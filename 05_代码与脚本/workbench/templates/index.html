@@ -11,56 +11,57 @@
             background: #0f1115;
             color: #e6e8eb;
             line-height: 1.6;
+            overflow-x: hidden;
         }
         .container {
-            max-width: 1280px;
+            max-width: 1400px;
             margin: 0 auto;
-            padding: 24px;
+            padding: 20px 24px 380px;
         }
         header {
-            margin-bottom: 32px;
-            padding-bottom: 16px;
+            margin-bottom: 24px;
+            padding-bottom: 12px;
             border-bottom: 1px solid #1e222a;
         }
-        header h1 { font-size: 24px; font-weight: 600; }
-        header p { color: #8a92a0; font-size: 14px; margin-top: 4px; }
+        header h1 { font-size: 22px; font-weight: 600; }
+        header p { color: #8a92a0; font-size: 13px; margin-top: 4px; }
 
         .grid {
             display: grid;
-            gap: 20px;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            margin-bottom: 32px;
+            gap: 16px;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            margin-bottom: 28px;
         }
         .card {
             background: #171a21;
             border: 1px solid #1e222a;
             border-radius: 10px;
-            padding: 20px;
+            padding: 16px;
         }
         .card h3 {
-            font-size: 13px;
+            font-size: 12px;
             color: #8a92a0;
             font-weight: 500;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         .card .value {
-            font-size: 28px;
+            font-size: 24px;
             font-weight: 700;
             color: #fff;
         }
         .card .sub {
-            font-size: 13px;
+            font-size: 12px;
             color: #6b7280;
-            margin-top: 6px;
+            margin-top: 4px;
         }
         .progress-bar {
-            height: 6px;
+            height: 5px;
             background: #1e222a;
             border-radius: 3px;
             overflow: hidden;
-            margin-top: 10px;
+            margin-top: 8px;
         }
         .progress-bar .fill {
             height: 100%;
@@ -70,40 +71,35 @@
         }
 
         h2 {
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 600;
-            margin: 32px 0 16px;
+            margin: 28px 0 12px;
         }
 
         /* 任务启动区 */
         .task-grid {
             display: grid;
-            gap: 12px;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            margin-bottom: 32px;
+            gap: 10px;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            margin-bottom: 28px;
         }
         .task-card {
             background: #171a21;
             border: 1px solid #1e222a;
-            border-radius: 10px;
-            padding: 16px;
+            border-radius: 8px;
+            padding: 14px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
+            transition: border-color 0.2s;
         }
-        .task-card .title {
-            font-weight: 600;
-            font-size: 15px;
-        }
-        .task-card .desc {
-            font-size: 13px;
-            color: #8a92a0;
-            flex: 1;
-        }
+        .task-card:hover { border-color: #374151; }
+        .task-card .title { font-weight: 600; font-size: 14px; }
+        .task-card .desc { font-size: 12px; color: #8a92a0; flex: 1; }
         .task-card .cat {
             display: inline-block;
-            font-size: 11px;
-            padding: 2px 8px;
+            font-size: 10px;
+            padding: 2px 6px;
             border-radius: 4px;
             background: #1e3a5f;
             color: #60a5fa;
@@ -113,44 +109,41 @@
             background: #3b82f6;
             color: white;
             border: none;
-            padding: 8px 16px;
+            padding: 7px 14px;
             border-radius: 6px;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 500;
             transition: background 0.2s;
         }
         .task-card button:hover { background: #2563eb; }
 
         /* 任务列表 */
-        .task-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
+        .task-list { display: flex; flex-direction: column; gap: 6px; }
         .task-row {
             background: #171a21;
             border: 1px solid #1e222a;
             border-radius: 8px;
-            padding: 12px 16px;
+            padding: 10px 14px;
             display: grid;
             grid-template-columns: 1fr auto auto;
             align-items: center;
-            gap: 12px;
+            gap: 10px;
+            cursor: pointer;
+            transition: background 0.15s;
         }
-        .task-row .info .name {
-            font-weight: 500;
-            font-size: 14px;
-        }
+        .task-row:hover { background: #1c2029; }
+        .task-row.active { border-color: #3b82f6; background: #1c2533; }
+        .task-row .info .name { font-weight: 500; font-size: 13px; }
         .task-row .info .meta {
-            font-size: 12px;
+            font-size: 11px;
             color: #6b7280;
             margin-top: 2px;
         }
         .status {
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 12px;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 11px;
             font-weight: 500;
         }
         .status.running { background: #14532d; color: #4ade80; }
@@ -163,69 +156,109 @@
             background: #374151;
             color: #d1d5db;
             border: none;
-            padding: 6px 12px;
-            border-radius: 5px;
+            padding: 5px 10px;
+            border-radius: 4px;
             cursor: pointer;
-            font-size: 12px;
-            margin-left: 6px;
+            font-size: 11px;
+            margin-left: 4px;
         }
         .task-row .actions button:hover { background: #4b5563; }
         .task-row .actions button.stop { background: #7f1d1d; color: #f87171; }
         .task-row .actions button.stop:hover { background: #991b1b; }
 
-        /* 日志面板 */
+        /* 底部日志面板 */
         .log-panel {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 360px;
             background: #0a0c10;
-            border: 1px solid #1e222a;
-            border-radius: 8px;
-            padding: 12px;
-            margin-top: 8px;
-            max-height: 400px;
-            overflow-y: auto;
-            font-family: "SF Mono", Monaco, Consolas, monospace;
+            border-top: 1px solid #1e222a;
+            display: flex;
+            flex-direction: column;
+            z-index: 100;
+        }
+        .log-panel.collapsed { height: 40px; }
+        .log-header {
+            padding: 10px 20px;
+            background: #12151b;
+            border-bottom: 1px solid #1e222a;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            user-select: none;
+        }
+        .log-header .title {
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .log-header .title .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #6b7280;
+        }
+        .log-header .title .dot.live { background: #4ade80; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .log-header .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
             font-size: 12px;
-            line-height: 1.5;
+            color: #6b7280;
+        }
+        .log-header .controls button {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .log-header .controls button:hover { background: #4b5563; }
+        .log-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 20px;
+            font-family: "SF Mono", Monaco, Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.6;
             color: #d1d5db;
             white-space: pre-wrap;
             word-break: break-all;
         }
-
-        /* 详情展开 */
-        .task-detail {
-            grid-column: 1 / -1;
-            margin-top: 4px;
-        }
-        .hidden { display: none !important; }
+        .log-content .empty { color: #4b5563; text-align: center; padding-top: 80px; }
+        .log-content .log-line { margin: 0; }
 
         .refresh-note {
-            font-size: 12px;
+            font-size: 11px;
             color: #6b7280;
             text-align: right;
-            margin-top: -8px;
-            margin-bottom: 16px;
+            margin-top: -6px;
+            margin-bottom: 12px;
         }
 
         table.entry-types {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 8px;
-            font-size: 13px;
+            margin-top: 6px;
+            font-size: 12px;
         }
-        table.entry-types td {
-            padding: 4px 0;
-            color: #9ca3af;
-        }
-        table.entry-types td:first-child {
-            color: #6b7280;
-            width: 130px;
-        }
+        table.entry-types td { padding: 2px 0; color: #9ca3af; }
+        table.entry-types td:first-child { color: #6b7280; width: 110px; }
     </style>
 </head>
 <body>
 <div class="container">
     <header>
         <h1>📊 加密货币投研资料采集工作台</h1>
-        <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time" class="refresh-note"></span></p>
+        <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time"></span></p>
     </header>
 
     <!-- 统计卡片 -->
@@ -258,15 +291,35 @@
     <div class="task-grid" id="task-def-grid"></div>
 
     <!-- 任务列表 -->
-    <h2>📋 任务列表</h2>
+    <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
     <div class="refresh-note">每 3 秒自动刷新</div>
     <div class="task-list" id="task-list"></div>
 </div>
 
+<!-- 底部日志面板 -->
+<div class="log-panel" id="log-panel">
+    <div class="log-header" onclick="toggleLogPanel()">
+        <div class="title">
+            <span class="dot" id="log-dot"></span>
+            <span id="log-title">运行日志（点击任务查看）</span>
+        </div>
+        <div class="controls">
+            <span id="log-count">0 行</span>
+            <button onclick="event.stopPropagation(); clearLog()">清空</button>
+            <button onclick="event.stopPropagation(); toggleLogPanel()">折叠</button>
+        </div>
+    </div>
+    <div class="log-content" id="log-content">
+        <div class="empty">选择一个任务查看实时日志</div>
+    </div>
+</div>
+
 <script>
 let selectedTaskId = null;
+let logPanelCollapsed = false;
+let lastLogCount = 0;
 
-// ── 仪表盘数据 ──
+// ── 仪表盘 ──
 async function loadDashboard() {
     try {
         const res = await fetch('/api/dashboard');
@@ -283,12 +336,11 @@ async function loadDashboard() {
         const et = d.entry_types || {};
         document.getElementById('stat-entry-types').innerHTML =
             `<table class="entry-types">
-                ${Object.entries(et).slice(0, 5).map(([k,v]) =>
+                ${Object.entries(et).slice(0, 4).map(([k,v]) =>
                     `<tr><td>${k}</td><td>${v.toLocaleString()}</td></tr>`
                 ).join('')}
              </table>`;
 
-        // 爬取进度
         const cp = d.crawl_progress || {};
         let totalCrawl = 0, doneCrawl = 0;
         Object.values(cp).forEach(v => { totalCrawl += v.total; doneCrawl += v.crawled; });
@@ -308,11 +360,11 @@ async function loadDashboard() {
         document.getElementById('refresh-time').textContent =
             ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');
     } catch (e) {
-        console.error('loadDashboard failed:', e);
+        console.error('dashboard error:', e);
     }
 }
 
-// ── 任务定义渲染 ──
+// ── 任务定义 ──
 async function loadTaskDefs() {
     const res = await fetch('/api/task_defs');
     const data = await res.json();
@@ -321,9 +373,9 @@ async function loadTaskDefs() {
     grid.innerHTML = Object.entries(data.defs).map(([key, t]) => `
         <div class="task-card">
             <span class="cat">${t.category}</span>
-            <div class="title">${t.name}</div>
-            <div class="desc">${t.description}</div>
-            <button onclick="startTask('${key}')">▶ 启动</button>
+            <div class="title">${escapeHtml(t.name)}</div>
+            <div class="desc">${escapeHtml(t.description)}</div>
+            <button onclick="startTask('${key}')">▶ 启动任务</button>
         </div>
     `).join('');
 }
@@ -331,62 +383,68 @@ async function loadTaskDefs() {
 // ── 任务列表 ──
 async function loadTasks() {
     try {
-        const res = await fetch('/api/tasks?limit=15');
+        const res = await fetch('/api/tasks?limit=20');
         const data = await res.json();
         if (!data.ok) return;
         renderTaskList(data.tasks);
+        // 如果有选中的任务，刷新日志
+        if (selectedTaskId) {
+            loadTaskLog(selectedTaskId);
+        }
     } catch (e) {
-        console.error('loadTasks failed:', e);
+        console.error('loadTasks error:', e);
     }
 }
 
 function renderTaskList(tasks) {
     const list = document.getElementById('task-list');
     if (tasks.length === 0) {
-        list.innerHTML = '<div class="task-row"><div class="info"><span style="color:#6b7280">暂无任务</span></div></div>';
+        list.innerHTML = '<div class="task-row"><div class="info"><span style="color:#6b7280">暂无任务，从上方启动一个吧</span></div></div>';
         return;
     }
     list.innerHTML = tasks.map(t => {
         const elapsed = t.elapsed_sec ? formatTime(t.elapsed_sec) : '';
-        const lastLog = t.last_log ? escapeHtml(t.last_log.substring(0, 120)) : '';
         const statsStr = t.stats && t.status === 'running' ? formatStats(t.stats) : '';
+        const isActive = selectedTaskId === t.task_id ? 'active' : '';
         return `
-        <div class="task-row">
+        <div class="task-row ${isActive}" onclick="selectTask('${t.task_id}')">
             <div class="info">
                 <div class="name">${escapeHtml(t.name)}</div>
                 <div class="meta">
                     ID: ${t.task_id} · ${elapsed}
                     ${statsStr ? ' · ' + statsStr : ''}
+                    ${t.error ? ' · <span style="color:#f87171">' + escapeHtml(t.error) + '</span>' : ''}
                 </div>
-                ${lastLog ? `<div class="meta" style="color:#4b5563">${lastLog}</div>` : ''}
             </div>
             <span class="status ${t.status}">${statusText(t.status)}</span>
-            <div class="actions">
-                <button onclick="toggleLog('${t.task_id}')">日志</button>
+            <div class="actions" onclick="event.stopPropagation()">
                 ${t.status === 'running' || t.status === 'pending' ?
                     `<button class="stop" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
             </div>
-            ${selectedTaskId === t.task_id ? `
-            <div class="task-detail">
-                <div class="log-panel" id="log-${t.task_id}">加载中...</div>
-            </div>` : ''}
         </div>`;
     }).join('');
+}
 
-    // 如果有展开的日志，加载
-    if (selectedTaskId) {
-        loadTaskLog(selectedTaskId);
-    }
+function selectTask(taskId) {
+    selectedTaskId = taskId;
+    lastLogCount = 0;
+    loadTasks();
+    loadTaskLog(taskId);
+    // 展开日志面板
+    if (logPanelCollapsed) toggleLogPanel();
 }
 
 function formatStats(stats) {
     const parts = [];
     if (stats.progress_pct) parts.push(stats.progress_pct);
     if (stats.ok !== undefined && stats.fail !== undefined)
-        parts.push(`OK:${stats.ok} FAIL:${stats.fail}`);
-    if (stats.discovered !== undefined) parts.push(`+${stats.discovered} docs`);
-    if (stats.candidates) parts.push(`共${stats.candidates}`);
+        parts.push(`OK:${stats.ok} / FAIL:${stats.fail}`);
+    if (stats.discovered !== undefined) parts.push(`+${stats.discovered} 链接`);
+    if (stats.candidates) parts.push(`共 ${stats.candidates}`);
     if (stats.downloaded !== undefined) parts.push(`下载:${stats.downloaded}`);
+    if (stats.failed !== undefined && stats.downloaded === undefined) {
+        // 仅完成统计时显示
+    }
     return parts.join(' · ');
 }
 
@@ -406,6 +464,7 @@ function formatTime(sec) {
 }
 
 function escapeHtml(s) {
+    if (s == null) return '';
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
@@ -413,7 +472,7 @@ function escapeHtml(s) {
 
 // ── 操作 ──
 async function startTask(taskKey) {
-    if (!confirm(`确定启动任务: ${taskKey}?`)) return;
+    if (!confirm(`确定启动任务: ${taskKey} ?`)) return;
     try {
         const res = await fetch('/api/tasks/start', {
             method: 'POST',
@@ -422,7 +481,8 @@ async function startTask(taskKey) {
         });
         const data = await res.json();
         if (data.ok) {
-            alert('任务已启动: ' + data.task_id);
+            selectedTaskId = data.task_id;
+            if (logPanelCollapsed) toggleLogPanel();
             loadTasks();
         } else {
             alert('启动失败: ' + data.error);
@@ -442,28 +502,55 @@ async function stopTask(taskId) {
     }
 }
 
-function toggleLog(taskId) {
-    if (selectedTaskId === taskId) {
-        selectedTaskId = null;
-    } else {
-        selectedTaskId = taskId;
-    }
-    loadTasks();
-}
-
+// ── 日志面板 ──
 async function loadTaskLog(taskId) {
     try {
-        const res = await fetch(`/api/tasks/${taskId}/log?limit=200`);
+        const res = await fetch(`/api/tasks/${taskId}/log?limit=500`);
         const data = await res.json();
         if (!data.ok) return;
-        const panel = document.getElementById(`log-${taskId}`);
-        if (panel) {
-            panel.textContent = data.logs.join('\n');
+        const logs = data.logs || [];
+        const panel = document.getElementById('log-content');
+        const dot = document.getElementById('log-dot');
+        const title = document.getElementById('log-title');
+        const countEl = document.getElementById('log-count');
+
+        // 判断是否在运行
+        const taskRes = await fetch(`/api/tasks/${taskId}`);
+        const taskData = await taskRes.json();
+        const isRunning = taskData.ok && taskData.task && taskData.task.status === 'running';
+
+        dot.className = 'dot' + (isRunning ? ' live' : '');
+        title.textContent = `${taskData.ok ? taskData.task.name : '任务'} · 日志`;
+        countEl.textContent = `${logs.length} 行`;
+
+        if (logs.length === 0) {
+            panel.innerHTML = '<div class="empty">暂无日志输出</div>';
+            return;
+        }
+
+        // 检测是否滚动到底部（如果用户没手动往上滚，就自动跟到底）
+        const isAtBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 50
+            || lastLogCount !== logs.length;
+
+        panel.innerHTML = logs.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+
+        if (isAtBottom) {
             panel.scrollTop = panel.scrollHeight;
         }
+        lastLogCount = logs.length;
     } catch (e) {
-        console.error('loadTaskLog failed:', e);
+        console.error('log error:', e);
     }
+}
+
+function toggleLogPanel() {
+    const panel = document.getElementById('log-panel');
+    logPanelCollapsed = !logPanelCollapsed;
+    panel.classList.toggle('collapsed', logPanelCollapsed);
+}
+
+function clearLog() {
+    document.getElementById('log-content').innerHTML = '<div class="empty">日志已清空（刷新后会重新加载）</div>';
 }
 
 // ── 初始化 + 轮询 ──

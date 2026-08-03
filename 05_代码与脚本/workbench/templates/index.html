@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>投研资料采集工作台</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: #0f1115;
+            color: #e6e8eb;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        header {
+            margin-bottom: 32px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #1e222a;
+        }
+        header h1 { font-size: 24px; font-weight: 600; }
+        header p { color: #8a92a0; font-size: 14px; margin-top: 4px; }
+
+        .grid {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            margin-bottom: 32px;
+        }
+        .card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 20px;
+        }
+        .card h3 {
+            font-size: 13px;
+            color: #8a92a0;
+            font-weight: 500;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .card .value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .card .sub {
+            font-size: 13px;
+            color: #6b7280;
+            margin-top: 6px;
+        }
+        .progress-bar {
+            height: 6px;
+            background: #1e222a;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 32px 0 16px;
+        }
+
+        /* 任务启动区 */
+        .task-grid {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            margin-bottom: 32px;
+        }
+        .task-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .task-card .title {
+            font-weight: 600;
+            font-size: 15px;
+        }
+        .task-card .desc {
+            font-size: 13px;
+            color: #8a92a0;
+            flex: 1;
+        }
+        .task-card .cat {
+            display: inline-block;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #1e3a5f;
+            color: #60a5fa;
+            width: fit-content;
+        }
+        .task-card button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .task-card button:hover { background: #2563eb; }
+
+        /* 任务列表 */
+        .task-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .task-row {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 12px 16px;
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            align-items: center;
+            gap: 12px;
+        }
+        .task-row .info .name {
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .task-row .info .meta {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+        .status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status.running { background: #14532d; color: #4ade80; }
+        .status.pending { background: #3f3f10; color: #facc15; }
+        .status.done    { background: #1e3a5f; color: #60a5fa; }
+        .status.failed  { background: #7f1d1d; color: #f87171; }
+        .status.stopped { background: #374151; color: #9ca3af; }
+
+        .task-row .actions button {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 6px;
+        }
+        .task-row .actions button:hover { background: #4b5563; }
+        .task-row .actions button.stop { background: #7f1d1d; color: #f87171; }
+        .task-row .actions button.stop:hover { background: #991b1b; }
+
+        /* 日志面板 */
+        .log-panel {
+            background: #0a0c10;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: "SF Mono", Monaco, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #d1d5db;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        /* 详情展开 */
+        .task-detail {
+            grid-column: 1 / -1;
+            margin-top: 4px;
+        }
+        .hidden { display: none !important; }
+
+        .refresh-note {
+            font-size: 12px;
+            color: #6b7280;
+            text-align: right;
+            margin-top: -8px;
+            margin-bottom: 16px;
+        }
+
+        table.entry-types {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+        table.entry-types td {
+            padding: 4px 0;
+            color: #9ca3af;
+        }
+        table.entry-types td:first-child {
+            color: #6b7280;
+            width: 130px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>📊 加密货币投研资料采集工作台</h1>
+        <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time" class="refresh-note"></span></p>
+    </header>
+
+    <!-- 统计卡片 -->
+    <div class="grid">
+        <div class="card">
+            <h3>总资产数</h3>
+            <div class="value" id="stat-assets">-</div>
+            <div class="sub" id="stat-sources">-</div>
+        </div>
+        <div class="card">
+            <h3>文档入口总数</h3>
+            <div class="value" id="stat-entries">-</div>
+            <div class="sub" id="stat-entry-types">-</div>
+        </div>
+        <div class="card">
+            <h3>深度爬取进度</h3>
+            <div class="value" id="stat-crawl-pct">-</div>
+            <div class="progress-bar"><div class="fill" id="stat-crawl-bar" style="width:0%"></div></div>
+            <div class="sub" id="stat-crawl-detail">-</div>
+        </div>
+        <div class="card">
+            <h3>文档资产</h3>
+            <div class="value" id="stat-docs">-</div>
+            <div class="sub" id="stat-docs-detail">-</div>
+        </div>
+    </div>
+
+    <!-- 任务启动 -->
+    <h2>🚀 任务启动</h2>
+    <div class="task-grid" id="task-def-grid"></div>
+
+    <!-- 任务列表 -->
+    <h2>📋 任务列表</h2>
+    <div class="refresh-note">每 3 秒自动刷新</div>
+    <div class="task-list" id="task-list"></div>
+</div>
+
+<script>
+let selectedTaskId = null;
+
+// ── 仪表盘数据 ──
+async function loadDashboard() {
+    try {
+        const res = await fetch('/api/dashboard');
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error);
+        const d = data.data;
+
+        document.getElementById('stat-assets').textContent = d.total_assets?.toLocaleString() || '-';
+        const srcDist = d.source_distribution || {};
+        document.getElementById('stat-sources').textContent =
+            `CMC: ${srcDist.cmc || 0} · CG: ${srcDist.cg || 0} · DL: ${srcDist.dl || 0}`;
+
+        document.getElementById('stat-entries').textContent = d.total_entries?.toLocaleString() || '-';
+        const et = d.entry_types || {};
+        document.getElementById('stat-entry-types').innerHTML =
+            `<table class="entry-types">
+                ${Object.entries(et).slice(0, 5).map(([k,v]) =>
+                    `<tr><td>${k}</td><td>${v.toLocaleString()}</td></tr>`
+                ).join('')}
+             </table>`;
+
+        // 爬取进度
+        const cp = d.crawl_progress || {};
+        let totalCrawl = 0, doneCrawl = 0;
+        Object.values(cp).forEach(v => { totalCrawl += v.total; doneCrawl += v.crawled; });
+        const pct = totalCrawl > 0 ? (doneCrawl / totalCrawl * 100).toFixed(1) : 0;
+        document.getElementById('stat-crawl-pct').textContent = pct + '%';
+        document.getElementById('stat-crawl-bar').style.width = pct + '%';
+        const detail = Object.entries(cp).map(([k,v]) =>
+            `${k}: ${v.crawled.toLocaleString()}/${v.total.toLocaleString()}`
+        ).join(' · ');
+        document.getElementById('stat-crawl-detail').textContent = detail;
+
+        const da = d.doc_asset || {};
+        document.getElementById('stat-docs').textContent = da.total?.toLocaleString() || '-';
+        document.getElementById('stat-docs-detail').textContent =
+            `已下载: ${da.downloaded || 0} · 已解析: ${da.parsed || 0}`;
+
+        document.getElementById('refresh-time').textContent =
+            ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+        console.error('loadDashboard failed:', e);
+    }
+}
+
+// ── 任务定义渲染 ──
+async function loadTaskDefs() {
+    const res = await fetch('/api/task_defs');
+    const data = await res.json();
+    if (!data.ok) return;
+    const grid = document.getElementById('task-def-grid');
+    grid.innerHTML = Object.entries(data.defs).map(([key, t]) => `
+        <div class="task-card">
+            <span class="cat">${t.category}</span>
+            <div class="title">${t.name}</div>
+            <div class="desc">${t.description}</div>
+            <button onclick="startTask('${key}')">▶ 启动</button>
+        </div>
+    `).join('');
+}
+
+// ── 任务列表 ──
+async function loadTasks() {
+    try {
+        const res = await fetch('/api/tasks?limit=15');
+        const data = await res.json();
+        if (!data.ok) return;
+        renderTaskList(data.tasks);
+    } catch (e) {
+        console.error('loadTasks failed:', e);
+    }
+}
+
+function renderTaskList(tasks) {
+    const list = document.getElementById('task-list');
+    if (tasks.length === 0) {
+        list.innerHTML = '<div class="task-row"><div class="info"><span style="color:#6b7280">暂无任务</span></div></div>';
+        return;
+    }
+    list.innerHTML = tasks.map(t => {
+        const elapsed = t.elapsed_sec ? formatTime(t.elapsed_sec) : '';
+        const lastLog = t.last_log ? escapeHtml(t.last_log.substring(0, 120)) : '';
+        const statsStr = t.stats && t.status === 'running' ? formatStats(t.stats) : '';
+        return `
+        <div class="task-row">
+            <div class="info">
+                <div class="name">${escapeHtml(t.name)}</div>
+                <div class="meta">
+                    ID: ${t.task_id} · ${elapsed}
+                    ${statsStr ? ' · ' + statsStr : ''}
+                </div>
+                ${lastLog ? `<div class="meta" style="color:#4b5563">${lastLog}</div>` : ''}
+            </div>
+            <span class="status ${t.status}">${statusText(t.status)}</span>
+            <div class="actions">
+                <button onclick="toggleLog('${t.task_id}')">日志</button>
+                ${t.status === 'running' || t.status === 'pending' ?
+                    `<button class="stop" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
+            </div>
+            ${selectedTaskId === t.task_id ? `
+            <div class="task-detail">
+                <div class="log-panel" id="log-${t.task_id}">加载中...</div>
+            </div>` : ''}
+        </div>`;
+    }).join('');
+
+    // 如果有展开的日志，加载
+    if (selectedTaskId) {
+        loadTaskLog(selectedTaskId);
+    }
+}
+
+function formatStats(stats) {
+    const parts = [];
+    if (stats.progress_pct) parts.push(stats.progress_pct);
+    if (stats.ok !== undefined && stats.fail !== undefined)
+        parts.push(`OK:${stats.ok} FAIL:${stats.fail}`);
+    if (stats.discovered !== undefined) parts.push(`+${stats.discovered} docs`);
+    if (stats.candidates) parts.push(`共${stats.candidates}`);
+    if (stats.downloaded !== undefined) parts.push(`下载:${stats.downloaded}`);
+    return parts.join(' · ');
+}
+
+function statusText(s) {
+    return {running: '运行中', pending: '等待中', done: '已完成',
+            failed: '失败', stopped: '已停止'}[s] || s;
+}
+
+function formatTime(sec) {
+    sec = Math.floor(sec);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+
+// ── 操作 ──
+async function startTask(taskKey) {
+    if (!confirm(`确定启动任务: ${taskKey}?`)) return;
+    try {
+        const res = await fetch('/api/tasks/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_key: taskKey})
+        });
+        const data = await res.json();
+        if (data.ok) {
+            alert('任务已启动: ' + data.task_id);
+            loadTasks();
+        } else {
+            alert('启动失败: ' + data.error);
+        }
+    } catch (e) {
+        alert('启动失败: ' + e.message);
+    }
+}
+
+async function stopTask(taskId) {
+    if (!confirm('确定停止此任务?')) return;
+    try {
+        await fetch(`/api/tasks/${taskId}/stop`, {method: 'POST'});
+        loadTasks();
+    } catch (e) {
+        alert('停止失败: ' + e.message);
+    }
+}
+
+function toggleLog(taskId) {
+    if (selectedTaskId === taskId) {
+        selectedTaskId = null;
+    } else {
+        selectedTaskId = taskId;
+    }
+    loadTasks();
+}
+
+async function loadTaskLog(taskId) {
+    try {
+        const res = await fetch(`/api/tasks/${taskId}/log?limit=200`);
+        const data = await res.json();
+        if (!data.ok) return;
+        const panel = document.getElementById(`log-${taskId}`);
+        if (panel) {
+            panel.textContent = data.logs.join('\n');
+            panel.scrollTop = panel.scrollHeight;
+        }
+    } catch (e) {
+        console.error('loadTaskLog failed:', e);
+    }
+}
+
+// ── 初始化 + 轮询 ──
+loadDashboard();
+loadTaskDefs();
+loadTasks();
+
+setInterval(loadTasks, 3000);
+setInterval(loadDashboard, 10000);
+</script>
+</body>
+</html>

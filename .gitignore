@@ -1,0 +1,27 @@
+# 本地开发和构建时可能产生的文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+.env.local
+*.egg-info/
+dist/
+build/
+node_modules/
+.DS_Store
+*.db
+
+# 文档存储（不入库）
+docs_storage/
+
+# 临时文件
+*.tmp
+*.txt
+_out.txt
+_diag_out.txt
+_cg_result.txt

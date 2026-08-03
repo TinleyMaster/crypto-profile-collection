@@ -10,11 +10,17 @@ import sys
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 
-WORKSPACE_ROOT = Path(__file__).resolve().parent  # workbench/
-CODE_ROOT = WORKSPACE_ROOT.parent  # 05_代码与脚本/
-SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
-SCRIPTS_BIN = CODE_ROOT / "scripts" / "bin"
-SQL_DIR = CODE_ROOT / "scripts" / "sql"
+# Docker 环境：/app/scripts/... ；本地：05_代码与脚本/scripts/...
+if os.path.exists("/app/scripts/src"):
+    SCRIPTS_SRC = Path("/app/scripts/src")
+    SCRIPTS_BIN = Path("/app/scripts/bin")
+    SQL_DIR = Path("/app/scripts/sql")
+else:
+    WORKSPACE_ROOT = Path(__file__).resolve().parent  # workbench/
+    CODE_ROOT = WORKSPACE_ROOT.parent  # 05_代码与脚本/
+    SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
+    SCRIPTS_BIN = CODE_ROOT / "scripts" / "bin"
+    SQL_DIR = CODE_ROOT / "scripts" / "sql"
 
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
@@ -22,9 +28,19 @@ if str(SCRIPTS_SRC) not in sys.path:
 app = Flask(__name__)
 
 from task_manager import TaskManager  # noqa: E402
-import db_stats  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
+
+# db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
+_db_stats_module = None
+
+
+def _get_db_stats():
+    global _db_stats_module
+    if _db_stats_module is None:
+        import db_stats  # noqa: E402
+        _db_stats_module = db_stats
+    return _db_stats_module
 
 # ── 任务定义 ──
 TASK_DEFS = {
@@ -75,6 +91,10 @@ TASK_DEFS = {
 
 # ── 页面路由 ──
 
+@app.route("/healthz")
+def healthz():
+    """健康检查：Zeabur 用来判断服务是否就绪"""
+    return jsonify({"ok": True, "status": "alive"})
 
 @app.route("/")
 def index():
@@ -87,7 +107,7 @@ def index():
 @app.route("/api/dashboard")
 def api_dashboard():
     try:
-        stats = db_stats.get_dashboard_stats()
+        stats = _get_db_stats().get_dashboard_stats()
         return jsonify({"ok": True, "data": stats})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -96,7 +116,7 @@ def api_dashboard():
 @app.route("/api/pending")
 def api_pending():
     try:
-        data = db_stats.get_pending_b2()
+        data = _get_db_stats().get_pending_b2()
         return jsonify({"ok": True, "data": data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

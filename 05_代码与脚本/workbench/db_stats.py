@@ -2,13 +2,20 @@
 数据库查询工具：给工作台提供统计数据。
 复用 scripts/src/crypto_research 的数据库连接。
 """
+
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS_SRC = WORKSPACE_ROOT / "05_代码与脚本" / "scripts" / "src"
+# Docker 环境下直接用 /app/scripts/src，本地则相对路径计算
+if os.path.exists("/app/scripts/src"):
+    SCRIPTS_SRC = Path("/app/scripts/src")
+else:
+    WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+    SCRIPTS_SRC = WORKSPACE_ROOT / "05_代码与脚本" / "scripts" / "src"
+
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
 

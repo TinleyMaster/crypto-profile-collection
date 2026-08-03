@@ -13,8 +13,13 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+import os
 
-WORKER_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts" / "bin"
+# Docker 或本地环境判断脚本路径
+if os.path.exists("/app/scripts/bin"):
+    WORKER_SCRIPTS_DIR = Path("/app/scripts/bin")
+else:
+    WORKER_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts" / "bin"
 
 
 @dataclass

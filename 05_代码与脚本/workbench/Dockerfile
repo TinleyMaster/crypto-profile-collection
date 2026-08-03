@@ -4,7 +4,7 @@ WORKDIR /app
 
 # 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    curl gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制 workbench 依赖并安装
@@ -20,9 +20,13 @@ COPY 05_代码与脚本/scripts/bin /app/scripts/bin
 COPY 05_代码与脚本/workbench/*.py /app/
 COPY 05_代码与脚本/workbench/templates /app/templates
 
-WORKDIR /app
+# 文档存储目录（供 B3/B7 下载使用）
+RUN mkdir -p /app/docs_storage
 
-# Zeabur 会自动注入 PORT 环境变量
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=utf-8
+
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+# 用 gunicorn 启动生产服务器
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120"]

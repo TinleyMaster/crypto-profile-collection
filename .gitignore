@@ -26,9 +26,8 @@ node_modules/
 # 文档存储（本地文件，不入库）
 docs_storage/
 
-# 临时/调试文件
+# 临时/调试文件（排除根目录散落的 .txt 临时文件）
 *.tmp
-*.txt
 _out.txt
 _diag_out.txt
 _cg_result.txt

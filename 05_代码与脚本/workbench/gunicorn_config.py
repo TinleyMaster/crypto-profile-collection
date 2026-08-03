@@ -3,6 +3,7 @@
 启动入口：读取 PORT 环境变量，用 gunicorn 或 flask 启动。
 兼容 Zeabur 自动注入 PORT 的机制。
 """
+
 import os
 
 port = int(os.environ.get("PORT", "5000"))

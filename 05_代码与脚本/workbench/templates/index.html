@@ -553,13 +553,40 @@ function clearLog() {
     document.getElementById('log-content').innerHTML = '<div class="empty">日志已清空（刷新后会重新加载）</div>';
 }
 
-// ── 初始化 + 轮询 ──
+// ── 初始化 ──
 loadDashboard();
 loadTaskDefs();
 loadTasks();
 
-setInterval(loadTasks, 3000);
-setInterval(loadDashboard, 10000);
+// 只在选中运行中任务时刷新日志
+setInterval(() => {
+    if (selectedTaskId) {
+        fetch(`/api/tasks/${selectedTaskId}`).then(r => r.json()).then(d => {
+            if (d.ok && d.task) {
+                // 更新当前任务状态
+                const row = document.querySelector(`.task-row.active`);
+                if (row) {
+                    const statusEl = row.querySelector('.status');
+                    if (statusEl) {
+                        statusEl.className = 'status ' + d.task.status;
+                        statusEl.textContent = statusText(d.task.status);
+                    }
+                }
+                // 运行中就刷新日志，完成了就停
+                if (d.task.status === 'running' || d.task.status === 'pending') {
+                    loadTaskLog(selectedTaskId);
+                } else {
+                    // 完成了刷新一次最终日志和列表
+                    loadTaskLog(selectedTaskId);
+                    loadTasks();
+                    selectedTaskId = null;
+                }
+            }
+        });
+    }
+}, 3000);
+
+setInterval(loadDashboard, 30000);
 </script>
 </body>
 </html>

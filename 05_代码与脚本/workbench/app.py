@@ -90,7 +90,14 @@ TASK_DEFS = {
         "name": "CG 拉取币种详情",
         "description": "从 CoinGecko 拉取 coin_info，补充官网/文档/GitHub 链接（Demo 月配额 10k）",
         "script": "ingest_cg_coin_info.py",
-        "default_args": ["--from-list-missing", "--limit", "100", "--max-calls", "5000", "--calls-per-minute", "90"],
+        "default_args": ["--from-list-missing", "--limit", "200", "--max-calls", "5000", "--calls-per-minute", "90"],
+        "category": "数据源采集",
+    },
+    "cg_coin_info_auto": {
+        "name": "CG 拉取币种详情（自动循环）",
+        "description": "自动循环拉取 coin_info，直到全部完成或月配额用完（上限 8000 次）",
+        "script": "ingest_cg_coin_info_auto.py",
+        "default_args": [],
         "category": "数据源采集",
     },
     "cg_bootstrap_assets": {

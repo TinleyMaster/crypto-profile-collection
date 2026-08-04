@@ -7,7 +7,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
@@ -30,8 +29,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
-        help="Batch size when using --from-list-missing. Default: 10",
+        default=100,
+        help="Batch size when using --from-list-missing. Default: 100",
+    )
+    parser.add_argument(
+        "--max-calls",
+        type=int,
+        default=0,
+        help="Max API calls before stopping (monthly credit protection). 0 = no limit. Default: 0",
+    )
+    parser.add_argument(
+        "--calls-per-minute",
+        type=int,
+        default=90,
+        help="Rate limit: API calls per minute. Default: 90 (Demo plan is 100)",
     )
     parser.add_argument(
         "--dry-run",
@@ -82,7 +93,7 @@ def main() -> int:
     else:
         raise ValueError("Either --coin-id or --from-list-missing must be provided")
 
-    client = CoinGeckoClient(settings)
+    client = CoinGeckoClient(settings, calls_per_minute=args.calls_per_minute)
     upsert_sql = load_sql("src_cg/upsert_coin_info.sql")
     insert_raw_sql = load_sql("raw/insert_api_response.sql")
     insert_ingest_run_sql = load_sql("sys/insert_ingest_run.sql")
@@ -124,12 +135,22 @@ def main() -> int:
         )
         run_id = run_row["run_id"]
 
+        _start_time = time.time()
         success_count = 0
         fail_count = 0
         last_error: str | None = None
+        max_calls = args.max_calls if args.max_calls and args.max_calls > 0 else len(coin_ids)
 
         try:
             for idx, coin_id in enumerate(coin_ids):
+                if idx >= max_calls:
+                    if args.max_calls and args.max_calls > 0:
+                        print(
+                            f"[ingest_cg_coin_info] Reached max-calls={max_calls}, stopping early.",
+                            flush=True,
+                        )
+                    break
+
                 try:
                     payload = client.get_coin_by_id(coin_id)
                     payload_text = stable_json_dumps(payload)
@@ -177,9 +198,22 @@ def main() -> int:
                     success_count += 1
 
                     progress = idx + 1
-                    if progress % 10 == 0 or progress == len(coin_ids):
+                    if progress % 10 == 0 or progress == min(actual_limit, len(coin_ids)):
+                        elapsed = time.time() - _start_time
+                        rate = progress / elapsed if elapsed > 0 else 0
+                        total_target = min(actual_limit, len(coin_ids))
+                        pct = progress / total_target * 100 if total_target > 0 else 0
+                        eta = int((total_target - progress) / rate) if rate > 0 else 0
+                        eta_str = (
+                            f"{eta // 60}m {eta % 60}s"
+                            if eta >= 60
+                            else f"{eta}s"
+                        )
+                        rate_str = f"{rate:.1f}/s" if rate >= 1 else f"{rate*60:.0f}/min"
                         print(
-                            f"[ingest_cg_coin_info] Progress: {progress}/{len(coin_ids)} ok={success_count} fail={fail_count}",
+                            f"[{progress}/{total_target} {pct:.0f}%] "
+                            f"OK:{success_count} FAIL:{fail_count} "
+                            f"| {rate_str} ETA:{eta_str}",
                             flush=True,
                         )
                 except Exception as exc:

@@ -11,7 +11,7 @@ from crypto_research.config import Settings
 
 
 class CoinGeckoClient:
-    def __init__(self, settings: Settings, calls_per_minute: int = 25) -> None:
+    def __init__(self, settings: Settings, calls_per_minute: int = 90) -> None:
         self.settings = settings
         self._min_interval = 60.0 / calls_per_minute
         self._last_call: float = 0.0

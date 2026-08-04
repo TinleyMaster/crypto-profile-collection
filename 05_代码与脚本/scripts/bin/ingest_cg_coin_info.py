@@ -140,6 +140,7 @@ def main() -> int:
         fail_count = 0
         last_error: str | None = None
         max_calls = args.max_calls if args.max_calls and args.max_calls > 0 else len(coin_ids)
+        actual_limit = min(max_calls, len(coin_ids))
 
         try:
             for idx, coin_id in enumerate(coin_ids):
@@ -219,8 +220,11 @@ def main() -> int:
                 except Exception as exc:
                     fail_count += 1
                     last_error = str(exc)
+                    # 400 错误通常是 CG 自身数据不一致（list 有但 detail 无），正常跳过
+                    is_400 = "400" in str(exc) and "Bad Request" in str(exc)
+                    prefix = "[SKIP 400]" if is_400 else "FAIL"
                     print(
-                        f"[ingest_cg_coin_info] FAIL {coin_id}: {last_error[:200]}",
+                        f"[ingest_cg_coin_info] {prefix} {coin_id}: {last_error[:200]}",
                         flush=True,
                     )
                     # rollback current sub-transaction but continue

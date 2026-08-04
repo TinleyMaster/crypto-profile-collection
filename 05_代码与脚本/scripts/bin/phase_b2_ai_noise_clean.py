@@ -219,15 +219,26 @@ def main() -> int:
                 error_count += len(batch)
                 continue
 
+            # 第一批打印原始响应样例，方便排查问题
+            if batch_num == 1 and hasattr(llm, '_last_raw_response'):
+                raw_sample = (llm._last_raw_response or "")[:500]
+                print(f"  [DEBUG] AI 原始响应样例: {raw_sample}")
+
             # 统计本批结果
             batch_noise = 0
             batch_keep = 0
+            batch_parse_fail = 0
             noise_ids: list[int] = []
 
             for entry, result in zip(batch, results):
                 entry_id = entry["entry_id"]
                 score = result["score"]
                 relevant = result["relevant"]
+                reason = result.get("reason", "")
+
+                # 解析失败的单独统计（score=0.5 + 理由含"失败"字样）
+                if "失败" in reason and score == 0.5:
+                    batch_parse_fail += 1
 
                 if not relevant or score < args.threshold:
                     batch_noise += 1
@@ -237,6 +248,8 @@ def main() -> int:
 
             noise_count += batch_noise
             keep_count += batch_keep
+            if batch_parse_fail > 0:
+                error_count += batch_parse_fail
 
             # 执行删除
             if args.execute and noise_ids:

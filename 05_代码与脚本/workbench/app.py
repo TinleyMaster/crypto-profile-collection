@@ -86,6 +86,34 @@ TASK_DEFS = {
         "default_args": ["--limit", "100"],
         "category": "文档采集",
     },
+    "cg_coin_info": {
+        "name": "CG 拉取币种详情",
+        "description": "从 CoinGecko 拉取 coin_info，补充官网/文档/GitHub 链接",
+        "script": "ingest_cg_coin_info.py",
+        "default_args": ["--from-list-missing", "--limit", "100"],
+        "category": "数据源采集",
+    },
+    "cg_bootstrap_assets": {
+        "name": "CG 新增币种入库",
+        "description": "将 CG 独有的币种补充到 core.asset（按 symbol 匹配）",
+        "script": "bootstrap_cg_assets_from_list.py",
+        "default_args": ["--limit", "500"],
+        "category": "数据源采集",
+    },
+    "cg_refresh_docs": {
+        "name": "CG 补充文档入口",
+        "description": "从 coin_info 的 links 中提取官网/文档/GitHub，写入 doc_source_entry",
+        "script": "refresh_doc_source_entries_from_cg.py",
+        "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+    },
+    "github_activity": {
+        "name": "GitHub 开发活跃度采集",
+        "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",
+        "script": "collect_github_activity.py",
+        "default_args": ["--limit", "50"],
+        "category": "数据源采集",
+    },
 }
 
 

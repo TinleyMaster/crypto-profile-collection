@@ -142,6 +142,7 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
+        self._last_full_response = data  # 保存完整响应用于调试
 
         # 从 output 中提取 assistant 的文本内容
         for item in data.get("output", []):

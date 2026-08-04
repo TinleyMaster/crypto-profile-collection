@@ -220,9 +220,14 @@ def main() -> int:
                 continue
 
             # 第一批打印原始响应样例，方便排查问题
-            if batch_num == 1 and hasattr(llm, '_last_raw_response'):
-                raw_sample = (llm._last_raw_response or "")[:500]
-                print(f"  [DEBUG] AI 原始响应样例: {raw_sample}")
+            if batch_num == 1:
+                if hasattr(llm, '_last_full_response') and llm._last_full_response:
+                    import json as _json
+                    full_sample = _json.dumps(llm._last_full_response, ensure_ascii=False)[:800]
+                    print(f"  [DEBUG] API完整响应样例: {full_sample}")
+                if hasattr(llm, '_last_raw_response'):
+                    raw_sample = (llm._last_raw_response or "")[:300]
+                    print(f"  [DEBUG] AI提取文本样例: '{raw_sample}'")
 
             # 统计本批结果
             batch_noise = 0

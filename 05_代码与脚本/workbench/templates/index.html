@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>投研资料采集工作台</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
             background: #0f1115;
@@ -13,18 +19,29 @@
             line-height: 1.6;
             overflow-x: hidden;
         }
+
         .container {
             max-width: 1400px;
             margin: 0 auto;
             padding: 20px 24px 380px;
         }
+
         header {
             margin-bottom: 24px;
             padding-bottom: 12px;
             border-bottom: 1px solid #1e222a;
         }
-        header h1 { font-size: 22px; font-weight: 600; }
-        header p { color: #8a92a0; font-size: 13px; margin-top: 4px; }
+
+        header h1 {
+            font-size: 22px;
+            font-weight: 600;
+        }
+
+        header p {
+            color: #8a92a0;
+            font-size: 13px;
+            margin-top: 4px;
+        }
 
         .grid {
             display: grid;
@@ -32,12 +49,14 @@
             grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             margin-bottom: 28px;
         }
+
         .card {
             background: #171a21;
             border: 1px solid #1e222a;
             border-radius: 10px;
             padding: 16px;
         }
+
         .card h3 {
             font-size: 12px;
             color: #8a92a0;
@@ -46,16 +65,19 @@
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
+
         .card .value {
             font-size: 24px;
             font-weight: 700;
             color: #fff;
         }
+
         .card .sub {
             font-size: 12px;
             color: #6b7280;
             margin-top: 4px;
         }
+
         .progress-bar {
             height: 5px;
             background: #1e222a;
@@ -63,6 +85,7 @@
             overflow: hidden;
             margin-top: 8px;
         }
+
         .progress-bar .fill {
             height: 100%;
             background: linear-gradient(90deg, #3b82f6, #60a5fa);
@@ -83,6 +106,7 @@
             grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
             margin-bottom: 28px;
         }
+
         .task-card {
             background: #171a21;
             border: 1px solid #1e222a;
@@ -93,9 +117,22 @@
             gap: 8px;
             transition: border-color 0.2s;
         }
-        .task-card:hover { border-color: #374151; }
-        .task-card .title { font-weight: 600; font-size: 14px; }
-        .task-card .desc { font-size: 12px; color: #8a92a0; flex: 1; }
+
+        .task-card:hover {
+            border-color: #374151;
+        }
+
+        .task-card .title {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .task-card .desc {
+            font-size: 12px;
+            color: #8a92a0;
+            flex: 1;
+        }
+
         .task-card .cat {
             display: inline-block;
             font-size: 10px;
@@ -105,6 +142,7 @@
             color: #60a5fa;
             width: fit-content;
         }
+
         .task-card button {
             background: #3b82f6;
             color: white;
@@ -116,10 +154,18 @@
             font-weight: 500;
             transition: background 0.2s;
         }
-        .task-card button:hover { background: #2563eb; }
+
+        .task-card button:hover {
+            background: #2563eb;
+        }
 
         /* 任务列表 */
-        .task-list { display: flex; flex-direction: column; gap: 6px; }
+        .task-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
         .task-row {
             background: #171a21;
             border: 1px solid #1e222a;
@@ -132,25 +178,58 @@
             cursor: pointer;
             transition: background 0.15s;
         }
-        .task-row:hover { background: #1c2029; }
-        .task-row.active { border-color: #3b82f6; background: #1c2533; }
-        .task-row .info .name { font-weight: 500; font-size: 13px; }
+
+        .task-row:hover {
+            background: #1c2029;
+        }
+
+        .task-row.active {
+            border-color: #3b82f6;
+            background: #1c2533;
+        }
+
+        .task-row .info .name {
+            font-weight: 500;
+            font-size: 13px;
+        }
+
         .task-row .info .meta {
             font-size: 11px;
             color: #6b7280;
             margin-top: 2px;
         }
+
         .status {
             padding: 3px 8px;
             border-radius: 10px;
             font-size: 11px;
             font-weight: 500;
         }
-        .status.running { background: #14532d; color: #4ade80; }
-        .status.pending { background: #3f3f10; color: #facc15; }
-        .status.done    { background: #1e3a5f; color: #60a5fa; }
-        .status.failed  { background: #7f1d1d; color: #f87171; }
-        .status.stopped { background: #374151; color: #9ca3af; }
+
+        .status.running {
+            background: #14532d;
+            color: #4ade80;
+        }
+
+        .status.pending {
+            background: #3f3f10;
+            color: #facc15;
+        }
+
+        .status.done {
+            background: #1e3a5f;
+            color: #60a5fa;
+        }
+
+        .status.failed {
+            background: #7f1d1d;
+            color: #f87171;
+        }
+
+        .status.stopped {
+            background: #374151;
+            color: #9ca3af;
+        }
 
         .task-row .actions button {
             background: #374151;
@@ -162,9 +241,19 @@
             font-size: 11px;
             margin-left: 4px;
         }
-        .task-row .actions button:hover { background: #4b5563; }
-        .task-row .actions button.stop { background: #7f1d1d; color: #f87171; }
-        .task-row .actions button.stop:hover { background: #991b1b; }
+
+        .task-row .actions button:hover {
+            background: #4b5563;
+        }
+
+        .task-row .actions button.stop {
+            background: #7f1d1d;
+            color: #f87171;
+        }
+
+        .task-row .actions button.stop:hover {
+            background: #991b1b;
+        }
 
         /* 底部日志面板 */
         .log-panel {
@@ -179,7 +268,11 @@
             flex-direction: column;
             z-index: 100;
         }
-        .log-panel.collapsed { height: 40px; }
+
+        .log-panel.collapsed {
+            height: 40px;
+        }
+
         .log-header {
             padding: 10px 20px;
             background: #12151b;
@@ -190,6 +283,7 @@
             cursor: pointer;
             user-select: none;
         }
+
         .log-header .title {
             font-size: 13px;
             font-weight: 600;
@@ -197,14 +291,31 @@
             align-items: center;
             gap: 10px;
         }
+
         .log-header .title .dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #6b7280;
         }
-        .log-header .title .dot.live { background: #4ade80; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .log-header .title .dot.live {
+            background: #4ade80;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
+        }
+
         .log-header .controls {
             display: flex;
             align-items: center;
@@ -212,6 +323,7 @@
             font-size: 12px;
             color: #6b7280;
         }
+
         .log-header .controls button {
             background: #374151;
             color: #d1d5db;
@@ -221,7 +333,11 @@
             cursor: pointer;
             font-size: 11px;
         }
-        .log-header .controls button:hover { background: #4b5563; }
+
+        .log-header .controls button:hover {
+            background: #4b5563;
+        }
+
         .log-content {
             flex: 1;
             overflow-y: auto;
@@ -233,8 +349,16 @@
             white-space: pre-wrap;
             word-break: break-all;
         }
-        .log-content .empty { color: #4b5563; text-align: center; padding-top: 80px; }
-        .log-content .log-line { margin: 0; }
+
+        .log-content .empty {
+            color: #4b5563;
+            text-align: center;
+            padding-top: 80px;
+        }
+
+        .log-content .log-line {
+            margin: 0;
+        }
 
         .refresh-note {
             font-size: 11px;
@@ -250,127 +374,559 @@
             margin-top: 6px;
             font-size: 12px;
         }
-        table.entry-types td { padding: 2px 0; color: #9ca3af; }
-        table.entry-types td:first-child { color: #6b7280; width: 110px; }
+
+        table.entry-types td {
+            padding: 2px 0;
+            color: #9ca3af;
+        }
+
+        table.entry-types td:first-child {
+            color: #6b7280;
+            width: 110px;
+        }
+
+        /* 搜索区 */
+        .search-section {
+            margin-bottom: 24px;
+            position: relative;
+        }
+
+        .search-box {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .search-input-wrap {
+            position: relative;
+            flex: 1;
+            max-width: 500px;
+        }
+
+        .search-input-wrap input {
+            width: 100%;
+            padding: 12px 40px 12px 16px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            color: #e6e8eb;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-input-wrap input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
+
+        .search-input-wrap .clear-btn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: #6b7280;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+            line-height: 1;
+            display: none;
+        }
+
+        .search-input-wrap .clear-btn.visible {
+            display: block;
+        }
+
+        .search-input-wrap .clear-btn:hover {
+            color: #e6e8eb;
+        }
+
+        .search-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            max-width: 500px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-top: none;
+            border-radius: 0 0 10px 10px;
+            max-height: 320px;
+            overflow-y: auto;
+            z-index: 200;
+            display: none;
+        }
+
+        .search-dropdown.open {
+            display: block;
+        }
+
+        .search-dropdown .item {
+            padding: 10px 16px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.1s;
+        }
+
+        .search-dropdown .item:hover,
+        .search-dropdown .item.active {
+            background: #1c2533;
+        }
+
+        .search-dropdown .item .sym {
+            font-weight: 600;
+            font-size: 14px;
+            color: #fff;
+            font-family: "SF Mono", Monaco, Consolas, monospace;
+        }
+
+        .search-dropdown .item .name {
+            font-size: 12px;
+            color: #8a92a0;
+            max-width: 280px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .search-dropdown .item .type-badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #1e3a5f;
+            color: #60a5fa;
+            flex-shrink: 0;
+        }
+
+        .search-dropdown .empty {
+            padding: 16px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .search-dropdown .loading {
+            padding: 16px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        /* 资料面板 */
+        .materials-panel {
+            display: none;
+            margin-bottom: 28px;
+        }
+
+        .materials-panel.visible {
+            display: block;
+        }
+
+        .materials-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .materials-header h2 {
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .materials-header .badge {
+            font-size: 12px;
+            font-weight: 500;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: #1e3a5f;
+            color: #60a5fa;
+        }
+
+        .materials-header .close-btn {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .materials-header .close-btn:hover {
+            background: #4b5563;
+        }
+
+        .stat-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        .stat-chip {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .stat-chip strong {
+            color: #e6e8eb;
+        }
+
+        .material-group {
+            margin-bottom: 20px;
+        }
+
+        .material-group h3 {
+            font-size: 13px;
+            color: #8a92a0;
+            font-weight: 500;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .material-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .material-item {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: border-color 0.15s;
+        }
+
+        .material-item:hover {
+            border-color: #374151;
+        }
+
+        .material-item .type-tag {
+            font-size: 10px;
+            font-weight: 500;
+            padding: 3px 8px;
+            border-radius: 4px;
+            flex-shrink: 0;
+            min-width: 70px;
+            text-align: center;
+        }
+
+        .tag-official_website {
+            background: #1e3a5f;
+            color: #60a5fa;
+        }
+
+        .tag-docs {
+            background: #064e3b;
+            color: #34d399;
+        }
+
+        .tag-docs_portal {
+            background: #065f46;
+            color: #6ee7b7;
+        }
+
+        .tag-github {
+            background: #374151;
+            color: #d1d5db;
+        }
+
+        .tag-medium {
+            background: #1e293b;
+            color: #94a3b8;
+        }
+
+        .tag-other {
+            background: #374151;
+            color: #9ca3af;
+        }
+
+        .tag-whitepaper {
+            background: #7c3aed22;
+            color: #a78bfa;
+            border: 1px solid #7c3aed44;
+        }
+
+        .tag-tokenomics {
+            background: #f59e0b22;
+            color: #fbbf24;
+            border: 1px solid #f59e0b44;
+        }
+
+        .tag-audit {
+            background: #ef444422;
+            color: #f87171;
+            border: 1px solid #ef444444;
+        }
+
+        .material-item .url-text {
+            flex: 1;
+            font-size: 12px;
+            color: #60a5fa;
+            word-break: break-all;
+            text-decoration: none;
+            min-width: 0;
+        }
+
+        .material-item .url-text:hover {
+            text-decoration: underline;
+        }
+
+        .material-item .meta {
+            font-size: 11px;
+            color: #6b7280;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .material-item .health {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 8px;
+            flex-shrink: 0;
+        }
+
+        .health-healthy {
+            background: #064e3b;
+            color: #34d399;
+        }
+
+        .health-dead {
+            background: #7f1d1d;
+            color: #f87171;
+        }
+
+        .health-protected {
+            background: #3f3f10;
+            color: #facc15;
+        }
+
+        .health-local_fallback {
+            background: #1e3a5f;
+            color: #60a5fa;
+        }
+
+        .health-unchecked {
+            background: #374151;
+            color: #9ca3af;
+        }
+
+        .no-data {
+            padding: 20px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .gh-repo-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .gh-repo-card .gh-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .gh-repo-card .gh-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: #e6e8eb;
+        }
+
+        .gh-repo-card .gh-name span {
+            color: #6b7280;
+            font-weight: 400;
+        }
+
+        .gh-repo-card .gh-stats {
+            display: flex;
+            gap: 14px;
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .gh-repo-card .gh-stats strong {
+            color: #e6e8eb;
+        }
+
+        .gh-repo-card .gh-lang {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #374151;
+            color: #d1d5db;
+        }
     </style>
 </head>
+
 <body>
-<div class="container">
-    <header>
-        <h1>📊 加密货币投研资料采集工作台</h1>
-        <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time"></span></p>
-    </header>
+    <div class="container">
+        <header>
+            <h1>📊 加密货币投研资料采集工作台</h1>
+            <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time"></span></p>
+        </header>
 
-    <!-- 统计卡片 -->
-    <div class="grid">
-        <div class="card">
-            <h3>总资产数</h3>
-            <div class="value" id="stat-assets">-</div>
-            <div class="sub" id="stat-sources">-</div>
+        <!-- 搜索区 -->
+        <div class="search-section">
+            <div class="search-box">
+                <div class="search-input-wrap">
+                    <input type="text" id="search-input" placeholder="搜索币种符号或名称，如 BTC、Ethereum..." autocomplete="off">
+                    <button class="clear-btn" id="search-clear" onclick="clearSearch()">&times;</button>
+                    <div class="search-dropdown" id="search-dropdown"></div>
+                </div>
+            </div>
         </div>
-        <div class="card">
-            <h3>文档入口总数</h3>
-            <div class="value" id="stat-entries">-</div>
-            <div class="sub" id="stat-entry-types">-</div>
+
+        <!-- 资料面板 -->
+        <div class="materials-panel" id="materials-panel">
+            <div class="materials-header">
+                <h2>
+                    <span id="mat-symbol"></span>
+                    <span class="badge" id="mat-type"></span>
+                    <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
+                </h2>
+                <button class="close-btn" onclick="closeMaterials()">关闭</button>
+            </div>
+            <div class="stat-row" id="mat-stats"></div>
+            <div id="mat-content"></div>
         </div>
-        <div class="card">
-            <h3>深度爬取进度</h3>
-            <div class="value" id="stat-crawl-pct">-</div>
-            <div class="progress-bar"><div class="fill" id="stat-crawl-bar" style="width:0%"></div></div>
-            <div class="sub" id="stat-crawl-detail">-</div>
+
+        <!-- 统计卡片 -->
+        <div class="grid">
+            <div class="card">
+                <h3>总资产数</h3>
+                <div class="value" id="stat-assets">-</div>
+                <div class="sub" id="stat-sources">-</div>
+            </div>
+            <div class="card">
+                <h3>文档入口总数</h3>
+                <div class="value" id="stat-entries">-</div>
+                <div class="sub" id="stat-entry-types">-</div>
+            </div>
+            <div class="card">
+                <h3>深度爬取进度</h3>
+                <div class="value" id="stat-crawl-pct">-</div>
+                <div class="progress-bar">
+                    <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
+                </div>
+                <div class="sub" id="stat-crawl-detail">-</div>
+            </div>
+            <div class="card">
+                <h3>文档资产</h3>
+                <div class="value" id="stat-docs">-</div>
+                <div class="sub" id="stat-docs-detail">-</div>
+            </div>
         </div>
-        <div class="card">
-            <h3>文档资产</h3>
-            <div class="value" id="stat-docs">-</div>
-            <div class="sub" id="stat-docs-detail">-</div>
+
+        <!-- 任务启动 -->
+        <h2>🚀 任务启动</h2>
+        <div class="task-grid" id="task-def-grid"></div>
+
+        <!-- 任务列表 -->
+        <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
+        <div class="refresh-note">每 3 秒自动刷新</div>
+        <div class="task-list" id="task-list"></div>
+    </div>
+
+    <!-- 底部日志面板 -->
+    <div class="log-panel" id="log-panel">
+        <div class="log-header" onclick="toggleLogPanel()">
+            <div class="title">
+                <span class="dot" id="log-dot"></span>
+                <span id="log-title">运行日志（点击任务查看）</span>
+            </div>
+            <div class="controls">
+                <span id="log-count">0 行</span>
+                <button onclick="event.stopPropagation(); clearLog()">清空</button>
+                <button onclick="event.stopPropagation(); toggleLogPanel()">折叠</button>
+            </div>
+        </div>
+        <div class="log-content" id="log-content">
+            <div class="empty">选择一个任务查看实时日志</div>
         </div>
     </div>
 
-    <!-- 任务启动 -->
-    <h2>🚀 任务启动</h2>
-    <div class="task-grid" id="task-def-grid"></div>
+    <script>
+        let selectedTaskId = null;
+        let logPanelCollapsed = false;
+        let lastLogCount = 0;
 
-    <!-- 任务列表 -->
-    <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
-    <div class="refresh-note">每 3 秒自动刷新</div>
-    <div class="task-list" id="task-list"></div>
-</div>
+        // ── 仪表盘 ──
+        async function loadDashboard () {
+            try {
+                const res = await fetch('/api/dashboard');
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+                const d = data.data;
 
-<!-- 底部日志面板 -->
-<div class="log-panel" id="log-panel">
-    <div class="log-header" onclick="toggleLogPanel()">
-        <div class="title">
-            <span class="dot" id="log-dot"></span>
-            <span id="log-title">运行日志（点击任务查看）</span>
-        </div>
-        <div class="controls">
-            <span id="log-count">0 行</span>
-            <button onclick="event.stopPropagation(); clearLog()">清空</button>
-            <button onclick="event.stopPropagation(); toggleLogPanel()">折叠</button>
-        </div>
-    </div>
-    <div class="log-content" id="log-content">
-        <div class="empty">选择一个任务查看实时日志</div>
-    </div>
-</div>
+                document.getElementById('stat-assets').textContent = d.total_assets?.toLocaleString() || '-';
+                const srcDist = d.source_distribution || {};
+                document.getElementById('stat-sources').textContent =
+                    `CMC: ${srcDist.cmc || 0} · CG: ${srcDist.cg || 0} · DL: ${srcDist.dl || 0}`;
 
-<script>
-let selectedTaskId = null;
-let logPanelCollapsed = false;
-let lastLogCount = 0;
-
-// ── 仪表盘 ──
-async function loadDashboard() {
-    try {
-        const res = await fetch('/api/dashboard');
-        const data = await res.json();
-        if (!data.ok) throw new Error(data.error);
-        const d = data.data;
-
-        document.getElementById('stat-assets').textContent = d.total_assets?.toLocaleString() || '-';
-        const srcDist = d.source_distribution || {};
-        document.getElementById('stat-sources').textContent =
-            `CMC: ${srcDist.cmc || 0} · CG: ${srcDist.cg || 0} · DL: ${srcDist.dl || 0}`;
-
-        document.getElementById('stat-entries').textContent = d.total_entries?.toLocaleString() || '-';
-        const et = d.entry_types || {};
-        document.getElementById('stat-entry-types').innerHTML =
-            `<table class="entry-types">
-                ${Object.entries(et).slice(0, 4).map(([k,v]) =>
-                    `<tr><td>${k}</td><td>${v.toLocaleString()}</td></tr>`
-                ).join('')}
+                document.getElementById('stat-entries').textContent = d.total_entries?.toLocaleString() || '-';
+                const et = d.entry_types || {};
+                document.getElementById('stat-entry-types').innerHTML =
+                    `<table class="entry-types">
+                ${Object.entries(et).slice(0, 4).map(([k, v]) =>
+                        `<tr><td>${k}</td><td>${v.toLocaleString()}</td></tr>`
+                    ).join('')}
              </table>`;
 
-        const cp = d.crawl_progress || {};
-        let totalCrawl = 0, doneCrawl = 0;
-        Object.values(cp).forEach(v => { totalCrawl += v.total; doneCrawl += v.crawled; });
-        const pct = totalCrawl > 0 ? (doneCrawl / totalCrawl * 100).toFixed(1) : 0;
-        document.getElementById('stat-crawl-pct').textContent = pct + '%';
-        document.getElementById('stat-crawl-bar').style.width = pct + '%';
-        const detail = Object.entries(cp).map(([k,v]) =>
-            `${k}: ${v.crawled.toLocaleString()}/${v.total.toLocaleString()}`
-        ).join(' · ');
-        document.getElementById('stat-crawl-detail').textContent = detail;
+                const cp = d.crawl_progress || {};
+                let totalCrawl = 0, doneCrawl = 0;
+                Object.values(cp).forEach(v => { totalCrawl += v.total; doneCrawl += v.crawled; });
+                const pct = totalCrawl > 0 ? (doneCrawl / totalCrawl * 100).toFixed(1) : 0;
+                document.getElementById('stat-crawl-pct').textContent = pct + '%';
+                document.getElementById('stat-crawl-bar').style.width = pct + '%';
+                const detail = Object.entries(cp).map(([k, v]) =>
+                    `${k}: ${v.crawled.toLocaleString()}/${v.total.toLocaleString()}`
+                ).join(' · ');
+                document.getElementById('stat-crawl-detail').textContent = detail;
 
-        const da = d.doc_asset || {};
-        document.getElementById('stat-docs').textContent = da.total?.toLocaleString() || '-';
-        document.getElementById('stat-docs-detail').textContent =
-            `已下载: ${da.downloaded || 0} · 已解析: ${da.parsed || 0}`;
+                const da = d.doc_asset || {};
+                document.getElementById('stat-docs').textContent = da.total?.toLocaleString() || '-';
+                document.getElementById('stat-docs-detail').textContent =
+                    `已下载: ${da.downloaded || 0} · 已解析: ${da.parsed || 0}`;
 
-        document.getElementById('refresh-time').textContent =
-            ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');
-    } catch (e) {
-        console.error('dashboard error:', e);
-    }
-}
+                document.getElementById('refresh-time').textContent =
+                    ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');
+            } catch (e) {
+                console.error('dashboard error:', e);
+            }
+        }
 
-// ── 任务定义 ──
-async function loadTaskDefs() {
-    const res = await fetch('/api/task_defs');
-    const data = await res.json();
-    if (!data.ok) return;
-    const grid = document.getElementById('task-def-grid');
-    grid.innerHTML = Object.entries(data.defs).map(([key, t]) => `
+        // ── 任务定义 ──
+        async function loadTaskDefs () {
+            const res = await fetch('/api/task_defs');
+            const data = await res.json();
+            if (!data.ok) return;
+            const grid = document.getElementById('task-def-grid');
+            grid.innerHTML = Object.entries(data.defs).map(([key, t]) => `
         <div class="task-card">
             <span class="cat">${t.category}</span>
             <div class="title">${escapeHtml(t.name)}</div>
@@ -378,35 +934,35 @@ async function loadTaskDefs() {
             <button onclick="startTask('${key}')">▶ 启动任务</button>
         </div>
     `).join('');
-}
-
-// ── 任务列表 ──
-async function loadTasks() {
-    try {
-        const res = await fetch('/api/tasks?limit=20');
-        const data = await res.json();
-        if (!data.ok) return;
-        renderTaskList(data.tasks);
-        // 如果有选中的任务，刷新日志
-        if (selectedTaskId) {
-            loadTaskLog(selectedTaskId);
         }
-    } catch (e) {
-        console.error('loadTasks error:', e);
-    }
-}
 
-function renderTaskList(tasks) {
-    const list = document.getElementById('task-list');
-    if (tasks.length === 0) {
-        list.innerHTML = '<div class="task-row"><div class="info"><span style="color:#6b7280">暂无任务，从上方启动一个吧</span></div></div>';
-        return;
-    }
-    list.innerHTML = tasks.map(t => {
-        const elapsed = t.elapsed_sec ? formatTime(t.elapsed_sec) : '';
-        const statsStr = t.stats && t.status === 'running' ? formatStats(t.stats) : '';
-        const isActive = selectedTaskId === t.task_id ? 'active' : '';
-        return `
+        // ── 任务列表 ──
+        async function loadTasks () {
+            try {
+                const res = await fetch('/api/tasks?limit=20');
+                const data = await res.json();
+                if (!data.ok) return;
+                renderTaskList(data.tasks);
+                // 如果有选中的任务，刷新日志
+                if (selectedTaskId) {
+                    loadTaskLog(selectedTaskId);
+                }
+            } catch (e) {
+                console.error('loadTasks error:', e);
+            }
+        }
+
+        function renderTaskList (tasks) {
+            const list = document.getElementById('task-list');
+            if (tasks.length === 0) {
+                list.innerHTML = '<div class="task-row"><div class="info"><span style="color:#6b7280">暂无任务，从上方启动一个吧</span></div></div>';
+                return;
+            }
+            list.innerHTML = tasks.map(t => {
+                const elapsed = t.elapsed_sec ? formatTime(t.elapsed_sec) : '';
+                const statsStr = t.stats && t.status === 'running' ? formatStats(t.stats) : '';
+                const isActive = selectedTaskId === t.task_id ? 'active' : '';
+                return `
         <div class="task-row ${isActive}" onclick="selectTask('${t.task_id}')">
             <div class="info">
                 <div class="name">${escapeHtml(t.name)}</div>
@@ -419,174 +975,417 @@ function renderTaskList(tasks) {
             <span class="status ${t.status}">${statusText(t.status)}</span>
             <div class="actions" onclick="event.stopPropagation()">
                 ${t.status === 'running' || t.status === 'pending' ?
-                    `<button class="stop" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
+                        `<button class="stop" onclick="stopTask('${t.task_id}')">停止</button>` : ''}
             </div>
         </div>`;
-    }).join('');
-}
+            }).join('');
+        }
 
-function selectTask(taskId) {
-    selectedTaskId = taskId;
-    lastLogCount = 0;
-    loadTasks();
-    loadTaskLog(taskId);
-    // 展开日志面板
-    if (logPanelCollapsed) toggleLogPanel();
-}
-
-function formatStats(stats) {
-    const parts = [];
-    if (stats.progress_pct) parts.push(stats.progress_pct);
-    if (stats.ok !== undefined && stats.fail !== undefined)
-        parts.push(`OK:${stats.ok} / FAIL:${stats.fail}`);
-    if (stats.discovered !== undefined) parts.push(`+${stats.discovered} 链接`);
-    if (stats.candidates) parts.push(`共 ${stats.candidates}`);
-    if (stats.downloaded !== undefined) parts.push(`下载:${stats.downloaded}`);
-    if (stats.failed !== undefined && stats.downloaded === undefined) {
-        // 仅完成统计时显示
-    }
-    return parts.join(' · ');
-}
-
-function statusText(s) {
-    return {running: '运行中', pending: '等待中', done: '已完成',
-            failed: '失败', stopped: '已停止'}[s] || s;
-}
-
-function formatTime(sec) {
-    sec = Math.floor(sec);
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s = sec % 60;
-    if (h > 0) return `${h}h ${m}m ${s}s`;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
-}
-
-function escapeHtml(s) {
-    if (s == null) return '';
-    const div = document.createElement('div');
-    div.textContent = s;
-    return div.innerHTML;
-}
-
-// ── 操作 ──
-async function startTask(taskKey) {
-    if (!confirm(`确定启动任务: ${taskKey} ?`)) return;
-    try {
-        const res = await fetch('/api/tasks/start', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({task_key: taskKey})
-        });
-        const data = await res.json();
-        if (data.ok) {
-            selectedTaskId = data.task_id;
-            if (logPanelCollapsed) toggleLogPanel();
+        function selectTask (taskId) {
+            selectedTaskId = taskId;
+            lastLogCount = 0;
             loadTasks();
-        } else {
-            alert('启动失败: ' + data.error);
-        }
-    } catch (e) {
-        alert('启动失败: ' + e.message);
-    }
-}
-
-async function stopTask(taskId) {
-    if (!confirm('确定停止此任务?')) return;
-    try {
-        await fetch(`/api/tasks/${taskId}/stop`, {method: 'POST'});
-        loadTasks();
-    } catch (e) {
-        alert('停止失败: ' + e.message);
-    }
-}
-
-// ── 日志面板 ──
-async function loadTaskLog(taskId) {
-    try {
-        const res = await fetch(`/api/tasks/${taskId}/log?limit=500`);
-        const data = await res.json();
-        if (!data.ok) return;
-        const logs = data.logs || [];
-        const panel = document.getElementById('log-content');
-        const dot = document.getElementById('log-dot');
-        const title = document.getElementById('log-title');
-        const countEl = document.getElementById('log-count');
-
-        // 判断是否在运行
-        const taskRes = await fetch(`/api/tasks/${taskId}`);
-        const taskData = await taskRes.json();
-        const isRunning = taskData.ok && taskData.task && taskData.task.status === 'running';
-
-        dot.className = 'dot' + (isRunning ? ' live' : '');
-        title.textContent = `${taskData.ok ? taskData.task.name : '任务'} · 日志`;
-        countEl.textContent = `${logs.length} 行`;
-
-        if (logs.length === 0) {
-            panel.innerHTML = '<div class="empty">暂无日志输出</div>';
-            return;
+            loadTaskLog(taskId);
+            // 展开日志面板
+            if (logPanelCollapsed) toggleLogPanel();
         }
 
-        // 检测是否滚动到底部（如果用户没手动往上滚，就自动跟到底）
-        const isAtBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 50
-            || lastLogCount !== logs.length;
-
-        panel.innerHTML = logs.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
-
-        if (isAtBottom) {
-            panel.scrollTop = panel.scrollHeight;
+        function formatStats (stats) {
+            const parts = [];
+            if (stats.progress_pct) parts.push(stats.progress_pct);
+            if (stats.ok !== undefined && stats.fail !== undefined)
+                parts.push(`OK:${stats.ok} / FAIL:${stats.fail}`);
+            if (stats.discovered !== undefined) parts.push(`+${stats.discovered} 链接`);
+            if (stats.candidates) parts.push(`共 ${stats.candidates}`);
+            if (stats.downloaded !== undefined) parts.push(`下载:${stats.downloaded}`);
+            if (stats.failed !== undefined && stats.downloaded === undefined) {
+                // 仅完成统计时显示
+            }
+            return parts.join(' · ');
         }
-        lastLogCount = logs.length;
-    } catch (e) {
-        console.error('log error:', e);
-    }
-}
 
-function toggleLogPanel() {
-    const panel = document.getElementById('log-panel');
-    logPanelCollapsed = !logPanelCollapsed;
-    panel.classList.toggle('collapsed', logPanelCollapsed);
-}
+        function statusText (s) {
+            return {
+                running: '运行中', pending: '等待中', done: '已完成',
+                failed: '失败', stopped: '已停止'
+            }[s] || s;
+        }
 
-function clearLog() {
-    document.getElementById('log-content').innerHTML = '<div class="empty">日志已清空（刷新后会重新加载）</div>';
-}
+        function formatTime (sec) {
+            sec = Math.floor(sec);
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const s = sec % 60;
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
 
-// ── 初始化 ──
-loadDashboard();
-loadTaskDefs();
-loadTasks();
+        function escapeHtml (s) {
+            if (s == null) return '';
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
 
-// 只在选中运行中任务时刷新日志
-setInterval(() => {
-    if (selectedTaskId) {
-        fetch(`/api/tasks/${selectedTaskId}`).then(r => r.json()).then(d => {
-            if (d.ok && d.task) {
-                // 更新当前任务状态
-                const row = document.querySelector(`.task-row.active`);
-                if (row) {
-                    const statusEl = row.querySelector('.status');
-                    if (statusEl) {
-                        statusEl.className = 'status ' + d.task.status;
-                        statusEl.textContent = statusText(d.task.status);
-                    }
+        // ── 搜索逻辑 ──
+        let searchTimer = null;
+        let searchActiveIdx = -1;
+        let searchResults = [];
+        let selectedAssetId = null;
+
+        const searchInput = document.getElementById('search-input');
+        const searchDropdown = document.getElementById('search-dropdown');
+        const searchClear = document.getElementById('search-clear');
+        const materialsPanel = document.getElementById('materials-panel');
+
+        searchInput.addEventListener('input', () => {
+            const q = searchInput.value.trim();
+            searchClear.classList.toggle('visible', q.length > 0);
+            if (q.length < 1) {
+                closeDropdown();
+                return;
+            }
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => doSearch(q), 250);
+        });
+
+        searchInput.addEventListener('keydown', (e) => {
+            const items = searchDropdown.querySelectorAll('.item');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                searchActiveIdx = Math.min(searchActiveIdx + 1, items.length - 1);
+                updateActiveItem(items);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                searchActiveIdx = Math.max(searchActiveIdx - 1, -1);
+                updateActiveItem(items);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (searchActiveIdx >= 0 && searchActiveIdx < searchResults.length) {
+                    selectAsset(searchResults[searchActiveIdx]);
                 }
-                // 运行中就刷新日志，完成了就停
-                if (d.task.status === 'running' || d.task.status === 'pending') {
-                    loadTaskLog(selectedTaskId);
-                } else {
-                    // 完成了刷新一次最终日志和列表
-                    loadTaskLog(selectedTaskId);
-                    loadTasks();
-                    selectedTaskId = null;
-                }
+            } else if (e.key === 'Escape') {
+                closeDropdown();
             }
         });
-    }
-}, 3000);
 
-setInterval(loadDashboard, 30000);
-</script>
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.search-input-wrap')) {
+                closeDropdown();
+            }
+        });
+
+        async function doSearch (q) {
+            searchDropdown.classList.add('open');
+            searchDropdown.innerHTML = '<div class="loading">搜索中...</div>';
+            try {
+                const res = await fetch(`/api/assets/search?q=${encodeURIComponent(q)}`);
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+                searchResults = data.assets;
+                searchActiveIdx = -1;
+                renderDropdown();
+            } catch (e) {
+                searchDropdown.innerHTML = '<div class="empty">搜索失败</div>';
+                searchResults = [];
+            }
+        }
+
+        function renderDropdown () {
+            if (searchResults.length === 0) {
+                searchDropdown.innerHTML = '<div class="empty">未找到匹配的币种</div>';
+                return;
+            }
+            searchDropdown.innerHTML = searchResults.map((a, i) => `
+                <div class="item" data-idx="${i}" onclick="selectAsset(searchResults[${i}])">
+                    <div>
+                        <span class="sym">${escapeHtml(a.symbol)}</span>
+                        <span class="name">${escapeHtml(a.name)}</span>
+                    </div>
+                    <span class="type-badge">${escapeHtml(a.type)}</span>
+                </div>
+            `).join('');
+        }
+
+        function updateActiveItem (items) {
+            items.forEach((el, i) => {
+                el.classList.toggle('active', i === searchActiveIdx);
+                if (i === searchActiveIdx) el.scrollIntoView({ block: 'nearest' });
+            });
+        }
+
+        function selectAsset (asset) {
+            searchInput.value = asset.symbol;
+            closeDropdown();
+            selectedAssetId = asset.asset_id;
+            searchClear.classList.add('visible');
+            loadMaterials(asset.asset_id);
+        }
+
+        function closeDropdown () {
+            searchDropdown.classList.remove('open');
+            searchActiveIdx = -1;
+        }
+
+        function clearSearch () {
+            searchInput.value = '';
+            selectedAssetId = null;
+            searchClear.classList.remove('visible');
+            closeDropdown();
+            closeMaterials();
+            searchInput.focus();
+        }
+
+        // ── 资料展示 ──
+
+        async function loadMaterials (assetId) {
+            materialsPanel.classList.add('visible');
+            document.getElementById('mat-content').innerHTML = '<div class="no-data">加载中...</div>';
+            try {
+                const res = await fetch(`/api/assets/${assetId}/materials`);
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+                renderMaterials(data.data);
+            } catch (e) {
+                document.getElementById('mat-content').innerHTML = '<div class="no-data">加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderMaterials (d) {
+            document.getElementById('mat-symbol').textContent = d.symbol;
+            document.getElementById('mat-name').textContent = d.name;
+            document.getElementById('mat-type').textContent = d.type;
+
+            const st = d.stats || {};
+            document.getElementById('mat-stats').innerHTML = `
+                <div class="stat-chip">文档入口: <strong>${st.total_entries || 0}</strong></div>
+                <div class="stat-chip">文档文件: <strong>${st.total_docs || 0}</strong></div>
+                <div class="stat-chip">投研链接: <strong>${st.total_research_urls || 0}</strong></div>
+                <div class="stat-chip">GitHub仓库: <strong>${st.total_github || 0}</strong></div>
+            `;
+
+            let html = '';
+
+            // 文档入口
+            html += '<div class="material-group"><h3>📎 文档入口 (doc_source_entry)</h3>';
+            if (d.doc_source_entries.length === 0) {
+                html += '<div class="no-data">暂无文档入口</div>';
+            } else {
+                html += '<div class="material-list">';
+                d.doc_source_entries.forEach(e => {
+                    const typeLabel = {
+                        official_website: '官网', docs: '文档', docs_portal: '文档门户',
+                        github: 'GitHub', medium: 'Medium', other: '其他'
+                    }[e.entry_type] || e.entry_type;
+                    html += `
+                    <div class="material-item">
+                        <span class="type-tag tag-${e.entry_type}">${typeLabel}</span>
+                        <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
+                        <span class="meta">${escapeHtml(e.source || '')} ${e.is_primary ? '· 主' : ''} ${e.deep_crawled ? '· 已爬' : ''}</span>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // 文档文件
+            html += '<div class="material-group"><h3>📄 文档文件 (doc_asset)</h3>';
+            if (d.doc_assets.length === 0) {
+                html += '<div class="no-data">暂无文档文件</div>';
+            } else {
+                html += '<div class="material-list">';
+                d.doc_assets.forEach(e => {
+                    html += `
+                    <div class="material-item">
+                        <span class="type-tag tag-${e.doc_type || 'other'}">${e.doc_type || 'other'}</span>
+                        <a class="url-text" href="${escapeHtml(e.source_url)}" target="_blank" rel="noopener">${escapeHtml(e.file_name || e.source_url)}</a>
+                        <span class="meta">${e.parse_status || ''} ${e.mime_type ? '· ' + e.mime_type : ''} ${e.file_size_bytes ? '· ' + formatBytes(e.file_size_bytes) : ''}</span>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // 投研链接
+            html += '<div class="material-group"><h3>🔍 投研链接精选 (research_url)</h3>';
+            if (d.research_urls.length === 0) {
+                html += '<div class="no-data">暂无投研链接（需运行 B5 健康检查+AI筛选）</div>';
+            } else {
+                html += '<div class="material-list">';
+                d.research_urls.forEach(e => {
+                    html += `
+                    <div class="material-item">
+                        <span class="type-tag tag-${e.category || 'other'}">${e.category || 'other'}</span>
+                        <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
+                        <span class="health health-${e.health_status || 'unchecked'}">${e.health_status || 'unchecked'}</span>
+                        ${e.relevance_score != null ? `<span class="meta">AI: ${(e.relevance_score * 100).toFixed(0)}%</span>` : ''}
+                    </div>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // GitHub 活跃度
+            html += '<div class="material-group"><h3>🐙 GitHub 开发活跃度</h3>';
+            if (d.github_activity.length === 0) {
+                html += '<div class="no-data">暂无 GitHub 活跃度数据</div>';
+            } else {
+                html += '<div class="material-list">';
+                d.github_activity.forEach(e => {
+                    html += `
+                    <div class="gh-repo-card">
+                        <div class="gh-info">
+                            <span class="gh-name">${escapeHtml(e.owner)}<span>/</span>${escapeHtml(e.repo)}</span>
+                            ${e.language ? `<span class="gh-lang">${escapeHtml(e.language)}</span>` : ''}
+                            ${e.archived ? '<span style="color:#f87171;font-size:11px">Archived</span>' : ''}
+                        </div>
+                        <div class="gh-stats">
+                            <span>⭐ <strong>${e.stars?.toLocaleString() || '-'}</strong></span>
+                            <span>⑂ <strong>${e.forks?.toLocaleString() || '-'}</strong></span>
+                            <span>52w commits: <strong>${e.commits_52w?.toLocaleString() || '-'}</strong></span>
+                            <span>贡献者: <strong>${e.contributors_52w || '-'}</strong></span>
+                        </div>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            document.getElementById('mat-content').innerHTML = html;
+            materialsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function closeMaterials () {
+            materialsPanel.classList.remove('visible');
+            selectedAssetId = null;
+        }
+
+        function formatBytes (bytes) {
+            if (!bytes) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // ── 操作 ──
+        async function startTask (taskKey) {
+            if (!confirm(`确定启动任务: ${taskKey} ?`)) return;
+            try {
+                const res = await fetch('/api/tasks/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_key: taskKey })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    selectedTaskId = data.task_id;
+                    if (logPanelCollapsed) toggleLogPanel();
+                    loadTasks();
+                } else {
+                    alert('启动失败: ' + data.error);
+                }
+            } catch (e) {
+                alert('启动失败: ' + e.message);
+            }
+        }
+
+        async function stopTask (taskId) {
+            if (!confirm('确定停止此任务?')) return;
+            try {
+                await fetch(`/api/tasks/${taskId}/stop`, { method: 'POST' });
+                loadTasks();
+            } catch (e) {
+                alert('停止失败: ' + e.message);
+            }
+        }
+
+        // ── 日志面板 ──
+        async function loadTaskLog (taskId) {
+            try {
+                const res = await fetch(`/api/tasks/${taskId}/log?limit=500`);
+                const data = await res.json();
+                if (!data.ok) return;
+                const logs = data.logs || [];
+                const panel = document.getElementById('log-content');
+                const dot = document.getElementById('log-dot');
+                const title = document.getElementById('log-title');
+                const countEl = document.getElementById('log-count');
+
+                // 判断是否在运行
+                const taskRes = await fetch(`/api/tasks/${taskId}`);
+                const taskData = await taskRes.json();
+                const isRunning = taskData.ok && taskData.task && taskData.task.status === 'running';
+
+                dot.className = 'dot' + (isRunning ? ' live' : '');
+                title.textContent = `${taskData.ok ? taskData.task.name : '任务'} · 日志`;
+                countEl.textContent = `${logs.length} 行`;
+
+                if (logs.length === 0) {
+                    panel.innerHTML = '<div class="empty">暂无日志输出</div>';
+                    return;
+                }
+
+                // 检测是否滚动到底部（如果用户没手动往上滚，就自动跟到底）
+                const isAtBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 50
+                    || lastLogCount !== logs.length;
+
+                panel.innerHTML = logs.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+
+                if (isAtBottom) {
+                    panel.scrollTop = panel.scrollHeight;
+                }
+                lastLogCount = logs.length;
+            } catch (e) {
+                console.error('log error:', e);
+            }
+        }
+
+        function toggleLogPanel () {
+            const panel = document.getElementById('log-panel');
+            logPanelCollapsed = !logPanelCollapsed;
+            panel.classList.toggle('collapsed', logPanelCollapsed);
+        }
+
+        function clearLog () {
+            document.getElementById('log-content').innerHTML = '<div class="empty">日志已清空（刷新后会重新加载）</div>';
+        }
+
+        // ── 初始化 ──
+        loadDashboard();
+        loadTaskDefs();
+        loadTasks();
+
+        // 只在选中运行中任务时刷新日志
+        setInterval(() => {
+            if (selectedTaskId) {
+                fetch(`/api/tasks/${selectedTaskId}`).then(r => r.json()).then(d => {
+                    if (d.ok && d.task) {
+                        // 更新当前任务状态
+                        const row = document.querySelector(`.task-row.active`);
+                        if (row) {
+                            const statusEl = row.querySelector('.status');
+                            if (statusEl) {
+                                statusEl.className = 'status ' + d.task.status;
+                                statusEl.textContent = statusText(d.task.status);
+                            }
+                        }
+                        // 运行中就刷新日志，完成了就停
+                        if (d.task.status === 'running' || d.task.status === 'pending') {
+                            loadTaskLog(selectedTaskId);
+                        } else {
+                            // 完成了刷新一次最终日志和列表
+                            loadTaskLog(selectedTaskId);
+                            loadTasks();
+                            selectedTaskId = null;
+                        }
+                    }
+                });
+            }
+        }, 3000);
+
+        setInterval(loadDashboard, 30000);
+    </script>
 </body>
+
 </html>

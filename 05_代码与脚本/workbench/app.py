@@ -169,6 +169,32 @@ def api_task_log(task_id):
     return jsonify({"ok": True, "logs": logs})
 
 
+# ── 代币搜索与资料查询 ──
+
+
+@app.route("/api/assets/search")
+def api_search_assets():
+    q = (request.args.get("q", "") or "").strip()
+    if not q or len(q) < 1:
+        return jsonify({"ok": True, "assets": []})
+    try:
+        assets = _get_db_stats().search_assets(q, limit=20)
+        return jsonify({"ok": True, "assets": assets})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/assets/<int:asset_id>/materials")
+def api_asset_materials(asset_id: int):
+    try:
+        data = _get_db_stats().get_asset_materials(asset_id)
+        if not data:
+            return jsonify({"ok": False, "error": "资产不存在"}), 404
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/task_defs")
 def api_task_defs():
     defs = {}

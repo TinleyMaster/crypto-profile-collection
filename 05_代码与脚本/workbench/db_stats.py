@@ -119,3 +119,214 @@ def get_pending_b2() -> dict:
             result = {r[0]: r[1] for r in rows}
             result["total"] = sum(result.values())
     return result
+
+
+def search_assets(query: str, limit: int = 20) -> list[dict]:
+    """按 symbol 或 name 搜索资产，用于下拉自动补全。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
+                       cb.cmc_id
+                FROM core.asset a
+                LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
+                WHERE a.canonical_symbol ILIKE %s
+                   OR a.canonical_name ILIKE %s
+                ORDER BY
+                    CASE
+                        WHEN a.canonical_symbol = UPPER(%s) THEN 0
+                        WHEN a.canonical_symbol ILIKE %s THEN 1
+                        ELSE 2
+                    END,
+                    a.canonical_symbol
+                LIMIT %s
+                """,
+                (f"%{query}%", f"%{query}%", query, f"{query}%", limit),
+            )
+            return [
+                {
+                    "asset_id": row[0],
+                    "symbol": row[1],
+                    "name": row[2],
+                    "type": row[3],
+                    "cmc_id": row[4],
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def get_asset_materials(asset_id: int) -> dict:
+    """获取某个币种的全部投研资料，按类型分组。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 基础信息
+            cur.execute(
+                "SELECT canonical_symbol, canonical_name, asset_type FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
+            asset_row = cur.fetchone()
+            if not asset_row:
+                return {}
+
+            result = {
+                "asset_id": asset_id,
+                "symbol": asset_row[0],
+                "name": asset_row[1],
+                "type": asset_row[2],
+                "doc_source_entries": [],
+                "doc_assets": [],
+                "research_urls": [],
+                "github_activity": [],
+            }
+
+            # 文档入口
+            cur.execute(
+                """
+                SELECT entry_id, source_code, entry_type, entry_url, discovered_from,
+                       is_primary, deep_crawled_at
+                FROM biz.doc_source_entry
+                WHERE asset_id = %s AND entity_type = 'asset'
+                ORDER BY
+                    CASE entry_type
+                        WHEN 'official_website' THEN 1
+                        WHEN 'docs' THEN 2
+                        WHEN 'docs_portal' THEN 3
+                        WHEN 'github' THEN 4
+                        WHEN 'medium' THEN 5
+                        ELSE 6
+                    END, entry_id
+                """,
+                (asset_id,),
+            )
+            result["doc_source_entries"] = [
+                {
+                    "entry_id": r[0],
+                    "source": r[1],
+                    "entry_type": r[2],
+                    "url": r[3],
+                    "discovered_from": r[4],
+                    "is_primary": r[5],
+                    "deep_crawled": r[6] is not None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 文档文件
+            cur.execute(
+                """
+                SELECT doc_id, doc_type, source_url, resolved_url, file_name,
+                       mime_type, file_size_bytes, storage_path,
+                       parse_status, last_seen_at
+                FROM biz.doc_asset
+                WHERE asset_id = %s
+                ORDER BY
+                    CASE doc_type
+                        WHEN 'whitepaper' THEN 1
+                        WHEN 'tokenomics' THEN 2
+                        WHEN 'audit' THEN 3
+                        WHEN 'docs' THEN 4
+                        ELSE 5
+                    END, doc_id
+                """,
+                (asset_id,),
+            )
+            result["doc_assets"] = [
+                {
+                    "doc_id": r[0],
+                    "doc_type": r[1],
+                    "source_url": r[2],
+                    "resolved_url": r[3],
+                    "file_name": r[4],
+                    "mime_type": r[5],
+                    "file_size_bytes": r[6],
+                    "storage_path": r[7],
+                    "parse_status": r[8],
+                    "last_seen_at": str(r[9]) if r[9] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 投研链接精选
+            cur.execute(
+                """
+                SELECT url_id, url, category, doc_type, file_name, mime_type,
+                       health_status, relevance_score, ai_reason, is_selected
+                FROM biz.research_url
+                WHERE asset_id = %s
+                ORDER BY is_selected DESC, relevance_score DESC NULLS LAST, url_id
+                """,
+                (asset_id,),
+            )
+            result["research_urls"] = [
+                {
+                    "url_id": r[0],
+                    "url": r[1],
+                    "category": r[2],
+                    "doc_type": r[3],
+                    "file_name": r[4],
+                    "mime_type": r[5],
+                    "health_status": r[6],
+                    "relevance_score": float(r[7]) if r[7] is not None else None,
+                    "ai_reason": r[8],
+                    "is_selected": r[9],
+                }
+                for r in cur.fetchall()
+            ]
+
+            # GitHub 开发活跃度
+            cur.execute(
+                """
+                SELECT owner_login, repo_name, stars_count, forks_count,
+                       open_issues_count, language, topics, license_name,
+                       archived, total_commits_52w, contributor_count_52w,
+                       pushed_at, fetched_at
+                FROM biz.github_repo_activity
+                WHERE owner_login || '/' || repo_name IN (
+                    SELECT DISTINCT
+                        SUBSTRING(entry_url FROM 'github\\.com/([^/]+/[^/\\s#?]+)')
+                    FROM biz.doc_source_entry
+                    WHERE asset_id = %s
+                      AND entry_type = 'github'
+                      AND entry_url LIKE '%%github.com%%'
+                )
+                ORDER BY stars_count DESC NULLS LAST
+                """,
+                (asset_id,),
+            )
+            result["github_activity"] = [
+                {
+                    "owner": r[0],
+                    "repo": r[1],
+                    "stars": r[2],
+                    "forks": r[3],
+                    "open_issues": r[4],
+                    "language": r[5],
+                    "topics": r[6],
+                    "license": r[7],
+                    "archived": r[8],
+                    "commits_52w": r[9],
+                    "contributors_52w": r[10],
+                    "pushed_at": str(r[11]) if r[11] else None,
+                    "fetched_at": str(r[12]) if r[12] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 统计汇总
+            result["stats"] = {
+                "total_entries": len(result["doc_source_entries"]),
+                "total_docs": len(result["doc_assets"]),
+                "total_research_urls": len(result["research_urls"]),
+                "total_github": len(result["github_activity"]),
+                "by_entry_type": {},
+                "by_doc_type": {},
+            }
+            for e in result["doc_source_entries"]:
+                t = e["entry_type"]
+                result["stats"]["by_entry_type"][t] = result["stats"]["by_entry_type"].get(t, 0) + 1
+            for d in result["doc_assets"]:
+                t = d["doc_type"] or "other"
+                result["stats"]["by_doc_type"][t] = result["stats"]["by_doc_type"].get(t, 0) + 1
+
+    return result

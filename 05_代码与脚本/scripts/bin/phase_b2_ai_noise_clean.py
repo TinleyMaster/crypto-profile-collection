@@ -101,15 +101,15 @@ def get_suspicious_entries(conn, source_filter: str, limit: int) -> list[dict]:
         for ext in GITHUB_CODE_EXT_PATTERNS:
             ext_clauses.append("entry_url LIKE %s")
             params.append(ext)
-        clauses.append(f"(entry_url LIKE '%github.com%/blob/%' AND ({' OR '.join(ext_clauses)}))")
+        clauses.append(f"(entry_url LIKE '%%github.com%%/blob/%%' AND ({' OR '.join(ext_clauses)}))")
 
         where = " OR ".join(clauses)
     elif source_filter in ("github-blob",):
         ext_clauses = " OR ".join(["entry_url LIKE %s"] * len(GITHUB_CODE_EXT_PATTERNS))
-        where = f"entry_url LIKE '%github.com%/blob/%' AND ({ext_clauses})"
+        where = f"entry_url LIKE '%%github.com%%/blob/%%' AND ({ext_clauses})"
         params = list(GITHUB_CODE_EXT_PATTERNS)
     elif source_filter == "github-tree":
-        where = "entry_url LIKE '%github.com%/tree/%'"
+        where = "entry_url LIKE '%%github.com%%/tree/%%'"
         params = []
     else:
         pattern = SUSPICIOUS_SOURCES[source_filter]

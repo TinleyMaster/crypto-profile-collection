@@ -48,7 +48,7 @@ TASK_DEFS = {
         "name": "B2 深度文档发现",
         "description": "从 doc_source_entry 深度爬取 HTML，发现嵌入的文档链接",
         "script": "phase_b2_deep_doc_discovery.py",
-        "default_args": ["--limit", "500", "--workers", "15", "--timeout", "8"],
+        "default_args": ["--limit", "1000", "--workers", "15", "--timeout", "8"],
         "category": "文档采集",
     },
     "b2_auto_loop": {
@@ -113,6 +113,13 @@ TASK_DEFS = {
         "script": "collect_github_activity.py",
         "default_args": ["--limit", "50"],
         "category": "数据源采集",
+    },
+    "b2_ai_noise_clean": {
+        "name": "B2 AI 噪声清理",
+        "description": "用 AI 判断深度爬取链接的投研相关性，删除无关噪声",
+        "script": "phase_b2_ai_noise_clean.py",
+        "default_args": ["--limit", "200", "--batch-size", "40", "--source", "all"],
+        "category": "AI 筛选",
     },
 }
 

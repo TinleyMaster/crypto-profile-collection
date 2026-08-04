@@ -14,6 +14,14 @@ class Settings:
     coingecko_api_key: str | None = None
     defillama_base_url: str = "https://api.llama.fi"
     github_token: str | None = None
+    # LLM (OpenAI 兼容)
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    llm_model: str | None = None
+    # 豆包 / 火山方舟 (OpenAI 兼容)
+    ark_api_key: str | None = None
+    ark_base_url: str | None = None
+    ark_model: str | None = None
     request_timeout_seconds: int = 30
 
 
@@ -47,4 +55,10 @@ def get_settings(require_database: bool = True) -> Settings:
         database_url=database_url or None,
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
+        openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
+        openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
+        llm_model=os.getenv("LLM_MODEL", "").strip() or None,
+        ark_api_key=os.getenv("ARK_API_KEY", "").strip() or None,
+        ark_base_url=os.getenv("ARK_BASE_URL", "").strip() or None,
+        ark_model=os.getenv("ARK_MODEL", "").strip() or None,
     )

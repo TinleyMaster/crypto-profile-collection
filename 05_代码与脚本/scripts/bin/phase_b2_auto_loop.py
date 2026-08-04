@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-BATCH_LIMIT = 500
+BATCH_LIMIT = 1000
 MAX_ROUNDS = 200  # 安全上限
 THRESHOLD = 500  # docs 类型低于此数时停止
 

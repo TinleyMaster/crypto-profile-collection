@@ -13,6 +13,7 @@ class Settings:
     coingecko_base_url: str = "https://pro-api.coingecko.com/api/v3"
     coingecko_api_key: str | None = None
     defillama_base_url: str = "https://api.llama.fi"
+    github_token: str | None = None
     request_timeout_seconds: int = 30
 
 
@@ -45,4 +46,5 @@ def get_settings(require_database: bool = True) -> Settings:
         cmc_api_key=cmc_api_key,
         database_url=database_url or None,
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip() or None,
+        github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
     )

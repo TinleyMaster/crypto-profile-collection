@@ -22,7 +22,8 @@ PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-# ── 常量（与旧版一致） ──
+# ── 常量 ──
+# 注意：不使用裸 "paper" 关键词，因为会大规模匹配 paperdigest.org、neurips proceedings 等噪声
 DOC_URL_KEYWORDS = [
     "whitepaper",
     "litepaper",
@@ -31,17 +32,39 @@ DOC_URL_KEYWORDS = [
     "tokenomics",
     "audit",
     "deck",
-    "paper",
     ".pdf",
     "/docs/",
     "documentation",
-    "report",
     "technical-paper",
     "white-paper",
     "lite-paper",
 ]
 ENTRY_TYPES_TO_CRAWL = {"docs", "official_website"}
+
+# ── URL 排除模式（按域名 / 路径匹配）──
+EXCLUDE_DOMAINS = {
+    # ── 非文档站点 ──
+    "docs.github.com",
+    "support.scribd.com",
+    "twitter.com",
+    "x.com",
+    # ── 通用学术聚合站（非加密货币专项）──
+    "neurips.cc",
+    "proceedings.neurips.cc",
+    "openreview.net",
+    "arxiv.org",
+    "aclanthology.org",
+    "researchgate.net",
+    "semanticscholar.org",
+    # ── 通用市场调研站 ──
+    "marketsandmarkets.com",
+    "grandviewresearch.com",
+    "marketresearch.com",
+    # 注意：PaperDigest（区块链学术论文）和 ReportLinker（RWA/支付市场报告）
+    # 属于投研有效来源，故意不在此排除
+}
 EXCLUDE_PATH_PATTERNS = [
+    # ── Wiki / CMS 管理页面 ──
     "Special:",
     "UserLogin",
     "User:",
@@ -53,14 +76,13 @@ EXCLUDE_PATH_PATTERNS = [
     "/index.php?title=Special:",
     "action=edit",
     "action=history",
+    # ── 登录/注册 ──
     "/login",
     "/signup",
     "/signin",
     "/register",
     "cdn-cgi/l/email-protection",
-    "/_history",
-    "privacy-policy",
-    "/services",
+    # ── GitHub 非文档页面（保留 blob/tree/raw → 它们指向实际的审计报告/白皮书）──
     "/issues",
     "/pulls",
     "/actions",
@@ -78,10 +100,78 @@ EXCLUDE_PATH_PATTERNS = [
     "/releases/tag",
     "template=bug_report",
     "template=feature_request",
+    "/discussions",
+    # ── GitHub 提交页面（差异对比/提交历史，非文档）──
+    "/commit/",
+    "/commits/",
+    # ── 虚拟环境 / 依赖目录（无论域名都排除）──
+    ".venv/",
+    "node_modules/",
+    "__pycache__/",
+    "/venv/",
+    "/env/",
+    # ── 通用学术会议（非加密货币专项）──
+    "/proceedings/",
+    "/paper_files/",
+    "neurips",
+    "iclr-",
+    "icml-",
+    "emnlp-",
+    "aclanthology",
+    "/acl-",
+    # ── 其他非投研路径 ──
+    "/_history",
+    "privacy-policy",
+    "/services",
+    "openreview.net",
+    "arxiv.org",
+    "/abs/",
+    "researchgate.net",
+    "semanticscholar.org",
+    "kubernetes.io",
+    # 注意：paperdigest 和 reportlinker 路径故意不排除，
+    # PaperDigest 用于 ZK/MEV/共识机制学术论文检索，
+    # ReportLinker 用于 RWA/支付/区块链产业市场规模报告
 ]
-EXCLUDE_DOMAINS = {"docs.github.com", "support.scribd.com", "twitter.com", "x.com"}
 EXCLUDE_PATH_EXACT = {"/resources/whitepapers"}
 NOISY_DOC_DOMAINS = {"whitepaper.io", "docs.eth"}
+
+# ── GitHub blob 链接的文件扩展名过滤 ──
+# GitHub /blob/ 路径同时包含文档（.pdf/.md）和源码（.py/.sol），
+# 只保留投研相关文档类文件，排除纯代码文件。
+GITHUB_BLOB_DOC_EXTENSIONS = {
+    ".pdf", ".md", ".txt", ".rst", ".adoc", ".asciidoc",
+    ".html", ".htm",
+}
+GITHUB_BLOB_EXCLUDE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".sol", ".rs", ".go",
+    ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php",
+    ".swift", ".kt", ".scala", ".lua", ".r", ".m", ".mm",
+    ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg",
+    ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp",
+    ".lock", ".css", ".scss", ".less", ".sass",
+    ".wasm", ".bin", ".so", ".dll", ".dylib", ".exe",
+    ".ipynb", ".csv", ".tsv",
+}
+
+# ── 噪声来源模式：discovered_from 匹配这些的条目不进 B2 重新爬取 ──
+# 仅排除非投研来源，防止递归爬取放大。
+# PaperDigest 和 ReportLinker 数据保留在库中但也不重爬（单页再爬不会产生新投研文档）
+NOISE_DISCOVERED_FROM_PATTERNS = [
+    "paper-trail-gem",           # Ruby gem，非加密货币
+    "paperdigest.org",
+    "neurips.cc",
+    "openreview.net",
+    "arxiv.org",
+    "aclanthology.org",
+    "researchgate.net",
+    "semanticscholar.org",
+    "marketsandmarkets.com",
+    "grandviewresearch.com",
+    "reportlinker.com",
+    "kubernetes.io",
+]
 
 # ── Worker 共享的全局变量 ──
 _worker_settings: dict = {}  # database_url, upsert_sql
@@ -120,7 +210,7 @@ def infer_doc_entry_type(url: str) -> str:
             "yellowpaper",
             "white-paper",
             "lite-paper",
-            "paper",
+            "technical-paper",
         ]
     ):
         return "docs"
@@ -133,6 +223,30 @@ def infer_doc_entry_type(url: str) -> str:
     if "github.com" in lowered:
         return "github"
     return "docs"
+
+
+def _is_github_non_doc_blob(url: str) -> bool:
+    """GitHub /blob/ 链接如果指向非文档文件（.py/.sol/.json 等源码），返回 True"""
+    from urllib.parse import urlparse
+    import os.path
+
+    parsed = urlparse(url)
+    if "github.com" not in parsed.netloc.lower():
+        return False
+    path = parsed.path.lower()
+    if "/blob/" not in path:
+        return False
+    # 提取文件名扩展名
+    ext = os.path.splitext(parsed.path)[1].lower()
+    if not ext:
+        # 没有扩展名 → 可能是目录或特殊文件，保守起见不排除
+        return False
+    if ext in GITHUB_BLOB_DOC_EXTENSIONS:
+        return False  # 是文档类文件，保留
+    if ext in GITHUB_BLOB_EXCLUDE_EXTENSIONS:
+        return True   # 是源码/资源文件，排除
+    # 未知扩展名 → 保守起见不排除
+    return False
 
 
 def _is_excluded_url(url: str) -> bool:
@@ -150,6 +264,9 @@ def _is_excluded_url(url: str) -> bool:
     for pattern in EXCLUDE_PATH_PATTERNS:
         if pattern.lower() in full_path or pattern.lower() in path:
             return True
+    # GitHub blob 链接：排除非文档文件（.py/.sol 等源码）
+    if _is_github_non_doc_blob(url):
+        return True
     return False
 
 
@@ -352,20 +469,25 @@ def main() -> int:
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS deep_crawled_at TIMESTAMPTZ"
             )
 
-    # 查询待处理
+    # 查询待处理（排除从噪声源发现的条目，防止递归放大）
+    noise_clauses = " AND ".join(
+        [f"COALESCE(discovered_from, '') NOT LIKE %s"] * len(NOISE_DISCOVERED_FROM_PATTERNS)
+    )
+    noise_params: list = [f"%{p}%" for p in NOISE_DISCOVERED_FROM_PATTERNS]
+    sql = f"""
+        SELECT entry_id, entity_type, asset_id, protocol_id, source_code,
+               entry_type, entry_url
+        FROM biz.doc_source_entry
+        WHERE entry_type = ANY(%s)
+          AND deep_crawled_at IS NULL
+          AND ({noise_clauses})
+        ORDER BY CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END, entry_id
+        LIMIT %s
+    """
     with get_connection(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """
-                SELECT entry_id, entity_type, asset_id, protocol_id, source_code,
-                       entry_type, entry_url
-                FROM biz.doc_source_entry
-                WHERE entry_type = ANY(%s) AND deep_crawled_at IS NULL
-                ORDER BY CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END, entry_id
-                LIMIT %s
-                """,
-                (list(ENTRY_TYPES_TO_CRAWL), args.limit),
-            )
+            params = [list(ENTRY_TYPES_TO_CRAWL)] + noise_params + [args.limit]
+            cur.execute(sql, params)
             entries = [dict(row) for row in cur.fetchall()]
 
     if not entries:

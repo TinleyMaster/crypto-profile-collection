@@ -29,4 +29,5 @@ ENV PYTHONIOENCODING=utf-8
 EXPOSE 5000
 
 # 用 gunicorn 启动生产服务器
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120"]
+# 注意：TaskManager 是内存状态，只能单 worker，否则任务列表会时有时无
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "4", "--timeout", "300"]

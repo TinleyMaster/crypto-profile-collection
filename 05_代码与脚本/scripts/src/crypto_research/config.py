@@ -10,7 +10,7 @@ class Settings:
     cmc_api_key: str
     database_url: str | None = None
     cmc_base_url: str = "https://pro-api.coinmarketcap.com"
-    coingecko_base_url: str = "https://pro-api.coingecko.com/api/v3"
+    coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     coingecko_api_key: str | None = None
     defillama_base_url: str = "https://api.llama.fi"
     github_token: str | None = None

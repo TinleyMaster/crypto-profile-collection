@@ -22,7 +22,7 @@ class CoinGeckoClient:
             "User-Agent": "crypto-research-ingest/1.0",
         }
         if settings.coingecko_api_key:
-            headers["x-cg-pro-api-key"] = settings.coingecko_api_key
+            headers["x-cg-demo-api-key"] = settings.coingecko_api_key
         self.session.headers.update(headers)
 
         retry = Retry(

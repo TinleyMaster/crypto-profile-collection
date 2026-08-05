@@ -142,6 +142,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "诊断",
     },
+    "diag_pipeline": {
+        "name": "数据链路诊断",
+        "description": "全链路检查：数据源→doc_source_entry→deep_crawl→AI检查，各环节健康度",
+        "script": "diag_data_pipeline.py",
+        "default_args": [],
+        "category": "诊断",
+    },
 }
 
 

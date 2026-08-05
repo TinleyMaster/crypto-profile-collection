@@ -118,12 +118,28 @@ TASK_DEFS = {
         "script": "refresh_doc_source_entries_from_cg.py",
         "default_args": ["--limit", "200"],
         "category": "数据源采集",
+        "hidden": True,
+    },
+    "cg_refresh_docs_auto": {
+        "name": "CG 补充文档入口（自动循环）",
+        "description": "自动循环，每批200资产，直到全部处理完",
+        "script": "refresh_doc_source_entries_from_cg_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
     },
     "cmc_refresh_docs": {
         "name": "CMC 补充文档入口",
         "description": "从 cmc_asset_info 的 urls 中提取官网/文档/GitHub/Twitter/Telegram 等，写入 doc_source_entry",
         "script": "refresh_doc_source_entries_from_cmc.py",
         "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "cmc_refresh_docs_auto": {
+        "name": "CMC 补充文档入口（自动循环）",
+        "description": "自动循环，每批200资产，直到全部处理完",
+        "script": "refresh_doc_source_entries_from_cmc_auto.py",
+        "default_args": [],
         "category": "数据源采集",
     },
     "github_activity": {

@@ -240,6 +240,56 @@ def run():
     for sym, name, cnt in cur.fetchall():
         print(f"  {sym or '(无)' :>8}  {name[:30]:<30}  {cnt:>5} 条")
 
+    # ═══ 7.5. 高条目资产污染溯源 ═══
+    print("\n── 7.5. 高条目资产污染溯源（TOP 5）──")
+    cur.execute("""
+        WITH top_assets AS (
+            SELECT asset_id FROM biz.doc_source_entry
+            WHERE asset_id IS NOT NULL
+            GROUP BY asset_id ORDER BY COUNT(*) DESC LIMIT 5
+        )
+        SELECT a.canonical_symbol,
+               e.entry_url,
+               e.entry_type,
+               COUNT(d.entry_id) AS spawned
+        FROM biz.doc_source_entry e
+        JOIN core.asset a ON a.asset_id = e.asset_id
+        JOIN top_assets ta ON ta.asset_id = e.asset_id
+        LEFT JOIN biz.doc_source_entry d
+            ON d.discovered_from = 'deep_crawl:' || LEFT(e.entry_url, 50)
+        WHERE e.discovered_from NOT LIKE 'deep_crawl:%%'
+        GROUP BY a.canonical_symbol, e.entry_url, e.entry_type
+        ORDER BY spawned DESC
+        LIMIT 30
+    """)
+    print("  种子入口 → 产出的 deep_crawl 子链接数:")
+    for sym, url, etype, spawned in cur.fetchall():
+        bar = "⚠️" if (spawned or 0) > 500 else ""
+        print(f"  {sym:<8} [{etype:<16}] → {spawned:>7,} 条子链接 {bar}"
+              f"\n         {url[:90]}")
+
+    # 每个高条目资产的 deep_crawl 域名分布
+    print("\n  各资产 deep_crawl 条目域名 TOP 3:")
+    cur.execute("""
+        SELECT a.asset_id, a.canonical_symbol FROM core.asset a
+        WHERE a.asset_id IN (
+            SELECT asset_id FROM biz.doc_source_entry WHERE asset_id IS NOT NULL
+            GROUP BY asset_id ORDER BY COUNT(*) DESC LIMIT 5
+        )
+    """)
+    top_asset_ids = cur.fetchall()
+    for asset_id, sym in top_asset_ids:
+        cur.execute("""
+            SELECT LOWER(SPLIT_PART(SPLIT_PART(entry_url, '/', 3), '?', 1)) AS domain,
+                   COUNT(*) AS cnt
+            FROM biz.doc_source_entry
+            WHERE asset_id = %s AND discovered_from LIKE 'deep_crawl:%%'
+            GROUP BY domain ORDER BY cnt DESC LIMIT 3
+        """, (asset_id,))
+        domains = cur.fetchall()
+        domain_str = " | ".join(f"{d}({c:,})" for d, c in domains)
+        print(f"  {sym:<8} {domain_str}")
+
     # ═══ 8. 哪些资产有原始入口但没 deep_crawl 结果 ═══
     print("\n── 8. 有原始入口但 deep_crawl 产出为0的资产数 ──")
     cur.execute("""

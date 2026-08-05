@@ -41,8 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--calls-per-minute",
         type=int,
-        default=90,
-        help="Rate limit: API calls per minute. Default: 90 (Demo plan is 100)",
+        default=60,
+        help="Rate limit: API calls per minute. Default: 60",
     )
     parser.add_argument(
         "--dry-run",

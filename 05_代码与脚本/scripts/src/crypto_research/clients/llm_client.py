@@ -248,16 +248,28 @@ class LLMClient:
 
         # 解析 JSON
         try:
-            data = json.loads(raw)
+            # 去除 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                # 去掉开头的 ```json 或 ```
+                first_line_end = cleaned.find("\n")
+                if first_line_end > 0:
+                    cleaned = cleaned[first_line_end + 1:]
+                # 去掉结尾的 ```
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3].strip()
+
+            data = json.loads(cleaned)
             results = data.get("results", [])
             if not isinstance(results, list):
-                raise ValueError("results 不是列表")
+                raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
             result_map = {}
             for r in results:
                 rid = r.get("id")
-                if rid:
-                    result_map[rid] = {
-                        "id": rid,
+                if rid is not None:
+                    # 统一转成字符串，避免 int/str 类型不匹配
+                    result_map[str(rid)] = {
+                        "id": str(rid),
                         "relevant": bool(r.get("relevant", False)),
                         "score": float(r.get("score", 0.0)),
                         "reason": str(r.get("reason", ""))[:200],
@@ -269,18 +281,21 @@ class LLMClient:
                         "id": str(item["id"]),
                         "relevant": True,
                         "score": 0.5,
-                        "reason": "AI 解析失败，默认保留",
+                        "reason": "未匹配到AI结果，默认保留",
                     },
                 )
                 for item in items
             ]
         except (json.JSONDecodeError, ValueError) as e:
+            # 记录解析失败的原始文本前 200 字符
+            self._last_diag["parse_error"] = str(e)
+            self._last_diag["parse_raw_prefix"] = raw[:200]
             return [
                 {
                     "id": str(item["id"]),
                     "relevant": True,
                     "score": 0.5,
-                    "reason": f"AI 响应解析失败: {str(e)[:100]}",
+                    "reason": f"AI响应解析失败: {str(e)[:100]}",
                 }
                 for item in items
             ]

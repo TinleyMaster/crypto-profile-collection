@@ -87,6 +87,65 @@ def run():
     cur.execute("SELECT COUNT(DISTINCT asset_id) FROM biz.doc_source_entry WHERE discovered_from LIKE 'deep_crawl:%%' AND asset_id IS NOT NULL")
     print(f"    覆盖资产: {cur.fetchone()[0]:>8,}")
 
+    # ═══ 2.5. 无入口资产分析 ═══
+    cur.execute("SELECT COUNT(*) FROM core.asset")
+    total_assets = cur.fetchone()[0]
+    no_entry = total_assets - unique_assets
+    print(f"\n── 2.5. 无任何文档入口的资产 ──")
+    print(f"  资产总数: {total_assets:>8,}")
+    print(f"  有 doc_source_entry: {unique_assets:>8,} ({unique_assets/total_assets*100:.1f}%)")
+    print(f"  无 doc_source_entry: {no_entry:>8,} ({no_entry/total_assets*100:.1f}%)")
+    print(f"  原因: 资产的 links 里没有官网/文档/GitHub 等 URL")
+
+    # 各 source 的资产覆盖率
+    print(f"\n  各数据源资产覆盖率:")
+    for sc, schema, table in [
+        ("cmc", "src_cmc", "cmc_asset_map"),
+        ("cg", "src_cg", "coin_list"),
+        ("dl", "src_dl", "protocol_list"),
+    ]:
+        cur.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
+        src_total = cur.fetchone()[0]
+        cur.execute(
+            f"SELECT COUNT(DISTINCT asm.asset_id) "
+            f"FROM core.asset_source_map asm "
+            f"JOIN biz.doc_source_entry e ON e.asset_id = asm.asset_id AND e.source_code = %s "
+            f"WHERE asm.source_code = %s",
+            (sc, sc),
+        )
+        with_entry = cur.fetchone()[0]
+        pct = with_entry / src_total * 100 if src_total else 0
+        print(f"    {sc}: {with_entry:>5,} / {src_total:>5,} ({pct:.1f}%)")
+
+    # 搜索常见代币（RWA 等）看是否有入口
+    sample_symbols = ["RWA", "BTC", "ETH", "SOL", "DOGE", "PEPE"]
+    print(f"\n  样本代币入口数:")
+    for sym in sample_symbols:
+        cur.execute("SELECT asset_id, canonical_symbol, canonical_name FROM core.asset WHERE canonical_symbol ILIKE %s LIMIT 1", (sym,))
+        row = cur.fetchone()
+        if not row:
+            print(f"    {sym:<8}  (资产库中不存在)")
+            continue
+        aid, s, n = row
+        cur.execute("SELECT COUNT(*) FROM biz.doc_source_entry WHERE asset_id = %s AND entity_type = 'asset'", (aid,))
+        cnt = cur.fetchone()[0]
+        if cnt == 0:
+            cur.execute(
+                "SELECT COUNT(*) FROM core.asset_source_map WHERE asset_id = %s", (aid,)
+            )
+            scnt = cur.fetchone()[0]
+            print(f"    {s:<8}  {n[:24]:<24}  入口: 0 条 (在 {scnt} 个数据源里)")
+        else:
+            cur.execute(
+                "SELECT entry_type, COUNT(*) FROM biz.doc_source_entry "
+                "WHERE asset_id = %s AND entity_type = 'asset' "
+                "GROUP BY entry_type ORDER BY COUNT(*) DESC",
+                (aid,),
+            )
+            types = cur.fetchall()
+            type_str = ", ".join(f"{t}:{c}" for t, c in types[:4])
+            print(f"    {s:<8}  {n[:24]:<24}  入口: {cnt:>4} 条 ({type_str})")
+
     # ═══ 3. 每条链路的"投入产出" ═══
     print("\n── 3. 每条链路的投入产出比 ──")
     # 原始入口中，有多少已经被 deep crawl 过

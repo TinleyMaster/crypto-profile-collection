@@ -165,13 +165,28 @@ def run():
 
     # 按 entry_type 的待爬取情况
     print("\n  原始入口 按 entry_type (待爬取):")
-    for et in ["docs", "official_website", "github", "medium", "other"]:
+    all_types = [
+        "docs",
+        "official_website",
+        "docs_portal",
+        "medium",
+        "announcement",
+        "github",
+        "other",
+        "twitter",
+        "telegram",
+        "reddit",
+        "facebook",
+    ]
+    uncrawled_by_type = {}
+    for et in all_types:
         cur.execute(
             "SELECT COUNT(*) FROM biz.doc_source_entry "
             "WHERE discovered_from NOT LIKE 'deep_crawl:%%' "
             "AND entry_type = %s AND deep_crawled_at IS NULL", (et,)
         )
         cnt = cur.fetchone()[0]
+        uncrawled_by_type[et] = cnt
         print(f"    {et}: {cnt:>8,}")
 
     # ═══ 4. AI 噪声清理进度 ═══
@@ -370,10 +385,32 @@ def run():
     print("\n" + "=" * 65)
     print("  诊断结论与建议")
     print("=" * 65)
-    if uncrawled > 0:
-        print(f"  🔴 还有 {uncrawled:,} 个原始入口未爬取 → 运行 B2 深度文档发现")
+
+    # 按类型分类待爬取原始入口
+    crawlable = 0  # 值得 B2 深度爬取的
+    skip_github = 0
+    skip_other = 0
+    skip_social = 0
+    for et in ["docs", "official_website", "docs_portal", "medium", "announcement"]:
+        cnt = uncrawled_by_type.get(et, 0)
+        crawlable += cnt
+    skip_github = uncrawled_by_type.get("github", 0)
+    skip_other = uncrawled_by_type.get("other", 0)
+    for et in ["twitter", "telegram", "reddit", "facebook"]:
+        skip_social += uncrawled_by_type.get(et, 0)
+
+    if crawlable > 0:
+        print(f"  🔴 {crawlable:,} 个文档类入口待爬 (docs/official/docs_portal/medium/announcement) → 运行 B2")
     else:
-        print(f"  ✅ 原始入口已全部爬取")
+        print(f"  ✅ 文档类入口已全部爬取")
+
+    if skip_github > 0:
+        print(f"  ℹ️ {skip_github:,} 个 github 入口 → 不爬（代码仓库，污染风险高）")
+    if skip_other > 0:
+        print(f"  ℹ️ {skip_other:,} 个 other 入口 → 不爬（论坛/浏览器等，污染风险高）")
+    if skip_social > 0:
+        print(f"  ℹ️ {skip_social:,} 个社交入口 (twitter/telegram/reddit/facebook) → 不爬（非文档源）")
+
     if ai_unchecked > 0:
         print(f"  🟡 还有 {ai_unchecked:,} 条 deep_crawl 链接未做 AI 噪声检查")
     else:

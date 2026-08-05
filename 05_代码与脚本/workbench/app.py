@@ -119,6 +119,13 @@ TASK_DEFS = {
         "default_args": ["--limit", "200"],
         "category": "数据源采集",
     },
+    "cmc_refresh_docs": {
+        "name": "CMC 补充文档入口",
+        "description": "从 cmc_asset_info 的 urls 中提取官网/文档/GitHub/Twitter/Telegram 等，写入 doc_source_entry",
+        "script": "refresh_doc_source_entries_from_cmc.py",
+        "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+    },
     "github_activity": {
         "name": "GitHub 开发活跃度采集",
         "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",

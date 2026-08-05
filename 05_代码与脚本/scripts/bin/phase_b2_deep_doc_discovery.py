@@ -539,7 +539,10 @@ def main() -> int:
         WHERE entry_type = ANY(%s)
           AND deep_crawled_at IS NULL
           AND ({noise_clauses})
-        ORDER BY CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END, entry_id
+        ORDER BY
+            CASE WHEN source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
+            CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
+            entry_id
         LIMIT %s
     """
     with get_connection(settings.database_url) as conn:

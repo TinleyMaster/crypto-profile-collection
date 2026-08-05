@@ -20,7 +20,7 @@ import io
 import time
 from pathlib import Path
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"

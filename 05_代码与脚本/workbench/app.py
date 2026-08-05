@@ -189,7 +189,7 @@ def api_start_task():
 
     tdef = TASK_DEFS[task_key]
     args = custom_args if custom_args else tdef["default_args"]
-    cmd = [sys.executable, str(SCRIPTS_BIN / tdef["script"])] + args
+    cmd = [sys.executable, "-u", str(SCRIPTS_BIN / tdef["script"])] + args
 
     task_id = task_mgr.submit_task(tdef["name"], cmd)
     return jsonify({"ok": True, "task_id": task_id})

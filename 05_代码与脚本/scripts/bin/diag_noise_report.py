@@ -7,13 +7,13 @@ import os
 import sys
 import time
 from datetime import date
+from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent  # bin/
 SRC_DIR = SCRIPT_DIR.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from pathlib import Path
 import psycopg
 from crypto_research.config import get_settings
 

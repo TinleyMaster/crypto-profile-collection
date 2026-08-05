@@ -1,6 +1,7 @@
 """
 B2 噪声 AI 清理：用 AI 批量判断深度爬取发现的链接是否与加密货币投研相关，
-无关的直接从 biz.doc_source_entry 删除。
+无关的直接从 biz.doc_source_entry 删除，相关的标记 ai_noise_checked_at
+避免下次重复判断。
 
 只针对"可疑"的链接（paperdigest、学术站、GitHub blob 源码等），
 不处理明确的原始入口（官网、CMC 原始链接等）。
@@ -121,8 +122,8 @@ def get_suspicious_entries(conn, source_filter: str, limit: int) -> list[dict]:
         where = "entry_url LIKE %s"
         params = [pattern]
 
-    # 只处理 deep_crawl 来源的（原始入口不动）
-    where = f"({where}) AND discovered_from LIKE 'deep_crawl:%%'"
+    # 只处理 deep_crawl 来源的（原始入口不动），跳过已标记的
+    where = f"({where}) AND discovered_from LIKE 'deep_crawl:%%' AND ai_noise_checked_at IS NULL"
 
     sql = f"""
         SELECT entry_id, asset_id, entry_url, entry_type, discovered_from
@@ -187,6 +188,14 @@ def main() -> int:
     print()
 
     with get_connection(settings.database_url) as conn:
+        # ── 自动迁移：确保 ai_noise_checked_at 列存在 ──
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE biz.doc_source_entry "
+                "ADD COLUMN IF NOT EXISTS ai_noise_checked_at TIMESTAMPTZ DEFAULT NULL"
+            )
+        conn.commit()
+
         # ── Step 1: 规则直删（纯噪声域名，不需要 AI） ──
         rule_deleted = 0
         if not args.skip_rule_delete:
@@ -234,6 +243,7 @@ def main() -> int:
         keep_count = 0
         error_count = 0
         deleted_count = 0
+        marked_count = 0
         batch_size = args.batch_size
 
         start_time = time.time()
@@ -277,6 +287,7 @@ def main() -> int:
             batch_keep = 0
             batch_parse_fail = 0
             noise_ids: list[int] = []
+            keep_ids: list[int] = []
 
             for entry, result in zip(batch, results):
                 entry_id = entry["entry_id"]
@@ -293,6 +304,7 @@ def main() -> int:
                     noise_ids.append(entry_id)
                 else:
                     batch_keep += 1
+                    keep_ids.append(entry_id)
 
             noise_count += batch_noise
             keep_count += batch_keep
@@ -308,6 +320,17 @@ def main() -> int:
                     )
                 conn.commit()
                 deleted_count += len(noise_ids)
+
+            # 标记已检查的"投研相关"条目，下次跳过
+            if args.execute and keep_ids:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE biz.doc_source_entry SET ai_noise_checked_at = NOW() "
+                        "WHERE entry_id = ANY(%s)",
+                        (keep_ids,),
+                    )
+                conn.commit()
+                marked_count += len(keep_ids)
 
             # 进度
             elapsed = time.time() - start_time
@@ -347,6 +370,8 @@ def main() -> int:
     print(f"  调用失败:    {error_count:>8,}")
     if args.execute:
         print(f"  已删除:      {deleted_count:>8,}")
+        if marked_count > 0:
+            print(f"  已标记:      {marked_count:>8,} (下次跳过)")
     else:
         print(f"  (DRY RUN) 使用 --execute 执行删除")
     print(f"  耗时:        {int(time.time()-start_time)}s")

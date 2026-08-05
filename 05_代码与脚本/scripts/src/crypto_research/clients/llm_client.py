@@ -144,15 +144,47 @@ class LLMClient:
         data = resp.json()
         self._last_full_response = data  # 保存完整响应用于调试
 
-        # 从 output 中提取 assistant 的文本内容
-        for item in data.get("output", []):
+        # 多种格式兼容提取
+        # 格式1: output[].content[].text (type=output_text 或 type=text)
+        output = data.get("output", [])
+        for item in output:
             if item.get("type") == "message" and item.get("role") == "assistant":
                 content = item.get("content", [])
-                parts = [c.get("text", "") for c in content if c.get("type") == "output_text"]
-                return "".join(parts)
+                # content 可能是字符串
+                if isinstance(content, str):
+                    return content
+                # content 可能是列表，尝试多种 type
+                if isinstance(content, list):
+                    parts = []
+                    for c in content:
+                        if isinstance(c, dict) and "text" in c:
+                            parts.append(c["text"])
+                    if parts:
+                        return "".join(parts)
 
-        # 兜底：尝试找 text 字段
-        return str(data.get("output_text", ""))
+        # 格式2: 顶层 output_text
+        if data.get("output_text"):
+            return str(data["output_text"])
+
+        # 格式3: choices (OpenAI 兼容格式)
+        choices = data.get("choices", [])
+        if choices:
+            msg = choices[0].get("message", {})
+            if msg.get("content"):
+                return str(msg["content"])
+
+        # 格式4: output 里直接是文本
+        if isinstance(output, str) and output:
+            return output
+
+        # 兜底：返回空字符串（上层会当失败处理）
+        self._last_diag = {
+            "keys": list(data.keys()),
+            "output_type": type(output).__name__,
+            "output_len": len(output) if isinstance(output, list) else None,
+            "first_item_keys": list(output[0].keys()) if isinstance(output, list) and output else None,
+        }
+        return ""
 
     def batch_check_crypto_relevance(
         self,

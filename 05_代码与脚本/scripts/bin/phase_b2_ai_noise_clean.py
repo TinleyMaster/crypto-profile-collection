@@ -221,13 +221,15 @@ def main() -> int:
 
             # 第一批打印原始响应样例，方便排查问题
             if batch_num == 1:
+                import json as _json
                 if hasattr(llm, '_last_full_response') and llm._last_full_response:
-                    import json as _json
-                    full_sample = _json.dumps(llm._last_full_response, ensure_ascii=False)[:800]
-                    print(f"  [DEBUG] API完整响应样例: {full_sample}")
+                    full_sample = _json.dumps(llm._last_full_response, ensure_ascii=False)[:1500]
+                    print(f"  [DEBUG] API完整响应: {full_sample}")
+                if hasattr(llm, '_last_diag') and llm._last_diag:
+                    print(f"  [DEBUG] 诊断信息: {_json.dumps(llm._last_diag, ensure_ascii=False)}")
                 if hasattr(llm, '_last_raw_response'):
                     raw_sample = (llm._last_raw_response or "")[:300]
-                    print(f"  [DEBUG] AI提取文本样例: '{raw_sample}'")
+                    print(f"  [DEBUG] 提取文本: '{raw_sample}'")
 
             # 统计本批结果
             batch_noise = 0

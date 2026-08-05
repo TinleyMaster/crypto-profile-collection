@@ -64,6 +64,7 @@ TASK_DEFS = {
         "script": "phase_b3_doc_download.py",
         "default_args": ["--limit", "200"],
         "category": "文档采集",
+        "hidden": True,
     },
     "b5_health_ai": {
         "name": "B5 链接健康检查 + AI 筛选",
@@ -71,6 +72,7 @@ TASK_DEFS = {
         "script": "phase_b5_link_health_ai_filter.py",
         "default_args": ["--limit", "200", "--skip-ai"],
         "category": "投研筛选",
+        "hidden": True,
     },
     "b6_generate": {
         "name": "B6 生成投研资料文件",
@@ -78,6 +80,7 @@ TASK_DEFS = {
         "script": "phase_b6_generate_research_files.py",
         "default_args": ["--limit", "100"],
         "category": "投研筛选",
+        "hidden": True,
     },
     "b7_fallback": {
         "name": "B7 防屏蔽链接下载",
@@ -85,6 +88,7 @@ TASK_DEFS = {
         "script": "phase_b7_fallback_download.py",
         "default_args": ["--limit", "100"],
         "category": "文档采集",
+        "hidden": True,
     },
     "cg_coin_info": {
         "name": "CG 拉取币种详情",
@@ -92,6 +96,7 @@ TASK_DEFS = {
         "script": "ingest_cg_coin_info.py",
         "default_args": ["--from-list-missing", "--limit", "200", "--max-calls", "5000", "--calls-per-minute", "90"],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cg_coin_info_auto": {
         "name": "CG 拉取币种详情（自动循环）",
@@ -120,6 +125,7 @@ TASK_DEFS = {
         "script": "collect_github_activity.py",
         "default_args": ["--limit", "50"],
         "category": "数据源采集",
+        "hidden": True,
     },
     "b2_ai_noise_clean": {
         "name": "B2 AI 噪声清理",
@@ -155,6 +161,7 @@ TASK_DEFS = {
         "script": "diag_cleanup_pollution.py",
         "default_args": [],
         "category": "维护",
+        "hidden": True,
     },
 }
 
@@ -209,6 +216,8 @@ def api_start_task():
         return jsonify({"ok": False, "error": f"未知任务: {task_key}"}), 400
 
     tdef = TASK_DEFS[task_key]
+    if tdef.get("hidden"):
+        return jsonify({"ok": False, "error": "该任务已隐藏"}), 400
     args = custom_args if custom_args else tdef["default_args"]
     cmd = [sys.executable, "-u", str(SCRIPTS_BIN / tdef["script"])] + args
 
@@ -269,6 +278,8 @@ def api_asset_materials(asset_id: int):
 def api_task_defs():
     defs = {}
     for k, v in TASK_DEFS.items():
+        if v.get("hidden"):
+            continue
         defs[k] = {
             "name": v["name"],
             "description": v["description"],

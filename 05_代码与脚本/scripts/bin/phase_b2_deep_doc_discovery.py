@@ -41,6 +41,32 @@ DOC_URL_KEYWORDS = [
 ]
 ENTRY_TYPES_TO_CRAWL = {"docs", "official_website"}
 
+# ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──
+# 爬取此类页面时只保留跨域链接，内链不继承 asset_id
+AGGREGATION_DOMAINS = {
+    "code4rena.com",
+    "www.cyberscope.io",
+    "reports.immunefi.com",
+    "immunefi.com",
+    "hashex.org",
+    "www.allcryptowhitepapers.com",
+    "thatwhitepaperguy.com",
+    "www.quillaudits.com",
+    "quillaudits.com",
+    "blockchainreporter.net",
+    "diligence.security",
+    "www.reportlinker.com",
+    "reportlinker.com",
+    "ai.reportlinker.com",
+    "conferences.miccai.org",
+    "hacken.io",
+    "assets.hacken.io",
+    "hacken.ghost.io",
+    "blog.openzeppelin.com",
+    "www.certora.com",
+    "certora.cdn.prismic.io",
+}
+
 # ── URL 排除模式（按域名 / 路径匹配）──
 EXCLUDE_DOMAINS = {
     # ── 非文档站点 ──
@@ -341,6 +367,9 @@ def extract_doc_links(
                 should_record = True
 
         if not should_record:
+            continue
+        # 聚合域名过滤：内链不继承 asset_id（如 code4rena 的 4,734 条其他比赛链接）
+        if base_domain in AGGREGATION_DOMAINS and link_domain == base_domain:
             continue
         # GitHub 同仓库过滤：跨仓库链接不继承 asset_id，阻止污染扩散
         if not _is_same_github_repo(base_url, absolute_url):

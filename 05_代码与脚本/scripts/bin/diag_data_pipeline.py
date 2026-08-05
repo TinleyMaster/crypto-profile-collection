@@ -126,6 +126,56 @@ def run():
     if deep_cnt > 0:
         print(f"  deep_crawl 已处理率: {ai_checked/deep_cnt*100:.1f}%")
 
+    # ═══ 4.5. deep_crawl 条目资产关联情况 ═══
+    print("\n── 4.5. deep_crawl 条目资产关联 ──")
+    cur.execute("SELECT COUNT(*) FROM biz.doc_source_entry WHERE discovered_from LIKE 'deep_crawl:%%' AND asset_id IS NULL")
+    deep_null_asset = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM biz.doc_source_entry WHERE discovered_from LIKE 'deep_crawl:%%' AND asset_id IS NOT NULL")
+    deep_has_asset = cur.fetchone()[0]
+    deep_total = deep_null_asset + deep_has_asset
+    if deep_total > 0:
+        print(f"  有 asset_id: {deep_has_asset:>8,} ({deep_has_asset/deep_total*100:.1f}%)")
+        print(f"  无 asset_id: {deep_null_asset:>8,} ({deep_null_asset/deep_total*100:.1f}%)")
+        if deep_null_asset > 0:
+            print(f"  ⚠️ {deep_null_asset:,} 条 deep_crawl 链接无 asset_id，无法按代币查询！")
+        else:
+            print(f"  ✅ 全部 deep_crawl 链接已关联资产")
+    # 按域名看资产关联：审计类域名是否关联了多个不同资产（交叉污染风险）
+    print("\n  审计/第三方域名 → 关联资产数（交叉污染风险）:")
+    cur.execute("""
+        SELECT domain, asset_count,
+               CASE WHEN asset_count > 50 THEN '⚠️ 高风险(>50个资产)' ELSE '✅ 正常' END AS risk
+        FROM (
+            SELECT LOWER(SPLIT_PART(SPLIT_PART(entry_url, '/', 3), '?', 1)) AS domain,
+                   COUNT(DISTINCT asset_id) AS asset_count
+            FROM biz.doc_source_entry
+            WHERE discovered_from LIKE 'deep_crawl:%%'
+              AND asset_id IS NOT NULL
+            GROUP BY LOWER(SPLIT_PART(SPLIT_PART(entry_url, '/', 3), '?', 1))
+            ORDER BY asset_count DESC
+            LIMIT 15
+        ) sub
+    """)
+    for domain, ac, risk in cur.fetchall():
+        print(f"    {domain:<40} {ac:>5} 个资产  {risk}")
+
+    # deep_crawl 条目按域名 + 无资产的情况
+    print("\n  deep_crawl 条目 TOP 域名（含无 asset_id）:")
+    cur.execute("""
+        SELECT COALESCE(LOWER(SPLIT_PART(SPLIT_PART(entry_url, '/', 3), '?', 1)), '(空)') AS domain,
+               COUNT(*) AS total,
+               COUNT(asset_id) AS with_asset,
+               COUNT(*) - COUNT(asset_id) AS no_asset
+        FROM biz.doc_source_entry
+        WHERE discovered_from LIKE 'deep_crawl:%%'
+        GROUP BY domain
+        ORDER BY total DESC
+        LIMIT 15
+    """)
+    for domain, total, with_a, no_a in cur.fetchall():
+        flag = " ⚠️" if no_a > 0 else ""
+        print(f"    {domain:<40} {total:>6,} 条, 有资产:{with_a:>6,}, 无资产:{no_a:>5,}{flag}")
+
     # ═══ 5. 每资产条目分布 ═══
     print("\n── 5. 每资产文档链接数分布 ──")
     cur.execute("""
@@ -225,6 +275,10 @@ def run():
     if avg < 5:
         print(f"  ⚠️ 平均每资产仅 {avg} 条链接，数据量偏少")
         print(f"     → 建议检查 CMC/CG/DL 数据源是否有足够的 URL 输入")
+    if deep_null_asset > 0:
+        pct = deep_null_asset / deep_total * 100 if deep_total else 0
+        print(f"  🔴 {deep_null_asset:,} 条 deep_crawl 链接无 asset_id ({pct:.1f}%)")
+        print(f"     → 这些链接无法按代币查询，需排查 deep_crawl 的 asset_id 继承逻辑")
     print(f"\n  📊 整体评估: {total_entries:,} 条链接覆盖 {unique_assets:,} 个资产")
     print(f"     原始 {orig_cnt:,} + deep_crawl {deep_cnt:,}")
 

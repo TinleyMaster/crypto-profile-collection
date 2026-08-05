@@ -50,6 +50,8 @@ class LLMClient:
 
         self.session = requests.Session()
         self._last_raw_response: str = ""
+        self._last_full_response: Any = None
+        self._last_diag: dict = {}
         retry = Retry(
             total=3,
             backoff_factor=2,
@@ -72,11 +74,18 @@ class LLMClient:
     def chat(self, system_prompt: str, user_prompt: str,
              temperature: float = 0.1, max_tokens: int = 2048) -> str:
         """统一的聊天接口，自动选择底层 API 格式。"""
+        self._last_diag = {
+            "provider": self.provider,
+            "model": self.model,
+            "api_type": self.api_type,
+            "base_url": self.base_url,
+        }
         if self.api_type == "responses":
             result = self._call_responses(system_prompt, user_prompt, temperature, max_tokens)
         else:
             result = self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens)
         self._last_raw_response = result
+        self._last_diag["result_len"] = len(result)
         return result
 
     def _call_chat_completions(

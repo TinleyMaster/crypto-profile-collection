@@ -119,6 +119,7 @@ class TaskManager:
 
     def submit_task(self, name: str, cmd: list[str]) -> str:
         task_id = uuid.uuid4().hex[:12]
+        now = time.time()
         with _lock():
             state = _load_state()
             state["tasks"][task_id] = {
@@ -126,13 +127,16 @@ class TaskManager:
                 "name": name,
                 "status": "pending",
                 "cmd": cmd,
-                "started_at": None,
+                "started_at": now,  # pending 也有时间戳，用于排序
                 "ended_at": None,
                 "stats": {},
                 "error": None,
             }
             state["pending"].append(task_id)
             _save_state(state)
+        # 提交后立刻写一条启动日志，确认任务注册成功
+        _append_log(task_id, f"[TASK] 任务已提交: {name}")
+        _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
         return task_id
 
     def stop_task(self, task_id: str) -> bool:
@@ -163,7 +167,12 @@ class TaskManager:
         with _lock():
             state = _load_state()
         items = list(state["tasks"].values())
-        items.sort(key=lambda t: t.get("started_at") or 0, reverse=True)
+        # 排序：running > pending > done/failed/stopped，同状态按时间倒序
+        status_order = {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}
+        items.sort(key=lambda t: (
+            status_order.get(t.get("status"), 9),
+            -(t.get("started_at") or 0)
+        ))
         return [self._serialize(t) for t in items[:limit]]
 
     def get_task(self, task_id: str) -> Optional[dict]:
@@ -239,6 +248,7 @@ class TaskManager:
         }
 
         try:
+            _append_log(task_id, f"[TASK] 开始执行，cwd={WORKER_SCRIPTS_DIR.parent}")
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(WORKER_SCRIPTS_DIR.parent),

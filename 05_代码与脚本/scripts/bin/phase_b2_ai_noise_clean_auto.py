@@ -44,7 +44,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
             str(RPM),
             "--execute",
             "--source",
-            "all",
+            "remaining",
         ],
         cwd=str(SCRIPT_DIR),
         env=env,

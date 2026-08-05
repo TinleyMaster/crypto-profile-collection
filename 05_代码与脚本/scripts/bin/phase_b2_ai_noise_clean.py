@@ -69,8 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         type=str,
         default="all",
-        choices=list(SUSPICIOUS_SOURCES.keys()) + ["all"],
-        help="只处理某类可疑来源，默认 all",
+        choices=list(SUSPICIOUS_SOURCES.keys()) + ["all", "remaining"],
+        help="只处理某类可疑来源，默认 all。remaining=所有未检查的 deep_crawl 条目",
     )
     p.add_argument(
         "--execute",
@@ -90,7 +90,11 @@ def get_suspicious_entries(conn, source_filter: str, limit: int) -> list[dict]:
     """获取可疑的 doc_source_entry 条目。"""
     import psycopg
 
-    if source_filter == "all":
+    if source_filter == "remaining":
+        # 所有未检查的 deep_crawl 条目（不限域名）
+        where = "discovered_from LIKE 'deep_crawl:%%' AND ai_noise_checked_at IS NULL"
+        params: list = []
+    elif source_filter == "all":
         # 所有可疑来源取并集
         clauses = []
         params: list = []
@@ -206,6 +210,23 @@ def main() -> int:
                 "neurips": "%neurips.cc%",
                 "springer": "%link.springer.com%",
                 "researchgate": "%researchgate.net%",
+                # ── 2026-08 新增：关键词误匹配 + 非加密噪声域名 ──
+                "papermc": "%papermc.io%",
+                "paperspace": "%paperspace.com%",
+                "ijcai": "%ijcai.org%",
+                "digitalocean": "%digitalocean.com%",
+                "powershellgallery": "%powershellgallery.com%",
+                "rubydoc": "%rubydoc.info%",
+                "rubygems": "%rubygems.org%",
+                "openai": "%developers.openai.com%",
+                "linkedin": "%linkedin.com%",
+                "facebook": "%facebook.com%",
+                "t-me": "%t.me%",
+                "telegram-me": "%telegram.me%",
+                "web-archive": "%web.archive.org%",
+                "dropbox": "%dropbox.com%",
+                "webflow-cdn": "%cdn.prod.website-files.com%",
+                "certora-cdn": "%certora.cdn.prismic.io%",
             }
             for label, pattern in rule_domains.items():
                 with conn.cursor() as cur:

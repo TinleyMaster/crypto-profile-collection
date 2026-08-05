@@ -228,7 +228,7 @@ class TaskManager:
                     _save_state(state)
 
             if task_id:
-                self._run_task(task_id)
+                threading.Thread(target=self._run_task, args=(task_id,), daemon=True).start()
                 continue
 
             time.sleep(1)

@@ -110,9 +110,15 @@ class LLMClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # DeepSeek V4 默认启用思考模式，噪声判断不需要深度推理，显式禁用
+        # 避免 max_tokens 被思维链吃掉导致 content 为空
+        if "deepseek" in (self.model or "").lower():
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["temperature"] = temperature
 
         resp = self.session.post(
             url, headers=headers, json=payload,
@@ -120,7 +126,17 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        self._last_full_response = data
+
+        content = data["choices"][0]["message"].get("content") or ""
+        # 兜底：如果 content 为空，尝试从 reasoning_content 获取
+        if not content:
+            reasoning = data["choices"][0]["message"].get("reasoning_content") or ""
+            if reasoning:
+                self._last_diag["used_reasoning_content"] = True
+                return reasoning
+
+        return content
 
     def _call_responses(
         self, system_prompt: str, user_prompt: str,

@@ -270,6 +270,32 @@ def _is_excluded_url(url: str) -> bool:
     return False
 
 
+def _is_same_github_repo(base_url: str, link_url: str) -> bool:
+    """GitHub 同仓库检查：防止跨仓库链接污染 asset_id。
+    当爬取 GitHub 页面时，只允许同 owner/repo 的链接继承 asset_id。"""
+    from urllib.parse import urlparse
+
+    base_parsed = urlparse(base_url)
+    link_parsed = urlparse(link_url)
+
+    if "github.com" not in base_parsed.netloc.lower():
+        return True  # base 不是 GitHub，不限制
+    if "github.com" not in link_parsed.netloc.lower():
+        return True  # link 不是 GitHub（跨域到官网/审计站），允许
+
+    # 两者都是 GitHub，检查 owner/repo 是否相同
+    base_parts = [p for p in base_parsed.path.strip("/").split("/") if p]
+    link_parts = [p for p in link_parsed.path.strip("/").split("/") if p]
+
+    if len(base_parts) < 2 or len(link_parts) < 2:
+        return False  # 路径不完整，保守拒绝
+
+    base_repo = f"{base_parts[0]}/{base_parts[1]}".lower()
+    link_repo = f"{link_parts[0]}/{link_parts[1]}".lower()
+
+    return base_repo == link_repo
+
+
 def extract_doc_links(
     html: str, base_url: str, same_domain_only: bool = True
 ) -> list[tuple[str, str]]:
@@ -315,6 +341,9 @@ def extract_doc_links(
                 should_record = True
 
         if not should_record:
+            continue
+        # GitHub 同仓库过滤：跨仓库链接不继承 asset_id，阻止污染扩散
+        if not _is_same_github_repo(base_url, absolute_url):
             continue
         if len(absolute_url) > 500:
             continue

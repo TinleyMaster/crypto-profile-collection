@@ -39,7 +39,19 @@ DOC_URL_KEYWORDS = [
     "white-paper",
     "lite-paper",
 ]
-ENTRY_TYPES_TO_CRAWL = {"docs", "official_website", "medium", "other"}
+ENTRY_TYPES_TO_CRAWL = {
+    "official_website",
+    "docs",
+    "docs_portal",
+    "github",
+    "medium",
+    "announcement",
+    "twitter",
+    "telegram",
+    "reddit",
+    "facebook",
+    "other",
+}
 
 # ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──
 # 爬取此类页面时只保留跨域链接，内链不继承 asset_id

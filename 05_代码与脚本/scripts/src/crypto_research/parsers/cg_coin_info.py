@@ -28,6 +28,8 @@ def parse_cg_coin_info_payload(
             "twitter_screen_name": links.get("twitter_screen_name"),
             "telegram_channel_identifier": links.get("telegram_channel_identifier"),
             "subreddit_url": links.get("subreddit_url"),
+            "repos_url": links.get("repos_url", {}),
+            "announcement_url": links.get("announcement_url", []),
         },
         "raw_response_id": raw_response_id,
     }

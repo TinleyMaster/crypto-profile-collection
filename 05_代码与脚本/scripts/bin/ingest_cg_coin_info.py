@@ -153,50 +153,51 @@ def main() -> int:
                     break
 
                 try:
-                    payload = client.get_coin_by_id(coin_id)
-                    payload_text = stable_json_dumps(payload)
-                    payload_hash = md5_text(payload_text)
+                    with conn.transaction():
+                        payload = client.get_coin_by_id(coin_id)
+                        payload_text = stable_json_dumps(payload)
+                        payload_hash = md5_text(payload_text)
 
-                    raw_row = fetch_one(
-                        conn,
-                        insert_raw_sql,
-                        (
-                            run_id,
-                            "cg",
-                            "coin_info",
-                            f"id={coin_id}",
-                            None,
-                            "page:single",
-                            payload_text,
-                            payload_hash,
-                            fetched_at,
-                        ),
-                    )
-                    raw_response_id = raw_row["response_id"]
-
-                    parsed = parse_cg_coin_info_payload(
-                        payload, raw_response_id=raw_response_id
-                    )
-                    row_params = [
-                        (
-                            parsed["coin_id"],
-                            parsed["symbol"],
-                            parsed["name"],
-                            parsed["description"],
-                            parsed["homepage_url"],
-                            parsed["image"],
-                            parsed["genesis_date"],
-                            parsed["market_cap_rank"],
-                            parsed["coingecko_rank"],
-                            json.dumps(parsed["categories"], ensure_ascii=False),
-                            json.dumps(parsed["platforms"], ensure_ascii=False),
-                            json.dumps(parsed["links"], ensure_ascii=False),
-                            raw_response_id,
-                            fetched_at,
+                        raw_row = fetch_one(
+                            conn,
+                            insert_raw_sql,
+                            (
+                                run_id,
+                                "cg",
+                                "coin_info",
+                                f"id={coin_id}",
+                                None,
+                                "page:single",
+                                payload_text,
+                                payload_hash,
+                                fetched_at,
+                            ),
                         )
-                    ]
-                    execute_many(conn, upsert_sql, row_params)
-                    success_count += 1
+                        raw_response_id = raw_row["response_id"]
+
+                        parsed = parse_cg_coin_info_payload(
+                            payload, raw_response_id=raw_response_id
+                        )
+                        row_params = [
+                            (
+                                parsed["coin_id"],
+                                parsed["symbol"],
+                                parsed["name"],
+                                parsed["description"],
+                                parsed["homepage_url"],
+                                parsed["image"],
+                                parsed["genesis_date"],
+                                parsed["market_cap_rank"],
+                                parsed["coingecko_rank"],
+                                json.dumps(parsed["categories"], ensure_ascii=False),
+                                json.dumps(parsed["platforms"], ensure_ascii=False),
+                                json.dumps(parsed["links"], ensure_ascii=False),
+                                raw_response_id,
+                                fetched_at,
+                            )
+                        ]
+                        execute_many(conn, upsert_sql, row_params)
+                        success_count += 1
 
                     progress = idx + 1
                     if progress % 10 == 0 or progress == min(actual_limit, len(coin_ids)):
@@ -227,8 +228,6 @@ def main() -> int:
                         f"[ingest_cg_coin_info] {prefix} {coin_id}: {last_error[:200]}",
                         flush=True,
                     )
-                    # rollback current sub-transaction but continue
-                    conn.rollback()
 
             fetch_one(
                 conn,

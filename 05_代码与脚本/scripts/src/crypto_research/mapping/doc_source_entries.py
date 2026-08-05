@@ -3,7 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 
-ALLOWED_URL_KEYS = ("website", "technical_doc", "source_code", "announcement")
+ALLOWED_URL_KEYS = (
+    "website",
+    "technical_doc",
+    "source_code",
+    "announcement",
+    "twitter",
+    "reddit",
+    "telegram",
+    "facebook",
+    "chat",
+    "message_board",
+    "blog",
+    "explorer",
+)
 
 
 def infer_entry_type(url_key: str, url: str) -> str:
@@ -19,6 +32,22 @@ def infer_entry_type(url_key: str, url: str) -> str:
     if url_key == "announcement":
         if "medium.com" in lowered_url:
             return "medium"
+        return "other"
+    if url_key in ("twitter", "facebook"):
+        return url_key
+    if url_key == "reddit":
+        return "reddit"
+    if url_key == "telegram":
+        return "telegram"
+    if url_key == "blog":
+        if "medium.com" in lowered_url:
+            return "medium"
+        return "other"
+    if url_key == "chat":
+        return "other"
+    if url_key == "message_board":
+        return "other"
+    if url_key == "explorer":
         return "other"
     return "other"
 

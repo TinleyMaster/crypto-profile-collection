@@ -31,7 +31,14 @@ class LLMClient:
         self.model: str | None = None
         self.api_type: str = "chat"  # chat | responses
 
-        if settings.ark_api_key and settings.ark_base_url and settings.ark_model:
+        # 优先 OpenAI 兼容接口（DeepSeek 直连等），其次火山方舟 ARK
+        if settings.openai_api_key and settings.openai_base_url and settings.llm_model:
+            self.provider = "openai"
+            self.api_key = settings.openai_api_key
+            self.base_url = settings.openai_base_url.rstrip("/")
+            self.model = settings.llm_model
+            self.api_type = "chat"
+        elif settings.ark_api_key and settings.ark_base_url and settings.ark_model:
             self.provider = "ark"
             self.api_key = settings.ark_api_key
             self.base_url = settings.ark_base_url.rstrip("/")
@@ -41,12 +48,6 @@ class LLMClient:
                 self.api_type = "responses"
             else:
                 self.api_type = "chat"
-        elif settings.openai_api_key and settings.openai_base_url and settings.llm_model:
-            self.provider = "openai"
-            self.api_key = settings.openai_api_key
-            self.base_url = settings.openai_base_url.rstrip("/")
-            self.model = settings.llm_model
-            self.api_type = "chat"
 
         self.session = requests.Session()
         self._last_raw_response: str = ""

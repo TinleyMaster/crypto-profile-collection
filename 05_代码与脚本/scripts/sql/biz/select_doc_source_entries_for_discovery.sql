@@ -15,6 +15,12 @@ LEFT JOIN biz.doc_asset AS d
    AND d.source_url = e.entry_url
 WHERE d.doc_id IS NULL
 ORDER BY
+    -- 优先原始入口(source_code=cmc/cg/dl)，再 deep_crawl
+    CASE
+        WHEN e.source_code IN ('cmc', 'cg', 'dl') THEN 1
+        ELSE 2
+    END,
+    -- URL 暗示文档(PDF/whitepaper等)优先
     CASE
         WHEN LOWER(e.entry_url) LIKE '%%.pdf%%'
           OR LOWER(e.entry_url) LIKE '%%whitepaper%%'

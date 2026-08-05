@@ -57,8 +57,13 @@ GITHUB_CODE_EXT_PATTERNS = [
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="B2 噪声 AI 清理")
     p.add_argument("--limit", type=int, default=100, help="最多处理条数")
-    p.add_argument("--batch-size", type=int, default=40, help="AI 每批条数")
-    p.add_argument("--rpm", type=int, default=60, help="AI 调用速率限制（次/分钟）")
+    p.add_argument("--batch-size", type=int, default=100, help="AI 每批条数")
+    p.add_argument("--rpm", type=int, default=300, help="AI 调用速率限制（次/分钟）")
+    p.add_argument(
+        "--skip-rule-delete",
+        action="store_true",
+        help="跳过规则直删 step（paperdigest 等纯噪声域名），只做 AI 筛选",
+    )
     p.add_argument(
         "--source",
         type=str,
@@ -182,8 +187,44 @@ def main() -> int:
     print()
 
     with get_connection(settings.database_url) as conn:
+        # ── Step 1: 规则直删（纯噪声域名，不需要 AI） ──
+        rule_deleted = 0
+        if not args.skip_rule_delete:
+            rule_domains = {
+                "paperdigest": "%paperdigest.org%",
+                "arxiv": "%arxiv.org%",
+                "papers-nips": "%papers.nips.cc%",
+                "neurips": "%neurips.cc%",
+                "springer": "%link.springer.com%",
+                "researchgate": "%researchgate.net%",
+            }
+            for label, pattern in rule_domains.items():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) FROM biz.doc_source_entry "
+                        "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
+                        (pattern,),
+                    )
+                    cnt = cur.fetchone()[0]
+                if cnt == 0:
+                    continue
+                if args.execute:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM biz.doc_source_entry "
+                            "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
+                            (pattern,),
+                        )
+                    conn.commit()
+                print(f"  [规则直删] {label}: {cnt} 条{' (dry-run)' if not args.execute else ' ✓'}")
+                rule_deleted += cnt
+
+            if rule_deleted > 0:
+                print(f"  规则直删合计: {rule_deleted} 条\n")
+
+        # ── Step 2: AI 精筛（剩余可疑条目） ──
         entries = get_suspicious_entries(conn, args.source, args.limit)
-        print(f"获取到 {len(entries)} 条可疑条目")
+        print(f"获取到 {len(entries)} 条可疑条目（AI 判断）")
         if not entries:
             print("没有可处理的条目")
             return 0

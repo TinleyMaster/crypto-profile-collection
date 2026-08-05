@@ -123,14 +123,14 @@ TASK_DEFS = {
     },
     "b2_ai_noise_clean": {
         "name": "B2 AI 噪声清理",
-        "description": "用 AI 判断深度爬取链接的投研相关性，删除无关噪声",
+        "description": "规则直删(paperdigest等)+AI精筛(GitHub blob/tree)，RPM=300 高速版",
         "script": "phase_b2_ai_noise_clean.py",
-        "default_args": ["--limit", "200", "--batch-size", "40", "--source", "all"],
+        "default_args": ["--limit", "500", "--batch-size", "100", "--rpm", "300", "--source", "all"],
         "category": "AI 筛选",
     },
     "b2_ai_noise_clean_auto": {
         "name": "B2 AI 噪声清理（自动循环）",
-        "description": "自动循环清理AI噪声，每批500条，直到处理完或达5万条上限",
+        "description": "自动循环，每轮2000条，规则秒删+AI高速筛，总上限10万条",
         "script": "phase_b2_ai_noise_clean_auto.py",
         "default_args": [],
         "category": "AI 筛选",

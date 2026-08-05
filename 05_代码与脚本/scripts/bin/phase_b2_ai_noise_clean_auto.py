@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-BATCH_LIMIT = 500        # 每批条数
+BATCH_LIMIT = 2000       # 每批条数（AI 批内速度够快，可以加大）
 MAX_ROUNDS = 100         # 安全上限
-TOTAL_LIMIT = 50000      # 总处理上限
+TOTAL_LIMIT = 100000     # 总处理上限
+BATCH_SIZE = 100         # 每次 AI 调用的条目数
+RPM = 300                # AI 调用速率限制（次/分钟）
 
 env = os.environ.copy()
 env["PYTHONIOENCODING"] = "utf-8"
@@ -37,7 +39,9 @@ for round_num in range(1, MAX_ROUNDS + 1):
             "--limit",
             str(batch_size),
             "--batch-size",
-            "40",
+            str(BATCH_SIZE),
+            "--rpm",
+            str(RPM),
             "--execute",
             "--source",
             "all",

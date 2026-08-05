@@ -149,6 +149,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "诊断",
     },
+    "cleanup_pollution": {
+        "name": "清理 GitHub 跨仓库污染",
+        "description": "删除 github.com deep_crawl 条目并重置爬取状态，修复 asset_id 大规模污染",
+        "script": "diag_cleanup_pollution.py",
+        "default_args": [],
+        "category": "维护",
+    },
 }
 
 

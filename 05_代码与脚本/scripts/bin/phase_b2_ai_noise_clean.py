@@ -227,6 +227,17 @@ def main() -> int:
                 "dropbox": "%dropbox.com%",
                 "webflow-cdn": "%cdn.prod.website-files.com%",
                 "certora-cdn": "%certora.cdn.prismic.io%",
+                # ── 2026-08-05 新增：非加密技术/包管理/社交域名 ──
+                "docs-rs": "%docs.rs%",
+                "diffend": "%my.diffend.io%",
+                "elastic": "%elastic.co%",
+                "nuget": "%nuget.org%",
+                "packagist": "%packagist.org%",
+                "manageengine": "%manageengine.com%",
+                "twitter": "%twitter.com%",
+                "x-com": "%x.com%",
+                "reddit": "%reddit.com%",
+                "papermc-jd": "%jd.papermc.io%",
             }
             for label, pattern in rule_domains.items():
                 with conn.cursor() as cur:

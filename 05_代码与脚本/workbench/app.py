@@ -128,6 +128,13 @@ TASK_DEFS = {
         "default_args": ["--limit", "200", "--batch-size", "40", "--source", "all"],
         "category": "AI 筛选",
     },
+    "b2_ai_noise_clean_auto": {
+        "name": "B2 AI 噪声清理（自动循环）",
+        "description": "自动循环清理AI噪声，每批500条，直到处理完或达5万条上限",
+        "script": "phase_b2_ai_noise_clean_auto.py",
+        "default_args": [],
+        "category": "AI 筛选",
+    },
 }
 
 

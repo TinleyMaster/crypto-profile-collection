@@ -135,6 +135,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "AI 筛选",
     },
+    "diag_noise": {
+        "name": "噪声诊断报告",
+        "description": "查看今日新增文档链接的噪声情况（域名分布、噪声占比、采样）",
+        "script": "diag_noise_report.py",
+        "default_args": [],
+        "category": "诊断",
+    },
 }
 
 

@@ -13,6 +13,5 @@ LEFT JOIN biz.doc_source_entry AS dse
    AND dse.source_code = 'cg'
 WHERE
     (i.homepage_url IS NOT NULL OR i.links IS NOT NULL)
-    AND dse.entry_id IS NULL
 ORDER BY i.coin_id
 LIMIT %s;

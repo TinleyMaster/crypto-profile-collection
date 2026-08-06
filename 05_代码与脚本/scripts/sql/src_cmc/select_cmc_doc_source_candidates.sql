@@ -13,5 +13,9 @@ LEFT JOIN biz.doc_source_entry AS dse
 WHERE
     i.urls IS NOT NULL
     AND dse.entry_id IS NULL
+    AND EXISTS (
+        SELECT 1 FROM jsonb_each(i.urls) AS kv
+        WHERE jsonb_typeof(kv.value) = 'array' AND jsonb_array_length(kv.value) > 0
+    )
 ORDER BY i.cmc_id
 LIMIT %s;

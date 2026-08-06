@@ -174,7 +174,7 @@ def get_task_progress() -> list[dict]:
             })
 
             # 3. CMC 补充文档入口
-            #    候选集: 有 CMC info (urls) + asset 映射的资产
+            #    候选集: 有 CMC info (urls 非空数组) + asset 映射的资产
             #    done: 候选集中已有 CMC doc_source_entry 的
             cur.execute(
                 """
@@ -182,6 +182,10 @@ def get_task_progress() -> list[dict]:
                 FROM src_cmc.cmc_asset_info i
                 INNER JOIN core.asset_source_map asm ON asm.source_code = 'cmc' AND asm.source_asset_key = i.cmc_id::text
                 WHERE i.urls IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM jsonb_each(i.urls) AS kv
+                      WHERE jsonb_typeof(kv.value) = 'array' AND jsonb_array_length(kv.value) > 0
+                  )
                 """
             )
             total = cur.fetchone()[0]
@@ -193,6 +197,10 @@ def get_task_progress() -> list[dict]:
                 INNER JOIN biz.doc_source_entry dse ON dse.asset_id = asm.asset_id
                     AND dse.source_code = 'cmc' AND dse.entity_type = 'asset'
                 WHERE i.urls IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM jsonb_each(i.urls) AS kv
+                      WHERE jsonb_typeof(kv.value) = 'array' AND jsonb_array_length(kv.value) > 0
+                  )
                 """
             )
             done = cur.fetchone()[0]

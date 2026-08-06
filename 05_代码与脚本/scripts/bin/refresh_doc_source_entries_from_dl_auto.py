@@ -52,6 +52,10 @@ for round_num in range(1, MAX_ROUNDS + 1):
             print("无更多候选资产，全部完成。")
             break
 
+        if entry_count == 0:
+            print("本轮无有效链接可提取，全部完成。")
+            break
+
         total_assets += asset_count
         total_entries += entry_count
         print(f"本轮: {asset_count} 资产, {entry_count} 条入口")

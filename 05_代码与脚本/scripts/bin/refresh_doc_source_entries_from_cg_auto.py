@@ -42,7 +42,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
         break
 
     try:
-        data = json.loads(result.stdout.strip().split("\n")[-1])
+        data = json.loads(result.stdout.strip())
         asset_count = data.get("asset_count", 0)
         entry_count = data.get("entry_count", 0)
 
@@ -53,8 +53,8 @@ for round_num in range(1, MAX_ROUNDS + 1):
         total_assets += asset_count
         total_entries += entry_count
         print(f"本轮: {asset_count} 资产, {entry_count} 条入口")
-    except (json.JSONDecodeError, IndexError):
-        print(f"无法解析输出: {result.stdout[:200]}")
+    except (json.JSONDecodeError, ValueError):
+        print(f"无法解析输出: {result.stdout.strip()[:200]}")
         break
 
 print(f"\n全部完成。累计: {total_assets} 资产, {total_entries} 条入口")

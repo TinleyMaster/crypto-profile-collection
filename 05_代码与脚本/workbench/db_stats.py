@@ -470,3 +470,26 @@ def get_asset_materials(asset_id: int) -> dict:
                 result["stats"]["by_doc_type"][t] = result["stats"]["by_doc_type"].get(t, 0) + 1
 
     return result
+
+
+def add_manual_entry(asset_id: int, entry_url: str) -> dict:
+    """手动为资产添加一个文档入口（官网链接）。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO biz.doc_source_entry (
+                    entity_type, asset_id, source_code, entry_type, entry_url,
+                    discovered_from, is_primary, updated_at
+                ) VALUES (
+                    'asset', %s, 'manual', 'official_website', %s,
+                    'manual_input', TRUE, NOW()
+                )
+                ON CONFLICT (entity_type, COALESCE(asset_id, -1), COALESCE(protocol_id, -1), entry_url) DO NOTHING
+                RETURNING entry_id
+                """,
+                (asset_id, entry_url),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return {"entry_id": row[0] if row else None, "url": entry_url}

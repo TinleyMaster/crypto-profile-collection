@@ -584,6 +584,21 @@
             border-color: #34d39944;
         }
 
+        .materials-header .add-btn {
+            background: #1e293b;
+            color: #fbbf24;
+            border: 1px solid #f59e0b44;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .materials-header .add-btn:hover {
+            background: #92400e;
+            color: #fff;
+        }
+
         .stat-row {
             display: flex;
             gap: 12px;
@@ -902,6 +917,7 @@
                     <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
                 </h2>
                 <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
+                <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
             <div class="stat-row" id="mat-stats"></div>
@@ -1400,6 +1416,37 @@
         function closeMaterials () {
             materialsPanel.classList.remove('visible');
             selectedAssetId = null;
+        }
+
+        async function addManualEntry () {
+            if (!selectedAssetId) return;
+            const url = prompt('请输入官网链接（https://...）');
+            if (!url || !url.trim()) return;
+            const trimmed = url.trim();
+            if (!trimmed.startsWith('http')) {
+                alert('URL 必须以 http 开头');
+                return;
+            }
+            try {
+                const res = await fetch(`/api/assets/${selectedAssetId}/add_entry`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: trimmed }),
+                });
+                const data = await res.json();
+                if (!data.ok) {
+                    alert('添加失败: ' + (data.error || '未知错误'));
+                    return;
+                }
+                if (data.data.entry_id) {
+                    alert('已添加官网链接');
+                } else {
+                    alert('该链接已存在，未重复添加');
+                }
+                loadMaterials(selectedAssetId);
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+            }
         }
 
         function formatBytes (bytes) {

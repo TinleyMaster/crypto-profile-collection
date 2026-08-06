@@ -311,6 +311,22 @@ def api_asset_materials(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])
+def api_add_manual_entry(asset_id: int):
+    """手动为资产添加官网链接。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        url = (data.get("url") or data.get("entry_url") or "").strip()
+        if not url:
+            return jsonify({"ok": False, "error": "缺少 url 参数"}), 400
+        if not url.startswith("http"):
+            return jsonify({"ok": False, "error": "URL 必须以 http 开头"}), 400
+        result = _get_db_stats().add_manual_entry(asset_id, url)
+        return jsonify({"ok": True, "data": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/task_defs")
 def api_task_defs():
     defs = {}

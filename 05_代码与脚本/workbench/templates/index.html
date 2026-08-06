@@ -1184,6 +1184,7 @@
                     <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
                 </h2>
                 <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
+                <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
                 <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
@@ -1678,6 +1679,45 @@
                     btn.classList.remove('copied');
                 }, 2000);
             });
+        }
+
+        async function copyNotebooklmLinks () {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('notebooklm-btn');
+            const origText = btn.textContent;
+
+            // 先查缓存
+            btn.textContent = '⏳ 查询中...';
+            btn.disabled = true;
+            try {
+                let res = await fetch('/api/notebooklm/links/' + selectedAssetId);
+                let data = await res.json();
+                if (data.ok && data.count > 0) {
+                    // 缓存命中
+                    await navigator.clipboard.writeText(data.urls.join('\n'));
+                    btn.textContent = '✅ 已复制 ' + data.count + ' 条精选';
+                    btn.classList.add('copied');
+                    setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
+                    return;
+                }
+
+                // 缓存未命中，触发 AI 精选
+                btn.textContent = '🤖 AI 筛选中...';
+                res = await fetch('/api/notebooklm/curate/' + selectedAssetId, { method: 'POST' });
+                data = await res.json();
+                if (data.ok && data.data && data.data.urls) {
+                    await navigator.clipboard.writeText(data.data.urls.join('\n'));
+                    btn.textContent = '✅ 已复制 ' + data.data.urls.length + ' 条精选';
+                    btn.classList.add('copied');
+                } else {
+                    alert('精选失败: ' + (data.error || '未知错误'));
+                    btn.textContent = origText;
+                }
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+                btn.textContent = origText;
+            }
+            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
         }
 
         function closeMaterials () {

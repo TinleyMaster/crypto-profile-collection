@@ -453,6 +453,30 @@ def api_trigger_deep_crawl(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── NotebookLM 投研精选 ──
+
+
+@app.route("/api/notebooklm/links/<int:asset_id>")
+def api_notebooklm_links(asset_id: int):
+    """获取已缓存的 NotebookLM 精选链接。"""
+    try:
+        data = _get_db_stats().get_notebooklm_links(asset_id)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/notebooklm/curate/<int:asset_id>", methods=["POST"])
+def api_notebooklm_curate(asset_id: int):
+    """触发 NotebookLM 精选生成（配额粗筛 + AI 排序）。"""
+    try:
+        force = request.args.get("force", "0") == "1"
+        data = _get_db_stats().curate_notebooklm(asset_id, force=force)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

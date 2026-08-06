@@ -207,6 +207,13 @@ TASK_DEFS = {
         "category": "维护",
         "hidden": True,
     },
+    "reset_high_entry": {
+        "name": "重置高条目资产（>1000条）",
+        "description": "删除 >1000条 deep_crawl 的资产的全部 deep_crawl 链接，重置 deep_crawled_at",
+        "script": "reset_high_entry_assets.py",
+        "default_args": ["--execute"],
+        "category": "维护",
+    },
 }
 
 

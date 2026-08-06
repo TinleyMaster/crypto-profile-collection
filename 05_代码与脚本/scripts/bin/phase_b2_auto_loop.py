@@ -7,6 +7,9 @@ import sys
 import os
 from pathlib import Path
 
+# 行缓冲：确保 print 实时输出（stdout 是 pipe 时默认全缓冲）
+sys.stdout.reconfigure(line_buffering=True)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 1000
 MAX_ROUNDS = 200  # 安全上限
@@ -47,6 +50,8 @@ for round_num in range(1, MAX_ROUNDS + 1):
         print(f"Script exited with code {result.returncode}, stopping.")
         break
 
+    print("B2 本轮完成，查询 pending 数量...")
+
     # 检查 pending
     try:
         probe = subprocess.run(
@@ -61,6 +66,12 @@ for round_num in range(1, MAX_ROUNDS + 1):
         print("探针查询超时，跳过本轮继续。")
         continue
 
+    if probe.returncode != 0:
+        print(f"探针脚本异常退出 (code={probe.returncode})，跳过本轮继续。")
+        if probe.stderr:
+            print(f"stderr: {probe.stderr[:500]}")
+        continue
+
     # 解析 docs pending count
     docs_pending = None
     for line in probe.stdout.splitlines():
@@ -72,5 +83,8 @@ for round_num in range(1, MAX_ROUNDS + 1):
     if docs_pending is not None and docs_pending <= THRESHOLD:
         print(f"\ndocs pending ({docs_pending}) <= threshold ({THRESHOLD}), done!")
         break
+
+    if docs_pending is not None:
+        print(f"docs pending ({docs_pending}) > threshold ({THRESHOLD})，继续下一轮...")
 
 print("\nAll rounds complete.")

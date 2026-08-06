@@ -127,17 +127,13 @@ def get_task_progress() -> list[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             # 1. CG 拉取币种详情
-            cur.execute(
-                """
-                SELECT COUNT(*) FROM src_cg.coin_list l
-                LEFT JOIN src_cg.coin_info i ON i.coin_id = l.coin_id
-                WHERE i.coin_id IS NULL
-                """
-            )
-            remaining = cur.fetchone()[0]
+            #    候选集: src_cg.coin_list 中所有 coin
+            #    done: 已拉取 coin_info 的
+            cur.execute("SELECT COUNT(*) FROM src_cg.coin_list")
+            total = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM src_cg.coin_info")
             done = cur.fetchone()[0]
-            total = done + remaining
+            remaining = total - done
             result.append({
                 "task": "CG 拉取币种详情",
                 "done": done,
@@ -147,6 +143,8 @@ def get_task_progress() -> list[dict]:
             })
 
             # 2. CG 补充文档入口
+            #    候选集: 有 CG coin_info (homepage 或 links) + asset 映射的资产
+            #    done: 候选集中已有 CG doc_source_entry 的
             cur.execute(
                 """
                 SELECT COUNT(DISTINCT asm.asset_id)
@@ -158,8 +156,12 @@ def get_task_progress() -> list[dict]:
             total = cur.fetchone()[0]
             cur.execute(
                 """
-                SELECT COUNT(DISTINCT asset_id) FROM biz.doc_source_entry
-                WHERE source_code = 'cg' AND entity_type = 'asset'
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_cg.coin_info i
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'cg' AND asm.source_asset_key = i.coin_id
+                INNER JOIN biz.doc_source_entry dse ON dse.asset_id = asm.asset_id
+                    AND dse.source_code = 'cg' AND dse.entity_type = 'asset'
+                WHERE i.homepage_url IS NOT NULL OR i.links IS NOT NULL
                 """
             )
             done = cur.fetchone()[0]
@@ -173,6 +175,8 @@ def get_task_progress() -> list[dict]:
             })
 
             # 3. CMC 补充文档入口
+            #    候选集: 有 CMC info (urls) + asset 映射的资产
+            #    done: 候选集中已有 CMC doc_source_entry 的
             cur.execute(
                 """
                 SELECT COUNT(DISTINCT asm.asset_id)
@@ -184,8 +188,12 @@ def get_task_progress() -> list[dict]:
             total = cur.fetchone()[0]
             cur.execute(
                 """
-                SELECT COUNT(DISTINCT asset_id) FROM biz.doc_source_entry
-                WHERE source_code = 'cmc' AND entity_type = 'asset'
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_cmc.cmc_asset_info i
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'cmc' AND asm.source_asset_key = i.cmc_id::text
+                INNER JOIN biz.doc_source_entry dse ON dse.asset_id = asm.asset_id
+                    AND dse.source_code = 'cmc' AND dse.entity_type = 'asset'
+                WHERE i.urls IS NOT NULL
                 """
             )
             done = cur.fetchone()[0]

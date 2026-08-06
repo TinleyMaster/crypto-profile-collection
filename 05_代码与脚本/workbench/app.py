@@ -366,6 +366,48 @@ def api_task_progress():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── DexScreener 辅助添加 ──
+
+
+@app.route("/api/dexscreener/search")
+def api_dexscreener_search():
+    """搜索 DexScreener 获取代币信息。"""
+    q = (request.args.get("q", "") or "").strip()
+    if not q or len(q) < 1:
+        return jsonify({"ok": True, "tokens": []})
+    try:
+        tokens = _get_db_stats().search_dexscreener(q)
+        return jsonify({"ok": True, "tokens": tokens})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/assets/create", methods=["POST"])
+def api_create_asset():
+    """从 DexScreener 数据或手动输入创建资产。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        symbol = (data.get("symbol") or "").strip()
+        name = (data.get("name") or "").strip()
+        asset_type = (data.get("asset_type") or "token").strip()
+        links = data.get("links") or []
+
+        if not symbol:
+            return jsonify({"ok": False, "error": "缺少 symbol 参数"}), 400
+        if not name:
+            return jsonify({"ok": False, "error": "缺少 name 参数"}), 400
+
+        result = _get_db_stats().create_asset_with_links(
+            symbol=symbol,
+            name=name,
+            asset_type=asset_type,
+            links=links,
+        )
+        return jsonify({"ok": True, "data": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

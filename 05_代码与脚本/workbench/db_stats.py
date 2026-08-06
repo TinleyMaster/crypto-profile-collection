@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import sys
 import os
+import urllib.request
+import urllib.error
+import json
 from pathlib import Path
 
 # Docker 环境下直接用 /app/scripts/src，本地则相对路径计算
@@ -531,3 +534,126 @@ def add_manual_entry(asset_id: int, entry_url: str) -> dict:
             row = cur.fetchone()
         conn.commit()
     return {"entry_id": row[0] if row else None, "url": entry_url}
+
+
+# ── DexScreener 辅助添加 ──
+
+
+def search_dexscreener(query: str) -> list[dict]:
+    """搜索 DexScreener，返回去重后的代币列表。"""
+    url = f"https://api.dexscreener.com/latest/dex/search?q={urllib.parse.quote(query)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+        return []
+
+    pairs = data.get("pairs") or []
+    if not pairs:
+        return []
+
+    # 按 baseToken.address 去重，保留流动性最高的 pair
+    seen = {}
+    for p in pairs:
+        bt = p.get("baseToken") or {}
+        addr = (bt.get("address") or "").lower()
+        if not addr:
+            continue
+        liq = float(p.get("liquidity", {}).get("usd", 0) or 0)
+        if addr not in seen or liq > seen[addr]["liquidity_usd"]:
+            info = p.get("info") or {}
+            websites = []
+            socials = []
+            for w in info.get("websites") or []:
+                if w.get("url"):
+                    websites.append({"label": w.get("label", ""), "url": w["url"]})
+            for s in info.get("socials") or []:
+                if s.get("url"):
+                    socials.append({"type": s.get("type", ""), "url": s["url"]})
+
+            seen[addr] = {
+                "name": bt.get("name", ""),
+                "symbol": bt.get("symbol", ""),
+                "address": addr,
+                "chain_id": p.get("chainId", ""),
+                "dex_id": p.get("dexId", ""),
+                "price_usd": p.get("priceUsd", ""),
+                "liquidity_usd": liq,
+                "fdv": p.get("fdv", 0),
+                "volume_24h": float(p.get("volume", {}).get("h24", 0) or 0),
+                "dex_url": p.get("url", ""),
+                "websites": websites,
+                "socials": socials,
+            }
+
+    # 按流动性降序排列
+    results = sorted(seen.values(), key=lambda x: x["liquidity_usd"], reverse=True)
+    return results[:10]
+
+
+def create_asset_with_links(
+    symbol: str,
+    name: str,
+    asset_type: str = "token",
+    links: list[dict] | None = None,
+) -> dict:
+    """创建资产并批量添加文档链接。
+
+    links 格式: [{"entry_type": "official_website", "entry_url": "https://..."}, ...]
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 检查是否已存在同名代币
+            cur.execute(
+                "SELECT asset_id FROM core.asset WHERE canonical_symbol = %s AND canonical_name = %s",
+                (symbol.upper(), name),
+            )
+            existing = cur.fetchone()
+            if existing:
+                return {"asset_id": existing[0], "created": False, "message": "资产已存在"}
+
+            cur.execute(
+                """INSERT INTO core.asset (canonical_symbol, canonical_name, asset_type, status)
+                   VALUES (%s, %s, %s, 'active')
+                   RETURNING asset_id""",
+                (symbol.upper(), name, asset_type),
+            )
+            asset_id = cur.fetchone()[0]
+
+            # 添加文档链接
+            entry_count = 0
+            if links:
+                for link in links:
+                    entry_type = link.get("entry_type", "official_website")
+                    entry_url = link.get("entry_url", "").strip()
+                    if not entry_url or not entry_url.startswith("http"):
+                        continue
+                    if entry_type not in (
+                        "official_website", "docs", "github", "medium",
+                        "docs_portal", "whitepaper_page", "other",
+                    ):
+                        entry_type = "other"
+                    cur.execute(
+                        """INSERT INTO biz.doc_source_entry (
+                               entity_type, asset_id, source_code, entry_type, entry_url,
+                               discovered_from, is_primary, updated_at
+                           ) VALUES (
+                               'asset', %s, 'manual', %s, %s,
+                               'dexscreener', FALSE, NOW()
+                           )
+                           ON CONFLICT (entity_type, COALESCE(asset_id, -1), COALESCE(protocol_id, -1), entry_url)
+                           DO NOTHING""",
+                        (asset_id, entry_type, entry_url),
+                    )
+                    if cur.rowcount:
+                        entry_count += 1
+
+        conn.commit()
+    return {
+        "asset_id": asset_id,
+        "created": True,
+        "entry_count": entry_count,
+        "symbol": symbol.upper(),
+        "name": name,
+    }

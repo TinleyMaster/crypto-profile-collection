@@ -443,6 +443,23 @@
             color: #e6e8eb;
         }
 
+        .add-asset-btn {
+            background: #1e293b;
+            color: #fbbf24;
+            border: 1px solid #f59e0b44;
+            padding: 10px 18px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 13px;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .add-asset-btn:hover {
+            background: #92400e;
+            color: #fff;
+        }
+
         .search-dropdown {
             position: absolute;
             top: 100%;
@@ -887,6 +904,255 @@
             text-align: right;
             flex-shrink: 0;
         }
+
+        /* ── 添加代币弹窗 ── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            z-index: 9999;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.65);
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-dialog {
+            background: #171a21;
+            border: 1px solid #2a2f3a;
+            border-radius: 12px;
+            width: 560px;
+            max-width: 95vw;
+            max-height: 85vh;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        .modal-dialog h3 {
+            font-size: 16px;
+            margin-bottom: 16px;
+            color: #e6e8eb;
+        }
+
+        .modal-dialog .modal-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 16px;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .modal-tabs .tab-btn {
+            padding: 8px 18px;
+            font-size: 13px;
+            border: none;
+            background: none;
+            color: #8a92a0;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .modal-tabs .tab-btn.active {
+            color: #60a5fa;
+            border-bottom-color: #60a5fa;
+        }
+
+        .modal-dialog .form-group {
+            margin-bottom: 12px;
+        }
+
+        .modal-dialog .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #8a92a0;
+            margin-bottom: 4px;
+        }
+
+        .modal-dialog .form-group input,
+        .modal-dialog .form-group select {
+            width: 100%;
+            padding: 8px 12px;
+            background: #0f1115;
+            border: 1px solid #1e222a;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #e6e8eb;
+            outline: none;
+        }
+
+        .modal-dialog .form-group input:focus,
+        .modal-dialog .form-group select:focus {
+            border-color: #3b82f6;
+        }
+
+        .modal-dialog .btn-row {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 16px;
+        }
+
+        .modal-dialog .btn {
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-primary {
+            background: #2563eb;
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        .btn-secondary {
+            background: #374151;
+            color: #d1d5db;
+        }
+
+        .btn-secondary:hover {
+            background: #4b5563;
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* DexScreener 搜索结果 */
+        .ds-results {
+            margin-top: 12px;
+        }
+
+        .ds-result-card {
+            background: #0f1115;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .ds-result-card:hover {
+            border-color: #3b82f6;
+        }
+
+        .ds-result-card.selected {
+            border-color: #10b981;
+            background: #0a1a14;
+        }
+
+        .ds-result-card .ds-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .ds-result-card .ds-name {
+            font-weight: 600;
+            font-size: 14px;
+            color: #e6e8eb;
+        }
+
+        .ds-result-card .ds-symbol {
+            font-size: 12px;
+            background: #1e3a5f;
+            color: #60a5fa;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .ds-result-card .ds-meta {
+            font-size: 11px;
+            color: #8a92a0;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .ds-result-card .ds-links {
+            margin-top: 6px;
+            font-size: 11px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .ds-result-card .ds-links a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .ds-result-card .ds-links a:hover {
+            text-decoration: underline;
+        }
+
+        .ds-result-card .ds-select-btn {
+            margin-top: 8px;
+            padding: 4px 14px;
+            font-size: 11px;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .ds-result-card .ds-select-btn:hover {
+            background: #1d4ed8;
+        }
+
+        .ds-result-card .ds-select-btn.done {
+            background: #065f46;
+            color: #34d399;
+        }
+
+        .ds-loading {
+            text-align: center;
+            padding: 20px;
+            color: #8a92a0;
+            font-size: 13px;
+        }
+
+        .ds-empty {
+            text-align: center;
+            padding: 20px;
+            color: #8a92a0;
+            font-size: 13px;
+        }
+
+        /* 链接预览 */
+        .link-preview {
+            background: #0f1115;
+            border: 1px solid #1e222a;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #8a92a0;
+        }
+
+        .link-preview .link-type {
+            display: inline-block;
+            background: #1e3a5f;
+            color: #60a5fa;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            margin-right: 6px;
+        }
     </style>
 </head>
 
@@ -905,6 +1171,7 @@
                     <button class="clear-btn" id="search-clear" onclick="clearSearch()">&times;</button>
                     <div class="search-dropdown" id="search-dropdown"></div>
                 </div>
+                <button class="add-asset-btn" onclick="openAddAssetModal()">➕ 添加代币</button>
             </div>
         </div>
 
@@ -1602,7 +1869,250 @@
 
         setInterval(loadDashboard, 30000);
         setInterval(loadTaskProgress, 30000);
+
+        // ── 添加代币弹窗逻辑 ──
+        let selectedDsToken = null;
+        let dsTokens = [];
+
+        function openAddAssetModal () {
+            document.getElementById('add-asset-modal').classList.add('active');
+            selectedDsToken = null;
+            dsTokens = [];
+            document.getElementById('ds-search-input').value = '';
+            document.getElementById('ds-results').innerHTML = '';
+            document.getElementById('create-symbol').value = '';
+            document.getElementById('create-name').value = '';
+            document.getElementById('link-previews').innerHTML = '';
+            switchAssetTab('ds');
+            document.getElementById('create-asset-btn').disabled = false;
+            document.getElementById('ds-search-btn').disabled = false;
+        }
+
+        function closeAddAssetModal () {
+            document.getElementById('add-asset-modal').classList.remove('active');
+        }
+
+        // 点击遮罩关闭
+        document.getElementById('add-asset-modal').addEventListener('click', function (e) {
+            if (e.target === this) closeAddAssetModal();
+        });
+
+        function switchAssetTab (tab) {
+            document.getElementById('tab-ds').classList.toggle('active', tab === 'ds');
+            document.getElementById('tab-manual').classList.toggle('active', tab === 'manual');
+            document.getElementById('tab-ds-content').style.display = tab === 'ds' ? '' : 'none';
+            document.getElementById('tab-manual-content').style.display = tab === 'manual' ? '' : 'none';
+        }
+
+        async function searchDexScreener () {
+            const q = document.getElementById('ds-search-input').value.trim();
+            if (!q) return;
+            const resultsDiv = document.getElementById('ds-results');
+            const btn = document.getElementById('ds-search-btn');
+            btn.disabled = true;
+            btn.textContent = '搜索中...';
+            resultsDiv.innerHTML = '<div class="ds-loading">搜索 DexScreener 中...</div>';
+            dsTokens = [];
+
+            try {
+                const res = await fetch('/api/dexscreener/search?q=' + encodeURIComponent(q));
+                const data = await res.json();
+                if (!data.ok) {
+                    resultsDiv.innerHTML = '<div class="ds-empty">搜索失败: ' + escapeHtml(data.error) + '</div>';
+                    return;
+                }
+                const tokens = data.tokens || [];
+                dsTokens = tokens;
+                if (tokens.length === 0) {
+                    resultsDiv.innerHTML = '<div class="ds-empty">未找到匹配的代币，请尝试搜索合约地址</div>';
+                    return;
+                }
+                resultsDiv.innerHTML = tokens.map((t, i) => {
+                    const liq = t.liquidity_usd >= 1000000
+                        ? '$' + (t.liquidity_usd / 1000000).toFixed(2) + 'M'
+                        : '$' + t.liquidity_usd.toLocaleString();
+                    const vol = t.volume_24h >= 1000000
+                        ? '$' + (t.volume_24h / 1000000).toFixed(2) + 'M'
+                        : '$' + t.volume_24h.toLocaleString();
+                    const links = [];
+                    (t.websites || []).forEach(w => {
+                        links.push(`<a href="${escapeHtml(w.url)}" target="_blank" onclick="event.stopPropagation()">${escapeHtml(w.label || 'Website')}</a>`);
+                    });
+                    (t.socials || []).forEach(s => {
+                        links.push(`<a href="${escapeHtml(s.url)}" target="_blank" onclick="event.stopPropagation()">${escapeHtml(s.type)}</a>`);
+                    });
+                    return `
+                    <div class="ds-result-card" id="ds-card-${i}">
+                        <div class="ds-header">
+                            <span class="ds-name">${escapeHtml(t.name)}</span>
+                            <span class="ds-symbol">${escapeHtml(t.symbol)}</span>
+                        </div>
+                        <div class="ds-meta">
+                            <span>链: ${escapeHtml(t.chain_id)}</span>
+                            <span>DEX: ${escapeHtml(t.dex_id)}</span>
+                            <span>流动性: ${liq}</span>
+                            <span>24h量: ${vol}</span>
+                        </div>
+                        ${links.length ? '<div class="ds-links">' + links.join(' · ') + '</div>' : ''}
+                        <button class="ds-select-btn" onclick="selectDsToken(${i})">选择此代币</button>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                resultsDiv.innerHTML = '<div class="ds-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '搜索';
+            }
+        }
+
+        function selectDsToken (idx) {
+            const cards = document.querySelectorAll('.ds-result-card');
+            cards.forEach(c => c.classList.remove('selected'));
+            const card = document.getElementById('ds-card-' + idx);
+            if (card) card.classList.add('selected');
+
+            const t = dsTokens[idx];
+            if (!t) return;
+            selectedDsToken = t;
+            document.getElementById('create-symbol').value = t.symbol;
+            document.getElementById('create-name').value = t.name;
+            renderLinkPreviews(t);
+            switchAssetTab('manual');
+        }
+
+        function renderLinkPreviews (token) {
+            const container = document.getElementById('link-previews');
+            const links = [];
+            (token.websites || []).forEach(w => {
+                links.push({ entry_type: 'official_website', url: w.url, label: w.label || '官网' });
+            });
+            (token.socials || []).forEach(s => {
+                let entryType = 'other';
+                if (s.type === 'twitter') entryType = 'other';
+                if (s.type === 'telegram') entryType = 'other';
+                if (s.type === 'github') entryType = 'github';
+                links.push({ entry_type: entryType, url: s.url, label: s.type });
+            });
+            if (links.length === 0) {
+                container.innerHTML = '<div style="font-size:12px;color:#8a92a0;padding:8px 0">DexScreener 未提供链接，可手动添加</div>';
+                return;
+            }
+            container.innerHTML = '<div style="font-size:12px;color:#8a92a0;margin-bottom:6px">将自动添加以下链接：</div>' +
+                links.map(l => `
+                <div class="link-preview">
+                    <span class="link-type">${escapeHtml(l.label)}</span>
+                    <span style="word-break:break-all">${escapeHtml(l.url)}</span>
+                </div>`).join('');
+        }
+
+        async function createAsset () {
+            const symbol = document.getElementById('create-symbol').value.trim();
+            const name = document.getElementById('create-name').value.trim();
+            const assetType = document.getElementById('create-type').value;
+
+            if (!symbol) { alert('请输入代币符号'); return; }
+            if (!name) { alert('请输入代币名称'); return; }
+
+            const links = [];
+            if (selectedDsToken) {
+                (selectedDsToken.websites || []).forEach(w => {
+                    links.push({ entry_type: 'official_website', entry_url: w.url });
+                });
+                (selectedDsToken.socials || []).forEach(s => {
+                    let entryType = 'other';
+                    if (s.type === 'github') entryType = 'github';
+                    links.push({ entry_type: entryType, entry_url: s.url });
+                });
+            }
+
+            const btn = document.getElementById('create-asset-btn');
+            btn.disabled = true;
+            btn.textContent = '创建中...';
+
+            try {
+                const res = await fetch('/api/assets/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol, name, asset_type: assetType, links }),
+                });
+                const data = await res.json();
+                if (!data.ok) {
+                    alert('创建失败: ' + (data.error || '未知错误'));
+                    return;
+                }
+                const d = data.data;
+                if (d.created) {
+                    alert(`已创建代币 ${d.symbol}（${d.name}），已添加 ${d.entry_count} 条链接`);
+                    closeAddAssetModal();
+                    loadDashboard();
+                    // 自动打开新资产的资料面板
+                    selectedAssetId = d.asset_id;
+                    loadMaterials(d.asset_id);
+                } else {
+                    alert(d.message || '资产已存在');
+                    // 帮用户跳转到已有资产
+                    closeAddAssetModal();
+                    selectedAssetId = d.asset_id;
+                    loadMaterials(d.asset_id);
+                }
+            } catch (e) {
+                alert('创建失败: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '创建代币';
+            }
+        }
     </script>
+
+    <!-- ── 添加代币弹窗 ── -->
+    <div class="modal-overlay" id="add-asset-modal">
+        <div class="modal-dialog">
+            <h3>➕ 添加代币</h3>
+            <div class="modal-tabs">
+                <button class="tab-btn active" id="tab-ds" onclick="switchAssetTab('ds')">DexScreener 搜索</button>
+                <button class="tab-btn" id="tab-manual" onclick="switchAssetTab('manual')">手动输入</button>
+            </div>
+
+            <!-- DexScreener 搜索 -->
+            <div id="tab-ds-content">
+                <div class="form-group">
+                    <label>搜索代币名称 / 符号 / 合约地址</label>
+                    <input type="text" id="ds-search-input" placeholder="如 PEPE, 0x... 等"
+                        onkeydown="if(event.key==='Enter')searchDexScreener()">
+                </div>
+                <button class="btn btn-primary" onclick="searchDexScreener()" id="ds-search-btn">搜索</button>
+                <div id="ds-results" class="ds-results"></div>
+            </div>
+
+            <!-- 手动输入 -->
+            <div id="tab-manual-content" style="display:none">
+                <div class="form-group">
+                    <label>代币符号（Symbol）<span style="color:#f87171">*</span></label>
+                    <input type="text" id="create-symbol" placeholder="如 PEPE">
+                </div>
+                <div class="form-group">
+                    <label>代币名称（Name）<span style="color:#f87171">*</span></label>
+                    <input type="text" id="create-name" placeholder="如 Pepe">
+                </div>
+                <div class="form-group">
+                    <label>代币类型</label>
+                    <select id="create-type">
+                        <option value="token">Token</option>
+                        <option value="meme">Meme</option>
+                        <option value="coin">Coin</option>
+                        <option value="stablecoin">Stablecoin</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                <div id="link-previews" style="margin-top: 12px;"></div>
+            </div>
+
+            <div class="btn-row">
+                <button class="btn btn-secondary" onclick="closeAddAssetModal()">取消</button>
+                <button class="btn btn-primary" id="create-asset-btn" onclick="createAsset()">创建代币</button>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>

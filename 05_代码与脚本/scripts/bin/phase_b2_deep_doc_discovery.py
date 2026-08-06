@@ -510,6 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Phase B2: 并发版文档发现")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--limit", type=int, default=500, help="最大处理数量")
+    p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID")
     p.add_argument("--workers", type=int, default=20, help="并发线程数")
     p.add_argument("--timeout", type=int, default=10, help="读取超时(秒)")
     p.add_argument("--flush-every", type=int, default=50, help="每 N 条 flush 一次 DB")
@@ -542,6 +543,9 @@ def main() -> int:
         [f"COALESCE(discovered_from, '') NOT LIKE %s"] * len(NOISE_DISCOVERED_FROM_PATTERNS)
     )
     noise_params: list = [f"%{p}%" for p in NOISE_DISCOVERED_FROM_PATTERNS]
+    asset_filter = ""
+    if args.asset_id is not None:
+        asset_filter = " AND asset_id = %s"
     sql = f"""
         SELECT entry_id, entity_type, asset_id, protocol_id, source_code,
                entry_type, entry_url
@@ -549,6 +553,7 @@ def main() -> int:
         WHERE entry_type = ANY(%s)
           AND deep_crawled_at IS NULL
           AND ({noise_clauses})
+          {asset_filter}
         ORDER BY
             CASE WHEN source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
             CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
@@ -557,13 +562,19 @@ def main() -> int:
     """
     with get_connection(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            params = [list(ENTRY_TYPES_TO_CRAWL)] + noise_params + [args.limit]
+            params = [list(ENTRY_TYPES_TO_CRAWL)] + noise_params
+            if args.asset_id is not None:
+                params.append(args.asset_id)
+            params.append(args.limit)
             cur.execute(sql, params)
             entries = [dict(row) for row in cur.fetchall()]
 
     if not entries:
         print(json.dumps({"status": "no_candidates"}, ensure_ascii=False))
         return 0
+
+    if args.asset_id is not None:
+        print(f"[asset_id={args.asset_id}] 待处理: {len(entries)} 条入口")
 
     _total = len(entries)
     docs_count = sum(1 for e in entries if e["entry_type"] == "docs")

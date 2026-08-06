@@ -2005,6 +2005,18 @@
                 </div>`).join('');
         }
 
+        async function triggerDeepCrawl (assetId) {
+            try {
+                const res = await fetch(`/api/assets/${assetId}/deep_crawl`, { method: 'POST' });
+                const data = await res.json();
+                if (data.ok) {
+                    console.log(`B2 deep crawl triggered for asset ${assetId}, pid=${data.data.pid}`);
+                }
+            } catch (e) {
+                console.error('trigger deep crawl failed:', e);
+            }
+        }
+
         async function createAsset () {
             const symbol = document.getElementById('create-symbol').value.trim();
             const name = document.getElementById('create-name').value.trim();
@@ -2042,15 +2054,14 @@
                 }
                 const d = data.data;
                 if (d.created) {
-                    alert(`已创建代币 ${d.symbol}（${d.name}），已添加 ${d.entry_count} 条链接`);
+                    alert(`已创建代币 ${d.symbol}（${d.name}），已添加 ${d.entry_count} 条链接，正在触发深度爬取...`);
                     closeAddAssetModal();
                     loadDashboard();
-                    // 自动打开新资产的资料面板
                     selectedAssetId = d.asset_id;
                     loadMaterials(d.asset_id);
+                    triggerDeepCrawl(d.asset_id);
                 } else {
                     alert(d.message || '资产已存在');
-                    // 帮用户跳转到已有资产
                     closeAddAssetModal();
                     selectedAssetId = d.asset_id;
                     loadMaterials(d.asset_id);

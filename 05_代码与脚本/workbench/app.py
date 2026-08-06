@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import subprocess
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 
@@ -404,6 +405,35 @@ def api_create_asset():
             links=links,
         )
         return jsonify({"ok": True, "data": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/assets/<int:asset_id>/deep_crawl", methods=["POST"])
+def api_trigger_deep_crawl(asset_id: int):
+    """立即触发指定资产的 B2 深度文档爬取。"""
+    try:
+        script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
+        cmd = [
+            sys.executable, "-u", script,
+            "--asset-id", str(asset_id),
+            "--limit", "100",
+            "--workers", "10",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(SCRIPTS_BIN),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return jsonify({
+            "ok": True,
+            "data": {
+                "asset_id": asset_id,
+                "pid": proc.pid,
+                "message": "B2 深度爬取已触发，正在后台运行",
+            },
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

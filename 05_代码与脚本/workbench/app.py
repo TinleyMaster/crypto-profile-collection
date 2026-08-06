@@ -44,13 +44,6 @@ def _get_db_stats():
 
 # ── 任务定义 ──
 TASK_DEFS = {
-    "b2_deep_discovery": {
-        "name": "B2 深度文档发现",
-        "description": "从 doc_source_entry 深度爬取 HTML，发现嵌入的文档链接",
-        "script": "phase_b2_deep_doc_discovery.py",
-        "default_args": ["--limit", "1000", "--workers", "15", "--timeout", "8"],
-        "category": "文档采集",
-    },
     "b2_auto_loop": {
         "name": "B2 深度文档发现（自动循环）",
         "description": "持续运行 B2，直到 docs 类型全部爬完",
@@ -149,13 +142,6 @@ TASK_DEFS = {
         "default_args": ["--limit", "50"],
         "category": "数据源采集",
         "hidden": True,
-    },
-    "b2_ai_noise_clean": {
-        "name": "B2 AI 噪声清理",
-        "description": "规则直删(paperdigest等)+AI精筛(GitHub blob/tree)，RPM=300 高速版",
-        "script": "phase_b2_ai_noise_clean.py",
-        "default_args": ["--limit", "500", "--batch-size", "100", "--rpm", "300", "--source", "all"],
-        "category": "AI 筛选",
     },
     "b2_ai_noise_clean_auto": {
         "name": "B2 AI 噪声清理（自动循环）",

@@ -12,5 +12,6 @@ LEFT JOIN biz.doc_source_entry AS dse
    AND dse.source_code = 'cmc'
 WHERE
     i.urls IS NOT NULL
+    AND dse.entry_id IS NULL
 ORDER BY i.cmc_id
 LIMIT %s;

@@ -222,7 +222,7 @@ def get_task_progress() -> list[dict]:
                 SELECT COUNT(DISTINCT asm.asset_id)
                 FROM src_dl.protocol_list p
                 INNER JOIN core.asset_source_map asm ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
-                WHERE (p.url IS NOT NULL AND p.url != '') OR (p.twitter IS NOT NULL AND p.twitter != '')
+                WHERE (p.url IS NOT NULL AND TRIM(p.url) != '') OR (p.twitter IS NOT NULL AND TRIM(p.twitter) != '')
                 """
             )
             total = cur.fetchone()[0]
@@ -233,7 +233,7 @@ def get_task_progress() -> list[dict]:
                 INNER JOIN core.asset_source_map asm ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
                 INNER JOIN biz.doc_source_entry dse ON dse.asset_id = asm.asset_id
                     AND dse.source_code = 'dl' AND dse.entity_type = 'asset'
-                WHERE (p.url IS NOT NULL AND p.url != '') OR (p.twitter IS NOT NULL AND p.twitter != '')
+                WHERE (p.url IS NOT NULL AND TRIM(p.url) != '') OR (p.twitter IS NOT NULL AND TRIM(p.twitter) != '')
                 """
             )
             done = cur.fetchone()[0]

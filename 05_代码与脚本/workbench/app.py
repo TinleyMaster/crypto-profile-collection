@@ -135,6 +135,21 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "dl_refresh_docs": {
+        "name": "DL 补充文档入口",
+        "description": "从 DefiLlama protocol_list 的 url/twitter 提取官网链接，写入 doc_source_entry",
+        "script": "refresh_doc_source_entries_from_dl.py",
+        "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "dl_refresh_docs_auto": {
+        "name": "DL 补充文档入口（自动循环）",
+        "description": "自动循环，每批200资产，直到全部处理完",
+        "script": "refresh_doc_source_entries_from_dl_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "github_activity": {
         "name": "GitHub 开发活跃度采集",
         "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",

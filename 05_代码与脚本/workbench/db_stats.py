@@ -205,6 +205,36 @@ def get_task_progress() -> list[dict]:
                 "pct": round(done / total * 100, 1) if total > 0 else 0,
             })
 
+            # 3.5. DL 补充文档入口
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_dl.protocol_list p
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
+                WHERE p.url IS NOT NULL OR p.twitter IS NOT NULL
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_dl.protocol_list p
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
+                INNER JOIN biz.doc_source_entry dse ON dse.asset_id = asm.asset_id
+                    AND dse.source_code = 'dl' AND dse.entity_type = 'asset'
+                WHERE p.url IS NOT NULL OR p.twitter IS NOT NULL
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "DL 补充文档入口",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
             # 4. B2 深度文档发现（只统计可爬的 entry_type）
             cur.execute(
                 """

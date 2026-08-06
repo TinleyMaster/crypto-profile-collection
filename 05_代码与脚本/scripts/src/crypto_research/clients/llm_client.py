@@ -316,3 +316,123 @@ class LLMClient:
                 }
                 for item in items
             ]
+
+    def batch_check_asset_noise(
+        self,
+        asset_symbol: str,
+        asset_name: str,
+        domain_groups: list[dict[str, Any]],
+        asset_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        按资产上下文判断域名/链接是否为噪声。
+
+        与 batch_check_crypto_relevance 的区别：
+        - 按资产分组，AI 能看到同一资产的所有域名，判断更准确
+        - 按域名粒度判断（而非逐条 URL），效率高很多
+
+        Args:
+            asset_symbol: 代币符号
+            asset_name: 代币名称
+            domain_groups: [{domain, count, sample_urls: [url, ...], entry_ids: [id, ...]}]
+            asset_id: 资产 ID（仅用于日志）
+
+        Returns:
+            [{domain, noise: bool, reason: str, affected_ids: [id, ...]}]
+        """
+        if not domain_groups:
+            return []
+
+        system_prompt = (
+            "你是一个加密货币投研资料筛选专家。你的任务是：给定一个特定加密资产，"
+            "判断其文档链接中哪些域名与**该资产本身**或加密/Web3 投研直接相关，哪些是噪声。\n"
+            "\n"
+            "判断标准：\n"
+            "- 相关（noise=false）：与该代币/项目直接相关的文档（白皮书、审计、代币经济学、"
+            "官方文档、官方博客、社区等），或加密行业通用投研资料（审计平台、安全报告、"
+            "行业分析等）。\n"
+            "- 噪声（noise=true）：通用技术文档、非加密包管理（npm/pip/nuget/packagist/ubuntu等）、"
+            "通用编程框架、非加密学术论文、社交平台个人主页、电商网站、"
+            "与该资产完全无关的其他项目文档等。\n"
+            "\n"
+            "重要提示：\n"
+            "- github.com 上的链接如果在其他域名的仓库里（不是该资产官方仓库），且是通用"
+            "编程库/框架/工具，则判定为噪声。\n"
+            "- 审计/安全平台（如 tech-audit.org, quillaudits, hacken, certik 等）的链接"
+            "如果是加密项目审计，判定为相关。\n"
+            "- 如果 domain 明显是该资产官方域名，判定为相关。\n"
+            "\n"
+            "只输出 JSON，不要输出其他内容。JSON 格式：\n"
+            '{"results": [{"domain": "string", "noise": true/false, "reason": "简短理由"}]}'
+        )
+
+        domains_text_parts = []
+        for g in domain_groups:
+            domain = g["domain"]
+            count = g["count"]
+            samples = g.get("sample_urls", [])[:3]
+            samples_str = "\n    ".join(samples)
+            domains_text_parts.append(
+                f"- {domain}: {count} 条链接\n"
+                f"  样本:\n    {samples_str}"
+            )
+        domains_text = "\n".join(domains_text_parts)
+
+        user_prompt = (
+            f"资产: {asset_symbol} ({asset_name})\n"
+            f"asset_id: {asset_id}\n\n"
+            f"该资产在 deep_crawl 中发现的域名及链接数：\n\n"
+            f"{domains_text}\n\n"
+            f"请判断以上 {len(domain_groups)} 个域名，哪些是噪声。"
+        )
+
+        try:
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+        except Exception as e:
+            return [
+                {"domain": g["domain"], "noise": False, "reason": f"AI调用失败: {e}",
+                 "affected_ids": g.get("entry_ids", [])}
+                for g in domain_groups
+            ]
+
+        # 解析 JSON
+        try:
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                first_line_end = cleaned.find("\n")
+                if first_line_end > 0:
+                    cleaned = cleaned[first_line_end + 1:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3].strip()
+            data = json.loads(cleaned)
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
+
+            # 构建 domain → 结果映射
+            result_map = {}
+            for r in results:
+                domain = r.get("domain", "")
+                if domain:
+                    result_map[domain] = {
+                        "domain": domain,
+                        "noise": bool(r.get("noise", False)),
+                        "reason": str(r.get("reason", ""))[:200],
+                    }
+
+            return [
+                {
+                    "domain": g["domain"],
+                    "noise": result_map.get(g["domain"], {}).get("noise", False),
+                    "reason": result_map.get(g["domain"], {}).get("reason", "未匹配到AI结果"),
+                    "affected_ids": g.get("entry_ids", []),
+                }
+                for g in domain_groups
+            ]
+        except (json.JSONDecodeError, ValueError) as e:
+            # 解析失败时全部默认保留
+            return [
+                {"domain": g["domain"], "noise": False, "reason": f"AI响应解析失败: {e}",
+                 "affected_ids": g.get("entry_ids", [])}
+                for g in domain_groups
+            ]

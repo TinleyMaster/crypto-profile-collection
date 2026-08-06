@@ -164,6 +164,20 @@ TASK_DEFS = {
         "default_args": [],
         "category": "AI 筛选",
     },
+    "b2_ai_noise_clean_by_asset": {
+        "name": "B2 AI 噪声清理（按资产分组）",
+        "description": "按资产聚合域名，AI 一次判断该资产所有域名是否噪声",
+        "script": "phase_b2_ai_noise_clean_by_asset.py",
+        "default_args": ["--execute"],
+        "category": "AI 筛选",
+    },
+    "b2_ai_noise_clean_by_asset_auto": {
+        "name": "B2 AI 噪声清理（按资产·自动循环）",
+        "description": "智能聚合：每轮20个资产，AI 按域名粒度批量判断，效率远超逐条模式",
+        "script": "phase_b2_ai_noise_clean_by_asset_auto.py",
+        "default_args": [],
+        "category": "AI 筛选",
+    },
     "diag_noise": {
         "name": "噪声诊断报告",
         "description": "查看今日新增文档链接的噪声情况（域名分布、噪声占比、采样）",

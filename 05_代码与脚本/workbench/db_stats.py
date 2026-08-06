@@ -11,7 +11,6 @@ import urllib.request
 import urllib.error
 import json
 from pathlib import Path
-
 import psycopg
 import psycopg.rows
 
@@ -335,6 +334,52 @@ def get_task_progress() -> list[dict]:
                 "total": total,
                 "remaining": remaining,
                 "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 6. 链上持仓快照
+            #    候选集: 有合约地址的活跃资产
+            #    done: 已有今日持仓快照的
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT a.asset_id)
+                FROM core.asset a
+                INNER JOIN core.asset_contract_map m ON m.asset_id = a.asset_id
+                WHERE a.status = 'active'
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT hs.asset_id)
+                FROM biz.onchain_holder_snapshot hs
+                WHERE hs.snapshot_date = CURRENT_DATE
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "链上持仓快照采集",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 7. 大额转账监控告警（24h）
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE"
+            )
+            total_alerts = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE AND block_timestamp >= NOW() - INTERVAL '24 hours'"
+            )
+            alerts_24h = cur.fetchone()[0]
+            result.append({
+                "task": "大额转入交易所告警(24h)",
+                "done": alerts_24h,
+                "total": total_alerts,
+                "remaining": total_alerts - alerts_24h,
+                "pct": 0,  # 累计型告警，不展示百分比
             })
 
     return result
@@ -750,3 +795,153 @@ def curate_notebooklm(asset_id: int, force: bool = False) -> dict:
     if stderr:
         return {"ok": False, "error": stderr[:500]}
     return {"ok": False, "error": f"exit code {result.returncode}"}
+
+
+# ── 链上数据监控 ──
+
+
+def get_onchain_holder_snapshot(asset_id: int) -> dict:
+    """获取指定资产的最新持仓快照。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT hs.*, a.canonical_symbol, a.canonical_name
+                FROM biz.onchain_holder_snapshot hs
+                INNER JOIN core.asset a ON a.asset_id = hs.asset_id
+                WHERE hs.asset_id = %s
+                ORDER BY hs.snapshot_date DESC, hs.chain
+            """, (asset_id,))
+            rows = [dict(r) for r in cur.fetchall()]
+
+            # 按链分组
+            by_chain = {}
+            for r in rows:
+                chain = r["chain"]
+                if chain not in by_chain:
+                    by_chain[chain] = []
+                by_chain[chain].append({
+                    "snapshot_date": str(r["snapshot_date"]),
+                    "chain": r["chain"],
+                    "top10_concentration": float(r["top10_concentration"]) if r["top10_concentration"] else None,
+                    "top50_concentration": float(r["top50_concentration"]) if r["top50_concentration"] else None,
+                    "top100_concentration": float(r["top100_concentration"]) if r["top100_concentration"] else None,
+                    "total_holders": r["total_holders"],
+                    "holder_change_7d": r["holder_change_7d"],
+                    "holder_change_30d": r["holder_change_30d"],
+                    "whale_balance_change_7d_pct": float(r["whale_balance_change_7d_pct"]) if r["whale_balance_change_7d_pct"] else None,
+                    "whale_balance_change_30d_pct": float(r["whale_balance_change_30d_pct"]) if r["whale_balance_change_30d_pct"] else None,
+                    "exchange_wallet_pct": float(r["exchange_wallet_pct"]) if r["exchange_wallet_pct"] else None,
+                    "fetched_at": str(r["fetched_at"]) if r["fetched_at"] else None,
+                })
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "symbol": rows[0]["canonical_symbol"] if rows else "",
+        "name": rows[0]["canonical_name"] if rows else "",
+        "by_chain": by_chain,
+    }
+
+
+def get_onchain_transfers(
+    asset_id: int | None = None,
+    is_to_exchange: bool | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """获取大额转账记录，可按资产和转入交易所过滤。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            conditions = []
+            params = []
+
+            if asset_id:
+                conditions.append("tl.asset_id = %s")
+                params.append(asset_id)
+            if is_to_exchange is not None:
+                conditions.append("tl.is_to_exchange = %s")
+                params.append(is_to_exchange)
+
+            where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+            cur.execute(f"""
+                SELECT tl.*, a.canonical_symbol, a.canonical_name
+                FROM biz.onchain_transfer_log tl
+                LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
+                {where}
+                ORDER BY tl.block_timestamp DESC
+                LIMIT %s
+            """, params + [limit])
+
+            return [
+                {
+                    "log_id": r["log_id"],
+                    "asset_id": r["asset_id"],
+                    "symbol": r["canonical_symbol"],
+                    "name": r["canonical_name"],
+                    "chain": r["chain"],
+                    "tx_hash": r["tx_hash"],
+                    "from_address": r["from_address"],
+                    "to_address": r["to_address"],
+                    "value": float(r["value"]),
+                    "value_usd": float(r["value_usd"]) if r["value_usd"] else None,
+                    "from_label": r["from_label"],
+                    "to_label": r["to_label"],
+                    "from_exchange": r["from_exchange"],
+                    "to_exchange": r["to_exchange"],
+                    "block_number": r["block_number"],
+                    "block_timestamp": str(r["block_timestamp"]) if r["block_timestamp"] else None,
+                    "is_to_exchange": r["is_to_exchange"],
+                }
+                for r in cur.fetchall()
+            ]
+
+
+def get_onchain_alert_summary() -> dict:
+    """获取链上告警摘要：最近 24h 转入交易所的大额转账统计。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 24h 转入交易所汇总
+            cur.execute("""
+                SELECT a.canonical_symbol, tl.chain,
+                       COUNT(*) AS tx_count,
+                       SUM(tl.value_usd) AS total_value_usd,
+                       MAX(tl.value_usd) AS max_value_usd,
+                       MAX(tl.block_timestamp) AS latest_at
+                FROM biz.onchain_transfer_log tl
+                LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
+                WHERE tl.is_to_exchange = TRUE
+                  AND tl.block_timestamp >= NOW() - INTERVAL '24 hours'
+                GROUP BY a.canonical_symbol, tl.chain
+                ORDER BY total_value_usd DESC NULLS LAST
+                LIMIT 20
+            """)
+            alerts_24h = [
+                {
+                    "symbol": r["canonical_symbol"] or "?",
+                    "chain": r["chain"],
+                    "tx_count": r["tx_count"],
+                    "total_value_usd": float(r["total_value_usd"]) if r["total_value_usd"] else 0,
+                    "max_value_usd": float(r["max_value_usd"]) if r["max_value_usd"] else 0,
+                    "latest_at": str(r["latest_at"]) if r["latest_at"] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            # 总览
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total_transfers,
+                    COUNT(*) FILTER (WHERE is_to_exchange) AS to_exchange_count,
+                    COALESCE(SUM(value_usd), 0) AS total_value_usd
+                FROM biz.onchain_transfer_log
+            """)
+            totals = dict(cur.fetchone()) if cur.rowcount else {}
+
+    return {
+        "ok": True,
+        "alerts_24h": alerts_24h,
+        "totals": {
+            "total_transfers": totals.get("total_transfers", 0),
+            "to_exchange_count": totals.get("to_exchange_count", 0),
+            "total_value_usd": float(totals.get("total_value_usd", 0)),
+        },
+    }

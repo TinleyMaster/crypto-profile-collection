@@ -216,6 +216,36 @@ TASK_DEFS = {
         "default_args": [],
         "category": "诊断",
     },
+    "chain_holder_snapshot": {
+        "name": "链上持仓快照采集",
+        "description": "从 Etherscan/BSCScan 拉取代币 Top 持有者，计算持仓集中度",
+        "script": "phase_chain_holder_snapshot.py",
+        "default_args": ["--limit", "50"],
+        "category": "链上数据",
+        "hidden": True,
+    },
+    "chain_holder_snapshot_auto": {
+        "name": "链上持仓快照采集（自动循环）",
+        "description": "自动循环，每批20资产，采集全部代币的持仓快照数据",
+        "script": "phase_chain_holder_snapshot_auto.py",
+        "default_args": [],
+        "category": "链上数据",
+    },
+    "chain_transfer_monitor": {
+        "name": "大额转账监控",
+        "description": "从 Etherscan/BSCScan 拉取大额转账，标记转入交易所的潜在砸盘信号",
+        "script": "phase_chain_transfer_monitor.py",
+        "default_args": ["--limit", "50"],
+        "category": "链上数据",
+        "hidden": True,
+    },
+    "chain_transfer_monitor_auto": {
+        "name": "大额转账监控（自动循环）",
+        "description": "自动循环，每批20资产，持续监控大额转账并标记转入交易所",
+        "script": "phase_chain_transfer_monitor_auto.py",
+        "default_args": [],
+        "category": "链上数据",
+    },
     "cleanup_pollution": {
         "name": "清理 GitHub 跨仓库污染",
         "description": "删除 github.com deep_crawl 条目并重置爬取状态，修复 asset_id 大规模污染",
@@ -472,6 +502,48 @@ def api_notebooklm_curate(asset_id: int):
     try:
         force = request.args.get("force", "0") == "1"
         data = _get_db_stats().curate_notebooklm(asset_id, force=force)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── 链上数据监控 ──
+
+
+@app.route("/api/onchain/holder/<int:asset_id>")
+def api_onchain_holder(asset_id: int):
+    """获取指定资产的最新持仓快照。"""
+    try:
+        data = _get_db_stats().get_onchain_holder_snapshot(asset_id)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/onchain/transfers")
+def api_onchain_transfers():
+    """获取大额转账记录。"""
+    try:
+        asset_id = request.args.get("asset_id", type=int)
+        is_to_exchange = request.args.get("to_exchange")
+        if is_to_exchange is not None:
+            is_to_exchange = is_to_exchange.lower() in ("true", "1", "yes")
+        limit = min(int(request.args.get("limit", 50)), 200)
+        data = _get_db_stats().get_onchain_transfers(
+            asset_id=asset_id,
+            is_to_exchange=is_to_exchange,
+            limit=limit,
+        )
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/onchain/alerts")
+def api_onchain_alerts():
+    """获取链上告警摘要：24h 转入交易所大额转账。"""
+    try:
+        data = _get_db_stats().get_onchain_alert_summary()
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

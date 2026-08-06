@@ -13,6 +13,8 @@ class Settings:
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     coingecko_api_key: str | None = None
     defillama_base_url: str = "https://api.llama.fi"
+    etherscan_api_key: str | None = None
+    bscscan_api_key: str | None = None
     github_token: str | None = None
     # LLM (OpenAI 兼容)
     openai_api_key: str | None = None
@@ -54,6 +56,8 @@ def get_settings(require_database: bool = True) -> Settings:
         cmc_api_key=cmc_api_key,
         database_url=database_url or None,
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip() or None,
+        etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
+        bscscan_api_key=os.getenv("BSCSCAN_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
         openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,

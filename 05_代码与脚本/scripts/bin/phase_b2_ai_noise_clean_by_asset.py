@@ -27,6 +27,7 @@ if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
 import psycopg
+import psycopg.rows
 from crypto_research.config import get_settings
 from crypto_research.clients.llm_client import LLMClient
 
@@ -98,7 +99,7 @@ def run_rule_delete(conn, execute: bool) -> int:
     """规则直删：删除明显噪声域名下的所有 deep_crawl 链接。"""
     deleted = 0
     for label, pattern in RULE_NOISE_DOMAINS.items():
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT count(*) FROM biz.doc_source_entry "
                 "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
@@ -108,7 +109,7 @@ def run_rule_delete(conn, execute: bool) -> int:
         if cnt == 0:
             continue
         if execute:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     "DELETE FROM biz.doc_source_entry "
                     "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
@@ -127,7 +128,7 @@ def get_asset_domain_groups(conn, limit: int) -> list[dict]:
     获取有未检查 deep_crawl 链接的资产，按资产分组，返回每个资产的域名聚合信息。
     优先处理链接数多的资产。
     """
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             SELECT
@@ -152,7 +153,7 @@ def get_asset_domain_groups(conn, limit: int) -> list[dict]:
     result = []
     for asset in assets:
         aid = asset["asset_id"]
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # 按域名聚合未检查的 deep_crawl 链接
             cur.execute(
                 """
@@ -192,7 +193,7 @@ def mark_checked(conn, entry_ids: list[int]) -> None:
     """批量标记已检查。"""
     if not entry_ids:
         return
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "UPDATE biz.doc_source_entry SET ai_noise_checked_at = NOW() "
             "WHERE entry_id = ANY(%s)",
@@ -205,7 +206,7 @@ def delete_noise_ids(conn, entry_ids: list[int]) -> None:
     """批量删除噪声链接。"""
     if not entry_ids:
         return
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "DELETE FROM biz.doc_source_entry WHERE entry_id = ANY(%s)",
             (entry_ids,),

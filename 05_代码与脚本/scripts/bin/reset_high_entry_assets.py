@@ -27,6 +27,7 @@ if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
 import psycopg
+import psycopg.rows
 from crypto_research.config import get_settings
 
 settings = get_settings(require_database=True)
@@ -45,7 +46,7 @@ def main():
     print("=" * 70)
 
     with psycopg.connect(settings.database_url) as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # 1. 找出超阈值资产
             cur.execute(
                 """
@@ -85,7 +86,7 @@ def main():
         # 2. 执行删除 + 重置
         asset_ids = [a["asset_id"] for a in assets]
 
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # 删除 deep_crawl 链接
             cur.execute(
                 "DELETE FROM biz.doc_source_entry "

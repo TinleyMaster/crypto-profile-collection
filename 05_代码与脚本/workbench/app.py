@@ -312,6 +312,15 @@ def api_task_defs():
     return jsonify({"ok": True, "defs": defs})
 
 
+@app.route("/api/task_progress")
+def api_task_progress():
+    try:
+        data = _get_db_stats().get_task_progress()
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -780,6 +780,77 @@
             background: #374151;
             color: #d1d5db;
         }
+
+        /* 任务进度区 */
+        .progress-section {
+            margin-bottom: 28px;
+        }
+
+        .progress-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .progress-item {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .progress-item .prog-label {
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6e8eb;
+            width: 180px;
+            flex-shrink: 0;
+        }
+
+        .progress-item .prog-bar-wrap {
+            flex: 1;
+            height: 6px;
+            background: #1e222a;
+            border-radius: 3px;
+            overflow: hidden;
+            min-width: 100px;
+        }
+
+        .progress-item .prog-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+
+        .progress-item .prog-bar-fill.low {
+            background: linear-gradient(90deg, #f59e0b, #fbbf24);
+        }
+
+        .progress-item .prog-bar-fill.near {
+            background: linear-gradient(90deg, #10b981, #34d399);
+        }
+
+        .progress-item .prog-nums {
+            font-size: 11px;
+            color: #8a92a0;
+            width: 160px;
+            text-align: right;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .progress-item .prog-pct {
+            font-size: 12px;
+            font-weight: 600;
+            color: #60a5fa;
+            width: 45px;
+            text-align: right;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 
@@ -839,6 +910,15 @@
                 <h3>文档资产</h3>
                 <div class="value" id="stat-docs">-</div>
                 <div class="sub" id="stat-docs-detail">-</div>
+            </div>
+        </div>
+
+        <!-- 任务进度 -->
+        <h2>📈 任务进度</h2>
+        <div class="refresh-note">每 30 秒自动刷新</div>
+        <div class="progress-section">
+            <div class="progress-list" id="progress-list">
+                <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
             </div>
         </div>
 
@@ -911,7 +991,7 @@
                 const da = d.doc_asset || {};
                 document.getElementById('stat-docs').textContent = da.total?.toLocaleString() || '-';
                 document.getElementById('stat-docs-detail').textContent =
-                    `已下载: ${da.downloaded || 0} · 已解析: ${da.parsed || 0}`;
+                    `已下载: ${da.downloaded || 0}`;
 
                 document.getElementById('refresh-time').textContent =
                     ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');
@@ -1351,10 +1431,38 @@
             document.getElementById('log-content').innerHTML = '<div class="empty">日志已清空（刷新后会重新加载）</div>';
         }
 
+        // ── 任务进度 ──
+        async function loadTaskProgress () {
+            try {
+                const res = await fetch('/api/task_progress');
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+                const items = data.data;
+                const list = document.getElementById('progress-list');
+                list.innerHTML = items.map(item => {
+                    let barClass = '';
+                    if (item.pct >= 90) barClass = ' near';
+                    else if (item.pct < 30) barClass = ' low';
+                    return `
+                    <div class="progress-item">
+                        <span class="prog-label">${escapeHtml(item.task)}</span>
+                        <div class="prog-bar-wrap">
+                            <div class="prog-bar-fill${barClass}" style="width:${item.pct}%"></div>
+                        </div>
+                        <span class="prog-nums">${item.done.toLocaleString()} / ${item.total.toLocaleString()} · 剩 ${item.remaining.toLocaleString()}</span>
+                        <span class="prog-pct">${item.pct}%</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                console.error('task progress error:', e);
+            }
+        }
+
         // ── 初始化 ──
         loadDashboard();
         loadTaskDefs();
         loadTasks();
+        loadTaskProgress();
 
         // 只在选中运行中任务时刷新日志
         setInterval(() => {
@@ -1385,6 +1493,7 @@
         }, 3000);
 
         setInterval(loadDashboard, 30000);
+        setInterval(loadTaskProgress, 30000);
     </script>
 </body>
 

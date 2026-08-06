@@ -121,6 +121,139 @@ def get_pending_b2() -> dict:
     return result
 
 
+def get_task_progress() -> list[dict]:
+    """返回各自动循环任务的进度：已处理/总量/百分比。"""
+    result = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # 1. CG 拉取币种详情
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM src_cg.coin_list l
+                LEFT JOIN src_cg.coin_info i ON i.coin_id = l.coin_id
+                WHERE i.coin_id IS NULL
+                """
+            )
+            remaining = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM src_cg.coin_info")
+            done = cur.fetchone()[0]
+            total = done + remaining
+            result.append({
+                "task": "CG 拉取币种详情",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 2. CG 补充文档入口
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_cg.coin_info i
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'cg' AND asm.source_asset_key = i.coin_id
+                WHERE i.homepage_url IS NOT NULL OR i.links IS NOT NULL
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asset_id) FROM biz.doc_source_entry
+                WHERE source_code = 'cg' AND entity_type = 'asset'
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "CG 补充文档入口",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 3. CMC 补充文档入口
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asm.asset_id)
+                FROM src_cmc.cmc_asset_info i
+                INNER JOIN core.asset_source_map asm ON asm.source_code = 'cmc' AND asm.source_asset_key = i.cmc_id::text
+                WHERE i.urls IS NOT NULL
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT asset_id) FROM biz.doc_source_entry
+                WHERE source_code = 'cmc' AND entity_type = 'asset'
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "CMC 补充文档入口",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 4. B2 深度文档发现（只统计可爬的 entry_type）
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM biz.doc_source_entry
+                WHERE discovered_from NOT LIKE 'deep_crawl:%'
+                  AND entry_type IN ('official_website', 'docs', 'docs_portal', 'medium', 'announcement',
+                                     'twitter', 'telegram', 'reddit', 'facebook')
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM biz.doc_source_entry
+                WHERE discovered_from NOT LIKE 'deep_crawl:%'
+                  AND entry_type IN ('official_website', 'docs', 'docs_portal', 'medium', 'announcement',
+                                     'twitter', 'telegram', 'reddit', 'facebook')
+                  AND deep_crawled_at IS NOT NULL
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "B2 深度文档发现",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+            # 5. B2 AI 噪声清理
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM biz.doc_source_entry
+                WHERE discovered_from LIKE 'deep_crawl:%'
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM biz.doc_source_entry
+                WHERE discovered_from LIKE 'deep_crawl:%' AND ai_noise_checked_at IS NOT NULL
+                """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "B2 AI 噪声清理",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
+    return result
+
+
 def search_assets(query: str, limit: int = 20) -> list[dict]:
     """按 symbol 或 name 搜索资产，用于下拉自动补全。"""
     with get_db() as conn:

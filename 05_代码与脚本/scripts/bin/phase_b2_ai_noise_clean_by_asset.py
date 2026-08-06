@@ -92,6 +92,30 @@ RULE_NOISE_DOMAINS = {
     "pinterest": "%www.pinterest.com%",
     "baiyuan-tech": "%baiyuan-tech.github.io%",
     "shagunsodhani": "%shagunsodhani.com%",
+    # ── 2026-08-06 新增：跨资产噪声域名 ──
+    # 代币化平台（非项目文档）
+    "pump-fun": "%pump.fun%",
+    "socios": "%www.socios.com%",
+    "xstocks-fi": "%xstocks.fi%",
+    "xstocks-com": "%xstocks.com%",
+    "backed-fi": "%assets.backed.fi%",
+    "backedassets-fi": "%www.backedassets.fi%",
+    "backed-fi-root": "%backed.fi%",
+    "reality-finance": "%realityfinance.xyz%",
+    # 聚合器/CDN
+    "coinmarketcap": "%coinmarketcap.com%",
+    "robinhood-cdn": "%cdn.robinhood.com%",
+    # 学术论文/原始代码
+    "iacr": "%eprint.iacr.org%",
+    "raw-github": "%raw.githubusercontent.com%",
+    # 审计/安全平台聚合器
+    "cyberscope": "%www.cyberscope.io%",
+    # 通用代码托管（非审计相关）
+    "github-cyberscope": "%github.com/cyberscope-io%",
+    "github-quillhash": "%github.com/Quillhash%",
+    "github-peckshield": "%github.com/peckshield%",
+    "github-verichains": "%github.com/verichains%",
+    "github-bnb-whitepaper": "%github.com/bnb-chain/whitepaper%",
 }
 
 
@@ -121,6 +145,88 @@ def run_rule_delete(conn, execute: bool) -> int:
     if deleted > 0:
         print(f"  规则直删合计: {deleted} 条\n")
     return deleted
+
+
+# ── 审计/安全平台域名白名单：这些平台的链接是投研材料，不删除 ──
+AUDIT_DOMAINS = {
+    "audits.sherlock.xyz",
+    "halborn.com",
+    "openzeppelin.com",
+    "certik.com",
+    "chainsecurity.com",
+    "code4rena.com",
+    "consensys.net",
+    "hacken.io",
+    "immunefi.com",
+    "tech-audit.org",
+    "quillaudits.com",
+    "www.coinfabrik.com",
+    "reports.yaudit.dev",
+    "guardianaudits.com",
+    "sayfer.io",
+    "paladinsec.co",
+    "softstack.io",
+    "wp.hacken.io",
+    "trailofbits.com",
+    "quantstamp.com",
+    "solidified.io",
+    "mixbytes.io",
+    "arbitraryexecution.com",
+    "slowmist.com",
+    "peckshield.com",
+}
+
+
+def reset_ai_false_positives(conn, execute: bool) -> int:
+    """
+    重置 AI 误判的 deep_crawl 条目。
+    对于关联 >50 资产的域名（非审计平台），将 ai_noise_checked_at 重置为 NULL，
+    让 AI 在资产上下文中重新评估。
+    """
+    reset_count = 0
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 找出 deep_crawl 中关联 >50 资产的域名
+        cur.execute("""
+            SELECT LOWER(SPLIT_PART(REPLACE(REPLACE(entry_url, 'https://', ''), 'http://', ''), '/', 1)) AS domain,
+                   count(DISTINCT asset_id) AS asset_cnt,
+                   count(*) AS entry_cnt
+            FROM biz.doc_source_entry
+            WHERE discovered_from LIKE 'deep_crawl:%%'
+              AND ai_noise_checked_at IS NOT NULL
+            GROUP BY 1
+            HAVING count(DISTINCT asset_id) > 50
+            ORDER BY asset_cnt DESC
+        """)
+        domains = [dict(r) for r in cur.fetchall()]
+
+    for d in domains:
+        domain = d["domain"]
+        # 跳过审计平台域名
+        if domain in AUDIT_DOMAINS:
+            continue
+        # 跳过通用代码托管平台（github.com 是合法代码托管，不重置）
+        if domain in ("github.com", "gitlab.com", "bitbucket.org"):
+            continue
+
+        if execute:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    UPDATE biz.doc_source_entry
+                    SET ai_noise_checked_at = NULL
+                    WHERE entry_url LIKE %s
+                      AND discovered_from LIKE 'deep_crawl:%%'
+                      AND ai_noise_checked_at IS NOT NULL
+                """, (f"%{domain}%",))
+                affected = cur.rowcount
+            conn.commit()
+            print(f"  [AI误判纠正] {domain}: {affected} 条已重置（{d['asset_cnt']} 资产，{d['entry_cnt']} 条）")
+        else:
+            print(f"  [AI误判纠正] {domain}: {d['entry_cnt']} 条待重置（{d['asset_cnt']} 资产）(dry-run)")
+        reset_count += d["entry_cnt"]
+
+    if reset_count > 0:
+        print(f"  AI误判纠正合计: {reset_count} 条\n")
+    return reset_count
 
 
 def get_asset_domain_groups(conn, limit: int) -> list[dict]:
@@ -235,6 +341,11 @@ def main():
         if not args.skip_rule_delete:
             print("\n── 规则直删 ──")
             run_rule_delete(conn, args.execute)
+
+        # ── Step 1.5: AI 误判纠正 ──
+        # 对关联 >50 资产的非审计域名，重置 ai_noise_checked_at
+        print("\n── AI 误判纠正 ──")
+        reset_ai_false_positives(conn, args.execute)
 
         # ── Step 2: 按资产分组，AI 判断 ──
         print(f"\n── 按资产 AI 判断（最多 {args.limit} 个资产）──")

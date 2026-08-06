@@ -75,6 +75,21 @@ AGGREGATION_DOMAINS = {
     "blog.openzeppelin.com",
     "www.certora.com",
     "certora.cdn.prismic.io",
+    # ── 2026-08-06 新增：跨资产污染源阻断 ──
+    "aave.com",                    # Aave 文档站，被当成多项目文档
+    "audits.sherlock.xyz",         # Sherlock 审计平台，跨资产污染
+    "accounting.auditchain.finance",  # Auditchain 会计平台
+    "quillaudits.medium.com",      # 审计报告聚合
+    "cdn.robinhood.com",           # Robinhood CDN
+    "github.com/cyberscope-io",    # 审计聚合仓库
+    "github.com/Quillhash",        # 审计聚合仓库
+    "github.com/peckshield",       # 审计聚合仓库
+    "github.com/verichains",       # 审计聚合仓库
+    "github.com/bnb-chain/whitepaper",  # 白皮书 forks
+    "realityfinance.xyz",          # RWA 代币化平台
+    "assets.backed.fi",            # 代币化资产平台
+    "www.backedassets.fi",         # 代币化资产平台
+    "backed.fi",                   # 代币化资产平台
 }
 
 # ── URL 排除模式（按域名 / 路径匹配）──

@@ -12,6 +12,9 @@ import urllib.error
 import json
 from pathlib import Path
 
+import psycopg
+import psycopg.rows
+
 # Docker 环境下直接用 /app/scripts/src，本地则相对路径计算
 if os.path.exists("/app/scripts/src"):
     SCRIPTS_SRC = Path("/app/scripts/src")
@@ -693,56 +696,57 @@ def create_asset_with_links(
         "name": name,
     }
 
-    # ── NotebookLM 投研精选 ──
 
-    def get_notebooklm_links(self, asset_id: int) -> dict:
-        """获取已缓存的 NotebookLM 精选链接。"""
-        cur = self.conn.cursor(row_factory=psycopg.rows.dict_row)
-        cur.execute(
-            "SELECT entry_url FROM biz.doc_source_notebooklm WHERE asset_id = %s ORDER BY ai_rank",
-            (asset_id,),
-        )
-        urls = [r["entry_url"] for r in cur.fetchall()]
-        return {"ok": True, "asset_id": asset_id, "count": len(urls), "urls": urls}
+# ── NotebookLM 投研精选 ──
 
-    def curate_notebooklm(self, asset_id: int, force: bool = False) -> dict:
-        """触发 NotebookLM 精选生成（异步后台执行）。"""
-        import subprocess
-        import os
 
-        script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "curate_notebooklm.py")
-        cmd = [
-            sys.executable, "-u", script,
-            "--asset-id", str(asset_id),
-            "--top-n", "50",
-        ]
-        if force:
-            cmd.append("--force")
+def get_notebooklm_links(asset_id: int) -> dict:
+    """获取已缓存的 NotebookLM 精选链接。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT entry_url FROM biz.doc_source_notebooklm WHERE asset_id = %s ORDER BY ai_rank",
+                (asset_id,),
+            )
+            urls = [r["entry_url"] for r in cur.fetchall()]
+    return {"ok": True, "asset_id": asset_id, "count": len(urls), "urls": urls}
 
-        # 同步执行（用户等待 AI 结果）
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,  # 3 分钟超时
-            cwd=str(Path(script).parent),
-        )
 
-        output = result.stdout.strip()
-        stderr = result.stderr.strip() if result.stderr else ""
+def curate_notebooklm(asset_id: int, force: bool = False) -> dict:
+    """触发 NotebookLM 精选生成（配额粗筛 + AI 排序）。"""
+    import subprocess
 
-        # 解析最后一行 JSON
-        json_line = None
-        for line in output.splitlines():
-            try:
-                parsed = json.loads(line)
-                if "status" in parsed:
-                    json_line = parsed
-            except json.JSONDecodeError:
-                continue
+    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "curate_notebooklm.py")
+    cmd = [
+        sys.executable, "-u", script,
+        "--asset-id", str(asset_id),
+        "--top-n", "50",
+    ]
+    if force:
+        cmd.append("--force")
 
-        if json_line:
-            return {"ok": True, "data": json_line}
-        if stderr:
-            return {"ok": False, "error": stderr[:500]}
-        return {"ok": False, "error": f"exit code {result.returncode}"}
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(Path(script).parent),
+    )
+
+    output = result.stdout.strip()
+    stderr = result.stderr.strip() if result.stderr else ""
+
+    json_line = None
+    for line in output.splitlines():
+        try:
+            parsed = json.loads(line)
+            if "status" in parsed:
+                json_line = parsed
+        except json.JSONDecodeError:
+            continue
+
+    if json_line:
+        return {"ok": True, "data": json_line}
+    if stderr:
+        return {"ok": False, "error": stderr[:500]}
+    return {"ok": False, "error": f"exit code {result.returncode}"}

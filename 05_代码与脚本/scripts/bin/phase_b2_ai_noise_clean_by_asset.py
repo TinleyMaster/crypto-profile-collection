@@ -105,7 +105,7 @@ def run_rule_delete(conn, execute: bool) -> int:
                 "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
                 (pattern,),
             )
-            cnt = cur.fetchone()[0]
+            cnt = cur.fetchone()["count"]
         if cnt == 0:
             continue
         if execute:

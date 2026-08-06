@@ -1,6 +1,7 @@
 """
-Phase 1: 大额转账监控（自动循环）。
-每轮处理一批资产，直到全部完成。
+Phase 1: 大额转账监控（告警模式·自动循环）。
+只关注转入交易所的大额转账（潜在砸盘信号），不存储所有转账明细。
+每轮扫描增量，标记告警。
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ if SRC_DIR not in sys.path:
 
 sys.stdout.reconfigure(line_buffering=True)
 
-BATCH_SIZE = 20
-MAX_ROUNDS = 500
+BATCH_SIZE = 30
+MAX_ROUNDS = 200
 TIMEOUT = 1800
 
 
@@ -26,7 +27,8 @@ def main():
     script = os.path.join(SCRIPT_DIR, "phase_chain_transfer_monitor.py")
 
     total_processed = 0
-    total_written = 0
+    total_alerts = 0
+    zero_consecutive = 0
 
     for round_num in range(1, MAX_ROUNDS + 1):
         print(f"\n{'='*60}")
@@ -35,7 +37,7 @@ def main():
 
         try:
             result = subprocess.run(
-                [sys.executable, "-u", script, "--limit", str(BATCH_SIZE)],
+                [sys.executable, "-u", script, "--limit", str(BATCH_SIZE), "--alarm-only"],
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT,
@@ -59,11 +61,10 @@ def main():
             print(f"  Round {round_num} 异常退出 (code={result.returncode})，终止")
             break
 
-        # 解析本轮统计
         round_processed = 0
-        round_written = 0
+        round_alerts = 0
         for line in output.splitlines():
-            if "处理" in line and "写入" in line:
+            if "处理" in line and "告警" in line:
                 parts = line.split(",")
                 for p in parts:
                     p = p.strip()
@@ -72,25 +73,29 @@ def main():
                             round_processed = int(p.split()[1])
                         except (ValueError, IndexError):
                             pass
-                    elif "写入" in p:
+                    elif "告警" in p:
                         try:
-                            round_written = int(p.split()[1])
+                            round_alerts = int(p.split()[1])
                         except (ValueError, IndexError):
                             pass
                 break
 
         total_processed += round_processed
-        total_written += round_written
+        total_alerts += round_alerts
 
-        print(f"  累计: 处理={total_processed}  写入={total_written}")
+        print(f"  累计: 处理={total_processed}  告警={total_alerts}")
 
         if round_processed == 0:
-            print("  本轮无新转账，可能已全部处理完成")
-            break
+            zero_consecutive += 1
+            if zero_consecutive >= 3:
+                print("  连续3轮无新数据，停止")
+                break
+        else:
+            zero_consecutive = 0
 
         time.sleep(2)
 
-    print(f"\nAll rounds complete.  累计: 处理={total_processed}  写入={total_written}")
+    print(f"\nAll rounds complete.  累计: 处理={total_processed}  告警={total_alerts}")
 
 
 if __name__ == "__main__":

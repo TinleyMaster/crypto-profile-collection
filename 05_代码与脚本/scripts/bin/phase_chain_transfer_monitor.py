@@ -126,8 +126,10 @@ def collect_transfers(
     asset: dict,
     exchange_map: dict[str, str],
     dry_run: bool = False,
+    alarm_only: bool = False,
 ) -> dict:
-    """采集单个资产的大额转账。"""
+    """采集单个资产的大额转账。
+    alarm_only=True: 只存储转入交易所的告警，不存普通大额转账。"""
     asset_id = asset["asset_id"]
     symbol = asset["canonical_symbol"]
     chain = asset["chain"]
@@ -183,6 +185,10 @@ def collect_transfers(
 
                 is_to_exchange = to_exchange is not None
 
+                # 告警模式：只保留转入交易所的
+                if alarm_only and not is_to_exchange:
+                    continue
+
                 block_ts = datetime.fromtimestamp(
                     int(tx.get("timeStamp", 0)), tz=timezone.utc
                 )
@@ -212,14 +218,14 @@ def collect_transfers(
 
     if dry_run:
         to_exchange_count = sum(1 for t in all_transfers if t["is_to_exchange"])
-        print(f"  [{symbol}] {chain}: {total_processed} 条转账, {len(all_transfers)} 条大额, "
-              f"{to_exchange_count} 条转入交易所 (dry-run)")
+        label = "告警" if alarm_only else "大额"
+        print(f"  [{symbol}] {chain}: {total_processed} 条转账, {to_exchange_count} 条{label} (dry-run)")
         return {"asset_id": asset_id, "symbol": symbol, "processed": total_processed, "written": 0}
 
     written = save_transfers(conn, all_transfers)
     to_exchange_count = sum(1 for t in all_transfers if t["is_to_exchange"])
-    print(f"  [{symbol}] {chain}: {total_processed} 条转账, {len(all_transfers)} 条大额, "
-          f"{to_exchange_count} 条转入交易所, 写入 {written} 条")
+    label = "告警" if alarm_only else "大额"
+    print(f"  [{symbol}] {chain}: {total_processed} 条转账, {to_exchange_count} 条{label}, 写入 {written} 条")
 
     return {
         "asset_id": asset_id,
@@ -235,6 +241,7 @@ def main():
     parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc）")
     parser.add_argument("--limit", type=int, default=50, help="最大处理资产数")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
+    parser.add_argument("--alarm-only", action="store_true", help="告警模式：只存储转入交易所的大额转账")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -273,12 +280,14 @@ def main():
             result = collect_transfers(
                 conn, client, asset, exchanges,
                 dry_run=args.dry_run,
+                alarm_only=args.alarm_only,
             )
             total_processed += result.get("processed", 0)
             total_written += result.get("written", 0)
 
         elapsed = time.time() - t0
-        print(f"\n完成: 处理 {total_processed} 条转账, 写入 {total_written} 条大额, 耗时 {elapsed:.1f}s")
+        label = "告警" if args.alarm_only else "大额"
+        print(f"\n完成: 处理 {total_processed} 条转账, {label} {total_written} 条, 耗时 {elapsed:.1f}s")
 
 
 if __name__ == "__main__":

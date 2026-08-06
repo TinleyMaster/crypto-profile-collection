@@ -945,3 +945,36 @@ def get_onchain_alert_summary() -> dict:
             "total_value_usd": float(totals.get("total_value_usd", 0)),
         },
     }
+
+
+def query_onchain_data(asset_id: int, force: bool = False) -> dict:
+    """按需查询链上数据（持仓 + 大额转账），先查缓存，缓存未命中则实时拉取。"""
+    import subprocess
+
+    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "phase_chain_onchain_query.py")
+    cmd = [
+        sys.executable, "-u", script,
+        "--asset-id", str(asset_id),
+    ]
+    if force:
+        cmd.append("--force")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(Path(script).parent),
+    )
+
+    output = result.stdout.strip()
+    if not output:
+        return {"ok": False, "error": "无输出"}
+
+    try:
+        data = json.loads(output)
+        if data.get("status") == "ok":
+            return {"ok": True, "data": data}
+        return {"ok": False, "error": data.get("message", "查询失败")}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": output[:200]}

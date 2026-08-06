@@ -225,8 +225,8 @@ TASK_DEFS = {
         "hidden": True,
     },
     "chain_holder_snapshot_auto": {
-        "name": "链上持仓快照采集（自动循环）",
-        "description": "自动循环，每批20资产，采集全部代币的持仓快照数据",
+        "name": "链上持仓快照采集（每日单次）",
+        "description": "每天运行一次，拉取全部有合约地址资产的 Top 持有者数据",
         "script": "phase_chain_holder_snapshot_auto.py",
         "default_args": [],
         "category": "链上数据",
@@ -240,8 +240,8 @@ TASK_DEFS = {
         "hidden": True,
     },
     "chain_transfer_monitor_auto": {
-        "name": "大额转账监控（自动循环）",
-        "description": "自动循环，每批20资产，持续监控大额转账并标记转入交易所",
+        "name": "大额转账监控（告警模式·自动循环）",
+        "description": "后台轮询增量大额转账，只标记转入交易所的告警，不存所有明细",
         "script": "phase_chain_transfer_monitor_auto.py",
         "default_args": [],
         "category": "链上数据",
@@ -544,6 +544,17 @@ def api_onchain_alerts():
     """获取链上告警摘要：24h 转入交易所大额转账。"""
     try:
         data = _get_db_stats().get_onchain_alert_summary()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/onchain/query/<int:asset_id>")
+def api_onchain_query(asset_id: int):
+    """按需查询指定资产的链上数据（持仓 + 大额转账）。先查缓存，未命中则实时拉取。"""
+    try:
+        force = request.args.get("force", "0") == "1"
+        data = _get_db_stats().query_onchain_data(asset_id, force=force)
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -1185,6 +1185,7 @@
                 </h2>
                 <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
                 <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
+                <button class="copy-btn" id="onchain-btn" onclick="queryOnchainData()">📊 链上数据</button>
                 <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
@@ -1713,6 +1714,79 @@
                     alert('精选失败: ' + (data.error || '未知错误'));
                     btn.textContent = origText;
                 }
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+                btn.textContent = origText;
+            }
+            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
+        }
+
+        async function queryOnchainData () {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('onchain-btn');
+            const origText = btn.textContent;
+
+            btn.textContent = '⏳ 查询中...';
+            btn.disabled = true;
+            try {
+                // 先查缓存
+                let res = await fetch('/api/onchain/query/' + selectedAssetId);
+                let data = await res.json();
+                if (!data.ok) {
+                    alert('链上数据查询失败: ' + (data.error || '未知错误'));
+                    btn.textContent = origText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const d = data.data;
+                const fromCache = d.from_cache ? '（缓存）' : '（实时）';
+                let msg = `【${d.symbol} ${d.name}】链上数据 ${fromCache}\n\n`;
+
+                // 持仓数据
+                if (d.chains && Object.keys(d.chains).length > 0) {
+                    msg += '── 持仓集中度 ──\n';
+                    for (const [chain, info] of Object.entries(d.chains)) {
+                        msg += `[${chain.toUpperCase()}] `;
+                        msg += `Top10: ${info.top10_concentration ?? '?'}%  `;
+                        msg += `Top50: ${info.top50_concentration ?? '?'}%  `;
+                        msg += `Top100: ${info.top100_concentration ?? '?'}%\n`;
+                        if (info.total_holders) msg += `  持币地址: ${info.total_holders.toLocaleString()}\n`;
+                        if (info.exchange_wallet_pct != null) msg += `  交易所占比: ${info.exchange_wallet_pct}%\n`;
+                        if (info.holder_change_7d != null) msg += `  7日地址变化: ${info.holder_change_7d > 0 ? '+' : ''}${info.holder_change_7d}\n`;
+                    }
+                    if (d.chains[Object.keys(d.chains)[0]].top_holders) {
+                        msg += '\n  Top 10 持有者:\n';
+                        const topHolders = d.chains[Object.keys(d.chains)[0]].top_holders;
+                        for (const h of topHolders.slice(0, 5)) {
+                            msg += `  ${h.address.slice(0, 8)}...${h.address.slice(-4)}  ${h.share_pct}%\n`;
+                        }
+                    }
+                }
+
+                // 大额转账
+                if (d.transfers && d.transfers.length > 0) {
+                    msg += '\n── 近7日大额转账 ──\n';
+                    const alerts = d.transfers.filter(t => t.is_to_exchange);
+                    if (alerts.length > 0) {
+                        msg += `⚠️ 转入交易所告警: ${alerts.length} 笔\n`;
+                    }
+                    for (const tx of d.transfers.slice(0, 5)) {
+                        const prefix = tx.is_to_exchange ? '⚠️ ' : '   ';
+                        const val = tx.value_usd ? `$${tx.value_usd.toLocaleString()}` : tx.value.toFixed(2);
+                        msg += `${prefix}${tx.from_address.slice(0, 6)}... → ${tx.to_address.slice(0, 6)}...  ${val}`;
+                        if (tx.to_exchange) msg += `  [${tx.to_exchange}]`;
+                        msg += '\n';
+                    }
+                }
+
+                if (d.elapsed_ms) {
+                    msg += `\n查询耗时: ${d.elapsed_ms}ms`;
+                }
+
+                alert(msg);
+                btn.textContent = '✅ 已查询';
+                btn.classList.add('copied');
             } catch (e) {
                 alert('请求失败: ' + e.message);
                 btn.textContent = origText;

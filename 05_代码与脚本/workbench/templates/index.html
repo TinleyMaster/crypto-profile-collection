@@ -563,6 +563,27 @@
             background: #4b5563;
         }
 
+        .materials-header .copy-btn {
+            background: #1e3a5f;
+            color: #60a5fa;
+            border: 1px solid #3b82f644;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .materials-header .copy-btn:hover {
+            background: #2563eb;
+            color: #fff;
+        }
+
+        .materials-header .copy-btn.copied {
+            background: #065f46;
+            color: #34d399;
+            border-color: #34d39944;
+        }
+
         .stat-row {
             display: flex;
             gap: 12px;
@@ -880,6 +901,7 @@
                     <span class="badge" id="mat-type"></span>
                     <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
                 </h2>
+                <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
             <div class="stat-row" id="mat-stats"></div>
@@ -1334,6 +1356,45 @@
 
             document.getElementById('mat-content').innerHTML = html;
             materialsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function copyAllLinks () {
+            const urls = [];
+            document.querySelectorAll('#mat-content .url-text').forEach(el => {
+                const href = el.getAttribute('href');
+                if (href) urls.push(href);
+            });
+            if (urls.length === 0) {
+                alert('没有可复制的链接');
+                return;
+            }
+            const text = urls.join('\n');
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.getElementById('copy-all-btn');
+                btn.textContent = '✅ 已复制 ' + urls.length + ' 条链接';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = '📋 复制全部链接';
+                    btn.classList.remove('copied');
+                }, 2000);
+            }).catch(() => {
+                // fallback for older browsers
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                const btn = document.getElementById('copy-all-btn');
+                btn.textContent = '✅ 已复制 ' + urls.length + ' 条链接';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = '📋 复制全部链接';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
         }
 
         function closeMaterials () {

@@ -4,12 +4,12 @@
 背景：之前 B2 爬了 github/other 种子入口，产生大量噪声链接。
 现在 B2 已跳过 github/other，重新爬取会干净很多。
 
-1. 找出 deep_crawl 条目过多的资产（默认 >1000 条）
+1. 找出 deep_crawl 条目过多的资产（默认 >500 条）
 2. 删除这些资产的所有 deep_crawl 链接
 3. 重置原始入口的 deep_crawled_at，让 B2 重新爬取
 
 用法：
-  python reset_high_entry_assets.py [--execute] [--threshold 1000]
+  python reset_high_entry_assets.py [--execute] [--threshold 500]
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ settings = get_settings(require_database=True)
 def main():
     parser = argparse.ArgumentParser(description="重置高条目资产 deep_crawl 数据")
     parser.add_argument("--execute", action="store_true", help="实际执行（默认 dry-run）")
-    parser.add_argument("--threshold", type=int, default=1000, help="deep_crawl 条目数阈值")
+    parser.add_argument("--threshold", type=int, default=500, help="deep_crawl 条目数阈值")
     args = parser.parse_args()
 
     print("=" * 70)

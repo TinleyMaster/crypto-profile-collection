@@ -1,5 +1,5 @@
 """
-高条目资产污染溯源：分析文档链接 >1000 的代币，定位污染链路。
+高条目资产污染溯源：分析文档链接 >500 的代币，定位污染链路。
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from crypto_research.config import get_settings
 
 settings = get_settings(require_database=True)
 
-ENTRY_THRESHOLD = 1000
+ENTRY_THRESHOLD = 500
 
 print("=" * 70)
 print("  高条目资产污染溯源分析")

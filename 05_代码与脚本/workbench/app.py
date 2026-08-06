@@ -194,7 +194,7 @@ TASK_DEFS = {
     },
     "diag_high_entry": {
         "name": "高条目资产污染溯源",
-        "description": "分析文档链接>1000的代币，定位污染链路（种子→域名→噪声量）",
+        "description": "分析文档链接>500的代币，定位污染链路（种子→域名→噪声量）",
         "script": "diag_high_entry_assets.py",
         "default_args": [],
         "category": "诊断",
@@ -208,8 +208,8 @@ TASK_DEFS = {
         "hidden": True,
     },
     "reset_high_entry": {
-        "name": "重置高条目资产（>1000条）",
-        "description": "删除 >1000条 deep_crawl 的资产的全部 deep_crawl 链接，重置 deep_crawled_at",
+        "name": "重置高条目资产（>500条）",
+        "description": "删除 >500条 deep_crawl 的资产的全部 deep_crawl 链接，重置 deep_crawled_at",
         "script": "reset_high_entry_assets.py",
         "default_args": ["--execute"],
         "category": "维护",

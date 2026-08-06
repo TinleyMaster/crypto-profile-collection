@@ -178,6 +178,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "诊断",
     },
+    "diag_high_entry": {
+        "name": "高条目资产污染溯源",
+        "description": "分析文档链接>1000的代币，定位污染链路（种子→域名→噪声量）",
+        "script": "diag_high_entry_assets.py",
+        "default_args": [],
+        "category": "诊断",
+    },
     "cleanup_pollution": {
         "name": "清理 GitHub 跨仓库污染",
         "description": "删除 github.com deep_crawl 条目并重置爬取状态，修复 asset_id 大规模污染",

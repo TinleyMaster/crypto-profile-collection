@@ -87,7 +87,7 @@ def call_deepseek_ranking(candidates: list[dict], asset_symbol: str, asset_name:
         "2. 原始入口（CMC/CG 收录）的可信度高于 deep_crawl 自动发现的\n"
         "3. 同一域名下优先保留最有代表性的链接，避免重复\n"
         "4. 第三方审计报告、独立分析文章有一定价值，但非项目一手信息\n"
-        "5. 社交链接（Twitter/Reddit/Telegram）投研价值低，除非没有其他链接才选\n"
+        "5. 社交链接（Twitter/Reddit/Telegram）不参与精选，已在上游过滤\n"
         "6. 通用代码仓库（非项目主仓库）和聚合器网站价值极低\n"
         "\n"
         "输出格式：只输出 JSON，不要输出其他内容。\n"
@@ -183,9 +183,6 @@ def _fallback_ranking(candidates: list[dict], top_n: int) -> list[dict]:
         "github": 4,
         "medium": 5,
         "other": 6,
-        "twitter": 7,
-        "reddit": 8,
-        "telegram": 9,
     }
     candidates.sort(key=lambda c: (
         type_order.get(c.get("entry_type", "other"), 99),
@@ -243,8 +240,8 @@ def main() -> int:
             asset_name = asset_row["canonical_name"]
 
             # 3. 配额粗筛
-            # SQL 有 11 个 %s，全部是 asset_id
-            params = (args.asset_id,) * 11
+            # SQL 有 9 个 %s，全部是 asset_id
+            params = (args.asset_id,) * 9
             cur.execute(select_candidates_sql, params)
             candidates = [dict(row) for row in cur.fetchall()]
 

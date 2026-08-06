@@ -117,37 +117,7 @@ SELECT * FROM (
 UNION ALL
 
 -- ============================================================
--- 7. twitter：仅原始入口，最多 1
--- ============================================================
-SELECT * FROM (
-    SELECT dse.entry_id, dse.asset_id, dse.entry_type, dse.entry_url, dse.source_code,
-           FALSE AS is_deep_crawl,
-           LOWER(SPLIT_PART(REPLACE(REPLACE(dse.entry_url, 'https://', ''), 'http://', ''), '/', 1)) AS domain
-    FROM biz.doc_source_entry dse
-    WHERE dse.asset_id = %s AND dse.entry_type = 'twitter'
-      AND dse.discovered_from NOT LIKE 'deep_crawl%%'
-    LIMIT 1
-) t7
-
-UNION ALL
-
--- ============================================================
--- 8. reddit：仅原始入口，最多 1
--- ============================================================
-SELECT * FROM (
-    SELECT dse.entry_id, dse.asset_id, dse.entry_type, dse.entry_url, dse.source_code,
-           FALSE AS is_deep_crawl,
-           LOWER(SPLIT_PART(REPLACE(REPLACE(dse.entry_url, 'https://', ''), 'http://', ''), '/', 1)) AS domain
-    FROM biz.doc_source_entry dse
-    WHERE dse.asset_id = %s AND dse.entry_type = 'reddit'
-      AND dse.discovered_from NOT LIKE 'deep_crawl%%'
-    LIMIT 1
-) t8
-
-UNION ALL
-
--- ============================================================
--- 9. other：原始入口最多 3，deep_crawl 同域名 ≤ 2 补充
+-- 7. other：原始入口最多 3，deep_crawl 同域名 ≤ 2 补充
 -- ============================================================
 SELECT * FROM (
     SELECT dse.entry_id, dse.asset_id, dse.entry_type, dse.entry_url, dse.source_code,
@@ -158,7 +128,7 @@ SELECT * FROM (
       AND dse.discovered_from NOT LIKE 'deep_crawl%%'
     ORDER BY CASE WHEN dse.source_code IN ('cmc','cg') THEN 0 ELSE 1 END, dse.is_primary DESC
     LIMIT 3
-) t9a
+) t7a
 
 UNION ALL
 
@@ -170,5 +140,5 @@ SELECT * FROM (
     FROM biz.doc_source_entry dse
     WHERE dse.asset_id = %s AND dse.entry_type = 'other'
       AND dse.discovered_from LIKE 'deep_crawl%%'
-) t9b WHERE t9b.domain_rn <= 2
+) t7b WHERE t7b.domain_rn <= 2
 LIMIT 5;

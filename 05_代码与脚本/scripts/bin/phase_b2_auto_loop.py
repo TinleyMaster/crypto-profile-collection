@@ -22,34 +22,44 @@ for round_num in range(1, MAX_ROUNDS + 1):
     print(f"{'=' * 60}")
 
     # 运行 B2
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
-            "--limit",
-            str(BATCH_LIMIT),
-            "--workers",
-            "15",
-            "--timeout",
-            "8",
-        ],
-        cwd=str(SCRIPT_DIR),
-        env=env,
-        capture_output=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
+                "--limit",
+                str(BATCH_LIMIT),
+                "--workers",
+                "8",
+                "--timeout",
+                "8",
+            ],
+            cwd=str(SCRIPT_DIR),
+            env=env,
+            capture_output=False,
+            timeout=1800,  # 单轮最长 30 分钟，防止卡死
+        )
+    except subprocess.TimeoutExpired:
+        print("B2 脚本本轮超时（30分钟），跳过继续下一轮。")
+        continue
 
     if result.returncode != 0:
         print(f"Script exited with code {result.returncode}, stopping.")
         break
 
     # 检查 pending
-    probe = subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "_probe_b2_pending.py")],
-        cwd=str(SCRIPT_DIR),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        probe = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "_probe_b2_pending.py")],
+            cwd=str(SCRIPT_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,  # 探针最长 30 秒
+        )
+    except subprocess.TimeoutExpired:
+        print("探针查询超时，跳过本轮继续。")
+        continue
 
     # 解析 docs pending count
     docs_pending = None

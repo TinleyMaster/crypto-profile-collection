@@ -448,17 +448,20 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
             }
 
     # 外层超时兜底：即使 requests 内部卡死，也保证在 timeout+8 秒内返回
-    with InnerPool(max_workers=1) as pool:
-        fut = pool.submit(_do_fetch)
-        try:
-            return fut.result(timeout=timeout + 8)
-        except Exception:
-            return {
-                "status": "failed",
-                "entry_id": entry_id,
-                "url": entry_url,
-                "error": "overall_timeout",
-            }
+    pool = InnerPool(max_workers=1)
+    fut = pool.submit(_do_fetch)
+    try:
+        return fut.result(timeout=timeout + 8)
+    except Exception:
+        # 超时后不等待卡住的内层线程，避免 shutdown(wait=True) 死锁
+        pool.shutdown(wait=False)
+        return {
+            "status": "failed",
+            "entry_id": entry_id,
+            "url": entry_url,
+            "error": "overall_timeout",
+        }
+    pool.shutdown(wait=True)
 
 
 def _flush_db() -> None:

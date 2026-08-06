@@ -247,7 +247,7 @@ def get_task_progress() -> list[dict]:
             })
 
             # 3.6. DexScreener 补充文档入口
-            #    候选集: 无任何 doc_source_entry 的活跃资产
+            #    候选集: 无任何 doc_source_entry 的活跃资产（排除衍生品）
             #    done: 已有 dexscreener 来源的 doc_source_entry
             cur.execute(
                 """
@@ -258,6 +258,7 @@ def get_task_progress() -> list[dict]:
                   AND a.status = 'active'
                   AND a.canonical_symbol IS NOT NULL
                   AND a.canonical_symbol != ''
+                  AND a.asset_type NOT IN ('derivative', 'synthetic', 'iou')
                 """
             )
             total = cur.fetchone()[0]

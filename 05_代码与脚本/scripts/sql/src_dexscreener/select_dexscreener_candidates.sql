@@ -13,5 +13,7 @@ WHERE
     AND a.status = 'active'
     AND a.canonical_symbol IS NOT NULL
     AND a.canonical_symbol != ''
+    -- 排除衍生品、合成资产、IOU 等非真实链上代币
+    AND a.asset_type NOT IN ('derivative', 'synthetic', 'iou')
 ORDER BY a.asset_id
 LIMIT %s;

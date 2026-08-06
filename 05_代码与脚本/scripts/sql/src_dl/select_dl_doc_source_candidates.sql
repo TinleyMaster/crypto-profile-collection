@@ -12,7 +12,7 @@ LEFT JOIN biz.doc_source_entry AS dse
    AND dse.asset_id = asm.asset_id
    AND dse.source_code = 'dl'
 WHERE
-    (p.url IS NOT NULL OR p.twitter IS NOT NULL)
+    ((p.url IS NOT NULL AND p.url != '') OR (p.twitter IS NOT NULL AND p.twitter != ''))
     AND dse.entry_id IS NULL
 ORDER BY p.protocol_id
 LIMIT %s;

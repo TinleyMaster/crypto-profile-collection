@@ -66,23 +66,22 @@ def get_dashboard_stats() -> dict:
                 }
             result["crawl_progress"] = crawl_progress
 
-            # doc_asset 统计
+            # doc_source_entry 按数据源分布
             cur.execute(
                 """
-                SELECT
-                    count(*) AS total,
-                    count(storage_path) AS downloaded,
-                    count(content_hash) AS hashed,
-                    count(*) FILTER (WHERE parse_status = '已解析') AS parsed
-                FROM biz.doc_asset
+                SELECT source_code, COUNT(*) AS cnt
+                FROM biz.doc_source_entry
+                WHERE entity_type = 'asset'
+                GROUP BY source_code
+                ORDER BY cnt DESC
                 """
             )
-            row = cur.fetchone()
-            result["doc_asset"] = {
-                "total": row[0],
-                "downloaded": row[1],
-                "hashed": row[2],
-                "parsed": row[3],
+            source_stats = {row[0]: row[1] for row in cur.fetchall()}
+            result["doc_source_stats"] = {
+                "total": sum(source_stats.values()),
+                "cmc": source_stats.get("cmc", 0),
+                "cg": source_stats.get("cg", 0),
+                "dl": source_stats.get("dl", 0),
             }
 
             # 资产总数

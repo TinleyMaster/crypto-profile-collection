@@ -929,7 +929,7 @@
                 <div class="sub" id="stat-crawl-detail">-</div>
             </div>
             <div class="card">
-                <h3>文档资产</h3>
+                <h3>文档链接来源</h3>
                 <div class="value" id="stat-docs">-</div>
                 <div class="sub" id="stat-docs-detail">-</div>
             </div>
@@ -1010,10 +1010,10 @@
                 ).join(' · ');
                 document.getElementById('stat-crawl-detail').textContent = detail;
 
-                const da = d.doc_asset || {};
-                document.getElementById('stat-docs').textContent = da.total?.toLocaleString() || '-';
+                const ds = d.doc_source_stats || {};
+                document.getElementById('stat-docs').textContent = ds.total?.toLocaleString() || '-';
                 document.getElementById('stat-docs-detail').textContent =
-                    `已下载: ${da.downloaded || 0}`;
+                    `CMC: ${(ds.cmc || 0).toLocaleString()} · CG: ${(ds.cg || 0).toLocaleString()} · DL: ${(ds.dl || 0).toLocaleString()}`;
 
                 document.getElementById('refresh-time').textContent =
                     ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN');

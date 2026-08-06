@@ -246,6 +246,40 @@ def get_task_progress() -> list[dict]:
                 "pct": round(done / total * 100, 1) if total > 0 else 0,
             })
 
+            # 3.6. DexScreener 补充文档入口
+            #    候选集: 无任何 doc_source_entry 的活跃资产
+            #    done: 已有 dexscreener 来源的 doc_source_entry
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT a.asset_id)
+                FROM core.asset a
+                LEFT JOIN biz.doc_source_entry dse ON dse.entity_type = 'asset' AND dse.asset_id = a.asset_id
+                WHERE dse.entry_id IS NULL
+                  AND a.status = 'active'
+                  AND a.canonical_symbol IS NOT NULL
+                  AND a.canonical_symbol != ''
+                """
+            )
+            total = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT a.asset_id)
+                FROM core.asset a
+                INNER JOIN biz.doc_source_entry dse ON dse.entity_type = 'asset' AND dse.asset_id = a.asset_id
+                    AND dse.source_code = 'dexscreener'
+                WHERE a.status = 'active'
+            """
+            )
+            done = cur.fetchone()[0]
+            remaining = total - done
+            result.append({
+                "task": "DexScreener 补充文档入口",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
             # 4. B2 深度文档发现（只统计可爬的 entry_type）
             cur.execute(
                 """

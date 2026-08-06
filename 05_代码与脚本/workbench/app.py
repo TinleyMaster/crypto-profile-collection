@@ -151,6 +151,21 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "dexscreener_supplement": {
+        "name": "DexScreener 补充文档入口",
+        "description": "对无文档入口的资产，通过 DexScreener API 搜索官网/社交链接",
+        "script": "supplement_doc_entries_from_dexscreener.py",
+        "default_args": ["--limit", "50"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "dexscreener_supplement_auto": {
+        "name": "DexScreener 补充文档入口（自动循环）",
+        "description": "自动循环，每批50资产，通过 DexScreener 补充无文档入口资产",
+        "script": "supplement_doc_entries_from_dexscreener_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "github_activity": {
         "name": "GitHub 开发活跃度采集",
         "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",

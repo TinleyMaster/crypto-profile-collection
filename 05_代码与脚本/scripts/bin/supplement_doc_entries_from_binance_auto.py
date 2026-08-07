@@ -22,7 +22,6 @@ env["PYTHONIOENCODING"] = "utf-8"
 
 total_assets = 0
 total_entries = 0
-consecutive_zero = 0  # 连续零匹配轮数
 
 for round_num in range(1, MAX_ROUNDS + 1):
     print(f"\n{'=' * 60}")
@@ -80,16 +79,6 @@ for round_num in range(1, MAX_ROUNDS + 1):
         if candidates == 0:
             print("\n无更多候选资产，全部完成！")
             break
-
-        if matched == 0:
-            consecutive_zero += 1
-            print(f"\n本轮无匹配（连续 {consecutive_zero}/3 轮），继续下一轮。")
-            if consecutive_zero >= 3:
-                print("\n连续 3 轮无匹配，剩余资产在 Binance 中大概率无数据，停止。")
-                break
-            continue
-        else:
-            consecutive_zero = 0  # 有匹配就重置计数器
     else:
         print("无法解析本轮结果，继续下一轮。")
 

@@ -82,20 +82,27 @@ def _match_asset(results: list[dict], symbol: str, name: str) -> dict | None:
     symbol_upper = symbol.strip().upper()
     name_lower = name.strip().lower()
 
+    if not results:
+        return None
+
+    # 优先：精确 symbol 匹配
+    exact_matches = [r for r in results if (r.get("symbol") or "").strip().upper() == symbol_upper]
+    if exact_matches:
+        # 在精确匹配中找名称匹配的
+        for r in exact_matches:
+            r_name = (r.get("name") or "").strip().lower()
+            if name_lower and r_name and (name_lower == r_name or name_lower in r_name or r_name in name_lower):
+                return r
+        # 没有名称匹配，返回第一个精确 symbol 匹配
+        return exact_matches[0]
+
+    # 兜底：symbol 包含关系（如 "MG" 匹配 "MGO"）
     for r in results:
         r_symbol = (r.get("symbol") or "").strip().upper()
-        r_name = (r.get("name") or "").strip().lower()
-
-        # 符号必须完全匹配（大小写不敏感）
-        if r_symbol != symbol_upper:
-            continue
-
-        # 名称相似度检查
-        if name_lower == r_name or name_lower in r_name or r_name in name_lower:
-            return r
-
-        # 符号精确匹配，接受
-        return r
+        if symbol_upper in r_symbol or r_symbol in symbol_upper:
+            r_name = (r.get("name") or "").strip().lower()
+            if name_lower and r_name and (name_lower in r_name or r_name in name_lower):
+                return r
 
     return None
 
@@ -167,41 +174,24 @@ def main() -> int:
         symbol = asset["canonical_symbol"]
         name = asset["canonical_name"]
         asset_id = asset["asset_id"]
-        contract_address = (asset.get("contract_address") or "").strip()
-        chain = (asset.get("chain") or "").strip()
 
         # 速率限制
         if i > 0:
             time.sleep(RATE_LIMIT_DELAY)
 
-        # 搜索策略：优先按合约地址搜索，再按 symbol 兜底
-        matched = None
-        search_method = ""
+        # 搜索：Binance API 不支持按合约地址搜索，直接按 symbol
+        print(f"[{i+1}/{len(candidates)}] 搜索: {symbol} ({name})...", end=" ")
+        results = search_binance(symbol)
+        if not results:
+            print("无结果")
+            total_skipped += 1
+            continue
 
-        if contract_address:
-            # 按合约地址搜索（精确）
-            results = search_binance(contract_address, chain)
-            matched = _match_asset(results, symbol, name)
-            if matched:
-                search_method = f"contract({contract_address[:10]}...)"
-
+        matched = _match_asset(results, symbol, name)
         if not matched:
-            # 按 symbol 搜索（兜底）
-            print(f"[{i+1}/{len(candidates)}] 搜索: {symbol} ({name})...", end=" ")
-            results = search_binance(symbol)
-            if not results:
-                print("无结果")
-                total_skipped += 1
-                continue
-
-            matched = _match_asset(results, symbol, name)
-            if not matched:
-                print(f"符号匹配但名称不匹配 (候选: {len(results)})")
-                total_skipped += 1
-                continue
-            search_method = "symbol"
-        else:
-            print(f"[{i+1}/{len(candidates)}] 搜索: {symbol} ({name}) via {search_method}...", end=" ")
+            print(f"无匹配 (候选: {len(results)})")
+            total_skipped += 1
+            continue
 
         links = extract_links(matched)
         if not links:

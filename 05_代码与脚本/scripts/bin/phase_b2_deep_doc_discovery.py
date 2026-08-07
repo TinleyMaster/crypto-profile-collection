@@ -46,6 +46,8 @@ ENTRY_TYPES_TO_CRAWL = {
 
 # ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──
 # 爬取此类页面时只保留跨域链接，内链不继承 asset_id
+# 注意：仅支持域名级匹配（netloc），不支持路径级（如 github.com/xxx）。
+#       GitHub 跨仓库污染由 _is_same_github_repo 和 AGGREGATION_DENSITY_DOMAINS 处理。
 AGGREGATION_DOMAINS = {
     "code4rena.com",
     "www.cyberscope.io",
@@ -74,11 +76,6 @@ AGGREGATION_DOMAINS = {
     "accounting.auditchain.finance",  # Auditchain 会计平台
     "quillaudits.medium.com",      # 审计报告聚合
     "cdn.robinhood.com",           # Robinhood CDN
-    "github.com/cyberscope-io",    # 审计聚合仓库
-    "github.com/Quillhash",        # 审计聚合仓库
-    "github.com/peckshield",       # 审计聚合仓库
-    "github.com/verichains",       # 审计聚合仓库
-    "github.com/bnb-chain/whitepaper",  # 白皮书 forks
     "realityfinance.xyz",          # RWA 代币化平台
     "assets.backed.fi",            # 代币化资产平台
     "www.backedassets.fi",         # 代币化资产平台
@@ -93,6 +90,30 @@ AGGREGATION_DENSITY_DOMAINS = {
     "github.com/zokyo-sec",
     "github.com/softstack",
     "github.com/oak-security",
+    "github.com/Hashlock-Auditing",
+    "github.com/Audit-Ace",
+    "github.com/Tech-Audit",
+    "github.com/HashEx",
+    "github.com/shieldify-security",
+    "github.com/CoinFabrik",
+    "github.com/mixbytes",
+    "github.com/pashov",
+    "github.com/TechRate",
+    "github.com/Dedaub",
+    "github.com/GuardianAudits",
+    "github.com/HalbornSecurity",
+    "github.com/SpyWolfNetwork",
+    "github.com/ConsenSysDiligence",
+    "github.com/tintinweb",
+    "github.com/sherlock-protocol",
+    "github.com/Stride-Labs",
+    "github.com/beefyfinance",
+    "github.com/Anzen-Finance",
+    "github.com/Folks-Finance",
+    "github.com/Satoshi-Protocol",
+    # 非审计类跨项目污染
+    "github.com/aave/aave-v3-core",
+    "github.com/ethereum/ethereum-org-website",
     "github.com/cyberscope-io",
     "github.com/Quillhash",
     "github.com/peckshield",

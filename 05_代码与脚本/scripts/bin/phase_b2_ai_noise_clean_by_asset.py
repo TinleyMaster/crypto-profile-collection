@@ -117,6 +117,7 @@ RULE_NOISE_DOMAINS = {
     "github-verichains": "%github.com/verichains%",
     "github-zokyo": "%github.com/zokyo-sec%",
     "github-softstack": "%github.com/softstack%",
+    "github-oak-security": "%github.com/oak-security%",
     "github-bnb-whitepaper": "%github.com/bnb-chain/whitepaper%",
 }
 

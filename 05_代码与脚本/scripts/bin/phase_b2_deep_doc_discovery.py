@@ -92,6 +92,7 @@ AGGREGATION_DENSITY_DOMAINS = {
     # 审计/安全公司 GitHub 仓库（跨项目审计报告聚合）
     "github.com/zokyo-sec",
     "github.com/softstack",
+    "github.com/oak-security",
     "github.com/cyberscope-io",
     "github.com/Quillhash",
     "github.com/peckshield",

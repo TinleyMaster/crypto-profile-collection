@@ -115,6 +115,7 @@ RULE_NOISE_DOMAINS = {
     "github-quillhash": "%github.com/Quillhash%",
     "github-peckshield": "%github.com/peckshield%",
     "github-verichains": "%github.com/verichains%",
+    "github-zokyo": "%github.com/zokyo-sec%",
     "github-bnb-whitepaper": "%github.com/bnb-chain/whitepaper%",
 }
 

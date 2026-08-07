@@ -166,6 +166,21 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "binance_supplement": {
+        "name": "Binance 补充文档入口",
+        "description": "对无文档入口的资产，通过 Binance Web3 API 搜索官网/社交链接（优先合约地址搜索）",
+        "script": "supplement_doc_entries_from_binance.py",
+        "default_args": ["--limit", "50"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "binance_supplement_auto": {
+        "name": "Binance 补充文档入口（自动循环）",
+        "description": "自动循环，每批50资产，通过 Binance Web3 搜索补充无文档入口资产",
+        "script": "supplement_doc_entries_from_binance_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "github_activity": {
         "name": "GitHub 开发活跃度采集",
         "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",

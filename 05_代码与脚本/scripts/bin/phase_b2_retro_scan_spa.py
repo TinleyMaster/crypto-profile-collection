@@ -67,7 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="仅预览不写入。")
     p.add_argument("--limit", type=int, default=500, help="最大扫描数。")
     p.add_argument("--workers", type=int, default=10, help="并发扫描线程数。")
-    p.add_argument("--force", action="store_true", help="扫描所有已爬取页面，不限于返回 0 链接的。")
     return p
 
 
@@ -87,33 +86,16 @@ def main() -> int:
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS needs_browser BOOLEAN DEFAULT FALSE"
             )
 
-    # 查询候选：B2 已爬取，但无子条目（即返回 0 链接）
-    if args.force:
-        # 扫描所有已爬取页面
-        candidate_sql = """
-            SELECT dse.entry_id, dse.entry_url
-            FROM biz.doc_source_entry dse
-            WHERE dse.deep_crawled_at IS NOT NULL
-              AND dse.entry_type IN ('official_website', 'docs')
-              AND COALESCE(dse.needs_browser, FALSE) = FALSE
-            ORDER BY dse.entry_id
-            LIMIT %s
-        """
-    else:
-        # 仅扫描返回 0 链接的页面（无子条目）
-        candidate_sql = """
-            SELECT dse.entry_id, dse.entry_url
-            FROM biz.doc_source_entry dse
-            WHERE dse.deep_crawled_at IS NOT NULL
-              AND dse.entry_type IN ('official_website', 'docs')
-              AND COALESCE(dse.needs_browser, FALSE) = FALSE
-              AND NOT EXISTS (
-                  SELECT 1 FROM biz.doc_source_entry child
-                  WHERE child.discovered_from LIKE 'deep_crawl:' || substring(dse.entry_url, 1, 50) || '%%'
-              )
-            ORDER BY dse.entry_id
-            LIMIT %s
-        """
+    # 查询候选：B2 已爬取但未标记 needs_browser 的页面
+    candidate_sql = """
+        SELECT dse.entry_id, dse.entry_url
+        FROM biz.doc_source_entry dse
+        WHERE dse.deep_crawled_at IS NOT NULL
+          AND dse.entry_type IN ('official_website', 'docs')
+          AND COALESCE(dse.needs_browser, FALSE) = FALSE
+        ORDER BY dse.entry_id
+        LIMIT %s
+    """
 
     with get_connection(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:

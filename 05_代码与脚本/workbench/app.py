@@ -204,6 +204,14 @@ TASK_DEFS = {
         "script": "phase_b2_retro_scan_spa.py",
         "default_args": ["--limit", "500", "--workers", "10"],
         "category": "数据源采集",
+        "hidden": True,
+    },
+    "spa_retro_scan_auto": {
+        "name": "SPA 回溯扫描（自动循环）",
+        "description": "自动循环，批量扫描 B2 已爬取页面，识别 SPA 并标记 needs_browser=TRUE",
+        "script": "phase_b2_retro_scan_spa_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
     },
     "spa_browser_crawl": {
         "name": "SPA 无头浏览器爬取",

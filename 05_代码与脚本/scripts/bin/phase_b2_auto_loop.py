@@ -13,7 +13,7 @@ sys.stdout.reconfigure(line_buffering=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 1000
 MAX_ROUNDS = 200  # 安全上限
-THRESHOLD = 500  # docs 类型低于此数时停止
+THRESHOLD = 500  # 全部可爬类型 pending 低于此数时停止
 
 # 设置环境
 env = os.environ.copy()

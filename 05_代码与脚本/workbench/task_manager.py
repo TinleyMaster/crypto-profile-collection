@@ -97,12 +97,34 @@ def _append_log(task_id: str, line: str) -> None:
 
 
 def _read_log(task_id: str, limit: int = 200) -> list[str]:
+    """只读日志文件末尾 N 行，O(1) 内存，不加载整个文件。"""
     log_path = LOG_DIR / f"{task_id}.log"
     if not log_path.exists():
         return []
-    with open(log_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    return [l.rstrip("\n") for l in lines[-limit:]]
+    try:
+        file_size = log_path.stat().st_size
+        if file_size == 0:
+            return []
+        with open(log_path, "rb") as f:
+            # 从文件末尾往回读，找够 limit 个换行符
+            BUFSIZE = 8192
+            blocks = []
+            lines_found = 0
+            offset = file_size
+            while offset > 0 and lines_found <= limit:
+                read_size = min(BUFSIZE, offset)
+                offset -= read_size
+                f.seek(offset)
+                block = f.read(read_size)
+                blocks.append(block)
+                lines_found += block.count(b"\n")
+            tail = b"".join(reversed(blocks))
+            lines = tail.decode("utf-8", errors="replace").split("\n")
+            # 过滤空行，取最后 limit 行
+            result = [l.rstrip("\r") for l in lines if l]
+            return result[-limit:]
+    except (IOError, OSError):
+        return []
 
 
 # ── TaskManager ─────────────────────────────────────────────
@@ -184,10 +206,15 @@ class TaskManager:
             return self._serialize(task)
 
     def get_task_log(self, task_id: str, limit: int = 200) -> Optional[list[str]]:
-        with _lock():
-            state = _load_state()
-            if task_id not in state["tasks"]:
-                return None
+        # 不加锁：只读日志文件就够了，不需要锁状态文件
+        log_path = LOG_DIR / f"{task_id}.log"
+        if not log_path.exists():
+            # 任务可能刚提交，日志还没创建，返回空列表
+            with _lock():
+                state = _load_state()
+                if task_id not in state["tasks"]:
+                    return None
+            return []
         return _read_log(task_id, limit)
 
     def running_count(self) -> int:

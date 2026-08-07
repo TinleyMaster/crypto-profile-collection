@@ -2174,18 +2174,20 @@
         // ── 日志面板 ──
         async function loadTaskLog (taskId) {
             try {
-                const res = await fetch(`/api/tasks/${taskId}/log?limit=500`);
-                const data = await res.json();
-                if (!data.ok) return;
-                const logs = data.logs || [];
+                // 并行请求：日志 + 任务状态，减少串行延迟
+                const [logRes, taskRes] = await Promise.all([
+                    fetch(`/api/tasks/${taskId}/log?limit=300`),
+                    fetch(`/api/tasks/${taskId}`)
+                ]);
+                const logData = await logRes.json();
+                const taskData = await taskRes.json();
+                if (!logData.ok) return;
+                const logs = logData.logs || [];
                 const panel = document.getElementById('log-content');
                 const dot = document.getElementById('log-dot');
                 const title = document.getElementById('log-title');
                 const countEl = document.getElementById('log-count');
 
-                // 判断是否在运行
-                const taskRes = await fetch(`/api/tasks/${taskId}`);
-                const taskData = await taskRes.json();
                 const isRunning = taskData.ok && taskData.task && taskData.task.status === 'running';
 
                 dot.className = 'dot' + (isRunning ? ' live' : '');

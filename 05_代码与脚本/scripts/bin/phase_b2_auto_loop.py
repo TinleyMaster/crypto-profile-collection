@@ -72,19 +72,19 @@ for round_num in range(1, MAX_ROUNDS + 1):
             print(f"stderr: {probe.stderr[:500]}")
         continue
 
-    # 解析 docs pending count
-    docs_pending = None
+    # 解析 Total pending count
+    total_pending = None
     for line in probe.stdout.splitlines():
-        if line.startswith("docs:"):
-            docs_pending = int(line.split(":")[1].strip())
+        if line.startswith("Total pending:"):
+            total_pending = int(line.split(":")[1].strip())
 
     print(probe.stdout.strip())
 
-    if docs_pending is not None and docs_pending <= THRESHOLD:
-        print(f"\ndocs pending ({docs_pending}) <= threshold ({THRESHOLD}), done!")
+    if total_pending is not None and total_pending <= THRESHOLD:
+        print(f"\nTotal pending ({total_pending}) <= threshold ({THRESHOLD}), done!")
         break
 
-    if docs_pending is not None:
-        print(f"docs pending ({docs_pending}) > threshold ({THRESHOLD})，继续下一轮...")
+    if total_pending is not None:
+        print(f"Total pending ({total_pending}) > threshold ({THRESHOLD})，继续下一轮...")
 
 print("\nAll rounds complete.")

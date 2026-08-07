@@ -30,9 +30,12 @@ CHAIN_ALIASES = {
 
 
 class EthplorerClient:
-    """Ethplorer API 客户端，免费 tier。"""
+    """Ethplorer API 客户端，免费 tier。
 
-    def __init__(self, chain: str, api_key: str = "freekey", calls_per_second: float = 4.5):
+    速率限制：freekey 约 50 req/min，30 req/min 安全。
+    """
+
+    def __init__(self, chain: str, api_key: str = "freekey", calls_per_second: float = 0.5):
         if chain not in CHAIN_BASE:
             raise ValueError(f"不支持的链: {chain}，可选: {list(CHAIN_BASE.keys())}")
         self.chain = chain
@@ -42,31 +45,47 @@ class EthplorerClient:
         self._last_call = 0.0
 
     def _get(self, path: str) -> dict[str, Any]:
-        """调用 API，带速率限制。"""
-        elapsed = time.time() - self._last_call
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
+        """调用 API，带速率限制和重试。"""
+        last_error = ""
+        for attempt in range(3):
+            elapsed = time.time() - self._last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
 
-        url = f"{self.base_url}{path}&apiKey={self.api_key}"
-        try:
-            self._last_call = time.time()
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
-            return {"error": {"code": -1, "message": str(e)}}
+            url = f"{self.base_url}{path}&apiKey={self.api_key}"
+            try:
+                self._last_call = time.time()
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                last_error = f"HTTP {e.code}"
+                if e.code in (429, 403):
+                    time.sleep(2 ** attempt)  # 指数退避
+                    continue
+                return {"error": {"code": e.code, "message": last_error}}
+            except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+                last_error = str(e)[:100]
+                if "ConnectionReset" in last_error or "10054" in last_error:
+                    time.sleep(2 ** attempt)  # 限流重试
+                    continue
+                return {"error": {"code": -1, "message": last_error}}
 
-    def get_token_holders(self, contract_address: str, limit: int = 100) -> list[dict]:
+        return {"error": {"code": -2, "message": f"重试3次后仍然失败: {last_error}"}}
+
+    def get_token_holders(self, contract_address: str, limit: int = 100) -> tuple[list[dict], str]:
         """获取代币 Top 持有者列表（按持仓量降序）。
 
-        返回格式与 Etherscan tokenholderlist 兼容：
-        [{"address": "0x...", "balance": 123.45, "share": 12.3}, ...]
+        返回: (holders_list, error_reason)
+          - holders_list: 持有者列表，格式 [{"address": "0x...", "balance": 123.45, "share": 12.3}, ...]
+          - error_reason: 空字符串=成功，否则为错误原因
         """
         data = self._get(
             f"/getTopTokenHolders/{contract_address}?limit={limit}"
         )
         if "error" in data:
-            return []
+            err = data["error"]
+            return [], f"API错误({err.get('code', '?')}): {err.get('message', '')}"
         holders = data.get("holders", [])
         result = []
         for h in holders:
@@ -75,7 +94,7 @@ class EthplorerClient:
                 "balance": float(h.get("balance", 0)),
                 "share": float(h.get("share", 0)),
             })
-        return result
+        return result, ""
 
     def get_token_info(self, contract_address: str) -> dict | None:
         """获取代币基本信息（总供应量、持有者数量等）。"""

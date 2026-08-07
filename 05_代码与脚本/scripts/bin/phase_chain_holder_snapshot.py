@@ -117,7 +117,11 @@ def collect_holder_snapshot(
         return None
 
     # 获取 Top 100 持有者（Ethplorer 一次返回，无需分页）
-    all_holders = client.get_token_holders(contract_address, limit=100)
+    all_holders, error_reason = client.get_token_holders(contract_address, limit=100)
+
+    if error_reason:
+        print(f"  [{symbol}] {chain}: {error_reason}")
+        return None
 
     if not all_holders:
         print(f"  [{symbol}] {chain}: 无持有者数据")

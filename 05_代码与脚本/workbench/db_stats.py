@@ -296,9 +296,9 @@ def get_task_progress() -> list[dict]:
                 """
             )
             row = cur.fetchone()
-            total = row["pending"] + row["done"]
-            done = row["done"]
-            remaining = row["pending"]
+            total = row[0] + row[1]
+            done = row[1]
+            remaining = row[0]
             result.append({
                 "task": "SPA 无头浏览器爬取",
                 "done": done,

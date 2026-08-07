@@ -18,6 +18,16 @@ CHAIN_BASE = {
     "bsc": "https://api.binplorer.com",
 }
 
+# 数据库链名 → Ethplorer 链名映射
+CHAIN_ALIASES = {
+    "ethereum": "eth",
+    "eth": "eth",
+    "bsc": "bsc",
+    "bnb": "bsc",
+    "binance": "bsc",
+    "binance-smart-chain": "bsc",
+}
+
 
 class EthplorerClient:
     """Ethplorer API 客户端，免费 tier。"""
@@ -86,7 +96,8 @@ class EthplorerClient:
 
 
 def get_ethplorer_client(chain: str) -> EthplorerClient | None:
-    """获取指定链的 Ethplorer 客户端。"""
-    if chain not in CHAIN_BASE:
+    """获取指定链的 Ethplorer 客户端。支持数据库链名别名。"""
+    normalized = CHAIN_ALIASES.get(chain.lower(), chain.lower())
+    if normalized not in CHAIN_BASE:
         return None
-    return EthplorerClient(chain)
+    return EthplorerClient(normalized)

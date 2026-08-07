@@ -110,38 +110,11 @@ RULE_NOISE_DOMAINS = {
     "raw-github": "%raw.githubusercontent.com%",
     # 审计/安全平台聚合器
     "cyberscope": "%www.cyberscope.io%",
-    # 通用代码托管（非审计相关）
-    "github-cyberscope": "%github.com/cyberscope-io%",
-    "github-quillhash": "%github.com/Quillhash%",
-    "github-peckshield": "%github.com/peckshield%",
-    "github-verichains": "%github.com/verichains%",
-    "github-zokyo": "%github.com/zokyo-sec%",
-    "github-softstack": "%github.com/softstack%",
-    "github-oak-security": "%github.com/oak-security%",
-    "github-hashlock": "%github.com/Hashlock-Auditing%",
-    "github-audit-ace": "%github.com/Audit-Ace%",
-    "github-tech-audit": "%github.com/Tech-Audit%",
-    "github-hashex": "%github.com/HashEx%",
-    "github-shieldify": "%github.com/shieldify-security%",
-    "github-coinfabrik": "%github.com/CoinFabrik%",
-    "github-mixbytes": "%github.com/mixbytes%",
-    "github-pashov": "%github.com/pashov%",
-    "github-techrate": "%github.com/TechRate%",
-    "github-dedaub": "%github.com/Dedaub%",
-    "github-guardian-audits": "%github.com/GuardianAudits%",
-    "github-halborn": "%github.com/HalbornSecurity%",
-    "github-spywolf": "%github.com/SpyWolfNetwork%",
-    "github-consensys-diligence": "%github.com/ConsenSysDiligence%",
-    "github-tintinweb": "%github.com/tintinweb%",
-    "github-sherlock-protocol": "%github.com/sherlock-protocol%",
-    "github-stride-labs": "%github.com/Stride-Labs%",
-    "github-beefyfinance": "%github.com/beefyfinance%",
-    "github-anzen-finance": "%github.com/Anzen-Finance%",
-    "github-folks-finance": "%github.com/Folks-Finance%",
-    "github-satoshi-protocol": "%github.com/Satoshi-Protocol%",
-    "github-aave-v3-core": "%github.com/aave/aave-v3-core%",
-    "github-ethereum-website": "%github.com/ethereum/ethereum-org-website%",
-    "github-bnb-whitepaper": "%github.com/bnb-chain/whitepaper%",
+    # ── 注意：审计公司 GitHub 仓库（zokyo-sec, oak-security, HashEx 等）──
+    # 不在此规则直删列表中，因为它们的链接可能是项目的正确审计报告。
+    # 这些仓库的污染由两处处理：
+    #   1. phase_b2_deep_doc_discovery.py 的密度触发（单页同源>5条拦截）
+    #   2. AI 噪声清理的逐资产分析（按域名密度判断是否噪声）
 }
 
 

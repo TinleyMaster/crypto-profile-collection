@@ -10,8 +10,14 @@ import time
 from typing import Any
 
 BASE_URL = "https://web3.binance.com"
-HEADERS = {"User-Agent": "binance-web3/2.0 (Skill)"}
-TIMEOUT = 15
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+}
+TIMEOUT = 10
+
+# API 端点
+RANK_URL = f"{BASE_URL}/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list"
 
 # 评分权重
 SCORE_WEIGHTS = {
@@ -34,23 +40,21 @@ _cache_ts: float = 0
 CACHE_TTL = 120  # 2 分钟缓存
 
 
-def _fetch_pages(pages: int = 3, page_size: int = 50) -> list[dict]:
-    """获取多页统一代币排行数据。"""
-    tokens = []
-    for page in range(1, pages + 1):
-        try:
-            r = requests.post(
-                f"{BASE_URL}/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list/ai",
-                headers=HEADERS,
-                json={"page": page, "pageSize": page_size},
-                timeout=TIMEOUT,
-            )
-            data = r.json()
-            if data.get("success") and data.get("data", {}).get("tokens"):
-                tokens.extend(data["data"]["tokens"])
-        except Exception:
-            continue
-    return tokens
+def _fetch_pages(pages: int = 1, page_size: int = 50) -> list[dict]:
+    """获取统一代币排行数据。API 返回所有结果，无需分页。"""
+    try:
+        r = requests.post(
+            RANK_URL,
+            headers=HEADERS,
+            json={"page": 1, "pageSize": page_size},
+            timeout=TIMEOUT,
+        )
+        data = r.json()
+        if data.get("success") and data.get("data", {}).get("tokens"):
+            return data["data"]["tokens"]
+    except Exception:
+        pass
+    return []
 
 
 def _normalize(value: float, min_val: float, max_val: float) -> float:
@@ -175,7 +179,7 @@ def get_hot_tokens(limit: int = 30) -> dict:
     if _cache and (now - _cache_ts) < CACHE_TTL:
         return {"cached": True, "tokens": _cache["tokens"][:limit], "total": _cache["total"]}
 
-    raw = _fetch_pages(pages=3, page_size=50)
+    raw = _fetch_pages(page_size=200)
     scored = score_tokens(raw)
 
     result = {
@@ -193,13 +197,13 @@ def get_hot_tokens(limit: int = 30) -> dict:
 
 def get_top_gainers(limit: int = 10) -> list[dict]:
     """24h 涨幅最高（已过滤极端值）。"""
-    raw = _fetch_pages(pages=3, page_size=50)
+    raw = _fetch_pages(page_size=200)
     scored = score_tokens(raw)
     return sorted(scored, key=lambda x: x["change_24h"], reverse=True)[:limit]
 
 
 def get_top_volume(limit: int = 10) -> list[dict]:
     """24h 交易量最高。"""
-    raw = _fetch_pages(pages=3, page_size=50)
+    raw = _fetch_pages(page_size=200)
     scored = score_tokens(raw)
     return sorted(scored, key=lambda x: x["volume_24h"], reverse=True)[:limit]

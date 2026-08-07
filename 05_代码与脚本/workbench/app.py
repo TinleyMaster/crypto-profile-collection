@@ -309,6 +309,7 @@ TASK_DEFS = {
         "script": "phase_chain_transfer_monitor_auto.py",
         "default_args": [],
         "category": "链上数据",
+        "hidden": True,
     },
     "cleanup_pollution": {
         "name": "清理 GitHub 跨仓库污染",

@@ -85,10 +85,10 @@ AGGREGATION_DOMAINS = {
     "backed.fi",                   # 代币化资产平台
 }
 
-# ── 全局链接黑名单：任何页面爬取时，匹配这些模式的链接直接丢弃 ──
+# ── 密度触发域名：单页提取到超过阈值数量的链接时，视为聚合页，整组丢弃 ──
 # 与 AGGREGATION_DOMAINS 不同：AGGREGATION_DOMAINS 只在爬取该域名时阻止内链，
-# 而 GLOBAL_LINK_BLACKLIST 无论 base URL 是什么，只要链接匹配就丢弃。
-GLOBAL_LINK_BLACKLIST = {
+# 而密度触发无论 base URL 是什么，只要同一来源的链接数超过阈值就触发过滤。
+AGGREGATION_DENSITY_DOMAINS = {
     # 审计/安全公司 GitHub 仓库（跨项目审计报告聚合）
     "github.com/zokyo-sec",
     "github.com/cyberscope-io",
@@ -96,15 +96,24 @@ GLOBAL_LINK_BLACKLIST = {
     "github.com/peckshield",
     "github.com/verichains",
     "github.com/bnb-chain/whitepaper",
-    # 审计平台
+    # 审计/安全平台
     "audits.sherlock.xyz",
     "quillaudits.medium.com",
+    "www.cyberscope.io",
+    "hacken.io",
+    "assets.hacken.io",
+    "hacken.ghost.io",
+    "blog.openzeppelin.com",
+    "www.certora.com",
+    "certora.cdn.prismic.io",
     # 代币化平台
     "realityfinance.xyz",
     "assets.backed.fi",
     "www.backedassets.fi",
     "backed.fi",
 }
+# 密度阈值：单页中同一来源的链接数超过此值，视为聚合页，整组丢弃
+AGGREGATION_DENSITY_THRESHOLD = 5
 
 # ── URL 排除模式（按域名 / 路径匹配）──
 EXCLUDE_DOMAINS = {
@@ -388,9 +397,6 @@ def extract_doc_links(
         link_domain = parsed.netloc.lower()
         if _is_excluded_url(absolute_url):
             continue
-        # 全局链接黑名单：审计聚合仓库、代币化平台等跨项目污染源
-        if any(pattern in absolute_url.lower() for pattern in GLOBAL_LINK_BLACKLIST):
-            continue
 
         should_record = False
         link_text = a.get_text(strip=True)
@@ -423,6 +429,26 @@ def extract_doc_links(
         if normalized not in seen:
             seen.add(normalized)
             results.append((absolute_url, infer_doc_entry_type(absolute_url)))
+
+    # ── 密度触发过滤：同一来源链接超过阈值时，视为聚合页，整组丢弃 ──
+    if results:
+        # 按密度域名分组
+        density_groups: dict[str, list[int]] = {}
+        for i, (url, _) in enumerate(results):
+            url_lower = url.lower()
+            for pattern in AGGREGATION_DENSITY_DOMAINS:
+                if pattern in url_lower:
+                    density_groups.setdefault(pattern, []).append(i)
+                    break
+
+        # 丢弃超过阈值的组
+        drop_indices: set[int] = set()
+        for pattern, indices in density_groups.items():
+            if len(indices) > AGGREGATION_DENSITY_THRESHOLD:
+                drop_indices.update(indices)
+
+        if drop_indices:
+            results = [r for i, r in enumerate(results) if i not in drop_indices]
 
     return results
 

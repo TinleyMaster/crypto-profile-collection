@@ -198,6 +198,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "spa_retro_scan": {
+        "name": "SPA 回溯扫描（找出历史 SPA 页面）",
+        "description": "扫描 B2 已爬取但返回 0 链接的页面，用轻量 HTTP 请求检测是否为 SPA，标记 needs_browser=TRUE",
+        "script": "phase_b2_retro_scan_spa.py",
+        "default_args": ["--limit", "500", "--workers", "10"],
+        "category": "数据源采集",
+    },
     "spa_browser_crawl": {
         "name": "SPA 无头浏览器爬取",
         "description": "单次：用 Playwright 渲染 JS 页面，提取 B2 无法处理的 SPA 网站文档链接",

@@ -562,34 +562,36 @@ def api_onchain_query(asset_id: int):
 
 @app.route("/api/market/hot")
 def api_market_hot():
-    """每日投研推荐：从 Binance Web3 统一代币排行获取实时市场热点，按投研价值评分。"""
+    """每日投研推荐：多源交叉验证（Binance + CMC），按综合评分排序。"""
     try:
-        from binance_market import get_hot_tokens, get_top_gainers, get_top_volume
+        from cross_market import get_cross_validated
         limit = int(request.args.get("limit", "30"))
-        hot = get_hot_tokens(limit)
-        return jsonify({"ok": True, **hot})
+        result = get_cross_validated(limit)
+        return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/market/gainers")
 def api_market_gainers():
-    """24h 涨幅榜（已过滤极端异常值）。"""
+    """24h 涨幅榜：多源交叉验证。"""
     try:
-        from binance_market import get_top_gainers
-        limit = int(request.args.get("limit", "10"))
-        return jsonify({"ok": True, "tokens": get_top_gainers(limit)})
+        from cross_market import get_consensus_gainers
+        limit = int(request.args.get("limit", "30"))
+        result = get_consensus_gainers(limit)
+        return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/market/volume")
 def api_market_volume():
-    """24h 交易量榜。"""
+    """24h 交易量榜：多源交叉验证。"""
     try:
-        from binance_market import get_top_volume
-        limit = int(request.args.get("limit", "10"))
-        return jsonify({"ok": True, "tokens": get_top_volume(limit)})
+        from cross_market import get_consensus_volume
+        limit = int(request.args.get("limit", "30"))
+        result = get_consensus_volume(limit)
+        return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

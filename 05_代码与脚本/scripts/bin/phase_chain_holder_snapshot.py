@@ -1,6 +1,7 @@
 """
 Phase 1: 链上持仓快照采集。
-从 Etherscan/BSCScan API 拉取代币 Top 持有者，计算持仓集中度。
+从 Ethplorer/Binplorer API 拉取代币 Top 持有者，计算持仓集中度。
+免费 API，无需注册，替换 Etherscan Pro 付费 tokenholderlist 接口。
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from crypto_research.config import get_settings
-from crypto_research.clients.etherscan_client import EtherscanClient, get_client
+from crypto_research.clients.ethplorer_client import EthplorerClient, get_ethplorer_client
 
 
 def get_asset_contracts(conn, asset_id: int | None = None) -> list[dict]:
@@ -101,7 +102,7 @@ def save_snapshot(conn, snapshot: dict) -> int:
 
 def collect_holder_snapshot(
     conn,
-    client: EtherscanClient,
+    client: EthplorerClient,
     asset: dict,
     exchange_addresses: set[str],
     dry_run: bool = False,
@@ -115,53 +116,29 @@ def collect_holder_snapshot(
     if not contract_address:
         return None
 
-    # 获取 Top 100 持有者
-    all_holders: list[dict] = []
-    for page in range(1, 6):  # 每页 100，最多 5 页 = 500 个持有者
-        holders = client.get_token_holders(contract_address, page=page, offset=100)
-        if not holders:
-            break
-        all_holders.extend(holders)
-        if len(holders) < 100:
-            break
+    # 获取 Top 100 持有者（Ethplorer 一次返回，无需分页）
+    all_holders = client.get_token_holders(contract_address, limit=100)
 
     if not all_holders:
         print(f"  [{symbol}] {chain}: 无持有者数据")
         return None
 
-    # 计算持仓占比（需要获取总供应量）
-    total_supply = 0.0
-    for h in all_holders:
-        total_supply += float(h.get("balance", 0)) / float(h.get("share", "1") or "1")
+    # 获取代币基本信息（总持有者数）
+    token_info = client.get_token_info(contract_address)
+    total_holders = token_info.get("holders_count", 0) if token_info else len(all_holders)
 
-    # 如果没有 share 字段，用 balance 之和作为总量
-    # Etherscan 的 tokenholderlist 不返回 share，需要另外获取 totalSupply
-    # 简化处理：用所有持有者的 balance 之和作为近似总量
-    if total_supply == 0:
-        for h in all_holders:
-            total_supply += float(h.get("balance", 0))
-
-    if total_supply == 0:
-        return None
-
-    total_holders = len(all_holders)
-
-    # 计算集中度
-    top10_balance = sum(float(h.get("balance", 0)) for h in all_holders[:10])
-    top50_balance = sum(float(h.get("balance", 0)) for h in all_holders[:50])
-    top100_balance = sum(float(h.get("balance", 0)) for h in all_holders[:100])
-
-    top10_pct = round(top10_balance / total_supply * 100, 2)
-    top50_pct = round(top50_balance / total_supply * 100, 2)
-    top100_pct = round(top100_balance / total_supply * 100, 2)
+    # Ethplorer 直接返回 share%（持仓占比），直接累加即可
+    top10_pct = round(sum(h.get("share", 0) for h in all_holders[:10]), 2)
+    top50_pct = round(sum(h.get("share", 0) for h in all_holders[:50]), 2)
+    top100_pct = round(sum(h.get("share", 0) for h in all_holders[:100]), 2)
 
     # 地址类型分布（基于交易所钱包标签）
-    exchange_balance = 0.0
+    exchange_pct = 0.0
     for h in all_holders:
         addr = h.get("address", "").lower()
         if addr in exchange_addresses:
-            exchange_balance += float(h.get("balance", 0))
-    exchange_pct = round(exchange_balance / total_supply * 100, 2) if total_supply > 0 else 0
+            exchange_pct += h.get("share", 0)
+    exchange_pct = round(exchange_pct, 2)
 
     # 计算趋势（与历史快照对比）
     prev_7d = get_previous_snapshot(conn, asset_id, chain, 7)
@@ -244,9 +221,9 @@ def main():
 
             # 缓存客户端
             if chain not in chain_clients:
-                client = get_client(chain)
+                client = get_ethplorer_client(chain)
                 if not client:
-                    print(f"  [{i}/{len(assets)}] 跳过 {chain}: 无 API Key")
+                    print(f"  [{i}/{len(assets)}] 跳过 {chain}: 不支持")
                     skip += 1
                     continue
                 chain_clients[chain] = client

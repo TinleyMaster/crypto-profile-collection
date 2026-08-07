@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import time
+import threading
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(SCRIPT_DIR, "..", "src")
@@ -21,6 +22,16 @@ sys.stdout.reconfigure(line_buffering=True)
 TIMEOUT = 1800  # 30 分钟
 
 
+def _stream_reader(pipe, prefix: str):
+    """实时读取子进程输出流。"""
+    try:
+        for line in iter(pipe.readline, ""):
+            if line:
+                print(f"{prefix}{line.rstrip()}")
+    except (ValueError, OSError):
+        pass
+
+
 def main():
     script = os.path.join(SCRIPT_DIR, "phase_chain_holder_snapshot.py")
 
@@ -30,30 +41,33 @@ def main():
 
     t0 = time.time()
 
+    proc = subprocess.Popen(
+        [sys.executable, "-u", script, "--limit", "0"],  # 0 = 不限量，全量处理
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=SCRIPT_DIR,
+    )
+
+    # 启动实时读取线程
+    stdout_thread = threading.Thread(target=_stream_reader, args=(proc.stdout, ""), daemon=True)
+    stderr_thread = threading.Thread(target=_stream_reader, args=(proc.stderr, "  [stderr] "), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
     try:
-        result = subprocess.run(
-            [sys.executable, "-u", script, "--limit", "0"],  # 0 = 不限量，全量处理
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-            cwd=SCRIPT_DIR,
-        )
+        proc.wait(timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
+        proc.kill()
         print(f"超时（>{TIMEOUT}s），终止")
         return
 
-    output = result.stdout.strip()
-    stderr = result.stderr.strip()
-
-    if output:
-        for line in output.splitlines():
-            print(f"  {line}")
-
-    if stderr:
-        print(f"  [stderr] {stderr[:500]}")
+    # 等待读取线程结束
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
 
     elapsed = time.time() - t0
-    print(f"\n每日快照完成，耗时 {elapsed:.1f}s")
+    print(f"\n每日快照完成，耗时 {elapsed:.1f}s, exit_code={proc.returncode}")
 
 
 if __name__ == "__main__":

@@ -85,6 +85,27 @@ AGGREGATION_DOMAINS = {
     "backed.fi",                   # 代币化资产平台
 }
 
+# ── 全局链接黑名单：任何页面爬取时，匹配这些模式的链接直接丢弃 ──
+# 与 AGGREGATION_DOMAINS 不同：AGGREGATION_DOMAINS 只在爬取该域名时阻止内链，
+# 而 GLOBAL_LINK_BLACKLIST 无论 base URL 是什么，只要链接匹配就丢弃。
+GLOBAL_LINK_BLACKLIST = {
+    # 审计/安全公司 GitHub 仓库（跨项目审计报告聚合）
+    "github.com/zokyo-sec",
+    "github.com/cyberscope-io",
+    "github.com/Quillhash",
+    "github.com/peckshield",
+    "github.com/verichains",
+    "github.com/bnb-chain/whitepaper",
+    # 审计平台
+    "audits.sherlock.xyz",
+    "quillaudits.medium.com",
+    # 代币化平台
+    "realityfinance.xyz",
+    "assets.backed.fi",
+    "www.backedassets.fi",
+    "backed.fi",
+}
+
 # ── URL 排除模式（按域名 / 路径匹配）──
 EXCLUDE_DOMAINS = {
     # ── 非文档站点 ──
@@ -366,6 +387,9 @@ def extract_doc_links(
             continue
         link_domain = parsed.netloc.lower()
         if _is_excluded_url(absolute_url):
+            continue
+        # 全局链接黑名单：审计聚合仓库、代币化平台等跨项目污染源
+        if any(pattern in absolute_url.lower() for pattern in GLOBAL_LINK_BLACKLIST):
             continue
 
         should_record = False

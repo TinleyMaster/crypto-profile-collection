@@ -283,6 +283,30 @@ def get_task_progress() -> list[dict]:
                 "pct": round(done / total * 100, 1) if total > 0 else 0,
             })
 
+            # 3.7. SPA 无头浏览器爬取
+            #    候选集: needs_browser=TRUE 的条目
+            #    done: needs_browser=FALSE（已处理过的）
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE COALESCE(needs_browser, FALSE) = TRUE) AS pending,
+                    COUNT(*) FILTER (WHERE COALESCE(needs_browser, FALSE) = FALSE) AS done
+                FROM biz.doc_source_entry
+                WHERE entry_type IN ('official_website', 'docs')
+                """
+            )
+            row = cur.fetchone()
+            total = row["pending"] + row["done"]
+            done = row["done"]
+            remaining = row["pending"]
+            result.append({
+                "task": "SPA 无头浏览器爬取",
+                "done": done,
+                "total": total,
+                "remaining": remaining,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
+            })
+
             # 4. B2 深度文档发现（只统计可爬的 entry_type）
             cur.execute(
                 """

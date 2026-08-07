@@ -1,0 +1,268 @@
+"""
+Phase B2-SPA: 无头浏览器爬取 SPA 页面
+处理 needs_browser=TRUE 的 entry，使用 Playwright 渲染 JavaScript 后提取文档链接。
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+
+sys.stdout.reconfigure(line_buffering=True)
+
+# 复用 B2 的 extract_doc_links（包含所有过滤、密度控制逻辑）
+from phase_b2_deep_doc_discovery import extract_doc_links
+
+# 有效的 entry_type
+VALID_ENTRY_TYPES = {
+    "official_website", "docs", "github", "medium",
+    "docs_portal", "whitepaper_page", "twitter", "telegram", "other", "reddit",
+}
+
+# 并发数（浏览器资源有限）
+DEFAULT_CONCURRENCY = 4
+# 页面加载超时
+PAGE_TIMEOUT_MS = 15000
+
+
+def build_project_identifiers(symbol: str, name: str, entry_url: str) -> list[str]:
+    """构建项目标识符，与 B2 crawl_one 逻辑一致。"""
+    identifiers: list[str] = []
+    if symbol and len(symbol) >= 2:
+        identifiers.append(symbol)
+    if name:
+        for word in name.replace("-", " ").replace(".", " ").split():
+            word = word.strip()
+            if len(word) >= 2 and word.lower() not in (
+                "token", "coin", "dao", "protocol", "network", "chain", "finance", "swap", "defi",
+            ):
+                identifiers.append(word)
+    domain = urlparse(entry_url).netloc.lower()
+    domain_name = domain.split(".")[0]
+    if len(domain_name) >= 2 and domain_name not in ("www", "docs", "blog", "app", "api"):
+        identifiers.append(domain_name)
+    return identifiers
+
+
+async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool) -> dict:
+    """用 Playwright 渲染一个 SPA 页面，提取文档链接。"""
+    entry_id = entry["entry_id"]
+    entry_url = entry["entry_url"]
+    symbol = entry["canonical_symbol"] or ""
+    name = entry["canonical_name"] or ""
+
+    project_identifiers = build_project_identifiers(symbol, name, entry_url)
+
+    page = await browser_context.new_page()
+    try:
+        # 拦截不必要的资源以加速
+        await page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda route: route.abort())
+
+        await page.goto(entry_url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
+        # 额外等待一下，确保动态内容渲染完成
+        await page.wait_for_timeout(2000)
+
+        html = await page.content()
+        final_url = page.url
+
+        doc_links = extract_doc_links(html, final_url, same_domain_only, project_identifiers)
+
+        return {
+            "status": "ok",
+            "entry_id": entry_id,
+            "url": entry_url,
+            "final_url": final_url,
+            "doc_links": doc_links,
+            "entity_type": entry["entity_type"],
+            "asset_id": entry["asset_id"],
+            "protocol_id": entry["protocol_id"],
+            "source_code": entry["source_code"],
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "entry_id": entry_id,
+            "url": entry_url,
+            "error": str(e)[:120],
+        }
+    finally:
+        await page.close()
+
+
+async def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> dict:
+    """并发爬取一批 SPA 页面。"""
+    from playwright.async_api import async_playwright
+
+    stats = {"done": 0, "failed": 0, "discovered": 0, "empty": 0}
+    db_rows: list[tuple] = []
+    done_ids: list[int] = []
+    failed_ids: list[int] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def process(entry):
+            async with semaphore:
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                )
+                try:
+                    return await crawl_one_spa(context, entry, same_domain_only)
+                finally:
+                    await context.close()
+
+        tasks = [process(e) for e in entries]
+        for i, coro in enumerate(asyncio.as_completed(tasks)):
+            result = await coro
+            entry_id = result["entry_id"]
+            idx = i + 1
+
+            if result["status"] == "ok":
+                doc_links = result["doc_links"]
+                stats["done"] += 1
+                if doc_links:
+                    stats["discovered"] += len(doc_links)
+                    for link_url, link_type in doc_links:
+                        db_rows.append((
+                            result["entity_type"],
+                            result["asset_id"],
+                            result["protocol_id"],
+                            result["source_code"],
+                            link_type if link_type in VALID_ENTRY_TYPES else "other",
+                            link_url,
+                            f"spa_browser_crawl:{result['url'][:50]}",
+                            False,
+                        ))
+                else:
+                    stats["empty"] += 1
+                done_ids.append(entry_id)
+                print(f"  [{idx}/{len(entries)}] OK  {result['url'][:80]}  +{len(doc_links)} links")
+            else:
+                stats["failed"] += 1
+                failed_ids.append(entry_id)
+                print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
+
+        await browser.close()
+
+    return {
+        "stats": stats,
+        "db_rows": db_rows,
+        "done_ids": done_ids,
+        "failed_ids": failed_ids,
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Phase B2-SPA: Playwright 无头浏览器爬取 SPA 页面")
+    p.add_argument("--dry-run", action="store_true", help="预览不写入。")
+    p.add_argument("--limit", type=int, default=20, help="每批最大处理数。")
+    p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发浏览器窗口数。")
+    p.add_argument("--all-domains", action="store_true", help="不限制同域。")
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    import psycopg
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+    from crypto_research.db.upsert import fetch_one, load_sql
+
+    settings = get_settings(require_database=True)
+    upsert_sql = load_sql("biz/upsert_doc_source_entry.sql")
+
+    # 查询 needs_browser = TRUE 的条目
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id,
+                       dse.source_code, dse.entry_type, dse.entry_url,
+                       a.canonical_symbol, a.canonical_name
+                FROM biz.doc_source_entry dse
+                LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
+                WHERE dse.needs_browser = TRUE
+                ORDER BY dse.entry_id
+                LIMIT %s
+                """,
+                (args.limit,),
+            )
+            entries = [dict(row) for row in cur.fetchall()]
+
+    if not entries:
+        print(json.dumps({"status": "no_candidates"}, ensure_ascii=False))
+        return 0
+
+    print(f"待处理 SPA 页面: {len(entries)}, 并发: {args.concurrency}")
+    print()
+
+    start_time = time.time()
+    same_domain_only = not args.all_domains
+
+    result = asyncio.run(run_batch(entries, args.concurrency, same_domain_only))
+
+    stats = result["stats"]
+    elapsed = time.time() - start_time
+
+    print(f"\n完成: done={stats['done']} failed={stats['failed']} +{stats['discovered']} docs empty={stats['empty']} | {elapsed:.1f}s")
+
+    if args.dry_run:
+        preview = result["db_rows"][:5] if result["db_rows"] else []
+        print(json.dumps({
+            "mode": "dry_run",
+            "candidates": len(entries),
+            "done": stats["done"],
+            "failed": stats["failed"],
+            "discovered": stats["discovered"],
+            "empty": stats["empty"],
+            "elapsed_sec": round(elapsed, 1),
+            "first_entry": preview[0] if preview else None,
+        }, ensure_ascii=False))
+        return 0
+
+    # 写入数据库
+    with get_connection(settings.database_url) as conn:
+        written = 0
+        for row in result["db_rows"]:
+            fetch_one(conn, upsert_sql, row)
+            written += 1
+
+        # 清除 needs_browser + 标记已爬取
+        all_done = result["done_ids"] + result["failed_ids"]
+        if all_done:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW() WHERE entry_id = ANY(%s)",
+                    (all_done,),
+                )
+        conn.commit()
+
+    print(f"写入: {written} 条目, 清除标记: {len(all_done)}")
+    print(json.dumps({
+        "status": "complete",
+        "candidates": len(entries),
+        "done": stats["done"],
+        "failed": stats["failed"],
+        "discovered": stats["discovered"],
+        "empty": stats["empty"],
+        "written": written,
+        "elapsed_sec": round(elapsed, 1),
+    }, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

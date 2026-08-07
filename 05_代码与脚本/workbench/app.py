@@ -198,6 +198,21 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "spa_browser_crawl": {
+        "name": "SPA 无头浏览器爬取",
+        "description": "单次：用 Playwright 渲染 JS 页面，提取 B2 无法处理的 SPA 网站文档链接",
+        "script": "phase_b2_spa_browser_crawl.py",
+        "default_args": ["--limit", "20", "--concurrency", "4"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "spa_browser_crawl_auto": {
+        "name": "SPA 无头浏览器爬取（自动循环）",
+        "description": "自动循环，Playwright 渲染 JS 页面，批量处理 needs_browser=TRUE 的 SPA 网站",
+        "script": "phase_b2_spa_browser_crawl_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "github_activity": {
         "name": "GitHub 开发活跃度采集",
         "description": "从 doc_source_entry 提取 GitHub 仓库，拉取开发活跃度数据",

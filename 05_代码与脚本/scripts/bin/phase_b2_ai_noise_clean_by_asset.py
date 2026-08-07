@@ -116,6 +116,7 @@ RULE_NOISE_DOMAINS = {
     "github-peckshield": "%github.com/peckshield%",
     "github-verichains": "%github.com/verichains%",
     "github-zokyo": "%github.com/zokyo-sec%",
+    "github-softstack": "%github.com/softstack%",
     "github-bnb-whitepaper": "%github.com/bnb-chain/whitepaper%",
 }
 

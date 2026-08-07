@@ -91,6 +91,7 @@ AGGREGATION_DOMAINS = {
 AGGREGATION_DENSITY_DOMAINS = {
     # 审计/安全公司 GitHub 仓库（跨项目审计报告聚合）
     "github.com/zokyo-sec",
+    "github.com/softstack",
     "github.com/cyberscope-io",
     "github.com/Quillhash",
     "github.com/peckshield",
@@ -178,6 +179,10 @@ EXCLUDE_PATH_PATTERNS = [
     # ── GitHub 提交页面（差异对比/提交历史，非文档）──
     "/commit/",
     "/commits/",
+    # ── GitHub 分支/标签页面（非文档）──
+    "/branches/",
+    "/tags/",
+    "/releases/",
     # ── 虚拟环境 / 依赖目录（无论域名都排除）──
     ".venv/",
     "node_modules/",

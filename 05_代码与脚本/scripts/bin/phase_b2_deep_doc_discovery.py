@@ -397,8 +397,19 @@ def _is_same_github_repo(base_url: str, link_url: str) -> bool:
     return base_repo == link_repo
 
 
+def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
+    """检查 URL 路径中是否包含项目标识符（代币简称/项目名称）"""
+    for identifier in project_identifiers:
+        if not identifier or len(identifier) < 2:
+            continue
+        if identifier.lower() in url_lower:
+            return True
+    return False
+
+
 def extract_doc_links(
-    html: str, base_url: str, same_domain_only: bool = True
+    html: str, base_url: str, same_domain_only: bool = True,
+    project_identifiers: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin, urlparse
@@ -457,8 +468,8 @@ def extract_doc_links(
             seen.add(normalized)
             results.append((absolute_url, infer_doc_entry_type(absolute_url)))
 
-    # ── 密度触发过滤：同一来源链接超过阈值时，视为聚合页，整组丢弃 ──
-    if results:
+    # ── 密度触发过滤：同一来源链接超过阈值时，只保留与项目标识匹配的链接 ──
+    if results and project_identifiers:
         # 按密度域名分组
         density_groups: dict[str, list[int]] = {}
         for i, (url, _) in enumerate(results):
@@ -468,11 +479,14 @@ def extract_doc_links(
                     density_groups.setdefault(pattern, []).append(i)
                     break
 
-        # 丢弃超过阈值的组
+        # 对超过阈值的组，只保留 URL 包含项目标识的链接
         drop_indices: set[int] = set()
         for pattern, indices in density_groups.items():
             if len(indices) > AGGREGATION_DENSITY_THRESHOLD:
-                drop_indices.update(indices)
+                for i in indices:
+                    url_lower = results[i][0].lower()
+                    if not _matches_project(url_lower, project_identifiers):
+                        drop_indices.add(i)
 
         if drop_indices:
             results = [r for i, r in enumerate(results) if i not in drop_indices]
@@ -505,6 +519,25 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
     def _do_fetch():
         import requests
 
+        # 构建项目标识符：代币简称 + 项目名称分词 + base_url 域名
+        project_identifiers: list[str] = []
+        symbol = (entry.get("canonical_symbol") or "").strip()
+        name = (entry.get("canonical_name") or "").strip()
+        if symbol and len(symbol) >= 2:
+            project_identifiers.append(symbol)
+        if name:
+            # 项目名称分词（按空格/连字符/点拆分）
+            for word in name.replace("-", " ").replace(".", " ").split():
+                word = word.strip()
+                if len(word) >= 2 and word.lower() not in ("token", "coin", "dao", "protocol", "network", "chain", "finance", "swap", "defi"):
+                    project_identifiers.append(word)
+        # 从 entry_url 提取域名中的项目名（如 vka.io -> vka, DMDcoin -> dmdcoin）
+        from urllib.parse import urlparse
+        entry_domain = urlparse(entry_url).netloc.lower()
+        domain_name = entry_domain.split(".")[0]
+        if len(domain_name) >= 2 and domain_name not in ("www", "docs", "blog", "app", "api"):
+            project_identifiers.append(domain_name)
+
         session = _make_session()
         try:
             resp = session.get(entry_url, timeout=(3, timeout), allow_redirects=True)
@@ -513,7 +546,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
-            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only)
+            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers)
             return {
                 "status": "ok",
                 "entry_id": entry_id,
@@ -633,19 +666,21 @@ def main() -> int:
     noise_params: list = [f"%{p}%" for p in NOISE_DISCOVERED_FROM_PATTERNS]
     asset_filter = ""
     if args.asset_id is not None:
-        asset_filter = " AND asset_id = %s"
+        asset_filter = " AND dse.asset_id = %s"
     sql = f"""
-        SELECT entry_id, entity_type, asset_id, protocol_id, source_code,
-               entry_type, entry_url
-        FROM biz.doc_source_entry
-        WHERE entry_type = ANY(%s)
-          AND deep_crawled_at IS NULL
+        SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id, dse.source_code,
+               dse.entry_type, dse.entry_url,
+               a.canonical_symbol, a.canonical_name
+        FROM biz.doc_source_entry dse
+        LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
+        WHERE dse.entry_type = ANY(%s)
+          AND dse.deep_crawled_at IS NULL
           AND ({noise_clauses})
           {asset_filter}
         ORDER BY
-            CASE WHEN source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
-            CASE entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
-            entry_id
+            CASE WHEN dse.source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
+            CASE dse.entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
+            dse.entry_id
         LIMIT %s
     """
     with get_connection(settings.database_url) as conn:

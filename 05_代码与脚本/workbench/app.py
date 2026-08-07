@@ -560,6 +560,40 @@ def api_onchain_query(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/hot")
+def api_market_hot():
+    """每日投研推荐：从 Binance Web3 统一代币排行获取实时市场热点，按投研价值评分。"""
+    try:
+        from binance_market import get_hot_tokens, get_top_gainers, get_top_volume
+        limit = int(request.args.get("limit", "30"))
+        hot = get_hot_tokens(limit)
+        return jsonify({"ok": True, **hot})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/market/gainers")
+def api_market_gainers():
+    """24h 涨幅榜（已过滤极端异常值）。"""
+    try:
+        from binance_market import get_top_gainers
+        limit = int(request.args.get("limit", "10"))
+        return jsonify({"ok": True, "tokens": get_top_gainers(limit)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/market/volume")
+def api_market_volume():
+    """24h 交易量榜。"""
+    try:
+        from binance_market import get_top_volume
+        limit = int(request.args.get("limit", "10"))
+        return jsonify({"ok": True, "tokens": get_top_volume(limit)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

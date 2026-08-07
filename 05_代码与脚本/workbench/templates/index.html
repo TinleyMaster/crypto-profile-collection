@@ -834,6 +834,182 @@
             color: #d1d5db;
         }
 
+        /* 每日投研推荐 */
+        .hot-tokens-section {
+            margin-bottom: 28px;
+        }
+
+        .hot-tokens-section .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .hot-tokens-section .section-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .hot-tokens-section .section-header .hot-refresh {
+            font-size: 12px;
+            color: #8a92a0;
+            cursor: pointer;
+            background: #1e222a;
+            border: 1px solid #2a2f3a;
+            padding: 4px 12px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .hot-tokens-section .section-header .hot-refresh:hover {
+            color: #e6e8eb;
+            background: #2a2f3a;
+        }
+
+        .hot-tokens-section .section-header .hot-refresh.loading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .hot-tokens-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            overflow: hidden;
+            font-size: 13px;
+        }
+
+        .hot-tokens-table th {
+            background: #1a1e27;
+            color: #8a92a0;
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .hot-tokens-table th.right {
+            text-align: right;
+        }
+
+        .hot-tokens-table th.center {
+            text-align: center;
+        }
+
+        .hot-tokens-table td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #1e222a;
+            color: #e6e8eb;
+        }
+
+        .hot-tokens-table td.right {
+            text-align: right;
+        }
+
+        .hot-tokens-table td.center {
+            text-align: center;
+        }
+
+        .hot-tokens-table tr:hover td {
+            background: #1e222a;
+        }
+
+        .hot-tokens-table .change-up {
+            color: #26a69a;
+        }
+
+        .hot-tokens-table .change-down {
+            color: #ef5350;
+        }
+
+        .hot-tokens-table .score-cell {
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .hot-tokens-table .score-high {
+            color: #26a69a;
+        }
+
+        .hot-tokens-table .score-mid {
+            color: #f9a825;
+        }
+
+        .hot-tokens-table .score-low {
+            color: #8a92a0;
+        }
+
+        .hot-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .hot-badge.rank-1 {
+            background: #f9a825;
+            color: #1a1e27;
+        }
+
+        .hot-badge.rank-2 {
+            background: #8a92a0;
+            color: #1a1e27;
+        }
+
+        .hot-badge.rank-3 {
+            background: #6d4c41;
+            color: #e6e8eb;
+        }
+
+        .hot-filters {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .hot-filters button {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 6px;
+            border: 1px solid #2a2f3a;
+            background: #1e222a;
+            color: #8a92a0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .hot-filters button.active {
+            background: #2a2f3a;
+            color: #e6e8eb;
+            border-color: #3a4250;
+        }
+
+        .hot-filters button:hover {
+            color: #e6e8eb;
+        }
+
+        .hot-tokens-loading {
+            text-align: center;
+            padding: 40px;
+            color: #8a92a0;
+            font-size: 13px;
+        }
+
+        .hot-tokens-error {
+            text-align: center;
+            padding: 20px;
+            color: #ef5350;
+            font-size: 13px;
+        }
+
         /* 任务进度区 */
         .progress-section {
             margin-bottom: 28px;
@@ -1217,6 +1393,25 @@
                 <h3>文档链接来源</h3>
                 <div class="value" id="stat-docs">-</div>
                 <div class="sub" id="stat-docs-detail">-</div>
+            </div>
+        </div>
+
+        <!-- 每日投研推荐 -->
+        <div class="hot-tokens-section">
+            <div class="section-header">
+                <h2>🔥 每日投研推荐</h2>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
+                    <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
+                </div>
+            </div>
+            <div class="hot-filters">
+                <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
+                <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
+                <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
+            </div>
+            <div id="hot-tokens-content">
+                <div class="hot-tokens-loading">加载中...</div>
             </div>
         </div>
 
@@ -2187,6 +2382,105 @@
                 btn.textContent = '创建代币';
             }
         }
+
+        // ── 每日投研推荐 ──
+        let hotFilter = 'score';
+
+        function switchHotFilter (filter, btn) {
+            hotFilter = filter;
+            document.querySelectorAll('.hot-filters button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadHotTokens();
+        }
+
+        async function loadHotTokens () {
+            const btn = document.getElementById('hot-refresh-btn');
+            const content = document.getElementById('hot-tokens-content');
+            btn.classList.add('loading');
+            btn.textContent = '加载中...';
+
+            let url;
+            if (hotFilter === 'gainers') url = '/api/market/gainers?limit=30';
+            else if (hotFilter === 'volume') url = '/api/market/volume?limit=30';
+            else url = '/api/market/hot?limit=30';
+
+            try {
+                const r = await fetch(url);
+                const data = await r.json();
+                if (!data.ok) {
+                    content.innerHTML = '<div class="hot-tokens-error">' + (data.error || '加载失败') + '</div>';
+                    return;
+                }
+
+                const tokens = data.tokens;
+                if (!tokens || tokens.length === 0) {
+                    content.innerHTML = '<div class="hot-tokens-loading">暂无数据</div>';
+                    return;
+                }
+
+                let html = '<table class="hot-tokens-table"><thead><tr>';
+                html += '<th style="width:40px">#</th>';
+                html += '<th>代币</th>';
+                html += '<th class="right">价格</th>';
+                html += '<th class="right">24h 涨跌</th>';
+                html += '<th class="right">24h 交易量</th>';
+                html += '<th class="right">交易笔数</th>';
+                if (hotFilter === 'score') html += '<th class="center">买入比</th><th class="center">投研评分</th>';
+                html += '</tr></thead><tbody>';
+
+                tokens.forEach((t, i) => {
+                    const rank = i + 1;
+                    let rankBadge = '';
+                    if (rank === 1) rankBadge = '<span class="hot-badge rank-1">1</span>';
+                    else if (rank === 2) rankBadge = '<span class="hot-badge rank-2">2</span>';
+                    else if (rank === 3) rankBadge = '<span class="hot-badge rank-3">3</span>';
+
+                    const change = t.change_24h || 0;
+                    const changeCls = change >= 0 ? 'change-up' : 'change-down';
+                    const changeSign = change >= 0 ? '+' : '';
+
+                    const vol = t.volume_24h || 0;
+                    const volStr = vol >= 1e6 ? (vol / 1e6).toFixed(1) + 'M' : vol >= 1e3 ? (vol / 1e3).toFixed(1) + 'K' : vol.toFixed(0);
+
+                    const txns = t.txns_24h || 0;
+                    const txnsStr = txns >= 1e3 ? (txns / 1e3).toFixed(1) + 'K' : txns.toFixed(0);
+
+                    const price = t.price || 0;
+                    const priceStr = price < 0.01 ? price.toFixed(6) : price < 1 ? price.toFixed(4) : price.toFixed(2);
+
+                    html += '<tr>';
+                    html += '<td>' + rankBadge + rank + '</td>';
+                    html += '<td><strong>' + (t.symbol || '?') + '</strong></td>';
+                    html += '<td class="right">$' + priceStr + '</td>';
+                    html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
+                    html += '<td class="right">$' + volStr + '</td>';
+                    html += '<td class="right">' + txnsStr + '</td>';
+                    if (hotFilter === 'score') {
+                        const buyRatio = t.buy_ratio || 0;
+                        const score = t.score || 0;
+                        let scoreCls = score >= 60 ? 'score-high' : score >= 40 ? 'score-mid' : 'score-low';
+                        html += '<td class="center">' + (buyRatio * 100).toFixed(0) + '%</td>';
+                        html += '<td class="center score-cell ' + scoreCls + '">' + score.toFixed(0) + '</td>';
+                    }
+                    html += '</tr>';
+                });
+                html += '</tbody></table>';
+                content.innerHTML = html;
+
+                const updated = document.getElementById('hot-updated');
+                const now = new Date();
+                updated.textContent = '更新于 ' + now.toLocaleTimeString('zh-CN');
+            } catch (e) {
+                content.innerHTML = '<div class="hot-tokens-error">网络错误: ' + e.message + '</div>';
+            } finally {
+                btn.classList.remove('loading');
+                btn.textContent = '刷新';
+            }
+        }
+
+        // 初始加载 & 定时刷新
+        loadHotTokens();
+        setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
     </script>
 
     <!-- ── 添加代币弹窗 ── -->

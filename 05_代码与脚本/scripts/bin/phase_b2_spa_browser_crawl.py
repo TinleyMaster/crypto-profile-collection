@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+
+import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -32,7 +35,11 @@ VALID_ENTRY_TYPES = {
 # 并发数（浏览器资源有限）
 DEFAULT_CONCURRENCY = 4
 # 页面加载超时
-PAGE_TIMEOUT_MS = 15000
+PAGE_TIMEOUT_MS = 8000
+# HEAD 预检超时
+HEAD_TIMEOUT_S = 8
+# 死链接标记文件（用于跨轮记忆）
+DEAD_CHECK_FILE = SCRIPT_DIR / ".." / ".." / "task_state" / "spa_dead_urls.json"
 
 
 def build_project_identifiers(symbol: str, name: str, entry_url: str) -> list[str]:
@@ -54,7 +61,28 @@ def build_project_identifiers(symbol: str, name: str, entry_url: str) -> list[st
     return identifiers
 
 
-async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool) -> dict:
+def preflight_check(url: str) -> str | None:
+    """HEAD 预检：返回 None 表示可以继续浏览器渲染，返回 reason 字符串表示应跳过。"""
+    try:
+        resp = requests.head(url, timeout=HEAD_TIMEOUT_S, allow_redirects=True,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            return None  # HTML，可以继续
+        if any(t in content_type for t in ("pdf", "image/", "application/zip", "application/gzip",
+                                            "application/octet-stream", "video/", "audio/")):
+            return f"非HTML内容: {content_type}"
+        # 其他类型也跳过（json, xml, etc.）
+        return f"非HTML内容: {content_type}"
+    except requests.exceptions.Timeout:
+        return "HEAD 超时"
+    except requests.exceptions.ConnectionError:
+        return "连接失败"
+    except Exception as e:
+        return f"HEAD 错误: {str(e)[:60]}"
+
+
+async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, executor) -> dict:
     """用 Playwright 渲染一个 SPA 页面，提取文档链接。"""
     entry_id = entry["entry_id"]
     entry_url = entry["entry_url"]
@@ -63,14 +91,25 @@ async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool) ->
 
     project_identifiers = build_project_identifiers(symbol, name, entry_url)
 
+    # 1. HEAD 预检：跳过非 HTML 内容（PDF、图片、死链等）
+    loop = asyncio.get_running_loop()
+    skip_reason = await loop.run_in_executor(executor, preflight_check, entry_url)
+    if skip_reason is not None:
+        return {
+            "status": "skipped",
+            "entry_id": entry_id,
+            "url": entry_url,
+            "reason": skip_reason,
+        }
+
+    # 2. 浏览器渲染
     page = await browser_context.new_page()
     try:
-        # 拦截不必要的资源以加速
         await page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda route: route.abort())
 
-        await page.goto(entry_url, wait_until="networkidle", timeout=PAGE_TIMEOUT_MS)
-        # 额外等待一下，确保动态内容渲染完成
-        await page.wait_for_timeout(2000)
+        await page.goto(entry_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        # 额外等待 JS 渲染
+        await page.wait_for_timeout(1500)
 
         html = await page.content()
         final_url = page.url
@@ -103,10 +142,12 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
     """并发爬取一批 SPA 页面。"""
     from playwright.async_api import async_playwright
 
-    stats = {"done": 0, "failed": 0, "discovered": 0, "empty": 0}
+    stats = {"done": 0, "failed": 0, "discovered": 0, "empty": 0, "skipped": 0}
     db_rows: list[tuple] = []
     done_ids: list[int] = []
     failed_ids: list[int] = []
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -119,7 +160,7 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
                     viewport={"width": 1280, "height": 800},
                 )
                 try:
-                    return await crawl_one_spa(context, entry, same_domain_only)
+                    return await crawl_one_spa(context, entry, same_domain_only, executor)
                 finally:
                     await context.close()
 
@@ -129,7 +170,12 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
             entry_id = result["entry_id"]
             idx = i + 1
 
-            if result["status"] == "ok":
+            if result["status"] == "skipped":
+                stats["skipped"] += 1
+                done_ids.append(entry_id)
+                print(f"  [{idx}/{len(entries)}] SKIP  {result['url'][:80]}  {result.get('reason','')}")
+
+            elif result["status"] == "ok":
                 doc_links = result["doc_links"]
                 stats["done"] += 1
                 if doc_links:
@@ -155,6 +201,8 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
                 print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
 
         await browser.close()
+
+    executor.shutdown(wait=False)
 
     return {
         "stats": stats,
@@ -217,7 +265,7 @@ def main() -> int:
     stats = result["stats"]
     elapsed = time.time() - start_time
 
-    print(f"\n完成: done={stats['done']} failed={stats['failed']} +{stats['discovered']} docs empty={stats['empty']} | {elapsed:.1f}s")
+    print(f"\n完成: done={stats['done']} skipped={stats['skipped']} failed={stats['failed']} +{stats['discovered']} docs empty={stats['empty']} | {elapsed:.1f}s")
 
     if args.dry_run:
         preview = result["db_rows"][:5] if result["db_rows"] else []
@@ -225,6 +273,7 @@ def main() -> int:
             "mode": "dry_run",
             "candidates": len(entries),
             "done": stats["done"],
+            "skipped": stats["skipped"],
             "failed": stats["failed"],
             "discovered": stats["discovered"],
             "empty": stats["empty"],
@@ -255,6 +304,7 @@ def main() -> int:
         "status": "complete",
         "candidates": len(entries),
         "done": stats["done"],
+        "skipped": stats["skipped"],
         "failed": stats["failed"],
         "discovered": stats["discovered"],
         "empty": stats["empty"],

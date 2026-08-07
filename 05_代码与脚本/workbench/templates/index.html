@@ -945,6 +945,30 @@
             color: #8a92a0;
         }
 
+        .token-name {
+            color: #8a92a0;
+            font-size: 11px;
+            font-weight: 400;
+        }
+
+        .contract-addr {
+            color: #5a8cd4;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .contract-addr:hover {
+            color: #7ab4ff;
+            text-decoration: underline;
+        }
+
+        .no-contract {
+            color: #4a5058;
+            font-size: 11px;
+        }
+
         .hot-badge {
             display: inline-block;
             padding: 1px 6px;
@@ -2541,7 +2565,8 @@
 
             html += '<table class="hot-tokens-table"><thead><tr>';
             html += '<th style="width:40px">#</th>';
-            html += '<th>代币</th>';
+            html += '<th>代币 / 项目</th>';
+            html += '<th>合约地址</th>';
             html += '<th class="right">价格</th>';
             html += '<th class="right">24h 涨跌</th>';
             html += '<th class="right">24h 交易量</th>';
@@ -2583,9 +2608,17 @@
                     srcIcons += '<span class="source-icon' + (active ? ' active' : '') + '">' + label + '</span>';
                 });
 
+                const name = t.name || '';
+                const contract = t.contract || '';
+                const chain = t.chain || '';
+                const contractShort = contract
+                    ? contract.substring(0, 6) + '...' + contract.substring(contract.length - 4)
+                    : '-';
+
                 html += '<tr>';
                 html += '<td>' + rankBadge + rank + '</td>';
-                html += '<td><strong>' + (t.symbol || '?') + '</strong></td>';
+                html += '<td><strong>' + (t.symbol || '?') + '</strong>' + (name ? '<br><span class="token-name">' + name + '</span>' : '') + '</td>';
+                html += '<td>' + (contract ? '<span class="contract-addr" title="' + contract + ' (' + chain + ')">' + contractShort + '</span>' : '<span class="no-contract">-</span>') + '</td>';
                 html += '<td class="right">$' + priceStr + '</td>';
                 html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
                 html += '<td class="right">' + volStr + '</td>';

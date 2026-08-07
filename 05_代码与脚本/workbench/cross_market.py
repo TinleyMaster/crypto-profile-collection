@@ -82,8 +82,17 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
         change_24h = b_change if b else c_change
         volume_24h = b_vol if b_vol > 0 else c_vol
 
+        # 项目名称：优先 CMC（有 name 字段），其次 Binance
+        name = (c.get("name") if c else "") or (b.get("name") if b else "")
+        # 链和合约地址：仅 Binance 有
+        chain = b.get("chain", "") if b else ""
+        contract = b.get("contract", "") if b else ""
+
         results.append({
             "symbol": symbol,
+            "name": name,
+            "chain": chain,
+            "contract": contract,
             "price": _normalize_float(price),
             "change_24h": change_24h,
             "volume_24h": volume_24h,

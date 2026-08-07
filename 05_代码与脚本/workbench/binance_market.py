@@ -111,6 +111,7 @@ def score_tokens(raw_tokens: list[dict]) -> list[dict]:
 
         scored.append({
             "symbol": symbol,
+            "name": (t.get("name") or "").strip(),
             "chain": t.get("chainId", ""),
             "contract": t.get("contractAddress", ""),
             "price": price,

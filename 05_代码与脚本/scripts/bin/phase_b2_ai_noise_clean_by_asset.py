@@ -33,6 +33,69 @@ from crypto_research.clients.llm_client import LLMClient
 
 settings = get_settings(require_database=True)
 
+# ── 审计/安全公司域名（跨项目审计报告聚合，需按项目标识过滤）──
+# 与 phase_b2_deep_doc_discovery.py 的 AGGREGATION_DENSITY_DOMAINS 保持同步
+AGGREGATION_DENSITY_DOMAINS = {
+    # 审计/安全公司 GitHub 仓库
+    "github.com/zokyo-sec",
+    "github.com/softstack",
+    "github.com/oak-security",
+    "github.com/Hashlock-Auditing",
+    "github.com/Audit-Ace",
+    "github.com/Tech-Audit",
+    "github.com/HashEx",
+    "github.com/shieldify-security",
+    "github.com/CoinFabrik",
+    "github.com/mixbytes",
+    "github.com/pashov",
+    "github.com/TechRate",
+    "github.com/Dedaub",
+    "github.com/GuardianAudits",
+    "github.com/HalbornSecurity",
+    "github.com/SpyWolfNetwork",
+    "github.com/ConsenSysDiligence",
+    "github.com/tintinweb",
+    "github.com/sherlock-protocol",
+    "github.com/Stride-Labs",
+    "github.com/beefyfinance",
+    "github.com/Anzen-Finance",
+    "github.com/Folks-Finance",
+    "github.com/Satoshi-Protocol",
+    # 非审计类跨项目污染
+    "github.com/aave/aave-v3-core",
+    "github.com/ethereum/ethereum-org-website",
+    "github.com/cyberscope-io",
+    "github.com/Quillhash",
+    "github.com/peckshield",
+    "github.com/verichains",
+    "github.com/bnb-chain/whitepaper",
+    # 审计/安全平台
+    "audits.sherlock.xyz",
+    "quillaudits.medium.com",
+    "www.cyberscope.io",
+    "hacken.io",
+    "assets.hacken.io",
+    "hacken.ghost.io",
+    "blog.openzeppelin.com",
+    "www.certora.com",
+    "certora.cdn.prismic.io",
+    # 代币化平台
+    "realityfinance.xyz",
+    "assets.backed.fi",
+    "www.backedassets.fi",
+    "backed.fi",
+}
+
+
+def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
+    """检查 URL 路径中是否包含项目标识符（代币简称/项目名称）"""
+    for identifier in project_identifiers:
+        if not identifier or len(identifier) < 2:
+            continue
+        if identifier.lower() in url_lower:
+            return True
+    return False
+
 # ── 规则直删域名（不需要 AI 判断） ──
 RULE_NOISE_DOMAINS = {
     "paperdigest": "%paperdigest.org%",
@@ -298,6 +361,76 @@ def reset_dense_domains(conn, execute: bool) -> int:
     return reset_count
 
 
+def build_project_identifiers(symbol: str, name: str) -> list[str]:
+    """构建项目标识符列表，用于审计链接匹配。"""
+    identifiers: list[str] = []
+    if symbol and len(symbol) >= 2:
+        identifiers.append(symbol)
+    if name:
+        for word in name.replace("-", " ").replace(".", " ").split():
+            word = word.strip()
+            if len(word) >= 2 and word.lower() not in ("token", "coin", "dao", "protocol", "network", "chain", "finance", "swap", "defi"):
+                identifiers.append(word)
+    return identifiers
+
+
+def pre_filter_audit_links(conn, asset: dict, execute: bool) -> tuple[int, int, list[dict]]:
+    """
+    审计链接预过滤：按项目标识匹配。
+    - 包含标识 → 保留（标记已检查）
+    - 不包含 → 删除
+    - 返回：(kept, deleted, remaining_domains_for_ai)
+    """
+    symbol = asset["symbol"] or ""
+    name = asset["name"] or ""
+    project_identifiers = build_project_identifiers(symbol, name)
+    if not project_identifiers:
+        return 0, 0, asset["domains"]
+
+    domains = asset["domains"]
+    remaining = []
+    auto_kept = 0
+    auto_deleted = 0
+
+    for d in domains:
+        domain = d["domain"] or ""
+        # 检查是否为审计密度域名
+        is_audit = any(ad in domain.lower() for ad in AGGREGATION_DENSITY_DOMAINS)
+        if not is_audit:
+            remaining.append(d)
+            continue
+
+        # 取出该域名下所有链接的 entry_id 和 entry_url
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT entry_id, entry_url FROM biz.doc_source_entry WHERE entry_id = ANY(%s) ORDER BY entry_id",
+                (d["entry_ids"],),
+            )
+            entries = cur.fetchall()
+
+        keep_ids = []
+        delete_ids = []
+        for e in entries:
+            if _matches_project(e["entry_url"].lower(), project_identifiers):
+                keep_ids.append(e["entry_id"])
+            else:
+                delete_ids.append(e["entry_id"])
+
+        if execute:
+            if keep_ids:
+                mark_checked(conn, keep_ids)
+            if delete_ids:
+                delete_noise_ids(conn, delete_ids)
+
+        if keep_ids or delete_ids:
+            print(f"  [审计预过滤] {domain}: 保留 {len(keep_ids)} 条, 删除 {len(delete_ids)} 条")
+
+        auto_kept += len(keep_ids)
+        auto_deleted += len(delete_ids)
+
+    return auto_kept, auto_deleted, remaining
+
+
 def get_asset_domain_groups(conn, limit: int) -> list[dict]:
     """
     获取有未检查 deep_crawl 链接的资产，按资产分组，返回每个资产的域名聚合信息。
@@ -444,7 +577,16 @@ def main():
             print(f"  未检查: {unchecked:,} 条  |  已检查: {asset['checked']:,} 条")
             print(f"  域名数: {len(domains)}")
 
-            # 构造 domain_groups 传给 AI
+            # ── 审计链接预过滤：按项目标识匹配，不送 AI ──
+            pre_kept, pre_deleted, domains = pre_filter_audit_links(conn, asset, args.execute)
+            total_kept_links += pre_kept
+            total_noise_links += pre_deleted
+
+            if not domains:
+                print(f"  所有链接已预过滤处理，无需 AI 判断\n")
+                continue
+
+            # 构造 domain_groups 传给 AI（仅剩余非审计域名）
             domain_groups = []
             for d in domains:
                 domain_groups.append({

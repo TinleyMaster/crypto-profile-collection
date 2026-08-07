@@ -1010,6 +1010,27 @@
             font-size: 13px;
         }
 
+        .hot-load-more-wrap {
+            text-align: center;
+            padding: 12px 0 4px;
+        }
+
+        .hot-load-more {
+            background: transparent;
+            border: 1px solid #2b3139;
+            color: #e6b800;
+            padding: 6px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .hot-load-more:hover {
+            border-color: #e6b800;
+            background: rgba(230, 184, 0, 0.08);
+        }
+
         .hot-source-stats {
             display: flex;
             gap: 12px;
@@ -2460,11 +2481,16 @@
             loadHotTokens();
         }
 
+        const HOT_PAGE_SIZE = 5;
+        let hotAllTokens = [];
+        let hotShowingAll = false;
+
         async function loadHotTokens () {
             const btn = document.getElementById('hot-refresh-btn');
             const content = document.getElementById('hot-tokens-content');
             btn.classList.add('loading');
             btn.textContent = '加载中...';
+            hotShowingAll = false;
 
             let url;
             if (hotFilter === 'gainers') url = '/api/market/gainers?limit=30';
@@ -2485,78 +2511,8 @@
                     return;
                 }
 
-                let html = '';
-
-                // 数据源统计
-                if (data.source_stats) {
-                    const s = data.source_stats;
-                    html += '<div class="hot-source-stats">';
-                    html += '<span>Binance: ' + s.binance + ' 个</span>';
-                    html += '<span>CMC: ' + s.cmc + ' 个</span>';
-                    html += '<span class="stat-both">双源共识: ' + s.both + ' 个</span>';
-                    html += '</div>';
-                }
-
-                html += '<table class="hot-tokens-table"><thead><tr>';
-                html += '<th style="width:40px">#</th>';
-                html += '<th>代币</th>';
-                html += '<th class="right">价格</th>';
-                html += '<th class="right">24h 涨跌</th>';
-                html += '<th class="right">24h 交易量</th>';
-                html += '<th class="center">共识</th>';
-                if (hotFilter === 'score') html += '<th class="center">综合评分</th>';
-                html += '</tr></thead><tbody>';
-
-                tokens.forEach((t, i) => {
-                    const rank = i + 1;
-                    let rankBadge = '';
-                    if (rank === 1) rankBadge = '<span class="hot-badge rank-1">1</span>';
-                    else if (rank === 2) rankBadge = '<span class="hot-badge rank-2">2</span>';
-                    else if (rank === 3) rankBadge = '<span class="hot-badge rank-3">3</span>';
-
-                    const change = t.change_24h || 0;
-                    const changeCls = change >= 0 ? 'change-up' : 'change-down';
-                    const changeSign = change >= 0 ? '+' : '';
-
-                    const vol = t.volume_24h || 0;
-                    const volStr = vol >= 1e6 ? '$' + (vol / 1e6).toFixed(1) + 'M' : vol >= 1e3 ? '$' + (vol / 1e3).toFixed(1) + 'K' : '$' + vol.toFixed(0);
-
-                    const price = t.price || 0;
-                    const priceStr = price < 0.01 ? price.toFixed(6) : price < 1 ? price.toFixed(4) : price.toFixed(2);
-
-                    // 共识度
-                    const consensus = t.consensus || '1/3';
-                    const consNum = t.source_count || 1;
-                    let consCls = 'consensus-1';
-                    if (consNum >= 3) consCls = 'consensus-3';
-                    else if (consNum >= 2) consCls = 'consensus-2';
-
-                    // 来源图标
-                    let srcIcons = '';
-                    const srcs = t.sources || [];
-                    const allSrcs = ['binance', 'cmc'];
-                    allSrcs.forEach(s => {
-                        const active = srcs.includes(s);
-                        const label = s === 'binance' ? 'B' : 'C';
-                        srcIcons += '<span class="source-icon' + (active ? ' active' : '') + '">' + label + '</span>';
-                    });
-
-                    html += '<tr>';
-                    html += '<td>' + rankBadge + rank + '</td>';
-                    html += '<td><strong>' + (t.symbol || '?') + '</strong></td>';
-                    html += '<td class="right">$' + priceStr + '</td>';
-                    html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
-                    html += '<td class="right">' + volStr + '</td>';
-                    html += '<td class="center"><div class="source-icons">' + srcIcons + '</div><span class="consensus-badge ' + consCls + '">' + consensus + '</span></td>';
-                    if (hotFilter === 'score') {
-                        const score = t.composite_score || t.score || 0;
-                        let scoreCls = score >= 60 ? 'score-high' : score >= 40 ? 'score-mid' : 'score-low';
-                        html += '<td class="center score-cell ' + scoreCls + '">' + score.toFixed(0) + '</td>';
-                    }
-                    html += '</tr>';
-                });
-                html += '</tbody></table>';
-                content.innerHTML = html;
+                hotAllTokens = tokens;
+                renderHotTokens(tokens.slice(0, HOT_PAGE_SIZE), data.source_stats);
 
                 const updated = document.getElementById('hot-updated');
                 const now = new Date();
@@ -2567,6 +2523,95 @@
                 btn.classList.remove('loading');
                 btn.textContent = '刷新';
             }
+        }
+
+        function renderHotTokens (tokens, sourceStats) {
+            const content = document.getElementById('hot-tokens-content');
+            let html = '';
+
+            // 数据源统计
+            if (sourceStats) {
+                const s = sourceStats;
+                html += '<div class="hot-source-stats">';
+                html += '<span>Binance: ' + s.binance + ' 个</span>';
+                html += '<span>CMC: ' + s.cmc + ' 个</span>';
+                html += '<span class="stat-both">双源共识: ' + s.both + ' 个</span>';
+                html += '</div>';
+            }
+
+            html += '<table class="hot-tokens-table"><thead><tr>';
+            html += '<th style="width:40px">#</th>';
+            html += '<th>代币</th>';
+            html += '<th class="right">价格</th>';
+            html += '<th class="right">24h 涨跌</th>';
+            html += '<th class="right">24h 交易量</th>';
+            html += '<th class="center">共识</th>';
+            if (hotFilter === 'score') html += '<th class="center">综合评分</th>';
+            html += '</tr></thead><tbody>';
+
+            tokens.forEach((t, i) => {
+                const rank = i + 1;
+                let rankBadge = '';
+                if (rank === 1) rankBadge = '<span class="hot-badge rank-1">1</span>';
+                else if (rank === 2) rankBadge = '<span class="hot-badge rank-2">2</span>';
+                else if (rank === 3) rankBadge = '<span class="hot-badge rank-3">3</span>';
+
+                const change = t.change_24h || 0;
+                const changeCls = change >= 0 ? 'change-up' : 'change-down';
+                const changeSign = change >= 0 ? '+' : '';
+
+                const vol = t.volume_24h || 0;
+                const volStr = vol >= 1e6 ? '$' + (vol / 1e6).toFixed(1) + 'M' : vol >= 1e3 ? '$' + (vol / 1e3).toFixed(1) + 'K' : '$' + vol.toFixed(0);
+
+                const price = t.price || 0;
+                const priceStr = price < 0.01 ? price.toFixed(6) : price < 1 ? price.toFixed(4) : price.toFixed(2);
+
+                // 共识度
+                const consensus = t.consensus || '1/3';
+                const consNum = t.source_count || 1;
+                let consCls = 'consensus-1';
+                if (consNum >= 3) consCls = 'consensus-3';
+                else if (consNum >= 2) consCls = 'consensus-2';
+
+                // 来源图标
+                let srcIcons = '';
+                const srcs = t.sources || [];
+                const allSrcs = ['binance', 'cmc'];
+                allSrcs.forEach(s => {
+                    const active = srcs.includes(s);
+                    const label = s === 'binance' ? 'B' : 'C';
+                    srcIcons += '<span class="source-icon' + (active ? ' active' : '') + '">' + label + '</span>';
+                });
+
+                html += '<tr>';
+                html += '<td>' + rankBadge + rank + '</td>';
+                html += '<td><strong>' + (t.symbol || '?') + '</strong></td>';
+                html += '<td class="right">$' + priceStr + '</td>';
+                html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
+                html += '<td class="right">' + volStr + '</td>';
+                html += '<td class="center"><div class="source-icons">' + srcIcons + '</div><span class="consensus-badge ' + consCls + '">' + consensus + '</span></td>';
+                if (hotFilter === 'score') {
+                    const score = t.composite_score || t.score || 0;
+                    let scoreCls = score >= 60 ? 'score-high' : score >= 40 ? 'score-mid' : 'score-low';
+                    html += '<td class="center score-cell ' + scoreCls + '">' + score.toFixed(0) + '</td>';
+                }
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+
+            // 加载更多按钮
+            if (!hotShowingAll && hotAllTokens.length > HOT_PAGE_SIZE) {
+                html += '<div class="hot-load-more-wrap">';
+                html += '<button class="hot-load-more" onclick="showAllHotTokens()">加载更多（剩余 ' + (hotAllTokens.length - HOT_PAGE_SIZE) + ' 个）</button>';
+                html += '</div>';
+            }
+
+            content.innerHTML = html;
+        }
+
+        function showAllHotTokens () {
+            hotShowingAll = true;
+            renderHotTokens(hotAllTokens, null);
         }
 
         // 初始加载 & 定时刷新

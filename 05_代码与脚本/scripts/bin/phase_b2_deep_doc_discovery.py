@@ -277,9 +277,10 @@ NOISE_DISCOVERED_FROM_PATTERNS = [
 # ── Worker 共享的全局变量 ──
 _worker_settings: dict = {}  # database_url, upsert_sql
 _stats_lock = threading.Lock()
-_stats = {"done": 0, "failed": 0, "not_html": 0, "empty": 0, "discovered": 0}
+_stats = {"done": 0, "failed": 0, "not_html": 0, "empty": 0, "discovered": 0, "spa": 0}
 _pending_db_rows: list[tuple] = []
 _pending_crawled_ids: list[int] = []
+_pending_spa_ids: list[int] = []
 _db_lock = threading.Lock()
 _start_time: float = 0
 _total: int = 0
@@ -547,6 +548,25 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
             doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers)
+
+            # 检测 SPA：无链接 + 小 HTML（<5000 bytes 或包含 SPA 框架标志）
+            needs_browser = False
+            if not doc_links:
+                html_lower = resp.text.lower()
+                is_spa = (
+                    len(resp.text) < 5000
+                    or 'id="app"' in html_lower
+                    or 'id="root"' in html_lower
+                    or 'id="__next"' in html_lower
+                    or 'id="__nuxt"' in html_lower
+                    or 'react-dom' in html_lower
+                    or 'vue' in html_lower
+                    or 'window.__NUXT__' in html_lower
+                    or '__NEXT_DATA__' in html_lower
+                )
+                if is_spa:
+                    needs_browser = True
+
             return {
                 "status": "ok",
                 "entry_id": entry_id,
@@ -556,6 +576,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
                 "asset_id": entry["asset_id"],
                 "protocol_id": entry["protocol_id"],
                 "source_code": entry["source_code"],
+                "needs_browser": needs_browser,
             }
         except Exception as e:
             return {
@@ -584,8 +605,8 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
 
 def _flush_db() -> None:
     """将累积的 DB 写入一次性提交"""
-    global _pending_db_rows, _pending_crawled_ids
-    if not _pending_db_rows and not _pending_crawled_ids:
+    global _pending_db_rows, _pending_crawled_ids, _pending_spa_ids
+    if not _pending_db_rows and not _pending_crawled_ids and not _pending_spa_ids:
         return
 
     from crypto_research.db.conn import get_connection
@@ -605,8 +626,15 @@ def _flush_db() -> None:
                     "UPDATE biz.doc_source_entry SET deep_crawled_at = NOW() WHERE entry_id = ANY(%s)",
                     (_pending_crawled_ids,),
                 )
+        if _pending_spa_ids:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.doc_source_entry SET deep_crawled_at = NOW(), needs_browser = TRUE WHERE entry_id = ANY(%s)",
+                    (_pending_spa_ids,),
+                )
     _pending_db_rows.clear()
     _pending_crawled_ids.clear()
+    _pending_spa_ids.clear()
 
 
 def _print_progress():
@@ -622,7 +650,7 @@ def _print_progress():
         print(
             f"[{done + failed}/{total} {pct:.0f}%] "
             f"OK:{done} FAIL:{failed} +{discovered} docs "
-            f"| {rate:.1f}/s ETA:{eta:.0f}s",
+            f"SPA:{_stats['spa']} | {rate:.1f}/s ETA:{eta:.0f}s",
             flush=True,
         )
 
@@ -657,6 +685,9 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS deep_crawled_at TIMESTAMPTZ"
+            )
+            cur.execute(
+                "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS needs_browser BOOLEAN DEFAULT FALSE"
             )
 
     # 查询待处理（排除从噪声源发现的条目，防止递归放大）
@@ -744,11 +775,16 @@ def main() -> int:
                     _stats["done"] += 1
                     if doc_links:
                         _stats["discovered"] += len(doc_links)
+                    elif result.get("needs_browser"):
+                        _stats["spa"] += 1
                     else:
                         _stats["empty"] += 1
 
                 with _db_lock:
-                    _pending_crawled_ids.append(entry_id)
+                    if result.get("needs_browser"):
+                        _pending_spa_ids.append(entry_id)
+                    else:
+                        _pending_crawled_ids.append(entry_id)
                     if doc_links:
                         for link_url, link_type in doc_links:
                             _pending_db_rows.append(
@@ -799,6 +835,7 @@ def main() -> int:
                 "not_html": _stats["not_html"],
                 "empty": _stats["empty"],
                 "discovered": _stats["discovered"],
+                "spa": _stats["spa"],
                 "elapsed_sec": round(elapsed, 1),
                 "rate": round((_stats["done"] + _stats["failed"]) / elapsed, 1)
                 if elapsed

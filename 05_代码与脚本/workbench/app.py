@@ -195,6 +195,7 @@ TASK_DEFS = {
         "script": "phase_b2_ai_noise_clean_auto.py",
         "default_args": [],
         "category": "AI 筛选",
+        "hidden": True,
     },
     "b2_ai_noise_clean_by_asset": {
         "name": "B2 AI 噪声清理（按资产分组）",
@@ -202,6 +203,7 @@ TASK_DEFS = {
         "script": "phase_b2_ai_noise_clean_by_asset.py",
         "default_args": ["--execute"],
         "category": "AI 筛选",
+        "hidden": True,
     },
     "b2_ai_noise_clean_by_asset_auto": {
         "name": "B2 AI 噪声清理（按资产·自动循环）",

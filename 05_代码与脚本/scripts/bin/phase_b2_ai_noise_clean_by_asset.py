@@ -229,6 +229,76 @@ def reset_ai_false_positives(conn, execute: bool) -> int:
     return reset_count
 
 
+def reset_dense_domains(conn, execute: bool) -> int:
+    """
+    重置单资产密集域名的 AI 检查状态。
+    对于域名在单个资产下链接数 >100 且占比 >90% 的情况，
+    将 ai_noise_checked_at 重置为 NULL，让 AI 重新评估。
+    排除 github.com/gitlab.com/bitbucket.org（合法代码托管）。
+    """
+    reset_count = 0
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""
+            WITH asset_domain_stats AS (
+                SELECT
+                    dse.asset_id,
+                    SUBSTRING(dse.entry_url FROM 'https?://([^/]+)') AS domain,
+                    COUNT(*) AS domain_cnt
+                FROM biz.doc_source_entry dse
+                WHERE dse.entity_type = 'asset'
+                  AND dse.discovered_from LIKE 'deep_crawl:%%'
+                  AND dse.ai_noise_checked_at IS NOT NULL
+                GROUP BY dse.asset_id, domain
+            ),
+            asset_totals AS (
+                SELECT
+                    dse.asset_id,
+                    COUNT(*) AS total_dc
+                FROM biz.doc_source_entry dse
+                WHERE dse.entity_type = 'asset'
+                  AND dse.discovered_from LIKE 'deep_crawl:%%'
+                GROUP BY dse.asset_id
+            )
+            SELECT ads.asset_id, ads.domain, ads.domain_cnt, at.total_dc,
+                   ROUND(ads.domain_cnt::numeric / at.total_dc * 100, 1) AS pct
+            FROM asset_domain_stats ads
+            INNER JOIN asset_totals at ON at.asset_id = ads.asset_id
+            WHERE ads.domain_cnt > 100
+              AND ads.domain_cnt::numeric / at.total_dc > 0.9
+              AND ads.domain NOT IN ('github.com', 'gitlab.com', 'bitbucket.org')
+            ORDER BY ads.domain_cnt DESC
+        """)
+        dense = [dict(r) for r in cur.fetchall()]
+
+    for d in dense:
+        domain = d["domain"]
+        aid = d["asset_id"]
+        cnt = d["domain_cnt"]
+        pct = d["pct"]
+
+        if execute:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    UPDATE biz.doc_source_entry
+                    SET ai_noise_checked_at = NULL
+                    WHERE asset_id = %s
+                      AND entity_type = 'asset'
+                      AND discovered_from LIKE 'deep_crawl:%%'
+                      AND entry_url LIKE %s
+                      AND ai_noise_checked_at IS NOT NULL
+                """, (aid, f"%{domain}%"))
+                affected = cur.rowcount
+            conn.commit()
+            print(f"  [密集域名重置] {domain}: {affected} 条已重置（asset_id={aid}, {cnt}条/{pct}%）")
+        else:
+            print(f"  [密集域名重置] {domain}: {cnt} 条待重置（asset_id={aid}, {pct}%）(dry-run)")
+        reset_count += cnt
+
+    if reset_count > 0:
+        print(f"  密集域名重置合计: {reset_count} 条\n")
+    return reset_count
+
+
 def get_asset_domain_groups(conn, limit: int) -> list[dict]:
     """
     获取有未检查 deep_crawl 链接的资产，按资产分组，返回每个资产的域名聚合信息。
@@ -346,6 +416,11 @@ def main():
         # 对关联 >50 资产的非审计域名，重置 ai_noise_checked_at
         print("\n── AI 误判纠正 ──")
         reset_ai_false_positives(conn, args.execute)
+
+        # ── Step 1.6: 密集域名重置 ──
+        # 对单资产下链接数 >100 且占比 >90% 的域名，重置 ai_noise_checked_at
+        print("\n── 密集域名重置 ──")
+        reset_dense_domains(conn, args.execute)
 
         # ── Step 2: 按资产分组，AI 判断 ──
         print(f"\n── 按资产 AI 判断（最多 {args.limit} 个资产）──")

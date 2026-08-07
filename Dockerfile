@@ -2,14 +2,20 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖（psycopg 需要 gcc/libpq-dev，slim 镜像没有）
+# 安装系统依赖（psycopg 需要 gcc/libpq-dev，Playwright 需要浏览器运行时库）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl gcc libpq-dev \
+    libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+    libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制 workbench 依赖并安装
 COPY 05_代码与脚本/workbench/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# 安装 Playwright Chromium 浏览器
+RUN playwright install chromium
 
 # 复制 scripts 源码（数据处理模块）
 COPY 05_代码与脚本/scripts/src /app/scripts/src

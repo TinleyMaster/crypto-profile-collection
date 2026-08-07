@@ -42,13 +42,6 @@ DOC_URL_KEYWORDS = [
 ENTRY_TYPES_TO_CRAWL = {
     "official_website",
     "docs",
-    "docs_portal",
-    "medium",
-    "announcement",
-    "twitter",
-    "telegram",
-    "reddit",
-    "facebook",
 }
 
 # ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──

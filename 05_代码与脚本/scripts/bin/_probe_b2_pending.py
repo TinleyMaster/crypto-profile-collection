@@ -7,8 +7,7 @@ from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 
 CRAWLABLE_TYPES = [
-    "official_website", "docs", "docs_portal", "medium", "announcement",
-    "twitter", "telegram", "reddit", "facebook",
+    "official_website", "docs",
 ]
 
 settings = get_settings(require_database=True)

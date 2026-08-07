@@ -56,7 +56,7 @@ def get_dashboard_stats() -> dict:
                        count(deep_crawled_at) AS crawled,
                        count(*) - count(deep_crawled_at) AS pending
                 FROM biz.doc_source_entry
-                WHERE entry_type IN ('official_website', 'docs', 'docs_portal')
+                WHERE entry_type IN ('official_website', 'docs')
                 GROUP BY entry_type
                 ORDER BY total DESC
                 """
@@ -113,7 +113,7 @@ def get_pending_b2() -> dict:
                 """
                 SELECT entry_type, count(*)
                 FROM biz.doc_source_entry
-                WHERE entry_type IN ('official_website', 'docs', 'docs_portal')
+                WHERE entry_type IN ('official_website', 'docs')
                   AND deep_crawled_at IS NULL
                 GROUP BY entry_type
                 ORDER BY count(*) DESC
@@ -288,8 +288,7 @@ def get_task_progress() -> list[dict]:
                 """
                 SELECT COUNT(*) FROM biz.doc_source_entry
                 WHERE discovered_from NOT LIKE 'deep_crawl:%'
-                  AND entry_type IN ('official_website', 'docs', 'docs_portal', 'medium', 'announcement',
-                                     'twitter', 'telegram', 'reddit', 'facebook')
+                  AND entry_type IN ('official_website', 'docs')
                 """
             )
             total = cur.fetchone()[0]
@@ -297,8 +296,7 @@ def get_task_progress() -> list[dict]:
                 """
                 SELECT COUNT(*) FROM biz.doc_source_entry
                 WHERE discovered_from NOT LIKE 'deep_crawl:%'
-                  AND entry_type IN ('official_website', 'docs', 'docs_portal', 'medium', 'announcement',
-                                     'twitter', 'telegram', 'reddit', 'facebook')
+                  AND entry_type IN ('official_website', 'docs')
                   AND deep_crawled_at IS NOT NULL
                 """
             )

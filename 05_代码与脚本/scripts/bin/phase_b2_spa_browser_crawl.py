@@ -188,7 +188,7 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
                             result["source_code"],
                             link_type if link_type in VALID_ENTRY_TYPES else "other",
                             link_url,
-                            f"spa_browser_crawl:{result['url'][:50]}",
+                            f"spa_browser_crawl:{result['url'][:43]}",  # discovered_from VARCHAR(64), 前缀19字符+URL最多43字符
                             False,
                         ))
                 else:
@@ -293,6 +293,7 @@ def main() -> int:
                     written += 1
                 except Exception as e:
                     write_errors += 1
+                    conn.rollback()  # 重置事务状态，防止后续 SQL 被拒
                     print(f"  [WARN] 写入失败: {row[5][:80]}  {str(e)[:100]}")
         if write_errors:
             print(f"  写入: {written} 成功, {write_errors} 失败")

@@ -71,18 +71,6 @@ Phase B2.5: AI 噪声清理             ← 进行中
   多层防御：源头阻断 → 规则直删 → AI 按资产分组判断
   密度触发 + 项目标识匹配：同一域名下 >5 条链接时触发拦截
   审计报告白名单保留，AAI 误判纠正机制
-            │
-            ▼
-Phase B5: 链接健康检查 + AI 筛选     ← 脚本就绪
-  健康检测 + AI 投研相关性评分 → biz.research_url
-            │
-            ▼
-Phase B6: 生成投研资料文件          ← 脚本就绪
-  {symbol}_投研网址链接.txt + {symbol}_基础数据.md
-            │
-            ▼
-Phase B7: 防屏蔽链接 Fallback 下载   ← 脚本就绪
-  Cloudflare/WAF 链接的兜底下载
 ```
 
 ---
@@ -123,9 +111,6 @@ Phase B7: 防屏蔽链接 Fallback 下载   ← 脚本就绪
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理
-│   │   │   ├── phase_b5_*.py   # 链接健康 + AI 筛选
-│   │   │   ├── phase_b6_*.py   # 生成投研资料
-│   │   │   ├── phase_b7_*.py   # Fallback 下载
 │   │   │   ├── phase_chain_*.py # 链上数据监控
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选

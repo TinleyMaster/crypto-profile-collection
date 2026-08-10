@@ -298,17 +298,18 @@ def main() -> int:
         if write_errors:
             print(f"  写入: {written} 成功, {write_errors} 失败")
 
-        # 清除 needs_browser + 标记已爬取
-        all_done = result["done_ids"] + result["failed_ids"]
-        if all_done:
+        # 清除成功处理的条目标记（failed 保留 needs_browser=TRUE 下轮重试）
+        cleared = 0
+        if result["done_ids"]:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW() WHERE entry_id = ANY(%s)",
-                    (all_done,),
+                    (result["done_ids"],),
                 )
+            cleared = len(result["done_ids"])
         conn.commit()
 
-    print(f"写入: {written} 条目, 清除标记: {len(all_done)}")
+    print(f"写入: {written} 条目, 清除标记: {cleared}（{len(result['failed_ids'])} 失败保留重试）")
     print(json.dumps({
         "status": "complete",
         "candidates": len(entries),

@@ -457,6 +457,48 @@ def api_reset_deep_crawl(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
+def api_re_crawl_full(asset_id: int):
+    """完整重新爬取：重置 → B2深度爬取 → B3 SPA爬取（链式执行）。"""
+    try:
+        # 1. 重置 deep_crawled_at
+        reset_result = _get_db_stats().reset_deep_crawl(asset_id)
+
+        b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
+        b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
+
+        # 2. 运行 B2 深度爬取（等待完成）
+        b2_result = subprocess.run(
+            [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
+             "--limit", "100", "--workers", "10"],
+            cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=600,
+        )
+        b2_ok = b2_result.returncode == 0
+        b2_output = b2_result.stdout[-2000:] if b2_result.stdout else ""
+
+        # 3. 运行 B3 SPA 爬取（等待完成）
+        b3_result = subprocess.run(
+            [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
+             "--limit", "20", "--concurrency", "4"],
+            cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=300,
+        )
+        b3_ok = b3_result.returncode == 0
+        b3_output = b3_result.stdout[-2000:] if b3_result.stdout else ""
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "reset": reset_result,
+                "b2": {"ok": b2_ok, "output": b2_output},
+                "b3": {"ok": b3_ok, "output": b3_output},
+            },
+        })
+    except subprocess.TimeoutExpired as e:
+        return jsonify({"ok": False, "error": f"爬取超时: {e}"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])
 def api_add_manual_entry(asset_id: int):
     """手动为资产添加官网链接。"""

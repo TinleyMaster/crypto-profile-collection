@@ -234,6 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20, help="每批最大处理数。")
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发浏览器窗口数。")
     p.add_argument("--all-domains", action="store_true", help="不限制同域。")
+    p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID。")
     return p
 
 
@@ -249,20 +250,25 @@ def main() -> int:
     upsert_sql = load_sql("biz/upsert_doc_source_entry.sql")
 
     # 查询 needs_browser = TRUE 的条目
+    asset_filter = ""
+    asset_params: list = []
+    if args.asset_id is not None:
+        asset_filter = " AND dse.asset_id = %s"
+        asset_params = [args.asset_id]
     with get_connection(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id,
                        dse.source_code, dse.entry_type, dse.entry_url,
                        a.canonical_symbol, a.canonical_name
                 FROM biz.doc_source_entry dse
                 LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
-                WHERE dse.needs_browser = TRUE
+                WHERE dse.needs_browser = TRUE{asset_filter}
                 ORDER BY dse.entry_id
                 LIMIT %s
                 """,
-                (args.limit,),
+                asset_params + [args.limit],
             )
             entries = [dict(row) for row in cur.fetchall()]
 

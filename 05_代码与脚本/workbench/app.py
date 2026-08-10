@@ -44,14 +44,9 @@ def _get_db_stats():
     return _db_stats_module
 
 # ── 任务定义 ──
+# 顺序 = 流水线执行顺序：B1 数据源拉取 → B1 文档入口补充 → B2/B3 文档爬取 → B4 噪声清理 → 链上 → 诊断 → 维护
 TASK_DEFS = {
-    "b2_auto_loop": {
-        "name": "B2 深度文档发现（自动循环）",
-        "description": "从官网 HTML 抓取嵌入的 PDF/白皮书链接，含 SPA 检测",
-        "script": "phase_b2_auto_loop.py",
-        "default_args": [],
-        "category": "文档采集",
-    },
+    # ═══ B1: 数据源拉取 ═══
     "cg_bootstrap_assets": {
         "name": "CG 新增币种入库",
         "description": "将 CG 独有的币种补充到 core.asset（按 symbol 匹配），应先于拉取详情执行",
@@ -88,6 +83,8 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+
+    # ═══ B1: 文档入口补充 ═══
     "cg_refresh_docs": {
         "name": "CG 补充文档入口",
         "description": "从 coin_info 的 links 中提取官网/文档/GitHub，写入 doc_source_entry",
@@ -180,6 +177,15 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+
+    # ═══ B2/B3: 文档爬取 ═══
+    "b2_auto_loop": {
+        "name": "B2 深度文档发现（自动循环）",
+        "description": "从官网 HTML 抓取嵌入的 PDF/白皮书链接，含 SPA 检测",
+        "script": "phase_b2_auto_loop.py",
+        "default_args": [],
+        "category": "文档采集",
+    },
     "spa_retro_scan": {
         "name": "SPA 回溯扫描（找出历史 SPA 页面）",
         "description": "扫描 B2 已爬取但返回 0 链接的页面，用轻量 HTTP 请求检测是否为 SPA，标记 needs_browser=TRUE",
@@ -218,6 +224,8 @@ TASK_DEFS = {
         "category": "数据源采集",
         "hidden": True,
     },
+
+    # ═══ B4: AI 噪声清理 ═══
     "b2_ai_noise_clean_auto": {
         "name": "B4 AI 噪声清理（自动循环）",
         "description": "自动循环，每轮2000条，规则秒删+AI高速筛，总上限10万条",
@@ -241,27 +249,8 @@ TASK_DEFS = {
         "default_args": [],
         "category": "AI 筛选",
     },
-    "diag_noise": {
-        "name": "噪声诊断报告",
-        "description": "查看今日新增文档链接的噪声情况（域名分布、噪声占比、采样）",
-        "script": "diag_noise_report.py",
-        "default_args": [],
-        "category": "诊断",
-    },
-    "diag_pipeline": {
-        "name": "数据链路诊断",
-        "description": "全链路检查：数据源→doc_source_entry→deep_crawl→AI检查，各环节健康度",
-        "script": "diag_data_pipeline.py",
-        "default_args": [],
-        "category": "诊断",
-    },
-    "diag_high_entry": {
-        "name": "高条目资产污染溯源",
-        "description": "分析文档链接>500的代币，定位污染链路（种子→域名→噪声量）",
-        "script": "diag_high_entry_assets.py",
-        "default_args": [],
-        "category": "诊断",
-    },
+
+    # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",
         "description": "从 Etherscan/BSCScan 拉取代币 Top 持有者，计算持仓集中度",
@@ -293,6 +282,31 @@ TASK_DEFS = {
         "category": "链上数据",
         "hidden": True,
     },
+
+    # ═══ 诊断 ═══
+    "diag_noise": {
+        "name": "噪声诊断报告",
+        "description": "查看今日新增文档链接的噪声情况（域名分布、噪声占比、采样）",
+        "script": "diag_noise_report.py",
+        "default_args": [],
+        "category": "诊断",
+    },
+    "diag_pipeline": {
+        "name": "数据链路诊断",
+        "description": "全链路检查：数据源→doc_source_entry→deep_crawl→AI检查，各环节健康度",
+        "script": "diag_data_pipeline.py",
+        "default_args": [],
+        "category": "诊断",
+    },
+    "diag_high_entry": {
+        "name": "高条目资产污染溯源",
+        "description": "分析文档链接>500的代币，定位污染链路（种子→域名→噪声量）",
+        "script": "diag_high_entry_assets.py",
+        "default_args": [],
+        "category": "诊断",
+    },
+
+    # ═══ 维护 ═══
     "cleanup_pollution": {
         "name": "清理 GitHub 跨仓库污染",
         "description": "删除 github.com deep_crawl 条目并重置爬取状态，修复 asset_id 大规模污染",

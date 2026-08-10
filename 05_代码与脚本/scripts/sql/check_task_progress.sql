@@ -70,9 +70,9 @@ WHERE discovered_from NOT LIKE 'deep_crawl:%'
 GROUP BY entry_type
 ORDER BY COUNT(*) DESC;
 
--- 5. B2 AI 噪声清理（自动循环）
+-- 5. B4 AI 噪声清理（自动循环）
 --    还有多少 deep_crawl 链接未做 AI 筛选
-SELECT 'B2 AI 噪声清理' AS task,
+SELECT 'B4 AI 噪声清理' AS task,
        (SELECT COUNT(*) FROM biz.doc_source_entry 
         WHERE discovered_from LIKE 'deep_crawl:%') AS total_deep_crawl,
        (SELECT COUNT(*) FROM biz.doc_source_entry 

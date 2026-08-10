@@ -1,4 +1,4 @@
-"""B2 AI 噪声清理（按资产分组）— 自动循环。"""
+"""B4 AI 噪声清理（按资产分组）— 自动循环。"""
 from __future__ import annotations
 
 import subprocess

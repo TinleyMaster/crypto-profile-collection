@@ -60,14 +60,14 @@ Phase B2: 深度文档发现              ← 进行中
   SPA 检测：识别 JS 渲染页面，标记 needs_browser=TRUE
             │
             ▼
-Phase B2-SPA: 无头浏览器爬取        ← 进行中
+Phase B3: 无头浏览器爬取            ← 进行中
   用 Playwright 渲染 JS 页面，提取 B2 静态爬取无法处理的 SPA 网站链接
   4 并发浏览器窗口，8 秒超时，HEAD 预检跳过非 HTML 内容
   SPA 回溯扫描：重检历史已爬取页面，识别遗漏的 SPA 页面
   写入的链接回流到 B2 继续深度爬取，形成闭环
             │
             ▼
-Phase B2.5: AI 噪声清理             ← 进行中
+Phase B4: AI 噪声清理               ← 进行中
   多层防御：源头阻断 → 规则直删 → AI 按资产分组判断
   密度触发 + 项目标识匹配：同一域名下 >5 条链接时触发拦截
   审计报告白名单保留，AAI 误判纠正机制
@@ -181,9 +181,9 @@ Phase B2.5: AI 噪声清理             ← 进行中
 | | CMC 补充文档入口（自动循环） | 从 cmc_asset_info urls 提取文档链接 | 可见 |
 | | DL 补充文档入口（自动循环） | 从 DefiLlama protocol_list 提取官网链接 | 可见 |
 | | 双源补充文档入口（自动循环） | DexScreener+Binance 双源兜底补充 | 可见 |
-| | SPA 无头浏览器爬取（自动循环） | Playwright 渲染 JS 页面，提取 SPA 网站链接 | 可见 |
+| | B3 SPA 无头浏览器爬取（自动循环） | Playwright 渲染 JS 页面，提取 SPA 网站链接 | 可见 |
 | 文档采集 | B2 深度文档发现（自动循环） | 从官网 HTML 抓取嵌入的 PDF/白皮书链接 | 可见 |
-| AI 筛选 | B2 AI 噪声清理（按资产·自动循环） | AI 按域名粒度批量判断噪声 | 可见 |
+| AI 筛选 | B4 AI 噪声清理（按资产·自动循环） | AI 按域名粒度批量判断噪声 | 可见 |
 | 链上数据 | 链上持仓快照采集（每日单次） | 拉取 Top 持有者，计算持仓集中度 | 可见 |
 | 诊断 | 噪声诊断报告 | 今日新增文档链接的噪声情况 | 可见 |
 | | 数据链路诊断 | 全链路健康度检查 | 可见 |
@@ -199,7 +199,7 @@ Phase B2.5: AI 噪声清理             ← 进行中
 ```
 第一层 ── B2 实时检测
   深度爬取时检测 SPA 特征：0 链接 + (HTML < 5000 字节 或 框架标记)
-  标记 needs_browser=TRUE，交由无头浏览器处理
+  标记 needs_browser=TRUE，交由 B3 无头浏览器处理
             │
             ▼
 第二层 ── 回溯扫描（一次性任务，已完成）
@@ -208,7 +208,7 @@ Phase B2.5: AI 噪声清理             ← 进行中
   已处理页面打 retro_scan_checked_at 时间戳，不重复扫描
             │
             ▼
-第三层 ── 无头浏览器爬取
+第三层 ── B3 无头浏览器爬取
   Playwright Chromium 渲染 JS 页面
   4 并发窗口，8 秒超时，domcontentloaded 等待策略
   HEAD 预检：跳过 PDF/图片/死链等非 HTML 内容
@@ -222,10 +222,10 @@ Phase B2.5: AI 噪声清理             ← 进行中
 - 或包含 `react-dom` / `vue` 引用
 - 或包含 `window.__NUXT__` / `__NEXT_DATA__`
 
-**SPA 与 B2 闭环**：
+**B3 与 B2 闭环**：
 ```
-SPA 爬取 → 发现新链接 → 写入 doc_source_entry → B2 深度爬取
-    → 遇到 SPA 页面 → 标记 needs_browser=TRUE → SPA 爬取 → ...
+B3 爬取 → 发现新链接 → 写入 doc_source_entry → B2 深度爬取
+    → 遇到 SPA 页面 → 标记 needs_browser=TRUE → B3 爬取 → ...
 ```
 
 ---

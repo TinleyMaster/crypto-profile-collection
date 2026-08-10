@@ -1,5 +1,5 @@
 """
-B2 AI 噪声清理 — 按资产分组版本。
+B4 AI 噪声清理 — 按资产分组版本。
 
 核心思路：
 - 将同一资产的所有 deep_crawl 链接按域名聚合后一并发给 AI
@@ -523,14 +523,14 @@ def delete_noise_ids(conn, entry_ids: list[int]) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="B2 AI 噪声清理 — 按资产分组")
+    parser = argparse.ArgumentParser(description="B4 AI 噪声清理 — 按资产分组")
     parser.add_argument("--execute", action="store_true", help="实际执行删除（默认 dry-run）")
     parser.add_argument("--limit", type=int, default=20, help="最多处理几个资产（默认 20）")
     parser.add_argument("--skip-rule-delete", action="store_true", help="跳过规则直删")
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  B2 AI 噪声清理 — 按资产分组")
+    print("  B4 AI 噪声清理 — 按资产分组")
     print(f"  模式: {'执行删除' if args.execute else 'dry-run 预览'}")
     print(f"  资产上限: {args.limit}")
     print("  策略: 按资产聚合域名 → AI 判断 → 批量删除噪声域名")

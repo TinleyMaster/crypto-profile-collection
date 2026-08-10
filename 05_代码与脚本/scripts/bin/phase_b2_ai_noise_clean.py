@@ -1,5 +1,5 @@
 """
-B2 噪声 AI 清理：用 AI 批量判断深度爬取发现的链接是否与加密货币投研相关，
+B4 噪声 AI 清理：用 AI 批量判断深度爬取发现的链接是否与加密货币投研相关，
 无关的直接从 biz.doc_source_entry 删除，相关的标记 ai_noise_checked_at
 避免下次重复判断。
 
@@ -56,7 +56,7 @@ GITHUB_CODE_EXT_PATTERNS = [
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="B2 噪声 AI 清理")
+    p = argparse.ArgumentParser(description="B4 噪声 AI 清理")
     p.add_argument("--limit", type=int, default=100, help="最多处理条数")
     p.add_argument("--batch-size", type=int, default=100, help="AI 每批条数")
     p.add_argument("--rpm", type=int, default=300, help="AI 调用速率限制（次/分钟）")

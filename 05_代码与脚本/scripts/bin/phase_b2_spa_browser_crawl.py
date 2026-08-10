@@ -1,5 +1,5 @@
 """
-Phase B2-SPA: 无头浏览器爬取 SPA 页面
+Phase B3: 无头浏览器爬取 SPA 页面
 处理 needs_browser=TRUE 的 entry，使用 Playwright 渲染 JavaScript 后提取文档链接。
 """
 
@@ -213,7 +213,7 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Phase B2-SPA: Playwright 无头浏览器爬取 SPA 页面")
+    p = argparse.ArgumentParser(description="Phase B3: Playwright 无头浏览器爬取 SPA 页面")
     p.add_argument("--dry-run", action="store_true", help="预览不写入。")
     p.add_argument("--limit", type=int, default=20, help="每批最大处理数。")
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发浏览器窗口数。")

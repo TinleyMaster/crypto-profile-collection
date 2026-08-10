@@ -47,7 +47,7 @@ def _get_db_stats():
 TASK_DEFS = {
     "b2_auto_loop": {
         "name": "B2 深度文档发现（自动循环）",
-        "description": "持续运行 B2，直到 docs 类型全部爬完",
+        "description": "从官网 HTML 抓取嵌入的 PDF/白皮书链接，含 SPA 检测",
         "script": "phase_b2_auto_loop.py",
         "default_args": [],
         "category": "文档采集",
@@ -182,15 +182,15 @@ TASK_DEFS = {
         "category": "数据源采集",
     },
     "spa_browser_crawl": {
-        "name": "SPA 无头浏览器爬取",
-        "description": "单次：用 Playwright 渲染 JS 页面，提取 B2 无法处理的 SPA 网站文档链接",
+        "name": "B3 SPA 无头浏览器爬取",
+        "description": "单次：用 Playwright 渲染 JS 页面，提取 B2 静态爬取无法处理的 SPA 网站文档链接",
         "script": "phase_b2_spa_browser_crawl.py",
         "default_args": ["--limit", "20", "--concurrency", "4"],
         "category": "数据源采集",
         "hidden": True,
     },
     "spa_browser_crawl_auto": {
-        "name": "SPA 无头浏览器爬取（自动循环）",
+        "name": "B3 SPA 无头浏览器爬取（自动循环）",
         "description": "自动循环，Playwright 渲染 JS 页面，批量处理 needs_browser=TRUE 的 SPA 网站",
         "script": "phase_b2_spa_browser_crawl_auto.py",
         "default_args": [],
@@ -205,7 +205,7 @@ TASK_DEFS = {
         "hidden": True,
     },
     "b2_ai_noise_clean_auto": {
-        "name": "B2 AI 噪声清理（自动循环）",
+        "name": "B4 AI 噪声清理（自动循环）",
         "description": "自动循环，每轮2000条，规则秒删+AI高速筛，总上限10万条",
         "script": "phase_b2_ai_noise_clean_auto.py",
         "default_args": [],
@@ -213,7 +213,7 @@ TASK_DEFS = {
         "hidden": True,
     },
     "b2_ai_noise_clean_by_asset": {
-        "name": "B2 AI 噪声清理（按资产分组）",
+        "name": "B4 AI 噪声清理（按资产分组）",
         "description": "按资产聚合域名，AI 一次判断该资产所有域名是否噪声",
         "script": "phase_b2_ai_noise_clean_by_asset.py",
         "default_args": ["--execute"],
@@ -221,7 +221,7 @@ TASK_DEFS = {
         "hidden": True,
     },
     "b2_ai_noise_clean_by_asset_auto": {
-        "name": "B2 AI 噪声清理（按资产·自动循环）",
+        "name": "B4 AI 噪声清理（按资产·自动循环）",
         "description": "智能聚合：每轮20个资产，AI 按域名粒度批量判断，效率远超逐条模式",
         "script": "phase_b2_ai_noise_clean_by_asset_auto.py",
         "default_args": [],

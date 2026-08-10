@@ -302,7 +302,7 @@ def get_task_progress() -> list[dict]:
             done = row[1]
             remaining = row[0]
             result.append({
-                "task": "SPA 无头浏览器爬取",
+                "task": "B3 SPA 无头浏览器爬取",
                 "done": done,
                 "total": total,
                 "remaining": remaining,
@@ -353,7 +353,7 @@ def get_task_progress() -> list[dict]:
             done = cur.fetchone()[0]
             remaining = total - done
             result.append({
-                "task": "B2 AI 噪声清理",
+                "task": "B4 AI 噪声清理",
                 "done": done,
                 "total": total,
                 "remaining": remaining,

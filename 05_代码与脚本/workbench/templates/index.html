@@ -1657,7 +1657,8 @@
                 <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
                 <button class="copy-btn" id="onchain-btn" onclick="queryOnchainData()">📊 链上数据</button>
                 <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
-                <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄 重新爬取</button>
+                <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄
+                    重新爬取</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
             <div class="stat-row" id="mat-stats"></div>
@@ -2493,9 +2494,10 @@
                 if (!data.ok) throw new Error(data.error);
 
                 // 自动选中日志面板
-                activeTaskId = data.task_id;
-                updateLogPanel();
-                refreshTaskList();
+                selectedTaskId = data.task_id;
+                loadTaskLog(data.task_id);
+                if (logPanelCollapsed) toggleLogPanel();
+                loadTasks();
 
                 // 轮询等待任务完成
                 await waitForTask(data.task_id);

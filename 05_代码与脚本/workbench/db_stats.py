@@ -664,6 +664,18 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
             }
 
 
+def reset_deep_crawl(asset_id: int) -> dict:
+    """重置指定资产的 deep_crawled_at，允许 B2 重新爬取。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE biz.doc_source_entry SET deep_crawled_at = NULL WHERE asset_id = %s AND deep_crawled_at IS NOT NULL",
+                (asset_id,),
+            )
+            affected = cur.rowcount
+    return {"affected": affected}
+
+
 def add_manual_entry(asset_id: int, entry_url: str) -> dict:
     """手动为资产添加一个文档入口（官网链接）。"""
     with get_db() as conn:

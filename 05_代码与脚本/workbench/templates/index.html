@@ -1657,6 +1657,7 @@
                 <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
                 <button class="copy-btn" id="onchain-btn" onclick="queryOnchainData()">📊 链上数据</button>
                 <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
+                <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄 重新爬取</button>
                 <button class="close-btn" onclick="closeMaterials()">关闭</button>
             </div>
             <div class="stat-row" id="mat-stats"></div>
@@ -2560,6 +2561,41 @@
                 loadMaterials(selectedAssetId);
             } catch (e) {
                 alert('请求失败: ' + e.message);
+            }
+        }
+
+        async function reCrawlAsset () {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('recrawl-btn');
+            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n这将重置已爬取状态并触发 B2 深度爬取。')) return;
+
+            btn.disabled = true;
+            btn.textContent = '⏳ 重置中...';
+
+            try {
+                // 1. 重置 deep_crawled_at
+                const resetRes = await fetch(`/api/assets/${selectedAssetId}/reset-deep-crawl`, {
+                    method: 'POST',
+                });
+                const resetData = await resetRes.json();
+                if (!resetData.ok) throw new Error(resetData.error);
+
+                btn.textContent = '⏳ 爬取中...';
+
+                // 2. 触发 B2 深度爬取
+                const crawlRes = await fetch(`/api/assets/${selectedAssetId}/deep_crawl`, {
+                    method: 'POST',
+                });
+                const crawlData = await crawlRes.json();
+                if (!crawlData.ok) throw new Error(crawlData.error);
+
+                alert(`已重置 ${resetData.affected} 条入口，B2 深度爬取已在后台启动。\n稍后刷新资料面板查看新链接。`);
+                btn.textContent = '🔄 重新爬取';
+                btn.disabled = false;
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+                btn.textContent = '🔄 重新爬取';
+                btn.disabled = false;
             }
         }
 

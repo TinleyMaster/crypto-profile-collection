@@ -447,6 +447,16 @@ def api_asset_tokenomics(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/assets/<int:asset_id>/reset-deep-crawl", methods=["POST"])
+def api_reset_deep_crawl(asset_id: int):
+    """重置 deep_crawled_at，允许 B2 重新爬取该资产。"""
+    try:
+        result = _get_db_stats().reset_deep_crawl(asset_id)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])
 def api_add_manual_entry(asset_id: int):
     """手动为资产添加官网链接。"""

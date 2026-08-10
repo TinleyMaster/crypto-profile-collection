@@ -205,6 +205,13 @@ EXCLUDE_PATH_PATTERNS = [
     "/branches/",
     "/tags/",
     "/releases/",
+    # ── GitHub 导航页面（非文档）──
+    "/forks",
+    "/pulse",
+    "/activity",
+    "/custom-properties",
+    "/graphs/",
+    "/community",
     # ── 虚拟环境 / 依赖目录（无论域名都排除）──
     ".venv/",
     "node_modules/",

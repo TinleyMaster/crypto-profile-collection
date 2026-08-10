@@ -80,6 +80,30 @@ AGGREGATION_DOMAINS = {
     "assets.backed.fi",            # 代币化资产平台
     "www.backedassets.fi",         # 代币化资产平台
     "backed.fi",                   # 代币化资产平台
+    # ── 2026-08-10 新增：第三方审计公司/平台，IBS 代币污染分析发现 ──
+    "tech-audit.org",              # 审计公司整站
+    "www.tech-audit.org",
+    "chainsecurity.com",           # 审计公司整站
+    "www.chainsecurity.com",
+    "docs.pinksale.finance",       # 启动平台审计合作页
+    "docs.uncx.network",           # 启动平台审计合作页
+    "gempad.gitbook.io",           # 启动平台审计合作页
+    "analytixaudit.com",           # 第三方审计公司
+    "www.analytixaudit.com",
+    "freshcoins.io",               # 第三方审计公司
+    "www.freshcoins.io",
+    "daudit.org",                  # 第三方审计公司
+    "rugfreecoins.com",            # 第三方审计公司
+    "www.rugfreecoins.com",
+    "auditace.tech",               # 第三方审计公司
+    "cointool.app",                # 第三方审计工具
+    "audit-hero.com",              # 第三方审计平台
+    "consensys.net",               # 审计公司
+    "academy.binance.com",         # 币安学院（通用教育资源）
+    "dxsale.network",              # 启动平台审计合作页
+    # Medium/Substack 审计聚合
+    "quillaudits.substack.com",
+    "www.newsletter.quillaudits.com",
 }
 
 # ── 密度触发域名：单页提取到超过阈值数量的链接时，视为聚合页，整组丢弃 ──
@@ -122,6 +146,8 @@ AGGREGATION_DENSITY_DOMAINS = {
     # 审计/安全平台
     "audits.sherlock.xyz",
     "quillaudits.medium.com",
+    "quillaudits.com",
+    "www.quillaudits.com",
     "www.cyberscope.io",
     "hacken.io",
     "assets.hacken.io",
@@ -129,6 +155,29 @@ AGGREGATION_DENSITY_DOMAINS = {
     "blog.openzeppelin.com",
     "www.certora.com",
     "certora.cdn.prismic.io",
+    # ── 2026-08-10 新增：第三方审计公司/平台（IBS 污染分析）──
+    "tech-audit.org",
+    "www.tech-audit.org",
+    "chainsecurity.com",
+    "www.chainsecurity.com",
+    "docs.pinksale.finance",
+    "docs.uncx.network",
+    "gempad.gitbook.io",
+    "analytixaudit.com",
+    "www.analytixaudit.com",
+    "freshcoins.io",
+    "www.freshcoins.io",
+    "daudit.org",
+    "rugfreecoins.com",
+    "www.rugfreecoins.com",
+    "auditace.tech",
+    "cointool.app",
+    "audit-hero.com",
+    "consensys.net",
+    "academy.binance.com",
+    "dxsale.network",
+    "quillaudits.substack.com",
+    "www.newsletter.quillaudits.com",
     # 代币化平台
     "realityfinance.xyz",
     "assets.backed.fi",

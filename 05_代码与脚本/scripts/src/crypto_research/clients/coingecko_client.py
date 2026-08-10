@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import time
 from typing import Any
 
@@ -16,13 +17,25 @@ class CoinGeckoClient:
         self._min_interval = 60.0 / calls_per_minute
         self._last_call: float = 0.0
 
+        # 多 key 轮替
+        if settings.coingecko_api_keys:
+            self._keys = settings.coingecko_api_keys
+            self._key_cycle = itertools.cycle(self._keys)
+            self._current_key = next(self._key_cycle)
+        elif settings.coingecko_api_key:
+            self._keys = [settings.coingecko_api_key]
+            self._key_cycle = None
+            self._current_key = settings.coingecko_api_key
+        else:
+            self._keys = []
+            self._key_cycle = None
+            self._current_key = None
+
         self.session = requests.Session()
         headers = {
             "Accept": "application/json",
             "User-Agent": "crypto-research-ingest/1.0",
         }
-        if settings.coingecko_api_key:
-            headers["x-cg-demo-api-key"] = settings.coingecko_api_key
         self.session.headers.update(headers)
 
         retry = Retry(
@@ -35,6 +48,11 @@ class CoinGeckoClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+    def _rotate_key(self) -> None:
+        """切换到下一个 API Key。"""
+        if self._key_cycle is not None:
+            self._current_key = next(self._key_cycle)
+
     def _rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_call
         if elapsed < self._min_interval:
@@ -44,11 +62,29 @@ class CoinGeckoClient:
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self._rate_limit()
         url = f"{self.settings.coingecko_base_url}{path}"
+        headers = self.session.headers.copy()
+        if self._current_key:
+            headers["x-cg-demo-api-key"] = self._current_key
         response = self.session.get(
             url,
             params=params,
+            headers=headers,
             timeout=self.settings.request_timeout_seconds,
         )
+        # 429 时切换到下一个 key 并重试一次
+        if response.status_code == 429 and self._key_cycle is not None:
+            self._rotate_key()
+            print(f"  [CG] 429 限流，切换到下一个 API Key")
+            self._rate_limit()
+            headers = self.session.headers.copy()
+            if self._current_key:
+                headers["x-cg-demo-api-key"] = self._current_key
+            response = self.session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=self.settings.request_timeout_seconds,
+            )
         response.raise_for_status()
         return response.json()
 

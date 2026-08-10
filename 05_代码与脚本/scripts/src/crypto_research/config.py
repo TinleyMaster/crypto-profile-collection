@@ -12,6 +12,7 @@ class Settings:
     cmc_base_url: str = "https://pro-api.coinmarketcap.com"
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
     coingecko_api_key: str | None = None
+    coingecko_api_keys: list[str] | None = None  # 多 key 轮替
     defillama_base_url: str = "https://api.llama.fi"
     etherscan_api_key: str | None = None
     bscscan_api_key: str | None = None
@@ -42,6 +43,15 @@ def load_local_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
+def _parse_coingecko_keys() -> list[str] | None:
+    """解析 COINGECKO_API_KEY 中的多个 key（逗号分隔）。"""
+    raw = os.getenv("COINGECKO_API_KEY", "").strip()
+    if not raw:
+        return None
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    return keys if len(keys) > 1 else None  # 只有一个 key 时不需要轮替列表
+
+
 def get_settings(require_database: bool = True) -> Settings:
     load_local_env_file()
     cmc_api_key = os.getenv("CMC_API_KEY", "").strip()
@@ -56,6 +66,7 @@ def get_settings(require_database: bool = True) -> Settings:
         cmc_api_key=cmc_api_key,
         database_url=database_url or None,
         coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip() or None,
+        coingecko_api_keys=_parse_coingecko_keys(),
         etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
         bscscan_api_key=os.getenv("BSCSCAN_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,

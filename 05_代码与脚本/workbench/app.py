@@ -52,6 +52,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "文档采集",
     },
+    "cg_bootstrap_assets": {
+        "name": "CG 新增币种入库",
+        "description": "将 CG 独有的币种补充到 core.asset（按 symbol 匹配），应先于拉取详情执行",
+        "script": "bootstrap_cg_assets_from_list.py",
+        "default_args": ["--limit", "500"],
+        "category": "数据源采集",
+    },
     "cg_coin_info": {
         "name": "CG 拉取币种详情",
         "description": "从 CoinGecko 拉取 coin_info，补充官网/文档/GitHub 链接（Demo 月配额 10k）",
@@ -67,11 +74,18 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
-    "cg_bootstrap_assets": {
-        "name": "CG 新增币种入库",
-        "description": "将 CG 独有的币种补充到 core.asset（按 symbol 匹配）",
-        "script": "bootstrap_cg_assets_from_list.py",
-        "default_args": ["--limit", "500"],
+    "cmc_ingest_info": {
+        "name": "CMC 拉取币种详情",
+        "description": "从 CoinMarketCap 拉取 asset_info（urls/描述/标签等），写入 src_cmc.cmc_asset_info",
+        "script": "ingest_cmc_info.py",
+        "default_args": ["--from-map-missing", "--limit", "200"],
+        "category": "数据源采集",
+    },
+    "dl_ingest_protocols": {
+        "name": "DL 拉取协议列表",
+        "description": "从 DefiLlama 拉取全量协议列表，写入 src_dl.protocol_list",
+        "script": "ingest_dl_protocols.py",
+        "default_args": [],
         "category": "数据源采集",
     },
     "cg_refresh_docs": {

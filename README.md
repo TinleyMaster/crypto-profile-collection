@@ -175,8 +175,10 @@ Phase B4: AI 噪声清理               ← 进行中
 
 | 分类 | 任务 | 说明 | 状态 |
 |------|------|------|------|
-| 数据源采集 | CG 拉取币种详情（自动循环） | CoinGecko coin_info 拉取 | 可见 |
-| | CG 新增币种入库 | CG 独有币种补充到 core.asset | 可见 |
+| 数据源采集 | CG 新增币种入库 | CG 独有币种补充到 core.asset（先于拉取详情） | 可见 |
+| | CG 拉取币种详情（自动循环） | CoinGecko coin_info 拉取 | 可见 |
+| | CMC 拉取币种详情 | CoinMarketCap asset_info 拉取 | 可见 |
+| | DL 拉取协议列表 | DefiLlama 全量协议列表拉取 | 可见 |
 | | CG 补充文档入口（自动循环） | 从 coin_info links 提取文档链接 | 可见 |
 | | CMC 补充文档入口（自动循环） | 从 cmc_asset_info urls 提取文档链接 | 可见 |
 | | DL 补充文档入口（自动循环） | 从 DefiLlama protocol_list 提取官网链接 | 可见 |
@@ -284,7 +286,7 @@ B3 爬取 → 发现新链接 → 写入 doc_source_entry → B2 深度爬取
 |------|------|------|
 | `DATABASE_URL` | PostgreSQL 连接串 | ✅ |
 | `CMC_API_KEY` | CoinMarketCap API Key | ✅ |
-| `COINGECKO_API_KEY` | CoinGecko API Key（可选，提升限流） | ❌ |
+| `COINGECKO_API_KEY` | CoinGecko API Key（支持逗号分隔多 key 轮替） | ❌ |
 | `GITHUB_TOKEN` | GitHub Token（可选，提升 API 限流） | ❌ |
 | `ETHERSCAN_API_KEY` | Etherscan API Key（可选，链上数据） | ❌ |
 | `BSCSCAN_API_KEY` | BSCScan API Key（可选，链上数据） | ❌ |

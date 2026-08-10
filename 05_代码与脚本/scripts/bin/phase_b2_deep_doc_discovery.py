@@ -620,7 +620,11 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
                     or 'id="__next"' in html_lower
                     or 'id="__nuxt"' in html_lower
                     or 'react-dom' in html_lower
-                    or 'vue' in html_lower
+                    or 'vue.js' in html_lower
+                    or 'vue.min.js' in html_lower
+                    or 'vue@' in html_lower
+                    or 'vue-router' in html_lower
+                    or 'vuex' in html_lower
                     or 'window.__NUXT__' in html_lower
                     or '__NEXT_DATA__' in html_lower
                 )

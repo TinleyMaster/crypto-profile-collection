@@ -13,7 +13,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 500
-WORKERS = 10
+WORKERS = 4
 MAX_ROUNDS = 100
 TIMEOUT = 600  # 10 分钟
 

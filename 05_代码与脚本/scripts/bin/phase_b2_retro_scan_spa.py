@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="回溯扫描 B2 已爬取页面，找出 SPA")
     p.add_argument("--dry-run", action="store_true", help="仅预览不写入。")
     p.add_argument("--limit", type=int, default=500, help="最大扫描数。")
-    p.add_argument("--workers", type=int, default=10, help="并发扫描线程数。")
+    p.add_argument("--workers", type=int, default=4, help="并发扫描线程数。")
     return p
 
 

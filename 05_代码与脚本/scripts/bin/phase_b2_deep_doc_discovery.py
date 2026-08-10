@@ -724,7 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--limit", type=int, default=500, help="最大处理数量")
     p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID")
-    p.add_argument("--workers", type=int, default=20, help="并发线程数")
+    p.add_argument("--workers", type=int, default=4, help="并发线程数")
     p.add_argument("--timeout", type=int, default=10, help="读取超时(秒)")
     p.add_argument("--flush-every", type=int, default=50, help="每 N 条 flush 一次 DB")
     p.add_argument("--all-domains", action="store_true")

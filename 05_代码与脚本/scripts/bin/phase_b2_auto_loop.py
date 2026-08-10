@@ -33,7 +33,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
                 "--limit",
                 str(BATCH_LIMIT),
                 "--workers",
-                "8",
+                "4",
                 "--timeout",
                 "8",
             ],

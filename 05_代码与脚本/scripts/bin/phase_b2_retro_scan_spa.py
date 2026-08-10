@@ -85,14 +85,18 @@ def main() -> int:
             cur.execute(
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS needs_browser BOOLEAN DEFAULT FALSE"
             )
+            cur.execute(
+                "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS retro_scan_checked_at TIMESTAMPTZ"
+            )
 
-    # 查询候选：B2 已爬取但未标记 needs_browser 的页面
+    # 查询候选：B2 已爬取且未回溯扫描过的页面
     candidate_sql = """
         SELECT dse.entry_id, dse.entry_url
         FROM biz.doc_source_entry dse
         WHERE dse.deep_crawled_at IS NOT NULL
           AND dse.entry_type IN ('official_website', 'docs')
           AND COALESCE(dse.needs_browser, FALSE) = FALSE
+          AND dse.retro_scan_checked_at IS NULL
         ORDER BY dse.entry_id
         LIMIT %s
     """
@@ -142,28 +146,39 @@ def main() -> int:
 
     print(f"\n扫描完成: SPA={_stats['spa']} 非SPA={_stats['not_spa']} 失败={_stats['failed']}")
 
-    if not spa_ids:
-        print("未发现 SPA 页面。")
-        return 0
-
     if args.dry_run:
-        print(f"\n[dry-run] 将标记 {len(spa_ids)} 个页面为 needs_browser=TRUE")
-        print(f"  entry_ids: {spa_ids[:20]}{'...' if len(spa_ids) > 20 else ''}")
+        if spa_ids:
+            print(f"\n[dry-run] 将标记 {len(spa_ids)} 个页面为 needs_browser=TRUE")
+            print(f"  entry_ids: {spa_ids[:20]}{'...' if len(spa_ids) > 20 else ''}")
+        print(f"[dry-run] 将标记 {len(candidates)} 个页面为已扫描（retro_scan_checked_at）")
         return 0
 
-    # 标记 SPA
+    # 标记 SPA 页面
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
+            if spa_ids:
+                cur.execute(
+                    """
+                    UPDATE biz.doc_source_entry
+                    SET needs_browser = TRUE, deep_crawled_at = NULL
+                    WHERE entry_id = ANY(%s)
+                    """,
+                    (spa_ids,),
+                )
+                print(f"已标记 {len(spa_ids)} 个页面为 SPA（needs_browser=TRUE, deep_crawled_at=NULL）")
+
+            # 所有扫描过的页面都标记已扫描，避免下轮重复
+            all_ids = [c["entry_id"] for c in candidates]
             cur.execute(
                 """
                 UPDATE biz.doc_source_entry
-                SET needs_browser = TRUE, deep_crawled_at = NULL
+                SET retro_scan_checked_at = NOW()
                 WHERE entry_id = ANY(%s)
                 """,
-                (spa_ids,),
+                (all_ids,),
             )
         conn.commit()
-        print(f"已标记 {len(spa_ids)} 个页面为 SPA（needs_browser=TRUE, deep_crawled_at=NULL）")
+        print(f"已标记 {len(all_ids)} 个页面为已扫描（retro_scan_checked_at）")
 
     return 0
 

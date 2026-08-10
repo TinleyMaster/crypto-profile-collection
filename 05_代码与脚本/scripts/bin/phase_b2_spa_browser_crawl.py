@@ -38,6 +38,9 @@ DEFAULT_CONCURRENCY = 4
 PAGE_TIMEOUT_MS = 8000
 # HEAD 预检超时
 HEAD_TIMEOUT_S = 8
+# 浏览器启动 + 整批处理超时（秒）
+BROWSER_LAUNCH_TIMEOUT = 30
+BATCH_TIMEOUT = 300
 # 死链接标记文件（用于跨轮记忆）
 DEAD_CHECK_FILE = SCRIPT_DIR / ".." / ".." / "task_state" / "spa_dead_urls.json"
 
@@ -150,7 +153,20 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        try:
+            browser = await asyncio.wait_for(
+                p.chromium.launch(headless=True),
+                timeout=BROWSER_LAUNCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"  [ERROR] 浏览器启动超时（{BROWSER_LAUNCH_TIMEOUT}s），请检查 Playwright/Chromium 安装")
+            executor.shutdown(wait=False)
+            return {
+                "stats": {"done": 0, "failed": len(entries), "discovered": 0, "empty": 0, "skipped": 0},
+                "db_rows": [],
+                "done_ids": [],
+                "failed_ids": [e["entry_id"] for e in entries],
+            }
         semaphore = asyncio.Semaphore(concurrency)
 
         async def process(entry):
@@ -260,7 +276,24 @@ def main() -> int:
     start_time = time.time()
     same_domain_only = not args.all_domains
 
-    result = asyncio.run(run_batch(entries, args.concurrency, same_domain_only))
+    # 线程级超时兜底：防止 asyncio 事件循环在浏览器启动/页面加载时无限期挂起
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as timeout_executor:
+        future = timeout_executor.submit(
+            asyncio.run, run_batch(entries, args.concurrency, same_domain_only)
+        )
+        try:
+            result = future.result(timeout=BATCH_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            print(f"\n  [ERROR] 整批处理超时（{BATCH_TIMEOUT}s），跳过本轮。")
+            print(json.dumps({
+                "status": "timeout",
+                "candidates": len(entries),
+                "done": 0,
+                "failed": len(entries),
+                "discovered": 0,
+                "elapsed_sec": BATCH_TIMEOUT,
+            }, ensure_ascii=False))
+            return 0
 
     stats = result["stats"]
     elapsed = time.time() - start_time

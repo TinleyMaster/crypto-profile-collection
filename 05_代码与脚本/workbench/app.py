@@ -186,21 +186,6 @@ TASK_DEFS = {
         "default_args": [],
         "category": "文档采集",
     },
-    "spa_retro_scan": {
-        "name": "SPA 回溯扫描（找出历史 SPA 页面）",
-        "description": "扫描 B2 已爬取但返回 0 链接的页面，用轻量 HTTP 请求检测是否为 SPA，标记 needs_browser=TRUE",
-        "script": "phase_b2_retro_scan_spa.py",
-        "default_args": ["--limit", "500", "--workers", "10"],
-        "category": "数据源采集",
-        "hidden": True,
-    },
-    "spa_retro_scan_auto": {
-        "name": "SPA 回溯扫描（自动循环）",
-        "description": "自动循环，批量扫描 B2 已爬取页面，识别 SPA 并标记 needs_browser=TRUE",
-        "script": "phase_b2_retro_scan_spa_auto.py",
-        "default_args": [],
-        "category": "数据源采集",
-    },
     "spa_browser_crawl": {
         "name": "B3 SPA 无头浏览器爬取",
         "description": "单次：用 Playwright 渲染 JS 页面，提取 B2 静态爬取无法处理的 SPA 网站文档链接",

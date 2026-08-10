@@ -285,9 +285,17 @@ def main() -> int:
     # 写入数据库
     with get_connection(settings.database_url) as conn:
         written = 0
-        for row in result["db_rows"]:
-            fetch_one(conn, upsert_sql, row)
-            written += 1
+        write_errors = 0
+        with conn.cursor() as cur:
+            for row in result["db_rows"]:
+                try:
+                    cur.execute(upsert_sql, row)
+                    written += 1
+                except Exception as e:
+                    write_errors += 1
+                    print(f"  [WARN] 写入失败: {row[5][:80]}  {str(e)[:100]}")
+        if write_errors:
+            print(f"  写入: {written} 成功, {write_errors} 失败")
 
         # 清除 needs_browser + 标记已爬取
         all_done = result["done_ids"] + result["failed_ids"]

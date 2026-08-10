@@ -1436,6 +1436,193 @@
             font-size: 10px;
             margin-right: 6px;
         }
+
+        .research-section {
+            margin-top: 24px;
+            border-top: 1px solid #1e222a;
+            padding-top: 20px;
+        }
+
+        .research-section h2 {
+            margin: 0 0 12px;
+            font-size: 15px;
+        }
+
+        .research-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+        }
+
+        @media (max-width: 900px) {
+            .research-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .research-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .research-card h4 {
+            font-size: 13px;
+            color: #8a92a0;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .research-card .status-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .research-card .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .status-indicator.ok {
+            background: #34d399;
+        }
+
+        .status-indicator.missing {
+            background: #f87171;
+        }
+
+        .status-indicator.warning {
+            background: #facc15;
+        }
+
+        .research-card .status-text {
+            font-size: 13px;
+            flex: 1;
+        }
+
+        .research-card .status-text.missing {
+            color: #f87171;
+        }
+
+        .research-card .status-text.ok {
+            color: #34d399;
+        }
+
+        .research-card button.run-btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 7px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .research-card button.run-btn:hover {
+            background: #2563eb;
+        }
+
+        .research-card button.run-btn:disabled {
+            background: #374151;
+            color: #6b7280;
+            cursor: not-allowed;
+        }
+
+        .research-card button.run-btn.running {
+            background: #7f1d1d;
+            animation: pulse 1.5s infinite;
+        }
+
+        /* tokenomics 详情 */
+        .tkm-detail {
+            margin-top: 12px;
+            font-size: 12px;
+        }
+
+        .tkm-detail table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .tkm-detail td {
+            padding: 3px 8px;
+            border-bottom: 1px solid #1e222a;
+            vertical-align: top;
+        }
+
+        .tkm-detail td:first-child {
+            color: #6b7280;
+            width: 100px;
+            white-space: nowrap;
+        }
+
+        .tkm-detail td:last-child {
+            color: #e6e8eb;
+        }
+
+        .tkm-allocation {
+            margin-top: 8px;
+        }
+
+        .tkm-alloc-bar {
+            height: 4px;
+            background: #1e222a;
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 2px 0 6px;
+        }
+
+        .tkm-alloc-bar .fill {
+            height: 100%;
+            border-radius: 2px;
+        }
+
+        .tkm-confidence {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        .tkm-conf-high {
+            background: #064e3b;
+            color: #34d399;
+        }
+
+        .tkm-conf-mid {
+            background: #3f3f10;
+            color: #facc15;
+        }
+
+        .tkm-conf-low {
+            background: #7f1d1d;
+            color: #f87171;
+        }
+
+        .tkm-source {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 8px;
+        }
+
+        .tkm-source a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .tkm-source a:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
 
@@ -1474,6 +1661,55 @@
             </div>
             <div class="stat-row" id="mat-stats"></div>
             <div id="mat-content"></div>
+            <div class="research-section" id="research-section" style="display:none">
+                <h2>🔬 投研分析</h2>
+                <div class="research-grid">
+                    <!-- 代币经济学 -->
+                    <div class="research-card" id="rc-tokenomics">
+                        <h4>代币经济学</h4>
+                        <div class="status-row">
+                            <span class="status-indicator" id="tkm-indicator"></span>
+                            <span class="status-text" id="tkm-status">检查中...</span>
+                        </div>
+                        <button class="run-btn" id="tkm-run-btn" onclick="runResearch('c_extract_tokenomics')">
+                            提取代币经济学
+                        </button>
+                        <div id="tkm-detail" style="display:none"></div>
+                    </div>
+
+                    <!-- 解锁测算 -->
+                    <div class="research-card" id="rc-unlocks">
+                        <h4>代币解锁测算</h4>
+                        <div class="status-row">
+                            <span class="status-indicator missing"></span>
+                            <span class="status-text missing">待开发</span>
+                        </div>
+                        <button class="run-btn" disabled>即将上线</button>
+                    </div>
+
+                    <!-- 链上数据 -->
+                    <div class="research-card" id="rc-onchain">
+                        <h4>链上数据分析</h4>
+                        <div class="status-row">
+                            <span class="status-indicator" id="onchain-indicator"></span>
+                            <span class="status-text" id="onchain-status">点击按钮按需拉取</span>
+                        </div>
+                        <button class="run-btn" id="onchain-run-btn" onclick="queryOnchainData()">
+                            拉取链上数据
+                        </button>
+                    </div>
+
+                    <!-- 社交热度 -->
+                    <div class="research-card" id="rc-social">
+                        <h4>社交热度</h4>
+                        <div class="status-row">
+                            <span class="status-indicator missing"></span>
+                            <span class="status-text missing">待开发</span>
+                        </div>
+                        <button class="run-btn" disabled>即将上线</button>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- 统计卡片 -->
@@ -1943,6 +2179,149 @@
 
             document.getElementById('mat-content').innerHTML = html;
             materialsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+            // 加载投研分析
+            loadResearch(d.asset_id);
+        }
+
+        // ── 投研分析 ──
+        let currentResearchAssetId = null;
+
+        async function loadResearch (assetId) {
+            currentResearchAssetId = assetId;
+            document.getElementById('research-section').style.display = 'block';
+
+            // 加载 tokenomics
+            try {
+                const res = await fetch(`/api/assets/${assetId}/tokenomics`);
+                const data = await res.json();
+                if (data.ok && data.data) {
+                    renderTokenomics(data.data);
+                } else {
+                    setTokenomicsMissing();
+                }
+            } catch (e) {
+                setTokenomicsMissing();
+            }
+
+            // 链上数据状态
+            try {
+                const res = await fetch(`/api/assets/${assetId}/materials`);
+                const data = await res.json();
+                if (data.ok) {
+                    const hasContract = data.data.github_activity && data.data.github_activity.length > 0;
+                    setOnchainStatus(hasContract ? 'warning' : 'missing',
+                        hasContract ? '可通过合约地址拉取链上数据' : '暂无合约地址');
+                }
+            } catch (e) { }
+        }
+
+        function setTokenomicsMissing () {
+            document.getElementById('tkm-indicator').className = 'status-indicator missing';
+            document.getElementById('tkm-status').textContent = '暂无数据';
+            document.getElementById('tkm-status').className = 'status-text missing';
+            document.getElementById('tkm-run-btn').disabled = false;
+            document.getElementById('tkm-detail').style.display = 'none';
+        }
+
+        function setOnchainStatus (cls, text) {
+            document.getElementById('onchain-indicator').className = 'status-indicator ' + cls;
+            document.getElementById('onchain-status').textContent = text;
+            document.getElementById('onchain-status').className = 'status-text ' + (cls === 'missing' ? 'missing' : '');
+        }
+
+        function renderTokenomics (t) {
+            const indicator = document.getElementById('tkm-indicator');
+            const status = document.getElementById('tkm-status');
+            const btn = document.getElementById('tkm-run-btn');
+            const detail = document.getElementById('tkm-detail');
+
+            indicator.className = 'status-indicator ok';
+            status.textContent = '已提取';
+            status.className = 'status-text ok';
+            btn.textContent = '重新提取';
+            btn.disabled = false;
+            btn.classList.remove('running');
+
+            // 置信度标签
+            let confClass = 'tkm-conf-high';
+            let confText = `置信度: ${((t.confidence || 0) * 100).toFixed(0)}%`;
+            if (t.confidence < 0.7) { confClass = 'tkm-conf-low'; }
+            else if (t.confidence < 0.85) { confClass = 'tkm-conf-mid'; }
+
+            let html = '<div class="tkm-detail"><table>';
+
+            if (t.total_supply) {
+                html += `<tr><td>总量</td><td>${Number(t.total_supply).toLocaleString()}</td></tr>`;
+            }
+            if (t.circulating_supply) {
+                html += `<tr><td>流通量</td><td>${Number(t.circulating_supply).toLocaleString()}</td></tr>`;
+            }
+            if (t.max_supply) {
+                html += `<tr><td>最大供应</td><td>${Number(t.max_supply).toLocaleString()}</td></tr>`;
+            }
+            if (t.buy_tax_pct !== null || t.sell_tax_pct !== null) {
+                const tax = [];
+                if (t.buy_tax_pct !== null) tax.push(`买入 ${t.buy_tax_pct}%`);
+                if (t.sell_tax_pct !== null) tax.push(`卖出 ${t.sell_tax_pct}%`);
+                html += `<tr><td>税率</td><td>${tax.join(' / ')}</td></tr>`;
+            }
+            if (t.tax_info) {
+                html += `<tr><td>税率说明</td><td>${escapeHtml(t.tax_info)}</td></tr>`;
+            }
+            if (t.contract_renounced !== null) {
+                html += `<tr><td>合约放弃</td><td>${t.contract_renounced ? '✅ 是' : '❌ 否'}</td></tr>`;
+            }
+            if (t.lp_locked !== null) {
+                html += `<tr><td>LP锁定</td><td>${t.lp_locked ? '✅ 是' : '❌ 否'}</td></tr>`;
+            }
+            if (t.lp_lock_info) {
+                html += `<tr><td>LP说明</td><td>${escapeHtml(t.lp_lock_info)}</td></tr>`;
+            }
+            if (t.burn_info) {
+                html += `<tr><td>销毁</td><td>${escapeHtml(t.burn_info)}</td></tr>`;
+            }
+            if (t.emission_schedule) {
+                html += `<tr><td>释放计划</td><td>${escapeHtml(t.emission_schedule)}</td></tr>`;
+            }
+            if (t.governance_info) {
+                html += `<tr><td>治理</td><td>${escapeHtml(t.governance_info)}</td></tr>`;
+            }
+            if (t.utility_info) {
+                html += `<tr><td>用途</td><td>${escapeHtml(t.utility_info)}</td></tr>`;
+            }
+            html += '</table>';
+
+            // 分配饼图
+            if (t.allocation && t.allocation.length > 0) {
+                html += '<div class="tkm-allocation"><strong style="font-size:11px;color:#6b7280">分配比例</strong>';
+                const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444', '#6366f1', '#14b8a6'];
+                t.allocation.forEach((a, i) => {
+                    const pct = Number(a.pct || 0);
+                    html += `<div style="margin:4px 0;display:flex;align-items:center;gap:8px;font-size:11px">
+                        <span style="width:80px;color:#9ca3af">${escapeHtml(a.category)}</span>
+                        <span style="flex:1"><div class="tkm-alloc-bar"><div class="fill" style="width:${pct}%;background:${colors[i % colors.length]}"></div></div></span>
+                        <span style="width:40px;text-align:right;color:#e6e8eb">${pct}%</span>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+
+            html += `<span class="tkm-confidence ${confClass}">${confText}</span>`;
+            if (t.extraction_notes) {
+                html += `<div style="margin-top:8px;font-size:11px;color:#6b7280">${escapeHtml(t.extraction_notes)}</div>`;
+            }
+            if (t.source_urls && t.source_urls.length > 0) {
+                html += '<div class="tkm-source">来源: ';
+                t.source_urls.forEach((url, i) => {
+                    html += `<a href="${escapeHtml(url)}" target="_blank">[${i + 1}]</a> `;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            detail.innerHTML = html;
+            detail.style.display = 'block';
         }
 
         function copyAllLinks () {
@@ -2096,9 +2475,61 @@
             setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
         }
 
+        async function runResearch (taskKey) {
+            if (!currentResearchAssetId) return;
+            const btn = document.getElementById('tkm-run-btn');
+            btn.disabled = true;
+            btn.classList.add('running');
+            btn.textContent = '运行中...';
+
+            try {
+                const res = await fetch('/api/tasks/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_key: taskKey, asset_id: currentResearchAssetId }),
+                });
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+
+                // 自动选中日志面板
+                activeTaskId = data.task_id;
+                updateLogPanel();
+                refreshTaskList();
+
+                // 轮询等待任务完成
+                await waitForTask(data.task_id);
+
+                // 重新加载 tokenomics
+                loadResearch(currentResearchAssetId);
+            } catch (e) {
+                alert('运行失败: ' + e.message);
+                btn.disabled = false;
+                btn.classList.remove('running');
+                btn.textContent = '提取代币经济学';
+            }
+        }
+
+        async function waitForTask (taskId, maxWait = 300000) {
+            const start = Date.now();
+            while (Date.now() - start < maxWait) {
+                await sleep(2000);
+                const res = await fetch(`/api/tasks/${taskId}`);
+                const data = await res.json();
+                if (data.ok && data.task && data.task.status !== 'pending' && data.task.status !== 'running') {
+                    return;
+                }
+            }
+        }
+
+        function sleep (ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
         function closeMaterials () {
             materialsPanel.classList.remove('visible');
+            document.getElementById('research-section').style.display = 'none';
             selectedAssetId = null;
+            currentResearchAssetId = null;
         }
 
         async function addManualEntry () {

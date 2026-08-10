@@ -235,6 +235,18 @@ TASK_DEFS = {
         "category": "AI 筛选",
     },
 
+    # ═══ C: 投研分析 ═══
+    "c_extract_tokenomics": {
+        "name": "C 代币经济学提取",
+        "description": "多源聚合（官网/白皮书/Docs + API）→ LLM 提取结构化 tokenomics 数据",
+        "script": "phase_c_extract_tokenomics.py",
+        "default_args": [],
+        "category": "投研分析",
+        "requires_asset_id": True,
+        "arg_label": "asset_id",
+        "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
+    },
+
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",
@@ -360,9 +372,17 @@ def api_start_task():
         return jsonify({"ok": False, "error": f"未知任务: {task_key}"}), 400
 
     tdef = TASK_DEFS[task_key]
-    if tdef.get("hidden"):
+    # 投研分析类任务（requires_asset_id）允许通过面板调用，不受 hidden 限制
+    if tdef.get("hidden") and not tdef.get("requires_asset_id"):
         return jsonify({"ok": False, "error": "该任务已隐藏"}), 400
     args = custom_args if custom_args else tdef["default_args"]
+    # 如果任务需要 asset_id 参数，从请求中获取
+    if tdef.get("requires_asset_id"):
+        asset_id = data.get("asset_id")
+        if not asset_id:
+            return jsonify({"ok": False, "error": "缺少 asset_id 参数"}), 400
+        arg_label = tdef.get("arg_label", "asset_id")
+        args = [f"--{arg_label}", str(asset_id)] + args
     cmd = [sys.executable, "-u", str(SCRIPTS_BIN / tdef["script"])] + args
 
     task_id = task_mgr.submit_task(tdef["name"], cmd)
@@ -413,6 +433,15 @@ def api_asset_materials(asset_id: int):
         data = _get_db_stats().get_asset_materials(asset_id)
         if not data:
             return jsonify({"ok": False, "error": "资产不存在"}), 404
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/assets/<int:asset_id>/tokenomics")
+def api_asset_tokenomics(asset_id: int):
+    try:
+        data = _get_db_stats().get_asset_tokenomics(asset_id)
         return jsonify({"ok": True, "data": data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

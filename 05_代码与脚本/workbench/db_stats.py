@@ -619,6 +619,51 @@ def get_asset_materials(asset_id: int) -> dict:
     return result
 
 
+def get_asset_tokenomics(asset_id: int) -> dict | None:
+    """获取资产的代币经济学结构化数据。"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT total_supply, max_supply, circulating_supply,
+                       buy_tax_pct, sell_tax_pct, tax_info,
+                       contract_renounced, lp_locked, lp_lock_info,
+                       allocation_json, burn_info, emission_schedule,
+                       inflation_info, governance_info, utility_info,
+                       confidence, extraction_notes,
+                       source_urls, created_at, updated_at
+                FROM biz.asset_tokenomics
+                WHERE asset_id = %s
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "total_supply": row[0],
+                "max_supply": row[1],
+                "circulating_supply": row[2],
+                "buy_tax_pct": float(row[3]) if row[3] is not None else None,
+                "sell_tax_pct": float(row[4]) if row[4] is not None else None,
+                "tax_info": row[5],
+                "contract_renounced": row[6],
+                "lp_locked": row[7],
+                "lp_lock_info": row[8],
+                "allocation": row[9],
+                "burn_info": row[10],
+                "emission_schedule": row[11],
+                "inflation_info": row[12],
+                "governance_info": row[13],
+                "utility_info": row[14],
+                "confidence": float(row[15]) if row[15] is not None else None,
+                "extraction_notes": row[16],
+                "source_urls": row[17],
+                "created_at": str(row[18]) if row[18] else None,
+                "updated_at": str(row[19]) if row[19] else None,
+            }
+
+
 def add_manual_entry(asset_id: int, entry_url: str) -> dict:
     """手动为资产添加一个文档入口（官网链接）。"""
     with get_db() as conn:

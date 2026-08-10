@@ -212,7 +212,6 @@ TASK_DEFS = {
         "script": "phase_b2_retro_scan_spa_auto.py",
         "default_args": [],
         "category": "数据源采集",
-        "hidden": True,
     },
     "spa_browser_crawl": {
         "name": "SPA 无头浏览器爬取",

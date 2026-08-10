@@ -284,8 +284,9 @@ def get_task_progress() -> list[dict]:
             })
 
             # 3.7. SPA 无头浏览器爬取
-            #    候选集: needs_browser=TRUE 的条目
-            #    done: needs_browser=FALSE（已处理过的）
+            #    范围：回溯扫描过的条目（retro_scan_checked_at IS NOT NULL）
+            #    pending: needs_browser=TRUE（待爬取）
+            #    done: needs_browser=FALSE（已处理，含非SPA直接跳过+SPA已爬完）
             cur.execute(
                 """
                 SELECT
@@ -293,6 +294,7 @@ def get_task_progress() -> list[dict]:
                     COUNT(*) FILTER (WHERE COALESCE(needs_browser, FALSE) = FALSE) AS done
                 FROM biz.doc_source_entry
                 WHERE entry_type IN ('official_website', 'docs')
+                  AND retro_scan_checked_at IS NOT NULL
                 """
             )
             row = cur.fetchone()

@@ -20,7 +20,7 @@ COPY 05_代码与脚本/scripts/bin /app/scripts/bin
 COPY 05_代码与脚本/workbench/*.py /app/
 COPY 05_代码与脚本/workbench/templates /app/templates
 
-# 文档存储目录（供 B3/B7 下载使用）
+# 文档存储目录（供 B7 下载使用）
 RUN mkdir -p /app/docs_storage
 
 ENV PYTHONUNBUFFERED=1

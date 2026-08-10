@@ -52,14 +52,6 @@ TASK_DEFS = {
         "default_args": [],
         "category": "文档采集",
     },
-    "b3_download": {
-        "name": "B3 文档下载",
-        "description": "下载 doc_asset 中的 PDF 到本地存储",
-        "script": "phase_b3_doc_download.py",
-        "default_args": ["--limit", "200"],
-        "category": "文档采集",
-        "hidden": True,
-    },
     "b5_health_ai": {
         "name": "B5 链接健康检查 + AI 筛选",
         "description": "检测链接健康状态，AI 评估投研相关性",

@@ -73,14 +73,6 @@ Phase B2.5: AI 噪声清理             ← 进行中
   审计报告白名单保留，AAI 误判纠正机制
             │
             ▼
-Phase B3: 文档下载与落盘            ← 已完成 77 个 PDF
-  目录结构: docs_storage/{symbol}_{asset_id}/whitepapers/{原始文件名}
-            │
-            ▼
-Phase B4: 文档解析                  ← 暂停（pypdf 太慢，待优化）
-  PDF → Markdown
-            │
-            ▼
 Phase B5: 链接健康检查 + AI 筛选     ← 脚本就绪
   健康检测 + AI 投研相关性评分 → biz.research_url
             │
@@ -131,8 +123,6 @@ Phase B7: 防屏蔽链接 Fallback 下载   ← 脚本就绪
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理
-│   │   │   ├── phase_b3_*.py   # 文档下载
-│   │   │   ├── phase_b4_*.py   # PDF 解析
 │   │   │   ├── phase_b5_*.py   # 链接健康 + AI 筛选
 │   │   │   ├── phase_b6_*.py   # 生成投研资料
 │   │   │   ├── phase_b7_*.py   # Fallback 下载

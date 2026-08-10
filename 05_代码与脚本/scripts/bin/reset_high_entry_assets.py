@@ -4,7 +4,7 @@
 背景：之前 B2 爬了 github/other 种子入口，产生大量噪声链接。
 现在 B2 已跳过 github/other，重新爬取会干净很多。
 
-1. 找出 deep_crawl 条目过多的资产（默认 >500 条）
+1. 找出总条目过多的资产（默认 >500 条，与诊断面板一致）
 2. 删除这些资产的所有 deep_crawl 链接
 3. 重置原始入口的 deep_crawled_at，让 B2 重新爬取
 
@@ -57,7 +57,7 @@ def main():
                 JOIN core.asset a ON a.asset_id = dse.asset_id
                 WHERE dse.entity_type = 'asset'
                 GROUP BY a.asset_id, a.canonical_symbol, a.canonical_name
-                HAVING COUNT(*) FILTER (WHERE dse.discovered_from LIKE 'deep_crawl:%%') > %s
+                HAVING COUNT(*) > %s
                 ORDER BY deep_crawl_cnt DESC
                 """,
                 (args.threshold,),
@@ -65,7 +65,7 @@ def main():
             assets = [dict(r) for r in cur.fetchall()]
 
         if not assets:
-            print(f"\n✅ 没有资产 deep_crawl 超过 {args.threshold} 条")
+            print(f"\n✅ 没有资产总条目超过 {args.threshold} 条")
             return
 
         total_deep = sum(a["deep_crawl_cnt"] for a in assets)

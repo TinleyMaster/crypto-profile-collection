@@ -469,7 +469,7 @@ def extract_doc_links(
     project_identifiers: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin, urlparse
+    from urllib.parse import urljoin, urlparse, urlunparse
 
     soup = BeautifulSoup(html, "html.parser")
     base_domain = urlparse(base_url).netloc.lower()
@@ -487,6 +487,10 @@ def extract_doc_links(
             continue
         absolute_url = urljoin(base_url, href)
         parsed = urlparse(absolute_url)
+        # 去掉 # 锚点片段：同一页面不同锚点内容完全一致，NotebookLM 无法区分
+        if parsed.fragment:
+            absolute_url = urlunparse(parsed._replace(fragment=""))
+            parsed = urlparse(absolute_url)
         if parsed.scheme not in ("http", "https"):
             continue
         link_domain = parsed.netloc.lower()

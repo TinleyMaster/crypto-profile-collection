@@ -284,21 +284,28 @@ def get_task_progress() -> list[dict]:
             })
 
             # 3.7. SPA 无头浏览器爬取
-            #    只统计 SPA 候选条目（needs_browser=TRUE），不把回溯扫描过的所有条目算进来
+            #    pending: needs_browser=TRUE
+            #    done: spa_crawled_at IS NOT NULL（已处理）
             cur.execute(
                 """
-                SELECT COUNT(*) FROM biz.doc_source_entry
+                SELECT
+                    COUNT(*) FILTER (WHERE needs_browser = TRUE) AS pending,
+                    COUNT(*) FILTER (WHERE spa_crawled_at IS NOT NULL) AS done
+                FROM biz.doc_source_entry
                 WHERE entry_type IN ('official_website', 'docs')
-                  AND needs_browser = TRUE
+                  AND (needs_browser = TRUE OR spa_crawled_at IS NOT NULL)
                 """
             )
-            remaining = cur.fetchone()[0]
+            row = cur.fetchone()
+            remaining = row[0]
+            done = row[1]
+            total = remaining + done
             result.append({
                 "task": "B3 SPA 无头浏览器爬取",
-                "done": 0,
-                "total": remaining,
+                "done": done,
+                "total": total,
                 "remaining": remaining,
-                "pct": 0,
+                "pct": round(done / total * 100, 1) if total > 0 else 0,
             })
 
             # 4. B2 深度文档发现（只统计可爬的 entry_type）

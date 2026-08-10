@@ -303,7 +303,7 @@ def main() -> int:
         if result["done_ids"]:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW() WHERE entry_id = ANY(%s)",
+                    "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW(), spa_crawled_at = NOW() WHERE entry_id = ANY(%s)",
                     (result["done_ids"],),
                 )
             cleared = len(result["done_ids"])

@@ -41,8 +41,8 @@ _stats = {"total": 0, "scanned": 0, "spa": 0, "not_spa": 0, "failed": 0}
 
 def is_spa(url: str, timeout: int = 8) -> bool | None:
     """快速检查 URL 是否为 SPA。返回 True/False/None（失败）。"""
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             content_type = (resp.headers.get("Content-Type") or "").lower()
             if "text/html" not in content_type:
@@ -117,25 +117,38 @@ def main() -> int:
     spa_ids: list[int] = []
 
     def check_one(entry):
-        entry_id = entry["entry_id"]
-        url = entry["entry_url"]
-        result = is_spa(url)
-        with _stats_lock:
-            _stats["scanned"] += 1
-            if result is True:
-                _stats["spa"] += 1
-            elif result is False:
-                _stats["not_spa"] += 1
-            else:
+        try:
+            entry_id = entry["entry_id"]
+            url = entry["entry_url"] or ""
+            if not url:
+                with _stats_lock:
+                    _stats["scanned"] += 1
+                    _stats["failed"] += 1
+                    print(f"[{_stats['scanned']}/{_stats['total']}] SKIP  (空URL)", flush=True)
+                return entry_id, None
+            result = is_spa(url)
+            with _stats_lock:
+                _stats["scanned"] += 1
+                if result is True:
+                    _stats["spa"] += 1
+                elif result is False:
+                    _stats["not_spa"] += 1
+                else:
+                    _stats["failed"] += 1
+                s = _stats
+                print(
+                    f"[{s['scanned']}/{s['total']}] "
+                    f"{'SPA' if result else 'OK' if result is False else 'FAIL'}  "
+                    f"{url[:100]}",
+                    flush=True,
+                )
+            return entry_id, result
+        except Exception as e:
+            with _stats_lock:
+                _stats["scanned"] += 1
                 _stats["failed"] += 1
-            s = _stats
-            print(
-                f"[{s['scanned']}/{s['total']}] "
-                f"{'SPA' if result else 'OK' if result is False else 'FAIL'}  "
-                f"{url[:100]}",
-                flush=True,
-            )
-        return entry_id, result
+                print(f"[{_stats['scanned']}/{_stats['total']}] ERROR  {str(e)[:80]}", flush=True)
+            return entry.get("entry_id", -1), None
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(check_one, e): e for e in candidates}

@@ -409,7 +409,9 @@ def get_task_progress() -> list[dict]:
 
 
 def search_assets(query: str, limit: int = 20) -> list[dict]:
-    """按 symbol 或 name 搜索资产，用于下拉自动补全。"""
+    """按 symbol 或 name 搜索资产，用于下拉自动补全。
+    优先查 core.asset，无结果时从 src_cmc 回退并自动入库。
+    """
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -431,16 +433,108 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                 """,
                 (f"%{query}%", f"%{query}%", query, f"{query}%", limit),
             )
-            return [
-                {
-                    "asset_id": row[0],
-                    "symbol": row[1],
-                    "name": row[2],
-                    "type": row[3],
-                    "cmc_id": row[4],
-                }
-                for row in cur.fetchall()
-            ]
+            rows = cur.fetchall()
+
+            if rows:
+                return [
+                    {
+                        "asset_id": row[0],
+                        "symbol": row[1],
+                        "name": row[2],
+                        "type": row[3],
+                        "cmc_id": row[4],
+                    }
+                    for row in rows
+                ]
+
+        # ── 回退：从 src_cmc 搜索并自动入库 ──
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.cmc_id, m.symbol, m.name, m.slug, m.platform_name,
+                       i.category_hint
+                FROM src_cmc.cmc_asset_map m
+                LEFT JOIN src_cmc.cmc_asset_info i ON i.cmc_id = m.cmc_id
+                WHERE (UPPER(m.symbol) = UPPER(%s) OR m.name ILIKE %s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM core.asset_source_map asm
+                      WHERE asm.source_code = 'cmc'
+                        AND asm.source_asset_key = m.cmc_id::text
+                  )
+                ORDER BY
+                    CASE WHEN UPPER(m.symbol) = UPPER(%s) THEN 0 ELSE 1 END,
+                    m.cmc_id
+                LIMIT %s
+                """,
+                (query, f"%{query}%", query, limit),
+            )
+            cmc_rows = cur.fetchall()
+
+            if not cmc_rows:
+                return []
+
+        # 自动入库
+        results = []
+        with conn.cursor() as cur:
+            for row in cmc_rows:
+                cmc_id = row[0]
+                symbol = row[1]
+                name = row[2]
+                slug = row[3] or ""
+                platform_name = row[4]
+                category_hint = row[5]
+
+                # 判断 asset_type：有 platform 是 token，否则 coin
+                asset_type = "token" if platform_name else "coin"
+                # meme 检测
+                hint = (category_hint or "").strip().lower()
+                if "meme" in hint:
+                    asset_type = "meme"
+                if "stablecoin" in hint:
+                    asset_type = "stablecoin"
+
+                try:
+                    # 先查是否已有同 symbol 的资产
+                    cur.execute(
+                        "SELECT asset_id FROM core.asset WHERE canonical_symbol = %s",
+                        (symbol,),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        asset_id = existing[0]
+                    else:
+                        # 插入 core.asset
+                        cur.execute(
+                            """INSERT INTO core.asset (canonical_symbol, canonical_name, asset_type, status)
+                               VALUES (%s, %s, %s, 'active')
+                               RETURNING asset_id""",
+                            (symbol, name, asset_type),
+                        )
+                        asset_id = cur.fetchone()[0]
+
+                    # 插入 source_map
+                    cur.execute(
+                        """INSERT INTO core.asset_source_map
+                           (asset_id, source_code, source_asset_key, match_status,
+                            match_method, match_confidence, is_primary, verified_by, updated_at)
+                           VALUES (%s, 'cmc', %s, 'confirmed', 'search_onboard', 1.0, false, 'workbench', NOW())
+                           ON CONFLICT (source_code, source_asset_key) DO NOTHING""",
+                        (asset_id, str(cmc_id)),
+                    )
+                    conn.commit()
+
+                    results.append({
+                        "asset_id": asset_id,
+                        "symbol": symbol,
+                        "name": name,
+                        "type": asset_type,
+                        "cmc_id": cmc_id,
+                    })
+                except Exception:
+                    conn.rollback()
+                    continue
+
+        return results
 
 
 def get_asset_materials(asset_id: int) -> dict:

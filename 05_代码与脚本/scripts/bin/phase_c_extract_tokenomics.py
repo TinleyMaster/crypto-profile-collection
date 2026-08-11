@@ -50,7 +50,7 @@ FETCH_TIMEOUT = 15           # 页面抓取超时（秒）
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="代币经济学提取")
     g = parser.add_mutually_exclusive_group(required=True)
-    g.add_argument("--asset-id", type=int, help="资产 ID")
+    g.add_argument("--asset-id", "--asset_id", type=int, dest="asset_id", help="资产 ID")
     g.add_argument("--symbol", type=str, help="代币符号（如 KOMA）")
     parser.add_argument("--dry-run", action="store_true", help="仅预览不写入")
     parser.add_argument("--force", action="store_true", help="强制覆盖已有数据")

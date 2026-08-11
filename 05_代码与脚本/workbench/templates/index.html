@@ -2494,7 +2494,9 @@
                 let res = await fetch('/api/unlocks/query/' + selectedAssetId);
                 let data = await res.json();
                 if (!data.ok) {
-                    alert('解锁数据拉取失败: ' + (data.error || '未知错误'));
+                    let msg = '解锁数据拉取失败: ' + (data.error || '未知错误');
+                    if (data.stderr) msg += '\n\n--- stderr ---\n' + data.stderr;
+                    alert(msg);
                     btn.textContent = origText;
                     btn.disabled = false;
                     return;
@@ -2534,6 +2536,13 @@
                         const icon = e.is_upcoming ? '🔜' : '✅';
                         html += icon + ' ' + e.date + ' ' + e.value_str + ' (' + e.pct + '%)<br>';
                     }
+                }
+
+                // 爬取日志
+                if (data.stderr) {
+                    html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">爬取日志</summary>';
+                    html += '<pre style="font-size:10px;color:#9ca3af;max-height:200px;overflow:auto;margin-top:4px">' + data.stderr + '</pre>';
+                    html += '</details>';
                 }
 
                 html += '</div>';

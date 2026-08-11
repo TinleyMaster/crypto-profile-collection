@@ -1197,12 +1197,12 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         return {"ok": False, "error": err_msg[:500]}
 
     if not output:
-        return {"ok": False, "error": "无输出"}
+        return {"ok": False, "error": "无输出", "stderr": stderr_output[:500]}
 
     try:
         data = json.loads(output)
         if data.get("status") == "ok":
-            return {"ok": True, "data": data}
-        return {"ok": False, "error": str(data.get("message", "查询失败"))}
+            return {"ok": True, "data": data, "stderr": stderr_output[:1000]}
+        return {"ok": False, "error": str(data.get("message", "查询失败")), "stderr": stderr_output[:500]}
     except json.JSONDecodeError:
         return {"ok": False, "error": (stderr_output or output)[:500]}

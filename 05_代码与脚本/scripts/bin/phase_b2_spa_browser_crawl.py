@@ -155,7 +155,7 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
     # 浏览器启动（线程池控制超时）
     headless_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     launch_future = headless_executor.submit(
-        lambda: sync_playwright().start().__enter__().chromium.launch(
+        lambda: sync_playwright().start().chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )

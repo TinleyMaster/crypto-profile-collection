@@ -719,6 +719,16 @@ def api_onchain_query(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/unlocks/query/<int:asset_id>")
+def api_unlocks_query(asset_id: int):
+    """按需拉取指定资产的代币解锁数据（从 tokenomist 爬取）。"""
+    try:
+        data = _get_db_stats().query_token_unlocks(asset_id)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/market/hot")
 def api_market_hot():
     """每日投研推荐：多源交叉验证（Binance + CMC），按综合评分排序。"""

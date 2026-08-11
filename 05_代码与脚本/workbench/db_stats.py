@@ -1064,3 +1064,43 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         return {"ok": False, "error": str(data.get("message", "查询失败"))}
     except json.JSONDecodeError:
         return {"ok": False, "error": (stderr_output or output)[:500]}
+
+
+def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
+    """按需拉取代币解锁数据（从 tokenomist 爬取）。"""
+    import subprocess
+
+    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "phase_chain_token_unlocks.py")
+    cmd = [
+        sys.executable, "-u", script,
+        "--asset-id", str(asset_id),
+        "--save",
+    ]
+    if force:
+        cmd.append("--force")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        cwd=str(Path(script).parent),
+    )
+
+    output = result.stdout.strip()
+    stderr_output = result.stderr.strip() if result.stderr else ""
+
+    if result.returncode != 0:
+        err_msg = stderr_output or output or f"exit code {result.returncode}"
+        return {"ok": False, "error": err_msg[:500]}
+
+    if not output:
+        return {"ok": False, "error": "无输出"}
+
+    try:
+        data = json.loads(output)
+        if data.get("status") == "ok":
+            return {"ok": True, "data": data}
+        return {"ok": False, "error": str(data.get("message", "查询失败"))}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": (stderr_output or output)[:500]}

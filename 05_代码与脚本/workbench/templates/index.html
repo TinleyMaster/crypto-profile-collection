@@ -1683,100 +1683,104 @@
                     <div class="research-card" id="rc-unlocks">
                         <h4>代币解锁测算</h4>
                         <div class="status-row">
-                            <span class="status-indicator missing"></span>
-                            <span class="status-text missing">待开发</span>
+                            <span class="status-indicator" id="ulk-indicator"></span>
+                            <span class="status-text" id="ulk-status">点击按钮拉取数据</span>
                         </div>
-                        <button class="run-btn" disabled>即将上线</button>
-                    </div>
-
-                    <!-- 链上数据 -->
-                    <div class="research-card" id="rc-onchain">
-                        <h4>链上数据分析</h4>
-                        <div class="status-row">
-                            <span class="status-indicator" id="onchain-indicator"></span>
-                            <span class="status-text" id="onchain-status">点击按钮按需拉取</span>
-                        </div>
-                        <button class="run-btn" id="onchain-run-btn" onclick="queryOnchainData()">
-                            拉取链上数据
+                        <button class="run-btn" id="ulk-run-btn" onclick="queryUnlocksData()">
+                            拉取代币解锁数据
                         </button>
-                    </div>
-
-                    <!-- 社交热度 -->
-                    <div class="research-card" id="rc-social">
-                        <h4>社交热度</h4>
-                        <div class="status-row">
-                            <span class="status-indicator missing"></span>
-                            <span class="status-text missing">待开发</span>
-                        </div>
-                        <button class="run-btn" disabled>即将上线</button>
+                        <div id="ulk-detail" style="display:none"></div>
                     </div>
                 </div>
-            </div>
-        </div>
 
-        <!-- 统计卡片 -->
-        <div class="grid">
-            <div class="card">
-                <h3>总资产数</h3>
-                <div class="value" id="stat-assets">-</div>
-                <div class="sub" id="stat-sources">-</div>
-            </div>
-            <div class="card">
-                <h3>文档入口总数</h3>
-                <div class="value" id="stat-entries">-</div>
-                <div class="sub" id="stat-entry-types">-</div>
-            </div>
-            <div class="card">
-                <h3>深度爬取进度</h3>
-                <div class="value" id="stat-crawl-pct">-</div>
-                <div class="progress-bar">
-                    <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
+                <!-- 链上数据 -->
+                <div class="research-card" id="rc-onchain">
+                    <h4>链上数据分析</h4>
+                    <div class="status-row">
+                        <span class="status-indicator" id="onchain-indicator"></span>
+                        <span class="status-text" id="onchain-status">点击按钮按需拉取</span>
+                    </div>
+                    <button class="run-btn" id="onchain-run-btn" onclick="queryOnchainData()">
+                        拉取链上数据
+                    </button>
                 </div>
-                <div class="sub" id="stat-crawl-detail">-</div>
-            </div>
-            <div class="card">
-                <h3>文档链接来源</h3>
-                <div class="value" id="stat-docs">-</div>
-                <div class="sub" id="stat-docs-detail">-</div>
-            </div>
-        </div>
 
-        <!-- 每日投研推荐 -->
-        <div class="hot-tokens-section">
-            <div class="section-header">
-                <h2>🔥 每日投研推荐</h2>
-                <div style="display:flex;align-items:center;gap:8px">
-                    <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
-                    <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
+                <!-- 社交热度 -->
+                <div class="research-card" id="rc-social">
+                    <h4>社交热度</h4>
+                    <div class="status-row">
+                        <span class="status-indicator missing"></span>
+                        <span class="status-text missing">待开发</span>
+                    </div>
+                    <button class="run-btn" disabled>即将上线</button>
                 </div>
             </div>
-            <div class="hot-filters">
-                <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
-                <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
-                <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
+        </div>
+    </div>
+
+    <!-- 统计卡片 -->
+    <div class="grid">
+        <div class="card">
+            <h3>总资产数</h3>
+            <div class="value" id="stat-assets">-</div>
+            <div class="sub" id="stat-sources">-</div>
+        </div>
+        <div class="card">
+            <h3>文档入口总数</h3>
+            <div class="value" id="stat-entries">-</div>
+            <div class="sub" id="stat-entry-types">-</div>
+        </div>
+        <div class="card">
+            <h3>深度爬取进度</h3>
+            <div class="value" id="stat-crawl-pct">-</div>
+            <div class="progress-bar">
+                <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
             </div>
-            <div id="hot-tokens-content">
-                <div class="hot-tokens-loading">加载中...</div>
+            <div class="sub" id="stat-crawl-detail">-</div>
+        </div>
+        <div class="card">
+            <h3>文档链接来源</h3>
+            <div class="value" id="stat-docs">-</div>
+            <div class="sub" id="stat-docs-detail">-</div>
+        </div>
+    </div>
+
+    <!-- 每日投研推荐 -->
+    <div class="hot-tokens-section">
+        <div class="section-header">
+            <h2>🔥 每日投研推荐</h2>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
+                <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
             </div>
         </div>
-
-        <!-- 任务进度 -->
-        <h2>📈 任务进度</h2>
-        <div class="refresh-note">每 30 秒自动刷新</div>
-        <div class="progress-section">
-            <div class="progress-list" id="progress-list">
-                <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
-            </div>
+        <div class="hot-filters">
+            <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
+            <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
+            <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
         </div>
+        <div id="hot-tokens-content">
+            <div class="hot-tokens-loading">加载中...</div>
+        </div>
+    </div>
 
-        <!-- 任务启动 -->
-        <h2>🚀 任务启动</h2>
-        <div class="task-grid" id="task-def-grid"></div>
+    <!-- 任务进度 -->
+    <h2>📈 任务进度</h2>
+    <div class="refresh-note">每 30 秒自动刷新</div>
+    <div class="progress-section">
+        <div class="progress-list" id="progress-list">
+            <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
+        </div>
+    </div>
 
-        <!-- 任务列表 -->
-        <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
-        <div class="refresh-note">每 3 秒自动刷新</div>
-        <div class="task-list" id="task-list"></div>
+    <!-- 任务启动 -->
+    <h2>🚀 任务启动</h2>
+    <div class="task-grid" id="task-def-grid"></div>
+
+    <!-- 任务列表 -->
+    <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
+    <div class="refresh-note">每 3 秒自动刷新</div>
+    <div class="task-list" id="task-list"></div>
     </div>
 
     <!-- 底部日志面板 -->
@@ -2475,6 +2479,78 @@
                 btn.textContent = origText;
             }
             setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
+        }
+
+        async function queryUnlocksData () {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('ulk-run-btn');
+            const detail = document.getElementById('ulk-detail');
+            const indicator = document.getElementById('ulk-indicator');
+            const statusEl = document.getElementById('ulk-status');
+            const origText = btn.textContent;
+
+            btn.textContent = '⏳ 爬取中...';
+            btn.disabled = true;
+            try {
+                let res = await fetch('/api/unlocks/query/' + selectedAssetId);
+                let data = await res.json();
+                if (!data.ok) {
+                    alert('解锁数据拉取失败: ' + (data.error || '未知错误'));
+                    btn.textContent = origText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const d = data.data;
+                const ov = d.overview || {};
+                const events = d.unlock_events || [];
+
+                let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
+
+                // Overview
+                if (ov.released_pct != null) {
+                    html += '<strong>释放进度:</strong> ' + ov.released_pct + '%';
+                    if (ov.released_amount_str) html += ' (' + ov.released_amount_str + ' / ' + ov.total_amount_str + ')';
+                    html += '<br>';
+                }
+                if (ov.market_cap_str) html += '<strong>市值:</strong> ' + ov.market_cap_str + '<br>';
+                if (ov.fdv_str) html += '<strong>FDV:</strong> ' + ov.fdv_str + '<br>';
+                if (ov.float_pct != null) html += '<strong>流通率:</strong> ' + ov.float_pct + '%<br>';
+
+                // Next unlock
+                if (ov.next_unlock_date) {
+                    html += '<strong>下一次解锁:</strong><br>';
+                    html += '&nbsp;&nbsp;日期: ' + ov.next_unlock_date + '<br>';
+                    if (ov.next_unlock_value_str) html += '&nbsp;&nbsp;价值: ' + ov.next_unlock_value_str + '<br>';
+                    if (ov.next_unlock_pct != null) html += '&nbsp;&nbsp;占比: ' + ov.next_unlock_pct + '%<br>';
+                    if (ov.next_unlock_when) html += '&nbsp;&nbsp;时间: ' + ov.next_unlock_when + '<br>';
+                }
+
+                // Unlock events
+                if (events.length > 0) {
+                    html += '<br><strong>近期解锁事件:</strong><br>';
+                    const futureEv = events.filter(e => e.is_future).slice(0, 3);
+                    const pastEv = events.filter(e => !e.is_future).slice(0, 3);
+                    for (const e of [...futureEv, ...pastEv]) {
+                        const icon = e.is_future ? '🔜' : '✅';
+                        html += icon + ' ' + e.date + ' ' + e.value_str + ' (' + e.pct + '%)<br>';
+                    }
+                }
+
+                html += '</div>';
+
+                detail.innerHTML = html;
+                detail.style.display = 'block';
+                indicator.className = 'status-indicator success';
+                statusEl.textContent = '数据已拉取 (' + events.length + ' 条解锁事件)';
+                statusEl.className = 'status-text';
+                btn.textContent = '✅ 已拉取';
+                btn.classList.add('copied');
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+                btn.textContent = origText;
+            }
+            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
         }
 
         async function runResearch (taskKey) {

@@ -246,13 +246,19 @@ def main() -> int:
     args = build_parser().parse_args()
     print(f"[SPA crawl] 启动, limit={args.limit}, concurrency={args.concurrency}", flush=True)
 
+    print("[SPA crawl] import psycopg...", flush=True)
     import psycopg
+    print("[SPA crawl] import config...", flush=True)
     from crypto_research.config import get_settings
+    print("[SPA crawl] import conn...", flush=True)
     from crypto_research.db.conn import get_connection
+    print("[SPA crawl] import upsert...", flush=True)
     from crypto_research.db.upsert import fetch_one, load_sql
 
+    print("[SPA crawl] 加载配置...", flush=True)
     settings = get_settings(require_database=True)
     upsert_sql = load_sql("biz/upsert_doc_source_entry.sql")
+    print(f"[SPA crawl] 配置加载完成, 连接数据库...", flush=True)
 
     # 查询 needs_browser = TRUE 的条目
     asset_filter = ""

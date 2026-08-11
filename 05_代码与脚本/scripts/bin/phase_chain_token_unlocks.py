@@ -72,13 +72,13 @@ def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None
     return None
 
 
-def guess_slug(asset: dict) -> str:
-    """推断 tokenomist 的 token slug。优先 CoinGecko ID，兜底 symbol/name。"""
+def guess_slugs(asset: dict) -> list[str]:
+    """推断 tokenomist 的 token slug 候选列表。优先 CoinGecko ID，兜底 symbol/name。"""
+    slugs = []
     cg_id = asset.get("coingecko_id")
-    if cg_id:
-        return cg_id.strip().lower()
     symbol = (asset.get("symbol") or "").strip().lower()
     name = (asset.get("name") or "").strip().lower().replace(" ", "-")
+
     # 常见映射修正
     slug_map = {
         "btc": "bitcoin",
@@ -87,98 +87,111 @@ def guess_slug(asset: dict) -> str:
         "sol": "solana",
         "matic": "polygon",
     }
-    if symbol in slug_map:
-        return slug_map[symbol]
-    return symbol or name
+    symbol_slug = slug_map.get(symbol, symbol or name)
+
+    if cg_id:
+        cg_slug = cg_id.strip().lower()
+        slugs.append(cg_slug)
+        # 如果 CG ID 和 symbol slug 不同，把 symbol slug 作为备选
+        if cg_slug != symbol_slug:
+            slugs.append(symbol_slug)
+    else:
+        slugs.append(symbol_slug)
+
+    # 去重保持顺序
+    seen = set()
+    return [s for s in slugs if not (s in seen or seen.add(s))]
 
 
 # ── 页面爬取 ──────────────────────────────────────────────
 
-def scrape_tokenomist(slug: str) -> dict | None:
-    """用 Playwright 爬取 tokenomist 的解锁数据。"""
-    base_url = f"https://tokenomist.ai/{slug}"
-    unlock_url = f"{base_url}/unlock-events"
+def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
+    """用 Playwright 爬取 tokenomist 的解锁数据。依次尝试 slugs，overview 为空则换下一个。"""
+    for idx, slug in enumerate(slugs):
+        is_fallback = idx > 0
+        base_url = f"https://tokenomist.ai/{slug}"
+        unlock_url = f"{base_url}/unlock-events"
 
-    _log(f"  Tokenomist slug: {slug}")
-    _log(f"  目标 URL: {unlock_url}")
+        _log(f"  Tokenomist slug: {slug}{' (备选)' if is_fallback else ''}")
+        _log(f"  目标 URL: {unlock_url}")
 
-    result = {
-        "source_url": base_url,
-        "source_name": "tokenomist",
-        "slug": slug,
-        "overview": {},
-        "unlock_events": [],
-        "allocation": [],
-    }
+        result = {
+            "source_url": base_url,
+            "source_name": "tokenomist",
+            "slug": slug,
+            "overview": {},
+            "unlock_events": [],
+            "allocation": [],
+        }
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/151.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/151.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = context.new_page()
 
-            # 拦截非必要资源以加速
-            page.route("**/*", lambda route: route.abort()
-                if route.request.resource_type in ("image", "font", "media", "stylesheet")
-                else route.continue_()
-            )
+                # 拦截非必要资源以加速
+                page.route("**/*", lambda route: route.abort()
+                    if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                    else route.continue_()
+                )
 
-            # ── Step 1: 爬 Overview 页面 ──
-            _log("  加载 Overview 页面...")
-            try:
-                page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-            except PlaywrightTimeout:
-                _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
-            except Exception as e:
-                _log(f"  [ERROR] Overview 页面导航失败: {e}")
-                browser.close()
-                return None
+                # ── Step 1: 爬 Overview 页面 ──
+                _log("  加载 Overview 页面...")
+                try:
+                    page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                except PlaywrightTimeout:
+                    _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
+                except Exception as e:
+                    _log(f"  [ERROR] Overview 页面导航失败: {e}")
+                    browser.close()
+                    continue
 
-            page.wait_for_timeout(5000)
+                page.wait_for_timeout(5000)
+                _close_popups(page)
+                overview = _extract_overview(page, slug)
+                result["overview"] = overview
 
-            # 关闭广告弹窗
-            _close_popups(page)
+                # 判断是否为有效页面：Overview 为空说明 slug 不对
+                if not overview and is_fallback is False and idx + 1 < len(slugs):
+                    _log(f"  Overview 为空，slug 可能不匹配，尝试备选...")
+                    browser.close()
+                    continue
 
-            # 提取 Overview 数据
-            overview = _extract_overview(page, slug)
-            result["overview"] = overview
-            _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
+                _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
 
-            # ── Step 2: 爬 Unlock Events 页面 ──
-            _log("  加载 Unlock Events 页面...")
-            try:
-                page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-            except PlaywrightTimeout:
-                _log("  [WARN] Unlock Events 页面加载超时")
-            except Exception as e:
-                _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
+                # ── Step 2: 爬 Unlock Events 页面 ──
+                _log("  加载 Unlock Events 页面...")
+                try:
+                    page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                except PlaywrightTimeout:
+                    _log("  [WARN] Unlock Events 页面加载超时")
+                except Exception as e:
+                    _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
+                    browser.close()
+                    return result
+
+                page.wait_for_timeout(5000)
+                _close_popups(page)
+                events = _extract_unlock_events(page)
+                result["unlock_events"] = events
+                _log(f"  Unlock Events: {len(events)} 条")
+
                 browser.close()
                 return result
 
-            page.wait_for_timeout(5000)
+        except Exception as e:
+            _log(f"  [ERROR] 页面爬取失败: {e}")
+            _log(traceback.format_exc())
+            continue
 
-            # 关闭广告弹窗
-            _close_popups(page)
-
-            # 提取解锁事件表
-            events = _extract_unlock_events(page)
-            result["unlock_events"] = events
-            _log(f"  Unlock Events: {len(events)} 条")
-
-            browser.close()
-
-    except Exception as e:
-        _log(f"  [ERROR] 页面爬取失败: {e}")
-        _log(traceback.format_exc())
-        return None
-
-    return result
+    return None
 
 
 def _close_popups(page) -> None:
@@ -496,13 +509,12 @@ def _main() -> int:
             return 1
 
         asset_id = asset["asset_id"]
-        slug = guess_slug(asset)
+        slugs = guess_slugs(asset)
 
         _log(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
-        _log(f"Tokenomist slug: {slug}")
 
-        # 爬取
-        data = scrape_tokenomist(slug)
+        # 爬取（自动回退备选 slug）
+        data = scrape_tokenomist(slugs, symbol=asset["symbol"])
 
         if data is None:
             print(json.dumps({"status": "error", "message": "页面爬取失败"}, ensure_ascii=False))

@@ -130,10 +130,12 @@ def get_suspicious_entries(conn, source_filter: str, limit: int) -> list[dict]:
     where = f"({where}) AND discovered_from LIKE 'deep_crawl:%%' AND ai_noise_checked_at IS NULL"
 
     sql = f"""
-        SELECT entry_id, asset_id, entry_url, entry_type, discovered_from
-        FROM biz.doc_source_entry
+        SELECT dse.entry_id, dse.asset_id, dse.entry_url, dse.entry_type, dse.discovered_from,
+               a.symbol, a.name as asset_name
+        FROM biz.doc_source_entry dse
+        LEFT JOIN core.asset a ON a.asset_id = dse.asset_id AND dse.entity_type = 'asset'
         WHERE {where}
-        ORDER BY entry_id
+        ORDER BY dse.entry_id
         LIMIT %s
     """
     params.append(limit)
@@ -143,8 +145,8 @@ def get_suspicious_entries(conn, source_filter: str, limit: int) -> list[dict]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def extract_title(url: str, discovered_from: str) -> str:
-    """从 URL 和来源中提取标题信息（用于 AI 判断）。"""
+def extract_title(url: str, discovered_from: str, asset_context: str = "") -> str:
+    """从 URL 和来源中提取标题信息（用于 AI 判断），附上资产上下文。"""
     from urllib.parse import urlparse, unquote
 
     parts = urlparse(url)
@@ -168,7 +170,8 @@ def extract_title(url: str, discovered_from: str) -> str:
         except Exception:
             pass
 
-    return f"文件名: {filename[:100]} | 域名: {domain} | 来源页面: {source_domain}"
+    prefix = f"[{asset_context}] " if asset_context else ""
+    return f"{prefix}文件名: {filename[:100]} | 域名: {domain} | 来源页面: {source_domain}"
 
 
 def main() -> int:
@@ -290,7 +293,11 @@ def main() -> int:
                 {
                     "id": str(e["entry_id"]),
                     "url": e["entry_url"],
-                    "title": extract_title(e["entry_url"], e.get("discovered_from", "")),
+                    "title": extract_title(
+                        e["entry_url"],
+                        e.get("discovered_from", ""),
+                        asset_context=f"{e.get('symbol', '')} {e.get('asset_name', '')}".strip() or "",
+                    ),
                 }
                 for e in batch
             ]

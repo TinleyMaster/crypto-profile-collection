@@ -239,6 +239,11 @@ class LLMClient:
             "- 无关（relevant=false）：普通学术论文、计算机通用技术文档、"
             "非加密行业报告、编程语言教程、普通企业官网、个人社交媒体等。\n"
             "\n"
+            "重要提示：标题中的 [SYMBOL NAME] 前缀表示该链接所属的加密资产项目。"
+            "如果链接来自知名审计公司（chainsecurity、certik、hacken、peckshield、"
+            "quillaudits、trailofbits、openzeppelin、zokyo 等）且审计内容与所属资产相关，"
+            "应判定为相关（这是该项目的审计报告，属于投研资料）。\n"
+            "\n"
             "只输出 JSON，不要输出其他内容。JSON 格式："
             '{results: [{id: string, relevant: boolean, score: 0.0-1.0, reason: "简短理由"}]}'
         )

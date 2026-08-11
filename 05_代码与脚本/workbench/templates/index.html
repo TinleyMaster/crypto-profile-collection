@@ -2579,15 +2579,16 @@
                     method: 'POST',
                 });
                 const data = await res.json();
-                if (!data.ok) throw new Error(data.error);
+                if (!data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
 
-                const d = data.data;
-                let msg = `已重置 ${d.reset.affected} 条入口。\n`;
-                msg += `共执行 ${d.total_rounds} 轮：\n`;
-                for (const r of d.rounds) {
-                    const b2 = r.b2;
-                    const b3 = r.b3;
-                    msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
+                const d = data.data || {};
+                let msg = `已重置 ${d.reset?.affected || 0} 条入口。\n`;
+                const rounds = d.rounds || [];
+                msg += `共执行 ${rounds.length} 轮：\n`;
+                for (const r of rounds) {
+                    const b2 = r.b2 || {};
+                    const b3 = r.b3 || {};
+                    msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs || 0} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
                 }
                 msg += '\n请刷新资料面板查看新链接。';
                 alert(msg);

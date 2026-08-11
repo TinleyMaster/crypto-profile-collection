@@ -467,6 +467,11 @@ def api_re_crawl_full(asset_id: int):
         b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
         b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
 
+        if not os.path.exists(b2_script):
+            return jsonify({"ok": False, "error": f"B2 脚本不存在: {b2_script}"}), 500
+        if not os.path.exists(b3_script):
+            return jsonify({"ok": False, "error": f"B3 脚本不存在: {b3_script}"}), 500
+
         rounds = []
         MAX_ROUNDS = 6
         total_timeout = 900  # 15 分钟总超时

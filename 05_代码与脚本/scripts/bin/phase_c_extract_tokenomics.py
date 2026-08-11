@@ -132,8 +132,37 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
     return docs
 
 
+def _fetch_pdf(url: str) -> str | None:
+    """用 requests 下载 PDF 并用 PyPDF2 提取文本。"""
+    try:
+        import io
+        import requests as req
+        from PyPDF2 import PdfReader
+    except ImportError as e:
+        print(f"  [WARN] PDF 解析库缺失: {e}")
+        return None
+
+    try:
+        resp = req.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        reader = PdfReader(io.BytesIO(resp.content))
+        texts = []
+        for page in reader.pages[:30]:  # 最多 30 页
+            t = page.extract_text()
+            if t:
+                texts.append(t)
+        return "\n\n".join(texts)
+    except Exception as e:
+        print(f"  [WARN] PDF 解析失败 {url[:80]}: {e}")
+        return None
+
+
 def fetch_page_content(url: str) -> str | None:
-    """用 headless browser 抓取页面内容，返回纯文本。"""
+    """抓取页面内容，对 PDF 用 PyPDF2 解析，对 HTML 用 headless browser。"""
+    # PDF 链接用专用解析器
+    if url.lower().endswith(".pdf"):
+        print(f"  [PDF] 解析 {url[:80]}")
+        return _fetch_pdf(url)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)

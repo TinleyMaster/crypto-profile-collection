@@ -268,6 +268,13 @@ TASK_DEFS = {
         "arg_label": "asset-id",
         "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
     },
+    "c_extract_tokenomics_auto": {
+        "name": "C 代币经济学批量提取",
+        "description": "自动循环批量提取所有资产 tokenomics 数据（每批10个，无候选自动停止）",
+        "script": "phase_c_extract_tokenomics_auto.py",
+        "default_args": [],
+        "category": "投研分析",
+    },
 
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {

@@ -446,8 +446,26 @@ def main() -> int:
         return 2
 
 
+def _check_playwright() -> str | None:
+    """检查 Playwright + Chromium 是否可用，返回 None 表示正常。"""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+    except Exception as e:
+        return f"Playwright/Chromium 不可用: {e}"
+    return None
+
+
 def _main() -> int:
     args = build_parser().parse_args()
+
+    # 预检 Playwright 可用性
+    pw_error = _check_playwright()
+    if pw_error:
+        _log(f"[FATAL] {pw_error}")
+        print(json.dumps({"status": "error", "message": pw_error}, ensure_ascii=False))
+        return 2
 
     settings = get_settings(require_database=True)
 

@@ -1160,11 +1160,19 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         return {"ok": False, "error": (stderr_output or output)[:500]}
 
 
+def _get_scripts_bin() -> Path:
+    """获取 scripts/bin 目录路径（兼容 Docker 和本地）。"""
+    if os.path.exists("/app/scripts/bin"):
+        return Path("/app/scripts/bin")
+    return Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin"
+
+
 def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
     """按需拉取代币解锁数据（从 tokenomist 爬取）。"""
     import subprocess
 
-    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "phase_chain_token_unlocks.py")
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_chain_token_unlocks.py")
     cmd = [
         sys.executable, "-u", script,
         "--asset-id", str(asset_id),
@@ -1178,7 +1186,7 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         capture_output=True,
         text=True,
         timeout=90,
-        cwd=str(Path(script).parent),
+        cwd=str(scripts_bin),
     )
 
     output = result.stdout.strip()

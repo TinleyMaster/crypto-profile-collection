@@ -467,6 +467,7 @@ def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
 def extract_doc_links(
     html: str, base_url: str, same_domain_only: bool = True,
     project_identifiers: list[str] | None = None,
+    require_doc_keyword: bool = True,
 ) -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin, urlparse, urlunparse
@@ -501,7 +502,11 @@ def extract_doc_links(
         link_text = a.get_text(strip=True)
         link_text_is_doc = _has_doc_keyword(link_text)
 
-        if link_domain in NOISY_DOC_DOMAINS:
+        if not require_doc_keyword:
+            # 放宽模式：收录所有同域链接（用于单资产重爬）
+            if link_domain == base_domain:
+                should_record = True
+        elif link_domain in NOISY_DOC_DOMAINS:
             if _doc_keyword_in_path_only(absolute_url) or link_text_is_doc:
                 should_record = True
         elif _has_doc_keyword(absolute_url):
@@ -570,7 +575,7 @@ def _make_session():
     return s
 
 
-def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
+def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_keyword: bool = True) -> dict:
     """单个 worker：爬一个网页（带外层超时兜底，防止 SSL 握手卡死）"""
     from concurrent.futures import ThreadPoolExecutor as InnerPool
 
@@ -607,7 +612,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
-            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers)
+            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword)
 
             # 检测 SPA：无链接 + 小 HTML（<5000 bytes 或包含 SPA 框架标志）
             needs_browser = False
@@ -807,7 +812,7 @@ def main() -> int:
     if args.dry_run:
         preview = []
         for entry in entries[:10]:
-            result = crawl_one(entry, not args.all_domains, args.timeout)
+            result = crawl_one(entry, not args.all_domains, args.timeout, require_doc_keyword=args.asset_id is None)
             preview.append(
                 {
                     "url": entry["entry_url"][:120],
@@ -825,7 +830,7 @@ def main() -> int:
     # ── 并发爬取 ──
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(crawl_one, entry, not args.all_domains, args.timeout): entry
+            executor.submit(crawl_one, entry, not args.all_domains, args.timeout, require_doc_keyword=args.asset_id is None): entry
             for entry in entries
         }
 

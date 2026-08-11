@@ -117,7 +117,7 @@ async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, ex
         html = await page.content()
         final_url = page.url
 
-        doc_links = extract_doc_links(html, final_url, same_domain_only, project_identifiers)
+        doc_links = extract_doc_links(html, final_url, same_domain_only, project_identifiers, require_doc_keyword=False)
 
         return {
             "status": "ok",

@@ -115,6 +115,21 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "cmc_backfill_assets": {
+        "name": "CMC 资产全量入库",
+        "description": "从 src_cmc.cmc_asset_map 单次批量写入 core.asset（未映射的资产）",
+        "script": "refresh_core_assets_from_cmc.py",
+        "default_args": ["--limit", "500"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "cmc_backfill_assets_auto": {
+        "name": "CMC 资产全量入库（自动循环）",
+        "description": "自动循环，每批500资产，直到所有 CMC 资产都写入 core.asset",
+        "script": "backfill_core_assets_from_cmc_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "dl_refresh_docs": {
         "name": "DL 补充文档入口",
         "description": "从 DefiLlama protocol_list 的 url/twitter 提取官网链接，写入 doc_source_entry",

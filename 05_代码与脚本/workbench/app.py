@@ -468,7 +468,7 @@ def api_re_crawl_full(asset_id: int):
         b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
 
         rounds = []
-        MAX_ROUNDS = 3
+        MAX_ROUNDS = 6
         total_timeout = 900  # 15 分钟总超时
 
         for round_num in range(1, MAX_ROUNDS + 1):

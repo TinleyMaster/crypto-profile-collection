@@ -2569,7 +2569,7 @@
         async function reCrawlAsset () {
             if (!selectedAssetId) return;
             const btn = document.getElementById('recrawl-btn');
-            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：B2→B3→B2→... 循环直到收敛\n最多 3 轮，预计耗时 2-5 分钟，请耐心等待。')) return;
+            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：B2→B3→B2→... 循环直到收敛\n最多 6 轮，预计耗时 2-5 分钟，请耐心等待。')) return;
 
             btn.disabled = true;
             btn.textContent = '⏳ 爬取中...';

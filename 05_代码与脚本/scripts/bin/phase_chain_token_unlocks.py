@@ -52,28 +52,19 @@ def build_parser() -> argparse.ArgumentParser:
 # ── 资产解析 ──────────────────────────────────────────────
 
 def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None:
-    """根据 asset_id 或 symbol 查找资产信息，含 CoinGecko ID（来自 asset_source_map 和 coin_list）。"""
+    """根据 asset_id 或 symbol 查找资产信息。"""
     query = """
         SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
-               asm_cg.source_asset_key AS coingecko_id,
-               cgl.coin_id AS cg_coin_id
+               asm_cg.source_asset_key AS coingecko_id
         FROM core.asset a
         LEFT JOIN core.asset_source_map asm_cg
             ON asm_cg.asset_id = a.asset_id AND asm_cg.source_code = 'cg'
-        LEFT JOIN LATERAL (
-            SELECT coin_id FROM src_cg.coin_list cgl
-            WHERE UPPER(cgl.symbol) = UPPER(a.canonical_symbol)
-            ORDER BY CASE WHEN LOWER(cgl.name) = LOWER(a.canonical_name) THEN 0 ELSE 1 END, cgl.coin_id
-            LIMIT 1
-        ) cgl ON TRUE
         WHERE {}
     """
     if asset_id:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(query.format("a.asset_id = %s"), (asset_id,))
-            row = cur.fetchone()
-            # 如果 symbol 匹配到多条 coin_list，取 rank 最高的（通常第一条）
-            return row
+            return cur.fetchone()
     if symbol:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(query.format("UPPER(a.canonical_symbol) = UPPER(%s) LIMIT 1"), (symbol,))
@@ -82,32 +73,37 @@ def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None
 
 
 def guess_slugs(asset: dict) -> list[str]:
-    """推断 tokenomist 的 token slug 候选列表。三级回退。"""
-    slugs = []
-    cg_id = asset.get("coingecko_id")        # 来自 asset_source_map（可能不准）
-    cg_coin_id = asset.get("cg_coin_id")     # 来自 src_cg.coin_list（按 symbol 直查，更可靠）
+    """推断 tokenomist 的 token slug 候选列表。
+
+    tokenomist 的 URL 规则: https://tokenomist.ai/{slug}
+    slug 基本等于 CoinGecko 的 coin_id，即项目名的小写形式。
+    如: Optimism → optimism, Arbitrum → arbitrum, Uniswap → uniswap
+    """
+    name = (asset.get("name") or "").strip()
     symbol = (asset.get("symbol") or "").strip().lower()
-    name = (asset.get("name") or "").strip().lower().replace(" ", "-")
 
-    # 常见 symbol → CG slug 映射
+    slugs = []
+
+    # 1. 主候选：项目名小写 + 连字符 → 覆盖绝大多数情况
+    if name:
+        name_slug = name.lower().replace(" ", "-")
+        slugs.append(name_slug)
+
+    # 2. symbol 兜底（如 BTC→bitcoin 等特殊映射）
     slug_map = {
-        "btc": "bitcoin",
-        "eth": "ethereum",
-        "bnb": "binancecoin",
-        "sol": "solana",
-        "matic": "polygon",
+        "btc": "bitcoin", "eth": "ethereum", "bnb": "binancecoin",
+        "sol": "solana", "matic": "polygon",
     }
-    symbol_slug = slug_map.get(symbol, symbol or name)
-
-    # 优先级：CG coin_list > CG asset_source_map > symbol slug > name slug
-    if cg_coin_id:
-        slugs.append(cg_coin_id.strip().lower())
-    if cg_id and cg_id.strip().lower() not in slugs:
-        slugs.append(cg_id.strip().lower())
-    if symbol_slug not in slugs:
+    symbol_slug = slug_map.get(symbol, symbol)
+    if symbol_slug and symbol_slug not in slugs:
         slugs.append(symbol_slug)
-    if name and name not in slugs:
-        slugs.append(name)
+
+    # 3. 数据库 CG ID 作为参考（asset_source_map 可能不准，放最后）
+    cg_id = asset.get("coingecko_id")
+    if cg_id:
+        cg_slug = cg_id.strip().lower()
+        if cg_slug not in slugs:
+            slugs.append(cg_slug)
 
     return slugs
 

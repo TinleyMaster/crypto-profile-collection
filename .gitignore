@@ -71,4 +71,5 @@ debug-zeabur-pg-connect.md
 
 # 旧版本 B 阶段脚本
 05_代码与脚本/scripts/bin/phase_b_deep_doc_discovery.py
+前情提要_投研系统.md
 05_代码与脚本/scripts/bin/bootstrap_cg_assets_from_list.py

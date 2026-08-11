@@ -30,8 +30,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 
-TIMEOUT = 30  # 页面总超时（秒）
-NAV_TIMEOUT = 30  # 导航超时
+NAV_TIMEOUT = 20  # 页面导航超时（秒）
+WAIT_MS = 3000      # 页面渲染等待（毫秒）
 
 
 def _log(msg: str) -> None:
@@ -162,7 +162,7 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
                     browser.close()
                     continue
 
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(WAIT_MS)
                 _close_popups(page)
                 overview = _extract_overview(page, slug)
                 result["overview"] = overview
@@ -186,7 +186,7 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
                     browser.close()
                     return result
 
-                page.wait_for_timeout(5000)
+                page.wait_for_timeout(WAIT_MS)
                 _close_popups(page)
                 events = _extract_unlock_events(page)
                 result["unlock_events"] = events
@@ -218,17 +218,16 @@ def _close_popups(page) -> None:
     for sel in close_selectors:
         try:
             el = page.locator(sel).first
-            if el.is_visible(timeout=1000):
+            if el.is_visible(timeout=500):
                 el.click()
-                _log(f"  关闭弹窗: {sel}")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(200)
         except Exception:
             pass
 
     # 按 Escape 关闭可能的模态框
     try:
         page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(200)
     except Exception:
         pass
 

@@ -1185,7 +1185,7 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         cmd,
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=180,
         cwd=str(scripts_bin),
     )
 

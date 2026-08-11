@@ -60,8 +60,12 @@ def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None
         FROM core.asset a
         LEFT JOIN core.asset_source_map asm_cg
             ON asm_cg.asset_id = a.asset_id AND asm_cg.source_code = 'cg'
-        LEFT JOIN src_cg.coin_list cgl
-            ON UPPER(cgl.symbol) = UPPER(a.canonical_symbol)
+        LEFT JOIN LATERAL (
+            SELECT coin_id FROM src_cg.coin_list cgl
+            WHERE UPPER(cgl.symbol) = UPPER(a.canonical_symbol)
+            ORDER BY CASE WHEN LOWER(cgl.name) = LOWER(a.canonical_name) THEN 0 ELSE 1 END, cgl.coin_id
+            LIMIT 1
+        ) cgl ON TRUE
         WHERE {}
     """
     if asset_id:
@@ -95,13 +99,15 @@ def guess_slugs(asset: dict) -> list[str]:
     }
     symbol_slug = slug_map.get(symbol, symbol or name)
 
-    # 优先级：CG coin_list > CG asset_source_map > symbol slug
+    # 优先级：CG coin_list > CG asset_source_map > symbol slug > name slug
     if cg_coin_id:
         slugs.append(cg_coin_id.strip().lower())
     if cg_id and cg_id.strip().lower() not in slugs:
         slugs.append(cg_id.strip().lower())
     if symbol_slug not in slugs:
         slugs.append(symbol_slug)
+    if name and name not in slugs:
+        slugs.append(name)
 
     return slugs
 

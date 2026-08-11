@@ -2529,10 +2529,10 @@
                 // Unlock events
                 if (events.length > 0) {
                     html += '<br><strong>近期解锁事件:</strong><br>';
-                    const futureEv = events.filter(e => e.is_future).slice(0, 3);
-                    const pastEv = events.filter(e => !e.is_future).slice(0, 3);
+                    const futureEv = events.filter(e => e.is_upcoming).slice(0, 3);
+                    const pastEv = events.filter(e => !e.is_upcoming).slice(0, 3);
                     for (const e of [...futureEv, ...pastEv]) {
-                        const icon = e.is_future ? '🔜' : '✅';
+                        const icon = e.is_upcoming ? '🔜' : '✅';
                         html += icon + ' ' + e.date + ' ' + e.value_str + ' (' + e.pct + '%)<br>';
                     }
                 }

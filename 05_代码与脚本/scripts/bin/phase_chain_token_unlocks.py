@@ -12,7 +12,7 @@ import argparse
 import json
 import re
 import sys
-import time
+import traceback
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -21,6 +21,7 @@ if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
 sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 import psycopg
 import psycopg.rows
@@ -31,6 +32,11 @@ from crypto_research.db.conn import get_connection
 
 TIMEOUT = 30  # 页面总超时（秒）
 NAV_TIMEOUT = 30  # 导航超时
+
+
+def _log(msg: str) -> None:
+    """日志输出到 stderr，避免污染 stdout 的 JSON。"""
+    print(msg, file=sys.stderr, flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,8 +99,8 @@ def scrape_tokenomist(slug: str) -> dict | None:
     base_url = f"https://tokenomist.ai/{slug}"
     unlock_url = f"{base_url}/unlock-events"
 
-    print(f"  Tokenomist slug: {slug}")
-    print(f"  目标 URL: {unlock_url}")
+    _log(f"  Tokenomist slug: {slug}")
+    _log(f"  目标 URL: {unlock_url}")
 
     result = {
         "source_url": base_url,
@@ -124,13 +130,13 @@ def scrape_tokenomist(slug: str) -> dict | None:
             )
 
             # ── Step 1: 爬 Overview 页面 ──
-            print("  加载 Overview 页面...")
+            _log("  加载 Overview 页面...")
             try:
                 page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
             except PlaywrightTimeout:
-                print("  [WARN] Overview 页面加载超时，尝试用已有内容")
+                _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
             except Exception as e:
-                print(f"  [ERROR] Overview 页面导航失败: {e}")
+                _log(f"  [ERROR] Overview 页面导航失败: {e}")
                 browser.close()
                 return None
 
@@ -142,16 +148,16 @@ def scrape_tokenomist(slug: str) -> dict | None:
             # 提取 Overview 数据
             overview = _extract_overview(page, slug)
             result["overview"] = overview
-            print(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
+            _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
 
             # ── Step 2: 爬 Unlock Events 页面 ──
-            print("  加载 Unlock Events 页面...")
+            _log("  加载 Unlock Events 页面...")
             try:
                 page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
             except PlaywrightTimeout:
-                print("  [WARN] Unlock Events 页面加载超时")
+                _log("  [WARN] Unlock Events 页面加载超时")
             except Exception as e:
-                print(f"  [WARN] Unlock Events 页面导航失败: {e}")
+                _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
                 browser.close()
                 return result
 
@@ -163,14 +169,13 @@ def scrape_tokenomist(slug: str) -> dict | None:
             # 提取解锁事件表
             events = _extract_unlock_events(page)
             result["unlock_events"] = events
-            print(f"  Unlock Events: {len(events)} 条")
+            _log(f"  Unlock Events: {len(events)} 条")
 
             browser.close()
 
     except Exception as e:
-        print(f"  [ERROR] 页面爬取失败: {e}")
-        import traceback
-        traceback.print_exc()
+        _log(f"  [ERROR] 页面爬取失败: {e}")
+        _log(traceback.format_exc())
         return None
 
     return result
@@ -193,7 +198,7 @@ def _close_popups(page) -> None:
             el = page.locator(sel).first
             if el.is_visible(timeout=1000):
                 el.click()
-                print(f"  关闭弹窗: {sel}")
+                _log(f"  关闭弹窗: {sel}")
                 page.wait_for_timeout(500)
         except Exception:
             pass
@@ -294,36 +299,36 @@ def _extract_unlock_events(page) -> list[dict]:
     # inner_text() 把表格拆成多行，需要按 5 字段一组重组成行
     # 模式：每行 = Date / Value / Release% / Allocation / Release(状态)
     lines = [l.strip() for l in all_text.split("\n") if l.strip()]
-    
+
     # 找到表格起始位置（"Notable Cliff Release Events" 之后）
     start_idx = -1
     for i, line in enumerate(lines):
         if "release events" in line.lower() or "all event" in line.lower():
             start_idx = i
             break
-    
+
     # 从表格数据开始，每 5 个非空行组成一条记录
     i = start_idx + 1 if start_idx >= 0 else 0
     seen_dates = set()
-    
+
     while i + 4 < len(lines):
         date_str = lines[i]
         value_str = lines[i + 1]
         pct_str = lines[i + 2]
         alloc_str = lines[i + 3]
         status_str = lines[i + 4]
-        
+
         # 验证日期格式：如 "16 Aug 2026"
         date_match = re.match(r'^\d{1,2}\s+\w{3}\s+\d{4}$', date_str)
         value_match = re.match(r'^\$([\d.]+)([BMK]?)$', value_str)
         pct_match = re.match(r'^\+?([\d.]+)%$', pct_str)
-        
+
         if date_match and value_match:
             if date_str in seen_dates:
                 i += 5
                 continue
             seen_dates.add(date_str)
-            
+
             value_num = float(value_match.group(1))
             unit = value_match.group(2)
             if unit == "B":
@@ -332,17 +337,17 @@ def _extract_unlock_events(page) -> list[dict]:
                 value_num *= 1_000_000
             elif unit == "K":
                 value_num *= 1_000
-            
+
             pct = float(pct_match.group(1)) if pct_match else 0.0
-            
+
             # 解析分配数量
             alloc_count = 1
             m2 = re.match(r'(\d+)\s+Allocation[s]?', alloc_str)
             if m2:
                 alloc_count = int(m2.group(1))
-            
+
             is_upcoming = "left" in status_str.lower()
-            
+
             events.append({
                 "date": date_str,
                 "value_usd": round(value_num, 2),
@@ -355,13 +360,13 @@ def _extract_unlock_events(page) -> list[dict]:
             i += 5
         else:
             i += 1
-    
+
     # 排序
     from datetime import datetime
     def parse_dt(s):
         try: return datetime.strptime(s, "%d %b %Y")
         except: return datetime(2000, 1, 1)
-    
+
     upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: parse_dt(e["date"]))
     past = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: parse_dt(e["date"]), reverse=True)
     return upcoming + past
@@ -426,12 +431,22 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "unlock_events_json": json_mod.dumps(data.get("unlock_events", []), ensure_ascii=False),
         })
     conn.commit()
-    print(f"  已写入数据库 (asset_id={asset_id})")
+    _log(f"  已写入数据库 (asset_id={asset_id})")
 
 
 # ── 主流程 ─────────────────────────────────────────────────
 
 def main() -> int:
+    try:
+        return _main()
+    except Exception as e:
+        _log(f"[FATAL] {e}")
+        _log(traceback.format_exc())
+        print(json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False))
+        return 2
+
+
+def _main() -> int:
     args = build_parser().parse_args()
 
     settings = get_settings(require_database=True)
@@ -446,8 +461,8 @@ def main() -> int:
         asset_id = asset["asset_id"]
         slug = guess_slug(asset)
 
-        print(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
-        print(f"Tokenomist slug: {slug}")
+        _log(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
+        _log(f"Tokenomist slug: {slug}")
 
         # 爬取
         data = scrape_tokenomist(slug)
@@ -466,7 +481,7 @@ def main() -> int:
             ensure_table(conn)
             save_to_db(conn, asset_id, data)
 
-        # JSON 输出
+        # JSON 输出到 stdout
         output = {k: v for k, v in data.items() if k not in ("status",)}
         print(json.dumps({"status": "ok", **output}, ensure_ascii=False, default=str))
         return 0

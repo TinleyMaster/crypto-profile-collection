@@ -1048,6 +1048,12 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
     )
 
     output = result.stdout.strip()
+    stderr_output = result.stderr.strip() if result.stderr else ""
+
+    if result.returncode != 0:
+        err_msg = stderr_output or output or f"exit code {result.returncode}"
+        return {"ok": False, "error": err_msg[:500]}
+
     if not output:
         return {"ok": False, "error": "无输出"}
 
@@ -1055,6 +1061,6 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         data = json.loads(output)
         if data.get("status") == "ok":
             return {"ok": True, "data": data}
-        return {"ok": False, "error": data.get("message", "查询失败")}
+        return {"ok": False, "error": str(data.get("message", "查询失败"))}
     except json.JSONDecodeError:
-        return {"ok": False, "error": output[:200]}
+        return {"ok": False, "error": (stderr_output or output)[:500]}

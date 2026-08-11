@@ -142,6 +142,15 @@ def main():
                         help="以 JSON 格式输出（默认）")
     args = parser.parse_args()
 
+    try:
+        _run(args)
+    except Exception as e:
+        print(json.dumps({"status": "error", "message": str(e)[:500]}))
+        sys.exit(1)
+
+
+def _run(args):
+
     settings = get_settings(require_database=True)
     t0 = time.time()
 
@@ -199,6 +208,7 @@ def main():
                 return
 
         # 缓存未命中，实时拉取
+        holder_fetched = False
         for asset in assets:
             chain = asset["chain"]
             client = get_client(chain)
@@ -207,14 +217,18 @@ def main():
 
             contract_address = asset["contract_address"]
 
-            # 持仓快照
+            # 持仓快照（需要 Etherscan Pro 订阅）
             snapshot = fetch_holder_snapshot(conn, client, asset, chain)
             if snapshot:
                 result["chains"][chain] = snapshot
+                holder_fetched = True
 
             # 大额转账
             transfers = fetch_transfers(client, contract_address)
             result["transfers"].extend(transfers)
+
+        if not holder_fetched and result["transfers"]:
+            result["_note"] = "持仓数据需要 Etherscan Pro 订阅，仅返回了大额转账记录"
 
         result["elapsed_ms"] = int((time.time() - t0) * 1000)
         print(json.dumps(result, ensure_ascii=False, default=str))

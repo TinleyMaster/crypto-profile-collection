@@ -5,6 +5,7 @@ Etherscan / BSCScan API 客户端。
 
 from __future__ import annotations
 
+import sys
 import time
 import json
 import urllib.request
@@ -80,7 +81,11 @@ class EtherscanClient:
     # ── Token 相关 ──
 
     def get_token_holders(self, contract_address: str, page: int = 1, offset: int = 100) -> list[dict]:
-        """获取代币持有者列表（按持仓量降序）。"""
+        """获取代币持有者列表（按持仓量降序）。
+        
+        注意：tokenholderlist 接口需要 Etherscan Pro 订阅，免费 API Key 不支持。
+        调用失败时返回空列表，上层应降级处理。
+        """
         data = self._call({
             "module": "token",
             "action": "tokenholderlist",
@@ -91,6 +96,9 @@ class EtherscanClient:
         result = data.get("result", [])
         if isinstance(result, list):
             return result
+        # 免费 API Key 不支持 tokenholderlist，返回空列表
+        if isinstance(result, str) and result:
+            print(f"  [WARN] tokenholderlist API 不可用（需要 Pro 订阅）: {result[:100]}", file=sys.stderr)
         return []
 
     def get_token_holder_count(self, contract_address: str) -> int:

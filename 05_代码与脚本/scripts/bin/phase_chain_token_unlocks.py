@@ -311,53 +311,118 @@ def _extract_allocation(page) -> list[dict]:
 
 def _extract_unlock_events(page) -> list[dict]:
     """从 Unlock Events 页面提取事件列表。
-    
-    tokenomist 的 innerText 输出格式：单元格独占一行，用 \\t 行分隔。
-    例:
-      Date
-      \\t
-      Value
-      \\t
-      Release %
-      \\t
-      Allocation
-      \\t
-      Release
-      
-      11 Oct 2026
-      \\t
-      $408.49K
-      ...
+    优先用 JS 直接解析 DOM 表格（可靠），失败回退到 innerText。
     """
+    events = []
+
+    # 方法 1：JS 提取 DOM 表格
+    try:
+        rows_data = page.evaluate("""
+            () => {
+                const tables = document.querySelectorAll('table');
+                for (const table of tables) {
+                    const headers = Array.from(table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td'));
+                    const headerTexts = headers.map(h => h.textContent.trim().toLowerCase());
+                    if (headerTexts.some(h => h === 'date') && headerTexts.some(h => h === 'value')) {
+                        const rows = [];
+                        const tbody = table.querySelector('tbody') || table;
+                        const trs = tbody.querySelectorAll('tr');
+                        for (const tr of trs) {
+                            const tds = tr.querySelectorAll('td');
+                            if (tds.length < 5) continue;
+                            const date = tds[0].textContent.trim();
+                            if (!/\\d{1,2}\\s+\\w{3}\\s+\\d{4}/.test(date)) continue;
+                            rows.push({
+                                date: date,
+                                value: tds[1].textContent.trim(),
+                                pct: tds[2].textContent.trim(),
+                                allocation: tds[3].textContent.trim(),
+                                status: tds[4].textContent.trim(),
+                            });
+                        }
+                        return rows;
+                    }
+                }
+                return [];
+            }
+        """)
+        _log(f"  JS 提取表格: {len(rows_data)} 行")
+    except Exception as e:
+        _log(f"  JS 提取失败: {e}, 回退到文本解析")
+        rows_data = None
+
+    if rows_data is not None:
+        seen_dates = set()
+        for row in rows_data:
+            date_str = row["date"]
+            if date_str in seen_dates:
+                continue
+            seen_dates.add(date_str)
+
+            value_str = row["value"]
+            pct_str = row["pct"]
+            status_str = row.get("status", "")
+            alloc_str = row.get("allocation", "")
+
+            value_match = re.match(r'^\$([\d.]+)([BMK]?)', value_str)
+            if not value_match:
+                continue
+
+            value_num = float(value_match.group(1))
+            unit = value_match.group(2)
+            if unit == "B": value_num *= 1_000_000_000
+            elif unit == "M": value_num *= 1_000_000
+            elif unit == "K": value_num *= 1_000
+
+            pct_match = re.match(r'^\+?([\d.]+)%$', pct_str)
+            pct = float(pct_match.group(1)) if pct_match else 0.0
+
+            alloc_count = 1
+            m2 = re.match(r'(\d+)\s+Allocation[s]?', alloc_str)
+            if m2: alloc_count = int(m2.group(1))
+
+            is_upcoming = "left" in status_str.lower()
+
+            events.append({
+                "date": date_str, "value_usd": round(value_num, 2),
+                "value_str": value_str, "pct": pct,
+                "allocations": alloc_count, "status": status_str,
+                "is_upcoming": is_upcoming,
+            })
+
+    # 方法 2：innerText 回退
+    if not events:
+        events = _extract_unlock_events_text(page)
+
+    from datetime import datetime
+    def parse_dt(s):
+        try: return datetime.strptime(s, "%d %b %Y")
+        except: return datetime(2000, 1, 1)
+
+    upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: parse_dt(e["date"]))
+    past = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: parse_dt(e["date"]), reverse=True)
+    return upcoming + past
+
+
+def _extract_unlock_events_text(page) -> list[dict]:
+    """innerText 文本解析（回退方案）。"""
     events = []
     try:
         all_text = page.locator("body").inner_text(timeout=5000)
     except Exception:
-        all_text = ""
+        return events
 
-    # 过滤：去掉空行和纯 tab 行，保留有效内容
     raw_lines = all_text.split("\n")
-    content_lines = []
-    for line in raw_lines:
-        stripped = line.strip()
-        if not stripped or stripped == "\t":
-            continue
-        content_lines.append(stripped)
+    content_lines = [l.strip() for l in raw_lines if l.strip() and l.strip() != "\t"]
 
-    # 找表头位置（"Date" + "Value" 连续出现）
     header_idx = -1
     for i in range(len(content_lines) - 4):
-        if (content_lines[i].lower() == "date"
-                and content_lines[i + 1].lower() == "value"):
+        if content_lines[i].lower() == "date" and content_lines[i + 1].lower() == "value":
             header_idx = i
             break
-
     if header_idx < 0:
-        _log("  [WARN] 未找到解锁事件表头，尝试全文匹配")
-        header_idx = 0
+        return events
 
-    # 表头 5 列: Date, Value, Release %, Allocation, Release
-    # 数据从 header_idx + 5 开始
     data_start = header_idx + 5
     date_re = re.compile(r'^\d{1,2}\s+\w{3}\s+\d{4}$')
     value_re = re.compile(r'^\$([\d.]+)([BMK]?)$')
@@ -367,58 +432,32 @@ def _extract_unlock_events(page) -> list[dict]:
     while i + 4 < len(content_lines):
         date_str = content_lines[i]
         value_str = content_lines[i + 1]
-        pct_str = content_lines[i + 2]
-        alloc_str = content_lines[i + 3]
-        status_str = content_lines[i + 4]
-
-        date_match = date_re.match(date_str)
-        value_match = value_re.match(value_str) if value_str else None
-
-        if date_match and value_match:
+        if date_re.match(date_str) and value_re.match(value_str):
             if date_str not in seen_dates:
                 seen_dates.add(date_str)
+                vm = value_re.match(value_str)
+                vn = float(vm.group(1))
+                u = vm.group(2)
+                if u == "B": vn *= 1_000_000_000
+                elif u == "M": vn *= 1_000_000
+                elif u == "K": vn *= 1_000
 
-                value_num = float(value_match.group(1))
-                unit = value_match.group(2)
-                if unit == "B":
-                    value_num *= 1_000_000_000
-                elif unit == "M":
-                    value_num *= 1_000_000
-                elif unit == "K":
-                    value_num *= 1_000
+                pm = re.match(r'^\+?([\d.]+)%$', content_lines[i + 2])
+                pct = float(pm.group(1)) if pm else 0.0
 
-                pct_match = re.match(r'^\+?([\d.]+)%$', pct_str)
-                pct = float(pct_match.group(1)) if pct_match else 0.0
-
-                alloc_count = 1
-                m2 = re.match(r'(\d+)\s+Allocation[s]?', alloc_str)
-                if m2:
-                    alloc_count = int(m2.group(1))
-
-                is_upcoming = "left" in status_str.lower()
+                ac = 1
+                am = re.match(r'(\d+)\s+Allocation[s]?', content_lines[i + 3])
+                if am: ac = int(am.group(1))
 
                 events.append({
-                    "date": date_str,
-                    "value_usd": round(value_num, 2),
-                    "value_str": value_str,
-                    "pct": pct,
-                    "allocations": alloc_count,
-                    "status": status_str,
-                    "is_upcoming": is_upcoming,
+                    "date": date_str, "value_usd": round(vn, 2), "value_str": value_str,
+                    "pct": pct, "allocations": ac, "status": content_lines[i + 4],
+                    "is_upcoming": "left" in content_lines[i + 4].lower(),
                 })
             i += 5
         else:
             i += 1
-
-    # 排序：upcoming 按日期升序在前，past 按日期降序在后
-    from datetime import datetime
-    def parse_dt(s):
-        try: return datetime.strptime(s, "%d %b %Y")
-        except: return datetime(2000, 1, 1)
-
-    upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: parse_dt(e["date"]))
-    past = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: parse_dt(e["date"]), reverse=True)
-    return upcoming + past
+    return events
 
 
 # ── 存入数据库 ─────────────────────────────────────────────

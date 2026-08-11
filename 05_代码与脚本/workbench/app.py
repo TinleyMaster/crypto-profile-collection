@@ -69,6 +69,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "cmc_ingest_map": {
+        "name": "CMC 拉取全量币种列表",
+        "description": "从 CMC API 拉取全量币种列表（listing/map），写入 src_cmc.cmc_asset_map。这是所有 CMC 后续步骤的前置步骤",
+        "script": "ingest_cmc_map.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "cmc_ingest_info": {
         "name": "CMC 拉取币种详情",
         "description": "从 CoinMarketCap 拉取 asset_info（urls/描述/标签等），写入 src_cmc.cmc_asset_info",

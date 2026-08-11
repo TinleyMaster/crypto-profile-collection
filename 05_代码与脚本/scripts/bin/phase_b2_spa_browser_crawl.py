@@ -143,88 +143,64 @@ def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
 
 
 def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> dict:
-    """并发爬取一批 SPA 页面（同步版，用 ThreadPoolExecutor 并发）。"""
-    import threading
-    from playwright.sync_api import sync_playwright
+    """爬取一批 SPA 页面（串行，Playwright sync API 绑定创建线程）。"""
 
     stats = {"done": 0, "failed": 0, "discovered": 0, "empty": 0, "skipped": 0}
     db_rows: list[tuple] = []
     done_ids: list[int] = []
     failed_ids: list[int] = []
 
-    # 浏览器启动（线程池控制超时）
-    headless_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    launch_future = headless_executor.submit(
-        lambda: sync_playwright().start().chromium.launch(
+    # 浏览器启动（run_batch 本身就在 ThreadPoolExecutor 里，外部有总超时 BATCH_TIMEOUT）
+    from playwright.sync_api import sync_playwright
+
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
-    )
-    try:
-        browser = launch_future.result(timeout=BROWSER_LAUNCH_TIMEOUT)
-    except concurrent.futures.TimeoutError:
-        print(f"  [ERROR] 浏览器启动超时（{BROWSER_LAUNCH_TIMEOUT}s），请检查 Playwright/Chromium 安装")
-        headless_executor.shutdown(wait=False)
-        return {"stats": stats, "db_rows": [], "done_ids": [], "failed_ids": [e["entry_id"] for e in entries]}
     except Exception as e:
         print(f"  [ERROR] 浏览器启动失败: {e}")
-        headless_executor.shutdown(wait=False)
         return {"stats": stats, "db_rows": [], "done_ids": [], "failed_ids": [e["entry_id"] for e in entries]}
-    headless_executor.shutdown(wait=False)
 
     print(f"  Chromium 已启动，开始爬取 {len(entries)} 个 SPA 页面...")
 
-    # 用线程池并发爬取
-    lock = threading.Lock()
-    processed_count = [0]
-
-    def process(entry):
+    # 串行爬取（Playwright sync API 的 browser 对象绑定创建线程，不能跨线程）
+    for i, entry in enumerate(entries):
         result = crawl_one_spa(browser, entry, same_domain_only)
-        with lock:
-            processed_count[0] += 1
-            idx = processed_count[0]
+        idx = i + 1
         
         if result["status"] == "skipped":
-            with lock:
-                stats["skipped"] += 1
-                done_ids.append(result["entry_id"])
+            stats["skipped"] += 1
+            done_ids.append(result["entry_id"])
             print(f"  [{idx}/{len(entries)}] SKIP  {result['url'][:80]}  {result.get('reason','')}")
         elif result["status"] == "ok":
-            with lock:
-                stats["done"] += 1
-                done_ids.append(result["entry_id"])
-                doc_links = result["doc_links"]
-                if doc_links:
-                    stats["discovered"] += len(doc_links)
-                    for link_url, link_type in doc_links:
-                        db_rows.append((
-                            result["entity_type"],
-                            result["asset_id"],
-                            result["protocol_id"],
-                            result["source_code"],
-                            link_type if link_type in VALID_ENTRY_TYPES else "other",
-                            link_url,
-                            f"spa_browser_crawl:{result['url'][:43]}",
-                            False,
-                        ))
-                else:
-                    stats["empty"] += 1
+            stats["done"] += 1
+            done_ids.append(result["entry_id"])
+            doc_links = result["doc_links"]
+            if doc_links:
+                stats["discovered"] += len(doc_links)
+                for link_url, link_type in doc_links:
+                    db_rows.append((
+                        result["entity_type"],
+                        result["asset_id"],
+                        result["protocol_id"],
+                        result["source_code"],
+                        link_type if link_type in VALID_ENTRY_TYPES else "other",
+                        link_url,
+                        f"spa_browser_crawl:{result['url'][:43]}",
+                        False,
+                    ))
+            else:
+                stats["empty"] += 1
             print(f"  [{idx}/{len(entries)}] OK  {result['url'][:80]}  +{len(result['doc_links'])} links")
         else:
-            with lock:
-                stats["failed"] += 1
-                failed_ids.append(result["entry_id"])
+            stats["failed"] += 1
+            failed_ids.append(result["entry_id"])
             print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as crawl_executor:
-        futures = [crawl_executor.submit(process, e) for e in entries]
-        for f in concurrent.futures.as_completed(futures):
-            try:
-                f.result()
-            except Exception as exc:
-                print(f"  [ERROR] 线程异常: {exc}")
-
     browser.close()
+    playwright.stop()
 
     return {"stats": stats, "db_rows": db_rows, "done_ids": done_ids, "failed_ids": failed_ids}
 

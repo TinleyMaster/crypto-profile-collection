@@ -244,6 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    print(f"[SPA crawl] 启动, limit={args.limit}, concurrency={args.concurrency}", flush=True)
 
     import psycopg
     from crypto_research.config import get_settings

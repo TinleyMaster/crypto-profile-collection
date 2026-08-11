@@ -48,6 +48,7 @@ def run_with_streaming(cmd: list[str], cwd: str, timeout: int) -> tuple[int, str
 
     def read_stderr():
         for line in iter(proc.stderr.readline, ""):
+            print(line, end="", file=sys.stderr)
             stderr_lines.append(line)
 
     t_out = threading.Thread(target=read_stdout, daemon=True)
@@ -60,8 +61,11 @@ def run_with_streaming(cmd: list[str], cwd: str, timeout: int) -> tuple[int, str
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+        err_text = "".join(stderr_lines)
         print(f"\n本轮超时（{timeout // 60}分钟），跳过继续。")
-        return -1, "".join(stdout_lines), "".join(stderr_lines)
+        if err_text:
+            print(f"stderr: {err_text[:1000]}")
+        return -1, "".join(stdout_lines), err_text
 
     t_out.join(timeout=5)
     t_err.join(timeout=5)

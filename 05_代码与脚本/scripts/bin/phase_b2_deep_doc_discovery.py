@@ -504,8 +504,12 @@ def extract_doc_links(
         link_text_is_doc = _has_doc_keyword(link_text)
 
         if not require_doc_keyword:
-            # 放宽模式：收录所有同域链接（用于单资产重爬）
+            # 放宽模式：收录所有同域链接 + 跨域文档关键词链接（用于单资产重爬）
+            # 同域链接全收录（/about, /team, /roadmap 等投研页面）
             if link_domain == base_domain:
+                should_record = True
+            # 跨域链接也检查 doc 关键词（审计报告、白皮书等外部链接）
+            elif _has_doc_keyword(absolute_url) or link_text_is_doc:
                 should_record = True
         elif link_domain in NOISY_DOC_DOMAINS:
             if _doc_keyword_in_path_only(absolute_url) or link_text_is_doc:

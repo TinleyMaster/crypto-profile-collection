@@ -15,7 +15,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 20
 MAX_ROUNDS = 100
 BROWSER_CONCURRENCY = 4
-TIMEOUT = 300  # 5 分钟（子进程内部已有 BATCH_TIMEOUT=300）
+TIMEOUT = 120  # 2 分钟（子进程 DB 查询 30s + Playwright 爬取 90s）
 
 env = os.environ.copy()
 env["PYTHONIOENCODING"] = "utf-8"
@@ -23,7 +23,7 @@ env["PYTHONIOENCODING"] = "utf-8"
 total_entries = 0
 total_discovered = 0
 consecutive_timeouts = 0
-MAX_CONSECUTIVE_TIMEOUTS = 3
+MAX_CONSECUTIVE_TIMEOUTS = 2
 
 
 def run_with_streaming(cmd: list[str], cwd: str, timeout: int) -> tuple[int, str, str]:

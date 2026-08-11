@@ -267,21 +267,31 @@ def main() -> int:
         asset_filter = " AND dse.asset_id = %s"
         asset_params = [args.asset_id]
     with get_connection(settings.database_url) as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                f"""
-                SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id,
-                       dse.source_code, dse.entry_type, dse.entry_url,
-                       a.canonical_symbol, a.canonical_name
-                FROM biz.doc_source_entry dse
-                LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
-                WHERE dse.needs_browser = TRUE{asset_filter}
-                ORDER BY dse.entry_id
-                LIMIT %s
-                """,
-                asset_params + [args.limit],
-            )
-            entries = [dict(row) for row in cur.fetchall()]
+        print("[SPA crawl] DB 已连接, 查询 SPA 页面...", flush=True)
+        try:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("SET statement_timeout = '30s'")
+                cur.execute(
+                    f"""
+                    SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id,
+                           dse.source_code, dse.entry_type, dse.entry_url,
+                           a.canonical_symbol, a.canonical_name
+                    FROM biz.doc_source_entry dse
+                    LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
+                    WHERE dse.needs_browser = TRUE{asset_filter}
+                    ORDER BY dse.entry_id
+                    LIMIT %s
+                    """,
+                    asset_params + [args.limit],
+                )
+                entries = [dict(row) for row in cur.fetchall()]
+        except Exception as e:
+            print(f"[SPA crawl] DB 查询失败: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return 2
+
+    print(f"[SPA crawl] 查询完成: {len(entries)} 条 SPA 页面", flush=True)
 
     if not entries:
         print(json.dumps({"status": "no_candidates"}, ensure_ascii=False))

@@ -243,7 +243,7 @@ TASK_DEFS = {
         "default_args": [],
         "category": "投研分析",
         "requires_asset_id": True,
-        "arg_label": "asset_id",
+        "arg_label": "asset-id",
         "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
     },
 

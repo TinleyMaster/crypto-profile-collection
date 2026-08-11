@@ -15,13 +15,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 20
 MAX_ROUNDS = 100
 BROWSER_CONCURRENCY = 4
-TIMEOUT = 900  # 15 分钟
+TIMEOUT = 300  # 5 分钟（子进程内部已有 BATCH_TIMEOUT=300）
 
 env = os.environ.copy()
 env["PYTHONIOENCODING"] = "utf-8"
 
 total_entries = 0
 total_discovered = 0
+consecutive_timeouts = 0
+MAX_CONSECUTIVE_TIMEOUTS = 3
 
 
 def run_with_streaming(cmd: list[str], cwd: str, timeout: int) -> tuple[int, str, str]:
@@ -87,7 +89,15 @@ for round_num in range(1, MAX_ROUNDS + 1):
     )
 
     if returncode == -1:  # 超时
+        consecutive_timeouts += 1
+        print(f"本轮超时（{TIMEOUT // 60}分钟），连续超时: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
+        if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+            print(f"连续超时 {MAX_CONSECUTIVE_TIMEOUTS} 次，自动停止。")
+            break
         continue
+
+    # 成功一轮则重置超时计数
+    consecutive_timeouts = 0
 
     if returncode != 0:
         print(f"Script exited with code {returncode}, stopping.")

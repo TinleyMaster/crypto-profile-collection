@@ -155,7 +155,11 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
     async with async_playwright() as p:
         try:
             browser = await asyncio.wait_for(
-                p.chromium.launch(headless=True),
+                p.chromium.launch(headless=True, args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ]),
                 timeout=BROWSER_LAUNCH_TIMEOUT,
             )
         except asyncio.TimeoutError:

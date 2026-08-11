@@ -269,6 +269,14 @@ def main() -> int:
     with get_connection(settings.database_url) as conn:
         print("[SPA crawl] DB 已连接, 查询 SPA 页面...", flush=True)
         try:
+            with conn.cursor() as cur:
+                # 确保 needs_browser 索引存在（partial index，极快）
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_dse_needs_browser
+                    ON biz.doc_source_entry (entry_id)
+                    WHERE needs_browser = TRUE
+                """)
+            conn.commit()
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("SET statement_timeout = '30s'")
                 cur.execute(

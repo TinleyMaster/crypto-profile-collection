@@ -2569,7 +2569,7 @@
         async function reCrawlAsset () {
             if (!selectedAssetId) return;
             const btn = document.getElementById('recrawl-btn');
-            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：重置状态 → B2深度爬取 → B3 SPA爬取\n预计耗时 1-3 分钟，请耐心等待。')) return;
+            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：B2→B3→B2→... 循环直到收敛\n最多 3 轮，预计耗时 2-5 分钟，请耐心等待。')) return;
 
             btn.disabled = true;
             btn.textContent = '⏳ 爬取中...';
@@ -2583,8 +2583,12 @@
 
                 const d = data.data;
                 let msg = `已重置 ${d.reset.affected} 条入口。\n`;
-                msg += `B2 深度爬取: ${d.b2.ok ? '完成' : '失败'}\n`;
-                msg += `B3 SPA 爬取: ${d.b3.ok ? '完成' : '失败'}\n`;
+                msg += `共执行 ${d.total_rounds} 轮：\n`;
+                for (const r of d.rounds) {
+                    const b2 = r.b2;
+                    const b3 = r.b3;
+                    msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
+                }
                 msg += '\n请刷新资料面板查看新链接。';
                 alert(msg);
 

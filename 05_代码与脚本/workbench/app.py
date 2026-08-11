@@ -459,7 +459,7 @@ def api_reset_deep_crawl(asset_id: int):
 
 @app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
 def api_re_crawl_full(asset_id: int):
-    """完整重新爬取：重置 → B2深度爬取 → B3 SPA爬取（链式执行）。"""
+    """完整重新爬取：重置 → B2→B3→B2→B3→... 循环直到收敛。"""
     try:
         # 1. 重置 deep_crawled_at
         reset_result = _get_db_stats().reset_deep_crawl(asset_id)
@@ -467,30 +467,57 @@ def api_re_crawl_full(asset_id: int):
         b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
         b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
 
-        # 2. 运行 B2 深度爬取（等待完成）
-        b2_result = subprocess.run(
-            [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
-             "--limit", "100", "--workers", "10"],
-            cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=600,
-        )
-        b2_ok = b2_result.returncode == 0
-        b2_output = b2_result.stdout[-2000:] if b2_result.stdout else ""
+        rounds = []
+        MAX_ROUNDS = 3
+        total_timeout = 900  # 15 分钟总超时
 
-        # 3. 运行 B3 SPA 爬取（等待完成）
-        b3_result = subprocess.run(
-            [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
-             "--limit", "20", "--concurrency", "4"],
-            cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=300,
-        )
-        b3_ok = b3_result.returncode == 0
-        b3_output = b3_result.stdout[-2000:] if b3_result.stdout else ""
+        for round_num in range(1, MAX_ROUNDS + 1):
+            # 2. 运行 B2 深度爬取
+            b2_result = subprocess.run(
+                [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
+                 "--limit", "100", "--workers", "10"],
+                cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(600, total_timeout),
+            )
+            b2_ok = b2_result.returncode == 0
+            b2_output = b2_result.stdout[-1000:] if b2_result.stdout else ""
+
+            # 检测 B2 是否发现了新链接（从输出中解析 +XXX docs）
+            new_docs = 0
+            for line in b2_output.split("\n"):
+                if "+" in line and "docs" in line:
+                    try:
+                        parts = line.split("+")[1].split("docs")[0].strip()
+                        new_docs = int(parts)
+                    except ValueError:
+                        pass
+
+            rounds.append({
+                "round": round_num,
+                "b2": {"ok": b2_ok, "new_docs": new_docs, "output": b2_output},
+                "b3": None,
+            })
+
+            # 3. 运行 B3 SPA 爬取
+            b3_result = subprocess.run(
+                [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
+                 "--limit", "20", "--concurrency", "4"],
+                cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(300, total_timeout),
+            )
+            b3_ok = b3_result.returncode == 0
+            b3_output = b3_result.stdout[-1000:] if b3_result.stdout else ""
+
+            rounds[-1]["b3"] = {"ok": b3_ok, "output": b3_output}
+
+            # 收敛判断：B2 没发现新链接，且 B3 也没发现新链接 → 停止
+            if new_docs == 0 and "+0 links" in b3_output:
+                break
 
         return jsonify({
             "ok": True,
             "data": {
                 "reset": reset_result,
-                "b2": {"ok": b2_ok, "output": b2_output},
-                "b3": {"ok": b3_ok, "output": b3_output},
+                "rounds": rounds,
+                "total_rounds": len(rounds),
             },
         })
     except subprocess.TimeoutExpired as e:

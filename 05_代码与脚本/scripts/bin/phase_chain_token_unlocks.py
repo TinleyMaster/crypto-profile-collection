@@ -289,79 +289,92 @@ def _extract_allocation(page) -> list[dict]:
 
 
 def _extract_unlock_events(page) -> list[dict]:
-    """从 Unlock Events 页面提取事件列表。"""
+    """从 Unlock Events 页面提取事件列表。
+    
+    innerText 规范中，表格行内单元格用 \\t 分隔，行间用 \\n 分隔。
+    如: "11 Oct 2026\\t$408.49K\\t+0.21%\\tSeed Fund\\t2 months left"
+    """
     events = []
     try:
         all_text = page.locator("body").inner_text(timeout=5000)
     except Exception:
         all_text = ""
 
-    # inner_text() 把表格拆成多行，需要按 5 字段一组重组成行
-    # 模式：每行 = Date / Value / Release% / Allocation / Release(状态)
-    lines = [l.strip() for l in all_text.split("\n") if l.strip()]
-
-    # 找到表格起始位置（"Notable Cliff Release Events" 之后）
-    start_idx = -1
-    for i, line in enumerate(lines):
-        if "release events" in line.lower() or "all event" in line.lower():
-            start_idx = i
-            break
-
-    # 从表格数据开始，每 5 个非空行组成一条记录
-    i = start_idx + 1 if start_idx >= 0 else 0
+    lines = all_text.split("\n")
     seen_dates = set()
+    date_re = re.compile(r'^\d{1,2}\s+\w{3}\s+\d{4}$')
+    value_re = re.compile(r'^\$([\d.]+)([BMK]?)$')
 
-    while i + 4 < len(lines):
-        date_str = lines[i]
-        value_str = lines[i + 1]
-        pct_str = lines[i + 2]
-        alloc_str = lines[i + 3]
-        status_str = lines[i + 4]
+    # 找到表头行（含 "Date" + "Value" 列），从下一行开始解析
+    in_table = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
 
-        # 验证日期格式：如 "16 Aug 2026"
-        date_match = re.match(r'^\d{1,2}\s+\w{3}\s+\d{4}$', date_str)
-        value_match = re.match(r'^\$([\d.]+)([BMK]?)$', value_str)
-        pct_match = re.match(r'^\+?([\d.]+)%$', pct_str)
+        # 检测表头
+        if not in_table and "date" in line.lower() and "value" in line.lower():
+            in_table = True
+            continue
 
-        if date_match and value_match:
-            if date_str in seen_dates:
-                i += 5
+        if not in_table:
+            # 尝试用 "All Event" 标签页作为备选入口
+            if "all event" in line.lower():
+                in_table = True
                 continue
-            seen_dates.add(date_str)
+            continue
 
-            value_num = float(value_match.group(1))
-            unit = value_match.group(2)
-            if unit == "B":
-                value_num *= 1_000_000_000
-            elif unit == "M":
-                value_num *= 1_000_000
-            elif unit == "K":
-                value_num *= 1_000
+        # 按 tab 拆分单元格: Date / Value / Release% / Allocation / Release
+        cells = [c.strip() for c in line.split("\t")]
+        if len(cells) < 3:
+            continue
 
-            pct = float(pct_match.group(1)) if pct_match else 0.0
+        date_str = cells[0]
+        value_str = cells[1] if len(cells) > 1 else ""
+        pct_str = cells[2] if len(cells) > 2 else ""
+        alloc_str = cells[3] if len(cells) > 3 else ""
+        status_str = cells[4] if len(cells) > 4 else ""
 
-            # 解析分配数量
-            alloc_count = 1
-            m2 = re.match(r'(\d+)\s+Allocation[s]?', alloc_str)
-            if m2:
-                alloc_count = int(m2.group(1))
+        date_match = date_re.match(date_str)
+        value_match = value_re.match(value_str) if value_str else None
+        pct_match = re.match(r'^\+?([\d.]+)%$', pct_str) if pct_str else None
 
-            is_upcoming = "left" in status_str.lower()
+        if not (date_match and value_match):
+            continue
 
-            events.append({
-                "date": date_str,
-                "value_usd": round(value_num, 2),
-                "value_str": value_str,
-                "pct": pct,
-                "allocations": alloc_count,
-                "status": status_str,
-                "is_upcoming": is_upcoming,
-            })
-            i += 5
-        else:
-            i += 1
+        if date_str in seen_dates:
+            continue
+        seen_dates.add(date_str)
 
-    # 排序
+        value_num = float(value_match.group(1))
+        unit = value_match.group(2)
+        if unit == "B":
+            value_num *= 1_000_000_000
+        elif unit == "M":
+            value_num *= 1_000_000
+        elif unit == "K":
+            value_num *= 1_000
+
+        pct = float(pct_match.group(1)) if pct_match else 0.0
+
+        alloc_count = 1
+        m2 = re.match(r'(\d+)\s+Allocation[s]?', alloc_str)
+        if m2:
+            alloc_count = int(m2.group(1))
+
+        is_upcoming = "left" in status_str.lower()
+
+        events.append({
+            "date": date_str,
+            "value_usd": round(value_num, 2),
+            "value_str": value_str,
+            "pct": pct,
+            "allocations": alloc_count,
+            "status": status_str,
+            "is_upcoming": is_upcoming,
+        })
+
+    # 排序：upcoming 按日期升序在前，past 按日期降序在后
     from datetime import datetime
     def parse_dt(s):
         try: return datetime.strptime(s, "%d %b %Y")
@@ -370,15 +383,6 @@ def _extract_unlock_events(page) -> list[dict]:
     upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: parse_dt(e["date"]))
     past = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: parse_dt(e["date"]), reverse=True)
     return upcoming + past
-
-
-def _parse_date(date_str: str):
-    """将 '16 Aug 2026' 转为 datetime 对象。"""
-    from datetime import datetime
-    try:
-        return datetime.strptime(date_str, "%d %b %Y")
-    except Exception:
-        return datetime(2000, 1, 1)
 
 
 # ── 存入数据库 ─────────────────────────────────────────────

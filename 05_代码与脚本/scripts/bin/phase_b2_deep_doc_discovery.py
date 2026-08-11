@@ -468,6 +468,7 @@ def extract_doc_links(
     html: str, base_url: str, same_domain_only: bool = True,
     project_identifiers: list[str] | None = None,
     require_doc_keyword: bool = True,
+    skip_aggregation_filter: bool = False,
 ) -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
     from urllib.parse import urljoin, urlparse, urlunparse
@@ -521,7 +522,8 @@ def extract_doc_links(
         if not should_record:
             continue
         # 聚合域名过滤：内链不继承 asset_id（如 code4rena 的 4,734 条其他比赛链接）
-        if base_domain in AGGREGATION_DOMAINS and link_domain == base_domain:
+        # 单资产重爬时跳过此过滤，允许审计报告等外部链接被收录
+        if not skip_aggregation_filter and base_domain in AGGREGATION_DOMAINS and link_domain == base_domain:
             continue
         # GitHub 同仓库过滤：跨仓库链接不继承 asset_id，阻止污染扩散
         if not _is_same_github_repo(base_url, absolute_url):
@@ -612,7 +614,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
-            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword)
+            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword, skip_aggregation_filter=not require_doc_keyword)
 
             # 检测 SPA：无链接 + 小 HTML（<5000 bytes 或包含 SPA 框架标志）
             needs_browser = False

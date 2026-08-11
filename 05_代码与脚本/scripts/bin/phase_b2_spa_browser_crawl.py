@@ -6,7 +6,6 @@ Phase B3: 无头浏览器爬取 SPA 页面
 from __future__ import annotations
 
 import argparse
-import asyncio
 import concurrent.futures
 import json
 import sys
@@ -85,8 +84,8 @@ def preflight_check(url: str) -> str | None:
         return f"HEAD 错误: {str(e)[:60]}"
 
 
-async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, executor) -> dict:
-    """用 Playwright 渲染一个 SPA 页面，提取文档链接。"""
+def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
+    """用 Playwright 渲染一个 SPA 页面，提取文档链接（同步版）。"""
     entry_id = entry["entry_id"]
     entry_url = entry["entry_url"]
     symbol = entry["canonical_symbol"] or ""
@@ -94,9 +93,8 @@ async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, ex
 
     project_identifiers = build_project_identifiers(symbol, name, entry_url)
 
-    # 1. HEAD 预检：跳过非 HTML 内容（PDF、图片、死链等）
-    loop = asyncio.get_running_loop()
-    skip_reason = await loop.run_in_executor(executor, preflight_check, entry_url)
+    # 1. HEAD 预检：跳过非 HTML 内容
+    skip_reason = preflight_check(entry_url)
     if skip_reason is not None:
         return {
             "status": "skipped",
@@ -106,15 +104,18 @@ async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, ex
         }
 
     # 2. 浏览器渲染
-    page = await browser_context.new_page()
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 800},
+    )
     try:
-        await page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda route: route.abort())
+        page = context.new_page()
+        page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda route: route.abort())
 
-        await page.goto(entry_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-        # 额外等待 JS 渲染
-        await page.wait_for_timeout(1500)
+        page.goto(entry_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        page.wait_for_timeout(1500)
 
-        html = await page.content()
+        html = page.content()
         final_url = page.url
 
         doc_links = extract_doc_links(html, final_url, same_domain_only, project_identifiers, require_doc_keyword=False, skip_aggregation_filter=True)
@@ -138,66 +139,61 @@ async def crawl_one_spa(browser_context, entry: dict, same_domain_only: bool, ex
             "error": str(e)[:120],
         }
     finally:
-        await page.close()
+        context.close()
 
 
-async def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> dict:
-    """并发爬取一批 SPA 页面。"""
-    from playwright.async_api import async_playwright
+def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> dict:
+    """并发爬取一批 SPA 页面（同步版，用 ThreadPoolExecutor 并发）。"""
+    import threading
+    from playwright.sync_api import sync_playwright
 
     stats = {"done": 0, "failed": 0, "discovered": 0, "empty": 0, "skipped": 0}
     db_rows: list[tuple] = []
     done_ids: list[int] = []
     failed_ids: list[int] = []
 
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    # 浏览器启动（线程池控制超时）
+    headless_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    launch_future = headless_executor.submit(
+        lambda: sync_playwright().start().__enter__().chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+    )
+    try:
+        browser = launch_future.result(timeout=BROWSER_LAUNCH_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        print(f"  [ERROR] 浏览器启动超时（{BROWSER_LAUNCH_TIMEOUT}s），请检查 Playwright/Chromium 安装")
+        headless_executor.shutdown(wait=False)
+        return {"stats": stats, "db_rows": [], "done_ids": [], "failed_ids": [e["entry_id"] for e in entries]}
+    except Exception as e:
+        print(f"  [ERROR] 浏览器启动失败: {e}")
+        headless_executor.shutdown(wait=False)
+        return {"stats": stats, "db_rows": [], "done_ids": [], "failed_ids": [e["entry_id"] for e in entries]}
+    headless_executor.shutdown(wait=False)
 
-    async with async_playwright() as p:
-        try:
-            browser = await asyncio.wait_for(
-                p.chromium.launch(headless=True, args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                ]),
-                timeout=BROWSER_LAUNCH_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            print(f"  [ERROR] 浏览器启动超时（{BROWSER_LAUNCH_TIMEOUT}s），请检查 Playwright/Chromium 安装")
-            executor.shutdown(wait=False)
-            return {
-                "stats": {"done": 0, "failed": len(entries), "discovered": 0, "empty": 0, "skipped": 0},
-                "db_rows": [],
-                "done_ids": [],
-                "failed_ids": [e["entry_id"] for e in entries],
-            }
-        semaphore = asyncio.Semaphore(concurrency)
+    print(f"  Chromium 已启动，开始爬取 {len(entries)} 个 SPA 页面...")
 
-        async def process(entry):
-            async with semaphore:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800},
-                )
-                try:
-                    return await crawl_one_spa(context, entry, same_domain_only, executor)
-                finally:
-                    await context.close()
+    # 用线程池并发爬取
+    lock = threading.Lock()
+    processed_count = [0]
 
-        tasks = [process(e) for e in entries]
-        for i, coro in enumerate(asyncio.as_completed(tasks)):
-            result = await coro
-            entry_id = result["entry_id"]
-            idx = i + 1
-
-            if result["status"] == "skipped":
+    def process(entry):
+        result = crawl_one_spa(browser, entry, same_domain_only)
+        with lock:
+            processed_count[0] += 1
+            idx = processed_count[0]
+        
+        if result["status"] == "skipped":
+            with lock:
                 stats["skipped"] += 1
-                done_ids.append(entry_id)
-                print(f"  [{idx}/{len(entries)}] SKIP  {result['url'][:80]}  {result.get('reason','')}")
-
-            elif result["status"] == "ok":
-                doc_links = result["doc_links"]
+                done_ids.append(result["entry_id"])
+            print(f"  [{idx}/{len(entries)}] SKIP  {result['url'][:80]}  {result.get('reason','')}")
+        elif result["status"] == "ok":
+            with lock:
                 stats["done"] += 1
+                done_ids.append(result["entry_id"])
+                doc_links = result["doc_links"]
                 if doc_links:
                     stats["discovered"] += len(doc_links)
                     for link_url, link_type in doc_links:
@@ -208,28 +204,29 @@ async def run_batch(entries: list[dict], concurrency: int, same_domain_only: boo
                             result["source_code"],
                             link_type if link_type in VALID_ENTRY_TYPES else "other",
                             link_url,
-                            f"spa_browser_crawl:{result['url'][:43]}",  # discovered_from VARCHAR(64), 前缀19字符+URL最多43字符
+                            f"spa_browser_crawl:{result['url'][:43]}",
                             False,
                         ))
                 else:
                     stats["empty"] += 1
-                done_ids.append(entry_id)
-                print(f"  [{idx}/{len(entries)}] OK  {result['url'][:80]}  +{len(doc_links)} links")
-            else:
+            print(f"  [{idx}/{len(entries)}] OK  {result['url'][:80]}  +{len(result['doc_links'])} links")
+        else:
+            with lock:
                 stats["failed"] += 1
-                failed_ids.append(entry_id)
-                print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
+                failed_ids.append(result["entry_id"])
+            print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
 
-        await browser.close()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as crawl_executor:
+        futures = [crawl_executor.submit(process, e) for e in entries]
+        for f in concurrent.futures.as_completed(futures):
+            try:
+                f.result()
+            except Exception as exc:
+                print(f"  [ERROR] 线程异常: {exc}")
 
-    executor.shutdown(wait=False)
+    browser.close()
 
-    return {
-        "stats": stats,
-        "db_rows": db_rows,
-        "done_ids": done_ids,
-        "failed_ids": failed_ids,
-    }
+    return {"stats": stats, "db_rows": db_rows, "done_ids": done_ids, "failed_ids": failed_ids}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -311,10 +308,10 @@ def main() -> int:
     start_time = time.time()
     same_domain_only = not args.all_domains
 
-    # 线程级超时兜底：防止 asyncio 事件循环在浏览器启动/页面加载时无限期挂起
+    # 线程级超时兜底：防止浏览器启动/页面加载时无限期挂起
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as timeout_executor:
         future = timeout_executor.submit(
-            asyncio.run, run_batch(entries, args.concurrency, same_domain_only)
+            run_batch, entries, args.concurrency, same_domain_only
         )
         try:
             result = future.result(timeout=BATCH_TIMEOUT)

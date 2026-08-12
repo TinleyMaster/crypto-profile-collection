@@ -205,9 +205,14 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
                 overview = _extract_overview(page, slug)
                 result["overview"] = overview
 
-                # 判断是否为有效页面：Overview 为空说明 slug 不对，换下一个
-                if not overview and idx + 1 < len(slugs):
-                    _log(f"  Overview 为空，slug 可能不匹配，尝试备选...")
+                # 判断是否为有效页面：Overview 为空说明 slug 不对
+                # - 不是最后一个 slug → 换下一个
+                # - 是最后一个 slug → 也返回 None，不写空数据
+                if not overview:
+                    if idx + 1 < len(slugs):
+                        _log(f"  Overview 为空，slug 可能不匹配，尝试备选...")
+                    else:
+                        _log(f"  Overview 为空且无更多备选 slug，该代币可能未被 tokenomist 收录")
                     browser.close()
                     continue
 

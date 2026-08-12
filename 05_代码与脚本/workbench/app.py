@@ -266,6 +266,7 @@ TASK_DEFS = {
         "category": "投研分析",
         "requires_asset_id": True,
         "arg_label": "asset-id",
+        "force_arg": "--force",  # 单币调用始终强制覆盖
         "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
     },
     "c_extract_tokenomics_auto": {
@@ -412,6 +413,10 @@ def api_start_task():
             return jsonify({"ok": False, "error": "缺少 asset_id 参数"}), 400
         arg_label = tdef.get("arg_label", "asset_id")
         args = [f"--{arg_label}", str(asset_id)] + args
+        # 单币调用默认强制覆盖已有数据
+        force_arg = tdef.get("force_arg")
+        if force_arg and force_arg not in args:
+            args.append(force_arg)
     cmd = [sys.executable, "-u", str(SCRIPTS_BIN / tdef["script"])] + args
 
     task_id = task_mgr.submit_task(tdef["name"], cmd)

@@ -28,6 +28,8 @@ COPY 05_代码与脚本/workbench/templates /app/templates
 
 # 文档存储目录
 RUN mkdir -p /app/docs_storage
+# tokenomics 图片存储目录（需挂载持久化卷）
+RUN mkdir -p /app/data/tokenomics_images
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=utf-8

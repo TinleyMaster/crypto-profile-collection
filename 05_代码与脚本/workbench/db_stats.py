@@ -1123,46 +1123,105 @@ def get_onchain_alert_summary() -> dict:
 
 
 def query_onchain_data(asset_id: int, force: bool = False) -> dict:
-    """按需查询链上数据（持仓 + 大额转账），先查缓存，缓存未命中则实时拉取。"""
+    """按需查询链上持仓分布（从区块浏览器 HTML 爬取，无需 API Key）。
+
+    支持多链：依次爬取资产在各链上的合约数据。
+    大额转账暂不支持（需 API），仅返回持仓分布。
+    """
     import subprocess
+    import time
 
+    t0 = time.time()
     scripts_bin = _get_scripts_bin()
-    script = str(scripts_bin / "phase_chain_onchain_query.py")
-    cmd = [
-        sys.executable, "-u", script,
-        "--asset-id", str(asset_id),
-    ]
-    if force:
-        cmd.append("--force")
+    script = str(scripts_bin / "phase_chain_holder_scrape.py")
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(scripts_bin),
-    )
+    # 1. 获取资产的所有链的合约地址
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+    settings = get_settings(require_database=True)
 
-    output = result.stdout.strip()
-    stderr_output = result.stderr.strip() if result.stderr else ""
+    result = {
+        "status": "ok",
+        "asset_id": asset_id,
+        "from_cache": False,
+        "chains": {},
+        "transfers": [],
+    }
 
-    if result.returncode != 0:
-        # 优先输出 stderr（包含真实错误信息），兜底 exit code
-        err_detail = stderr_output or output
-        if not err_detail:
-            err_detail = f"脚本退出码 {result.returncode}，无 stderr/stdout 输出（脚本路径: {script}）"
-        return {"ok": False, "error": err_detail[:500]}
+    chains_info = []
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT a.canonical_symbol, a.canonical_name,
+                          m.chain, m.contract_address
+                   FROM core.asset a
+                   INNER JOIN core.asset_contract m ON m.asset_id = a.asset_id
+                   WHERE a.asset_id = %s AND a.status = 'active'
+                   ORDER BY CASE m.chain WHEN 'bsc' THEN 0 WHEN 'eth' THEN 1 ELSE 2 END""",
+                (asset_id,),
+            )
+            chains_info = [dict(r) for r in cur.fetchall()]
 
-    if not output:
-        return {"ok": False, "error": "无输出"}
+    if not chains_info:
+        return {"ok": False, "error": "资产无合约地址，无法查询链上数据"}
 
-    try:
-        data = json.loads(output)
-        if data.get("status") == "ok":
-            return {"ok": True, "data": data}
-        return {"ok": False, "error": str(data.get("message", "查询失败"))}
-    except json.JSONDecodeError:
-        return {"ok": False, "error": (stderr_output or output)[:500]}
+    result["symbol"] = chains_info[0]["canonical_symbol"]
+    result["name"] = chains_info[0]["canonical_name"]
+
+    # 2. 逐链爬取
+    holder_fetched = False
+    for info in chains_info:
+        chain = info["chain"]
+        contract = info["contract_address"]
+        cmd = [
+            sys.executable, "-u", script,
+            "--contract", contract,
+            "--chain", chain,
+        ]
+        if force:
+            cmd.append("--force")
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=60,
+                cwd=str(scripts_bin),
+            )
+        except subprocess.TimeoutExpired:
+            continue
+
+        stdout = proc.stdout.strip()
+        if proc.returncode != 0 or not stdout:
+            continue
+
+        # 提取最后一行 JSON 输出
+        for line in reversed(stdout.split("\n")):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    if data.get("status") == "ok" and data.get("total_holders", 0) > 0:
+                        result["chains"][chain] = {
+                            "top10_concentration": data.get("top_10_pct"),
+                            "top50_concentration": data.get("top_50_pct"),
+                            "top100_concentration": data.get("top_100_pct"),
+                            "total_holders": data.get("total_holders", 0),
+                            "top_holders": [
+                                {"address": h["address"], "share_pct": h.get("pct")}
+                                for h in data.get("top_holders", [])
+                            ],
+                            "tier_distribution": data.get("tier_distribution", []),
+                        }
+                        holder_fetched = True
+                except json.JSONDecodeError:
+                    pass
+                break
+
+    result["elapsed_ms"] = int((time.time() - t0) * 1000)
+    if not holder_fetched:
+        result["_note"] = "持仓数据爬取失败（可能合约无持币记录或区块浏览器访问受限）"
+
+    return {"ok": True, "data": result}
 
 
 def _get_scripts_bin() -> Path:

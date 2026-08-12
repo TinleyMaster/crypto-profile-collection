@@ -1405,24 +1405,59 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 
 
 def _fetch_cg_price(asset_id: int, settings) -> dict:
-    """从 CoinGecko 获取当前价格、市值、FDV。"""
+    """从 CoinGecko 获取当前价格、市值、FDV。先查直接映射，失败则按 symbol 搜索。"""
     try:
         import requests
         from crypto_research.db.conn import get_connection
 
-        # 获取 CG coin_id
+        coin_id = None
+        symbol = None
+
         with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 1. 先查 CG 直接映射
                 cur.execute(
                     """SELECT source_asset_key FROM core.asset_source_map
                        WHERE asset_id = %s AND source_code = 'cg'""",
                     (asset_id,),
                 )
                 row = cur.fetchone()
-        if not row:
+                if row:
+                    coin_id = row["source_asset_key"]
+
+                # 2. 同时查 symbol（供回退搜索用）
+                cur.execute(
+                    "SELECT canonical_symbol FROM core.asset WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                asset_row = cur.fetchone()
+                if asset_row:
+                    symbol = asset_row["canonical_symbol"]
+
+        # 3. 无直接映射 → 按 symbol 搜索 CG
+        if not coin_id and symbol:
+            try:
+                search_url = f"{settings.coingecko_base_url}/search"
+                params = {"query": symbol.lower()}
+                headers = {"Accept": "application/json"}
+                if settings.coingecko_api_key:
+                    headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+                resp = requests.get(search_url, params=params, headers=headers, timeout=10)
+                resp.raise_for_status()
+                search_data = resp.json()
+                coins = search_data.get("coins", [])
+                if coins:
+                    # 优先精确匹配 symbol
+                    exact = [c for c in coins if c.get("symbol", "").lower() == symbol.lower()]
+                    best = exact[0] if exact else coins[0]
+                    coin_id = best.get("id")
+            except Exception:
+                pass
+
+        if not coin_id:
             return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
 
-        coin_id = row[0]
+        # 4. 获取价格
         url = f"{settings.coingecko_base_url}/simple/price"
         params = {
             "ids": coin_id,

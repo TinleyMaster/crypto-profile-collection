@@ -2348,6 +2348,9 @@
                 if (d.input_snapshot) {
                     html += '<br><strong>输入数据:</strong><br>';
                     const inp = d.input_snapshot;
+                    if (inp.price_usd != null) html += '&nbsp;&nbsp;价格: $' + inp.price_usd + '<br>';
+                    if (inp.market_cap_usd != null) html += '&nbsp;&nbsp;市值: $' + inp.market_cap_usd + '<br>';
+                    if (inp.fdv_usd != null) html += '&nbsp;&nbsp;FDV: $' + inp.fdv_usd + '<br>';
                     if (inp.total_supply) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
                     if (inp.max_supply) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
                     if (inp.circulating_supply) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';

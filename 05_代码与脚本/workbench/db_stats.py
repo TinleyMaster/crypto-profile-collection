@@ -1366,3 +1366,83 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             "name": asset["canonical_name"],
         },
     }
+
+
+def query_holder_snapshot(asset_id: int, chain: str = "bsc", save: bool = True) -> dict:
+    """拉取代币持仓分布快照（从区块浏览器爬取）。"""
+    import subprocess
+
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_chain_holder_scrape.py")
+    cmd = [
+        sys.executable, "-u", script,
+        "--asset-id", str(asset_id),
+        "--chain", chain,
+    ]
+    if save:
+        cmd.append("--save")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(scripts_bin),
+    )
+
+    output = result.stdout.strip()
+    stderr_output = result.stderr.strip() if result.stderr else ""
+
+    if result.returncode != 0:
+        err_msg = stderr_output or output or f"exit code {result.returncode}"
+        return {"ok": False, "error": err_msg[:500]}
+
+    if not output:
+        return {"ok": False, "error": "无输出"}
+
+    try:
+        lines = output.strip().split("\n")
+        json_lines = [l for l in lines if l.strip().startswith("{")]
+        if json_lines:
+            data = json.loads(json_lines[-1])
+            if data.get("status") == "ok":
+                return {"ok": True, "data": data, "stderr": stderr_output[:500]}
+            return {"ok": False, "error": str(data.get("message", "失败")), "stderr": stderr_output[:500]}
+        return {"ok": False, "error": "无 JSON 输出", "stderr": stderr_output[:500]}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": (stderr_output or output)[:500]}
+
+
+def get_token_holders(asset_id: int) -> dict:
+    """读取 biz.asset_token_holders 中的持仓分布数据。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT h.*, a.canonical_symbol AS symbol, a.canonical_name AS name
+                   FROM biz.asset_token_holders h
+                   JOIN core.asset a ON a.asset_id = h.asset_id
+                   WHERE h.asset_id = %s""",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return {"ok": False, "error": "无持仓数据"}
+
+    return {
+        "ok": True,
+        "data": {
+            "asset_id": row["asset_id"],
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "chain": row["chain"],
+            "contract_address": row["contract_address"],
+            "total_holders": row["total_holders"],
+            "top_5_pct": float(row["top_5_pct"]) if row["top_5_pct"] else None,
+            "top_10_pct": float(row["top_10_pct"]) if row["top_10_pct"] else None,
+            "top_50_pct": float(row["top_50_pct"]) if row["top_50_pct"] else None,
+            "top_100_pct": float(row["top_100_pct"]) if row["top_100_pct"] else None,
+            "top_holders": json.loads(row["top_holders_json"]) if isinstance(row["top_holders_json"], str) else row["top_holders_json"],
+            "tier_distribution": json.loads(row["tier_distribution_json"]) if isinstance(row["tier_distribution_json"], str) else row["tier_distribution_json"],
+            "scraped_at": str(row["scraped_at"]) if row["scraped_at"] else None,
+        },
+    }

@@ -309,6 +309,13 @@ TASK_DEFS = {
         "category": "链上数据",
         "hidden": True,
     },
+    "chain_holder_scrape": {
+        "name": "持仓分布爬取（区块浏览器 HTML）",
+        "description": "直接从 BSCScan/Etherscan 网页解析持仓分布（集中度/Top50 地址/CEX标签），无需 API Key",
+        "script": "phase_chain_holder_scrape.py",
+        "default_args": ["--limit", "50"],
+        "category": "链上数据",
+    },
 
     # ═══ 诊断 ═══
     "diag_noise": {
@@ -758,6 +765,27 @@ def api_unlocks_query(asset_id: int):
     """按需拉取指定资产的代币解锁数据（从 tokenomist 爬取）。"""
     try:
         data = _get_db_stats().query_token_unlocks(asset_id)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/holders/query/<int:asset_id>")
+def api_holders_query(asset_id: int):
+    """按需拉取指定资产的持仓分布快照（从区块浏览器爬取）。"""
+    chain = request.args.get("chain", "bsc")
+    try:
+        data = _get_db_stats().query_holder_snapshot(asset_id, chain=chain)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/holders/<int:asset_id>")
+def api_holders_get(asset_id: int):
+    """读取已保存的持仓分布数据。"""
+    try:
+        data = _get_db_stats().get_token_holders(asset_id)
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

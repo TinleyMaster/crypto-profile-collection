@@ -1,0 +1,405 @@
+"""
+链上代币持仓分布快照：从区块浏览器爬取持币地址分布、集中度、CEX标签。
+
+BSCScan 已无免费 API，改为网页 HTML 解析。
+
+用法:
+    python phase_chain_holder_snapshot.py --asset-id 9052 --chain bsc
+    python phase_chain_holder_snapshot.py --contract 0xcf3232B85b43BCa90E51D38cc06Cc8bB8C8A3E36 --chain bsc
+    python phase_chain_holder_snapshot.py --asset-id 9052 --chain bsc --save
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+
+sys.stdout.reconfigure(line_buffering=True)
+
+import psycopg
+import psycopg.rows
+import requests
+from bs4 import BeautifulSoup
+
+from crypto_research.config import get_settings
+from crypto_research.db.conn import get_connection
+
+
+# ── 配置 ──────────────────────────────────────────────────
+
+EXPLORER_URLS = {
+    "bsc": "https://bscscan.com",
+    "eth": "https://etherscan.io",
+    "polygon": "https://polygonscan.com",
+    "arb": "https://arbiscan.io",
+    "opt": "https://optimistic.etherscan.io",
+    "base": "https://basescan.org",
+    "avax": "https://snowtrace.io",
+}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+RE_PCT = re.compile(r'([\d.]+)%')
+RE_NUMBER = re.compile(r'([\d,]+\.?\d*)')
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="代币持仓分布快照")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--asset-id", "--asset_id", type=int, dest="asset_id")
+    g.add_argument("--contract", type=str, help="合约地址")
+    p.add_argument("--chain", type=str, default="bsc",
+                   help="链简称: bsc/eth/polygon/arb/opt/base/avax")
+    p.add_argument("--save", action="store_true", help="写入数据库")
+    p.add_argument("--holders-limit", type=int, default=50,
+                   help="最多解析多少持币地址")
+    return p
+
+
+# ── 合约地址解析 ──────────────────────────────────────────
+
+def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
+                     chain: str) -> dict | None:
+    """获取合约地址和资产信息。"""
+    if contract_address:
+        # 用合约地址反查 asset_id
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT a.asset_id, a.canonical_symbol AS symbol,
+                          a.canonical_name AS name
+                   FROM core.asset_contract c
+                   JOIN core.asset a ON a.asset_id = c.asset_id
+                   WHERE c.contract_address = %s AND c.chain = %s""",
+                (contract_address.lower(), chain),
+            )
+            row = cur.fetchone()
+            if row:
+                row["contract_address"] = contract_address.lower()
+                row["chain"] = chain
+            return row
+
+    if asset_id:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT a.asset_id, a.canonical_symbol AS symbol,
+                          a.canonical_name AS name,
+                          c.contract_address, c.chain
+                   FROM core.asset a
+                   LEFT JOIN core.asset_contract c
+                       ON c.asset_id = a.asset_id AND c.chain = %s
+                   WHERE a.asset_id = %s
+                   ORDER BY c.contract_address NULLS LAST
+                   LIMIT 1""",
+                (chain, asset_id),
+            )
+            row = cur.fetchone()
+        if row and not row["contract_address"]:
+            print(f"  资产 {asset_id} 在 {chain} 上无合约地址")
+            return None
+        return row
+
+    return None
+
+
+# ── BSCScan 网页解析 ─────────────────────────────────────
+
+def _parse_pct(s: str) -> float | None:
+    m = RE_PCT.search(s)
+    return float(m.group(1)) if m else None
+
+
+def _parse_number(s: str) -> str | None:
+    m = RE_NUMBER.search(s)
+    return m.group(1).replace(",", "") if m else None
+
+
+def scrape_holders(explorer_url: str, contract_address: str,
+                   max_holders: int = 50) -> dict:
+    """从区块浏览器持币页面抓取持仓分布数据。"""
+    token_url = f"{explorer_url}/token/{contract_address}"
+    holders_url = f"{token_url}#balances"
+
+    result = {
+        "chain": "",
+        "contract_address": contract_address.lower(),
+        "total_holders": 0,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+        "scraped_at": None,
+    }
+
+    # ── Step 1: Token 首页 → 总持币数 ──
+    try:
+        resp = requests.get(token_url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  [WARN] Token 首页抓取失败: {e}")
+        return result
+
+    # 解析总持币数（页面文本中的 "Holders 153,662"）
+    body_text = soup.get_text()
+    m = re.search(r'Holders\s+([\d,]+)', body_text)
+    if m:
+        result["total_holders"] = int(m.group(1).replace(",", ""))
+
+    # ── Step 2: Holders 页面 → 持仓分布 ──
+    try:
+        resp = requests.get(holders_url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as e:
+        print(f"  [WARN] Holders 页面抓取失败: {e}")
+        return result
+
+    body_text = soup.get_text()
+
+    # 解析 Top 集中度：BSCScan 格式:
+    # "Supply of Top 5 holders: 67.99% | Top 10 holders: 84.11%"
+    for label, key in [("Top 5", "top_5_pct"), ("Top 10", "top_10_pct"),
+                       ("Top 25", "top_25_pct"), ("Top 50", "top_50_pct"),
+                       ("Top 100", "top_100_pct")]:
+        m = re.search(rf'{label}\s+holders?:\s*([\d.]+)%', body_text)
+        if m:
+            result[key] = float(m.group(1))
+
+    # 解析 Tier 分布
+    tier_names = ["Whale", "Shark", "Dolphin", "Fish", "Crab", "Shrimp"]
+    tiers = []
+    for tn in tier_names:
+        # 格式: "🐋 Whale 129 0.09% 99.67%"
+        pattern = rf'{re.escape(tn)}\s+([\d,]+)\s+([\d.]+)%\s+([\d.]+)%'
+        m = re.search(pattern, body_text)
+        if m:
+            tiers.append({
+                "tier": tn,
+                "count": int(m.group(1).replace(",", "")),
+                "pct_holders": float(m.group(2)),
+                "pct_supply": float(m.group(3)),
+            })
+    result["tier_distribution_json"] = tiers
+
+    # ── Step 3: 解析持仓列表（从 HTML table）──
+    holders_table = soup.select_one("table")
+    if not holders_table:
+        print("  [WARN] 未找到持仓表格")
+        result["top_holders_json"] = []
+        return result
+
+    rows = holders_table.select("tr")[1:]  # 跳过表头
+    parsed = []
+
+    for row in rows:
+        if len(parsed) >= max_holders:
+            break
+
+        cols = row.select("td")
+        if len(cols) < 3:
+            continue
+
+        rank_text = cols[0].get_text(strip=True)
+        try:
+            rank = int(rank_text)
+        except ValueError:
+            continue
+
+        # 地址
+        addr_link = cols[1].select_one("a")
+        if not addr_link:
+            continue
+        addr_text = addr_link.get_text(strip=True)
+
+        # Label（BSCScan 自动标注如 "Gate 5", "KuCoin: Hot Wallet 2"）
+        label_spans = cols[1].select("span")
+        label = ""
+        for sp in label_spans:
+            t = sp.get_text(strip=True)
+            if t and t != addr_text:
+                label = t
+                break
+
+        # 数量
+        qty_text = cols[2].get_text(strip=True)
+        qty = qty_text.replace(",", "")
+
+        # 百分比
+        pct_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+        pct = _parse_pct(pct_text)
+
+        parsed.append({
+            "rank": rank,
+            "address": addr_text,
+            "label": label,
+            "amount": qty,
+            "pct": pct,
+        })
+
+    result["top_holders_json"] = parsed
+    result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(parsed)} 条")
+    if tiers:
+        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
+        print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")
+        print(f"  CEX 标签: {len([h for h in parsed if h['label']])} 个地址有标签")
+
+    return result
+
+
+# ── 数据库 ────────────────────────────────────────────────
+
+ENSURE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS biz.asset_token_holders (
+    asset_id INTEGER PRIMARY KEY REFERENCES core.asset(asset_id),
+    chain TEXT DEFAULT 'bsc',
+    contract_address TEXT,
+    source_url TEXT,
+    total_holders INTEGER,
+    top_5_pct NUMERIC,
+    top_10_pct NUMERIC,
+    top_25_pct NUMERIC,
+    top_50_pct NUMERIC,
+    top_100_pct NUMERIC,
+    top_holders_json JSONB,
+    tier_distribution_json JSONB,
+    scraped_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+)
+"""
+
+UPSERT_SQL = """
+INSERT INTO biz.asset_token_holders (
+    asset_id, chain, contract_address, source_url,
+    total_holders,
+    top_5_pct, top_10_pct, top_25_pct, top_50_pct, top_100_pct,
+    top_holders_json, tier_distribution_json,
+    scraped_at, updated_at
+) VALUES (
+    %(asset_id)s, %(chain)s, %(contract_address)s, %(source_url)s,
+    %(total_holders)s,
+    %(top_5_pct)s, %(top_10_pct)s, %(top_25_pct)s, %(top_50_pct)s, %(top_100_pct)s,
+    %(top_holders_json)s, %(tier_distribution_json)s,
+    NOW(), NOW()
+)
+ON CONFLICT (asset_id) DO UPDATE SET
+    chain = EXCLUDED.chain,
+    contract_address = EXCLUDED.contract_address,
+    source_url = EXCLUDED.source_url,
+    total_holders = EXCLUDED.total_holders,
+    top_5_pct = EXCLUDED.top_5_pct,
+    top_10_pct = EXCLUDED.top_10_pct,
+    top_25_pct = EXCLUDED.top_25_pct,
+    top_50_pct = EXCLUDED.top_50_pct,
+    top_100_pct = EXCLUDED.top_100_pct,
+    top_holders_json = EXCLUDED.top_holders_json,
+    tier_distribution_json = EXCLUDED.tier_distribution_json,
+    scraped_at = EXCLUDED.scraped_at,
+    updated_at = NOW()
+"""
+
+
+def ensure_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(ENSURE_TABLE_SQL)
+    conn.commit()
+
+
+def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
+               explorer_url: str, data: dict) -> None:
+    token_url = f"{explorer_url}/token/{contract_address}"
+    with conn.cursor() as cur:
+        cur.execute(UPSERT_SQL, {
+            "asset_id": asset_id,
+            "chain": chain,
+            "contract_address": contract_address.lower(),
+            "source_url": token_url,
+            "total_holders": data.get("total_holders", 0),
+            "top_5_pct": data.get("top_5_pct"),
+            "top_10_pct": data.get("top_10_pct"),
+            "top_25_pct": data.get("top_25_pct"),
+            "top_50_pct": data.get("top_50_pct"),
+            "top_100_pct": data.get("top_100_pct"),
+            "top_holders_json": json.dumps(data.get("top_holders_json", []), ensure_ascii=False),
+            "tier_distribution_json": json.dumps(data.get("tier_distribution_json", []), ensure_ascii=False),
+        })
+    conn.commit()
+    print("  已写入 biz.asset_token_holders")
+
+
+# ── 主流程 ─────────────────────────────────────────────────
+
+def main() -> int:
+    args = build_parser().parse_args()
+    settings = get_settings(require_database=True)
+
+    chain = args.chain.lower()
+    explorer_url = EXPLORER_URLS.get(chain)
+    if not explorer_url:
+        print(f"ERROR: 不支持的链: {chain}")
+        return 1
+
+    with get_connection(settings.database_url) as conn:
+        info = resolve_contract(conn, args.asset_id, args.contract, chain)
+        if not info:
+            print(f"ERROR: 无法找到合约地址或资产信息")
+            return 1
+
+        asset_id = info["asset_id"]
+        contract_address = info["contract_address"]
+        symbol = info.get("symbol", "")
+        name = info.get("name", "")
+
+        print(f"资产: {symbol} ({name}) [asset_id={asset_id}]")
+        print(f"链: {chain}, 合约: {contract_address}")
+
+        # 确保表存在
+        ensure_table(conn)
+
+        # 爬取
+        print(f"  抓取 {explorer_url}/token/{contract_address}...")
+        data = scrape_holders(explorer_url, contract_address, args.holders_limit)
+
+        if args.save:
+            save_to_db(conn, asset_id, chain, contract_address, explorer_url, data)
+
+        # JSON 输出
+        output = {
+            "status": "ok",
+            "asset_id": asset_id,
+            "symbol": symbol,
+            "name": name,
+            "chain": chain,
+            "contract_address": contract_address,
+            "total_holders": data["total_holders"],
+            "top_5_pct": data["top_5_pct"],
+            "top_10_pct": data["top_10_pct"],
+            "top_50_pct": data["top_50_pct"],
+            "top_100_pct": data["top_100_pct"],
+            "top_holders": data["top_holders_json"][:10],
+            "tier_distribution": data["tier_distribution_json"],
+        }
+        print(json.dumps(output, ensure_ascii=False, default=str))
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

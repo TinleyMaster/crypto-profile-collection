@@ -275,6 +275,10 @@ def main() -> int:
         print("[SPA crawl] DB 已连接, 查询 SPA 页面...", flush=True)
         try:
             with conn.cursor() as cur:
+                # 确保 spa_crawled_at 列存在
+                cur.execute("""
+                    ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS spa_crawled_at TIMESTAMPTZ
+                """)
                 # 确保 needs_browser 索引存在（partial index，极快）
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_dse_needs_browser

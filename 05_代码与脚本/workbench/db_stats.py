@@ -725,7 +725,7 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
                        allocation_json, burn_info, emission_schedule,
                        inflation_info, governance_info, utility_info,
                        confidence, extraction_notes,
-                       source_urls, created_at, updated_at
+                       source_urls, chart_images, created_at, updated_at
                 FROM biz.asset_tokenomics
                 WHERE asset_id = %s
                 """,
@@ -753,8 +753,9 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
                 "confidence": float(row[15]) if row[15] is not None else None,
                 "extraction_notes": row[16],
                 "source_urls": row[17],
-                "created_at": str(row[18]) if row[18] else None,
-                "updated_at": str(row[19]) if row[19] else None,
+                "chart_images": row[18],
+                "created_at": str(row[19]) if row[19] else None,
+                "updated_at": str(row[20]) if row[20] else None,
             }
 
 

@@ -141,6 +141,135 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
     return docs
 
 
+def _extract_page_images(url: str) -> list[dict]:
+    """从页面提取 tokenomics 相关的图片（分配图/排放曲线等）。
+    返回 [{"label": "分类名", "src_url": "原始URL", "alt": "alt文本"}, ...]"""
+    IMAGE_KEYWORDS = [
+        "allocation", "distribution", "emission", "schedule", "vesting",
+        "tokenomics", "supply", "pie", "chart", "unlock",
+    ]
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            # 不拦截图片，仅拦截字体和样式
+            page.route("**/*", lambda route: route.abort()
+                if route.request.resource_type in ("font", "media", "stylesheet")
+                else route.continue_()
+            )
+
+            try:
+                page.goto(url, wait_until="networkidle", timeout=FETCH_TIMEOUT * 1000)
+            except PlaywrightTimeout:
+                pass  # 部分加载也可接受
+            except Exception as e:
+                print(f"  [IMG WARN] 页面加载失败 {url[:80]}: {e}")
+                browser.close()
+                return []
+
+            page.wait_for_timeout(3000)
+
+            # JS 提取：查找 img 标签，检测其附近文本是否含有关键词
+            images = page.evaluate("""
+                (keywords) => {
+                    const results = [];
+                    const imgs = document.querySelectorAll('img[src]');
+                    const seen = new Set();
+                    for (const img of imgs) {
+                        const src = img.src || img.getAttribute('data-src') || '';
+                        if (!src || src.startsWith('data:') || seen.has(src)) continue;
+                        seen.add(src);
+
+                        // 检查 alt / title / 父元素文本
+                        const alt = (img.alt || '').toLowerCase();
+                        let contextText = alt + ' ';
+                        // 向上查找最近的 heading 或 figure caption
+                        let el = img.closest('figure') || img.parentElement;
+                        if (el) {
+                            contextText += (el.textContent || '').toLowerCase();
+                        }
+                        // 再往上找一层
+                        el = el ? el.parentElement : null;
+                        if (el) {
+                            contextText += ' ' + (el.textContent || '').toLowerCase();
+                        }
+
+                        let matched = false;
+                        for (const kw of keywords) {
+                            if (contextText.includes(kw)) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (matched) {
+                            results.push({
+                                label: alt || img.alt || '',
+                                src: src,
+                                alt: img.alt || '',
+                            });
+                        }
+                    }
+                    return results;
+                }
+            """, IMAGE_KEYWORDS)
+
+            browser.close()
+            return images
+    except Exception as e:
+        print(f"  [IMG WARN] 图片提取失败 {url[:80]}: {e}")
+        return []
+
+
+def _download_and_save_images(images: list[dict], asset_id: int) -> list[dict]:
+    """下载图片到本地存储，返回入库用的 dict 列表。"""
+    import requests as req
+
+    storage_dir = SCRIPT_DIR.parent.parent / "data" / "tokenomics_images" / str(asset_id)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for i, img in enumerate(images):
+        src = img["src"]
+        label = img.get("label") or img.get("alt") or f"chart_{i}"
+        try:
+            resp = req.get(src, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+
+            # 确定扩展名
+            ext = ".png"
+            content_type = resp.headers.get("Content-Type", "")
+            if "svg" in content_type:
+                ext = ".svg"
+            elif "jpeg" in content_type or "jpg" in content_type:
+                ext = ".jpg"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif "gif" in content_type:
+                ext = ".gif"
+
+            fname = f"{asset_id}_{i}{ext}"
+            fpath = storage_dir / fname
+            fpath.write_bytes(resp.content)
+
+            saved.append({
+                "label": label[:100],
+                "src_url": src[:500],
+                "file": str(fpath.relative_to(SCRIPT_DIR.parent.parent)),
+                "size": len(resp.content),
+            })
+            print(f"  [IMG] 已保存: {fname} ({len(resp.content)} bytes)")
+        except Exception as e:
+            print(f"  [IMG WARN] 下载失败 {src[:80]}: {e}")
+    return saved
+
+
 def _fetch_pdf(url: str) -> str | None:
     """用 requests 下载 PDF 并用 PyPDF2 提取文本。"""
     try:
@@ -379,7 +508,8 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             contract_renounced, lp_locked, lp_lock_info,
             allocation_json, burn_info, emission_schedule,
             inflation_info, governance_info, utility_info,
-            raw_text, extracted_by, confidence, extraction_notes
+            raw_text, extracted_by, confidence, extraction_notes,
+            chart_images
         ) VALUES (
             %(asset_id)s, %(source_urls)s,
             %(total_supply)s, %(max_supply)s, %(circulating_supply)s,
@@ -387,7 +517,8 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             %(contract_renounced)s, %(lp_locked)s, %(lp_lock_info)s,
             %(allocation_json)s, %(burn_info)s, %(emission_schedule)s,
             %(inflation_info)s, %(governance_info)s, %(utility_info)s,
-            %(raw_text)s, %(extracted_by)s, %(confidence)s, %(extraction_notes)s
+            %(raw_text)s, %(extracted_by)s, %(confidence)s, %(extraction_notes)s,
+            %(chart_images)s
         )
         ON CONFLICT (asset_id) DO UPDATE SET
             source_urls = EXCLUDED.source_urls,
@@ -410,6 +541,7 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             extracted_by = EXCLUDED.extracted_by,
             confidence = EXCLUDED.confidence,
             extraction_notes = EXCLUDED.extraction_notes,
+            chart_images = EXCLUDED.chart_images,
             updated_at = NOW()
     """
     params = {
@@ -434,6 +566,7 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
         "extracted_by": "llm",
         "confidence": data.get("confidence"),
         "extraction_notes": data.get("notes"),
+        "chart_images": json.dumps(data.get("chart_images"), ensure_ascii=False) if data.get("chart_images") else None,
     }
 
     if dry_run:
@@ -453,6 +586,22 @@ def main() -> None:
     settings = get_settings(require_database=True)
 
     with get_connection(settings.database_url) as conn:
+        # 0. 确保 chart_images 列存在
+        with conn.cursor() as cur:
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'biz' AND table_name = 'asset_tokenomics'
+                        AND column_name = 'chart_images'
+                    ) THEN
+                        ALTER TABLE biz.asset_tokenomics ADD COLUMN chart_images JSONB;
+                    END IF;
+                END $$;
+            """)
+        conn.commit()
+
         # 1. 查找资产
         asset = resolve_asset(conn, args.asset_id, args.symbol)
         if not asset:
@@ -526,6 +675,35 @@ def main() -> None:
 
         print(f"  LLM 提取完成，耗时 {elapsed:.1f}s")
         print(f"  置信度: {result.get('confidence')}")
+
+        # 5b. 合并 API supply 数据（CG 优先于 CMC，API 精确数值覆盖 LLM 提取）
+        for api_entry in api_data:
+            for key in ("total_supply", "max_supply", "circulating_supply"):
+                val = api_entry.get(key)
+                if val is not None:
+                    result[key] = val
+        print(f"  API supply 合并: total={result.get('total_supply')}, "
+              f"max={result.get('max_supply')}, circ={result.get('circulating_supply')}")
+
+        # 5c. 提取 tokenomics 页面中的关键图片（分配图/排放曲线等）
+        chart_images = []
+        # 选择最合适的 tokenomics 页面 URL：优先含 tokenomics 关键词的
+        best_url = None
+        for d in doc_contents:
+            if "tokenomics" in d["source_url"].lower():
+                best_url = d["source_url"]
+                break
+        if not best_url and doc_contents:
+            best_url = doc_contents[0]["source_url"]
+        if best_url:
+            print(f"  提取图片: {best_url[:80]}")
+            raw_images = _extract_page_images(best_url)
+            if raw_images:
+                print(f"  发现 {len(raw_images)} 张相关图片，开始下载...")
+                chart_images = _download_and_save_images(raw_images, asset["asset_id"])
+            else:
+                print("  未发现相关图片")
+        result["chart_images"] = chart_images
 
         # 6. 入库
         source_urls = [d["source_url"] for d in doc_contents]

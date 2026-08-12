@@ -1405,14 +1405,15 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 
 
 def _fetch_cg_price(asset_id: int, settings) -> dict:
-    """从 CoinGecko 获取当前价格、市值、FDV。先查直接映射，失败则按 symbol 搜索。"""
+    """从 CoinGecko 获取当前价格、市值、FDV。先查直接映射，失败则按 symbol 搜索。支持重试。"""
+    import requests
+    import time as time_mod
+    from crypto_research.db.conn import get_connection
+
+    coin_id = None
+    symbol = None
+
     try:
-        import requests
-        from crypto_research.db.conn import get_connection
-
-        coin_id = None
-        symbol = None
-
         with get_connection(settings.database_url) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 # 1. 先查 CG 直接映射
@@ -1433,56 +1434,79 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
                 asset_row = cur.fetchone()
                 if asset_row:
                     symbol = asset_row["canonical_symbol"]
+    except Exception as e:
+        return {"price_usd": f"DB查询失败: {e}", "market_cap_usd": f"DB查询失败: {e}", "fdv_usd": f"DB查询失败: {e}"}
 
-        # 3. 无直接映射 → 按 symbol 搜索 CG
-        if not coin_id and symbol:
-            try:
-                search_url = f"{settings.coingecko_base_url}/search"
-                params = {"query": symbol.lower()}
-                headers = {"Accept": "application/json"}
-                if settings.coingecko_api_key:
-                    headers["x-cg-demo-api-key"] = settings.coingecko_api_key
-                resp = requests.get(search_url, params=params, headers=headers, timeout=10)
-                resp.raise_for_status()
-                search_data = resp.json()
-                coins = search_data.get("coins", [])
-                if coins:
-                    # 优先精确匹配 symbol
-                    exact = [c for c in coins if c.get("symbol", "").lower() == symbol.lower()]
-                    best = exact[0] if exact else coins[0]
-                    coin_id = best.get("id")
-            except Exception:
-                pass
+    # 3. 无直接映射 → 按 symbol 搜索 CG
+    if not coin_id and symbol:
+        try:
+            search_url = f"{settings.coingecko_base_url}/search"
+            params = {"query": symbol.lower()}
+            headers = {"Accept": "application/json"}
+            if settings.coingecko_api_key:
+                headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+            resp = requests.get(search_url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            search_data = resp.json()
+            coins = search_data.get("coins", [])
+            if coins:
+                # 优先精确匹配 symbol
+                exact = [c for c in coins if c.get("symbol", "").lower() == symbol.lower()]
+                best = exact[0] if exact else coins[0]
+                coin_id = best.get("id")
+        except Exception:
+            pass
 
-        if not coin_id:
-            return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
+    if not coin_id:
+        return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
 
-        # 4. 获取价格
-        url = f"{settings.coingecko_base_url}/simple/price"
-        params = {
-            "ids": coin_id,
-            "vs_currencies": "usd",
-            "include_market_cap": "true",
-            "include_24hr_vol": "false",
-            "include_24hr_change": "false",
-            "include_last_updated_at": "false",
-        }
-        headers = {"Accept": "application/json"}
-        if settings.coingecko_api_key:
-            headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+    # 4. 获取价格（带重试）
+    url = f"{settings.coingecko_base_url}/simple/price"
+    params = {
+        "ids": coin_id,
+        "vs_currencies": "usd",
+        "include_market_cap": "true",
+        "include_24hr_vol": "false",
+        "include_24hr_change": "false",
+        "include_last_updated_at": "false",
+    }
+    headers = {"Accept": "application/json"}
+    if settings.coingecko_api_key:
+        headers["x-cg-demo-api-key"] = settings.coingecko_api_key
 
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            coin_data = data.get(coin_id, {})
+            return {
+                "price_usd": coin_data.get("usd"),
+                "market_cap_usd": coin_data.get("usd_market_cap"),
+                "fdv_usd": coin_data.get("usd_fully_diluted_valuation"),
+            }
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"连接失败(尝试{attempt+1}/3): {e}"
+            if attempt < 2:
+                time_mod.sleep(1 * (attempt + 1))
+        except requests.exceptions.Timeout as e:
+            last_error = f"超时(尝试{attempt+1}/3): {e}"
+            if attempt < 2:
+                time_mod.sleep(1 * (attempt + 1))
+        except requests.exceptions.HTTPError as e:
+            last_error = f"HTTP错误: {e.response.status_code if e.response else e}"
+            if e.response is not None and e.response.status_code == 429:
+                if attempt < 2:
+                    time_mod.sleep(2 * (attempt + 1))
+                    continue
+            break
+        except Exception as e:
+            last_error = f"未知错误: {e}"
+            break
 
-        coin_data = data.get(coin_id, {})
-        return {
-            "price_usd": coin_data.get("usd"),
-            "market_cap_usd": coin_data.get("usd_market_cap"),
-            "fdv_usd": coin_data.get("usd_fully_diluted_valuation"),
-        }
-    except Exception:
-        return {"price_usd": "获取失败", "market_cap_usd": "获取失败", "fdv_usd": "获取失败"}
+    error_msg = last_error or "获取失败"
+    return {"price_usd": error_msg, "market_cap_usd": error_msg, "fdv_usd": error_msg}
 
 
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:

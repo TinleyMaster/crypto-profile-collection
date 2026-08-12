@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import socket
 import sys
 import time
 from pathlib import Path
@@ -65,7 +66,9 @@ def build_project_identifiers(symbol: str, name: str, entry_url: str) -> list[st
 
 def preflight_check(url: str) -> str | None:
     """HEAD 预检：返回 None 表示可以继续浏览器渲染，返回 reason 字符串表示应跳过。"""
+    old_timeout = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(HEAD_TIMEOUT_S)
         resp = requests.head(url, timeout=HEAD_TIMEOUT_S, allow_redirects=True,
                              headers={"User-Agent": "Mozilla/5.0"})
         content_type = resp.headers.get("Content-Type", "").lower()
@@ -82,6 +85,8 @@ def preflight_check(url: str) -> str | None:
         return "连接失败"
     except Exception as e:
         return f"HEAD 错误: {str(e)[:60]}"
+    finally:
+        socket.setdefaulttimeout(old_timeout)
 
 
 def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
@@ -169,13 +174,15 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
 
     # 串行爬取（Playwright sync API 的 browser 对象绑定创建线程，不能跨线程）
     for i, entry in enumerate(entries):
-        result = crawl_one_spa(browser, entry, same_domain_only)
         idx = i + 1
+        url_short = entry["entry_url"][:80]
+        print(f"  [{idx}/{len(entries)}] 爬取: {url_short} ...", flush=True)
+        result = crawl_one_spa(browser, entry, same_domain_only)
         
         if result["status"] == "skipped":
             stats["skipped"] += 1
             done_ids.append(result["entry_id"])
-            print(f"  [{idx}/{len(entries)}] SKIP  {result['url'][:80]}  {result.get('reason','')}")
+            print(f"  [{idx}/{len(entries)}] SKIP  {url_short}  {result.get('reason','')}", flush=True)
         elif result["status"] == "ok":
             stats["done"] += 1
             done_ids.append(result["entry_id"])
@@ -195,11 +202,11 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
                     ))
             else:
                 stats["empty"] += 1
-            print(f"  [{idx}/{len(entries)}] OK  {result['url'][:80]}  +{len(result['doc_links'])} links")
+            print(f"  [{idx}/{len(entries)}] OK  {url_short}  +{len(result['doc_links'])} links", flush=True)
         else:
             stats["failed"] += 1
             failed_ids.append(result["entry_id"])
-            print(f"  [{idx}/{len(entries)}] FAIL  {result['url'][:80]}  {result.get('error','')}")
+            print(f"  [{idx}/{len(entries)}] FAIL  {url_short}  {result.get('error','')}", flush=True)
 
     browser.close()
     playwright.stop()

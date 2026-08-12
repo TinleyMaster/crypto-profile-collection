@@ -1126,7 +1126,8 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
     """按需查询链上数据（持仓 + 大额转账），先查缓存，缓存未命中则实时拉取。"""
     import subprocess
 
-    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "phase_chain_onchain_query.py")
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_chain_onchain_query.py")
     cmd = [
         sys.executable, "-u", script,
         "--asset-id", str(asset_id),
@@ -1139,15 +1140,18 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         capture_output=True,
         text=True,
         timeout=120,
-        cwd=str(Path(script).parent),
+        cwd=str(scripts_bin),
     )
 
     output = result.stdout.strip()
     stderr_output = result.stderr.strip() if result.stderr else ""
 
     if result.returncode != 0:
-        err_msg = stderr_output or output or f"exit code {result.returncode}"
-        return {"ok": False, "error": err_msg[:500]}
+        # 优先输出 stderr（包含真实错误信息），兜底 exit code
+        err_detail = stderr_output or output
+        if not err_detail:
+            err_detail = f"脚本退出码 {result.returncode}，无 stderr/stdout 输出（脚本路径: {script}）"
+        return {"ok": False, "error": err_detail[:500]}
 
     if not output:
         return {"ok": False, "error": "无输出"}

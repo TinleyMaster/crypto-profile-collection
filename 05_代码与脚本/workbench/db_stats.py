@@ -1232,8 +1232,51 @@ def _get_scripts_bin() -> Path:
 
 
 def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
-    """按需拉取代币解锁数据（从 tokenomist 爬取，失败则 AI 测算）。"""
+    """按需拉取代币解锁数据（先查缓存，未命中则从 tokenomist 爬取，失败则 AI 测算）。"""
     import subprocess
+
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+
+    settings = get_settings(require_database=True)
+
+    # 0. 先查缓存（非 force 模式）
+    if not force:
+        try:
+            with get_connection(settings.database_url) as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(
+                        """SELECT overview_json, unlock_events_json, source_name, slug,
+                                  methodology_json, input_snapshot_json, updated_at
+                           FROM biz.asset_token_unlocks WHERE asset_id = %s""",
+                        (asset_id,),
+                    )
+                    cached = cur.fetchone()
+            if cached:
+                overview = cached.get("overview_json") or {}
+                events = cached.get("unlock_events_json") or []
+                methodology = cached.get("methodology_json") or {}
+                input_snapshot = cached.get("input_snapshot_json") or {}
+                note = ""
+                if isinstance(overview, dict):
+                    note = overview.pop("_note", "") or ""
+                return {
+                    "ok": True,
+                    "data": {
+                        "status": "ok",
+                        "source_name": cached.get("source_name", "缓存"),
+                        "slug": cached.get("slug"),
+                        "overview": overview,
+                        "unlock_events": events,
+                        "note": note,
+                        "methodology": methodology,
+                        "input_snapshot": input_snapshot,
+                        "from_cache": True,
+                        "cached_at": str(cached.get("updated_at", "")),
+                    },
+                }
+        except Exception as e:
+            pass  # 缓存查询失败，继续走实时拉取
 
     scripts_bin = _get_scripts_bin()
     script = str(scripts_bin / "phase_chain_token_unlocks.py")
@@ -1245,19 +1288,25 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
     if force:
         cmd.append("--force")
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=str(scripts_bin),
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=str(scripts_bin),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Tokenomist 爬取超时（180秒），请稍后重试或检查网络"}
 
     output = result.stdout.strip()
     stderr_output = result.stderr.strip() if result.stderr else ""
 
     if result.returncode != 0:
         err_msg = stderr_output or output or f"exit code {result.returncode}"
+        # 如果 stderr 中有 Playwright/浏览器相关错误，给出友好提示
+        if "Executable doesn't exist" in err_msg or "BrowserType.launch" in err_msg:
+            return {"ok": False, "error": "Playwright 浏览器未安装，请运行: playwright install chromium"}
         return {"ok": False, "error": err_msg[:500]}
 
     if not output:

@@ -1689,7 +1689,11 @@
                         <button class="run-btn" id="ulk-run-btn" onclick="queryUnlocksData()">
                             拉取代币解锁数据
                         </button>
+                        <a href="javascript:queryUnlocksData(true)"
+                            style="font-size:11px;color:#9ca3af;margin-left:8px;display:none"
+                            id="ulk-force-link">强制刷新</a>
                         <div id="ulk-detail" style="display:none"></div>
+                        <div id="ulk-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px"></div>
                     </div>
                 </div>
 
@@ -2500,25 +2504,33 @@
             setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
         }
 
-        async function queryUnlocksData () {
+        async function queryUnlocksData (forceRefresh) {
             if (!selectedAssetId) return;
             const btn = document.getElementById('ulk-run-btn');
             const detail = document.getElementById('ulk-detail');
             const indicator = document.getElementById('ulk-indicator');
             const statusEl = document.getElementById('ulk-status');
+            const errEl = document.getElementById('ulk-error');
+            const forceLink = document.getElementById('ulk-force-link');
             const origText = btn.textContent;
 
-            btn.textContent = '⏳ 爬取中...';
+            btn.textContent = forceRefresh ? '⏳ 强制刷新中...' : '⏳ 爬取中...';
             btn.disabled = true;
+            errEl.style.display = 'none';
             try {
-                let res = await fetch('/api/unlocks/query/' + selectedAssetId);
+                let url = '/api/unlocks/query/' + selectedAssetId;
+                if (forceRefresh) url += '?force=1';
+                let res = await fetch(url);
                 let data = await res.json();
                 if (!data.ok) {
-                    let msg = '解锁数据拉取失败: ' + (data.error || '未知错误');
-                    if (data.stderr) msg += '\n\n--- stderr ---\n' + data.stderr;
-                    alert(msg);
+                    errEl.textContent = '拉取失败: ' + (data.error || '未知错误');
+                    if (data.stderr) errEl.textContent += '\n' + data.stderr.slice(0, 300);
+                    errEl.style.display = 'block';
+                    statusEl.textContent = '拉取失败，点击重试';
+                    statusEl.className = 'status-text missing';
                     btn.textContent = origText;
                     btn.disabled = false;
+                    forceLink.style.display = 'inline';
                     return;
                 }
 
@@ -2615,14 +2627,21 @@
                 indicator.className = 'status-indicator success';
 
                 const sourceLabel = d.source_name || '未知来源';
+                const cacheLabel = d.from_cache ? '（缓存 ' + (d.cached_at || '').slice(0, 16) + '）' : '';
                 const noteSuffix = d.note ? ' [' + d.note + ']' : '';
-                statusEl.textContent = '已拉取 (' + events.length + ' 条解锁事件) — 来源: ' + sourceLabel + noteSuffix;
+                statusEl.textContent = '已拉取 (' + events.length + ' 条解锁事件) — ' + sourceLabel + cacheLabel + noteSuffix;
                 statusEl.className = 'status-text';
                 btn.textContent = '✅ 已拉取';
                 btn.classList.add('copied');
+                // 有缓存数据显示强制刷新链接
+                forceLink.style.display = d.from_cache ? 'inline' : 'none';
             } catch (e) {
-                alert('请求失败: ' + e.message);
+                errEl.textContent = '请求失败: ' + e.message;
+                errEl.style.display = 'block';
+                statusEl.textContent = '网络错误，点击重试';
+                statusEl.className = 'status-text missing';
                 btn.textContent = origText;
+                forceLink.style.display = 'inline';
             }
             setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
         }

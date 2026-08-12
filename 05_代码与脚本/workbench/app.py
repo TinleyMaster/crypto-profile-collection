@@ -762,9 +762,10 @@ def api_onchain_query(asset_id: int):
 
 @app.route("/api/unlocks/query/<int:asset_id>")
 def api_unlocks_query(asset_id: int):
-    """按需拉取指定资产的代币解锁数据（从 tokenomist 爬取）。"""
+    """按需拉取指定资产的代币解锁数据（先查缓存，未命中则从 tokenomist 爬取）。"""
     try:
-        data = _get_db_stats().query_token_unlocks(asset_id)
+        force = request.args.get("force", "0") == "1"
+        data = _get_db_stats().query_token_unlocks(asset_id, force=force)
         return jsonify(data)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

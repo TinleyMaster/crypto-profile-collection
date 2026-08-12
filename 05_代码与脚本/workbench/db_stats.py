@@ -1251,7 +1251,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     """AI 根据代币经济学数据测算解锁信息，保存并返回。"""
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
-    from crypto_research.clients.llm_client import LLMClient
+    from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
     settings = get_settings(require_database=True)
     llm = LLMClient(settings, rpm=30)
@@ -1305,18 +1305,11 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
         return {"ok": False, "error": f"LLM 调用失败: {e}",
                 "tokenomist_error": tokenomist_error}
 
-    # 3. 解析 JSON
+    # 3. 解析 JSON（增强提取：处理 LLM 返回 JSON 前后附带文字的情况）
     try:
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            nl = cleaned.find("\n")
-            if nl > 0:
-                cleaned = cleaned[nl + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
-        est = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "AI 返回 JSON 解析失败",
+        est = extract_json_from_llm_response(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"AI 返回 JSON 解析失败: {e}",
                 "raw": raw[:500], "tokenomist_error": tokenomist_error}
 
     overview = est.get("overview", {})

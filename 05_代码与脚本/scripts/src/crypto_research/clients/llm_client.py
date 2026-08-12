@@ -16,6 +16,57 @@ from urllib3.util.retry import Retry
 from crypto_research.config import Settings
 
 
+def extract_json_from_llm_response(raw: str) -> Any:
+    """从 LLM 返回内容中健壮地提取 JSON。
+
+    处理多种情况：
+    - 纯 JSON
+    - markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
+    - JSON 前后有说明文字（从第一个 { 到最后一个 } 提取）
+    - 空内容
+    """
+    if not raw or not raw.strip():
+        raise ValueError("LLM 返回空内容")
+
+    text = raw.strip()
+
+    # 策略1：去除 markdown 代码块后解析
+    cleaned = text
+    if cleaned.startswith("```"):
+        first_line_end = cleaned.find("\n")
+        if first_line_end > 0:
+            cleaned = cleaned[first_line_end + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 策略2：在文本中查找 JSON 对象（{ 到 }）
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # 策略3：查找 markdown 代码块中的 JSON（可能有前置文字）
+    fence_start = text.find("```")
+    if fence_start >= 0:
+        fence_end = text.find("\n", fence_start)
+        if fence_end > 0:
+            inner = text[fence_end + 1:]
+            close_fence = inner.rfind("```")
+            if close_fence > 0:
+                inner_cleaned = inner[:close_fence].strip()
+                return json.loads(inner_cleaned)
+
+    raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
+
+
 class LLMClient:
     """统一 LLM 调用接口。优先 ARK（火山方舟），其次 OpenAI 兼容。"""
 
@@ -270,18 +321,7 @@ class LLMClient:
 
         # 解析 JSON
         try:
-            # 去除 markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                # 去掉开头的 ```json 或 ```
-                first_line_end = cleaned.find("\n")
-                if first_line_end > 0:
-                    cleaned = cleaned[first_line_end + 1:]
-                # 去掉结尾的 ```
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3].strip()
-
-            data = json.loads(cleaned)
+            data = extract_json_from_llm_response(raw)
             results = data.get("results", [])
             if not isinstance(results, list):
                 raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
@@ -408,14 +448,7 @@ class LLMClient:
 
         # 解析 JSON
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                first_line_end = cleaned.find("\n")
-                if first_line_end > 0:
-                    cleaned = cleaned[first_line_end + 1:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3].strip()
-            data = json.loads(cleaned)
+            data = extract_json_from_llm_response(raw)
             results = data.get("results", [])
             if not isinstance(results, list):
                 raise ValueError(f"results 不是列表，类型: {type(results).__name__}")

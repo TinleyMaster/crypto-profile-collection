@@ -36,7 +36,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
-from crypto_research.clients.llm_client import LLMClient
+from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
 
 # ── 配置 ──────────────────────────────────────────────────
@@ -185,15 +185,8 @@ def select_relevant_links(llm: LLMClient, asset: dict, all_links: list[dict]) ->
 
     # 解析 JSON
     try:
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            first_line_end = cleaned.find("\n")
-            if first_line_end > 0:
-                cleaned = cleaned[first_line_end + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
-        selected = json.loads(cleaned)
-    except json.JSONDecodeError:
+        selected = extract_json_from_llm_response(raw)
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"  [WARN] LLM 返回 JSON 解析失败，回退取前 {MAX_PAGES} 个")
         return [d["source_url"] for d in all_links[:MAX_PAGES]]
 
@@ -554,17 +547,10 @@ def extract_with_llm(llm: LLMClient, asset: dict, doc_contents: list[dict],
         print(f"  [ERROR] LLM 调用失败: {e}")
         return None
 
-    # 解析 JSON
+    # 解析 JSON（增强提取）
     try:
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            first_line_end = cleaned.find("\n")
-            if first_line_end > 0:
-                cleaned = cleaned[first_line_end + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
+        return extract_json_from_llm_response(raw)
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"  [ERROR] LLM 返回 JSON 解析失败: {e}")
         print(f"  原始返回前 500 字符: {raw[:500]}")
         return None

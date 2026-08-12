@@ -61,10 +61,49 @@ def _get_llm_config():
 def call_deepseek_ranking(candidates: list[dict], asset_symbol: str, asset_name: str,
                           top_n: int, llm_config: dict) -> list[dict]:
     """调用 DeepSeek（思考模式）对候选链接排序。"""
+
+    def _extract_json(raw: str):
+        """从 LLM 返回内容中健壮地提取 JSON。"""
+        if not raw or not raw.strip():
+            raise ValueError("LLM 返回空内容")
+
+        text = raw.strip()
+        cleaned = text
+        if cleaned.startswith("```"):
+            nl = cleaned.find("\n")
+            if nl > 0:
+                cleaned = cleaned[nl + 1:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        fence_start = text.find("```")
+        if fence_start >= 0:
+            fence_end = text.find("\n", fence_start)
+            if fence_end > 0:
+                inner = text[fence_end + 1:]
+                close_fence = inner.rfind("```")
+                if close_fence > 0:
+                    return json.loads(inner[:close_fence].strip())
+
+        raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
+
+    # 构建候选列表文本
     if not candidates:
         return []
 
-    # 构建候选列表文本
     items_text = []
     for i, c in enumerate(candidates):
         tags = []
@@ -136,16 +175,9 @@ def call_deepseek_ranking(candidates: list[dict], asset_symbol: str, asset_name:
         content = data["choices"][0]["message"].get("reasoning_content") or ""
     print(f"  AI 响应完成，耗时 {elapsed:.1f}s，输出长度 {len(content)}")
 
-    # 解析 JSON
+    # 解析 JSON（增强提取）
     try:
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            first_line_end = cleaned.find("\n")
-            if first_line_end > 0:
-                cleaned = cleaned[first_line_end + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
-        result = json.loads(cleaned)
+        result = _extract_json(content)
         ranked = result.get("ranked", [])
         if not isinstance(ranked, list):
             raise ValueError(f"ranked 不是列表")

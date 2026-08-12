@@ -2641,10 +2641,11 @@
                 let res = await fetch(url);
                 let data = await res.json();
                 if (!data.ok) {
-                    errEl.textContent = '拉取失败: ' + (data.error || '未知错误');
-                    if (data.stderr) errEl.textContent += '\n' + data.stderr.slice(0, 300);
+                    const errMsg = data.error || '未知错误';
+                    const stderrMsg = data.stderr ? ' | ' + data.stderr.slice(0, 200) : '';
+                    errEl.textContent = '拉取失败: ' + errMsg + stderrMsg;
                     errEl.style.display = 'block';
-                    document.getElementById('ulk-status').textContent = '拉取失败，点击重试';
+                    document.getElementById('ulk-status').textContent = '拉取失败: ' + errMsg.slice(0, 60);
                     document.getElementById('ulk-status').className = 'status-text missing';
                     btn.textContent = origText;
                     btn.disabled = false;
@@ -2664,7 +2665,7 @@
             } catch (e) {
                 errEl.textContent = '请求失败: ' + e.message;
                 errEl.style.display = 'block';
-                document.getElementById('ulk-status').textContent = '网络错误，点击重试';
+                document.getElementById('ulk-status').textContent = '网络错误: ' + e.message.slice(0, 60);
                 document.getElementById('ulk-status').className = 'status-text missing';
                 btn.textContent = origText;
                 forceLink.style.display = 'inline';

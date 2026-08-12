@@ -1406,6 +1406,52 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 5. 代币经济学数据:"""
 
 
+def _fetch_cg_price(asset_id: int, settings) -> dict:
+    """从 CoinGecko 获取当前价格、市值、FDV。"""
+    try:
+        import requests
+        from crypto_research.db.conn import get_connection
+
+        # 获取 CG coin_id
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT source_asset_key FROM core.asset_source_map
+                       WHERE asset_id = %s AND source_code = 'cg'""",
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
+
+        coin_id = row[0]
+        url = f"{settings.coingecko_base_url}/simple/price"
+        params = {
+            "ids": coin_id,
+            "vs_currencies": "usd",
+            "include_market_cap": "true",
+            "include_24hr_vol": "false",
+            "include_24hr_change": "false",
+            "include_last_updated_at": "false",
+        }
+        headers = {"Accept": "application/json"}
+        if settings.coingecko_api_key:
+            headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        coin_data = data.get(coin_id, {})
+        return {
+            "price_usd": coin_data.get("usd"),
+            "market_cap_usd": coin_data.get("usd_market_cap"),
+            "fdv_usd": coin_data.get("usd_fully_diluted_valuation"),
+        }
+    except Exception:
+        return {"price_usd": "获取失败", "market_cap_usd": "获取失败", "fdv_usd": "获取失败"}
+
+
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     """AI 根据代币经济学数据测算解锁信息，保存并返回。"""
     from crypto_research.config import get_settings
@@ -1438,12 +1484,18 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             cur.execute("SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s", (asset_id,))
             asset = cur.fetchone()
 
+    # 1.5 获取 CG 价格/市值/FDV（供 AI 估算解锁价值）
+    price_info = _fetch_cg_price(asset_id, settings)
+
     # 2. 构建 prompt
     tokenomics_text = f"""
     代币: {asset['canonical_name']} ({asset['canonical_symbol']})
     总供应: {tkn.get('total_supply')}
     最大供应: {tkn.get('max_supply')}
     流通供应: {tkn.get('circulating_supply')}
+    当前价格: {price_info.get('price_usd', '未获取')} USD
+    市值: {price_info.get('market_cap_usd', '未获取')} USD
+    完全稀释估值(FDV): {price_info.get('fdv_usd', '未获取')} USD
     分配: {json.dumps(tkn.get('allocation_json'), ensure_ascii=False) if tkn.get('allocation_json') else '无'}
     销毁: {tkn.get('burn_info', '无')}
     排放: {tkn.get('emission_schedule', '无')}
@@ -1493,6 +1545,9 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
         "total_supply": _safe_float(tkn.get("total_supply")),
         "max_supply": _safe_float(tkn.get("max_supply")),
         "circulating_supply": _safe_float(tkn.get("circulating_supply")),
+        "price_usd": _safe_float(price_info.get("price_usd")),
+        "market_cap_usd": _safe_float(price_info.get("market_cap_usd")),
+        "fdv_usd": _safe_float(price_info.get("fdv_usd")),
         "allocation": tkn.get("allocation_json"),
         "burn_info": tkn.get("burn_info"),
         "emission_schedule": tkn.get("emission_schedule"),

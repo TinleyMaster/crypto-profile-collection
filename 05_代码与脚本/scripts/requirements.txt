@@ -2,4 +2,5 @@ psycopg[binary]>=3.2
 requests>=2.32
 playwright>=1.52
 PyPDF2>=3.0
+beautifulsoup4>=4.12
 

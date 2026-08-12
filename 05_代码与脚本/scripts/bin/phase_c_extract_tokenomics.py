@@ -110,33 +110,48 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
         )
         docs = cur.fetchall()
 
-        # 如果 tokenomics 文档不够，补充 doc_source_entry 中的相关页面
-        # 优先带 tokenomics 关键词的 URL，其次按 entry_type 优先级
-        if len(docs) < 3:
-            cur.execute(
-                """
-                SELECT dse.entry_id AS doc_id, dse.entry_type AS doc_type,
-                       dse.entry_url AS source_url, NULL AS file_name,
-                       NULL AS storage_path, NULL AS mime_type
-                FROM biz.doc_source_entry dse
-                WHERE dse.asset_id = %s
-                  AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page')
-                  AND dse.deep_crawled_at IS NOT NULL
-                  AND dse.needs_browser = FALSE
-                ORDER BY
-                    CASE WHEN dse.entry_url ILIKE '%%tokenomics%%' THEN 0 ELSE 1 END,
-                    CASE dse.entry_type
-                        WHEN 'whitepaper_page' THEN 1
-                        WHEN 'docs' THEN 2
-                        WHEN 'docs_portal' THEN 3
-                        WHEN 'official_website' THEN 4
-                    END, dse.entry_id
-                LIMIT %s
-                """,
-                (asset_id, MAX_PAGES - len(docs)),
-            )
-            extra = cur.fetchall()
-            docs.extend(extra)
+        # 补充 doc_source_entry 中的相关页面（始终查询，与 doc_asset 合并）
+        # 优先匹配 whitepaper/tokenomics/pdf 关键词，其次按 entry_type 优先级
+        cur.execute(
+            """
+            SELECT dse.entry_id AS doc_id, dse.entry_type AS doc_type,
+                   dse.entry_url AS source_url, NULL AS file_name,
+                   NULL AS storage_path, NULL AS mime_type
+            FROM biz.doc_source_entry dse
+            WHERE dse.asset_id = %s
+              AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page')
+              AND dse.deep_crawled_at IS NOT NULL
+              AND dse.needs_browser = FALSE
+            ORDER BY
+                CASE
+                    WHEN dse.entry_url ILIKE '%%tokenomics%%' THEN 0
+                    WHEN dse.entry_url ILIKE '%%whitepaper%%' THEN 1
+                    WHEN dse.entry_url ILIKE '%%tokenom%%' THEN 1
+                    WHEN dse.entry_url ILIKE '%%.pdf%%' THEN 2
+                    ELSE 3
+                END,
+                CASE dse.entry_type
+                    WHEN 'whitepaper_page' THEN 1
+                    WHEN 'docs' THEN 2
+                    WHEN 'docs_portal' THEN 3
+                    WHEN 'official_website' THEN 4
+                END, dse.entry_id
+            LIMIT %s
+            """,
+            (asset_id, MAX_PAGES),
+        )
+        extra = cur.fetchall()
+
+        # 合并去重（以 source_url 为键，doc_asset 优先保留）
+        seen_urls = {d["source_url"] for d in docs}
+        for e in extra:
+            if e["source_url"] not in seen_urls:
+                seen_urls.add(e["source_url"])
+                docs.append(e)
+
+        # 按优先级排序：doc_asset 优先，doc_source_entry 中 URL 关键词优先
+        # 截断到 MAX_PAGES
+        docs = docs[:MAX_PAGES]
 
     return docs
 

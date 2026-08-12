@@ -177,8 +177,24 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
     db_rows: list[tuple] = []
     done_ids: list[int] = []
     failed_ids: list[int] = []
+    entry_ids = [e["entry_id"] for e in entries]
 
-    # 浏览器启动
+    # 0. 递增重试计数（标记本轮尝试）
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+    try:
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.doc_source_entry SET spa_retry_count = COALESCE(spa_retry_count, 0) + 1 WHERE entry_id = ANY(%s)",
+                    (entry_ids,),
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"  [WARN] 递增重试计数失败: {e}", flush=True)
+
+    # 1. 浏览器启动
     print(f"  [SPA] 启动 Playwright...", flush=True)
     from playwright.sync_api import sync_playwright
 
@@ -275,9 +291,12 @@ def main() -> int:
         print("[SPA crawl] DB 已连接, 查询 SPA 页面...", flush=True)
         try:
             with conn.cursor() as cur:
-                # 确保 spa_crawled_at 列存在
+                # 确保列存在
                 cur.execute("""
                     ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS spa_crawled_at TIMESTAMPTZ
+                """)
+                cur.execute("""
+                    ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS spa_retry_count INTEGER DEFAULT 0
                 """)
                 # 确保 needs_browser 索引存在（partial index，极快）
                 cur.execute("""
@@ -286,17 +305,32 @@ def main() -> int:
                     WHERE needs_browser = TRUE
                 """)
             conn.commit()
+
+            # 先自动清理：spa_retry_count >= 3 的条目直接跳过，不再重试
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    UPDATE biz.doc_source_entry
+                    SET needs_browser = FALSE, spa_crawled_at = NOW()
+                    WHERE needs_browser = TRUE AND spa_retry_count >= 3
+                """)
+                auto_skipped = cur.rowcount
+                if auto_skipped:
+                    conn.commit()
+                    print(f"[SPA crawl] 自动跳过 {auto_skipped} 条重试超限的 SPA 页面", flush=True)
+
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("SET statement_timeout = '30s'")
+                # 按重试次数升序 + entry_id 升序：从未重试过的优先，避免被顽固条目卡死
                 cur.execute(
                     f"""
                     SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id,
                            dse.source_code, dse.entry_type, dse.entry_url,
-                           a.canonical_symbol, a.canonical_name
+                           a.canonical_symbol, a.canonical_name,
+                           COALESCE(dse.spa_retry_count, 0) AS retries
                     FROM biz.doc_source_entry dse
                     LEFT JOIN core.asset a ON dse.asset_id = a.asset_id
                     WHERE dse.needs_browser = TRUE{asset_filter}
-                    ORDER BY dse.entry_id
+                    ORDER BY COALESCE(dse.spa_retry_count, 0) ASC, dse.entry_id
                     LIMIT %s
                     """,
                     asset_params + [args.limit],
@@ -376,7 +410,7 @@ def main() -> int:
         else:
             print(f"  [CLEAR] done_ids 为空，无条目标记清除", flush=True)
 
-    print(f"写入: {written} 条目, 清除标记: {cleared}（{len(result['failed_ids'])} 失败保留重试）")
+    print(f"写入: {written} 条目, 清除标记: {cleared}（{len(result['failed_ids'])} 失败保留重试，已重试次数见 spa_retry_count）")
     print(json.dumps({
         "status": "complete",
         "candidates": len(entries),

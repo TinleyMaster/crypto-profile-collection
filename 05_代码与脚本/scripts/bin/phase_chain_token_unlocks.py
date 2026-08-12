@@ -15,6 +15,8 @@ import sys
 import traceback
 from pathlib import Path
 
+import requests
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
@@ -108,6 +110,42 @@ def guess_slugs(asset: dict) -> list[str]:
     return slugs
 
 
+def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
+    """通过 tokenomist 搜索 API 查找正确的 slug。"""
+    queries = [symbol]
+    if name and name.lower() != symbol.lower():
+        queries.append(name)
+    for q in queries:
+        try:
+            resp = requests.get(
+                "https://tokenomist.ai/api/search",
+                params={"q": q},
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            results = resp.json()
+            if isinstance(results, list) and results:
+                # 结果格式: [{slug: "...", name: "...", symbol: "..."}, ...]
+                # 匹配 symbol 大小写不敏感
+                for r in results:
+                    r_symbol = (r.get("symbol") or "").strip().upper()
+                    if r_symbol == symbol.upper():
+                        slug = r.get("slug") or ""
+                        if slug:
+                            _log(f"  [搜索] 通过 API 找到 slug: {slug}")
+                            return slug
+                # 如果没有精确匹配，取第一个
+                first_slug = (results[0].get("slug") or "").strip()
+                if first_slug:
+                    _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug}")
+                    return first_slug
+        except Exception as e:
+            _log(f"  [搜索API] 查询 '{q}' 失败: {e}")
+    return None
+
+
 # ── 页面爬取 ──────────────────────────────────────────────
 
 def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
@@ -167,8 +205,8 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
                 overview = _extract_overview(page, slug)
                 result["overview"] = overview
 
-                # 判断是否为有效页面：Overview 为空说明 slug 不对
-                if not overview and is_fallback is False and idx + 1 < len(slugs):
+                # 判断是否为有效页面：Overview 为空说明 slug 不对，换下一个
+                if not overview and idx + 1 < len(slugs):
                     _log(f"  Overview 为空，slug 可能不匹配，尝试备选...")
                     browser.close()
                     continue
@@ -200,6 +238,15 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
             _log(traceback.format_exc())
             continue
 
+    # 所有 slug 都失败，尝试 tokenomist 搜索 API
+    if symbol:
+        searched_slug = _search_tokenomist_slug(symbol, "")
+        if searched_slug and searched_slug not in slugs:
+            _log(f"  [搜索兜底] 尝试搜索到的 slug: {searched_slug}")
+            # 递归调用自己，只试这一个 slug
+            return scrape_tokenomist([searched_slug], symbol)
+
+    _log(f"  所有 slug 均失败，该代币可能未被 tokenomist 收录")
     return None
 
 

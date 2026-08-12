@@ -1317,8 +1317,6 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         "--asset-id", str(asset_id),
         "--save",
     ]
-    if force:
-        cmd.append("--force")
 
     try:
         result = subprocess.run(

@@ -23,6 +23,7 @@ def extract_json_from_llm_response(raw: str) -> Any:
     - 纯 JSON
     - markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
     - JSON 前后有说明文字（从第一个 { 到最后一个 } 提取）
+    - 被截断的 JSON（max_tokens 不足导致末尾不完整）
     - 空内容
     """
     if not raw or not raw.strip():
@@ -62,7 +63,31 @@ def extract_json_from_llm_response(raw: str) -> Any:
             close_fence = inner.rfind("```")
             if close_fence > 0:
                 inner_cleaned = inner[:close_fence].strip()
-                return json.loads(inner_cleaned)
+                try:
+                    return json.loads(inner_cleaned)
+                except json.JSONDecodeError:
+                    pass
+
+    # 策略4：处理被截断的 JSON（max_tokens 不足导致末尾不完整）
+    # 从第一个 { 开始，尝试在最后一个完整键值对处截断并补上 }
+    if start >= 0:
+        candidate = text[start:]
+        # 找到最后一个逗号（键值对分隔符），去掉不完整的后半部分，补 }
+        last_comma = candidate.rfind(",")
+        if last_comma > 0:
+            try:
+                fixed = candidate[:last_comma] + "}"
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                pass
+        # 如果逗号方案失败，尝试在最后一个完整值（} 或 ] 或 "）处截断
+        for ch in ('"}', ']', '"'):
+            pos = candidate.rfind(ch)
+            if pos > 0:
+                try:
+                    return json.loads(candidate[:pos + len(ch)])
+                except json.JSONDecodeError:
+                    continue
 
     raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
 

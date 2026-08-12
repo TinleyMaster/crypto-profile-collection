@@ -760,6 +760,18 @@ def api_onchain_query(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/unlocks/<int:asset_id>")
+def api_unlocks_get(asset_id: int):
+    """读取已缓存的代币解锁数据（只读，不触发爬取）。"""
+    try:
+        data = _get_db_stats().get_asset_unlocks(asset_id)
+        if data:
+            return jsonify({"ok": True, "data": data})
+        return jsonify({"ok": False, "error": "无缓存数据"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/unlocks/query/<int:asset_id>")
 def api_unlocks_query(asset_id: int):
     """按需拉取指定资产的代币解锁数据（先查缓存，未命中则从 tokenomist 爬取）。"""

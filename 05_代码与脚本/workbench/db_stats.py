@@ -1231,6 +1231,38 @@ def _get_scripts_bin() -> Path:
     return Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin"
 
 
+def get_asset_unlocks(asset_id: int) -> dict | None:
+    """读取已缓存的解锁数据（只读，不触发爬取）。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT overview_json, unlock_events_json, source_name, slug,
+                          methodology_json, input_snapshot_json, updated_at
+                   FROM biz.asset_token_unlocks WHERE asset_id = %s""",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    overview = row.get("overview_json") or {}
+    events = row.get("unlock_events_json") or []
+    methodology = row.get("methodology_json") or {}
+    input_snapshot = row.get("input_snapshot_json") or {}
+    note = ""
+    if isinstance(overview, dict):
+        note = overview.pop("_note", "") or ""
+    return {
+        "source_name": row.get("source_name", "缓存"),
+        "slug": row.get("slug"),
+        "overview": overview,
+        "unlock_events": events,
+        "note": note,
+        "methodology": methodology,
+        "input_snapshot": input_snapshot,
+        "updated_at": str(row.get("updated_at", "")),
+    }
+
+
 def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
     """按需拉取代币解锁数据（先查缓存，未命中则从 tokenomist 爬取，失败则 AI 测算）。"""
     import subprocess

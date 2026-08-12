@@ -2214,6 +2214,19 @@
                 setTokenomicsMissing();
             }
 
+            // 加载解锁数据缓存
+            try {
+                const res = await fetch(`/api/unlocks/${assetId}`);
+                const data = await res.json();
+                if (data.ok && data.data) {
+                    renderUnlocks(data.data);
+                } else {
+                    setUnlocksMissing();
+                }
+            } catch (e) {
+                setUnlocksMissing();
+            }
+
             // 链上数据状态
             try {
                 const res = await fetch(`/api/assets/${assetId}/materials`);
@@ -2238,6 +2251,114 @@
             document.getElementById('onchain-indicator').className = 'status-indicator ' + cls;
             document.getElementById('onchain-status').textContent = text;
             document.getElementById('onchain-status').className = 'status-text ' + (cls === 'missing' ? 'missing' : '');
+        }
+
+        function setUnlocksMissing () {
+            document.getElementById('ulk-indicator').className = 'status-indicator missing';
+            document.getElementById('ulk-status').textContent = '暂无数据';
+            document.getElementById('ulk-status').className = 'status-text missing';
+            document.getElementById('ulk-run-btn').textContent = '拉取代币解锁数据';
+            document.getElementById('ulk-run-btn').disabled = false;
+            document.getElementById('ulk-detail').style.display = 'none';
+            document.getElementById('ulk-force-link').style.display = 'none';
+            document.getElementById('ulk-error').style.display = 'none';
+        }
+
+        function renderUnlocks (d) {
+            const indicator = document.getElementById('ulk-indicator');
+            const statusEl = document.getElementById('ulk-status');
+            const btn = document.getElementById('ulk-run-btn');
+            const detail = document.getElementById('ulk-detail');
+            const forceLink = document.getElementById('ulk-force-link');
+            const errEl = document.getElementById('ulk-error');
+
+            indicator.className = 'status-indicator success';
+            const ov = d.overview || {};
+            const events = d.unlock_events || [];
+
+            const sourceLabel = d.source_name || '缓存';
+            const cacheLabel = '（' + (d.updated_at || '').slice(0, 16) + '）';
+            const noteSuffix = d.note ? ' [' + d.note + ']' : '';
+            statusEl.textContent = '已拉取 (' + events.length + ' 条解锁事件) — ' + sourceLabel + cacheLabel + noteSuffix;
+            statusEl.className = 'status-text';
+            btn.textContent = '重新拉取';
+            btn.disabled = false;
+            btn.classList.remove('running');
+            forceLink.style.display = 'inline';
+            errEl.style.display = 'none';
+
+            let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
+
+            if (ov.released_pct != null) {
+                html += '<strong>释放进度:</strong> ' + ov.released_pct + '%';
+                if (ov.released_amount_str) html += ' (' + ov.released_amount_str + ' / ' + ov.total_amount_str + ')';
+                html += '<br>';
+            }
+            if (ov.market_cap_str) html += '<strong>市值:</strong> ' + ov.market_cap_str + '<br>';
+            if (ov.fdv_str) html += '<strong>FDV:</strong> ' + ov.fdv_str + '<br>';
+            if (ov.float_pct != null) html += '<strong>流通率:</strong> ' + ov.float_pct + '%<br>';
+
+            if (ov.next_unlock_date) {
+                html += '<strong>下一次解锁:</strong><br>';
+                html += '&nbsp;&nbsp;日期: ' + ov.next_unlock_date + '<br>';
+                if (ov.next_unlock_value_str) html += '&nbsp;&nbsp;价值: ' + ov.next_unlock_value_str + '<br>';
+                if (ov.next_unlock_pct != null) html += '&nbsp;&nbsp;占比: ' + ov.next_unlock_pct + '%<br>';
+                if (ov.next_unlock_when) html += '&nbsp;&nbsp;时间: ' + ov.next_unlock_when + '<br>';
+            }
+
+            if (events.length > 0) {
+                html += '<br><strong>近期解锁事件:</strong><br>';
+                const futureEv = events.filter(e => e.is_upcoming).slice(0, 3);
+                const pastEv = events.filter(e => !e.is_upcoming).slice(0, 3);
+                for (const e of [...futureEv, ...pastEv]) {
+                    const icon = e.is_upcoming ? '🔜' : '✅';
+                    html += icon + ' ' + e.date + ' ' + (e.value_str || e.amount_str || '') + ' (' + (e.pct || '?') + '%)<br>';
+                }
+            }
+
+            if (d.methodology && Object.keys(d.methodology).length > 0) {
+                html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">📋 测算依据</summary>';
+                html += '<div style="font-size:11px;color:#6b7280;margin-top:4px;padding:4px 8px;background:#f9fafb;border-radius:4px;max-height:300px;overflow:auto">';
+                const m = d.methodology;
+                if (m.confidence) {
+                    const confColor = m.confidence.startsWith('high') ? '#059669' : m.confidence.startsWith('medium') ? '#d97706' : '#dc2626';
+                    html += '<strong>置信度:</strong> <span style="color:' + confColor + '">' + m.confidence + '</span><br>';
+                }
+                if (m.data_sources && m.data_sources.length > 0) {
+                    html += '<strong>数据来源:</strong> ' + m.data_sources.join(', ') + '<br>';
+                }
+                if (m.key_assumptions) {
+                    html += '<br><strong>关键假设:</strong><br>';
+                    const ka = m.key_assumptions;
+                    if (ka.tge_date) html += '&nbsp;&nbsp;TGE: ' + ka.tge_date + '<br>';
+                    if (ka.release_curve) html += '&nbsp;&nbsp;释放曲线: ' + ka.release_curve + '<br>';
+                    if (ka.cliff_vesting_rules && typeof ka.cliff_vesting_rules === 'object') {
+                        html += '&nbsp;&nbsp;解锁规则:<br>';
+                        for (const [group, rule] of Object.entries(ka.cliff_vesting_rules)) {
+                            html += '&nbsp;&nbsp;&nbsp;&nbsp;' + group + ': ' + rule + '<br>';
+                        }
+                    }
+                }
+                if (m.calculation_steps && m.calculation_steps.length > 0) {
+                    html += '<br><strong>计算过程:</strong><br>';
+                    for (const step of m.calculation_steps) {
+                        html += '&nbsp;&nbsp;' + step + '<br>';
+                    }
+                }
+                if (d.input_snapshot) {
+                    html += '<br><strong>输入数据:</strong><br>';
+                    const inp = d.input_snapshot;
+                    if (inp.total_supply) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
+                    if (inp.max_supply) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
+                    if (inp.circulating_supply) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';
+                    if (inp.confidence) html += '&nbsp;&nbsp;数据置信度: ' + inp.confidence + '<br>';
+                }
+                html += '</div></details>';
+            }
+
+            html += '</div>';
+            detail.innerHTML = html;
+            detail.style.display = 'block';
         }
 
         function renderTokenomics (t) {
@@ -2507,11 +2628,8 @@
         async function queryUnlocksData (forceRefresh) {
             if (!selectedAssetId) return;
             const btn = document.getElementById('ulk-run-btn');
-            const detail = document.getElementById('ulk-detail');
-            const indicator = document.getElementById('ulk-indicator');
-            const statusEl = document.getElementById('ulk-status');
-            const errEl = document.getElementById('ulk-error');
             const forceLink = document.getElementById('ulk-force-link');
+            const errEl = document.getElementById('ulk-error');
             const origText = btn.textContent;
 
             btn.textContent = forceRefresh ? '⏳ 强制刷新中...' : '⏳ 爬取中...';
@@ -2526,124 +2644,32 @@
                     errEl.textContent = '拉取失败: ' + (data.error || '未知错误');
                     if (data.stderr) errEl.textContent += '\n' + data.stderr.slice(0, 300);
                     errEl.style.display = 'block';
-                    statusEl.textContent = '拉取失败，点击重试';
-                    statusEl.className = 'status-text missing';
+                    document.getElementById('ulk-status').textContent = '拉取失败，点击重试';
+                    document.getElementById('ulk-status').className = 'status-text missing';
                     btn.textContent = origText;
                     btn.disabled = false;
                     forceLink.style.display = 'inline';
                     return;
                 }
 
-                const d = data.data;
-                const ov = d.overview || {};
-                const events = d.unlock_events || [];
-
-                let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
-
-                // Overview
-                if (ov.released_pct != null) {
-                    html += '<strong>释放进度:</strong> ' + ov.released_pct + '%';
-                    if (ov.released_amount_str) html += ' (' + ov.released_amount_str + ' / ' + ov.total_amount_str + ')';
-                    html += '<br>';
-                }
-                if (ov.market_cap_str) html += '<strong>市值:</strong> ' + ov.market_cap_str + '<br>';
-                if (ov.fdv_str) html += '<strong>FDV:</strong> ' + ov.fdv_str + '<br>';
-                if (ov.float_pct != null) html += '<strong>流通率:</strong> ' + ov.float_pct + '%<br>';
-
-                // Next unlock
-                if (ov.next_unlock_date) {
-                    html += '<strong>下一次解锁:</strong><br>';
-                    html += '&nbsp;&nbsp;日期: ' + ov.next_unlock_date + '<br>';
-                    if (ov.next_unlock_value_str) html += '&nbsp;&nbsp;价值: ' + ov.next_unlock_value_str + '<br>';
-                    if (ov.next_unlock_pct != null) html += '&nbsp;&nbsp;占比: ' + ov.next_unlock_pct + '%<br>';
-                    if (ov.next_unlock_when) html += '&nbsp;&nbsp;时间: ' + ov.next_unlock_when + '<br>';
-                }
-
-                // Unlock events
-                if (events.length > 0) {
-                    html += '<br><strong>近期解锁事件:</strong><br>';
-                    const futureEv = events.filter(e => e.is_upcoming).slice(0, 3);
-                    const pastEv = events.filter(e => !e.is_upcoming).slice(0, 3);
-                    for (const e of [...futureEv, ...pastEv]) {
-                        const icon = e.is_upcoming ? '🔜' : '✅';
-                        html += icon + ' ' + e.date + ' ' + e.value_str + ' (' + e.pct + '%)<br>';
-                    }
-                }
-
-                // 测算依据（AI 测算时展示）
-                if (d.methodology && Object.keys(d.methodology).length > 0) {
-                    html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">📋 测算依据</summary>';
-                    html += '<div style="font-size:11px;color:#6b7280;margin-top:4px;padding:4px 8px;background:#f9fafb;border-radius:4px;max-height:300px;overflow:auto">';
-
-                    const m = d.methodology;
-                    if (m.confidence) {
-                        const confColor = m.confidence.startsWith('high') ? '#059669' : m.confidence.startsWith('medium') ? '#d97706' : '#dc2626';
-                        html += '<strong>置信度:</strong> <span style="color:' + confColor + '">' + m.confidence + '</span><br>';
-                    }
-                    if (m.data_sources && m.data_sources.length > 0) {
-                        html += '<strong>数据来源:</strong> ' + m.data_sources.join(', ') + '<br>';
-                    }
-                    if (m.key_assumptions) {
-                        html += '<br><strong>关键假设:</strong><br>';
-                        const ka = m.key_assumptions;
-                        if (ka.tge_date) html += '&nbsp;&nbsp;TGE: ' + ka.tge_date + '<br>';
-                        if (ka.release_curve) html += '&nbsp;&nbsp;释放曲线: ' + ka.release_curve + '<br>';
-                        if (ka.cliff_vesting_rules && typeof ka.cliff_vesting_rules === 'object') {
-                            html += '&nbsp;&nbsp;解锁规则:<br>';
-                            for (const [group, rule] of Object.entries(ka.cliff_vesting_rules)) {
-                                html += '&nbsp;&nbsp;&nbsp;&nbsp;' + group + ': ' + rule + '<br>';
-                            }
-                        }
-                    }
-                    if (m.calculation_steps && m.calculation_steps.length > 0) {
-                        html += '<br><strong>计算过程:</strong><br>';
-                        for (const step of m.calculation_steps) {
-                            html += '&nbsp;&nbsp;' + step + '<br>';
-                        }
-                    }
-                    // 输入数据快照
-                    if (d.input_snapshot) {
-                        html += '<br><strong>输入数据:</strong><br>';
-                        const inp = d.input_snapshot;
-                        if (inp.total_supply) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
-                        if (inp.max_supply) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
-                        if (inp.circulating_supply) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';
-                        if (inp.confidence) html += '&nbsp;&nbsp;数据置信度: ' + inp.confidence + '<br>';
-                    }
-                    html += '</div></details>';
-                }
-
-                // 爬取日志
+                // 拉取成功，用 renderUnlocks 统一渲染（会设置按钮为"重新拉取"）
+                renderUnlocks(data.data);
+                // 如果有爬取日志，追加显示
                 if (data.stderr) {
-                    html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">爬取日志</summary>';
-                    html += '<pre style="font-size:10px;color:#9ca3af;max-height:200px;overflow:auto;margin-top:4px">' + data.stderr + '</pre>';
-                    html += '</details>';
+                    const detail = document.getElementById('ulk-detail');
+                    detail.innerHTML += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">爬取日志</summary>';
+                    detail.innerHTML += '<pre style="font-size:10px;color:#9ca3af;max-height:200px;overflow:auto;margin-top:4px">' + data.stderr + '</pre>';
+                    detail.innerHTML += '</details>';
                 }
-
-                html += '</div>';
-
-                detail.innerHTML = html;
-                detail.style.display = 'block';
-                indicator.className = 'status-indicator success';
-
-                const sourceLabel = d.source_name || '未知来源';
-                const cacheLabel = d.from_cache ? '（缓存 ' + (d.cached_at || '').slice(0, 16) + '）' : '';
-                const noteSuffix = d.note ? ' [' + d.note + ']' : '';
-                statusEl.textContent = '已拉取 (' + events.length + ' 条解锁事件) — ' + sourceLabel + cacheLabel + noteSuffix;
-                statusEl.className = 'status-text';
-                btn.textContent = '✅ 已拉取';
-                btn.classList.add('copied');
-                // 有缓存数据显示强制刷新链接
-                forceLink.style.display = d.from_cache ? 'inline' : 'none';
             } catch (e) {
                 errEl.textContent = '请求失败: ' + e.message;
                 errEl.style.display = 'block';
-                statusEl.textContent = '网络错误，点击重试';
-                statusEl.className = 'status-text missing';
+                document.getElementById('ulk-status').textContent = '网络错误，点击重试';
+                document.getElementById('ulk-status').className = 'status-text missing';
                 btn.textContent = origText;
                 forceLink.style.display = 'inline';
             }
-            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
+            setTimeout(() => { btn.classList.remove('running'); btn.disabled = false; }, 3000);
         }
 
         async function runResearch (taskKey) {

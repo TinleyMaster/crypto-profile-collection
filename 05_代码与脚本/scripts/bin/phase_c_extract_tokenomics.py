@@ -110,7 +110,8 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
         )
         docs = cur.fetchall()
 
-        # 如果 tokenomics 文档不够，补充官网的 deep_crawl 子页面
+        # 如果 tokenomics 文档不够，补充 doc_source_entry 中的相关页面
+        # 优先带 tokenomics 关键词的 URL，其次按 entry_type 优先级
         if len(docs) < 3:
             cur.execute(
                 """
@@ -119,9 +120,17 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
                        NULL AS storage_path, NULL AS mime_type
                 FROM biz.doc_source_entry dse
                 WHERE dse.asset_id = %s
-                  AND dse.entry_type = 'official_website'
+                  AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page')
                   AND dse.deep_crawled_at IS NOT NULL
                   AND dse.needs_browser = FALSE
+                ORDER BY
+                    CASE WHEN dse.entry_url ILIKE '%%tokenomics%%' THEN 0 ELSE 1 END,
+                    CASE dse.entry_type
+                        WHEN 'whitepaper_page' THEN 1
+                        WHEN 'docs' THEN 2
+                        WHEN 'docs_portal' THEN 3
+                        WHEN 'official_website' THEN 4
+                    END, dse.entry_id
                 LIMIT %s
                 """,
                 (asset_id, MAX_PAGES - len(docs)),

@@ -1482,14 +1482,21 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             e["pct"] = e.pop("pct_of_total")
 
     # 输入数据快照（供后续核验）
+    def _safe_float(v):
+        """将 Decimal 等类型转为 float，确保 JSON 可序列化。"""
+        from decimal import Decimal
+        if isinstance(v, Decimal):
+            return float(v)
+        return v
+
     input_snapshot = {
-        "total_supply": tkn.get("total_supply"),
-        "max_supply": tkn.get("max_supply"),
-        "circulating_supply": tkn.get("circulating_supply"),
+        "total_supply": _safe_float(tkn.get("total_supply")),
+        "max_supply": _safe_float(tkn.get("max_supply")),
+        "circulating_supply": _safe_float(tkn.get("circulating_supply")),
         "allocation": tkn.get("allocation_json"),
         "burn_info": tkn.get("burn_info"),
         "emission_schedule": tkn.get("emission_schedule"),
-        "confidence": tkn.get("confidence"),
+        "confidence": _safe_float(tkn.get("confidence")),
         "source_urls": tkn.get("source_urls", []),
     }
 

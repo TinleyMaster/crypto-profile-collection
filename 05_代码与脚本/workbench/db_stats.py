@@ -1169,7 +1169,7 @@ def _get_scripts_bin() -> Path:
 
 
 def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
-    """按需拉取代币解锁数据（从 tokenomist 爬取）。"""
+    """按需拉取代币解锁数据（从 tokenomist 爬取，失败则 AI 测算）。"""
     import subprocess
 
     scripts_bin = _get_scripts_bin()
@@ -1204,6 +1204,165 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         data = json.loads(output)
         if data.get("status") == "ok":
             return {"ok": True, "data": data, "stderr": stderr_output[:1000]}
-        return {"ok": False, "error": str(data.get("message", "查询失败")), "stderr": stderr_output[:500]}
+        # tokenomist 没收录 → 尝试 AI 测算
+        return _ai_estimate_unlocks(asset_id, stderr_output[:500])
     except json.JSONDecodeError:
         return {"ok": False, "error": (stderr_output or output)[:500]}
+
+
+AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根据以下代币经济学数据，估算该代币的解锁时间表。
+
+请返回一个 JSON，格式如下：
+{
+  "overview": {
+    "released_pct": 已释放百分比(数字),
+    "total_amount_str": "总供应量",
+    "released_amount_str": "已释放量",
+    "next_unlock_date": "下一次解锁日期",
+    "next_unlock_amount_str": "下一次解锁数量",
+    "next_unlock_pct": 下一次解锁占总量百分比(数字),
+    "next_unlock_value_str": "下一次解锁估值",
+    "market_cap_str": "市值",
+    "fdv_str": "完全稀释估值",
+    "float_pct": 流通率(数字),
+    "allocation": [{"group": "分组名", "pct": 百分比(数字), "cliff_months": 锁定期月数, "vesting_months": 线性释放月数, "tge_unlock_pct": TGE解锁百分比(数字)}]
+  },
+  "unlock_events": [
+    {"date": "2026-08-15", "amount_str": "10M", "pct_of_total": 1.0, "value_str": "$1M", "label": "Team vesting"}
+  ],
+  "note": "估算方法和假设（一句话）"
+}
+
+规则：
+1. 如果有明确的解锁时间表（cliff + vesting），按时间线逐月生成 unlock_events（未来12个月的关键事件）
+2. 如果没有明确时间表，给出合理的行业常规估计（如 Team 1年cliff + 3年vesting，Investor 1年cliff + 2年vesting）
+3. overview 中 released_pct 估算当前已流通比例
+4. 代币经济学数据:"""
+
+
+def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
+    """AI 根据代币经济学数据测算解锁信息，保存并返回。"""
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+    from crypto_research.clients.llm_client import LLMClient
+
+    settings = get_settings(require_database=True)
+    llm = LLMClient(settings, rpm=30)
+    if not llm.is_available():
+        return {"ok": False, "error": "LLM 未配置，无法 AI 测算", "tokenomist_error": tokenomist_error}
+
+    # 1. 获取代币经济学数据
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT total_supply, max_supply, circulating_supply,
+                          allocation_json, burn_info, emission_schedule,
+                          governance_info, utility_info, confidence, source_urls
+                   FROM biz.asset_tokenomics WHERE asset_id = %s""",
+                (asset_id,),
+            )
+            tkn = cur.fetchone()
+
+        if not tkn:
+            return {"ok": False, "error": "无代币经济学数据，无法 AI 测算",
+                    "tokenomist_error": tokenomist_error}
+
+        # 获取 symbol/name
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s", (asset_id,))
+            asset = cur.fetchone()
+
+    # 2. 构建 prompt
+    tokenomics_text = f"""
+    代币: {asset['canonical_name']} ({asset['canonical_symbol']})
+    总供应: {tkn.get('total_supply')}
+    最大供应: {tkn.get('max_supply')}
+    流通供应: {tkn.get('circulating_supply')}
+    分配: {json.dumps(tkn.get('allocation_json'), ensure_ascii=False) if tkn.get('allocation_json') else '无'}
+    销毁: {tkn.get('burn_info', '无')}
+    排放: {tkn.get('emission_schedule', '无')}
+    治理: {tkn.get('governance_info', '无')}
+    用途: {tkn.get('utility_info', '无')}
+    数据来源: {json.dumps(tkn.get('source_urls', []), ensure_ascii=False)}
+    置信度: {tkn.get('confidence')}
+    """
+
+    prompt = AI_UNLOCK_PROMPT + "\n" + tokenomics_text
+
+    try:
+        raw = llm.chat(
+            "你是一个加密货币解锁时间表分析专家。只输出 JSON。",
+            prompt, temperature=0.1, max_tokens=4096,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败: {e}",
+                "tokenomist_error": tokenomist_error}
+
+    # 3. 解析 JSON
+    try:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            nl = cleaned.find("\n")
+            if nl > 0:
+                cleaned = cleaned[nl + 1:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()
+        est = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "AI 返回 JSON 解析失败",
+                "raw": raw[:500], "tokenomist_error": tokenomist_error}
+
+    overview = est.get("overview", {})
+    unlock_events = est.get("unlock_events", [])
+    note = est.get("note", "")
+
+    # 4. 保存到数据库
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            # 确保表存在
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.asset_token_unlocks (
+                    asset_id INTEGER PRIMARY KEY REFERENCES core.asset(asset_id),
+                    source_url TEXT,
+                    source_name TEXT DEFAULT 'tokenomist',
+                    slug TEXT,
+                    overview_json JSONB,
+                    unlock_events_json JSONB,
+                    scraped_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                INSERT INTO biz.asset_token_unlocks (
+                    asset_id, source_url, source_name, slug,
+                    overview_json, unlock_events_json, scraped_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    source_url = EXCLUDED.source_url,
+                    source_name = EXCLUDED.source_name,
+                    slug = EXCLUDED.slug,
+                    overview_json = EXCLUDED.overview_json,
+                    unlock_events_json = EXCLUDED.unlock_events_json,
+                    updated_at = NOW()
+            """, (
+                asset_id,
+                f"AI估算基于tokenomics数据 asset_id={asset_id}",
+                "AI测算",
+                f"ai_estimate_{asset_id}",
+                json.dumps(overview, ensure_ascii=False),
+                json.dumps(unlock_events, ensure_ascii=False),
+            ))
+        conn.commit()
+
+    return {
+        "ok": True,
+        "data": {
+            "source_name": "AI测算",
+            "overview": overview,
+            "unlock_events": unlock_events,
+            "note": note,
+            "asset_id": asset_id,
+            "symbol": asset["canonical_symbol"],
+            "name": asset["canonical_name"],
+        },
+    }

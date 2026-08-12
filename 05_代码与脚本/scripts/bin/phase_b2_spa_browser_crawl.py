@@ -150,11 +150,13 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
     done_ids: list[int] = []
     failed_ids: list[int] = []
 
-    # 浏览器启动（run_batch 本身就在 ThreadPoolExecutor 里，外部有总超时 BATCH_TIMEOUT）
+    # 浏览器启动
+    print(f"  [SPA] 启动 Playwright...", flush=True)
     from playwright.sync_api import sync_playwright
 
     try:
         playwright = sync_playwright().start()
+        print(f"  [SPA] Playwright 已启动, 启动 Chromium...", flush=True)
         browser = playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
@@ -163,7 +165,7 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
         print(f"  [ERROR] 浏览器启动失败: {e}")
         return {"stats": stats, "db_rows": [], "done_ids": [], "failed_ids": [e["entry_id"] for e in entries]}
 
-    print(f"  Chromium 已启动，开始爬取 {len(entries)} 个 SPA 页面...")
+    print(f"  [SPA] Chromium 已启动，开始爬取 {len(entries)} 个 SPA 页面...", flush=True)
 
     # 串行爬取（Playwright sync API 的 browser 对象绑定创建线程，不能跨线程）
     for i, entry in enumerate(entries):
@@ -278,30 +280,13 @@ def main() -> int:
         print(json.dumps({"status": "no_candidates"}, ensure_ascii=False))
         return 0
 
-    print(f"待处理 SPA 页面: {len(entries)}, 并发: {args.concurrency}")
-    print()
+    print(f"待处理 SPA 页面: {len(entries)}, 并发: {args.concurrency}", flush=True)
 
     start_time = time.time()
     same_domain_only = not args.all_domains
 
-    # 线程级超时兜底：防止浏览器启动/页面加载时无限期挂起
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as timeout_executor:
-        future = timeout_executor.submit(
-            run_batch, entries, args.concurrency, same_domain_only
-        )
-        try:
-            result = future.result(timeout=BATCH_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            print(f"\n  [ERROR] 整批处理超时（{BATCH_TIMEOUT}s），跳过本轮。")
-            print(json.dumps({
-                "status": "timeout",
-                "candidates": len(entries),
-                "done": 0,
-                "failed": len(entries),
-                "discovered": 0,
-                "elapsed_sec": BATCH_TIMEOUT,
-            }, ensure_ascii=False))
-            return 0
+    print(f"[SPA crawl] 开始爬取...", flush=True)
+    result = run_batch(entries, args.concurrency, same_domain_only)
 
     stats = result["stats"]
     elapsed = time.time() - start_time

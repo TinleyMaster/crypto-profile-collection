@@ -119,16 +119,19 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
                    NULL AS storage_path, NULL AS mime_type
             FROM biz.doc_source_entry dse
             WHERE dse.asset_id = %s
-              AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page')
+              AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page', 'other')
               AND dse.deep_crawled_at IS NOT NULL
               AND dse.needs_browser = FALSE
             ORDER BY
                 CASE
                     WHEN dse.entry_url ILIKE '%%tokenomics%%' THEN 0
+                    WHEN dse.entry_url ILIKE '%%economics%%' THEN 0
+                    WHEN dse.entry_url ILIKE '%%staking%%' THEN 0
                     WHEN dse.entry_url ILIKE '%%whitepaper%%' THEN 1
                     WHEN dse.entry_url ILIKE '%%tokenom%%' THEN 1
-                    WHEN dse.entry_url ILIKE '%%.pdf%%' THEN 2
-                    ELSE 3
+                    WHEN dse.entry_url ILIKE '%%tokenization%%' THEN 2
+                    WHEN dse.entry_url ILIKE '%%.pdf%%' THEN 3
+                    ELSE 4
                 END,
                 CASE dse.entry_type
                     WHEN 'whitepaper_page' THEN 1

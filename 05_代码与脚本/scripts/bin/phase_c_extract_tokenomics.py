@@ -85,33 +85,30 @@ def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None
     return None
 
 
-def collect_doc_pages(conn, asset_id: int) -> list[dict]:
-    """收集该资产下所有可用于 tokenomics 提取的文档页面。"""
+def collect_all_links(conn, asset_id: int) -> list[dict]:
+    """收集该资产下所有可能的文档链接（不做筛选，交给 AI 选）。"""
+    docs: list[dict] = []
+    seen_urls: set[str] = set()
+
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        # 优先 tokenomics/whitepaper/docs 类型的 doc_asset
+        # doc_asset 中的文档
         cur.execute(
             """
             SELECT da.doc_id, da.doc_type, da.source_url, da.file_name,
                    da.storage_path, da.mime_type
             FROM biz.doc_asset da
             WHERE da.asset_id = %s
-              AND da.doc_type IN ('tokenomics', 'whitepaper', 'docs', 'deck', 'other')
-            ORDER BY
-                CASE da.doc_type
-                    WHEN 'tokenomics' THEN 1
-                    WHEN 'whitepaper' THEN 2
-                    WHEN 'docs' THEN 3
-                    WHEN 'deck' THEN 4
-                    ELSE 5
-                END, da.doc_id
-            LIMIT %s
+            ORDER BY da.doc_id
             """,
-            (asset_id, MAX_PAGES),
+            (asset_id,),
         )
-        docs = cur.fetchall()
+        for row in cur.fetchall():
+            url = row["source_url"]
+            if url not in seen_urls:
+                seen_urls.add(url)
+                docs.append(row)
 
-        # 补充 doc_source_entry 中的相关页面（始终查询，与 doc_asset 合并）
-        # 优先匹配 whitepaper/tokenomics/pdf 关键词，其次按 entry_type 优先级
+        # doc_source_entry 中已爬取的页面
         cur.execute(
             """
             SELECT dse.entry_id AS doc_id, dse.entry_type AS doc_type,
@@ -119,44 +116,104 @@ def collect_doc_pages(conn, asset_id: int) -> list[dict]:
                    NULL AS storage_path, NULL AS mime_type
             FROM biz.doc_source_entry dse
             WHERE dse.asset_id = %s
-              AND dse.entry_type IN ('official_website', 'docs', 'docs_portal', 'whitepaper_page', 'other')
               AND dse.deep_crawled_at IS NOT NULL
               AND dse.needs_browser = FALSE
-            ORDER BY
-                CASE
-                    WHEN dse.entry_url ILIKE '%%tokenomics%%' THEN 0
-                    WHEN dse.entry_url ILIKE '%%economics%%' THEN 0
-                    WHEN dse.entry_url ILIKE '%%staking%%' THEN 0
-                    WHEN dse.entry_url ILIKE '%%whitepaper%%' THEN 1
-                    WHEN dse.entry_url ILIKE '%%tokenom%%' THEN 1
-                    WHEN dse.entry_url ILIKE '%%tokenization%%' THEN 2
-                    WHEN dse.entry_url ILIKE '%%.pdf%%' THEN 3
-                    ELSE 4
-                END,
-                CASE dse.entry_type
-                    WHEN 'whitepaper_page' THEN 1
-                    WHEN 'docs' THEN 2
-                    WHEN 'docs_portal' THEN 3
-                    WHEN 'official_website' THEN 4
-                END, dse.entry_id
-            LIMIT %s
+            ORDER BY dse.entry_id
             """,
-            (asset_id, MAX_PAGES),
+            (asset_id,),
         )
-        extra = cur.fetchall()
-
-        # 合并去重（以 source_url 为键，doc_asset 优先保留）
-        seen_urls = {d["source_url"] for d in docs}
-        for e in extra:
-            if e["source_url"] not in seen_urls:
-                seen_urls.add(e["source_url"])
-                docs.append(e)
-
-        # 按优先级排序：doc_asset 优先，doc_source_entry 中 URL 关键词优先
-        # 截断到 MAX_PAGES
-        docs = docs[:MAX_PAGES]
+        for row in cur.fetchall():
+            url = row["source_url"]
+            if url not in seen_urls:
+                seen_urls.add(url)
+                docs.append(row)
 
     return docs
+
+
+LINK_SELECTION_PROMPT = """你是一个加密货币投研分析助手。下面是一个代币的所有文档链接列表。
+
+请从中选出与**代币经济学（tokenomics）**最相关的链接，最多选 10 个。
+
+代币经济学相关内容包括：
+- 白皮书（whitepaper）中描述代币分配、供应、用途的页面
+- 专门介绍 tokenomics / 代币经济模型 / 分配 / 锁仓 / 排放的页面
+- 质押（staking）、治理（governance）、经济模型（economics）相关页面
+- 官方文档中涉及代币用途、费用结构的页面
+- 博客/公告中关于代币分配的官方声明
+
+不相关的内容：
+- 纯技术架构、代码仓库、API 文档
+- 非官方的第三方审计报告
+- 社交媒体链接（Twitter/Telegram/Discord/Reddit）
+- 区块链浏览器（etherscan/bscscan/solscan）
+- 图片文件（.png/.jpg/.svg，除非文件名含 whitepaper/tokenomics）
+- 视频/音频链接
+
+请返回一个 JSON 数组，每个元素包含 url 和 reason（一句话说明为什么选它）。
+按重要性从高到低排序。只输出 JSON，不要输出其他内容。
+
+资产: {name} ({symbol})
+文档链接:
+{links}"""
+
+
+def select_relevant_links(llm: LLMClient, asset: dict, all_links: list[dict]) -> list[str]:
+    """调用 LLM 从所有链接中选出代币经济学相关的链接。"""
+    if len(all_links) <= MAX_PAGES:
+        return [d["source_url"] for d in all_links]
+
+    # 构建链接列表文本
+    link_list = "\n".join(
+        f"  [{i+1}] [{d['doc_type']}] {d['source_url']}"
+        for i, d in enumerate(all_links)
+    )
+
+    prompt = LINK_SELECTION_PROMPT.format(
+        name=asset["name"], symbol=asset["symbol"], links=link_list,
+    )
+
+    print(f"  发送 {len(all_links)} 个链接给 LLM 筛选...")
+    try:
+        raw = llm.chat(
+            "你是一个加密货币投研分析助手。只输出 JSON，不要输出其他内容。",
+            prompt, temperature=0.1, max_tokens=2048,
+        )
+    except Exception as e:
+        print(f"  [WARN] LLM 链接筛选失败: {e}，回退取前 {MAX_PAGES} 个")
+        return [d["source_url"] for d in all_links[:MAX_PAGES]]
+
+    # 解析 JSON
+    try:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            first_line_end = cleaned.find("\n")
+            if first_line_end > 0:
+                cleaned = cleaned[first_line_end + 1:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()
+        selected = json.loads(cleaned)
+    except json.JSONDecodeError:
+        print(f"  [WARN] LLM 返回 JSON 解析失败，回退取前 {MAX_PAGES} 个")
+        return [d["source_url"] for d in all_links[:MAX_PAGES]]
+
+    # 提取 URL
+    urls = []
+    for item in selected:
+        if isinstance(item, str):
+            urls.append(item)
+        elif isinstance(item, dict):
+            u = item.get("url", "")
+            reason = item.get("reason", "")
+            print(f"    -> [{reason[:60]}] {u[:80]}")
+            urls.append(u)
+
+    # 补充 doc_asset 中的链接（始终保留）
+    extra = [d["source_url"] for d in all_links
+             if d.get("file_name") and d["source_url"] not in urls]
+    urls.extend(extra)
+
+    return urls[:MAX_PAGES]
 
 
 def _extract_page_images(url: str) -> list[dict]:
@@ -639,18 +696,33 @@ def main() -> None:
                     print("  已有 tokenomics 数据，跳过（使用 --force 强制覆盖）")
                     return
 
-        # 3. 收集文档
-        docs = collect_doc_pages(conn, asset["asset_id"])
-        print(f"  收集到 {len(docs)} 个文档页面")
+        # 3. 收集所有链接，AI 筛选
+        all_links = collect_all_links(conn, asset["asset_id"])
+        print(f"  收集到 {len(all_links)} 个候选链接")
+
+        llm = LLMClient(settings, rpm=30)
+        if not llm.is_available():
+            print("ERROR: LLM 未配置")
+            sys.exit(1)
+
+        selected_urls = select_relevant_links(llm, asset, all_links)
+        print(f"  AI 筛选出 {len(selected_urls)} 个相关链接")
 
         doc_contents = []
-        for doc in docs:
-            print(f"  抓取: [{doc['doc_type']}] {doc['source_url'][:80]}")
-            content = fetch_page_content(doc["source_url"])
+        for url in selected_urls:
+            print(f"  抓取: {url[:80]}")
+            # 查找原始 doc_type（用于日志标记）
+            doc_type = "unknown"
+            for d in all_links:
+                if d["source_url"] == url:
+                    doc_type = d["doc_type"]
+                    break
+
+            content = fetch_page_content(url)
             if content:
                 doc_contents.append({
-                    "doc_type": doc["doc_type"],
-                    "source_url": doc["source_url"],
+                    "doc_type": doc_type,
+                    "source_url": url,
                     "content": content,
                 })
                 print(f"    -> {len(content)} 字符")
@@ -677,11 +749,6 @@ def main() -> None:
                 print(f"  CG supply: {json.dumps({k: v for k, v in cg.items() if v is not None}, default=str)}")
 
         # 5. LLM 提取
-        llm = LLMClient(settings, rpm=30)
-        if not llm.is_available():
-            print("ERROR: LLM 未配置")
-            sys.exit(1)
-
         print("  调用 LLM 提取 tokenomics...")
         start = time.monotonic()
         result = extract_with_llm(llm, asset, doc_contents, api_data)

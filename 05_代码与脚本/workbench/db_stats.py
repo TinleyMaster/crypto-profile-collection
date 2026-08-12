@@ -1237,14 +1237,33 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
   "unlock_events": [
     {"date": "2026-08-15", "amount_str": "10M", "pct_of_total": 1.0, "value_str": "$1M", "label": "Team vesting"}
   ],
-  "note": "估算方法和假设（一句话）"
+  "note": "估算方法一句话概述",
+  "methodology": {
+    "data_sources": ["使用的数据来源"],
+    "key_assumptions": {
+      "tge_date": "推测的TGE日期及依据",
+      "cliff_vesting_rules": {
+        "Team": "cliff X月 + vesting Y月，依据...",
+        "Investor": "cliff X月 + vesting Y月，依据...",
+        "Ecosystem": "释放规则，依据..."
+      },
+      "release_curve": "线性/阶梯/自定义，依据..."
+    },
+    "calculation_steps": [
+      "步骤1: 根据流通率XX%倒推已释放量 = ...",
+      "步骤2: 按月分配释放量...",
+      "步骤3: ..."
+    ],
+    "confidence": "high/medium/low，说明确定性"
+  }
 }
 
 规则：
 1. 如果有明确的解锁时间表（cliff + vesting），按时间线逐月生成 unlock_events（未来12个月的关键事件）
 2. 如果没有明确时间表，给出合理的行业常规估计（如 Team 1年cliff + 3年vesting，Investor 1年cliff + 2年vesting）
-3. overview 中 released_pct 估算当前已流通比例
-4. 代币经济学数据:"""
+3. methodology 必须详细记录你是如何得出每个数字的，包括假设依据和计算过程
+4. overview 中 released_pct 估算当前已流通比例
+5. 代币经济学数据:"""
 
 
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
@@ -1315,16 +1334,29 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     overview = est.get("overview", {})
     unlock_events = est.get("unlock_events", [])
     note = est.get("note", "")
+    methodology = est.get("methodology", {})
 
     # 规范化字段：AI 返回 pct_of_total，前端统一读 pct
     for e in unlock_events:
         if "pct_of_total" in e and "pct" not in e:
             e["pct"] = e.pop("pct_of_total")
 
+    # 输入数据快照（供后续核验）
+    input_snapshot = {
+        "total_supply": tkn.get("total_supply"),
+        "max_supply": tkn.get("max_supply"),
+        "circulating_supply": tkn.get("circulating_supply"),
+        "allocation": tkn.get("allocation_json"),
+        "burn_info": tkn.get("burn_info"),
+        "emission_schedule": tkn.get("emission_schedule"),
+        "confidence": tkn.get("confidence"),
+        "source_urls": tkn.get("source_urls", []),
+    }
+
     # 4. 保存到数据库
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
-            # 确保表存在
+            # 确保表存在（含新增列）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS biz.asset_token_unlocks (
                     asset_id INTEGER PRIMARY KEY REFERENCES core.asset(asset_id),
@@ -1333,21 +1365,36 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
                     slug TEXT,
                     overview_json JSONB,
                     unlock_events_json JSONB,
+                    methodology_json JSONB,
+                    input_snapshot_json JSONB,
                     scraped_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            # 兼容旧表：添加可能缺失的列
+            for col in ("methodology_json", "input_snapshot_json"):
+                try:
+                    cur.execute(f"""
+                        ALTER TABLE biz.asset_token_unlocks
+                        ADD COLUMN IF NOT EXISTS {col} JSONB
+                    """)
+                except Exception:
+                    pass  # 列已存在或表刚创建
             cur.execute("""
                 INSERT INTO biz.asset_token_unlocks (
                     asset_id, source_url, source_name, slug,
-                    overview_json, unlock_events_json, scraped_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    overview_json, unlock_events_json,
+                    methodology_json, input_snapshot_json,
+                    scraped_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (asset_id) DO UPDATE SET
                     source_url = EXCLUDED.source_url,
                     source_name = EXCLUDED.source_name,
                     slug = EXCLUDED.slug,
                     overview_json = EXCLUDED.overview_json,
                     unlock_events_json = EXCLUDED.unlock_events_json,
+                    methodology_json = EXCLUDED.methodology_json,
+                    input_snapshot_json = EXCLUDED.input_snapshot_json,
                     updated_at = NOW()
             """, (
                 asset_id,
@@ -1356,6 +1403,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
                 f"ai_estimate_{asset_id}",
                 json.dumps(overview, ensure_ascii=False),
                 json.dumps(unlock_events, ensure_ascii=False),
+                json.dumps(methodology, ensure_ascii=False),
+                json.dumps(input_snapshot, ensure_ascii=False),
             ))
         conn.commit()
 
@@ -1366,6 +1415,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             "overview": overview,
             "unlock_events": unlock_events,
             "note": note,
+            "methodology": methodology,
+            "input_snapshot": input_snapshot,
             "asset_id": asset_id,
             "symbol": asset["canonical_symbol"],
             "name": asset["canonical_name"],

@@ -1719,68 +1719,68 @@
         </div>
 
         <!-- 统计卡片 -->
-    <div class="grid">
-        <div class="card">
-            <h3>总资产数</h3>
-            <div class="value" id="stat-assets">-</div>
-            <div class="sub" id="stat-sources">-</div>
-        </div>
-        <div class="card">
-            <h3>文档入口总数</h3>
-            <div class="value" id="stat-entries">-</div>
-            <div class="sub" id="stat-entry-types">-</div>
-        </div>
-        <div class="card">
-            <h3>深度爬取进度</h3>
-            <div class="value" id="stat-crawl-pct">-</div>
-            <div class="progress-bar">
-                <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
+        <div class="grid">
+            <div class="card">
+                <h3>总资产数</h3>
+                <div class="value" id="stat-assets">-</div>
+                <div class="sub" id="stat-sources">-</div>
             </div>
-            <div class="sub" id="stat-crawl-detail">-</div>
-        </div>
-        <div class="card">
-            <h3>文档链接来源</h3>
-            <div class="value" id="stat-docs">-</div>
-            <div class="sub" id="stat-docs-detail">-</div>
-        </div>
-    </div>
-
-    <!-- 每日投研推荐 -->
-    <div class="hot-tokens-section">
-        <div class="section-header">
-            <h2>🔥 每日投研推荐</h2>
-            <div style="display:flex;align-items:center;gap:8px">
-                <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
-                <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
+            <div class="card">
+                <h3>文档入口总数</h3>
+                <div class="value" id="stat-entries">-</div>
+                <div class="sub" id="stat-entry-types">-</div>
+            </div>
+            <div class="card">
+                <h3>深度爬取进度</h3>
+                <div class="value" id="stat-crawl-pct">-</div>
+                <div class="progress-bar">
+                    <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
+                </div>
+                <div class="sub" id="stat-crawl-detail">-</div>
+            </div>
+            <div class="card">
+                <h3>文档链接来源</h3>
+                <div class="value" id="stat-docs">-</div>
+                <div class="sub" id="stat-docs-detail">-</div>
             </div>
         </div>
-        <div class="hot-filters">
-            <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
-            <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
-            <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
-        </div>
-        <div id="hot-tokens-content">
-            <div class="hot-tokens-loading">加载中...</div>
-        </div>
-    </div>
 
-    <!-- 任务进度 -->
-    <h2>📈 任务进度</h2>
-    <div class="refresh-note">每 30 秒自动刷新</div>
-    <div class="progress-section">
-        <div class="progress-list" id="progress-list">
-            <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
+        <!-- 每日投研推荐 -->
+        <div class="hot-tokens-section">
+            <div class="section-header">
+                <h2>🔥 每日投研推荐</h2>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
+                    <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
+                </div>
+            </div>
+            <div class="hot-filters">
+                <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
+                <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
+                <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
+            </div>
+            <div id="hot-tokens-content">
+                <div class="hot-tokens-loading">加载中...</div>
+            </div>
         </div>
-    </div>
 
-    <!-- 任务启动 -->
-    <h2>🚀 任务启动</h2>
-    <div class="task-grid" id="task-def-grid"></div>
+        <!-- 任务进度 -->
+        <h2>📈 任务进度</h2>
+        <div class="refresh-note">每 30 秒自动刷新</div>
+        <div class="progress-section">
+            <div class="progress-list" id="progress-list">
+                <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
+            </div>
+        </div>
 
-    <!-- 任务列表 -->
-    <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
-    <div class="refresh-note">每 3 秒自动刷新</div>
-    <div class="task-list" id="task-list"></div>
+        <!-- 任务启动 -->
+        <h2>🚀 任务启动</h2>
+        <div class="task-grid" id="task-def-grid"></div>
+
+        <!-- 任务列表 -->
+        <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
+        <div class="refresh-note">每 3 秒自动刷新</div>
+        <div class="task-list" id="task-list"></div>
     </div>
 
     <!-- 底部日志面板 -->
@@ -2556,6 +2556,49 @@
                         const icon = e.is_upcoming ? '🔜' : '✅';
                         html += icon + ' ' + e.date + ' ' + e.value_str + ' (' + e.pct + '%)<br>';
                     }
+                }
+
+                // 测算依据（AI 测算时展示）
+                if (d.methodology && Object.keys(d.methodology).length > 0) {
+                    html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">📋 测算依据</summary>';
+                    html += '<div style="font-size:11px;color:#6b7280;margin-top:4px;padding:4px 8px;background:#f9fafb;border-radius:4px;max-height:300px;overflow:auto">';
+
+                    const m = d.methodology;
+                    if (m.confidence) {
+                        const confColor = m.confidence.startsWith('high') ? '#059669' : m.confidence.startsWith('medium') ? '#d97706' : '#dc2626';
+                        html += '<strong>置信度:</strong> <span style="color:' + confColor + '">' + m.confidence + '</span><br>';
+                    }
+                    if (m.data_sources && m.data_sources.length > 0) {
+                        html += '<strong>数据来源:</strong> ' + m.data_sources.join(', ') + '<br>';
+                    }
+                    if (m.key_assumptions) {
+                        html += '<br><strong>关键假设:</strong><br>';
+                        const ka = m.key_assumptions;
+                        if (ka.tge_date) html += '&nbsp;&nbsp;TGE: ' + ka.tge_date + '<br>';
+                        if (ka.release_curve) html += '&nbsp;&nbsp;释放曲线: ' + ka.release_curve + '<br>';
+                        if (ka.cliff_vesting_rules && typeof ka.cliff_vesting_rules === 'object') {
+                            html += '&nbsp;&nbsp;解锁规则:<br>';
+                            for (const [group, rule] of Object.entries(ka.cliff_vesting_rules)) {
+                                html += '&nbsp;&nbsp;&nbsp;&nbsp;' + group + ': ' + rule + '<br>';
+                            }
+                        }
+                    }
+                    if (m.calculation_steps && m.calculation_steps.length > 0) {
+                        html += '<br><strong>计算过程:</strong><br>';
+                        for (const step of m.calculation_steps) {
+                            html += '&nbsp;&nbsp;' + step + '<br>';
+                        }
+                    }
+                    // 输入数据快照
+                    if (d.input_snapshot) {
+                        html += '<br><strong>输入数据:</strong><br>';
+                        const inp = d.input_snapshot;
+                        if (inp.total_supply) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
+                        if (inp.max_supply) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
+                        if (inp.circulating_supply) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';
+                        if (inp.confidence) html += '&nbsp;&nbsp;数据置信度: ' + inp.confidence + '<br>';
+                    }
+                    html += '</div></details>';
                 }
 
                 // 爬取日志

@@ -98,6 +98,16 @@ def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
 
     project_identifiers = build_project_identifiers(symbol, name, entry_url)
 
+    # 0. URL 后缀预检：PDF 等直接跳过，避免 Playwright 触发 Download 错误
+    url_lower = entry_url.lower().split("?")[0]
+    if url_lower.endswith((".pdf", ".zip", ".gz", ".tar", ".jpg", ".jpeg", ".png", ".svg", ".mp4", ".mp3")):
+        return {
+            "status": "skipped",
+            "entry_id": entry_id,
+            "url": entry_url,
+            "reason": f"非HTML文件: {url_lower.rsplit('.', 1)[-1]}",
+        }
+
     # 1. HEAD 预检：跳过非 HTML 内容
     skip_reason = preflight_check(entry_url)
     if skip_reason is not None:
@@ -141,6 +151,15 @@ def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
             "source_code": entry["source_code"],
         }
     except Exception as e:
+        err_msg = str(e)
+        # Playwright 遇到 PDF 下载会报 "Download is starting"，视为 SKIP
+        if "Download" in err_msg or "download" in err_msg:
+            return {
+                "status": "skipped",
+                "entry_id": entry_id,
+                "url": entry_url,
+                "reason": f"触发下载: {err_msg[:80]}",
+            }
         return {
             "status": "failed",
             "entry_id": entry_id,
@@ -338,13 +357,20 @@ def main() -> int:
         # 清除成功处理的条目标记（failed 保留 needs_browser=TRUE 下轮重试）
         cleared = 0
         if result["done_ids"]:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW(), spa_crawled_at = NOW() WHERE entry_id = ANY(%s)",
-                    (result["done_ids"],),
-                )
-            cleared = len(result["done_ids"])
-        conn.commit()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE biz.doc_source_entry SET needs_browser = FALSE, deep_crawled_at = NOW(), spa_crawled_at = NOW() WHERE entry_id = ANY(%s)",
+                        (result["done_ids"],),
+                    )
+                cleared = cur.rowcount
+                conn.commit()
+                print(f"  [CLEAR] 已清除 {cleared} 条 needs_browser 标记", flush=True)
+            except Exception as e:
+                print(f"  [CLEAR ERROR] 清除标记失败: {e}", flush=True)
+                conn.rollback()
+        else:
+            print(f"  [CLEAR] done_ids 为空，无条目标记清除", flush=True)
 
     print(f"写入: {written} 条目, 清除标记: {cleared}（{len(result['failed_ids'])} 失败保留重试）")
     print(json.dumps({

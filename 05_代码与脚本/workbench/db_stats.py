@@ -1205,7 +1205,10 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         if data.get("status") == "ok":
             return {"ok": True, "data": data, "stderr": stderr_output[:1000]}
         # tokenomist 没收录 → 尝试 AI 测算
-        return _ai_estimate_unlocks(asset_id, stderr_output[:500])
+        if data.get("status") == "not_found":
+            return _ai_estimate_unlocks(asset_id, data.get("message", "未被 tokenomist 收录"))
+        # 其他错误
+        return {"ok": False, "error": data.get("message", "失败"), "stderr": stderr_output[:500]}
     except json.JSONDecodeError:
         return {"ok": False, "error": (stderr_output or output)[:500]}
 

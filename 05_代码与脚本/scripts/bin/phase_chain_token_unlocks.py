@@ -616,8 +616,15 @@ def _main() -> int:
         data = scrape_tokenomist(slugs, symbol=asset["symbol"])
 
         if data is None:
-            print(json.dumps({"status": "error", "message": "页面爬取失败"}, ensure_ascii=False))
-            return 1
+            # tokenomist 未收录 → 返回 not_found 状态，让上层触发 AI 测算
+            print(json.dumps({
+                "status": "not_found",
+                "message": "该代币未被 tokenomist 收录",
+                "asset_id": asset_id,
+                "symbol": asset["symbol"],
+                "name": asset["name"],
+            }, ensure_ascii=False))
+            return 0
 
         data["asset_id"] = asset_id
         data["symbol"] = asset["symbol"]

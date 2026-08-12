@@ -1316,6 +1316,11 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     unlock_events = est.get("unlock_events", [])
     note = est.get("note", "")
 
+    # 规范化字段：AI 返回 pct_of_total，前端统一读 pct
+    for e in unlock_events:
+        if "pct_of_total" in e and "pct" not in e:
+            e["pct"] = e.pop("pct_of_total")
+
     # 4. 保存到数据库
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:

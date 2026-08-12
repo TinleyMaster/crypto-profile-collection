@@ -2550,7 +2550,10 @@
                 detail.innerHTML = html;
                 detail.style.display = 'block';
                 indicator.className = 'status-indicator success';
-                statusEl.textContent = '数据已拉取 (' + events.length + ' 条解锁事件)';
+
+                const sourceLabel = d.source_name || '未知来源';
+                const noteSuffix = d.note ? ' [' + d.note + ']' : '';
+                statusEl.textContent = '已拉取 (' + events.length + ' 条解锁事件) — 来源: ' + sourceLabel + noteSuffix;
                 statusEl.className = 'status-text';
                 btn.textContent = '✅ 已拉取';
                 btn.classList.add('copied');

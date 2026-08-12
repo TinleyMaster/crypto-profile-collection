@@ -1544,6 +1544,15 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     # 1.5 获取 CG 价格/市值/FDV（供 AI 估算解锁价值）
     price_info = _fetch_cg_price(asset_id, settings)
 
+    # 价格数据校验：无有效价格则无法测算，直接报错
+    price_usd = price_info.get("price_usd")
+    if price_usd is None or isinstance(price_usd, str):
+        return {
+            "ok": False,
+            "error": f"无法获取价格数据，跳过 AI 测算: {price_usd}",
+            "tokenomist_error": tokenomist_error,
+        }
+
     # 2. 构建 prompt
     tokenomics_text = f"""
     代币: {asset['canonical_name']} ({asset['canonical_symbol']})

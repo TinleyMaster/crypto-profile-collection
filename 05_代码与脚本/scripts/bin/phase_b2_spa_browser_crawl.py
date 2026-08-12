@@ -35,7 +35,7 @@ VALID_ENTRY_TYPES = {
 # 并发数（浏览器资源有限）
 DEFAULT_CONCURRENCY = 4
 # 页面加载超时
-PAGE_TIMEOUT_MS = 8000
+PAGE_TIMEOUT_MS = 20000
 # HEAD 预检超时
 HEAD_TIMEOUT_S = 8
 # 浏览器启动 + 整批处理超时（秒）
@@ -117,7 +117,11 @@ def crawl_one_spa(browser, entry: dict, same_domain_only: bool) -> dict:
         page = context.new_page()
         page.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css}", lambda route: route.abort())
 
-        page.goto(entry_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        # SPA 页面先尝试 domcontentloaded，超时则降级为 commit（至少拿到部分内容）
+        try:
+            page.goto(entry_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        except Exception:
+            page.goto(entry_url, wait_until="commit", timeout=PAGE_TIMEOUT_MS)
         page.wait_for_timeout(1500)
 
         html = page.content()

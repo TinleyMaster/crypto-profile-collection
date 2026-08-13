@@ -629,6 +629,83 @@ def _make_session():
     return s
 
 
+def _fetch_llms_txt(base_url: str, session, timeout: int) -> list[tuple[str, str]]:
+    """获取文档站的 llms.txt 索引（GitBook/Mintlify 标准），返回 (normalized_url, entry_type) 列表。
+
+    llms.txt 是 LLM 友好的 Markdown 索引文件，列出站点全部文档链接。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    # 候选位置：根路径 + 当前路径（如 /docs/llms.txt）
+    candidates = [f"{origin}/llms.txt"]
+    if parsed.path and parsed.path.rstrip("/"):
+        candidates.append(f"{origin}{parsed.path.rstrip('/')}/llms.txt")
+
+    for llms_url in candidates:
+        try:
+            resp = session.get(llms_url, timeout=(3, timeout), allow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "text" not in ct and "markdown" not in ct:
+                continue
+            text = resp.text or ""
+            if not text.strip() or len(text) > 500_000:
+                continue
+
+            results: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            base_root = _root_domain(parsed.netloc.lower())
+            for m in re.finditer(r'\[[^\]]*\]\((https?://[^)\s]+)\)', text):
+                link = m.group(1)
+                lp = urlparse(link)
+                if lp.scheme not in ("http", "https"):
+                    continue
+                # 只保留同根域名链接，避免跨站污染
+                if _root_domain(lp.netloc.lower()) != base_root:
+                    continue
+                if _is_excluded_url(link):
+                    continue
+                norm = _normalize_url(link)
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                results.append((norm, infer_doc_entry_type(norm)))
+            if results:
+                return results
+        except Exception:
+            continue
+    return []
+
+
+def _probe_docs_subdomain(base_url: str, session, timeout: int) -> str | None:
+    """官网 SPA/无链接时，探测 docs.{root_domain} 子域名是否存在。"""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("docs.") or netloc.startswith("www.docs."):
+        return None
+    root = _root_domain(netloc)
+    docs_url = f"{parsed.scheme}://docs.{root}"
+
+    try:
+        resp = session.get(docs_url, timeout=(3, timeout), allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" not in ct and "text/plain" not in ct:
+            return None
+        # 简单排除软 404 / 域名停放页（内容过短）
+        if len(resp.text or "") < 200:
+            return None
+        return docs_url
+    except Exception:
+        return None
+
+
 def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_keyword: bool = True) -> dict:
     """单个 worker：爬一个网页（带外层超时兜底，防止 SSL 握手卡死）"""
     from concurrent.futures import ThreadPoolExecutor as InnerPool
@@ -667,6 +744,22 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
             doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword, skip_aggregation_filter=not require_doc_keyword)
+
+            # 文档站识别 llms.txt 索引（GitBook/Mintlify 标准），一次性发现全部文档
+            if entry.get("entry_type") in ("docs", "docs_portal"):
+                llms_links = _fetch_llms_txt(resp.url, session, timeout)
+                if llms_links:
+                    existing = {u for u, _ in doc_links}
+                    for u, t in llms_links:
+                        if u not in existing:
+                            doc_links.append((u, t))
+                            existing.add(u)
+
+            # 官网 SPA/无链接时，探测 docs.{root_domain} 子域名
+            if not doc_links and entry.get("entry_type") == "official_website":
+                docs_url = _probe_docs_subdomain(resp.url, session, timeout)
+                if docs_url:
+                    doc_links.append((docs_url, "docs_portal"))
 
             # 检测 SPA：无链接 + 小 HTML（<5000 bytes 或包含 SPA 框架标志）
             needs_browser = False

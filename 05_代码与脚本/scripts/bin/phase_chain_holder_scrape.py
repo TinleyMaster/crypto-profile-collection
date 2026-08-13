@@ -228,6 +228,7 @@ def _parse_holders_html(html: str, max_holders: int) -> dict:
 
     result = {
         "total_holders": 0,
+        "total_supply": None,
         "top_holders_json": [],
         "tier_distribution_json": [],
         "top_5_pct": None,
@@ -241,6 +242,11 @@ def _parse_holders_html(html: str, max_holders: int) -> dict:
     m = re.search(r'Holders\s+([\d,]+)', body_text)
     if m:
         result["total_holders"] = int(m.group(1).replace(",", ""))
+
+    # 解析总供应（Total / Max Total Supply），用于计算每个地址占比
+    m = re.search(r'(?:Max\s+)?Total\s+Supply[^\d]*([\d,]+(?:\.\d+)?)', body_text)
+    if m:
+        result["total_supply"] = float(m.group(1).replace(",", ""))
 
     # 解析 Top 集中度：BSCScan 格式:
     # "Supply of Top 5 holders: 67.99% | Top 10 holders: 84.11%"
@@ -349,8 +355,14 @@ def _fetch_tokenholders(explorer_url: str, contract_address: str) -> str | None:
     return None
 
 
-def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
-    """解析 generic-tokenholders2 接口返回的 HTML（Cohort/Tier/持币列表）。"""
+def _parse_tokenholders_html(html: str, max_holders: int,
+                             total_supply: float | None = None) -> dict:
+    """解析 generic-tokenholders2 接口返回的 HTML（Cohort/Tier/持币列表）。
+
+    total_supply 来自主页面 Total/Max Total Supply 字段；用于计算每个地址占比。
+    不要用 Cohort 表累加求总供应——Cohort 的 Holding Amount 与持币列表存在不一致，
+    会导致占比偏低。
+    """
     soup = BeautifulSoup(html, "html.parser")
     result = {
         "total_holders": 0,
@@ -366,7 +378,6 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
     cohort = {}  # 如 {"1-5": 90.39, "6-10": 3.58, ...}
     tiers = []
     holders = []
-    total_supply = 0.0
 
     for t in soup.select("table"):
         rows = t.select("tr")
@@ -381,11 +392,6 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
                 if not cells:
                     continue
                 label = cells[0]
-                # 累加 Holding Amount 求总供应（用于计算每个地址占比）
-                if len(cells) > 1:
-                    amt = _parse_token_amount(cells[1])
-                    if amt:
-                        total_supply += amt
                 pct = None
                 for c in cells:
                     m = re.search(r'([\d.]+)%', c)
@@ -462,7 +468,7 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
                 })
 
     # 计算每个地址的真实占比（etherscan 的 Percentage 列对部分代币显示 0.0000%，需自行计算）
-    if total_supply > 0:
+    if total_supply and total_supply > 0:
         for h in holders:
             try:
                 qty = float(str(h.get("amount", "")).replace(",", ""))
@@ -527,8 +533,10 @@ def scrape_holders(explorer_url: str, contract_address: str,
     result["total_holders"] = main_total
 
     # Step 2: 持币接口 → 集中度/Tier/持币列表（etherscan 系，最稳定）
+    main_total_supply = main_parsed["total_supply"] if main_parsed else None
     api_html = _fetch_tokenholders(explorer_url, contract_address)
-    api_parsed = _parse_tokenholders_html(api_html, max_holders) if api_html else None
+    api_parsed = _parse_tokenholders_html(api_html, max_holders,
+                                          total_supply=main_total_supply) if api_html else None
 
     # 合并：接口数据优先（含集中度/Tier/持币列表），total_holders 保留主页面的
     if api_parsed and api_parsed["top_holders_json"]:

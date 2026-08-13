@@ -1437,13 +1437,13 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
     except Exception as e:
         return {"price_usd": f"DB查询失败: {e}", "market_cap_usd": f"DB查询失败: {e}", "fdv_usd": f"DB查询失败: {e}"}
 
-    # 3. 无直接映射 → 按 symbol 搜索 CG（key 失效时回退无 key）
+    # 3. 无直接映射 → 按 symbol 搜索 CG（无 key 优先，限流/失败时回退 key）
     if not coin_id and symbol:
         search_headers_candidates = [{"Accept": "application/json"}]
-        if settings.coingecko_api_key:
-            search_headers_candidates.insert(0, {
+        for _key in settings.get_coingecko_keys():
+            search_headers_candidates.append({
                 "Accept": "application/json",
-                "x-cg-demo-api-key": settings.coingecko_api_key,
+                "x-cg-demo-api-key": _key,
             })
         for headers in search_headers_candidates:
             try:
@@ -1466,7 +1466,7 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
     if not coin_id:
         return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
 
-    # 4. 获取价格（带重试；key 失效/超限时自动回退到无 key 公共接口）
+    # 4. 获取价格（无 key 优先，限流/失败时回退 key；带重试）
     url = f"{settings.coingecko_base_url}/simple/price"
     params = {
         "ids": coin_id,
@@ -1477,12 +1477,12 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
         "include_last_updated_at": "false",
     }
 
-    # 请求头候选：优先带 key（高配额），key 失效/超限（401/403/429）时回退无 key
+    # 请求头候选：无 key 优先（不消耗配额），限流/失败时依次轮替多个 key
     header_candidates = [{"Accept": "application/json"}]
-    if settings.coingecko_api_key:
-        header_candidates.insert(0, {
+    for _key in settings.get_coingecko_keys():
+        header_candidates.append({
             "Accept": "application/json",
-            "x-cg-demo-api-key": settings.coingecko_api_key,
+            "x-cg-demo-api-key": _key,
         })
 
     last_error = None

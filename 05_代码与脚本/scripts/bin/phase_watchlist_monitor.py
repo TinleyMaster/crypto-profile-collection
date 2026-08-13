@@ -87,10 +87,10 @@ def _get_coin_id(conn, asset_id: int, symbol: str, settings) -> str | None:
         return None
     search_url = f"{settings.coingecko_base_url}/search"
     header_candidates = [{"Accept": "application/json"}]
-    if settings.coingecko_api_key:
-        header_candidates.insert(0, {
+    for _key in settings.get_coingecko_keys():
+        header_candidates.append({
             "Accept": "application/json",
-            "x-cg-demo-api-key": settings.coingecko_api_key,
+            "x-cg-demo-api-key": _key,
         })
     for headers in header_candidates:
         try:
@@ -107,14 +107,14 @@ def _get_coin_id(conn, asset_id: int, symbol: str, settings) -> str | None:
 
 
 def _get_price(coin_id: str, settings) -> float | None:
-    """从 CoinGecko 获取当前价格（带重试；key 失效/超限时回退无 key）。"""
+    """从 CoinGecko 获取当前价格（无 key 优先，限流/失败时回退 key；带重试）。"""
     url = f"{settings.coingecko_base_url}/simple/price"
     params = {"ids": coin_id, "vs_currencies": "usd"}
     header_candidates = [{"Accept": "application/json"}]
-    if settings.coingecko_api_key:
-        header_candidates.insert(0, {
+    for _key in settings.get_coingecko_keys():
+        header_candidates.append({
             "Accept": "application/json",
-            "x-cg-demo-api-key": settings.coingecko_api_key,
+            "x-cg-demo-api-key": _key,
         })
     last_err = None
     for headers in header_candidates:

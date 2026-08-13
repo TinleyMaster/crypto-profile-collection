@@ -34,6 +34,14 @@ class Settings:
     smtp_to: str | None = None
     smtp_from: str | None = None
 
+    def get_coingecko_keys(self) -> list[str]:
+        """返回所有可用的 CoinGecko API key（单个或多个），无 key 返回空列表。"""
+        if self.coingecko_api_keys:
+            return list(self.coingecko_api_keys)
+        if self.coingecko_api_key:
+            return [self.coingecko_api_key]
+        return []
+
 
 def load_local_env_file() -> None:
     env_path = Path(__file__).resolve().parents[2] / ".env"
@@ -50,13 +58,12 @@ def load_local_env_file() -> None:
         os.environ.setdefault(key, value)
 
 
-def _parse_coingecko_keys() -> list[str] | None:
-    """解析 COINGECKO_API_KEY 中的多个 key（逗号分隔）。"""
+def _parse_coingecko_keys() -> list[str]:
+    """解析 COINGECKO_API_KEY 中的多个 key（逗号分隔），返回全部 key 列表。"""
     raw = os.getenv("COINGECKO_API_KEY", "").strip()
     if not raw:
-        return None
-    keys = [k.strip() for k in raw.split(",") if k.strip()]
-    return keys if len(keys) > 1 else None  # 只有一个 key 时不需要轮替列表
+        return []
+    return [k.strip() for k in raw.split(",") if k.strip()]
 
 
 def get_settings(require_database: bool = True) -> Settings:
@@ -69,11 +76,13 @@ def get_settings(require_database: bool = True) -> Settings:
     if require_database and not database_url:
         raise RuntimeError("Missing required environment variable: DATABASE_URL")
 
+    cg_keys = _parse_coingecko_keys()
+
     return Settings(
         cmc_api_key=cmc_api_key,
         database_url=database_url or None,
-        coingecko_api_key=os.getenv("COINGECKO_API_KEY", "").strip() or None,
-        coingecko_api_keys=_parse_coingecko_keys(),
+        coingecko_api_key=cg_keys[0] if cg_keys else None,
+        coingecko_api_keys=cg_keys if len(cg_keys) > 1 else None,
         etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
         bscscan_api_key=os.getenv("BSCSCAN_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,

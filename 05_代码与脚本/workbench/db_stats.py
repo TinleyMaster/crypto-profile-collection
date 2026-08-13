@@ -1184,7 +1184,7 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         try:
             proc = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=120,
                 cwd=str(scripts_bin),
             )
         except subprocess.TimeoutExpired:

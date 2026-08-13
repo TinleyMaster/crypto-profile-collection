@@ -171,8 +171,11 @@ def _parse_token_amount(s: str) -> float | None:
     return val * mult.get((m.group(2) or "").upper(), 1.0)
 
 
-def _fetch_html(url: str, timeout: int = 20, retries: int = 3) -> str | None:
-    """带重试的页面抓取，返回 HTML 文本（失败返回 None）。"""
+def _fetch_html(url: str, timeout: int = 20, retries: int = 5) -> str | None:
+    """带重试的页面抓取，返回 HTML 文本（失败返回 None）。
+
+    区块浏览器对国内网络偶发 ConnectionResetError，需多次重试 + 递增间隔。
+    """
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -182,43 +185,48 @@ def _fetch_html(url: str, timeout: int = 20, retries: int = 3) -> str | None:
         except Exception as e:
             last_err = e
             if attempt < retries:
-                time.sleep(1 * attempt)
+                time.sleep(2 * attempt)
     print(f"  [WARN] requests 抓取失败（重试 {retries} 次）: {last_err}")
     return None
 
 
-def _fetch_html_browser(url: str, timeout: int = 30) -> str | None:
-    """用无头浏览器抓取渲染后的 HTML（绕过区块浏览器反爬）。"""
+def _fetch_html_browser(url: str, timeout: int = 20, retries: int = 2) -> str | None:
+    """用无头浏览器抓取渲染后的 HTML（绕过区块浏览器反爬，带重试）。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("  [WARN] playwright 未安装，无法使用无头浏览器")
         return None
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ])
-            context = browser.new_context(user_agent=HEADERS["User-Agent"])
-            page = context.new_page()
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ])
+                context = browser.new_context(user_agent=HEADERS["User-Agent"])
+                page = context.new_page()
 
-            # 拦截非必要资源加速
-            page.route("**/*", lambda route: route.abort()
-                if route.request.resource_type in ("image", "font", "media", "stylesheet")
-                else route.continue_())
+                # 拦截非必要资源加速
+                page.route("**/*", lambda route: route.abort()
+                    if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                    else route.continue_())
 
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-            # 等待持币列表 JS 渲染完成
-            page.wait_for_timeout(4000)
-            html = page.content()
-            browser.close()
-            return html
-    except Exception as e:
-        print(f"  [WARN] 无头浏览器抓取失败: {e}")
-        return None
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                # 等待持币列表 JS 渲染完成
+                page.wait_for_timeout(4000)
+                html = page.content()
+                browser.close()
+                return html
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2)
+    print(f"  [WARN] 无头浏览器抓取失败: {last_err}")
+    return None
 
 
 def _parse_holders_html(html: str, max_holders: int) -> dict:
@@ -342,15 +350,15 @@ def _fetch_tokenholders(explorer_url: str, contract_address: str) -> str | None:
     headers = dict(HEADERS)
     headers["Referer"] = f"{explorer_url}/token/{contract_address}"
     last_err = None
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):
         try:
             resp = requests.get(url, headers=headers, timeout=20)
             resp.raise_for_status()
             return resp.text
         except Exception as e:
             last_err = e
-            if attempt < 3:
-                time.sleep(1 * attempt)
+            if attempt < 5:
+                time.sleep(2 * attempt)
     print(f"  [WARN] 持币接口抓取失败: {last_err}")
     return None
 

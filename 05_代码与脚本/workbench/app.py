@@ -570,6 +570,31 @@ def api_reset_deep_crawl(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _parse_discovered(output: str) -> int:
+    """从 B2/B3 脚本输出中解析本轮新发现的文档链接数（discovered）。
+
+    B2/B3 结束时都会输出一行 JSON：{"status": "complete", ..., "discovered": N}。
+    优先解析该 JSON；失败时回退匹配摘要行 "+N docs"。
+    """
+    if not output:
+        return 0
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if '"discovered"' in line and '"status"' in line:
+            try:
+                data = json.loads(line)
+                return int(data.get("discovered") or 0)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+    m = re.search(r"\+(\d+)\s+docs", output)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return 0
+
+
 def _run_re_crawl_full(asset_id: int) -> dict:
     """执行完整重新爬取（清理爬取产物 → 逐层 B2/B3 爬取，最多 8 层）。"""
     b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
@@ -597,21 +622,12 @@ def _run_re_crawl_full(asset_id: int) -> dict:
                 timeout=min(600, total_timeout),
             )
             b2_ok = b2_result.returncode == 0
-            b2_output = b2_result.stdout[-1000:] if b2_result.stdout else ""
-
-            # 检测 B2 是否发现了新链接（从输出中解析 +XXX docs）
-            new_docs = 0
-            for line in b2_output.split("\n"):
-                if "+" in line and "docs" in line:
-                    try:
-                        parts = line.split("+")[1].split("docs")[0].strip()
-                        new_docs = int(parts)
-                    except ValueError:
-                        pass
+            b2_output = b2_result.stdout[-2000:] if b2_result.stdout else ""
+            b2_new_docs = _parse_discovered(b2_output)
 
             rounds.append({
                 "round": round_num,
-                "b2": {"ok": b2_ok, "new_docs": new_docs, "output": b2_output},
+                "b2": {"ok": b2_ok, "new_docs": b2_new_docs, "output": b2_output},
                 "b3": None,
             })
 
@@ -624,12 +640,13 @@ def _run_re_crawl_full(asset_id: int) -> dict:
                 timeout=min(300, total_timeout),
             )
             b3_ok = b3_result.returncode == 0
-            b3_output = b3_result.stdout[-1000:] if b3_result.stdout else ""
+            b3_output = b3_result.stdout[-2000:] if b3_result.stdout else ""
+            b3_new_docs = _parse_discovered(b3_output)
 
-            rounds[-1]["b3"] = {"ok": b3_ok, "output": b3_output}
+            rounds[-1]["b3"] = {"ok": b3_ok, "new_docs": b3_new_docs, "output": b3_output}
 
-            # 收敛判断：B2 没发现新链接，且 B3 也没发现新链接 → 停止
-            if new_docs == 0 and "+0 links" in b3_output:
+            # 收敛判断：B2 与 B3 本轮都未发现新链接 → 停止
+            if b2_new_docs == 0 and b3_new_docs == 0:
                 break
 
         return {

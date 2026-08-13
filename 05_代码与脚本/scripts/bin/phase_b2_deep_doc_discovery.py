@@ -43,6 +43,7 @@ DOC_URL_KEYWORDS = [
 ENTRY_TYPES_TO_CRAWL = {
     "official_website",
     "docs",
+    "docs_portal",  # 文档门户站（如 docs.bitway.com），需爬取以通过 llms.txt 发现其下全部文档
 }
 
 # ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──

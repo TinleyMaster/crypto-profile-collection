@@ -1122,6 +1122,17 @@ def get_onchain_alert_summary() -> dict:
     }
 
 
+def _extract_chain_error(stderr: str, returncode: int) -> str:
+    """从 subprocess stderr 提取关键错误信息，便于前端显示具体原因。"""
+    lines = [l.strip() for l in (stderr or "").split("\n") if l.strip()]
+    warn_lines = [l for l in lines if "[WARN]" in l or "[ERROR]" in l or "ERROR" in l]
+    if warn_lines:
+        return warn_lines[-1]
+    if lines:
+        return lines[-1]
+    return f"退出码 {returncode}"
+
+
 def query_onchain_data(asset_id: int, force: bool = False) -> dict:
     """按需查询链上持仓分布（从区块浏览器 HTML 爬取，无需 API Key）。
 
@@ -1188,10 +1199,16 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
                 cwd=str(scripts_bin),
             )
         except subprocess.TimeoutExpired:
+            result["_errors"] = result.get("_errors", [])
+            result["_errors"].append(f"{chain}: 爬取超时（120秒）")
             continue
 
         stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
         if proc.returncode != 0 or not stdout:
+            err = _extract_chain_error(stderr, proc.returncode)
+            result["_errors"] = result.get("_errors", [])
+            result["_errors"].append(f"{chain}: {err}")
             continue
 
         # 提取最后一行 JSON 输出
@@ -1213,13 +1230,23 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
                             "tier_distribution": data.get("tier_distribution", []),
                         }
                         holder_fetched = True
+                    else:
+                        err = _extract_chain_error(stderr, 0)
+                        result["_errors"] = result.get("_errors", [])
+                        result["_errors"].append(f"{chain}: {err or '无持币数据'}")
                 except json.JSONDecodeError:
                     pass
                 break
 
     result["elapsed_ms"] = int((time.time() - t0) * 1000)
     if not holder_fetched:
+        detail = ""
+        if result.get("_errors"):
+            detail = " | ".join(result["_errors"])
         result["_note"] = "持仓数据爬取失败（可能合约无持币记录或区块浏览器访问受限）"
+        if detail:
+            result["_note"] += f"【{detail}】"
+        result.pop("_errors", None)
 
     return {"ok": True, "data": result}
 

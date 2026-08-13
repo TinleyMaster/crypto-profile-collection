@@ -2348,13 +2348,35 @@
                 if (d.input_snapshot) {
                     html += '<br><strong>输入数据:</strong><br>';
                     const inp = d.input_snapshot;
-                    if (inp.price_usd != null) html += '&nbsp;&nbsp;价格: $' + inp.price_usd + '<br>';
-                    if (inp.market_cap_usd != null) html += '&nbsp;&nbsp;市值: $' + inp.market_cap_usd + '<br>';
-                    if (inp.fdv_usd != null) html += '&nbsp;&nbsp;FDV: $' + inp.fdv_usd + '<br>';
-                    if (inp.total_supply) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
-                    if (inp.max_supply) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
-                    if (inp.circulating_supply) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';
-                    if (inp.confidence) html += '&nbsp;&nbsp;数据置信度: ' + inp.confidence + '<br>';
+                    // 价格/市值/FDV：只有数值才显示，字符串错误信息标红
+                    const isNum = v => typeof v === 'number' && !isNaN(v);
+                    if (isNum(inp.price_usd)) html += '&nbsp;&nbsp;价格: $' + inp.price_usd + '<br>';
+                    else if (typeof inp.price_usd === 'string') html += '&nbsp;&nbsp;价格: <span style="color:#dc2626">' + escapeHtml(inp.price_usd) + '</span><br>';
+                    if (isNum(inp.market_cap_usd)) html += '&nbsp;&nbsp;市值: $' + inp.market_cap_usd + '<br>';
+                    else if (typeof inp.market_cap_usd === 'string') html += '&nbsp;&nbsp;市值: <span style="color:#dc2626">' + escapeHtml(inp.market_cap_usd) + '</span><br>';
+                    if (isNum(inp.fdv_usd)) html += '&nbsp;&nbsp;FDV: $' + inp.fdv_usd + '<br>';
+                    else if (typeof inp.fdv_usd === 'string') html += '&nbsp;&nbsp;FDV: <span style="color:#dc2626">' + escapeHtml(inp.fdv_usd) + '</span><br>';
+                    if (isNum(inp.total_supply)) html += '&nbsp;&nbsp;总供应: ' + inp.total_supply + '<br>';
+                    if (isNum(inp.max_supply)) html += '&nbsp;&nbsp;最大供应: ' + inp.max_supply + '<br>';
+                    if (isNum(inp.circulating_supply)) html += '&nbsp;&nbsp;流通供应: ' + inp.circulating_supply + '<br>';
+                    if (isNum(inp.confidence)) html += '&nbsp;&nbsp;数据置信度: ' + inp.confidence + '<br>';
+                    // allocation 是对象/数组，格式化显示，避免 [object Object] 破坏排版
+                    if (inp.allocation && typeof inp.allocation === 'object') {
+                        html += '&nbsp;&nbsp;分配: <br>';
+                        const alloc = inp.allocation;
+                        if (Array.isArray(alloc)) {
+                            alloc.forEach(a => {
+                                const name = a.name || a.group || a.category || '未命名';
+                                const pct = a.pct != null ? a.pct + '%' : (a.percentage != null ? a.percentage + '%' : '');
+                                const amount = a.amount || a.tokens || '';
+                                html += '&nbsp;&nbsp;&nbsp;&nbsp;• ' + escapeHtml(name) + (pct ? ': ' + pct : '') + (amount ? ' (' + escapeHtml(String(amount)) + ')' : '') + '<br>';
+                            });
+                        } else {
+                            for (const [k, v] of Object.entries(alloc)) {
+                                html += '&nbsp;&nbsp;&nbsp;&nbsp;• ' + escapeHtml(k) + ': ' + escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v)) + '<br>';
+                            }
+                        }
+                    }
                 }
                 html += '</div></details>';
             }

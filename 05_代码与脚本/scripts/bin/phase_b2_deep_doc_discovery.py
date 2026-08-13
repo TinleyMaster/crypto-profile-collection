@@ -344,6 +344,8 @@ _stats = {"done": 0, "failed": 0, "not_html": 0, "empty": 0, "discovered": 0, "s
 _pending_db_rows: list[tuple] = []
 _pending_crawled_ids: list[int] = []
 _pending_spa_ids: list[int] = []
+# 跨入口去重：已发现的 (asset_id, entry_url)，避免同一 URL 被多个文档页侧边栏重复统计/写入
+_seen_doc_urls: set[tuple] = set()
 _db_lock = threading.Lock()
 _start_time: float = 0
 _total: int = 0
@@ -907,6 +909,18 @@ def main() -> int:
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS needs_browser BOOLEAN DEFAULT FALSE"
             )
 
+    # 预载已存在的 entry_url，跨轮去重：单资产重爬时，上一轮已入库的文档
+    # 会被本轮文档页侧边栏再次发现，若不预载会重复统计 discovered 计数。
+    if args.asset_id is not None:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT asset_id, entry_url FROM biz.doc_source_entry WHERE asset_id = %s",
+                    (args.asset_id,),
+                )
+                for aid, url in cur.fetchall():
+                    _seen_doc_urls.add((aid, url))
+
     # 查询待处理（排除从噪声源发现的条目，防止递归放大）
     noise_clauses = " AND ".join(
         [f"COALESCE(discovered_from, '') NOT LIKE %s"] * len(NOISE_DISCOVERED_FROM_PATTERNS)
@@ -988,34 +1002,42 @@ def main() -> int:
 
             if result["status"] == "ok":
                 doc_links = result["doc_links"]
-                with _stats_lock:
-                    _stats["done"] += 1
-                    if doc_links:
-                        _stats["discovered"] += len(doc_links)
-                    elif result.get("needs_browser"):
-                        _stats["spa"] += 1
-                    else:
-                        _stats["empty"] += 1
-
+                unique_links: list[tuple[str, str]] = []
                 with _db_lock:
                     if result.get("needs_browser"):
                         _pending_spa_ids.append(entry_id)
                     else:
                         _pending_crawled_ids.append(entry_id)
-                    if doc_links:
-                        for link_url, link_type in doc_links:
-                            _pending_db_rows.append(
-                                (
-                                    result["entity_type"],
-                                    result["asset_id"],
-                                    result["protocol_id"],
-                                    result["source_code"],
-                                    link_type,
-                                    link_url,
-                                    f"deep_crawl:{result['url'][:50]}",
-                                    False,
-                                )
+                    for link_url, link_type in doc_links:
+                        key = (result["asset_id"], link_url)
+                        if key in _seen_doc_urls:
+                            continue
+                        _seen_doc_urls.add(key)
+                        unique_links.append((link_url, link_type))
+                        _pending_db_rows.append(
+                            (
+                                result["entity_type"],
+                                result["asset_id"],
+                                result["protocol_id"],
+                                result["source_code"],
+                                link_type,
+                                link_url,
+                                f"deep_crawl:{result['url'][:50]}",
+                                False,
                             )
+                        )
+
+                with _stats_lock:
+                    _stats["done"] += 1
+                    if unique_links:
+                        _stats["discovered"] += len(unique_links)
+                    elif doc_links:
+                        # 有链接但全部重复（如文档页侧边栏），视为未新增
+                        _stats["empty"] += 1
+                    elif result.get("needs_browser"):
+                        _stats["spa"] += 1
+                    else:
+                        _stats["empty"] += 1
 
             elif result["status"] == "not_html":
                 with _stats_lock:

@@ -85,40 +85,51 @@ def _get_coin_id(conn, asset_id: int, symbol: str, settings) -> str | None:
 
     if not symbol:
         return None
-    try:
-        search_url = f"{settings.coingecko_base_url}/search"
-        headers = {"Accept": "application/json"}
-        if settings.coingecko_api_key:
-            headers["x-cg-demo-api-key"] = settings.coingecko_api_key
-        resp = requests.get(search_url, params={"query": symbol.lower()},
-                            headers=headers, timeout=10)
-        resp.raise_for_status()
-        coins = resp.json().get("coins", [])
-        if coins:
-            exact = [c for c in coins if c.get("symbol", "").lower() == symbol.lower()]
-            return (exact[0] if exact else coins[0]).get("id")
-    except Exception:
-        pass
+    search_url = f"{settings.coingecko_base_url}/search"
+    header_candidates = [{"Accept": "application/json"}]
+    if settings.coingecko_api_key:
+        header_candidates.insert(0, {
+            "Accept": "application/json",
+            "x-cg-demo-api-key": settings.coingecko_api_key,
+        })
+    for headers in header_candidates:
+        try:
+            resp = requests.get(search_url, params={"query": symbol.lower()},
+                                headers=headers, timeout=10)
+            resp.raise_for_status()
+            coins = resp.json().get("coins", [])
+            if coins:
+                exact = [c for c in coins if c.get("symbol", "").lower() == symbol.lower()]
+                return (exact[0] if exact else coins[0]).get("id")
+        except Exception:
+            continue
     return None
 
 
 def _get_price(coin_id: str, settings) -> float | None:
-    """从 CoinGecko 获取当前价格（带重试）。"""
+    """从 CoinGecko 获取当前价格（带重试；key 失效/超限时回退无 key）。"""
     url = f"{settings.coingecko_base_url}/simple/price"
     params = {"ids": coin_id, "vs_currencies": "usd"}
-    headers = {"Accept": "application/json"}
+    header_candidates = [{"Accept": "application/json"}]
     if settings.coingecko_api_key:
-        headers["x-cg-demo-api-key"] = settings.coingecko_api_key
+        header_candidates.insert(0, {
+            "Accept": "application/json",
+            "x-cg-demo-api-key": settings.coingecko_api_key,
+        })
     last_err = None
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, params=params, headers=headers, timeout=15)
-            resp.raise_for_status()
-            return resp.json().get(coin_id, {}).get("usd")
-        except Exception as e:
-            last_err = e
-            if attempt < 2:
-                time.sleep(1 * (attempt + 1))
+    for headers in header_candidates:
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                resp.raise_for_status()
+                return resp.json().get(coin_id, {}).get("usd")
+            except requests.exceptions.HTTPError as e:
+                last_err = e
+                break  # 401/403/429 等 → 换无 key 公共接口
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(1 * (attempt + 1))
     print(f"  [WARN] 价格获取失败 {coin_id}: {last_err}")
     return None
 

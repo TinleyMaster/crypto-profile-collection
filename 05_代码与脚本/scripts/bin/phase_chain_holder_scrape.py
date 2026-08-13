@@ -44,6 +44,7 @@ EXPLORER_URLS = {
     "opt": "https://optimistic.etherscan.io",
     "base": "https://basescan.org",
     "avax": "https://snowtrace.io",
+    "monad": "https://monadscan.com",
 }
 
 # 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称
@@ -62,6 +63,7 @@ CHAIN_ALIASES = {
     "base": "base",
     "avalanche": "avax",
     "avax": "avax",
+    "monad": "monad",
 }
 
 # 浏览器简称 → 数据库完整名列表（反查合约地址时兼容多种命名）
@@ -73,6 +75,7 @@ CHAIN_DB_NAMES = {
     "opt": ("optimism", "op"),
     "base": ("base",),
     "avax": ("avalanche", "avax"),
+    "monad": ("monad",),
 }
 
 HEADERS = {

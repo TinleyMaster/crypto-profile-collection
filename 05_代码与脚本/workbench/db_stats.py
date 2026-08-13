@@ -1149,15 +1149,15 @@ def get_onchain_alert_summary() -> dict:
     }
 
 
-def _extract_chain_error(stderr: str, returncode: int) -> str:
-    """从 subprocess stderr 提取关键错误信息，便于前端显示具体原因。"""
-    lines = [l.strip() for l in (stderr or "").split("\n") if l.strip()]
+def _extract_chain_error(stdout: str, stderr: str, returncode: int) -> str:
+    """从 subprocess 输出提取关键错误信息（脚本错误用 print 输出到 stdout）。"""
+    lines = [l.strip() for l in (stderr or "").split("\n") + (stdout or "").split("\n") if l.strip()]
     warn_lines = [l for l in lines if "[WARN]" in l or "[ERROR]" in l or "ERROR" in l]
     if warn_lines:
         return warn_lines[-1]
-    if lines:
-        return lines[-1]
-    return f"退出码 {returncode}"
+    if returncode != 0:
+        return lines[-1] if lines else f"退出码 {returncode}"
+    return ""  # 退出码 0 且无错误行：视为无数据，由调用方提示
 
 
 def query_onchain_data(asset_id: int, force: bool = False) -> dict:
@@ -1233,9 +1233,9 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
         if proc.returncode != 0 or not stdout:
-            err = _extract_chain_error(stderr, proc.returncode)
+            err = _extract_chain_error(stdout, stderr, proc.returncode)
             result["_errors"] = result.get("_errors", [])
-            result["_errors"].append(f"{chain}: {err}")
+            result["_errors"].append(f"{chain}: {err or '无输出'}")
             continue
 
         # 提取最后一行 JSON 输出
@@ -1258,7 +1258,7 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
                         }
                         holder_fetched = True
                     else:
-                        err = _extract_chain_error(stderr, 0)
+                        err = _extract_chain_error(stdout, stderr, 0)
                         result["_errors"] = result.get("_errors", [])
                         result["_errors"].append(f"{chain}: {err or '无持币数据'}")
                 except json.JSONDecodeError:

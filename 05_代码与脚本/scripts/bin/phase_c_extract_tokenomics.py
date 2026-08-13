@@ -42,8 +42,8 @@ from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_
 # ── 配置 ──────────────────────────────────────────────────
 
 MAX_CONTENT_LENGTH = 8000    # 单页最大字符数（超过截断）
-MAX_TOTAL_CONTENT = 30000    # 总内容最大字符数
-MAX_PAGES = 10               # 最多收集多少页文档
+MAX_TOTAL_CONTENT = 80000    # 总内容最大字符数
+MAX_PAGES = 20               # 最多收集多少页文档
 FETCH_TIMEOUT = 15           # 页面抓取超时（秒）
 
 
@@ -133,7 +133,7 @@ def collect_all_links(conn, asset_id: int) -> list[dict]:
 
 LINK_SELECTION_PROMPT = """你是一个加密货币投研分析助手。下面是一个代币的所有文档链接列表。
 
-请从中选出与**代币经济学（tokenomics）**最相关的链接，最多选 10 个。
+请从中选出与**代币经济学（tokenomics）**最相关的链接，最多选 20 个。
 
 代币经济学相关内容包括：
 - 白皮书（whitepaper）中描述代币分配、供应、用途的页面
@@ -177,7 +177,7 @@ def select_relevant_links(llm: LLMClient, asset: dict, all_links: list[dict]) ->
     try:
         raw = llm.chat(
             "你是一个加密货币投研分析助手。只输出 JSON，不要输出其他内容。",
-            prompt, temperature=0.1, max_tokens=2048,
+            prompt, temperature=0.1, max_tokens=4096,
         )
     except Exception as e:
         print(f"  [WARN] LLM 链接筛选失败: {e}，回退取前 {MAX_PAGES} 个")

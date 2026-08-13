@@ -44,6 +44,11 @@ _unlock_async_lock = threading.Lock()
 def _unlock_async_key(asset_id: int, force: bool) -> str:
     return f"{asset_id}:{1 if force else 0}"
 
+
+# 重新爬取异步任务状态（key: str(asset_id)）
+_recrawl_async: dict = {}
+_recrawl_async_lock = threading.Lock()
+
 # db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
 _db_stats_module = None
 
@@ -519,28 +524,25 @@ def api_reset_deep_crawl(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
-def api_re_crawl_full(asset_id: int):
-    """完整重新爬取：清理爬取产物 → 从 API 种子链接第一层开始，逐层 B2/B3 爬取，最多 8 层。"""
+def _run_re_crawl_full(asset_id: int) -> dict:
+    """执行完整重新爬取（清理爬取产物 → 逐层 B2/B3 爬取，最多 8 层）。"""
+    reset_result = _get_db_stats().reset_full_crawl(asset_id)
+
+    b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
+    b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
+
+    if not os.path.exists(b2_script):
+        return {"ok": False, "error": f"B2 脚本不存在: {b2_script}"}
+    if not os.path.exists(b3_script):
+        return {"ok": False, "error": f"B3 脚本不存在: {b3_script}"}
+
+    rounds = []
+    MAX_ROUNDS = 8  # 最多爬 8 层
+    total_timeout = 900  # 单次脚本超时兜底（秒）
+
     try:
-        # 1. 清理除 API 来源以外的链接（删除 deep_crawl / spa_browser_crawl 产物），
-        #    并重置剩余种子链接，使 B2 从第一层重新爬取
-        reset_result = _get_db_stats().reset_full_crawl(asset_id)
-
-        b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
-        b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
-
-        if not os.path.exists(b2_script):
-            return jsonify({"ok": False, "error": f"B2 脚本不存在: {b2_script}"}), 500
-        if not os.path.exists(b3_script):
-            return jsonify({"ok": False, "error": f"B3 脚本不存在: {b3_script}"}), 500
-
-        rounds = []
-        MAX_ROUNDS = 8  # 最多爬 8 层
-        total_timeout = 900  # 单次脚本超时兜底（秒）
-
         for round_num in range(1, MAX_ROUNDS + 1):
-            # 2. 运行 B2 深度爬取（limit 调大，确保一次运行完整处理当前层）
+            # B2 深度爬取（limit 调大，确保一次运行完整处理当前层）
             b2_result = subprocess.run(
                 [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
                  "--limit", "1000", "--workers", "10"],
@@ -565,7 +567,7 @@ def api_re_crawl_full(asset_id: int):
                 "b3": None,
             })
 
-            # 3. 运行 B3 SPA 爬取
+            # B3 SPA 爬取
             b3_result = subprocess.run(
                 [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
                  "--limit", "100", "--concurrency", "4"],
@@ -580,18 +582,54 @@ def api_re_crawl_full(asset_id: int):
             if new_docs == 0 and "+0 links" in b3_output:
                 break
 
-        return jsonify({
+        return {
             "ok": True,
             "data": {
                 "reset": reset_result,
                 "rounds": rounds,
                 "total_rounds": len(rounds),
             },
-        })
+        }
     except subprocess.TimeoutExpired as e:
-        return jsonify({"ok": False, "error": f"爬取超时: {e}"}), 504
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return {"ok": False, "error": f"爬取超时: {e}"}
+
+
+@app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
+def api_re_crawl_full(asset_id: int):
+    """完整重新爬取（异步后台执行，避免长请求导致网关超时）。
+
+    启动后前端应轮询 /api/assets/<asset_id>/re-crawl-full/status 获取结果。
+    """
+    key = str(asset_id)
+    with _recrawl_async_lock:
+        existing = _recrawl_async.get(key)
+        if existing and existing.get("status") == "running":
+            return jsonify({"ok": True, "pending": True})
+        _recrawl_async[key] = {"status": "running", "result": None}
+
+    def _worker():
+        try:
+            result = _run_re_crawl_full(asset_id)
+        except Exception as e:
+            result = {"ok": False, "error": str(e)}
+        with _recrawl_async_lock:
+            _recrawl_async[key] = {"status": "done", "result": result}
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"ok": True, "pending": True})
+
+
+@app.route("/api/assets/<int:asset_id>/re-crawl-full/status")
+def api_re_crawl_full_status(asset_id: int):
+    """查询重新爬取异步任务状态。"""
+    key = str(asset_id)
+    with _recrawl_async_lock:
+        state = _recrawl_async.get(key)
+    if not state:
+        return jsonify({"ok": True, "pending": False, "not_started": True})
+    if state.get("status") == "running":
+        return jsonify({"ok": True, "pending": True})
+    return jsonify({"ok": True, "pending": False, "result": state.get("result")})
 
 
 @app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])

@@ -2889,29 +2889,42 @@
         async function reCrawlAsset () {
             if (!selectedAssetId) return;
             const btn = document.getElementById('recrawl-btn');
-            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：B2→B3→B2→... 循环直到收敛\n最多 6 轮，预计耗时 2-5 分钟，请耐心等待。')) return;
+            if (!confirm('确定重新爬取该资产的所有文档链接？\n\n流程：B2→B3→B2→... 循环直到收敛\n最多 8 轮，后台执行，完成后自动提示。')) return;
 
             btn.disabled = true;
             btn.textContent = '⏳ 爬取中...';
 
             try {
-                const res = await fetch(`/api/assets/${selectedAssetId}/re-crawl-full`, {
-                    method: 'POST',
-                });
-                const data = await res.json();
-                if (!data?.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+                const startRes = await fetch(`/api/assets/${selectedAssetId}/re-crawl-full`, { method: 'POST' });
+                const startData = await startRes.json();
+                if (!startData?.ok) throw new Error(startData?.error || `HTTP ${startRes.status}`);
 
-                const d = data.data || {};
-                let msg = `已重置 ${d.reset?.affected || 0} 条入口。\n`;
-                const rounds = d.rounds || [];
-                msg += `共执行 ${rounds.length} 轮：\n`;
-                for (const r of rounds) {
-                    const b2 = r.b2 || {};
-                    const b3 = r.b3 || {};
-                    msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs || 0} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
+                const startTime = Date.now();
+                const MAX_WAIT = 15 * 60 * 1000; // 最多等 15 分钟
+                while (true) {
+                    if (Date.now() - startTime > MAX_WAIT) throw new Error('爬取超时（超过 15 分钟）');
+                    await new Promise(r => setTimeout(r, 3000));
+                    const stRes = await fetch(`/api/assets/${selectedAssetId}/re-crawl-full/status`);
+                    const stData = await stRes.json();
+                    if (!stData?.ok) throw new Error(stData?.error || '状态查询失败');
+                    if (!stData.pending) {
+                        const result = stData.result || {};
+                        if (!result.ok) throw new Error(result.error || '爬取失败');
+                        const d = result.data || {};
+                        const reset = d.reset || {};
+                        let msg = `已清理 ${reset.deleted_crawl_links ?? 0} 条爬取产物、重置 ${reset.reset_seed_links ?? 0} 条种子入口。\n`;
+                        const rounds = d.rounds || [];
+                        msg += `共执行 ${rounds.length} 轮：\n`;
+                        for (const r of rounds) {
+                            const b2 = r.b2 || {};
+                            const b3 = r.b3 || {};
+                            msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs || 0} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
+                        }
+                        msg += '\n请刷新资料面板查看新链接。';
+                        alert(msg);
+                        break;
+                    }
                 }
-                msg += '\n请刷新资料面板查看新链接。';
-                alert(msg);
 
                 btn.textContent = '🔄 重新爬取';
                 btn.disabled = false;

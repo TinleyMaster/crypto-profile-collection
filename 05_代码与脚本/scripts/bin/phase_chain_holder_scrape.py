@@ -161,6 +161,16 @@ def _parse_number(s: str) -> str | None:
     return m.group(1).replace(",", "") if m else None
 
 
+def _parse_token_amount(s: str) -> float | None:
+    """解析带单位的代币数量，如 '1.04 B', '41.09 M', '355,242.71'。"""
+    m = re.search(r'([\d,]+\.?\d*)\s*([BKMT])?', s or "", re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", ""))
+    mult = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+    return val * mult.get((m.group(2) or "").upper(), 1.0)
+
+
 def _fetch_html(url: str, timeout: int = 20, retries: int = 3) -> str | None:
     """带重试的页面抓取，返回 HTML 文本（失败返回 None）。"""
     last_err = None
@@ -356,6 +366,7 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
     cohort = {}  # 如 {"1-5": 90.39, "6-10": 3.58, ...}
     tiers = []
     holders = []
+    total_supply = 0.0
 
     for t in soup.select("table"):
         rows = t.select("tr")
@@ -370,6 +381,11 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
                 if not cells:
                     continue
                 label = cells[0]
+                # 累加 Holding Amount 求总供应（用于计算每个地址占比）
+                if len(cells) > 1:
+                    amt = _parse_token_amount(cells[1])
+                    if amt:
+                        total_supply += amt
                 pct = None
                 for c in cells:
                     m = re.search(r'([\d.]+)%', c)
@@ -444,6 +460,15 @@ def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
                     "amount": quantity,
                     "pct": pct,
                 })
+
+    # 计算每个地址的真实占比（etherscan 的 Percentage 列对部分代币显示 0.0000%，需自行计算）
+    if total_supply > 0:
+        for h in holders:
+            try:
+                qty = float(str(h.get("amount", "")).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
+            h["pct"] = round(qty / total_supply * 100, 4)
 
     # Cohort 累加 → Top 5/10/25/50/100 集中度
     if cohort:

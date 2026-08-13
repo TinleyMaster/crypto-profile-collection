@@ -1655,7 +1655,7 @@
                 </h2>
                 <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
                 <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
-                <button class="copy-btn" id="onchain-btn" onclick="queryOnchainData()">📊 链上数据</button>
+                <button class="copy-btn" id="noise-clean-btn" onclick="runAiNoiseClean()">AI噪声清理</button>
                 <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
                 <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄
                     重新爬取</button>
@@ -2584,7 +2584,7 @@
 
         async function queryOnchainData () {
             if (!selectedAssetId) return;
-            const btn = document.getElementById('onchain-btn');
+            const btn = document.getElementById('onchain-run-btn');
             const detail = document.getElementById('onchain-detail');
             const indicator = document.getElementById('onchain-indicator');
             const statusEl = document.getElementById('onchain-status');
@@ -2667,6 +2667,44 @@
                 statusEl.textContent = '已拉取（来源:' + fromCache + ', ' + (d.symbol || '') + '）';
                 btn.textContent = '✅ 已查询';
                 btn.classList.add('copied');
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+                btn.textContent = origText;
+            }
+            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
+        }
+
+        async function runAiNoiseClean () {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('noise-clean-btn');
+            const origText = btn.textContent;
+            if (!confirm('确定对该资产执行 AI 噪声清理？\n将删除 AI 判定为噪声的 deep_crawl 链接。')) return;
+
+            btn.textContent = '⏳ 清理中...';
+            btn.disabled = true;
+            try {
+                const res = await fetch(`/api/assets/${selectedAssetId}/ai-noise-clean`, { method: 'POST' });
+                const data = await res.json();
+                if (!data.ok) {
+                    const errMsg = data.error || '未知错误';
+                    const stderrMsg = data.stderr ? ' | ' + data.stderr.slice(0, 200) : '';
+                    alert('AI 噪声清理失败: ' + errMsg + stderrMsg);
+                    btn.textContent = origText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const d = data.data || {};
+                const s = d.summary || {};
+                const parts = [];
+                if (s.assets != null) parts.push('处理资产 ' + s.assets + ' 个');
+                if (s.noise_links != null) parts.push('删除噪声 ' + s.noise_links + ' 条');
+                if (s.kept_links != null) parts.push('保留 ' + s.kept_links + ' 条');
+                if (s.checked != null) parts.push('已检查 ' + s.checked + ' 条');
+                alert('AI 噪声清理完成。\n' + (parts.length ? parts.join('，') + '。' : ''));
+                btn.textContent = '✅ 已清理';
+                btn.classList.add('copied');
+                loadMaterials(selectedAssetId);
             } catch (e) {
                 alert('请求失败: ' + e.message);
                 btn.textContent = origText;

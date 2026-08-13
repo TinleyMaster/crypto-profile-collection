@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -584,6 +585,54 @@ def api_add_manual_entry(asset_id: int):
             return jsonify({"ok": False, "error": "URL 必须以 http 开头"}), 400
         result = _get_db_stats().add_manual_entry(asset_id, url)
         return jsonify({"ok": True, "data": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/assets/<int:asset_id>/ai-noise-clean", methods=["POST"])
+def api_ai_noise_clean(asset_id: int):
+    """对指定资产执行 AI 噪声清理。"""
+    script = str(SCRIPTS_BIN / "phase_b2_ai_noise_clean_by_asset.py")
+    if not os.path.exists(script):
+        return jsonify({"ok": False, "error": f"脚本不存在: {script}"}), 500
+    try:
+        result = subprocess.run(
+            [sys.executable, "-u", script, "--asset-id", str(asset_id), "--execute"],
+            cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()[-1000:]
+            return jsonify({"ok": False, "error": "AI 噪声清理失败", "stderr": err}), 500
+
+        stdout = result.stdout or ""
+        summary: dict = {}
+        for line in stdout.splitlines():
+            line = line.strip()
+            m = re.match(
+                r"^(处理资产|判断域名|噪声域名|噪声链接|保留链接|总检查数):\s*([\d,]+)",
+                line,
+            )
+            if m:
+                key_map = {
+                    "处理资产": "assets",
+                    "判断域名": "domains",
+                    "噪声域名": "noise_domains",
+                    "噪声链接": "noise_links",
+                    "保留链接": "kept_links",
+                    "总检查数": "checked",
+                }
+                summary[key_map[m.group(1)]] = int(m.group(2).replace(",", ""))
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "asset_id": asset_id,
+                "summary": summary,
+                "log": stdout[-4000:],
+            },
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "AI 噪声清理超时（300秒）"}), 504
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

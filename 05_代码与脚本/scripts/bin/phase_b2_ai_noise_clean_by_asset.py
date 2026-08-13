@@ -170,15 +170,19 @@ RULE_NOISE_DOMAINS = {
 }
 
 
-def run_rule_delete(conn, execute: bool) -> int:
+def run_rule_delete(conn, execute: bool, asset_id: int | None = None) -> int:
     """规则直删：删除明显噪声域名下的所有 deep_crawl 链接。"""
+    asset_clause = "AND asset_id = %s" if asset_id is not None else ""
     deleted = 0
     for label, pattern in RULE_NOISE_DOMAINS.items():
+        params: list = [pattern]
+        if asset_id is not None:
+            params.append(asset_id)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT count(*) FROM biz.doc_source_entry "
-                "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
-                (pattern,),
+                f"SELECT count(*) FROM biz.doc_source_entry "
+                f"WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%' {asset_clause}",
+                tuple(params),
             )
             cnt = cur.fetchone()["count"]
         if cnt == 0:
@@ -186,9 +190,9 @@ def run_rule_delete(conn, execute: bool) -> int:
         if execute:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
-                    "DELETE FROM biz.doc_source_entry "
-                    "WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%'",
-                    (pattern,),
+                    f"DELETE FROM biz.doc_source_entry "
+                    f"WHERE entry_url LIKE %s AND discovered_from LIKE 'deep_crawl:%%' {asset_clause}",
+                    tuple(params),
                 )
             conn.commit()
         print(f"  [规则直删] {label}: {cnt} 条{' (dry-run)' if not execute else ' ✓'}")
@@ -280,16 +284,18 @@ def reset_ai_false_positives(conn, execute: bool) -> int:
     return reset_count
 
 
-def reset_dense_domains(conn, execute: bool) -> int:
+def reset_dense_domains(conn, execute: bool, asset_id: int | None = None) -> int:
     """
     重置单资产密集域名的 AI 检查状态。
     对于域名在单个资产下链接数 >100 且占比 >90% 的情况，
     将 ai_noise_checked_at 重置为 NULL，让 AI 重新评估。
     排除 github.com/gitlab.com/bitbucket.org（合法代码托管）。
     """
+    asset_clause = "AND dse.asset_id = %s" if asset_id is not None else ""
+    params = (asset_id, asset_id) if asset_id is not None else ()
     reset_count = 0
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute("""
+        cur.execute(f"""
             WITH asset_domain_stats AS (
                 SELECT
                     dse.asset_id,
@@ -299,6 +305,7 @@ def reset_dense_domains(conn, execute: bool) -> int:
                 WHERE dse.entity_type = 'asset'
                   AND dse.discovered_from LIKE 'deep_crawl:%%'
                   AND dse.ai_noise_checked_at IS NOT NULL
+                  {asset_clause}
                 GROUP BY dse.asset_id, domain
             ),
             asset_totals AS (
@@ -308,6 +315,7 @@ def reset_dense_domains(conn, execute: bool) -> int:
                 FROM biz.doc_source_entry dse
                 WHERE dse.entity_type = 'asset'
                   AND dse.discovered_from LIKE 'deep_crawl:%%'
+                  {asset_clause}
                 GROUP BY dse.asset_id
             )
             SELECT ads.asset_id, ads.domain, ads.domain_cnt, at.total_dc,
@@ -318,7 +326,7 @@ def reset_dense_domains(conn, execute: bool) -> int:
               AND ads.domain_cnt::numeric / at.total_dc > 0.9
               AND ads.domain NOT IN ('github.com', 'gitlab.com', 'bitbucket.org')
             ORDER BY ads.domain_cnt DESC
-        """)
+        """, params)
         dense = [dict(r) for r in cur.fetchall()]
 
     for d in dense:
@@ -420,14 +428,19 @@ def pre_filter_audit_links(conn, asset: dict, execute: bool) -> tuple[int, int, 
     return auto_kept, auto_deleted, remaining
 
 
-def get_asset_domain_groups(conn, limit: int) -> list[dict]:
+def get_asset_domain_groups(conn, limit: int, asset_id: int | None = None) -> list[dict]:
     """
     获取有未检查 deep_crawl 链接的资产，按资产分组，返回每个资产的域名聚合信息。
-    优先处理链接数多的资产。
+    优先处理链接数多的资产。asset_id 指定时仅处理该资产。
     """
+    asset_clause = "AND dse.asset_id = %s" if asset_id is not None else ""
+    params: list = []
+    if asset_id is not None:
+        params.append(asset_id)
+    params.append(limit)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 a.asset_id,
                 a.canonical_symbol,
@@ -438,12 +451,13 @@ def get_asset_domain_groups(conn, limit: int) -> list[dict]:
             JOIN core.asset a ON a.asset_id = dse.asset_id
             WHERE dse.entity_type = 'asset'
               AND dse.discovered_from LIKE 'deep_crawl:%%'
+              {asset_clause}
             GROUP BY a.asset_id, a.canonical_symbol, a.canonical_name
             HAVING SUM(CASE WHEN dse.ai_noise_checked_at IS NULL THEN 1 ELSE 0 END) > 0
             ORDER BY unchecked DESC
             LIMIT %s
             """,
-            (limit,),
+            tuple(params),
         )
         assets = [dict(r) for r in cur.fetchall()]
 
@@ -516,12 +530,18 @@ def main():
     parser.add_argument("--execute", action="store_true", help="实际执行删除（默认 dry-run）")
     parser.add_argument("--limit", type=int, default=20, help="最多处理几个资产（默认 20）")
     parser.add_argument("--skip-rule-delete", action="store_true", help="跳过规则直删")
+    parser.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产")
     args = parser.parse_args()
+
+    asset_id = args.asset_id
 
     print("=" * 70)
     print("  B4 AI 噪声清理 — 按资产分组")
     print(f"  模式: {'执行删除' if args.execute else 'dry-run 预览'}")
-    print(f"  资产上限: {args.limit}")
+    if asset_id is not None:
+        print(f"  单资产模式: asset_id={asset_id}")
+    else:
+        print(f"  资产上限: {args.limit}")
     print("  策略: 按资产聚合域名 → AI 判断 → 批量删除噪声域名")
     print("=" * 70)
 
@@ -531,21 +551,24 @@ def main():
         # ── Step 1: 规则直删 ──
         if not args.skip_rule_delete:
             print("\n── 规则直删 ──")
-            run_rule_delete(conn, args.execute)
+            run_rule_delete(conn, args.execute, asset_id=asset_id)
 
-        # ── Step 1.5: AI 误判纠正 ──
-        # 对关联 >50 资产的非审计域名，重置 ai_noise_checked_at
-        print("\n── AI 误判纠正 ──")
-        reset_ai_false_positives(conn, args.execute)
+        # ── Step 1.5: AI 误判纠正（跨资产域名，仅批量模式）──
+        if asset_id is None:
+            print("\n── AI 误判纠正 ──")
+            reset_ai_false_positives(conn, args.execute)
 
         # ── Step 1.6: 密集域名重置 ──
-        # 对单资产下链接数 >100 且占比 >90% 的域名，重置 ai_noise_checked_at
         print("\n── 密集域名重置 ──")
-        reset_dense_domains(conn, args.execute)
+        reset_dense_domains(conn, args.execute, asset_id=asset_id)
 
         # ── Step 2: 按资产分组，AI 判断 ──
-        print(f"\n── 按资产 AI 判断（最多 {args.limit} 个资产）──")
-        assets = get_asset_domain_groups(conn, args.limit)
+        if asset_id is not None:
+            print("\n── 按资产 AI 判断（单资产）──")
+            assets = get_asset_domain_groups(conn, 1, asset_id=asset_id)
+        else:
+            print(f"\n── 按资产 AI 判断（最多 {args.limit} 个资产）──")
+            assets = get_asset_domain_groups(conn, args.limit)
         print(f"获取到 {len(assets)} 个有未检查链接的资产\n")
 
         total_domains_judged = 0

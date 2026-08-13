@@ -2908,6 +2908,7 @@
                     const stData = await stRes.json();
                     if (!stData?.ok) throw new Error(stData?.error || '状态查询失败');
                     if (!stData.pending) {
+                        if (stData.not_started) continue; // 尚未开始（多 worker 状态同步），继续轮询
                         const result = stData.result || {};
                         if (!result.ok) throw new Error(result.error || '爬取失败');
                         const d = result.data || {};

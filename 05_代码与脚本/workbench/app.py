@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import re
 import sys
+import json
+import fcntl
 import subprocess
 import threading
 from pathlib import Path
@@ -46,8 +48,52 @@ def _unlock_async_key(asset_id: int, force: bool) -> str:
 
 
 # 重新爬取异步任务状态（key: str(asset_id)）
-_recrawl_async: dict = {}
-_recrawl_async_lock = threading.Lock()
+# 注意：gunicorn 多 worker 部署下内存 dict 不共享，需文件持久化，
+# 否则 POST 落在 A worker、status 轮询落在 B worker 时状态会丢失（表现为“爬取失败”）。
+RECRAWL_STATE_DIR = (
+    Path("/app/task_state")
+    if os.path.exists("/app/scripts/bin")
+    else Path(__file__).resolve().parent / "task_state"
+)
+RECRAWL_STATE_DIR.mkdir(parents=True, exist_ok=True)
+RECRAWL_STATE_FILE = RECRAWL_STATE_DIR / "recrawl_state.json"
+RECRAWL_LOCK_FILE = RECRAWL_STATE_DIR / "recrawl_state.lock"
+
+
+class _RecrawlFileLock:
+    """基于 fcntl 的跨进程文件锁（与 task_manager 一致）。"""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fd = None
+
+    def __enter__(self):
+        self._fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *args):
+        if self._fd is not None:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+            self._fd = None
+
+
+def _load_recrawl_state() -> dict:
+    if not RECRAWL_STATE_FILE.exists():
+        return {}
+    try:
+        with open(RECRAWL_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return {}
+
+
+def _save_recrawl_state(state: dict) -> None:
+    tmp = RECRAWL_STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+    os.replace(tmp, RECRAWL_STATE_FILE)
 
 # db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
 _db_stats_module = None
@@ -526,8 +572,6 @@ def api_reset_deep_crawl(asset_id: int):
 
 def _run_re_crawl_full(asset_id: int) -> dict:
     """执行完整重新爬取（清理爬取产物 → 逐层 B2/B3 爬取，最多 8 层）。"""
-    reset_result = _get_db_stats().reset_full_crawl(asset_id)
-
     b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
     b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
 
@@ -541,12 +585,16 @@ def _run_re_crawl_full(asset_id: int) -> dict:
     total_timeout = 900  # 单次脚本超时兜底（秒）
 
     try:
+        reset_result = _get_db_stats().reset_full_crawl(asset_id)
+
         for round_num in range(1, MAX_ROUNDS + 1):
             # B2 深度爬取（limit 调大，确保一次运行完整处理当前层）
             b2_result = subprocess.run(
                 [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
                  "--limit", "1000", "--workers", "10"],
-                cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(600, total_timeout),
+                cwd=str(SCRIPTS_BIN), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=min(600, total_timeout),
             )
             b2_ok = b2_result.returncode == 0
             b2_output = b2_result.stdout[-1000:] if b2_result.stdout else ""
@@ -571,7 +619,9 @@ def _run_re_crawl_full(asset_id: int) -> dict:
             b3_result = subprocess.run(
                 [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
                  "--limit", "100", "--concurrency", "4"],
-                cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(300, total_timeout),
+                cwd=str(SCRIPTS_BIN), capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=min(300, total_timeout),
             )
             b3_ok = b3_result.returncode == 0
             b3_output = b3_result.stdout[-1000:] if b3_result.stdout else ""
@@ -592,6 +642,8 @@ def _run_re_crawl_full(asset_id: int) -> dict:
         }
     except subprocess.TimeoutExpired as e:
         return {"ok": False, "error": f"爬取超时: {e}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
@@ -601,19 +653,23 @@ def api_re_crawl_full(asset_id: int):
     启动后前端应轮询 /api/assets/<asset_id>/re-crawl-full/status 获取结果。
     """
     key = str(asset_id)
-    with _recrawl_async_lock:
-        existing = _recrawl_async.get(key)
+    with _RecrawlFileLock(RECRAWL_LOCK_FILE):
+        state = _load_recrawl_state()
+        existing = state.get(key)
         if existing and existing.get("status") == "running":
             return jsonify({"ok": True, "pending": True})
-        _recrawl_async[key] = {"status": "running", "result": None}
+        state[key] = {"status": "running", "result": None}
+        _save_recrawl_state(state)
 
     def _worker():
         try:
             result = _run_re_crawl_full(asset_id)
         except Exception as e:
-            result = {"ok": False, "error": str(e)}
-        with _recrawl_async_lock:
-            _recrawl_async[key] = {"status": "done", "result": result}
+            result = {"ok": False, "error": str(e) or e.__class__.__name__}
+        with _RecrawlFileLock(RECRAWL_LOCK_FILE):
+            st = _load_recrawl_state()
+            st[key] = {"status": "done", "result": result}
+            _save_recrawl_state(st)
 
     threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"ok": True, "pending": True})
@@ -623,13 +679,14 @@ def api_re_crawl_full(asset_id: int):
 def api_re_crawl_full_status(asset_id: int):
     """查询重新爬取异步任务状态。"""
     key = str(asset_id)
-    with _recrawl_async_lock:
-        state = _recrawl_async.get(key)
-    if not state:
+    with _RecrawlFileLock(RECRAWL_LOCK_FILE):
+        state = _load_recrawl_state()
+        item = state.get(key)
+    if not item:
         return jsonify({"ok": True, "pending": False, "not_started": True})
-    if state.get("status") == "running":
+    if item.get("status") == "running":
         return jsonify({"ok": True, "pending": True})
-    return jsonify({"ok": True, "pending": False, "result": state.get("result")})
+    return jsonify({"ok": True, "pending": False, "result": item.get("result")})
 
 
 @app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])

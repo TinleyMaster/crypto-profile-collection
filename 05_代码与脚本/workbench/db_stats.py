@@ -781,8 +781,8 @@ def reset_full_crawl(asset_id: int) -> dict:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM biz.doc_source_entry WHERE asset_id = %s "
-                "AND (discovered_from LIKE 'deep_crawl:%' OR discovered_from LIKE 'spa_browser_crawl:%')",
-                (asset_id,),
+                "AND (discovered_from LIKE %s OR discovered_from LIKE %s)",
+                (asset_id, "deep_crawl:%", "spa_browser_crawl:%"),
             )
             deleted = cur.rowcount
 

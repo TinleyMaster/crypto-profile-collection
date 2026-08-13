@@ -10,19 +10,21 @@ import re
 import sys
 import subprocess
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, send_from_directory
 
 # Docker 环境：/app/scripts/... ；本地：05_代码与脚本/scripts/...
 if os.path.exists("/app/scripts/src"):
     SCRIPTS_SRC = Path("/app/scripts/src")
     SCRIPTS_BIN = Path("/app/scripts/bin")
     SQL_DIR = Path("/app/scripts/sql")
+    TOKENOMICS_IMAGES_ROOT = Path("/app/data/tokenomics_images")
 else:
     WORKSPACE_ROOT = Path(__file__).resolve().parent  # workbench/
     CODE_ROOT = WORKSPACE_ROOT.parent  # 05_代码与脚本/
     SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
     SCRIPTS_BIN = CODE_ROOT / "scripts" / "bin"
     SQL_DIR = CODE_ROOT / "scripts" / "sql"
+    TOKENOMICS_IMAGES_ROOT = CODE_ROOT / "data" / "tokenomics_images"
 
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
@@ -487,6 +489,15 @@ def api_asset_tokenomics(asset_id: int):
         return jsonify({"ok": True, "data": data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tokenomics-images/<int:asset_id>/<path:filename>")
+def api_tokenomics_image(asset_id: int, filename: str):
+    """提供代币经济学提取保存的图片（分配图/排放曲线等）。"""
+    directory = TOKENOMICS_IMAGES_ROOT / str(asset_id)
+    if not directory.is_dir():
+        return jsonify({"ok": False, "error": "图片目录不存在"}), 404
+    return send_from_directory(directory, filename)
 
 
 @app.route("/api/assets/<int:asset_id>/reset-deep-crawl", methods=["POST"])

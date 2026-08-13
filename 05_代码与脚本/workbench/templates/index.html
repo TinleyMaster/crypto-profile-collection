@@ -2487,6 +2487,23 @@
                 html += '</div>';
             }
 
+            // 代币经济学相关图片（分配图/排放曲线等，提取时下载保存）
+            if (t.chart_images && t.chart_images.length > 0) {
+                html += '<div class="tkm-charts">';
+                t.chart_images.forEach((img, i) => {
+                    const fname = (img.file || '').split('/').pop();
+                    if (!fname) return;
+                    const src = `/api/tokenomics-images/${selectedAssetId}/${encodeURIComponent(fname)}`;
+                    const label = img.label || `图表 ${i + 1}`;
+                    html += `<figure style="margin:8px 0">
+                        <img src="${src}" alt="${escapeHtml(label)}" loading="lazy"
+                             style="max-width:100%;border-radius:8px;border:1px solid #2a2f3a;background:#111" />
+                        <figcaption style="font-size:11px;color:#9ca3af;margin-top:4px">${escapeHtml(label)}</figcaption>
+                    </figure>`;
+                });
+                html += '</div>';
+            }
+
             html += `<span class="tkm-confidence ${confClass}">${confText}</span>`;
             if (t.extraction_notes) {
                 html += `<div style="margin-top:8px;font-size:11px;color:#6b7280">${escapeHtml(t.extraction_notes)}</div>`;

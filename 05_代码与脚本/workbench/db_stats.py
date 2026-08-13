@@ -775,7 +775,8 @@ def reset_full_crawl(asset_id: int) -> dict:
     """完整重新爬取前置清理：
     1. 删除该资产所有爬取来源链接（deep_crawl / spa_browser_crawl），
        仅保留 API 来源的种子链接（cmc/cg/dl/dexscreener/binance/manual）。
-    2. 重置剩余种子链接的 deep_crawled_at / needs_browser，允许 B2 从第一层重新爬取。
+    2. 重置剩余种子链接的 deep_crawled_at / needs_browser / spa_retry_count，
+       允许 B2 从第一层重新爬取，并让 B3 重新尝试渲染 SPA 页面。
     """
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -787,7 +788,8 @@ def reset_full_crawl(asset_id: int) -> dict:
             deleted = cur.rowcount
 
             cur.execute(
-                "UPDATE biz.doc_source_entry SET deep_crawled_at = NULL, needs_browser = FALSE "
+                "UPDATE biz.doc_source_entry SET deep_crawled_at = NULL, needs_browser = FALSE, "
+                "spa_retry_count = 0, spa_crawled_at = NULL "
                 "WHERE asset_id = %s AND deep_crawled_at IS NOT NULL",
                 (asset_id,),
             )

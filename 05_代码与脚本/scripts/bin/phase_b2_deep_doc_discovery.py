@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import io
 import time
@@ -291,6 +292,11 @@ EXCLUDE_PATH_PATTERNS = [
     # ReportLinker 用于 RWA/支付/区块链产业市场规模报告
 ]
 EXCLUDE_PATH_EXACT = {"/resources/whitepapers"}
+# ── DApp 数据页正则：金库/合约详情页（链 ID + 0x 合约地址），属产品数据而非文档 ──
+EXCLUDE_PATH_REGEX = [
+    re.compile(r"/vaults/\d+/0x[0-9a-fA-F]+"),
+    re.compile(r"/aclm/\d+/0x[0-9a-fA-F]+"),
+]
 NOISY_DOC_DOMAINS = {"whitepaper.io", "docs.eth"}
 
 # ── GitHub blob 链接的文件扩展名过滤 ──
@@ -422,6 +428,10 @@ def _is_excluded_url(url: str) -> bool:
     for pattern in EXCLUDE_PATH_PATTERNS:
         if pattern.lower() in full_path or pattern.lower() in path:
             return True
+    # DApp 金库/合约详情页（链 ID + 0x 合约地址）
+    for rx in EXCLUDE_PATH_REGEX:
+        if rx.search(path):
+            return True
     # GitHub blob 链接：排除非文档文件（.py/.sol 等源码）
     if _is_github_non_doc_blob(url):
         return True
@@ -470,6 +480,28 @@ def _root_domain(domain: str) -> str:
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return domain
+
+
+def _normalize_url(url: str) -> str:
+    """URL 归一化：去 www、去 query/fragment、去尾斜杠、合并 Mintlify 的 .md 后缀。
+
+    用于去重，避免同一页面因查询参数（排序/筛选/跟踪）或 Mintlify 的
+    /x 与 /x.md 两种写法被当成不同文档。
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path or "/"
+    # Mintlify 文档站 /x 与 /x.md 同内容；GitHub blob/raw 的 .md 是真实文件名，不能去
+    if path.lower().endswith(".md") and "github.com" not in netloc:
+        path = path[:-3]
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunparse((scheme, netloc, path, "", "", ""))
 
 
 def extract_doc_links(
@@ -551,10 +583,10 @@ def extract_doc_links(
         if len(absolute_url) > 500:
             continue
 
-        normalized = absolute_url.rstrip("/")
+        normalized = _normalize_url(absolute_url)
         if normalized not in seen:
             seen.add(normalized)
-            results.append((absolute_url, infer_doc_entry_type(absolute_url)))
+            results.append((normalized, infer_doc_entry_type(normalized)))
 
     # ── 密度触发过滤：同一来源链接超过阈值时，只保留与项目标识匹配的链接 ──
     if results and project_identifiers:

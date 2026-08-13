@@ -474,6 +474,94 @@ def get_cg_supply(coingecko_id: str) -> dict | None:
     return None
 
 
+# ── tokenomics.com 结构化数据源 ──────────────────────────────
+
+def scrape_tokenomics_com(asset: dict) -> dict | None:
+    """从 app.tokenomics.com 抓取结构化代币经济学数据。
+
+    复用 phase_chain_token_unlocks 的 slug 推导 + 结构化爬虫，
+    额外抓取 revenue / valuation / FAQ 子板块。失败返回 None（不阻断流程）。
+    """
+    try:
+        _bin = Path(__file__).resolve().parent
+        if str(_bin) not in sys.path:
+            sys.path.insert(0, str(_bin))
+        from phase_chain_token_unlocks import guess_slugs, scrape_tokenomist
+
+        slugs = guess_slugs(asset)
+        print(f"  tokenomics.com 尝试 slugs: {slugs}")
+        data = scrape_tokenomist(slugs, symbol=asset.get("symbol", ""), include_extras=True)
+        if data:
+            print(f"  tokenomics.com 命中: {data.get('source_url')}")
+        return data
+    except Exception as e:
+        print(f"  [WARN] tokenomics.com 抓取失败: {e}")
+        return None
+
+
+def _format_tokenomics_com(data: dict) -> str:
+    """把 tokenomics.com 结构化数据格式化为 LLM 最高优先级文本块。"""
+    lines = ["## tokenomics.com 平台结构化数据（最高优先级，请优先以此为准）",
+             f"数据来源: {data.get('source_url', '')}"]
+
+    ov = data.get("overview") or {}
+    for label, key in (
+        ("TGE 日期", "tge_date"),
+        ("最大总供应量", "max_supply_str"),
+        ("总供应量", "total_amount_str"),
+    ):
+        if ov.get(key):
+            lines.append(f"- {label}: {ov[key]}")
+    if ov.get("released_pct") is not None:
+        lines.append(f"- 已释放比例: {ov['released_pct']}%")
+    if ov.get("locked_pct") is not None:
+        lines.append(f"- 锁定比例: {ov['locked_pct']}%")
+
+    alloc = ov.get("allocation") or data.get("allocation") or []
+    if alloc:
+        lines.append("\n### 代币分配 (allocation)")
+        for a in alloc:
+            lines.append(f"- {a.get('name')}: {a.get('pct')}%")
+
+    rounds = ov.get("investor_rounds") or []
+    if rounds:
+        lines.append("\n### 投资者轮次与条款 (investor rounds)")
+        for r in rounds:
+            lines.append(f"- {json.dumps(r, ensure_ascii=False, default=str)}")
+
+    faq = ov.get("faq") or []
+    if faq:
+        lines.append("\n### 代币经济学 FAQ")
+        for f in faq:
+            lines.append(f"Q: {f.get('q')}")
+            lines.append(f"A: {f.get('a')}")
+
+    events = data.get("unlock_events") or []
+    if events:
+        lines.append(f"\n### 解锁事件 (unlock events，共 {len(events)} 条)")
+        for e in events[:40]:
+            lines.append(f"- {json.dumps(e, ensure_ascii=False, default=str)}")
+
+    rev = data.get("revenue") or {}
+    if rev.get("faq"):
+        lines.append("\n### 协议收入 FAQ (revenue)")
+        for f in rev["faq"]:
+            lines.append(f"Q: {f.get('q')}")
+            lines.append(f"A: {f.get('a')}")
+    if rev.get("tables"):
+        lines.append("\n### 收入报表 (revenue statement)")
+        for t in rev["tables"]:
+            for row in t:
+                lines.append(" | ".join(row))
+
+    val = data.get("valuation") or {}
+    if val.get("text"):
+        lines.append("\n### 估值数据 (valuation)")
+        lines.append(val["text"][:2000])
+
+    return "\n".join(lines)
+
+
 # ── LLM 提取 ──────────────────────────────────────────────
 
 SYSTEM_PROMPT = """你是一个加密货币代币经济学数据分析专家。你的任务是从给定的多个文档中，
@@ -481,7 +569,7 @@ SYSTEM_PROMPT = """你是一个加密货币代币经济学数据分析专家。�
 
 规则：
 1. 从所有文档中综合提取，合并去重
-2. 如果多个来源对同一字段有冲突，以官网为优先，白皮书次之
+2. 如果多个来源对同一字段有冲突，优先级为：tokenomics.com 平台结构化数据 > 官网 > 白皮书 > 其他投研资料
 3. 没有的字段设为 null，不要编造数据
 4. 数字字段只保留数值，去掉逗号、单位等
 5. 百分比字段转为小数（如 12% → 12.00）
@@ -510,14 +598,18 @@ SYSTEM_PROMPT = """你是一个加密货币代币经济学数据分析专家。�
 }"""
 
 
-def build_user_prompt(asset: dict, doc_contents: list[dict], api_data: list[dict]) -> str:
-    """构建 LLM 用户提示词。"""
+def build_user_prompt(asset: dict, doc_contents: list[dict], api_data: list[dict],
+                      tokenomics_com_data: dict | None = None) -> str:
+    """构建 LLM 用户提示词。tokenomics.com 结构化数据作为最高优先级排在最前。"""
     parts = []
 
     parts.append(f"## 资产信息\n- 名称: {asset['name']}\n- 符号: {asset['symbol']}")
 
+    if tokenomics_com_data:
+        parts.append("\n" + _format_tokenomics_com(tokenomics_com_data))
+
     if doc_contents:
-        parts.append(f"\n## 文档内容（共 {len(doc_contents)} 页）\n")
+        parts.append(f"\n## 投研资料（作为补充，共 {len(doc_contents)} 页）\n")
         for i, doc in enumerate(doc_contents):
             content = doc["content"] or "(空)"
             parts.append(
@@ -538,9 +630,9 @@ def build_user_prompt(asset: dict, doc_contents: list[dict], api_data: list[dict
 
 
 def extract_with_llm(llm: LLMClient, asset: dict, doc_contents: list[dict],
-                     api_data: list[dict]) -> dict | None:
+                     api_data: list[dict], tokenomics_com_data: dict | None = None) -> dict | None:
     """调用 LLM 提取 tokenomics 数据。"""
-    user_prompt = build_user_prompt(asset, doc_contents, api_data)
+    user_prompt = build_user_prompt(asset, doc_contents, api_data, tokenomics_com_data)
 
     print(f"  发送给 LLM 的内容长度: {len(user_prompt)} 字符")
     print(f"  API 数据源: {[d['source'] for d in api_data]}")
@@ -695,6 +787,9 @@ def main() -> None:
             print("ERROR: LLM 未配置")
             sys.exit(1)
 
+        # 优先抓取 tokenomics.com 结构化数据（含 FAQ/revenue/valuation）
+        tokenomics_com_data = scrape_tokenomics_com(asset)
+
         selected_urls = select_relevant_links(llm, asset, all_links)
         print(f"  AI 筛选出 {len(selected_urls)} 个相关链接")
 
@@ -741,7 +836,7 @@ def main() -> None:
         # 5. LLM 提取
         print("  调用 LLM 提取 tokenomics...")
         start = time.monotonic()
-        result = extract_with_llm(llm, asset, doc_contents, api_data)
+        result = extract_with_llm(llm, asset, doc_contents, api_data, tokenomics_com_data)
         elapsed = time.monotonic() - start
 
         if not result:
@@ -782,6 +877,8 @@ def main() -> None:
 
         # 6. 入库
         source_urls = [d["source_url"] for d in doc_contents]
+        if tokenomics_com_data and tokenomics_com_data.get("source_url"):
+            source_urls.insert(0, tokenomics_com_data["source_url"])
         save_tokenomics(conn, asset["asset_id"], source_urls, result, dry_run=args.dry_run)
 
         if not args.dry_run:

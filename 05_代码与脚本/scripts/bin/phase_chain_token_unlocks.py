@@ -155,8 +155,10 @@ def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
 
 # ── 页面爬取 ──────────────────────────────────────────────
 
-def _scrape_variant(slug: str, variant: dict, is_fallback: bool) -> dict | None:
-    """用 Playwright 爬取单个数据源（新版 tokenomics.com 或旧版 tokenomist.ai）。"""
+def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras: bool = False) -> dict | None:
+    """用 Playwright 爬取单个数据源（新版 tokenomics.com 或旧版 tokenomist.ai）。
+
+    include_extras=True 时额外爬取 revenue / valuation 子页面（仅新版支持）。"""
     key = variant["key"]
     base_url = variant["base_tpl"].format(slug=slug)
     unlock_url = base_url + variant["unlock_path"]
@@ -171,6 +173,8 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool) -> dict | None:
         "overview": {},
         "unlock_events": [],
         "allocation": [],
+        "revenue": {},
+        "valuation": {},
     }
 
     try:
@@ -244,6 +248,29 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool) -> dict | None:
             result["unlock_events"] = events
             _log(f"  Unlock Events: {len(events)} 条")
 
+            # ── Step 3: 可选爬取 revenue / valuation 子页面 ──
+            if include_extras:
+                for sub_key, sub_path in (
+                    ("revenue", variant.get("revenue_path")),
+                    ("valuation", variant.get("valuation_path")),
+                ):
+                    if not sub_path:
+                        continue
+                    sub_url = base_url + sub_path
+                    _log(f"  加载 {sub_key} 页面: {sub_path}")
+                    try:
+                        page.goto(sub_url, wait_until="networkidle", timeout=NAV_TIMEOUT * 1000)
+                    except PlaywrightTimeout:
+                        _log(f"  [WARN] {sub_key} 页面加载超时，尝试用已有内容")
+                    except Exception as e:
+                        _log(f"  [WARN] {sub_key} 页面导航失败: {e}")
+                        continue
+                    page.wait_for_timeout(4000)
+                    _close_popups(page)
+                    result[sub_key] = _extract_subpage(page)
+                    _log(f"  {sub_key}: {len(result[sub_key].get('faq', []))} FAQ, "
+                         f"{len(result[sub_key].get('tables', []))} tables")
+
             browser.close()
             return result
 
@@ -253,15 +280,16 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool) -> dict | None:
         return None
 
 
-def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
+def scrape_tokenomist(slugs: list[str], symbol: str = "", include_extras: bool = False) -> dict | None:
     """用 Playwright 爬取解锁数据。
 
     依次尝试 slugs × 数据源（新版 app.tokenomics.com 优先，旧版 tokenomist.ai 兜底），
-    overview 为空则换下一个。"""
+    overview 为空则换下一个。
+    include_extras=True 时额外爬取 revenue / valuation 子页面。"""
     for idx, slug in enumerate(slugs):
         is_fallback = idx > 0
         for variant in SOURCE_VARIANTS:
-            result = _scrape_variant(slug, variant, is_fallback)
+            result = _scrape_variant(slug, variant, is_fallback, include_extras=include_extras)
             if result:
                 return result
 
@@ -271,7 +299,7 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
         if searched_slug and searched_slug not in slugs:
             _log(f"  [搜索兜底] 尝试搜索到的 slug: {searched_slug}")
             # 递归调用自己，只试这一个 slug
-            return scrape_tokenomist([searched_slug], symbol)
+            return scrape_tokenomist([searched_slug], symbol, include_extras=include_extras)
 
     _log(f"  所有 slug 均失败，该代币可能未被收录")
     return None
@@ -333,6 +361,16 @@ def _extract_overview(page, slug: str) -> dict:
     if allocations:
         overview["allocation"] = allocations
 
+    # 投资者轮次与条款（Investor Rounds & Terms 表格）
+    investor_rounds = _extract_investor_rounds(page)
+    if investor_rounds:
+        overview["investor_rounds"] = investor_rounds
+
+    # Tokenomics FAQ 板块（Q&A）
+    faq = _extract_faq(page)
+    if faq:
+        overview["faq"] = faq
+
     return overview
 
 
@@ -389,12 +427,128 @@ def _extract_allocation(page) -> list[dict]:
                 # 过滤表头/汇总行
                 if not name or name.lower() in ("pool name", "name", "total", "average"):
                     continue
+                # 去重：同一 pool 可能同时出现在分配表与投资者轮次表中
+                if any(a["name"].lower() == name.lower() for a in allocations):
+                    continue
                 allocations.append({"name": name, "pct": pct})
             except Exception:
                 continue
     except Exception:
         pass
     return allocations[:15]
+
+
+def _extract_faq(page) -> list[dict]:
+    """提取 Overview 页面的 Tokenomics FAQ 板块（<details>/<summary> 手风琴）。
+
+    每个 FAQ 项是一个 <details>，textContent 依次为「问题 + 答案」。
+    返回 [{"q": 问题, "a": 答案}, ...]。
+    """
+    try:
+        faqs = page.evaluate("""
+            () => {
+                const results = [];
+                const details = document.querySelectorAll('details');
+                details.forEach(d => {
+                    const summary = d.querySelector('summary');
+                    if (!summary) return;
+                    const q = summary.textContent.trim().replace(/\\s+/g, ' ');
+                    const full = d.textContent.trim().replace(/\\s+/g, ' ');
+                    // 去掉前面的问题文本，剩下即答案
+                    let a = full;
+                    if (a.startsWith(q)) {
+                        a = a.slice(q.length).trim();
+                    }
+                    if (q && a) {
+                        results.push({ q: q, a: a.slice(0, 3000) });
+                    }
+                });
+                return results;
+            }
+        """)
+        _log(f"  FAQ: {len(faqs)} 条")
+        return faqs
+    except Exception as e:
+        _log(f"  [WARN] FAQ 提取失败: {e}")
+        return []
+
+
+def _extract_investor_rounds(page) -> list[dict]:
+    """提取 Overview 页面的 Investor Rounds & Terms 表格。
+
+    该表列: Round | Allocation | Entry Price | Entry FDV | Raised | Vesting Terms
+    与上方 Allocation Distribution 表（Pool Name | Allocation % ...）不同，
+    通过表头含 "entry price"/"vesting"/"round" 来定位。
+    返回 [{列名: 值}, ...]。
+    """
+    try:
+        rows = page.evaluate("""
+            () => {
+                const tables = Array.from(document.querySelectorAll('table'));
+                for (const table of tables) {
+                    const headerCells = Array.from(table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td'));
+                    const headers = headerCells.map(h => h.textContent.trim().replace(/\\s+/g, ' '));
+                    const joined = headers.join(' ').toLowerCase();
+                    if (!(joined.includes('entry price') || joined.includes('vesting') || joined.includes('entry fdv'))) {
+                        continue;
+                    }
+                    const result = [];
+                    table.querySelectorAll('tr').forEach(tr => {
+                        const cells = Array.from(tr.querySelectorAll('td, th'))
+                            .map(td => td.textContent.trim().replace(/\\s+/g, ' '))
+                            .filter(Boolean);
+                        if (cells.length < 2) return;
+                        // 跳过表头行（含 Round / Entry Price 等列名）
+                        if (cells.some(c => /entry price|entry fdv|vesting terms|^round$/i.test(c))) return;
+                        const obj = {};
+                        cells.forEach((c, i) => {
+                            const key = headers[i] || ('col' + (i + 1));
+                            obj[key] = c;
+                        });
+                        result.push(obj);
+                    });
+                    if (result.length) return result;
+                }
+                return [];
+            }
+        """)
+        _log(f"  Investor Rounds: {len(rows)} 行")
+        return rows
+    except Exception as e:
+        _log(f"  [WARN] Investor Rounds 提取失败: {e}")
+        return []
+
+
+def _extract_tables(page) -> list[list[list[str]]]:
+    """提取页面上所有表格，返回 [表格][行][单元格] 的文本结构。"""
+    try:
+        return page.evaluate("""
+            () => Array.from(document.querySelectorAll('table')).map(t =>
+                Array.from(t.querySelectorAll('tr')).map(tr =>
+                    Array.from(tr.querySelectorAll('th, td'))
+                        .map(c => c.textContent.trim().replace(/\\s+/g, ' '))
+                        .filter(Boolean)
+                ).filter(r => r.length > 0)
+            )
+        """)
+    except Exception as e:
+        _log(f"  [WARN] 表格提取失败: {e}")
+        return []
+
+
+def _extract_subpage(page) -> dict:
+    """提取 revenue / valuation 子页面的通用结构化数据。
+
+    返回 {"text": 正文文本, "faq": Q&A, "tables": 所有表格}。
+    """
+    out: dict = {}
+    try:
+        out["text"] = page.locator("body").inner_text(timeout=5000)[:5000]
+    except Exception:
+        out["text"] = ""
+    out["faq"] = _extract_faq(page)
+    out["tables"] = _extract_tables(page)
+    return out
 
 
 def _extract_unlock_events(page) -> list[dict]:
@@ -757,6 +911,8 @@ SOURCE_VARIANTS = [
         "key": "tokenomics.com",
         "base_tpl": "https://app.tokenomics.com/tokenomics/{slug}",
         "unlock_path": "/unlocks",
+        "revenue_path": "/revenue",
+        "valuation_path": "/valuation",
         "extract_overview": _extract_overview,
         "extract_unlocks_overview": _extract_unlocks_overview,
         "extract_unlock_events": _extract_unlock_events,

@@ -46,6 +46,35 @@ EXPLORER_URLS = {
     "avax": "https://snowtrace.io",
 }
 
+# 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称
+CHAIN_ALIASES = {
+    "ethereum": "eth",
+    "eth": "eth",
+    "bsc": "bsc",
+    "bnb": "bsc",
+    "binance": "bsc",
+    "polygon": "polygon",
+    "matic": "polygon",
+    "arbitrum": "arb",
+    "arb": "arb",
+    "optimism": "opt",
+    "op": "opt",
+    "base": "base",
+    "avalanche": "avax",
+    "avax": "avax",
+}
+
+# 浏览器简称 → 数据库完整名列表（反查合约地址时兼容多种命名）
+CHAIN_DB_NAMES = {
+    "eth": ("ethereum", "eth"),
+    "bsc": ("bsc", "bnb", "binance"),
+    "polygon": ("polygon", "matic"),
+    "arb": ("arbitrum", "arb"),
+    "opt": ("optimism", "op"),
+    "base": ("base",),
+    "avax": ("avalanche", "avax"),
+}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -65,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chain", type=str, default="bsc",
                    help="链简称: bsc/eth/polygon/arb/opt/base/avax")
     p.add_argument("--save", action="store_true", help="写入数据库")
+    p.add_argument("--force", action="store_true", help="忽略缓存强制爬取（兼容上层调用）")
     p.add_argument("--holders-limit", type=int, default=50,
                    help="最多解析多少持币地址")
     return p
@@ -74,17 +104,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
                      chain: str) -> dict | None:
-    """获取合约地址和资产信息。"""
+    """获取合约地址和资产信息。chain 参数已归一化为浏览器简称。"""
+    # 归一化 chain 对应的数据库完整名列表，用于反查
+    db_names = CHAIN_DB_NAMES.get(chain, (chain,))
+    placeholders = ",".join(["%s"] * len(db_names))
+
     if contract_address:
         # 用合约地址反查 asset_id
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                """SELECT a.asset_id, a.canonical_symbol AS symbol,
+                f"""SELECT a.asset_id, a.canonical_symbol AS symbol,
                           a.canonical_name AS name
                    FROM core.asset_contract c
                    JOIN core.asset a ON a.asset_id = c.asset_id
-                   WHERE c.contract_address = %s AND c.chain = %s""",
-                (contract_address.lower(), chain),
+                   WHERE c.contract_address = %s AND c.chain IN ({placeholders})""",
+                (contract_address.lower(), *db_names),
             )
             row = cur.fetchone()
             if row:
@@ -95,16 +129,16 @@ def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
     if asset_id:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                """SELECT a.asset_id, a.canonical_symbol AS symbol,
+                f"""SELECT a.asset_id, a.canonical_symbol AS symbol,
                           a.canonical_name AS name,
                           c.contract_address, c.chain
                    FROM core.asset a
                    LEFT JOIN core.asset_contract c
-                       ON c.asset_id = a.asset_id AND c.chain = %s
+                       ON c.asset_id = a.asset_id AND c.chain IN ({placeholders})
                    WHERE a.asset_id = %s
                    ORDER BY c.contract_address NULLS LAST
                    LIMIT 1""",
-                (chain, asset_id),
+                (*db_names, asset_id),
             )
             row = cur.fetchone()
         if row and not row["contract_address"]:
@@ -127,11 +161,31 @@ def _parse_number(s: str) -> str | None:
     return m.group(1).replace(",", "") if m else None
 
 
+def _fetch_html(url: str, timeout: int = 20, retries: int = 3) -> str | None:
+    """带重试的页面抓取，返回 HTML 文本（失败返回 None）。"""
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(1 * attempt)
+    print(f"  [WARN] 抓取失败（重试 {retries} 次）: {last_err}")
+    return None
+
+
 def scrape_holders(explorer_url: str, contract_address: str,
                    max_holders: int = 50) -> dict:
-    """从区块浏览器持币页面抓取持仓分布数据。"""
+    """从区块浏览器持币页面抓取持仓分布数据。
+
+    注意：#balances 是 URL 片段（fragment），不会发送到服务器，
+    持币列表、Top 集中度、Tier 分布都在 Token 首页的同一份 HTML 里，
+    因此只需抓取一次 token_url 即可解析全部数据（避免连续请求触发反爬）。
+    """
     token_url = f"{explorer_url}/token/{contract_address}"
-    holders_url = f"{token_url}#balances"
 
     result = {
         "chain": "",
@@ -147,31 +201,17 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "scraped_at": None,
     }
 
-    # ── Step 1: Token 首页 → 总持币数 ──
-    try:
-        resp = requests.get(token_url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        print(f"  [WARN] Token 首页抓取失败: {e}")
+    html = _fetch_html(token_url)
+    if not html:
         return result
 
-    # 解析总持币数（页面文本中的 "Holders 153,662"）
+    soup = BeautifulSoup(html, "html.parser")
     body_text = soup.get_text()
+
+    # 解析总持币数（页面文本中的 "Holders 153,662"）
     m = re.search(r'Holders\s+([\d,]+)', body_text)
     if m:
         result["total_holders"] = int(m.group(1).replace(",", ""))
-
-    # ── Step 2: Holders 页面 → 持仓分布 ──
-    try:
-        resp = requests.get(holders_url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        print(f"  [WARN] Holders 页面抓取失败: {e}")
-        return result
-
-    body_text = soup.get_text()
 
     # 解析 Top 集中度：BSCScan 格式:
     # "Supply of Top 5 holders: 67.99% | Top 10 holders: 84.11%"
@@ -198,69 +238,69 @@ def scrape_holders(explorer_url: str, contract_address: str,
             })
     result["tier_distribution_json"] = tiers
 
-    # ── Step 3: 解析持仓列表（从 HTML table）──
+    # 解析持仓列表（从 HTML table）
     holders_table = soup.select_one("table")
     if not holders_table:
         print("  [WARN] 未找到持仓表格")
         result["top_holders_json"] = []
-        return result
+    else:
+        rows = holders_table.select("tr")[1:]  # 跳过表头
+        parsed = []
 
-    rows = holders_table.select("tr")[1:]  # 跳过表头
-    parsed = []
-
-    for row in rows:
-        if len(parsed) >= max_holders:
-            break
-
-        cols = row.select("td")
-        if len(cols) < 3:
-            continue
-
-        rank_text = cols[0].get_text(strip=True)
-        try:
-            rank = int(rank_text)
-        except ValueError:
-            continue
-
-        # 地址
-        addr_link = cols[1].select_one("a")
-        if not addr_link:
-            continue
-        addr_text = addr_link.get_text(strip=True)
-
-        # Label（BSCScan 自动标注如 "Gate 5", "KuCoin: Hot Wallet 2"）
-        label_spans = cols[1].select("span")
-        label = ""
-        for sp in label_spans:
-            t = sp.get_text(strip=True)
-            if t and t != addr_text:
-                label = t
+        for row in rows:
+            if len(parsed) >= max_holders:
                 break
 
-        # 数量
-        qty_text = cols[2].get_text(strip=True)
-        qty = qty_text.replace(",", "")
+            cols = row.select("td")
+            if len(cols) < 3:
+                continue
 
-        # 百分比
-        pct_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
-        pct = _parse_pct(pct_text)
+            rank_text = cols[0].get_text(strip=True)
+            try:
+                rank = int(rank_text)
+            except ValueError:
+                continue
 
-        parsed.append({
-            "rank": rank,
-            "address": addr_text,
-            "label": label,
-            "amount": qty,
-            "pct": pct,
-        })
+            # 地址
+            addr_link = cols[1].select_one("a")
+            if not addr_link:
+                continue
+            addr_text = addr_link.get_text(strip=True)
 
-    result["top_holders_json"] = parsed
+            # Label（BSCScan 自动标注如 "Gate 5", "KuCoin: Hot Wallet 2"）
+            label_spans = cols[1].select("span")
+            label = ""
+            for sp in label_spans:
+                t = sp.get_text(strip=True)
+                if t and t != addr_text:
+                    label = t
+                    break
+
+            # 数量
+            qty_text = cols[2].get_text(strip=True)
+            qty = qty_text.replace(",", "")
+
+            # 百分比
+            pct_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+            pct = _parse_pct(pct_text)
+
+            parsed.append({
+                "rank": rank,
+                "address": addr_text,
+                "label": label,
+                "amount": qty,
+                "pct": pct,
+            })
+
+        result["top_holders_json"] = parsed
+
     result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(parsed)} 条")
+    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
     if tiers:
         print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
         print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")
-        print(f"  CEX 标签: {len([h for h in parsed if h['label']])} 个地址有标签")
+        print(f"  CEX 标签: {len([h for h in result['top_holders_json'] if h['label']])} 个地址有标签")
 
     return result
 
@@ -351,10 +391,12 @@ def main() -> int:
     args = build_parser().parse_args()
     settings = get_settings(require_database=True)
 
-    chain = args.chain.lower()
+    # 归一化链名：ethereum→eth, arbitrum→arb, avalanche→avax 等
+    raw_chain = args.chain.lower()
+    chain = CHAIN_ALIASES.get(raw_chain, raw_chain)
     explorer_url = EXPLORER_URLS.get(chain)
     if not explorer_url:
-        print(f"ERROR: 不支持的链: {chain}")
+        print(f"ERROR: 不支持的链: {raw_chain}")
         return 1
 
     with get_connection(settings.database_url) as conn:

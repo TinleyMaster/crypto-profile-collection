@@ -33,6 +33,38 @@ from crypto_research.clients.llm_client import LLMClient
 
 settings = get_settings(require_database=True)
 
+
+def _normalize_domain(domain: str) -> str:
+    """域名归一化：小写并去掉 www 前缀。"""
+    dl = (domain or "").lower().strip()
+    if dl.startswith("www."):
+        dl = dl[3:]
+    return dl
+
+
+# ── 社交平台域名：直接判过（不送 AI，避免误删投研核心资料）──
+SOCIAL_DOMAINS = {
+    "twitter.com",
+    "x.com",
+    "t.co",
+    "linkedin.com",
+    "t.me",
+    "telegram.me",
+    "reddit.com",
+    "medium.com",
+    "discord.com",
+    "discord.gg",
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "youtu.be",
+}
+
+
+def _is_social_domain(domain: str) -> bool:
+    return _normalize_domain(domain) in SOCIAL_DOMAINS
+
+
 # ── 审计/安全公司域名（跨项目审计报告聚合，需按项目标识过滤）──
 # 与 phase_b2_deep_doc_discovery.py 的 AGGREGATION_DENSITY_DOMAINS 保持同步
 AGGREGATION_DENSITY_DOMAINS = {
@@ -85,16 +117,6 @@ AGGREGATION_DENSITY_DOMAINS = {
     "www.backedassets.fi",
     "backed.fi",
 }
-
-
-def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
-    """检查 URL 路径中是否包含项目标识符（代币简称/项目名称）"""
-    for identifier in project_identifiers:
-        if not identifier or len(identifier) < 2:
-            continue
-        if identifier.lower() in url_lower:
-            return True
-    return False
 
 # ── 规则直删域名（不需要 AI 判断） ──
 RULE_NOISE_DOMAINS = {
@@ -231,6 +253,77 @@ AUDIT_DOMAINS = {
     "peckshield.com",
 }
 
+# 归一化后的审计平台域名与审计聚合域名（host 粒度），用于识别审计聚合链接
+_NORMALIZED_AUDIT_DOMAINS = {_normalize_domain(d) for d in AUDIT_DOMAINS}
+_NORMALIZED_AGGREGATION_HOSTS = {
+    _normalize_domain(d) for d in AGGREGATION_DENSITY_DOMAINS if "/" not in d
+}
+
+
+def get_cross_asset_domains(conn) -> set[str]:
+    """识别 deep_crawl 中关联 >50 资产的域名（host 粒度，排除社交与代码托管）。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""
+            SELECT LOWER(SPLIT_PART(REPLACE(REPLACE(entry_url, 'https://', ''), 'http://', ''), '/', 1)) AS domain,
+                   count(DISTINCT asset_id) AS asset_cnt
+            FROM biz.doc_source_entry
+            WHERE entity_type = 'asset'
+              AND discovered_from LIKE 'deep_crawl:%%'
+            GROUP BY 1
+            HAVING count(DISTINCT asset_id) > 50
+        """)
+        rows = cur.fetchall()
+
+    domains = set()
+    for r in rows:
+        domain = _normalize_domain(r["domain"])
+        if domain in ("github.com", "gitlab.com", "bitbucket.org"):
+            continue
+        if domain in SOCIAL_DOMAINS:
+            continue
+        domains.add(domain)
+    return domains
+
+
+def _is_audit_aggregation_domain(domain: str, cross_asset_domains: set[str]) -> bool:
+    """判断域名是否为审计聚合域名（关联 >50 资产，或已知审计平台）。"""
+    dl = _normalize_domain(domain)
+    return (
+        dl in cross_asset_domains
+        or dl in _NORMALIZED_AUDIT_DOMAINS
+        or dl in _NORMALIZED_AGGREGATION_HOSTS
+    )
+
+
+def fetch_page_text(url: str, timeout: int = 15) -> dict:
+    """抓取页面并提取标题与正文文本，供 AI 二次判断。"""
+    import requests
+    from bs4 import BeautifulSoup
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            return {"ok": False, "error": f"非HTML内容: {content_type}"}
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        text = " ".join(soup.get_text(" ", strip=True).split())[:3000]
+        return {"ok": True, "title": title, "text": text}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
 
 def reset_ai_false_positives(conn, execute: bool) -> int:
     """
@@ -358,46 +451,30 @@ def reset_dense_domains(conn, execute: bool, asset_id: int | None = None) -> int
     return reset_count
 
 
-def build_project_identifiers(symbol: str, name: str) -> list[str]:
-    """构建项目标识符列表，用于审计链接匹配。"""
-    identifiers: list[str] = []
-    if symbol and len(symbol) >= 2:
-        identifiers.append(symbol)
-    if name:
-        for word in name.replace("-", " ").replace(".", " ").split():
-            word = word.strip()
-            if len(word) >= 2 and word.lower() not in ("token", "coin", "dao", "protocol", "network", "chain", "finance", "swap", "defi"):
-                identifiers.append(word)
-    return identifiers
-
-
-def pre_filter_audit_links(conn, asset: dict, execute: bool) -> tuple[int, int, list[dict]]:
+def filter_audit_links_with_ai(conn, asset: dict, llm, execute: bool, cross_asset_domains: set[str]) -> tuple[int, int, list[dict]]:
     """
-    审计链接预过滤：按项目标识匹配。
-    - 包含标识 → 保留（标记已检查）
-    - 不包含 → 删除
+    审计聚合链接按条交给 AI 判断：仅保留当前代币的审计资料。
     - 返回：(kept, deleted, remaining_domains_for_ai)
     """
     symbol = asset["symbol"] or ""
     name = asset["name"] or ""
-    project_identifiers = build_project_identifiers(symbol, name)
-    if not project_identifiers:
-        return 0, 0, asset["domains"]
-
+    description = asset.get("description") or ""
     domains = asset["domains"]
+
+    audit_domains = []
     remaining = []
-    auto_kept = 0
-    auto_deleted = 0
-
     for d in domains:
-        domain = d["domain"] or ""
-        # 检查是否为审计密度域名
-        is_audit = any(ad in domain.lower() for ad in AGGREGATION_DENSITY_DOMAINS)
-        if not is_audit:
+        if _is_audit_aggregation_domain(d["domain"], cross_asset_domains):
+            audit_domains.append(d)
+        else:
             remaining.append(d)
-            continue
 
-        # 取出该域名下所有链接的 entry_id 和 entry_url
+    if not audit_domains:
+        return 0, 0, remaining
+
+    kept = 0
+    deleted = 0
+    for d in audit_domains:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT entry_id, entry_url FROM biz.doc_source_entry WHERE entry_id = ANY(%s) ORDER BY entry_id",
@@ -405,13 +482,13 @@ def pre_filter_audit_links(conn, asset: dict, execute: bool) -> tuple[int, int, 
             )
             entries = cur.fetchall()
 
-        keep_ids = []
-        delete_ids = []
-        for e in entries:
-            if _matches_project(e["entry_url"].lower(), project_identifiers):
-                keep_ids.append(e["entry_id"])
-            else:
-                delete_ids.append(e["entry_id"])
+        links = [{"entry_id": e["entry_id"], "url": e["entry_url"]} for e in entries]
+        if not links:
+            continue
+
+        results = llm.judge_audit_links(symbol, name, description, links)
+        keep_ids = [r["entry_id"] for r in results if r["keep"]]
+        delete_ids = [r["entry_id"] for r in results if not r["keep"]]
 
         if execute:
             if keep_ids:
@@ -419,13 +496,66 @@ def pre_filter_audit_links(conn, asset: dict, execute: bool) -> tuple[int, int, 
             if delete_ids:
                 delete_noise_ids(conn, delete_ids)
 
-        if keep_ids or delete_ids:
-            print(f"  [审计预过滤] {domain}: 保留 {len(keep_ids)} 条, 删除 {len(delete_ids)} 条")
+        kept += len(keep_ids)
+        deleted += len(delete_ids)
+        print(f"  [审计AI] {d['domain']}: 保留 {len(keep_ids)} 条, 删除 {len(delete_ids)} 条")
 
-        auto_kept += len(keep_ids)
-        auto_deleted += len(delete_ids)
+    return kept, deleted, remaining
 
-    return auto_kept, auto_deleted, remaining
+
+def recheck_uncertain_links(conn, asset: dict, uncertain_domains: list[dict], llm, execute: bool) -> tuple[int, int]:
+    """
+    对 AI 首次判断为 uncertain 的域名，抓取页面正文后二次判断是否删除。
+    - 返回：(kept, deleted)
+    """
+    symbol = asset["symbol"] or ""
+    name = asset["name"] or ""
+    description = asset.get("description") or ""
+
+    kept = 0
+    deleted = 0
+    for d in uncertain_domains:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT entry_id, entry_url FROM biz.doc_source_entry WHERE entry_id = ANY(%s) ORDER BY entry_id",
+                (d["affected_ids"],),
+            )
+            entries = cur.fetchall()
+
+        items = []
+        for e in entries:
+            page = fetch_page_text(e["entry_url"])
+            if page.get("ok"):
+                items.append({
+                    "entry_id": e["entry_id"],
+                    "url": e["entry_url"],
+                    "title": page.get("title", ""),
+                    "text": page.get("text", ""),
+                })
+            else:
+                # 抓取失败则保守保留
+                if execute:
+                    mark_checked(conn, [e["entry_id"]])
+                kept += 1
+
+        if not items:
+            continue
+
+        results = llm.judge_links_with_content(symbol, name, description, items)
+        keep_ids = [r["entry_id"] for r in results if not r["noise"]]
+        delete_ids = [r["entry_id"] for r in results if r["noise"]]
+
+        if execute:
+            if keep_ids:
+                mark_checked(conn, keep_ids)
+            if delete_ids:
+                delete_noise_ids(conn, delete_ids)
+
+        kept += len(keep_ids)
+        deleted += len(delete_ids)
+        print(f"  [二次判断] {d['domain']}: 保留 {len(keep_ids)} 条, 删除 {len(delete_ids)} 条")
+
+    return kept, deleted
 
 
 def get_asset_domain_groups(conn, limit: int, asset_id: int | None = None) -> list[dict]:
@@ -445,6 +575,7 @@ def get_asset_domain_groups(conn, limit: int, asset_id: int | None = None) -> li
                 a.asset_id,
                 a.canonical_symbol,
                 a.canonical_name,
+                a.description_short,
                 SUM(CASE WHEN dse.ai_noise_checked_at IS NULL THEN 1 ELSE 0 END) AS unchecked,
                 SUM(CASE WHEN dse.ai_noise_checked_at IS NOT NULL THEN 1 ELSE 0 END) AS checked
             FROM biz.doc_source_entry dse
@@ -452,7 +583,7 @@ def get_asset_domain_groups(conn, limit: int, asset_id: int | None = None) -> li
             WHERE dse.entity_type = 'asset'
               AND dse.discovered_from LIKE 'deep_crawl:%%'
               {asset_clause}
-            GROUP BY a.asset_id, a.canonical_symbol, a.canonical_name
+            GROUP BY a.asset_id, a.canonical_symbol, a.canonical_name, a.description_short
             HAVING SUM(CASE WHEN dse.ai_noise_checked_at IS NULL THEN 1 ELSE 0 END) > 0
             ORDER BY unchecked DESC
             LIMIT %s
@@ -492,6 +623,7 @@ def get_asset_domain_groups(conn, limit: int, asset_id: int | None = None) -> li
             "asset_id": aid,
             "symbol": asset["canonical_symbol"],
             "name": asset["canonical_name"],
+            "description": asset.get("description_short") or "",
             "unchecked": asset["unchecked"],
             "checked": asset["checked"],
             "domains": domains,
@@ -577,6 +709,10 @@ def main():
         total_kept_links = 0
         total_checked = 0
 
+        # ── 识别跨资产审计聚合域名（>50 资产），用于审计链接按条 AI 判断 ──
+        cross_asset_domains = get_cross_asset_domains(conn)
+        print(f"跨资产审计聚合域名（>50 资产）: {len(cross_asset_domains)} 个\n")
+
         for idx, asset in enumerate(assets):
             aid = asset["asset_id"]
             sym = asset["symbol"] or "?"
@@ -589,18 +725,35 @@ def main():
             print(f"  未检查: {unchecked:,} 条  |  已检查: {asset['checked']:,} 条")
             print(f"  域名数: {len(domains)}")
 
-            # ── 审计链接预过滤：按项目标识匹配，不送 AI ──
-            pre_kept, pre_deleted, domains = pre_filter_audit_links(conn, asset, args.execute)
-            total_kept_links += pre_kept
-            total_noise_links += pre_deleted
+            # ── 1) 社交平台域名：直接判过，不送 AI ──
+            social_domains = [d for d in domains if _is_social_domain(d["domain"])]
+            social_kept = 0
+            for d in social_domains:
+                ids = d.get("entry_ids", [])
+                if args.execute:
+                    mark_checked(conn, ids)
+                social_kept += len(ids)
+                print(f"  [社交直过] {d['domain']}: {len(ids)} 条")
+            total_kept_links += social_kept
 
-            if not domains:
-                print(f"  所有链接已预过滤处理，无需 AI 判断\n")
+            non_social_domains = [d for d in domains if not _is_social_domain(d["domain"])]
+
+            # ── 2) 审计聚合链接：按条交给 AI，仅保留当前代币审计资料 ──
+            asset_for_audit = dict(asset)
+            asset_for_audit["domains"] = non_social_domains
+            audit_kept, audit_deleted, remaining = filter_audit_links_with_ai(
+                conn, asset_for_audit, llm, args.execute, cross_asset_domains,
+            )
+            total_kept_links += audit_kept
+            total_noise_links += audit_deleted
+
+            if not remaining:
+                print(f"  所有链接已处理（社交直过 + 审计 AI），无需域名级 AI 判断\n")
                 continue
 
-            # 构造 domain_groups 传给 AI（仅剩余非审计域名）
+            # ── 3) 域名级 AI 判断：noise / relevant / uncertain ──
             domain_groups = []
-            for d in domains:
+            for d in remaining:
                 domain_groups.append({
                     "domain": d["domain"] or "unknown",
                     "count": d["cnt"],
@@ -618,19 +771,20 @@ def main():
                 print(f"  ❌ AI 调用失败: {str(e)[:120]}")
                 continue
 
-            # 处理结果
-            noise_domains = [r for r in results if r["noise"]]
-            relevant_domains = [r for r in results if not r["noise"]]
+            noise_domains = [r for r in results if r["decision"] == "noise"]
+            relevant_domains = [r for r in results if r["decision"] == "relevant"]
+            uncertain_domains = [r for r in results if r["decision"] == "uncertain"]
 
+            # 噪声 → 删除
             for r in noise_domains:
                 domain = r["domain"]
                 ids = r.get("affected_ids", [])
                 reason = r.get("reason", "")
                 if args.execute:
                     delete_noise_ids(conn, ids)
-                print(f"  ✗ [{domain}] {len(ids):,} 条 → {reason[:80]}")
+                print(f"  ✗ [噪声] {domain} {len(ids):,} 条 → {reason[:80]}")
 
-            # 标记相关域名的条目为已检查
+            # 相关 → 标记已检查
             for r in relevant_domains:
                 ids = r.get("affected_ids", [])
                 if args.execute:
@@ -639,13 +793,25 @@ def main():
             noise_link_count = sum(len(r.get("affected_ids", [])) for r in noise_domains)
             kept_link_count = sum(len(r.get("affected_ids", [])) for r in relevant_domains)
 
-            total_domains_judged += len(domains)
+            # 不确定 → 抓取页面正文后二次判断
+            uncertain_kept = 0
+            uncertain_deleted = 0
+            if uncertain_domains:
+                print(f"  [?] 不确定域名 {len(uncertain_domains)} 个，抓取页面正文二次判断…")
+                uncertain_kept, uncertain_deleted = recheck_uncertain_links(
+                    conn, asset, uncertain_domains, llm, args.execute,
+                )
+            total_kept_links += uncertain_kept
+            total_noise_links += uncertain_deleted
+
+            total_domains_judged += len(remaining)
             total_noise_domains += len(noise_domains)
             total_noise_links += noise_link_count
             total_kept_links += kept_link_count
 
             print(f"  噪声: {len(noise_domains)} 域名 / {noise_link_count:,} 条  |  "
                   f"保留: {len(relevant_domains)} 域名 / {kept_link_count:,} 条  |  "
+                  f"二次判断: 删 {uncertain_deleted} 保留 {uncertain_kept}  |  "
                   f"耗时: {elapsed:.1f}s")
 
         # ── 汇总 ──

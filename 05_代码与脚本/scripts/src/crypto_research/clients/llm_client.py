@@ -408,17 +408,18 @@ class LLMClient:
             asset_id: 资产 ID（仅用于日志）
 
         Returns:
-            [{domain, noise: bool, reason: str, affected_ids: [id, ...]}]
+            [{domain, decision: "noise"|"relevant"|"uncertain", reason: str,
+              affected_ids: [id, ...], sample_urls: [url, ...]}]
         """
         if not domain_groups:
             return []
 
         system_prompt = (
             "你是一个加密货币投研资料筛选专家。你的任务是：给定一个特定加密资产，"
-            "判断其文档链接中哪些域名与加密/Web3 投研相关，哪些是噪声。\n"
+            "判断其文档链接中哪些域名与加密/Web3 投研相关，哪些是噪声，哪些不确定。\n"
             "\n"
             "判断标准：\n"
-            "- 相关（noise=false）：以下类型的链接都应保留，因为它们对投研有价值：\n"
+            "- 相关（decision=relevant）：以下类型的链接都应保留，因为它们对投研有价值：\n"
             "  1. 项目官方文档（白皮书、代币经济学、治理文档、路线图等）\n"
             "  2. 审计报告和安全评估（即使来自第三方审计平台，如 tech-audit.org, "
             "quillaudits, hacken, certik, certora, openzeppelin 等）\n"
@@ -427,25 +428,28 @@ class LLMClient:
             "  4. 合作伙伴/生态页面（如 partners.circle.com 等）\n"
             "  5. 加密行业通用平台（CoinGecko, CoinMarketCap, DeFiLlama, Dune 等）\n"
             "  6. GitHub 仓库（即使是第三方审计仓库，只要涉及加密项目审计）\n"
-            "- 噪声（noise=true）：仅以下类型应判定为噪声：\n"
+            "- 噪声（decision=noise）：仅以下类型应判定为噪声：\n"
             "  1. 非加密学术论文（arxiv, springer, neurips, researchgate 等）\n"
             "  2. 通用编程/技术文档（npm, pip, nuget, packagist, ubuntu packages, "
             "laravel, ruby, postgresql, elastic, docker 等）\n"
-            "  3. 与该资产完全无关的其他项目专属文档（如 polkastation 的项目文档出现在"
-            " LONG 的链接中）\n"
+            "  3. 与该资产完全无关的其他项目专属文档\n"
             "  4. 电商/企业网站（amazon, dropbox, manageengine 等）\n"
             "  5. 通用工具/聚合网站（非加密类，如 digitalocean, powershellgallery 等）\n"
+            "- 不确定（decision=uncertain）：仅凭域名和样本 URL 无法判断时标记为 uncertain，"
+            "程序会抓取页面正文后再二次判断。\n"
             "\n"
-            "⚠️ 重要原则：宁可保留，不可误删。如果无法确定，判定为相关（noise=false）。\n"
+            "⚠️ 重要原则：宁可保留，不可误删。无法确定时优先判定为 relevant；"
+            "只有当你认为必须读取页面正文才能确认时，才判定为 uncertain。\n"
             "\n"
             "⚠️ 密度预警：\n"
             "- 如果一个域名在单个资产下链接数超过 100 条，且占该资产总链接数的 90% 以上，"
             "极有可能是**应用类网站被误爬**（如会计平台、内部管理系统、无分页的 Web 应用），"
-            "应判定为噪声（noise=true）。\n"
+            "应判定为噪声（decision=noise）。\n"
             "- 正常文档站即使内容多，链接数通常也不会超过几百条，且会分散在多个域名下。\n"
             "\n"
             "只输出 JSON，不要输出其他内容。JSON 格式：\n"
-            '{"results": [{"domain": "string", "noise": true/false, "reason": "简短理由"}]}'
+            '{"results": [{"domain": "string", "decision": "noise|relevant|uncertain", '
+            '"reason": "简短理由"}]}'
         )
 
         domains_text_parts = []
@@ -465,15 +469,15 @@ class LLMClient:
             f"asset_id: {asset_id}\n\n"
             f"该资产在 deep_crawl 中发现的域名及链接数：\n\n"
             f"{domains_text}\n\n"
-            f"请判断以上 {len(domain_groups)} 个域名，哪些是噪声。"
+            f"请判断以上 {len(domain_groups)} 个域名，哪些是噪声、哪些相关、哪些不确定。"
         )
 
         try:
             raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
         except Exception as e:
             return [
-                {"domain": g["domain"], "noise": False, "reason": f"AI调用失败: {e}",
-                 "affected_ids": g.get("entry_ids", [])}
+                {"domain": g["domain"], "decision": "relevant", "reason": f"AI调用失败: {e}",
+                 "affected_ids": g.get("entry_ids", []), "sample_urls": g.get("sample_urls", [])}
                 for g in domain_groups
             ]
 
@@ -488,26 +492,211 @@ class LLMClient:
             result_map = {}
             for r in results:
                 domain = r.get("domain", "")
-                if domain:
-                    result_map[domain] = {
-                        "domain": domain,
-                        "noise": bool(r.get("noise", False)),
-                        "reason": str(r.get("reason", ""))[:200],
-                    }
+                if not domain:
+                    continue
+                decision = str(r.get("decision", "relevant")).lower()
+                if decision not in ("noise", "relevant", "uncertain"):
+                    decision = "relevant"
+                result_map[domain] = {
+                    "decision": decision,
+                    "reason": str(r.get("reason", ""))[:200],
+                }
 
             return [
                 {
                     "domain": g["domain"],
-                    "noise": result_map.get(g["domain"], {}).get("noise", False),
+                    "decision": result_map.get(g["domain"], {}).get("decision", "relevant"),
                     "reason": result_map.get(g["domain"], {}).get("reason", "未匹配到AI结果"),
                     "affected_ids": g.get("entry_ids", []),
+                    "sample_urls": g.get("sample_urls", []),
                 }
                 for g in domain_groups
             ]
         except (json.JSONDecodeError, ValueError) as e:
             # 解析失败时全部默认保留
             return [
-                {"domain": g["domain"], "noise": False, "reason": f"AI响应解析失败: {e}",
-                 "affected_ids": g.get("entry_ids", [])}
+                {"domain": g["domain"], "decision": "relevant", "reason": f"AI响应解析失败: {e}",
+                 "affected_ids": g.get("entry_ids", []), "sample_urls": g.get("sample_urls", [])}
                 for g in domain_groups
+            ]
+
+    def judge_audit_links(
+        self,
+        asset_symbol: str,
+        asset_name: str,
+        asset_description: str,
+        links: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        审计聚合链接按条判断：仅保留属于当前代币的审计资料。
+
+        Args:
+            links: [{entry_id, url}]
+
+        Returns:
+            [{entry_id, url, keep: bool, reason: str}]
+        """
+        if not links:
+            return []
+
+        system_prompt = (
+            "你是一个加密货币项目审计报告筛选专家。给定一个代币的基础资料，"
+            "以及若干来自审计/安全平台（可能聚合了多个项目）的链接，"
+            "判断每条链接是否属于该代币自己的审计资料。\n"
+            "\n"
+            "判断标准：\n"
+            "- keep=true（保留）：链接的 URL 明确指向该代币项目，"
+            "或内容是该项目的审计报告、安全评估、漏洞披露。\n"
+            "- keep=false（删除）：链接指向其他项目、其他代币，"
+            "或与该代币完全无关的审计/安全内容。\n"
+            "\n"
+            "⚠️ 原则：只保留「当前代币」的审计资料，其他项目的一律删除。"
+            "尽量依据 URL 中的项目标识（符号/名称）判断归属；"
+            "如果 URL 中不含该代币标识且无法确认归属，判定为删除。\n"
+            "\n"
+            "只输出 JSON，不要输出其他内容。JSON 格式：\n"
+            '{"results": [{"url": "string", "keep": true/false, "reason": "简短理由"}]}'
+        )
+
+        links_text = "\n".join(
+            f'- id: {l["entry_id"]}\n  url: {l["url"]}' for l in links
+        )
+        desc = (asset_description or "").strip()[:500]
+        user_prompt = (
+            f"代币基础资料：\n"
+            f"- 符号: {asset_symbol}\n"
+            f"- 名称: {asset_name}\n"
+            f"- 简介: {desc or '（无）'}\n\n"
+            f"请判断以下 {len(links)} 条审计链接，哪些属于该代币自己的审计资料：\n\n"
+            f"{links_text}"
+        )
+
+        try:
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+        except Exception as e:
+            return [
+                {"entry_id": l["entry_id"], "url": l["url"], "keep": True,
+                 "reason": f"AI调用失败: {e}"}
+                for l in links
+            ]
+
+        try:
+            data = extract_json_from_llm_response(raw)
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
+            result_map = {}
+            for r in results:
+                url = r.get("url", "")
+                if url:
+                    result_map[url] = {
+                        "keep": bool(r.get("keep", True)),
+                        "reason": str(r.get("reason", ""))[:200],
+                    }
+            return [
+                {
+                    "entry_id": l["entry_id"],
+                    "url": l["url"],
+                    "keep": result_map.get(l["url"], {}).get("keep", True),
+                    "reason": result_map.get(l["url"], {}).get("reason", "未匹配到AI结果"),
+                }
+                for l in links
+            ]
+        except (json.JSONDecodeError, ValueError) as e:
+            return [
+                {"entry_id": l["entry_id"], "url": l["url"], "keep": True,
+                 "reason": f"AI响应解析失败: {e}"}
+                for l in links
+            ]
+
+    def judge_links_with_content(
+        self,
+        asset_symbol: str,
+        asset_name: str,
+        asset_description: str,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        结合页面正文，二次判断不确定链接是否为噪声。
+
+        Args:
+            items: [{entry_id, url, title, text}]
+
+        Returns:
+            [{entry_id, url, noise: bool, reason: str}]
+        """
+        if not items:
+            return []
+
+        system_prompt = (
+            "你是一个加密货币投研资料筛选专家。给定代币基础资料和一批链接的页面正文，"
+            "判断每条链接是否为噪声。\n"
+            "\n"
+            "- noise=false（保留）：内容与该代币项目相关（官方文档、审计、生态、社区等）。\n"
+            "- noise=true（删除）：内容与该代币无关、是其它项目文档、通用技术文档、"
+            "学术论文、电商/企业网站等。\n"
+            "\n"
+            "⚠️ 原则：宁可保留，不可误删；无法确定则保留（noise=false）。\n"
+            "\n"
+            "只输出 JSON。JSON 格式：\n"
+            '{"results": [{"url": "string", "noise": true/false, "reason": "简短理由"}]}'
+        )
+
+        parts = []
+        for it in items:
+            text = (it.get("text") or "").strip()[:3000]
+            title = (it.get("title") or "").strip()[:300]
+            parts.append(
+                f'- url: {it["url"]}\n'
+                f"  title: {title}\n"
+                f"  正文摘要:\n    {text}"
+            )
+        items_text = "\n\n".join(parts)
+
+        desc = (asset_description or "").strip()[:500]
+        user_prompt = (
+            f"代币基础资料：\n"
+            f"- 符号: {asset_symbol}\n"
+            f"- 名称: {asset_name}\n"
+            f"- 简介: {desc or '（无）'}\n\n"
+            f"请结合页面内容判断以下 {len(items)} 条链接是否为噪声：\n\n"
+            f"{items_text}"
+        )
+
+        try:
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+        except Exception as e:
+            return [
+                {"entry_id": it["entry_id"], "url": it["url"], "noise": False,
+                 "reason": f"AI调用失败: {e}"}
+                for it in items
+            ]
+
+        try:
+            data = extract_json_from_llm_response(raw)
+            results = data.get("results", [])
+            if not isinstance(results, list):
+                raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
+            result_map = {}
+            for r in results:
+                url = r.get("url", "")
+                if url:
+                    result_map[url] = {
+                        "noise": bool(r.get("noise", False)),
+                        "reason": str(r.get("reason", ""))[:200],
+                    }
+            return [
+                {
+                    "entry_id": it["entry_id"],
+                    "url": it["url"],
+                    "noise": result_map.get(it["url"], {}).get("noise", False),
+                    "reason": result_map.get(it["url"], {}).get("reason", "未匹配到AI结果"),
+                }
+                for it in items
+            ]
+        except (json.JSONDecodeError, ValueError) as e:
+            return [
+                {"entry_id": it["entry_id"], "url": it["url"], "noise": False,
+                 "reason": f"AI响应解析失败: {e}"}
+                for it in items
             ]

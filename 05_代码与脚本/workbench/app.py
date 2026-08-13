@@ -501,10 +501,11 @@ def api_reset_deep_crawl(asset_id: int):
 
 @app.route("/api/assets/<int:asset_id>/re-crawl-full", methods=["POST"])
 def api_re_crawl_full(asset_id: int):
-    """完整重新爬取：重置 → B2→B3→B2→B3→... 循环直到收敛。"""
+    """完整重新爬取：清理爬取产物 → 从 API 种子链接第一层开始，逐层 B2/B3 爬取，最多 8 层。"""
     try:
-        # 1. 重置 deep_crawled_at
-        reset_result = _get_db_stats().reset_deep_crawl(asset_id)
+        # 1. 清理除 API 来源以外的链接（删除 deep_crawl / spa_browser_crawl 产物），
+        #    并重置剩余种子链接，使 B2 从第一层重新爬取
+        reset_result = _get_db_stats().reset_full_crawl(asset_id)
 
         b2_script = str(SCRIPTS_BIN / "phase_b2_deep_doc_discovery.py")
         b3_script = str(SCRIPTS_BIN / "phase_b2_spa_browser_crawl.py")
@@ -515,14 +516,14 @@ def api_re_crawl_full(asset_id: int):
             return jsonify({"ok": False, "error": f"B3 脚本不存在: {b3_script}"}), 500
 
         rounds = []
-        MAX_ROUNDS = 6
-        total_timeout = 900  # 15 分钟总超时
+        MAX_ROUNDS = 8  # 最多爬 8 层
+        total_timeout = 900  # 单次脚本超时兜底（秒）
 
         for round_num in range(1, MAX_ROUNDS + 1):
-            # 2. 运行 B2 深度爬取
+            # 2. 运行 B2 深度爬取（limit 调大，确保一次运行完整处理当前层）
             b2_result = subprocess.run(
                 [sys.executable, "-u", b2_script, "--asset-id", str(asset_id),
-                 "--limit", "100", "--workers", "10"],
+                 "--limit", "1000", "--workers", "10"],
                 cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(600, total_timeout),
             )
             b2_ok = b2_result.returncode == 0
@@ -547,7 +548,7 @@ def api_re_crawl_full(asset_id: int):
             # 3. 运行 B3 SPA 爬取
             b3_result = subprocess.run(
                 [sys.executable, "-u", b3_script, "--asset-id", str(asset_id),
-                 "--limit", "20", "--concurrency", "4"],
+                 "--limit", "100", "--concurrency", "4"],
                 cwd=str(SCRIPTS_BIN), capture_output=True, text=True, timeout=min(300, total_timeout),
             )
             b3_ok = b3_result.returncode == 0

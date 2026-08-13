@@ -771,6 +771,31 @@ def reset_deep_crawl(asset_id: int) -> dict:
     return {"affected": affected}
 
 
+def reset_full_crawl(asset_id: int) -> dict:
+    """完整重新爬取前置清理：
+    1. 删除该资产所有爬取来源链接（deep_crawl / spa_browser_crawl），
+       仅保留 API 来源的种子链接（cmc/cg/dl/dexscreener/binance/manual）。
+    2. 重置剩余种子链接的 deep_crawled_at / needs_browser，允许 B2 从第一层重新爬取。
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM biz.doc_source_entry WHERE asset_id = %s "
+                "AND (discovered_from LIKE 'deep_crawl:%' OR discovered_from LIKE 'spa_browser_crawl:%')",
+                (asset_id,),
+            )
+            deleted = cur.rowcount
+
+            cur.execute(
+                "UPDATE biz.doc_source_entry SET deep_crawled_at = NULL, needs_browser = FALSE "
+                "WHERE asset_id = %s AND deep_crawled_at IS NOT NULL",
+                (asset_id,),
+            )
+            reset = cur.rowcount
+        conn.commit()
+    return {"deleted_crawl_links": deleted, "reset_seed_links": reset}
+
+
 def add_manual_entry(asset_id: int, entry_url: str) -> dict:
     """手动为资产添加一个文档入口（官网链接）。"""
     with get_db() as conn:

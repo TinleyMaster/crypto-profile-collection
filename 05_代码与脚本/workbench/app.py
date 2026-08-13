@@ -38,9 +38,9 @@ from task_manager import TaskManager  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
 
-# 解锁数据异步拉取状态（key: f"{asset_id}:{force}"）
-_unlock_async: dict = {}
-_unlock_async_lock = threading.Lock()
+# 解锁数据异步拉取状态（key: f"{asset_id}:{force}"）。
+# 注意：gunicorn 多 worker 部署下内存 dict 不共享，需文件持久化（见下方 UNLOCK_STATE_FILE），
+# 否则 POST 落在 A worker、status 轮询落在 B worker 时状态会丢失（表现为“拉取超时”）。
 
 
 def _unlock_async_key(asset_id: int, force: bool) -> str:
@@ -94,6 +94,27 @@ def _save_recrawl_state(state: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
     os.replace(tmp, RECRAWL_STATE_FILE)
+
+# 解锁数据异步状态文件（与 recrawl 同理，gunicorn 多 worker 下跨进程共享）
+UNLOCK_STATE_FILE = RECRAWL_STATE_DIR / "unlock_state.json"
+UNLOCK_LOCK_FILE = RECRAWL_STATE_DIR / "unlock_state.lock"
+
+
+def _load_unlock_state() -> dict:
+    if not UNLOCK_STATE_FILE.exists():
+        return {}
+    try:
+        with open(UNLOCK_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return {}
+
+
+def _save_unlock_state(state: dict) -> None:
+    tmp = UNLOCK_STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+    os.replace(tmp, UNLOCK_STATE_FILE)
 
 # db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
 _db_stats_module = None
@@ -966,19 +987,23 @@ def api_unlocks_query(asset_id: int):
         force = request.args.get("force", "0") == "1"
 
     key = _unlock_async_key(asset_id, force)
-    with _unlock_async_lock:
-        existing = _unlock_async.get(key)
+    with _RecrawlFileLock(UNLOCK_LOCK_FILE):
+        state = _load_unlock_state()
+        existing = state.get(key)
         if existing and existing.get("status") == "running":
             return jsonify({"ok": True, "pending": True})
-        _unlock_async[key] = {"status": "running", "result": None}
+        state[key] = {"status": "running", "result": None}
+        _save_unlock_state(state)
 
     def _worker():
         try:
             result = _get_db_stats().query_token_unlocks(asset_id, force=force)
         except Exception as e:
             result = {"ok": False, "error": str(e)}
-        with _unlock_async_lock:
-            _unlock_async[key] = {"status": "done", "result": result}
+        with _RecrawlFileLock(UNLOCK_LOCK_FILE):
+            st = _load_unlock_state()
+            st[key] = {"status": "done", "result": result}
+            _save_unlock_state(st)
 
     threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"ok": True, "pending": True})
@@ -990,13 +1015,14 @@ def api_unlocks_query_status(asset_id: int):
     try:
         force = request.args.get("force", "0") == "1"
         key = _unlock_async_key(asset_id, force)
-        with _unlock_async_lock:
-            state = _unlock_async.get(key)
-        if not state:
+        with _RecrawlFileLock(UNLOCK_LOCK_FILE):
+            state = _load_unlock_state()
+            item = state.get(key)
+        if not item:
             return jsonify({"ok": True, "pending": False, "not_started": True})
-        if state.get("status") == "running":
+        if item.get("status") == "running":
             return jsonify({"ok": True, "pending": True})
-        return jsonify({"ok": True, "pending": False, "result": state.get("result")})
+        return jsonify({"ok": True, "pending": False, "result": item.get("result")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

@@ -108,7 +108,10 @@ def collect_all_links(conn, asset_id: int) -> list[dict]:
                 seen_urls.add(url)
                 docs.append(row)
 
-        # doc_source_entry 中已爬取的页面
+        # doc_source_entry 中该资产的全部文档入口链接。
+        # 不做 deep_crawled_at / needs_browser 过滤：种子链接（官网/docs 等）
+        # 即使未深度爬取也可能直接指向 tokenomics 页面，SPA 页面由
+        # fetch_page_content 的 Playwright 渲染处理；最终相关性交给 AI 筛选。
         cur.execute(
             """
             SELECT dse.entry_id AS doc_id, dse.entry_type AS doc_type,
@@ -116,8 +119,9 @@ def collect_all_links(conn, asset_id: int) -> list[dict]:
                    NULL AS storage_path, NULL AS mime_type
             FROM biz.doc_source_entry dse
             WHERE dse.asset_id = %s
-              AND dse.deep_crawled_at IS NOT NULL
-              AND dse.needs_browser = FALSE
+              AND dse.entity_type = 'asset'
+              AND dse.entry_url IS NOT NULL
+              AND TRIM(dse.entry_url) <> ''
             ORDER BY dse.entry_id
             """,
             (asset_id,),

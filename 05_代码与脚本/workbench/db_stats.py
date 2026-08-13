@@ -1455,7 +1455,8 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 2. 如果没有明确时间表，给出合理的行业常规估计（如 Team 1年cliff + 3年vesting，Investor 1年cliff + 2年vesting）
 3. methodology 必须详细记录你是如何得出每个数字的，包括假设依据和计算过程
 4. overview 中 released_pct 估算当前已流通比例
-5. 代币经济学数据:"""
+5. 所有解锁日期必须以给定的 TGE/上线日期为基准计算（TGE + cliff + vesting）；若 TGE/上线日期未知，必须在 methodology.key_assumptions.tge_date 中说明推测依据，并将 confidence 降为 low
+6. 代币经济学数据:"""
 
 
 def _fetch_cg_price(asset_id: int, settings) -> dict:
@@ -1602,9 +1603,12 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             return {"ok": False, "error": "无代币经济学数据，无法 AI 测算",
                     "tokenomist_error": tokenomist_error}
 
-        # 获取 symbol/name
+        # 获取 symbol/name/launch_date（launch_date 作为 TGE/上线日期基准）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s", (asset_id,))
+            cur.execute(
+                "SELECT canonical_symbol, canonical_name, launch_date FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
             asset = cur.fetchone()
 
     # 1.5 获取 CG 价格/市值/FDV（供 AI 估算解锁价值）
@@ -1620,8 +1624,17 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
         }
 
     # 2. 构建 prompt
+    tge_date = asset.get("launch_date") if asset else None
+    if hasattr(tge_date, "strftime"):
+        tge_date_str = tge_date.strftime("%Y-%m-%d")
+    elif tge_date:
+        tge_date_str = str(tge_date)
+    else:
+        tge_date_str = "未知"
+
     tokenomics_text = f"""
     代币: {asset['canonical_name']} ({asset['canonical_symbol']})
+    TGE/上线日期: {tge_date_str}
     总供应: {tkn.get('total_supply')}
     最大供应: {tkn.get('max_supply')}
     流通供应: {tkn.get('circulating_supply')}
@@ -1677,6 +1690,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
         "total_supply": _safe_float(tkn.get("total_supply")),
         "max_supply": _safe_float(tkn.get("max_supply")),
         "circulating_supply": _safe_float(tkn.get("circulating_supply")),
+        "tge_date": tge_date_str,
         "price_usd": _safe_float(price_info.get("price_usd")),
         "market_cap_usd": _safe_float(price_info.get("market_cap_usd")),
         "fdv_usd": _safe_float(price_info.get("fdv_usd")),

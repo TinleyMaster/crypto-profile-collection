@@ -111,139 +111,161 @@ def guess_slugs(asset: dict) -> list[str]:
 
 
 def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
-    """通过 tokenomist 搜索 API 查找正确的 slug。"""
+    """通过搜索 API 查找正确的 slug（新版 tokenomics.com + 旧版 tokenomist.ai 都试）。"""
     queries = [symbol]
     if name and name.lower() != symbol.lower():
         queries.append(name)
-    for q in queries:
-        try:
-            resp = requests.get(
-                "https://tokenomist.ai/api/search",
-                params={"q": q},
-                headers={"Accept": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                continue
-            results = resp.json()
-            if isinstance(results, list) and results:
-                # 结果格式: [{slug: "...", name: "...", symbol: "..."}, ...]
-                # 匹配 symbol 大小写不敏感
-                for r in results:
-                    r_symbol = (r.get("symbol") or "").strip().upper()
-                    if r_symbol == symbol.upper():
-                        slug = r.get("slug") or ""
-                        if slug:
-                            _log(f"  [搜索] 通过 API 找到 slug: {slug}")
-                            return slug
-                # 如果没有精确匹配，取第一个
-                first_slug = (results[0].get("slug") or "").strip()
-                if first_slug:
-                    _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug}")
-                    return first_slug
-        except Exception as e:
-            _log(f"  [搜索API] 查询 '{q}' 失败: {e}")
+
+    api_urls = [
+        "https://app.tokenomics.com/api/search",
+        "https://tokenomist.ai/api/search",
+    ]
+
+    for api_url in api_urls:
+        for q in queries:
+            try:
+                resp = requests.get(
+                    api_url,
+                    params={"q": q},
+                    headers={"Accept": "application/json"},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    continue
+                results = resp.json()
+                if isinstance(results, list) and results:
+                    # 结果格式: [{slug: "...", name: "...", symbol: "..."}, ...]
+                    # 匹配 symbol 大小写不敏感
+                    for r in results:
+                        r_symbol = (r.get("symbol") or "").strip().upper()
+                        if r_symbol == symbol.upper():
+                            slug = r.get("slug") or ""
+                            if slug:
+                                _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
+                                return slug
+                    # 如果没有精确匹配，取第一个
+                    first_slug = (results[0].get("slug") or "").strip()
+                    if first_slug:
+                        _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug} ({api_url})")
+                        return first_slug
+            except Exception as e:
+                _log(f"  [搜索API] {api_url} 查询 '{q}' 失败: {e}")
     return None
 
 
 # ── 页面爬取 ──────────────────────────────────────────────
 
-def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
-    """用 Playwright 爬取 tokenomist 的解锁数据。依次尝试 slugs，overview 为空则换下一个。"""
-    for idx, slug in enumerate(slugs):
-        is_fallback = idx > 0
-        base_url = f"https://tokenomist.ai/{slug}"
-        unlock_url = f"{base_url}/unlock-events"
+def _scrape_variant(slug: str, variant: dict, is_fallback: bool) -> dict | None:
+    """用 Playwright 爬取单个数据源（新版 tokenomics.com 或旧版 tokenomist.ai）。"""
+    key = variant["key"]
+    base_url = variant["base_tpl"].format(slug=slug)
+    unlock_url = base_url + variant["unlock_path"]
 
-        _log(f"  Tokenomist slug: {slug}{' (备选)' if is_fallback else ''}")
-        _log(f"  目标 URL: {unlock_url}")
+    _log(f"  数据源: {key} | slug: {slug}{' (备选)' if is_fallback else ''}")
+    _log(f"  目标 URL: {unlock_url}")
 
-        result = {
-            "source_url": base_url,
-            "source_name": "tokenomist",
-            "slug": slug,
-            "overview": {},
-            "unlock_events": [],
-            "allocation": [],
-        }
+    result = {
+        "source_url": base_url,
+        "source_name": "tokenomist",
+        "slug": slug,
+        "overview": {},
+        "unlock_events": [],
+        "allocation": [],
+    }
 
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                ])
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/151.0.0.0 Safari/537.36"
-                    ),
-                )
-                page = context.new_page()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ])
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/151.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
 
-                # 拦截非必要资源以加速
-                page.route("**/*", lambda route: route.abort()
-                    if route.request.resource_type in ("image", "font", "media", "stylesheet")
-                    else route.continue_()
-                )
+            # 拦截非必要资源以加速
+            page.route("**/*", lambda route: route.abort()
+                if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                else route.continue_()
+            )
 
-                # ── Step 1: 爬 Overview 页面 ──
-                _log("  加载 Overview 页面...")
-                try:
-                    page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-                except PlaywrightTimeout:
-                    _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
-                except Exception as e:
-                    _log(f"  [ERROR] Overview 页面导航失败: {e}")
-                    browser.close()
-                    continue
+            # ── Step 1: 爬 Overview 页面 ──
+            _log("  加载 Overview 页面...")
+            try:
+                page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+            except PlaywrightTimeout:
+                _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
+            except Exception as e:
+                _log(f"  [ERROR] Overview 页面导航失败: {e}")
+                browser.close()
+                return None
 
-                page.wait_for_timeout(WAIT_MS)
-                _close_popups(page)
-                overview = _extract_overview(page, slug)
-                result["overview"] = overview
+            page.wait_for_timeout(WAIT_MS)
+            _close_popups(page)
+            overview = variant["extract_overview"](page, slug)
+            result["overview"] = overview
 
-                # 判断是否为有效页面：Overview 为空说明 slug 不对
-                # - 不是最后一个 slug → 换下一个
-                # - 是最后一个 slug → 也返回 None，不写空数据
-                if not overview:
-                    if idx + 1 < len(slugs):
-                        _log(f"  Overview 为空，slug 可能不匹配，尝试备选...")
-                    else:
-                        _log(f"  Overview 为空且无更多备选 slug，该代币可能未被 tokenomist 收录")
-                    browser.close()
-                    continue
+            # Overview 为空说明 slug 不对或该数据源未收录
+            if not overview:
+                _log(f"  Overview 为空，{key} 未收录该 slug")
+                browser.close()
+                return None
 
-                _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
+            _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
 
-                # ── Step 2: 爬 Unlock Events 页面 ──
-                _log("  加载 Unlock Events 页面...")
-                try:
-                    page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-                except PlaywrightTimeout:
-                    _log("  [WARN] Unlock Events 页面加载超时")
-                except Exception as e:
-                    _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
-                    browser.close()
-                    return result
-
-                page.wait_for_timeout(WAIT_MS)
-                _close_popups(page)
-                events = _extract_unlock_events(page)
-                result["unlock_events"] = events
-                _log(f"  Unlock Events: {len(events)} 条")
-
+            # ── Step 2: 爬 Unlock Events 页面 ──
+            _log("  加载 Unlock Events 页面...")
+            try:
+                page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+            except PlaywrightTimeout:
+                _log("  [WARN] Unlock Events 页面加载超时")
+            except Exception as e:
+                _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
                 browser.close()
                 return result
 
-        except Exception as e:
-            _log(f"  [ERROR] 页面爬取失败: {e}")
-            _log(traceback.format_exc())
-            continue
+            page.wait_for_timeout(WAIT_MS)
+            _close_popups(page)
 
-    # 所有 slug 都失败，尝试 tokenomist 搜索 API
+            unlocks_ov_fn = variant.get("extract_unlocks_overview")
+            if unlocks_ov_fn:
+                unlocks_ov = unlocks_ov_fn(page)
+                if unlocks_ov:
+                    # 合并解锁进度到 overview，避免覆盖 Overview 页已提取的字段
+                    result["overview"] = {**result["overview"], **unlocks_ov}
+
+            events = variant["extract_unlock_events"](page)
+            result["unlock_events"] = events
+            _log(f"  Unlock Events: {len(events)} 条")
+
+            browser.close()
+            return result
+
+    except Exception as e:
+        _log(f"  [ERROR] 页面爬取失败 ({key}): {e}")
+        _log(traceback.format_exc())
+        return None
+
+
+def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
+    """用 Playwright 爬取解锁数据。
+
+    依次尝试 slugs × 数据源（新版 app.tokenomics.com 优先，旧版 tokenomist.ai 兜底），
+    overview 为空则换下一个。"""
+    for idx, slug in enumerate(slugs):
+        is_fallback = idx > 0
+        for variant in SOURCE_VARIANTS:
+            result = _scrape_variant(slug, variant, is_fallback)
+            if result:
+                return result
+
+    # 所有 slug + 数据源都失败，尝试搜索 API 找到正确 slug
     if symbol:
         searched_slug = _search_tokenomist_slug(symbol, "")
         if searched_slug and searched_slug not in slugs:
@@ -251,7 +273,7 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "") -> dict | None:
             # 递归调用自己，只试这一个 slug
             return scrape_tokenomist([searched_slug], symbol)
 
-    _log(f"  所有 slug 均失败，该代币可能未被 tokenomist 收录")
+    _log(f"  所有 slug 均失败，该代币可能未被收录")
     return None
 
 
@@ -285,7 +307,223 @@ def _close_popups(page) -> None:
 
 
 def _extract_overview(page, slug: str) -> dict:
-    """从 Overview 页面提取关键数据。"""
+    """从 Overview 页面提取关键数据（app.tokenomics.com 新版结构）。"""
+    overview: dict = {}
+
+    try:
+        full_text = page.locator("body").inner_text(timeout=5000)
+    except Exception:
+        full_text = ""
+
+    # TGE 日期: "TGE Date November 1, 2025"
+    m = re.search(r'TGE\s*Date\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})', full_text)
+    if m:
+        overview["tge_date"] = m.group(1)
+
+    # Max Total Supply / Total Supply: "Max Total Supply 1,000,000,000"
+    m = re.search(r'Max\s+Total\s+Supply\s*([\d,]+(?:\.\d+)?)', full_text)
+    if m:
+        overview["max_supply_str"] = m.group(1).replace(",", "")
+    m = re.search(r'Total\s+Supply\s*([\d,]+(?:\.\d+)?)', full_text)
+    if m:
+        overview["total_amount_str"] = m.group(1).replace(",", "")
+
+    # 分配表（Overview 页面的 Allocation Distribution 部分）
+    allocations = _extract_allocation(page)
+    if allocations:
+        overview["allocation"] = allocations
+
+    return overview
+
+
+def _extract_unlocks_overview(page) -> dict:
+    """从 Unlocks 页面提取解锁进度 + 下一次解锁信息（app.tokenomics.com 新版结构）。"""
+    ov: dict = {}
+
+    try:
+        full_text = page.locator("body").inner_text(timeout=5000)
+    except Exception:
+        full_text = ""
+
+    # 释放进度: "Released: 33.1%" / "Unlocked 33.1%" / "Locked 65.8%"
+    m = re.search(r'Released[:\s]*([\d.]+)%', full_text)
+    if m:
+        ov["released_pct"] = float(m.group(1))
+    m = re.search(r'Locked\s*([\d.]+)%', full_text)
+    if m:
+        ov["locked_pct"] = float(m.group(1))
+
+    # 下一次解锁: "Next Unlock Sep 1, 2026 ... USD Value $32.2M Tokens 11.2M % of Supply 1.1% % of MCAP 3.4%"
+    m = re.search(r'Next\s+Unlock\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})', full_text)
+    if m:
+        ov["next_unlock_date"] = m.group(1)
+    m = re.search(r'USD\s*Value\s*\$([\d.]+[BMK]?)', full_text)
+    if m:
+        ov["next_unlock_value_str"] = "$" + m.group(1)
+    m = re.search(r'Tokens\s*([\d.]+[BMK]?)', full_text)
+    if m:
+        ov["next_unlock_amount_str"] = m.group(1)
+    m = re.search(r'%\s*of\s*Supply\s*([\d.]+)%', full_text)
+    if m:
+        ov["next_unlock_pct"] = float(m.group(1))
+
+    return ov
+
+
+def _extract_allocation(page) -> list[dict]:
+    """提取分配表（app.tokenomics.com 新版：Pool Name | Allocation % | ...）。"""
+    allocations = []
+    try:
+        rows = page.locator("table tr").all()
+        for row in rows[:20]:
+            try:
+                text = row.inner_text().strip()
+                if not text:
+                    continue
+                # 模式: "Community 40.00% 18.8% $1.3B 22 Days"
+                m = re.match(r'(.+?)\s+([\d.]+)%', text)
+                if not m:
+                    continue
+                name = m.group(1).strip()
+                pct = float(m.group(2))
+                # 过滤表头/汇总行
+                if not name or name.lower() in ("pool name", "name", "total", "average"):
+                    continue
+                allocations.append({"name": name, "pct": pct})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return allocations[:15]
+
+
+def _extract_unlock_events(page) -> list[dict]:
+    """从 Unlocks 页面提取事件列表（app.tokenomics.com 新版结构）。
+
+    新版表格列: Unlock Date | % of MCAP | Unlock Recipients | Countdown
+    """
+    events = []
+
+    # 方法 1：JS 提取 DOM 表格
+    try:
+        rows_data = page.evaluate("""
+            () => {
+                const tables = document.querySelectorAll('table');
+                for (const table of tables) {
+                    const headers = Array.from(table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td'));
+                    const headerTexts = headers.map(h => h.textContent.trim().toLowerCase());
+                    if (headerTexts.some(h => h.includes('unlock date')) && headerTexts.some(h => h.includes('mcap'))) {
+                        const rows = [];
+                        const trs = table.querySelectorAll('tbody tr, tr');
+                        for (const tr of trs) {
+                            const tds = tr.querySelectorAll('td');
+                            if (tds.length < 3) continue;
+                            const date = tds[0].textContent.trim();
+                            if (!/\\w{3,9}\\s+\\d{1,2},\\s+\\d{4}/.test(date)) continue;
+                            rows.push({
+                                date: date,
+                                pct: tds[1].textContent.trim(),
+                                recipients: tds[2].textContent.trim(),
+                                status: tds[3] ? tds[3].textContent.trim() : '',
+                            });
+                        }
+                        return rows;
+                    }
+                }
+                return [];
+            }
+        """)
+        _log(f"  JS 提取表格: {len(rows_data)} 行")
+    except Exception as e:
+        _log(f"  JS 提取失败: {e}, 回退到文本解析")
+        rows_data = None
+
+    if rows_data:
+        seen = set()
+        for row in rows_data:
+            date_str = row["date"]
+            pct_str = row["pct"]
+            status_str = row.get("status", "")
+            recipients_str = row.get("recipients", "")
+
+            pm = re.match(r'^\+?([\d.]+)%$', pct_str)
+            pct = float(pm.group(1)) if pm else 0.0
+
+            rm = re.match(r'(\d+)\s*Recipients?', recipients_str)
+            recipients = int(rm.group(1)) if rm else 1
+
+            is_upcoming = "left" in status_str.lower()
+
+            key = (date_str, pct)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            events.append({
+                "date": date_str, "value_usd": 0, "value_str": "",
+                "pct": pct, "allocations": recipients, "status": status_str,
+                "is_upcoming": is_upcoming,
+            })
+
+    # 方法 2：innerText 回退
+    if not events:
+        events = _extract_unlock_events_text(page)
+
+    from datetime import datetime
+    def parse_dt(s):
+        try: return datetime.strptime(s, "%b %d, %Y")
+        except: return datetime(2000, 1, 1)
+
+    upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: parse_dt(e["date"]))
+    past = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: parse_dt(e["date"]), reverse=True)
+    return upcoming + past
+
+
+def _extract_unlock_events_text(page) -> list[dict]:
+    """innerText 文本解析（回退方案，适配新版日期格式 Mon D, YYYY）。"""
+    events = []
+    try:
+        all_text = page.locator("body").inner_text(timeout=5000)
+    except Exception:
+        return events
+
+    date_re = re.compile(r'([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})')
+    pct_re = re.compile(r'([\d.]+)%')
+    recipients_re = re.compile(r'(\d+)\s*Recipients?')
+    countdown_re = re.compile(r'(\d+\s+\w+\s+(?:ago|left))')
+
+    seen = set()
+    for line in all_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        dm = date_re.search(line)
+        pm = pct_re.search(line)
+        if not dm or not pm:
+            continue
+        date_str = dm.group(1)
+        pct = float(pm.group(1))
+        rm = recipients_re.search(line)
+        recipients = int(rm.group(1)) if rm else 1
+        cm = countdown_re.search(line)
+        status = cm.group(1) if cm else ""
+        is_upcoming = "left" in status.lower()
+        key = (date_str, pct)
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append({
+            "date": date_str, "value_usd": 0, "value_str": "",
+            "pct": pct, "allocations": recipients, "status": status,
+            "is_upcoming": is_upcoming,
+        })
+    return events
+
+
+# ── 旧版 tokenomist.ai 解析函数（部分代币仍仅存于旧站） ─────
+
+def _extract_overview_legacy(page, slug: str) -> dict:
+    """从 Overview 页面提取关键数据（旧版 tokenomist.ai 结构）。"""
     overview: dict = {}
 
     try:
@@ -327,16 +565,16 @@ def _extract_overview(page, slug: str) -> dict:
     if m:
         overview["float_pct"] = float(m.group(1))
 
-    # 分配表（从 Overview 页面的 Allocation 部分）
-    allocations = _extract_allocation(page)
+    # 分配表（Overview 页面的 Allocation 部分）
+    allocations = _extract_allocation_legacy(page)
     if allocations:
         overview["allocation"] = allocations
 
     return overview
 
 
-def _extract_allocation(page) -> list[dict]:
-    """提取分配表。"""
+def _extract_allocation_legacy(page) -> list[dict]:
+    """提取分配表（旧版 tokenomist.ai 结构）。"""
     allocations = []
     try:
         # 尝试找 allocation 表格行
@@ -361,8 +599,9 @@ def _extract_allocation(page) -> list[dict]:
     return allocations[:10]
 
 
-def _extract_unlock_events(page) -> list[dict]:
-    """从 Unlock Events 页面提取事件列表。
+def _extract_unlock_events_legacy(page) -> list[dict]:
+    """从 Unlock Events 页面提取事件列表（旧版 tokenomist.ai 结构）。
+
     优先用 JS 直接解析 DOM 表格（可靠），失败回退到 innerText。
     """
     events = []
@@ -444,7 +683,7 @@ def _extract_unlock_events(page) -> list[dict]:
 
     # 方法 2：innerText 回退
     if not events:
-        events = _extract_unlock_events_text(page)
+        events = _extract_unlock_events_text_legacy(page)
 
     from datetime import datetime
     def parse_dt(s):
@@ -456,8 +695,8 @@ def _extract_unlock_events(page) -> list[dict]:
     return upcoming + past
 
 
-def _extract_unlock_events_text(page) -> list[dict]:
-    """innerText 文本解析（回退方案）。"""
+def _extract_unlock_events_text_legacy(page) -> list[dict]:
+    """innerText 文本解析（回退方案，旧版 tokenomist.ai 结构）。"""
     events = []
     try:
         all_text = page.locator("body").inner_text(timeout=5000)
@@ -510,6 +749,27 @@ def _extract_unlock_events_text(page) -> list[dict]:
         else:
             i += 1
     return events
+
+
+# 数据源变体：新版 app.tokenomics.com 优先，旧版 tokenomist.ai 兜底
+SOURCE_VARIANTS = [
+    {
+        "key": "tokenomics.com",
+        "base_tpl": "https://app.tokenomics.com/tokenomics/{slug}",
+        "unlock_path": "/unlocks",
+        "extract_overview": _extract_overview,
+        "extract_unlocks_overview": _extract_unlocks_overview,
+        "extract_unlock_events": _extract_unlock_events,
+    },
+    {
+        "key": "tokenomist.ai",
+        "base_tpl": "https://tokenomist.ai/{slug}",
+        "unlock_path": "/unlock-events",
+        "extract_overview": _extract_overview_legacy,
+        "extract_unlocks_overview": None,
+        "extract_unlock_events": _extract_unlock_events_legacy,
+    },
+]
 
 
 # ── 存入数据库 ─────────────────────────────────────────────

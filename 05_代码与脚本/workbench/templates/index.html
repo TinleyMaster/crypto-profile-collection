@@ -2740,13 +2740,33 @@
             btn.disabled = true;
             errEl.style.display = 'none';
             try {
-                let url = '/api/unlocks/query/' + selectedAssetId;
-                if (forceRefresh) url += '?force=1';
-                let res = await fetch(url);
-                let data = await res.json();
-                if (!data.ok) {
-                    const errMsg = data.error || '未知错误';
-                    const stderrMsg = data.stderr ? ' | ' + data.stderr.slice(0, 200) : '';
+                // 1. 启动异步拉取（立即返回，避免长请求超时）
+                const startRes = await fetch('/api/unlocks/query/' + selectedAssetId, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force: forceRefresh ? 1 : 0 }),
+                });
+                const startData = await startRes.json();
+                if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+                // 2. 轮询结果（最多 4 分钟）
+                const statusUrl = '/api/unlocks/query/' + selectedAssetId + '/status' + (forceRefresh ? '?force=1' : '');
+                let result = null;
+                for (let i = 0; i < 120; i++) {
+                    await sleep(2000);
+                    const statusRes = await fetch(statusUrl);
+                    const statusData = await statusRes.json();
+                    if (statusData.ok && statusData.pending === false) {
+                        result = statusData.result;
+                        break;
+                    }
+                }
+
+                if (!result) throw new Error('拉取超时（4分钟），请稍后重试');
+
+                if (!result.ok) {
+                    const errMsg = result.error || '未知错误';
+                    const stderrMsg = result.stderr ? ' | ' + result.stderr.slice(0, 200) : '';
                     errEl.textContent = '拉取失败: ' + errMsg + stderrMsg;
                     errEl.style.display = 'block';
                     document.getElementById('ulk-status').textContent = '拉取失败: ' + errMsg.slice(0, 60);
@@ -2758,12 +2778,12 @@
                 }
 
                 // 拉取成功，用 renderUnlocks 统一渲染（会设置按钮为"重新拉取"）
-                renderUnlocks(data.data);
+                renderUnlocks(result.data);
                 // 如果有爬取日志，追加显示
-                if (data.stderr) {
+                if (result.stderr) {
                     const detail = document.getElementById('ulk-detail');
                     detail.innerHTML += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">爬取日志</summary>';
-                    detail.innerHTML += '<pre style="font-size:10px;color:#9ca3af;max-height:200px;overflow:auto;margin-top:4px">' + data.stderr + '</pre>';
+                    detail.innerHTML += '<pre style="font-size:10px;color:#9ca3af;max-height:200px;overflow:auto;margin-top:4px">' + result.stderr + '</pre>';
                     detail.innerHTML += '</details>';
                 }
             } catch (e) {

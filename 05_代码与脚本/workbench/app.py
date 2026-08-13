@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import subprocess
+import threading
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request, send_from_directory
 
@@ -34,6 +35,14 @@ app = Flask(__name__)
 from task_manager import TaskManager  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
+
+# 解锁数据异步拉取状态（key: f"{asset_id}:{force}"）
+_unlock_async: dict = {}
+_unlock_async_lock = threading.Lock()
+
+
+def _unlock_async_key(asset_id: int, force: bool) -> str:
+    return f"{asset_id}:{1 if force else 0}"
 
 # db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
 _db_stats_module = None
@@ -833,13 +842,49 @@ def api_unlocks_get(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/unlocks/query/<int:asset_id>")
+@app.route("/api/unlocks/query/<int:asset_id>", methods=["GET", "POST"])
 def api_unlocks_query(asset_id: int):
-    """按需拉取指定资产的代币解锁数据（先查缓存，未命中则从 tokenomist 爬取）。"""
+    """按需拉取指定资产的代币解锁数据（异步后台执行，避免长请求导致网关超时）。
+
+    启动后前端应轮询 /api/unlocks/query/<asset_id>/status 获取结果。
+    """
+    if request.method == "POST":
+        force = (request.get_json(silent=True) or {}).get("force") == 1
+    else:
+        force = request.args.get("force", "0") == "1"
+
+    key = _unlock_async_key(asset_id, force)
+    with _unlock_async_lock:
+        existing = _unlock_async.get(key)
+        if existing and existing.get("status") == "running":
+            return jsonify({"ok": True, "pending": True})
+        _unlock_async[key] = {"status": "running", "result": None}
+
+    def _worker():
+        try:
+            result = _get_db_stats().query_token_unlocks(asset_id, force=force)
+        except Exception as e:
+            result = {"ok": False, "error": str(e)}
+        with _unlock_async_lock:
+            _unlock_async[key] = {"status": "done", "result": result}
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"ok": True, "pending": True})
+
+
+@app.route("/api/unlocks/query/<int:asset_id>/status")
+def api_unlocks_query_status(asset_id: int):
+    """查询解锁数据异步拉取状态。"""
     try:
         force = request.args.get("force", "0") == "1"
-        data = _get_db_stats().query_token_unlocks(asset_id, force=force)
-        return jsonify(data)
+        key = _unlock_async_key(asset_id, force)
+        with _unlock_async_lock:
+            state = _unlock_async.get(key)
+        if not state:
+            return jsonify({"ok": True, "pending": False, "not_started": True})
+        if state.get("status") == "running":
+            return jsonify({"ok": True, "pending": True})
+        return jsonify({"ok": True, "pending": False, "result": state.get("result")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

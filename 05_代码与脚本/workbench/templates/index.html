@@ -1749,6 +1749,20 @@
             </div>
         </div>
 
+        <!-- 解锁追踪列表 -->
+        <div class="watchlist-section">
+            <div class="section-header">
+                <h2>🔔 解锁追踪列表</h2>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:12px;color:#8a92a0" id="watchlist-note">跟踪大额解锁，做空/观察提醒</span>
+                    <button class="hot-refresh" onclick="loadWatchlist()">刷新</button>
+                </div>
+            </div>
+            <div id="watchlist-content">
+                <div class="hot-tokens-loading">加载中...</div>
+            </div>
+        </div>
+
         <!-- 每日投研推荐 -->
         <div class="hot-tokens-section">
             <div class="section-header">
@@ -2382,6 +2396,16 @@
             }
 
             html += '</div>';
+
+            // 加入追踪按钮：自动带入下一个 upcoming 解锁事件
+            const nextUpcoming = events.filter(e => e.is_upcoming)[0];
+            const targetDate = nextUpcoming ? nextUpcoming.date : '';
+            const targetPct = nextUpcoming ? (parseFloat(nextUpcoming.pct) || null) : null;
+            const dateStr = parseUnlockDate(targetDate);
+            html += '<button class="run-btn" style="margin-top:8px;font-size:12px" ' +
+                'onclick="addToWatchlist(' + selectedAssetId + ', \'' + escapeHtml(dateStr) + '\', ' + (targetPct ?? 'null') + ')">' +
+                '🔔 加入解锁追踪</button>';
+
             detail.innerHTML = html;
             detail.style.display = 'block';
         }
@@ -2943,11 +2967,121 @@
             }
         }
 
+        // ── 解锁追踪列表 ──
+
+        const UNLOCK_MONTHS = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+
+        function parseUnlockDate (s) {
+            if (!s) return '';
+            if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+            const m = String(s).match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})/);
+            if (m && UNLOCK_MONTHS[m[2]]) {
+                return m[3] + '-' + String(UNLOCK_MONTHS[m[2]]).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+            }
+            return '';
+        }
+
+        async function loadWatchlist () {
+            try {
+                const res = await fetch('/api/watchlist');
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error);
+                renderWatchlist(data.data || []);
+            } catch (e) {
+                document.getElementById('watchlist-content').innerHTML =
+                    '<div class="no-data">加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderWatchlist (items) {
+            const box = document.getElementById('watchlist-content');
+            if (!items || items.length === 0) {
+                box.innerHTML = '<div class="no-data">暂无追踪的代币，在「代币解锁测算」卡片点击「加入解锁追踪」即可添加。</div>';
+                return;
+            }
+            // 排序：临近(approaching)最前，其次按解锁日期升序
+            const sorted = [...items].sort((a, b) => {
+                if (a.approaching !== b.approaching) return a.approaching ? -1 : 1;
+                if (a.days_left != null && b.days_left != null) return a.days_left - b.days_left;
+                return 0;
+            });
+            box.innerHTML = '<div class="watchlist-grid">' + sorted.map(w => {
+                const approaching = w.approaching;
+                const overdue = w.overdue;
+                let bg = 'background:#1a1d24';
+                let border = '1px solid #2a2e37';
+                let badge = '';
+                if (approaching) { bg = 'background:#2a1a0f'; border = '1px solid #d97706'; badge = '<span style="background:#d97706;color:#fff;padding:2px 6px;border-radius:4px;font-size:11px">🔔 ' + w.days_left + '天后解锁</span>'; }
+                if (overdue) { bg = 'background:#1f0f10'; border = '1px solid #dc2626'; badge = '<span style="background:#dc2626;color:#fff;padding:2px 6px;border-radius:4px;font-size:11px">已解锁</span>'; }
+                const chg = w.change_pct;
+                const chgHtml = chg == null
+                    ? '<span style="color:#6b7280">—</span>'
+                    : '<span style="color:' + (chg < 0 ? '#dc2626' : '#16a34a') + '">' + (chg > 0 ? '+' : '') + chg + '%</span>';
+                const entryHtml = w.entry_price != null ? '$' + Number(w.entry_price).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—';
+                const lastHtml = w.last_price != null ? '$' + Number(w.last_price).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—';
+                const dateHtml = w.target_unlock_date || '—';
+                const pctHtml = w.target_unlock_pct != null ? w.target_unlock_pct + '%' : '—';
+                const noteHtml = w.short_plan_note ? '<div style="font-size:11px;color:#9ca3af;margin-top:4px">📝 ' + escapeHtml(w.short_plan_note) + '</div>' : '';
+                return `<div class="watchlist-item" style="${bg};${border};border-radius:8px;padding:10px 12px">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <strong style="font-size:14px">${escapeHtml(w.symbol)}</strong>
+                        <span style="font-size:12px;color:#8a92a0">${escapeHtml(w.name || '')}</span>
+                        <button onclick="removeFromWatchlist(${w.watch_id})" style="background:none;border:none;color:#9ca3af;cursor:pointer;font-size:14px" title="移除">✕</button>
+                    </div>
+                    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:12px">
+                        <span>解锁日: <strong>${escapeHtml(dateHtml)}</strong></span>
+                        <span>占比: <strong>${escapeHtml(pctHtml)}</strong></span>
+                        <span>加入价: ${entryHtml}</span>
+                        <span>现价: ${lastHtml}</span>
+                        <span>涨跌: ${chgHtml}</span>
+                    </div>
+                    ${badge ? '<div style="margin-top:6px">' + badge + '</div>' : ''}
+                    ${noteHtml}
+                </div>`;
+            }).join('') + '</div>';
+        }
+
+        async function addToWatchlist (assetId, dateStr, pct) {
+            if (!assetId) return;
+            const note = prompt('加入追踪列表。请填写做空计划备注（可留空）:', '');
+            if (note === null) return;
+            try {
+                const res = await fetch('/api/watchlist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        asset_id: assetId,
+                        short_plan_note: note,
+                        target_unlock_date: dateStr || null,
+                        target_unlock_pct: pct || null,
+                    }),
+                });
+                const data = await res.json();
+                if (!data.ok) { alert('加入失败: ' + (data.error || '未知错误')); return; }
+                loadWatchlist();
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+            }
+        }
+
+        async function removeFromWatchlist (watchId) {
+            if (!confirm('确认从追踪列表移除？')) return;
+            try {
+                const res = await fetch('/api/watchlist/' + watchId, { method: 'DELETE' });
+                const data = await res.json();
+                if (!data.ok) { alert('移除失败: ' + (data.error || '未知错误')); return; }
+                loadWatchlist();
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+            }
+        }
+
         // ── 初始化 ──
         loadDashboard();
         loadTaskDefs();
         loadTasks();
         loadTaskProgress();
+        loadWatchlist();
 
         // 只在选中运行中任务时刷新日志
         setInterval(() => {

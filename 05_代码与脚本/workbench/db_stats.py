@@ -1770,3 +1770,151 @@ def get_token_holders(asset_id: int) -> dict:
             "scraped_at": str(row["scraped_at"]) if row["scraped_at"] else None,
         },
     }
+
+
+# ── 解锁追踪列表（watchlist） ──
+
+def _ensure_watchlist_table(conn) -> None:
+    """确保 biz.unlock_watchlist 表存在（新环境自动建表）。"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.unlock_watchlist (
+                watch_id            SERIAL PRIMARY KEY,
+                asset_id            INTEGER NOT NULL,
+                symbol              TEXT,
+                short_plan_note     TEXT,
+                target_unlock_date  DATE,
+                target_unlock_pct   NUMERIC(8,2),
+                entry_price         NUMERIC(24,8),
+                last_price          NUMERIC(24,8),
+                last_price_at       TIMESTAMPTZ,
+                unlock_alert_sent_at TIMESTAMPTZ,
+                trend_alert_sent_at  TIMESTAMPTZ,
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_watchlist_asset UNIQUE (asset_id),
+                CONSTRAINT fk_watchlist_asset
+                    FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+
+def add_watchlist(asset_id: int, short_plan_note: str = "",
+                  target_unlock_date: str = None,
+                  target_unlock_pct: float = None) -> dict:
+    """加入解锁追踪列表（记录加入时价格）。"""
+    from datetime import date as date_cls
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    unlock_date = None
+    if target_unlock_date:
+        try:
+            unlock_date = date_cls.fromisoformat(target_unlock_date)
+        except ValueError:
+            return {"ok": False, "error": f"日期格式错误: {target_unlock_date}（应为 YYYY-MM-DD）"}
+
+    with get_db() as conn:
+        _ensure_watchlist_table(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT canonical_symbol AS symbol, canonical_name AS name "
+                "FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
+            asset = cur.fetchone()
+        if not asset:
+            return {"ok": False, "error": "资产不存在"}
+
+        # 获取加入时价格（失败则留空，由监控脚本后续补）
+        entry_price = None
+        try:
+            price_info = _fetch_cg_price(asset_id, settings)
+            p = price_info.get("price_usd")
+            if isinstance(p, (int, float)):
+                entry_price = p
+        except Exception:
+            entry_price = None
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO biz.unlock_watchlist
+                    (asset_id, symbol, short_plan_note, target_unlock_date,
+                     target_unlock_pct, entry_price, last_price, last_price_at,
+                     created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW())
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    short_plan_note = EXCLUDED.short_plan_note,
+                    target_unlock_date = EXCLUDED.target_unlock_date,
+                    target_unlock_pct = EXCLUDED.target_unlock_pct,
+                    entry_price = COALESCE(biz.unlock_watchlist.entry_price, EXCLUDED.entry_price),
+                    last_price = EXCLUDED.last_price,
+                    last_price_at = NOW(),
+                    updated_at = NOW()
+            """, (
+                asset_id, asset["symbol"], short_plan_note, unlock_date,
+                target_unlock_pct, entry_price, entry_price,
+            ))
+        conn.commit()
+
+    return {"ok": True, "entry_price": entry_price,
+            "symbol": asset["symbol"], "name": asset["name"]}
+
+
+def list_watchlist() -> dict:
+    """返回解锁追踪列表（含跌幅、到期天数、临近/逾期标记）。"""
+    from datetime import date as date_cls
+
+    today = date_cls.today()
+    rows = []
+    with get_db() as conn:
+        _ensure_watchlist_table(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT w.*, a.canonical_name AS name
+                FROM biz.unlock_watchlist w
+                JOIN core.asset a ON a.asset_id = w.asset_id
+                ORDER BY w.target_unlock_date ASC NULLS LAST, w.created_at DESC
+            """)
+            for r in cur.fetchall():
+                entry = r.get("entry_price")
+                last = r.get("last_price")
+                change_pct = None
+                if entry and last:
+                    try:
+                        change_pct = round((float(last) - float(entry)) / float(entry) * 100, 2)
+                    except ZeroDivisionError:
+                        change_pct = None
+                days_left = None
+                if r.get("target_unlock_date"):
+                    days_left = (r["target_unlock_date"] - today).days
+                rows.append({
+                    "watch_id": r["watch_id"],
+                    "asset_id": r["asset_id"],
+                    "symbol": r["symbol"],
+                    "name": r["name"],
+                    "short_plan_note": r["short_plan_note"],
+                    "target_unlock_date": str(r["target_unlock_date"]) if r["target_unlock_date"] else None,
+                    "target_unlock_pct": float(r["target_unlock_pct"]) if r["target_unlock_pct"] is not None else None,
+                    "entry_price": float(entry) if entry is not None else None,
+                    "last_price": float(last) if last is not None else None,
+                    "change_pct": change_pct,
+                    "days_left": days_left,
+                    "approaching": days_left is not None and 0 <= days_left <= 14,
+                    "overdue": days_left is not None and days_left < 0,
+                    "created_at": str(r["created_at"]),
+                })
+
+    return {"ok": True, "data": rows}
+
+
+def remove_watchlist(watch_id: int) -> dict:
+    """从追踪列表移除。"""
+    with get_db() as conn:
+        _ensure_watchlist_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM biz.unlock_watchlist WHERE watch_id = %s", (watch_id,))
+        conn.commit()
+    return {"ok": True}

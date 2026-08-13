@@ -26,6 +26,13 @@ class Settings:
     ark_base_url: str | None = None
     ark_model: str | None = None
     request_timeout_seconds: int = 30
+    # 邮件通知（解锁追踪提醒）
+    smtp_host: str | None = None
+    smtp_port: int = 465
+    smtp_user: str | None = None
+    smtp_pass: str | None = None
+    smtp_to: str | None = None
+    smtp_from: str | None = None
 
 
 def load_local_env_file() -> None:
@@ -76,4 +83,10 @@ def get_settings(require_database: bool = True) -> Settings:
         ark_api_key=os.getenv("ARK_API_KEY", "").strip() or None,
         ark_base_url=os.getenv("ARK_BASE_URL", "").strip() or None,
         ark_model=os.getenv("ARK_MODEL", "").strip() or None,
+        smtp_host=os.getenv("SMTP_HOST", "").strip() or None,
+        smtp_port=int(os.getenv("SMTP_PORT", "465") or 465),
+        smtp_user=os.getenv("SMTP_USER", "").strip() or None,
+        smtp_pass=os.getenv("SMTP_PASS", "").strip() or None,
+        smtp_to=os.getenv("SMTP_TO", "").strip() or None,
+        smtp_from=os.getenv("SMTP_FROM", "").strip() or None,
     )

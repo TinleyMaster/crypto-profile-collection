@@ -840,6 +840,47 @@ def api_market_volume():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── 解锁追踪列表（watchlist） ──
+
+@app.route("/api/watchlist", methods=["GET"])
+def api_watchlist_list():
+    """解锁追踪列表（含跌幅、到期天数）。"""
+    try:
+        data = _get_db_stats().list_watchlist()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/watchlist", methods=["POST"])
+def api_watchlist_add():
+    """加入解锁追踪列表。body: {asset_id, short_plan_note, target_unlock_date, target_unlock_pct}"""
+    try:
+        body = request.get_json(silent=True) or {}
+        asset_id = body.get("asset_id")
+        if not asset_id:
+            return jsonify({"ok": False, "error": "缺少 asset_id"}), 400
+        data = _get_db_stats().add_watchlist(
+            asset_id=int(asset_id),
+            short_plan_note=body.get("short_plan_note", "") or "",
+            target_unlock_date=body.get("target_unlock_date"),
+            target_unlock_pct=body.get("target_unlock_pct"),
+        )
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/watchlist/<int:watch_id>", methods=["DELETE"])
+def api_watchlist_remove(watch_id: int):
+    """从解锁追踪列表移除。"""
+    try:
+        data = _get_db_stats().remove_watchlist(watch_id)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -173,23 +173,50 @@ def _fetch_html(url: str, timeout: int = 20, retries: int = 3) -> str | None:
             last_err = e
             if attempt < retries:
                 time.sleep(1 * attempt)
-    print(f"  [WARN] 抓取失败（重试 {retries} 次）: {last_err}")
+    print(f"  [WARN] requests 抓取失败（重试 {retries} 次）: {last_err}")
     return None
 
 
-def scrape_holders(explorer_url: str, contract_address: str,
-                   max_holders: int = 50) -> dict:
-    """从区块浏览器持币页面抓取持仓分布数据。
+def _fetch_html_browser(url: str, timeout: int = 30) -> str | None:
+    """用无头浏览器抓取渲染后的 HTML（绕过区块浏览器反爬）。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] playwright 未安装，无法使用无头浏览器")
+        return None
 
-    注意：#balances 是 URL 片段（fragment），不会发送到服务器，
-    持币列表、Top 集中度、Tier 分布都在 Token 首页的同一份 HTML 里，
-    因此只需抓取一次 token_url 即可解析全部数据（避免连续请求触发反爬）。
-    """
-    token_url = f"{explorer_url}/token/{contract_address}"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ])
+            context = browser.new_context(user_agent=HEADERS["User-Agent"])
+            page = context.new_page()
+
+            # 拦截非必要资源加速
+            page.route("**/*", lambda route: route.abort()
+                if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                else route.continue_())
+
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            # 等待持币列表 JS 渲染完成
+            page.wait_for_timeout(4000)
+            html = page.content()
+            browser.close()
+            return html
+    except Exception as e:
+        print(f"  [WARN] 无头浏览器抓取失败: {e}")
+        return None
+
+
+def _parse_holders_html(html: str, max_holders: int) -> dict:
+    """从区块浏览器 HTML 解析持仓分布数据。"""
+    soup = BeautifulSoup(html, "html.parser")
+    body_text = soup.get_text()
 
     result = {
-        "chain": "",
-        "contract_address": contract_address.lower(),
         "total_holders": 0,
         "top_holders_json": [],
         "tier_distribution_json": [],
@@ -198,15 +225,7 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "top_25_pct": None,
         "top_50_pct": None,
         "top_100_pct": None,
-        "scraped_at": None,
     }
-
-    html = _fetch_html(token_url)
-    if not html:
-        return result
-
-    soup = BeautifulSoup(html, "html.parser")
-    body_text = soup.get_text()
 
     # 解析总持币数（页面文本中的 "Holders 153,662"）
     m = re.search(r'Holders\s+([\d,]+)', body_text)
@@ -294,9 +313,222 @@ def scrape_holders(explorer_url: str, contract_address: str,
 
         result["top_holders_json"] = parsed
 
+    return result
+
+
+def _fetch_tokenholders(explorer_url: str, contract_address: str) -> str | None:
+    """请求 etherscan 系区块浏览器的持币数据接口（generic-tokenholders2）。
+
+    该接口直接返回集中度 Cohort、Tier 分布、持币列表三张表，
+    比主页面更稳定（requests 即可拿到，无需 JS 渲染）。
+    """
+    url = f"{explorer_url}/token/generic-tokenholders2?m=normal&a={contract_address}"
+    headers = dict(HEADERS)
+    headers["Referer"] = f"{explorer_url}/token/{contract_address}"
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                time.sleep(1 * attempt)
+    print(f"  [WARN] 持币接口抓取失败: {last_err}")
+    return None
+
+
+def _parse_tokenholders_html(html: str, max_holders: int) -> dict:
+    """解析 generic-tokenholders2 接口返回的 HTML（Cohort/Tier/持币列表）。"""
+    soup = BeautifulSoup(html, "html.parser")
+    result = {
+        "total_holders": 0,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+    }
+
+    cohort = {}  # 如 {"1-5": 90.39, "6-10": 3.58, ...}
+    tiers = []
+    holders = []
+
+    for t in soup.select("table"):
+        rows = t.select("tr")
+        if not rows:
+            continue
+        header_text = rows[0].get_text(" ", strip=True)
+
+        # 1) Cohort 集中度表
+        if "Cohort" in header_text or "Top 1-5" in header_text:
+            for row in rows[1:]:
+                cells = [c.get_text(strip=True) for c in row.select("td")]
+                if not cells:
+                    continue
+                label = cells[0]
+                pct = None
+                for c in cells:
+                    m = re.search(r'([\d.]+)%', c)
+                    if m:
+                        pct = float(m.group(1))
+                m2 = re.match(r'Top\s+(\d+)-(\d+)', label)
+                if m2:
+                    cohort[f"{m2.group(1)}-{m2.group(2)}"] = pct
+
+        # 2) Tier 分布表
+        elif "Tier" in header_text or "Whale" in header_text:
+            for row in rows[1:]:
+                cells = [c.get_text(strip=True) for c in row.select("td")]
+                if len(cells) < 4:
+                    continue
+                m = re.search(r'(Whale|Shark|Dolphin|Fish|Crab|Shrimp)', cells[0])
+                if not m:
+                    continue
+                tier = m.group(1)
+                count = int(cells[1].replace(",", "")) if cells[1].replace(",", "").isdigit() else 0
+                pct_holders = _parse_pct(cells[2])
+                pct_supply = _parse_pct(cells[3])
+                tiers.append({
+                    "tier": tier,
+                    "count": count,
+                    "pct_holders": pct_holders,
+                    "pct_supply": pct_supply,
+                })
+
+        # 3) 持币列表
+        elif "Rank" in header_text and "Address" in header_text and "Quantity" in header_text:
+            for row in rows[1:]:
+                if len(holders) >= max_holders:
+                    break
+                cells = row.select("td")
+                if len(cells) < 4:
+                    continue
+                rank_text = cells[0].get_text(strip=True)
+                try:
+                    rank = int(rank_text)
+                except ValueError:
+                    continue
+                # 完整地址从 a 标签 href 提取（持币地址在 ?a= 参数里）
+                addr = ""
+                for a in row.select("a"):
+                    href = a.get("href", "")
+                    m = re.search(r'a=(0x[a-fA-F0-9]{40})', href)
+                    if m:
+                        addr = m.group(1)
+                        break
+                if not addr:
+                    # 备选：href 里第二个 0x 地址（第一个是 token 合约地址）
+                    for a in row.select("a"):
+                        href = a.get("href", "")
+                        addrs = re.findall(r'0x[a-fA-F0-9]{40}', href)
+                        if len(addrs) >= 2:
+                            addr = addrs[-1]
+                            break
+                if not addr:
+                    m = re.search(r'0x[a-fA-F0-9]{40}', cells[1].get_text(strip=True))
+                    if m:
+                        addr = m.group(0)
+                if not addr:
+                    continue
+                label = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                quantity = cells[3].get_text(strip=True).replace(",", "") if len(cells) > 3 else ""
+                pct = _parse_pct(cells[4].get_text(strip=True)) if len(cells) > 4 else None
+                holders.append({
+                    "rank": rank,
+                    "address": addr,
+                    "label": label,
+                    "amount": quantity,
+                    "pct": pct,
+                })
+
+    # Cohort 累加 → Top 5/10/25/50/100 集中度
+    if cohort:
+        result["top_5_pct"] = cohort.get("1-5")
+        top10 = None
+        if cohort.get("1-5") is not None and cohort.get("6-10") is not None:
+            top10 = round(cohort["1-5"] + cohort["6-10"], 2)
+        result["top_10_pct"] = top10
+        top25 = None
+        if top10 is not None and cohort.get("11-25") is not None:
+            top25 = round(top10 + cohort["11-25"], 2)
+        result["top_25_pct"] = top25
+        top50 = None
+        if top25 is not None and cohort.get("26-50") is not None:
+            top50 = round(top25 + cohort["26-50"], 2)
+        result["top_50_pct"] = top50
+        top100 = None
+        if top50 is not None and cohort.get("51-100") is not None:
+            top100 = round(top50 + cohort["51-100"], 2)
+        result["top_100_pct"] = top100
+
+    result["tier_distribution_json"] = tiers
+    result["top_holders_json"] = holders
+    return result
+
+
+def scrape_holders(explorer_url: str, contract_address: str,
+                   max_holders: int = 50) -> dict:
+    """从区块浏览器抓取持仓分布数据。
+
+    策略：
+    1. 先请求 token 主页面拿 total_holders（及 BSCScan 主页面直接渲染的持币表）
+    2. 再请求 generic-tokenholders2 接口拿集中度/Tier/持币列表（etherscan 系）
+    3. 接口失败时回退无头浏览器抓主页面渲染后的完整 HTML
+    """
+    token_url = f"{explorer_url}/token/{contract_address}"
+
+    result = {
+        "chain": "",
+        "contract_address": contract_address.lower(),
+        "total_holders": 0,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+        "scraped_at": None,
+    }
+
+    # Step 1: 主页面 → total_holders（及 BSCScan 直接渲染的持币表）
+    html = _fetch_html(token_url)
+    main_parsed = _parse_holders_html(html, max_holders) if html else None
+    main_total = main_parsed["total_holders"] if main_parsed else 0
+    result["total_holders"] = main_total
+
+    # Step 2: 持币接口 → 集中度/Tier/持币列表（etherscan 系，最稳定）
+    api_html = _fetch_tokenholders(explorer_url, contract_address)
+    api_parsed = _parse_tokenholders_html(api_html, max_holders) if api_html else None
+
+    # 合并：接口数据优先（含集中度/Tier/持币列表），total_holders 保留主页面的
+    if api_parsed and api_parsed["top_holders_json"]:
+        result["top_holders_json"] = api_parsed["top_holders_json"]
+        result["tier_distribution_json"] = api_parsed["tier_distribution_json"]
+        result["top_5_pct"] = api_parsed["top_5_pct"]
+        result["top_10_pct"] = api_parsed["top_10_pct"]
+        result["top_25_pct"] = api_parsed["top_25_pct"]
+        result["top_50_pct"] = api_parsed["top_50_pct"]
+        result["top_100_pct"] = api_parsed["top_100_pct"]
+    elif main_parsed and main_parsed["top_holders_json"]:
+        result.update(main_parsed)
+
+    # Step 3: 仍无持币数据 → 回退无头浏览器
+    if not result["top_holders_json"]:
+        print("  [INFO] 接口未获取到持币数据，改用无头浏览器...")
+        browser_html = _fetch_html_browser(token_url)
+        browser_parsed = _parse_holders_html(browser_html, max_holders) if browser_html else None
+        if browser_parsed:
+            result.update(browser_parsed)
+
     result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
+    tiers = result["tier_distribution_json"]
     if tiers:
         print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
         print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")

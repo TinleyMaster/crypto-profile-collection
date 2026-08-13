@@ -464,6 +464,14 @@ def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
     return False
 
 
+def _root_domain(domain: str) -> str:
+    """提取根域名（最后两级），如 ai.cysic.xyz -> cysic.xyz。"""
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return domain
+
+
 def extract_doc_links(
     html: str, base_url: str, same_domain_only: bool = True,
     project_identifiers: list[str] | None = None,
@@ -498,12 +506,20 @@ def extract_doc_links(
         link_domain = parsed.netloc.lower()
         if _is_excluded_url(absolute_url):
             continue
+        # 同一根域名下的文档子域名（如 ai.cysic.xyz -> docs.cysic.xyz）
+        link_is_same_root_docs = (
+            link_domain.startswith("docs.")
+            and _root_domain(link_domain) == _root_domain(base_domain)
+        )
 
         should_record = False
         link_text = a.get_text(strip=True)
         link_text_is_doc = _has_doc_keyword(link_text)
 
-        if not require_doc_keyword:
+        if link_is_same_root_docs:
+            # 同根域名的 docs 子域名是文档站，直接收录（跨子域名也保留）
+            should_record = True
+        elif not require_doc_keyword:
             # 放宽模式：收录所有同域链接 + 跨域文档关键词链接（用于单资产重爬）
             # 同域链接全收录（/about, /team, /roadmap 等投研页面）
             if link_domain == base_domain:

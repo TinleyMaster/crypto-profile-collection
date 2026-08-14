@@ -2386,13 +2386,20 @@
 
             const tr = d.trend || {};
             const updates = tr.updates || [];
-            if (tr.trending_rank != null || updates.length) {
+            const news = tr.news || [];
+            if (tr.trending_rank != null || updates.length || news.length) {
                 html += '<br><strong>── 趋势新闻 ──</strong><br>';
                 if (tr.trending_rank != null) html += '全球热搜榜: 第 ' + tr.trending_rank + ' 名<br>';
                 if (updates.length) {
                     html += '项目动态 (' + updates.length + '):<br>';
                     updates.slice(0, 5).forEach(u => {
                         html += '&nbsp;&nbsp;• ' + escapeHtml((u.text || '').slice(0, 80)) + '<br>';
+                    });
+                }
+                if (news.length) {
+                    html += '相关新闻 (' + news.length + '):<br>';
+                    news.slice(0, 5).forEach(n => {
+                        html += '&nbsp;&nbsp;• ' + escapeHtml((n.title || '').slice(0, 80)) + '<br>';
                     });
                 }
             }

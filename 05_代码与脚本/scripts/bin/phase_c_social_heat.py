@@ -3,8 +3,8 @@
 
 数据源（全部免费公开 API）：
   - 社区规模：CoinGecko /coins/{id}（community_data）
-  - 实时舆情：Reddit 搜索 JSON + LLM 情绪分析
-  - 趋势新闻：CoinGecko /search/trending + /coins/{id}/status_updates
+  - 实时舆情：Reddit 搜索 JSON（易被 403 拦截，失败降级）+ Google News RSS + LLM 情绪分析
+  - 趋势新闻：CoinGecko /search/trending + /coins/{id}/status_updates + Google News
   - 市场热度：CoinGecko /coins/{id}（market_data：成交量/涨跌幅/市值排名）
 
 用法：
@@ -108,23 +108,35 @@ def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None
         return cur.fetchone()
 
 
-def _cg_get(settings, path: str, params: dict | None = None) -> dict | None:
-    """带 key 与重试的 CoinGecko GET 请求。"""
+def _cg_get(settings, path: str, params: dict | None = None, timeout: int = 15) -> dict | None:
+    """带 key、重试与无 key 回退的 CoinGecko GET 请求。
+
+    优先用 demo key（速率配额更高），若 key 被限流(429)/超时则回退到公共 API。
+    """
     params = dict(params or {})
-    headers = {"Accept": "application/json", "User-Agent": "crypto-research-ingest/1.0"}
-    for key in settings.get_coingecko_keys():
-        h = dict(headers)
+    base_headers = {"Accept": "application/json", "User-Agent": "crypto-research-ingest/1.0"}
+    keys = settings.get_coingecko_keys()
+    candidates = [k for k in keys if k] + [None]  # 无 key 公共 API 作为兜底
+    for attempt in range(3):
+        key = candidates[attempt % len(candidates)]
+        h = dict(base_headers)
         if key:
             h["x-cg-demo-api-key"] = key
         try:
             resp = requests.get(f"{settings.coingecko_base_url}{path}",
-                                params=params, headers=h, timeout=REQUEST_TIMEOUT)
+                                params=params, headers=h, timeout=timeout)
             if resp.status_code == 429:
+                _log(f"  [CG] {path} 限流(429)，等待重试" + ("（改用公共 API）" if attempt >= len(keys) else ""))
+                time.sleep(2 * (attempt + 1))
                 continue
             resp.raise_for_status()
             return resp.json()
+        except requests.exceptions.ReadTimeout:
+            _log(f"  [CG] {path} 超时，等待重试")
+            time.sleep(2 * (attempt + 1))
         except Exception as e:
             _log(f"  [CG] {path} 请求失败: {e}")
+            return None
     return None
 
 
@@ -217,18 +229,30 @@ def fetch_status_updates(settings, coin_id: str) -> list[dict]:
     return out
 
 
+def _search_query(symbol: str, name: str) -> str:
+    """构造搜索词，附带 crypto 关键词以消除通用符号歧义（如 APR=年利率）。"""
+    s = (symbol or "").strip()
+    n = (name or "").strip()
+    if n and n.lower() != s.lower() and s.lower() not in n.lower() and len(n) <= 20:
+        return f"{s} {n} crypto"
+    return f"{s} crypto"
+
+
 def fetch_reddit_posts(symbol: str, name: str) -> list[dict]:
     """从 Reddit 搜索最近相关帖子，返回 [{title, text, subreddit, score, num_comments}]。"""
-    query = symbol
-    if len(symbol) < 3 and name:
-        query = f"{symbol} {name}"
+    query = _search_query(symbol, name)
     url = "https://www.reddit.com/search.json"
     params = {"q": query, "sort": "new", "t": "month", "limit": "25", "raw_json": "1"}
-    headers = {"User-Agent": "crypto-research/1.0 (research bot)"}
+    # Reddit 无鉴权 JSON 接口近年经常被 403/Cloudflare 拦截，失败时静默降级到 Google News
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "application/json",
+    }
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
-            _log(f"  [Reddit] 搜索失败 HTTP {resp.status_code}")
+            _log(f"  [Reddit] 搜索失败 HTTP {resp.status_code}（跳过）")
             return []
         data = resp.json()
     except Exception as e:
@@ -250,6 +274,35 @@ def fetch_reddit_posts(symbol: str, name: str) -> list[dict]:
             "num_comments": _f(d.get("num_comments")),
         })
     return posts[:20]
+
+
+def fetch_google_news(symbol: str, name: str) -> list[dict]:
+    """从 Google News RSS 搜索最近新闻标题，返回 [{title, created_at}]。免费无 key。"""
+    import xml.etree.ElementTree as ET
+
+    query = _search_query(symbol, name)
+    url = "https://news.google.com/rss/search"
+    params = {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            _log(f"  [GoogleNews] 搜索失败 HTTP {resp.status_code}")
+            return []
+        root = ET.fromstring(resp.content)
+    except Exception as e:
+        _log(f"  [GoogleNews] 搜索失败: {e}")
+        return []
+
+    news = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        pub = item.findtext("pubDate") or ""
+        if title:
+            news.append({"title": title[:300], "created_at": pub})
+        if len(news) >= 15:
+            break
+    return news
 
 
 # ── LLM 情绪分析 ──────────────────────────────────────────
@@ -274,8 +327,9 @@ SENTIMENT_PROMPT = """你是一个加密货币舆情分析专家。根据给定�
 
 
 def analyze_sentiment(settings, symbol: str, name: str,
-                      posts: list[dict], updates: list[dict]) -> dict | None:
-    """用 LLM 对 Reddit 帖 + 项目动态做情绪分析。无文本时返回 None。"""
+                      posts: list[dict], updates: list[dict],
+                      news: list[dict]) -> dict | None:
+    """用 LLM 对 Reddit 帖 + 项目动态 + 新闻做情绪分析。无文本时返回 None。"""
     from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
     text_parts = []
@@ -283,6 +337,8 @@ def analyze_sentiment(settings, symbol: str, name: str,
         text_parts.append(f"- [Reddit r/{p.get('subreddit', '?')}] {p.get('title', '')} {p.get('text', '')}")
     for u in updates:
         text_parts.append(f"- [动态] {u.get('text', '')}")
+    for n in news:
+        text_parts.append(f"- [新闻] {n.get('title', '')}")
     if not text_parts:
         return None
 
@@ -293,7 +349,7 @@ def analyze_sentiment(settings, symbol: str, name: str,
 
     user_prompt = (
         f"代币: {symbol} ({name})\n\n"
-        f"以下是从 Reddit 和项目动态收集到的 {len(text_parts)} 条文本：\n\n"
+        f"以下是从 Reddit、项目动态和新闻收集到的 {len(text_parts)} 条文本：\n\n"
         + "\n".join(text_parts[:40])
     )
     try:
@@ -331,7 +387,8 @@ def _mean(vals: list[float]) -> float | None:
 
 
 def compute_scores(community: dict, market: dict, trending_rank: int | None,
-                   updates: list[dict], sentiment: dict | None) -> dict:
+                   updates: list[dict], news: list[dict],
+                   sentiment: dict | None) -> dict:
     """计算四维度评分与综合评分。"""
     # 社区规模：twitter / reddit / telegram 的 log 归一化均值
     community_score = _mean([
@@ -343,11 +400,12 @@ def compute_scores(community: dict, market: dict, trending_rank: int | None,
     # 舆情情绪：LLM 直接给 0-100
     sentiment_score = _f(sentiment.get("sentiment_score")) if sentiment else None
 
-    # 趋势新闻：热搜位次 + 项目动态数量
+    # 趋势新闻：热搜位次 + 项目动态/新闻数量
     trending_score = None
     if trending_rank:
         trending_score = max(0.0, 100 - (trending_rank - 1) * 12)
-    news_score = min(50.0, len(updates) * 12.0) if updates else None
+    news_count = len(updates) + len(news)
+    news_score = min(50.0, news_count * 8.0) if news_count else None
     trend_score = _mean([v for v in (trending_score, news_score) if v is not None])
 
     # 市场热度：成交量 + 涨跌幅绝对值 + 市值排名
@@ -525,14 +583,17 @@ def _main() -> int:
         posts = fetch_reddit_posts(symbol, name)
         _log(f"  Reddit 帖子: {len(posts)} 条")
 
-        sentiment = analyze_sentiment(settings, symbol, name, posts, updates)
+        news = fetch_google_news(symbol, name)
+        _log(f"  Google News: {len(news)} 条")
+
+        sentiment = analyze_sentiment(settings, symbol, name, posts, updates, news)
         if sentiment:
             _log(f"  情绪: {sentiment.get('sentiment')} ({sentiment.get('sentiment_score')})")
         else:
             _log("  情绪: 无数据（跳过）")
 
         # 全部维度都无数据 → not_found
-        if not community and not market and trending_rank is None and not updates and not posts:
+        if not community and not market and trending_rank is None and not updates and not posts and not news:
             print(json.dumps({
                 "status": "not_found",
                 "message": "未获取到任何社交热度数据（无 CoinGecko 映射或各源均无数据）",
@@ -542,13 +603,15 @@ def _main() -> int:
             }, ensure_ascii=False))
             return 0
 
-        scores = compute_scores(community, market, trending_rank, updates, sentiment)
+        scores = compute_scores(community, market, trending_rank, updates, news, sentiment)
 
         data_sources = ["CoinGecko community_data", "CoinGecko market_data"]
         if trending_rank or updates:
             data_sources.append("CoinGecko trending/status_updates")
         if posts:
             data_sources.append("Reddit search")
+        if news:
+            data_sources.append("Google News RSS")
         if sentiment:
             data_sources.append("LLM 情绪分析 (DeepSeek/豆包)")
 
@@ -560,11 +623,12 @@ def _main() -> int:
                 "trending_rank": trending_rank,
                 "reddit_posts": len(posts),
                 "status_updates": len(updates),
+                "google_news": len(news),
             },
             "calculation_steps": [
                 "社区规模：twitter/reddit/telegram 用户数 log10 归一化取均值",
-                "舆情情绪：LLM 对 Reddit 帖 + 项目动态做情绪分析，输出 0-100 情绪分",
-                "趋势新闻：热搜位次 + 项目动态数量合成",
+                "舆情情绪：LLM 对 Reddit 帖 + 项目动态 + 新闻标题做情绪分析，输出 0-100 情绪分",
+                "趋势新闻：热搜位次 + 项目动态/新闻数量合成",
                 "市场热度：成交量 + 24h 涨跌幅绝对值 + 市值排名合成",
                 "综合评分：可用维度按权重加权并重新归一化",
             ],
@@ -578,6 +642,7 @@ def _main() -> int:
             "trending_rank": trending_rank,
             "status_updates_count": len(updates),
             "reddit_posts_count": len(posts),
+            "google_news_count": len(news),
             "sentiment_raw": sentiment,
         }
 
@@ -595,7 +660,7 @@ def _main() -> int:
             "confidence": scores["confidence"],
             "community": community,
             "sentiment": sentiment,
-            "trend": {"trending_rank": trending_rank, "updates": updates},
+            "trend": {"trending_rank": trending_rank, "updates": updates, "news": news},
             "market": market,
             "score_detail": scores["score_detail"],
             "methodology": methodology,

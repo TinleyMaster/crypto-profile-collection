@@ -191,13 +191,13 @@ Phase C: 投研分析提取              ← 进行中
 | 维度 | 数据来源（免费公开 API） | 指标 |
 |------|------------------------|------|
 | 社区规模 | CoinGecko `/coins/{id}`（community_data） | Twitter 粉丝、Reddit 订阅、Telegram 成员、GitHub Stars |
-| 实时舆情 | Reddit 搜索 JSON + LLM 情绪分析 | 情绪正负、情绪分、看涨/看跌占比、热点主题 |
-| 趋势新闻 | CoinGecko `/search/trending` + `/coins/{id}/status_updates` | 热搜位次、项目动态 |
+| 实时舆情 | Reddit 搜索 JSON + Google News RSS + LLM 情绪分析 | 情绪正负、情绪分、看涨/看跌占比、热点主题 |
+| 趋势新闻 | CoinGecko `/search/trending` + `/coins/{id}/status_updates` + Google News | 热搜位次、项目动态、相关新闻 |
 | 市场热度 | CoinGecko `/coins/{id}`（market_data） | 24h 成交、涨跌幅、市值排名 |
 
 **综合评分：** 社区规模 25% + 舆情情绪 30% + 趋势新闻 25% + 市场热度 20%，缺失维度自动剔除并重新归一化；输出 `confidence`（high/medium/low，按可用维度数）。
 
-**容错：** 各维度独立 try/except，单源失败不阻断整体；无 CoinGecko 映射且各源均无数据时返回 `not_found`；LLM 情绪仅在拿到 Reddit/项目动态文本时调用。本期不含 X/Twitter 抓取（免费 API 已停用，爬取脆弱）。
+**容错：** 各维度独立 try/except，单源失败不阻断整体；无 CoinGecko 映射且各源均无数据时返回 `not_found`；CoinGecko demo key 限流(429)时自动重试并回退公共 API；Reddit 无鉴权接口常被 403 拦截，自动降级到 Google News；搜索词附带 `crypto` 关键词以消除通用符号歧义（如 APR=年利率）。LLM 情绪仅在拿到 Reddit/项目动态/新闻文本时调用。本期不含 X/Twitter 抓取（免费 API 已停用，爬取脆弱）。
 
 **数据表：** `biz.asset_social_heat`（按 asset_id 唯一），含 `community_json` / `sentiment_json` / `trend_json` / `market_json` / `score_detail_json` / `methodology_json` / `input_snapshot_json`。
 

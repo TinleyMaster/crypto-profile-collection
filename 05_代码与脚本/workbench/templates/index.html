@@ -2753,47 +2753,79 @@
             btn.disabled = true;
             errEl.style.display = 'none';
             try {
-                // 启动后台任务（返回 task_id，实时日志见日志面板）
-                const startRes = await fetch('/api/unlocks/query/' + selectedAssetId, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ force: forceRefresh ? 1 : 0 }),
-                });
-                const startData = await startRes.json();
-                if (!startData.ok) throw new Error(startData.error || '启动失败');
-
-                selectedTaskId = startData.task_id;
-                loadTaskLog(startData.task_id);
-                if (logPanelCollapsed) toggleLogPanel();
-                loadTasks();
-                await waitForTask(startData.task_id, 240000);
-
-                const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
-                const resultData = await resultRes.json();
-                if (resultData.pending) throw new Error('拉取超时（4分钟），请稍后重试');
-                if (!resultData.ok || !resultData.result || !resultData.result.ok) {
-                    const errMsg = (resultData.result && resultData.result.error) || resultData.error || '未知错误';
-                    errEl.textContent = '拉取失败: ' + errMsg;
-                    errEl.style.display = 'block';
-                    document.getElementById('ulk-status').textContent = '拉取失败: ' + errMsg.slice(0, 60);
-                    document.getElementById('ulk-status').className = 'status-text missing';
-                    btn.textContent = origText;
-                    btn.disabled = false;
-                    forceLink.style.display = 'inline';
-                    return;
-                }
-
-                // 拉取成功，用 renderUnlocks 统一渲染（会设置按钮为"重新拉取"）
-                renderUnlocks(resultData.result.data);
+                await runUnlocksTask(
+                    '/api/unlocks/query/' + selectedAssetId,
+                    { force: forceRefresh ? 1 : 0 },
+                    '拉取超时（4分钟），请稍后重试'
+                );
             } catch (e) {
-                errEl.textContent = '请求失败: ' + e.message;
+                errEl.textContent = '拉取失败: ' + e.message;
                 errEl.style.display = 'block';
-                document.getElementById('ulk-status').textContent = '网络错误: ' + e.message.slice(0, 60);
+                document.getElementById('ulk-status').textContent = '拉取失败: ' + e.message.slice(0, 60);
                 document.getElementById('ulk-status').className = 'status-text missing';
                 btn.textContent = origText;
                 forceLink.style.display = 'inline';
             }
             setTimeout(() => { btn.classList.remove('running'); btn.disabled = false; }, 3000);
+        }
+
+        async function queryUnlocksByUrl (url) {
+            await runUnlocksTask(
+                '/api/unlocks/scrape-url/' + selectedAssetId,
+                { url: url },
+                '网址抓取超时（4分钟），请稍后重试'
+            );
+        }
+
+        async function queryUnlocksAi () {
+            await runUnlocksTask(
+                '/api/unlocks/ai-estimate/' + selectedAssetId,
+                {},
+                'AI 测算超时（4分钟），请稍后重试'
+            );
+        }
+
+        async function runUnlocksTask (startUrl, body, timeoutMsg) {
+            const startRes = await fetch(startUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const startData = await startRes.json();
+            if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+            selectedTaskId = startData.task_id;
+            loadTaskLog(startData.task_id);
+            if (logPanelCollapsed) toggleLogPanel();
+            loadTasks();
+            await waitForTask(startData.task_id, 240000);
+
+            const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+            const resultData = await resultRes.json();
+            if (resultData.pending) throw new Error(timeoutMsg);
+
+            const result = resultData.result;
+            if (resultData.ok && result && result.ok) {
+                renderUnlocks(result.data);
+                return;
+            }
+
+            // tokenomist 未收录：让用户输入 tokenomics 网址，未输入则改用 AI 测算
+            if (result && result.needs_url) {
+                const url = prompt(
+                    '该代币未能自动匹配 tokenomics.com 项目页。\n\n' +
+                    '请粘贴 tokenomics 项目网址（例如 https://app.tokenomics.com/tokenomics/akedo-games）：\n\n' +
+                    '若无法提供网址，请点「取消」，将改用 AI 测算。'
+                );
+                if (url && /^https?:\/\//i.test(url.trim())) {
+                    await queryUnlocksByUrl(url.trim());
+                } else {
+                    await queryUnlocksAi();
+                }
+                return;
+            }
+
+            throw new Error((result && result.error) || resultData.error || '未知错误');
         }
 
         async function runResearch (taskKey) {

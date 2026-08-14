@@ -1445,14 +1445,73 @@ def query_token_unlocks(asset_id: int, force: bool = False, log=None) -> dict:
         if data.get("status") == "ok":
             _emit("tokenomist 解锁数据拉取成功")
             return {"ok": True, "data": data}
-        # tokenomist 没收录 → 尝试 AI 测算
+        # tokenomist 没收录 → 让前端询问用户是否提供网址，未提供再走 AI 测算
         if data.get("status") == "not_found":
-            _emit(f"tokenomist 未收录，触发 AI 测算: {data.get('message', '')}")
-            return _ai_estimate_unlocks(asset_id, data.get("message", "未被 tokenomist 收录"), log=log)
+            _emit(f"tokenomist 未收录: {data.get('message', '')}，等待用户提供网址或改用 AI 测算")
+            return {
+                "ok": False,
+                "needs_url": True,
+                "error": data.get("message", "该代币未被 tokenomist 收录"),
+                "symbol": data.get("symbol"),
+                "name": data.get("name"),
+            }
         # 其他错误
         return {"ok": False, "error": data.get("message", "失败")}
     except json.JSONDecodeError:
         return {"ok": False, "error": output[:500]}
+
+
+def query_unlocks_by_url(asset_id: int, url: str, log=None) -> dict:
+    """按用户提供的 tokenomics 网址抓取解锁数据，失败则回退 AI 测算。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "error": "网址必须以 http:// 或 https:// 开头"}
+
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_chain_token_unlocks.py")
+    cmd = [
+        sys.executable, "-u", script,
+        "--asset-id", str(asset_id),
+        "--url", url,
+        "--save",
+    ]
+
+    _emit(f"按用户提供的网址抓取解锁数据: {url}")
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 180, log=log)
+
+    if returncode == -1:
+        return {"ok": False, "error": "网址抓取超时（180秒）"}
+
+    output = stdout.strip()
+    if returncode != 0 or not output:
+        _emit(f"网址抓取失败（exit {returncode}），回退 AI 测算")
+        return _ai_estimate_unlocks(asset_id, "网址抓取失败，tokenomist 未收录", log=log)
+
+    try:
+        data = json.loads(output)
+        if data.get("status") == "ok":
+            _emit("网址抓取解锁数据成功")
+            return {"ok": True, "data": data}
+        msg = data.get("message", "网址抓取失败")
+        _emit(f"网址抓取未获取到数据（{msg}），回退 AI 测算")
+        return _ai_estimate_unlocks(asset_id, msg, log=log)
+    except json.JSONDecodeError:
+        _emit("网址抓取输出解析失败，回退 AI 测算")
+        return _ai_estimate_unlocks(asset_id, "网址抓取输出解析失败", log=log)
+
+
+def query_unlocks_ai(asset_id: int, log=None) -> dict:
+    """用户未提供网址时，直接触发 AI 测算解锁数据。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    _emit("用户未提供网址，改用 AI 测算解锁数据")
+    return _ai_estimate_unlocks(asset_id, "tokenomist 未收录，用户未提供网址", log=log)
 
 
 AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根据以下代币经济学数据，估算该代币的解锁时间表。

@@ -1008,6 +1008,30 @@ def api_unlocks_query(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/unlocks/scrape-url/<int:asset_id>", methods=["POST"])
+def api_unlocks_scrape_url(asset_id: int):
+    """按用户提供的 tokenomics 网址抓取解锁数据（后台任务 + 实时日志）。"""
+    url = (request.get_json(silent=True) or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "缺少网址"}), 400
+
+    def _worker(log):
+        return _get_db_stats().query_unlocks_by_url(asset_id, url, log=log)
+
+    task_id = task_mgr.submit_func_task(f"解锁数据(网址): asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
+@app.route("/api/unlocks/ai-estimate/<int:asset_id>", methods=["POST"])
+def api_unlocks_ai_estimate(asset_id: int):
+    """用户未提供网址时，直接触发 AI 测算解锁数据（后台任务 + 实时日志）。"""
+    def _worker(log):
+        return _get_db_stats().query_unlocks_ai(asset_id, log=log)
+
+    task_id = task_mgr.submit_func_task(f"解锁数据(AI测算): asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/holders/query/<int:asset_id>")
 def api_holders_query(asset_id: int):
     """按需拉取指定资产的持仓分布快照（从区块浏览器爬取）。"""

@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--symbol", type=str, help="代币符号")
     p.add_argument("--save", action="store_true", help="写入数据库（默认只输出 JSON）")
     p.add_argument("--output-json", action="store_true", default=True, help="JSON 格式输出")
+    p.add_argument("--url", type=str,
+                   help="用户提供的 tokenomics 项目网址（覆盖 slug 猜测，直接按该 slug 爬取）")
     return p
 
 
@@ -108,6 +110,32 @@ def guess_slugs(asset: dict) -> list[str]:
             slugs.append(cg_slug)
 
     return slugs
+
+
+def _extract_slug_from_url(url: str) -> str | None:
+    """从用户提供的 tokenomics 网址中提取项目 slug。
+
+    支持:
+      https://app.tokenomics.com/tokenomics/akedo-games
+      https://app.tokenomics.com/tokenomics/akedo-games/unlocks
+      https://tokenomist.ai/akedo-games
+      https://tokenomist.ai/akedo-games/unlock-events
+    """
+    from urllib.parse import urlparse
+    path = (urlparse(url).path or "").strip("/")
+    if not path:
+        return None
+    # 新版 tokenomics.com 的 path 形如 tokenomics/{slug}/...
+    if path.startswith("tokenomics/"):
+        path = path[len("tokenomics/"):]
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return None
+    slug = parts[0]
+    # 若首段是已知子路径（说明 URL 缺少 slug），尝试下一段
+    if slug in ("unlocks", "unlock-events", "revenue", "valuation"):
+        slug = parts[1] if len(parts) > 1 else ""
+    return slug or None
 
 
 def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
@@ -1126,7 +1154,17 @@ def _main() -> int:
             return 1
 
         asset_id = asset["asset_id"]
-        slugs = guess_slugs(asset)
+
+        if args.url:
+            slug = _extract_slug_from_url(args.url)
+            if not slug:
+                print(json.dumps({"status": "error", "message": "无法从网址解析 tokenomics slug"},
+                                 ensure_ascii=False))
+                return 1
+            slugs = [slug]
+            _log(f"使用用户提供的网址 slug: {slug} (来源 {args.url})")
+        else:
+            slugs = guess_slugs(asset)
 
         _log(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
 

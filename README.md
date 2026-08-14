@@ -27,7 +27,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**六大主要数据源：**
+**主要数据源：**
 
 | 数据源 | 用途 | 接口 |
 |--------|------|------|
@@ -37,7 +37,7 @@
 | DexScreener | 无文档入口资产的兜底补充（官网/社交链接） | DexScreener API |
 | Binance Web3 | 无文档入口资产的兜底补充 + 每日投研推荐 | Binance Web3 API |
 | Ethplorer | 链上持仓快照（Top 持有者、持仓集中度） | Ethplorer API |
-| Tokenomist | 代币解锁时间表（无头浏览器爬取） | 网页爬取 |
+| Tokenomist / tokenomics.com | 代币解锁时间表 + 代币经济学四板块（overview / unlocks / revenue / valuation） | 网页爬取（Playwright 无头浏览器） |
 
 ---
 
@@ -80,9 +80,9 @@ Phase B4: AI 噪声清理               ← 进行中
             │
             ▼
 Phase C: 投研分析提取              ← 进行中
-  代币经济学提取（多源聚合 + LLM 结构化）
-  代币解锁测算（Tokenomist 无头浏览器爬取）
-  链上数据分析（持仓集中度 + 大额转账告警）
+  代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
+  代币解锁测算（tokenomics.com 四板块 + 未命中弹网址框 → URL/AI 测算）
+  链上数据分析（区块浏览器 HTML 解析持仓集中度 + 大额转账告警）
   社交热度（待开发）
 ```
 
@@ -94,18 +94,32 @@ Phase C: 投研分析提取              ← 进行中
 
 ### 代币经济学提取
 
-从多源文档中提取结构化代币经济学数据，写入 `biz.asset_tokenomics`。
+从 tokenomics.com 结构化数据或文档中提取代币经济学数据，写入 `biz.asset_tokenomics`。
 
-**数据来源：**
-1. **文档层**：tokenomics / whitepaper / docs 类型的文档（优先）
-2. **网页层**：官网 deep_crawl 子页面（兜底补充）
-3. **API 层**：CMC 市场数据 + CoinGecko supply 数据（参考）
+**优先数据源：tokenomics.com 结构化平台**
 
-**提取流程：**
+命中后直接使用平台结构化数据入库，**跳过文档解析与 LLM**，并将四个子板块分别保存：
+
+- **Overview**：TGE 日期、总供应量、分配表、投资者轮次、FAQ
+- **Unlocks**：释放进度、下一次解锁、Cliff 解锁事件列表
+- **Revenue**：协议收入 FAQ、收入报表（原文文本 + 表格）
+- **Valuation**：FDV、P/E 等估值数据（原文文本 + 表格）
+
+**提取流程（三层降级）：**
 ```
-收集文档 → Playwright 抓取纯文本 → 拼接 CMC/CG supply 数据
-    → LLM 提取结构化字段 → 写入 biz.asset_tokenomics
+① tokenomics.com 优先：slug 推断 + 无头浏览器爬取四板块
+   ├─ 命中 → 四板块分别入库（overview/unlocks/revenue/valuation），跳过 LLM
+   └─ 未命中 ↓
+② 前端弹网址输入框：用户提供 tokenomics / 白皮书网址
+   ├─ 有网址 → Playwright 抓取该网址 → LLM 提取结构化字段
+   └─ 无网址 ↓
+③ AI 测算：收集全部文档链接 → LLM 筛选相关链接 → 抓取 → LLM 提取
 ```
+
+**数据来源（AI 测算时）：**
+1. **文档层**：tokenomics / whitepaper / docs 类型的文档
+2. **网页层**：官网 deep_crawl 子页面
+3. **API 层**：CMC 市场数据 + CoinGecko supply 数据（补充总/最大/流通供应）
 
 **提取字段：** total_supply、max_supply、circulating_supply、buy/sell tax、contract_renounced、lp_locked、allocation（分配比例）、burn_info、emission_schedule、governance_info、utility_info 等。
 
@@ -113,20 +127,50 @@ Phase C: 投研分析提取              ← 进行中
 
 ### 代币解锁测算
 
-从 [Tokenomist](https://tokenomist.ai/)（原 TokenUnlocks）用 Playwright 无头浏览器爬取解锁时间表。
+从 [tokenomics.com](https://app.tokenomics.com/)（原 Tokenomist / TokenUnlocks）用 Playwright 无头浏览器爬取解锁时间表。
 
 **为什么不用 API：** Tokenomist API 按次收费，单币投研场景用爬虫更经济。
 
-**爬取内容：**
-- **Overview 页面**：释放进度、市值、FDV、流通率、分配表、下一次解锁
-- **Unlock Events 页面**：Notable Cliff Release Events 列表（日期、解锁价值、释放比例、分配类别数、状态）
+**爬取内容（四板块）：**
+- **Overview 页面**：TGE 日期、总供应、释放进度、市值、FDV、流通率、分配表、投资者轮次、FAQ
+- **Unlock Events 页面**：Cliff 解锁事件列表（日期、解锁价值、释放比例、分配类别数、状态）
+- **Revenue 页面**：协议收入 FAQ + 收入报表
+- **Valuation 页面**：FDV、P/E 等估值数据
+
+**查询流程（缓存优先 + 三层降级）：**
+```
+① 缓存优先：命中 biz.asset_token_unlocks 缓存则秒级返回
+② tokenomics.com 爬取：slug 推断（CG ID → symbol/name → 搜索兜底）
+   ├─ 命中 → 四板块分别入库
+   └─ 未命中 ↓
+③ 前端弹网址输入框：用户提供 tokenomics 网址
+   ├─ 有网址 → 提取 slug 重爬 tokenomics.com，仍失败则回退 AI
+   └─ 无网址 ↓
+④ AI 测算：基于代币经济学数据 + 当前价格/市值/FDV 估算解锁时间表
+   （价格/市值/FDV 缺失时直接报错，不调用 AI）
+```
 
 **数据表：** `biz.asset_token_unlocks`（按 asset_id 唯一）
 
 **注意：**
 - 自动关闭 CLI 广告弹窗（Dismiss / Escape）
-- slug 推断优先使用 CoinGecko ID，兜底 symbol/name
+- slug 推断优先使用 CoinGecko ID，兜底 symbol/name；搜索 API 被 Cloudflare 拦截时改用无头浏览器首页搜索
 - 免费版只能看到 Cliff 大额解锁事件，逐日解锁数据需要 Pro
+- AI 测算结果带 methodology（数据来源/关键假设/计算步骤/置信度）和 input_snapshot 供核验
+
+### 解锁追踪列表（Watchlist）
+
+手动将代币加入解锁追踪列表，后台定期监控价格跌幅与解锁到期，触发邮件提醒。
+
+**功能：**
+- **加入追踪**：记录加入时价格（entry_price），可设置目标解锁日期、解锁占比、做空计划备注
+- **列表展示**：跌幅（相对 entry_price）、到期天数、临近（≤14 天）/逾期标记
+- **后台监控**：`phase_watchlist_monitor.py` 定期检查，触发两类提醒：
+  1. 解锁到期提醒：target_unlock_date 距今 ≤ `UNLOCK_ALERT_DAYS`（默认 14 天）且未提醒过
+  2. 空头趋势提醒：最新价相对 entry_price 跌幅 ≤ `-TREND_DROP_PCT%`（默认 -15%）且未提醒过
+- **邮件通知**：SMTP 配置（SMTP_HOST/PORT/USER/PASS/TO/FROM）
+
+**数据表：** `biz.unlock_watchlist`（按 asset_id 唯一）
 
 ### 链上数据分析
 
@@ -136,9 +180,9 @@ Phase C: 投研分析提取              ← 进行中
 |------|------|---------|--------|------|
 | 快照层 | 持仓集中度 / Holder 数 | 每日单次全量 | `biz.onchain_holder_snapshot` | 运行中 |
 | 告警层 | 大额转入交易所 | 后台自动循环 | `biz.onchain_transfer_log` | 已隐藏（大部分链无 API Key） |
-| 明细层 | 持仓 + 大额转账明细 | 投研按需查询 | — | 可用 |
+| 明细层 | 持仓 + 大额转账明细 | 投研按需查询 | `biz.asset_token_holders` / `onchain_transfer_log` | 可用 |
 
-**按需查询**：在投研分析面板点击"拉取链上数据"，先查当日缓存，缓存未命中则实时从 Etherscan 拉取。
+**持仓分布数据来源：** 优先使用区块浏览器 HTML 解析（BSCScan/Etherscan 等 BeautifulSoup 抓取），Base 链优先 Blockscout 免费 REST API；不依赖 Etherscan API（BSCScan 已无免费 API）。
 
 ---
 
@@ -169,9 +213,9 @@ Phase C: 投研分析提取              ← 进行中
 - **资料面板**：文档链接列表（按来源分类，标注入库来源）
 - **一键复制全部链接** / **NotebookLM 精选**
 - **投研分析面板**：
-  - 💰 代币经济学提取（多源 + LLM 结构化）
-  - 🔓 代币解锁测算（Tokenomist 爬取）
-  - 📊 链上数据分析（持仓 + 大额转账）
+  - 💰 代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
+  - 🔓 代币解锁测算（tokenomics.com 四板块，未命中弹网址框 → URL/AI 测算）
+  - 📊 链上数据分析（持仓集中度 + 大额转账）
   - 📱 社交热度（待开发）
 - **单资产重新爬取**：B2→B3→B2 循环最多 6 轮，深度覆盖子页面
 - **手动添加官网链接** / **创建新资产**
@@ -184,7 +228,8 @@ Phase C: 投研分析提取              ← 进行中
 |------|------|------|------|
 | 数据源采集 | CG 新增币种入库 | CG 独有币种补充到 core.asset（先于拉取详情） | 可见 |
 | | CG 拉取币种详情（自动循环） | CoinGecko coin_info 拉取 | 可见 |
-| | CMC 拉取币种详情 | CoinMarketCap asset_info 拉取 | 可见 |
+| | CMC 拉取全量币种列表 | CMC listing/map 全量币种列表，写入 src_cmc.cmc_asset_map（CMC 后续步骤前置） | 可见 |
+| | CMC 拉取币种详情 | CoinMarketCap asset_info 拉取（urls/描述/标签） | 可见 |
 | | CMC 资产全量入库（自动循环） | 从 src_cmc 全量写入 core.asset，每批 500 | 可见 |
 | | DL 拉取协议列表 | DefiLlama 全量协议列表拉取 | 可见 |
 | | CG 补充文档入口（自动循环） | 从 coin_info links 提取文档链接 | 可见 |
@@ -194,7 +239,9 @@ Phase C: 投研分析提取              ← 进行中
 | | B3 SPA 无头浏览器爬取（自动循环） | Playwright 渲染 JS 页面，提取 SPA 网站链接 | 可见 |
 | 文档采集 | B2 深度文档发现（自动循环） | 从官网 HTML 抓取嵌入的 PDF/白皮书链接 | 可见 |
 | AI 筛选 | B4 AI 噪声清理（按资产·自动循环） | AI 按域名粒度批量判断噪声 | 可见 |
+| 投研分析 | C 代币经济学批量提取（自动循环） | 批量提取所有资产 tokenomics 数据（每批10个，无候选自动停止） | 可见 |
 | 链上数据 | 链上持仓快照采集（每日单次） | 拉取 Top 持有者，计算持仓集中度 | 可见 |
+| | 持仓分布爬取（区块浏览器 HTML） | 从 BSCScan/Etherscan 网页解析持仓分布（集中度/Top50/CEX标签），无需 API Key | 可见 |
 | 诊断 | 噪声诊断报告 | 今日新增文档链接的噪声情况 | 可见 |
 | | 数据链路诊断 | 全链路健康度检查 | 可见 |
 | | 高条目资产污染溯源 | 分析文档链接 >500 的代币污染链路 | 可见 |
@@ -416,6 +463,9 @@ docker run -p 5000:5000 -e DATABASE_URL=... crypto-workbench
 - 线程池 `shutdown(wait=False)` 避免死锁
 - 写入失败 `conn.rollback()` 重置事务，避免后续 SQL 被拒绝
 - `discovered_from` 字段限制 VARCHAR(64)，URL 前缀需截断适配
+- 单币按需提取（代币经济学/解锁）始终加 `--force` 覆盖已有数据，避免「已有数据」提前 return 导致无结果
+- 代币经济学/解锁未命中 tokenomics.com 时，前端先弹网址输入框，用户未提供网址才走 AI 测算
+- AI 测算解锁数据要求价格/市值/FDV 齐全，任一缺失直接报错、不调用 AI
 
 ---
 

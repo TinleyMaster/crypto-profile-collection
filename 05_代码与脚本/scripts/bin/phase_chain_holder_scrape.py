@@ -48,6 +48,12 @@ EXPLORER_URLS = {
     "monad": "https://monadscan.com",
 }
 
+# Blockscout 免费 REST API（JSON 接口，无 Cloudflare 拦截），用于避开
+# basescan/etherscan 系对 requests 的 403 反爬。key 为链简称。
+BLOCKSCOUT_BASE = {
+    "base": "https://base.blockscout.com",
+}
+
 # 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称
 CHAIN_ALIASES = {
     "ethereum": "eth",
@@ -588,6 +594,142 @@ def _scrape_holders_binplorer(chain: str, contract_address: str,
     }
 
 
+def _blockscout_get_json(url: str, retries: int = 4) -> dict | None:
+    """请求 Blockscout REST API，返回 JSON dict（失败返回 None）。
+
+    本地网络访问 blockscout 偶发 ConnectionResetError(10054)，需重试 + 递增间隔。
+    """
+    headers = dict(HEADERS)
+    headers["Accept"] = "application/json"
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    print(f"  [WARN] Blockscout API 请求失败（重试 {retries} 次）: {last_err}")
+    return None
+
+
+def _scrape_holders_blockscout(chain: str, contract_address: str,
+                               max_holders: int) -> dict | None:
+    """用 Blockscout 免费 REST API 获取持仓分布（base 等 EVM 链）。
+
+    比 basescan HTML 更稳定（JSON 接口，无 Cloudflare 403）：
+    - GET /api/v2/tokens/{addr} → name / decimals / total_supply / holders_count
+    - GET /api/v2/tokens/{addr}/holders → 持币地址列表（value 为 raw 余额）
+    据此计算 Top 5/10/25/50/100 集中度。
+    """
+    base = BLOCKSCOUT_BASE.get(chain)
+    if not base:
+        return None
+
+    info = _blockscout_get_json(f"{base}/api/v2/tokens/{contract_address}")
+    if not info:
+        print("  [WARN] Blockscout getTokenInfo 无数据")
+        return None
+
+    try:
+        decimals = int(info.get("decimals") or 18)
+    except (ValueError, TypeError):
+        decimals = 18
+    total_supply = info.get("total_supply")  # 字符串 wei
+    try:
+        total_holders = int(info.get("holders_count") or 0)
+    except (ValueError, TypeError):
+        total_holders = 0
+
+    # 分页拉取持仓地址，至少覆盖 max_holders 和 100 条（用于 Top100 集中度）
+    fetch_limit = max(max_holders, 100)
+    holders: list[dict] = []
+    next_params: dict | None = None
+    while len(holders) < fetch_limit:
+        url = f"{base}/api/v2/tokens/{contract_address}/holders"
+        if next_params:
+            from urllib.parse import urlencode
+            url += "?" + urlencode(next_params)
+        page = _blockscout_get_json(url)
+        if not page:
+            break
+        items = page.get("items") or []
+        for it in items:
+            addr_obj = it.get("address") or {}
+            addr = addr_obj.get("hash", "")
+            value = it.get("value")
+            # Blockscout 标签在 public_tags / private_tags 里（不是 metadata.tags）
+            tags = []
+            for key in ("public_tags", "private_tags"):
+                tags.extend(addr_obj.get(key) or [])
+            label = ""
+            for t in tags:
+                name = t.get("display_name") or t.get("label") or t.get("name") or ""
+                tt = (t.get("tag_type") or "").lower()
+                if not name:
+                    continue
+                if "exchange" in tt or "cex" in tt or "dex" in tt:
+                    label = name
+                    break
+                if not label:
+                    label = name
+            holders.append({
+                "address": addr,
+                "value": value,
+                "label": label,
+            })
+        next_params = page.get("next_page_params")
+        if not next_params:
+            break
+
+    def _raw_to_human(raw) -> str:
+        try:
+            return f"{int(raw) / (10 ** decimals):.4f}"
+        except (ValueError, TypeError):
+            return str(raw)
+
+    def _pct(raw) -> float:
+        try:
+            if total_supply and int(total_supply) > 0:
+                return round(int(raw) / int(total_supply) * 100, 4)
+        except (ValueError, TypeError):
+            pass
+        return 0.0
+
+    top_holders_json = []
+    for i, h in enumerate(holders, start=1):
+        top_holders_json.append({
+            "rank": i,
+            "address": h["address"],
+            "label": h["label"],
+            "amount": _raw_to_human(h["value"]),
+            "pct": _pct(h["value"]),
+        })
+
+    def _cum_pct(n: int) -> float | None:
+        if len(top_holders_json) < n:
+            return None
+        return round(sum(h["pct"] for h in top_holders_json[:n]), 2)
+
+    return {
+        "chain": chain,
+        "contract_address": contract_address.lower(),
+        "total_holders": total_holders,
+        "top_holders_json": top_holders_json,
+        "tier_distribution_json": [],
+        "top_5_pct": _cum_pct(5),
+        "top_10_pct": _cum_pct(10),
+        "top_25_pct": _cum_pct(25),
+        "top_50_pct": _cum_pct(50),
+        "top_100_pct": _cum_pct(100),
+        "scraped_at": None,
+        "total_supply": total_supply,
+        "source": "blockscout_api",
+    }
+
+
 def _print_holder_summary(result: dict) -> None:
     """打印持仓采集结果摘要。"""
     print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
@@ -641,6 +783,17 @@ def scrape_holders(explorer_url: str, contract_address: str,
             _print_holder_summary(api_result)
             return api_result
         print("  [WARN] Binplorer API 未获取到数据，回退区块浏览器 HTML")
+
+    # Step 0.5: base 等 EVM 链优先 Blockscout API（JSON 接口，避免 basescan Cloudflare 403）
+    if chain in BLOCKSCOUT_BASE:
+        print("  [INFO] 尝试 Blockscout API 获取持仓...")
+        api_result = _scrape_holders_blockscout(chain, contract_address, max_holders)
+        if api_result and api_result["top_holders_json"]:
+            api_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Blockscout API ({chain})")
+            _print_holder_summary(api_result)
+            return api_result
+        print("  [WARN] Blockscout API 未获取到数据，回退区块浏览器 HTML")
 
     # Step 1: 主页面 → total_holders（及 BSCScan 直接渲染的持币表）
     html = _fetch_html(token_url)

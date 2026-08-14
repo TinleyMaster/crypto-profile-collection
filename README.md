@@ -83,7 +83,7 @@ Phase C: 投研分析提取              ← 进行中
   代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
   代币解锁测算（tokenomics.com 四板块 + 未命中弹网址框 → URL/AI 测算）
   链上数据分析（区块浏览器 HTML 解析持仓集中度 + 大额转账告警）
-  社交热度（待开发）
+  社交热度（单币按需：社区规模 + 实时舆情 + 趋势新闻 + 市场热度）
 ```
 
 ---
@@ -184,6 +184,23 @@ Phase C: 投研分析提取              ← 进行中
 
 **持仓分布数据来源：** 优先使用区块浏览器 HTML 解析（BSCScan/Etherscan 等 BeautifulSoup 抓取），Base 链优先 Blockscout 免费 REST API；不依赖 Etherscan API（BSCScan 已无免费 API）。
 
+### 社交热度
+
+单币按需拉取，四维度加权综合评分（0-100），结果写入 `biz.asset_social_heat` 缓存。
+
+| 维度 | 数据来源（免费公开 API） | 指标 |
+|------|------------------------|------|
+| 社区规模 | CoinGecko `/coins/{id}`（community_data） | Twitter 粉丝、Reddit 订阅、Telegram 成员、GitHub Stars |
+| 实时舆情 | Reddit 搜索 JSON + LLM 情绪分析 | 情绪正负、情绪分、看涨/看跌占比、热点主题 |
+| 趋势新闻 | CoinGecko `/search/trending` + `/coins/{id}/status_updates` | 热搜位次、项目动态 |
+| 市场热度 | CoinGecko `/coins/{id}`（market_data） | 24h 成交、涨跌幅、市值排名 |
+
+**综合评分：** 社区规模 25% + 舆情情绪 30% + 趋势新闻 25% + 市场热度 20%，缺失维度自动剔除并重新归一化；输出 `confidence`（high/medium/low，按可用维度数）。
+
+**容错：** 各维度独立 try/except，单源失败不阻断整体；无 CoinGecko 映射且各源均无数据时返回 `not_found`；LLM 情绪仅在拿到 Reddit/项目动态文本时调用。本期不含 X/Twitter 抓取（免费 API 已停用，爬取脆弱）。
+
+**数据表：** `biz.asset_social_heat`（按 asset_id 唯一），含 `community_json` / `sentiment_json` / `trend_json` / `market_json` / `score_detail_json` / `methodology_json` / `input_snapshot_json`。
+
 ---
 
 ## 每日投研推荐
@@ -216,7 +233,7 @@ Phase C: 投研分析提取              ← 进行中
   - 💰 代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
   - 🔓 代币解锁测算（tokenomics.com 四板块，未命中弹网址框 → URL/AI 测算）
   - 📊 链上数据分析（持仓集中度 + 大额转账）
-  - 📱 社交热度（待开发）
+  - 📱 社交热度（社区规模 + 舆情 + 趋势 + 市场热度，综合评分）
 - **单资产重新爬取**：B2→B3→B2 循环最多 6 轮，深度覆盖子页面
 - **手动添加官网链接** / **创建新资产**
 
@@ -361,7 +378,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理
-│   │   │   ├── phase_c_*.py    # 代币经济学提取
+│   │   │   ├── phase_c_*.py    # 代币经济学提取 + 社交热度
 │   │   │   ├── phase_chain_*.py # 链上数据 + 解锁数据
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选

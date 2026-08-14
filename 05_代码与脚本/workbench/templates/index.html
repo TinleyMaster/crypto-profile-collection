@@ -1714,10 +1714,16 @@
                 <div class="research-card" id="rc-social">
                     <h4>社交热度</h4>
                     <div class="status-row">
-                        <span class="status-indicator missing"></span>
-                        <span class="status-text missing">待开发</span>
+                        <span class="status-indicator" id="soc-indicator"></span>
+                        <span class="status-text" id="soc-status">点击按钮按需拉取</span>
                     </div>
-                    <button class="run-btn" disabled>即将上线</button>
+                    <button class="run-btn" id="soc-run-btn" onclick="querySocialHeat(false)">
+                        拉取社交热度
+                    </button>
+                    <a href="javascript:querySocialHeat(true)"
+                        style="font-size:11px;color:#9ca3af;margin-left:8px;display:none" id="soc-force-link">强制刷新</a>
+                    <div id="soc-detail" style="display:none"></div>
+                    <div id="soc-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px"></div>
                 </div>
             </div>
         </div>
@@ -2253,6 +2259,19 @@
             } catch (e) {
                 setOnchainMissing();
             }
+
+            // 社交热度：加载缓存
+            try {
+                const res = await fetch(`/api/social/${assetId}`);
+                const data = await res.json();
+                if (data.ok && data.data) {
+                    renderSocial(data.data);
+                } else {
+                    setSocialMissing();
+                }
+            } catch (e) {
+                setSocialMissing();
+            }
         }
 
         function setTokenomicsMissing () {
@@ -2276,6 +2295,188 @@
             document.getElementById('onchain-run-btn').textContent = '拉取链上数据';
             document.getElementById('onchain-run-btn').disabled = false;
             document.getElementById('onchain-detail').style.display = 'none';
+        }
+
+        function setSocialMissing () {
+            document.getElementById('soc-indicator').className = 'status-indicator missing';
+            document.getElementById('soc-status').textContent = '暂无社交热度数据，点击按钮拉取';
+            document.getElementById('soc-status').className = 'status-text missing';
+            document.getElementById('soc-run-btn').textContent = '拉取社交热度';
+            document.getElementById('soc-run-btn').disabled = false;
+            document.getElementById('soc-detail').style.display = 'none';
+            document.getElementById('soc-force-link').style.display = 'none';
+            document.getElementById('soc-error').style.display = 'none';
+        }
+
+        function renderSocial (d) {
+            function fmtNum (v) {
+                if (v == null) return '?';
+                const n = Number(v);
+                if (isNaN(n)) return String(v);
+                if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+                if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+                if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+                return n.toLocaleString();
+            }
+
+            const indicator = document.getElementById('soc-indicator');
+            const statusEl = document.getElementById('soc-status');
+            const btn = document.getElementById('soc-run-btn');
+            const detail = document.getElementById('soc-detail');
+            const forceLink = document.getElementById('soc-force-link');
+            const errEl = document.getElementById('soc-error');
+
+            const score = d.score;
+            const conf = d.confidence || '';
+            const confColor = conf.startsWith('high') ? '#059669' : conf.startsWith('medium') ? '#d97706' : '#dc2626';
+            const cacheLabel = d.from_cache ? '（缓存 ' + (d.fetched_at || '').slice(0, 16) + '）' : '';
+            const noteSuffix = d.note ? ' [' + d.note + ']' : '';
+
+            indicator.className = 'status-indicator success';
+            statusEl.textContent = '综合热度 ' + (score != null ? score : '?') + ' / 100 — ' + (conf || '?') + cacheLabel + noteSuffix;
+            statusEl.className = 'status-text';
+            btn.textContent = '重新拉取';
+            btn.disabled = false;
+            btn.classList.remove('running');
+            forceLink.style.display = 'inline';
+            errEl.style.display = 'none';
+
+            let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
+
+            if (score != null) {
+                html += '<div style="font-size:20px;font-weight:700;color:#111827">' + score +
+                    '<span style="font-size:12px;color:#6b7280"> / 100</span>' +
+                    ' <span style="font-size:12px;color:' + confColor + '">' + escapeHtml(conf) + '</span></div>';
+            }
+
+            const sd = d.score_detail || {};
+            const dims = [['社区规模', sd.community], ['舆情情绪', sd.sentiment], ['趋势新闻', sd.trend], ['市场热度', sd.market]];
+            for (const [name, val] of dims) {
+                const v = val != null ? val : '缺失';
+                const barW = val != null ? Math.round(val) : 0;
+                html += '<div style="margin:2px 0">' + name + ': ' + v;
+                if (val != null) {
+                    html += ' <span style="display:inline-block;width:100px;height:6px;background:#e5e7eb;border-radius:3px;vertical-align:middle">' +
+                        '<span style="display:inline-block;width:' + barW + 'px;height:6px;background:#7c3aed;border-radius:3px"></span></span>';
+                }
+                html += '</div>';
+            }
+
+            const cm = d.community || {};
+            if (Object.keys(cm).length) {
+                html += '<br><strong>── 社区规模 ──</strong><br>';
+                if (cm.twitter_followers != null) html += 'Twitter: ' + fmtNum(cm.twitter_followers) + '<br>';
+                if (cm.reddit_subscribers != null) html += 'Reddit: ' + fmtNum(cm.reddit_subscribers) + '<br>';
+                if (cm.telegram_channel_user_count != null) html += 'Telegram: ' + fmtNum(cm.telegram_channel_user_count) + '<br>';
+                if (cm.github_stars != null) html += 'GitHub Stars: ' + fmtNum(cm.github_stars) + '<br>';
+            }
+
+            const st = d.sentiment || {};
+            if (st && Object.keys(st).length) {
+                html += '<br><strong>── 实时舆情 ──</strong><br>';
+                if (st.sentiment) html += '情绪: ' + escapeHtml(st.sentiment) + '<br>';
+                if (st.sentiment_score != null) html += '情绪分: ' + st.sentiment_score + '<br>';
+                if (st.bullish_ratio != null || st.bearish_ratio != null) {
+                    html += '看涨/看跌: ' + (st.bullish_ratio != null ? st.bullish_ratio + '%' : '?') + ' / ' +
+                        (st.bearish_ratio != null ? st.bearish_ratio + '%' : '?') + '<br>';
+                }
+                if (st.key_topics && st.key_topics.length) html += '热点主题: ' + st.key_topics.map(t => escapeHtml(t)).join('、') + '<br>';
+                if (st.summary) html += '摘要: ' + escapeHtml(st.summary) + '<br>';
+            }
+
+            const tr = d.trend || {};
+            const updates = tr.updates || [];
+            if (tr.trending_rank != null || updates.length) {
+                html += '<br><strong>── 趋势新闻 ──</strong><br>';
+                if (tr.trending_rank != null) html += '全球热搜榜: 第 ' + tr.trending_rank + ' 名<br>';
+                if (updates.length) {
+                    html += '项目动态 (' + updates.length + '):<br>';
+                    updates.slice(0, 5).forEach(u => {
+                        html += '&nbsp;&nbsp;• ' + escapeHtml((u.text || '').slice(0, 80)) + '<br>';
+                    });
+                }
+            }
+
+            const mk = d.market || {};
+            if (Object.keys(mk).length) {
+                html += '<br><strong>── 市场热度 ──</strong><br>';
+                if (mk.price_usd != null) html += '价格: $' + Number(mk.price_usd).toLocaleString() + '<br>';
+                if (mk.market_cap_usd != null) html += '市值: $' + fmtNum(mk.market_cap_usd) + '<br>';
+                if (mk.total_volume_usd != null) html += '24h成交: $' + fmtNum(mk.total_volume_usd) + '<br>';
+                if (mk.price_change_24h != null) html += '24h涨跌: ' + (mk.price_change_24h > 0 ? '+' : '') + mk.price_change_24h + '%<br>';
+                if (mk.market_cap_rank != null) html += '市值排名: #' + mk.market_cap_rank + '<br>';
+            }
+
+            const m = d.methodology;
+            if (m && Object.keys(m).length) {
+                html += '<br><details><summary style="cursor:pointer;color:#6b7280;font-size:11px">📋 测算依据</summary>';
+                html += '<div style="font-size:11px;color:#6b7280;margin-top:4px;padding:4px 8px;background:#f9fafb;border-radius:4px;max-height:300px;overflow:auto">';
+                if (m.confidence) html += '<strong>置信度:</strong> ' + escapeHtml(m.confidence) + '<br>';
+                if (m.data_sources && m.data_sources.length) html += '<strong>数据来源:</strong> ' + m.data_sources.map(s => escapeHtml(s)).join(', ') + '<br>';
+                if (m.calculation_steps && m.calculation_steps.length) {
+                    html += '<br><strong>计算过程:</strong><br>';
+                    m.calculation_steps.forEach(s => { html += '&nbsp;&nbsp;' + escapeHtml(s) + '<br>'; });
+                }
+                html += '</div></details>';
+            }
+
+            html += '</div>';
+            detail.innerHTML = html;
+            detail.style.display = 'block';
+        }
+
+        async function querySocialHeat (forceRefresh) {
+            if (!selectedAssetId) return;
+            const btn = document.getElementById('soc-run-btn');
+            const forceLink = document.getElementById('soc-force-link');
+            const errEl = document.getElementById('soc-error');
+            const origText = btn.textContent;
+
+            btn.textContent = forceRefresh ? '⏳ 强制刷新中...' : '⏳ 拉取中...';
+            btn.disabled = true;
+            errEl.style.display = 'none';
+            try {
+                await runSocialTask(
+                    '/api/social/query/' + selectedAssetId,
+                    { force: forceRefresh ? 1 : 0 },
+                    '拉取超时（4分钟），请稍后重试'
+                );
+            } catch (e) {
+                errEl.textContent = '拉取失败: ' + e.message;
+                errEl.style.display = 'block';
+                document.getElementById('soc-status').textContent = '拉取失败: ' + e.message.slice(0, 60);
+                document.getElementById('soc-status').className = 'status-text missing';
+                btn.textContent = origText;
+                forceLink.style.display = 'inline';
+            }
+            setTimeout(() => { btn.classList.remove('running'); btn.disabled = false; }, 3000);
+        }
+
+        async function runSocialTask (startUrl, body, timeoutMsg) {
+            const startRes = await fetch(startUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const startData = await startRes.json();
+            if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+            selectedTaskId = startData.task_id;
+            loadTaskLog(startData.task_id);
+            if (logPanelCollapsed) toggleLogPanel();
+            loadTasks();
+            await waitForTask(startData.task_id, 240000);
+
+            const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+            const resultData = await resultRes.json();
+            if (resultData.pending) throw new Error(timeoutMsg);
+
+            const result = resultData.result;
+            if (resultData.ok && result && result.ok) {
+                renderSocial(result.data);
+                return;
+            }
+            throw new Error((result && result.error) || resultData.error || '未知错误');
         }
 
         function renderOnchainSnapshot (d) {

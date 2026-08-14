@@ -1068,6 +1068,33 @@ def api_unlocks_ai_estimate(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/social/<int:asset_id>")
+def api_social_get(asset_id: int):
+    """读取已缓存的社交热度数据（只读，不触发拉取）。"""
+    try:
+        data = _get_db_stats().get_asset_social_heat(asset_id)
+        if data:
+            return jsonify({"ok": True, "data": data})
+        return jsonify({"ok": False, "error": "无缓存数据"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/social/query/<int:asset_id>", methods=["GET", "POST"])
+def api_social_query(asset_id: int):
+    """按需拉取指定资产的社交热度数据（后台任务 + 实时日志）。"""
+    if request.method == "POST":
+        force = (request.get_json(silent=True) or {}).get("force") == 1
+    else:
+        force = request.args.get("force", "0") == "1"
+
+    def _worker(log):
+        return _get_db_stats().query_social_heat(asset_id, force=force, log=log)
+
+    task_id = task_mgr.submit_func_task(f"社交热度: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/holders/query/<int:asset_id>")
 def api_holders_query(asset_id: int):
     """按需拉取指定资产的持仓分布快照（从区块浏览器爬取）。"""

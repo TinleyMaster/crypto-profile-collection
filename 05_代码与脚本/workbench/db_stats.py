@@ -1649,6 +1649,121 @@ def query_unlocks_ai(asset_id: int, log=None) -> dict:
     return _ai_estimate_unlocks(asset_id, "tokenomist 未收录，用户未提供网址", log=log)
 
 
+def _social_float(v):
+    """将 Postgres NUMERIC/其它类型安全转为 float。"""
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return v
+
+
+def get_asset_social_heat(asset_id: int) -> dict | None:
+    """读取已缓存的社交热度数据（只读，不触发拉取）。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT score, confidence, community_json, sentiment_json,
+                          trend_json, market_json, score_detail_json,
+                          methodology_json, input_snapshot_json, fetched_at
+                   FROM biz.asset_social_heat WHERE asset_id = %s""",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "score": _social_float(row.get("score")),
+        "confidence": row.get("confidence"),
+        "community": row.get("community_json") or {},
+        "sentiment": row.get("sentiment_json") or {},
+        "trend": row.get("trend_json") or {},
+        "market": row.get("market_json") or {},
+        "score_detail": row.get("score_detail_json") or {},
+        "methodology": row.get("methodology_json") or {},
+        "input_snapshot": row.get("input_snapshot_json") or {},
+        "fetched_at": str(row.get("fetched_at", "")),
+    }
+
+
+def query_social_heat(asset_id: int, force: bool = False, log=None) -> dict:
+    """按需拉取社交热度数据（先查缓存，未命中或强制则运行脚本）。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+
+    settings = get_settings(require_database=True)
+
+    # 0. 先查缓存（非 force 模式）
+    if not force:
+        cached = None
+        try:
+            with get_connection(settings.database_url) as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(
+                        """SELECT score, confidence, community_json, sentiment_json,
+                                  trend_json, market_json, score_detail_json,
+                                  methodology_json, input_snapshot_json, fetched_at
+                           FROM biz.asset_social_heat WHERE asset_id = %s""",
+                        (asset_id,),
+                    )
+                    cached = cur.fetchone()
+        except Exception:
+            cached = None
+
+        if cached:
+            _emit("命中缓存，直接返回已缓存的社交热度数据")
+            return {
+                "ok": True,
+                "data": {
+                    "status": "ok",
+                    "score": _social_float(cached.get("score")),
+                    "confidence": cached.get("confidence"),
+                    "community": cached.get("community_json") or {},
+                    "sentiment": cached.get("sentiment_json") or {},
+                    "trend": cached.get("trend_json") or {},
+                    "market": cached.get("market_json") or {},
+                    "score_detail": cached.get("score_detail_json") or {},
+                    "methodology": cached.get("methodology_json") or {},
+                    "input_snapshot": cached.get("input_snapshot_json") or {},
+                    "from_cache": True,
+                    "fetched_at": str(cached.get("fetched_at", "")),
+                },
+            }
+
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_c_social_heat.py")
+    cmd = [sys.executable, "-u", script, "--asset-id", str(asset_id), "--save"]
+
+    _emit("开始拉取社交热度数据（社区规模 + 舆情 + 趋势 + 市场）...")
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 180, log=log)
+
+    if returncode == -1:
+        return {"ok": False, "error": "社交热度拉取超时（180秒），请稍后重试"}
+
+    output = stdout.strip()
+    if returncode != 0:
+        return {"ok": False, "error": (output or f"exit code {returncode}")[-500:]}
+
+    if not output:
+        return {"ok": False, "error": "无输出"}
+
+    try:
+        data = _extract_json_output(output)
+        if data is None:
+            return {"ok": False, "error": (output or "无输出")[-500:]}
+        if data.get("status") == "ok":
+            _emit("社交热度拉取成功")
+            return {"ok": True, "data": data}
+        if data.get("status") == "not_found":
+            return {"ok": False, "error": data.get("message", "未获取到社交热度数据")}
+        return {"ok": False, "error": data.get("message", "失败")}
+    except Exception:
+        return {"ok": False, "error": (output or "无输出")[-500:]}
+
+
 AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根据以下代币经济学数据，估算该代币的解锁时间表。
 
 请返回一个 JSON，格式如下：

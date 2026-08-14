@@ -2241,16 +2241,18 @@
                 setUnlocksMissing();
             }
 
-            // 链上数据状态
+            // 链上数据：加载缓存快照（切币时实时刷新，避免停留在上一代币的数据）
             try {
-                const res = await fetch(`/api/assets/${assetId}/materials`);
+                const res = await fetch(`/api/onchain/holder/${assetId}`);
                 const data = await res.json();
-                if (data.ok) {
-                    const hasContract = data.data.github_activity && data.data.github_activity.length > 0;
-                    setOnchainStatus(hasContract ? 'warning' : 'missing',
-                        hasContract ? '可通过合约地址拉取链上数据' : '暂无合约地址');
+                if (data.ok && data.by_chain && Object.keys(data.by_chain || {}).length > 0) {
+                    renderOnchainSnapshot(data);
+                } else {
+                    setOnchainMissing();
                 }
-            } catch (e) { }
+            } catch (e) {
+                setOnchainMissing();
+            }
         }
 
         function setTokenomicsMissing () {
@@ -2265,6 +2267,52 @@
             document.getElementById('onchain-indicator').className = 'status-indicator ' + cls;
             document.getElementById('onchain-status').textContent = text;
             document.getElementById('onchain-status').className = 'status-text ' + (cls === 'missing' ? 'missing' : '');
+        }
+
+        function setOnchainMissing () {
+            document.getElementById('onchain-indicator').className = 'status-indicator missing';
+            document.getElementById('onchain-status').textContent = '暂无链上数据，点击按钮拉取';
+            document.getElementById('onchain-status').className = 'status-text missing';
+            document.getElementById('onchain-run-btn').textContent = '拉取链上数据';
+            document.getElementById('onchain-run-btn').disabled = false;
+            document.getElementById('onchain-detail').style.display = 'none';
+        }
+
+        function renderOnchainSnapshot (d) {
+            const indicator = document.getElementById('onchain-indicator');
+            const statusEl = document.getElementById('onchain-status');
+            const btn = document.getElementById('onchain-run-btn');
+            const detail = document.getElementById('onchain-detail');
+
+            const byChain = d.by_chain || {};
+            const chains = Object.keys(byChain);
+            if (chains.length === 0) {
+                setOnchainMissing();
+                return;
+            }
+
+            let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
+            html += '<strong>── 持仓集中度（快照）──</strong><br>';
+            for (const chain of chains) {
+                const snap = byChain[chain][0] || {};
+                html += '[' + chain.toUpperCase() + '] ';
+                html += 'Top10: ' + (snap.top10_concentration != null ? snap.top10_concentration + '%' : '?') + '  ';
+                html += 'Top50: ' + (snap.top50_concentration != null ? snap.top50_concentration + '%' : '?') + '  ';
+                html += 'Top100: ' + (snap.top100_concentration != null ? snap.top100_concentration + '%' : '?') + '<br>';
+                if (snap.total_holders != null) html += '&nbsp;&nbsp;持币地址: ' + Number(snap.total_holders).toLocaleString() + '<br>';
+                if (snap.exchange_wallet_pct != null) html += '&nbsp;&nbsp;交易所占比: ' + snap.exchange_wallet_pct + '%<br>';
+                if (snap.holder_change_7d != null) html += '&nbsp;&nbsp;7日地址变化: ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d + '<br>';
+                if (snap.fetched_at) html += '&nbsp;&nbsp;快照时间: ' + snap.fetched_at.slice(0, 16) + '<br>';
+            }
+            html += '</div>';
+
+            detail.innerHTML = html;
+            detail.style.display = 'block';
+            indicator.className = 'status-indicator success';
+            statusEl.textContent = '已加载快照 (' + (d.symbol || '') + ')';
+            statusEl.className = 'status-text';
+            btn.textContent = '重新拉取链上数据';
+            btn.disabled = false;
         }
 
         function setUnlocksMissing () {

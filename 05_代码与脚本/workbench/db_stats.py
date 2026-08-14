@@ -1456,7 +1456,8 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 3. methodology 必须详细记录你是如何得出每个数字的，包括假设依据和计算过程
 4. overview 中 released_pct 估算当前已流通比例
 5. 所有解锁日期必须以给定的 TGE/上线日期为基准计算（TGE + cliff + vesting）；若 TGE/上线日期未知，必须在 methodology.key_assumptions.tge_date 中说明推测依据，并将 confidence 降为 low
-6. 代币经济学数据:"""
+6. 所有解锁事件（unlock_events 及 overview.next_unlock_date）必须严格晚于"当前日期"；由 TGE + cliff + vesting 推导出的解锁日若已早于当前日期，应跳到之后的下一个解锁日，禁止输出历史解锁事件
+7. 代币经济学数据:"""
 
 
 def _fetch_cg_price(asset_id: int, settings) -> dict:
@@ -1578,6 +1579,7 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
 
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     """AI 根据代币经济学数据测算解锁信息，保存并返回。"""
+    import datetime
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
@@ -1633,6 +1635,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
         tge_date_str = "未知"
 
     tokenomics_text = f"""
+    当前日期: {datetime.date.today().isoformat()}
     代币: {asset['canonical_name']} ({asset['canonical_symbol']})
     TGE/上线日期: {tge_date_str}
     总供应: {tkn.get('total_supply')}

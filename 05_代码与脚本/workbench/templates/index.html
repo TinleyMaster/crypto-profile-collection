@@ -2458,6 +2458,24 @@
             detail.style.display = 'block';
         }
 
+        function renderTokenomicsTables (tables) {
+            if (!tables || tables.length === 0) return '';
+            let h = '';
+            tables.forEach((table) => {
+                h += '<table style="width:100%;border-collapse:collapse;margin:6px 0;font-size:11px">';
+                table.forEach((row, ri) => {
+                    const tag = ri === 0 ? 'th' : 'td';
+                    h += '<tr>';
+                    row.forEach(cell => {
+                        h += '<' + tag + ' style="border:1px solid #2a2f3a;padding:3px 6px;text-align:left;color:#e6e8eb">' + escapeHtml(cell) + '</' + tag + '>';
+                    });
+                    h += '</tr>';
+                });
+                h += '</table>';
+            });
+            return h;
+        }
+
         function renderTokenomics (t) {
             const indicator = document.getElementById('tkm-indicator');
             const status = document.getElementById('tkm-status');
@@ -2533,6 +2551,40 @@
                     </div>`;
                 });
                 html += '</div>';
+            }
+
+            // 协议收入（revenue）子板块
+            const revenue = t.revenue || {};
+            const revFaq = revenue.faq || [];
+            const revTables = revenue.tables || [];
+            if (revFaq.length > 0 || revTables.length > 0 || (revenue.text && revenue.text.trim())) {
+                html += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;font-weight:600;color:#e6e8eb">💰 协议收入 (revenue)</summary>';
+                html += '<div style="margin-top:6px;font-size:12px;line-height:1.6">';
+                revFaq.forEach(f => {
+                    html += '<div style="margin:6px 0"><strong>' + escapeHtml(f.q) + '</strong><br>' + escapeHtml(f.a) + '</div>';
+                });
+                html += renderTokenomicsTables(revTables);
+                if (revenue.text && revenue.text.trim()) {
+                    html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#9ca3af">原文文本</summary><div style="max-height:200px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:4px">' + escapeHtml(revenue.text) + '</div></details>';
+                }
+                html += '</div></details>';
+            }
+
+            // 估值（valuation）子板块
+            const valuation = t.valuation || {};
+            const valFaq = valuation.faq || [];
+            const valTables = valuation.tables || [];
+            if (valFaq.length > 0 || valTables.length > 0 || (valuation.text && valuation.text.trim())) {
+                html += '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;font-weight:600;color:#e6e8eb">📈 代币估值 (valuation)</summary>';
+                html += '<div style="margin-top:6px;font-size:12px;line-height:1.6">';
+                valFaq.forEach(f => {
+                    html += '<div style="margin:6px 0"><strong>' + escapeHtml(f.q) + '</strong><br>' + escapeHtml(f.a) + '</div>';
+                });
+                html += renderTokenomicsTables(valTables);
+                if (valuation.text && valuation.text.trim()) {
+                    html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#9ca3af">原文文本</summary><div style="max-height:200px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:4px">' + escapeHtml(valuation.text) + '</div></details>';
+                }
+                html += '</div></details>';
             }
 
             // 代币经济学相关图片（分配图/排放曲线等，提取时下载保存）

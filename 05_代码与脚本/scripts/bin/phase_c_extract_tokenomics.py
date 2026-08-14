@@ -654,6 +654,109 @@ def extract_with_llm(llm: LLMClient, asset: dict, doc_contents: list[dict],
 
 # ── 入库 ──────────────────────────────────────────────────
 
+def _to_int(s) -> int | None:
+    """把 tokenomist 的供应量字符串转成 int（失败返回 None）。"""
+    if s is None:
+        return None
+    try:
+        return int(float(str(s).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def _tokenomics_from_tokenomist(data: dict) -> dict:
+    """把 tokenomics.com 结构化数据转成 biz.asset_tokenomics 需要的字段。
+
+    命中 tokenomics.com 后直接使用平台结构化数据入库，不再调用 LLM。
+    """
+    ov = data.get("overview") or {}
+    total = _to_int(ov.get("total_amount_str") or ov.get("max_supply_str"))
+    max_supply = _to_int(ov.get("max_supply_str"))
+
+    # allocation: tokenomist 用 name，asset_tokenomics 用 category
+    allocation = [
+        {"category": a.get("name"), "pct": a.get("pct")}
+        for a in (ov.get("allocation") or [])
+        if a.get("name") is not None
+    ]
+
+    # 从 FAQ 提取 emission / vesting / 项目简介 / circulating supply
+    faq = ov.get("faq") or []
+    emission_schedule = None
+    utility_info = None
+    circulating_supply = None
+    for f in faq:
+        q = (f.get("q") or "").lower()
+        a = (f.get("a") or "").strip()
+        if not a:
+            continue
+        if not emission_schedule and ("emission" in q or "vesting" in q):
+            emission_schedule = a
+        if not utility_info and ("what is" in q):
+            utility_info = a
+        if circulating_supply is None and "circulating" in (q + " " + a.lower()):
+            m = re.search(r'([\d.]+)\s*%\s*of\s*total', a, re.IGNORECASE)
+            if m and total:
+                circulating_supply = round(total * float(m.group(1)) / 100.0)
+            else:
+                m2 = re.search(r'([\d,]+(?:\.\d+)?)\s+[A-Z]{2,}\s+is\s+currently\s+circulating', a, re.IGNORECASE)
+                if m2:
+                    circulating_supply = _to_int(m2.group(1))
+
+    tge_date = ov.get("tge_date")
+    if tge_date:
+        parts = [emission_schedule, f"TGE: {tge_date}"] if emission_schedule else [f"TGE: {tge_date}"]
+        emission_schedule = "\n".join(parts)
+
+    return {
+        "total_supply": total,
+        "max_supply": max_supply,
+        "circulating_supply": circulating_supply,  # FAQ 提取，可被 CMC/CG API 覆盖
+        "buy_tax_pct": None,
+        "sell_tax_pct": None,
+        "tax_info": None,
+        "contract_renounced": None,
+        "lp_locked": None,
+        "lp_lock_info": None,
+        "allocation": allocation,
+        "burn_info": None,
+        "emission_schedule": emission_schedule,
+        "inflation_info": None,
+        "governance_info": None,
+        "utility_info": utility_info,
+        "confidence": 1.0,
+        "notes": f"数据来自 tokenomics.com 结构化平台 ({data.get('source_url', '')})，未使用 LLM 提取",
+        "extracted_by": "tokenomist",
+        "raw_text": json.dumps(data, ensure_ascii=False, default=str),
+    }
+
+
+def save_tokenomist_full(conn, asset_id: int, data: dict,
+                         api_data: list[dict] | None = None,
+                         dry_run: bool = False) -> None:
+    """命中 tokenomics.com 后，把四个子板块分别入库，并写入综合 tokenomics。
+
+    - biz.asset_token_unlocks: overview / unlock_events / revenue / valuation（分别保存）
+    - biz.asset_tokenomics: 由 overview 结构化字段构造（extracted_by=tokenomist）
+    """
+    from phase_chain_token_unlocks import ensure_table, save_to_db
+
+    ensure_table(conn)
+    save_to_db(conn, asset_id, data)
+
+    tokenomics = _tokenomics_from_tokenomist(data)
+
+    # 合并 API supply（CG/CMC 精确数值覆盖，circulating 尤其需要）
+    for api_entry in (api_data or []):
+        for key in ("total_supply", "max_supply", "circulating_supply"):
+            val = api_entry.get(key)
+            if val is not None:
+                tokenomics[key] = val
+
+    source_urls = [data["source_url"]] if data.get("source_url") else []
+    save_tokenomics(conn, asset_id, source_urls, tokenomics, dry_run=dry_run)
+
+
 def save_tokenomics(conn, asset_id: int, source_urls: list[str],
                     data: dict, dry_run: bool = False) -> None:
     """写入或更新 biz.asset_tokenomics。"""
@@ -719,8 +822,8 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
         "inflation_info": data.get("inflation_info"),
         "governance_info": data.get("governance_info"),
         "utility_info": data.get("utility_info"),
-        "raw_text": json.dumps(data, ensure_ascii=False, default=str),
-        "extracted_by": "llm",
+        "raw_text": data.get("raw_text") or json.dumps(data, ensure_ascii=False, default=str),
+        "extracted_by": data.get("extracted_by", "llm"),
         "confidence": data.get("confidence"),
         "extraction_notes": data.get("notes"),
         "chart_images": json.dumps(data.get("chart_images"), ensure_ascii=False) if data.get("chart_images") else None,
@@ -778,7 +881,34 @@ def main() -> None:
                     print("  已有 tokenomics 数据，跳过（使用 --force 强制覆盖）")
                     return
 
-        # 3. 收集所有链接，AI 筛选
+        # 3. 收集 API supply 数据（CMC/CG，命中 tokenomics.com 时也用于补 circulating）
+        api_data = []
+
+        if not args.no_cmc:
+            cmc = get_cmc_supply(conn, asset["asset_id"])
+            if cmc:
+                api_data.append(cmc)
+                print(f"  CMC supply: {json.dumps({k: v for k, v in cmc.items() if v is not None}, default=str)}")
+
+        if not args.no_cg and asset.get("coingecko_id"):
+            cg = get_cg_supply(asset["coingecko_id"])
+            if cg:
+                api_data.append(cg)
+                print(f"  CG supply: {json.dumps({k: v for k, v in cg.items() if v is not None}, default=str)}")
+
+        # 优先抓取 tokenomics.com 结构化数据（含 overview/unlocks/revenue/valuation）
+        tokenomics_com_data = scrape_tokenomics_com(asset)
+
+        # 命中 tokenomics.com：四个子板块分别入库，跳过文档解析与 LLM
+        if tokenomics_com_data:
+            print("  tokenomics.com 命中，直接使用结构化数据入库（跳过文档解析与 LLM）")
+            save_tokenomist_full(conn, asset["asset_id"], tokenomics_com_data,
+                                 api_data=api_data, dry_run=args.dry_run)
+            if not args.dry_run:
+                print("完成！")
+            return
+
+        # 4. 未命中：收集所有链接，AI 筛选 + LLM 提取
         all_links = collect_all_links(conn, asset["asset_id"])
         print(f"  收集到 {len(all_links)} 个候选链接")
 
@@ -786,9 +916,6 @@ def main() -> None:
         if not llm.is_available():
             print("ERROR: LLM 未配置")
             sys.exit(1)
-
-        # 优先抓取 tokenomics.com 结构化数据（含 FAQ/revenue/valuation）
-        tokenomics_com_data = scrape_tokenomics_com(asset)
 
         selected_urls = select_relevant_links(llm, asset, all_links)
         print(f"  AI 筛选出 {len(selected_urls)} 个相关链接")
@@ -817,21 +944,6 @@ def main() -> None:
         if not doc_contents:
             print("ERROR: 没有成功抓取到任何页面内容")
             sys.exit(1)
-
-        # 4. 收集 API 数据
-        api_data = []
-
-        if not args.no_cmc:
-            cmc = get_cmc_supply(conn, asset["asset_id"])
-            if cmc:
-                api_data.append(cmc)
-                print(f"  CMC supply: {json.dumps({k: v for k, v in cmc.items() if v is not None}, default=str)}")
-
-        if not args.no_cg and asset.get("coingecko_id"):
-            cg = get_cg_supply(asset["coingecko_id"])
-            if cg:
-                api_data.append(cg)
-                print(f"  CG supply: {json.dumps({k: v for k, v in cg.items() if v is not None}, default=str)}")
 
         # 5. LLM 提取
         print("  调用 LLM 提取 tokenomics...")

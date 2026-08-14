@@ -1061,7 +1061,7 @@ SOURCE_VARIANTS = [
 # ── 存入数据库 ─────────────────────────────────────────────
 
 def ensure_table(conn) -> None:
-    """确保 biz.asset_token_unlocks 表存在。"""
+    """确保 biz.asset_token_unlocks 表存在，并包含 revenue/valuation 等列。"""
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS biz.asset_token_unlocks (
@@ -1071,10 +1071,23 @@ def ensure_table(conn) -> None:
                 slug TEXT,
                 overview_json JSONB,
                 unlock_events_json JSONB,
+                revenue_json JSONB,
+                valuation_json JSONB,
+                methodology_json JSONB,
+                input_snapshot_json JSONB,
                 scraped_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # 兼容旧表：补充可能缺失的列
+        for col in ("revenue_json", "valuation_json", "methodology_json", "input_snapshot_json"):
+            try:
+                cur.execute(f"""
+                    ALTER TABLE biz.asset_token_unlocks
+                    ADD COLUMN IF NOT EXISTS {col} JSONB
+                """)
+            except Exception:
+                pass  # 列已存在或表刚创建
     conn.commit()
 
 
@@ -1085,10 +1098,13 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
     sql = """
         INSERT INTO biz.asset_token_unlocks (
             asset_id, source_url, source_name, slug,
-            overview_json, unlock_events_json, scraped_at, updated_at
+            overview_json, unlock_events_json, revenue_json, valuation_json,
+            scraped_at, updated_at
         ) VALUES (
             %(asset_id)s, %(source_url)s, %(source_name)s, %(slug)s,
-            %(overview_json)s, %(unlock_events_json)s, NOW(), NOW()
+            %(overview_json)s, %(unlock_events_json)s,
+            %(revenue_json)s, %(valuation_json)s,
+            NOW(), NOW()
         )
         ON CONFLICT (asset_id) DO UPDATE SET
             source_url = EXCLUDED.source_url,
@@ -1096,6 +1112,8 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             slug = EXCLUDED.slug,
             overview_json = EXCLUDED.overview_json,
             unlock_events_json = EXCLUDED.unlock_events_json,
+            revenue_json = EXCLUDED.revenue_json,
+            valuation_json = EXCLUDED.valuation_json,
             updated_at = NOW()
     """
     with conn.cursor() as cur:
@@ -1106,6 +1124,8 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "slug": data.get("slug"),
             "overview_json": json_mod.dumps(data.get("overview", {}), ensure_ascii=False),
             "unlock_events_json": json_mod.dumps(data.get("unlock_events", []), ensure_ascii=False),
+            "revenue_json": json_mod.dumps(data.get("revenue", {}), ensure_ascii=False),
+            "valuation_json": json_mod.dumps(data.get("valuation", {}), ensure_ascii=False),
         })
     conn.commit()
     _log(f"  已写入数据库 (asset_id={asset_id})")

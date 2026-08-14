@@ -714,20 +714,22 @@ def get_asset_materials(asset_id: int) -> dict:
 
 
 def get_asset_tokenomics(asset_id: int) -> dict | None:
-    """获取资产的代币经济学结构化数据。"""
+    """获取资产的代币经济学结构化数据（含 tokenomics.com 的收入/估值子板块）。"""
     with get_db() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT total_supply, max_supply, circulating_supply,
-                       buy_tax_pct, sell_tax_pct, tax_info,
-                       contract_renounced, lp_locked, lp_lock_info,
-                       allocation_json, burn_info, emission_schedule,
-                       inflation_info, governance_info, utility_info,
-                       confidence, extraction_notes,
-                       source_urls, chart_images, created_at, updated_at
-                FROM biz.asset_tokenomics
-                WHERE asset_id = %s
+                SELECT t.total_supply, t.max_supply, t.circulating_supply,
+                       t.buy_tax_pct, t.sell_tax_pct, t.tax_info,
+                       t.contract_renounced, t.lp_locked, t.lp_lock_info,
+                       t.allocation_json, t.burn_info, t.emission_schedule,
+                       t.inflation_info, t.governance_info, t.utility_info,
+                       t.confidence, t.extraction_notes,
+                       t.source_urls, t.chart_images, t.created_at, t.updated_at,
+                       u.revenue_json, u.valuation_json, u.overview_json
+                FROM biz.asset_tokenomics t
+                LEFT JOIN biz.asset_token_unlocks u ON u.asset_id = t.asset_id
+                WHERE t.asset_id = %s
                 """,
                 (asset_id,),
             )
@@ -735,27 +737,30 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
             if not row:
                 return None
             return {
-                "total_supply": row[0],
-                "max_supply": row[1],
-                "circulating_supply": row[2],
-                "buy_tax_pct": float(row[3]) if row[3] is not None else None,
-                "sell_tax_pct": float(row[4]) if row[4] is not None else None,
-                "tax_info": row[5],
-                "contract_renounced": row[6],
-                "lp_locked": row[7],
-                "lp_lock_info": row[8],
-                "allocation": row[9],
-                "burn_info": row[10],
-                "emission_schedule": row[11],
-                "inflation_info": row[12],
-                "governance_info": row[13],
-                "utility_info": row[14],
-                "confidence": float(row[15]) if row[15] is not None else None,
-                "extraction_notes": row[16],
-                "source_urls": row[17],
-                "chart_images": row[18],
-                "created_at": str(row[19]) if row[19] else None,
-                "updated_at": str(row[20]) if row[20] else None,
+                "total_supply": row["total_supply"],
+                "max_supply": row["max_supply"],
+                "circulating_supply": row["circulating_supply"],
+                "buy_tax_pct": float(row["buy_tax_pct"]) if row["buy_tax_pct"] is not None else None,
+                "sell_tax_pct": float(row["sell_tax_pct"]) if row["sell_tax_pct"] is not None else None,
+                "tax_info": row["tax_info"],
+                "contract_renounced": row["contract_renounced"],
+                "lp_locked": row["lp_locked"],
+                "lp_lock_info": row["lp_lock_info"],
+                "allocation": row["allocation_json"],
+                "burn_info": row["burn_info"],
+                "emission_schedule": row["emission_schedule"],
+                "inflation_info": row["inflation_info"],
+                "governance_info": row["governance_info"],
+                "utility_info": row["utility_info"],
+                "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
+                "extraction_notes": row["extraction_notes"],
+                "source_urls": row["source_urls"],
+                "chart_images": row["chart_images"],
+                "created_at": str(row["created_at"]) if row["created_at"] else None,
+                "updated_at": str(row["updated_at"]) if row["updated_at"] else None,
+                "revenue": row["revenue_json"] or {},
+                "valuation": row["valuation_json"] or {},
+                "overview": row["overview_json"] or {},
             }
 
 
@@ -1357,7 +1362,8 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                """SELECT overview_json, unlock_events_json, source_name, slug,
+                """SELECT overview_json, unlock_events_json, revenue_json, valuation_json,
+                          source_name, slug,
                           methodology_json, input_snapshot_json, updated_at
                    FROM biz.asset_token_unlocks WHERE asset_id = %s""",
                 (asset_id,),
@@ -1367,6 +1373,8 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
         return None
     overview = row.get("overview_json") or {}
     events = row.get("unlock_events_json") or []
+    revenue = row.get("revenue_json") or {}
+    valuation = row.get("valuation_json") or {}
     methodology = row.get("methodology_json") or {}
     input_snapshot = row.get("input_snapshot_json") or {}
     note = ""
@@ -1377,6 +1385,8 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
         "slug": row.get("slug"),
         "overview": overview,
         "unlock_events": events,
+        "revenue": revenue,
+        "valuation": valuation,
         "note": note,
         "methodology": methodology,
         "input_snapshot": input_snapshot,

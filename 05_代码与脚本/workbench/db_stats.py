@@ -764,6 +764,106 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
             }
 
 
+def query_tokenomics(asset_id: int, force: bool = False, log=None) -> dict:
+    """按需提取代币经济学数据。
+
+    优先 tokenomics.com 结构化数据；未命中时返回 needs_url，由前端询问用户
+    提供网址或改用 AI 测算。
+    """
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_c_extract_tokenomics.py")
+    # 单币调用始终强制覆盖：用户点「提取代币经济学」即为手动重提，
+    # 否则脚本会在「已有数据」时提前 return，不输出 not_found/ok JSON，
+    # 导致 _extract_json_output 解析失败。
+    cmd = [sys.executable, "-u", script, "--asset-id", str(asset_id), "--force"]
+
+    _emit("开始提取代币经济学数据（tokenomics.com 优先）...")
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 300, log=log)
+
+    if returncode == -1:
+        return {"ok": False, "error": "代币经济学提取超时（300秒），请稍后重试"}
+
+    data = _extract_json_output(stdout)
+    if data is None:
+        return {"ok": False, "error": (stdout.strip() or "无输出")[-500:]}
+
+    if data.get("status") == "ok":
+        _emit("代币经济学提取成功")
+        return {"ok": True, "data": get_asset_tokenomics(asset_id) or {}}
+
+    if data.get("status") == "not_found":
+        _emit("tokenomics.com 未收录，等待用户提供网址或改用 AI 测算")
+        return {
+            "ok": False,
+            "needs_url": True,
+            "error": data.get("message", "tokenomics.com 未收录该代币"),
+            "symbol": data.get("symbol"),
+            "name": data.get("name"),
+        }
+
+    return {"ok": False, "error": data.get("message", "提取失败")}
+
+
+def query_tokenomics_by_url(asset_id: int, url: str, log=None) -> dict:
+    """按用户提供的网址抓取 tokenomics 数据（LLM 提取）。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "error": "网址必须以 http:// 或 https:// 开头"}
+
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_c_extract_tokenomics.py")
+    cmd = [sys.executable, "-u", script, "--asset-id", str(asset_id),
+           "--url", url, "--force"]
+
+    _emit(f"按用户提供的网址抓取 tokenomics: {url}")
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 300, log=log)
+
+    if returncode == -1:
+        return {"ok": False, "error": "网址抓取超时（300秒）"}
+
+    data = _extract_json_output(stdout)
+    if data and data.get("status") == "ok":
+        _emit("网址抓取 tokenomics 成功")
+        return {"ok": True, "data": get_asset_tokenomics(asset_id) or {}}
+
+    err = (data or {}).get("message") if data else (stdout.strip() or "无输出")
+    return {"ok": False, "error": err[-500:]}
+
+
+def query_tokenomics_ai(asset_id: int, log=None) -> dict:
+    """用户未提供网址时，直接触发 AI 测算（文档 + LLM）。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
+    _emit("用户未提供网址，改用 AI 测算代币经济学（文档 + LLM）")
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "phase_c_extract_tokenomics.py")
+    cmd = [sys.executable, "-u", script, "--asset-id", str(asset_id),
+           "--ai", "--force"]
+
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 600, log=log)
+
+    if returncode == -1:
+        return {"ok": False, "error": "AI 测算超时（600秒）"}
+
+    data = _extract_json_output(stdout)
+    if data and data.get("status") == "ok":
+        _emit("AI 测算代币经济学成功")
+        return {"ok": True, "data": get_asset_tokenomics(asset_id) or {}}
+
+    err = (data or {}).get("message") if data else (stdout.strip() or "无输出")
+    return {"ok": False, "error": err[-500:]}
+
+
 def reset_deep_crawl(asset_id: int) -> dict:
     """重置指定资产的 deep_crawled_at，允许 B2 重新爬取。"""
     with get_db() as conn:

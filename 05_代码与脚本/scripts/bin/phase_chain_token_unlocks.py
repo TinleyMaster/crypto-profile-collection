@@ -666,16 +666,42 @@ def _extract_tables(page) -> list[list[list[str]]]:
         return []
 
 
+def _clean_subpage_text(text: str) -> str:
+    """清洗 tokenomics.com 子页面正文，去除顶部导航/面包屑与尾部推荐/页脚噪音。
+
+    tokenomics.com 的 /revenue、/valuation 页面结构固定：
+    - 正文以 "Protocol Revenue" / "Token Valuation" 标题开头；
+    - 正文在 "Similar Tokens" 推荐列表处结束。
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    # 尾部：截断到 "Similar Tokens"（其后为推荐列表 + 页脚）
+    for i, ln in enumerate(lines):
+        if ln.strip() == "Similar Tokens":
+            lines = lines[:i]
+            break
+    # 头部：定位正文标题，去除导航/面包屑
+    start = 0
+    for i, ln in enumerate(lines):
+        if "Protocol Revenue" in ln or "Token Valuation" in ln:
+            start = i
+            break
+    return "\n".join(lines[start:]).strip()
+
+
 def _extract_subpage(page) -> dict:
     """提取 revenue / valuation 子页面的通用结构化数据。
 
-    返回 {"text": 正文文本, "faq": Q&A, "tables": 所有表格}。
+    返回 {"text": 正文文本（已清洗导航噪音）, "faq": Q&A, "tables": 所有表格}。
     """
     out: dict = {}
+    raw_text = ""
     try:
-        out["text"] = page.locator("body").inner_text(timeout=5000)[:5000]
+        raw_text = page.locator("body").inner_text(timeout=5000)[:5000]
     except Exception:
-        out["text"] = ""
+        raw_text = ""
+    out["text"] = _clean_subpage_text(raw_text)
     out["faq"] = _extract_faq(page)
     out["tables"] = _extract_tables(page)
     return out

@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true", help="强制覆盖已有数据")
     parser.add_argument("--no-cmc", action="store_true", help="跳过 CMC 数据")
     parser.add_argument("--no-cg", action="store_true", help="跳过 CG 数据")
+    parser.add_argument("--url", type=str, help="用户提供的 tokenomics 网址（直接抓取并 LLM 提取，跳过 tokenomics.com 搜索）")
+    parser.add_argument("--ai", action="store_true", help="tokenomics.com 未命中时直接走 AI 测算（文档+LLM），不询问")
     return parser
 
 
@@ -906,13 +908,60 @@ def main() -> None:
                                  api_data=api_data, dry_run=args.dry_run)
             if not args.dry_run:
                 print("完成！")
+                print(json.dumps({"status": "ok", "source": "tokenomist",
+                                  "asset_id": asset["asset_id"]}, ensure_ascii=False))
             return
 
-        # 4. 未命中：收集所有链接，AI 筛选 + LLM 提取
+        llm = LLMClient(settings, rpm=30)
+
+        # 4. 未命中 tokenomics.com：优先使用用户提供的网址抓取
+        if args.url:
+            print(f"  使用用户提供的网址抓取 tokenomics: {args.url}")
+            if not llm.is_available():
+                print("ERROR: LLM 未配置")
+                sys.exit(1)
+            content = fetch_page_content(args.url)
+            if not content:
+                print(json.dumps({"status": "error",
+                                  "message": f"网址抓取失败或非 HTML 页面: {args.url}"},
+                                 ensure_ascii=False))
+                sys.exit(1)
+            print(f"    -> {len(content)} 字符")
+            doc_contents = [{"doc_type": "tokenomics_url",
+                             "source_url": args.url, "content": content}]
+            result = extract_with_llm(llm, asset, doc_contents, api_data)
+            if not result:
+                print(json.dumps({"status": "error", "message": "LLM 提取失败"},
+                                 ensure_ascii=False))
+                sys.exit(1)
+            for api_entry in api_data:
+                for key in ("total_supply", "max_supply", "circulating_supply"):
+                    val = api_entry.get(key)
+                    if val is not None:
+                        result[key] = val
+            result["chart_images"] = []
+            save_tokenomics(conn, asset["asset_id"], [args.url], result, dry_run=args.dry_run)
+            if not args.dry_run:
+                print("完成！")
+                print(json.dumps({"status": "ok", "source": "llm",
+                                  "asset_id": asset["asset_id"]}, ensure_ascii=False))
+            return
+
+        # 5. 未命中且未指定 --ai：提示上层询问用户是否提供网址（前端弹框）
+        if not args.ai:
+            print(json.dumps({
+                "status": "not_found",
+                "message": "tokenomics.com 未收录该代币，请提供 tokenomics 网址或改用 AI 测算",
+                "asset_id": asset["asset_id"],
+                "symbol": asset["symbol"],
+                "name": asset["name"],
+            }, ensure_ascii=False))
+            return
+
+        # 6. --ai：收集所有链接，AI 筛选 + LLM 提取
         all_links = collect_all_links(conn, asset["asset_id"])
         print(f"  收集到 {len(all_links)} 个候选链接")
 
-        llm = LLMClient(settings, rpm=30)
         if not llm.is_available():
             print("ERROR: LLM 未配置")
             sys.exit(1)
@@ -995,6 +1044,8 @@ def main() -> None:
 
         if not args.dry_run:
             print("完成！")
+            print(json.dumps({"status": "ok", "source": "llm",
+                              "asset_id": asset["asset_id"]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -586,6 +586,42 @@ def api_asset_tokenomics(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/tokenomics/query/<int:asset_id>", methods=["POST"])
+def api_tokenomics_query(asset_id: int):
+    """按需提取代币经济学数据（tokenomics.com 优先，未命中返回 needs_url 供前端弹框）。"""
+    force = (request.get_json(silent=True) or {}).get("force") == 1
+
+    def _worker(log):
+        return _get_db_stats().query_tokenomics(asset_id, force=force, log=log)
+
+    task_id = task_mgr.submit_func_task(f"代币经济学: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
+@app.route("/api/tokenomics/scrape-url/<int:asset_id>", methods=["POST"])
+def api_tokenomics_scrape_url(asset_id: int):
+    """按用户提供的网址抓取代币经济学数据（LLM 提取）。"""
+    url = (request.get_json(silent=True) or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "缺少网址"}), 400
+
+    def _worker(log):
+        return _get_db_stats().query_tokenomics_by_url(asset_id, url, log=log)
+
+    task_id = task_mgr.submit_func_task(f"代币经济学(网址): asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
+@app.route("/api/tokenomics/ai/<int:asset_id>", methods=["POST"])
+def api_tokenomics_ai(asset_id: int):
+    """用户未提供网址时，直接触发 AI 测算代币经济学（文档 + LLM）。"""
+    def _worker(log):
+        return _get_db_stats().query_tokenomics_ai(asset_id, log=log)
+
+    task_id = task_mgr.submit_func_task(f"代币经济学(AI测算): asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/tokenomics-images/<int:asset_id>/<path:filename>")
 def api_tokenomics_image(asset_id: int, filename: str):
     """提供代币经济学提取保存的图片（分配图/排放曲线等）。"""

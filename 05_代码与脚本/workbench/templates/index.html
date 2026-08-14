@@ -1673,7 +1673,7 @@
                             <span class="status-indicator" id="tkm-indicator"></span>
                             <span class="status-text" id="tkm-status">检查中...</span>
                         </div>
-                        <button class="run-btn" id="tkm-run-btn" onclick="runResearch('c_extract_tokenomics')">
+                        <button class="run-btn" id="tkm-run-btn" onclick="runTokenomicsExtract()">
                             提取代币经济学
                         </button>
                         <div id="tkm-detail" style="display:none"></div>
@@ -2565,7 +2565,7 @@
                 });
                 html += renderTokenomicsTables(revTables);
                 if (revenue.text && revenue.text.trim()) {
-                    html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#9ca3af">原文文本</summary><div style="max-height:200px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:4px">' + escapeHtml(revenue.text) + '</div></details>';
+                    html += '<div style="margin-top:6px;font-size:11px;color:#9ca3af">原文文本：</div><div style="max-height:400px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:2px;border-left:2px solid #2a2f3a;padding-left:8px">' + escapeHtml(revenue.text) + '</div>';
                 }
                 html += '</div></details>';
             }
@@ -2582,7 +2582,7 @@
                 });
                 html += renderTokenomicsTables(valTables);
                 if (valuation.text && valuation.text.trim()) {
-                    html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#9ca3af">原文文本</summary><div style="max-height:200px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:4px">' + escapeHtml(valuation.text) + '</div></details>';
+                    html += '<div style="margin-top:6px;font-size:11px;color:#9ca3af">原文文本：</div><div style="max-height:400px;overflow:auto;white-space:pre-wrap;color:#9ca3af;font-size:11px;margin-top:2px;border-left:2px solid #2a2f3a;padding-left:8px">' + escapeHtml(valuation.text) + '</div>';
                 }
                 html += '</div></details>';
             }
@@ -2967,39 +2967,81 @@
             throw new Error((result && result.error) || resultData.error || '未知错误');
         }
 
-        async function runResearch (taskKey) {
+        async function runTokenomicsExtract () {
             if (!currentResearchAssetId) return;
             const btn = document.getElementById('tkm-run-btn');
             btn.disabled = true;
             btn.classList.add('running');
-            btn.textContent = '运行中...';
+            btn.textContent = '提取中...';
 
             try {
-                const res = await fetch('/api/tasks/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ task_key: taskKey, asset_id: currentResearchAssetId }),
-                });
-                const data = await res.json();
-                if (!data.ok) throw new Error(data.error);
-
-                // 自动选中日志面板
-                selectedTaskId = data.task_id;
-                loadTaskLog(data.task_id);
-                if (logPanelCollapsed) toggleLogPanel();
-                loadTasks();
-
-                // 轮询等待任务完成
-                await waitForTask(data.task_id);
-
-                // 重新加载 tokenomics
-                loadResearch(currentResearchAssetId);
+                await runTokenomicsTask(
+                    '/api/tokenomics/query/' + currentResearchAssetId,
+                    { force: 0 },
+                    '提取超时（5分钟），请稍后重试'
+                );
             } catch (e) {
-                alert('运行失败: ' + e.message);
-                btn.disabled = false;
-                btn.classList.remove('running');
-                btn.textContent = '提取代币经济学';
+                alert('提取失败: ' + e.message);
             }
+            btn.disabled = false;
+            btn.classList.remove('running');
+            btn.textContent = '重新提取';
+        }
+
+        async function runTokenomicsTask (startUrl, body, timeoutMsg, maxWait = 360000) {
+            const startRes = await fetch(startUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const startData = await startRes.json();
+            if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+            selectedTaskId = startData.task_id;
+            loadTaskLog(startData.task_id);
+            if (logPanelCollapsed) toggleLogPanel();
+            loadTasks();
+            await waitForTask(startData.task_id, maxWait);
+
+            const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+            const resultData = await resultRes.json();
+            if (resultData.pending) throw new Error(timeoutMsg);
+
+            const result = resultData.result;
+            if (resultData.ok && result && result.ok) {
+                renderTokenomics(result.data);
+                return;
+            }
+
+            // tokenomics.com 未收录：询问用户提供网址，未提供则改用 AI 测算
+            if (result && result.needs_url) {
+                const url = await promptForTokenomicsUrl();
+                if (url) {
+                    await queryTokenomicsByUrl(url);
+                } else {
+                    await queryTokenomicsAi();
+                }
+                return;
+            }
+
+            throw new Error((result && result.error) || resultData.error || '未知错误');
+        }
+
+        async function queryTokenomicsByUrl (url) {
+            await runTokenomicsTask(
+                '/api/tokenomics/scrape-url/' + currentResearchAssetId,
+                { url: url },
+                '网址抓取超时（5分钟），请稍后重试'
+            );
+        }
+
+        async function queryTokenomicsAi () {
+            await runTokenomicsTask(
+                '/api/tokenomics/ai/' + currentResearchAssetId,
+                {},
+                'AI 测算超时（10分钟），请稍后重试',
+                660000
+            );
         }
 
         async function waitForTask (taskId, maxWait = 300000) {

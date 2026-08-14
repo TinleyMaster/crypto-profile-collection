@@ -82,6 +82,39 @@ SET asset_id = m.keep_id, updated_at = NOW()
 FROM _dedup_map m
 WHERE ac.asset_id = m.old_id;
 
+-- asset_tokenomics (asset_id UNIQUE)：keep 已有则删 old，否则迁移
+DELETE FROM biz.asset_tokenomics t
+USING _dedup_map m
+WHERE t.asset_id = m.old_id
+  AND EXISTS (SELECT 1 FROM biz.asset_tokenomics t2 WHERE t2.asset_id = m.keep_id);
+
+UPDATE biz.asset_tokenomics t
+SET asset_id = m.keep_id, updated_at = NOW()
+FROM _dedup_map m
+WHERE t.asset_id = m.old_id;
+
+-- asset_token_unlocks (asset_id PK)：keep 已有则删 old，否则迁移
+DELETE FROM biz.asset_token_unlocks t
+USING _dedup_map m
+WHERE t.asset_id = m.old_id
+  AND EXISTS (SELECT 1 FROM biz.asset_token_unlocks t2 WHERE t2.asset_id = m.keep_id);
+
+UPDATE biz.asset_token_unlocks t
+SET asset_id = m.keep_id, updated_at = NOW()
+FROM _dedup_map m
+WHERE t.asset_id = m.old_id;
+
+-- coin_basic (asset_id PK)：keep 已有则删 old，否则迁移
+DELETE FROM biz.coin_basic t
+USING _dedup_map m
+WHERE t.asset_id = m.old_id
+  AND EXISTS (SELECT 1 FROM biz.coin_basic t2 WHERE t2.asset_id = m.keep_id);
+
+UPDATE biz.coin_basic t
+SET asset_id = m.keep_id
+FROM _dedup_map m
+WHERE t.asset_id = m.old_id;
+
 -- Delete orphan assets
 DELETE FROM core.asset a
 USING _dedup_map m

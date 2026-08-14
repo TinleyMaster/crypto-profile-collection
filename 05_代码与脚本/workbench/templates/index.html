@@ -2839,6 +2839,43 @@
             );
         }
 
+        function promptForTokenomicsUrl () {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('url-modal');
+                const input = document.getElementById('url-input');
+                if (!modal || !input) { resolve(null); return; }
+
+                input.value = '';
+                input.style.borderColor = '';
+                modal.classList.add('active');
+                input.focus();
+
+                function cleanup () { modal.classList.remove('active'); }
+
+                function resolveAi () { cleanup(); resolve(null); }
+
+                function resolveUrl () {
+                    const v = input.value.trim();
+                    if (/^https?:\/\//i.test(v)) {
+                        cleanup();
+                        resolve(v);
+                    } else {
+                        input.style.borderColor = '#f87171';
+                        input.focus();
+                    }
+                }
+
+                document.getElementById('url-confirm-btn').onclick = resolveUrl;
+                document.getElementById('url-ai-btn').onclick = resolveAi;
+                input.onkeydown = function (e) {
+                    if (e.key === 'Enter') resolveUrl();
+                };
+                modal.onclick = function (e) {
+                    if (e.target === modal) resolveAi();
+                };
+            });
+        }
+
         async function runUnlocksTask (startUrl, body, timeoutMsg) {
             const startRes = await fetch(startUrl, {
                 method: 'POST',
@@ -2866,13 +2903,9 @@
 
             // tokenomist 未收录：让用户输入 tokenomics 网址，未输入则改用 AI 测算
             if (result && result.needs_url) {
-                const url = prompt(
-                    '该代币未能自动匹配 tokenomics.com 项目页。\n\n' +
-                    '请粘贴 tokenomics 项目网址（例如 https://app.tokenomics.com/tokenomics/akedo-games）：\n\n' +
-                    '若无法提供网址，请点「取消」，将改用 AI 测算。'
-                );
-                if (url && /^https?:\/\//i.test(url.trim())) {
-                    await queryUnlocksByUrl(url.trim());
+                const url = await promptForTokenomicsUrl();
+                if (url) {
+                    await queryUnlocksByUrl(url);
                 } else {
                     await queryUnlocksAi();
                 }
@@ -3700,6 +3733,27 @@
             <div class="btn-row">
                 <button class="btn btn-secondary" onclick="closeAddAssetModal()">取消</button>
                 <button class="btn btn-primary" id="create-asset-btn" onclick="createAsset()">创建代币</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── tokenomics 网址输入弹窗 ── -->
+    <div class="modal-overlay" id="url-modal">
+        <div class="modal-dialog" style="width: 520px;">
+            <h3>🔗 输入 tokenomics 项目网址</h3>
+            <p style="font-size:13px;color:#8a92a0;margin:0 0 12px;">
+                该代币未能自动匹配 tokenomics.com 项目页，请粘贴项目网址。
+            </p>
+            <div class="form-group">
+                <label>tokenomics 项目网址</label>
+                <input type="text" id="url-input" placeholder="https://app.tokenomics.com/tokenomics/项目名">
+            </div>
+            <p style="font-size:12px;color:#8a92a0;margin:8px 0 0;">
+                若无法提供网址，点「改用 AI 测算」将直接调用 AI 估算。
+            </p>
+            <div class="btn-row">
+                <button class="btn btn-secondary" id="url-ai-btn">改用 AI 测算</button>
+                <button class="btn btn-primary" id="url-confirm-btn">抓取</button>
             </div>
         </div>
     </div>

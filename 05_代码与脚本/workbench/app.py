@@ -537,6 +537,20 @@ def api_task_log(task_id):
     return jsonify({"ok": True, "logs": logs})
 
 
+@app.route("/api/tasks/<task_id>/result")
+def api_task_result(task_id):
+    """读取函数式后台任务的最终结果（submit_func_task 存入）。"""
+    task = task_mgr.get_task(task_id)
+    if not task:
+        return jsonify({"ok": False, "error": "任务不存在"}), 404
+    if task.get("status") in ("pending", "running"):
+        return jsonify({"ok": True, "pending": True})
+    result = task_mgr.get_task_result(task_id)
+    if task.get("status") == "failed":
+        return jsonify({"ok": False, "pending": False, "error": task.get("error") or "任务失败"})
+    return jsonify({"ok": True, "pending": False, "result": result})
+
+
 # ── 代币搜索与资料查询 ──
 
 
@@ -952,15 +966,19 @@ def api_onchain_alerts():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/onchain/query/<int:asset_id>")
+@app.route("/api/onchain/query/<int:asset_id>", methods=["GET", "POST"])
 def api_onchain_query(asset_id: int):
-    """按需查询指定资产的链上数据（持仓 + 大额转账）。先查缓存，未命中则实时拉取。"""
-    try:
+    """按需查询指定资产的链上数据（后台任务 + 实时日志）。返回 task_id 供前端轮询。"""
+    if request.method == "POST":
+        force = (request.get_json(silent=True) or {}).get("force") == 1
+    else:
         force = request.args.get("force", "0") == "1"
-        data = _get_db_stats().query_onchain_data(asset_id, force=force)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+
+    def _worker(log):
+        return _get_db_stats().query_onchain_data(asset_id, force=force, log=log)
+
+    task_id = task_mgr.submit_func_task(f"链上数据: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
 @app.route("/api/unlocks/<int:asset_id>")
@@ -977,54 +995,17 @@ def api_unlocks_get(asset_id: int):
 
 @app.route("/api/unlocks/query/<int:asset_id>", methods=["GET", "POST"])
 def api_unlocks_query(asset_id: int):
-    """按需拉取指定资产的代币解锁数据（异步后台执行，避免长请求导致网关超时）。
-
-    启动后前端应轮询 /api/unlocks/query/<asset_id>/status 获取结果。
-    """
+    """按需拉取指定资产的代币解锁数据（后台任务 + 实时日志）。返回 task_id 供前端轮询。"""
     if request.method == "POST":
         force = (request.get_json(silent=True) or {}).get("force") == 1
     else:
         force = request.args.get("force", "0") == "1"
 
-    key = _unlock_async_key(asset_id, force)
-    with _RecrawlFileLock(UNLOCK_LOCK_FILE):
-        state = _load_unlock_state()
-        existing = state.get(key)
-        if existing and existing.get("status") == "running":
-            return jsonify({"ok": True, "pending": True})
-        state[key] = {"status": "running", "result": None}
-        _save_unlock_state(state)
+    def _worker(log):
+        return _get_db_stats().query_token_unlocks(asset_id, force=force, log=log)
 
-    def _worker():
-        try:
-            result = _get_db_stats().query_token_unlocks(asset_id, force=force)
-        except Exception as e:
-            result = {"ok": False, "error": str(e)}
-        with _RecrawlFileLock(UNLOCK_LOCK_FILE):
-            st = _load_unlock_state()
-            st[key] = {"status": "done", "result": result}
-            _save_unlock_state(st)
-
-    threading.Thread(target=_worker, daemon=True).start()
-    return jsonify({"ok": True, "pending": True})
-
-
-@app.route("/api/unlocks/query/<int:asset_id>/status")
-def api_unlocks_query_status(asset_id: int):
-    """查询解锁数据异步拉取状态。"""
-    try:
-        force = request.args.get("force", "0") == "1"
-        key = _unlock_async_key(asset_id, force)
-        with _RecrawlFileLock(UNLOCK_LOCK_FILE):
-            state = _load_unlock_state()
-            item = state.get(key)
-        if not item:
-            return jsonify({"ok": True, "pending": False, "not_started": True})
-        if item.get("status") == "running":
-            return jsonify({"ok": True, "pending": True})
-        return jsonify({"ok": True, "pending": False, "result": item.get("result")})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    task_id = task_mgr.submit_func_task(f"解锁数据: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
 @app.route("/api/holders/query/<int:asset_id>")

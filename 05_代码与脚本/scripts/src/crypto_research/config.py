@@ -16,6 +16,7 @@ class Settings:
     defillama_base_url: str = "https://api.llama.fi"
     etherscan_api_key: str | None = None
     bscscan_api_key: str | None = None
+    binplorer_api_key: str | None = None
     github_token: str | None = None
     # LLM (OpenAI 兼容)
     openai_api_key: str | None = None
@@ -85,6 +86,7 @@ def get_settings(require_database: bool = True) -> Settings:
         coingecko_api_keys=cg_keys if len(cg_keys) > 1 else None,
         etherscan_api_key=os.getenv("ETHERSCAN_API_KEY", "").strip() or None,
         bscscan_api_key=os.getenv("BSCSCAN_API_KEY", "").strip() or None,
+        binplorer_api_key=os.getenv("BINPLORER_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
         openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,

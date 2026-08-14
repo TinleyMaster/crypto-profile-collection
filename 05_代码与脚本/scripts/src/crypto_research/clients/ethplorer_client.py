@@ -7,6 +7,7 @@ Ethplorer / Binplorer API 客户端。
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -114,9 +115,22 @@ class EthplorerClient:
         }
 
 
-def get_ethplorer_client(chain: str) -> EthplorerClient | None:
-    """获取指定链的 Ethplorer 客户端。支持数据库链名别名。"""
+def get_ethplorer_client(chain: str, api_key: str | None = None) -> EthplorerClient | None:
+    """获取指定链的 Ethplorer 客户端。支持数据库链名别名。
+
+    api_key 缺省时读取环境变量 BINPLORER_API_KEY（Personal Key 优先，其次 freekey）。
+    Personal Key：10 req/s、单次最多 1000 条、1 年历史；
+    freekey：2 req/s、单次最多 100 条、仅 30 天历史。
+    """
     normalized = CHAIN_ALIASES.get(chain.lower(), chain.lower())
     if normalized not in CHAIN_BASE:
         return None
-    return EthplorerClient(normalized)
+    if not api_key:
+        api_key = os.getenv("BINPLORER_API_KEY", "").strip() or "freekey"
+    if normalized == "bsc":
+        # Binplorer：Personal Key 10 req/s；freekey 2 req/s
+        calls_per_second = 10.0 if api_key != "freekey" else 2.0
+    else:
+        # Ethplorer 免费 tier：约 50 req/min，保持 30 req/min 保守限速
+        calls_per_second = 0.5
+    return EthplorerClient(normalized, api_key=api_key, calls_per_second=calls_per_second)

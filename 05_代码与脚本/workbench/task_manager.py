@@ -86,7 +86,7 @@ def _load_state() -> dict:
 def _save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2, default=str)
     os.replace(tmp, STATE_FILE)
 
 
@@ -160,6 +160,86 @@ class TaskManager:
         _append_log(task_id, f"[TASK] 任务已提交: {name}")
         _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
         return task_id
+
+    def submit_func_task(self, name: str, func) -> str:
+        """提交一个 Python 可调用任务（后台线程执行 + 实时日志流），返回 task_id。
+
+        func 签名为 func(log) -> dict：
+          - log(line): 写一行日志到该任务的日志文件；
+          - 返回的 dict 作为最终结果存入 task["stats"]["result"]，供 get_task_result 读取。
+
+        与 submit_task 一样，任务状态持久化到文件，跨 gunicorn 多 worker 可读。
+        """
+        task_id = uuid.uuid4().hex[:12]
+        now = time.time()
+        with _lock():
+            state = _load_state()
+            state["tasks"][task_id] = {
+                "task_id": task_id,
+                "name": name,
+                "status": "pending",
+                "cmd": [],
+                "started_at": now,
+                "ended_at": None,
+                "stats": {},
+                "error": None,
+            }
+            _save_state(state)
+        _append_log(task_id, f"[TASK] 任务已提交: {name}")
+        threading.Thread(
+            target=self._run_func_task, args=(task_id, func), daemon=True
+        ).start()
+        return task_id
+
+    def get_task_result(self, task_id: str):
+        """读取函数式任务（submit_func_task）的最终结果，无结果返回 None。"""
+        with _lock():
+            state = _load_state()
+            task = state["tasks"].get(task_id)
+            if not task:
+                return None
+            stats = task.get("stats") or {}
+            return stats.get("result")
+
+    def _run_func_task(self, task_id: str, func) -> None:
+        with _lock():
+            state = _load_state()
+            task = state["tasks"].get(task_id)
+            if not task:
+                return
+            task["status"] = "running"
+            task["started_at"] = time.time()
+            _save_state(state)
+
+        def log(line: str) -> None:
+            _append_log(task_id, str(line))
+
+        name = getattr(func, "__name__", "任务")
+        _append_log(task_id, f"[TASK] 开始执行: {name}")
+        try:
+            result = func(log)
+        except Exception as e:
+            _append_log(task_id, f"[ERROR] {str(e)[:200]}")
+            with _lock():
+                state = _load_state()
+                task = state["tasks"].get(task_id)
+                if task:
+                    task["ended_at"] = time.time()
+                    task["status"] = "failed"
+                    task["error"] = str(e)[:200]
+                    _save_state(state)
+            return
+
+        _append_log(task_id, "[TASK] 执行完成")
+        with _lock():
+            state = _load_state()
+            task = state["tasks"].get(task_id)
+            if task:
+                task["ended_at"] = time.time()
+                task["status"] = "done"
+                if isinstance(result, dict):
+                    task.setdefault("stats", {})["result"] = result
+                _save_state(state)
 
     def stop_task(self, task_id: str) -> bool:
         with _lock():

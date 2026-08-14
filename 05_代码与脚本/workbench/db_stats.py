@@ -1160,14 +1160,57 @@ def _extract_chain_error(stdout: str, stderr: str, returncode: int) -> str:
     return ""  # 退出码 0 且无错误行：视为无数据，由调用方提示
 
 
-def query_onchain_data(asset_id: int, force: bool = False) -> dict:
-    """按需查询链上持仓分布（从区块浏览器 HTML 爬取，无需 API Key）。
+def _run_with_log(cmd: list, cwd: str, timeout: int, log=None) -> tuple[str, int]:
+    """运行子进程，实时把 stdout/stderr 逐行传给 log，返回 (合并输出, 退出码)。
+
+    退出码为 -1 表示超时（已被 kill），供调用方判断。
+    """
+    import subprocess
+    import threading
+
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, env=env,
+    )
+    out_lines: list[str] = []
+
+    def _reader() -> None:
+        assert proc.stdout
+        for line in proc.stdout:
+            line = line.rstrip("\r\n")
+            if line:
+                if log:
+                    try:
+                        log(line)
+                    except Exception:
+                        pass
+                out_lines.append(line)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        t.join(timeout=5)
+        return "\n".join(out_lines), -1
+    t.join(timeout=5)
+    return "\n".join(out_lines), proc.returncode
+
+
+def query_onchain_data(asset_id: int, force: bool = False, log=None) -> dict:
+    """按需查询链上持仓分布（BSC/ETH 优先 Binplorer API，其余链从区块浏览器 HTML 爬取）。
 
     支持多链：依次爬取资产在各链上的合约数据。
     大额转账暂不支持（需 API），仅返回持仓分布。
     """
-    import subprocess
     import time
+
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
 
     t0 = time.time()
     scripts_bin = _get_scripts_bin()
@@ -1205,12 +1248,14 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
 
     result["symbol"] = chains_info[0]["canonical_symbol"]
     result["name"] = chains_info[0]["canonical_name"]
+    _emit(f"开始查询链上数据: {result['name']} ({result['symbol']})，共 {len(chains_info)} 条链")
 
     # 2. 逐链爬取
     holder_fetched = False
     for info in chains_info:
         chain = info["chain"]
         contract = info["contract_address"]
+        _emit(f"→ 爬取 {chain} 链持仓: {contract}")
         cmd = [
             sys.executable, "-u", script,
             "--contract", contract,
@@ -1220,20 +1265,20 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
             cmd.append("--force")
 
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True, text=True, timeout=120,
-                cwd=str(scripts_bin),
-            )
-        except subprocess.TimeoutExpired:
+            stdout, returncode = _run_with_log(cmd, str(scripts_bin), 120, log=log)
+        except Exception as e:
+            result["_errors"] = result.get("_errors", [])
+            result["_errors"].append(f"{chain}: {e}")
+            continue
+
+        if returncode == -1:
             result["_errors"] = result.get("_errors", [])
             result["_errors"].append(f"{chain}: 爬取超时（120秒）")
             continue
 
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        if proc.returncode != 0 or not stdout:
-            err = _extract_chain_error(stdout, stderr, proc.returncode)
+        stdout = stdout.strip()
+        if returncode != 0 or not stdout:
+            err = _extract_chain_error(stdout, "", returncode)
             result["_errors"] = result.get("_errors", [])
             result["_errors"].append(f"{chain}: {err or '无输出'}")
             continue
@@ -1258,7 +1303,7 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
                         }
                         holder_fetched = True
                     else:
-                        err = _extract_chain_error(stdout, stderr, 0)
+                        err = _extract_chain_error(stdout, "", 0)
                         result["_errors"] = result.get("_errors", [])
                         result["_errors"].append(f"{chain}: {err or '无持币数据'}")
                 except json.JSONDecodeError:
@@ -1274,6 +1319,8 @@ def query_onchain_data(asset_id: int, force: bool = False) -> dict:
         if detail:
             result["_note"] += f"【{detail}】"
         result.pop("_errors", None)
+    else:
+        _emit(f"链上数据查询完成，耗时 {result['elapsed_ms']}ms")
 
     return {"ok": True, "data": result}
 
@@ -1317,9 +1364,11 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
     }
 
 
-def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
+def query_token_unlocks(asset_id: int, force: bool = False, log=None) -> dict:
     """按需拉取代币解锁数据（先查缓存，未命中则从 tokenomist 爬取，失败则 AI 测算）。"""
-    import subprocess
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
 
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
@@ -1339,6 +1388,7 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
                     )
                     cached = cur.fetchone()
             if cached:
+                _emit("命中缓存，直接返回已缓存的解锁数据")
                 overview = cached.get("overview_json") or {}
                 events = cached.get("unlock_events_json") or []
                 methodology = cached.get("methodology_json") or {}
@@ -1372,41 +1422,37 @@ def query_token_unlocks(asset_id: int, force: bool = False) -> dict:
         "--save",
     ]
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            cwd=str(scripts_bin),
-        )
-    except subprocess.TimeoutExpired:
+    _emit("开始拉取代币解锁数据（tokenomist）...")
+    stdout, returncode = _run_with_log(cmd, str(scripts_bin), 180, log=log)
+
+    if returncode == -1:
         return {"ok": False, "error": "Tokenomist 爬取超时（180秒），请稍后重试或检查网络"}
 
-    output = result.stdout.strip()
-    stderr_output = result.stderr.strip() if result.stderr else ""
+    output = stdout.strip()
 
-    if result.returncode != 0:
-        err_msg = stderr_output or output or f"exit code {result.returncode}"
+    if returncode != 0:
+        err_msg = output or f"exit code {returncode}"
         # 如果 stderr 中有 Playwright/浏览器相关错误，给出友好提示
         if "Executable doesn't exist" in err_msg or "BrowserType.launch" in err_msg:
             return {"ok": False, "error": "Playwright 浏览器未安装，请运行: playwright install chromium"}
         return {"ok": False, "error": err_msg[:500]}
 
     if not output:
-        return {"ok": False, "error": "无输出", "stderr": stderr_output[:500]}
+        return {"ok": False, "error": "无输出"}
 
     try:
         data = json.loads(output)
         if data.get("status") == "ok":
-            return {"ok": True, "data": data, "stderr": stderr_output[:1000]}
+            _emit("tokenomist 解锁数据拉取成功")
+            return {"ok": True, "data": data}
         # tokenomist 没收录 → 尝试 AI 测算
         if data.get("status") == "not_found":
-            return _ai_estimate_unlocks(asset_id, data.get("message", "未被 tokenomist 收录"))
+            _emit(f"tokenomist 未收录，触发 AI 测算: {data.get('message', '')}")
+            return _ai_estimate_unlocks(asset_id, data.get("message", "未被 tokenomist 收录"), log=log)
         # 其他错误
-        return {"ok": False, "error": data.get("message", "失败"), "stderr": stderr_output[:500]}
+        return {"ok": False, "error": data.get("message", "失败")}
     except json.JSONDecodeError:
-        return {"ok": False, "error": (stderr_output or output)[:500]}
+        return {"ok": False, "error": output[:500]}
 
 
 AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根据以下代币经济学数据，估算该代币的解锁时间表。
@@ -1577,8 +1623,12 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
     return {"price_usd": error_msg, "market_cap_usd": error_msg, "fdv_usd": error_msg}
 
 
-def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
+def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict:
     """AI 根据代币经济学数据测算解锁信息，保存并返回。"""
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+
     import datetime
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
@@ -1588,6 +1638,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     llm = LLMClient(settings, rpm=30)
     if not llm.is_available():
         return {"ok": False, "error": "LLM 未配置，无法 AI 测算", "tokenomist_error": tokenomist_error}
+
+    _emit("开始 AI 测算解锁数据...")
 
     # 1. 获取代币经济学数据
     with get_connection(settings.database_url) as conn:
@@ -1613,6 +1665,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             )
             asset = cur.fetchone()
 
+    _emit("已获取代币经济学数据，正在获取当前价格/市值/FDV...")
+
     # 1.5 获取 CG 价格/市值/FDV（供 AI 估算解锁价值）
     price_info = _fetch_cg_price(asset_id, settings)
 
@@ -1624,6 +1678,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             "error": f"无法获取价格数据，跳过 AI 测算: {price_usd}",
             "tokenomist_error": tokenomist_error,
         }
+
+    _emit(f"价格: {price_info.get('price_usd')} USD, 市值: {price_info.get('market_cap_usd')} USD, FDV: {price_info.get('fdv_usd')} USD")
 
     # 2. 构建 prompt
     tge_date = asset.get("launch_date") if asset else None
@@ -1655,6 +1711,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
 
     prompt = AI_UNLOCK_PROMPT + "\n" + tokenomics_text
 
+    _emit("调用 LLM 测算解锁时间表...")
     try:
         raw = llm.chat(
             "你是一个加密货币解锁时间表分析专家。只输出 JSON。",
@@ -1663,6 +1720,8 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"LLM 调用失败: {e}",
                 "tokenomist_error": tokenomist_error}
+
+    _emit("LLM 返回成功，正在解析结果...")
 
     # 3. 解析 JSON（增强提取：处理 LLM 返回 JSON 前后附带文字的情况）
     try:
@@ -1759,6 +1818,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str) -> dict:
             ))
         conn.commit()
 
+    _emit("AI 测算完成并已保存")
     return {
         "ok": True,
         "data": {

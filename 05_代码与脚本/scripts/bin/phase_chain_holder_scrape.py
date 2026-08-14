@@ -32,6 +32,7 @@ from bs4 import BeautifulSoup
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
+from crypto_research.clients.ethplorer_client import get_ethplorer_client
 
 
 # ── 配置 ──────────────────────────────────────────────────
@@ -512,11 +513,104 @@ def _parse_tokenholders_html(html: str, max_holders: int,
     return result
 
 
+def _scrape_holders_binplorer(chain: str, contract_address: str,
+                              max_holders: int) -> dict | None:
+    """用 Binplorer/Ethplorer 免费 API 获取持仓分布（BSC/ETH）。
+
+    比区块浏览器 HTML 更稳定（JSON 接口，无 Cloudflare/ConnectionReset）：
+    - getTokenInfo → total_holders / total_supply / 市值 / 价格
+    - getTopTokenHolders → Top 持仓地址 + share 占比
+    据此计算 Top 5/10/25/50/100 集中度。
+    """
+    client = get_ethplorer_client(chain)
+    if client is None:
+        return None
+
+    info = client.get_token_info(contract_address)
+    if not info:
+        print("  [WARN] Binplorer getTokenInfo 无数据")
+        return None
+
+    # 至少取 100 条用于计算 Top100 集中度（freekey 单次上限 100，personal 可到 1000）
+    fetch_limit = max(max_holders, 100)
+    holders, err = client.get_token_holders(contract_address, limit=fetch_limit)
+    if err:
+        print(f"  [WARN] Binplorer getTopTokenHolders 失败: {err}")
+
+    total_holders = int(info.get("holders_count") or 0)
+    price = info.get("price") or {}
+    decimals = info.get("decimals")
+    try:
+        decimals = int(decimals) if decimals else 18
+    except (ValueError, TypeError):
+        decimals = 18
+
+    def _raw_to_human(raw) -> str:
+        """把 raw 余额（带 decimals）转成人类可读字符串。"""
+        try:
+            return f"{float(raw) / (10 ** decimals):.4f}"
+        except (ValueError, TypeError):
+            return str(raw)
+
+    top_holders_json = []
+    for i, h in enumerate(holders, start=1):
+        top_holders_json.append({
+            "rank": i,
+            "address": h.get("address", ""),
+            "label": "",
+            "amount": _raw_to_human(h.get("balance", 0)),
+            "pct": round(float(h.get("share", 0)), 4),
+        })
+
+    def _cum_pct(n: int) -> float | None:
+        if len(holders) < n:
+            return None
+        s = sum(float(h.get("share", 0)) for h in holders[:n])
+        return round(s, 2)
+
+    return {
+        "chain": chain,
+        "contract_address": contract_address.lower(),
+        "total_holders": total_holders,
+        "top_holders_json": top_holders_json,
+        "tier_distribution_json": [],
+        "top_5_pct": _cum_pct(5),
+        "top_10_pct": _cum_pct(10),
+        "top_25_pct": _cum_pct(25),
+        "top_50_pct": _cum_pct(50),
+        "top_100_pct": _cum_pct(100),
+        "scraped_at": None,
+        # 额外信息（供日志/上层展示）
+        "total_supply": info.get("total_supply"),
+        "market_cap_usd": price.get("marketCapUsd"),
+        "price_usd": price.get("rate"),
+        "source": "binplorer_api",
+    }
+
+
+def _print_holder_summary(result: dict) -> None:
+    """打印持仓采集结果摘要。"""
+    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
+    if result.get("price_usd"):
+        print(f"  价格: ${result['price_usd']}")
+    if result.get("market_cap_usd"):
+        print(f"  市值: ${result['market_cap_usd']}")
+    tiers = result["tier_distribution_json"]
+    if tiers:
+        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
+        print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")
+        print(f"  CEX 标签: {len([h for h in result['top_holders_json'] if h['label']])} 个地址有标签")
+    else:
+        print(f"  Top 5 集中度: {result.get('top_5_pct')}%")
+        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
+
+
 def scrape_holders(explorer_url: str, contract_address: str,
-                   max_holders: int = 50) -> dict:
+                   max_holders: int = 50, chain: str = "bsc") -> dict:
     """从区块浏览器抓取持仓分布数据。
 
     策略：
+    0. BSC/ETH 优先用 Binplorer/Ethplorer 免费 API（JSON 接口，稳定无 Cloudflare）
     1. 先请求 token 主页面拿 total_holders（及 BSCScan 主页面直接渲染的持币表）
     2. 再请求 generic-tokenholders2 接口拿集中度/Tier/持币列表（etherscan 系）
     3. 接口失败时回退无头浏览器抓主页面渲染后的完整 HTML
@@ -536,6 +630,17 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "top_100_pct": None,
         "scraped_at": None,
     }
+
+    # Step 0: BSC/ETH 优先 Binplorer API（免费 JSON 接口，避免区块浏览器 HTML 被拦截）
+    if chain in ("bsc", "eth"):
+        print("  [INFO] 尝试 Binplorer API 获取持仓...")
+        api_result = _scrape_holders_binplorer(chain, contract_address, max_holders)
+        if api_result and (api_result["total_holders"] > 0 or api_result["top_holders_json"]):
+            api_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Binplorer API ({chain})")
+            _print_holder_summary(api_result)
+            return api_result
+        print("  [WARN] Binplorer API 未获取到数据，回退区块浏览器 HTML")
 
     # Step 1: 主页面 → total_holders（及 BSCScan 直接渲染的持币表）
     html = _fetch_html(token_url)
@@ -570,13 +675,7 @@ def scrape_holders(explorer_url: str, contract_address: str,
             result.update(browser_parsed)
 
     result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
-    tiers = result["tier_distribution_json"]
-    if tiers:
-        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
-        print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")
-        print(f"  CEX 标签: {len([h for h in result['top_holders_json'] if h['label']])} 个地址有标签")
+    _print_holder_summary(result)
 
     return result
 
@@ -694,7 +793,7 @@ def main() -> int:
 
         # 爬取
         print(f"  抓取 {explorer_url}/token/{contract_address}...")
-        data = scrape_holders(explorer_url, contract_address, args.holders_limit)
+        data = scrape_holders(explorer_url, contract_address, args.holders_limit, chain=chain)
 
         if args.save:
             save_to_db(conn, asset_id, chain, contract_address, explorer_url, data)

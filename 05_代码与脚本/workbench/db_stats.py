@@ -1200,6 +1200,26 @@ def _run_with_log(cmd: list, cwd: str, timeout: int, log=None) -> tuple[str, int
     return "\n".join(out_lines), proc.returncode
 
 
+def _extract_json_output(output: str) -> dict | None:
+    """从子进程合并输出中提取脚本最后的 JSON 结果。
+
+    脚本约定：最终结果用 print(json.dumps(...)) 单行输出到 stdout，
+    进度日志走 stderr（被 _run_with_log 合并进同一输出）。因此从后往前找
+    第一个能解析且含 status 键的 JSON 行。
+    """
+    for line in reversed(output.strip().split("\n")):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "status" in obj:
+            return obj
+    return None
+
+
 def query_onchain_data(asset_id: int, force: bool = False, log=None) -> dict:
     """按需查询链上持仓分布（BSC/ETH 优先 Binplorer API，其余链从区块浏览器 HTML 爬取）。
 
@@ -1441,7 +1461,9 @@ def query_token_unlocks(asset_id: int, force: bool = False, log=None) -> dict:
         return {"ok": False, "error": "无输出"}
 
     try:
-        data = json.loads(output)
+        data = _extract_json_output(output)
+        if data is None:
+            return {"ok": False, "error": (output or "无输出")[:500]}
         if data.get("status") == "ok":
             _emit("tokenomist 解锁数据拉取成功")
             return {"ok": True, "data": data}
@@ -1457,8 +1479,8 @@ def query_token_unlocks(asset_id: int, force: bool = False, log=None) -> dict:
             }
         # 其他错误
         return {"ok": False, "error": data.get("message", "失败")}
-    except json.JSONDecodeError:
-        return {"ok": False, "error": output[:500]}
+    except Exception:
+        return {"ok": False, "error": (output or "无输出")[:500]}
 
 
 def query_unlocks_by_url(asset_id: int, url: str, log=None) -> dict:
@@ -1492,14 +1514,17 @@ def query_unlocks_by_url(asset_id: int, url: str, log=None) -> dict:
         return _ai_estimate_unlocks(asset_id, "网址抓取失败，tokenomist 未收录", log=log)
 
     try:
-        data = json.loads(output)
+        data = _extract_json_output(output)
+        if data is None:
+            _emit("网址抓取输出解析失败，回退 AI 测算")
+            return _ai_estimate_unlocks(asset_id, "网址抓取输出解析失败", log=log)
         if data.get("status") == "ok":
             _emit("网址抓取解锁数据成功")
             return {"ok": True, "data": data}
         msg = data.get("message", "网址抓取失败")
         _emit(f"网址抓取未获取到数据（{msg}），回退 AI 测算")
         return _ai_estimate_unlocks(asset_id, msg, log=log)
-    except json.JSONDecodeError:
+    except Exception:
         _emit("网址抓取输出解析失败，回退 AI 测算")
         return _ai_estimate_unlocks(asset_id, "网址抓取输出解析失败", log=log)
 

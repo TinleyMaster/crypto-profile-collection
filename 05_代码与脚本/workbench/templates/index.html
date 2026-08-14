@@ -2654,6 +2654,7 @@
             const indicator = document.getElementById('onchain-indicator');
             const statusEl = document.getElementById('onchain-status');
             const origText = btn.textContent;
+            let succeeded = false;
 
             btn.textContent = '⏳ 查询中...';
             btn.disabled = true;
@@ -2743,13 +2744,18 @@
                 detail.style.display = 'block';
                 indicator.className = 'status-indicator success';
                 statusEl.textContent = '已拉取（来源:' + fromCache + ', ' + (d.symbol || '') + '）';
+                succeeded = true;
                 btn.textContent = '✅ 已查询';
                 btn.classList.add('copied');
             } catch (e) {
                 alert('请求失败: ' + e.message);
                 btn.textContent = origText;
             }
-            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 3000);
+            setTimeout(() => {
+                btn.textContent = succeeded ? '重新拉取链上数据' : origText;
+                btn.classList.remove('copied');
+                btn.disabled = false;
+            }, 3000);
         }
 
         async function runAiNoiseClean () {

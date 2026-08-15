@@ -131,12 +131,20 @@ def _get_db_stats():
 # 顺序 = 流水线执行顺序：B1 数据源拉取 → B1 文档入口补充 → B2/B3 文档爬取 → B4 噪声清理 → 链上 → 诊断 → 维护
 TASK_DEFS = {
     # ═══ B1: 数据源拉取 ═══
+    "cg_pipeline": {
+        "name": "CG 一键流水线",
+        "description": "按依赖顺序自动执行：①拉全量列表 → ②拉币种详情(循环) → ③新增币种入库(循环) → ④补充文档入口，失败即停",
+        "script": "run_cg_pipeline.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "cg_bootstrap_assets": {
         "name": "CG 新增币种入库",
         "description": "将 CG 独有的币种补充到 core.asset（按 symbol 匹配），应先于拉取详情执行",
         "script": "bootstrap_cg_assets_from_list.py",
         "default_args": ["--limit", "500"],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cg_coin_info": {
         "name": "CG 拉取币种详情",
@@ -152,6 +160,7 @@ TASK_DEFS = {
         "script": "ingest_cg_coin_info_auto.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cmc_pipeline": {
         "name": "CMC 一键流水线",
@@ -166,12 +175,21 @@ TASK_DEFS = {
         "script": "ingest_cmc_map.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cmc_ingest_info": {
         "name": "CMC 拉取币种详情",
         "description": "从 CoinMarketCap 拉取 asset_info（urls/描述/标签等），写入 src_cmc.cmc_asset_info",
         "script": "ingest_cmc_info.py",
         "default_args": ["--from-map-missing", "--limit", "200"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "dl_pipeline": {
+        "name": "DL 一键流水线",
+        "description": "按依赖顺序自动执行：①拉协议列表 → ②资产入库(循环) → ③补充文档入口，失败即停",
+        "script": "run_dl_pipeline.py",
+        "default_args": [],
         "category": "数据源采集",
     },
     "dl_ingest_protocols": {
@@ -180,6 +198,7 @@ TASK_DEFS = {
         "script": "ingest_dl_protocols.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
 
     # ═══ B1: 文档入口补充 ═══
@@ -197,6 +216,7 @@ TASK_DEFS = {
         "script": "refresh_doc_source_entries_from_cg_auto.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cmc_refresh_docs": {
         "name": "CMC 补充文档入口",
@@ -212,6 +232,7 @@ TASK_DEFS = {
         "script": "refresh_doc_source_entries_from_cmc_auto.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "cmc_backfill_assets": {
         "name": "CMC 资产全量入库",
@@ -227,6 +248,7 @@ TASK_DEFS = {
         "script": "backfill_core_assets_from_cmc_auto.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "dl_refresh_docs": {
         "name": "DL 补充文档入口",
@@ -242,6 +264,7 @@ TASK_DEFS = {
         "script": "refresh_doc_source_entries_from_dl_auto.py",
         "default_args": [],
         "category": "数据源采集",
+        "hidden": True,
     },
     "dexscreener_supplement": {
         "name": "DexScreener 补充文档入口",
@@ -958,13 +981,14 @@ def api_notebooklm_links(asset_id: int):
 
 @app.route("/api/notebooklm/curate/<int:asset_id>", methods=["POST"])
 def api_notebooklm_curate(asset_id: int):
-    """触发 NotebookLM 精选生成（配额粗筛 + AI 排序）。"""
-    try:
-        force = request.args.get("force", "0") == "1"
-        data = _get_db_stats().curate_notebooklm(asset_id, force=force)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    """触发 NotebookLM 精选生成（配额粗筛 + AI 排序）。后台任务 + 实时日志，返回 task_id 供前端轮询。"""
+    force = request.args.get("force", "0") == "1"
+
+    def _worker(log):
+        return _get_db_stats().curate_notebooklm(asset_id, force=force, log=log)
+
+    task_id = task_mgr.submit_func_task(f"NotebookLM 精选: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
 # ── 链上数据监控 ──

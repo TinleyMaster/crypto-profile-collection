@@ -1064,11 +1064,18 @@ def get_notebooklm_links(asset_id: int) -> dict:
     return {"ok": True, "asset_id": asset_id, "count": len(urls), "urls": urls}
 
 
-def curate_notebooklm(asset_id: int, force: bool = False) -> dict:
+def curate_notebooklm(asset_id: int, force: bool = False, log=None) -> dict:
     """触发 NotebookLM 精选生成（配额粗筛 + AI 排序）。"""
-    import subprocess
+
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
 
     script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "curate_notebooklm.py")
+    script_dir = str(Path(script).parent)
     cmd = [
         sys.executable, "-u", script,
         "--asset-id", str(asset_id),
@@ -1077,31 +1084,22 @@ def curate_notebooklm(asset_id: int, force: bool = False) -> dict:
     if force:
         cmd.append("--force")
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=str(Path(script).parent),
-    )
+    _emit(f"[NotebookLM] 开始精选: asset {asset_id}")
+    _emit(f"[NotebookLM] 执行: {' '.join(cmd)}")
+    output, returncode = _run_with_log(cmd, script_dir, 180, log=log)
 
-    output = result.stdout.strip()
-    stderr = result.stderr.strip() if result.stderr else ""
+    if returncode == -1:
+        return {"ok": False, "error": "NotebookLM 精选超时（180秒）"}
 
-    json_line = None
-    for line in output.splitlines():
-        try:
-            parsed = json.loads(line)
-            if "status" in parsed:
-                json_line = parsed
-        except json.JSONDecodeError:
-            continue
-
+    json_line = _extract_json_output(output)
     if json_line:
+        urls = json_line.get("urls") or []
+        count = json_line.get("count") if json_line.get("count") is not None else len(urls)
+        _emit(f"[NotebookLM] 精选完成: status={json_line.get('status')}, 链接数={count}")
         return {"ok": True, "data": json_line}
-    if stderr:
-        return {"ok": False, "error": stderr[:500]}
-    return {"ok": False, "error": f"exit code {result.returncode}"}
+
+    err = _extract_chain_error(output, "", returncode) or f"exit code {returncode}"
+    return {"ok": False, "error": err[:500]}
 
 
 # ── 链上数据监控 ──
@@ -1421,7 +1419,12 @@ def query_onchain_data(asset_id: int, force: bool = False, log=None) -> dict:
                             "top100_concentration": data.get("top_100_pct"),
                             "total_holders": data.get("total_holders", 0),
                             "top_holders": [
-                                {"address": h["address"], "share_pct": h.get("pct")}
+                                {
+                                    "address": h.get("address", ""),
+                                    "share_pct": h.get("pct"),
+                                    "label": h.get("label", ""),
+                                    "rank": h.get("rank"),
+                                }
                                 for h in data.get("top_holders", [])
                             ],
                             "tier_distribution": data.get("tier_distribution", []),

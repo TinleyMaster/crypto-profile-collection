@@ -1983,6 +1983,27 @@
             return div.innerHTML;
         }
 
+        function shortAddr (addr) {
+            if (!addr) return '';
+            const s = String(addr);
+            if (s.length <= 12) return s;
+            return s.slice(0, 8) + '...' + s.slice(-4);
+        }
+
+        function onchainBar (pct, color) {
+            const v = (pct == null || isNaN(pct)) ? 0 : Math.max(0, Math.min(100, Number(pct)));
+            return '<span style="display:inline-block;width:130px;height:6px;background:#e5e7eb;border-radius:3px;vertical-align:middle;margin:0 6px;overflow:hidden">' +
+                '<span style="display:block;height:100%;width:' + v + '%;background:' + color + ';border-radius:3px"></span></span>';
+        }
+
+        function onchainMetricRow (label, pct, color) {
+            const v = (pct == null || isNaN(pct)) ? null : Number(pct);
+            return '<div style="margin:2px 0">' +
+                '<span style="display:inline-block;width:52px;color:#6b7280">' + label + '</span>' +
+                onchainBar(v, color) +
+                '<span style="font-size:12px">' + (v != null ? v + '%' : '?') + '</span></div>';
+        }
+
         // ── 搜索逻辑 ──
         let searchTimer = null;
         let searchActiveIdx = -1;
@@ -2503,14 +2524,17 @@
             html += '<strong>── 持仓集中度（快照）──</strong><br>';
             for (const chain of chains) {
                 const snap = byChain[chain][0] || {};
-                html += '[' + chain.toUpperCase() + '] ';
-                html += 'Top10: ' + (snap.top10_concentration != null ? snap.top10_concentration + '%' : '?') + '  ';
-                html += 'Top50: ' + (snap.top50_concentration != null ? snap.top50_concentration + '%' : '?') + '  ';
-                html += 'Top100: ' + (snap.top100_concentration != null ? snap.top100_concentration + '%' : '?') + '<br>';
-                if (snap.total_holders != null) html += '&nbsp;&nbsp;持币地址: ' + Number(snap.total_holders).toLocaleString() + '<br>';
-                if (snap.exchange_wallet_pct != null) html += '&nbsp;&nbsp;交易所占比: ' + snap.exchange_wallet_pct + '%<br>';
-                if (snap.holder_change_7d != null) html += '&nbsp;&nbsp;7日地址变化: ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d + '<br>';
-                if (snap.fetched_at) html += '&nbsp;&nbsp;快照时间: ' + snap.fetched_at.slice(0, 16) + '<br>';
+                html += '<div style="margin:6px 0;padding:6px 8px;background:#f9fafb;border-radius:6px">';
+                html += '<strong>[' + escapeHtml(chain.toUpperCase()) + ']</strong>';
+                if (snap.total_holders != null) html += ' <span style="color:#6b7280">持币地址 ' + Number(snap.total_holders).toLocaleString() + '</span>';
+                html += '<br>';
+                html += onchainMetricRow('Top10', snap.top10_concentration, '#dc2626');
+                html += onchainMetricRow('Top50', snap.top50_concentration, '#f59e0b');
+                html += onchainMetricRow('Top100', snap.top100_concentration, '#3b82f6');
+                if (snap.exchange_wallet_pct != null) html += '<span style="color:#6b7280">交易所占比</span> ' + snap.exchange_wallet_pct + '%<br>';
+                if (snap.holder_change_7d != null) html += '<span style="color:#6b7280">7日地址变化</span> ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d + '<br>';
+                if (snap.fetched_at) html += '<span style="color:#9ca3af;font-size:11px">快照时间 ' + escapeHtml(snap.fetched_at.slice(0, 16)) + '</span>';
+                html += '</div>';
             }
             html += '</div>';
 
@@ -2888,16 +2912,32 @@
                     return;
                 }
 
-                // 缓存未命中，触发 AI 精选
+                // 缓存未命中，触发 AI 精选（后台任务 + 实时日志）
                 btn.textContent = '🤖 AI 筛选中...';
                 res = await fetch('/api/notebooklm/curate/' + selectedAssetId, { method: 'POST' });
-                data = await res.json();
-                if (data.ok && data.data && data.data.urls) {
-                    await navigator.clipboard.writeText(data.data.urls.join('\n'));
-                    btn.textContent = '✅ 已复制 ' + data.data.urls.length + ' 条精选';
+                const startData = await res.json();
+                if (!startData.ok || !startData.task_id) throw new Error(startData.error || '启动失败');
+
+                selectedTaskId = startData.task_id;
+                loadTaskLog(startData.task_id);
+                if (logPanelCollapsed) toggleLogPanel();
+                loadTasks();
+                await waitForTask(startData.task_id, 240000);
+
+                const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+                const resultData = await resultRes.json();
+                if (resultData.pending) throw new Error('AI 精选超时（4分钟），请稍后重试');
+                if (!resultData.ok || !resultData.result || !resultData.result.ok) {
+                    throw new Error((resultData.result && resultData.result.error) || resultData.error || '未知错误');
+                }
+
+                const d = resultData.result.data;
+                if (d && d.urls && d.urls.length) {
+                    await navigator.clipboard.writeText(d.urls.join('\n'));
+                    btn.textContent = '✅ 已复制 ' + d.urls.length + ' 条精选';
                     btn.classList.add('copied');
                 } else {
-                    alert('精选失败: ' + (data.error || '未知错误'));
+                    alert('精选失败: ' + ((d && d.status) || '未知错误'));
                     btn.textContent = origText;
                 }
             } catch (e) {
@@ -2957,20 +2997,49 @@
                     hasContent = true;
                     html += '<strong>── 持仓集中度 ──</strong><br>';
                     for (const [chain, info] of Object.entries(d.chains)) {
-                        html += '[' + chain.toUpperCase() + '] ';
-                        html += 'Top10: ' + (info.top10_concentration ?? '?') + '%  ';
-                        html += 'Top50: ' + (info.top50_concentration ?? '?') + '%  ';
-                        html += 'Top100: ' + (info.top100_concentration ?? '?') + '%<br>';
-                        if (info.total_holders) html += '&nbsp;&nbsp;持币地址: ' + info.total_holders.toLocaleString() + '<br>';
-                        if (info.exchange_wallet_pct != null) html += '&nbsp;&nbsp;交易所占比: ' + info.exchange_wallet_pct + '%<br>';
-                        if (info.holder_change_7d != null) html += '&nbsp;&nbsp;7日地址变化: ' + (info.holder_change_7d > 0 ? '+' : '') + info.holder_change_7d + '<br>';
-                    }
-                    if (d.chains[Object.keys(d.chains)[0]].top_holders) {
-                        html += '<br>Top 10 持有者:<br>';
-                        const topHolders = d.chains[Object.keys(d.chains)[0]].top_holders;
-                        for (const h of topHolders.slice(0, 5)) {
-                            html += '&nbsp;&nbsp;' + h.address.slice(0, 8) + '...' + h.address.slice(-4) + '  ' + h.share_pct + '%<br>';
+                        html += '<div style="margin:6px 0;padding:6px 8px;background:#f9fafb;border-radius:6px">';
+                        html += '<strong>[' + escapeHtml(chain.toUpperCase()) + ']</strong>';
+                        if (info.total_holders) html += ' <span style="color:#6b7280">持币地址 ' + Number(info.total_holders).toLocaleString() + '</span>';
+                        html += '<br>';
+                        html += onchainMetricRow('Top10', info.top10_concentration, '#dc2626');
+                        html += onchainMetricRow('Top50', info.top50_concentration, '#f59e0b');
+                        html += onchainMetricRow('Top100', info.top100_concentration, '#3b82f6');
+                        if (info.exchange_wallet_pct != null) html += '<span style="color:#6b7280">交易所占比</span> ' + info.exchange_wallet_pct + '%<br>';
+                        if (info.holder_change_7d != null) html += '<span style="color:#6b7280">7日地址变化</span> ' + (info.holder_change_7d > 0 ? '+' : '') + info.holder_change_7d + '<br>';
+
+                        // Top 持有者
+                        const holders = info.top_holders || [];
+                        if (holders.length) {
+                            html += '<div style="margin-top:6px"><strong>Top ' + holders.length + ' 持有者</strong></div>';
+                            holders.forEach((h, idx) => {
+                                const rank = h.rank != null ? h.rank : (idx + 1);
+                                const pct = h.share_pct != null ? Number(h.share_pct) : null;
+                                const label = h.label ? '<span style="color:#f59e0b;font-size:11px;margin-left:4px">[' + escapeHtml(h.label) + ']</span>' : '';
+                                html += '<div style="margin:4px 0">';
+                                html += '<span style="display:inline-block;width:24px;color:#9ca3af">' + rank + '</span>';
+                                html += '<span style="font-family:monospace;font-size:12px">' + escapeHtml(shortAddr(h.address)) + '</span>' + label;
+                                html += '<span style="float:right;font-size:12px">' + (pct != null ? pct + '%' : '?') + '</span>';
+                                html += '<div style="margin-left:24px;margin-top:1px">' + onchainBar(pct, '#7c3aed') + '</div>';
+                                html += '</div>';
+                            });
                         }
+
+                        // 持仓分层
+                        const tiers = info.tier_distribution || [];
+                        if (tiers.length) {
+                            html += '<div style="margin-top:6px"><strong>持仓分层</strong></div>';
+                            tiers.forEach(t => {
+                                const pctSupply = t.pct_supply != null ? Number(t.pct_supply) : null;
+                                html += '<div style="margin:3px 0">';
+                                html += '<span style="display:inline-block;width:64px;color:#6b7280">' + escapeHtml(t.tier || '') + '</span>';
+                                html += '<span style="display:inline-block;width:48px;color:#9ca3af;font-size:11px">' + (t.count != null ? Number(t.count).toLocaleString() : '?') + '</span>';
+                                html += onchainBar(pctSupply, '#059669');
+                                html += '<span style="font-size:12px">' + (pctSupply != null ? pctSupply + '%' : '?') + '</span>';
+                                html += '</div>';
+                            });
+                        }
+
+                        html += '</div>';
                     }
                 }
 

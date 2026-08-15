@@ -836,7 +836,7 @@ def _flush_db() -> None:
 
     db_url = _worker_settings["database_url"]
     upsert_sql = _worker_settings.get("upsert_sql") or load_sql(
-        "biz/upsert_doc_source_entry.sql"
+        "biz/upsert_doc_source_entry_noop.sql"
     )
 
     with get_connection(db_url) as conn:
@@ -901,7 +901,10 @@ def main() -> int:
 
     settings = get_settings(require_database=True)
     _worker_settings["database_url"] = settings.database_url
-    _worker_settings["upsert_sql"] = load_sql("biz/upsert_doc_source_entry.sql")
+    # 使用 DO NOTHING 语义：发现链接若已存在（种子入口/历史爬取产物），
+    # 不得覆盖其 discovered_from/source_code/is_primary，否则会把
+    # cmc/cg 种子入口的 provenance 改成 deep_crawl:*，导致重爬时被误删。
+    _worker_settings["upsert_sql"] = load_sql("biz/upsert_doc_source_entry_noop.sql")
 
     # 保证列存在
     with get_connection(settings.database_url) as conn:

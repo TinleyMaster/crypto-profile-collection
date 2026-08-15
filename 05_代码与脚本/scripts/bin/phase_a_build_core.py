@@ -81,6 +81,56 @@ def normalize_chain(name: str | None) -> str | None:
     return CHAIN_NORMALIZE.get(name.strip().lower(), name.strip().lower())
 
 
+# CoinGecko platform key → 归一化链名（与 core.asset_contract 现有命名一致）。
+# 仅收录项目当前已识别/可爬取的链，未知 key 跳过，避免引入脏链名。
+CG_CHAIN_MAP = {
+    "ethereum": "ethereum",
+    "binance-smart-chain": "bsc",
+    "bnb-smart-chain": "bsc",
+    "solana": "solana",
+    "base": "base",
+    "polygon-pos": "polygon",
+    "polygon": "polygon",
+    "arbitrum-one": "arbitrum",
+    "arbitrum": "arbitrum",
+    "optimistic-ethereum": "optimism",
+    "optimism": "optimism",
+    "avalanche": "avalanche",
+    "avalanche-c-chain": "avalanche",
+    "fantom": "fantom",
+    "tron": "tron",
+    "tron20": "tron",
+    "the-open-network": "ton",
+    "ton": "ton",
+    "aptos": "aptos",
+    "sui": "sui",
+    "near-protocol": "near",
+    "near": "near",
+    "cronos": "cronos",
+    "osmosis": "osmosis",
+    "cardano": "cardano",
+    "zksync-era": "zksync",
+    "zksync": "zksync",
+    "scroll": "scroll",
+    "blast": "blast",
+    "sonic": "sonic",
+    "berachain": "berachain",
+    "monad": "monad",
+    "hyperliquid": "hyperliquid",
+    "sei-network": "sei",
+    "injective": "injective",
+    "kaia": "kaia",
+    "klay-token": "klaytn",
+    "pulsechain": "pulsechain",
+    "kava": "kava",
+    "multiversx": "multiversx",
+    "bittensor": "bittensor",
+    "robinhood-chain": "robinhood",
+    "anubis": "anubis",
+    "hyperevm": "hyperevm",
+}
+
+
 # ===================== STEP 1: CREATE TABLE =====================
 
 CREATE_ASSET_CONTRACT = """
@@ -267,6 +317,63 @@ def step3_populate_dl(settings) -> None:
             total = cur.rowcount
         conn.commit()
     print(f"[Step 3] DL 合约填充完成: {total} 条")
+
+
+# ===================== STEP 3b: POPULATE FROM CG PLATFORMS =====================
+
+
+def step3b_populate_cg(settings) -> None:
+    """从 CoinGecko platforms 补齐 CMC/DL 未覆盖的多链合约地址。
+
+    CMC 只收录部分链、DL 只收录有 TVL 的协议，导致像 ROBO 这类多链代币
+    的 Base/BSC 合约缺失。CG 的 platforms 字段是 {chain: contract} 字典，
+    用它补充 core.asset_contract，同时用 ON CONFLICT DO NOTHING 避免覆盖
+    已存在的 CMC 主合约（is_primary）。
+    """
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT asm.asset_id, ci.platforms
+                FROM core.asset_source_map asm
+                INNER JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
+                WHERE asm.source_code = 'cg'
+                """
+            )
+            rows = cur.fetchall()
+
+        seen: set[tuple[str, str]] = set()
+        insert_rows: list[tuple[int, str, str]] = []
+        for row in rows:
+            platforms = row["platforms"] or {}
+            if not isinstance(platforms, dict):
+                continue
+            for platform_key, addr in platforms.items():
+                chain = CG_CHAIN_MAP.get((platform_key or "").strip().lower())
+                if not chain:
+                    continue
+                addr = (addr or "").strip().lower()
+                if not addr:
+                    continue
+                key = (chain, addr)
+                if key in seen:
+                    continue
+                seen.add(key)
+                insert_rows.append((row["asset_id"], chain, addr))
+
+        if insert_rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO core.asset_contract
+                        (asset_id, chain, contract_address, is_primary, source_code)
+                    VALUES (%s, %s, %s, FALSE, 'cg')
+                    ON CONFLICT (chain, contract_address) DO NOTHING
+                    """,
+                    insert_rows,
+                )
+            conn.commit()
+        print(f"[Step 3b] CG 合约填充完成: {len(insert_rows)} 条（唯一）")
 
 
 # ===================== STEP 4: DEDUP ASSETS =====================
@@ -522,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--step",
         type=str,
         default="all",
-        help="Which step: create_table, populate_cmc, populate_dl, dedup, coin_basic, all",
+        help="Which step: create_table, populate_cmc, populate_dl, populate_cg, dedup, coin_basic, all",
     )
     return p
 
@@ -540,6 +647,9 @@ def main() -> int:
 
     if "all" in steps or "populate_dl" in steps:
         step3_populate_dl(settings)
+
+    if "all" in steps or "populate_cg" in steps:
+        step3b_populate_cg(settings)
 
     if "all" in steps or "dedup" in steps:
         step4_dedup_assets(settings, dry_run=args.dry_run)

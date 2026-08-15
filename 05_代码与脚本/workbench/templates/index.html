@@ -3139,13 +3139,29 @@
             });
         }
 
+        async function safeJson (res, url) {
+            // 安全解析响应：先检查 HTTP 状态，再解析 JSON，避免 502「Bad Gateway」
+            // 等非 JSON 响应被 res.json() 抛成晦涩的 "Unexpected token 'B'..."。
+            if (!res.ok) {
+                let detail = '';
+                try { detail = (await res.text()).slice(0, 200); } catch (e) {}
+                throw new Error(`服务器错误 ${res.status}${detail ? '（' + detail + '）' : ''}`);
+            }
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                throw new Error('服务器返回异常响应: ' + text.slice(0, 200));
+            }
+        }
+
         async function runUnlocksTask (startUrl, body, timeoutMsg) {
             const startRes = await fetch(startUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            const startData = await startRes.json();
+            const startData = await safeJson(startRes, startUrl);
             if (!startData.ok) throw new Error(startData.error || '启动失败');
 
             selectedTaskId = startData.task_id;
@@ -3155,7 +3171,7 @@
             await waitForTask(startData.task_id, 240000);
 
             const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
-            const resultData = await resultRes.json();
+            const resultData = await safeJson(resultRes, '/api/tasks/' + startData.task_id + '/result');
             if (resultData.pending) throw new Error(timeoutMsg);
 
             const result = resultData.result;
@@ -3205,7 +3221,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            const startData = await startRes.json();
+            const startData = await safeJson(startRes, startUrl);
             if (!startData.ok) throw new Error(startData.error || '启动失败');
 
             selectedTaskId = startData.task_id;
@@ -3215,7 +3231,7 @@
             await waitForTask(startData.task_id, maxWait);
 
             const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
-            const resultData = await resultRes.json();
+            const resultData = await safeJson(resultRes, '/api/tasks/' + startData.task_id + '/result');
             if (resultData.pending) throw new Error(timeoutMsg);
 
             const result = resultData.result;
@@ -3259,8 +3275,14 @@
             const start = Date.now();
             while (Date.now() - start < maxWait) {
                 await sleep(2000);
-                const res = await fetch(`/api/tasks/${taskId}`);
-                const data = await res.json();
+                let data;
+                try {
+                    const res = await fetch(`/api/tasks/${taskId}`);
+                    data = await safeJson(res, `/api/tasks/${taskId}`);
+                } catch (e) {
+                    // 轮询请求暂时失败（如 502），任务仍在后台运行，忽略并继续等待
+                    continue;
+                }
                 if (data.ok && data.task && data.task.status !== 'pending' && data.task.status !== 'running') {
                     return;
                 }

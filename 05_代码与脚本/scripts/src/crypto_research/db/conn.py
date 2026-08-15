@@ -18,7 +18,14 @@ def get_connection(database_url: str) -> Iterator[psycopg.Connection]:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        # 连接已丢失时 rollback 本身也会抛错，吞掉避免掩盖原始异常
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass

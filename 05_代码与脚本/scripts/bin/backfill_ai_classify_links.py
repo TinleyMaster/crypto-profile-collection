@@ -108,6 +108,30 @@ def _where_method(method: str) -> str:
     return "classify_method IN ('default', 'keyword')"
 
 
+def _db_retry(database_url, fn, retries=8, delay=5):
+    """在可重试连接下执行 fn(conn)，PG 周期性重启时自动重连重试。
+
+    fn(conn) 需返回结果；仅连接类异常重试，数据类异常直接抛出。
+    """
+    import psycopg
+    from psycopg.errors import AdminShutdown
+    from crypto_research.db.conn import get_connection
+
+    last_err = None
+    for i in range(retries):
+        try:
+            with get_connection(database_url) as conn:
+                return fn(conn)
+        except (psycopg.OperationalError, AdminShutdown) as e:
+            last_err = e
+            print(
+                f"  [WARN] DB 操作失败({i + 1}/{retries}): {str(e)[:70]}，{delay}s 后重试...",
+                flush=True,
+            )
+            time.sleep(delay)
+    raise last_err
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="存量链接 AI 内容分类回填（阶段2）")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少条（0=全部）")
@@ -134,7 +158,6 @@ def main() -> int:
 
     import psycopg
     from crypto_research.config import get_settings
-    from crypto_research.db.conn import get_connection
     from crypto_research.clients.llm_client import LLMClient
 
     settings = get_settings(require_database=True)
@@ -158,7 +181,10 @@ def main() -> int:
     last_id = 0
     start = time.time()
 
-    with get_connection(settings.database_url) as conn:
+    db_url = settings.database_url
+
+    # 待处理总数（独立连接 + 重试）
+    def _count(conn):
         with conn.cursor() as cur:
             cur.execute(
                 f"""
@@ -170,15 +196,19 @@ def main() -> int:
                 """,
                 (entry_types,),
             )
-            total = cur.fetchone()[0]
-        print(f"待处理总数: {total:,}\n")
+            return cur.fetchone()[0]
 
-        while True:
-            remaining = args.limit - processed if args.limit > 0 else None
-            fetch = args.batch_size if remaining is None else min(args.batch_size, remaining)
-            if fetch <= 0:
-                break
+    total = _db_retry(db_url, _count)
+    print(f"待处理总数: {total:,}\n")
 
+    while True:
+        remaining = args.limit - processed if args.limit > 0 else None
+        fetch = args.batch_size if remaining is None else min(args.batch_size, remaining)
+        if fetch <= 0:
+            break
+
+        # 每批独立连接读取，PG 重启时自动重连
+        def _select(conn):
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     f"""
@@ -193,68 +223,72 @@ def main() -> int:
                     """,
                     (last_id, entry_types, fetch),
                 )
-                rows = [dict(r) for r in cur.fetchall()]
-            if not rows:
-                break
+                return [dict(r) for r in cur.fetchall()]
 
-            # 并发抓正文
-            texts: list[str] = [""] * len(rows)
-            with ThreadPoolExecutor(max_workers=args.workers) as ex:
-                futs = {
-                    ex.submit(_fetch_page_text, r["entry_url"], args.fetch_timeout): i
-                    for i, r in enumerate(rows)
-                }
-                for fut in as_completed(futs):
-                    i = futs[fut]
-                    try:
-                        texts[i] = fut.result()
-                    except Exception:
-                        texts[i] = ""
+        rows = _db_retry(db_url, _select)
+        if not rows:
+            break
 
-            llm_items = [
-                {
-                    "entry_id": str(r["entry_id"]),
-                    "url": r["entry_url"],
-                    "title": _extract_title(r["entry_url"]),
-                    "text": texts[i],
-                }
+        # 并发抓正文（不占 DB 连接）
+        texts: list[str] = [""] * len(rows)
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {
+                ex.submit(_fetch_page_text, r["entry_url"], args.fetch_timeout): i
                 for i, r in enumerate(rows)
-            ]
+            }
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    texts[i] = fut.result()
+                except Exception:
+                    texts[i] = ""
 
-            results = llm.batch_classify_content_topics(llm_items)
+        llm_items = [
+            {
+                "entry_id": str(r["entry_id"]),
+                "url": r["entry_url"],
+                "title": _extract_title(r["entry_url"]),
+                "text": texts[i],
+            }
+            for i, r in enumerate(rows)
+        ]
 
-            # 第一批打印几个样本，便于核对分类质量
-            if processed == 0:
-                shown = 0
-                for r, t, res in zip(rows, texts, results):
-                    if not res["content_topics"]:
-                        continue
-                    print(
-                        f"  [样例] {r['entry_url'][:80]}\n"
-                        f"         -> {res['content_topics']} (conf={res['confidence']:.2f}) "
-                        f"| 正文 {len(t)} 字 | {res['reason'][:60]}"
-                    )
-                    shown += 1
-                    if shown >= 3:
-                        break
+        results = llm.batch_classify_content_topics(llm_items)
 
-            updates = []
-            fails = []
+        # 第一批打印几个样本，便于核对分类质量
+        if processed == 0:
+            shown = 0
             for r, t, res in zip(rows, texts, results):
-                if not res["content_topics"] or res["confidence"] <= 0:
-                    failed += 1
-                    error = (res.get("reason") or "").strip() or "未知失败"
-                    fails.append((error, r["entry_id"]))
+                if not res["content_topics"]:
                     continue
-                conf = res["confidence"]
-                if not t:
-                    conf = min(conf, 0.6)  # 无正文，置信度封顶
-                    empty_text += 1
-                reason = (res.get("reason") or "").strip()
-                updates.append((res["content_topics"], conf, reason, r["entry_id"]))
-                classified += 1
+                print(
+                    f"  [样例] {r['entry_url'][:80]}\n"
+                    f"         -> {res['content_topics']} (conf={res['confidence']:.2f}) "
+                    f"| 正文 {len(t)} 字 | {res['reason'][:60]}"
+                )
+                shown += 1
+                if shown >= 3:
+                    break
 
-            if updates and not args.dry_run:
+        updates = []
+        fails = []
+        for r, t, res in zip(rows, texts, results):
+            if not res["content_topics"] or res["confidence"] <= 0:
+                failed += 1
+                error = (res.get("reason") or "").strip() or "未知失败"
+                fails.append((error, r["entry_id"]))
+                continue
+            conf = res["confidence"]
+            if not t:
+                conf = min(conf, 0.6)  # 无正文，置信度封顶
+                empty_text += 1
+            reason = (res.get("reason") or "").strip()
+            updates.append((res["content_topics"], conf, reason, r["entry_id"]))
+            classified += 1
+
+        # 每批独立连接写入，PG 重启时自动重连（UPDATE 幂等，重试安全）
+        if updates and not args.dry_run:
+            def _write_updates(conn):
                 with conn.cursor() as cur:
                     cur.executemany(
                         """
@@ -265,9 +299,11 @@ def main() -> int:
                         """,
                         updates,
                     )
-                conn.commit()
 
-            if fails and not args.dry_run:
+            _db_retry(db_url, _write_updates)
+
+        if fails and not args.dry_run:
+            def _write_fails(conn):
                 with conn.cursor() as cur:
                     cur.executemany(
                         """
@@ -277,21 +313,22 @@ def main() -> int:
                         """,
                         fails,
                     )
-                conn.commit()
 
-            processed += len(rows)
-            last_id = rows[-1]["entry_id"]
+            _db_retry(db_url, _write_fails)
 
-            elapsed = time.time() - start
-            pct = processed / total * 100 if total else 0
-            rate = processed / elapsed if elapsed > 0 else 0
-            eta = int((total - processed) / rate) if rate > 0 else 0
-            eta_str = f"{eta // 60}m {eta % 60}s" if eta >= 60 else f"{eta}s"
-            print(
-                f"[{processed:,}/{total:,} {pct:.1f}%] "
-                f"已分类:{classified:,} 无正文:{empty_text:,} 失败:{failed:,} "
-                f"| {rate:.1f}条/s ETA:{eta_str}"
-            )
+        processed += len(rows)
+        last_id = rows[-1]["entry_id"]
+
+        elapsed = time.time() - start
+        pct = processed / total * 100 if total else 0
+        rate = processed / elapsed if elapsed > 0 else 0
+        eta = int((total - processed) / rate) if rate > 0 else 0
+        eta_str = f"{eta // 60}m {eta % 60}s" if eta >= 60 else f"{eta}s"
+        print(
+            f"[{processed:,}/{total:,} {pct:.1f}%] "
+            f"已分类:{classified:,} 无正文:{empty_text:,} 失败:{failed:,} "
+            f"| {rate:.1f}条/s ETA:{eta_str}"
+        )
 
     print()
     print("=" * 60)

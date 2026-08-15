@@ -10,7 +10,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 BATCH_LIMIT = 200        # 每批条数
 MAX_ROUNDS = 200         # 安全上限（防止无限循环）
-MAX_CALLS = 8000         # 总调用上限（留 20% 余量，Demo 月配额 10k）
+MAX_CALLS = 500          # 单次流水线详情调用上限：增量只补 missing，避免一次吃掉大部分月额度
 CALLS_PER_MINUTE = 60    # 速率限制（免费 API 更稳健）
 
 env = os.environ.copy()

@@ -988,6 +988,35 @@ def api_notebooklm_curate(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+# ── 一键投研（NotebookLM 风格） ──
+
+
+@app.route("/api/research/<int:asset_id>/notebook")
+def api_research_notebook(asset_id: int):
+    """打开（不存在则创建）一个代币对应的一键投研笔记本。"""
+    try:
+        data = _get_db_stats().get_or_create_research_notebook(asset_id)
+        if data.get("ok"):
+            return jsonify(data)
+        return jsonify(data), 404 if "不存在" in (data.get("error") or "") else 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
+def api_research_ask(notebook_id: int):
+    """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""
+    question = (request.get_json(silent=True) or {}).get("question", "").strip()
+    if not question:
+        return jsonify({"ok": False, "error": "缺少 question 参数"}), 400
+
+    def _worker(log):
+        return _get_db_stats().ask_research_notebook(notebook_id, question, log=log)
+
+    task_id = task_mgr.submit_func_task(f"一键投研问答: notebook {notebook_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 # ── 链上数据监控 ──
 
 

@@ -1130,6 +1130,522 @@ def curate_notebooklm(asset_id: int, force: bool = False, log=None) -> dict:
     return {"ok": False, "error": err[:500]}
 
 
+# ── 一键投研（NotebookLM 风格） ──
+
+
+def _ensure_research_tables(conn) -> None:
+    """确保一键投研笔记本相关表存在（新环境自动建表）。"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.research_notebook (
+                notebook_id    SERIAL PRIMARY KEY,
+                asset_id       INTEGER NOT NULL,
+                title          TEXT NOT NULL DEFAULT '',
+                snapshot_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+                missing_json   JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_research_notebook_asset UNIQUE (asset_id),
+                CONSTRAINT fk_research_notebook_asset
+                    FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id)
+                    ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.research_message (
+                message_id     SERIAL PRIMARY KEY,
+                notebook_id    INTEGER NOT NULL,
+                role           TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                citations_json JSONB,
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT fk_research_message_notebook
+                    FOREIGN KEY (notebook_id) REFERENCES biz.research_notebook(notebook_id)
+                    ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_research_message_notebook
+                ON biz.research_message (notebook_id, created_at)
+        """)
+
+
+def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls) -> list[dict]:
+    """把各来源的文档链接合并去重成统一资料清单。"""
+    sources = []
+    seen = set()
+
+    def _add(entry_type: str, url, title=None):
+        url = (url or "").strip()
+        if not url or url in seen:
+            return
+        seen.add(url)
+        sources.append({"type": entry_type, "url": url, "title": title or url})
+
+    for e in doc_source_entries:
+        _add(e["entry_type"], e["url"])
+    for r in research_urls:
+        _add(r.get("category") or "research", r["url"], title=r.get("doc_type") or None)
+    for d in doc_assets:
+        _add("doc_file", d.get("source_url") or d.get("resolved_url"),
+             title=d.get("file_name") or d.get("doc_type"))
+        if d.get("resolved_url") and d.get("resolved_url") != d.get("source_url"):
+            _add("doc_file", d["resolved_url"], title=d.get("file_name") or d.get("doc_type"))
+    for u in notebooklm_urls:
+        _add("notebooklm", u)
+    return sources
+
+
+def _collect_asset_snapshot(asset_id: int) -> dict | None:
+    """收集一个代币的全部投研资料快照（文档入口/文件/精选/结构化数据/合约）。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT canonical_symbol, canonical_name, asset_type FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
+            asset = cur.fetchone()
+            if not asset:
+                return None
+
+            cur.execute("""
+                SELECT entry_id, source_code, entry_type, entry_url, discovered_from, is_primary
+                FROM biz.doc_source_entry
+                WHERE asset_id = %s AND entity_type = 'asset'
+                ORDER BY
+                    CASE entry_type
+                        WHEN 'whitepaper_page' THEN 1
+                        WHEN 'official_website' THEN 2
+                        WHEN 'docs' THEN 3
+                        WHEN 'docs_portal' THEN 4
+                        WHEN 'github' THEN 5
+                        WHEN 'medium' THEN 6
+                        ELSE 7
+                    END, entry_id
+            """, (asset_id,))
+            doc_source_entries = [
+                {
+                    "entry_id": r["entry_id"],
+                    "source": r["source_code"],
+                    "entry_type": r["entry_type"],
+                    "url": r["entry_url"],
+                    "discovered_from": r["discovered_from"],
+                    "is_primary": bool(r["is_primary"]),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT doc_id, doc_type, source_url, resolved_url, file_name, mime_type, parse_status
+                FROM biz.doc_asset WHERE asset_id = %s
+                ORDER BY CASE doc_type WHEN 'whitepaper' THEN 1 WHEN 'tokenomics' THEN 2 WHEN 'audit' THEN 3 ELSE 4 END, doc_id
+            """, (asset_id,))
+            doc_assets = [
+                {
+                    "doc_id": r["doc_id"],
+                    "doc_type": r["doc_type"],
+                    "source_url": r["source_url"],
+                    "resolved_url": r["resolved_url"],
+                    "file_name": r["file_name"],
+                    "mime_type": r["mime_type"],
+                    "parse_status": r["parse_status"],
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT url_id, url, category, doc_type, relevance_score, ai_reason, is_selected
+                FROM biz.research_url WHERE asset_id = %s
+                ORDER BY is_selected DESC, relevance_score DESC NULLS LAST, url_id
+            """, (asset_id,))
+            research_urls = [
+                {
+                    "url_id": r["url_id"],
+                    "url": r["url"],
+                    "category": r["category"],
+                    "doc_type": r["doc_type"],
+                    "relevance_score": float(r["relevance_score"]) if r["relevance_score"] is not None else None,
+                    "ai_reason": r["ai_reason"],
+                    "is_selected": bool(r["is_selected"]),
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                "SELECT entry_url FROM biz.doc_source_notebooklm WHERE asset_id = %s ORDER BY ai_rank",
+                (asset_id,),
+            )
+            notebooklm_urls = [r["entry_url"] for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT chain, contract_address, decimals, is_primary
+                FROM core.asset_contract WHERE asset_id = %s
+                ORDER BY is_primary DESC, chain
+            """, (asset_id,))
+            contracts = [
+                {
+                    "chain": r["chain"],
+                    "contract_address": r["contract_address"],
+                    "decimals": r["decimals"],
+                    "is_primary": bool(r["is_primary"]),
+                }
+                for r in cur.fetchall()
+            ]
+
+    # 结构化数据（复用现有只读查询；缺失返回 None / 空结构）
+    tokenomics = get_asset_tokenomics(asset_id)
+    onchain = get_onchain_holder_snapshot(asset_id)
+    social = get_asset_social_heat(asset_id)
+    unlocks = get_asset_unlocks(asset_id)
+
+    sources = _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls)
+
+    return {
+        "asset_id": asset_id,
+        "symbol": asset["canonical_symbol"],
+        "name": asset["canonical_name"],
+        "type": asset["asset_type"],
+        "sources": sources,
+        "structured": {
+            "tokenomics": tokenomics,
+            "onchain": onchain,
+            "social": social,
+            "unlocks": unlocks,
+            "contracts": contracts,
+        },
+        "counts": {
+            "doc_source_entries": len(doc_source_entries),
+            "doc_assets": len(doc_assets),
+            "research_urls": len(research_urls),
+            "contracts": len(contracts),
+            "doc_source_entry_types": [e["entry_type"] for e in doc_source_entries],
+            "doc_asset_types": [d["doc_type"] for d in doc_assets],
+            "research_categories": [r["category"] for r in research_urls],
+        },
+    }
+
+
+def _compute_missing_materials(snapshot: dict) -> list[dict]:
+    """按投研清单判断还缺哪些资料。"""
+    counts = snapshot.get("counts") or {}
+    structured = snapshot.get("structured") or {}
+    entry_types = set(counts.get("doc_source_entry_types") or [])
+    asset_types = set(counts.get("doc_asset_types") or [])
+    research_cats = set(counts.get("research_categories") or [])
+
+    items = []
+
+    def _add(key, label, present, note=""):
+        items.append({"key": key, "label": label, "present": bool(present), "note": note})
+
+    _add("official_website", "官网", "official_website" in entry_types)
+    has_whitepaper = (
+        "whitepaper_page" in entry_types
+        or "docs" in entry_types
+        or "docs_portal" in entry_types
+        or "whitepaper" in asset_types
+        or "tokenomics" in asset_types
+    )
+    _add("whitepaper", "白皮书 / 文档", has_whitepaper)
+    _add("github", "GitHub 仓库", "github" in entry_types)
+    has_audit = ("audit" in asset_types) or any(
+        "audit" in (c or "").lower() or "security" in (c or "").lower() for c in research_cats
+    )
+    _add("audit", "审计报告", has_audit)
+    _add("tokenomics", "代币经济学", bool(structured.get("tokenomics")))
+    _add("onchain", "链上持仓数据", bool(structured.get("onchain") and structured["onchain"].get("by_chain")))
+    _add("social", "社交热度", bool(structured.get("social")))
+    _add("unlocks", "代币解锁数据", bool(structured.get("unlocks")))
+    _add("contract", "合约地址", bool(structured.get("contracts")))
+    return items
+
+
+_FETCH_TYPES = {"whitepaper_page", "docs", "docs_portal", "official_website", "github", "medium"}
+_MAX_DOC_FETCH = 10
+_SNIPPET_LIMIT = 2500
+
+
+def _fetch_url_text(url: str) -> str:
+    """抓取 URL 正文文本，失败或非 HTML 返回空字符串（仅保留链接引用）。"""
+    import re
+    import requests
+
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+            timeout=8,
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "")
+        if "html" not in ctype.lower() and "text" not in ctype.lower():
+            return ""
+        text = resp.text
+    except Exception:
+        return ""
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:_SNIPPET_LIMIT]
+
+
+def _build_research_sources(snapshot: dict) -> list[dict]:
+    """把快照组装成带编号的引用来源（结构化数据 + 文档正文）。"""
+    sources = []
+    structured = snapshot.get("structured") or {}
+
+    def _add_structured(key, label):
+        val = structured.get(key)
+        if not val:
+            return
+        sources.append({
+            "type": "structured",
+            "title": label,
+            "url": None,
+            "snippet": json.dumps(val, ensure_ascii=False, default=str),
+        })
+
+    _add_structured("tokenomics", "代币经济学数据")
+    _add_structured("onchain", "链上持仓数据")
+    _add_structured("social", "社交热度数据")
+    _add_structured("unlocks", "代币解锁数据")
+    _add_structured("contracts", "合约地址")
+
+    order = {
+        "whitepaper_page": 0, "docs": 1, "docs_portal": 2, "official_website": 3,
+        "github": 4, "medium": 5, "doc_file": 6, "audit": 7,
+    }
+    docs = sorted((snapshot.get("sources") or []), key=lambda d: order.get(d.get("type"), 99))
+
+    fetched = 0
+    for d in docs:
+        snippet = None
+        if d.get("type") in _FETCH_TYPES and d.get("url") and fetched < _MAX_DOC_FETCH:
+            snippet = _fetch_url_text(d["url"])
+            fetched += 1
+        sources.append({
+            "type": d.get("type"),
+            "title": d.get("title") or d.get("url"),
+            "url": d.get("url"),
+            "snippet": snippet,
+        })
+    return sources
+
+
+def _format_research_context(sources: list[dict]) -> str:
+    """把引用来源格式化成 LLM 上下文文本。"""
+    lines = []
+    for i, s in enumerate(sources, 1):
+        if s.get("type") == "structured":
+            head = f"[{i}] {s['title']}"
+        else:
+            head = f"[{i}] {s.get('title') or s.get('url')}（类型: {s.get('type')}）"
+        lines.append(head)
+        if s.get("url"):
+            lines.append(f"    链接: {s['url']}")
+        snip = (s.get("snippet") or "").strip()
+        if snip:
+            lines.append(f"    内容: {snip}")
+    return "\n".join(lines)
+
+
+def get_or_create_research_notebook(asset_id: int) -> dict:
+    """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。"""
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT * FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
+            nb = cur.fetchone()
+
+    snapshot = _collect_asset_snapshot(asset_id)
+    if not snapshot:
+        return {"ok": False, "error": "资产不存在"}
+    missing = _compute_missing_materials(snapshot)
+    title = f"{snapshot['symbol']} ({snapshot['name']}) 投研笔记"
+
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            if nb:
+                cur.execute("""
+                    UPDATE biz.research_notebook
+                    SET snapshot_json = %s, missing_json = %s, title = %s, updated_at = NOW()
+                    WHERE notebook_id = %s
+                    RETURNING notebook_id, asset_id, title, snapshot_json, missing_json, created_at, updated_at
+                """, (
+                    json.dumps(snapshot, ensure_ascii=False, default=str),
+                    json.dumps(missing, ensure_ascii=False),
+                    title,
+                    nb["notebook_id"],
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO biz.research_notebook (asset_id, title, snapshot_json, missing_json)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING notebook_id, asset_id, title, snapshot_json, missing_json, created_at, updated_at
+                """, (
+                    asset_id, title,
+                    json.dumps(snapshot, ensure_ascii=False, default=str),
+                    json.dumps(missing, ensure_ascii=False),
+                ))
+            notebook = cur.fetchone()
+
+            cur.execute("""
+                SELECT message_id, role, content, citations_json, created_at
+                FROM biz.research_message WHERE notebook_id = %s ORDER BY created_at, message_id
+            """, (notebook["notebook_id"],))
+            messages = [
+                {
+                    "message_id": r["message_id"],
+                    "role": r["role"],
+                    "content": r["content"],
+                    "citations": r["citations_json"] or [],
+                    "created_at": str(r["created_at"]),
+                }
+                for r in cur.fetchall()
+            ]
+        conn.commit()
+
+    return {
+        "ok": True,
+        "data": {
+            "notebook_id": notebook["notebook_id"],
+            "asset_id": notebook["asset_id"],
+            "title": notebook["title"],
+            "missing": missing,
+            "sources": snapshot["sources"],
+            "structured": snapshot["structured"],
+            "counts": snapshot["counts"],
+            "messages": messages,
+            "created_at": str(notebook["created_at"]),
+            "updated_at": str(notebook["updated_at"]),
+        },
+    }
+
+
+def ask_research_notebook(notebook_id: int, question: str, log=None) -> dict:
+    """基于笔记本资料库进行 AI 问答（所有回答来自资料库并标注引用）。"""
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    question = (question or "").strip()
+    if not question:
+        return {"ok": False, "error": "问题为空"}
+
+    from crypto_research.config import get_settings
+    from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
+
+    settings = get_settings(require_database=True)
+    llm = LLMClient(settings, rpm=30)
+    if not llm.is_available():
+        return {"ok": False, "error": "LLM 未配置，无法问答"}
+
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT * FROM biz.research_notebook WHERE notebook_id = %s", (notebook_id,))
+            nb = cur.fetchone()
+        if not nb:
+            return {"ok": False, "error": "笔记本不存在"}
+
+        snapshot = nb.get("snapshot_json") or {}
+        sources = _build_research_sources(snapshot)
+        if not sources:
+            return {"ok": False, "error": "该代币暂无投研资料，无法问答"}
+
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "INSERT INTO biz.research_message (notebook_id, role, content) VALUES (%s, 'user', %s) "
+                "RETURNING message_id, role, content, citations_json, created_at",
+                (notebook_id, question),
+            )
+            user_msg = cur.fetchone()
+        conn.commit()
+
+    _emit("构建资料上下文并调用 LLM...")
+    context = _format_research_context(sources)
+    if len(context) > 40000:
+        context = context[:40000]
+
+    system_prompt = (
+        "你是一个加密货币投研助手。请严格只依据下面「资料库」中的内容回答用户问题，"
+        "不要使用资料库之外的任何知识或猜测。\n"
+        "引用资料时，在相应句子末尾用 [编号] 标注来源，例如 [1] 或 [2][3]。\n"
+        "如果资料库中没有相关信息，请直接说明「资料库中未找到相关信息」，不要编造。\n"
+        "只输出 JSON，不要输出其他内容。JSON 格式："
+        '{"answer": "你的回答（Markdown 文本，含 [编号] 引用）", '
+        '"citations": [{"index": 1, "quote": "被引用的原文片段（不超过40字）"}]}'
+    )
+    user_prompt = (
+        f"资料库如下：\n\n{context}\n\n"
+        f"用户问题：{question}\n\n请回答。"
+    )
+
+    try:
+        raw = llm.chat(system_prompt, user_prompt, temperature=0.2, max_tokens=4096)
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败: {e}"}
+
+    try:
+        est = extract_json_from_llm_response(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"AI 返回解析失败: {e}"}
+
+    answer = (est.get("answer") or "").strip()
+    if not answer:
+        answer = "（AI 未返回有效回答）"
+
+    citations = []
+    seen_idx = set()
+    for c in est.get("citations") or []:
+        try:
+            idx = int(c.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        if idx < 1 or idx > len(sources) or idx in seen_idx:
+            continue
+        seen_idx.add(idx)
+        s = sources[idx - 1]
+        citations.append({
+            "index": idx,
+            "title": s.get("title") or s.get("url") or "",
+            "url": s.get("url"),
+            "quote": str(c.get("quote", ""))[:200],
+        })
+
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                INSERT INTO biz.research_message (notebook_id, role, content, citations_json)
+                VALUES (%s, 'assistant', %s, %s)
+                RETURNING message_id, role, content, citations_json, created_at
+            """, (notebook_id, answer, json.dumps(citations, ensure_ascii=False)))
+            assistant_msg = cur.fetchone()
+            cur.execute("UPDATE biz.research_notebook SET updated_at = NOW() WHERE notebook_id = %s", (notebook_id,))
+        conn.commit()
+
+    _emit("问答完成")
+    return {
+        "ok": True,
+        "data": {
+            "message": {
+                "message_id": assistant_msg["message_id"],
+                "role": assistant_msg["role"],
+                "content": assistant_msg["content"],
+                "citations": citations,
+                "created_at": str(assistant_msg["created_at"]),
+            },
+            "user_message_id": user_msg["message_id"],
+        },
+    }
+
+
 # ── 链上数据监控 ──
 
 

@@ -692,10 +692,14 @@ def _run_re_crawl_full(asset_id: int) -> dict:
 
     rounds = []
     MAX_ROUNDS = 8  # 最多爬 8 层
+    MAX_DOCS = 100  # 累计文档链接上限，超过即停止
     total_timeout = 900  # 单次脚本超时兜底（秒）
 
     try:
         reset_result = _get_db_stats().reset_full_crawl(asset_id)
+
+        total_discovered = 0
+        stopped_by_doc_limit = False
 
         for round_num in range(1, MAX_ROUNDS + 1):
             # B2 深度爬取（limit 调大，确保一次运行完整处理当前层）
@@ -709,6 +713,7 @@ def _run_re_crawl_full(asset_id: int) -> dict:
             b2_ok = b2_result.returncode == 0
             b2_output = b2_result.stdout[-2000:] if b2_result.stdout else ""
             b2_new_docs = _parse_discovered(b2_output)
+            total_discovered += b2_new_docs
 
             rounds.append({
                 "round": round_num,
@@ -727,11 +732,17 @@ def _run_re_crawl_full(asset_id: int) -> dict:
             b3_ok = b3_result.returncode == 0
             b3_output = b3_result.stdout[-2000:] if b3_result.stdout else ""
             b3_new_docs = _parse_discovered(b3_output)
+            total_discovered += b3_new_docs
 
             rounds[-1]["b3"] = {"ok": b3_ok, "new_docs": b3_new_docs, "output": b3_output}
 
             # 收敛判断：B2 与 B3 本轮都未发现新链接 → 停止
             if b2_new_docs == 0 and b3_new_docs == 0:
+                break
+
+            # 累计文档链接超过 100 条 → 停止继续爬取
+            if total_discovered >= MAX_DOCS:
+                stopped_by_doc_limit = True
                 break
 
         return {
@@ -740,6 +751,8 @@ def _run_re_crawl_full(asset_id: int) -> dict:
                 "reset": reset_result,
                 "rounds": rounds,
                 "total_rounds": len(rounds),
+                "total_discovered": total_discovered,
+                "stopped_by_doc_limit": stopped_by_doc_limit,
             },
         }
     except subprocess.TimeoutExpired as e:

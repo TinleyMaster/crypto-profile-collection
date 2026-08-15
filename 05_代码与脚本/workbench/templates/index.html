@@ -3421,6 +3421,10 @@
                             const b3 = r.b3 || {};
                             msg += `  Round ${r.round}: B2 ${b2.ok ? 'OK' : 'FAIL'} (+${b2.new_docs || 0} docs) | B3 ${b3.ok ? 'OK' : 'FAIL'}\n`;
                         }
+                        msg += `累计发现 ${d.total_discovered ?? 0} 条文档链接。`;
+                        if (d.stopped_by_doc_limit) {
+                            msg += '已达到 100 条上限，提前停止。';
+                        }
                         msg += '\n请刷新资料面板查看新链接。';
                         alert(msg);
                         break;

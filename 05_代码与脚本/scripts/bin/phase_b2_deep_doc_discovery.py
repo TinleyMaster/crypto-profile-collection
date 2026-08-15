@@ -555,12 +555,15 @@ def extract_doc_links(
             # 同根域名的 docs 子域名是文档站，直接收录（跨子域名也保留）
             should_record = True
         elif not require_doc_keyword:
-            # 放宽模式：收录所有同域链接 + 跨域文档关键词链接（用于单资产重爬）
-            # 同域链接全收录（/about, /team, /roadmap 等投研页面）
-            if link_domain == base_domain:
+            # 放宽模式：收录所有同域/同根域名链接 + 匹配项目标识的跨域文档链接（用于单资产重爬）
+            # 同域/同根域名链接全收录（/about, /team, /roadmap 等投研页面）
+            if link_domain == base_domain or _root_domain(link_domain) == _root_domain(base_domain):
                 should_record = True
-            # 跨域链接也检查 doc 关键词（审计报告、白皮书等外部链接）
-            elif _has_doc_keyword(absolute_url) or link_text_is_doc:
+            # 跨域链接：文档关键词 + 项目标识双重校验，
+            # 阻止 lab.stellar.org、profiler.firefox.com 等无关外链被误收
+            elif (_has_doc_keyword(absolute_url) or link_text_is_doc) and _matches_project(
+                absolute_url.lower(), project_identifiers or []
+            ):
                 should_record = True
         elif link_domain in NOISY_DOC_DOMAINS:
             if _doc_keyword_in_path_only(absolute_url) or link_text_is_doc:

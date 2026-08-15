@@ -1,11 +1,12 @@
 """
-CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 4 个步骤。
+CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 5 个步骤。
 
 顺序：
   ① CMC 拉取全量币种列表   ingest_cmc_map.py                     → src_cmc.cmc_asset_map
   ② CMC 拉取币种详情       ingest_cmc_info.py（循环直到无缺失）   → src_cmc.cmc_asset_info
   ③ CMC 资产全量入库       backfill_core_assets_from_cmc_auto.py  → core.asset
-  ④ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
+  ④ CMC 填充合约地址       phase_a_build_core.py --step populate_cmc → core.asset_contract
+  ⑤ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -95,8 +96,16 @@ def main() -> int:
     if code != 0:
         return code
 
-    # ④ 补充文档入口（依赖②+③，内部自动循环）
-    code, _ = _run(_python("refresh_doc_source_entries_from_cmc_auto.py"), "④ 文档")
+    # ④ 填充合约地址（依赖③）：同步 core.asset_contract，否则新入库币查不到链上数据
+    code, _ = _run(
+        _python("phase_a_build_core.py", "--step", "populate_cmc"),
+        "④ 合约",
+    )
+    if code != 0:
+        return code
+
+    # ⑤ 补充文档入口（依赖②+③，内部自动循环）
+    code, _ = _run(_python("refresh_doc_source_entries_from_cmc_auto.py"), "⑤ 文档")
     if code != 0:
         return code
 

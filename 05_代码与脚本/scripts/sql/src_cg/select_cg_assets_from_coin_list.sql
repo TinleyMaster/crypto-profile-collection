@@ -7,11 +7,13 @@ WITH ranked AS (
         l.name,
         l.platforms,
         -- Try exact symbol match to existing core.asset (via CMC)
-        a.asset_id AS existing_asset_id,
+        -- 仅当名称也精确匹配（大小写敏感）时才关联现有资产，
+        -- 防止 symbol 撞车（如 symbol=cap 的 based-brians / cap-2 被误关联到 Cap）
+        CASE WHEN a.canonical_name = l.name THEN a.asset_id ELSE NULL END AS existing_asset_id,
         ROW_NUMBER() OVER (
             PARTITION BY l.coin_id
             ORDER BY
-                CASE WHEN UPPER(a.canonical_name) = l.name THEN 1 ELSE 2 END,
+                CASE WHEN a.canonical_name = l.name THEN 1 ELSE 2 END,
                 a.asset_id
         ) AS rn
     FROM src_cg.coin_list l

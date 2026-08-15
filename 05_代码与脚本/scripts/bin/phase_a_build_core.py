@@ -192,48 +192,69 @@ def step2_populate_cmc(settings, limit: int = 0) -> None:
 
 POPULATE_FROM_DL = """
 INSERT INTO core.asset_contract (asset_id, chain, contract_address, is_primary, source_code)
+WITH dl AS (
+    SELECT
+        asm.asset_id,
+        p.chain AS raw_chain,
+        p.address AS raw_address,
+        -- DefiLlama 的 address 常为「链:地址」格式（如 bsc:0x...），
+        -- 优先用前缀作为该合约所属链（比协议主链 raw_chain 更准确）。
+        CASE
+            WHEN position(':' in p.address) > 0
+                 AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
+            THEN split_part(p.address, ':', 1)
+            ELSE NULL
+        END AS addr_chain,
+        CASE
+            WHEN position(':' in p.address) > 0
+                 AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
+            THEN substring(p.address from position(':' in p.address) + 1)
+            ELSE p.address
+        END AS contract_address
+    FROM src_dl.protocol_list p
+    INNER JOIN core.asset_source_map asm
+        ON asm.source_code = 'dl'
+        AND asm.source_asset_key = p.protocol_id
+    WHERE p.address IS NOT NULL
+      AND p.address != ''
+)
 SELECT
-    asm.asset_id,
+    asset_id,
     CASE
-        WHEN LOWER(p.chain) IN ('ethereum', 'ethereum (erc20)') THEN 'ethereum'
-        WHEN LOWER(p.chain) IN ('binance', 'bsc', 'bnb smart chain') THEN 'bsc'
-        WHEN LOWER(p.chain) = 'solana' THEN 'solana'
-        WHEN LOWER(p.chain) = 'base' THEN 'base'
-        WHEN LOWER(p.chain) IN ('polygon', 'polygon pos') THEN 'polygon'
-        WHEN LOWER(p.chain) IN ('arbitrum', 'arbitrum one') THEN 'arbitrum'
-        WHEN LOWER(p.chain) = 'ton' THEN 'ton'
-        WHEN LOWER(p.chain) IN ('avalanche', 'avalanche c-chain') THEN 'avalanche'
-        WHEN LOWER(p.chain) = 'sui' THEN 'sui'
-        WHEN LOWER(p.chain) = 'fantom' THEN 'fantom'
-        WHEN LOWER(p.chain) = 'cronos' THEN 'cronos'
-        WHEN LOWER(p.chain) = 'aptos' THEN 'aptos'
-        WHEN LOWER(p.chain) = 'optimism' THEN 'optimism'
-        WHEN LOWER(p.chain) = 'near' THEN 'near'
-        WHEN LOWER(p.chain) = 'sonic' THEN 'sonic'
-        WHEN LOWER(p.chain) = 'zksync era' THEN 'zksync'
-        WHEN LOWER(p.chain) IN ('pulse', 'pulsechain') THEN 'pulsechain'
-        WHEN LOWER(p.chain) = 'klaytn' THEN 'klaytn'
-        WHEN LOWER(p.chain) = 'scroll' THEN 'scroll'
-        WHEN LOWER(p.chain) = 'monad' THEN 'monad'
-        WHEN LOWER(p.chain) = 'berachain' THEN 'berachain'
-        WHEN LOWER(p.chain) = 'kava' THEN 'kava'
-        WHEN LOWER(p.chain) = 'blast' THEN 'blast'
-        WHEN LOWER(p.chain) IN ('hyperliquid', 'hyperliquid l1') THEN 'hyperliquid'
-        WHEN LOWER(p.chain) = 'cardano' THEN 'cardano'
-        WHEN LOWER(p.chain) = 'robinhood chain' THEN 'robinhood'
-        ELSE LOWER(p.chain)
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('ethereum', 'ethereum (erc20)', 'eth') THEN 'ethereum'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('binance', 'bsc', 'bnb smart chain', 'bnb') THEN 'bsc'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN 'solana'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'base' THEN 'base'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('polygon', 'polygon pos', 'matic') THEN 'polygon'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('arbitrum', 'arbitrum one', 'arb', 'arbirtum') THEN 'arbitrum'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'ton' THEN 'ton'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('avalanche', 'avalanche c-chain', 'avax') THEN 'avalanche'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'sui' THEN 'sui'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('fantom', 'ftm') THEN 'fantom'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'cronos' THEN 'cronos'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'aptos' THEN 'aptos'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('optimism', 'op') THEN 'optimism'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'near' THEN 'near'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'sonic' THEN 'sonic'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('zksync era', 'zksync', 'era') THEN 'zksync'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('pulse', 'pulsechain') THEN 'pulsechain'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'klaytn' THEN 'klaytn'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'scroll' THEN 'scroll'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'monad' THEN 'monad'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'berachain' THEN 'berachain'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'kava' THEN 'kava'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'blast' THEN 'blast'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('hyperliquid', 'hyperliquid l1') THEN 'hyperliquid'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'cardano' THEN 'cardano'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('robinhood chain', 'robinhood') THEN 'robinhood'
+        ELSE LOWER(COALESCE(addr_chain, raw_chain))
     END AS chain,
-    LOWER(p.address) AS contract_address,
+    LOWER(contract_address) AS contract_address,
     FALSE AS is_primary,
     'dl' AS source_code
-FROM src_dl.protocol_list p
-INNER JOIN core.asset_source_map asm
-    ON asm.source_code = 'dl'
-    AND asm.source_asset_key = p.protocol_id
-WHERE p.address IS NOT NULL
-  AND p.address != ''
-  AND p.address != '0x0000000000000000000000000000000000000000'
-  AND LOWER(p.chain) != 'multi-chain'
+FROM dl
+WHERE LOWER(contract_address) <> '0x0000000000000000000000000000000000000000'
+  AND (addr_chain IS NOT NULL OR LOWER(raw_chain) != 'multi-chain')
 ON CONFLICT (chain, contract_address) DO NOTHING
 """
 

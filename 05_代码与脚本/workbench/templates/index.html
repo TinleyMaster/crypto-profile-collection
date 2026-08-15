@@ -3375,6 +3375,17 @@
             }
         }
 
+        async function fetchWithRetry (url, options, retries = 2, delayMs = 2000) {
+            for (let i = 0; i <= retries; i++) {
+                try {
+                    return await fetch(url, options);
+                } catch (e) {
+                    if (i === retries) throw e;
+                    await new Promise(r => setTimeout(r, delayMs));
+                }
+            }
+        }
+
         async function reCrawlAsset () {
             if (!selectedAssetId) return;
             const btn = document.getElementById('recrawl-btn');
@@ -3384,7 +3395,7 @@
             btn.textContent = '⏳ 爬取中...';
 
             try {
-                const startRes = await fetch(`/api/assets/${selectedAssetId}/re-crawl-full`, { method: 'POST' });
+                const startRes = await fetchWithRetry(`/api/assets/${selectedAssetId}/re-crawl-full`, { method: 'POST' });
                 const startData = await startRes.json();
                 if (!startData?.ok) throw new Error(startData?.error || `HTTP ${startRes.status}`);
 
@@ -3393,7 +3404,7 @@
                 while (true) {
                     if (Date.now() - startTime > MAX_WAIT) throw new Error('爬取超时（超过 15 分钟）');
                     await new Promise(r => setTimeout(r, 3000));
-                    const stRes = await fetch(`/api/assets/${selectedAssetId}/re-crawl-full/status`);
+                    const stRes = await fetchWithRetry(`/api/assets/${selectedAssetId}/re-crawl-full/status`, {}, 2, 1000);
                     const stData = await stRes.json();
                     if (!stData?.ok) throw new Error(stData?.error || '状态查询失败');
                     if (!stData.pending) {

@@ -24,6 +24,9 @@ BOOTSTRAP_MAX_ROUNDS = 100  # ② 安全上限，防止异常情况下死循环
 
 env = os.environ.copy()
 env["PYTHONIOENCODING"] = "utf-8"
+# 清除代理变量：requests 会读取 HTTP(S)_PROXY，本地 socks5 代理不可用会导致 API 请求失败
+for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+    env.pop(_proxy_var, None)
 
 
 def _python(script: str, *args: str) -> list[str]:

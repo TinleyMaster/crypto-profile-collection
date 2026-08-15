@@ -14,6 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from crypto_research.config import Settings
+from crypto_research.mapping.taxonomy import CONTENT_TOPICS
 
 
 def extract_json_from_llm_response(raw: str) -> Any:
@@ -698,5 +699,161 @@ class LLMClient:
             return [
                 {"entry_id": it["entry_id"], "url": it["url"], "noise": False,
                  "reason": f"AI响应解析失败: {e}"}
+                for it in items
+            ]
+
+    def batch_classify_content_topics(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """批量对链接做「内容主题」多标签分类（结合页面正文/URL）。
+
+        与 batch_check_crypto_relevance 只判断是否相关不同，本方法输出对齐
+        taxonomy.CONTENT_TOPICS 的多标签，用于回填低置信度链接的内容主题。
+
+        Args:
+            items: [{entry_id, url, title, text}]，text 为页面正文摘要（可空，
+                   为空时仅凭 URL + 标题判断，置信度应相应降低）。
+
+        Returns:
+            [{entry_id, url, content_topics: [str], confidence: float, reason: str}]
+            调用失败/解析失败时 content_topics 为空、confidence 为 0，由调用方跳过。
+        """
+        if not items:
+            return []
+
+        # 主题定义：label 复用 taxonomy.CONTENT_TOPIC_LABELS，此处只补充简短判据
+        topic_defs = [
+            ("whitepaper", "白皮书/黄皮书/轻皮书，项目技术愿景"),
+            ("docs", "技术文档/开发者文档/接口文档/使用说明"),
+            ("audit", "安全审计报告/漏洞评估/代码审计"),
+            ("deck", "项目路演 PPT / 融资 Deck"),
+            ("tokenomics", "代币经济学/代币分配/释放/经济模型"),
+            ("research", "行业或项目研究报告/深度分析"),
+            ("announcement", "官方公告/新闻发布"),
+            ("roadmap", "路线图/里程碑规划"),
+            ("tge_ido", "TGE/IDO/IEO/公募/私募/代币发行"),
+            ("lp_liquidity", "流动性池/LP/做市/AMM"),
+            ("treasury_multisig", "国库/多签钱包/资金管理"),
+            ("team_vc", "团队/创始人/投资人/融资"),
+            ("dao_governance", "DAO/治理提案/投票"),
+            ("bug_bounty", "漏洞赏金/安全披露"),
+            ("exchange_listing", "交易所上线/上市/交易对"),
+            ("competitor", "竞品对比/竞争分析"),
+            ("major_event", "重大事件/迁移/升级/空投/主网上线"),
+            ("third_party_rating", "第三方评级/数据平台(Dune/DefiLlama/Messari 等)"),
+            ("onchain_abnormal", "链上异常/攻击/漏洞利用/黑客事件"),
+            ("other", "无法归入以上任何一类"),
+        ]
+        topics_text = "\n".join(f'- "{k}": {v}' for k, v in topic_defs)
+
+        system_prompt = (
+            "你是加密货币投研资料分类专家。给定链接的 URL、标题与页面正文摘要，"
+            "判断其内容主题，输出多标签分类结果。\n"
+            "\n"
+            "可选主题（可多选，至少选一个，最相关不超过 3 个）：\n"
+            f"{topics_text}\n"
+            "\n"
+            "规则：\n"
+            "- 优先依据页面正文内容判断，而不是仅凭 URL；正文为空时再参考 URL 与标题。\n"
+            "- 优先选最贴切的主题；无法归入具体主题时选 other。\n"
+            "- content_topics 只能使用上述 key，不要自造新词。\n"
+            "- confidence 表示把握程度（0~1）：正文明确时给 0.8~0.95，"
+            "仅凭 URL/标题推断时给 0.5~0.7。\n"
+            "\n"
+            "只输出 JSON，不要输出其他内容。JSON 格式：\n"
+            '{"results": [{"entry_id": "string", "content_topics": ["..."], '
+            '"confidence": 0.0, "reason": "简短理由"}]}'
+        )
+
+        parts = []
+        for it in items:
+            text = (it.get("text") or "").strip()[:2500]
+            title = (it.get("title") or "").strip()[:200]
+            parts.append(
+                f'- entry_id: {it["entry_id"]}\n'
+                f"  url: {it['url']}\n"
+                f"  title: {title}\n"
+                f"  正文摘要:\n    {text or '（无正文）'}"
+            )
+        items_text = "\n\n".join(parts)
+
+        user_prompt = (
+            f"请对以下 {len(items)} 个链接做内容主题多标签分类：\n\n{items_text}"
+        )
+
+        try:
+            raw = self.chat(system_prompt, user_prompt, temperature=0.0, max_tokens=4096)
+        except Exception as e:
+            return [
+                {"entry_id": str(it["entry_id"]), "url": it["url"],
+                 "content_topics": [], "confidence": 0.0,
+                 "reason": f"AI调用失败: {str(e)[:100]}"}
+                for it in items
+            ]
+
+        try:
+            data = extract_json_from_llm_response(raw)
+            # LLM 可能返回 {"results": [...]}，也可能直接返回 [...] 数组
+            if isinstance(data, dict):
+                results = data.get("results", [])
+            elif isinstance(data, list):
+                results = data
+            else:
+                results = []
+            if not isinstance(results, list):
+                raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
+
+            def _key(v: Any) -> str:
+                return str(v).strip()
+
+            result_map: dict[str, dict] = {}
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                rid = r.get("entry_id")
+                rurl = r.get("url")
+                if rid is None and not rurl:
+                    continue
+                topics = [
+                    str(t) for t in (r.get("content_topics") or [])
+                    if str(t) in CONTENT_TOPICS
+                ]
+                if not topics:
+                    topics = ["other"]
+                conf = max(0.0, min(1.0, float(r.get("confidence", 0.5))))
+                entry = {
+                    "content_topics": topics,
+                    "confidence": conf,
+                    "reason": str(r.get("reason", ""))[:200],
+                }
+                if rid is not None:
+                    result_map[_key(rid)] = entry
+                if rurl:
+                    result_map.setdefault(_key(rurl), entry)
+
+            def _lookup(it: dict[str, Any]) -> dict:
+                return result_map.get(
+                    _key(it["entry_id"]),
+                    result_map.get(_key(it["url"]), {}),
+                )
+
+            return [
+                {
+                    "entry_id": str(it["entry_id"]),
+                    "url": it["url"],
+                    "content_topics": _lookup(it).get("content_topics", []),
+                    "confidence": _lookup(it).get("confidence", 0.0),
+                    "reason": _lookup(it).get("reason", "未匹配到AI结果"),
+                }
+                for it in items
+            ]
+        except (json.JSONDecodeError, ValueError) as e:
+            self._last_diag["parse_error"] = str(e)
+            self._last_diag["parse_raw_prefix"] = raw[:200]
+            return [
+                {"entry_id": str(it["entry_id"]), "url": it["url"],
+                 "content_topics": [], "confidence": 0.0,
+                 "reason": f"AI响应解析失败: {str(e)[:100]}"}
                 for it in items
             ]

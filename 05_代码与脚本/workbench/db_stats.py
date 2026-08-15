@@ -1325,38 +1325,102 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
     }
 
 
+# 完整投研资料类型清单（key 为后端唯一标识，label 为 UI 显示名，description 为说明）。
+RESEARCH_MATERIAL_TYPES = [
+    {"key": "official_website", "label": "官网", "description": "项目官方网站"},
+    {"key": "whitepaper_docs", "label": "白皮书 / 文档", "description": "白皮书、官方技术文档、Gitbook"},
+    {"key": "github_repo", "label": "GitHub仓库", "description": "合约、前端、SDK开源代码仓库"},
+    {"key": "audit_report", "label": "审计报告", "description": "第三方安全审计PDF/链接，包含二次审计"},
+    {"key": "tokenomics", "label": "代币经济学", "description": "代币分配、总供应量、通胀模型文档"},
+    {"key": "onchain_holder_data", "label": "链上持仓数据", "description": "大户持仓、持有者分布、Top Holder"},
+    {"key": "social_heat", "label": "社交热度", "description": "X、Discord、TG粉丝数量、活跃度指标"},
+    {"key": "token_unlock_data", "label": "代币解锁数据", "description": "解锁时间表、TGE后释放、vesting资料"},
+    {"key": "contract_address", "label": "合约地址", "description": "代币合约、代理合约，区分多链地址"},
+    {"key": "tge_ido_info", "label": "TGE & IDO信息", "description": "TGE日期，IDO平台，公募/私募价格，轮次信息"},
+    {"key": "lp_liquidity_info", "label": "LP流动性信息", "description": "LP合约地址、流动性锁仓、DEX交易对、深度"},
+    {"key": "treasury_multisig", "label": "国库&多签钱包", "description": "国库地址、多签配置、国库资产与历史转账"},
+    {"key": "team_vc", "label": "团队 & VC投资人资料", "description": "核心团队背景、投资机构、融资轮次记录"},
+    {"key": "roadmap", "label": "Roadmap路线图", "description": "官方路线图，已完成/待完成里程碑"},
+    {"key": "dao_governance", "label": "治理DAO资料", "description": "治理页面、提案记录、投票权重规则"},
+    {"key": "bug_bounty", "label": "漏洞披露 & BugBounty", "description": "赏金计划，历史漏洞披露记录"},
+    {"key": "exchange_listing", "label": "交易所上线信息", "description": "CEX、DEX上线交易对列表"},
+    {"key": "competitor_material", "label": "竞品对比资料", "description": "同赛道竞品项目链接，用于横向投研对比"},
+    {"key": "major_event_announcement", "label": "重大公告&事件", "description": "合约迁移、升级、品牌更名、风险公告"},
+    {"key": "third_party_rating", "label": "第三方评级资料", "description": "DefiLlama、Tokenomist等第三方页面链接"},
+    {"key": "onchain_abnormal_event", "label": "链上异常事件记录", "description": "大额异常转账、攻击事件、链上风险事件资料"},
+]
+
+# 对尚无独立表/结构化字段的资料类型，用关键词在已收集资料上做启发式判断。
+_MATERIAL_KEYWORD_RULES = {
+    "tge_ido_info": ("tge", "ido", "ieo", "presale", "public sale", "private sale", "launchpad", "token generation", "fair launch"),
+    "lp_liquidity_info": ("liquidity", "uniswap", "pancakeswap", "sushiswap", "dex", "amm", "lp lock", "lp-lock", "locked liquidity", "team finance"),
+    "treasury_multisig": ("treasury", "multisig", "multi-sig", "gnosis", "safe.global", "vault", "dao treasury"),
+    "team_vc": ("founder", "core team", "advisor", "investor", "venture", "funding", "seed round", "series a", "series b", "backed by", "financing"),
+    "roadmap": ("roadmap", "milestone", "q1 20", "q2 20", "q3 20", "q4 20"),
+    "dao_governance": ("dao", "governance", "snapshot", "tally", "proposal", "voting", "vote"),
+    "bug_bounty": ("bug bounty", "bounty", "immunefi", "hackerone", "disclosure", "cve-", "responsible disclosure"),
+    "exchange_listing": ("listing", "listed on", "dexscreener", "trading pair", "trading pairs", "market listing"),
+    "competitor_material": ("competitor", "comparison", " vs ", "benchmark", "peer review"),
+    "major_event_announcement": ("announcement", "migration", "migrate", "upgrade", "rebrand", "airdrop", "mainnet launch"),
+    "third_party_rating": ("defillama", "tokenomist", "cryptorank", "messari", "dappradar", "nansen", "glassnode"),
+    "onchain_abnormal_event": ("hack", "exploit", "attack", "breach", "rug pull", "anomaly", "abnormal", "incident", "flash loan"),
+}
+
+
 def _compute_missing_materials(snapshot: dict) -> list[dict]:
-    """按投研清单判断还缺哪些资料。"""
+    """按完整投研清单判断每类资料的收集状态。"""
     counts = snapshot.get("counts") or {}
     structured = snapshot.get("structured") or {}
     entry_types = set(counts.get("doc_source_entry_types") or [])
     asset_types = set(counts.get("doc_asset_types") or [])
     research_cats = set(counts.get("research_categories") or [])
+    sources = snapshot.get("sources") or []
+    tokenomics = structured.get("tokenomics") or {}
+    onchain = structured.get("onchain") or {}
+    unlocks = structured.get("unlocks")
+
+    # 拼接用于关键词检索的文本：资料链接/标题/类型 + 各枚举 + 结构化字段名。
+    hay_parts = []
+    for s in sources:
+        hay_parts.append(str(s.get("type") or ""))
+        hay_parts.append(str(s.get("url") or ""))
+        hay_parts.append(str(s.get("title") or ""))
+    hay_parts.extend(entry_types)
+    hay_parts.extend(asset_types)
+    hay_parts.extend(research_cats)
+    for k, v in tokenomics.items():
+        if v:
+            hay_parts.append(str(k))
+    haystack = " ".join(hay_parts).lower()
+
+    def _has_keyword(*words: str) -> bool:
+        return any(w in haystack for w in words)
+
+    present: dict[str, bool] = {
+        "official_website": "official_website" in entry_types,
+        "whitepaper_docs": bool({"whitepaper_page", "docs", "docs_portal"} & entry_types)
+        or bool({"whitepaper", "tokenomics", "docs"} & asset_types),
+        "github_repo": "github" in entry_types,
+        "audit_report": "audit" in asset_types or _has_keyword("audit", "security"),
+        "tokenomics": bool(tokenomics) or "tokenomics" in asset_types,
+        "onchain_holder_data": bool(onchain and onchain.get("by_chain")),
+        "social_heat": bool(structured.get("social")),
+        "token_unlock_data": bool(unlocks),
+        "contract_address": bool(structured.get("contracts")),
+    }
+    for key in _MATERIAL_KEYWORD_RULES:
+        present[key] = _has_keyword(*_MATERIAL_KEYWORD_RULES[key])
 
     items = []
-
-    def _add(key, label, present, note=""):
-        items.append({"key": key, "label": label, "present": bool(present), "note": note})
-
-    _add("official_website", "官网", "official_website" in entry_types)
-    has_whitepaper = (
-        "whitepaper_page" in entry_types
-        or "docs" in entry_types
-        or "docs_portal" in entry_types
-        or "whitepaper" in asset_types
-        or "tokenomics" in asset_types
-    )
-    _add("whitepaper", "白皮书 / 文档", has_whitepaper)
-    _add("github", "GitHub 仓库", "github" in entry_types)
-    has_audit = ("audit" in asset_types) or any(
-        "audit" in (c or "").lower() or "security" in (c or "").lower() for c in research_cats
-    )
-    _add("audit", "审计报告", has_audit)
-    _add("tokenomics", "代币经济学", bool(structured.get("tokenomics")))
-    _add("onchain", "链上持仓数据", bool(structured.get("onchain") and structured["onchain"].get("by_chain")))
-    _add("social", "社交热度", bool(structured.get("social")))
-    _add("unlocks", "代币解锁数据", bool(structured.get("unlocks")))
-    _add("contract", "合约地址", bool(structured.get("contracts")))
+    for spec in RESEARCH_MATERIAL_TYPES:
+        key = spec["key"]
+        items.append({
+            "key": key,
+            "label": spec["label"],
+            "description": spec["description"],
+            "present": bool(present.get(key)),
+            "note": "",
+        })
     return items
 
 

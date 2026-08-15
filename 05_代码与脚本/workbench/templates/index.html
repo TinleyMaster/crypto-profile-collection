@@ -4305,7 +4305,8 @@
                     const dot = m.present ? 'ok' : 'miss';
                     const status = m.present ? '已收集' : '缺失';
                     const color = m.present ? '#10b981' : '#dc2626';
-                    side += '<div class="r-missing-item">' +
+                    const desc = m.description ? ' title="' + escapeHtml(m.description) + '"' : '';
+                    side += '<div class="r-missing-item"' + desc + '>' +
                         '<span class="dot ' + dot + '"></span>' +
                         '<span>' + escapeHtml(m.label) + '</span>' +
                         '<span style="margin-left:auto;color:' + color + '">' + status + '</span>' +

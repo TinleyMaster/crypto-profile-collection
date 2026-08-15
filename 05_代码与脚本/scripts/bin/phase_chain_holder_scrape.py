@@ -49,9 +49,10 @@ EXPLORER_URLS = {
 }
 
 # Blockscout 免费 REST API（JSON 接口，无 Cloudflare 拦截），用于避开
-# basescan/etherscan 系对 requests 的 403 反爬。key 为链简称。
+# basescan/arbiscan/etherscan 系对 requests 的 403 反爬。key 为链简称。
 BLOCKSCOUT_BASE = {
     "base": "https://base.blockscout.com",
+    "arb": "https://arbitrum.blockscout.com",
 }
 
 # 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称

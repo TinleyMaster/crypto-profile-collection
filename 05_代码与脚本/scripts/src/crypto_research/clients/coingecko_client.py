@@ -38,10 +38,13 @@ class CoinGeckoClient:
         }
         self.session.headers.update(headers)
 
+        # 注意：429 不放入 status_forcelist，否则 urllib3 会自动重试并最终抛
+        # "Max retries exceeded"，掩盖真实的 429，导致 _get() 里的 key 轮替逻辑
+        # 永远走不到。429 直接返回 response，交由下方按需切换 API Key。
         retry = Retry(
             total=3,
             backoff_factor=2,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[500, 502, 503, 504],
             allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)

@@ -30,6 +30,7 @@ from phase_b2_deep_doc_discovery import extract_doc_links
 VALID_ENTRY_TYPES = {
     "official_website", "docs", "github", "medium",
     "docs_portal", "whitepaper_page", "twitter", "telegram", "other", "reddit",
+    "facebook", "announcement",
 }
 
 # 并发数（浏览器资源有限）

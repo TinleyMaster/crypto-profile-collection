@@ -367,7 +367,23 @@ def _doc_keyword_in_path_only(url: str) -> bool:
 
 
 def infer_doc_entry_type(url: str) -> str:
+    from urllib.parse import urlparse
+
+    from crypto_research.mapping.classify_link import infer_source_type
+
     lowered = url.lower()
+
+    # B2 特有：文档门户站识别（保留 docs_portal，供后续轮次 llms.txt 递归发现）
+    if "/docs/" in lowered or "documentation" in lowered:
+        return "docs_portal"
+    if urlparse(url).netloc.lower().startswith("docs."):
+        return "docs_portal"
+
+    # 文档类关键词 → docs（tokenomics/audit 页面是文档，不是官网）
+    if "tokenomics" in lowered or "audit" in lowered:
+        return "docs"
+
+    # 白皮书独立成 whitepaper_page（对齐 taxonomy.SOURCE_TYPES）
     if any(
         kw in lowered
         for kw in [
@@ -380,16 +396,11 @@ def infer_doc_entry_type(url: str) -> str:
             "technical-paper",
         ]
     ):
-        return "docs"
-    if "tokenomics" in lowered:
-        return "docs"
-    if "audit" in lowered:
-        return "docs"
-    if "/docs/" in lowered or "documentation" in lowered:
-        return "docs_portal"
-    if "github.com" in lowered:
-        return "github"
-    return "docs"
+        return "whitepaper_page"
+
+    # 其余交给统一分类器：github/twitter/telegram/medium/reddit/facebook 等，
+    # 无法识别的默认 official_website（官网页面），避免误标为 docs。
+    return infer_source_type(url)
 
 
 def _is_github_non_doc_blob(url: str) -> bool:

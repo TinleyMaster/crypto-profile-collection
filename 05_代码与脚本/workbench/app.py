@@ -454,6 +454,13 @@ TASK_DEFS = {
         "default_args": ["--execute"],
         "category": "维护",
     },
+    "cmc_backfill_missing_urls": {
+        "name": "CMC 补缺缺失链接",
+        "description": "回填 CMC urls 中存在但 doc_source_entry 缺失的链接（如官网/文档，曾被 B2 覆盖 provenance 后误删）。每批200资产自动循环，直到补完，可与 AI 分类错峰执行避免争锁",
+        "script": "backfill_doc_source_entries_from_cmc.py",
+        "default_args": ["--batch-size", "200", "--max-batches", "100"],
+        "category": "维护",
+    },
 }
 
 

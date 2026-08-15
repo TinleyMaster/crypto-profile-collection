@@ -1017,6 +1017,25 @@ def api_research_ask(notebook_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/research/<int:asset_id>")
+def research_page(asset_id: int):
+    """一键投研独立页面（新标签页打开）。"""
+    return render_template("research.html", asset_id=asset_id)
+
+
+@app.route("/api/research/source/content")
+def api_research_source_content():
+    """抓取单个来源 URL 的正文（HTML/PDF），供投研页按文件类型展开查看资料内容。"""
+    url = (request.args.get("url", "") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "缺少 url 参数"}), 400
+    try:
+        content = _get_db_stats().fetch_research_source_content(url)
+        return jsonify({"ok": True, "content": content})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── 链上数据监控 ──
 
 

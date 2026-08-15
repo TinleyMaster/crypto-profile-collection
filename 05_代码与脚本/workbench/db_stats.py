@@ -1470,6 +1470,11 @@ def _fetch_url_text(url: str) -> str:
     return text[:_SNIPPET_LIMIT]
 
 
+def fetch_research_source_content(url: str) -> str:
+    """抓取 URL 正文文本（HTML 去标签 / PDF 抽取），供投研页按需查看资料内容。"""
+    return _fetch_url_text(url)
+
+
 def _build_research_sources(snapshot: dict) -> list[dict]:
     """把快照组装成带编号的引用来源（结构化数据 + 文档正文）。"""
     sources = []

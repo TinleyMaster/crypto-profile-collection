@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一键投研</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
+        body {
+            background: #0f1115;
+            color: #e6e8eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        a { color: #60a5fa; }
+
+        .r-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 20px;
+            border-bottom: 1px solid #1e222a;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+        .r-title { font-size: 15px; font-weight: 600; }
+        .r-actions { display: flex; gap: 8px; align-items: center; }
+        .r-actions button {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .r-actions button:hover { background: #4b5563; }
+
+        .r-body { flex: 1; display: flex; min-height: 0; }
+
+        .r-sidebar {
+            width: 360px;
+            border-right: 1px solid #1e222a;
+            overflow-y: auto;
+            padding: 16px;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+        .r-sidebar h3 {
+            font-size: 12px;
+            color: #8a92a0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 16px 0 8px;
+        }
+        .r-sidebar h3:first-child { margin-top: 0; }
+
+        .r-missing-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            margin-bottom: 6px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+        }
+        .r-missing-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .r-missing-item .dot.ok { background: #10b981; }
+        .r-missing-item .dot.miss { background: #dc2626; }
+
+        .r-group {
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            background: #171a21;
+            overflow: hidden;
+        }
+        .r-group-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 10px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .r-group-head:hover { background: #1c2129; }
+        .r-group-head .chev { margin-left: auto; color: #8a92a0; font-size: 11px; transition: transform .15s; }
+        .r-group.open .r-group-head .chev { transform: rotate(90deg); }
+        .r-group-head .cnt { color: #6b7280; font-size: 11px; font-weight: 400; }
+        .r-group-body { display: none; border-top: 1px solid #1e222a; padding: 8px; }
+        .r-group.open .r-group-body { display: block; }
+
+        .r-src { margin-bottom: 8px; }
+        .r-src:last-child { margin-bottom: 0; }
+        .r-src-head {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 12px;
+            word-break: break-all;
+        }
+        .r-src-head a { text-decoration: none; color: #9ca3af; flex: 1; }
+        .r-src-head a:hover { text-decoration: underline; color: #e6e8eb; }
+        .r-src-head .r-content-btn {
+            background: #272d38;
+            color: #9ca3af;
+            border: none;
+            border-radius: 5px;
+            padding: 2px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+        .r-src-head .r-content-btn:hover { background: #374151; color: #e6e8eb; }
+        .r-src-content {
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: #0d1014;
+            border: 1px solid #1e222a;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.6;
+            color: #b8bec7;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 240px;
+            overflow-y: auto;
+        }
+
+        .r-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .r-messages { flex: 1; overflow-y: auto; padding: 20px; }
+        .r-msg { max-width: 760px; margin-bottom: 16px; }
+        .r-msg-role { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+        .r-msg-content {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 14px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .r-msg.user .r-msg-content { background: #1c2533; border-color: #2b3a52; }
+        .r-citations { margin-top: 8px; font-size: 11px; color: #8a92a0; }
+        .r-citations a { color: #60a5fa; text-decoration: none; }
+        .r-citations a:hover { text-decoration: underline; }
+        .r-cite { display: block; margin-top: 4px; padding-left: 8px; border-left: 2px solid #2a2f3a; }
+
+        .r-input {
+            display: flex;
+            gap: 10px;
+            padding: 16px 20px;
+            border-top: 1px solid #1e222a;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+        .r-input textarea {
+            flex: 1;
+            resize: none;
+            height: 60px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            color: #e6e8eb;
+            font-size: 14px;
+            padding: 12px 14px;
+            outline: none;
+            font-family: inherit;
+        }
+        .r-input textarea:focus { border-color: #3b82f6; }
+        .r-input button {
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            padding: 0 22px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .r-input button:disabled { background: #374151; color: #9ca3af; cursor: not-allowed; }
+
+        .no-data { color: #6b7280; font-size: 12px; padding: 8px 0; }
+    </style>
+</head>
+<body>
+    <header class="r-header">
+        <div class="r-title" id="r-title">🤖 一键投研</div>
+        <div class="r-actions">
+            <button onclick="window.close()">关闭</button>
+        </div>
+    </header>
+    <div class="r-body">
+        <aside class="r-sidebar" id="r-sidebar"><div class="no-data">加载中...</div></aside>
+        <section class="r-chat">
+            <div class="r-messages" id="r-messages"></div>
+            <div class="r-input">
+                <textarea id="r-question" placeholder="输入问题，回答将严格基于已收集资料并标注来源...（Enter 发送，Shift+Enter 换行）"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askResearchQuestion();}"></textarea>
+                <button id="r-ask-btn" onclick="askResearchQuestion()">发送</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const ASSET_ID = {{ asset_id }};
+        let researchNotebookId = null;
+        let researchAsking = false;
+
+        const TYPE_LABELS = {
+            whitepaper_page: '白皮书页',
+            docs: '文档',
+            docs_portal: '文档门户',
+            official_website: '官网',
+            doc_file: '文档文件',
+            github: 'GitHub',
+            medium: 'Medium 博客',
+            announcement: '公告',
+            twitter: 'Twitter / X',
+            telegram: 'Telegram',
+            reddit: 'Reddit',
+            facebook: 'Facebook',
+            notebooklm: 'NotebookLM 精选',
+            research: '投研精选',
+            other: '其他',
+        };
+        const TYPE_ORDER = ['whitepaper_page', 'docs', 'docs_portal', 'official_website', 'doc_file',
+            'github', 'medium', 'announcement', 'twitter', 'telegram', 'reddit', 'facebook',
+            'notebooklm', 'research', 'other'];
+
+        function escapeHtml (s) {
+            if (s == null) return '';
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+        function attrEscape (s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function sleep (ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+        async function safeJson (res, url) {
+            if (!res.ok) {
+                let detail = '';
+                try { detail = (await res.text()).slice(0, 200); } catch (e) {}
+                throw new Error('服务器错误 ' + res.status + (detail ? '（' + detail + '）' : ''));
+            }
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                throw new Error('服务器返回异常响应: ' + text.slice(0, 200));
+            }
+        }
+
+        async function waitForTask (taskId, maxWait = 600000) {
+            const start = Date.now();
+            while (Date.now() - start < maxWait) {
+                await sleep(2000);
+                let data;
+                try {
+                    const res = await fetch('/api/tasks/' + taskId);
+                    data = await safeJson(res, '/api/tasks/' + taskId);
+                } catch (e) {
+                    continue;
+                }
+                if (data.ok && data.task && data.task.status !== 'pending' && data.task.status !== 'running') {
+                    return;
+                }
+            }
+        }
+
+        // ── 加载笔记本 ──
+        async function loadNotebook () {
+            try {
+                const res = await fetch('/api/research/' + ASSET_ID + '/notebook');
+                const data = await safeJson(res, '/api/research/' + ASSET_ID + '/notebook');
+                if (!data.ok || !data.data) throw new Error(data.error || '打开失败');
+                researchNotebookId = data.data.notebook_id;
+                render(data.data);
+            } catch (e) {
+                document.getElementById('r-title').textContent = '🤖 一键投研';
+                document.getElementById('r-sidebar').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
+                document.getElementById('r-messages').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function render (d) {
+            const title = d.title || '一键投研';
+            document.getElementById('r-title').textContent = '🤖 ' + title;
+            document.title = title;
+            renderSidebar(d);
+            renderMessages(d.messages || []);
+        }
+
+        function renderSidebar (d) {
+            let side = '';
+            const missing = d.missing || [];
+            side += '<h3>投研资料完整性</h3>';
+            if (missing.length === 0) {
+                side += '<div class="no-data">无缺失项</div>';
+            } else {
+                missing.forEach(function (m) {
+                    const dot = m.present ? 'ok' : 'miss';
+                    const status = m.present ? '已收集' : '缺失';
+                    const color = m.present ? '#10b981' : '#dc2626';
+                    const desc = m.description ? ' title="' + attrEscape(m.description) + '"' : '';
+                    side += '<div class="r-missing-item"' + desc + '>' +
+                        '<span class="dot ' + dot + '"></span>' +
+                        '<span>' + escapeHtml(m.label) + '</span>' +
+                        '<span style="margin-left:auto;color:' + color + '">' + status + '</span>' +
+                        '</div>';
+                });
+            }
+
+            const sources = d.sources || [];
+            side += '<h3>文件类型（' + sources.length + '）</h3>';
+            if (sources.length === 0) {
+                side += '<div class="no-data">暂无资料</div>';
+            } else {
+                side += renderSourceGroups(sources);
+            }
+            document.getElementById('r-sidebar').innerHTML = side;
+        }
+
+        function renderSourceGroups (sources) {
+            const groups = {};
+            sources.forEach(function (s) {
+                const key = TYPE_LABELS[s.type] ? s.type : 'other';
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(s);
+            });
+            const keys = Object.keys(groups).sort(function (a, b) {
+                const ia = TYPE_ORDER.indexOf(a); const ib = TYPE_ORDER.indexOf(b);
+                return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+            });
+
+            let html = '';
+            keys.forEach(function (key) {
+                const items = groups[key];
+                const label = TYPE_LABELS[key] || key;
+                html += '<div class="r-group">' +
+                    '<div class="r-group-head" onclick="toggleGroup(this)">' +
+                    '<span>' + escapeHtml(label) + '</span>' +
+                    '<span class="cnt">' + items.length + '</span>' +
+                    '<span class="chev">▶</span>' +
+                    '</div>' +
+                    '<div class="r-group-body">';
+                items.forEach(function (s) {
+                    html += renderSourceItem(s);
+                });
+                html += '</div></div>';
+            });
+            return html;
+        }
+
+        function renderSourceItem (s) {
+            const title = escapeHtml(s.title || s.url || '');
+            let html = '<div class="r-src"><div class="r-src-head">';
+            if (s.url) {
+                html += '<a href="' + attrEscape(s.url) + '" target="_blank" rel="noopener">' + title + '</a>';
+            } else {
+                html += '<span>' + title + '</span>';
+            }
+            if (s.url) {
+                html += '<button class="r-content-btn" data-url="' + attrEscape(s.url) + '" onclick="toggleSourceContent(this)">内容</button>';
+            }
+            html += '</div><div class="r-src-content" style="display:none"></div></div>';
+            return html;
+        }
+
+        function toggleGroup (head) {
+            head.parentElement.classList.toggle('open');
+        }
+
+        function toggleSourceContent (btn) {
+            const wrap = btn.closest('.r-src');
+            const box = wrap.querySelector('.r-src-content');
+            if (box.style.display === 'none') {
+                box.style.display = 'block';
+                if (!box.getAttribute('data-loaded')) {
+                    box.innerHTML = '<div class="no-data">加载中...</div>';
+                    fetchSourceContent(btn.getAttribute('data-url'), box);
+                }
+            } else {
+                box.style.display = 'none';
+            }
+        }
+
+        async function fetchSourceContent (url, box) {
+            try {
+                const res = await fetch('/api/research/source/content?url=' + encodeURIComponent(url));
+                const data = await safeJson(res, '/api/research/source/content');
+                if (!data.ok) throw new Error(data.error || '抓取失败');
+                const content = (data.content || '').trim();
+                box.setAttribute('data-loaded', '1');
+                box.innerHTML = content
+                    ? escapeHtml(content)
+                    : '<div class="no-data">未能抓取到正文（可能是图片/JS 渲染页面）</div>';
+            } catch (e) {
+                box.setAttribute('data-loaded', '1');
+                box.innerHTML = '<div class="no-data">抓取失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        // ── 对话 ──
+        function renderMessages (messages) {
+            const box = document.getElementById('r-messages');
+            if (!messages || messages.length === 0) {
+                box.innerHTML = '<div class="no-data">还没有对话。输入问题开始投研。</div>';
+                return;
+            }
+            let html = '';
+            messages.forEach(function (m) { html += renderMessage(m); });
+            box.innerHTML = html;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function renderMessage (m) {
+            const roleLabel = m.role === 'user' ? '你' : 'AI 助手';
+            const roleCls = m.role === 'user' ? 'user' : 'assistant';
+            let html = '<div class="r-msg ' + roleCls + '">';
+            html += '<div class="r-msg-role">' + roleLabel + '</div>';
+            html += '<div class="r-msg-content">' + escapeHtml(m.content || '') + '</div>';
+            const cites = m.citations || [];
+            if (cites.length) {
+                html += '<div class="r-citations"><strong>引用来源：</strong>';
+                cites.forEach(function (c) {
+                    html += '<span class="r-cite">[' + c.index + '] ' + escapeHtml(c.title || '');
+                    if (c.url) {
+                        html += ' <a href="' + attrEscape(c.url) + '" target="_blank" rel="noopener">' + escapeHtml(c.url) + '</a>';
+                    }
+                    if (c.quote) {
+                        html += '<br><span style="color:#6b7280">“' + escapeHtml(c.quote) + '”</span>';
+                    }
+                    html += '</span>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        function appendMessage (m) {
+            const box = document.getElementById('r-messages');
+            if (box.querySelector('.no-data')) box.innerHTML = '';
+            box.insertAdjacentHTML('beforeend', renderMessage(m));
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function askResearchQuestion () {
+            if (researchAsking) return;
+            if (!researchNotebookId) { alert('笔记本尚未打开'); return; }
+            const ta = document.getElementById('r-question');
+            const question = ta.value.trim();
+            if (!question) return;
+
+            researchAsking = true;
+            const btn = document.getElementById('r-ask-btn');
+            btn.disabled = true;
+            btn.textContent = '思考中...';
+            ta.value = '';
+
+            appendMessage({ role: 'user', content: question, citations: [] });
+
+            try {
+                const startRes = await fetch('/api/research/notebook/' + researchNotebookId + '/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: question }),
+                });
+                const startData = await safeJson(startRes, '/api/research/notebook/' + researchNotebookId + '/ask');
+                if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+                await waitForTask(startData.task_id, 600000);
+
+                const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+                const resultData = await safeJson(resultRes, '/api/tasks/' + startData.task_id + '/result');
+                if (resultData.pending) throw new Error('回答超时，请稍后重试');
+
+                const result = resultData.result;
+                if (resultData.ok && result && result.ok) {
+                    appendMessage(result.data.message);
+                } else {
+                    throw new Error((result && result.error) || resultData.error || '未知错误');
+                }
+            } catch (e) {
+                appendMessage({ role: 'assistant', content: '回答失败: ' + e.message, citations: [] });
+            }
+
+            researchAsking = false;
+            btn.disabled = false;
+            btn.textContent = '发送';
+            ta.focus();
+        }
+
+        loadNotebook();
+    </script>
+</body>
+</html>

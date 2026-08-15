@@ -1101,8 +1101,9 @@ def curate_notebooklm(asset_id: int, force: bool = False, log=None) -> dict:
             except Exception:
                 pass
 
-    script = str(Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin" / "curate_notebooklm.py")
-    script_dir = str(Path(script).parent)
+    scripts_bin = _get_scripts_bin()
+    script = str(scripts_bin / "curate_notebooklm.py")
+    script_dir = str(scripts_bin)
     cmd = [
         sys.executable, "-u", script,
         "--asset-id", str(asset_id),

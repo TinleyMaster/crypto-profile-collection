@@ -383,14 +383,6 @@ TASK_DEFS = {
         "force_arg": "--force",  # 单币调用始终强制覆盖
         "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
     },
-    "c_extract_tokenomics_auto": {
-        "name": "C 代币经济学批量提取",
-        "description": "自动循环批量提取所有资产 tokenomics 数据（每批10个，无候选自动停止）",
-        "script": "phase_c_extract_tokenomics_auto.py",
-        "default_args": [],
-        "category": "投研分析",
-    },
-
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",
@@ -423,14 +415,6 @@ TASK_DEFS = {
         "category": "链上数据",
         "hidden": True,
     },
-    "chain_holder_scrape": {
-        "name": "持仓分布爬取（区块浏览器 HTML）",
-        "description": "直接从 BSCScan/Etherscan 网页解析持仓分布（集中度/Top50 地址/CEX标签），无需 API Key",
-        "script": "phase_chain_holder_scrape.py",
-        "default_args": ["--limit", "50"],
-        "category": "链上数据",
-    },
-
     # ═══ 诊断 ═══
     "diag_noise": {
         "name": "噪声诊断报告",

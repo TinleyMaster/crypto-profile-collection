@@ -10,9 +10,11 @@ import os
 import urllib.request
 import urllib.error
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import psycopg
 import psycopg.rows
+import psycopg_pool
 
 # Docker 环境下直接用 /app/scripts/src，本地则相对路径计算
 if os.path.exists("/app/scripts/src"):
@@ -25,12 +27,37 @@ if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
 
 
-def get_db():
-    from crypto_research.config import get_settings
-    from crypto_research.db.conn import get_connection
+_pool: psycopg_pool.ConnectionPool | None = None
 
-    settings = get_settings(require_database=True)
-    return get_connection(settings.database_url)
+
+def _get_pool() -> psycopg_pool.ConnectionPool:
+    """惰性创建连接池（常驻进程复用连接，避免每次请求重新握手远程数据库）。"""
+    global _pool
+    if _pool is None:
+        from crypto_research.config import get_settings
+
+        settings = get_settings(require_database=True)
+        _pool = psycopg_pool.ConnectionPool(
+            settings.database_url,
+            min_size=1,
+            max_size=5,
+            open=True,
+            timeout=30,
+            kwargs={"connect_timeout": 30},
+        )
+    return _pool
+
+
+@contextmanager
+def get_db():
+    """从连接池取连接，保留原 get_connection 的 commit/rollback 语义。"""
+    with _get_pool().connection() as conn:
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def get_dashboard_stats() -> dict:

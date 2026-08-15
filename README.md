@@ -88,6 +88,29 @@ Phase C: 投研分析提取              ← 进行中
 
 ---
 
+## 文档链接统一分类体系
+
+对 `biz.doc_source_entry` / `biz.doc_asset` / `biz.research_url` 的全部链接，统一做「**来源类型 + 内容主题**」两个正交维度的分类，取代早期分散在 `infer_entry_type` / `infer_doc_type` / `_classify_url` 三处不一致的规则。
+
+**统一 taxonomy（单一数据源，`mapping/taxonomy.py`）**
+- `SOURCE_TYPES` 来源类型：`official_website` / `docs` / `docs_portal` / `whitepaper_page` / `github` / `medium` / `announcement` / `twitter` / `telegram` / `reddit` / `facebook` / `other`
+- `CONTENT_TOPICS` 内容主题（20 类多标签）：`whitepaper` / `docs` / `audit` / `deck` / `tokenomics` / `research` / `announcement` / `roadmap` / `tge_ido` / `lp_liquidity` / `treasury_multisig` / `team_vc` / `dao_governance` / `bug_bounty` / `exchange_listing` / `competitor` / `major_event` / `third_party_rating` / `onchain_abnormal` / `other`
+- `CONTENT_TOPIC_KEYWORDS`：每个主题的关键词规则（多词 `-`/`_` 归一化为空格后匹配）
+- `DOMAIN_SOURCE_TYPES`：域名 → 来源类型（github.com→github、x.com→twitter 等）
+
+**两层分类**
+1. **L1 规则（免费、确定性）**：`mapping/classify_link.py` 的 `classify_link()`，按优先级「域名规则 → CMC `url_key` 元数据 → 标签/URL 关键词 → 兜底」判定，输出 `method` + `confidence`：
+   - `domain` 0.98 / `url_key` 0.9 / `keyword` 0.6 / `default` 0.3（主题 `["other"]`）
+2. **L2 AI 内容分类**：`llm_client.batch_classify_content_topics()` + `backfill_ai_classify_links.py`，对 L1 低置信度项（`default`/0.3）抓页面正文（HTML 去标签 / PDF 用 PyPDF2），喂 LLM 输出对齐 20 类 taxonomy 的多标签 + `confidence` + `reason`，回写 `classify_method='ai_content'`（正文明确 0.8~0.95，仅凭 URL 0.5~0.7）。
+
+**落库字段**：每条链接最终带 `content_topics TEXT[]` + `classify_method TEXT` + `classify_confidence REAL`，供一键投研的 21 类缺失清单精确判定。
+
+**回填脚本**
+- `backfill_classify_links.py`：阶段1，规则 + 元数据（已全量跑通）
+- `backfill_ai_classify_links.py`：阶段2，AI 内容分类（主键分页 + 并发抓正文 + LLM 批量分类 + 断点续跑）
+
+---
+
 ## Phase C：投研分析工具箱
 
 针对单个资产的深度投研分析，从 Web 工作台的"投研分析"面板触发。
@@ -229,6 +252,7 @@ Phase C: 投研分析提取              ← 进行中
 - **搜索回退**：core.asset 搜不到时，自动从 src_cmc 查找并写入 core.asset
 - **资料面板**：文档链接列表（按来源分类，标注入库来源）
 - **一键复制全部链接** / **NotebookLM 精选**
+- **🤖 一键投研**：全屏 NotebookLM 风格投研页（自动收集资料 + 21 类完整性清单 + AI 问答带引用 + 对话持久化）
 - **投研分析面板**：
   - 💰 代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
   - 🔓 代币解锁测算（tokenomics.com 四板块，未命中弹网址框 → URL/AI 测算）
@@ -364,6 +388,33 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 
 ---
 
+## 一键投研笔记本（NotebookLM 风格）
+
+在单个代币搜索面板点击「🤖 一键投研」，跳转到全屏投研页：一个代币对应一个笔记本，自动收集该代币全部已收集资料并保存对话与资料快照，下次重新打开可继续。
+
+**自动收集的资料快照**（`_collect_asset_snapshot`）：
+- 文档入口 `doc_source_entry`（按类型排序）
+- 文档文件 `doc_asset`（whitepaper / tokenomics / audit 优先）
+- 投研精选 `research_url` + NotebookLM 精选 `doc_source_notebooklm`
+- 结构化数据：代币经济学 `asset_tokenomics`、链上持仓 `onchain_holder_snapshot`、社交热度 `asset_social_heat`、解锁数据 `asset_token_unlocks`、合约地址 `asset_contract`
+
+**21 类投研资料完整性清单**（`RESEARCH_MATERIAL_TYPES` + `_compute_missing_materials`）：
+- 前 9 类结构化精确判定：官网 / 白皮书文档 / GitHub 仓库 / 审计报告 / 代币经济学 / 链上持仓 / 社交热度 / 代币解锁 / 合约地址
+- 后 12 类关键词启发式判定：TGE&IDO / LP 流动性 / 国库&多签 / 团队&VC / 路线图 / 治理 DAO / 漏洞赏金 / 交易所上线 / 竞品对比 / 重大公告 / 第三方评级 / 链上异常（阶段3 将改用 `content_topics` 精确判定）
+
+**AI 问答（RAG 式，`ask_research_notebook`）**：
+- 严格只依据资料库回答，强制 `[编号]` 标注来源，返回 `{answer, citations}`；资料库无相关信息时明说、不编造
+- 正文抽取：HTML 去标签 + PDF（PyPDF2，最多 30 页、2500 字 snippet）
+- 历史对话持久化到 `biz.research_message`（外键级联删除），下次打开保留
+
+**API**
+- `GET /api/research/<asset_id>/notebook`：打开（不存在则创建）笔记本
+- `POST /api/research/notebook/<notebook_id>/ask`：提问（后台任务，前端轮询）
+
+**数据表**：`biz.research_notebook`（asset_id 唯一）+ `biz.research_message`
+
+---
+
 ## 项目结构
 
 ```
@@ -374,7 +425,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   ├── bin/                # 入口脚本（n8n / 工作台调用）
 │   │   │   ├── ingest_*.py     # 数据源采集（CG/CMC/DL）
 │   │   │   ├── bootstrap_*.py  # source → core 批量映射
-│   │   │   ├── backfill_*.py   # 历史数据回填
+│   │   │   ├── backfill_*.py   # 历史数据回填（含链接分类阶段1/阶段2）
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理
@@ -393,7 +444,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   │   ├── http_client.py        # 通用 HTTP
 │   │   │   │   └── llm_client.py         # LLM（DeepSeek）
 │   │   │   ├── parsers/        # 响应解析器
-│   │   │   ├── mapping/        # 映射逻辑
+│   │   │   ├── mapping/        # 映射逻辑 + 链接分类（taxonomy / classify_link）
 │   │   │   ├── db/             # 数据库工具
 │   │   │   └── utils/          # 通用工具
 │   │   └── sql/                # SQL 模板

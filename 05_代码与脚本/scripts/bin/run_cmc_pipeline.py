@@ -1,12 +1,13 @@
 """
-CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 5 个步骤。
+CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 6 个步骤。
 
 顺序：
   ① CMC 拉取全量币种列表   ingest_cmc_map.py                     → src_cmc.cmc_asset_map
   ② CMC 拉取币种详情       ingest_cmc_info.py（循环直到无缺失）   → src_cmc.cmc_asset_info
   ③ CMC 资产全量入库       backfill_core_assets_from_cmc_auto.py  → core.asset
   ④ CMC 填充合约地址       phase_a_build_core.py --step populate_cmc → core.asset_contract
-  ⑤ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
+  ⑤ DexScreener 补新币合约 populate_contracts_from_dexscreener.py → core.asset_contract（仅新上市无合约资产）
+  ⑥ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -104,8 +105,13 @@ def main() -> int:
     if code != 0:
         return code
 
-    # ⑤ 补充文档入口（依赖②+③，内部自动循环）
-    code, _ = _run(_python("refresh_doc_source_entries_from_cmc_auto.py"), "⑤ 文档")
+    # ⑤ DexScreener 补新币合约（依赖④）：CMC/CG 都无合约地址的新上市资产，从 DEX 补
+    code, _ = _run(_python("populate_contracts_from_dexscreener.py"), "⑤ DexScreener 补合约")
+    if code != 0:
+        return code
+
+    # ⑥ 补充文档入口（依赖②+③，内部自动循环）
+    code, _ = _run(_python("refresh_doc_source_entries_from_cmc_auto.py"), "⑥ 文档")
     if code != 0:
         return code
 

@@ -2136,9 +2136,6 @@
             const st = d.stats || {};
             document.getElementById('mat-stats').innerHTML = `
                 <div class="stat-chip">文档入口: <strong>${st.total_entries || 0}</strong></div>
-                <div class="stat-chip">文档文件: <strong>${st.total_docs || 0}</strong></div>
-                <div class="stat-chip">投研链接: <strong>${st.total_research_urls || 0}</strong></div>
-                <div class="stat-chip">GitHub仓库: <strong>${st.total_github || 0}</strong></div>
             `;
 
             let html = '';
@@ -2159,69 +2156,6 @@
                         <span class="type-tag tag-${e.entry_type}">${typeLabel}</span>
                         <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
                         <span class="meta">${escapeHtml(e.source || '')} ${e.is_primary ? '· 主' : ''} ${e.deep_crawled ? '· 已爬' : ''}</span>
-                    </div>`;
-                });
-                html += '</div>';
-            }
-            html += '</div>';
-
-            // 文档文件
-            html += '<div class="material-group"><h3>📄 文档文件 (doc_asset)</h3>';
-            if (d.doc_assets.length === 0) {
-                html += '<div class="no-data">暂无文档文件</div>';
-            } else {
-                html += '<div class="material-list">';
-                d.doc_assets.forEach(e => {
-                    html += `
-                    <div class="material-item">
-                        <span class="type-tag tag-${e.doc_type || 'other'}">${e.doc_type || 'other'}</span>
-                        <a class="url-text" href="${escapeHtml(e.source_url)}" target="_blank" rel="noopener">${escapeHtml(e.file_name || e.source_url)}</a>
-                        <span class="meta">${e.parse_status || ''} ${e.mime_type ? '· ' + e.mime_type : ''} ${e.file_size_bytes ? '· ' + formatBytes(e.file_size_bytes) : ''}</span>
-                    </div>`;
-                });
-                html += '</div>';
-            }
-            html += '</div>';
-
-            // 投研链接
-            html += '<div class="material-group"><h3>🔍 投研链接精选 (research_url)</h3>';
-            if (d.research_urls.length === 0) {
-                html += '<div class="no-data">暂无投研链接</div>';
-            } else {
-                html += '<div class="material-list">';
-                d.research_urls.forEach(e => {
-                    html += `
-                    <div class="material-item">
-                        <span class="type-tag tag-${e.category || 'other'}">${e.category || 'other'}</span>
-                        <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
-                        <span class="health health-${e.health_status || 'unchecked'}">${e.health_status || 'unchecked'}</span>
-                        ${e.relevance_score != null ? `<span class="meta">AI: ${(e.relevance_score * 100).toFixed(0)}%</span>` : ''}
-                    </div>`;
-                });
-                html += '</div>';
-            }
-            html += '</div>';
-
-            // GitHub 活跃度
-            html += '<div class="material-group"><h3>🐙 GitHub 开发活跃度</h3>';
-            if (d.github_activity.length === 0) {
-                html += '<div class="no-data">暂无 GitHub 活跃度数据</div>';
-            } else {
-                html += '<div class="material-list">';
-                d.github_activity.forEach(e => {
-                    html += `
-                    <div class="gh-repo-card">
-                        <div class="gh-info">
-                            <span class="gh-name">${escapeHtml(e.owner)}<span>/</span>${escapeHtml(e.repo)}</span>
-                            ${e.language ? `<span class="gh-lang">${escapeHtml(e.language)}</span>` : ''}
-                            ${e.archived ? '<span style="color:#f87171;font-size:11px">Archived</span>' : ''}
-                        </div>
-                        <div class="gh-stats">
-                            <span>⭐ <strong>${e.stars?.toLocaleString() || '-'}</strong></span>
-                            <span>⑂ <strong>${e.forks?.toLocaleString() || '-'}</strong></span>
-                            <span>52w commits: <strong>${e.commits_52w?.toLocaleString() || '-'}</strong></span>
-                            <span>贡献者: <strong>${e.contributors_52w || '-'}</strong></span>
-                        </div>
                     </div>`;
                 });
                 html += '</div>';

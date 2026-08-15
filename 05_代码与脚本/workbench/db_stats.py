@@ -954,6 +954,30 @@ def add_manual_entry(asset_id: int, entry_url: str) -> dict:
     return {"entry_id": row[0] if row else None, "url": entry_url}
 
 
+# doc_source_entry 允许的 entry_type（对齐 taxonomy.SOURCE_TYPES 与数据库 CHECK 约束）
+VALID_ENTRY_TYPES = {
+    "official_website", "docs", "docs_portal", "whitepaper_page",
+    "github", "medium", "announcement", "twitter", "telegram",
+    "reddit", "facebook", "other",
+}
+
+
+def update_entry_type(entry_id: int, entry_type: str) -> dict:
+    """修改某条 doc_source_entry 的来源类型（entry_type）。"""
+    if entry_type not in VALID_ENTRY_TYPES:
+        return {"ok": False, "error": f"非法 entry_type: {entry_type}"}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE biz.doc_source_entry SET entry_type = %s, updated_at = NOW() WHERE entry_id = %s",
+                (entry_type, entry_id),
+            )
+            affected = cur.rowcount
+    if affected == 0:
+        return {"ok": False, "error": "条目不存在"}
+    return {"ok": True, "affected": affected, "entry_type": entry_type}
+
+
 # ── DexScreener 辅助添加 ──
 
 

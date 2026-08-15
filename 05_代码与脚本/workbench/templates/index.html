@@ -728,6 +728,23 @@
             border: 1px solid #ef444444;
         }
 
+        .material-item .entry-type-select {
+            font-size: 11px;
+            font-weight: 500;
+            padding: 3px 6px;
+            border-radius: 4px;
+            flex-shrink: 0;
+            min-width: 96px;
+            background: #171a21;
+            color: #e6e8eb;
+            border: 1px solid #374151;
+            cursor: pointer;
+        }
+
+        .material-item .entry-type-select:hover {
+            border-color: #60a5fa;
+        }
+
         .material-item .url-text {
             flex: 1;
             font-size: 12px;
@@ -2118,6 +2135,29 @@
 
         // ── 资料展示 ──
 
+        async function changeEntryType (select) {
+            const entryId = select.dataset.entryId;
+            const entryType = select.value;
+            if (!entryId || !entryType) return;
+            try {
+                const res = await fetch(`/api/entries/${entryId}/entry-type`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entry_type: entryType }),
+                });
+                const data = await res.json();
+                if (!data.ok) {
+                    alert('修改失败: ' + (data.error || '未知错误'));
+                    loadMaterials(selectedAssetId);
+                    return;
+                }
+                loadMaterials(selectedAssetId);
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+                loadMaterials(selectedAssetId);
+            }
+        }
+
         async function loadMaterials (assetId) {
             materialsPanel.classList.add('visible');
             document.getElementById('mat-content').innerHTML = '<div class="no-data">加载中...</div>';
@@ -2149,14 +2189,21 @@
                 html += '<div class="no-data">暂无文档入口</div>';
             } else {
                 html += '<div class="material-list">';
+                const entryTypeOptions = {
+                    official_website: '官网', docs: '文档', docs_portal: '文档门户',
+                    whitepaper_page: '白皮书页', github: 'GitHub', medium: 'Medium',
+                    announcement: '公告', twitter: 'Twitter', telegram: 'Telegram',
+                    reddit: 'Reddit', facebook: 'Facebook', other: '其他'
+                };
                 d.doc_source_entries.forEach(e => {
-                    const typeLabel = {
-                        official_website: '官网', docs: '文档', docs_portal: '文档门户',
-                        github: 'GitHub', medium: 'Medium', other: '其他'
-                    }[e.entry_type] || e.entry_type;
+                    const opts = Object.entries(entryTypeOptions).map(([v, lbl]) =>
+                        `<option value="${v}" ${v === e.entry_type ? 'selected' : ''}>${lbl}</option>`
+                    ).join('');
                     html += `
                     <div class="material-item">
-                        <span class="type-tag tag-${e.entry_type}">${typeLabel}</span>
+                        <select class="entry-type-select" data-entry-id="${e.entry_id}" onchange="changeEntryType(this)" title="修改链接类型">
+                            ${opts}
+                        </select>
                         <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
                         <span class="meta">${escapeHtml(e.source || '')} ${e.is_primary ? '· 主' : ''} ${e.deep_crawled ? '· 已爬' : ''}</span>
                     </div>`;
@@ -3337,7 +3384,13 @@
         async function fetchWithRetry (url, options, retries = 2, delayMs = 2000) {
             for (let i = 0; i <= retries; i++) {
                 try {
-                    return await fetch(url, options);
+                    const res = await fetch(url, options);
+                    // 网关层 502/503/504 常是后端容器重启/抖动，自动重试
+                    if (res.status >= 500 && i < retries) {
+                        await new Promise(r => setTimeout(r, delayMs));
+                        continue;
+                    }
+                    return res;
                 } catch (e) {
                     if (i === retries) throw e;
                     await new Promise(r => setTimeout(r, delayMs));
@@ -3394,7 +3447,11 @@
                 btn.disabled = false;
                 loadMaterials(selectedAssetId);
             } catch (e) {
-                alert('操作失败: ' + e.message);
+                let msg = e.message || String(e);
+                if (e instanceof SyntaxError && /Unexpected token|valid JSON/i.test(msg)) {
+                    msg = '后端服务暂时无响应（网关返回了非 JSON 内容，通常是服务正在重启或超时），请稍后重试';
+                }
+                alert('操作失败: ' + msg);
                 btn.textContent = '🔄 重新爬取';
                 btn.disabled = false;
             }

@@ -827,6 +827,22 @@ def api_add_manual_entry(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/entries/<int:entry_id>/entry-type", methods=["POST"])
+def api_update_entry_type(entry_id: int):
+    """修改某条 doc_source_entry 的来源类型（entry_type）。"""
+    try:
+        data = request.get_json(silent=True) or {}
+        entry_type = (data.get("entry_type") or "").strip()
+        if not entry_type:
+            return jsonify({"ok": False, "error": "缺少 entry_type 参数"}), 400
+        result = _get_db_stats().update_entry_type(entry_id, entry_type)
+        if not result.get("ok"):
+            return jsonify({"ok": False, "error": result.get("error")}), 400
+        return jsonify({"ok": True, "data": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/assets/<int:asset_id>/ai-noise-clean", methods=["POST"])
 def api_ai_noise_clean(asset_id: int):
     """对指定资产执行 AI 噪声清理。"""

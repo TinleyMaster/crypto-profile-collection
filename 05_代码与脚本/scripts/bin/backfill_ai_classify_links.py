@@ -2,7 +2,10 @@
 
 对 biz.doc_source_entry 中规则/元数据分类置信度低的记录（默认 classify_method='default'，
 即 content_topics=['other'] 且置信度 0.3），抓取页面正文后用 LLM 做内容主题多标签分类，
-回写 content_topics / classify_method='ai_content' / classify_confidence。
+回写 content_topics / classify_method='ai_content' / classify_confidence / classify_reason。
+
+失败项会显式打标：classify_method='ai_failed' + classify_error=原因，可用
+--method ai_failed 精确重试，避免与未处理项混淆。
 
 采用主键分页逐批读取 + 并发抓正文 + LLM 批量分类，避免一次性加载全表。
 
@@ -10,6 +13,7 @@
     python backfill_ai_classify_links.py --dry-run --limit 50        # 预览，不写库
     python backfill_ai_classify_links.py --limit 5000                # 实际回填前 5000 条
     python backfill_ai_classify_links.py --method all                # default + keyword 都重分类
+    python backfill_ai_classify_links.py --method ai_failed          # 只重跑上次失败项
     python backfill_ai_classify_links.py --entry-types docs,docs_portal
 """
 
@@ -43,7 +47,9 @@ UA = (
 SNIPPET_LIMIT = 3000
 PDF_MAX_PAGES = 30
 
-DEFAULT_ENTRY_TYPES = "docs,docs_portal,official_website,other"
+DEFAULT_ENTRY_TYPES = (
+    "docs,docs_portal,whitepaper_page,official_website,medium,announcement,other"
+)
 
 
 def _extract_title(url: str) -> str:
@@ -97,6 +103,8 @@ def _where_method(method: str) -> str:
         return "classify_method = 'default'"
     if method == "keyword":
         return "classify_method = 'keyword'"
+    if method == "ai_failed":
+        return "classify_method = 'ai_failed'"
     return "classify_method IN ('default', 'keyword')"
 
 
@@ -108,8 +116,8 @@ def main() -> int:
     parser.add_argument("--rpm", type=int, default=60, help="LLM 调用速率限制（次/分钟）")
     parser.add_argument(
         "--method", type=str, default="default",
-        choices=["default", "keyword", "all"],
-        help="重分类哪类记录：default=置信度0.3，keyword=置信度0.6，all=两者",
+        choices=["default", "keyword", "all", "ai_failed"],
+        help="重分类哪类记录：default=置信度0.3，keyword=置信度0.6，all=default+keyword，ai_failed=上次失败项",
     )
     parser.add_argument(
         "--entry-types", type=str, default=DEFAULT_ENTRY_TYPES,
@@ -231,15 +239,19 @@ def main() -> int:
                         break
 
             updates = []
+            fails = []
             for r, t, res in zip(rows, texts, results):
                 if not res["content_topics"] or res["confidence"] <= 0:
                     failed += 1
+                    error = (res.get("reason") or "").strip() or "未知失败"
+                    fails.append((error, r["entry_id"]))
                     continue
                 conf = res["confidence"]
                 if not t:
                     conf = min(conf, 0.6)  # 无正文，置信度封顶
                     empty_text += 1
-                updates.append((res["content_topics"], conf, r["entry_id"]))
+                reason = (res.get("reason") or "").strip()
+                updates.append((res["content_topics"], conf, reason, r["entry_id"]))
                 classified += 1
 
             if updates and not args.dry_run:
@@ -247,10 +259,23 @@ def main() -> int:
                     cur.executemany(
                         """
                         UPDATE biz.doc_source_entry
-                        SET content_topics = %s, classify_method = 'ai_content', classify_confidence = %s
+                        SET content_topics = %s, classify_method = 'ai_content', classify_confidence = %s,
+                            classify_reason = %s, classify_error = NULL
                         WHERE entry_id = %s
                         """,
                         updates,
+                    )
+                conn.commit()
+
+            if fails and not args.dry_run:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        UPDATE biz.doc_source_entry
+                        SET classify_method = 'ai_failed', classify_error = %s, classify_reason = NULL
+                        WHERE entry_id = %s
+                        """,
+                        fails,
                     )
                 conn.commit()
 

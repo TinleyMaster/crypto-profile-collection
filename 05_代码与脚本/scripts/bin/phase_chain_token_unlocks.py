@@ -138,15 +138,35 @@ def _extract_slug_from_url(url: str) -> str | None:
     return slug or None
 
 
+def _parse_search_results(payload) -> list[dict]:
+    """解析搜索 API 返回，兼容新版嵌套结构 {success, data: {results}} 与旧版列表。"""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        if payload.get("success"):
+            data = payload.get("data") or {}
+            if isinstance(data, dict):
+                results = data.get("results")
+                if isinstance(results, list):
+                    return results
+        results = payload.get("results")
+        if isinstance(results, list):
+            return results
+    return []
+
+
 def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
-    """通过搜索 API 查找正确的 slug（新版 tokenomics.com + 旧版 tokenomist.ai 都试）。"""
+    """通过搜索 API 查找正确的 slug。
+
+    使用新版 tokenomics.com 的 /api/search/audits 接口（返回 project_slug），
+    该接口对 ticker 匹配准确（旧版 /api/search 已失效）。
+    """
     queries = [symbol]
     if name and name.lower() != symbol.lower():
         queries.append(name)
 
     api_urls = [
-        "https://app.tokenomics.com/api/search",
-        "https://tokenomist.ai/api/search",
+        "https://app.tokenomics.com/api/search/audits",
     ]
 
     for api_url in api_urls:
@@ -154,28 +174,29 @@ def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
             try:
                 resp = requests.get(
                     api_url,
-                    params={"q": q},
+                    params={"q": q, "limit": 50},
                     headers={"Accept": "application/json"},
                     timeout=10,
                 )
                 if resp.status_code != 200:
                     continue
-                results = resp.json()
-                if isinstance(results, list) and results:
-                    # 结果格式: [{slug: "...", name: "...", symbol: "..."}, ...]
-                    # 匹配 symbol 大小写不敏感
-                    for r in results:
-                        r_symbol = (r.get("symbol") or "").strip().upper()
-                        if r_symbol == symbol.upper():
-                            slug = r.get("slug") or ""
-                            if slug:
-                                _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
-                                return slug
-                    # 如果没有精确匹配，取第一个
-                    first_slug = (results[0].get("slug") or "").strip()
-                    if first_slug:
-                        _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug} ({api_url})")
-                        return first_slug
+                results = _parse_search_results(resp.json())
+                if not results:
+                    continue
+                # 结果格式: [{name, ticker, project_slug, ...}, ...]
+                # ticker 可能带尾部空格，需 strip 后再匹配
+                for r in results:
+                    r_symbol = (r.get("ticker") or r.get("symbol") or "").strip().upper()
+                    if r_symbol == symbol.upper():
+                        slug = (r.get("project_slug") or r.get("slug") or "").strip()
+                        if slug:
+                            _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
+                            return slug
+                # 如果没有精确匹配，取第一个
+                first_slug = (results[0].get("project_slug") or results[0].get("slug") or "").strip()
+                if first_slug:
+                    _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug} ({api_url})")
+                    return first_slug
             except Exception as e:
                 _log(f"  [搜索API] {api_url} 查询 '{q}' 失败: {e}")
     return None

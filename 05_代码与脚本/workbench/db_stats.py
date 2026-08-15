@@ -1360,13 +1360,16 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     return items
 
 
-_FETCH_TYPES = {"whitepaper_page", "docs", "docs_portal", "official_website", "github", "medium"}
+_FETCH_TYPES = {"whitepaper_page", "docs", "docs_portal", "official_website", "github", "medium", "doc_file"}
 _MAX_DOC_FETCH = 10
 _SNIPPET_LIMIT = 2500
+_PDF_MAX_PAGES = 30
 
 
 def _fetch_url_text(url: str) -> str:
-    """抓取 URL 正文文本，失败或非 HTML 返回空字符串（仅保留链接引用）。"""
+    """抓取 URL 正文文本：HTML 用正则去标签，PDF 用 PyPDF2 抽取。
+    失败或非文本返回空字符串（仅保留链接引用）。"""
+    import io
     import re
     import requests
 
@@ -1374,12 +1377,25 @@ def _fetch_url_text(url: str) -> str:
         resp = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
-            timeout=8,
+            timeout=20,
             allow_redirects=True,
         )
         resp.raise_for_status()
-        ctype = resp.headers.get("content-type", "")
-        if "html" not in ctype.lower() and "text" not in ctype.lower():
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf"):
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(io.BytesIO(resp.content))
+            parts = []
+            for page in reader.pages[:_PDF_MAX_PAGES]:
+                t = page.extract_text()
+                if t:
+                    parts.append(t)
+            text = "\n\n".join(parts)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:_SNIPPET_LIMIT]
+
+        if "html" not in ctype and "text" not in ctype:
             return ""
         text = resp.text
     except Exception:

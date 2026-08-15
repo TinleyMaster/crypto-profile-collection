@@ -316,11 +316,24 @@
                     const status = m.present ? '已收集' : '缺失';
                     const color = m.present ? '#10b981' : '#dc2626';
                     const desc = m.description ? ' title="' + attrEscape(m.description) + '"' : '';
-                    side += '<div class="r-missing-item"' + desc + '>' +
+                    const links = m.links || [];
+                    side += '<div class="r-group">' +
+                        '<div class="r-group-head"' + desc + ' onclick="toggleGroup(this)">' +
                         '<span class="dot ' + dot + '"></span>' +
                         '<span>' + escapeHtml(m.label) + '</span>' +
+                        '<span class="cnt">' + links.length + '</span>' +
                         '<span style="margin-left:auto;color:' + color + '">' + status + '</span>' +
-                        '</div>';
+                        '<span class="chev">▶</span>' +
+                        '</div>' +
+                        '<div class="r-group-body">';
+                    if (links.length === 0) {
+                        side += '<div class="no-data">暂无链接</div>';
+                    } else {
+                        links.forEach(function (l) {
+                            side += renderSourceItem(l);
+                        });
+                    }
+                    side += '</div></div>';
                 });
             }
 

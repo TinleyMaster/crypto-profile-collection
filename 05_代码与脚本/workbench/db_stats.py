@@ -1398,6 +1398,44 @@ _MATERIAL_TOPIC_MAP = {
 }
 
 
+def _collect_material_links(sources: list[dict]) -> dict[str, list[dict]]:
+    """把引用来源按投研资料类型分组，供投研页「资料完整性」清单点击展开查看链接。
+
+    前 5 类（官网/文档/GitHub/审计/代币经济学）用来源类型 + 内容主题匹配；
+    后 12 类复用 _MATERIAL_TOPIC_MAP 的内容主题映射。无 url 的（结构化数据）不纳入。
+    """
+    links: dict[str, list[dict]] = {}
+
+    def _add(key: str, s: dict):
+        url = s.get("url")
+        if not url:
+            return
+        links.setdefault(key, []).append({
+            "title": s.get("title") or url,
+            "url": url,
+        })
+
+    for s in sources:
+        topics = set(s.get("topics") or [])
+        stype = s.get("type") or ""
+
+        if stype == "official_website":
+            _add("official_website", s)
+        if stype in {"whitepaper_page", "docs", "docs_portal"} or topics & {"whitepaper", "docs", "tokenomics"}:
+            _add("whitepaper_docs", s)
+        if stype == "github":
+            _add("github_repo", s)
+        if "audit" in topics:
+            _add("audit_report", s)
+        if "tokenomics" in topics:
+            _add("tokenomics", s)
+        for key, wanted in _MATERIAL_TOPIC_MAP.items():
+            if set(wanted) & topics:
+                _add(key, s)
+
+    return links
+
+
 def _compute_missing_materials(snapshot: dict) -> list[dict]:
     """按完整投研清单判断每类资料的收集状态。
 
@@ -1434,6 +1472,7 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     for key, wanted in _MATERIAL_TOPIC_MAP.items():
         present[key] = bool(set(wanted) & topics)
 
+    material_links = _collect_material_links(sources)
     items = []
     for spec in RESEARCH_MATERIAL_TYPES:
         key = spec["key"]
@@ -1443,6 +1482,7 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
             "description": spec["description"],
             "present": bool(present.get(key)),
             "note": "",
+            "links": material_links.get(key, []),
         })
     return items
 

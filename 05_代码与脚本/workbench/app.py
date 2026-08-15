@@ -461,6 +461,13 @@ TASK_DEFS = {
         "default_args": ["--batch-size", "200", "--max-batches", "100"],
         "category": "维护",
     },
+    "backfill_ai_classify_official": {
+        "name": "官网内容主题 AI 补分类",
+        "description": "对 official_website 入口抓正文，用 LLM 补 content_topics（白皮书/文档/代币经济学/审计等），供投研资料完整性清单使用。已做 PG 重启自动重连，可断点续跑",
+        "script": "backfill_ai_classify_links.py",
+        "default_args": ["--entry-types", "official_website"],
+        "category": "维护",
+    },
 }
 
 

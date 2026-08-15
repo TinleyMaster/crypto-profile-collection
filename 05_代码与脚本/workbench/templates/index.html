@@ -1992,16 +1992,16 @@
 
         function onchainBar (pct, color) {
             const v = (pct == null || isNaN(pct)) ? 0 : Math.max(0, Math.min(100, Number(pct)));
-            return '<span style="display:inline-block;width:130px;height:6px;background:#e5e7eb;border-radius:3px;vertical-align:middle;margin:0 6px;overflow:hidden">' +
+            return '<span style="display:inline-block;width:130px;height:6px;background:#2a3040;border-radius:3px;vertical-align:middle;margin:0 6px;overflow:hidden">' +
                 '<span style="display:block;height:100%;width:' + v + '%;background:' + color + ';border-radius:3px"></span></span>';
         }
 
         function onchainMetricRow (label, pct, color) {
             const v = (pct == null || isNaN(pct)) ? null : Number(pct);
             return '<div style="margin:2px 0">' +
-                '<span style="display:inline-block;width:52px;color:#6b7280">' + label + '</span>' +
+                '<span style="display:inline-block;width:52px;color:#8a92a0">' + label + '</span>' +
                 onchainBar(v, color) +
-                '<span style="font-size:12px">' + (v != null ? v + '%' : '?') + '</span></div>';
+                '<span style="font-size:12px;color:#e6e8eb">' + (v != null ? v + '%' : '?') + '</span></div>';
         }
 
         // ── 搜索逻辑 ──
@@ -2458,16 +2458,16 @@
             html += '<strong>── 持仓集中度（快照）──</strong><br>';
             for (const chain of chains) {
                 const snap = byChain[chain][0] || {};
-                html += '<div style="margin:6px 0;padding:6px 8px;background:#f9fafb;border-radius:6px">';
+                html += '<div style="margin:6px 0;padding:6px 8px;background:#1e222a;border-radius:6px">';
                 html += '<strong>[' + escapeHtml(chain.toUpperCase()) + ']</strong>';
-                if (snap.total_holders != null) html += ' <span style="color:#6b7280">持币地址 ' + Number(snap.total_holders).toLocaleString() + '</span>';
+                if (snap.total_holders != null) html += ' <span style="color:#8a92a0">持币地址 ' + Number(snap.total_holders).toLocaleString() + '</span>';
                 html += '<br>';
                 html += onchainMetricRow('Top10', snap.top10_concentration, '#dc2626');
                 html += onchainMetricRow('Top50', snap.top50_concentration, '#f59e0b');
                 html += onchainMetricRow('Top100', snap.top100_concentration, '#3b82f6');
-                if (snap.exchange_wallet_pct != null) html += '<span style="color:#6b7280">交易所占比</span> ' + snap.exchange_wallet_pct + '%<br>';
-                if (snap.holder_change_7d != null) html += '<span style="color:#6b7280">7日地址变化</span> ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d + '<br>';
-                if (snap.fetched_at) html += '<span style="color:#9ca3af;font-size:11px">快照时间 ' + escapeHtml(snap.fetched_at.slice(0, 16)) + '</span>';
+                if (snap.exchange_wallet_pct != null) html += '<span style="color:#8a92a0">交易所占比</span> ' + snap.exchange_wallet_pct + '%<br>';
+                if (snap.holder_change_7d != null) html += '<span style="color:#8a92a0">7日地址变化</span> ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d + '<br>';
+                if (snap.fetched_at) html += '<span style="color:#6b7280;font-size:11px">快照时间 ' + escapeHtml(snap.fetched_at.slice(0, 16)) + '</span>';
                 html += '</div>';
             }
             html += '</div>';
@@ -2931,15 +2931,15 @@
                     hasContent = true;
                     html += '<strong>── 持仓集中度 ──</strong><br>';
                     for (const [chain, info] of Object.entries(d.chains)) {
-                        html += '<div style="margin:6px 0;padding:6px 8px;background:#f9fafb;border-radius:6px">';
+                        html += '<div style="margin:6px 0;padding:6px 8px;background:#1e222a;border-radius:6px">';
                         html += '<strong>[' + escapeHtml(chain.toUpperCase()) + ']</strong>';
-                        if (info.total_holders) html += ' <span style="color:#6b7280">持币地址 ' + Number(info.total_holders).toLocaleString() + '</span>';
+                        if (info.total_holders) html += ' <span style="color:#8a92a0">持币地址 ' + Number(info.total_holders).toLocaleString() + '</span>';
                         html += '<br>';
                         html += onchainMetricRow('Top10', info.top10_concentration, '#dc2626');
                         html += onchainMetricRow('Top50', info.top50_concentration, '#f59e0b');
                         html += onchainMetricRow('Top100', info.top100_concentration, '#3b82f6');
-                        if (info.exchange_wallet_pct != null) html += '<span style="color:#6b7280">交易所占比</span> ' + info.exchange_wallet_pct + '%<br>';
-                        if (info.holder_change_7d != null) html += '<span style="color:#6b7280">7日地址变化</span> ' + (info.holder_change_7d > 0 ? '+' : '') + info.holder_change_7d + '<br>';
+                        if (info.exchange_wallet_pct != null) html += '<span style="color:#8a92a0">交易所占比</span> ' + info.exchange_wallet_pct + '%<br>';
+                        if (info.holder_change_7d != null) html += '<span style="color:#8a92a0">7日地址变化</span> ' + (info.holder_change_7d > 0 ? '+' : '') + info.holder_change_7d + '<br>';
 
                         // Top 持有者
                         const holders = info.top_holders || [];
@@ -2950,9 +2950,9 @@
                                 const pct = h.share_pct != null ? Number(h.share_pct) : null;
                                 const label = h.label ? '<span style="color:#f59e0b;font-size:11px;margin-left:4px">[' + escapeHtml(h.label) + ']</span>' : '';
                                 html += '<div style="margin:4px 0">';
-                                html += '<span style="display:inline-block;width:24px;color:#9ca3af">' + rank + '</span>';
-                                html += '<span style="font-family:monospace;font-size:12px">' + escapeHtml(shortAddr(h.address)) + '</span>' + label;
-                                html += '<span style="float:right;font-size:12px">' + (pct != null ? pct + '%' : '?') + '</span>';
+                                html += '<span style="display:inline-block;width:24px;color:#6b7280">' + rank + '</span>';
+                                html += '<span style="font-family:monospace;font-size:12px;color:#e6e8eb">' + escapeHtml(shortAddr(h.address)) + '</span>' + label;
+                                html += '<span style="float:right;font-size:12px;color:#e6e8eb">' + (pct != null ? pct + '%' : '?') + '</span>';
                                 html += '<div style="margin-left:24px;margin-top:1px">' + onchainBar(pct, '#7c3aed') + '</div>';
                                 html += '</div>';
                             });
@@ -2965,10 +2965,10 @@
                             tiers.forEach(t => {
                                 const pctSupply = t.pct_supply != null ? Number(t.pct_supply) : null;
                                 html += '<div style="margin:3px 0">';
-                                html += '<span style="display:inline-block;width:64px;color:#6b7280">' + escapeHtml(t.tier || '') + '</span>';
-                                html += '<span style="display:inline-block;width:48px;color:#9ca3af;font-size:11px">' + (t.count != null ? Number(t.count).toLocaleString() : '?') + '</span>';
+                                html += '<span style="display:inline-block;width:64px;color:#8a92a0">' + escapeHtml(t.tier || '') + '</span>';
+                                html += '<span style="display:inline-block;width:48px;color:#6b7280;font-size:11px">' + (t.count != null ? Number(t.count).toLocaleString() : '?') + '</span>';
                                 html += onchainBar(pctSupply, '#059669');
-                                html += '<span style="font-size:12px">' + (pctSupply != null ? pctSupply + '%' : '?') + '</span>';
+                                html += '<span style="font-size:12px;color:#e6e8eb">' + (pctSupply != null ? pctSupply + '%' : '?') + '</span>';
                                 html += '</div>';
                             });
                         }
@@ -2995,7 +2995,7 @@
                 }
 
                 if (!hasContent) {
-                    html += '<span style="color:#9ca3af">暂无链上数据（可能无合约地址、需 API Pro 订阅、或该链近期无活动）</span><br>';
+                    html += '<span style="color:#8a92a0">暂无链上数据（可能无合约地址、需 API Pro 订阅、或该链近期无活动）</span><br>';
                 }
 
                 if (d.elapsed_ms) {

@@ -153,6 +153,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "cmc_pipeline": {
+        "name": "CMC 一键流水线",
+        "description": "按依赖顺序自动执行：①拉全量列表 → ②拉币种详情(循环) → ③资产全量入库 → ④补充文档入口，失败即停",
+        "script": "run_cmc_pipeline.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
     "cmc_ingest_map": {
         "name": "CMC 拉取全量币种列表",
         "description": "从 CMC API 拉取全量币种列表（listing/map），写入 src_cmc.cmc_asset_map。这是所有 CMC 后续步骤的前置步骤",

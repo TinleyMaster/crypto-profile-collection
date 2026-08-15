@@ -37,6 +37,9 @@ _tmp.txt
 *.db
 *.sqlite
 
+# 工作台运行时任务状态（tasks.json / 日志 / 锁）
+05_代码与脚本/workbench/task_state/
+
 # IDE
 .vscode/
 .idea/

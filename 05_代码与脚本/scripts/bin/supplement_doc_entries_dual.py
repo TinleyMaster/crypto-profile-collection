@@ -218,6 +218,7 @@ def main() -> int:
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     from crypto_research.db.upsert import fetch_one, load_sql
+    from crypto_research.mapping.classify_link import classify_entry_fields
 
     settings = get_settings(require_database=True)
     select_candidates_sql = load_sql("src_dexscreener/select_dexscreener_candidates.sql")
@@ -298,6 +299,7 @@ def main() -> int:
             if entry_type not in VALID_ENTRY_TYPES:
                 entry_type = "other"
             source_code = "dexscreener" if link["discovered_from"].startswith("dexscreener") else "binance"
+            topics, method, confidence = classify_entry_fields(link["entry_url"], source_code=source_code)
             entries.append({
                 "entity_type": "asset",
                 "asset_id": asset_id,
@@ -307,6 +309,9 @@ def main() -> int:
                 "entry_url": link["entry_url"],
                 "discovered_from": link["discovered_from"],
                 "is_primary": entry_type == "official_website",
+                "content_topics": topics,
+                "classify_method": method,
+                "classify_confidence": confidence,
             })
 
         total_matched += 1
@@ -339,7 +344,8 @@ def main() -> int:
             fetch_one(conn, upsert_entry_sql,
                 (entry["entity_type"], entry["asset_id"], entry["protocol_id"],
                  entry["source_code"], entry["entry_type"], entry["entry_url"],
-                 entry["discovered_from"], entry["is_primary"]),
+                 entry["discovered_from"], entry["is_primary"],
+                 entry["content_topics"], entry["classify_method"], entry["classify_confidence"]),
             )
             written += 1
         conn.commit()

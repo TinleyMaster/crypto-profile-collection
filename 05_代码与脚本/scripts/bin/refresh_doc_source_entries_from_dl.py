@@ -29,6 +29,7 @@ def main() -> int:
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     from crypto_research.db.upsert import fetch_one, load_sql
+    from crypto_research.mapping.classify_link import classify_entry_fields
 
     settings = get_settings(require_database=True)
     select_candidates_sql = load_sql("src_dl/select_dl_doc_source_candidates.sql")
@@ -44,6 +45,7 @@ def main() -> int:
             # Official website
             url = row.get("url")
             if url and isinstance(url, str) and url.strip():
+                topics, method, confidence = classify_entry_fields(url.strip(), source_code="dl")
                 entries.append({
                     "entity_type": "asset",
                     "asset_id": row["asset_id"],
@@ -53,11 +55,15 @@ def main() -> int:
                     "entry_url": url.strip(),
                     "discovered_from": "dl_info.url",
                     "is_primary": True,
+                    "content_topics": topics,
+                    "classify_method": method,
+                    "classify_confidence": confidence,
                 })
             # Twitter
             twitter = row.get("twitter")
             if twitter and isinstance(twitter, str) and twitter.strip():
                 twitter_url = f"https://twitter.com/{twitter.strip()}" if not twitter.startswith("http") else twitter.strip()
+                topics, method, confidence = classify_entry_fields(twitter_url, source_code="dl")
                 entries.append({
                     "entity_type": "asset",
                     "asset_id": row["asset_id"],
@@ -67,6 +73,9 @@ def main() -> int:
                     "entry_url": twitter_url,
                     "discovered_from": "dl_info.twitter",
                     "is_primary": False,
+                    "content_topics": topics,
+                    "classify_method": method,
+                    "classify_confidence": confidence,
                 })
 
         if args.dry_run:
@@ -78,7 +87,8 @@ def main() -> int:
                 fetch_one(conn, upsert_entry_sql,
                     (entry["entity_type"], entry["asset_id"], entry["protocol_id"],
                      entry["source_code"], entry["entry_type"], entry["entry_url"],
-                     entry["discovered_from"], entry["is_primary"]))
+                     entry["discovered_from"], entry["is_primary"],
+                     entry["content_topics"], entry["classify_method"], entry["classify_confidence"]))
                 written += 1
             result = {"status": "success", "asset_count": len(source_rows),
                       "entry_count": len(entries), "written_rows": written}

@@ -182,6 +182,7 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
     # 0. 递增重试计数（标记本轮尝试）
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
+    from crypto_research.mapping.classify_link import classify_entry_fields
     try:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
@@ -229,6 +230,9 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
             if doc_links:
                 stats["discovered"] += len(doc_links)
                 for link_url, link_type in doc_links:
+                    topics, method, confidence = classify_entry_fields(
+                        link_url, source_code=result["source_code"]
+                    )
                     db_rows.append((
                         result["entity_type"],
                         result["asset_id"],
@@ -238,6 +242,9 @@ def run_batch(entries: list[dict], concurrency: int, same_domain_only: bool) -> 
                         link_url,
                         f"spa_browser_crawl:{result['url'][:43]}",
                         False,
+                        topics,
+                        method,
+                        confidence,
                     ))
             else:
                 stats["empty"] += 1

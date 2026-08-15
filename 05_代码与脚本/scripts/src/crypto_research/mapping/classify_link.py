@@ -135,3 +135,13 @@ def classify_link(url: str, label: str = "", url_key: str = "", source_code: str
         "method": method,
         "confidence": confidence,
     }
+
+
+def classify_entry_fields(url: str, source_code: str = "", label: str = "", url_key: str = "") -> tuple[list[str], str, float]:
+    """给入库 entry 生成 (content_topics, method, confidence) 三元组。
+
+    entry_type 仍由各来源自身推断（保持既有行为），这里只负责补齐
+    内容主题与分类元数据，供一键投研缺失清单按主题精确判定。
+    """
+    result = classify_link(url, label=label, url_key=url_key, source_code=source_code)
+    return result["content_topics"], result["method"], result["confidence"]

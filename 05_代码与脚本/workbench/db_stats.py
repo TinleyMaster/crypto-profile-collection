@@ -11,6 +11,7 @@ import urllib.request
 import urllib.error
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 import psycopg
 import psycopg.rows
@@ -1175,22 +1176,25 @@ def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm
     sources = []
     seen = set()
 
-    def _add(entry_type: str, url, title=None):
+    def _add(entry_type: str, url, title=None, topics=None):
         url = (url or "").strip()
         if not url or url in seen:
             return
         seen.add(url)
-        sources.append({"type": entry_type, "url": url, "title": title or url})
+        sources.append({"type": entry_type, "url": url, "title": title or url,
+                        "topics": list(topics or [])})
 
     for e in doc_source_entries:
-        _add(e["entry_type"], e["url"])
+        _add(e["entry_type"], e["url"], topics=e.get("content_topics"))
     for r in research_urls:
-        _add(r.get("category") or "research", r["url"], title=r.get("doc_type") or None)
+        _add(r.get("category") or "research", r["url"], title=r.get("doc_type") or None,
+             topics=r.get("content_topics"))
     for d in doc_assets:
         _add("doc_file", d.get("source_url") or d.get("resolved_url"),
-             title=d.get("file_name") or d.get("doc_type"))
+             title=d.get("file_name") or d.get("doc_type"), topics=d.get("content_topics"))
         if d.get("resolved_url") and d.get("resolved_url") != d.get("source_url"):
-            _add("doc_file", d["resolved_url"], title=d.get("file_name") or d.get("doc_type"))
+            _add("doc_file", d["resolved_url"], title=d.get("file_name") or d.get("doc_type"),
+                 topics=d.get("content_topics"))
     for u in notebooklm_urls:
         _add("notebooklm", u)
     return sources
@@ -1209,7 +1213,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                 return None
 
             cur.execute("""
-                SELECT entry_id, source_code, entry_type, entry_url, discovered_from, is_primary
+                SELECT entry_id, source_code, entry_type, entry_url, discovered_from, is_primary, content_topics
                 FROM biz.doc_source_entry
                 WHERE asset_id = %s AND entity_type = 'asset'
                 ORDER BY
@@ -1231,12 +1235,13 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                     "url": r["entry_url"],
                     "discovered_from": r["discovered_from"],
                     "is_primary": bool(r["is_primary"]),
+                    "content_topics": r["content_topics"] or [],
                 }
                 for r in cur.fetchall()
             ]
 
             cur.execute("""
-                SELECT doc_id, doc_type, source_url, resolved_url, file_name, mime_type, parse_status
+                SELECT doc_id, doc_type, source_url, resolved_url, file_name, mime_type, parse_status, content_topics
                 FROM biz.doc_asset WHERE asset_id = %s
                 ORDER BY CASE doc_type WHEN 'whitepaper' THEN 1 WHEN 'tokenomics' THEN 2 WHEN 'audit' THEN 3 ELSE 4 END, doc_id
             """, (asset_id,))
@@ -1249,12 +1254,13 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                     "file_name": r["file_name"],
                     "mime_type": r["mime_type"],
                     "parse_status": r["parse_status"],
+                    "content_topics": r["content_topics"] or [],
                 }
                 for r in cur.fetchall()
             ]
 
             cur.execute("""
-                SELECT url_id, url, category, doc_type, relevance_score, ai_reason, is_selected
+                SELECT url_id, url, category, doc_type, relevance_score, ai_reason, is_selected, content_topics
                 FROM biz.research_url WHERE asset_id = %s
                 ORDER BY is_selected DESC, relevance_score DESC NULLS LAST, url_id
             """, (asset_id,))
@@ -1267,6 +1273,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                     "relevance_score": float(r["relevance_score"]) if r["relevance_score"] is not None else None,
                     "ai_reason": r["ai_reason"],
                     "is_selected": bool(r["is_selected"]),
+                    "content_topics": r["content_topics"] or [],
                 }
                 for r in cur.fetchall()
             ]
@@ -1350,66 +1357,58 @@ RESEARCH_MATERIAL_TYPES = [
     {"key": "onchain_abnormal_event", "label": "链上异常事件记录", "description": "大额异常转账、攻击事件、链上风险事件资料"},
 ]
 
-# 对尚无独立表/结构化字段的资料类型，用关键词在已收集资料上做启发式判断。
-_MATERIAL_KEYWORD_RULES = {
-    "tge_ido_info": ("tge", "ido", "ieo", "presale", "public sale", "private sale", "launchpad", "token generation", "fair launch"),
-    "lp_liquidity_info": ("liquidity", "uniswap", "pancakeswap", "sushiswap", "dex", "amm", "lp lock", "lp-lock", "locked liquidity", "team finance"),
-    "treasury_multisig": ("treasury", "multisig", "multi-sig", "gnosis", "safe.global", "vault", "dao treasury"),
-    "team_vc": ("founder", "core team", "advisor", "investor", "venture", "funding", "seed round", "series a", "series b", "backed by", "financing"),
-    "roadmap": ("roadmap", "milestone", "q1 20", "q2 20", "q3 20", "q4 20"),
-    "dao_governance": ("dao", "governance", "snapshot", "tally", "proposal", "voting", "vote"),
-    "bug_bounty": ("bug bounty", "bounty", "immunefi", "hackerone", "disclosure", "cve-", "responsible disclosure"),
-    "exchange_listing": ("listing", "listed on", "dexscreener", "trading pair", "trading pairs", "market listing"),
-    "competitor_material": ("competitor", "comparison", " vs ", "benchmark", "peer review"),
-    "major_event_announcement": ("announcement", "migration", "migrate", "upgrade", "rebrand", "airdrop", "mainnet launch"),
-    "third_party_rating": ("defillama", "tokenomist", "cryptorank", "messari", "dappradar", "nansen", "glassnode"),
-    "onchain_abnormal_event": ("hack", "exploit", "attack", "breach", "rug pull", "anomaly", "abnormal", "incident", "flash loan"),
+# 后 12 类资料类型 → content_topics 内容主题的精确映射（取代早期基于 URL/标题的关键词猜测）。
+_MATERIAL_TOPIC_MAP = {
+    "tge_ido_info": ("tge_ido",),
+    "lp_liquidity_info": ("lp_liquidity",),
+    "treasury_multisig": ("treasury_multisig",),
+    "team_vc": ("team_vc",),
+    "roadmap": ("roadmap",),
+    "dao_governance": ("dao_governance",),
+    "bug_bounty": ("bug_bounty",),
+    "exchange_listing": ("exchange_listing",),
+    "competitor_material": ("competitor",),
+    "major_event_announcement": ("major_event", "announcement"),
+    "third_party_rating": ("third_party_rating",),
+    "onchain_abnormal_event": ("onchain_abnormal",),
 }
 
 
 def _compute_missing_materials(snapshot: dict) -> list[dict]:
-    """按完整投研清单判断每类资料的收集状态。"""
+    """按完整投研清单判断每类资料的收集状态。
+
+    前 9 类用结构化数据/来源类型精确判定；后 12 类用 content_topics
+    内容主题精确判定（不再依赖 URL/标题关键词猜测）。
+    """
     counts = snapshot.get("counts") or {}
     structured = snapshot.get("structured") or {}
     entry_types = set(counts.get("doc_source_entry_types") or [])
     asset_types = set(counts.get("doc_asset_types") or [])
-    research_cats = set(counts.get("research_categories") or [])
     sources = snapshot.get("sources") or []
     tokenomics = structured.get("tokenomics") or {}
     onchain = structured.get("onchain") or {}
     unlocks = structured.get("unlocks")
 
-    # 拼接用于关键词检索的文本：资料链接/标题/类型 + 各枚举 + 结构化字段名。
-    hay_parts = []
+    topics: set[str] = set()
     for s in sources:
-        hay_parts.append(str(s.get("type") or ""))
-        hay_parts.append(str(s.get("url") or ""))
-        hay_parts.append(str(s.get("title") or ""))
-    hay_parts.extend(entry_types)
-    hay_parts.extend(asset_types)
-    hay_parts.extend(research_cats)
-    for k, v in tokenomics.items():
-        if v:
-            hay_parts.append(str(k))
-    haystack = " ".join(hay_parts).lower()
-
-    def _has_keyword(*words: str) -> bool:
-        return any(w in haystack for w in words)
+        for t in (s.get("topics") or []):
+            topics.add(t)
 
     present: dict[str, bool] = {
         "official_website": "official_website" in entry_types,
         "whitepaper_docs": bool({"whitepaper_page", "docs", "docs_portal"} & entry_types)
-        or bool({"whitepaper", "tokenomics", "docs"} & asset_types),
+        or bool({"whitepaper", "tokenomics", "docs"} & asset_types)
+        or bool({"whitepaper", "docs"} & topics),
         "github_repo": "github" in entry_types,
-        "audit_report": "audit" in asset_types or _has_keyword("audit", "security"),
+        "audit_report": "audit" in asset_types or "audit" in topics,
         "tokenomics": bool(tokenomics) or "tokenomics" in asset_types,
         "onchain_holder_data": bool(onchain and onchain.get("by_chain")),
         "social_heat": bool(structured.get("social")),
         "token_unlock_data": bool(unlocks),
         "contract_address": bool(structured.get("contracts")),
     }
-    for key in _MATERIAL_KEYWORD_RULES:
-        present[key] = _has_keyword(*_MATERIAL_KEYWORD_RULES[key])
+    for key, wanted in _MATERIAL_TOPIC_MAP.items():
+        present[key] = bool(set(wanted) & topics)
 
     items = []
     for spec in RESEARCH_MATERIAL_TYPES:
@@ -1535,17 +1534,50 @@ def _format_research_context(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def get_or_create_research_notebook(asset_id: int) -> dict:
-    """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。"""
+_SNAPSHOT_TTL_SECONDS = 3600  # 一键投研快照缓存有效期（1 小时）
+
+
+def _snapshot_cache_valid(snapshot: dict, updated_at) -> bool:
+    """判断缓存的快照是否可复用：结构为最新（sources 均带 topics）且未过期。"""
+    if not snapshot or not updated_at:
+        return False
+    sources = snapshot.get("sources") or []
+    # 阶段3 之后快照的 sources 均带 topics 字段；旧结构快照视为失效，强制重采。
+    if sources and not all("topics" in s for s in sources):
+        return False
+    try:
+        updated = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - updated).total_seconds()
+    except Exception:
+        return False
+    return 0 <= age < _SNAPSHOT_TTL_SECONDS
+
+
+def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) -> dict:
+    """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。
+
+    快照缓存：先读 snapshot_json，未过期且结构一致时直接复用，避免每次打开都重采
+    结构化数据；通过 force_refresh（或 ?refresh=1）可强制重采。
+    """
     with get_db() as conn:
         _ensure_research_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT * FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
             nb = cur.fetchone()
 
-    snapshot = _collect_asset_snapshot(asset_id)
-    if not snapshot:
-        return {"ok": False, "error": "资产不存在"}
+    # 命中缓存：已有快照且未强制刷新且未过期且结构为最新（sources 均带 topics）
+    snapshot = None
+    if nb and not force_refresh:
+        cached = nb.get("snapshot_json") or {}
+        if _snapshot_cache_valid(cached, nb.get("updated_at")):
+            snapshot = cached
+
+    recollected = snapshot is None
+    if recollected:
+        snapshot = _collect_asset_snapshot(asset_id)
+        if not snapshot:
+            return {"ok": False, "error": "资产不存在"}
+
     missing = _compute_missing_materials(snapshot)
     title = f"{snapshot['symbol']} ({snapshot['name']}) 投研笔记"
 
@@ -1553,17 +1585,24 @@ def get_or_create_research_notebook(asset_id: int) -> dict:
         _ensure_research_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             if nb:
-                cur.execute("""
-                    UPDATE biz.research_notebook
-                    SET snapshot_json = %s, missing_json = %s, title = %s, updated_at = NOW()
-                    WHERE notebook_id = %s
-                    RETURNING notebook_id, asset_id, title, snapshot_json, missing_json, created_at, updated_at
-                """, (
-                    json.dumps(snapshot, ensure_ascii=False, default=str),
-                    json.dumps(missing, ensure_ascii=False),
-                    title,
-                    nb["notebook_id"],
-                ))
+                if recollected:
+                    cur.execute("""
+                        UPDATE biz.research_notebook
+                        SET snapshot_json = %s, missing_json = %s, title = %s, updated_at = NOW()
+                        WHERE notebook_id = %s
+                        RETURNING notebook_id, asset_id, title, snapshot_json, missing_json, created_at, updated_at
+                    """, (
+                        json.dumps(snapshot, ensure_ascii=False, default=str),
+                        json.dumps(missing, ensure_ascii=False),
+                        title,
+                        nb["notebook_id"],
+                    ))
+                else:
+                    # 命中缓存：不重写快照，直接复用行数据（updated_at 保持原值）
+                    cur.execute("""
+                        SELECT notebook_id, asset_id, title, snapshot_json, missing_json, created_at, updated_at
+                        FROM biz.research_notebook WHERE notebook_id = %s
+                    """, (nb["notebook_id"],))
             else:
                 cur.execute("""
                     INSERT INTO biz.research_notebook (asset_id, title, snapshot_json, missing_json)

@@ -993,9 +993,10 @@ def api_notebooklm_curate(asset_id: int):
 
 @app.route("/api/research/<int:asset_id>/notebook")
 def api_research_notebook(asset_id: int):
-    """打开（不存在则创建）一个代币对应的一键投研笔记本。"""
+    """打开（不存在则创建）一个代币对应的一键投研笔记本。支持 ?refresh=1 强制重采快照。"""
+    force_refresh = (request.args.get("refresh", "") or "").strip() == "1"
     try:
-        data = _get_db_stats().get_or_create_research_notebook(asset_id)
+        data = _get_db_stats().get_or_create_research_notebook(asset_id, force_refresh=force_refresh)
         if data.get("ok"):
             return jsonify(data)
         return jsonify(data), 404 if "不存在" in (data.get("error") or "") else 500

@@ -897,6 +897,7 @@ def main() -> int:
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     from crypto_research.db.upsert import load_sql
+    from crypto_research.mapping.classify_link import classify_entry_fields
 
     settings = get_settings(require_database=True)
     _worker_settings["database_url"] = settings.database_url
@@ -1017,6 +1018,9 @@ def main() -> int:
                             continue
                         _seen_doc_urls.add(key)
                         unique_links.append((link_url, link_type))
+                        topics, method, confidence = classify_entry_fields(
+                            link_url, source_code=result["source_code"]
+                        )
                         _pending_db_rows.append(
                             (
                                 result["entity_type"],
@@ -1027,6 +1031,9 @@ def main() -> int:
                                 link_url,
                                 f"deep_crawl:{result['url'][:50]}",
                                 False,
+                                topics,
+                                method,
+                                confidence,
                             )
                         )
 

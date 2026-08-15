@@ -42,3 +42,11 @@ ALTER TABLE biz.research_url
 -- 索引：按分类方法/置信度筛选（供后续 AI 补分类低置信度项）
 CREATE INDEX IF NOT EXISTS idx_doc_source_entry_classify
     ON biz.doc_source_entry (classify_method, classify_confidence);
+
+-- 5) content_topics 数组 GIN 索引（供一键投研缺失清单按主题精确判定）
+CREATE INDEX IF NOT EXISTS idx_doc_source_entry_content_topics
+    ON biz.doc_source_entry USING GIN (content_topics);
+CREATE INDEX IF NOT EXISTS idx_doc_asset_content_topics
+    ON biz.doc_asset USING GIN (content_topics);
+CREATE INDEX IF NOT EXISTS idx_research_url_content_topics
+    ON biz.research_url USING GIN (content_topics);

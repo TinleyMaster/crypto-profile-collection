@@ -958,7 +958,7 @@ def add_manual_entry(asset_id: int, entry_url: str) -> dict:
 VALID_ENTRY_TYPES = {
     "official_website", "docs", "docs_portal", "whitepaper_page",
     "github", "medium", "announcement", "twitter", "telegram",
-    "reddit", "facebook", "other",
+    "reddit", "facebook", "explorer", "social", "other",
 }
 
 
@@ -976,6 +976,118 @@ def update_entry_type(entry_id: int, entry_type: str) -> dict:
     if affected == 0:
         return {"ok": False, "error": "条目不存在"}
     return {"ok": True, "affected": affected, "entry_type": entry_type}
+
+
+def _extract_url_title(url: str) -> str:
+    """从 URL 路径最后一段提取粗略标题（供 AI 分类参考）。"""
+    from urllib.parse import urlparse, unquote
+
+    path = unquote(urlparse(url).path)
+    name = path.rsplit("/", 1)[-1] if "/" in path else path
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name.replace("-", " ").replace("_", " ").strip()[:200]
+
+
+def ai_classify_asset(asset_id: int, log=None) -> dict:
+    """对单个资产的「未精确分类」链接做 AI 内容主题分类。
+
+    范围：classify_method='default'（content_topics=['other']，规则/元数据未判出）的
+    doc_source_entry。抓正文后用 LLM 判 content_topics，回写 classify_method='ai_content'。
+    """
+
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    from crypto_research.config import get_settings
+    from crypto_research.clients.llm_client import LLMClient
+
+    settings = get_settings(require_database=True)
+    llm = LLMClient(settings, rpm=30)
+    if not llm.is_available():
+        return {"ok": False, "error": "未配置 LLM（OPENAI_API_KEY / ARK_*），无法做 AI 精确分类"}
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT entry_id, entry_url
+                FROM biz.doc_source_entry
+                WHERE asset_id = %s AND entity_type = 'asset'
+                  AND classify_method = 'default'
+                ORDER BY entry_id
+                """,
+                (asset_id,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+    if not rows:
+        _emit("[AI精确分类] 该币无待分类链接（classify_method=default）")
+        return {"ok": True, "data": {"total": 0, "classified": 0, "failed": 0}}
+
+    _emit(f"[AI精确分类] 待分类 {len(rows)} 条")
+
+    items = []
+    texts = []
+    for r in rows:
+        text = _fetch_url_text(r["entry_url"])
+        texts.append(text)
+        items.append({
+            "entry_id": str(r["entry_id"]),
+            "url": r["entry_url"],
+            "title": _extract_url_title(r["entry_url"]),
+            "text": text,
+        })
+        _emit(f"[AI精确分类] 抓正文 {len(text)} 字: {r['entry_url'][:80]}")
+
+    results = llm.batch_classify_content_topics(items)
+
+    classified = 0
+    failed = 0
+    no_content = 0
+    for r, t, res in zip(rows, texts, results):
+        if not t:
+            # 无正文（JS 渲染/反爬）：不靠 URL 硬猜，标 needs_browser 交 SPA 爬取重抓
+            no_content += 1
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE biz.doc_source_entry
+                        SET classify_method = 'ai_failed', classify_error = '无正文（JS渲染/反爬）',
+                            classify_reason = NULL, needs_browser = TRUE
+                        WHERE entry_id = %s
+                        """,
+                        (r["entry_id"],),
+                    )
+            _emit(f"[AI精确分类] 无正文: {r['entry_url'][:60]} (标 needs_browser)")
+            continue
+        topics = res.get("content_topics") or []
+        conf = float(res.get("confidence") or 0.0)
+        reason = (res.get("reason") or "").strip()
+        if topics and conf > 0:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE biz.doc_source_entry
+                        SET content_topics = %s, classify_method = 'ai_content',
+                            classify_confidence = %s, classify_reason = %s, classify_error = NULL
+                        WHERE entry_id = %s
+                        """,
+                        (topics, conf, reason, r["entry_id"]),
+                    )
+            classified += 1
+            _emit(f"[AI精确分类] {r['entry_url'][:60]} -> {topics} (conf={conf:.2f})")
+        else:
+            failed += 1
+            _emit(f"[AI精确分类] 失败: {r['entry_url'][:60]} ({reason or '无结果'})")
+
+    return {"ok": True, "data": {"total": len(rows), "classified": classified, "failed": failed, "no_content": no_content}}
 
 
 # ── DexScreener 辅助添加 ──

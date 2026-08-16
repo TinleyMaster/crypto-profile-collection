@@ -272,16 +272,19 @@ def main() -> int:
 
         updates = []
         fails = []
+        no_content_ids = []  # 无正文：不靠 URL 硬猜，标 needs_browser 交 SPA 爬取重抓
         for r, t, res in zip(rows, texts, results):
+            if not t:
+                # 抓不到正文（JS 渲染/反爬），不标 ai_content
+                empty_text += 1
+                no_content_ids.append(r["entry_id"])
+                continue
             if not res["content_topics"] or res["confidence"] <= 0:
                 failed += 1
                 error = (res.get("reason") or "").strip() or "未知失败"
                 fails.append((error, r["entry_id"]))
                 continue
             conf = res["confidence"]
-            if not t:
-                conf = min(conf, 0.6)  # 无正文，置信度封顶
-                empty_text += 1
             reason = (res.get("reason") or "").strip()
             updates.append((res["content_topics"], conf, reason, r["entry_id"]))
             classified += 1
@@ -301,6 +304,21 @@ def main() -> int:
                     )
 
             _db_retry(db_url, _write_updates)
+
+        if no_content_ids and not args.dry_run:
+            def _write_no_content(conn):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE biz.doc_source_entry
+                        SET classify_method = 'ai_failed', classify_error = '无正文（JS渲染/反爬）',
+                            classify_reason = NULL, needs_browser = TRUE
+                        WHERE entry_id = ANY(%s)
+                        """,
+                        (no_content_ids,),
+                    )
+
+            _db_retry(db_url, _write_no_content)
 
         if fails and not args.dry_run:
             def _write_fails(conn):

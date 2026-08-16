@@ -857,6 +857,17 @@ def api_update_entry_type(entry_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/assets/<int:asset_id>/ai-classify", methods=["POST"])
+def api_ai_classify(asset_id: int):
+    """对单个资产的未精确分类链接做 AI 内容主题分类（后台任务 + 实时日志）。"""
+
+    def _worker(log):
+        return _get_db_stats().ai_classify_asset(asset_id, log=log)
+
+    task_id = task_mgr.submit_func_task(f"AI精确分类: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/assets/<int:asset_id>/ai-noise-clean", methods=["POST"])
 def api_ai_noise_clean(asset_id: int):
     """对指定资产执行 AI 噪声清理。"""

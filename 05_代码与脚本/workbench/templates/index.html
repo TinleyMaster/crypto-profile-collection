@@ -1672,7 +1672,7 @@
                     <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
                 </h2>
                 <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
-                <button class="copy-btn" id="notebooklm-btn" onclick="copyNotebooklmLinks()">🧠 NotebookLM 精选</button>
+                <button class="copy-btn" id="notebooklm-btn" onclick="runAiClassify()">🧠 AI精确分类</button>
                 <button class="copy-btn" id="research-btn" onclick="openResearchNotebook()"
                     style="background:#7c3aed;color:#fff;border-color:#8b5cf6">🤖 一键投研</button>
                 <button class="copy-btn" id="noise-clean-btn" onclick="runAiNoiseClean()">AI噪声清理</button>
@@ -2193,7 +2193,8 @@
                     official_website: '官网', docs: '文档', docs_portal: '文档门户',
                     whitepaper_page: '白皮书页', github: 'GitHub', medium: 'Medium',
                     announcement: '公告', twitter: 'Twitter', telegram: 'Telegram',
-                    reddit: 'Reddit', facebook: 'Facebook', other: '其他'
+                    reddit: 'Reddit', facebook: 'Facebook', explorer: '区块浏览器',
+                    social: '社交媒体', other: '其他'
                 };
                 d.doc_source_entries.forEach(e => {
                     const opts = Object.entries(entryTypeOptions).map(([v, lbl]) =>
@@ -2876,59 +2877,42 @@
             });
         }
 
-        async function copyNotebooklmLinks () {
+        async function runAiClassify () {
             if (!selectedAssetId) return;
             const btn = document.getElementById('notebooklm-btn');
             const origText = btn.textContent;
-
-            // 先查缓存
-            btn.textContent = '⏳ 查询中...';
+            btn.textContent = '🤖 分类中...';
             btn.disabled = true;
             try {
-                let res = await fetch('/api/notebooklm/links/' + selectedAssetId);
-                let data = await res.json();
-                if (data.ok && data.count > 0) {
-                    // 缓存命中
-                    await navigator.clipboard.writeText(data.urls.join('\n'));
-                    btn.textContent = '✅ 已复制 ' + data.count + ' 条精选';
-                    btn.classList.add('copied');
-                    setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
-                    return;
-                }
+                const res = await fetch('/api/assets/' + selectedAssetId + '/ai-classify', { method: 'POST' });
+                const data = await res.json();
+                if (!data.ok || !data.task_id) throw new Error(data.error || '启动失败');
 
-                // 缓存未命中，触发 AI 精选（后台任务 + 实时日志）
-                btn.textContent = '🤖 AI 筛选中...';
-                res = await fetch('/api/notebooklm/curate/' + selectedAssetId, { method: 'POST' });
-                const startData = await res.json();
-                if (!startData.ok || !startData.task_id) throw new Error(startData.error || '启动失败');
-
-                selectedTaskId = startData.task_id;
-                loadTaskLog(startData.task_id);
+                selectedTaskId = data.task_id;
+                loadTaskLog(data.task_id);
                 if (logPanelCollapsed) toggleLogPanel();
                 loadTasks();
-                await waitForTask(startData.task_id, 240000);
+                await waitForTask(data.task_id, 300000);
 
-                const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+                const resultRes = await fetch('/api/tasks/' + data.task_id + '/result');
                 const resultData = await resultRes.json();
-                if (resultData.pending) throw new Error('AI 精选超时（4分钟），请稍后重试');
+                if (resultData.pending) throw new Error('AI 精确分类超时，请稍后重试');
                 if (!resultData.ok || !resultData.result || !resultData.result.ok) {
                     throw new Error((resultData.result && resultData.result.error) || resultData.error || '未知错误');
                 }
 
-                const d = resultData.result.data;
-                if (d && d.urls && d.urls.length) {
-                    await navigator.clipboard.writeText(d.urls.join('\n'));
-                    btn.textContent = '✅ 已复制 ' + d.urls.length + ' 条精选';
-                    btn.classList.add('copied');
+                const d = resultData.result.data || {};
+                if ((d.total || 0) === 0) {
+                    alert('该币所有链接已精确分类，无需 AI 处理');
                 } else {
-                    alert('精选失败: ' + ((d && d.status) || '未知错误'));
-                    btn.textContent = origText;
+                    alert('AI精确分类完成：成功 ' + (d.classified || 0) + ' 条，失败 ' + (d.failed || 0) + ' 条');
                 }
+                loadMaterials(selectedAssetId);
             } catch (e) {
                 alert('请求失败: ' + e.message);
-                btn.textContent = origText;
             }
-            setTimeout(() => { btn.textContent = origText; btn.classList.remove('copied'); btn.disabled = false; }, 2000);
+            btn.textContent = origText;
+            btn.disabled = false;
         }
 
         async function queryOnchainData () {

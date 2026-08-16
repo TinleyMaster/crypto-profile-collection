@@ -468,6 +468,13 @@ TASK_DEFS = {
         "default_args": ["--entry-types", "official_website"],
         "category": "维护",
     },
+    "backfill_ai_classify_retry_failed": {
+        "name": "官网补分类失败重试",
+        "description": "重跑官网内容主题 AI 补分类的失败项（classify_method='ai_failed' 的 official_website），多为临时网络/限速/LLM 抖动，可安全重试",
+        "script": "backfill_ai_classify_links.py",
+        "default_args": ["--method", "ai_failed", "--entry-types", "official_website"],
+        "category": "维护",
+    },
 }
 
 

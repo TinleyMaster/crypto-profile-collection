@@ -510,6 +510,14 @@
             white-space: nowrap;
         }
 
+        .search-dropdown .item .chain {
+            display: block;
+            font-size: 10px;
+            color: #5b6472;
+            font-family: "SF Mono", Monaco, Consolas, monospace;
+            margin-top: 2px;
+        }
+
         .search-dropdown .item .type-badge {
             font-size: 10px;
             padding: 2px 6px;
@@ -2098,6 +2106,7 @@
                     <div>
                         <span class="sym">${escapeHtml(a.symbol)}</span>
                         <span class="name">${escapeHtml(a.name)}</span>
+                        ${a.chain ? `<span class="chain">${escapeHtml(a.chain)}${a.contract ? ' · ' + escapeHtml(shortAddr(a.contract)) : ''}</span>` : ''}
                     </div>
                     <span class="type-badge">${escapeHtml(a.type)}</span>
                 </div>

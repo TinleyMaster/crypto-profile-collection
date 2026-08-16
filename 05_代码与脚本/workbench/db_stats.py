@@ -464,6 +464,22 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
             rows = cur.fetchall()
 
             if rows:
+                # 补充链/合约信息（每资产优先 primary 合约），用于区分同名币
+                asset_ids = [row[0] for row in rows]
+                cur.execute(
+                    """
+                    SELECT asset_id, chain, contract_address
+                    FROM core.asset_contract
+                    WHERE asset_id = ANY(%s)
+                    ORDER BY asset_id, is_primary DESC, contract_id
+                    """,
+                    (asset_ids,),
+                )
+                contract_map = {}
+                for aid, chain, addr in cur.fetchall():
+                    if aid not in contract_map:
+                        contract_map[aid] = (chain, addr)
+
                 return [
                     {
                         "asset_id": row[0],
@@ -471,6 +487,8 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         "name": row[2],
                         "type": row[3],
                         "cmc_id": row[4],
+                        "chain": contract_map.get(row[0], (None, None))[0],
+                        "contract": contract_map.get(row[0], (None, None))[1],
                     }
                     for row in rows
                 ]
@@ -557,6 +575,8 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         "name": name,
                         "type": asset_type,
                         "cmc_id": cmc_id,
+                        "chain": None,
+                        "contract": None,
                     })
                 except Exception:
                     conn.rollback()

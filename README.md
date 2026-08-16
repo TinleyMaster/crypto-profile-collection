@@ -14,7 +14,11 @@
 │                    research_url / coin_basic                 │
 │                    asset_tokenomics / asset_token_unlocks    │
 │                    onchain_holder_snapshot / transfer_log    │
-│                    doc_source_notebooklm / exchange_wallet   │
+│                    asset_social_heat / asset_token_holders   │
+│                    asset_raises / asset_hacks                │
+│                    doc_source_notebooklm / research_notebook │
+│                    unlock_watchlist / dl_protocol_checked    │
+│                    exchange_wallet                           │
 ├─────────────────────────────────────────────────────────────┤
 │  core   统一实体层  asset / asset_source_map                  │
 │                    asset_contract_map                        │
@@ -33,7 +37,7 @@
 |--------|------|------|
 | CoinMarketCap | 币种信息 + URLs（官网/文档/GitHub/Twitter/Telegram/Reddit/Facebook） | CMC API |
 | CoinGecko | 币种列表 + coin_info（links 提取文档入口） | CoinGecko API |
-| DeFiLlama | 协议列表 + TVL（url/twitter 提取官网链接） | DL API |
+| DeFiLlama | 协议列表 + TVL（url/twitter 提取官网链接）+ 协议详情（audit_links 审计 / raises 融资轮次 / 评级页）+ /hacks 异常事件 | DL API |
 | DexScreener | 无文档入口资产的兜底补充（官网/社交链接） | DexScreener API |
 | Binance Web3 | 无文档入口资产的兜底补充 + 每日投研推荐 | Binance Web3 API |
 | Ethplorer | 链上持仓快照（Top 持有者、持仓集中度） | Ethplorer API |
@@ -84,7 +88,30 @@ Phase C: 投研分析提取              ← 进行中
   代币解锁测算（tokenomics.com 四板块 + 未命中弹网址框 → URL/AI 测算）
   链上数据分析（区块浏览器 HTML 解析持仓集中度 + 大额转账告警）
   社交热度（单币按需：社区规模 + 实时舆情 + 趋势新闻 + 市场热度）
+            │
+            ▼
+Phase D: 一键投研（NotebookLM 风格） ← 进行中
+  单代币对应一个笔记本，自动收集全部已采资料快照 + 21 类完整性清单
+  缺失项一键补齐：按缺失类型映射动作串行执行（deep/spa/第三方/AI 分类等）
+  AI 问答（RAG）：严格依据资料库回答，强制 [编号] 标注来源
+  对话与资料快照持久化（biz.research_notebook / biz.research_message）
 ```
+
+---
+
+## 第三方专项数据源（Phase B2 third_party 扩展）
+
+在深度文档发现之外，针对「审计 / 第三方评级 / 融资 / 链上异常」四类投研资料，从 DefiLlama 协议详情与 `/hacks` 接口结构化补入：
+
+| 脚本 | 数据 | 落库 |
+|------|------|------|
+| `phase_b2_third_party.py` | DefiLlama `audit_links`（审计报告链接）+ 协议页（第三方评级） | `biz.doc_source_entry`（content_topics=audit / third_party_rating） |
+| `phase_b2_third_party_raises.py` | DefiLlama `raises` 字段（TGE / 融资轮次） | `biz.asset_raises`（结构化表） |
+| `phase_b2_third_party_hacks.py` | DefiLlama `/hacks` 全量异常事件 | `biz.asset_hacks`（结构化表） |
+
+- 审计/评级是「URL 维度」，落 `doc_source_entry`；融资/异常是「结构化维度」（无稳定可映射 URL），落独立表。
+- raises/hacks 均按 `defillamaId` → `src_dl.protocol_list` → `core.asset_source_map` 映射到资产；无法映射的直接跳过。
+- raises 用 `biz.dl_protocol_checked` 标记断点续跑；hacks 全量一次性拉取。
 
 ---
 
@@ -277,6 +304,9 @@ Phase C: 投研分析提取              ← 进行中
 | | CMC 补充文档入口（自动循环） | 从 cmc_asset_info urls 提取文档链接 | 可见 |
 | | DL 补充文档入口（自动循环） | 从 DefiLlama protocol_list 提取官网链接 | 可见 |
 | | 双源补充文档入口（自动循环） | DexScreener+Binance 双源兜底补充 | 可见 |
+| | 第三方评级/审计回填（自动循环） | DefiLlama 协议详情，提取审计链接 + 评级页写入 doc_source_entry | 可见 |
+| | TGE/融资轮次采集（自动循环） | DefiLlama 协议详情 raises 字段，写入 biz.asset_raises | 可见 |
+| | 链上异常事件采集（hacks） | DefiLlama /hacks 全量异常事件，写入 biz.asset_hacks | 可见 |
 | | B3 SPA 无头浏览器爬取（自动循环） | Playwright 渲染 JS 页面，提取 SPA 网站链接 | 可见 |
 | 文档采集 | B2 深度文档发现（自动循环） | 从官网 HTML 抓取嵌入的 PDF/白皮书链接 | 可见 |
 | AI 筛选 | B4 AI 噪声清理（按资产·自动循环） | AI 按域名粒度批量判断噪声 | 可见 |
@@ -400,7 +430,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 
 **21 类投研资料完整性清单**（`RESEARCH_MATERIAL_TYPES` + `_compute_missing_materials`）：
 - 前 9 类结构化精确判定：官网 / 白皮书文档 / GitHub 仓库 / 审计报告 / 代币经济学 / 链上持仓 / 社交热度 / 代币解锁 / 合约地址
-- 后 12 类关键词启发式判定：TGE&IDO / LP 流动性 / 国库&多签 / 团队&VC / 路线图 / 治理 DAO / 漏洞赏金 / 交易所上线 / 竞品对比 / 重大公告 / 第三方评级 / 链上异常（阶段3 将改用 `content_topics` 精确判定）
+- 后 12 类 `content_topics` 精确判定：TGE&IDO / LP 流动性 / 国库&多签 / 团队&VC / 路线图 / 治理 DAO / 漏洞赏金 / 交易所上线 / 竞品对比 / 重大公告 / 第三方评级 / 链上异常（由 `_MATERIAL_TOPIC_MAP` 映射到内容主题，不再依赖 URL/标题关键词猜测）
 
 **AI 问答（RAG 式，`ask_research_notebook`）**：
 - 严格只依据资料库回答，强制 `[编号]` 标注来源，返回 `{answer, citations}`；资料库无相关信息时明说、不编造
@@ -412,6 +442,46 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 - `POST /api/research/notebook/<notebook_id>/ask`：提问（后台任务，前端轮询）
 
 **数据表**：`biz.research_notebook`（asset_id 唯一）+ `biz.research_message`
+
+---
+
+## 缺失资料自动补齐
+
+针对 21 类投研资料完整性清单中的缺失项，提供「单币一键补齐」和「批量补齐」两条流水线。
+
+### 单币缺失一键补齐（`fill_missing_materials`）
+
+投研页「补齐缺失」按钮触发：采集当前快照 → 计算缺失清单 → 按缺失项映射动作 → 按依赖顺序串行执行 → 重新采集对比补齐前后变化。
+
+缺失类型 → 动作映射（`_MISSING_FILL_ACTIONS`），动作按 `_FILL_ACTION_ORDER` 顺序执行：
+
+| 动作 | 脚本 / 逻辑 | 作用 |
+|------|-------------|------|
+| `deep` | `phase_b2_deep_doc_discovery.py --asset-id` | 文档深爬（单资产放宽模式） |
+| `spa` | `phase_b2_spa_browser_crawl.py --asset-id` | SPA 浏览器兜底 |
+| `third_party` | `phase_b2_third_party.py --asset-id` | 审计 / 评级链接 |
+| `raises` | `phase_b2_third_party_raises.py --asset-id` | TGE / 融资轮次 |
+| `hacks` | `phase_b2_third_party_hacks.py --asset-id` | 链上异常事件 |
+| `ai_classify` | `ai_classify_asset` | AI 正文多标签分类 |
+| `tokenomics` / `holders` / `social` / `unlocks` | 对应结构化补齐 | 代币经济学 / 持仓 / 社交 / 解锁 |
+
+单个动作失败不中断整体，最终返回补齐前后缺失变化。
+
+### 批量补齐（新币 + 热门赛道）
+
+- `select_missing_material_distribution.sql`：诊断各资料类型缺失分布，决定先补哪类。
+- `select_target_assets.sql`：生成目标资产清单（新币 `date_launched >= 2025` ∪ 热门赛道 7 类）。
+- `collect_assets_batch.py`：节流批量编排，逐资产调用 `collect_asset_materials.py`（deep → spa → third_party → ai_classify 五阶段），jsonl 断点续跑。
+
+### 自有站点主题抢救（第一步）
+
+针对「有官网入口、但缺失自有站点主题」的资产，`phase_b2_rescue_ownsite_topics.py` 按「staging + 多轮深爬 + 按需 SPA 提升」抢救：
+
+1. **staging**：`select_ownsite_rescue_targets.sql` 选出缺失「国库/多签、团队/VC、审计、漏洞赏金、交易所上线、公告」且含官网入口的资产（缺失多者优先）。
+2. **多轮深爬**：重置官网 `deep_crawled_at` 后，用单资产放宽模式（含 sitemap 全站索引）反复深爬，直到无未爬官网/文档入口。
+3. **按需提升**：仅当存在 `needs_browser=TRUE` 且重试未超限的 SPA 页面时，才提升到 Playwright 浏览器爬取。
+
+只针对自有站点主题，不涉及第三方数据源；官网没有对应页面就跳过（不硬造数据）。
 
 ---
 
@@ -428,12 +498,12 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   ├── backfill_*.py   # 历史数据回填（含链接分类阶段1/阶段2）
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
-│   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理
+│   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理 + 第三方专项(审计/评级/融资/异常) + 自有站点主题抢救
 │   │   │   ├── phase_c_*.py    # 代币经济学提取 + 社交热度
 │   │   │   ├── phase_chain_*.py # 链上数据 + 解锁数据
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选
-│   │   │   └── collect_*.py    # GitHub 活跃度采集
+│   │   │   └── collect_*.py    # GitHub 活跃度采集 + 批量补齐编排
 │   │   ├── src/crypto_research/ # 可复用模块
 │   │   │   ├── clients/        # API 客户端
 │   │   │   │   ├── cmc_client.py         # CoinMarketCap

@@ -475,6 +475,27 @@ TASK_DEFS = {
         "default_args": ["--method", "ai_failed", "--entry-types", "official_website"],
         "category": "维护",
     },
+    "rescan_low_conf_no_content": {
+        "name": "历史无正文回扫",
+        "description": "回扫低置信度 ai_content（conf≤0.6）链接，重新抓正文确认：抓不到则标 needs_browser 交 SPA 重抓，抓到则保留",
+        "script": "rescan_low_conf_no_content.py",
+        "default_args": [],
+        "category": "维护",
+    },
+    "probe_no_content_dryrun": {
+        "name": "无正文链接甄别（预览）",
+        "description": "探测无正文链接的 HTTP 状态，区分死链/反爬/JS渲染/可恢复，仅预览不删除",
+        "script": "probe_no_content_links.py",
+        "default_args": ["--dry-run"],
+        "category": "维护",
+    },
+    "probe_no_content_execute": {
+        "name": "无正文链接甄别（删死链）",
+        "description": "探测无正文链接并删除真死链（404/域名失效），保留反爬/JS渲染链接供重抓",
+        "script": "probe_no_content_links.py",
+        "default_args": ["--execute"],
+        "category": "维护",
+    },
 }
 
 

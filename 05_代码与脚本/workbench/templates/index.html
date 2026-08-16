@@ -2227,6 +2227,54 @@
             }
         }
 
+        // ── 文档入口分页（默认 25 条，点击加载更多显示全部） ──
+        const DOC_ENTRY_PAGE_SIZE = 25;
+        const ENTRY_TYPE_OPTIONS = {
+            official_website: '官网', docs: '文档', docs_portal: '文档门户',
+            whitepaper_page: '白皮书页', github: 'GitHub', medium: 'Medium',
+            announcement: '公告', twitter: 'Twitter', telegram: 'Telegram',
+            reddit: 'Reddit', facebook: 'Facebook', explorer: '区块浏览器',
+            social: '社交媒体', other: '其他'
+        };
+        let currentDocEntries = [];
+        let currentDocShowAll = false;
+
+        function docEntryItemHtml (e) {
+            const opts = Object.entries(ENTRY_TYPE_OPTIONS).map(([v, lbl]) =>
+                `<option value="${v}" ${v === e.entry_type ? 'selected' : ''}>${lbl}</option>`
+            ).join('');
+            return `
+            <div class="material-item">
+                <select class="entry-type-select" data-entry-id="${e.entry_id}" onchange="changeEntryType(this)" title="修改链接类型">
+                    ${opts}
+                </select>
+                <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
+                <span class="meta">${escapeHtml(e.source || '')} ${e.is_primary ? '· 主' : ''} ${e.deep_crawled ? '· 已爬' : ''}</span>
+            </div>`;
+        }
+
+        function renderDocEntriesGroup () {
+            const entries = currentDocEntries;
+            let html = '<div class="material-group"><h3>📎 文档入口 (doc_source_entry)</h3>';
+            if (entries.length === 0) {
+                html += '<div class="no-data">暂无文档入口</div>';
+            } else {
+                const visible = currentDocShowAll ? entries : entries.slice(0, DOC_ENTRY_PAGE_SIZE);
+                html += '<div class="material-list">' + visible.map(docEntryItemHtml).join('') + '</div>';
+                if (!currentDocShowAll && entries.length > DOC_ENTRY_PAGE_SIZE) {
+                    const remaining = entries.length - DOC_ENTRY_PAGE_SIZE;
+                    html += '<div class="hot-load-more-wrap"><button class="hot-load-more" onclick="loadMoreDocEntries()">加载更多（剩余 ' + remaining + ' 条）</button></div>';
+                }
+            }
+            html += '</div>';
+            document.getElementById('mat-doc-entries').innerHTML = html;
+        }
+
+        function loadMoreDocEntries () {
+            currentDocShowAll = true;
+            renderDocEntriesGroup();
+        }
+
         function renderMaterials (d) {
             document.getElementById('mat-symbol').textContent = d.symbol;
             document.getElementById('mat-name').textContent = d.name;
@@ -2239,37 +2287,13 @@
 
             let html = '';
 
-            // 文档入口
-            html += '<div class="material-group"><h3>📎 文档入口 (doc_source_entry)</h3>';
-            if (d.doc_source_entries.length === 0) {
-                html += '<div class="no-data">暂无文档入口</div>';
-            } else {
-                html += '<div class="material-list">';
-                const entryTypeOptions = {
-                    official_website: '官网', docs: '文档', docs_portal: '文档门户',
-                    whitepaper_page: '白皮书页', github: 'GitHub', medium: 'Medium',
-                    announcement: '公告', twitter: 'Twitter', telegram: 'Telegram',
-                    reddit: 'Reddit', facebook: 'Facebook', explorer: '区块浏览器',
-                    social: '社交媒体', other: '其他'
-                };
-                d.doc_source_entries.forEach(e => {
-                    const opts = Object.entries(entryTypeOptions).map(([v, lbl]) =>
-                        `<option value="${v}" ${v === e.entry_type ? 'selected' : ''}>${lbl}</option>`
-                    ).join('');
-                    html += `
-                    <div class="material-item">
-                        <select class="entry-type-select" data-entry-id="${e.entry_id}" onchange="changeEntryType(this)" title="修改链接类型">
-                            ${opts}
-                        </select>
-                        <a class="url-text" href="${escapeHtml(e.url)}" target="_blank" rel="noopener">${escapeHtml(e.url)}</a>
-                        <span class="meta">${escapeHtml(e.source || '')} ${e.is_primary ? '· 主' : ''} ${e.deep_crawled ? '· 已爬' : ''}</span>
-                    </div>`;
-                });
-                html += '</div>';
-            }
-            html += '</div>';
+            // 文档入口（独立容器，便于分页刷新）
+            html += '<div id="mat-doc-entries"></div>';
 
             document.getElementById('mat-content').innerHTML = html;
+            currentDocEntries = d.doc_source_entries || [];
+            currentDocShowAll = false;
+            renderDocEntriesGroup();
             materialsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
             // 加载投研分析
@@ -2895,11 +2919,8 @@
         }
 
         function copyAllLinks () {
-            const urls = [];
-            document.querySelectorAll('#mat-content .url-text').forEach(el => {
-                const href = el.getAttribute('href');
-                if (href) urls.push(href);
-            });
+            // 复制全部文档入口链接（不受分页 25 条限制影响）
+            const urls = (currentDocEntries || []).map(e => e.url).filter(u => u);
             if (urls.length === 0) {
                 alert('没有可复制的链接');
                 return;

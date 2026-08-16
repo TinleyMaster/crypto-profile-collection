@@ -23,6 +23,8 @@ SOURCE_TYPES = (
     "telegram",
     "reddit",
     "facebook",
+    "explorer",
+    "social",
     "other",
 )
 
@@ -108,3 +110,30 @@ DOMAIN_SOURCE_TYPES = {
     "discord.com": "other",
     "discord.gg": "other",
 }
+
+# 区块浏览器 / 链上数据（注册域名，来源类型 explorer）。
+# 说明：explorer.* / scan.* 这类子域名由 classify_link._domain_source_type
+# 通过主机名前缀另行识别，无需在此枚举。
+EXPLORER_DOMAINS = frozenset({
+    # 主流 EVM 浏览器
+    "etherscan.io", "bscscan.com", "basescan.org", "polygonscan.com",
+    "arbiscan.io", "snowtrace.io", "hyperevmscan.io",
+    # 非 EVM 浏览器
+    "solscan.io", "suiscan.xyz", "tonscan.org", "tronscan.org",
+    "cardanoscan.io", "mintscan.io", "tonviewer.com", "solana.fm",
+    "suivision.xyz", "stellar.expert", "nearblocks.io", "xrpscan.com",
+    "taostats.io", "avascan.info", "hypurrscan.io",
+    # 通用 / 分析型
+    "ethplorer.io", "binplorer.com", "oklink.com", "voyager.online",
+    "arkm.com", "blockscout.com",
+    # 其他链浏览器
+    "berascan.com", "monadscan.com", "kaiascan.io", "lineascan.build",
+    "aptscan.ai", "abscan.org", "sonicscan.org",
+})
+
+# 其他社交媒体 / 社区（注册域名，来源类型 social）。
+SOCIAL_DOMAINS = frozenset({
+    "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
+    "youtu.be", "warpcast.com", "farcaster.xyz", "linktr.ee",
+    "hey.xyz", "mirror.xyz",
+})

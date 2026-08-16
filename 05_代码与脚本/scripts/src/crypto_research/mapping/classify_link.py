@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 from crypto_research.mapping.taxonomy import (
     CONTENT_TOPIC_KEYWORDS,
     DOMAIN_SOURCE_TYPES,
+    EXPLORER_DOMAINS,
+    SOCIAL_DOMAINS,
 )
 
 
@@ -28,15 +30,32 @@ def _extract_domain(url: str) -> str:
     return host
 
 
+def _domain_source_type(host: str, domain: str) -> str:
+    """按主机名/注册域名命中精确来源类型，未命中返回空串。
+
+    优先级：DOMAIN_SOURCE_TYPES 精确映射 > 区块浏览器 > 社交媒体。
+    区块浏览器子域名（explorer.* / scan.*）通过主机名前缀识别。
+    """
+    if domain in DOMAIN_SOURCE_TYPES:
+        return DOMAIN_SOURCE_TYPES[domain]
+    if domain in EXPLORER_DOMAINS or host.startswith("explorer.") or host.startswith("scan."):
+        return "explorer"
+    if domain in SOCIAL_DOMAINS:
+        return "social"
+    return ""
+
+
 def infer_source_type(url: str, url_key: str = "", label: str = "") -> str:
     """推断来源类型（source_type）。"""
     url_l = (url or "").lower()
     label_l = (label or "").lower()
+    host = (urlparse(url_l).hostname or "").lower()
     domain = _extract_domain(url)
 
     # 1) 域名精确规则（最高优先级，跨源稳定）
-    if domain in DOMAIN_SOURCE_TYPES:
-        return DOMAIN_SOURCE_TYPES[domain]
+    stype = _domain_source_type(host, domain)
+    if stype:
+        return stype
 
     # 2) CMC url_key 元数据映射
     key_type = {
@@ -51,7 +70,7 @@ def infer_source_type(url: str, url_key: str = "", label: str = "") -> str:
         "blog": "medium" if "medium.com" in url_l else "other",
         "chat": "other",
         "message_board": "other",
-        "explorer": "other",
+        "explorer": "explorer",
     }.get(url_key or "")
     if key_type:
         return key_type
@@ -116,11 +135,12 @@ def classify_link(url: str, label: str = "", url_key: str = "", source_code: str
         confidence: float     置信度 0~1（供后续 AI 分类筛选低置信度项）
     """
     url_l = (url or "").lower()
+    host = (urlparse(url_l).hostname or "").lower()
     domain = _extract_domain(url)
     source_type = infer_source_type(url, url_key=url_key, label=label)
     topics = infer_content_topics(url, label=label, source_type=source_type)
 
-    if domain in DOMAIN_SOURCE_TYPES:
+    if _domain_source_type(host, domain):
         method, confidence = "domain", 0.98
     elif url_key:
         method, confidence = "url_key", 0.9

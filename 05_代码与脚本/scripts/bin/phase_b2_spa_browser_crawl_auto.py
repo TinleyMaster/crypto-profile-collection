@@ -5,6 +5,7 @@ SPA 无头浏览器爬取自动循环脚本。
 """
 
 import concurrent.futures
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,10 @@ BATCH_LIMIT = 20
 MAX_ROUNDS = 100
 TIMEOUT = 300  # 5 分钟（留给 Chromium 启动 + 串行爬取 20 页）
 MAX_CONSECUTIVE_ERRORS = 3
+
+# 新入库币水位线：仅处理 asset_id >= 该值的资产，老语料（已成熟）跳过。
+# 取值 = 语料成熟时刻的 MAX(asset_id)，可用环境变量 MIN_NEW_ASSET_ID 覆盖。
+MIN_ASSET_ID = int(os.environ.get("MIN_NEW_ASSET_ID", "25952"))
 
 total_discovered = 0
 consecutive_errors = 0
@@ -30,6 +35,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
     sys.argv = [
         "phase_b2_spa_browser_crawl.py",
         "--limit", str(BATCH_LIMIT),
+        "--min-asset-id", str(MIN_ASSET_ID),
         "--concurrency", "4",
     ]
 
@@ -85,7 +91,9 @@ for round_num in range(1, MAX_ROUNDS + 1):
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM biz.doc_source_entry WHERE needs_browser = TRUE LIMIT 1"
+                    "SELECT 1 FROM biz.doc_source_entry "
+                    "WHERE needs_browser = TRUE AND asset_id >= %s LIMIT 1",
+                    (MIN_ASSET_ID,),
                 )
                 has_more = cur.fetchone() is not None
         if not has_more:

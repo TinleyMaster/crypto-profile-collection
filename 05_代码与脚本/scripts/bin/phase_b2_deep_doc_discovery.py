@@ -983,6 +983,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--limit", type=int, default=500, help="最大处理数量")
     p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID")
+    p.add_argument("--min-asset-id", type=int, default=0, help="仅处理 asset_id >= 该值的资产（新入库币），0 表示不过滤")
     p.add_argument("--workers", type=int, default=4, help="并发线程数")
     p.add_argument("--timeout", type=int, default=10, help="读取超时(秒)")
     p.add_argument("--flush-every", type=int, default=50, help="每 N 条 flush 一次 DB")
@@ -1037,6 +1038,9 @@ def main() -> int:
     asset_filter = ""
     if args.asset_id is not None:
         asset_filter = " AND dse.asset_id = %s"
+    min_asset_filter = ""
+    if args.min_asset_id and args.min_asset_id > 0:
+        min_asset_filter = " AND dse.asset_id >= %s"
     sql = f"""
         SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id, dse.source_code,
                dse.entry_type, dse.entry_url,
@@ -1047,6 +1051,7 @@ def main() -> int:
           AND dse.deep_crawled_at IS NULL
           AND ({noise_clauses})
           {asset_filter}
+          {min_asset_filter}
         ORDER BY
             CASE WHEN dse.source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
             CASE dse.entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
@@ -1058,6 +1063,8 @@ def main() -> int:
             params = [list(ENTRY_TYPES_TO_CRAWL)] + noise_params
             if args.asset_id is not None:
                 params.append(args.asset_id)
+            if args.min_asset_id and args.min_asset_id > 0:
+                params.append(args.min_asset_id)
             params.append(args.limit)
             cur.execute(sql, params)
             entries = [dict(row) for row in cur.fetchall()]

@@ -268,6 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发浏览器窗口数。")
     p.add_argument("--all-domains", action="store_true", help="不限制同域。")
     p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID。")
+    p.add_argument("--min-asset-id", type=int, default=0, help="仅处理 asset_id >= 该值的资产（新入库币），0 表示不过滤。")
     return p
 
 
@@ -295,6 +296,9 @@ def main() -> int:
     if args.asset_id is not None:
         asset_filter = " AND dse.asset_id = %s"
         asset_params = [args.asset_id]
+    if args.min_asset_id and args.min_asset_id > 0:
+        asset_filter += " AND dse.asset_id >= %s"
+        asset_params.append(args.min_asset_id)
     with get_connection(settings.database_url) as conn:
         print("[SPA crawl] DB 已连接, 查询 SPA 页面...", flush=True)
         try:

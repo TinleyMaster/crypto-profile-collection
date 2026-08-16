@@ -69,8 +69,13 @@ debug-zeabur-pg-connect.md
 # 脚本内的调试/临时工具脚本（下划线开头的一次性脚本）
 05_代码与脚本/scripts/_*.py
 05_代码与脚本/scripts/bin/_*.py
+05_代码与脚本/workbench/_*.py
 05_代码与脚本/crypto_data.py
 05_代码与脚本/scripts/README.md
+
+# 批量任务运行产物（进度/失败清单，断点续跑用，不入库）
+*_progress.jsonl
+*_failures.jsonl
 
 # 旧版本 B 阶段脚本
 05_代码与脚本/scripts/bin/phase_b_deep_doc_discovery.py

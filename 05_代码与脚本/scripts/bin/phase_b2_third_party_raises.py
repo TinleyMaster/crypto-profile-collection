@@ -66,6 +66,23 @@ def _as_list(v) -> list[str]:
     return [str(v)]
 
 
+def _to_numeric(v):
+    """将 DefiLlama 金额/估值字段规范化为数值，兼容 '3,000'、'$3,000' 等格式；无法解析返回 None。"""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        s = v.strip().replace(",", "").replace("$", "").replace(" ", "")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
 def extract_raises(asset_id: int, protocol_id: str, protocol: dict) -> list[dict]:
     """从协议详情的 raises 字段提取融资轮次，返回待写入行（不含 id）。"""
     rows: list[dict] = []
@@ -82,13 +99,13 @@ def extract_raises(asset_id: int, protocol_id: str, protocol: dict) -> list[dict
             "protocol_name": raw.get("name") or protocol.get("name"),
             "round": str(round_name),
             "raise_date": raise_date,
-            "amount": raw.get("amount"),
+            "amount": _to_numeric(raw.get("amount")),
             "chains": _as_list(raw.get("chains")),
             "sector": raw.get("sector"),
             "category": raw.get("category"),
             "lead_investors": _as_list(raw.get("leadInvestors")),
             "other_investors": _as_list(raw.get("otherInvestors")),
-            "valuation": raw.get("valuation"),
+            "valuation": _to_numeric(raw.get("valuation")),
             "source": raw.get("source") or None,
         })
     return rows

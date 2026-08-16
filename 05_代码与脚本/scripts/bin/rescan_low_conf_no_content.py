@@ -105,9 +105,9 @@ def main() -> int:
         help="逗号分隔的 entry_type 白名单",
     )
     parser.add_argument("--limit", type=int, default=0, help="最多回扫多少条（0=全部）")
-    parser.add_argument("--batch-size", type=int, default=2000, help="每批读取条数")
-    parser.add_argument("--workers", type=int, default=8, help="抓正文并发线程数")
-    parser.add_argument("--fetch-timeout", type=int, default=15, help="抓正文超时（秒）")
+    parser.add_argument("--batch-size", type=int, default=200, help="每批读取条数")
+    parser.add_argument("--workers", type=int, default=12, help="抓正文并发线程数")
+    parser.add_argument("--fetch-timeout", type=int, default=10, help="抓正文超时（秒）")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写库")
     args = parser.parse_args()
 
@@ -172,8 +172,9 @@ def main() -> int:
         if not rows:
             break
 
-        # 并发抓正文
+        # 并发抓正文（边完成边打印，避免长时间无输出像卡死）
         texts = [""] * len(rows)
+        done = 0
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futs = {
                 ex.submit(_fetch_page_text, r["entry_url"], args.fetch_timeout): i
@@ -185,6 +186,9 @@ def main() -> int:
                     texts[i] = fut.result()
                 except Exception:
                     texts[i] = ""
+                done += 1
+                if done % 50 == 0 or done == len(rows):
+                    print(f"    批内抓取 {done}/{len(rows)} ...", flush=True)
 
         no_content_ids = [r["entry_id"] for r, t in zip(rows, texts) if not t]
         confirmed += len(no_content_ids)

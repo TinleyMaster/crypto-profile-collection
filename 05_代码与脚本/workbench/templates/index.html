@@ -994,6 +994,23 @@
             font-size: 11px;
         }
 
+        .chain-badge {
+            display: inline-block;
+            font-size: 10px;
+            color: #8a92a0;
+            background: #1e222a;
+            border: 1px solid #2a3040;
+            border-radius: 4px;
+            padding: 0 5px;
+            margin-right: 6px;
+            vertical-align: middle;
+            line-height: 16px;
+        }
+
+        .contract-addr.copied {
+            color: #4ade80;
+        }
+
         .hot-badge {
             display: inline-block;
             padding: 1px 6px;
@@ -2016,6 +2033,36 @@
             const s = String(addr);
             if (s.length <= 12) return s;
             return s.slice(0, 8) + '...' + s.slice(-4);
+        }
+
+        function copyContract (el) {
+            const addr = el.getAttribute('data-addr');
+            if (!addr) return;
+            const show = () => {
+                const old = el.textContent;
+                el.textContent = '已复制';
+                el.classList.add('copied');
+                setTimeout(() => {
+                    el.textContent = old;
+                    el.classList.remove('copied');
+                }, 1200);
+            };
+            const fallback = () => {
+                const ta = document.createElement('textarea');
+                ta.value = addr;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try { document.execCommand('copy'); } catch (e) {}
+                document.body.removeChild(ta);
+                show();
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(addr).then(show).catch(fallback);
+            } else {
+                fallback();
+            }
         }
 
         function onchainBar (pct, color) {
@@ -3996,7 +4043,7 @@
             html += '<table class="hot-tokens-table"><thead><tr>';
             html += '<th style="width:40px">#</th>';
             html += '<th>代币 / 项目</th>';
-            html += '<th>合约地址</th>';
+            html += '<th>链 / 合约地址</th>';
             html += '<th class="right">价格</th>';
             html += '<th class="right">24h 涨跌</th>';
             html += '<th class="right">24h 交易量</th>';
@@ -4045,10 +4092,19 @@
                     ? contract.substring(0, 6) + '...' + contract.substring(contract.length - 4)
                     : '-';
 
+                let contractCell = '';
+                if (contract) {
+                    contractCell =
+                        (chain ? '<span class="chain-badge">' + escapeHtml(chain) + '</span>' : '') +
+                        '<span class="contract-addr" data-addr="' + escapeHtml(contract) + '" onclick="copyContract(this)" title="点击复制">' + escapeHtml(contractShort) + '</span>';
+                } else {
+                    contractCell = '<span class="no-contract">-</span>';
+                }
+
                 html += '<tr>';
                 html += '<td>' + rankBadge + rank + '</td>';
                 html += '<td><strong>' + (t.symbol || '?') + '</strong>' + (name ? '<br><span class="token-name">' + name + '</span>' : '') + '</td>';
-                html += '<td>' + (contract ? '<span class="contract-addr" title="' + contract + ' (' + chain + ')">' + contractShort + '</span>' : '<span class="no-contract">-</span>') + '</td>';
+                html += '<td>' + contractCell + '</td>';
                 html += '<td class="right">$' + priceStr + '</td>';
                 html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
                 html += '<td class="right">' + volStr + '</td>';

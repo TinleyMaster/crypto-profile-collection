@@ -34,6 +34,27 @@ MIN_TXNS = 30               # 最低交易笔数
 MAX_CHANGE_24H = 1000       # 最多 1000% 涨幅（过滤极端异常）
 MIN_CHANGE_24H = -90        # 最少 -90% 跌幅
 
+# Binance chainId → 可读链名
+CHAIN_NAME_MAP = {
+    "1": "Ethereum",
+    "10": "Optimism",
+    "56": "BSC",
+    "137": "Polygon",
+    "250": "Fantom",
+    "324": "zkSync Era",
+    "8453": "Base",
+    "42161": "Arbitrum",
+    "43114": "Avalanche",
+    "CT_501": "Solana",
+}
+
+
+def _chain_name(chain_id: Any) -> str:
+    """将 Binance chainId 映射为可读链名，未知时回退原值。"""
+    if chain_id is None:
+        return ""
+    return CHAIN_NAME_MAP.get(str(chain_id), str(chain_id))
+
 # 缓存
 _cache: dict[str, Any] = {}
 _cache_ts: float = 0
@@ -112,7 +133,7 @@ def score_tokens(raw_tokens: list[dict]) -> list[dict]:
         scored.append({
             "symbol": symbol,
             "name": (t.get("name") or "").strip(),
-            "chain": t.get("chainId", ""),
+            "chain": _chain_name(t.get("chainId", "")),
             "contract": t.get("contractAddress", ""),
             "price": price,
             "change_24h": change_24h,

@@ -196,6 +196,7 @@
     <header class="r-header">
         <div class="r-title" id="r-title">🤖 一键投研</div>
         <div class="r-actions">
+            <button id="r-fill-btn" onclick="fillMissing()">补齐缺失</button>
             <button onclick="window.close()">关闭</button>
         </div>
     </header>
@@ -215,27 +216,7 @@
         const ASSET_ID = {{ asset_id }};
         let researchNotebookId = null;
         let researchAsking = false;
-
-        const TYPE_LABELS = {
-            whitepaper_page: '白皮书页',
-            docs: '文档',
-            docs_portal: '文档门户',
-            official_website: '官网',
-            doc_file: '文档文件',
-            github: 'GitHub',
-            medium: 'Medium 博客',
-            announcement: '公告',
-            twitter: 'Twitter / X',
-            telegram: 'Telegram',
-            reddit: 'Reddit',
-            facebook: 'Facebook',
-            notebooklm: 'AI精确分类',
-            research: '投研精选',
-            other: '其他',
-        };
-        const TYPE_ORDER = ['whitepaper_page', 'docs', 'docs_portal', 'official_website', 'doc_file',
-            'github', 'medium', 'announcement', 'twitter', 'telegram', 'reddit', 'facebook',
-            'notebooklm', 'research', 'other'];
+        let filling = false;
 
         function escapeHtml (s) {
             if (s == null) return '';
@@ -282,10 +263,12 @@
         }
 
         // ── 加载笔记本 ──
-        async function loadNotebook () {
+        async function loadNotebook (refresh) {
             try {
-                const res = await fetch('/api/research/' + ASSET_ID + '/notebook');
-                const data = await safeJson(res, '/api/research/' + ASSET_ID + '/notebook');
+                let url = '/api/research/' + ASSET_ID + '/notebook';
+                if (refresh) url += '?refresh=1';
+                const res = await fetch(url);
+                const data = await safeJson(res, url);
                 if (!data.ok || !data.data) throw new Error(data.error || '打开失败');
                 researchNotebookId = data.data.notebook_id;
                 render(data.data);
@@ -294,6 +277,49 @@
                 document.getElementById('r-sidebar').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
                 document.getElementById('r-messages').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
             }
+        }
+
+        async function fillMissing () {
+            if (filling) return;
+            if (!confirm('将针对缺失项自动补齐投研资料（可能耗时较长），是否继续？')) return;
+            filling = true;
+            const btn = document.getElementById('r-fill-btn');
+            btn.disabled = true;
+            btn.textContent = '补齐中...';
+            try {
+                const res = await fetch('/api/research/' + ASSET_ID + '/fill-missing', { method: 'POST' });
+                const data = await safeJson(res, '/api/research/' + ASSET_ID + '/fill-missing');
+                if (!data.ok) throw new Error(data.error || '启动失败');
+
+                await waitForTask(data.task_id, 1800000); // 最长 30 分钟
+
+                const resultRes = await fetch('/api/tasks/' + data.task_id + '/result');
+                const resultData = await safeJson(resultRes, '/api/tasks/' + data.task_id + '/result');
+
+                let msg = '补齐完成';
+                if (resultData.pending) {
+                    msg = '补齐仍在后台进行中，可稍后重新打开本页查看最新进度。';
+                } else if (resultData.ok && resultData.result && resultData.result.ok) {
+                    const d = resultData.result.data || {};
+                    msg = d.message || msg;
+                    if (d.filled && d.filled.length) {
+                        msg += '\n\n本次补齐：' + d.filled.map(function (x) { return x.label; }).join('、');
+                    }
+                    if (d.still_missing && d.still_missing.length) {
+                        msg += '\n\n仍缺失：' + d.still_missing.map(function (x) { return x.label; }).join('、');
+                    }
+                } else {
+                    msg = '补齐失败：' + ((resultData.result && resultData.result.error) || resultData.error || '未知错误');
+                }
+                alert(msg);
+                await loadNotebook(true); // 强制重采快照
+            } catch (e) {
+                alert('补齐失败: ' + e.message);
+                await loadNotebook(true);
+            }
+            filling = false;
+            btn.disabled = false;
+            btn.textContent = '补齐缺失';
         }
 
         function render (d) {
@@ -337,45 +363,7 @@
                 });
             }
 
-            const sources = d.sources || [];
-            side += '<h3>文件类型（' + sources.length + '）</h3>';
-            if (sources.length === 0) {
-                side += '<div class="no-data">暂无资料</div>';
-            } else {
-                side += renderSourceGroups(sources);
-            }
             document.getElementById('r-sidebar').innerHTML = side;
-        }
-
-        function renderSourceGroups (sources) {
-            const groups = {};
-            sources.forEach(function (s) {
-                const key = TYPE_LABELS[s.type] ? s.type : 'other';
-                if (!groups[key]) groups[key] = [];
-                groups[key].push(s);
-            });
-            const keys = Object.keys(groups).sort(function (a, b) {
-                const ia = TYPE_ORDER.indexOf(a); const ib = TYPE_ORDER.indexOf(b);
-                return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
-            });
-
-            let html = '';
-            keys.forEach(function (key) {
-                const items = groups[key];
-                const label = TYPE_LABELS[key] || key;
-                html += '<div class="r-group">' +
-                    '<div class="r-group-head" onclick="toggleGroup(this)">' +
-                    '<span>' + escapeHtml(label) + '</span>' +
-                    '<span class="cnt">' + items.length + '</span>' +
-                    '<span class="chev">▶</span>' +
-                    '</div>' +
-                    '<div class="r-group-body">';
-                items.forEach(function (s) {
-                    html += renderSourceItem(s);
-                });
-                html += '</div></div>';
-            });
-            return html;
         }
 
         function renderSourceItem (s) {

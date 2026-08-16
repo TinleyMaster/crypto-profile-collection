@@ -1599,6 +1599,166 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     return items
 
 
+# ── 单币缺失补齐流水线 ──
+# 缺失资料类型 key → 可自动补齐的动作集合。动作在执行时去重，按 _FILL_ACTION_ORDER 顺序串行。
+_CONTENT_TOPIC_FILL = ["deep", "spa", "ai_classify"]  # 文档深爬 + SPA 兜底 + AI 正文分类
+
+_MISSING_FILL_ACTIONS = {
+    "official_website": [],                                   # 官网入口无可靠自动补，需手动
+    "whitepaper_docs": ["deep", "spa", "ai_classify"],
+    "github_repo": ["deep"],
+    "audit_report": ["third_party", "deep", "ai_classify"],
+    "tokenomics": ["tokenomics", "deep", "ai_classify"],
+    "onchain_holder_data": ["holders"],
+    "social_heat": ["social"],
+    "token_unlock_data": ["unlocks", "deep", "ai_classify"],
+    "contract_address": [],                                   # 合约地址无自动补，需手动
+    "tge_ido_info": ["raises", "ai_classify"],
+    "lp_liquidity_info": _CONTENT_TOPIC_FILL,
+    "treasury_multisig": _CONTENT_TOPIC_FILL,
+    "team_vc": ["raises", "deep", "ai_classify"],
+    "roadmap": _CONTENT_TOPIC_FILL,
+    "dao_governance": _CONTENT_TOPIC_FILL,
+    "bug_bounty": ["third_party", "deep", "ai_classify"],
+    "exchange_listing": _CONTENT_TOPIC_FILL,
+    "competitor_material": ["ai_classify"],
+    "major_event_announcement": _CONTENT_TOPIC_FILL,
+    "third_party_rating": ["third_party"],
+    "onchain_abnormal_event": ["hacks"],
+}
+
+# 动作执行顺序（依赖关系：先爬文档，再第三方/TGE/异常，最后 AI 分类；结构化数据独立置后）
+_FILL_ACTION_ORDER = [
+    "deep", "spa", "third_party", "raises", "hacks", "ai_classify",
+    "tokenomics", "holders", "social", "unlocks",
+]
+
+# 脚本动作：key -> (脚本名, 额外参数, 超时秒)
+_FILL_SCRIPT_ACTIONS = {
+    "deep": ("phase_b2_deep_doc_discovery.py", ["--limit", "50", "--workers", "1", "--timeout", "15"], 300),
+    "spa": ("phase_b2_spa_browser_crawl.py", ["--limit", "20", "--concurrency", "1"], 300),
+    "third_party": ("phase_b2_third_party.py", ["--timeout", "20"], 180),
+    "raises": ("phase_b2_third_party_raises.py", ["--timeout", "20"], 180),
+    "hacks": ("phase_b2_third_party_hacks.py", ["--timeout", "20"], 180),
+}
+
+
+def _fill_result_ok(result) -> bool:
+    """宽松判断结构化补齐函数返回是否成功（兼容 ok / status 两种字段约定）。"""
+    if not isinstance(result, dict):
+        return False
+    if "ok" in result:
+        return bool(result["ok"])
+    return result.get("status") == "ok"
+
+
+def _run_fill_action(action: str, asset_id: int, log=None) -> tuple[bool, str]:
+    """执行单个补齐动作，返回 (是否成功, 说明)。"""
+    if action in _FILL_SCRIPT_ACTIONS:
+        script, extra_args, timeout = _FILL_SCRIPT_ACTIONS[action]
+        bin_dir = _get_scripts_bin()
+        cmd = [sys.executable, "-u", str(bin_dir / script), "--asset-id", str(asset_id)] + extra_args
+        if log:
+            log("$ " + " ".join(cmd))
+        _, returncode = _run_with_log(cmd, str(bin_dir), timeout, log=log)
+        return returncode == 0, ("ok" if returncode == 0 else f"exit {returncode}")
+
+    if action == "ai_classify":
+        result = ai_classify_asset(asset_id, log=log)
+        return _fill_result_ok(result), (result.get("error") or "ok") if isinstance(result, dict) else "ok"
+
+    if action == "tokenomics":
+        result = query_tokenomics_ai(asset_id, log=log)
+        return _fill_result_ok(result), (result.get("error") or "ok") if isinstance(result, dict) else "ok"
+
+    if action == "holders":
+        result = query_onchain_data(asset_id, force=True, log=log)
+        return _fill_result_ok(result), (result.get("error") or "ok") if isinstance(result, dict) else "ok"
+
+    if action == "social":
+        result = query_social_heat(asset_id, force=True, log=log)
+        return _fill_result_ok(result), (result.get("error") or "ok") if isinstance(result, dict) else "ok"
+
+    if action == "unlocks":
+        result = query_unlocks_ai(asset_id, log=log)
+        return _fill_result_ok(result), (result.get("error") or "ok") if isinstance(result, dict) else "ok"
+
+    return False, f"unknown action: {action}"
+
+
+def fill_missing_materials(asset_id: int, log=None) -> dict:
+    """一键补齐单个代币缺失的投研资料。
+
+    流程：采集当前快照 → 计算缺失清单 → 按缺失项映射动作 → 串行执行 →
+    重新采集快照对比，返回补齐前后缺失变化。单个动作失败不中断整体。
+    """
+
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    snapshot = _collect_asset_snapshot(asset_id)
+    if not snapshot:
+        return {"ok": False, "error": "资产不存在"}
+
+    materials = _compute_missing_materials(snapshot)
+    before_missing = [{"key": m["key"], "label": m["label"]} for m in materials if not m["present"]]
+
+    if not before_missing:
+        return {
+            "ok": True,
+            "data": {
+                "message": "该代币投研资料已完整，无需补齐",
+                "before_missing": [],
+                "filled": [],
+                "still_missing": [],
+                "actions": [],
+            },
+        }
+
+    actions: list[str] = []
+    for m in materials:
+        if m["present"]:
+            continue
+        for act in _MISSING_FILL_ACTIONS.get(m["key"], []):
+            if act not in actions:
+                actions.append(act)
+
+    _emit(f"检测到 {len(before_missing)} 项缺失，计划执行动作: {actions}")
+
+    action_results = []
+    for act in _FILL_ACTION_ORDER:
+        if act not in actions:
+            continue
+        _emit(f"\n{'=' * 40}\n[补齐] {act}\n{'=' * 40}")
+        try:
+            ok, note = _run_fill_action(act, asset_id, log=log)
+        except Exception as e:
+            ok, note = False, str(e)
+        action_results.append({"action": act, "ok": ok, "note": note})
+        _emit(f"[补齐] {act} => {'成功' if ok else '失败'}: {note}")
+
+    snapshot2 = _collect_asset_snapshot(asset_id)
+    materials2 = _compute_missing_materials(snapshot2)
+    still_missing = [{"key": m["key"], "label": m["label"]} for m in materials2 if not m["present"]]
+    still_keys = {x["key"] for x in still_missing}
+    filled = [m for m in before_missing if m["key"] not in still_keys]
+
+    return {
+        "ok": True,
+        "data": {
+            "message": f"补齐完成：缺失 {len(before_missing)} 项 → {len(still_missing)} 项（本次补齐 {len(filled)} 项）",
+            "before_missing": before_missing,
+            "filled": filled,
+            "still_missing": still_missing,
+            "actions": action_results,
+        },
+    }
+
+
 _FETCH_TYPES = {"whitepaper_page", "docs", "docs_portal", "official_website", "github", "medium", "doc_file"}
 _MAX_DOC_FETCH = 10
 _SNIPPET_LIMIT = 2500

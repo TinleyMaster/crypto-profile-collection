@@ -1112,6 +1112,16 @@ def api_research_notebook(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/fill-missing", methods=["POST"])
+def api_research_fill_missing(asset_id: int):
+    """一键补齐单个代币缺失的投研资料（后台任务 + 实时日志）。"""
+    def _worker(log):
+        return _get_db_stats().fill_missing_materials(asset_id, log=log)
+
+    task_id = task_mgr.submit_func_task(f"补齐缺失: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

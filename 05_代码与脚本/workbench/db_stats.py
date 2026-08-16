@@ -1356,6 +1356,48 @@ def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm
     return sources
 
 
+def get_asset_raises(asset_id: int) -> list[dict]:
+    """读取已落库的融资轮次（团队/VC 投资人结构化数据，只读）。"""
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT protocol_name, round, raise_date, amount,
+                           lead_investors, other_investors, valuation
+                    FROM biz.asset_raises
+                    WHERE asset_id = %s
+                    ORDER BY raise_date
+                    """,
+                    (asset_id,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    except psycopg.errors.UndefinedTable:
+        return []
+
+
+def get_asset_exchanges(asset_id: int) -> list[dict]:
+    """读取 CMC 交易对快照，作为交易所上线信息的结构化来源（只读）。"""
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT mp.exchange_name, mp.market_pair,
+                           mp.pair_base_symbol, mp.pair_quote_symbol
+                    FROM src_cmc.cmc_market_pair_snapshot mp
+                    INNER JOIN core.asset_source_map asm
+                      ON asm.source_code = 'cmc' AND asm.source_asset_key = mp.cmc_id::text
+                    WHERE asm.asset_id = %s
+                    ORDER BY mp.exchange_name
+                    """,
+                    (asset_id,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    except psycopg.errors.UndefinedTable:
+        return []
+
+
 def _collect_asset_snapshot(asset_id: int) -> dict | None:
     """收集一个代币的全部投研资料快照（文档入口/文件/精选/结构化数据/合约）。"""
     with get_db() as conn:
@@ -1460,6 +1502,8 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
     onchain = get_onchain_holder_snapshot(asset_id)
     social = get_asset_social_heat(asset_id)
     unlocks = get_asset_unlocks(asset_id)
+    raises = get_asset_raises(asset_id)
+    exchanges = get_asset_exchanges(asset_id)
 
     sources = _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls)
 
@@ -1475,6 +1519,8 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
             "social": social,
             "unlocks": unlocks,
             "contracts": contracts,
+            "raises": raises,
+            "exchanges": exchanges,
         },
         "counts": {
             "doc_source_entries": len(doc_source_entries),
@@ -1603,6 +1649,10 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     }
     for key, wanted in _MATERIAL_TOPIC_MAP.items():
         present[key] = bool(set(wanted) & topics)
+
+    # 结构化数据补齐：融资轮次（团队/VC）、CMC 交易对（交易所上线）
+    present["team_vc"] = present["team_vc"] or bool(structured.get("raises"))
+    present["exchange_listing"] = present["exchange_listing"] or bool(structured.get("exchanges"))
 
     material_links = _collect_material_links(sources)
     items = []
@@ -1900,6 +1950,10 @@ def _snapshot_cache_valid(snapshot: dict, updated_at) -> bool:
     sources = snapshot.get("sources") or []
     # 阶段3 之后快照的 sources 均带 topics 字段；旧结构快照视为失效，强制重采。
     if sources and not all("topics" in s for s in sources):
+        return False
+    # 引入结构化 raises/exchanges 后，旧快照缺这些键也视为失效，保证新判定立即生效。
+    structured = snapshot.get("structured") or {}
+    if "raises" not in structured or "exchanges" not in structured:
         return False
     try:
         updated = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
@@ -2347,6 +2401,72 @@ def _extract_json_output(output: str) -> dict | None:
     return None
 
 
+def _ensure_onchain_snapshot_table(conn) -> None:
+    """确保 biz.onchain_holder_snapshot 存在（新环境自动建表，与 DDL 迁移保持一致）。"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.onchain_holder_snapshot (
+                snapshot_id      SERIAL PRIMARY KEY,
+                asset_id         INTEGER NOT NULL,
+                chain            TEXT NOT NULL,
+                contract_address TEXT NOT NULL,
+                snapshot_date    DATE NOT NULL,
+                top10_concentration  NUMERIC(5,2),
+                top50_concentration  NUMERIC(5,2),
+                top100_concentration NUMERIC(5,2),
+                total_holders        INTEGER,
+                holder_change_7d     INTEGER,
+                holder_change_30d    INTEGER,
+                whale_balance_change_7d_pct  NUMERIC(6,2),
+                whale_balance_change_30d_pct NUMERIC(6,2),
+                exchange_wallet_pct   NUMERIC(5,2),
+                vc_wallet_pct         NUMERIC(5,2),
+                smart_money_pct       NUMERIC(5,2),
+                retail_pct            NUMERIC(5,2),
+                contract_pct          NUMERIC(5,2),
+                fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT fk_holder_snapshot_asset
+                    FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id)
+                    ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_holder_snapshot_asset_date
+            ON biz.onchain_holder_snapshot (asset_id, snapshot_date DESC)
+        """)
+
+
+def _save_onchain_holder_snapshot(asset_id: int, chain: str, contract_address: str, data: dict) -> None:
+    """把「拉取链上数据」爬到的持仓分布写入投研页判定所用的 onchain_holder_snapshot 表。
+
+    同日同链重复拉取时先删旧快照再写新快照，避免重复累积。
+    """
+    with get_db() as conn:
+        _ensure_onchain_snapshot_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM biz.onchain_holder_snapshot
+                WHERE asset_id = %s AND chain = %s AND snapshot_date = CURRENT_DATE
+                """,
+                (asset_id, chain),
+            )
+            cur.execute(
+                """
+                INSERT INTO biz.onchain_holder_snapshot
+                    (asset_id, chain, contract_address, snapshot_date,
+                     top10_concentration, top50_concentration, top100_concentration,
+                     total_holders, fetched_at)
+                VALUES (%s, %s, %s, CURRENT_DATE, %s, %s, %s, %s, NOW())
+                """,
+                (
+                    asset_id, chain, contract_address,
+                    data.get("top_10_pct"), data.get("top_50_pct"), data.get("top_100_pct"),
+                    data.get("total_holders"),
+                ),
+            )
+
+
 def query_onchain_data(asset_id: int, force: bool = False, log=None) -> dict:
     """按需查询链上持仓分布（BSC/ETH 优先 Binplorer API，其余链从区块浏览器 HTML 爬取）。
 
@@ -2454,6 +2574,10 @@ def query_onchain_data(asset_id: int, force: bool = False, log=None) -> dict:
                             "tier_distribution": data.get("tier_distribution", []),
                         }
                         holder_fetched = True
+                        try:
+                            _save_onchain_holder_snapshot(asset_id, chain, contract, data)
+                        except Exception as e:
+                            _emit(f"写入链上持仓快照失败({chain}): {e}")
                     else:
                         err = _extract_chain_error(stdout, "", 0)
                         result["_errors"] = result.get("_errors", [])

@@ -147,6 +147,7 @@ def main() -> int:
         "--entry-types", type=str, default=DEFAULT_ENTRY_TYPES,
         help="逗号分隔的 entry_type 白名单",
     )
+    parser.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID")
     parser.add_argument("--fetch-timeout", type=int, default=15, help="抓正文超时（秒）")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写库")
     args = parser.parse_args()
@@ -167,6 +168,12 @@ def main() -> int:
         return 1
 
     where_method = _where_method(args.method)
+
+    asset_filter = ""
+    asset_params: list = []
+    if args.asset_id is not None:
+        asset_filter = "AND asset_id = %s"
+        asset_params = [args.asset_id]
 
     print(f"提供商: {llm.provider} | 模型: {llm.model}")
     print(f"模式: {'DRY-RUN 预览' if args.dry_run else '执行回填'}")
@@ -193,8 +200,9 @@ def main() -> int:
                 WHERE {where_method}
                   AND entry_type = ANY(%s)
                   AND content_topics IS NOT NULL
+                  {asset_filter}
                 """,
-                (entry_types,),
+                (entry_types, *asset_params),
             )
             return cur.fetchone()[0]
 
@@ -218,10 +226,11 @@ def main() -> int:
                       AND {where_method}
                       AND entry_type = ANY(%s)
                       AND content_topics IS NOT NULL
+                      {asset_filter}
                     ORDER BY entry_id
                     LIMIT %s
                     """,
-                    (last_id, entry_types, fetch),
+                    (last_id, entry_types, *asset_params, fetch),
                 )
                 return [dict(r) for r in cur.fetchall()]
 

@@ -697,6 +697,84 @@ def _fetch_llms_txt(base_url: str, session, timeout: int) -> list[tuple[str, str
     return []
 
 
+def _parse_sitemap(text: str) -> tuple[str, list[str]]:
+    """解析 sitemap XML，返回 (root_tag, <loc> 列表)，兼容命名空间。"""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return "", []
+    root_tag = root.tag.rsplit("}", 1)[-1]
+    locs = [
+        el.text.strip()
+        for el in root.iter()
+        if el.tag.rsplit("}", 1)[-1] == "loc" and el.text and el.text.strip()
+    ]
+    return root_tag, locs
+
+
+def _fetch_sitemap(base_url: str, session, timeout: int, max_pages: int = 200) -> list[tuple[str, str]]:
+    """获取站点 sitemap.xml（含 sitemap index），返回 (normalized_url, entry_type) 列表。
+
+    一次性拿到站点全部页面（roadmap/team/governance 等 HTML 内链可能漏掉的页），
+    仅保留同根域名链接并套用与深爬一致的排除规则，避免跨站污染。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    base_root = _root_domain(parsed.netloc.lower())
+
+    pending = [f"{origin}/sitemap.xml"]
+    seen_sitemaps: set[str] = set()
+    page_urls: list[str] = []
+
+    # 主 sitemap + 最多 9 个子 sitemap，避免无界递归
+    while pending and len(seen_sitemaps) < 10:
+        su = pending.pop(0)
+        if su in seen_sitemaps:
+            continue
+        seen_sitemaps.add(su)
+        try:
+            resp = session.get(su, timeout=(3, timeout), allow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "xml" not in ct and "text/plain" not in ct:
+                continue
+            root_tag, locs = _parse_sitemap(resp.text or "")
+            if not locs:
+                continue
+            if root_tag == "sitemapindex":
+                for loc in locs:
+                    if loc not in seen_sitemaps and loc not in pending:
+                        pending.append(loc)
+                continue
+            page_urls.extend(locs)
+        except Exception:
+            continue
+
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for link in page_urls:
+        lp = urlparse(link)
+        if lp.scheme not in ("http", "https"):
+            continue
+        if _root_domain(lp.netloc.lower()) != base_root:
+            continue
+        if _is_excluded_url(link):
+            continue
+        norm = _normalize_url(link)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        results.append((norm, infer_doc_entry_type(norm)))
+        if len(results) >= max_pages:
+            break
+    return results
+
+
 def _probe_docs_subdomain(base_url: str, session, timeout: int) -> str | None:
     """官网 SPA/无链接时，探测 docs.{root_domain} 子域名是否存在。"""
     from urllib.parse import urlparse
@@ -768,6 +846,18 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
                 if llms_links:
                     existing = {u for u, _ in doc_links}
                     for u, t in llms_links:
+                        if u not in existing:
+                            doc_links.append((u, t))
+                            existing.add(u)
+
+            # sitemap.xml 全量索引：文档站总是安全；官网仅在单资产放宽模式下抓全站页面，
+            # 避免批量模式把 /about /careers /legal 等非投研页大规模收进库。
+            apply_sitemap = entry.get("entry_type") in ("docs", "docs_portal") or not require_doc_keyword
+            if apply_sitemap:
+                sitemap_links = _fetch_sitemap(resp.url, session, timeout)
+                if sitemap_links:
+                    existing = {u for u, _ in doc_links}
+                    for u, t in sitemap_links:
                         if u not in existing:
                             doc_links.append((u, t))
                             existing.add(u)

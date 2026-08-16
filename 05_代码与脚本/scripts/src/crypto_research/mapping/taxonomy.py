@@ -88,7 +88,7 @@ CONTENT_TOPIC_KEYWORDS = {
     "tge_ido": ("tge", "ido", "ieo", "presale", "public sale", "private sale", "launchpad", "token generation", "fair launch"),
     "lp_liquidity": ("liquidity", "amm", "pool", "lp lock", "locked liquidity", "trading pair"),
     "treasury_multisig": ("treasury", "multisig", "multi-sig", "gnosis", "safe.global", "vault", "dao treasury"),
-    "team_vc": ("founder", "core team", "advisor", "investor", "venture", "funding", "seed round", "series a", "series b", "backed by", "financing"),
+    "team_vc": ("team", "about", "founder", "core team", "advisor", "investor", "venture", "funding", "seed round", "series a", "series b", "backed by", "financing"),
     "dao_governance": ("dao", "governance", "snapshot", "tally", "proposal", "voting", "vote"),
     "bug_bounty": ("bug bounty", "bounty", "immunefi", "hackerone", "disclosure", "cve-", "responsible disclosure"),
     "exchange_listing": ("listing", "listed on", "dexscreener", "trading pair", "trading pairs", "market listing"),

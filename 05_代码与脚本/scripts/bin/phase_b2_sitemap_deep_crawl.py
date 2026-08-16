@@ -6,7 +6,8 @@ Phase B2-sitemap: sitemap 全量深爬（独立脚本，用于老币抢救 / 手
 
     阶段1 深爬：对每个种子入口（official_website/docs/docs_portal）尽可能深地
                 抓取 sitemap.xml（含 sitemap index 递归、robots.txt 声明、.gz）；
-                无 sitemap 时回退到 HTML 内链 + llms.txt。发现的全部页面 URL
+                无 sitemap 时回退到 HTML 内链 + llms.txt，并跟随发现的文档站
+                子域名（docs.* / gitbook 等）进一步深爬。发现的全部页面 URL
                 存入临时表 biz.doc_crawl_staging（仅 URL）。
     阶段2 分类：对临时表中未处理的 URL 调用 classify_link 分类，
                 命中 content_topics（非 other）的，或官网/文档首页，才写入主表
@@ -49,6 +50,9 @@ SITEMAP_CANDIDATES = (
 
 # 官网/文档首页即使未命中投研关键词也保留
 KEEP_HOMEPAGE_TYPES = {"official_website", "docs", "docs_portal"}
+
+# 文档聚合平台：深爬时限制同 host，避免把其他项目的内容收进来
+DOC_PLATFORM_HOSTS = ("gitbook.io", "readthedocs.io", "readme.io", "gitbook.com")
 
 STAGING_DDL = """
 CREATE TABLE IF NOT EXISTS biz.doc_crawl_staging (
@@ -153,18 +157,28 @@ def _fetch_sitemap_deep(
     timeout: int,
     max_sitemaps: int,
     max_pages: int,
+    same_host_only: bool = False,
 ) -> list[str]:
-    """尽可能深地抓取站点 sitemap，返回归一化后的同根域名页面 URL 列表。
+    """尽可能深地抓取站点 sitemap，返回归一化后的页面 URL 列表。
 
     相比 B2 的 _fetch_sitemap（固定 200 页 / 10 个子 sitemap），这里：
     - 先读 robots.txt 的 Sitemap 声明，再兜底常见 sitemap 路径；
     - 递归展开 sitemap index，上限可配（默认 200 个子 sitemap）；
     - 页面数上限可配（默认 20000），覆盖大站；
-    - 支持 .xml.gz 压缩 sitemap。
+    - 支持 .xml.gz 压缩 sitemap；
+    - same_host_only=True 时仅保留同 host（子域名）链接，用于 gitbook.io 等聚合平台，
+      避免跨项目污染。
     """
     parsed = urlparse(base_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    base_root = b2._root_domain(parsed.netloc.lower())
+    base_host = parsed.netloc.lower()
+    base_root = b2._root_domain(base_host)
+
+    def _same_site(netloc: str) -> bool:
+        nl = netloc.lower()
+        if same_host_only:
+            return nl == base_host
+        return b2._root_domain(nl) == base_root
 
     pending: list[str] = []
     seen_sitemaps: set[str] = set()
@@ -201,8 +215,8 @@ def _fetch_sitemap_deep(
                     lp = urlparse(loc)
                     if lp.scheme not in ("http", "https"):
                         continue
-                    # 子 sitemap 只接受同根域名，避免跨站
-                    if b2._root_domain(lp.netloc.lower()) != base_root:
+                    # 子 sitemap 只接受同站点，避免跨站
+                    if not _same_site(lp.netloc):
                         continue
                     if loc not in seen_sitemaps and loc not in pending:
                         pending.append(loc)
@@ -219,7 +233,7 @@ def _fetch_sitemap_deep(
         lp = urlparse(link)
         if lp.scheme not in ("http", "https"):
             continue
-        if b2._root_domain(lp.netloc.lower()) != base_root:
+        if not _same_site(lp.netloc):
             continue
         if b2._is_excluded_url(link):
             continue
@@ -255,8 +269,35 @@ def _build_project_identifiers(entry: dict, resolved_url: str) -> list[str]:
     return identifiers
 
 
-def _fallback_html_links(entry: dict, session, timeout: int) -> list[str]:
-    """无 sitemap 时回退：抓首页 HTML，提取内链 + llms.txt（放宽模式，交给分类闸门过滤）。"""
+def _find_doc_sites(doc_links: list[tuple[str, str]], seed_url: str) -> list[str]:
+    """从已发现的链接里识别文档站入口（docs 子域名 / gitbook 等聚合平台）。"""
+    seed_host = urlparse(seed_url).netloc.lower()
+    seed_root = b2._root_domain(seed_host)
+
+    sites: dict[str, str] = {}
+    for u, _ in doc_links:
+        lp = urlparse(u)
+        if lp.scheme not in ("http", "https"):
+            continue
+        host = lp.netloc.lower()
+        if host == seed_host:
+            continue
+        # docs 子域名（同根域名）
+        if host.startswith("docs.") and b2._root_domain(host) == seed_root:
+            sites.setdefault(host, f"{lp.scheme}://{host}")
+            continue
+        # 聚合文档平台：取该 host 下路径最短的 URL 作为项目根
+        if any(host == p or host.endswith("." + p) for p in DOC_PLATFORM_HOSTS):
+            cur = sites.get(host)
+            if cur is None or len(u) < len(cur):
+                sites[host] = u
+    return list(sites.values())
+
+
+def _fallback_html_links(
+    entry: dict, session, timeout: int, max_sitemaps: int, max_pages: int
+) -> list[str]:
+    """无 sitemap 时回退：抓首页 HTML，提取内链 + llms.txt，并深爬发现的文档站子域名。"""
     seed_url = entry["entry_url"]
     resp = session.get(seed_url, timeout=(3, timeout), allow_redirects=True)
     resp.raise_for_status()
@@ -274,9 +315,25 @@ def _fallback_html_links(entry: dict, session, timeout: int) -> list[str]:
         skip_aggregation_filter=True,
     )
 
+    existing = {u for u, _ in doc_links}
+
     if entry.get("entry_type") in ("docs", "docs_portal"):
-        existing = {u for u, _ in doc_links}
         for u, t in b2._fetch_llms_txt(resp.url, session, timeout):
+            if u not in existing:
+                doc_links.append((u, t))
+                existing.add(u)
+
+    # 跟随文档站子域名深爬（gitbook/docs 等），补全 HTML 首页内链发现不了的章节
+    for site_url in _find_doc_sites(doc_links, seed_url):
+        extra = b2._fetch_llms_txt(site_url, session, timeout)
+        if not extra:
+            extra = [
+                (u, b2.infer_doc_entry_type(u))
+                for u in _fetch_sitemap_deep(
+                    site_url, session, timeout, max_sitemaps, max_pages, same_host_only=True
+                )
+            ]
+        for u, t in extra:
             if u not in existing:
                 doc_links.append((u, t))
                 existing.add(u)
@@ -291,7 +348,7 @@ def _crawl_seed(entry: dict, timeout: int, max_sitemaps: int, max_pages: int) ->
         urls = _fetch_sitemap_deep(entry["entry_url"], session, timeout, max_sitemaps, max_pages)
         if urls:
             return {"status": "ok", "entry": entry, "urls": urls, "method": "sitemap"}
-        urls = _fallback_html_links(entry, session, timeout)
+        urls = _fallback_html_links(entry, session, timeout, max_sitemaps, max_pages)
         return {"status": "ok", "entry": entry, "urls": urls, "method": "html"}
     except Exception as e:
         return {"status": "failed", "entry": entry, "error": str(e)[:100]}

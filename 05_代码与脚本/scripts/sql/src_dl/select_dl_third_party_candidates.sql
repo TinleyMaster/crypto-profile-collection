@@ -1,5 +1,5 @@
 -- 查找已映射 DefiLlama、但尚未补齐第三方(审计/评级)链接的资产。
--- 以 dl_protocol.rating 条目作为「已处理」标记（无论是否存在审计链接都会写入）。
+-- 以 doc_source_entry.discovered_from='dl_protocol.rating' 条目作为「已处理」标记（无论是否存在审计链接都会写入）。
 SELECT
     asm.asset_id,
     p.protocol_id,

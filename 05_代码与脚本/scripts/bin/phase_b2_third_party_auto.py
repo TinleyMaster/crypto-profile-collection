@@ -2,7 +2,7 @@
 third_party 自动循环脚本：持续运行 phase_b2_third_party 直到无剩余候选。
 
 每次调用 phase_b2_third_party.py 会：
-- 按 dl_protocol.rating 缺失重新选择候选（天然断点续跑）
+- 按 doc_source_entry 中 discovered_from='dl_protocol.rating' 条目缺失重新选择候选（天然断点续跑）
 - 一轮结束后统一提交，进度按轮保存
 
 对数据库瞬时断连（Zeabur 偶发 server closed the connection）做带退避的重试。

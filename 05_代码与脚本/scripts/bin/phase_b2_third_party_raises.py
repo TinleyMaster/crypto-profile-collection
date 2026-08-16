@@ -4,8 +4,8 @@ Phase B2 third_party 扩展：TGE / 融资轮次（raises）结构化落库。
 对已映射 DefiLlama 的资产，调用 /protocol/{slug} 详情接口，提取 raises 字段，
 写入 biz.asset_raises（结构化表，非 URL 维度，因 DefiLlama raises.source 无稳定 URL）。
 
-断点续跑：以 biz.asset_raises.defillama_id 已存在的协议作为「已处理」标记。
-注意：raises 为空的协议不产生记录，重跑时会重复拉取，但单轮全量处理下无影响。
+断点续跑：以 biz.dl_protocol_checked 已标记的协议作为「已处理」标记。
+成功拉取协议详情即标记（无论 raises 是否为空），重跑时自动跳过，不会重复拉取。
 """
 from __future__ import annotations
 

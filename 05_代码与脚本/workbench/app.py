@@ -314,6 +314,45 @@ TASK_DEFS = {
         "category": "数据源采集",
     },
 
+    # ═══ 第三方专项（DefiLlama 评级/审计 + TGE/融资 + 链上异常）═══
+    "third_party_auto": {
+        "name": "第三方评级/审计回填（自动循环）",
+        "description": "拉取 DefiLlama 协议详情，提取审计链接与评级页写入 doc_source_entry，直到全部处理完（rating 缺失标记断点续跑）",
+        "script": "phase_b2_third_party_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
+    "third_party_hacks": {
+        "name": "链上异常事件采集（hacks）",
+        "description": "拉取 DefiLlama /hacks 全量异常事件，按 defillamaId 映射资产，写入 biz.asset_hacks（结构化表）",
+        "script": "phase_b2_third_party_hacks.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
+    "third_party_raises_auto": {
+        "name": "TGE/融资轮次采集（自动循环）",
+        "description": "拉取 DefiLlama 协议详情 raises 字段，写入 biz.asset_raises（结构化表），直到全部处理完（dl_protocol_checked 标记断点续跑）",
+        "script": "phase_b2_third_party_raises_auto.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
+    "third_party": {
+        "name": "第三方评级/审计回填（单批）",
+        "description": "单批回填 DefiLlama 评级页与审计链接",
+        "script": "phase_b2_third_party.py",
+        "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+    "third_party_raises": {
+        "name": "TGE/融资轮次采集（单批）",
+        "description": "单批回填 TGE/融资轮次",
+        "script": "phase_b2_third_party_raises.py",
+        "default_args": ["--limit", "200"],
+        "category": "数据源采集",
+        "hidden": True,
+    },
+
     # ═══ B2/B3: 文档爬取 ═══
     "b2_auto_loop": {
         "name": "B2 深度文档发现（自动循环）",

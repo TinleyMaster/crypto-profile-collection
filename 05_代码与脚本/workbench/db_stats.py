@@ -1403,7 +1403,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT canonical_symbol, canonical_name, asset_type FROM core.asset WHERE asset_id = %s",
+                "SELECT canonical_symbol, canonical_name, asset_type, primary_sector FROM core.asset WHERE asset_id = %s",
                 (asset_id,),
             )
             asset = cur.fetchone()
@@ -1512,6 +1512,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
         "symbol": asset["canonical_symbol"],
         "name": asset["canonical_name"],
         "type": asset["asset_type"],
+        "sector": asset["primary_sector"] or "other",
         "sources": sources,
         "structured": {
             "tokenomics": tokenomics,
@@ -1666,6 +1667,40 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
             "note": "",
             "links": material_links.get(key, []),
         })
+
+    # 分赛道排序：缺失项优先；缺失项内部按赛道主题优先级排序，
+    # 让该赛道更看重的资料（如 DeFi 的审计、Meme 的交易所上线）排最前。
+    try:
+        from crypto_research.mapping.sector import topic_priority_rank
+    except ImportError:  # pragma: no cover - 独立运行场景
+        topic_priority_rank = None
+
+    if topic_priority_rank is not None:
+        sector = snapshot.get("sector") or "other"
+        # 资料类型 key → 用于赛道优先级排序的代表主题（结构化数据无对应主题）
+        priority_topic = {
+            "official_website": None,
+            "whitepaper_docs": "whitepaper",
+            "github_repo": "docs",
+            "audit_report": "audit",
+            "tokenomics": "tokenomics",
+        }
+        for _k, _v in _MATERIAL_TOPIC_MAP.items():
+            priority_topic[_k] = _v[0]
+
+        def _sector_rank(item: dict) -> int:
+            if item["present"]:
+                return 1  # 已收集排后（保持原顺序）
+            topic = priority_topic.get(item["key"])
+            if topic is None:
+                # 官网是一切投研基础，缺失最优先；结构化数据保持原顺序
+                return -1 if item["key"] == "official_website" else 500
+            return topic_priority_rank(sector, topic)
+
+        # 稳定排序：主键 present（缺失优先），次键赛道优先级
+        items = sorted(items, key=lambda it: (0 if not it["present"] else 1,
+                                              _sector_rank(it)))
+
     return items
 
 
@@ -1954,6 +1989,9 @@ def _snapshot_cache_valid(snapshot: dict, updated_at) -> bool:
     # 引入结构化 raises/exchanges 后，旧快照缺这些键也视为失效，保证新判定立即生效。
     structured = snapshot.get("structured") or {}
     if "raises" not in structured or "exchanges" not in structured:
+        return False
+    # 引入分赛道排序后，旧快照缺 sector 键视为失效，保证新排序立即生效。
+    if "sector" not in snapshot:
         return False
     try:
         updated = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)

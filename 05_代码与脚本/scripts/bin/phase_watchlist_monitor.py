@@ -36,14 +36,18 @@ import psycopg.rows
 import requests
 
 from crypto_research.config import get_settings
+from crypto_research.mapping.sector import get_sector_unlock_alert_days
 from crypto_research.clients.notifier import (
     EmailNotifier,
     build_unlock_alert_html,
     build_trend_alert_html,
+    build_whale_transfer_alert_html,
 )
 
 TREND_DROP_PCT = float(os.getenv("TREND_DROP_PCT", "15"))
 UNLOCK_ALERT_DAYS = int(os.getenv("UNLOCK_ALERT_DAYS", "14"))
+# Meme 大户转账监控阈值（美元）：24h 内单笔转入交易所金额超过该值则提醒
+WHALE_TRANSFER_MIN_USD = float(os.getenv("WHALE_TRANSFER_MIN_USD", "100000"))
 
 
 def _ensure_table(conn) -> None:
@@ -134,6 +138,43 @@ def _get_price(coin_id: str, settings) -> float | None:
     return None
 
 
+def _check_whale_transfers(conn, notifier, asset_id: int, symbol: str, name: str) -> bool:
+    """Meme 赛道：检查 24h 内转入交易所的大额转账，命中则发提醒并返回 True。
+
+    链上转账表不存在（未采集）或查询失败时静默跳过，返回 False。
+    """
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT chain, value_usd, is_to_exchange
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
+                  AND value_usd >= %s
+                ORDER BY value_usd DESC
+                LIMIT 1
+            """, (asset_id, WHALE_TRANSFER_MIN_USD))
+            row = cur.fetchone()
+    except psycopg.errors.UndefinedTable:
+        return False
+    except Exception as e:
+        print(f"  [WARN] 大户转账查询失败 {symbol}: {e}")
+        return False
+
+    if not row:
+        return False
+
+    value_usd = float(row["value_usd"] or 0)
+    ok, msg = notifier.send(
+        f"🐋 {symbol} 检测到大户转入交易所",
+        build_whale_transfer_alert_html(
+            symbol, name, row["chain"] or "", value_usd, bool(row["is_to_exchange"]),
+        ),
+    )
+    print(f"  [{symbol}] 大户转账 {value_usd:,.2f} USD: {msg}")
+    return ok
+
+
 def run_once(settings) -> None:
     notifier = EmailNotifier(settings)
     today = date.today()
@@ -144,7 +185,8 @@ def run_once(settings) -> None:
             cur.execute("""
                 SELECT w.watch_id, w.asset_id, w.symbol, w.target_unlock_date,
                        w.target_unlock_pct, w.entry_price, w.unlock_alert_sent_at,
-                       w.trend_alert_sent_at, a.canonical_name AS name
+                       w.trend_alert_sent_at, a.canonical_name AS name,
+                       a.primary_sector AS sector
                 FROM biz.unlock_watchlist w
                 JOIN core.asset a ON a.asset_id = w.asset_id
             """)
@@ -159,6 +201,7 @@ def run_once(settings) -> None:
             asset_id = it["asset_id"]
             symbol = it["symbol"]
             name = it["name"] or symbol
+            sector = it["sector"] or "other"
 
             coin_id = _get_coin_id(conn, asset_id, symbol, settings)
             price = _get_price(coin_id, settings) if coin_id else None
@@ -182,26 +225,37 @@ def run_once(settings) -> None:
                     )
                 entry = price
 
-            # 1. 解锁到期提醒
-            ud = it["target_unlock_date"]
-            if ud and it["unlock_alert_sent_at"] is None:
-                days_left = (ud - today).days
-                if 0 <= days_left <= UNLOCK_ALERT_DAYS:
-                    ok, msg = notifier.send(
-                        f"🔓 {symbol} 将于 {days_left} 天后解锁",
-                        build_unlock_alert_html(
-                            symbol, name, str(ud),
-                            float(it["target_unlock_pct"]) if it["target_unlock_pct"] is not None else None,
-                            days_left,
-                        ),
-                    )
-                    print(f"  [{symbol}] 解锁提醒 {days_left} 天: {msg}")
-                    if ok:
-                        with conn.cursor() as ucur:
-                            ucur.execute(
-                                "UPDATE biz.unlock_watchlist SET unlock_alert_sent_at = NOW(), updated_at = NOW() WHERE watch_id = %s",
-                                (watch_id,),
-                            )
+            # 1. 分赛道解锁到期提醒（L2/AI 提前 21 天，默认 14 天；Meme 不解锁预警）
+            alert_days = get_sector_unlock_alert_days(sector)
+            if sector == "meme":
+                # Meme 无 vesting，改用大户转账监控（复用 unlock_alert_sent_at 去重）
+                if it["unlock_alert_sent_at"] is None and _check_whale_transfers(
+                        conn, notifier, asset_id, symbol, name):
+                    with conn.cursor() as ucur:
+                        ucur.execute(
+                            "UPDATE biz.unlock_watchlist SET unlock_alert_sent_at = NOW(), updated_at = NOW() WHERE watch_id = %s",
+                            (watch_id,),
+                        )
+            else:
+                ud = it["target_unlock_date"]
+                if ud and it["unlock_alert_sent_at"] is None and alert_days > 0:
+                    days_left = (ud - today).days
+                    if 0 <= days_left <= alert_days:
+                        ok, msg = notifier.send(
+                            f"🔓 {symbol} 将于 {days_left} 天后解锁",
+                            build_unlock_alert_html(
+                                symbol, name, str(ud),
+                                float(it["target_unlock_pct"]) if it["target_unlock_pct"] is not None else None,
+                                days_left,
+                            ),
+                        )
+                        print(f"  [{symbol}] 解锁提醒 {days_left} 天: {msg}")
+                        if ok:
+                            with conn.cursor() as ucur:
+                                ucur.execute(
+                                    "UPDATE biz.unlock_watchlist SET unlock_alert_sent_at = NOW(), updated_at = NOW() WHERE watch_id = %s",
+                                    (watch_id,),
+                                )
 
             # 2. 空头趋势提醒
             if price is not None and entry is not None and it["trend_alert_sent_at"] is None:

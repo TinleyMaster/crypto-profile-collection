@@ -87,3 +87,23 @@ def build_trend_alert_html(symbol: str, name: str, entry_price: float,
       <p style="color:#666">解锁砸盘信号已出现，请关注空头机会与止损纪律。</p>
     </div>
     """
+
+
+def build_whale_transfer_alert_html(symbol: str, name: str, chain: str,
+                                    value_usd: float, to_exchange: bool) -> str:
+    """构建大户转账监控提醒邮件 HTML（Meme 赛道替代解锁预警）。"""
+    direction = "转入交易所" if to_exchange else "链上大额转账"
+    color = "#dc2626" if to_exchange else "#b45309"
+    return f"""
+    <div style="font-family:sans-serif;max-width:600px;margin:auto">
+      <h2 style="color:{color}">🐋 大户转账监控提醒</h2>
+      <p><b>{symbol}</b>（{name}）检测到一笔{direction}。</p>
+      <table style="border-collapse:collapse;width:100%">
+        <tr><td style="padding:6px;border:1px solid #eee">代币</td><td style="padding:6px;border:1px solid #eee">{symbol}</td></tr>
+        <tr><td style="padding:6px;border:1px solid #eee">链</td><td style="padding:6px;border:1px solid #eee">{chain}</td></tr>
+        <tr><td style="padding:6px;border:1px solid #eee">金额</td><td style="padding:6px;border:1px solid #eee;color:{color}">${value_usd:,.2f}</td></tr>
+        <tr><td style="padding:6px;border:1px solid #eee">方向</td><td style="padding:6px;border:1px solid #eee">{direction}</td></tr>
+      </table>
+      <p style="color:#666">大户动向是 Meme 代币的重要风险信号，请评估抛压/拉盘风险。</p>
+    </div>
+    """

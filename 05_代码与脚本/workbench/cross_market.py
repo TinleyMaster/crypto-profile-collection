@@ -11,6 +11,16 @@ from typing import Any
 from binance_market import get_hot_tokens as get_binance_tokens
 from cmc_market import get_cmc_tokens, get_cmc_trending
 
+# 可选依赖：从 scripts/src 引入赛道映射（app.py 已把 scripts/src 加 sys.path）。
+# 独立运行本模块时回退为「无赛道信息」的默认评分。
+try:
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+    import psycopg.rows
+    _HAS_DB = True
+except ImportError:  # pragma: no cover - 独立运行场景
+    _HAS_DB = False
+
 # 权重分配
 WEIGHTS = {
     "binance": 0.50,  # Binance 交易数据
@@ -21,6 +31,11 @@ WEIGHTS = {
 _cache: dict[str, Any] = {}
 _cache_ts: float = 0
 CACHE_TTL = 120
+
+# symbol → sector 映射缓存（赛道变化不频繁，TTL 拉长）
+_sector_map: dict[str, str] = {}
+_sector_map_ts: float = 0
+SECTOR_MAP_TTL = 3600
 
 
 def _normalize_float(v: Any, default: float = 0) -> float:
@@ -33,6 +48,49 @@ def _normalize_float(v: Any, default: float = 0) -> float:
 def _build_index(tokens: list[dict], key: str = "symbol") -> dict[str, dict]:
     """按 symbol 建立索引。"""
     return {t.get(key, "").upper(): t for t in tokens if t.get(key)}
+
+
+def _load_sector_map() -> dict[str, str]:
+    """从 core.asset 加载 symbol → primary_sector 映射（带缓存）。
+
+    处理同名 symbol 重复：排除 other 后取众数赛道；全部为 other 则回退 other。
+    """
+    global _sector_map, _sector_map_ts
+    if not _HAS_DB:
+        return {}
+
+    now = time.time()
+    if _sector_map and (now - _sector_map_ts) < SECTOR_MAP_TTL:
+        return _sector_map
+
+    try:
+        settings = get_settings()
+        with get_connection(settings.database_url) as conn:
+            cur = conn.cursor(row_factory=psycopg.rows.dict_row)
+            cur.execute("""
+                SELECT DISTINCT ON (a.canonical_symbol)
+                       a.canonical_symbol AS symbol,
+                       a.primary_sector AS sector
+                FROM core.asset a
+                WHERE a.primary_sector IS NOT NULL
+                  AND a.primary_sector != 'other'
+                ORDER BY a.canonical_symbol,
+                         CASE a.asset_type
+                             WHEN 'coin' THEN 0
+                             WHEN 'token' THEN 1
+                             WHEN 'stablecoin' THEN 2
+                             ELSE 3
+                         END,
+                         a.asset_id
+            """)
+            _sector_map = {r["symbol"].upper(): r["sector"] for r in cur.fetchall()}
+            _sector_map_ts = now
+    except Exception:
+        # 赛道映射加载失败不影响主流程，回退默认评分
+        _sector_map = {}
+        _sector_map_ts = now
+
+    return _sector_map
 
 
 def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
@@ -120,8 +178,9 @@ def get_cross_validated(limit: int = 30) -> dict:
     if _cache and (now - _cache_ts) < CACHE_TTL:
         return {"cached": True, "results": _cache["results"][:limit], "total": _cache["total"]}
 
-    # 并行获取各数据源
-    binance_data = get_binance_tokens(100)
+    # 并行获取各数据源（Binance 评分套用分赛道权重）
+    sector_map = _load_sector_map()
+    binance_data = get_binance_tokens(100, sector_map)
     cmc_data = get_cmc_tokens(100)
 
     binance_idx = _build_index(binance_data.get("tokens", []))

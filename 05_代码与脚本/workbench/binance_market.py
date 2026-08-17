@@ -28,6 +28,13 @@ SCORE_WEIGHTS = {
     "momentum": 0.10,     # 短期动量（1h/5m 变化）
 }
 
+# 分赛道权重（可选）：从 scripts/src 的 sector 模块引入「单一数据源」。
+# 独立运行本模块（未挂 scripts/src）时回退到上面的默认 SCORE_WEIGHTS。
+try:
+    from crypto_research.mapping.sector import get_sector_weights
+except ImportError:  # pragma: no cover - 独立运行场景
+    get_sector_weights = None
+
 # 过滤阈值
 MIN_VOLUME_USD = 5000       # 最低 24h 交易量
 MIN_TXNS = 30               # 最低交易笔数
@@ -99,8 +106,13 @@ def _safe_int(v: Any, default: int = 0) -> int:
         return default
 
 
-def score_tokens(raw_tokens: list[dict]) -> list[dict]:
-    """对原始代币数据评分排序。"""
+def score_tokens(raw_tokens: list[dict],
+                 sector_by_symbol: dict[str, str] | None = None) -> list[dict]:
+    """对原始代币数据评分排序。
+
+    sector_by_symbol: 可选，{symbol: sector} 映射。传入时按赛道套用不同
+    市场五维权重（分赛道评分）；不传则用默认 SCORE_WEIGHTS。
+    """
     scored = []
 
     # 数据清洗
@@ -171,12 +183,17 @@ def score_tokens(raw_tokens: list[dict]) -> list[dict]:
         momentum = abs(s["change_1h"]) + abs(s["change_5m"]) * 2
         momentum_score = _normalize(momentum, m_min, m_max)
 
+        # 分赛道权重：命中映射则按赛道套用，否则默认
+        sector = (sector_by_symbol or {}).get(s["symbol"])
+        weights = get_sector_weights(sector) if get_sector_weights else SCORE_WEIGHTS
+
+        s["sector"] = sector
         s["score"] = round(
-            vol_score * SCORE_WEIGHTS["volume"] * 100
-            + change_score * SCORE_WEIGHTS["change_24h"] * 100
-            + txn_score * SCORE_WEIGHTS["txns"] * 100
-            + buy_score * SCORE_WEIGHTS["buy_ratio"] * 100
-            + momentum_score * SCORE_WEIGHTS["momentum"] * 100,
+            vol_score * weights["volume"] * 100
+            + change_score * weights["change_24h"] * 100
+            + txn_score * weights["txns"] * 100
+            + buy_score * weights["buy_ratio"] * 100
+            + momentum_score * weights["momentum"] * 100,
             1,
         )
 
@@ -193,8 +210,12 @@ def score_tokens(raw_tokens: list[dict]) -> list[dict]:
     return scored
 
 
-def get_hot_tokens(limit: int = 30) -> dict:
-    """获取今日最值得投研的代币列表（带缓存）。"""
+def get_hot_tokens(limit: int = 30,
+                   sector_by_symbol: dict[str, str] | None = None) -> dict:
+    """获取今日最值得投研的代币列表（带缓存）。
+
+    sector_by_symbol: 可选，{symbol: sector} 映射，传给评分做分赛道权重。
+    """
     global _cache, _cache_ts
 
     now = time.time()
@@ -202,7 +223,7 @@ def get_hot_tokens(limit: int = 30) -> dict:
         return {"cached": True, "tokens": _cache["tokens"][:limit], "total": _cache["total"]}
 
     raw = _fetch_pages(page_size=200)
-    scored = score_tokens(raw)
+    scored = score_tokens(raw, sector_by_symbol)
 
     result = {
         "cached": False,

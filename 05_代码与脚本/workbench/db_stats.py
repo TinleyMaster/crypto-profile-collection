@@ -448,8 +448,11 @@ def get_task_progress() -> list[dict]:
 
 
 def search_assets(query: str, limit: int = 20) -> list[dict]:
-    """按 symbol 或 name 搜索资产，用于下拉自动补全。
+    """按 symbol / name / 合约地址搜索资产，用于下拉自动补全。
     优先查 core.asset，无结果时从 src_cmc 回退并自动入库。
+
+    合约地址匹配：EVM（0x 开头）大小写不敏感（含部分匹配）；非 EVM（如 Solana
+    base58）精确匹配（大小写敏感）。
     """
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -461,16 +464,32 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
                 WHERE a.canonical_symbol ILIKE %s
                    OR a.canonical_name ILIKE %s
+                   OR EXISTS (
+                       SELECT 1 FROM core.asset_contract ac
+                       WHERE ac.asset_id = a.asset_id
+                         AND (
+                             (LEFT(ac.contract_address, 2) = '0x' AND LOWER(ac.contract_address) LIKE LOWER(%s))
+                             OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
+                         )
+                   )
                 ORDER BY
                     CASE
-                        WHEN a.canonical_symbol = UPPER(%s) THEN 0
-                        WHEN a.canonical_symbol ILIKE %s THEN 1
-                        ELSE 2
+                        WHEN EXISTS (
+                            SELECT 1 FROM core.asset_contract ac
+                            WHERE ac.asset_id = a.asset_id
+                              AND (
+                                  (LEFT(ac.contract_address, 2) = '0x' AND LOWER(ac.contract_address) = LOWER(%s))
+                                  OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
+                              )
+                        ) THEN 0
+                        WHEN a.canonical_symbol = UPPER(%s) THEN 1
+                        WHEN a.canonical_symbol ILIKE %s THEN 2
+                        ELSE 3
                     END,
                     a.canonical_symbol
                 LIMIT %s
                 """,
-                (f"%{query}%", f"%{query}%", query, f"{query}%", limit),
+                (f"%{query}%", f"%{query}%", f"%{query}%", query, query, query, query, f"{query}%", limit),
             )
             rows = cur.fetchall()
 

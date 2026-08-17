@@ -46,6 +46,7 @@ EXPLORER_URLS = {
     "base": "https://basescan.org",
     "avax": "https://snowtrace.io",
     "monad": "https://monadscan.com",
+    "solana": "https://solscan.io",
 }
 
 # Blockscout 免费 REST API（JSON 接口，无 Cloudflare 拦截），用于避开
@@ -72,6 +73,8 @@ CHAIN_ALIASES = {
     "avalanche": "avax",
     "avax": "avax",
     "monad": "monad",
+    "solana": "solana",
+    "sol": "solana",
 }
 
 # 浏览器简称 → 数据库完整名列表（反查合约地址时兼容多种命名）
@@ -84,6 +87,7 @@ CHAIN_DB_NAMES = {
     "base": ("base",),
     "avax": ("avalanche", "avax"),
     "monad": ("monad",),
+    "solana": ("solana", "sol"),
 }
 
 HEADERS = {
@@ -95,6 +99,15 @@ HEADERS = {
 
 RE_PCT = re.compile(r'([\d.]+)%')
 RE_NUMBER = re.compile(r'([\d,]+\.?\d*)')
+
+
+def _norm_addr(chain: str, addr: str) -> str:
+    """地址归一化：EVM 地址（hex）统一小写；Solana 地址（base58）大小写敏感，保持原样。"""
+    if not addr:
+        return addr
+    if chain == "solana":
+        return addr
+    return addr.lower()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,11 +142,11 @@ def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
                    FROM core.asset_contract c
                    JOIN core.asset a ON a.asset_id = c.asset_id
                    WHERE c.contract_address = %s AND c.chain IN ({placeholders})""",
-                (contract_address.lower(), *db_names),
+                (_norm_addr(chain, contract_address), *db_names),
             )
             row = cur.fetchone()
             if row:
-                row["contract_address"] = contract_address.lower()
+                row["contract_address"] = _norm_addr(chain, contract_address)
                 row["chain"] = chain
             return row
 
@@ -731,6 +744,180 @@ def _scrape_holders_blockscout(chain: str, contract_address: str,
     }
 
 
+def _scrape_holders_solscan(chain: str, contract_address: str,
+                            max_holders: int = 50) -> dict | None:
+    """用 Playwright 爬取 Solscan 的 token 持仓分布（Solana SPL 代币）。
+
+    Solscan 有 Cloudflare 防护（requests 直接访问返回 403），需用无头浏览器
+    通过 JS 挑战后解析渲染后的 DOM。token 页面 Overview 提供 total_holders /
+    current_supply / 集中度汇总，Holders 标签页提供持币列表表格。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] playwright 未安装，无法爬取 Solscan")
+        return None
+
+    url = f"https://solscan.io/token/{contract_address}"
+
+    result = {
+        "chain": chain,
+        "contract_address": _norm_addr(chain, contract_address),
+        "total_holders": 0,
+        "total_supply": None,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+        "price_usd": None,
+        "market_cap_usd": None,
+        "source": "solscan",
+    }
+
+    # 提取 holder 表格行（Solscan 表格列：# / Account / Token Account / Quantity / Percentage / Value / Tags）
+    EXTRACT_JS = """() => {
+        for (const tb of document.querySelectorAll('table')) {
+            const heads = Array.from(tb.querySelectorAll('thead th')).map(c => c.innerText.trim());
+            if (heads.includes('Quantity') && heads.includes('Percentage')) {
+                return Array.from(tb.querySelectorAll('tbody tr')).map(tr => {
+                    const tds = Array.from(tr.querySelectorAll('td')).map(c => c.innerText.trim());
+                    return {rank: tds[0]||'', account: tds[1]||'', tokenAccount: tds[2]||'',
+                            quantity: tds[3]||'', percentage: tds[4]||'', value: tds[5]||'', tags: tds[6]||''};
+                });
+            }
+        }
+        return [];
+    }"""
+
+    for attempt in range(1, 3):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=[
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
+                ])
+                context = browser.new_context(
+                    user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 900})
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+                # 等待 Cloudflare JS 挑战完成（title 从 "Just a moment..." 变成正常）
+                for _ in range(40):
+                    title = page.title()
+                    if title and "moment" not in title.lower() and "attention" not in title.lower():
+                        break
+                    time.sleep(2)
+                # 等待 token 数据通过内部 API 异步加载完成
+                page.wait_for_timeout(6000)
+
+                body_text = page.evaluate("() => document.body.innerText")
+
+                # 总持币地址数（"Holders 131,083"）
+                m = re.search(r'Holders\s+([\d,]+)', body_text)
+                if m:
+                    result["total_holders"] = int(m.group(1).replace(",", ""))
+
+                # 当前总供应（"Current Supply 839,956,905,903.697222"）
+                m = re.search(r'Current Supply\s+([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["total_supply"] = float(m.group(1).replace(",", ""))
+
+                # 市值 / 价格（Overview 区域）
+                m = re.search(r'Market Cap\s+\$([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["market_cap_usd"] = float(m.group(1).replace(",", ""))
+
+                m = re.search(r'Price\s+\$([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["price_usd"] = float(m.group(1).replace(",", ""))
+
+                # 进入 Holders 标签页，抓持币列表
+                holders_btn = page.locator("button:has-text('Holders')").first
+                if holders_btn.count() > 0:
+                    holders_btn.click(timeout=10000)
+                    page.wait_for_timeout(5000)
+
+                # Solscan 每页最多 40 条（下拉选项 10/20/30/40），切换为 40 以尽量多抓
+                try:
+                    sel = page.locator("button[aria-label='select']").first
+                    if sel.count() > 0:
+                        sel.click(timeout=5000)
+                        page.wait_for_timeout(1500)
+                        opt40 = page.locator("[role=option]:has-text('40')").first
+                        if opt40.count() > 0:
+                            opt40.click(timeout=5000)
+                            page.wait_for_timeout(5000)
+                except Exception as e:
+                    print(f"  [WARN] 切换每页数量失败: {e}")
+
+                rows = page.evaluate(EXTRACT_JS)
+
+                top_holders = []
+                tiers_count = {}
+                tag_pcts = {}
+                for r in rows[:max_holders]:
+                    try:
+                        rank = int(r["rank"])
+                    except (ValueError, TypeError):
+                        continue
+                    # Account 列 = "标签\n地址" 或纯地址
+                    lines = [l.strip() for l in r["account"].splitlines() if l.strip()]
+                    if len(lines) >= 2:
+                        label = " ".join(lines[:-1])
+                        address = lines[-1]
+                    else:
+                        label = ""
+                        address = lines[0] if lines else ""
+                    pct = _parse_pct(r["percentage"])
+                    top_holders.append({
+                        "rank": rank,
+                        "address": address,
+                        "label": label,
+                        "amount": r["quantity"].replace(",", ""),
+                        "pct": pct,
+                    })
+                    tag = (r["tags"] or "").strip()
+                    if tag:
+                        tiers_count[tag] = tiers_count.get(tag, 0) + 1
+                        if pct:
+                            tag_pcts[tag] = tag_pcts.get(tag, 0.0) + pct
+
+                result["top_holders_json"] = top_holders
+
+                # 集中度用持币列表累加（列表已按 rank 升序，即持仓量降序）
+                pcts = [h["pct"] for h in top_holders if h["pct"]]
+                if len(pcts) >= 5:
+                    result["top_5_pct"] = round(sum(pcts[:5]), 2)
+                if len(pcts) >= 10:
+                    result["top_10_pct"] = round(sum(pcts[:10]), 2)
+                if len(pcts) >= 25:
+                    result["top_25_pct"] = round(sum(pcts[:25]), 2)
+                if len(pcts) >= 50:
+                    result["top_50_pct"] = round(sum(pcts[:50]), 2)
+
+                # tier 分布：用 Tags 列统计（Whale/Shark/Dolphin/... 各 tier 地址数与占比）
+                tier_order = ["Whale", "Shark", "Dolphin", "Fish", "Crab", "Shrimp"]
+                tiers = []
+                for tn in tier_order:
+                    count = tiers_count.get(tn, 0)
+                    if count:
+                        tiers.append({"tier": tn, "count": count,
+                                      "pct_supply": round(tag_pcts.get(tn, 0.0), 2),
+                                      "pct_holders": None})
+                result["tier_distribution_json"] = tiers
+
+                browser.close()
+                return result
+        except Exception as e:
+            print(f"  [WARN] Solscan 爬取失败（尝试 {attempt}）: {e}")
+            if attempt < 2:
+                time.sleep(5)
+    return None
+
+
 def _print_holder_summary(result: dict) -> None:
     """打印持仓采集结果摘要。"""
     print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
@@ -762,7 +949,7 @@ def scrape_holders(explorer_url: str, contract_address: str,
 
     result = {
         "chain": "",
-        "contract_address": contract_address.lower(),
+        "contract_address": _norm_addr(chain, contract_address),
         "total_holders": 0,
         "top_holders_json": [],
         "tier_distribution_json": [],
@@ -773,6 +960,18 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "top_100_pct": None,
         "scraped_at": None,
     }
+
+    # Solana: Solscan 有 Cloudflare 防护（requests 返回 403），需用 Playwright 解析渲染后的 DOM
+    if chain == "solana":
+        print("  [INFO] 尝试 Solscan (Playwright) 获取持仓...")
+        sol_result = _scrape_holders_solscan(chain, contract_address, max_holders)
+        if sol_result and (sol_result["total_holders"] > 0 or sol_result["top_holders_json"]):
+            sol_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Solscan ({chain})")
+            _print_holder_summary(sol_result)
+            return sol_result
+        print("  [WARN] Solscan 未获取到数据")
+        return None
 
     # Step 0: BSC/ETH 优先 Binplorer API（免费 JSON 接口，避免区块浏览器 HTML 被拦截）
     if chain in ("bsc", "eth"):
@@ -899,7 +1098,7 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
         cur.execute(UPSERT_SQL, {
             "asset_id": asset_id,
             "chain": chain,
-            "contract_address": contract_address.lower(),
+            "contract_address": _norm_addr(chain, contract_address),
             "source_url": token_url,
             "total_holders": data.get("total_holders", 0),
             "top_5_pct": data.get("top_5_pct"),
@@ -948,6 +1147,10 @@ def main() -> int:
         # 爬取
         print(f"  抓取 {explorer_url}/token/{contract_address}...")
         data = scrape_holders(explorer_url, contract_address, args.holders_limit, chain=chain)
+
+        if data is None:
+            print("ERROR: 持仓数据获取失败，未写入数据库")
+            return 1
 
         if args.save:
             save_to_db(conn, asset_id, chain, contract_address, explorer_url, data)

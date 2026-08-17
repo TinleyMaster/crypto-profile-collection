@@ -45,9 +45,28 @@ def _normalize_float(v: Any, default: float = 0) -> float:
         return default
 
 
-def _build_index(tokens: list[dict], key: str = "symbol") -> dict[str, dict]:
-    """按 symbol 建立索引。"""
-    return {t.get(key, "").upper(): t for t in tokens if t.get(key)}
+def _norm_contract(contract: str) -> str:
+    """归一化合约地址：EVM（0x 开头）统一小写，非 EVM（如 Solana base58）保持原样。"""
+    c = (contract or "").strip()
+    if not c:
+        return ""
+    return c.lower() if c.startswith("0x") else c
+
+
+def _token_key(token: dict) -> str:
+    """以合约地址作为 token 唯一标识；无合约地址时回退到 symbol。
+
+    避免同名 symbol 的不同代币（如多个「牛来」meme）互相污染 name/contract。
+    """
+    contract = _norm_contract(token.get("contract", ""))
+    if contract:
+        return contract
+    return "sym:" + (token.get("symbol") or "").strip().upper()
+
+
+def _build_index(tokens: list[dict]) -> dict[str, dict]:
+    """按合约地址（缺省回退 symbol）建立索引。"""
+    return {_token_key(t): t for t in tokens if t.get("symbol")}
 
 
 def _load_sector_map() -> dict[str, str]:
@@ -95,12 +114,12 @@ def _load_sector_map() -> dict[str, str]:
 
 def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
     """计算多源交叉验证结果。"""
-    all_symbols = set(binance_idx.keys()) | set(cmc_idx.keys())
+    all_keys = set(binance_idx.keys()) | set(cmc_idx.keys())
     results = []
 
-    for sym in all_symbols:
-        b = binance_idx.get(sym)
-        c = cmc_idx.get(sym)
+    for key in all_keys:
+        b = binance_idx.get(key)
+        c = cmc_idx.get(key)
 
         sources = []
         # Binance 信号
@@ -134,17 +153,17 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
             + c_score * WEIGHTS["cmc"]
         )
 
-        # 选择最佳展示数据
-        symbol = (b.get("symbol") if b else c.get("symbol", sym)).upper() if (b or c) else sym
+        # 选择最佳展示数据（symbol/name/chain/contract 均来自匹配到的同一 token）
+        symbol = (b.get("symbol") if b else c.get("symbol", "")).upper() if (b or c) else ""
         price = b.get("price") if b else c.get("price") if c else 0
         change_24h = b_change if b else c_change
         volume_24h = b_vol if b_vol > 0 else c_vol
 
         # 项目名称：优先 CMC（有 name 字段），其次 Binance
         name = (c.get("name") if c else "") or (b.get("name") if b else "")
-        # 链和合约地址：仅 Binance 有
-        chain = b.get("chain", "") if b else ""
-        contract = b.get("contract", "") if b else ""
+        # 链和合约地址：优先 Binance（有完整字段），否则回退 CMC（仅有合约）
+        chain = b.get("chain", "") if b else c.get("chain", "")
+        contract = b.get("contract", "") if b else c.get("contract", "")
 
         results.append({
             "symbol": symbol,

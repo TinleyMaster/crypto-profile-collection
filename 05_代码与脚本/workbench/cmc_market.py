@@ -49,6 +49,10 @@ def _normalize_cmc_listing(item: dict) -> dict | None:
     price = float(usd.get("price", 0) or 0)
     market_cap = float(usd.get("market_cap", 0) or 0)
 
+    # 合约地址（platform.token_address），用于跨源按合约精确匹配，避免同名 symbol 误配
+    platform = item.get("platform") or {}
+    contract = (platform.get("token_address") or "").strip()
+
     return {
         "symbol": symbol,
         "name": item.get("name", ""),
@@ -61,6 +65,7 @@ def _normalize_cmc_listing(item: dict) -> dict | None:
         "market_cap": market_cap,
         "num_market_pairs": item.get("num_market_pairs", 0),
         "tags": item.get("tags", []),
+        "contract": contract,
     }
 
 

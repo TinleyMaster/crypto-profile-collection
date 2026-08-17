@@ -27,6 +27,17 @@ else:
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
 
+try:
+    from crypto_research.mapping.sector import (
+        SECTOR_LABELS,
+        get_sector_visible_material_keys,
+        topic_priority_rank,
+    )
+except ImportError:  # pragma: no cover - 独立运行场景
+    SECTOR_LABELS = {}
+    get_sector_visible_material_keys = None
+    topic_priority_rank = None
+
 
 _pool: psycopg_pool.ConnectionPool | None = None
 
@@ -445,7 +456,7 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
             cur.execute(
                 """
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
-                       cb.cmc_id
+                       cb.cmc_id, a.primary_sector
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
                 WHERE a.canonical_symbol ILIKE %s
@@ -487,6 +498,8 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         "name": row[2],
                         "type": row[3],
                         "cmc_id": row[4],
+                        "sector": row[5] or "other",
+                        "sector_label": SECTOR_LABELS.get(row[5] or "other", row[5] or "other"),
                         "chain": contract_map.get(row[0], (None, None))[0],
                         "contract": contract_map.get(row[0], (None, None))[1],
                     }
@@ -575,6 +588,8 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         "name": name,
                         "type": asset_type,
                         "cmc_id": cmc_id,
+                        "sector": None,
+                        "sector_label": None,
                         "chain": None,
                         "contract": None,
                     })
@@ -1668,15 +1683,15 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
             "links": material_links.get(key, []),
         })
 
+    # 分赛道展示：只保留该赛道需要的资料类型，无关类型隐藏。
+    sector = snapshot.get("sector") or "other"
+    if get_sector_visible_material_keys is not None:
+        visible = get_sector_visible_material_keys(sector)
+        items = [it for it in items if it["key"] in visible]
+
     # 分赛道排序：缺失项优先；缺失项内部按赛道主题优先级排序，
     # 让该赛道更看重的资料（如 DeFi 的审计、Meme 的交易所上线）排最前。
-    try:
-        from crypto_research.mapping.sector import topic_priority_rank
-    except ImportError:  # pragma: no cover - 独立运行场景
-        topic_priority_rank = None
-
     if topic_priority_rank is not None:
-        sector = snapshot.get("sector") or "other"
         # 资料类型 key → 用于赛道优先级排序的代表主题（结构化数据无对应主题）
         priority_topic = {
             "official_website": None,
@@ -2079,12 +2094,15 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             ]
         conn.commit()
 
+    sector = snapshot.get("sector") or "other"
     return {
         "ok": True,
         "data": {
             "notebook_id": notebook["notebook_id"],
             "asset_id": notebook["asset_id"],
             "title": notebook["title"],
+            "sector": sector,
+            "sector_label": SECTOR_LABELS.get(sector, sector),
             "missing": missing,
             "sources": snapshot["sources"],
             "structured": snapshot["structured"],

@@ -270,6 +270,59 @@ def get_sector_topic_priorities(sector: str | None) -> list[str]:
     return SECTOR_TOPIC_PRIORITY.get(sector or "other", SECTOR_TOPIC_PRIORITY["other"])
 
 
+# ── 分赛道投研资料展示 ─────────────────────────────────────────────
+# 说明：投研页「资料完整性」清单按赛道只展示该赛道关心的资料类型，无关类型
+# 隐藏，避免清单冗长。基础资料（官网/白皮书/GitHub/合约/链上/社交）所有赛道
+# 均展示；主题类资料按 SECTOR_TOPIC_PRIORITY 命中显示。
+
+SECTOR_BASE_MATERIAL_KEYS: tuple[str, ...] = (
+    "official_website",       # 官网
+    "whitepaper_docs",        # 白皮书 / 文档
+    "github_repo",            # GitHub 仓库
+    "contract_address",       # 合约地址
+    "onchain_holder_data",    # 链上持仓数据
+    "social_heat",            # 社交热度
+)
+
+# content_topic → 主题类资料类型 key（对齐 db_stats._MATERIAL_TOPIC_MAP）。
+# 仅收录能在投研清单里对应到独立资料类型的主题。
+_TOPIC_MATERIAL_KEYS: dict[str, str] = {
+    "audit": "audit_report",
+    "tokenomics": "tokenomics",
+    "tge_ido": "tge_ido_info",
+    "lp_liquidity": "lp_liquidity_info",
+    "treasury_multisig": "treasury_multisig",
+    "team_vc": "team_vc",
+    "roadmap": "roadmap",
+    "dao_governance": "dao_governance",
+    "bug_bounty": "bug_bounty",
+    "exchange_listing": "exchange_listing",
+    "competitor": "competitor_material",
+    "major_event": "major_event_announcement",
+    "announcement": "major_event_announcement",
+    "third_party_rating": "third_party_rating",
+    "onchain_abnormal": "onchain_abnormal_event",
+}
+
+
+def get_sector_visible_material_keys(sector: str | None) -> set[str]:
+    """返回某赛道在投研页应展示的资料类型 key 集合（对齐 db_stats.RESEARCH_MATERIAL_TYPES）。
+
+    - 基础资料所有赛道展示；
+    - 代币解锁数据除 Meme（无 vesting）外均展示；
+    - 主题类资料按 SECTOR_TOPIC_PRIORITY 命中展示。
+    """
+    keys = set(SECTOR_BASE_MATERIAL_KEYS)
+    keys.add("token_unlock_data")
+    if sector == "meme":
+        keys.discard("token_unlock_data")
+    for topic in get_sector_topic_priorities(sector):
+        mk = _TOPIC_MATERIAL_KEYS.get(topic)
+        if mk:
+            keys.add(mk)
+    return keys
+
+
 def topic_priority_rank(sector: str | None, topic: str) -> int:
     """返回 topic 在该赛道的优先级序号（0 = 最优先），未列出则排在默认兜底之后。
 

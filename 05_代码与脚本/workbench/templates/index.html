@@ -2155,7 +2155,10 @@
                         <span class="name">${escapeHtml(a.name)}</span>
                         ${a.chain ? `<span class="chain">${escapeHtml(a.chain)}${a.contract ? ' · ' + escapeHtml(shortAddr(a.contract)) : ''}</span>` : ''}
                     </div>
-                    <span class="type-badge">${escapeHtml(a.type)}</span>
+                    <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+                        ${a.sector_label ? `<span class="type-badge" style="background:#3f2d1e;color:#fbbf24">${escapeHtml(a.sector_label)}</span>` : ''}
+                        <span class="type-badge">${escapeHtml(a.type)}</span>
+                    </div>
                 </div>
             `).join('');
         }

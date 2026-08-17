@@ -333,6 +333,9 @@
         function renderSidebar (d) {
             let side = '';
             const missing = d.missing || [];
+            if (d.sector_label) {
+                side += '<div style="font-size:12px;color:#fbbf24;margin-bottom:12px">代币分类：' + escapeHtml(d.sector_label) + '</div>';
+            }
             side += '<h3>投研资料完整性</h3>';
             if (missing.length === 0) {
                 side += '<div class="no-data">无缺失项</div>';

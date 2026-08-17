@@ -130,6 +130,11 @@ CG_CHAIN_MAP = {
     "hyperevm": "hyperevm",
 }
 
+# 合约地址大小写敏感的链（非 EVM hex）。这类链（如 Solana 的 base58）地址
+# 一旦被 .lower() 就会指向错误账户，导入时必须保留原始大小写。
+# EVM 链（hex 地址）大小写不敏感，统一转小写用于去重。
+CASE_SENSITIVE_CHAINS = {"solana"}
+
 
 # ===================== STEP 1: CREATE TABLE =====================
 
@@ -209,7 +214,10 @@ SELECT
         WHEN LOWER(m.platform_name) = 'hyperevm' THEN 'hyperevm'
         ELSE LOWER(m.platform_name)
     END AS chain,
-    LOWER(m.token_address) AS contract_address,
+    CASE
+        WHEN LOWER(m.platform_name) IN ('solana', 'solana (spl)') THEN m.token_address
+        ELSE LOWER(m.token_address)
+    END AS contract_address,
     TRUE AS is_primary,
     'cmc' AS source_code
 FROM src_cmc.cmc_asset_map m
@@ -299,7 +307,10 @@ SELECT
         WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('robinhood chain', 'robinhood') THEN 'robinhood'
         ELSE LOWER(COALESCE(addr_chain, raw_chain))
     END AS chain,
-    LOWER(contract_address) AS contract_address,
+    CASE
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN contract_address
+        ELSE LOWER(contract_address)
+    END AS contract_address,
     FALSE AS is_primary,
     'dl' AS source_code
 FROM dl
@@ -352,7 +363,9 @@ def step3b_populate_cg(settings) -> None:
                 chain = CG_CHAIN_MAP.get((platform_key or "").strip().lower())
                 if not chain:
                     continue
-                addr = (addr or "").strip().lower()
+                addr = (addr or "").strip()
+                if chain not in CASE_SENSITIVE_CHAINS:
+                    addr = addr.lower()
                 if not addr:
                     continue
                 key = (chain, addr)

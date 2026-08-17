@@ -257,11 +257,12 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 
 基于市场数据驱动的投研价值评分，从 Binance Web3 API + CMC API 双源交叉验证：
 
-1. **评分维度**：24h 交易量、价格涨跌幅、交易笔数、买入占比、短期动量
-2. **交叉验证**：Binance 实时数据 + CMC 市场数据（双源共识标记 2/3）
-3. **前端展示**：默认显示 5 个代币，点击"加载更多"展示全部
-4. **信息展示**：项目名称、合约地址、交易量、涨跌幅、评分
-5. **一键投研**：点击代币直接打开资料面板 + 投研分析
+1. **评分维度**：24h 交易量、价格涨跌幅、交易笔数、买入占比、短期动量；评分权重按代币赛道（`SECTOR_SCORE_WEIGHTS`）微调，未知赛道回退默认权重
+2. **跨源匹配（按合约地址）**：CMC 提取 `platform.token_address`，与 Binance 数据以**合约地址**作为唯一键交叉匹配（EVM 合约地址统一小写归一化，非 EVM 如 Solana base58 保持原样），无合约地址时回退 symbol。避免同名 symbol 的不同代币（如多个「牛来」meme）互相污染 name/contract
+3. **交叉验证共识**：双源共识标记（2/3 表示双源命中，1/3 表示单源）
+4. **前端展示**：默认显示 5 个代币，点击"加载更多"展示全部
+5. **信息展示**：项目名称、合约地址、交易量、涨跌幅、评分（symbol/name/chain/contract 均来自匹配到的同一 token）
+6. **一键投研**：点击代币直接打开资料面板 + 投研分析
 
 ---
 
@@ -275,8 +276,8 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 - 任务进度（CG 币种详情、CG/CMC/DL 文档入口补充、双源补充、B2 深度文档发现、SPA 无头浏览器爬取、B2 AI 噪声清理、链上持仓快照）
 
 ### 币种查询与投研分析
-- **搜索**：按 symbol 或 name 搜索（pg_trgm GIN 索引加速模糊搜索）
-- **搜索回退**：core.asset 搜不到时，自动从 src_cmc 查找并写入 core.asset
+- **搜索**：按 symbol / name / **合约地址**搜索（pg_trgm GIN 索引加速模糊搜索）。合约地址匹配：EVM（`0x` 开头）大小写不敏感、支持部分前缀匹配；非 EVM（如 Solana base58）精确匹配（大小写敏感）。搜索结果展示**代币赛道分类徽章**（`primary_sector` → 中文标签）
+- **搜索回退**：core.asset 搜不到时，自动从 src_cmc 查找（按 symbol/name）并写入 core.asset
 - **资料面板**：文档链接列表（按来源分类，标注入库来源）
 - **一键复制全部链接** / **NotebookLM 精选**
 - **🤖 一键投研**：全屏 NotebookLM 风格投研页（自动收集资料 + 21 类完整性清单 + AI 问答带引用 + 对话持久化）
@@ -395,9 +396,10 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 
 ### 搜索性能
 - `pg_trgm` 扩展 + GIN 索引加速 `ILIKE '%query%'` 模糊搜索
-- `canonical_symbol` 和 `canonical_name` 双字段索引
+- `canonical_symbol` 和 `canonical_name` 双字段索引，`core.asset_contract` 合约地址关联匹配
 - 查询响应从 ~12ms（全表扫描）优化至 ~0.1ms（Bitmap Index Scan）
-- 搜索排序：精确匹配 > 前缀匹配 > 包含匹配
+- 搜索排序：合约地址精确匹配 > symbol 精确匹配 > 前缀匹配 > 包含匹配
+- 合约地址匹配：EVM（`0x` 开头）统一小写、支持部分前缀匹配；非 EVM（Solana base58）精确匹配、大小写敏感
 
 ### 资产入库流程
 1. **批量入库**：CMC/CG/DL 数据源 → 跨源匹配 → core.asset
@@ -431,6 +433,10 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 **21 类投研资料完整性清单**（`RESEARCH_MATERIAL_TYPES` + `_compute_missing_materials`）：
 - 前 9 类结构化精确判定：官网 / 白皮书文档 / GitHub 仓库 / 审计报告 / 代币经济学 / 链上持仓 / 社交热度 / 代币解锁 / 合约地址
 - 后 12 类 `content_topics` 精确判定：TGE&IDO / LP 流动性 / 国库&多签 / 团队&VC / 路线图 / 治理 DAO / 漏洞赏金 / 交易所上线 / 竞品对比 / 重大公告 / 第三方评级 / 链上异常（由 `_MATERIAL_TOPIC_MAP` 映射到内容主题，不再依赖 URL/标题关键词猜测）
+- **分赛道过滤**（`get_sector_visible_material_keys`）：按代币赛道只展示该赛道关心的资料类型，无关类型隐藏。基础资料（官网/白皮书/GitHub/合约/链上/社交）所有赛道展示；代币解锁数据除 Meme（无 vesting）外均展示；主题类资料按 `SECTOR_TOPIC_PRIORITY` 命中展示
+- **分赛道排序**（`topic_priority_rank`）：缺失项优先；缺失项内部按赛道主题优先级排序（如 DeFi 的审计、Meme 的交易所上线排最前），官网缺失最优先
+
+投研页侧栏显示**代币分类**（`sector_label`），snapshot 携带 `sector` 字段供上述过滤/排序使用。
 
 **AI 问答（RAG 式，`ask_research_notebook`）**：
 - 严格只依据资料库回答，强制 `[编号]` 标注来源，返回 `{answer, citations}`；资料库无相关信息时明说、不编造
@@ -514,7 +520,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   │   ├── http_client.py        # 通用 HTTP
 │   │   │   │   └── llm_client.py         # LLM（DeepSeek）
 │   │   │   ├── parsers/        # 响应解析器
-│   │   │   ├── mapping/        # 映射逻辑 + 链接分类（taxonomy / classify_link）
+│   │   │   ├── mapping/        # 映射逻辑 + 链接分类（taxonomy / classify_link）+ 代币赛道（sector）
 │   │   │   ├── db/             # 数据库工具
 │   │   │   └── utils/          # 通用工具
 │   │   └── sql/                # SQL 模板
@@ -528,11 +534,13 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   └── workbench/              # Flask Web 工作台
 │       ├── app.py              # 主应用 + API 路由
 │       ├── task_manager.py     # 后台任务管理器（Popen 实时流式输出）
-│       ├── db_stats.py         # 数据库统计查询 + 进度计算 + 搜索
-│       ├── binance_market.py   # 每日投研推荐（市场数据+评分）
-│       ├── cross_market.py     # 多源交叉验证
+│       ├── db_stats.py         # 数据库统计查询 + 进度计算 + 搜索（含合约地址搜索、赛道过滤）
+│       ├── binance_market.py   # Binance Web3 市场数据 + 评分（套用分赛道权重）
+│       ├── cmc_market.py       # CMC 市场数据（提取 platform.token_address 供跨源匹配）
+│       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）
 │       └── templates/          # 前端页面
-│           └── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析
+│           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析
+│           └── research.html   # 一键投研笔记本页（含代币分类 + 分赛道资料清单）
 │
 ├── 07_测试与验收/              # 诊断脚本与报告
 ├── Dockerfile                  # 工作台 Docker 镜像（含 Playwright）

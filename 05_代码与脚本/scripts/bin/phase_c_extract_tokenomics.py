@@ -492,7 +492,7 @@ def scrape_tokenomics_com(asset: dict) -> dict | None:
 
         slugs = guess_slugs(asset)
         print(f"  tokenomics.com 尝试 slugs: {slugs}")
-        data = scrape_tokenomist(slugs, symbol=asset.get("symbol", ""), include_extras=True)
+        data = scrape_tokenomist(slugs, symbol=asset.get("symbol", ""), name=asset.get("name", ""), include_extras=True)
         if data:
             print(f"  tokenomics.com 命中: {data.get('source_url')}")
         return data

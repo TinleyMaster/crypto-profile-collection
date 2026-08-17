@@ -155,11 +155,27 @@ def _parse_search_results(payload) -> list[dict]:
     return []
 
 
+def _names_match(asset_name: str, result_name: str) -> bool:
+    """判断资产项目名与搜索结果项目名是否指向同一项目（symbol 歧义消解用）。
+
+    归一化（小写 + 去除非字母数字）后比较是否相等。
+    例：Pump.fun → pumpfun 与 PumpBTC → pumpbtc 不等，判定为不同项目。
+    """
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+    a, b = _norm(asset_name), _norm(result_name)
+    return bool(a and b and a == b)
+
+
 def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
     """通过搜索 API 查找正确的 slug。
 
     使用新版 tokenomics.com 的 /api/search/audits 接口（返回 project_slug），
     该接口对 ticker 匹配准确（旧版 /api/search 已失效）。
+
+    symbol 存在歧义（同一 symbol 对应多个项目，如 PUMP = Pump.fun / PumpBTC）时，
+    用项目名 name 消歧：ticker 精确匹配后必须项目名也匹配才采纳，否则判定未收录。
     """
     queries = [symbol]
     if name and name.lower() != symbol.lower():
@@ -185,18 +201,37 @@ def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
                     continue
                 # 结果格式: [{name, ticker, project_slug, ...}, ...]
                 # ticker 可能带尾部空格，需 strip 后再匹配
-                for r in results:
-                    r_symbol = (r.get("ticker") or r.get("symbol") or "").strip().upper()
-                    if r_symbol == symbol.upper():
-                        slug = (r.get("project_slug") or r.get("slug") or "").strip()
-                        if slug:
-                            _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
-                            return slug
-                # 如果没有精确匹配，取第一个
-                first_slug = (results[0].get("project_slug") or results[0].get("slug") or "").strip()
-                if first_slug:
-                    _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug} ({api_url})")
-                    return first_slug
+                ticker_matches = [
+                    r for r in results
+                    if (r.get("ticker") or r.get("symbol") or "").strip().upper() == symbol.upper()
+                ]
+                if ticker_matches:
+                    # 有项目名时，在 ticker 候选中消歧（symbol 歧义保护）
+                    if name:
+                        for r in ticker_matches:
+                            if _names_match(name, (r.get("name") or "").strip()):
+                                slug = (r.get("project_slug") or r.get("slug") or "").strip()
+                                if slug:
+                                    _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
+                                    return slug
+                        _log(f"  [搜索] symbol {symbol} 匹配到 {len(ticker_matches)} 个结果但项目名不匹配，判定为歧义，跳过")
+                        return None
+                    # 无项目名时，回退到第一个 ticker 精确匹配
+                    first = ticker_matches[0]
+                    slug = (first.get("project_slug") or first.get("slug") or "").strip()
+                    if slug:
+                        _log(f"  [搜索] 通过 API 找到 slug: {slug} ({api_url})")
+                        return slug
+                # 无 ticker 精确匹配：有项目名时校验首位，否则直接取首位
+                first = results[0]
+                first_slug = (first.get("project_slug") or first.get("slug") or "").strip()
+                if not first_slug:
+                    continue
+                if name and not _names_match(name, (first.get("name") or "").strip()):
+                    _log(f"  [搜索] 首位结果项目名不匹配（{first.get('name')}），跳过")
+                    continue
+                _log(f"  [搜索] 通过 API 找到 slug（首位）: {first_slug} ({api_url})")
+                return first_slug
             except Exception as e:
                 _log(f"  [搜索API] {api_url} 查询 '{q}' 失败: {e}")
     return None
@@ -424,12 +459,14 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras:
         return None
 
 
-def scrape_tokenomist(slugs: list[str], symbol: str = "", include_extras: bool = False) -> dict | None:
+def scrape_tokenomist(slugs: list[str], symbol: str = "", name: str = "",
+                      include_extras: bool = False) -> dict | None:
     """用 Playwright 爬取解锁数据。
 
     依次尝试 slugs × 数据源（新版 app.tokenomics.com 优先，旧版 tokenomist.ai 兜底），
     overview 为空则换下一个。
-    include_extras=True 时额外爬取 revenue / valuation 子页面。"""
+    include_extras=True 时额外爬取 revenue / valuation 子页面。
+    name 用于搜索兜底时的 symbol 歧义消解。"""
     for idx, slug in enumerate(slugs):
         is_fallback = idx > 0
         for variant in SOURCE_VARIANTS:
@@ -440,17 +477,17 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "", include_extras: bool =
     # 所有 slug + 数据源都失败，尝试搜索找到正确 slug
     if symbol:
         # 兜底1：搜索 API（requests）
-        searched_slug = _search_tokenomist_slug(symbol, "")
+        searched_slug = _search_tokenomist_slug(symbol, name)
         if searched_slug and searched_slug not in slugs:
             _log(f"  [搜索兜底] 尝试搜索到的 slug: {searched_slug}")
             # 递归调用自己，只试这一个 slug
-            return scrape_tokenomist([searched_slug], symbol, include_extras=include_extras)
+            return scrape_tokenomist([searched_slug], symbol, name, include_extras=include_extras)
 
         # 兜底2：无头浏览器在首页搜索（API 常被 Cloudflare 拦截）
-        browser_slug = _search_tokenomist_slug_browser(symbol, "")
+        browser_slug = _search_tokenomist_slug_browser(symbol, name)
         if browser_slug and browser_slug not in slugs:
             _log(f"  [浏览器搜索兜底] 首页匹配到 slug: {browser_slug}")
-            return scrape_tokenomist([browser_slug], symbol, include_extras=include_extras)
+            return scrape_tokenomist([browser_slug], symbol, name, include_extras=include_extras)
 
     _log(f"  所有 slug 均失败，该代币可能未被收录")
     return None
@@ -1236,7 +1273,7 @@ def _main() -> int:
         _log(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
 
         # 爬取（自动回退备选 slug）
-        data = scrape_tokenomist(slugs, symbol=asset["symbol"])
+        data = scrape_tokenomist(slugs, symbol=asset["symbol"], name=asset["name"])
 
         if data is None:
             # tokenomist 未收录 → 返回 not_found 状态，让上层触发 AI 测算

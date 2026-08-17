@@ -88,10 +88,16 @@ def guess_slugs(asset: dict) -> list[str]:
 
     slugs = []
 
-    # 1. 主候选：项目名小写 + 连字符 → 覆盖绝大多数情况
+    # 1. 主候选：项目名小写 + 连字符（空格与点都转连字符）→ 覆盖绝大多数情况
+    #    tokenomics.com 统一用连字符，含品牌名中的点（如 Pump.fun → pump-fun）
     if name:
-        name_slug = name.lower().replace(" ", "-")
-        slugs.append(name_slug)
+        name_slug = name.lower().replace(" ", "-").replace(".", "-")
+        if name_slug not in slugs:
+            slugs.append(name_slug)
+        # 兜底：保留点的变体（部分项目 slug 可能保留点）
+        dot_slug = name.lower().replace(" ", "-")
+        if dot_slug != name_slug and dot_slug not in slugs:
+            slugs.append(dot_slug)
 
     # 2. symbol 兜底（如 BTC→bitcoin 等特殊映射）
     slug_map = {

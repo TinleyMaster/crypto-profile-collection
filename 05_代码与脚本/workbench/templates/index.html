@@ -2651,6 +2651,26 @@
 
             let html = '<div style="font-size:12px;line-height:1.6;margin-top:8px">';
 
+            // 抛压风险徽章（解锁 × 持仓集中度 × 流动性交叉评分）
+            if (d.pressure && d.pressure.pressure_score != null) {
+                const p = d.pressure;
+                const riskMap = {
+                    high: { bg: '#2a1517', border: '#dc2626', color: '#fca5a5', label: '高风险' },
+                    medium: { bg: '#2a1f12', border: '#d97706', color: '#fbbf24', label: '中风险' },
+                    low: { bg: '#12271f', border: '#059669', color: '#6ee7b7', label: '低风险' }
+                };
+                const rk = riskMap[p.risk_level] || riskMap.low;
+                html += '<div style="margin:4px 0 8px;padding:6px 10px;border-radius:6px;font-size:12px;background:' + rk.bg + ';border:1px solid ' + rk.border + '">';
+                html += '<strong style="color:' + rk.color + '">⚡ 抛压风险: ' + rk.label + ' (' + p.pressure_score + '分)</strong>';
+                const parts = [];
+                if (p.unlock_pct_30d != null) parts.push('未来30天解锁 ' + p.unlock_pct_30d + '%');
+                if (p.unlock_pct_7d != null) parts.push('7天 ' + p.unlock_pct_7d + '%');
+                if (p.next_unlock_date) parts.push('下次解锁 ' + escapeHtml(p.next_unlock_date));
+                if (p.top10_concentration != null) parts.push('Top10集中 ' + p.top10_concentration + '%');
+                if (parts.length) html += '<br><span style="color:#8a92a0">' + parts.join(' · ') + '</span>';
+                html += '</div>';
+            }
+
             if (ov.released_pct != null) {
                 html += '<strong>释放进度:</strong> ' + ov.released_pct + '%';
                 if (ov.released_amount_str) html += ' (' + ov.released_amount_str + ' / ' + ov.total_amount_str + ')';

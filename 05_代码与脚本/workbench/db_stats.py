@@ -2717,6 +2717,216 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
         "methodology": methodology,
         "input_snapshot": input_snapshot,
         "updated_at": str(row.get("updated_at", "")),
+        "pressure": compute_unlock_pressure(asset_id),
+    }
+
+
+# ── 解锁 × 持仓 抛压评分 ─────────────────────────────────────
+
+_UNLOCK_PRESSURE_TTL_SECONDS = 6 * 3600  # 压力评分缓存 6 小时
+
+_ENSURE_UNLOCK_PRESSURE_SQL = """
+CREATE TABLE IF NOT EXISTS biz.asset_unlock_pressure (
+    asset_id            INTEGER PRIMARY KEY REFERENCES core.asset(asset_id),
+    unlock_pct_7d       NUMERIC(6,2),   -- 未来 7 天解锁占 MCAP 百分比
+    unlock_pct_30d      NUMERIC(6,2),   -- 未来 30 天解锁占 MCAP 百分比
+    next_unlock_date    DATE,           -- 最近一次解锁日期
+    top10_concentration NUMERIC(5,2),   -- Top10 持仓集中度（快照）
+    turnover_24h        NUMERIC(8,4),   -- 24h 换手率（volume/mcap）
+    pressure_score      NUMERIC(5,2),   -- 抛压评分 0-100
+    risk_level          TEXT,           -- low / medium / high
+    detail_json         JSONB,          -- 各分量明细
+    calculated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+"""
+
+
+def _pressure_float(v):
+    """Decimal / None / 字符串 → float 或 None。"""
+    from decimal import Decimal
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return float(v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_unlock_event_date(date_str: str):
+    """解析解锁事件日期（如 'Feb 15, 2026'），失败返回 None。"""
+    if not date_str:
+        return None
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h):
+    """抛压评分 0-100（越高越危险）。
+
+    unlock_score：未来 30 天解锁占比 × 6，60 分封顶；
+    concentration_score：Top10 集中度映射 0-25 分（越集中解锁抛压越集中）；
+    liquidity_discount：换手率越高承接力越强，减免最多 15 分。
+    """
+    unlock_score = min(60.0, (unlock_pct_30d or 0.0) * 6.0)
+    concentration_score = ((top10_concentration or 0.0) / 100.0) * 25.0
+    liquidity_discount = min(15.0, (turnover_24h or 0.0) * 150.0)
+    score = max(0.0, min(100.0, unlock_score + concentration_score - liquidity_discount))
+    if score >= 60:
+        risk = "high"
+    elif score >= 30:
+        risk = "medium"
+    else:
+        risk = "low"
+    return round(score, 2), risk
+
+
+def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
+    """计算「未来解锁 × 持仓集中度 × 流动性」交叉抛压评分。
+
+    数据来源：biz.asset_token_unlocks（未来 7/30 天解锁占比）+ biz.asset_token_holders
+    （Top10 集中度）+ CoinGecko（市值/24h 交易量算换手率）。结果缓存到
+    biz.asset_unlock_pressure，6 小时内命中缓存秒级返回。
+    """
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    # 0. 读缓存（未过期且非 force）
+    if not force:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_ENSURE_UNLOCK_PRESSURE_SQL)
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """SELECT unlock_pct_7d, unlock_pct_30d, next_unlock_date,
+                              top10_concentration, turnover_24h, pressure_score,
+                              risk_level, detail_json, calculated_at
+                       FROM biz.asset_unlock_pressure WHERE asset_id = %s""",
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+        if row:
+            age = (datetime.now(timezone.utc) - row["calculated_at"]).total_seconds()
+            if age < _UNLOCK_PRESSURE_TTL_SECONDS:
+                return {
+                    "unlock_pct_7d": _pressure_float(row["unlock_pct_7d"]),
+                    "unlock_pct_30d": _pressure_float(row["unlock_pct_30d"]),
+                    "next_unlock_date": str(row["next_unlock_date"]) if row["next_unlock_date"] else None,
+                    "top10_concentration": _pressure_float(row["top10_concentration"]),
+                    "turnover_24h": _pressure_float(row["turnover_24h"]),
+                    "pressure_score": _pressure_float(row["pressure_score"]),
+                    "risk_level": row["risk_level"],
+                    "detail": row["detail_json"] or {},
+                    "cached": True,
+                }
+
+    # 1. 读解锁事件 + 持仓集中度
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT unlock_events_json FROM biz.asset_token_unlocks WHERE asset_id = %s",
+                (asset_id,),
+            )
+            urow = cur.fetchone()
+            cur.execute(
+                "SELECT top_10_pct FROM biz.asset_token_holders WHERE asset_id = %s",
+                (asset_id,),
+            )
+            hrow = cur.fetchone()
+
+    if not urow:
+        return None
+
+    events = urow.get("unlock_events_json") or []
+    today = datetime.now(timezone.utc).date()
+    unlock_pct_7d = 0.0
+    unlock_pct_30d = 0.0
+    next_unlock_date = None
+    for e in events:
+        if not e.get("is_upcoming"):
+            continue
+        d = _parse_unlock_event_date(e.get("date"))
+        if d is None or d < today:
+            continue
+        pct = _pressure_float(e.get("pct")) or 0.0
+        delta_days = (d - today).days
+        if delta_days <= 7:
+            unlock_pct_7d += pct
+        if delta_days <= 30:
+            unlock_pct_30d += pct
+        if next_unlock_date is None or d < next_unlock_date:
+            next_unlock_date = d
+
+    top10_concentration = _pressure_float(hrow.get("top_10_pct")) if hrow else None
+
+    # 2. 价格 / 市值 / 24h 交易量 → 换手率
+    price_info = _fetch_cg_price(asset_id, settings)
+    market_cap_f = _pressure_float(price_info.get("market_cap_usd"))
+    volume_f = _pressure_float(price_info.get("volume_24h_usd"))
+    turnover_24h = None
+    if market_cap_f and volume_f and market_cap_f > 0:
+        turnover_24h = round(volume_f / market_cap_f, 4)
+
+    score, risk = _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h)
+
+    detail = {
+        "unlock_score": round(min(60.0, unlock_pct_30d * 6.0), 2),
+        "concentration_score": round(((top10_concentration or 0.0) / 100.0) * 25.0, 2),
+        "liquidity_discount": round(min(15.0, (turnover_24h or 0.0) * 150.0), 2),
+        "price_usd": price_info.get("price_usd"),
+        "market_cap_usd": price_info.get("market_cap_usd"),
+        "volume_24h_usd": price_info.get("volume_24h_usd"),
+        "upcoming_events_count": sum(1 for e in events if e.get("is_upcoming")),
+    }
+
+    # 3. 写缓存
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(_ENSURE_UNLOCK_PRESSURE_SQL)
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO biz.asset_unlock_pressure
+                       (asset_id, unlock_pct_7d, unlock_pct_30d, next_unlock_date,
+                        top10_concentration, turnover_24h, pressure_score, risk_level,
+                        detail_json, calculated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (asset_id) DO UPDATE SET
+                       unlock_pct_7d = EXCLUDED.unlock_pct_7d,
+                       unlock_pct_30d = EXCLUDED.unlock_pct_30d,
+                       next_unlock_date = EXCLUDED.next_unlock_date,
+                       top10_concentration = EXCLUDED.top10_concentration,
+                       turnover_24h = EXCLUDED.turnover_24h,
+                       pressure_score = EXCLUDED.pressure_score,
+                       risk_level = EXCLUDED.risk_level,
+                       detail_json = EXCLUDED.detail_json,
+                       calculated_at = NOW()""",
+                (asset_id,
+                 round(unlock_pct_7d, 2),
+                 round(unlock_pct_30d, 2),
+                 next_unlock_date,
+                 top10_concentration,
+                 turnover_24h,
+                 score,
+                 risk,
+                 json.dumps(detail, ensure_ascii=False, default=str)),
+            )
+
+    return {
+        "unlock_pct_7d": round(unlock_pct_7d, 2),
+        "unlock_pct_30d": round(unlock_pct_30d, 2),
+        "next_unlock_date": str(next_unlock_date) if next_unlock_date else None,
+        "top10_concentration": top10_concentration,
+        "turnover_24h": turnover_24h,
+        "pressure_score": score,
+        "risk_level": risk,
+        "detail": detail,
+        "cached": False,
     }
 
 
@@ -3109,7 +3319,7 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
         "ids": coin_id,
         "vs_currencies": "usd",
         "include_market_cap": "true",
-        "include_24hr_vol": "false",
+        "include_24hr_vol": "true",
         "include_24hr_change": "false",
         "include_last_updated_at": "false",
     }
@@ -3134,6 +3344,7 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
                     "price_usd": coin_data.get("usd"),
                     "market_cap_usd": coin_data.get("usd_market_cap"),
                     "fdv_usd": coin_data.get("usd_fully_diluted_valuation"),
+                    "volume_24h_usd": coin_data.get("usd_24h_vol"),
                 }
             except requests.exceptions.ConnectionError as e:
                 last_error = f"连接失败: {e}"

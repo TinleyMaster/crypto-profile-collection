@@ -1143,6 +1143,16 @@ def api_research_competitors(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/divergence")
+def api_research_divergence(asset_id: int):
+    """情绪 × 价格 × 链上 背离检测。"""
+    try:
+        result = _get_db_stats().get_divergence_signals(asset_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

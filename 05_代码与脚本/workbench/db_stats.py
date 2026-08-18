@@ -2330,6 +2330,196 @@ def _thesis_row_to_dict(row) -> dict:
     }
 
 
+def get_divergence_signals(asset_id: int) -> dict:
+    """情绪 × 价格 × 链上 背离检测。
+
+    基于当前快照 + 已有变化率指标（7d/30d），识别两类经典背离：
+
+    顶部背离（看空）：
+      - 社交情绪高涨（sentiment_score > 65）
+      - 价格滞涨或微涨（24h 涨幅 < 5%，或 7d 涨幅 < 10%）
+      - 链上资金流出（鲸鱼 7d 减持 > 3%，或 24h 大额转入交易所 > 市值 0.1%）
+      → 散户 FOMO 但聪明钱在出货
+
+    底部背离（看多）：
+      - 社交情绪低迷（sentiment_score < 35）
+      - 价格微跌或横盘（24h 跌幅 < 5%，或 7d 跌幅 < 10%）
+      - 链上资金流入（鲸鱼 7d 增持 > 3%，或持有者 7d 增长 > 5%）
+      → 散户绝望但聪明钱在吸筹
+
+    返回信号列表 + 各维度原始指标。
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 1. 基础信息
+            cur.execute(
+                "SELECT asset_id, canonical_symbol, canonical_name, primary_sector "
+                "FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
+            asset = cur.fetchone()
+            if not asset:
+                return {"ok": False, "error": "资产不存在"}
+
+            # 2. 社交热度 + 价格（从 market_json 取）
+            cur.execute("""
+                SELECT score, sentiment_json, trend_json, market_json, fetched_at
+                FROM biz.asset_social_heat WHERE asset_id = %s
+            """, (asset_id,))
+            social_row = cur.fetchone()
+
+            sentiment_score = None
+            price_change_24h = None
+            price_change_7d = None
+            market_cap = None
+            if social_row:
+                sent = social_row.get("sentiment_json") or {}
+                sentiment_score = sent.get("sentiment_score") or sent.get("score")
+                market = social_row.get("market_json") or {}
+                price_change_24h = market.get("price_change_24h")
+                price_change_7d = market.get("price_change_7d")
+                market_cap = market.get("market_cap_usd")
+
+            # 3. 链上持仓变化（取最新一条，主链优先）
+            cur.execute("""
+                SELECT DISTINCT ON (asset_id)
+                       top10_concentration, total_holders,
+                       holder_change_7d, holder_change_30d,
+                       whale_balance_change_7d_pct, whale_balance_change_30d_pct,
+                       exchange_wallet_pct, chain, snapshot_date
+                FROM biz.onchain_holder_snapshot
+                WHERE asset_id = %s
+                ORDER BY asset_id, snapshot_date DESC, chain
+            """, (asset_id,))
+            onchain_row = cur.fetchone()
+
+            whale_change_7d = None
+            whale_change_30d = None
+            holder_change_7d = None
+            holder_change_7d_pct = None
+            total_holders = None
+            if onchain_row:
+                whale_change_7d = onchain_row.get("whale_balance_change_7d_pct")
+                whale_change_30d = onchain_row.get("whale_balance_change_30d_pct")
+                holder_change_7d = onchain_row.get("holder_change_7d")
+                total_holders = onchain_row.get("total_holders")
+                if total_holders and total_holders > 0 and holder_change_7d is not None:
+                    holder_change_7d_pct = round(holder_change_7d / total_holders * 100, 2)
+
+            # 4. 24h 大额转入交易所
+            cur.execute("""
+                SELECT COUNT(*) AS tx_count,
+                       COALESCE(SUM(value_usd), 0) AS total_value_usd
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND is_to_exchange = TRUE
+                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
+            """, (asset_id,))
+            transfer_row = cur.fetchone()
+            exchange_inflow_24h = float(transfer_row["total_value_usd"] or 0) if transfer_row else 0
+            exchange_inflow_tx = int(transfer_row["tx_count"] or 0) if transfer_row else 0
+
+            # 流入占市值比例
+            exchange_inflow_pct = None
+            if market_cap and market_cap > 0 and exchange_inflow_24h > 0:
+                exchange_inflow_pct = round(exchange_inflow_24h / market_cap * 100, 4)
+
+    # ── 背离检测逻辑 ──
+    signals = []
+
+    def _num(v):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    s_score = _num(sentiment_score)
+    p_24h = _num(price_change_24h)
+    p_7d = _num(price_change_7d)
+    w_7d = _num(whale_change_7d)
+    h_7d_pct = _num(holder_change_7d_pct)
+    ex_pct = _num(exchange_inflow_pct)
+
+    # 顶部背离条件
+    top_conds = []
+    if s_score is not None:
+        top_conds.append(("high_sentiment", s_score > 65, f"情绪分 {s_score:.1f}（>65 高涨）"))
+    if p_24h is not None:
+        top_conds.append(("price_stagnant_up", p_24h < 5, f"24h 涨幅 {p_24h:+.2f}%（<5% 滞涨）"))
+    elif p_7d is not None:
+        top_conds.append(("price_stagnant_up", p_7d < 10, f"7d 涨幅 {p_7d:+.2f}%（<10% 滞涨）"))
+    if w_7d is not None:
+        top_conds.append(("whale_selling", w_7d < -3, f"鲸鱼 7d 变化 {w_7d:+.2f}%（<-3% 减持）"))
+    if ex_pct is not None:
+        top_conds.append(("exchange_inflow", ex_pct > 0.1, f"24h 转入交易所 {ex_pct:.4f}%（>0.1% 抛压）"))
+
+    top_matched = [c for c in top_conds if c[1]]
+    if len(top_matched) >= 3:
+        signals.append({
+            "type": "bearish_divergence",
+            "label": "顶部背离",
+            "severity": "high" if len(top_matched) >= 4 else "medium",
+            "confidence": round(len(top_matched) / len(top_conds) * 100, 0) if top_conds else 0,
+            "description": "社交情绪高涨但价格滞涨、链上资金流出，散户 FOMO 而聪明钱出货",
+            "conditions": [{"key": k, "matched": m, "detail": d} for k, m, d in top_conds],
+        })
+
+    # 底部背离条件
+    bot_conds = []
+    if s_score is not None:
+        bot_conds.append(("low_sentiment", s_score < 35, f"情绪分 {s_score:.1f}（<35 低迷）"))
+    if p_24h is not None:
+        bot_conds.append(("price_stagnant_down", p_24h > -5, f"24h 跌幅 {p_24h:+.2f}%（>-5% 抗跌）"))
+    elif p_7d is not None:
+        bot_conds.append(("price_stagnant_down", p_7d > -10, f"7d 跌幅 {p_7d:+.2f}%（>-10% 抗跌）"))
+    if w_7d is not None:
+        bot_conds.append(("whale_buying", w_7d > 3, f"鲸鱼 7d 变化 {w_7d:+.2f}%（>+3% 增持）"))
+    if h_7d_pct is not None:
+        bot_conds.append(("holder_growth", h_7d_pct > 5, f"持有者 7d 增长 {h_7d_pct:+.2f}%（>+5% 扩散）"))
+
+    bot_matched = [c for c in bot_conds if c[1]]
+    if len(bot_matched) >= 3:
+        signals.append({
+            "type": "bullish_divergence",
+            "label": "底部背离",
+            "severity": "high" if len(bot_matched) >= 4 else "medium",
+            "confidence": round(len(bot_matched) / len(bot_conds) * 100, 0) if bot_conds else 0,
+            "description": "社交情绪低迷但价格抗跌、链上资金流入，散户绝望而聪明钱吸筹",
+            "conditions": [{"key": k, "matched": m, "detail": d} for k, m, d in bot_conds],
+        })
+
+    # 原始指标（用于前端展示）
+    metrics = {
+        "sentiment_score": s_score,
+        "price_change_24h": p_24h,
+        "price_change_7d": p_7d,
+        "market_cap_usd": market_cap,
+        "whale_change_7d_pct": w_7d,
+        "whale_change_30d_pct": _num(whale_change_30d),
+        "holder_change_7d_pct": h_7d_pct,
+        "total_holders": total_holders,
+        "exchange_inflow_24h_usd": exchange_inflow_24h,
+        "exchange_inflow_24h_pct": ex_pct,
+        "exchange_inflow_tx_24h": exchange_inflow_tx,
+    }
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "symbol": asset["canonical_symbol"],
+        "name": asset["canonical_name"],
+        "sector": asset["primary_sector"] or "other",
+        "signals": signals,
+        "metrics": metrics,
+        "data_availability": {
+            "sentiment": s_score is not None,
+            "price": p_24h is not None or p_7d is not None,
+            "onchain": w_7d is not None or h_7d_pct is not None,
+            "exchange_flow": transfer_row is not None,
+        },
+    }
+
+
 def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
     """同赛道竞品结构化对比：按 primary_sector 找同赛道币，聚合关键指标横向对比。
 

@@ -480,6 +480,163 @@
             padding: 20px;
         }
 
+        /* 背离检测 */
+        .r-divergence {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-divergence .d-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-divergence .d-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-divergence .d-signal {
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid;
+        }
+
+        .r-divergence .d-signal.bearish {
+            background: rgba(239, 68, 68, 0.08);
+            border-color: #ef4444;
+        }
+
+        .r-divergence .d-signal.bullish {
+            background: rgba(16, 185, 129, 0.08);
+            border-color: #10b981;
+        }
+
+        .r-divergence .d-signal .d-title {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .r-divergence .d-signal.bearish .d-title {
+            color: #f87171;
+        }
+
+        .r-divergence .d-signal.bullish .d-title {
+            color: #34d399;
+        }
+
+        .r-divergence .d-signal .d-severity {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        .r-divergence .d-signal.bearish .d-severity.high {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+        }
+
+        .r-divergence .d-signal.bearish .d-severity.medium {
+            background: rgba(239, 68, 68, 0.1);
+            color: #f87171;
+        }
+
+        .r-divergence .d-signal.bullish .d-severity.high {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+
+        .r-divergence .d-signal.bullish .d-severity.medium {
+            background: rgba(16, 185, 129, 0.1);
+            color: #34d399;
+        }
+
+        .r-divergence .d-signal .d-desc {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 8px;
+        }
+
+        .r-divergence .d-signal .d-conds {
+            font-size: 11px;
+        }
+
+        .r-divergence .d-signal .d-cond {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 2px 0;
+        }
+
+        .r-divergence .d-signal .d-cond .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .r-divergence .d-signal .d-cond.matched .dot {
+            background: currentColor;
+        }
+
+        .r-divergence .d-signal .d-cond.unmatched .dot {
+            background: #374151;
+        }
+
+        .r-divergence .d-signal .d-cond.unmatched {
+            color: #6b7280;
+        }
+
+        .r-divergence .d-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .r-divergence .d-metric {
+            text-align: center;
+        }
+
+        .r-divergence .d-metric .dm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .r-divergence .d-metric .dm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .r-divergence .d-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 16px;
+        }
+
+        .r-divergence .d-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 16px;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -553,6 +710,15 @@
                 </div>
                 <div id="c-table-container">
                     <div class="c-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-divergence" id="r-divergence" style="display:none">
+                <div class="d-head">
+                    <h3>📡 背离信号检测</h3>
+                    <span style="font-size:11px;color:#6b7280">情绪 × 价格 × 链上</span>
+                </div>
+                <div id="d-signals-container">
+                    <div class="d-loading">加载中...</div>
                 </div>
             </div>
             <div class="r-messages" id="r-messages"></div>
@@ -682,6 +848,7 @@
             renderSidebar(d);
             renderMessages(d.messages || []);
             loadCompetitors();
+            loadDivergence();
         }
 
         function renderThesis (d) {
@@ -902,6 +1069,93 @@
             }
             // 重新加载（简单起见，重新拉数据；数据量小也可缓存）
             loadCompetitors();
+        }
+
+        // ── 背离检测 ──
+        async function loadDivergence () {
+            const box = document.getElementById('r-divergence');
+            const container = document.getElementById('d-signals-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="d-loading">检测中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/divergence');
+                const data = await safeJson(r, '/api/research/divergence');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="d-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const signals = data.signals || [];
+                const metrics = data.metrics || {};
+                const avail = data.data_availability || {};
+
+                let html = '';
+                if (signals.length === 0) {
+                    // 数据不足或暂无背离
+                    const missing = [];
+                    if (!avail.sentiment) missing.push('情绪');
+                    if (!avail.price) missing.push('价格');
+                    if (!avail.onchain) missing.push('链上');
+                    if (missing.length > 0) {
+                        html = '<div class="d-empty">数据不足，无法检测（缺少: ' + missing.join('、') + '）</div>';
+                    } else {
+                        html = '<div class="d-empty">当前未检测到明显背离信号</div>';
+                    }
+                } else {
+                    signals.forEach(function (s) {
+                        const cls = s.type === 'bearish_divergence' ? 'bearish' : 'bullish';
+                        const sevLabel = s.severity === 'high' ? '强信号' : '中信号';
+                        html += '<div class="d-signal ' + cls + '">';
+                        html += '<div class="d-title">';
+                        html += (s.type === 'bearish_divergence' ? '⚠️ ' : '💎 ') + escapeHtml(s.label);
+                        html += '<span class="d-severity ' + s.severity + '">' + sevLabel + ' · ' + Math.round(s.confidence) + '%</span>';
+                        html += '</div>';
+                        html += '<div class="d-desc">' + escapeHtml(s.description || '') + '</div>';
+                        html += '<div class="d-conds">';
+                        (s.conditions || []).forEach(function (c) {
+                            const ccls = c.matched ? 'matched' : 'unmatched';
+                            html += '<div class="d-cond ' + ccls + '"><span class="dot"></span>' + escapeHtml(c.detail) + '</div>';
+                        });
+                        html += '</div></div>';
+                    });
+                }
+
+                // 指标面板（始终展示，即使无信号）
+                html += '<div class="d-metrics">';
+                const metricItems = [
+                    { k: 'sentiment_score', l: '情绪分', f: 'score' },
+                    { k: 'price_change_24h', l: '24h 涨跌', f: 'pct' },
+                    { k: 'price_change_7d', l: '7d 涨跌', f: 'pct' },
+                    { k: 'whale_change_7d_pct', l: '鲸鱼 7d', f: 'pct' },
+                    { k: 'holder_change_7d_pct', l: '持有者 7d', f: 'pct' },
+                    { k: 'exchange_inflow_24h_pct', l: '24h 入交易所', f: 'pct4' },
+                ];
+                metricItems.forEach(function (m) {
+                    let val = metrics[m.k];
+                    let display;
+                    if (val === null || val === undefined || val === '') {
+                        display = '—';
+                    } else if (m.f === 'score') {
+                        display = Number(val).toFixed(1);
+                    } else if (m.f === 'pct') {
+                        const n = Number(val);
+                        display = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+                    } else if (m.f === 'pct4') {
+                        const n = Number(val);
+                        display = n.toFixed(4) + '%';
+                    } else {
+                        display = String(val);
+                    }
+                    html += '<div class="d-metric"><div class="dm-label">' + escapeHtml(m.l) + '</div>';
+                    html += '<div class="dm-value">' + display + '</div></div>';
+                });
+                html += '</div>';
+
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = '<div class="d-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
         }
 
         function renderSidebar (d) {

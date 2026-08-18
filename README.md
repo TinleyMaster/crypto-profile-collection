@@ -14,11 +14,13 @@
 │                    research_url / coin_basic                 │
 │                    asset_tokenomics / asset_token_unlocks    │
 │                    onchain_holder_snapshot / transfer_log    │
+│                    onchain_exchange_wallet                   │
 │                    asset_social_heat / asset_token_holders   │
 │                    asset_raises / asset_hacks                │
+│                    asset_derivatives / daily_recommendation  │
 │                    doc_source_notebooklm / research_notebook │
+│                    research_thesis / research_message        │
 │                    unlock_watchlist / dl_protocol_checked    │
-│                    exchange_wallet                           │
 ├─────────────────────────────────────────────────────────────┤
 │  core   统一实体层  asset / asset_source_map                  │
 │                    asset_contract_map                        │
@@ -42,6 +44,7 @@
 | Binance Web3 | 无文档入口资产的兜底补充 + 每日投研推荐 | Binance Web3 API |
 | Ethplorer | 链上持仓快照（Top 持有者、持仓集中度） | Ethplorer API |
 | Tokenomist / tokenomics.com | 代币解锁时间表 + 代币经济学四板块（overview / unlocks / revenue / valuation） | 网页爬取（Playwright 无头浏览器） |
+| Binance / OKX / Bybit / Bitget / Gate 永续合约公开接口 | 衍生品资金面（资金费率 / OI / 成交，本地多交易所求和） | 匿名 REST API |
 
 ---
 
@@ -135,6 +138,24 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 **回填脚本**
 - `backfill_classify_links.py`：阶段1，规则 + 元数据（已全量跑通）
 - `backfill_ai_classify_links.py`：阶段2，AI 内容分类（主键分页 + 并发抓正文 + LLM 批量分类 + 断点续跑）
+
+---
+
+## 分赛道体系（sector.py 单一数据源）
+
+所有赛道相关的分类、评分、采集优先级、解锁预警规则统一收敛在 `crypto_research/mapping/sector.py`，各脚本禁止重复硬编码赛道规则。
+
+**赛道枚举（12 类）**：`l1`（L1 公链）/ `l2`（L2 二层）/ `defi` / `meme` / `gamefi` / `rwa` / `ai` / `cex_token`（平台币）/ `derivatives` / `depin` / `infra` / `other`。
+
+**主赛道判定**：`core.asset.primary_sector` 是统一主赛道字段，由 `refresh_asset_sectors.py` 从 CMC tags + category_hint 归一化写入（`CMC_TAG_SECTOR_MAP` / `CMC_CATEGORY_SECTOR_MAP` 只映射「明确赛道」标签，ecosystem 类不参与判定，避免误判）；取置信度最高者为 `primary_sector`，无明确赛道回退 `other`。
+
+**分赛道评分权重**（`SECTOR_SCORE_WEIGHTS`）：市场五维（volume / change_24h / txns / buy_ratio / momentum）按赛道微调，`get_sector_weights()` 未知赛道回退 `DEFAULT_SCORE_WEIGHTS`。例如 Meme 重涨幅与买入占比、DeFi 重交易量与流动性。
+
+**分赛道采集优先级**：`SECTOR_COLLECT_PRIORITY`（资产级，L2 95 / AI 90 最高、meme 45 最低）+ `SECTOR_TOPIC_PRIORITY`（主题级，对齐 `taxonomy.CONTENT_TOPICS`）。`select_target_assets.sql` 的 `sector_priority` CASE 映射必须与 `SECTOR_COLLECT_PRIORITY` 保持一致。
+
+**分赛道资料展示**（`get_sector_visible_material_keys` / `topic_priority_rank`）：投研页「资料完整性」清单按赛道只展示该赛道关心的资料类型——基础资料（官网/白皮书/GitHub/合约/链上/社交）所有赛道展示；代币解锁数据除 Meme（无 vesting）外均展示；主题类资料按 `SECTOR_TOPIC_PRIORITY` 命中展示。
+
+**分赛道解锁预警**（`SECTOR_UNLOCK_ALERT_DAYS`）：L2 / AI 提前 21 天预警（解锁密集/叙事敏感），多数赛道默认 14 天，Meme 无 vesting 不解锁预警、改监控大户转账（`phase_watchlist_monitor.py` 复用 `unlock_alert_sent_at` 字段去重）。
 
 ---
 
@@ -251,6 +272,54 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 
 **数据表：** `biz.asset_social_heat`（按 asset_id 唯一），含 `community_json` / `sentiment_json` / `trend_json` / `market_json` / `score_detail_json` / `methodology_json` / `input_snapshot_json`。
 
+### 竞品结构化对比
+
+`get_sector_competitors()` + `GET /api/research/<asset_id>/competitors`：按 `primary_sector` 找同赛道币，聚合关键指标横向对比（目标币置顶）。
+
+**对比维度：** 基础（市值 / FDV / 价格）、代币经济学（总供应 / 流通量 / 未流通占比 / 买卖税）、链上（Top10 集中度 / 持有者数）、社交（热度分 / X 粉丝）、解锁（未来 30 天解锁 %）、融资（轮数 / 总额）。市值/FDV/价格从 `biz.asset_token_unlocks.input_snapshot_json` 降级取，无数据则为空。
+
+### 情绪 × 价格 × 链上 背离检测
+
+`get_divergence_signals()` + `GET /api/research/<asset_id>/divergence`：基于社交热度分 + 价格涨跌幅 + 链上持仓/转账变化率，识别两类经典背离（各条件满足 ≥3 条才触发）：
+
+- **顶部背离（看空）**：情绪高涨（>65）+ 价格滞涨（24h<5% 或 7d<10%）+ 链上资金流出（鲸鱼 7d 减持 >3% 或 24h 大额转入交易所 >市值 0.1%）→ 散户 FOMO 而聪明钱出货。
+- **底部背离（看多）**：情绪低迷（<35）+ 价格抗跌（24h>-5% 或 7d>-10%）+ 链上资金流入（鲸鱼 7d 增持 >3% 或持有者 7d 增长 >5%）→ 散户绝望而聪明钱吸筹。
+
+输出信号列表 + 各维度原始指标 + 数据可用性；`severity` 按命中条件数分 high/medium。
+
+### 衍生品 / 资金面数据（多交易所聚合）
+
+`get_asset_derivatives()` + `derivatives_client.py` + `GET /api/research/<asset_id>/derivatives`：匿名调用 Binance / OKX / Bybit / Bitget / Gate 五家公开 REST 接口，本地并行探测 + 聚合求和：
+
+- **资金费率**：实时 + 7d/30d 历史平均（按 OI 加权）。
+- **未平仓合约 OI**：总价值 + 24h 变化。
+- **CVD 成交净流入**：拉近期成交本地计算主动买/卖净额。
+
+仅主流币有永续合约，Meme 小币无合约时返回「未找到衍生品数据」；结果 15 分钟 DB 缓存（`biz.asset_derivatives`，含 `exchanges_json` / `available_exchanges`）。
+
+### 链上 CEX 净流入（方案 B）
+
+`get_cex_netflow()` + `GET /api/research/<asset_id>/cex-netflow`：不依赖 CryptoQuant，用已有 `biz.onchain_transfer_log` + `biz.onchain_exchange_wallet`（交易所钱包地址库，16 个高可信度 CEX 钱包种子）自己计算。
+
+CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币到链上，潜在看涨；负值=充值到交易所，潜在抛压），输出 24h/7d 净流入 + 按交易所分组明细。主流币链上监控采集中，Meme 小币暂不纳入。
+
+### 鲸鱼 / 聪明钱行为流
+
+`get_whale_flow()` + `GET /api/research/<asset_id>/whale-flow`：不依赖预定义鲸鱼地址标签，从两个维度综合判断增持/减持方向：
+
+1. **持仓集中度变化**（`biz.onchain_holder_snapshot` 最新快照的 `whale_balance_change_7d/30d_pct` + Top10/Top100 集中度）。
+2. **大额转账流向**（`biz.onchain_transfer_log` 按金额分级 >1M / 100K-1M / 10K-100K + 交易所进出方向分类）。
+
+`_compute_whale_signal()` 加权评分（鲸鱼 7d 持仓 40% + 鲸鱼 30d 持仓 20% + 24h 净流向 25% + 7d 净流向 15%），归一化到 -100~+100：>20 增持、<-20 减持、否则中性，输出 `stance` + `confidence` + 因子明细 + Top 大额转账明细。
+
+### 链上快照趋势化
+
+`get_onchain_holder_trend()` + `GET /api/onchain/holder/<asset_id>/trend?days=30`：持仓集中度（Top10/Top50/Top100）、持有者数、鲸鱼持仓变化等指标按快照日期展开为时间序列，前端 SVG sparkline 迷你趋势图展示 7/30 天变化率，支持按链切换。
+
+### 研究结论生成
+
+`generate_research_thesis()` + `POST /api/research/<asset_id>/thesis`：基于资料库 LLM 生成结构化研究结论（`stance` 看多/看空/中性 + `conviction` 置信度 + 论点/风险/催化剂/关键指标），严格依据资料库事实并 `[编号]` 标注来源，附加抛压评分作量化辅助；每次生成追加一条新记录（`biz.research_thesis`），保留历史版本用于「当时判断 vs 后续走势」回溯。
+
 ---
 
 ## 每日投研推荐
@@ -263,6 +332,18 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 4. **前端展示**：默认显示 5 个代币，点击"加载更多"展示全部
 5. **信息展示**：项目名称、合约地址、交易量、涨跌幅、评分（symbol/name/chain/contract 均来自匹配到的同一 token）
 6. **一键投研**：点击代币直接打开资料面板 + 投研分析
+
+### 推荐质量回测
+
+`_archive_daily_recommendations()`（每日推荐自动存档到 `biz.daily_recommendation`，按 `(rec_date, symbol, chain)` 去重）+ `get_recommendation_backtest()` + `GET /api/market/backtest`。
+
+- **收益近似**：用「推荐日存档价格 vs 当前价格」近似计算持有收益（`biz.asset_price_daily` 积累后可升级为精确 1d/3d/7d 周期回测）。
+- **指标**：平均收益率、胜率、中位数收益、盈亏比（profit_factor）、最佳/最差推荐。
+- **分层**：按评分分层（高 ≥70 / 中 50-70 / 低 <50）与按赛道分层，用于校准评分权重。
+
+### 赛道轮动热力图
+
+`get_sector_heatmap()` + `GET /api/market/sector-heatmap`：按 `primary_sector` 聚合多源交叉验证结果，输出各赛道上榜代币数、平均 24h 涨幅、平均综合评分、赛道龙头代币、综合热度分（heat_score 归一化 0-100）。
 
 ---
 
@@ -284,8 +365,14 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 - **投研分析面板**：
   - 💰 代币经济学提取（tokenomics.com 四板块优先，未命中弹网址框 → URL/AI 测算）
   - 🔓 代币解锁测算（tokenomics.com 四板块，未命中弹网址框 → URL/AI 测算）
-  - 📊 链上数据分析（持仓集中度 + 大额转账）
+  - 📊 链上数据分析（持仓集中度 + 大额转账 + 快照趋势化 sparkline）
   - 📱 社交热度（社区规模 + 舆情 + 趋势 + 市场热度，综合评分）
+  - 📡 情绪 × 价格 × 链上 背离检测
+  - 🏆 同赛道竞品结构化对比
+  - 📈 衍生品资金面（多交易所聚合：资金费率 / OI / CVD）
+  - 🔗 链上 CEX 净流入
+  - 🐋 鲸鱼 / 聪明钱行为流（持仓变化 + 大额转账方向）
+  - 🎯 研究结论生成（看多/看空/中性 + 置信度 + 论点/风险/催化剂）
 - **单资产重新爬取**：B2→B3→B2 循环最多 6 轮，深度覆盖子页面
 - **手动添加官网链接** / **创建新资产**
 
@@ -440,6 +527,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 
 **AI 问答（RAG 式，`ask_research_notebook`）**：
 - 严格只依据资料库回答，强制 `[编号]` 标注来源，返回 `{answer, citations}`；资料库无相关信息时明说、不编造
+- **资料时效性**：文档来源带 `published_at`（发布/更新日期），正文按「类型优先 + 发布时间倒序」排序（新的在前），上下文显式标注发布时间，避免引用过时资料
 - 正文抽取：HTML 去标签 + PDF（PyPDF2，最多 30 页、2500 字 snippet）
 - 历史对话持久化到 `biz.research_message`（外键级联删除），下次打开保留
 
@@ -537,10 +625,11 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │       ├── db_stats.py         # 数据库统计查询 + 进度计算 + 搜索（含合约地址搜索、赛道过滤）
 │       ├── binance_market.py   # Binance Web3 市场数据 + 评分（套用分赛道权重）
 │       ├── cmc_market.py       # CMC 市场数据（提取 platform.token_address 供跨源匹配）
-│       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）
+│       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）+ 每日推荐存档 + 赛道热力图
+│       ├── derivatives_client.py # 5 家交易所衍生品客户端（资金费率/OI/成交）
 │       └── templates/          # 前端页面
-│           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析
-│           └── research.html   # 一键投研笔记本页（含代币分类 + 分赛道资料清单）
+│           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析 + 回测/赛道热力图
+│           └── research.html   # 一键投研笔记本页（含代币分类 + 分赛道资料清单 + 竞品/背离/衍生品/CEX净流入/鲸鱼流/研究结论）
 │
 ├── 07_测试与验收/              # 诊断脚本与报告
 ├── Dockerfile                  # 工作台 Docker 镜像（含 Playwright）
@@ -612,6 +701,9 @@ docker run -p 5000:5000 -e DATABASE_URL=... crypto-workbench
 - 单币按需提取（代币经济学/解锁）始终加 `--force` 覆盖已有数据，避免「已有数据」提前 return 导致无结果
 - 代币经济学/解锁未命中 tokenomics.com 时，前端先弹网址输入框，用户未提供网址才走 AI 测算
 - AI 测算解锁数据要求价格/市值/FDV 齐全，任一缺失直接报错、不调用 AI
+- 衍生品资金面多交易所并行探测，结果 15 分钟 DB 缓存（`biz.asset_derivatives`）
+- 鲸鱼行为流 / CEX 净流入不依赖预定义鲸鱼/交易所地址标签，改用「持仓快照变化 + 大额转账分级 + 交易所钱包种子」数据驱动方案
+- 赛道规则（分类/评分/采集优先级/解锁预警）统一收敛在 `mapping/sector.py`，各脚本禁止重复硬编码
 
 ---
 

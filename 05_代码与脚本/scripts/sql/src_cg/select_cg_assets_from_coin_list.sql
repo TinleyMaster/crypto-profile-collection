@@ -6,6 +6,7 @@ WITH coin AS (
         UPPER(l.symbol) AS symbol,
         l.name,
         l.platforms,
+        i.categories,
         -- CG coin 的 homepage 域名，用于区分 symbol/name 撞车的不同项目（如 cap-3 vs cap-4）
         LOWER(REGEXP_REPLACE(
             SPLIT_PART(SPLIT_PART(REGEXP_REPLACE(i.homepage_url, '^https?://', '', 'i'), '/', 1), ':', 1),
@@ -33,6 +34,7 @@ ranked AS (
         c.symbol,
         c.name,
         c.platforms,
+        c.categories,
         -- 仅当名称精确匹配（大小写敏感）且 homepage 域名一致时才关联现有资产，
         -- 防止 symbol/name 撞车（cap-3=cap.bet 被误关联到 cap-4=cap.app 的 Cap）。
         -- 任一方缺 homepage/官网信息时维持原 name 匹配，避免误伤无官网数据的资产。
@@ -72,6 +74,7 @@ SELECT
     symbol,
     name,
     platforms,
+    categories,
     existing_asset_id
 FROM dedup
 LIMIT %s

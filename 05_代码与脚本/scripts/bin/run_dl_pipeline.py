@@ -5,6 +5,7 @@ DL 一键流水线：按正确依赖顺序自动执行 DefiLlama 的 3 个步骤
   ① 拉取协议列表           ingest_dl_protocols.py                    → src_dl.protocol_list
   ② 资产入库               bootstrap_dl_assets_batch.py（循环）       → core.asset
   ③ 补充文档入口           refresh_doc_source_entries_from_dl_auto.py → biz.doc_source_entry
+  ④ 赛道标签全量刷新       run_refresh_sectors.py                     → biz.asset_sector + core.asset.primary_sector
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -103,6 +104,11 @@ def main() -> int:
 
     # ③ 补充文档入口（依赖②，内部自动循环）
     code, _ = _run(_python("refresh_doc_source_entries_from_dl_auto.py"), "③ 文档")
+    if code != 0:
+        return code
+
+    # ④ 赛道标签全量刷新（依赖②，确保新入库资产分类正确）
+    code, _ = _run(_python("run_refresh_sectors.py"), "④ 赛道刷新")
     if code != 0:
         return code
 

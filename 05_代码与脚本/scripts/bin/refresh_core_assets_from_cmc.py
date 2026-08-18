@@ -35,6 +35,7 @@ def main() -> int:
 
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
+    from crypto_research.db.sector import classify_and_upsert_cmc
     from crypto_research.db.upsert import fetch_one, load_sql
     from crypto_research.mapping.cmc_asset_bootstrap import (
         build_description_short,
@@ -96,8 +97,10 @@ def main() -> int:
         created_count = 0
         refreshed_count = 0
         mapped_count = 0
+        sector_hit_count = 0
 
-        for row in prepared_rows:
+        for idx, row in enumerate(prepared_rows):
+            src = source_rows[idx]
             if row["existing_asset_id"]:
                 asset_row = fetch_one(
                     conn,
@@ -146,6 +149,16 @@ def main() -> int:
             )
             mapped_count += 1
 
+            # 实时写入 CMC 来源赛道标签
+            sectors = classify_and_upsert_cmc(
+                conn,
+                asset_id,
+                tags=src.get("tags"),
+                category_hint=src.get("category_hint"),
+            )
+            if sectors:
+                sector_hit_count += 1
+
         print(
             json.dumps(
                 {
@@ -154,6 +167,7 @@ def main() -> int:
                     "created_assets": created_count,
                     "refreshed_assets": refreshed_count,
                     "mapped_rows": mapped_count,
+                    "sector_hits": sector_hit_count,
                 },
                 ensure_ascii=False,
                 indent=2,

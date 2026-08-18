@@ -1175,6 +1175,16 @@ def api_research_cex_netflow(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/whale-flow")
+def api_research_whale_flow(asset_id: int):
+    """鲸鱼/聪明钱行为流分析（持仓变化 + 大额转账流向）。"""
+    try:
+        result = _get_db_stats().get_whale_flow(asset_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

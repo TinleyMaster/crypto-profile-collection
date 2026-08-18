@@ -2550,6 +2550,343 @@ def _ensure_exchange_wallet_seeds(cur) -> None:
         """, (addr, name, chain, conf, src))
 
 
+def get_whale_flow(asset_id: int) -> dict:
+    """鲸鱼/聪明钱行为流分析。
+
+    不依赖预定义鲸鱼地址标签，而是从两个维度综合判断：
+      1. 持仓集中度变化（Top10/Top100 鲸鱼持仓变化率）
+      2. 大额转账流向（按金额分级 + 交易所进出方向）
+
+    返回：
+      - 鲸鱼持仓变化（7d/30d）
+      - 大额转账统计（24h/7d，按金额分级 + 流向分类）
+      - Top 大额转账明细
+      - 综合行为信号（增持/减持/中性 + 置信度）
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确保表存在
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.onchain_holder_snapshot (
+                    snapshot_id SERIAL PRIMARY KEY,
+                    asset_id INTEGER,
+                    chain TEXT NOT NULL,
+                    contract_address TEXT NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    total_supply NUMERIC,
+                    total_holders INTEGER,
+                    top10_concentration NUMERIC(5,2),
+                    top50_concentration NUMERIC(5,2),
+                    top100_concentration NUMERIC(5,2),
+                    whale_balance_change_7d_pct NUMERIC(6,2),
+                    whale_balance_change_30d_pct NUMERIC(6,2),
+                    exchange_wallet_pct NUMERIC(5,2),
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
+                    log_id SERIAL PRIMARY KEY,
+                    asset_id INTEGER,
+                    chain TEXT NOT NULL,
+                    contract_address TEXT NOT NULL,
+                    tx_hash TEXT NOT NULL,
+                    from_address TEXT NOT NULL,
+                    to_address TEXT NOT NULL,
+                    value NUMERIC NOT NULL,
+                    value_usd NUMERIC(15,2),
+                    from_label TEXT,
+                    to_label TEXT,
+                    from_exchange TEXT,
+                    to_exchange TEXT,
+                    block_number INTEGER,
+                    block_timestamp TIMESTAMPTZ,
+                    is_to_exchange BOOLEAN DEFAULT FALSE,
+                    alert_sent_at TIMESTAMPTZ,
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+            # ── 1. 鲸鱼持仓变化（从最新快照）──
+            cur.execute("""
+                SELECT chain, snapshot_date, top10_concentration, top50_concentration,
+                       top100_concentration, total_holders,
+                       whale_balance_change_7d_pct, whale_balance_change_30d_pct,
+                       exchange_wallet_pct
+                FROM biz.onchain_holder_snapshot
+                WHERE asset_id = %s
+                ORDER BY snapshot_date DESC
+                LIMIT 5
+            """, (asset_id,))
+            snapshot_rows = [dict(r) for r in cur.fetchall()]
+
+            holding = {}
+            if snapshot_rows:
+                latest = snapshot_rows[0]
+                holding = {
+                    "chain": latest["chain"],
+                    "snapshot_date": str(latest["snapshot_date"]),
+                    "top10_concentration": float(latest["top10_concentration"]) if latest["top10_concentration"] else None,
+                    "top50_concentration": float(latest["top50_concentration"]) if latest["top50_concentration"] else None,
+                    "top100_concentration": float(latest["top100_concentration"]) if latest["top100_concentration"] else None,
+                    "total_holders": latest["total_holders"],
+                    "whale_change_7d_pct": float(latest["whale_balance_change_7d_pct"]) if latest["whale_balance_change_7d_pct"] else None,
+                    "whale_change_30d_pct": float(latest["whale_balance_change_30d_pct"]) if latest["whale_balance_change_30d_pct"] else None,
+                    "exchange_wallet_pct": float(latest["exchange_wallet_pct"]) if latest["exchange_wallet_pct"] else None,
+                }
+                # 多链的话取所有链
+                by_chain = {}
+                for r in snapshot_rows:
+                    ch = r["chain"]
+                    if ch not in by_chain:
+                        by_chain[ch] = {
+                            "snapshot_date": str(r["snapshot_date"]),
+                            "top10_concentration": float(r["top10_concentration"]) if r["top10_concentration"] else None,
+                            "whale_change_7d_pct": float(r["whale_balance_change_7d_pct"]) if r["whale_balance_change_7d_pct"] else None,
+                            "whale_change_30d_pct": float(r["whale_balance_change_30d_pct"]) if r["whale_balance_change_30d_pct"] else None,
+                        }
+
+            # ── 2. 大额转账统计（24h）──
+            cur.execute("SELECT COUNT(*) AS cnt FROM biz.onchain_transfer_log WHERE asset_id = %s", (asset_id,))
+            total_transfers = cur.fetchone()["cnt"]
+
+            large_transfers = {"has_data": total_transfers > 0}
+
+            if total_transfers > 0:
+                # 按金额分级统计（24h）
+                cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE value_usd >= 1000000) AS ultra_large,
+                        COUNT(*) FILTER (WHERE value_usd >= 100000 AND value_usd < 1000000) AS large,
+                        COUNT(*) FILTER (WHERE value_usd >= 10000 AND value_usd < 100000) AS medium,
+                        COALESCE(SUM(CASE WHEN value_usd >= 10000 THEN value_usd END), 0) AS total_large_volume,
+                        -- 流向：转入交易所
+                        COALESCE(SUM(CASE WHEN is_to_exchange = TRUE THEN value_usd END), 0) AS inflow_to_exchange,
+                        -- 流向：从交易所转出
+                        COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd END), 0) AS outflow_from_exchange
+                    FROM biz.onchain_transfer_log
+                    WHERE asset_id = %s
+                      AND block_timestamp >= NOW() - INTERVAL '24 hours'
+                """, (asset_id,))
+                r24 = cur.fetchone()
+
+                large_transfers["24h"] = {
+                    "ultra_large_count": r24["ultra_large"],
+                    "large_count": r24["large"],
+                    "medium_count": r24["medium"],
+                    "total_large_volume": float(r24["total_large_volume"]),
+                    "inflow_to_exchange": float(r24["inflow_to_exchange"]),
+                    "outflow_from_exchange": float(r24["outflow_from_exchange"]),
+                    "net_exchange_flow": float(r24["outflow_from_exchange"]) - float(r24["inflow_to_exchange"]),
+                }
+
+                # 7d 统计
+                cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE value_usd >= 1000000) AS ultra_large,
+                        COUNT(*) FILTER (WHERE value_usd >= 100000 AND value_usd < 1000000) AS large,
+                        COUNT(*) FILTER (WHERE value_usd >= 10000 AND value_usd < 100000) AS medium,
+                        COALESCE(SUM(CASE WHEN value_usd >= 10000 THEN value_usd END), 0) AS total_large_volume,
+                        COALESCE(SUM(CASE WHEN is_to_exchange = TRUE THEN value_usd END), 0) AS inflow_to_exchange,
+                        COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd END), 0) AS outflow_from_exchange
+                    FROM biz.onchain_transfer_log
+                    WHERE asset_id = %s
+                      AND block_timestamp >= NOW() - INTERVAL '7 days'
+                """, (asset_id,))
+                r7 = cur.fetchone()
+
+                large_transfers["7d"] = {
+                    "ultra_large_count": r7["ultra_large"],
+                    "large_count": r7["large"],
+                    "medium_count": r7["medium"],
+                    "total_large_volume": float(r7["total_large_volume"]),
+                    "inflow_to_exchange": float(r7["inflow_to_exchange"]),
+                    "outflow_from_exchange": float(r7["outflow_from_exchange"]),
+                    "net_exchange_flow": float(r7["outflow_from_exchange"]) - float(r7["inflow_to_exchange"]),
+                }
+
+                # Top 大额转账（24h）
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, from_label, to_label,
+                           from_exchange, to_exchange, value, value_usd,
+                           block_timestamp, is_to_exchange
+                    FROM biz.onchain_transfer_log
+                    WHERE asset_id = %s
+                      AND block_timestamp >= NOW() - INTERVAL '24 hours'
+                      AND value_usd >= 10000
+                    ORDER BY value_usd DESC
+                    LIMIT 10
+                """, (asset_id,))
+                large_transfers["top_transfers"] = [
+                    {
+                        "tx_hash": r["tx_hash"],
+                        "from": r["from_address"],
+                        "to": r["to_address"],
+                        "from_label": r["from_label"],
+                        "to_label": r["to_label"],
+                        "from_exchange": r["from_exchange"],
+                        "to_exchange": r["to_exchange"],
+                        "value": float(r["value"]),
+                        "value_usd": float(r["value_usd"]) if r["value_usd"] else None,
+                        "timestamp": r["block_timestamp"].isoformat() if r["block_timestamp"] else None,
+                        "direction": _classify_transfer_direction(r),
+                    }
+                    for r in cur.fetchall()
+                ]
+            else:
+                large_transfers["24h"] = None
+                large_transfers["7d"] = None
+                large_transfers["top_transfers"] = []
+
+            # ── 3. 综合行为信号 ──
+            signal = _compute_whale_signal(holding, large_transfers)
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "holding": holding,
+        "large_transfers": large_transfers,
+        "signal": signal,
+        "has_holding_data": bool(holding),
+        "has_transfer_data": total_transfers > 0,
+    }
+
+
+def _classify_transfer_direction(row: dict) -> str:
+    """分类大额转账方向。"""
+    from_ex = row.get("from_label") == "exchange" or row.get("from_exchange")
+    to_ex = row.get("to_label") == "exchange" or row.get("to_exchange") or row.get("is_to_exchange")
+    from_whale = row.get("from_label") == "whale"
+    to_whale = row.get("to_label") == "whale"
+
+    if from_ex and not to_ex:
+        return "from_exchange"  # 从交易所转出（吸筹）
+    if to_ex and not from_ex:
+        return "to_exchange"    # 转入交易所（抛压）
+    if from_ex and to_ex:
+        return "exchange_internal"  # 交易所内划转
+    if from_whale and to_whale:
+        return "whale_to_whale"  # 鲸鱼互转
+    if from_whale:
+        return "whale_sell"     # 鲸鱼卖出/派发
+    if to_whale:
+        return "whale_buy"      # 鲸鱼买入/增持
+    return "unknown"
+
+
+def _compute_whale_signal(holding: dict, transfers: dict) -> dict:
+    """综合持仓变化 + 大额转账流向，计算鲸鱼行为信号。
+
+    返回：
+      - stance: accumulating / distributing / neutral
+      - confidence: 0-100
+      - factors: 各因子得分明细
+    """
+    score = 0  # 正=增持，负=减持
+    factors = []
+    weight_sum = 0
+
+    # 因子 1: 鲸鱼 7d 持仓变化（权重 40%）
+    whale_7d = holding.get("whale_change_7d_pct")
+    if whale_7d is not None:
+        w = 40
+        # +5% 以上 = 满分，-5% 以下 = 最低分
+        s = max(-1, min(1, whale_7d / 5.0))
+        score += s * w
+        weight_sum += w
+        factors.append({
+            "name": "鲸鱼 7d 持仓变化",
+            "value": f"{whale_7d:+.2f}%",
+            "weight": w,
+            "score": round(s * w, 1),
+            "bullish": s > 0,
+        })
+
+    # 因子 2: 鲸鱼 30d 持仓变化（权重 20%）
+    whale_30d = holding.get("whale_change_30d_pct")
+    if whale_30d is not None:
+        w = 20
+        s = max(-1, min(1, whale_30d / 15.0))  # 30d ±15% 为满格
+        score += s * w
+        weight_sum += w
+        factors.append({
+            "name": "鲸鱼 30d 持仓变化",
+            "value": f"{whale_30d:+.2f}%",
+            "weight": w,
+            "score": round(s * w, 1),
+            "bullish": s > 0,
+        })
+
+    # 因子 3: 24h 大额转账净流向（权重 25%）
+    t24 = transfers.get("24h")
+    if t24 and t24.get("total_large_volume", 0) > 0:
+        w = 25
+        net = t24["net_exchange_flow"]  # 正=从交易所出来=看涨
+        vol = t24["total_large_volume"]
+        # 净流向占大额成交量 ±20% 为满格
+        ratio = net / vol if vol > 0 else 0
+        s = max(-1, min(1, ratio / 0.2))
+        score += s * w
+        weight_sum += w
+        factors.append({
+            "name": "24h 大额转账净流向",
+            "value": f"{'+' if net >= 0 else ''}${net/1e6:.2f}M",
+            "weight": w,
+            "score": round(s * w, 1),
+            "bullish": s > 0,
+        })
+
+    # 因子 4: 7d 大额转账净流向（权重 15%）
+    t7 = transfers.get("7d")
+    if t7 and t7.get("total_large_volume", 0) > 0:
+        w = 15
+        net = t7["net_exchange_flow"]
+        vol = t7["total_large_volume"]
+        ratio = net / vol if vol > 0 else 0
+        s = max(-1, min(1, ratio / 0.15))  # 7d ±15% 为满格
+        score += s * w
+        weight_sum += w
+        factors.append({
+            "name": "7d 大额转账净流向",
+            "value": f"{'+' if net >= 0 else ''}${net/1e6:.2f}M",
+            "weight": w,
+            "score": round(s * w, 1),
+            "bullish": s > 0,
+        })
+
+    if weight_sum == 0:
+        return {
+            "stance": "unknown",
+            "confidence": 0,
+            "factors": [],
+            "message": "数据不足，无法判断鲸鱼行为方向",
+        }
+
+    # 归一化到 -100 ~ +100
+    normalized = score / weight_sum * 100
+    confidence = min(100, int(weight_sum))  # 数据越全置信度越高
+
+    if normalized > 20:
+        stance = "accumulating"  # 增持/吸筹
+    elif normalized < -20:
+        stance = "distributing"  # 减持/派发
+    else:
+        stance = "neutral"
+
+    return {
+        "stance": stance,
+        "stance_label": {
+            "accumulating": "🐋 鲸鱼增持中",
+            "distributing": "🐋 鲸鱼减持中",
+            "neutral": "🐋 鲸鱼行为中性",
+            "unknown": "❓ 数据不足",
+        }.get(stance, stance),
+        "score": round(normalized, 1),
+        "confidence": confidence,
+        "factors": factors,
+    }
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 

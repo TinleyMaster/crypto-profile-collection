@@ -947,6 +947,217 @@
             color: #4b5563;
         }
 
+        /* 鲸鱼行为流 */
+        .r-whale-flow {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-whale-flow .wf-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-whale-flow .wf-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .wf-signal {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            background: #111318;
+        }
+
+        .wf-signal.accumulating {
+            border-left: 3px solid #10b981;
+        }
+
+        .wf-signal.distributing {
+            border-left: 3px solid #ef4444;
+        }
+
+        .wf-signal.neutral {
+            border-left: 3px solid #6b7280;
+        }
+
+        .wf-signal.unknown {
+            border-left: 3px solid #4b5563;
+        }
+
+        .wf-signal .wfs-label {
+            font-size: 15px;
+            font-weight: 700;
+            flex: 1;
+        }
+
+        .wf-signal.accumulating .wfs-label {
+            color: #10b981;
+        }
+
+        .wf-signal.distributing .wfs-label {
+            color: #ef4444;
+        }
+
+        .wf-signal.neutral .wfs-label {
+            color: #9ca3af;
+        }
+
+        .wf-signal.unknown .wfs-label {
+            color: #6b7280;
+        }
+
+        .wf-signal .wfs-score {
+            font-size: 12px;
+            color: #6b7280;
+            text-align: right;
+        }
+
+        .wf-signal .wfs-score strong {
+            font-size: 16px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .wf-factors {
+            margin-bottom: 12px;
+        }
+
+        .wf-factor {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            font-size: 12px;
+        }
+
+        .wf-factor .wff-name {
+            width: 120px;
+            color: #9ca3af;
+            flex-shrink: 0;
+        }
+
+        .wf-factor .wff-bar {
+            flex: 1;
+            height: 6px;
+            background: #1e222a;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .wf-factor .wff-fill {
+            height: 100%;
+            border-radius: 3px;
+            position: absolute;
+            left: 50%;
+        }
+
+        .wf-factor .wff-fill.bullish {
+            background: #10b981;
+        }
+
+        .wf-factor .wff-fill.bearish {
+            background: #ef4444;
+        }
+
+        .wf-factor .wff-value {
+            width: 80px;
+            text-align: right;
+            flex-shrink: 0;
+            font-weight: 600;
+        }
+
+        .wf-factor .wff-value.bullish {
+            color: #10b981;
+        }
+
+        .wf-factor .wff-value.bearish {
+            color: #ef4444;
+        }
+
+        .wf-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .wf-metric {
+            background: #111318;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        .wf-metric .wfm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .wf-metric .wfm-value {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .wf-metric .wfm-value.positive {
+            color: #10b981;
+        }
+
+        .wf-metric .wfm-value.negative {
+            color: #ef4444;
+        }
+
+        .wf-tiers {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .wf-tier {
+            background: #111318;
+            border-radius: 6px;
+            padding: 6px 8px;
+            text-align: center;
+        }
+
+        .wf-tier .wft-label {
+            font-size: 9px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .wf-tier .wft-value {
+            font-size: 12px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .wf-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .wf-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -1047,6 +1258,14 @@
                 </div>
                 <div id="dv-container">
                     <div class="dv-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-whale-flow" id="r-whale-flow" style="display:none">
+                <div class="wf-head">
+                    <h3>🐋 鲸鱼/聪明钱行为流</h3>
+                </div>
+                <div id="wf-container">
+                    <div class="wf-empty">加载中...</div>
                 </div>
             </div>
             <div class="r-messages" id="r-messages"></div>
@@ -1179,6 +1398,7 @@
             loadDivergence();
             loadChainTrend();
             loadDerivatives();
+            loadWhaleFlow();
         }
 
         function renderThesis (d) {
@@ -1865,6 +2085,139 @@
             }
 
             container.innerHTML = html;
+        }
+
+        // ── 鲸鱼/聪明钱行为流 ──
+        async function loadWhaleFlow () {
+            const box = document.getElementById('r-whale-flow');
+            const container = document.getElementById('wf-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="wf-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/whale-flow');
+                const data = await safeJson(r, '/api/research/whale-flow');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="wf-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderWhaleFlow(data);
+            } catch (e) {
+                container.innerHTML = '<div class="wf-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderWhaleFlow (data) {
+            const container = document.getElementById('wf-container');
+            const holding = data.holding || {};
+            const transfers = data.large_transfers || {};
+            const signal = data.signal || {};
+
+            if (!data.has_holding_data && !data.has_transfer_data) {
+                container.innerHTML = '<div class="wf-empty">暂无链上鲸鱼数据' +
+                    '<small>需要持仓快照或大额转账日志，主流币监控采集中</small></div>';
+                return;
+            }
+
+            let html = '';
+
+            // 信号条
+            const stance = signal.stance || 'unknown';
+            const score = signal.score;
+            const confidence = signal.confidence || 0;
+            html += '<div class="wf-signal ' + stance + '">';
+            html += '<div class="wfs-label">' + escapeHtml(signal.stance_label || stance) + '</div>';
+            html += '<div class="wfs-score">行为分 <strong>' +
+                (score === undefined || score === null ? '—' : (score >= 0 ? '+' : '') + score) +
+                '</strong><br>置信度 ' + confidence + '%</div>';
+            html += '</div>';
+
+            // 因子明细
+            const factors = signal.factors || [];
+            if (factors.length > 0) {
+                html += '<div class="wf-factors">';
+                factors.forEach(function (f) {
+                    const w = f.weight || 0;
+                    const s = f.score || 0;
+                    const ratio = w > 0 ? Math.min(1, Math.abs(s) / w) : 0;
+                    const pct = ratio * 50;
+                    const fillStyle = f.bullish
+                        ? ('left:50%;width:' + pct + '%;')
+                        : ('left:' + (50 - pct) + '%;width:' + pct + '%;');
+                    html += '<div class="wf-factor">';
+                    html += '<div class="wff-name">' + escapeHtml(f.name) + '</div>';
+                    html += '<div class="wff-bar"><div class="wff-fill ' + (f.bullish ? 'bullish' : 'bearish') + '" style="' + fillStyle + '"></div></div>';
+                    html += '<div class="wff-value ' + (f.bullish ? 'bullish' : 'bearish') + '">' + escapeHtml(f.value) + '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 持仓指标
+            if (data.has_holding_data) {
+                html += '<div class="wf-metrics">';
+                html += '<div class="wf-metric"><div class="wfm-label">鲸鱼 7d 持仓</div><div class="wfm-value ' + cls(holding.whale_change_7d_pct) + '">' + pct(holding.whale_change_7d_pct) + '</div></div>';
+                html += '<div class="wf-metric"><div class="wfm-label">鲸鱼 30d 持仓</div><div class="wfm-value ' + cls(holding.whale_change_30d_pct) + '">' + pct(holding.whale_change_30d_pct) + '</div></div>';
+                html += '<div class="wf-metric"><div class="wfm-label">Top10 集中度</div><div class="wfm-value">' + (holding.top10_concentration != null ? holding.top10_concentration + '%' : '—') + '</div></div>';
+                html += '</div>';
+            }
+
+            // 大额转账分级
+            const t24 = transfers['24h'];
+            const t7 = transfers['7d'];
+            if (t24 || t7) {
+                html += '<div class="wf-tiers">';
+                html += '<div class="wf-tier"><div class="wft-label">24h >$1M</div><div class="wft-value">' + (t24 ? t24.ultra_large_count : 0) + ' 笔</div></div>';
+                html += '<div class="wf-tier"><div class="wft-label">24h $100K-$1M</div><div class="wft-value">' + (t24 ? t24.large_count : 0) + ' 笔</div></div>';
+                html += '<div class="wf-tier"><div class="wft-label">24h $10K-$100K</div><div class="wft-value">' + (t24 ? t24.medium_count : 0) + ' 笔</div></div>';
+                html += '</div>';
+
+                if (t24) {
+                    const net = t24.net_exchange_flow;
+                    html += '<div class="wf-metrics">';
+                    html += '<div class="wf-metric"><div class="wfm-label">24h 大额成交</div><div class="wfm-value">' + formatUsdBig(t24.total_large_volume) + '</div></div>';
+                    html += '<div class="wf-metric"><div class="wfm-label">24h 净流出交易所</div><div class="wfm-value ' + cls(net) + '">' + (net >= 0 ? '+' : '') + formatUsdBig(net) + '</div></div>';
+                    html += '<div class="wf-metric"><div class="wfm-label">7d 净流出交易所</div><div class="wfm-value ' + (t7 ? cls(t7.net_exchange_flow) : '') + '">' + (t7 ? (t7.net_exchange_flow >= 0 ? '+' : '') + formatUsdBig(t7.net_exchange_flow) : '—') + '</div></div>';
+                    html += '</div>';
+                }
+            }
+
+            // Top 大额转账明细
+            const top = transfers.top_transfers || [];
+            if (top.length > 0) {
+                const dirMap = {
+                    from_exchange: '从交易所转出',
+                    to_exchange: '转入交易所',
+                    exchange_internal: '交易所内划转',
+                    whale_to_whale: '鲸鱼互转',
+                    whale_sell: '鲸鱼卖出',
+                    whale_buy: '鲸鱼买入',
+                };
+                html += '<div style="font-size:10px;color:#6b7280;margin:6px 0 4px;">近 24h 大额转账（Top ' + Math.min(top.length, 5) + '）</div>';
+                top.slice(0, 5).forEach(function (t) {
+                    const dir = dirMap[t.direction] || '未知方向';
+                    html += '<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:2px 0;">';
+                    html += '<span style="color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                        escapeHtml(shortAddr(t.from)) + ' → ' + escapeHtml(shortAddr(t.to)) + '</span>';
+                    html += '<span style="white-space:nowrap;">' + escapeHtml(dir) + ' · <span style="color:#e6e8eb">' + formatUsdBig(t.value_usd) + '</span></span>';
+                    html += '</div>';
+                });
+            }
+
+            container.innerHTML = html;
+        }
+
+        function cls (v) {
+            if (v === null || v === undefined) return '';
+            return v > 0 ? 'positive' : (v < 0 ? 'negative' : '');
+        }
+        function pct (v) {
+            if (v === null || v === undefined) return '—';
+            return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+        }
+        function shortAddr (a) {
+            if (!a) return '';
+            return a.length > 12 ? a.slice(0, 6) + '...' + a.slice(-4) : a;
         }
 
         function renderSidebar (d) {

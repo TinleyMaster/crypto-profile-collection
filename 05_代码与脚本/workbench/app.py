@@ -1122,6 +1122,16 @@ def api_research_fill_missing(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/research/<int:asset_id>/thesis", methods=["POST"])
+def api_research_thesis(asset_id: int):
+    """生成结构化研究结论（后台任务 + 实时日志）。"""
+    def _worker(log):
+        return _get_db_stats().generate_research_thesis(asset_id, log=log)
+
+    task_id = task_mgr.submit_func_task(f"生成研究结论: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

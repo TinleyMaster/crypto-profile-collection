@@ -1359,6 +1359,28 @@ def _ensure_research_tables(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_research_message_notebook
                 ON biz.research_message (notebook_id, created_at)
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.research_thesis (
+                thesis_id         SERIAL PRIMARY KEY,
+                asset_id          INTEGER NOT NULL,
+                stance            TEXT NOT NULL,            -- bullish / bearish / neutral
+                conviction        TEXT NOT NULL DEFAULT 'medium',  -- high / medium / low
+                thesis_json       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- 核心论点列表（带引用）
+                key_metrics_json  JSONB,                    -- 关键指标快照
+                risks_json        JSONB,                    -- 风险点列表
+                catalysts_json    JSONB,                    -- 催化剂 + 时间点
+                source_notebook_id INTEGER REFERENCES biz.research_notebook(notebook_id) ON DELETE SET NULL,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT fk_research_thesis_asset
+                    FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id)
+                    ON DELETE CASCADE
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_research_thesis_asset
+                ON biz.research_thesis (asset_id, updated_at DESC)
+        """)
 
 
 def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls) -> list[dict]:
@@ -2127,6 +2149,7 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             "structured": snapshot["structured"],
             "counts": snapshot["counts"],
             "messages": messages,
+            "thesis": get_latest_research_thesis(asset_id),
             "created_at": str(notebook["created_at"]),
             "updated_at": str(notebook["updated_at"]),
         },
@@ -2253,6 +2276,164 @@ def ask_research_notebook(notebook_id: int, question: str, log=None) -> dict:
             "user_message_id": user_msg["message_id"],
         },
     }
+
+
+# ── 研究结论 / 评级（结构化沉淀） ──
+
+
+def _thesis_row_to_dict(row) -> dict:
+    """把 research_thesis 行转成可序列化 dict。"""
+    if not row:
+        return None
+    return {
+        "thesis_id": row["thesis_id"],
+        "asset_id": row["asset_id"],
+        "stance": row["stance"],
+        "conviction": row["conviction"],
+        "thesis": row["thesis_json"] or [],
+        "key_metrics": row["key_metrics_json"] or {},
+        "risks": row["risks_json"] or [],
+        "catalysts": row["catalysts_json"] or [],
+        "source_notebook_id": row["source_notebook_id"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def get_latest_research_thesis(asset_id: int) -> dict | None:
+    """读取某代币最新一条研究结论（不含历史版本）。"""
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT thesis_id, asset_id, stance, conviction, thesis_json,
+                       key_metrics_json, risks_json, catalysts_json,
+                       source_notebook_id, created_at, updated_at
+                FROM biz.research_thesis WHERE asset_id = %s
+                ORDER BY updated_at DESC, thesis_id DESC LIMIT 1
+            """, (asset_id,))
+            row = cur.fetchone()
+    return _thesis_row_to_dict(row)
+
+
+def generate_research_thesis(asset_id: int, log=None) -> dict:
+    """基于资料库生成结构化研究结论（stance/conviction/thesis/risks/catalysts/key_metrics）。
+
+    结论严格依据笔记本资料库，并附带抛压评分作为量化辅助；每次生成追加一条新记录，
+    保留历史版本用于「当时判断 vs 后续走势」回溯。
+    """
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    from crypto_research.config import get_settings
+    from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
+
+    settings = get_settings(require_database=True)
+    llm = LLMClient(settings, rpm=30)
+    if not llm.is_available():
+        return {"ok": False, "error": "LLM 未配置，无法生成结论"}
+
+    # 1. 读取笔记本快照（不存在则先创建）
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT notebook_id, snapshot_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
+            nb = cur.fetchone()
+    if not nb:
+        created = get_or_create_research_notebook(asset_id)
+        if not created.get("ok"):
+            return {"ok": False, "error": created.get("error", "无法创建笔记本")}
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("SELECT notebook_id, snapshot_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
+                nb = cur.fetchone()
+
+    notebook_id = nb["notebook_id"]
+    snapshot = nb.get("snapshot_json") or {}
+    sources = _build_research_sources(snapshot)
+    if not sources:
+        return {"ok": False, "error": "该代币暂无投研资料，无法生成结论"}
+
+    context = _format_research_context(sources)
+    if len(context) > 40000:
+        context = context[:40000]
+
+    # 2. 附加抛压评分作为量化辅助
+    pressure = compute_unlock_pressure(asset_id)
+    pressure_txt = ""
+    if pressure:
+        pressure_txt = (
+            f"\n\n[抛压评分（量化参考）]\n"
+            f"风险等级: {pressure.get('risk_level')}, 评分: {pressure.get('pressure_score')}分, "
+            f"未来30天解锁占比: {pressure.get('unlock_pct_30d')}%, "
+            f"Top10持仓集中度: {pressure.get('top10_concentration')}%"
+        )
+
+    _emit("调用 LLM 生成研究结论...")
+    system_prompt = (
+        "你是一名资深加密货币投研分析师。请严格只依据下面「资料库」中的内容，"
+        "输出一个结构化的研究结论 JSON，不要使用资料库之外的知识或猜测。\n"
+        "论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n"
+        "只输出 JSON，不要输出其他内容。JSON 格式：\n"
+        '{"stance": "bullish|bearish|neutral", '
+        '"conviction": "high|medium|low", '
+        '"thesis": [{"point": "核心论点（一句话）", "citations": [1, 2]}], '
+        '"risks": [{"risk": "风险点", "citations": [3]}], '
+        '"catalysts": [{"catalyst": "催化剂/事件", "timing": "预期时间"}], '
+        '"key_metrics": {"价格": "...", "市值": "...", "FDV": "...", "其他关键指标": "..."}}'
+    )
+    user_prompt = f"资料库如下：\n\n{context}{pressure_txt}\n\n请给出该代币的研究结论。"
+
+    try:
+        raw = llm.chat(system_prompt, user_prompt, temperature=0.3, max_tokens=4096)
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败: {e}"}
+
+    try:
+        est = extract_json_from_llm_response(raw)
+    except Exception as e:
+        return {"ok": False, "error": f"AI 返回解析失败: {e}"}
+
+    stance = (est.get("stance") or "neutral").lower()
+    if stance not in ("bullish", "bearish", "neutral"):
+        stance = "neutral"
+    conviction = (est.get("conviction") or "medium").lower()
+    if conviction not in ("high", "medium", "low"):
+        conviction = "medium"
+
+    thesis = est.get("thesis") or []
+    risks = est.get("risks") or []
+    catalysts = est.get("catalysts") or []
+    key_metrics = est.get("key_metrics") or {}
+
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                INSERT INTO biz.research_thesis
+                    (asset_id, stance, conviction, thesis_json, key_metrics_json,
+                     risks_json, catalysts_json, source_notebook_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING thesis_id, asset_id, stance, conviction, thesis_json,
+                          key_metrics_json, risks_json, catalysts_json,
+                          source_notebook_id, created_at, updated_at
+            """, (
+                asset_id, stance, conviction,
+                json.dumps(thesis, ensure_ascii=False),
+                json.dumps(key_metrics, ensure_ascii=False, default=str),
+                json.dumps(risks, ensure_ascii=False),
+                json.dumps(catalysts, ensure_ascii=False),
+                notebook_id,
+            ))
+            row = cur.fetchone()
+        conn.commit()
+
+    _emit("研究结论已生成")
+    return {"ok": True, "data": _thesis_row_to_dict(row)}
 
 
 # ── 链上数据监控 ──

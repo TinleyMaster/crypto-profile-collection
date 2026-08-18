@@ -344,6 +344,7 @@ _stats = {"done": 0, "failed": 0, "not_html": 0, "empty": 0, "discovered": 0, "s
 _pending_db_rows: list[tuple] = []
 _pending_crawled_ids: list[int] = []
 _pending_spa_ids: list[int] = []
+_pending_published_updates: list[tuple[int, str]] = []  # (entry_id, published_at)
 # 跨入口去重：已发现的 (asset_id, entry_url)，避免同一 URL 被多个文档页侧边栏重复统计/写入
 _seen_doc_urls: set[tuple] = set()
 _db_lock = threading.Lock()
@@ -516,6 +517,118 @@ def _normalize_url(url: str) -> str:
     if path != "/":
         path = path.rstrip("/")
     return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def extract_published_date(html: str, headers: dict | None = None) -> str | None:
+    """从 HTML 页面提取发布/最后更新日期。
+
+    优先级：
+      1. JSON-LD 结构化数据 (datePublished / dateModified)
+      2. meta 标签 (article:published_time / article:modified_time / og:published_time)
+      3. meta name (pubdate / publishdate / last-modified)
+      4. HTTP Last-Modified 头
+    返回 ISO 日期字符串 (YYYY-MM-DD)，提取失败返回 None。
+    """
+    import re
+    import json
+    from datetime import datetime
+    from bs4 import BeautifulSoup
+
+    def _parse_date(s: str) -> str | None:
+        if not s:
+            return None
+        s = s.strip().strip('"').strip("'")
+        # 常见格式：2024-01-15, 2024-01-15T10:30:00Z, 2024/01/15, Jan 15, 2024
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%d %b %Y",
+            "%d %B %Y",
+            "%a, %d %b %Y %H:%M:%S %Z",  # RFC 2822 (Last-Modified)
+            "%a, %d %b %Y %H:%M:%S %z",
+        ):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+        # 兜底：用正则抓 YYYY-MM-DD
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+        if m:
+            return m.group(1)
+        return None
+
+    if not html:
+        # 无 HTML 时尝试 HTTP 头
+        if headers:
+            lm = headers.get("Last-Modified") or headers.get("last-modified")
+            if lm:
+                return _parse_date(lm)
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1. JSON-LD
+    for script in soup.find_all("script", type="application/ld+json"):
+        text = script.string or script.get_text() or ""
+        text = text.strip()
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # 可能是 dict 或 list
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in ("datePublished", "dateModified", "dateCreated"):
+                val = item.get(key)
+                if isinstance(val, str):
+                    d = _parse_date(val)
+                    if d:
+                        return d
+                elif isinstance(val, dict):
+                    # 有时是 {"@value": "..."}
+                    v = val.get("@value") or val.get("value")
+                    if isinstance(v, str):
+                        d = _parse_date(v)
+                        if d:
+                            return d
+
+    # 2. meta property (OpenGraph / article)
+    meta_props = [
+        "article:published_time", "article:modified_time",
+        "og:published_time", "og:updated_time",
+        "pubdate", "publishdate", "last-modified",
+    ]
+    for prop in meta_props:
+        tag = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+        if tag:
+            content = tag.get("content") or tag.get("value")
+            d = _parse_date(content)
+            if d:
+                return d
+
+    # 3. <time> 标签
+    for time_tag in soup.find_all("time"):
+        dt = time_tag.get("datetime") or time_tag.get_text(strip=True)
+        d = _parse_date(dt)
+        if d:
+            return d
+
+    # 4. HTTP Last-Modified
+    if headers:
+        lm = headers.get("Last-Modified") or headers.get("last-modified")
+        if lm:
+            return _parse_date(lm)
+
+    return None
 
 
 def extract_doc_links(
@@ -840,6 +953,9 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
 
             doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword, skip_aggregation_filter=not require_doc_keyword)
 
+            # 提取当前页面发布时间（用于时效性标注）
+            page_published_at = extract_published_date(resp.text, dict(resp.headers))
+
             # 文档站识别 llms.txt 索引（GitBook/Mintlify 标准），一次性发现全部文档
             if entry.get("entry_type") in ("docs", "docs_portal"):
                 llms_links = _fetch_llms_txt(resp.url, session, timeout)
@@ -900,6 +1016,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
                 "protocol_id": entry["protocol_id"],
                 "source_code": entry["source_code"],
                 "needs_browser": needs_browser,
+                "published_at": page_published_at,
             }
         except Exception as e:
             return {
@@ -928,8 +1045,8 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_
 
 def _flush_db() -> None:
     """将累积的 DB 写入一次性提交"""
-    global _pending_db_rows, _pending_crawled_ids, _pending_spa_ids
-    if not _pending_db_rows and not _pending_crawled_ids and not _pending_spa_ids:
+    global _pending_db_rows, _pending_crawled_ids, _pending_spa_ids, _pending_published_updates
+    if not _pending_db_rows and not _pending_crawled_ids and not _pending_spa_ids and not _pending_published_updates:
         return
 
     from crypto_research.db.conn import get_connection
@@ -941,6 +1058,12 @@ def _flush_db() -> None:
     )
 
     with get_connection(db_url) as conn:
+        # 确保 published_at 列存在（新环境自动加字段）
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE biz.doc_source_entry
+                ADD COLUMN IF NOT EXISTS published_at DATE
+            """)
         if _pending_db_rows:
             execute_many(conn, upsert_sql, _pending_db_rows)
         if _pending_crawled_ids:
@@ -955,9 +1078,20 @@ def _flush_db() -> None:
                     "UPDATE biz.doc_source_entry SET deep_crawled_at = NOW(), needs_browser = TRUE WHERE entry_id = ANY(%s)",
                     (_pending_spa_ids,),
                 )
+        # 发布时间批量更新（只在有值且原值为空时更新，避免覆盖更准确的旧值）
+        if _pending_published_updates:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """UPDATE biz.doc_source_entry
+                       SET published_at = %s::DATE
+                       WHERE entry_id = %s
+                         AND published_at IS NULL""",
+                    [(d, eid) for eid, d in _pending_published_updates if d],
+                )
     _pending_db_rows.clear()
     _pending_crawled_ids.clear()
     _pending_spa_ids.clear()
+    _pending_published_updates.clear()
 
 
 def _print_progress():
@@ -1123,6 +1257,9 @@ def main() -> int:
                         _pending_spa_ids.append(entry_id)
                     else:
                         _pending_crawled_ids.append(entry_id)
+                    # 记录当前页面的发布时间（用于时效性标注）
+                    if result.get("published_at"):
+                        _pending_published_updates.append((entry_id, result["published_at"]))
                     for link_url, link_type in doc_links:
                         key = (result["asset_id"], link_url)
                         if key in _seen_doc_urls:

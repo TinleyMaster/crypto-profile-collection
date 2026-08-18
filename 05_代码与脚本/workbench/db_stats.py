@@ -1467,7 +1467,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                 return None
 
             cur.execute("""
-                SELECT entry_id, source_code, entry_type, entry_url, discovered_from, is_primary, content_topics
+                SELECT entry_id, source_code, entry_type, entry_url, discovered_from, is_primary, content_topics, published_at
                 FROM biz.doc_source_entry
                 WHERE asset_id = %s AND entity_type = 'asset'
                 ORDER BY
@@ -1479,7 +1479,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                         WHEN 'github' THEN 5
                         WHEN 'medium' THEN 6
                         ELSE 7
-                    END, entry_id
+                    END, published_at DESC NULLS LAST, entry_id
             """, (asset_id,))
             doc_source_entries = [
                 {
@@ -1490,6 +1490,7 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                     "discovered_from": r["discovered_from"],
                     "is_primary": bool(r["is_primary"]),
                     "content_topics": r["content_topics"] or [],
+                    "published_at": str(r["published_at"]) if r["published_at"] else None,
                 }
                 for r in cur.fetchall()
             ]
@@ -1997,7 +1998,14 @@ def _build_research_sources(snapshot: dict) -> list[dict]:
         "whitepaper_page": 0, "docs": 1, "docs_portal": 2, "official_website": 3,
         "github": 4, "medium": 5, "doc_file": 6, "audit": 7,
     }
-    docs = sorted((snapshot.get("sources") or []), key=lambda d: order.get(d.get("type"), 99))
+    # 按类型升序 + 发布时间倒序（新的在前，时效性更高），无日期排最后
+    docs = sorted(
+        (snapshot.get("sources") or []),
+        key=lambda d: (
+            order.get(d.get("type"), 99),
+            _date_sort_key(d.get("published_at")),
+        ),
+    )
 
     fetched = 0
     for d in docs:
@@ -2010,8 +2018,28 @@ def _build_research_sources(snapshot: dict) -> list[dict]:
             "title": d.get("title") or d.get("url"),
             "url": d.get("url"),
             "snippet": snippet,
+            "published_at": d.get("published_at"),
         })
     return sources
+
+
+def _date_sort_key(date_str: str | None) -> tuple[int, str]:
+    """日期排序 key：(有日期=0, 日期倒序字符串) 或 (无日期=1, '')。
+
+    升序排序时：有日期的排前面（0 < 1），且越新越靠前（'9999-2025' < '9999-2024'）。
+    """
+    if not date_str:
+        return (1, "")
+    # 用一个大数减年份，实现日期倒序：越新的日期 key 越小
+    # 例如 2025-08-15 -> '7974-91-84'，2024-08-15 -> '7975-91-84'，升序时 2025 在前
+    try:
+        y, m, d = date_str.split("-")
+        inv_y = 9999 - int(y)
+        inv_m = 99 - int(m)
+        inv_d = 99 - int(d)
+        return (0, f"{inv_y:04d}-{inv_m:02d}-{inv_d:02d}")
+    except (ValueError, AttributeError):
+        return (1, "")
 
 
 def _format_research_context(sources: list[dict]) -> str:
@@ -2021,7 +2049,9 @@ def _format_research_context(sources: list[dict]) -> str:
         if s.get("type") == "structured":
             head = f"[{i}] {s['title']}"
         else:
-            head = f"[{i}] {s.get('title') or s.get('url')}（类型: {s.get('type')}）"
+            pub = s.get("published_at")
+            pub_tag = f"（发布: {pub}）" if pub else ""
+            head = f"[{i}] {s.get('title') or s.get('url')}（类型: {s.get('type')}）{pub_tag}"
         lines.append(head)
         if s.get("url"):
             lines.append(f"    链接: {s['url']}")

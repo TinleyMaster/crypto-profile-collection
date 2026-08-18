@@ -209,7 +209,14 @@
 
         .r-src-head .r-content-btn:hover {
             background: #374151;
-            color: #e6e8eb;
+        }
+
+        .r-src-head .r-src-date {
+            color: #6b7280;
+            font-size: 11px;
+            flex-shrink: 0;
+            white-space: nowrap;
+            margin-top: 1px;
         }
 
         .r-src-content {
@@ -690,6 +697,9 @@
                 html += '<a href="' + attrEscape(s.url) + '" target="_blank" rel="noopener">' + title + '</a>';
             } else {
                 html += '<span>' + title + '</span>';
+            }
+            if (s.published_at) {
+                html += '<span class="r-src-date" title="发布/更新日期">📅 ' + escapeHtml(s.published_at) + '</span>';
             }
             if (s.url) {
                 html += '<button class="r-content-btn" data-url="' + attrEscape(s.url) + '" onclick="toggleSourceContent(this)">内容</button>';

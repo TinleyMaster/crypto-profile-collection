@@ -210,6 +210,12 @@ def get_cross_validated(limit: int = 30) -> dict:
     _cache = {"results": results, "total": len(results)}
     _cache_ts = now
 
+    # 异步存档到 DB（不阻塞返回）
+    try:
+        _archive_daily_recommendations(results)
+    except Exception:
+        pass  # 存档失败不影响主流程
+
     return {
         "cached": False,
         "results": results[:limit],
@@ -221,6 +227,80 @@ def get_cross_validated(limit: int = 30) -> dict:
             "both": sum(1 for r in results if r["source_count"] >= 2),
         },
     }
+
+
+def _archive_daily_recommendations(results: list[dict]) -> None:
+    """将每日推荐存档到 biz.daily_recommendation，按天去重（同一天只存第一次）。
+
+    用于后续回测推荐质量。
+    """
+    import datetime
+    from db_stats import get_db
+    import psycopg
+
+    today = datetime.date.today()
+
+    with get_db() as conn:
+        # 确保表存在
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.daily_recommendation (
+                    rec_date DATE NOT NULL,
+                    rank INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT,
+                    chain TEXT,
+                    contract TEXT,
+                    sector TEXT,
+                    source_count INTEGER,
+                    composite_score NUMERIC(6,2),
+                    change_24h NUMERIC(8,2),
+                    volume_24h NUMERIC(20,2),
+                    price_usd NUMERIC(18,8),
+                    market_cap_usd NUMERIC(20,2),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (rec_date, symbol, chain)
+                )
+            """)
+
+        # 检查今天是否已存档（避免重复写入）
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.daily_recommendation WHERE rec_date = %s",
+                (today,),
+            )
+            if cur.fetchone()[0] > 0:
+                return  # 今天已存档，跳过
+
+        # 批量插入前 30 名
+        with conn.cursor() as cur:
+            for i, t in enumerate(results[:30]):
+                try:
+                    cur.execute("""
+                        INSERT INTO biz.daily_recommendation
+                            (rec_date, rank, symbol, name, chain, contract, sector,
+                             source_count, composite_score, change_24h, volume_24h,
+                             price_usd, market_cap_usd)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (rec_date, symbol, chain) DO NOTHING
+                    """, (
+                        today,
+                        i + 1,
+                        t.get("symbol", ""),
+                        t.get("name", ""),
+                        t.get("chain", ""),
+                        t.get("contract", ""),
+                        t.get("sector", ""),
+                        t.get("source_count", 0),
+                        t.get("composite_score", 0),
+                        t.get("change_24h", 0),
+                        t.get("volume_24h", 0),
+                        t.get("price", 0),
+                        t.get("market_cap", 0),
+                    ))
+                except (psycopg.errors.UniqueViolation, psycopg.errors.IntegrityError):
+                    continue
+        conn.commit()
 
 
 def get_consensus_gainers(limit: int = 30) -> dict:

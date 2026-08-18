@@ -964,6 +964,193 @@
             text-align: center;
         }
 
+        /* 推荐回测面板 */
+        .backtest-section {
+            margin-bottom: 28px;
+        }
+
+        .backtest-section .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .backtest-section .section-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .backtest-section .bt-controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .backtest-section .bt-controls select {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            color: #e6e8eb;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .bt-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .bt-stat-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 12px 14px;
+        }
+
+        .bt-stat-card .bt-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .bt-stat-card .bt-value {
+            font-size: 18px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .bt-stat-card .bt-value.positive {
+            color: #10b981;
+        }
+
+        .bt-stat-card .bt-value.negative {
+            color: #ef4444;
+        }
+
+        .bt-stat-card .bt-sub {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        .bt-tiers {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .bt-tier-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .bt-tier-card .bt-tier-label {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .bt-tier-card .bt-tier-bar {
+            height: 4px;
+            background: #1e222a;
+            border-radius: 2px;
+            margin-bottom: 6px;
+            overflow: hidden;
+        }
+
+        .bt-tier-card .bt-tier-fill {
+            height: 100%;
+            border-radius: 2px;
+        }
+
+        .bt-tier-card .bt-tier-meta {
+            font-size: 11px;
+            color: #6b7280;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .bt-best-worst {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .bt-bw-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .bt-bw-card h4 {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .bt-bw-card.best h4 {
+            color: #10b981;
+        }
+
+        .bt-bw-card.worst h4 {
+            color: #ef4444;
+        }
+
+        .bt-bw-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 0;
+            font-size: 12px;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .bt-bw-item:last-child {
+            border-bottom: none;
+        }
+
+        .bt-bw-item .bt-bw-sym {
+            font-weight: 500;
+        }
+
+        .bt-bw-item .bt-bw-ret {
+            font-weight: 600;
+        }
+
+        .bt-bw-item .bt-bw-ret.positive {
+            color: #10b981;
+        }
+
+        .bt-bw-item .bt-bw-ret.negative {
+            color: #ef4444;
+        }
+
+        .bt-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 24px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+        }
+
+        .bt-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
         .hot-tokens-section .section-header {
             display: flex;
             align-items: center;
@@ -1921,6 +2108,28 @@
             </div>
             <div id="sector-heatmap-content">
                 <div class="sector-heatmap-loading">加载中...</div>
+            </div>
+        </div>
+
+        <!-- 推荐质量回测 -->
+        <div class="backtest-section">
+            <div class="section-header">
+                <h2>📈 推荐质量回测</h2>
+                <div class="bt-controls">
+                    <select id="bt-days" onchange="loadBacktest()">
+                        <option value="7">近 7 天</option>
+                        <option value="30" selected>近 30 天</option>
+                        <option value="90">近 90 天</option>
+                    </select>
+                    <select id="bt-topn" onchange="loadBacktest()">
+                        <option value="5">Top 5</option>
+                        <option value="10" selected>Top 10</option>
+                        <option value="20">Top 20</option>
+                    </select>
+                </div>
+            </div>
+            <div id="backtest-container">
+                <div class="bt-empty">加载中...</div>
             </div>
         </div>
 
@@ -4211,6 +4420,112 @@
             console.log('Filter by sector:', sector);
         }
 
+        // ── 推荐质量回测 ──
+        async function loadBacktest () {
+            const container = document.getElementById('backtest-container');
+            if (!container) return;
+            container.innerHTML = '<div class="bt-empty">加载中...</div>';
+
+            try {
+                const days = document.getElementById('bt-days').value;
+                const topN = document.getElementById('bt-topn').value;
+                const r = await fetch('/api/market/backtest?days=' + days + '&top_n=' + topN);
+                const data = await r.json();
+                if (!data.ok) {
+                    container.innerHTML = '<div class="bt-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                if (data.message || !data.overall || !data.overall.total_samples) {
+                    container.innerHTML = '<div class="bt-empty">' +
+                        escapeHtml(data.message || '暂无回测数据') +
+                        '<small>每日推荐会自动存档，积累 3-7 天后可查看回测结果</small></div>';
+                    return;
+                }
+
+                renderBacktest(data);
+            } catch (e) {
+                container.innerHTML = '<div class="bt-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderBacktest (data) {
+            const container = document.getElementById('backtest-container');
+            const o = data.overall;
+
+            // 核心指标卡片
+            let html = '<div class="bt-stats-grid">';
+            const statItems = [
+                {
+                    l: '平均收益率', v: (o.avg_return_pct >= 0 ? '+' : '') + o.avg_return_pct.toFixed(2) + '%',
+                    cls: o.avg_return_pct >= 0 ? 'positive' : 'negative',
+                    sub: '样本 ' + o.total_samples + ' 个 / ' + o.unique_days + ' 天'
+                },
+                {
+                    l: '胜率', v: o.win_rate_pct.toFixed(1) + '%',
+                    cls: o.win_rate_pct >= 50 ? 'positive' : 'negative',
+                    sub: '上涨 ' + Math.round(o.total_samples * o.win_rate_pct / 100) + ' 个'
+                },
+                {
+                    l: '盈亏比', v: o.profit_factor !== null && o.profit_factor !== undefined ? o.profit_factor.toFixed(2) : '—',
+                    cls: o.profit_factor >= 1 ? 'positive' : 'negative',
+                    sub: '平均盈 ' + (o.avg_win_pct || 0).toFixed(2) + '% / 亏 ' + (o.avg_loss_pct || 0).toFixed(2) + '%'
+                },
+                {
+                    l: '中位数收益', v: (o.median_return_pct >= 0 ? '+' : '') + o.median_return_pct.toFixed(2) + '%',
+                    cls: o.median_return_pct >= 0 ? 'positive' : 'negative',
+                    sub: '最佳 ' + (o.best_return_pct >= 0 ? '+' : '') + o.best_return_pct.toFixed(2) + '% / 最差 ' + o.worst_return_pct.toFixed(2) + '%'
+                },
+            ];
+            statItems.forEach(function (s) {
+                html += '<div class="bt-stat-card"><div class="bt-label">' + escapeHtml(s.l) + '</div>';
+                html += '<div class="bt-value ' + s.cls + '">' + escapeHtml(s.v) + '</div>';
+                html += '<div class="bt-sub">' + escapeHtml(s.sub) + '</div></div>';
+            });
+            html += '</div>';
+
+            // 评分分层表现
+            if (data.by_score_tier && data.by_score_tier.length > 0) {
+                // 找最大绝对值用于进度条缩放
+                const maxAbs = Math.max.apply(null, data.by_score_tier.map(function (t) {
+                    return Math.abs(t.avg_return_pct);
+                })) || 1;
+                html += '<div class="bt-tiers">';
+                data.by_score_tier.forEach(function (t) {
+                    const pct = Math.min(100, Math.abs(t.avg_return_pct) / maxAbs * 100);
+                    const color = t.avg_return_pct >= 0 ? '#10b981' : '#ef4444';
+                    html += '<div class="bt-tier-card">';
+                    html += '<div class="bt-tier-label"><span>' + escapeHtml(t.label) + '</span>';
+                    html += '<span style="color:' + color + '">' + (t.avg_return_pct >= 0 ? '+' : '') + t.avg_return_pct.toFixed(2) + '%</span></div>';
+                    html += '<div class="bt-tier-bar"><div class="bt-tier-fill" style="width:' + pct.toFixed(1) + '%;background:' + color + '"></div></div>';
+                    html += '<div class="bt-tier-meta"><span>胜率 ' + t.win_rate_pct.toFixed(1) + '%</span><span>' + t.count + ' 样本</span></div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 最佳/最差
+            if (data.best && data.best.length > 0) {
+                html += '<div class="bt-best-worst">';
+                html += '<div class="bt-bw-card best"><h4>🏆 最佳推荐</h4>';
+                data.best.forEach(function (b) {
+                    html += '<div class="bt-bw-item"><span class="bt-bw-sym">' + escapeHtml(b.symbol) + '</span>';
+                    html += '<span class="bt-bw-ret positive">+' + b.return_pct.toFixed(2) + '%</span></div>';
+                });
+                html += '</div>';
+                html += '<div class="bt-bw-card worst"><h4>💀 最差推荐</h4>';
+                (data.worst || []).forEach(function (w) {
+                    const cls = w.return_pct >= 0 ? 'positive' : 'negative';
+                    const sign = w.return_pct >= 0 ? '+' : '';
+                    html += '<div class="bt-bw-item"><span class="bt-bw-sym">' + escapeHtml(w.symbol) + '</span>';
+                    html += '<span class="bt-bw-ret ' + cls + '">' + sign + w.return_pct.toFixed(2) + '%</span></div>';
+                });
+                html += '</div></div>';
+            }
+
+            container.innerHTML = html;
+        }
+
         // ── 每日投研推荐 ──
         let hotFilter = 'score';
 
@@ -4383,6 +4698,7 @@
 
         // 初始加载 & 定时刷新
         loadSectorHeatmap();
+        loadBacktest();
         loadHotTokens();
         setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
         setInterval(loadSectorHeatmap, 5 * 60 * 1000);

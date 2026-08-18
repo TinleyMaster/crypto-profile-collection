@@ -2330,6 +2330,205 @@ def _thesis_row_to_dict(row) -> dict:
     }
 
 
+def get_recommendation_backtest(days: int = 30, top_n: int = 10) -> dict:
+    """每日推荐质量回测：统计过去 N 天推荐币的后续表现。
+
+    由于没有完整历史价格序列，用「推荐日存档价格 vs 当前价格」近似计算持有收益。
+    等 asset_price_daily 积累数据后可升级为精确的 1d/3d/7d 周期回测。
+
+    指标：
+      - 平均收益率、胜率（上涨比例）、中位数收益
+      - 按评分分层（高/中/低评分组表现对比）
+      - 按赛道分层
+      - 最佳/最差推荐
+    """
+    days = max(7, min(180, days))
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确保表存在
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.daily_recommendation (
+                    rec_date DATE NOT NULL,
+                    rank INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT,
+                    chain TEXT,
+                    contract TEXT,
+                    sector TEXT,
+                    source_count INTEGER,
+                    composite_score NUMERIC(6,2),
+                    change_24h NUMERIC(8,2),
+                    volume_24h NUMERIC(20,2),
+                    price_usd NUMERIC(18,8),
+                    market_cap_usd NUMERIC(20,2),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (rec_date, symbol, chain)
+                )
+            """)
+
+            # 取过去 N 天的 Top N 推荐
+            cur.execute("""
+                SELECT rec_date, rank, symbol, name, chain, contract, sector,
+                       source_count, composite_score, price_usd, market_cap_usd
+                FROM biz.daily_recommendation
+                WHERE rec_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND rank <= %s
+                ORDER BY rec_date DESC, rank ASC
+            """, (days, top_n))
+            recs = [dict(r) for r in cur.fetchall()]
+
+            if not recs:
+                return {
+                    "ok": True,
+                    "days": days,
+                    "top_n": top_n,
+                    "total_recommendations": 0,
+                    "unique_days": 0,
+                    "message": "暂无历史推荐数据，每日推荐会自动存档，积累几天后可查看回测结果",
+                    "overall": {},
+                    "by_score_tier": [],
+                    "by_sector": [],
+                    "best": [],
+                    "worst": [],
+                }
+
+            # 取每个推荐币的当前价格（从 social_heat.market_json 降级取）
+            symbols = list(set(r["symbol"].upper() for r in recs))
+            cur.execute("""
+                SELECT a.canonical_symbol,
+                       (sh.market_json->>'price_usd')::NUMERIC AS current_price
+                FROM core.asset a
+                LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = a.asset_id
+                WHERE UPPER(a.canonical_symbol) = ANY(%s)
+            """, (symbols,))
+            price_map = {}
+            for r in cur.fetchall():
+                if r["current_price"]:
+                    price_map[r["canonical_symbol"].upper()] = float(r["current_price"])
+
+            # 计算每个推荐的收益率
+            results = []
+            for r in recs:
+                rec_price = float(r["price_usd"] or 0)
+                cur_price = price_map.get(r["symbol"].upper())
+                if not rec_price or not cur_price or rec_price <= 0:
+                    continue
+                return_pct = round((cur_price - rec_price) / rec_price * 100, 2)
+                days_held = (
+                    __import__("datetime").date.today() - r["rec_date"]
+                ).days
+                results.append({
+                    "symbol": r["symbol"],
+                    "name": r["name"],
+                    "sector": r["sector"],
+                    "rec_date": str(r["rec_date"]),
+                    "days_held": days_held,
+                    "rec_price": rec_price,
+                    "current_price": cur_price,
+                    "return_pct": return_pct,
+                    "score": float(r["composite_score"] or 0),
+                    "rank": r["rank"],
+                    "source_count": r["source_count"],
+                })
+
+            if not results:
+                return {
+                    "ok": True,
+                    "days": days,
+                    "top_n": top_n,
+                    "total_recommendations": len(recs),
+                    "unique_days": len(set(r["rec_date"] for r in recs)),
+                    "message": "有推荐存档但当前价格数据不足，无法计算收益",
+                    "overall": {},
+                    "by_score_tier": [],
+                    "by_sector": [],
+                    "best": [],
+                    "worst": [],
+                }
+
+            # 总体统计
+            returns = [r["return_pct"] for r in results]
+            wins = [r for r in results if r["return_pct"] > 0]
+            losses = [r for r in results if r["return_pct"] < 0]
+            avg_win = sum(r["return_pct"] for r in wins) / len(wins) if wins else 0
+            avg_loss = abs(sum(r["return_pct"] for r in losses) / len(losses)) if losses else 0
+            win_rate = round(len(wins) / len(results) * 100, 1)
+            avg_return = round(sum(returns) / len(results), 2)
+            median_return = sorted(returns)[len(returns) // 2]
+            profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else None
+
+            overall = {
+                "total_samples": len(results),
+                "unique_days": len(set(r["rec_date"] for r in results)),
+                "avg_return_pct": avg_return,
+                "median_return_pct": round(median_return, 2),
+                "win_rate_pct": win_rate,
+                "profit_factor": profit_factor,
+                "avg_win_pct": round(avg_win, 2),
+                "avg_loss_pct": round(avg_loss, 2),
+                "best_return_pct": round(max(returns), 2),
+                "worst_return_pct": round(min(returns), 2),
+            }
+
+            # 按评分分层（高 >=70, 中 50-70, 低 <50）
+            tiers = [
+                ("high", "高评分 (≥70)", lambda r: r["score"] >= 70),
+                ("medium", "中评分 (50-70)", lambda r: 50 <= r["score"] < 70),
+                ("low", "低评分 (<50)", lambda r: r["score"] < 50),
+            ]
+            by_score_tier = []
+            for tid, tlabel, tfn in tiers:
+                group = [r for r in results if tfn(r)]
+                if not group:
+                    continue
+                g_returns = [r["return_pct"] for r in group]
+                g_wins = [r for r in group if r["return_pct"] > 0]
+                by_score_tier.append({
+                    "tier": tid,
+                    "label": tlabel,
+                    "count": len(group),
+                    "avg_return_pct": round(sum(g_returns) / len(group), 2),
+                    "win_rate_pct": round(len(g_wins) / len(group) * 100, 1),
+                })
+
+            # 按赛道分层
+            sector_groups = {}
+            for r in results:
+                sec = r["sector"] or "other"
+                sector_groups.setdefault(sec, []).append(r)
+            by_sector = []
+            for sec, group in sorted(sector_groups.items(), key=lambda x: -len(x[1])):
+                if len(group) < 2:
+                    continue
+                g_returns = [r["return_pct"] for r in group]
+                g_wins = [r for r in group if r["return_pct"] > 0]
+                by_sector.append({
+                    "sector": sec,
+                    "sector_label": SECTOR_LABELS.get(sec, sec),
+                    "count": len(group),
+                    "avg_return_pct": round(sum(g_returns) / len(group), 2),
+                    "win_rate_pct": round(len(g_wins) / len(group) * 100, 1),
+                })
+
+            # 最佳/最差 Top 5
+            sorted_by_return = sorted(results, key=lambda r: -r["return_pct"])
+            best = sorted_by_return[:5]
+            worst = sorted_by_return[-5:][::-1]
+
+    return {
+        "ok": True,
+        "days": days,
+        "top_n": top_n,
+        "total_recommendations": len(recs),
+        "unique_days": len(set(r["rec_date"] for r in recs)),
+        "overall": overall,
+        "by_score_tier": by_score_tier,
+        "by_sector": by_sector,
+        "best": best,
+        "worst": worst,
+    }
+
+
 def get_divergence_signals(asset_id: int) -> dict:
     """情绪 × 价格 × 链上 背离检测。
 

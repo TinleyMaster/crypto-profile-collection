@@ -1401,6 +1401,18 @@ def api_market_sector_heatmap():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/backtest")
+def api_market_backtest():
+    """每日推荐质量回测。"""
+    try:
+        days = request.args.get("days", default=30, type=int)
+        top_n = request.args.get("top_n", default=10, type=int)
+        result = _get_db_stats().get_recommendation_backtest(days, top_n)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── 解锁追踪列表（watchlist） ──
 
 @app.route("/api/watchlist", methods=["GET"])

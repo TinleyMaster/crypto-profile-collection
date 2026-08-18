@@ -250,3 +250,62 @@ def get_consensus_volume(limit: int = 30) -> dict:
         "results": volume_ranked[:limit],
         "total": len(volume_ranked),
     }
+
+
+def get_sector_heatmap(limit: int = 20) -> dict:
+    """赛道轮动热力图：按赛道聚合多源交叉验证结果，输出各赛道热度指标。
+
+    指标：
+      - token_count: 上榜代币数
+      - avg_change_24h: 平均 24h 涨幅
+      - avg_score: 平均综合评分
+      - top_token: 该赛道评分最高的代币
+      - heat_score: 综合热度分（上榜数 × 平均涨幅 × 平均评分，归一化后 0-100）
+    """
+    result = get_cross_validated(100)
+    tokens = result["results"]
+
+    # 按赛道分组
+    sectors: dict[str, list[dict]] = {}
+    for t in tokens:
+        sec = t.get("sector") or "other"
+        sectors.setdefault(sec, []).append(t)
+
+    # 计算各赛道指标
+    sector_stats = []
+    for sec, stokens in sectors.items():
+        count = len(stokens)
+        avg_change = sum(t["change_24h"] for t in stokens) / count
+        avg_score = sum(t["composite_score"] for t in stokens) / count
+        top = max(stokens, key=lambda x: x["composite_score"])
+
+        # 热度分：上榜数权重 40% + 平均涨幅权重 30% + 平均评分权重 30%
+        # 归一化基准：count 以 10 为满值，avg_change 以 20% 为满值，avg_score 以 80 为满值
+        count_norm = min(100, count / 10 * 100)
+        change_norm = min(100, max(0, avg_change) / 20 * 100)
+        score_norm = min(100, avg_score / 80 * 100)
+        heat_score = round(count_norm * 0.4 + change_norm * 0.3 + score_norm * 0.3, 1)
+
+        sector_stats.append({
+            "sector": sec,
+            "token_count": count,
+            "avg_change_24h": round(avg_change, 2),
+            "avg_score": round(avg_score, 1),
+            "heat_score": heat_score,
+            "top_token": {
+                "symbol": top["symbol"],
+                "name": top.get("name", ""),
+                "change_24h": top["change_24h"],
+                "composite_score": top["composite_score"],
+            },
+        })
+
+    # 按热度分降序
+    sector_stats.sort(key=lambda x: x["heat_score"], reverse=True)
+
+    return {
+        "sectors": sector_stats[:limit],
+        "total_sectors": len(sector_stats),
+        "total_tokens": len(tokens),
+        "fetched_at": result.get("fetched_at"),
+    }

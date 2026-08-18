@@ -1357,6 +1357,18 @@ def api_market_volume():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/sector-heatmap")
+def api_market_sector_heatmap():
+    """赛道轮动热力图：按赛道聚合多源交叉验证结果。"""
+    try:
+        from cross_market import get_sector_heatmap
+        limit = int(request.args.get("limit", "20"))
+        result = get_sector_heatmap(limit)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── 解锁追踪列表（watchlist） ──
 
 @app.route("/api/watchlist", methods=["GET"])

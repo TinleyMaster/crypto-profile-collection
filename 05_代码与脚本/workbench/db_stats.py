@@ -3433,7 +3433,11 @@ AI_UNLOCK_PROMPT = """你是一个加密货币解锁时间表分析专家。根�
 
 
 def _fetch_cg_price(asset_id: int, settings) -> dict:
-    """从 CoinGecko 获取当前价格、市值、FDV。先查直接映射，失败则按 symbol 搜索。支持重试。"""
+    """从 CoinGecko 获取当前价格、市值、FDV。先查直接映射，失败则按 symbol 搜索。支持重试。
+
+    降级策略：CG 不可达时，从 biz.coin_basic 或 biz.asset_token_unlocks.input_snapshot_json
+    里取缓存的市值/FDV/价格，保证抛压评分等下游逻辑在离线环境也能算出有意义的结果。
+    """
     import requests
     import time as time_mod
     from crypto_research.db.conn import get_connection
@@ -3547,7 +3551,60 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
                 break
 
     error_msg = last_error or "获取失败"
-    return {"price_usd": error_msg, "market_cap_usd": error_msg, "fdv_usd": error_msg}
+
+    # ── 降级：从本地缓存表取市值/FDV/价格（离线环境也能算抛压评分） ──
+    try:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 1) 优先从 coin_basic 取（如果有缓存的市值/价格字段）
+                cur.execute(
+                    """SELECT column_name FROM information_schema.columns
+                       WHERE table_schema='biz' AND table_name='coin_basic'
+                         AND column_name IN ('price_usd', 'market_cap_usd', 'fdv_usd', 'volume_24h_usd')"""
+                )
+                cols = [r["column_name"] for r in cur.fetchall()]
+                if cols:
+                    sel = ", ".join(cols)
+                    cur.execute(f"SELECT {sel} FROM biz.coin_basic WHERE asset_id = %s", (asset_id,))
+                    cb = cur.fetchone()
+                    if cb and any(cb.get(c) for c in cols):
+                        result = {
+                            "price_usd": cb.get("price_usd"),
+                            "market_cap_usd": cb.get("market_cap_usd"),
+                            "fdv_usd": cb.get("fdv_usd"),
+                            "volume_24h_usd": cb.get("volume_24h_usd"),
+                            "_source": "coin_basic_cache",
+                            "_error": error_msg,
+                        }
+                        return result
+
+                # 2) 再从 asset_token_unlocks.input_snapshot_json 里挖
+                cur.execute(
+                    "SELECT input_snapshot_json FROM biz.asset_token_unlocks WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                urow = cur.fetchone()
+                if urow and urow.get("input_snapshot_json"):
+                    snap = urow["input_snapshot_json"] or {}
+                    ov = snap.get("overview") or {}
+                    price = ov.get("price") or ov.get("price_usd")
+                    mcap = ov.get("market_cap") or ov.get("market_cap_usd")
+                    fdv = ov.get("fdv") or ov.get("fdv_usd")
+                    vol = ov.get("volume_24h") or ov.get("volume_24h_usd")
+                    if mcap or fdv or price:
+                        return {
+                            "price_usd": price,
+                            "market_cap_usd": mcap,
+                            "fdv_usd": fdv,
+                            "volume_24h_usd": vol,
+                            "_source": "unlock_snapshot_cache",
+                            "_error": error_msg,
+                        }
+    except Exception:
+        pass  # 降级失败就返回原始错误
+
+    return {"price_usd": error_msg, "market_cap_usd": error_msg, "fdv_usd": error_msg,
+            "volume_24h_usd": error_msg}
 
 
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict:

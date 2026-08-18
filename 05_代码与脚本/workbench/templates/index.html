@@ -864,6 +864,106 @@
             margin-bottom: 28px;
         }
 
+        /* 赛道轮动热力图 */
+        .sector-heatmap-section {
+            margin-bottom: 28px;
+        }
+
+        .sector-heatmap-section .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .sector-heatmap-section .section-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .sector-heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .sector-heat-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 12px 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .sector-heat-card:hover {
+            border-color: #3b82f6;
+            transform: translateY(-1px);
+        }
+
+        .sector-heat-card .heat-bar {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: #3b82f6;
+            opacity: 0.6;
+        }
+
+        .sector-heat-card .sec-name {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .sector-heat-card .sec-stats {
+            font-size: 11px;
+            color: #8a92a0;
+            line-height: 1.6;
+        }
+
+        .sector-heat-card .sec-top {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #1e222a;
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        .sector-heat-card .sec-top .sym {
+            color: #e6e8eb;
+            font-weight: 500;
+        }
+
+        .sector-heat-card .heat-score {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #3b82f6;
+        }
+
+        .sector-heatmap-loading {
+            color: #6b7280;
+            font-size: 13px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .sector-heatmap-error {
+            color: #f87171;
+            font-size: 13px;
+            padding: 20px;
+            text-align: center;
+        }
+
         .hot-tokens-section .section-header {
             display: flex;
             align-items: center;
@@ -1665,7 +1765,6 @@
         .tkm-source a:hover {
             text-decoration: underline;
         }
-
     </style>
 </head>
 
@@ -1811,6 +1910,17 @@
             </div>
             <div id="watchlist-content">
                 <div class="hot-tokens-loading">加载中...</div>
+            </div>
+        </div>
+
+        <!-- 赛道轮动热力图 -->
+        <div class="sector-heatmap-section">
+            <div class="section-header">
+                <h2>🌡️ 赛道轮动热力图</h2>
+                <span style="font-size:12px;color:#8a92a0" id="sector-heat-updated"></span>
+            </div>
+            <div id="sector-heatmap-content">
+                <div class="sector-heatmap-loading">加载中...</div>
             </div>
         </div>
 
@@ -2054,7 +2164,7 @@
                 ta.style.left = '-9999px';
                 document.body.appendChild(ta);
                 ta.select();
-                try { document.execCommand('copy'); } catch (e) {}
+                try { document.execCommand('copy'); } catch (e) { }
                 document.body.removeChild(ta);
                 show();
             };
@@ -3278,7 +3388,7 @@
             // 等非 JSON 响应被 res.json() 抛成晦涩的 "Unexpected token 'B'..."。
             if (!res.ok) {
                 let detail = '';
-                try { detail = (await res.text()).slice(0, 200); } catch (e) {}
+                try { detail = (await res.text()).slice(0, 200); } catch (e) { }
                 throw new Error(`服务器错误 ${res.status}${detail ? '（' + detail + '）' : ''}`);
             }
             const text = await res.text();
@@ -4016,6 +4126,91 @@
             }
         }
 
+        // ── 赛道轮动热力图 ──
+        const SECTOR_LABELS = {
+            'layer1': 'Layer1 公链', 'layer2': 'Layer2 扩容', 'defi': 'DeFi 金融',
+            'meme': 'Meme 文化', 'ai': 'AI + 加密', 'gaming': 'GameFi',
+            'nft': 'NFT 收藏', 'social': 'SocialFi', 'rwa': 'RWA 现实资产',
+            'infra': '基础设施', 'oracle': '预言机', 'privacy': '隐私计算',
+            'storage': '去中心化存储', 'dao': 'DAO 治理', 'stablecoin': '稳定币',
+            'restaking': '再质押', 'lsd': '流动性质押', 'depin': 'DePIN',
+            'perp_dex': '永续 DEX', 'launchpad': 'Launchpad', 'other': '其他'
+        };
+
+        async function loadSectorHeatmap () {
+            const content = document.getElementById('sector-heatmap-content');
+            content.innerHTML = '<div class="sector-heatmap-loading">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/market/sector-heatmap?limit=12');
+                const data = await r.json();
+                if (!data.ok) {
+                    content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
+                    return;
+                }
+
+                const sectors = data.sectors || [];
+                if (!sectors.length) {
+                    content.innerHTML = '<div class="sector-heatmap-loading">暂无数据</div>';
+                    return;
+                }
+
+                let html = '<div class="sector-heatmap-grid">';
+                const maxHeat = Math.max(...sectors.map(s => s.heat_score || 0), 1);
+                sectors.forEach(s => {
+                    const label = SECTOR_LABELS[s.sector] || s.sector;
+                    const heatPct = Math.min(100, (s.heat_score || 0) / maxHeat * 100);
+                    const change = s.avg_change_24h || 0;
+                    const changeCls = change >= 0 ? 'change-up' : 'change-down';
+                    const changeSign = change >= 0 ? '+' : '';
+                    const top = s.top_token || {};
+                    const topChange = top.change_24h || 0;
+                    const topChangeSign = topChange >= 0 ? '+' : '';
+
+                    // 热度颜色：从蓝到红渐变
+                    const hue = 220 - heatPct * 2.2; // 220(蓝) → 0(红)
+                    const barColor = `hsl(${hue}, 80%, 55%)`;
+                    const scoreColor = `hsl(${hue}, 80%, 60%)`;
+
+                    html += '<div class="sector-heat-card" onclick="filterHotBySector(\'' + escapeHtml(s.sector) + '\')">';
+                    html += '<div class="heat-bar" style="background:' + barColor + ';opacity:' + (0.4 + heatPct / 100 * 0.6) + '"></div>';
+                    html += '<div class="heat-score" style="color:' + scoreColor + '">' + (s.heat_score || 0).toFixed(0) + '</div>';
+                    html += '<div class="sec-name">' + escapeHtml(label) + '</div>';
+                    html += '<div class="sec-stats">';
+                    html += '<div>上榜代币: ' + s.token_count + ' 个</div>';
+                    html += '<div>平均涨幅: <span class="' + changeCls + '">' + changeSign + change.toFixed(2) + '%</span></div>';
+                    html += '<div>平均评分: ' + (s.avg_score || 0).toFixed(1) + '</div>';
+                    html += '</div>';
+                    if (top.symbol) {
+                        html += '<div class="sec-top">';
+                        html += '龙头: <span class="sym">' + escapeHtml(top.symbol) + '</span>';
+                        html += ' <span class="' + (topChange >= 0 ? 'change-up' : 'change-down') + '">' + topChangeSign + topChange.toFixed(2) + '%</span>';
+                        html += '</div>';
+                    }
+                    html += '</div>';
+                });
+                html += '</div>';
+
+                content.innerHTML = html;
+
+                const updated = document.getElementById('sector-heat-updated');
+                if (updated) {
+                    const now = new Date();
+                    updated.textContent = '更新于 ' + now.toLocaleTimeString('zh-CN') + ' · 共 ' + data.total_sectors + ' 赛道 / ' + data.total_tokens + ' 币';
+                }
+            } catch (e) {
+                content.innerHTML = '<div class="sector-heatmap-error">网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        function filterHotBySector (sector) {
+            // 点击赛道卡片 → 滚动到每日推荐并按赛道过滤
+            const section = document.querySelector('.hot-tokens-section');
+            if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            // 简单提示：当前版本暂不做前端过滤，可后续扩展
+            console.log('Filter by sector:', sector);
+        }
+
         // ── 每日投研推荐 ──
         let hotFilter = 'score';
 
@@ -4187,8 +4382,10 @@
         }
 
         // 初始加载 & 定时刷新
+        loadSectorHeatmap();
         loadHotTokens();
         setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
+        setInterval(loadSectorHeatmap, 5 * 60 * 1000);
     </script>
 
     <!-- ── 添加代币弹窗 ── -->
@@ -4247,7 +4444,8 @@
             <h3>🔗 输入 tokenomics 项目网址</h3>
             <p style="font-size:13px;color:#8a92a0;margin:0 0 12px;">
                 该代币未能自动匹配 tokenomics.com 项目页，请粘贴项目网址。
-                可前往 <a href="https://app.tokenomics.com/" target="_blank" rel="noopener" style="color:#6c8cff;">tokenomics.com</a> 搜索对应项目页。
+                可前往 <a href="https://app.tokenomics.com/" target="_blank" rel="noopener"
+                    style="color:#6c8cff;">tokenomics.com</a> 搜索对应项目页。
             </p>
             <div class="form-group">
                 <label>tokenomics 项目网址</label>

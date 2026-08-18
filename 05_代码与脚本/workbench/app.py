@@ -1153,6 +1153,17 @@ def api_research_divergence(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/derivatives")
+def api_research_derivatives(asset_id: int):
+    """衍生品资金面数据（多交易所聚合：资金费率/OI/CVD）。"""
+    try:
+        force = request.args.get("refresh", "").lower() in ("1", "true", "yes")
+        result = _get_db_stats().get_asset_derivatives(asset_id, force_refresh=force)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

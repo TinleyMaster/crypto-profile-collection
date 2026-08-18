@@ -752,6 +752,136 @@
             color: #4b5563;
         }
 
+        /* 衍生品资金面 */
+        .r-derivatives {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-derivatives .dv-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-derivatives .dv-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-derivatives .dv-refresh {
+            font-size: 11px;
+            color: #6b7280;
+            cursor: pointer;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: 1px solid #1e222a;
+        }
+
+        .r-derivatives .dv-refresh:hover {
+            color: #e6e8eb;
+            border-color: #374151;
+        }
+
+        .dv-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .dv-metric {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .dv-metric .dvm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .dv-metric .dvm-value {
+            font-size: 15px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .dv-metric .dvm-value.positive {
+            color: #10b981;
+        }
+
+        .dv-metric .dvm-value.negative {
+            color: #ef4444;
+        }
+
+        .dv-metric .dvm-sub {
+            font-size: 10px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        .dv-exchanges {
+            padding-top: 10px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .dv-exchanges .dve-title {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 6px;
+        }
+
+        .dv-ex-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .dv-ex-tag {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #1f2937;
+            color: #9ca3af;
+            border: 1px solid #374151;
+        }
+
+        .dv-ex-tag.active {
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .dv-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .dv-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
+        .dv-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -843,6 +973,15 @@
                 </div>
                 <div id="ct-charts-container">
                     <div class="ct-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-derivatives" id="r-derivatives" style="display:none">
+                <div class="dv-head">
+                    <h3>📈 衍生品资金面</h3>
+                    <span class="dv-refresh" onclick="loadDerivatives(true)">🔄 刷新</span>
+                </div>
+                <div id="dv-container">
+                    <div class="dv-loading">加载中...</div>
                 </div>
             </div>
             <div class="r-messages" id="r-messages"></div>
@@ -974,6 +1113,7 @@
             loadCompetitors();
             loadDivergence();
             loadChainTrend();
+            loadDerivatives();
         }
 
         function renderThesis (d) {
@@ -1457,6 +1597,129 @@
                 '<path d="' + areaD + '" fill="' + color + '" fill-opacity="0.1" />' +
                 '<path d="' + pathD + '" fill="none" stroke="' + color + '" stroke-width="1.5" />' +
                 '</svg>';
+        }
+
+        // ── 衍生品资金面 ──
+        async function loadDerivatives (force) {
+            const box = document.getElementById('r-derivatives');
+            const container = document.getElementById('dv-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="dv-loading">加载中（首次可能需要 5-10 秒，并行请求 5 家交易所）...</div>';
+
+            try {
+                const url = '/api/research/' + ASSET_ID + '/derivatives' + (force ? '?refresh=1' : '');
+                const r = await fetch(url);
+                const data = await safeJson(r, '/api/research/derivatives');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="dv-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                if (!data.available_exchanges || data.available_exchanges.length === 0) {
+                    container.innerHTML = '<div class="dv-empty">未找到该代币的永续合约数据' +
+                        '<small>仅主流币有衍生品数据，Meme 小币可能无合约</small></div>';
+                    return;
+                }
+
+                renderDerivatives(data);
+            } catch (e) {
+                container.innerHTML = '<div class="dv-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderDerivatives (data) {
+            const container = document.getElementById('dv-container');
+
+            // 6 个核心指标
+            const metrics = [
+                {
+                    label: '当前资金费率', icon: '💰',
+                    value: data.funding_rate_pct !== null && data.funding_rate_pct !== undefined
+                        ? (data.funding_rate_pct >= 0 ? '+' : '') + data.funding_rate_pct.toFixed(4) + '%'
+                        : '—',
+                    cls: data.funding_rate_pct > 0 ? 'positive' : (data.funding_rate_pct < 0 ? 'negative' : ''),
+                    sub: data.next_funding_time ? '下次结算: ' + new Date(data.next_funding_time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''
+                },
+                {
+                    label: '7 天平均费率', icon: '📊',
+                    value: data.funding_rate_7d_avg !== null && data.funding_rate_7d_avg !== undefined
+                        ? (data.funding_rate_7d_avg >= 0 ? '+' : '') + (data.funding_rate_7d_avg * 100).toFixed(4) + '%'
+                        : '—',
+                    cls: data.funding_rate_7d_avg > 0 ? 'positive' : (data.funding_rate_7d_avg < 0 ? 'negative' : ''),
+                    sub: '每 8 小时结算一次'
+                },
+                {
+                    label: '全市场 OI 价值', icon: '📦',
+                    value: data.total_oi_usd ? formatUsdBig(data.total_oi_usd) : '—',
+                    cls: '',
+                    sub: data.oi_change_24h_pct !== null && data.oi_change_24h_pct !== undefined
+                        ? '24h: ' + (data.oi_change_24h_pct >= 0 ? '+' : '') + data.oi_change_24h_pct.toFixed(2) + '%'
+                        : ''
+                },
+                {
+                    label: 'OI 24h 变化', icon: '📈',
+                    value: data.oi_change_24h_pct !== null && data.oi_change_24h_pct !== undefined
+                        ? (data.oi_change_24h_pct >= 0 ? '+' : '') + data.oi_change_24h_pct.toFixed(2) + '%'
+                        : '—',
+                    cls: data.oi_change_24h_pct > 0 ? 'positive' : (data.oi_change_24h_pct < 0 ? 'negative' : ''),
+                    sub: 'OI 增=多头进场'
+                },
+                {
+                    label: 'CVD 净流入', icon: '💹',
+                    value: data.cvd_24h_usd !== null && data.cvd_24h_usd !== undefined
+                        ? (data.cvd_24h_usd >= 0 ? '+' : '') + formatUsdBig(data.cvd_24h_usd)
+                        : '—',
+                    cls: data.cvd_24h_usd > 0 ? 'positive' : (data.cvd_24h_usd < 0 ? 'negative' : ''),
+                    sub: '主动买卖净额（近期）'
+                },
+                {
+                    label: 'CVD 占比', icon: '⚖️',
+                    value: data.cvd_ratio_24h !== null && data.cvd_ratio_24h !== undefined
+                        ? (data.cvd_ratio_24h >= 0 ? '+' : '') + (data.cvd_ratio_24h * 100).toFixed(2) + '%'
+                        : '—',
+                    cls: data.cvd_ratio_24h > 0 ? 'positive' : (data.cvd_ratio_24h < 0 ? 'negative' : ''),
+                    sub: 'CVD / 总成交额'
+                },
+            ];
+
+            let html = '<div class="dv-metrics">';
+            metrics.forEach(function (m) {
+                html += '<div class="dv-metric"><div class="dvm-label">' + m.icon + ' ' + escapeHtml(m.label) + '</div>';
+                html += '<div class="dvm-value ' + m.cls + '">' + escapeHtml(m.value) + '</div>';
+                if (m.sub) html += '<div class="dvm-sub">' + escapeHtml(m.sub) + '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+
+            // 交易所明细
+            const allEx = ['binance', 'okx', 'bybit', 'bitget', 'gate'];
+            const exLabels = { binance: 'Binance', okx: 'OKX', bybit: 'Bybit', bitget: 'Bitget', gate: 'Gate.io' };
+            html += '<div class="dv-exchanges"><div class="dve-title">覆盖交易所</div><div class="dv-ex-list">';
+            allEx.forEach(function (ex) {
+                const active = (data.available_exchanges || []).indexOf(ex) >= 0;
+                html += '<span class="dv-ex-tag ' + (active ? 'active' : '') + '">' + exLabels[ex] + '</span>';
+            });
+            html += '</div></div>';
+
+            // 缓存提示
+            if (data.cached && data.fetched_at) {
+                html += '<div style="font-size:10px;color:#4b5563;text-align:right;margin-top:8px;">' +
+                    '缓存于 ' + new Date(data.fetched_at).toLocaleString('zh-CN') + '（15分钟有效）</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        function formatUsdBig (v) {
+            if (v === null || v === undefined) return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            const abs = Math.abs(n);
+            const sign = n < 0 ? '-' : '';
+            if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+            return sign + '$' + abs.toFixed(2);
         }
 
         function renderSidebar (d) {

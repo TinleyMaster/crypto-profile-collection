@@ -637,6 +637,121 @@
             padding: 16px;
         }
 
+        /* 链上持仓趋势 */
+        .r-chain-trend {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-chain-trend .ct-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-chain-trend .ct-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-chain-trend .ct-tabs {
+            display: flex;
+            gap: 4px;
+        }
+
+        .r-chain-trend .ct-tab {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #6b7280;
+            background: transparent;
+            border: 1px solid #1e222a;
+        }
+
+        .r-chain-trend .ct-tab.active {
+            color: #e6e8eb;
+            background: #1f2937;
+            border-color: #374151;
+        }
+
+        .r-chain-trend .ct-chart-wrap {
+            margin-bottom: 12px;
+        }
+
+        .r-chain-trend .ct-chart-title {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .r-chain-trend .ct-chart-title .ct-val {
+            color: #e6e8eb;
+            font-weight: 600;
+        }
+
+        .r-chain-trend .ct-spark {
+            width: 100%;
+            height: 48px;
+        }
+
+        .r-chain-trend .ct-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 8px;
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .r-chain-trend .ct-metric {
+            text-align: center;
+        }
+
+        .r-chain-trend .ct-metric .ctm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .r-chain-trend .ct-metric .ctm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change {
+            font-size: 10px;
+            margin-top: 1px;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change.up {
+            color: #10b981;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change.down {
+            color: #ef4444;
+        }
+
+        .r-chain-trend .ct-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .r-chain-trend .ct-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -719,6 +834,15 @@
                 </div>
                 <div id="d-signals-container">
                     <div class="d-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-chain-trend" id="r-chain-trend" style="display:none">
+                <div class="ct-head">
+                    <h3>📊 链上持仓趋势</h3>
+                    <div class="ct-tabs" id="ct-chain-tabs"></div>
+                </div>
+                <div id="ct-charts-container">
+                    <div class="ct-empty">加载中...</div>
                 </div>
             </div>
             <div class="r-messages" id="r-messages"></div>
@@ -849,6 +973,7 @@
             renderMessages(d.messages || []);
             loadCompetitors();
             loadDivergence();
+            loadChainTrend();
         }
 
         function renderThesis (d) {
@@ -1156,6 +1281,182 @@
             } catch (e) {
                 container.innerHTML = '<div class="d-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
             }
+        }
+
+        // ── 链上持仓趋势 ──
+        let currentChain = null;
+
+        async function loadChainTrend () {
+            const box = document.getElementById('r-chain-trend');
+            const container = document.getElementById('ct-charts-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="ct-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/onchain/holder/' + ASSET_ID + '/trend?days=30');
+                const data = await safeJson(r, '/api/onchain/holder/trend');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="ct-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const chains = Object.keys(data.by_chain || {});
+                if (chains.length === 0 || data.data_points === 0) {
+                    container.innerHTML = '<div class="ct-empty">暂无链上持仓数据' +
+                        '<small>每日快照采集中，数据积累后自动显示趋势</small></div>';
+                    return;
+                }
+
+                // 链选择 tabs
+                const tabsEl = document.getElementById('ct-chain-tabs');
+                if (!currentChain || chains.indexOf(currentChain) < 0) {
+                    currentChain = chains[0];
+                }
+                tabsEl.innerHTML = chains.map(function (c) {
+                    const cls = c === currentChain ? 'ct-tab active' : 'ct-tab';
+                    return '<span class="' + cls + '" onclick="switchChain(\'' + escapeHtml(c) + '\')">' + escapeHtml(c.toUpperCase()) + '</span>';
+                }).join('');
+
+                renderChainTrendCharts(data);
+            } catch (e) {
+                container.innerHTML = '<div class="ct-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function switchChain (chain) {
+            currentChain = chain;
+            // 重新加载（简单起见重新拉数据）
+            loadChainTrend();
+        }
+
+        function renderChainTrendCharts (data) {
+            const container = document.getElementById('ct-charts-container');
+            const points = (data.by_chain && data.by_chain[currentChain]) || [];
+            const summary = (data.trend_summary && data.trend_summary[currentChain]) || {};
+
+            if (points.length < 2) {
+                container.innerHTML = '<div class="ct-empty">数据点不足（' + points.length + ' 个），趋势图需至少 2 个数据点' +
+                    '<small>每日快照采集中，通常 3-7 天后可查看趋势</small></div>';
+                return;
+            }
+
+            // 要展示的指标
+            const metrics = [
+                { key: 'top10_concentration', label: 'Top10 集中度', unit: '%', color: '#3b82f6' },
+                { key: 'total_holders', label: '持有者数', unit: '', color: '#10b981' },
+                { key: 'exchange_wallet_pct', label: '交易所钱包占比', unit: '%', color: '#f59e0b' },
+            ];
+
+            let html = '';
+            metrics.forEach(function (m) {
+                const values = points.map(function (p) { return p[m.key]; });
+                const validValues = values.filter(function (v) { return v !== null && v !== undefined; });
+                if (validValues.length < 2) return;
+
+                const lastVal = values[values.length - 1];
+                const firstVal = validValues[0];
+                let changePct = null;
+                if (firstVal !== null && firstVal !== undefined && firstVal !== 0 && lastVal !== null) {
+                    changePct = ((lastVal - firstVal) / Math.abs(firstVal) * 100);
+                }
+
+                html += '<div class="ct-chart-wrap">';
+                html += '<div class="ct-chart-title">';
+                html += '<span>' + escapeHtml(m.label) + '</span>';
+                html += '<span class="ct-val">' + fmtMetricValue(lastVal, m.unit) + '</span>';
+                html += '</div>';
+                html += buildSparkline(points, m.key, m.color);
+                html += '</div>';
+            });
+
+            // 底部指标汇总
+            html += '<div class="ct-metrics">';
+            const metricItems = [
+                { l: '数据点', v: points.length, u: '个' },
+                {
+                    l: '时间跨度', v: summary.first_date && summary.last_date
+                        ? (summary.first_date.slice(5) + ' ~ ' + summary.last_date.slice(5)) : '—', u: ''
+                },
+                {
+                    l: 'Top10 变化', v: summary.top10_change_pct !== null && summary.top10_change_pct !== undefined
+                        ? ((summary.top10_change_pct >= 0 ? '+' : '') + summary.top10_change_pct.toFixed(2) + '%') : '—',
+                    cls: (summary.top10_change_pct || 0) > 0 ? 'up' : ((summary.top10_change_pct || 0) < 0 ? 'down' : '')
+                },
+                {
+                    l: '持有者变化', v: summary.holders_change_pct !== null && summary.holders_change_pct !== undefined
+                        ? ((summary.holders_change_pct >= 0 ? '+' : '') + summary.holders_change_pct.toFixed(2) + '%') : '—',
+                    cls: (summary.holders_change_pct || 0) > 0 ? 'up' : ((summary.holders_change_pct || 0) < 0 ? 'down' : '')
+                },
+            ];
+            metricItems.forEach(function (m) {
+                const chgCls = m.cls ? 'ctm-change ' + m.cls : '';
+                html += '<div class="ct-metric"><div class="ctm-label">' + escapeHtml(m.l) + '</div>';
+                html += '<div class="ctm-value">' + escapeHtml(String(m.v)) + '</div></div>';
+            });
+            html += '</div>';
+
+            container.innerHTML = html;
+        }
+
+        function fmtMetricValue (v, unit) {
+            if (v === null || v === undefined) return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            if (unit === '%') return n.toFixed(2) + '%';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+
+        function buildSparkline (points, valueKey, color) {
+            const w = 400, h = 48, pad = 2;
+            const values = points.map(function (p) { return p[valueKey]; });
+            const valid = values.filter(function (v) { return v !== null && v !== undefined; });
+            if (valid.length < 2) return '';
+
+            const min = Math.min.apply(null, valid);
+            const max = Math.max.apply(null, valid);
+            const range = max - min || 1;
+
+            // 生成路径点（跳过 null 值，断开线）
+            let pathD = '';
+            let started = false;
+            const stepX = (w - pad * 2) / (points.length - 1 || 1);
+            points.forEach(function (p, i) {
+                const v = p[valueKey];
+                if (v === null || v === undefined) {
+                    started = false;
+                    return;
+                }
+                const x = pad + i * stepX;
+                const y = pad + (h - pad * 2) * (1 - (v - min) / range);
+                if (!started) {
+                    pathD += 'M' + x.toFixed(1) + ',' + y.toFixed(1);
+                    started = true;
+                } else {
+                    pathD += ' L' + x.toFixed(1) + ',' + y.toFixed(1);
+                }
+            });
+
+            // 面积填充（从最后一点到底部）
+            const lastIdx = points.length - 1;
+            const firstValidIdx = values.findIndex(function (v) { return v !== null && v !== undefined; });
+            let areaD = '';
+            if (firstValidIdx >= 0) {
+                const fx = pad + firstValidIdx * stepX;
+                const fy = pad + (h - pad * 2) * (1 - (valid[0] - min) / range);
+                const lx = pad + lastIdx * stepX;
+                const ly = pad + (h - pad * 2) * (1 - (valid[valid.length - 1] - min) / range);
+                areaD = 'M' + fx.toFixed(1) + ',' + (h - pad).toFixed(1) +
+                    ' L' + fx.toFixed(1) + ',' + fy.toFixed(1) +
+                    ' ' + pathD.replace(/^M/, 'L') +
+                    ' L' + lx.toFixed(1) + ',' + (h - pad).toFixed(1) + ' Z';
+            }
+
+            return '<svg class="ct-spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+                '<path d="' + areaD + '" fill="' + color + '" fill-opacity="0.1" />' +
+                '<path d="' + pathD + '" fill="none" stroke="' + color + '" stroke-width="1.5" />' +
+                '</svg>';
         }
 
         function renderSidebar (d) {

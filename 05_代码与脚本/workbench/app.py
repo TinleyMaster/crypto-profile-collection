@@ -1199,6 +1199,17 @@ def api_onchain_holder(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/onchain/holder/<int:asset_id>/trend")
+def api_onchain_holder_trend(asset_id: int):
+    """链上持仓趋势（时间序列）。"""
+    try:
+        days = request.args.get("days", default=30, type=int)
+        data = _get_db_stats().get_onchain_holder_trend(asset_id, days)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/onchain/transfers")
 def api_onchain_transfers():
     """获取大额转账记录。"""

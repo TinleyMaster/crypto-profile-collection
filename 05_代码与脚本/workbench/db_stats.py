@@ -2950,6 +2950,90 @@ def get_onchain_holder_snapshot(asset_id: int) -> dict:
     }
 
 
+def get_onchain_holder_trend(asset_id: int, days: int = 30) -> dict:
+    """链上持仓趋势：返回指定天数内的每日快照时间序列，用于趋势图。
+
+    每条数据点包含：日期、Top10/50/100 集中度、持有者数、鲸鱼余额变化、交易所钱包占比。
+    按链分组，每条链独立时间序列。
+    """
+    days = max(7, min(90, days))
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT hs.*, a.canonical_symbol, a.canonical_name
+                FROM biz.onchain_holder_snapshot hs
+                INNER JOIN core.asset a ON a.asset_id = hs.asset_id
+                WHERE hs.asset_id = %s
+                  AND hs.snapshot_date >= CURRENT_DATE - INTERVAL '%s days'
+                ORDER BY hs.chain, hs.snapshot_date ASC
+            """, (asset_id, days))
+            rows = [dict(r) for r in cur.fetchall()]
+
+            if not rows:
+                return {
+                    "ok": True,
+                    "asset_id": asset_id,
+                    "symbol": "",
+                    "name": "",
+                    "days": days,
+                    "data_points": 0,
+                    "by_chain": {},
+                    "has_enough_data": False,
+                }
+
+            # 按链分组
+            by_chain = {}
+            for r in rows:
+                chain = r["chain"]
+                if chain not in by_chain:
+                    by_chain[chain] = []
+                by_chain[chain].append({
+                    "date": str(r["snapshot_date"]),
+                    "top10_concentration": float(r["top10_concentration"]) if r["top10_concentration"] else None,
+                    "top50_concentration": float(r["top50_concentration"]) if r["top50_concentration"] else None,
+                    "top100_concentration": float(r["top100_concentration"]) if r["top100_concentration"] else None,
+                    "total_holders": r["total_holders"],
+                    "whale_balance_change_7d_pct": float(r["whale_balance_change_7d_pct"]) if r["whale_balance_change_7d_pct"] else None,
+                    "exchange_wallet_pct": float(r["exchange_wallet_pct"]) if r["exchange_wallet_pct"] else None,
+                })
+
+            # 计算每条链的变化趋势（首末对比）
+            trend_summary = {}
+            for chain, points in by_chain.items():
+                if len(points) < 2:
+                    trend_summary[chain] = {"points": len(points), "trend": "insufficient"}
+                    continue
+                first = points[0]
+                last = points[-1]
+                def _chg(a, b):
+                    if a is None or b is None or a == 0:
+                        return None
+                    return round((b - a) / abs(a) * 100, 2)
+                trend_summary[chain] = {
+                    "points": len(points),
+                    "first_date": first["date"],
+                    "last_date": last["date"],
+                    "top10_change_pct": _chg(first["top10_concentration"], last["top10_concentration"]),
+                    "holders_change_pct": _chg(first["total_holders"], last["total_holders"]),
+                    "trend": "available",
+                }
+
+            total_points = len(rows)
+            has_enough = total_points >= 7  # 至少 7 个数据点才算有意义的趋势
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "symbol": rows[0]["canonical_symbol"] if rows else "",
+        "name": rows[0]["canonical_name"] if rows else "",
+        "days": days,
+        "data_points": total_points,
+        "has_enough_data": has_enough,
+        "by_chain": by_chain,
+        "trend_summary": trend_summary,
+    }
+
+
 def get_onchain_transfers(
     asset_id: int | None = None,
     is_to_exchange: bool | None = None,

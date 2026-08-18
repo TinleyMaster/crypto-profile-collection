@@ -882,6 +882,71 @@
             padding: 20px;
         }
 
+        /* CEX Netflow */
+        .dv-cex {
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+            margin-top: 4px;
+        }
+
+        .dv-cex .dvc-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .dv-cex .dvc-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .dv-cex .dvc-metric {
+            background: #111318;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        .dv-cex .dvc-metric .dvcm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value.positive {
+            color: #10b981;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value.negative {
+            color: #ef4444;
+        }
+
+        .dv-cex .dvc-empty {
+            font-size: 11px;
+            color: #6b7280;
+            text-align: center;
+            padding: 12px;
+            background: #111318;
+            border-radius: 6px;
+        }
+
+        .dv-cex .dvc-empty small {
+            display: block;
+            margin-top: 2px;
+            font-size: 10px;
+            color: #4b5563;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -1618,10 +1683,14 @@
                 if (!data.available_exchanges || data.available_exchanges.length === 0) {
                     container.innerHTML = '<div class="dv-empty">未找到该代币的永续合约数据' +
                         '<small>仅主流币有衍生品数据，Meme 小币可能无合约</small></div>';
+                    // 仍然加载 CEX 数据（链上数据和衍生品无关）
+                    loadCexNetflow();
                     return;
                 }
 
                 renderDerivatives(data);
+                // 并行加载 CEX 净流数据
+                loadCexNetflow();
             } catch (e) {
                 container.innerHTML = '<div class="dv-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
             }
@@ -1720,6 +1789,82 @@
             if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
             if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
             return sign + '$' + abs.toFixed(2);
+        }
+
+        // ── CEX 净流入 ──
+        async function loadCexNetflow () {
+            // 确保衍生品卡片已显示
+            const box = document.getElementById('r-derivatives');
+            if (box.style.display === 'none') box.style.display = 'block';
+
+            // 创建或获取 CEX 容器
+            let cexBox = document.getElementById('dv-cex-container');
+            if (!cexBox) {
+                cexBox = document.createElement('div');
+                cexBox.id = 'dv-cex-container';
+                cexBox.className = 'dv-cex';
+                const dvContainer = document.getElementById('dv-container');
+                if (dvContainer) {
+                    dvContainer.appendChild(cexBox);
+                } else {
+                    return;
+                }
+            }
+            cexBox.innerHTML = '<div style="font-size:11px;color:#6b7280;text-align:center;padding:8px;">链上资金流加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/cex-netflow?hours=24');
+                const data = await safeJson(r, '/api/research/cex-netflow');
+                if (!data.ok) {
+                    cexBox.innerHTML = '<div class="dvc-empty">链上资金流加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                if (!data.has_data) {
+                    cexBox.innerHTML = '<div class="dvc-title">🔗 链上 CEX 资金流</div>' +
+                        '<div class="dvc-empty">' + escapeHtml(data.message || '暂无数据') +
+                        '<small>主流币链上监控采集中，Meme 小币暂不纳入</small></div>';
+                    return;
+                }
+
+                renderCexNetflow(data, cexBox);
+            } catch (e) {
+                cexBox.innerHTML = '<div class="dvc-empty">链上资金流加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderCexNetflow (data, container) {
+            const n24 = data.netflow_24h_usd;
+            const n7d = data.netflow_7d_usd;
+            const cls24 = n24 > 0 ? 'positive' : (n24 < 0 ? 'negative' : '');
+            const cls7d = n7d > 0 ? 'positive' : (n7d < 0 ? 'negative' : '');
+
+            let html = '<div class="dvc-title">🔗 链上 CEX 资金流</div>';
+            html += '<div class="dvc-metrics">';
+            html += '<div class="dvc-metric"><div class="dvcm-label">24h 净流入</div>';
+            html += '<div class="dvcm-value ' + cls24 + '">' + (n24 >= 0 ? '+' : '') + formatUsdBig(n24) + '</div></div>';
+            html += '<div class="dvc-metric"><div class="dvcm-label">7d 净流入</div>';
+            html += '<div class="dvcm-value ' + cls7d + '">' + (n7d >= 0 ? '+' : '') + formatUsdBig(n7d) + '</div></div>';
+            html += '<div class="dvc-metric"><div class="dvcm-label">24h 转入/转出</div>';
+            html += '<div class="dvcm-value" style="font-size:11px;font-weight:500;">' +
+                formatUsdBig(data.inflow_24h_usd) + ' / ' + formatUsdBig(data.outflow_24h_usd) + '</div></div>';
+            html += '</div>';
+
+            // 按交易所分布
+            if (data.by_exchange && data.by_exchange.length > 0) {
+                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">按交易所分布</div>';
+                data.by_exchange.slice(0, 5).forEach(function (ex) {
+                    const net = ex.netflow_usd;
+                    const cls = net > 0 ? 'positive' : (net < 0 ? 'negative' : '');
+                    const sign = net >= 0 ? '+' : '';
+                    html += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">';
+                    html += '<span style="color:#9ca3af;">' + escapeHtml(ex.exchange || '未知') + '</span>';
+                    html += '<span class="' + cls + '">' + sign + formatUsdBig(net) + '</span>';
+                    html += '</div>';
+                });
+            }
+
+            container.innerHTML = html;
         }
 
         function renderSidebar (d) {

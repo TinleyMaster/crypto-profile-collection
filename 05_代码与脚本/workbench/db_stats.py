@@ -2330,6 +2330,226 @@ def _thesis_row_to_dict(row) -> dict:
     }
 
 
+def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
+    """链上 CEX 净流入/流出计算。
+
+    CEX Netflow = 从交易所转出金额 - 转入交易所金额
+      - 正值 = 净流入（从交易所提币到链上，潜在看涨/惜售）
+      - 负值 = 净流出（充值到交易所，潜在抛压）
+
+    数据来源：biz.onchain_transfer_log（链上大额转账监控）
+    标签来源：biz.onchain_exchange_wallet（交易所钱包地址库）
+
+    返回：
+      - 24h / 7d 两个时间窗口的净流入金额
+      - 按交易所分组明细
+      - 大额转账 Top 列表
+    """
+    hours = max(1, min(720, hours))
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确保表存在
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
+                    log_id SERIAL PRIMARY KEY,
+                    asset_id INTEGER,
+                    chain TEXT NOT NULL,
+                    contract_address TEXT NOT NULL,
+                    tx_hash TEXT NOT NULL,
+                    from_address TEXT NOT NULL,
+                    to_address TEXT NOT NULL,
+                    value NUMERIC NOT NULL,
+                    value_usd NUMERIC(15,2),
+                    from_label TEXT,
+                    to_label TEXT,
+                    from_exchange TEXT,
+                    to_exchange TEXT,
+                    block_number INTEGER,
+                    block_timestamp TIMESTAMPTZ,
+                    is_to_exchange BOOLEAN DEFAULT FALSE,
+                    alert_sent_at TIMESTAMPTZ,
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_onchain_tx UNIQUE (chain, tx_hash, contract_address, from_address, to_address)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.onchain_exchange_wallet (
+                    wallet_id SERIAL PRIMARY KEY,
+                    address TEXT NOT NULL,
+                    exchange_name TEXT NOT NULL,
+                    chain TEXT NOT NULL,
+                    label TEXT DEFAULT 'exchange',
+                    confidence TEXT DEFAULT 'high',
+                    source TEXT DEFAULT 'seed',
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_exchange_wallet UNIQUE (address, chain)
+                )
+            """)
+
+            # 先确保种子地址已导入（幂等）
+            _ensure_exchange_wallet_seeds(cur)
+
+            # 统计总转账数（判断是否有数据）
+            cur.execute("""
+                SELECT COUNT(*) AS cnt FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+            """, (asset_id,))
+            total_transfers = cur.fetchone()["cnt"]
+
+            if total_transfers == 0:
+                return {
+                    "ok": True,
+                    "asset_id": asset_id,
+                    "has_data": False,
+                    "message": "暂无链上转账数据，链上监控采集中",
+                    "netflow_24h_usd": None,
+                    "netflow_7d_usd": None,
+                    "inflow_24h_usd": None,
+                    "outflow_24h_usd": None,
+                    "by_exchange": [],
+                    "top_transfers": [],
+                }
+
+            # 24h 净流入
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow_from_exchange,
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
+            """, (asset_id,))
+            r24 = cur.fetchone()
+            outflow_24h = float(r24["outflow_from_exchange"] or 0)
+            inflow_24h = float(r24["inflow_to_exchange"] or 0)
+            netflow_24h = outflow_24h - inflow_24h  # 正=从交易所出来=净流入链上
+
+            # 7d 净流入
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow_from_exchange,
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND block_timestamp >= NOW() - INTERVAL '7 days'
+            """, (asset_id,))
+            r7 = cur.fetchone()
+            outflow_7d = float(r7["outflow_from_exchange"] or 0)
+            inflow_7d = float(r7["inflow_to_exchange"] or 0)
+            netflow_7d = outflow_7d - inflow_7d
+
+            # 按交易所分组（24h）
+            cur.execute("""
+                SELECT
+                    COALESCE(from_exchange, to_exchange) AS exchange_name,
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
+                  AND (from_label = 'exchange' OR to_label = 'exchange')
+                GROUP BY COALESCE(from_exchange, to_exchange)
+                ORDER BY GREATEST(outflow, inflow) DESC
+                LIMIT 10
+            """, (asset_id,))
+            by_exchange = [
+                {
+                    "exchange": r["exchange_name"],
+                    "outflow_usd": float(r["outflow"]),
+                    "inflow_usd": float(r["inflow"]),
+                    "netflow_usd": float(r["outflow"]) - float(r["inflow"]),
+                }
+                for r in cur.fetchall()
+            ]
+
+            # Top 大额转账（24h）
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, from_label, to_label,
+                       from_exchange, to_exchange, value, value_usd, block_timestamp
+                FROM biz.onchain_transfer_log
+                WHERE asset_id = %s
+                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
+                  AND (from_label = 'exchange' OR to_label = 'exchange')
+                ORDER BY value_usd DESC NULLS LAST
+                LIMIT 10
+            """, (asset_id,))
+            top_transfers = [
+                {
+                    "tx_hash": r["tx_hash"],
+                    "from": r["from_address"],
+                    "to": r["to_address"],
+                    "from_label": r["from_label"],
+                    "to_label": r["to_label"],
+                    "from_exchange": r["from_exchange"],
+                    "to_exchange": r["to_exchange"],
+                    "value": float(r["value"]),
+                    "value_usd": float(r["value_usd"]) if r["value_usd"] else None,
+                    "timestamp": r["block_timestamp"].isoformat() if r["block_timestamp"] else None,
+                    "direction": "to_exchange" if r["to_label"] == "exchange" else "from_exchange",
+                }
+                for r in cur.fetchall()
+            ]
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "has_data": True,
+        "netflow_24h_usd": round(netflow_24h, 2),
+        "netflow_7d_usd": round(netflow_7d, 2),
+        "inflow_24h_usd": round(inflow_24h, 2),
+        "outflow_24h_usd": round(outflow_24h, 2),
+        "inflow_7d_usd": round(inflow_7d, 2),
+        "outflow_7d_usd": round(outflow_7d, 2),
+        "by_exchange": by_exchange,
+        "top_transfers": top_transfers,
+        "total_transfers": total_transfers,
+    }
+
+
+def _ensure_exchange_wallet_seeds(cur) -> None:
+    """确保交易所钱包种子地址已导入（幂等操作）。
+
+    只在表为空时导入，避免重复执行开销。
+    """
+    cur.execute("SELECT COUNT(*) AS cnt FROM biz.onchain_exchange_wallet")
+    if cur.fetchone()["cnt"] > 0:
+        return  # 已有数据，跳过
+
+    # 插入种子地址（高可信度，来自 Etherscan/BSCScan 公开标签）
+    seed_addresses = [
+        # Binance - ETH
+        ('0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0xf977814e90da44bfa03b6295a0616a897441acec', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0x28C6c06298d514Db089934071355E5743bf21d60', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0xDFd5293D8e347dFe59E90eFd55b2956a1343963d', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0x5a52e96bacdabb82fd05763e25335261b270efcb', 'Binance', 'eth', 'high', 'etherscan-label'),
+        ('0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503', 'Binance', 'eth', 'high', 'etherscan-label'),
+        # Binance - BSC
+        ('0x8894E0a0c962CB723c1976a4421c95949bE2D4E3', 'Binance', 'bsc', 'high', 'bscscan-label'),
+        ('0x0D0707963952f2fBA59dD06f2b425ace40b492Fe', 'Binance', 'bsc', 'high', 'bscscan-label'),
+        ('0x18b2a687610328590bc8f2e5fedde3b582a49cda', 'Binance', 'bsc', 'medium', 'bscscan-label'),
+        # Coinbase - ETH
+        ('0x71660c4005BA85476C0FE5d080f20C20e7b61C94', 'Coinbase', 'eth', 'high', 'etherscan-label'),
+        ('0x503828976D22510aA0d5d6b773756A3e02c1b97f', 'Coinbase', 'eth', 'high', 'etherscan-label'),
+        ('0xA090e606E30bD747d4E6245a1517EbE430F0057e', 'Coinbase', 'eth', 'high', 'etherscan-label'),
+        # OKX - ETH
+        ('0x6CC14824Ea2918f5De5C2f75A9Da968ad4BD6344', 'OKX', 'eth', 'high', 'etherscan-label'),
+        ('0x9696f59E4d72E237d85aB7F66B9eB7d5bB7eB7d5', 'OKX', 'eth', 'high', 'etherscan-label'),
+        # Huobi - ETH
+        ('0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B', 'Huobi', 'eth', 'high', 'etherscan-label'),
+    ]
+
+    for addr, name, chain, conf, src in seed_addresses:
+        cur.execute("""
+            INSERT INTO biz.onchain_exchange_wallet
+                (address, exchange_name, chain, label, confidence, source)
+            VALUES (%s, %s, %s, 'exchange', %s, %s)
+            ON CONFLICT (address, chain) DO NOTHING
+        """, (addr, name, chain, conf, src))
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 

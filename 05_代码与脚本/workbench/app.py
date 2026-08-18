@@ -1164,6 +1164,17 @@ def api_research_derivatives(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/cex-netflow")
+def api_research_cex_netflow(asset_id: int):
+    """链上 CEX 净流入/流出（基于交易所钱包标签 + 大额转账日志）。"""
+    try:
+        hours = request.args.get("hours", default=24, type=int)
+        result = _get_db_stats().get_cex_netflow(asset_id, hours)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

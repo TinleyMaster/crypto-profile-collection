@@ -542,6 +542,147 @@
         }
 
         /* 资料面板 */
+        /* ── 文档文件项 ── */
+        .doc-asset-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            background: #1a1d24;
+            border: 1px solid #2a2f3a;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .doc-asset-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .doc-type-tag {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .doc-asset-name {
+            font-size: 13px;
+            color: #e4e7ed;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+        }
+
+        .doc-asset-size {
+            font-size: 12px;
+            color: #8a92a0;
+            flex-shrink: 0;
+        }
+
+        .doc-asset-actions {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .doc-link {
+            font-size: 12px;
+            color: #6c8cff;
+            text-decoration: none;
+            padding: 4px 10px;
+            border: 1px solid #6c8cff44;
+            border-radius: 4px;
+            background: #6c8cff11;
+        }
+
+        .doc-link:hover {
+            background: #6c8cff22;
+        }
+
+        .doc-link.disabled {
+            color: #555;
+            border-color: #333;
+            background: #222;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .view-pdf-btn {
+            font-size: 12px;
+            padding: 4px 10px;
+            border: 1px solid #7c3aed66;
+            border-radius: 4px;
+            background: #7c3aed22;
+            color: #a78bfa;
+            cursor: pointer;
+        }
+
+        .view-pdf-btn:hover {
+            background: #7c3aed33;
+        }
+
+        /* ── PDF 查看器模态框 ── */
+        .pdf-viewer-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .pdf-viewer-modal.visible {
+            display: flex;
+        }
+
+        .pdf-viewer-container {
+            width: 90%;
+            height: 90%;
+            background: #fff;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .pdf-viewer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: #1a1d24;
+            color: #e4e7ed;
+            border-bottom: 1px solid #2a2f3a;
+        }
+
+        .pdf-viewer-close {
+            background: none;
+            border: none;
+            color: #8a92a0;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
+
+        .pdf-viewer-close:hover {
+            color: #fff;
+        }
+
+        .pdf-viewer-iframe {
+            flex: 1;
+            width: 100%;
+            border: none;
+        }
+
         .materials-panel {
             display: none;
             margin-bottom: 28px;
@@ -1294,6 +1435,94 @@
             line-height: 16px;
         }
 
+        .sector-tag {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 500;
+            border-radius: 4px;
+            padding: 2px 8px;
+            line-height: 16px;
+            white-space: nowrap;
+        }
+
+        .sector-l1 {
+            color: #f59e0b;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .sector-l2 {
+            color: #8b5cf6;
+            background: rgba(139, 92, 246, 0.12);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+
+        .sector-defi {
+            color: #06b6d4;
+            background: rgba(6, 182, 212, 0.12);
+            border: 1px solid rgba(6, 182, 212, 0.3);
+        }
+
+        .sector-meme {
+            color: #ec4899;
+            background: rgba(236, 72, 153, 0.12);
+            border: 1px solid rgba(236, 72, 153, 0.3);
+        }
+
+        .sector-gamefi {
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .sector-ai {
+            color: #3b82f6;
+            background: rgba(59, 130, 246, 0.12);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .sector-rwa {
+            color: #f97316;
+            background: rgba(249, 115, 22, 0.12);
+            border: 1px solid rgba(249, 115, 22, 0.3);
+        }
+
+        .sector-stablecoin {
+            color: #22c55e;
+            background: rgba(34, 197, 94, 0.12);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .sector-cex_token {
+            color: #eab308;
+            background: rgba(234, 179, 8, 0.12);
+            border: 1px solid rgba(234, 179, 8, 0.3);
+        }
+
+        .sector-derivatives {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .sector-depin {
+            color: #14b8a6;
+            background: rgba(20, 184, 166, 0.12);
+            border: 1px solid rgba(20, 184, 166, 0.3);
+        }
+
+        .sector-infra {
+            color: #64748b;
+            background: rgba(100, 116, 139, 0.12);
+            border: 1px solid rgba(100, 116, 139, 0.3);
+        }
+
+        .sector-other {
+            color: #6b7280;
+            background: rgba(107, 114, 128, 0.10);
+            border: 1px solid rgba(107, 114, 128, 0.25);
+        }
+
         .contract-addr.copied {
             color: #4ade80;
         }
@@ -1952,6 +2181,114 @@
         .tkm-source a:hover {
             text-decoration: underline;
         }
+
+        /* ── 白皮书摘要卡片 ── */
+        .wp-summary-card {
+            background: #1a1d24;
+            border: 1px solid #2a2f3a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+        }
+
+        .wp-summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #2a2f3a;
+        }
+
+        .wp-one-liner {
+            font-size: 14px;
+            font-weight: 600;
+            color: #a78bfa;
+        }
+
+        .wp-confidence {
+            font-size: 11px;
+            color: #8a92a0;
+            background: #2a2f3a;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .wp-section {
+            margin-bottom: 10px;
+        }
+
+        .wp-section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #6c8cff;
+            margin-bottom: 4px;
+        }
+
+        .wp-section-content {
+            font-size: 13px;
+            color: #c8ccd4;
+            line-height: 1.6;
+        }
+
+        .wp-two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .wp-col {
+            background: #1e222a;
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+
+        .wp-col-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .wp-col-content {
+            font-size: 12px;
+            color: #c8ccd4;
+            line-height: 1.5;
+        }
+
+        .wp-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .wp-tag {
+            font-size: 11px;
+            padding: 3px 10px;
+            background: #7c3aed22;
+            color: #a78bfa;
+            border: 1px solid #7c3aed44;
+            border-radius: 12px;
+        }
+
+        .wp-list {
+            margin: 0;
+            padding-left: 18px;
+            font-size: 12px;
+            color: #c8ccd4;
+            line-height: 1.6;
+        }
+
+        .wp-list li {
+            margin-bottom: 2px;
+        }
+
+        .wp-actions {
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid #2a2f3a;
+            text-align: right;
+        }
     </style>
 </head>
 
@@ -2008,6 +2345,19 @@
                             提取代币经济学
                         </button>
                         <div id="tkm-detail" style="display:none"></div>
+                    </div>
+
+                    <!-- 白皮书摘要 -->
+                    <div class="research-card" id="rc-whitepaper">
+                        <h4>白皮书摘要</h4>
+                        <div class="status-row">
+                            <span class="status-indicator" id="wp-indicator"></span>
+                            <span class="status-text" id="wp-status">检查中...</span>
+                        </div>
+                        <button class="run-btn" id="wp-run-btn" onclick="runWhitepaperExtract()">
+                            提取白皮书摘要
+                        </button>
+                        <div id="wp-detail" style="display:none"></div>
                     </div>
 
                     <!-- 解锁测算 -->
@@ -2347,6 +2697,30 @@
             return div.innerHTML;
         }
 
+        function formatFileSize (bytes) {
+            if (!bytes || bytes <= 0) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // ── PDF 查看器 ──
+        function openPdfViewer (url, title) {
+            const modal = document.getElementById('pdf-viewer-modal');
+            const iframe = document.getElementById('pdf-viewer-iframe');
+            const titleEl = document.getElementById('pdf-viewer-title');
+            titleEl.textContent = title || 'PDF 预览';
+            iframe.src = url;
+            modal.classList.add('visible');
+        }
+
+        function closePdfViewer () {
+            const modal = document.getElementById('pdf-viewer-modal');
+            const iframe = document.getElementById('pdf-viewer-iframe');
+            modal.classList.remove('visible');
+            iframe.src = '';
+        }
+
         function shortAddr (addr) {
             if (!addr) return '';
             const s = String(addr);
@@ -2612,6 +2986,50 @@
             // 文档入口（独立容器，便于分页刷新）
             html += '<div id="mat-doc-entries"></div>';
 
+            // 文档文件（PDF 等）
+            const docAssets = d.doc_assets || [];
+            if (docAssets.length > 0) {
+                html += '<div class="material-group"><h3>📄 文档文件 (doc_asset)</h3>';
+                html += '<div class="material-list">';
+                for (const doc of docAssets) {
+                    const typeLabel = {
+                        whitepaper: '白皮书',
+                        tokenomics: '代币经济学',
+                        audit: '审计报告',
+                        docs: '技术文档',
+                        other: '其他'
+                    }[doc.doc_type] || doc.doc_type;
+                    const sizeText = doc.file_size_bytes
+                        ? formatFileSize(doc.file_size_bytes)
+                        : '';
+                    const hasLocal = !!doc.local_url;
+                    const viewBtn = hasLocal && doc.mime_type === 'application/pdf'
+                        ? `<button class="view-pdf-btn" onclick="openPdfViewer('${doc.local_url}', '${escapeHtml(doc.file_name || 'whitepaper.pdf')}')">📖 在线预览</button>`
+                        : '';
+                    const downloadBtn = hasLocal
+                        ? `<a class="doc-link" href="${doc.local_url}" download="${escapeHtml(doc.file_name || 'file.pdf')}" target="_blank">⬇ 下载</a>`
+                        : `<a class="doc-link disabled" title="暂无本地文件">⬇ 下载</a>`;
+                    const sourceLink = doc.source_url
+                        ? `<a class="doc-link" href="${doc.source_url}" target="_blank" rel="noopener">🔗 源地址</a>`
+                        : '';
+                    html += `
+                        <div class="doc-asset-item">
+                            <div class="doc-asset-info">
+                                <span class="doc-type-tag tag-${doc.doc_type}">${typeLabel}</span>
+                                <span class="doc-asset-name" title="${escapeHtml(doc.file_name || '')}">${escapeHtml(doc.file_name || '未命名')}</span>
+                                ${sizeText ? `<span class="doc-asset-size">${sizeText}</span>` : ''}
+                            </div>
+                            <div class="doc-asset-actions">
+                                ${viewBtn}
+                                ${downloadBtn}
+                                ${sourceLink}
+                            </div>
+                        </div>
+                    `;
+                }
+                html += '</div></div>';
+            }
+
             document.getElementById('mat-content').innerHTML = html;
             currentDocEntries = d.doc_source_entries || [];
             currentDocShowAll = false;
@@ -2640,6 +3058,19 @@
                 }
             } catch (e) {
                 setTokenomicsMissing();
+            }
+
+            // 加载白皮书摘要
+            try {
+                const wpRes = await fetch(`/api/assets/${assetId}/whitepaper-summary`);
+                const wpData = await wpRes.json();
+                if (wpData.ok && wpData.data && wpData.data.length > 0) {
+                    renderWhitepaperSummary(wpData.data);
+                } else {
+                    setWhitepaperMissing();
+                }
+            } catch (e) {
+                setWhitepaperMissing();
             }
 
             // 加载解锁数据缓存
@@ -2688,6 +3119,131 @@
             document.getElementById('tkm-status').className = 'status-text missing';
             document.getElementById('tkm-run-btn').disabled = false;
             document.getElementById('tkm-detail').style.display = 'none';
+        }
+
+        // ── 白皮书摘要 ──
+        function setWhitepaperMissing () {
+            document.getElementById('wp-indicator').className = 'status-indicator missing';
+            document.getElementById('wp-status').textContent = '暂无摘要';
+            document.getElementById('wp-status').className = 'status-text missing';
+            document.getElementById('wp-run-btn').disabled = false;
+            document.getElementById('wp-detail').style.display = 'none';
+        }
+
+        function renderWhitepaperSummary (summaries) {
+            const indicator = document.getElementById('wp-indicator');
+            const statusEl = document.getElementById('wp-status');
+            const detailEl = document.getElementById('wp-detail');
+            const runBtn = document.getElementById('wp-run-btn');
+
+            indicator.className = 'status-indicator ok';
+            statusEl.textContent = `已提取 ${summaries.length} 份`;
+            statusEl.className = 'status-text';
+            runBtn.disabled = false;
+            runBtn.textContent = '重新提取';
+
+            let html = '';
+            for (const s of summaries) {
+                const conf = s.confidence != null ? (s.confidence * 100).toFixed(0) + '%' : 'N/A';
+                const viewBtn = s.local_url
+                    ? `<button class="view-pdf-btn" onclick="openPdfViewer('${s.local_url}', '${escapeHtml(s.file_name || 'whitepaper.pdf')}')">📖 查看PDF</button>`
+                    : '';
+
+                html += `<div class="wp-summary-card">`;
+                html += `<div class="wp-summary-header">`;
+                html += `<span class="wp-one-liner">${escapeHtml(s.one_liner || '')}</span>`;
+                html += `<span class="wp-confidence">置信度: ${conf}</span>`;
+                html += `</div>`;
+
+                if (s.summary_short) {
+                    html += `<div class="wp-section"><div class="wp-section-title">简介</div><div class="wp-section-content">${escapeHtml(s.summary_short)}</div></div>`;
+                }
+
+                // 问题与方案
+                if (s.problem_statement || s.solution) {
+                    html += `<div class="wp-two-col">`;
+                    if (s.problem_statement) {
+                        html += `<div class="wp-col"><div class="wp-col-title">🔴 问题</div><div class="wp-col-content">${escapeHtml(s.problem_statement)}</div></div>`;
+                    }
+                    if (s.solution) {
+                        html += `<div class="wp-col"><div class="wp-col-title">🟢 方案</div><div class="wp-col-content">${escapeHtml(s.solution)}</div></div>`;
+                    }
+                    html += `</div>`;
+                }
+
+                if (s.core_mechanism) {
+                    html += `<div class="wp-section"><div class="wp-section-title">⚙️ 核心机制</div><div class="wp-section-content">${escapeHtml(s.core_mechanism)}</div></div>`;
+                }
+
+                if (s.key_innovations && s.key_innovations.length > 0) {
+                    html += `<div class="wp-section"><div class="wp-section-title">💡 关键创新</div><div class="wp-tags">`;
+                    for (const inv of s.key_innovations) {
+                        html += `<span class="wp-tag">${escapeHtml(inv)}</span>`;
+                    }
+                    html += `</div></div>`;
+                }
+
+                if (s.token_utility) {
+                    html += `<div class="wp-section"><div class="wp-section-title">🪙 代币用途</div><div class="wp-section-content">${escapeHtml(s.token_utility)}</div></div>`;
+                }
+
+                if (s.team_info) {
+                    html += `<div class="wp-section"><div class="wp-section-title">👥 团队</div><div class="wp-section-content">${escapeHtml(s.team_info)}</div></div>`;
+                }
+
+                if (s.risks && s.risks.length > 0) {
+                    html += `<div class="wp-section"><div class="wp-section-title">⚠️ 风险</div><ul class="wp-list">`;
+                    for (const r of s.risks) {
+                        html += `<li>${escapeHtml(r)}</li>`;
+                    }
+                    html += `</ul></div>`;
+                }
+
+                html += `<div class="wp-actions">${viewBtn}</div>`;
+                html += `</div>`;
+            }
+
+            detailEl.innerHTML = html;
+            detailEl.style.display = 'block';
+        }
+
+        async function runWhitepaperExtract () {
+            const assetId = currentResearchAssetId;
+            if (!assetId) return;
+
+            const btn = document.getElementById('wp-run-btn');
+            btn.disabled = true;
+            btn.textContent = '提取中...';
+            document.getElementById('wp-status').textContent = '正在提取...';
+            document.getElementById('wp-indicator').className = 'status-indicator pending';
+
+            try {
+                const res = await fetch(`/api/whitepaper/extract/${assetId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force: 0 })
+                });
+                const data = await res.json();
+                if (data.ok && data.pending) {
+                    // 轮询任务状态
+                    pollTask(data.task_id, () => {
+                        // 完成后重新加载
+                        fetch(`/api/assets/${assetId}/whitepaper-summary`)
+                            .then(r => r.json())
+                            .then(d => {
+                                if (d.ok && d.data && d.data.length > 0) {
+                                    renderWhitepaperSummary(d.data);
+                                } else {
+                                    setWhitepaperMissing();
+                                }
+                            });
+                    });
+                }
+            } catch (e) {
+                document.getElementById('wp-status').textContent = '提取失败: ' + e.message;
+                btn.disabled = false;
+                btn.textContent = '提取白皮书摘要';
+            }
         }
 
         function setOnchainStatus (cls, text) {
@@ -4337,13 +4893,11 @@
 
         // ── 赛道轮动热力图 ──
         const SECTOR_LABELS = {
-            'layer1': 'Layer1 公链', 'layer2': 'Layer2 扩容', 'defi': 'DeFi 金融',
-            'meme': 'Meme 文化', 'ai': 'AI + 加密', 'gaming': 'GameFi',
-            'nft': 'NFT 收藏', 'social': 'SocialFi', 'rwa': 'RWA 现实资产',
-            'infra': '基础设施', 'oracle': '预言机', 'privacy': '隐私计算',
-            'storage': '去中心化存储', 'dao': 'DAO 治理', 'stablecoin': '稳定币',
-            'restaking': '再质押', 'lsd': '流动性质押', 'depin': 'DePIN',
-            'perp_dex': '永续 DEX', 'launchpad': 'Launchpad', 'other': '其他'
+            'l1': 'L1 公链', 'l2': 'L2 扩容', 'defi': 'DeFi 金融',
+            'meme': 'Meme 文化', 'gamefi': 'GameFi', 'ai': 'AI + 加密',
+            'rwa': 'RWA 现实资产', 'stablecoin': '稳定币', 'cex_token': 'CEX 平台币',
+            'derivatives': '衍生品', 'depin': 'DePIN', 'infra': '基础设施',
+            'other': '其他'
         };
 
         async function loadSectorHeatmap () {
@@ -4597,6 +5151,7 @@
             html += '<table class="hot-tokens-table"><thead><tr>';
             html += '<th style="width:40px">#</th>';
             html += '<th>代币 / 项目</th>';
+            html += '<th style="width:90px">赛道</th>';
             html += '<th>链 / 合约地址</th>';
             html += '<th class="right">价格</th>';
             html += '<th class="right">24h 涨跌</th>';
@@ -4658,6 +5213,7 @@
                 html += '<tr>';
                 html += '<td>' + rankBadge + rank + '</td>';
                 html += '<td><strong>' + (t.symbol || '?') + '</strong>' + (name ? '<br><span class="token-name">' + name + '</span>' : '') + '</td>';
+                html += '<td><span class="sector-tag sector-' + (t.sector || 'other') + '">' + (SECTOR_LABELS[t.sector] || t.sector || '其他') + '</span></td>';
                 html += '<td>' + contractCell + '</td>';
                 html += '<td class="right">$' + priceStr + '</td>';
                 html += '<td class="right ' + changeCls + '">' + changeSign + change.toFixed(1) + '%</td>';
@@ -4774,6 +5330,17 @@
                 <button class="btn btn-secondary" id="url-ai-btn">改用 AI 测算</button>
                 <button class="btn btn-primary" id="url-confirm-btn">抓取</button>
             </div>
+        </div>
+    </div>
+
+    <!-- PDF 查看器模态框 -->
+    <div class="pdf-viewer-modal" id="pdf-viewer-modal">
+        <div class="pdf-viewer-container">
+            <div class="pdf-viewer-header">
+                <span id="pdf-viewer-title">PDF 预览</span>
+                <button class="pdf-viewer-close" onclick="closePdfViewer()">✕</button>
+            </div>
+            <iframe id="pdf-viewer-iframe" class="pdf-viewer-iframe"></iframe>
         </div>
     </div>
 </body>

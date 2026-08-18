@@ -112,8 +112,15 @@ def _load_sector_map() -> dict[str, str]:
     return _sector_map
 
 
-def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
-    """计算多源交叉验证结果。"""
+def _compute_consensus(binance_idx: dict, cmc_idx: dict, sector_map: dict[str, str] | None = None) -> list[dict]:
+    """计算多源交叉验证结果。
+
+    Args:
+        binance_idx: Binance 代币索引
+        cmc_idx: CMC 代币索引
+        sector_map: symbol(大写) → primary_sector 映射，用于注入赛道字段
+    """
+    sector_map = sector_map or {}
     all_keys = set(binance_idx.keys()) | set(cmc_idx.keys())
     results = []
 
@@ -170,6 +177,7 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict) -> list[dict]:
             "name": name,
             "chain": chain,
             "contract": contract,
+            "sector": sector_map.get(symbol, "other"),
             "price": _normalize_float(price),
             "change_24h": change_24h,
             "volume_24h": volume_24h,
@@ -205,7 +213,7 @@ def get_cross_validated(limit: int = 30) -> dict:
     binance_idx = _build_index(binance_data.get("tokens", []))
     cmc_idx = _build_index(cmc_data.get("tokens", []))
 
-    results = _compute_consensus(binance_idx, cmc_idx)
+    results = _compute_consensus(binance_idx, cmc_idx, sector_map)
 
     _cache = {"results": results, "total": len(results)}
     _cache_ts = now

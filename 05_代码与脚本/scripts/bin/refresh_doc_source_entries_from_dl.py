@@ -54,7 +54,7 @@ def main() -> int:
                     "entry_type": "official_website",
                     "entry_url": url.strip(),
                     "discovered_from": "dl_info.url",
-                    "is_primary": True,
+                    "is_primary": False,  # 统一由裁决脚本设置，避免多来源各标各的
                     "content_topics": topics,
                     "classify_method": method,
                     "classify_confidence": confidence,

@@ -33,7 +33,7 @@ def extract_cg_doc_source_entries(
                 "entry_type": "official_website",
                 "entry_url": homepage_url.strip(),
                 "discovered_from": "cg_info.homepage_url",
-                "is_primary": True,
+                "is_primary": False,  # 统一由裁决脚本设置，避免多来源各标各的
                 **_classify(homepage_url.strip()),
             }
         )

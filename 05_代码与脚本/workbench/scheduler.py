@@ -63,6 +63,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ 赛道分类刷新 ═══
     ("refresh_sectors", "0 6 * * *", "run_refresh_sectors.py", [], "赛道标签全量刷新（每日兜底）"),
 
+    # ═══ 官网 primary 裁决 ═══
+    ("refresh_primary_website", "30 6 * * *", "run_refresh_primary_website.py", [], "官网 primary 裁决（每日兜底）"),
+
     # ═══ 文档入口补充（自动循环）═══
     ("cmc_refresh_docs_auto", "0 6 * * *", "refresh_doc_source_entries_from_cmc_auto.py", [], "CMC 补充文档入口"),
     ("cg_refresh_docs_auto", "0 6 * * *", "refresh_doc_source_entries_from_cg_auto.py", [], "CG 补充文档入口"),

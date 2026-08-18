@@ -8,7 +8,8 @@ CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 6 个步骤。
   ④ CMC 填充合约地址       phase_a_build_core.py --step populate_cmc → core.asset_contract
   ⑤ DexScreener 补新币合约 populate_contracts_from_dexscreener.py → core.asset_contract（仅新上市无合约资产）
   ⑥ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
-  ⑦ 赛道标签全量刷新       run_refresh_sectors.py                 → biz.asset_sector + core.asset.primary_sector
+  ⑦ 官网 primary 裁决       run_refresh_primary_website.py          → biz.doc_source_entry.is_primary
+  ⑧ 赛道标签全量刷新       run_refresh_sectors.py                 → biz.asset_sector + core.asset.primary_sector
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -116,8 +117,13 @@ def main() -> int:
     if code != 0:
         return code
 
-    # ⑦ 赛道标签全量刷新（依赖③，确保新入库资产分类正确）
-    code, _ = _run(_python("run_refresh_sectors.py"), "⑦ 赛道刷新")
+    # ⑦ 官网 primary 裁决（依赖⑥，确保每资产唯一主官网）
+    code, _ = _run(_python("run_refresh_primary_website.py"), "⑦ 官网裁决")
+    if code != 0:
+        return code
+
+    # ⑧ 赛道标签全量刷新（依赖③，确保新入库资产分类正确）
+    code, _ = _run(_python("run_refresh_sectors.py"), "⑧ 赛道刷新")
     if code != 0:
         return code
 

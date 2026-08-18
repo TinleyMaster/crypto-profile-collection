@@ -1132,6 +1132,17 @@ def api_research_thesis(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/research/<int:asset_id>/competitors")
+def api_research_competitors(asset_id: int):
+    """同赛道竞品结构化对比。"""
+    try:
+        limit = int(request.args.get("limit", "8"))
+        result = _get_db_stats().get_sector_competitors(asset_id, limit)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""

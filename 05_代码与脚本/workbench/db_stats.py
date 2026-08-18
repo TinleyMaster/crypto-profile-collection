@@ -2330,6 +2330,255 @@ def _thesis_row_to_dict(row) -> dict:
     }
 
 
+def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
+    """同赛道竞品结构化对比：按 primary_sector 找同赛道币，聚合关键指标横向对比。
+
+    对比维度：
+      - 基础：市值 / FDV / 价格
+      - 代币经济学：总供应量 / 流通量 / 通胀率
+      - 链上：Top10 集中度 / 持有者数
+      - 社交：热度分 / X 粉丝
+      - 解锁：未来 30 天解锁 %
+      - 融资：融资轮数 / 总金额
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 1. 取当前币的赛道
+            cur.execute(
+                "SELECT asset_id, canonical_symbol, canonical_name, primary_sector, asset_type "
+                "FROM core.asset WHERE asset_id = %s",
+                (asset_id,),
+            )
+            target = cur.fetchone()
+            if not target:
+                return {"ok": False, "error": "资产不存在"}
+            sector = target["primary_sector"] or "other"
+
+            # 2. 找同赛道币（排除自己），按市值/FDV 降序取前 N 个
+            #    市值从 biz.coin_basic 或 input_snapshot 里取（降级兼容）
+            cur.execute("""
+                WITH sector_assets AS (
+                    SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
+                           a.primary_sector
+                    FROM core.asset a
+                    WHERE a.primary_sector = %s
+                      AND a.asset_id <> %s
+                ),
+                asset_mcap AS (
+                    SELECT asset_id,
+                           COALESCE(
+                               NULLIF((cb.input_snapshot_json->>'market_cap')::NUMERIC, 0),
+                               NULLIF((cb.input_snapshot_json->>'fdv')::NUMERIC, 0),
+                               0
+                           ) AS mcap
+                    FROM biz.asset_token_unlocks cb
+                    WHERE cb.asset_id IN (SELECT asset_id FROM sector_assets)
+                )
+                SELECT sa.asset_id, sa.canonical_symbol, sa.canonical_name, sa.asset_type,
+                       COALESCE(am.mcap, 0) AS mcap
+                FROM sector_assets sa
+                LEFT JOIN asset_mcap am ON am.asset_id = sa.asset_id
+                ORDER BY am.mcap DESC NULLS LAST, sa.canonical_symbol
+                LIMIT %s
+            """, (sector, asset_id, limit))
+            comp_rows = cur.fetchall()
+
+            if not comp_rows:
+                return {
+                    "ok": True,
+                    "sector": sector,
+                    "sector_label": SECTOR_LABELS.get(sector, sector),
+                    "target": {
+                        "asset_id": target["asset_id"],
+                        "symbol": target["canonical_symbol"],
+                        "name": target["canonical_name"],
+                    },
+                    "competitors": [],
+                    "metrics": [],
+                }
+
+            comp_ids = [r["asset_id"] for r in comp_rows]
+            all_ids = [asset_id] + comp_ids
+
+            # 3. 批量取各维度数据
+            # 3a. 代币经济学
+            cur.execute("""
+                SELECT asset_id, total_supply, circulating_supply, max_supply,
+                       buy_tax_pct, sell_tax_pct, contract_renounced, lp_locked
+                FROM biz.asset_tokenomics WHERE asset_id = ANY(%s)
+            """, (all_ids,))
+            tokenomics_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+
+            # 3b. 链上持仓（最新一条）
+            cur.execute("""
+                SELECT DISTINCT ON (asset_id)
+                       asset_id, top10_concentration, total_holders,
+                       holder_change_30d, whale_balance_change_30d_pct
+                FROM biz.onchain_holder_snapshot
+                WHERE asset_id = ANY(%s)
+                ORDER BY asset_id, snapshot_date DESC
+            """, (all_ids,))
+            onchain_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+
+            # 3c. 社交热度
+            cur.execute("""
+                SELECT asset_id, score, community_json
+                FROM biz.asset_social_heat WHERE asset_id = ANY(%s)
+            """, (all_ids,))
+            social_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+
+            # 3d. 解锁（未来 30 天解锁 %）
+            cur.execute("""
+                SELECT asset_id, unlock_events_json, input_snapshot_json
+                FROM biz.asset_token_unlocks WHERE asset_id = ANY(%s)
+            """, (all_ids,))
+            unlock_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+
+            # 3e. 融资
+            try:
+                cur.execute("""
+                    SELECT asset_id, COUNT(*) AS raise_count,
+                           SUM(amount) AS total_raised
+                    FROM biz.asset_raises
+                    WHERE asset_id = ANY(%s)
+                    GROUP BY asset_id
+                """, (all_ids,))
+                raise_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+            except psycopg.errors.UndefinedTable:
+                raise_map = {}
+
+            # 3f. 市值/价格（从 unlock input_snapshot 降级取）
+            def _get_mcap_price(aid):
+                row = unlock_map.get(aid)
+                if not row:
+                    return (None, None)
+                snap = row.get("input_snapshot_json") or {}
+                mcap = snap.get("market_cap") or snap.get("market_cap_usd")
+                price = snap.get("price") or snap.get("price_usd")
+                fdv = snap.get("fdv") or snap.get("fdv_usd")
+                return (mcap or fdv, price)
+
+            # 4. 组装竞品列表
+            def _build_coin(aid, symbol, name, atype):
+                mcap, price = _get_mcap_price(aid)
+                t = tokenomics_map.get(aid) or {}
+                o = onchain_map.get(aid) or {}
+                s = social_map.get(aid) or {}
+                u = unlock_map.get(aid) or {}
+                r = raise_map.get(aid) or {}
+
+                # 计算未来 30 天解锁 %
+                unlock_30d_pct = None
+                events = u.get("unlock_events_json") or []
+                if events:
+                    from datetime import datetime, timedelta
+                    now = datetime.utcnow().date()
+                    thirty = now + timedelta(days=30)
+                    total_pct = 0.0
+                    for ev in events:
+                        if not ev.get("is_upcoming"):
+                            continue
+                        d = ev.get("date")
+                        if not d:
+                            continue
+                        try:
+                            ev_date = datetime.strptime(d[:10], "%Y-%m-%d").date()
+                        except (ValueError, TypeError):
+                            continue
+                        if ev_date <= thirty:
+                            pct = ev.get("pct") or 0
+                            try:
+                                total_pct += float(pct)
+                            except (ValueError, TypeError):
+                                pass
+                    unlock_30d_pct = round(total_pct, 2) if total_pct else 0
+
+                # X 粉丝数
+                community = s.get("community_json") or {}
+                x_followers = None
+                for plat in ("x", "twitter", "X"):
+                    if plat in community:
+                        x_followers = community[plat].get("followers")
+                        break
+
+                circ_supply = t.get("circulating_supply")
+                total_supply = t.get("total_supply")
+                inflation_pct = None
+                if circ_supply and total_supply and float(total_supply) > 0:
+                    try:
+                        inflation_pct = round(
+                            (1 - float(circ_supply) / float(total_supply)) * 100, 2
+                        )
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
+
+                return {
+                    "asset_id": aid,
+                    "symbol": symbol,
+                    "name": name,
+                    "type": atype,
+                    "is_target": aid == asset_id,
+                    "market_cap": mcap,
+                    "price": price,
+                    "total_supply": total_supply,
+                    "circulating_supply": circ_supply,
+                    "inflation_pct": inflation_pct,
+                    "buy_tax_pct": t.get("buy_tax_pct"),
+                    "sell_tax_pct": t.get("sell_tax_pct"),
+                    "contract_renounced": t.get("contract_renounced"),
+                    "lp_locked": t.get("lp_locked"),
+                    "top10_concentration": o.get("top10_concentration"),
+                    "total_holders": o.get("total_holders"),
+                    "holder_change_30d": o.get("holder_change_30d"),
+                    "social_score": s.get("score"),
+                    "x_followers": x_followers,
+                    "unlock_30d_pct": unlock_30d_pct,
+                    "raise_count": r.get("raise_count"),
+                    "total_raised": r.get("total_raised"),
+                }
+
+            competitors = []
+            # 目标币放第一个
+            competitors.append(_build_coin(
+                target["asset_id"], target["canonical_symbol"],
+                target["canonical_name"], target["asset_type"],
+            ))
+            for r in comp_rows:
+                competitors.append(_build_coin(
+                    r["asset_id"], r["canonical_symbol"],
+                    r["canonical_name"], r["asset_type"],
+                ))
+
+            # 5. 指标定义（前端表格列）
+            metrics = [
+                {"key": "market_cap", "label": "市值", "format": "usd_big"},
+                {"key": "price", "label": "价格", "format": "usd_price"},
+                {"key": "total_supply", "label": "总供应量", "format": "number_big"},
+                {"key": "circulating_supply", "label": "流通量", "format": "number_big"},
+                {"key": "inflation_pct", "label": "未流通占比", "format": "pct"},
+                {"key": "unlock_30d_pct", "label": "30天解锁%", "format": "pct"},
+                {"key": "top10_concentration", "label": "Top10集中度", "format": "pct"},
+                {"key": "total_holders", "label": "持有者数", "format": "number_big"},
+                {"key": "social_score", "label": "社交热度分", "format": "score"},
+                {"key": "x_followers", "label": "X粉丝", "format": "number_big"},
+                {"key": "raise_count", "label": "融资轮数", "format": "number"},
+                {"key": "total_raised", "label": "融资总额", "format": "usd_big"},
+            ]
+
+            return {
+                "ok": True,
+                "sector": sector,
+                "sector_label": SECTOR_LABELS.get(sector, sector),
+                "target": {
+                    "asset_id": target["asset_id"],
+                    "symbol": target["canonical_symbol"],
+                    "name": target["canonical_name"],
+                },
+                "competitors": competitors,
+                "metrics": metrics,
+            }
+
+
 def get_latest_research_thesis(asset_id: int) -> dict | None:
     """读取某代币最新一条研究结论（不含历史版本）。"""
     with get_db() as conn:

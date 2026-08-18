@@ -380,6 +380,106 @@
             cursor: not-allowed;
         }
 
+        /* 竞品对比 */
+        .r-competitors {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-competitors .c-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-competitors .c-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-competitors .c-sector {
+            font-size: 12px;
+            color: #fbbf24;
+        }
+
+        .r-competitors .c-table-wrap {
+            overflow-x: auto;
+        }
+
+        .r-competitors table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            min-width: 800px;
+        }
+
+        .r-competitors th,
+        .r-competitors td {
+            padding: 8px 10px;
+            text-align: right;
+            border-bottom: 1px solid #1e222a;
+            white-space: nowrap;
+        }
+
+        .r-competitors th:first-child,
+        .r-competitors td:first-child {
+            text-align: left;
+            position: sticky;
+            left: 0;
+            background: #171a21;
+            z-index: 1;
+        }
+
+        .r-competitors th {
+            color: #8a92a0;
+            font-weight: 500;
+            font-size: 11px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .r-competitors th:hover {
+            color: #e6e8eb;
+        }
+
+        .r-competitors tr.target-row td {
+            background: rgba(59, 130, 246, 0.08);
+            font-weight: 600;
+        }
+
+        .r-competitors tr.target-row td:first-child {
+            background: rgba(59, 130, 246, 0.12);
+        }
+
+        .r-competitors td .coin-sym {
+            color: #e6e8eb;
+            font-weight: 500;
+        }
+
+        .r-competitors td .coin-name {
+            color: #6b7280;
+            font-size: 11px;
+            margin-left: 4px;
+        }
+
+        .r-competitors .c-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .r-competitors .c-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -446,6 +546,15 @@
         </aside>
         <section class="r-chat">
             <div class="r-thesis" id="r-thesis" style="display:none"></div>
+            <div class="r-competitors" id="r-competitors" style="display:none">
+                <div class="c-head">
+                    <h3>🏆 同赛道竞品对比</h3>
+                    <span class="c-sector" id="c-sector-label"></span>
+                </div>
+                <div id="c-table-container">
+                    <div class="c-loading">加载中...</div>
+                </div>
+            </div>
             <div class="r-messages" id="r-messages"></div>
             <div class="r-input">
                 <textarea id="r-question" placeholder="输入问题，回答将严格基于已收集资料并标注来源...（Enter 发送，Shift+Enter 换行）"
@@ -572,6 +681,7 @@
             renderThesis(d);
             renderSidebar(d);
             renderMessages(d.messages || []);
+            loadCompetitors();
         }
 
         function renderThesis (d) {
@@ -649,6 +759,149 @@
                 alert('生成研究结论失败: ' + e.message);
                 if (btn) { btn.disabled = false; btn.textContent = '生成研究结论'; }
             }
+        }
+
+        // ── 竞品对比 ──
+        let compSortKey = 'market_cap';
+        let compSortAsc = false;
+
+        function fmtUsdBig (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            if (n >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+            if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+            return '$' + n.toFixed(2);
+        }
+        function fmtUsdPrice (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            if (n >= 1000) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+            if (n >= 1) return '$' + n.toFixed(2);
+            if (n >= 0.01) return '$' + n.toFixed(4);
+            return '$' + n.toFixed(6);
+        }
+        function fmtNumberBig (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+            if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+        function fmtPct (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            return n.toFixed(2) + '%';
+        }
+        function fmtScore (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            return n.toFixed(1);
+        }
+        function fmtNumber (v) {
+            if (v === null || v === undefined || v === '') return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            return Math.round(n).toLocaleString();
+        }
+        function fmtCell (v, format) {
+            switch (format) {
+                case 'usd_big': return fmtUsdBig(v);
+                case 'usd_price': return fmtUsdPrice(v);
+                case 'number_big': return fmtNumberBig(v);
+                case 'pct': return fmtPct(v);
+                case 'score': return fmtScore(v);
+                case 'number': return fmtNumber(v);
+                default: return v !== null && v !== undefined ? String(v) : '—';
+            }
+        }
+        function cellValue (v) {
+            if (v === null || v === undefined || v === '') return -Infinity;
+            const n = Number(v);
+            return isNaN(n) ? -Infinity : n;
+        }
+
+        async function loadCompetitors () {
+            const box = document.getElementById('r-competitors');
+            const container = document.getElementById('c-table-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="c-loading">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/competitors?limit=8');
+                const data = await safeJson(r, '/api/research/competitors');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="c-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const sectorLabel = document.getElementById('c-sector-label');
+                sectorLabel.textContent = data.sector_label || '';
+
+                const comps = data.competitors || [];
+                const metrics = data.metrics || [];
+                if (comps.length <= 1) {
+                    container.innerHTML = '<div class="c-empty">同赛道暂无其他竞品数据</div>';
+                    return;
+                }
+
+                renderCompetitorTable(comps, metrics);
+            } catch (e) {
+                container.innerHTML = '<div class="c-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderCompetitorTable (comps, metrics) {
+            const container = document.getElementById('c-table-container');
+            // 排序
+            const sorted = [...comps].sort((a, b) => {
+                const av = cellValue(a[compSortKey]);
+                const bv = cellValue(b[compSortKey]);
+                if (av === bv) return 0;
+                return compSortAsc ? (av - bv) : (bv - av);
+            });
+
+            let html = '<div class="c-table-wrap"><table>';
+            // 表头
+            html += '<thead><tr><th>代币</th>';
+            metrics.forEach(function (m) {
+                const arrow = compSortKey === m.key ? (compSortAsc ? ' ↑' : ' ↓') : '';
+                html += '<th onclick="sortCompetitors(\'' + escapeHtml(m.key) + '\')">' + escapeHtml(m.label) + arrow + '</th>';
+            });
+            html += '</tr></thead><tbody>';
+
+            sorted.forEach(function (c) {
+                const rowCls = c.is_target ? ' class="target-row"' : '';
+                html += '<tr' + rowCls + '>';
+                html += '<td><span class="coin-sym">' + escapeHtml(c.symbol) + '</span>' +
+                    '<span class="coin-name">' + escapeHtml(c.name || '') + '</span></td>';
+                metrics.forEach(function (m) {
+                    html += '<td>' + fmtCell(c[m.key], m.format) + '</td>';
+                });
+                html += '</tr>';
+            });
+
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        }
+
+        function sortCompetitors (key) {
+            if (compSortKey === key) {
+                compSortAsc = !compSortAsc;
+            } else {
+                compSortKey = key;
+                compSortAsc = false;
+            }
+            // 重新加载（简单起见，重新拉数据；数据量小也可缓存）
+            loadCompetitors();
         }
 
         function renderSidebar (d) {

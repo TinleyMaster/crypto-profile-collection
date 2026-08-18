@@ -34,5 +34,7 @@ ENV PYTHONIOENCODING=utf-8
 
 EXPOSE 9999
 
-# 用 gunicorn 启动，监听 $PORT（Zeabur 自动注入，默认 9999）
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-9999} --workers 2 --timeout 120 --access-logfile - --error-logfile -"]
+# 同一镜像支持两个服务角色，由环境变量 SERVICE_ROLE 决定启动命令：
+#   web       （默认）gunicorn 监听 $PORT（Zeabur 自动注入，默认 9999）
+#   scheduler         独立调度进程（替代 n8n），按 cron 触发 scripts/bin 脚本
+CMD ["sh", "-c", "if [ \"$SERVICE_ROLE\" = \"scheduler\" ]; then exec python scheduler.py; else exec gunicorn app:app --bind 0.0.0.0:${PORT:-9999} --workers 2 --timeout 120 --access-logfile - --error-logfile -; fi"]

@@ -1,6 +1,6 @@
 # 加密货币投研资料采集系统 (Crypto Profile Collection)
 
-一套**加密货币投研资料采集与沉淀系统**，采用 **n8n 调度中枢 + Python 数据处理引擎 + Flask Web 工作台** 的混合架构。
+一套**加密货币投研资料采集与沉淀系统**，采用 **Python 数据处理引擎 + Flask Web 工作台 + 定时调度器（scheduler.py）** 的架构。
 
 核心思路：把"从多数据源抓取币种/协议资料，找到官网/白皮书/文档，再将文档变成可沉淀资产"这件事，拆成**层层可维护的流水线**，并在末端提供**投研分析工具箱**（代币经济学、解锁时间表、链上数据等）。
 
@@ -586,7 +586,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 ├── 04_架构与代码方案/          # 项目完整逻辑文档
 ├── 05_代码与脚本/
 │   ├── scripts/                # 核心 Python 脚本
-│   │   ├── bin/                # 入口脚本（n8n / 工作台调用）
+│   │   ├── bin/                # 入口脚本（scheduler / 工作台调用）
 │   │   │   ├── ingest_*.py     # 数据源采集（CG/CMC/DL）
 │   │   │   ├── bootstrap_*.py  # source → core 批量映射
 │   │   │   ├── backfill_*.py   # 历史数据回填（含链接分类阶段1/阶段2）
@@ -627,6 +627,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │       ├── cmc_market.py       # CMC 市场数据（提取 platform.token_address 供跨源匹配）
 │       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）+ 每日推荐存档 + 赛道热力图
 │       ├── derivatives_client.py # 5 家交易所衍生品客户端（资金费率/OI/成交）
+│       ├── scheduler.py        # 定时调度器（APScheduler，替代 n8n 调度）
 │       └── templates/          # 前端页面
 │           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析 + 回测/赛道热力图
 │           └── research.html   # 一键投研笔记本页（含代币分类 + 分赛道资料清单 + 竞品/背离/衍生品/CEX净流入/鲸鱼流/研究结论）
@@ -707,11 +708,50 @@ docker run -p 5000:5000 -e DATABASE_URL=... crypto-workbench
 
 ---
 
+## 定时调度器（scheduler.py）
+
+用 **APScheduler** 替代 n8n 的调度职责。n8n 原本的编排/调度/重试逻辑已被代码吸收（一键流水线 `run_*_pipeline.py`、自循环 `*_auto.py`、Web 工作台 `TaskManager`、`phase_watchlist_monitor.py`），n8n 只剩「到点把脚本踢起来」，由本调度器承担。
+
+**职责**：
+1. 按调度表定时启动 `scripts/bin` 下的脚本（调用方式与工作台 `TaskManager` 一致）。
+2. 同一任务不重叠：`max_instances=1 + coalesce`，前一轮未结束则跳过新触发（脚本本身幂等，重叠也只是浪费资源）。
+3. 子进程日志实时流式写入日志文件（也打到 stdout 便于 `docker logs` 查看）。
+4. 子进程非零退出 → SMTP 邮件告警（复用 `SMTP_HOST/PORT/USER/PASS/TO/FROM`）。
+
+**用法**：
+
+```bash
+python scheduler.py                 # 前台常驻
+python scheduler.py --list          # 打印调度表
+python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次（测试/补跑）
+```
+
+**默认调度表**（编辑 `scheduler.py` 的 `SCHEDULE` 可调整）：
+
+| 时间（Asia/Shanghai） | 任务 | 说明 |
+|------|------|------|
+| 每日 03:00 | CMC 一键流水线 | 数据源 |
+| 每日 04:00 | DefiLlama 一键流水线 | 数据源 |
+| 每周一 05:00 | CoinGecko 一键流水线 | 月配额 10k，低频 |
+| 每日 05:30 | 链上持仓快照 | 每日单次 |
+| 每日 06:00 | CMC/CG/DL 补充文档入口 | 自循环 |
+| 每日 07:00 | 双源补充文档入口 | 自循环 |
+| 每日 08:00 | 第三方评级/审计 + TGE/融资 | 自循环 |
+| 每周一 08:30 | 链上异常事件（hacks） | — |
+| 每 6 小时 | B2 深度文档发现 | 自循环 |
+| 每日 09:00 | B3 SPA 无头浏览器爬取 | 自循环 |
+| 每日 10:00 | B4 AI 噪声清理 | 自循环 |
+| 每 30 分钟 | 大额转账监控 + 解锁/空头/大户监控 | 跑到完/单次 |
+
+**环境变量**（可选）：`SCHEDULER_TIMEZONE`（默认 `Asia/Shanghai`）、`SCHEDULER_ENABLED`（逗号分隔 key 白名单，空=全部）、`SCHEDULER_LOG_DIR`（默认 `/app/task_state/scheduler`）。
+
+---
+
 ## 部署平台
 
 - **数据库**：Zeabur PostgreSQL
-- **Web 工作台**：Zeabur Docker 部署
-- **调度**：n8n（Zeabur 同项目） + Web 工作台手动触发
+- **Web 工作台**：Zeabur Docker 部署（默认 `SERVICE_ROLE=web`）
+- **调度**：同一镜像另起一个服务，环境变量设 `SERVICE_ROLE=scheduler` 跑 `python scheduler.py`；手动触发走 Web 工作台任务面板
 
 ---
 

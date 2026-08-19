@@ -213,16 +213,17 @@ def main() -> int:
                 time.sleep(RATE_LIMIT_DELAY)
 
             protocol = _fetch_protocol(slug, args.timeout)
+
+            # 无论成功/失败/空结果，都标记已检查，保证断点续跑不会反复重试失败项
+            if not args.dry_run:
+                conn.execute(mark_sql, (asset["protocol_id"],))
+
             if protocol is None:
                 skipped += 1
                 print(f"[{i + 1}/{len(candidates)}] {slug} 拉取失败", flush=True)
                 continue
 
             rows = extract_raises(asset["asset_id"], asset["protocol_id"], protocol)
-
-            # 成功拉取即标记该协议已检查（无论 raises 是否为空），保证断点续跑
-            if not args.dry_run:
-                conn.execute(mark_sql, (asset["protocol_id"],))
 
             if not rows:
                 skipped += 1

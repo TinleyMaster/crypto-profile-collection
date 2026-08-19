@@ -32,7 +32,8 @@ from crypto_research.db.conn import get_connection
 # 导入单币提取的核心函数
 from phase_c_extract_tokenomics import (
     resolve_asset,
-    collect_doc_pages,
+    collect_all_links,
+    select_relevant_links,
     fetch_page_content,
     get_cmc_supply,
     get_cg_supply,
@@ -56,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
-    """获取尚未提取 tokenomics 的资产（按市值排名优先）。"""
+    """获取尚未提取 tokenomics 的资产（有文档入口的优先）。"""
     where = "TRUE" if force else "tok.asset_id IS NULL"
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -65,12 +66,12 @@ def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
             SELECT a.asset_id
             FROM core.asset a
             LEFT JOIN biz.asset_tokenomics tok ON tok.asset_id = a.asset_id
-            WHERE a.status = 'active'
-              AND {where}
+            WHERE {where}
               AND EXISTS (
                   SELECT 1 FROM biz.doc_source_entry dse
                   WHERE dse.asset_id = a.asset_id
-                    AND dse.ai_noise_checked_at IS NOT NULL
+                    AND dse.entity_type = 'asset'
+                    AND dse.entry_url IS NOT NULL
               )
             ORDER BY a.asset_id
             LIMIT %s
@@ -99,22 +100,36 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
                 print(f"  跳过（已有数据）")
                 return True
 
-    # 收集文档
-    docs = collect_doc_pages(conn, asset_id)
-    if not docs:
-        print(f"  SKIP: 无可用文档")
+    # 收集所有文档链接
+    all_links = collect_all_links(conn, asset_id)
+    if not all_links:
+        print(f"  SKIP: 无可用文档链接")
         return False
 
-    print(f"  收集到 {len(docs)} 个文档页面")
+    print(f"  收集到 {len(all_links)} 个文档链接")
 
+    # AI 筛选相关链接
+    try:
+        relevant_urls = select_relevant_links(llm, asset, all_links)
+    except Exception as e:
+        print(f"  AI 链接筛选失败: {e}")
+        # 降级：取前 10 个
+        relevant_urls = [l["source_url"] for l in all_links[:10]]
+
+    print(f"  AI 筛选出 {len(relevant_urls)} 个相关链接")
+
+    if not relevant_urls:
+        print(f"  SKIP: 无相关链接")
+        return False
+
+    # 抓取页面内容
     doc_contents = []
-    for doc in docs:
-        print(f"  抓取: [{doc['doc_type']}] {doc['source_url'][:80]}")
-        content = fetch_page_content(doc["source_url"])
+    for url in relevant_urls:
+        print(f"  抓取: {url[:80]}")
+        content = fetch_page_content(url)
         if content:
             doc_contents.append({
-                "doc_type": doc["doc_type"],
-                "source_url": doc["source_url"],
+                "source_url": url,
                 "content": content,
             })
         else:
@@ -123,6 +138,8 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
     if not doc_contents:
         print(f"  SKIP: 无成功抓取的页面")
         return False
+
+    print(f"  成功抓取 {len(doc_contents)} 个页面")
 
     # API 数据
     api_data = []
@@ -135,7 +152,7 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
             api_data.append(cg)
 
     # LLM 提取
-    print(f"  调用 LLM...")
+    print(f"  调用 LLM 提取 tokenomics...")
     try:
         result = extract_with_llm(llm, asset, doc_contents, api_data)
     except Exception as e:
@@ -153,6 +170,7 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
     source_urls = [d["source_url"] for d in doc_contents]
     try:
         save_tokenomics(conn, asset_id, source_urls, result)
+        print(f"  已入库")
         return True
     except Exception as e:
         print(f"  入库失败: {e}")

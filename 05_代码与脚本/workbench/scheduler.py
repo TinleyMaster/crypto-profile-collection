@@ -57,8 +57,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）"),
     ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）"),
 
-    # ═══ 链上快照（每日单次）═══
-    ("chain_holder_snapshot_auto", "30 5 * * *", "phase_chain_holder_snapshot_auto.py", [], "链上持仓快照（每日单次）"),
+    # ═══ 链上快照（每日全量）═══
+    ("chain_holder_snapshot_bsc", "30 5 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（每日）"),
+    ("chain_holder_snapshot_eth", "0 6 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（每日）"),
+    ("chain_holder_snapshot_base_arb", "30 6 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（每日）"),
+    ("chain_holder_snapshot_solana", "0 7 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日）"),
 
     # ═══ 赛道分类刷新 ═══
     ("refresh_sectors", "0 6 * * *", "run_refresh_sectors.py", [], "赛道标签全量刷新（每日兜底）"),
@@ -76,6 +79,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("third_party_auto", "0 8 * * *", "phase_b2_third_party_auto.py", [], "第三方评级/审计回填"),
     ("third_party_raises_auto", "0 8 * * *", "phase_b2_third_party_raises_auto.py", [], "TGE/融资轮次采集"),
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）"),
+
+    # ═══ 投研数据提取 ═══
+    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币）"),
+    ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
+    ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）"),
 
     # ═══ 文档深度爬取 ═══
     ("b2_auto_loop", "0 */6 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每 6 小时）"),

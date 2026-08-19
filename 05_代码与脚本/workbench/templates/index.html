@@ -360,6 +360,42 @@
             margin: 0;
         }
 
+        .task-filter {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 4px 12px;
+            font-size: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            background: #fff;
+            color: #6b7280;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .filter-btn:hover {
+            border-color: #3b82f6;
+            color: #3b82f6;
+        }
+
+        .filter-btn.active {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .task-filter .refresh-note {
+            margin-left: auto;
+            margin-top: 0;
+            margin-bottom: 0;
+        }
+
         .refresh-note {
             font-size: 11px;
             color: #6b7280;
@@ -2517,7 +2553,13 @@
 
         <!-- 任务列表 -->
         <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
-        <div class="refresh-note">每 3 秒自动刷新</div>
+        <div class="task-filter">
+            <button class="filter-btn active" data-filter="all" onclick="setTaskFilter('all')">全部</button>
+            <button class="filter-btn" data-filter="scheduler" onclick="setTaskFilter('scheduler')">调度任务</button>
+            <button class="filter-btn" data-filter="manual" onclick="setTaskFilter('manual')">手动任务</button>
+            <button class="filter-btn" data-filter="failed" onclick="setTaskFilter('failed')">失败</button>
+            <span class="refresh-note">每 3 秒自动刷新</span>
+        </div>
         <div class="task-list" id="task-list"></div>
     </div>
 
@@ -2543,6 +2585,7 @@
         let selectedTaskId = null;
         let logPanelCollapsed = false;
         let lastLogCount = 0;
+        let taskFilter = 'all';
 
         // ── 仪表盘 ──
         async function loadDashboard () {
@@ -2608,10 +2651,11 @@
         // ── 任务列表 ──
         async function loadTasks () {
             try {
-                const res = await fetch('/api/tasks?limit=20');
+                const res = await fetch('/api/tasks?limit=50');
                 const data = await res.json();
                 if (!data.ok) return;
-                renderTaskList(data.tasks);
+                const filtered = filterTasks(data.tasks);
+                renderTaskList(filtered);
                 // 如果有选中的任务，刷新日志
                 if (selectedTaskId) {
                     loadTaskLog(selectedTaskId);
@@ -2619,6 +2663,22 @@
             } catch (e) {
                 console.error('loadTasks error:', e);
             }
+        }
+
+        function setTaskFilter (f) {
+            taskFilter = f;
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.filter === f);
+            });
+            loadTasks();
+        }
+
+        function filterTasks (tasks) {
+            if (taskFilter === 'all') return tasks;
+            if (taskFilter === 'scheduler') return tasks.filter(t => t.name && t.name.startsWith('[调度]'));
+            if (taskFilter === 'manual') return tasks.filter(t => !t.name || !t.name.startsWith('[调度]'));
+            if (taskFilter === 'failed') return tasks.filter(t => t.status === 'failed');
+            return tasks;
         }
 
         function renderTaskList (tasks) {

@@ -1,56 +1,58 @@
 """
-定时调度器：用 APScheduler 按 cron 表达式触发采集脚本，替代 n8n 的调度职责。
+定时调度器：用 APScheduler 按 cron 表达式触发采集任务，提交到 TaskManager 统一执行。
 
-背景：n8n 原本的「编排 / 调度 / 重试」职责已被代码吸收——
-  - 依赖顺序编排 → run_*_pipeline.py 一键流水线
-  - 读库取任务 + 循环   → *__auto.py 自循环（entry_count==0 自动终止）
-  - 人工触发 + 日志     → Web 工作台 TaskManager
-  - 定时监控 + 邮件     → phase_watchlist_monitor.py
-所以 n8n 只剩「到点把脚本踢起来」，改由本调度器承担。
-
-职责：
-  1. 按调度表定时启动 scripts/bin 下的脚本（调用方式与工作台 TaskManager 一致）
-  2. 同一任务不重叠（max_instances=1 + coalesce，前一轮未结束则跳过新触发）
-  3. 子进程日志实时流式写入日志文件（也打到 stdout 便于 docker logs 查看）
-  4. 子进程非零退出 → SMTP 邮件告警（复用 SMTP_HOST/PORT/USER/PASS/TO/FROM）
+设计：
+  - 调度器只负责「到点提交任务」，不直接执行脚本
+  - 任务执行、日志、状态全由 TaskManager 统一管理（工作台可查）
+  - 同一任务不重叠：提交前检查是否已有同名任务在 running/pending，有则跳过
+  - 失败告警：SMTP 邮件（复用 SMTP_* 环境变量）
 
 用法：
     python scheduler.py                 # 前台常驻
     python scheduler.py --list          # 打印调度表
-    python scheduler.py --run-once <key>  # 立即同步执行某个任务一次（测试/补跑）
+    python scheduler.py --run-once <key>  # 立即提交某个任务一次（测试/补跑）
 
 环境变量（均可选）：
     SCHEDULER_TIMEZONE  时区（默认 Asia/Shanghai）
     SCHEDULER_ENABLED   逗号分隔的 key 白名单，空 = 全部启用
-    SCHEDULER_LOG_DIR   日志目录（默认 /app/task_state/scheduler 或本地 task_state/scheduler）
     SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_TO / SMTP_FROM  失败邮件告警
 """
 from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
-from collections import deque
-from datetime import datetime
+import time
 from pathlib import Path
 
-# Docker 或本地环境判断脚本路径（与 task_manager.py 保持一致）
+# 复用 task_manager 的状态/日志路径和文件锁工具
 if os.path.exists("/app/scripts/bin"):
-    SCRIPTS_BIN = Path("/app/scripts/bin")
     _DEFAULT_STATE_DIR = Path("/app/task_state")
 else:
-    SCRIPTS_BIN = Path(__file__).resolve().parents[1] / "scripts" / "bin"
     _DEFAULT_STATE_DIR = Path(__file__).resolve().parent / "task_state"
 
 STATE_DIR = Path(os.getenv("SCHEDULER_LOG_DIR") or _DEFAULT_STATE_DIR)
-LOG_DIR = STATE_DIR / "scheduler"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 把 workbench 目录加入 path，直接 import task_manager 的工具函数
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from task_manager import (  # noqa: E402
+    LOG_DIR,
+    STATE_FILE,
+    WORKER_SCRIPTS_DIR,
+    _append_log,
+    _load_state,
+    _save_state,
+    _lock,
+)
+
+import uuid  # noqa: E402
 
 TZ = os.getenv("SCHEDULER_TIMEZONE", "Asia/Shanghai")
 
 # 调度表：(key, cron, script, args, 说明)
-# cron 为 5 段式（分 时 日 月 周）。所有 *__auto.py 都是「跑到完即停」，周期性触发安全。
+# cron 为 5 段式（分 时 日 月 周）。
 SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ 数据源流水线 ═══
     ("cmc_pipeline", "0 3 * * *", "run_cmc_pipeline.py", [], "CMC 一键流水线（每日）"),
@@ -97,18 +99,62 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
 ]
 
 
-def _log_path(key: str) -> Path:
-    return LOG_DIR / f"{key}.log"
+def _build_cmd(script: str, args: list[str]) -> list[str]:
+    script_path = str(WORKER_SCRIPTS_DIR / script)
+    return [sys.executable, "-u", script_path] + list(args)
+
+
+def _has_active_task(name_prefix: str) -> bool:
+    """检查是否已有同名调度任务在 running/pending 状态（防重叠）。"""
+    with _lock():
+        state = _load_state()
+    for t in state["tasks"].values():
+        if t.get("status") in ("running", "pending") and t.get("name", "").startswith(f"[调度] {name_prefix}"):
+            return True
+    return False
+
+
+def submit_scheduled_task(key: str, script: str, args: list[str], desc: str) -> str | None:
+    """提交一个调度任务到 TaskManager 队列。返回 task_id 或 None（被去重跳过）。"""
+    name = f"[调度] {key} - {desc}"
+
+    # 防重叠：已有同名任务在跑就跳过
+    if _has_active_task(key):
+        print(f"[调度] {key} 已有任务在执行，跳过本次触发")
+        return None
+
+    task_id = uuid.uuid4().hex[:12]
+    cmd = _build_cmd(script, args)
+    now = time.time()
+
+    with _lock():
+        state = _load_state()
+        state["tasks"][task_id] = {
+            "task_id": task_id,
+            "name": name,
+            "status": "pending",
+            "cmd": cmd,
+            "started_at": now,
+            "ended_at": None,
+            "stats": {"scheduler_key": key},
+            "error": None,
+        }
+        state["pending"].append(task_id)
+        _save_state(state)
+
+    _append_log(task_id, f"[TASK] 调度触发: {key}")
+    _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
+    print(f"[调度] 已提交 {key} -> task_id={task_id}")
+    return task_id
 
 
 def _send_alert_email(subject: str, body_text: str) -> bool:
-    """失败告警邮件（自包含 smtplib，不依赖 crypto_research）。"""
+    """失败告警邮件（自包含 smtplib）。"""
     host = os.getenv("SMTP_HOST", "").strip()
     user = os.getenv("SMTP_USER", "").strip()
     pwd = os.getenv("SMTP_PASS", "")
     to = os.getenv("SMTP_TO", "").strip()
     if not (host and user and pwd and to):
-        print("[调度] SMTP 未配置，跳过失败告警邮件")
         return False
 
     import smtplib
@@ -134,68 +180,56 @@ def _send_alert_email(subject: str, body_text: str) -> bool:
         server.login(user, pwd)
         server.sendmail(from_addr, to_addrs, msg.as_string())
         server.quit()
-        print("[调度] 失败告警邮件已发送")
+        print(f"[调度] 失败告警邮件已发送: {subject}")
         return True
     except Exception as e:
         print(f"[调度] 告警邮件发送失败: {e}")
         return False
 
 
-def _run_job(key: str, script: str, args: list[str]) -> int:
-    """同步执行一个任务，实时写日志，非零退出发邮件。返回退出码。"""
-    log_path = _log_path(key)
-    script_path = str(SCRIPTS_BIN / script)
-    cmd = [sys.executable, "-u", script_path] + list(args)
+def _scheduler_job(key: str, script: str, args: list[str], desc: str) -> None:
+    """APScheduler 回调：提交任务 + 异步等待完成 + 失败发邮件。"""
+    task_id = submit_scheduled_task(key, script, args, desc)
+    if not task_id:
+        return
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"\n{'=' * 60}\n[{datetime.now():%Y-%m-%d %H:%M:%S}] 启动 {key}: {' '.join(cmd)}\n")
+    # 轮询等待任务完成（非阻塞调度器线程池，用独立线程等）
+    def _wait_and_alert():
+        # 最多等 24 小时，超时就不管了
+        for _ in range(24 * 3600):  # 每秒检查一次
+            time.sleep(1)
+            with _lock():
+                state = _load_state()
+            task = state["tasks"].get(task_id)
+            if not task:
+                return
+            status = task.get("status")
+            if status in ("done", "failed", "stopped"):
+                if status == "failed":
+                    # 读最后 50 行日志
+                    from task_manager import _read_log
+                    logs = _read_log(task_id, 50)
+                    body = (
+                        f"任务：{key}\n"
+                        f"task_id：{task_id}\n"
+                        f"状态：{status}\n"
+                        f"错误：{task.get('error') or '未知'}\n\n"
+                        f"最后 50 行日志：\n" + "\n".join(logs)
+                    )
+                    _send_alert_email(
+                        f"⚠️ [调度] {key} 执行失败",
+                        body,
+                    )
+                return
 
-    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-    tail: deque[str] = deque(maxlen=50)
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(SCRIPTS_BIN.parent),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-        )
-        assert proc.stdout is not None
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n").rstrip("\r")
-            tail.append(line)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-            print(f"[{key}] {line}")
-        proc.wait()
-        returncode = proc.returncode
-    except Exception as e:
-        returncode = -1
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[ERROR] 启动失败: {e}\n")
-        print(f"[调度] {key} 启动失败: {e}")
-        tail.append(f"[ERROR] 启动失败: {e}")
-
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 结束 {key} exit_code={returncode}\n")
-
-    if returncode != 0:
-        body = "\n".join(tail) or "(无日志)"
-        _send_alert_email(
-            f"⚠️ [调度] {key} 执行失败 (exit {returncode})",
-            f"任务：{key}\n脚本：{script}\n命令：{' '.join(cmd)}\n退出码：{returncode}\n\n最近日志（最多 50 行）：\n{body}",
-        )
-    return returncode
+    import threading
+    threading.Thread(target=_wait_and_alert, daemon=True).start()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="定时调度器（替代 n8n）")
+    parser = argparse.ArgumentParser(description="定时调度器（任务提交到 TaskManager）")
     parser.add_argument("--list", action="store_true", help="打印调度表")
-    parser.add_argument("--run-once", metavar="KEY", help="立即执行某个任务一次")
+    parser.add_argument("--run-once", metavar="KEY", help="立即提交某个任务一次")
     args = parser.parse_args()
 
     if args.list:
@@ -203,12 +237,17 @@ def main() -> int:
         print("-" * 120)
         for key, cron, script, _a, desc in SCHEDULE:
             print(f"{key:<32} {cron:<18} {script:<48} {desc}")
+        print(f"\n状态文件: {STATE_FILE}")
+        print(f"日志目录: {LOG_DIR}")
         return 0
 
     if args.run_once:
-        for key, _cron, script, a, _desc in SCHEDULE:
+        for key, _cron, script, a, desc in SCHEDULE:
             if key == args.run_once:
-                return _run_job(key, script, a)
+                task_id = submit_scheduled_task(key, script, a, desc)
+                if task_id:
+                    print(f"已提交: task_id={task_id}")
+                return 0
         print(f"未知任务 key: {args.run_once}（可用 --list 查看）")
         return 1
 
@@ -225,9 +264,9 @@ def main() -> int:
             print(f"[调度] 跳过（未启用） {key}")
             continue
         scheduler.add_job(
-            _run_job,
+            _scheduler_job,
             CronTrigger.from_crontab(cron, timezone=tz),
-            args=[key, script, a],
+            args=[key, script, a, desc],
             id=key,
             name=desc,
             max_instances=1,
@@ -237,7 +276,9 @@ def main() -> int:
         )
         print(f"[调度] 注册 {key:<32} {cron:<18} {script}  ({desc})")
 
-    print("[调度] 启动完成，Ctrl+C 退出")
+    print(f"[调度] 启动完成，状态文件: {STATE_FILE}")
+    print(f"[调度] 任务提交到 TaskManager pending 队列，由 Flask 进程的 runner 执行")
+    print("[调度] Ctrl+C 退出")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

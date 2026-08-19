@@ -4,7 +4,7 @@ WORKDIR /app
 
 # 安装系统依赖（psycopg 需要 gcc，Playwright 需要浏览器运行时库）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gcc \
+    curl gcc supervisor \
     libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
     libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
     libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
@@ -24,6 +24,7 @@ COPY 05_代码与脚本/scripts/bin /app/scripts/bin
 
 # 复制 workbench 应用
 COPY 05_代码与脚本/workbench/*.py /app/
+COPY 05_代码与脚本/workbench/*.conf /app/
 COPY 05_代码与脚本/workbench/templates /app/templates
 
 # 文档存储目录
@@ -36,6 +37,6 @@ ENV PYTHONIOENCODING=utf-8
 
 EXPOSE 5000
 
-# 用 gunicorn 启动生产服务器
-# 注意：TaskManager 是内存状态，只能单 worker，否则任务列表会时有时无
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "4", "--timeout", "300"]
+# 用 supervisord 同时启动 gunicorn（Web）和 scheduler（定时调度）
+# 两者共享 /app/task_state 目录，调度任务提交到 TaskManager 队列统一执行
+CMD ["supervisord", "-c", "/app/supervisord.conf"]

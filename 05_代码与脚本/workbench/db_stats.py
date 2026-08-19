@@ -5025,7 +5025,8 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
             )
             urow = cur.fetchone()
             cur.execute(
-                "SELECT top_10_pct FROM biz.asset_token_holders WHERE asset_id = %s",
+                "SELECT top10_concentration AS top_10_pct FROM biz.onchain_holder_snapshot "
+                "WHERE asset_id = %s ORDER BY snapshot_date DESC LIMIT 1",
                 (asset_id,),
             )
             hrow = cur.fetchone()
@@ -5874,14 +5875,16 @@ def query_holder_snapshot(asset_id: int, chain: str = "bsc", save: bool = True) 
 
 
 def get_token_holders(asset_id: int) -> dict:
-    """读取 biz.asset_token_holders 中的持仓分布数据。"""
+    """读取 biz.onchain_holder_snapshot 中最新的持仓分布数据。"""
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                """SELECT h.*, a.canonical_symbol AS symbol, a.canonical_name AS name
-                   FROM biz.asset_token_holders h
-                   JOIN core.asset a ON a.asset_id = h.asset_id
-                   WHERE h.asset_id = %s""",
+                """SELECT s.*, a.canonical_symbol AS symbol, a.canonical_name AS name
+                   FROM biz.onchain_holder_snapshot s
+                   JOIN core.asset a ON a.asset_id = s.asset_id
+                   WHERE s.asset_id = %s
+                   ORDER BY s.snapshot_date DESC
+                   LIMIT 1""",
                 (asset_id,),
             )
             row = cur.fetchone()
@@ -5897,13 +5900,14 @@ def get_token_holders(asset_id: int) -> dict:
             "chain": row["chain"],
             "contract_address": row["contract_address"],
             "total_holders": row["total_holders"],
-            "top_5_pct": float(row["top_5_pct"]) if row["top_5_pct"] else None,
-            "top_10_pct": float(row["top_10_pct"]) if row["top_10_pct"] else None,
-            "top_50_pct": float(row["top_50_pct"]) if row["top_50_pct"] else None,
-            "top_100_pct": float(row["top_100_pct"]) if row["top_100_pct"] else None,
+            "top_5_pct": None,  # onchain_holder_snapshot 不存 top5
+            "top_10_pct": float(row["top10_concentration"]) if row["top10_concentration"] else None,
+            "top_50_pct": float(row["top50_concentration"]) if row["top50_concentration"] else None,
+            "top_100_pct": float(row["top100_concentration"]) if row["top100_concentration"] else None,
             "top_holders": json.loads(row["top_holders_json"]) if isinstance(row["top_holders_json"], str) else row["top_holders_json"],
             "tier_distribution": json.loads(row["tier_distribution_json"]) if isinstance(row["tier_distribution_json"], str) else row["tier_distribution_json"],
-            "scraped_at": str(row["scraped_at"]) if row["scraped_at"] else None,
+            "scraped_at": str(row["fetched_at"]) if row["fetched_at"] else None,
+            "snapshot_date": str(row["snapshot_date"]) if row["snapshot_date"] else None,
         },
     }
 

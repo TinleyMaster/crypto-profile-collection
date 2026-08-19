@@ -1036,52 +1036,38 @@ def scrape_holders(explorer_url: str, contract_address: str,
 # ── 数据库 ────────────────────────────────────────────────
 
 ENSURE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS biz.asset_token_holders (
-    asset_id INTEGER PRIMARY KEY REFERENCES core.asset(asset_id),
-    chain TEXT DEFAULT 'bsc',
-    contract_address TEXT,
-    source_url TEXT,
-    total_holders INTEGER,
-    top_5_pct NUMERIC,
-    top_10_pct NUMERIC,
-    top_25_pct NUMERIC,
-    top_50_pct NUMERIC,
-    top_100_pct NUMERIC,
+CREATE TABLE IF NOT EXISTS biz.onchain_holder_snapshot (
+    snapshot_id      SERIAL PRIMARY KEY,
+    asset_id         INTEGER NOT NULL REFERENCES core.asset(asset_id) ON DELETE CASCADE,
+    chain            TEXT NOT NULL,
+    contract_address TEXT NOT NULL,
+    snapshot_date    DATE NOT NULL,
+    top10_concentration  NUMERIC(5,2),
+    top50_concentration  NUMERIC(5,2),
+    top100_concentration NUMERIC(5,2),
+    total_holders        INTEGER,
     top_holders_json JSONB,
     tier_distribution_json JSONB,
-    scraped_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-)
+    source_url TEXT,
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_holder_snapshot_asset_date
+    ON biz.onchain_holder_snapshot (asset_id, snapshot_date DESC);
 """
 
 UPSERT_SQL = """
-INSERT INTO biz.asset_token_holders (
-    asset_id, chain, contract_address, source_url,
-    total_holders,
-    top_5_pct, top_10_pct, top_25_pct, top_50_pct, top_100_pct,
-    top_holders_json, tier_distribution_json,
-    scraped_at, updated_at
+INSERT INTO biz.onchain_holder_snapshot (
+    asset_id, chain, contract_address, snapshot_date,
+    top10_concentration, top50_concentration, top100_concentration,
+    total_holders, top_holders_json, tier_distribution_json,
+    source_url, fetched_at
 ) VALUES (
-    %(asset_id)s, %(chain)s, %(contract_address)s, %(source_url)s,
-    %(total_holders)s,
-    %(top_5_pct)s, %(top_10_pct)s, %(top_25_pct)s, %(top_50_pct)s, %(top_100_pct)s,
-    %(top_holders_json)s, %(tier_distribution_json)s,
-    NOW(), NOW()
+    %(asset_id)s, %(chain)s, %(contract_address)s, CURRENT_DATE,
+    %(top10_concentration)s, %(top50_concentration)s, %(top100_concentration)s,
+    %(total_holders)s, %(top_holders_json)s, %(tier_distribution_json)s,
+    %(source_url)s, NOW()
 )
-ON CONFLICT (asset_id) DO UPDATE SET
-    chain = EXCLUDED.chain,
-    contract_address = EXCLUDED.contract_address,
-    source_url = EXCLUDED.source_url,
-    total_holders = EXCLUDED.total_holders,
-    top_5_pct = EXCLUDED.top_5_pct,
-    top_10_pct = EXCLUDED.top_10_pct,
-    top_25_pct = EXCLUDED.top_25_pct,
-    top_50_pct = EXCLUDED.top_50_pct,
-    top_100_pct = EXCLUDED.top_100_pct,
-    top_holders_json = EXCLUDED.top_holders_json,
-    tier_distribution_json = EXCLUDED.tier_distribution_json,
-    scraped_at = EXCLUDED.scraped_at,
-    updated_at = NOW()
+ON CONFLICT DO NOTHING
 """
 
 
@@ -1095,22 +1081,26 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
                explorer_url: str, data: dict) -> None:
     token_url = f"{explorer_url}/token/{contract_address}"
     with conn.cursor() as cur:
+        # 同日同链同资产先删旧快照再插新快照
+        cur.execute(
+            "DELETE FROM biz.onchain_holder_snapshot "
+            "WHERE asset_id = %s AND chain = %s AND snapshot_date = CURRENT_DATE",
+            (asset_id, chain),
+        )
         cur.execute(UPSERT_SQL, {
             "asset_id": asset_id,
             "chain": chain,
             "contract_address": _norm_addr(chain, contract_address),
-            "source_url": token_url,
+            "top10_concentration": data.get("top_10_pct"),
+            "top50_concentration": data.get("top_50_pct"),
+            "top100_concentration": data.get("top_100_pct"),
             "total_holders": data.get("total_holders", 0),
-            "top_5_pct": data.get("top_5_pct"),
-            "top_10_pct": data.get("top_10_pct"),
-            "top_25_pct": data.get("top_25_pct"),
-            "top_50_pct": data.get("top_50_pct"),
-            "top_100_pct": data.get("top_100_pct"),
             "top_holders_json": json.dumps(data.get("top_holders_json", []), ensure_ascii=False),
             "tier_distribution_json": json.dumps(data.get("tier_distribution_json", []), ensure_ascii=False),
+            "source_url": token_url,
         })
     conn.commit()
-    print("  已写入 biz.asset_token_holders")
+    print("  已写入 biz.onchain_holder_snapshot")
 
 
 # ── 主流程 ─────────────────────────────────────────────────

@@ -1188,6 +1188,16 @@ def api_research_thesis(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/research/<int:asset_id>/tokenomics")
+def api_research_tokenomics(asset_id: int):
+    """代币经济学结构化数据。"""
+    try:
+        data = _get_db_stats().get_asset_tokenomics(asset_id)
+        return jsonify({"ok": True, "data": data or {}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/<int:asset_id>/competitors")
 def api_research_competitors(asset_id: int):
     """同赛道竞品结构化对比。"""

@@ -140,6 +140,7 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict, sector_map: dict[str, s
         c_rank = c.get("cmc_rank", 99999) if c else 99999
         c_change = _normalize_float(c.get("change_24h", 0)) if c else 0
         c_vol = _normalize_float(c.get("volume_24h", 0)) if c else 0
+        c_mcap = _normalize_float(c.get("market_cap", 0)) if c else 0
         if c:
             sources.append("cmc")
 
@@ -181,6 +182,7 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict, sector_map: dict[str, s
             "price": _normalize_float(price),
             "change_24h": change_24h,
             "volume_24h": volume_24h,
+            "market_cap": c_mcap if c_mcap > 0 else None,
             "composite_score": round(composite, 1),
             "binance_score": round(b_score, 1),
             "cmc_rank": c_rank if c_rank < 99999 else None,
@@ -349,13 +351,39 @@ def get_sector_heatmap(limit: int = 20) -> dict:
       - avg_score: 平均综合评分
       - top_token: 该赛道评分最高的代币
       - heat_score: 综合热度分（上榜数 × 平均涨幅 × 平均评分，归一化后 0-100）
+
+    防污染机制：
+      - 最低市值过滤：市值 < $1M 的代币不参与统计（过滤土狗）
+      - 涨幅截断：单币 24h 涨幅 > 200% 按 200% 计（防止极端值拉动均值）
+      - 样本量标注：token_count < 3 的赛道标注 low_sample=True
     """
-    result = get_cross_validated(100)
+    result = get_cross_validated(300)
     tokens = result["results"]
+
+    # 过滤：市值 >= $1M（多源 fallback 估算）
+    MIN_MCAP = 1_000_000
+    MAX_CHANGE = 200.0  # 单币涨幅上限，防极端值
+    filtered = []
+    for t in tokens:
+        mcap = t.get("market_cap") or 0
+        if not mcap:
+            # 用成交量粗略估算：volume_24h > $100k 的也保留
+            vol = t.get("volume_24h") or 0
+            if vol < 100_000:
+                continue
+        else:
+            if mcap < MIN_MCAP:
+                continue
+        # 涨幅截断
+        t = dict(t)
+        if t["change_24h"] > MAX_CHANGE:
+            t["change_24h"] = MAX_CHANGE
+            t["change_capped"] = True
+        filtered.append(t)
 
     # 按赛道分组
     sectors: dict[str, list[dict]] = {}
-    for t in tokens:
+    for t in filtered:
         sec = t.get("sector") or "other"
         sectors.setdefault(sec, []).append(t)
 
@@ -380,6 +408,7 @@ def get_sector_heatmap(limit: int = 20) -> dict:
             "avg_change_24h": round(avg_change, 2),
             "avg_score": round(avg_score, 1),
             "heat_score": heat_score,
+            "low_sample": count < 3,
             "top_token": {
                 "symbol": top["symbol"],
                 "name": top.get("name", ""),
@@ -394,6 +423,7 @@ def get_sector_heatmap(limit: int = 20) -> dict:
     return {
         "sectors": sector_stats[:limit],
         "total_sectors": len(sector_stats),
-        "total_tokens": len(tokens),
+        "total_tokens": len(filtered),
+        "filtered_out": len(tokens) - len(filtered),
         "fetched_at": result.get("fetched_at"),
     }

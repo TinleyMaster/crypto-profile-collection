@@ -32,6 +32,8 @@ from crypto_research.db.conn import get_connection
 # 导入单币提取的核心函数
 from phase_c_extract_tokenomics import (
     resolve_asset,
+    scrape_tokenomics_com,
+    save_tokenomist_full,
     collect_all_links,
     select_relevant_links,
     fetch_page_content,
@@ -57,7 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
-    """获取尚未提取 tokenomics 的资产（有文档入口的优先）。"""
+    """获取尚未提取 tokenomics 的资产（有文档入口的优先）。
+
+    排序策略：优先处理 CMC 排名靠前的主流币，避免小币连续失败导致任务提前终止。
+    """
     where = "TRUE" if force else "tok.asset_id IS NULL"
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -66,6 +71,7 @@ def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
             SELECT a.asset_id
             FROM core.asset a
             LEFT JOIN biz.asset_tokenomics tok ON tok.asset_id = a.asset_id
+            LEFT JOIN src_cmc.cmc_asset_map cam ON cam.asset_id = a.asset_id
             WHERE {where}
               AND EXISTS (
                   SELECT 1 FROM biz.doc_source_entry dse
@@ -73,7 +79,11 @@ def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
                     AND dse.entity_type = 'asset'
                     AND dse.entry_url IS NOT NULL
               )
-            ORDER BY a.asset_id
+            ORDER BY
+                -- CMC 有排名的优先，按排名升序
+                CASE WHEN cam.rank_num IS NOT NULL THEN 0 ELSE 1 END,
+                COALESCE(cam.rank_num, 999999),
+                a.asset_id
             LIMIT %s
             """,
             (batch_size,),
@@ -99,6 +109,26 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
             if cur.fetchone():
                 print(f"  跳过（已有数据）")
                 return True
+
+    # 优先尝试 tokenomics.com 结构化数据（主流币命中率高，置信度 1.0）
+    tokenomics_com_data = scrape_tokenomics_com(asset)
+    if tokenomics_com_data:
+        print(f"  tokenomics.com 命中，直接使用结构化数据入库")
+        # API 数据补充 supply
+        api_data = []
+        cmc = get_cmc_supply(conn, asset_id)
+        if cmc:
+            api_data.append(cmc)
+        if asset.get("coingecko_id"):
+            cg = get_cg_supply(asset["coingecko_id"])
+            if cg:
+                api_data.append(cg)
+        try:
+            save_tokenomist_full(conn, asset_id, tokenomics_com_data, api_data=api_data)
+            print(f"  已入库（tokenomics.com）")
+            return True
+        except Exception as e:
+            print(f"  tokenomics.com 入库失败，回退到文档+LLM路径: {e}")
 
     # 收集所有文档链接
     all_links = collect_all_links(conn, asset_id)

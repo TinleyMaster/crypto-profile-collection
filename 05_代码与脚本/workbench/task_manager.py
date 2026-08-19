@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import subprocess
@@ -17,6 +16,14 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# 跨平台文件锁：Unix 用 fcntl，Windows 用 msvcrt
+try:
+    import fcntl  # type: ignore
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+    import msvcrt  # type: ignore  # Windows
 
 # Docker 或本地环境判断脚本路径
 if os.path.exists("/app/scripts/bin"):
@@ -50,19 +57,26 @@ class TaskInfo:
 # ── 文件锁辅助 ──────────────────────────────────────────────
 
 class _FileLock:
-    """基于 fcntl 的跨进程文件锁。"""
+    """跨进程文件锁（Unix 用 fcntl.flock，Windows 用 msvcrt.locking）。"""
     def __init__(self, path: Path):
         self.path = path
         self._fd: Optional[int] = None
 
     def __enter__(self):
         self._fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        if _HAS_FCNTL:
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        else:
+            # Windows: LK_LOCK = 0x0002，阻塞式独占锁
+            msvcrt.locking(self._fd, msvcrt.LK_LOCK, 1)
         return self
 
     def __exit__(self, *args):
         if self._fd is not None:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            if _HAS_FCNTL:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            else:
+                msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
             os.close(self._fd)
             self._fd = None
 

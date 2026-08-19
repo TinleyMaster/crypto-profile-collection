@@ -1,7 +1,8 @@
 """
 后台任务管理器：用线程池跑各种采集脚本，Web 端只管发指令和查状态。
 
-任务状态持久化到 JSON 文件，支持多 worker（gunicorn 多进程）共享状态。
+任务状态和日志持久化到数据库（sys.task / sys.task_log），
+支持跨服务共享状态（调度器和 Flask 主应用即使在不同容器也能看到同一批任务）。
 """
 
 from __future__ import annotations
@@ -13,132 +14,264 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# 跨平台文件锁：Unix 用 fcntl，Windows 用 msvcrt
-try:
-    import fcntl  # type: ignore
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
-    import msvcrt  # type: ignore  # Windows
+import psycopg
+import psycopg.rows
+import psycopg_pool
 
 # Docker 或本地环境判断脚本路径
 if os.path.exists("/app/scripts/bin"):
     WORKER_SCRIPTS_DIR = Path("/app/scripts/bin")
-    STATE_DIR = Path("/app/task_state")
 else:
     WORKER_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts" / "bin"
-    STATE_DIR = Path(__file__).resolve().parent / "task_state"
-
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = STATE_DIR / "tasks.json"
-LOCK_FILE = STATE_DIR / "tasks.lock"
-LOG_DIR = STATE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_LOG_LINES = 1000
 
+# ── 数据库连接池 ────────────────────────────────────────────
 
-@dataclass
-class TaskInfo:
-    task_id: str
-    name: str
-    status: str  # pending / running / done / failed / stopped
-    cmd: list[str]
-    started_at: Optional[float] = None
-    ended_at: Optional[float] = None
-    stats: dict = field(default_factory=dict)
-    error: Optional[str] = None
+_pool: psycopg_pool.ConnectionPool | None = None
 
 
-# ── 文件锁辅助 ──────────────────────────────────────────────
+def _get_pool() -> psycopg_pool.ConnectionPool:
+    """惰性创建连接池。"""
+    global _pool
+    if _pool is None:
+        from crypto_research.config import get_settings
 
-class _FileLock:
-    """跨进程文件锁（Unix 用 fcntl.flock，Windows 用 msvcrt.locking）。"""
-    def __init__(self, path: Path):
-        self.path = path
-        self._fd: Optional[int] = None
+        settings = get_settings(require_database=True)
+        _pool = psycopg_pool.ConnectionPool(
+            settings.database_url,
+            min_size=1,
+            max_size=5,
+            open=True,
+            timeout=30,
+            kwargs={"connect_timeout": 30},
+        )
+    return _pool
 
-    def __enter__(self):
-        self._fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR)
-        if _HAS_FCNTL:
-            fcntl.flock(self._fd, fcntl.LOCK_EX)
+
+@contextmanager
+def _get_db():
+    """从连接池取连接，自动 commit/rollback。"""
+    with _get_pool().connection() as conn:
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+# ── 时间戳转换 ──────────────────────────────────────────────
+
+def _to_ts(val) -> Optional[datetime]:
+    """把 epoch 秒转成 datetime，None 透传。"""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return datetime.fromtimestamp(val, tz=timezone.utc)
+    return val
+
+
+def _from_ts(val) -> Optional[float]:
+    """把 datetime 转成 epoch 秒，None 透传。"""
+    if val is None:
+        return None
+    return val.timestamp()
+
+
+# ── 状态读写（数据库版）────────────────────────────────────
+
+def _row_to_task(row: dict) -> dict:
+    """把数据库行转成原 task dict 格式（时间戳转 epoch 秒）。"""
+    return {
+        "task_id": row["task_id"],
+        "name": row["name"],
+        "status": row["status"],
+        "cmd": list(row["cmd"]) if row["cmd"] else [],
+        "started_at": _from_ts(row["started_at"]),
+        "ended_at": _from_ts(row["ended_at"]),
+        "stats": dict(row["stats"]) if row["stats"] else {},
+        "error": row["error"],
+    }
+
+
+def _load_task(task_id: str) -> Optional[dict]:
+    """读取单个任务，返回 dict（字段名与原 JSON 结构一致）。"""
+    with _get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT task_id, name, status, cmd, started_at, ended_at, stats, error "
+                "FROM sys.task WHERE task_id = %s",
+                (task_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return _row_to_task(dict(row))
+
+
+def _load_all_tasks() -> dict:
+    """读取所有任务，返回 {tasks: {...}, pending: [...]} 结构（兼容旧接口）。"""
+    with _get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT task_id, name, status, cmd, started_at, ended_at, stats, error "
+                "FROM sys.task ORDER BY started_at DESC"
+            )
+            rows = cur.fetchall()
+
+    tasks = {}
+    pending = []
+    for row in rows:
+        t = _row_to_task(dict(row))
+        tasks[t["task_id"]] = t
+        if t["status"] == "pending":
+            pending.append(t["task_id"])
+    # pending 队列按提交时间正序（FIFO）
+    pending.sort(key=lambda tid: tasks[tid].get("started_at") or 0)
+    return {"tasks": tasks, "pending": pending}
+
+
+def _insert_task(task: dict) -> None:
+    """插入一条新任务。"""
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sys.task (task_id, name, status, cmd, started_at, ended_at, stats, error)
+                VALUES (%s, %s, %s, %s::text[], %s, %s, %s::jsonb, %s)
+                """,
+                (
+                    task["task_id"],
+                    task["name"],
+                    task["status"],
+                    task.get("cmd") or [],
+                    _to_ts(task.get("started_at")),
+                    _to_ts(task.get("ended_at")),
+                    json.dumps(task.get("stats") or {}),
+                    task.get("error"),
+                ),
+            )
+
+
+def _update_task(task_id: str, **fields) -> None:
+    """更新任务字段。只传需要更新的字段。"""
+    if not fields:
+        return
+    sets = []
+    params = []
+    for key, val in fields.items():
+        if key == "stats":
+            sets.append("stats = %s::jsonb")
+            params.append(json.dumps(val or {}))
+        elif key == "cmd":
+            sets.append("cmd = %s::text[]")
+            params.append(val or [])
+        elif key in ("started_at", "ended_at"):
+            sets.append(f"{key} = %s")
+            params.append(_to_ts(val))
         else:
-            # Windows: LK_LOCK = 0x0002，阻塞式独占锁
-            msvcrt.locking(self._fd, msvcrt.LK_LOCK, 1)
-        return self
-
-    def __exit__(self, *args):
-        if self._fd is not None:
-            if _HAS_FCNTL:
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            else:
-                msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
-            os.close(self._fd)
-            self._fd = None
-
-
-def _lock():
-    return _FileLock(LOCK_FILE)
-
-
-# ── 状态读写 ────────────────────────────────────────────────
-
-def _load_state() -> dict:
-    if not STATE_FILE.exists():
-        return {"tasks": {}, "pending": []}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"tasks": {}, "pending": []}
-
-
-def _save_state(state: dict) -> None:
-    tmp = STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2, default=str)
-    os.replace(tmp, STATE_FILE)
+            sets.append(f"{key} = %s")
+            params.append(val)
+    sets.append("updated_at = NOW()")
+    params.append(task_id)
+    sql = f"UPDATE sys.task SET {', '.join(sets)} WHERE task_id = %s"
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
 
 
 def _append_log(task_id: str, line: str) -> None:
-    log_path = LOG_DIR / f"{task_id}.log"
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    """追加一行日志到数据库。"""
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sys.task_log (task_id, line_no, content)
+                VALUES (
+                    %s,
+                    COALESCE((SELECT MAX(line_no) FROM sys.task_log WHERE task_id = %s), 0) + 1,
+                    %s
+                )
+                """,
+                (task_id, task_id, line),
+            )
 
 
 def _read_log(task_id: str, limit: int = 200) -> list[str]:
-    """只读日志文件末尾 N 行，O(1) 内存，不加载整个文件。"""
-    log_path = LOG_DIR / f"{task_id}.log"
-    if not log_path.exists():
-        return []
-    try:
-        file_size = log_path.stat().st_size
-        if file_size == 0:
-            return []
-        with open(log_path, "rb") as f:
-            # 从文件末尾往回读，找够 limit 个换行符
-            BUFSIZE = 8192
-            blocks = []
-            lines_found = 0
-            offset = file_size
-            while offset > 0 and lines_found <= limit:
-                read_size = min(BUFSIZE, offset)
-                offset -= read_size
-                f.seek(offset)
-                block = f.read(read_size)
-                blocks.append(block)
-                lines_found += block.count(b"\n")
-            tail = b"".join(reversed(blocks))
-            lines = tail.decode("utf-8", errors="replace").split("\n")
-            # 过滤空行，取最后 limit 行
-            result = [l.rstrip("\r") for l in lines if l]
-            return result[-limit:]
-    except (IOError, OSError):
-        return []
+    """读日志最后 N 行（正序返回）。"""
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT content FROM (
+                    SELECT content, line_no FROM sys.task_log
+                    WHERE task_id = %s
+                    ORDER BY line_no DESC
+                    LIMIT %s
+                ) sub
+                ORDER BY line_no ASC
+                """,
+                (task_id, limit),
+            )
+            return [row[0] for row in cur.fetchall()]
+
+
+def _task_exists(task_id: str) -> bool:
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM sys.task WHERE task_id = %s", (task_id,))
+            return cur.fetchone() is not None
+
+
+# ── 兼容旧接口的占位（scheduler.py 可能 import 这些）──────
+# 保留 STATE_FILE / LOG_DIR / _lock / _load_state / _save_state
+# 但内部改为数据库实现，scheduler.py 无需改动即可工作
+
+STATE_FILE = "sys.task (database)"
+LOG_DIR = "sys.task_log (database)"
+
+
+class _NoopLock:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+
+
+def _lock():
+    """数据库版不再需要文件锁（行级锁由 DB 处理），返回空锁兼容旧调用。"""
+    return _NoopLock()
+
+
+def _load_state() -> dict:
+    """兼容旧接口：返回 {tasks, pending} 结构。"""
+    return _load_all_tasks()
+
+
+def _save_state(state: dict) -> None:
+    """兼容旧接口：把整个 state 写回数据库（增量 upsert）。
+
+    注意：旧代码通过 _load_state → 修改 dict → _save_state 的模式工作，
+    这里做全量比对，只 upsert 有变化的任务。删除操作不处理（任务只追加不删除）。
+    """
+    for task_id, task in state["tasks"].items():
+        existing = _load_task(task_id)
+        if existing is None:
+            _insert_task(task)
+        else:
+            # 比较关键字段，有变化才更新
+            changed = {}
+            for key in ("name", "status", "cmd", "started_at", "ended_at", "stats", "error"):
+                if task.get(key) != existing.get(key):
+                    changed[key] = task.get(key)
+            if changed:
+                _update_task(task_id, **changed)
 
 
 # ── TaskManager ─────────────────────────────────────────────
@@ -156,20 +289,17 @@ class TaskManager:
     def submit_task(self, name: str, cmd: list[str]) -> str:
         task_id = uuid.uuid4().hex[:12]
         now = time.time()
-        with _lock():
-            state = _load_state()
-            state["tasks"][task_id] = {
-                "task_id": task_id,
-                "name": name,
-                "status": "pending",
-                "cmd": cmd,
-                "started_at": now,  # pending 也有时间戳，用于排序
-                "ended_at": None,
-                "stats": {},
-                "error": None,
-            }
-            state["pending"].append(task_id)
-            _save_state(state)
+        task = {
+            "task_id": task_id,
+            "name": name,
+            "status": "pending",
+            "cmd": cmd,
+            "started_at": now,
+            "ended_at": None,
+            "stats": {},
+            "error": None,
+        }
+        _insert_task(task)
         # 提交后立刻写一条启动日志，确认任务注册成功
         _append_log(task_id, f"[TASK] 任务已提交: {name}")
         _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
@@ -179,26 +309,22 @@ class TaskManager:
         """提交一个 Python 可调用任务（后台线程执行 + 实时日志流），返回 task_id。
 
         func 签名为 func(log) -> dict：
-          - log(line): 写一行日志到该任务的日志文件；
-          - 返回的 dict 作为最终结果存入 task["stats"]["result"]，供 get_task_result 读取。
-
-        与 submit_task 一样，任务状态持久化到文件，跨 gunicorn 多 worker 可读。
+          - log(line): 写一行日志到该任务的日志；
+          - 返回的 dict 作为最终结果存入 task["stats"]["result"]。
         """
         task_id = uuid.uuid4().hex[:12]
         now = time.time()
-        with _lock():
-            state = _load_state()
-            state["tasks"][task_id] = {
-                "task_id": task_id,
-                "name": name,
-                "status": "pending",
-                "cmd": [],
-                "started_at": now,
-                "ended_at": None,
-                "stats": {},
-                "error": None,
-            }
-            _save_state(state)
+        task = {
+            "task_id": task_id,
+            "name": name,
+            "status": "pending",
+            "cmd": [],
+            "started_at": now,
+            "ended_at": None,
+            "stats": {},
+            "error": None,
+        }
+        _insert_task(task)
         _append_log(task_id, f"[TASK] 任务已提交: {name}")
         threading.Thread(
             target=self._run_func_task, args=(task_id, func), daemon=True
@@ -207,23 +333,14 @@ class TaskManager:
 
     def get_task_result(self, task_id: str):
         """读取函数式任务（submit_func_task）的最终结果，无结果返回 None。"""
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if not task:
-                return None
-            stats = task.get("stats") or {}
-            return stats.get("result")
+        task = _load_task(task_id)
+        if not task:
+            return None
+        stats = task.get("stats") or {}
+        return stats.get("result")
 
     def _run_func_task(self, task_id: str, func) -> None:
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if not task:
-                return
-            task["status"] = "running"
-            task["started_at"] = time.time()
-            _save_state(state)
+        _update_task(task_id, status="running", started_at=time.time())
 
         def log(line: str) -> None:
             _append_log(task_id, str(line))
@@ -234,41 +351,34 @@ class TaskManager:
             result = func(log)
         except Exception as e:
             _append_log(task_id, f"[ERROR] {str(e)[:200]}")
-            with _lock():
-                state = _load_state()
-                task = state["tasks"].get(task_id)
-                if task:
-                    task["ended_at"] = time.time()
-                    task["status"] = "failed"
-                    task["error"] = str(e)[:200]
-                    _save_state(state)
+            _update_task(
+                task_id,
+                ended_at=time.time(),
+                status="failed",
+                error=str(e)[:200],
+            )
             return
 
         _append_log(task_id, "[TASK] 执行完成")
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if task:
-                task["ended_at"] = time.time()
-                task["status"] = "done"
-                if isinstance(result, dict):
-                    task.setdefault("stats", {})["result"] = result
-                _save_state(state)
+        task = _load_task(task_id)
+        if task:
+            stats = task.get("stats") or {}
+            if isinstance(result, dict):
+                stats["result"] = result
+            _update_task(
+                task_id,
+                ended_at=time.time(),
+                status="done",
+                stats=stats,
+            )
 
     def stop_task(self, task_id: str) -> bool:
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if not task:
-                return False
-            if task["status"] in ("done", "failed", "stopped"):
-                return False
-            task["status"] = "stopped"
-            task["ended_at"] = time.time()
-            # 从 pending 队列移除
-            if task_id in state["pending"]:
-                state["pending"].remove(task_id)
-            _save_state(state)
+        task = _load_task(task_id)
+        if not task:
+            return False
+        if task["status"] in ("done", "failed", "stopped"):
+            return False
+        _update_task(task_id, status="stopped", ended_at=time.time())
 
         # 如果是本进程启动的，杀掉进程
         proc = self._local_procs.get(task_id)
@@ -280,8 +390,7 @@ class TaskManager:
         return True
 
     def list_tasks(self, limit: int = 20) -> list[dict]:
-        with _lock():
-            state = _load_state()
+        state = _load_all_tasks()
         items = list(state["tasks"].values())
         # 排序：running > pending > done/failed/stopped，同状态按时间倒序
         status_order = {"running": 0, "pending": 1, "done": 2, "failed": 3, "stopped": 4}
@@ -292,29 +401,22 @@ class TaskManager:
         return [self._serialize(t) for t in items[:limit]]
 
     def get_task(self, task_id: str) -> Optional[dict]:
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if not task:
-                return None
-            return self._serialize(task)
+        task = _load_task(task_id)
+        if not task:
+            return None
+        return self._serialize(task)
 
     def get_task_log(self, task_id: str, limit: int = 200) -> Optional[list[str]]:
-        # 不加锁：只读日志文件就够了，不需要锁状态文件
-        log_path = LOG_DIR / f"{task_id}.log"
-        if not log_path.exists():
-            # 任务可能刚提交，日志还没创建，返回空列表
-            with _lock():
-                state = _load_state()
-                if task_id not in state["tasks"]:
-                    return None
-            return []
+        if not _task_exists(task_id):
+            return None
         return _read_log(task_id, limit)
 
     def running_count(self) -> int:
-        with _lock():
-            state = _load_state()
-            return sum(1 for t in state["tasks"].values() if t["status"] == "running")
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM sys.task WHERE status = 'running'")
+                row = cur.fetchone()
+                return row[0] if row else 0
 
     # ── 内部 ──
 
@@ -339,14 +441,33 @@ class TaskManager:
     def _runner_loop(self):
         while not self._stop_flag:
             task_id = None
-            with _lock():
-                state = _load_state()
-                running = sum(1 for t in state["tasks"].values() if t["status"] == "running")
-                if running < self._max_concurrent and state["pending"]:
-                    task_id = state["pending"].pop(0)
-                    state["tasks"][task_id]["status"] = "running"
-                    state["tasks"][task_id]["started_at"] = time.time()
-                    _save_state(state)
+            # 原子地取一个 pending 任务：用 SELECT ... FOR UPDATE SKIP LOCKED
+            try:
+                with _get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM sys.task WHERE status = 'running'")
+                        running = cur.fetchone()[0]
+                        if running < self._max_concurrent:
+                            cur.execute(
+                                """
+                                SELECT task_id FROM sys.task
+                                WHERE status = 'pending'
+                                ORDER BY started_at ASC
+                                LIMIT 1
+                                FOR UPDATE SKIP LOCKED
+                                """
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                task_id = row[0]
+                                cur.execute(
+                                    "UPDATE sys.task SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE task_id = %s",
+                                    (task_id,),
+                                )
+            except Exception as e:
+                print(f"[TaskManager] runner_loop error: {e}", file=sys.stderr)
+                time.sleep(5)
+                continue
 
             if task_id:
                 threading.Thread(target=self._run_task, args=(task_id,), daemon=True).start()
@@ -355,12 +476,10 @@ class TaskManager:
             time.sleep(1)
 
     def _run_task(self, task_id: str):
-        with _lock():
-            state = _load_state()
-            task = state["tasks"].get(task_id)
-            if not task:
-                return
-            cmd = list(task["cmd"])
+        task = _load_task(task_id)
+        if not task:
+            return
+        cmd = list(task["cmd"])
 
         env = {
             **os.environ,
@@ -393,31 +512,28 @@ class TaskManager:
             returncode = proc.returncode
             self._local_procs.pop(task_id, None)
 
-            with _lock():
-                state = _load_state()
-                task = state["tasks"].get(task_id)
-                if not task:
-                    return
-                if task["status"] == "stopped":
-                    return
-                task["ended_at"] = time.time()
-                task["status"] = "done" if returncode == 0 else "failed"
-                if returncode != 0:
-                    task["error"] = f"exit code {returncode}"
-                _save_state(state)
+            # 重新读取确认状态（可能被 stop 改过）
+            task = _load_task(task_id)
+            if not task:
+                return
+            if task["status"] == "stopped":
+                return
+            _update_task(
+                task_id,
+                ended_at=time.time(),
+                status="done" if returncode == 0 else "failed",
+                error=None if returncode == 0 else f"exit code {returncode}",
+            )
 
         except Exception as e:
             self._local_procs.pop(task_id, None)
             _append_log(task_id, f"[ERROR] {str(e)[:200]}")
-            with _lock():
-                state = _load_state()
-                task = state["tasks"].get(task_id)
-                if not task:
-                    return
-                task["ended_at"] = time.time()
-                task["status"] = "failed"
-                task["error"] = str(e)[:200]
-                _save_state(state)
+            _update_task(
+                task_id,
+                ended_at=time.time(),
+                status="failed",
+                error=str(e)[:200],
+            )
 
     def _try_parse_stats(self, task_id: str, line: str):
         stripped = line.strip()
@@ -457,9 +573,8 @@ class TaskManager:
                 pass
 
         if stats:
-            with _lock():
-                state = _load_state()
-                task = state["tasks"].get(task_id)
-                if task:
-                    task.setdefault("stats", {}).update(stats)
-                    _save_state(state)
+            task = _load_task(task_id)
+            if task:
+                cur_stats = task.get("stats") or {}
+                cur_stats.update(stats)
+                _update_task(task_id, stats=cur_stats)

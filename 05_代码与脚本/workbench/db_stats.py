@@ -454,18 +454,25 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
     合约地址匹配：EVM（0x 开头）大小写不敏感（含部分匹配）；非 EVM（如 Solana
     base58）精确匹配（大小写敏感）。
     """
+    try:
+        return _search_assets_inner(query, limit)
+    except Exception as e:
+        return [{"error": str(e), "notice": "搜索失败，请检查数据库连接"}]
+
+
+def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
                        cb.cmc_id, a.primary_sector,
-                       (rar.api_response->'market_data'->'market_cap_rank')::INT AS market_cap_rank
+                       ci.market_cap_rank
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
                 LEFT JOIN core.asset_source_map asm ON asm.asset_id = a.asset_id
                     AND asm.source_code = 'cg' AND asm.is_primary = TRUE
-                LEFT JOIN raw.cg_asset_response rar ON rar.cg_id = asm.source_asset_key
+                LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 WHERE a.canonical_symbol ILIKE %s
                    OR a.canonical_name ILIKE %s
                    OR EXISTS (
@@ -491,11 +498,7 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         ELSE 3
                     END,
                     -- 市值排名权重：排名越靠前优先级越高，无排名的排最后
-                    CASE
-                        WHEN (rar.api_response->'market_data'->'market_cap_rank')::INT IS NOT NULL
-                        THEN (rar.api_response->'market_data'->'market_cap_rank')::INT
-                        ELSE 999999
-                    END,
+                    COALESCE(ci.market_cap_rank, 999999),
                     a.canonical_symbol
                 LIMIT %s
                 """,
@@ -3255,6 +3258,25 @@ def get_recommendation_backtest(days: int = 30, top_n: int = 10) -> dict:
       - 按赛道分层
       - 最佳/最差推荐
     """
+    try:
+        return _get_recommendation_backtest_inner(days, top_n)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "days": days,
+            "top_n": top_n,
+            "notice": "回测计算失败，请检查数据库表是否完整（需 biz.daily_recommendation、raw.api_response、src_cg.coin_info）",
+            "total_recommendations": 0,
+            "overall": {},
+            "by_score_tier": [],
+            "by_sector": [],
+            "best": [],
+            "worst": [],
+        }
+
+
+def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
     days = max(7, min(180, days))
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -3305,84 +3327,112 @@ def get_recommendation_backtest(days: int = 30, top_n: int = 10) -> dict:
                     "worst": [],
                 }
 
-            # 取每个推荐币的当前价格（优先从 CG 最新 raw 响应取，其次从 asset_market_daily 取）
-            # 注意：daily_recommendation 存的是 symbol+chain，但我们用 asset_id 关联避免 symbol 碰撞
-            # 先收集所有推荐的 (symbol, chain) 对，映射到 asset_id
-            rec_keys = list(set((r["symbol"].upper(), r["chain"]) for r in recs))
-            # 用 symbol+chain 匹配 asset_contract 找 asset_id（优先 primary 合约）
-            placeholders = ",".join(["(%s, %s)"] * len(rec_keys))
-            params = []
-            for sym, ch in rec_keys:
-                params.extend([sym, ch])
-            cur.execute(f"""
-                WITH rec_inputs(sym, chain) AS (
-                    VALUES {placeholders}
-                ),
-                ranked AS (
-                    SELECT a.asset_id, a.canonical_symbol, ac.chain,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY UPPER(a.canonical_symbol), ac.chain
-                               ORDER BY ac.is_primary DESC, ac.contract_id
-                           ) AS rn
-                    FROM rec_inputs ri
-                    JOIN core.asset a ON UPPER(a.canonical_symbol) = UPPER(ri.sym)
-                    JOIN core.asset_contract ac ON ac.asset_id = a.asset_id
-                        AND LOWER(ac.chain) = LOWER(ri.chain)
-                )
-                SELECT asset_id, canonical_symbol, chain
-                INTO TEMP TABLE _rec_assets
-                FROM ranked
-                WHERE rn = 1
-            """, params)
+            # 取每个推荐币的当前价格
+            # 关联路径：daily_recommendation → core.asset_contract (contract+chain) → core.asset
+            #           → core.asset_source_map (cg, is_primary) → raw.api_response (cg/coin_info)
+            # 对于无合约的主流币，fallback 到 src_cg.coin_info 按 symbol+排名取
+            price_map = {}  # key: (symbol_upper, chain_lower), value: current_price
+            asset_id_map = {}  # key: (symbol_upper, chain_lower), value: asset_id
 
-            # 从 CG raw 响应取最新价格（最准确）
-            cur.execute("""
-                SELECT ra.asset_id,
-                       (rar.api_response->'market_data'->'current_price'->>'usd')::NUMERIC AS current_price
-                FROM _rec_assets ra
-                JOIN core.asset_source_map asm ON asm.asset_id = ra.asset_id
-                    AND asm.source_code = 'cg'
-                JOIN raw.cg_asset_response rar ON rar.cg_id = asm.source_asset_key
-                ORDER BY rar.fetched_at DESC
-            """)
-            price_map = {}
-            asset_id_to_symbol = {}
-            for r in cur.fetchall():
-                if r["current_price"]:
-                    price_map[r["asset_id"]] = float(r["current_price"])
+            # 第一步：有合约的币，用 contract+chain 精确匹配
+            rec_with_contract = [r for r in recs if r.get("contract") and r.get("chain")]
+            if rec_with_contract:
+                contract_keys = list(set(
+                    (r["contract"].lower(), (r["chain"] or "").lower())
+                    for r in rec_with_contract
+                ))
+                placeholders = ",".join(["(%s, %s)"] * len(contract_keys))
+                params = []
+                for addr, ch in contract_keys:
+                    params.extend([addr, ch])
 
-            # 降级：从 asset_market_daily 取最近一天的价格
-            if len(price_map) < len(rec_keys):
-                cur.execute("""
-                    SELECT DISTINCT ON (ra.asset_id) ra.asset_id, amd.price_usd
-                    FROM _rec_assets ra
-                    JOIN biz.asset_market_daily amd ON amd.asset_id = ra.asset_id
-                    WHERE ra.asset_id NOT IN (
-                        SELECT UNNEST(%s::BIGINT[])
+                cur.execute(f"""
+                    WITH rec_inputs(contract_address, chain) AS (
+                        VALUES {placeholders}
+                    ),
+                    ranked_contracts AS (
+                        SELECT ac.asset_id, LOWER(ac.contract_address) AS contract_address,
+                               LOWER(ac.chain) AS chain, a.canonical_symbol,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY LOWER(ac.contract_address), LOWER(ac.chain)
+                                   ORDER BY ac.is_primary DESC, ac.contract_id
+                               ) AS rn
+                        FROM rec_inputs ri
+                        JOIN core.asset_contract ac
+                            ON LOWER(ac.contract_address) = ri.contract_address
+                            AND LOWER(ac.chain) = ri.chain
+                        JOIN core.asset a ON a.asset_id = ac.asset_id
+                    ),
+                    primary_sources AS (
+                        SELECT rc.asset_id, rc.canonical_symbol, rc.contract_address, rc.chain,
+                               asm.source_asset_key AS cg_id
+                        FROM ranked_contracts rc
+                        LEFT JOIN core.asset_source_map asm
+                            ON asm.asset_id = rc.asset_id
+                            AND asm.source_code = 'cg'
+                            AND asm.is_primary = TRUE
+                        WHERE rc.rn = 1
                     )
-                    ORDER BY ra.asset_id, amd.market_date DESC
-                """, (list(price_map.keys()) or [0],))
+                    SELECT ps.asset_id, ps.canonical_symbol, ps.contract_address, ps.chain,
+                           ps.cg_id,
+                           (rar.payload->'market_data'->'current_price'->>'usd')::NUMERIC AS current_price
+                    FROM primary_sources ps
+                    LEFT JOIN raw.api_response rar
+                        ON rar.platform_code = 'cg'
+                        AND rar.endpoint_code = 'coin_info'
+                        AND rar.request_key = 'id=' || ps.cg_id
+                    WHERE ps.cg_id IS NOT NULL
+                    ORDER BY rar.fetched_at DESC NULLS LAST
+                """, params)
+
                 for r in cur.fetchall():
-                    if r["price_usd"]:
-                        price_map[r["asset_id"]] = float(r["price_usd"])
+                    key = (r["canonical_symbol"].upper(), r["chain"])
+                    if r["current_price"] and key not in price_map:
+                        price_map[key] = float(r["current_price"])
+                        asset_id_map[key] = r["asset_id"]
 
-            # 建立 symbol+chain -> asset_id 映射，用于后续查找
-            cur.execute("SELECT asset_id, canonical_symbol, chain FROM _rec_assets")
-            sc_to_asset = {}
-            for r in cur.fetchall():
-                key = (r["canonical_symbol"].upper(), r["chain"].lower() if r["chain"] else "")
-                sc_to_asset[key] = r["asset_id"]
+            # 第二步：无合约的主流币，用 symbol + src_cg.coin_info 匹配（取排名最高的）
+            rec_no_contract = [r for r in recs if not r.get("contract") or not r.get("chain")]
+            if rec_no_contract:
+                symbols = list(set(r["symbol"].upper() for r in rec_no_contract))
+                placeholders = ",".join(["%s"] * len(symbols))
+                cur.execute(f"""
+                    WITH ranked_coins AS (
+                        SELECT ci.coin_id, ci.symbol, ci.market_cap_rank,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY UPPER(ci.symbol)
+                                   ORDER BY ci.market_cap_rank NULLS LAST, ci.coin_id
+                               ) AS rn
+                        FROM src_cg.coin_info ci
+                        WHERE UPPER(ci.symbol) IN ({placeholders})
+                    ),
+                    top_coins AS (
+                        SELECT coin_id, UPPER(symbol) AS symbol_upper
+                        FROM ranked_coins
+                        WHERE rn = 1
+                    )
+                    SELECT tc.symbol_upper,
+                           (rar.payload->'market_data'->'current_price'->>'usd')::NUMERIC AS current_price
+                    FROM top_coins tc
+                    LEFT JOIN raw.api_response rar
+                        ON rar.platform_code = 'cg'
+                        AND rar.endpoint_code = 'coin_info'
+                        AND rar.request_key = 'id=' || tc.coin_id
+                    WHERE rar.payload IS NOT NULL
+                    ORDER BY rar.fetched_at DESC NULLS LAST
+                """, symbols)
 
-            cur.execute("DROP TABLE _rec_assets")
+                for r in cur.fetchall():
+                    key = (r["symbol_upper"], "")
+                    if r["current_price"] and key not in price_map:
+                        price_map[key] = float(r["current_price"])
 
             # 计算每个推荐的收益率
             results = []
             for r in recs:
                 rec_price = float(r["price_usd"] or 0)
-                # 用 symbol+chain 找 asset_id，再查价格（避免 symbol 碰撞）
                 key = (r["symbol"].upper(), (r["chain"] or "").lower())
-                asset_id = sc_to_asset.get(key)
-                cur_price = price_map.get(asset_id) if asset_id else None
+                cur_price = price_map.get(key)
                 if not rec_price or not cur_price or rec_price <= 0:
                     continue
                 return_pct = round((cur_price - rec_price) / rec_price * 100, 2)

@@ -84,9 +84,6 @@ CMC_TAG_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "animal-memes": ("meme", 0.9),
     "cat-themed": ("meme", 0.8),
     "doggone-doggerel": ("meme", 0.8),
-    "pump-fun-ecosystem": ("defi", 0.6),  # 发行平台生态，归 DeFi（Launchpad），不是 meme
-    "four-meme-ecosystem": ("meme", 0.8),
-    "ton-meme-coins": ("meme", 0.8),
     # GameFi / NFT
     "gaming": ("gamefi", 0.9),
     "play-to-earn": ("gamefi", 0.9),
@@ -102,8 +99,6 @@ CMC_TAG_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "tradfi-assets-derivatives": ("rwa", 0.8),
     "rehypothecated-crypto": ("rwa", 0.8),
     "tokenized-etfs": ("rwa", 0.8),
-    "ondo-stocks-ecosystem": ("rwa", 0.8),
-    "xstocks-ecosystem": ("rwa", 0.8),
     "real-estate": ("rwa", 0.8),
     # AI
     "ai-big-data": ("ai", 0.9),
@@ -161,7 +156,6 @@ CMC_TAG_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "education": ("infra", 0.3),
     "health": ("ai", 0.4),
     "energy": ("depin", 0.4),
-    "ordinals-brc20-ecosystem": ("infra", 0.4),
     "hybrid-pow-pos": ("l1", 0.4),
     "move-vm": ("l1", 0.5),
     "web3": ("infra", 0.3),
@@ -284,9 +278,6 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "meme": ("meme", 0.9),
     "dog-themed": ("meme", 0.85),
     "cat-themed": ("meme", 0.85),
-    "solana meme": ("meme", 0.85),
-    "base meme": ("meme", 0.8),
-    "pump.fun ecosystem": ("defi", 0.6),  # 发行平台生态，归 DeFi（Launchpad），不是 meme
     "ai meme": ("meme", 0.7),
     # GameFi / NFT
     "gaming (gamefi)": ("gamefi", 0.9),
@@ -308,7 +299,6 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "tokenized exchange-traded funds (etfs)": ("rwa", 0.85),
     "tokenized exchange-traded product (etps)": ("rwa", 0.85),
     "rwa lending": ("rwa", 0.8),
-    "ondo tokenized assets": ("rwa", 0.8),
     # AI
     "artificial intelligence (ai)": ("ai", 0.9),
     "ai agents": ("ai", 0.9),
@@ -379,13 +369,6 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "retail": ("infra", 0.3),
     "charity": ("infra", 0.3),
     "regenerative finance (refi)": ("defi", 0.5),
-    "inscriptions": ("infra", 0.4),
-    "brc-20": ("infra", 0.4),
-    "runes": ("infra", 0.4),
-    "drc-20": ("infra", 0.4),
-    "src-20": ("infra", 0.4),
-    "wrapped-tokens": ("infra", 0.4),
-    "bridged-tokens": ("infra", 0.4),
     "telegram apps": ("infra", 0.4),
     "trading bots": ("infra", 0.5),
     "music": ("infra", 0.3),
@@ -396,7 +379,6 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "btcfi protocol": ("defi", 0.6),
     "surge launchpad": ("defi", 0.5),
     "discord bots": ("infra", 0.4),
-    "base native": ("infra", 0.3),
 }
 
 

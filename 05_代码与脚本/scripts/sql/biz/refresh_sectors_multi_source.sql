@@ -63,8 +63,6 @@ tag_hits AS (
         -- Meme
         ('memes', 'meme', 0.9), ('animal-memes', 'meme', 0.9),
         ('cat-themed', 'meme', 0.8), ('doggone-doggerel', 'meme', 0.8),
-        ('pump-fun-ecosystem', 'meme', 0.9), ('four-meme-ecosystem', 'meme', 0.8),
-        ('ton-meme-coins', 'meme', 0.8),
         -- GameFi
         ('gaming', 'gamefi', 0.9), ('play-to-earn', 'gamefi', 0.9),
         ('metaverse', 'gamefi', 0.8), ('collectibles-nfts', 'gamefi', 0.8),
@@ -74,7 +72,6 @@ tag_hits AS (
         ('real-world-assets-protocols', 'rwa', 0.9), ('tokenized-assets', 'rwa', 0.8),
         ('tokenized-stock', 'rwa', 0.9), ('tradfi-assets-derivatives', 'rwa', 0.8),
         ('rehypothecated-crypto', 'rwa', 0.8), ('tokenized-etfs', 'rwa', 0.8),
-        ('ondo-stocks-ecosystem', 'rwa', 0.8), ('xstocks-ecosystem', 'rwa', 0.8),
         ('real-estate', 'rwa', 0.8),
         -- AI
         ('ai-big-data', 'ai', 0.9), ('ai-agents', 'ai', 0.9),
@@ -114,7 +111,6 @@ tag_hits AS (
         ('education', 'infra', 0.3),
         ('health', 'ai', 0.4),
         ('energy', 'depin', 0.4),
-        ('ordinals-brc20-ecosystem', 'infra', 0.4),
         ('hybrid-pow-pos', 'l1', 0.4),
         ('move-vm', 'l1', 0.5),
         ('web3', 'infra', 0.3)
@@ -226,8 +222,7 @@ cg_hits AS (
         ('yield-bearing stablecoin', 'stablecoin', 0.9),
         -- Meme
         ('meme', 'meme', 0.9), ('dog-themed', 'meme', 0.85),
-        ('cat-themed', 'meme', 0.85), ('solana meme', 'meme', 0.85),
-        ('base meme', 'meme', 0.8), ('pump.fun ecosystem', 'meme', 0.85),
+        ('cat-themed', 'meme', 0.85),
         ('ai meme', 'meme', 0.7), ('parody meme', 'meme', 0.7),
         ('desci meme', 'meme', 0.6),
         -- GameFi
@@ -244,7 +239,7 @@ cg_hits AS (
         ('tokenized stock', 'rwa', 0.9),
         ('tokenized exchange-traded funds (etfs)', 'rwa', 0.85),
         ('tokenized exchange-traded product (etps)', 'rwa', 0.85),
-        ('rwa lending', 'rwa', 0.8), ('ondo tokenized assets', 'rwa', 0.8),
+        ('rwa lending', 'rwa', 0.8),
         ('tokenized btc', 'rwa', 0.7),
         -- AI
         ('artificial intelligence (ai)', 'ai', 0.9),
@@ -284,13 +279,6 @@ cg_hits AS (
         ('retail', 'infra', 0.3),
         ('charity', 'infra', 0.3),
         ('regenerative finance (refi)', 'defi', 0.5),
-        ('inscriptions', 'infra', 0.4),
-        ('brc-20', 'infra', 0.4),
-        ('runes', 'infra', 0.4),
-        ('drc-20', 'infra', 0.4),
-        ('src-20', 'infra', 0.4),
-        ('wrapped-tokens', 'infra', 0.4),
-        ('bridged-tokens', 'infra', 0.4),
         ('telegram apps', 'infra', 0.4),
         ('trading bots', 'infra', 0.5),
         ('music', 'infra', 0.3),
@@ -300,8 +288,7 @@ cg_hits AS (
         ('multiplier denominated tokens', 'defi', 0.4),
         ('btcfi protocol', 'defi', 0.6),
         ('surge launchpad', 'defi', 0.5),
-        ('discord bots', 'infra', 0.4),
-        ('base native', 'infra', 0.3)
+        ('discord bots', 'infra', 0.4)
     ) map(cat_name, sector, confidence) ON lower(c.cat) = lower(map.cat_name)
 ),
 cg_best AS (

@@ -2380,12 +2380,54 @@ def _snapshot_cache_valid(snapshot: dict, updated_at) -> bool:
     return 0 <= age < _SNAPSHOT_TTL_SECONDS
 
 
+def _to_float(v) -> float | None:
+    """安全地将任意类型转为 float，失败返回 None。"""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        v = v.strip()
+        if not v:
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> dict:
     """从 snapshot.structured 实时拼装结构化指标，与 competitors 接口同源。
 
     用于 notebook 读取时覆盖 thesis 里的旧快照市场数据，
     确保页面顶部关键指标与竞品对比表数字一致。
+
+    所有数值统一转为 float，避免 JSON 字段取回为字符串导致前端格式化崩溃。
+    全局 try/except 兜底：单字段异常不影响 notebook 整体返回。
     """
+    try:
+        return _build_structured_metrics_inner(snapshot, asset_id)
+    except Exception as e:
+        # 任何异常都返回空结构，不让 notebook 500
+        import logging
+        logging.getLogger(__name__).warning(
+            f"_build_structured_metrics_from_snapshot failed for asset {asset_id}: {e}"
+        )
+        return {
+            "market": {},
+            "tokenomics": {},
+            "unlock": {},
+            "onchain": {},
+            "social": {},
+            "pressure": {},
+        }
+
+
+def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
     structured = snapshot.get("structured") or {}
     tokenomics = structured.get("tokenomics")
     unlocks = structured.get("unlocks")
@@ -2408,34 +2450,30 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
     market_fdv = None
     market_snapshot_time = None
 
+    def _extract_market(snap: dict) -> tuple:
+        """从快照 dict 提取价格/市值/FDV/时间，统一转 float。"""
+        p = _to_float(snap.get("price") or snap.get("price_usd"))
+        m = _to_float(snap.get("market_cap") or snap.get("market_cap_usd"))
+        f = _to_float(snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation"))
+        t = snap.get("snapshot_time") or snap.get("updated_at") or snap.get("quote_time")
+        return p, m, f, t
+
     # 1. unlock input_snapshot
     if isinstance(unlocks, dict):
         snap = unlocks.get("input_snapshot_json") or {}
-        p = snap.get("price") or snap.get("price_usd")
-        m = snap.get("market_cap") or snap.get("market_cap_usd")
-        f = snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation")
-        t = snap.get("snapshot_time") or snap.get("updated_at") or snap.get("quote_time")
-        if p or m or f:
-            market_price = p
-            market_mcap = m
-            market_fdv = f
-            market_snapshot_time = t
+        p, m, f, t = _extract_market(snap)
+        if p is not None or m is not None or f is not None:
+            market_price, market_mcap, market_fdv, market_snapshot_time = p, m, f, t
 
     # 2. social_heat market_json
-    if (not market_price and not market_mcap) and isinstance(social, dict):
+    if (market_price is None and market_mcap is None) and isinstance(social, dict):
         mj = social.get("market_json") or {}
-        p = mj.get("price") or mj.get("price_usd")
-        m = mj.get("market_cap") or mj.get("market_cap_usd")
-        f = mj.get("fdv") or mj.get("fully_diluted_valuation")
-        t = mj.get("snapshot_time") or mj.get("updated_at") or mj.get("quote_time")
-        if p or m or f:
-            market_price = p
-            market_mcap = m
-            market_fdv = f
-            market_snapshot_time = t
+        p, m, f, t = _extract_market(mj)
+        if p is not None or m is not None or f is not None:
+            market_price, market_mcap, market_fdv, market_snapshot_time = p, m, f, t
 
-    # 3. CMC 最新报价快照
-    if not market_price and not market_mcap:
+    # 3. CMC 最新报价快照（psycopg 返回的是数值类型，无需转）
+    if market_price is None and market_mcap is None:
         try:
             with get_db() as conn:
                 with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -2448,29 +2486,24 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
                     """, (asset_id,))
                     row = cur.fetchone()
                     if row:
-                        market_price = row.get("price_usd")
-                        market_mcap = row.get("market_cap")
-                        market_fdv = row.get("fdv")
-                        market_snapshot_time = str(row.get("quote_time")) if row.get("quote_time") else None
+                        market_price = _to_float(row.get("price_usd"))
+                        market_mcap = _to_float(row.get("market_cap"))
+                        market_fdv = _to_float(row.get("fdv"))
+                        if row.get("quote_time"):
+                            market_snapshot_time = str(row.get("quote_time"))
         except (psycopg.errors.UndefinedTable, Exception):
             pass
 
     # 4. tokenomics 推算
-    if not market_mcap and tokenomics:
-        price = tokenomics.get("price_usd")
-        circ = tokenomics.get("circulating_supply")
-        total = tokenomics.get("total_supply")
-        if price and circ:
-            try:
-                market_price = price
-                market_mcap = float(price) * float(circ)
-            except (ValueError, TypeError):
-                pass
-        if not market_fdv and price and total:
-            try:
-                market_fdv = float(price) * float(total)
-            except (ValueError, TypeError):
-                pass
+    if market_mcap is None and tokenomics:
+        price = _to_float(tokenomics.get("price_usd"))
+        circ = _to_float(tokenomics.get("circulating_supply"))
+        total = _to_float(tokenomics.get("total_supply"))
+        if price is not None and circ is not None:
+            market_price = price
+            market_mcap = price * circ
+        if market_fdv is None and price is not None and total is not None:
+            market_fdv = price * total
 
     if market_price is not None:
         result["market"]["price_usd"] = market_price
@@ -2483,16 +2516,14 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
 
     # ── 代币经济学 ──
     if tokenomics:
-        if tokenomics.get("total_supply"):
-            result["tokenomics"]["total_supply"] = tokenomics["total_supply"]
-        if tokenomics.get("circulating_supply"):
-            result["tokenomics"]["circulating_supply"] = tokenomics["circulating_supply"]
-        if tokenomics.get("max_supply"):
-            result["tokenomics"]["max_supply"] = tokenomics["max_supply"]
-        if tokenomics.get("buy_tax_pct") is not None:
-            result["tokenomics"]["buy_tax_pct"] = tokenomics["buy_tax_pct"]
-        if tokenomics.get("sell_tax_pct") is not None:
-            result["tokenomics"]["sell_tax_pct"] = tokenomics["sell_tax_pct"]
+        for key in ("total_supply", "circulating_supply", "max_supply"):
+            v = _to_float(tokenomics.get(key))
+            if v is not None:
+                result["tokenomics"][key] = v
+        for key in ("buy_tax_pct", "sell_tax_pct"):
+            v = _to_float(tokenomics.get(key))
+            if v is not None:
+                result["tokenomics"][key] = v
 
     # ── 解锁 ──
     if isinstance(unlocks, dict):
@@ -2503,8 +2534,9 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
             next_ev = upcoming[0]
             if next_ev.get("date"):
                 result["unlock"]["next_unlock_date"] = next_ev["date"]
-            if next_ev.get("pct") is not None:
-                result["unlock"]["next_unlock_pct"] = next_ev["pct"]
+            pct = _to_float(next_ev.get("pct"))
+            if pct is not None:
+                result["unlock"]["next_unlock_pct"] = pct
             # 30天解锁比例
             from datetime import datetime, timezone, timedelta
             try:
@@ -2515,7 +2547,7 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
                     try:
                         ed = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00"))
                         if ed <= thirty_days:
-                            pct_30d += float(e.get("pct") or 0)
+                            pct_30d += _to_float(e.get("pct")) or 0
                     except (ValueError, TypeError, KeyError):
                         pass
                 result["unlock"]["unlock_pct_30d"] = round(pct_30d, 4)
@@ -2536,10 +2568,12 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
             elif isinstance(data, dict):
                 latest = data
             if latest:
-                if latest.get("total_holders") is not None:
-                    total_holders = latest["total_holders"]
-                if latest.get("top10_concentration") is not None:
-                    top10 = latest["top10_concentration"]
+                th = _to_float(latest.get("total_holders"))
+                if th is not None:
+                    total_holders = th
+                t10 = _to_float(latest.get("top10_concentration"))
+                if t10 is not None:
+                    top10 = t10
         if chains:
             result["onchain"]["chains"] = chains
         if total_holders is not None:
@@ -2549,25 +2583,27 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
 
     # ── 社交热度 ──
     if isinstance(social, dict):
-        if social.get("score") is not None:
-            result["social"]["social_score"] = social["score"]
-        if social.get("sentiment_score") is not None:
-            result["social"]["sentiment_score"] = social["sentiment_score"]
+        score = _to_float(social.get("score"))
+        if score is not None:
+            result["social"]["social_score"] = score
+        sent = _to_float(social.get("sentiment_score"))
+        if sent is not None:
+            result["social"]["sentiment_score"] = sent
         cj = social.get("community_json") or {}
         x_followers = None
         for plat in ("x", "twitter", "X"):
             if plat in cj and cj[plat].get("followers"):
-                x_followers = cj[plat]["followers"]
+                x_followers = _to_float(cj[plat]["followers"])
                 break
         if x_followers is not None:
             result["social"]["x_followers"] = x_followers
 
     # ── 抛压评分（简化版，用解锁 + Top10 估算）──
     try:
-        pressure = 0
+        pressure = 0.0
         factors = 0
         if result["unlock"].get("unlock_pct_30d") is not None:
-            pct = float(result["unlock"]["unlock_pct_30d"])
+            pct = _to_float(result["unlock"]["unlock_pct_30d"]) or 0
             if pct > 5:
                 pressure += 80
             elif pct > 1:
@@ -2576,7 +2612,7 @@ def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> di
                 pressure += 20
             factors += 1
         if result["onchain"].get("top10_concentration_pct") is not None:
-            t10 = float(result["onchain"]["top10_concentration_pct"])
+            t10 = _to_float(result["onchain"]["top10_concentration_pct"]) or 0
             if t10 > 80:
                 pressure += 90
             elif t10 > 60:
@@ -4609,31 +4645,31 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     # 1. 从 unlock input_snapshot 取（最优先，与 competitors 对齐）
     if isinstance(unlocks, dict):
         snap = unlocks.get("input_snapshot_json") or {}
-        p = snap.get("price") or snap.get("price_usd")
-        m = snap.get("market_cap") or snap.get("market_cap_usd")
-        f = snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation")
+        p = _to_float(snap.get("price") or snap.get("price_usd"))
+        m = _to_float(snap.get("market_cap") or snap.get("market_cap_usd"))
+        f = _to_float(snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation"))
         t = snap.get("snapshot_time") or snap.get("updated_at") or snap.get("quote_time")
-        if p or m or f:
+        if p is not None or m is not None or f is not None:
             market_price = p
             market_mcap = m
             market_fdv = f
             market_snapshot_time = t
 
     # 2. 从 social_heat market_json 取
-    if (not market_price and not market_mcap) and isinstance(social, dict):
+    if (market_price is None and market_mcap is None) and isinstance(social, dict):
         mj = social.get("market_json") or {}
-        p = mj.get("price") or mj.get("price_usd")
-        m = mj.get("market_cap") or mj.get("market_cap_usd")
-        f = mj.get("fdv") or mj.get("fully_diluted_valuation")
+        p = _to_float(mj.get("price") or mj.get("price_usd"))
+        m = _to_float(mj.get("market_cap") or mj.get("market_cap_usd"))
+        f = _to_float(mj.get("fdv") or mj.get("fully_diluted_valuation"))
         t = mj.get("snapshot_time") or mj.get("updated_at") or mj.get("quote_time")
-        if p or m or f:
+        if p is not None or m is not None or f is not None:
             market_price = p
             market_mcap = m
             market_fdv = f
             market_snapshot_time = t
 
     # 3. 从 CMC 最新报价快照取（最可靠的 fallback）
-    if not market_price and not market_mcap:
+    if market_price is None and market_mcap is None:
         try:
             with get_db() as conn:
                 with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -4647,29 +4683,23 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     """, (asset_id,))
                     row = cur.fetchone()
                     if row:
-                        market_price = row.get("price_usd")
-                        market_mcap = row.get("market_cap")
-                        market_fdv = row.get("fdv")
+                        market_price = _to_float(row.get("price_usd"))
+                        market_mcap = _to_float(row.get("market_cap"))
+                        market_fdv = _to_float(row.get("fdv"))
                         market_snapshot_time = str(row.get("quote_time")) if row.get("quote_time") else None
         except (psycopg.errors.UndefinedTable, Exception):
             pass
 
     # 4. 从 tokenomics 推算（价格 * 流通量/总量）
-    if not market_mcap and tokenomics:
-        price = tokenomics.get("price_usd")
-        circ = tokenomics.get("circulating_supply")
-        total = tokenomics.get("total_supply")
-        if price and circ:
-            try:
-                market_price = price
-                market_mcap = float(price) * float(circ)
-            except (ValueError, TypeError):
-                pass
-        if not market_fdv and price and total:
-            try:
-                market_fdv = float(price) * float(total)
-            except (ValueError, TypeError):
-                pass
+    if market_mcap is None and tokenomics:
+        price = _to_float(tokenomics.get("price_usd"))
+        circ = _to_float(tokenomics.get("circulating_supply"))
+        total = _to_float(tokenomics.get("total_supply"))
+        if price is not None and circ is not None:
+            market_price = price
+            market_mcap = price * circ
+        if market_fdv is None and price is not None and total is not None:
+            market_fdv = price * total
 
     if market_price is not None:
         metrics_structured["market"]["price_usd"] = market_price

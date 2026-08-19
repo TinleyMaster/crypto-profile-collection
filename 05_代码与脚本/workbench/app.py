@@ -21,13 +21,16 @@ if os.path.exists("/app/scripts/src"):
     SCRIPTS_BIN = Path("/app/scripts/bin")
     SQL_DIR = Path("/app/scripts/sql")
     TOKENOMICS_IMAGES_ROOT = Path("/app/data/tokenomics_images")
+    DOCS_STORAGE_ROOT = Path(os.getenv("DOCS_STORAGE_ROOT", "/app/docs_storage"))
 else:
     WORKSPACE_ROOT = Path(__file__).resolve().parent  # workbench/
     CODE_ROOT = WORKSPACE_ROOT.parent  # 05_代码与脚本/
+    PROJECT_ROOT = CODE_ROOT.parent  # 项目根目录
     SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
     SCRIPTS_BIN = CODE_ROOT / "scripts" / "bin"
     SQL_DIR = CODE_ROOT / "scripts" / "sql"
     TOKENOMICS_IMAGES_ROOT = CODE_ROOT / "data" / "tokenomics_images"
+    DOCS_STORAGE_ROOT = Path(os.getenv("DOCS_STORAGE_ROOT", str(PROJECT_ROOT / "docs_storage")))
 
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
@@ -681,6 +684,39 @@ def api_asset_tokenomics(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/assets/<int:asset_id>/whitepaper-summary")
+def api_asset_whitepaper_summary(asset_id: int):
+    """获取资产的白皮书结构化摘要。"""
+    try:
+        data = _get_db_stats().get_whitepaper_summary(asset_id)
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/whitepaper/extract/<int:asset_id>", methods=["POST"])
+def api_whitepaper_extract(asset_id: int):
+    """按需提取白皮书摘要。"""
+    force = (request.get_json(silent=True) or {}).get("force") == 1
+
+    def _worker(log):
+        import subprocess
+        cmd = [
+            sys.executable,
+            str(SCRIPTS_BIN / "extract_whitepaper_summary.py"),
+            "--asset_id", str(asset_id),
+        ]
+        if force:
+            cmd.append("--force")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            return {"ok": False, "error": result.stderr[-500:]}
+        return {"ok": True, "data": _get_db_stats().get_whitepaper_summary(asset_id)}
+
+    task_id = task_mgr.submit_func_task(f"白皮书摘要: asset {asset_id}", _worker)
+    return jsonify({"ok": True, "pending": True, "task_id": task_id})
+
+
 @app.route("/api/tokenomics/query/<int:asset_id>", methods=["POST"])
 def api_tokenomics_query(asset_id: int):
     """按需提取代币经济学数据（tokenomics.com 优先，未命中返回 needs_url 供前端弹框）。"""
@@ -724,6 +760,26 @@ def api_tokenomics_image(asset_id: int, filename: str):
     if not directory.is_dir():
         return jsonify({"ok": False, "error": "图片目录不存在"}), 404
     return send_from_directory(directory, filename)
+
+
+@app.route("/api/docs/<path:rel_path>")
+def api_docs_file(rel_path: str):
+    """提供文档存储中的文件（白皮书、审计报告等）。
+
+    storage_path 为相对路径，相对于 DOCS_STORAGE_ROOT。
+    路由格式：/api/docs/btc_2/whitepapers/bitcoin.pdf
+    """
+    # 安全检查：防止路径穿越
+    safe_path = (DOCS_STORAGE_ROOT / rel_path).resolve()
+    try:
+        safe_path.relative_to(DOCS_STORAGE_ROOT.resolve())
+    except ValueError:
+        return jsonify({"ok": False, "error": "非法路径"}), 400
+
+    if not safe_path.is_file():
+        return jsonify({"ok": False, "error": "文件不存在"}), 404
+
+    return send_from_directory(DOCS_STORAGE_ROOT, rel_path)
 
 
 @app.route("/api/assets/<int:asset_id>/reset-deep-crawl", methods=["POST"])

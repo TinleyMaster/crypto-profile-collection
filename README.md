@@ -135,6 +135,26 @@ Phase D: 一键投研（NotebookLM 风格） ← 进行中
 
 **落库字段**：每条链接最终带 `content_topics TEXT[]` + `classify_method TEXT` + `classify_confidence REAL`，供一键投研的 21 类缺失清单精确判定。
 
+**新链接分类的两阶段流程**
+
+B2 深度爬取发现的新链接不是一步到位精确分类，而是「规则初分 → AI 精分」递进：
+
+1. **阶段 0：B2 即时分类（规则，秒级）**
+   - B2 每抓到一个新链接，立刻调用 `classify_link()` 按域名 / URL 关键词规则初分，写入 `content_topics` + `classify_method` + `classify_confidence`。
+   - 域名精确匹配（0.98）/ CMC url_key 元数据（0.9）/ URL 关键词命中（0.6）/ 兜底 `other`（0.3）。
+   - **局限**：很多文档页 URL 路径是语义化的（如 `/getting-started`、`/core-concepts`），不含特征关键词，会被暂标为 `other`（置信度 0.3）。
+
+2. **阶段 1：规则回填（`backfill_classify_links.py`）**
+   - 对存量 `content_topics IS NULL` 的记录，用统一分类器补充分类（利用 CMC url_key 元数据等 B2 时拿不到的信息）。
+   - 纯规则、免费、速度快。
+
+3. **阶段 2：AI 内容分类（`backfill_ai_classify_links.py`，调度器每日 10:00 跑）**
+   - 对阶段 0/1 低置信度项（`classify_method='default'`，即 `content_topics=['other']`），抓页面正文（HTML 去标签 / PDF 抽文本），喂 LLM 做多标签分类。
+   - 回写 `classify_method='ai_content'` + 置信度 + 分类理由。
+   - 抓不到正文的 SPA 页面 → 标 `ai_failed` + `needs_browser=TRUE`，交 B3 无头浏览器重抓后再分类。
+
+**结论**：新爬取的链接刚入库时分类可能不准（尤其是 docs 类很多暂标 `other`），过一天 AI 分类跑完后质量会被修正到可用水平。
+
 **回填脚本**
 - `backfill_classify_links.py`：阶段1，规则 + 元数据（已全量跑通）
 - `backfill_ai_classify_links.py`：阶段2，AI 内容分类（主键分页 + 并发抓正文 + LLM 批量分类 + 断点续跑）
@@ -652,7 +672,16 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 | `ETHERSCAN_API_KEY` | Etherscan API Key（可选，链上数据） | ❌ |
 | `BSCSCAN_API_KEY` | BSCScan API Key（可选，链上数据） | ❌ |
 | `ETHPLORER_API_KEY` | Ethplorer API Key（可选，持仓快照） | ❌ |
-| `OPENAI_API_KEY` / `ARK_API_KEY` | LLM API Key（代币经济学提取 + AI 噪声清理） | ❌ |
+| `OPENAI_API_KEY` / `ARK_API_KEY` | LLM API Key（代币经济学提取 + AI 噪声清理 + AI 链接分类） | ❌ |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_TO` / `SMTP_FROM` | 邮件通知（解锁提醒 + 空头告警 + 调度失败告警），端口 465=SSL / 587=STARTTLS | ❌ |
+| `SERVICE_ROLE` | 服务角色：`web`（默认，gunicorn Web 工作台）或 `scheduler`（调度器常驻进程） | ❌ |
+| `SCHEDULER_TIMEZONE` | 调度器时区，默认 `Asia/Shanghai` | ❌ |
+| `SCHEDULER_ENABLED` | 调度器任务白名单（逗号分隔 key），空=全部启用 | ❌ |
+| `SCHEDULER_LOG_DIR` | 调度器日志目录，默认 `/app/task_state/scheduler` | ❌ |
+| `TREND_DROP_PCT` | 空头趋势跌幅阈值（%），默认 15 | ❌ |
+| `UNLOCK_ALERT_DAYS` | 解锁提前提醒天数，默认 14（分赛道会覆盖） | ❌ |
+| `WHALE_TRANSFER_MIN_USD` | Meme 大户转账告警阈值（美元），默认 100000 | ❌ |
+| `MIN_NEW_ASSET_ID` | B2 新币水位线，只处理 asset_id >= 该值的新资产，老语料跳过 | ❌ |
 
 ### 本地运行
 
@@ -745,13 +774,39 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 
 **环境变量**（可选）：`SCHEDULER_TIMEZONE`（默认 `Asia/Shanghai`）、`SCHEDULER_ENABLED`（逗号分隔 key 白名单，空=全部）、`SCHEDULER_LOG_DIR`（默认 `/app/task_state/scheduler`）。
 
+### B2 自动循环的停止机制（不会无限爬取）
+
+`phase_b2_auto_loop.py` 是「定时启动 → 跑到没东西可爬 → 退出 → 等下一次定时」的模式，有 4 层停止保护：
+
+1. **Pending 数量阈值（主要停止条件）**：每跑完一轮查询待爬数量，全部可爬类型的 pending 低于 **500 条**就自动停。
+2. **最大轮数上限（安全兜底）**：最多跑 **200 轮**强制停，每轮 1000 条上限，总量最多 20 万条。
+3. **单轮超时保护**：单轮最长 **30 分钟**，卡住了强制跳过继续下一轮，不会吊死。
+4. **新币水位线**：只处理 `asset_id >= MIN_NEW_ASSET_ID` 的新资产，老的已成熟语料不会反复爬。
+
+调度器每 6 小时踢一次 B2 自动循环，每次启动后自己跑到 pending < 500 或跑满 200 轮就退出，不会 24 小时不停爬。
+
 ---
 
 ## 部署平台
 
 - **数据库**：Zeabur PostgreSQL
 - **Web 工作台**：Zeabur Docker 部署（默认 `SERVICE_ROLE=web`）
-- **调度**：同一镜像另起一个服务，环境变量设 `SERVICE_ROLE=scheduler` 跑 `python scheduler.py`；手动触发走 Web 工作台任务面板
+- **调度器**：同一镜像另起一个服务，环境变量设 `SERVICE_ROLE=scheduler` 跑 `python scheduler.py`；手动触发走 Web 工作台任务面板
+
+### 新建调度器服务步骤（Zeabur）
+
+调度器和 Web 工作台共用同一个 Docker 镜像，只是启动角色不同，需要在 Zeabur 上**再建一个服务**：
+
+1. 项目页点「+ 添加服务」→ 选 **GitHub** → 选同一个仓库（`crypto-profile-collection`）。
+2. 分支选 `main`，构建方式选 **Dockerfile**（根目录的 `Dockerfile`）。
+3. 服务名建议叫 `crypto-scheduler`。
+4. 部署完成后，进入新服务的「设置」→「环境变量」：
+   - 加一条：`SERVICE_ROLE` = `scheduler`
+   - 把 Web 服务里已有的环境变量（`DATABASE_URL`、`CMC_API_KEY`、`COINGECKO_API_KEY`、`SMTP_*` 等）**全部复制过来**，否则脚本跑起来会缺配置。
+5. 「重新部署」让环境变量生效。
+6. 验证：进「日志」看有没有 `[调度] 启动完成` 的输出；或进「命令」执行 `python scheduler.py --list` 看调度表。
+
+> 调度服务**不需要域名/端口**，是纯后台进程。Zeabur 可能提示「没有健康检查/端口」，属正常现象，只要容器在跑、日志正常即可。
 
 ---
 

@@ -381,6 +381,68 @@
             cursor: not-allowed;
         }
 
+        .r-thesis .t-refs {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid #1e222a;
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .r-thesis .t-refs h4 {
+            margin: 0 0 6px;
+            font-size: 11px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
+
+        .r-thesis .t-refs ol {
+            margin: 0;
+            padding-left: 18px;
+            line-height: 1.6;
+        }
+
+        .r-thesis .t-refs a {
+            color: #60a5fa;
+            text-decoration: none;
+            word-break: break-all;
+        }
+
+        .r-thesis .t-refs a:hover {
+            text-decoration: underline;
+        }
+
+        .r-thesis .t-ref-structured {
+            color: #9ca3af;
+            font-style: italic;
+        }
+
+        .r-thesis .t-collapsible .t-section {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .r-thesis .t-collapsible .t-section::after {
+            content: ' ▼';
+            font-size: 10px;
+            color: #4b5563;
+        }
+
+        .r-thesis .t-collapsible.collapsed .t-section::after {
+            content: ' ▶';
+        }
+
+        .r-thesis .t-collapsible.collapsed .t-body {
+            display: none;
+        }
+
+        .cell-na {
+            color: #4b5563;
+            font-size: 11px;
+        }
+
         /* 竞品对比 */
         .r-competitors {
             background: #171a21;
@@ -1405,6 +1467,8 @@
         function renderThesis (d) {
             const box = document.getElementById('r-thesis');
             const t = d.thesis;
+            const sources = d.sources || [];
+            const structuredMetrics = (t && t.structured_metrics) || d.structured_metrics || {};
             if (!t) {
                 box.style.display = 'block';
                 box.innerHTML = '<div class="t-empty">暂无研究结论</div>' +
@@ -1423,41 +1487,117 @@
                 '<span class="t-conviction">' + (convMap[t.conviction] || t.conviction) + '</span>' +
                 '<span style="margin-left:auto"><button class="t-gen-btn" onclick="generateThesis()">重新生成</button></span>' +
                 '</div>';
+
+            // 关键指标（优先用结构化指标，不用 LLM 生成的）
+            const sm = structuredMetrics || {};
+            const hasStructuredMetrics = sm.market && Object.keys(sm.market).length > 0;
+            if (hasStructuredMetrics) {
+                html += '<div class="t-section">关键指标</div><div class="t-metrics">';
+                if (sm.market.price_usd) {
+                    html += '<div><strong>价格</strong>: ' + fmtUsdPrice(sm.market.price_usd) + '</div>';
+                }
+                if (sm.market.market_cap_usd) {
+                    html += '<div><strong>流通市值</strong>: ' + fmtUsdBig(sm.market.market_cap_usd) + '</div>';
+                }
+                if (sm.market.fdv_usd) {
+                    html += '<div><strong>FDV（完全稀释估值）</strong>: ' + fmtUsdBig(sm.market.fdv_usd) + '</div>';
+                }
+                if (sm.tokenomics.total_supply) {
+                    html += '<div><strong>总供应量</strong>: ' + fmtNumberBig(sm.tokenomics.total_supply) + '</div>';
+                }
+                if (sm.tokenomics.circulating_supply) {
+                    html += '<div><strong>流通量</strong>: ' + fmtNumberBig(sm.tokenomics.circulating_supply) + '</div>';
+                }
+                if (sm.unlock.unlock_pct_30d !== null && sm.unlock.unlock_pct_30d !== undefined) {
+                    html += '<div><strong>30天解锁比例</strong>: ' + fmtPct(sm.unlock.unlock_pct_30d) + '</div>';
+                }
+                if (sm.pressure.pressure_score !== null && sm.pressure.pressure_score !== undefined) {
+                    const riskLvl = sm.pressure.risk_level || '';
+                    html += '<div><strong>抛压评分</strong>: ' + Number(sm.pressure.pressure_score).toFixed(2) +
+                        (riskLvl ? '（' + escapeHtml(riskLvl) + '）' : '') + '</div>';
+                }
+                if (sm.onchain.top10_concentration_pct !== null && sm.onchain.top10_concentration_pct !== undefined) {
+                    html += '<div><strong>Top10持仓集中度</strong>: ' + fmtPct(sm.onchain.top10_concentration_pct) + '</div>';
+                }
+                if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
+                    html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
+                }
+                html += '</div>';
+            } else {
+                const km = t.key_metrics || {};
+                const kmKeys = Object.keys(km);
+                if (kmKeys.length) {
+                    html += '<div class="t-section">关键指标</div><div class="t-metrics">';
+                    kmKeys.forEach(function (k) {
+                        html += '<div><strong>' + escapeHtml(k) + '</strong>: ' + escapeHtml(String(km[k])) + '</div>';
+                    });
+                    html += '</div>';
+                }
+            }
+
             const thesis = t.thesis || [];
             if (thesis.length) {
-                html += '<div class="t-section">核心论点</div>';
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">核心论点</div><div class="t-body">';
                 thesis.forEach(function (p) {
                     const cite = (p.citations || []).map(function (c) { return '[' + c + ']'; }).join('');
                     html += '<div class="t-point">' + escapeHtml(p.point || '') + '<span class="t-cite">' + cite + '</span></div>';
                 });
-            }
-            const km = t.key_metrics || {};
-            const kmKeys = Object.keys(km);
-            if (kmKeys.length) {
-                html += '<div class="t-section">关键指标</div><div class="t-metrics">';
-                kmKeys.forEach(function (k) {
-                    html += '<div><strong>' + escapeHtml(k) + '</strong>: ' + escapeHtml(String(km[k])) + '</div>';
-                });
-                html += '</div>';
+                html += '</div></div>';
             }
             const risks = t.risks || [];
             if (risks.length) {
-                html += '<div class="t-section">风险点</div>';
-                risks.forEach(function (r) { html += '<div class="t-point">' + escapeHtml(r.risk || '') + '</div>'; });
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">风险点</div><div class="t-body">';
+                risks.forEach(function (r) {
+                    const cite = (r.citations || []).map(function (c) { return '[' + c + ']'; }).join('');
+                    html += '<div class="t-point">' + escapeHtml(r.risk || '') + '<span class="t-cite">' + cite + '</span></div>';
+                });
+                html += '</div></div>';
             }
             const cats = t.catalysts || [];
             if (cats.length) {
-                html += '<div class="t-section">催化剂</div>';
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">催化剂</div><div class="t-body">';
                 cats.forEach(function (c) {
                     const timing = c.timing ? ' <span class="t-conviction">(' + escapeHtml(c.timing) + ')</span>' : '';
-                    html += '<div class="t-point">' + escapeHtml(c.catalyst || '') + timing + '</div>';
+                    const cite = (c.citations || []).map(function (ci) { return '[' + ci + ']'; }).join('');
+                    html += '<div class="t-point">' + escapeHtml(c.catalyst || '') + timing + '<span class="t-cite">' + cite + '</span></div>';
                 });
+                html += '</div></div>';
             }
+
+            // 参考文献
+            const allCites = new Set();
+            [].concat(thesis, risks, cats).forEach(function (item) {
+                (item.citations || []).forEach(function (c) { allCites.add(Number(c)); });
+            });
+            if (allCites.size > 0 && sources.length > 0) {
+                html += '<div class="t-refs"><h4>参考文献</h4><ol>';
+                const sortedCites = Array.from(allCites).sort(function (a, b) { return a - b; });
+                sortedCites.forEach(function (idx) {
+                    const src = sources[idx - 1]; // 1-based
+                    if (!src) return;
+                    const title = src.title || src.url || '来源 ' + idx;
+                    if (src.type === 'structured') {
+                        html += '<li><span class="t-ref-structured">' + escapeHtml(title) + '（结构化数据）</span></li>';
+                    } else if (src.url) {
+                        html += '<li><a href="' + attrEscape(src.url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a></li>';
+                    } else {
+                        html += '<li>' + escapeHtml(title) + '</li>';
+                    }
+                });
+                html += '</ol></div>';
+            }
+
             box.style.display = 'block';
             box.innerHTML = html;
         }
 
+        function toggleThesisSection (el) {
+            const parent = el.parentElement;
+            parent.classList.toggle('collapsed');
+        }
+
         async function generateThesis () {
+            if (!confirm('重新生成将覆盖当前研究结论，是否继续？')) return;
             const btn = document.getElementById('t-gen-btn');
             if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
             try {
@@ -1483,10 +1623,11 @@
         let compSortKey = 'market_cap';
         let compSortAsc = false;
 
+        const NA_HTML = '<span class="cell-na">未采集</span>';
         function fmtUsdBig (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             if (n >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
             if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
             if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
@@ -1494,18 +1635,18 @@
             return '$' + n.toFixed(2);
         }
         function fmtUsdPrice (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             if (n >= 1000) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
             if (n >= 1) return '$' + n.toFixed(2);
             if (n >= 0.01) return '$' + n.toFixed(4);
             return '$' + n.toFixed(6);
         }
         function fmtNumberBig (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
             if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
             if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
@@ -1513,21 +1654,21 @@
             return Math.round(n).toLocaleString();
         }
         function fmtPct (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             return n.toFixed(2) + '%';
         }
         function fmtScore (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             return n.toFixed(1);
         }
         function fmtNumber (v) {
-            if (v === null || v === undefined || v === '') return '—';
+            if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
-            if (isNaN(n)) return '—';
+            if (isNaN(n)) return NA_HTML;
             return Math.round(n).toLocaleString();
         }
         function fmtCell (v, format) {
@@ -1538,7 +1679,7 @@
                 case 'pct': return fmtPct(v);
                 case 'score': return fmtScore(v);
                 case 'number': return fmtNumber(v);
-                default: return v !== null && v !== undefined ? String(v) : '—';
+                default: return v !== null && v !== undefined && v !== '' ? String(v) : NA_HTML;
             }
         }
         function cellValue (v) {
@@ -2233,15 +2374,16 @@
             } else {
                 missing.forEach(function (m) {
                     const dot = m.present ? 'ok' : 'miss';
-                    const status = m.present ? '已收集' : '缺失';
+                    const links = m.links || [];
+                    const count = (m.count !== undefined && m.count !== null) ? m.count : links.length;
+                    const status = m.present ? '已收集(' + count + '份)' : '缺失';
                     const color = m.present ? '#10b981' : '#dc2626';
                     const desc = m.description ? ' title="' + attrEscape(m.description) + '"' : '';
-                    const links = m.links || [];
                     side += '<div class="r-group">' +
                         '<div class="r-group-head"' + desc + ' onclick="toggleGroup(this)">' +
                         '<span class="dot ' + dot + '"></span>' +
                         '<span>' + escapeHtml(m.label) + '</span>' +
-                        '<span class="cnt">' + links.length + '</span>' +
+                        '<span class="cnt">' + count + '</span>' +
                         '<span style="margin-left:auto;color:' + color + '">' + status + '</span>' +
                         '<span class="chev">▶</span>' +
                         '</div>' +

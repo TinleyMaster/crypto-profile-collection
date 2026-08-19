@@ -84,7 +84,7 @@ CMC_TAG_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "animal-memes": ("meme", 0.9),
     "cat-themed": ("meme", 0.8),
     "doggone-doggerel": ("meme", 0.8),
-    "pump-fun-ecosystem": ("meme", 0.9),
+    "pump-fun-ecosystem": ("defi", 0.6),  # 发行平台生态，归 DeFi（Launchpad），不是 meme
     "four-meme-ecosystem": ("meme", 0.8),
     "ton-meme-coins": ("meme", 0.8),
     # GameFi / NFT
@@ -286,7 +286,7 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "cat-themed": ("meme", 0.85),
     "solana meme": ("meme", 0.85),
     "base meme": ("meme", 0.8),
-    "pump.fun ecosystem": ("meme", 0.85),
+    "pump.fun ecosystem": ("defi", 0.6),  # 发行平台生态，归 DeFi（Launchpad），不是 meme
     "ai meme": ("meme", 0.7),
     # GameFi / NFT
     "gaming (gamefi)": ("gamefi", 0.9),

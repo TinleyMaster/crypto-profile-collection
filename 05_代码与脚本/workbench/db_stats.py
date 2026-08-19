@@ -72,8 +72,19 @@ def get_db():
             raise
 
 
+_dashboard_cache = None
+_dashboard_cache_ts = 0
+_DASHBOARD_CACHE_TTL = 60  # 秒
+
+
 def get_dashboard_stats() -> dict:
-    """返回仪表盘需要的全部统计数据。"""
+    """返回仪表盘需要的全部统计数据（60秒缓存）。"""
+    global _dashboard_cache, _dashboard_cache_ts
+    import time
+    now = time.time()
+    if _dashboard_cache and (now - _dashboard_cache_ts) < _DASHBOARD_CACHE_TTL:
+        return _dashboard_cache
+
     result = {}
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -141,6 +152,8 @@ def get_dashboard_stats() -> dict:
             )
             result["source_distribution"] = {row[0]: row[1] for row in cur.fetchall()}
 
+    _dashboard_cache = result
+    _dashboard_cache_ts = now
     return result
 
 

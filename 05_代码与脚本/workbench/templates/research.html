@@ -333,6 +333,20 @@
             text-transform: uppercase;
             letter-spacing: 0.5px;
             margin: 10px 0 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .r-thesis .t-snapshot {
+            font-size: 10px;
+            text-transform: none;
+            letter-spacing: 0;
+            color: #9ca3af;
+            background: #1f2937;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: normal;
         }
 
         .r-thesis .t-point {
@@ -1492,7 +1506,11 @@
             const sm = structuredMetrics || {};
             const hasStructuredMetrics = sm.market && Object.keys(sm.market).length > 0;
             if (hasStructuredMetrics) {
-                html += '<div class="t-section">关键指标</div><div class="t-metrics">';
+                let snapshotLabel = '';
+                if (sm.market.snapshot_time) {
+                    snapshotLabel = '<span class="t-snapshot" title="行情数据快照时间">📊 行情截至 ' + escapeHtml(formatTimeAgo(sm.market.snapshot_time)) + '</span>';
+                }
+                html += '<div class="t-section">关键指标' + snapshotLabel + '</div><div class="t-metrics">';
                 if (sm.market.price_usd) {
                     html += '<div><strong>价格</strong>: ' + fmtUsdPrice(sm.market.price_usd) + '</div>';
                 }
@@ -1664,6 +1682,17 @@
             const n = Number(v);
             if (isNaN(n)) return NA_HTML;
             return n.toFixed(1);
+        }
+        function formatTimeAgo (t) {
+            if (!t) return '';
+            const d = new Date(t);
+            if (isNaN(d.getTime())) return String(t).slice(0, 16);
+            const diff = (Date.now() - d.getTime()) / 1000;
+            if (diff < 60) return Math.round(diff) + ' 秒前';
+            if (diff < 3600) return Math.round(diff / 60) + ' 分钟前';
+            if (diff < 86400) return Math.round(diff / 3600) + ' 小时前';
+            if (diff < 86400 * 7) return Math.round(diff / 86400) + ' 天前';
+            return d.toISOString().slice(0, 10);
         }
         function fmtNumber (v) {
             if (v === null || v === undefined || v === '') return NA_HTML;

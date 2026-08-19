@@ -1762,6 +1762,182 @@ def _collect_material_links(sources: list[dict]) -> dict[str, list[dict]]:
     return links
 
 
+def _augment_structured_links(items: list[dict], structured: dict) -> None:
+    """为结构化数据类型补充摘要条目（无 doc_source_entry 链接时）。
+
+    合约地址 → 生成区块浏览器链接
+    链上持仓 → 展示持有者数/Top10 集中度 + 区块浏览器 holder 页
+    社交热度 → 展示评分 + X/twitter 链接（如有）
+    代币经济学 → 展示流通量/总量/燃烧机制摘要
+    解锁数据 → 展示未来 30 天解锁比例/事件数
+    """
+    if not structured:
+        return
+
+    item_map = {it["key"]: it for it in items}
+
+    # 1. 合约地址
+    it = item_map.get("contract_address")
+    if it and it["present"] and not it["links"]:
+        contracts = structured.get("contracts") or []
+        for c in contracts:
+            chain = c.get("chain") or ""
+            addr = c.get("address") or ""
+            if not addr:
+                continue
+            explorer_url = _chain_explorer_token_url(chain, addr)
+            label = f"{chain}: {addr[:8]}…{addr[-6:]}"
+            if c.get("is_primary"):
+                label += "（主合约）"
+            it["links"].append({
+                "title": label,
+                "url": explorer_url,
+                "is_structured": True,
+            })
+
+    # 2. 链上持仓数据
+    it = item_map.get("onchain_holder_data")
+    if it and it["present"] and not it["links"]:
+        onchain = structured.get("onchain") or {}
+        by_chain = onchain.get("by_chain") or {}
+        for chain, data in by_chain.items():
+            if isinstance(data, list) and data:
+                latest = data[-1] if isinstance(data[-1], dict) else {}
+            elif isinstance(data, dict):
+                latest = data
+            else:
+                latest = {}
+            holders = latest.get("total_holders")
+            top10 = latest.get("top10_concentration")
+            parts = []
+            if holders is not None:
+                parts.append(f"持有者 {holders:,.0f}")
+            if top10 is not None:
+                parts.append(f"Top10 集中度 {top10}%")
+            label = f"{chain}: " + (" / ".join(parts) if parts else "已采集")
+            # 尝试生成区块浏览器 holder 页链接
+            contracts = structured.get("contracts") or []
+            primary = next((c for c in contracts if c.get("chain") == chain and c.get("is_primary")), None)
+            url = ""
+            if primary:
+                url = _chain_explorer_holder_url(chain, primary.get("address", ""))
+            it["links"].append({
+                "title": label,
+                "url": url,
+                "is_structured": True,
+            })
+
+    # 3. 社交热度
+    it = item_map.get("social_heat")
+    if it and it["present"] and not it["links"]:
+        social = structured.get("social") or {}
+        score = social.get("score")
+        sentiment = social.get("sentiment_score")
+        parts = []
+        if score is not None:
+            parts.append(f"社交热度分 {score}")
+        if sentiment is not None:
+            parts.append(f"情绪分 {sentiment}")
+        cj = social.get("community_json") or {}
+        x_url = ""
+        for plat in ("x", "twitter", "X"):
+            if plat in cj and cj[plat].get("url"):
+                x_url = cj[plat]["url"]
+                break
+            if plat in cj and cj[plat].get("username"):
+                x_url = f"https://x.com/{cj[plat]['username']}"
+                break
+        label = " / ".join(parts) if parts else "已采集"
+        it["links"].append({
+            "title": label,
+            "url": x_url,
+            "is_structured": True,
+        })
+
+    # 4. 代币经济学
+    it = item_map.get("tokenomics")
+    if it and it["present"] and not it["links"]:
+        tok = structured.get("tokenomics") or {}
+        parts = []
+        if tok.get("circulating_supply"):
+            parts.append(f"流通量 {tok['circulating_supply']:,.0f}")
+        if tok.get("total_supply"):
+            parts.append(f"总量 {tok['total_supply']:,.0f}")
+        if tok.get("burn_info"):
+            bi = tok["burn_info"]
+            if isinstance(bi, dict) and bi.get("burned_pct") is not None:
+                parts.append(f"已燃烧 {bi['burned_pct']}%")
+            elif isinstance(bi, str):
+                parts.append(f"燃烧: {bi[:30]}")
+        label = " / ".join(parts) if parts else "已采集"
+        it["links"].append({
+            "title": label,
+            "url": "",
+            "is_structured": True,
+        })
+
+    # 5. 解锁数据（补充摘要，同时解决 P1-4「0事件误判为缺失」）
+    it = item_map.get("token_unlock_data")
+    if it and it["present"] and not it["links"]:
+        unlocks = structured.get("unlocks")
+        if isinstance(unlocks, dict):
+            events = unlocks.get("events") or unlocks.get("unlock_events_json") or []
+            upcoming = [e for e in events if e.get("is_upcoming")]
+            if upcoming:
+                next_ev = upcoming[0]
+                label = f"未来 30 天 {len(upcoming)} 次解锁 · 下一次: {next_ev.get('date', '?')}"
+                if next_ev.get("pct") is not None:
+                    label += f"（{next_ev['pct']}%）"
+            else:
+                label = "已采集 · 近期无解锁事件"
+                # 0 事件也是有效数据，标记 note 让前端知道不是缺失
+                it["note"] = "no_upcoming_events"
+            it["links"].append({
+                "title": label,
+                "url": "",
+                "is_structured": True,
+            })
+
+
+def _chain_explorer_token_url(chain: str, address: str) -> str:
+    """根据链名生成代币区块浏览器链接。"""
+    if not address:
+        return ""
+    chain_l = (chain or "").lower()
+    if chain_l == "solana":
+        return f"https://solscan.io/token/{address}"
+    if chain_l == "ethereum":
+        return f"https://etherscan.io/token/{address}"
+    if chain_l == "bsc" or chain_l == "bnb":
+        return f"https://bscscan.com/token/{address}"
+    if chain_l == "base":
+        return f"https://basescan.org/token/{address}"
+    if chain_l == "arbitrum":
+        return f"https://arbiscan.io/token/{address}"
+    if chain_l == "polygon":
+        return f"https://polygonscan.com/token/{address}"
+    if chain_l == "avalanche":
+        return f"https://snowtrace.io/token/{address}"
+    if chain_l == "optimism":
+        return f"https://optimistic.etherscan.io/token/{address}"
+    # 默认返回地址（无链接）
+    return ""
+
+
+def _chain_explorer_holder_url(chain: str, address: str) -> str:
+    """根据链名生成代币持有者页面链接。"""
+    if not address:
+        return ""
+    chain_l = (chain or "").lower()
+    if chain_l == "solana":
+        return f"https://solscan.io/token/{address}#holders"
+    if chain_l in ("ethereum", "bsc", "bnb", "base", "arbitrum", "polygon", "avalanche", "optimism"):
+        # Etherscan 系列
+        base = _chain_explorer_token_url(chain, address)
+        return base + "#balances" if base else ""
+    return ""
+
+
 def _compute_missing_materials(snapshot: dict) -> list[dict]:
     """按完整投研清单判断每类资料的收集状态。
 
@@ -1812,7 +1988,8 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     if structured.get("social"):
         structured_counts["social_heat"] = 1
     if unlocks:
-        structured_counts["token_unlock_data"] = len(unlocks.get("events", [])) if isinstance(unlocks, dict) else 1
+        events = unlocks.get("events") or unlocks.get("unlock_events") or unlocks.get("unlock_events_json") or []
+        structured_counts["token_unlock_data"] = len(events) if isinstance(unlocks, dict) else 1
     if structured.get("contracts"):
         structured_counts["contract_address"] = len(structured["contracts"])
     if structured.get("raises"):
@@ -1834,6 +2011,12 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
             "note": "",
             "links": links,
         })
+
+    # ── 结构化数据补充摘要链接 ──
+    # 合约/链上/社交/代币经济 等类型只有结构化数据、没有 doc_source_entry 链接，
+    # 前端会显示「已收集(N份) 暂无链接」造成矛盾。这里从 structured 生成
+    # 摘要条目（带外链或纯文本摘要），让用户点开能看到实际数据。
+    _augment_structured_links(items, structured)
 
     # 分赛道展示：只保留该赛道需要的资料类型，无关类型隐藏。
     sector = snapshot.get("sector") or "other"
@@ -4062,10 +4245,22 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 target["canonical_name"], target["asset_type"],
             ))
             for r in comp_rows:
-                competitors.append(_build_coin(
+                coin = _build_coin(
                     r["asset_id"], r["canonical_symbol"],
                     r["canonical_name"], r["asset_type"],
-                ))
+                )
+                # 过滤全列未采集的噪声行：除基础字段外，所有数据字段都为空/None/0
+                data_fields = ("market_cap", "fdv", "price", "total_supply",
+                               "circulating_supply", "inflation_pct", "unlock_30d_pct",
+                               "top10_concentration", "total_holders", "social_score",
+                               "x_followers", "raise_count", "total_raised",
+                               "buy_tax_pct", "sell_tax_pct", "contract_renounced", "lp_locked")
+                has_any_data = any(
+                    coin.get(f) is not None and coin.get(f) != 0 and coin.get(f) != ""
+                    for f in data_fields
+                )
+                if has_any_data:
+                    competitors.append(coin)
 
             # 5. 指标定义（前端表格列）
             metrics = [
@@ -4179,23 +4374,86 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "pressure": {},
     }
 
-    # 市场数据（从 social_heat market_json 或 unlock snapshot 取）
-    if isinstance(social, dict):
-        mj = social.get("market_json") or {}
-        if mj.get("price") or mj.get("price_usd"):
-            metrics_structured["market"]["price_usd"] = mj.get("price") or mj.get("price_usd")
-        if mj.get("market_cap") or mj.get("market_cap_usd"):
-            metrics_structured["market"]["market_cap_usd"] = mj.get("market_cap") or mj.get("market_cap_usd")
-        if mj.get("fdv") or mj.get("fully_diluted_valuation"):
-            metrics_structured["market"]["fdv_usd"] = mj.get("fdv") or mj.get("fully_diluted_valuation")
-    if not metrics_structured["market"] and isinstance(unlocks, dict):
+    # 市场数据（多源 fallback：unlock snapshot > social_heat market > CMC 快照 > tokenomics推算）
+    # 优先级与 get_sector_competitors 保持一致，确保页面各处行情数字统一
+    market_price = None
+    market_mcap = None
+    market_fdv = None
+    market_snapshot_time = None
+
+    # 1. 从 unlock input_snapshot 取（最优先，与 competitors 对齐）
+    if isinstance(unlocks, dict):
         snap = unlocks.get("input_snapshot_json") or {}
-        if snap.get("price") or snap.get("price_usd"):
-            metrics_structured["market"]["price_usd"] = snap.get("price") or snap.get("price_usd")
-        if snap.get("market_cap") or snap.get("market_cap_usd"):
-            metrics_structured["market"]["market_cap_usd"] = snap.get("market_cap") or snap.get("market_cap_usd")
-        if snap.get("fdv"):
-            metrics_structured["market"]["fdv_usd"] = snap.get("fdv")
+        p = snap.get("price") or snap.get("price_usd")
+        m = snap.get("market_cap") or snap.get("market_cap_usd")
+        f = snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation")
+        t = snap.get("snapshot_time") or snap.get("updated_at") or snap.get("quote_time")
+        if p or m or f:
+            market_price = p
+            market_mcap = m
+            market_fdv = f
+            market_snapshot_time = t
+
+    # 2. 从 social_heat market_json 取
+    if (not market_price and not market_mcap) and isinstance(social, dict):
+        mj = social.get("market_json") or {}
+        p = mj.get("price") or mj.get("price_usd")
+        m = mj.get("market_cap") or mj.get("market_cap_usd")
+        f = mj.get("fdv") or mj.get("fully_diluted_valuation")
+        t = mj.get("snapshot_time") or mj.get("updated_at") or mj.get("quote_time")
+        if p or m or f:
+            market_price = p
+            market_mcap = m
+            market_fdv = f
+            market_snapshot_time = t
+
+    # 3. 从 CMC 最新报价快照取（最可靠的 fallback）
+    if not market_price and not market_mcap:
+        try:
+            with get_db() as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute("""
+                        SELECT cb.asset_id, q.price_usd, q.market_cap, q.fdv,
+                               q.quote_time
+                        FROM biz.coin_basic cb
+                        JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                        WHERE cb.asset_id = %s
+                          AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    """, (asset_id,))
+                    row = cur.fetchone()
+                    if row:
+                        market_price = row.get("price_usd")
+                        market_mcap = row.get("market_cap")
+                        market_fdv = row.get("fdv")
+                        market_snapshot_time = str(row.get("quote_time")) if row.get("quote_time") else None
+        except (psycopg.errors.UndefinedTable, Exception):
+            pass
+
+    # 4. 从 tokenomics 推算（价格 * 流通量/总量）
+    if not market_mcap and tokenomics:
+        price = tokenomics.get("price_usd")
+        circ = tokenomics.get("circulating_supply")
+        total = tokenomics.get("total_supply")
+        if price and circ:
+            try:
+                market_price = price
+                market_mcap = float(price) * float(circ)
+            except (ValueError, TypeError):
+                pass
+        if not market_fdv and price and total:
+            try:
+                market_fdv = float(price) * float(total)
+            except (ValueError, TypeError):
+                pass
+
+    if market_price is not None:
+        metrics_structured["market"]["price_usd"] = market_price
+    if market_mcap is not None:
+        metrics_structured["market"]["market_cap_usd"] = market_mcap
+    if market_fdv is not None:
+        metrics_structured["market"]["fdv_usd"] = market_fdv
+    if market_snapshot_time is not None:
+        metrics_structured["market"]["snapshot_time"] = market_snapshot_time
 
     # 代币经济学
     if tokenomics:
@@ -4313,6 +4571,37 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     risks = est.get("risks") or []
     catalysts = est.get("catalysts") or []
     key_metrics = est.get("key_metrics") or {}
+
+    # ── Citation 后处理校验 ──
+    # 过滤无效引用（越界/重复），补充 title/url，对无有效引用的论点标记为推断
+    def _sanitize_citations(items: list[dict], text_key: str) -> list[dict]:
+        cleaned = []
+        seen_idx = set()
+        for item in items:
+            cites = []
+            for c in item.get("citations") or []:
+                try:
+                    idx = int(c) if isinstance(c, (int, float, str)) else int(c.get("index", 0))
+                except (TypeError, ValueError):
+                    continue
+                if idx < 1 or idx > len(sources) or idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                s = sources[idx - 1]
+                cites.append({
+                    "index": idx,
+                    "title": s.get("title") or s.get("url") or "",
+                    "url": s.get("url") or "",
+                })
+            new_item = dict(item)
+            new_item["citations"] = cites
+            if not cites:
+                new_item["is_inferred"] = True  # 无引用源，标记为推断
+            cleaned.append(new_item)
+        return cleaned
+
+    thesis = _sanitize_citations(thesis, "point")
+    risks = _sanitize_citations(risks, "risk")
 
     with get_db() as conn:
         _ensure_research_tables(conn)

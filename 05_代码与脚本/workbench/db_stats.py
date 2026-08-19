@@ -4979,8 +4979,8 @@ def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h):
 def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     """计算「未来解锁 × 持仓集中度 × 流动性」交叉抛压评分。
 
-    数据来源：biz.asset_token_unlocks（未来 7/30 天解锁占比）+ biz.asset_token_holders
-    （Top10 集中度）+ CoinGecko（市值/24h 交易量算换手率）。结果缓存到
+    数据来源：biz.asset_token_unlocks（未来 7/30 天解锁占比）+ biz.onchain_holder_snapshot
+    （Top10 集中度，取最新快照）+ CoinGecko（市值/24h 交易量算换手率）。结果缓存到
     biz.asset_unlock_pressure，6 小时内命中缓存秒级返回。
     """
     from crypto_research.config import get_settings

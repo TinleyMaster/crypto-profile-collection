@@ -15,7 +15,7 @@
 │                    asset_tokenomics / asset_token_unlocks    │
 │                    onchain_holder_snapshot / transfer_log    │
 │                    onchain_exchange_wallet                   │
-│                    asset_social_heat / asset_token_holders   │
+│                    asset_social_heat / onchain_holder_snapshot   │
 │                    asset_raises / asset_hacks                │
 │                    asset_derivatives / daily_recommendation  │
 │                    doc_source_notebooklm / research_notebook │
@@ -271,7 +271,7 @@ B2 深度爬取发现的新链接不是一步到位精确分类，而是「规�
 |------|------|---------|--------|------|
 | 快照层 | 持仓集中度 / Holder 数 | 每日单次全量 | `biz.onchain_holder_snapshot` | 运行中 |
 | 告警层 | 大额转入交易所 | 后台自动循环 | `biz.onchain_transfer_log` | 已隐藏（大部分链无 API Key） |
-| 明细层 | 持仓 + 大额转账明细 | 投研按需查询 | `biz.asset_token_holders` / `onchain_transfer_log` | 可用 |
+| 明细层 | 持仓 + 大额转账明细 | 投研按需查询 | `biz.onchain_holder_snapshot` / `onchain_transfer_log` | 可用 |
 
 **持仓分布数据来源：** 优先使用区块浏览器 HTML 解析（BSCScan/Etherscan 等 BeautifulSoup 抓取），Base 链优先 Blockscout 免费 REST API；不依赖 Etherscan API（BSCScan 已无免费 API）。
 

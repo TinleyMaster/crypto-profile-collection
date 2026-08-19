@@ -55,3 +55,23 @@ class CMCClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def get_listings_latest(
+        self,
+        start: int = 1,
+        limit: int = 5000,
+        sort: str = "market_cap",
+        convert: str = "USD",
+    ) -> dict[str, Any]:
+        response = self.session.get(
+            f"{self.settings.cmc_base_url}/v1/cryptocurrency/listings/latest",
+            params={
+                "start": start,
+                "limit": limit,
+                "sort": sort,
+                "convert": convert,
+            },
+            timeout=self.settings.request_timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()

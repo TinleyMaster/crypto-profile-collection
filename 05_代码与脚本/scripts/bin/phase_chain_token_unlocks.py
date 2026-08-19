@@ -542,13 +542,17 @@ def _extract_overview(page, slug: str) -> dict:
     if m:
         overview["tge_date"] = m.group(1)
 
-    # Max Total Supply / Total Supply: "Max Total Supply 1,000,000,000"
-    m = re.search(r'Max\s+Total\s+Supply\s*([\d,]+(?:\.\d+)?)', full_text)
+    # Max Total Supply / Total Supply: 支持带单位后缀（M/B/K），如 "Max Total Supply 244.08M"
+    m = re.search(r'Max\s+Total\s+Supply\s*([\d,]+(?:\.\d+)?)\s*([BMKbmk]?)', full_text)
     if m:
-        overview["max_supply_str"] = m.group(1).replace(",", "")
-    m = re.search(r'Total\s+Supply\s*([\d,]+(?:\.\d+)?)', full_text)
+        num = m.group(1).replace(",", "")
+        suffix = m.group(2).upper()
+        overview["max_supply_str"] = num + suffix if suffix else num
+    m = re.search(r'Total\s+Supply\s*([\d,]+(?:\.\d+)?)\s*([BMKbmk]?)', full_text)
     if m:
-        overview["total_amount_str"] = m.group(1).replace(",", "")
+        num = m.group(1).replace(",", "")
+        suffix = m.group(2).upper()
+        overview["total_amount_str"] = num + suffix if suffix else num
 
     # 分配表（Overview 页面的 Allocation Distribution 部分）
     allocations = _extract_allocation(page)

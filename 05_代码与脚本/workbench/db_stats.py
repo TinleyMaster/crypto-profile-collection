@@ -3891,7 +3891,21 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             except psycopg.errors.UndefinedTable:
                 raise_map = {}
 
-            # 3f. 市值/价格（多源 fallback：unlock > social_heat > tokenomics）
+            # 3f. CMC 报价快照 fallback（unlock/social_heat 都没有时用）
+            try:
+                cur.execute("""
+                    SELECT cb.asset_id, q.price_usd, q.market_cap, q.fdv,
+                           q.circulating_supply, q.total_supply, q.max_supply
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = ANY(%s)
+                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                """, (all_ids,))
+                cmc_quote_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+            except psycopg.errors.UndefinedTable:
+                cmc_quote_map = {}
+
+            # 3g. 市值/价格（多源 fallback：unlock > social_heat > cmc_snapshot > tokenomics推算）
             def _get_mcap_price(aid):
                 # 1. 从 unlock input_snapshot 取
                 row = unlock_map.get(aid)
@@ -3911,7 +3925,15 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     fdv = mj.get("fdv") or mj.get("fully_diluted_valuation")
                     if mcap or price:
                         return (mcap or fdv, price, fdv)
-                # 3. 从 tokenomics 推算（价格 * 流通量）
+                # 3. 从 CMC 报价快照取（最可靠的 fallback）
+                q = cmc_quote_map.get(aid)
+                if q:
+                    mcap = q.get("market_cap")
+                    price = q.get("price_usd")
+                    fdv = q.get("fdv")
+                    if mcap or price:
+                        return (mcap, price, fdv)
+                # 4. 从 tokenomics 推算（价格 * 流通量）
                 t = tokenomics_map.get(aid) or {}
                 price = t.get("price_usd")
                 circ = t.get("circulating_supply")
@@ -3975,6 +3997,16 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
 
                 circ_supply = t.get("circulating_supply")
                 total_supply = t.get("total_supply")
+                max_supply = t.get("max_supply")
+                # CMC 快照 fallback（tokenomics 没有时用）
+                q = cmc_quote_map.get(aid)
+                if q:
+                    if not circ_supply and q.get("circulating_supply"):
+                        circ_supply = q["circulating_supply"]
+                    if not total_supply and q.get("total_supply"):
+                        total_supply = q["total_supply"]
+                    if not max_supply and q.get("max_supply"):
+                        max_supply = q["max_supply"]
                 inflation_pct = None
                 if circ_supply and total_supply and float(total_supply) > 0:
                     try:

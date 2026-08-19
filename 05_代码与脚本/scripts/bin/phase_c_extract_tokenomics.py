@@ -657,11 +657,30 @@ def extract_with_llm(llm: LLMClient, asset: dict, doc_contents: list[dict],
 # ── 入库 ──────────────────────────────────────────────────
 
 def _to_int(s) -> int | None:
-    """把 tokenomist 的供应量字符串转成 int（失败返回 None）。"""
+    """把 tokenomist 的供应量字符串转成 int（失败返回 None）。
+
+    支持单位后缀：K=千, M=百万, B=十亿（不区分大小写）。
+    例："244.08M" → 244080000, "1.2B" → 1200000000, "500K" → 500000
+    """
     if s is None:
         return None
     try:
-        return int(float(str(s).replace(",", "").strip()))
+        raw = str(s).replace(",", "").strip()
+        if not raw:
+            return None
+        # 检查单位后缀
+        multiplier = 1
+        if raw[-1].upper() in ("K", "M", "B"):
+            suffix = raw[-1].upper()
+            num_part = raw[:-1]
+            if suffix == "K":
+                multiplier = 1_000
+            elif suffix == "M":
+                multiplier = 1_000_000
+            elif suffix == "B":
+                multiplier = 1_000_000_000
+            return int(float(num_part) * multiplier)
+        return int(float(raw))
     except (ValueError, TypeError):
         return None
 

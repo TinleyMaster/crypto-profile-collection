@@ -217,6 +217,38 @@ def get_cross_validated(limit: int = 30) -> dict:
 
     results = _compute_consensus(binance_idx, cmc_idx, sector_map)
 
+    # 实时数据源都为空时，fallback 到今日存档数据（外部 API 挂了也能展示）
+    if not results and _HAS_DB:
+        try:
+            from db_stats import get_db
+            import psycopg.rows
+            with get_db() as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute("""
+                        SELECT symbol, name, chain, contract, sector,
+                               source_count, composite_score, change_24h,
+                               volume_24h, price_usd AS price, market_cap_usd AS market_cap,
+                               rank
+                        FROM biz.daily_recommendation
+                        WHERE rec_date = CURRENT_DATE
+                        ORDER BY rank ASC
+                        LIMIT %s
+                    """, (max(limit, 100),))
+                    rows = [dict(r) for r in cur.fetchall()]
+                    if rows:
+                        _cache = {"results": rows, "total": len(rows)}
+                        _cache_ts = now
+                        return {
+                            "cached": False,
+                            "results": rows[:limit],
+                            "total": len(rows),
+                            "fetched_at": int(now),
+                            "from_archive": True,
+                            "source_stats": {"binance": 0, "cmc": 0, "both": 0},
+                        }
+        except Exception:
+            pass  # fallback 失败不影响主流程
+
     _cache = {"results": results, "total": len(results)}
     _cache_ts = now
 

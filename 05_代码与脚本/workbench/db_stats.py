@@ -1781,16 +1781,36 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
     present["exchange_listing"] = present["exchange_listing"] or bool(structured.get("exchanges"))
 
     material_links = _collect_material_links(sources)
+    # 结构化数据类型的"已收集数量"（不是文档链接数，而是数据条目数/链数等）
+    structured_counts = {}
+    if tokenomics:
+        structured_counts["tokenomics"] = 1
+    if onchain and onchain.get("by_chain"):
+        structured_counts["onchain_holder_data"] = len(onchain["by_chain"])
+    if structured.get("social"):
+        structured_counts["social_heat"] = 1
+    if unlocks:
+        structured_counts["token_unlock_data"] = len(unlocks.get("events", [])) if isinstance(unlocks, dict) else 1
+    if structured.get("contracts"):
+        structured_counts["contract_address"] = len(structured["contracts"])
+    if structured.get("raises"):
+        structured_counts["team_vc"] = len(structured["raises"])
+    if structured.get("exchanges"):
+        structured_counts["exchange_listing"] = len(structured["exchanges"])
+
     items = []
     for spec in RESEARCH_MATERIAL_TYPES:
         key = spec["key"]
+        links = material_links.get(key, [])
+        count = structured_counts.get(key, len(links))
         items.append({
             "key": key,
             "label": spec["label"],
             "description": spec["description"],
             "present": bool(present.get(key)),
+            "count": count,
             "note": "",
-            "links": material_links.get(key, []),
+            "links": links,
         })
 
     # 分赛道展示：只保留该赛道需要的资料类型，无关类型隐藏。
@@ -3766,14 +3786,18 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             sector = target["primary_sector"] or "other"
 
             # 2. 找同赛道币（排除自己），按市值/FDV 降序取前 N 个
-            #    市值从 biz.coin_basic 或 input_snapshot 里取（降级兼容）
-            cur.execute("""
+            #    额外过滤：meme 赛道排除 asset_type='coin'（主流公链币被误分类的情况）
+            extra_filter = ""
+            if sector == "meme":
+                extra_filter = "AND a.asset_type != 'coin'"
+            cur.execute(f"""
                 WITH sector_assets AS (
                     SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
                            a.primary_sector
                     FROM core.asset a
                     WHERE a.primary_sector = %s
                       AND a.asset_id <> %s
+                      {extra_filter}
                 ),
                 asset_mcap AS (
                     SELECT asset_id,
@@ -3858,20 +3882,48 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             except psycopg.errors.UndefinedTable:
                 raise_map = {}
 
-            # 3f. 市值/价格（从 unlock input_snapshot 降级取）
+            # 3f. 市值/价格（多源 fallback：unlock > social_heat > tokenomics）
             def _get_mcap_price(aid):
+                # 1. 从 unlock input_snapshot 取
                 row = unlock_map.get(aid)
-                if not row:
-                    return (None, None)
-                snap = row.get("input_snapshot_json") or {}
-                mcap = snap.get("market_cap") or snap.get("market_cap_usd")
-                price = snap.get("price") or snap.get("price_usd")
-                fdv = snap.get("fdv") or snap.get("fdv_usd")
-                return (mcap or fdv, price)
+                if row:
+                    snap = row.get("input_snapshot_json") or {}
+                    mcap = snap.get("market_cap") or snap.get("market_cap_usd")
+                    price = snap.get("price") or snap.get("price_usd")
+                    fdv = snap.get("fdv") or snap.get("fdv_usd")
+                    if mcap or price:
+                        return (mcap or fdv, price, fdv)
+                # 2. 从 social_heat market_json 取
+                s = social_map.get(aid)
+                if s:
+                    mj = s.get("market_json") or {}
+                    mcap = mj.get("market_cap") or mj.get("market_cap_usd")
+                    price = mj.get("price") or mj.get("price_usd")
+                    fdv = mj.get("fdv") or mj.get("fully_diluted_valuation")
+                    if mcap or price:
+                        return (mcap or fdv, price, fdv)
+                # 3. 从 tokenomics 推算（价格 * 流通量）
+                t = tokenomics_map.get(aid) or {}
+                price = t.get("price_usd")
+                circ = t.get("circulating_supply")
+                fdv = None
+                mcap = None
+                if price and circ:
+                    try:
+                        mcap = float(price) * float(circ)
+                    except (ValueError, TypeError):
+                        pass
+                total = t.get("total_supply")
+                if price and total:
+                    try:
+                        fdv = float(price) * float(total)
+                    except (ValueError, TypeError):
+                        pass
+                return (mcap, price, fdv)
 
             # 4. 组装竞品列表
             def _build_coin(aid, symbol, name, atype):
-                mcap, price = _get_mcap_price(aid)
+                mcap, price, fdv = _get_mcap_price(aid)
                 t = tokenomics_map.get(aid) or {}
                 o = onchain_map.get(aid) or {}
                 s = social_map.get(aid) or {}
@@ -3930,6 +3982,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     "type": atype,
                     "is_target": aid == asset_id,
                     "market_cap": mcap,
+                    "fdv": fdv,
                     "price": price,
                     "total_supply": total_supply,
                     "circulating_supply": circ_supply,
@@ -3963,6 +4016,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             # 5. 指标定义（前端表格列）
             metrics = [
                 {"key": "market_cap", "label": "市值", "format": "usd_big"},
+                {"key": "fdv", "label": "FDV", "format": "usd_big"},
                 {"key": "price", "label": "价格", "format": "usd_price"},
                 {"key": "total_supply", "label": "总供应量", "format": "number_big"},
                 {"key": "circulating_supply", "label": "流通量", "format": "number_big"},
@@ -4052,22 +4106,124 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     if len(context) > 40000:
         context = context[:40000]
 
-    # 2. 附加抛压评分作为量化辅助
+    # 2. 收集所有结构化指标（强制 LLM 只能引用这些数字，禁止幻觉）
+    structured = snapshot.get("structured") or {}
     pressure = compute_unlock_pressure(asset_id)
-    pressure_txt = ""
+    tokenomics = structured.get("tokenomics") or {}
+    social = structured.get("social") or {}
+    onchain = structured.get("onchain") or {}
+    unlocks = structured.get("unlocks") or {}
+    contracts = structured.get("contracts") or []
+
+    # 组装结构化指标 JSON（LLM 所有数字必须从这里取）
+    metrics_structured = {
+        "market": {},
+        "tokenomics": {},
+        "unlock": {},
+        "onchain": {},
+        "social": {},
+        "pressure": {},
+    }
+
+    # 市场数据（从 social_heat market_json 或 unlock snapshot 取）
+    if isinstance(social, dict):
+        mj = social.get("market_json") or {}
+        if mj.get("price") or mj.get("price_usd"):
+            metrics_structured["market"]["price_usd"] = mj.get("price") or mj.get("price_usd")
+        if mj.get("market_cap") or mj.get("market_cap_usd"):
+            metrics_structured["market"]["market_cap_usd"] = mj.get("market_cap") or mj.get("market_cap_usd")
+        if mj.get("fdv") or mj.get("fully_diluted_valuation"):
+            metrics_structured["market"]["fdv_usd"] = mj.get("fdv") or mj.get("fully_diluted_valuation")
+    if not metrics_structured["market"] and isinstance(unlocks, dict):
+        snap = unlocks.get("input_snapshot_json") or {}
+        if snap.get("price") or snap.get("price_usd"):
+            metrics_structured["market"]["price_usd"] = snap.get("price") or snap.get("price_usd")
+        if snap.get("market_cap") or snap.get("market_cap_usd"):
+            metrics_structured["market"]["market_cap_usd"] = snap.get("market_cap") or snap.get("market_cap_usd")
+        if snap.get("fdv"):
+            metrics_structured["market"]["fdv_usd"] = snap.get("fdv")
+
+    # 代币经济学
+    if tokenomics:
+        if tokenomics.get("total_supply"):
+            metrics_structured["tokenomics"]["total_supply"] = tokenomics["total_supply"]
+        if tokenomics.get("circulating_supply"):
+            metrics_structured["tokenomics"]["circulating_supply"] = tokenomics["circulating_supply"]
+        if tokenomics.get("max_supply"):
+            metrics_structured["tokenomics"]["max_supply"] = tokenomics["max_supply"]
+        if tokenomics.get("buy_tax_pct") is not None:
+            metrics_structured["tokenomics"]["buy_tax_pct"] = tokenomics["buy_tax_pct"]
+        if tokenomics.get("sell_tax_pct") is not None:
+            metrics_structured["tokenomics"]["sell_tax_pct"] = tokenomics["sell_tax_pct"]
+
+    # 解锁数据（结构化，LLM 必须严格引用，禁止自行推演解锁时间/金额）
+    unlock_pct_30d = None
+    if pressure and pressure.get("unlock_pct_30d") is not None:
+        unlock_pct_30d = pressure["unlock_pct_30d"]
+    metrics_structured["unlock"]["unlock_pct_30d"] = unlock_pct_30d
+    if isinstance(unlocks, dict):
+        events = unlocks.get("events") or unlocks.get("unlock_events_json") or []
+        upcoming = [e for e in events if e.get("is_upcoming")]
+        metrics_structured["unlock"]["upcoming_events_count"] = len(upcoming)
+        if upcoming:
+            next_event = upcoming[0]
+            metrics_structured["unlock"]["next_unlock_date"] = next_event.get("date")
+            metrics_structured["unlock"]["next_unlock_pct"] = next_event.get("pct")
+            metrics_structured["unlock"]["next_unlock_value_usd"] = next_event.get("value_usd") or next_event.get("amount_usd")
+        metrics_structured["unlock"]["total_events"] = len(events)
+
+    # 链上持仓
+    if onchain and onchain.get("by_chain"):
+        chains = list(onchain["by_chain"].keys())
+        metrics_structured["onchain"]["chains"] = chains
+        # 取第一条链的集中度数据
+        first_chain = chains[0] if chains else None
+        if first_chain and onchain["by_chain"][first_chain]:
+            cd = onchain["by_chain"][first_chain]
+            if isinstance(cd, list) and cd:
+                latest = cd[-1] if isinstance(cd[-1], dict) else {}
+            elif isinstance(cd, dict):
+                latest = cd
+            else:
+                latest = {}
+            if latest.get("top10_concentration") is not None:
+                metrics_structured["onchain"]["top10_concentration_pct"] = latest["top10_concentration"]
+            if latest.get("total_holders") is not None:
+                metrics_structured["onchain"]["total_holders"] = latest["total_holders"]
+
+    # 社交热度
+    if isinstance(social, dict):
+        if social.get("score") is not None:
+            metrics_structured["social"]["social_score"] = social["score"]
+        if social.get("sentiment_score") is not None:
+            metrics_structured["social"]["sentiment_score"] = social["sentiment_score"]
+        cj = social.get("community_json") or {}
+        for plat in ("x", "twitter", "X"):
+            if plat in cj and cj[plat].get("followers"):
+                metrics_structured["social"]["x_followers"] = cj[plat]["followers"]
+                break
+
+    # 抛压评分
     if pressure:
-        pressure_txt = (
-            f"\n\n[抛压评分（量化参考）]\n"
-            f"风险等级: {pressure.get('risk_level')}, 评分: {pressure.get('pressure_score')}分, "
-            f"未来30天解锁占比: {pressure.get('unlock_pct_30d')}%, "
-            f"Top10持仓集中度: {pressure.get('top10_concentration')}%"
-        )
+        metrics_structured["pressure"]["pressure_score"] = pressure.get("pressure_score")
+        metrics_structured["pressure"]["risk_level"] = pressure.get("risk_level")
+        if pressure.get("top10_concentration") is not None:
+            metrics_structured["pressure"]["top10_concentration_pct"] = pressure["top10_concentration"]
+
+    metrics_json_str = json.dumps(metrics_structured, ensure_ascii=False, indent=2, default=str)
 
     _emit("调用 LLM 生成研究结论...")
     system_prompt = (
-        "你是一名资深加密货币投研分析师。请严格只依据下面「资料库」中的内容，"
-        "输出一个结构化的研究结论 JSON，不要使用资料库之外的知识或猜测。\n"
-        "论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n"
+        "你是一名资深加密货币投研分析师。请严格只依据下面「资料库」和「结构化指标」中的内容，"
+        "输出一个结构化的研究结论 JSON。\n\n"
+        "【绝对禁止规则】\n"
+        "1. 所有数字、百分比、金额、时间点必须直接引用「结构化指标」中的数据，禁止自行推演、估算或编造。\n"
+        "2. 如果结构化指标中某项为 null 或不存在，你不能在结论中写入相关数字，也不能猜测。\n"
+        "3. 解锁风险描述必须严格使用 unlock_pct_30d 和 upcoming_events_count："
+        "   - 若 unlock_pct_30d = 0 或 null，且 upcoming_events_count = 0，则必须写「未来30天无代币解锁」，禁止写存在解锁。\n"
+        "   - 若有解锁，只能引用 next_unlock_date / next_unlock_pct / next_unlock_value_usd 的具体值。\n"
+        "4. 抛压风险等级必须严格使用 pressure.risk_level，不能自行判断高低。\n"
+        "5. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n\n"
         "只输出 JSON，不要输出其他内容。JSON 格式：\n"
         '{"stance": "bullish|bearish|neutral", '
         '"conviction": "high|medium|low", '
@@ -4076,7 +4232,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         '"catalysts": [{"catalyst": "催化剂/事件", "timing": "预期时间"}], '
         '"key_metrics": {"价格": "...", "市值": "...", "FDV": "...", "其他关键指标": "..."}}'
     )
-    user_prompt = f"资料库如下：\n\n{context}{pressure_txt}\n\n请给出该代币的研究结论。"
+    user_prompt = (
+        f"【资料库】\n\n{context}\n\n"
+        f"【结构化指标（所有数字必须从这里取，禁止自行推演）】\n\n{metrics_json_str}\n\n"
+        f"请给出该代币的研究结论。"
+    )
 
     try:
         raw = llm.chat(system_prompt, user_prompt, temperature=0.3, max_tokens=4096)
@@ -4123,7 +4283,9 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         conn.commit()
 
     _emit("研究结论已生成")
-    return {"ok": True, "data": _thesis_row_to_dict(row)}
+    result = _thesis_row_to_dict(row)
+    result["structured_metrics"] = metrics_structured
+    return {"ok": True, "data": result}
 
 
 # ── 链上数据监控 ──

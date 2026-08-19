@@ -224,10 +224,12 @@ FROM src_cmc.cmc_asset_map m
 INNER JOIN core.asset_source_map asm
     ON asm.source_code = 'cmc'
     AND asm.source_asset_key = m.cmc_id::text
+INNER JOIN core.asset a ON a.asset_id = asm.asset_id
 WHERE m.platform_name IS NOT NULL
   AND m.token_address IS NOT NULL
   AND m.token_address != ''
   AND LOWER(m.platform_name) != 'multi-chain'
+  AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
 ON CONFLICT (chain, contract_address) DO UPDATE SET
     asset_id = EXCLUDED.asset_id,
     is_primary = TRUE,
@@ -314,8 +316,10 @@ SELECT
     FALSE AS is_primary,
     'dl' AS source_code
 FROM dl
+INNER JOIN core.asset a ON a.asset_id = dl.asset_id
 WHERE LOWER(contract_address) <> '0x0000000000000000000000000000000000000000'
   AND (addr_chain IS NOT NULL OR LOWER(raw_chain) != 'multi-chain')
+  AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
 ON CONFLICT (chain, contract_address) DO NOTHING
 """
 
@@ -355,7 +359,16 @@ def step3b_populate_cg(settings) -> None:
 
         seen: set[tuple[str, str]] = set()
         insert_rows: list[tuple[int, str, str]] = []
+        # 获取原生币 asset_id 集合，避免给原生币写入非原生合约
+        native_coin_ids: set[int] = set()
+        with conn.cursor() as cur:
+            cur.execute("SELECT asset_id FROM core.asset WHERE asset_type = 'coin'")
+            native_coin_ids = {r["asset_id"] for r in cur.fetchall()}
+
         for row in rows:
+            # 原生币（BTC/ETH/SOL等）不写入非原生链合约，避免污染
+            if row["asset_id"] in native_coin_ids:
+                continue
             platforms = row["platforms"] or {}
             if not isinstance(platforms, dict):
                 continue

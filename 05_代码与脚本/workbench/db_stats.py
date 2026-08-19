@@ -459,9 +459,13 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
             cur.execute(
                 """
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
-                       cb.cmc_id, a.primary_sector
+                       cb.cmc_id, a.primary_sector,
+                       (rar.api_response->'market_data'->'market_cap_rank')::INT AS market_cap_rank
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
+                LEFT JOIN core.asset_source_map asm ON asm.asset_id = a.asset_id
+                    AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                LEFT JOIN raw.cg_asset_response rar ON rar.cg_id = asm.source_asset_key
                 WHERE a.canonical_symbol ILIKE %s
                    OR a.canonical_name ILIKE %s
                    OR EXISTS (
@@ -485,6 +489,12 @@ def search_assets(query: str, limit: int = 20) -> list[dict]:
                         WHEN a.canonical_symbol = UPPER(%s) THEN 1
                         WHEN a.canonical_symbol ILIKE %s THEN 2
                         ELSE 3
+                    END,
+                    -- 市值排名权重：排名越靠前优先级越高，无排名的排最后
+                    CASE
+                        WHEN (rar.api_response->'market_data'->'market_cap_rank')::INT IS NOT NULL
+                        THEN (rar.api_response->'market_data'->'market_cap_rank')::INT
+                        ELSE 999999
                     END,
                     a.canonical_symbol
                 LIMIT %s
@@ -704,6 +714,7 @@ def get_asset_materials(asset_id: int) -> dict:
                     "mime_type": r[5],
                     "file_size_bytes": r[6],
                     "storage_path": r[7],
+                    "local_url": f"/api/docs/{r[7]}" if r[7] else None,
                     "parse_status": r[8],
                     "last_seen_at": str(r[9]) if r[9] else None,
                 }
@@ -844,6 +855,57 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
                 "valuation": row["valuation_json"] or {},
                 "overview": row["overview_json"] or {},
             }
+
+
+def get_whitepaper_summary(asset_id: int) -> list[dict]:
+    """获取资产的白皮书结构化摘要列表。"""
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.doc_id, s.one_liner, s.summary_short, s.summary_long,
+                       s.problem_statement, s.solution, s.core_mechanism,
+                       s.key_innovations, s.tech_stack, s.token_utility,
+                       s.tokenomics_notes, s.team_info, s.investors, s.funding_info,
+                       s.roadmap, s.key_milestones, s.risks, s.challenges,
+                       s.confidence, s.extraction_notes,
+                       d.file_name, d.storage_path
+                FROM biz.doc_whitepaper_summary s
+                JOIN biz.doc_asset d ON d.doc_id = s.doc_id
+                WHERE s.asset_id = %s
+                ORDER BY s.confidence DESC NULLS LAST, s.id
+                """,
+                (asset_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "doc_id": r["doc_id"],
+                    "file_name": r["file_name"],
+                    "local_url": f"/api/docs/{r['storage_path']}" if r["storage_path"] else None,
+                    "one_liner": r["one_liner"],
+                    "summary_short": r["summary_short"],
+                    "summary_long": r["summary_long"],
+                    "problem_statement": r["problem_statement"],
+                    "solution": r["solution"],
+                    "core_mechanism": r["core_mechanism"],
+                    "key_innovations": r["key_innovations"] or [],
+                    "tech_stack": r["tech_stack"] or [],
+                    "token_utility": r["token_utility"],
+                    "tokenomics_notes": r["tokenomics_notes"],
+                    "team_info": r["team_info"],
+                    "investors": r["investors"] or [],
+                    "funding_info": r["funding_info"],
+                    "roadmap": r["roadmap"],
+                    "key_milestones": r["key_milestones"] or [],
+                    "risks": r["risks"] or [],
+                    "challenges": r["challenges"],
+                    "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+                    "extraction_notes": r["extraction_notes"],
+                }
+                for r in rows
+            ]
 
 
 def query_tokenomics(asset_id: int, force: bool = False, log=None) -> dict:
@@ -1496,7 +1558,8 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
             ]
 
             cur.execute("""
-                SELECT doc_id, doc_type, source_url, resolved_url, file_name, mime_type, parse_status, content_topics
+                SELECT doc_id, doc_type, source_url, resolved_url, file_name, mime_type,
+                       storage_path, parse_status, content_topics
                 FROM biz.doc_asset WHERE asset_id = %s
                 ORDER BY CASE doc_type WHEN 'whitepaper' THEN 1 WHEN 'tokenomics' THEN 2 WHEN 'audit' THEN 3 ELSE 4 END, doc_id
             """, (asset_id,))
@@ -1508,6 +1571,8 @@ def _collect_asset_snapshot(asset_id: int) -> dict | None:
                     "resolved_url": r["resolved_url"],
                     "file_name": r["file_name"],
                     "mime_type": r["mime_type"],
+                    "storage_path": r["storage_path"],
+                    "local_url": f"/api/docs/{r['storage_path']}" if r["storage_path"] else None,
                     "parse_status": r["parse_status"],
                     "content_topics": r["content_topics"] or [],
                 }
@@ -3240,25 +3305,84 @@ def get_recommendation_backtest(days: int = 30, top_n: int = 10) -> dict:
                     "worst": [],
                 }
 
-            # 取每个推荐币的当前价格（从 social_heat.market_json 降级取）
-            symbols = list(set(r["symbol"].upper() for r in recs))
+            # 取每个推荐币的当前价格（优先从 CG 最新 raw 响应取，其次从 asset_market_daily 取）
+            # 注意：daily_recommendation 存的是 symbol+chain，但我们用 asset_id 关联避免 symbol 碰撞
+            # 先收集所有推荐的 (symbol, chain) 对，映射到 asset_id
+            rec_keys = list(set((r["symbol"].upper(), r["chain"]) for r in recs))
+            # 用 symbol+chain 匹配 asset_contract 找 asset_id（优先 primary 合约）
+            placeholders = ",".join(["(%s, %s)"] * len(rec_keys))
+            params = []
+            for sym, ch in rec_keys:
+                params.extend([sym, ch])
+            cur.execute(f"""
+                WITH rec_inputs(sym, chain) AS (
+                    VALUES {placeholders}
+                ),
+                ranked AS (
+                    SELECT a.asset_id, a.canonical_symbol, ac.chain,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY UPPER(a.canonical_symbol), ac.chain
+                               ORDER BY ac.is_primary DESC, ac.contract_id
+                           ) AS rn
+                    FROM rec_inputs ri
+                    JOIN core.asset a ON UPPER(a.canonical_symbol) = UPPER(ri.sym)
+                    JOIN core.asset_contract ac ON ac.asset_id = a.asset_id
+                        AND LOWER(ac.chain) = LOWER(ri.chain)
+                )
+                SELECT asset_id, canonical_symbol, chain
+                INTO TEMP TABLE _rec_assets
+                FROM ranked
+                WHERE rn = 1
+            """, params)
+
+            # 从 CG raw 响应取最新价格（最准确）
             cur.execute("""
-                SELECT a.canonical_symbol,
-                       (sh.market_json->>'price_usd')::NUMERIC AS current_price
-                FROM core.asset a
-                LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = a.asset_id
-                WHERE UPPER(a.canonical_symbol) = ANY(%s)
-            """, (symbols,))
+                SELECT ra.asset_id,
+                       (rar.api_response->'market_data'->'current_price'->>'usd')::NUMERIC AS current_price
+                FROM _rec_assets ra
+                JOIN core.asset_source_map asm ON asm.asset_id = ra.asset_id
+                    AND asm.source_code = 'cg'
+                JOIN raw.cg_asset_response rar ON rar.cg_id = asm.source_asset_key
+                ORDER BY rar.fetched_at DESC
+            """)
             price_map = {}
+            asset_id_to_symbol = {}
             for r in cur.fetchall():
                 if r["current_price"]:
-                    price_map[r["canonical_symbol"].upper()] = float(r["current_price"])
+                    price_map[r["asset_id"]] = float(r["current_price"])
+
+            # 降级：从 asset_market_daily 取最近一天的价格
+            if len(price_map) < len(rec_keys):
+                cur.execute("""
+                    SELECT DISTINCT ON (ra.asset_id) ra.asset_id, amd.price_usd
+                    FROM _rec_assets ra
+                    JOIN biz.asset_market_daily amd ON amd.asset_id = ra.asset_id
+                    WHERE ra.asset_id NOT IN (
+                        SELECT UNNEST(%s::BIGINT[])
+                    )
+                    ORDER BY ra.asset_id, amd.market_date DESC
+                """, (list(price_map.keys()) or [0],))
+                for r in cur.fetchall():
+                    if r["price_usd"]:
+                        price_map[r["asset_id"]] = float(r["price_usd"])
+
+            # 建立 symbol+chain -> asset_id 映射，用于后续查找
+            cur.execute("SELECT asset_id, canonical_symbol, chain FROM _rec_assets")
+            sc_to_asset = {}
+            for r in cur.fetchall():
+                key = (r["canonical_symbol"].upper(), r["chain"].lower() if r["chain"] else "")
+                sc_to_asset[key] = r["asset_id"]
+
+            cur.execute("DROP TABLE _rec_assets")
 
             # 计算每个推荐的收益率
             results = []
             for r in recs:
                 rec_price = float(r["price_usd"] or 0)
-                cur_price = price_map.get(r["symbol"].upper())
+                # 用 symbol+chain 找 asset_id，再查价格（避免 symbol 碰撞）
+                key = (r["symbol"].upper(), (r["chain"] or "").lower())
+                asset_id = sc_to_asset.get(key)
+                cur_price = price_map.get(asset_id) if asset_id else None
                 if not rec_price or not cur_price or rec_price <= 0:
                     continue
                 return_pct = round((cur_price - rec_price) / rec_price * 100, 2)
@@ -4099,6 +4223,9 @@ def get_onchain_transfers(
                 conditions.append("tl.is_to_exchange = %s")
                 params.append(is_to_exchange)
 
+            # 排除测试数据
+            conditions.append("tl.tx_hash NOT LIKE '0xtest%'")
+
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
             cur.execute(f"""
@@ -4135,10 +4262,22 @@ def get_onchain_transfers(
 
 
 def get_onchain_alert_summary() -> dict:
-    """获取链上告警摘要：最近 24h 转入交易所的大额转账统计。"""
+    """获取链上告警摘要：最近 24h 转入交易所的大额转账统计。
+
+    自动过滤测试数据（tx_hash 以 0xtest 开头），并返回采集状态。
+    """
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # 24h 转入交易所汇总
+            # 先判断链上采集是否已启用（有真实数据才算启用）
+            cur.execute("""
+                SELECT COUNT(*) AS real_count
+                FROM biz.onchain_transfer_log
+                WHERE tx_hash NOT LIKE '0xtest%'
+            """)
+            real_count = cur.fetchone()["real_count"] or 0
+            is_enabled = real_count > 0
+
+            # 24h 转入交易所汇总（排除测试数据）
             cur.execute("""
                 SELECT a.canonical_symbol, tl.chain,
                        COUNT(*) AS tx_count,
@@ -4149,6 +4288,7 @@ def get_onchain_alert_summary() -> dict:
                 LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
                 WHERE tl.is_to_exchange = TRUE
                   AND tl.block_timestamp >= NOW() - INTERVAL '24 hours'
+                  AND tl.tx_hash NOT LIKE '0xtest%'
                 GROUP BY a.canonical_symbol, tl.chain
                 ORDER BY total_value_usd DESC NULLS LAST
                 LIMIT 20
@@ -4165,18 +4305,21 @@ def get_onchain_alert_summary() -> dict:
                 for r in cur.fetchall()
             ]
 
-            # 总览
+            # 总览（排除测试数据）
             cur.execute("""
                 SELECT
                     COUNT(*) AS total_transfers,
                     COUNT(*) FILTER (WHERE is_to_exchange) AS to_exchange_count,
                     COALESCE(SUM(value_usd), 0) AS total_value_usd
                 FROM biz.onchain_transfer_log
+                WHERE tx_hash NOT LIKE '0xtest%'
             """)
             totals = dict(cur.fetchone()) if cur.rowcount else {}
 
     return {
         "ok": True,
+        "is_enabled": is_enabled,
+        "notice": "" if is_enabled else "链上大额转账采集尚未启用，当前无真实数据",
         "alerts_24h": alerts_24h,
         "totals": {
             "total_transfers": totals.get("total_transfers", 0),

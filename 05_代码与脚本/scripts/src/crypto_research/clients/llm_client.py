@@ -202,6 +202,16 @@ class LLMClient:
             timeout=self.settings.request_timeout_seconds,
         )
         resp.raise_for_status()
+
+        # 内容类型校验：防止代理/网关返回 HTML 错误页被当成 JSON 解析
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" not in content_type.lower():
+            snippet = resp.text[:500]
+            raise RuntimeError(
+                f"LLM API 返回非 JSON 响应 (Content-Type: {content_type})。"
+                f"状态码: {resp.status_code}，前 500 字符: {snippet}"
+            )
+
         data = resp.json()
         self._last_full_response = data
 
@@ -244,6 +254,16 @@ class LLMClient:
             timeout=self.settings.request_timeout_seconds,
         )
         resp.raise_for_status()
+
+        # 内容类型校验：防止代理/网关返回 HTML 错误页被当成 JSON 解析
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" not in content_type.lower():
+            snippet = resp.text[:500]
+            raise RuntimeError(
+                f"LLM API 返回非 JSON 响应 (Content-Type: {content_type})。"
+                f"状态码: {resp.status_code}，前 500 字符: {snippet}"
+            )
+
         data = resp.json()
         self._last_full_response = data  # 保存完整响应用于调试
 

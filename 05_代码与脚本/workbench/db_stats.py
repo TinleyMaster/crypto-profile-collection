@@ -1782,7 +1782,7 @@ def _augment_structured_links(items: list[dict], structured: dict) -> None:
         contracts = structured.get("contracts") or []
         for c in contracts:
             chain = c.get("chain") or ""
-            addr = c.get("address") or ""
+            addr = c.get("contract_address") or c.get("address") or ""
             if not addr:
                 continue
             explorer_url = _chain_explorer_token_url(chain, addr)
@@ -2380,6 +2380,222 @@ def _snapshot_cache_valid(snapshot: dict, updated_at) -> bool:
     return 0 <= age < _SNAPSHOT_TTL_SECONDS
 
 
+def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> dict:
+    """从 snapshot.structured 实时拼装结构化指标，与 competitors 接口同源。
+
+    用于 notebook 读取时覆盖 thesis 里的旧快照市场数据，
+    确保页面顶部关键指标与竞品对比表数字一致。
+    """
+    structured = snapshot.get("structured") or {}
+    tokenomics = structured.get("tokenomics")
+    unlocks = structured.get("unlocks")
+    social = structured.get("social")
+    onchain = structured.get("onchain")
+
+    result = {
+        "market": {},
+        "tokenomics": {},
+        "unlock": {},
+        "onchain": {},
+        "social": {},
+        "pressure": {},
+    }
+
+    # ── 市场数据（多源 fallback：unlock > social > CMC快照 > tokenomics推算）──
+    # 优先级与 get_sector_competitors 完全对齐
+    market_price = None
+    market_mcap = None
+    market_fdv = None
+    market_snapshot_time = None
+
+    # 1. unlock input_snapshot
+    if isinstance(unlocks, dict):
+        snap = unlocks.get("input_snapshot_json") or {}
+        p = snap.get("price") or snap.get("price_usd")
+        m = snap.get("market_cap") or snap.get("market_cap_usd")
+        f = snap.get("fdv") or snap.get("fdv_usd") or snap.get("fully_diluted_valuation")
+        t = snap.get("snapshot_time") or snap.get("updated_at") or snap.get("quote_time")
+        if p or m or f:
+            market_price = p
+            market_mcap = m
+            market_fdv = f
+            market_snapshot_time = t
+
+    # 2. social_heat market_json
+    if (not market_price and not market_mcap) and isinstance(social, dict):
+        mj = social.get("market_json") or {}
+        p = mj.get("price") or mj.get("price_usd")
+        m = mj.get("market_cap") or mj.get("market_cap_usd")
+        f = mj.get("fdv") or mj.get("fully_diluted_valuation")
+        t = mj.get("snapshot_time") or mj.get("updated_at") or mj.get("quote_time")
+        if p or m or f:
+            market_price = p
+            market_mcap = m
+            market_fdv = f
+            market_snapshot_time = t
+
+    # 3. CMC 最新报价快照
+    if not market_price and not market_mcap:
+        try:
+            with get_db() as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute("""
+                        SELECT cb.asset_id, q.price_usd, q.market_cap, q.fdv, q.quote_time
+                        FROM biz.coin_basic cb
+                        JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                        WHERE cb.asset_id = %s
+                          AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    """, (asset_id,))
+                    row = cur.fetchone()
+                    if row:
+                        market_price = row.get("price_usd")
+                        market_mcap = row.get("market_cap")
+                        market_fdv = row.get("fdv")
+                        market_snapshot_time = str(row.get("quote_time")) if row.get("quote_time") else None
+        except (psycopg.errors.UndefinedTable, Exception):
+            pass
+
+    # 4. tokenomics 推算
+    if not market_mcap and tokenomics:
+        price = tokenomics.get("price_usd")
+        circ = tokenomics.get("circulating_supply")
+        total = tokenomics.get("total_supply")
+        if price and circ:
+            try:
+                market_price = price
+                market_mcap = float(price) * float(circ)
+            except (ValueError, TypeError):
+                pass
+        if not market_fdv and price and total:
+            try:
+                market_fdv = float(price) * float(total)
+            except (ValueError, TypeError):
+                pass
+
+    if market_price is not None:
+        result["market"]["price_usd"] = market_price
+    if market_mcap is not None:
+        result["market"]["market_cap_usd"] = market_mcap
+    if market_fdv is not None:
+        result["market"]["fdv_usd"] = market_fdv
+    if market_snapshot_time is not None:
+        result["market"]["snapshot_time"] = market_snapshot_time
+
+    # ── 代币经济学 ──
+    if tokenomics:
+        if tokenomics.get("total_supply"):
+            result["tokenomics"]["total_supply"] = tokenomics["total_supply"]
+        if tokenomics.get("circulating_supply"):
+            result["tokenomics"]["circulating_supply"] = tokenomics["circulating_supply"]
+        if tokenomics.get("max_supply"):
+            result["tokenomics"]["max_supply"] = tokenomics["max_supply"]
+        if tokenomics.get("buy_tax_pct") is not None:
+            result["tokenomics"]["buy_tax_pct"] = tokenomics["buy_tax_pct"]
+        if tokenomics.get("sell_tax_pct") is not None:
+            result["tokenomics"]["sell_tax_pct"] = tokenomics["sell_tax_pct"]
+
+    # ── 解锁 ──
+    if isinstance(unlocks, dict):
+        events = unlocks.get("events") or unlocks.get("unlock_events") or unlocks.get("unlock_events_json") or []
+        upcoming = [e for e in events if e.get("is_upcoming")]
+        result["unlock"]["upcoming_events_count"] = len(upcoming)
+        if upcoming:
+            next_ev = upcoming[0]
+            if next_ev.get("date"):
+                result["unlock"]["next_unlock_date"] = next_ev["date"]
+            if next_ev.get("pct") is not None:
+                result["unlock"]["next_unlock_pct"] = next_ev["pct"]
+            # 30天解锁比例
+            from datetime import datetime, timezone, timedelta
+            try:
+                now = datetime.now(timezone.utc)
+                thirty_days = now + timedelta(days=30)
+                pct_30d = 0.0
+                for e in upcoming:
+                    try:
+                        ed = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00"))
+                        if ed <= thirty_days:
+                            pct_30d += float(e.get("pct") or 0)
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                result["unlock"]["unlock_pct_30d"] = round(pct_30d, 4)
+            except Exception:
+                pass
+
+    # ── 链上持仓 ──
+    if isinstance(onchain, dict):
+        by_chain = onchain.get("by_chain") or {}
+        chains = []
+        total_holders = None
+        top10 = None
+        for chain, data in by_chain.items():
+            chains.append(chain)
+            latest = None
+            if isinstance(data, list) and data:
+                latest = data[-1] if isinstance(data[-1], dict) else None
+            elif isinstance(data, dict):
+                latest = data
+            if latest:
+                if latest.get("total_holders") is not None:
+                    total_holders = latest["total_holders"]
+                if latest.get("top10_concentration") is not None:
+                    top10 = latest["top10_concentration"]
+        if chains:
+            result["onchain"]["chains"] = chains
+        if total_holders is not None:
+            result["onchain"]["total_holders"] = total_holders
+        if top10 is not None:
+            result["onchain"]["top10_concentration_pct"] = top10
+
+    # ── 社交热度 ──
+    if isinstance(social, dict):
+        if social.get("score") is not None:
+            result["social"]["social_score"] = social["score"]
+        if social.get("sentiment_score") is not None:
+            result["social"]["sentiment_score"] = social["sentiment_score"]
+        cj = social.get("community_json") or {}
+        x_followers = None
+        for plat in ("x", "twitter", "X"):
+            if plat in cj and cj[plat].get("followers"):
+                x_followers = cj[plat]["followers"]
+                break
+        if x_followers is not None:
+            result["social"]["x_followers"] = x_followers
+
+    # ── 抛压评分（简化版，用解锁 + Top10 估算）──
+    try:
+        pressure = 0
+        factors = 0
+        if result["unlock"].get("unlock_pct_30d") is not None:
+            pct = float(result["unlock"]["unlock_pct_30d"])
+            if pct > 5:
+                pressure += 80
+            elif pct > 1:
+                pressure += 50
+            elif pct > 0.1:
+                pressure += 20
+            factors += 1
+        if result["onchain"].get("top10_concentration_pct") is not None:
+            t10 = float(result["onchain"]["top10_concentration_pct"])
+            if t10 > 80:
+                pressure += 90
+            elif t10 > 60:
+                pressure += 60
+            elif t10 > 40:
+                pressure += 30
+            factors += 1
+        if factors > 0:
+            score = round(pressure / factors, 1)
+            result["pressure"]["pressure_score"] = score
+            result["pressure"]["risk_level"] = (
+                "high" if score >= 70 else "medium" if score >= 40 else "low"
+            )
+    except Exception:
+        pass
+
+    return result
+
+
 def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) -> dict:
     """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。
 
@@ -2459,6 +2675,14 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
         conn.commit()
 
     sector = snapshot.get("sector") or "other"
+    thesis = get_latest_research_thesis(asset_id)
+
+    # 实时拼装结构化指标（与 competitors 同源），覆盖 thesis 里的旧快照值
+    # 确保页面顶部关键指标与竞品对比表的行情数字一致
+    structured_metrics = _build_structured_metrics_from_snapshot(snapshot, asset_id)
+    if thesis:
+        thesis["structured_metrics"] = structured_metrics
+
     return {
         "ok": True,
         "data": {
@@ -2470,9 +2694,10 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             "missing": missing,
             "sources": snapshot["sources"],
             "structured": snapshot["structured"],
+            "structured_metrics": structured_metrics,
             "counts": snapshot["counts"],
             "messages": messages,
-            "thesis": get_latest_research_thesis(asset_id),
+            "thesis": thesis,
             "created_at": str(notebook["created_at"]),
             "updated_at": str(notebook["updated_at"]),
         },

@@ -465,6 +465,13 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 """
+                WITH latest_cmc AS (
+                    SELECT cmc_id, market_cap
+                    FROM src_cmc.cmc_asset_quote_snapshot
+                    WHERE quote_time = (
+                        SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot
+                    )
+                )
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
                        cb.cmc_id, a.primary_sector,
                        ci.market_cap_rank
@@ -473,6 +480,7 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                 LEFT JOIN core.asset_source_map asm ON asm.asset_id = a.asset_id
                     AND asm.source_code = 'cg' AND asm.is_primary = TRUE
                 LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
+                LEFT JOIN latest_cmc cqs ON cqs.cmc_id = cb.cmc_id
                 WHERE a.canonical_symbol ILIKE %s
                    OR a.canonical_name ILIKE %s
                    OR EXISTS (
@@ -497,8 +505,9 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                         WHEN a.canonical_symbol ILIKE %s THEN 2
                         ELSE 3
                     END,
-                    -- 市值排名权重：排名越靠前优先级越高，无排名的排最后
+                    -- 市值权重：优先 CG 排名（越小越靠前），无排名用 CMC 市值降序，都没有排最后
                     COALESCE(ci.market_cap_rank, 999999),
+                    COALESCE(cqs.market_cap, 0) DESC,
                     a.canonical_symbol
                 LIMIT %s
                 """,

@@ -1770,7 +1770,19 @@ def _augment_structured_links(items: list[dict], structured: dict) -> None:
     社交热度 → 展示评分 + X/twitter 链接（如有）
     代币经济学 → 展示流通量/总量/燃烧机制摘要
     解锁数据 → 展示未来 30 天解锁比例/事件数
+
+    全局 try/except 兜底：单类异常不影响 notebook 整体返回。
     """
+    try:
+        _augment_structured_links_inner(items, structured)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"_augment_structured_links failed: {e}"
+        )
+
+
+def _augment_structured_links_inner(items: list[dict], structured: dict) -> None:
     if not structured:
         return
 
@@ -1807,8 +1819,8 @@ def _augment_structured_links(items: list[dict], structured: dict) -> None:
                 latest = data
             else:
                 latest = {}
-            holders = latest.get("total_holders")
-            top10 = latest.get("top10_concentration")
+            holders = _to_float(latest.get("total_holders"))
+            top10 = _to_float(latest.get("top10_concentration"))
             parts = []
             if holders is not None:
                 parts.append(f"持有者 {holders:,.0f}")
@@ -1859,10 +1871,12 @@ def _augment_structured_links(items: list[dict], structured: dict) -> None:
     if it and it["present"] and not it["links"]:
         tok = structured.get("tokenomics") or {}
         parts = []
-        if tok.get("circulating_supply"):
-            parts.append(f"流通量 {tok['circulating_supply']:,.0f}")
-        if tok.get("total_supply"):
-            parts.append(f"总量 {tok['total_supply']:,.0f}")
+        circ = _to_float(tok.get("circulating_supply"))
+        if circ is not None:
+            parts.append(f"流通量 {circ:,.0f}")
+        total = _to_float(tok.get("total_supply"))
+        if total is not None:
+            parts.append(f"总量 {total:,.0f}")
         if tok.get("burn_info"):
             bi = tok["burn_info"]
             if isinstance(bi, dict) and bi.get("burned_pct") is not None:
@@ -1943,7 +1957,20 @@ def _compute_missing_materials(snapshot: dict) -> list[dict]:
 
     前 9 类用结构化数据/来源类型精确判定；后 12 类用 content_topics
     内容主题精确判定（不再依赖 URL/标题关键词猜测）。
+
+    全局 try/except 兜底：异常时返回空列表，不让 notebook 500。
     """
+    try:
+        return _compute_missing_materials_inner(snapshot)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"_compute_missing_materials failed: {e}"
+        )
+        return []
+
+
+def _compute_missing_materials_inner(snapshot: dict) -> list[dict]:
     counts = snapshot.get("counts") or {}
     structured = snapshot.get("structured") or {}
     entry_types = set(counts.get("doc_source_entry_types") or [])

@@ -247,7 +247,7 @@ def get_coverage_by_tier() -> dict:
                         SELECT DISTINCT asset_id FROM biz.asset_tokenomics
                     ) tk ON tk.asset_id = cb.asset_id
                     LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = cb.asset_id
-                    LEFT JOIN biz.asset_unlocks ul ON ul.asset_id = cb.asset_id
+                    LEFT JOIN biz.asset_unlock_event ul ON ul.asset_id = cb.asset_id
                     LEFT JOIN biz.asset_derivatives dv ON dv.asset_id = cb.asset_id
                     LEFT JOIN biz.onchain_holder_snapshot oh ON oh.asset_id = cb.asset_id
                     WHERE {tier_cond}
@@ -3980,8 +3980,9 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     f"""
-                    SELECT cb.asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name, cb.cmc_rank
                     FROM biz.coin_basic cb
+                    JOIN core.asset a ON a.asset_id = cb.asset_id
                     WHERE cb.cmc_rank IS NOT NULL
                       {tier_cond}
                     ORDER BY cb.cmc_rank ASC
@@ -3995,8 +3996,9 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT cb.asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name, cb.cmc_rank
                     FROM biz.coin_basic cb
+                    JOIN core.asset a ON a.asset_id = cb.asset_id
                     WHERE cb.asset_id = ANY(%s)
                     ORDER BY cb.cmc_rank ASC NULLS LAST
                     """,
@@ -6936,8 +6938,8 @@ def get_social_heat_leaderboard(
                 f"""
                 SELECT
                     cb.asset_id,
-                    cb.symbol,
-                    cb.name,
+                    a.canonical_symbol AS symbol,
+                    a.canonical_name AS name,
                     cb.cmc_rank,
                     sh.score,
                     sh.confidence,
@@ -6953,6 +6955,7 @@ def get_social_heat_leaderboard(
                     sh.fetched_at
                 FROM biz.asset_social_heat sh
                 JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
+                JOIN core.asset a ON a.asset_id = cb.asset_id
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 ORDER BY {sort_col}

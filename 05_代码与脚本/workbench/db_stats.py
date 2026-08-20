@@ -3581,6 +3581,89 @@ def _compute_whale_signal(holding: dict, transfers: dict) -> dict:
     }
 
 
+def get_asset_market_history(
+    asset_id: int,
+    days: int = 30,
+    source_code: str = "cmc",
+) -> dict:
+    """获取资产行情历史时间序列（日级）。
+
+    数据来源：biz.asset_market_daily（由 CMC 快照聚合而来）。
+
+    Args:
+        asset_id: 资产 ID
+        days: 取最近 N 天，默认 30 天
+        source_code: 数据源，默认 'cmc'
+
+    Returns:
+        {
+            "ok": bool,
+            "asset_id": int,
+            "source_code": str,
+            "days": int,
+            "data_points": int,
+            "series": [
+                {"date": "2026-08-01", "price_usd": ..., "market_cap": ...,
+                 "volume_24h": ..., "change_24h": ..., "fdv": ...}
+            ],
+            "latest": {...},  # 最新一天数据
+        }
+    """
+    if days < 1:
+        days = 1
+    if days > 3650:
+        days = 3650
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT
+                    market_date,
+                    price_usd,
+                    market_cap,
+                    fdv,
+                    circulating_supply,
+                    total_supply,
+                    volume_24h,
+                    change_24h,
+                    change_7d
+                FROM biz.asset_market_daily
+                WHERE asset_id = %s
+                  AND source_code = %s
+                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                ORDER BY market_date ASC
+                """,
+                (asset_id, source_code, days),
+            )
+            rows = cur.fetchall()
+
+    series = []
+    for r in rows:
+        item = {
+            "date": str(r["market_date"]),
+            "price_usd": float(r["price_usd"]) if r["price_usd"] is not None else None,
+            "market_cap": float(r["market_cap"]) if r["market_cap"] is not None else None,
+            "fdv": float(r["fdv"]) if r["fdv"] is not None else None,
+            "volume_24h": float(r["volume_24h"]) if r["volume_24h"] is not None else None,
+            "change_24h": float(r["change_24h"]) if r["change_24h"] is not None else None,
+            "change_7d": float(r["change_7d"]) if r["change_7d"] is not None else None,
+            "circulating_supply": float(r["circulating_supply"]) if r["circulating_supply"] is not None else None,
+            "total_supply": float(r["total_supply"]) if r["total_supply"] is not None else None,
+        }
+        series.append(item)
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "source_code": source_code,
+        "days": days,
+        "data_points": len(series),
+        "series": series,
+        "latest": series[-1] if series else None,
+    }
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 

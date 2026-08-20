@@ -1231,6 +1231,18 @@ def api_research_derivatives(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/market-history")
+def api_research_market_history(asset_id: int):
+    """行情历史时间序列（日级，价格/市值/成交量等）。"""
+    try:
+        days = int(request.args.get("days", 30))
+        source = request.args.get("source", "cmc")
+        result = _get_db_stats().get_asset_market_history(asset_id, days=days, source_code=source)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/<int:asset_id>/cex-netflow")
 def api_research_cex_netflow(asset_id: int):
     """链上 CEX 净流入/流出（基于交易所钱包标签 + 大额转账日志）。"""

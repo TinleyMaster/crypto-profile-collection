@@ -22,6 +22,7 @@
 │                    doc_source_notebooklm / research_notebook │
 │                    research_thesis / research_message        │
 │                    unlock_watchlist / dl_protocol_checked    │
+│                    kol_profile / kol_post / kol_signal       │
 ├─────────────────────────────────────────────────────────────┤
 │  core   统一实体层  asset / asset_source_map                  │
 │                    asset_contract_map                        │
@@ -46,6 +47,7 @@
 | Ethplorer | 链上持仓快照（Top 持有者、持仓集中度） | Ethplorer API |
 | Tokenomist / tokenomics.com | 代币解锁时间表 + 代币经济学四板块（overview / unlocks / revenue / valuation） | 网页爬取（Playwright 无头浏览器） |
 | Binance / OKX / Bybit / Bitget / Gate 永续合约公开接口 | 衍生品资金面（资金费率 / OI / 成交，本地多交易所求和） | 匿名 REST API |
+| Binance Square（币安广场） | KOL 交易信号监控（实时喊单识别 + 邮件提醒） | Playwright 无头浏览器 + bapi 接口 |
 
 ---
 
@@ -391,6 +393,78 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 
 ---
 
+## KOL 信号监控模块
+
+监控币安广场等平台的交易类 KOL 发帖，通过 AI 自动区分「实时喊单」与「事后晒单」，只对有跟单价值的实时信号发邮件提醒，同时全量存档用于后续回测博主胜率。
+
+访问路径：`/kol`（Web 工作台 → KOL 信号监控面板）。
+
+### 核心流程
+
+```
+博主配置（DB INSERT，不改代码）
+        │
+        ▼
+Playwright 无头浏览器抓取（30 秒轮询，按博主增量拉取）
+  币安广场：拦截 /bapi/composite/* 接口 + __NEXT_DATA__ 兜底
+        │
+        ▼
+帖子存档（biz.kol_post，平台+帖子ID 唯一约束去重）
+        │
+        ▼
+LLM AI 结构化分类（11 个字段，规则强制校验）
+  post_type / direction / symbol / entry_condition / entry_price
+  stop_loss / take_profit / leverage / already_entered / has_pnl_number / confidence
+        │
+        ▼
+币种匹配（core.asset，精确匹配 + 50+ 别名 + 交易对后缀剥离）
+        │
+        ▼
+信号过滤 → 邮件提醒（仅 prediction + 未进场 + 置信度≥0.8）
+  邮件内容：信号详情 + 原文摘要 + 交叉验证数据（解锁/转账/资金费率/OI）
+```
+
+### AI 分类规则（优先级从高到低）
+
+1. **`already_entered = true` → 强制 `after_action`**：博主明确说已进场/持仓/开仓
+2. **`has_pnl_number = true` → 强制 `after_action`**：出现具体盈亏数字（+2341 USDT 等）
+3. **晒持仓截图 / 回顾性语言** → 倾向 `after_action`（"我说过""果然""已经突破"）
+4. **明确入场条件 + 未进场 + 无盈亏数字 + 无持仓截图** → `prediction`（实时喊单）
+5. **只讲方向无明确操作** → `analysis`（纯行情分析）
+
+### 数据库表（biz schema）
+
+| 表 | 用途 | 关键字段 |
+|----|------|---------|
+| `biz.kol_profile` | 博主档案 | platform_code, platform_user_id, nickname, follower_count, is_active, last_post_id, win_rate, total_signals |
+| `biz.kol_post` | 帖子原文（全量存档） | platform_post_id（唯一）, content_text, image_urls, posted_at, raw_json, ai_failed, ai_retry_count |
+| `biz.kol_signal` | AI 分析信号 | post_type, direction, symbol, entry_price, stop_loss, take_profit, leverage, already_entered, has_pnl_number, confidence, is_alerted, backtest_*（回测预留） |
+
+### Web 面板功能（3 个 Tab）
+
+- **信号列表**：按类型/方向/博主筛选，置信度进度条，告警状态，详情弹窗（原文 + AI 结构化 + 图片）
+- **博主管理**：新增/启用/停用博主，粉丝数、信号数、胜率展示，**手动立即抓取**按钮
+- **帖子存档**：全量帖子浏览，AI 分析状态，原文链接
+
+### 调度方式
+
+- **主监控**：`kol_daemon.py` 常驻守护进程（30 秒间隔，由 supervisord 管理）
+- **兜底调度**：`kol_monitor_run.py` 注册到 scheduler.py（每 5 分钟，防止常驻进程挂掉）
+
+### 可扩展性
+
+- 新增平台只需继承 `BaseScraper` 并注册到 `_SCRAPER_REGISTRY`
+- AI 分类、过滤、邮件、存档逻辑全部复用
+- 首期支持币安广场，预留 Twitter/X、Telegram 扩展位
+
+### 本期不做
+
+- 自动跟单交易（只做信号提醒，不接交易所 API）
+- 历史信号回测逻辑（只预留数据库字段）
+- 图片 OCR 识别持仓截图（首期通过文本上下文判断）
+
+---
+
 ## 每日投研推荐
 
 基于市场数据驱动的投研价值评分，从 Binance Web3 API + CMC API 双源交叉验证：
@@ -703,9 +777,19 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）+ 每日推荐存档 + 赛道热力图
 │       ├── derivatives_client.py # 5 家交易所衍生品客户端（资金费率/OI/成交）
 │       ├── scheduler.py        # 定时调度器（APScheduler，替代 n8n 调度）
+│       ├── kol_daemon.py       # KOL 信号监控守护进程（30s 轮询）
+│       ├── kol/                # KOL 信号监控模块
+│       │   ├── db.py           # 数据库操作（博主/帖子/信号 CRUD）
+│       │   ├── scraper.py      # 多平台抓取器（币安广场 Playwright）
+│       │   ├── classifier.py   # AI 信号分类与结构化提取
+│       │   ├── notifier.py     # 信号邮件提醒（含交叉验证数据）
+│       │   ├── asset_match.py  # 币种匹配（关联 core.asset）
+│       │   ├── routes.py       # Flask 蓝图（API 路由）
+│       │   └── runner.py       # 主流程编排（抓取→AI→匹配→告警）
 │       └── templates/          # 前端页面
 │           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析 + 回测/赛道热力图
-│           └── research.html   # 一键投研笔记本页（含代币分类 + 分赛道资料清单 + 竞品/背离/衍生品/CEX净流入/鲸鱼流/研究结论）
+│           ├── research.html   # 一键投研笔记本页
+│           └── kol.html        # KOL 信号监控面板
 │
 ├── 07_测试与验收/              # 诊断脚本与报告
 ├── Dockerfile                  # 工作台 Docker 镜像（含 Playwright）
@@ -737,6 +821,8 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 | `UNLOCK_ALERT_DAYS` | 解锁提前提醒天数，默认 14（分赛道会覆盖） | ❌ |
 | `WHALE_TRANSFER_MIN_USD` | Meme 大户转账告警阈值（美元），默认 100000 | ❌ |
 | `MIN_NEW_ASSET_ID` | B2 新币水位线，只处理 asset_id >= 该值的新资产，老语料跳过 | ❌ |
+| `KOL_POLL_INTERVAL` | KOL 监控轮询间隔（秒），默认 30 | ❌ |
+| `KOL_ALERT_CONFIDENCE` | KOL 信号邮件告警置信度阈值（0~1），默认 0.8 | ❌ |
 
 ### 本地运行
 

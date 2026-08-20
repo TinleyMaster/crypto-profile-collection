@@ -96,6 +96,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ 监控告警 ═══
     ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）"),
     ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）"),
+
+    # ═══ KOL 信号监控（兜底，主监控走 kol_daemon.py 常驻进程）═══
+    ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底（每 5 分钟）"),
 ]
 
 

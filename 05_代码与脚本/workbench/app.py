@@ -38,8 +38,12 @@ if str(SCRIPTS_SRC) not in sys.path:
 app = Flask(__name__)
 
 from task_manager import TaskManager  # noqa: E402
+from kol.routes import kol_bp  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
+
+# 注册 KOL 监控蓝图
+app.register_blueprint(kol_bp)
 
 # 解锁数据异步拉取状态（key: f"{asset_id}:{force}"）。
 # 注意：gunicorn 多 worker 部署下内存 dict 不共享，需文件持久化（见下方 UNLOCK_STATE_FILE），
@@ -551,6 +555,12 @@ def healthz():
 @app.route("/")
 def index():
     return render_template("index.html", task_defs=TASK_DEFS)
+
+
+@app.route("/kol")
+def kol_monitor():
+    """KOL 信号监控面板。"""
+    return render_template("kol.html")
 
 
 # ── API 路由 ──

@@ -211,10 +211,10 @@ def get_coverage_by_tier() -> dict:
         }
     """
     tiers = [
-        ("top100", "cb.cmc_rank <= 100"),
-        ("top500", "cb.cmc_rank <= 500"),
-        ("top1000", "cb.cmc_rank <= 1000"),
-        ("other", "(cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"),
+        ("top100", "COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 100"),
+        ("top500", "COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 500"),
+        ("top1000", "COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 1000"),
+        ("other", "COALESCE(cm.rank_num, ci.market_cap_rank, 999999) > 1000"),
         ("all", "1=1"),
     ]
 
@@ -239,6 +239,10 @@ def get_coverage_by_tier() -> dict:
                         -- 链上持仓
                         COUNT(CASE WHEN oh.asset_id IS NOT NULL THEN 1 END) AS onchain_holders
                     FROM biz.coin_basic cb
+                    LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                    LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                        AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                     LEFT JOIN (
                         SELECT DISTINCT asset_id FROM biz.doc_source_entry
                          WHERE entry_type IN ('whitepaper', 'whitepaper_page')
@@ -3966,13 +3970,13 @@ def compute_correlation_matrix(
         tier_params: list = []
         if tier and tier != "all":
             if tier == "top100":
-                tier_cond = "AND cb.cmc_rank <= 100"
+                tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 100"
             elif tier == "top500":
-                tier_cond = "AND cb.cmc_rank <= 500"
+                tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 500"
             elif tier == "top1000":
-                tier_cond = "AND cb.cmc_rank <= 1000"
+                tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 1000"
             elif tier == "other":
-                tier_cond = "AND (cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"
+                tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) > 1000"
             else:
                 tier_cond = ""
 
@@ -3980,12 +3984,17 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     f"""
-                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name, cb.cmc_rank
+                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           COALESCE(cm.rank_num, ci.market_cap_rank) AS cmc_rank
                     FROM biz.coin_basic cb
                     JOIN core.asset a ON a.asset_id = cb.asset_id
-                    WHERE cb.cmc_rank IS NOT NULL
+                    LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                    LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                        AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
+                    WHERE (cm.rank_num IS NOT NULL OR ci.market_cap_rank IS NOT NULL)
                       {tier_cond}
-                    ORDER BY cb.cmc_rank ASC
+                    ORDER BY COALESCE(cm.rank_num, ci.market_cap_rank, 999999) ASC
                     LIMIT %s
                     """,
                     (*tier_params, top_n),
@@ -3996,11 +4005,16 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name, cb.cmc_rank
+                    SELECT cb.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           COALESCE(cm.rank_num, ci.market_cap_rank) AS cmc_rank
                     FROM biz.coin_basic cb
                     JOIN core.asset a ON a.asset_id = cb.asset_id
+                    LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                    LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                        AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                     WHERE cb.asset_id = ANY(%s)
-                    ORDER BY cb.cmc_rank ASC NULLS LAST
+                    ORDER BY COALESCE(cm.rank_num, ci.market_cap_rank, 999999) ASC NULLS LAST
                     """,
                     (asset_ids,),
                 )
@@ -6901,13 +6915,13 @@ def get_social_heat_leaderboard(
     tier_params: list = []
     if tier and tier != "all":
         if tier == "top100":
-            tier_cond = "AND cb.cmc_rank <= 100"
+            tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 100"
         elif tier == "top500":
-            tier_cond = "AND cb.cmc_rank <= 500"
+            tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 500"
         elif tier == "top1000":
-            tier_cond = "AND cb.cmc_rank <= 1000"
+            tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) <= 1000"
         elif tier == "other":
-            tier_cond = "AND (cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"
+            tier_cond = "AND COALESCE(cm.rank_num, ci.market_cap_rank, 999999) > 1000"
         else:
             tier_cond = ""
 
@@ -6926,6 +6940,10 @@ def get_social_heat_leaderboard(
                 SELECT COUNT(*) AS cnt
                 FROM biz.asset_social_heat sh
                 JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
+                LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                    AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 """,
@@ -6940,7 +6958,7 @@ def get_social_heat_leaderboard(
                     cb.asset_id,
                     a.canonical_symbol AS symbol,
                     a.canonical_name AS name,
-                    cb.cmc_rank,
+                    COALESCE(cm.rank_num, ci.market_cap_rank) AS cmc_rank,
                     sh.score,
                     sh.confidence,
                     sh.sentiment_json->>'sentiment' AS sentiment,
@@ -6956,6 +6974,10 @@ def get_social_heat_leaderboard(
                 FROM biz.asset_social_heat sh
                 JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
                 JOIN core.asset a ON a.asset_id = cb.asset_id
+                LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                    AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 ORDER BY {sort_col}
@@ -6973,6 +6995,10 @@ def get_social_heat_leaderboard(
                     COUNT(*) AS cnt
                 FROM biz.asset_social_heat sh
                 JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
+                LEFT JOIN src_cmc.cmc_asset_map cm ON cm.cmc_id = cb.cmc_id
+                LEFT JOIN core.asset_source_map asm ON asm.asset_id = cb.asset_id
+                    AND asm.source_code = 'cg' AND asm.is_primary = TRUE
+                LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 GROUP BY COALESCE(sh.sentiment_json->>'sentiment', 'neutral')

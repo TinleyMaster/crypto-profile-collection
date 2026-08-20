@@ -240,15 +240,16 @@ def get_coverage_by_tier() -> dict:
                         COUNT(CASE WHEN oh.asset_id IS NOT NULL THEN 1 END) AS onchain_holders
                     FROM biz.coin_basic cb
                     LEFT JOIN (
-                        SELECT DISTINCT asset_id FROM biz.whitepaper_summary
-                    ) wp ON wp.asset_id = cb.id
+                        SELECT DISTINCT asset_id FROM biz.doc_source_entry
+                         WHERE entry_type IN ('whitepaper', 'whitepaper_page')
+                    ) wp ON wp.asset_id = cb.asset_id
                     LEFT JOIN (
                         SELECT DISTINCT asset_id FROM biz.asset_tokenomics
-                    ) tk ON tk.asset_id = cb.id
-                    LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = cb.id
-                    LEFT JOIN biz.asset_unlocks ul ON ul.asset_id = cb.id
-                    LEFT JOIN biz.asset_derivatives dv ON dv.asset_id = cb.id
-                    LEFT JOIN biz.onchain_holder_snapshot oh ON oh.asset_id = cb.id
+                    ) tk ON tk.asset_id = cb.asset_id
+                    LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = cb.asset_id
+                    LEFT JOIN biz.asset_unlocks ul ON ul.asset_id = cb.asset_id
+                    LEFT JOIN biz.asset_derivatives dv ON dv.asset_id = cb.asset_id
+                    LEFT JOIN biz.onchain_holder_snapshot oh ON oh.asset_id = cb.asset_id
                     WHERE {tier_cond}
                     """
                 )
@@ -614,22 +615,24 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                 LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 LEFT JOIN latest_cmc cqs ON cqs.cmc_id = cb.cmc_id
                 WHERE (
-                   OR a.canonical_name ILIKE %s
-                   OR EXISTS (
-                       SELECT 1 FROM core.asset_contract ac
-                       WHERE ac.asset_id = a.asset_id
-                         AND (
-                             (LEFT(ac.contract_address, 2) = '0x' AND LOWER(ac.contract_address) LIKE LOWER(%s))
-                             OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
-                         )
-                   )
-                  AND CASE %s
+                    a.canonical_symbol ILIKE %s
+                    OR a.canonical_name ILIKE %s
+                    OR EXISTS (
+                        SELECT 1 FROM core.asset_contract ac
+                        WHERE ac.asset_id = a.asset_id
+                          AND (
+                              (LEFT(ac.contract_address, 2) = '0x' AND LOWER(ac.contract_address) LIKE LOWER(%s))
+                              OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
+                          )
+                    )
+                )
+                AND CASE %s
                         WHEN 'top100' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 100
                         WHEN 'top500' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 500
                         WHEN 'top1000' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 1000
                         WHEN 'other' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) > 1000
                         ELSE TRUE
-                      END
+                    END
                 ORDER BY
                     CASE
                         WHEN EXISTS (
@@ -3977,7 +3980,7 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     f"""
-                    SELECT cb.id AS asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    SELECT cb.asset_id, cb.symbol, cb.name, cb.cmc_rank
                     FROM biz.coin_basic cb
                     WHERE cb.cmc_rank IS NOT NULL
                       {tier_cond}
@@ -3992,9 +3995,9 @@ def compute_correlation_matrix(
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT cb.id AS asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    SELECT cb.asset_id, cb.symbol, cb.name, cb.cmc_rank
                     FROM biz.coin_basic cb
-                    WHERE cb.id = ANY(%s)
+                    WHERE cb.asset_id = ANY(%s)
                     ORDER BY cb.cmc_rank ASC NULLS LAST
                     """,
                     (asset_ids,),
@@ -6920,7 +6923,7 @@ def get_social_heat_leaderboard(
                 f"""
                 SELECT COUNT(*) AS cnt
                 FROM biz.asset_social_heat sh
-                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 """,
@@ -6932,7 +6935,7 @@ def get_social_heat_leaderboard(
             cur.execute(
                 f"""
                 SELECT
-                    cb.id AS asset_id,
+                    cb.asset_id,
                     cb.symbol,
                     cb.name,
                     cb.cmc_rank,
@@ -6949,7 +6952,7 @@ def get_social_heat_leaderboard(
                     ) AS community_size,
                     sh.fetched_at
                 FROM biz.asset_social_heat sh
-                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 ORDER BY {sort_col}
@@ -6966,7 +6969,7 @@ def get_social_heat_leaderboard(
                     COALESCE(sh.sentiment_json->>'sentiment', 'neutral') AS sentiment,
                     COUNT(*) AS cnt
                 FROM biz.asset_social_heat sh
-                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                JOIN biz.coin_basic cb ON cb.asset_id = sh.asset_id
                 WHERE sh.score IS NOT NULL
                   {tier_cond}
                 GROUP BY COALESCE(sh.sentiment_json->>'sentiment', 'neutral')

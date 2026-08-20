@@ -1426,6 +1426,17 @@ def api_unlocks_ai_estimate(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/unlocks/event-impact/<int:asset_id>")
+def api_unlocks_event_impact(asset_id: int):
+    """解锁事件研究：分析历史解锁事件前后的价格走势。"""
+    try:
+        window = int(request.args.get("window", 14))
+        data = _get_db_stats().analyze_unlock_event_impact(asset_id, window_days=window)
+        return jsonify({"ok": True, "data": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/social/<int:asset_id>")
 def api_social_get(asset_id: int):
     """读取已缓存的社交热度数据（只读，不触发拉取）。"""

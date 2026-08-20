@@ -6128,6 +6128,222 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     }
 
 
+def analyze_unlock_event_impact(
+    asset_id: int,
+    window_days: int = 14,
+) -> dict:
+    """解锁事件研究：分析每个历史解锁事件前后的价格走势。
+
+    核心问题：解锁前会不会跌？解锁后会不会反弹？
+    对每个历史解锁事件，取前后 N 天的价格数据，计算：
+    - 事件前收益（pre_return）
+    - 事件后收益（post_return）
+    - 事件前最大回撤（pre_max_drawdown）
+    - 事件后最大涨幅（post_max_rally）
+    - 解锁规模 vs 价格波动的相关性
+
+    Args:
+        asset_id: 资产 ID
+        window_days: 事件前后窗口天数，默认 14 天
+
+    Returns:
+        {
+            "ok": bool,
+            "asset_id": int,
+            "window_days": int,
+            "total_events": int,
+            "analyzed_events": int,  # 有足够行情数据的事件数
+            "events": [
+                {
+                    "unlock_date": str,
+                    "unlock_pct": float,
+                    "unlock_value_usd": float,
+                    "price_at_event": float,
+                    "pre_return_pct": float,       # 事件前 N 天涨跌幅
+                    "post_return_pct": float,      # 事件后 N 天涨跌幅
+                    "pre_max_drawdown_pct": float, # 事件前最大回撤（从窗口高点到事件日）
+                    "post_max_rally_pct": float,   # 事件后最大涨幅（从事件日到窗口高点）
+                    "volume_surge": float,         # 事件日成交量 / 前 7 日均量
+                }
+            ],
+            "summary": {
+                "avg_pre_return_pct": float,
+                "avg_post_return_pct": float,
+                "pre_positive_rate": float,     # 事件前上涨比例
+                "post_positive_rate": float,    # 事件后上涨比例
+                "avg_pre_max_drawdown_pct": float,
+                "avg_post_max_rally_pct": float,
+                "big_unlock_pre_return_pct": float,   # 大额解锁（>=5%）前收益
+                "big_unlock_post_return_pct": float,  # 大额解锁（>=5%）后收益
+            },
+        }
+    """
+    from datetime import timedelta
+
+    # 1. 读取解锁事件
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT unlock_events_json FROM biz.asset_token_unlocks WHERE asset_id = %s",
+                (asset_id,),
+            )
+            urow = cur.fetchone()
+
+    if not urow:
+        return {"ok": False, "error": "无解锁数据", "asset_id": asset_id}
+
+    events_raw = urow.get("unlock_events_json") or []
+    if not events_raw:
+        return {"ok": False, "error": "解锁事件为空", "asset_id": asset_id}
+
+    # 2. 解析历史解锁事件（排除 upcoming）
+    historical_events = []
+    for e in events_raw:
+        if e.get("is_upcoming"):
+            continue
+        d = _parse_unlock_event_date(e.get("date"))
+        if d is None:
+            continue
+        pct = _to_float(e.get("pct"))
+        value_usd = _to_float(e.get("value_usd") or e.get("amount_usd"))
+        historical_events.append({
+            "date": d,
+            "pct": pct or 0.0,
+            "value_usd": value_usd,
+        })
+
+    if not historical_events:
+        return {"ok": False, "error": "无历史解锁事件", "asset_id": asset_id}
+
+    # 3. 取足够长的行情历史（最早事件前 window 天 到 最晚事件后 window 天）
+    dates = [e["date"] for e in historical_events]
+    earliest = min(dates) - timedelta(days=window_days)
+    latest = max(dates) + timedelta(days=window_days)
+    total_days = (latest - earliest).days + 1
+
+    history = get_asset_market_history(asset_id, days=total_days + 30)  # 多取 30 天兜底
+    series = history.get("series") or []
+    if not series:
+        return {"ok": False, "error": "无行情历史数据", "asset_id": asset_id}
+
+    # 构建 date -> price/volume 映射
+    price_map = {}
+    for s in series:
+        price_map[s["date"]] = s
+
+    # 4. 逐个事件分析
+    analyzed = []
+    for ev in historical_events:
+        ev_date_str = str(ev["date"])
+        if ev_date_str not in price_map:
+            continue  # 事件日无行情数据，跳过
+
+        event_price = price_map[ev_date_str].get("price_usd")
+        if event_price is None or event_price <= 0:
+            continue
+
+        # 收集前后窗口数据
+        pre_prices = []
+        post_prices = []
+        pre_volumes = []
+
+        for i in range(1, window_days + 1):
+            pre_date = str(ev["date"] - timedelta(days=i))
+            post_date = str(ev["date"] + timedelta(days=i))
+            if pre_date in price_map and price_map[pre_date].get("price_usd"):
+                pre_prices.append((i, price_map[pre_date]["price_usd"]))
+                if price_map[pre_date].get("volume_24h"):
+                    pre_volumes.append(price_map[pre_date]["volume_24h"])
+            if post_date in price_map and price_map[post_date].get("price_usd"):
+                post_prices.append((i, price_map[post_date]["price_usd"]))
+
+        if len(pre_prices) < 3 or len(post_prices) < 3:
+            continue  # 数据点太少，跳过
+
+        # 事件前收益（窗口起点到事件日）
+        first_pre = pre_prices[-1][1]  # 最远的一天
+        pre_return = (event_price - first_pre) / first_pre * 100
+
+        # 事件后收益（事件日到窗口终点）
+        last_post = post_prices[-1][1]
+        post_return = (last_post - event_price) / event_price * 100
+
+        # 事件前最大回撤（窗口内高点到事件日的跌幅）
+        pre_high = max(p for _, p in pre_prices)
+        pre_max_dd = (event_price - pre_high) / pre_high * 100  # 负值
+
+        # 事件后最大涨幅（事件日到窗口内高点）
+        post_high = max(p for _, p in post_prices)
+        post_max_rally = (post_high - event_price) / event_price * 100
+
+        # 成交量放大倍数（事件日 vs 前7日均量）
+        volume_surge = None
+        event_vol = price_map[ev_date_str].get("volume_24h")
+        if event_vol and pre_volumes:
+            avg_vol = sum(pre_volumes[:7]) / min(7, len(pre_volumes))
+            if avg_vol > 0:
+                volume_surge = round(event_vol / avg_vol, 2)
+
+        analyzed.append({
+            "unlock_date": ev_date_str,
+            "unlock_pct": ev["pct"],
+            "unlock_value_usd": ev["value_usd"],
+            "price_at_event": event_price,
+            "pre_return_pct": round(pre_return, 2),
+            "post_return_pct": round(post_return, 2),
+            "pre_max_drawdown_pct": round(pre_max_dd, 2),
+            "post_max_rally_pct": round(post_max_rally, 2),
+            "volume_surge": volume_surge,
+        })
+
+    if not analyzed:
+        return {
+            "ok": False,
+            "error": "无足够行情数据进行事件研究",
+            "asset_id": asset_id,
+            "total_events": len(historical_events),
+        }
+
+    # 5. 汇总统计
+    pre_returns = [e["pre_return_pct"] for e in analyzed]
+    post_returns = [e["post_return_pct"] for e in analyzed]
+    pre_dds = [e["pre_max_drawdown_pct"] for e in analyzed]
+    post_rallies = [e["post_max_rally_pct"] for e in analyzed]
+
+    pre_positive = sum(1 for r in pre_returns if r > 0)
+    post_positive = sum(1 for r in post_returns if r > 0)
+
+    # 大额解锁（>=5%）单独统计
+    big_events = [e for e in analyzed if e["unlock_pct"] >= 5]
+    big_pre = [e["pre_return_pct"] for e in big_events]
+    big_post = [e["post_return_pct"] for e in big_events]
+
+    summary = {
+        "avg_pre_return_pct": round(sum(pre_returns) / len(pre_returns), 2),
+        "avg_post_return_pct": round(sum(post_returns) / len(post_returns), 2),
+        "pre_positive_rate": round(pre_positive / len(analyzed) * 100, 1),
+        "post_positive_rate": round(post_positive / len(analyzed) * 100, 1),
+        "avg_pre_max_drawdown_pct": round(sum(pre_dds) / len(pre_dds), 2),
+        "avg_post_max_rally_pct": round(sum(post_rallies) / len(post_rallies), 2),
+        "big_unlock_count": len(big_events),
+        "big_unlock_avg_pre_return_pct": round(sum(big_pre) / len(big_pre), 2) if big_pre else None,
+        "big_unlock_avg_post_return_pct": round(sum(big_post) / len(big_post), 2) if big_post else None,
+    }
+
+    # 按日期倒序
+    analyzed.sort(key=lambda e: e["unlock_date"], reverse=True)
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "window_days": window_days,
+        "total_events": len(historical_events),
+        "analyzed_events": len(analyzed),
+        "events": analyzed,
+        "summary": summary,
+    }
+
+
 def query_token_unlocks(asset_id: int, force: bool = False, log=None) -> dict:
     """按需拉取代币解锁数据（先查缓存，未命中则从 tokenomist 爬取，失败则 AI 测算）。"""
     def _emit(msg: str) -> None:

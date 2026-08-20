@@ -29,6 +29,16 @@ class ScrapedPost:
     raw_json: dict = field(default_factory=dict)
 
 
+@dataclass
+class FetchResult:
+    """抓取结果（含帖子 + 诊断信息，用于区分 404 / 反爬 / 空 feed）。"""
+    posts: list[ScrapedPost] = field(default_factory=list)
+    page_status: str = "ok"  # ok / not_found / blocked / empty_feed / error
+    page_title: str = ""
+    error_reason: str = ""
+    http_status: int | None = None
+
+
 class BaseScraper:
     """抓取器基类。子类实现 fetch_posts。"""
 
@@ -39,7 +49,7 @@ class BaseScraper:
         platform_user_id: str,
         since_post_id: str | None = None,
         max_pages: int = 3,
-    ) -> list[ScrapedPost]:
+    ) -> FetchResult:
         """
         抓取指定博主的帖子。
 
@@ -49,7 +59,7 @@ class BaseScraper:
             max_pages: 最大翻页数
 
         Returns:
-            按时间从新到旧排序的帖子列表
+            FetchResult：含帖子列表 + 页面状态诊断
         """
         raise NotImplementedError
 
@@ -90,11 +100,39 @@ class BinanceSquareScraper(BaseScraper):
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/126.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1920, "height": 1080},
             locale="zh-CN",
+            extra_http_headers={
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
         )
+        # Stealth：覆盖常见自动化检测点
+        self._context.add_init_script("""
+            // 覆盖 navigator.webdriver
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // 覆盖 chrome 对象
+            window.chrome = { runtime: {} };
+            // 覆盖 permissions
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            // 覆盖 plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+            // 覆盖 languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en'],
+            });
+        """)
         # 拦截静态资源加速
         self._context.route(
             "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css,mp4,webm}",
@@ -119,7 +157,7 @@ class BinanceSquareScraper(BaseScraper):
         platform_user_id: str,
         since_post_id: str | None = None,
         max_pages: int = 3,
-    ) -> list[ScrapedPost]:
+    ) -> FetchResult:
         """
         抓取币安广场博主的帖子列表。
 
@@ -134,21 +172,25 @@ class BinanceSquareScraper(BaseScraper):
         url = f"{self.BASE_URL}/{platform_user_id}"
         posts: list[ScrapedPost] = []
         seen_ids: set[str] = set()
+        result = FetchResult()
 
         # 收集 API 响应
         api_responses: list[dict] = []
+        api_statuses: list[int] = []
 
         def handle_response(response):
-            url = response.url
+            resp_url = response.url
             # 币安广场帖子列表接口（bapi composite）
-            if "/bapi/composite/" in url and "feed" in url.lower():
+            if "/bapi/composite/" in resp_url and "feed" in resp_url.lower():
+                api_statuses.append(response.status)
                 try:
                     data = response.json()
                     api_responses.append(data)
                 except Exception:
                     pass
             # 另一种可能的接口路径
-            if "/bapi/web/" in url and "post" in url.lower():
+            if "/bapi/web/" in resp_url and "post" in resp_url.lower():
+                api_statuses.append(response.status)
                 try:
                     data = response.json()
                     api_responses.append(data)
@@ -157,21 +199,54 @@ class BinanceSquareScraper(BaseScraper):
 
         self._page.on("response", handle_response)
 
+        # 记录主页面 HTTP 状态
+        main_status: int | None = None
         try:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            resp = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if resp:
+                main_status = resp.status
         except Exception:
             try:
-                self._page.goto(url, wait_until="commit", timeout=30000)
+                resp = self._page.goto(url, wait_until="commit", timeout=30000)
+                if resp:
+                    main_status = resp.status
             except Exception as e:
                 print(f"[KOL][binance_square] 页面加载失败 {platform_user_id}: {e}")
-                return []
+                result.page_status = "error"
+                result.error_reason = f"页面加载失败: {e}"
+                return result
+
+        result.http_status = main_status
 
         # 等待帖子渲染
         time.sleep(2)
 
+        # 获取页面 title 用于诊断
+        try:
+            result.page_title = self._page.title() or ""
+        except Exception:
+            pass
+
+        # 404 检测
+        if main_status == 404 or "404" in result.page_title or "Not Found" in result.page_title:
+            result.page_status = "not_found"
+            result.error_reason = f"博主不存在 (HTTP {main_status}, title={result.page_title})"
+            return result
+
+        # 反爬/挑战检测（页面标题含验证/挑战关键词，或 API 全是 403/202）
+        challenge_keywords = ["验证", "挑战", "challenge", "security", "Security", "Just a moment"]
+        if any(kw in result.page_title for kw in challenge_keywords):
+            result.page_status = "blocked"
+            result.error_reason = f"疑似被反爬拦截 (title={result.page_title})"
+            return result
+
+        if api_statuses and all(s in (403, 429, 202) for s in api_statuses):
+            result.page_status = "blocked"
+            result.error_reason = f"API 被拦截 (statuses={api_statuses})"
+            return result
+
         # 尝试从页面中提取帖子数据（兜底方案）
         if not api_responses:
-            # 从页面 HTML 中提取 __NEXT_DATA__ 或 window 数据
             page_content = self._page.content()
             extracted = self._extract_from_html(page_content)
             for item in extracted:
@@ -222,7 +297,14 @@ class BinanceSquareScraper(BaseScraper):
             if idx is not None:
                 posts = posts[:idx]
 
-        return posts
+        result.posts = posts
+
+        # 0 帖但页面正常 → 空 feed（博主真的没发帖）
+        if not posts:
+            result.page_status = "empty_feed"
+            result.error_reason = "页面加载成功但未抓到任何帖子（可能是反爬或博主无发帖）"
+
+        return result
 
     def _extract_posts_from_api(self, resp: dict) -> list[dict]:
         """从 API 响应中递归提取帖子列表。"""

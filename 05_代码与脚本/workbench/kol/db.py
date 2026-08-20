@@ -153,6 +153,16 @@ def update_profile_last_post(profile_id: int, last_post_id: str) -> None:
         )
 
 
+def mark_profile_crawled(profile_id: int) -> None:
+    """仅更新 last_crawled_at（抓到 0 帖时也调用，区分「从没抓过」与「抓过没帖」）。"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE biz.kol_profile SET last_crawled_at = NOW(), updated_at = NOW() "
+            "WHERE profile_id = %s",
+            (profile_id,),
+        )
+
+
 def set_profile_active(profile_id: int, is_active: bool) -> None:
     with get_conn() as conn:
         conn.execute(

@@ -53,6 +53,7 @@ def run_crawl_once(platform_code: str | None = None,
         "profiles_total": 0,
         "profiles_success": 0,
         "profiles_failed": 0,
+        "profiles_empty": 0,
         "posts_new": 0,
         "posts_duplicate": 0,
         "signals_created": 0,
@@ -120,6 +121,7 @@ def run_crawl_once(platform_code: str | None = None,
     _process_pending_alerts(stats)
 
     print(f"[KOL][runner] 本轮完成: "
+          f"博主 {stats['profiles_success']}成功/{stats['profiles_empty']}空/{stats['profiles_failed']}失败 / "
           f"新帖 {stats['posts_new']} / "
           f"信号 {stats['signals_created']} / "
           f"告警 {stats['alerts_sent']}")
@@ -136,14 +138,29 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
 
     print(f"[KOL][runner] 抓取博主: {nickname} (last_post_id={last_post_id})")
 
-    posts = scraper.fetch_posts(
+    result = scraper.fetch_posts(
         platform_user_id=user_id,
         since_post_id=last_post_id,
         max_pages=3,
     )
+    posts = result.posts
 
+    # 每次抓取都更新 last_crawled_at（含 0 帖场景）
+    db.mark_profile_crawled(profile_id)
+
+    # 0 帖场景：区分 not_found / blocked / empty_feed / error
     if not posts:
-        print(f"[KOL][runner]   无新帖子")
+        stats["profiles_empty"] += 1
+        status_label = {
+            "not_found": "博主不存在",
+            "blocked": "被反爬拦截",
+            "empty_feed": "无新帖/空feed",
+            "error": "抓取异常",
+            "ok": "无新帖",
+        }.get(result.page_status, result.page_status)
+        warn_msg = f"博主 {nickname} 0帖 [{status_label}]: {result.error_reason}"
+        print(f"[KOL][runner]   ⚠️ {warn_msg}")
+        stats["errors"].append(warn_msg)
         return
 
     print(f"[KOL][runner]   抓到 {len(posts)} 条帖子")
@@ -158,7 +175,7 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
         if not posted_at:
             posted_at = datetime.now(timezone.utc).isoformat()
 
-        result = db.insert_post(
+        result_db = db.insert_post(
             profile_id=profile_id,
             platform_code=profile["platform_code"],
             platform_post_id=post.platform_post_id,
@@ -169,7 +186,7 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
             raw_json=post.raw_json,
         )
 
-        if result:
+        if result_db:
             stats["posts_new"] += 1
             latest_post_id = post.platform_post_id
         else:

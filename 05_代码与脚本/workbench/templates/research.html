@@ -1553,11 +1553,17 @@
                 }
             }
 
+            // 兼容两种 citation 格式：number（旧）和 {index,title,url}（新）
+            function citeIndex (c) { return typeof c === 'object' && c ? c.index : Number(c); }
+            function citeLabel (c) {
+                if (typeof c === 'object' && c) return '[' + (c.index || '?') + ']';
+                return '[' + c + ']';
+            }
             const thesis = t.thesis || [];
             if (thesis.length) {
                 html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">核心论点</div><div class="t-body">';
                 thesis.forEach(function (p) {
-                    const cite = (p.citations || []).map(function (c) { return '[' + c + ']'; }).join('');
+                    const cite = (p.citations || []).map(function (c) { return citeLabel(c); }).join('');
                     html += '<div class="t-point">' + escapeHtml(p.point || '') + '<span class="t-cite">' + cite + '</span></div>';
                 });
                 html += '</div></div>';
@@ -1566,7 +1572,7 @@
             if (risks.length) {
                 html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">风险点</div><div class="t-body">';
                 risks.forEach(function (r) {
-                    const cite = (r.citations || []).map(function (c) { return '[' + c + ']'; }).join('');
+                    const cite = (r.citations || []).map(function (c) { return citeLabel(c); }).join('');
                     html += '<div class="t-point">' + escapeHtml(r.risk || '') + '<span class="t-cite">' + cite + '</span></div>';
                 });
                 html += '</div></div>';
@@ -1576,7 +1582,7 @@
                 html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">催化剂</div><div class="t-body">';
                 cats.forEach(function (c) {
                     const timing = c.timing ? ' <span class="t-conviction">(' + escapeHtml(c.timing) + ')</span>' : '';
-                    const cite = (c.citations || []).map(function (ci) { return '[' + ci + ']'; }).join('');
+                    const cite = (c.citations || []).map(function (ci) { return citeLabel(ci); }).join('');
                     html += '<div class="t-point">' + escapeHtml(c.catalyst || '') + timing + '<span class="t-cite">' + cite + '</span></div>';
                 });
                 html += '</div></div>';
@@ -1585,7 +1591,10 @@
             // 参考文献
             const allCites = new Set();
             [].concat(thesis, risks, cats).forEach(function (item) {
-                (item.citations || []).forEach(function (c) { allCites.add(Number(c)); });
+                (item.citations || []).forEach(function (c) {
+                    const idx = citeIndex(c);
+                    if (idx && idx > 0) allCites.add(idx);
+                });
             });
             if (allCites.size > 0 && sources.length > 0) {
                 html += '<div class="t-refs"><h4>参考文献</h4><ol>';
@@ -2506,12 +2515,17 @@
             if (cites.length) {
                 html += '<div class="r-citations"><strong>引用来源：</strong>';
                 cites.forEach(function (c) {
-                    html += '<span class="r-cite">[' + c.index + '] ' + escapeHtml(c.title || '');
-                    if (c.url) {
-                        html += ' <a href="' + attrEscape(c.url) + '" target="_blank" rel="noopener">' + escapeHtml(c.url) + '</a>';
+                    // 兼容两种格式：number（旧）和 {index,title,url}（新）
+                    const idx = typeof c === 'object' && c ? c.index : c;
+                    const title = typeof c === 'object' && c ? (c.title || '') : '';
+                    const url = typeof c === 'object' && c ? (c.url || '') : '';
+                    const quote = typeof c === 'object' && c ? (c.quote || '') : '';
+                    html += '<span class="r-cite">[' + (idx || '?') + '] ' + escapeHtml(title);
+                    if (url) {
+                        html += ' <a href="' + attrEscape(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a>';
                     }
-                    if (c.quote) {
-                        html += '<br><span style="color:#6b7280">“' + escapeHtml(c.quote) + '”</span>';
+                    if (quote) {
+                        html += '<br><span style="color:#6b7280">"' + escapeHtml(quote) + '"</span>';
                     }
                     html += '</span>';
                 });

@@ -214,6 +214,10 @@ def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
 
             signal = db.insert_signal(signal_data)
             db.mark_post_ai_ok(post_id)
+            if signal is None:
+                # 重复信号（双调度去重），跳过计数
+                print(f"[KOL][runner]   信号已存在(去重): post_id={post_id}")
+                continue
             stats["signals_created"] += 1
 
             # 如果是 prediction 类型，博主信号数 +1

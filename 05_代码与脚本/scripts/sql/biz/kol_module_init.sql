@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS biz.kol_signal (
     CONSTRAINT chk_kol_signal_direction
         CHECK (direction IN ('long', 'short', 'neutral', NULL)),
     CONSTRAINT chk_kol_signal_confidence
-        CHECK (confidence >= 0 AND confidence <= 1)
+        CHECK (confidence >= 0 AND confidence <= 1),
+    CONSTRAINT uq_kol_signal_post UNIQUE (post_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_kol_signal_post_id

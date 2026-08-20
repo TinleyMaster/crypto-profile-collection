@@ -115,5 +115,16 @@ def match_asset(symbol: str | None) -> int | None:
                 asset_id = find_asset_by_symbol(canonical)
                 if asset_id:
                     return asset_id
+            # 币安永续 1000 前缀（如 1000PEPEUSDT → PEPE）
+            if base.startswith("1000") and len(base) > 4:
+                base2 = base[4:]
+                asset_id = find_asset_by_symbol(base2)
+                if asset_id:
+                    return asset_id
+                canonical2 = _ALIAS_MAP.get(base2)
+                if canonical2:
+                    asset_id = find_asset_by_symbol(canonical2)
+                    if asset_id:
+                        return asset_id
 
     return None

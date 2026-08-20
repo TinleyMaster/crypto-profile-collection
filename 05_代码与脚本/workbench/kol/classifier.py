@@ -184,7 +184,8 @@ def _normalize_result(data: dict) -> dict:
         if val is None or val == "":
             return None
         try:
-            return float(val)
+            s = str(val).strip().rstrip("xX")
+            return float(s)
         except (ValueError, TypeError):
             return None
 
@@ -203,12 +204,8 @@ def _normalize_result(data: dict) -> dict:
     except (ValueError, TypeError):
         confidence = 0.5
 
-    # 规则强制：already_entered → after_action
-    if already_entered and post_type == "prediction":
-        post_type = "after_action"
-
-    # 规则强制：has_pnl_number → after_action
-    if has_pnl_number and post_type == "prediction":
+    # 规则强制：already_entered 或 has_pnl_number → 无条件 after_action（最高优先级）
+    if already_entered or has_pnl_number:
         post_type = "after_action"
 
     return {

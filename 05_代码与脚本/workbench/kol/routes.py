@@ -14,6 +14,7 @@ KOL 监控 Web 面板 — Flask 路由。
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -23,10 +24,12 @@ from flask import Blueprint, jsonify, request
 # 路径兼容
 if os.path.exists("/app/scripts/src"):
     SCRIPTS_SRC = Path("/app/scripts/src")
+    STATE_DIR = Path("/app/task_state")
 else:
     WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
     CODE_ROOT = WORKSPACE_ROOT.parent
     SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
+    STATE_DIR = WORKSPACE_ROOT / "task_state"
 
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
@@ -35,9 +38,52 @@ from . import db  # noqa: E402
 
 kol_bp = Blueprint("kol", __name__, url_prefix="/api/kol")
 
-# 手动抓取任务状态（内存 dict，单 worker 够用）
-_crawl_status: dict[int, dict] = {}
-_crawl_lock = threading.Lock()
+# 手动抓取任务状态（文件持久化，跨 gunicorn worker 共享）
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+_CRAWL_STATE_FILE = STATE_DIR / "kol_crawl_state.json"
+_CRAWL_LOCK_FILE = STATE_DIR / "kol_crawl_state.lock"
+
+
+def _get_file_lock():
+    """跨进程文件锁（fcntl，Linux 可用；Windows 降级为线程锁）。"""
+    try:
+        import fcntl
+        fd = os.open(str(_CRAWL_LOCK_FILE), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    except (ImportError, OSError):
+        # Windows 或不支持时降级
+        return None
+
+
+def _release_file_lock(fd):
+    if fd is None:
+        return
+    try:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    except (ImportError, OSError):
+        pass
+
+
+def _load_crawl_state() -> dict:
+    if not _CRAWL_STATE_FILE.exists():
+        return {}
+    try:
+        with open(_CRAWL_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # JSON key 是字符串，转回 int
+        return {int(k): v for k, v in data.items()}
+    except (json.JSONDecodeError, IOError, OSError):
+        return {}
+
+
+def _save_crawl_state(state: dict) -> None:
+    tmp = _CRAWL_STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+    os.replace(tmp, _CRAWL_STATE_FILE)
 
 
 @kol_bp.route("/stats")
@@ -173,29 +219,44 @@ def crawl_profile(profile_id: int):
     if not profile:
         return jsonify({"error": "博主不存在"}), 404
 
-    with _crawl_lock:
-        if profile_id in _crawl_status and _crawl_status[profile_id].get("status") == "running":
+    lock_fd = _get_file_lock()
+    try:
+        state = _load_crawl_state()
+        if profile_id in state and state[profile_id].get("status") == "running":
             return jsonify({"error": "抓取正在进行中"}), 409
 
-        _crawl_status[profile_id] = {"status": "running", "started_at": _now_iso()}
+        state[profile_id] = {"status": "running", "started_at": _now_iso()}
+        _save_crawl_state(state)
+    finally:
+        _release_file_lock(lock_fd)
 
     def _run():
         try:
             from .runner import run_crawl_once
             stats = run_crawl_once(profile_id=profile_id)
-            with _crawl_lock:
-                _crawl_status[profile_id] = {
+            lock_fd = _get_file_lock()
+            try:
+                state = _load_crawl_state()
+                state[profile_id] = {
                     "status": "done",
                     "finished_at": _now_iso(),
                     "stats": stats,
                 }
+                _save_crawl_state(state)
+            finally:
+                _release_file_lock(lock_fd)
         except Exception as e:
-            with _crawl_lock:
-                _crawl_status[profile_id] = {
+            lock_fd = _get_file_lock()
+            try:
+                state = _load_crawl_state()
+                state[profile_id] = {
                     "status": "failed",
                     "finished_at": _now_iso(),
                     "error": str(e),
                 }
+                _save_crawl_state(state)
+            finally:
+                _release_file_lock(lock_fd)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -206,8 +267,8 @@ def crawl_profile(profile_id: int):
 @kol_bp.route("/profiles/<int:profile_id>/crawl-status")
 def crawl_status(profile_id: int):
     """查询手动抓取状态。"""
-    with _crawl_lock:
-        status = _crawl_status.get(profile_id, {"status": "idle"})
+    state = _load_crawl_state()
+    status = state.get(profile_id, {"status": "idle"})
     return jsonify(status)
 
 

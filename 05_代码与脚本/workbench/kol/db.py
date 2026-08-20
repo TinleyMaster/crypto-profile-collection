@@ -261,8 +261,11 @@ def mark_post_ai_ok(post_id: int) -> None:
 # 信号 (kol_signal)
 # ============================================================
 
-def insert_signal(data: dict) -> dict:
-    """插入一条信号记录。data 包含所有业务字段。"""
+def insert_signal(data: dict) -> dict | None:
+    """插入一条信号记录。data 包含所有业务字段。
+
+    若 post_id 已存在（双调度去重），返回 None。
+    """
     fields = [
         "post_id", "profile_id", "asset_id", "post_type", "direction",
         "symbol", "entry_condition", "entry_price", "stop_loss",
@@ -273,7 +276,8 @@ def insert_signal(data: dict) -> dict:
     placeholders = ", ".join([f"%({f})s" for f in fields])
     with get_conn() as conn:
         row = conn.execute(
-            f"INSERT INTO biz.kol_signal ({columns}) VALUES ({placeholders}) RETURNING *",
+            f"INSERT INTO biz.kol_signal ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT (post_id) DO NOTHING RETURNING *",
             data,
         ).fetchone()
         return row

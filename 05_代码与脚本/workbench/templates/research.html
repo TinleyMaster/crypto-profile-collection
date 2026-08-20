@@ -374,6 +374,68 @@
             line-height: 1.7;
         }
 
+        .r-thesis .t-dim-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .r-thesis .t-dim-card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 10px 12px;
+            border-left: 3px solid #3b82f6;
+        }
+
+        .r-thesis .t-dim-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+
+        .r-thesis .t-dim-icon {
+            font-size: 14px;
+        }
+
+        .r-thesis .t-dim-title {
+            font-weight: 600;
+            font-size: 13px;
+            color: #f1f5f9;
+        }
+
+        .r-thesis .t-dim-desc {
+            font-size: 11px;
+            color: #64748b;
+            margin-left: auto;
+        }
+
+        .r-thesis .t-dim-summary {
+            font-size: 12px;
+            color: #e2e8f0;
+            line-height: 1.5;
+            margin-bottom: 6px;
+        }
+
+        .r-thesis .t-dim-points {
+            border-top: 1px solid #334155;
+            padding-top: 6px;
+        }
+
+        .r-thesis .t-dim-point {
+            font-size: 11px;
+            color: #94a3b8;
+            line-height: 1.5;
+            padding: 2px 0;
+        }
+
+        .r-thesis .t-inferred {
+            color: #f59e0b;
+            font-size: 10px;
+            opacity: 0.8;
+        }
+
         .r-thesis .t-gen-btn {
             background: #3b82f6;
             color: #fff;
@@ -1540,6 +1602,26 @@
                 if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
                     html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
                 }
+                // 衍生品资金面指标
+                const dv = sm.derivatives || {};
+                if (dv.funding_rate_pct !== null && dv.funding_rate_pct !== undefined) {
+                    const frColor = Number(dv.funding_rate_pct) >= 0 ? '#34d399' : '#f87171';
+                    html += '<div><strong>资金费率</strong>: <span style="color:' + frColor + '">' +
+                        Number(dv.funding_rate_pct).toFixed(4) + '%</span></div>';
+                }
+                if (dv.total_oi_usd !== null && dv.total_oi_usd !== undefined) {
+                    html += '<div><strong>未平仓合约(OI)</strong>: ' + fmtUsdBig(dv.total_oi_usd) + '</div>';
+                }
+                if (dv.oi_change_24h_pct !== null && dv.oi_change_24h_pct !== undefined) {
+                    const oiColor = Number(dv.oi_change_24h_pct) >= 0 ? '#34d399' : '#f87171';
+                    html += '<div><strong>OI 24h变化</strong>: <span style="color:' + oiColor + '">' +
+                        fmtPct(dv.oi_change_24h_pct) + '</span></div>';
+                }
+                if (dv.cvd_24h_usd !== null && dv.cvd_24h_usd !== undefined) {
+                    const cvdColor = Number(dv.cvd_24h_usd) >= 0 ? '#34d399' : '#f87171';
+                    html += '<div><strong>24h CVD净流入</strong>: <span style="color:' + cvdColor + '">' +
+                        fmtUsdBig(dv.cvd_24h_usd) + '</span></div>';
+                }
                 html += '</div>';
             } else {
                 const km = t.key_metrics || {};
@@ -1551,6 +1633,44 @@
                     });
                     html += '</div>';
                 }
+            }
+
+            // 四维框架卡片（新格式）
+            const dims = t.dimensions;
+            if (dims && typeof dims === 'object' && Object.keys(dims).length > 0) {
+                const dimMeta = {
+                    valuation: { label: '估值', icon: '📊', color: '#3b82f6', desc: '值不值得' },
+                    supply: { label: '筹码', icon: '💰', color: '#f59e0b', desc: '风险在哪（筹码）' },
+                    sentiment: { label: '情绪', icon: '🔥', color: '#ef4444', desc: '现在是不是时机' },
+                    catalyst: { label: '催化', icon: '⚡', color: '#8b5cf6', desc: '风险在哪（外部）' },
+                };
+                html += '<div class="t-section">四维分析</div><div class="t-dim-grid">';
+                ['valuation', 'supply', 'sentiment', 'catalyst'].forEach(function (key) {
+                    const dim = dims[key];
+                    const meta = dimMeta[key];
+                    if (!dim || !meta) return;
+                    const summary = dim.summary || '暂无数据';
+                    const points = dim.points || [];
+                    const hasPoints = points.length > 0;
+                    html += '<div class="t-dim-card" style="border-left:3px solid ' + meta.color + '">' +
+                        '<div class="t-dim-head">' +
+                        '<span class="t-dim-icon">' + meta.icon + '</span>' +
+                        '<span class="t-dim-title">' + meta.label + '</span>' +
+                        '<span class="t-dim-desc">' + meta.desc + '</span>' +
+                        '</div>' +
+                        '<div class="t-dim-summary">' + escapeHtml(summary) + '</div>';
+                    if (hasPoints) {
+                        html += '<div class="t-dim-points">';
+                        points.forEach(function (p) {
+                            const cite = (p.citations || []).map(function (c) { return citeLabel(c); }).join('');
+                            const inferred = p.is_inferred ? ' <span class="t-inferred" title="无引用源，AI推断">(推断)</span>' : '';
+                            html += '<div class="t-dim-point">' + escapeHtml(p.point || '') + inferred + '<span class="t-cite">' + cite + '</span></div>';
+                        });
+                        html += '</div>';
+                    }
+                    html += '</div>';
+                });
+                html += '</div>';
             }
 
             // 兼容两种 citation 格式：number（旧）和 {index,title,url}（新）
@@ -1596,6 +1716,19 @@
                     if (idx && idx > 0) allCites.add(idx);
                 });
             });
+            // 收集四维卡片的引用
+            if (dims && typeof dims === 'object') {
+                Object.values(dims).forEach(function (dim) {
+                    if (dim && dim.points) {
+                        dim.points.forEach(function (p) {
+                            (p.citations || []).forEach(function (c) {
+                                const idx = citeIndex(c);
+                                if (idx && idx > 0) allCites.add(idx);
+                            });
+                        });
+                    }
+                });
+            }
             if (allCites.size > 0 && sources.length > 0) {
                 html += '<div class="t-refs"><h4>参考文献</h4><ol>';
                 const sortedCites = Array.from(allCites).sort(function (a, b) { return a - b; });

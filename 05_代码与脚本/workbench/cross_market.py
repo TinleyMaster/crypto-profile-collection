@@ -27,6 +27,31 @@ WEIGHTS = {
     "cmc": 0.50,      # CMC 市场数据
 }
 
+# 市值分层（与 db_stats.MARKET_TIERS 保持一致）
+MARKET_TIERS = {
+    "top100": {"label": "TOP 100", "max_rank": 100},
+    "top500": {"label": "TOP 500", "max_rank": 500},
+    "top1000": {"label": "TOP 1000", "max_rank": 1000},
+    "other": {"label": "长尾", "max_rank": None},
+}
+
+
+def _market_tier(cmc_rank: int | None) -> str:
+    if not cmc_rank:
+        return "other"
+    try:
+        r = int(cmc_rank)
+    except (TypeError, ValueError):
+        return "other"
+    if r <= 100:
+        return "top100"
+    if r <= 500:
+        return "top500"
+    if r <= 1000:
+        return "top1000"
+    return "other"
+
+
 # 缓存
 _cache: dict[str, Any] = {}
 _cache_ts: float = 0
@@ -199,13 +224,19 @@ def _compute_consensus(binance_idx: dict, cmc_idx: dict, sector_map: dict[str, s
     return results
 
 
-def get_cross_validated(limit: int = 30) -> dict:
-    """获取多源交叉验证的投研推荐（带缓存）。"""
+def get_cross_validated(limit: int = 30, tier: str | None = None) -> dict:
+    """获取多源交叉验证的投研推荐（带缓存）。
+
+    tier: 市值分层过滤（top100/top500/top1000/other），None 表示不过滤。
+    """
     global _cache, _cache_ts
 
     now = time.time()
+    cache_key = tier or "all"
     if _cache and (now - _cache_ts) < CACHE_TTL:
-        return {"cached": True, "results": _cache["results"][:limit], "total": _cache["total"]}
+        all_results = _cache["results"]
+        filtered = _filter_by_tier(all_results, tier)
+        return {"cached": True, "results": filtered[:limit], "total": len(filtered)}
 
     # 并行获取各数据源（Binance 评分套用分赛道权重）
     sector_map = _load_sector_map()
@@ -216,6 +247,11 @@ def get_cross_validated(limit: int = 30) -> dict:
     cmc_idx = _build_index(cmc_data.get("tokens", []))
 
     results = _compute_consensus(binance_idx, cmc_idx, sector_map)
+
+    # 给每个结果加 market_tier 字段
+    for r in results:
+        r["market_tier"] = _market_tier(r.get("cmc_rank"))
+        r["market_tier_label"] = MARKET_TIERS[r["market_tier"]]["label"]
 
     # 实时数据源都为空时，fallback 到今日存档数据（外部 API 挂了也能展示）
     if not results and _HAS_DB:
@@ -236,12 +272,16 @@ def get_cross_validated(limit: int = 30) -> dict:
                     """, (max(limit, 100),))
                     rows = [dict(r) for r in cur.fetchall()]
                     if rows:
+                        for r in rows:
+                            r["market_tier"] = _market_tier(r.get("rank"))
+                            r["market_tier_label"] = MARKET_TIERS[r["market_tier"]]["label"]
                         _cache = {"results": rows, "total": len(rows)}
                         _cache_ts = now
+                        filtered = _filter_by_tier(rows, tier)
                         return {
                             "cached": False,
-                            "results": rows[:limit],
-                            "total": len(rows),
+                            "results": filtered[:limit],
+                            "total": len(filtered),
                             "fetched_at": int(now),
                             "from_archive": True,
                             "source_stats": {"binance": 0, "cmc": 0, "both": 0},
@@ -258,10 +298,11 @@ def get_cross_validated(limit: int = 30) -> dict:
     except Exception:
         pass  # 存档失败不影响主流程
 
+    filtered = _filter_by_tier(results, tier)
     return {
         "cached": False,
-        "results": results[:limit],
-        "total": len(results),
+        "results": filtered[:limit],
+        "total": len(filtered),
         "fetched_at": int(now),
         "source_stats": {
             "binance": len(binance_idx),
@@ -269,6 +310,18 @@ def get_cross_validated(limit: int = 30) -> dict:
             "both": sum(1 for r in results if r["source_count"] >= 2),
         },
     }
+
+
+def _filter_by_tier(results: list[dict], tier: str | None) -> list[dict]:
+    """按市值分层过滤结果。"""
+    if not tier or tier == "all":
+        return results
+    max_rank = MARKET_TIERS.get(tier, {}).get("max_rank")
+    if tier == "other":
+        return [r for r in results if not r.get("cmc_rank") or int(r["cmc_rank"]) > 1000]
+    if max_rank:
+        return [r for r in results if r.get("cmc_rank") and int(r["cmc_rank"]) <= max_rank]
+    return results
 
 
 def _archive_daily_recommendations(results: list[dict]) -> None:
@@ -345,9 +398,9 @@ def _archive_daily_recommendations(results: list[dict]) -> None:
         conn.commit()
 
 
-def get_consensus_gainers(limit: int = 30) -> dict:
+def get_consensus_gainers(limit: int = 30, tier: str | None = None) -> dict:
     """获取多源共识的涨幅榜。"""
-    result = get_cross_validated(100)
+    result = get_cross_validated(100, tier=tier)
     # 按 24h 涨幅排序，优先高共识
     gainers = sorted(
         result["results"],
@@ -360,9 +413,9 @@ def get_consensus_gainers(limit: int = 30) -> dict:
     }
 
 
-def get_consensus_volume(limit: int = 30) -> dict:
+def get_consensus_volume(limit: int = 30, tier: str | None = None) -> dict:
     """获取多源共识的交易量榜。"""
-    result = get_cross_validated(100)
+    result = get_cross_validated(100, tier=tier)
     volume_ranked = sorted(
         result["results"],
         key=lambda x: (x["source_count"], x["volume_24h"]),

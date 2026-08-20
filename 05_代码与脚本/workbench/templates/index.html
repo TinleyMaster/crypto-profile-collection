@@ -1614,6 +1614,46 @@
             color: #e6e8eb;
         }
 
+        .hot-tier-filters {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .hot-tier-filters .tier-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-right: 2px;
+        }
+
+        .hot-tier-filters .tier-btn {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            border: 1px solid #2a2f3a;
+            background: transparent;
+            color: #8a92a0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .hot-tier-filters .tier-btn.active {
+            background: #3b82f6;
+            color: #fff;
+            border-color: #3b82f6;
+        }
+
+        .hot-tier-filters .tier-btn:hover {
+            color: #e6e8eb;
+            border-color: #3a4250;
+        }
+
+        .hot-tier-filters .tier-btn.active:hover {
+            color: #fff;
+        }
+
         .hot-tokens-loading {
             text-align: center;
             padding: 40px;
@@ -2533,6 +2573,14 @@
                 <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
                 <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
             </div>
+            <div class="hot-tier-filters">
+                <span class="tier-label">市值分层：</span>
+                <button class="tier-btn active" data-tier="top500" onclick="switchHotTier('top500', this)">TOP
+                    500</button>
+                <button class="tier-btn" data-tier="top100" onclick="switchHotTier('top100', this)">TOP 100</button>
+                <button class="tier-btn" data-tier="top1000" onclick="switchHotTier('top1000', this)">TOP 1000</button>
+                <button class="tier-btn" data-tier="all" onclick="switchHotTier('all', this)">全部</button>
+            </div>
             <div id="hot-tokens-content">
                 <div class="hot-tokens-loading">加载中...</div>
             </div>
@@ -2909,6 +2957,7 @@
                         ${a.chain ? `<span class="chain">${escapeHtml(a.chain)}${a.contract ? ' · ' + escapeHtml(shortAddr(a.contract)) : ''}</span>` : ''}
                     </div>
                     <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+                        ${a.market_tier_label ? `<span class="type-badge" style="background:#1e3a5f;color:#60a5fa">${escapeHtml(a.market_tier_label)}</span>` : ''}
                         ${a.sector_label ? `<span class="type-badge" style="background:#3f2d1e;color:#fbbf24">${escapeHtml(a.sector_label)}</span>` : ''}
                         <span class="type-badge">${escapeHtml(a.type)}</span>
                     </div>
@@ -5142,10 +5191,18 @@
 
         // ── 每日投研推荐 ──
         let hotFilter = 'score';
+        let hotTier = 'top500';
 
         function switchHotFilter (filter, btn) {
             hotFilter = filter;
             document.querySelectorAll('.hot-filters button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadHotTokens();
+        }
+
+        function switchHotTier (tier, btn) {
+            hotTier = tier;
+            document.querySelectorAll('.hot-tier-filters .tier-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             loadHotTokens();
         }
@@ -5161,10 +5218,11 @@
             btn.textContent = '加载中...';
             hotShowingAll = false;
 
+            const tierParam = hotTier && hotTier !== 'all' ? '&tier=' + hotTier : '';
             let url;
-            if (hotFilter === 'gainers') url = '/api/market/gainers?limit=30';
-            else if (hotFilter === 'volume') url = '/api/market/volume?limit=30';
-            else url = '/api/market/hot?limit=30';
+            if (hotFilter === 'gainers') url = '/api/market/gainers?limit=30' + tierParam;
+            else if (hotFilter === 'volume') url = '/api/market/volume?limit=30' + tierParam;
+            else url = '/api/market/hot?limit=30' + tierParam;
 
             try {
                 const r = await fetch(url);

@@ -655,10 +655,11 @@ def api_task_result(task_id):
 @app.route("/api/assets/search")
 def api_search_assets():
     q = (request.args.get("q", "") or "").strip()
+    tier = request.args.get("tier") or None
     if not q or len(q) < 1:
         return jsonify({"ok": True, "assets": []})
     try:
-        assets = _get_db_stats().search_assets(q, limit=20)
+        assets = _get_db_stats().search_assets(q, limit=20, tier=tier)
         return jsonify({"ok": True, "assets": assets})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1457,7 +1458,8 @@ def api_market_hot():
     try:
         from cross_market import get_cross_validated
         limit = int(request.args.get("limit", "30"))
-        result = get_cross_validated(limit)
+        tier = request.args.get("tier") or None
+        result = get_cross_validated(limit, tier=tier)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1469,7 +1471,8 @@ def api_market_gainers():
     try:
         from cross_market import get_consensus_gainers
         limit = int(request.args.get("limit", "30"))
-        result = get_consensus_gainers(limit)
+        tier = request.args.get("tier") or None
+        result = get_consensus_gainers(limit, tier=tier)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1481,7 +1484,8 @@ def api_market_volume():
     try:
         from cross_market import get_consensus_volume
         limit = int(request.args.get("limit", "30"))
-        result = get_consensus_volume(limit)
+        tier = request.args.get("tier") or None
+        result = get_consensus_volume(limit, tier=tier)
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

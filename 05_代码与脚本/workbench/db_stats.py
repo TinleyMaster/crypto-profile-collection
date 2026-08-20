@@ -60,6 +60,37 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
     return _pool
 
 
+# 市值分层定义（基于 CMC 排名）
+MARKET_TIERS = {
+    "top100": {"label": "TOP 100", "min_rank": 1, "max_rank": 100},
+    "top500": {"label": "TOP 500", "min_rank": 1, "max_rank": 500},
+    "top1000": {"label": "TOP 1000", "min_rank": 1, "max_rank": 1000},
+    "other": {"label": "长尾", "min_rank": 1001, "max_rank": 999999},
+}
+MARKET_TIER_ORDER = ["top100", "top500", "top1000", "other"]
+
+
+def get_market_tier(cmc_rank: int | None, cg_rank: int | None = None) -> str:
+    """根据 CMC 排名（或 CG 排名 fallback）计算市值分层。
+
+    优先用 CMC 排名，没有则用 CG 排名兜底。无排名返回 'other'。
+    """
+    rank = cmc_rank or cg_rank
+    if not rank:
+        return "other"
+    try:
+        r = int(rank)
+    except (TypeError, ValueError):
+        return "other"
+    if r <= 100:
+        return "top100"
+    if r <= 500:
+        return "top500"
+    if r <= 1000:
+        return "top1000"
+    return "other"
+
+
 @contextmanager
 def get_db():
     """从连接池取连接，保留原 get_connection 的 commit/rollback 语义。"""
@@ -460,20 +491,22 @@ def get_task_progress() -> list[dict]:
     return result
 
 
-def search_assets(query: str, limit: int = 20) -> list[dict]:
+def search_assets(query: str, limit: int = 20, tier: str | None = None) -> list[dict]:
     """按 symbol / name / 合约地址搜索资产，用于下拉自动补全。
     优先查 core.asset，无结果时从 src_cmc 回退并自动入库。
 
     合约地址匹配：EVM（0x 开头）大小写不敏感（含部分匹配）；非 EVM（如 Solana
     base58）精确匹配（大小写敏感）。
+
+    tier: 市值分层过滤（top100/top500/top1000/other），None 表示不过滤。
     """
     try:
-        return _search_assets_inner(query, limit)
+        return _search_assets_inner(query, limit, tier)
     except Exception as e:
         return [{"error": str(e), "notice": "搜索失败，请检查数据库连接"}]
 
 
-def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
+def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -> list[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -487,14 +520,17 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                 )
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
                        cb.cmc_id, a.primary_sector,
-                       ci.market_cap_rank
+                       ci.market_cap_rank,
+                       cam.rank_num AS cmc_rank,
+                       cqs.market_cap
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
+                LEFT JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = cb.cmc_id
                 LEFT JOIN core.asset_source_map asm ON asm.asset_id = a.asset_id
                     AND asm.source_code = 'cg' AND asm.is_primary = TRUE
                 LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 LEFT JOIN latest_cmc cqs ON cqs.cmc_id = cb.cmc_id
-                WHERE a.canonical_symbol ILIKE %s
+                WHERE (
                    OR a.canonical_name ILIKE %s
                    OR EXISTS (
                        SELECT 1 FROM core.asset_contract ac
@@ -504,6 +540,13 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                              OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
                          )
                    )
+                  AND CASE %s
+                        WHEN 'top100' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 100
+                        WHEN 'top500' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 500
+                        WHEN 'top1000' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) <= 1000
+                        WHEN 'other' THEN COALESCE(cam.rank_num, ci.market_cap_rank, 999999) > 1000
+                        ELSE TRUE
+                      END
                 ORDER BY
                     CASE
                         WHEN EXISTS (
@@ -518,13 +561,15 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                         WHEN a.canonical_symbol ILIKE %s THEN 2
                         ELSE 3
                     END,
-                    -- 市值权重：优先 CG 排名（越小越靠前），无排名用 CMC 市值降序，都没有排最后
-                    COALESCE(ci.market_cap_rank, 999999),
+                    -- 市值权重：优先 CMC 排名（越小越靠前），其次 CG 排名，无排名用市值降序
+                    COALESCE(cam.rank_num, ci.market_cap_rank, 999999),
                     COALESCE(cqs.market_cap, 0) DESC,
                     a.canonical_symbol
                 LIMIT %s
                 """,
-                (f"%{query}%", f"%{query}%", f"%{query}%", query, query, query, query, f"{query}%", limit),
+                (f"%{query}%", f"%{query}%", f"%{query}%", query,
+                 tier or "",
+                 query, query, query, f"{query}%", limit),
             )
             rows = cur.fetchall()
 
@@ -556,6 +601,10 @@ def _search_assets_inner(query: str, limit: int = 20) -> list[dict]:
                         "sector_label": SECTOR_LABELS.get(row[5] or "other", row[5] or "other"),
                         "chain": contract_map.get(row[0], (None, None))[0],
                         "contract": contract_map.get(row[0], (None, None))[1],
+                        "cmc_rank": row[7],
+                        "market_cap": float(row[8]) if row[8] else None,
+                        "market_tier": get_market_tier(row[7], row[6]),
+                        "market_tier_label": MARKET_TIERS[get_market_tier(row[7], row[6])]["label"],
                     }
                     for row in rows
                 ]
@@ -2899,12 +2948,21 @@ def _thesis_row_to_dict(row) -> dict:
     """把 research_thesis 行转成可序列化 dict。"""
     if not row:
         return None
+    thesis_json = row["thesis_json"] or []
+    # thesis_json 可能是 list（旧格式，纯论点列表）或 dict（新格式，含 dimensions + 旧字段）
+    if isinstance(thesis_json, dict):
+        thesis_list = thesis_json.get("thesis") or []
+        dimensions = thesis_json.get("dimensions") or None
+    else:
+        thesis_list = thesis_json
+        dimensions = None
     return {
         "thesis_id": row["thesis_id"],
         "asset_id": row["asset_id"],
         "stance": row["stance"],
         "conviction": row["conviction"],
-        "thesis": row["thesis_json"] or [],
+        "thesis": thesis_list,
+        "dimensions": dimensions,
         "key_metrics": row["key_metrics_json"] or {},
         "risks": row["risks_json"] or [],
         "catalysts": row["catalysts_json"] or [],
@@ -2954,6 +3012,15 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
 
     thesis_data["thesis"] = _sanitize(thesis_data.get("thesis") or [])
     thesis_data["risks"] = _sanitize(thesis_data.get("risks") or [])
+
+    # 四维框架引用校验
+    dimensions = thesis_data.get("dimensions")
+    if isinstance(dimensions, dict):
+        for dim_key in ("valuation", "supply", "sentiment", "catalyst"):
+            dim = dimensions.get(dim_key)
+            if isinstance(dim, dict):
+                dim["points"] = _sanitize(dim.get("points") or [])
+
     return thesis_data
 
 
@@ -4706,6 +4773,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "onchain": {},
         "social": {},
         "pressure": {},
+        "derivatives": {},
     }
 
     # 市场数据（多源 fallback：unlock snapshot > social_heat market > CMC 快照 > tokenomics推算）
@@ -4850,6 +4918,33 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         if pressure.get("top10_concentration") is not None:
             metrics_structured["pressure"]["top10_concentration_pct"] = pressure["top10_concentration"]
 
+    # 衍生品资金面（情绪维度核心数据）
+    _emit("采集衍生品资金面数据...")
+    try:
+        deriv = get_asset_derivatives(asset_id)
+        if deriv and deriv.get("ok"):
+            d = deriv.get("data") or {}
+            if d.get("funding_rate") is not None:
+                metrics_structured["derivatives"]["funding_rate"] = d["funding_rate"]
+            if d.get("funding_rate_pct") is not None:
+                metrics_structured["derivatives"]["funding_rate_pct"] = d["funding_rate_pct"]
+            if d.get("funding_rate_7d_avg") is not None:
+                metrics_structured["derivatives"]["funding_rate_7d_avg"] = d["funding_rate_7d_avg"]
+            if d.get("funding_rate_30d_avg") is not None:
+                metrics_structured["derivatives"]["funding_rate_30d_avg"] = d["funding_rate_30d_avg"]
+            if d.get("total_oi_usd") is not None:
+                metrics_structured["derivatives"]["total_oi_usd"] = d["total_oi_usd"]
+            if d.get("oi_change_24h_pct") is not None:
+                metrics_structured["derivatives"]["oi_change_24h_pct"] = d["oi_change_24h_pct"]
+            if d.get("cvd_24h_usd") is not None:
+                metrics_structured["derivatives"]["cvd_24h_usd"] = d["cvd_24h_usd"]
+            if d.get("cvd_ratio_24h") is not None:
+                metrics_structured["derivatives"]["cvd_ratio_24h"] = d["cvd_ratio_24h"]
+            if d.get("available_exchanges"):
+                metrics_structured["derivatives"]["exchange_count"] = len(d["available_exchanges"])
+    except Exception as e:
+        _emit(f"衍生品数据采集失败（不影响结论生成）: {e}")
+
     metrics_json_str = json.dumps(metrics_structured, ensure_ascii=False, indent=2, default=str)
 
     _emit("调用 LLM 生成研究结论...")
@@ -4864,13 +4959,32 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "   - 若有解锁，只能引用 next_unlock_date / next_unlock_pct / next_unlock_value_usd 的具体值。\n"
         "4. 抛压风险等级必须严格使用 pressure.risk_level，不能自行判断高低。\n"
         "5. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n\n"
+        "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
+        "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
+        "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"
+        "3. sentiment（情绪）：回答「现在是不是时机」——社交热度、衍生品资金面、市场情绪\n"
+        "   情绪维度必须优先引用 derivatives 数据：\n"
+        "   - funding_rate/funding_rate_pct：当前资金费率（正=多头付费给空头，市场偏多；负=空头付费，市场偏空）\n"
+        "   - funding_rate_7d_avg/funding_rate_30d_avg：7天/30天平均资金费率（趋势判断）\n"
+        "   - total_oi_usd：全市场未平仓合约价值（OI高=市场热度高，杠杆多）\n"
+        "   - oi_change_24h_pct：OI 24h变化（OI上升=新资金入场，OI下降=资金离场）\n"
+        "   - cvd_24h_usd：24h累计主动买卖净流入（正=主动买入多，看涨；负=主动卖出多，看跌）\n"
+        "   - cvd_ratio_24h：CVD占总成交额比例（绝对值高=方向性强）\n"
+        "4. catalyst（催化）：回答「风险在哪（外部催化）」——解锁事件、上所、融资、监管、项目动态\n\n"
         "只输出 JSON，不要输出其他内容。JSON 格式：\n"
         '{"stance": "bullish|bearish|neutral", '
         '"conviction": "high|medium|low", '
+        '"dimensions": {'
+        '"valuation": {"summary": "估值维度一句话结论", "points": [{"point": "论点描述", "citations": [1, 2]}], "data_keys": ["market.price_usd", "market.market_cap_usd"]}, '
+        '"supply": {"summary": "筹码维度一句话结论", "points": [{"point": "论点描述", "citations": [3]}], "data_keys": ["onchain.top10_concentration_pct", "unlock.unlock_pct_30d"]}, '
+        '"sentiment": {"summary": "情绪维度一句话结论", "points": [{"point": "论点描述", "citations": [4]}], "data_keys": ["social.social_score", "social.sentiment_score"]}, '
+        '"catalyst": {"summary": "催化维度一句话结论", "points": [{"point": "论点描述", "timing": "预期时间", "citations": [5]}], "data_keys": ["unlock.next_unlock_date"]}'
+        '}, '
         '"thesis": [{"point": "核心论点（一句话）", "citations": [1, 2]}], '
         '"risks": [{"risk": "风险点", "citations": [3]}], '
         '"catalysts": [{"catalyst": "催化剂/事件", "timing": "预期时间"}], '
         '"key_metrics": {"价格": "...", "市值": "...", "FDV": "...", "其他关键指标": "..."}}'
+        "\n\n说明：dimensions 是主结构（四维框架），thesis/risks/catalysts 是旧格式兼容字段，两者都要填。"
     )
     user_prompt = (
         f"【资料库】\n\n{context}\n\n"
@@ -4931,6 +5045,26 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     thesis = _sanitize_citations(thesis, "point")
     risks = _sanitize_citations(risks, "risk")
 
+    # 四维框架 citation 校验
+    dimensions_raw = est.get("dimensions") or {}
+    dimensions_clean = {}
+    if isinstance(dimensions_raw, dict):
+        for dim_key in ("valuation", "supply", "sentiment", "catalyst"):
+            dim = dimensions_raw.get(dim_key)
+            if isinstance(dim, dict):
+                clean_dim = {
+                    "summary": dim.get("summary", ""),
+                    "points": _sanitize_citations(dim.get("points") or [], "point"),
+                    "data_keys": dim.get("data_keys") or [],
+                }
+                dimensions_clean[dim_key] = clean_dim
+
+    # thesis_json 存储为 dict（含 dimensions + 旧 thesis 列表），兼容旧格式读取
+    thesis_payload = {
+        "thesis": thesis,
+        "dimensions": dimensions_clean,
+    }
+
     with get_db() as conn:
         _ensure_research_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -4944,7 +5078,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                           source_notebook_id, created_at, updated_at
             """, (
                 asset_id, stance, conviction,
-                json.dumps(thesis, ensure_ascii=False),
+                json.dumps(thesis_payload, ensure_ascii=False),
                 json.dumps(key_metrics, ensure_ascii=False, default=str),
                 json.dumps(risks, ensure_ascii=False),
                 json.dumps(catalysts, ensure_ascii=False),

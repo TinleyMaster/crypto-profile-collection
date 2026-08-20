@@ -1253,6 +1253,37 @@ def api_research_signals(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/correlation-matrix")
+def api_research_correlation_matrix():
+    """资产间价格收益相关性矩阵（Pearson）。
+
+    支持两种模式：
+      - tier + top_n：按市值分层取 top N
+      - asset_ids：指定资产 ID 列表（逗号分隔）
+    """
+    try:
+        tier = request.args.get("tier", "top100")
+        top_n = request.args.get("top_n", default=30, type=int)
+        days = request.args.get("days", default=90, type=int)
+        metric = request.args.get("metric", "price")
+        asset_ids_str = request.args.get("asset_ids", "")
+
+        asset_ids = None
+        if asset_ids_str:
+            asset_ids = [int(x) for x in asset_ids_str.split(",") if x.strip()]
+
+        result = _get_db_stats().compute_correlation_matrix(
+            asset_ids=asset_ids,
+            tier=tier,
+            top_n=top_n,
+            days=days,
+            metric=metric,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/<int:asset_id>/cex-netflow")
 def api_research_cex_netflow(asset_id: int):
     """链上 CEX 净流入/流出（基于交易所钱包标签 + 大额转账日志）。"""

@@ -3837,6 +3837,248 @@ def detect_asset_signals(asset_id: int) -> dict:
     }
 
 
+def compute_correlation_matrix(
+    asset_ids: list[int] | None = None,
+    tier: str | None = None,
+    top_n: int = 30,
+    days: int = 90,
+    metric: str = "price",
+    source_code: str = "cmc",
+) -> dict:
+    """计算资产间价格收益相关性矩阵（Pearson）。
+
+    支持两种输入方式：
+      1. 直接传入 asset_ids 列表
+      2. 指定 tier + top_n，按市值从高到低取该分层的 top N
+
+    Args:
+        asset_ids: 资产 ID 列表，传 None 则用 tier+top_n 模式
+        tier: 市值分层，如 'top100' / 'top500' / 'top1000' / 'other'
+        top_n: 分层内取前 N 个，默认 30
+        days: 回溯天数，默认 90 天
+        metric: 计算相关性的指标，'price'（日收益率）或 'volume'（成交量变化率）
+        source_code: 数据源，默认 'cmc'
+
+    Returns:
+        {
+            "ok": bool,
+            "metric": str,
+            "days": int,
+            "asset_count": int,
+            "assets": [{"asset_id": int, "symbol": str, "name": str, "cmc_rank": int}],
+            "matrix": [[float, ...], ...],  # N x N 相关系数矩阵，行/列顺序与 assets 一致
+            "top_positive": [{"asset_a": {...}, "asset_b": {...}, "correlation": float}],
+            "top_negative": [{"asset_a": {...}, "asset_b": {...}, "correlation": float}],
+        }
+    """
+    import math
+
+    # --- 1. 确定资产列表 ---
+    if asset_ids is None:
+        # 按分层 + 市值排序取 top N
+        tier_cond = ""
+        tier_params: list = []
+        if tier and tier != "all":
+            if tier == "top100":
+                tier_cond = "AND cb.cmc_rank <= 100"
+            elif tier == "top500":
+                tier_cond = "AND cb.cmc_rank <= 500"
+            elif tier == "top1000":
+                tier_cond = "AND cb.cmc_rank <= 1000"
+            elif tier == "other":
+                tier_cond = "AND (cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"
+            else:
+                tier_cond = ""
+
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    f"""
+                    SELECT cb.id AS asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    FROM biz.coin_basic cb
+                    WHERE cb.cmc_rank IS NOT NULL
+                      {tier_cond}
+                    ORDER BY cb.cmc_rank ASC
+                    LIMIT %s
+                    """,
+                    (*tier_params, top_n),
+                )
+                assets = [dict(r) for r in cur.fetchall()]
+    else:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT cb.id AS asset_id, cb.symbol, cb.name, cb.cmc_rank
+                    FROM biz.coin_basic cb
+                    WHERE cb.id = ANY(%s)
+                    ORDER BY cb.cmc_rank ASC NULLS LAST
+                    """,
+                    (asset_ids,),
+                )
+                assets = [dict(r) for r in cur.fetchall()]
+
+    if len(assets) < 2:
+        return {
+            "ok": False,
+            "error": f"资产数量不足（{len(assets)} 个），无法计算相关性",
+            "assets": assets,
+        }
+
+    asset_id_list = [a["asset_id"] for a in assets]
+
+    # --- 2. 批量拉取行情历史 ---
+    value_col = "price_usd" if metric == "price" else "volume_24h"
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT asset_id, market_date, {value_col} AS val
+                FROM biz.asset_market_daily
+                WHERE asset_id = ANY(%s)
+                  AND source_code = %s
+                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND {value_col} IS NOT NULL
+                  AND {value_col} > 0
+                ORDER BY asset_id, market_date ASC
+                """,
+                (asset_id_list, source_code, days),
+            )
+            rows = cur.fetchall()
+
+    # --- 3. 构建 {asset_id: {date: val}} ---
+    price_map: dict[int, dict[str, float]] = {}
+    for r in rows:
+        aid = r["asset_id"]
+        if aid not in price_map:
+            price_map[aid] = {}
+        price_map[aid][str(r["market_date"])] = float(r["val"])
+
+    # --- 4. 计算日收益率序列 ---
+    def _returns(prices: dict[str, float]) -> tuple[list[str], list[float]]:
+        """按日期排序，返回 (dates, returns_pct)。"""
+        sorted_dates = sorted(prices.keys())
+        rets = []
+        ret_dates = []
+        for i in range(1, len(sorted_dates)):
+            prev = prices[sorted_dates[i - 1]]
+            curr = prices[sorted_dates[i]]
+            if prev and prev > 0:
+                rets.append((curr - prev) / prev * 100)  # 百分比收益率
+                ret_dates.append(sorted_dates[i])
+        return ret_dates, rets
+
+    returns_map: dict[int, list[float]] = {}
+    date_sets: list[set[str]] = []
+    for aid in asset_id_list:
+        if aid in price_map:
+            d, r = _returns(price_map[aid])
+            returns_map[aid] = r
+            date_sets.append(set(d))
+        else:
+            returns_map[aid] = []
+            date_sets.append(set())
+
+    # --- 5. 找共同日期交集（简化：用索引对齐，假设日期连续且相近） ---
+    # 更稳妥的方式：按日期对齐
+    # 先找所有资产都有的日期
+    if date_sets:
+        common_dates = date_sets[0].copy()
+        for ds in date_sets[1:]:
+            common_dates &= ds
+        common_dates = sorted(common_dates)
+    else:
+        common_dates = []
+
+    if len(common_dates) < 5:
+        return {
+            "ok": False,
+            "error": f"共同交易日不足（{len(common_dates)} 天），无法可靠计算相关性",
+            "assets": assets,
+            "common_days": len(common_dates),
+        }
+
+    # 按共同日期对齐收益率
+    aligned_returns: list[list[float]] = []
+    for aid in asset_id_list:
+        prices = price_map.get(aid, {})
+        rets = []
+        sorted_dates = sorted(prices.keys())
+        date_to_ret = {}
+        for i in range(1, len(sorted_dates)):
+            prev = prices[sorted_dates[i - 1]]
+            curr = prices[sorted_dates[i]]
+            if prev and prev > 0:
+                date_to_ret[sorted_dates[i]] = (curr - prev) / prev * 100
+        aligned = [date_to_ret.get(d, 0.0) for d in common_dates]
+        aligned_returns.append(aligned)
+
+    # --- 6. 计算 Pearson 相关系数矩阵 ---
+    n = len(assets)
+
+    def _pearson(x: list[float], y: list[float]) -> float:
+        m = len(x)
+        if m < 2:
+            return 0.0
+        mx = sum(x) / m
+        my = sum(y) / m
+        num = sum((x[i] - mx) * (y[i] - my) for i in range(m))
+        dx = math.sqrt(sum((xi - mx) ** 2 for xi in x))
+        dy = math.sqrt(sum((yi - my) ** 2 for yi in y))
+        if dx == 0 or dy == 0:
+            return 0.0
+        r = num / (dx * dy)
+        # 数值稳定性：钳位到 [-1, 1]
+        return max(-1.0, min(1.0, r))
+
+    matrix: list[list[float]] = []
+    pairs: list[tuple[int, int, float]] = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            if i == j:
+                row.append(1.0)
+            elif j < i:
+                row.append(matrix[j][i])
+            else:
+                r = _pearson(aligned_returns[i], aligned_returns[j])
+                row.append(round(r, 4))
+                pairs.append((i, j, r))
+        matrix.append(row)
+
+    # --- 7. Top 正相关 / 负相关 ---
+    pairs_sorted = sorted(pairs, key=lambda p: p[2], reverse=True)
+    top_positive = []
+    for i, j, r in pairs_sorted[:10]:
+        if r > 0:
+            top_positive.append({
+                "asset_a": assets[i],
+                "asset_b": assets[j],
+                "correlation": round(r, 4),
+            })
+    top_negative = []
+    for i, j, r in reversed(pairs_sorted[-10:]):
+        if r < 0:
+            top_negative.append({
+                "asset_a": assets[i],
+                "asset_b": assets[j],
+                "correlation": round(r, 4),
+            })
+
+    return {
+        "ok": True,
+        "metric": metric,
+        "days": days,
+        "common_days": len(common_dates),
+        "asset_count": n,
+        "assets": assets,
+        "matrix": matrix,
+        "top_positive": top_positive,
+        "top_negative": top_negative,
+    }
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 

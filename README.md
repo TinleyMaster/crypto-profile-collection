@@ -18,6 +18,7 @@
 │                    asset_social_heat / onchain_holder_snapshot   │
 │                    asset_raises / asset_hacks                │
 │                    asset_derivatives / daily_recommendation  │
+│                    asset_market_daily                         │
 │                    doc_source_notebooklm / research_notebook │
 │                    research_thesis / research_message        │
 │                    unlock_watchlist / dl_protocol_checked    │
@@ -336,9 +337,57 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 
 `get_onchain_holder_trend()` + `GET /api/onchain/holder/<asset_id>/trend?days=30`：持仓集中度（Top10/Top50/Top100）、持有者数、鲸鱼持仓变化等指标按快照日期展开为时间序列，前端 SVG sparkline 迷你趋势图展示 7/30 天变化率，支持按链切换。
 
-### 研究结论生成
+### 市值分层（排序层）
+
+`get_market_tier()` + `search_assets(tier=...)` + `GET /api/search?q=...&tier=top100`：基于 CMC 排名将资产分为四层，投研结论按分层圈定范围，避免被小币稀释失真。
+
+| 分层 | CMC 排名 | 说明 |
+|------|---------|------|
+| `top100` | 1-100 | 主流币，数据最齐全 |
+| `top500` | 1-500 | 中盘币，投研主力范围 |
+| `top1000` | 1-1000 | 小盘币，需谨慎 |
+| `other` | >1000 或无排名 | 土狗/新币，高风险 |
+
+搜索接口、社交热度排行榜、覆盖率统计、相关性矩阵等均支持 `tier` 参数过滤。
+
+### 行情历史落库
+
+`etl_asset_market_daily_from_cmc.py`：从 CMC 快照（`src_cmc.cmc_quote_snapshot`）按日聚合，UPSERT 到 `biz.asset_market_daily`，零额外 API 成本。
+
+- **粒度**：日级（每日最后一条快照）
+- **字段**：price_usd / market_cap / fdv / volume_24h / change_24h / change_7d / circulating_supply / total_supply
+- **API**：`GET /api/research/<asset_id>/market-history?days=30`
+- **用途**：解锁事件研究、相关性矩阵、信号层异动检测、趋势分析等所有时间序列功能的地基
+
+### 信号层（异动检测 diff）
+
+`detect_asset_signals()` + `GET /api/research/<asset_id>/signals`：机器擅长发现 diff，不擅长判断重要性——只做异动检测 + 严重程度分级，不做投资建议。
+
+| 信号类型 | 触发条件（warning / critical） |
+|---------|-------------------------------|
+| 价格异动 | 24h 涨跌 ≥15% / ≥30% |
+| 成交量放大 | 24h 量 vs 7 日均量 ≥2x / ≥5x |
+| OI 异动 | 24h OI 变化 ≥±20% / ≥±50% |
+| 资金费率极端 | 费率 > 0.05% 或 < -0.05%（warning） |
+| 解锁临近 | 30 天解锁 ≥5% / ≥20% |
+
+按 severity（critical > warning）排序，输出信号列表 + 各维度原始值。
+
+### 研究结论生成（四维模板化）
 
 `generate_research_thesis()` + `POST /api/research/<asset_id>/thesis`：基于资料库 LLM 生成结构化研究结论（`stance` 看多/看空/中性 + `conviction` 置信度 + 论点/风险/催化剂/关键指标），严格依据资料库事实并 `[编号]` 标注来源，附加抛压评分作量化辅助；每次生成追加一条新记录（`biz.research_thesis`），保留历史版本用于「当时判断 vs 后续走势」回溯。
+
+**四维框架模板化**：结论强制按「**估值 / 筹码 / 情绪 / 催化**」四维组织，每维包含 summary + 要点列表 + 引用，而非 LLM 自由发挥。LLM system prompt 注入四维框架说明 + 衍生品/链上定量指标说明，确保每维都挂数据、挂引用。
+
+**定量指标注入**：thesis 生成时自动采集 8 项衍生品指标（资金费率 / OI / OI 变化 / CVD / 多空比等）+ 链上持仓数据 + 解锁压力数据，作为定量部分喂给 LLM，避免结论只谈定性。
+
+**解锁事件研究**：`analyze_unlock_event_impact()` + `GET /api/unlocks/event-impact/<asset_id>`——基于历史解锁事件做事件研究法分析，计算每个事件前后 N 天的 pre_return / post_return / max_drawdown / max_rally / volume_surge，汇总平均收益、正收益占比、大额解锁单独统计，用于 thesis 中解锁催化维度的量化支撑。
+
+**相关性矩阵**：`compute_correlation_matrix()` + `GET /api/research/correlation-matrix`——基于日收益率的 Pearson 相关系数，支持按市值分层取 top N 或指定资产列表，输出 N×N 矩阵 + Top 正相关/负相关配对，用于判断赛道联动性与 Beta 暴露。
+
+**社媒趋势排行榜**：`get_social_heat_leaderboard()` + `GET /api/social/leaderboard`——按市值分层展示社交热度最高的资产（综合评分 / 情绪分 / 热搜排名）+ 情绪分布统计（positive/neutral/negative），用于发现市场情绪热点。
+
+**覆盖率统计按分层**：`get_coverage_by_tier()` + `GET /api/coverage-by-tier`——5 个分层（top100/top500/top1000/other/all）× 6 个维度（白皮书/代币经济/社交/解锁/衍生品/链上），直观展示各分层的数据完整度。
 
 ---
 
@@ -375,9 +424,11 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 - 资产总数、活跃资产、有文档链接的资产数
 - 文档链接来源分布（CMC / CG / DL / DexScreener / Binance / deep_crawl）
 - 任务进度（CG 币种详情、CG/CMC/DL 文档入口补充、双源补充、B2 深度文档发现、SPA 无头浏览器爬取、B2 AI 噪声清理、链上持仓快照）
+- 覆盖率统计按市值分层（白皮书 / 代币经济 / 社交 / 解锁 / 衍生品 / 链上，5 层 × 6 维）
 
 ### 币种查询与投研分析
 - **搜索**：按 symbol / name / **合约地址**搜索（pg_trgm GIN 索引加速模糊搜索）。合约地址匹配：EVM（`0x` 开头）大小写不敏感、支持部分前缀匹配；非 EVM（如 Solana base58）精确匹配（大小写敏感）。搜索结果展示**代币赛道分类徽章**（`primary_sector` → 中文标签）
+- **市值分层筛选**：搜索结果支持按 CMC 排名分层（top100 / top500 / top1000 / other），圈定投研范围，避免被小币稀释
 - **搜索回退**：core.asset 搜不到时，自动从 src_cmc 查找（按 symbol/name）并写入 core.asset
 - **资料面板**：文档链接列表（按来源分类，标注入库来源）
 - **一键复制全部链接** / **NotebookLM 精选**
@@ -392,7 +443,10 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
   - 📈 衍生品资金面（多交易所聚合：资金费率 / OI / CVD）
   - 🔗 链上 CEX 净流入
   - 🐋 鲸鱼 / 聪明钱行为流（持仓变化 + 大额转账方向）
-  - 🎯 研究结论生成（看多/看空/中性 + 置信度 + 论点/风险/催化剂）
+  - 📉 行情历史（日级 K 线，解锁事件研究 / 相关性矩阵地基）
+  - 🚨 异动信号（价格 / 成交量 / OI / 资金费率 / 解锁 5 类 diff 检测）
+  - 🔬 解锁事件研究（历史解锁前后价格走势，事件研究法）
+  - 🎯 研究结论生成（四维模板化：估值 / 筹码 / 情绪 / 催化 + 定量指标注入）
 - **单资产重新爬取**：B2→B3→B2 循环最多 6 轮，深度覆盖子页面
 - **手动添加官网链接** / **创建新资产**
 
@@ -615,6 +669,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理 + 第三方专项(审计/评级/融资/异常) + 自有站点主题抢救
 │   │   │   ├── phase_c_*.py    # 代币经济学提取 + 社交热度
 │   │   │   ├── phase_chain_*.py # 链上数据 + 解锁数据
+│   │   │   ├── etl_*.py        # ETL 脚本（行情历史日级聚合等）
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选
 │   │   │   └── collect_*.py    # GitHub 活跃度采集 + 批量补齐编排

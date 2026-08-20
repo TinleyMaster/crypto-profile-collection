@@ -3664,6 +3664,179 @@ def get_asset_market_history(
     }
 
 
+def detect_asset_signals(asset_id: int) -> dict:
+    """检测单资产的异动信号（diff 检测）。
+
+    机器擅长发现变化，不擅长判断重要性。本函数只负责「发现 diff」，
+    不做重要性评级，由人或上层逻辑判断是否值得关注。
+
+    信号类型：
+    - price_surge / price_dump: 价格异动（24h 涨跌幅超阈值）
+    - volume_surge: 成交量放大（24h 成交量 > 7日均量 * 倍数）
+    - oi_surge / oi_dump: OI 异动（衍生品未平仓合约 24h 变化大）
+    - funding_extreme: 资金费率极端（> 0.05% 或 < -0.05%）
+    - unlock_soon: 近期解锁（未来 7 天内有解锁事件）
+    - holder_concentration_change: 持仓集中度变化（需历史持仓数据）
+
+    Returns:
+        {
+            "ok": bool,
+            "asset_id": int,
+            "signals": [
+                {
+                    "type": str,           # 信号类型
+                    "direction": str,      # up / down / neutral
+                    "severity": str,       # info / warning / critical
+                    "value": float,        # 当前值
+                    "threshold": float,    # 阈值
+                    "description": str,    # 人类可读描述
+                    "source": str,         # 数据来源
+                }
+            ],
+            "signal_count": int,
+        }
+    """
+    signals: list[dict] = []
+
+    # ── 1. 价格 & 成交量信号（来自行情历史） ──
+    try:
+        history = get_asset_market_history(asset_id, days=14)
+        series = history.get("series") or []
+        if len(series) >= 2:
+            latest = series[-1]
+            prev = series[-2]
+
+            # 价格异动（24h 涨跌幅）
+            change_24h = latest.get("change_24h")
+            if change_24h is not None:
+                if change_24h >= 15:
+                    signals.append({
+                        "type": "price_surge",
+                        "direction": "up",
+                        "severity": "critical" if change_24h >= 30 else "warning",
+                        "value": round(change_24h, 2),
+                        "threshold": 15,
+                        "description": f"24h 涨幅 {change_24h:.2f}%",
+                        "source": "cmc",
+                    })
+                elif change_24h <= -15:
+                    signals.append({
+                        "type": "price_dump",
+                        "direction": "down",
+                        "severity": "critical" if change_24h <= -30 else "warning",
+                        "value": round(change_24h, 2),
+                        "threshold": -15,
+                        "description": f"24h 跌幅 {abs(change_24h):.2f}%",
+                        "source": "cmc",
+                    })
+
+            # 成交量放大（24h 成交量 vs 7日均量）
+            vol_24h = latest.get("volume_24h")
+            if vol_24h and len(series) >= 7:
+                last7_vols = [s["volume_24h"] for s in series[-8:-1] if s.get("volume_24h")]
+                if last7_vols:
+                    avg_vol = sum(last7_vols) / len(last7_vols)
+                    if avg_vol > 0 and vol_24h / avg_vol >= 2:
+                        signals.append({
+                            "type": "volume_surge",
+                            "direction": "up",
+                            "severity": "warning" if vol_24h / avg_vol < 5 else "critical",
+                            "value": round(vol_24h / avg_vol, 2),
+                            "threshold": 2.0,
+                            "description": f"24h 成交量是 7 日均量的 {vol_24h / avg_vol:.1f} 倍",
+                            "source": "cmc",
+                        })
+    except Exception:
+        pass
+
+    # ── 2. 衍生品信号（OI / 资金费率） ──
+    try:
+        deriv = get_asset_derivatives(asset_id)
+        if deriv and deriv.get("ok"):
+            d = deriv.get("data") or {}
+
+            # OI 变化
+            oi_change = d.get("oi_change_24h_pct")
+            if oi_change is not None:
+                if oi_change >= 20:
+                    signals.append({
+                        "type": "oi_surge",
+                        "direction": "up",
+                        "severity": "warning" if oi_change < 50 else "critical",
+                        "value": round(oi_change, 2),
+                        "threshold": 20,
+                        "description": f"OI 24h 增长 {oi_change:.1f}%（新资金入场/杠杆增加）",
+                        "source": "derivatives",
+                    })
+                elif oi_change <= -20:
+                    signals.append({
+                        "type": "oi_dump",
+                        "direction": "down",
+                        "severity": "warning" if oi_change > -50 else "critical",
+                        "value": round(oi_change, 2),
+                        "threshold": -20,
+                        "description": f"OI 24h 下降 {abs(oi_change):.1f}%（资金离场/去杠杆）",
+                        "source": "derivatives",
+                    })
+
+            # 资金费率极端
+            fr_pct = d.get("funding_rate_pct")
+            if fr_pct is not None:
+                if fr_pct >= 0.05:
+                    signals.append({
+                        "type": "funding_extreme",
+                        "direction": "up",
+                        "severity": "warning",
+                        "value": round(fr_pct, 4),
+                        "threshold": 0.05,
+                        "description": f"资金费率 {fr_pct:.4f}% 偏高（多头拥挤，注意回调风险）",
+                        "source": "derivatives",
+                    })
+                elif fr_pct <= -0.05:
+                    signals.append({
+                        "type": "funding_extreme",
+                        "direction": "down",
+                        "severity": "warning",
+                        "value": round(fr_pct, 4),
+                        "threshold": -0.05,
+                        "description": f"资金费率 {fr_pct:.4f}% 偏低（空头拥挤，可能有轧空机会）",
+                        "source": "derivatives",
+                    })
+    except Exception:
+        pass
+
+    # ── 3. 解锁信号 ──
+    try:
+        pressure = compute_unlock_pressure(asset_id)
+        if pressure:
+            unlock_pct_30d = pressure.get("unlock_pct_30d")
+            if unlock_pct_30d is not None and unlock_pct_30d > 0:
+                # 30 天解锁 > 5% 流通量算显著
+                if unlock_pct_30d >= 5:
+                    signals.append({
+                        "type": "unlock_soon",
+                        "direction": "down",
+                        "severity": "warning" if unlock_pct_30d < 20 else "critical",
+                        "value": round(unlock_pct_30d, 2),
+                        "threshold": 5,
+                        "description": f"未来 30 天解锁 {unlock_pct_30d:.1f}% 流通量（抛压风险）",
+                        "source": "unlock",
+                    })
+    except Exception:
+        pass
+
+    # 按严重程度排序：critical > warning > info
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    signals.sort(key=lambda s: severity_order.get(s.get("severity", "info"), 99))
+
+    return {
+        "ok": True,
+        "asset_id": asset_id,
+        "signals": signals,
+        "signal_count": len(signals),
+    }
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 

@@ -1243,6 +1243,16 @@ def api_research_market_history(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/signals")
+def api_research_signals(asset_id: int):
+    """单资产异动信号检测（价格/成交量/OI/资金费率/解锁等 diff）。"""
+    try:
+        result = _get_db_stats().detect_asset_signals(asset_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/<int:asset_id>/cex-netflow")
 def api_research_cex_netflow(asset_id: int):
     """链上 CEX 净流入/流出（基于交易所钱包标签 + 大额转账日志）。"""

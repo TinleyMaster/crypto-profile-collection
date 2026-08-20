@@ -1,19 +1,18 @@
 """
 KOL 信号监控守护进程。
 
-独立于 scheduler.py 运行，因为 scheduler 使用 cron 表达式（最小粒度 1 分钟），
-而 KOL 监控需要 30 秒级别的轮询间隔。
+独立于 scheduler.py 运行，使用币安广场公开 HTTP API（免认证）抓取。
 
 设计：
   - 常驻进程，循环执行抓取 → AI 分类 → 邮件提醒
-  - 每轮间隔由 KOL_POLL_INTERVAL 环境变量控制（默认 30 秒）
+  - 每轮间隔由 KOL_POLL_INTERVAL 环境变量控制（默认 900 秒 = 15 分钟）
   - 单轮失败不影响下一轮
   - 支持 --run-once 只跑一次（调试用）
 
 用法：
     python kol_daemon.py                 # 前台常驻
     python kol_daemon.py --run-once      # 只跑一次
-    python kol_daemon.py --interval 60   # 自定义间隔（秒）
+    python kol_daemon.py --interval 600  # 自定义间隔（秒）
 """
 from __future__ import annotations
 
@@ -36,16 +35,16 @@ def main():
     parser.add_argument("--run-once", action="store_true",
                         help="只跑一次（调试用）")
     parser.add_argument("--interval", type=int, default=None,
-                        help="轮询间隔秒数（默认读取环境变量 KOL_POLL_INTERVAL，默认 30）")
+                        help="轮询间隔秒数（默认读取环境变量 KOL_POLL_INTERVAL，默认 900）")
     parser.add_argument("--platform", type=str, default=None,
                         help="只监控指定平台")
     parser.add_argument("--headed", action="store_true",
-                        help="有头模式（调试用）")
+                        help="有头模式（调试用，API 模式无实际作用）")
     args = parser.parse_args()
 
     interval = args.interval
     if interval is None:
-        interval = int(os.getenv("KOL_POLL_INTERVAL", "30"))
+        interval = int(os.getenv("KOL_POLL_INTERVAL", "900"))
 
     print(f"[KOL][daemon] 启动，轮询间隔 {interval}s，平台: {args.platform or '全部'}")
 

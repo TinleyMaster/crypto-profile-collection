@@ -2,20 +2,18 @@
 KOL 帖子抓取器。
 
 支持的平台：
-  - binance_square  币安广场（Playwright 无头浏览器，调用内部 bapi 接口）
+  - binance_square  币安广场（纯 HTTP API，免认证）
 
 架构：每个平台一个 Scraper 类，统一接口 fetch_posts(profile, since_post_id)。
 新增平台时只需新增 Scraper 类，其他逻辑（AI 分类、邮件、存档）全部复用。
 """
 from __future__ import annotations
 
-import json
-import re
 import time
 from dataclasses import dataclass, field
-from typing import Iterator
+from datetime import datetime, timezone
 
-from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext
+import requests
 
 
 @dataclass
@@ -54,7 +52,7 @@ class BaseScraper:
         抓取指定博主的帖子。
 
         Args:
-            platform_user_id: 平台内用户 ID
+            platform_user_id: 平台内用户 ID（币安广场为 username，如 Square-Creator-xxx）
             since_post_id: 增量游标，只返回比此 ID 更新的帖子
             max_pages: 最大翻页数
 
@@ -65,90 +63,58 @@ class BaseScraper:
 
 
 # ============================================================
-# 币安广场抓取器
+# 币安广场抓取器（纯 HTTP API 模式）
 # ============================================================
 
 class BinanceSquareScraper(BaseScraper):
     """
-    币安广场帖子抓取器。
+    币安广场帖子抓取器（纯 HTTP API，免认证）。
 
-    使用 Playwright 无头浏览器访问博主主页，
-    拦截 /bapi/composite/* 接口获取帖子列表 JSON。
+    使用币安公开 bapi friendly 接口：
+      - POST /bapi/composite/v3/friendly/pgc/user/client  → 拿 squareUid
+      - GET  /bapi/composite/v2/friendly/pgc/content/queryUserProfilePageContentsWithFilter
+        → 帖子列表（timeOffset 翻页）
 
-    币安广场博主主页 URL 格式：
-      https://www.binance.com/zh-CN/square/profile/{user_id}
+    platform_user_id 为 username（如 Square-Creator-xxx），
+    内部自动解析为 squareUid 后再抓帖。
     """
 
     platform_code = "binance_square"
 
-    BASE_URL = "https://www.binance.com/zh-CN/square/profile"
+    USER_API = "https://www.binance.com/bapi/composite/v3/friendly/pgc/user/client"
+    FEED_API = ("https://www.binance.com/bapi/composite/v2/friendly/pgc/content/"
+                "queryUserProfilePageContentsWithFilter")
+
+    _DEFAULT_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Origin": "https://www.binance.com",
+        "Referer": "https://www.binance.com/",
+        "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+    }
+
+    # squareUid 缓存（username → uid），避免每轮重复查询
+    _uid_cache: dict[str, str] = {}
 
     def __init__(self, headless: bool = True):
+        # headless 参数保留以兼容旧接口，API 模式无实际作用
         self.headless = headless
-        self._playwright = None
-        self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
-        self._page: Page | None = None
+        self._session = requests.Session()
+        self._session.headers.update(self._DEFAULT_HEADERS)
 
     def __enter__(self):
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=self.headless,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-        )
-        self._context = self._browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/126.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-            locale="zh-CN",
-            extra_http_headers={
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-            },
-        )
-        # Stealth：覆盖常见自动化检测点
-        self._context.add_init_script("""
-            // 覆盖 navigator.webdriver
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            // 覆盖 chrome 对象
-            window.chrome = { runtime: {} };
-            // 覆盖 permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-            );
-            // 覆盖 plugins
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-            // 覆盖 languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['zh-CN', 'zh', 'en'],
-            });
-        """)
-        # 拦截静态资源加速
-        self._context.route(
-            "**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot,css,mp4,webm}",
-            lambda route: route.abort(),
-        )
-        self._page = self._context.new_page()
         return self
 
     def __exit__(self, *args):
         try:
-            if self._context:
-                self._context.close()
-            if self._browser:
-                self._browser.close()
-            if self._playwright:
-                self._playwright.stop()
+            self._session.close()
         except Exception:
             pass
 
@@ -161,128 +127,72 @@ class BinanceSquareScraper(BaseScraper):
         """
         抓取币安广场博主的帖子列表。
 
-        策略：
-          1. 打开博主主页，等待帖子列表接口响应
-          2. 解析接口返回的 JSON
-          3. 如果需要翻页，模拟滚动加载更多
+        流程：
+          1. 通过 username 查 squareUid（缓存优先）
+          2. 循环 GET feed 接口，timeOffset 翻页
+          3. 组装 ScrapedPost，增量过滤
         """
-        if not self._page:
-            raise RuntimeError("Scraper not initialized. Use 'with' statement.")
-
-        url = f"{self.BASE_URL}/{platform_user_id}"
-        posts: list[ScrapedPost] = []
-        seen_ids: set[str] = set()
         result = FetchResult()
 
-        # 收集 API 响应
-        api_responses: list[dict] = []
-        api_statuses: list[int] = []
-
-        def handle_response(response):
-            resp_url = response.url
-            # 币安广场帖子列表接口（bapi composite）
-            if "/bapi/composite/" in resp_url and "feed" in resp_url.lower():
-                api_statuses.append(response.status)
-                try:
-                    data = response.json()
-                    api_responses.append(data)
-                except Exception:
-                    pass
-            # 另一种可能的接口路径
-            if "/bapi/web/" in resp_url and "post" in resp_url.lower():
-                api_statuses.append(response.status)
-                try:
-                    data = response.json()
-                    api_responses.append(data)
-                except Exception:
-                    pass
-
-        self._page.on("response", handle_response)
-
-        # 记录主页面 HTTP 状态
-        main_status: int | None = None
+        # Step 1: 拿 squareUid
         try:
-            resp = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            if resp:
-                main_status = resp.status
-        except Exception:
-            try:
-                resp = self._page.goto(url, wait_until="commit", timeout=30000)
-                if resp:
-                    main_status = resp.status
-            except Exception as e:
-                print(f"[KOL][binance_square] 页面加载失败 {platform_user_id}: {e}")
-                result.page_status = "error"
-                result.error_reason = f"页面加载失败: {e}"
-                return result
-
-        result.http_status = main_status
-
-        # 等待帖子渲染
-        time.sleep(2)
-
-        # 获取页面 title 用于诊断
-        try:
-            result.page_title = self._page.title() or ""
-        except Exception:
-            pass
-
-        # 404 检测
-        if main_status == 404 or "404" in result.page_title or "Not Found" in result.page_title:
+            square_uid = self._get_square_uid(platform_user_id)
+        except _NotFoundError as e:
             result.page_status = "not_found"
-            result.error_reason = f"博主不存在 (HTTP {main_status}, title={result.page_title})"
+            result.error_reason = str(e)
             return result
-
-        # 反爬/挑战检测（页面标题含验证/挑战关键词，或 API 全是 403/202）
-        challenge_keywords = ["验证", "挑战", "challenge", "security", "Security", "Just a moment"]
-        if any(kw in result.page_title for kw in challenge_keywords):
+        except _BlockedError as e:
             result.page_status = "blocked"
-            result.error_reason = f"疑似被反爬拦截 (title={result.page_title})"
+            result.error_reason = str(e)
+            return result
+        except Exception as e:
+            result.page_status = "error"
+            result.error_reason = f"获取博主信息失败: {e}"
             return result
 
-        if api_statuses and all(s in (403, 429, 202) for s in api_statuses):
-            result.page_status = "blocked"
-            result.error_reason = f"API 被拦截 (statuses={api_statuses})"
-            return result
+        # Step 2: 翻页抓帖
+        posts: list[ScrapedPost] = []
+        seen_ids: set[str] = set()
+        time_offset = "-1"
+        page = 0
 
-        # 尝试从页面中提取帖子数据（兜底方案）
-        if not api_responses:
-            page_content = self._page.content()
-            extracted = self._extract_from_html(page_content)
-            for item in extracted:
-                post = self._parse_post_item(item)
-                if post and post.platform_post_id not in seen_ids:
-                    seen_ids.add(post.platform_post_id)
-                    posts.append(post)
+        try:
+            while page < max_pages:
+                page += 1
+                resp_data = self._fetch_feed_page(square_uid, time_offset)
+                contents = resp_data.get("contents", [])
 
-        # 从 API 响应中解析
-        for resp in api_responses:
-            items = self._extract_posts_from_api(resp)
-            for item in items:
-                post = self._parse_post_item(item)
-                if post and post.platform_post_id not in seen_ids:
-                    seen_ids.add(post.platform_post_id)
-                    posts.append(post)
+                if not contents:
+                    break
 
-        # 如果第一页没抓到足够数据，尝试滚动加载更多
-        page_count = 1
-        while page_count < max_pages and len(posts) < 20:
-            # 滚动到底部触发加载
-            self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(2)
-
-            before_count = len(posts)
-            for resp in api_responses:
-                items = self._extract_posts_from_api(resp)
-                for item in items:
+                for item in contents:
                     post = self._parse_post_item(item)
                     if post and post.platform_post_id not in seen_ids:
                         seen_ids.add(post.platform_post_id)
                         posts.append(post)
 
-            if len(posts) == before_count:
-                break  # 没有新内容
-            page_count += 1
+                # 判断是否还有下一页
+                if not resp_data.get("isExistSecondPage", False):
+                    break
+
+                next_offset = resp_data.get("timeOffset")
+                if not next_offset or str(next_offset) == time_offset:
+                    break
+                time_offset = str(next_offset)
+
+                # 轻微限速，避免触发风控
+                time.sleep(0.3)
+
+        except _BlockedError as e:
+            result.page_status = "blocked"
+            result.error_reason = str(e)
+            result.posts = posts  # 已抓到的部分也返回
+            return result
+        except Exception as e:
+            result.page_status = "error"
+            result.error_reason = f"抓取帖子失败: {e}"
+            result.posts = posts
+            return result
 
         # 按时间倒序
         posts.sort(key=lambda p: p.posted_at, reverse=True)
@@ -299,131 +209,118 @@ class BinanceSquareScraper(BaseScraper):
 
         result.posts = posts
 
-        # 0 帖但页面正常 → 空 feed（博主真的没发帖）
         if not posts:
             result.page_status = "empty_feed"
-            result.error_reason = "页面加载成功但未抓到任何帖子（可能是反爬或博主无发帖）"
+            result.error_reason = "接口返回正常但无帖子（博主可能未发帖或已全部增量过滤）"
 
         return result
 
-    def _extract_posts_from_api(self, resp: dict) -> list[dict]:
-        """从 API 响应中递归提取帖子列表。"""
-        results: list[dict] = []
+    # --------------------------------------------------------
+    # 内部方法
+    # --------------------------------------------------------
 
-        def walk(obj):
-            if isinstance(obj, dict):
-                # 常见的帖子列表字段
-                for key in ("posts", "feedList", "list", "items", "data"):
-                    if key in obj and isinstance(obj[key], list):
-                        for item in obj[key]:
-                            if isinstance(item, dict):
-                                # 判断是否是帖子对象（有 id + content 类字段）
-                                if any(k in item for k in ("id", "postId", "post_id")):
-                                    results.append(item)
-                                else:
-                                    walk(item)
-                for v in obj.values():
-                    walk(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    walk(item)
+    def _get_square_uid(self, username: str) -> str:
+        """通过 username 获取 squareUid，带缓存。"""
+        if username in self._uid_cache:
+            return self._uid_cache[username]
 
-        walk(resp)
-        return results
-
-    def _extract_from_html(self, html: str) -> list[dict]:
-        """从 HTML 中提取 __NEXT_DATA__ 等内嵌 JSON。"""
-        results: list[dict] = []
-
-        # 匹配 <script id="__NEXT_DATA__" ...>...</script>
-        m = re.search(
-            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            html, re.DOTALL,
+        payload = {
+            "username": username,
+            "getFollowCount": True,
+            "queryFollowersInfo": True,
+            "queryRelationTokens": True,
+        }
+        resp = self._session.post(
+            self.USER_API,
+            json=payload,
+            timeout=15,
         )
-        if m:
-            try:
-                data = json.loads(m.group(1))
-                results.extend(self._extract_posts_from_api(data))
-            except Exception:
-                pass
 
-        # 匹配 window.__INITIAL_STATE__ 等
-        for pattern in [
-            r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-            r'window\.__APP_DATA__\s*=\s*({.*?});',
-        ]:
-            m = re.search(pattern, html, re.DOTALL)
-            if m:
-                try:
-                    data = json.loads(m.group(1))
-                    results.extend(self._extract_posts_from_api(data))
-                except Exception:
-                    pass
+        if resp.status_code == 404:
+            raise _NotFoundError(f"博主不存在 (HTTP 404, username={username})")
+        if resp.status_code in (403, 429, 202):
+            raise _BlockedError(f"用户接口被拦截 (HTTP {resp.status_code})")
+        if resp.status_code != 200:
+            raise _BlockedError(f"用户接口异常 (HTTP {resp.status_code})")
 
-        return results
+        data = resp.json()
+        if data.get("code") != "000000":
+            msg = data.get("message") or data.get("messageDetail") or str(data)
+            if "not found" in msg.lower() or "不存在" in msg:
+                raise _NotFoundError(f"博主不存在: {msg}")
+            raise _BlockedError(f"用户接口返回错误: {msg}")
+
+        user_data = data.get("data", {})
+        uid = user_data.get("squareUid")
+        if not uid:
+            raise _NotFoundError(f"返回数据中无 squareUid: {list(user_data.keys())}")
+
+        self._uid_cache[username] = uid
+        return uid
+
+    def _fetch_feed_page(self, square_uid: str, time_offset: str) -> dict:
+        """抓取一页帖子，返回 data 字段内容。"""
+        params = {
+            "targetSquareUid": square_uid,
+            "timeOffset": time_offset,
+            "filterType": "ALL",
+        }
+        resp = self._session.get(
+            self.FEED_API,
+            params=params,
+            timeout=15,
+        )
+
+        if resp.status_code in (403, 429, 202):
+            raise _BlockedError(f"帖子接口被拦截 (HTTP {resp.status_code})")
+        if resp.status_code != 200:
+            raise _BlockedError(f"帖子接口异常 (HTTP {resp.status_code})")
+
+        data = resp.json()
+        if data.get("code") != "000000":
+            msg = data.get("message") or data.get("messageDetail") or str(data)
+            raise _BlockedError(f"帖子接口返回错误: {msg}")
+
+        return data.get("data", {})
 
     def _parse_post_item(self, item: dict) -> ScrapedPost | None:
         """将 API 返回的单条帖子解析为 ScrapedPost。"""
-        # 尝试多种字段名
-        post_id = (
-            item.get("id")
-            or item.get("postId")
-            or item.get("post_id")
-            or item.get("postCode")
-        )
+        post_id = item.get("id") or item.get("postId")
         if not post_id:
             return None
         post_id = str(post_id)
 
-        # 正文内容
-        content = (
-            item.get("content")
-            or item.get("text")
-            or item.get("body")
-            or item.get("description")
-            or item.get("title", "")
-        )
+        # 正文：优先 bodyTextOnly（纯文本，直接喂 AI）
+        content = item.get("bodyTextOnly") or item.get("content") or item.get("title", "")
         if isinstance(content, dict):
             content = content.get("text", "") or str(content)
         content = str(content or "").strip()
 
         # 图片
         images: list[str] = []
-        for key in ("images", "imageList", "image_urls", "medias", "mediaList"):
-            val = item.get(key)
-            if isinstance(val, list):
-                for img in val:
-                    if isinstance(img, str):
-                        images.append(img)
-                    elif isinstance(img, dict):
-                        url = (
-                            img.get("url")
-                            or img.get("imageUrl")
-                            or img.get("src")
-                        )
-                        if url:
-                            images.append(url)
+        image_list = item.get("imageList") or []
+        if isinstance(image_list, list):
+            for img in image_list:
+                if isinstance(img, str):
+                    images.append(img)
+                elif isinstance(img, dict):
+                    url = img.get("url") or img.get("imageUrl") or img.get("src")
+                    if url:
+                        images.append(url)
 
-        # 发帖时间
+        # 发帖时间：latestReleaseTime 毫秒时间戳
         posted_at = ""
-        for key in ("createTime", "createdAt", "postTime", "publishTime", "time", "date"):
-            val = item.get(key)
-            if val:
-                if isinstance(val, (int, float)):
-                    # 可能是毫秒时间戳
-                    if val > 1e12:
-                        val = val / 1000
-                    from datetime import datetime, timezone
-                    posted_at = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
-                else:
-                    posted_at = str(val)
-                break
+        ts = item.get("latestReleaseTime") or item.get("createTime")
+        if ts and isinstance(ts, (int, float)):
+            if ts > 1e12:
+                ts = ts / 1000
+            posted_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
         # 帖子 URL
         post_url = ""
-        url = item.get("url") or item.get("postUrl") or item.get("shareUrl")
-        if url:
-            post_url = url if url.startswith("http") else f"https://www.binance.com{url}"
+        share_link = item.get("shareLink")
+        if share_link:
+            post_url = share_link if share_link.startswith("http") else f"https://www.binance.com{share_link}"
         else:
             post_url = f"https://www.binance.com/zh-CN/square/post/{post_id}"
 
@@ -435,6 +332,20 @@ class BinanceSquareScraper(BaseScraper):
             posted_at=posted_at,
             raw_json=item,
         )
+
+
+# ============================================================
+# 自定义异常（用于场景区分）
+# ============================================================
+
+class _NotFoundError(Exception):
+    """博主不存在。"""
+    pass
+
+
+class _BlockedError(Exception):
+    """被反爬/风控拦截。"""
+    pass
 
 
 # ============================================================

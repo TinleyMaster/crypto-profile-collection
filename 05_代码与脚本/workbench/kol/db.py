@@ -206,7 +206,8 @@ def insert_post(
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                 "RETURNING *",
                 (profile_id, platform_code, platform_post_id, content_text,
-                 image_urls, post_url, posted_at, raw_json),
+                 image_urls, post_url, posted_at,
+                 psycopg.types.json.Json(raw_json) if raw_json is not None else None),
             ).fetchone()
             return row
         except psycopg.errors.UniqueViolation:

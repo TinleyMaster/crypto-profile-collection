@@ -37,6 +37,15 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 # 把 workbench 目录加入 path，直接 import task_manager 的工具函数
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 把 scripts/src 加入 path（crypto_research 包）
+# 容器内路径 /app/scripts/src，本地为 ../../scripts/src
+if os.path.exists("/app/scripts/src"):
+    _SCRIPTS_SRC = Path("/app/scripts/src")
+else:
+    _SCRIPTS_SRC = Path(__file__).resolve().parent.parent / "scripts" / "src"
+if str(_SCRIPTS_SRC) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_SRC))
+
 from task_manager import (  # noqa: E402
     LOG_DIR,
     STATE_FILE,

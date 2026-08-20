@@ -565,6 +565,16 @@ def api_dashboard():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/coverage-by-tier")
+def api_coverage_by_tier():
+    """按市值分层统计各维度数据覆盖率。"""
+    try:
+        result = _get_db_stats().get_coverage_by_tier()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/pending")
 def api_pending():
     try:

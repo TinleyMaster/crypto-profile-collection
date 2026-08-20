@@ -188,6 +188,89 @@ def get_dashboard_stats() -> dict:
     return result
 
 
+def get_coverage_by_tier() -> dict:
+    """按市值分层统计各维度数据覆盖率。
+
+    统计维度：白皮书/文档、代币经济、社交热度、解锁数据、衍生品、链上持仓。
+
+    Returns:
+        {
+            "ok": bool,
+            "tiers": {
+                "top100": {
+                    "total": int,
+                    "whitepaper": {"count": int, "pct": float},
+                    "tokenomics": {"count": int, "pct": float},
+                    "social_heat": {"count": int, "pct": float},
+                    "unlocks": {"count": int, "pct": float},
+                    "derivatives": {"count": int, "pct": float},
+                    "onchain_holders": {"count": int, "pct": float},
+                },
+                ...
+            }
+        }
+    """
+    tiers = [
+        ("top100", "cb.cmc_rank <= 100"),
+        ("top500", "cb.cmc_rank <= 500"),
+        ("top1000", "cb.cmc_rank <= 1000"),
+        ("other", "(cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"),
+        ("all", "1=1"),
+    ]
+
+    result = {}
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            for tier_name, tier_cond in tiers:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS total,
+                        -- 白皮书/文档
+                        COUNT(CASE WHEN wp.asset_id IS NOT NULL THEN 1 END) AS whitepaper,
+                        -- 代币经济
+                        COUNT(CASE WHEN tk.asset_id IS NOT NULL THEN 1 END) AS tokenomics,
+                        -- 社交热度
+                        COUNT(CASE WHEN sh.asset_id IS NOT NULL THEN 1 END) AS social_heat,
+                        -- 解锁数据
+                        COUNT(CASE WHEN ul.asset_id IS NOT NULL THEN 1 END) AS unlocks,
+                        -- 衍生品
+                        COUNT(CASE WHEN dv.asset_id IS NOT NULL THEN 1 END) AS derivatives,
+                        -- 链上持仓
+                        COUNT(CASE WHEN oh.asset_id IS NOT NULL THEN 1 END) AS onchain_holders
+                    FROM biz.coin_basic cb
+                    LEFT JOIN (
+                        SELECT DISTINCT asset_id FROM biz.whitepaper_summary
+                    ) wp ON wp.asset_id = cb.id
+                    LEFT JOIN (
+                        SELECT DISTINCT asset_id FROM biz.asset_tokenomics
+                    ) tk ON tk.asset_id = cb.id
+                    LEFT JOIN biz.asset_social_heat sh ON sh.asset_id = cb.id
+                    LEFT JOIN biz.asset_unlocks ul ON ul.asset_id = cb.id
+                    LEFT JOIN biz.asset_derivatives dv ON dv.asset_id = cb.id
+                    LEFT JOIN biz.onchain_holder_snapshot oh ON oh.asset_id = cb.id
+                    WHERE {tier_cond}
+                    """
+                )
+                row = cur.fetchone()
+                total = row["total"] or 0
+
+                def _pct(cnt):
+                    return round(cnt / total * 100, 1) if total > 0 else 0.0
+
+                result[tier_name] = {
+                    "total": total,
+                    "whitepaper": {"count": row["whitepaper"] or 0, "pct": _pct(row["whitepaper"])},
+                    "tokenomics": {"count": row["tokenomics"] or 0, "pct": _pct(row["tokenomics"])},
+                    "social_heat": {"count": row["social_heat"] or 0, "pct": _pct(row["social_heat"])},
+                    "unlocks": {"count": row["unlocks"] or 0, "pct": _pct(row["unlocks"])},
+                    "derivatives": {"count": row["derivatives"] or 0, "pct": _pct(row["derivatives"])},
+                    "onchain_holders": {"count": row["onchain_holders"] or 0, "pct": _pct(row["onchain_holders"])},
+                }
+
+    return {"ok": True, "tiers": result}
+
+
 def get_pending_b2() -> dict:
     """B2 剩余待爬数量。"""
     with get_db() as conn:

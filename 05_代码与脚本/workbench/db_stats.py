@@ -6777,6 +6777,155 @@ def get_asset_social_heat(asset_id: int) -> dict | None:
     }
 
 
+def get_social_heat_leaderboard(
+    tier: str | None = None,
+    limit: int = 20,
+    sort_by: str = "score",
+) -> dict:
+    """社交热度排行榜：按市值分层展示社交热度最高的资产。
+
+    Args:
+        tier: 市值分层，None/'all' 表示全部
+        limit: 返回数量，默认 20
+        sort_by: 排序字段，score / sentiment_score / trending_rank
+
+    Returns:
+        {
+            "ok": bool,
+            "tier": str,
+            "sort_by": str,
+            "total": int,
+            "assets": [
+                {
+                    "asset_id": int, "symbol": str, "name": str, "cmc_rank": int,
+                    "score": float, "confidence": str,
+                    "sentiment": str, "sentiment_score": float,
+                    "trending_rank": int | None,
+                    "community_size": int | None,
+                    "fetched_at": str,
+                }
+            ],
+            "sentiment_distribution": {"positive": int, "neutral": int, "negative": int},
+        }
+    """
+    # 分层条件
+    tier_cond = ""
+    tier_params: list = []
+    if tier and tier != "all":
+        if tier == "top100":
+            tier_cond = "AND cb.cmc_rank <= 100"
+        elif tier == "top500":
+            tier_cond = "AND cb.cmc_rank <= 500"
+        elif tier == "top1000":
+            tier_cond = "AND cb.cmc_rank <= 1000"
+        elif tier == "other":
+            tier_cond = "AND (cb.cmc_rank > 1000 OR cb.cmc_rank IS NULL)"
+        else:
+            tier_cond = ""
+
+    # 排序字段
+    sort_col = "sh.score DESC"
+    if sort_by == "sentiment_score":
+        sort_col = "(sh.sentiment_json->>'sentiment_score')::float DESC"
+    elif sort_by == "trending_rank":
+        sort_col = "(sh.trend_json->>'trending_rank')::int ASC NULLS LAST"
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 总数
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM biz.asset_social_heat sh
+                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                WHERE sh.score IS NOT NULL
+                  {tier_cond}
+                """,
+                tier_params,
+            )
+            total = cur.fetchone()["cnt"]
+
+            # 排行榜
+            cur.execute(
+                f"""
+                SELECT
+                    cb.id AS asset_id,
+                    cb.symbol,
+                    cb.name,
+                    cb.cmc_rank,
+                    sh.score,
+                    sh.confidence,
+                    sh.sentiment_json->>'sentiment' AS sentiment,
+                    (sh.sentiment_json->>'sentiment_score')::float AS sentiment_score,
+                    (sh.trend_json->>'trending_rank')::int AS trending_rank,
+                    COALESCE(
+                        (sh.community_json->'x'->>'followers')::bigint,
+                        (sh.community_json->'twitter'->>'followers')::bigint,
+                        (sh.community_json->'reddit'->>'subscribers')::bigint,
+                        0
+                    ) AS community_size,
+                    sh.fetched_at
+                FROM biz.asset_social_heat sh
+                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                WHERE sh.score IS NOT NULL
+                  {tier_cond}
+                ORDER BY {sort_col}
+                LIMIT %s
+                """,
+                (*tier_params, limit),
+            )
+            rows = cur.fetchall()
+
+            # 情绪分布
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(sh.sentiment_json->>'sentiment', 'neutral') AS sentiment,
+                    COUNT(*) AS cnt
+                FROM biz.asset_social_heat sh
+                JOIN biz.coin_basic cb ON cb.id = sh.asset_id
+                WHERE sh.score IS NOT NULL
+                  {tier_cond}
+                GROUP BY COALESCE(sh.sentiment_json->>'sentiment', 'neutral')
+                """,
+                tier_params,
+            )
+            dist_rows = cur.fetchall()
+
+    assets = []
+    for r in rows:
+        assets.append({
+            "asset_id": r["asset_id"],
+            "symbol": r["symbol"],
+            "name": r["name"],
+            "cmc_rank": r["cmc_rank"],
+            "score": _social_float(r.get("score")),
+            "confidence": r.get("confidence"),
+            "sentiment": r.get("sentiment") or "neutral",
+            "sentiment_score": float(r["sentiment_score"]) if r.get("sentiment_score") is not None else None,
+            "trending_rank": r.get("trending_rank"),
+            "community_size": int(r["community_size"]) if r.get("community_size") else None,
+            "fetched_at": str(r["fetched_at"]) if r.get("fetched_at") else None,
+        })
+
+    sentiment_dist = {"positive": 0, "neutral": 0, "negative": 0}
+    for d in dist_rows:
+        s = d["sentiment"] or "neutral"
+        if s in sentiment_dist:
+            sentiment_dist[s] = d["cnt"]
+        else:
+            sentiment_dist["neutral"] += d["cnt"]
+
+    return {
+        "ok": True,
+        "tier": tier or "all",
+        "sort_by": sort_by,
+        "total": total,
+        "assets": assets,
+        "sentiment_distribution": sentiment_dist,
+    }
+
+
 def query_social_heat(asset_id: int, force: bool = False, log=None) -> dict:
     """按需拉取社交热度数据（先查缓存，未命中或强制则运行脚本）。"""
     def _emit(msg: str) -> None:

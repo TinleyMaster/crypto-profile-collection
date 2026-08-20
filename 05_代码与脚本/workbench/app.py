@@ -1495,6 +1495,23 @@ def api_social_query(asset_id: int):
     return jsonify({"ok": True, "pending": True, "task_id": task_id})
 
 
+@app.route("/api/social/leaderboard")
+def api_social_leaderboard():
+    """社交热度排行榜：按市值分层展示社交热度最高的资产 + 情绪分布。"""
+    try:
+        tier = request.args.get("tier", "all")
+        limit = request.args.get("limit", default=20, type=int)
+        sort_by = request.args.get("sort_by", "score")
+        result = _get_db_stats().get_social_heat_leaderboard(
+            tier=tier if tier != "all" else None,
+            limit=limit,
+            sort_by=sort_by,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/holders/query/<int:asset_id>")
 def api_holders_query(asset_id: int):
     """按需拉取指定资产的持仓分布快照（从区块浏览器爬取）。"""

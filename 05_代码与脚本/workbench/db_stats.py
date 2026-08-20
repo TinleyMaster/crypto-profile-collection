@@ -2745,6 +2745,9 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
     structured_metrics = _build_structured_metrics_from_snapshot(snapshot, asset_id)
     if thesis:
         thesis["structured_metrics"] = structured_metrics
+        # 读取时幂等校验引用：旧 thesis 是裸数字 citations，补全 title/url + is_inferred
+        sources_list = snapshot.get("sources") or []
+        _sanitize_thesis_citations(thesis, sources_list)
 
     return {
         "ok": True,
@@ -2909,6 +2912,49 @@ def _thesis_row_to_dict(row) -> dict:
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
     }
+
+
+def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) -> dict | None:
+    """读取时幂等校验 thesis/risks 的引用：过滤越界/重复，补充 title/url，无引用标记推断。
+
+    旧 thesis 是落库快照（citations 为裸数字如 [1,3]，无 title/url，无 is_inferred），
+    每次读取时用当前 sources 列表做后处理，确保前端展示一致。
+    """
+    if not thesis_data:
+        return thesis_data
+
+    def _sanitize(items: list[dict]) -> list[dict]:
+        cleaned = []
+        for item in items:
+            cites = []
+            seen_idx = set()
+            for c in item.get("citations") or []:
+                try:
+                    if isinstance(c, dict):
+                        idx = int(c.get("index", 0))
+                    else:
+                        idx = int(c)
+                except (TypeError, ValueError):
+                    continue
+                if idx < 1 or idx > len(sources) or idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                s = sources[idx - 1]
+                cites.append({
+                    "index": idx,
+                    "title": s.get("title") or s.get("url") or "",
+                    "url": s.get("url") or "",
+                })
+            new_item = dict(item)
+            new_item["citations"] = cites
+            if not cites:
+                new_item["is_inferred"] = True
+            cleaned.append(new_item)
+        return cleaned
+
+    thesis_data["thesis"] = _sanitize(thesis_data.get("thesis") or [])
+    thesis_data["risks"] = _sanitize(thesis_data.get("risks") or [])
+    return thesis_data
 
 
 def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:

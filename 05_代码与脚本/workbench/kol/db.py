@@ -27,14 +27,21 @@ if str(SCRIPTS_SRC) not in sys.path:
 
 from crypto_research.config import get_settings  # noqa: E402
 
-_settings = get_settings(require_database=True)
-DATABASE_URL = _settings.database_url
+_database_url: str | None = None
+
+
+def _get_db_url() -> str:
+    """惰性获取数据库 URL（避免模块导入时就建立连接导致启动崩溃）。"""
+    global _database_url
+    if _database_url is None:
+        _database_url = get_settings(require_database=True).database_url
+    return _database_url
 
 
 @contextmanager
 def get_conn() -> Iterator[psycopg.Connection]:
     """获取数据库连接（上下文管理器，自动提交/回滚）。"""
-    conn = psycopg.connect(DATABASE_URL, connect_timeout=30, row_factory=dict_row)
+    conn = psycopg.connect(_get_db_url(), connect_timeout=30, row_factory=dict_row)
     try:
         yield conn
         conn.commit()

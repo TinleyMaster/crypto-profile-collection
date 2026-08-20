@@ -25,6 +25,7 @@ COPY 05_代码与脚本/scripts/bin /app/scripts/bin
 # 复制 workbench 应用
 COPY 05_代码与脚本/workbench/*.py /app/
 COPY 05_代码与脚本/workbench/*.conf /app/
+COPY 05_代码与脚本/workbench/kol /app/kol
 COPY 05_代码与脚本/workbench/templates /app/templates
 
 # 文档存储目录

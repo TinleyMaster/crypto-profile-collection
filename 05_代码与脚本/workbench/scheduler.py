@@ -101,6 +101,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("unlock_event_sync", "30 10 * * *", "sync_unlock_events_from_json.py", [], "解锁事件 JSON→结构化同步（每日）"),
     ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）"),
 
+    # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══
+    # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）"),
+
     # ═══ 文档深度爬取 ═══
     ("b2_auto_loop", "0 */6 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每 6 小时）"),
     ("spa_browser_crawl_auto", "0 9 * * *", "phase_b2_spa_browser_crawl_auto.py", [], "B3 SPA 无头浏览器爬取"),

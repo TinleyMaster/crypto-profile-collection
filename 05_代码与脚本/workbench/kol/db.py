@@ -315,8 +315,8 @@ def list_signals(
     offset: int = 0,
 ) -> list[dict]:
     sql = (
-        "SELECT s.*, p.posted_at, p.post_url, pr.nickname as profile_nickname, "
-        "pr.platform_code "
+        "SELECT s.*, p.posted_at, p.post_url, p.content_text, "
+        "pr.nickname as profile_nickname, pr.platform_code "
         "FROM biz.kol_signal s "
         "JOIN biz.kol_post p ON s.post_id = p.post_id "
         "JOIN biz.kol_profile pr ON s.profile_id = pr.profile_id "

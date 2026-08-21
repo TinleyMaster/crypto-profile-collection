@@ -39,17 +39,37 @@ def _parse_date(val) -> datetime.date | None:
     if isinstance(val, datetime):
         return val.date()
     s = str(val).strip()
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
-                "%Y-%m-%dT%H:%M:%S+00:00", "%Y/%m/%d"):
+    # 清理 tokenomist 格式的后缀，如 "Sep 10, 2026Next" → "Sep 10, 2026"
+    # 以及 "Apr 18, 2023TGE" → "Apr 18, 2023"
+    for suffix in ("Next", "TGE", "Unlocks", "Unlock"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)].strip()
+
+    # 先尝试完整匹配
+    full_formats = (
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S+00:00",
+        "%Y/%m/%d",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    )
+    for fmt in full_formats:
         try:
-            return datetime.strptime(s[:len(fmt) + 4], fmt).date()
+            return datetime.strptime(s, fmt).date()
         except ValueError:
             continue
-    # 尝试 date.fromisoformat
+
+    # 再尝试 ISO 格式（处理各种时区后缀）
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except (ValueError, TypeError):
-        return None
+        pass
+
+    return None
 
 
 def _to_float(val) -> float | None:

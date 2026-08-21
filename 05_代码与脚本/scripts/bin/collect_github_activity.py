@@ -45,9 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]:
-    """从 doc_source_entry 提取去重的 owner/repo 列表。
+    """从 doc_source_entry 提取去重的 owner/repo 列表，按市值排序优先主项目仓库。
 
-    Returns list of dicts with keys: owner_login, repo_name, sample_url, entry_count
+    Returns list of dicts with keys: owner_login, repo_name, sample_url, entry_count, market_cap_rank
     """
     # 外部用 NOT EXISTS 过滤已采集的仓库
     not_exists_clause = ""
@@ -66,30 +66,45 @@ def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]
             repo.owner_login,
             repo.repo_name,
             repo.sample_url,
-            repo.entry_count
+            repo.entry_count,
+            repo.market_cap_rank
         FROM (
             SELECT
                 split_part(
-                    regexp_replace(entry_url, '^https?://github\\.com/', ''),
+                    regexp_replace(d.entry_url, '^https?://github\\.com/', ''),
                     '/', 1
                 ) AS owner_login,
                 split_part(
-                    regexp_replace(entry_url, '^https?://github\\.com/', ''),
+                    regexp_replace(d.entry_url, '^https?://github\\.com/', ''),
                     '/', 2
                 ) AS repo_name,
-                MAX(entry_url) AS sample_url,
-                COUNT(*) AS entry_count
-            FROM biz.doc_source_entry
-            WHERE entry_url LIKE '%%github.com%%'
-              AND entry_url NOT LIKE '%%gist.github.com%%'
+                MAX(d.entry_url) AS sample_url,
+                COUNT(*) AS entry_count,
+                MIN(a.market_cap_rank) AS market_cap_rank
+            FROM biz.doc_source_entry d
+            JOIN core.asset a ON a.asset_id = d.asset_id
+            WHERE d.entry_url LIKE '%%github.com%%'
+              AND d.entry_url NOT LIKE '%%gist.github.com%%'
+              -- 过滤审计报告/文档类仓库，优先项目主仓库
+              AND d.entry_url NOT LIKE '%%/audit%%'
+              AND d.entry_url NOT LIKE '%%/audits%%'
+              AND d.entry_url NOT LIKE '%%/audit-reports%%'
+              AND d.entry_url NOT LIKE '%%/publications%%'
+              AND d.entry_url NOT LIKE '%%/docs%%'
+              AND d.entry_url NOT LIKE '%%/documentation%%'
+              AND d.entry_url NOT LIKE '%%/whitepaper%%'
+              AND d.entry_url NOT LIKE '%%/whitepapers%%'
             GROUP BY 1, 2
-            ORDER BY entry_count DESC
-            LIMIT %s
         ) repo
         WHERE repo.owner_login != ''
           AND repo.repo_name != ''
+          AND repo.market_cap_rank IS NOT NULL
         """
         + not_exists_clause
+        + """
+        ORDER BY repo.market_cap_rank ASC
+        LIMIT %s
+        """
     )
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(sql, (limit,))

@@ -13,7 +13,6 @@ INSERT INTO biz.github_repo_activity (
     disabled,
     pushed_at,
     created_at,
-    updated_at,
     -- commit activity (last 52 weeks)
     total_commits_52w,
     weekly_commit_counts,
@@ -24,7 +23,7 @@ INSERT INTO biz.github_repo_activity (
     api_response_json,
     fetched_at
 ) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s,
     %s, %s,
     %s::jsonb, %s::timestamptz

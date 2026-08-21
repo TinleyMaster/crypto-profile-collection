@@ -589,6 +589,7 @@
                         <th>方向</th>
                         <th>标的</th>
                         <th>入场条件</th>
+                        <th>原文</th>
                         <th>置信度</th>
                         <th>告警</th>
                         <th>操作</th>
@@ -771,7 +772,7 @@
                 const tbody = document.getElementById('signalsTable');
 
                 if (data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无信号</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无信号</td></tr>';
                     return;
                 }
 
@@ -793,6 +794,7 @@
                             <td>${dirTag}</td>
                             <td><b>${s.symbol || '—'}</b></td>
                             <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.entry_condition || '—'}</td>
+                            <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.content_text || '')}">${escapeHtml((s.content_text || '').slice(0, 60))}${s.content_text && s.content_text.length > 60 ? '...' : ''}</td>
                             <td>${confBar}</td>
                             <td>${alertTag}</td>
                             <td><button class="btn" onclick="showSignalDetail(${s.signal_id})">详情</button></td>
@@ -801,7 +803,7 @@
                 }).join('');
             } catch (e) {
                 document.getElementById('signalsTable').innerHTML =
-                    '<tr><td colspan="9" class="empty">加载失败</td></tr>';
+                    '<tr><td colspan="10" class="empty">加载失败</td></tr>';
             }
         }
 

@@ -155,6 +155,23 @@ def main() -> int:
             # Simpler: just use the first raw_response_id for all rows
             primary_raw_id = raw_response_ids[0] if raw_response_ids else None
 
+            # 过滤掉不在 cmc_asset_map 中的新币，避免外键失败导致整批回滚
+            with conn.cursor() as cur:
+                all_cmc_ids = [row["cmc_id"] for row in all_rows]
+                cur.execute(
+                    "SELECT cmc_id FROM src_cmc.cmc_asset_map WHERE cmc_id = ANY(%s)",
+                    (all_cmc_ids,),
+                )
+                valid_ids = {r[0] for r in cur.fetchall()}
+
+            skipped_new = 0
+            filtered_rows = []
+            for row in all_rows:
+                if row["cmc_id"] in valid_ids:
+                    filtered_rows.append(row)
+                else:
+                    skipped_new += 1
+
             row_params = [
                 (
                     row["cmc_id"],
@@ -173,7 +190,7 @@ def main() -> int:
                     row["market_cap_dominance"],
                     primary_raw_id,
                 )
-                for row in all_rows
+                for row in filtered_rows
             ]
             execute_many(conn, upsert_quote_sql, row_params)
 
@@ -196,7 +213,8 @@ def main() -> int:
                     {
                         "status": "success",
                         "run_id": run_id,
-                        "row_count": len(all_rows),
+                        "row_count": len(filtered_rows),
+                        "skipped_new_coins": skipped_new,
                         "top": args.top,
                         "fetched_at": fetched_at,
                     },

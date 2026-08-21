@@ -109,25 +109,37 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 UNLOCK_SQL = """
 INSERT INTO biz.daily_diff_summary
     (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH upcoming AS (
+    SELECT
+        e.asset_id,
+        SUM(e.unlock_value_usd) AS unlock_value_7d_usd,
+        SUM(e.unlock_amount) AS unlock_amount_7d,
+        COUNT(*) AS event_count_7d
+    FROM biz.asset_unlock_event e
+    WHERE e.unlock_date BETWEEN %s::DATE AND %s::DATE + INTERVAL '7 days'
+      AND e.unlock_value_usd IS NOT NULL
+      AND e.unlock_value_usd > 0
+    GROUP BY e.asset_id
+)
 SELECT
     %s::DATE,
     'unlock_7d',
     a.asset_id,
-    COALESCE(ap.pressure_score, 0),
-    '抛压评分 (0-100)',
-    ROW_NUMBER() OVER (ORDER BY COALESCE(ap.pressure_score, 0) DESC),
+    COALESCE(u.unlock_value_7d_usd, 0),
+    '7 天解锁价值 (USD)',
+    ROW_NUMBER() OVER (ORDER BY COALESCE(u.unlock_value_7d_usd, 0) DESC),
     'up',
     jsonb_build_object(
-        'risk_level', ap.risk_level,
-        'unlock_pct_7d', ap.unlock_pct_7d,
-        'unlock_pct_30d', ap.unlock_pct_30d,
-        'top10_concentration', ap.top10_concentration
+        'unlock_value_7d_usd', u.unlock_value_7d_usd,
+        'unlock_amount_7d', u.unlock_amount_7d,
+        'event_count_7d', u.event_count_7d,
+        'market_cap', a.market_cap,
+        'market_cap_rank', a.market_cap_rank
     )
-FROM biz.asset_unlock_pressure ap
-JOIN core.asset a ON a.asset_id = ap.asset_id
-WHERE a.market_cap_rank <= 1000
-  AND ap.pressure_score > 0
-ORDER BY ap.pressure_score DESC
+FROM upcoming u
+JOIN core.asset a ON a.asset_id = u.asset_id
+WHERE a.market_cap_rank <= 3000
+ORDER BY u.unlock_value_7d_usd DESC
 LIMIT 20
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -144,9 +156,9 @@ def generate_for_date(cur, d: date) -> dict:
     cur.execute(VOLUME_SURGE_SQL, (date_str, date_str))
     result["volume_surge_24h"] = cur.rowcount
 
-    cur.execute("SELECT count(*) FROM biz.asset_token_unlocks")
+    cur.execute("SELECT count(*) FROM biz.asset_unlock_event")
     if cur.fetchone()[0] > 0:
-        cur.execute(UNLOCK_SQL, (date_str,))
+        cur.execute(UNLOCK_SQL, (date_str, date_str, date_str))
         result["unlock_7d"] = cur.rowcount
     else:
         result["unlock_7d"] = 0

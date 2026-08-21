@@ -43,28 +43,6 @@ import psycopg.rows  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
 
-# /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
-# 文件持久化，兼容 gunicorn 多 worker
-_FEED_FULL_TS_FILE = RECRAWL_STATE_DIR / "feed_full_ts.json"
-_FEED_FULL_TS_LOCK = RECRAWL_STATE_DIR / "feed_full_ts.lock"
-
-
-def _load_feed_full_ts() -> float:
-    if not _FEED_FULL_TS_FILE.exists():
-        return 0.0
-    try:
-        with open(_FEED_FULL_TS_FILE, "r", encoding="utf-8") as f:
-            return float(json.load(f).get("ts", 0.0))
-    except (json.JSONDecodeError, IOError, OSError, ValueError):
-        return 0.0
-
-
-def _save_feed_full_ts(ts: float) -> None:
-    tmp = _FEED_FULL_TS_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"ts": ts}, f)
-    os.replace(tmp, _FEED_FULL_TS_FILE)
-
 # KOL 监控模块（可选，导入失败不影响主服务）
 try:
     from kol.routes import kol_bp  # noqa: E402
@@ -94,6 +72,28 @@ RECRAWL_STATE_DIR = (
 RECRAWL_STATE_DIR.mkdir(parents=True, exist_ok=True)
 RECRAWL_STATE_FILE = RECRAWL_STATE_DIR / "recrawl_state.json"
 RECRAWL_LOCK_FILE = RECRAWL_STATE_DIR / "recrawl_state.lock"
+
+# /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
+# 文件持久化，兼容 gunicorn 多 worker
+_FEED_FULL_TS_FILE = RECRAWL_STATE_DIR / "feed_full_ts.json"
+_FEED_FULL_TS_LOCK = RECRAWL_STATE_DIR / "feed_full_ts.lock"
+
+
+def _load_feed_full_ts() -> float:
+    if not _FEED_FULL_TS_FILE.exists():
+        return 0.0
+    try:
+        with open(_FEED_FULL_TS_FILE, "r", encoding="utf-8") as f:
+            return float(json.load(f).get("ts", 0.0))
+    except (json.JSONDecodeError, IOError, OSError, ValueError):
+        return 0.0
+
+
+def _save_feed_full_ts(ts: float) -> None:
+    tmp = _FEED_FULL_TS_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": ts}, f)
+    os.replace(tmp, _FEED_FULL_TS_FILE)
 
 
 class _RecrawlFileLock:

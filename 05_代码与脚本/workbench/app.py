@@ -1736,6 +1736,19 @@ def api_market_sector_heatmap():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/daily-diff")
+def api_daily_diff():
+    """每日 diff 变化榜：涨跌幅/成交量异动/解锁抛压等。"""
+    try:
+        diff_date = request.args.get("date")
+        categories = request.args.get("categories")
+        cat_list = categories.split(",") if categories else None
+        result = _get_db_stats().get_daily_diff_summary(diff_date=diff_date, categories=cat_list)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/market/backtest")
 def api_market_backtest():
     """每日推荐质量回测。"""

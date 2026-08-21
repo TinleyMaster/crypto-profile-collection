@@ -308,6 +308,98 @@
             border-radius: 10px;
         }
 
+        /* 一页结论 */
+        .r-onepage {
+            flex-shrink: 0;
+            margin: 16px 20px 0;
+            padding: 14px 16px;
+            background: linear-gradient(135deg, #1a1f2e 0%, #14181f 100%);
+            border: 1px solid #2a3550;
+            border-radius: 12px;
+        }
+
+        .r-onepage .op-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .r-onepage .op-head h3 {
+            font-size: 15px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .r-onepage .op-stance {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .r-onepage .op-stance.bullish {
+            background: #0b3d2a;
+            color: #34d399;
+        }
+
+        .r-onepage .op-stance.bearish {
+            background: #3d1616;
+            color: #f87171;
+        }
+
+        .r-onepage .op-stance.neutral {
+            background: #2a2f3a;
+            color: #9ca3af;
+        }
+
+        .r-onepage .op-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+        }
+
+        .r-onepage .op-item {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .r-onepage .op-item .op-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .r-onepage .op-item .op-value {
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6e8eb;
+            line-height: 1.4;
+        }
+
+        .r-onepage .op-item .op-value.positive {
+            color: #34d399;
+        }
+
+        .r-onepage .op-item .op-value.negative {
+            color: #f87171;
+        }
+
+        .r-onepage .op-item .op-value.warning {
+            color: #f59e0b;
+        }
+
+        .r-onepage .op-item .op-sub {
+            font-size: 10px;
+            color: #4b5563;
+            margin-top: 2px;
+        }
+
         .r-thesis .t-head {
             display: flex;
             align-items: center;
@@ -1444,6 +1536,38 @@
             <div class="no-data">加载中...</div>
         </aside>
         <section class="r-chat">
+            <div class="r-onepage" id="r-onepage" style="display:none">
+                <div class="op-head">
+                    <h3>🎯 一页结论</h3>
+                    <span class="op-stance neutral" id="op-stance">加载中</span>
+                </div>
+                <div class="op-grid" id="op-grid">
+                    <div class="op-item">
+                        <div class="op-label">📊 综合立场</div>
+                        <div class="op-value" id="op-thesis">—</div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">📡 背离信号</div>
+                        <div class="op-value" id="op-divergence">—</div>
+                        <div class="op-sub" id="op-divergence-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">🔓 解锁压力</div>
+                        <div class="op-value" id="op-unlock">—</div>
+                        <div class="op-sub" id="op-unlock-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">⛓️ 链上异动</div>
+                        <div class="op-value" id="op-onchain">—</div>
+                        <div class="op-sub" id="op-onchain-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">📈 衍生品情绪</div>
+                        <div class="op-value" id="op-derivatives">—</div>
+                        <div class="op-sub" id="op-derivatives-sub"></div>
+                    </div>
+                </div>
+            </div>
             <div class="r-thesis" id="r-thesis" style="display:none"></div>
             <div class="r-competitors" id="r-competitors" style="display:none">
                 <div class="c-head">
@@ -1608,10 +1732,172 @@
             btn.textContent = '补齐缺失';
         }
 
+        // ── 一页结论：各维度数据聚合 ──
+        var onepageData = {
+            thesis: null,       // { stance, conviction }
+            divergence: null,   // { signals, metrics }
+            unlock: null,       // { unlock_pct_30d, pressure_score, risk_level }
+            onchain: null,      // { top10_concentration_pct, holder_change_7d_pct, whale_change_7d_pct }
+            derivatives: null   // { funding_rate_pct, oi_change_24h_pct, cvd_ratio_24h }
+        };
+
+        function updateOnepage () {
+            const box = document.getElementById('r-onepage');
+            const d = onepageData;
+            // 至少有 thesis 或 2 个以上维度有数据才显示
+            const hasData = d.thesis || [d.divergence, d.unlock, d.onchain, d.derivatives].filter(Boolean).length >= 2;
+            if (!hasData) return;
+            box.style.display = 'block';
+
+            // 综合立场
+            const stanceEl = document.getElementById('op-stance');
+            const thesisEl = document.getElementById('op-thesis');
+            if (d.thesis) {
+                const stanceMap = { bullish: '看多', bearish: '看空', neutral: '中性' };
+                const convMap = { high: '高置信', medium: '中置信', low: '低置信' };
+                const label = stanceMap[d.thesis.stance] || '中性';
+                stanceEl.textContent = label;
+                stanceEl.className = 'op-stance ' + (d.thesis.stance || 'neutral');
+                thesisEl.textContent = (convMap[d.thesis.conviction] || '') + ' · AI 投研结论';
+            } else {
+                stanceEl.textContent = '待生成';
+                stanceEl.className = 'op-stance neutral';
+                thesisEl.textContent = '点击"生成研究结论"获取 AI 观点';
+            }
+
+            // 背离信号
+            const divEl = document.getElementById('op-divergence');
+            const divSub = document.getElementById('op-divergence-sub');
+            if (d.divergence && d.divergence.signals && d.divergence.signals.length > 0) {
+                const sig = d.divergence.signals[0];
+                const isBullish = sig.type === 'bullish_divergence';
+                divEl.textContent = (isBullish ? '看涨背离' : '看跌背离') + ' · ' + Math.round(sig.confidence) + '%';
+                divEl.className = 'op-value ' + (isBullish ? 'positive' : 'negative');
+                divSub.textContent = d.divergence.signals.length + ' 个信号 · ' + (sig.label || '');
+            } else if (d.divergence && d.divergence.metrics) {
+                divEl.textContent = '无明显背离';
+                divEl.className = 'op-value';
+                const m = d.divergence.metrics;
+                const parts = [];
+                if (m.price_change_24h !== null && m.price_change_24h !== undefined)
+                    parts.push('24h ' + (m.price_change_24h >= 0 ? '+' : '') + Number(m.price_change_24h).toFixed(2) + '%');
+                if (m.sentiment_score !== null && m.sentiment_score !== undefined)
+                    parts.push('情绪 ' + Number(m.sentiment_score).toFixed(1));
+                divSub.textContent = parts.join(' · ');
+            } else {
+                divEl.textContent = '检测中...';
+                divEl.className = 'op-value';
+                divSub.textContent = '';
+            }
+
+            // 解锁压力
+            const unEl = document.getElementById('op-unlock');
+            const unSub = document.getElementById('op-unlock-sub');
+            if (d.unlock && (d.unlock.unlock_pct_30d !== null && d.unlock.unlock_pct_30d !== undefined)) {
+                const pct = Number(d.unlock.unlock_pct_30d);
+                let label = '低压力', cls = 'positive';
+                if (pct > 5) { label = '高抛压'; cls = 'negative'; }
+                else if (pct > 1) { label = '中压力'; cls = 'warning'; }
+                unEl.textContent = label + ' · 30d ' + pct.toFixed(2) + '%';
+                unEl.className = 'op-value ' + cls;
+                if (d.unlock.pressure_score !== null && d.unlock.pressure_score !== undefined)
+                    unSub.textContent = '抛压评分 ' + Number(d.unlock.pressure_score).toFixed(1);
+            } else {
+                unEl.textContent = '暂无解锁数据';
+                unEl.className = 'op-value';
+                unSub.textContent = '';
+            }
+
+            // 链上异动
+            const ocEl = document.getElementById('op-onchain');
+            const ocSub = document.getElementById('op-onchain-sub');
+            if (d.onchain) {
+                const parts = [];
+                let mainLabel = '链上平稳', mainCls = '';
+                if (d.onchain.whale_change_7d_pct !== null && d.onchain.whale_change_7d_pct !== undefined) {
+                    const wc = Number(d.onchain.whale_change_7d_pct);
+                    if (wc > 5) { mainLabel = '鲸鱼增持'; mainCls = 'positive'; }
+                    else if (wc < -5) { mainLabel = '鲸鱼减持'; mainCls = 'negative'; }
+                    parts.push('鲸鱼 7d ' + (wc >= 0 ? '+' : '') + wc.toFixed(2) + '%');
+                }
+                if (d.onchain.holder_change_7d_pct !== null && d.onchain.holder_change_7d_pct !== undefined) {
+                    const hc = Number(d.onchain.holder_change_7d_pct);
+                    parts.push('持币地址 7d ' + (hc >= 0 ? '+' : '') + hc.toFixed(2) + '%');
+                }
+                if (d.onchain.top10_concentration_pct !== null && d.onchain.top10_concentration_pct !== undefined) {
+                    const t10 = Number(d.onchain.top10_concentration_pct);
+                    if (t10 > 70 && !mainCls) { mainLabel = '高度集中'; mainCls = 'warning'; }
+                    parts.push('Top10 ' + t10.toFixed(1) + '%');
+                }
+                ocEl.textContent = mainLabel;
+                ocEl.className = 'op-value ' + mainCls;
+                ocSub.textContent = parts.join(' · ');
+            } else {
+                ocEl.textContent = '链上数据加载中';
+                ocEl.className = 'op-value';
+                ocSub.textContent = '';
+            }
+
+            // 衍生品情绪
+            const dvEl = document.getElementById('op-derivatives');
+            const dvSub = document.getElementById('op-derivatives-sub');
+            if (d.derivatives && d.derivatives.funding_rate_pct !== null && d.derivatives.funding_rate_pct !== undefined) {
+                const fr = Number(d.derivatives.funding_rate_pct);
+                let label = '中性情绪', cls = '';
+                if (fr > 0.05) { label = '多头亢奋'; cls = 'positive'; }
+                else if (fr > 0.01) { label = '偏多'; cls = 'positive'; }
+                else if (fr < -0.05) { label = '空头拥挤'; cls = 'negative'; }
+                else if (fr < -0.01) { label = '偏空'; cls = 'negative'; }
+                dvEl.textContent = label + ' · 费率 ' + (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%';
+                dvEl.className = 'op-value ' + cls;
+                const subs = [];
+                if (d.derivatives.oi_change_24h_pct !== null && d.derivatives.oi_change_24h_pct !== undefined) {
+                    const oi = Number(d.derivatives.oi_change_24h_pct);
+                    subs.push('OI 24h ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%');
+                }
+                if (d.derivatives.cvd_ratio_24h !== null && d.derivatives.cvd_ratio_24h !== undefined) {
+                    const cvd = Number(d.derivatives.cvd_ratio_24h);
+                    subs.push('CVD ' + (cvd >= 0 ? '+' : '') + (cvd * 100).toFixed(2) + '%');
+                }
+                dvSub.textContent = subs.join(' · ');
+            } else if (d.derivatives && d.derivatives.available_exchanges && d.derivatives.available_exchanges.length === 0) {
+                dvEl.textContent = '无合约数据';
+                dvEl.className = 'op-value';
+                dvSub.textContent = '该代币可能无永续合约';
+            } else {
+                dvEl.textContent = '衍生品数据加载中';
+                dvEl.className = 'op-value';
+                dvSub.textContent = '';
+            }
+        }
+
         function render (d) {
             const title = d.title || '一键投研';
             document.getElementById('r-title').textContent = '🤖 ' + title;
             document.title = title;
+            // 收集 thesis + structured metrics 到一页结论
+            const sm = (d.thesis && d.thesis.structured_metrics) || d.structured_metrics || {};
+            if (d.thesis) {
+                onepageData.thesis = { stance: d.thesis.stance, conviction: d.thesis.conviction };
+            }
+            if (sm.unlock || sm.pressure) {
+                onepageData.unlock = {
+                    unlock_pct_30d: sm.unlock ? sm.unlock.unlock_pct_30d : null,
+                    pressure_score: sm.pressure ? sm.pressure.pressure_score : null,
+                    risk_level: sm.pressure ? sm.pressure.risk_level : null,
+                };
+            }
+            if (sm.onchain) {
+                onepageData.onchain = {
+                    top10_concentration_pct: sm.onchain.top10_concentration_pct,
+                    holder_change_7d_pct: null,
+                    whale_change_7d_pct: null,
+                };
+            }
+            if (sm.derivatives && Object.keys(sm.derivatives).length > 0) {
+                onepageData.derivatives = sm.derivatives;
+            }
+            updateOnepage();
             renderThesis(d);
             renderSidebar(d);
             renderMessages(d.messages || []);
@@ -1683,6 +1969,22 @@
                 }
                 if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
                     html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
+                }
+                // 衍生品指标
+                if (sm.derivatives && Object.keys(sm.derivatives).length > 0) {
+                    if (sm.derivatives.funding_rate_pct !== null && sm.derivatives.funding_rate_pct !== undefined) {
+                        const fr = Number(sm.derivatives.funding_rate_pct);
+                        html += '<div><strong>资金费率</strong>: <span style="color:' + (fr >= 0 ? '#34d399' : '#f87171') + '">' +
+                            (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%</span></div>';
+                    }
+                    if (sm.derivatives.oi_change_24h_pct !== null && sm.derivatives.oi_change_24h_pct !== undefined) {
+                        const oi = Number(sm.derivatives.oi_change_24h_pct);
+                        html += '<div><strong>OI 24h变化</strong>: <span style="color:' + (oi >= 0 ? '#34d399' : '#f87171') + '">' +
+                            (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%</span></div>';
+                    }
+                    if (sm.derivatives.total_oi_usd !== null && sm.derivatives.total_oi_usd !== undefined) {
+                        html += '<div><strong>未平仓合约</strong>: ' + fmtUsdBig(sm.derivatives.total_oi_usd) + '</div>';
+                    }
                 }
                 html += '</div>';
             } else {
@@ -2078,6 +2380,9 @@
                 html += '</div>';
 
                 container.innerHTML = html;
+                // 更新一页结论
+                onepageData.divergence = { signals: signals, metrics: metrics };
+                updateOnepage();
             } catch (e) {
                 container.innerHTML = '<div class="d-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
             }
@@ -2196,6 +2501,25 @@
             html += '</div>';
 
             container.innerHTML = html;
+
+            // 更新一页结论的链上数据（汇总所有链的最新值）
+            const allSummaries = data.trend_summary || {};
+            const chainKeys = Object.keys(allSummaries);
+            let latestTop10 = null, holderChange = null;
+            if (chainKeys.length > 0) {
+                const firstSummary = allSummaries[chainKeys[0]] || {};
+                latestTop10 = firstSummary.latest_top10_concentration !== undefined
+                    ? firstSummary.latest_top10_concentration
+                    : null;
+                holderChange = firstSummary.holders_change_pct;
+            }
+            // 从 structuredMetrics 里已有 top10，这里补充 holder 变化
+            if (!onepageData.onchain) onepageData.onchain = {};
+            if (holderChange !== null && holderChange !== undefined)
+                onepageData.onchain.holder_change_7d_pct = holderChange;
+            if (latestTop10 !== null && onepageData.onchain.top10_concentration_pct === undefined)
+                onepageData.onchain.top10_concentration_pct = latestTop10;
+            updateOnepage();
         }
 
         function fmtMetricValue (v, unit) {
@@ -2278,6 +2602,9 @@
                 if (!data.available_exchanges || data.available_exchanges.length === 0) {
                     container.innerHTML = '<div class="dv-empty">未找到该代币的永续合约数据' +
                         '<small>仅主流币有衍生品数据，Meme 小币可能无合约</small></div>';
+                    // 更新一页结论（无合约数据）
+                    onepageData.derivatives = { available_exchanges: [] };
+                    updateOnepage();
                     // 仍然加载 CEX 数据（链上数据和衍生品无关）
                     loadCexNetflow();
                     return;
@@ -2372,6 +2699,15 @@
             }
 
             container.innerHTML = html;
+            // 更新一页结论
+            onepageData.derivatives = {
+                funding_rate_pct: data.funding_rate_pct,
+                oi_change_24h_pct: data.oi_change_24h_pct,
+                cvd_ratio_24h: data.cvd_ratio_24h,
+                total_oi_usd: data.total_oi_usd,
+                available_exchanges: data.available_exchanges,
+            };
+            updateOnepage();
         }
 
         function formatUsdBig (v) {

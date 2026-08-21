@@ -2606,6 +2606,7 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
         "unlock": {},
         "onchain": {},
         "social": {},
+        "derivatives": {},
         "pressure": {},
     }
 
@@ -2763,6 +2764,37 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                 break
         if x_followers is not None:
             result["social"]["x_followers"] = x_followers
+
+    # ── 衍生品资金面（读 biz.asset_derivatives 缓存）──
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT funding_rate_pct, funding_rate_7d_avg, funding_rate_30d_avg,
+                           total_oi_usd, oi_change_24h_pct, cvd_24h_usd, cvd_ratio_24h,
+                           available_exchanges, fetched_at
+                    FROM biz.asset_derivatives
+                    WHERE asset_id = %s
+                      AND fetched_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY fetched_at DESC
+                    LIMIT 1
+                """, (asset_id,))
+                row = cur.fetchone()
+                if row:
+                    if row["funding_rate_pct"] is not None:
+                        result["derivatives"]["funding_rate_pct"] = float(row["funding_rate_pct"])
+                    if row["funding_rate_7d_avg"] is not None:
+                        result["derivatives"]["funding_rate_7d_avg"] = float(row["funding_rate_7d_avg"])
+                    if row["total_oi_usd"] is not None:
+                        result["derivatives"]["total_oi_usd"] = float(row["total_oi_usd"])
+                    if row["oi_change_24h_pct"] is not None:
+                        result["derivatives"]["oi_change_24h_pct"] = float(row["oi_change_24h_pct"])
+                    if row["cvd_ratio_24h"] is not None:
+                        result["derivatives"]["cvd_ratio_24h"] = float(row["cvd_ratio_24h"])
+                    if row["available_exchanges"]:
+                        result["derivatives"]["available_exchanges"] = row["available_exchanges"]
+    except (psycopg.errors.UndefinedTable, Exception):
+        pass
 
     # ── 抛压评分（简化版，用解锁 + Top10 估算）──
     try:
@@ -7787,3 +7819,93 @@ def remove_watchlist(watch_id: int) -> dict:
             cur.execute("DELETE FROM biz.unlock_watchlist WHERE watch_id = %s", (watch_id,))
         conn.commit()
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 每日 diff 变化榜
+# ═══════════════════════════════════════════════════════════════
+
+def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] | None = None) -> dict:
+    """获取每日 diff 变化榜。
+
+    Args:
+        diff_date: 指定日期（YYYY-MM-DD），None 取最新一天
+        categories: 过滤榜单类型，None 返回全部
+
+    Returns:
+        {
+            "ok": True,
+            "diff_date": "2026-08-20",
+            "categories": {
+                "price_change_24h": {
+                    "up": [...],
+                    "down": [...]
+                },
+                ...
+            }
+        }
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确定日期
+            if diff_date:
+                target_date = diff_date
+            else:
+                cur.execute("SELECT max(diff_date) AS d FROM biz.daily_diff_summary")
+                row = cur.fetchone()
+                if not row or not row["d"]:
+                    return {"ok": True, "diff_date": None, "categories": {}}
+                target_date = str(row["d"])
+
+            cat_filter = ""
+            params: list = [target_date]
+            if categories:
+                placeholders = ",".join(["%s"] * len(categories))
+                cat_filter = f" AND category IN ({placeholders})"
+                params.extend(categories)
+
+            cur.execute(
+                f"""
+                SELECT
+                    d.category,
+                    d.direction,
+                    d.rank,
+                    d.metric_value,
+                    d.metric_label,
+                    d.detail_json,
+                    a.asset_id,
+                    a.canonical_symbol,
+                    a.canonical_name,
+                    a.market_cap_rank
+                FROM biz.daily_diff_summary d
+                JOIN core.asset a ON a.asset_id = d.asset_id
+                WHERE d.diff_date = %s
+                  {cat_filter}
+                ORDER BY d.category, d.direction, d.rank
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+
+            result: dict = {}
+            for r in rows:
+                cat = r["category"]
+                direction = r["direction"]
+                if cat not in result:
+                    result[cat] = {"up": [], "down": []}
+                result[cat][direction].append({
+                    "asset_id": r["asset_id"],
+                    "symbol": r["canonical_symbol"],
+                    "name": r["canonical_name"],
+                    "market_cap_rank": r["market_cap_rank"],
+                    "rank": r["rank"],
+                    "metric_value": float(r["metric_value"]) if r["metric_value"] is not None else None,
+                    "metric_label": r["metric_label"],
+                    "detail": r["detail_json"] or {},
+                })
+
+            return {
+                "ok": True,
+                "diff_date": target_date,
+                "categories": result,
+            }

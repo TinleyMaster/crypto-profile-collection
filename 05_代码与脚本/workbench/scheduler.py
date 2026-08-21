@@ -93,9 +93,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
 
     # ═══ 投研数据提取 ═══
     ("cmc_quote_snapshot", "0 */6 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "1000"], "CMC 行情快照（每 6 小时 top 1000）"),
+    ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", ["--days", "2"], "行情快照→日级 ETL（每 6 小时，CMC 快照后）"),
+    ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）"),
     ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币）"),
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
     ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）"),
+    ("unlock_event_sync", "30 10 * * *", "sync_unlock_events_from_json.py", [], "解锁事件 JSON→结构化同步（每日）"),
+    ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）"),
 
     # ═══ 文档深度爬取 ═══
     ("b2_auto_loop", "0 */6 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每 6 小时）"),

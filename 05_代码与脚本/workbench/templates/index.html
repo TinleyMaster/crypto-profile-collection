@@ -5508,8 +5508,10 @@
                 html += '<div class="bt-best-worst">';
                 html += '<div class="bt-bw-card best"><h4>🏆 最佳推荐</h4>';
                 data.best.forEach(function (b) {
+                    const cls = b.return_pct >= 0 ? 'positive' : 'negative';
+                    const sign = b.return_pct >= 0 ? '+' : '';
                     html += '<div class="bt-bw-item"><span class="bt-bw-sym">' + escapeHtml(b.symbol) + '</span>';
-                    html += '<span class="bt-bw-ret positive">+' + b.return_pct.toFixed(2) + '%</span></div>';
+                    html += '<span class="bt-bw-ret ' + cls + '">' + sign + b.return_pct.toFixed(2) + '%</span></div>';
                 });
                 html += '</div>';
                 html += '<div class="bt-bw-card worst"><h4>💀 最差推荐</h4>';

@@ -138,6 +138,9 @@ class EtherscanClient:
         result = data.get("result", [])
         if isinstance(result, list):
             return result
+        # API 返回错误（如 Invalid API Key、Max rate limit reached 等），打印后返回空
+        msg = data.get("message", "")
+        print(f"  [etherscan:{self.chain}] API error: status={data.get('status')} msg={msg} result={str(result)[:200]}")
         return []
 
     def get_token_transfers_by_address(
@@ -158,6 +161,8 @@ class EtherscanClient:
         result = data.get("result", [])
         if isinstance(result, list):
             return result
+        msg = data.get("message", "")
+        print(f"  [etherscan:{self.chain}] API error (tokentx by address): status={data.get('status')} msg={msg} result={str(result)[:200]}")
         return []
 
     def get_account_token_balance(self, contract_address: str, address: str) -> str:
@@ -186,6 +191,8 @@ class EtherscanClient:
         result = data.get("result", [])
         if isinstance(result, list):
             return result
+        msg = data.get("message", "")
+        print(f"  [etherscan:{self.chain}] API error (txlist): status={data.get('status')} msg={msg} result={str(result)[:200]}")
         return []
 
     def get_last_active(self, address: str) -> int | None:

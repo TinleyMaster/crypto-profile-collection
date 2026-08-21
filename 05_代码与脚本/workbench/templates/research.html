@@ -1684,26 +1684,6 @@
                 if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
                     html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
                 }
-                // 衍生品资金面指标
-                const dv = sm.derivatives || {};
-                if (dv.funding_rate_pct !== null && dv.funding_rate_pct !== undefined) {
-                    const frColor = Number(dv.funding_rate_pct) >= 0 ? '#34d399' : '#f87171';
-                    html += '<div><strong>资金费率</strong>: <span style="color:' + frColor + '">' +
-                        Number(dv.funding_rate_pct).toFixed(4) + '%</span></div>';
-                }
-                if (dv.total_oi_usd !== null && dv.total_oi_usd !== undefined) {
-                    html += '<div><strong>未平仓合约(OI)</strong>: ' + fmtUsdBig(dv.total_oi_usd) + '</div>';
-                }
-                if (dv.oi_change_24h_pct !== null && dv.oi_change_24h_pct !== undefined) {
-                    const oiColor = Number(dv.oi_change_24h_pct) >= 0 ? '#34d399' : '#f87171';
-                    html += '<div><strong>OI 24h变化</strong>: <span style="color:' + oiColor + '">' +
-                        fmtPct(dv.oi_change_24h_pct) + '</span></div>';
-                }
-                if (dv.cvd_24h_usd !== null && dv.cvd_24h_usd !== undefined) {
-                    const cvdColor = Number(dv.cvd_24h_usd) >= 0 ? '#34d399' : '#f87171';
-                    html += '<div><strong>24h CVD净流入</strong>: <span style="color:' + cvdColor + '">' +
-                        fmtUsdBig(dv.cvd_24h_usd) + '</span></div>';
-                }
                 html += '</div>';
             } else {
                 const km = t.key_metrics || {};

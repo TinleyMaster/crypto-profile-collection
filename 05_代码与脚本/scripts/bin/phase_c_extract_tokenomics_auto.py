@@ -71,7 +71,8 @@ def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
             SELECT a.asset_id
             FROM core.asset a
             LEFT JOIN biz.asset_tokenomics tok ON tok.asset_id = a.asset_id
-            LEFT JOIN src_cmc.cmc_asset_map cam ON cam.asset_id = a.asset_id
+            LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
+            LEFT JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = cb.cmc_id
             WHERE {where}
               AND EXISTS (
                   SELECT 1 FROM biz.doc_source_entry dse

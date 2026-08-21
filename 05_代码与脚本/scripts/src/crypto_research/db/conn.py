@@ -11,13 +11,17 @@ _pool: psycopg_pool.ConnectionPool | None = None
 
 
 def _get_pool(database_url: str) -> psycopg_pool.ConnectionPool:
-    """惰性创建全局连接池（max_size=5，避免打爆数据库连接）。"""
+    """惰性创建全局连接池（max_size=2，避免打爆数据库连接）。
+
+    注意：每个独立 Python 进程各有一个池实例。
+    子进程脚本通常只用 1 条连接，web 进程 2 条足够。
+    """
     global _pool
     if _pool is None:
         _pool = psycopg_pool.ConnectionPool(
             database_url,
             min_size=1,
-            max_size=5,
+            max_size=2,
             open=True,
             timeout=30,
             kwargs={"connect_timeout": 30},

@@ -31,11 +31,11 @@ PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-import psycopg
 import psycopg.rows
 import requests
 
 from crypto_research.config import get_settings
+from crypto_research.db.conn import get_connection
 from crypto_research.mapping.sector import get_sector_unlock_alert_days
 from crypto_research.clients.notifier import (
     EmailNotifier,
@@ -179,7 +179,7 @@ def run_once(settings) -> None:
     notifier = EmailNotifier(settings)
     today = date.today()
 
-    with psycopg.connect(settings.database_url) as conn:
+    with get_connection(settings.database_url) as conn:
         _ensure_table(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("""

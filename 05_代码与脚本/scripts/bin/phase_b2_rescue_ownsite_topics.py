@@ -28,6 +28,7 @@ import random
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -54,19 +55,31 @@ DEEP_ARGS = ["--limit", "50", "--workers", "1", "--timeout", "15"]
 SPA_ARGS = ["--limit", "20", "--concurrency", "1"]
 
 
+@contextmanager
 def _connect(db_url: str):
     """连接数据库，带重试（PG 服务重启/瞬时抖动时自动重连）。"""
-    import psycopg
+    from crypto_research.db.conn import get_connection
 
-    last = None
+    last_err = None
+    ctx = None
     for attempt in range(1, 6):
         try:
-            return psycopg.connect(db_url, connect_timeout=60)
-        except psycopg.OperationalError as e:
-            last = e
+            ctx = get_connection(db_url)
+            conn = ctx.__enter__()
+            break
+        except Exception as e:
+            last_err = e
             print(f"      [DB] 连接失败（第 {attempt}/5 次），3s 后重试: {str(e)[:80]}")
             time.sleep(3)
-    raise last
+    if ctx is None:
+        raise last_err
+    try:
+        yield conn
+    except BaseException as e:
+        if not ctx.__exit__(type(e), e, e.__traceback__):
+            raise
+    else:
+        ctx.__exit__(None, None, None)
 
 
 def _load_targets(db_url: str) -> list[dict]:

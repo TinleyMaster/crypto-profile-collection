@@ -27,6 +27,10 @@ import time
 from pathlib import Path
 
 BIN_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = BIN_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+
 TARGET_SQL = BIN_DIR.parent / "sql" / "biz" / "select_target_assets.sql"
 PIPELINE = BIN_DIR / "collect_asset_materials.py"
 
@@ -57,11 +61,11 @@ def _load_done(path: Path) -> set[int]:
 
 
 def _load_targets(db_url: str) -> list[dict]:
-    import psycopg
+    from crypto_research.db.conn import get_connection
     from psycopg.rows import dict_row
 
     sql = TARGET_SQL.read_text(encoding="utf-8")
-    with psycopg.connect(db_url, connect_timeout=60) as conn:
+    with get_connection(db_url) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(sql)
             return [dict(r) for r in cur.fetchall()]

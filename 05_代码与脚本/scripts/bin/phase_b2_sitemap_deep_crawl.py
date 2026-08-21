@@ -97,34 +97,28 @@ CONNECT_RETRY_DELAY = 6
 @contextmanager
 def _get_connection_retry(db_url: str):
     """带重试的 DB 连接（Zeabur PG 周期性重启会偶发断开）。"""
-    import psycopg
+    from crypto_research.db.conn import get_connection
 
     last_err = None
-    conn = None
+    ctx = None
     for i in range(CONNECT_RETRIES):
         try:
-            conn = psycopg.connect(db_url, connect_timeout=20)
+            ctx = get_connection(db_url)
+            conn = ctx.__enter__()
             break
         except Exception as e:
             last_err = e
             print(f"  [WARN] 连接失败({i + 1}/{CONNECT_RETRIES}): {str(e)[:80]}", flush=True)
             time.sleep(CONNECT_RETRY_DELAY)
-    if conn is None:
+    if ctx is None:
         raise last_err
     try:
         yield conn
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    except BaseException as e:
+        if not ctx.__exit__(type(e), e, e.__traceback__):
+            raise
+    else:
+        ctx.__exit__(None, None, None)
 
 
 def _ensure_staging_table(db_url: str) -> None:

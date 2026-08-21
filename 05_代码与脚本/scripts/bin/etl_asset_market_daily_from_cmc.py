@@ -18,14 +18,13 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import psycopg
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
 from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.db.conn import get_connection  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,20 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _get_db_conn(settings):
-    return psycopg.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        dbname=settings.db_name,
-        user=settings.db_user,
-        password=settings.db_password,
-    )
-
-
 def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
     """执行 ETL，返回统计信息。"""
     settings = get_settings(require_database=True)
-    with _get_db_conn(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             # 确定时间范围
             date_filter = ""

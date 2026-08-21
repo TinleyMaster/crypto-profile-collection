@@ -20,6 +20,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from crypto_research.config import get_settings
+from crypto_research.db.conn import get_connection
 from crypto_research.clients.etherscan_client import EtherscanClient, get_client
 
 
@@ -246,7 +247,7 @@ def main():
 
     settings = get_settings(require_database=True)
 
-    with psycopg.connect(settings.database_url) as conn:
+    with get_connection(settings.database_url) as conn:
         assets = get_asset_contracts(conn, args.asset_id)
 
         if args.chain:

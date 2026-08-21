@@ -279,7 +279,7 @@ def _save_state(state: dict) -> None:
 # ── TaskManager ─────────────────────────────────────────────
 
 class TaskManager:
-    def __init__(self, max_concurrent: int = 3):
+    def __init__(self, max_concurrent: int = 2):
         self._max_concurrent = max_concurrent
         self._local_procs: dict[str, subprocess.Popen] = {}
         self._stop_flag = False

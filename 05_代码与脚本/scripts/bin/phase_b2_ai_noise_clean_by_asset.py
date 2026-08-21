@@ -29,6 +29,7 @@ if str(PROJECT_SRC) not in sys.path:
 import psycopg
 import psycopg.rows
 from crypto_research.config import get_settings
+from crypto_research.db.conn import get_connection
 from crypto_research.clients.llm_client import LLMClient
 
 settings = get_settings(require_database=True)
@@ -679,7 +680,7 @@ def main():
 
     llm = LLMClient(settings)
 
-    with psycopg.connect(settings.database_url) as conn:
+    with get_connection(settings.database_url) as conn:
         # ── Step 1: 规则直删 ──
         if not args.skip_rule_delete:
             print("\n── 规则直删 ──")

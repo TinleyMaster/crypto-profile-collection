@@ -31,6 +31,7 @@ else:
 
 MAX_LOG_LINES = 1000
 MAX_RUNTIME_HOURS = 12  # 超过此时长的 running 任务视为僵尸，自动标记 failed
+LOG_STUCK_MINUTES = 30  # running 任务超过该时长无新日志，视为卡死，提前收割
 
 # ── 数据库连接池 ────────────────────────────────────────────
 
@@ -484,10 +485,14 @@ class TaskManager:
             time.sleep(1)
 
     def _reap_zombie_tasks(self) -> None:
-        """收割超过 MAX_RUNTIME_HOURS 的 running 任务，避免永久占槽。"""
+        """收割僵尸任务，两个条件满足其一即触发：
+        1. 运行时长超过 MAX_RUNTIME_HOURS（硬超时）
+        2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟）
+        """
         try:
             with _get_db() as conn:
                 with conn.cursor() as cur:
+                    # 条件1：超 12h 硬超时
                     cur.execute(
                         """
                         UPDATE sys.task
@@ -501,8 +506,33 @@ class TaskManager:
                         (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
                          str(MAX_RUNTIME_HOURS)),
                     )
-                    if cur.rowcount > 0:
-                        print(f"[TaskManager] 收割 {cur.rowcount} 个僵尸任务",
+                    count_timeout = cur.rowcount
+
+                    # 条件2：30min 无新日志 + 已运行至少 10min（卡死）
+                    cur.execute(
+                        """
+                        UPDATE sys.task t
+                        SET status = 'failed',
+                            ended_at = NOW(),
+                            error = %s,
+                            updated_at = NOW()
+                        WHERE t.status = 'running'
+                          AND t.started_at < NOW() - '10 minutes'::interval
+                          AND (
+                              SELECT MAX(l.created_at)
+                              FROM sys.task_log l
+                              WHERE l.task_id = t.task_id
+                          ) < NOW() - (%s || ' minutes')::interval
+                        """,
+                        (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
+                         str(LOG_STUCK_MINUTES)),
+                    )
+                    count_stuck = cur.rowcount
+
+                    total = count_timeout + count_stuck
+                    if total > 0:
+                        print(f"[TaskManager] 收割 {total} 个僵尸任务 "
+                              f"(超时={count_timeout}, 卡死={count_stuck})",
                               file=sys.stderr)
         except Exception as e:
             print(f"[TaskManager] reap_zombie error: {e}", file=sys.stderr)

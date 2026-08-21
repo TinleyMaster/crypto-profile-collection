@@ -1346,10 +1346,93 @@
             font-size: 12px;
             padding: 8px 0;
         }
+
+        /* ── 顶部导航 ── */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #0f1115;
+            border-bottom: 1px solid #232a36;
+            padding: 0 24px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .top-nav .brand {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .top-nav .brand .logo {
+            color: #4ea1ff;
+            font-size: 18px;
+        }
+
+        .top-nav .nav-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .top-nav .nav-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .top-nav .nav-tab {
+            padding: 0 14px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            color: #8a92a0;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .top-nav .nav-tab:hover {
+            color: #e6e8eb;
+            text-decoration: none;
+        }
+
+        .top-nav .nav-tab.active {
+            color: #4ea1ff;
+            border-bottom-color: #4ea1ff;
+        }
     </style>
 </head>
 
 <body>
+    <nav class="top-nav">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <span>投研工作台</span>
+        </div>
+        <div class="nav-tabs">
+            <a class="nav-tab" href="/#assets">总览</a>
+            <a class="nav-tab active" href="/#assets">资产库</a>
+            <a class="nav-tab" href="/#market">行情</a>
+            <a class="nav-tab" href="/#unlock">解锁</a>
+            <a class="nav-tab" href="/#heat">热力</a>
+            <a class="nav-tab" href="/#backtest">回测</a>
+            <a class="nav-tab" href="/#tasks">任务</a>
+            <a class="nav-tab" href="/kol">KOL</a>
+        </div>
+    </nav>
     <header class="r-header">
         <div class="r-title" id="r-title">🤖 一键投研</div>
         <div class="r-actions">

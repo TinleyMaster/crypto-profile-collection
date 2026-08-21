@@ -2365,250 +2365,587 @@
             border-top: 1px solid #2a2f3a;
             text-align: right;
         }
+
+        /* ── 顶部导航 ── */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #0f1115;
+            border-bottom: 1px solid #232a36;
+            padding: 0 24px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .top-nav .brand {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .top-nav .brand .logo {
+            color: #4ea1ff;
+            font-size: 18px;
+        }
+
+        .top-nav .nav-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .top-nav .nav-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .top-nav .nav-tab {
+            padding: 0 14px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            color: #8a92a0;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .top-nav .nav-tab:hover {
+            color: #e6e8eb;
+            text-decoration: none;
+        }
+
+        .top-nav .nav-tab.active {
+            color: #4ea1ff;
+            border-bottom-color: #4ea1ff;
+        }
+
+        /* ── 主布局：主内容 + 右侧侧栏 ── */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 24px;
+            max-width: 1760px;
+            margin: 0 auto;
+            padding: 20px 24px 60px;
+        }
+
+        .main-content {
+            min-width: 0;
+        }
+
+        /* ── 模块卡片 ── */
+        .module-card {
+            background: #161a21;
+            border: 1px solid #232a36;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .module-header {
+            margin-bottom: 16px;
+        }
+
+        .module-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0 0 4px 0;
+            color: #e6e9ef;
+        }
+
+        .module-header .module-desc {
+            color: #8a92a0;
+            font-size: 13px;
+            margin: 0;
+        }
+
+        /* ── 右侧调度日志侧栏 ── */
+        .scheduler-sidebar {
+            position: sticky;
+            top: 60px;
+            align-self: start;
+            background: #161a21;
+            border: 1px solid #232a36;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 80px);
+            overflow: hidden;
+        }
+
+        .scheduler-sidebar .sb-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid #232a36;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .scheduler-sidebar .sb-title {
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .scheduler-sidebar .sb-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #8a92a0;
+            display: inline-block;
+        }
+
+        .scheduler-sidebar .sb-status-dot.connected {
+            background: #22c55e;
+            box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+        }
+
+        .scheduler-sidebar .sb-status-dot.disconnected {
+            background: #ef4444;
+            box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+        }
+
+        .scheduler-sidebar .sb-controls {
+            display: flex;
+            gap: 6px;
+        }
+
+        .scheduler-sidebar .sb-controls button {
+            background: #1f242d;
+            color: #9ca3af;
+            border: 1px solid #2a2f3a;
+            padding: 4px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }
+
+        .scheduler-sidebar .sb-controls button:hover {
+            background: #2a2f3a;
+            color: #e6e8eb;
+        }
+
+        .scheduler-sidebar .sb-controls button.active {
+            background: rgba(78, 161, 255, 0.15);
+            color: #4ea1ff;
+            border-color: rgba(78, 161, 255, 0.3);
+        }
+
+        .scheduler-sidebar .sb-log-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 12px;
+            font-family: "SF Mono", Monaco, Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            max-height: calc(100vh - 120px);
+        }
+
+        .scheduler-sidebar .sb-log-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .scheduler-sidebar .sb-log-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .scheduler-sidebar .sb-log-container::-webkit-scrollbar-thumb {
+            background: #2a2f3a;
+            border-radius: 3px;
+        }
+
+        .sb-log-line {
+            margin: 0 0 2px 0;
+            color: #b8bec7;
+            word-break: break-all;
+        }
+
+        .sb-log-line .sb-log-time {
+            color: #6b7280;
+        }
+
+        .sb-log-line .sb-log-task {
+            color: #9ca3af;
+        }
+
+        .sb-log-line.running .sb-log-status {
+            color: #4ea1ff;
+        }
+
+        .sb-log-line.success .sb-log-status {
+            color: #22c55e;
+        }
+
+        .sb-log-line.failed .sb-log-status {
+            color: #ef4444;
+        }
+
+        .sb-log-line.pending .sb-log-status {
+            color: #8a92a0;
+        }
+
+        .sb-log-empty {
+            color: #4b5563;
+            text-align: center;
+            padding: 40px 0;
+            font-size: 12px;
+        }
+
+        /* ── 响应式 ── */
+        @media (max-width: 1200px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .scheduler-sidebar {
+                display: none;
+            }
+        }
     </style>
 </head>
 
 <body>
-    <div class="container">
-        <header>
-            <h1>📊 加密货币投研资料采集工作台</h1>
-            <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time"></span></p>
-        </header>
-
-        <!-- 搜索区 -->
-        <div class="search-section">
-            <div class="search-box">
-                <div class="search-input-wrap">
-                    <input type="text" id="search-input" placeholder="搜索币种符号或名称，如 BTC、Ethereum..." autocomplete="off">
-                    <button class="clear-btn" id="search-clear" onclick="clearSearch()">&times;</button>
-                    <div class="search-dropdown" id="search-dropdown"></div>
-                </div>
-                <button class="add-asset-btn" onclick="openAddAssetModal()">➕ 添加代币</button>
-            </div>
+    <nav class="top-nav">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <span>投研工作台</span>
         </div>
+        <div class="nav-tabs">
+            <a class="nav-tab active" href="#assets" data-section="assets">总览</a>
+            <a class="nav-tab" href="#assets" data-section="assets">资产库</a>
+            <a class="nav-tab" href="#market" data-section="market">行情</a>
+            <a class="nav-tab" href="#unlock" data-section="unlock">解锁</a>
+            <a class="nav-tab" href="#heat" data-section="heat">热力</a>
+            <a class="nav-tab" href="#backtest" data-section="backtest">回测</a>
+            <a class="nav-tab" href="#tasks" data-section="tasks">任务</a>
+            <a class="nav-tab" href="/kol">KOL</a>
+        </div>
+    </nav>
+    <div class="main-layout">
+        <div class="main-content">
+            <!-- #assets 资产资料库 -->
+            <section id="assets" class="module-card">
+                <div class="module-header">
+                    <h2>📚 资产资料库</h2>
+                    <p class="module-desc">搜索币种、查看投研资料、管理文档链接与健康状态</p>
+                </div>
+                <header>
+                    <h1>📊 加密货币投研资料采集工作台</h1>
+                    <p>文档深度发现 · 下载 · 健康检查 · 投研资料生成 <span id="refresh-time"></span></p>
+                </header>
 
-        <!-- 资料面板 -->
-        <div class="materials-panel" id="materials-panel">
-            <div class="materials-header">
-                <h2>
-                    <span id="mat-symbol"></span>
-                    <span class="badge" id="mat-type"></span>
-                    <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
-                </h2>
-                <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
-                <button class="copy-btn" id="notebooklm-btn" onclick="runAiClassify()">🧠 AI精确分类</button>
-                <button class="copy-btn" id="research-btn" onclick="openResearchNotebook()"
-                    style="background:#7c3aed;color:#fff;border-color:#8b5cf6">🤖 一键投研</button>
-                <button class="copy-btn" id="noise-clean-btn" onclick="runAiNoiseClean()">AI噪声清理</button>
-                <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
-                <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄
-                    重新爬取</button>
-                <button class="close-btn" onclick="closeMaterials()">关闭</button>
-            </div>
-            <div class="stat-row" id="mat-stats"></div>
-            <div id="mat-content"></div>
-            <div class="research-section" id="research-section" style="display:none">
-                <h2>🔬 投研分析</h2>
-                <div class="research-grid">
-                    <!-- 代币经济学 -->
-                    <div class="research-card" id="rc-tokenomics">
-                        <h4>代币经济学</h4>
-                        <div class="status-row">
-                            <span class="status-indicator" id="tkm-indicator"></span>
-                            <span class="status-text" id="tkm-status">检查中...</span>
+                <!-- 搜索区 -->
+                <div class="search-section">
+                    <div class="search-box">
+                        <div class="search-input-wrap">
+                            <input type="text" id="search-input" placeholder="搜索币种符号或名称，如 BTC、Ethereum..."
+                                autocomplete="off">
+                            <button class="clear-btn" id="search-clear" onclick="clearSearch()">&times;</button>
+                            <div class="search-dropdown" id="search-dropdown"></div>
                         </div>
-                        <button class="run-btn" id="tkm-run-btn" onclick="runTokenomicsExtract()">
-                            提取代币经济学
-                        </button>
-                        <div id="tkm-detail" style="display:none"></div>
+                        <button class="add-asset-btn" onclick="openAddAssetModal()">➕ 添加代币</button>
                     </div>
+                </div>
 
-                    <!-- 白皮书摘要 -->
-                    <div class="research-card" id="rc-whitepaper">
-                        <h4>白皮书摘要</h4>
-                        <div class="status-row">
-                            <span class="status-indicator" id="wp-indicator"></span>
-                            <span class="status-text" id="wp-status">检查中...</span>
+                <!-- 资料面板 -->
+                <div class="materials-panel" id="materials-panel">
+                    <div class="materials-header">
+                        <h2>
+                            <span id="mat-symbol"></span>
+                            <span class="badge" id="mat-type"></span>
+                            <span style="font-size:14px;color:#8a92a0;font-weight:400" id="mat-name"></span>
+                        </h2>
+                        <button class="copy-btn" id="copy-all-btn" onclick="copyAllLinks()">📋 复制全部链接</button>
+                        <button class="copy-btn" id="notebooklm-btn" onclick="runAiClassify()">🧠 AI精确分类</button>
+                        <button class="copy-btn" id="research-btn" onclick="openResearchNotebook()"
+                            style="background:#7c3aed;color:#fff;border-color:#8b5cf6">🤖 一键投研</button>
+                        <button class="copy-btn" id="noise-clean-btn" onclick="runAiNoiseClean()">AI噪声清理</button>
+                        <button class="add-btn" id="add-entry-btn" onclick="addManualEntry()">➕ 添加官网</button>
+                        <button class="add-btn" id="recrawl-btn" onclick="reCrawlAsset()" style="background:#7c3aed">🔄
+                            重新爬取</button>
+                        <button class="close-btn" onclick="closeMaterials()">关闭</button>
+                    </div>
+                    <div class="stat-row" id="mat-stats"></div>
+                    <div id="mat-content"></div>
+                    <div class="research-section" id="research-section" style="display:none">
+                        <h2>🔬 投研分析</h2>
+                        <div class="research-grid">
+                            <!-- 代币经济学 -->
+                            <div class="research-card" id="rc-tokenomics">
+                                <h4>代币经济学</h4>
+                                <div class="status-row">
+                                    <span class="status-indicator" id="tkm-indicator"></span>
+                                    <span class="status-text" id="tkm-status">检查中...</span>
+                                </div>
+                                <button class="run-btn" id="tkm-run-btn" onclick="runTokenomicsExtract()">
+                                    提取代币经济学
+                                </button>
+                                <div id="tkm-detail" style="display:none"></div>
+                            </div>
+
+                            <!-- 白皮书摘要 -->
+                            <div class="research-card" id="rc-whitepaper">
+                                <h4>白皮书摘要</h4>
+                                <div class="status-row">
+                                    <span class="status-indicator" id="wp-indicator"></span>
+                                    <span class="status-text" id="wp-status">检查中...</span>
+                                </div>
+                                <button class="run-btn" id="wp-run-btn" onclick="runWhitepaperExtract()">
+                                    提取白皮书摘要
+                                </button>
+                                <div id="wp-detail" style="display:none"></div>
+                            </div>
+
+                            <!-- 解锁测算 -->
+                            <div class="research-card" id="rc-unlocks">
+                                <h4>代币解锁测算</h4>
+                                <div class="status-row">
+                                    <span class="status-indicator" id="ulk-indicator"></span>
+                                    <span class="status-text" id="ulk-status">点击按钮拉取数据</span>
+                                </div>
+                                <button class="run-btn" id="ulk-run-btn" onclick="queryUnlocksData()">
+                                    拉取代币解锁数据
+                                </button>
+                                <a href="javascript:queryUnlocksData(true)"
+                                    style="font-size:11px;color:#9ca3af;margin-left:8px;display:none"
+                                    id="ulk-force-link">强制刷新</a>
+                                <div id="ulk-detail" style="display:none"></div>
+                                <div id="ulk-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px">
+                                </div>
+                            </div>
                         </div>
-                        <button class="run-btn" id="wp-run-btn" onclick="runWhitepaperExtract()">
-                            提取白皮书摘要
-                        </button>
-                        <div id="wp-detail" style="display:none"></div>
-                    </div>
 
-                    <!-- 解锁测算 -->
-                    <div class="research-card" id="rc-unlocks">
-                        <h4>代币解锁测算</h4>
-                        <div class="status-row">
-                            <span class="status-indicator" id="ulk-indicator"></span>
-                            <span class="status-text" id="ulk-status">点击按钮拉取数据</span>
+                        <!-- 链上数据 -->
+                        <div class="research-card" id="rc-onchain">
+                            <h4>链上数据分析</h4>
+                            <div class="status-row">
+                                <span class="status-indicator" id="onchain-indicator"></span>
+                                <span class="status-text" id="onchain-status">点击按钮按需拉取</span>
+                            </div>
+                            <button class="run-btn" id="onchain-run-btn" onclick="queryOnchainData()">
+                                拉取链上数据
+                            </button>
+                            <div id="onchain-detail" style="display:none"></div>
                         </div>
-                        <button class="run-btn" id="ulk-run-btn" onclick="queryUnlocksData()">
-                            拉取代币解锁数据
-                        </button>
-                        <a href="javascript:queryUnlocksData(true)"
-                            style="font-size:11px;color:#9ca3af;margin-left:8px;display:none"
-                            id="ulk-force-link">强制刷新</a>
-                        <div id="ulk-detail" style="display:none"></div>
-                        <div id="ulk-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px"></div>
+
+                        <!-- 社交热度 -->
+                        <div class="research-card" id="rc-social">
+                            <h4>社交热度</h4>
+                            <div class="status-row">
+                                <span class="status-indicator" id="soc-indicator"></span>
+                                <span class="status-text" id="soc-status">点击按钮按需拉取</span>
+                            </div>
+                            <button class="run-btn" id="soc-run-btn" onclick="querySocialHeat(false)">
+                                拉取社交热度
+                            </button>
+                            <a href="javascript:querySocialHeat(true)"
+                                style="font-size:11px;color:#9ca3af;margin-left:8px;display:none"
+                                id="soc-force-link">强制刷新</a>
+                            <div id="soc-detail" style="display:none"></div>
+                            <div id="soc-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px"></div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- 链上数据 -->
-                <div class="research-card" id="rc-onchain">
-                    <h4>链上数据分析</h4>
-                    <div class="status-row">
-                        <span class="status-indicator" id="onchain-indicator"></span>
-                        <span class="status-text" id="onchain-status">点击按钮按需拉取</span>
+                <!-- 统计卡片 -->
+                <div class="grid">
+                    <div class="card">
+                        <h3>总资产数</h3>
+                        <div class="value" id="stat-assets">-</div>
+                        <div class="sub" id="stat-sources">-</div>
                     </div>
-                    <button class="run-btn" id="onchain-run-btn" onclick="queryOnchainData()">
-                        拉取链上数据
-                    </button>
-                    <div id="onchain-detail" style="display:none"></div>
-                </div>
-
-                <!-- 社交热度 -->
-                <div class="research-card" id="rc-social">
-                    <h4>社交热度</h4>
-                    <div class="status-row">
-                        <span class="status-indicator" id="soc-indicator"></span>
-                        <span class="status-text" id="soc-status">点击按钮按需拉取</span>
+                    <div class="card">
+                        <h3>文档入口总数</h3>
+                        <div class="value" id="stat-entries">-</div>
+                        <div class="sub" id="stat-entry-types">-</div>
                     </div>
-                    <button class="run-btn" id="soc-run-btn" onclick="querySocialHeat(false)">
-                        拉取社交热度
-                    </button>
-                    <a href="javascript:querySocialHeat(true)"
-                        style="font-size:11px;color:#9ca3af;margin-left:8px;display:none" id="soc-force-link">强制刷新</a>
-                    <div id="soc-detail" style="display:none"></div>
-                    <div id="soc-error" style="display:none;color:#dc2626;font-size:12px;margin-top:6px"></div>
+                    <div class="card">
+                        <h3>深度爬取进度</h3>
+                        <div class="value" id="stat-crawl-pct">-</div>
+                        <div class="progress-bar">
+                            <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
+                        </div>
+                        <div class="sub" id="stat-crawl-detail">-</div>
+                    </div>
+                    <div class="card">
+                        <h3>文档链接来源</h3>
+                        <div class="value" id="stat-docs">-</div>
+                        <div class="sub" id="stat-docs-detail">-</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- #market 行情 & 每日推荐 -->
+            <section id="market" class="module-card">
+                <div class="module-header">
+                    <h2>📊 行情 &amp; 每日推荐</h2>
+                    <p class="module-desc">每日投研推荐、涨幅榜、交易量榜，以及解锁追踪观察</p>
+                </div>
+
+                <!-- 每日投研推荐 -->
+                <div class="hot-tokens-section">
+                    <div class="section-header">
+                        <h2>🔥 每日投研推荐</h2>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
+                            <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
+                        </div>
+                    </div>
+                    <div class="hot-filters">
+                        <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
+                        <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
+                        <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
+                    </div>
+                    <div class="hot-tier-filters">
+                        <span class="tier-label">市值分层：</span>
+                        <button class="tier-btn active" data-tier="top500" onclick="switchHotTier('top500', this)">TOP
+                            500</button>
+                        <button class="tier-btn" data-tier="top100" onclick="switchHotTier('top100', this)">TOP
+                            100</button>
+                        <button class="tier-btn" data-tier="top1000" onclick="switchHotTier('top1000', this)">TOP
+                            1000</button>
+                        <button class="tier-btn" data-tier="all" onclick="switchHotTier('all', this)">全部</button>
+                    </div>
+                    <div id="hot-tokens-content">
+                        <div class="hot-tokens-loading">加载中...</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- #unlock 解锁追踪 -->
+            <section id="unlock" class="module-card">
+                <div class="module-header">
+                    <h2>🔔 解锁追踪</h2>
+                    <p class="module-desc">跟踪大额解锁事件，辅助做空与观察决策</p>
+                </div>
+                <div class="watchlist-section">
+                    <div class="section-header">
+                        <h2 style="display:none">解锁追踪列表</h2>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="font-size:12px;color:#8a92a0" id="watchlist-note">跟踪大额解锁，做空/观察提醒</span>
+                            <button class="hot-refresh" onclick="loadWatchlist()">刷新</button>
+                        </div>
+                    </div>
+                    <div id="watchlist-content">
+                        <div class="hot-tokens-loading">加载中...</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- #heat 赛道轮动热力图 -->
+            <section id="heat" class="module-card">
+                <div class="module-header">
+                    <h2>🌡️ 赛道轮动热力图</h2>
+                    <p class="module-desc">各赛道资金流向与热度变化，把握轮动节奏</p>
+                </div>
+                <div class="sector-heatmap-section">
+                    <div class="section-header">
+                        <h2 style="display:none">赛道轮动热力图</h2>
+                        <span style="font-size:12px;color:#8a92a0" id="sector-heat-updated"></span>
+                    </div>
+                    <div id="sector-heatmap-content">
+                        <div class="sector-heatmap-loading">加载中...</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- #backtest 推荐质量回测 -->
+            <section id="backtest" class="module-card">
+                <div class="module-header">
+                    <h2>📈 推荐质量回测</h2>
+                    <p class="module-desc">历史推荐收益表现统计，验证策略有效性</p>
+                </div>
+                <div class="backtest-section">
+                    <div class="section-header">
+                        <h2 style="display:none">推荐质量回测</h2>
+                        <div class="bt-controls">
+                            <select id="bt-days" onchange="loadBacktest()">
+                                <option value="7">近 7 天</option>
+                                <option value="30" selected>近 30 天</option>
+                                <option value="90">近 90 天</option>
+                            </select>
+                            <select id="bt-topn" onchange="loadBacktest()">
+                                <option value="5">Top 5</option>
+                                <option value="10" selected>Top 10</option>
+                                <option value="20">Top 20</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="backtest-container">
+                        <div class="bt-empty">加载中...</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- #tasks 调度 & 任务 -->
+            <section id="tasks" class="module-card">
+                <div class="module-header">
+                    <h2>⚙️ 调度 &amp; 任务</h2>
+                    <p class="module-desc">任务进度监控、启动新任务、查看历史任务列表</p>
+                </div>
+
+                <!-- 任务进度 -->
+                <h3 style="margin:0 0 8px 0;font-size:15px;color:#e6e9ef">📈 任务进度</h3>
+                <div class="refresh-note">每 30 秒自动刷新</div>
+                <div class="progress-section">
+                    <div class="progress-list" id="progress-list">
+                        <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
+                    </div>
+                </div>
+
+                <!-- 任务启动 -->
+                <h3 style="margin:24px 0 12px 0;font-size:15px;color:#e6e9ef">🚀 任务启动</h3>
+                <div class="task-grid" id="task-def-grid"></div>
+
+                <!-- 任务列表 -->
+                <h3 style="margin:24px 0 12px 0;font-size:15px;color:#e6e9ef">📋 任务列表 <span
+                        style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h3>
+                <div class="task-filter">
+                    <button class="filter-btn active" data-filter="all" onclick="setTaskFilter('all')">全部</button>
+                    <button class="filter-btn" data-filter="scheduler"
+                        onclick="setTaskFilter('scheduler')">调度任务</button>
+                    <button class="filter-btn" data-filter="manual" onclick="setTaskFilter('manual')">手动任务</button>
+                    <button class="filter-btn" data-filter="failed" onclick="setTaskFilter('failed')">失败</button>
+                    <span class="refresh-note">每 3 秒自动刷新</span>
+                </div>
+                <div class="task-list" id="task-list"></div>
+            </section>
+        </div>
+
+        <!-- 右侧调度实时日志侧栏 -->
+        <aside class="scheduler-sidebar">
+            <div class="sb-header">
+                <div class="sb-title">
+                    <span class="sb-status-dot connected" id="sb-status-dot"></span>
+                    <span>调度实时日志</span>
+                </div>
+                <div class="sb-controls">
+                    <button id="sb-pause-btn" onclick="toggleSchedulerPause()">暂停</button>
+                    <button id="sb-clear-btn" onclick="clearSchedulerLog()">清空</button>
+                    <button id="sb-autoscroll-btn" class="active" onclick="toggleSchedulerAutoScroll()">自动滚动</button>
                 </div>
             </div>
-        </div>
-
-        <!-- 统计卡片 -->
-        <div class="grid">
-            <div class="card">
-                <h3>总资产数</h3>
-                <div class="value" id="stat-assets">-</div>
-                <div class="sub" id="stat-sources">-</div>
+            <div class="sb-log-container" id="sb-log-container">
+                <div class="sb-log-empty">等待日志...</div>
             </div>
-            <div class="card">
-                <h3>文档入口总数</h3>
-                <div class="value" id="stat-entries">-</div>
-                <div class="sub" id="stat-entry-types">-</div>
-            </div>
-            <div class="card">
-                <h3>深度爬取进度</h3>
-                <div class="value" id="stat-crawl-pct">-</div>
-                <div class="progress-bar">
-                    <div class="fill" id="stat-crawl-bar" style="width:0%"></div>
-                </div>
-                <div class="sub" id="stat-crawl-detail">-</div>
-            </div>
-            <div class="card">
-                <h3>文档链接来源</h3>
-                <div class="value" id="stat-docs">-</div>
-                <div class="sub" id="stat-docs-detail">-</div>
-            </div>
-        </div>
-
-        <!-- 解锁追踪列表 -->
-        <div class="watchlist-section">
-            <div class="section-header">
-                <h2>🔔 解锁追踪列表</h2>
-                <div style="display:flex;align-items:center;gap:8px">
-                    <span style="font-size:12px;color:#8a92a0" id="watchlist-note">跟踪大额解锁，做空/观察提醒</span>
-                    <button class="hot-refresh" onclick="loadWatchlist()">刷新</button>
-                </div>
-            </div>
-            <div id="watchlist-content">
-                <div class="hot-tokens-loading">加载中...</div>
-            </div>
-        </div>
-
-        <!-- 赛道轮动热力图 -->
-        <div class="sector-heatmap-section">
-            <div class="section-header">
-                <h2>🌡️ 赛道轮动热力图</h2>
-                <span style="font-size:12px;color:#8a92a0" id="sector-heat-updated"></span>
-            </div>
-            <div id="sector-heatmap-content">
-                <div class="sector-heatmap-loading">加载中...</div>
-            </div>
-        </div>
-
-        <!-- 推荐质量回测 -->
-        <div class="backtest-section">
-            <div class="section-header">
-                <h2>📈 推荐质量回测</h2>
-                <div class="bt-controls">
-                    <select id="bt-days" onchange="loadBacktest()">
-                        <option value="7">近 7 天</option>
-                        <option value="30" selected>近 30 天</option>
-                        <option value="90">近 90 天</option>
-                    </select>
-                    <select id="bt-topn" onchange="loadBacktest()">
-                        <option value="5">Top 5</option>
-                        <option value="10" selected>Top 10</option>
-                        <option value="20">Top 20</option>
-                    </select>
-                </div>
-            </div>
-            <div id="backtest-container">
-                <div class="bt-empty">加载中...</div>
-            </div>
-        </div>
-
-        <!-- 每日投研推荐 -->
-        <div class="hot-tokens-section">
-            <div class="section-header">
-                <h2>🔥 每日投研推荐</h2>
-                <div style="display:flex;align-items:center;gap:8px">
-                    <span style="font-size:12px;color:#8a92a0" id="hot-updated"></span>
-                    <button class="hot-refresh" id="hot-refresh-btn" onclick="loadHotTokens()">刷新</button>
-                </div>
-            </div>
-            <div class="hot-filters">
-                <button class="active" onclick="switchHotFilter('score', this)">综合评分</button>
-                <button onclick="switchHotFilter('gainers', this)">24h 涨幅榜</button>
-                <button onclick="switchHotFilter('volume', this)">24h 交易量榜</button>
-            </div>
-            <div class="hot-tier-filters">
-                <span class="tier-label">市值分层：</span>
-                <button class="tier-btn active" data-tier="top500" onclick="switchHotTier('top500', this)">TOP
-                    500</button>
-                <button class="tier-btn" data-tier="top100" onclick="switchHotTier('top100', this)">TOP 100</button>
-                <button class="tier-btn" data-tier="top1000" onclick="switchHotTier('top1000', this)">TOP 1000</button>
-                <button class="tier-btn" data-tier="all" onclick="switchHotTier('all', this)">全部</button>
-            </div>
-            <div id="hot-tokens-content">
-                <div class="hot-tokens-loading">加载中...</div>
-            </div>
-        </div>
-
-        <!-- 任务进度 -->
-        <h2>📈 任务进度</h2>
-        <div class="refresh-note">每 30 秒自动刷新</div>
-        <div class="progress-section">
-            <div class="progress-list" id="progress-list">
-                <div class="progress-item"><span class="prog-label" style="color:#6b7280">加载中...</span></div>
-            </div>
-        </div>
-
-        <!-- 任务启动 -->
-        <h2>🚀 任务启动</h2>
-        <div class="task-grid" id="task-def-grid"></div>
-
-        <!-- 任务列表 -->
-        <h2>📋 任务列表 <span style="font-size:12px;color:#6b7280;font-weight:400">（点击任务查看日志）</span></h2>
-        <div class="task-filter">
-            <button class="filter-btn active" data-filter="all" onclick="setTaskFilter('all')">全部</button>
-            <button class="filter-btn" data-filter="scheduler" onclick="setTaskFilter('scheduler')">调度任务</button>
-            <button class="filter-btn" data-filter="manual" onclick="setTaskFilter('manual')">手动任务</button>
-            <button class="filter-btn" data-filter="failed" onclick="setTaskFilter('failed')">失败</button>
-            <span class="refresh-note">每 3 秒自动刷新</span>
-        </div>
-        <div class="task-list" id="task-list"></div>
+        </aside>
     </div>
 
     <!-- 底部日志面板 -->
@@ -5376,6 +5713,167 @@
         loadHotTokens();
         setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
         setInterval(loadSectorHeatmap, 5 * 60 * 1000);
+
+        // ── 导航滚动高亮（IntersectionObserver） ──
+        (function () {
+            var sections = ['assets', 'market', 'unlock', 'heat', 'backtest', 'tasks'];
+            var tabs = document.querySelectorAll('.top-nav .nav-tab[data-section]');
+            if (!('IntersectionObserver' in window) || tabs.length === 0) return;
+
+            var observer = new IntersectionObserver(function (entries) {
+                entries.forEach(function (entry) {
+                    if (entry.isIntersecting) {
+                        var id = entry.target.id;
+                        tabs.forEach(function (tab) {
+                            tab.classList.toggle('active', tab.getAttribute('data-section') === id);
+                        });
+                    }
+                });
+            }, { rootMargin: '-30% 0px -60% 0px', threshold: 0 });
+
+            sections.forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) observer.observe(el);
+            });
+        })();
+
+        // ── 调度实时日志侧栏 ──
+        var _scheduler = {
+            latestTs: 0,
+            paused: false,
+            autoScroll: true,
+            pollInterval: 5000,
+            backoff: 1,
+            maxLines: 500,
+            timer: null,
+            container: null,
+            statusDot: null,
+            emptyEl: null
+        };
+
+        function initSchedulerFeed () {
+            _scheduler.container = document.getElementById('sb-log-container');
+            _scheduler.statusDot = document.getElementById('sb-status-dot');
+            if (!_scheduler.container) return;
+
+            _scheduler.emptyEl = _scheduler.container.querySelector('.sb-log-empty');
+            fetchSchedulerFeed();
+        }
+
+        function fetchSchedulerFeed () {
+            if (_scheduler.paused) {
+                _scheduler.timer = setTimeout(fetchSchedulerFeed, _scheduler.pollInterval);
+                return;
+            }
+
+            var url = '/api/scheduler/feed?limit=200';
+            if (_scheduler.latestTs > 0) {
+                url += '&since_ts=' + _scheduler.latestTs;
+            }
+
+            fetch(url)
+                .then(function (r) {
+                    if (r.status === 429) return null;
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(function (data) {
+                    if (data && data.ok && data.logs) {
+                        _scheduler.backoff = 1;
+                        setSchedulerStatus(true);
+                        appendSchedulerLogs(data.logs);
+                        if (data.latest_ts && data.latest_ts > _scheduler.latestTs) {
+                            _scheduler.latestTs = data.latest_ts;
+                        }
+                    }
+                    _scheduler.timer = setTimeout(fetchSchedulerFeed, _scheduler.pollInterval);
+                })
+                .catch(function () {
+                    setSchedulerStatus(false);
+                    _scheduler.backoff = Math.min(_scheduler.backoff * 2, 8);
+                    _scheduler.timer = setTimeout(fetchSchedulerFeed, _scheduler.pollInterval * _scheduler.backoff);
+                });
+        }
+
+        function setSchedulerStatus (connected) {
+            if (!_scheduler.statusDot) return;
+            _scheduler.statusDot.classList.toggle('connected', connected);
+            _scheduler.statusDot.classList.toggle('disconnected', !connected);
+        }
+
+        function appendSchedulerLogs (logs) {
+            if (!logs || logs.length === 0) return;
+            if (_scheduler.emptyEl) {
+                _scheduler.emptyEl.style.display = 'none';
+            }
+
+            // 按时间正序追加（旧→新）
+            logs.sort(function (a, b) { return a.created_at - b.created_at; });
+
+            var frag = document.createDocumentFragment();
+            logs.forEach(function (log) {
+                var line = document.createElement('div');
+                line.className = 'sb-log-line';
+                var time = new Date(log.created_at * 1000);
+                var timeStr = time.toLocaleTimeString('zh-CN', { hour12: false });
+                var statusClass = 'status-' + (log.status || 'pending');
+                line.innerHTML = '<span class="sb-log-time">[' + timeStr + ']</span> '
+                    + '<span class="sb-log-task ' + statusClass + '">[' + escapeHtml(log.task_name || log.task_id) + ']</span> '
+                    + '<span class="sb-log-content">' + escapeHtml(log.content || '') + '</span>';
+                frag.appendChild(line);
+            });
+
+            _scheduler.container.appendChild(frag);
+
+            // 裁剪到 maxLines
+            var children = _scheduler.container.children;
+            var extra = children.length - _scheduler.maxLines;
+            if (extra > 0) {
+                for (var i = 0; i < extra; i++) {
+                    if (children[i] === _scheduler.emptyEl) continue;
+                    _scheduler.container.removeChild(children[i]);
+                    i--;
+                    extra--;
+                }
+            }
+
+            // 自动滚动
+            if (_scheduler.autoScroll) {
+                _scheduler.container.scrollTop = _scheduler.container.scrollHeight;
+            }
+        }
+
+        function escapeHtml (str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function toggleSchedulerPause () {
+            _scheduler.paused = !_scheduler.paused;
+            var btn = document.getElementById('sb-pause-btn');
+            if (btn) btn.textContent = _scheduler.paused ? '继续' : '暂停';
+        }
+
+        function clearSchedulerLog () {
+            if (!_scheduler.container) return;
+            _scheduler.container.innerHTML = '<div class="sb-log-empty">等待日志...</div>';
+            _scheduler.emptyEl = _scheduler.container.querySelector('.sb-log-empty');
+            _scheduler.latestTs = 0;
+        }
+
+        function toggleSchedulerAutoScroll () {
+            _scheduler.autoScroll = !_scheduler.autoScroll;
+            var btn = document.getElementById('sb-autoscroll-btn');
+            if (btn) btn.classList.toggle('active', _scheduler.autoScroll);
+        }
+
+        // 页面加载完成后初始化
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initSchedulerFeed);
+        } else {
+            initSchedulerFeed();
+        }
     </script>
 
     <!-- ── 添加代币弹窗 ── -->

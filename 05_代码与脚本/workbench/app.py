@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import json
+import time
 import fcntl
 import subprocess
 import threading
@@ -37,9 +38,14 @@ if str(SCRIPTS_SRC) not in sys.path:
 
 app = Flask(__name__)
 
-from task_manager import TaskManager  # noqa: E402
+from task_manager import TaskManager, _get_db  # noqa: E402
+import psycopg.rows  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
+
+# /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
+_feed_full_last_ts = 0.0
+_feed_full_lock = threading.Lock()
 
 # KOL 监控模块（可选，导入失败不影响主服务）
 try:
@@ -674,6 +680,106 @@ def api_task_result(task_id):
     if task.get("status") == "failed":
         return jsonify({"ok": False, "pending": False, "error": task.get("error") or "任务失败"})
     return jsonify({"ok": True, "pending": False, "result": result})
+
+
+@app.route("/api/scheduler/feed")
+def api_scheduler_feed():
+    """聚合 sys.task_log 中最近的任务日志，用于前端实时日志侧栏。
+
+    查询参数：
+      - limit: int，默认 200，最大 500
+      - since_ts: float，可选，epoch 秒，只返回大于该时间的新日志（增量拉取）
+    """
+    global _feed_full_last_ts
+
+    # 解析 limit
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (ValueError, TypeError):
+        limit = 200
+    limit = max(1, min(limit, 500))
+
+    # 解析 since_ts
+    since_ts = request.args.get("since_ts")
+    since_ts_val = None
+    if since_ts is not None:
+        try:
+            since_ts_val = float(since_ts)
+        except (ValueError, TypeError):
+            since_ts_val = None
+
+    # 全量查询（无 since_ts）限流：每 5 秒最多 1 次
+    if since_ts_val is None:
+        now = time.time()
+        with _feed_full_lock:
+            if now - _feed_full_last_ts < 5.0:
+                return jsonify({
+                    "ok": False,
+                    "error": "rate limited: 全量查询每 5 秒最多 1 次",
+                    "retry_after": round(5.0 - (now - _feed_full_last_ts), 1),
+                }), 429
+            _feed_full_last_ts = now
+
+    try:
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                if since_ts_val is not None:
+                    cur.execute(
+                        """
+                        SELECT tl.task_id,
+                               t.name AS task_name,
+                               t.status,
+                               tl.line_no,
+                               tl.content,
+                               EXTRACT(EPOCH FROM tl.created_at) AS created_at
+                        FROM sys.task_log tl
+                        JOIN sys.task t USING (task_id)
+                        WHERE tl.created_at > to_timestamp(%s)
+                        ORDER BY tl.created_at DESC
+                        LIMIT %s
+                        """,
+                        (since_ts_val, limit),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT tl.task_id,
+                               t.name AS task_name,
+                               t.status,
+                               tl.line_no,
+                               tl.content,
+                               EXTRACT(EPOCH FROM tl.created_at) AS created_at
+                        FROM sys.task_log tl
+                        JOIN sys.task t USING (task_id)
+                        ORDER BY tl.created_at DESC
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                rows = cur.fetchall()
+
+        logs = []
+        latest_ts = since_ts_val or 0.0
+        for row in rows:
+            ts = float(row["created_at"])
+            logs.append({
+                "task_id": row["task_id"],
+                "task_name": row["task_name"],
+                "status": row["status"],
+                "line_no": row["line_no"],
+                "content": row["content"],
+                "created_at": ts,
+            })
+            if ts > latest_ts:
+                latest_ts = ts
+
+        return jsonify({
+            "ok": True,
+            "logs": logs,
+            "latest_ts": latest_ts,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── 代币搜索与资料查询 ──

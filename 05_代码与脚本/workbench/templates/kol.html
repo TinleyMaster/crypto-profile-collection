@@ -435,10 +435,92 @@
         a:hover {
             text-decoration: underline;
         }
+
+        /* ── 顶部导航 ── */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #0f1115;
+            border-bottom: 1px solid #232a36;
+            padding: 0 24px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .top-nav .brand {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .top-nav .brand .logo {
+            color: #4ea1ff;
+            font-size: 18px;
+        }
+
+        .top-nav .nav-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .top-nav .nav-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .top-nav .nav-tab {
+            padding: 0 14px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            color: #8a92a0;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .top-nav .nav-tab:hover {
+            color: #e6e8eb;
+            text-decoration: none;
+        }
+
+        .top-nav .nav-tab.active {
+            color: #4ea1ff;
+            border-bottom-color: #4ea1ff;
+        }
     </style>
 </head>
 
 <body>
+    <nav class="top-nav">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <span>投研工作台</span>
+        </div>
+        <div class="nav-tabs">
+            <a class="nav-tab" href="/#assets">总览</a>
+            <a class="nav-tab" href="/#assets">资产库</a>
+            <a class="nav-tab" href="/#market">行情</a>
+            <a class="nav-tab" href="/#unlock">解锁</a>
+            <a class="nav-tab" href="/#heat">热力</a>
+            <a class="nav-tab" href="/#backtest">回测</a>
+            <a class="nav-tab" href="/#tasks">任务</a>
+            <a class="nav-tab active" href="/kol">KOL</a>
+        </div>
+    </nav>
     <div class="container">
         <header>
             <div>
@@ -514,7 +596,9 @@
                     </tr>
                 </thead>
                 <tbody id="signalsTable">
-                    <tr><td colspan="9" class="loading">加载中...</td></tr>
+                    <tr>
+                        <td colspan="9" class="loading">加载中...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -540,7 +624,9 @@
                     </tr>
                 </thead>
                 <tbody id="profilesTable">
-                    <tr><td colspan="9" class="loading">加载中...</td></tr>
+                    <tr>
+                        <td colspan="9" class="loading">加载中...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -565,7 +651,9 @@
                     </tr>
                 </thead>
                 <tbody id="postsTable">
-                    <tr><td colspan="6" class="loading">加载中...</td></tr>
+                    <tr>
+                        <td colspan="6" class="loading">加载中...</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
@@ -638,7 +726,7 @@
         loadProfileFilters();
 
         // ---- 统计 ----
-        async function loadStats() {
+        async function loadStats () {
             try {
                 const res = await fetch('/api/kol/stats');
                 const data = await res.json();
@@ -655,7 +743,7 @@
         }
 
         // ---- 博主筛选选项 ----
-        async function loadProfileFilters() {
+        async function loadProfileFilters () {
             try {
                 const res = await fetch('/api/kol/profiles');
                 const profiles = await res.json();
@@ -668,7 +756,7 @@
         }
 
         // ---- 信号列表 ----
-        async function loadSignals() {
+        async function loadSignals () {
             const postType = document.getElementById('filterPostType').value;
             const direction = document.getElementById('filterDirection').value;
             const profileId = document.getElementById('filterProfile').value;
@@ -718,15 +806,15 @@
             }
         }
 
-        function typeLabel(t) {
+        function typeLabel (t) {
             return { prediction: '实时喊单', after_action: '事后晒单', analysis: '纯分析' }[t] || t;
         }
-        function dirLabel(d) {
+        function dirLabel (d) {
             return { long: '做多', short: '做空', neutral: '中性' }[d] || d;
         }
 
         // ---- 信号详情 ----
-        async function showSignalDetail(signalId) {
+        async function showSignalDetail (signalId) {
             openModal('signalDetailModal');
             try {
                 const res = await fetch('/api/kol/signals/' + signalId);
@@ -813,14 +901,14 @@
             }
         }
 
-        function escapeHtml(text) {
+        function escapeHtml (text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
 
         // ---- 博主列表 ----
-        async function loadProfiles() {
+        async function loadProfiles () {
             try {
                 const res = await fetch('/api/kol/profiles');
                 const data = await res.json();
@@ -866,7 +954,7 @@
             }
         }
 
-        async function toggleProfile(id, currentState) {
+        async function toggleProfile (id, currentState) {
             try {
                 await fetch(`/api/kol/profiles/${id}/toggle`, { method: 'POST' });
                 loadProfiles();
@@ -877,7 +965,7 @@
             }
         }
 
-        async function crawlProfile(id) {
+        async function crawlProfile (id) {
             try {
                 const res = await fetch(`/api/kol/profiles/${id}/crawl`, { method: 'POST' });
                 const data = await res.json();
@@ -903,11 +991,11 @@
         }
 
         // ---- 新增博主 ----
-        function openAddProfileModal() {
+        function openAddProfileModal () {
             openModal('addProfileModal');
         }
 
-        async function addProfile() {
+        async function addProfile () {
             const platform = document.getElementById('newPlatform').value;
             const userId = document.getElementById('newUserId').value.trim();
             const nickname = document.getElementById('newNickname').value.trim();
@@ -950,7 +1038,7 @@
         }
 
         // ---- 帖子列表 ----
-        async function loadPosts() {
+        async function loadPosts () {
             const profileId = document.getElementById('filterPostProfile').value;
             let url = '/api/kol/posts?limit=50';
             if (profileId) url += '&profile_id=' + profileId;
@@ -991,10 +1079,10 @@
         }
 
         // ---- 模态框通用 ----
-        function openModal(id) {
+        function openModal (id) {
             document.getElementById(id).classList.add('active');
         }
-        function closeModal(id) {
+        function closeModal (id) {
             document.getElementById(id).classList.remove('active');
         }
         document.querySelectorAll('.modal-overlay').forEach(overlay => {

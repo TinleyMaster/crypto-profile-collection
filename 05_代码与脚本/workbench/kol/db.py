@@ -338,8 +338,9 @@ def list_signals(
         return conn.execute(sql, params).fetchall()
 
 
-def list_signals_pending_alert(confidence_threshold: float = 0.8) -> list[dict]:
-    """列出待发送邮件的信号：prediction/analysis + 未进场 + 高置信度 + 未发过。"""
+def list_signals_pending_alert(confidence_threshold: float = 0.8,
+                               max_age_hours: int = 24) -> list[dict]:
+    """列出待发送邮件的信号：prediction/analysis + 有标的 + 有方向 + 高置信度 + 24h内 + 未发过。"""
     with get_conn() as conn:
         return conn.execute(
             "SELECT s.*, p.content_text, p.posted_at, p.post_url, p.image_urls, "
@@ -352,8 +353,11 @@ def list_signals_pending_alert(confidence_threshold: float = 0.8) -> list[dict]:
             "  AND s.confidence >= %s "
             "  AND s.is_alerted = FALSE "
             "  AND s.alert_failed = FALSE "
+            "  AND s.asset_id IS NOT NULL "          -- 必须匹配到币种
+            "  AND s.direction IN ('long', 'short') " -- 必须有明确方向
+            "  AND p.posted_at >= NOW() - (%s || ' hours')::interval "  -- 24h 内的新帖
             "ORDER BY s.created_at ASC",
-            (confidence_threshold,),
+            (confidence_threshold, str(max_age_hours)),
         ).fetchall()
 
 

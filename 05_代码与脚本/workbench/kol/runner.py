@@ -263,8 +263,12 @@ def _process_pending_alerts(stats: dict, confidence_threshold: float = 0.8) -> N
     """处理待发送邮件的信号。"""
     # 从环境变量读取阈值
     threshold = float(os.getenv("KOL_ALERT_CONFIDENCE", confidence_threshold))
+    max_age_hours = int(os.getenv("KOL_ALERT_MAX_AGE_HOURS", 24))
 
-    pending = db.list_signals_pending_alert(confidence_threshold=threshold)
+    pending = db.list_signals_pending_alert(
+        confidence_threshold=threshold,
+        max_age_hours=max_age_hours,
+    )
     if not pending:
         return
 

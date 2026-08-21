@@ -20,7 +20,7 @@ def _get_pool(database_url: str) -> psycopg_pool.ConnectionPool:
     if _pool is None:
         _pool = psycopg_pool.ConnectionPool(
             database_url,
-            min_size=1,
+            min_size=0,
             max_size=2,
             open=True,
             timeout=30,

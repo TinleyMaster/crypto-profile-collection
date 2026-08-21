@@ -47,8 +47,8 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
         settings = get_settings(require_database=True)
         _pool = psycopg_pool.ConnectionPool(
             settings.database_url,
-            min_size=1,
-            max_size=5,
+            min_size=0,
+            max_size=2,
             open=True,
             timeout=30,
             kwargs={"connect_timeout": 30},

@@ -44,8 +44,26 @@ import psycopg.rows  # noqa: E402
 task_mgr = TaskManager(max_concurrent=3)
 
 # /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
-_feed_full_last_ts = 0.0
-_feed_full_lock = threading.Lock()
+# 文件持久化，兼容 gunicorn 多 worker
+_FEED_FULL_TS_FILE = RECRAWL_STATE_DIR / "feed_full_ts.json"
+_FEED_FULL_TS_LOCK = RECRAWL_STATE_DIR / "feed_full_ts.lock"
+
+
+def _load_feed_full_ts() -> float:
+    if not _FEED_FULL_TS_FILE.exists():
+        return 0.0
+    try:
+        with open(_FEED_FULL_TS_FILE, "r", encoding="utf-8") as f:
+            return float(json.load(f).get("ts", 0.0))
+    except (json.JSONDecodeError, IOError, OSError, ValueError):
+        return 0.0
+
+
+def _save_feed_full_ts(ts: float) -> None:
+    tmp = _FEED_FULL_TS_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": ts}, f)
+    os.replace(tmp, _FEED_FULL_TS_FILE)
 
 # KOL 监控模块（可选，导入失败不影响主服务）
 try:
@@ -708,17 +726,18 @@ def api_scheduler_feed():
         except (ValueError, TypeError):
             since_ts_val = None
 
-    # 全量查询（无 since_ts）限流：每 5 秒最多 1 次
+    # 全量查询（无 since_ts）限流：每 5 秒最多 1 次，文件锁跨 worker 共享
     if since_ts_val is None:
         now = time.time()
-        with _feed_full_lock:
-            if now - _feed_full_last_ts < 5.0:
+        with _RecrawlFileLock(_FEED_FULL_TS_LOCK):
+            last_ts = _load_feed_full_ts()
+            if now - last_ts < 5.0:
                 return jsonify({
                     "ok": False,
                     "error": "rate limited: 全量查询每 5 秒最多 1 次",
-                    "retry_after": round(5.0 - (now - _feed_full_last_ts), 1),
+                    "retry_after": round(5.0 - (now - last_ts), 1),
                 }), 429
-            _feed_full_last_ts = now
+            _save_feed_full_ts(now)
 
     try:
         with _get_db() as conn:
@@ -734,7 +753,7 @@ def api_scheduler_feed():
                                EXTRACT(EPOCH FROM tl.created_at) AS created_at
                         FROM sys.task_log tl
                         JOIN sys.task t USING (task_id)
-                        WHERE tl.created_at > to_timestamp(%s)
+                        WHERE tl.created_at >= to_timestamp(%s)
                         ORDER BY tl.created_at DESC
                         LIMIT %s
                         """,

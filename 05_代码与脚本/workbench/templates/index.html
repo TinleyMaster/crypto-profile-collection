@@ -2628,8 +2628,7 @@
             <span>投研工作台</span>
         </div>
         <div class="nav-tabs">
-            <a class="nav-tab active" href="#assets" data-section="assets">总览</a>
-            <a class="nav-tab" href="#assets" data-section="assets">资产库</a>
+            <a class="nav-tab active" href="#assets" data-section="assets">资产库</a>
             <a class="nav-tab" href="#market" data-section="market">行情</a>
             <a class="nav-tab" href="#unlock" data-section="unlock">解锁</a>
             <a class="nav-tab" href="#heat" data-section="heat">热力</a>
@@ -5748,7 +5747,8 @@
             timer: null,
             container: null,
             statusDot: null,
-            emptyEl: null
+            emptyEl: null,
+            seenKeys: new Set()
         };
 
         function initSchedulerFeed () {
@@ -5773,7 +5773,14 @@
 
             fetch(url)
                 .then(function (r) {
-                    if (r.status === 429) return null;
+                    if (r.status === 429) {
+                        return r.json().then(function (body) {
+                            var wait = (body && body.retry_after ? body.retry_after * 1000 : _scheduler.pollInterval);
+                            _scheduler.backoff = Math.min(_scheduler.backoff * 2, 8);
+                            _scheduler.timer = setTimeout(fetchSchedulerFeed, Math.max(wait, _scheduler.pollInterval * _scheduler.backoff));
+                            return null;
+                        }).catch(function () { return null; });
+                    }
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
                 })
@@ -5811,7 +5818,11 @@
             logs.sort(function (a, b) { return a.created_at - b.created_at; });
 
             var frag = document.createDocumentFragment();
+            var added = 0;
             logs.forEach(function (log) {
+                var key = log.task_id + ':' + log.line_no;
+                if (_scheduler.seenKeys.has(key)) return;
+                _scheduler.seenKeys.add(key);
                 var line = document.createElement('div');
                 line.className = 'sb-log-line';
                 var time = new Date(log.created_at * 1000);
@@ -5821,7 +5832,10 @@
                     + '<span class="sb-log-task ' + statusClass + '">[' + escapeHtml(log.task_name || log.task_id) + ']</span> '
                     + '<span class="sb-log-content">' + escapeHtml(log.content || '') + '</span>';
                 frag.appendChild(line);
+                added++;
             });
+
+            if (added === 0) return;
 
             _scheduler.container.appendChild(frag);
 

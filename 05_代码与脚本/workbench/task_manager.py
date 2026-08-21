@@ -30,6 +30,7 @@ else:
     WORKER_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts" / "bin"
 
 MAX_LOG_LINES = 1000
+MAX_RUNTIME_HOURS = 12  # 超过此时长的 running 任务视为僵尸，自动标记 failed
 
 # ── 数据库连接池 ────────────────────────────────────────────
 
@@ -439,10 +440,17 @@ class TaskManager:
         }
 
     def _runner_loop(self):
+        last_reap = 0.0
         while not self._stop_flag:
             task_id = None
             # 原子地取一个 pending 任务：用 SELECT ... FOR UPDATE SKIP LOCKED
             try:
+                # 每 60 秒收割一次僵尸任务（超过 MAX_RUNTIME_HOURS 的 running 任务）
+                now = time.time()
+                if now - last_reap > 60:
+                    last_reap = now
+                    self._reap_zombie_tasks()
+
                 with _get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT COUNT(*) FROM sys.task WHERE status = 'running'")
@@ -474,6 +482,30 @@ class TaskManager:
                 continue
 
             time.sleep(1)
+
+    def _reap_zombie_tasks(self) -> None:
+        """收割超过 MAX_RUNTIME_HOURS 的 running 任务，避免永久占槽。"""
+        try:
+            with _get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE sys.task
+                        SET status = 'failed',
+                            ended_at = NOW(),
+                            error = %s,
+                            updated_at = NOW()
+                        WHERE status = 'running'
+                          AND started_at < NOW() - (%s || ' hours')::interval
+                        """,
+                        (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
+                         str(MAX_RUNTIME_HOURS)),
+                    )
+                    if cur.rowcount > 0:
+                        print(f"[TaskManager] 收割 {cur.rowcount} 个僵尸任务",
+                              file=sys.stderr)
+        except Exception as e:
+            print(f"[TaskManager] reap_zombie error: {e}", file=sys.stderr)
 
     def _run_task(self, task_id: str):
         task = _load_task(task_id)

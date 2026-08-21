@@ -124,8 +124,8 @@ def get_total_pending(conn, chain_short: str) -> int:
         return cur.fetchone()[0]
 
 
-def run_single(asset_id: int, chain: str, timeout: int = 30) -> bool:
-    """运行单币持仓快照采集，返回是否成功。"""
+def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]:
+    """运行单币持仓快照采集，返回 (是否成功, 失败原因)。"""
     script = SCRIPT_DIR / "phase_chain_holder_scrape.py"
     try:
         result = subprocess.run(
@@ -140,11 +140,15 @@ def run_single(asset_id: int, chain: str, timeout: int = 30) -> bool:
             timeout=timeout,
             cwd=str(SCRIPT_DIR),
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True, ""
+        # 取 stderr 最后 200 字符作为失败原因
+        err = (result.stderr or result.stdout or "").strip()[-200:]
+        return False, f"exit={result.returncode} {err}"
     except subprocess.TimeoutExpired:
-        return False
-    except Exception:
-        return False
+        return False, f"timeout {timeout}s"
+    except Exception as e:
+        return False, f"exception: {str(e)[:100]}"
 
 
 def main():
@@ -208,13 +212,13 @@ def main():
                 print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
                       end="", flush=True)
 
-                ok = run_single(asset_id, chain, timeout=args.timeout)
+                ok, reason = run_single(asset_id, chain, timeout=args.timeout)
                 if ok:
                     chain_success += 1
                     print("OK")
                 else:
                     chain_fail += 1
-                    print("FAIL")
+                    print(f"FAIL ({reason})")
 
                 if i < len(assets) and args.delay > 0:
                     time.sleep(args.delay)

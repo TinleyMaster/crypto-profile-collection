@@ -125,16 +125,22 @@ def upsert_asset_sectors_batch(
             (source, asset_list),
         )
 
-        # 2. 写入新标签
+        # 2. 写入新标签（批内去重 + ON CONFLICT 兜底）
         tag_rows = []
+        seen: set[tuple[int, str, str]] = set()
         for aid in asset_list:
             for sector, conf in sectors_by_asset.get(aid, []):
+                key = (aid, sector, source)
+                if key in seen:
+                    continue
+                seen.add(key)
                 tag_rows.append((aid, sector, source, conf))
         if tag_rows:
             cur.executemany(
                 """
                 INSERT INTO biz.asset_sector (asset_id, sector, source, confidence, is_primary)
                 VALUES (%s, %s, %s, %s, false)
+                ON CONFLICT (asset_id, sector, source) DO NOTHING
                 """,
                 tag_rows,
             )

@@ -173,7 +173,7 @@ def set_profile_active(profile_id: int, is_active: bool) -> None:
 
 
 def increment_signal_count(profile_id: int) -> None:
-    """博主累计信号数 +1（仅 prediction 类型）。"""
+    """博主累计信号数 +1。"""
     with get_conn() as conn:
         conn.execute(
             "UPDATE biz.kol_profile SET total_signals = total_signals + 1, "
@@ -339,7 +339,7 @@ def list_signals(
 
 
 def list_signals_pending_alert(confidence_threshold: float = 0.8) -> list[dict]:
-    """列出待发送邮件的信号：prediction + 未进场 + 高置信度 + 未发过。"""
+    """列出待发送邮件的信号：prediction/analysis + 未进场 + 高置信度 + 未发过。"""
     with get_conn() as conn:
         return conn.execute(
             "SELECT s.*, p.content_text, p.posted_at, p.post_url, p.image_urls, "
@@ -347,7 +347,7 @@ def list_signals_pending_alert(confidence_threshold: float = 0.8) -> list[dict]:
             "FROM biz.kol_signal s "
             "JOIN biz.kol_post p ON s.post_id = p.post_id "
             "JOIN biz.kol_profile pr ON s.profile_id = pr.profile_id "
-            "WHERE s.post_type = 'prediction' "
+            "WHERE s.post_type IN ('prediction', 'analysis') "
             "  AND s.already_entered = FALSE "
             "  AND s.confidence >= %s "
             "  AND s.is_alerted = FALSE "

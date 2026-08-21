@@ -148,6 +148,15 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
     # 每次抓取都更新 last_crawled_at（含 0 帖场景）
     db.mark_profile_crawled(profile_id)
 
+    # 更新粉丝数（如果抓取到了）
+    if result.follower_count is not None:
+        db.upsert_profile(
+            platform_code=profile["platform_code"],
+            platform_user_id=user_id,
+            nickname=nickname,
+            follower_count=result.follower_count,
+        )
+
     # 0 帖场景：区分 not_found / blocked / empty_feed / error
     if not posts:
         stats["profiles_empty"] += 1
@@ -237,9 +246,8 @@ def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
                 continue
             stats["signals_created"] += 1
 
-            # 如果是 prediction 类型，博主信号数 +1
-            if result["post_type"] == "prediction":
-                db.increment_signal_count(post["profile_id"])
+            # 博主信号数 +1（所有类型都计数）
+            db.increment_signal_count(post["profile_id"])
 
             print(f"[KOL][runner]   信号: {result['post_type']} "
                   f"{result.get('symbol', '?')} "

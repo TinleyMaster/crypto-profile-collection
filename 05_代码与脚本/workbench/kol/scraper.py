@@ -35,6 +35,7 @@ class FetchResult:
     page_title: str = ""
     error_reason: str = ""
     http_status: int | None = None
+    follower_count: int | None = None
 
 
 class BaseScraper:
@@ -102,6 +103,8 @@ class BinanceSquareScraper(BaseScraper):
 
     # squareUid 缓存（username → uid），避免每轮重复查询
     _uid_cache: dict[str, str] = {}
+    # follower_count 缓存（username → count）
+    _follower_cache: dict[str, int] = {}
 
     def __init__(self, headless: bool = True):
         # headless 参数保留以兼容旧接口，API 模式无实际作用
@@ -149,6 +152,9 @@ class BinanceSquareScraper(BaseScraper):
             result.page_status = "error"
             result.error_reason = f"获取博主信息失败: {e}"
             return result
+
+        # 写入粉丝数（从 USER_API 缓存中取）
+        result.follower_count = self.get_cached_follower_count(platform_user_id)
 
         # Step 2: 翻页抓帖
         posts: list[ScrapedPost] = []
@@ -220,7 +226,7 @@ class BinanceSquareScraper(BaseScraper):
     # --------------------------------------------------------
 
     def _get_square_uid(self, username: str) -> str:
-        """通过 username 获取 squareUid，带缓存。"""
+        """通过 username 获取 squareUid，带缓存。同时缓存 follower_count。"""
         if username in self._uid_cache:
             return self._uid_cache[username]
 
@@ -256,7 +262,20 @@ class BinanceSquareScraper(BaseScraper):
             raise _NotFoundError(f"返回数据中无 squareUid: {list(user_data.keys())}")
 
         self._uid_cache[username] = uid
+
+        # 缓存粉丝数（优先取 followersCount，兼容不同字段名）
+        follower_count = user_data.get("followersCount") or user_data.get("followerCount")
+        if follower_count is not None:
+            try:
+                self._follower_cache[username] = int(follower_count)
+            except (ValueError, TypeError):
+                pass
+
         return uid
+
+    def get_cached_follower_count(self, username: str) -> int | None:
+        """获取缓存的粉丝数（需先调用过 _get_square_uid）。"""
+        return self._follower_cache.get(username)
 
     def _fetch_feed_page(self, square_uid: str, time_offset: str) -> dict:
         """抓取一页帖子，返回 data 字段内容。"""

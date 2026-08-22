@@ -64,9 +64,19 @@ CHAIN_ALIASES = {
     "sol": "solana",
 }
 
+# 排除清单：错误/可疑的合约映射，快照会产生明显失真数据（如供应量亿倍于真实值）。
+# 例：BTC(asset_id=2) 的 ethereum 合约 0x43fd... 实为某山寨代币，抓取会得到 2610 亿枚的
+# 荒诞结果，直接写入会污染 BTC 行。此类原生币（BTC/ETH）本就无 EVM 合约，应跳过。
+EXCLUDE_CONTRACTS = (
+    "0x43fd9de06bb69ad771556e171f960a91c42d2955",  # BTC(asset_id=2) 错误映射的 ethereum 合约
+)
+
 
 def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
-    """获取指定链上有合约地址但尚无今日快照的资产列表。"""
+    """获取指定链上有合约地址但尚无今日快照的资产列表。
+
+    排序按 market_cap_rank 优先（TOP 资产先入队），rank 缺失的排后面，asset_id 兜底。
+    """
     db_names = tuple(
         k for k, v in CHAIN_ALIASES.items() if v == chain_short
     )
@@ -74,6 +84,7 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
         return []
 
     placeholders = ",".join(["%s"] * len(db_names))
+    exclude_ph = ",".join(["%s"] * len(EXCLUDE_CONTRACTS))
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -84,6 +95,7 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
             JOIN core.asset a ON a.asset_id = c.asset_id
             WHERE c.chain IN ({placeholders})
               AND c.contract_address IS NOT NULL
+              AND c.contract_address NOT IN ({exclude_ph})
               AND NOT EXISTS (
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
@@ -91,10 +103,10 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
                     -- 按北京时间判断"今日"，避免 UTC 时区下凌晨跑批被误判为已采集
                     AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
-            ORDER BY c.asset_id ASC
+            ORDER BY a.market_cap_rank ASC NULLS LAST, c.asset_id ASC
             LIMIT %s
             """,
-            (*db_names, limit),
+            (*db_names, *EXCLUDE_CONTRACTS, limit),
         )
         return cur.fetchall()
 
@@ -108,6 +120,7 @@ def get_total_pending(conn, chain_short: str) -> int:
         return 0
 
     placeholders = ",".join(["%s"] * len(db_names))
+    exclude_ph = ",".join(["%s"] * len(EXCLUDE_CONTRACTS))
 
     with conn.cursor() as cur:
         cur.execute(
@@ -116,6 +129,7 @@ def get_total_pending(conn, chain_short: str) -> int:
             FROM core.asset_contract c
             WHERE c.chain IN ({placeholders})
               AND c.contract_address IS NOT NULL
+              AND c.contract_address NOT IN ({exclude_ph})
               AND NOT EXISTS (
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
@@ -124,7 +138,7 @@ def get_total_pending(conn, chain_short: str) -> int:
                     AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
             """,
-            db_names,
+            (*db_names, *EXCLUDE_CONTRACTS),
         )
         return cur.fetchone()[0]
 

@@ -138,7 +138,7 @@ def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"""SELECT a.asset_id, a.canonical_symbol AS symbol,
-                          a.canonical_name AS name
+                          a.canonical_name AS name, c.chain
                    FROM core.asset_contract c
                    JOIN core.asset a ON a.asset_id = c.asset_id
                    WHERE c.contract_address = %s AND c.chain IN ({placeholders})""",
@@ -147,7 +147,9 @@ def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
             row = cur.fetchone()
             if row:
                 row["contract_address"] = _norm_addr(chain, contract_address)
-                row["chain"] = chain
+                # 保留数据库规范链名（如 ethereum），不要覆盖成脚本简称（eth），
+                # 否则 onchain_holder_snapshot.chain 与 asset_contract.chain 不一致，
+                # 导致每日去重 NOT EXISTS(s.chain=c.chain) 永远不成立、重复全量采集。
             return row
 
     if asset_id:
@@ -1145,7 +1147,9 @@ def main() -> int:
             return 1
 
         if args.save:
-            save_to_db(conn, asset_id, chain, contract_address, explorer_url, data)
+            # 用数据库规范链名写入（如 ethereum 而非 eth），保证与 asset_contract.chain
+            # 一致，每日去重 NOT EXISTS(s.chain=c.chain) 才能正确命中。
+            save_to_db(conn, asset_id, info.get("chain") or chain, contract_address, explorer_url, data)
 
         # JSON 输出
         output = {

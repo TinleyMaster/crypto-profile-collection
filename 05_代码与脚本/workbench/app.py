@@ -462,8 +462,8 @@ TASK_DEFS = {
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",
         "description": "从 Etherscan/BSCScan 拉取代币 Top 持有者，计算持仓集中度",
-        "script": "phase_chain_holder_snapshot.py",
-        "default_args": ["--limit", "50"],
+        "script": "phase_chain_holder_batch.py",
+        "default_args": ["--all-chains", "--limit", "50"],
         "category": "链上数据",
         "hidden": True,
     },

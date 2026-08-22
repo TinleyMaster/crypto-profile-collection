@@ -972,7 +972,11 @@ def get_asset_materials(asset_id: int) -> dict:
 
 
 def get_asset_tokenomics(asset_id: int) -> dict | None:
-    """获取资产的代币经济学结构化数据（含 tokenomics.com 的收入/估值子板块）。"""
+    """获取资产的代币经济学结构化数据（含 tokenomics.com 的收入/估值子板块）。
+
+    supply 安全校验：total_supply / circulating_supply / max_supply 会与
+    CMC 权威快照对比，偏离 >10 倍时自动用权威值覆盖，防止单位错误传导。
+    """
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -994,10 +998,51 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
             row = cur.fetchone()
             if not row:
                 return None
+
+            # supply 安全校验：从 CMC 权威快照取基准值
+            auth_supply = {}
+            try:
+                cur.execute(
+                    """
+                    SELECT q.total_supply, q.circulating_supply, q.max_supply
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    """,
+                    (asset_id,),
+                )
+                auth_row = cur.fetchone()
+                if auth_row:
+                    auth_supply = {
+                        k: auth_row[k]
+                        for k in ("total_supply", "circulating_supply", "max_supply")
+                        if auth_row[k] is not None
+                    }
+            except (psycopg.errors.UndefinedTable, Exception):
+                pass
+
+            def _safe_supply(tok_key: str):
+                """supply 字段安全取值：偏离权威值 >10 倍则用权威值覆盖。"""
+                tok_val = row[tok_key]
+                auth_val = auth_supply.get(tok_key)
+                if auth_val is None:
+                    return tok_val
+                if tok_val is None:
+                    return auth_val
+                try:
+                    tv = float(tok_val)
+                    av = float(auth_val)
+                    if av > 0 and (tv / av > 10 or tv / av < 0.1):
+                        return auth_val  # 单位疑似错误，用权威值覆盖
+                except (ValueError, TypeError, ZeroDivisionError):
+                    pass
+                return tok_val
+
             return {
-                "total_supply": row["total_supply"],
-                "max_supply": row["max_supply"],
-                "circulating_supply": row["circulating_supply"],
+                "total_supply": _safe_supply("total_supply"),
+                "max_supply": _safe_supply("max_supply"),
+                "circulating_supply": _safe_supply("circulating_supply"),
                 "buy_tax_pct": float(row["buy_tax_pct"]) if row["buy_tax_pct"] is not None else None,
                 "sell_tax_pct": float(row["sell_tax_pct"]) if row["sell_tax_pct"] is not None else None,
                 "tax_info": row["tax_info"],
@@ -5249,15 +5294,27 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 circ_supply = t.get("circulating_supply")
                 total_supply = t.get("total_supply")
                 max_supply = t.get("max_supply")
-                # CMC 快照 fallback（tokenomics 没有时用）
+                # CMC 权威 supply 校验：tokenomics 为空或偏离 >10 倍时用 CMC 覆盖
                 q = cmc_quote_map.get(aid)
                 if q:
-                    if not circ_supply and q.get("circulating_supply"):
-                        circ_supply = q["circulating_supply"]
-                    if not total_supply and q.get("total_supply"):
-                        total_supply = q["total_supply"]
-                    if not max_supply and q.get("max_supply"):
-                        max_supply = q["max_supply"]
+                    def _sanitize_supply(tok_val, q_key):
+                        q_val = q.get(q_key)
+                        if q_val is None:
+                            return tok_val
+                        if tok_val is None:
+                            return q_val
+                        try:
+                            tvf = float(tok_val)
+                            qvf = float(q_val)
+                            if qvf > 0 and (tvf / qvf > 10 or tvf / qvf < 0.1):
+                                return q_val  # 单位疑似错误，用权威值覆盖
+                        except (ValueError, TypeError, ZeroDivisionError):
+                            pass
+                        return tok_val
+
+                    circ_supply = _sanitize_supply(circ_supply, "circulating_supply")
+                    total_supply = _sanitize_supply(total_supply, "total_supply")
+                    max_supply = _sanitize_supply(max_supply, "max_supply")
                 # 未流通占比（原 inflation_pct 命名误导，实为「未流通占比」，已更名 unlocked_pct）。
                 # 防御：circ > total 说明 supply 来源单位不一致（tokenomics 与 CMC 混用），
                 # 此时不输出负值爆炸，置为 None。
@@ -7476,6 +7533,46 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict
         if not tkn:
             return {"ok": False, "error": "无代币经济学数据，无法 AI 测算",
                     "tokenomist_error": tokenomist_error}
+
+        # supply 安全校验：对比 CMC 权威快照，偏离 >10 倍则用权威值覆盖
+        try:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as _cur:
+                _cur.execute(
+                    """
+                    SELECT q.total_supply AS auth_total,
+                           q.circulating_supply AS auth_circ,
+                           q.max_supply AS auth_max
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    """,
+                    (asset_id,),
+                )
+                _auth = _cur.fetchone()
+                if _auth:
+                    tkn = dict(tkn)  # 转可写 dict
+                    for _tok_key, _auth_key in [
+                        ("total_supply", "auth_total"),
+                        ("circulating_supply", "auth_circ"),
+                        ("max_supply", "auth_max"),
+                    ]:
+                        _tv = tkn.get(_tok_key)
+                        _av = _auth.get(_auth_key)
+                        if _av is None:
+                            continue
+                        if _tv is None:
+                            tkn[_tok_key] = _av
+                            continue
+                        try:
+                            _tvf = float(_tv)
+                            _avf = float(_av)
+                            if _avf > 0 and (_tvf / _avf > 10 or _tvf / _avf < 0.1):
+                                tkn[_tok_key] = _av  # 单位疑似错误，用权威值覆盖
+                        except (ValueError, TypeError, ZeroDivisionError):
+                            pass
+        except (psycopg.errors.UndefinedTable, Exception):
+            pass
 
         # 获取 symbol/name/launch_date（launch_date 作为 TGE/上线日期基准）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:

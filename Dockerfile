@@ -11,6 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY 05_代码与脚本/workbench/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# 安装 Playwright 浏览器二进制与系统依赖（tokenomics 爬取依赖 chromium headless shell）。
+# install-deps 补齐 libnss3 等共享库；playwright install 下载浏览器到脚本默认查找的
+# /root/.cache/ms-playwright，避免容器重建后出现 "Executable doesn't exist" 报错。
+RUN apt-get update && playwright install-deps chromium \
+    && playwright install chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # 复制 scripts 源码（数据处理模块）
 COPY 05_代码与脚本/scripts/src /app/scripts/src
 COPY 05_代码与脚本/scripts/sql /app/scripts/sql

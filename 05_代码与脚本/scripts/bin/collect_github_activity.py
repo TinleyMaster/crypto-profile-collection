@@ -183,10 +183,11 @@ def _collect_single_repo(
         contrib_list = sorted(
             (
                 {
-                    "login": c.get("author", {}).get("login", "unknown"),
+                    "login": (c.get("author") or {}).get("login", "unknown"),
                     "commits": c.get("total", 0),
                 }
                 for c in contributors
+                if isinstance(c, dict)
             ),
             key=lambda x: -x["commits"],
         )[:20]

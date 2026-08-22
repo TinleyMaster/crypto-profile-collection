@@ -3,6 +3,7 @@
 -- 检测一个 asset_id 映射了多个 cmc_id 的情况（symbol 撞名导致的污染）
 --
 -- 用法：直接在 pgAdmin 或 psql 中执行，查看结果
+-- 注意：cmc_asset_map.rank_num 是 CMC 排名字段
 -- =====================================================================
 
 -- 1. 找出所有"一资产多 cmc_id"的污染案例
@@ -13,6 +14,10 @@ WITH multi_mapped AS (
     WHERE asm.source_code = 'cmc'
     GROUP BY asm.asset_id
     HAVING COUNT(*) > 1
+),
+cmc_info AS (
+    SELECT cmc_id, name, symbol, rank_num AS cmc_rank, is_active
+    FROM src_cmc.cmc_asset_map
 )
 SELECT
     a.asset_id,
@@ -27,16 +32,16 @@ SELECT
             'cmc_id', m.cmc_id,
             'name', m.name,
             'symbol', m.symbol,
-            'rank', m.rank,
+            'rank', m.cmc_rank,
             'is_active', m.is_active
         )
-        ORDER BY m.rank NULLS LAST
+        ORDER BY m.cmc_rank NULLS LAST
     ) AS mapped_cmc_ids
 FROM core.asset a
 JOIN multi_mapped mm ON mm.asset_id = a.asset_id
 JOIN core.asset_source_map asm
     ON asm.asset_id = a.asset_id AND asm.source_code = 'cmc'
-JOIN src_cmc.cmc_asset_map m ON m.cmc_id = asm.source_asset_key::bigint
+JOIN cmc_info m ON m.cmc_id = asm.source_asset_key::bigint
 GROUP BY a.asset_id, a.canonical_name, a.canonical_symbol, a.asset_type, a.market_cap_rank
 ORDER BY a.market_cap_rank NULLS LAST, a.asset_id;
 

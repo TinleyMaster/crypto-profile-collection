@@ -1569,8 +1569,16 @@ def api_unlocks_get(asset_id: int):
     try:
         data = _get_db_stats().get_asset_unlocks(asset_id)
         if data:
-            return jsonify({"ok": True, "data": data})
-        return jsonify({"ok": False, "error": "无缓存数据"}), 404
+            return jsonify({"ok": True, "has_unlock_data": True, "data": data})
+        # 无缓存数据：返回 200 + 明确语义，而非 404 错误。
+        # 该接口只读、不触发爬取，无法区分「从未抓取」与「已确认无解锁计划」，
+        # 因此统一提示「暂无已知解锁计划（或尚未抓取）」，前端据此展示友好状态。
+        return jsonify({
+            "ok": True,
+            "has_unlock_data": False,
+            "data": None,
+            "message": "该资产暂无已知解锁计划（或尚未抓取 tokenomics.com 数据），可点击拉取。",
+        }), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

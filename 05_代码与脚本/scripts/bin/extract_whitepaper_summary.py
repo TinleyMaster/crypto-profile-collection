@@ -9,6 +9,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,8 +24,8 @@ from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_
 
 settings = get_settings(require_database=True)
 
-# 文档存储根目录
-DOCS_STORAGE_ROOT = Path(r"E:\瞎搞乱搞\web3\加密货币研究报告\docs_storage")
+# 文档存储根目录（优先环境变量，兼容容器和本地）
+DOCS_STORAGE_ROOT = Path(os.getenv("DOCS_STORAGE_ROOT", "/app/docs_storage"))
 
 # 单次提取最大文本字符数（避免 token 超限）
 MAX_TEXT_CHARS = 15000

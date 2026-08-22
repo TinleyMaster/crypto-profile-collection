@@ -3658,10 +3658,10 @@
             try {
                 const res = await fetch(`/api/unlocks/${assetId}`);
                 const data = await res.json();
-                if (data.ok && data.data) {
+                if (data.ok && data.has_unlock_data && data.data) {
                     renderUnlocks(data.data);
                 } else {
-                    setUnlocksMissing();
+                    setUnlocksMissing(data && data.message ? data.message : '');
                 }
             } catch (e) {
                 setUnlocksMissing();
@@ -4071,9 +4071,9 @@
             btn.disabled = false;
         }
 
-        function setUnlocksMissing () {
+        function setUnlocksMissing (message) {
             document.getElementById('ulk-indicator').className = 'status-indicator missing';
-            document.getElementById('ulk-status').textContent = '暂无数据';
+            document.getElementById('ulk-status').textContent = message || '暂无数据';
             document.getElementById('ulk-status').className = 'status-text missing';
             document.getElementById('ulk-run-btn').textContent = '拉取代币解锁数据';
             document.getElementById('ulk-run-btn').disabled = false;

@@ -5,6 +5,7 @@
 
 目录结构：{symbol}_{asset_id}/whitepapers/{file_name}
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,8 +17,9 @@ from crypto_research.db.conn import get_connection
 
 settings = get_settings(require_database=True)
 
-# 文档存储根目录
-DOCS_STORAGE_ROOT = Path(r"E:\瞎搞乱搞\web3\加密货币研究报告\docs_storage")
+# 文档存储根目录：优先读环境变量（兼容容器/跨平台），默认项目本地 docs_storage
+DOCS_STORAGE_ROOT = Path(os.getenv("DOCS_STORAGE_ROOT",
+    str(Path(__file__).resolve().parent.parent.parent / "docs_storage")))
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -64,7 +66,7 @@ def main(dry_run: bool = True):
                        a.canonical_symbol
                 FROM biz.doc_asset d
                 JOIN core.asset a ON a.asset_id = d.asset_id
-                WHERE d.doc_type = 'whitepaper'
+                WHERE d.doc_type IN ('whitepaper', 'docs')
                   AND d.storage_path IS NULL
                   AND d.source_url IS NOT NULL
                 ORDER BY d.doc_id
@@ -117,6 +119,12 @@ def main(dry_run: bool = True):
                     """, (rel_path, save_path.stat().st_size, doc_id))
                 else:
                     failed += 1
+                    # 下载失败：显式标记，避免长期沉默为「待解析」占位行
+                    cur.execute("""
+                        UPDATE biz.doc_asset
+                        SET parse_status = '下载失败', updated_at = NOW()
+                        WHERE doc_id = %s AND storage_path IS NULL
+                    """, (doc_id,))
 
                 # 礼貌性延迟
                 time.sleep(0.5)

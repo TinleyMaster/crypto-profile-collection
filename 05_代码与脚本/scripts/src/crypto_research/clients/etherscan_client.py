@@ -1,6 +1,11 @@
 """
-Etherscan / BSCScan API 客户端。
-统一接口访问 Etherscan 和 BSCScan 的免费 API。
+Etherscan API V2 客户端。
+统一接口访问 Etherscan V2 API（支持 60+ 条链，ETH/BSC 等共用同一套 API）。
+
+V2 变化（2025-08-15 V1 正式废弃）：
+  - 基础 URL: https://api.etherscan.io/v2/api
+  - 通过 chainid 参数区分链（ETH=1, BSC=56）
+  - 同一个 API Key 可访问所有支持的链
 """
 
 from __future__ import annotations
@@ -14,30 +19,35 @@ import urllib.error
 from typing import Any
 
 
-# 链配置
+# 链配置：chain -> chain_id
+# 完整列表见 https://docs.etherscan.io/supported-chains
 CHAIN_CONFIG = {
     "eth": {
         "name": "Ethereum",
-        "api_url": "https://api.etherscan.io/api",
+        "chain_id": "1",
         "explorer_url": "https://etherscan.io",
     },
     "bsc": {
         "name": "BSC",
-        "api_url": "https://api.bscscan.com/api",
+        "chain_id": "56",
         "explorer_url": "https://bscscan.com",
     },
 }
 
+# V2 API 基础 URL（所有链共用）
+V2_API_URL = "https://api.etherscan.io/v2/api"
+
 
 class EtherscanClient:
-    """Etherscan / BSCScan API 客户端，支持免费 API 调用。"""
+    """Etherscan API V2 客户端，支持多链。"""
 
     def __init__(self, chain: str, api_key: str, calls_per_second: float = 4.5):
         if chain not in CHAIN_CONFIG:
             raise ValueError(f"不支持的链: {chain}，可选: {list(CHAIN_CONFIG.keys())}")
         self.chain = chain
+        self.chain_id = CHAIN_CONFIG[chain]["chain_id"]
         self.api_key = api_key
-        self.api_url = CHAIN_CONFIG[chain]["api_url"]
+        self.api_url = V2_API_URL
         self.min_interval = 1.0 / calls_per_second
         self._last_call = 0.0
 
@@ -48,6 +58,8 @@ class EtherscanClient:
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
 
+        # V2: 所有请求带 chainid 参数
+        params["chainid"] = self.chain_id
         params["apikey"] = self.api_key
         query_string = urllib.parse.urlencode(params)
         url = f"{self.api_url}?{query_string}"

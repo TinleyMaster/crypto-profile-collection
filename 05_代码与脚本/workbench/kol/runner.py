@@ -294,23 +294,145 @@ def _process_pending_alerts(stats: dict, confidence_threshold: float = 0.8) -> N
 
 
 # ============================================================
+# 博主发现流程
+# ============================================================
+
+def run_discover_once(
+    platform_code: str = "binance_square",
+    max_pages: int = 5,
+    min_followers: int = 10000,
+    auto_activate: bool = False,
+) -> dict:
+    """从广场热门发现新博主并入库。
+
+    Args:
+        platform_code: 平台编码（目前仅支持币安广场）
+        max_pages: 翻页数量
+        min_followers: 最低粉丝数过滤
+        auto_activate: 新发现博主是否自动启用监控（默认 False，需人工审核）
+
+    Returns:
+        dict: 统计信息 {discovered, new, updated, skipped}
+    """
+    stats = {"discovered": 0, "new": 0, "updated": 0, "skipped": 0}
+
+    if platform_code != "binance_square":
+        print(f"[KOL][discover] 暂不支持平台 {platform_code} 的发现")
+        return stats
+
+    # 币安广场用纯 HTTP scraper（不需要浏览器）
+    from .scraper import BinanceSquareScraper
+
+    scraper_cls = BinanceSquareScraper
+
+    with scraper_cls(headless=True) as scraper:
+        print(f"[KOL][discover] 开始发现博主：max_pages={max_pages}, "
+              f"min_followers={min_followers}")
+        creators = scraper.discover_creators(
+            max_pages=max_pages,
+            min_followers=min_followers,
+        )
+        stats["discovered"] = len(creators)
+        print(f"[KOL][discover] 发现 {len(creators)} 位符合条件的博主")
+
+        # 先查已存在的博主，用于区分新增/更新
+        existing_ids = {
+            p["platform_user_id"]
+            for p in db.list_all_profiles()
+            if p["platform_code"] == platform_code
+        }
+
+        # 批量入库
+        for c in creators:
+            try:
+                username = c.get("username") or ""
+                nickname = c.get("nickname") or username
+                square_uid = c.get("square_uid")
+                if not square_uid:
+                    stats["skipped"] += 1
+                    continue
+
+                uid_str = str(square_uid)
+                is_new = uid_str not in existing_ids
+
+                db.upsert_profile(
+                    platform_code=platform_code,
+                    platform_user_id=uid_str,
+                    nickname=nickname,
+                    avatar_url=c.get("avatar_url"),
+                    follower_count=c.get("follower_count"),
+                    is_active=auto_activate,
+                    notes="广场热门发现，待审核" if is_new and not auto_activate else None,
+                    extra_json={
+                        "username": username,
+                        "square_uid": square_uid,
+                        "discover_source": "square_hot_feed",
+                        "discover_time": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                if is_new:
+                    stats["new"] += 1
+                else:
+                    stats["updated"] += 1
+            except Exception as e:
+                stats["skipped"] += 1
+                print(f"[KOL][discover] 入库失败 {c.get('nickname')}: {e}")
+    print(f"[KOL][discover] 完成：发现 {stats['discovered']}，"
+          f"新增 {stats['new']}，更新 {stats['updated']}，跳过 {stats['skipped']}")
+    return stats
+
+
+# ============================================================
 # 命令行入口
 # ============================================================
 
 def main():
-    """命令行入口：执行一轮抓取。"""
+    """命令行入口：执行一轮抓取或博主发现。"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="KOL 信号监控 — 抓取一轮")
+    parser = argparse.ArgumentParser(description="KOL 信号监控")
+    parser.add_argument("--discover", action="store_true",
+                        help="运行博主发现流程（从广场热门发现新博主）")
     parser.add_argument("--platform", type=str, default=None,
-                        help="只抓取指定平台")
+                        help="只抓取/发现指定平台")
     parser.add_argument("--profile-id", type=int, default=None,
-                        help="只抓取指定博主 ID")
+                        help="只抓取指定博主 ID（抓取模式）")
     parser.add_argument("--headed", action="store_true",
                         help="有头模式（调试用）")
     parser.add_argument("--interval", type=int, default=0,
                         help="循环间隔秒数，0=只跑一次")
+    parser.add_argument("--discover-pages", type=int, default=5,
+                        help="发现模式：翻页数量（默认 5）")
+    parser.add_argument("--discover-min-followers", type=int, default=10000,
+                        help="发现模式：最低粉丝数（默认 10000）")
+    parser.add_argument("--discover-activate", action="store_true",
+                        help="发现模式：新博主自动启用监控（默认关闭，需人工审核）")
     args = parser.parse_args()
+
+    if args.discover:
+        platform = args.platform or "binance_square"
+        if args.interval > 0:
+            print(f"[KOL][discover] 循环模式，间隔 {args.interval} 秒")
+            while True:
+                try:
+                    run_discover_once(
+                        platform_code=platform,
+                        max_pages=args.discover_pages,
+                        min_followers=args.discover_min_followers,
+                        auto_activate=args.discover_activate,
+                    )
+                except Exception as e:
+                    print(f"[KOL][discover] 本轮异常: {e}")
+                    traceback.print_exc()
+                time.sleep(args.interval)
+        else:
+            run_discover_once(
+                platform_code=platform,
+                max_pages=args.discover_pages,
+                min_followers=args.discover_min_followers,
+                auto_activate=args.discover_activate,
+            )
+        return
 
     if args.interval > 0:
         print(f"[KOL][runner] 循环模式，间隔 {args.interval} 秒")

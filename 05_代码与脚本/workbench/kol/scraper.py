@@ -85,6 +85,9 @@ class BinanceSquareScraper(BaseScraper):
     USER_API = "https://www.binance.com/bapi/composite/v3/friendly/pgc/user/client"
     FEED_API = ("https://www.binance.com/bapi/composite/v2/friendly/pgc/content/"
                 "queryUserProfilePageContentsWithFilter")
+    # 广场热门 feed（按热度排序的推荐流，用于发现新博主）
+    HOT_FEED_API = ("https://www.binance.com/bapi/composite/v1/friendly/pgc/"
+                    "content/querySquareHomePageContentsWithFilter")
 
     _DEFAULT_HEADERS = {
         "User-Agent": (
@@ -351,6 +354,89 @@ class BinanceSquareScraper(BaseScraper):
             posted_at=posted_at,
             raw_json=item,
         )
+
+    def discover_creators(
+        self,
+        max_pages: int = 5,
+        min_followers: int = 10000,
+    ) -> list[dict]:
+        """从广场热门 feed 发现高粉丝博主。
+
+        Args:
+            max_pages: 翻页数（每页约 20 条）
+            min_followers: 最低粉丝数阈值，低于则跳过
+
+        Returns:
+            list[dict]: 符合条件的博主列表，每项含
+                username, nickname, avatar_url, follower_count, square_uid
+        """
+        creators: dict[str, dict] = {}  # username -> info（去重）
+        time_offset = "-1"
+
+        for page in range(max_pages):
+            try:
+                resp = self._session.get(
+                    self.HOT_FEED_API,
+                    params={
+                        "timeOffset": time_offset,
+                        "filterType": "ALL",
+                        "topicId": "",
+                    },
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                if data.get("code") != "000000":
+                    break
+
+                contents = data.get("data", {}).get("contents", [])
+                if not contents:
+                    break
+
+                for item in contents:
+                    creator = item.get("creator") or item.get("creatorVO") or {}
+                    username = creator.get("username") or creator.get("userName")
+                    nickname = creator.get("nickName") or creator.get("nickname") or ""
+                    avatar = creator.get("avatarUrl") or creator.get("avatar") or ""
+                    square_uid = creator.get("squareUid") or ""
+                    followers = creator.get("followersCount") or creator.get("followerCount") or 0
+
+                    if not username:
+                        continue
+                    if username in creators:
+                        continue
+
+                    try:
+                        follower_count = int(followers) if followers else 0
+                    except (ValueError, TypeError):
+                        follower_count = 0
+
+                    if follower_count < min_followers:
+                        continue
+
+                    creators[username] = {
+                        "username": username,
+                        "nickname": nickname,
+                        "avatar_url": avatar,
+                        "follower_count": follower_count,
+                        "square_uid": str(square_uid) if square_uid else "",
+                    }
+
+                # 翻页
+                if not data.get("data", {}).get("isExistSecondPage", False):
+                    break
+                next_offset = data.get("data", {}).get("timeOffset")
+                if not next_offset or str(next_offset) == time_offset:
+                    break
+                time_offset = str(next_offset)
+
+                time.sleep(0.5)  # 限速
+
+            except Exception:
+                break
+
+        return list(creators.values())
 
 
 # ============================================================

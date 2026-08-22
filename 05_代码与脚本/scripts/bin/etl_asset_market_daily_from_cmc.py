@@ -62,14 +62,16 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                 sql = f"""
                     WITH ranked AS (
                         SELECT
-                            cb.asset_id,
+                            asm.asset_id,
                             DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
                             ROW_NUMBER() OVER (
-                                PARTITION BY cb.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
+                                PARTITION BY asm.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
                                 ORDER BY q.quote_time DESC
                             ) AS rn
                         FROM src_cmc.cmc_asset_quote_snapshot q
-                        JOIN biz.coin_basic cb ON cb.cmc_id = q.cmc_id
+                        JOIN core.asset_source_map asm
+                            ON asm.source_code = 'cmc'
+                            AND asm.source_asset_key = q.cmc_id::text
                         {date_filter}
                     )
                     SELECT count(*), min(market_date), max(market_date), count(DISTINCT asset_id)
@@ -94,7 +96,7 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                      volume_24h, change_24h, change_7d, raw_ref)
                 WITH ranked AS (
                     SELECT
-                        cb.asset_id,
+                        asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
                         q.price_usd,
                         q.market_cap,
@@ -105,11 +107,13 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                         q.percent_change_24h AS change_24h,
                         q.percent_change_7d AS change_7d,
                         ROW_NUMBER() OVER (
-                            PARTITION BY cb.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
+                            PARTITION BY asm.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
                             ORDER BY q.quote_time DESC
                         ) AS rn
                     FROM src_cmc.cmc_asset_quote_snapshot q
-                    JOIN biz.coin_basic cb ON cb.cmc_id = q.cmc_id
+                    JOIN core.asset_source_map asm
+                        ON asm.source_code = 'cmc'
+                        AND asm.source_asset_key = q.cmc_id::text
                     {date_filter}
                 )
                 SELECT

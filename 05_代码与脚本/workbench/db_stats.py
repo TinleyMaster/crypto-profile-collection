@@ -546,7 +546,8 @@ def get_task_progress() -> list[dict]:
                 """
                 SELECT COUNT(DISTINCT hs.asset_id)
                 FROM biz.onchain_holder_snapshot hs
-                WHERE hs.snapshot_date = CURRENT_DATE
+                -- 按北京时间计"今日"，与调度时区对齐
+                WHERE hs.snapshot_date = (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
                 """
             )
             done = cur.fetchone()[0]
@@ -4859,6 +4860,27 @@ def get_divergence_signals(asset_id: int) -> dict:
                 price_change_7d = market.get("price_change_7d")
                 market_cap = market.get("market_cap_usd")
 
+            # 价格数据回退：social_heat.market_json 缺失率高（60% 为空），
+            # 从权威行情源 biz.asset_market_daily 补价格/涨跌幅/市值。
+            if price_change_24h is None or price_change_7d is None or market_cap is None:
+                try:
+                    cur.execute("""
+                        SELECT change_24h, change_7d, market_cap, price_usd
+                        FROM biz.asset_market_daily
+                        WHERE asset_id = %s AND source_code = 'cmc'
+                        ORDER BY market_date DESC LIMIT 1
+                    """, (asset_id,))
+                    md = cur.fetchone()
+                    if md:
+                        if price_change_24h is None:
+                            price_change_24h = md.get("change_24h")
+                        if price_change_7d is None:
+                            price_change_7d = md.get("change_7d")
+                        if market_cap is None:
+                            market_cap = md.get("market_cap")
+                except psycopg.errors.UndefinedTable:
+                    pass
+
             # 3. 链上持仓变化（取最新一条，主链优先）
             cur.execute("""
                 SELECT DISTINCT ON (asset_id)
@@ -5236,14 +5258,17 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                         total_supply = q["total_supply"]
                     if not max_supply and q.get("max_supply"):
                         max_supply = q["max_supply"]
-                inflation_pct = None
-                if circ_supply and total_supply and float(total_supply) > 0:
-                    try:
-                        inflation_pct = round(
-                            (1 - float(circ_supply) / float(total_supply)) * 100, 2
-                        )
-                    except (ValueError, TypeError, ZeroDivisionError):
-                        pass
+                # 未流通占比（原 inflation_pct 命名误导，实为「未流通占比」，已更名 unlocked_pct）。
+                # 防御：circ > total 说明 supply 来源单位不一致（tokenomics 与 CMC 混用），
+                # 此时不输出负值爆炸，置为 None。
+                unlocked_pct = None
+                try:
+                    circ_f = float(circ_supply)
+                    total_f = float(total_supply)
+                    if total_f > 0 and circ_f >= 0 and circ_f <= total_f:
+                        unlocked_pct = round((1 - circ_f / total_f) * 100, 2)
+                except (ValueError, TypeError, ZeroDivisionError):
+                    pass
 
                 return {
                     "asset_id": aid,
@@ -5256,7 +5281,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     "price": price,
                     "total_supply": total_supply,
                     "circulating_supply": circ_supply,
-                    "inflation_pct": inflation_pct,
+                    "unlocked_pct": unlocked_pct,
                     "buy_tax_pct": t.get("buy_tax_pct"),
                     "sell_tax_pct": t.get("sell_tax_pct"),
                     "contract_renounced": t.get("contract_renounced"),
@@ -5284,7 +5309,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 )
                 # 过滤全列未采集的噪声行：除基础字段外，所有数据字段都为空/None/0
                 data_fields = ("market_cap", "fdv", "price", "total_supply",
-                               "circulating_supply", "inflation_pct", "unlock_30d_pct",
+                               "circulating_supply", "unlocked_pct", "unlock_30d_pct",
                                "top10_concentration", "total_holders", "social_score",
                                "x_followers", "raise_count", "total_raised",
                                "buy_tax_pct", "sell_tax_pct", "contract_renounced", "lp_locked")
@@ -5302,7 +5327,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 {"key": "price", "label": "价格", "format": "usd_price"},
                 {"key": "total_supply", "label": "总供应量", "format": "number_big"},
                 {"key": "circulating_supply", "label": "流通量", "format": "number_big"},
-                {"key": "inflation_pct", "label": "未流通占比", "format": "pct"},
+                {"key": "unlocked_pct", "label": "未流通占比", "format": "pct"},
                 {"key": "unlock_30d_pct", "label": "30天解锁%", "format": "pct"},
                 {"key": "top10_concentration", "label": "Top10集中度", "format": "pct"},
                 {"key": "total_holders", "label": "持有者数", "format": "number_big"},
@@ -5483,14 +5508,50 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     if market_snapshot_time is not None:
         metrics_structured["market"]["snapshot_time"] = market_snapshot_time
 
-    # 代币经济学
+    # 代币经济学（supply 优先使用 CMC 权威快照，避免 tokenomics 提取的单位错误传导到结论）
+    _auth_supply = {}
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT q.total_supply, q.circulating_supply, q.max_supply
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                """, (asset_id,))
+                _row = cur.fetchone()
+                if _row:
+                    _auth_supply = {k: _row[k] for k in ("total_supply", "circulating_supply", "max_supply") if _row[k] is not None}
+    except (psycopg.errors.UndefinedTable, Exception):
+        pass
+
+    def _prefer_auth_supply(tok_key: str):
+        tok_val = tokenomics.get(tok_key)
+        auth_val = _auth_supply.get(tok_key)
+        if auth_val is None:
+            return tok_val
+        if tok_val is None:
+            return auth_val
+        try:
+            tv = float(tok_val)
+            av = float(auth_val)
+            if av > 0 and (tv / av > 10 or tv / av < 0.1):
+                return auth_val  # 单位疑似错误，用权威值覆盖
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+        return tok_val
+
     if tokenomics:
-        if tokenomics.get("total_supply"):
-            metrics_structured["tokenomics"]["total_supply"] = tokenomics["total_supply"]
-        if tokenomics.get("circulating_supply"):
-            metrics_structured["tokenomics"]["circulating_supply"] = tokenomics["circulating_supply"]
-        if tokenomics.get("max_supply"):
-            metrics_structured["tokenomics"]["max_supply"] = tokenomics["max_supply"]
+        _total_supply = _prefer_auth_supply("total_supply")
+        _circ_supply = _prefer_auth_supply("circulating_supply")
+        _max_supply = _prefer_auth_supply("max_supply")
+        if _total_supply:
+            metrics_structured["tokenomics"]["total_supply"] = _total_supply
+        if _circ_supply:
+            metrics_structured["tokenomics"]["circulating_supply"] = _circ_supply
+        if _max_supply:
+            metrics_structured["tokenomics"]["max_supply"] = _max_supply
         if tokenomics.get("buy_tax_pct") is not None:
             metrics_structured["tokenomics"]["buy_tax_pct"] = tokenomics["buy_tax_pct"]
         if tokenomics.get("sell_tax_pct") is not None:
@@ -6088,6 +6149,7 @@ def _save_onchain_holder_snapshot(asset_id: int, chain: str, contract_address: s
     """把「拉取链上数据」爬到的持仓分布写入投研页判定所用的 onchain_holder_snapshot 表。
 
     同日同链重复拉取时先删旧快照再写新快照，避免重复累积。
+    日期按北京时间（Asia/Shanghai）计算，与调度时区对齐，避免 UTC 数据库下凌晨跑批日期错位。
     """
     with get_db() as conn:
         _ensure_onchain_snapshot_table(conn)
@@ -6095,7 +6157,8 @@ def _save_onchain_holder_snapshot(asset_id: int, chain: str, contract_address: s
             cur.execute(
                 """
                 DELETE FROM biz.onchain_holder_snapshot
-                WHERE asset_id = %s AND chain = %s AND snapshot_date = CURRENT_DATE
+                WHERE asset_id = %s AND chain = %s
+                  AND snapshot_date = (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
                 """,
                 (asset_id, chain),
             )
@@ -6105,7 +6168,9 @@ def _save_onchain_holder_snapshot(asset_id: int, chain: str, contract_address: s
                     (asset_id, chain, contract_address, snapshot_date,
                      top10_concentration, top50_concentration, top100_concentration,
                      total_holders, fetched_at)
-                VALUES (%s, %s, %s, CURRENT_DATE, %s, %s, %s, %s, NOW())
+                VALUES (%s, %s, %s,
+                        (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date,
+                        %s, %s, %s, %s, NOW())
                 """,
                 (
                     asset_id, chain, contract_address,

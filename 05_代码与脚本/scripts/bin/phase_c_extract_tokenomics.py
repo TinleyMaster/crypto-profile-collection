@@ -778,9 +778,81 @@ def save_tokenomist_full(conn, asset_id: int, data: dict,
     save_tokenomics(conn, asset_id, source_urls, tokenomics, dry_run=dry_run)
 
 
+def get_authoritative_supply(conn, asset_id: int) -> dict | None:
+    """从 src_cmc.cmc_asset_quote_snapshot（经 biz.coin_basic 映射）取权威 supply。
+
+    这是多源交叉验证后的 CMC 权威数据，用于校验 LLM/平台提取的 supply 单位是否错误。
+    """
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT q.total_supply, q.circulating_supply, q.max_supply
+                FROM biz.coin_basic cb
+                JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                WHERE cb.asset_id = %s
+                  AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            if row and any(v is not None for v in row.values()):
+                return {
+                    "source": "CMC_SNAPSHOT",
+                    "total_supply": row.get("total_supply"),
+                    "max_supply": row.get("max_supply"),
+                    "circulating_supply": row.get("circulating_supply"),
+                }
+    except Exception as e:
+        print(f"  [WARN] 权威 supply 读取失败: {e}")
+    return None
+
+
+def validate_supply_units(conn, asset_id: int, data: dict) -> dict:
+    """对 LLM/平台提取的 supply 做单位归一化校验。
+
+    LLM 常把「2.441 亿」提取成 244 之类的裸数字（单位丢失）。与 CMC 权威快照做
+    ratio 对比，偏离 >10 倍（或 <0.1 倍）视为「单位疑似错误」，用 CMC 权威值覆盖，
+    并在 notes 中标注，避免错误 supply 传导到通胀率/未流通占比/研究结论。
+    """
+    auth = get_authoritative_supply(conn, asset_id)
+    if not auth:
+        return data
+
+    notes = []
+    for key in ("total_supply", "circulating_supply", "max_supply"):
+        llm_val = data.get(key)
+        auth_val = auth.get(key)
+        if llm_val is None or auth_val is None:
+            continue
+        try:
+            llm_f = float(llm_val)
+            auth_f = float(auth_val)
+        except (ValueError, TypeError):
+            continue
+        if auth_f <= 0:
+            continue
+        ratio = llm_f / auth_f
+        if ratio > 10 or ratio < 0.1:
+            data[key] = auth_val
+            notes.append(f"{key} 提取值 {llm_f:g} 与 CMC 权威值 {auth_f:g} 偏差 {ratio:.2f}x，已用权威值覆盖")
+
+    if notes:
+        data["notes"] = (("；".join(notes) if data.get("notes") else "")
+                         + ("；" if data.get("notes") else "") + "supply 单位校验已触发")
+        # 命中单位错误时降低置信度
+        try:
+            data["confidence"] = min(float(data.get("confidence") or 1.0), 0.5)
+        except (ValueError, TypeError):
+            data["confidence"] = 0.5
+    return data
+
+
 def save_tokenomics(conn, asset_id: int, source_urls: list[str],
                     data: dict, dry_run: bool = False) -> None:
     """写入或更新 biz.asset_tokenomics。"""
+    if not dry_run:
+        data = validate_supply_units(conn, asset_id, data)
     sql = """
         INSERT INTO biz.asset_tokenomics (
             asset_id, source_urls,

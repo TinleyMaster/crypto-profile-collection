@@ -22,11 +22,14 @@ if str(SRC_DIR) not in sys.path:
 
 sys.stdout.reconfigure(line_buffering=True)
 
+import json
+
 import psycopg
 import psycopg.rows
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
+from crypto_research.db.upsert import load_sql, fetch_one
 
 
 # 支持的链（有可靠免费数据源的优先）
@@ -85,7 +88,8 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
                     AND s.chain = c.chain
-                    AND s.snapshot_date >= CURRENT_DATE
+                    -- 按北京时间判断"今日"，避免 UTC 时区下凌晨跑批被误判为已采集
+                    AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
             ORDER BY c.asset_id ASC
             LIMIT %s
@@ -116,7 +120,8 @@ def get_total_pending(conn, chain_short: str) -> int:
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
                     AND s.chain = c.chain
-                    AND s.snapshot_date >= CURRENT_DATE
+                    -- 按北京时间判断"今日"
+                    AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
             """,
             db_names,
@@ -185,14 +190,41 @@ def main():
 
     total_success = 0
     total_fail = 0
+    total_skipped = 0
     t0 = time.time()
 
+    # ingest_run 审计记录（与 CMC 流水线对齐，方便监控面板统一查询）
+    insert_ingest_sql = load_sql("sys/insert_ingest_run.sql")
+    finish_ingest_sql = load_sql("sys/finish_ingest_run.sql")
+    run_id = None
+    workflow_name = "WF_CHAIN_HOLDER_SNAPSHOT"
+
     with get_connection(settings.database_url) as conn:
+        try:
+            run_row = fetch_one(
+                conn,
+                insert_ingest_sql,
+                (
+                    "onchain",
+                    "holder_snapshot",
+                    workflow_name,
+                    json.dumps(
+                        {"chains": chains, "limit": args.limit, "timeout": args.timeout},
+                        ensure_ascii=False,
+                    ),
+                    f"chains:{','.join(chains)}",
+                ),
+            )
+            run_id = run_row["run_id"]
+        except Exception as e:
+            print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
+
         for chain in chains:
             total_pending = get_total_pending(conn, chain)
             limit = args.limit if args.limit > 0 else total_pending
             if limit == 0:
                 print(f"\n[{chain}] 待采集: 0 (全部完成或无合约)，跳过")
+                total_skipped += 1
                 continue
 
             print(f"\n[{chain}] 待采集总数: {total_pending}，本次处理: {limit}")
@@ -201,6 +233,7 @@ def main():
             assets = get_pending_assets(conn, chain, limit)
             if not assets:
                 print(f"  无待采集资产")
+                total_skipped += 1
                 continue
 
             chain_success = 0
@@ -228,12 +261,59 @@ def main():
             print(f"  本链完成: 成功 {chain_success}, 失败 {chain_fail}")
 
     elapsed = time.time() - t0
+    total_processed = total_success + total_fail
+    # 状态判定：全失败 → failed；部分失败 → partial；全成功 → success；无待处理 → success（空跑）
+    if total_processed == 0:
+        status = "success"
+        error_msg = "无待采集资产"
+    elif total_fail == 0:
+        status = "success"
+        error_msg = None
+    elif total_success == 0:
+        status = "failed"
+        error_msg = f"全部失败 ({total_fail}/{total_processed})"
+    else:
+        status = "partial"
+        error_msg = f"部分失败 ({total_fail}/{total_processed})"
+
+    # 写 ingest_run 结束记录
+    if run_id:
+        try:
+            with get_connection(settings.database_url) as conn:
+                fetch_one(
+                    conn,
+                    finish_ingest_sql,
+                    (
+                        status,
+                        200 if status != "failed" else 500,
+                        total_processed,
+                        total_success,
+                        total_fail,
+                        error_msg,
+                        run_id,
+                    ),
+                )
+        except Exception as e:
+            print(f"[WARN] ingest_run 结束记录写入失败: {e}")
+
     print("\n" + "=" * 60)
     print(f"全部完成，耗时 {elapsed:.1f}s")
-    print(f"总计: 成功 {total_success}, 失败 {total_fail}")
+    print(f"总计: 成功 {total_success}, 失败 {total_fail}, 跳过 {total_skipped}")
+    print(f"状态: {status}")
     print("=" * 60)
 
-    return 0
+    # JSON 行输出，供 TaskManager 解析 stats
+    print(json.dumps({
+        "status": status,
+        "success": total_success,
+        "fail": total_fail,
+        "skipped": total_skipped,
+        "elapsed_s": round(elapsed, 1),
+        "chains": chains,
+    }, ensure_ascii=False))
+
+    # 全失败时 exit 1，让 TaskManager 标记为 failed 并触发告警
+    return 1 if status == "failed" else 0
 
 
 if __name__ == "__main__":

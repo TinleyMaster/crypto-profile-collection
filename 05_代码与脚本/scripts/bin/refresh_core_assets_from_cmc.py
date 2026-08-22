@@ -98,10 +98,36 @@ def main() -> int:
         refreshed_count = 0
         mapped_count = 0
         sector_hit_count = 0
+        name_guard_count = 0
+
+        # 名称突变防护：批量取已有资产的 canonical_name，避免 symbol 撞名（如 BTC meme 币）
+        # 把主流币名称覆盖为错误名称。已有名称非空且与 CMC 名称不一致时，保留原名称。
+        existing_ids = [r["existing_asset_id"] for r in prepared_rows if r["existing_asset_id"]]
+        existing_names: dict[int, str] = {}
+        if existing_ids:
+            with conn.cursor(row_factory=__import__("psycopg").rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT asset_id, canonical_name FROM core.asset WHERE asset_id = ANY(%s)",
+                    (existing_ids,),
+                )
+                existing_names = {r["asset_id"]: r["canonical_name"] for r in cur.fetchall()}
 
         for idx, row in enumerate(prepared_rows):
             src = source_rows[idx]
             if row["existing_asset_id"]:
+                # 名称突变检测：已有名称非空且与新名称不同 → 保留已有名称
+                prev_name = existing_names.get(row["existing_asset_id"])
+                new_name = row["canonical_name"]
+                if prev_name and (prev_name or "").strip() and (
+                    prev_name.strip().lower() != (new_name or "").strip().lower()
+                ):
+                    print(
+                        f"  [名称防护] asset_id={row['existing_asset_id']} 保留原名称 "
+                        f"{prev_name!r}，拒绝覆盖为 {new_name!r}"
+                    )
+                    row["canonical_name"] = prev_name
+                    name_guard_count += 1
+
                 asset_row = fetch_one(
                     conn,
                     update_asset_sql,
@@ -168,6 +194,7 @@ def main() -> int:
                     "refreshed_assets": refreshed_count,
                     "mapped_rows": mapped_count,
                     "sector_hits": sector_hit_count,
+                    "name_guard_triggered": name_guard_count,
                 },
                 ensure_ascii=False,
                 indent=2,

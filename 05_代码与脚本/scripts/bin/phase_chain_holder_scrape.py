@@ -1062,7 +1062,8 @@ INSERT INTO biz.onchain_holder_snapshot (
     total_holders, top_holders_json, tier_distribution_json,
     source_url, fetched_at
 ) VALUES (
-    %(asset_id)s, %(chain)s, %(contract_address)s, CURRENT_DATE,
+    %(asset_id)s, %(chain)s, %(contract_address)s,
+    (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date,
     %(top10_concentration)s, %(top50_concentration)s, %(top100_concentration)s,
     %(total_holders)s, %(top_holders_json)s, %(tier_distribution_json)s,
     %(source_url)s, NOW()
@@ -1081,10 +1082,11 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
                explorer_url: str, data: dict) -> None:
     token_url = f"{explorer_url}/token/{contract_address}"
     with conn.cursor() as cur:
-        # 同日同链同资产先删旧快照再插新快照
+        # 同日同链同资产先删旧快照再插新快照（按北京时间日期）
         cur.execute(
             "DELETE FROM biz.onchain_holder_snapshot "
-            "WHERE asset_id = %s AND chain = %s AND snapshot_date = CURRENT_DATE",
+            "WHERE asset_id = %s AND chain = %s "
+            "AND snapshot_date = (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date",
             (asset_id, chain),
         )
         cur.execute(UPSERT_SQL, {

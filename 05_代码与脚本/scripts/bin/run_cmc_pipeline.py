@@ -127,6 +127,11 @@ def main() -> int:
     if code != 0:
         return code
 
+    # ⑨ coin_basic 消费层刷新（依赖③+②，确保 cmc_id/defillama_slug/logo 等字段最新）
+    code, _ = _run(_python("phase_a_build_core.py", "--step", "coin_basic"), "⑨ coin_basic 刷新")
+    if code != 0:
+        return code
+
     print("\n" + "=" * 70)
     print("CMC 一键流水线全部完成 ✅")
     print("=" * 70, flush=True)

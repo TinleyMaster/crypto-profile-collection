@@ -811,7 +811,12 @@ def api_search_assets():
     if not q or len(q) < 1:
         return jsonify({"ok": True, "assets": []})
     try:
-        assets = _get_db_stats().search_assets(q, limit=20, tier=tier)
+        try:
+            limit = int(request.args.get("limit", 20))
+        except (ValueError, TypeError):
+            limit = 20
+        limit = max(1, min(limit, 200))
+        assets = _get_db_stats().search_assets(q, limit=limit, tier=tier)
         return jsonify({"ok": True, "assets": assets})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

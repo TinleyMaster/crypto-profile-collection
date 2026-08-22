@@ -639,6 +639,10 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                         ELSE TRUE
                     END
                 ORDER BY
+                    -- 市值权重优先：排名越小越靠前。修复 P1-1：避免 meme 币（symbol=BITCOIN）的
+                    -- 精确符号匹配压过真币（symbol=BTC, rank=1）。搜索结果整体按市值排名排序，
+                    -- 精确符号/名称匹配仅作为同排名区间内的次级加权。
+                    COALESCE(cam.rank_num, ci.market_cap_rank, 999999),
                     CASE
                         WHEN EXISTS (
                             SELECT 1 FROM core.asset_contract ac
@@ -654,8 +658,6 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                         WHEN a.canonical_name ILIKE %s THEN 2
                         ELSE 3
                     END,
-                    -- 市值权重：优先 CMC 排名（越小越靠前），其次 CG 排名，无排名用市值降序
-                    COALESCE(cam.rank_num, ci.market_cap_rank, 999999),
                     COALESCE(cqs.market_cap, 0) DESC,
                     a.canonical_symbol
                 LIMIT %s

@@ -92,8 +92,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）"),
 
     # ═══ 投研数据提取 ═══
-    ("cmc_quote_snapshot", "0 */6 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "1000"], "CMC 行情快照（每 6 小时 top 1000）"),
-    ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", ["--days", "2"], "行情快照→日级 ETL（每 6 小时，CMC 快照后）"),
+    ("cmc_quote_snapshot", "0 */6 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每 6 小时，覆盖全部 CMC 映射资产）"),
+    ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）"),
     ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）"),
     ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币）"),
     ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）"),

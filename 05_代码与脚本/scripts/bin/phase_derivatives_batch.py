@@ -377,10 +377,11 @@ def main() -> int:
     run_id = None
     workflow_name = "WF_DERIVATIVES_BATCH"
 
-    with get_connection(settings.database_url) as conn:
-        try:
+    # ingest_run 审计记录：独立连接写入，避免写入失败污染主事务（与 P1-3 同源问题）。
+    try:
+        with get_connection(settings.database_url) as wconn:
             run_row = fetch_one(
-                conn,
+                wconn,
                 insert_ingest_sql,
                 (
                     "derivatives",
@@ -394,9 +395,10 @@ def main() -> int:
                 ),
             )
             run_id = run_row["run_id"]
-        except Exception as e:
-            print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
+    except Exception as e:
+        print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
 
+    with get_connection(settings.database_url) as conn:
         ensure_table(conn)
 
         total_pending = get_total_pending(conn, force=args.force)

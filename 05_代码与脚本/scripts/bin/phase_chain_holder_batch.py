@@ -199,10 +199,12 @@ def main():
     run_id = None
     workflow_name = "WF_CHAIN_HOLDER_SNAPSHOT"
 
-    with get_connection(settings.database_url) as conn:
-        try:
+    # ingest_run 审计记录：用独立连接写入，避免写入失败污染主采集事务。
+    # 修复 P1-3：原本与外键缺失共同导致整条管线在 get_total_pending 处崩溃。
+    try:
+        with get_connection(settings.database_url) as wconn:
             run_row = fetch_one(
-                conn,
+                wconn,
                 insert_ingest_sql,
                 (
                     "onchain",
@@ -216,9 +218,10 @@ def main():
                 ),
             )
             run_id = run_row["run_id"]
-        except Exception as e:
-            print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
+    except Exception as e:
+        print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
 
+    with get_connection(settings.database_url) as conn:
         for chain in chains:
             total_pending = get_total_pending(conn, chain)
             limit = args.limit if args.limit > 0 else total_pending

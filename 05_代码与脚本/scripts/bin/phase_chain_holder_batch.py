@@ -221,8 +221,11 @@ def main():
     except Exception as e:
         print(f"[WARN] ingest_run 记录写入失败（不影响采集）: {e}")
 
-    with get_connection(settings.database_url) as conn:
-        for chain in chains:
+    for chain in chains:
+        # 每条链用独立短连接查询待采集资产后立刻关闭，避免连接在外层 subprocess 长循环中
+        # 空闲过久被服务端/代理断开（修复 P1-3：长循环后 __exit__ 的 commit 偶发
+        # "server closed the connection unexpectedly"，导致 ingest_run 无法终态化）。
+        with get_connection(settings.database_url) as conn:
             total_pending = get_total_pending(conn, chain)
             limit = args.limit if args.limit > 0 else total_pending
             if limit == 0:
@@ -234,34 +237,35 @@ def main():
             print(f"  数据源: {SUPPORTED_CHAINS[chain]}")
 
             assets = get_pending_assets(conn, chain, limit)
-            if not assets:
-                print(f"  无待采集资产")
-                total_skipped += 1
-                continue
 
-            chain_success = 0
-            chain_fail = 0
+        if not assets:
+            print(f"  无待采集资产")
+            total_skipped += 1
+            continue
 
-            for i, asset in enumerate(assets, 1):
-                asset_id = asset["asset_id"]
-                symbol = asset.get("symbol", "?")
-                print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
-                      end="", flush=True)
+        chain_success = 0
+        chain_fail = 0
 
-                ok, reason = run_single(asset_id, chain, timeout=args.timeout)
-                if ok:
-                    chain_success += 1
-                    print("OK")
-                else:
-                    chain_fail += 1
-                    print(f"FAIL ({reason})")
+        for i, asset in enumerate(assets, 1):
+            asset_id = asset["asset_id"]
+            symbol = asset.get("symbol", "?")
+            print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
+                  end="", flush=True)
 
-                if i < len(assets) and args.delay > 0:
-                    time.sleep(args.delay)
+            ok, reason = run_single(asset_id, chain, timeout=args.timeout)
+            if ok:
+                chain_success += 1
+                print("OK")
+            else:
+                chain_fail += 1
+                print(f"FAIL ({reason})")
 
-            total_success += chain_success
-            total_fail += chain_fail
-            print(f"  本链完成: 成功 {chain_success}, 失败 {chain_fail}")
+            if i < len(assets) and args.delay > 0:
+                time.sleep(args.delay)
+
+        total_success += chain_success
+        total_fail += chain_fail
+        print(f"  本链完成: 成功 {chain_success}, 失败 {chain_fail}")
 
     elapsed = time.time() - t0
     total_processed = total_success + total_fail

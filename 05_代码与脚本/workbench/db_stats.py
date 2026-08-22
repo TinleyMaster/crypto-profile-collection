@@ -648,8 +648,10 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                                   OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
                               )
                         ) THEN 0
-                        WHEN a.canonical_symbol = UPPER(%s) THEN 1
+                        WHEN LOWER(a.canonical_symbol) = LOWER(%s) THEN 1
+                        WHEN LOWER(a.canonical_name) = LOWER(%s) THEN 1
                         WHEN a.canonical_symbol ILIKE %s THEN 2
+                        WHEN a.canonical_name ILIKE %s THEN 2
                         ELSE 3
                     END,
                     -- 市值权重：优先 CMC 排名（越小越靠前），其次 CG 排名，无排名用市值降序
@@ -660,7 +662,7 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                 """,
                 (f"%{query}%", f"%{query}%", f"%{query}%", query,
                  tier or "",
-                 query, query, query, f"{query}%", limit),
+                 query, query, query, query, f"%{query}%", f"%{query}%", limit),
             )
             rows = cur.fetchall()
 

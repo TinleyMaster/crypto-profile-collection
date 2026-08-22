@@ -23,6 +23,7 @@ from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 from crypto_research.clients.etherscan_client import EtherscanClient, get_client
 from crypto_research.clients.rpc_client import get_rpc_client
+from crypto_research.clients.ethplorer_client import get_ethplorer_client
 
 
 # 大额转账阈值（美元）
@@ -164,11 +165,12 @@ def collect_transfers(
     exchange_map: dict[str, str],
     dry_run: bool = False,
     alarm_only: bool = False,
-    client_type: str = "etherscan",
+    client_type: str = "explorer",
 ) -> dict:
     """采集单个资产的大额转账。
     alarm_only=True: 只存储转入交易所的告警，不存普通大额转账。
-    client_type: 'etherscan' 或 'rpc'，影响时间戳等字段处理。"""
+    client_type: 'explorer' / 'etherscan' / 'rpc'，影响时间戳等字段处理。
+    三者均通过 client.get_token_transfers(...) 拉取，返回字段归一化一致。"""
     asset_id = asset["asset_id"]
     symbol = asset["canonical_symbol"]
     chain = asset["chain"]
@@ -185,9 +187,11 @@ def collect_transfers(
 
     all_transfers = []
     total_processed = 0
+    seen_raw = set()          # 已见过的 tx_hash
+    overlap_pages = 0         # 连续完全重叠的页数
 
     # 分页拉取转账记录
-    for page in range(1, 11):  # 最多 10 页 = 1000 条转账
+    for page in range(1, 11):  # 最多 10 页 = 上限 1000 条转账
         transfers = client.get_token_transfers(
             contract_address,
             page=page,
@@ -197,6 +201,17 @@ def collect_transfers(
         )
         if not transfers:
             break
+        # 高频币（如 USDT）的分页按"操作"而非"交易"，会出现整页都是已见过的重复，
+        # 且呈现"重叠→前进→重叠"交替。仅当连续 2 页完全重叠（真正到历史末尾）才停止，
+        # 避免误停漏掉后续新数据，也避免无谓翻页。
+        if all(t.get("hash") in seen_raw for t in transfers):
+            overlap_pages += 1
+            if overlap_pages >= 2:
+                break
+            continue
+        overlap_pages = 0
+        for t in transfers:
+            seen_raw.add(t.get("hash"))
 
         total_processed += len(transfers)
 
@@ -261,10 +276,13 @@ def collect_transfers(
             break
 
     if dry_run:
+        large_count = len(all_transfers)
         to_exchange_count = sum(1 for t in all_transfers if t["is_to_exchange"])
         label = "告警" if alarm_only else "大额"
-        print(f"  [{symbol}] {chain}: {total_processed} 条转账, {to_exchange_count} 条{label} (dry-run)")
-        return {"asset_id": asset_id, "symbol": symbol, "processed": total_processed, "written": 0}
+        print(f"  [{symbol}] {chain}: {total_processed} 条转账, {large_count} 条{label}"
+              f"（其中 {to_exchange_count} 条转入交易所） (dry-run)")
+        return {"asset_id": asset_id, "symbol": symbol, "processed": total_processed,
+                "written": 0, "large": large_count}
 
     written = save_transfers(conn, all_transfers)
     to_exchange_count = sum(1 for t in all_transfers if t["is_to_exchange"])
@@ -276,24 +294,51 @@ def collect_transfers(
         "symbol": symbol,
         "processed": total_processed,
         "written": written,
+        "large": sum(1 for t in all_transfers if t["is_to_exchange"]) if alarm_only
+                 else len(all_transfers),
     }
 
 
-def _init_chain_client(chain: str, source: str):
-    """按 --source 初始化链上数据源客户端。
+def _build_chain_sources(source: str) -> list[str]:
+    """按 --source 展开为该链尝试数据源的降级顺序。
 
-    auto: 有 API Key 优先 Etherscan（运行时返回空会自动降级 RPC），无 Key 直接公共 RPC。
-    返回 (client, client_type)，client 为 None 表示无可用数据源。
+    explorer: 免 Key 免费源优先，公共 RPC 兜底。
+    etherscan: 付费 Key 主源，公共 RPC 兜底。
+    rpc: 仅公共 RPC。
+    auto: explorer → etherscan(若有有效Key) → rpc。
+    """
+    if source == "explorer":
+        return ["explorer", "rpc"]
+    if source == "etherscan":
+        return ["etherscan", "rpc"]
+    if source == "rpc":
+        return ["rpc"]
+    return ["explorer", "etherscan", "rpc"]  # auto
+
+
+def _init_chain_client(chain: str, source: str):
+    """按单个数据源类型初始化客户端，返回 (client, client_type)。
+
+    client_type ∈ {"explorer", "etherscan", "rpc"}。
+    client 为 None 表示该类型无可用数据源（如 etherscan 未配置 Key）。
     """
     if source == "rpc":
         return get_rpc_client(chain), "rpc"
     if source == "etherscan":
         return get_client(chain), "etherscan"
-    # auto
-    client = get_client(chain)
-    if client:
-        return client, "etherscan"
-    return get_rpc_client(chain), "rpc"
+    # explorer（免 Key 免费源，无需付费 Key，默认主链路）
+    return get_ethplorer_client(chain), "explorer"
+
+
+def _print_source_banner(chain: str, client_type: str) -> None:
+    """打印当前链实际采用的数据源横幅。"""
+    if client_type == "rpc":
+        msg = "使用公共 RPC 节点（免 API Key，最终兜底）"
+    elif client_type == "etherscan":
+        msg = "使用 Etherscan API（需付费 Key）"
+    else:  # explorer
+        msg = "使用 Ethplorer/Binplorer 免 Key 免费源（默认主链路）"
+    print(f"  [{chain}] {msg}")
 
 
 def main():
@@ -303,9 +348,10 @@ def main():
     parser.add_argument("--limit", type=int, default=50, help="最大处理资产数")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
     parser.add_argument("--alarm-only", action="store_true", help="告警模式：只存储转入交易所的大额转账")
-    parser.add_argument("--source", type=str, default="auto",
-                        choices=["auto", "etherscan", "rpc"],
-                        help="转账数据源：auto=优先 Etherscan，返回为空自动降级公共 RPC（默认）")
+    parser.add_argument("--source", type=str, default="explorer",
+                        choices=["auto", "explorer", "etherscan", "rpc"],
+                        help="转账数据源：explorer=免Key免费源(默认)；etherscan=需付费Key；"
+                             "rpc=公共RPC兜底；auto=explorer→etherscan→rpc 自动降级")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -328,70 +374,69 @@ def main():
 
         print(f"共 {len(assets)} 个资产待监控\n")
 
-        chain_clients = {}
+        chain_sources = _build_chain_sources(args.source)
+        chain_clients = {}     # chain -> (client, client_type)，首个成功返回数据的源
         chain_exchanges = {}
-        etherscan_ok = {}      # chain -> Etherscan 是否成功返回过数据（成功过则不再探测降级）
 
         total_processed = 0
         total_written = 0
+        total_large = 0
         t0 = time.time()
 
         for i, asset in enumerate(assets, 1):
             chain = asset["chain"]
 
+            # 该链尚未锁定数据源：按降级链依次尝试，锁定第一个能返回数据的源。
+            # lock_result 非空表示本次已为该资产采集过，避免重复调用 API。
+            lock_result = None
             if chain not in chain_clients:
-                client, client_type = _init_chain_client(chain, args.source)
-                if client and client_type == "rpc":
-                    print(f"  [{chain}] 使用公共 RPC 节点（免 API Key）")
-                if not client:
-                    print(f"  [{i}/{len(assets)}] 跳过 {chain}: 无可用数据源"
-                          + ("（--source etherscan 需要配置 API Key）" if args.source == "etherscan" else ""))
+                exchanges = None
+                for stype in chain_sources:
+                    client = _init_chain_client(chain, stype)[0]
+                    if not client:
+                        continue
+                    if exchanges is None:
+                        exchanges = get_exchange_map(conn, chain)
+                    result = collect_transfers(
+                        conn, client, asset, exchanges,
+                        dry_run=args.dry_run,
+                        alarm_only=args.alarm_only,
+                        client_type=stype,
+                    )
+                    if result.get("processed", 0) > 0:
+                        chain_clients[chain] = (client, stype)
+                        chain_exchanges[chain] = exchanges
+                        _print_source_banner(chain, stype)
+                        lock_result = result
+                        break
+                    # 该源无返回（如免费源该代币近期无转账 / Etherscan Key 失效），尝试下一源
+                    print(f"  [{chain}] {stype} 无返回，尝试下一数据源")
+                if chain not in chain_clients:
+                    print(f"  [{i}/{len(assets)}] 跳过 {chain}: 所有数据源均无返回")
                     continue
-                chain_clients[chain] = (client, client_type)
-                chain_exchanges[chain] = get_exchange_map(conn, chain)
 
             client, client_type = chain_clients[chain]
             exchanges = chain_exchanges[chain]
 
-            result = collect_transfers(
-                conn, client, asset, exchanges,
-                dry_run=args.dry_run,
-                alarm_only=args.alarm_only,
-                client_type=client_type,
-            )
-
-            # auto 模式：Etherscan 返回为空且该链从未成功返回过时，自动降级公共 RPC 重试。
-            # 典型场景：API Key 在 V2 下失效/无权限，调用不报错但永远返回空。
-            # 只要 Etherscan 没被证实可用，就持续探测（小币种可能本来就无近期转账）。
-            if (
-                args.source == "auto"
-                and client_type == "etherscan"
-                and result.get("processed", 0) == 0
-                and not etherscan_ok.get(chain)
-            ):
-                rpc_fb = get_rpc_client(chain)
-                if rpc_fb:
-                    print(f"  [{chain}] Etherscan 无返回（Key 可能无效/无权限），自动降级公共 RPC 重试")
-                    fb_result = collect_transfers(
-                        conn, rpc_fb, asset, exchanges,
-                        dry_run=args.dry_run,
-                        alarm_only=args.alarm_only,
-                        client_type="rpc",
-                    )
-                    if fb_result.get("processed", 0) > 0:
-                        # RPC 可用：该链后续资产全部切到 RPC
-                        chain_clients[chain] = (rpc_fb, "rpc")
-                        result = fb_result
-
-            if client_type == "etherscan" and result.get("processed", 0) > 0:
-                etherscan_ok[chain] = True
+            if lock_result is not None:
+                # 锁定数据源时已经为该资产采集过，直接复用
+                result = lock_result
+            else:
+                result = collect_transfers(
+                    conn, client, asset, exchanges,
+                    dry_run=args.dry_run,
+                    alarm_only=args.alarm_only,
+                    client_type=client_type,
+                )
 
             total_processed += result.get("processed", 0)
             total_written += result.get("written", 0)
+            total_large += result.get("large", 0)
 
         elapsed = time.time() - t0
         label = "告警" if args.alarm_only else "大额"
-        print(f"\n完成: 处理 {total_processed} 条转账, {label} {total_written} 条, 耗时 {elapsed:.1f}s")
+        written_note = "" if args.dry_run else f", 写入 {total_written} 条"
+        print(f"\n完成: 处理 {total_processed} 条转账, {label} {total_large} 条{written_note}, 耗时 {elapsed:.1f}s")
 
 
 if __name__ == "__main__":

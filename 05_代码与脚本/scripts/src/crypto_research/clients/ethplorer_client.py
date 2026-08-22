@@ -114,6 +114,60 @@ class EthplorerClient:
             "price": data.get("price", {}),
         }
 
+    def get_token_transfers(self, contract_address: str, page: int = 1,
+                            offset: int = 100, sort: str = "desc",
+                            start_block: int = 0) -> list[dict]:
+        """获取代币近期转账列表（getTokenHistory），无需 Etherscan Key。
+
+        这是持仓快照 getTopTokenHolders 的"转账版"等价数据源：免费、免 Key、
+        返回真实时间戳与 raw 金额。适用于大额转账监控的主链路（替代失效的
+        Etherscan tokentx API）。
+
+        返回字段归一化为与 phase_chain_transfer_monitor.collect_transfers 一致的
+        形状：value(raw 字符串) / tokenDecimal / from / to / hash / timeStamp(epoch) /
+        blockNumber。
+
+        注意：分页参数名为 limit（非 pageSize），缺省仅返回 10 条；单次最多 1000 条。
+        历史窗口约 30 天（免费档）/ 更长（Personal Key）。
+        """
+        # getTokenHistory 的分页参数叫 limit，不是 pageSize；缺省只给 10 条。
+        # 实测 offset 可达 1000，故这里统一取 min(offset, 1000)。
+        limit = min(offset, 1000)
+        data = self._get(
+            f"/getTokenHistory/{contract_address}?limit={limit}&page={page}"
+        )
+        if "error" in data:
+            return []
+        ops = data.get("operations") or []
+        result = []
+        for op in ops:
+            # 只保留实际转账（跳过 approval 等无 from/to 的操作）
+            if op.get("type") not in ("transfer", "transferFrom", None):
+                continue
+            tx_hash = op.get("transactionHash") or op.get("hash") or ""
+            from_addr = op.get("from") or ""
+            to_addr = op.get("to") or ""
+            raw_value = op.get("value")
+            if not (tx_hash and from_addr and to_addr and raw_value is not None):
+                continue
+            ti = op.get("tokenInfo") or {}
+            try:
+                decimals = int(ti.get("decimals", 18))
+            except (ValueError, TypeError):
+                decimals = 18
+            result.append({
+                "value": str(raw_value),
+                "tokenDecimal": decimals,
+                "from": from_addr.lower(),
+                "to": to_addr.lower(),
+                "hash": tx_hash,
+                "timeStamp": str(int(op.get("timestamp", 0) or 0)),
+                "blockNumber": "0",
+                "sort": sort,
+                "start_block": start_block,
+            })
+        return result
+
 
 def get_ethplorer_client(chain: str, api_key: str | None = None) -> EthplorerClient | None:
     """获取指定链的 Ethplorer 客户端。支持数据库链名别名。

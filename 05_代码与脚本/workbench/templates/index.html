@@ -1046,6 +1046,68 @@
             margin-bottom: 20px;
         }
 
+        .module-note {
+            margin: 4px 0 0 0;
+            font-size: 11.5px;
+            line-height: 1.6;
+            color: #8a92a0;
+            background: #181c24;
+            border: 1px solid #232834;
+            border-left: 3px solid #3a6ea5;
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+        .module-note b {
+            color: #c2c8d2;
+        }
+
+        .color-scheme-toggle {
+            font-size: 11px;
+            color: #8a92a0;
+            cursor: pointer;
+            user-select: none;
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid #2a2f3a;
+            background: #1e222a;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+        .color-scheme-toggle:hover {
+            color: #e6e8eb;
+            border-color: #3a4050;
+        }
+
+        .daily-diff-col .col-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: help;
+        }
+        .daily-diff-col .col-tip {
+            font-size: 10px;
+            font-weight: 500;
+            color: #6b7280;
+            border: 1px dashed #2a2f3a;
+            border-radius: 4px;
+            padding: 0 4px;
+        }
+
+        /* A股颜色惯例：红涨绿跌（scheme-red-up） */
+        #daily-diff.scheme-red-up .daily-diff-col.up h4,
+        #daily-diff.scheme-red-up .diff-item.up .value {
+            color: #f87171;
+        }
+        #daily-diff.scheme-red-up .daily-diff-col.down h4,
+        #daily-diff.scheme-red-up .diff-item.down .value {
+            color: #4ade80;
+        }
+        #daily-diff.scheme-red-up .daily-diff-tab.active {
+            background: #5a2d2d;
+            color: #f87171;
+            border-color: #5a2d2d;
+        }
+
         .daily-diff-section .section-header {
             display: flex;
             align-items: center;
@@ -2969,13 +3031,15 @@
             <section id="daily-diff" class="module-card">
                 <div class="module-header">
                     <h2>⚡ 每日变化榜</h2>
-                    <p class="module-desc">今日异动信号：涨跌幅 / 成交量 / 解锁抛压</p>
+                    <p class="module-desc" id="daily-diff-caption">今日异动信号：涨跌幅 / 成交量 / 解锁抛压</p>
+                    <p class="module-note">全市场按所选信号排序后的「头部」与「尾部」：左列为涨幅/正向最大的 <b>Top N</b>，右列为跌幅/负向最大的 <b>Bottom N</b>；左侧序号为该资产的<b>全市场排名</b>（非榜单内第几名），因此左右两栏数字并不连续。切换上方标签可查看不同信号口径。</p>
                 </div>
                 <div class="daily-diff-section">
                     <div class="section-header">
                         <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
-                        <div style="display:flex;gap:6px">
-                            <button class="hot-refresh" onclick="loadDailyDiff()">刷新</button>
+                        <div style="display:flex;gap:6px;align-items:center">
+                            <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0" title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
+                            <button class="hot-refresh" id="daily-diff-refresh" onclick="loadDailyDiff(true)">刷新</button>
                         </div>
                     </div>
                     <div id="daily-diff-content">
@@ -5487,11 +5551,37 @@
             'volume_surge_24h': '成交量异动',
             'unlock_7d': '解锁抛压'
         };
+        const DIFF_CATEGORY_TIP = {
+            'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
+            'volume_surge_24h': '按成交量较近期均值的异动倍数排序：左列为放量最显著，右列为缩量/异动最显著',
+            'unlock_7d': '按未来 7 天代币解锁抛压占流通市值比例排序：左列为抛压最大'
+        };
         let currentDiffCategory = 'price_change_24h';
 
-        async function loadDailyDiff () {
+        // 涨跌颜色惯例：green-up（国际：绿涨红跌） / red-up（A股：红涨绿跌）
+        let diffColorScheme = localStorage.getItem('diffColorScheme') || 'green-up';
+        function applyDiffColorScheme () {
+            const sec = document.getElementById('daily-diff');
+            if (!sec) return;
+            sec.classList.toggle('scheme-red-up', diffColorScheme === 'red-up');
+            const toggle = document.getElementById('diff-color-toggle');
+            if (toggle) toggle.textContent = diffColorScheme === 'red-up' ? '🀄 红涨绿跌' : '🌐 绿涨红跌';
+        }
+        function toggleDiffColorScheme () {
+            diffColorScheme = diffColorScheme === 'red-up' ? 'green-up' : 'red-up';
+            localStorage.setItem('diffColorScheme', diffColorScheme);
+            applyDiffColorScheme();
+        }
+
+        async function loadDailyDiff (isRefresh) {
             const content = document.getElementById('daily-diff-content');
             const dateEl = document.getElementById('daily-diff-date');
+            const refreshBtn = document.getElementById('daily-diff-refresh');
+            const captionEl = document.getElementById('daily-diff-caption');
+            if (isRefresh && refreshBtn) {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '刷新中…';
+            }
             content.innerHTML = '<div class="hot-tokens-loading">加载中...</div>';
             try {
                 const r = await fetch('/api/daily-diff');
@@ -5505,12 +5595,18 @@
                     return;
                 }
 
-                dateEl.textContent = '数据日期: ' + data.diff_date;
+                const now = new Date();
+                const hh = String(now.getHours()).padStart(2, '0');
+                const mm = String(now.getMinutes()).padStart(2, '0');
+                dateEl.textContent = '数据日期: ' + data.diff_date + '　·　更新于 ' + hh + ':' + mm;
 
-                // 确定当前选中的分类
+                // 副标题动态反映实际可用的信号口径
                 const cats = Object.keys(data.categories);
                 if (!cats.includes(currentDiffCategory)) {
                     currentDiffCategory = cats[0];
+                }
+                if (captionEl) {
+                    captionEl.textContent = '信号口径：' + cats.map(c => DIFF_CATEGORY_LABELS[c] || c).join(' / ');
                 }
 
                 // 渲染 tab
@@ -5525,19 +5621,20 @@
                 const catData = data.categories[currentDiffCategory];
                 const upList = catData.up || [];
                 const downList = catData.down || [];
+                const tip = escapeHtml(DIFF_CATEGORY_TIP[currentDiffCategory] || '');
 
                 html += '<div class="daily-diff-grid">';
 
                 // 上涨/正向
                 html += '<div class="daily-diff-col up">';
-                html += '<h4>📈 上涨 / 正向</h4>';
+                html += '<h4 class="col-head" title="' + tip + '">📈 上涨 / 正向 <span class="col-tip">Top N ↗</span></h4>';
                 if (upList.length === 0) {
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
                 } else {
                     upList.slice(0, 10).forEach(item => {
                         const val = item.metric_value !== null ? item.metric_value.toFixed(2) + '%' : '-';
-                        html += '<div class="diff-item up" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
-                        html += '<span class="rank">' + item.rank + '</span>';
+                        html += '<div class="diff-item up" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
+                        html += '<span class="rank" title="全市场排名（非榜单内序号）">Top ' + item.rank + '</span>';
                         html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
                         html += '<span class="name">' + escapeHtml(item.name || '') + '</span>';
                         html += '<span class="value">+' + val + '</span>';
@@ -5548,14 +5645,14 @@
 
                 // 下跌/负向
                 html += '<div class="daily-diff-col down">';
-                html += '<h4>📉 下跌 / 负向</h4>';
+                html += '<h4 class="col-head" title="' + tip + '">📉 下跌 / 负向 <span class="col-tip">Bottom N ↘</span></h4>';
                 if (downList.length === 0) {
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
                 } else {
                     downList.slice(0, 10).forEach(item => {
                         const val = item.metric_value !== null ? item.metric_value.toFixed(2) + '%' : '-';
-                        html += '<div class="diff-item down" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
-                        html += '<span class="rank">' + item.rank + '</span>';
+                        html += '<div class="diff-item down" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
+                        html += '<span class="rank" title="全市场排名（非榜单内序号）">Bottom ' + item.rank + '</span>';
                         html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
                         html += '<span class="name">' + escapeHtml(item.name || '') + '</span>';
                         html += '<span class="value">' + val + '</span>';
@@ -5568,6 +5665,11 @@
                 content.innerHTML = html;
             } catch (e) {
                 content.innerHTML = '<div class="sector-heatmap-error">网络错误: ' + e.message + '</div>';
+            } finally {
+                if (refreshBtn) {
+                    refreshBtn.disabled = false;
+                    refreshBtn.textContent = '刷新';
+                }
             }
         }
 
@@ -5940,6 +6042,7 @@
         }
 
         // 初始加载 & 定时刷新
+        applyDiffColorScheme();
         loadDailyDiff();
         loadSectorHeatmap();
         loadBacktest();

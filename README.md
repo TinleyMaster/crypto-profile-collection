@@ -768,7 +768,9 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │       ├── src_dl/         # DeFiLlama 数据源
 │   │       └── sys/            # 系统表（ingest_run）
 │   │
-│   └── workbench/              # Flask Web 工作台
+│   └── workbench/              # Flask Web 工作台 + 调度器 + 部署配置（单容器）
+│       ├── supervisord.conf    # 单容器多进程编排：gunicorn + scheduler + kol_daemon
+│       ├── gunicorn_config.py  # gunicorn 启动配置（读取 PORT 环境变量）
 │       ├── app.py              # 主应用 + API 路由
 │       ├── task_manager.py     # 后台任务管理器（Popen 实时流式输出）
 │       ├── db_stats.py         # 数据库统计查询 + 进度计算 + 搜索（含合约地址搜索、赛道过滤）
@@ -792,7 +794,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │           └── kol.html        # KOL 信号监控面板
 │
 ├── 07_测试与验收/              # 诊断脚本与报告
-├── Dockerfile                  # 工作台 Docker 镜像（含 Playwright）
+├── Dockerfile                  # 工作台 Docker 镜像（构建上下文=仓库根，docker build . 即用此文件）
 └── README.md                   # 本文件
 ```
 
@@ -813,7 +815,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 | `ETHPLORER_API_KEY` | Ethplorer API Key（可选，持仓快照） | ❌ |
 | `OPENAI_API_KEY` / `ARK_API_KEY` | LLM API Key（代币经济学提取 + AI 噪声清理 + AI 链接分类） | ❌ |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_TO` / `SMTP_FROM` | 邮件通知（解锁提醒 + 空头告警 + 调度失败告警），端口 465=SSL / 587=STARTTLS | ❌ |
-| `SERVICE_ROLE` | 服务角色：`web`（默认，gunicorn Web 工作台）或 `scheduler`（调度器常驻进程） | ❌ |
+| `PORT` | Web 监听端口：容器由 Zeabur 注入（默认 9999），本地 `python app.py` 默认 5000 | ❌ |
 | `SCHEDULER_TIMEZONE` | 调度器时区，默认 `Asia/Shanghai` | ❌ |
 | `SCHEDULER_ENABLED` | 调度器任务白名单（逗号分隔 key），空=全部启用 | ❌ |
 | `SCHEDULER_LOG_DIR` | 调度器日志目录，默认 `/app/task_state/scheduler` | ❌ |
@@ -837,9 +839,12 @@ python app.py
 ### Docker 部署
 
 ```bash
+# 构建上下文 = 仓库根目录（Dockerfile 在根目录，COPY 路径 05_代码与脚本/...）
 docker build -t crypto-workbench .
-docker run -p 5000:5000 -e DATABASE_URL=... crypto-workbench
+docker run -p 9999:9999 -e PORT=9999 -e DATABASE_URL=... crypto-workbench
 ```
+
+> 容器内 `supervisord` 同时拉起 gunicorn（Web）、scheduler（定时任务）、kol_daemon（KOL 轮询）三个进程，**单容器即可完整运行，无需额外服务**。Web 端口读取 `PORT` 环境变量（Zeabur 自动注入，默认 9999）。
 
 ---
 
@@ -931,23 +936,20 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 ## 部署平台
 
 - **数据库**：Zeabur PostgreSQL
-- **Web 工作台**：Zeabur Docker 部署（默认 `SERVICE_ROLE=web`）
-- **调度器**：同一镜像另起一个服务，环境变量设 `SERVICE_ROLE=scheduler` 跑 `python scheduler.py`；手动触发走 Web 工作台任务面板
+- **Web 工作台 / 调度器 / KOL 监控**：共用**同一个 Docker 镜像、同一个 Zeabur 服务（单容器）**。容器入口 `supervisord -c /app/supervisord.conf` 一次性拉起三个常驻进程：
 
-### 新建调度器服务步骤（Zeabur）
+| 进程 | 命令 | 职责 |
+|------|------|------|
+| `gunicorn` | `gunicorn app:app --bind 0.0.0.0:$PORT` | Web 工作台（Flask API + 前端），端口读 `PORT`（默认 9999） |
+| `scheduler` | `python /app/scheduler.py` | APScheduler 定时任务，到点提交到 TaskManager 队列 |
+| `kol_daemon` | `python /app/kol_daemon.py` | KOL 信号监控守护进程（30s 轮询） |
 
-调度器和 Web 工作台共用同一个 Docker 镜像，只是启动角色不同，需要在 Zeabur 上**再建一个服务**：
+- Web 与 scheduler 共享 `/app/task_state` 目录；调度器触发的脚本由 `TaskManager` 用 `Popen` 实时执行，日志可在 Web 工作台「任务面板」查看（等价于手动点「运行」）。
+- 三个进程均 `autorestart=true`，挂掉自动拉起。
+- 手动触发任务：Web 工作台任务面板，或 `python scheduler.py --run-once <key>`。
+- **Zeabur 部署**：项目页「+ 添加服务」→ GitHub → 选同一仓库 `crypto-profile-collection` → 分支 `main` → 构建方式 **Dockerfile**（根目录 `Dockerfile`）→ 注入环境变量（`DATABASE_URL`、`CMC_API_KEY`、`COINGECKO_API_KEY`、`SMTP_*` 等，无需 `SERVICE_ROLE`）→ 重新部署。验证：进「日志」看 gunicorn / `[调度]` / kol_daemon 的启动输出，或「命令」执行 `python scheduler.py --list`。
 
-1. 项目页点「+ 添加服务」→ 选 **GitHub** → 选同一个仓库（`crypto-profile-collection`）。
-2. 分支选 `main`，构建方式选 **Dockerfile**（根目录的 `Dockerfile`）。
-3. 服务名建议叫 `crypto-scheduler`。
-4. 部署完成后，进入新服务的「设置」→「环境变量」：
-   - 加一条：`SERVICE_ROLE` = `scheduler`
-   - 把 Web 服务里已有的环境变量（`DATABASE_URL`、`CMC_API_KEY`、`COINGECKO_API_KEY`、`SMTP_*` 等）**全部复制过来**，否则脚本跑起来会缺配置。
-5. 「重新部署」让环境变量生效。
-6. 验证：进「日志」看有没有 `[调度] 启动完成` 的输出；或进「命令」执行 `python scheduler.py --list` 看调度表。
-
-> 调度服务**不需要域名/端口**，是纯后台进程。Zeabur 可能提示「没有健康检查/端口」，属正常现象，只要容器在跑、日志正常即可。
+> 早期版本曾用 `SERVICE_ROLE=web/scheduler` 把 Web 与调度器拆成两个 Zeabur 服务，现已统一为**单容器 supervisord 编排**，`SERVICE_ROLE` 已废弃，也不再需要单独建调度服务。
 
 ---
 

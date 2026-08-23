@@ -4886,7 +4886,19 @@
 
             const result = resultData.result;
             if (resultData.ok && result && result.ok) {
-                renderTokenomics(result.data);
+                // 任务完成后从 DB 重新读取，避免 worker 闭包内回读竞态导致 result.data 为空
+                try {
+                    const d = await (await fetch('/api/assets/' + currentResearchAssetId + '/tokenomics')).json();
+                    if (d.ok && d.data && Object.keys(d.data).length > 0) {
+                        renderTokenomics(d.data);
+                        return;
+                    }
+                } catch (e) { /* 落到兜底分支用 result.data 渲染 */ }
+                if (result.data && Object.keys(result.data).length > 0) {
+                    renderTokenomics(result.data);
+                } else {
+                    renderTokenomics({});
+                }
                 return;
             }
 

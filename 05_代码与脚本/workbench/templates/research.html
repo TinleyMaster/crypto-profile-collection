@@ -1389,6 +1389,292 @@
             color: #4b5563;
         }
 
+        /* 代币经济学 */
+        .r-tokenomics {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-tokenomics .t-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-tokenomics .t-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .tm-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .tm-cell {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .tm-cell .tm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .tm-cell .tm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .tm-section-title {
+            font-size: 12px;
+            color: #9ca3af;
+            margin: 12px 0 8px;
+            font-weight: 600;
+        }
+
+        .tm-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .tm-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .tm-bar .tm-bar-label {
+            width: 80px;
+            color: #9ca3af;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tm-bar .tm-bar-track {
+            flex: 1;
+            height: 8px;
+            background: #1e222a;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .tm-bar .tm-bar-fill {
+            height: 100%;
+            background: #3b82f6;
+            border-radius: 4px;
+        }
+
+        .tm-bar .tm-bar-pct {
+            width: 48px;
+            text-align: right;
+            color: #e6e8eb;
+            font-weight: 600;
+        }
+
+        .tm-info {
+            font-size: 12px;
+            color: #9ca3af;
+            line-height: 1.5;
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .tm-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* 行情表现 */
+        .r-market {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-market .m-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-market .m-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .m-price {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .m-price .mp-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .m-price .mp-change {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .m-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .m-cell {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .m-cell .m-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .m-cell .m-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .m-extremes {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+
+        .m-extreme {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .m-extreme .me-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .m-extreme .me-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .m-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* 异动信号 */
+        .r-signals {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-signals .s-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-signals .s-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .sg-signal {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            border-left: 3px solid;
+            background: #111318;
+        }
+
+        .sg-signal.critical {
+            border-color: #ef4444;
+        }
+
+        .sg-signal.warning {
+            border-color: #f59e0b;
+        }
+
+        .sg-signal.info {
+            border-color: #3b82f6;
+        }
+
+        .sg-signal .sg-icon {
+            font-size: 16px;
+            line-height: 1;
+            margin-top: 2px;
+        }
+
+        .sg-signal .sg-body {
+            flex: 1;
+        }
+
+        .sg-signal .sg-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+            margin-bottom: 2px;
+        }
+
+        .sg-signal .sg-desc {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-bottom: 2px;
+        }
+
+        .sg-signal .sg-meta {
+            font-size: 10px;
+            color: #6b7280;
+        }
+
+        .sg-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
         .r-input {
             display: flex;
             gap: 10px;
@@ -1612,6 +1898,33 @@
                 </div>
                 <div id="wf-container">
                     <div class="wf-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-tokenomics" id="r-tokenomics" style="display:none">
+                <div class="t-head">
+                    <h3>🪙 代币经济学</h3>
+                    <span style="font-size:11px;color:#6b7280">流通/总量/解锁/通胀</span>
+                </div>
+                <div id="tm-container">
+                    <div class="tm-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-market" id="r-market" style="display:none">
+                <div class="m-head">
+                    <h3>📈 行情表现</h3>
+                    <span style="font-size:11px;color:#6b7280">日级行情快照</span>
+                </div>
+                <div id="m-container">
+                    <div class="m-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-signals" id="r-signals" style="display:none">
+                <div class="s-head">
+                    <h3>⚡ 异动信号</h3>
+                    <span style="font-size:11px;color:#6b7280">价格/成交量/衍生品/解锁</span>
+                </div>
+                <div id="sg-container">
+                    <div class="sg-empty">加载中...</div>
                 </div>
             </div>
             <div class="r-messages" id="r-messages"></div>
@@ -1907,6 +2220,9 @@
             loadChainTrend();
             loadDerivatives();
             loadWhaleFlow();
+            loadTokenomics();
+            loadMarketHistory();
+            loadSignals();
         }
 
         function renderThesis (d) {
@@ -1927,9 +2243,16 @@
             };
             const s = stanceMap[t.stance] || stanceMap.neutral;
             const convMap = { high: '高置信', medium: '中置信', low: '低置信' };
+            // B2：展示结论最后生成时间，让用户判断数据时效（结论为生成时快照，可能滞后于实时 API）
+            const genTime = t.updated_at || t.created_at;
+            let genLabel = '';
+            if (genTime) {
+                genLabel = '<span class="t-snapshot" title="结论最后生成时间（' + escapeHtml(genTime) + '）。结论为生成时的行情快照，可能与实时 API 存在滞后。">🕒 结论生成于 ' + escapeHtml(formatTimeAgo(genTime)) + '</span>';
+            }
             let html = '<div class="t-head">' +
                 '<span class="t-stance" style="background:' + s.bg + ';color:' + s.color + '">' + s.label + '</span>' +
                 '<span class="t-conviction">' + (convMap[t.conviction] || t.conviction) + '</span>' +
+                genLabel +
                 '<span style="margin-left:auto"><button class="t-gen-btn" onclick="generateThesis()">重新生成</button></span>' +
                 '</div>';
 
@@ -2148,7 +2471,7 @@
         let compSortKey = 'market_cap';
         let compSortAsc = false;
 
-        const NA_HTML = '<span class="cell-na">未采集</span>';
+        const NA_HTML = '<span class="cell-na">—</span>';
         function fmtUsdBig (v) {
             if (v === null || v === undefined || v === '') return NA_HTML;
             const n = Number(v);
@@ -2915,6 +3238,213 @@
                     html += '</div>';
                 });
             }
+
+            container.innerHTML = html;
+        }
+
+        // ── 代币经济学 ──
+        async function loadTokenomics () {
+            const box = document.getElementById('r-tokenomics');
+            const container = document.getElementById('tm-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="tm-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/tokenomics');
+                const data = await safeJson(r, '/api/research/tokenomics');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="tm-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderTokenomics(data.data || {});
+            } catch (e) {
+                container.innerHTML = '<div class="tm-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderTokenomics (d) {
+            const container = document.getElementById('tm-container');
+            const hasAny = d.total_supply != null || d.circulating_supply != null || d.max_supply != null ||
+                (d.allocation && Object.keys(d.allocation).length > 0);
+
+            if (!hasAny) {
+                container.innerHTML = '<div class="tm-empty">暂无代币经济学数据</div>';
+                return;
+            }
+
+            let html = '';
+
+            // 核心 supply 指标
+            html += '<div class="tm-grid">';
+            html += '<div class="tm-cell"><div class="tm-label">总供应量</div><div class="tm-value">' + fmtNumberBig(d.total_supply) + '</div></div>';
+            html += '<div class="tm-cell"><div class="tm-label">流通供应量</div><div class="tm-value">' + fmtNumberBig(d.circulating_supply) + '</div></div>';
+            html += '<div class="tm-cell"><div class="tm-label">最大供应量</div><div class="tm-value">' + fmtNumberBig(d.max_supply) + '</div></div>';
+
+            let circRatio = null;
+            if (d.circulating_supply != null && d.total_supply != null && Number(d.total_supply) > 0) {
+                circRatio = Number(d.circulating_supply) / Number(d.total_supply) * 100;
+            }
+            html += '<div class="tm-cell"><div class="tm-label">流通率</div><div class="tm-value">' + fmtPct(circRatio) + '</div></div>';
+            html += '</div>';
+
+            // 代币分配
+            const alloc = d.allocation || {};
+            const allocKeys = Object.keys(alloc);
+            if (allocKeys.length > 0) {
+                html += '<div class="tm-section-title">代币分配</div><div class="tm-bars">';
+                allocKeys.slice(0, 8).forEach(function (k) {
+                    const v = alloc[k];
+                    let pctVal = null;
+                    if (typeof v === 'number') pctVal = v;
+                    else if (v && typeof v === 'object' && v.percentage != null) pctVal = v.percentage;
+                    else if (v && typeof v === 'object' && v.value != null) pctVal = v.value;
+                    if (pctVal == null || isNaN(Number(pctVal))) return;
+                    const n = Number(pctVal);
+                    const label = k;
+                    html += '<div class="tm-bar">' +
+                        '<div class="tm-bar-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</div>' +
+                        '<div class="tm-bar-track"><div class="tm-bar-fill" style="width:' + Math.min(100, Math.max(0, n)) + '%"></div></div>' +
+                        '<div class="tm-bar-pct">' + n.toFixed(1) + '%</div>' +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 关键信息文本
+            const infoParts = [];
+            if (d.inflation_info) infoParts.push('通胀: ' + String(d.inflation_info).slice(0, 120));
+            if (d.emission_schedule) infoParts.push('排放: ' + String(d.emission_schedule).slice(0, 120));
+            if (d.burn_info) infoParts.push('销毁: ' + String(d.burn_info).slice(0, 120));
+            if (d.lp_locked != null) infoParts.push('流动性锁定: ' + (d.lp_locked ? '是' : '否'));
+            if (d.contract_renounced != null) infoParts.push('合约权限放弃: ' + (d.contract_renounced ? '是' : '否'));
+            if (d.tax_info) infoParts.push('税收: ' + String(d.tax_info).slice(0, 120));
+            if (infoParts.length > 0) {
+                html += '<div class="tm-section-title">关键机制</div><div class="tm-info">' + escapeHtml(infoParts.join(' · ')) + '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 行情表现 ──
+        async function loadMarketHistory () {
+            const box = document.getElementById('r-market');
+            const container = document.getElementById('m-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="m-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/market-history?days=30');
+                const data = await safeJson(r, '/api/research/market-history');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="m-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderMarketHistory(data);
+            } catch (e) {
+                container.innerHTML = '<div class="m-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderMarketHistory (data) {
+            const container = document.getElementById('m-container');
+            const series = data.series || [];
+            const latest = data.latest || (series.length ? series[series.length - 1] : null);
+
+            if (!latest) {
+                container.innerHTML = '<div class="m-empty">暂无行情数据</div>';
+                return;
+            }
+
+            let html = '';
+            const price = latest.price_usd;
+            const ch24 = latest.change_24h;
+            const chCls = ch24 > 0 ? 'positive' : (ch24 < 0 ? 'negative' : '');
+            const chSign = ch24 >= 0 ? '+' : '';
+            html += '<div class="m-price">' +
+                '<div class="mp-value">' + fmtUsdPrice(price) + '</div>' +
+                '<div class="mp-change ' + chCls + '">' + chSign + fmtPct(ch24) + '</div>' +
+                '</div>';
+
+            html += '<div class="m-grid">';
+            html += '<div class="m-cell"><div class="m-label">流通市值</div><div class="m-value">' + fmtUsdBig(latest.market_cap) + '</div></div>';
+            html += '<div class="m-cell"><div class="m-label">FDV</div><div class="m-value">' + fmtUsdBig(latest.fdv) + '</div></div>';
+            html += '<div class="m-cell"><div class="m-label">24h 成交量</div><div class="m-value">' + fmtUsdBig(latest.volume_24h) + '</div></div>';
+            html += '</div>';
+
+            // 区间表现（基于首尾数据点近似）
+            if (series.length >= 2) {
+                const first = series[0];
+                const intervalDays = Math.max(1, Math.round((Date.now() - new Date(first.date).getTime()) / 86400000));
+                const intervalPct = first.price_usd > 0 ? (latest.price_usd - first.price_usd) / first.price_usd * 100 : null;
+                html += '<div class="m-grid">';
+                html += '<div class="m-cell"><div class="m-label">' + intervalDays + 'd 涨跌</div><div class="m-value ' + cls(intervalPct) + '">' + (intervalPct != null ? ((intervalPct >= 0 ? '+' : '') + fmtPct(intervalPct)) : NA_HTML) + '</div></div>';
+                html += '<div class="m-cell"><div class="m-label">数据点数</div><div class="m-value">' + fmtNumber(series.length) + '</div></div>';
+                html += '<div class="m-cell"><div class="m-label">最新日期</div><div class="m-value">' + escapeHtml(latest.date) + '</div></div>';
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 异动信号 ──
+        async function loadSignals () {
+            const box = document.getElementById('r-signals');
+            const container = document.getElementById('sg-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="sg-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/signals');
+                const data = await safeJson(r, '/api/research/signals');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="sg-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderSignals(data);
+            } catch (e) {
+                container.innerHTML = '<div class="sg-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderSignals (data) {
+            const container = document.getElementById('sg-container');
+            const signals = data.signals || [];
+
+            if (signals.length === 0) {
+                container.innerHTML = '<div class="sg-empty">当前未检测到显著异动信号</div>';
+                return;
+            }
+
+            const typeMap = {
+                price_surge: '价格暴涨',
+                price_dump: '价格暴跌',
+                volume_surge: '成交量放大',
+                oi_surge: 'OI 激增',
+                oi_dump: 'OI 骤降',
+                funding_extreme: '资金费率极端',
+                unlock_soon: '解锁临近',
+                holder_concentration_change: '持仓集中度变化'
+            };
+            const iconMap = {
+                price_surge: '🚀', price_dump: '🔻', volume_surge: '📊',
+                oi_surge: '💹', oi_dump: '📉', funding_extreme: '⚠️',
+                unlock_soon: '🔓', holder_concentration_change: '👁️'
+            };
+
+            let html = '';
+            signals.forEach(function (s) {
+                const sev = s.severity || 'info';
+                const title = typeMap[s.type] || s.type;
+                const icon = iconMap[s.type] || '🔔';
+                const value = s.value != null ? fmtPct(s.value) : '';
+                html += '<div class="sg-signal ' + escapeHtml(sev) + '">';
+                html += '<div class="sg-icon">' + icon + '</div>';
+                html += '<div class="sg-body">';
+                html += '<div class="sg-title">' + escapeHtml(title) + (value ? ' · ' + value : '') + '</div>';
+                html += '<div class="sg-desc">' + escapeHtml(s.description || '') + '</div>';
+                html += '<div class="sg-meta">来源: ' + escapeHtml(s.source || '未知') + ' · 阈值 ' + (s.threshold != null ? fmtPct(s.threshold) : '—') + '</div>';
+                html += '</div></div>';
+            });
 
             container.innerHTML = html;
         }

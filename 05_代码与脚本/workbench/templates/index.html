@@ -2864,6 +2864,11 @@
                     <div id="mat-content"></div>
                     <div class="research-section" id="research-section" style="display:none">
                         <h2>🔬 投研分析</h2>
+                        <div class="research-actions" style="margin:6px 0 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                            <button class="copy-btn" onclick="viewAllResearch()" id="view-all-btn">📑 查看全部投研</button>
+                            <button class="copy-btn" onclick="copyAllResearch()" id="copy-research-btn">📋 复制全部投研</button>
+                            <span id="research-view-status" style="font-size:12px;color:#8a92a0"></span>
+                        </div>
                         <div class="research-grid">
                             <!-- 代币经济学 -->
                             <div class="research-card" id="rc-tokenomics">
@@ -4491,6 +4496,306 @@
                     btn.classList.remove('copied');
                 }, 2000);
             });
+        }
+
+        // ───────────────────────────────────────────────────────────
+        // 一键查看 / 复制全部投研信息（仅展示 DB 中已有数据，不触发重新抓取）
+        // ───────────────────────────────────────────────────────────
+        function researchAssetLabel () {
+            const sym = (document.getElementById('mat-symbol') || {}).textContent || '';
+            const name = (document.getElementById('mat-name') || {}).textContent || '';
+            return [sym, name].filter(s => (s || '').trim()).join(' ').trim() || '未知代币';
+        }
+
+        function _fmtNum (v) {
+            if (v == null || v === '') return null;
+            const n = Number(v);
+            if (isNaN(n)) return String(v);
+            if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return n.toLocaleString();
+        }
+
+        async function viewAllResearch () {
+            if (!currentResearchAssetId) { alert('请先搜索并选择一个代币'); return; }
+            const id = currentResearchAssetId;
+            const statusEl = document.getElementById('research-view-status');
+            const btn = document.getElementById('view-all-btn');
+            btn.disabled = true;
+            btn.textContent = '⏳ 加载中...';
+            if (statusEl) statusEl.textContent = '';
+
+            const sections = [
+                {
+                    title: '代币经济学',
+                    url: `/api/assets/${id}/tokenomics`,
+                    has: (d) => d && d.ok && d.data && Object.keys(d.data).length > 0,
+                    render: (d) => renderTokenomics(d.data),
+                },
+                {
+                    title: '白皮书摘要',
+                    url: `/api/assets/${id}/whitepaper-summary`,
+                    has: (d) => d && d.ok && Array.isArray(d.data) && d.data.length > 0,
+                    render: (d) => renderWhitepaperSummary(d.data),
+                },
+                {
+                    title: '代币解锁测算',
+                    url: `/api/unlocks/${id}`,
+                    has: (d) => d && d.ok && d.has_unlock_data && d.data,
+                    render: (d) => renderUnlocks(d.data),
+                },
+                {
+                    title: '链上数据分析',
+                    url: `/api/onchain/holder/${id}`,
+                    has: (d) => d && d.ok && d.by_chain && Object.keys(d.by_chain).length > 0,
+                    render: (d) => renderOnchainSnapshot(d),
+                },
+                {
+                    title: '社交热度',
+                    url: `/api/social/${id}`,
+                    has: (d) => d && d.ok && d.data,
+                    render: (d) => renderSocial(d.data),
+                },
+            ];
+
+            let loaded = 0, empty = 0;
+            await Promise.all(sections.map(async (s) => {
+                try {
+                    const res = await fetch(s.url);
+                    const d = await res.json();
+                    if (s.has(d)) { s.render(d); loaded++; }
+                    else { empty++; }
+                } catch (e) { empty++; }
+            }));
+
+            btn.disabled = false;
+            btn.textContent = '📑 查看全部投研';
+            if (statusEl) {
+                statusEl.textContent = `已加载 ${loaded} 项投研信息` + (empty ? `，暂无 ${empty} 项` : '');
+            }
+        }
+
+        async function _copyText (text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            }
+        }
+
+        async function copyAllResearch () {
+            if (!currentResearchAssetId) { alert('请先搜索并选择一个代币'); return; }
+            const id = currentResearchAssetId;
+            const btn = document.getElementById('copy-research-btn');
+            const orig = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '⏳ 整理中...';
+            try {
+                const [tk, wp, ulk, onc, soc] = await Promise.all([
+                    fetch(`/api/assets/${id}/tokenomics`).then(r => r.json()).catch(() => null),
+                    fetch(`/api/assets/${id}/whitepaper-summary`).then(r => r.json()).catch(() => null),
+                    fetch(`/api/unlocks/${id}`).then(r => r.json()).catch(() => null),
+                    fetch(`/api/onchain/holder/${id}`).then(r => r.json()).catch(() => null),
+                    fetch(`/api/social/${id}`).then(r => r.json()).catch(() => null),
+                ]);
+
+                const blocks = [];
+                if (tk && tk.ok && tk.data && Object.keys(tk.data).length > 0)
+                    blocks.push('【代币经济学】\n' + _buildTokenomicsText(tk.data));
+                if (wp && wp.ok && Array.isArray(wp.data) && wp.data.length > 0)
+                    blocks.push('【白皮书摘要】\n' + _buildWhitepaperText(wp.data));
+                if (ulk && ulk.ok && ulk.has_unlock_data && ulk.data)
+                    blocks.push('【代币解锁测算】\n' + _buildUnlocksText(ulk.data));
+                if (onc && onc.ok && onc.by_chain && Object.keys(onc.by_chain).length > 0)
+                    blocks.push('【链上数据分析】\n' + _buildOnchainText(onc));
+                if (soc && soc.ok && soc.data)
+                    blocks.push('【社交热度】\n' + _buildSocialText(soc.data));
+
+                if (blocks.length === 0) {
+                    alert('该代币暂无已提取的投研信息');
+                    return;
+                }
+                const header = `【${researchAssetLabel()} 投研信息汇总】\n`;
+                await _copyText(header + blocks.join('\n\n'));
+                btn.textContent = '✅ 已复制 ' + blocks.length + ' 项投研信息';
+            } catch (e) {
+                alert('复制失败: ' + e.message);
+            } finally {
+                setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2000);
+            }
+        }
+
+        function _buildTokenomicsText (t) {
+            const L = [];
+            const line = (k, v) => { if (v !== null && v !== undefined && v !== '') L.push(`${k}: ${v}`); };
+            line('总量', t.total_supply != null ? Number(t.total_supply).toLocaleString() : null);
+            line('流通量', t.circulating_supply != null ? Number(t.circulating_supply).toLocaleString() : null);
+            line('最大供应', t.max_supply != null ? Number(t.max_supply).toLocaleString() : null);
+            const tax = [];
+            if (t.buy_tax_pct !== null && t.buy_tax_pct !== undefined) tax.push(`买入 ${t.buy_tax_pct}%`);
+            if (t.sell_tax_pct !== null && t.sell_tax_pct !== undefined) tax.push(`卖出 ${t.sell_tax_pct}%`);
+            if (tax.length) L.push('税率: ' + tax.join(' / '));
+            line('税率说明', t.tax_info);
+            if (t.contract_renounced !== null && t.contract_renounced !== undefined) L.push('合约放弃: ' + (t.contract_renounced ? '是' : '否'));
+            if (t.lp_locked !== null && t.lp_locked !== undefined) L.push('LP锁定: ' + (t.lp_locked ? '是' : '否'));
+            line('LP说明', t.lp_lock_info);
+            line('销毁', t.burn_info);
+            line('释放计划', t.emission_schedule);
+            line('通胀信息', t.inflation_info);
+            line('治理', t.governance_info);
+            line('用途', t.utility_info);
+            if (t.allocation && t.allocation.length > 0) {
+                L.push('分配比例:');
+                t.allocation.forEach(a => {
+                    const pct = a.pct != null ? a.pct + '%' : '';
+                    L.push(`  - ${a.category || '未命名'}${pct ? ': ' + pct : ''}`);
+                });
+            }
+            const rev = t.revenue || {};
+            if (rev.faq && rev.faq.length) {
+                L.push('协议收入(revenue):');
+                rev.faq.forEach(f => L.push(`  Q: ${f.q}\n  A: ${f.a}`));
+            }
+            if (rev.text && rev.text.trim()) L.push('  原文: ' + rev.text.trim());
+            const val = t.valuation || {};
+            if (val.faq && val.faq.length) {
+                L.push('代币估值(valuation):');
+                val.faq.forEach(f => L.push(`  Q: ${f.q}\n  A: ${f.a}`));
+            }
+            if (val.text && val.text.trim()) L.push('  原文: ' + val.text.trim());
+            line('置信度', t.confidence != null ? (Number(t.confidence) * 100).toFixed(0) + '%' : null);
+            line('提取备注', t.extraction_notes);
+            if (t.source_urls && t.source_urls.length) L.push('来源: ' + t.source_urls.join(' / '));
+            return L.join('\n');
+        }
+
+        function _buildWhitepaperText (list) {
+            return list.map(s => {
+                const L = [];
+                const conf = s.confidence != null ? (Number(s.confidence) * 100).toFixed(0) + '%' : 'N/A';
+                L.push(`（置信度: ${conf}）`);
+                if (s.one_liner) L.push('一句话: ' + s.one_liner);
+                if (s.summary_short) L.push('简介: ' + s.summary_short);
+                if (s.problem_statement) L.push('🔴 问题: ' + s.problem_statement);
+                if (s.solution) L.push('🟢 方案: ' + s.solution);
+                if (s.core_mechanism) L.push('⚙️ 核心机制: ' + s.core_mechanism);
+                if (s.key_innovations && s.key_innovations.length) L.push('💡 关键创新: ' + s.key_innovations.join('、'));
+                if (s.token_utility) L.push('🪙 代币用途: ' + s.token_utility);
+                if (s.team_info) L.push('👥 团队: ' + s.team_info);
+                if (s.risks && s.risks.length) L.push('⚠️ 风险:\n' + s.risks.map(r => '  - ' + r).join('\n'));
+                return L.join('\n');
+            }).join('\n\n');
+        }
+
+        function _buildUnlocksText (d) {
+            const L = [];
+            const ov = d.overview || {};
+            const events = d.unlock_events || [];
+            L.push(`（${events.length} 条解锁事件 — 来源 ${d.source_name || '缓存'}${(d.updated_at || '').slice(0, 16)}）`);
+            if (d.pressure && d.pressure.pressure_score != null) {
+                const p = d.pressure;
+                const rkMap = { high: '高', medium: '中', low: '低' };
+                L.push(`⚡ 抛压风险: ${rkMap[p.risk_level] || '低'} (${p.pressure_score}分)`);
+                const parts = [];
+                if (p.unlock_pct_30d != null) parts.push(`未来30天解锁 ${p.unlock_pct_30d}%`);
+                if (p.unlock_pct_7d != null) parts.push(`7天 ${p.unlock_pct_7d}%`);
+                if (p.next_unlock_date) parts.push(`下次解锁 ${p.next_unlock_date}`);
+                if (p.top10_concentration != null) parts.push(`Top10集中 ${p.top10_concentration}%`);
+                if (parts.length) L.push('  ' + parts.join(' · '));
+            }
+            if (ov.released_pct != null) L.push(`释放进度: ${ov.released_pct}%` + (ov.released_amount_str ? ` (${ov.released_amount_str} / ${ov.total_amount_str})` : ''));
+            if (ov.market_cap_str) L.push('市值: ' + ov.market_cap_str);
+            if (ov.fdv_str) L.push('FDV: ' + ov.fdv_str);
+            if (ov.float_pct != null) L.push('流通率: ' + ov.float_pct + '%');
+            if (ov.next_unlock_date) {
+                L.push('下一次解锁:');
+                L.push('  日期: ' + ov.next_unlock_date);
+                if (ov.next_unlock_value_str) L.push('  价值: ' + ov.next_unlock_value_str);
+                if (ov.next_unlock_pct != null) L.push('  占比: ' + ov.next_unlock_pct + '%');
+                if (ov.next_unlock_when) L.push('  时间: ' + ov.next_unlock_when);
+            }
+            if (events.length) {
+                L.push('近期解锁事件:');
+                const futureEv = events.filter(e => e.is_upcoming).slice(0, 3);
+                const pastEv = events.filter(e => !e.is_upcoming).slice(0, 3);
+                [...futureEv, ...pastEv].forEach(e => {
+                    L.push(`  ${e.is_upcoming ? '🔜' : '✅'} ${e.date} ${e.value_str || e.amount_str || ''} (${e.pct != null ? e.pct : '?'}%)`);
+                });
+            }
+            return L.join('\n');
+        }
+
+        function _buildOnchainText (d) {
+            const L = [];
+            L.push(`（${d.symbol || ''}）`);
+            L.push('── 持仓集中度（快照）──');
+            const byChain = d.by_chain || {};
+            for (const chain of Object.keys(byChain)) {
+                const snap = byChain[chain][0] || {};
+                L.push(`[${chain.toUpperCase()}]`);
+                if (snap.total_holders != null) L.push('  持币地址: ' + Number(snap.total_holders).toLocaleString());
+                if (snap.top10_concentration != null) L.push('  Top10: ' + snap.top10_concentration + '%');
+                if (snap.top50_concentration != null) L.push('  Top50: ' + snap.top50_concentration + '%');
+                if (snap.top100_concentration != null) L.push('  Top100: ' + snap.top100_concentration + '%');
+                if (snap.exchange_wallet_pct != null) L.push('  交易所占比: ' + snap.exchange_wallet_pct + '%');
+                if (snap.holder_change_7d != null) L.push('  7日地址变化: ' + (snap.holder_change_7d > 0 ? '+' : '') + snap.holder_change_7d);
+                if (snap.fetched_at) L.push('  快照时间: ' + String(snap.fetched_at).slice(0, 16));
+            }
+            return L.join('\n');
+        }
+
+        function _buildSocialText (d) {
+            const L = [];
+            const score = d.score;
+            const conf = d.confidence || '';
+            L.push(`综合热度 ${score != null ? score : '?'} / 100 — ${conf || '?'}${d.from_cache ? '（缓存 ' + String(d.fetched_at || '').slice(0, 16) + '）' : ''}`);
+            const sd = d.score_detail || {};
+            const dims = [['社区规模', sd.community], ['舆情情绪', sd.sentiment], ['趋势新闻', sd.trend], ['市场热度', sd.market]];
+            dims.forEach(([name, val]) => L.push(`${name}: ${val != null ? val : '缺失'}`));
+            const cm = d.community || {};
+            if (Object.keys(cm).length) {
+                L.push('── 社区规模 ──');
+                if (cm.twitter_followers != null) L.push('  Twitter: ' + _fmtNum(cm.twitter_followers));
+                if (cm.reddit_subscribers != null) L.push('  Reddit: ' + _fmtNum(cm.reddit_subscribers));
+                if (cm.telegram_channel_user_count != null) L.push('  Telegram: ' + _fmtNum(cm.telegram_channel_user_count));
+                if (cm.github_stars != null) L.push('  GitHub Stars: ' + _fmtNum(cm.github_stars));
+            }
+            const st = d.sentiment || {};
+            if (st && Object.keys(st).length) {
+                L.push('── 实时舆情 ──');
+                if (st.sentiment) L.push('  情绪: ' + st.sentiment);
+                if (st.sentiment_score != null) L.push('  情绪分: ' + st.sentiment_score);
+                if (st.bullish_ratio != null || st.bearish_ratio != null) L.push('  看涨/看跌: ' + (st.bullish_ratio != null ? st.bullish_ratio + '%' : '?') + ' / ' + (st.bearish_ratio != null ? st.bearish_ratio + '%' : '?'));
+                if (st.key_topics && st.key_topics.length) L.push('  热点主题: ' + st.key_topics.join('、'));
+                if (st.summary) L.push('  摘要: ' + st.summary);
+            }
+            const tr = d.trend || {};
+            const updates = tr.updates || [];
+            const news = tr.news || [];
+            if (tr.trending_rank != null || updates.length || news.length) {
+                L.push('── 趋势新闻 ──');
+                if (tr.trending_rank != null) L.push('  全球热搜榜: 第 ' + tr.trending_rank + ' 名');
+                updates.slice(0, 5).forEach(u => L.push('  动态: ' + (u.text || '').slice(0, 80)));
+                news.slice(0, 5).forEach(n => L.push('  新闻: ' + (n.title || '').slice(0, 80)));
+            }
+            const mk = d.market || {};
+            if (Object.keys(mk).length) {
+                L.push('── 市场热度 ──');
+                if (mk.price_usd != null) L.push('  价格: $' + Number(mk.price_usd).toLocaleString());
+                if (mk.market_cap_usd != null) L.push('  市值: $' + _fmtNum(mk.market_cap_usd));
+                if (mk.total_volume_usd != null) L.push('  24h成交: $' + _fmtNum(mk.total_volume_usd));
+                if (mk.price_change_24h != null) L.push('  24h涨跌: ' + (mk.price_change_24h > 0 ? '+' : '') + mk.price_change_24h + '%');
+                if (mk.market_cap_rank != null) L.push('  市值排名: #' + mk.market_cap_rank);
+            }
+            return L.join('\n');
         }
 
         async function runAiClassify () {

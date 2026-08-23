@@ -23,13 +23,30 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 SRC_DIR = SCRIPT_DIR.parent / "src"
 
-# 找到 workbench 目录（含 derivatives_client 等模块）。
-# 容器内：Dockerfile 将 workbench/*.py 复制到 /app/（见 workbench/Dockerfile）。
-# 本地：scripts 与 workbench 同级。与 bin/kol_monitor_run.py 保持同一约定。
-if os.path.exists("/app"):
-    WORKBENCH_DIR = Path("/app")
-else:
-    WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
+
+def _find_workbench_dir() -> Path:
+    """探测 derivatives_client.py 所在目录，兼容本地与多种部署结构。
+
+    容器/部署常见路径与本地路径逐一探测，命中即返回，避免硬编码 /app 导致跨环境失效。
+    """
+    candidates = [
+        # Zeabur 实际结构：仓库完整挂载
+        Path("/app/05_代码与脚本/workbench"),
+        # Dockerfile 式扁平复制
+        Path("/app/workbench"),
+        # 本地开发：scripts/bin 与 workbench 同级
+        SCRIPT_DIR.parent.parent / "workbench",
+        # 本地开发（仓库根为 05_代码与脚本）
+        SCRIPT_DIR.parent.parent.parent / "workbench",
+    ]
+    for c in candidates:
+        if (c / "derivatives_client.py").exists():
+            return c
+    # 兜底：优先用 /app，其次本地同级
+    return Path("/app/05_代码与脚本/workbench") if os.path.exists("/app") else (SCRIPT_DIR.parent.parent / "workbench")
+
+
+WORKBENCH_DIR = _find_workbench_dir()
 
 for _p in (str(SRC_DIR), str(WORKBENCH_DIR)):
     if _p not in sys.path:

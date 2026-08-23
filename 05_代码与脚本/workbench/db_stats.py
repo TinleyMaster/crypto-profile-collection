@@ -8075,7 +8075,14 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                     a.asset_id,
                     a.canonical_symbol,
                     a.canonical_name,
-                    a.market_cap_rank
+                    a.market_cap_rank,
+                    -- 同名 symbol 可能对应多个项目（如 TUT=Tutorial 与 TUT=Tutellus），
+                    -- 取主链以便前端展示，避免两个 TUT 在榜单上被误认为同一资产。
+                    (SELECT ac.chain
+                     FROM core.asset_contract ac
+                     WHERE ac.asset_id = a.asset_id
+                     ORDER BY ac.is_primary DESC NULLS LAST
+                     LIMIT 1) AS chain
                 FROM biz.daily_diff_summary d
                 JOIN core.asset a ON a.asset_id = d.asset_id
                 WHERE d.diff_date = %s
@@ -8096,6 +8103,7 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                     "asset_id": r["asset_id"],
                     "symbol": r["canonical_symbol"],
                     "name": r["canonical_name"],
+                    "chain": r["chain"],
                     "market_cap_rank": r["market_cap_rank"],
                     "rank": r["rank"],
                     "metric_value": float(r["metric_value"]) if r["metric_value"] is not None else None,

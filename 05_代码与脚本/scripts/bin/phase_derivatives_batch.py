@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -21,7 +22,15 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SRC_DIR = SCRIPT_DIR.parent / "src"
-WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
+
+# 找到 workbench 目录（含 derivatives_client 等模块）。
+# 容器内：Dockerfile 将 workbench/*.py 复制到 /app/（见 workbench/Dockerfile）。
+# 本地：scripts 与 workbench 同级。与 bin/kol_monitor_run.py 保持同一约定。
+if os.path.exists("/app"):
+    WORKBENCH_DIR = Path("/app")
+else:
+    WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
+
 for _p in (str(SRC_DIR), str(WORKBENCH_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)

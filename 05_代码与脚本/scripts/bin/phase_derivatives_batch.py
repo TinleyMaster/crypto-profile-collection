@@ -27,13 +27,14 @@ SRC_DIR = SCRIPT_DIR.parent / "src"
 def _find_workbench_dir() -> Path:
     """探测 derivatives_client.py 所在目录，兼容本地与多种部署结构。
 
-    容器/部署常见路径与本地路径逐一探测，命中即返回，避免硬编码 /app 导致跨环境失效。
+    容器内按 Dockerfile 扁平复制：05_代码与脚本/workbench/*.py 会落到 /app/ 根目录，
+    因此部署环境的真实路径就是 /app（而非任何 workbench 子目录）。逐一探测命中即返回。
     """
     candidates = [
-        # Zeabur 实际结构：仓库完整挂载
+        # Dockerfile 扁平复制：workbench/*.py 直接落到 /app/
+        Path("/app"),
+        # Zeabur 完整仓库挂载
         Path("/app/05_代码与脚本/workbench"),
-        # Dockerfile 式扁平复制
-        Path("/app/workbench"),
         # 本地开发：scripts/bin 与 workbench 同级
         SCRIPT_DIR.parent.parent / "workbench",
         # 本地开发（仓库根为 05_代码与脚本）
@@ -42,8 +43,8 @@ def _find_workbench_dir() -> Path:
     for c in candidates:
         if (c / "derivatives_client.py").exists():
             return c
-    # 兜底：优先用 /app，其次本地同级
-    return Path("/app/05_代码与脚本/workbench") if os.path.exists("/app") else (SCRIPT_DIR.parent.parent / "workbench")
+    # 兜底：容器环境优先用 /app 根目录，本地回退到 scripts/bin 同级的 workbench
+    return Path("/app") if os.path.exists("/app") else (SCRIPT_DIR.parent.parent / "workbench")
 
 
 WORKBENCH_DIR = _find_workbench_dir()

@@ -5625,9 +5625,23 @@
 
                 html += '<div class="daily-diff-grid">';
 
+                // 根据当前信号口径动态生成左右两栏表头，避免"上涨/下跌"语义空泛
+                const upHeadMap = {
+                    'price_change_24h': ['📈 涨幅榜', '全市场 Top（24h 涨幅最大）'],
+                    'volume_surge_24h': ['📈 放量榜', '全市场 Top（成交量异动最大）'],
+                    'unlock_7d': ['🔓 抛压榜', '全市场 Top（未来 7d 解锁抛压最大）']
+                };
+                const downHeadMap = {
+                    'price_change_24h': ['📉 跌幅榜', '全市场 Bottom（24h 跌幅最大）'],
+                    'volume_surge_24h': ['📉 缩量榜', '全市场 Bottom（成交量异动最小）'],
+                    'unlock_7d': ['🔒 轻压榜', '全市场 Bottom（未来 7d 解锁抛压最小）']
+                };
+                const upHead = upHeadMap[currentDiffCategory] || ['📈 正向榜', '全市场 Top'];
+                const downHead = downHeadMap[currentDiffCategory] || ['📉 负向榜', '全市场 Bottom'];
+
                 // 上涨/正向
                 html += '<div class="daily-diff-col up">';
-                html += '<h4 class="col-head" title="' + tip + '">📈 上涨 / 正向 <span class="col-tip">Top N ↗</span></h4>';
+                html += '<h4 class="col-head" title="' + tip + '">' + upHead[0] + ' <span class="col-tip">' + upHead[1] + '</span></h4>';
                 if (upList.length === 0) {
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
                 } else {
@@ -5645,7 +5659,7 @@
 
                 // 下跌/负向
                 html += '<div class="daily-diff-col down">';
-                html += '<h4 class="col-head" title="' + tip + '">📉 下跌 / 负向 <span class="col-tip">Bottom N ↘</span></h4>';
+                html += '<h4 class="col-head" title="' + tip + '">' + downHead[0] + ' <span class="col-tip">' + downHead[1] + '</span></h4>';
                 if (downList.length === 0) {
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
                 } else {

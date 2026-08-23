@@ -340,10 +340,50 @@ def _try_search_box(page, symbol: str) -> None:
 
 # ── 页面爬取 ──────────────────────────────────────────────
 
-def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras: bool = False) -> dict | None:
+def _norm_name(s: str) -> str:
+    """项目名归一化（小写 + 去非字母数字），用于身份比对。"""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _clean_page_project_name(page_title: str) -> str:
+    """从 tokenomics 页面标题提取项目名。
+
+    tokenomics.com 标题形如「Tutorial (TUT) Token Unlocks & Tokenomics | Tokenomist」。
+    去掉 site 后缀（| / - 之后）与尾部 symbol 括号，得到「Tutorial」。
+    """
+    if not page_title:
+        return ""
+    head = re.split(r"\s+Token", page_title)[0].strip()
+    head = re.split(r"\s*[\|\-]\s*", head)[0].strip()
+    head = re.sub(r"\s*\([^)]*\)\s*$", "", head).strip()
+    return head
+
+
+def _page_identity_ok(page_title: str, asset_name: str, asset_symbol: str) -> bool:
+    """判断已抓取的页面是否确实属于目标资产（防同名 symbol 串项目）。
+
+    仅当「能解析出页面项目名且明确不同于目标资产」时才判定为不匹配；
+    取不到标题或格式异常时一律放行，宁可不拦截也绝不误杀正确页面。
+    """
+    page_name = _clean_page_project_name(page_title)
+    a, b = _norm_name(page_name), _norm_name(asset_name)
+    if not a or not b:
+        return True
+    # 名称相等，或一方包含另一方（容忍 "Tutellus" vs "Tutellus Protocol"）
+    if a == b or a in b or b in a:
+        return True
+    # 仅当双方都是完整项目名（>=4 字符）且明显不同，才认定不是同一项目
+    if len(a) >= 4 and len(b) >= 4:
+        return False
+    return True
+
+
+def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras: bool = False,
+                    asset_name: str = "", asset_symbol: str = "") -> dict | None:
     """用 Playwright 爬取单个数据源（新版 tokenomics.com 或旧版 tokenomist.ai）。
 
-    include_extras=True 时额外爬取 revenue / valuation 子页面（仅新版支持）。"""
+    include_extras=True 时额外爬取 revenue / valuation 子页面（仅新版支持）。
+    asset_name / asset_symbol 用于抓取后校验页面身份，避免同名 symbol 串项目。"""
     key = variant["key"]
     base_url = variant["base_tpl"].format(slug=slug)
     unlock_url = base_url + variant["unlock_path"]
@@ -405,6 +445,18 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras:
                 _log(f"  Overview 为空，{key} 未收录该 slug")
                 browser.close()
                 return None
+
+            # 抓取后校验页面身份：避免同名 symbol 串项目（如 Tutellus 与 Tutorial
+            # 两个 TUT 项目共用一个 "tut" slug 时，抓到另一个项目的页面）。
+            # 页面标题解析出的项目名若明显不同于目标资产，则放弃该页面，
+            # 改试下一个 slug / 数据源，宁缺毋滥。
+            if asset_name or asset_symbol:
+                page_title = page.title()
+                if not _page_identity_ok(page_title, asset_name, asset_symbol):
+                    _log(f"  [身份校验] 页面标题「{page_title}」与目标资产 "
+                         f"{asset_name or asset_symbol} 不匹配，疑似串项目，放弃")
+                    browser.close()
+                    return None
 
             _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
 
@@ -476,7 +528,8 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "", name: str = "",
     for idx, slug in enumerate(slugs):
         is_fallback = idx > 0
         for variant in SOURCE_VARIANTS:
-            result = _scrape_variant(slug, variant, is_fallback, include_extras=include_extras)
+            result = _scrape_variant(slug, variant, is_fallback, include_extras=include_extras,
+                                     asset_name=name, asset_symbol=symbol)
             if result:
                 return result
 

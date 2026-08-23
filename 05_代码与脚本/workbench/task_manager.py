@@ -459,11 +459,16 @@ class TaskManager:
                         cur.execute("SELECT COUNT(*) FROM sys.task WHERE status = 'running'")
                         running = cur.fetchone()[0]
                         if running < self._max_concurrent:
+                            # 让槽逻辑：监控类任务（name 含 monitor）设为低优先级。
+                            # 只要队列中还有非监控任务在等待，监控任务就排到末尾、主动让槽；
+                            # 只有当没有非监控 pending 时，监控任务才会占用空闲的执行槽。
                             cur.execute(
                                 """
                                 SELECT task_id FROM sys.task
                                 WHERE status = 'pending'
-                                ORDER BY started_at ASC
+                                ORDER BY
+                                    (CASE WHEN name ILIKE '%monitor%' THEN 1 ELSE 0 END),
+                                    started_at ASC
                                 LIMIT 1
                                 FOR UPDATE SKIP LOCKED
                                 """

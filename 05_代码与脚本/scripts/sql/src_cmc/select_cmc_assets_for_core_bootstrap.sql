@@ -14,9 +14,12 @@ WITH ranked AS (
         i.description,
         i.date_launched,
         i.category_hint,
+        i.tags,
         i.urls,
         -- 优先复用 CMC 自身映射，其次跨源 symbol 匹配到的 core.asset
         COALESCE(asm.asset_id, a.asset_id) AS existing_asset_id,
+        -- 已存在资产的 categories，用于 asset_type 多信号分类（避免刷新时回退已修正类型）
+        ea.categories AS existing_categories,
         ROW_NUMBER() OVER (
             PARTITION BY m.cmc_id
             ORDER BY
@@ -29,6 +32,8 @@ WITH ranked AS (
     LEFT JOIN core.asset_source_map AS asm
         ON asm.source_code = 'cmc'
        AND asm.source_asset_key = m.cmc_id::text
+    LEFT JOIN core.asset ea
+        ON ea.asset_id = asm.asset_id
     LEFT JOIN core.asset a
         ON UPPER(a.canonical_symbol) = UPPER(m.symbol)
         AND COALESCE(asm.asset_id, -1) != a.asset_id
@@ -52,7 +57,8 @@ SELECT
     date_launched,
     category_hint,
     urls,
-    existing_asset_id
+    existing_asset_id,
+    existing_categories
 FROM dedup
 ORDER BY cmc_id
 LIMIT %s;

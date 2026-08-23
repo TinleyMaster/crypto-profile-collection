@@ -709,7 +709,7 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
             cur.execute(
                 """
                 SELECT m.cmc_id, m.symbol, m.name, m.slug, m.platform_name,
-                       i.category_hint
+                       i.category_hint, i.tags
                 FROM src_cmc.cmc_asset_map m
                 LEFT JOIN src_cmc.cmc_asset_info i ON i.cmc_id = m.cmc_id
                 WHERE (UPPER(m.symbol) = UPPER(%s) OR m.name ILIKE %s)
@@ -740,15 +740,29 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                 slug = row[3] or ""
                 platform_name = row[4]
                 category_hint = row[5]
+                tags = row[6]
 
-                # 判断 asset_type：有 platform 是 token，否则 coin
-                asset_type = "token" if platform_name else "coin"
-                # meme 检测
-                hint = (category_hint or "").strip().lower()
-                if "meme" in hint:
-                    asset_type = "meme"
-                if "stablecoin" in hint:
+                # 多信号交叉判定 asset_type（稳定币优先），与 cmc_asset_bootstrap.classify_asset_type 保持一致
+                _hint = (category_hint or "").strip().lower()
+                _tagset = set(t.lower() for t in (tags or []))
+                _STABLE_FALSE = {"stable ecosystem", "stablecoin issuer"}
+                _STRONG_STABLE = {
+                    "stablecoin", "usd-stablecoin", "asset-backed-stablecoin",
+                    "fiat-stablecoin", "fiat-backed-stablecoin", "algorithmic-stablecoin",
+                    "crypto-backed-stablecoin", "yield-bearing-stablecoin",
+                    "eur-stablecoin", "krw-stablecoin",
+                }
+                _SYMBOL_STABLE = {"USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE"}
+                if (
+                    _hint == "stablecoin"
+                    or (symbol or "").strip().upper() in _SYMBOL_STABLE
+                    or (_tagset & _STRONG_STABLE)
+                ):
                     asset_type = "stablecoin"
+                elif "meme" in _hint or (_tagset & {"memes", "meme", "memecoin"}):
+                    asset_type = "meme"
+                else:
+                    asset_type = "token" if platform_name else "coin"
 
                 try:
                     # 先查是否已有同 symbol 的资产

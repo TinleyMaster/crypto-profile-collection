@@ -62,6 +62,8 @@ def main() -> int:
                 category_hint=row.get("category_hint"),
                 urls=urls,
                 has_platform=bool(row.get("platform_name") or row.get("token_address")),
+                tags=row.get("tags"),
+                categories=row.get("existing_categories"),
             )
             prepared_rows.append(
                 {

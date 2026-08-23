@@ -367,7 +367,8 @@ def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
     parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc）")
-    parser.add_argument("--limit", type=int, default=50, help="最大处理资产数")
+    parser.add_argument("--limit", type=int, default=50, help="单轮最大处理资产数")
+    parser.add_argument("--offset", type=int, default=0, help="资产列表起始偏移（自动循环分批扫描用）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
     parser.add_argument("--alarm-only", action="store_true", help="告警模式：只存储转入交易所的大额转账")
     parser.add_argument("--source", type=str, default="explorer",
@@ -392,7 +393,11 @@ def main():
         if args.chain:
             assets = [a for a in assets if a["chain"] == args.chain]
         if args.limit > 0:
-            assets = assets[:args.limit]
+            # 自动循环分批：从 offset 起取 limit 个资产；未指定 offset 则从头取
+            if args.offset > 0:
+                assets = assets[args.offset:args.offset + args.limit]
+            else:
+                assets = assets[:args.limit]
 
         print(f"共 {len(assets)} 个资产待监控\n")
 

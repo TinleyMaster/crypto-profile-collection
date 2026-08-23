@@ -31,7 +31,9 @@ else:
 
 MAX_LOG_LINES = 1000
 MAX_RUNTIME_HOURS = 12  # 超过此时长的 running 任务视为僵尸，自动标记 failed
-LOG_STUCK_MINUTES = 30  # running 任务超过该时长无新日志，视为卡死，提前收割
+# b2_ai_noise_clean_by_asset_auto 等按资产循环的长任务，单轮之间可能数十分钟无日志，
+# 但仍正常推进。放宽到 90 分钟，避免误杀大循环任务。
+LOG_STUCK_MINUTES = 90  # running 任务超过该时长无新日志，视为卡死，提前收割
 
 # ── 数据库连接池 ────────────────────────────────────────────
 

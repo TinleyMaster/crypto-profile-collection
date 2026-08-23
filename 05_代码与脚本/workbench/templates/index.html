@@ -2867,6 +2867,7 @@
                         <div class="research-actions" style="margin:6px 0 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                             <button class="copy-btn" onclick="viewAllResearch()" id="view-all-btn">📑 查看全部投研</button>
                             <button class="copy-btn" onclick="copyAllResearch()" id="copy-research-btn">📋 复制全部投研</button>
+                            <button class="copy-btn" onclick="openResearchPage()" id="open-research-btn">🔗 打开投研详情页</button>
                             <span id="research-view-status" style="font-size:12px;color:#8a92a0"></span>
                         </div>
                         <div class="research-grid">
@@ -4505,6 +4506,12 @@
             const sym = (document.getElementById('mat-symbol') || {}).textContent || '';
             const name = (document.getElementById('mat-name') || {}).textContent || '';
             return [sym, name].filter(s => (s || '').trim()).join(' ').trim() || '未知代币';
+        }
+
+        function openResearchPage () {
+            if (!currentResearchAssetId) { alert('请先搜索并选择一个代币'); return; }
+            const url = '/research/' + currentResearchAssetId;
+            window.open(url, '_blank', 'noopener');
         }
 
         function _fmtNum (v) {

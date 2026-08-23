@@ -4920,45 +4920,44 @@ def get_divergence_signals(asset_id: int) -> dict:
             if not asset:
                 return {"ok": False, "error": "资产不存在"}
 
-            # 2. 社交热度 + 价格（从 market_json 取）
+            # 2. 价格/市值优先从权威行情源 biz.asset_market_daily 取（与 market-history 实时同步）
+            #    social_heat.market_json 缺失率高且可能陈旧，仅作为 sentiment_score 来源和行情 fallback。
+            sentiment_score = None
+            price_change_24h = None
+            price_change_7d = None
+            market_cap = None
+            try:
+                cur.execute("""
+                    SELECT change_24h, change_7d, market_cap, price_usd
+                    FROM biz.asset_market_daily
+                    WHERE asset_id = %s AND source_code = 'cmc'
+                    ORDER BY market_date DESC LIMIT 1
+                """, (asset_id,))
+                md = cur.fetchone()
+                if md:
+                    price_change_24h = md.get("change_24h")
+                    price_change_7d = md.get("change_7d")
+                    market_cap = md.get("market_cap")
+            except psycopg.errors.UndefinedTable:
+                pass
+
             cur.execute("""
                 SELECT score, sentiment_json, trend_json, market_json, fetched_at
                 FROM biz.asset_social_heat WHERE asset_id = %s
             """, (asset_id,))
             social_row = cur.fetchone()
 
-            sentiment_score = None
-            price_change_24h = None
-            price_change_7d = None
-            market_cap = None
             if social_row:
                 sent = social_row.get("sentiment_json") or {}
                 sentiment_score = sent.get("sentiment_score") or sent.get("score")
                 market = social_row.get("market_json") or {}
-                price_change_24h = market.get("price_change_24h")
-                price_change_7d = market.get("price_change_7d")
-                market_cap = market.get("market_cap_usd")
-
-            # 价格数据回退：social_heat.market_json 缺失率高（60% 为空），
-            # 从权威行情源 biz.asset_market_daily 补价格/涨跌幅/市值。
-            if price_change_24h is None or price_change_7d is None or market_cap is None:
-                try:
-                    cur.execute("""
-                        SELECT change_24h, change_7d, market_cap, price_usd
-                        FROM biz.asset_market_daily
-                        WHERE asset_id = %s AND source_code = 'cmc'
-                        ORDER BY market_date DESC LIMIT 1
-                    """, (asset_id,))
-                    md = cur.fetchone()
-                    if md:
-                        if price_change_24h is None:
-                            price_change_24h = md.get("change_24h")
-                        if price_change_7d is None:
-                            price_change_7d = md.get("change_7d")
-                        if market_cap is None:
-                            market_cap = md.get("market_cap")
-                except psycopg.errors.UndefinedTable:
-                    pass
+                # 若日级行情表无数据，才回退到 social_heat
+                if price_change_24h is None:
+                    price_change_24h = market.get("price_change_24h")
+                if price_change_7d is None:
+                    price_change_7d = market.get("price_change_7d")
+                if market_cap is None:
+                    market_cap = market.get("market_cap_usd")
 
             # 3. 链上持仓变化（取最新一条，主链优先）
             cur.execute("""
@@ -5221,23 +5220,47 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             except psycopg.errors.UndefinedTable:
                 raise_map = {}
 
-            # 3f. CMC 报价快照 fallback（unlock/social_heat 都没有时用）
+            # 3f. 日级行情表（与 /api/research/<id>/market-history 同源，最可靠）
             try:
                 cur.execute("""
-                    SELECT cb.asset_id, q.price_usd, q.market_cap, q.fdv,
+                    SELECT DISTINCT ON (asset_id)
+                           asset_id, price_usd, market_cap, fdv,
+                           circulating_supply, total_supply
+                    FROM biz.asset_market_daily
+                    WHERE asset_id = ANY(%s)
+                      AND source_code = 'cmc'
+                    ORDER BY asset_id, market_date DESC
+                """, (all_ids,))
+                market_daily_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+            except psycopg.errors.UndefinedTable:
+                market_daily_map = {}
+
+            # 3g. CMC 报价快照 fallback（按资产取该资产最新 quote_time，避免全局最大时间导致该资产无记录）
+            try:
+                cur.execute("""
+                    SELECT DISTINCT ON (cb.asset_id)
+                           cb.asset_id, q.price_usd, q.market_cap, q.fdv,
                            q.circulating_supply, q.total_supply, q.max_supply
                     FROM biz.coin_basic cb
                     JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                     WHERE cb.asset_id = ANY(%s)
-                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    ORDER BY cb.asset_id, q.quote_time DESC
                 """, (all_ids,))
                 cmc_quote_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
             except psycopg.errors.UndefinedTable:
                 cmc_quote_map = {}
 
-            # 3g. 市值/价格（多源 fallback：unlock > social_heat > cmc_snapshot > tokenomics推算）
+            # 3h. 市值/价格（多源 fallback：日级行情 > unlock > social_heat > cmc_snapshot > tokenomics推算）
             def _get_mcap_price(aid):
-                # 1. 从 unlock input_snapshot 取
+                # 1. 从日级行情表取（与 market-history 同源，最可靠）
+                m = market_daily_map.get(aid)
+                if m:
+                    mcap = m.get("market_cap")
+                    price = m.get("price_usd")
+                    fdv = m.get("fdv")
+                    if mcap or price or fdv:
+                        return (mcap or fdv, price, fdv)
+                # 2. 从 unlock input_snapshot 取
                 row = unlock_map.get(aid)
                 if row:
                     snap = row.get("input_snapshot_json") or {}
@@ -5246,7 +5269,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     fdv = snap.get("fdv") or snap.get("fdv_usd")
                     if mcap or price:
                         return (mcap or fdv, price, fdv)
-                # 2. 从 social_heat market_json 取
+                # 3. 从 social_heat market_json 取
                 s = social_map.get(aid)
                 if s:
                     mj = s.get("market_json") or {}
@@ -5524,15 +5547,34 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "derivatives": {},
     }
 
-    # 市场数据（多源 fallback：unlock snapshot > social_heat market > CMC 快照 > tokenomics推算）
-    # 优先级与 get_sector_competitors 保持一致，确保页面各处行情数字统一
+    # 市场数据（多源 fallback：日级行情 > unlock snapshot > social_heat market > CMC 快照 > tokenomics推算）
+    # 优先级与 /api/research/<id>/market-history、divergence 对齐，确保结论页数字与实时 API 一致。
     market_price = None
     market_mcap = None
     market_fdv = None
     market_snapshot_time = None
 
-    # 1. 从 unlock input_snapshot 取（最优先，与 competitors 对齐）
-    if isinstance(unlocks, dict):
+    # 1. 从 biz.asset_market_daily 取（与实时 API 同源，最可靠）
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT price_usd, market_cap, fdv, market_date
+                    FROM biz.asset_market_daily
+                    WHERE asset_id = %s AND source_code = 'cmc'
+                    ORDER BY market_date DESC LIMIT 1
+                """, (asset_id,))
+                row = cur.fetchone()
+                if row:
+                    market_price = _to_float(row.get("price_usd"))
+                    market_mcap = _to_float(row.get("market_cap"))
+                    market_fdv = _to_float(row.get("fdv"))
+                    market_snapshot_time = str(row.get("market_date")) if row.get("market_date") else None
+    except (psycopg.errors.UndefinedTable, Exception):
+        pass
+
+    # 2. 从 unlock input_snapshot 取
+    if (market_price is None and market_mcap is None and market_fdv is None) and isinstance(unlocks, dict):
         snap = unlocks.get("input_snapshot_json") or {}
         p = _to_float(snap.get("price") or snap.get("price_usd"))
         m = _to_float(snap.get("market_cap") or snap.get("market_cap_usd"))
@@ -5544,7 +5586,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             market_fdv = f
             market_snapshot_time = t
 
-    # 2. 从 social_heat market_json 取
+    # 3. 从 social_heat market_json 取
     if (market_price is None and market_mcap is None) and isinstance(social, dict):
         mj = social.get("market_json") or {}
         p = _to_float(mj.get("price") or mj.get("price_usd"))
@@ -5557,18 +5599,18 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             market_fdv = f
             market_snapshot_time = t
 
-    # 3. 从 CMC 最新报价快照取（最可靠的 fallback）
+    # 4. 从 CMC 最新报价快照取（按资产取该资产最新 quote_time，避免全局最大时间导致该资产无记录）
     if market_price is None and market_mcap is None:
         try:
             with get_db() as conn:
                 with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                     cur.execute("""
-                        SELECT cb.asset_id, q.price_usd, q.market_cap, q.fdv,
-                               q.quote_time
+                        SELECT q.price_usd, q.market_cap, q.fdv, q.quote_time
                         FROM biz.coin_basic cb
                         JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                         WHERE cb.asset_id = %s
-                          AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                        ORDER BY q.quote_time DESC
+                        LIMIT 1
                     """, (asset_id,))
                     row = cur.fetchone()
                     if row:
@@ -5579,7 +5621,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         except (psycopg.errors.UndefinedTable, Exception):
             pass
 
-    # 4. 从 tokenomics 推算（价格 * 流通量/总量）
+    # 5. 从 tokenomics 推算（价格 * 流通量/总量）
     if market_mcap is None and tokenomics:
         price = _to_float(tokenomics.get("price_usd"))
         circ = _to_float(tokenomics.get("circulating_supply"))
@@ -5609,7 +5651,8 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     FROM biz.coin_basic cb
                     JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                     WHERE cb.asset_id = %s
-                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    ORDER BY q.quote_time DESC
+                    LIMIT 1
                 """, (asset_id,))
                 _row = cur.fetchone()
                 if _row:
@@ -5745,7 +5788,14 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "   - 若 unlock_pct_30d = 0 或 null，且 upcoming_events_count = 0，则必须写「未来30天无代币解锁」，禁止写存在解锁。\n"
         "   - 若有解锁，只能引用 next_unlock_date / next_unlock_pct / next_unlock_value_usd 的具体值。\n"
         "5. 抛压风险等级必须严格使用 pressure.risk_level，不能自行判断高低。\n"
-        "6. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n\n"
+        "6. 营收/收入趋势描述必须基于实际序列判断，禁止用「持续下滑」等绝对化表述描述非单调序列："
+        "   - 仅当最近 N 个月/周连续下降时，才可用「持续下滑」。"
+        "   - 若存在反弹（如 6 月→7 月回升），必须描述为「先降后升」或「近 X 月/周整体下降但期间有反弹」。"
+        "   - 若数据末尾月份带 * 号（表示预估/月度未完结），必须标注「* 为预估/不完整数据」。\n"
+        "7. 金额单位必须统一、无歧义："
+        "   - 英文/代码场景用 B=十亿、M=百万、K=千；中文场景统一用「亿」「千万」「百万」，禁止把 2.48B 写成「约2.48亿」（2.48B=24.8亿）。"
+        "   - 引用结构化指标 market.market_cap_usd / market.fdv_usd 时，按实际数值换算，不得篡改数量级。\n"
+        "8. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
         "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"

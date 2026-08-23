@@ -652,11 +652,13 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                                   OR (LEFT(ac.contract_address, 2) <> '0x' AND ac.contract_address = %s)
                               )
                         ) THEN 0
+                        -- P1-1 (2.3) 防御性加固：同 rank（如 999999 蹭名币）区间，精确符号匹配
+                        -- 先于精确名称匹配前置，便于“真币”在撞名组中排在最前。
                         WHEN LOWER(a.canonical_symbol) = LOWER(%s) THEN 1
-                        WHEN LOWER(a.canonical_name) = LOWER(%s) THEN 1
-                        WHEN a.canonical_symbol ILIKE %s THEN 2
-                        WHEN a.canonical_name ILIKE %s THEN 2
-                        ELSE 3
+                        WHEN LOWER(a.canonical_name) = LOWER(%s) THEN 2
+                        WHEN a.canonical_symbol ILIKE %s THEN 3
+                        WHEN a.canonical_name ILIKE %s THEN 4
+                        ELSE 5
                     END,
                     COALESCE(cqs.market_cap, 0) DESC,
                     a.canonical_symbol
@@ -667,6 +669,19 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                  query, query, query, query, f"%{query}%", f"%{query}%", limit),
             )
             rows = cur.fetchall()
+
+            # P1-1 (2.2) 消歧标注：同符号多个匹配时，仅 rank 最小者标 is_canonical=True，
+            # 供前端下拉区分“真币”与“蹭名币”，无需盲取第一个。
+            canonical_ids: set = set()
+            sym_groups: dict = {}
+            for row in rows:
+                rk = row[7] if row[7] is not None else (row[6] if row[6] is not None else 999999)
+                mc = float(row[8]) if row[8] is not None else 0.0
+                sym_groups.setdefault((row[1] or "").lower(), []).append((rk, mc, row[0]))
+            for members in sym_groups.values():
+                # rank 升序 -> 市值降序 -> asset_id 升序，取首个为 canonical
+                members.sort(key=lambda m: (m[0], -m[1], m[2]))
+                canonical_ids.add(members[0][2])
 
             if rows:
                 # 补充链/合约信息（每资产优先 primary 合约），用于区分同名币
@@ -700,6 +715,7 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                         "market_cap": float(row[8]) if row[8] else None,
                         "market_tier": get_market_tier(row[7], row[6]),
                         "market_tier_label": MARKET_TIERS[get_market_tier(row[7], row[6])]["label"],
+                        "is_canonical": row[0] in canonical_ids,
                     }
                     for row in rows
                 ]

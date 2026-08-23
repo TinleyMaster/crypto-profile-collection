@@ -97,6 +97,23 @@ class CoinGeckoClient:
             params={"include_platform": str(include_platform).lower()},
         )
 
+    def get_token_price(
+        self, platform: str, contract_addresses: list[str], vs_currencies: str = "usd"
+    ) -> dict[str, Any]:
+        """按合约地址批量查价（支持 Solana 等，platform 如 'solana' / 'ethereum'）。
+
+        返回形如 {contract_address: {"usd": price}, ...} 的映射。
+        """
+        if not contract_addresses:
+            return {}
+        return self._get(
+            f"/simple/token_price/{platform}",
+            params={
+                "contract_addresses": ",".join(contract_addresses),
+                "vs_currencies": vs_currencies,
+            },
+        )
+
     def get_coin_by_id(
         self,
         coin_id: str,

@@ -937,6 +937,30 @@ def _print_holder_summary(result: dict) -> None:
         print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
 
 
+def _scrape_holders_helius(chain: str, contract_address: str, max_holders: int = 20) -> dict | None:
+    """通过 Helius RPC 获取 Solana 持仓（Top 20，API 级、快、规避 Playwright 超时）。
+
+    返回结构与 _scrape_holders_solscan 对齐（top_holders_json / top_N_pct 等）。
+    无 HELIUS_API_KEY 时回退公共 RPC（getTokenLargestAccounts 可能 429，仅兜底）。
+    """
+    try:
+        from crypto_research.clients.solana_client import SolanaClient
+        from crypto_research.config import get_settings
+    except Exception as e:  # noqa: BLE001
+        print(f"  [WARN] 无法加载 Solana 客户端: {e}")
+        return None
+    try:
+        settings = get_settings(require_database=False)
+        client = SolanaClient(api_key=settings.helius_api_key)
+        result = client.get_token_holders(_norm_addr(chain, contract_address), limit=max_holders)
+        if not result["top_holders_json"]:
+            return None
+        return result
+    except Exception as e:  # noqa: BLE001
+        print(f"  [WARN] Helius 获取持仓失败: {e}")
+        return None
+
+
 def scrape_holders(explorer_url: str, contract_address: str,
                    max_holders: int = 50, chain: str = "bsc") -> dict:
     """从区块浏览器抓取持仓分布数据。
@@ -963,8 +987,17 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "scraped_at": None,
     }
 
-    # Solana: Solscan 有 Cloudflare 防护（requests 返回 403），需用 Playwright 解析渲染后的 DOM
+    # Solana: 优先 Helius RPC（Top 20 持仓，API 级、快、无 Playwright 超时问题），
+    # 失败或拿不到数据再回退 Solscan (Playwright)。
     if chain == "solana":
+        helius_result = _scrape_holders_helius(chain, contract_address, max_holders)
+        if helius_result and helius_result["top_holders_json"]:
+            helius_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Helius RPC ({chain})")
+            _print_holder_summary(helius_result)
+            return helius_result
+        print("  [WARN] Helius 未获取到数据，回退 Solscan (Playwright) ...")
+
         print("  [INFO] 尝试 Solscan (Playwright) 获取持仓...")
         sol_result = _scrape_holders_solscan(chain, contract_address, max_holders)
         if sol_result and (sol_result["total_holders"] > 0 or sol_result["top_holders_json"]):

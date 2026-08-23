@@ -266,7 +266,10 @@ def main():
             print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
                   end="", flush=True)
 
-            ok, reason = run_single(asset_id, chain, timeout=args.timeout)
+            # Solana 默认优先 Helius（快）；若回退 Solscan(Playwright) 需 2~3 分钟，
+            # 故 solana 链单独放宽超时，避免被默认 30s 打断。
+            timeout = args.timeout if chain != "solana" else max(args.timeout, 300)
+            ok, reason = run_single(asset_id, chain, timeout=timeout)
             if ok:
                 chain_success += 1
                 print("OK")

@@ -24,6 +24,8 @@ from crypto_research.db.conn import get_connection
 from crypto_research.clients.etherscan_client import EtherscanClient, get_client
 from crypto_research.clients.rpc_client import get_rpc_client
 from crypto_research.clients.ethplorer_client import get_ethplorer_client
+from crypto_research.clients.solana_client import get_solana_client
+from crypto_research.clients.coingecko_client import CoinGeckoClient
 
 
 # 大额转账阈值（美元）
@@ -35,10 +37,12 @@ CHAIN_NAME_MAP = {
     "eth": "eth",
     "bsc": "bsc",
     "binance-smart-chain": "bsc",
+    "solana": "solana",
+    "sol": "solana",
 }
 
-# 当前支持监控的链（其他链暂无数据源，跳过）
-SUPPORTED_CHAINS = ("eth", "bsc")
+# 当前支持监控的链
+SUPPORTED_CHAINS = ("eth", "bsc", "solana")
 
 # 热门代币的参考价格（美元），用于粗略估算
 # 实际使用时可通过 CoinGecko API 获取实时价格
@@ -166,6 +170,7 @@ def collect_transfers(
     dry_run: bool = False,
     alarm_only: bool = False,
     client_type: str = "explorer",
+    price_usd: float | None = None,
 ) -> dict:
     """采集单个资产的大额转账。
     alarm_only=True: 只存储转入交易所的告警，不存普通大额转账。
@@ -182,8 +187,9 @@ def collect_transfers(
     # 获取上次扫描到的区块号，从该区块之后开始扫描
     last_block = get_last_block(conn, chain, contract_address)
 
-    # 获取代币价格（从 CoinGecko 或使用 fallback）
-    price_usd = FALLBACK_PRICES.get(symbol.lower(), 0.0)
+    # 获取代币价格（调用方显式传入则用传入值，否则用 fallback 参考价）
+    if price_usd is None:
+        price_usd = FALLBACK_PRICES.get(symbol.lower(), 0.0)
 
     all_transfers = []
     total_processed = 0
@@ -316,12 +322,15 @@ def _build_chain_sources(source: str) -> list[str]:
     return ["explorer", "etherscan", "rpc"]  # auto
 
 
-def _init_chain_client(chain: str, source: str):
+def _init_chain_client(chain: str, source: str, settings=None):
     """按单个数据源类型初始化客户端，返回 (client, client_type)。
 
-    client_type ∈ {"explorer", "etherscan", "rpc"}。
+    client_type ∈ {"explorer", "etherscan", "rpc", "helius"}。
     client 为 None 表示该类型无可用数据源（如 etherscan 未配置 Key）。
     """
+    # Solana 统一走 Helius RPC（无论 --source 选啥，转账/持仓均走 Helius）
+    if chain == "solana":
+        return get_solana_client(settings.helius_api_key if settings else None), "helius"
     if source == "rpc":
         return get_rpc_client(chain), "rpc"
     if source == "etherscan":
@@ -336,9 +345,22 @@ def _print_source_banner(chain: str, client_type: str) -> None:
         msg = "使用公共 RPC 节点（免 API Key，最终兜底）"
     elif client_type == "etherscan":
         msg = "使用 Etherscan API（需付费 Key）"
+    elif client_type == "helius":
+        msg = "使用 Helius RPC（Solana 链，免费档）"
     else:  # explorer
         msg = "使用 Ethplorer/Binplorer 免 Key 免费源（默认主链路）"
     print(f"  [{chain}] {msg}")
+
+
+def _get_solana_price_usd(settings, mint: str) -> float:
+    """通过 CoinGecko 按合约地址查询 Solana 代币 USD 价格（失败回退 0）。"""
+    try:
+        cg = CoinGeckoClient(settings)
+        data = cg.get_token_price("solana", [mint])
+        price = data.get(mint, {}).get("usd")
+        return float(price) if price else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def main():
@@ -365,7 +387,7 @@ def main():
         before = len(assets)
         assets = [a for a in assets if a["chain"] in SUPPORTED_CHAINS]
         if before - len(assets) > 0:
-            print(f"（跳过 {before - len(assets)} 个非 ETH/BSC 链资产，当前仅支持 eth/bsc）")
+            print(f"（跳过 {before - len(assets)} 个暂不支持的链资产，当前支持 eth/bsc/solana）")
 
         if args.chain:
             assets = [a for a in assets if a["chain"] == args.chain]
@@ -389,10 +411,15 @@ def main():
             # 该链尚未锁定数据源：按降级链依次尝试，锁定第一个能返回数据的源。
             # lock_result 非空表示本次已为该资产采集过，避免重复调用 API。
             lock_result = None
+            # Solana 走 CoinGecko 按合约查价（用于大额转账 USD 估值）
+            price_usd = (
+                _get_solana_price_usd(settings, asset["contract_address"])
+                if chain == "solana" else None
+            )
             if chain not in chain_clients:
                 exchanges = None
                 for stype in chain_sources:
-                    client = _init_chain_client(chain, stype)[0]
+                    client = _init_chain_client(chain, stype, settings)[0]
                     if not client:
                         continue
                     if exchanges is None:
@@ -402,6 +429,7 @@ def main():
                         dry_run=args.dry_run,
                         alarm_only=args.alarm_only,
                         client_type=stype,
+                        price_usd=price_usd,
                     )
                     if result.get("processed", 0) > 0:
                         chain_clients[chain] = (client, stype)
@@ -427,6 +455,7 @@ def main():
                     dry_run=args.dry_run,
                     alarm_only=args.alarm_only,
                     client_type=client_type,
+                    price_usd=price_usd,
                 )
 
             total_processed += result.get("processed", 0)

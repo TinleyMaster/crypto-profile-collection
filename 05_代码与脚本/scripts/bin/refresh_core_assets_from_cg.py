@@ -25,37 +25,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# 稳定币误判陷阱类别（描述“发行方/生态”而非资产本身是稳定币）
+STABLE_FALSE_CATS = {"stable ecosystem", "stablecoin issuer"}
+
+# 强稳定币符号白名单
+STABLE_SYMBOLS = {
+    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD", "USDP",
+    "GUSD", "LUSD", "FRAX", "MIM", "USTC", "USDD",
+}
+
+
 def classify_cg_asset_type(
     symbol: str | None,
     categories: list[str] | None,
     platforms: dict | None,
 ) -> str:
     symbol_norm = (symbol or "").strip().upper()
+    cats = [str(c).lower() for c in (categories or [])]
 
-    # stablecoins
-    if symbol_norm in {
-        "USDT",
-        "USDC",
-        "DAI",
-        "FDUSD",
-        "TUSD",
-        "USDE",
-        "BUSD",
-        "USDP",
-        "GUSD",
-        "LUSD",
-        "FRAX",
-        "MIM",
-        "USTC",
-        "USDD",
-    }:
+    # 1) 稳定币优先：任意 category 含 'stablecoin'（排除误判陷阱）或符号白名单
+    for c in cats:
+        if "stablecoin" in c and c not in STABLE_FALSE_CATS:
+            return "stablecoin"
+    if symbol_norm in STABLE_SYMBOLS:
         return "stablecoin"
 
-    cat_text = " ".join(c or "" for c in (categories or [])).lower()
-    if "stablecoin" in cat_text:
-        return "stablecoin"
+    # 2) meme：category 含 'meme' 子串
+    cat_text = " ".join(cats)
     if "meme" in cat_text:
         return "meme"
+
+    # 3) 其余：有合约平台 → token，否则 coin
     if platforms and len(platforms) > 0:
         return "token"
     return "coin"

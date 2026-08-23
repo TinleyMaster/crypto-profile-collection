@@ -25,12 +25,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# DL 类别中明确的稳定币信号。
+# 注意：'cdp' 是 CDP 协议的治理代币（如 MKR/ANGLE），并非稳定币本身，故排除；
+# 仅保留明确的 'stablecoin' 子串与 'algo-stables'（算法稳定币协议，如 FRAX/LUSD）。
+DL_STABLE_CATS = {"algo-stables"}
+
+
 def classify_dl_asset_type(category: str | None) -> str:
     """Map DL category to core.asset valid types: token/coin/stablecoin/lp_token/meme/synthetic/other"""
     if not category:
         return "other"
     cat = category.lower()
-    if "stablecoin" in cat or "cdp" in cat:
+    # 1) 稳定币优先
+    if "stablecoin" in cat or cat in DL_STABLE_CATS:
         return "stablecoin"
     if "meme" in cat:
         return "meme"

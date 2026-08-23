@@ -3870,22 +3870,18 @@
                 });
                 const data = await res.json();
                 if (data.ok && data.pending) {
-                    // 轮询任务状态
-                    pollTask(data.task_id, () => {
-                        // 完成后重新加载
-                        fetch(`/api/assets/${assetId}/whitepaper-summary`)
-                            .then(r => r.json())
-                            .then(d => {
-                                if (d.ok && d.data && d.data.length > 0) {
-                                    renderWhitepaperSummary(d.data);
-                                } else {
-                                    setWhitepaperMissing();
-                                }
-                            });
-                    });
+                    // 轮询任务状态，进入终态后重新加载摘要（复用通用 waitForTask）
+                    await waitForTask(data.task_id, 600000);
+                    const d = await (await fetch(`/api/assets/${assetId}/whitepaper-summary`)).json();
+                    if (d.ok && d.data && d.data.length > 0) {
+                        renderWhitepaperSummary(d.data);
+                    } else {
+                        setWhitepaperMissing();
+                    }
                 }
             } catch (e) {
                 document.getElementById('wp-status').textContent = '提取失败: ' + e.message;
+            } finally {
                 btn.disabled = false;
                 btn.textContent = '提取白皮书摘要';
             }

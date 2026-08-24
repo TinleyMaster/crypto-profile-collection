@@ -3,12 +3,18 @@
 对 biz.doc_source_entry 与 biz.doc_asset 中尚未分类（content_topics 为空）的记录，
 用统一分类器 classify_link 回填 content_topics / classify_method / classify_confidence。
 
+同时支持「按标准分类器重标 entry_type」模式，用于修复：
+  - URL 含 github.com 但 entry_type 未标为 github
+  - URL 含 whitepaper/litepaper 但 entry_type 未标为 whitepaper_page
+  - github.io 等误标为 github 的链接回滚
+
 采用主键分页逐批读取，避免一次性加载全表。
 
 用法：
     python backfill_classify_links.py --dry-run            # 预览，不写库
     python backfill_classify_links.py --limit 10000        # 只处理前 N 条
     python backfill_classify_links.py --upgrade-whitepaper # 额外把 docs 中白皮书页升级为 whitepaper_page
+    python backfill_classify_links.py --relabel-entry-types # 按 URL 重标 entry_type（覆盖全类目）
 """
 
 from __future__ import annotations
@@ -166,11 +172,84 @@ def _classify_doc_assets(conn, limit: int, dry_run: bool) -> int:
     return total
 
 
+def _relabel_entry_types(conn, limit: int, dry_run: bool, upgrade_whitepaper: bool) -> dict:
+    """按标准分类器重标 entry_type，修复 github/whitepaper 漏标与误标。
+
+    处理范围：
+      1. URL 含 github.com 但 entry_type <> 'github' → 标为 github
+      2. URL 不含 github.com 但 entry_type = 'github' → 回滚为 other
+      3. URL 含 whitepaper/litepaper 且 entry_type 不是 whitepaper_page → 标为 whitepaper_page
+
+    使用 classify_link 推断，确保与 taxonomy 标准一致。
+    """
+    from crypto_research.mapping.classify_link import classify_link
+
+    cur = conn.cursor()
+    stats = {"github_relabeled": 0, "github_rollback": 0, "whitepaper_relabeled": 0}
+
+    # 1) github.com 漏标
+    where_github = "entry_url ILIKE '%github.com%' AND entry_type <> 'github'"
+    cur.execute(f"SELECT entry_id, entry_url, discovered_from, source_code FROM biz.doc_source_entry WHERE {where_github} ORDER BY entry_id LIMIT %s", (limit or None,))
+    rows = cur.fetchall()
+    updates = []
+    for entry_id, entry_url, discovered_from, source_code in rows:
+        url_key = _extract_url_key(source_code, discovered_from or "")
+        res = classify_link(entry_url, url_key=url_key, source_code=source_code)
+        if res["source_type"] == "github":
+            updates.append((entry_id,))
+    if not dry_run and updates:
+        cur.executemany(
+            "UPDATE biz.doc_source_entry SET entry_type = 'github', updated_at = NOW() WHERE entry_id = %s",
+            updates,
+        )
+        conn.commit()
+    stats["github_relabeled"] = len(updates)
+
+    # 2) github.io 等误标回滚
+    where_not_github = "entry_type = 'github' AND entry_url NOT ILIKE '%github.com%'"
+    cur.execute(f"UPDATE biz.doc_source_entry SET entry_type = 'other', updated_at = NOW() WHERE {where_not_github}")
+    if not dry_run:
+        conn.commit()
+    stats["github_rollback"] = cur.rowcount
+
+    # 3) whitepaper/litepaper 漏标（不限于 docs，覆盖全类目）
+    where_wp = """
+        entry_type <> 'whitepaper_page'
+        AND (
+            entry_url ILIKE '%whitepaper%'
+            OR entry_url ILIKE '%litepaper%'
+            OR entry_url ILIKE '%white-paper%'
+            OR entry_url ILIKE '%lite-paper%'
+        )
+    """
+    cur.execute(f"SELECT entry_id, entry_url, discovered_from, source_code FROM biz.doc_source_entry WHERE {where_wp} ORDER BY entry_id LIMIT %s", (limit or None,))
+    rows = cur.fetchall()
+    updates = []
+    for entry_id, entry_url, discovered_from, source_code in rows:
+        url_key = _extract_url_key(source_code, discovered_from or "")
+        res = classify_link(entry_url, url_key=url_key, source_code=source_code)
+        if res["source_type"] == "whitepaper_page" or (
+            upgrade_whitepaper and res["source_type"] in ("docs", "docs_portal", "official_website", "other")
+        ):
+            updates.append((entry_id,))
+    if not dry_run and updates:
+        cur.executemany(
+            "UPDATE biz.doc_source_entry SET entry_type = 'whitepaper_page', updated_at = NOW() WHERE entry_id = %s",
+            updates,
+        )
+        conn.commit()
+    stats["whitepaper_relabeled"] = len(updates)
+
+    cur.close()
+    return stats
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="存量链接分类回填（规则 + 元数据）")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少条（0=全部）")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写库")
     parser.add_argument("--upgrade-whitepaper", action="store_true", help="把 docs 中白皮书页升级为 whitepaper_page")
+    parser.add_argument("--relabel-entry-types", action="store_true", help="按标准分类器重标 entry_type（覆盖 github/whitepaper 全类目）")
     args = parser.parse_args()
 
     from crypto_research.config import get_settings
@@ -179,6 +258,19 @@ def main() -> int:
     settings = get_settings(require_database=True)
 
     with get_connection(settings.database_url) as conn:
+        if args.relabel_entry_types:
+            print("开始按标准分类器重标 entry_type ...", flush=True)
+            stats = _relabel_entry_types(conn, args.limit, args.dry_run, args.upgrade_whitepaper)
+            tag = "[dry-run] " if args.dry_run else ""
+            print(
+                f"\n{tag}entry_type 重标完成："
+                f" github 漏标 {stats['github_relabeled']} 条，"
+                f" github 误标回滚 {stats['github_rollback']} 条，"
+                f" 白皮书升级 {stats['whitepaper_relabeled']} 条。",
+                flush=True,
+            )
+            return 0
+
         print("开始回填 doc_source_entry ...", flush=True)
         n_entries, n_upgraded = _classify_doc_source_entries(
             conn, args.limit, args.dry_run, args.upgrade_whitepaper

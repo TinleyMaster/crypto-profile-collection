@@ -105,7 +105,10 @@ def main():
 
         if round_processed == 0:
             zero_consecutive += 1
-            if zero_consecutive >= 15:
+            # 安全阀：连续 50 批（约 1500 个资产）无新数据才停止，
+            # 避免主流币扫完后、长尾小币种无数据时提前终止。
+            # offset 越界（round_assets=0）时会优先停止，不会真的跑满 50 批。
+            if zero_consecutive >= 50:
                 print("  连续多批无新数据，停止（安全阀）")
                 break
         else:

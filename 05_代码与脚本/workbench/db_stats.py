@@ -4004,10 +4004,12 @@ def get_asset_market_history(
 
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # 1. 主数据源：cmc 快照聚合（最新几天精度高）
+            # 一次性查出所有 source_code 的数据，按优先级在 Python 层合并
+            # 优先级：cmc（快照聚合，最新）> cmc_historical（历史 API 回填）> 其他所有源
             cur.execute(
                 """
                 SELECT
+                    source_code,
                     market_date,
                     price_usd,
                     market_cap,
@@ -4019,40 +4021,40 @@ def get_asset_market_history(
                     change_7d
                 FROM biz.asset_market_daily
                 WHERE asset_id = %s
-                  AND source_code = %s
-                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
-                ORDER BY market_date ASC
-                """,
-                (asset_id, source_code, days),
-            )
-            primary_rows = cur.fetchall()
-
-            # 2. 补充数据源：cmc_historical 历史 API 回填（更早的日期）
-            cur.execute(
-                """
-                SELECT
-                    market_date,
-                    price_usd,
-                    market_cap,
-                    fdv,
-                    circulating_supply,
-                    total_supply,
-                    volume_24h,
-                    change_24h,
-                    change_7d
-                FROM biz.asset_market_daily
-                WHERE asset_id = %s
-                  AND source_code = 'cmc_historical'
                   AND market_date >= CURRENT_DATE - INTERVAL '%s days'
                 ORDER BY market_date ASC
                 """,
                 (asset_id, days),
             )
-            hist_rows = cur.fetchall()
+            all_rows = cur.fetchall()
 
-    # 合并：primary 优先（覆盖同一天的 historical），historical 补全更早日期
-    merged = _rows_to_series(hist_rows)
-    merged.update(_rows_to_series(primary_rows))
+    # 按 source_code 优先级分组合并：同一天优先用高优先级源
+    # 优先级从高到低：cmc > cmc_historical > 其他
+    PRIORITY = {"cmc": 0, "cmc_historical": 1}
+    merged: dict[str, dict] = {}
+    for r in all_rows:
+        date_str = str(r["market_date"])
+        sc = r["source_code"]
+        priority = PRIORITY.get(sc, 99)
+        existing = merged.get(date_str)
+        if existing is None or priority < existing["_priority"]:
+            item = {
+                "date": date_str,
+                "price_usd": float(r["price_usd"]) if r["price_usd"] is not None else None,
+                "market_cap": float(r["market_cap"]) if r["market_cap"] is not None else None,
+                "fdv": float(r["fdv"]) if r["fdv"] is not None else None,
+                "volume_24h": float(r["volume_24h"]) if r["volume_24h"] is not None else None,
+                "change_24h": float(r["change_24h"]) if r["change_24h"] is not None else None,
+                "change_7d": float(r["change_7d"]) if r["change_7d"] is not None else None,
+                "circulating_supply": float(r["circulating_supply"]) if r["circulating_supply"] is not None else None,
+                "total_supply": float(r["total_supply"]) if r["total_supply"] is not None else None,
+                "_priority": priority,
+            }
+            merged[date_str] = item
+
+    # 清理内部优先级字段
+    for item in merged.values():
+        del item["_priority"]
 
     # 按日期排序
     series = [merged[d] for d in sorted(merged.keys())]

@@ -511,6 +511,7 @@ def get_sector_heatmap(limit: int = 20) -> dict:
             "avg_score": round(avg_score, 1),
             "heat_score": heat_score,
             "low_sample": low_sample,
+            "is_miscellaneous": sec == "other",
             "top_token": {
                 "symbol": top["symbol"],
                 "name": top.get("name", ""),
@@ -519,8 +520,8 @@ def get_sector_heatmap(limit: int = 20) -> dict:
             },
         })
 
-    # 按热度分降序
-    sector_stats.sort(key=lambda x: x["heat_score"], reverse=True)
+    # 按热度分降序，other 板块（长尾杂项）始终放最后，避免失真误导
+    sector_stats.sort(key=lambda x: (x["is_miscellaneous"], -x["heat_score"]))
 
     return {
         "sectors": sector_stats[:limit],

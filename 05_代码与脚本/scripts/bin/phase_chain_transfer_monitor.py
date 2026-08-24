@@ -82,7 +82,7 @@ def get_asset_contracts(conn, asset_id: int | None = None) -> list[dict]:
                 FROM core.asset a
                 INNER JOIN core.asset_contract_map m ON m.asset_id = a.asset_id
                 WHERE a.status = 'active'
-                ORDER BY a.asset_id
+                ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id
             """)
         return [dict(r) for r in cur.fetchall()]
 

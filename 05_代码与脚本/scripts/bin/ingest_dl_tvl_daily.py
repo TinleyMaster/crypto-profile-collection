@@ -23,16 +23,24 @@ sys.stdout.reconfigure(line_buffering=True)
 SQL_AGGREGATE = """
     INSERT INTO biz.protocol_metric_daily (asset_id, metric_date, tvl, tvl_change_1d, tvl_change_7d, source_code)
     SELECT
-        m.asset_id,
+        asset_id,
         CURRENT_DATE,
-        p.tvl,
-        p.change_1d,
-        p.change_7d,
+        MAX(tvl) AS tvl,
+        MAX(tvl_change_1d) AS tvl_change_1d,
+        MAX(tvl_change_7d) AS tvl_change_7d,
         'dl'
-    FROM src_dl.protocol_list p
-    JOIN core.asset_source_map m
-        ON m.source_code = 'dl' AND m.source_asset_key = p.protocol_id
-    WHERE p.tvl IS NOT NULL AND p.tvl > 0
+    FROM (
+        SELECT
+            m.asset_id,
+            p.tvl,
+            p.change_1d AS tvl_change_1d,
+            p.change_7d AS tvl_change_7d
+        FROM src_dl.protocol_list p
+        JOIN core.asset_source_map m
+            ON m.source_code = 'dl' AND m.source_asset_key = p.protocol_id
+        WHERE p.tvl IS NOT NULL AND p.tvl > 0
+    ) t
+    GROUP BY asset_id
     ON CONFLICT (asset_id, metric_date, source_code) DO UPDATE SET
         tvl = EXCLUDED.tvl,
         tvl_change_1d = EXCLUDED.tvl_change_1d,
@@ -88,11 +96,14 @@ def main() -> int:
 
             if args.dry_run:
                 cur.execute("""
-                    SELECT COUNT(*) AS candidates, SUM(p.tvl) AS total_tvl
-                    FROM src_dl.protocol_list p
-                    JOIN core.asset_source_map m
-                        ON m.source_code = 'dl' AND m.source_asset_key = p.protocol_id
-                    WHERE p.tvl IS NOT NULL AND p.tvl > 0
+                    SELECT COUNT(DISTINCT asset_id) AS candidates, SUM(tvl) AS total_tvl
+                    FROM (
+                        SELECT m.asset_id, p.tvl
+                        FROM src_dl.protocol_list p
+                        JOIN core.asset_source_map m
+                            ON m.source_code = 'dl' AND m.source_asset_key = p.protocol_id
+                        WHERE p.tvl IS NOT NULL AND p.tvl > 0
+                    ) t
                 """)
                 row = cur.fetchone()
                 print(f"[DRY-RUN] 候选资产: {row[0]}, TVL 总计: ${float(row[1] or 0):,.0f}")

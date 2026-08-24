@@ -71,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def ensure_source_platform(conn) -> None:
+    """确保 asset_market_daily.source_code 外键中存在 cmc_historical。"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO sys.source_platform (platform_code, platform_name, base_url, description, is_active)
+            VALUES ('cmc_historical', 'CoinMarketCap Historical Quotes', 'https://coinmarketcap.com', 'CMC 专业版历史行情 API 回填', TRUE)
+            ON CONFLICT (platform_code) DO NOTHING
+        """)
+
+
 def fetch_target_assets(conn, top_n: int | None, asset_id: int | None) -> list[tuple[int, int]]:
     """获取需要回填的资产列表，返回 [(asset_id, cmc_id), ...]。
 
@@ -226,6 +236,9 @@ def backfill_historical_quotes(
     print(f"[CMC] Date range: {time_start} ~ {time_end} ({days} days)")
 
     with get_connection(settings.database_url) as conn:
+        # 注册 source_code 外键
+        ensure_source_platform(conn)
+
         # 获取目标资产
         assets = fetch_target_assets(conn, top_n, asset_id)
         if not assets:

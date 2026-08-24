@@ -51,9 +51,9 @@ from task_manager import (  # noqa: E402
     STATE_FILE,
     WORKER_SCRIPTS_DIR,
     _append_log,
-    _load_state,
-    _save_state,
-    _lock,
+    _get_db,
+    _insert_task,
+    _load_task,
 )
 
 import uuid  # noqa: E402
@@ -127,12 +127,23 @@ def _build_cmd(script: str, args: list[str]) -> list[str]:
 
 def _has_active_task(name_prefix: str) -> bool:
     """检查是否已有同名调度任务在 running/pending 状态（防重叠）。"""
-    with _lock():
-        state = _load_state()
-    for t in state["tasks"].values():
-        if t.get("status") in ("running", "pending") and t.get("name", "").startswith(f"[调度] {name_prefix}"):
-            return True
-    return False
+    name_like = f"[调度] {name_prefix}%"
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM sys.task
+                    WHERE status IN ('running', 'pending')
+                      AND name LIKE %s
+                    LIMIT 1
+                    """,
+                    (name_like,),
+                )
+                return cur.fetchone() is not None
+    except Exception as e:
+        print(f"[调度] _has_active_task 出错: {e}", file=sys.stderr)
+        return False  # 出错时放行，避免调度器彻底停摆
 
 
 def submit_scheduled_task(key: str, script: str, args: list[str], desc: str) -> str | None:
@@ -148,20 +159,21 @@ def submit_scheduled_task(key: str, script: str, args: list[str], desc: str) -> 
     cmd = _build_cmd(script, args)
     now = time.time()
 
-    with _lock():
-        state = _load_state()
-        state["tasks"][task_id] = {
-            "task_id": task_id,
-            "name": name,
-            "status": "pending",
-            "cmd": cmd,
-            "started_at": now,
-            "ended_at": None,
-            "stats": {"scheduler_key": key},
-            "error": None,
-        }
-        state["pending"].append(task_id)
-        _save_state(state)
+    task = {
+        "task_id": task_id,
+        "name": name,
+        "status": "pending",
+        "cmd": cmd,
+        "started_at": now,
+        "ended_at": None,
+        "stats": {"scheduler_key": key},
+        "error": None,
+    }
+    try:
+        _insert_task(task)
+    except Exception as e:
+        print(f"[调度] 提交任务失败 {key}: {e}", file=sys.stderr)
+        return None
 
     _append_log(task_id, f"[TASK] 调度触发: {key}")
     _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
@@ -210,18 +222,25 @@ def _send_alert_email(subject: str, body_text: str) -> bool:
 
 def _scheduler_job(key: str, script: str, args: list[str], desc: str) -> None:
     """APScheduler 回调：提交任务 + 异步等待完成 + 失败发邮件。"""
-    task_id = submit_scheduled_task(key, script, args, desc)
+    try:
+        task_id = submit_scheduled_task(key, script, args, desc)
+    except Exception as e:
+        print(f"[调度] 提交任务异常 {key}: {e}", file=sys.stderr)
+        return
     if not task_id:
         return
 
     # 轮询等待任务完成（非阻塞调度器线程池，用独立线程等）
     def _wait_and_alert():
         # 最多等 24 小时，超时就不管了
-        for _ in range(24 * 3600):  # 每秒检查一次
-            time.sleep(1)
-            with _lock():
-                state = _load_state()
-            task = state["tasks"].get(task_id)
+        poll_interval = 10  # 每 10 秒查一次，避免 DB 压力过大
+        max_checks = (24 * 3600) // poll_interval
+        for _ in range(max_checks):
+            time.sleep(poll_interval)
+            try:
+                task = _load_task(task_id)
+            except Exception:
+                continue
             if not task:
                 return
             status = task.get("status")
@@ -229,7 +248,10 @@ def _scheduler_job(key: str, script: str, args: list[str], desc: str) -> None:
                 if status == "failed":
                     # 读最后 50 行日志
                     from task_manager import _read_log
-                    logs = _read_log(task_id, 50)
+                    try:
+                        logs = _read_log(task_id, 50)
+                    except Exception:
+                        logs = ["(读取日志失败)"]
                     body = (
                         f"任务：{key}\n"
                         f"task_id：{task_id}\n"

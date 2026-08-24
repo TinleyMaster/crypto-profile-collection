@@ -62,42 +62,29 @@ def main() -> int:
 
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
-            # 确保表存在（若已有旧表，用 ADD COLUMN IF NOT EXISTS 补齐列）
+            # 确保表结构正确：先删除可能存在的旧表（biz/public），再重建。
+            # 当前该表无业务数据，重建安全；如有历史数据则需改用迁移脚本。
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS biz.protocol_metric_daily (
-                    asset_id      INTEGER NOT NULL,
+                DROP TABLE IF EXISTS public.protocol_metric_daily CASCADE;
+                DROP TABLE IF EXISTS biz.protocol_metric_daily CASCADE;
+
+                CREATE TABLE biz.protocol_metric_daily (
+                    asset_id      INTEGER NOT NULL REFERENCES core.asset(asset_id) ON DELETE CASCADE,
                     metric_date   DATE NOT NULL DEFAULT CURRENT_DATE,
+                    tvl           NUMERIC(20, 2),
+                    tvl_change_1d NUMERIC,
+                    tvl_change_7d NUMERIC,
                     source_code   TEXT NOT NULL DEFAULT 'dl',
+                    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (asset_id, metric_date, source_code)
                 )
             """)
 
             cur.execute("""
-                ALTER TABLE biz.protocol_metric_daily
-                ADD COLUMN IF NOT EXISTS tvl NUMERIC(20, 2),
-                ADD COLUMN IF NOT EXISTS tvl_change_1d NUMERIC,
-                ADD COLUMN IF NOT EXISTS tvl_change_7d NUMERIC,
-                ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                CREATE INDEX IF NOT EXISTS idx_protocol_metric_daily_date
+                    ON biz.protocol_metric_daily (metric_date DESC)
             """)
-
-            # 确保外键（已有数据可能冲突，这里仅添加约束；若失败则打印警告继续）
-            try:
-                cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_constraint
-                            WHERE conname = 'protocol_metric_daily_asset_id_fkey'
-                        ) THEN
-                            ALTER TABLE biz.protocol_metric_daily
-                            ADD CONSTRAINT protocol_metric_daily_asset_id_fkey
-                            FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id) ON DELETE CASCADE;
-                        END IF;
-                    END $$;
-                """)
-            except Exception as e:
-                print(f"[WARN] 添加外键约束失败（可能已有脏数据）: {e}", file=sys.stderr)
 
             if args.dry_run:
                 cur.execute("""

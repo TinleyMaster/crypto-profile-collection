@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="资产 ID（优先）")
     p.add_argument("--symbol", type=str, help="代币符号（未提供 asset-id 时使用）")
     p.add_argument("--save", action="store_true", help="写入数据库")
+    p.add_argument("--no-llm", action="store_true",
+                   help="跳过 LLM 情绪分析（批量采集时提速用）")
     return p
 
 
@@ -580,17 +582,25 @@ def _main() -> int:
         updates = fetch_status_updates(settings, coin_id) if coin_id else []
         _log(f"  项目动态: {len(updates)} 条")
 
-        posts = fetch_reddit_posts(symbol, name)
-        _log(f"  Reddit 帖子: {len(posts)} 条")
+        posts = []
+        if not args.no_llm:
+            posts = fetch_reddit_posts(symbol, name)
+            _log(f"  Reddit 帖子: {len(posts)} 条")
+        else:
+            _log("  Reddit 帖子: 已跳过（--no-llm）")
 
         news = fetch_google_news(symbol, name)
         _log(f"  Google News: {len(news)} 条")
 
-        sentiment = analyze_sentiment(settings, symbol, name, posts, updates, news)
-        if sentiment:
-            _log(f"  情绪: {sentiment.get('sentiment')} ({sentiment.get('sentiment_score')})")
+        sentiment = None
+        if not args.no_llm:
+            sentiment = analyze_sentiment(settings, symbol, name, posts, updates, news)
+            if sentiment:
+                _log(f"  情绪: {sentiment.get('sentiment')} ({sentiment.get('sentiment_score')})")
+            else:
+                _log("  情绪: 无数据（跳过）")
         else:
-            _log("  情绪: 无数据（跳过）")
+            _log("  情绪: 已跳过（--no-llm）")
 
         # 全部维度都无数据 → not_found
         if not community and not market and trending_rank is None and not updates and not posts and not news:

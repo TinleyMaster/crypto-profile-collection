@@ -30,7 +30,7 @@ from crypto_research.db.conn import get_connection
 
 
 def get_pending_assets(conn, limit: int) -> list[dict]:
-    """获取有 CG 映射但尚无社交热度的资产列表。"""
+    """获取有 CG 映射但尚无社交热度的资产列表（按市值降序，优先采集高价值资产）。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -45,7 +45,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = a.asset_id
               )
-            ORDER BY a.asset_id ASC
+            ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
             LIMIT %s
             """,
             (limit,),
@@ -69,16 +69,19 @@ def get_total_pending(conn) -> int:
         return cur.fetchone()[0]
 
 
-def run_single(asset_id: int, timeout: int = 60) -> tuple[bool, str]:
+def run_single(asset_id: int, timeout: int = 60, no_llm: bool = False) -> tuple[bool, str]:
     """运行单币社交热度采集，返回 (是否成功, 状态信息)。"""
     script = SCRIPT_DIR / "phase_c_social_heat.py"
+    cmd = [
+        sys.executable, "-u", str(script),
+        "--asset-id", str(asset_id),
+        "--save",
+    ]
+    if no_llm:
+        cmd.append("--no-llm")
     try:
         result = subprocess.run(
-            [
-                sys.executable, "-u", str(script),
-                "--asset-id", str(asset_id),
-                "--save",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -117,7 +120,14 @@ def main():
                         help="单币超时时间（秒）")
     parser.add_argument("--delay", type=float, default=0.5,
                         help="每币之间延迟（秒，避免触发CG限流）")
+    parser.add_argument("--no-llm", action="store_true", default=True,
+                        help="批量采集时跳过 LLM 情绪分析（大幅提速，默认开启）")
+    parser.add_argument("--with-llm", action="store_true",
+                        help="启用 LLM 情绪分析（慢，仅小批量时使用）")
     args = parser.parse_args()
+
+    # --with-llm 覆盖默认的 --no-llm
+    no_llm = not args.with_llm
 
     settings = get_settings(require_database=True)
 
@@ -149,7 +159,7 @@ def main():
         print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
               end="", flush=True)
 
-        ok, info = run_single(asset_id, timeout=args.timeout)
+        ok, info = run_single(asset_id, timeout=args.timeout, no_llm=no_llm)
         if ok:
             success += 1
             print(f"OK ({info})")

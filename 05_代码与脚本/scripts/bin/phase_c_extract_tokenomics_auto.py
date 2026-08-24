@@ -157,9 +157,17 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
     doc_contents = []
     for url in relevant_urls:
         print(f"  抓取: {url[:80]}")
+        # 查找原始 doc_type（用于日志标记）
+        doc_type = "unknown"
+        for d in all_links:
+            if d["source_url"] == url:
+                doc_type = d["doc_type"]
+                break
+
         content = fetch_page_content(url)
         if content:
             doc_contents.append({
+                "doc_type": doc_type,
                 "source_url": url,
                 "content": content,
             })

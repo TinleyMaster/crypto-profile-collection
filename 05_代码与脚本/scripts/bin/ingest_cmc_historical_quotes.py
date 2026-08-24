@@ -86,11 +86,12 @@ def fetch_target_assets(conn, top_n: int | None, asset_id: int | None) -> list[t
             """, (asset_id,))
         else:
             cur.execute("""
-                SELECT asset_id, cmc_id
-                FROM biz.coin_basic
-                WHERE cmc_id IS NOT NULL
-                  AND cmc_rank IS NOT NULL
-                ORDER BY cmc_rank ASC
+                SELECT cb.asset_id, cb.cmc_id
+                FROM biz.coin_basic cb
+                JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = cb.cmc_id
+                WHERE cb.cmc_id IS NOT NULL
+                  AND cam.rank_num IS NOT NULL
+                ORDER BY cam.rank_num ASC
                 LIMIT %s
             """, (top_n,))
         rows = cur.fetchall()

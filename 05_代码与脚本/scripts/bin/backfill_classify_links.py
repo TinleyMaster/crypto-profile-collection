@@ -188,7 +188,8 @@ def _relabel_entry_types(conn, limit: int, dry_run: bool, upgrade_whitepaper: bo
     stats = {"github_relabeled": 0, "github_rollback": 0, "whitepaper_relabeled": 0}
 
     # 1) github.com 漏标
-    where_github = "entry_url ILIKE '%github.com%' AND entry_type <> 'github'"
+    # psycopg 把裸 % 当占位符，LIKE 模式里要写成 %%
+    where_github = "entry_url ILIKE '%%github.com%%' AND entry_type <> 'github'"
     cur.execute(f"SELECT entry_id, entry_url, discovered_from, source_code FROM biz.doc_source_entry WHERE {where_github} ORDER BY entry_id LIMIT %s", (limit or None,))
     rows = cur.fetchall()
     updates = []
@@ -206,7 +207,7 @@ def _relabel_entry_types(conn, limit: int, dry_run: bool, upgrade_whitepaper: bo
     stats["github_relabeled"] = len(updates)
 
     # 2) github.io 等误标回滚
-    where_not_github = "entry_type = 'github' AND entry_url NOT ILIKE '%github.com%'"
+    where_not_github = "entry_type = 'github' AND entry_url NOT ILIKE '%%github.com%%'"
     cur.execute(f"UPDATE biz.doc_source_entry SET entry_type = 'other', updated_at = NOW() WHERE {where_not_github}")
     if not dry_run:
         conn.commit()
@@ -216,10 +217,10 @@ def _relabel_entry_types(conn, limit: int, dry_run: bool, upgrade_whitepaper: bo
     where_wp = """
         entry_type <> 'whitepaper_page'
         AND (
-            entry_url ILIKE '%whitepaper%'
-            OR entry_url ILIKE '%litepaper%'
-            OR entry_url ILIKE '%white-paper%'
-            OR entry_url ILIKE '%lite-paper%'
+            entry_url ILIKE '%%whitepaper%%'
+            OR entry_url ILIKE '%%litepaper%%'
+            OR entry_url ILIKE '%%white-paper%%'
+            OR entry_url ILIKE '%%lite-paper%%'
         )
     """
     cur.execute(f"SELECT entry_id, entry_url, discovered_from, source_code FROM biz.doc_source_entry WHERE {where_wp} ORDER BY entry_id LIMIT %s", (limit or None,))

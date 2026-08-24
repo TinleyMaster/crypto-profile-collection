@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-json", action="store_true", default=True, help="JSON 格式输出")
     p.add_argument("--url", type=str,
                    help="用户提供的 tokenomics 项目网址（覆盖 slug 猜测，直接按该 slug 爬取）")
+    p.add_argument("--no-browser-search", action="store_true",
+                   help="禁用无头浏览器首页搜索兜底（批量模式下可显著提速）")
     return p
 
 
@@ -378,10 +380,13 @@ def _page_identity_ok(page_title: str, asset_name: str, asset_symbol: str) -> bo
     return True
 
 
-def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras: bool = False,
+def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
+                    include_extras: bool = False,
                     asset_name: str = "", asset_symbol: str = "") -> dict | None:
     """用 Playwright 爬取单个数据源（新版 tokenomics.com 或旧版 tokenomist.ai）。
 
+    context 为已创建的 Playwright BrowserContext，本函数只负责新建/关闭 page，
+    避免每个 slug 都重启浏览器。
     include_extras=True 时额外爬取 revenue / valuation 子页面（仅新版支持）。
     asset_name / asset_symbol 用于抓取后校验页面身份，避免同名 symbol 串项目。"""
     key = variant["key"]
@@ -402,154 +407,189 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, include_extras:
         "valuation": {},
     }
 
+    page = None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ])
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/151.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+        page = context.new_page()
 
-            # 拦截非必要资源以加速
-            page.route("**/*", lambda route: route.abort()
-                if route.request.resource_type in ("image", "font", "media", "stylesheet")
-                else route.continue_()
-            )
+        # 拦截非必要资源以加速
+        page.route("**/*", lambda route: route.abort()
+            if route.request.resource_type in ("image", "font", "media", "stylesheet")
+            else route.continue_()
+        )
 
-            # ── Step 1: 爬 Overview 页面 ──
-            _log("  加载 Overview 页面...")
-            try:
-                page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-            except PlaywrightTimeout:
-                _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
-            except Exception as e:
-                _log(f"  [ERROR] Overview 页面导航失败: {e}")
-                browser.close()
+        # ── Step 1: 爬 Overview 页面 ──
+        _log("  加载 Overview 页面...")
+        try:
+            page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+        except PlaywrightTimeout:
+            _log("  [WARN] Overview 页面加载超时，尝试用已有内容")
+        except Exception as e:
+            _log(f"  [ERROR] Overview 页面导航失败: {e}")
+            page.close()
+            return None
+
+        page.wait_for_timeout(WAIT_MS)
+        _close_popups(page)
+        overview = variant["extract_overview"](page, slug)
+        result["overview"] = overview
+
+        # Overview 为空说明 slug 不对或该数据源未收录
+        if not overview:
+            _log(f"  Overview 为空，{key} 未收录该 slug")
+            page.close()
+            return None
+
+        # 抓取后校验页面身份：避免同名 symbol 串项目（如 Tutellus 与 Tutorial
+        # 两个 TUT 项目共用一个 "tut" slug 时，抓到另一个项目的页面）。
+        # 页面标题解析出的项目名若明显不同于目标资产，则放弃该页面，
+        # 改试下一个 slug / 数据源，宁缺毋滥。
+        if asset_name or asset_symbol:
+            page_title = page.title()
+            if not _page_identity_ok(page_title, asset_name, asset_symbol):
+                _log(f"  [身份校验] 页面标题「{page_title}」与目标资产 "
+                     f"{asset_name or asset_symbol} 不匹配，疑似串项目，放弃")
+                page.close()
                 return None
 
-            page.wait_for_timeout(WAIT_MS)
-            _close_popups(page)
-            overview = variant["extract_overview"](page, slug)
-            result["overview"] = overview
+        _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
 
-            # Overview 为空说明 slug 不对或该数据源未收录
-            if not overview:
-                _log(f"  Overview 为空，{key} 未收录该 slug")
-                browser.close()
-                return None
-
-            # 抓取后校验页面身份：避免同名 symbol 串项目（如 Tutellus 与 Tutorial
-            # 两个 TUT 项目共用一个 "tut" slug 时，抓到另一个项目的页面）。
-            # 页面标题解析出的项目名若明显不同于目标资产，则放弃该页面，
-            # 改试下一个 slug / 数据源，宁缺毋滥。
-            if asset_name or asset_symbol:
-                page_title = page.title()
-                if not _page_identity_ok(page_title, asset_name, asset_symbol):
-                    _log(f"  [身份校验] 页面标题「{page_title}」与目标资产 "
-                         f"{asset_name or asset_symbol} 不匹配，疑似串项目，放弃")
-                    browser.close()
-                    return None
-
-            _log(f"  Overview: {json.dumps(overview, ensure_ascii=False)}")
-
-            # ── Step 2: 爬 Unlock Events 页面 ──
-            _log("  加载 Unlock Events 页面...")
-            try:
-                page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-            except PlaywrightTimeout:
-                _log("  [WARN] Unlock Events 页面加载超时")
-            except Exception as e:
-                _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
-                browser.close()
-                return result
-
-            page.wait_for_timeout(WAIT_MS)
-            _close_popups(page)
-
-            unlocks_ov_fn = variant.get("extract_unlocks_overview")
-            if unlocks_ov_fn:
-                unlocks_ov = unlocks_ov_fn(page)
-                if unlocks_ov:
-                    # 合并解锁进度到 overview，避免覆盖 Overview 页已提取的字段
-                    result["overview"] = {**result["overview"], **unlocks_ov}
-
-            events = variant["extract_unlock_events"](page)
-            result["unlock_events"] = events
-            _log(f"  Unlock Events: {len(events)} 条")
-
-            # ── Step 3: 可选爬取 revenue / valuation 子页面 ──
-            if include_extras:
-                for sub_key, sub_path in (
-                    ("revenue", variant.get("revenue_path")),
-                    ("valuation", variant.get("valuation_path")),
-                ):
-                    if not sub_path:
-                        continue
-                    sub_url = base_url + sub_path
-                    _log(f"  加载 {sub_key} 页面: {sub_path}")
-                    try:
-                        page.goto(sub_url, wait_until="networkidle", timeout=NAV_TIMEOUT * 1000)
-                    except PlaywrightTimeout:
-                        _log(f"  [WARN] {sub_key} 页面加载超时，尝试用已有内容")
-                    except Exception as e:
-                        _log(f"  [WARN] {sub_key} 页面导航失败: {e}")
-                        continue
-                    page.wait_for_timeout(4000)
-                    _close_popups(page)
-                    result[sub_key] = _extract_subpage(page)
-                    _log(f"  {sub_key}: {len(result[sub_key].get('faq', []))} FAQ, "
-                         f"{len(result[sub_key].get('tables', []))} tables")
-
-            browser.close()
+        # ── Step 2: 爬 Unlock Events 页面 ──
+        _log("  加载 Unlock Events 页面...")
+        try:
+            page.goto(unlock_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+        except PlaywrightTimeout:
+            _log("  [WARN] Unlock Events 页面加载超时")
+        except Exception as e:
+            _log(f"  [WARN] Unlock Events 页面导航失败: {e}")
+            page.close()
             return result
+
+        page.wait_for_timeout(WAIT_MS)
+        _close_popups(page)
+
+        unlocks_ov_fn = variant.get("extract_unlocks_overview")
+        if unlocks_ov_fn:
+            unlocks_ov = unlocks_ov_fn(page)
+            if unlocks_ov:
+                # 合并解锁进度到 overview，避免覆盖 Overview 页已提取的字段
+                result["overview"] = {**result["overview"], **unlocks_ov}
+
+        events = variant["extract_unlock_events"](page)
+        result["unlock_events"] = events
+        _log(f"  Unlock Events: {len(events)} 条")
+
+        # ── Step 3: 可选爬取 revenue / valuation 子页面 ──
+        if include_extras:
+            for sub_key, sub_path in (
+                ("revenue", variant.get("revenue_path")),
+                ("valuation", variant.get("valuation_path")),
+            ):
+                if not sub_path:
+                    continue
+                sub_url = base_url + sub_path
+                _log(f"  加载 {sub_key} 页面: {sub_path}")
+                try:
+                    page.goto(sub_url, wait_until="networkidle", timeout=NAV_TIMEOUT * 1000)
+                except PlaywrightTimeout:
+                    _log(f"  [WARN] {sub_key} 页面加载超时，尝试用已有内容")
+                except Exception as e:
+                    _log(f"  [WARN] {sub_key} 页面导航失败: {e}")
+                    continue
+                page.wait_for_timeout(4000)
+                _close_popups(page)
+                result[sub_key] = _extract_subpage(page)
+                _log(f"  {sub_key}: {len(result[sub_key].get('faq', []))} FAQ, "
+                     f"{len(result[sub_key].get('tables', []))} tables")
+
+        page.close()
+        return result
 
     except Exception as e:
         _log(f"  [ERROR] 页面爬取失败 ({key}): {e}")
         _log(traceback.format_exc())
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
         return None
 
 
 def scrape_tokenomist(slugs: list[str], symbol: str = "", name: str = "",
-                      include_extras: bool = False) -> dict | None:
+                      include_extras: bool = False,
+                      no_browser_search: bool = False) -> dict | None:
     """用 Playwright 爬取解锁数据。
 
     依次尝试 slugs × 数据源（新版 app.tokenomics.com 优先，旧版 tokenomist.ai 兜底），
     overview 为空则换下一个。
     include_extras=True 时额外爬取 revenue / valuation 子页面。
-    name 用于搜索兜底时的 symbol 歧义消解。"""
-    for idx, slug in enumerate(slugs):
-        is_fallback = idx > 0
-        for variant in SOURCE_VARIANTS:
-            result = _scrape_variant(slug, variant, is_fallback, include_extras=include_extras,
-                                     asset_name=name, asset_symbol=symbol)
-            if result:
-                return result
+    name 用于搜索兜底时的 symbol 歧义消解。
+    no_browser_search=True 时跳过无头浏览器首页搜索兜底，用于批量模式提速。"""
+    p = None
+    browser = None
+    context = None
+    try:
+        p = sync_playwright().start()
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ])
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+        )
 
-    # 所有 slug + 数据源都失败，尝试搜索找到正确 slug
-    if symbol:
-        # 兜底1：搜索 API（requests）
-        searched_slug = _search_tokenomist_slug(symbol, name)
-        if searched_slug and searched_slug not in slugs:
-            _log(f"  [搜索兜底] 尝试搜索到的 slug: {searched_slug}")
-            # 递归调用自己，只试这一个 slug
-            return scrape_tokenomist([searched_slug], symbol, name, include_extras=include_extras)
+        for idx, slug in enumerate(slugs):
+            is_fallback = idx > 0
+            for variant in SOURCE_VARIANTS:
+                result = _scrape_variant(slug, variant, is_fallback, context,
+                                         include_extras=include_extras,
+                                         asset_name=name, asset_symbol=symbol)
+                if result:
+                    return result
 
-        # 兜底2：无头浏览器在首页搜索（API 常被 Cloudflare 拦截）
-        browser_slug = _search_tokenomist_slug_browser(symbol, name)
-        if browser_slug and browser_slug not in slugs:
-            _log(f"  [浏览器搜索兜底] 首页匹配到 slug: {browser_slug}")
-            return scrape_tokenomist([browser_slug], symbol, name, include_extras=include_extras)
+        # 所有 slug + 数据源都失败，尝试搜索找到正确 slug
+        if symbol:
+            # 兜底1：搜索 API（requests）
+            searched_slug = _search_tokenomist_slug(symbol, name)
+            if searched_slug and searched_slug not in slugs:
+                _log(f"  [搜索兜底] 尝试搜索到的 slug: {searched_slug}")
+                # 递归调用自己，只试这一个 slug
+                return scrape_tokenomist([searched_slug], symbol, name,
+                                         include_extras=include_extras,
+                                         no_browser_search=no_browser_search)
 
-    _log(f"  所有 slug 均失败，该代币可能未被收录")
-    return None
+            # 兜底2：无头浏览器在首页搜索（API 常被 Cloudflare 拦截）
+            if not no_browser_search:
+                browser_slug = _search_tokenomist_slug_browser(symbol, name)
+                if browser_slug and browser_slug not in slugs:
+                    _log(f"  [浏览器搜索兜底] 首页匹配到 slug: {browser_slug}")
+                    return scrape_tokenomist([browser_slug], symbol, name,
+                                             include_extras=include_extras,
+                                             no_browser_search=True)
+
+        _log(f"  所有 slug 均失败，该代币可能未被收录")
+        return None
+    finally:
+        if context:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if p:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
 
 def _close_popups(page) -> None:
@@ -1336,7 +1376,10 @@ def _main() -> int:
         _log(f"资产: {asset['symbol']} ({asset['name']}), asset_id={asset_id}")
 
         # 爬取（自动回退备选 slug）
-        data = scrape_tokenomist(slugs, symbol=asset["symbol"], name=asset["name"])
+        data = scrape_tokenomist(
+            slugs, symbol=asset["symbol"], name=asset["name"],
+            no_browser_search=args.no_browser_search,
+        )
 
         if data is None:
             # tokenomist 未收录 → 返回 not_found 状态，让上层触发 AI 测算

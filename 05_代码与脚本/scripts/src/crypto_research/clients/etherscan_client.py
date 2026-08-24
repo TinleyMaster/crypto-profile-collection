@@ -32,6 +32,31 @@ CHAIN_CONFIG = {
         "chain_id": "56",
         "explorer_url": "https://bscscan.com",
     },
+    "polygon": {
+        "name": "Polygon",
+        "chain_id": "137",
+        "explorer_url": "https://polygonscan.com",
+    },
+    "arbitrum": {
+        "name": "Arbitrum",
+        "chain_id": "42161",
+        "explorer_url": "https://arbiscan.io",
+    },
+    "base": {
+        "name": "Base",
+        "chain_id": "8453",
+        "explorer_url": "https://basescan.org",
+    },
+    "optimism": {
+        "name": "Optimism",
+        "chain_id": "10",
+        "explorer_url": "https://optimistic.etherscan.io",
+    },
+    "avalanche": {
+        "name": "Avalanche C-Chain",
+        "chain_id": "43114",
+        "explorer_url": "https://snowtrace.io",
+    },
 }
 
 # V2 API 基础 URL（所有链共用）
@@ -216,15 +241,24 @@ class EtherscanClient:
 
 
 def get_client(chain: str, api_key: str | None = None) -> EtherscanClient | None:
-    """获取指定链的 API 客户端。"""
-    if chain == "eth":
-        import os
-        key = api_key or os.getenv("ETHERSCAN_API_KEY", "")
-    elif chain == "bsc":
-        import os
-        key = api_key or os.getenv("BSCSCAN_API_KEY", "")
-    else:
+    """获取指定链的 API 客户端。
+
+    Etherscan V2 同一个 API Key 可访问所有支持的链；BSC 保持兼容旧的
+    BSCSCAN_API_KEY，未配置时再回退到 ETHERSCAN_API_KEY。
+    """
+    import os
+
+    if chain not in CHAIN_CONFIG:
         return None
+
+    key = api_key
+    if not key:
+        if chain == "eth":
+            key = os.getenv("ETHERSCAN_API_KEY", "")
+        elif chain == "bsc":
+            key = os.getenv("BSCSCAN_API_KEY", "") or os.getenv("ETHERSCAN_API_KEY", "")
+        else:
+            key = os.getenv("ETHERSCAN_API_KEY", "")
 
     if not key:
         return None

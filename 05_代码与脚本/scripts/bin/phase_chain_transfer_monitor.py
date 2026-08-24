@@ -39,10 +39,21 @@ CHAIN_NAME_MAP = {
     "binance-smart-chain": "bsc",
     "solana": "solana",
     "sol": "solana",
+    "polygon": "polygon",
+    "matic": "polygon",
+    "matic-network": "polygon",
+    "arbitrum": "arbitrum",
+    "arbitrum-one": "arbitrum",
+    "base": "base",
+    "optimism": "optimism",
+    "op": "optimism",
+    "avalanche": "avalanche",
+    "avax": "avalanche",
+    "avalanche-c-chain": "avalanche",
 }
 
 # 当前支持监控的链
-SUPPORTED_CHAINS = ("eth", "bsc", "solana")
+SUPPORTED_CHAINS = ("eth", "bsc", "solana", "polygon", "arbitrum", "base", "optimism", "avalanche")
 
 # 热门代币的参考价格（美元），用于粗略估算
 # 实际使用时可通过 CoinGecko API 获取实时价格
@@ -408,7 +419,7 @@ def _get_solana_price_usd(settings, mint: str) -> float:
 def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
-    parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc）")
+    parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc/solana/polygon/arbitrum/base/optimism/avalanche）")
     parser.add_argument("--limit", type=int, default=50, help="单轮最大处理资产数")
     parser.add_argument("--offset", type=int, default=0, help="资产列表起始偏移（自动循环分批扫描用）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
@@ -430,7 +441,7 @@ def main():
         before = len(assets)
         assets = [a for a in assets if a["chain"] in SUPPORTED_CHAINS]
         if before - len(assets) > 0:
-            print(f"（跳过 {before - len(assets)} 个暂不支持的链资产，当前支持 eth/bsc/solana）")
+            print(f"（跳过 {before - len(assets)} 个暂不支持的链资产，当前支持 {', '.join(SUPPORTED_CHAINS)}）")
 
         if args.chain:
             assets = [a for a in assets if a["chain"] == args.chain]

@@ -34,6 +34,31 @@ PUBLIC_RPC_ENDPOINTS: dict[str, list[str]] = {
     "bsc": [
         "https://bsc-rpc.publicnode.com",
     ],
+    "polygon": [
+        "https://polygon-rpc.com",
+        "https://polygon-bor-rpc.publicnode.com",
+        "https://polygon.drpc.org",
+    ],
+    "arbitrum": [
+        "https://arb1.arbitrum.io/rpc",
+        "https://arbitrum-one-rpc.publicnode.com",
+        "https://arbitrum.drpc.org",
+    ],
+    "base": [
+        "https://mainnet.base.org",
+        "https://base-rpc.publicnode.com",
+        "https://base.drpc.org",
+    ],
+    "optimism": [
+        "https://mainnet.optimism.io",
+        "https://optimism-rpc.publicnode.com",
+        "https://optimism.drpc.org",
+    ],
+    "avalanche": [
+        "https://api.avax.network/ext/bc/C/rpc",
+        "https://avalanche-c-chain-rpc.publicnode.com",
+        "https://avalanche.drpc.org",
+    ],
 }
 
 # ERC20 Transfer 事件 topic: keccak256("Transfer(address,address,uint256)")

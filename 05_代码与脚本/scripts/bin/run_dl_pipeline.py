@@ -118,6 +118,11 @@ def main() -> int:
     if code != 0:
         return code
 
+    # ⑥ TVL 业务层聚合（依赖①，必须在 src_dl.protocol_list 更新后执行）
+    code, _ = _run(_python("ingest_dl_tvl_daily.py"), "⑥ TVL 聚合")
+    if code != 0:
+        return code
+
     print("\n" + "=" * 70)
     print("DL 一键流水线全部完成 ✅")
     print("=" * 70, flush=True)

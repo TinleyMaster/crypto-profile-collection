@@ -25,6 +25,10 @@ from crypto_research.clients.etherscan_client import EtherscanClient, get_client
 from crypto_research.clients.rpc_client import get_rpc_client
 from crypto_research.clients.ethplorer_client import get_ethplorer_client
 from crypto_research.clients.solana_client import get_solana_client
+from crypto_research.clients.tron_client import get_tron_client
+from crypto_research.clients.ton_client import get_ton_client
+from crypto_research.clients.sui_client import get_sui_client
+from crypto_research.clients.aptos_client import get_aptos_client
 from crypto_research.clients.coingecko_client import CoinGeckoClient
 
 
@@ -50,10 +54,19 @@ CHAIN_NAME_MAP = {
     "avalanche": "avalanche",
     "avax": "avalanche",
     "avalanche-c-chain": "avalanche",
+    "tron": "tron",
+    "trx": "tron",
+    "ton": "ton",
+    "the-open-network": "ton",
+    "sui": "sui",
+    "aptos": "aptos",
+    "apt": "aptos",
 }
 
-# 当前支持监控的链
-SUPPORTED_CHAINS = ("eth", "bsc", "solana", "polygon", "arbitrum", "base", "optimism", "avalanche")
+# 大小写敏感链（地址不得 .lower()，否则会指向错误地址）
+CASE_SENSITIVE_CHAINS = frozenset({"solana", "tron", "ton", "sui", "aptos"})
+SUPPORTED_CHAINS = ("eth", "bsc", "solana", "polygon", "arbitrum", "base", "optimism", "avalanche",
+                    "tron", "ton", "sui", "aptos")
 
 # 热门代币的参考价格（美元），用于粗略估算
 # 实际使用时可通过 CoinGecko API 获取实时价格
@@ -291,8 +304,12 @@ def collect_transfers(
                 if value_usd is not None and value_usd < LARGE_TRANSFER_THRESHOLD_USD:
                     continue
 
-                from_addr = (tx.get("from", "") or "").lower()
-                to_addr = (tx.get("to", "") or "").lower()
+                from_addr = (tx.get("from", "") or "")
+                to_addr = (tx.get("to", "") or "")
+                # EVM 链统一小写，大小写敏感链保留原样
+                if chain not in CASE_SENSITIVE_CHAINS:
+                    from_addr = from_addr.lower()
+                    to_addr = to_addr.lower()
 
                 from_exchange = exchange_map.get(from_addr)
                 to_exchange = exchange_map.get(to_addr)
@@ -378,12 +395,24 @@ def _build_chain_sources(source: str) -> list[str]:
 def _init_chain_client(chain: str, source: str, settings=None):
     """按单个数据源类型初始化客户端，返回 (client, client_type)。
 
-    client_type ∈ {"explorer", "etherscan", "rpc", "helius"}。
+    client_type ∈ {"explorer", "etherscan", "rpc", "helius", "trongrid", "toncenter", "sui_rpc", "aptos_rpc"}。
     client 为 None 表示该类型无可用数据源（如 etherscan 未配置 Key）。
     """
     # Solana 统一走 Helius RPC（无论 --source 选啥，转账/持仓均走 Helius）
     if chain == "solana":
         return get_solana_client(settings.helius_api_key if settings else None), "helius"
+    # Tron 统一走 TronGrid API
+    if chain == "tron":
+        return get_tron_client(settings.trongrid_api_key if settings else None), "trongrid"
+    # TON 统一走 TON Center API
+    if chain == "ton":
+        return get_ton_client(settings.toncenter_api_key if settings else None), "toncenter"
+    # Sui 统一走 Sui 公共 RPC
+    if chain == "sui":
+        return get_sui_client(), "sui_rpc"
+    # Aptos 统一走 Aptos 公共全节点
+    if chain == "aptos":
+        return get_aptos_client(), "aptos_rpc"
     if source == "rpc":
         return get_rpc_client(chain), "rpc"
     if source == "etherscan":
@@ -400,17 +429,37 @@ def _print_source_banner(chain: str, client_type: str) -> None:
         msg = "使用 Etherscan API（需付费 Key）"
     elif client_type == "helius":
         msg = "使用 Helius RPC（Solana 链，免费档）"
+    elif client_type == "trongrid":
+        msg = "使用 TronGrid API（Tron 链，免费档）"
+    elif client_type == "toncenter":
+        msg = "使用 TON Center API（TON 链，免费档）"
+    elif client_type == "sui_rpc":
+        msg = "使用 Sui 公共 RPC（Sui 链，免费免 Key）"
+    elif client_type == "aptos_rpc":
+        msg = "使用 Aptos 全节点 API（Aptos 链，免费免 Key）"
     else:  # explorer
         msg = "使用 Ethplorer/Binplorer 免 Key 免费源（默认主链路）"
     print(f"  [{chain}] {msg}")
 
 
-def _get_solana_price_usd(settings, mint: str) -> float:
-    """通过 CoinGecko 按合约地址查询 Solana 代币 USD 价格（失败回退 0）。"""
+CG_CHAIN_ID_MAP = {
+    "solana": "solana",
+    "tron": "tron",
+    "ton": "the-open-network",
+    "sui": "sui",
+    "aptos": "aptos",
+}
+
+
+def _get_nonevm_price_usd(settings, chain: str, contract_address: str) -> float:
+    """通过 CoinGecko 按合约地址查询非 EVM 链代币 USD 价格（失败回退 0）。"""
+    cg_chain = CG_CHAIN_ID_MAP.get(chain)
+    if not cg_chain:
+        return 0.0
     try:
         cg = CoinGeckoClient(settings)
-        data = cg.get_token_price("solana", [mint])
-        price = data.get(mint, {}).get("usd")
+        data = cg.get_token_price(cg_chain, [contract_address])
+        price = data.get(contract_address, {}).get("usd")
         return float(price) if price else 0.0
     except Exception:  # noqa: BLE001
         return 0.0
@@ -419,7 +468,7 @@ def _get_solana_price_usd(settings, mint: str) -> float:
 def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
-    parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc/solana/polygon/arbitrum/base/optimism/avalanche）")
+    parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc/solana/polygon/arbitrum/base/optimism/avalanche/tron/ton/sui/aptos）")
     parser.add_argument("--limit", type=int, default=50, help="单轮最大处理资产数")
     parser.add_argument("--offset", type=int, default=0, help="资产列表起始偏移（自动循环分批扫描用）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
@@ -469,10 +518,10 @@ def main():
             # 该链尚未锁定数据源：按降级链依次尝试，锁定第一个能返回数据的源。
             # lock_result 非空表示本次已为该资产采集过，避免重复调用 API。
             lock_result = None
-            # Solana 走 CoinGecko 按合约查价（用于大额转账 USD 估值）
+            # 非 EVM 链走 CoinGecko 按合约查价（用于大额转账 USD 估值）
             price_usd = (
-                _get_solana_price_usd(settings, asset["contract_address"])
-                if chain == "solana" else None
+                _get_nonevm_price_usd(settings, chain, asset["contract_address"])
+                if chain in ("solana", "tron", "ton", "sui", "aptos") else None
             )
             if chain not in chain_clients:
                 exchanges = None

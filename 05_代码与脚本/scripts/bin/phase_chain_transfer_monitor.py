@@ -29,7 +29,7 @@ from crypto_research.clients.coingecko_client import CoinGeckoClient
 
 
 # 大额转账阈值（美元）
-LARGE_TRANSFER_THRESHOLD_USD = 100_000
+LARGE_TRANSFER_THRESHOLD_USD = 50_000
 
 # asset_contract_map 表中的链名（全称）-> 数据源客户端使用的内部短名
 CHAIN_NAME_MAP = {
@@ -85,6 +85,51 @@ def get_asset_contracts(conn, asset_id: int | None = None) -> list[dict]:
                 ORDER BY a.asset_id
             """)
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_asset_price(conn, asset_id: int, symbol: str) -> float:
+    """从数据库获取代币最新价格（多源 fallback）。
+
+    优先级：
+    1. biz.asset_market_daily 最新日收盘价（最准确）
+    2. src_cmc.cmc_asset_quote_snapshot 最新快照
+    3. core.asset.market_cap / circulating_supply 推算
+    4. FALLBACK_PRICES 硬编码（兜底）
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. 日级行情表
+        cur.execute("""
+            SELECT price_usd FROM biz.asset_market_daily
+            WHERE asset_id = %s AND price_usd IS NOT NULL
+            ORDER BY market_date DESC LIMIT 1
+        """, (asset_id,))
+        row = cur.fetchone()
+        if row and row["price_usd"]:
+            return float(row["price_usd"])
+
+        # 2. CMC 快照表
+        cur.execute("""
+            SELECT cqs.price_usd
+            FROM src_cmc.cmc_asset_quote_snapshot cqs
+            INNER JOIN biz.coin_basic cb ON cb.cmc_id = cqs.cmc_id
+            WHERE cb.asset_id = %s AND cqs.price_usd IS NOT NULL
+            ORDER BY cqs.quote_time DESC LIMIT 1
+        """, (asset_id,))
+        row = cur.fetchone()
+        if row and row["price_usd"]:
+            return float(row["price_usd"])
+
+        # 3. core.asset 市值/流通量推算
+        cur.execute("""
+            SELECT market_cap, circulating_supply
+            FROM core.asset WHERE asset_id = %s
+        """, (asset_id,))
+        row = cur.fetchone()
+        if row and row["market_cap"] and row["circulating_supply"] and float(row["circulating_supply"]) > 0:
+            return float(row["market_cap"]) / float(row["circulating_supply"])
+
+    # 4. 硬编码兜底
+    return FALLBACK_PRICES.get(symbol.lower(), 0.0)
 
 
 def get_exchange_map(conn, chain: str) -> dict[str, str]:
@@ -173,7 +218,9 @@ def collect_transfers(
     price_usd: float | None = None,
 ) -> dict:
     """采集单个资产的大额转账。
-    alarm_only=True: 只存储转入交易所的告警，不存普通大额转账。
+
+    alarm_only=True: 存储双向大额转账（保证 netflow 计算完整），
+    但仅对转入交易所的记录标记告警关注。
     client_type: 'explorer' / 'etherscan' / 'rpc'，影响时间戳等字段处理。
     三者均通过 client.get_token_transfers(...) 拉取，返回字段归一化一致。"""
     asset_id = asset["asset_id"]
@@ -187,9 +234,8 @@ def collect_transfers(
     # 获取上次扫描到的区块号，从该区块之后开始扫描
     last_block = get_last_block(conn, chain, contract_address)
 
-    # 获取代币价格（调用方显式传入则用传入值，否则用 fallback 参考价）
-    if price_usd is None:
-        price_usd = FALLBACK_PRICES.get(symbol.lower(), 0.0)
+    # 获取代币价格（从数据库多源 fallback，最后用硬编码兜底）
+    price_usd = get_asset_price(conn, asset_id, symbol)
 
     all_transfers = []
     total_processed = 0
@@ -244,10 +290,6 @@ def collect_transfers(
                 to_label = "exchange" if to_exchange else "unknown"
 
                 is_to_exchange = to_exchange is not None
-
-                # 告警模式：只保留转入交易所的
-                if alarm_only and not is_to_exchange:
-                    continue
 
                 block_ts_raw = int(tx.get("timeStamp", 0))
                 if block_ts_raw > 0:

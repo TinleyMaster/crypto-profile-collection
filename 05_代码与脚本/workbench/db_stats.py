@@ -55,6 +55,8 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
             max_size=5,
             open=True,
             timeout=30,
+            max_idle=300,  # 空闲 5 分钟后回收，避免 SSL 连接被中间设备掐断
+            check=psycopg_pool.ConnectionPool.check_connection,  # 取连接时健康检查，自动重连
             kwargs={"connect_timeout": 30},
         )
     return _pool
@@ -611,7 +613,7 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                        cb.cmc_id, a.primary_sector,
                        ci.market_cap_rank,
                        cam.rank_num AS cmc_rank,
-                       cqs.market_cap
+                       COALESCE(cqs.market_cap, a.market_cap) AS market_cap
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
                 LEFT JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = cb.cmc_id
@@ -660,7 +662,9 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                         WHEN a.canonical_name ILIKE %s THEN 4
                         ELSE 5
                     END,
-                    COALESCE(cqs.market_cap, 0) DESC,
+                    -- 市值权重：优先 CMC 排名（越小越靠前），其次 CG 排名，无排名用市值降序
+                    COALESCE(cam.rank_num, ci.market_cap_rank, 999999),
+                    COALESCE(cqs.market_cap, a.market_cap, 0) DESC,
                     a.canonical_symbol
                 LIMIT %s
                 """,
@@ -2999,6 +3003,10 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
         # 读取时幂等校验引用：旧 thesis 是裸数字 citations，补全 title/url + is_inferred
         sources_list = snapshot.get("sources") or []
         _sanitize_thesis_citations(thesis, sources_list)
+    else:
+        # 降级结论：无 LLM 生成的 stance 时，基于已有数据生成机器可读结论
+        # 保证 research 页面「研究结论」卡片不为空，用户至少能看到关键指标和数据概览
+        thesis = _build_fallback_thesis(snapshot, structured_metrics, asset_id)
 
     return {
         "ok": True,
@@ -3018,6 +3026,162 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             "created_at": str(notebook["created_at"]),
             "updated_at": str(notebook["updated_at"]),
         },
+    }
+
+
+def _build_fallback_thesis(snapshot: dict, structured_metrics: dict, asset_id: int) -> dict:
+    """降级结论：无 LLM 生成的 stance 时，基于已有结构化数据生成机器可读结论。
+
+    保证 research 页面「研究结论」卡片不为空，用户至少能看到：
+    - 数据覆盖度概览（哪些维度有数据、哪些缺失）
+    - 关键市场指标（价格/市值/成交量等）
+    - 近期异动信号摘要
+    - 明确的「待人工研判」标记，避免误导
+
+    不编造 stance/conviction，统一标记为 neutral / 0，
+    thesis 正文全部来自真实数据，不做任何主观推断。
+    """
+    import datetime
+
+    structured = snapshot.get("structured") or {}
+    sources = snapshot.get("sources") or []
+    counts = snapshot.get("counts") or {}
+
+    # ── 1. 统计各维度数据覆盖度 ──
+    coverage = []
+    market = structured_metrics.get("market") or {}
+    if market.get("price") is not None:
+        coverage.append("行情数据")
+    tokenomics = structured_metrics.get("tokenomics") or {}
+    if tokenomics:
+        coverage.append("代币经济")
+    onchain = structured_metrics.get("onchain") or {}
+    if onchain:
+        coverage.append("链上持仓")
+    social = structured_metrics.get("social") or {}
+    if social:
+        coverage.append("社交热度")
+    derivatives = structured_metrics.get("derivatives") or {}
+    if derivatives:
+        coverage.append("衍生品")
+    unlock = structured_metrics.get("unlock") or {}
+    if unlock:
+        coverage.append("解锁日历")
+
+    # ── 2. 尝试获取异动信号摘要（不抛异常，失败则跳过） ──
+    signal_summary = ""
+    try:
+        sig_result = detect_asset_signals(asset_id)
+        signals = sig_result.get("signals") or []
+        if signals:
+            critical = [s for s in signals if s.get("severity") == "critical"]
+            warning = [s for s in signals if s.get("severity") == "warning"]
+            parts = []
+            if critical:
+                parts.append(f"{len(critical)} 个高危信号")
+            if warning:
+                parts.append(f"{len(warning)} 个警告信号")
+            info_count = len(signals) - len(critical) - len(warning)
+            if info_count > 0:
+                parts.append(f"{info_count} 个提示信号")
+            signal_summary = "；".join(parts)
+    except Exception:
+        pass
+
+    # ── 3. 拼装 thesis 正文（纯事实陈述，无主观判断） ──
+    thesis_items = []
+
+    # 数据覆盖度
+    if coverage:
+        thesis_items.append({
+            "point": f"当前已采集 {len(coverage)} 个维度数据：{', '.join(coverage)}。",
+            "citations": [],
+            "is_inferred": False,
+        })
+    else:
+        thesis_items.append({
+            "point": "当前暂无结构化数据，建议先等待数据采集完成。",
+            "citations": [],
+            "is_inferred": False,
+        })
+
+    # 市场关键指标摘要
+    price = market.get("price")
+    mcap = market.get("market_cap")
+    change_24h = market.get("change_24h")
+    if price is not None or mcap is not None:
+        parts = []
+        if price is not None:
+            parts.append(f"价格 ${price:,.4f}" if price < 1 else f"价格 ${price:,.2f}")
+        if mcap is not None:
+            if mcap >= 1e9:
+                parts.append(f"市值 ${mcap/1e9:.2f}B")
+            elif mcap >= 1e6:
+                parts.append(f"市值 ${mcap/1e6:.2f}M")
+            else:
+                parts.append(f"市值 ${mcap:,.0f}")
+        if change_24h is not None:
+            direction = "上涨" if change_24h >= 0 else "下跌"
+            parts.append(f"24h {direction} {abs(change_24h):.2f}%")
+        if parts:
+            thesis_items.append({
+                "point": "市场概览：" + "，".join(parts) + "。",
+                "citations": [],
+                "is_inferred": False,
+            })
+
+    # 异动信号
+    if signal_summary:
+        thesis_items.append({
+            "point": f"近期异动检测：{signal_summary}，详见异动信号卡片。",
+            "citations": [],
+            "is_inferred": False,
+        })
+
+    # 资料数量
+    total_sources = len(sources)
+    if total_sources > 0:
+        thesis_items.append({
+            "point": f"资料库已收录 {total_sources} 条资料来源，可在对话区提问获取深度分析。",
+            "citations": [],
+            "is_inferred": False,
+        })
+
+    # 明确提示：这是机器生成的降级结论
+    thesis_items.append({
+        "point": "⚠️ 本结论为系统自动生成的数据概览，尚未经过 AI 深度研判。点击「生成研究结论」可获取基于四维框架的完整分析。",
+        "citations": [],
+        "is_inferred": True,
+    })
+
+    # ── 4. 关键指标（直接透传 structured_metrics.market） ──
+    key_metrics = {}
+    if market.get("price") is not None:
+        key_metrics["price"] = market["price"]
+    if market.get("market_cap") is not None:
+        key_metrics["market_cap"] = market["market_cap"]
+    if market.get("fdv") is not None:
+        key_metrics["fdv"] = market["fdv"]
+    if market.get("volume_24h") is not None:
+        key_metrics["volume_24h"] = market["volume_24h"]
+    if market.get("change_24h") is not None:
+        key_metrics["change_24h"] = market["change_24h"]
+
+    return {
+        "thesis_id": 0,  # 0 表示降级结论，非数据库记录
+        "asset_id": asset_id,
+        "stance": "neutral",  # 无立场，避免误导
+        "conviction": 0,  # 零置信度
+        "thesis": thesis_items,
+        "dimensions": None,  # 无四维框架分析
+        "key_metrics": key_metrics,
+        "risks": [],
+        "catalysts": [],
+        "source_notebook_id": None,
+        "is_fallback": True,  # 标记为降级结论，前端可据此展示不同样式
+        "created_at": str(datetime.datetime.now()),
+        "updated_at": str(datetime.datetime.now()),
+        "structured_metrics": structured_metrics,
     }
 
 
@@ -3790,12 +3954,16 @@ def get_asset_market_history(
 ) -> dict:
     """获取资产行情历史时间序列（日级）。
 
-    数据来源：biz.asset_market_daily（由 CMC 快照聚合而来）。
+    数据来源：biz.asset_market_daily（CMC 快照聚合 + CMC 历史 API 回填）。
+
+    合并策略：同时读取 cmc（快照聚合）和 cmc_historical（历史 API 回填）两个数据源，
+    按日期合并，同一天优先使用 cmc 快照数据（更接近实时），历史 API 数据补全更早的日期。
+    这样即使快照只积累了几天，也能通过历史回填获得更长的时间序列。
 
     Args:
         asset_id: 资产 ID
         days: 取最近 N 天，默认 30 天
-        source_code: 数据源，默认 'cmc'
+        source_code: 数据源，默认 'cmc'（实际会同时查 cmc_historical 合并）
 
     Returns:
         {
@@ -3816,8 +3984,27 @@ def get_asset_market_history(
     if days > 3650:
         days = 3650
 
+    def _rows_to_series(rows) -> dict[str, dict]:
+        """把行列表转成 {date_str: item_dict} 映射，方便按日期合并。"""
+        result: dict[str, dict] = {}
+        for r in rows:
+            date_str = str(r["market_date"])
+            result[date_str] = {
+                "date": date_str,
+                "price_usd": float(r["price_usd"]) if r["price_usd"] is not None else None,
+                "market_cap": float(r["market_cap"]) if r["market_cap"] is not None else None,
+                "fdv": float(r["fdv"]) if r["fdv"] is not None else None,
+                "volume_24h": float(r["volume_24h"]) if r["volume_24h"] is not None else None,
+                "change_24h": float(r["change_24h"]) if r["change_24h"] is not None else None,
+                "change_7d": float(r["change_7d"]) if r["change_7d"] is not None else None,
+                "circulating_supply": float(r["circulating_supply"]) if r["circulating_supply"] is not None else None,
+                "total_supply": float(r["total_supply"]) if r["total_supply"] is not None else None,
+            }
+        return result
+
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 1. 主数据源：cmc 快照聚合（最新几天精度高）
             cur.execute(
                 """
                 SELECT
@@ -3838,22 +4025,37 @@ def get_asset_market_history(
                 """,
                 (asset_id, source_code, days),
             )
-            rows = cur.fetchall()
+            primary_rows = cur.fetchall()
 
-    series = []
-    for r in rows:
-        item = {
-            "date": str(r["market_date"]),
-            "price_usd": float(r["price_usd"]) if r["price_usd"] is not None else None,
-            "market_cap": float(r["market_cap"]) if r["market_cap"] is not None else None,
-            "fdv": float(r["fdv"]) if r["fdv"] is not None else None,
-            "volume_24h": float(r["volume_24h"]) if r["volume_24h"] is not None else None,
-            "change_24h": float(r["change_24h"]) if r["change_24h"] is not None else None,
-            "change_7d": float(r["change_7d"]) if r["change_7d"] is not None else None,
-            "circulating_supply": float(r["circulating_supply"]) if r["circulating_supply"] is not None else None,
-            "total_supply": float(r["total_supply"]) if r["total_supply"] is not None else None,
-        }
-        series.append(item)
+            # 2. 补充数据源：cmc_historical 历史 API 回填（更早的日期）
+            cur.execute(
+                """
+                SELECT
+                    market_date,
+                    price_usd,
+                    market_cap,
+                    fdv,
+                    circulating_supply,
+                    total_supply,
+                    volume_24h,
+                    change_24h,
+                    change_7d
+                FROM biz.asset_market_daily
+                WHERE asset_id = %s
+                  AND source_code = 'cmc_historical'
+                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                ORDER BY market_date ASC
+                """,
+                (asset_id, days),
+            )
+            hist_rows = cur.fetchall()
+
+    # 合并：primary 优先（覆盖同一天的 historical），historical 补全更早日期
+    merged = _rows_to_series(hist_rows)
+    merged.update(_rows_to_series(primary_rows))
+
+    # 按日期排序
+    series = [merged[d] for d in sorted(merged.keys())]
 
     return {
         "ok": True,
@@ -3899,16 +4101,17 @@ def detect_asset_signals(asset_id: int) -> dict:
         }
     """
     signals: list[dict] = []
+    data_status = {}  # 记录各维度数据可用性，用于输出"无信号原因"
 
     # ── 1. 价格 & 成交量信号（来自行情历史） ──
     try:
         history = get_asset_market_history(asset_id, days=14)
         series = history.get("series") or []
-        if len(series) >= 2:
+        data_status["market_days"] = len(series)
+        if len(series) >= 1:
             latest = series[-1]
-            prev = series[-2]
 
-            # 价格异动（24h 涨跌幅）
+            # 价格异动（24h 涨跌幅）—— 只要有 change_24h 字段就能检测
             change_24h = latest.get("change_24h")
             if change_24h is not None:
                 if change_24h >= 15:
@@ -3932,9 +4135,9 @@ def detect_asset_signals(asset_id: int) -> dict:
                         "source": "cmc",
                     })
 
-            # 成交量放大（24h 成交量 vs 7日均量）
+            # 成交量放大（24h 成交量 vs 7日均量）—— 需要至少 8 天数据
             vol_24h = latest.get("volume_24h")
-            if vol_24h and len(series) >= 7:
+            if vol_24h and len(series) >= 8:
                 last7_vols = [s["volume_24h"] for s in series[-8:-1] if s.get("volume_24h")]
                 if last7_vols:
                     avg_vol = sum(last7_vols) / len(last7_vols)
@@ -3948,14 +4151,19 @@ def detect_asset_signals(asset_id: int) -> dict:
                             "description": f"24h 成交量是 7 日均量的 {vol_24h / avg_vol:.1f} 倍",
                             "source": "cmc",
                         })
-    except Exception:
-        pass
+        else:
+            data_status["market_error"] = "行情历史数据不足"
+    except Exception as e:
+        data_status["market_error"] = str(e)
+        import logging
+        logging.warning(f"detect_asset_signals: market signal error: {e}")
 
     # ── 2. 衍生品信号（OI / 资金费率） ──
     try:
         deriv = get_asset_derivatives(asset_id)
         if deriv and deriv.get("ok"):
             d = deriv.get("data") or {}
+            data_status["has_derivatives"] = True
 
             # OI 变化
             oi_change = d.get("oi_change_24h_pct")
@@ -4004,13 +4212,18 @@ def detect_asset_signals(asset_id: int) -> dict:
                         "description": f"资金费率 {fr_pct:.4f}% 偏低（空头拥挤，可能有轧空机会）",
                         "source": "derivatives",
                     })
-    except Exception:
-        pass
+        else:
+            data_status["has_derivatives"] = False
+    except Exception as e:
+        data_status["derivatives_error"] = str(e)
+        import logging
+        logging.warning(f"detect_asset_signals: derivatives signal error: {e}")
 
     # ── 3. 解锁信号 ──
     try:
         pressure = compute_unlock_pressure(asset_id)
         if pressure:
+            data_status["has_unlock"] = True
             unlock_pct_30d = pressure.get("unlock_pct_30d")
             if unlock_pct_30d is not None and unlock_pct_30d > 0:
                 # 30 天解锁 > 5% 流通量算显著
@@ -4024,8 +4237,12 @@ def detect_asset_signals(asset_id: int) -> dict:
                         "description": f"未来 30 天解锁 {unlock_pct_30d:.1f}% 流通量（抛压风险）",
                         "source": "unlock",
                     })
-    except Exception:
-        pass
+        else:
+            data_status["has_unlock"] = False
+    except Exception as e:
+        data_status["unlock_error"] = str(e)
+        import logging
+        logging.warning(f"detect_asset_signals: unlock signal error: {e}")
 
     # 按严重程度排序：critical > warning > info
     severity_order = {"critical": 0, "warning": 1, "info": 2}
@@ -4036,6 +4253,7 @@ def detect_asset_signals(asset_id: int) -> dict:
         "asset_id": asset_id,
         "signals": signals,
         "signal_count": len(signals),
+        "data_status": data_status,
     }
 
 

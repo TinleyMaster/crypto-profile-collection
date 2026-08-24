@@ -448,13 +448,15 @@ def get_sector_heatmap(limit: int = 20) -> dict:
     # 过滤：市值 >= $1M（多源 fallback 估算）
     MIN_MCAP = 1_000_000
     MAX_CHANGE = 200.0  # 单币涨幅上限，防极端值
+    # 无市值代币的成交量门槛提高到 $500k，防止刷量土狗混入
+    MIN_VOLUME_FOR_NO_MCAP = 500_000
     filtered = []
     for t in tokens:
         mcap = t.get("market_cap") or 0
         if not mcap:
-            # 用成交量粗略估算：volume_24h > $100k 的也保留
+            # 用成交量粗略估算：volume_24h >= $500k 的也保留
             vol = t.get("volume_24h") or 0
-            if vol < 100_000:
+            if vol < MIN_VOLUME_FOR_NO_MCAP:
                 continue
         else:
             if mcap < MIN_MCAP:
@@ -476,7 +478,16 @@ def get_sector_heatmap(limit: int = 20) -> dict:
     sector_stats = []
     for sec, stokens in sectors.items():
         count = len(stokens)
-        avg_change = sum(t["change_24h"] for t in stokens) / count
+        # 市值加权平均涨幅（土股市值小，对均值影响降低）
+        total_mcap = sum(max(t.get("market_cap") or 0, 1_000_000) for t in stokens)
+        if total_mcap > 0:
+            weighted_change = sum(
+                t["change_24h"] * max(t.get("market_cap") or 0, 1_000_000)
+                for t in stokens
+            ) / total_mcap
+        else:
+            weighted_change = sum(t["change_24h"] for t in stokens) / count
+        avg_change = weighted_change
         avg_score = sum(t["composite_score"] for t in stokens) / count
         top = max(stokens, key=lambda x: x["composite_score"])
 
@@ -487,13 +498,19 @@ def get_sector_heatmap(limit: int = 20) -> dict:
         score_norm = min(100, avg_score / 80 * 100)
         heat_score = round(count_norm * 0.4 + change_norm * 0.3 + score_norm * 0.3, 1)
 
+        # 样本量不足的赛道降权（count < 5 时热度打折扣）
+        low_sample = count < 5
+        if low_sample:
+            sample_penalty = count / 5.0  # 3个币打6折，2个打4折，1个打2折
+            heat_score = round(heat_score * sample_penalty, 1)
+
         sector_stats.append({
             "sector": sec,
             "token_count": count,
             "avg_change_24h": round(avg_change, 2),
             "avg_score": round(avg_score, 1),
             "heat_score": heat_score,
-            "low_sample": count < 3,
+            "low_sample": low_sample,
             "top_token": {
                 "symbol": top["symbol"],
                 "name": top.get("name", ""),

@@ -278,6 +278,13 @@ TASK_DEFS = {
         "category": "数据源采集",
         "hidden": True,
     },
+    "cmc_backfill_historical": {
+        "name": "CMC 历史行情回填",
+        "description": "从 CMC 历史行情 API 回填日级行情数据到 biz.asset_market_daily，解决 market-history 仅 3 天问题。默认回填 top 500 币种最近 90 天",
+        "script": "ingest_cmc_historical_quotes.py",
+        "default_args": ["--days", "90", "--top", "500"],
+        "category": "数据源采集",
+    },
     "cmc_backfill_assets_auto": {
         "name": "CMC 资产全量入库（自动循环）",
         "description": "自动循环，每批500资产，直到所有 CMC 资产都写入 core.asset",

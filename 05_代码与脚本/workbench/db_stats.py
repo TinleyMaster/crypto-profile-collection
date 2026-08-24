@@ -1684,7 +1684,9 @@ def _ensure_research_tables(conn) -> None:
                 updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 CONSTRAINT fk_research_thesis_asset
                     FOREIGN KEY (asset_id) REFERENCES core.asset(asset_id)
-                    ON DELETE CASCADE
+                    ON DELETE CASCADE,
+                CONSTRAINT uq_research_thesis_asset_notebook
+                    UNIQUE (asset_id, source_notebook_id)
             )
         """)
         cur.execute("""
@@ -6125,11 +6127,20 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     with get_db() as conn:
         _ensure_research_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 同一资产 + 同一笔记本只保留最新一条结论，避免重复插入
             cur.execute("""
                 INSERT INTO biz.research_thesis
                     (asset_id, stance, conviction, thesis_json, key_metrics_json,
                      risks_json, catalysts_json, source_notebook_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (asset_id, source_notebook_id) DO UPDATE SET
+                    stance = EXCLUDED.stance,
+                    conviction = EXCLUDED.conviction,
+                    thesis_json = EXCLUDED.thesis_json,
+                    key_metrics_json = EXCLUDED.key_metrics_json,
+                    risks_json = EXCLUDED.risks_json,
+                    catalysts_json = EXCLUDED.catalysts_json,
+                    updated_at = NOW()
                 RETURNING thesis_id, asset_id, stance, conviction, thesis_json,
                           key_metrics_json, risks_json, catalysts_json,
                           source_notebook_id, created_at, updated_at

@@ -436,9 +436,15 @@ def compute_scores(community: dict, market: dict, trending_rank: int | None,
         total_w = sum(SCORE_WEIGHTS[k] for k in available)
         score = round(sum(v * SCORE_WEIGHTS[k] for k, v in available.items()) / total_w, 1)
 
-    # 置信度：可用维度数
+    # 置信度：先看核心社媒是否真实存在
+    has_social_signal = any([
+        _f(community.get("twitter_followers")),
+        _f(community.get("reddit_subscribers")),
+        _f(community.get("telegram_channel_user_count")),
+    ])
+    # 可用维度数
     n = len(available)
-    confidence = "high" if n >= 4 else ("medium" if n >= 3 else "low")
+    confidence = "high" if n >= 4 and has_social_signal else ("medium" if n >= 3 else "low")
 
     return {
         "score": score,

@@ -64,6 +64,7 @@ SINGLE_TABLES = [
     "biz.research_notebook",        # UNIQUE(asset_id)
     "biz.research_target",          # PK(asset_id)
     "biz.asset_token_unlocks",      # PK(asset_id), NO ACTION
+    "biz.asset_token_holders",      # PK(asset_id), NO ACTION
     "biz.asset_social_heat",        # PK(asset_id), NO ACTION
     "biz.coin_basic",               # PK(asset_id), NO ACTION
 ]

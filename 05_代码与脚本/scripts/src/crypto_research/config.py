@@ -20,6 +20,10 @@ class Settings:
     github_token: str | None = None
     # Solana 链上采集（Helius RPC，免费档即可满足持仓 Top20 / 转账监控）
     helius_api_key: str | None = None
+    # Tron 链上采集（TronGrid，免费档即可）
+    trongrid_api_key: str | None = None
+    # TON 链上采集（TON Center，免费档即可）
+    toncenter_api_key: str | None = None
     # LLM (OpenAI 兼容)
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -91,6 +95,8 @@ def get_settings(require_database: bool = True) -> Settings:
         binplorer_api_key=os.getenv("BINPLORER_API_KEY", "").strip() or None,
         github_token=os.getenv("GITHUB_TOKEN", "").strip() or None,
         helius_api_key=os.getenv("HELIUS_API_KEY", "").strip() or None,
+        trongrid_api_key=os.getenv("TRONGRID_API_KEY", "").strip() or None,
+        toncenter_api_key=os.getenv("TONCENTER_API_KEY", "").strip() or None,
         openai_api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
         openai_base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
         llm_model=os.getenv("LLM_MODEL", "").strip() or None,

@@ -375,14 +375,18 @@ def collect_transfers(
     }
 
 
-def _build_chain_sources(source: str) -> list[str]:
+def _build_chain_sources(source: str, chain: str = "eth") -> list[str]:
     """按 --source 展开为该链尝试数据源的降级顺序。
 
     explorer: 免 Key 免费源优先，公共 RPC 兜底。
     etherscan: 付费 Key 主源，公共 RPC 兜底。
     rpc: 仅公共 RPC。
     auto: explorer → etherscan(若有有效Key) → rpc。
+
+    非 EVM 链（solana/tron/ton/sui/aptos）只有单一数据源，直接返回对应类型。
     """
+    if chain in ("solana", "tron", "ton", "sui", "aptos"):
+        return [chain]  # 这些链只有一种数据源类型，由 _init_chain_client 直接处理
     if source == "explorer":
         return ["explorer", "rpc"]
     if source == "etherscan":
@@ -525,7 +529,9 @@ def main():
             )
             if chain not in chain_clients:
                 exchanges = None
-                for stype in chain_sources:
+                # 非 EVM 链用自己的源列表，EVM 链用通用 chain_sources
+                sources = _build_chain_sources(args.source, chain)
+                for stype in sources:
                     client = _init_chain_client(chain, stype, settings)[0]
                     if not client:
                         continue

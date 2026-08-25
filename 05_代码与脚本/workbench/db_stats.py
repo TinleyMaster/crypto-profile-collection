@@ -3340,8 +3340,30 @@ def _thesis_row_to_dict(row) -> dict:
     }
 
 
+def _is_self_serving_source(s: dict) -> bool:
+    """判断引用源是否为项目方自引页面（官网交易页/产品页等非独立信源）。
+
+    这类页面不能作为事实引用的依据（循环引用），在后处理中过滤掉。
+    判定：类型为 official_website 且 URL 有具体子路径（非首页）。
+    """
+    if s.get("type") != "official_website":
+        return False
+    url = (s.get("url") or "").rstrip("/")
+    # 去掉协议和域名，看是否有路径
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        # 有具体子路径（如 /trade、/product、/usdf 等）= 产品/交易页
+        if path and path != "":
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) -> dict | None:
-    """读取时幂等校验 thesis/risks 的引用：过滤越界/重复，补充 title/url，无引用标记推断。
+    """读取时幂等校验 thesis/risks 的引用：过滤越界/重复/自引，补充 title/url，无引用标记推断。
 
     旧 thesis 是落库快照（citations 为裸数字如 [1,3]，无 title/url，无 is_inferred），
     每次读取时用当前 sources 列表做后处理，确保前端展示一致。
@@ -3364,8 +3386,11 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
                     continue
                 if idx < 1 or idx > len(sources) or idx in seen_idx:
                     continue
-                seen_idx.add(idx)
                 s = sources[idx - 1]
+                # 过滤项目官网交易页/产品页的自引（循环引用）
+                if _is_self_serving_source(s):
+                    continue
+                seen_idx.add(idx)
                 cites.append({
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",
@@ -6014,10 +6039,14 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "   - 仅当最近 N 个月/周连续下降时，才可用「持续下滑」。"
         "   - 若存在反弹（如 6 月→7 月回升），必须描述为「先降后升」或「近 X 月/周整体下降但期间有反弹」。"
         "   - 若数据末尾月份带 * 号（表示预估/月度未完结），必须标注「* 为预估/不完整数据」。\n"
-        "7. 金额单位必须统一、无歧义："
-        "   - 英文/代码场景用 B=十亿、M=百万、K=千；中文场景统一用「亿」「千万」「百万」，禁止把 2.48B 写成「约2.48亿」（2.48B=24.8亿）。"
+        "7. 金额单位必须统一、无歧义：\n"
+        "   - 英文/代码场景用 B=十亿、M=百万、K=千；中文场景统一用「亿」「千万」「百万」，禁止把 2.48B 写成「约2.48亿」（2.48B=24.8亿）。\n"
         "   - 引用结构化指标 market.market_cap_usd / market.fdv_usd 时，按实际数值换算，不得篡改数量级。\n"
-        "8. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n\n"
+        "8. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n"
+        "9. 衍生品数据规则：\n"
+        "   - 若结构化指标 derivatives.total_oi_usd 存在且 > 0，sentiment 维度必须提及衍生品 OI 数据，\n"
+        "     禁止写「缺乏衍生品数据」「衍生品维度缺失」等类似表述。\n"
+        "   - 若 derivatives 数据为空，sentiment 维度可说明「衍生品数据暂缺」，但不得编造数字。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
         "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"
@@ -6074,7 +6103,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     key_metrics = est.get("key_metrics") or {}
 
     # ── Citation 后处理校验 ──
-    # 过滤无效引用（越界/重复），补充 title/url，对无有效引用的论点标记为推断
+    # 过滤无效引用（越界/重复/自引），补充 title/url，对无有效引用的论点标记为推断
     def _sanitize_citations(items: list[dict], text_key: str) -> list[dict]:
         cleaned = []
         seen_idx = set()
@@ -6087,8 +6116,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     continue
                 if idx < 1 or idx > len(sources) or idx in seen_idx:
                     continue
-                seen_idx.add(idx)
                 s = sources[idx - 1]
+                # 过滤项目官网交易页/产品页的自引（循环引用）
+                if _is_self_serving_source(s):
+                    continue
+                seen_idx.add(idx)
                 cites.append({
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",

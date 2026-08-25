@@ -4048,7 +4048,7 @@ def get_asset_market_history(
                     change_7d
                 FROM biz.asset_market_daily
                 WHERE asset_id = %s
-                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND market_date >= CURRENT_DATE - %s * INTERVAL '1 day'
                 ORDER BY market_date ASC
                 """,
                 (asset_id, days),
@@ -4408,7 +4408,7 @@ def compute_correlation_matrix(
                     FROM biz.asset_market_daily
                     WHERE asset_id = ANY(%s)
                       AND source_code IN ('cmc', 'cmc_historical')
-                      AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                      AND market_date >= CURRENT_DATE - %s * INTERVAL '1 day'
                       AND {value_col} IS NOT NULL
                       AND {value_col} > 0
                 ) sub
@@ -4590,7 +4590,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                 cur.execute("""
                     SELECT * FROM biz.asset_derivatives
                     WHERE asset_id = %s
-                      AND fetched_at > NOW() - INTERVAL '%s seconds'
+                      AND fetched_at > NOW() - %s * INTERVAL '1 second'
                 """, (asset_id, CACHE_TTL))
                 row = cur.fetchone()
                 if row:
@@ -4902,7 +4902,7 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
                 SELECT rec_date, rank, symbol, name, chain, contract, sector,
                        source_count, composite_score, price_usd, market_cap_usd
                 FROM biz.daily_recommendation
-                WHERE rec_date >= CURRENT_DATE - INTERVAL '%s days'
+                WHERE rec_date >= CURRENT_DATE - %s * INTERVAL '1 day'
                   AND rank <= %s
                 ORDER BY rec_date DESC, rank ASC
             """, (days, top_n))
@@ -6300,7 +6300,7 @@ def get_onchain_holder_trend(asset_id: int, days: int = 30) -> dict:
                 FROM biz.onchain_holder_snapshot hs
                 INNER JOIN core.asset a ON a.asset_id = hs.asset_id
                 WHERE hs.asset_id = %s
-                  AND hs.snapshot_date >= CURRENT_DATE - INTERVAL '%s days'
+                  AND hs.snapshot_date >= CURRENT_DATE - %s * INTERVAL '1 day'
                 ORDER BY hs.chain, hs.snapshot_date ASC
             """, (asset_id, days))
             rows = [dict(r) for r in cur.fetchall()]

@@ -53,11 +53,11 @@ def _get_latest_snapshot_sql() -> str:
     return """
         SELECT DISTINCT ON (cmc_id)
                cmc_id,
-               price,
+               price_usd,
                market_cap,
+               fdv,
                total_supply,
                circulating_supply,
-               max_supply,
                cmc_rank,
                ath,
                quote_time
@@ -77,11 +77,11 @@ def collect_sync_rows(conn) -> list[dict]:
                a.total_supply AS asset_ts,
                a.ath_usd,
                l.cmc_rank, l.market_cap AS cmc_market_cap,
+               l.fdv AS cmc_fdv,
                l.circulating_supply AS cmc_cs,
                l.total_supply AS cmc_ts,
-               l.max_supply AS cmc_max_supply,
                l.ath AS cmc_ath,
-               l.price AS cmc_price,
+               l.price_usd AS cmc_price,
                l.quote_time
         FROM core.asset a
         JOIN core.asset_source_map m
@@ -173,13 +173,10 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
             cur.execute(upd, (
                 r["cmc_rank"],
                 r["cmc_market_cap"],
-                # FDV = price * max_supply（若 max_supply 存在），否则用 market_cap 近似
-                (float(r["cmc_price"]) * float(r["cmc_max_supply"]))
-                    if r.get("cmc_max_supply") and r.get("cmc_price")
-                    else None,
+                r["cmc_fdv"],
                 r["cmc_cs"],
                 r["cmc_ts"],
-                r["cmc_max_supply"],
+                None,  # max_supply 快照表无此字段
                 r["cmc_ath"],
                 r["quote_time"],
                 r["asset_id"],

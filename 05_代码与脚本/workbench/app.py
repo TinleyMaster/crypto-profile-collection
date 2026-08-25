@@ -580,6 +580,20 @@ TASK_DEFS = {
         "default_args": [],
         "category": "数据源采集",
     },
+    "kol_backtest_batch": {
+        "name": "KOL 信号回测",
+        "description": "对未回测的 KOL prediction 信号用日频行情做简化回测（默认止损10%/止盈20%/持仓30天），结果写回 kol_signal.backtest_* 并更新博主胜率",
+        "script": "kol_backtest_batch.py",
+        "default_args": [],
+        "category": "KOL",
+    },
+    "social_heat_batch": {
+        "name": "社交热度批量采集",
+        "description": "按市值降序批量采集社交热度（跳过稳定币），每日 500 币",
+        "script": "phase_c_social_heat_batch.py",
+        "default_args": ["--limit", "500", "--delay", "0.5", "--timeout", "60"],
+        "category": "投研数据提取",
+    },
     "rescan_low_conf_no_content": {
         "name": "历史无正文回扫",
         "description": "回扫低置信度 ai_content（conf≤0.6）链接，重新抓正文确认：抓不到则标 needs_browser 交 SPA 重抓，抓到则保留",

@@ -30,7 +30,10 @@ from crypto_research.db.conn import get_connection
 
 
 def get_pending_assets(conn, limit: int) -> list[dict]:
-    """获取有 CG 映射但尚无社交热度的资产列表（按市值降序，优先采集高价值资产）。"""
+    """获取有 CG 映射但尚无社交热度的资产列表（按市值降序，优先采集高价值资产）。
+
+    跳过稳定币（asset_type='stablecoin'），避免浪费配额。
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -41,6 +44,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
             JOIN core.asset_source_map asm
                 ON asm.asset_id = a.asset_id AND asm.source_code = 'cg'
             WHERE asm.source_asset_key IS NOT NULL
+              AND a.asset_type <> 'stablecoin'
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = a.asset_id
@@ -59,7 +63,9 @@ def get_total_pending(conn) -> int:
             """
             SELECT COUNT(*)
             FROM core.asset_source_map asm
+            JOIN core.asset a ON a.asset_id = asm.asset_id
             WHERE asm.source_code = 'cg' AND asm.source_asset_key IS NOT NULL
+              AND a.asset_type <> 'stablecoin'
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = asm.asset_id

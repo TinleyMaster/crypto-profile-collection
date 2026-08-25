@@ -95,13 +95,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("cmc_quote_snapshot", "0 */6 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每 6 小时，覆盖全部 CMC 映射资产）"),
     ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）"),
     ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）"),
-    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币）"),
+    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币，跳过稳定币）"),
     ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）"),
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
     ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）"),
     ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）"),
     ("unlock_event_sync", "30 10 * * *", "sync_unlock_events_from_json.py", [], "解锁事件 JSON→结构化同步（每日）"),
     ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）"),
+    ("kol_backtest_batch", "0 12 * * *", "kol_backtest_batch.py", [], "KOL 信号回测（每日，对新 prediction 信号补回测）"),
 
     # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══
     # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）"),

@@ -85,17 +85,38 @@ class AptosClient:
                 return None
         return None
 
+    # ── 工具方法 ───────────────────────────────────────────
+    @staticmethod
+    def _is_valid_coin_type(coin_type: str) -> bool:
+        """判断是否为完整的 Aptos coin_type 格式：address::module::name。
+
+        数据库中部分 aptos 合约地址只有 0x 地址（缺少 module::struct），
+        这种格式无法用于 CoinInfo / CoinStore API 查询，需跳过。
+        """
+        if not coin_type:
+            return False
+        parts = coin_type.split("::")
+        return len(parts) >= 3 and all(p for p in parts)
+
     # ── 代币元数据 ─────────────────────────────────────────
     def get_token_decimals(self, coin_type: str) -> int:
         """查询 Aptos Coin 精度（decimals），带缓存。
 
         默认 8 位（Aptos 标准），通过 coin info API 查询。
         coin_type 格式如 "0x1::aptos_coin::AptosCoin"。
+        若 coin_type 不是完整的 address::module::name 格式，直接返回默认 8。
         """
         if coin_type in self._decimals_cache:
             return self._decimals_cache[coin_type]
 
-        data = self._get(f"/accounts/{coin_type}/resource/0x1::coin::CoinInfo<{coin_type}>")
+        if not self._is_valid_coin_type(coin_type):
+            self._decimals_cache[coin_type] = 8
+            return 8
+
+        # coin_type 格式：address::module::name
+        # CoinInfo 资源在 coin_type 的发布地址账户下
+        coin_address = coin_type.split("::")[0]
+        data = self._get(f"/accounts/{coin_address}/resource/0x1::coin::CoinInfo<{coin_type}>")
         decimals = 8  # Aptos 默认精度
         if data and isinstance(data, dict):
             decimals = data.get("data", {}).get("decimals", 8)
@@ -116,8 +137,12 @@ class AptosClient:
 
         通过 Aptos 全节点 API 查询 Coin 转账事件。
         page=2 时返回空（增量）。
+        若 coin_type 不是完整的 address::module::name 格式，返回空列表。
         """
         if page > 1:
+            return []
+
+        if not self._is_valid_coin_type(coin_type):
             return []
 
         limit = min(offset, 50)

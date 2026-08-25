@@ -412,9 +412,10 @@ Playwright 无头浏览器抓取（30 秒轮询，按博主增量拉取）
 帖子存档（biz.kol_post，平台+帖子ID 唯一约束去重）
         │
         ▼
-LLM AI 结构化分类（11 个字段，规则强制校验）
+LLM AI 结构化分类（14 个字段，规则强制校验）
   post_type / direction / symbol / entry_condition / entry_price
-  stop_loss / take_profit / leverage / already_entered / has_pnl_number / confidence
+  stop_loss / take_profit / leverage / support_level / resistance_level
+  already_entered / has_pnl_number / confidence / signal_summary
         │
         ▼
 币种匹配（core.asset，精确匹配 + 50+ 别名 + 交易对后缀剥离）
@@ -424,13 +425,23 @@ LLM AI 结构化分类（11 个字段，规则强制校验）
   邮件内容：信号详情 + 原文摘要 + 交叉验证数据（解锁/转账/资金费率/OI）
 ```
 
-### AI 分类规则（优先级从高到低）
+### AI 分类体系（四分类，优先级从高到低）
 
-1. **`already_entered = true` → 强制 `after_action`**：博主明确说已进场/持仓/开仓
-2. **`has_pnl_number = true` → 强制 `after_action`**：出现具体盈亏数字（+2341 USDT 等）
-3. **晒持仓截图 / 回顾性语言** → 倾向 `after_action`（"我说过""果然""已经突破"）
-4. **明确入场条件 + 未进场 + 无盈亏数字 + 无持仓截图** → `prediction`（实时喊单）
-5. **只讲方向无明确操作** → `analysis`（纯行情分析）
+| 类型 | 含义 | 跟单价值 |
+|---|---|---|
+| `noise` | 与交易/行情完全无关（生活、营销、广告、闲聊、转发等） | 无 |
+| `after_action` | 事后晒单：已进场或已有盈亏结果 | 中（验证用） |
+| `prediction` | 前瞻喊单：给出明确入场条件，博主尚未进场 | 高（可跟单） |
+| `analysis` | 纯行情分析/观点分享，无明确操作建议 | 低（参考） |
+
+**判断优先级（从高到低）：**
+
+1. **第 1 优先级：noise**（无交易信号，直接排除）——与交易完全无关、纯营销广告、纯闲聊、纯转发、只有图片无文字等
+2. **第 2 优先级：after_action**（事后晒单）——博主明确表示已进场 / 出现具体盈亏数字 / 晒持仓截图 / 回顾性语言 + 交易结果
+3. **第 3 优先级：prediction**（前瞻喊单）——有明确入场条件（突破型/回踩型/现价型/区间型）+ 未进场 + 无盈亏数字；有止损止盈位也算；有压力位/支撑位 + 操作建议也算
+4. **第 4 优先级：analysis**（纯分析）——只讲方向判断、行情分析、宏观观点，但无明确入场条件、无止损止盈、未给出操作建议
+
+**规则强制修正**：`already_entered = true` 或 `has_pnl_number = true` 时，无条件强制设为 `after_action`（但 noise 优先级更高）。
 
 ### 数据库表（biz schema）
 
@@ -438,7 +449,7 @@ LLM AI 结构化分类（11 个字段，规则强制校验）
 |----|------|---------|
 | `biz.kol_profile` | 博主档案 | platform_code, platform_user_id, nickname, follower_count, is_active, last_post_id, win_rate, total_signals |
 | `biz.kol_post` | 帖子原文（全量存档） | platform_post_id（唯一）, content_text, image_urls, posted_at, raw_json, ai_failed, ai_retry_count |
-| `biz.kol_signal` | AI 分析信号 | post_type, direction, symbol, entry_price, stop_loss, take_profit, leverage, already_entered, has_pnl_number, confidence, is_alerted, backtest_*（回测预留） |
+| `biz.kol_signal` | AI 分析信号 | post_type（四分类：prediction/after_action/analysis/noise）, direction, symbol, entry_condition, entry_price, stop_loss, take_profit, leverage, **support_level, resistance_level**, already_entered, has_pnl_number, confidence, is_alerted, backtest_*（回测预留） |
 
 ### Web 面板功能（3 个 Tab）
 
@@ -460,8 +471,20 @@ LLM AI 结构化分类（11 个字段，规则强制校验）
 ### 本期不做
 
 - 自动跟单交易（只做信号提醒，不接交易所 API）
-- 历史信号回测逻辑（只预留数据库字段）
 - 图片 OCR 识别持仓截图（首期通过文本上下文判断）
+
+### 信号回测
+
+`kol_backtest_batch.py` 对 `prediction` 类信号用日频行情（`biz.asset_market_daily`）做简化回测，结果写回 `kol_signal.backtest_*` 字段。
+
+**回测规则：**
+- **入场价**：信号发布当日收盘价（或 `entry_price`，优先 entry_price）
+- **止损**：`stop_loss`（缺失则按方向默认 -10%）
+- **止盈**：`take_profit`（缺失则按方向默认 +20%）
+- **持仓窗口**：30 天
+- **结果判定**：先触发止损/止盈则记为对应命中；都没触发则按期末价计算 PnL
+
+**幂等保证**：`backtest_done = TRUE` 的信号跳过，可重复运行。
 
 ---
 
@@ -737,16 +760,21 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   ├── bin/                # 入口脚本（scheduler / 工作台调用）
 │   │   │   ├── ingest_*.py     # 数据源采集（CG/CMC/DL）
 │   │   │   ├── bootstrap_*.py  # source → core 批量映射
-│   │   │   ├── backfill_*.py   # 历史数据回填（含链接分类阶段1/阶段2）
+│   │   │   ├── backfill_*.py   # 历史数据回填（含链接分类阶段1/阶段2、KOL信号重标）
 │   │   │   ├── refresh_*.py    # 核心资产/文档入口刷新
 │   │   │   ├── supplement_*.py # 双源(DexScreener+Binance)兜底补充
 │   │   │   ├── phase_b2_*.py   # 深度文档发现 + SPA 爬取 + AI 噪声清理 + 第三方专项(审计/评级/融资/异常) + 自有站点主题抢救
 │   │   │   ├── phase_c_*.py    # 代币经济学提取 + 社交热度
 │   │   │   ├── phase_chain_*.py # 链上数据 + 解锁数据
+│   │   │   ├── phase_derivatives_batch.py # 衍生品资金面批量采集
+│   │   │   ├── phase_watchlist_monitor.py # 解锁追踪监控 + 告警
 │   │   │   ├── etl_*.py        # ETL 脚本（行情历史日级聚合等）
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选
-│   │   │   └── collect_*.py    # GitHub 活跃度采集 + 批量补齐编排
+│   │   │   ├── collect_*.py    # GitHub 活跃度采集 + 批量补齐编排
+│   │   │   ├── kol_*.py        # KOL 监控调度 + 批量回测
+│   │   │   └── run_*_pipeline.py # 一键流水线（CMC/CG/DL）
+│   │   ├── migrations/         # 数据库迁移脚本（fix_*.sql）
 │   │   ├── src/crypto_research/ # 可复用模块
 │   │   │   ├── clients/        # API 客户端
 │   │   │   │   ├── cmc_client.py         # CoinMarketCap
@@ -762,7 +790,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   └── utils/          # 通用工具
 │   │   └── sql/                # SQL 模板
 │   │       ├── core/           # 核心表（insert_asset, upsert_asset_source_map）
-│   │       ├── biz/            # 业务表（doc_source_entry, onchain_*, tokenomics, unlocks）
+│   │       ├── biz/            # 业务表（doc_source_entry, onchain_*, tokenomics, unlocks, kol_*）
 │   │       ├── src_cmc/        # CMC 数据源
 │   │       ├── src_cg/         # CoinGecko 数据源
 │   │       ├── src_dl/         # DeFiLlama 数据源
@@ -793,6 +821,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │           ├── research.html   # 一键投研笔记本页
 │           └── kol.html        # KOL 信号监控面板
 │
+├── 测试报告/                   # 工单、验收报告、偏差分析等测试文档
 ├── 07_测试与验收/              # 诊断脚本与报告
 ├── Dockerfile                  # 工作台 Docker 镜像（构建上下文=仓库根，docker build . 即用此文件）
 └── README.md                   # 本文件

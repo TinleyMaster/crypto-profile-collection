@@ -74,17 +74,14 @@ def collect_sync_rows(conn) -> list[dict]:
     sql = f"""
         WITH latest AS ({_get_latest_snapshot_sql()})
         SELECT a.asset_id, a.canonical_symbol,
-               a.market_cap_rank, a.market_cap, a.fdv,
+               a.market_cap_rank, a.market_cap,
                a.circulating_supply AS asset_cs,
                a.total_supply AS asset_ts,
                a.ath_usd,
                cam.rank_num AS cmc_rank,
                l.market_cap AS cmc_market_cap,
-               l.fdv AS cmc_fdv,
                l.circulating_supply AS cmc_cs,
                l.total_supply AS cmc_ts,
-               l.max_supply AS cmc_max_supply,
-               l.price_usd AS cmc_price,
                l.quote_time
         FROM core.asset a
         JOIN core.asset_source_map m
@@ -160,11 +157,8 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
         UPDATE core.asset
         SET market_cap_rank = %s,
             market_cap = %s,
-            fdv = %s,
             circulating_supply = %s,
             total_supply = %s,
-            max_supply = %s,
-            ath_usd = %s,
             last_ranked_at = %s,
             updated_at = NOW()
         WHERE asset_id = %s
@@ -177,11 +171,8 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
             cur.execute(upd, (
                 r["cmc_rank"],
                 r["cmc_market_cap"],
-                r["cmc_fdv"],
                 r["cmc_cs"],
                 r["cmc_ts"],
-                r["cmc_max_supply"],
-                r["ath_usd"],  # ath 快照表无此字段，保留原值
                 r["quote_time"],
                 r["asset_id"],
             ))

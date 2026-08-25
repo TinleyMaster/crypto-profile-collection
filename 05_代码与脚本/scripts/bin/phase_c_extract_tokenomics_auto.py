@@ -49,6 +49,49 @@ BATCH_SIZE = 10
 MAX_ROUNDS = 100
 MAX_CONSECUTIVE_FAILURES = 5
 
+# tokenomics 相关关键词（URL / doc_type 命中即视为候选，不命中直接跳过，不调用 LLM）
+TOKENOMICS_KEYWORDS = [
+    "tokenomic", "tokenomics", "token-economics", "token_economics",
+    "代币经济", "代币分配", "代币供应", "代币模型",
+    "whitepaper", "litepaper", "white-paper", "lite-paper",
+    "vesting", "unlock", "emission", "inflation", "supply",
+    "staking", "governance", "utility", "distribution",
+    "economics", "token-distribution", "token-allocation",
+    "allocation", "lockup", "cliff",
+]
+
+# 直接跳过的 doc_type（社媒/代码仓库/浏览器等，不可能有 tokenomics 内容）
+SKIP_DOC_TYPES = {
+    "twitter", "x", "telegram", "discord", "reddit", "facebook",
+    "github", "linkedin", "medium", "youtube",
+    "etherscan", "bscscan", "solscan", "blockchain_explorer",
+    "audit_report", "security_assessment",
+    "blog", "news", "press_release",
+}
+
+
+def _has_tokenomics_keyword(url: str, doc_type: str | None) -> bool:
+    """URL 或 doc_type 含 tokenomics 关键词即返回 True。"""
+    if doc_type and doc_type.lower() in SKIP_DOC_TYPES:
+        return False
+    text = (url or "").lower()
+    return any(kw in text for kw in TOKENOMICS_KEYWORDS)
+
+
+def _filter_tokenomics_links(all_links: list[dict]) -> list[dict]:
+    """从所有链接中按关键词预筛 tokenomics 相关链接，返回命中的列表。"""
+    hits = []
+    for d in all_links:
+        url = d.get("source_url") or ""
+        doc_type = d.get("doc_type")
+        # doc_asset 中的文件（PDF 等）始终保留，可能是白皮书
+        if d.get("file_name"):
+            hits.append(d)
+            continue
+        if _has_tokenomics_keyword(url, doc_type):
+            hits.append(d)
+    return hits
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="代币经济学批量提取（自动循环）")
@@ -139,13 +182,21 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
 
     print(f"  收集到 {len(all_links)} 个文档链接")
 
-    # AI 筛选相关链接
+    # 关键词预筛：无 tokenomics 相关链接直接跳过，不浪费 LLM token
+    prefiltered = _filter_tokenomics_links(all_links)
+    if not prefiltered:
+        print(f"  SKIP: 无 tokenomics 相关链接（关键词预筛未命中），跳过，不调用 LLM")
+        return False
+
+    print(f"  关键词预筛命中 {len(prefiltered)} 个链接")
+
+    # AI 筛选相关链接（只在预筛后链接数 > MAX_PAGES 时才调用 LLM）
     try:
-        relevant_urls = select_relevant_links(llm, asset, all_links)
+        relevant_urls = select_relevant_links(llm, asset, prefiltered)
     except Exception as e:
         print(f"  AI 链接筛选失败: {e}")
         # 降级：取前 10 个
-        relevant_urls = [l["source_url"] for l in all_links[:10]]
+        relevant_urls = [l["source_url"] for l in prefiltered[:10]]
 
     print(f"  AI 筛选出 {len(relevant_urls)} 个相关链接")
 
@@ -159,7 +210,7 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> bool:
         print(f"  抓取: {url[:80]}")
         # 查找原始 doc_type（用于日志标记）
         doc_type = "unknown"
-        for d in all_links:
+        for d in prefiltered:
             if d["source_url"] == url:
                 doc_type = d["doc_type"]
                 break

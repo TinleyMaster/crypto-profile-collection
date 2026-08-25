@@ -4388,23 +4388,34 @@ def compute_correlation_matrix(
 
     asset_id_list = [a["asset_id"] for a in assets]
 
-    # --- 2. 批量拉取行情历史 ---
+    # --- 2. 批量拉取行情历史（cmc 快照优先，cmc_historical 回填兜底，按日期合并） ---
     value_col = "price_usd" if metric == "price" else "volume_24h"
 
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"""
-                SELECT asset_id, market_date, {value_col} AS val
-                FROM biz.asset_market_daily
-                WHERE asset_id = ANY(%s)
-                  AND source_code = %s
-                  AND market_date >= CURRENT_DATE - INTERVAL '%s days'
-                  AND {value_col} IS NOT NULL
-                  AND {value_col} > 0
+                SELECT asset_id, market_date, val
+                FROM (
+                    SELECT asset_id, market_date, {value_col} AS val,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY asset_id, market_date
+                               ORDER BY CASE source_code
+                                   WHEN 'cmc' THEN 0
+                                   WHEN 'cmc_historical' THEN 1
+                                   ELSE 99 END
+                           ) AS rn
+                    FROM biz.asset_market_daily
+                    WHERE asset_id = ANY(%s)
+                      AND source_code IN ('cmc', 'cmc_historical')
+                      AND market_date >= CURRENT_DATE - INTERVAL '%s days'
+                      AND {value_col} IS NOT NULL
+                      AND {value_col} > 0
+                ) sub
+                WHERE rn = 1
                 ORDER BY asset_id, market_date ASC
                 """,
-                (asset_id_list, source_code, days),
+                (asset_id_list, days),
             )
             rows = cur.fetchall()
 
@@ -5176,9 +5187,21 @@ def get_divergence_signals(asset_id: int) -> dict:
             try:
                 cur.execute("""
                     SELECT change_24h, change_7d, market_cap, price_usd
-                    FROM biz.asset_market_daily
-                    WHERE asset_id = %s AND source_code = 'cmc'
-                    ORDER BY market_date DESC LIMIT 1
+                    FROM (
+                        SELECT change_24h, change_7d, market_cap, price_usd,
+                               ROW_NUMBER() OVER (
+                                   ORDER BY CASE source_code
+                                       WHEN 'cmc' THEN 0
+                                       WHEN 'cmc_historical' THEN 1
+                                       ELSE 99 END,
+                                   market_date DESC
+                               ) AS rn
+                        FROM biz.asset_market_daily
+                        WHERE asset_id = %s
+                          AND source_code IN ('cmc', 'cmc_historical')
+                    ) sub
+                    WHERE rn = 1
+                    LIMIT 1
                 """, (asset_id,))
                 md = cur.fetchone()
                 if md:
@@ -5468,15 +5491,27 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 raise_map = {}
 
             # 3f. 日级行情表（与 /api/research/<id>/market-history 同源，最可靠）
+            #     cmc 快照优先，cmc_historical 回填兜底，按优先级取每个资产最新一条
             try:
                 cur.execute("""
-                    SELECT DISTINCT ON (asset_id)
-                           asset_id, price_usd, market_cap, fdv,
+                    SELECT asset_id, price_usd, market_cap, fdv,
                            circulating_supply, total_supply
-                    FROM biz.asset_market_daily
-                    WHERE asset_id = ANY(%s)
-                      AND source_code = 'cmc'
-                    ORDER BY asset_id, market_date DESC
+                    FROM (
+                        SELECT asset_id, price_usd, market_cap, fdv,
+                               circulating_supply, total_supply,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY asset_id
+                                   ORDER BY CASE source_code
+                                       WHEN 'cmc' THEN 0
+                                       WHEN 'cmc_historical' THEN 1
+                                       ELSE 99 END,
+                                   market_date DESC
+                               ) AS rn
+                        FROM biz.asset_market_daily
+                        WHERE asset_id = ANY(%s)
+                          AND source_code IN ('cmc', 'cmc_historical')
+                    ) sub
+                    WHERE rn = 1
                 """, (all_ids,))
                 market_daily_map = {r["asset_id"]: dict(r) for r in cur.fetchall()}
             except psycopg.errors.UndefinedTable:
@@ -5802,14 +5837,27 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     market_snapshot_time = None
 
     # 1. 从 biz.asset_market_daily 取（与实时 API 同源，最可靠）
+    #    cmc 快照优先，cmc_historical 回填兜底
     try:
         with get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT price_usd, market_cap, fdv, market_date
-                    FROM biz.asset_market_daily
-                    WHERE asset_id = %s AND source_code = 'cmc'
-                    ORDER BY market_date DESC LIMIT 1
+                    FROM (
+                        SELECT price_usd, market_cap, fdv, market_date,
+                               ROW_NUMBER() OVER (
+                                   ORDER BY CASE source_code
+                                       WHEN 'cmc' THEN 0
+                                       WHEN 'cmc_historical' THEN 1
+                                       ELSE 99 END,
+                                   market_date DESC
+                               ) AS rn
+                        FROM biz.asset_market_daily
+                        WHERE asset_id = %s
+                          AND source_code IN ('cmc', 'cmc_historical')
+                    ) sub
+                    WHERE rn = 1
+                    LIMIT 1
                 """, (asset_id,))
                 row = cur.fetchone()
                 if row:

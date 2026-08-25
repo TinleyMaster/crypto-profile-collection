@@ -28,25 +28,35 @@ from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 
 # 多行关联表：asset_id 无唯一约束（或唯一键与 asset_id 无关），直接 UPDATE。
+# 注意：asset_sector / asset_market_daily 有复合主键，迁移前需先删冲突行。
 MANY_TABLES = [
     "core.asset_contract",          # NO ACTION, UNIQUE(chain, contract_address)
     "core.asset_source_map",        # CASCADE
     "core.protocol_asset_link",     # CASCADE
     "core.asset_contract_map",      # 无外键
-    "biz.doc_source_entry",         # CASCADE
+    "biz.doc_source_entry",         # CASCADE（已在 _apply_group 中单独去重）
     "biz.doc_asset",                # CASCADE
     "biz.doc_crawl_staging",        # CASCADE
     "biz.doc_source_notebooklm",    # CASCADE, PK(asset_id, source_entry_id)
     "biz.asset_hacks",              # CASCADE
     "biz.asset_raises",             # CASCADE
-    "biz.asset_sector",             # CASCADE
+    "biz.asset_sector",             # CASCADE, PK(asset_id, sector, source) — 有冲突需先删
     "biz.asset_tokenomics",         # CASCADE
     "biz.asset_unlock_event",       # CASCADE
-    "biz.asset_market_daily",       # CASCADE
+    "biz.asset_market_daily",       # CASCADE, PK(asset_id, market_date, source_code) — 有冲突需先删
     "biz.onchain_holder_snapshot",  # CASCADE
     "biz.onchain_transfer_log",     # 无外键
     "biz.research_url",             # 无外键, UNIQUE(asset_id, url)
 ]
+
+# 有复合唯一键的多行表：迁移前先删 drop 中与 keep 冲突的行（保留 keep 的）。
+# key 是表名，value 是除 asset_id 外的主键列列表。
+CONFLICT_AWARE_TABLES = {
+    "biz.asset_sector": ["sector", "source"],
+    "biz.asset_market_daily": ["market_date", "source_code"],
+    "biz.research_url": ["url"],
+    "core.asset_contract": ["chain", "contract_address"],
+}
 
 # 单行关联表：PK/UNIQUE(asset_id)，迁移时先「条件更新」再「删 drop 残留」。
 SINGLE_TABLES = [
@@ -149,8 +159,19 @@ def _apply_group(conn, group: dict) -> dict:
                   AND COALESCE(d.protocol_id, -1) = COALESCE(k.protocol_id, -1)
             """, (drop_id, keep_id))
 
-            # 1) 多行表：直接迁移
+            # 1) 多行表：有复合唯一键的先删冲突行，再迁移
             for tbl in MANY_TABLES:
+                # 冲突感知表：先删 drop 中与 keep 键重复的行（保留 keep）
+                if tbl in CONFLICT_AWARE_TABLES:
+                    key_cols = CONFLICT_AWARE_TABLES[tbl]
+                    join_cond = " AND ".join(f"d.{c} = k.{c}" for c in key_cols)
+                    cur.execute(f"""
+                        DELETE FROM {tbl} d
+                        USING {tbl} k
+                        WHERE d.asset_id = %s AND k.asset_id = %s
+                          AND {join_cond}
+                    """, (drop_id, keep_id))
+
                 cur.execute(
                     f"UPDATE {tbl} SET asset_id = %s WHERE asset_id = %s",
                     (keep_id, drop_id),

@@ -74,24 +74,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("chain_holder_snapshot_base_arb", "30 6 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（每日）"),
     ("chain_holder_snapshot_solana", "0 7 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日）"),
 
-    # ═══ 赛道分类刷新 ═══
-    ("refresh_sectors", "0 6 * * *", "run_refresh_sectors.py", [], "赛道标签全量刷新（每日兜底）"),
+    # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
+    ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],
+     "每日数据同步/矫正总调度（赛道→去重→文档入口→第三方→supply对齐→diff→链接重标→解锁→KOL回测）"),
 
-    # ═══ 资产去重（每日兜底，防止 symbol 污染）═══
-    ("asset_dedup_daily", "30 6 * * *", "dedup_assets.py", ["--apply"], "资产完全同名重复合并（每日兜底）"),
-
-    # ═══ 官网 primary 裁决 ═══
-    ("refresh_primary_website", "30 6 * * *", "run_refresh_primary_website.py", [], "官网 primary 裁决（每日兜底）"),
-
-    # ═══ 文档入口补充（自动循环）═══
-    ("cmc_refresh_docs_auto", "0 6 * * *", "refresh_doc_source_entries_from_cmc_auto.py", [], "CMC 补充文档入口"),
-    ("cg_refresh_docs_auto", "0 6 * * *", "refresh_doc_source_entries_from_cg_auto.py", [], "CG 补充文档入口"),
-    ("dl_refresh_docs_auto", "0 6 * * *", "refresh_doc_source_entries_from_dl_auto.py", [], "DL 补充文档入口"),
-    ("dual_supplement_auto", "0 7 * * *", "supplement_doc_entries_dual_auto.py", [], "双源(DexScreener+Binance)补充文档入口"),
-
-    # ═══ 第三方专项 ═══
-    ("third_party_auto", "0 8 * * *", "phase_b2_third_party_auto.py", [], "第三方评级/审计回填"),
-    ("third_party_raises_auto", "0 8 * * *", "phase_b2_third_party_raises_auto.py", [], "TGE/融资轮次采集"),
+    # ═══ 每周专项 ═══
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）"),
 
     # ═══ 投研数据提取 ═══
@@ -104,9 +91,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
     ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）"),
     ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）"),
-    ("unlock_event_sync", "30 10 * * *", "sync_unlock_events_from_json.py", [], "解锁事件 JSON→结构化同步（每日）"),
     ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）"),
-    ("kol_backtest_batch", "0 12 * * *", "kol_backtest_batch.py", [], "KOL 信号回测（每日，对新 prediction 信号补回测）"),
 
     # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══
     # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）"),

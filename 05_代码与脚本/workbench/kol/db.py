@@ -280,8 +280,8 @@ def insert_signal(data: dict) -> dict | None:
     fields = [
         "post_id", "profile_id", "asset_id", "post_type", "direction",
         "symbol", "entry_condition", "entry_price", "stop_loss",
-        "take_profit", "leverage", "already_entered", "has_pnl_number",
-        "confidence",
+        "take_profit", "leverage", "support_level", "resistance_level",
+        "already_entered", "has_pnl_number", "confidence",
     ]
     columns = ", ".join(fields)
     placeholders = ", ".join([f"%({f})s" for f in fields])

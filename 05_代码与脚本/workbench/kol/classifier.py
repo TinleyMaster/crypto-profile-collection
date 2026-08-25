@@ -3,12 +3,11 @@ KOL 帖子 AI 信号分类与结构化提取。
 
 调用系统已有的 llm_client，对帖子内容进行分析，输出结构化信号字段。
 
-核心判断规则（优先级从高到低）：
-  1. already_entered = true → post_type = after_action
-  2. has_pnl_number = true  → post_type = after_action
-  3. 持仓截图 / 回顾性语言 → 倾向 after_action
-  4. 明确入场条件 + 未进场 + 无盈亏数字 → prediction
-  5. 只讲方向无操作 → analysis
+核心判断流程（先粗分再细分，避免保守偏见导致漏标）：
+  1. 先判断是否为 noise（无交易相关内容 → 直接丢弃）
+  2. 非 noise 则判断是否有明确交易信号
+  3. 有信号 → 细分 prediction / after_action
+  4. 无信号但有行情分析 → analysis
 """
 from __future__ import annotations
 
@@ -45,32 +44,85 @@ def _get_llm() -> LLMClient | None:
 
 
 SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任务是分析 KOL（关键意见领袖）发布的帖子，
-判断其是否为有跟单价值的「实时喊单」，并提取结构化交易信息。
+判断其类型并提取结构化交易信息。
 
-## 核心判断规则（必须严格遵守）
+## 分类总览（四选一）
 
-### 最高优先级：判断是否为「事后晒单」
-只要满足以下任一条件，post_type 必须为 "after_action"：
-1. **博主明确表示已经进场/持仓/开仓**：出现"我已经进场了"、"我已开多"、"我已建仓"、"我拿着"、"我在持有"、"我已经上车"、"已入场"、"已布局"等表述
-2. **出现具体盈亏数字**：如"+2341 USDT"、"赚了 5000u"、"浮盈 30%"、"亏损 2000刀"、"盈利 $1500"等
-3. **晒持仓截图**：帖子中提到"截图"、"持仓图"、"实盘"、"交割单"，或上下文明显在晒收益
-4. **回顾性语言**：出现"我说过"、"我就知道"、"果然"、"已经突破"、"如我所料"、"之前说的"、"应验了"等表述
+| 类型 | 含义 | 跟单价值 |
+|---|---|---|
+| noise | 与交易/行情完全无关的内容（生活、营销、广告、闲聊、转发等） | 无 |
+| analysis | 纯行情分析/观点分享，无明确操作建议 | 低（参考） |
+| prediction | 前瞻喊单：给出明确入场条件，博主尚未进场 | 高（可跟单） |
+| after_action | 事后晒单：已进场或已有盈亏结果 | 中（验证用） |
 
-### 「实时喊单」(prediction) 的严格定义
-只有**同时满足**以下所有条件，才标记为 "prediction"：
-1. 给出了**明确的入场条件**（如"突破 66600 做多"、"跌破 50000 做空"、"回踩 63000 接多"、"现价直接进"）
-2. **未表示已进场**（没有"我已经"、"已开"、"已进"等表述）
-3. **无具体盈亏数字**
-4. **无持仓截图**
+## 判断优先级（从高到低）
 
-### 「纯行情分析」(analysis) 的定义
-只讲方向判断、行情分析，但**无明确入场条件、无止损止盈、未说要进场**的，标记为 "analysis"。
+### 第 1 优先级：noise（无交易信号，直接排除）
+满足以下任一条件即为 noise：
+- 内容与加密货币/交易/行情完全无关（生活日常、美食、旅游、情感、政治等）
+- 纯营销广告（项目推广、空投、拉群、付费社群、带单广告等）
+- 纯闲聊/吐槽/灌水，无实质观点
+- 纯转发/搬运，无自己的分析
+- 只有图片/表情，无有效文字内容
+
+### 第 2 优先级：after_action（事后晒单）
+满足以下任一条件即为 after_action：
+1. **博主明确表示已经进场/持仓/开仓**：出现"我已经进场了"、"我已开多"、"我已建仓"、"我拿着"、"我在持有"、"我已经上车"、"已入场"、"已布局"、"上车了"、"进场了"等表述
+2. **出现具体盈亏数字**：如"+2341 USDT"、"赚了 5000u"、"浮盈 30%"、"亏损 2000刀"、"盈利 $1500"、"止损了"、"止盈了"等
+3. **晒持仓截图/交割单**：帖子中提到"截图"、"持仓图"、"实盘"、"交割单"、"收益图"，或上下文明显在晒收益
+4. **回顾性语言 + 交易结果**：出现"我说过"、"我就知道"、"果然"、"已经突破"、"如我所料"、"之前说的"、"应验了"等，且讨论的是已发生的交易结果
+
+### 第 3 优先级：prediction（前瞻喊单）
+**只要有明确的入场/操作建议，且未说已进场，就是 prediction**。不要过度保守。
+
+典型特征（满足 2 条以上即可）：
+1. **给出明确入场条件**：
+   - 突破型："突破 66600 做多"、"站稳 50000 上方进多"
+   - 回踩型："回踩 63000 接多"、"跌到 48000 抄底"
+   - 现价型："现价直接进"、"当前价位开多"、"这里可以空"
+   - 区间型："62000-63000 区间布局多单"
+2. **有止损/止盈位**（即使没说入场价，有明确的止损止盈也算）
+3. **有明确的方向 + 操作建议**："建议做多"、"可以空了"、"逢低买入"、"逢高做空"
+4. **博主未表示已进场**（没有"我已经"、"已开"、"已进"、"我在"等表述）
+
+**重要**：
+- 有入场价 + 止损 + 止盈的 = prediction（这是最标准的喊单格式）
+- 只说"现价做多"但没给止损的 = prediction（不完整喊单，但仍是喊单）
+- 说"等突破再进" = prediction（有条件的前瞻喊单）
+- 有压力位/支撑位 + 操作建议 = prediction
+
+### 第 4 优先级：analysis（纯分析）
+只讲方向判断、行情分析、宏观观点，但**无明确入场条件、无止损止盈、未给出操作建议**的，标记为 analysis。
+
+典型特征：
+- "BTC 看涨"、"ETH 可能下跌"（只有方向判断，无操作建议）
+- "现在是牛市"、"熊市来了"（宏观判断）
+- 技术分析：画趋势线、讲指标、分析形态，但没说"怎么做"
+- 基本面分析：讲项目、讲叙事、讲逻辑，但没给交易建议
+
+## 关键字段提取
+
+除了分类，还要尽可能提取以下结构化字段：
+
+- **direction**: long / short / neutral — 整体方向判断
+- **symbol**: 标的币种符号，大写，如 BTC、ETH、SOL。无则为 null
+- **entry_condition**: 入场条件文本描述（如"突破 66600 做多"），无则为 null
+- **entry_price**: 明确给出的入场价格数值，无则为 null
+- **stop_loss**: 止损价格，无则为 null
+- **take_profit**: 止盈价格，无则为 null
+- **leverage**: 杠杆倍数（数字），无则为 null
+- **support_level**: 支撑位价格（帖子中提到的关键支撑），无则为 null
+- **resistance_level**: 压力位价格（帖子中提到的关键压力/阻力），无则为 null
+- **already_entered**: 博主是否已经进场持仓（布尔值）
+- **has_pnl_number**: 帖子中是否出现具体盈亏数字（布尔值）
+- **confidence**: 你对本次分类的置信度，0~1 之间的小数
 
 ## 输出格式
+
 严格输出 JSON，不要任何解释文字，不要 markdown 代码块。字段如下：
 
 {
-  "post_type": "prediction | after_action | analysis",
+  "post_type": "noise | prediction | after_action | analysis",
   "direction": "long | short | neutral",
   "symbol": "BTC",
   "entry_condition": "突破 66600 做多",
@@ -78,31 +130,21 @@ SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任�
   "stop_loss": 65000.0,
   "take_profit": 70000.0,
   "leverage": 5.0,
+  "support_level": 62000.0,
+  "resistance_level": 68000.0,
   "already_entered": false,
   "has_pnl_number": false,
   "confidence": 0.95
 }
-
-字段说明：
-- post_type: 帖子类型，三选一
-- direction: 方向，long=做多，short=做空，neutral=中性/无明确方向
-- symbol: 标的币种符号，大写，如 BTC、ETH、SOL。无则为 null
-- entry_condition: 入场条件文本描述，无则为 null
-- entry_price: 明确给出的入场价格数值，无则为 null
-- stop_loss: 止损价格，无则为 null
-- take_profit: 止盈价格，无则为 null
-- leverage: 杠杆倍数（数字），无则为 null
-- already_entered: 博主是否已经进场持仓（布尔值）
-- has_pnl_number: 帖子中是否出现具体盈亏数字（布尔值）
-- confidence: 你对本次分类的置信度，0~1 之间的小数
 
 ## 注意事项
 - 如果帖子提到多个币种，取最主要的那个
 - 价格数字要提取为数值类型，不要带货币符号
 - 如果某个字段无法确定，设为 null（布尔字段除外）
 - 中文帖子用中文理解，英文帖子用英文理解
-- 宁可保守标记为 analysis，也不要误判为 prediction
-- already_entered 是最高优先级，只要博主说自己已经进场了，不管其他条件如何，都是 after_action
+- **不要过度保守**：有明确交易建议的就标 prediction，不要因为"不够完整"就降级为 analysis
+- **already_entered 是 after_action 的最高优先级触发条件**，只要博主说自己已经进场了，就是 after_action
+- **noise 类型的帖子其他字段可以全为 null**，只要 post_type 正确即可
 """
 
 
@@ -160,7 +202,7 @@ def classify_post(content_text: str, image_count: int = 0) -> dict[str, Any] | N
 def _normalize_result(data: dict) -> dict:
     """规范化 AI 返回的字段，确保类型正确。"""
     post_type = str(data.get("post_type", "analysis")).lower().strip()
-    if post_type not in ("prediction", "after_action", "analysis"):
+    if post_type not in ("prediction", "after_action", "analysis", "noise"):
         post_type = "analysis"
 
     direction = data.get("direction")
@@ -193,6 +235,8 @@ def _normalize_result(data: dict) -> dict:
     stop_loss = _to_float(data.get("stop_loss"))
     take_profit = _to_float(data.get("take_profit"))
     leverage = _to_float(data.get("leverage"))
+    support_level = _to_float(data.get("support_level"))
+    resistance_level = _to_float(data.get("resistance_level"))
 
     already_entered = bool(data.get("already_entered", False))
     has_pnl_number = bool(data.get("has_pnl_number", False))
@@ -205,7 +249,8 @@ def _normalize_result(data: dict) -> dict:
         confidence = 0.5
 
     # 规则强制：already_entered 或 has_pnl_number → 无条件 after_action（最高优先级）
-    if already_entered or has_pnl_number:
+    # 但 noise 优先级更高（完全无关的内容不应该被标记为 after_action）
+    if post_type != "noise" and (already_entered or has_pnl_number):
         post_type = "after_action"
 
     return {
@@ -217,6 +262,8 @@ def _normalize_result(data: dict) -> dict:
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "leverage": leverage,
+        "support_level": support_level,
+        "resistance_level": resistance_level,
         "already_entered": already_entered,
         "has_pnl_number": has_pnl_number,
         "confidence": confidence,

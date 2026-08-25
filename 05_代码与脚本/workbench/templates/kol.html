@@ -218,6 +218,12 @@
             color: #9ca3af;
         }
 
+        .tag-noise {
+            background: rgba(156, 163, 175, 0.1);
+            color: #9ca3af;
+            opacity: 0.7;
+        }
+
         .tag-long {
             background: rgba(220, 38, 38, 0.15);
             color: #f87171;
@@ -568,6 +574,7 @@
                     <option value="prediction">实时喊单</option>
                     <option value="after_action">事后晒单</option>
                     <option value="analysis">纯分析</option>
+                    <option value="noise">噪音/无关</option>
                 </select>
                 <select id="filterDirection">
                     <option value="">全部方向</option>
@@ -808,7 +815,7 @@
         }
 
         function typeLabel (t) {
-            return { prediction: '实时喊单', after_action: '事后晒单', analysis: '纯分析' }[t] || t;
+            return { prediction: '实时喊单', after_action: '事后晒单', analysis: '纯分析', noise: '噪音' }[t] || t;
         }
         function dirLabel (d) {
             return { long: '做多', short: '做空', neutral: '中性' }[d] || d;
@@ -873,6 +880,14 @@
                         <div class="detail-item">
                             <div class="label">杠杆</div>
                             <div class="val">${s.leverage ? Number(s.leverage) + 'x' : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">支撑位</div>
+                            <div class="val" style="color:#4ade80">${s.support_level ? '$' + Number(s.support_level).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">压力位</div>
+                            <div class="val" style="color:#f87171">${s.resistance_level ? '$' + Number(s.resistance_level).toLocaleString() : '—'}</div>
                         </div>
                         <div class="detail-item">
                             <div class="label">已进场</div>

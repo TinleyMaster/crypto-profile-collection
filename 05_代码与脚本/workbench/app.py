@@ -580,6 +580,13 @@ TASK_DEFS = {
         "default_args": ["--apply"],
         "category": "维护",
     },
+    "sync_core_supply": {
+        "name": "主表 supply/市值对齐 CMC",
+        "description": "以 CMC 最新快照为权威源，同步 core.asset 的 circulating_supply/total_supply/market_cap/fdv/rank/ath 字段，消除跨源不一致与长尾缩放脏数据",
+        "script": "sync_core_supply_from_cmc.py",
+        "default_args": ["--sync"],
+        "category": "数据源采集",
+    },
     "ingest_dl_tvl_daily": {
         "name": "TVL 每日聚合",
         "description": "将 src_dl.protocol_list 的最新 TVL 快照聚合到 biz.protocol_metric_daily（幂等写入）",

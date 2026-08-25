@@ -128,13 +128,17 @@ def main() -> int:
         return code
 
     # ⑨ coin_basic 消费层刷新（依赖③+②，确保 cmc_id/defillama_slug/logo 等字段最新）
-    # ⑨ coin_basic 消费层刷新（依赖③+②，确保 cmc_id/defillama_slug/logo 等字段最新）
     code, _ = _run(_python("phase_a_build_core.py", "--step", "coin_basic"), "⑨ coin_basic 刷新")
     if code != 0:
         return code
 
-    # ⑩ 资产去重清理（依赖③，合并完全同名重复，防止 symbol 污染）
-    code, _ = _run(_python("dedup_assets.py", "--apply"), "⑩ 资产去重")
+    # ⑩ 主表 supply/市值对齐（依赖 CMC 快照，以 CMC 为权威源同步回 core.asset）
+    code, _ = _run(_python("sync_core_supply_from_cmc.py", "--sync"), "⑩ supply 对齐")
+    if code != 0:
+        return code
+
+    # ⑪ 资产去重清理（依赖③，合并完全同名重复，防止 symbol 污染）
+    code, _ = _run(_python("dedup_assets.py", "--apply"), "⑪ 资产去重")
     if code != 0:
         return code
 

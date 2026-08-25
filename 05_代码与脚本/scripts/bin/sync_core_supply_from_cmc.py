@@ -58,8 +58,10 @@ def _get_latest_snapshot_sql() -> str:
                fdv,
                total_supply,
                circulating_supply,
-               cmc_rank,
-               ath,
+               max_supply,
+               market_cap_dominance,
+               percent_change_24h,
+               percent_change_7d,
                quote_time
         FROM src_cmc.cmc_asset_quote_snapshot
         WHERE cmc_id IS NOT NULL
@@ -76,11 +78,12 @@ def collect_sync_rows(conn) -> list[dict]:
                a.circulating_supply AS asset_cs,
                a.total_supply AS asset_ts,
                a.ath_usd,
-               l.cmc_rank, l.market_cap AS cmc_market_cap,
+               cam.rank_num AS cmc_rank,
+               l.market_cap AS cmc_market_cap,
                l.fdv AS cmc_fdv,
                l.circulating_supply AS cmc_cs,
                l.total_supply AS cmc_ts,
-               l.ath AS cmc_ath,
+               l.max_supply AS cmc_max_supply,
                l.price_usd AS cmc_price,
                l.quote_time
         FROM core.asset a
@@ -89,7 +92,8 @@ def collect_sync_rows(conn) -> list[dict]:
          AND m.source_code = 'cmc'
          AND m.is_primary = TRUE
         JOIN latest l ON l.cmc_id = m.source_asset_key::bigint
-        ORDER BY COALESCE(l.cmc_rank, 999999), a.asset_id
+        LEFT JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = l.cmc_id
+        ORDER BY COALESCE(cam.rank_num, 999999), a.asset_id
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(sql)
@@ -176,8 +180,8 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
                 r["cmc_fdv"],
                 r["cmc_cs"],
                 r["cmc_ts"],
-                None,  # max_supply 快照表无此字段
-                r["cmc_ath"],
+                r["cmc_max_supply"],
+                r["ath_usd"],  # ath 快照表无此字段，保留原值
                 r["quote_time"],
                 r["asset_id"],
             ))

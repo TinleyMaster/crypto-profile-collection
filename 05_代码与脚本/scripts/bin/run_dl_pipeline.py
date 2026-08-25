@@ -7,6 +7,8 @@ DL 一键流水线：按正确依赖顺序自动执行 DefiLlama 的 3 个步骤
   ③ 补充文档入口           refresh_doc_source_entries_from_dl_auto.py → biz.doc_source_entry
   ④ 官网 primary 裁决       run_refresh_primary_website.py             → biz.doc_source_entry.is_primary
   ⑤ 赛道标签全量刷新       run_refresh_sectors.py                     → biz.asset_sector + core.asset.primary_sector
+  ⑥ TVL 业务层聚合           ingest_dl_tvl_daily.py                      → biz.protocol_metric_daily
+  ⑦ 资产去重清理           dedup_assets.py --apply                     → core.asset（合并完全同名重复）
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -120,6 +122,11 @@ def main() -> int:
 
     # ⑥ TVL 业务层聚合（依赖①，必须在 src_dl.protocol_list 更新后执行）
     code, _ = _run(_python("ingest_dl_tvl_daily.py"), "⑥ TVL 聚合")
+    if code != 0:
+        return code
+
+    # ⑦ 资产去重清理（依赖②，合并完全同名重复，防止 symbol 污染）
+    code, _ = _run(_python("dedup_assets.py", "--apply"), "⑦ 资产去重")
     if code != 0:
         return code
 

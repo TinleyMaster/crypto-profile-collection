@@ -77,6 +77,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ 赛道分类刷新 ═══
     ("refresh_sectors", "0 6 * * *", "run_refresh_sectors.py", [], "赛道标签全量刷新（每日兜底）"),
 
+    # ═══ 资产去重（每日兜底，防止 symbol 污染）═══
+    ("asset_dedup_daily", "30 6 * * *", "dedup_assets.py", ["--apply"], "资产完全同名重复合并（每日兜底）"),
+
     # ═══ 官网 primary 裁决 ═══
     ("refresh_primary_website", "30 6 * * *", "run_refresh_primary_website.py", [], "官网 primary 裁决（每日兜底）"),
 

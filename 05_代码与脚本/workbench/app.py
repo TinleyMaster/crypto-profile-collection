@@ -573,6 +573,13 @@ TASK_DEFS = {
         "category": "维护",
         "hidden": True,
     },
+    "asset_dedup": {
+        "name": "资产同名重复合并",
+        "description": "合并 core.asset 中 symbol+name 完全相同的真重复记录（如 CG 空壳 + CMC 有合约），迁移所有关联数据后删除冗余",
+        "script": "dedup_assets.py",
+        "default_args": ["--apply"],
+        "category": "维护",
+    },
     "ingest_dl_tvl_daily": {
         "name": "TVL 每日聚合",
         "description": "将 src_dl.protocol_list 的最新 TVL 快照聚合到 biz.protocol_metric_daily（幂等写入）",

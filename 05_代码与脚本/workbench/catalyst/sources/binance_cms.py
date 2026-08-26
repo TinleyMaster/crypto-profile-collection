@@ -15,6 +15,7 @@ import re
 
 from ..base import BaseCatalystSource
 from ..models import CatalystItem
+from . import register_source
 
 logger = logging.getLogger(__name__)
 
@@ -244,3 +245,35 @@ def _extract_pairs_from_text(text: str) -> list[str]:
         seen.add(pair)
         result.append(pair)
     return result
+
+
+# ── 各 catalog 子类注册（每个 catalog 对应一个独立 source_code）──
+
+@register_source
+class BinanceListingSource(BinanceCMSNewsSource):
+    """币安上新公告（catalog 48）。"""
+    source_code = "binance_listing"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("catalog_id", 48)
+        super().__init__(**kwargs)
+
+
+@register_source
+class BinanceNewsSource(BinanceCMSNewsSource):
+    """币安综合新闻（catalog 49）。"""
+    source_code = "binance_news"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("catalog_id", 49)
+        super().__init__(**kwargs)
+
+
+@register_source
+class BinanceAPISource(BinanceCMSNewsSource):
+    """币安 API 更新（catalog 51）。"""
+    source_code = "binance_api"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("catalog_id", 51)
+        super().__init__(**kwargs)

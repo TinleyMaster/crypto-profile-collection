@@ -6206,11 +6206,14 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     catalysts = est.get("catalysts") or []
     key_metrics = est.get("key_metrics") or {}
 
-    # ── 催化剂后处理：校验 catalyst_id 有效性，补全来源信息，向后兼容
-    if catalysts and catalysts_list:
+    # ── 催化剂后处理：校验 catalyst_id 有效性，补全来源信息，确保真实催化剂入库
+    if catalysts_list:
         _valid_ids = {c["catalyst_id"] for c in catalysts_list}
         _id_map = {c["catalyst_id"]: c for c in catalysts_list}
         _sanitized_catalysts = []
+        _used_ids = set()
+
+        # 1. 处理 LLM 返回的催化剂
         for cat in catalysts:
             if not isinstance(cat, dict):
                 continue
@@ -6226,9 +6229,25 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     cat["timing"] = src["published_at"][:10]
                 cat["catalyst_id"] = int(cid)
                 _sanitized_catalysts.append(cat)
+                _used_ids.add(int(cid))
             elif cat.get("catalyst"):
                 # 无 ID 但有描述：保留（可能是 LLM 从 unlock 等推导的）
                 _sanitized_catalysts.append(cat)
+
+        # 2. 补充 DB 中存在但 LLM 未引用的真实催化剂（确保 catalysts_json 有真实 catalyst_id）
+        #    最多补 5 条（按时间倒序取最新的），避免数组过长
+        _missing = [c for c in catalysts_list if c["catalyst_id"] not in _used_ids]
+        for src in _missing[:5]:
+            _sanitized_catalysts.append({
+                "catalyst_id": src["catalyst_id"],
+                "catalyst": src["summary"] or src["title"],
+                "timing": src["published_at"][:10] if src.get("published_at") else None,
+                "source_code": src["source_code"],
+                "event_type": src.get("event_type") or "other",
+                "sentiment": src.get("sentiment") or "neutral",
+                "_auto_added": True,  # 标记为自动补充，非 LLM 引用
+            })
+
         catalysts = _sanitized_catalysts
 
     # ── Citation 后处理校验 ──

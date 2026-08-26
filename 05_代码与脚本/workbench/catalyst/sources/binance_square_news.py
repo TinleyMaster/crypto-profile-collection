@@ -18,6 +18,7 @@ from datetime import datetime
 
 from ..base import BaseCatalystSource
 from ..models import CatalystItem
+from . import register_source
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ from scraper import BinanceSquareScraper, ScrapedPost  # noqa: E402
 BINANCE_NEWS_USERNAME = "Binance_News"
 
 
+@register_source
 class BinanceSquareNewsSource(BaseCatalystSource):
     """币安广场 Binance News 账号催化剂源。
 

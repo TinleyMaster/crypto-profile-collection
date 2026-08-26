@@ -25,6 +25,8 @@ class ScrapedPost:
     post_url: str = ""
     posted_at: str = ""  # ISO 8601 字符串
     raw_json: dict = field(default_factory=dict)
+    # 币安广场特有：关联交易对（tradingPairsV2[].symbol），催化剂场景用
+    trading_pairs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -346,6 +348,18 @@ class BinanceSquareScraper(BaseScraper):
         else:
             post_url = f"https://www.binance.com/zh-CN/square/post/{post_id}"
 
+        # 关联交易对（tradingPairsV2[].symbol），催化剂场景用
+        trading_pairs: list[str] = []
+        tp_list = item.get("tradingPairsV2") or []
+        if isinstance(tp_list, list):
+            for tp in tp_list:
+                if isinstance(tp, dict):
+                    sym = tp.get("symbol") or tp.get("pair") or ""
+                    if sym:
+                        trading_pairs.append(str(sym).upper())
+                elif isinstance(tp, str):
+                    trading_pairs.append(tp.upper())
+
         return ScrapedPost(
             platform_post_id=post_id,
             content_text=content,
@@ -353,6 +367,7 @@ class BinanceSquareScraper(BaseScraper):
             post_url=post_url,
             posted_at=posted_at,
             raw_json=item,
+            trading_pairs=trading_pairs,
         )
 
     def discover_creators(

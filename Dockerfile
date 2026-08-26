@@ -22,10 +22,12 @@ RUN apt-get update && playwright install-deps chromium \
 COPY 05_代码与脚本/scripts/src /app/scripts/src
 COPY 05_代码与脚本/scripts/sql /app/scripts/sql
 COPY 05_代码与脚本/scripts/bin /app/scripts/bin
+COPY 05_代码与脚本/scripts/migrations /app/scripts/migrations
 
 # 复制 workbench 应用
 COPY 05_代码与脚本/workbench/*.py /app/
 COPY 05_代码与脚本/workbench/kol /app/kol
+COPY 05_代码与脚本/workbench/catalyst /app/catalyst
 COPY 05_代码与脚本/workbench/templates /app/templates
 COPY 05_代码与脚本/workbench/supervisord.conf /app/supervisord.conf
 

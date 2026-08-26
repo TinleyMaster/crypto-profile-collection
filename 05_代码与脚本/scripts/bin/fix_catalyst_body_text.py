@@ -15,10 +15,15 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "workbench"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
-import db_stats  # noqa: E402
+import psycopg  # noqa: E402
+import psycopg.rows  # noqa: E402
+from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.db.conn import get_connection  # noqa: E402
 
 
 def _extract_text_from_content_json(content_json) -> str:
@@ -73,31 +78,26 @@ def _strip_html(html: str) -> str:
     return text.strip()
 
 
-def fetch_polluted(limit: int = 100) -> list[dict]:
+def fetch_polluted(conn, limit: int = 100) -> list[dict]:
     """获取 body_text 疑似 JSON 污染的记录。"""
-    conn = db_stats.get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT catalyst_id, source_code, body_text, body_html, raw_json
-        FROM biz.asset_catalyst
-        WHERE body_text IS NOT NULL
-          AND body_text LIKE '{%'
-          AND raw_json IS NOT NULL
-        ORDER BY catalyst_id
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    cols = ["catalyst_id", "source_code", "body_text", "body_html", "raw_json"]
-    return [dict(zip(cols, row)) for row in rows]
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT catalyst_id, source_code, body_text, body_html, raw_json
+            FROM biz.asset_catalyst
+            WHERE body_text IS NOT NULL
+              AND body_text LIKE '{%'
+              AND raw_json IS NOT NULL
+            ORDER BY catalyst_id
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
-def fix_one(cat: dict, dry_run: bool = False) -> tuple[str, int]:
+def fix_one(conn, cat: dict, dry_run: bool = False) -> tuple[str, int]:
     """修复单条，返回 (新 body_text, 字符数变化)。"""
     raw = cat.get("raw_json")
     if isinstance(raw, str):
@@ -117,15 +117,11 @@ def fix_one(cat: dict, dry_run: bool = False) -> tuple[str, int]:
         new_text = _strip_html(cat["body_html"])
 
     if not dry_run and new_text:
-        conn = db_stats.get_db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE biz.asset_catalyst SET body_text = %s WHERE catalyst_id = %s",
-            (new_text, cat["catalyst_id"]),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE biz.asset_catalyst SET body_text = %s WHERE catalyst_id = %s",
+                (new_text, cat["catalyst_id"]),
+            )
 
     return new_text, len(new_text) - old_len
 
@@ -137,39 +133,42 @@ def main():
     parser.add_argument("--batch-size", type=int, default=100, help="每批查询数量")
     args = parser.parse_args()
 
+    settings = get_settings(require_database=not args.dry_run)
+
     total_fixed = 0
     total_skipped = 0
 
-    while True:
-        batch = fetch_polluted(args.batch_size)
-        if not batch:
-            print("没有发现 JSON 污染的记录，完成。")
-            break
+    with get_connection(settings.database_url) as conn:
+        while True:
+            batch = fetch_polluted(conn, args.batch_size)
+            if not batch:
+                print("没有发现 JSON 污染的记录，完成。")
+                break
 
-        print(f"\n获取到 {len(batch)} 条疑似污染的记录")
+            print(f"\n获取到 {len(batch)} 条疑似污染的记录")
 
-        for cat in batch:
+            for cat in batch:
+                if args.max_items and total_fixed >= args.max_items:
+                    break
+
+                cid = cat["catalyst_id"]
+                new_text, delta = fix_one(conn, cat, dry_run=args.dry_run)
+
+                if not new_text:
+                    total_skipped += 1
+                    print(f"  [{cid}] ✗ 无法提取文本，跳过")
+                    continue
+
+                preview = new_text[:80].replace("\n", " ")
+                status = "DRY" if args.dry_run else "OK"
+                print(f"  [{cid}] {status} 字符变化: {delta:+d} | {preview}")
+                total_fixed += 1
+
             if args.max_items and total_fixed >= args.max_items:
                 break
 
-            cid = cat["catalyst_id"]
-            new_text, delta = fix_one(cat, dry_run=args.dry_run)
-
-            if not new_text:
-                total_skipped += 1
-                print(f"  [{cid}] ✗ 无法提取文本，跳过")
-                continue
-
-            preview = new_text[:80].replace("\n", " ")
-            status = "DRY" if args.dry_run else "OK"
-            print(f"  [{cid}] {status} 字符变化: {delta:+d} | {preview}")
-            total_fixed += 1
-
-        if args.max_items and total_fixed >= args.max_items:
-            break
-
-        if len(batch) < args.batch_size:
-            break
+            if len(batch) < args.batch_size:
+                break
 
     print(f"\n完成：修复 {total_fixed} 条，跳过 {total_skipped} 条"
           + ("（dry-run 模式，未实际修改）" if args.dry_run else ""))

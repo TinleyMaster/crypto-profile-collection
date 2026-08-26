@@ -13,37 +13,170 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "workbench"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
-import db_stats  # noqa: E402
-from catalyst.linker import map_pairs_to_asset_ids, extract_pairs_from_text  # noqa: E402
+import psycopg  # noqa: E402
+import psycopg.rows  # noqa: E402
+from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.db.conn import get_connection  # noqa: E402
 
 
-def fetch_all_catalysts(limit: int = 500, offset: int = 0) -> list[dict]:
+# ---------------------------------------------------------------------------
+# linker 核心逻辑（内联自 catalyst/linker.py，避免依赖 workbench）
+# ---------------------------------------------------------------------------
+
+# symbol(大写) -> asset_id 缓存
+_symbol_asset_cache: dict[str, int | None] = {}
+
+# 常见 quote 币种，用于拆分交易对
+_QUOTE_ASSETS = (
+    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD",
+    "BTC", "ETH", "BNB", "SOL", "XRP",
+)
+
+
+def _extract_base_symbol(pair: str) -> str | None:
+    """从交易对中提取 base symbol（大写）。"""
+    if not pair:
+        return None
+    pair = pair.upper().strip()
+    for quote in _QUOTE_ASSETS:
+        if pair.endswith(quote) and len(pair) > len(quote):
+            base = pair[: -len(quote)]
+            if len(base) >= 2 and any(c.isalpha() for c in base):
+                return base
+    return None
+
+
+def extract_pairs_from_text(text: str) -> list[str]:
+    """从正文中提取交易对（cashtag 兜底）。"""
+    if not text:
+        return []
+    pairs: list[str] = []
+    seen: set[str] = set()
+
+    # 模式 1：$XXXUSDT 或 $XXX
+    for m in re.finditer(r"\$([A-Z0-9]{2,20})(USDT|USDC|BTC|ETH|BNB)?\b", text):
+        base = m.group(1)
+        quote = m.group(2) or "USDT"
+        pair = base + quote
+        if pair not in seen and any(c.isalpha() for c in base):
+            seen.add(pair)
+            pairs.append(pair)
+
+    # 模式 2：直接 XXXUSDT
+    for m in re.finditer(r"\b([A-Z0-9]{2,20})USDT\b", text):
+        base = m.group(1)
+        if not any(c.isalpha() for c in base):
+            continue
+        if base in ("USD", "USDC", "BUSD", "TUSD", "USDP", "FDUSD"):
+            continue
+        pair = base + "USDT"
+        if pair not in seen:
+            seen.add(pair)
+            pairs.append(pair)
+
+    return pairs
+
+
+def map_pairs_to_asset_ids(
+    pairs: list[str],
+    conn,
+    source_hint: str = "binance",
+) -> list[int]:
+    """将交易对列表映射为 asset_id 列表（多资产）。"""
+    if not pairs:
+        return []
+
+    asset_ids: list[int] = []
+    seen: set[int] = set()
+
+    for pair in pairs:
+        base = _extract_base_symbol(pair)
+        if not base:
+            continue
+
+        # 查缓存
+        if base in _symbol_asset_cache:
+            aid = _symbol_asset_cache[base]
+            if aid is not None and aid not in seen:
+                seen.add(aid)
+                asset_ids.append(aid)
+            continue
+
+        # 查库：优先 source_hint 来源的 source_asset_key
+        row = conn.execute(
+            """
+            SELECT a.asset_id
+            FROM core.asset a
+            JOIN core.asset_source_map m ON a.asset_id = m.asset_id
+            WHERE m.source_code = %s
+              AND UPPER(m.source_asset_key) = %s
+            LIMIT 1
+            """,
+            (source_hint, base),
+        ).fetchone()
+        if row:
+            aid = row["asset_id"]
+            _symbol_asset_cache[base] = aid
+            if aid not in seen:
+                seen.add(aid)
+                asset_ids.append(aid)
+            continue
+
+        # 退一步：asset 表的 canonical_symbol
+        row = conn.execute(
+            """
+            SELECT asset_id
+            FROM core.asset
+            WHERE UPPER(canonical_symbol) = %s
+            LIMIT 1
+            """,
+            (base,),
+        ).fetchone()
+        if row:
+            aid = row["asset_id"]
+            _symbol_asset_cache[base] = aid
+            if aid not in seen:
+                seen.add(aid)
+                asset_ids.append(aid)
+            continue
+
+        # 没找到，缓存 None
+        _symbol_asset_cache[base] = None
+
+    return asset_ids
+
+
+# ---------------------------------------------------------------------------
+# 业务逻辑
+# ---------------------------------------------------------------------------
+
+
+def fetch_all_catalysts(conn, limit: int = 500, offset: int = 0) -> list[dict]:
     """获取所有催化剂（分批）。"""
-    conn = db_stats.get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT catalyst_id, source_code, title, body_text, related_pairs
-        FROM biz.asset_catalyst
-        ORDER BY catalyst_id
-        LIMIT %s OFFSET %s
-        """,
-        (limit, offset),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT catalyst_id, source_code, title, body_text, related_pairs
+            FROM biz.asset_catalyst
+            ORDER BY catalyst_id
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
+        )
+        rows = cur.fetchall()
 
-    cols = ["catalyst_id", "source_code", "title", "body_text", "related_pairs"]
     result = []
     for row in rows:
-        d = dict(zip(cols, row))
+        d = dict(row)
         # related_pairs 可能是 list 或 str
         if isinstance(d["related_pairs"], str):
             try:
@@ -56,11 +189,11 @@ def fetch_all_catalysts(limit: int = 500, offset: int = 0) -> list[dict]:
     return result
 
 
-def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int], str]:
+def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int]]:
     """对单条催化剂做资产关联。
 
     Returns:
-        (trading_pairs_asset_ids, cashtag_asset_ids, link_source_desc)
+        (trading_pairs_asset_ids, cashtag_asset_ids)
     """
     related_pairs = cat.get("related_pairs") or []
     body_text = cat.get("body_text") or ""
@@ -82,7 +215,7 @@ def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int], str]:
         pair_set = set(pair_asset_ids)
         cashtag_asset_ids = [aid for aid in all_ids if aid not in pair_set]
 
-    return pair_asset_ids, cashtag_asset_ids, ""
+    return pair_asset_ids, cashtag_asset_ids
 
 
 def insert_links(catalyst_id: int, asset_ids: list[int], link_source: str,
@@ -92,24 +225,22 @@ def insert_links(catalyst_id: int, asset_ids: list[int], link_source: str,
         return 0
 
     added = 0
-    cur = conn.cursor()
-    for aid in asset_ids:
-        try:
-            cur.execute(
-                """
-                INSERT INTO biz.catalyst_asset_link
-                    (catalyst_id, asset_id, link_source, confidence)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (catalyst_id, asset_id) DO NOTHING
-                """,
-                (catalyst_id, aid, link_source, confidence),
-            )
-            if cur.rowcount > 0:
-                added += 1
-        except Exception as e:
-            print(f"    写入关联失败 catalyst_id={catalyst_id}, asset_id={aid}: {e}")
-    conn.commit()
-    cur.close()
+    with conn.cursor() as cur:
+        for aid in asset_ids:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO biz.catalyst_asset_link
+                        (catalyst_id, asset_id, link_source, confidence)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (catalyst_id, asset_id) DO NOTHING
+                    """,
+                    (catalyst_id, aid, link_source, confidence),
+                )
+                if cur.rowcount > 0:
+                    added += 1
+            except Exception as e:
+                print(f"    写入关联失败 catalyst_id={catalyst_id}, asset_id={aid}: {e}")
     return added
 
 
@@ -120,27 +251,28 @@ def main():
     parser.add_argument("--batch-size", type=int, default=500, help="每批查询数量")
     args = parser.parse_args()
 
+    settings = get_settings(require_database=not args.dry_run)
+
     total = 0
     total_pair_links = 0
     total_cashtag_links = 0
     total_no_link = 0
     offset = 0
 
-    while True:
-        batch = fetch_all_catalysts(args.batch_size, offset)
-        if not batch:
-            break
+    with get_connection(settings.database_url) as conn:
+        while True:
+            batch = fetch_all_catalysts(conn, args.batch_size, offset)
+            if not batch:
+                break
 
-        print(f"\n处理第 {offset+1}-{offset+len(batch)} 条（共处理 {total} 条已完成）")
+            print(f"\n处理第 {offset+1}-{offset+len(batch)} 条（共处理 {total} 条已完成）")
 
-        conn = db_stats.get_db_conn()
-        try:
             for cat in batch:
                 if args.max_items and total >= args.max_items:
                     break
 
                 cid = cat["catalyst_id"]
-                pair_ids, cashtag_ids, _ = link_catalyst(cat, conn)
+                pair_ids, cashtag_ids = link_catalyst(cat, conn)
 
                 n_pair = 0
                 n_cash = 0
@@ -170,16 +302,14 @@ def main():
                 print(f"  [{cid}] {mode} {status} | {title_preview}")
 
                 total += 1
-        finally:
-            conn.close()
 
-        if args.max_items and total >= args.max_items:
-            break
+            if args.max_items and total >= args.max_items:
+                break
 
-        if len(batch) < args.batch_size:
-            break
+            if len(batch) < args.batch_size:
+                break
 
-        offset += len(batch)
+            offset += len(batch)
 
     print(f"\n{'='*60}")
     print(f"处理催化剂总数: {total}")

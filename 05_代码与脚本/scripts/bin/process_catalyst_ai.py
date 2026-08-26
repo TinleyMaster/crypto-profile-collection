@@ -19,13 +19,16 @@ import sys
 import time
 from pathlib import Path
 
-# 确保能 import 项目模块
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "workbench"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
-import db_stats  # noqa: E402
-from crypto_research.clients.llm_client import LLMClient  # noqa: E402
-from crypto_research.config import load_config  # noqa: E402
+import psycopg  # noqa: E402
+import psycopg.rows  # noqa: E402
+from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response  # noqa: E402
+from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.db.conn import get_connection  # noqa: E402
 
 
 SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据给定的新闻标题和正文，输出结构化分析结果。
@@ -78,7 +81,6 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
     raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=512)
 
     # 解析 JSON
-    from crypto_research.clients.llm_client import extract_json_from_llm_response
     result = extract_json_from_llm_response(raw)
 
     # 字段校验 + 归一化
@@ -109,33 +111,27 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
     }
 
 
-def fetch_pending(batch_size: int = 50) -> list[dict]:
+def fetch_pending(conn, batch_size: int = 50) -> list[dict]:
     """获取待处理的催化剂记录。"""
-    conn = db_stats.get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT catalyst_id, source_code, source_article_id, source_article_code,
-               title, body_text, body_html, event_category, related_pairs,
-               published_at, source_url
-        FROM biz.asset_catalyst
-        WHERE ai_processed = FALSE
-           OR ai_processed IS NULL
-        ORDER BY published_at DESC
-        LIMIT %s
-        """,
-        (batch_size,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT catalyst_id, source_code, source_article_id, source_article_code,
+                   title, body_text, body_html, event_category, related_pairs,
+                   published_at, source_url
+            FROM biz.asset_catalyst
+            WHERE ai_processed = FALSE
+               OR ai_processed IS NULL
+            ORDER BY published_at DESC
+            LIMIT %s
+            """,
+            (batch_size,),
+        )
+        rows = cur.fetchall()
 
-    cols = ["catalyst_id", "source_code", "source_article_id", "source_article_code",
-            "title", "body_text", "body_html", "event_category", "related_pairs",
-            "published_at", "source_url"]
     result = []
     for row in rows:
-        d = dict(zip(cols, row))
+        d = dict(row)
         # related_pairs 可能是 list 或 str
         if isinstance(d["related_pairs"], str):
             try:
@@ -146,29 +142,24 @@ def fetch_pending(batch_size: int = 50) -> list[dict]:
     return result
 
 
-def fetch_by_id(catalyst_id: int) -> dict | None:
+def fetch_by_id(conn, catalyst_id: int) -> dict | None:
     """按 ID 获取单条催化剂。"""
-    conn = db_stats.get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT catalyst_id, source_code, source_article_id, source_article_code,
-               title, body_text, body_html, event_category, related_pairs,
-               published_at, source_url
-        FROM biz.asset_catalyst
-        WHERE catalyst_id = %s
-        """,
-        (catalyst_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT catalyst_id, source_code, source_article_id, source_article_code,
+                   title, body_text, body_html, event_category, related_pairs,
+                   published_at, source_url
+            FROM biz.asset_catalyst
+            WHERE catalyst_id = %s
+            """,
+            (catalyst_id,),
+        )
+        row = cur.fetchone()
+
     if not row:
         return None
-    cols = ["catalyst_id", "source_code", "source_article_id", "source_article_code",
-            "title", "body_text", "body_html", "event_category", "related_pairs",
-            "published_at", "source_url"]
-    d = dict(zip(cols, row))
+    d = dict(row)
     if isinstance(d["related_pairs"], str):
         try:
             d["related_pairs"] = json.loads(d["related_pairs"])
@@ -177,32 +168,28 @@ def fetch_by_id(catalyst_id: int) -> dict | None:
     return d
 
 
-def update_result(catalyst_id: int, ai_data: dict) -> None:
+def update_result(conn, catalyst_id: int, ai_data: dict) -> None:
     """更新 AI 处理结果到数据库。"""
-    conn = db_stats.get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE biz.asset_catalyst
-        SET ai_event_type = %s,
-            ai_sentiment = %s,
-            ai_summary = %s,
-            ai_keywords = %s,
-            ai_processed = TRUE,
-            ai_processed_at = NOW()
-        WHERE catalyst_id = %s
-        """,
-        (
-            ai_data["ai_event_type"],
-            ai_data["ai_sentiment"],
-            ai_data["ai_summary"],
-            ai_data["ai_keywords"],  # TEXT[] 直接传 list
-            catalyst_id,
-        ),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE biz.asset_catalyst
+            SET ai_event_type = %s,
+                ai_sentiment = %s,
+                ai_summary = %s,
+                ai_keywords = %s,
+                ai_processed = TRUE,
+                ai_processed_at = NOW()
+            WHERE catalyst_id = %s
+            """,
+            (
+                ai_data["ai_event_type"],
+                ai_data["ai_sentiment"],
+                ai_data["ai_summary"],
+                ai_data["ai_keywords"],  # TEXT[] 直接传 list
+                catalyst_id,
+            ),
+        )
 
 
 def main():
@@ -213,62 +200,67 @@ def main():
     parser.add_argument("--sleep", type=float, default=0.5, help="每条之间的间隔秒数")
     args = parser.parse_args()
 
-    config = load_config()
-    llm = LLMClient(config)
+    settings = get_settings()
+    llm = LLMClient(settings)
 
-    if args.catalyst_id:
-        # 单条模式
-        cat = fetch_by_id(args.catalyst_id)
-        if not cat:
-            print(f"未找到 catalyst_id={args.catalyst_id}")
-            return 1
-        print(f"处理: [{cat['catalyst_id']}] {cat['title'][:60]}")
-        result = process_one(llm, cat)
-        update_result(cat["catalyst_id"], result)
-        print(f"  → event_type={result['ai_event_type']}, "
-              f"sentiment={result['ai_sentiment']}, "
-              f"summary={result['ai_summary'][:50]}")
-        return 0
+    if not llm.is_available():
+        print("错误：未配置 LLM 提供商（需要 OPENAI_API_KEY/BASE_URL/MODEL 或 ARK_* 环境变量）")
+        return 1
 
-    # 批量模式
-    processed = 0
-    failed = 0
+    with get_connection(settings.database_url) as conn:
+        if args.catalyst_id:
+            # 单条模式
+            cat = fetch_by_id(conn, args.catalyst_id)
+            if not cat:
+                print(f"未找到 catalyst_id={args.catalyst_id}")
+                return 1
+            print(f"处理: [{cat['catalyst_id']}] {cat['title'][:60]}")
+            result = process_one(llm, cat)
+            update_result(conn, cat["catalyst_id"], result)
+            print(f"  → event_type={result['ai_event_type']}, "
+                  f"sentiment={result['ai_sentiment']}, "
+                  f"summary={result['ai_summary'][:50]}")
+            return 0
 
-    while True:
-        pending = fetch_pending(args.batch_size)
-        if not pending:
-            print("没有待处理的催化剂，完成。")
-            break
+        # 批量模式
+        processed = 0
+        failed = 0
 
-        print(f"\n获取到 {len(pending)} 条待处理催化剂")
-
-        for cat in pending:
-            if args.max_items and processed >= args.max_items:
-                print(f"已达到 max_items={args.max_items}，停止。")
+        while True:
+            pending = fetch_pending(conn, args.batch_size)
+            if not pending:
+                print("没有待处理的催化剂，完成。")
                 break
 
-            cid = cat["catalyst_id"]
-            title_preview = (cat.get("title") or "(无标题)")[:60]
-            print(f"[{processed + 1}] 处理 catalyst_id={cid}: {title_preview}")
+            print(f"\n获取到 {len(pending)} 条待处理催化剂")
 
-            try:
-                result = process_one(llm, cat)
-                update_result(cid, result)
-                processed += 1
-                print(f"     ✓ event_type={result['ai_event_type']}, "
-                      f"sentiment={result['ai_sentiment']}")
-            except Exception as e:
-                failed += 1
-                print(f"     ✗ 失败: {e}")
+            for cat in pending:
+                if args.max_items and processed >= args.max_items:
+                    print(f"已达到 max_items={args.max_items}，停止。")
+                    break
 
-            time.sleep(args.sleep)
+                cid = cat["catalyst_id"]
+                title_preview = (cat.get("title") or "(无标题)")[:60]
+                print(f"[{processed + 1}] 处理 catalyst_id={cid}: {title_preview}")
 
-        if args.max_items and processed >= args.max_items:
-            break
+                try:
+                    result = process_one(llm, cat)
+                    update_result(conn, cid, result)
+                    processed += 1
+                    print(f"     ✓ event_type={result['ai_event_type']}, "
+                          f"sentiment={result['ai_sentiment']}")
+                except Exception as e:
+                    failed += 1
+                    print(f"     ✗ 失败: {e}")
 
-        # 如果这一批不满 batch_size，说明没有更多了
-        if len(pending) < args.batch_size:
-            break
+                time.sleep(args.sleep)
+
+            if args.max_items and processed >= args.max_items:
+                break
+
+            # 如果这一批不满 batch_size，说明没有更多了
+            if len(pending) < args.batch_size:
+                break
 
     print(f"\n完成：成功 {processed} 条，失败 {failed} 条")
     return 0 if failed == 0 else 1

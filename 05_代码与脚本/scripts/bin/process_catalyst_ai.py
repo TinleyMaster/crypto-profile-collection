@@ -196,7 +196,7 @@ def update_result(catalyst_id: int, ai_data: dict) -> None:
             ai_data["ai_event_type"],
             ai_data["ai_sentiment"],
             ai_data["ai_summary"],
-            json.dumps(ai_data["ai_keywords"], ensure_ascii=False),
+            ai_data["ai_keywords"],  # TEXT[] 直接传 list
             catalyst_id,
         ),
     )

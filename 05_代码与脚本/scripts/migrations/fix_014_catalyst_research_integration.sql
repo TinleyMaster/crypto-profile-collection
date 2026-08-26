@@ -16,6 +16,12 @@ ALTER TABLE biz.asset_catalyst
 COMMENT ON COLUMN biz.asset_catalyst.ai_processed_at
     IS 'AI 预处理完成时间';
 
+ALTER TABLE biz.asset_catalyst
+    ADD COLUMN IF NOT EXISTS ai_keywords TEXT[];
+
+COMMENT ON COLUMN biz.asset_catalyst.ai_keywords
+    IS 'AI 提取的关键词数组';
+
 -- ============================================================
 -- 第二步：按资产聚合的催化剂视图（最近 90 天，供投研直接用）
 -- ============================================================
@@ -32,15 +38,16 @@ SELECT
     ac.ai_event_type,
     ac.ai_sentiment,
     ac.ai_summary,
+    ac.seo_keywords,
     ac.ai_keywords,
     ac.related_pairs,
     ac.source_url,
+    ac.share_count,
     cal.link_source,
     cal.confidence
 FROM biz.catalyst_asset_link cal
 JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
-WHERE ac.published_at >= NOW() - INTERVAL '90 days'
-  AND ac.is_active = TRUE;
+WHERE ac.published_at >= NOW() - INTERVAL '90 days';
 
 COMMENT ON VIEW biz.v_asset_catalyst_recent
     IS '按资产聚合的近期催化剂（90天内，已激活），供投研/分析直接 JOIN';
@@ -54,18 +61,19 @@ CREATE OR REPLACE FUNCTION biz.get_asset_catalysts(
     p_days INT DEFAULT 90
 )
 RETURNS TABLE (
-    catalyst_id INT,
-    source_code VARCHAR(50),
-    title VARCHAR(500),
+    catalyst_id BIGINT,
+    source_code VARCHAR(32),
+    title TEXT,
     body_text TEXT,
     published_at TIMESTAMPTZ,
-    event_category VARCHAR(100),
-    ai_event_type VARCHAR(50),
-    ai_sentiment VARCHAR(20),
-    ai_summary VARCHAR(500),
-    ai_keywords JSONB,
-    related_pairs JSONB,
-    source_url VARCHAR(1000),
+    event_category VARCHAR(128),
+    ai_event_type VARCHAR(64),
+    ai_sentiment VARCHAR(16),
+    ai_summary TEXT,
+    seo_keywords TEXT[],
+    ai_keywords TEXT[],
+    related_pairs TEXT[],
+    source_url TEXT,
     link_source VARCHAR(50),
     confidence NUMERIC(3,2)
 )
@@ -84,6 +92,7 @@ BEGIN
         ac.ai_event_type,
         ac.ai_sentiment,
         ac.ai_summary,
+        ac.seo_keywords,
         ac.ai_keywords,
         ac.related_pairs,
         ac.source_url,
@@ -93,7 +102,6 @@ BEGIN
     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
     WHERE cal.asset_id = p_asset_id
       AND ac.published_at >= NOW() - (p_days || ' days')::INTERVAL
-      AND ac.is_active = TRUE
     ORDER BY ac.published_at DESC;
 END;
 $$;
@@ -121,7 +129,6 @@ SELECT
 FROM biz.catalyst_asset_link cal
 JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
 WHERE ac.published_at >= NOW() - INTERVAL '90 days'
-  AND ac.is_active = TRUE
 GROUP BY cal.asset_id;
 
 COMMENT ON VIEW biz.v_asset_catalyst_stats

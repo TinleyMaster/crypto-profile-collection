@@ -6077,12 +6077,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     SELECT ac.catalyst_id, ac.source_code, ac.title, ac.body_text,
                            ac.published_at, ac.event_category,
                            ac.ai_event_type, ac.ai_sentiment, ac.ai_summary,
-                           ac.related_pairs, ac.source_url,
+                           ac.seo_keywords, ac.related_pairs, ac.source_url,
                            cal.link_source, cal.confidence
                     FROM biz.catalyst_asset_link cal
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
                     WHERE cal.asset_id = %s
-                      AND ac.is_active = TRUE
                       AND ac.published_at >= NOW() - INTERVAL '180 days'
                     ORDER BY ac.published_at DESC
                     LIMIT 30

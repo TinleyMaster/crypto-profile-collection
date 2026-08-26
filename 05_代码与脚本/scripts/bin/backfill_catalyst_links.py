@@ -112,17 +112,19 @@ def map_pairs_to_asset_ids(
             continue
 
         # 查库：优先 source_hint 来源的 source_asset_key
-        row = conn.execute(
-            """
-            SELECT a.asset_id
-            FROM core.asset a
-            JOIN core.asset_source_map m ON a.asset_id = m.asset_id
-            WHERE m.source_code = %s
-              AND UPPER(m.source_asset_key) = %s
-            LIMIT 1
-            """,
-            (source_hint, base),
-        ).fetchone()
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT a.asset_id
+                FROM core.asset a
+                JOIN core.asset_source_map m ON a.asset_id = m.asset_id
+                WHERE m.source_code = %s
+                  AND UPPER(m.source_asset_key) = %s
+                LIMIT 1
+                """,
+                (source_hint, base),
+            )
+            row = cur.fetchone()
         if row:
             aid = row["asset_id"]
             _symbol_asset_cache[base] = aid
@@ -132,15 +134,17 @@ def map_pairs_to_asset_ids(
             continue
 
         # 退一步：asset 表的 canonical_symbol
-        row = conn.execute(
-            """
-            SELECT asset_id
-            FROM core.asset
-            WHERE UPPER(canonical_symbol) = %s
-            LIMIT 1
-            """,
-            (base,),
-        ).fetchone()
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT asset_id
+                FROM core.asset
+                WHERE UPPER(canonical_symbol) = %s
+                LIMIT 1
+                """,
+                (base,),
+            )
+            row = cur.fetchone()
         if row:
             aid = row["asset_id"]
             _symbol_asset_cache[base] = aid

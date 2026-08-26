@@ -86,7 +86,7 @@ def fetch_polluted(conn, limit: int = 100) -> list[dict]:
             SELECT catalyst_id, source_code, body_text, body_html, raw_json
             FROM biz.asset_catalyst
             WHERE body_text IS NOT NULL
-              AND body_text LIKE '{%'
+              AND body_text LIKE '{%%}'
               AND raw_json IS NOT NULL
             ORDER BY catalyst_id
             LIMIT %s

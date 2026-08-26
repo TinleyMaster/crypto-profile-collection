@@ -1057,6 +1057,7 @@
             border-radius: 6px;
             padding: 8px 10px;
         }
+
         .module-note b {
             color: #c2c8d2;
         }
@@ -1073,6 +1074,7 @@
             white-space: nowrap;
             transition: all 0.2s;
         }
+
         .color-scheme-toggle:hover {
             color: #e6e8eb;
             border-color: #3a4050;
@@ -1084,6 +1086,7 @@
             gap: 6px;
             cursor: help;
         }
+
         .daily-diff-col .col-tip {
             font-size: 10px;
             font-weight: 500;
@@ -1098,10 +1101,12 @@
         #daily-diff.scheme-red-up .diff-item.up .value {
             color: #f87171;
         }
+
         #daily-diff.scheme-red-up .daily-diff-col.down h4,
         #daily-diff.scheme-red-up .diff-item.down .value {
             color: #4ade80;
         }
+
         #daily-diff.scheme-red-up .daily-diff-tab.active {
             background: #5a2d2d;
             color: #f87171;
@@ -2787,6 +2792,188 @@
         }
 
         /* ── 响应式 ── */
+        /* ── 大盘分析 ── */
+        .overview-summary {
+            margin-bottom: 20px;
+        }
+
+        .summary-banner {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px 20px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #1a2332 0%, #0f1620 100%);
+            border: 1px solid #2a3a50;
+            margin-bottom: 10px;
+        }
+
+        .summary-label {
+            font-size: 13px;
+            color: #8a92a0;
+        }
+
+        .summary-score {
+            font-size: 28px;
+            font-weight: 700;
+            margin-left: auto;
+        }
+
+        .summary-direction {
+            font-size: 15px;
+            font-weight: 600;
+            padding: 4px 12px;
+            border-radius: 20px;
+        }
+
+        .summary-direction.bullish {
+            color: #00c087;
+            background: rgba(0, 192, 135, 0.1);
+        }
+
+        .summary-direction.bearish {
+            color: #ff5b5b;
+            background: rgba(255, 91, 91, 0.1);
+        }
+
+        .summary-direction.neutral {
+            color: #f0b90b;
+            background: rgba(240, 185, 11, 0.1);
+        }
+
+        .summary-reason {
+            font-size: 13px;
+            color: #b0b8c4;
+            line-height: 1.7;
+            padding: 12px 16px;
+            background: #0f1620;
+            border-radius: 8px;
+            border-left: 3px solid #3a86ff;
+        }
+
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14px;
+        }
+
+        @media (max-width: 900px) {
+            .overview-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 600px) {
+            .overview-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .dim-card {
+            background: #0f1620;
+            border: 1px solid #1e2a3a;
+            border-radius: 10px;
+            padding: 16px;
+            min-height: 180px;
+        }
+
+        .dim-card.loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #5a6472;
+            font-size: 13px;
+        }
+
+        .dim-card-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .dim-card-icon {
+            font-size: 20px;
+        }
+
+        .dim-card-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #e0e6ed;
+        }
+
+        .dim-card-score {
+            margin-left: auto;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .dim-card-score.bull {
+            color: #00c087;
+            background: rgba(0, 192, 135, 0.12);
+        }
+
+        .dim-card-score.bear {
+            color: #ff5b5b;
+            background: rgba(255, 91, 91, 0.12);
+        }
+
+        .dim-card-score.neutral {
+            color: #f0b90b;
+            background: rgba(240, 185, 11, 0.12);
+        }
+
+        .dim-card-score.na {
+            color: #5a6472;
+            background: rgba(90, 100, 114, 0.15);
+        }
+
+        .dim-metrics {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .dim-metric-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+
+        .dim-metric-label {
+            color: #8a92a0;
+        }
+
+        .dim-metric-val {
+            color: #e0e6ed;
+            font-weight: 500;
+        }
+
+        .dim-metric-val.up {
+            color: #00c087;
+        }
+
+        .dim-metric-val.down {
+            color: #ff5b5b;
+        }
+
+        .dim-conclusion {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #1e2a3a;
+            font-size: 12px;
+            color: #b0b8c4;
+            line-height: 1.6;
+        }
+
+        .dim-warn {
+            font-size: 11px;
+            color: #f0b90b;
+            margin-top: 6px;
+        }
+
         @media (max-width: 1200px) {
             .main-layout {
                 grid-template-columns: 1fr;
@@ -2807,6 +2994,7 @@
         </div>
         <div class="nav-tabs">
             <a class="nav-tab active" href="#assets" data-section="assets">资产库</a>
+            <a class="nav-tab" href="#overview" data-section="overview">大盘</a>
             <a class="nav-tab" href="#market" data-section="market">行情</a>
             <a class="nav-tab" href="#unlock" data-section="unlock">解锁</a>
             <a class="nav-tab" href="#daily-diff" data-section="daily-diff">信号</a>
@@ -2864,9 +3052,11 @@
                     <div id="mat-content"></div>
                     <div class="research-section" id="research-section" style="display:none">
                         <h2>🔬 投研分析</h2>
-                        <div class="research-actions" style="margin:6px 0 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                        <div class="research-actions"
+                            style="margin:6px 0 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                             <button class="copy-btn" onclick="viewAllResearch()" id="view-all-btn">📑 查看全部投研</button>
-                            <button class="copy-btn" onclick="copyAllResearch()" id="copy-research-btn">📋 复制全部投研</button>
+                            <button class="copy-btn" onclick="copyAllResearch()" id="copy-research-btn">📋
+                                复制全部投研</button>
                             <span id="research-view-status" style="font-size:12px;color:#8a92a0"></span>
                         </div>
                         <div class="research-grid">
@@ -2975,6 +3165,38 @@
                 </div>
             </section>
 
+            <!-- #overview 大盘分析 -->
+            <section id="overview" class="module-card">
+                <div class="module-header">
+                    <h2>🌐 大盘分析</h2>
+                    <p class="module-desc">六维大盘扫描：体量 / 盘面 / 衍生品情绪 / 宏观机构 / 板块轮动 / 事件日历</p>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                        <span style="font-size:12px;color:#8a92a0" id="overview-updated">-</span>
+                        <button class="hot-refresh" onclick="loadMarketOverview(true)">刷新</button>
+                    </div>
+                </div>
+
+                <!-- 综合结论 -->
+                <div id="overview-summary" class="overview-summary" style="display:none">
+                    <div class="summary-banner">
+                        <span class="summary-label">综合判断</span>
+                        <span class="summary-score" id="overview-score">-</span>
+                        <span class="summary-direction" id="overview-direction">-</span>
+                    </div>
+                    <div class="summary-reason" id="overview-reason">-</div>
+                </div>
+
+                <!-- 六维卡片网格 -->
+                <div class="overview-grid" id="overview-grid">
+                    <div class="dim-card loading">加载中…</div>
+                    <div class="dim-card loading">加载中…</div>
+                    <div class="dim-card loading">加载中…</div>
+                    <div class="dim-card loading">加载中…</div>
+                    <div class="dim-card loading">加载中…</div>
+                    <div class="dim-card loading">加载中…</div>
+                </div>
+            </section>
+
             <!-- #market 行情 & 每日推荐 -->
             <section id="market" class="module-card">
                 <div class="module-header">
@@ -3037,14 +3259,17 @@
                 <div class="module-header">
                     <h2>⚡ 每日变化榜</h2>
                     <p class="module-desc" id="daily-diff-caption">今日异动信号：涨跌幅 / 成交量 / 解锁抛压</p>
-                    <p class="module-note">全市场按所选信号排序后的「头部」与「尾部」：左列为涨幅/正向最大的 <b>Top N</b>，右列为跌幅/负向最大的 <b>Bottom N</b>；左侧序号为该资产的<b>全市场排名</b>（非榜单内第几名），因此左右两栏数字并不连续。切换上方标签可查看不同信号口径。</p>
+                    <p class="module-note">全市场按所选信号排序后的「头部」与「尾部」：左列为涨幅/正向最大的 <b>Top N</b>，右列为跌幅/负向最大的 <b>Bottom
+                            N</b>；左侧序号为该资产的<b>全市场排名</b>（非榜单内第几名），因此左右两栏数字并不连续。切换上方标签可查看不同信号口径。</p>
                 </div>
                 <div class="daily-diff-section">
                     <div class="section-header">
                         <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
                         <div style="display:flex;gap:6px;align-items:center">
-                            <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0" title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
-                            <button class="hot-refresh" id="daily-diff-refresh" onclick="loadDailyDiff(true)">刷新</button>
+                            <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0"
+                                title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
+                            <button class="hot-refresh" id="daily-diff-refresh"
+                                onclick="loadDailyDiff(true)">刷新</button>
                         </div>
                     </div>
                     <div id="daily-diff-content">
@@ -6205,6 +6430,81 @@
             loadHotTokens();
         }
 
+        // ── 大盘分析 ──
+        const DIM_META = [
+            { key: 'dim1_size', icon: '📊', title: '体量 / 增量存量' },
+            { key: 'dim2_pairs', icon: '📈', title: 'BTC/ETH 盘面' },
+            { key: 'dim3_derivatives_sentiment', icon: '🎭', title: '衍生品 / 情绪' },
+            { key: 'dim4_macro_institution', icon: '🏛️', title: '宏观 / 机构' },
+            { key: 'dim5_sectors', icon: '🔄', title: '板块轮动' },
+            { key: 'dim6_events', icon: '📅', title: '事件日历' },
+        ];
+
+        async function loadMarketOverview (force) {
+            const grid = document.getElementById('overview-grid');
+            const updated = document.getElementById('overview-updated');
+            grid.innerHTML = DIM_META.map(() => '<div class="dim-card loading">加载中…</div>').join('');
+            try {
+                const url = '/api/market/overview' + (force ? '?force_refresh=1' : '');
+                const res = await fetch(url);
+                const data = await res.json();
+                if (!data.ok) throw new Error(data.error || '加载失败');
+                renderOverview(data);
+                updated.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+            } catch (e) {
+                grid.innerHTML = '<div class="dim-card" style="grid-column:1/-1;color:#ff5b5b">加载失败：' + e.message + '</div>';
+            }
+        }
+
+        function renderOverview (data) {
+            // 综合结论
+            const summary = data.summary || {};
+            const sumEl = document.getElementById('overview-summary');
+            const scoreEl = document.getElementById('overview-score');
+            const dirEl = document.getElementById('overview-direction');
+            const reasonEl = document.getElementById('overview-reason');
+            if (summary.score !== undefined) {
+                sumEl.style.display = 'block';
+                scoreEl.textContent = summary.score + ' / 100';
+                const dir = summary.direction || 'neutral';
+                dirEl.textContent = dir === 'bullish' ? '偏多' : dir === 'bearish' ? '偏空' : '中性';
+                dirEl.className = 'summary-direction ' + dir;
+                reasonEl.textContent = summary.reason || '';
+            }
+            // 六维卡片
+            const grid = document.getElementById('overview-grid');
+            grid.innerHTML = DIM_META.map(meta => {
+                const dim = data[meta.key] || {};
+                const score = dim.score !== undefined ? dim.score : null;
+                const scoreClass = score === null ? 'na' :
+                    score >= 60 ? 'bull' : score <= 40 ? 'bear' : 'neutral';
+                const scoreText = score === null ? 'N/A' :
+                    score >= 60 ? '偏多 ' + score : score <= 40 ? '偏空 ' + score : '中性 ' + score;
+                const metrics = dim.metrics || [];
+                const metricHtml = metrics.slice(0, 6).map(m => {
+                    let valClass = '';
+                    if (m.trend === 'up') valClass = 'up';
+                    else if (m.trend === 'down') valClass = 'down';
+                    return `<div class="dim-metric-row">
+                        <span class="dim-metric-label">${m.label}</span>
+                        <span class="dim-metric-val ${valClass}">${m.value}</span>
+                    </div>`;
+                }).join('');
+                const warnHtml = dim.warning ? `<div class="dim-warn">⚠️ ${dim.warning}</div>` : '';
+                const conclHtml = dim.conclusion ? `<div class="dim-conclusion">${dim.conclusion}</div>` : '';
+                return `<div class="dim-card">
+                    <div class="dim-card-header">
+                        <span class="dim-card-icon">${meta.icon}</span>
+                        <span class="dim-card-title">${meta.title}</span>
+                        <span class="dim-card-score ${scoreClass}">${scoreText}</span>
+                    </div>
+                    <div class="dim-metrics">${metricHtml || '<span style="color:#5a6472;font-size:12px">暂无数据</span>'}</div>
+                    ${conclHtml}
+                    ${warnHtml}
+                </div>`;
+            }).join('');
+        }
+
         const HOT_PAGE_SIZE = 5;
         let hotAllTokens = [];
         let hotShowingAll = false;
@@ -6374,13 +6674,15 @@
         loadSectorHeatmap();
         loadBacktest();
         loadHotTokens();
+        loadMarketOverview();
         setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
         setInterval(loadSectorHeatmap, 5 * 60 * 1000);
         setInterval(loadDailyDiff, 10 * 60 * 1000);
+        setInterval(loadMarketOverview, 3 * 60 * 1000);
 
         // ── 导航滚动高亮（IntersectionObserver） ──
         (function () {
-            var sections = ['assets', 'daily-diff', 'market', 'unlock', 'heat', 'backtest', 'tasks'];
+            var sections = ['assets', 'overview', 'daily-diff', 'market', 'unlock', 'heat', 'backtest', 'tasks'];
             var tabs = document.querySelectorAll('.top-nav .nav-tab[data-section]');
             if (!('IntersectionObserver' in window) || tabs.length === 0) return;
 

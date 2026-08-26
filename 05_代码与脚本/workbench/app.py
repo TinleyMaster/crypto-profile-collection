@@ -1816,6 +1816,18 @@ def api_market_sector_heatmap():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/overview")
+def api_market_overview():
+    """六维大盘分析总览：体量/盘面/衍生品情绪/宏观机构/板块/事件。"""
+    try:
+        from macro_market import get_market_overview
+        force = request.args.get("force_refresh", "0") == "1"
+        result = get_market_overview(force_refresh=force)
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/daily-diff")
 def api_daily_diff():
     """每日 diff 变化榜：涨跌幅/成交量异动/解锁抛压等。"""

@@ -97,7 +97,7 @@ BEGIN
         ac.related_pairs,
         ac.source_url,
         cal.link_source,
-        cal.confidence
+        cal.confidence::NUMERIC(3,2) AS confidence
     FROM biz.catalyst_asset_link cal
     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
     WHERE cal.asset_id = p_asset_id

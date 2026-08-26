@@ -63,9 +63,7 @@ class BinanceSquareNewsSource(BaseCatalystSource):
     @property
     def scraper(self) -> BinanceSquareScraper:
         if self._scraper is None:
-            self._scraper = BinanceSquareScraper(
-                request_interval=self.request_interval,
-            )
+            self._scraper = BinanceSquareScraper()
         return self._scraper
 
     def fetch(self, since_ts: float | None = None) -> list[CatalystItem]:
@@ -77,22 +75,10 @@ class BinanceSquareNewsSource(BaseCatalystSource):
         Returns:
             CatalystItem 列表
         """
-        # 解析 squareUid
-        square_uid = self.scraper._get_square_uid(self.username)
-        if not square_uid:
-            logger.error("failed to resolve squareUid for username=%s", self.username)
-            return []
-
-        logger.info(
-            "fetching binance square news: username=%s uid=%s since=%s",
-            self.username, square_uid,
-            datetime.fromtimestamp(since_ts) if since_ts else "full",
-        )
-
-        # since_post_id: scraper 支持按 post_id 增量，但我们按时间更方便
-        # 这里用 max_pages + 时间过滤
+        # fetch_posts 内部会调 _get_square_uid 解析 username → squareUid
+        # 所以直接传 username，不要先解析再传 UID（会导致二次解析失败）
         result = self.scraper.fetch_posts(
-            platform_user_id=square_uid,
+            platform_user_id=self.username,
             since_post_id=None,
             max_pages=self.max_pages,
         )

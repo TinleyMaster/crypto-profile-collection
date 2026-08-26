@@ -102,7 +102,7 @@ def main() -> int:
             print("\n（dry-run 结束，加 --apply 执行修正）")
             return 0
 
-        # 执行：逐字段覆盖
+        # 执行：逐字段覆盖（写入前做数据质量校验）
         upd = """
             UPDATE core.asset
             SET total_supply = %(cmc_ts)s,
@@ -112,10 +112,25 @@ def main() -> int:
         """
         n = 0
         for r in rows:
+            new_ts = r["cmc_ts"] if (r["ts_ratio"] and r["ts_ratio"] > ratio) else r["asset_ts"]
+            new_cs = r["cmc_cs"] if (r["cs_ratio"] and r["cs_ratio"] > ratio) else r["asset_cs"]
+
+            # 语义修正：0 改为 NULL
+            if new_cs is not None and new_cs == 0:
+                new_cs = None
+            if new_ts is not None and new_ts == 0:
+                new_ts = None
+
+            # 内部一致性：circulating <= total
+            if (new_cs is not None and new_ts is not None
+                    and new_cs > new_ts
+                    and new_ts > 0):
+                new_ts = new_cs
+
             params = {
                 "asset_id": r["asset_id"],
-                "cmc_ts": r["cmc_ts"] if (r["ts_ratio"] and r["ts_ratio"] > ratio) else r["asset_ts"],
-                "cmc_cs": r["cmc_cs"] if (r["cs_ratio"] and r["cs_ratio"] > ratio) else r["asset_cs"],
+                "cmc_ts": new_ts,
+                "cmc_cs": new_cs,
             }
             with conn.cursor() as cur:
                 cur.execute(upd, params)

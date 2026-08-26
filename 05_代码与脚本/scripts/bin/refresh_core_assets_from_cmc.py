@@ -161,6 +161,22 @@ def main() -> int:
                 asset_id = asset_row["asset_id"]
                 created_count += 1
 
+            # is_primary 互斥 guard：同 asset 已有其他源 primary 则降级为 false
+            # （按 8/25 既定口径，CG 为权威主映射，CMC 次之）
+            has_other_primary = fetch_one(
+                conn,
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM core.asset_source_map
+                    WHERE asset_id = %s
+                      AND is_primary = TRUE
+                      AND source_code <> 'cmc'
+                ) AS has_primary
+                """,
+                (asset_id,),
+            )
+            is_primary = not (has_other_primary.get("has_primary") or False)
+
             fetch_one(
                 conn,
                 upsert_source_map_sql,
@@ -171,7 +187,7 @@ def main() -> int:
                     "confirmed",
                     "bootstrap_cmc",
                     100,
-                    True,
+                    is_primary,
                     "agent",
                 ),
             )

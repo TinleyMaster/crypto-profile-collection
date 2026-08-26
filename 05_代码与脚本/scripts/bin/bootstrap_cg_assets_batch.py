@@ -61,7 +61,18 @@ ON CONFLICT (source_code, source_asset_key) DO UPDATE SET
     match_status = EXCLUDED.match_status,
     match_method = EXCLUDED.match_method,
     match_confidence = EXCLUDED.match_confidence,
-    is_primary = EXCLUDED.is_primary,
+    -- is_primary 互斥保护：同 asset 已有其他源 primary 则降级
+    is_primary = CASE
+        WHEN EXCLUDED.is_primary = TRUE
+         AND EXISTS (
+             SELECT 1 FROM core.asset_source_map
+             WHERE asset_id = EXCLUDED.asset_id
+               AND is_primary = TRUE
+               AND (source_code, source_asset_key) <> (EXCLUDED.source_code, EXCLUDED.source_asset_key)
+         )
+        THEN FALSE
+        ELSE EXCLUDED.is_primary
+    END,
     verified_by = EXCLUDED.verified_by,
     verified_at = NOW(),
     updated_at = NOW()

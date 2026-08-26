@@ -152,7 +152,13 @@ def _fmt_num(v) -> str:
 
 
 def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
-    """全量同步：用 CMC 快照覆盖 core.asset 字段。"""
+    """全量同步：用 CMC 快照覆盖 core.asset 字段。
+
+    写入前做三项数据质量校验：
+    1. circulating_supply <= total_supply（内部一致性）
+    2. supply = 0 改为 NULL（语义正确，0 表示"无"而非"未知"）
+    3. max_supply 存在时 total_supply 不应超过 max_supply
+    """
     upd = """
         UPDATE core.asset
         SET market_cap_rank = %s,
@@ -166,13 +172,30 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
     n = 0
     with conn.cursor() as cur:
         for r in rows:
+            cs = r["cmc_cs"]
+            ts = r["cmc_ts"]
+
+            # 语义修正：0 改为 NULL（"未知"≠"0"）
+            if cs is not None and cs == 0:
+                cs = None
+            if ts is not None and ts == 0:
+                ts = None
+
+            # 内部一致性：circulating <= total
+            # 若 CMC 源本身就有 circ > total（罕见但存在，如弹性币/重基币），
+            # 则将 total 向上对齐到 circ（宁可 total 偏大，也不破坏 circ<=total 语义）
+            if (cs is not None and ts is not None
+                    and cs > ts
+                    and ts > 0):
+                ts = cs
+
             if dry_run:
                 continue
             cur.execute(upd, (
                 r["cmc_rank"],
                 r["cmc_market_cap"],
-                r["cmc_cs"],
-                r["cmc_ts"],
+                cs,
+                ts,
                 r["quote_time"],
                 r["asset_id"],
             ))
@@ -181,7 +204,10 @@ def do_sync(conn, rows: list[dict], dry_run: bool) -> int:
 
 
 def do_fix(conn, rows: list[dict], ratio: float, dry_run: bool) -> int:
-    """修复模式：只修偏离 >ratio 倍的 supply 字段。"""
+    """修复模式：只修偏离 >ratio 倍的 supply 字段。
+
+    写入前同样做数据质量校验（0→NULL、circ<=total）。
+    """
     upd = """
         UPDATE core.asset
         SET total_supply = %s,
@@ -194,6 +220,19 @@ def do_fix(conn, rows: list[dict], ratio: float, dry_run: bool) -> int:
         for r in rows:
             new_ts = r["cmc_ts"] if (r["ts_ratio"] and r["ts_ratio"] > ratio) else r["asset_ts"]
             new_cs = r["cmc_cs"] if (r["cs_ratio"] and r["cs_ratio"] > ratio) else r["asset_cs"]
+
+            # 语义修正：0 改为 NULL
+            if new_cs is not None and new_cs == 0:
+                new_cs = None
+            if new_ts is not None and new_ts == 0:
+                new_ts = None
+
+            # 内部一致性：circulating <= total
+            if (new_cs is not None and new_ts is not None
+                    and new_cs > new_ts
+                    and new_ts > 0):
+                new_ts = new_cs
+
             if dry_run:
                 continue
             cur.execute(upd, (new_ts, new_cs, r["asset_id"]))

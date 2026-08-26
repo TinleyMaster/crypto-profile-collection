@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-BIN_DIR = SCRIPTS_DIR / "bin"
+BIN_DIR = SCRIPTS_DIR
 
 # 执行顺序：(任务名, 脚本名, 参数列表, 失败是否继续)
 # 关键路径任务失败则终止；非关键任务失败继续往下走

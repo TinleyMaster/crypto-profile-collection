@@ -11,6 +11,8 @@ KOL 监控 Web 面板 — Flask 路由。
   GET  /api/kol/signals/<id>       信号详情
   GET  /api/kol/posts              帖子列表
   GET  /api/kol/stats              统计概览
+  POST /api/kol/discover           从分享链接发现博主（预览）
+  POST /api/kol/discover/add       确认添加已发现的博主
 """
 from __future__ import annotations
 
@@ -314,3 +316,171 @@ def list_posts():
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+# ============================================================
+# 博主发现：分享链接 → 自动解析 + 预览
+# ============================================================
+
+@kol_bp.route("/discover", methods=["POST"])
+def discover_kol():
+    """从分享链接发现博主（返回预览信息，用户确认后再添加）。
+
+    Request:
+        { "share_url": "https://app.binance.com/uni-qr/cpro/god_of_trader_tony?..." }
+
+    Response:
+        {
+            "platform_code": "binance_square",
+            "platform_user_id": "god_of_trader_tony",
+            "nickname": "币圈交易之神Tony",
+            "avatar_url": "...",
+            "follower_count": 12345,
+            "profile_url": "...",
+            "already_exists": false,
+            "profile_id": null
+        }
+    """
+    data = request.get_json() or {}
+    share_url = (data.get("share_url") or "").strip()
+    if not share_url:
+        return jsonify({"error": "缺少 share_url 参数"}), 400
+
+    try:
+        from .discover import discover_profile
+        profile = discover_profile(share_url)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"发现博主失败: {e}"}), 500
+
+    # 检查是否已存在
+    already_exists = False
+    existing_id = None
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT profile_id FROM biz.kol_profile "
+            "WHERE platform_code = %s AND platform_user_id = %s",
+            (profile.platform_code, profile.platform_user_id),
+        ).fetchone()
+        if row:
+            already_exists = True
+            existing_id = row["profile_id"]
+
+    return jsonify({
+        "platform_code": profile.platform_code,
+        "platform_user_id": profile.platform_user_id,
+        "nickname": profile.nickname,
+        "avatar_url": profile.avatar_url,
+        "follower_count": profile.follower_count,
+        "profile_url": profile.profile_url,
+        "extra": profile.extra,
+        "already_exists": already_exists,
+        "profile_id": existing_id,
+    })
+
+
+@kol_bp.route("/discover/add", methods=["POST"])
+def add_discovered_kol():
+    """确认添加已发现的博主（入库并启用监控）。
+
+    Request:
+        {
+            "platform_code": "binance_square",
+            "platform_user_id": "god_of_trader_tony",
+            "nickname": "币圈交易之神Tony",
+            "avatar_url": "...",
+            "follower_count": 12345,
+            "notes": "手动添加",
+            "auto_crawl": true
+        }
+
+    Response:
+        { "profile_id": 123, "is_new": true, "crawl_started": true }
+    """
+    data = request.get_json() or {}
+    required = ["platform_code", "platform_user_id", "nickname"]
+    for field in required:
+        if not data.get(field):
+            return jsonify({"error": f"缺少必填字段: {field}"}), 400
+
+    # 检查是否已存在
+    existing = None
+    with db.get_conn() as conn:
+        existing = conn.execute(
+            "SELECT * FROM biz.kol_profile "
+            "WHERE platform_code = %s AND platform_user_id = %s",
+            (data["platform_code"], data["platform_user_id"]),
+        ).fetchone()
+
+    is_new = existing is None
+
+    try:
+        profile = db.upsert_profile(
+            platform_code=data["platform_code"],
+            platform_user_id=data["platform_user_id"],
+            nickname=data["nickname"],
+            avatar_url=data.get("avatar_url"),
+            follower_count=data.get("follower_count"),
+            is_active=True,
+            notes=data.get("notes"),
+            extra_json=data.get("extra"),
+        )
+    except Exception as e:
+        return jsonify({"error": f"添加博主失败: {e}"}), 500
+
+    profile_id = profile["profile_id"]
+    auto_crawl = data.get("auto_crawl", True)
+    crawl_started = False
+
+    # 如果是新增且开启自动抓取，异步触发首次抓取
+    if is_new and auto_crawl:
+        lock_fd = _get_file_lock()
+        try:
+            state = _load_crawl_state()
+            if profile_id not in state or state[profile_id].get("status") != "running":
+                state[profile_id] = {"status": "running", "started_at": _now_iso()}
+                _save_crawl_state(state)
+                crawl_started = True
+        finally:
+            _release_file_lock(lock_fd)
+
+        if crawl_started:
+            def _run():
+                try:
+                    from .runner import run_crawl_once
+                    stats = run_crawl_once(profile_id=profile_id)
+                    lock_fd = _get_file_lock()
+                    try:
+                        state = _load_crawl_state()
+                        state[profile_id] = {
+                            "status": "done",
+                            "finished_at": _now_iso(),
+                            "stats": stats,
+                        }
+                        _save_crawl_state(state)
+                    finally:
+                        _release_file_lock(lock_fd)
+                except Exception as e:
+                    lock_fd = _get_file_lock()
+                    try:
+                        state = _load_crawl_state()
+                        state[profile_id] = {
+                            "status": "failed",
+                            "finished_at": _now_iso(),
+                            "error": str(e),
+                        }
+                        _save_crawl_state(state)
+                    finally:
+                        _release_file_lock(lock_fd)
+
+            import threading
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+
+    return jsonify({
+        "profile_id": profile_id,
+        "is_new": is_new,
+        "crawl_started": crawl_started,
+        "profile": profile,
+    })

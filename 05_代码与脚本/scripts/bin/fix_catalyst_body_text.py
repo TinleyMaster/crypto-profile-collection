@@ -1,9 +1,9 @@
 """
 修复存量催化剂的 body_text JSON 污染（P1-A）。
 
-问题：早期 CMS 抓取直接把 body（JSON block tree）存进了 body_text，
+问题：早期 CMS 抓取直接把 body（JSON node/child 树）存进了 body_text，
       导致 body_text 是 {"node":"root"...} 这种 JSON 噪声。
-修法：从 raw_json 的 contentJson 重新提取纯文本，写回 body_text。
+修法：从 body_html（= raw_json['body']）的 node/child 树递归提取纯文本，写回 body_text。
 
 用法：
     python scripts/bin/fix_catalyst_body_text.py [--dry-run] [--max-items 100]
@@ -26,56 +26,34 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 
-def _extract_text_from_content_json(content_json) -> str:
-    """从 CMS contentJson block tree 提取纯文本（与 catalyst/sources/binance_cms.py 一致）。"""
-    if not content_json:
+def _extract_text_from_node_tree(tree_json) -> str:
+    """从 CMS 的 node/child 块树提取纯文本（body_html / raw_json['body'] 的真实结构）。"""
+    if not tree_json:
         return ""
-    if isinstance(content_json, str):
+    if isinstance(tree_json, str):
         try:
-            content_json = json.loads(content_json)
+            tree_json = json.loads(tree_json)
         except Exception:
             return ""
-    if not isinstance(content_json, dict):
+    if not isinstance(tree_json, dict):
         return ""
 
-    blocks = content_json.get("blocks") or []
     texts = []
 
-    def _walk(block):
-        if not isinstance(block, dict):
+    def _walk(node):
+        if not isinstance(node, dict):
             return
-        # 文本节点
-        if block.get("type") == "text" or block.get("nodeType") == "text":
-            text = block.get("value") or block.get("text") or ""
-            if text:
-                texts.append(text)
-        # 段落/标题等容器
-        for key in ("children", "content", "blocks"):
-            children = block.get(key)
-            if isinstance(children, list):
-                for child in children:
-                    _walk(child)
+        if node.get("node") == "text":
+            t = node.get("text") or ""
+            if t and t.strip():
+                texts.append(t.strip())
+        if node.get("node") == "element" and isinstance(node.get("text"), str) and node["text"].strip():
+            texts.append(node["text"].strip())
+        for child in node.get("child") or []:
+            _walk(child)
 
-    for block in blocks:
-        _walk(block)
-
-    # 段落之间加换行
-    result = "\n".join(t.strip() for t in texts if t and t.strip())
-    return result.strip()
-
-
-def _strip_html(html: str) -> str:
-    """简易 HTML 去标签（兜底用）。"""
-    if not html:
-        return ""
-    import re
-    text = re.sub(r"<[^>]+>", "", html)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    _walk(tree_json)
+    return "\n".join(texts).strip()
 
 
 def fetch_polluted(conn, limit: int = 100) -> list[dict]:
@@ -108,15 +86,15 @@ def fix_one(conn, cat: dict, dry_run: bool = False) -> tuple[str, int]:
 
     old_len = len(cat.get("body_text") or "")
 
-    # 优先从 contentJson 提取
-    content_json = raw.get("contentJson") if isinstance(raw, dict) else None
-    new_text = _extract_text_from_content_json(content_json)
+    # 正文树优先从 body_html（= raw_json['body']，均为 node/child 结构）提取
+    new_text = _extract_text_from_node_tree(cat.get("body_html"))
+    if not new_text and isinstance(raw, dict):
+        new_text = _extract_text_from_node_tree(raw.get("body"))
 
-    # 兜底：HTML 去标签
-    if not new_text and cat.get("body_html"):
-        new_text = _strip_html(cat["body_html"])
+    if not new_text:
+        return "", 0
 
-    if not dry_run and new_text:
+    if not dry_run:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE biz.asset_catalyst SET body_text = %s WHERE catalyst_id = %s",

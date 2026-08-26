@@ -111,22 +111,38 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
     }
 
 
-def fetch_pending(conn, batch_size: int = 50) -> list[dict]:
-    """获取待处理的催化剂记录。"""
+def fetch_pending(conn, batch_size: int = 50, force: bool = False, offset: int = 0) -> list[dict]:
+    """获取待处理的催化剂记录。
+
+    force=True 时忽略 ai_processed 状态，按 published_at 倒序取 batch_size 条。
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            """
-            SELECT catalyst_id, source_code, source_article_id, source_article_code,
-                   title, body_text, body_html, event_category, related_pairs,
-                   published_at, source_url
-            FROM biz.asset_catalyst
-            WHERE ai_processed = FALSE
-               OR ai_processed IS NULL
-            ORDER BY published_at DESC
-            LIMIT %s
-            """,
-            (batch_size,),
-        )
+        if force:
+            cur.execute(
+                """
+                SELECT catalyst_id, source_code, source_article_id, source_article_code,
+                       title, body_text, body_html, event_category, related_pairs,
+                       published_at, source_url
+                FROM biz.asset_catalyst
+                ORDER BY published_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (batch_size, offset),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT catalyst_id, source_code, source_article_id, source_article_code,
+                       title, body_text, body_html, event_category, related_pairs,
+                       published_at, source_url
+                FROM biz.asset_catalyst
+                WHERE ai_processed = FALSE
+                   OR ai_processed IS NULL
+                ORDER BY published_at DESC
+                LIMIT %s
+                """,
+                (batch_size,),
+            )
         rows = cur.fetchall()
 
     result = []
@@ -197,6 +213,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=50, help="每批处理数量")
     parser.add_argument("--max-items", type=int, default=0, help="最多处理条数（0=全部）")
     parser.add_argument("--catalyst-id", type=int, help="只处理指定 catalyst_id")
+    parser.add_argument("--force", action="store_true", help="忽略 ai_processed 状态强制重跑")
     parser.add_argument("--sleep", type=float, default=0.5, help="每条之间的间隔秒数")
     args = parser.parse_args()
 
@@ -225,9 +242,10 @@ def main():
         # 批量模式
         processed = 0
         failed = 0
+        offset = 0
 
         while True:
-            pending = fetch_pending(conn, args.batch_size)
+            pending = fetch_pending(conn, args.batch_size, force=args.force, offset=offset)
             if not pending:
                 print("没有待处理的催化剂，完成。")
                 break
@@ -257,6 +275,10 @@ def main():
 
             if args.max_items and processed >= args.max_items:
                 break
+
+            # force 模式用 offset 推进；非 force 模式靠 ai_processed 状态推进
+            if args.force:
+                offset += len(pending)
 
             # 如果这一批不满 batch_size，说明没有更多了
             if len(pending) < args.batch_size:

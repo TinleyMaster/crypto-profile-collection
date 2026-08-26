@@ -27,12 +27,12 @@ import requests
 TIMEOUT = 15
 CACHE_TTL = 180
 
-CMC_BASE = "https://pro-api.coinmarketcap.com"
+CMC_BASE = "https://pro-api.coinmarketcap.com/trial-pro-api"
 BINANCE_SPOT = "https://api.binance.com"
 BINANCE_FAPI = "https://fapi.binance.com"
 COINMETRICS_BASE = "https://community-api.coinmetrics.io/v4"
 FRED_BASE = "https://api.stlouisfed.org/fred"
-CRYPTOETF_BASE = "https://api.cryptoetf.com"
+CRYPTOETF_BASE = "https://api.cryptoetf.today/api"
 DL_BASE = "https://api.llama.fi"
 CG_BASE = "https://api.coingecko.com/api/v3"
 
@@ -86,12 +86,12 @@ def _fmt_num(v: float | None, unit: str = "") -> str:
 def _fetch_dim1_size() -> dict:
     result = {"status": "ok", "data": {}, "conclusion": ""}
     try:
-        data = _safe_get(f"{CMC_BASE}/public-api/v3/global-metrics/quotes/latest")
+        data = _safe_get(f"{CMC_BASE}/v1/global-metrics/quotes/latest")
         if not data or "data" not in data:
             raise ValueError("返回为空")
         d = data["data"]
-        quote = d.get("quote", [])
-        usd = quote[0] if quote else {}
+        quote = d.get("quote", {})
+        usd = quote.get("USD", {}) if isinstance(quote, dict) else (quote[0] if quote else {})
 
         total_mcap = float(usd.get("total_market_cap", 0) or 0)
         total_vol = float(usd.get("total_volume_24h", 0) or 0)
@@ -272,7 +272,6 @@ def _fetch_dim2_pairs() -> dict:
         )
 
     btc_mvrv = _fetch_mvrv("btc")
-    eth_mvrv = _fetch_mvrv("eth")
 
     result["data"] = {
         "btc": btc_ta,
@@ -280,7 +279,6 @@ def _fetch_dim2_pairs() -> dict:
         "eth_btc_ratio": round(eth_btc_price, 6) if eth_btc_price else None,
         "eth_btc_change_24h": eth_btc_chg,
         "btc_mvrv": btc_mvrv,
-        "eth_mvrv": eth_mvrv,
     }
 
     parts = []
@@ -329,22 +327,22 @@ def _fetch_binance_futures(symbol: str = "BTCUSDT") -> dict:
 
 def _fetch_cmc_fear_greed() -> dict:
     """CMC 恐贪指数（keyless）。"""
-    data = _safe_get(f"{CMC_BASE}/public-api/v3/fear-and-greed/latest")
+    data = _safe_get(f"{CMC_BASE}/v3/fear-and-greed/latest")
     if not data or "data" not in data:
         return {"value": None, "classification": None, "conclusion": "⚠️ 恐贪指数不可用"}
     d = data["data"]
     val = int(d.get("value", 0) or 0)
-    cls = d.get("classification", "")
+    cls = d.get("value_classification", "") or d.get("classification", "")
     return {"value": val, "classification": cls, "conclusion": f"恐贪指数 {val}（{cls}）"}
 
 
 def _fetch_cmc_altcoin_season() -> dict:
     """CMC 山寨季指数（keyless）。"""
-    data = _safe_get(f"{CMC_BASE}/public-api/v3/altcoin-season-index/latest")
+    data = _safe_get(f"{CMC_BASE}/v1/altcoin-season-index/latest")
     if not data or "data" not in data:
         return {"value": None, "conclusion": "⚠️ 山寨季指数不可用"}
     d = data["data"]
-    val = float(d.get("value", 0) or 0)
+    val = float(d.get("altcoin_index", 0) or 0)
     if val > 75:
         conc = f"山寨季指数 {val:.0f}，山寨季（>75）"
     elif val < 25:
@@ -409,6 +407,20 @@ def _fetch_dim3_derivatives_sentiment() -> dict:
             parts.append(cefi["conclusion"])
 
         result["conclusion"] = "；".join(parts)
+
+        # 子源完整度检查：衍生品(BTC/ETH) + 情绪(fng) 为关键子源
+        ok_sub = 0
+        total_sub = 3
+        if btc_fut.get("open_interest") is not None:
+            ok_sub += 1
+        if fng.get("value") is not None:
+            ok_sub += 1
+        if alt_season.get("value") is not None:
+            ok_sub += 1
+        result["subsource_ok"] = ok_sub
+        result["subsource_total"] = total_sub
+        if ok_sub < total_sub:
+            result["status"] = "warning"
     except Exception as e:
         result["status"] = "error"
         result["conclusion"] = f"⚠️ 衍生品/情绪数据不可用（{e.__class__.__name__}）"
@@ -545,6 +557,18 @@ def _fetch_dim4_macro_institution() -> dict:
         parts.append(etf["conclusion"])
 
         result["conclusion"] = "；".join(parts)
+
+        # 子源完整度检查
+        ok_sub = 0
+        total_sub = 2
+        if dxy is not None or t10y is not None:
+            ok_sub += 1
+        if etf.get("status") == "ok":
+            ok_sub += 1
+        result["subsource_ok"] = ok_sub
+        result["subsource_total"] = total_sub
+        if ok_sub < total_sub:
+            result["status"] = "warning"
     except Exception as e:
         result["status"] = "error"
         result["conclusion"] = f"⚠️ 宏观/机构数据不可用（{e.__class__.__name__}）"
@@ -558,8 +582,8 @@ def _fetch_dim4_macro_institution() -> dict:
 def _fetch_cmc_categories(limit: int = 30) -> list[dict]:
     """CMC 赛道分类（keyless），按 24h 市值变化排序。"""
     data = _safe_get(
-        f"{CMC_BASE}/public-api/v3/cryptocurrency/categories",
-        params={"limit": limit, "sort": "market_cap_change_24h", "sort_dir": "desc"},
+        f"{CMC_BASE}/v1/cryptocurrency/categories",
+        params={"limit": limit, "sort": "market_cap_change", "sort_dir": "desc"},
     )
     if not data or "data" not in data:
         return []
@@ -569,9 +593,9 @@ def _fetch_cmc_categories(limit: int = 30) -> list[dict]:
             "id": item.get("id", ""),
             "name": item.get("name", ""),
             "market_cap": float(item.get("market_cap", 0) or 0),
-            "market_cap_change_24h": float(item.get("market_cap_change_24h", 0) or 0),
-            "volume_24h": float(item.get("volume_24h", 0) or 0),
-            "volume_change_24h": float(item.get("volume_change_24h", 0) or 0),
+            "market_cap_change_24h": float(item.get("market_cap_change", 0) or 0),
+            "volume_24h": float(item.get("volume", 0) or 0),
+            "volume_change_24h": float(item.get("volume_change", 0) or 0),
             "num_coins": item.get("num_tokens", 0),
         })
     return result
@@ -643,6 +667,18 @@ def _fetch_dim5_sectors() -> dict:
                 parts.append(f"⚖️ 分化行情（{pos_count}/{len(cmc_cats)} 板块上涨）")
 
         result["conclusion"] = "；".join(parts)
+
+        # 子源完整度检查
+        ok_sub = 0
+        total_sub = 2
+        if cmc_cats:
+            ok_sub += 1
+        if dl_tvl:
+            ok_sub += 1
+        result["subsource_ok"] = ok_sub
+        result["subsource_total"] = total_sub
+        if ok_sub < total_sub:
+            result["status"] = "warning"
     except Exception as e:
         result["status"] = "error"
         result["conclusion"] = f"⚠️ 板块数据不可用（{e.__class__.__name__}）"
@@ -790,13 +826,25 @@ def get_market_overview(force_refresh: bool = False) -> dict:
     ]
 
     ok_count = 0
+    warn_count = 0
+    err_count = 0
+    subsource_ok = 0
+    subsource_total = 0
     for key, name, fetcher in dim_fetchers:
         try:
             dim = fetcher()
             result["dimensions"][key] = dim
             if dim.get("status") == "ok":
                 ok_count += 1
+            elif dim.get("status") == "warning":
+                warn_count += 1
+            else:
+                err_count += 1
+            if "subsource_ok" in dim:
+                subsource_ok += dim["subsource_ok"]
+                subsource_total += dim["subsource_total"]
         except Exception as e:
+            err_count += 1
             result["dimensions"][key] = {
                 "status": "error",
                 "data": {},
@@ -806,7 +854,9 @@ def get_market_overview(force_refresh: bool = False) -> dict:
     # 综合判断
     dims = result["dimensions"]
     summary_parts = []
-    summary_parts.append(f"数据完整度: {ok_count}/6 维度正常")
+    summary_parts.append(f"维度完整度: {ok_count}正常/{warn_count}部分缺失/{err_count}失败（共6维）")
+    if subsource_total > 0:
+        summary_parts.append(f"子源完整度: {subsource_ok}/{subsource_total}")
 
     # 多空综合
     bull_signals = 0
@@ -852,9 +902,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim1(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         metrics = [
             {"label": "总市值", "value": d.get("total_market_cap_fmt", "N/A"),
              "trend": "up" if d.get("market_cap_change_24h", 0) > 0 else "down"},
@@ -873,9 +924,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim2(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         btc = d.get("btc", {}).get("data", {})
         eth = d.get("eth", {}).get("data", {})
         metrics = [
@@ -899,9 +951,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim3(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         fng = d.get("fear_greed", {})
         btc_f = d.get("btc_futures", {})
         metrics = [
@@ -921,9 +974,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim4(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         etf = d.get("etf_flows", {}).get("data", {})
         fomc = d.get("next_fomc", {})
         metrics = [
@@ -944,9 +998,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim5(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         gainers = d.get("top_gainers", [])
         losers = d.get("top_losers", [])
         metrics = [
@@ -974,9 +1029,10 @@ def get_market_overview(force_refresh: bool = False) -> dict:
 
     def _flatten_dim6(dim: dict) -> dict:
         d = dim.get("data", {})
-        if dim.get("status") != "ok" or not d:
+        status = dim.get("status", "error")
+        if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
-                    "warning": None if dim.get("status") == "ok" else "数据获取失败"}
+                    "warning": "数据获取失败" if status == "error" else None}
         macro = d.get("macro_events", [])
         crypto = d.get("crypto_events", [])
         metrics = [
@@ -1005,6 +1061,13 @@ def get_market_overview(force_refresh: bool = False) -> dict:
         "dim5_sectors": _flatten_dim5(dims.get("sectors", {})),
         "dim6_events": _flatten_dim6(dims.get("events", {})),
     }
+    # 补子源完整度 warning
+    dim_keys = ["size", "pairs", "derivatives", "macro", "sectors", "events"]
+    flat_keys = list(flat.keys())
+    for dk, fk in zip(dim_keys, flat_keys):
+        dim = dims.get(dk, {})
+        if dim.get("status") == "warning" and "subsource_ok" in dim:
+            flat[fk]["warning"] = f"子源数据不完整（{dim['subsource_ok']}/{dim['subsource_total']}）"
     result.update(flat)
 
     # 综合 summary 对象化

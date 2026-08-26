@@ -6067,6 +6067,57 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     except Exception as e:
         _emit(f"衍生品数据采集失败（不影响结论生成）: {e}")
 
+    # ── 催化剂数据（从 asset_catalyst 取，建立 ID 级关联）──
+    catalysts_list = []
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT ac.catalyst_id, ac.source_code, ac.title, ac.body_text,
+                           ac.published_at, ac.event_category,
+                           ac.ai_event_type, ac.ai_sentiment, ac.ai_summary,
+                           ac.related_pairs, ac.source_url,
+                           cal.link_source, cal.confidence
+                    FROM biz.catalyst_asset_link cal
+                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
+                    WHERE cal.asset_id = %s
+                      AND ac.is_active = TRUE
+                      AND ac.published_at >= NOW() - INTERVAL '180 days'
+                    ORDER BY ac.published_at DESC
+                    LIMIT 30
+                    """,
+                    (asset_id,),
+                )
+                rows = cur.fetchall()
+                for r in rows:
+                    catalysts_list.append({
+                        "catalyst_id": r["catalyst_id"],
+                        "source_code": r["source_code"],
+                        "title": r["title"],
+                        "summary": r["ai_summary"] or r["title"],
+                        "published_at": str(r["published_at"]) if r["published_at"] else None,
+                        "event_category": r["event_category"],
+                        "event_type": r["ai_event_type"],
+                        "sentiment": r["ai_sentiment"],
+                        "related_pairs": r["related_pairs"],
+                        "source_url": r["source_url"],
+                        "link_source": r["link_source"],
+                        "confidence": float(r["confidence"]) if r["confidence"] else None,
+                    })
+        if catalysts_list:
+            metrics_structured["catalysts"] = {
+                "total_count": len(catalysts_list),
+                "bullish_count": sum(1 for c in catalysts_list if c["sentiment"] == "bullish"),
+                "bearish_count": sum(1 for c in catalysts_list if c["sentiment"] == "bearish"),
+                "neutral_count": sum(1 for c in catalysts_list if c["sentiment"] == "neutral"),
+                "source_count": len(set(c["source_code"] for c in catalysts_list)),
+                "items": catalysts_list,
+            }
+            _emit(f"催化剂数据：{len(catalysts_list)} 条（近180天）")
+    except Exception as e:
+        _emit(f"催化剂数据采集失败（不影响结论生成）: {e}")
+
     metrics_json_str = json.dumps(metrics_structured, ensure_ascii=False, indent=2, default=str)
 
     _emit("调用 LLM 生成研究结论...")
@@ -6094,7 +6145,13 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "9. 衍生品数据规则：\n"
         "   - 若结构化指标 derivatives.total_oi_usd 存在且 > 0，sentiment 维度必须提及衍生品 OI 数据，\n"
         "     禁止写「缺乏衍生品数据」「衍生品维度缺失」等类似表述。\n"
-        "   - 若 derivatives 数据为空，sentiment 维度可说明「衍生品数据暂缺」，但不得编造数字。\n\n"
+        "   - 若 derivatives 数据为空，sentiment 维度可说明「衍生品数据暂缺」，但不得编造数字。\n"
+        "10. 催化剂数据规则：\n"
+        "    - 若结构化指标 catalysts.items 存在且非空，catalyst 维度必须优先引用这些真实新闻事件，\n"
+        "      每条都要带上对应的 catalyst_id（从 items 中取），禁止凭空编造催化剂事件。\n"
+        "    - catalysts 数组的每项必须包含 catalyst_id（数字）、catalyst（描述）、timing（时间）、\n"
+        "      source_code（来源）、event_type（事件类型）、sentiment（情感）。\n"
+        "    - 如果 catalysts.items 为空，可以基于 unlock 等其他结构化指标推导催化剂，但不能编造具体新闻事件。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
         "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"
@@ -6118,7 +6175,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         '}, '
         '"thesis": [{"point": "核心论点（一句话）", "citations": [1, 2]}], '
         '"risks": [{"risk": "风险点", "citations": [3]}], '
-        '"catalysts": [{"catalyst": "催化剂/事件", "timing": "预期时间"}], '
+        '"catalysts": [{"catalyst_id": 123, "catalyst": "催化剂/事件", "timing": "预期时间", "source_code": "binance_news", "event_type": "listing", "sentiment": "bullish"}], '
         '"key_metrics": {"价格": "...", "市值": "...", "FDV": "...", "其他关键指标": "..."}}'
         "\n\n说明：dimensions 是主结构（四维框架），thesis/risks/catalysts 是旧格式兼容字段，两者都要填。"
     )
@@ -6149,6 +6206,31 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     risks = est.get("risks") or []
     catalysts = est.get("catalysts") or []
     key_metrics = est.get("key_metrics") or {}
+
+    # ── 催化剂后处理：校验 catalyst_id 有效性，补全来源信息，向后兼容
+    if catalysts and catalysts_list:
+        _valid_ids = {c["catalyst_id"] for c in catalysts_list}
+        _id_map = {c["catalyst_id"]: c for c in catalysts_list}
+        _sanitized_catalysts = []
+        for cat in catalysts:
+            if not isinstance(cat, dict):
+                continue
+            cid = cat.get("catalyst_id")
+            if cid is not None and int(cid) in _valid_ids:
+                # 有效引用：补全缺失字段（以 DB 为准）
+                src = _id_map[int(cid)]
+                cat.setdefault("catalyst", src["summary"] or src["title"])
+                cat.setdefault("source_code", src["source_code"])
+                cat.setdefault("event_type", src["event_type"] or "other")
+                cat.setdefault("sentiment", src["sentiment"] or "neutral")
+                if not cat.get("timing") and src.get("published_at"):
+                    cat["timing"] = src["published_at"][:10]
+                cat["catalyst_id"] = int(cid)
+                _sanitized_catalysts.append(cat)
+            elif cat.get("catalyst"):
+                # 无 ID 但有描述：保留（可能是 LLM 从 unlock 等推导的）
+                _sanitized_catalysts.append(cat)
+        catalysts = _sanitized_catalysts
 
     # ── Citation 后处理校验 ──
     # 过滤无效引用（越界/重复/自引），补充 title/url，对无有效引用的论点标记为推断

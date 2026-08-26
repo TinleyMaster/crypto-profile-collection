@@ -12,8 +12,11 @@ import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-WORKBENCH_DIR = PROJECT_ROOT / "workbench"
+# prod 结构: /app/scripts/bin/ → /app/（workbench 文件直接在 /app/ 下）
+# 本地结构: .../scripts/bin/ → .../workbench/
+# 优先用 /app/workbench，不存在则用 /app（prod 扁平部署）
+_candidate = SCRIPT_DIR.parent.parent / "workbench"
+WORKBENCH_DIR = _candidate if _candidate.exists() else SCRIPT_DIR.parent.parent
 
 # 确保能 import catalyst 包
 sys.path.insert(0, str(WORKBENCH_DIR))

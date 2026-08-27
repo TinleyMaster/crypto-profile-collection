@@ -48,7 +48,7 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 def _load_cursor() -> tuple[str | None, int | None]:
     """读取复合游标 (last_ts, last_asset_id)。"""
     settings = get_settings(require_database=True)
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT last_ts, last_asset_id FROM biz.catalyst_regen_cursor WHERE id = 1"
@@ -62,7 +62,7 @@ def _load_cursor() -> tuple[str | None, int | None]:
 def _save_cursor(last_ts: str | None, last_asset_id: int | None, processed: int):
     """保存复合游标。"""
     settings = get_settings(require_database=True)
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -83,7 +83,7 @@ def _save_cursor(last_ts: str | None, last_asset_id: int | None, processed: int)
 def _reset_cursor():
     """重置游标（清空）。"""
     settings = get_settings(require_database=True)
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM biz.catalyst_regen_cursor WHERE id = 1"
@@ -102,7 +102,7 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
     last_ts, last_aid = _load_cursor()
     settings = get_settings(require_database=True)
 
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             if last_ts and last_ts != "infinity":
                 # 复合游标：(ts, asset_id) 元组比较
@@ -168,7 +168,7 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
 def get_assets_hours(hours: int, limit: int) -> list[int]:
     """基于滑动窗口（回溯模式，不影响游标）。"""
     settings = get_settings(require_database=True)
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """

@@ -104,9 +104,12 @@ class BinanceSquareNewsSource(BaseCatalystSource):
         logger.info("fetched %d catalyst items from binance square news", len(items))
         return items
 
+    def __enter__(self):
+        return self
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._scraper:
-            self._scraper.session.close()
+            self._scraper._session.close()
             self._scraper = None
 
 

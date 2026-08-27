@@ -28,18 +28,18 @@ from catalyst.runner import run_all  # noqa: E402
 
 
 def main() -> int:
-    print("=" * 60)
-    print("催化剂数据摄入（全源增量）")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("催化剂数据摄入（全源增量）", flush=True)
+    print("=" * 60, flush=True)
 
     results = run_all()
 
-    print()
-    print("=" * 60)
-    print("摄入完成")
-    print("=" * 60)
-    print(f"{'源':<30} {'抓取':>6} {'新增':>6} {'合并':>6} {'跳过':>6}  错误")
-    print("-" * 70)
+    print(flush=True)
+    print("=" * 60, flush=True)
+    print("摄入完成", flush=True)
+    print("=" * 60, flush=True)
+    print(f"{'源':<30} {'抓取':>6} {'新增':>6} {'合并':>6} {'跳过':>6}  错误", flush=True)
+    print("-" * 70, flush=True)
 
     total_fetched = 0
     total_inserted = 0
@@ -52,15 +52,16 @@ def main() -> int:
             f"{r['inserted']:>6} "
             f"{r['merged']:>6} "
             f"{r['skipped']:>6}  "
-            f"{r['error']}"
+            f"{r['error']}",
+            flush=True,
         )
         total_fetched += r["fetched"]
         total_inserted += r["inserted"]
         if r["error"]:
             total_errors += 1
 
-    print()
-    print(f"总计: 抓取 {total_fetched} 条, 新增 {total_inserted} 条, 错误源 {total_errors}/{len(results)}")
+    print(flush=True)
+    print(f"总计: 抓取 {total_fetched} 条, 新增 {total_inserted} 条, 错误源 {total_errors}/{len(results)}", flush=True)
 
     # 所有源都报错才算失败；部分源失败但有数据进来仍算成功
     if total_errors == len(results) and total_fetched == 0:

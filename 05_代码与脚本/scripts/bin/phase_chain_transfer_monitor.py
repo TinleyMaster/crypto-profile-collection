@@ -29,7 +29,6 @@ from crypto_research.clients.tron_client import get_tron_client
 from crypto_research.clients.ton_client import get_ton_client
 from crypto_research.clients.sui_client import get_sui_client
 from crypto_research.clients.aptos_client import get_aptos_client
-from crypto_research.clients.coingecko_client import CoinGeckoClient
 
 
 # 大额转账阈值（美元）
@@ -446,29 +445,6 @@ def _print_source_banner(chain: str, client_type: str) -> None:
     print(f"  [{chain}] {msg}")
 
 
-CG_CHAIN_ID_MAP = {
-    "solana": "solana",
-    "tron": "tron",
-    "ton": "the-open-network",
-    "sui": "sui",
-    "aptos": "aptos",
-}
-
-
-def _get_nonevm_price_usd(settings, chain: str, contract_address: str) -> float:
-    """通过 CoinGecko 按合约地址查询非 EVM 链代币 USD 价格（失败回退 0）。"""
-    cg_chain = CG_CHAIN_ID_MAP.get(chain)
-    if not cg_chain:
-        return 0.0
-    try:
-        cg = CoinGeckoClient(settings)
-        data = cg.get_token_price(cg_chain, [contract_address])
-        price = data.get(contract_address, {}).get("usd")
-        return float(price) if price else 0.0
-    except Exception:  # noqa: BLE001
-        return 0.0
-
-
 def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
@@ -522,9 +498,10 @@ def main():
             # 该链尚未锁定数据源：按降级链依次尝试，锁定第一个能返回数据的源。
             # lock_result 非空表示本次已为该资产采集过，避免重复调用 API。
             lock_result = None
-            # 非 EVM 链走 CoinGecko 按合约查价（用于大额转账 USD 估值）
+            # 非 EVM 链走本地行情库查价（日级行情→CMC快照→市值推算，零 API 配额）
+            # 替代原 CoinGecko 按合约查价（CG 配额有限且 429 频发）
             price_usd = (
-                _get_nonevm_price_usd(settings, chain, asset["contract_address"])
+                get_asset_price(conn, asset["asset_id"], asset["canonical_symbol"])
                 if chain in ("solana", "tron", "ton", "sui", "aptos") else None
             )
             if chain not in chain_clients:

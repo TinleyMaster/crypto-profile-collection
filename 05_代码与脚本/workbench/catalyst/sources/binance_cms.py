@@ -20,7 +20,7 @@ from . import register_source
 logger = logging.getLogger(__name__)
 
 # 复用已有 scraper
-from ..binance_news import BinanceNewsScraper, KNOWN_CATALOGS  # noqa: E402
+from ..binance_news import BinanceNewsScraper, KNOWN_CATALOGS, RateLimitedError  # noqa: E402
 
 
 class BinanceCMSNewsSource(BaseCatalystSource):
@@ -78,18 +78,29 @@ class BinanceCMSNewsSource(BaseCatalystSource):
             since_ts,
         )
 
-        articles = self.scraper.fetch_catalog(
-            catalog_id=self.catalog_id,
-            max_pages=self.max_pages,
-            since_release_date=since_ts,
-        )
+        try:
+            articles = self.scraper.fetch_catalog(
+                catalog_id=self.catalog_id,
+                max_pages=self.max_pages,
+                since_release_date=since_ts,
+            )
+        except RateLimitedError:
+            logger.warning("binance CMS rate limited (429) at catalog fetch, source skipped")
+            return []
 
         items: list[CatalystItem] = []
         for art in articles:
             code = art.get("code")
             if not code:
                 continue
-            detail = self.scraper.fetch_detail(code)
+            try:
+                detail = self.scraper.fetch_detail(code)
+            except RateLimitedError:
+                logger.warning(
+                    "binance CMS rate limited (429), stopping detail fetch early (fetched %d items)",
+                    len(items),
+                )
+                break
             if not detail:
                 continue
 

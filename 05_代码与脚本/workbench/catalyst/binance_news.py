@@ -15,6 +15,11 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+class RateLimitedError(Exception):
+    """Binance API 限流（HTTP 429）信号，用于快速短路整个源抓取。"""
+
+
 LIST_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
 DETAIL_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query"
 
@@ -86,10 +91,17 @@ class BinanceNewsScraper:
         self._last_request_ts = time.time()
 
     def _get(self, url: str, params: dict) -> dict | None:
-        """统一 GET 请求封装"""
+        """统一 GET 请求封装
+
+        Returns:
+            dict 或 None；429 限流抛 RateLimitedError 由上层短路
+        """
         self._throttle()
         try:
             resp = self.session.get(url, params=params, timeout=self.timeout)
+            if resp.status_code == 429:
+                logger.warning("GET %s status=429 (rate limited)", url)
+                raise RateLimitedError(url)
             if resp.status_code != 200:
                 logger.warning("GET %s status=%s", url, resp.status_code)
                 return None
@@ -98,6 +110,8 @@ class BinanceNewsScraper:
                 logger.warning("GET %s code=%s msg=%s", url, data.get("code"), data.get("message"))
                 return None
             return data.get("data")
+        except RateLimitedError:
+            raise
         except Exception as e:
             logger.error("GET %s error: %s", url, e)
             return None

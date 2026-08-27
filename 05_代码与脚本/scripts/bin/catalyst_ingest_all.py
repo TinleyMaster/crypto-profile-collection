@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import os
+import logging
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -23,6 +24,13 @@ sys.path.insert(0, str(WORKBENCH_DIR))
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
+
+# 配置 logger 输出到 stdout，让 catalyst 内部的进度信息可见
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 
 from catalyst.runner import run_all  # noqa: E402
 

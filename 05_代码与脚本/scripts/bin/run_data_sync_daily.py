@@ -37,7 +37,9 @@ TASKS = [
     ("CMC 文档入口补充", "refresh_doc_source_entries_from_cmc_auto.py", [], True),
     ("CG 文档入口补充", "refresh_doc_source_entries_from_cg_auto.py", [], True),
     ("DL 文档入口补充", "refresh_doc_source_entries_from_dl_auto.py", [], True),
-    ("双源文档入口补充", "supplement_doc_entries_dual_auto.py", [], True),
+    # 注：双源文档入口补充（supplement_doc_entries_dual_auto.py）已从每日同步移除——
+    # 其候选查询对 doc_source_entry 的反连接走全表扫描（1.8GB），导致每日同步卡死
+    # （详见 复验结论_data_sync_daily执行情况_2026-08-27.md，task 4221708 卡在 Round 89/200）。
 
     # ─── 第三方数据层 ───
     ("第三方评级/审计回填", "phase_b2_third_party_auto.py", [], True),

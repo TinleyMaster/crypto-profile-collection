@@ -497,6 +497,13 @@ TASK_DEFS = {
         "category": "链上数据",
         "hidden": True,
     },
+    "collect_exchange_wallets": {
+        "name": "CEX 地址自动收集",
+        "description": "社区公开地址库+快照标签反查，分级入库（high/medium/low），默认 dry-run 需 --apply",
+        "script": "collect_exchange_wallets.py",
+        "default_args": ["--chains", "eth,bsc", "--sources", "community,ethplorer"],
+        "category": "链上数据",
+    },
     # ═══ 诊断 ═══
     "diag_noise": {
         "name": "噪声诊断报告",

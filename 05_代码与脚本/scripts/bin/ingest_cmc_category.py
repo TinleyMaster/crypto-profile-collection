@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--category-id",
-        type=int,
-        help="Only ingest a single category by CMC category id.",
+        type=str,
+        help="Only ingest a single category by CMC category id (MongoDB ObjectId string).",
     )
     parser.add_argument(
         "--dry-run",
@@ -228,7 +228,7 @@ def ingest_categories(client, conn, dry_run: bool) -> tuple[list[dict], int | No
 def ingest_category_members(
     client,
     conn,
-    category_id: int,
+    category_id: str,
     category_name: str,
     limit: int,
     dry_run: bool,
@@ -320,7 +320,7 @@ def main() -> int:
                 ingest_category_members(
                     client,
                     None,
-                    int(cat["category_id"]),
+                    cat["category_id"],
                     cat["category_name"],
                     args.member_limit,
                     dry_run=True,
@@ -339,7 +339,7 @@ def main() -> int:
         failed = 0
 
         for cat in category_rows:
-            cat_id = int(cat["category_id"])
+            cat_id = cat["category_id"]
             if target_ids and cat_id not in target_ids:
                 continue
             try:

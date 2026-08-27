@@ -3169,28 +3169,15 @@
             <section id="overview" class="module-card">
                 <div class="module-header">
                     <h2>🌐 大盘分析</h2>
-                    <p class="module-desc">六维大盘扫描：体量 / 盘面 / 衍生品情绪 / 宏观机构 / 板块轮动 / 事件日历</p>
+                    <p class="module-desc">情绪子分 + 结构子分 + 事件日历（事件日历不参与子分计算）</p>
                     <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
                         <span style="font-size:12px;color:#8a92a0" id="overview-updated">-</span>
                         <button class="hot-refresh" onclick="loadMarketOverview(true)">刷新</button>
                     </div>
                 </div>
 
-                <!-- 综合结论 -->
-                <div id="overview-summary" class="overview-summary" style="display:none">
-                    <div class="summary-banner">
-                        <span class="summary-label">综合判断</span>
-                        <span class="summary-score" id="overview-score">-</span>
-                        <span class="summary-direction" id="overview-direction">-</span>
-                    </div>
-                    <div class="summary-reason" id="overview-reason">-</div>
-                </div>
-
-                <!-- 六维卡片网格 -->
+                <!-- 子分卡片网格 -->
                 <div class="overview-grid" id="overview-grid">
-                    <div class="dim-card loading">加载中…</div>
-                    <div class="dim-card loading">加载中…</div>
-                    <div class="dim-card loading">加载中…</div>
                     <div class="dim-card loading">加载中…</div>
                     <div class="dim-card loading">加载中…</div>
                     <div class="dim-card loading">加载中…</div>
@@ -6457,52 +6444,107 @@
         }
 
         function renderOverview (data) {
-            // 综合结论
             const summary = data.summary || {};
-            const sumEl = document.getElementById('overview-summary');
-            const scoreEl = document.getElementById('overview-score');
-            const dirEl = document.getElementById('overview-direction');
-            const reasonEl = document.getElementById('overview-reason');
-            if (summary.score !== undefined) {
-                sumEl.style.display = 'block';
-                scoreEl.textContent = summary.score + ' / 100';
-                const dir = summary.direction || 'neutral';
-                dirEl.textContent = dir === 'bullish' ? '偏多' : dir === 'bearish' ? '偏空' : '中性';
-                dirEl.className = 'summary-direction ' + dir;
-                reasonEl.textContent = summary.reason || '';
-            }
-            // 六维卡片
             const grid = document.getElementById('overview-grid');
-            grid.innerHTML = DIM_META.map(meta => {
-                const dim = data[meta.key] || {};
-                const score = dim.score !== undefined ? dim.score : null;
-                const scoreClass = score === null ? 'na' :
-                    score >= 60 ? 'bull' : score <= 40 ? 'bear' : 'neutral';
-                const scoreText = score === null ? 'N/A' :
-                    score >= 60 ? '偏多 ' + score : score <= 40 ? '偏空 ' + score : '中性 ' + score;
-                const metrics = dim.metrics || [];
-                const metricHtml = metrics.slice(0, 6).map(m => {
-                    let valClass = '';
-                    if (m.trend === 'up') valClass = 'up';
-                    else if (m.trend === 'down') valClass = 'down';
-                    return `<div class="dim-metric-row">
-                        <span class="dim-metric-label">${m.label}</span>
-                        <span class="dim-metric-val ${valClass}">${m.value}</span>
-                    </div>`;
-                }).join('');
-                const warnHtml = dim.warning ? `<div class="dim-warn">⚠️ ${dim.warning}</div>` : '';
-                const conclHtml = dim.conclusion ? `<div class="dim-conclusion">${dim.conclusion}</div>` : '';
-                return `<div class="dim-card">
-                    <div class="dim-card-header">
-                        <span class="dim-card-icon">${meta.icon}</span>
-                        <span class="dim-card-title">${meta.title}</span>
-                        <span class="dim-card-score ${scoreClass}">${scoreText}</span>
-                    </div>
-                    <div class="dim-metrics">${metricHtml || '<span style="color:#5a6472;font-size:12px">暂无数据</span>'}</div>
-                    ${conclHtml}
-                    ${warnHtml}
-                </div>`;
-            }).join('');
+            
+            // 渲染情绪子分
+            const emotion = summary.emotion_subscore || {};
+            const emotionScore = emotion.score;
+            const emotionStatus = emotion.status || 'error';
+            const emotionComponents = emotion.components || {};
+            
+            // 渲染结构子分
+            const structure = summary.structure_subscore || {};
+            const structureScore = structure.score;
+            const structureStatus = structure.status || 'error';
+            const structureComponents = structure.components || {};
+            
+            let html = '';
+            
+            // 情绪子分卡片
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">🧠</span>
+                    <span class="dim-card-title">情绪子分</span>
+                    <span class="dim-card-score ${emotionScore >= 60 ? 'bull' : emotionScore <= 40 ? 'bear' : 'neutral'}">
+                        ${emotionScore !== null ? emotionScore + ' / 100' : 'N/A'}
+                    </span>
+                </div>
+                <div class="dim-metrics">
+                    ${Object.entries(emotionComponents).map(([key, comp]) => {
+                        if (comp.status && comp.status !== 'ok') {
+                            return `<div class="dim-metric-row">
+                                <span class="dim-metric-label">${key}</span>
+                                <span class="dim-metric-val" style="color:#6b7280">⚠️ ${comp.status}</span>
+                            </div>`;
+                        }
+                        const val = comp.value !== undefined ? comp.value : (comp.funding_rate !== undefined ? comp.funding_rate : '-');
+                        const score = comp.score !== undefined ? comp.score : '-';
+                        return `<div class="dim-metric-row">
+                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)</span>
+                            <span class="dim-metric-val">${typeof val === 'number' ? val.toFixed(2) : val} → ${score}</span>
+                        </div>`;
+                    }).join('')}
+                </div>
+                <div class="dim-conclusion">权重覆盖: ${(emotion.available_weight * 100).toFixed(0)}%</div>
+            </div>`;
+            
+            // 结构子分卡片
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">📊</span>
+                    <span class="dim-card-title">结构子分</span>
+                    <span class="dim-card-score ${structureScore >= 60 ? 'bull' : structureScore <= 40 ? 'bear' : 'neutral'}">
+                        ${structureScore !== null ? structureScore + ' / 100' : 'N/A'}
+                    </span>
+                </div>
+                <div class="dim-metrics">
+                    ${Object.entries(structureComponents).map(([key, comp]) => {
+                        if (comp.status && comp.status !== 'ok') {
+                            return `<div class="dim-metric-row">
+                                <span class="dim-metric-label">${key}</span>
+                                <span class="dim-metric-val" style="color:#6b7280">⚠️ ${comp.status}</span>
+                            </div>`;
+                        }
+                        const score = comp.score !== undefined ? comp.score : '-';
+                        return `<div class="dim-metric-row">
+                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)</span>
+                            <span class="dim-metric-val">评分: ${score}</span>
+                        </div>`;
+                    }).join('')}
+                </div>
+                <div class="dim-conclusion">权重覆盖: ${(structure.available_weight * 100).toFixed(0)}%</div>
+            </div>`;
+            
+            // 事件日历（独立信息栏，不参与子分）
+            const eventCal = data.event_calendar || {};
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">📅</span>
+                    <span class="dim-card-title">事件日历</span>
+                    <span class="dim-card-score neutral">仅展示</span>
+                </div>
+                <div class="dim-metrics">
+                    ${(eventCal.hardcoded || []).map(evt => `
+                        <div class="dim-metric-row">
+                            <span class="dim-metric-label">${evt.date}</span>
+                            <span class="dim-metric-val">${evt.event}</span>
+                        </div>
+                    `).join('')}
+                    ${(eventCal.gecko || []).map(evt => `
+                        <div class="dim-metric-row">
+                            <span class="dim-metric-label">${evt.date || 'TBD'}</span>
+                            <span class="dim-metric-val">${evt.event}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+            
+            grid.innerHTML = html;
+            
+            // 隐藏旧的综合结论区域（如果存在）
+            const sumEl = document.getElementById('overview-summary');
+            if (sumEl) sumEl.style.display = 'none';
         }
 
         const HOT_PAGE_SIZE = 5;

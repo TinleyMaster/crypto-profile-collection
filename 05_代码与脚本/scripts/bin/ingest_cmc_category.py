@@ -312,19 +312,27 @@ def main() -> int:
     if args.dry_run:
         category_rows, _ = ingest_categories(client, None, dry_run=True)
         if args.category_id:
-            ingest_category_members(
-                client, None, args.category_id, "dry-run", args.member_limit, dry_run=True
-            )
+            # Only test member endpoint if category_id is numeric (CMC API requirement)
+            if args.category_id.isdigit():
+                ingest_category_members(
+                    client, None, args.category_id, "dry-run", args.member_limit, dry_run=True
+                )
+            else:
+                print(f"Skipping member test: category_id '{args.category_id}' is not numeric (CMC API requires numeric ID)")
         else:
-            for cat in category_rows[:3]:
+            # Find first numeric category_id for member test
+            numeric_cat = next((cat for cat in category_rows[:10] if cat["category_id"].isdigit()), None)
+            if numeric_cat:
                 ingest_category_members(
                     client,
                     None,
-                    cat["category_id"],
-                    cat["category_name"],
+                    numeric_cat["category_id"],
+                    numeric_cat["category_name"],
                     args.member_limit,
                     dry_run=True,
                 )
+            else:
+                print("Skipping member test: no numeric category_id found in first 10 categories")
         return 0
 
     if not settings.database_url:
@@ -341,6 +349,10 @@ def main() -> int:
         for cat in category_rows:
             cat_id = cat["category_id"]
             if target_ids and cat_id not in target_ids:
+                continue
+            # Skip non-numeric category IDs (CMC member API requires numeric ID)
+            if not cat_id.isdigit():
+                print(f"  category {cat_id} ({cat['category_name']}): skipped (non-numeric ID)")
                 continue
             try:
                 count, _ = ingest_category_members(

@@ -76,6 +76,39 @@ class CMCClient:
         response.raise_for_status()
         return response.json()
 
+    def get_cryptocurrency_categories(
+        self,
+        start: int = 1,
+        limit: int = 5000,
+    ) -> dict[str, Any]:
+        response = self.session.get(
+            f"{self.settings.cmc_base_url}/v1/cryptocurrency/categories",
+            params={"start": start, "limit": limit},
+            timeout=self.settings.request_timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def get_cryptocurrency_category(
+        self,
+        category_id: int,
+        start: int = 1,
+        limit: int = 5000,
+        convert: str = "USD",
+    ) -> dict[str, Any]:
+        response = self.session.get(
+            f"{self.settings.cmc_base_url}/v1/cryptocurrency/category",
+            params={
+                "id": category_id,
+                "start": start,
+                "limit": limit,
+                "convert": convert,
+            },
+            timeout=self.settings.request_timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def get_quotes_historical(
         self,
         ids: list[int],

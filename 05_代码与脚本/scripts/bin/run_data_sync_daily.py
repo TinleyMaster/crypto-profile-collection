@@ -45,6 +45,7 @@ TASKS = [
 
     # ─── 行情/市值层 ───
     ("主表 supply/市值对齐 CMC", "sync_core_supply_from_cmc.py", ["--sync"], False),
+    ("CMC 分类聚合", "ingest_cmc_category.py", [], True),
 
     # ─── 信号层 ───
     ("每日 diff 变化榜", "daily_diff_generator.py", [], True),

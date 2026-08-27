@@ -1825,10 +1825,10 @@ def api_market_overview():
         force = request.args.get("force_refresh", "0") == "1"
         result = get_market_overview(force_refresh=force)
 
-        # 将 ethbtc 风险偏好开关注入维度2「pairs」（盘面）
+        # 将 ethbtc 风险偏好开关注入维度2「2盘面」的 data（盘面）
         ethbtc = get_ethbtc_overview()
-        if "dimensions" in result and "pairs" in result["dimensions"]:
-            result["dimensions"]["pairs"]["ethbtc"] = ethbtc
+        if "dimensions" in result and "2盘面" in result["dimensions"]:
+            result["dimensions"]["2盘面"].setdefault("data", {})["ethbtc"] = ethbtc
 
         return jsonify({"ok": True, **result})
     except Exception as e:

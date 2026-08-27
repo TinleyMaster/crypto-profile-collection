@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import io
 import time
@@ -42,6 +43,7 @@ DOC_URL_KEYWORDS = [
 ENTRY_TYPES_TO_CRAWL = {
     "official_website",
     "docs",
+    "docs_portal",  # 文档门户站（如 docs.bitway.com），需爬取以通过 llms.txt 发现其下全部文档
 }
 
 # ── 聚合类域名：多项目共用平台，内链导航导致大规模 asset_id 污染 ──
@@ -80,6 +82,30 @@ AGGREGATION_DOMAINS = {
     "assets.backed.fi",            # 代币化资产平台
     "www.backedassets.fi",         # 代币化资产平台
     "backed.fi",                   # 代币化资产平台
+    # ── 2026-08-10 新增：第三方审计公司/平台，IBS 代币污染分析发现 ──
+    "tech-audit.org",              # 审计公司整站
+    "www.tech-audit.org",
+    "chainsecurity.com",           # 审计公司整站
+    "www.chainsecurity.com",
+    "docs.pinksale.finance",       # 启动平台审计合作页
+    "docs.uncx.network",           # 启动平台审计合作页
+    "gempad.gitbook.io",           # 启动平台审计合作页
+    "analytixaudit.com",           # 第三方审计公司
+    "www.analytixaudit.com",
+    "freshcoins.io",               # 第三方审计公司
+    "www.freshcoins.io",
+    "daudit.org",                  # 第三方审计公司
+    "rugfreecoins.com",            # 第三方审计公司
+    "www.rugfreecoins.com",
+    "auditace.tech",               # 第三方审计公司
+    "cointool.app",                # 第三方审计工具
+    "audit-hero.com",              # 第三方审计平台
+    "consensys.net",               # 审计公司
+    "academy.binance.com",         # 币安学院（通用教育资源）
+    "dxsale.network",              # 启动平台审计合作页
+    # Medium/Substack 审计聚合
+    "quillaudits.substack.com",
+    "www.newsletter.quillaudits.com",
 }
 
 # ── 密度触发域名：单页提取到超过阈值数量的链接时，视为聚合页，整组丢弃 ──
@@ -122,6 +148,8 @@ AGGREGATION_DENSITY_DOMAINS = {
     # 审计/安全平台
     "audits.sherlock.xyz",
     "quillaudits.medium.com",
+    "quillaudits.com",
+    "www.quillaudits.com",
     "www.cyberscope.io",
     "hacken.io",
     "assets.hacken.io",
@@ -129,6 +157,29 @@ AGGREGATION_DENSITY_DOMAINS = {
     "blog.openzeppelin.com",
     "www.certora.com",
     "certora.cdn.prismic.io",
+    # ── 2026-08-10 新增：第三方审计公司/平台（IBS 污染分析）──
+    "tech-audit.org",
+    "www.tech-audit.org",
+    "chainsecurity.com",
+    "www.chainsecurity.com",
+    "docs.pinksale.finance",
+    "docs.uncx.network",
+    "gempad.gitbook.io",
+    "analytixaudit.com",
+    "www.analytixaudit.com",
+    "freshcoins.io",
+    "www.freshcoins.io",
+    "daudit.org",
+    "rugfreecoins.com",
+    "www.rugfreecoins.com",
+    "auditace.tech",
+    "cointool.app",
+    "audit-hero.com",
+    "consensys.net",
+    "academy.binance.com",
+    "dxsale.network",
+    "quillaudits.substack.com",
+    "www.newsletter.quillaudits.com",
     # 代币化平台
     "realityfinance.xyz",
     "assets.backed.fi",
@@ -205,6 +256,13 @@ EXCLUDE_PATH_PATTERNS = [
     "/branches/",
     "/tags/",
     "/releases/",
+    # ── GitHub 导航页面（非文档）──
+    "/forks",
+    "/pulse",
+    "/activity",
+    "/custom-properties",
+    "/graphs/",
+    "/community",
     # ── 虚拟环境 / 依赖目录（无论域名都排除）──
     ".venv/",
     "node_modules/",
@@ -235,6 +293,11 @@ EXCLUDE_PATH_PATTERNS = [
     # ReportLinker 用于 RWA/支付/区块链产业市场规模报告
 ]
 EXCLUDE_PATH_EXACT = {"/resources/whitepapers"}
+# ── DApp 数据页正则：金库/合约详情页（链 ID + 0x 合约地址），属产品数据而非文档 ──
+EXCLUDE_PATH_REGEX = [
+    re.compile(r"/vaults/\d+/0x[0-9a-fA-F]+"),
+    re.compile(r"/aclm/\d+/0x[0-9a-fA-F]+"),
+]
 NOISY_DOC_DOMAINS = {"whitepaper.io", "docs.eth"}
 
 # ── GitHub blob 链接的文件扩展名过滤 ──
@@ -281,6 +344,9 @@ _stats = {"done": 0, "failed": 0, "not_html": 0, "empty": 0, "discovered": 0, "s
 _pending_db_rows: list[tuple] = []
 _pending_crawled_ids: list[int] = []
 _pending_spa_ids: list[int] = []
+_pending_published_updates: list[tuple[int, str]] = []  # (entry_id, published_at)
+# 跨入口去重：已发现的 (asset_id, entry_url)，避免同一 URL 被多个文档页侧边栏重复统计/写入
+_seen_doc_urls: set[tuple] = set()
 _db_lock = threading.Lock()
 _start_time: float = 0
 _total: int = 0
@@ -302,7 +368,23 @@ def _doc_keyword_in_path_only(url: str) -> bool:
 
 
 def infer_doc_entry_type(url: str) -> str:
+    from urllib.parse import urlparse
+
+    from crypto_research.mapping.classify_link import infer_source_type
+
     lowered = url.lower()
+
+    # B2 特有：文档门户站识别（保留 docs_portal，供后续轮次 llms.txt 递归发现）
+    if "/docs/" in lowered or "documentation" in lowered:
+        return "docs_portal"
+    if urlparse(url).netloc.lower().startswith("docs."):
+        return "docs_portal"
+
+    # 文档类关键词 → docs（tokenomics/audit 页面是文档，不是官网）
+    if "tokenomics" in lowered or "audit" in lowered:
+        return "docs"
+
+    # 白皮书独立成 whitepaper_page（对齐 taxonomy.SOURCE_TYPES）
     if any(
         kw in lowered
         for kw in [
@@ -315,16 +397,11 @@ def infer_doc_entry_type(url: str) -> str:
             "technical-paper",
         ]
     ):
-        return "docs"
-    if "tokenomics" in lowered:
-        return "docs"
-    if "audit" in lowered:
-        return "docs"
-    if "/docs/" in lowered or "documentation" in lowered:
-        return "docs_portal"
-    if "github.com" in lowered:
-        return "github"
-    return "docs"
+        return "whitepaper_page"
+
+    # 其余交给统一分类器：github/twitter/telegram/medium/reddit/facebook 等，
+    # 无法识别的默认 official_website（官网页面），避免误标为 docs。
+    return infer_source_type(url)
 
 
 def _is_github_non_doc_blob(url: str) -> bool:
@@ -365,6 +442,10 @@ def _is_excluded_url(url: str) -> bool:
         return True
     for pattern in EXCLUDE_PATH_PATTERNS:
         if pattern.lower() in full_path or pattern.lower() in path:
+            return True
+    # DApp 金库/合约详情页（链 ID + 0x 合约地址）
+    for rx in EXCLUDE_PATH_REGEX:
+        if rx.search(path):
             return True
     # GitHub blob 链接：排除非文档文件（.py/.sol 等源码）
     if _is_github_non_doc_blob(url):
@@ -408,12 +489,156 @@ def _matches_project(url_lower: str, project_identifiers: list[str]) -> bool:
     return False
 
 
+def _root_domain(domain: str) -> str:
+    """提取根域名（最后两级），如 ai.cysic.xyz -> cysic.xyz。"""
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return domain
+
+
+def _normalize_url(url: str) -> str:
+    """URL 归一化：去 www、去 query/fragment、去尾斜杠、合并 Mintlify 的 .md 后缀。
+
+    用于去重，避免同一页面因查询参数（排序/筛选/跟踪）或 Mintlify 的
+    /x 与 /x.md 两种写法被当成不同文档。
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = parsed.path or "/"
+    # Mintlify 文档站 /x 与 /x.md 同内容；GitHub blob/raw 的 .md 是真实文件名，不能去
+    if path.lower().endswith(".md") and "github.com" not in netloc:
+        path = path[:-3]
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def extract_published_date(html: str, headers: dict | None = None) -> str | None:
+    """从 HTML 页面提取发布/最后更新日期。
+
+    优先级：
+      1. JSON-LD 结构化数据 (datePublished / dateModified)
+      2. meta 标签 (article:published_time / article:modified_time / og:published_time)
+      3. meta name (pubdate / publishdate / last-modified)
+      4. HTTP Last-Modified 头
+    返回 ISO 日期字符串 (YYYY-MM-DD)，提取失败返回 None。
+    """
+    import re
+    import json
+    from datetime import datetime
+    from bs4 import BeautifulSoup
+
+    def _parse_date(s: str) -> str | None:
+        if not s:
+            return None
+        s = s.strip().strip('"').strip("'")
+        # 常见格式：2024-01-15, 2024-01-15T10:30:00Z, 2024/01/15, Jan 15, 2024
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%d %b %Y",
+            "%d %B %Y",
+            "%a, %d %b %Y %H:%M:%S %Z",  # RFC 2822 (Last-Modified)
+            "%a, %d %b %Y %H:%M:%S %z",
+        ):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                continue
+        # 兜底：用正则抓 YYYY-MM-DD
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+        if m:
+            return m.group(1)
+        return None
+
+    if not html:
+        # 无 HTML 时尝试 HTTP 头
+        if headers:
+            lm = headers.get("Last-Modified") or headers.get("last-modified")
+            if lm:
+                return _parse_date(lm)
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1. JSON-LD
+    for script in soup.find_all("script", type="application/ld+json"):
+        text = script.string or script.get_text() or ""
+        text = text.strip()
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # 可能是 dict 或 list
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in ("datePublished", "dateModified", "dateCreated"):
+                val = item.get(key)
+                if isinstance(val, str):
+                    d = _parse_date(val)
+                    if d:
+                        return d
+                elif isinstance(val, dict):
+                    # 有时是 {"@value": "..."}
+                    v = val.get("@value") or val.get("value")
+                    if isinstance(v, str):
+                        d = _parse_date(v)
+                        if d:
+                            return d
+
+    # 2. meta property (OpenGraph / article)
+    meta_props = [
+        "article:published_time", "article:modified_time",
+        "og:published_time", "og:updated_time",
+        "pubdate", "publishdate", "last-modified",
+    ]
+    for prop in meta_props:
+        tag = soup.find("meta", attrs={"property": prop}) or soup.find("meta", attrs={"name": prop})
+        if tag:
+            content = tag.get("content") or tag.get("value")
+            d = _parse_date(content)
+            if d:
+                return d
+
+    # 3. <time> 标签
+    for time_tag in soup.find_all("time"):
+        dt = time_tag.get("datetime") or time_tag.get_text(strip=True)
+        d = _parse_date(dt)
+        if d:
+            return d
+
+    # 4. HTTP Last-Modified
+    if headers:
+        lm = headers.get("Last-Modified") or headers.get("last-modified")
+        if lm:
+            return _parse_date(lm)
+
+    return None
+
+
 def extract_doc_links(
     html: str, base_url: str, same_domain_only: bool = True,
     project_identifiers: list[str] | None = None,
+    require_doc_keyword: bool = True,
+    skip_aggregation_filter: bool = False,
 ) -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin, urlparse
+    from urllib.parse import urljoin, urlparse, urlunparse
 
     soup = BeautifulSoup(html, "html.parser")
     base_domain = urlparse(base_url).netloc.lower()
@@ -431,17 +656,40 @@ def extract_doc_links(
             continue
         absolute_url = urljoin(base_url, href)
         parsed = urlparse(absolute_url)
+        # 去掉 # 锚点片段：同一页面不同锚点内容完全一致，NotebookLM 无法区分
+        if parsed.fragment:
+            absolute_url = urlunparse(parsed._replace(fragment=""))
+            parsed = urlparse(absolute_url)
         if parsed.scheme not in ("http", "https"):
             continue
         link_domain = parsed.netloc.lower()
         if _is_excluded_url(absolute_url):
             continue
+        # 同一根域名下的文档子域名（如 ai.cysic.xyz -> docs.cysic.xyz）
+        link_is_same_root_docs = (
+            link_domain.startswith("docs.")
+            and _root_domain(link_domain) == _root_domain(base_domain)
+        )
 
         should_record = False
         link_text = a.get_text(strip=True)
         link_text_is_doc = _has_doc_keyword(link_text)
 
-        if link_domain in NOISY_DOC_DOMAINS:
+        if link_is_same_root_docs:
+            # 同根域名的 docs 子域名是文档站，直接收录（跨子域名也保留）
+            should_record = True
+        elif not require_doc_keyword:
+            # 放宽模式：收录所有同域/同根域名链接 + 匹配项目标识的跨域文档链接（用于单资产重爬）
+            # 同域/同根域名链接全收录（/about, /team, /roadmap 等投研页面）
+            if link_domain == base_domain or _root_domain(link_domain) == _root_domain(base_domain):
+                should_record = True
+            # 跨域链接：文档关键词 + 项目标识双重校验，
+            # 阻止 lab.stellar.org、profiler.firefox.com 等无关外链被误收
+            elif (_has_doc_keyword(absolute_url) or link_text_is_doc) and _matches_project(
+                absolute_url.lower(), project_identifiers or []
+            ):
+                should_record = True
+        elif link_domain in NOISY_DOC_DOMAINS:
             if _doc_keyword_in_path_only(absolute_url) or link_text_is_doc:
                 should_record = True
         elif _has_doc_keyword(absolute_url):
@@ -456,7 +704,8 @@ def extract_doc_links(
         if not should_record:
             continue
         # 聚合域名过滤：内链不继承 asset_id（如 code4rena 的 4,734 条其他比赛链接）
-        if base_domain in AGGREGATION_DOMAINS and link_domain == base_domain:
+        # 单资产重爬时跳过此过滤，允许审计报告等外部链接被收录
+        if not skip_aggregation_filter and base_domain in AGGREGATION_DOMAINS and link_domain == base_domain:
             continue
         # GitHub 同仓库过滤：跨仓库链接不继承 asset_id，阻止污染扩散
         if not _is_same_github_repo(base_url, absolute_url):
@@ -464,10 +713,10 @@ def extract_doc_links(
         if len(absolute_url) > 500:
             continue
 
-        normalized = absolute_url.rstrip("/")
+        normalized = _normalize_url(absolute_url)
         if normalized not in seen:
             seen.add(normalized)
-            results.append((absolute_url, infer_doc_entry_type(absolute_url)))
+            results.append((normalized, infer_doc_entry_type(normalized)))
 
     # ── 密度触发过滤：同一来源链接超过阈值时，只保留与项目标识匹配的链接 ──
     if results and project_identifiers:
@@ -510,7 +759,162 @@ def _make_session():
     return s
 
 
-def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
+def _fetch_llms_txt(base_url: str, session, timeout: int) -> list[tuple[str, str]]:
+    """获取文档站的 llms.txt 索引（GitBook/Mintlify 标准），返回 (normalized_url, entry_type) 列表。
+
+    llms.txt 是 LLM 友好的 Markdown 索引文件，列出站点全部文档链接。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    # 候选位置：根路径 + 当前路径（如 /docs/llms.txt）
+    candidates = [f"{origin}/llms.txt"]
+    if parsed.path and parsed.path.rstrip("/"):
+        candidates.append(f"{origin}{parsed.path.rstrip('/')}/llms.txt")
+
+    for llms_url in candidates:
+        try:
+            resp = session.get(llms_url, timeout=(3, timeout), allow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "text" not in ct and "markdown" not in ct:
+                continue
+            text = resp.text or ""
+            if not text.strip() or len(text) > 500_000:
+                continue
+
+            results: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            base_root = _root_domain(parsed.netloc.lower())
+            for m in re.finditer(r'\[[^\]]*\]\((https?://[^)\s]+)\)', text):
+                link = m.group(1)
+                lp = urlparse(link)
+                if lp.scheme not in ("http", "https"):
+                    continue
+                # 只保留同根域名链接，避免跨站污染
+                if _root_domain(lp.netloc.lower()) != base_root:
+                    continue
+                if _is_excluded_url(link):
+                    continue
+                norm = _normalize_url(link)
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                results.append((norm, infer_doc_entry_type(norm)))
+            if results:
+                return results
+        except Exception:
+            continue
+    return []
+
+
+def _parse_sitemap(text: str) -> tuple[str, list[str]]:
+    """解析 sitemap XML，返回 (root_tag, <loc> 列表)，兼容命名空间。"""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return "", []
+    root_tag = root.tag.rsplit("}", 1)[-1]
+    locs = [
+        el.text.strip()
+        for el in root.iter()
+        if el.tag.rsplit("}", 1)[-1] == "loc" and el.text and el.text.strip()
+    ]
+    return root_tag, locs
+
+
+def _fetch_sitemap(base_url: str, session, timeout: int, max_pages: int = 200) -> list[tuple[str, str]]:
+    """获取站点 sitemap.xml（含 sitemap index），返回 (normalized_url, entry_type) 列表。
+
+    一次性拿到站点全部页面（roadmap/team/governance 等 HTML 内链可能漏掉的页），
+    仅保留同根域名链接并套用与深爬一致的排除规则，避免跨站污染。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    base_root = _root_domain(parsed.netloc.lower())
+
+    pending = [f"{origin}/sitemap.xml"]
+    seen_sitemaps: set[str] = set()
+    page_urls: list[str] = []
+
+    # 主 sitemap + 最多 9 个子 sitemap，避免无界递归
+    while pending and len(seen_sitemaps) < 10:
+        su = pending.pop(0)
+        if su in seen_sitemaps:
+            continue
+        seen_sitemaps.add(su)
+        try:
+            resp = session.get(su, timeout=(3, timeout), allow_redirects=True)
+            if resp.status_code != 200:
+                continue
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "xml" not in ct and "text/plain" not in ct:
+                continue
+            root_tag, locs = _parse_sitemap(resp.text or "")
+            if not locs:
+                continue
+            if root_tag == "sitemapindex":
+                for loc in locs:
+                    if loc not in seen_sitemaps and loc not in pending:
+                        pending.append(loc)
+                continue
+            page_urls.extend(locs)
+        except Exception:
+            continue
+
+    results: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for link in page_urls:
+        lp = urlparse(link)
+        if lp.scheme not in ("http", "https"):
+            continue
+        if _root_domain(lp.netloc.lower()) != base_root:
+            continue
+        if _is_excluded_url(link):
+            continue
+        norm = _normalize_url(link)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        results.append((norm, infer_doc_entry_type(norm)))
+        if len(results) >= max_pages:
+            break
+    return results
+
+
+def _probe_docs_subdomain(base_url: str, session, timeout: int) -> str | None:
+    """官网 SPA/无链接时，探测 docs.{root_domain} 子域名是否存在。"""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("docs.") or netloc.startswith("www.docs."):
+        return None
+    root = _root_domain(netloc)
+    docs_url = f"{parsed.scheme}://docs.{root}"
+
+    try:
+        resp = session.get(docs_url, timeout=(3, timeout), allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" not in ct and "text/plain" not in ct:
+            return None
+        # 简单排除软 404 / 域名停放页（内容过短）
+        if len(resp.text or "") < 200:
+            return None
+        return docs_url
+    except Exception:
+        return None
+
+
+def crawl_one(entry: dict, same_domain_only: bool, timeout: int, *, require_doc_keyword: bool = True) -> dict:
     """单个 worker：爬一个网页（带外层超时兜底，防止 SSL 握手卡死）"""
     from concurrent.futures import ThreadPoolExecutor as InnerPool
 
@@ -547,7 +951,38 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
             if "text/html" not in content_type and "text/plain" not in content_type:
                 return {"status": "not_html", "entry_id": entry_id, "url": entry_url}
 
-            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers)
+            doc_links = extract_doc_links(resp.text, resp.url, same_domain_only, project_identifiers, require_doc_keyword=require_doc_keyword, skip_aggregation_filter=not require_doc_keyword)
+
+            # 提取当前页面发布时间（用于时效性标注）
+            page_published_at = extract_published_date(resp.text, dict(resp.headers))
+
+            # 文档站识别 llms.txt 索引（GitBook/Mintlify 标准），一次性发现全部文档
+            if entry.get("entry_type") in ("docs", "docs_portal"):
+                llms_links = _fetch_llms_txt(resp.url, session, timeout)
+                if llms_links:
+                    existing = {u for u, _ in doc_links}
+                    for u, t in llms_links:
+                        if u not in existing:
+                            doc_links.append((u, t))
+                            existing.add(u)
+
+            # sitemap.xml 全量索引：文档站总是安全；官网仅在单资产放宽模式下抓全站页面，
+            # 避免批量模式把 /about /careers /legal 等非投研页大规模收进库。
+            apply_sitemap = entry.get("entry_type") in ("docs", "docs_portal") or not require_doc_keyword
+            if apply_sitemap:
+                sitemap_links = _fetch_sitemap(resp.url, session, timeout)
+                if sitemap_links:
+                    existing = {u for u, _ in doc_links}
+                    for u, t in sitemap_links:
+                        if u not in existing:
+                            doc_links.append((u, t))
+                            existing.add(u)
+
+            # 官网 SPA/无链接时，探测 docs.{root_domain} 子域名
+            if not doc_links and entry.get("entry_type") == "official_website":
+                docs_url = _probe_docs_subdomain(resp.url, session, timeout)
+                if docs_url:
+                    doc_links.append((docs_url, "docs_portal"))
 
             # 检测 SPA：无链接 + 小 HTML（<5000 bytes 或包含 SPA 框架标志）
             needs_browser = False
@@ -560,7 +995,11 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
                     or 'id="__next"' in html_lower
                     or 'id="__nuxt"' in html_lower
                     or 'react-dom' in html_lower
-                    or 'vue' in html_lower
+                    or 'vue.js' in html_lower
+                    or 'vue.min.js' in html_lower
+                    or 'vue@' in html_lower
+                    or 'vue-router' in html_lower
+                    or 'vuex' in html_lower
                     or 'window.__NUXT__' in html_lower
                     or '__NEXT_DATA__' in html_lower
                 )
@@ -577,6 +1016,7 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
                 "protocol_id": entry["protocol_id"],
                 "source_code": entry["source_code"],
                 "needs_browser": needs_browser,
+                "published_at": page_published_at,
             }
         except Exception as e:
             return {
@@ -605,8 +1045,8 @@ def crawl_one(entry: dict, same_domain_only: bool, timeout: int) -> dict:
 
 def _flush_db() -> None:
     """将累积的 DB 写入一次性提交"""
-    global _pending_db_rows, _pending_crawled_ids, _pending_spa_ids
-    if not _pending_db_rows and not _pending_crawled_ids and not _pending_spa_ids:
+    global _pending_db_rows, _pending_crawled_ids, _pending_spa_ids, _pending_published_updates
+    if not _pending_db_rows and not _pending_crawled_ids and not _pending_spa_ids and not _pending_published_updates:
         return
 
     from crypto_research.db.conn import get_connection
@@ -614,10 +1054,16 @@ def _flush_db() -> None:
 
     db_url = _worker_settings["database_url"]
     upsert_sql = _worker_settings.get("upsert_sql") or load_sql(
-        "biz/upsert_doc_source_entry.sql"
+        "biz/upsert_doc_source_entry_noop.sql"
     )
 
     with get_connection(db_url) as conn:
+        # 确保 published_at 列存在（新环境自动加字段）
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE biz.doc_source_entry
+                ADD COLUMN IF NOT EXISTS published_at DATE
+            """)
         if _pending_db_rows:
             execute_many(conn, upsert_sql, _pending_db_rows)
         if _pending_crawled_ids:
@@ -632,9 +1078,20 @@ def _flush_db() -> None:
                     "UPDATE biz.doc_source_entry SET deep_crawled_at = NOW(), needs_browser = TRUE WHERE entry_id = ANY(%s)",
                     (_pending_spa_ids,),
                 )
+        # 发布时间批量更新（只在有值且原值为空时更新，避免覆盖更准确的旧值）
+        if _pending_published_updates:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """UPDATE biz.doc_source_entry
+                       SET published_at = %s::DATE
+                       WHERE entry_id = %s
+                         AND published_at IS NULL""",
+                    [(d, eid) for eid, d in _pending_published_updates if d],
+                )
     _pending_db_rows.clear()
     _pending_crawled_ids.clear()
     _pending_spa_ids.clear()
+    _pending_published_updates.clear()
 
 
 def _print_progress():
@@ -660,7 +1117,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--limit", type=int, default=500, help="最大处理数量")
     p.add_argument("--asset-id", type=int, default=None, help="仅处理指定资产ID")
-    p.add_argument("--workers", type=int, default=20, help="并发线程数")
+    p.add_argument("--min-asset-id", type=int, default=0, help="仅处理 asset_id >= 该值的资产（新入库币），0 表示不过滤")
+    p.add_argument("--workers", type=int, default=4, help="并发线程数")
     p.add_argument("--timeout", type=int, default=10, help="读取超时(秒)")
     p.add_argument("--flush-every", type=int, default=50, help="每 N 条 flush 一次 DB")
     p.add_argument("--all-domains", action="store_true")
@@ -675,10 +1133,14 @@ def main() -> int:
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     from crypto_research.db.upsert import load_sql
+    from crypto_research.mapping.classify_link import classify_entry_fields
 
     settings = get_settings(require_database=True)
     _worker_settings["database_url"] = settings.database_url
-    _worker_settings["upsert_sql"] = load_sql("biz/upsert_doc_source_entry.sql")
+    # 使用 DO NOTHING 语义：发现链接若已存在（种子入口/历史爬取产物），
+    # 不得覆盖其 discovered_from/source_code/is_primary，否则会把
+    # cmc/cg 种子入口的 provenance 改成 deep_crawl:*，导致重爬时被误删。
+    _worker_settings["upsert_sql"] = load_sql("biz/upsert_doc_source_entry_noop.sql")
 
     # 保证列存在
     with get_connection(settings.database_url) as conn:
@@ -690,6 +1152,18 @@ def main() -> int:
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS needs_browser BOOLEAN DEFAULT FALSE"
             )
 
+    # 预载已存在的 entry_url，跨轮去重：单资产重爬时，上一轮已入库的文档
+    # 会被本轮文档页侧边栏再次发现，若不预载会重复统计 discovered 计数。
+    if args.asset_id is not None:
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT asset_id, entry_url FROM biz.doc_source_entry WHERE asset_id = %s",
+                    (args.asset_id,),
+                )
+                for aid, url in cur.fetchall():
+                    _seen_doc_urls.add((aid, url))
+
     # 查询待处理（排除从噪声源发现的条目，防止递归放大）
     noise_clauses = " AND ".join(
         [f"COALESCE(discovered_from, '') NOT LIKE %s"] * len(NOISE_DISCOVERED_FROM_PATTERNS)
@@ -698,6 +1172,9 @@ def main() -> int:
     asset_filter = ""
     if args.asset_id is not None:
         asset_filter = " AND dse.asset_id = %s"
+    min_asset_filter = ""
+    if args.min_asset_id and args.min_asset_id > 0:
+        min_asset_filter = " AND dse.asset_id >= %s"
     sql = f"""
         SELECT dse.entry_id, dse.entity_type, dse.asset_id, dse.protocol_id, dse.source_code,
                dse.entry_type, dse.entry_url,
@@ -708,6 +1185,7 @@ def main() -> int:
           AND dse.deep_crawled_at IS NULL
           AND ({noise_clauses})
           {asset_filter}
+          {min_asset_filter}
         ORDER BY
             CASE WHEN dse.source_code IN ('cmc', 'cg', 'dl') THEN 1 ELSE 2 END,
             CASE dse.entry_type WHEN 'official_website' THEN 1 WHEN 'docs' THEN 2 ELSE 3 END,
@@ -719,6 +1197,8 @@ def main() -> int:
             params = [list(ENTRY_TYPES_TO_CRAWL)] + noise_params
             if args.asset_id is not None:
                 params.append(args.asset_id)
+            if args.min_asset_id and args.min_asset_id > 0:
+                params.append(args.min_asset_id)
             params.append(args.limit)
             cur.execute(sql, params)
             entries = [dict(row) for row in cur.fetchall()]
@@ -743,7 +1223,7 @@ def main() -> int:
     if args.dry_run:
         preview = []
         for entry in entries[:10]:
-            result = crawl_one(entry, not args.all_domains, args.timeout)
+            result = crawl_one(entry, not args.all_domains, args.timeout, require_doc_keyword=args.asset_id is None)
             preview.append(
                 {
                     "url": entry["entry_url"][:120],
@@ -761,7 +1241,7 @@ def main() -> int:
     # ── 并发爬取 ──
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(crawl_one, entry, not args.all_domains, args.timeout): entry
+            executor.submit(crawl_one, entry, not args.all_domains, args.timeout, require_doc_keyword=args.asset_id is None): entry
             for entry in entries
         }
 
@@ -771,34 +1251,51 @@ def main() -> int:
 
             if result["status"] == "ok":
                 doc_links = result["doc_links"]
-                with _stats_lock:
-                    _stats["done"] += 1
-                    if doc_links:
-                        _stats["discovered"] += len(doc_links)
-                    elif result.get("needs_browser"):
-                        _stats["spa"] += 1
-                    else:
-                        _stats["empty"] += 1
-
+                unique_links: list[tuple[str, str]] = []
                 with _db_lock:
                     if result.get("needs_browser"):
                         _pending_spa_ids.append(entry_id)
                     else:
                         _pending_crawled_ids.append(entry_id)
-                    if doc_links:
-                        for link_url, link_type in doc_links:
-                            _pending_db_rows.append(
-                                (
-                                    result["entity_type"],
-                                    result["asset_id"],
-                                    result["protocol_id"],
-                                    result["source_code"],
-                                    link_type,
-                                    link_url,
-                                    f"deep_crawl:{result['url'][:50]}",
-                                    False,
-                                )
+                    # 记录当前页面的发布时间（用于时效性标注）
+                    if result.get("published_at"):
+                        _pending_published_updates.append((entry_id, result["published_at"]))
+                    for link_url, link_type in doc_links:
+                        key = (result["asset_id"], link_url)
+                        if key in _seen_doc_urls:
+                            continue
+                        _seen_doc_urls.add(key)
+                        unique_links.append((link_url, link_type))
+                        topics, method, confidence = classify_entry_fields(
+                            link_url, source_code=result["source_code"]
+                        )
+                        _pending_db_rows.append(
+                            (
+                                result["entity_type"],
+                                result["asset_id"],
+                                result["protocol_id"],
+                                result["source_code"],
+                                link_type,
+                                link_url,
+                                f"deep_crawl:{result['url'][:50]}",
+                                False,
+                                topics,
+                                method,
+                                confidence,
                             )
+                        )
+
+                with _stats_lock:
+                    _stats["done"] += 1
+                    if unique_links:
+                        _stats["discovered"] += len(unique_links)
+                    elif doc_links:
+                        # 有链接但全部重复（如文档页侧边栏），视为未新增
+                        _stats["empty"] += 1
+                    elif result.get("needs_browser"):
+                        _stats["spa"] += 1
+                    else:
+                        _stats["empty"] += 1
 
             elif result["status"] == "not_html":
                 with _stats_lock:

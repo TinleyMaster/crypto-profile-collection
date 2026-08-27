@@ -81,6 +81,61 @@ def normalize_chain(name: str | None) -> str | None:
     return CHAIN_NORMALIZE.get(name.strip().lower(), name.strip().lower())
 
 
+# CoinGecko platform key → 归一化链名（与 core.asset_contract 现有命名一致）。
+# 仅收录项目当前已识别/可爬取的链，未知 key 跳过，避免引入脏链名。
+CG_CHAIN_MAP = {
+    "ethereum": "ethereum",
+    "binance-smart-chain": "bsc",
+    "bnb-smart-chain": "bsc",
+    "solana": "solana",
+    "base": "base",
+    "polygon-pos": "polygon",
+    "polygon": "polygon",
+    "arbitrum-one": "arbitrum",
+    "arbitrum": "arbitrum",
+    "optimistic-ethereum": "optimism",
+    "optimism": "optimism",
+    "avalanche": "avalanche",
+    "avalanche-c-chain": "avalanche",
+    "fantom": "fantom",
+    "tron": "tron",
+    "tron20": "tron",
+    "the-open-network": "ton",
+    "ton": "ton",
+    "aptos": "aptos",
+    "sui": "sui",
+    "near-protocol": "near",
+    "near": "near",
+    "cronos": "cronos",
+    "osmosis": "osmosis",
+    "cardano": "cardano",
+    "zksync-era": "zksync",
+    "zksync": "zksync",
+    "scroll": "scroll",
+    "blast": "blast",
+    "sonic": "sonic",
+    "berachain": "berachain",
+    "monad": "monad",
+    "hyperliquid": "hyperliquid",
+    "sei-network": "sei",
+    "injective": "injective",
+    "kaia": "kaia",
+    "klay-token": "klaytn",
+    "pulsechain": "pulsechain",
+    "kava": "kava",
+    "multiversx": "multiversx",
+    "bittensor": "bittensor",
+    "robinhood-chain": "robinhood",
+    "anubis": "anubis",
+    "hyperevm": "hyperevm",
+}
+
+# 合约地址大小写敏感的链（非 EVM hex）。这类链（如 Solana 的 base58）地址
+# 一旦被 .lower() 就会指向错误账户，导入时必须保留原始大小写。
+# EVM 链（hex 地址）大小写不敏感，统一转小写用于去重。
+CASE_SENSITIVE_CHAINS = {"solana"}
+
+
 # ===================== STEP 1: CREATE TABLE =====================
 
 CREATE_ASSET_CONTRACT = """
@@ -159,17 +214,22 @@ SELECT
         WHEN LOWER(m.platform_name) = 'hyperevm' THEN 'hyperevm'
         ELSE LOWER(m.platform_name)
     END AS chain,
-    LOWER(m.token_address) AS contract_address,
+    CASE
+        WHEN LOWER(m.platform_name) IN ('solana', 'solana (spl)') THEN m.token_address
+        ELSE LOWER(m.token_address)
+    END AS contract_address,
     TRUE AS is_primary,
     'cmc' AS source_code
 FROM src_cmc.cmc_asset_map m
 INNER JOIN core.asset_source_map asm
     ON asm.source_code = 'cmc'
     AND asm.source_asset_key = m.cmc_id::text
+INNER JOIN core.asset a ON a.asset_id = asm.asset_id
 WHERE m.platform_name IS NOT NULL
   AND m.token_address IS NOT NULL
   AND m.token_address != ''
   AND LOWER(m.platform_name) != 'multi-chain'
+  AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
 ON CONFLICT (chain, contract_address) DO UPDATE SET
     asset_id = EXCLUDED.asset_id,
     is_primary = TRUE,
@@ -192,48 +252,74 @@ def step2_populate_cmc(settings, limit: int = 0) -> None:
 
 POPULATE_FROM_DL = """
 INSERT INTO core.asset_contract (asset_id, chain, contract_address, is_primary, source_code)
+WITH dl AS (
+    SELECT
+        asm.asset_id,
+        p.chain AS raw_chain,
+        p.address AS raw_address,
+        -- DefiLlama 的 address 常为「链:地址」格式（如 bsc:0x...），
+        -- 优先用前缀作为该合约所属链（比协议主链 raw_chain 更准确）。
+        CASE
+            WHEN position(':' in p.address) > 0
+                 AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
+            THEN split_part(p.address, ':', 1)
+            ELSE NULL
+        END AS addr_chain,
+        CASE
+            WHEN position(':' in p.address) > 0
+                 AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
+            THEN substring(p.address from position(':' in p.address) + 1)
+            ELSE p.address
+        END AS contract_address
+    FROM src_dl.protocol_list p
+    INNER JOIN core.asset_source_map asm
+        ON asm.source_code = 'dl'
+        AND asm.source_asset_key = p.protocol_id
+    WHERE p.address IS NOT NULL
+      AND p.address != ''
+)
 SELECT
-    asm.asset_id,
+    asset_id,
     CASE
-        WHEN LOWER(p.chain) IN ('ethereum', 'ethereum (erc20)') THEN 'ethereum'
-        WHEN LOWER(p.chain) IN ('binance', 'bsc', 'bnb smart chain') THEN 'bsc'
-        WHEN LOWER(p.chain) = 'solana' THEN 'solana'
-        WHEN LOWER(p.chain) = 'base' THEN 'base'
-        WHEN LOWER(p.chain) IN ('polygon', 'polygon pos') THEN 'polygon'
-        WHEN LOWER(p.chain) IN ('arbitrum', 'arbitrum one') THEN 'arbitrum'
-        WHEN LOWER(p.chain) = 'ton' THEN 'ton'
-        WHEN LOWER(p.chain) IN ('avalanche', 'avalanche c-chain') THEN 'avalanche'
-        WHEN LOWER(p.chain) = 'sui' THEN 'sui'
-        WHEN LOWER(p.chain) = 'fantom' THEN 'fantom'
-        WHEN LOWER(p.chain) = 'cronos' THEN 'cronos'
-        WHEN LOWER(p.chain) = 'aptos' THEN 'aptos'
-        WHEN LOWER(p.chain) = 'optimism' THEN 'optimism'
-        WHEN LOWER(p.chain) = 'near' THEN 'near'
-        WHEN LOWER(p.chain) = 'sonic' THEN 'sonic'
-        WHEN LOWER(p.chain) = 'zksync era' THEN 'zksync'
-        WHEN LOWER(p.chain) IN ('pulse', 'pulsechain') THEN 'pulsechain'
-        WHEN LOWER(p.chain) = 'klaytn' THEN 'klaytn'
-        WHEN LOWER(p.chain) = 'scroll' THEN 'scroll'
-        WHEN LOWER(p.chain) = 'monad' THEN 'monad'
-        WHEN LOWER(p.chain) = 'berachain' THEN 'berachain'
-        WHEN LOWER(p.chain) = 'kava' THEN 'kava'
-        WHEN LOWER(p.chain) = 'blast' THEN 'blast'
-        WHEN LOWER(p.chain) IN ('hyperliquid', 'hyperliquid l1') THEN 'hyperliquid'
-        WHEN LOWER(p.chain) = 'cardano' THEN 'cardano'
-        WHEN LOWER(p.chain) = 'robinhood chain' THEN 'robinhood'
-        ELSE LOWER(p.chain)
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('ethereum', 'ethereum (erc20)', 'eth') THEN 'ethereum'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('binance', 'bsc', 'bnb smart chain', 'bnb') THEN 'bsc'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN 'solana'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'base' THEN 'base'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('polygon', 'polygon pos', 'matic') THEN 'polygon'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('arbitrum', 'arbitrum one', 'arb', 'arbirtum') THEN 'arbitrum'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'ton' THEN 'ton'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('avalanche', 'avalanche c-chain', 'avax') THEN 'avalanche'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'sui' THEN 'sui'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('fantom', 'ftm') THEN 'fantom'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'cronos' THEN 'cronos'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'aptos' THEN 'aptos'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('optimism', 'op') THEN 'optimism'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'near' THEN 'near'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'sonic' THEN 'sonic'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('zksync era', 'zksync', 'era') THEN 'zksync'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('pulse', 'pulsechain') THEN 'pulsechain'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'klaytn' THEN 'klaytn'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'scroll' THEN 'scroll'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'monad' THEN 'monad'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'berachain' THEN 'berachain'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'kava' THEN 'kava'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'blast' THEN 'blast'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('hyperliquid', 'hyperliquid l1') THEN 'hyperliquid'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'cardano' THEN 'cardano'
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('robinhood chain', 'robinhood') THEN 'robinhood'
+        ELSE LOWER(COALESCE(addr_chain, raw_chain))
     END AS chain,
-    LOWER(p.address) AS contract_address,
+    CASE
+        WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN contract_address
+        ELSE LOWER(contract_address)
+    END AS contract_address,
     FALSE AS is_primary,
     'dl' AS source_code
-FROM src_dl.protocol_list p
-INNER JOIN core.asset_source_map asm
-    ON asm.source_code = 'dl'
-    AND asm.source_asset_key = p.protocol_id
-WHERE p.address IS NOT NULL
-  AND p.address != ''
-  AND p.address != '0x0000000000000000000000000000000000000000'
-  AND LOWER(p.chain) != 'multi-chain'
+FROM dl
+INNER JOIN core.asset a ON a.asset_id = dl.asset_id
+WHERE LOWER(contract_address) <> '0x0000000000000000000000000000000000000000'
+  AND (addr_chain IS NOT NULL OR LOWER(raw_chain) != 'multi-chain')
+  AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
 ON CONFLICT (chain, contract_address) DO NOTHING
 """
 
@@ -246,6 +332,74 @@ def step3_populate_dl(settings) -> None:
             total = cur.rowcount
         conn.commit()
     print(f"[Step 3] DL 合约填充完成: {total} 条")
+
+
+# ===================== STEP 3b: POPULATE FROM CG PLATFORMS =====================
+
+
+def step3b_populate_cg(settings) -> None:
+    """从 CoinGecko platforms 补齐 CMC/DL 未覆盖的多链合约地址。
+
+    CMC 只收录部分链、DL 只收录有 TVL 的协议，导致像 ROBO 这类多链代币
+    的 Base/BSC 合约缺失。CG 的 platforms 字段是 {chain: contract} 字典，
+    用它补充 core.asset_contract，同时用 ON CONFLICT DO NOTHING 避免覆盖
+    已存在的 CMC 主合约（is_primary）。
+    """
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT asm.asset_id, ci.platforms
+                FROM core.asset_source_map asm
+                INNER JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
+                WHERE asm.source_code = 'cg'
+                """
+            )
+            rows = cur.fetchall()
+
+        seen: set[tuple[str, str]] = set()
+        insert_rows: list[tuple[int, str, str]] = []
+        # 获取原生币 asset_id 集合，避免给原生币写入非原生合约
+        native_coin_ids: set[int] = set()
+        with conn.cursor() as cur:
+            cur.execute("SELECT asset_id FROM core.asset WHERE asset_type = 'coin'")
+            native_coin_ids = {r["asset_id"] for r in cur.fetchall()}
+
+        for row in rows:
+            # 原生币（BTC/ETH/SOL等）不写入非原生链合约，避免污染
+            if row["asset_id"] in native_coin_ids:
+                continue
+            platforms = row["platforms"] or {}
+            if not isinstance(platforms, dict):
+                continue
+            for platform_key, addr in platforms.items():
+                chain = CG_CHAIN_MAP.get((platform_key or "").strip().lower())
+                if not chain:
+                    continue
+                addr = (addr or "").strip()
+                if chain not in CASE_SENSITIVE_CHAINS:
+                    addr = addr.lower()
+                if not addr:
+                    continue
+                key = (chain, addr)
+                if key in seen:
+                    continue
+                seen.add(key)
+                insert_rows.append((row["asset_id"], chain, addr))
+
+        if insert_rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO core.asset_contract
+                        (asset_id, chain, contract_address, is_primary, source_code)
+                    VALUES (%s, %s, %s, FALSE, 'cg')
+                    ON CONFLICT (chain, contract_address) DO NOTHING
+                    """,
+                    insert_rows,
+                )
+            conn.commit()
+        print(f"[Step 3b] CG 合约填充完成: {len(insert_rows)} 条（唯一）")
 
 
 # ===================== STEP 4: DEDUP ASSETS =====================
@@ -501,7 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--step",
         type=str,
         default="all",
-        help="Which step: create_table, populate_cmc, populate_dl, dedup, coin_basic, all",
+        help="Which step: create_table, populate_cmc, populate_dl, populate_cg, dedup, coin_basic, all",
     )
     return p
 
@@ -519,6 +673,9 @@ def main() -> int:
 
     if "all" in steps or "populate_dl" in steps:
         step3_populate_dl(settings)
+
+    if "all" in steps or "populate_cg" in steps:
+        step3b_populate_cg(settings)
 
     if "all" in steps or "dedup" in steps:
         step4_dedup_assets(settings, dry_run=args.dry_run)

@@ -35,6 +35,7 @@ def main() -> int:
 
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
+    from crypto_research.db.sector import classify_and_upsert_cmc
     from crypto_research.db.upsert import fetch_one, load_sql
     from crypto_research.mapping.cmc_asset_bootstrap import (
         build_description_short,
@@ -61,6 +62,8 @@ def main() -> int:
                 category_hint=row.get("category_hint"),
                 urls=urls,
                 has_platform=bool(row.get("platform_name") or row.get("token_address")),
+                tags=row.get("tags"),
+                categories=row.get("existing_categories"),
             )
             prepared_rows.append(
                 {
@@ -96,9 +99,37 @@ def main() -> int:
         created_count = 0
         refreshed_count = 0
         mapped_count = 0
+        sector_hit_count = 0
+        name_guard_count = 0
 
-        for row in prepared_rows:
+        # 名称突变防护：批量取已有资产的 canonical_name，避免 symbol 撞名（如 BTC meme 币）
+        # 把主流币名称覆盖为错误名称。已有名称非空且与 CMC 名称不一致时，保留原名称。
+        existing_ids = [r["existing_asset_id"] for r in prepared_rows if r["existing_asset_id"]]
+        existing_names: dict[int, str] = {}
+        if existing_ids:
+            with conn.cursor(row_factory=__import__("psycopg").rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT asset_id, canonical_name FROM core.asset WHERE asset_id = ANY(%s)",
+                    (existing_ids,),
+                )
+                existing_names = {r["asset_id"]: r["canonical_name"] for r in cur.fetchall()}
+
+        for idx, row in enumerate(prepared_rows):
+            src = source_rows[idx]
             if row["existing_asset_id"]:
+                # 名称突变检测：已有名称非空且与新名称不同 → 保留已有名称
+                prev_name = existing_names.get(row["existing_asset_id"])
+                new_name = row["canonical_name"]
+                if prev_name and (prev_name or "").strip() and (
+                    prev_name.strip().lower() != (new_name or "").strip().lower()
+                ):
+                    print(
+                        f"  [名称防护] asset_id={row['existing_asset_id']} 保留原名称 "
+                        f"{prev_name!r}，拒绝覆盖为 {new_name!r}"
+                    )
+                    row["canonical_name"] = prev_name
+                    name_guard_count += 1
+
                 asset_row = fetch_one(
                     conn,
                     update_asset_sql,
@@ -130,6 +161,22 @@ def main() -> int:
                 asset_id = asset_row["asset_id"]
                 created_count += 1
 
+            # is_primary 互斥 guard：同 asset 已有其他源 primary 则降级为 false
+            # （按 8/25 既定口径，CG 为权威主映射，CMC 次之）
+            has_other_primary = fetch_one(
+                conn,
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM core.asset_source_map
+                    WHERE asset_id = %s
+                      AND is_primary = TRUE
+                      AND source_code <> 'cmc'
+                ) AS has_primary
+                """,
+                (asset_id,),
+            )
+            is_primary = not (has_other_primary.get("has_primary") or False)
+
             fetch_one(
                 conn,
                 upsert_source_map_sql,
@@ -140,11 +187,21 @@ def main() -> int:
                     "confirmed",
                     "bootstrap_cmc",
                     100,
-                    True,
+                    is_primary,
                     "agent",
                 ),
             )
             mapped_count += 1
+
+            # 实时写入 CMC 来源赛道标签
+            sectors = classify_and_upsert_cmc(
+                conn,
+                asset_id,
+                tags=src.get("tags"),
+                category_hint=src.get("category_hint"),
+            )
+            if sectors:
+                sector_hit_count += 1
 
         print(
             json.dumps(
@@ -154,6 +211,8 @@ def main() -> int:
                     "created_assets": created_count,
                     "refreshed_assets": refreshed_count,
                     "mapped_rows": mapped_count,
+                    "sector_hits": sector_hit_count,
+                    "name_guard_triggered": name_guard_count,
                 },
                 ensure_ascii=False,
                 indent=2,

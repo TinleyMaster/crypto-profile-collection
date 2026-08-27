@@ -33,7 +33,10 @@ def _stream_reader(pipe, prefix: str):
 
 
 def main():
-    script = os.path.join(SCRIPT_DIR, "phase_chain_holder_snapshot.py")
+    # 注意：原 phase_chain_holder_snapshot.py 已被拆分为 batch(调度) + scrape(单币)，
+    # 但该文件名已不存在，导致每日调度启动即失败（P1-3 实质未恢复的根因之一）。
+    # 此处改为调用 batch 版（真正的每日全量采集入口）。
+    script = os.path.join(SCRIPT_DIR, "phase_chain_holder_batch.py")
 
     print("=" * 60)
     print("链上持仓快照采集（每日单次）")
@@ -42,7 +45,7 @@ def main():
     t0 = time.time()
 
     proc = subprocess.Popen(
-        [sys.executable, "-u", script, "--limit", "0"],  # 0 = 不限量，全量处理
+        [sys.executable, "-u", script, "--all-chains", "--limit", "0"],  # 0 = 不限量，全量处理
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

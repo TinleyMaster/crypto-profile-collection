@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from crypto_research.mapping.classify_link import classify_entry_fields
+
+
+def _classify(url: str) -> dict[str, Any]:
+    topics, method, confidence = classify_entry_fields(url, source_code="cg")
+    return {
+        "content_topics": topics,
+        "classify_method": method,
+        "classify_confidence": confidence,
+    }
+
 
 def extract_cg_doc_source_entries(
     asset_id: int,
@@ -22,7 +33,8 @@ def extract_cg_doc_source_entries(
                 "entry_type": "official_website",
                 "entry_url": homepage_url.strip(),
                 "discovered_from": "cg_info.homepage_url",
-                "is_primary": True,
+                "is_primary": False,  # 统一由裁决脚本设置，避免多来源各标各的
+                **_classify(homepage_url.strip()),
             }
         )
 
@@ -47,6 +59,7 @@ def extract_cg_doc_source_entries(
                     "entry_url": url.strip(),
                     "discovered_from": "cg_info.links.homepage",
                     "is_primary": False,
+                    **_classify(url.strip()),
                 }
             )
 
@@ -66,6 +79,7 @@ def extract_cg_doc_source_entries(
                     "entry_url": url.strip(),
                     "discovered_from": "cg_info.links.blockchain_site",
                     "is_primary": False,
+                    **_classify(url.strip()),
                 }
             )
 
@@ -85,6 +99,7 @@ def extract_cg_doc_source_entries(
                     "entry_url": url.strip(),
                     "discovered_from": "cg_info.links.official_forum_url",
                     "is_primary": False,
+                    **_classify(url.strip()),
                 }
             )
 
@@ -101,6 +116,7 @@ def extract_cg_doc_source_entries(
                 "entry_url": reddit.strip(),
                 "discovered_from": "cg_info.links.subreddit_url",
                 "is_primary": False,
+                **_classify(reddit.strip()),
             }
         )
 
@@ -117,6 +133,7 @@ def extract_cg_doc_source_entries(
                 "entry_url": f"https://x.com/{twitter_sn.strip()}",
                 "discovered_from": "cg_info.links.twitter_screen_name",
                 "is_primary": False,
+                **_classify(f"https://x.com/{twitter_sn.strip()}"),
             }
         )
 
@@ -133,6 +150,7 @@ def extract_cg_doc_source_entries(
                 "entry_url": f"https://t.me/{tg_id.strip()}",
                 "discovered_from": "cg_info.links.telegram_channel_identifier",
                 "is_primary": False,
+                **_classify(f"https://t.me/{tg_id.strip()}"),
             }
         )
 
@@ -154,6 +172,7 @@ def extract_cg_doc_source_entries(
                         "entry_url": url.strip(),
                         "discovered_from": "cg_info.links.repos_url.github",
                         "is_primary": False,
+                        **_classify(url.strip()),
                     }
                 )
         # bitbucket repos
@@ -172,6 +191,7 @@ def extract_cg_doc_source_entries(
                         "entry_url": url.strip(),
                         "discovered_from": "cg_info.links.repos_url.bitbucket",
                         "is_primary": False,
+                        **_classify(url.strip()),
                     }
                 )
 
@@ -193,6 +213,7 @@ def extract_cg_doc_source_entries(
                     "entry_url": url.strip(),
                     "discovered_from": "cg_info.links.announcement_url",
                     "is_primary": False,
+                    **_classify(url.strip()),
                 }
             )
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from crypto_research.mapping.classify_link import classify_entry_fields
+
 
 ALLOWED_URL_KEYS = (
     "website",
@@ -65,6 +67,9 @@ def extract_doc_source_entries(asset_id: int, cmc_id: int, urls: dict[str, Any])
             normalized = url.strip()
             if not normalized:
                 continue
+            topics, method, confidence = classify_entry_fields(
+                normalized, source_code="cmc", url_key=url_key
+            )
             entries.append(
                 {
                     "entity_type": "asset",
@@ -74,8 +79,11 @@ def extract_doc_source_entries(asset_id: int, cmc_id: int, urls: dict[str, Any])
                     "entry_type": infer_entry_type(url_key, normalized),
                     "entry_url": normalized,
                     "discovered_from": f"cmc_info.urls.{url_key}",
-                    "is_primary": index == 0,
+                    "is_primary": False,  # 统一由裁决脚本设置，避免多来源各标各的
                     "cmc_id": cmc_id,
+                    "content_topics": topics,
+                    "classify_method": method,
+                    "classify_confidence": confidence,
                 }
             )
 

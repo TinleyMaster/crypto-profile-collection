@@ -38,10 +38,13 @@ class CoinGeckoClient:
         }
         self.session.headers.update(headers)
 
+        # 注意：429 不放入 status_forcelist，否则 urllib3 会自动重试并最终抛
+        # "Max retries exceeded"，掩盖真实的 429，导致 _get() 里的 key 轮替逻辑
+        # 永远走不到。429 直接返回 response，交由下方按需切换 API Key。
         retry = Retry(
             total=3,
             backoff_factor=2,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[500, 502, 503, 504],
             allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)
@@ -92,6 +95,23 @@ class CoinGeckoClient:
         return self._get(
             "/coins/list",
             params={"include_platform": str(include_platform).lower()},
+        )
+
+    def get_token_price(
+        self, platform: str, contract_addresses: list[str], vs_currencies: str = "usd"
+    ) -> dict[str, Any]:
+        """按合约地址批量查价（支持 Solana 等，platform 如 'solana' / 'ethereum'）。
+
+        返回形如 {contract_address: {"usd": price}, ...} 的映射。
+        """
+        if not contract_addresses:
+            return {}
+        return self._get(
+            f"/simple/token_price/{platform}",
+            params={
+                "contract_addresses": ",".join(contract_addresses),
+                "vs_currencies": vs_currencies,
+            },
         )
 
     def get_coin_by_id(

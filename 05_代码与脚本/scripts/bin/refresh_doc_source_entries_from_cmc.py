@@ -84,6 +84,9 @@ def main() -> int:
                         entry["entry_url"],
                         entry["discovered_from"],
                         entry["is_primary"],
+                        entry["content_topics"],
+                        entry["classify_method"],
+                        entry["classify_confidence"],
                     ),
                 )
                 written += 1

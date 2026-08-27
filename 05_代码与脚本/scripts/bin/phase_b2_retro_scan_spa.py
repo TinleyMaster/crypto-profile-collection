@@ -31,7 +31,8 @@ import urllib.request
 SPA_HTML_MAX_BYTES = 5000
 SPA_MARKERS = [
     'id="app"', 'id="root"', 'id="__next"', 'id="__nuxt"',
-    'react-dom', 'vue', 'window.__NUXT__', '__NEXT_DATA__',
+    'react-dom', 'vue.js', 'vue.min.js', 'vue@', 'vue-router', 'vuex',
+    'window.__NUXT__', '__NEXT_DATA__',
     'ng-app', 'ng-version', 'data-reactroot', 'data-reactid',
 ]
 
@@ -66,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="回溯扫描 B2 已爬取页面，找出 SPA")
     p.add_argument("--dry-run", action="store_true", help="仅预览不写入。")
     p.add_argument("--limit", type=int, default=500, help="最大扫描数。")
-    p.add_argument("--workers", type=int, default=10, help="并发扫描线程数。")
+    p.add_argument("--workers", type=int, default=4, help="并发扫描线程数。")
     return p
 
 
@@ -89,7 +90,7 @@ def main() -> int:
                 "ALTER TABLE biz.doc_source_entry ADD COLUMN IF NOT EXISTS retro_scan_checked_at TIMESTAMPTZ"
             )
 
-    # 查询候选：B2 已爬取且未回溯扫描过的页面
+    # 查询候选：B2 已爬取但返回 0 链接，且未回溯扫描过的页面
     candidate_sql = """
         SELECT dse.entry_id, dse.entry_url
         FROM biz.doc_source_entry dse
@@ -97,6 +98,11 @@ def main() -> int:
           AND dse.entry_type IN ('official_website', 'docs')
           AND COALESCE(dse.needs_browser, FALSE) = FALSE
           AND dse.retro_scan_checked_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM biz.doc_source_entry sub
+              WHERE sub.discovered_from = 'deep_crawl:' || dse.entry_url
+                AND sub.asset_id = dse.asset_id
+          )
         ORDER BY dse.entry_id
         LIMIT %s
     """

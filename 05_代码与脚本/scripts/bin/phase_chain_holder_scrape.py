@@ -1,0 +1,1208 @@
+"""
+链上代币持仓分布快照：从区块浏览器爬取持币地址分布、集中度、CEX标签。
+
+BSCScan 已无免费 API，改为网页 HTML 解析。
+
+用法:
+    python phase_chain_holder_snapshot.py --asset-id 9052 --chain bsc
+    python phase_chain_holder_snapshot.py --contract 0xcf3232B85b43BCa90E51D38cc06Cc8bB8C8A3E36 --chain bsc
+    python phase_chain_holder_snapshot.py --asset-id 9052 --chain bsc --save
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
+
+sys.stdout.reconfigure(line_buffering=True)
+
+import psycopg
+import psycopg.rows
+import requests
+from bs4 import BeautifulSoup
+
+from crypto_research.config import get_settings
+from crypto_research.db.conn import get_connection
+from crypto_research.clients.ethplorer_client import get_ethplorer_client
+
+
+# ── 配置 ──────────────────────────────────────────────────
+
+EXPLORER_URLS = {
+    "bsc": "https://bscscan.com",
+    "eth": "https://etherscan.io",
+    "polygon": "https://polygonscan.com",
+    "arb": "https://arbiscan.io",
+    "opt": "https://optimistic.etherscan.io",
+    "base": "https://basescan.org",
+    "avax": "https://snowtrace.io",
+    "monad": "https://monadscan.com",
+    "solana": "https://solscan.io",
+}
+
+# Blockscout 免费 REST API（JSON 接口，无 Cloudflare 拦截），用于避开
+# basescan/arbiscan/etherscan 系对 requests 的 403 反爬。key 为链简称。
+BLOCKSCOUT_BASE = {
+    "base": "https://base.blockscout.com",
+    "arb": "https://arbitrum.blockscout.com",
+}
+
+# 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称
+CHAIN_ALIASES = {
+    "ethereum": "eth",
+    "eth": "eth",
+    "bsc": "bsc",
+    "bnb": "bsc",
+    "binance": "bsc",
+    "polygon": "polygon",
+    "matic": "polygon",
+    "arbitrum": "arb",
+    "arb": "arb",
+    "optimism": "opt",
+    "op": "opt",
+    "base": "base",
+    "avalanche": "avax",
+    "avax": "avax",
+    "monad": "monad",
+    "solana": "solana",
+    "sol": "solana",
+}
+
+# 浏览器简称 → 数据库完整名列表（反查合约地址时兼容多种命名）
+CHAIN_DB_NAMES = {
+    "eth": ("ethereum", "eth"),
+    "bsc": ("bsc", "bnb", "binance"),
+    "polygon": ("polygon", "matic"),
+    "arb": ("arbitrum", "arb"),
+    "opt": ("optimism", "op"),
+    "base": ("base",),
+    "avax": ("avalanche", "avax"),
+    "monad": ("monad",),
+    "solana": ("solana", "sol"),
+}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+RE_PCT = re.compile(r'([\d.]+)%')
+RE_NUMBER = re.compile(r'([\d,]+\.?\d*)')
+
+
+def _norm_addr(chain: str, addr: str) -> str:
+    """地址归一化：EVM 地址（hex）统一小写；Solana 地址（base58）大小写敏感，保持原样。"""
+    if not addr:
+        return addr
+    if chain == "solana":
+        return addr
+    return addr.lower()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="代币持仓分布快照")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--asset-id", "--asset_id", type=int, dest="asset_id")
+    g.add_argument("--contract", type=str, help="合约地址")
+    p.add_argument("--chain", type=str, default="bsc",
+                   help="链简称: bsc/eth/polygon/arb/opt/base/avax")
+    p.add_argument("--save", action="store_true", help="写入数据库")
+    p.add_argument("--force", action="store_true", help="忽略缓存强制爬取（兼容上层调用）")
+    p.add_argument("--holders-limit", type=int, default=50,
+                   help="最多解析多少持币地址")
+    return p
+
+
+# ── 合约地址解析 ──────────────────────────────────────────
+
+def resolve_contract(conn, asset_id: int | None, contract_address: str | None,
+                     chain: str) -> dict | None:
+    """获取合约地址和资产信息。chain 参数已归一化为浏览器简称。"""
+    # 归一化 chain 对应的数据库完整名列表，用于反查
+    db_names = CHAIN_DB_NAMES.get(chain, (chain,))
+    placeholders = ",".join(["%s"] * len(db_names))
+
+    if contract_address:
+        # 用合约地址反查 asset_id
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                f"""SELECT a.asset_id, a.canonical_symbol AS symbol,
+                          a.canonical_name AS name, c.chain
+                   FROM core.asset_contract c
+                   JOIN core.asset a ON a.asset_id = c.asset_id
+                   WHERE c.contract_address = %s AND c.chain IN ({placeholders})""",
+                (_norm_addr(chain, contract_address), *db_names),
+            )
+            row = cur.fetchone()
+            if row:
+                row["contract_address"] = _norm_addr(chain, contract_address)
+                # 保留数据库规范链名（如 ethereum），不要覆盖成脚本简称（eth），
+                # 否则 onchain_holder_snapshot.chain 与 asset_contract.chain 不一致，
+                # 导致每日去重 NOT EXISTS(s.chain=c.chain) 永远不成立、重复全量采集。
+            return row
+
+    if asset_id:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                f"""SELECT a.asset_id, a.canonical_symbol AS symbol,
+                          a.canonical_name AS name,
+                          c.contract_address, c.chain
+                   FROM core.asset a
+                   LEFT JOIN core.asset_contract c
+                       ON c.asset_id = a.asset_id AND c.chain IN ({placeholders})
+                   WHERE a.asset_id = %s
+                   ORDER BY c.contract_address NULLS LAST
+                   LIMIT 1""",
+                (*db_names, asset_id),
+            )
+            row = cur.fetchone()
+        if row and not row["contract_address"]:
+            print(f"  资产 {asset_id} 在 {chain} 上无合约地址")
+            return None
+        return row
+
+    return None
+
+
+# ── BSCScan 网页解析 ─────────────────────────────────────
+
+def _parse_pct(s: str) -> float | None:
+    m = RE_PCT.search(s)
+    return float(m.group(1)) if m else None
+
+
+def _parse_number(s: str) -> str | None:
+    m = RE_NUMBER.search(s)
+    return m.group(1).replace(",", "") if m else None
+
+
+def _parse_token_amount(s: str) -> float | None:
+    """解析带单位的代币数量，如 '1.04 B', '41.09 M', '355,242.71'。"""
+    m = re.search(r'([\d,]+\.?\d*)\s*([BKMT])?', s or "", re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", ""))
+    mult = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+    return val * mult.get((m.group(2) or "").upper(), 1.0)
+
+
+def _fetch_html(url: str, timeout: int = 20, retries: int = 5) -> str | None:
+    """带重试的页面抓取，返回 HTML 文本（失败返回 None）。
+
+    区块浏览器对国内网络偶发 ConnectionResetError，需多次重试 + 递增间隔。
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    print(f"  [WARN] requests 抓取失败（重试 {retries} 次）: {last_err}")
+    return None
+
+
+def _fetch_html_browser(url: str, timeout: int = 20, retries: int = 2) -> str | None:
+    """用无头浏览器抓取渲染后的 HTML（绕过区块浏览器反爬，带重试）。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] playwright 未安装，无法使用无头浏览器")
+        return None
+
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ])
+                context = browser.new_context(user_agent=HEADERS["User-Agent"])
+                page = context.new_page()
+
+                # 拦截非必要资源加速
+                page.route("**/*", lambda route: route.abort()
+                    if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                    else route.continue_())
+
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                # 等待持币列表 JS 渲染完成
+                page.wait_for_timeout(4000)
+                html = page.content()
+                browser.close()
+                return html
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2)
+    print(f"  [WARN] 无头浏览器抓取失败: {last_err}")
+    return None
+
+
+def _parse_holders_html(html: str, max_holders: int) -> dict:
+    """从区块浏览器 HTML 解析持仓分布数据。"""
+    soup = BeautifulSoup(html, "html.parser")
+    body_text = soup.get_text()
+
+    result = {
+        "total_holders": 0,
+        "total_supply": None,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+    }
+
+    # 解析总持币数（页面文本中的 "Holders 153,662"）
+    m = re.search(r'Holders\s+([\d,]+)', body_text)
+    if m:
+        result["total_holders"] = int(m.group(1).replace(",", ""))
+
+    # 解析总供应（Total / Max Total Supply），用于计算每个地址占比
+    m = re.search(r'(?:Max\s+)?Total\s+Supply[^\d]*([\d,]+(?:\.\d+)?)', body_text)
+    if m:
+        result["total_supply"] = float(m.group(1).replace(",", ""))
+
+    # 解析 Top 集中度：BSCScan 格式:
+    # "Supply of Top 5 holders: 67.99% | Top 10 holders: 84.11%"
+    for label, key in [("Top 5", "top_5_pct"), ("Top 10", "top_10_pct"),
+                       ("Top 25", "top_25_pct"), ("Top 50", "top_50_pct"),
+                       ("Top 100", "top_100_pct")]:
+        m = re.search(rf'{label}\s+holders?:\s*([\d.]+)%', body_text)
+        if m:
+            result[key] = float(m.group(1))
+
+    # 解析 Tier 分布
+    tier_names = ["Whale", "Shark", "Dolphin", "Fish", "Crab", "Shrimp"]
+    tiers = []
+    for tn in tier_names:
+        # 格式: "🐋 Whale 129 0.09% 99.67%"
+        pattern = rf'{re.escape(tn)}\s+([\d,]+)\s+([\d.]+)%\s+([\d.]+)%'
+        m = re.search(pattern, body_text)
+        if m:
+            tiers.append({
+                "tier": tn,
+                "count": int(m.group(1).replace(",", "")),
+                "pct_holders": float(m.group(2)),
+                "pct_supply": float(m.group(3)),
+            })
+    result["tier_distribution_json"] = tiers
+
+    # 解析持仓列表（从 HTML table）
+    holders_table = soup.select_one("table")
+    if not holders_table:
+        print("  [WARN] 未找到持仓表格")
+        result["top_holders_json"] = []
+    else:
+        rows = holders_table.select("tr")[1:]  # 跳过表头
+        parsed = []
+
+        for row in rows:
+            if len(parsed) >= max_holders:
+                break
+
+            cols = row.select("td")
+            if len(cols) < 3:
+                continue
+
+            rank_text = cols[0].get_text(strip=True)
+            try:
+                rank = int(rank_text)
+            except ValueError:
+                continue
+
+            # 地址
+            addr_link = cols[1].select_one("a")
+            if not addr_link:
+                continue
+            addr_text = addr_link.get_text(strip=True)
+
+            # Label（BSCScan 自动标注如 "Gate 5", "KuCoin: Hot Wallet 2"）
+            label_spans = cols[1].select("span")
+            label = ""
+            for sp in label_spans:
+                t = sp.get_text(strip=True)
+                if t and t != addr_text:
+                    label = t
+                    break
+
+            # 数量
+            qty_text = cols[2].get_text(strip=True)
+            qty = qty_text.replace(",", "")
+
+            # 百分比
+            pct_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+            pct = _parse_pct(pct_text)
+
+            parsed.append({
+                "rank": rank,
+                "address": addr_text,
+                "label": label,
+                "amount": qty,
+                "pct": pct,
+            })
+
+        result["top_holders_json"] = parsed
+
+    return result
+
+
+def _fetch_tokenholders(explorer_url: str, contract_address: str) -> str | None:
+    """请求 etherscan 系区块浏览器的持币数据接口（generic-tokenholders2）。
+
+    该接口直接返回集中度 Cohort、Tier 分布、持币列表三张表，
+    比主页面更稳定（requests 即可拿到，无需 JS 渲染）。
+    """
+    url = f"{explorer_url}/token/generic-tokenholders2?m=normal&a={contract_address}"
+    headers = dict(HEADERS)
+    headers["Referer"] = f"{explorer_url}/token/{contract_address}"
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_err = e
+            if attempt < 5:
+                time.sleep(2 * attempt)
+    print(f"  [WARN] 持币接口抓取失败: {last_err}")
+    return None
+
+
+def _parse_tokenholders_html(html: str, max_holders: int,
+                             total_supply: float | None = None) -> dict:
+    """解析 generic-tokenholders2 接口返回的 HTML（Cohort/Tier/持币列表）。
+
+    total_supply 来自主页面 Total/Max Total Supply 字段；用于计算每个地址占比。
+    不要用 Cohort 表累加求总供应——Cohort 的 Holding Amount 与持币列表存在不一致，
+    会导致占比偏低。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    result = {
+        "total_holders": 0,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+    }
+
+    cohort = {}  # 如 {"1-5": 90.39, "6-10": 3.58, ...}
+    tiers = []
+    holders = []
+
+    for t in soup.select("table"):
+        rows = t.select("tr")
+        if not rows:
+            continue
+        header_text = rows[0].get_text(" ", strip=True)
+
+        # 1) Cohort 集中度表
+        if "Cohort" in header_text or "Top 1-5" in header_text:
+            for row in rows[1:]:
+                cells = [c.get_text(strip=True) for c in row.select("td")]
+                if not cells:
+                    continue
+                label = cells[0]
+                pct = None
+                for c in cells:
+                    m = re.search(r'([\d.]+)%', c)
+                    if m:
+                        pct = float(m.group(1))
+                m2 = re.match(r'Top\s+(\d+)-(\d+)', label)
+                if m2:
+                    cohort[f"{m2.group(1)}-{m2.group(2)}"] = pct
+
+        # 2) Tier 分布表
+        elif "Tier" in header_text or "Whale" in header_text:
+            for row in rows[1:]:
+                cells = [c.get_text(strip=True) for c in row.select("td")]
+                if len(cells) < 4:
+                    continue
+                m = re.search(r'(Whale|Shark|Dolphin|Fish|Crab|Shrimp)', cells[0])
+                if not m:
+                    continue
+                tier = m.group(1)
+                count = int(cells[1].replace(",", "")) if cells[1].replace(",", "").isdigit() else 0
+                pct_holders = _parse_pct(cells[2])
+                pct_supply = _parse_pct(cells[3])
+                tiers.append({
+                    "tier": tier,
+                    "count": count,
+                    "pct_holders": pct_holders,
+                    "pct_supply": pct_supply,
+                })
+
+        # 3) 持币列表
+        elif "Rank" in header_text and "Address" in header_text and "Quantity" in header_text:
+            for row in rows[1:]:
+                if len(holders) >= max_holders:
+                    break
+                cells = row.select("td")
+                if len(cells) < 4:
+                    continue
+                rank_text = cells[0].get_text(strip=True)
+                try:
+                    rank = int(rank_text)
+                except ValueError:
+                    continue
+                # 完整地址从 a 标签 href 提取（持币地址在 ?a= 参数里）
+                addr = ""
+                for a in row.select("a"):
+                    href = a.get("href", "")
+                    m = re.search(r'a=(0x[a-fA-F0-9]{40})', href)
+                    if m:
+                        addr = m.group(1)
+                        break
+                if not addr:
+                    # 备选：href 里第二个 0x 地址（第一个是 token 合约地址）
+                    for a in row.select("a"):
+                        href = a.get("href", "")
+                        addrs = re.findall(r'0x[a-fA-F0-9]{40}', href)
+                        if len(addrs) >= 2:
+                            addr = addrs[-1]
+                            break
+                if not addr:
+                    m = re.search(r'0x[a-fA-F0-9]{40}', cells[1].get_text(strip=True))
+                    if m:
+                        addr = m.group(0)
+                if not addr:
+                    continue
+                label = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                quantity = cells[3].get_text(strip=True).replace(",", "") if len(cells) > 3 else ""
+                pct = _parse_pct(cells[4].get_text(strip=True)) if len(cells) > 4 else None
+                holders.append({
+                    "rank": rank,
+                    "address": addr,
+                    "label": label,
+                    "amount": quantity,
+                    "pct": pct,
+                })
+
+    # 计算每个地址的真实占比（etherscan 的 Percentage 列对部分代币显示 0.0000%，需自行计算）
+    if total_supply and total_supply > 0:
+        for h in holders:
+            try:
+                qty = float(str(h.get("amount", "")).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
+            h["pct"] = round(qty / total_supply * 100, 4)
+
+    # Cohort 累加 → Top 5/10/25/50/100 集中度
+    if cohort:
+        result["top_5_pct"] = cohort.get("1-5")
+        top10 = None
+        if cohort.get("1-5") is not None and cohort.get("6-10") is not None:
+            top10 = round(cohort["1-5"] + cohort["6-10"], 2)
+        result["top_10_pct"] = top10
+        top25 = None
+        if top10 is not None and cohort.get("11-25") is not None:
+            top25 = round(top10 + cohort["11-25"], 2)
+        result["top_25_pct"] = top25
+        top50 = None
+        if top25 is not None and cohort.get("26-50") is not None:
+            top50 = round(top25 + cohort["26-50"], 2)
+        result["top_50_pct"] = top50
+        top100 = None
+        if top50 is not None and cohort.get("51-100") is not None:
+            top100 = round(top50 + cohort["51-100"], 2)
+        result["top_100_pct"] = top100
+
+    result["tier_distribution_json"] = tiers
+    result["top_holders_json"] = holders
+    return result
+
+
+def _scrape_holders_binplorer(chain: str, contract_address: str,
+                              max_holders: int) -> dict | None:
+    """用 Binplorer/Ethplorer 免费 API 获取持仓分布（BSC/ETH）。
+
+    比区块浏览器 HTML 更稳定（JSON 接口，无 Cloudflare/ConnectionReset）：
+    - getTokenInfo → total_holders / total_supply / 市值 / 价格
+    - getTopTokenHolders → Top 持仓地址 + share 占比
+    据此计算 Top 5/10/25/50/100 集中度。
+    """
+    client = get_ethplorer_client(chain)
+    if client is None:
+        return None
+
+    info = client.get_token_info(contract_address)
+    if not info:
+        print("  [WARN] Binplorer getTokenInfo 无数据")
+        return None
+
+    # 至少取 100 条用于计算 Top100 集中度（freekey 单次上限 100，personal 可到 1000）
+    fetch_limit = max(max_holders, 100)
+    holders, err = client.get_token_holders(contract_address, limit=fetch_limit)
+    if err:
+        print(f"  [WARN] Binplorer getTopTokenHolders 失败: {err}")
+
+    total_holders = int(info.get("holders_count") or 0)
+    price = info.get("price") or {}
+    decimals = info.get("decimals")
+    try:
+        decimals = int(decimals) if decimals else 18
+    except (ValueError, TypeError):
+        decimals = 18
+
+    def _raw_to_human(raw) -> str:
+        """把 raw 余额（带 decimals）转成人类可读字符串。"""
+        try:
+            return f"{float(raw) / (10 ** decimals):.4f}"
+        except (ValueError, TypeError):
+            return str(raw)
+
+    top_holders_json = []
+    for i, h in enumerate(holders, start=1):
+        top_holders_json.append({
+            "rank": i,
+            "address": h.get("address", ""),
+            "label": "",
+            "amount": _raw_to_human(h.get("balance", 0)),
+            "pct": round(float(h.get("share", 0)), 4),
+        })
+
+    def _cum_pct(n: int) -> float | None:
+        if len(holders) < n:
+            return None
+        s = sum(float(h.get("share", 0)) for h in holders[:n])
+        return round(s, 2)
+
+    return {
+        "chain": chain,
+        "contract_address": contract_address.lower(),
+        "total_holders": total_holders,
+        "top_holders_json": top_holders_json,
+        "tier_distribution_json": [],
+        "top_5_pct": _cum_pct(5),
+        "top_10_pct": _cum_pct(10),
+        "top_25_pct": _cum_pct(25),
+        "top_50_pct": _cum_pct(50),
+        "top_100_pct": _cum_pct(100),
+        "scraped_at": None,
+        # 额外信息（供日志/上层展示）
+        "total_supply": info.get("total_supply"),
+        "market_cap_usd": price.get("marketCapUsd"),
+        "price_usd": price.get("rate"),
+        "source": "binplorer_api",
+    }
+
+
+def _blockscout_get_json(url: str, retries: int = 4) -> dict | None:
+    """请求 Blockscout REST API，返回 JSON dict（失败返回 None）。
+
+    本地网络访问 blockscout 偶发 ConnectionResetError(10054)，需重试 + 递增间隔。
+    """
+    headers = dict(HEADERS)
+    headers["Accept"] = "application/json"
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    print(f"  [WARN] Blockscout API 请求失败（重试 {retries} 次）: {last_err}")
+    return None
+
+
+def _scrape_holders_blockscout(chain: str, contract_address: str,
+                               max_holders: int) -> dict | None:
+    """用 Blockscout 免费 REST API 获取持仓分布（base 等 EVM 链）。
+
+    比 basescan HTML 更稳定（JSON 接口，无 Cloudflare 403）：
+    - GET /api/v2/tokens/{addr} → name / decimals / total_supply / holders_count
+    - GET /api/v2/tokens/{addr}/holders → 持币地址列表（value 为 raw 余额）
+    据此计算 Top 5/10/25/50/100 集中度。
+    """
+    base = BLOCKSCOUT_BASE.get(chain)
+    if not base:
+        return None
+
+    info = _blockscout_get_json(f"{base}/api/v2/tokens/{contract_address}")
+    if not info:
+        print("  [WARN] Blockscout getTokenInfo 无数据")
+        return None
+
+    try:
+        decimals = int(info.get("decimals") or 18)
+    except (ValueError, TypeError):
+        decimals = 18
+    total_supply = info.get("total_supply")  # 字符串 wei
+    try:
+        total_holders = int(info.get("holders_count") or 0)
+    except (ValueError, TypeError):
+        total_holders = 0
+
+    # 分页拉取持仓地址，至少覆盖 max_holders 和 100 条（用于 Top100 集中度）
+    fetch_limit = max(max_holders, 100)
+    holders: list[dict] = []
+    next_params: dict | None = None
+    while len(holders) < fetch_limit:
+        url = f"{base}/api/v2/tokens/{contract_address}/holders"
+        if next_params:
+            from urllib.parse import urlencode
+            url += "?" + urlencode(next_params)
+        page = _blockscout_get_json(url)
+        if not page:
+            break
+        items = page.get("items") or []
+        for it in items:
+            addr_obj = it.get("address") or {}
+            addr = addr_obj.get("hash", "")
+            value = it.get("value")
+            # Blockscout 标签在 public_tags / private_tags 里（不是 metadata.tags）
+            tags = []
+            for key in ("public_tags", "private_tags"):
+                tags.extend(addr_obj.get(key) or [])
+            label = ""
+            for t in tags:
+                name = t.get("display_name") or t.get("label") or t.get("name") or ""
+                tt = (t.get("tag_type") or "").lower()
+                if not name:
+                    continue
+                if "exchange" in tt or "cex" in tt or "dex" in tt:
+                    label = name
+                    break
+                if not label:
+                    label = name
+            holders.append({
+                "address": addr,
+                "value": value,
+                "label": label,
+            })
+        next_params = page.get("next_page_params")
+        if not next_params:
+            break
+
+    def _raw_to_human(raw) -> str:
+        try:
+            return f"{int(raw) / (10 ** decimals):.4f}"
+        except (ValueError, TypeError):
+            return str(raw)
+
+    def _pct(raw) -> float:
+        try:
+            if total_supply and int(total_supply) > 0:
+                return round(int(raw) / int(total_supply) * 100, 4)
+        except (ValueError, TypeError):
+            pass
+        return 0.0
+
+    top_holders_json = []
+    for i, h in enumerate(holders, start=1):
+        top_holders_json.append({
+            "rank": i,
+            "address": h["address"],
+            "label": h["label"],
+            "amount": _raw_to_human(h["value"]),
+            "pct": _pct(h["value"]),
+        })
+
+    def _cum_pct(n: int) -> float | None:
+        if len(top_holders_json) < n:
+            return None
+        return round(sum(h["pct"] for h in top_holders_json[:n]), 2)
+
+    return {
+        "chain": chain,
+        "contract_address": contract_address.lower(),
+        "total_holders": total_holders,
+        "top_holders_json": top_holders_json,
+        "tier_distribution_json": [],
+        "top_5_pct": _cum_pct(5),
+        "top_10_pct": _cum_pct(10),
+        "top_25_pct": _cum_pct(25),
+        "top_50_pct": _cum_pct(50),
+        "top_100_pct": _cum_pct(100),
+        "scraped_at": None,
+        "total_supply": total_supply,
+        "source": "blockscout_api",
+    }
+
+
+def _scrape_holders_solscan(chain: str, contract_address: str,
+                            max_holders: int = 50) -> dict | None:
+    """用 Playwright 爬取 Solscan 的 token 持仓分布（Solana SPL 代币）。
+
+    Solscan 有 Cloudflare 防护（requests 直接访问返回 403），需用无头浏览器
+    通过 JS 挑战后解析渲染后的 DOM。token 页面 Overview 提供 total_holders /
+    current_supply / 集中度汇总，Holders 标签页提供持币列表表格。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] playwright 未安装，无法爬取 Solscan")
+        return None
+
+    url = f"https://solscan.io/token/{contract_address}"
+
+    result = {
+        "chain": chain,
+        "contract_address": _norm_addr(chain, contract_address),
+        "total_holders": 0,
+        "total_supply": None,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+        "price_usd": None,
+        "market_cap_usd": None,
+        "source": "solscan",
+    }
+
+    # 提取 holder 表格行（Solscan 表格列：# / Account / Token Account / Quantity / Percentage / Value / Tags）
+    EXTRACT_JS = """() => {
+        for (const tb of document.querySelectorAll('table')) {
+            const heads = Array.from(tb.querySelectorAll('thead th')).map(c => c.innerText.trim());
+            if (heads.includes('Quantity') && heads.includes('Percentage')) {
+                return Array.from(tb.querySelectorAll('tbody tr')).map(tr => {
+                    const tds = Array.from(tr.querySelectorAll('td')).map(c => c.innerText.trim());
+                    return {rank: tds[0]||'', account: tds[1]||'', tokenAccount: tds[2]||'',
+                            quantity: tds[3]||'', percentage: tds[4]||'', value: tds[5]||'', tags: tds[6]||''};
+                });
+            }
+        }
+        return [];
+    }"""
+
+    for attempt in range(1, 3):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=[
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
+                ])
+                context = browser.new_context(
+                    user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 900})
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+                # 等待 Cloudflare JS 挑战完成（title 从 "Just a moment..." 变成正常）
+                for _ in range(40):
+                    title = page.title()
+                    if title and "moment" not in title.lower() and "attention" not in title.lower():
+                        break
+                    time.sleep(2)
+                # 等待 token 数据通过内部 API 异步加载完成
+                page.wait_for_timeout(6000)
+
+                body_text = page.evaluate("() => document.body.innerText")
+
+                # 总持币地址数（"Holders 131,083"）
+                m = re.search(r'Holders\s+([\d,]+)', body_text)
+                if m:
+                    result["total_holders"] = int(m.group(1).replace(",", ""))
+
+                # 当前总供应（"Current Supply 839,956,905,903.697222"）
+                m = re.search(r'Current Supply\s+([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["total_supply"] = float(m.group(1).replace(",", ""))
+
+                # 市值 / 价格（Overview 区域）
+                m = re.search(r'Market Cap\s+\$([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["market_cap_usd"] = float(m.group(1).replace(",", ""))
+
+                m = re.search(r'Price\s+\$([\d,]+(?:\.\d+)?)', body_text)
+                if m:
+                    result["price_usd"] = float(m.group(1).replace(",", ""))
+
+                # 进入 Holders 标签页，抓持币列表
+                holders_btn = page.locator("button:has-text('Holders')").first
+                if holders_btn.count() > 0:
+                    holders_btn.click(timeout=10000)
+                    page.wait_for_timeout(5000)
+
+                # Solscan 每页最多 40 条（下拉选项 10/20/30/40），切换为 40 以尽量多抓
+                try:
+                    sel = page.locator("button[aria-label='select']").first
+                    if sel.count() > 0:
+                        sel.click(timeout=5000)
+                        page.wait_for_timeout(1500)
+                        opt40 = page.locator("[role=option]:has-text('40')").first
+                        if opt40.count() > 0:
+                            opt40.click(timeout=5000)
+                            page.wait_for_timeout(5000)
+                except Exception as e:
+                    print(f"  [WARN] 切换每页数量失败: {e}")
+
+                rows = page.evaluate(EXTRACT_JS)
+
+                top_holders = []
+                tiers_count = {}
+                tag_pcts = {}
+                for r in rows[:max_holders]:
+                    try:
+                        rank = int(r["rank"])
+                    except (ValueError, TypeError):
+                        continue
+                    # Account 列 = "标签\n地址" 或纯地址
+                    lines = [l.strip() for l in r["account"].splitlines() if l.strip()]
+                    if len(lines) >= 2:
+                        label = " ".join(lines[:-1])
+                        address = lines[-1]
+                    else:
+                        label = ""
+                        address = lines[0] if lines else ""
+                    pct = _parse_pct(r["percentage"])
+                    top_holders.append({
+                        "rank": rank,
+                        "address": address,
+                        "label": label,
+                        "amount": r["quantity"].replace(",", ""),
+                        "pct": pct,
+                    })
+                    tag = (r["tags"] or "").strip()
+                    if tag:
+                        tiers_count[tag] = tiers_count.get(tag, 0) + 1
+                        if pct:
+                            tag_pcts[tag] = tag_pcts.get(tag, 0.0) + pct
+
+                result["top_holders_json"] = top_holders
+
+                # 集中度用持币列表累加（列表已按 rank 升序，即持仓量降序）
+                pcts = [h["pct"] for h in top_holders if h["pct"]]
+                if len(pcts) >= 5:
+                    result["top_5_pct"] = round(sum(pcts[:5]), 2)
+                if len(pcts) >= 10:
+                    result["top_10_pct"] = round(sum(pcts[:10]), 2)
+                if len(pcts) >= 25:
+                    result["top_25_pct"] = round(sum(pcts[:25]), 2)
+                if len(pcts) >= 50:
+                    result["top_50_pct"] = round(sum(pcts[:50]), 2)
+
+                # tier 分布：用 Tags 列统计（Whale/Shark/Dolphin/... 各 tier 地址数与占比）
+                tier_order = ["Whale", "Shark", "Dolphin", "Fish", "Crab", "Shrimp"]
+                tiers = []
+                for tn in tier_order:
+                    count = tiers_count.get(tn, 0)
+                    if count:
+                        tiers.append({"tier": tn, "count": count,
+                                      "pct_supply": round(tag_pcts.get(tn, 0.0), 2),
+                                      "pct_holders": None})
+                result["tier_distribution_json"] = tiers
+
+                browser.close()
+                return result
+        except Exception as e:
+            print(f"  [WARN] Solscan 爬取失败（尝试 {attempt}）: {e}")
+            if attempt < 2:
+                time.sleep(5)
+    return None
+
+
+def _print_holder_summary(result: dict) -> None:
+    """打印持仓采集结果摘要。"""
+    print(f"  总持币: {result['total_holders']}, 解析持仓: {len(result['top_holders_json'])} 条")
+    if result.get("price_usd"):
+        print(f"  价格: ${result['price_usd']}")
+    if result.get("market_cap_usd"):
+        print(f"  市值: ${result['market_cap_usd']}")
+    tiers = result["tier_distribution_json"]
+    if tiers:
+        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
+        print(f"  Whale 占比: {tiers[0].get('pct_supply') if tiers else 'N/A'}%")
+        print(f"  CEX 标签: {len([h for h in result['top_holders_json'] if h['label']])} 个地址有标签")
+    else:
+        print(f"  Top 5 集中度: {result.get('top_5_pct')}%")
+        print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
+
+
+def _scrape_holders_helius(chain: str, contract_address: str, max_holders: int = 20) -> dict | None:
+    """通过 Helius RPC 获取 Solana 持仓（Top 20，API 级、快、规避 Playwright 超时）。
+
+    返回结构与 _scrape_holders_solscan 对齐（top_holders_json / top_N_pct 等）。
+    无 HELIUS_API_KEY 时回退公共 RPC（getTokenLargestAccounts 可能 429，仅兜底）。
+    """
+    try:
+        from crypto_research.clients.solana_client import SolanaClient
+        from crypto_research.config import get_settings
+    except Exception as e:  # noqa: BLE001
+        print(f"  [WARN] 无法加载 Solana 客户端: {e}")
+        return None
+    try:
+        settings = get_settings(require_database=False)
+        client = SolanaClient(api_key=settings.helius_api_key)
+        result = client.get_token_holders(_norm_addr(chain, contract_address), limit=max_holders)
+        if not result["top_holders_json"]:
+            return None
+        return result
+    except Exception as e:  # noqa: BLE001
+        print(f"  [WARN] Helius 获取持仓失败: {e}")
+        return None
+
+
+def scrape_holders(explorer_url: str, contract_address: str,
+                   max_holders: int = 50, chain: str = "bsc") -> dict:
+    """从区块浏览器抓取持仓分布数据。
+
+    策略：
+    0. BSC/ETH 优先用 Binplorer/Ethplorer 免费 API（JSON 接口，稳定无 Cloudflare）
+    1. 先请求 token 主页面拿 total_holders（及 BSCScan 主页面直接渲染的持币表）
+    2. 再请求 generic-tokenholders2 接口拿集中度/Tier/持币列表（etherscan 系）
+    3. 接口失败时回退无头浏览器抓主页面渲染后的完整 HTML
+    """
+    token_url = f"{explorer_url}/token/{contract_address}"
+
+    result = {
+        "chain": "",
+        "contract_address": _norm_addr(chain, contract_address),
+        "total_holders": 0,
+        "top_holders_json": [],
+        "tier_distribution_json": [],
+        "top_5_pct": None,
+        "top_10_pct": None,
+        "top_25_pct": None,
+        "top_50_pct": None,
+        "top_100_pct": None,
+        "scraped_at": None,
+    }
+
+    # Solana: 优先 Helius RPC（Top 20 持仓，API 级、快、无 Playwright 超时问题），
+    # 失败或拿不到数据再回退 Solscan (Playwright)。
+    if chain == "solana":
+        helius_result = _scrape_holders_helius(chain, contract_address, max_holders)
+        if helius_result and helius_result["top_holders_json"]:
+            helius_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Helius RPC ({chain})")
+            _print_holder_summary(helius_result)
+            return helius_result
+        print("  [WARN] Helius 未获取到数据，回退 Solscan (Playwright) ...")
+
+        print("  [INFO] 尝试 Solscan (Playwright) 获取持仓...")
+        sol_result = _scrape_holders_solscan(chain, contract_address, max_holders)
+        if sol_result and (sol_result["total_holders"] > 0 or sol_result["top_holders_json"]):
+            sol_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Solscan ({chain})")
+            _print_holder_summary(sol_result)
+            return sol_result
+        print("  [WARN] Solscan 未获取到数据")
+        return None
+
+    # Step 0: BSC/ETH 优先 Binplorer API（免费 JSON 接口，避免区块浏览器 HTML 被拦截）
+    if chain in ("bsc", "eth"):
+        print("  [INFO] 尝试 Binplorer API 获取持仓...")
+        api_result = _scrape_holders_binplorer(chain, contract_address, max_holders)
+        if api_result and (api_result["total_holders"] > 0 or api_result["top_holders_json"]):
+            api_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Binplorer API ({chain})")
+            _print_holder_summary(api_result)
+            return api_result
+        print("  [WARN] Binplorer API 未获取到数据，回退区块浏览器 HTML")
+
+    # Step 0.5: base 等 EVM 链优先 Blockscout API（JSON 接口，避免 basescan Cloudflare 403）
+    if chain in BLOCKSCOUT_BASE:
+        print("  [INFO] 尝试 Blockscout API 获取持仓...")
+        api_result = _scrape_holders_blockscout(chain, contract_address, max_holders)
+        if api_result and api_result["top_holders_json"]:
+            api_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"  数据来源: Blockscout API ({chain})")
+            _print_holder_summary(api_result)
+            return api_result
+        print("  [WARN] Blockscout API 未获取到数据，回退区块浏览器 HTML")
+
+    # Step 1: 主页面 → total_holders（及 BSCScan 直接渲染的持币表）
+    html = _fetch_html(token_url)
+    main_parsed = _parse_holders_html(html, max_holders) if html else None
+    main_total = main_parsed["total_holders"] if main_parsed else 0
+    result["total_holders"] = main_total
+
+    # Step 2: 持币接口 → 集中度/Tier/持币列表（etherscan 系，最稳定）
+    main_total_supply = main_parsed["total_supply"] if main_parsed else None
+    api_html = _fetch_tokenholders(explorer_url, contract_address)
+    api_parsed = _parse_tokenholders_html(api_html, max_holders,
+                                          total_supply=main_total_supply) if api_html else None
+
+    # 合并：接口数据优先（含集中度/Tier/持币列表），total_holders 保留主页面的
+    if api_parsed and api_parsed["top_holders_json"]:
+        result["top_holders_json"] = api_parsed["top_holders_json"]
+        result["tier_distribution_json"] = api_parsed["tier_distribution_json"]
+        result["top_5_pct"] = api_parsed["top_5_pct"]
+        result["top_10_pct"] = api_parsed["top_10_pct"]
+        result["top_25_pct"] = api_parsed["top_25_pct"]
+        result["top_50_pct"] = api_parsed["top_50_pct"]
+        result["top_100_pct"] = api_parsed["top_100_pct"]
+    elif main_parsed and main_parsed["top_holders_json"]:
+        result.update(main_parsed)
+
+    # Step 3: 仍无持币数据 → 回退无头浏览器
+    if not result["top_holders_json"]:
+        print("  [INFO] 接口未获取到持币数据，改用无头浏览器...")
+        browser_html = _fetch_html_browser(token_url)
+        browser_parsed = _parse_holders_html(browser_html, max_holders) if browser_html else None
+        if browser_parsed:
+            result.update(browser_parsed)
+
+    result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _print_holder_summary(result)
+
+    return result
+
+
+# ── 数据库 ────────────────────────────────────────────────
+
+ENSURE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS biz.onchain_holder_snapshot (
+    snapshot_id      SERIAL PRIMARY KEY,
+    asset_id         INTEGER NOT NULL REFERENCES core.asset(asset_id) ON DELETE CASCADE,
+    chain            TEXT NOT NULL,
+    contract_address TEXT NOT NULL,
+    snapshot_date    DATE NOT NULL,
+    top10_concentration  NUMERIC(5,2),
+    top50_concentration  NUMERIC(5,2),
+    top100_concentration NUMERIC(5,2),
+    total_holders        INTEGER,
+    top_holders_json JSONB,
+    tier_distribution_json JSONB,
+    source_url TEXT,
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_holder_snapshot_asset_date
+    ON biz.onchain_holder_snapshot (asset_id, snapshot_date DESC);
+"""
+
+UPSERT_SQL = """
+INSERT INTO biz.onchain_holder_snapshot (
+    asset_id, chain, contract_address, snapshot_date,
+    top10_concentration, top50_concentration, top100_concentration,
+    total_holders, top_holders_json, tier_distribution_json,
+    source_url, fetched_at
+) VALUES (
+    %(asset_id)s, %(chain)s, %(contract_address)s,
+    (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date,
+    %(top10_concentration)s, %(top50_concentration)s, %(top100_concentration)s,
+    %(total_holders)s, %(top_holders_json)s, %(tier_distribution_json)s,
+    %(source_url)s, NOW()
+)
+ON CONFLICT DO NOTHING
+"""
+
+
+def ensure_table(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(ENSURE_TABLE_SQL)
+    conn.commit()
+
+
+def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
+               explorer_url: str, data: dict) -> None:
+    token_url = f"{explorer_url}/token/{contract_address}"
+    with conn.cursor() as cur:
+        # 同日同链同资产先删旧快照再插新快照（按北京时间日期）
+        cur.execute(
+            "DELETE FROM biz.onchain_holder_snapshot "
+            "WHERE asset_id = %s AND chain = %s "
+            "AND snapshot_date = (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date",
+            (asset_id, chain),
+        )
+        cur.execute(UPSERT_SQL, {
+            "asset_id": asset_id,
+            "chain": chain,
+            "contract_address": _norm_addr(chain, contract_address),
+            "top10_concentration": data.get("top_10_pct"),
+            "top50_concentration": data.get("top_50_pct"),
+            "top100_concentration": data.get("top_100_pct"),
+            "total_holders": data.get("total_holders", 0),
+            "top_holders_json": json.dumps(data.get("top_holders_json", []), ensure_ascii=False),
+            "tier_distribution_json": json.dumps(data.get("tier_distribution_json", []), ensure_ascii=False),
+            "source_url": token_url,
+        })
+    conn.commit()
+    print("  已写入 biz.onchain_holder_snapshot")
+
+
+# ── 主流程 ─────────────────────────────────────────────────
+
+def main() -> int:
+    args = build_parser().parse_args()
+    settings = get_settings(require_database=True)
+
+    # 归一化链名：ethereum→eth, arbitrum→arb, avalanche→avax 等
+    raw_chain = args.chain.lower()
+    chain = CHAIN_ALIASES.get(raw_chain, raw_chain)
+    explorer_url = EXPLORER_URLS.get(chain)
+    if not explorer_url:
+        print(f"ERROR: 不支持的链: {raw_chain}")
+        return 1
+
+    with get_connection(settings.database_url) as conn:
+        info = resolve_contract(conn, args.asset_id, args.contract, chain)
+        if not info:
+            print(f"ERROR: 无法找到合约地址或资产信息")
+            return 1
+
+        asset_id = info["asset_id"]
+        contract_address = info["contract_address"]
+        symbol = info.get("symbol", "")
+        name = info.get("name", "")
+
+        print(f"资产: {symbol} ({name}) [asset_id={asset_id}]")
+        print(f"链: {chain}, 合约: {contract_address}")
+
+        # 确保表存在
+        ensure_table(conn)
+
+        # 爬取
+        print(f"  抓取 {explorer_url}/token/{contract_address}...")
+        data = scrape_holders(explorer_url, contract_address, args.holders_limit, chain=chain)
+
+        if data is None:
+            print("ERROR: 持仓数据获取失败，未写入数据库")
+            return 1
+
+        if args.save:
+            # 用数据库规范链名写入（如 ethereum 而非 eth），保证与 asset_contract.chain
+            # 一致，每日去重 NOT EXISTS(s.chain=c.chain) 才能正确命中。
+            save_to_db(conn, asset_id, info.get("chain") or chain, contract_address, explorer_url, data)
+
+        # JSON 输出
+        output = {
+            "status": "ok",
+            "asset_id": asset_id,
+            "symbol": symbol,
+            "name": name,
+            "chain": chain,
+            "contract_address": contract_address,
+            "total_holders": data["total_holders"],
+            "top_5_pct": data["top_5_pct"],
+            "top_10_pct": data["top_10_pct"],
+            "top_50_pct": data["top_50_pct"],
+            "top_100_pct": data["top_100_pct"],
+            "top_holders": data["top_holders_json"][:10],
+            "tier_distribution": data["tier_distribution_json"],
+        }
+        print(json.dumps(output, ensure_ascii=False, default=str))
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

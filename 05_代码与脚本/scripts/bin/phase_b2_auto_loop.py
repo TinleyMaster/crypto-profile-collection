@@ -15,6 +15,10 @@ BATCH_LIMIT = 1000
 MAX_ROUNDS = 200  # 安全上限
 THRESHOLD = 500  # 全部可爬类型 pending 低于此数时停止
 
+# 新入库币水位线：仅处理 asset_id >= 该值的资产，老语料（已成熟）跳过。
+# 取值 = 语料成熟时刻的 MAX(asset_id)，可用环境变量 MIN_NEW_ASSET_ID 覆盖。
+MIN_ASSET_ID = int(os.environ.get("MIN_NEW_ASSET_ID", "25952"))
+
 # 设置环境
 env = os.environ.copy()
 env["PYTHONIOENCODING"] = "utf-8"
@@ -32,8 +36,10 @@ for round_num in range(1, MAX_ROUNDS + 1):
                 str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
                 "--limit",
                 str(BATCH_LIMIT),
+                "--min-asset-id",
+                str(MIN_ASSET_ID),
                 "--workers",
-                "8",
+                "4",
                 "--timeout",
                 "8",
             ],
@@ -55,7 +61,12 @@ for round_num in range(1, MAX_ROUNDS + 1):
     # 检查 pending
     try:
         probe = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "_probe_b2_pending.py")],
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "_probe_b2_pending.py"),
+                "--min-asset-id",
+                str(MIN_ASSET_ID),
+            ],
             cwd=str(SCRIPT_DIR),
             env=env,
             capture_output=True,

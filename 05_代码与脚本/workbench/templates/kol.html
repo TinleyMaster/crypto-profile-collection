@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KOL 信号监控 - 投研工作台</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: #0f1115;
+            color: #e6e8eb;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px 24px 60px;
+        }
+
+        header {
+            margin-bottom: 24px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #1e222a;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        header h1 {
+            font-size: 22px;
+            font-weight: 600;
+        }
+
+        header p {
+            color: #8a92a0;
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        .back-link {
+            color: #3b82f6;
+            text-decoration: none;
+            font-size: 13px;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+
+        /* 统计卡片 */
+        .grid {
+            display: grid;
+            gap: 16px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            margin-bottom: 28px;
+        }
+
+        .card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .card h3 {
+            font-size: 12px;
+            color: #8a92a0;
+            font-weight: 500;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .card .value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .card .sub {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+
+        /* Tab 切换 */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            border-bottom: 1px solid #1e222a;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            color: #8a92a0;
+            font-size: 14px;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: #e6e8eb;
+        }
+
+        .tab.active {
+            color: #fff;
+            border-bottom-color: #3b82f6;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* 筛选栏 */
+        .filter-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-bar select,
+        .filter-bar input,
+        .filter-bar button {
+            background: #171a21;
+            border: 1px solid #2a2f3a;
+            color: #e6e8eb;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .filter-bar button {
+            cursor: pointer;
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .filter-bar button:hover {
+            background: #2563eb;
+        }
+
+        .filter-bar button.secondary {
+            background: #171a21;
+            border-color: #2a2f3a;
+        }
+
+        .filter-bar button.secondary:hover {
+            background: #1e222a;
+        }
+
+        /* 表格 */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            color: #8a92a0;
+            font-weight: 500;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #1e222a;
+            background: #171a21;
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        tr:hover {
+            background: #171a21;
+        }
+
+        /* 标签 */
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .tag-prediction {
+            background: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+        }
+
+        .tag-after_action {
+            background: rgba(234, 179, 8, 0.15);
+            color: #fbbf24;
+        }
+
+        .tag-analysis {
+            background: rgba(107, 114, 128, 0.15);
+            color: #9ca3af;
+        }
+
+        .tag-noise {
+            background: rgba(156, 163, 175, 0.1);
+            color: #9ca3af;
+            opacity: 0.7;
+        }
+
+        .tag-long {
+            background: rgba(220, 38, 38, 0.15);
+            color: #f87171;
+        }
+
+        .tag-short {
+            background: rgba(22, 163, 74, 0.15);
+            color: #4ade80;
+        }
+
+        .tag-neutral {
+            background: rgba(107, 114, 128, 0.15);
+            color: #9ca3af;
+        }
+
+        .tag-active {
+            background: rgba(22, 163, 74, 0.15);
+            color: #4ade80;
+        }
+
+        .tag-inactive {
+            background: rgba(107, 114, 128, 0.15);
+            color: #9ca3af;
+        }
+
+        .tag-alerted {
+            background: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+        }
+
+        .tag-no-alert {
+            color: #6b7280;
+        }
+
+        /* 操作按钮 */
+        .btn {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            border: 1px solid #2a2f3a;
+            background: #171a21;
+            color: #e6e8eb;
+        }
+
+        .btn:hover {
+            background: #1e222a;
+        }
+
+        .btn-primary {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            background: #2563eb;
+        }
+
+        .btn-danger {
+            color: #f87171;
+        }
+
+        /* 模态框 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: #171a21;
+            border: 1px solid #2a2f3a;
+            border-radius: 10px;
+            padding: 24px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal h2 {
+            font-size: 18px;
+            margin-bottom: 16px;
+        }
+
+        .modal-close {
+            float: right;
+            cursor: pointer;
+            color: #8a92a0;
+            font-size: 20px;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            color: #8a92a0;
+            margin-bottom: 4px;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            background: #0f1115;
+            border: 1px solid #2a2f3a;
+            color: #e6e8eb;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        /* 信号详情 */
+        .signal-detail {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .signal-detail .full {
+            grid-column: 1 / -1;
+        }
+
+        .detail-item {
+            background: #0f1115;
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .detail-item .label {
+            font-size: 12px;
+            color: #8a92a0;
+            margin-bottom: 4px;
+        }
+
+        .detail-item .val {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .post-content {
+            background: #0f1115;
+            padding: 16px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            font-size: 14px;
+            line-height: 1.7;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+
+        .empty {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .confidence-bar {
+            height: 4px;
+            background: #1e222a;
+            border-radius: 2px;
+            overflow: hidden;
+            width: 80px;
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 6px;
+        }
+
+        .confidence-bar .fill {
+            height: 100%;
+            background: linear-gradient(90deg, #ef4444, #eab308, #22c55e);
+        }
+
+        a {
+            color: #3b82f6;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* ── 顶部导航 ── */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #0f1115;
+            border-bottom: 1px solid #232a36;
+            padding: 0 24px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .top-nav .brand {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .top-nav .brand .logo {
+            color: #4ea1ff;
+            font-size: 18px;
+        }
+
+        .top-nav .nav-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .top-nav .nav-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .top-nav .nav-tab {
+            padding: 0 14px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            color: #8a92a0;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .top-nav .nav-tab:hover {
+            color: #e6e8eb;
+            text-decoration: none;
+        }
+
+        .top-nav .nav-tab.active {
+            color: #4ea1ff;
+            border-bottom-color: #4ea1ff;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="top-nav">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <span>投研工作台</span>
+        </div>
+        <div class="nav-tabs">
+            <a class="nav-tab" href="/#assets">资产库</a>
+            <a class="nav-tab" href="/#market">行情</a>
+            <a class="nav-tab" href="/#unlock">解锁</a>
+            <a class="nav-tab" href="/#heat">热力</a>
+            <a class="nav-tab" href="/#backtest">回测</a>
+            <a class="nav-tab" href="/#tasks">任务</a>
+            <a class="nav-tab active" href="/kol">KOL</a>
+        </div>
+    </nav>
+    <div class="container">
+        <header>
+            <div>
+                <h1>📡 KOL 信号监控</h1>
+                <p>监控币安广场等平台交易类 KOL 发帖，AI 识别实时喊单信号</p>
+            </div>
+            <a href="/" class="back-link">← 返回工作台</a>
+        </header>
+
+        <!-- 统计卡片 -->
+        <div class="grid" id="statsGrid">
+            <div class="card">
+                <h3>监控博主</h3>
+                <div class="value" id="statActiveProfiles">--</div>
+                <div class="sub" id="statTotalProfiles">共 -- 位</div>
+            </div>
+            <div class="card">
+                <h3>累计帖子</h3>
+                <div class="value" id="statTotalPosts">--</div>
+                <div class="sub">全量存档</div>
+            </div>
+            <div class="card">
+                <h3>AI 信号</h3>
+                <div class="value" id="statTotalSignals">--</div>
+                <div class="sub" id="statPredictionSignals">实时喊单 -- 条</div>
+            </div>
+            <div class="card">
+                <h3>今日信号</h3>
+                <div class="value" id="statTodaySignals">--</div>
+                <div class="sub" id="statAlertsSent">已发告警 -- 条</div>
+            </div>
+        </div>
+
+        <!-- Tab 切换 -->
+        <div class="tabs">
+            <div class="tab active" data-tab="signals">信号列表</div>
+            <div class="tab" data-tab="profiles">博主管理</div>
+            <div class="tab" data-tab="posts">帖子存档</div>
+        </div>
+
+        <!-- 信号列表 -->
+        <div class="tab-content active" id="tab-signals">
+            <div class="filter-bar">
+                <select id="filterPostType">
+                    <option value="">全部类型</option>
+                    <option value="prediction">实时喊单</option>
+                    <option value="after_action">事后晒单</option>
+                    <option value="analysis">纯分析</option>
+                    <option value="noise">噪音/无关</option>
+                </select>
+                <select id="filterDirection">
+                    <option value="">全部方向</option>
+                    <option value="long">做多</option>
+                    <option value="short">做空</option>
+                    <option value="neutral">中性</option>
+                </select>
+                <select id="filterProfile">
+                    <option value="">全部博主</option>
+                </select>
+                <button class="secondary" onclick="loadSignals()">刷新</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>博主</th>
+                        <th>类型</th>
+                        <th>方向</th>
+                        <th>标的</th>
+                        <th>入场条件</th>
+                        <th>原文</th>
+                        <th>置信度</th>
+                        <th>告警</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="signalsTable">
+                    <tr>
+                        <td colspan="9" class="loading">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 博主管理 -->
+        <div class="tab-content" id="tab-profiles">
+            <div class="filter-bar">
+                <button class="btn-primary" onclick="openAddProfileModal()">+ 新增博主</button>
+                <button class="secondary" onclick="loadProfiles()">刷新</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>昵称</th>
+                        <th>平台</th>
+                        <th>粉丝数</th>
+                        <th>信号数</th>
+                        <th>胜率</th>
+                        <th>状态</th>
+                        <th>最后抓取</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="profilesTable">
+                    <tr>
+                        <td colspan="9" class="loading">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 帖子存档 -->
+        <div class="tab-content" id="tab-posts">
+            <div class="filter-bar">
+                <select id="filterPostProfile">
+                    <option value="">全部博主</option>
+                </select>
+                <button class="secondary" onclick="loadPosts()">刷新</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>发帖时间</th>
+                        <th>博主</th>
+                        <th>内容摘要</th>
+                        <th>图片</th>
+                        <th>AI 状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="postsTable">
+                    <tr>
+                        <td colspan="6" class="loading">加载中...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 新增博主模态框 -->
+    <div class="modal-overlay" id="addProfileModal">
+        <div class="modal">
+            <span class="modal-close" onclick="closeModal('addProfileModal')">&times;</span>
+            <h2>新增博主</h2>
+            <div class="form-group">
+                <label>平台</label>
+                <select id="newPlatform">
+                    <option value="binance_square">币安广场 (Binance Square)</option>
+                    <option value="twitter" disabled>Twitter/X (预留)</option>
+                    <option value="telegram" disabled>Telegram (预留)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>平台用户 ID</label>
+                <input type="text" id="newUserId" placeholder="币安广场用户 ID">
+            </div>
+            <div class="form-group">
+                <label>昵称</label>
+                <input type="text" id="newNickname" placeholder="博主昵称">
+            </div>
+            <div class="form-group">
+                <label>粉丝数（可选）</label>
+                <input type="number" id="newFollowers" placeholder="0">
+            </div>
+            <div class="form-group">
+                <label>备注（可选）</label>
+                <textarea id="newNotes" placeholder="备注信息"></textarea>
+            </div>
+            <div class="form-actions">
+                <button class="btn" onclick="closeModal('addProfileModal')">取消</button>
+                <button class="btn btn-primary" onclick="addProfile()">确认添加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 信号详情模态框 -->
+    <div class="modal-overlay" id="signalDetailModal">
+        <div class="modal">
+            <span class="modal-close" onclick="closeModal('signalDetailModal')">&times;</span>
+            <h2>信号详情</h2>
+            <div id="signalDetailContent">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab 切换
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+
+                if (tab.dataset.tab === 'profiles') loadProfiles();
+                if (tab.dataset.tab === 'posts') loadPosts();
+            });
+        });
+
+        // 初始化
+        loadStats();
+        loadSignals();
+        loadProfileFilters();
+
+        // ---- 统计 ----
+        async function loadStats () {
+            try {
+                const res = await fetch('/api/kol/stats');
+                const data = await res.json();
+                document.getElementById('statActiveProfiles').textContent = data.active_profiles;
+                document.getElementById('statTotalProfiles').textContent = `共 ${data.total_profiles} 位`;
+                document.getElementById('statTotalPosts').textContent = data.total_posts;
+                document.getElementById('statTotalSignals').textContent = data.total_signals;
+                document.getElementById('statPredictionSignals').textContent = `实时喊单 ${data.prediction_signals} 条`;
+                document.getElementById('statTodaySignals').textContent = data.today_signals;
+                document.getElementById('statAlertsSent').textContent = `已发告警 ${data.alerts_sent} 条`;
+            } catch (e) {
+                console.error('加载统计失败', e);
+            }
+        }
+
+        // ---- 博主筛选选项 ----
+        async function loadProfileFilters () {
+            try {
+                const res = await fetch('/api/kol/profiles');
+                const profiles = await res.json();
+                const opts = profiles.map(p => `<option value="${p.profile_id}">${p.nickname}</option>`).join('');
+                document.getElementById('filterProfile').innerHTML = '<option value="">全部博主</option>' + opts;
+                document.getElementById('filterPostProfile').innerHTML = '<option value="">全部博主</option>' + opts;
+            } catch (e) {
+                console.error('加载博主列表失败', e);
+            }
+        }
+
+        // ---- 信号列表 ----
+        async function loadSignals () {
+            const postType = document.getElementById('filterPostType').value;
+            const direction = document.getElementById('filterDirection').value;
+            const profileId = document.getElementById('filterProfile').value;
+
+            let url = '/api/kol/signals?limit=50';
+            if (postType) url += '&post_type=' + postType;
+            if (direction) url += '&direction=' + direction;
+            if (profileId) url += '&profile_id=' + profileId;
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                const tbody = document.getElementById('signalsTable');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无信号</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(s => {
+                    const time = new Date(s.posted_at || s.created_at).toLocaleString('zh-CN');
+                    const typeTag = `<span class="tag tag-${s.post_type}">${typeLabel(s.post_type)}</span>`;
+                    const dirTag = s.direction ? `<span class="tag tag-${s.direction}">${dirLabel(s.direction)}</span>` : '—';
+                    const confPct = Math.round((s.confidence || 0) * 100);
+                    const confBar = `<div class="confidence-bar"><div class="fill" style="width:${confPct}%"></div></div> ${confPct}%`;
+                    const alertTag = s.is_alerted
+                        ? '<span class="tag tag-alerted">已发送</span>'
+                        : '<span class="tag-no-alert">未发送</span>';
+
+                    return `
+                        <tr>
+                            <td>${time}</td>
+                            <td>${s.profile_nickname || '—'}</td>
+                            <td>${typeTag}</td>
+                            <td>${dirTag}</td>
+                            <td><b>${s.symbol || '—'}</b></td>
+                            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.entry_condition || '—'}</td>
+                            <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.content_text || '')}">${escapeHtml((s.content_text || '').slice(0, 60))}${s.content_text && s.content_text.length > 60 ? '...' : ''}</td>
+                            <td>${confBar}</td>
+                            <td>${alertTag}</td>
+                            <td><button class="btn" onclick="showSignalDetail(${s.signal_id})">详情</button></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                document.getElementById('signalsTable').innerHTML =
+                    '<tr><td colspan="10" class="empty">加载失败</td></tr>';
+            }
+        }
+
+        function typeLabel (t) {
+            return { prediction: '实时喊单', after_action: '事后晒单', analysis: '纯分析', noise: '噪音' }[t] || t;
+        }
+        function dirLabel (d) {
+            return { long: '做多', short: '做空', neutral: '中性' }[d] || d;
+        }
+
+        // ---- 信号详情 ----
+        async function showSignalDetail (signalId) {
+            openModal('signalDetailModal');
+            try {
+                const res = await fetch('/api/kol/signals/' + signalId);
+                const s = await res.json();
+                if (s.error) {
+                    document.getElementById('signalDetailContent').innerHTML = `<div class="empty">${s.error}</div>`;
+                    return;
+                }
+
+                const time = new Date(s.posted_at || s.created_at).toLocaleString('zh-CN');
+                const confPct = Math.round((s.confidence || 0) * 100);
+
+                document.getElementById('signalDetailContent').innerHTML = `
+                    <div class="signal-detail">
+                        <div class="detail-item">
+                            <div class="label">博主</div>
+                            <div class="val">${s.profile_nickname || '—'} <span style="color:#6b7280;font-size:12px">(${s.platform_code})</span></div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">发帖时间</div>
+                            <div class="val">${time}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">类型</div>
+                            <div class="val"><span class="tag tag-${s.post_type}">${typeLabel(s.post_type)}</span></div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">方向</div>
+                            <div class="val">${s.direction ? `<span class="tag tag-${s.direction}">${dirLabel(s.direction)}</span>` : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">标的</div>
+                            <div class="val"><b>${s.symbol || '—'}</b></div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">置信度</div>
+                            <div class="val">${confPct}%</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">入场条件</div>
+                            <div class="val">${s.entry_condition || '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">入场价格</div>
+                            <div class="val">${s.entry_price ? '$' + Number(s.entry_price).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">止损</div>
+                            <div class="val" style="color:#f87171">${s.stop_loss ? '$' + Number(s.stop_loss).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">止盈</div>
+                            <div class="val" style="color:#4ade80">${s.take_profit ? '$' + Number(s.take_profit).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">杠杆</div>
+                            <div class="val">${s.leverage ? Number(s.leverage) + 'x' : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">支撑位</div>
+                            <div class="val" style="color:#4ade80">${s.support_level ? '$' + Number(s.support_level).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">压力位</div>
+                            <div class="val" style="color:#f87171">${s.resistance_level ? '$' + Number(s.resistance_level).toLocaleString() : '—'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="label">已进场</div>
+                            <div class="val">${s.already_entered ? '是' : '否'}</div>
+                        </div>
+                        <div class="detail-item full">
+                            <div class="label">原文链接</div>
+                            <div class="val"><a href="${s.post_url || '#'}" target="_blank">${s.post_url || '—'}</a></div>
+                        </div>
+                        <div class="detail-item full">
+                            <div class="label">原文内容</div>
+                            <div class="post-content">${escapeHtml(s.content_text || '')}</div>
+                        </div>
+                        ${s.image_urls && s.image_urls.length > 0 ? `
+                        <div class="detail-item full">
+                            <div class="label">图片 (${s.image_urls.length} 张)</div>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+                                ${s.image_urls.slice(0, 6).map(u => `<img src="${u}" style="max-width:120px;max-height:120px;border-radius:4px">`).join('')}
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                `;
+            } catch (e) {
+                document.getElementById('signalDetailContent').innerHTML =
+                    `<div class="empty">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        function escapeHtml (text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ---- 博主列表 ----
+        async function loadProfiles () {
+            try {
+                const res = await fetch('/api/kol/profiles');
+                const data = await res.json();
+                const tbody = document.getElementById('profilesTable');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无博主，点击「新增博主」添加</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(p => {
+                    const statusTag = p.is_active
+                        ? '<span class="tag tag-active">启用</span>'
+                        : '<span class="tag tag-inactive">停用</span>';
+                    const lastCrawl = p.last_crawled_at
+                        ? new Date(p.last_crawled_at).toLocaleString('zh-CN')
+                        : '从未';
+                    const winRate = p.win_rate != null ? p.win_rate + '%' : '—';
+                    const sigStats = p.signal_stats || {};
+
+                    return `
+                        <tr>
+                            <td>${p.profile_id}</td>
+                            <td><b>${p.nickname}</b></td>
+                            <td>${p.platform_code}</td>
+                            <td>${(p.follower_count || 0).toLocaleString()}</td>
+                            <td>${sigStats.prediction || 0}</td>
+                            <td>${winRate}</td>
+                            <td>${statusTag}</td>
+                            <td style="font-size:12px;color:#6b7280">${lastCrawl}</td>
+                            <td>
+                                <button class="btn" onclick="crawlProfile(${p.profile_id})">抓取</button>
+                                <button class="btn" onclick="toggleProfile(${p.profile_id}, ${p.is_active})">
+                                    ${p.is_active ? '停用' : '启用'}
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                document.getElementById('profilesTable').innerHTML =
+                    '<tr><td colspan="9" class="empty">加载失败</td></tr>';
+            }
+        }
+
+        async function toggleProfile (id, currentState) {
+            try {
+                await fetch(`/api/kol/profiles/${id}/toggle`, { method: 'POST' });
+                loadProfiles();
+                loadStats();
+                loadProfileFilters();
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        async function crawlProfile (id) {
+            try {
+                const res = await fetch(`/api/kol/profiles/${id}/crawl`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                alert('抓取任务已启动，请稍候刷新查看结果');
+                // 轮询状态
+                const check = setInterval(async () => {
+                    const r = await fetch(`/api/kol/profiles/${id}/crawl-status`);
+                    const s = await r.json();
+                    if (s.status === 'done' || s.status === 'failed') {
+                        clearInterval(check);
+                        loadProfiles();
+                        loadStats();
+                        loadSignals();
+                    }
+                }, 3000);
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        // ---- 新增博主 ----
+        function openAddProfileModal () {
+            openModal('addProfileModal');
+        }
+
+        async function addProfile () {
+            const platform = document.getElementById('newPlatform').value;
+            const userId = document.getElementById('newUserId').value.trim();
+            const nickname = document.getElementById('newNickname').value.trim();
+            const followers = document.getElementById('newFollowers').value;
+            const notes = document.getElementById('newNotes').value.trim();
+
+            if (!userId || !nickname) {
+                alert('请填写平台用户 ID 和昵称');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/kol/profiles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        platform_code: platform,
+                        platform_user_id: userId,
+                        nickname: nickname,
+                        follower_count: followers ? parseInt(followers) : 0,
+                        notes: notes || null,
+                    }),
+                });
+                const data = await res.json();
+                if (data.error) {
+                    alert('添加失败: ' + data.error);
+                    return;
+                }
+                closeModal('addProfileModal');
+                document.getElementById('newUserId').value = '';
+                document.getElementById('newNickname').value = '';
+                document.getElementById('newFollowers').value = '';
+                document.getElementById('newNotes').value = '';
+                loadProfiles();
+                loadStats();
+                loadProfileFilters();
+            } catch (e) {
+                alert('添加失败: ' + e.message);
+            }
+        }
+
+        // ---- 帖子列表 ----
+        async function loadPosts () {
+            const profileId = document.getElementById('filterPostProfile').value;
+            let url = '/api/kol/posts?limit=50';
+            if (profileId) url += '&profile_id=' + profileId;
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                const tbody = document.getElementById('postsTable');
+
+                if (data.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无帖子</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.map(p => {
+                    const time = new Date(p.posted_at).toLocaleString('zh-CN');
+                    const summary = (p.content_text || '').slice(0, 80) + ((p.content_text || '').length > 80 ? '...' : '');
+                    const aiStatus = p.ai_failed
+                        ? '<span style="color:#f87171">失败</span>'
+                        : '<span style="color:#4ade80">已分析</span>';
+                    const imgCount = (p.image_urls || []).length;
+
+                    return `
+                        <tr>
+                            <td style="font-size:12px;color:#6b7280">${time}</td>
+                            <td>—</td>
+                            <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(summary)}</td>
+                            <td>${imgCount} 张</td>
+                            <td>${aiStatus}</td>
+                            <td><a href="${p.post_url || '#'}" target="_blank">原文</a></td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (e) {
+                document.getElementById('postsTable').innerHTML =
+                    '<tr><td colspan="6" class="empty">加载失败</td></tr>';
+            }
+        }
+
+        // ---- 模态框通用 ----
+        function openModal (id) {
+            document.getElementById(id).classList.add('active');
+        }
+        function closeModal (id) {
+            document.getElementById(id).classList.remove('active');
+        }
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) overlay.classList.remove('active');
+            });
+        });
+    </script>
+</body>
+
+</html>

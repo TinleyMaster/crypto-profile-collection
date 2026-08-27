@@ -61,7 +61,18 @@ ON CONFLICT (source_code, source_asset_key) DO UPDATE SET
     match_status = EXCLUDED.match_status,
     match_method = EXCLUDED.match_method,
     match_confidence = EXCLUDED.match_confidence,
-    is_primary = EXCLUDED.is_primary,
+    -- is_primary 互斥保护：同 asset 已有其他源 primary 则降级
+    is_primary = CASE
+        WHEN EXCLUDED.is_primary = TRUE
+         AND EXISTS (
+             SELECT 1 FROM core.asset_source_map
+             WHERE asset_id = EXCLUDED.asset_id
+               AND is_primary = TRUE
+               AND (source_code, source_asset_key) <> (EXCLUDED.source_code, EXCLUDED.source_asset_key)
+         )
+        THEN FALSE
+        ELSE EXCLUDED.is_primary
+    END,
     verified_by = EXCLUDED.verified_by,
     verified_at = NOW(),
     updated_at = NOW()
@@ -74,7 +85,9 @@ def main() -> int:
     import psycopg
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
+    from crypto_research.db.sector import upsert_asset_sectors_batch
     from crypto_research.db.upsert import load_sql
+    from crypto_research.mapping.sector import classify_cg_sectors
 
     settings = get_settings(require_database=True)
     select_sql = load_sql("src_cg/select_cg_assets_from_coin_list.sql")
@@ -104,6 +117,7 @@ def main() -> int:
                 "symbol": row["symbol"],
                 "name": row["name"],
                 "asset_type": asset_type,
+                "categories": row.get("categories"),
                 "existing_asset_id": row.get("existing_asset_id"),
             }
             if entry["existing_asset_id"]:
@@ -189,6 +203,38 @@ def main() -> int:
             with conn.cursor() as cur:
                 cur.execute(map_sql, map_params)
 
+        # 批量写入 CG 来源赛道标签
+        all_asset_ids: list[int] = []
+        sectors_by_asset: dict[int, list[tuple[str, float]]] = {}
+        for e in matched:
+            aid = e["existing_asset_id"]
+            all_asset_ids.append(aid)
+            cats = e.get("categories")
+            if isinstance(cats, str):
+                import json as _json
+                try:
+                    cats = _json.loads(cats)
+                except Exception:
+                    cats = None
+            sectors_by_asset[aid] = classify_cg_sectors(cats)
+        for e in unmatched:
+            aid = symbol_to_asset_id.get(e["symbol"])
+            if aid is None:
+                continue
+            all_asset_ids.append(aid)
+            cats = e.get("categories")
+            if isinstance(cats, str):
+                import json as _json
+                try:
+                    cats = _json.loads(cats)
+                except Exception:
+                    cats = None
+            sectors_by_asset[aid] = classify_cg_sectors(cats)
+
+        sector_hit_count = sum(1 for s in sectors_by_asset.values() if s)
+        if all_asset_ids:
+            upsert_asset_sectors_batch(conn, all_asset_ids, "cg", sectors_by_asset)
+
         print(
             json.dumps(
                 {
@@ -197,6 +243,7 @@ def main() -> int:
                     "matched": matched_count,
                     "new_assets": new_asset_count,
                     "mapped": len(map_values),
+                    "sector_hits": sector_hit_count,
                 },
                 ensure_ascii=False,
             )

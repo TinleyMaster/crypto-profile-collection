@@ -1,0 +1,3655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一键投研</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            background: #0f1115;
+            color: #e6e8eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        a {
+            color: #60a5fa;
+        }
+
+        .r-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 20px;
+            border-bottom: 1px solid #1e222a;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+
+        .r-title {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .r-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .r-actions button {
+            background: #374151;
+            color: #d1d5db;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .r-actions button:hover {
+            background: #4b5563;
+        }
+
+        .r-body {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+        }
+
+        .r-sidebar {
+            width: 360px;
+            border-right: 1px solid #1e222a;
+            overflow-y: auto;
+            padding: 16px;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+
+        .r-sidebar h3 {
+            font-size: 12px;
+            color: #8a92a0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 16px 0 8px;
+        }
+
+        .r-sidebar h3:first-child {
+            margin-top: 0;
+        }
+
+        .r-missing-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            margin-bottom: 6px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+        }
+
+        .r-missing-item .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .r-missing-item .dot.ok {
+            background: #10b981;
+        }
+
+        .r-missing-item .dot.miss {
+            background: #dc2626;
+        }
+
+        .r-group {
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            background: #171a21;
+            overflow: hidden;
+        }
+
+        .r-group-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 10px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .r-group-head:hover {
+            background: #1c2129;
+        }
+
+        .r-group-head .chev {
+            margin-left: auto;
+            color: #8a92a0;
+            font-size: 11px;
+            transition: transform .15s;
+        }
+
+        .r-group.open .r-group-head .chev {
+            transform: rotate(90deg);
+        }
+
+        .r-group-head .cnt {
+            color: #6b7280;
+            font-size: 11px;
+            font-weight: 400;
+        }
+
+        .r-group-body {
+            display: none;
+            border-top: 1px solid #1e222a;
+            padding: 8px;
+        }
+
+        .r-group.open .r-group-body {
+            display: block;
+        }
+
+        .r-src {
+            margin-bottom: 8px;
+        }
+
+        .r-src:last-child {
+            margin-bottom: 0;
+        }
+
+        .r-src-head {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        .r-src-head a {
+            text-decoration: none;
+            color: #9ca3af;
+            flex: 1;
+        }
+
+        .r-src-head a:hover {
+            text-decoration: underline;
+            color: #e6e8eb;
+        }
+
+        .r-src-head .r-content-btn {
+            background: #272d38;
+            color: #9ca3af;
+            border: none;
+            border-radius: 5px;
+            padding: 2px 8px;
+            cursor: pointer;
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+
+        .r-src-head .r-content-btn:hover {
+            background: #374151;
+        }
+
+        .r-src-head .r-src-date {
+            color: #6b7280;
+            font-size: 11px;
+            flex-shrink: 0;
+            white-space: nowrap;
+            margin-top: 1px;
+        }
+
+        .r-src-content {
+            margin-top: 6px;
+            padding: 8px 10px;
+            background: #0d1014;
+            border: 1px solid #1e222a;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.6;
+            color: #b8bec7;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 240px;
+            overflow-y: auto;
+        }
+
+        .r-chat {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+            overflow-y: auto;
+        }
+
+        .r-messages {
+            flex: 1;
+            padding: 20px;
+        }
+
+        .r-msg {
+            max-width: 760px;
+            margin-bottom: 16px;
+        }
+
+        .r-msg-role {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .r-msg-content {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 14px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .r-msg.user .r-msg-content {
+            background: #1c2533;
+            border-color: #2b3a52;
+        }
+
+        .r-citations {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #8a92a0;
+        }
+
+        .r-citations a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .r-citations a:hover {
+            text-decoration: underline;
+        }
+
+        .r-cite {
+            display: block;
+            margin-top: 4px;
+            padding-left: 8px;
+            border-left: 2px solid #2a2f3a;
+        }
+
+        .r-thesis {
+            flex-shrink: 0;
+            margin: 16px 20px 0;
+            padding: 14px 16px;
+            background: #14181f;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+        }
+
+        /* 一页结论 */
+        .r-onepage {
+            flex-shrink: 0;
+            margin: 16px 20px 0;
+            padding: 14px 16px;
+            background: linear-gradient(135deg, #1a1f2e 0%, #14181f 100%);
+            border: 1px solid #2a3550;
+            border-radius: 12px;
+        }
+
+        .r-onepage .op-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .r-onepage .op-head h3 {
+            font-size: 15px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .r-onepage .op-stance {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .r-onepage .op-stance.bullish {
+            background: #0b3d2a;
+            color: #34d399;
+        }
+
+        .r-onepage .op-stance.bearish {
+            background: #3d1616;
+            color: #f87171;
+        }
+
+        .r-onepage .op-stance.neutral {
+            background: #2a2f3a;
+            color: #9ca3af;
+        }
+
+        .r-onepage .op-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+        }
+
+        .r-onepage .op-item {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .r-onepage .op-item .op-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .r-onepage .op-item .op-value {
+            font-size: 13px;
+            font-weight: 500;
+            color: #e6e8eb;
+            line-height: 1.4;
+        }
+
+        .r-onepage .op-item .op-value.positive {
+            color: #34d399;
+        }
+
+        .r-onepage .op-item .op-value.negative {
+            color: #f87171;
+        }
+
+        .r-onepage .op-item .op-value.warning {
+            color: #f59e0b;
+        }
+
+        .r-onepage .op-item .op-sub {
+            font-size: 10px;
+            color: #4b5563;
+            margin-top: 2px;
+        }
+
+        .r-thesis .t-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .r-thesis .t-stance {
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .r-thesis .t-conviction {
+            font-size: 11px;
+            color: #8a92a0;
+        }
+
+        .r-thesis .t-section {
+            font-size: 11px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 10px 0 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .r-thesis .t-snapshot {
+            font-size: 10px;
+            text-transform: none;
+            letter-spacing: 0;
+            color: #9ca3af;
+            background: #1f2937;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: normal;
+        }
+
+        .r-thesis .t-point {
+            font-size: 13px;
+            line-height: 1.6;
+            margin: 4px 0;
+            padding-left: 10px;
+            border-left: 2px solid #2a2f3a;
+        }
+
+        .r-thesis .t-cite {
+            color: #60a5fa;
+            font-size: 11px;
+            margin-left: 4px;
+        }
+
+        .r-thesis .t-empty {
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .r-thesis .t-metrics {
+            font-size: 12px;
+            color: #cbd5e1;
+            line-height: 1.7;
+        }
+
+        .r-thesis .t-dim-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .r-thesis .t-dim-card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 10px 12px;
+            border-left: 3px solid #3b82f6;
+        }
+
+        .r-thesis .t-dim-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+
+        .r-thesis .t-dim-icon {
+            font-size: 14px;
+        }
+
+        .r-thesis .t-dim-title {
+            font-weight: 600;
+            font-size: 13px;
+            color: #f1f5f9;
+        }
+
+        .r-thesis .t-dim-desc {
+            font-size: 11px;
+            color: #64748b;
+            margin-left: auto;
+        }
+
+        .r-thesis .t-dim-summary {
+            font-size: 12px;
+            color: #e2e8f0;
+            line-height: 1.5;
+            margin-bottom: 6px;
+        }
+
+        .r-thesis .t-dim-points {
+            border-top: 1px solid #334155;
+            padding-top: 6px;
+        }
+
+        .r-thesis .t-dim-point {
+            font-size: 11px;
+            color: #94a3b8;
+            line-height: 1.5;
+            padding: 2px 0;
+        }
+
+        .r-thesis .t-inferred {
+            color: #f59e0b;
+            font-size: 10px;
+            opacity: 0.8;
+        }
+
+        .r-thesis .t-gen-btn {
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .r-thesis .t-gen-btn:hover {
+            background: #2563eb;
+        }
+
+        .r-thesis .t-gen-btn:disabled {
+            background: #374151;
+            color: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .r-thesis .t-refs {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid #1e222a;
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .r-thesis .t-refs h4 {
+            margin: 0 0 6px;
+            font-size: 11px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
+
+        .r-thesis .t-refs ol {
+            margin: 0;
+            padding-left: 18px;
+            line-height: 1.6;
+        }
+
+        .r-thesis .t-refs a {
+            color: #60a5fa;
+            text-decoration: none;
+            word-break: break-all;
+        }
+
+        .r-thesis .t-refs a:hover {
+            text-decoration: underline;
+        }
+
+        .r-thesis .t-ref-structured {
+            color: #9ca3af;
+            font-style: italic;
+        }
+
+        .r-thesis .t-collapsible .t-section {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .r-thesis .t-collapsible .t-section::after {
+            content: ' ▼';
+            font-size: 10px;
+            color: #4b5563;
+        }
+
+        .r-thesis .t-collapsible.collapsed .t-section::after {
+            content: ' ▶';
+        }
+
+        .r-thesis .t-collapsible.collapsed .t-body {
+            display: none;
+        }
+
+        .cell-na {
+            color: #4b5563;
+            font-size: 11px;
+        }
+
+        /* 竞品对比 */
+        .r-competitors {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-competitors .c-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-competitors .c-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-competitors .c-sector {
+            font-size: 12px;
+            color: #fbbf24;
+        }
+
+        .r-competitors .c-table-wrap {
+            overflow-x: auto;
+        }
+
+        .r-competitors table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            min-width: 800px;
+        }
+
+        .r-competitors th,
+        .r-competitors td {
+            padding: 8px 10px;
+            text-align: right;
+            border-bottom: 1px solid #1e222a;
+            white-space: nowrap;
+        }
+
+        .r-competitors th:first-child,
+        .r-competitors td:first-child {
+            text-align: left;
+            position: sticky;
+            left: 0;
+            background: #171a21;
+            z-index: 1;
+        }
+
+        .r-competitors th {
+            color: #8a92a0;
+            font-weight: 500;
+            font-size: 11px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .r-competitors th:hover {
+            color: #e6e8eb;
+        }
+
+        .r-competitors tr.target-row td {
+            background: rgba(59, 130, 246, 0.08);
+            font-weight: 600;
+        }
+
+        .r-competitors tr.target-row td:first-child {
+            background: rgba(59, 130, 246, 0.12);
+        }
+
+        .r-competitors td .coin-sym {
+            color: #e6e8eb;
+            font-weight: 500;
+        }
+
+        .r-competitors td .coin-name {
+            color: #6b7280;
+            font-size: 11px;
+            margin-left: 4px;
+        }
+
+        .r-competitors .c-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .r-competitors .c-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* 背离检测 */
+        .r-divergence {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-divergence .d-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-divergence .d-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-divergence .d-signal {
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid;
+        }
+
+        .r-divergence .d-signal.bearish {
+            background: rgba(239, 68, 68, 0.08);
+            border-color: #ef4444;
+        }
+
+        .r-divergence .d-signal.bullish {
+            background: rgba(16, 185, 129, 0.08);
+            border-color: #10b981;
+        }
+
+        .r-divergence .d-signal .d-title {
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .r-divergence .d-signal.bearish .d-title {
+            color: #f87171;
+        }
+
+        .r-divergence .d-signal.bullish .d-title {
+            color: #34d399;
+        }
+
+        .r-divergence .d-signal .d-severity {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
+        .r-divergence .d-signal.bearish .d-severity.high {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+        }
+
+        .r-divergence .d-signal.bearish .d-severity.medium {
+            background: rgba(239, 68, 68, 0.1);
+            color: #f87171;
+        }
+
+        .r-divergence .d-signal.bullish .d-severity.high {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+
+        .r-divergence .d-signal.bullish .d-severity.medium {
+            background: rgba(16, 185, 129, 0.1);
+            color: #34d399;
+        }
+
+        .r-divergence .d-signal .d-desc {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 8px;
+        }
+
+        .r-divergence .d-signal .d-conds {
+            font-size: 11px;
+        }
+
+        .r-divergence .d-signal .d-cond {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 2px 0;
+        }
+
+        .r-divergence .d-signal .d-cond .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .r-divergence .d-signal .d-cond.matched .dot {
+            background: currentColor;
+        }
+
+        .r-divergence .d-signal .d-cond.unmatched .dot {
+            background: #374151;
+        }
+
+        .r-divergence .d-signal .d-cond.unmatched {
+            color: #6b7280;
+        }
+
+        .r-divergence .d-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .r-divergence .d-metric {
+            text-align: center;
+        }
+
+        .r-divergence .d-metric .dm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .r-divergence .d-metric .dm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .r-divergence .d-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 16px;
+        }
+
+        .r-divergence .d-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 16px;
+        }
+
+        /* 链上持仓趋势 */
+        .r-chain-trend {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-chain-trend .ct-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-chain-trend .ct-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-chain-trend .ct-tabs {
+            display: flex;
+            gap: 4px;
+        }
+
+        .r-chain-trend .ct-tab {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #6b7280;
+            background: transparent;
+            border: 1px solid #1e222a;
+        }
+
+        .r-chain-trend .ct-tab.active {
+            color: #e6e8eb;
+            background: #1f2937;
+            border-color: #374151;
+        }
+
+        .r-chain-trend .ct-chart-wrap {
+            margin-bottom: 12px;
+        }
+
+        .r-chain-trend .ct-chart-title {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .r-chain-trend .ct-chart-title .ct-val {
+            color: #e6e8eb;
+            font-weight: 600;
+        }
+
+        .r-chain-trend .ct-spark {
+            width: 100%;
+            height: 48px;
+        }
+
+        .r-chain-trend .ct-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 8px;
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .r-chain-trend .ct-metric {
+            text-align: center;
+        }
+
+        .r-chain-trend .ct-metric .ctm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .r-chain-trend .ct-metric .ctm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change {
+            font-size: 10px;
+            margin-top: 1px;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change.up {
+            color: #10b981;
+        }
+
+        .r-chain-trend .ct-metric .ctm-change.down {
+            color: #ef4444;
+        }
+
+        .r-chain-trend .ct-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .r-chain-trend .ct-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
+        /* 衍生品资金面 */
+        .r-derivatives {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-derivatives .dv-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-derivatives .dv-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .r-derivatives .dv-refresh {
+            font-size: 11px;
+            color: #6b7280;
+            cursor: pointer;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: 1px solid #1e222a;
+        }
+
+        .r-derivatives .dv-refresh:hover {
+            color: #e6e8eb;
+            border-color: #374151;
+        }
+
+        .dv-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .dv-metric {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .dv-metric .dvm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .dv-metric .dvm-value {
+            font-size: 15px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .dv-metric .dvm-value.positive {
+            color: #10b981;
+        }
+
+        .dv-metric .dvm-value.negative {
+            color: #ef4444;
+        }
+
+        .dv-metric .dvm-sub {
+            font-size: 10px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        .dv-exchanges {
+            padding-top: 10px;
+            border-top: 1px solid #1e222a;
+        }
+
+        .dv-exchanges .dve-title {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 6px;
+        }
+
+        .dv-ex-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .dv-ex-tag {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #1f2937;
+            color: #9ca3af;
+            border: 1px solid #374151;
+        }
+
+        .dv-ex-tag.active {
+            background: rgba(59, 130, 246, 0.1);
+            color: #60a5fa;
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+
+        .dv-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .dv-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
+        .dv-loading {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* CEX Netflow */
+        .dv-cex {
+            padding-top: 12px;
+            border-top: 1px solid #1e222a;
+            margin-top: 4px;
+        }
+
+        .dv-cex .dvc-title {
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .dv-cex .dvc-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .dv-cex .dvc-metric {
+            background: #111318;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        .dv-cex .dvc-metric .dvcm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value.positive {
+            color: #10b981;
+        }
+
+        .dv-cex .dvc-metric .dvcm-value.negative {
+            color: #ef4444;
+        }
+
+        .dv-cex .dvc-empty {
+            font-size: 11px;
+            color: #6b7280;
+            text-align: center;
+            padding: 12px;
+            background: #111318;
+            border-radius: 6px;
+        }
+
+        .dv-cex .dvc-empty small {
+            display: block;
+            margin-top: 2px;
+            font-size: 10px;
+            color: #4b5563;
+        }
+
+        /* 鲸鱼行为流 */
+        .r-whale-flow {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-whale-flow .wf-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-whale-flow .wf-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .wf-signal {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            background: #111318;
+        }
+
+        .wf-signal.accumulating {
+            border-left: 3px solid #10b981;
+        }
+
+        .wf-signal.distributing {
+            border-left: 3px solid #ef4444;
+        }
+
+        .wf-signal.neutral {
+            border-left: 3px solid #6b7280;
+        }
+
+        .wf-signal.unknown {
+            border-left: 3px solid #4b5563;
+        }
+
+        .wf-signal .wfs-label {
+            font-size: 15px;
+            font-weight: 700;
+            flex: 1;
+        }
+
+        .wf-signal.accumulating .wfs-label {
+            color: #10b981;
+        }
+
+        .wf-signal.distributing .wfs-label {
+            color: #ef4444;
+        }
+
+        .wf-signal.neutral .wfs-label {
+            color: #9ca3af;
+        }
+
+        .wf-signal.unknown .wfs-label {
+            color: #6b7280;
+        }
+
+        .wf-signal .wfs-score {
+            font-size: 12px;
+            color: #6b7280;
+            text-align: right;
+        }
+
+        .wf-signal .wfs-score strong {
+            font-size: 16px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .wf-factors {
+            margin-bottom: 12px;
+        }
+
+        .wf-factor {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            font-size: 12px;
+        }
+
+        .wf-factor .wff-name {
+            width: 120px;
+            color: #9ca3af;
+            flex-shrink: 0;
+        }
+
+        .wf-factor .wff-bar {
+            flex: 1;
+            height: 6px;
+            background: #1e222a;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .wf-factor .wff-fill {
+            height: 100%;
+            border-radius: 3px;
+            position: absolute;
+            left: 50%;
+        }
+
+        .wf-factor .wff-fill.bullish {
+            background: #10b981;
+        }
+
+        .wf-factor .wff-fill.bearish {
+            background: #ef4444;
+        }
+
+        .wf-factor .wff-value {
+            width: 80px;
+            text-align: right;
+            flex-shrink: 0;
+            font-weight: 600;
+        }
+
+        .wf-factor .wff-value.bullish {
+            color: #10b981;
+        }
+
+        .wf-factor .wff-value.bearish {
+            color: #ef4444;
+        }
+
+        .wf-metrics {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .wf-metric {
+            background: #111318;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        .wf-metric .wfm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .wf-metric .wfm-value {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .wf-metric .wfm-value.positive {
+            color: #10b981;
+        }
+
+        .wf-metric .wfm-value.negative {
+            color: #ef4444;
+        }
+
+        .wf-tiers {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .wf-tier {
+            background: #111318;
+            border-radius: 6px;
+            padding: 6px 8px;
+            text-align: center;
+        }
+
+        .wf-tier .wft-label {
+            font-size: 9px;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+
+        .wf-tier .wft-value {
+            font-size: 12px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .wf-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .wf-empty small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
+        /* 代币经济学 */
+        .r-tokenomics {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-tokenomics .t-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-tokenomics .t-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .tm-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .tm-cell {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .tm-cell .tm-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .tm-cell .tm-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .tm-section-title {
+            font-size: 12px;
+            color: #9ca3af;
+            margin: 12px 0 8px;
+            font-weight: 600;
+        }
+
+        .tm-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .tm-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+        }
+
+        .tm-bar .tm-bar-label {
+            width: 80px;
+            color: #9ca3af;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tm-bar .tm-bar-track {
+            flex: 1;
+            height: 8px;
+            background: #1e222a;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .tm-bar .tm-bar-fill {
+            height: 100%;
+            background: #3b82f6;
+            border-radius: 4px;
+        }
+
+        .tm-bar .tm-bar-pct {
+            width: 48px;
+            text-align: right;
+            color: #e6e8eb;
+            font-weight: 600;
+        }
+
+        .tm-info {
+            font-size: 12px;
+            color: #9ca3af;
+            line-height: 1.5;
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .tm-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* 行情表现 */
+        .r-market {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-market .m-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-market .m-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .m-price {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .m-price .mp-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #e6e8eb;
+        }
+
+        .m-price .mp-change {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .m-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .m-cell {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .m-cell .m-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .m-cell .m-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .m-extremes {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+
+        .m-extreme {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .m-extreme .me-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .m-extreme .me-value {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .m-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* 异动信号 */
+        .r-signals {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .r-signals .s-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .r-signals .s-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .sg-signal {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            border-left: 3px solid;
+            background: #111318;
+        }
+
+        .sg-signal.critical {
+            border-color: #ef4444;
+        }
+
+        .sg-signal.warning {
+            border-color: #f59e0b;
+        }
+
+        .sg-signal.info {
+            border-color: #3b82f6;
+        }
+
+        .sg-signal .sg-icon {
+            font-size: 16px;
+            line-height: 1;
+            margin-top: 2px;
+        }
+
+        .sg-signal .sg-body {
+            flex: 1;
+        }
+
+        .sg-signal .sg-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+            margin-bottom: 2px;
+        }
+
+        .sg-signal .sg-desc {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-bottom: 2px;
+        }
+
+        .sg-signal .sg-meta {
+            font-size: 10px;
+            color: #6b7280;
+        }
+
+        .sg-empty {
+            color: #6b7280;
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .r-input {
+            display: flex;
+            gap: 10px;
+            padding: 16px 20px;
+            border-top: 1px solid #1e222a;
+            background: #12151b;
+            flex-shrink: 0;
+        }
+
+        .r-input textarea {
+            flex: 1;
+            resize: none;
+            height: 60px;
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            color: #e6e8eb;
+            font-size: 14px;
+            padding: 12px 14px;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .r-input textarea:focus {
+            border-color: #3b82f6;
+        }
+
+        .r-input button {
+            background: #3b82f6;
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            padding: 0 22px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .r-input button:disabled {
+            background: #374151;
+            color: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .no-data {
+            color: #6b7280;
+            font-size: 12px;
+            padding: 8px 0;
+        }
+
+        /* ── 顶部导航 ── */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #0f1115;
+            border-bottom: 1px solid #232a36;
+            padding: 0 24px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .top-nav .brand {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .top-nav .brand .logo {
+            color: #4ea1ff;
+            font-size: 18px;
+        }
+
+        .top-nav .nav-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .top-nav .nav-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .top-nav .nav-tab {
+            padding: 0 14px;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            color: #8a92a0;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            box-sizing: border-box;
+        }
+
+        .top-nav .nav-tab:hover {
+            color: #e6e8eb;
+            text-decoration: none;
+        }
+
+        .top-nav .nav-tab.active {
+            color: #4ea1ff;
+            border-bottom-color: #4ea1ff;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="top-nav">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <span>投研工作台</span>
+        </div>
+        <div class="nav-tabs">
+            <a class="nav-tab active" href="/#assets">资产库</a>
+            <a class="nav-tab" href="/#market">行情</a>
+            <a class="nav-tab" href="/#unlock">解锁</a>
+            <a class="nav-tab" href="/#heat">热力</a>
+            <a class="nav-tab" href="/#backtest">回测</a>
+            <a class="nav-tab" href="/#tasks">任务</a>
+            <a class="nav-tab" href="/kol">KOL</a>
+        </div>
+    </nav>
+    <header class="r-header">
+        <div class="r-title" id="r-title">🤖 一键投研</div>
+        <div class="r-actions">
+            <button id="r-fill-btn" onclick="fillMissing()">补齐缺失</button>
+            <button onclick="window.open('/research/' + ASSET_ID, '_blank', 'noopener')">🔗 投研链接</button>
+            <button onclick="location.href='/'">关闭</button>
+        </div>
+    </header>
+    <div class="r-body">
+        <aside class="r-sidebar" id="r-sidebar">
+            <div class="no-data">加载中...</div>
+        </aside>
+        <section class="r-chat">
+            <div class="r-onepage" id="r-onepage" style="display:none">
+                <div class="op-head">
+                    <h3>🎯 一页结论</h3>
+                    <span class="op-stance neutral" id="op-stance">加载中</span>
+                </div>
+                <div class="op-grid" id="op-grid">
+                    <div class="op-item">
+                        <div class="op-label">📊 综合立场</div>
+                        <div class="op-value" id="op-thesis">—</div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">📡 背离信号</div>
+                        <div class="op-value" id="op-divergence">—</div>
+                        <div class="op-sub" id="op-divergence-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">🔓 解锁压力</div>
+                        <div class="op-value" id="op-unlock">—</div>
+                        <div class="op-sub" id="op-unlock-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">⛓️ 链上异动</div>
+                        <div class="op-value" id="op-onchain">—</div>
+                        <div class="op-sub" id="op-onchain-sub"></div>
+                    </div>
+                    <div class="op-item">
+                        <div class="op-label">📈 衍生品情绪</div>
+                        <div class="op-value" id="op-derivatives">—</div>
+                        <div class="op-sub" id="op-derivatives-sub"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="r-thesis" id="r-thesis" style="display:none"></div>
+            <div class="r-competitors" id="r-competitors" style="display:none">
+                <div class="c-head">
+                    <h3>🏆 同赛道竞品对比</h3>
+                    <span class="c-sector" id="c-sector-label"></span>
+                </div>
+                <div id="c-table-container">
+                    <div class="c-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-divergence" id="r-divergence" style="display:none">
+                <div class="d-head">
+                    <h3>📡 背离信号检测</h3>
+                    <span style="font-size:11px;color:#6b7280">情绪 × 价格 × 链上</span>
+                </div>
+                <div id="d-signals-container">
+                    <div class="d-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-chain-trend" id="r-chain-trend" style="display:none">
+                <div class="ct-head">
+                    <h3>📊 链上持仓趋势</h3>
+                    <div class="ct-tabs" id="ct-chain-tabs"></div>
+                </div>
+                <div id="ct-charts-container">
+                    <div class="ct-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-derivatives" id="r-derivatives" style="display:none">
+                <div class="dv-head">
+                    <h3>📈 衍生品资金面</h3>
+                    <span class="dv-refresh" onclick="loadDerivatives(true)">🔄 刷新</span>
+                </div>
+                <div id="dv-container">
+                    <div class="dv-loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-whale-flow" id="r-whale-flow" style="display:none">
+                <div class="wf-head">
+                    <h3>🐋 鲸鱼/聪明钱行为流</h3>
+                </div>
+                <div id="wf-container">
+                    <div class="wf-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-tokenomics" id="r-tokenomics" style="display:none">
+                <div class="t-head">
+                    <h3>🪙 代币经济学</h3>
+                    <span style="font-size:11px;color:#6b7280">流通/总量/解锁/通胀</span>
+                </div>
+                <div id="tm-container">
+                    <div class="tm-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-market" id="r-market" style="display:none">
+                <div class="m-head">
+                    <h3>📈 行情表现</h3>
+                    <span style="font-size:11px;color:#6b7280">日级行情快照</span>
+                </div>
+                <div id="m-container">
+                    <div class="m-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-signals" id="r-signals" style="display:none">
+                <div class="s-head">
+                    <h3>⚡ 异动信号</h3>
+                    <span style="font-size:11px;color:#6b7280">价格/成交量/衍生品/解锁</span>
+                </div>
+                <div id="sg-container">
+                    <div class="sg-empty">加载中...</div>
+                </div>
+            </div>
+            <div class="r-messages" id="r-messages"></div>
+            <div class="r-input">
+                <textarea id="r-question" placeholder="输入问题，回答将严格基于已收集资料并标注来源...（Enter 发送，Shift+Enter 换行）"
+                    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askResearchQuestion();}"></textarea>
+                <button id="r-ask-btn" onclick="askResearchQuestion()">发送</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const ASSET_ID = {{ asset_id }};
+        let researchNotebookId = null;
+        let researchAsking = false;
+        let filling = false;
+
+        function escapeHtml (s) {
+            if (s == null) return '';
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+        function attrEscape (s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+        function sleep (ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+        async function safeJson (res, url) {
+            if (!res.ok) {
+                let detail = '';
+                try { detail = (await res.text()).slice(0, 200); } catch (e) { }
+                throw new Error('服务器错误 ' + res.status + (detail ? '（' + detail + '）' : ''));
+            }
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch (e) {
+                throw new Error('服务器返回异常响应: ' + text.slice(0, 200));
+            }
+        }
+
+        async function waitForTask (taskId, maxWait = 600000) {
+            const start = Date.now();
+            while (Date.now() - start < maxWait) {
+                await sleep(2000);
+                let data;
+                try {
+                    const res = await fetch('/api/tasks/' + taskId);
+                    data = await safeJson(res, '/api/tasks/' + taskId);
+                } catch (e) {
+                    continue;
+                }
+                if (data.ok && data.task && data.task.status !== 'pending' && data.task.status !== 'running') {
+                    return;
+                }
+            }
+        }
+
+        // ── 加载笔记本 ──
+        async function loadNotebook (refresh) {
+            try {
+                let url = '/api/research/' + ASSET_ID + '/notebook';
+                if (refresh) url += '?refresh=1';
+                const res = await fetch(url);
+                const data = await safeJson(res, url);
+                if (!data.ok || !data.data) throw new Error(data.error || '打开失败');
+                researchNotebookId = data.data.notebook_id;
+                render(data.data);
+            } catch (e) {
+                document.getElementById('r-title').textContent = '🤖 一键投研';
+                document.getElementById('r-sidebar').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
+                document.getElementById('r-messages').innerHTML = '<div class="no-data">打开失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        async function fillMissing () {
+            if (filling) return;
+            if (!confirm('将针对缺失项自动补齐投研资料（可能耗时较长），是否继续？')) return;
+            filling = true;
+            const btn = document.getElementById('r-fill-btn');
+            btn.disabled = true;
+            btn.textContent = '补齐中...';
+            try {
+                const res = await fetch('/api/research/' + ASSET_ID + '/fill-missing', { method: 'POST' });
+                const data = await safeJson(res, '/api/research/' + ASSET_ID + '/fill-missing');
+                if (!data.ok) throw new Error(data.error || '启动失败');
+
+                await waitForTask(data.task_id, 1800000); // 最长 30 分钟
+
+                const resultRes = await fetch('/api/tasks/' + data.task_id + '/result');
+                const resultData = await safeJson(resultRes, '/api/tasks/' + data.task_id + '/result');
+
+                let msg = '补齐完成';
+                if (resultData.pending) {
+                    msg = '补齐仍在后台进行中，可稍后重新打开本页查看最新进度。';
+                } else if (resultData.ok && resultData.result && resultData.result.ok) {
+                    const d = resultData.result.data || {};
+                    msg = d.message || msg;
+                    if (d.filled && d.filled.length) {
+                        msg += '\n\n本次补齐：' + d.filled.map(function (x) { return x.label; }).join('、');
+                    }
+                    if (d.still_missing && d.still_missing.length) {
+                        msg += '\n\n仍缺失：' + d.still_missing.map(function (x) { return x.label; }).join('、');
+                    }
+                } else {
+                    msg = '补齐失败：' + ((resultData.result && resultData.result.error) || resultData.error || '未知错误');
+                }
+                alert(msg);
+                await loadNotebook(true); // 强制重采快照
+            } catch (e) {
+                alert('补齐失败: ' + e.message);
+                await loadNotebook(true);
+            }
+            filling = false;
+            btn.disabled = false;
+            btn.textContent = '补齐缺失';
+        }
+
+        // ── 一页结论：各维度数据聚合 ──
+        var onepageData = {
+            thesis: null,       // { stance, conviction }
+            divergence: null,   // { signals, metrics }
+            unlock: null,       // { unlock_pct_30d, pressure_score, risk_level }
+            onchain: null,      // { top10_concentration_pct, holder_change_7d_pct, whale_change_7d_pct }
+            derivatives: null   // { funding_rate_pct, oi_change_24h_pct, cvd_ratio_24h }
+        };
+
+        function updateOnepage () {
+            const box = document.getElementById('r-onepage');
+            const d = onepageData;
+            // 至少有 thesis 或 2 个以上维度有数据才显示
+            const hasData = d.thesis || [d.divergence, d.unlock, d.onchain, d.derivatives].filter(Boolean).length >= 2;
+            if (!hasData) return;
+            box.style.display = 'block';
+
+            // 综合立场
+            const stanceEl = document.getElementById('op-stance');
+            const thesisEl = document.getElementById('op-thesis');
+            if (d.thesis) {
+                const stanceMap = { bullish: '看多', bearish: '看空', neutral: '中性' };
+                const convMap = { high: '高置信', medium: '中置信', low: '低置信' };
+                const label = stanceMap[d.thesis.stance] || '中性';
+                stanceEl.textContent = label;
+                stanceEl.className = 'op-stance ' + (d.thesis.stance || 'neutral');
+                thesisEl.textContent = (convMap[d.thesis.conviction] || '') + ' · AI 投研结论';
+            } else {
+                stanceEl.textContent = '待生成';
+                stanceEl.className = 'op-stance neutral';
+                thesisEl.textContent = '点击"生成研究结论"获取 AI 观点';
+            }
+
+            // 背离信号
+            const divEl = document.getElementById('op-divergence');
+            const divSub = document.getElementById('op-divergence-sub');
+            if (d.divergence && d.divergence.signals && d.divergence.signals.length > 0) {
+                const sig = d.divergence.signals[0];
+                const isBullish = sig.type === 'bullish_divergence';
+                divEl.textContent = (isBullish ? '看涨背离' : '看跌背离') + ' · ' + Math.round(sig.confidence) + '%';
+                divEl.className = 'op-value ' + (isBullish ? 'positive' : 'negative');
+                divSub.textContent = d.divergence.signals.length + ' 个信号 · ' + (sig.label || '');
+            } else if (d.divergence && d.divergence.metrics) {
+                divEl.textContent = '无明显背离';
+                divEl.className = 'op-value';
+                const m = d.divergence.metrics;
+                const parts = [];
+                if (m.price_change_24h !== null && m.price_change_24h !== undefined)
+                    parts.push('24h ' + (m.price_change_24h >= 0 ? '+' : '') + Number(m.price_change_24h).toFixed(2) + '%');
+                if (m.sentiment_score !== null && m.sentiment_score !== undefined)
+                    parts.push('情绪 ' + Number(m.sentiment_score).toFixed(1));
+                divSub.textContent = parts.join(' · ');
+            } else {
+                divEl.textContent = '检测中...';
+                divEl.className = 'op-value';
+                divSub.textContent = '';
+            }
+
+            // 解锁压力
+            const unEl = document.getElementById('op-unlock');
+            const unSub = document.getElementById('op-unlock-sub');
+            if (d.unlock && (d.unlock.unlock_pct_30d !== null && d.unlock.unlock_pct_30d !== undefined)) {
+                const pct = Number(d.unlock.unlock_pct_30d);
+                let label = '低压力', cls = 'positive';
+                if (pct > 5) { label = '高抛压'; cls = 'negative'; }
+                else if (pct > 1) { label = '中压力'; cls = 'warning'; }
+                unEl.textContent = label + ' · 30d ' + pct.toFixed(2) + '%';
+                unEl.className = 'op-value ' + cls;
+                if (d.unlock.pressure_score !== null && d.unlock.pressure_score !== undefined)
+                    unSub.textContent = '抛压评分 ' + Number(d.unlock.pressure_score).toFixed(1);
+            } else {
+                unEl.textContent = '暂无解锁数据';
+                unEl.className = 'op-value';
+                unSub.textContent = '';
+            }
+
+            // 链上异动
+            const ocEl = document.getElementById('op-onchain');
+            const ocSub = document.getElementById('op-onchain-sub');
+            if (d.onchain) {
+                const parts = [];
+                let mainLabel = '链上平稳', mainCls = '';
+                if (d.onchain.whale_change_7d_pct !== null && d.onchain.whale_change_7d_pct !== undefined) {
+                    const wc = Number(d.onchain.whale_change_7d_pct);
+                    if (wc > 5) { mainLabel = '鲸鱼增持'; mainCls = 'positive'; }
+                    else if (wc < -5) { mainLabel = '鲸鱼减持'; mainCls = 'negative'; }
+                    parts.push('鲸鱼 7d ' + (wc >= 0 ? '+' : '') + wc.toFixed(2) + '%');
+                }
+                if (d.onchain.holder_change_7d_pct !== null && d.onchain.holder_change_7d_pct !== undefined) {
+                    const hc = Number(d.onchain.holder_change_7d_pct);
+                    parts.push('持币地址 7d ' + (hc >= 0 ? '+' : '') + hc.toFixed(2) + '%');
+                }
+                if (d.onchain.top10_concentration_pct !== null && d.onchain.top10_concentration_pct !== undefined) {
+                    const t10 = Number(d.onchain.top10_concentration_pct);
+                    if (t10 > 70 && !mainCls) { mainLabel = '高度集中'; mainCls = 'warning'; }
+                    parts.push('Top10 ' + t10.toFixed(1) + '%');
+                }
+                ocEl.textContent = mainLabel;
+                ocEl.className = 'op-value ' + mainCls;
+                ocSub.textContent = parts.join(' · ');
+            } else {
+                ocEl.textContent = '链上数据加载中';
+                ocEl.className = 'op-value';
+                ocSub.textContent = '';
+            }
+
+            // 衍生品情绪
+            const dvEl = document.getElementById('op-derivatives');
+            const dvSub = document.getElementById('op-derivatives-sub');
+            if (d.derivatives && d.derivatives.funding_rate_pct !== null && d.derivatives.funding_rate_pct !== undefined) {
+                const fr = Number(d.derivatives.funding_rate_pct);
+                let label = '中性情绪', cls = '';
+                if (fr > 0.05) { label = '多头亢奋'; cls = 'positive'; }
+                else if (fr > 0.01) { label = '偏多'; cls = 'positive'; }
+                else if (fr < -0.05) { label = '空头拥挤'; cls = 'negative'; }
+                else if (fr < -0.01) { label = '偏空'; cls = 'negative'; }
+                dvEl.textContent = label + ' · 费率 ' + (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%';
+                dvEl.className = 'op-value ' + cls;
+                const subs = [];
+                if (d.derivatives.oi_change_24h_pct !== null && d.derivatives.oi_change_24h_pct !== undefined) {
+                    const oi = Number(d.derivatives.oi_change_24h_pct);
+                    subs.push('OI 24h ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%');
+                }
+                if (d.derivatives.cvd_ratio_24h !== null && d.derivatives.cvd_ratio_24h !== undefined) {
+                    const cvd = Number(d.derivatives.cvd_ratio_24h);
+                    subs.push('CVD ' + (cvd >= 0 ? '+' : '') + (cvd * 100).toFixed(2) + '%');
+                }
+                dvSub.textContent = subs.join(' · ');
+            } else if (d.derivatives && d.derivatives.available_exchanges && d.derivatives.available_exchanges.length === 0) {
+                dvEl.textContent = '无合约数据';
+                dvEl.className = 'op-value';
+                dvSub.textContent = '该代币可能无永续合约';
+            } else {
+                dvEl.textContent = '衍生品数据加载中';
+                dvEl.className = 'op-value';
+                dvSub.textContent = '';
+            }
+        }
+
+        function render (d) {
+            const title = d.title || '一键投研';
+            document.getElementById('r-title').textContent = '🤖 ' + title;
+            document.title = title;
+            // 收集 thesis + structured metrics 到一页结论
+            const sm = (d.thesis && d.thesis.structured_metrics) || d.structured_metrics || {};
+            if (d.thesis) {
+                onepageData.thesis = { stance: d.thesis.stance, conviction: d.thesis.conviction };
+            }
+            if (sm.unlock || sm.pressure) {
+                onepageData.unlock = {
+                    unlock_pct_30d: sm.unlock ? sm.unlock.unlock_pct_30d : null,
+                    pressure_score: sm.pressure ? sm.pressure.pressure_score : null,
+                    risk_level: sm.pressure ? sm.pressure.risk_level : null,
+                };
+            }
+            if (sm.onchain) {
+                onepageData.onchain = {
+                    top10_concentration_pct: sm.onchain.top10_concentration_pct,
+                    holder_change_7d_pct: null,
+                    whale_change_7d_pct: null,
+                };
+            }
+            if (sm.derivatives && Object.keys(sm.derivatives).length > 0) {
+                onepageData.derivatives = sm.derivatives;
+            }
+            updateOnepage();
+            renderThesis(d);
+            renderSidebar(d);
+            renderMessages(d.messages || []);
+            loadCompetitors();
+            loadDivergence();
+            loadChainTrend();
+            loadDerivatives();
+            loadWhaleFlow();
+            loadTokenomics();
+            loadMarketHistory();
+            loadSignals();
+        }
+
+        function renderThesis (d) {
+            const box = document.getElementById('r-thesis');
+            const t = d.thesis;
+            const sources = d.sources || [];
+            const structuredMetrics = (t && t.structured_metrics) || d.structured_metrics || {};
+            if (!t) {
+                box.style.display = 'block';
+                box.innerHTML = '<div class="t-empty">暂无研究结论</div>' +
+                    '<div style="margin-top:8px"><button class="t-gen-btn" id="t-gen-btn" onclick="generateThesis()">生成研究结论</button></div>';
+                return;
+            }
+            const stanceMap = {
+                bullish: { label: '看多', bg: '#0b3d2a', color: '#34d399' },
+                bearish: { label: '看空', bg: '#3d1616', color: '#f87171' },
+                neutral: { label: '中性', bg: '#2a2f3a', color: '#9ca3af' }
+            };
+            const s = stanceMap[t.stance] || stanceMap.neutral;
+            const convMap = { high: '高置信', medium: '中置信', low: '低置信' };
+            // B2：展示结论最后生成时间，让用户判断数据时效（结论为生成时快照，可能滞后于实时 API）
+            const genTime = t.updated_at || t.created_at;
+            let genLabel = '';
+            if (genTime) {
+                genLabel = '<span class="t-snapshot" title="结论最后生成时间（' + escapeHtml(genTime) + '）。结论为生成时的行情快照，可能与实时 API 存在滞后。">🕒 结论生成于 ' + escapeHtml(formatTimeAgo(genTime)) + '</span>';
+            }
+            let html = '<div class="t-head">' +
+                '<span class="t-stance" style="background:' + s.bg + ';color:' + s.color + '">' + s.label + '</span>' +
+                '<span class="t-conviction">' + (convMap[t.conviction] || t.conviction) + '</span>' +
+                genLabel +
+                '<span style="margin-left:auto"><button class="t-gen-btn" onclick="generateThesis()">重新生成</button></span>' +
+                '</div>';
+
+            // 关键指标（优先用结构化指标，不用 LLM 生成的）
+            const sm = structuredMetrics || {};
+            const hasStructuredMetrics = sm.market && Object.keys(sm.market).length > 0;
+            if (hasStructuredMetrics) {
+                let snapshotLabel = '';
+                if (sm.market.snapshot_time) {
+                    snapshotLabel = '<span class="t-snapshot" title="行情数据快照时间">📊 行情截至 ' + escapeHtml(formatTimeAgo(sm.market.snapshot_time)) + '</span>';
+                }
+                html += '<div class="t-section">关键指标' + snapshotLabel + '</div><div class="t-metrics">';
+                if (sm.market.price_usd) {
+                    html += '<div><strong>价格</strong>: ' + fmtUsdPrice(sm.market.price_usd) + '</div>';
+                }
+                if (sm.market.market_cap_usd) {
+                    html += '<div><strong>流通市值</strong>: ' + fmtUsdBig(sm.market.market_cap_usd) + '</div>';
+                }
+                if (sm.market.fdv_usd) {
+                    html += '<div><strong>FDV（完全稀释估值）</strong>: ' + fmtUsdBig(sm.market.fdv_usd) + '</div>';
+                }
+                if (sm.tokenomics.total_supply) {
+                    html += '<div><strong>总供应量</strong>: ' + fmtNumberBig(sm.tokenomics.total_supply) + '</div>';
+                }
+                if (sm.tokenomics.circulating_supply) {
+                    html += '<div><strong>流通量</strong>: ' + fmtNumberBig(sm.tokenomics.circulating_supply) + '</div>';
+                }
+                if (sm.unlock.unlock_pct_30d !== null && sm.unlock.unlock_pct_30d !== undefined) {
+                    html += '<div><strong>30天解锁比例</strong>: ' + fmtPct(sm.unlock.unlock_pct_30d) + '</div>';
+                }
+                if (sm.pressure.pressure_score !== null && sm.pressure.pressure_score !== undefined) {
+                    const riskLvl = sm.pressure.risk_level || '';
+                    html += '<div><strong>抛压评分</strong>: ' + Number(sm.pressure.pressure_score).toFixed(2) +
+                        (riskLvl ? '（' + escapeHtml(riskLvl) + '）' : '') + '</div>';
+                }
+                if (sm.onchain.top10_concentration_pct !== null && sm.onchain.top10_concentration_pct !== undefined) {
+                    html += '<div><strong>Top10持仓集中度</strong>: ' + fmtPct(sm.onchain.top10_concentration_pct) + '</div>';
+                }
+                if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
+                    html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
+                }
+                // 衍生品指标
+                if (sm.derivatives && Object.keys(sm.derivatives).length > 0) {
+                    if (sm.derivatives.funding_rate_pct !== null && sm.derivatives.funding_rate_pct !== undefined) {
+                        const fr = Number(sm.derivatives.funding_rate_pct);
+                        html += '<div><strong>资金费率</strong>: <span style="color:' + (fr >= 0 ? '#34d399' : '#f87171') + '">' +
+                            (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%</span></div>';
+                    }
+                    if (sm.derivatives.oi_change_24h_pct !== null && sm.derivatives.oi_change_24h_pct !== undefined) {
+                        const oi = Number(sm.derivatives.oi_change_24h_pct);
+                        html += '<div><strong>OI 24h变化</strong>: <span style="color:' + (oi >= 0 ? '#34d399' : '#f87171') + '">' +
+                            (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%</span></div>';
+                    }
+                    if (sm.derivatives.total_oi_usd !== null && sm.derivatives.total_oi_usd !== undefined) {
+                        html += '<div><strong>未平仓合约</strong>: ' + fmtUsdBig(sm.derivatives.total_oi_usd) + '</div>';
+                    }
+                }
+                html += '</div>';
+            } else {
+                const km = t.key_metrics || {};
+                const kmKeys = Object.keys(km);
+                if (kmKeys.length) {
+                    html += '<div class="t-section">关键指标</div><div class="t-metrics">';
+                    kmKeys.forEach(function (k) {
+                        html += '<div><strong>' + escapeHtml(k) + '</strong>: ' + escapeHtml(String(km[k])) + '</div>';
+                    });
+                    html += '</div>';
+                }
+            }
+
+            // 四维框架卡片（新格式）
+            const dims = t.dimensions;
+            if (dims && typeof dims === 'object' && Object.keys(dims).length > 0) {
+                const dimMeta = {
+                    valuation: { label: '估值', icon: '📊', color: '#3b82f6', desc: '值不值得' },
+                    supply: { label: '筹码', icon: '💰', color: '#f59e0b', desc: '风险在哪（筹码）' },
+                    sentiment: { label: '情绪', icon: '🔥', color: '#ef4444', desc: '现在是不是时机' },
+                    catalyst: { label: '催化', icon: '⚡', color: '#8b5cf6', desc: '风险在哪（外部）' },
+                };
+                html += '<div class="t-section">四维分析</div><div class="t-dim-grid">';
+                ['valuation', 'supply', 'sentiment', 'catalyst'].forEach(function (key) {
+                    const dim = dims[key];
+                    const meta = dimMeta[key];
+                    if (!dim || !meta) return;
+                    const summary = dim.summary || '暂无数据';
+                    const points = dim.points || [];
+                    const hasPoints = points.length > 0;
+                    html += '<div class="t-dim-card" style="border-left:3px solid ' + meta.color + '">' +
+                        '<div class="t-dim-head">' +
+                        '<span class="t-dim-icon">' + meta.icon + '</span>' +
+                        '<span class="t-dim-title">' + meta.label + '</span>' +
+                        '<span class="t-dim-desc">' + meta.desc + '</span>' +
+                        '</div>' +
+                        '<div class="t-dim-summary">' + escapeHtml(summary) + '</div>';
+                    if (hasPoints) {
+                        html += '<div class="t-dim-points">';
+                        points.forEach(function (p) {
+                            const cite = (p.citations || []).map(function (c) { return citeLabel(c); }).join('');
+                            const inferred = p.is_inferred ? ' <span class="t-inferred" title="无引用源，AI推断">(推断)</span>' : '';
+                            html += '<div class="t-dim-point">' + escapeHtml(p.point || '') + inferred + '<span class="t-cite">' + cite + '</span></div>';
+                        });
+                        html += '</div>';
+                    }
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 兼容两种 citation 格式：number（旧）和 {index,title,url}（新）
+            function citeIndex (c) { return typeof c === 'object' && c ? c.index : Number(c); }
+            function citeLabel (c) {
+                if (typeof c === 'object' && c) return '[' + (c.index || '?') + ']';
+                return '[' + c + ']';
+            }
+            const thesis = t.thesis || [];
+            if (thesis.length) {
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">核心论点</div><div class="t-body">';
+                thesis.forEach(function (p) {
+                    const cite = (p.citations || []).map(function (c) { return citeLabel(c); }).join('');
+                    html += '<div class="t-point">' + escapeHtml(p.point || '') + '<span class="t-cite">' + cite + '</span></div>';
+                });
+                html += '</div></div>';
+            }
+            const risks = t.risks || [];
+            if (risks.length) {
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">风险点</div><div class="t-body">';
+                risks.forEach(function (r) {
+                    const cite = (r.citations || []).map(function (c) { return citeLabel(c); }).join('');
+                    html += '<div class="t-point">' + escapeHtml(r.risk || '') + '<span class="t-cite">' + cite + '</span></div>';
+                });
+                html += '</div></div>';
+            }
+            const cats = t.catalysts || [];
+            if (cats.length) {
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">催化剂</div><div class="t-body">';
+                cats.forEach(function (c) {
+                    const timing = c.timing ? ' <span class="t-conviction">(' + escapeHtml(c.timing) + ')</span>' : '';
+                    const cite = (c.citations || []).map(function (ci) { return citeLabel(ci); }).join('');
+                    html += '<div class="t-point">' + escapeHtml(c.catalyst || '') + timing + '<span class="t-cite">' + cite + '</span></div>';
+                });
+                html += '</div></div>';
+            }
+
+            // 参考文献
+            const allCites = new Set();
+            [].concat(thesis, risks, cats).forEach(function (item) {
+                (item.citations || []).forEach(function (c) {
+                    const idx = citeIndex(c);
+                    if (idx && idx > 0) allCites.add(idx);
+                });
+            });
+            // 收集四维卡片的引用
+            if (dims && typeof dims === 'object') {
+                Object.values(dims).forEach(function (dim) {
+                    if (dim && dim.points) {
+                        dim.points.forEach(function (p) {
+                            (p.citations || []).forEach(function (c) {
+                                const idx = citeIndex(c);
+                                if (idx && idx > 0) allCites.add(idx);
+                            });
+                        });
+                    }
+                });
+            }
+            if (allCites.size > 0 && sources.length > 0) {
+                html += '<div class="t-refs"><h4>参考文献</h4><ol>';
+                const sortedCites = Array.from(allCites).sort(function (a, b) { return a - b; });
+                sortedCites.forEach(function (idx) {
+                    const src = sources[idx - 1]; // 1-based
+                    if (!src) return;
+                    const title = src.title || src.url || '来源 ' + idx;
+                    if (src.type === 'structured') {
+                        html += '<li><span class="t-ref-structured">' + escapeHtml(title) + '（结构化数据）</span></li>';
+                    } else if (src.url) {
+                        html += '<li><a href="' + attrEscape(src.url) + '" target="_blank" rel="noopener">' + escapeHtml(title) + '</a></li>';
+                    } else {
+                        html += '<li>' + escapeHtml(title) + '</li>';
+                    }
+                });
+                html += '</ol></div>';
+            }
+
+            box.style.display = 'block';
+            box.innerHTML = html;
+        }
+
+        function toggleThesisSection (el) {
+            const parent = el.parentElement;
+            parent.classList.toggle('collapsed');
+        }
+
+        async function generateThesis () {
+            if (!confirm('重新生成将覆盖当前研究结论，是否继续？')) return;
+            const btn = document.getElementById('t-gen-btn');
+            if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
+            try {
+                const res = await fetch('/api/research/' + ASSET_ID + '/thesis', { method: 'POST' });
+                const data = await safeJson(res, '/api/research/' + ASSET_ID + '/thesis');
+                if (!data.ok) throw new Error(data.error || '启动失败');
+
+                await waitForTask(data.task_id, 300000); // 最长 5 分钟
+
+                const resultRes = await fetch('/api/tasks/' + data.task_id + '/result');
+                const resultData = await safeJson(resultRes, '/api/tasks/' + data.task_id + '/result');
+                if (resultData.ok && resultData.result && resultData.result.ok === false) {
+                    throw new Error(resultData.result.error || '生成失败');
+                }
+                await loadNotebook(false);
+            } catch (e) {
+                alert('生成研究结论失败: ' + e.message);
+                if (btn) { btn.disabled = false; btn.textContent = '生成研究结论'; }
+            }
+        }
+
+        // ── 竞品对比 ──
+        let compSortKey = 'market_cap';
+        let compSortAsc = false;
+
+        const NA_HTML = '<span class="cell-na">—</span>';
+        function fmtUsdBig (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            if (n >= 1e12) return '$' + (n / 1e12).toFixed(2) + 'T';
+            if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+            return '$' + n.toFixed(2);
+        }
+        function fmtUsdPrice (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            if (n >= 1000) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+            if (n >= 1) return '$' + n.toFixed(2);
+            if (n >= 0.01) return '$' + n.toFixed(4);
+            return '$' + n.toFixed(6);
+        }
+        function fmtNumberBig (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+            if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+        function fmtPct (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            return n.toFixed(2) + '%';
+        }
+        function fmtScore (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            return n.toFixed(1);
+        }
+        function formatTimeAgo (t) {
+            if (!t) return '';
+            const d = new Date(t);
+            if (isNaN(d.getTime())) return String(t).slice(0, 16);
+            const diff = (Date.now() - d.getTime()) / 1000;
+            if (diff < 60) return Math.round(diff) + ' 秒前';
+            if (diff < 3600) return Math.round(diff / 60) + ' 分钟前';
+            if (diff < 86400) return Math.round(diff / 3600) + ' 小时前';
+            if (diff < 86400 * 7) return Math.round(diff / 86400) + ' 天前';
+            return d.toISOString().slice(0, 10);
+        }
+        function fmtNumber (v) {
+            if (v === null || v === undefined || v === '') return NA_HTML;
+            const n = Number(v);
+            if (isNaN(n)) return NA_HTML;
+            return Math.round(n).toLocaleString();
+        }
+        function fmtCell (v, format) {
+            switch (format) {
+                case 'usd_big': return fmtUsdBig(v);
+                case 'usd_price': return fmtUsdPrice(v);
+                case 'number_big': return fmtNumberBig(v);
+                case 'pct': return fmtPct(v);
+                case 'score': return fmtScore(v);
+                case 'number': return fmtNumber(v);
+                default: return v !== null && v !== undefined && v !== '' ? String(v) : NA_HTML;
+            }
+        }
+        function cellValue (v) {
+            if (v === null || v === undefined || v === '') return -Infinity;
+            const n = Number(v);
+            return isNaN(n) ? -Infinity : n;
+        }
+
+        async function loadCompetitors () {
+            const box = document.getElementById('r-competitors');
+            const container = document.getElementById('c-table-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="c-loading">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/competitors?limit=8');
+                const data = await safeJson(r, '/api/research/competitors');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="c-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const sectorLabel = document.getElementById('c-sector-label');
+                sectorLabel.textContent = data.sector_label || '';
+
+                const comps = data.competitors || [];
+                const metrics = data.metrics || [];
+                if (comps.length <= 1) {
+                    container.innerHTML = '<div class="c-empty">同赛道暂无其他竞品数据</div>';
+                    return;
+                }
+
+                renderCompetitorTable(comps, metrics);
+            } catch (e) {
+                container.innerHTML = '<div class="c-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderCompetitorTable (comps, metrics) {
+            const container = document.getElementById('c-table-container');
+            // 排序
+            const sorted = [...comps].sort((a, b) => {
+                const av = cellValue(a[compSortKey]);
+                const bv = cellValue(b[compSortKey]);
+                if (av === bv) return 0;
+                return compSortAsc ? (av - bv) : (bv - av);
+            });
+
+            let html = '<div class="c-table-wrap"><table>';
+            // 表头
+            html += '<thead><tr><th>代币</th>';
+            metrics.forEach(function (m) {
+                const arrow = compSortKey === m.key ? (compSortAsc ? ' ↑' : ' ↓') : '';
+                html += '<th onclick="sortCompetitors(\'' + escapeHtml(m.key) + '\')">' + escapeHtml(m.label) + arrow + '</th>';
+            });
+            html += '</tr></thead><tbody>';
+
+            sorted.forEach(function (c) {
+                const rowCls = c.is_target ? ' class="target-row"' : '';
+                html += '<tr' + rowCls + '>';
+                html += '<td><span class="coin-sym">' + escapeHtml(c.symbol) + '</span>' +
+                    '<span class="coin-name">' + escapeHtml(c.name || '') + '</span></td>';
+                metrics.forEach(function (m) {
+                    html += '<td>' + fmtCell(c[m.key], m.format) + '</td>';
+                });
+                html += '</tr>';
+            });
+
+            html += '</tbody></table></div>';
+            container.innerHTML = html;
+        }
+
+        function sortCompetitors (key) {
+            if (compSortKey === key) {
+                compSortAsc = !compSortAsc;
+            } else {
+                compSortKey = key;
+                compSortAsc = false;
+            }
+            // 重新加载（简单起见，重新拉数据；数据量小也可缓存）
+            loadCompetitors();
+        }
+
+        // ── 背离检测 ──
+        async function loadDivergence () {
+            const box = document.getElementById('r-divergence');
+            const container = document.getElementById('d-signals-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="d-loading">检测中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/divergence');
+                const data = await safeJson(r, '/api/research/divergence');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="d-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const signals = data.signals || [];
+                const metrics = data.metrics || {};
+                const avail = data.data_availability || {};
+
+                let html = '';
+                if (signals.length === 0) {
+                    // 数据不足或暂无背离
+                    const missing = [];
+                    if (!avail.sentiment) missing.push('情绪');
+                    if (!avail.price) missing.push('价格');
+                    if (!avail.onchain) missing.push('链上');
+                    if (missing.length > 0) {
+                        html = '<div class="d-empty">数据不足，无法检测（缺少: ' + missing.join('、') + '）</div>';
+                    } else {
+                        html = '<div class="d-empty">当前未检测到明显背离信号</div>';
+                    }
+                } else {
+                    signals.forEach(function (s) {
+                        const cls = s.type === 'bearish_divergence' ? 'bearish' : 'bullish';
+                        const sevLabel = s.severity === 'high' ? '强信号' : '中信号';
+                        html += '<div class="d-signal ' + cls + '">';
+                        html += '<div class="d-title">';
+                        html += (s.type === 'bearish_divergence' ? '⚠️ ' : '💎 ') + escapeHtml(s.label);
+                        html += '<span class="d-severity ' + s.severity + '">' + sevLabel + ' · ' + Math.round(s.confidence) + '%</span>';
+                        html += '</div>';
+                        html += '<div class="d-desc">' + escapeHtml(s.description || '') + '</div>';
+                        html += '<div class="d-conds">';
+                        (s.conditions || []).forEach(function (c) {
+                            const ccls = c.matched ? 'matched' : 'unmatched';
+                            html += '<div class="d-cond ' + ccls + '"><span class="dot"></span>' + escapeHtml(c.detail) + '</div>';
+                        });
+                        html += '</div></div>';
+                    });
+                }
+
+                // 指标面板（始终展示，即使无信号）
+                html += '<div class="d-metrics">';
+                const metricItems = [
+                    { k: 'sentiment_score', l: '情绪分', f: 'score' },
+                    { k: 'price_change_24h', l: '24h 涨跌', f: 'pct' },
+                    { k: 'price_change_7d', l: '7d 涨跌', f: 'pct' },
+                    { k: 'whale_change_7d_pct', l: '鲸鱼 7d', f: 'pct' },
+                    { k: 'holder_change_7d_pct', l: '持有者 7d', f: 'pct' },
+                    { k: 'exchange_inflow_24h_pct', l: '24h 入交易所', f: 'pct4' },
+                ];
+                metricItems.forEach(function (m) {
+                    let val = metrics[m.k];
+                    let display;
+                    if (val === null || val === undefined || val === '') {
+                        display = '—';
+                    } else if (m.f === 'score') {
+                        display = Number(val).toFixed(1);
+                    } else if (m.f === 'pct') {
+                        const n = Number(val);
+                        display = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+                    } else if (m.f === 'pct4') {
+                        const n = Number(val);
+                        display = n.toFixed(4) + '%';
+                    } else {
+                        display = String(val);
+                    }
+                    html += '<div class="d-metric"><div class="dm-label">' + escapeHtml(m.l) + '</div>';
+                    html += '<div class="dm-value">' + display + '</div></div>';
+                });
+                html += '</div>';
+
+                container.innerHTML = html;
+                // 更新一页结论
+                onepageData.divergence = { signals: signals, metrics: metrics };
+                updateOnepage();
+            } catch (e) {
+                container.innerHTML = '<div class="d-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        // ── 链上持仓趋势 ──
+        let currentChain = null;
+
+        async function loadChainTrend () {
+            const box = document.getElementById('r-chain-trend');
+            const container = document.getElementById('ct-charts-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="ct-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/onchain/holder/' + ASSET_ID + '/trend?days=30');
+                const data = await safeJson(r, '/api/onchain/holder/trend');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="ct-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                const chains = Object.keys(data.by_chain || {});
+                if (chains.length === 0 || data.data_points === 0) {
+                    container.innerHTML = '<div class="ct-empty">暂无链上持仓数据' +
+                        '<small>每日快照采集中，数据积累后自动显示趋势</small></div>';
+                    return;
+                }
+
+                // 链选择 tabs
+                const tabsEl = document.getElementById('ct-chain-tabs');
+                if (!currentChain || chains.indexOf(currentChain) < 0) {
+                    currentChain = chains[0];
+                }
+                tabsEl.innerHTML = chains.map(function (c) {
+                    const cls = c === currentChain ? 'ct-tab active' : 'ct-tab';
+                    return '<span class="' + cls + '" onclick="switchChain(\'' + escapeHtml(c) + '\')">' + escapeHtml(c.toUpperCase()) + '</span>';
+                }).join('');
+
+                renderChainTrendCharts(data);
+            } catch (e) {
+                container.innerHTML = '<div class="ct-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function switchChain (chain) {
+            currentChain = chain;
+            // 重新加载（简单起见重新拉数据）
+            loadChainTrend();
+        }
+
+        function renderChainTrendCharts (data) {
+            const container = document.getElementById('ct-charts-container');
+            const points = (data.by_chain && data.by_chain[currentChain]) || [];
+            const summary = (data.trend_summary && data.trend_summary[currentChain]) || {};
+
+            if (points.length < 2) {
+                container.innerHTML = '<div class="ct-empty">数据点不足（' + points.length + ' 个），趋势图需至少 2 个数据点' +
+                    '<small>每日快照采集中，通常 3-7 天后可查看趋势</small></div>';
+                return;
+            }
+
+            // 要展示的指标
+            const metrics = [
+                { key: 'top10_concentration', label: 'Top10 集中度', unit: '%', color: '#3b82f6' },
+                { key: 'total_holders', label: '持有者数', unit: '', color: '#10b981' },
+                { key: 'exchange_wallet_pct', label: '交易所钱包占比', unit: '%', color: '#f59e0b' },
+            ];
+
+            let html = '';
+            metrics.forEach(function (m) {
+                const values = points.map(function (p) { return p[m.key]; });
+                const validValues = values.filter(function (v) { return v !== null && v !== undefined; });
+                if (validValues.length < 2) return;
+
+                const lastVal = values[values.length - 1];
+                const firstVal = validValues[0];
+                let changePct = null;
+                if (firstVal !== null && firstVal !== undefined && firstVal !== 0 && lastVal !== null) {
+                    changePct = ((lastVal - firstVal) / Math.abs(firstVal) * 100);
+                }
+
+                html += '<div class="ct-chart-wrap">';
+                html += '<div class="ct-chart-title">';
+                html += '<span>' + escapeHtml(m.label) + '</span>';
+                html += '<span class="ct-val">' + fmtMetricValue(lastVal, m.unit) + '</span>';
+                html += '</div>';
+                html += buildSparkline(points, m.key, m.color);
+                html += '</div>';
+            });
+
+            // 底部指标汇总
+            html += '<div class="ct-metrics">';
+            const metricItems = [
+                { l: '数据点', v: points.length, u: '个' },
+                {
+                    l: '时间跨度', v: summary.first_date && summary.last_date
+                        ? (summary.first_date.slice(5) + ' ~ ' + summary.last_date.slice(5)) : '—', u: ''
+                },
+                {
+                    l: 'Top10 变化', v: summary.top10_change_pct !== null && summary.top10_change_pct !== undefined
+                        ? ((summary.top10_change_pct >= 0 ? '+' : '') + summary.top10_change_pct.toFixed(2) + '%') : '—',
+                    cls: (summary.top10_change_pct || 0) > 0 ? 'up' : ((summary.top10_change_pct || 0) < 0 ? 'down' : '')
+                },
+                {
+                    l: '持有者变化', v: summary.holders_change_pct !== null && summary.holders_change_pct !== undefined
+                        ? ((summary.holders_change_pct >= 0 ? '+' : '') + summary.holders_change_pct.toFixed(2) + '%') : '—',
+                    cls: (summary.holders_change_pct || 0) > 0 ? 'up' : ((summary.holders_change_pct || 0) < 0 ? 'down' : '')
+                },
+            ];
+            metricItems.forEach(function (m) {
+                const chgCls = m.cls ? 'ctm-change ' + m.cls : '';
+                html += '<div class="ct-metric"><div class="ctm-label">' + escapeHtml(m.l) + '</div>';
+                html += '<div class="ctm-value">' + escapeHtml(String(m.v)) + '</div></div>';
+            });
+            html += '</div>';
+
+            container.innerHTML = html;
+
+            // 更新一页结论的链上数据（汇总所有链的最新值）
+            const allSummaries = data.trend_summary || {};
+            const chainKeys = Object.keys(allSummaries);
+            let latestTop10 = null, holderChange = null;
+            if (chainKeys.length > 0) {
+                const firstSummary = allSummaries[chainKeys[0]] || {};
+                latestTop10 = firstSummary.latest_top10_concentration !== undefined
+                    ? firstSummary.latest_top10_concentration
+                    : null;
+                holderChange = firstSummary.holders_change_pct;
+            }
+            // 从 structuredMetrics 里已有 top10，这里补充 holder 变化
+            if (!onepageData.onchain) onepageData.onchain = {};
+            if (holderChange !== null && holderChange !== undefined)
+                onepageData.onchain.holder_change_7d_pct = holderChange;
+            if (latestTop10 !== null && onepageData.onchain.top10_concentration_pct === undefined)
+                onepageData.onchain.top10_concentration_pct = latestTop10;
+            updateOnepage();
+        }
+
+        function fmtMetricValue (v, unit) {
+            if (v === null || v === undefined) return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            if (unit === '%') return n.toFixed(2) + '%';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toLocaleString();
+        }
+
+        function buildSparkline (points, valueKey, color) {
+            const w = 400, h = 48, pad = 2;
+            const values = points.map(function (p) { return p[valueKey]; });
+            const valid = values.filter(function (v) { return v !== null && v !== undefined; });
+            if (valid.length < 2) return '';
+
+            const min = Math.min.apply(null, valid);
+            const max = Math.max.apply(null, valid);
+            const range = max - min || 1;
+
+            // 生成路径点（跳过 null 值，断开线）
+            let pathD = '';
+            let started = false;
+            const stepX = (w - pad * 2) / (points.length - 1 || 1);
+            points.forEach(function (p, i) {
+                const v = p[valueKey];
+                if (v === null || v === undefined) {
+                    started = false;
+                    return;
+                }
+                const x = pad + i * stepX;
+                const y = pad + (h - pad * 2) * (1 - (v - min) / range);
+                if (!started) {
+                    pathD += 'M' + x.toFixed(1) + ',' + y.toFixed(1);
+                    started = true;
+                } else {
+                    pathD += ' L' + x.toFixed(1) + ',' + y.toFixed(1);
+                }
+            });
+
+            // 面积填充（从最后一点到底部）
+            const lastIdx = points.length - 1;
+            const firstValidIdx = values.findIndex(function (v) { return v !== null && v !== undefined; });
+            let areaD = '';
+            if (firstValidIdx >= 0) {
+                const fx = pad + firstValidIdx * stepX;
+                const fy = pad + (h - pad * 2) * (1 - (valid[0] - min) / range);
+                const lx = pad + lastIdx * stepX;
+                const ly = pad + (h - pad * 2) * (1 - (valid[valid.length - 1] - min) / range);
+                areaD = 'M' + fx.toFixed(1) + ',' + (h - pad).toFixed(1) +
+                    ' L' + fx.toFixed(1) + ',' + fy.toFixed(1) +
+                    ' ' + pathD.replace(/^M/, 'L') +
+                    ' L' + lx.toFixed(1) + ',' + (h - pad).toFixed(1) + ' Z';
+            }
+
+            return '<svg class="ct-spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+                '<path d="' + areaD + '" fill="' + color + '" fill-opacity="0.1" />' +
+                '<path d="' + pathD + '" fill="none" stroke="' + color + '" stroke-width="1.5" />' +
+                '</svg>';
+        }
+
+        // ── 衍生品资金面 ──
+        async function loadDerivatives (force) {
+            const box = document.getElementById('r-derivatives');
+            const container = document.getElementById('dv-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="dv-loading">加载中（首次可能需要 5-10 秒，并行请求 5 家交易所）...</div>';
+
+            try {
+                const url = '/api/research/' + ASSET_ID + '/derivatives' + (force ? '?refresh=1' : '');
+                const r = await fetch(url);
+                const data = await safeJson(r, '/api/research/derivatives');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="dv-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                if (!data.available_exchanges || data.available_exchanges.length === 0) {
+                    container.innerHTML = '<div class="dv-empty">未找到该代币的永续合约数据' +
+                        '<small>仅主流币有衍生品数据，Meme 小币可能无合约</small></div>';
+                    // 更新一页结论（无合约数据）
+                    onepageData.derivatives = { available_exchanges: [] };
+                    updateOnepage();
+                    // 仍然加载 CEX 数据（链上数据和衍生品无关）
+                    loadCexNetflow();
+                    return;
+                }
+
+                renderDerivatives(data);
+                // 并行加载 CEX 净流数据
+                loadCexNetflow();
+            } catch (e) {
+                container.innerHTML = '<div class="dv-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderDerivatives (data) {
+            const container = document.getElementById('dv-container');
+
+            // 6 个核心指标
+            const metrics = [
+                {
+                    label: '当前资金费率', icon: '💰',
+                    value: data.funding_rate_pct !== null && data.funding_rate_pct !== undefined
+                        ? (data.funding_rate_pct >= 0 ? '+' : '') + data.funding_rate_pct.toFixed(4) + '%'
+                        : '—',
+                    cls: data.funding_rate_pct > 0 ? 'positive' : (data.funding_rate_pct < 0 ? 'negative' : ''),
+                    sub: data.next_funding_time ? '下次结算: ' + new Date(data.next_funding_time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''
+                },
+                {
+                    label: '7 天平均费率', icon: '📊',
+                    value: data.funding_rate_7d_avg !== null && data.funding_rate_7d_avg !== undefined
+                        ? (data.funding_rate_7d_avg >= 0 ? '+' : '') + (data.funding_rate_7d_avg * 100).toFixed(4) + '%'
+                        : '—',
+                    cls: data.funding_rate_7d_avg > 0 ? 'positive' : (data.funding_rate_7d_avg < 0 ? 'negative' : ''),
+                    sub: '每 8 小时结算一次'
+                },
+                {
+                    label: '全市场 OI 价值', icon: '📦',
+                    value: data.total_oi_usd ? formatUsdBig(data.total_oi_usd) : '—',
+                    cls: '',
+                    sub: data.oi_change_24h_pct !== null && data.oi_change_24h_pct !== undefined
+                        ? '24h: ' + (data.oi_change_24h_pct >= 0 ? '+' : '') + data.oi_change_24h_pct.toFixed(2) + '%'
+                        : ''
+                },
+                {
+                    label: 'OI 24h 变化', icon: '📈',
+                    value: data.oi_change_24h_pct !== null && data.oi_change_24h_pct !== undefined
+                        ? (data.oi_change_24h_pct >= 0 ? '+' : '') + data.oi_change_24h_pct.toFixed(2) + '%'
+                        : '—',
+                    cls: data.oi_change_24h_pct > 0 ? 'positive' : (data.oi_change_24h_pct < 0 ? 'negative' : ''),
+                    sub: 'OI 增=多头进场'
+                },
+                {
+                    label: 'CVD 净流入', icon: '💹',
+                    value: data.cvd_24h_usd !== null && data.cvd_24h_usd !== undefined
+                        ? (data.cvd_24h_usd >= 0 ? '+' : '') + formatUsdBig(data.cvd_24h_usd)
+                        : '—',
+                    cls: data.cvd_24h_usd > 0 ? 'positive' : (data.cvd_24h_usd < 0 ? 'negative' : ''),
+                    sub: '主动买卖净额（近期）'
+                },
+                {
+                    label: 'CVD 占比', icon: '⚖️',
+                    value: data.cvd_ratio_24h !== null && data.cvd_ratio_24h !== undefined
+                        ? (data.cvd_ratio_24h >= 0 ? '+' : '') + (data.cvd_ratio_24h * 100).toFixed(2) + '%'
+                        : '—',
+                    cls: data.cvd_ratio_24h > 0 ? 'positive' : (data.cvd_ratio_24h < 0 ? 'negative' : ''),
+                    sub: 'CVD / 总成交额'
+                },
+            ];
+
+            let html = '<div class="dv-metrics">';
+            metrics.forEach(function (m) {
+                html += '<div class="dv-metric"><div class="dvm-label">' + m.icon + ' ' + escapeHtml(m.label) + '</div>';
+                html += '<div class="dvm-value ' + m.cls + '">' + escapeHtml(m.value) + '</div>';
+                if (m.sub) html += '<div class="dvm-sub">' + escapeHtml(m.sub) + '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+
+            // 交易所明细
+            const allEx = ['binance', 'okx', 'bybit', 'bitget', 'gate'];
+            const exLabels = { binance: 'Binance', okx: 'OKX', bybit: 'Bybit', bitget: 'Bitget', gate: 'Gate.io' };
+            html += '<div class="dv-exchanges"><div class="dve-title">覆盖交易所</div><div class="dv-ex-list">';
+            allEx.forEach(function (ex) {
+                const active = (data.available_exchanges || []).indexOf(ex) >= 0;
+                html += '<span class="dv-ex-tag ' + (active ? 'active' : '') + '">' + exLabels[ex] + '</span>';
+            });
+            html += '</div></div>';
+
+            // 缓存提示
+            if (data.cached && data.fetched_at) {
+                html += '<div style="font-size:10px;color:#4b5563;text-align:right;margin-top:8px;">' +
+                    '缓存于 ' + new Date(data.fetched_at).toLocaleString('zh-CN') + '（15分钟有效）</div>';
+            }
+
+            container.innerHTML = html;
+            // 更新一页结论
+            onepageData.derivatives = {
+                funding_rate_pct: data.funding_rate_pct,
+                oi_change_24h_pct: data.oi_change_24h_pct,
+                cvd_ratio_24h: data.cvd_ratio_24h,
+                total_oi_usd: data.total_oi_usd,
+                available_exchanges: data.available_exchanges,
+            };
+            updateOnepage();
+        }
+
+        function formatUsdBig (v) {
+            if (v === null || v === undefined) return '—';
+            const n = Number(v);
+            if (isNaN(n)) return '—';
+            const abs = Math.abs(n);
+            const sign = n < 0 ? '-' : '';
+            if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+            if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'K';
+            return sign + '$' + abs.toFixed(2);
+        }
+
+        // ── CEX 净流入 ──
+        async function loadCexNetflow () {
+            // 确保衍生品卡片已显示
+            const box = document.getElementById('r-derivatives');
+            if (box.style.display === 'none') box.style.display = 'block';
+
+            // 创建或获取 CEX 容器
+            let cexBox = document.getElementById('dv-cex-container');
+            if (!cexBox) {
+                cexBox = document.createElement('div');
+                cexBox.id = 'dv-cex-container';
+                cexBox.className = 'dv-cex';
+                const dvContainer = document.getElementById('dv-container');
+                if (dvContainer) {
+                    dvContainer.appendChild(cexBox);
+                } else {
+                    return;
+                }
+            }
+            cexBox.innerHTML = '<div style="font-size:11px;color:#6b7280;text-align:center;padding:8px;">链上资金流加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/cex-netflow?hours=24');
+                const data = await safeJson(r, '/api/research/cex-netflow');
+                if (!data.ok) {
+                    cexBox.innerHTML = '<div class="dvc-empty">链上资金流加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+
+                if (!data.has_data) {
+                    cexBox.innerHTML = '<div class="dvc-title">🔗 链上 CEX 资金流</div>' +
+                        '<div class="dvc-empty">' + escapeHtml(data.message || '暂无数据') +
+                        '<small>主流币链上监控采集中，Meme 小币暂不纳入</small></div>';
+                    return;
+                }
+
+                renderCexNetflow(data, cexBox);
+            } catch (e) {
+                cexBox.innerHTML = '<div class="dvc-empty">链上资金流加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderCexNetflow (data, container) {
+            const n24 = data.netflow_24h_usd;
+            const n7d = data.netflow_7d_usd;
+            const cls24 = n24 > 0 ? 'positive' : (n24 < 0 ? 'negative' : '');
+            const cls7d = n7d > 0 ? 'positive' : (n7d < 0 ? 'negative' : '');
+
+            let html = '<div class="dvc-title">🔗 链上 CEX 资金流</div>';
+            html += '<div class="dvc-metrics">';
+            html += '<div class="dvc-metric"><div class="dvcm-label">24h 净流入</div>';
+            html += '<div class="dvcm-value ' + cls24 + '">' + (n24 >= 0 ? '+' : '') + formatUsdBig(n24) + '</div></div>';
+            html += '<div class="dvc-metric"><div class="dvcm-label">7d 净流入</div>';
+            html += '<div class="dvcm-value ' + cls7d + '">' + (n7d >= 0 ? '+' : '') + formatUsdBig(n7d) + '</div></div>';
+            html += '<div class="dvc-metric"><div class="dvcm-label">24h 转入/转出</div>';
+            html += '<div class="dvcm-value" style="font-size:11px;font-weight:500;">' +
+                formatUsdBig(data.inflow_24h_usd) + ' / ' + formatUsdBig(data.outflow_24h_usd) + '</div></div>';
+            html += '</div>';
+
+            // 按交易所分布
+            if (data.by_exchange && data.by_exchange.length > 0) {
+                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">按交易所分布</div>';
+                data.by_exchange.slice(0, 5).forEach(function (ex) {
+                    const net = ex.netflow_usd;
+                    const cls = net > 0 ? 'positive' : (net < 0 ? 'negative' : '');
+                    const sign = net >= 0 ? '+' : '';
+                    html += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:2px 0;">';
+                    html += '<span style="color:#9ca3af;">' + escapeHtml(ex.exchange || '未知') + '</span>';
+                    html += '<span class="' + cls + '">' + sign + formatUsdBig(net) + '</span>';
+                    html += '</div>';
+                });
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 鲸鱼/聪明钱行为流 ──
+        async function loadWhaleFlow () {
+            const box = document.getElementById('r-whale-flow');
+            const container = document.getElementById('wf-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="wf-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/whale-flow');
+                const data = await safeJson(r, '/api/research/whale-flow');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="wf-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderWhaleFlow(data);
+            } catch (e) {
+                container.innerHTML = '<div class="wf-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderWhaleFlow (data) {
+            const container = document.getElementById('wf-container');
+            const holding = data.holding || {};
+            const transfers = data.large_transfers || {};
+            const signal = data.signal || {};
+
+            if (!data.has_holding_data && !data.has_transfer_data) {
+                container.innerHTML = '<div class="wf-empty">暂无链上鲸鱼数据' +
+                    '<small>需要持仓快照或大额转账日志，主流币监控采集中</small></div>';
+                return;
+            }
+
+            let html = '';
+
+            // 信号条
+            const stance = signal.stance || 'unknown';
+            const score = signal.score;
+            const confidence = signal.confidence || 0;
+            html += '<div class="wf-signal ' + stance + '">';
+            html += '<div class="wfs-label">' + escapeHtml(signal.stance_label || stance) + '</div>';
+            html += '<div class="wfs-score">行为分 <strong>' +
+                (score === undefined || score === null ? '—' : (score >= 0 ? '+' : '') + score) +
+                '</strong><br>置信度 ' + confidence + '%</div>';
+            html += '</div>';
+
+            // 因子明细
+            const factors = signal.factors || [];
+            if (factors.length > 0) {
+                html += '<div class="wf-factors">';
+                factors.forEach(function (f) {
+                    const w = f.weight || 0;
+                    const s = f.score || 0;
+                    const ratio = w > 0 ? Math.min(1, Math.abs(s) / w) : 0;
+                    const pct = ratio * 50;
+                    const fillStyle = f.bullish
+                        ? ('left:50%;width:' + pct + '%;')
+                        : ('left:' + (50 - pct) + '%;width:' + pct + '%;');
+                    html += '<div class="wf-factor">';
+                    html += '<div class="wff-name">' + escapeHtml(f.name) + '</div>';
+                    html += '<div class="wff-bar"><div class="wff-fill ' + (f.bullish ? 'bullish' : 'bearish') + '" style="' + fillStyle + '"></div></div>';
+                    html += '<div class="wff-value ' + (f.bullish ? 'bullish' : 'bearish') + '">' + escapeHtml(f.value) + '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 持仓指标
+            if (data.has_holding_data) {
+                html += '<div class="wf-metrics">';
+                html += '<div class="wf-metric"><div class="wfm-label">鲸鱼 7d 持仓</div><div class="wfm-value ' + cls(holding.whale_change_7d_pct) + '">' + pct(holding.whale_change_7d_pct) + '</div></div>';
+                html += '<div class="wf-metric"><div class="wfm-label">鲸鱼 30d 持仓</div><div class="wfm-value ' + cls(holding.whale_change_30d_pct) + '">' + pct(holding.whale_change_30d_pct) + '</div></div>';
+                html += '<div class="wf-metric"><div class="wfm-label">Top10 集中度</div><div class="wfm-value">' + (holding.top10_concentration != null ? holding.top10_concentration + '%' : '—') + '</div></div>';
+                html += '</div>';
+            }
+
+            // 大额转账分级
+            const t24 = transfers['24h'];
+            const t7 = transfers['7d'];
+            if (t24 || t7) {
+                html += '<div class="wf-tiers">';
+                html += '<div class="wf-tier"><div class="wft-label">24h >$1M</div><div class="wft-value">' + (t24 ? t24.ultra_large_count : 0) + ' 笔</div></div>';
+                html += '<div class="wf-tier"><div class="wft-label">24h $100K-$1M</div><div class="wft-value">' + (t24 ? t24.large_count : 0) + ' 笔</div></div>';
+                html += '<div class="wf-tier"><div class="wft-label">24h $10K-$100K</div><div class="wft-value">' + (t24 ? t24.medium_count : 0) + ' 笔</div></div>';
+                html += '</div>';
+
+                if (t24) {
+                    const net = t24.net_exchange_flow;
+                    html += '<div class="wf-metrics">';
+                    html += '<div class="wf-metric"><div class="wfm-label">24h 大额成交</div><div class="wfm-value">' + formatUsdBig(t24.total_large_volume) + '</div></div>';
+                    html += '<div class="wf-metric"><div class="wfm-label">24h 净流出交易所</div><div class="wfm-value ' + cls(net) + '">' + (net >= 0 ? '+' : '') + formatUsdBig(net) + '</div></div>';
+                    html += '<div class="wf-metric"><div class="wfm-label">7d 净流出交易所</div><div class="wfm-value ' + (t7 ? cls(t7.net_exchange_flow) : '') + '">' + (t7 ? (t7.net_exchange_flow >= 0 ? '+' : '') + formatUsdBig(t7.net_exchange_flow) : '—') + '</div></div>';
+                    html += '</div>';
+                }
+            }
+
+            // Top 大额转账明细
+            const top = transfers.top_transfers || [];
+            if (top.length > 0) {
+                const dirMap = {
+                    from_exchange: '从交易所转出',
+                    to_exchange: '转入交易所',
+                    exchange_internal: '交易所内划转',
+                    whale_to_whale: '鲸鱼互转',
+                    whale_sell: '鲸鱼卖出',
+                    whale_buy: '鲸鱼买入',
+                };
+                html += '<div style="font-size:10px;color:#6b7280;margin:6px 0 4px;">近 24h 大额转账（Top ' + Math.min(top.length, 5) + '）</div>';
+                top.slice(0, 5).forEach(function (t) {
+                    const dir = dirMap[t.direction] || '未知方向';
+                    html += '<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px;padding:2px 0;">';
+                    html += '<span style="color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                        escapeHtml(shortAddr(t.from)) + ' → ' + escapeHtml(shortAddr(t.to)) + '</span>';
+                    html += '<span style="white-space:nowrap;">' + escapeHtml(dir) + ' · <span style="color:#e6e8eb">' + formatUsdBig(t.value_usd) + '</span></span>';
+                    html += '</div>';
+                });
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 代币经济学 ──
+        async function loadTokenomics () {
+            const box = document.getElementById('r-tokenomics');
+            const container = document.getElementById('tm-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="tm-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/tokenomics');
+                const data = await safeJson(r, '/api/research/tokenomics');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="tm-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderTokenomics(data.data || {});
+            } catch (e) {
+                container.innerHTML = '<div class="tm-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderTokenomics (d) {
+            const container = document.getElementById('tm-container');
+            const hasAny = d.total_supply != null || d.circulating_supply != null || d.max_supply != null ||
+                (d.allocation && Object.keys(d.allocation).length > 0);
+
+            if (!hasAny) {
+                container.innerHTML = '<div class="tm-empty">暂无代币经济学数据</div>';
+                return;
+            }
+
+            let html = '';
+
+            // 核心 supply 指标
+            html += '<div class="tm-grid">';
+            html += '<div class="tm-cell"><div class="tm-label">总供应量</div><div class="tm-value">' + fmtNumberBig(d.total_supply) + '</div></div>';
+            html += '<div class="tm-cell"><div class="tm-label">流通供应量</div><div class="tm-value">' + fmtNumberBig(d.circulating_supply) + '</div></div>';
+            html += '<div class="tm-cell"><div class="tm-label">最大供应量</div><div class="tm-value">' + fmtNumberBig(d.max_supply) + '</div></div>';
+
+            let circRatio = null;
+            if (d.circulating_supply != null && d.total_supply != null && Number(d.total_supply) > 0) {
+                circRatio = Number(d.circulating_supply) / Number(d.total_supply) * 100;
+            }
+            html += '<div class="tm-cell"><div class="tm-label">流通率</div><div class="tm-value">' + fmtPct(circRatio) + '</div></div>';
+            html += '</div>';
+
+            // 代币分配
+            const alloc = d.allocation || {};
+            const allocKeys = Object.keys(alloc);
+            if (allocKeys.length > 0) {
+                html += '<div class="tm-section-title">代币分配</div><div class="tm-bars">';
+                allocKeys.slice(0, 8).forEach(function (k) {
+                    const v = alloc[k];
+                    let pctVal = null;
+                    if (typeof v === 'number') pctVal = v;
+                    else if (v && typeof v === 'object' && v.percentage != null) pctVal = v.percentage;
+                    else if (v && typeof v === 'object' && v.value != null) pctVal = v.value;
+                    if (pctVal == null || isNaN(Number(pctVal))) return;
+                    const n = Number(pctVal);
+                    const label = k;
+                    html += '<div class="tm-bar">' +
+                        '<div class="tm-bar-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</div>' +
+                        '<div class="tm-bar-track"><div class="tm-bar-fill" style="width:' + Math.min(100, Math.max(0, n)) + '%"></div></div>' +
+                        '<div class="tm-bar-pct">' + n.toFixed(1) + '%</div>' +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+
+            // 关键信息文本
+            const infoParts = [];
+            if (d.inflation_info) infoParts.push('通胀: ' + String(d.inflation_info).slice(0, 120));
+            if (d.emission_schedule) infoParts.push('排放: ' + String(d.emission_schedule).slice(0, 120));
+            if (d.burn_info) infoParts.push('销毁: ' + String(d.burn_info).slice(0, 120));
+            if (d.lp_locked != null) infoParts.push('流动性锁定: ' + (d.lp_locked ? '是' : '否'));
+            if (d.contract_renounced != null) infoParts.push('合约权限放弃: ' + (d.contract_renounced ? '是' : '否'));
+            if (d.tax_info) infoParts.push('税收: ' + String(d.tax_info).slice(0, 120));
+            if (infoParts.length > 0) {
+                html += '<div class="tm-section-title">关键机制</div><div class="tm-info">' + escapeHtml(infoParts.join(' · ')) + '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 行情表现 ──
+        async function loadMarketHistory () {
+            const box = document.getElementById('r-market');
+            const container = document.getElementById('m-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="m-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/market-history?days=30');
+                const data = await safeJson(r, '/api/research/market-history');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="m-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderMarketHistory(data);
+            } catch (e) {
+                container.innerHTML = '<div class="m-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderMarketHistory (data) {
+            const container = document.getElementById('m-container');
+            const series = data.series || [];
+            const latest = data.latest || (series.length ? series[series.length - 1] : null);
+
+            if (!latest) {
+                container.innerHTML = '<div class="m-empty">暂无行情数据</div>';
+                return;
+            }
+
+            let html = '';
+            const price = latest.price_usd;
+            const ch24 = latest.change_24h;
+            const chCls = ch24 > 0 ? 'positive' : (ch24 < 0 ? 'negative' : '');
+            const chSign = ch24 >= 0 ? '+' : '';
+            html += '<div class="m-price">' +
+                '<div class="mp-value">' + fmtUsdPrice(price) + '</div>' +
+                '<div class="mp-change ' + chCls + '">' + chSign + fmtPct(ch24) + '</div>' +
+                '</div>';
+
+            html += '<div class="m-grid">';
+            html += '<div class="m-cell"><div class="m-label">流通市值</div><div class="m-value">' + fmtUsdBig(latest.market_cap) + '</div></div>';
+            html += '<div class="m-cell"><div class="m-label">FDV</div><div class="m-value">' + fmtUsdBig(latest.fdv) + '</div></div>';
+            html += '<div class="m-cell"><div class="m-label">24h 成交量</div><div class="m-value">' + fmtUsdBig(latest.volume_24h) + '</div></div>';
+            html += '</div>';
+
+            // 区间表现（基于首尾数据点近似）
+            if (series.length >= 2) {
+                const first = series[0];
+                const intervalDays = Math.max(1, Math.round((Date.now() - new Date(first.date).getTime()) / 86400000));
+                const intervalPct = first.price_usd > 0 ? (latest.price_usd - first.price_usd) / first.price_usd * 100 : null;
+                html += '<div class="m-grid">';
+                html += '<div class="m-cell"><div class="m-label">' + intervalDays + 'd 涨跌</div><div class="m-value ' + cls(intervalPct) + '">' + (intervalPct != null ? ((intervalPct >= 0 ? '+' : '') + fmtPct(intervalPct)) : NA_HTML) + '</div></div>';
+                html += '<div class="m-cell"><div class="m-label">数据点数</div><div class="m-value">' + fmtNumber(series.length) + '</div></div>';
+                html += '<div class="m-cell"><div class="m-label">最新日期</div><div class="m-value">' + escapeHtml(latest.date) + '</div></div>';
+                html += '</div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // ── 异动信号 ──
+        async function loadSignals () {
+            const box = document.getElementById('r-signals');
+            const container = document.getElementById('sg-container');
+            box.style.display = 'block';
+            container.innerHTML = '<div class="sg-empty">加载中...</div>';
+
+            try {
+                const r = await fetch('/api/research/' + ASSET_ID + '/signals');
+                const data = await safeJson(r, '/api/research/signals');
+                if (!data.ok) {
+                    container.innerHTML = '<div class="sg-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
+                    return;
+                }
+                renderSignals(data);
+            } catch (e) {
+                container.innerHTML = '<div class="sg-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        function renderSignals (data) {
+            const container = document.getElementById('sg-container');
+            const signals = data.signals || [];
+
+            if (signals.length === 0) {
+                container.innerHTML = '<div class="sg-empty">当前未检测到显著异动信号</div>';
+                return;
+            }
+
+            const typeMap = {
+                price_surge: '价格暴涨',
+                price_dump: '价格暴跌',
+                volume_surge: '成交量放大',
+                oi_surge: 'OI 激增',
+                oi_dump: 'OI 骤降',
+                funding_extreme: '资金费率极端',
+                unlock_soon: '解锁临近',
+                holder_concentration_change: '持仓集中度变化'
+            };
+            const iconMap = {
+                price_surge: '🚀', price_dump: '🔻', volume_surge: '📊',
+                oi_surge: '💹', oi_dump: '📉', funding_extreme: '⚠️',
+                unlock_soon: '🔓', holder_concentration_change: '👁️'
+            };
+
+            let html = '';
+            signals.forEach(function (s) {
+                const sev = s.severity || 'info';
+                const title = typeMap[s.type] || s.type;
+                const icon = iconMap[s.type] || '🔔';
+                const value = s.value != null ? fmtPct(s.value) : '';
+                html += '<div class="sg-signal ' + escapeHtml(sev) + '">';
+                html += '<div class="sg-icon">' + icon + '</div>';
+                html += '<div class="sg-body">';
+                html += '<div class="sg-title">' + escapeHtml(title) + (value ? ' · ' + value : '') + '</div>';
+                html += '<div class="sg-desc">' + escapeHtml(s.description || '') + '</div>';
+                html += '<div class="sg-meta">来源: ' + escapeHtml(s.source || '未知') + ' · 阈值 ' + (s.threshold != null ? fmtPct(s.threshold) : '—') + '</div>';
+                html += '</div></div>';
+            });
+
+            container.innerHTML = html;
+        }
+
+        function cls (v) {
+            if (v === null || v === undefined) return '';
+            return v > 0 ? 'positive' : (v < 0 ? 'negative' : '');
+        }
+        function pct (v) {
+            if (v === null || v === undefined) return '—';
+            return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+        }
+        function shortAddr (a) {
+            if (!a) return '';
+            return a.length > 12 ? a.slice(0, 6) + '...' + a.slice(-4) : a;
+        }
+
+        function renderSidebar (d) {
+            let side = '';
+            const missing = d.missing || [];
+            if (d.sector_label) {
+                side += '<div style="font-size:12px;color:#fbbf24;margin-bottom:12px">代币分类：' + escapeHtml(d.sector_label) + '</div>';
+            }
+            side += '<h3>投研资料完整性</h3>';
+            if (missing.length === 0) {
+                side += '<div class="no-data">无缺失项</div>';
+            } else {
+                missing.forEach(function (m) {
+                    const dot = m.present ? 'ok' : 'miss';
+                    const links = m.links || [];
+                    const count = (m.count !== undefined && m.count !== null) ? m.count : links.length;
+                    const status = m.present ? '已收集(' + count + '份)' : '缺失';
+                    const color = m.present ? '#10b981' : '#dc2626';
+                    const desc = m.description ? ' title="' + attrEscape(m.description) + '"' : '';
+                    side += '<div class="r-group">' +
+                        '<div class="r-group-head"' + desc + ' onclick="toggleGroup(this)">' +
+                        '<span class="dot ' + dot + '"></span>' +
+                        '<span>' + escapeHtml(m.label) + '</span>' +
+                        '<span class="cnt">' + count + '</span>' +
+                        '<span style="margin-left:auto;color:' + color + '">' + status + '</span>' +
+                        '<span class="chev">▶</span>' +
+                        '</div>' +
+                        '<div class="r-group-body">';
+                    if (links.length === 0) {
+                        side += '<div class="no-data">暂无链接</div>';
+                    } else {
+                        links.forEach(function (l) {
+                            side += renderSourceItem(l);
+                        });
+                    }
+                    side += '</div></div>';
+                });
+            }
+
+            document.getElementById('r-sidebar').innerHTML = side;
+        }
+
+        function renderSourceItem (s) {
+            const title = escapeHtml(s.title || s.url || '');
+            let html = '<div class="r-src"><div class="r-src-head">';
+            if (s.url) {
+                html += '<a href="' + attrEscape(s.url) + '" target="_blank" rel="noopener">' + title + '</a>';
+            } else {
+                html += '<span>' + title + '</span>';
+            }
+            if (s.published_at) {
+                html += '<span class="r-src-date" title="发布/更新日期">📅 ' + escapeHtml(s.published_at) + '</span>';
+            }
+            if (s.url) {
+                html += '<button class="r-content-btn" data-url="' + attrEscape(s.url) + '" onclick="toggleSourceContent(this)">内容</button>';
+            }
+            html += '</div><div class="r-src-content" style="display:none"></div></div>';
+            return html;
+        }
+
+        function toggleGroup (head) {
+            head.parentElement.classList.toggle('open');
+        }
+
+        function toggleSourceContent (btn) {
+            const wrap = btn.closest('.r-src');
+            const box = wrap.querySelector('.r-src-content');
+            if (box.style.display === 'none') {
+                box.style.display = 'block';
+                if (!box.getAttribute('data-loaded')) {
+                    box.innerHTML = '<div class="no-data">加载中...</div>';
+                    fetchSourceContent(btn.getAttribute('data-url'), box);
+                }
+            } else {
+                box.style.display = 'none';
+            }
+        }
+
+        async function fetchSourceContent (url, box) {
+            try {
+                const res = await fetch('/api/research/source/content?url=' + encodeURIComponent(url));
+                const data = await safeJson(res, '/api/research/source/content');
+                if (!data.ok) throw new Error(data.error || '抓取失败');
+                const content = (data.content || '').trim();
+                box.setAttribute('data-loaded', '1');
+                box.innerHTML = content
+                    ? escapeHtml(content)
+                    : '<div class="no-data">未能抓取到正文（可能是图片/JS 渲染页面）</div>';
+            } catch (e) {
+                box.setAttribute('data-loaded', '1');
+                box.innerHTML = '<div class="no-data">抓取失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        // ── 对话 ──
+        function renderMessages (messages) {
+            const box = document.getElementById('r-messages');
+            if (!messages || messages.length === 0) {
+                box.innerHTML = '<div class="no-data">还没有对话。输入问题开始投研。</div>';
+                return;
+            }
+            let html = '';
+            messages.forEach(function (m) { html += renderMessage(m); });
+            box.innerHTML = html;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function renderMessage (m) {
+            const roleLabel = m.role === 'user' ? '你' : 'AI 助手';
+            const roleCls = m.role === 'user' ? 'user' : 'assistant';
+            let html = '<div class="r-msg ' + roleCls + '">';
+            html += '<div class="r-msg-role">' + roleLabel + '</div>';
+            html += '<div class="r-msg-content">' + escapeHtml(m.content || '') + '</div>';
+            const cites = m.citations || [];
+            if (cites.length) {
+                html += '<div class="r-citations"><strong>引用来源：</strong>';
+                cites.forEach(function (c) {
+                    // 兼容两种格式：number（旧）和 {index,title,url}（新）
+                    const idx = typeof c === 'object' && c ? c.index : c;
+                    const title = typeof c === 'object' && c ? (c.title || '') : '';
+                    const url = typeof c === 'object' && c ? (c.url || '') : '';
+                    const quote = typeof c === 'object' && c ? (c.quote || '') : '';
+                    html += '<span class="r-cite">[' + (idx || '?') + '] ' + escapeHtml(title);
+                    if (url) {
+                        html += ' <a href="' + attrEscape(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a>';
+                    }
+                    if (quote) {
+                        html += '<br><span style="color:#6b7280">"' + escapeHtml(quote) + '"</span>';
+                    }
+                    html += '</span>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            return html;
+        }
+
+        function appendMessage (m) {
+            const box = document.getElementById('r-messages');
+            if (box.querySelector('.no-data')) box.innerHTML = '';
+            box.insertAdjacentHTML('beforeend', renderMessage(m));
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function askResearchQuestion () {
+            if (researchAsking) return;
+            if (!researchNotebookId) { alert('笔记本尚未打开'); return; }
+            const ta = document.getElementById('r-question');
+            const question = ta.value.trim();
+            if (!question) return;
+
+            researchAsking = true;
+            const btn = document.getElementById('r-ask-btn');
+            btn.disabled = true;
+            btn.textContent = '思考中...';
+            ta.value = '';
+
+            appendMessage({ role: 'user', content: question, citations: [] });
+
+            try {
+                const startRes = await fetch('/api/research/notebook/' + researchNotebookId + '/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: question }),
+                });
+                const startData = await safeJson(startRes, '/api/research/notebook/' + researchNotebookId + '/ask');
+                if (!startData.ok) throw new Error(startData.error || '启动失败');
+
+                await waitForTask(startData.task_id, 600000);
+
+                const resultRes = await fetch('/api/tasks/' + startData.task_id + '/result');
+                const resultData = await safeJson(resultRes, '/api/tasks/' + startData.task_id + '/result');
+                if (resultData.pending) throw new Error('回答超时，请稍后重试');
+
+                const result = resultData.result;
+                if (resultData.ok && result && result.ok) {
+                    appendMessage(result.data.message);
+                } else {
+                    throw new Error((result && result.error) || resultData.error || '未知错误');
+                }
+            } catch (e) {
+                appendMessage({ role: 'assistant', content: '回答失败: ' + e.message, citations: [] });
+            }
+
+            researchAsking = false;
+            btn.disabled = false;
+            btn.textContent = '发送';
+            ta.focus();
+        }
+
+        loadNotebook();
+    </script>
+</body>
+
+</html>

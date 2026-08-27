@@ -8,7 +8,7 @@ import os
 
 port = int(os.environ.get("PORT", "5000"))
 bind = f"0.0.0.0:{port}"
-workers = int(os.environ.get("GUNICORN_WORKERS", "2"))
+workers = int(os.environ.get("GUNICORN_WORKERS", "1"))
 timeout = 120
 accesslog = "-"
 errorlog = "-"

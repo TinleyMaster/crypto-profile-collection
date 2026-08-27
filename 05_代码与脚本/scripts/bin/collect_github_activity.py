@@ -45,9 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]:
-    """从 doc_source_entry 提取去重的 owner/repo 列表。
+    """从 doc_source_entry 提取去重的 owner/repo 列表，按市值排序优先主项目仓库。
 
-    Returns list of dicts with keys: owner_login, repo_name, sample_url, entry_count
+    Returns list of dicts with keys: owner_login, repo_name, sample_url, entry_count, market_cap_rank
     """
     # 外部用 NOT EXISTS 过滤已采集的仓库
     not_exists_clause = ""
@@ -66,30 +66,45 @@ def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]
             repo.owner_login,
             repo.repo_name,
             repo.sample_url,
-            repo.entry_count
+            repo.entry_count,
+            repo.market_cap_rank
         FROM (
             SELECT
                 split_part(
-                    regexp_replace(entry_url, '^https?://github\\.com/', ''),
+                    regexp_replace(d.entry_url, '^https?://github\\.com/', ''),
                     '/', 1
                 ) AS owner_login,
                 split_part(
-                    regexp_replace(entry_url, '^https?://github\\.com/', ''),
+                    regexp_replace(d.entry_url, '^https?://github\\.com/', ''),
                     '/', 2
                 ) AS repo_name,
-                MAX(entry_url) AS sample_url,
-                COUNT(*) AS entry_count
-            FROM biz.doc_source_entry
-            WHERE entry_url LIKE '%%github.com%%'
-              AND entry_url NOT LIKE '%%gist.github.com%%'
+                MAX(d.entry_url) AS sample_url,
+                COUNT(*) AS entry_count,
+                MIN(a.market_cap_rank) AS market_cap_rank
+            FROM biz.doc_source_entry d
+            JOIN core.asset a ON a.asset_id = d.asset_id
+            WHERE d.entry_url LIKE '%%github.com%%'
+              AND d.entry_url NOT LIKE '%%gist.github.com%%'
+              -- 过滤审计报告/文档类仓库，优先项目主仓库
+              AND d.entry_url NOT LIKE '%%/audit%%'
+              AND d.entry_url NOT LIKE '%%/audits%%'
+              AND d.entry_url NOT LIKE '%%/audit-reports%%'
+              AND d.entry_url NOT LIKE '%%/publications%%'
+              AND d.entry_url NOT LIKE '%%/docs%%'
+              AND d.entry_url NOT LIKE '%%/documentation%%'
+              AND d.entry_url NOT LIKE '%%/whitepaper%%'
+              AND d.entry_url NOT LIKE '%%/whitepapers%%'
             GROUP BY 1, 2
-            ORDER BY entry_count DESC
-            LIMIT %s
         ) repo
         WHERE repo.owner_login != ''
           AND repo.repo_name != ''
+          AND repo.market_cap_rank IS NOT NULL
         """
         + not_exists_clause
+        + """
+        ORDER BY repo.market_cap_rank ASC
+        LIMIT %s
+        """
     )
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(sql, (limit,))
@@ -168,10 +183,11 @@ def _collect_single_repo(
         contrib_list = sorted(
             (
                 {
-                    "login": c.get("author", {}).get("login", "unknown"),
+                    "login": (c.get("author") or {}).get("login", "unknown"),
                     "commits": c.get("total", 0),
                 }
                 for c in contributors
+                if isinstance(c, dict)
             ),
             key=lambda x: -x["commits"],
         )[:20]
@@ -213,6 +229,97 @@ def _collect_single_repo(
         ),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _link_repo_to_assets(
+    conn,
+    owner_login: str,
+    repo_name: str,
+    repo_id: int,
+) -> int:
+    """将仓库与所有引用它的资产建立关联。
+
+    从 doc_source_entry 中找到所有指向该仓库的链接，
+    为每个关联的 asset 写入 biz.asset_github_repo。
+    每个资产的第一个（按市值排序）仓库标记为 is_primary。
+
+    Returns: 建立的关联数
+    """
+    # 找出所有引用该仓库的资产
+    sql = """
+        SELECT DISTINCT ON (d.asset_id)
+            d.asset_id,
+            d.source_code,
+            d.entry_url,
+            a.market_cap_rank,
+            -- 按 URL 特征判断是否为主仓库（source_code 链接优先）
+            CASE
+                WHEN d.entry_type = 'source_code' THEN 1.0
+                WHEN d.entry_url LIKE '%/tree/%' THEN 0.7
+                WHEN d.entry_url LIKE '%/wiki%' THEN 0.5
+                ELSE 0.8
+            END AS confidence
+        FROM biz.doc_source_entry d
+        JOIN core.asset a ON a.asset_id = d.asset_id
+        WHERE d.entry_url LIKE 'https://github.com/' || %s || '/' || %s || '%'
+           OR d.entry_url LIKE 'https://github.com/' || %s || '/' || %s
+        ORDER BY d.asset_id, confidence DESC
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, (owner_login, repo_name, owner_login, repo_name))
+        asset_links = list(cur.fetchall())
+
+    if not asset_links:
+        return 0
+
+    upsert_sql = """
+        INSERT INTO biz.asset_github_repo (
+            asset_id, repo_id, owner_login, repo_name,
+            source_code, entry_url, is_primary, confidence
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (asset_id, repo_id) DO UPDATE SET
+            source_code = EXCLUDED.source_code,
+            entry_url = EXCLUDED.entry_url,
+            confidence = GREATEST(EXCLUDED.confidence, biz.asset_github_repo.confidence),
+            is_primary = CASE
+                WHEN EXCLUDED.is_primary = TRUE THEN TRUE
+                ELSE biz.asset_github_repo.is_primary
+            END,
+            updated_at = NOW()
+    """
+
+    n = 0
+    with conn.cursor() as cur:
+        for link in asset_links:
+            # 该资产是否已有主仓库
+            cur.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM biz.asset_github_repo
+                    WHERE asset_id = %s AND is_primary = TRUE AND repo_id <> %s
+                ) AS can_be_primary
+                """,
+                (link["asset_id"], repo_id),
+            )
+            can_be_primary = cur.fetchone()[0]
+            is_primary = can_be_primary and link["confidence"] >= 0.9
+
+            cur.execute(
+                upsert_sql,
+                (
+                    link["asset_id"],
+                    repo_id,
+                    owner_login,
+                    repo_name,
+                    link["source_code"],
+                    link["entry_url"],
+                    is_primary,
+                    link["confidence"],
+                ),
+            )
+            n += 1
+
+    return n
 
 
 def main() -> int:
@@ -259,7 +366,7 @@ def main() -> int:
                 _wait_if_needed(session, github_token)
                 data = _collect_single_repo(session, owner, name, github_token)
 
-                with conn.cursor() as cur:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                     cur.execute(
                         upsert_sql,
                         (
@@ -285,11 +392,19 @@ def main() -> int:
                             data["fetched_at"],
                         ),
                     )
+                    repo_row = cur.fetchone()
+                    repo_id = repo_row["id"] if repo_row else None
+
+                # 建立资产-仓库关联
+                link_count = 0
+                if repo_id:
+                    link_count = _link_repo_to_assets(conn, owner, name, repo_id)
 
                 print(
                     f"stars={data['stars_count']}, "
                     f"commits_52w={data['total_commits_52w']}, "
-                    f"contributors={data['contributor_count_52w']}"
+                    f"contributors={data['contributor_count_52w']}, "
+                    f"linked_assets={link_count}"
                 )
                 success_count += 1
 
@@ -309,7 +424,7 @@ def main() -> int:
                     _wait_if_needed(session, github_token, min_remaining=999)
                     try:
                         data = _collect_single_repo(session, owner, name, github_token)
-                        with conn.cursor() as cur:
+                        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                             cur.execute(
                                 upsert_sql,
                                 (
@@ -335,10 +450,19 @@ def main() -> int:
                                     data["fetched_at"],
                                 ),
                             )
+                            repo_row = cur.fetchone()
+                            repo_id = repo_row["id"] if repo_row else None
+
+                        # 建立资产-仓库关联
+                        link_count = 0
+                        if repo_id:
+                            link_count = _link_repo_to_assets(conn, owner, name, repo_id)
+
                         print(
                             f"stars={data['stars_count']}, "
                             f"commits_52w={data['total_commits_52w']}, "
-                            f"contributors={data['contributor_count_52w']}  (retry ok)"
+                            f"contributors={data['contributor_count_52w']}, "
+                            f"linked_assets={link_count}  (retry ok)"
                         )
                         success_count += 1
                     except Exception:

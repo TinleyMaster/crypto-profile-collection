@@ -27,7 +27,9 @@ import requests
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="NotebookLM 投研精选")
-    parser.add_argument("--asset-id", type=int, required=True, help="资产 ID")
+    parser.add_argument("--asset-id", type=int, default=None, help="资产 ID（单资产模式）")
+    parser.add_argument("--batch", type=int, default=None, metavar="N",
+                        help="批量模式：处理市值前 N 个尚无缓存的资产")
     parser.add_argument("--force", action="store_true", help="强制重新生成，忽略缓存")
     parser.add_argument("--top-n", type=int, default=50, help="输出 Top N 链接，默认 50")
     parser.add_argument("--dry-run", action="store_true", help="仅预览不写入")
@@ -61,10 +63,49 @@ def _get_llm_config():
 def call_deepseek_ranking(candidates: list[dict], asset_symbol: str, asset_name: str,
                           top_n: int, llm_config: dict) -> list[dict]:
     """调用 DeepSeek（思考模式）对候选链接排序。"""
+
+    def _extract_json(raw: str):
+        """从 LLM 返回内容中健壮地提取 JSON。"""
+        if not raw or not raw.strip():
+            raise ValueError("LLM 返回空内容")
+
+        text = raw.strip()
+        cleaned = text
+        if cleaned.startswith("```"):
+            nl = cleaned.find("\n")
+            if nl > 0:
+                cleaned = cleaned[nl + 1:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3].strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        fence_start = text.find("```")
+        if fence_start >= 0:
+            fence_end = text.find("\n", fence_start)
+            if fence_end > 0:
+                inner = text[fence_end + 1:]
+                close_fence = inner.rfind("```")
+                if close_fence > 0:
+                    return json.loads(inner[:close_fence].strip())
+
+        raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
+
+    # 构建候选列表文本
     if not candidates:
         return []
 
-    # 构建候选列表文本
     items_text = []
     for i, c in enumerate(candidates):
         tags = []
@@ -136,16 +177,9 @@ def call_deepseek_ranking(candidates: list[dict], asset_symbol: str, asset_name:
         content = data["choices"][0]["message"].get("reasoning_content") or ""
     print(f"  AI 响应完成，耗时 {elapsed:.1f}s，输出长度 {len(content)}")
 
-    # 解析 JSON
+    # 解析 JSON（增强提取）
     try:
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            first_line_end = cleaned.find("\n")
-            if first_line_end > 0:
-                cleaned = cleaned[first_line_end + 1:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3].strip()
-        result = json.loads(cleaned)
+        result = _extract_json(content)
         ranked = result.get("ranked", [])
         if not isinstance(ranked, list):
             raise ValueError(f"ranked 不是列表")
@@ -195,114 +229,158 @@ def _fallback_ranking(candidates: list[dict], top_n: int) -> list[dict]:
     return candidates[:top_n]
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-
+def _curate_single_asset(conn, asset_id: int, top_n: int, force: bool, dry_run: bool) -> dict:
+    """为单个资产生成 NotebookLM 精选。返回结果 dict。"""
     import psycopg
-
-    from crypto_research.config import get_settings
-    from crypto_research.db.conn import get_connection
     from crypto_research.db.upsert import load_sql
 
-    settings = get_settings(require_database=True)
     select_candidates_sql = load_sql("biz/select_notebooklm_candidates.sql")
 
-    with get_connection(settings.database_url) as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # 1. 检查缓存
-            if not args.force:
-                cur.execute(
-                    "SELECT COUNT(*) as cnt FROM biz.doc_source_notebooklm WHERE asset_id = %s",
-                    (args.asset_id,),
-                )
-                row = cur.fetchone()
-                if row and row["cnt"] > 0:
-                    print(f"  缓存命中: {row['cnt']} 条已精选链接")
-                    cur.execute(
-                        "SELECT entry_url FROM biz.doc_source_notebooklm WHERE asset_id = %s ORDER BY ai_rank",
-                        (args.asset_id,),
-                    )
-                    urls = [r["entry_url"] for r in cur.fetchall()]
-                    result = {"status": "cache_hit", "asset_id": args.asset_id, "count": len(urls), "urls": urls}
-                    print(json.dumps(result, ensure_ascii=False))
-                    return 0
-
-            # 2. 获取资产信息
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # 1. 检查缓存
+        if not force:
             cur.execute(
-                "SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s",
-                (args.asset_id,),
+                "SELECT COUNT(*) as cnt FROM biz.doc_source_notebooklm WHERE asset_id = %s",
+                (asset_id,),
             )
-            asset_row = cur.fetchone()
-            if not asset_row:
-                print(f"资产 {args.asset_id} 不存在")
-                return 1
-            asset_symbol = asset_row["canonical_symbol"]
-            asset_name = asset_row["canonical_name"]
-
-            # 3. 配额粗筛
-            # SQL 有 9 个 %s，全部是 asset_id
-            params = (args.asset_id,) * 9
-            cur.execute(select_candidates_sql, params)
-            candidates = [dict(row) for row in cur.fetchall()]
-
-            if not candidates:
-                msg = {"status": "empty", "asset_id": args.asset_id, "candidates": 0}
-                print(json.dumps(msg, ensure_ascii=False))
-                return 0
-
-            print(f"  配额粗筛: {len(candidates)} 条候选")
-
-            # 4. AI 排序
-            try:
-                llm_config = _get_llm_config()
-            except RuntimeError as e:
-                print(f"  LLM 不可用: {e}，使用降级排序")
-                ranked = _fallback_ranking(candidates, args.top_n)
-            else:
-                ranked = call_deepseek_ranking(candidates, asset_symbol, asset_name, args.top_n, llm_config)
-
-            if args.dry_run:
-                result = {
-                    "status": "dry_run",
-                    "asset_id": args.asset_id,
-                    "candidates": len(candidates),
-                    "ranked": len(ranked),
-                    "urls": [r["entry_url"] for r in ranked],
-                }
-                print(json.dumps(result, ensure_ascii=False))
-                return 0
-
-            # 5. 写入缓存表（先删后插）
-            cur.execute(
-                "DELETE FROM biz.doc_source_notebooklm WHERE asset_id = %s",
-                (args.asset_id,),
-            )
-            for r in ranked:
+            row = cur.fetchone()
+            if row and row["cnt"] > 0:
                 cur.execute(
-                    """INSERT INTO biz.doc_source_notebooklm
-                       (asset_id, source_entry_id, entry_type, entry_url, source_code, ai_rank, ai_reason)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        r["asset_id"],
-                        r["source_entry_id"],
-                        r["entry_type"],
-                        r["entry_url"],
-                        r["source_code"],
-                        r["ai_rank"],
-                        r.get("ai_reason", ""),
-                    ),
+                    "SELECT entry_url FROM biz.doc_source_notebooklm WHERE asset_id = %s ORDER BY ai_rank",
+                    (asset_id,),
                 )
-            conn.commit()
+                urls = [r["entry_url"] for r in cur.fetchall()]
+                return {"status": "cache_hit", "asset_id": asset_id, "count": len(urls), "urls": urls}
 
-            result = {
-                "status": "generated",
-                "asset_id": args.asset_id,
+        # 2. 获取资产信息
+        cur.execute(
+            "SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s",
+            (asset_id,),
+        )
+        asset_row = cur.fetchone()
+        if not asset_row:
+            return {"status": "error", "asset_id": asset_id, "error": "资产不存在"}
+        asset_symbol = asset_row["canonical_symbol"]
+        asset_name = asset_row["canonical_name"]
+
+        # 3. 配额粗筛
+        # SQL 有 9 个 %s，全部是 asset_id
+        params = (asset_id,) * 9
+        cur.execute(select_candidates_sql, params)
+        candidates = [dict(row) for row in cur.fetchall()]
+
+        if not candidates:
+            return {"status": "empty", "asset_id": asset_id, "candidates": 0}
+
+        # 4. AI 排序
+        try:
+            llm_config = _get_llm_config()
+        except RuntimeError as e:
+            print(f"  LLM 不可用: {e}，使用降级排序")
+            ranked = _fallback_ranking(candidates, top_n)
+        else:
+            ranked = call_deepseek_ranking(candidates, asset_symbol, asset_name, top_n, llm_config)
+
+        if dry_run:
+            return {
+                "status": "dry_run",
+                "asset_id": asset_id,
                 "candidates": len(candidates),
                 "ranked": len(ranked),
                 "urls": [r["entry_url"] for r in ranked],
             }
-            print(json.dumps(result, ensure_ascii=False))
-            return 0
+
+        # 5. 写入缓存表（先删后插）
+        cur.execute(
+            "DELETE FROM biz.doc_source_notebooklm WHERE asset_id = %s",
+            (asset_id,),
+        )
+        for r in ranked:
+            cur.execute(
+                """INSERT INTO biz.doc_source_notebooklm
+                   (asset_id, source_entry_id, entry_type, entry_url, source_code, ai_rank, ai_reason)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    r["asset_id"],
+                    r["source_entry_id"],
+                    r["entry_type"],
+                    r["entry_url"],
+                    r["source_code"],
+                    r["ai_rank"],
+                    r.get("ai_reason", ""),
+                ),
+            )
+        conn.commit()
+
+        return {
+            "status": "generated",
+            "asset_id": asset_id,
+            "candidates": len(candidates),
+            "ranked": len(ranked),
+            "urls": [r["entry_url"] for r in ranked],
+        }
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+
+    settings = get_settings(require_database=True)
+
+    with get_connection(settings.database_url) as conn:
+        # 批量模式
+        if args.batch:
+            import psycopg
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 找市值前 N 个尚无缓存的资产
+                not_exists_clause = "" if args.force else (
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM biz.doc_source_notebooklm n "
+                    "  WHERE n.asset_id = a.asset_id"
+                    ")"
+                )
+                cur.execute(f"""
+                    SELECT a.asset_id, a.canonical_symbol, a.market_cap_rank
+                    FROM core.asset a
+                    WHERE a.market_cap_rank IS NOT NULL
+                      {not_exists_clause}
+                    ORDER BY a.market_cap_rank ASC
+                    LIMIT %s
+                """, (args.batch,))
+                assets = cur.fetchall()
+
+            print(f"批量模式：待处理 {len(assets)} 个资产（市值前 {args.batch}）")
+            success = 0
+            skipped = 0
+            errors = 0
+            for i, ast in enumerate(assets, 1):
+                print(f"\n[{i}/{len(assets)}] {ast['canonical_symbol']} (asset_id={ast['asset_id']}, rank={ast['market_cap_rank']})")
+                try:
+                    result = _curate_single_asset(conn, ast["asset_id"], args.top_n, args.force, args.dry_run)
+                    print(f"  → {result['status']}: {result.get('ranked', result.get('count', 0))} 条")
+                    if result["status"] in ("generated", "cache_hit", "dry_run"):
+                        success += 1
+                    elif result["status"] == "empty":
+                        skipped += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    print(f"  → ERROR: {e}")
+                    errors += 1
+
+            print(f"\n批量完成：成功 {success}，空候选 {skipped}，错误 {errors}")
+            return 0 if errors == 0 else 1
+
+        # 单资产模式
+        if not args.asset_id:
+            print("请指定 --asset-id 或 --batch")
+            return 1
+
+        result = _curate_single_asset(conn, args.asset_id, args.top_n, args.force, args.dry_run)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["status"] != "error" else 1
 
 
 if __name__ == "__main__":

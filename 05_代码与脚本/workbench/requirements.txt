@@ -1,6 +1,9 @@
 flask>=3.0
 gunicorn>=22.0
 psycopg[binary]>=3.2
+psycopg-pool>=3.2
 requests>=2.32
 beautifulsoup4>=4.12
 playwright>=1.52
+PyPDF2>=3.0
+APScheduler>=3.10,<4.0

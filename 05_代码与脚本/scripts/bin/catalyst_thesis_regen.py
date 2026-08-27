@@ -56,7 +56,11 @@ def _load_cursor() -> tuple[str | None, int | None]:
             row = cur.fetchone()
     if not row:
         return None, None
-    return (str(row[0]) if row[0] else None, row[1])
+    ts = row[0]
+    # infinity 哨兵（旧版误存）：视为无游标，走首次分支
+    if ts is None or str(ts) in ("infinity", "-infinity"):
+        return None, None
+    return (str(ts), row[1])
 
 
 def _save_cursor(last_ts: str | None, last_asset_id: int | None, processed: int):
@@ -104,7 +108,7 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
 
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
-            if last_ts and last_ts != "infinity":
+            if last_ts:
                 # 复合游标：(ts, asset_id) 元组比较
                 cur.execute(
                     """
@@ -119,25 +123,8 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
                     """,
                     (last_ts, last_aid or 0, limit),
                 )
-            elif last_ts == "infinity":
-                # 已追平，取"上次更新之后"的新数据
-                cur.execute(
-                    """
-                    SELECT DISTINCT ON (ac.ai_processed_at, cal.asset_id)
-                           cal.asset_id, ac.ai_processed_at
-                    FROM biz.catalyst_asset_link cal
-                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
-                    WHERE ac.ai_processed = true
-                      AND ac.ai_processed_at > (
-                          SELECT updated_at FROM biz.catalyst_regen_cursor WHERE id = 1
-                      )
-                    ORDER BY ac.ai_processed_at, cal.asset_id
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
             else:
-                # 首次运行：取近 7 天的，避免全量重生
+                # 首次运行（游标为空）：取近 7 天的，避免全量重生
                 cur.execute(
                     """
                     SELECT DISTINCT ON (ac.ai_processed_at, cal.asset_id)
@@ -252,9 +239,9 @@ def main() -> int:
     # 游标模式下，成功处理后更新游标
     if is_cursor_mode and success > 0:
         if is_complete:
-            # 不满批 = 全部处理完，标记为追平（infinity），下次从 updated_at 之后取新数据
-            _save_cursor("infinity", 0, success)
-            print(f"\n游标已追平（本批处理完成）")
+            # 不满批 = 全部处理完，清空游标，下次从近 7 天重新取（避免 infinity 哨兵）
+            _save_cursor(None, None, success)
+            print(f"\n游标已追平（本批处理完成，游标清空）")
         else:
             # 满批 = 还有下一批，游标推进到最后一行
             _save_cursor(new_ts, new_aid, success)

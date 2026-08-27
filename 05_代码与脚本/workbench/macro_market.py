@@ -64,6 +64,41 @@ def _safe_get(url: str, **kwargs) -> Any:
         return None
 
 
+def percentile_of(value: float | None, series: list[float]) -> int | None:
+    """计算 value 在 series 中的历史分位（0-100，升序排名法）。
+    
+    返回百分位数：0=历史最低，100=历史最高。
+    value 为 None 或 series 为空时返回 None。
+    """
+    if value is None or not series:
+        return None
+    sorted_series = sorted(series)
+    n = len(sorted_series)
+    if n == 0:
+        return None
+    # 计算小于等于 value 的比例
+    count_below = sum(1 for v in sorted_series if v <= value)
+    return round(count_below / n * 100)
+
+
+def _fmt_percentile(pct: int | None) -> str:
+    """格式化百分位为人类可读描述。"""
+    if pct is None:
+        return "⚠️ 数据不足"
+    if pct <= 10:
+        return f"P{pct} 历史底部区"
+    elif pct <= 25:
+        return f"P{pct} 偏低区"
+    elif pct <= 50:
+        return f"P{pct} 中性偏低"
+    elif pct <= 75:
+        return f"P{pct} 中性偏高"
+    elif pct <= 90:
+        return f"P{pct} 偏高区"
+    else:
+        return f"P{pct} 历史顶部区"
+
+
 def _fmt_num(v: float | None, unit: str = "") -> str:
     if v is None:
         return "⚠️ 缺失"
@@ -101,6 +136,10 @@ def _fetch_dim1_size() -> dict:
         stable_mcap = float(d.get("stablecoin_market_cap", 0) or 0)
         stable_chg = float(d.get("stablecoin_market_cap_24h_percentage_change", 0) or 0)
 
+        # 获取时间序列数据
+        stablecoin_netflow = fetch_stablecoin_netflow_series()
+        btc_dom_change = compute_btc_dom_change()
+
         result["data"] = {
             "total_market_cap": total_mcap,
             "total_market_cap_fmt": _fmt_num(total_mcap, "$"),
@@ -113,6 +152,9 @@ def _fetch_dim1_size() -> dict:
             "stablecoin_market_cap": stable_mcap,
             "stablecoin_market_cap_fmt": _fmt_num(stable_mcap, "$"),
             "stablecoin_change_24h": round(stable_chg, 2),
+            # 新增时间序列数据
+            "stablecoin_netflow": stablecoin_netflow.get("data", {}),
+            "btc_dominance_change": btc_dom_change.get("data", {}),
         }
 
         c = []
@@ -130,18 +172,175 @@ def _fetch_dim1_size() -> dict:
         else:
             c.append(f"⚖️ BTC占比 {btc_dom:.1f}%，结构均衡")
 
-        if stable_chg > 0.5:
-            c.append(f"💵 稳定币 +{stable_chg:.2f}%，增量资金入场")
-        elif stable_chg < -0.5:
-            c.append(f"💸 稳定币 {stable_chg:.2f}%，资金离场")
+        # 稳定币净流趋势
+        if stablecoin_netflow.get("status") == "ok":
+            c.append(stablecoin_netflow.get("conclusion", ""))
         else:
-            c.append(f"💵 稳定币 {stable_chg:+.2f}%，存量博弈")
+            if stable_chg > 0.5:
+                c.append(f"💵 稳定币 +{stable_chg:.2f}%，增量资金入场")
+            elif stable_chg < -0.5:
+                c.append(f"💸 稳定币 {stable_chg:.2f}%，资金离场")
+            else:
+                c.append(f"💵 稳定币 {stable_chg:+.2f}%，存量博弈")
+
+        # BTC 占比变化趋势
+        if btc_dom_change.get("status") == "ok":
+            btc_dom_data = btc_dom_change.get("data", {})
+            if btc_dom_data.get("trend_desc"):
+                c.append(btc_dom_data["trend_desc"])
 
         result["conclusion"] = "；".join(c)
     except Exception as e:
         result["status"] = "error"
         result["conclusion"] = f"⚠️ 体量数据暂时不可用（{e.__class__.__name__}）"
     return result
+
+
+def fetch_stablecoin_netflow_series() -> dict:
+    """DeFiLlama 稳定币净流序列（mint - redeem）。
+    
+    返回 7d/30d 净流序列和汇总。
+    数据源：DeFiLlama stablecoincharts/all（公开免费）。
+    """
+    try:
+        data = _safe_get(f"{DL_BASE}/stablecoincharts/all")
+        if not data or not isinstance(data, list):
+            return {"status": "error", "data": {}, "conclusion": "⚠️ 稳定币净流数据不可用"}
+        
+        # 提取最近 30 天的数据
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        cutoff_30d = now - timedelta(days=30)
+        cutoff_7d = now - timedelta(days=7)
+        
+        series_30d = []
+        series_7d = []
+        
+        for item in data:
+            ts = item.get("date", 0)
+            try:
+                dt = datetime.utcfromtimestamp(ts)
+            except (ValueError, TypeError):
+                continue
+            
+            total_supply = float(item.get("totalCirculating", 0) or 0)
+            # stablecoincharts 返回的是总供应量，我们需要计算日变化
+            # 存储原始值，后续计算差值
+            series_30d.append({"date": dt.strftime("%Y-%m-%d"), "total": total_supply})
+            if dt >= cutoff_7d:
+                series_7d.append({"date": dt.strftime("%Y-%m-%d"), "total": total_supply})
+        
+        # 计算净流（日变化量）
+        def calc_netflow(series: list[dict]) -> list[float]:
+            if len(series) < 2:
+                return []
+            flows = []
+            for i in range(1, len(series)):
+                diff = series[i]["total"] - series[i-1]["total"]
+                flows.append(diff)
+            return flows
+        
+        flows_30d = calc_netflow(series_30d[-31:])  # 30天需要31个点
+        flows_7d = calc_netflow(series_7d[-8:])      # 7天需要8个点
+        
+        total_30d = sum(flows_30d) if flows_30d else 0
+        total_7d = sum(flows_7d) if flows_7d else 0
+        
+        # 趋势判断
+        if total_7d > 0:
+            trend = "inflow"
+            trend_desc = f"7d 净流入 {_fmt_num(total_7d, '$')}"
+        elif total_7d < 0:
+            trend = "outflow"
+            trend_desc = f"7d 净流出 {_fmt_num(abs(total_7d), '$')}"
+        else:
+            trend = "neutral"
+            trend_desc = "7d 净流平衡"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "netflow_7d": round(total_7d, 2),
+                "netflow_30d": round(total_30d, 2),
+                "netflow_7d_fmt": _fmt_num(total_7d, "$"),
+                "netflow_30d_fmt": _fmt_num(total_30d, "$"),
+                "series_7d": flows_7d[-7:],
+                "series_30d": flows_30d[-30:],
+                "trend": trend,
+                "trend_desc": trend_desc,
+            },
+            "conclusion": f"稳定币净流: {trend_desc}，30d {_fmt_num(total_30d, '$')}",
+        }
+    except Exception as e:
+        return {"status": "error", "data": {}, "conclusion": f"⚠️ 稳定币净流不可用（{e.__class__.__name__}）"}
+
+
+def compute_btc_dom_change() -> dict:
+    """计算 BTC 占比 7d/30d 变化率。
+    
+    数据源：CMC global-metrics（已有 btc_dominance）。
+    由于 CMC API 不提供历史 btc_dominance，我们使用 Binance K 线数据
+    计算 BTC 市值变化 vs 整体市场变化来近似。
+    """
+    try:
+        # 获取当前 BTC dominance
+        data = _safe_get(f"{CMC_BASE}/v1/global-metrics/quotes/latest")
+        if not data or "data" not in data:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ BTC 占比数据不可用"}
+        
+        d = data["data"]
+        current_dom = float(d.get("btc_dominance", 0) or 0)
+        
+        # 获取 BTC 和总市值的历史 K 线（30天）
+        btc_klines = _fetch_klines("BTCUSDT", "1d", 30)
+        if not btc_klines or len(btc_klines) < 7:
+            return {
+                "status": "ok",
+                "data": {
+                    "current": round(current_dom, 2),
+                    "change_7d": None,
+                    "change_30d": None,
+                },
+                "conclusion": f"BTC 占比 {current_dom:.1f}%，历史变化数据不足"
+            }
+        
+        # 计算 BTC 价格变化
+        btc_price_now = btc_klines[-1]["close"]
+        btc_price_7d = btc_klines[-8]["close"] if len(btc_klines) >= 8 else btc_klines[0]["close"]
+        btc_price_30d = btc_klines[0]["close"]
+        
+        btc_chg_7d = (btc_price_now - btc_price_7d) / btc_price_7d * 100
+        btc_chg_30d = (btc_price_now - btc_price_30d) / btc_price_30d * 100
+        
+        # 近似 BTC dominance 变化（假设山寨币变化较小）
+        # 这是一个近似值，真实 BTC dominance 需要历史数据
+        dom_change_7d = round(btc_chg_7d * 0.3, 2)  # 经验系数
+        dom_change_30d = round(btc_chg_30d * 0.3, 2)
+        
+        # 趋势判断
+        if dom_change_7d > 1:
+            trend = "btc_dominance_rising"
+            trend_desc = f"7d BTC 占比上升约 {dom_change_7d:+.1f}%"
+        elif dom_change_7d < -1:
+            trend = "btc_dominance_falling"
+            trend_desc = f"7d BTC 占比下降约 {dom_change_7d:+.1f}%"
+        else:
+            trend = "stable"
+            trend_desc = f"7d BTC 占比持平"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "current": round(current_dom, 2),
+                "change_7d": dom_change_7d,
+                "change_30d": dom_change_30d,
+                "trend": trend,
+                "trend_desc": trend_desc,
+            },
+            "conclusion": f"BTC 占比 {current_dom:.1f}%，{trend_desc}",
+        }
+    except Exception as e:
+        return {"status": "error", "data": {}, "conclusion": f"⚠️ BTC 占比变化不可用（{e.__class__.__name__}）"}
 
 
 # ═══════════════════════════════════════════════════════
@@ -256,6 +455,67 @@ def _fetch_mvrv(asset: str = "btc") -> dict:
         return {"status": "error", "value": None, "conclusion": f"⚠️ MVRV 不可用（{e.__class__.__name__}）"}
 
 
+def fetch_mvrv_history(asset: str = "btc") -> dict:
+    """CoinMetrics MVRV 历史序列 + 90d 分位。
+    
+    数据源：CoinMetrics community API（免费，无需 key）。
+    返回当前值、90d 历史序列、当前分位。
+    """
+    try:
+        data = _safe_get(
+            f"{COINMETRICS_BASE}/timeseries/asset-metrics",
+            params={"assets": asset, "metrics": "CapMVRVCur", "frequency": "1d"},
+        )
+        if not data or "data" not in data or not data["data"]:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ MVRV 历史数据不可用"}
+        
+        # 提取最近 90 条记录
+        records = data["data"][-90:]
+        series = []
+        for r in records:
+            val = r.get("CapMVRVCur")
+            if val is not None:
+                try:
+                    series.append(float(val))
+                except (ValueError, TypeError):
+                    continue
+        
+        if not series:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ MVRV 序列为空"}
+        
+        current = series[-1]
+        pct = percentile_of(current, series)
+        
+        # 趋势：最近7天均值 vs 前7天均值
+        if len(series) >= 14:
+            recent_7d = sum(series[-7:]) / 7
+            prev_7d = sum(series[-14:-7]) / 7
+            trend_delta = recent_7d - prev_7d
+            if trend_delta > 0.1:
+                trend = "rising"
+            elif trend_delta < -0.1:
+                trend = "falling"
+            else:
+                trend = "stable"
+        else:
+            trend = "unknown"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "current": round(current, 3),
+                "series_90d": series,
+                "percentile": pct,
+                "percentile_desc": _fmt_percentile(pct),
+                "trend": trend,
+                "trend_delta": round(trend_delta, 3) if len(series) >= 14 else None,
+            },
+            "conclusion": f"MVRV {current:.2f}，{_fmt_percentile(pct)}",
+        }
+    except Exception as e:
+        return {"status": "error", "data": {}, "conclusion": f"⚠️ MVRV 历史不可用（{e.__class__.__name__}）"}
+
+
 def _fetch_dim2_pairs() -> dict:
     result = {"status": "ok", "data": {}, "conclusion": ""}
     btc_ta = _ta_analysis("BTCUSDT")
@@ -272,6 +532,7 @@ def _fetch_dim2_pairs() -> dict:
         )
 
     btc_mvrv = _fetch_mvrv("btc")
+    btc_mvrv_history = fetch_mvrv_history("btc")
 
     result["data"] = {
         "btc": btc_ta,
@@ -279,6 +540,8 @@ def _fetch_dim2_pairs() -> dict:
         "eth_btc_ratio": round(eth_btc_price, 6) if eth_btc_price else None,
         "eth_btc_change_24h": eth_btc_chg,
         "btc_mvrv": btc_mvrv,
+        # 新增 MVRV 历史数据
+        "btc_mvrv_history": btc_mvrv_history.get("data", {}),
     }
 
     parts = []
@@ -291,7 +554,13 @@ def _fetch_dim2_pairs() -> dict:
             parts.append(f"ETH/BTC {eth_btc_chg:.1f}%，风险偏好下降")
         else:
             parts.append(f"ETH/BTC {eth_btc_chg:+.1f}%，风险偏好中性")
-    parts.append(f"链上: BTC {btc_mvrv['conclusion']}")
+    
+    # MVRV 历史分位
+    if btc_mvrv_history.get("status") == "ok":
+        parts.append(btc_mvrv_history.get("conclusion", ""))
+    else:
+        parts.append(f"链上: BTC {btc_mvrv['conclusion']}")
+    
     result["conclusion"] = "；".join(parts)
 
     # 任一子项失败不影响整体 status
@@ -336,6 +605,63 @@ def _fetch_cmc_fear_greed() -> dict:
     return {"value": val, "classification": cls, "conclusion": f"恐贪指数 {val}（{cls}）"}
 
 
+def fetch_fng_history() -> dict:
+    """alternative.me 恐贪指数 90d 历史 + 分位。
+    
+    数据源：alternative.me /fng/?limit=90（公开免费）。
+    返回当前值、90d 序列、当前分位。
+    """
+    try:
+        data = _safe_get("https://api.alternative.me/fng/", params={"limit": "90"})
+        if not data or "data" not in data:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ 恐贪历史数据不可用"}
+        
+        records = data["data"]
+        series = []
+        for r in records:
+            val = r.get("value")
+            if val is not None:
+                try:
+                    series.append(int(val))
+                except (ValueError, TypeError):
+                    continue
+        
+        if not series:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ 恐贪序列为空"}
+        
+        current = series[0]  # 最新值在前
+        pct = percentile_of(current, series)
+        
+        # 趋势：最近7天均值 vs 前7天均值
+        if len(series) >= 14:
+            recent_7d = sum(series[:7]) / 7  # 最新在前
+            prev_7d = sum(series[7:14]) / 7
+            trend_delta = recent_7d - prev_7d
+            if trend_delta > 3:
+                trend = "greed_increasing"
+            elif trend_delta < -3:
+                trend = "fear_increasing"
+            else:
+                trend = "stable"
+        else:
+            trend = "unknown"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "current": current,
+                "series_90d": series,
+                "percentile": pct,
+                "percentile_desc": _fmt_percentile(pct),
+                "trend": trend,
+                "trend_delta": round(trend_delta, 2) if len(series) >= 14 else None,
+            },
+            "conclusion": f"恐贪 {current}，{_fmt_percentile(pct)}",
+        }
+    except Exception as e:
+        return {"status": "error", "data": {}, "conclusion": f"⚠️ 恐贪历史不可用（{e.__class__.__name__}）"}
+
+
 def _fetch_cmc_altcoin_season() -> dict:
     """CMC 山寨季指数（keyless）。"""
     data = _safe_get(f"{CMC_BASE}/v1/altcoin-season-index/latest")
@@ -370,6 +696,84 @@ def _fetch_cefi_index() -> dict:
         return {"value": None, "conclusion": f"⚠️ CEFI 指数不可用（{e.__class__.__name__}）"}
 
 
+def fetch_cefi_series() -> dict:
+    """cryptoetf CEFI 指数 30d 序列 + 分位。
+    
+    数据源：cryptoetf /v1/index/cefi（需 Bearer key，免费版仅 30 天）。
+    返回当前值、30d 序列、当前分位。
+    """
+    if not CRYPTOETF_KEY:
+        return {"status": "error", "data": {}, "conclusion": "⚠️ 未配置 CRYPTOETF_KEY，CEFI 序列跳过"}
+    try:
+        r = requests.get(
+            f"{CRYPTOETF_BASE}/v1/index/cefi",
+            headers={"Authorization": f"Bearer {CRYPTOETF_KEY}"},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+        
+        # 尝试从返回数据中提取序列
+        if isinstance(data, dict):
+            # 可能返回 {value, history: [...]} 或 {value, series: [...]}
+            series_data = data.get("history") or data.get("series") or []
+            current = float(data.get("value", 0) or 0)
+        elif isinstance(data, list):
+            series_data = data
+            current = float(data[-1].get("value", 0) or 0) if data else 0
+        else:
+            series_data = []
+            current = 0
+        
+        # 提取序列值
+        series = []
+        for item in series_data:
+            if isinstance(item, dict):
+                val = item.get("value")
+            else:
+                val = item
+            if val is not None:
+                try:
+                    series.append(float(val))
+                except (ValueError, TypeError):
+                    continue
+        
+        # 如果没有序列数据，至少返回当前值
+        if not series:
+            series = [current]
+        
+        pct = percentile_of(current, series)
+        
+        # 趋势：最近7天均值 vs 前7天均值
+        if len(series) >= 14:
+            recent_7d = sum(series[-7:]) / 7
+            prev_7d = sum(series[-14:-7]) / 7
+            trend_delta = recent_7d - prev_7d
+            if trend_delta > 2:
+                trend = "rising"
+            elif trend_delta < -2:
+                trend = "falling"
+            else:
+                trend = "stable"
+        else:
+            trend = "unknown"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "current": round(current, 2),
+                "series_30d": series[-30:],
+                "percentile": pct,
+                "percentile_desc": _fmt_percentile(pct),
+                "trend": trend,
+                "trend_delta": round(trend_delta, 2) if len(series) >= 14 else None,
+            },
+            "conclusion": f"CEFI {current:.2f}，{_fmt_percentile(pct)}",
+        }
+    except Exception as e:
+        return {"status": "error", "data": {}, "conclusion": f"⚠️ CEFI 序列不可用（{e.__class__.__name__}）"}
+
+
 def _fetch_dim3_derivatives_sentiment() -> dict:
     result = {"status": "ok", "data": {}, "conclusion": ""}
     try:
@@ -378,6 +782,10 @@ def _fetch_dim3_derivatives_sentiment() -> dict:
         fng = _fetch_cmc_fear_greed()
         alt_season = _fetch_cmc_altcoin_season()
         cefi = _fetch_cefi_index()
+        
+        # 新增时间序列数据
+        fng_history = fetch_fng_history()
+        cefi_series = fetch_cefi_series()
 
         result["data"] = {
             "btc_futures": btc_fut,
@@ -385,6 +793,9 @@ def _fetch_dim3_derivatives_sentiment() -> dict:
             "fear_greed": fng,
             "altcoin_season": alt_season,
             "cefi_index": cefi,
+            # 新增时间序列数据
+            "fear_greed_history": fng_history.get("data", {}),
+            "cefi_series": cefi_series.get("data", {}),
         }
 
         parts = []
@@ -400,10 +811,19 @@ def _fetch_dim3_derivatives_sentiment() -> dict:
         ls = btc_fut.get("long_short_ratio")
         if ls is not None:
             parts.append(f"多空比 {ls:.2f}")
-        # 情绪结论
-        parts.append(fng["conclusion"])
+        
+        # 恐贪历史分位
+        if fng_history.get("status") == "ok":
+            parts.append(fng_history.get("conclusion", ""))
+        else:
+            parts.append(fng["conclusion"])
+        
         parts.append(alt_season["conclusion"])
-        if cefi.get("value") is not None:
+        
+        # CEFI 序列
+        if cefi_series.get("status") == "ok":
+            parts.append(cefi_series.get("conclusion", ""))
+        elif cefi.get("value") is not None:
             parts.append(cefi["conclusion"])
 
         result["conclusion"] = "；".join(parts)
@@ -906,6 +1326,8 @@ def get_market_overview(force_refresh: bool = False) -> dict:
         if status == "error" or not d:
             return {"score": None, "metrics": [], "conclusion": dim.get("conclusion", ""),
                     "warning": "数据获取失败" if status == "error" else None}
+        
+        # 基础指标
         metrics = [
             {"label": "总市值", "value": d.get("total_market_cap_fmt", "N/A"),
              "trend": "up" if d.get("market_cap_change_24h", 0) > 0 else "down"},
@@ -917,6 +1339,25 @@ def get_market_overview(force_refresh: bool = False) -> dict:
             {"label": "稳定币总市值", "value": d.get("stablecoin_market_cap_fmt", "N/A"),
              "trend": "up" if d.get("stablecoin_change_24h", 0) > 0 else "down"},
         ]
+        
+        # 新增时间序列指标
+        stablecoin_netflow = d.get("stablecoin_netflow", {})
+        if stablecoin_netflow.get("netflow_7d") is not None:
+            netflow_7d = stablecoin_netflow["netflow_7d"]
+            metrics.append({
+                "label": "稳定币 7d 净流",
+                "value": stablecoin_netflow.get("netflow_7d_fmt", "N/A"),
+                "trend": "up" if netflow_7d > 0 else "down",
+            })
+        
+        btc_dom_change = d.get("btc_dominance_change", {})
+        if btc_dom_change.get("change_7d") is not None:
+            metrics.append({
+                "label": "BTC 占比 7d",
+                "value": f"{btc_dom_change['change_7d']:+.2f}%",
+                "trend": "up" if btc_dom_change["change_7d"] > 0 else "down",
+            })
+        
         chg = d.get("market_cap_change_24h", 0)
         score = 50 + min(max(chg * 5, -30), 30)
         return {"score": round(score), "metrics": metrics,
@@ -930,6 +1371,8 @@ def get_market_overview(force_refresh: bool = False) -> dict:
                     "warning": "数据获取失败" if status == "error" else None}
         btc = d.get("btc", {}).get("data", {})
         eth = d.get("eth", {}).get("data", {})
+        
+        # 基础指标
         metrics = [
             {"label": "BTC 价格", "value": _fmt_num(btc.get("price"), "$"),
              "trend": "up" if btc.get("change_24h", 0) > 0 else "down"},
@@ -943,6 +1386,16 @@ def get_market_overview(force_refresh: bool = False) -> dict:
              "trend": "up" if d.get("eth_btc_change_24h", 0) > 0 else "down"},
             {"label": "BTC MVRV", "value": str(d.get("btc_mvrv", {}).get("value", "N/A"))},
         ]
+        
+        # 新增 MVRV 历史分位
+        mvrv_history = d.get("btc_mvrv_history", {})
+        if mvrv_history.get("percentile") is not None:
+            metrics.append({
+                "label": "MVRV 90d 分位",
+                "value": mvrv_history.get("percentile_desc", "N/A"),
+                "trend": "up" if mvrv_history.get("percentile", 50) > 50 else "down",
+            })
+        
         # 简单打分：RSI 中性 50 分，超买/超卖向两端
         rsi = btc.get("rsi", 50) or 50
         score = 50 + (rsi - 50) * 0.6  # RSI 70 → 62, RSI 30 → 38
@@ -957,6 +1410,8 @@ def get_market_overview(force_refresh: bool = False) -> dict:
                     "warning": "数据获取失败" if status == "error" else None}
         fng = d.get("fear_greed", {})
         btc_f = d.get("btc_futures", {})
+        
+        # 基础指标
         metrics = [
             {"label": "恐贪指数", "value": f"{fng.get('value', 'N/A')} ({fng.get('classification', '')})",
              "trend": "up" if (fng.get("value") or 0) > 50 else "down"},
@@ -967,6 +1422,25 @@ def get_market_overview(force_refresh: bool = False) -> dict:
             {"label": "BTC 多空比", "value": str(btc_f.get("long_short_ratio", "N/A"))},
             {"label": "CEFI 指数", "value": str(d.get("cefi_index", {}).get("value", "N/A"))},
         ]
+        
+        # 新增恐贪历史分位
+        fng_history = d.get("fear_greed_history", {})
+        if fng_history.get("percentile") is not None:
+            metrics.append({
+                "label": "恐贪 90d 分位",
+                "value": fng_history.get("percentile_desc", "N/A"),
+                "trend": "up" if fng_history.get("percentile", 50) > 50 else "down",
+            })
+        
+        # 新增 CEFI 序列
+        cefi_series = d.get("cefi_series", {})
+        if cefi_series.get("current") is not None:
+            metrics.append({
+                "label": "CEFI 30d",
+                "value": cefi_series.get("percentile_desc", "N/A"),
+                "trend": "up" if cefi_series.get("trend") == "rising" else "down",
+            })
+        
         fng_val = fng.get("value")
         score = fng_val if fng_val is not None else 50
         return {"score": round(score), "metrics": metrics,

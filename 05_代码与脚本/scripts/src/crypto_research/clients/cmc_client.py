@@ -91,7 +91,7 @@ class CMCClient:
 
     def get_cryptocurrency_category(
         self,
-        category_id: int,
+        category_id: str,
         start: int = 1,
         limit: int = 5000,
         convert: str = "USD",

@@ -30,5 +30,4 @@ ON CONFLICT (category_id) DO UPDATE SET
     volume_24h = EXCLUDED.volume_24h,
     last_updated = EXCLUDED.last_updated,
     raw_response_id = EXCLUDED.raw_response_id,
-    fetched_at = EXCLUDED.fetched_at,
-    updated_at = NOW();
+    fetched_at = EXCLUDED.fetched_at;

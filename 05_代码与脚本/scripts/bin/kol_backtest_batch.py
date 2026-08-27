@@ -110,7 +110,7 @@ def get_price_series(conn, asset_id: int, start_date, end_date) -> list[dict]:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT market_date, price_usd, high_usd, low_usd
+            SELECT market_date, price_usd
             FROM biz.asset_market_daily
             WHERE asset_id = %s
               AND source_code = 'cmc'

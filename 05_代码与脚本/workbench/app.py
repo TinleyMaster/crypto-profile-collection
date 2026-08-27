@@ -1897,7 +1897,6 @@ def api_watchlist_remove(watch_id: int):
     try:
         data = _get_db_stats().remove_watchlist(watch_id)
         return jsonify(data)
->>>>>>> ee4d2ff5a826a9187454463923838bf50c8edd28
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

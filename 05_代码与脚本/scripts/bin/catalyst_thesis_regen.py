@@ -102,7 +102,7 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
     last_ts, last_aid = _load_cursor()
     settings = get_settings(require_database=True)
 
-    with get_connection(settings) as conn:
+    with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
             if last_ts and last_ts != "infinity":
                 # 复合游标：(ts, asset_id) 元组比较

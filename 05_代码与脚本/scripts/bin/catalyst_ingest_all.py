@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sys
 import os
-import traceback
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -19,26 +18,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 _candidate = SCRIPT_DIR.parent.parent / "workbench"
 WORKBENCH_DIR = _candidate if _candidate.exists() else SCRIPT_DIR.parent.parent
 
-print(f"SCRIPT_DIR: {SCRIPT_DIR}", flush=True)
-print(f"WORKBENCH_DIR: {WORKBENCH_DIR}", flush=True)
-print(f"WORKBENCH_DIR exists: {WORKBENCH_DIR.exists()}", flush=True)
-
 # 确保能 import catalyst 包 和 crypto_research
 sys.path.insert(0, str(WORKBENCH_DIR))
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-print(f"sys.path: {sys.path[:5]}", flush=True)
-
-try:
-    from catalyst.runner import run_all  # noqa: E402
-    from catalyst.sources import SOURCE_REGISTRY  # noqa: E402
-    print(f"Registered sources: {list(SOURCE_REGISTRY.keys())}", flush=True)
-except Exception as e:
-    print(f"Import error: {e}", flush=True)
-    traceback.print_exc()
-    sys.exit(1)
+from catalyst.runner import run_all  # noqa: E402
 
 
 def main() -> int:
@@ -46,13 +32,7 @@ def main() -> int:
     print("催化剂数据摄入（全源增量）", flush=True)
     print("=" * 60, flush=True)
 
-    try:
-        results = run_all()
-        print(f"run_all returned {len(results)} results", flush=True)
-    except Exception as e:
-        print(f"run_all error: {e}", flush=True)
-        traceback.print_exc()
-        return 1
+    results = run_all()
 
     print(flush=True)
     print("=" * 60, flush=True)

@@ -109,7 +109,7 @@ class BinanceSquareNewsSource(BaseCatalystSource):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._scraper:
-            self._scraper.session.close()
+            self._scraper._session.close()
             self._scraper = None
 
 

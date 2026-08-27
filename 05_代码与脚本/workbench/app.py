@@ -617,32 +617,11 @@ TASK_DEFS = {
         "default_args": [],
         "category": "KOL",
     },
-    "catalyst_ingest_all": {
-        "name": "催化剂全源增量摄入",
-        "description": "双源摄入：跑所有已注册源（binance_square_news / binance_news / binance_listing / binance_api），验证 square 不再崩 + CMS 429 快速跳过",
-        "script": "catalyst_ingest_all.py",
+    "catalyst_run_all": {
+        "name": "催化剂全链路（摄入→AI→thesis）",
+        "description": "催化剂完整 runbook：全源增量摄入 → AI 预处理(批量200) → 游标模式 thesis 重生。合并自原 ingest_all / ai_process / thesis_regen 三子任务，单次运行完成整条管道；原 cursor 验证子任务并入单次重生（游标模式每次运行自然推进，无需独立任务）。",
+        "script": "catalyst_run_all.py",
         "default_args": [],
-        "category": "催化剂",
-    },
-    "catalyst_ai_process": {
-        "name": "催化剂 AI 预处理",
-        "description": "对新摄入的催化剂做 AI 预处理（批量 200），为 thesis 重生准备结构化内容",
-        "script": "process_catalyst_ai.py",
-        "default_args": ["--batch-size", "200"],
-        "category": "催化剂",
-    },
-    "catalyst_thesis_regen": {
-        "name": "催化剂驱动 thesis 重生",
-        "description": "基于 AI 处理后的催化剂对资产 thesis 重生（游标模式，最多 100 资产），催化 IDs 写回 catalysts_json",
-        "script": "catalyst_thesis_regen.py",
-        "default_args": ["--max-assets", "100"],
-        "category": "催化剂",
-    },
-    "catalyst_thesis_regen_cursor": {
-        "name": "催化剂 thesis 重生（游标推进）",
-        "description": "再次运行 thesis 重生以验证 biz.catalyst_regen_cursor 游标推进（出现 1 行游标记录）",
-        "script": "catalyst_thesis_regen.py",
-        "default_args": ["--max-assets", "100"],
         "category": "催化剂",
     },
     "social_heat_batch": {

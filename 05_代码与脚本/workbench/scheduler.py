@@ -110,10 +110,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底"),
 
-    # ═══ 催化剂模块（数据摄入 + AI 处理 + thesis 重生，默认注释，等数据全绿后打开）═══
-    # ("catalyst_ingest_all",   "*/30 * * * *", "catalyst_ingest_all.py", [], "催化剂全源增量摄入（每 30 分钟）"),
-    # ("catalyst_ai_process",   "*/40 * * * *", "process_catalyst_ai.py", ["--batch-size", "200"], "催化剂 AI 预处理（每 40 分钟）"),
-    # ("catalyst_thesis_regen", "0 * * * *",    "catalyst_thesis_regen.py", ["--max-assets", "100"], "催化剂驱动 thesis 重生（每小时，游标模式）"),
+    # ═══ 催化剂模块（全链路合并任务，每小时一轮）═══
+    ("catalyst_run_all", "0 * * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每小时）"),
 ]
 
 

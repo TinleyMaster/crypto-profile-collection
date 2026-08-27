@@ -13,6 +13,7 @@ from datetime import datetime
 from .db import get_conn
 from .pipeline import upsert_catalyst_item, get_latest_publish_time
 from .sources import SOURCE_REGISTRY, get_source
+from .binance_news import RateLimitedError
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ def run_source(
                     conn.rollback()
                     stats["skipped"] += 1
 
+    except RateLimitedError as e:
+        logger.error("source %s rate limited: %s", source_code, e)
+        stats["error"] = f"rate limited (429): {e}"
     except Exception as e:
         logger.error("source %s failed: %s", source_code, e)
         stats["error"] = str(e)

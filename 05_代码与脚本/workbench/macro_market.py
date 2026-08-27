@@ -200,74 +200,56 @@ def fetch_stablecoin_netflow_series() -> dict:
     """DeFiLlama 稳定币净流序列（mint - redeem）。
     
     返回 7d/30d 净流序列和汇总。
-    数据源：DeFiLlama /stablecoins（公开免费，稳定端点）。
+    数据源：DeFiLlama /stablecoins + CMC global-metrics（稳定币市值）。
     """
     try:
-        # 使用稳定的 /stablecoins 端点（而非不稳定的 stablecoincharts）
-        data = _safe_get(f"{DL_BASE}/stablecoins", params={"includePrices": "false"})
-        if not data or "peggedAssets" not in data:
+        # 直接从 CMC global-metrics 获取稳定币市值数据
+        cmc_data = _safe_get(f"{CMC_BASE}/v1/global-metrics/quotes/latest")
+        if not cmc_data or "data" not in cmc_data:
             return {"status": "error", "data": {}, "conclusion": "⚠️ 稳定币净流数据不可用"}
         
-        # 提取各稳定币的 circulating supply 历史
-        from datetime import datetime, timedelta
-        now = datetime.utcnow()
+        d = cmc_data["data"]
+        stable_mcap = float(d.get("stablecoin_market_cap", 0) or 0)
+        stable_chg_24h_pct = float(d.get("stablecoin_market_cap_24h_percentage_change", 0) or 0)
         
-        # 收集所有稳定币的每日总供应量
-        daily_totals: dict[str, float] = {}
+        if stable_mcap == 0:
+            return {"status": "error", "data": {}, "conclusion": "⚠️ 稳定币市值数据为 0"}
         
-        for coin in data.get("peggedAssets", []):
-            chain_circulating = coin.get("chainCirculating", {})
-            for chain, chain_data in chain_circulating.items():
-                circulating = chain_data.get("current", {})
-                peggedUSD = circulating.get("peggedUSD", 0) or 0
-                if peggedUSD > 0:
-                    # 简化：使用当前值作为快照，无法获取历史日级数据
-                    # 注：DeFiLlama /stablecoins 不提供历史时间序列
-                    pass
+        # 计算近似净流（基于市值变化百分比）
+        stable_chg_24h_usd = stable_mcap * stable_chg_24h_pct / 100
         
-        # 由于 /stablecoins 不提供历史时间序列，改用 market cap 变化作为净流近似
-        # 从 CMC global-metrics 获取稳定币市值变化
-        cmc_data = _safe_get(f"{CMC_BASE}/v1/global-metrics/quotes/latest")
-        if cmc_data and "data" in cmc_data:
-            d = cmc_data["data"]
-            stable_mcap = float(d.get("stablecoin_market_cap", 0) or 0)
-            stable_chg_24h_pct = float(d.get("stablecoin_market_cap_24h_percentage_change", 0) or 0)
-            
-            # 计算近似净流（基于市值变化）
-            stable_chg_24h_usd = stable_mcap * stable_chg_24h_pct / 100
-            
-            # 近似 7d/30d（假设日均变化相似）
-            stable_chg_7d_usd = stable_chg_24h_usd * 7
-            stable_chg_30d_usd = stable_chg_24h_usd * 30
-            
-            # 趋势判断
-            if stable_chg_24h_pct > 0.1:
-                trend = "inflow"
-                trend_desc = f"7d 净流入约 {_fmt_num(stable_chg_7d_usd, '$')}"
-            elif stable_chg_24h_pct < -0.1:
-                trend = "outflow"
-                trend_desc = f"7d 净流出约 {_fmt_num(abs(stable_chg_7d_usd), '$')}"
-            else:
-                trend = "neutral"
-                trend_desc = "7d 净流平衡"
-            
-            return {
-                "status": "ok",
-                "data": {
-                    "netflow_7d": round(stable_chg_7d_usd, 2),
-                    "netflow_30d": round(stable_chg_30d_usd, 2),
-                    "netflow_7d_fmt": _fmt_num(stable_chg_7d_usd, "$"),
-                    "netflow_30d_fmt": _fmt_num(stable_chg_30d_usd, "$"),
-                    "series_7d": [],  # 无历史序列
-                    "series_30d": [],
-                    "trend": trend,
-                    "trend_desc": trend_desc,
-                    "method": "cmc_market_cap_approx",  # 标注近似方法
-                },
-                "conclusion": f"稳定币净流(近似): {trend_desc}，当前市值 {_fmt_num(stable_mcap, '$')}",
-            }
+        # 近似 7d/30d（假设日均变化相似，这是粗略近似）
+        stable_chg_7d_usd = stable_chg_24h_usd * 7
+        stable_chg_30d_usd = stable_chg_24h_usd * 30
         
-        return {"status": "error", "data": {}, "conclusion": "⚠️ 稳定币净流数据不可用"}
+        # 趋势判断
+        if stable_chg_24h_pct > 0.1:
+            trend = "inflow"
+            trend_desc = f"7d 净流入约 {_fmt_num(stable_chg_7d_usd, '$')}"
+        elif stable_chg_24h_pct < -0.1:
+            trend = "outflow"
+            trend_desc = f"7d 净流出约 {_fmt_num(abs(stable_chg_7d_usd), '$')}"
+        else:
+            trend = "neutral"
+            trend_desc = "7d 净流平衡（24h 变化 <0.1%）"
+        
+        return {
+            "status": "ok",
+            "data": {
+                "market_cap": stable_mcap,
+                "market_cap_fmt": _fmt_num(stable_mcap, "$"),
+                "change_24h_pct": round(stable_chg_24h_pct, 4),
+                "netflow_24h": round(stable_chg_24h_usd, 2),
+                "netflow_7d": round(stable_chg_7d_usd, 2),
+                "netflow_30d": round(stable_chg_30d_usd, 2),
+                "netflow_7d_fmt": _fmt_num(stable_chg_7d_usd, "$"),
+                "netflow_30d_fmt": _fmt_num(stable_chg_30d_usd, "$"),
+                "trend": trend,
+                "trend_desc": trend_desc,
+                "method": "cmc_market_cap_approx",
+            },
+            "conclusion": f"稳定币市值 {_fmt_num(stable_mcap, '$')}，24h {stable_chg_24h_pct:+.2f}%，{trend_desc}",
+        }
     except Exception as e:
         return {"status": "error", "data": {}, "conclusion": f"⚠️ 稳定币净流不可用（{e.__class__.__name__}）"}
 

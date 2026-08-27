@@ -18,8 +18,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 _candidate = SCRIPT_DIR.parent.parent / "workbench"
 WORKBENCH_DIR = _candidate if _candidate.exists() else SCRIPT_DIR.parent.parent
 
-# 确保能 import catalyst 包
+# 确保能 import catalyst 包 和 crypto_research
 sys.path.insert(0, str(WORKBENCH_DIR))
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
 from catalyst.runner import run_all  # noqa: E402
 

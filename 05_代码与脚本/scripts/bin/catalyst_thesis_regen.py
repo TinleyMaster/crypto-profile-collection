@@ -34,6 +34,10 @@ _candidate = SCRIPT_DIR.parent.parent / "workbench"
 WORKBENCH_DIR = _candidate if _candidate.exists() else SCRIPT_DIR.parent.parent
 
 sys.path.insert(0, str(WORKBENCH_DIR))
+# crypto_research 在 scripts/src/ 下
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402

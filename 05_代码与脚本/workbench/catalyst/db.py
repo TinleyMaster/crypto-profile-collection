@@ -25,12 +25,21 @@ def _get_db_url() -> str:
     if _database_url is None:
         _database_url = os.environ.get("DATABASE_URL", "")
         if not _database_url:
-            try:
-                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "src"))
-                from crypto_research.config import get_settings
-                _database_url = get_settings().database_url
-            except Exception:
-                pass
+            # 本地结构: workbench/catalyst/db.py → workbench/../scripts/src
+            # 扁平结构: catalyst/db.py → ../scripts/src
+            candidates = [
+                os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "src"),
+                os.path.join(os.path.dirname(__file__), "..", "scripts", "src"),
+            ]
+            for candidate in candidates:
+                if os.path.isdir(candidate):
+                    try:
+                        sys.path.insert(0, candidate)
+                        from crypto_research.config import get_settings
+                        _database_url = get_settings().database_url
+                        break
+                    except Exception:
+                        continue
     if not _database_url:
         raise RuntimeError("DATABASE_URL not set")
     return _database_url

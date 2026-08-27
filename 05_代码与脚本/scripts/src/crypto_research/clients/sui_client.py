@@ -5,8 +5,8 @@ Sui 链上客户端（基于 Sui 公共 RPC，免费免 Key）。
   - get_token_transfers(coin_type, ...) → 近期 Coin Transfer 事件
 
 数据源：
-  - Sui 公共 RPC: https://fullnode.mainnet.sui.io
-  - 备选: https://sui-rpc.publicnode.com
+  - Sui 公共 RPC: https://sui-rpc.publicnode.com（JSON-RPC 仍可用）
+  - fullnode.mainnet.sui.io 已废弃 JSON-RPC，仅作最后兜底
 
 返回格式与 EtherscanClient.get_token_transfers 对齐。
 """
@@ -41,9 +41,10 @@ class SuiClient:
     # ── RPC 端点 ────────────────────────────────────────────
     @property
     def _rpc_urls(self) -> list[str]:
+        # fullnode.mainnet.sui.io 已废弃 JSON-RPC，publicnode 为首选
         return [
-            "https://fullnode.mainnet.sui.io",
             "https://sui-rpc.publicnode.com",
+            "https://fullnode.mainnet.sui.io",
         ]
 
     @property
@@ -98,12 +99,12 @@ class SuiClient:
     def get_token_decimals(self, coin_type: str) -> int:
         """查询 Sui Coin 精度（decimals），带缓存。
 
-        默认 9 位（Sui 标准），通过 sui_getCoinMetadata 查询。
+        默认 9 位（Sui 标准），通过 suix_getCoinMetadata 查询。
         """
         if coin_type in self._decimals_cache:
             return self._decimals_cache[coin_type]
 
-        result = self._json_rpc("sui_getCoinMetadata", [coin_type])
+        result = self._json_rpc("suix_getCoinMetadata", [coin_type])
         decimals = 9  # Sui 默认精度
         if result and isinstance(result, dict):
             decimals = result.get("decimals", 9)
@@ -122,7 +123,9 @@ class SuiClient:
           from, to, value(str=base units), tokenDecimal(str),
           contractAddress, tokenName, tokenSymbol
 
-        通过 sui_queryTransactionBlocks 查询，page=2 时返回空（增量）。
+        实现：suix_queryTransactionBlocks 按 MoveModule 0x2::coin 过滤，
+        逐个拉取完整交易块并解析 balanceChanges 中该 coin 的余额变化。
+        JSON-RPC 已在公共 fullnode 废弃，公共 RPC 仍可用 suix_ 方法。
         """
         if page > 1:
             return []
@@ -130,12 +133,10 @@ class SuiClient:
         limit = min(offset, 50)
         decimals = self.get_token_decimals(coin_type)
 
-        # 查询最近的交易块，按 coin type 过滤
-        # Sui 没有直接的 "按 coin type 查转账" API，我们用 queryTransactionBlocks
-        # 配合 MoveCall 过滤来近似获取
-        result = self._json_rpc("sui_queryTransactionBlocks", [{
+        # 查询最近涉及 coin 模块（0x2::coin 传输操作）的交易
+        result = self._json_rpc("suix_queryTransactionBlocks", [{
             "filter": {
-                "InputObject": coin_type,
+                "MoveFunction": {"package": "0x2", "module": "coin", "function": "transfer"},
             },
             "options": {
                 "showInput": True,
@@ -143,7 +144,7 @@ class SuiClient:
                 "showBalanceChanges": True,
                 "showEvents": True,
             },
-        }, None, limit, False])  # cursor, limit, descending
+        }, None, limit, True])
 
         if not result or not isinstance(result, dict):
             return []
@@ -153,43 +154,70 @@ class SuiClient:
 
         for tx in txs:
             digest = tx.get("digest", "")
-            checkpoint = tx.get("checkpoint", "0")
-            timestamp_ms = tx.get("timestampMs", "0")
+            # 列表查询通常只返回 digest，需逐个拉取完整交易块
+            detail = self._json_rpc("sui_getTransactionBlock", [
+                digest, {
+                    "showInput": True,
+                    "showEffects": True,
+                    "showBalanceChanges": True,
+                    "showEvents": True,
+                },
+            ])
+            if not detail or not isinstance(detail, dict):
+                continue
+            checkpoint = str(detail.get("checkpoint", "0"))
+            timestamp_ms = str(detail.get("timestampMs", "0"))
 
-            # 从 balanceChanges 中提取与 coin_type 相关的余额变化
-            balance_changes = tx.get("balanceChanges", []) or []
-            for bc in balance_changes:
-                if bc.get("coinType") != coin_type:
-                    continue
+            # 从 balanceChanges 中提取该 coin 的余额变化
+            balance_changes = detail.get("balanceChanges", []) or []
+            coin_bcs = [bc for bc in balance_changes if bc.get("coinType") == coin_type]
+            if not coin_bcs:
+                continue
+
+            # 净余额变化：正数 = 接收（to），负数 = 转出（from）
+            from_addr = ""
+            to_addr = ""
+            total_in = 0
+            total_out = 0
+            for bc in coin_bcs:
                 owner = bc.get("owner", {}) or {}
                 owner_addr = ""
                 if isinstance(owner, dict):
                     owner_addr = owner.get("AddressOwner", "")
                 amount = bc.get("amount", "0")
-
+                try:
+                    amt = int(amount)
+                except (TypeError, ValueError):
+                    amt = 0
                 if not owner_addr:
                     continue
+                if amt < 0:
+                    from_addr = owner_addr
+                    total_out += -amt
+                elif amt > 0:
+                    to_addr = owner_addr
+                    total_in += amt
 
-                # 注：sui_queryTransactionBlocks 只返回净余额变化，无法区分 from/to
-                # 这里取绝对值作为转账金额，from/to 回退到 coin_type 自身
-                abs_amount = str(abs(int(amount)))
-                transfers.append({
-                    "hash": digest,
-                    "blockNumber": str(checkpoint),
-                    "timeStamp": timestamp_ms,
-                    "from": owner_addr if int(amount) < 0 else "",
-                    "to": owner_addr if int(amount) > 0 else "",
-                    "value": abs_amount,
-                    "tokenDecimal": str(decimals),
-                    "contractAddress": coin_type,
-                    "tokenName": "",
-                    "tokenSymbol": "",
-                })
+            # 取较大侧作为转账金额（双边转账时 from/to 分别来自不同 owner）
+            value = max(total_in, total_out) or abs(sum(int(bc.get("amount", 0)) for bc in coin_bcs))
+
+            transfers.append({
+                "hash": digest,
+                "blockNumber": checkpoint,
+                "timeStamp": timestamp_ms,
+                "from": from_addr,
+                "to": to_addr,
+                "value": str(value),
+                "tokenDecimal": str(decimals),
+                "contractAddress": coin_type,
+                "tokenName": "",
+                "tokenSymbol": "",
+            })
 
         if sort == "desc":
-            transfers.sort(key=lambda x: int(x["timeStamp"]), reverse=True)
+            transfers.sort(key=lambda x: int(x["timeStamp"] or 0), reverse=True)
         elif sort == "asc":
-            transfers.sort(key=lambda x: int(x["timeStamp"]))
+            transfers.sort(key=lambda x: int(x["timeStamp"] or 0))
         return transfers
 
 

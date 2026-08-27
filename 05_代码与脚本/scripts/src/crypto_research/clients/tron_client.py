@@ -13,6 +13,7 @@ Tron 链上客户端（基于 TronGrid API，免费免 Key）。
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 
@@ -20,6 +21,42 @@ import requests
 
 
 DEFAULT_RPS = 5.0  # 保守速率，TronGrid 免费档 15 req/s
+
+# Tron 地址 base58 字母表
+_TRON_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _hex_to_base58(hex_addr: str) -> str:
+    """将 TRON 事件的 hex 地址（0x...，20 字节）转成 base58 地址。
+
+    events API 的 result.from/to 是 hex（不带 0x41 前缀），
+    而交易所钱包表 / 合约地址是 base58（T...），需转换后才有意义。
+    转换失败返回原值。
+    """
+    if not hex_addr:
+        return hex_addr
+    h = hex_addr.strip().removeprefix("0x").removeprefix("0X")
+    if len(h) == 40:  # 20 字节，补 0x41 前缀
+        h = "41" + h
+    try:
+        raw = bytes.fromhex(h)
+    except ValueError:
+        return hex_addr
+    # base58check：sha256x2 前 4 字节作校验
+    checksum = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[:4]
+    payload = raw + checksum
+    num = int.from_bytes(payload, "big")
+    res = ""
+    while num > 0:
+        num, rem = divmod(num, 58)
+        res = _TRON_ALPHABET[rem] + res
+    # 前置零字节
+    for c in payload:
+        if c == 0:
+            res = "1" + res
+        else:
+            break
+    return res
 
 
 class TronClient:
@@ -72,18 +109,24 @@ class TronClient:
 
     # ── 代币元数据 ─────────────────────────────────────────
     def get_token_decimals(self, contract_address: str) -> int:
-        """查询 TRC-20 代币精度（decimals），带缓存。"""
+        """查询 TRC-20 代币精度（decimals），带缓存。
+
+        使用 /v1/trc20/info 端点（contract_list 查询），失败回退 6。
+        """
         if contract_address in self._decimals_cache:
             return self._decimals_cache[contract_address]
 
-        data = self._get(f"/v1/contracts/{contract_address}")
+        data = self._get("/v1/trc20/info", {"contract_list": contract_address})
         if data and data.get("data"):
             info = data["data"][0] if isinstance(data["data"], list) else data["data"]
-            decimals = info.get("decimals", 0)
-            if decimals is not None:
-                self._decimals_cache[contract_address] = int(decimals)
-                return int(decimals)
-        return 6  # TRC-20 默认 6 位精度（多数 USDT 类代币），回退值
+            try:
+                decimals = int(info.get("decimals", 0))
+                self._decimals_cache[contract_address] = decimals
+                return decimals
+            except (TypeError, ValueError):
+                pass
+        self._decimals_cache[contract_address] = 6  # TRC-20 默认 6 位精度
+        return 6
 
     # ── 大额转账 ───────────────────────────────────────────
     def get_token_transfers(
@@ -129,9 +172,14 @@ class TronClient:
             ts = str(ev.get("block_timestamp", 0))
 
             # Tron Transfer 事件: indexed topics: from, to; data: value
+            # 注意：events 返回的 from/to 是 hex（0x...），需转 base58 才能与
+            # 交易所钱包表（T... base58）匹配。
             from_addr = result.get("from") or result.get("0", "")
             to_addr = result.get("to") or result.get("1", "")
             raw_value = result.get("value") or result.get("2", "0")
+
+            from_addr = _hex_to_base58(str(from_addr))
+            to_addr = _hex_to_base58(str(to_addr))
 
             if not from_addr or not to_addr:
                 continue

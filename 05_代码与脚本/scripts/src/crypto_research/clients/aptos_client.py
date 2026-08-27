@@ -1,12 +1,12 @@
 """
-Aptos 链上客户端（基于 Aptos 公共全节点 API，免费免 Key）。
+Aptos 链上客户端（基于 Aptos Indexer GraphQL + 公共全节点兜底）。
 
 封装 Coin 转账查询，供大额转账监控使用：
   - get_token_transfers(coin_type, ...) → 近期 Coin Transfer 事件
 
 数据源：
-  - Aptos 公共全节点: https://fullnode.mainnet.aptoslabs.com/v1
-  - 备选: https://aptos-mainnet.publicnode.com
+  - Aptos Indexer GraphQL: https://api.mainnet.aptoslabs.com/v1/graphql（fungible_asset_activities，首选）
+  - 备选: https://fullnode.mainnet.aptoslabs.com/v1
 
 返回格式与 EtherscanClient.get_token_transfers 对齐。
 """
@@ -14,12 +14,13 @@ Aptos 链上客户端（基于 Aptos 公共全节点 API，免费免 Key）。
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 
 import requests
 
 
-DEFAULT_RPS = 3.0  # Aptos 公共 API 保守速率
+DEFAULT_RPS = 2.0  # Aptos Indexer 保守速率（匿名 IP 限流 40k compute units / 300s）
 
 
 class AptosClient:
@@ -44,6 +45,10 @@ class AptosClient:
             "https://fullnode.mainnet.aptoslabs.com/v1",
             "https://aptos-mainnet.publicnode.com",
         ]
+
+    @property
+    def _graphql_url(self) -> str:
+        return "https://api.mainnet.aptoslabs.com/v1/graphql"
 
     @property
     def _current_rpc(self) -> str:
@@ -82,6 +87,29 @@ class AptosClient:
                         self._next_rpc()
                     continue
                 print(f"  [aptos] API 请求失败 {path}: {e}")
+                return None
+        return None
+
+    def _graphql(self, query: str, retries: int = 4) -> dict[str, Any] | None:
+        """Aptos Indexer GraphQL POST。失败返回 None。"""
+        self._rate_limit()
+        for attempt in range(retries):
+            try:
+                resp = self.session.post(self._graphql_url, json={"query": query}, timeout=60)
+                if resp.status_code in (408, 429, 502, 503):
+                    time.sleep(3 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if "errors" in data:
+                    print(f"  [aptos] GraphQL 错误: {data['errors'][0].get('message', '')[:120]}")
+                    return None
+                return data
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(3 * (attempt + 1))
+                    continue
+                print(f"  [aptos] GraphQL 失败: {e}")
                 return None
         return None
 
@@ -131,13 +159,13 @@ class AptosClient:
         """获取 Aptos Coin 近期转账交易。
 
         接口与 EtherscanClient.get_token_transfers 对齐，返回字段：
-          hash, blockNumber(str=version), timeStamp(str=unix_us),
+          hash, blockNumber(str=version), timeStamp(str=unix_ms),
           from, to, value(str=base units), tokenDecimal(str),
           contractAddress, tokenName, tokenSymbol
 
-        通过 Aptos 全节点 API 查询 Coin 转账事件。
+        通过 Aptos Indexer GraphQL 的 fungible_asset_activities 查询（首选），
+        若 coin_type 不是完整的 address::module::name 格式或查询失败，返回空列表。
         page=2 时返回空（增量）。
-        若 coin_type 不是完整的 address::module::name 格式，返回空列表。
         """
         if page > 1:
             return []
@@ -148,20 +176,87 @@ class AptosClient:
         limit = min(offset, 50)
         decimals = self.get_token_decimals(coin_type)
 
-        # Aptos 的 Coin 转账事件句柄: 0x1::coin::CoinStore<CoinType>
-        # 转账事件类型: 0x1::coin::WithdrawEvent + 0x1::coin::DepositEvent
-        # 这里用事件 API 查询，获取最近的 deposit/withdraw 事件
-        transfers: list[dict] = []
+        # 用 Indexer GraphQL 按 coin_type 精确过滤（性能与命中率远优于全量 /transactions 筛）
+        query = (
+            '{ fungible_asset_activities('
+            'where: {asset_type: {_eq: "%s"}, is_gas_fee: {_eq: false}, is_transaction_success: {_eq: true}},'
+            'order_by: {transaction_version: desc}, limit: %d)'
+            '{ transaction_version transaction_timestamp asset_type amount owner_address type } }'
+        ) % (coin_type, limit)
 
-        # 方法：查询最近的交易版本，从中提取 coin 转账
-        # 使用 /transactions?limit=N 然后过滤
-        data = self._get("/transactions", {
-            "limit": limit,
-            "start": max(0, start_block - 1) if start_block > 0 else None,
-        })
+        data = self._graphql(query)
+
+        # Indexer 不可用（限流/超时）时回退到全节点 /transactions 事件解析
+        if not data or "data" not in data:
+            return self._get_transfers_fullnode(coin_type, limit, decimals)
+
+        transfers: list[dict] = []
+        acts = data["data"].get("fungible_asset_activities") or []
+        for a in acts:
+            version = str(a.get("transaction_version", 0))
+            # transaction_timestamp 形如 "2026-08-27T06:46:32"，转成 unix 毫秒
+            ts_ms = 0
+            raw_ts = a.get("transaction_timestamp") or ""
+            try:
+                ts_ms = int(datetime.fromisoformat(raw_ts.replace("Z", "+00:00")).timestamp() * 1000)
+            except (ValueError, TypeError):
+                ts_ms = 0
+
+            amount = a.get("amount", 0)
+            owner = (a.get("owner_address") or "").strip()
+            ev_type = a.get("type") or ""
+
+            # amount 为带符号净变化：Deposit 事件 >0（接收方），Withdraw <0（发送方）
+            try:
+                amt = int(amount)
+            except (TypeError, ValueError):
+                amt = 0
+
+            if not owner:
+                continue
+
+            if "WithdrawEvent" in ev_type or amt < 0:
+                transfers.append({
+                    "hash": str(version),
+                    "blockNumber": version,
+                    "timeStamp": str(ts_ms),
+                    "from": owner,
+                    "to": "",
+                    "value": str(abs(amt)),
+                    "tokenDecimal": str(decimals),
+                    "contractAddress": coin_type,
+                    "tokenName": "",
+                    "tokenSymbol": "",
+                })
+            elif "DepositEvent" in ev_type or amt > 0:
+                transfers.append({
+                    "hash": str(version),
+                    "blockNumber": version,
+                    "timeStamp": str(ts_ms),
+                    "from": "",
+                    "to": owner,
+                    "value": str(abs(amt)),
+                    "tokenDecimal": str(decimals),
+                    "contractAddress": coin_type,
+                    "tokenName": "",
+                    "tokenSymbol": "",
+                })
+
+        if sort == "desc":
+            transfers.sort(key=lambda x: int(x["blockNumber"] or 0), reverse=True)
+        elif sort == "asc":
+            transfers.sort(key=lambda x: int(x["blockNumber"] or 0))
+        return transfers
+
+    def _get_transfers_fullnode(
+        self, coin_type: str, limit: int, decimals: int
+    ) -> list[dict]:
+        """回退方案：全节点 /transactions 事件解析（命中率低，仅作兜底）。"""
+        data = self._get("/transactions", {"limit": limit})
         if not data or not isinstance(data, list):
             return []
 
+        transfers: list[dict] = []
         for tx in data:
             tx_hash = tx.get("hash", "")
             version = str(tx.get("version", "0"))
@@ -208,11 +303,6 @@ class AptosClient:
                         "tokenName": "",
                         "tokenSymbol": "",
                     })
-
-        if sort == "desc":
-            transfers.sort(key=lambda x: int(x["blockNumber"]), reverse=True)
-        elif sort == "asc":
-            transfers.sort(key=lambda x: int(x["blockNumber"]))
         return transfers
 
 

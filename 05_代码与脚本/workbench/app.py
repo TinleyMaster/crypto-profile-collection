@@ -657,6 +657,26 @@ def api_market_volume():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/overview")
+def api_market_overview():
+    """大盘模块总览：维度2（BTC/ETH 盘面）+ ETHBTC 风险偏好开关。"""
+    try:
+        from ethbtc_market import get_ethbtc_overview
+
+        ethbtc = get_ethbtc_overview()
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "dimension_2_btc_eth": {
+                    "ethbtc": ethbtc,
+                },
+            },
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

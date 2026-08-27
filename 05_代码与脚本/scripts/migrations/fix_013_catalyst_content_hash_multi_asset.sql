@@ -15,14 +15,13 @@ COMMENT ON COLUMN biz.asset_catalyst.content_hash
     IS '内容哈希（sha256 of 归一化title+正文前200字），用于跨源去重';
 
 -- 唯一索引：同内容只存一条（允许多来源合并）
+-- 注意：不加 WHERE 子句，否则 ON CONFLICT (content_hash) 无法推断仲裁索引
 CREATE UNIQUE INDEX IF NOT EXISTS uq_asset_catalyst_content_hash
-    ON biz.asset_catalyst (content_hash)
-    WHERE content_hash IS NOT NULL;
+    ON biz.asset_catalyst (content_hash);
 
 -- 加速按 hash 查找
 CREATE INDEX IF NOT EXISTS idx_asset_catalyst_content_hash
-    ON biz.asset_catalyst (content_hash)
-    WHERE content_hash IS NOT NULL;
+    ON biz.asset_catalyst (content_hash);
 
 -- ============================================================
 -- 第二步：多资产关联表（一篇催化剂 → 多个资产）
@@ -68,16 +67,19 @@ SET source_codes = ARRAY[source_code]
 WHERE source_codes IS NULL;
 
 -- 回填 content_hash（对 title + body_text 前 200 字归一化后算 sha256）
+-- 用内置 sha256(bytea) 函数，无需 pgcrypto 扩展
 UPDATE biz.asset_catalyst
 SET content_hash = ENCODE(
-    DIGEST(
-        LOWER(
-            REGEXP_REPLACE(
-                COALESCE(title, '') || '|' || COALESCE(LEFT(body_text, 200), ''),
-                '\s+', ' ', 'g'
-            )
-        ),
-        'sha256'
+    SHA256(
+        CONVERT_TO(
+            LOWER(
+                REGEXP_REPLACE(
+                    COALESCE(title, '') || '|' || COALESCE(LEFT(body_text, 200), ''),
+                    '\s+', ' ', 'g'
+                )
+            ),
+            'UTF8'
+        )
     ),
     'hex'
 )

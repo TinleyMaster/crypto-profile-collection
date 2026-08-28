@@ -6571,6 +6571,48 @@
                 <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
             </div>`;
 
+            // 背离检测卡（P1-2：健康/危险/背离）
+            const divSignals = (data.divergence_signals || {}).signals || [];
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">🛰️</span>
+                    <span class="dim-card-title">背离检测</span>
+                    <span class="dim-card-score neutral">健康/危险</span>
+                </div>
+                <div class="dim-metrics">`;
+            if (divSignals.length) {
+                divSignals.forEach(function (s) {
+                    const label = s.label || 'DEGRADED';
+                    let cls = 'up', badge = '健康';
+                    if (label === 'DANGEROUS') { cls = 'down'; badge = '危险'; }
+                    else if (label === 'DIVERGENT') { cls = 'neutral'; badge = '背离'; }
+                    else if (label === 'DEGRADED') { badge = '⚠️ 缺失'; }
+                    const m = s.metrics || {};
+                    const mTxt = Object.entries(m)
+                        .filter(function (kv) { return kv[1] !== null && kv[1] !== undefined; })
+                        .map(function (kv) {
+                            const k = kv[0], v = kv[1];
+                            if (typeof v === 'number') {
+                                if (Math.abs(v) >= 1e9) return k + ': $' + (v / 1e9).toFixed(2) + 'B';
+                                if (Math.abs(v) >= 1e6) return k + ': $' + (v / 1e6).toFixed(1) + 'M';
+                                if (Math.abs(v) < 0.01 && v !== 0) return k + ': ' + v.toExponential(2);
+                                return k + ': ' + v.toFixed(2);
+                            }
+                            return k + ': ' + v;
+                        })
+                        .join(' · ');
+                    html += `<div class="dim-metric-row">
+                        <span class="dim-metric-label">${s.icon || ''} ${s.name || s.signal} <small style="color:#6b7280">${mTxt}</small></span>
+                        <span class="dim-metric-val ${cls}">${badge}</span>
+                    </div>`;
+                    html += `<div class="dim-conclusion" style="margin-top:2px;padding-top:2px;border-top:none;font-size:11px">${s.interpretation || '数据缺失，无法解读'}</div>`;
+                });
+            } else {
+                html += `<div class="dim-metric-row"><span class="dim-metric-label">背离检测</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
+            }
+            html += `</div>
+            </div>`;
+
             // 事件日历（独立信息栏，不参与子分）
             const eventCal = data.event_calendar || {};
             html += `<div class="dim-card">

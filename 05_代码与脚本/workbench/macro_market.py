@@ -220,6 +220,7 @@ def fetch_binance_btc_klines() -> dict:
             "ma50": ma50,
             "high_24h": _safe_float(data[-1][2]),
             "low_24h": _safe_float(data[-1][3]),
+            "closes": closes,
             "status": "ok",
         }
     except Exception as e:
@@ -606,6 +607,412 @@ def fetch_chain_flow() -> dict:
     }
 
 
+# ══════════════════════════════════════════════════════════════
+# P1-2 背离检测引擎（健康 vs 危险 vs 背离）
+# ══════════════════════════════════════════════════════════════
+
+# 背离标签阈值（P2-4 外置 market_rules.yaml 前的默认值）
+DIVERGENCE_THRESHOLDS = {
+    "oi_surge_pct": 30.0,           # OI 7d 变化 > +30% = 暴增（杠杆过热）
+    "oi_flat_pct": 10.0,            # OI 7d 变化 < +10% = 平稳（现货推动）
+    "oi_drop_pct": -10.0,           # OI 7d 变化 < -10% = 明显收缩（去杠杆）
+    "price_up_pct": 1.0,            # 7d 价涨判定
+    "price_down_pct": -1.0,         # 7d 价跌判定
+    "funding_extreme": 0.0005,      # 单期 funding(8h) 绝对值 > 0.05% = 极端
+    "price_stagnation_pct": 5.0,    # 7d 价变化 < 5% 视为滞涨
+    "stablecoin_flow_min_usd": 5_000_000_000,  # 稳定币 7d 净流显著阈值（50 亿美元）
+    "corr_strong": 0.6,             # 30d Pearson |r| > 0.6 强耦合
+    "corr_decouple": 0.2,           # 30d Pearson r < 0.2 脱钩
+    "corr_prior": 0.5,              # 60d 历史相关性基线（曾强相关）
+}
+
+DIVERGENCE_META = {
+    "price_oi": {"label": "价格 vs OI", "icon": "⚖️"},
+    "price_funding": {"label": "价格 vs funding", "icon": "🔥"},
+    "price_stablecoin": {"label": "价格 vs 稳定币净流", "icon": "💰"},
+    "btc_nasdaq": {"label": "BTC vs 纳指", "icon": "🌐"},
+}
+
+
+def _pct_change(first: float, last: float) -> float | None:
+    """计算百分比变化（%），first<=0 返回 None。"""
+    if first is None or last is None:
+        return None
+    if first == 0:
+        return None
+    return (last - first) / first * 100
+
+
+def _pearson(a: list[float], b: list[float]) -> float | None:
+    """两序列同尾对齐后的 Pearson 相关系数（纯 Python 实现）。"""
+    n = min(len(a), len(b))
+    if n < 5:
+        return None
+    a = a[-n:]
+    b = b[-n:]
+    ma = sum(a) / n
+    mb = sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va == 0 or vb == 0:
+        return None
+    return cov / ((va * vb) ** 0.5)
+
+
+def _daily_returns(closes: list[float]) -> list[float]:
+    return [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes)) if closes[i - 1]]
+
+
+def _fetch_binance_oi_history(days: int = 30) -> dict:
+    """Binance fapi 日频未平仓合约历史。返回 {status, series: [{date, oi}]}。"""
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"{BINANCE_FAPI}/futures/data/openInterestHist",
+                params={"symbol": "BTCUSDT", "period": "1d", "limit": days},
+                timeout=TIMEOUT,
+            )
+            r.raise_for_status()
+            rows = r.json()
+            series = sorted(
+                (
+                    {"date": int(row["timestamp"] // 1000), "oi": _safe_float(row.get("sumOpenInterest"))}
+                    for row in rows
+                    if row.get("sumOpenInterest") is not None
+                ),
+                key=lambda x: x["date"],
+            )
+            if not series:
+                return {"status": "error", "error": "empty", "series": []}
+            return {"status": "ok", "series": series}
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5)
+    return {"status": "error", "error": str(last_err), "series": []}
+
+
+def _fetch_binance_funding_history(limit: int = 100) -> dict:
+    """Binance fapi 历史 funding rate（8h 一期）。返回 {status, rates: [...]}。"""
+    try:
+        r = requests.get(
+            f"{BINANCE_FAPI}/fapi/v1/fundingRate",
+            params={"symbol": "BTCUSDT", "limit": limit},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        rates = [
+            _safe_float(row.get("fundingRate"))
+            for row in rows
+            if row.get("fundingRate") is not None
+        ]
+        if not rates:
+            return {"status": "error", "error": "empty", "rates": []}
+        return {"status": "ok", "rates": rates}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "rates": []}
+
+
+def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
+    """DeFiLlama 稳定币总流通量日频序列。返回 {status, series: [{date, supply}]}。"""
+    try:
+        r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
+        r.raise_for_status()
+        rows = r.json()
+        series = []
+        for row in rows:
+            usd = (row.get("totalCirculating") or {}).get("peggedUSD")
+            if usd is None:
+                continue
+            series.append({"date": int(row["date"]), "supply": _safe_float(usd)})
+        if not series:
+            return {"status": "error", "error": "empty", "series": []}
+        return {"status": "ok", "series": series[-days:]}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "series": []}
+
+
+def _yf_closes(symbol: str, days: int = 45) -> list[float] | None:
+    """yfinance 拉日频收盘序列（主源，Zeabur 美区直连稳定）。失败返回 None。"""
+    try:
+        import yfinance as yf
+
+        for attempt in range(3):
+            try:
+                df = yf.download(
+                    symbol,
+                    period=f"{days}d",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+                if df is not None and not df.empty:
+                    closes = [float(v) for v in df["Close"].dropna().tolist()]
+                    if len(closes) >= 2:
+                        return closes
+            except Exception:
+                pass
+            time.sleep(1.5)
+        return None
+    except Exception:
+        return None
+
+
+def _stooq_closes(symbol: str) -> list[float] | None:
+    """stooq 日频 CSV 兜底（yfinance 限流时使用）。失败返回 None。"""
+    try:
+        r = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=TIMEOUT)
+        r.raise_for_status()
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        closes: list[float] = []
+        for line in lines[1:]:
+            parts = line.split(",")
+            if len(parts) >= 5 and parts[4] not in ("", "null"):
+                try:
+                    closes.append(float(parts[4]))
+                except ValueError:
+                    pass
+        return closes[-45:] if closes else None
+    except Exception:
+        return None
+
+
+def _yahoo_chart_closes(symbol: str, rng: str = "1mo") -> list[float] | None:
+    """直接调 Yahoo Finance chart API（免 crumb，比 yfinance 更稳），失败返回 None。"""
+    sym = symbol.replace("^", "%5E")
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            r = requests.get(
+                f"https://{host}/v8/finance/chart/{sym}",
+                params={"range": rng, "interval": "1d"},
+                timeout=TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            r.raise_for_status()
+            res = r.json().get("chart", {}).get("result")
+            if not res or not res[0].get("timestamp"):
+                continue
+            closes = [
+                c for c in (res[0].get("indicators", {}).get("quote", [{}])[0].get("close") or [])
+                if c is not None
+            ]
+            if len(closes) >= 2:
+                return closes
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_nasdaq_gold() -> dict:
+    """纳指 + 黄金日频序列。返回 {status, nasdaq, gold}。yfinance 主源，Yahoo chart API 兜底。"""
+    nasdaq = _yf_closes("^IXIC") or _yahoo_chart_closes("^IXIC") or _stooq_closes("^ndx")
+    gold = _yf_closes("GC=F") or _yahoo_chart_closes("GC=F") or _stooq_closes("gc.f")
+    if not nasdaq and not gold:
+        return {"status": "error", "error": "no cross-asset data", "nasdaq": [], "gold": []}
+    status = "ok" if nasdaq and gold else "partial"
+    return {"status": status, "nasdaq": nasdaq or [], "gold": gold or []}
+
+
+def detect_price_oi_divergence(btc_closes: list[float], oi_series: list[dict], t: dict | None = None) -> dict:
+    """价格 vs OI 背离：价涨 OI 不涨=现货推动健康；价涨 OI 暴增=杠杆过热危险。"""
+    t = t or DIVERGENCE_THRESHOLDS
+    if not btc_closes or len(btc_closes) < 8 or not oi_series or len(oi_series) < 8:
+        return {"signal": "price_oi", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格/OI 数据不足，无法检测", "metrics": {}}
+    price_pct = _pct_change(btc_closes[-8], btc_closes[-1])
+    oi_now = oi_series[-1]["oi"]
+    oi_prev = oi_series[-8]["oi"]
+    oi_pct = _pct_change(oi_prev, oi_now)
+    metrics = {"price_7d_pct": round(price_pct or 0, 2), "oi_7d_pct": round(oi_pct or 0, 2)}
+
+    if price_pct is None or oi_pct is None:
+        return {"signal": "price_oi", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格/OI 变化无法计算", "metrics": metrics}
+
+    if price_pct >= t["price_up_pct"]:
+        if oi_pct >= t["oi_surge_pct"]:
+            label = "DANGEROUS"
+            interp = f"价涨 {price_pct:.1f}% 但 OI 暴增 {oi_pct:.1f}%：杠杆过热，回撤风险高"
+        elif oi_pct >= t["oi_flat_pct"]:
+            label = "HEALTHY"
+            interp = f"价涨 {price_pct:.1f}% + OI 温和增 {oi_pct:.1f}%：资金推动健康"
+        else:
+            label = "HEALTHY"
+            interp = f"价涨 {price_pct:.1f}% + OI 未跟涨 {oi_pct:.1f}%：现货推动，杠杆不拥挤"
+    elif price_pct <= t["price_down_pct"]:
+        if oi_pct <= t["oi_drop_pct"]:
+            label = "HEALTHY"
+            interp = f"价跌 {price_pct:.1f}% + OI 收缩 {oi_pct:.1f}%：去杠杆释放风险"
+        elif oi_pct >= t["oi_surge_pct"]:
+            label = "DANGEROUS"
+            interp = f"价跌 {price_pct:.1f}% 但 OI 暴增 {oi_pct:.1f}%：杠杆堆积未出清，下跌风险延续"
+        else:
+            label = "DIVERGENT"
+            interp = f"价跌 {price_pct:.1f}% 但 OI 基本未动 {oi_pct:.1f}%：空头被动持仓，警惕急拉"
+    else:
+        if oi_pct >= t["oi_surge_pct"]:
+            label = "DANGEROUS"
+            interp = f"价横盘 {price_pct:.1f}% + OI 暴增 {oi_pct:.1f}%：杠杆潜伏，随时放大波动"
+        else:
+            label = "HEALTHY"
+            interp = f"价横盘 {price_pct:.1f}% + OI {oi_pct:.1f}%：中性"
+    return {"signal": "price_oi", "label": label, "status": "ok", "interpretation": interp, "metrics": metrics}
+
+
+def detect_price_funding_divergence(btc_closes: list[float], rates: list[float], t: dict | None = None) -> dict:
+    """价格 vs funding：极端正 funding + 价滞涨 = 挤仓风险；负 funding + 价滞涨 = 逼空风险。"""
+    t = t or DIVERGENCE_THRESHOLDS
+    if not btc_closes or len(btc_closes) < 8 or not rates:
+        return {"signal": "price_funding", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格/funding 数据不足，无法检测", "metrics": {}}
+    price_pct = _pct_change(btc_closes[-8], btc_closes[-1])
+    funding = rates[-1]
+    funding_7d_avg = sum(rates[-21:]) / len(rates[-21:]) if len(rates) >= 21 else funding
+    metrics = {
+        "price_7d_pct": round(price_pct or 0, 2),
+        "funding_latest": funding,
+        "funding_7d_avg": round(funding_7d_avg, 6),
+    }
+    if price_pct is None:
+        return {"signal": "price_funding", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格变化无法计算", "metrics": metrics}
+
+    if funding > t["funding_extreme"]:
+        if abs(price_pct) < t["price_stagnation_pct"]:
+            label = "DANGEROUS"
+            interp = f"funding {funding * 100:.3f}%/期 极端多头 + 价滞涨 {price_pct:.1f}%：多头拥挤，挤压/回撤风险"
+        else:
+            label = "DIVERGENT"
+            interp = f"funding {funding * 100:.3f}%/期 极端正 + 价仍涨 {price_pct:.1f}%：过热但趋势未破，警惕顶部"
+    elif funding < -t["funding_extreme"]:
+        if abs(price_pct) < t["price_stagnation_pct"]:
+            label = "DIVERGENT"
+            interp = f"funding {funding * 100:.3f}%/期 极端负 + 价滞涨 {price_pct:.1f}%：空头拥挤，逼空风险"
+        else:
+            label = "HEALTHY"
+            interp = f"funding {funding * 100:.3f}%/期 极端负 + 价跌 {price_pct:.1f}%：空头主导出清"
+    else:
+        label = "HEALTHY"
+        interp = f"funding {funding * 100:.3f}%/期 正常区间：无极端仓位拥挤"
+    return {"signal": "price_funding", "label": label, "status": "ok", "interpretation": interp, "metrics": metrics}
+
+
+def detect_price_stablecoin_divergence(btc_closes: list[float], sc_series: list[dict], t: dict | None = None) -> dict:
+    """价格 vs 稳定币净流：价涨但稳定币净流出=存量博弈；价稳但稳定币净流入=场外弹药积累。"""
+    t = t or DIVERGENCE_THRESHOLDS
+    if not btc_closes or len(btc_closes) < 8 or not sc_series or len(sc_series) < 8:
+        return {"signal": "price_stablecoin", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格/稳定币数据不足，无法检测", "metrics": {}}
+    price_pct = _pct_change(btc_closes[-8], btc_closes[-1])
+    sc_now = sc_series[-1]["supply"]
+    sc_prev = sc_series[-8]["supply"]
+    netflow = sc_now - sc_prev
+    flow_pct = _pct_change(sc_prev, sc_now)
+    metrics = {
+        "price_7d_pct": round(price_pct or 0, 2),
+        "stablecoin_supply": round(sc_now, 0),
+        "stablecoin_7d_netflow_usd": round(netflow, 0),
+        "stablecoin_7d_pct": round(flow_pct or 0, 3),
+    }
+    if price_pct is None or sc_prev == 0:
+        return {"signal": "price_stablecoin", "label": "DEGRADED", "status": "error",
+                "interpretation": "价格/稳定币变化无法计算", "metrics": metrics}
+
+    flow_b = netflow / 1e9
+    if price_pct >= t["price_up_pct"]:
+        if netflow < -t["stablecoin_flow_min_usd"]:
+            label = "DIVERGENT"
+            interp = f"价涨 {price_pct:.1f}% 但稳定币净流出 {flow_b:+.1f}B：存量博弈，上涨或虚"
+        else:
+            label = "HEALTHY"
+            interp = f"价涨 {price_pct:.1f}% + 稳定币净流 {flow_b:+.1f}B：场外弹药充足"
+    elif price_pct <= t["price_down_pct"]:
+        if netflow > t["stablecoin_flow_min_usd"]:
+            label = "HEALTHY"
+            interp = f"价跌 {price_pct:.1f}% 但稳定币净流入 {flow_b:+.1f}B：场外弹药积累，左侧信号"
+        else:
+            label = "DIVERGENT"
+            interp = f"价跌 {price_pct:.1f}% + 稳定币净流出 {flow_b:+.1f}B：抛压延续"
+    else:
+        if netflow > t["stablecoin_flow_min_usd"]:
+            label = "HEALTHY"
+            interp = f"价横盘 {price_pct:.1f}% + 稳定币净流入 {flow_b:+.1f}B：蓄势待发"
+        else:
+            label = "HEALTHY"
+            interp = f"价横盘 {price_pct:.1f}%，稳定币净流 {flow_b:+.1f}B 中性"
+    return {"signal": "price_stablecoin", "label": label, "status": "ok", "interpretation": interp, "metrics": metrics}
+
+
+def detect_btc_nasdaq_divergence(
+    btc_closes: list[float], nasdaq_closes: list[float], gold_closes: list[float], t: dict | None = None
+) -> dict:
+    """BTC vs 纳指 30d 相关性/背离（yfinance 主源）。曾强相关后脱钩=宏观脱钩独立行情。"""
+    t = t or DIVERGENCE_THRESHOLDS
+    if not btc_closes or len(btc_closes) < 10 or not nasdaq_closes or len(nasdaq_closes) < 10:
+        return {"signal": "btc_nasdaq", "label": "DEGRADED", "status": "error",
+                "interpretation": "纳指/黄金序列缺失（yfinance 不可达），无法检测", "metrics": {}}
+    btc_ret = _daily_returns(btc_closes)
+    ndx_ret = _daily_returns(nasdaq_closes)
+    r30 = _pearson(btc_ret[-30:], ndx_ret[-30:])
+    r60 = _pearson(btc_ret[-60:], ndx_ret[-60:]) if len(btc_ret) >= 60 and len(ndx_ret) >= 60 else r30
+    gold_ret = _daily_returns(gold_closes) if len(gold_closes) >= 10 else []
+    r30_gold = _pearson(btc_ret[-30:], gold_ret[-30:]) if len(gold_ret) >= 30 else None
+    metrics = {
+        "nasdaq_30d_corr": round(r30, 3) if r30 is not None else None,
+        "nasdaq_60d_corr": round(r60, 3) if r60 is not None else None,
+        "gold_30d_corr": round(r30_gold, 3) if r30_gold is not None else None,
+    }
+    if r30 is None:
+        return {"signal": "btc_nasdaq", "label": "DEGRADED", "status": "error",
+                "interpretation": "相关性序列不足", "metrics": metrics}
+
+    if r60 is not None and r60 >= t["corr_prior"] and r30 < t["corr_decouple"]:
+        label = "DIVERGENT"
+        interp = f"BTC-纳指 30d 相关 {r30:.2f}（60d 曾 {r60:.2f}）：宏观脱钩，独立行情"
+    elif abs(r30) >= t["corr_strong"]:
+        label = "HEALTHY"
+        interp = f"BTC-纳指 30d 相关 {r30:.2f}：强耦合，受宏观风险偏好驱动"
+    elif r30 < t["corr_decouple"]:
+        label = "DIVERGENT"
+        interp = f"BTC-纳指 30d 相关 {r30:.2f}：低相关，加密独立行情"
+    else:
+        label = "HEALTHY"
+        interp = f"BTC-纳指 30d 相关 {r30:.2f}：中性耦合"
+    return {"signal": "btc_nasdaq", "label": label, "status": "ok", "interpretation": interp, "metrics": metrics}
+
+
+def build_divergence_signals() -> dict:
+    """编排四对背离检测，输出 {status, degraded, signals}。单源失败降级标注不中断。"""
+    btc = fetch_binance_btc_klines()
+    btc_closes = btc.get("closes") or []
+    oi = _fetch_binance_oi_history()
+    funding = _fetch_binance_funding_history()
+    sc = _fetch_stablecoin_supply_history()
+    cross = _fetch_nasdaq_gold()
+
+    detectors = [
+        detect_price_oi_divergence(btc_closes, oi.get("series") or []),
+        detect_price_funding_divergence(btc_closes, funding.get("rates") or []),
+        detect_price_stablecoin_divergence(btc_closes, sc.get("series") or []),
+        detect_btc_nasdaq_divergence(btc_closes, cross.get("nasdaq") or [], cross.get("gold") or []),
+    ]
+    # 补充分类元信息
+    for s in detectors:
+        meta = DIVERGENCE_META.get(s["signal"], {})
+        s["name"] = meta.get("label", s["signal"])
+        s["icon"] = meta.get("icon", "📡")
+
+    ok_count = sum(1 for s in detectors if s["status"] == "ok")
+    degraded = [s["signal"] for s in detectors if s["status"] != "ok"]
+    status = "ok" if ok_count == len(detectors) else ("partial" if ok_count > 0 else "error")
+    return {"status": status, "degraded": degraded, "signals": detectors}
+
+
 def fetch_event_calendar() -> dict:
     """获取事件日历（硬编码 FOMC + CoinGecko events）。仅展示，不参与子分。"""
     # 硬编码重要事件
@@ -891,6 +1298,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     chain_flow = fetch_chain_flow()
     narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
 
+    # ── P1-2 背离检测（价格/OI、价格/funding、价格/稳定币、BTC/纳指） ──
+    divergence = build_divergence_signals()
+
     # ── 计算子分 ──
     emotion_subscore = compute_emotion_subscore(
         fear_greed=fear_greed,
@@ -956,6 +1366,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             },
         },
         "event_calendar": event_calendar,
+        "divergence_signals": divergence,
         "fetched_at": int(now),
     }
 

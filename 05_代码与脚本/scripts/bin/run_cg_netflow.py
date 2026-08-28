@@ -3,7 +3,7 @@
 CoinGlass 净流抓取器 Python 封装。
 
 功能：
-  1. 调用 node cg_netflow_scraper.js 抓取 CoinGlass 净流数据
+  1. 调用 cg_netflow_scraper.py 抓取 CoinGlass 净流数据（Python Playwright，复用容器 chromium）
   2. 读取 cg_netflow_latest.json
   3. 输出结构化净流信号（净流入 TOP5、净流出 TOP5、全网净流）
 
@@ -22,13 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCRAPER_JS = SCRIPT_DIR / "cg_netflow_scraper.js"
+SCRAPER_PY = SCRIPT_DIR / "cg_netflow_scraper.py"
 OUTPUT_JSON = SCRIPT_DIR / "cg_netflow_latest.json"
 
 
 def run_scraper(timeout: int = 120) -> int:
-    """调用 node cg_netflow_scraper.js 抓取数据。"""
-    cmd = ["node", str(SCRAPER_JS)]
+    """调用 cg_netflow_scraper.py 抓取数据。"""
+    cmd = [sys.executable, "-u", str(SCRAPER_PY)]
     print(f"[fetch] 执行: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, cwd=str(SCRIPT_DIR), timeout=timeout)
@@ -39,7 +39,7 @@ def run_scraper(timeout: int = 120) -> int:
         print(f"[ERROR] 抓取器超时 ({timeout}s)", file=sys.stderr)
         return 1
     except FileNotFoundError:
-        print("[ERROR] 未找到 node 或 cg_netflow_scraper.js", file=sys.stderr)
+        print(f"[ERROR] 未找到 {SCRAPER_PY.name}", file=sys.stderr)
         return 1
 
 

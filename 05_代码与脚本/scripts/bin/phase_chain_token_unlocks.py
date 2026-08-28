@@ -483,7 +483,8 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
         ov = result["overview"]
         next_val = ov.get("next_unlock_value_str")
         next_amt = ov.get("next_unlock_amount_str")
-        if next_val or next_amt:
+        next_pct_mcap = ov.get("next_unlock_pct_mcap")
+        if next_val or next_amt or next_pct_mcap:
             upcoming = [e for e in events if e.get("is_upcoming")]
             if upcoming:
                 # 取日期最早的 upcoming 事件（最近的一次解锁）
@@ -499,6 +500,10 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
                     target["value_usd"] = _parse_value_str(next_val)
                 if next_amt and not target.get("amount_str"):
                     target["amount_str"] = next_amt
+                # P2-1: overview 的 % of MCAP 摊到 upcoming 事件
+                if next_pct_mcap and not target.get("pct"):
+                    target["pct"] = next_pct_mcap
+                    target["ratio_mcap"] = True
 
         # ── Step 3: 可选爬取 revenue / valuation 子页面 ──
         if include_extras:
@@ -708,15 +713,20 @@ def _extract_unlocks_overview(page) -> dict:
     m = re.search(r'Next\s+Unlock\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})', full_text)
     if m:
         ov["next_unlock_date"] = m.group(1)
-    m = re.search(r'USD\s*Value\s*\$([\d.]+[BMK]?)', full_text)
+    # P1-2: 放宽正则 — 兼容 "USD Value $32.2M" / "Value $32.2M" / "USDValue$32.2M" 等变体
+    m = re.search(r'(?:USD\s*)?Value\s*\$([\d,.]+[BMKbmk]?)', full_text)
     if m:
         ov["next_unlock_value_str"] = "$" + m.group(1)
-    m = re.search(r'Tokens\s*([\d.]+[BMK]?)', full_text)
+    m = re.search(r'Tokens?\s*([\d,.]+[BMKbmk]?)', full_text)
     if m:
         ov["next_unlock_amount_str"] = m.group(1)
     m = re.search(r'%\s*of\s*Supply\s*([\d.]+)%', full_text)
     if m:
         ov["next_unlock_pct"] = float(m.group(1))
+    # P2-1: % of MCAP
+    m = re.search(r'%\s*of\s*MCAP\s*([\d.]+)%', full_text)
+    if m:
+        ov["next_unlock_pct_mcap"] = float(m.group(1))
 
     return ov
 
@@ -1378,6 +1388,11 @@ def ensure_table(conn) -> None:
         cur.execute(
             "ALTER TABLE biz.asset_token_unlocks "
             "ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ DEFAULT NOW()"
+        )
+        # P2-1: 解锁占市值百分比（主源 tokenomics.com 的 % of MCAP）
+        cur.execute(
+            "ALTER TABLE biz.asset_token_unlocks "
+            "ADD COLUMN IF NOT EXISTS unlock_ratio_mcap NUMERIC"
         )
     conn.commit()
 

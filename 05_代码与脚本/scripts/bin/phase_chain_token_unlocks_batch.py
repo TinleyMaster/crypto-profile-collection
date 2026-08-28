@@ -31,6 +31,18 @@ from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 
 
+_PENDING_EXCLUDE = """
+            AND NOT EXISTS (
+                SELECT 1 FROM biz.asset_token_unlocks u
+                WHERE u.asset_id = a.asset_id
+                  AND (u.crawl_status = 'ok'
+                       OR (u.crawl_status = 'not_found'
+                           AND u.last_attempt_at > NOW() - INTERVAL '30 day')
+                       OR (u.crawl_status = 'fail_timeout'
+                           AND u.last_attempt_at > NOW() - INTERVAL '7 day')))
+"""
+
+
 def get_pending_assets(conn, limit: int) -> list[dict]:
     """获取有 CG 映射但尚无解锁数据的资产列表。
 
@@ -38,10 +50,11 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
     提升 tokenomics.com 命中率和批量成功率。
 
     P1-1: not_found 墓碑 30 天冷却；parse_empty 视为待重试（不阻塞）。
+    隐患1: fail_timeout 墓碑 7 天冷却，避免主流币反复超时浪费配额。
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
                    asm.source_asset_key AS coingecko_id
             FROM core.asset a
@@ -55,12 +68,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
               AND asm.source_asset_key IS NOT NULL
               AND a.asset_type != 'stablecoin'
               AND a.primary_sector != 'meme'
-              AND NOT EXISTS (
-                  SELECT 1 FROM biz.asset_token_unlocks u
-                  WHERE u.asset_id = a.asset_id
-                    AND (u.crawl_status = 'ok'
-                         OR (u.crawl_status = 'not_found'
-                             AND u.last_attempt_at > NOW() - INTERVAL '30 day')))
+              {_PENDING_EXCLUDE}
             ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
             LIMIT %s
             """,
@@ -72,7 +80,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
 def get_total_pending(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT a.asset_id)
             FROM core.asset a
             JOIN (
@@ -85,15 +93,45 @@ def get_total_pending(conn) -> int:
               AND asm.source_asset_key IS NOT NULL
               AND a.asset_type != 'stablecoin'
               AND a.primary_sector != 'meme'
-              AND NOT EXISTS (
-                  SELECT 1 FROM biz.asset_token_unlocks u
-                  WHERE u.asset_id = a.asset_id
-                    AND (u.crawl_status = 'ok'
-                         OR (u.crawl_status = 'not_found'
-                             AND u.last_attempt_at > NOW() - INTERVAL '30 day')))
+              {_PENDING_EXCLUDE}
             """
         )
         return cur.fetchone()[0]
+
+
+def _mark_fail_timeout(conn, asset_id: int) -> None:
+    """写入 fail_timeout 墓碑：timeout 失败后冷却 7 天，避免主流币反复超时。
+
+    不覆盖已有的 ok / not_found 记录。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM biz.asset_token_unlocks "
+            "WHERE asset_id = %s AND crawl_status IN ('ok', 'not_found')",
+            (asset_id,),
+        )
+        if cur.fetchone():
+            return
+        cur.execute(
+            """
+            INSERT INTO biz.asset_token_unlocks (
+                asset_id, source_url, source_name, slug,
+                overview_json, unlock_events_json, revenue_json, valuation_json,
+                scraped_at, updated_at, crawl_status, last_attempt_at
+            ) VALUES (
+                %s, NULL, 'unknown', NULL,
+                '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                NOW(), NOW(), 'fail_timeout', NOW()
+            )
+            ON CONFLICT (asset_id) DO UPDATE SET
+                crawl_status = 'fail_timeout',
+                last_attempt_at = NOW(),
+                updated_at = NOW()
+            """,
+            (asset_id,),
+        )
+    conn.commit()
+    print(f"    -> 已写入 fail_timeout 墓碑 (asset_id={asset_id})")
 
 
 def run_single(asset_id: int, timeout: int = 60, allow_browser_search: bool = False) -> tuple[str, str]:
@@ -179,7 +217,8 @@ def main():
     print("代币解锁数据批量采集")
     print("=" * 60)
 
-    with get_connection(settings.database_url) as conn:
+    conn = get_connection(settings.database_url)
+    try:
         total_pending = get_total_pending(conn)
         limit = args.limit if args.limit > 0 else total_pending
         print(f"待采集总数: {total_pending}，本次处理: {limit}")
@@ -193,52 +232,60 @@ def main():
             print("无待采集资产")
             return 0
 
-    success = 0
-    fail = 0
-    not_found = 0
-    t0 = time.time()
+        success = 0
+        fail = 0
+        not_found = 0
+        t0 = time.time()
 
-    for i, asset in enumerate(assets, 1):
-        asset_id = asset["asset_id"]
-        symbol = asset.get("symbol", "?")
-        print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
-              end="", flush=True)
+        for i, asset in enumerate(assets, 1):
+            asset_id = asset["asset_id"]
+            symbol = asset.get("symbol", "?")
+            print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
+                  end="", flush=True)
 
-        # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
-        allow_browser = (i % 50 == 0)
-        status, info = run_single(asset_id, timeout=args.timeout,
-                                  allow_browser_search=allow_browser)
-        if status == "ok":
-            success += 1
-            print(f"OK ({info})")
-        elif status == "not_found":
-            not_found += 1
-            print(f"NOT_FOUND ({info})")
-        else:
-            fail += 1
-            print(f"FAIL ({info})")
+            # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
+            allow_browser = (i % 50 == 0)
+            status, info = run_single(asset_id, timeout=args.timeout,
+                                      allow_browser_search=allow_browser)
+            if status == "ok":
+                success += 1
+                print(f"OK ({info})")
+            elif status == "not_found":
+                not_found += 1
+                print(f"NOT_FOUND ({info})")
+            else:
+                fail += 1
+                print(f"FAIL ({info})")
+                # 隐患1: timeout 失败写墓碑，7 天冷却避免反复超时
+                if info == "timeout":
+                    try:
+                        _mark_fail_timeout(conn, asset_id)
+                    except Exception as e:
+                        print(f"    -> 写入 fail_timeout 失败: {e}")
 
-        if i < len(assets) and args.delay > 0:
-            time.sleep(args.delay)
+            if i < len(assets) and args.delay > 0:
+                time.sleep(args.delay)
 
-        # 每 20 个打印一次进度摘要
-        if i % 20 == 0:
-            elapsed = time.time() - t0
-            rate = i / elapsed if elapsed > 0 else 0
-            eta = (len(assets) - i) / rate if rate > 0 else 0
-            print(f"  -- 进度 {i}/{len(assets)} ({i/len(assets)*100:.1f}%), "
-                  f"成功 {success}, not_found {not_found}, 失败 {fail}, "
-                  f"速度 {rate*60:.1f}/h, 预计剩余 {eta/60:.1f}min --")
+            # 每 20 个打印一次进度摘要
+            if i % 20 == 0:
+                elapsed = time.time() - t0
+                rate = i / elapsed if elapsed > 0 else 0
+                eta = (len(assets) - i) / rate if rate > 0 else 0
+                print(f"  -- 进度 {i}/{len(assets)} ({i/len(assets)*100:.1f}%), "
+                      f"成功 {success}, not_found {not_found}, 失败 {fail}, "
+                      f"速度 {rate*60:.1f}/h, 预计剩余 {eta/60:.1f}min --")
 
-    elapsed = time.time() - t0
-    print("\n" + "=" * 60)
-    print(f"全部完成，耗时 {elapsed:.1f}s ({elapsed/60:.1f}min)")
-    print(f"总计: 成功 {success}, not_found {not_found}, 失败 {fail}")
-    print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
-    print("=" * 60)
+        elapsed = time.time() - t0
+        print("\n" + "=" * 60)
+        print(f"全部完成，耗时 {elapsed:.1f}s ({elapsed/60:.1f}min)")
+        print(f"总计: 成功 {success}, not_found {not_found}, 失败 {fail}")
+        print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
+        print("=" * 60)
 
-    # P2-5: fail > 0 返回 1，让调度器能感知失败率
-    return 1 if fail > 0 else 0
+        # P2-5: fail > 0 返回 1，让调度器能感知失败率
+        return 1 if fail > 0 else 0
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

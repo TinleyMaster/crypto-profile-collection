@@ -2974,6 +2974,14 @@
             margin-top: 6px;
         }
 
+        .dim-section-label {
+            margin-top: 8px;
+            margin-bottom: 2px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #f0b90b;
+        }
+
         @media (max-width: 1200px) {
             .main-layout {
                 grid-template-columns: 1fr;
@@ -6516,6 +6524,53 @@
                 <div class="dim-conclusion">权重覆盖: ${(structure.available_weight * 100).toFixed(0)}%</div>
             </div>`;
             
+            // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）
+            const dim5 = (data.dimensions || {})['5板块'] || {};
+            const dim5data = dim5.data || {};
+            const narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
+            const chainFlow = (dim5data.chain_flow_ranking || {}).ranked || [];
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">🔄</span>
+                    <span class="dim-card-title">板块资金净流入</span>
+                    <span class="dim-card-score neutral">7d 视角</span>
+                </div>
+                <div class="dim-metrics">`;
+            if (narrFlow.length) {
+                html += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}）</div>`;
+                narrFlow.forEach(function (n) {
+                    const cls = n.composite_score >= 0 ? 'up' : 'down';
+                    const sign = n.composite_score >= 0 ? '+' : '';
+                    const tvlTxt = n.tvl_change_7d_pct != null
+                        ? ` TVL ${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%`
+                        : '';
+                    const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
+                    html += `<div class="dim-metric-row">
+                        <span class="dim-metric-label">${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
+                        <span class="dim-metric-val ${cls}">${sign}${n.composite_score.toFixed(1)}%${tvlTxt}</span>
+                    </div>`;
+                });
+            } else {
+                html += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
+            }
+            if (chainFlow.length) {
+                html += `<div class="dim-section-label">链净流入 TOP5</div>`;
+                chainFlow.forEach(function (c) {
+                    const cls = c.flow_7d >= 0 ? 'up' : 'down';
+                    const sign = c.flow_7d >= 0 ? '+' : '';
+                    const flowStr = '$' + (Math.abs(c.flow_7d) / 1e9).toFixed(2) + 'B';
+                    html += `<div class="dim-metric-row">
+                        <span class="dim-metric-label">${c.chain}</span>
+                        <span class="dim-metric-val ${cls}">${sign}${flowStr} (${c.flow_7d_pct >= 0 ? '+' : ''}${c.flow_7d_pct.toFixed(1)}%)</span>
+                    </div>`;
+                });
+            } else {
+                html += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
+            }
+            html += `</div>
+                <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
+            </div>`;
+
             // 事件日历（独立信息栏，不参与子分）
             const eventCal = data.event_calendar || {};
             html += `<div class="dim-card">

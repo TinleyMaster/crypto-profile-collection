@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 # ── 数据源配置 ──
@@ -18,6 +19,7 @@ BINANCE_BASE = "https://api.binance.com"
 BINANCE_FAPI = "https://fapi.binance.com"
 COINMETRICS_BASE = "https://community-api.coinmetrics.io"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
 
 # ── 权重配置（P2-4 接 yaml 外置） ──
@@ -39,6 +41,36 @@ STRUCTURE_WEIGHTS = {
 _cache: dict[str, Any] = {}
 _cache_ts: float = 0
 CACHE_TTL = 180  # 3 分钟缓存
+
+# ── P1-1 资金净流入：叙事榜配置 ──
+# 关注的 CMC 叙事分类（无 TVL 赛道（Meme/L1 等）仅用市值变化，有 TVL 赛道与 DeFiLlama 加权合成）
+NARRATIVE_WATCHLIST = [
+    "Layer 1", "Layer 2", "DeFi", "Memes", "AI & Big Data", "Real World Assets",
+    "Gaming", "DePIN", "Liquid Staking", "Lending", "Derivatives", "Yield Farming",
+    "Restaking", "Bridges", "Stablecoin", "NFTs & Collectibles", "Metaverse",
+    "Privacy", "Oracles", "File Storage", "Zero Knowledge", "SocialFi",
+]
+# CMC 叙事分类名 → DeFiLlama category（有 TVL 腿才合成）
+NARRATIVE_TVL_MAP = {
+    "Lending": "Lending",
+    "Dexes": "Dexs",
+    "DEX": "Dexs",
+    "Derivatives": "Derivatives",
+    "Liquid Staking": "Liquid Staking",
+    "Liquid Staking Derivatives": "Liquid Staking",
+    "Restaking": "Restaking",
+    "Bridges": "Bridge",
+    "Bridging": "Bridge",
+    "Real World Assets": "RWA",
+    "RWA": "RWA",
+    "Yield Farming": "Yield",
+    "Staking": "Staking Pool",
+    "CDP": "CDP",
+    "Yield Aggregator": "Yield Aggregator",
+}
+NARRATIVE_TOP_N = 15      # 最多拉取 detail 聚合的叙事数（受 CMC 限流约束）
+TVL_LEG_MIN = 50_000_000  # TVL 腿阈值：低于此视为无有效 TVL，仅用市值变化
+CHAIN_TOP_N = 30          # 链榜扫描的 top 链数（按当前 TVL）
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -322,6 +354,258 @@ def fetch_cmc_categories() -> dict:
         return {"status": "error", "error": str(e)}
 
 
+# ══════════════════════════════════════════════════════════════
+# P1-1 板块/链资金净流入（7d 视角）
+# ══════════════════════════════════════════════════════════════
+
+def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int]:
+    """
+    通过 CMC category detail 聚合成分币的 7d 市值变化%（真实 7d 视角）。
+    返回 (change_pct, used, total)，change_pct 为 None 表示聚合失败/数据不足。
+    """
+    try:
+        r = requests.get(
+            f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/category",
+            params={"id": category_id},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json().get("data", {})
+        coins = data.get("coins", []) or []
+        cur = 0.0
+        prev = 0.0
+        used = 0
+        for c in coins:
+            q = (c.get("quote") or {}).get("USD") or {}
+            mcap = q.get("market_cap")
+            p7 = q.get("percent_change_7d")
+            if mcap is None or p7 is None:
+                continue
+            p7f = _safe_float(p7)
+            if p7f <= -100:
+                continue  # 价格归零，避免除零
+            mcapf = _safe_float(mcap)
+            cur += mcapf
+            prev += mcapf / (1 + p7f / 100)
+            used += 1
+        if prev > 0 and used >= max(1, len(coins) // 2):
+            return (cur - prev) / prev * 100, used, len(coins)
+        return None, used, len(coins)
+    except Exception:
+        return None, 0, 0
+
+
+def fetch_category_flow() -> dict:
+    """
+    CMC categories 7d 市值变化%（叙事榜 mcap 腿）。
+    返回 {status, ranked: [{narrative, cmc_category, market_cap, mcap_change_7d_pct, mcap_period}], degraded}。
+    detail 聚合失败时降级用 list 的 market_cap_change（24h）并标记 mcap_period='24h_fallback'。
+    """
+    try:
+        r = requests.get(
+            f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/categories",
+            params={"limit": 500},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        cats = r.json().get("data", [])
+    except Exception as e:
+        return {"status": "error", "error": str(e), "ranked": [], "degraded": []}
+
+    wanted: dict[str, dict] = {}
+    # 两遍匹配：先精确、后前缀，避免前缀误配（如 Gaming 匹配到 Gaming Guild）
+    for c in cats:
+        name = (c.get("name") or "").strip().lower()
+        for w in NARRATIVE_WATCHLIST:
+            if name == w.lower() and w not in wanted:
+                wanted[w] = c
+    for c in cats:
+        name = (c.get("name") or "").strip().lower()
+        for w in NARRATIVE_WATCHLIST:
+            if w not in wanted and name.startswith(w.lower()):
+                wanted[w] = c
+    if not wanted:
+        return {"status": "ok", "ranked": [], "degraded": [], "note": "no watchlist category matched"}
+
+    # 按市值取 top N，优先计算大盘叙事
+    selected = sorted(wanted.items(), key=lambda x: -_safe_float(x[1].get("market_cap")))[:NARRATIVE_TOP_N]
+
+    def work(item: tuple[str, dict]) -> dict:
+        w, c = item
+        change, used, total = _cmc_category_7d_flow(c["id"])
+        period = "7d" if change is not None else "24h_fallback"
+        if change is None:
+            change = c.get("market_cap_change")  # 24h 兜底，避免整条丢失
+        return {
+            "narrative": w,
+            "cmc_category": c.get("name"),
+            "market_cap": _safe_float(c.get("market_cap")),
+            "mcap_change_7d_pct": round(change, 2) if change is not None else None,
+            "mcap_period": period,
+        }
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        ranked = list(ex.map(work, selected))
+
+    degraded = [item["narrative"] for item in ranked if item["mcap_period"] == "24h_fallback"]
+
+    return {"status": "ok", "ranked": ranked, "degraded": degraded}
+
+
+def fetch_category_tvl_flow() -> dict:
+    """
+    DeFiLlama /protocols 按 category 聚合 7d TVL 变化%（叙事榜 TVL 腿）。
+    /categories 已 402 付费墙，改聚合免费 /protocols（每条含 category/tvl/change_7d）。
+    返回 {status, categories: {cat: {tvl, tvl_change_7d_pct, protocols}}}。
+    """
+    try:
+        r = requests.get(f"{DL_BASE}/protocols", timeout=TIMEOUT)
+        r.raise_for_status()
+        prots = r.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "categories": {}}
+
+    agg: dict[str, dict] = {}
+    for p in prots:
+        cat = p.get("category") or "Unknown"
+        tvl = _safe_float(p.get("tvl"))
+        ch7 = p.get("change_7d")
+        e = agg.setdefault(cat, {"tvl": 0.0, "wsum": 0.0, "n": 0})
+        e["tvl"] += tvl
+        if ch7 is not None:
+            e["wsum"] += _safe_float(ch7) * tvl
+            e["n"] += 1
+
+    categories: dict[str, dict] = {}
+    for cat, e in agg.items():
+        tvl = e["tvl"]
+        change = (e["wsum"] / tvl) if tvl > 0 else 0.0
+        categories[cat] = {
+            "tvl": tvl,
+            "tvl_change_7d_pct": round(change, 2),
+            "protocols": e["n"],
+        }
+    return {"status": "ok", "categories": categories}
+
+
+def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
+    """
+    合成叙事榜：有 TVL 腿（映射命中且 TVL≥阈值）= 市值变化 0.5 + TVL 变化 0.5；
+    无 TVL 腿（Meme/L1 等）= 仅市值变化。按合成值降序取前 10。
+    返回 {status, ranked, degraded}。
+    """
+    tvl_cats = tvl_flow.get("categories", {}) if tvl_flow.get("status") == "ok" else {}
+    ranked: list[dict] = []
+    for item in cat_flow.get("ranked", []):
+        mcap7 = item.get("mcap_change_7d_pct")
+        if mcap7 is None:
+            continue
+        dl_cat = NARRATIVE_TVL_MAP.get(item["narrative"])
+        tvl_info = tvl_cats.get(dl_cat) if dl_cat else None
+        if tvl_info and tvl_info.get("tvl", 0) >= TVL_LEG_MIN:
+            composite = 0.5 * mcap7 + 0.5 * tvl_info["tvl_change_7d_pct"]
+            mode = "blended"
+        else:
+            composite = mcap7
+            mode = "mcap_only"
+        ranked.append({
+            "narrative": item["narrative"],
+            "composite_score": round(composite, 2),
+            "mode": mode,
+            "mcap_change_7d_pct": mcap7,
+            "mcap_period": item.get("mcap_period"),
+            "tvl_change_7d_pct": tvl_info["tvl_change_7d_pct"] if tvl_info else None,
+            "tvl_usd": tvl_info["tvl"] if tvl_info else None,
+            "market_cap": item.get("market_cap"),
+        })
+
+    ranked.sort(key=lambda x: -x["composite_score"])
+    degraded = list(cat_flow.get("degraded", []))
+    status = "ok"
+    if not ranked:
+        status = "error"
+    elif degraded or tvl_flow.get("status") != "ok":
+        status = "partial"
+    return {"ranked": ranked[:10], "status": status, "degraded": degraded}
+
+
+def _chain_7d_flow(chain_ident: str) -> dict | None:
+    """拉取单链日频 TVL 历史，差分最新 vs 约 7 天前，返回 {tvl, tvl_prev_week, flow_7d, flow_7d_pct}。"""
+    try:
+        r = requests.get(f"{DL_BASE}/v2/historicalChainTvl/{chain_ident}", timeout=TIMEOUT)
+        r.raise_for_status()
+        hist = r.json()
+        if not isinstance(hist, list):
+            return None
+        pts = [p for p in hist if isinstance(p, dict) and p.get("tvl") is not None]
+        if len(pts) < 2:
+            return None
+        latest_date = max(p["date"] for p in pts)
+        latest = max(p for p in pts if p["date"] == latest_date)
+        target = latest_date - 7 * 86400
+        candidates = [p for p in pts if p["date"] <= target]
+        prev = min(candidates, key=lambda p: target - p["date"]) if candidates else pts[0]
+        tvl_now = _safe_float(latest["tvl"])
+        tvl_prev = _safe_float(prev["tvl"])
+        flow = tvl_now - tvl_prev
+        flow_pct = (flow / tvl_prev * 100) if tvl_prev > 0 else 0.0
+        return {"tvl": tvl_now, "tvl_prev_week": tvl_prev, "flow_7d": flow, "flow_7d_pct": round(flow_pct, 2)}
+    except Exception:
+        return None
+
+
+def fetch_chain_flow() -> dict:
+    """
+    DeFiLlama 链净流入榜 TOP5。/v2/chains 无 tvlPrevWeek 字段（实测），
+    改为对 top 链逐一拉 /v2/historicalChainTvl 差分 7d 净流入。
+    返回 {status, ranked: [{chain, tvl, flow_7d, flow_7d_pct}], degraded_count, scanned}。
+    """
+    try:
+        r = requests.get(f"{DL_BASE}/v2/chains", timeout=TIMEOUT)
+        r.raise_for_status()
+        chains = r.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "ranked": [], "degraded_count": 0, "scanned": 0}
+
+    top = sorted(chains, key=lambda x: -(x.get("tvl") or 0))[:CHAIN_TOP_N]
+
+    def work(c: dict) -> dict | None:
+        # 历史端点用链显示名（实测 BSC/Polygon/Avalanche 的 gecko_id 不可用，name 可用）
+        ident = c.get("name") or c.get("gecko_id")
+        if not ident:
+            return None
+        info = _chain_7d_flow(ident)
+        if info is None:
+            return {
+                "chain": c.get("name"),
+                "tvl": _safe_float(c.get("tvl")),
+                "flow_7d": None,
+                "flow_7d_pct": None,
+                "degraded": True,
+            }
+        return {
+            "chain": c.get("name"),
+            "tvl": info["tvl"],
+            "tvl_prev_week": info["tvl_prev_week"],
+            "flow_7d": info["flow_7d"],
+            "flow_7d_pct": info["flow_7d_pct"],
+            "degraded": False,
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = [x for x in ex.map(work, top) if x]
+
+    valid = [x for x in results if x.get("flow_7d") is not None]
+    valid.sort(key=lambda x: -x["flow_7d"])
+    degraded_count = sum(1 for x in results if x.get("degraded"))
+    return {
+        "status": "ok",
+        "ranked": valid[:5],
+        "degraded_count": degraded_count,
+        "scanned": len(results),
+    }
+
+
 def fetch_event_calendar() -> dict:
     """获取事件日历（硬编码 FOMC + CoinGecko events）。仅展示，不参与子分。"""
     # 硬编码重要事件
@@ -601,6 +885,12 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     categories = fetch_cmc_categories()
     event_calendar = fetch_event_calendar()
 
+    # ── P1-1 板块/链资金净流入（7d 视角） ──
+    cat_flow = fetch_category_flow()
+    tvl_flow = fetch_category_tvl_flow()
+    chain_flow = fetch_chain_flow()
+    narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
+
     # ── 计算子分 ──
     emotion_subscore = compute_emotion_subscore(
         fear_greed=fear_greed,
@@ -652,8 +942,17 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                 "data": etf_flows,
             },
             "5板块": {
-                "status": categories.get("status", "error"),
-                "data": categories,
+                "status": (
+                    "ok"
+                    if narrative_flow.get("ranked") or chain_flow.get("ranked")
+                    else ("partial" if cat_flow.get("status") == "ok" or chain_flow.get("status") == "ok" else "error")
+                ),
+                "data": {
+                    "narrative_flow_ranking": narrative_flow,
+                    "chain_flow_ranking": chain_flow,
+                    "narrative_tvl_flow": tvl_flow,
+                    "category_flow": cat_flow,
+                },
             },
         },
         "event_calendar": event_calendar,

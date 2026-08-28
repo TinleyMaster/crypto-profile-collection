@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -68,26 +69,38 @@ class CategoryMemberError(RuntimeError):
 
 
 def _fetch_category_members(client, category_id: str, start: int, limit: int) -> dict:
-    """调用 CMC 单分类成员接口，失败时解析响应体中的 error_message 便于排查。"""
+    """调用 CMC 单分类成员接口，429 限流时指数退避重试，失败时解析 error_message。"""
+    import random as _random
+    import time as _time
+
     import requests as _requests
 
-    try:
-        return client.get_cryptocurrency_category(
-            category_id=category_id, start=start, limit=limit
-        )
-    except _requests.HTTPError as exc:
-        response = getattr(exc, "response", None)
-        status_code = response.status_code if response is not None else 0
-        api_message = ""
-        if response is not None:
-            try:
-                body = response.json()
-                api_message = (body.get("status") or {}).get("error_message") or ""
-            except Exception:
-                api_message = ""
-            if not api_message:
-                api_message = (response.text or "")[:300]
-        raise CategoryMemberError(category_id, status_code, api_message) from exc
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            return client.get_cryptocurrency_category(
+                category_id=category_id, start=start, limit=limit
+            )
+        except _requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status_code = response.status_code if response is not None else 0
+
+            # 429 限流：指数退避重试（客户端 Retry 已试 3 轮，此处再追加 5 轮长等待）
+            if status_code == 429 and attempt < max_retries - 1:
+                wait = 2 ** attempt + _random.uniform(0, 1)
+                _time.sleep(wait)
+                continue
+
+            api_message = ""
+            if response is not None:
+                try:
+                    body = response.json()
+                    api_message = (body.get("status") or {}).get("error_message") or ""
+                except Exception:
+                    api_message = ""
+                if not api_message:
+                    api_message = (response.text or "")[:300]
+            raise CategoryMemberError(category_id, status_code, api_message) from exc
 
 
 def _safe_float(value: Any) -> float | None:
@@ -346,8 +359,10 @@ def ingest_category_members(
             execute_many(conn, upsert_sql, params)
     except Exception as exc:
         _finish_run(conn, run_id, "failed", 0, str(exc))
+        conn.commit()  # 即使失败也 commit run 状态，避免长事务拖死后续分类
         raise
     _finish_run(conn, run_id, "success", len(params))
+    conn.commit()  # 每分类独立 commit，已处理分类不受后续失败/429/连接断影响
     return len(params), response_id
 
 
@@ -413,6 +428,7 @@ def main() -> int:
                     f"  category {cat_id} ({cat['category_name']}): {count} members"
                 )
                 processed += 1
+                time.sleep(0.5)  # 分类间限速，避免触发 CMC 429
             except CategoryMemberError as exc:
                 if exc.status_code == 400:
                     # CMC 列表接口仍返回的"僵尸"分类，单分类接口已不可解析，跳过即可

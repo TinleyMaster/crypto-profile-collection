@@ -33,6 +33,12 @@ def run_scraper(timeout: int = 120) -> int:
     try:
         result = subprocess.run(cmd, cwd=str(SCRIPT_DIR), timeout=timeout)
         if result.returncode != 0:
+            # 非致命降级：scraper 因 capi 节流/空表返回非零，但已写降级 JSON，
+            # 消费侧会正确降级（main_rows==0），不应触发失败告警邮件。
+            if OUTPUT_JSON.exists() and _is_degraded_output():
+                print(f"[WARN] 抓取器降级（数据源限流/空表），已写降级 JSON，exit={result.returncode}",
+                      file=sys.stderr)
+                return 0
             print(f"[ERROR] 抓取器返回非零退出码: {result.returncode}", file=sys.stderr)
         return result.returncode
     except subprocess.TimeoutExpired:
@@ -41,6 +47,16 @@ def run_scraper(timeout: int = 120) -> int:
     except FileNotFoundError:
         print(f"[ERROR] 未找到 {SCRAPER_PY.name}", file=sys.stderr)
         return 1
+
+
+def _is_degraded_output() -> bool:
+    """判断输出 JSON 是否为降级（main_rows==0 或 degraded 标记）。"""
+    try:
+        with open(OUTPUT_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("main_rows", 0) == 0 or bool(data.get("degraded"))
+    except (json.JSONDecodeError, IOError):
+        return False
 
 
 def read_output() -> dict | None:

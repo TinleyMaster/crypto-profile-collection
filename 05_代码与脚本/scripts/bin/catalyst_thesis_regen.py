@@ -12,7 +12,9 @@
 游标机制：
 - 复合键：(ai_processed_at, asset_id)，查询 ORDER BY 与游标同维度
 - 满批（返回 == LIMIT）：游标推进到最后一行的复合键，下次从其后继续
-- 不满批（返回 < LIMIT）：本批处理完，游标推进到 (infinity, 0)，下次取最新
+- 不满批（返回 < LIMIT）：本批处理完，游标推进到本批最后一行的复合键（绝不清空）。
+  清空游标会让下轮重扫近 7 天窗口、把同一批资产反复重生 → 白烧 LLM 额度（DeepSeek 402 根因）
+- 新鲜度闸门：`--fresh-hours`（默认 24h）内已重生过 thesis 的资产直接跳过，兜底防重复
 - 幂等：同一资产多次重生安全（UPSERT 覆盖）
 
 用法：
@@ -20,11 +22,13 @@
     python catalyst_thesis_regen.py --asset-id 123
     python catalyst_thesis_regen.py --hours 24 --max-assets 200  # 临时回溯模式
     python catalyst_thesis_regen.py --reset-cursor              # 重置游标（首次全量用）
+    python catalyst_thesis_regen.py --fresh-hours 0             # 关闭新鲜度闸门
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -97,11 +101,16 @@ def _reset_cursor():
 
 # ── 查询待重生资产（复合游标 + 同维度排序）──
 
-def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bool]:
+def get_assets_cursor(
+    limit: int, fresh_hours: int = 24
+) -> tuple[list[int], str | None, int | None, bool]:
     """基于复合游标找出有新催化剂（AI 已处理）的资产。
 
     返回 (asset_ids, new_last_ts, new_last_asset_id, is_complete)。
     is_complete=True 表示本批已处理完（不满批），下次可直接取最新。
+
+    fresh_hours: 新鲜度闸门——该小时内已重生过 thesis 的资产直接跳过，
+    兜底防止同一资产被反复重生烧 LLM 额度。
     """
     last_ts, last_aid = _load_cursor()
     settings = get_settings(require_database=True)
@@ -118,10 +127,15 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
                     WHERE ac.ai_processed = true
                       AND (ac.ai_processed_at, cal.asset_id) > (%s::timestamptz, %s::bigint)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM biz.research_thesis rt
+                          WHERE rt.asset_id = cal.asset_id
+                            AND rt.updated_at >= NOW() - make_interval(hours => %s)
+                      )
                     ORDER BY ac.ai_processed_at, cal.asset_id
                     LIMIT %s
                     """,
-                    (last_ts, last_aid or 0, limit),
+                    (last_ts, last_aid or 0, fresh_hours, limit),
                 )
             else:
                 # 首次运行（游标为空）：取近 7 天的，避免全量重生
@@ -133,10 +147,15 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
                     WHERE ac.ai_processed = true
                       AND ac.ai_processed_at >= NOW() - INTERVAL '7 days'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM biz.research_thesis rt
+                          WHERE rt.asset_id = cal.asset_id
+                            AND rt.updated_at >= NOW() - make_interval(hours => %s)
+                      )
                     ORDER BY ac.ai_processed_at, cal.asset_id
                     LIMIT %s
                     """,
-                    (limit,),
+                    (fresh_hours, limit),
                 )
             rows = cur.fetchall()
 
@@ -152,7 +171,7 @@ def get_assets_cursor(limit: int) -> tuple[list[int], str | None, int | None, bo
     return asset_ids, new_ts, new_aid, is_complete
 
 
-def get_assets_hours(hours: int, limit: int) -> list[int]:
+def get_assets_hours(hours: int, limit: int, fresh_hours: int = 24) -> list[int]:
     """基于滑动窗口（回溯模式，不影响游标）。"""
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
@@ -163,11 +182,16 @@ def get_assets_hours(hours: int, limit: int) -> list[int]:
                 FROM biz.catalyst_asset_link cal
                 JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
                 WHERE ac.ai_processed = true
-                  AND ac.ai_processed_at >= NOW() - INTERVAL '%s hours'
+                  AND ac.ai_processed_at >= NOW() - make_interval(hours => %s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM biz.research_thesis rt
+                      WHERE rt.asset_id = cal.asset_id
+                        AND rt.updated_at >= NOW() - make_interval(hours => %s)
+                  )
                 ORDER BY cal.asset_id
                 LIMIT %s
                 """,
-                (hours, limit),
+                (hours, fresh_hours, limit),
             )
             rows = cur.fetchall()
     return [r[0] for r in rows]
@@ -185,6 +209,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="催化剂驱动 thesis 重生（DB 复合游标）")
     parser.add_argument("--max-assets", type=int, default=100,
                         help="单轮最多重生多少个资产（默认 100）")
+    parser.add_argument("--fresh-hours", type=int, default=24,
+                        help="新鲜度闸门：N 小时内已重生 thesis 的资产跳过（默认 24，0=关闭）")
     parser.add_argument("--asset-id", type=int, default=None,
                         help="指定单个资产 ID 重生（忽略游标）")
     parser.add_argument("--hours", type=int, default=None,
@@ -195,6 +221,7 @@ def main() -> int:
 
     print("=" * 60)
     print("催化剂驱动 thesis 重生")
+    print(f"新鲜度闸门: {args.fresh_hours}h（0=关闭）")
     print("=" * 60)
 
     if args.reset_cursor:
@@ -207,10 +234,12 @@ def main() -> int:
         asset_ids = [args.asset_id]
         print(f"指定资产: {args.asset_id}")
     elif args.hours:
-        asset_ids = get_assets_hours(args.hours, args.max_assets)
+        asset_ids = get_assets_hours(args.hours, args.max_assets, args.fresh_hours)
         print(f"回溯模式：近 {args.hours} 小时 AI 处理完的资产 {len(asset_ids)} 个")
     else:
-        asset_ids, new_ts, new_aid, is_complete = get_assets_cursor(args.max_assets)
+        asset_ids, new_ts, new_aid, is_complete = get_assets_cursor(
+            args.max_assets, args.fresh_hours
+        )
         cur_ts, cur_aid = _load_cursor()
         print(f"游标模式: 上次游标 = ({cur_ts or 'NULL'}, {cur_aid or 'NULL'})")
         print(f"待重生资产: {len(asset_ids)} 个 (本批{'已完' if is_complete else '未完'})")
@@ -239,9 +268,12 @@ def main() -> int:
     # 游标模式下，成功处理后更新游标
     if is_cursor_mode and success > 0:
         if is_complete:
-            # 不满批 = 全部处理完，清空游标，下次从近 7 天重新取（避免 infinity 哨兵）
-            _save_cursor(None, None, success)
-            print(f"\n游标已追平（本批处理完成，游标清空）")
+            # 追平（不满批）：游标推进到本批最后一行的复合键，下次只取之后的新数据。
+            # 绝不清空游标——清空会让下轮重扫近 7 天窗口，同一批资产反复重生，
+            # 每次都是一次 20K+ token 的重型 LLM 调用（DeepSeek 额度暴耗根因）。
+            save_ts = new_ts or datetime.now(timezone.utc).isoformat()
+            _save_cursor(save_ts, new_aid or 0, success)
+            print(f"\n游标已追平（推进到 ({save_ts}, {new_aid or 0})，下次只取新数据）")
         else:
             # 满批 = 还有下一批，游标推进到最后一行
             _save_cursor(new_ts, new_aid, success)

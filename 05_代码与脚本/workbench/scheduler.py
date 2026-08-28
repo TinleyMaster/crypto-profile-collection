@@ -111,7 +111,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底"),
 
     # ═══ 催化剂模块（全链路合并任务，每小时一轮）═══
-    ("catalyst_run_all", "0 * * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每小时）"),
+    ("catalyst_run_all", "0 */6 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 6 小时，DeepSeek 额度告警期间降频）"),
 ]
 
 

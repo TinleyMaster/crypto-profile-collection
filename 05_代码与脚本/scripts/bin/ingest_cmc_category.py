@@ -48,8 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--member-limit",
         type=int,
-        default=5000,
-        help="Page limit for category member endpoint. Default: 5000 (CMC max).",
+        default=100,
+        help="Page limit for category member endpoint. CMC rejects >~100 per request (limit=5000 -> 400); "
+        "100 confirmed working, pagination handles larger categories.",
     )
     return parser
 

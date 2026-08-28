@@ -93,9 +93,11 @@ class CMCClient:
         self,
         category_id: str,
         start: int = 1,
-        limit: int = 5000,
+        limit: int = 100,
         convert: str = "USD",
     ) -> dict[str, Any]:
+        # 注意：CMC 单分类成员端点会拒绝 limit=5000（实测 400），limit=100 已确认可用，
+        # 大分类靠调用方分页（start 递增）取全。
         response = self.session.get(
             f"{self.settings.cmc_base_url}/v1/cryptocurrency/category",
             params={

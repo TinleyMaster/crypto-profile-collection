@@ -626,10 +626,26 @@ DIVERGENCE_THRESHOLDS_DEFAULT = {
     "corr_prior": 0.5,              # 60d 历史相关性基线（曾强相关）
 }
 
+# P1-4 机会评分阈值默认值（P2-4 外置 market_rules.yaml）
+OPPORTUNITY_THRESHOLDS_DEFAULT = {
+    "narrative_min_composite": 8.0,          # 叙事入榜最小合成分
+    "narrative_top_n": 3,                    # 叙事机会最多取前 N
+    "chain_min_flow_usd": 200_000_000,       # 链 7d 净流入阈值（2 亿美元）
+    "chain_min_flow_pct": 3.0,               # 链 7d 净流入百分比阈值
+    "chain_top_n": 3,                        # 链机会最多取前 N
+    "stablecoin_flow_min_usd": 5_000_000_000,  # 稳定币净流入显著阈值（50 亿美元）
+    "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
+    "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
+    "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除）
+}
+
 
 def _load_market_rules() -> dict:
-    """从 market_rules.yaml 加载背离阈值（缺失/解析失败回退默认值，不影响运行）。"""
-    rules = dict(DIVERGENCE_THRESHOLDS_DEFAULT)
+    """从 market_rules.yaml 加载规则（缺失/解析失败回退默认值，不影响运行）。"""
+    rules = {
+        "divergence_thresholds": dict(DIVERGENCE_THRESHOLDS_DEFAULT),
+        "opportunity_thresholds": dict(OPPORTUNITY_THRESHOLDS_DEFAULT),
+    }
     try:
         import yaml
 
@@ -637,19 +653,25 @@ def _load_market_rules() -> dict:
         if not os.path.exists(path):
             return rules
         data = yaml.safe_load(open(path, encoding="utf-8")) or {}
-        overrides = data.get("divergence_thresholds") or {}
-        for k, v in overrides.items():
-            if k in rules:
-                try:
-                    rules[k] = float(v)
-                except (TypeError, ValueError):
-                    pass
+        for section, target in (
+            ("divergence_thresholds", rules["divergence_thresholds"]),
+            ("opportunity_rules", rules["opportunity_thresholds"]),
+        ):
+            overrides = data.get(section) or {}
+            for k, v in overrides.items():
+                if k in target:
+                    try:
+                        target[k] = float(v)
+                    except (TypeError, ValueError):
+                        pass
     except Exception:
         pass
     return rules
 
 
-DIVERGENCE_THRESHOLDS = _load_market_rules()
+_MARKET_RULES = _load_market_rules()
+DIVERGENCE_THRESHOLDS = _MARKET_RULES["divergence_thresholds"]
+OPPORTUNITY_THRESHOLDS = _MARKET_RULES["opportunity_thresholds"]
 
 DIVERGENCE_META = {
     "price_oi": {"label": "价格 vs OI", "icon": "⚖️"},
@@ -1038,6 +1060,204 @@ def build_divergence_signals() -> dict:
     return {"status": status, "degraded": degraded, "signals": detectors}
 
 
+# ══════════════════════════════════════════════════════════════
+# P1-4 机会评分清单（Layer 3 最终交付物）
+# ══════════════════════════════════════════════════════════════
+
+def _fmt_billions(value: float | None) -> str:
+    """格式化美元金额为 +x.xB / -x.xB。"""
+    if value is None:
+        return "N/A"
+    return f"{value / 1e9:+.1f}B"
+
+
+def _resolve_confidence(sources: list[tuple[str, str]], t: dict) -> tuple[str, str]:
+    """
+    共振置信判定（PD-1）：sources = [(source_type, direction), ...]。
+    返回 (confidence, direction)；方向冲突 → (low, neutral)。
+    高 = 独立源类型数 ≥ high_min_sources 且同向；中 = 单强信号。
+    """
+    dirs = {d for _, d in sources}
+    types = {typ for typ, _ in sources}
+    if len(dirs) > 1:
+        return "low", "neutral"
+    direction = next(iter(dirs))
+    n_types = len(types)
+    if n_types >= int(t.get("resonance_high_min_sources", 2)):
+        return "high", direction
+    return "medium", direction
+
+
+def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict], t: dict) -> None:
+    """按推送阈值去噪：仅 高+中 进清单，low 进 excluded（可追溯）。"""
+    threshold = t.get("push_confidence_threshold", "medium")
+    if opp["confidence"] == threshold or opp["confidence"] == "high":
+        opportunities.append(opp)
+    else:
+        excluded.append(opp)
+
+
+def score_opportunities(overview: dict) -> dict:
+    """
+    聚合 P1-1~P1-3 + P0-3 真实字段合成机会清单。
+    返回 {status, opportunities: [{target, direction, confidence, trigger_logic, related_dims}], excluded, degraded}。
+    任一上游信号缺失 → 该机会剔除/降级，不崩溃。
+    """
+    t = OPPORTUNITY_THRESHOLDS
+    d5 = (overview.get("dimensions") or {}).get("5板块") or {}
+    d5data = d5.get("data") or {}
+    narrative = d5data.get("narrative_flow_ranking", {}).get("ranked", []) or []
+    chains = d5data.get("chain_flow_ranking", {}).get("ranked", []) or []
+    divergence = (overview.get("divergence_signals") or {}).get("signals", []) or []
+    emotion = ((overview.get("summary") or {}).get("emotion_subscore") or {})
+    onchain = overview.get("onchain_anomaly_signals")  # P1-3（可能未接入）
+    by_sig = {s.get("signal"): s for s in divergence}
+
+    opportunities: list[dict] = []
+    excluded: list[dict] = []
+    degraded: list[str] = []
+
+    # ── 1) BTC 左侧积累 / 场外弹药（long） ──
+    btc_left_sources: list[tuple[str, str]] = []
+    left_metrics: list[str] = []
+    sc = by_sig.get("price_stablecoin") or {}
+    scm = sc.get("metrics") or {}
+    if sc.get("status") == "ok" and (scm.get("stablecoin_7d_netflow_usd") or 0) >= t["stablecoin_flow_min_usd"]:
+        if (scm.get("price_7d_pct") or 0) < 5.0:  # 价未大涨 + 稳定币净流入 = 弹药积累
+            btc_left_sources.append(("stablecoin_flow", "long"))
+            left_metrics.append(f"稳定币 7d 净流入 {_fmt_billions(scm.get('stablecoin_7d_netflow_usd'))}")
+    emo_score = emotion.get("score")
+    if emo_score is not None and emo_score < t.get("emotion_fear_max", 50):
+        btc_left_sources.append(("emotion", "long"))
+        left_metrics.append(f"恐贪 {emo_score:.0f}（恐惧区）")
+    if onchain:
+        ex = onchain.get("exchange_netflow") or {}
+        if isinstance(ex, dict) and ex.get("status") == "ok":
+            net = ex.get("netflow_7d_usd")
+            if net is not None and net > 0:  # 正 = 交易所净流出（积累）
+                btc_left_sources.append(("exchange_netflow", "long"))
+                left_metrics.append(f"交易所 7d 净流出 {_fmt_billions(net)}")
+    if btc_left_sources:
+        conf, direction = _resolve_confidence(btc_left_sources, t)
+        related = ["P1-2 价格vs稳定币"]
+        if "emotion" in {typ for typ, _ in btc_left_sources}:
+            related.append("P0-3 情绪")
+        if "exchange_netflow" in {typ for typ, _ in btc_left_sources}:
+            related.append("P1-3 交易所净流")
+        trigger = f"{' / '.join(left_metrics)} → 场外弹药积累，左侧布局窗口"
+        _push_opportunity(
+            {"target": "BTC", "direction": direction, "confidence": conf,
+             "trigger_logic": trigger, "related_dims": related},
+            opportunities, excluded, t,
+        )
+
+    # ── 2) 杠杆过热 / 风险规避（short） ──
+    oi_sig = by_sig.get("price_oi") or {}
+    funding_sig = by_sig.get("price_funding") or {}
+    risk_sources: list[tuple[str, str]] = []
+    risk_metrics: list[str] = []
+    oim = oi_sig.get("metrics") or {}
+    if oi_sig.get("status") == "ok" and oi_sig.get("label") == "DANGEROUS":
+        risk_sources.append(("oi", "short"))
+        risk_metrics.append(f"OI 7d {oim.get('oi_7d_pct', 0):+.1f}%")
+    fm = funding_sig.get("metrics") or {}
+    if funding_sig.get("status") == "ok" and funding_sig.get("label") in ("DANGEROUS", "DIVERGENT"):
+        risk_sources.append(("funding", "short"))
+        risk_metrics.append(f"funding {fm.get('funding_latest', 0) * 100:.3f}%/期")
+    if risk_sources:
+        conf, direction = _resolve_confidence(risk_sources, t)
+        trigger = f"{' / '.join(risk_metrics) if risk_metrics else '杠杆信号'} → 杠杆过热，防回撤"
+        _push_opportunity(
+            {"target": "BTC", "direction": direction, "confidence": conf,
+             "trigger_logic": trigger, "related_dims": ["P1-2 价格vs OI", "P1-2 价格vs funding"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 3) 叙事流入（long，TOP N） ──
+    n_top = int(t.get("narrative_top_n", 3))
+    for row in narrative[:n_top]:
+        composite = row.get("composite_score")
+        if composite is None or composite < t.get("narrative_min_composite", 8.0):
+            continue
+        mode = row.get("mode")
+        if mode == "blended":  # CMC 市值 + DL TVL 两独立源同向
+            conf, direction = "high", "long"
+            related = ["P1-1 叙事榜（市值+TVL）"]
+            trigger = (
+                f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}%"
+                f" + TVL {row.get('tvl_change_7d_pct', 0):+.1f}% → 双源资金净流入"
+            )
+        else:
+            conf, direction = "medium", "long"
+            related = ["P1-1 叙事榜（市值）"]
+            trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
+        _push_opportunity(
+            {"target": row.get("narrative"), "direction": direction, "confidence": conf,
+             "trigger_logic": trigger, "related_dims": related},
+            opportunities, excluded, t,
+        )
+
+    # ── 4) 链净流入（long，TOP N） ──
+    c_top = int(t.get("chain_top_n", 3))
+    for row in chains[:c_top]:
+        flow = row.get("flow_7d")
+        flow_pct = row.get("flow_7d_pct")
+        if flow is None or flow_pct is None:
+            continue
+        if flow < t.get("chain_min_flow_usd", 200_000_000) or flow_pct < t.get("chain_min_flow_pct", 3.0):
+            continue
+        _push_opportunity(
+            {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
+             "trigger_logic": f"{row.get('chain')} 链 7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）→ 资金净流入",
+             "related_dims": ["P1-1 链净流入榜"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 5) 宏观脱钩 / 独立行情（neutral） ──
+    ndx_sig = by_sig.get("btc_nasdaq") or {}
+    if ndx_sig.get("status") == "ok" and ndx_sig.get("label") == "DIVERGENT":
+        interp = ndx_sig.get("interpretation", "宏观脱钩")
+        _push_opportunity(
+            {"target": "BTC", "direction": "neutral", "confidence": "medium",
+             "trigger_logic": interp, "related_dims": ["P1-2 BTC vs 纳指"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 6) P1-3 链上异动（若已接入） ──
+    if onchain:
+        protos = (onchain.get("new_protocol_tvl") or {}).get("ranked", []) or []
+        for p in protos[:3]:
+            if not isinstance(p, dict):
+                continue
+            _push_opportunity(
+                {"target": p.get("name") or "新协议", "direction": "long", "confidence": "medium",
+                 "trigger_logic": f"{p.get('name')} 7d TVL {p.get('change_7d_pct') if p.get('change_7d_pct') is not None else '?'}% 异动增长",
+                 "related_dims": ["P1-3 新协议 TVL"]},
+                opportunities, excluded, t,
+            )
+    else:
+        degraded.append("P1-3 链上异动未接入（跳过）")
+
+    if not narrative:
+        degraded.append("P1-1 叙事榜缺失")
+    if not chains:
+        degraded.append("P1-1 链榜缺失")
+    if not divergence:
+        degraded.append("P1-2 背离信号缺失")
+
+    status = "ok"
+    if not opportunities:
+        status = "error" if not degraded else "partial"
+    elif degraded:
+        status = "partial"
+    return {
+        "status": status,
+        "opportunities": opportunities,
+        "excluded": excluded,
+        "degraded": degraded,
+    }
+
+
 def fetch_event_calendar() -> dict:
     """获取事件日历（硬编码 FOMC + CoinGecko events）。仅展示，不参与子分。"""
     # 硬编码重要事件
@@ -1394,6 +1614,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         "divergence_signals": divergence,
         "fetched_at": int(now),
     }
+
+    # ── P1-4 机会清单（消费 P1-1~P1-3 + P0-3 真实字段） ──
+    result["opportunity_list"] = score_opportunities(result)
 
     _cache = result
     _cache_ts = now

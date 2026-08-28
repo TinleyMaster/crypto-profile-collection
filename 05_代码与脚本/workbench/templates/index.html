@@ -6613,6 +6613,36 @@
             html += `</div>
             </div>`;
 
+            // 机会清单卡（P1-4：异常→机会评分）
+            const oppList = (data.opportunity_list || {}).opportunities || [];
+            const oppExcluded = (data.opportunity_list || {}).excluded || [];
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">🎯</span>
+                    <span class="dim-card-title">机会清单</span>
+                    <span class="dim-card-score neutral">高/中置信</span>
+                </div>
+                <div class="dim-metrics">`;
+            if (oppList.length) {
+                oppList.forEach(function (o) {
+                    const confCls = o.confidence === 'high' ? 'up' : (o.confidence === 'medium' ? 'neutral' : 'down');
+                    const dirTxt = o.direction === 'long' ? '多' : o.direction === 'short' ? '空' : '中性';
+                    const dirCls = o.direction === 'long' ? 'up' : o.direction === 'short' ? 'down' : 'neutral';
+                    html += `<div class="dim-metric-row">
+                        <span class="dim-metric-label">${o.target} <small style="color:#6b7280">${o.direction}</small></span>
+                        <span class="dim-metric-val ${dirCls}">${dirTxt} · ${o.confidence}</span>
+                    </div>`;
+                    html += `<div class="dim-conclusion" style="margin-top:2px;padding-top:2px;border-top:none;font-size:11px">${o.trigger_logic || ''} <small style="color:#6b7280">[${(o.related_dims || []).join(', ')}]</small></div>`;
+                });
+            } else {
+                html += `<div class="dim-metric-row"><span class="dim-metric-label">机会清单</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无高置信机会</span></div>`;
+            }
+            if (oppExcluded.length) {
+                html += `<div class="dim-warn">已剔除低置信 ${oppExcluded.length} 条（可追溯）</div>`;
+            }
+            html += `</div>
+            </div>`;
+
             // 事件日历（独立信息栏，不参与子分）
             const eventCal = data.event_calendar || {};
             html += `<div class="dim-card">

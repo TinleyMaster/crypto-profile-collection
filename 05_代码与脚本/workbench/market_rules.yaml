@@ -12,3 +12,14 @@ divergence_thresholds:
   corr_strong: 0.6              # 30d Pearson |r| > 0.6 强耦合
   corr_decouple: 0.2            # 30d Pearson r < 0.2 脱钩
   corr_prior: 0.5               # 60d 历史相关性基线（曾强相关）
+
+opportunity_rules:
+  narrative_min_composite: 8.0          # 叙事入榜最小合成分（低于视为弱信号）
+  narrative_top_n: 3                    # 叙事机会最多取前 N
+  chain_min_flow_usd: 200000000         # 链 7d 净流入阈值（2 亿美元）
+  chain_min_flow_pct: 3.0               # 链 7d 净流入百分比阈值
+  chain_top_n: 3                        # 链机会最多取前 N
+  stablecoin_flow_min_usd: 5000000000   # 稳定币净流入显著阈值（50 亿美元）
+  emotion_fear_max: 50                  # 恐贪 < 50 视为恐惧（左侧信号）
+  resonance_high_min_sources: 2         # 高置信最少独立源类型数
+  push_confidence_threshold: medium     # 默认只推 高+中（low 剔除）

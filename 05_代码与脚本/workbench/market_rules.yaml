@@ -1,0 +1,14 @@
+# 大盘模块规则外置（P2-4 演进目标：评分/背离阈值全外置于此文件）
+# 本文件由 macro_market.py 在启动时加载，缺失或解析失败时回退内置默认值，不影响运行。
+divergence_thresholds:
+  oi_surge_pct: 30.0            # OI 7d 变化 > +30% = 暴增（杠杆过热）
+  oi_flat_pct: 10.0             # OI 7d 变化 < +10% = 平稳（现货推动）
+  oi_drop_pct: -10.0            # OI 7d 变化 < -10% = 明显收缩（去杠杆）
+  price_up_pct: 1.0             # 7d 价涨判定
+  price_down_pct: -1.0          # 7d 价跌判定
+  funding_extreme: 0.0005       # 单期 funding(8h) 绝对值 > 0.05% = 极端
+  price_stagnation_pct: 5.0     # 7d 价变化 < 5% 视为滞涨
+  stablecoin_flow_min_usd: 5000000000   # 稳定币 7d 净流显著阈值（50 亿美元）
+  corr_strong: 0.6              # 30d Pearson |r| > 0.6 强耦合
+  corr_decouple: 0.2            # 30d Pearson r < 0.2 脱钩
+  corr_prior: 0.5               # 60d 历史相关性基线（曾强相关）

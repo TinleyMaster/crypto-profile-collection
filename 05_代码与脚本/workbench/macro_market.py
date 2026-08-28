@@ -173,11 +173,11 @@ def fetch_cryptoetf_cefi() -> dict:
 
 
 def fetch_binance_btc_klines() -> dict:
-    """获取 BTC 日线 K 线（30 天），计算技术指标。返回 {rsi, ma20, ma50, price, ...}。"""
+    """获取 BTC 日线 K 线（90 天），计算技术指标。返回 {rsi, ma20, ma50, price, closes, ...}。"""
     try:
         r = requests.get(
             f"{BINANCE_BASE}/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 60},
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 90},
             timeout=TIMEOUT,
         )
         r.raise_for_status()
@@ -611,8 +611,8 @@ def fetch_chain_flow() -> dict:
 # P1-2 背离检测引擎（健康 vs 危险 vs 背离）
 # ══════════════════════════════════════════════════════════════
 
-# 背离标签阈值（P2-4 外置 market_rules.yaml 前的默认值）
-DIVERGENCE_THRESHOLDS = {
+# 背离标签阈值默认值（P2-4 外置 market_rules.yaml，启动时优先读 yaml）
+DIVERGENCE_THRESHOLDS_DEFAULT = {
     "oi_surge_pct": 30.0,           # OI 7d 变化 > +30% = 暴增（杠杆过热）
     "oi_flat_pct": 10.0,            # OI 7d 变化 < +10% = 平稳（现货推动）
     "oi_drop_pct": -10.0,           # OI 7d 变化 < -10% = 明显收缩（去杠杆）
@@ -625,6 +625,31 @@ DIVERGENCE_THRESHOLDS = {
     "corr_decouple": 0.2,           # 30d Pearson r < 0.2 脱钩
     "corr_prior": 0.5,              # 60d 历史相关性基线（曾强相关）
 }
+
+
+def _load_market_rules() -> dict:
+    """从 market_rules.yaml 加载背离阈值（缺失/解析失败回退默认值，不影响运行）。"""
+    rules = dict(DIVERGENCE_THRESHOLDS_DEFAULT)
+    try:
+        import yaml
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_rules.yaml")
+        if not os.path.exists(path):
+            return rules
+        data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        overrides = data.get("divergence_thresholds") or {}
+        for k, v in overrides.items():
+            if k in rules:
+                try:
+                    rules[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    return rules
+
+
+DIVERGENCE_THRESHOLDS = _load_market_rules()
 
 DIVERGENCE_META = {
     "price_oi": {"label": "价格 vs OI", "icon": "⚖️"},
@@ -734,7 +759,7 @@ def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
         return {"status": "error", "error": str(e), "series": []}
 
 
-def _yf_closes(symbol: str, days: int = 45) -> list[float] | None:
+def _yf_closes(symbol: str, days: int = 90) -> list[float] | None:
     """yfinance 拉日频收盘序列（主源，Zeabur 美区直连稳定）。失败返回 None。"""
     try:
         import yfinance as yf
@@ -777,12 +802,12 @@ def _stooq_closes(symbol: str) -> list[float] | None:
                     closes.append(float(parts[4]))
                 except ValueError:
                     pass
-        return closes[-45:] if closes else None
+        return closes[-90:] if closes else None
     except Exception:
         return None
 
 
-def _yahoo_chart_closes(symbol: str, rng: str = "1mo") -> list[float] | None:
+def _yahoo_chart_closes(symbol: str, rng: str = "3mo") -> list[float] | None:
     """直接调 Yahoo Finance chart API（免 crumb，比 yfinance 更稳），失败返回 None。"""
     sym = symbol.replace("^", "%5E")
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):

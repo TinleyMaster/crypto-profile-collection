@@ -26,6 +26,7 @@ COPY 05_代码与脚本/scripts/migrations /app/scripts/migrations
 
 # 复制 workbench 应用
 COPY 05_代码与脚本/workbench/*.py /app/
+COPY 05_代码与脚本/workbench/market_rules.yaml /app/market_rules.yaml
 COPY 05_代码与脚本/workbench/kol /app/kol
 COPY 05_代码与脚本/workbench/catalyst /app/catalyst
 COPY 05_代码与脚本/workbench/templates /app/templates

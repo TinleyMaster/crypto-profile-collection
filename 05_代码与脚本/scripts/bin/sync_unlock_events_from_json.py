@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,32 +73,51 @@ def _parse_date(val) -> datetime.date | None:
     return None
 
 
-def _to_float(val) -> float | None:
-    if val is None:
+def safe_float(x) -> float | None:
+    """通用安全浮点转换：任何从网页解析的数值字段都走这里，绝不冒泡崩溃。"""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    if not isinstance(x, str):
+        return None
+    x = x.strip().replace(",", "")
+    if not x:
         return None
     try:
-        return float(val)
-    except (ValueError, TypeError):
+        return float(x)
+    except (ValueError, AttributeError):
         return None
+
+
+def _to_float(val) -> float | None:
+    return safe_float(val)
+
+
+# 锚定正则：必须以数字开头，"." / ".." / "abc" 等脏值直接不匹配
+_AMOUNT_RE = re.compile(r'^([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMBTkmbt])?$')
+_AMOUNT_MULT = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
 
 def _parse_token_amount_str(s: str) -> float | None:
-    """解析 '11.2M' / '1.2B' / '100K' 等代币数量字符串为数值。"""
+    """解析 '11.2M' / '1.2B' / '100K' 等代币数量字符串为数值。
+
+    三道守卫：空值直接返回、正则 ^...$ 锚定拦截脏值、float 转换 try 包裹。
+    """
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip()
     if not s:
         return None
-    import re
-    m = re.match(r'^\s*([\d,.]+)\s*([BMKbmk]?)\s*$', str(s).strip())
+    m = _AMOUNT_RE.match(s)
     if not m:
         return None
-    num = float(m.group(1).replace(",", ""))
-    unit = m.group(2).upper()
-    if unit == "B":
-        num *= 1_000_000_000
-    elif unit == "M":
-        num *= 1_000_000
-    elif unit == "K":
-        num *= 1_000
-    return num
+    try:
+        num = float(m.group(1).replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
+    mult = _AMOUNT_MULT.get((m.group(2) or "").upper(), 1)
+    return num * mult
 
 
 def _infer_beneficiary_type(recipients: str) -> str | None:

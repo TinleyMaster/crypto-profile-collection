@@ -34,4 +34,12 @@ WHERE crawl_status = 'ok'
 -- 隐患1: 为 fail_timeout 墓碑预留（代码已支持，此处仅确认列兼容）
 -- crawl_status VARCHAR(20) 已足够存储 'fail_timeout'
 
+-- 二狗 §5(c): 历史 %MCAP 误存残留 — 事件的 ratio_mcap=True（主源语义）但值落到
+-- unlock_ratio_total，迁到 unlock_ratio_mcap；仅处理明确带 ratio_mcap 标记的行，避免误伤。
+UPDATE biz.asset_unlock_event
+SET unlock_ratio_mcap = unlock_ratio_total,
+    unlock_ratio_total = NULL
+WHERE unlock_ratio_total > 1
+  AND (raw_ref->>'ratio_mcap')::text = 'true';
+
 COMMIT;

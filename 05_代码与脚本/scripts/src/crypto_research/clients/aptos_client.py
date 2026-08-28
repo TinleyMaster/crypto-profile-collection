@@ -37,6 +37,7 @@ class AptosClient:
         })
         self._rpc_index = 0
         self._decimals_cache: dict[str, int] = {}
+        self._coin_type_cache: dict[str, str] = {}
 
     # ── RPC 端点 ────────────────────────────────────────────
     @property
@@ -119,12 +120,41 @@ class AptosClient:
         """判断是否为完整的 Aptos coin_type 格式：address::module::name。
 
         数据库中部分 aptos 合约地址只有 0x 地址（缺少 module::struct），
-        这种格式无法用于 CoinInfo / CoinStore API 查询，需跳过。
+        这种格式无法用于 CoinInfo / CoinStore API 查询。
         """
         if not coin_type:
             return False
         parts = coin_type.split("::")
         return len(parts) >= 3 and all(p for p in parts)
+
+    def _resolve_coin_type(self, raw: str) -> str | None:
+        """将纯 0x 地址补全为完整 coin_type。
+
+        asset_contract_map 中部分 aptos 合约地址缺 ::module::struct（如 0x357b0b74...）。
+        这里通过 Indexer 按地址前缀匹配真实 asset_type 补全；失败返回 None。
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        if self._is_valid_coin_type(raw):
+            return raw
+        if raw in self._coin_type_cache:
+            return self._coin_type_cache[raw]
+
+        resolved = None
+        query = (
+            '{ fungible_asset_activities('
+            'where: {asset_type: {_like: "%s::%%"}},'
+            'distinct_on: asset_type, limit: 1)'
+            '{ asset_type } }'
+        ) % raw
+        data = self._graphql(query)
+        if data and "data" in data:
+            rows = (data["data"].get("fungible_asset_activities") or [])
+            if rows:
+                resolved = rows[0].get("asset_type") or None
+        self._coin_type_cache[raw] = resolved or ""
+        return resolved
 
     # ── 代币元数据 ─────────────────────────────────────────
     def get_token_decimals(self, coin_type: str) -> int:
@@ -137,6 +167,7 @@ class AptosClient:
         if coin_type in self._decimals_cache:
             return self._decimals_cache[coin_type]
 
+        coin_type = self._resolve_coin_type(coin_type) or coin_type
         if not self._is_valid_coin_type(coin_type):
             self._decimals_cache[coin_type] = 8
             return 8
@@ -170,6 +201,8 @@ class AptosClient:
         if page > 1:
             return []
 
+        # 纯 0x 地址（缺 ::module::struct）先经 Indexer 补全为完整 coin_type
+        coin_type = self._resolve_coin_type(coin_type) or coin_type
         if not self._is_valid_coin_type(coin_type):
             return []
 

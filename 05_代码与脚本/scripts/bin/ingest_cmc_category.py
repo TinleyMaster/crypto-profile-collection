@@ -10,6 +10,10 @@ Usage:
     python ingest_cmc_category.py
     python ingest_cmc_category.py --category-id 6051a82066fc1b42617d6dc0
     python ingest_cmc_category.py --dry-run
+
+Note:
+    CMC 列表接口会返回部分已下线/失效的分类（成员接口返回 400），
+    这些分类会被跳过并计入 skipped_invalid_category，不计入任务失败。
 """
 from __future__ import annotations
 
@@ -48,6 +52,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Page limit for category member endpoint. Default: 5000 (CMC max).",
     )
     return parser
+
+
+class CategoryMemberError(RuntimeError):
+    """CMC /v1/cryptocurrency/category 请求失败，附带 CMC 返回的 HTTP 状态码与错误信息。"""
+
+    def __init__(self, category_id: str, status_code: int, api_message: str) -> None:
+        self.category_id = category_id
+        self.status_code = status_code
+        self.api_message = api_message
+        super().__init__(
+            f"category {category_id}: CMC HTTP {status_code} - {api_message}"
+        )
+
+
+def _fetch_category_members(client, category_id: str, start: int, limit: int) -> dict:
+    """调用 CMC 单分类成员接口，失败时解析响应体中的 error_message 便于排查。"""
+    import requests as _requests
+
+    try:
+        return client.get_cryptocurrency_category(
+            category_id=category_id, start=start, limit=limit
+        )
+    except _requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        status_code = response.status_code if response is not None else 0
+        api_message = ""
+        if response is not None:
+            try:
+                body = response.json()
+                api_message = (body.get("status") or {}).get("error_message") or ""
+            except Exception:
+                api_message = ""
+            if not api_message:
+                api_message = (response.text or "")[:300]
+        raise CategoryMemberError(category_id, status_code, api_message) from exc
 
 
 def _safe_float(value: Any) -> float | None:
@@ -111,7 +150,7 @@ def _record_run(
     request_url: str,
     payload: dict,
     fetched_at: str,
-) -> int:
+) -> tuple[int, int]:
     from crypto_research.db.upsert import fetch_one
     from crypto_research.utils.hash_utils import md5_text
     from crypto_research.utils.json_utils import stable_json_dumps
@@ -147,7 +186,7 @@ def _record_run(
             fetched_at,
         ),
     )
-    return raw_row["response_id"]
+    return raw_row["response_id"], run_id
 
 
 def _finish_run(conn, run_id: int, status: str, rows: int, error: str | None = None) -> None:
@@ -194,7 +233,7 @@ def ingest_categories(client, conn, dry_run: bool) -> tuple[list[dict], int | No
         )
         return category_rows, None
 
-    response_id = _record_run(
+    response_id, run_id = _record_run(
         conn,
         "cmc_categories",
         {"start": 1, "limit": 5000},
@@ -221,7 +260,12 @@ def ingest_categories(client, conn, dry_run: bool) -> tuple[list[dict], int | No
     ]
     from crypto_research.db.upsert import execute_many
 
-    execute_many(conn, upsert_sql, params)
+    try:
+        execute_many(conn, upsert_sql, params)
+    except Exception as exc:
+        _finish_run(conn, run_id, "failed", 0, str(exc))
+        raise
+    _finish_run(conn, run_id, "success", len(category_rows))
     return category_rows, response_id
 
 
@@ -241,9 +285,7 @@ def ingest_category_members(
     request_url = f"{client.settings.cmc_base_url}/v1/cryptocurrency/category"
 
     while page < max_pages:
-        payload = client.get_cryptocurrency_category(
-            category_id=category_id, start=start, limit=limit
-        )
+        payload = _fetch_category_members(client, category_id, start, limit)
         rows = _parse_category_members(payload)
         if not rows:
             break
@@ -271,7 +313,7 @@ def ingest_category_members(
         return len(all_rows), None
 
     # Record a single run/response for all pages of this category.
-    response_id = _record_run(
+    response_id, run_id = _record_run(
         conn,
         "cmc_category",
         {"id": category_id, "limit": limit},
@@ -296,7 +338,12 @@ def ingest_category_members(
     ]
     from crypto_research.db.upsert import execute_many
 
-    execute_many(conn, upsert_sql, params)
+    try:
+        execute_many(conn, upsert_sql, params)
+    except Exception as exc:
+        _finish_run(conn, run_id, "failed", 0, str(exc))
+        raise
+    _finish_run(conn, run_id, "success", len(all_rows))
     return len(all_rows), response_id
 
 
@@ -340,6 +387,7 @@ def main() -> int:
         target_ids = [args.category_id] if args.category_id else None
         processed = 0
         failed = 0
+        skipped_invalid: list[tuple[str, str]] = []
 
         for cat in category_rows:
             cat_id = cat["category_id"]
@@ -353,6 +401,20 @@ def main() -> int:
                     f"  category {cat_id} ({cat['category_name']}): {count} members"
                 )
                 processed += 1
+            except CategoryMemberError as exc:
+                if exc.status_code == 400:
+                    # CMC 列表接口仍返回的"僵尸"分类，单分类接口已不可解析，跳过即可
+                    skipped_invalid.append((cat_id, cat["category_name"]))
+                    print(
+                        f"  category {cat_id} ({cat['category_name']}): skipped (CMC invalid category) - {exc.api_message or 'Bad Request'}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"  category {cat_id} ({cat['category_name']}): failed - {exc}",
+                        file=sys.stderr,
+                    )
+                    failed += 1
             except Exception as exc:
                 print(
                     f"  category {cat_id} ({cat['category_name']}): failed - {exc}",
@@ -368,6 +430,7 @@ def main() -> int:
                 "categories": len(category_rows),
                 "processed": processed,
                 "failed": failed,
+                "skipped_invalid_category": len(skipped_invalid),
             },
             ensure_ascii=False,
             indent=2,

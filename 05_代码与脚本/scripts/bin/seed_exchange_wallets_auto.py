@@ -1,6 +1,16 @@
 """
 交易所钱包地址自动采集脚本。
 
+⚠️ 已弃用（2026-08-28）：
+  本脚本已被 collect_exchange_wallets.py 替代。
+  请使用 collect_exchange_wallets.py 进行地址采集（社区源 + 快照反查 + 防假校验）。
+  本脚本保留但不再调度，仅作历史参考。
+
+弃用原因：
+  1. EVM_SEEDS 硬编码 stub 含 48 条假占位地址（Bitget/Upbit/Bithumb/Bitstamp/Deribit/XT.COM）
+  2. docstring 声称"Etherscan 标签云抓取"但无 _collect_etherscan_labels 函数
+  3. 跨链传播放大假地址污染（假地址 ×6 链）
+
 策略（按优先级）：
   1. EVM 跨链传播：将 ETH/BSC 已有地址复制到其他 EVM 链（大所复用同一地址）
   2. Etherscan 标签云抓取：从各链浏览器抓取交易所标记地址

@@ -156,12 +156,13 @@ def get_asset_price(conn, asset_id: int, symbol: str) -> float:
 
 
 def get_exchange_map(conn, chain: str) -> dict[str, str]:
-    """获取指定链的交易所钱包地址 -> 交易所名称映射。"""
+    """获取指定链的交易所钱包地址 -> 交易所名称映射（仅 high 置信度参与净流标签）。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("""
             SELECT LOWER(address) AS address, exchange_name
             FROM biz.onchain_exchange_wallet
             WHERE chain = %s
+              AND confidence = 'high'
         """, (chain,))
         return {r["address"]: r["exchange_name"] for r in cur.fetchall()}
 

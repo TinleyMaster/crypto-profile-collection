@@ -504,6 +504,13 @@ TASK_DEFS = {
         "default_args": ["--chains", "eth,bsc", "--sources", "community,ethplorer"],
         "category": "链上数据",
     },
+    "cg_netflow_fetch": {
+        "name": "CoinGlass 净流抓取",
+        "description": "CoinGlass 网页端浏览器渲染抓取净流数据（替代 Dune），每日单次，空表降级",
+        "script": "run_cg_netflow.py",
+        "default_args": ["--fetch-only"],
+        "category": "链上数据",
+    },
     # ═══ 诊断 ═══
     "diag_noise": {
         "name": "噪声诊断报告",

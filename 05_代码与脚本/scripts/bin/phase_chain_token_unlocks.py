@@ -398,7 +398,7 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
 
     result = {
         "source_url": base_url,
-        "source_name": "tokenomist",
+        "source_name": variant["key"],
         "slug": slug,
         "overview": {},
         "unlock_events": [],
@@ -477,6 +477,28 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
         events = variant["extract_unlock_events"](page)
         result["unlock_events"] = events
         _log(f"  Unlock Events: {len(events)} 条")
+
+        # P1-2: overview 的 next_unlock_value/amount 摊到最近的 upcoming 事件
+        # （新站事件表常无 value 列，overview 的 Next Unlock 摘要包含 USD 值）
+        ov = result["overview"]
+        next_val = ov.get("next_unlock_value_str")
+        next_amt = ov.get("next_unlock_amount_str")
+        if next_val or next_amt:
+            upcoming = [e for e in events if e.get("is_upcoming")]
+            if upcoming:
+                # 取日期最早的 upcoming 事件（最近的一次解锁）
+                from datetime import datetime as _dt
+                def _pd(s):
+                    try:
+                        return _dt.strptime(s, "%b %d, %Y")
+                    except Exception:
+                        return _dt(2000, 1, 1)
+                target = min(upcoming, key=lambda e: _pd(e["date"]))
+                if next_val and not target.get("value_str"):
+                    target["value_str"] = next_val
+                    target["value_usd"] = _parse_value_str(next_val)
+                if next_amt and not target.get("amount_str"):
+                    target["amount_str"] = next_amt
 
         # ── Step 3: 可选爬取 revenue / valuation 子页面 ──
         if include_extras:
@@ -868,10 +890,47 @@ def _extract_subpage(page) -> dict:
     return out
 
 
+def _parse_value_str(value_str: str) -> float:
+    """解析 '$32.2M' / '$1.2B' 等 USD 值字符串为数值。"""
+    if not value_str:
+        return 0.0
+    m = re.match(r'^\$?\s*([\d,.]+)\s*([BMKbmk]?)$', value_str.strip())
+    if not m:
+        return 0.0
+    num = float(m.group(1).replace(",", ""))
+    unit = m.group(2).upper()
+    if unit == "B":
+        num *= 1_000_000_000
+    elif unit == "M":
+        num *= 1_000_000
+    elif unit == "K":
+        num *= 1_000
+    return round(num, 2)
+
+
+def _parse_token_amount_str(amount_str: str) -> str:
+    """归一化代币数量字符串（'11.2M' / '11.2 Million' / '11.2M ARB'）。"""
+    if not amount_str:
+        return ""
+    s = amount_str.strip()
+    m = re.match(r'^([\d,.]+)\s*(BMKbmk]?|Billion|Million|Thousand)', s)
+    if m:
+        num = m.group(1)
+        unit_map = {"B": "B", "M": "M", "K": "K",
+                    "Billion": "B", "Million": "M", "Thousand": "K"}
+        unit = unit_map.get(m.group(2).capitalize() if len(m.group(2)) > 1 else m.group(2), "")
+        return num + unit
+    # 仅数字
+    m = re.match(r'^([\d,.]+)$', s)
+    return m.group(1) if m else s
+
+
 def _extract_unlock_events(page) -> list[dict]:
     """从 Unlocks 页面提取事件列表（app.tokenomics.com 新版结构）。
 
     新版表格列: Unlock Date | % of MCAP | Unlock Recipients | Countdown
+    P1-2/P2-1: 尝试捕获可能的 USD Value 列；% of MCAP 存入 pct 并标注 ratio_mcap=True。
+    P2-3: 尝试从行文本解析代币数量（如 '11.2M ARB'）。
     """
     events = []
 
@@ -896,6 +955,7 @@ def _extract_unlock_events(page) -> list[dict]:
                                 pct: tds[1].textContent.trim(),
                                 recipients: tds[2].textContent.trim(),
                                 status: tds[3] ? tds[3].textContent.trim() : '',
+                                rowText: tr.textContent.trim(),
                             });
                         }
                         return rows;
@@ -916,6 +976,7 @@ def _extract_unlock_events(page) -> list[dict]:
             pct_str = row["pct"]
             status_str = row.get("status", "")
             recipients_str = row.get("recipients", "")
+            row_text = row.get("rowText", "")
 
             pm = re.match(r'^\+?([\d.]+)%$', pct_str)
             pct = float(pm.group(1)) if pm else 0.0
@@ -925,14 +986,33 @@ def _extract_unlock_events(page) -> list[dict]:
 
             is_upcoming = "left" in status_str.lower()
 
+            # P1-2: 行内若有 USD 值（'$32.2M'），解析
+            value_usd = 0.0
+            value_str = ""
+            vm = re.search(r'\$([\d,.]+[BMKbmk]?)', row_text)
+            if vm:
+                value_str = "$" + vm.group(1)
+                value_usd = _parse_value_str(value_str)
+
+            # P2-3: 行内若有代币数量（'11.2M ARB' / 'Tokens 11.2M'），解析
+            amount_str = ""
+            am = re.search(r'(?:Tokens?|Tokens\s*)\s*([\d,.]+[BMKbmk]?)', row_text)
+            if am:
+                amount_str = _parse_token_amount_str(am.group(1))
+            else:
+                am2 = re.search(r'\b([\d,.]+)\s*[A-Z]{2,6}\b', row_text)
+                if am2:
+                    amount_str = _parse_token_amount_str(am2.group(1))
+
             key = (date_str, pct)
             if key in seen:
                 continue
             seen.add(key)
 
             events.append({
-                "date": date_str, "value_usd": 0, "value_str": "",
-                "pct": pct, "allocations": recipients, "status": status_str,
+                "date": date_str, "value_usd": value_usd, "value_str": value_str,
+                "amount_str": amount_str, "pct": pct, "ratio_mcap": True,
+                "allocations": recipients, "status": status_str,
                 "is_upcoming": is_upcoming,
             })
 
@@ -962,6 +1042,8 @@ def _extract_unlock_events_text(page) -> list[dict]:
     pct_re = re.compile(r'([\d.]+)%')
     recipients_re = re.compile(r'(\d+)\s*Recipients?')
     countdown_re = re.compile(r'(\d+\s+\w+\s+(?:ago|left))')
+    value_re = re.compile(r'\$([\d,.]+[BMKbmk]?)')
+    amount_re = re.compile(r'(?:Tokens?|Tokens\s*)\s*([\d,.]+[BMKbmk]?)')
 
     seen = set()
     for line in all_text.split("\n"):
@@ -979,13 +1061,27 @@ def _extract_unlock_events_text(page) -> list[dict]:
         cm = countdown_re.search(line)
         status = cm.group(1) if cm else ""
         is_upcoming = "left" in status.lower()
+
+        value_usd = 0.0
+        value_str = ""
+        vm = value_re.search(line)
+        if vm:
+            value_str = "$" + vm.group(1)
+            value_usd = _parse_value_str(value_str)
+
+        amount_str = ""
+        am = amount_re.search(line)
+        if am:
+            amount_str = _parse_token_amount_str(am.group(1))
+
         key = (date_str, pct)
         if key in seen:
             continue
         seen.add(key)
         events.append({
-            "date": date_str, "value_usd": 0, "value_str": "",
-            "pct": pct, "allocations": recipients, "status": status,
+            "date": date_str, "value_usd": value_usd, "value_str": value_str,
+            "amount_str": amount_str, "pct": pct, "ratio_mcap": True,
+            "allocations": recipients, "status": status,
             "is_upcoming": is_upcoming,
         })
     return events
@@ -1263,18 +1359,33 @@ def ensure_table(conn) -> None:
                 methodology_json JSONB,
                 input_snapshot_json JSONB,
                 scraped_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW()
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                crawl_status VARCHAR(20) NOT NULL DEFAULT 'ok',
+                last_attempt_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
         # 兼容旧表：补充可能缺失的列
-        for col in ("revenue_json", "valuation_json", "methodology_json", "input_snapshot_json"):
+        for col in ("revenue_json", "valuation_json", "methodology_json", "input_snapshot_json",
+                    "crawl_status", "last_attempt_at"):
             try:
                 cur.execute(f"""
                     ALTER TABLE biz.asset_token_unlocks
                     ADD COLUMN IF NOT EXISTS {col} JSONB
                 """)
             except Exception:
-                pass  # 列已存在或表刚创建
+                try:
+                    if col == "crawl_status":
+                        cur.execute(
+                            "ALTER TABLE biz.asset_token_unlocks "
+                            "ADD COLUMN IF NOT EXISTS crawl_status VARCHAR(20) NOT NULL DEFAULT 'ok'"
+                        )
+                    elif col == "last_attempt_at":
+                        cur.execute(
+                            "ALTER TABLE biz.asset_token_unlocks "
+                            "ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ DEFAULT NOW()"
+                        )
+                except Exception:
+                    pass  # 列已存在或表刚创建
     conn.commit()
 
 
@@ -1286,12 +1397,12 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
         INSERT INTO biz.asset_token_unlocks (
             asset_id, source_url, source_name, slug,
             overview_json, unlock_events_json, revenue_json, valuation_json,
-            scraped_at, updated_at
+            scraped_at, updated_at, crawl_status, last_attempt_at
         ) VALUES (
             %(asset_id)s, %(source_url)s, %(source_name)s, %(slug)s,
             %(overview_json)s, %(unlock_events_json)s,
             %(revenue_json)s, %(valuation_json)s,
-            NOW(), NOW()
+            NOW(), NOW(), %(crawl_status)s, NOW()
         )
         ON CONFLICT (asset_id) DO UPDATE SET
             source_url = EXCLUDED.source_url,
@@ -1301,6 +1412,8 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             unlock_events_json = EXCLUDED.unlock_events_json,
             revenue_json = EXCLUDED.revenue_json,
             valuation_json = EXCLUDED.valuation_json,
+            crawl_status = EXCLUDED.crawl_status,
+            last_attempt_at = NOW(),
             updated_at = NOW()
     """
     with conn.cursor() as cur:
@@ -1313,9 +1426,52 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "unlock_events_json": json_mod.dumps(data.get("unlock_events", []), ensure_ascii=False),
             "revenue_json": json_mod.dumps(data.get("revenue", {}), ensure_ascii=False),
             "valuation_json": json_mod.dumps(data.get("valuation", {}), ensure_ascii=False),
+            "crawl_status": data.get("crawl_status", "ok"),
         })
     conn.commit()
-    _log(f"  已写入数据库 (asset_id={asset_id})")
+    _log(f"  已写入数据库 (asset_id={asset_id}, crawl_status={data.get('crawl_status', 'ok')})")
+
+
+def _mark_not_found(conn, asset_id: int, data: dict | None = None) -> None:
+    """写入 not_found 墓碑：站点未收录时占位，避免每日重复爬取。
+
+    写入一行 crawl_status='not_found' 的记录；若已存在 ok 记录则跳过
+    （不覆盖已成功的数据）。
+    """
+    import json as json_mod
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM biz.asset_token_unlocks WHERE asset_id = %s AND crawl_status = 'ok'",
+            (asset_id,),
+        )
+        if cur.fetchone():
+            return
+        data = data or {}
+        cur.execute(
+            """
+            INSERT INTO biz.asset_token_unlocks (
+                asset_id, source_url, source_name, slug,
+                overview_json, unlock_events_json, revenue_json, valuation_json,
+                scraped_at, updated_at, crawl_status, last_attempt_at
+            ) VALUES (
+                %(asset_id)s, NULL, %(source_name)s, %(slug)s,
+                '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                NOW(), NOW(), 'not_found', NOW()
+            )
+            ON CONFLICT (asset_id) DO UPDATE SET
+                crawl_status = 'not_found',
+                last_attempt_at = NOW(),
+                updated_at = NOW()
+            """,
+            {
+                "asset_id": asset_id,
+                "source_name": (data.get("source_name") or "tokenomist"),
+                "slug": data.get("slug"),
+            },
+        )
+    conn.commit()
+    _log(f"  已写入 not_found 墓碑 (asset_id={asset_id})")
 
 
 # ── 主流程 ─────────────────────────────────────────────────
@@ -1382,7 +1538,11 @@ def _main() -> int:
         )
 
         if data is None:
-            # tokenomist 未收录 → 返回 not_found 状态，让上层触发 AI 测算
+            # tokenomist 未收录 → 返回 not_found 状态
+            # P1-1: 写 not_found 墓碑，避免 batch 每日重复爬取该资产
+            if args.save:
+                ensure_table(conn)
+                _mark_not_found(conn, asset_id)
             print(json.dumps({
                 "status": "not_found",
                 "message": "该代币未被 tokenomist 收录",
@@ -1396,6 +1556,18 @@ def _main() -> int:
         data["symbol"] = asset["symbol"]
         data["name"] = asset["name"]
         data["status"] = "ok"
+
+        # P1-3: overview 有解锁信号但事件为空 → 疑似解析失败，标记 parse_empty
+        # 避免"假成功"污染 pending 判定（不覆盖已有 ok 数据）
+        overview = data.get("overview", {}) or {}
+        overview_signals = any(
+            k in overview for k in ("released_pct", "next_unlock_date", "released_amount_str")
+        )
+        if not data.get("unlock_events") and overview_signals:
+            _log("[WARN] overview 有解锁信号但事件为空，疑似解析失败，标记 parse_empty")
+            data["crawl_status"] = "parse_empty"
+        else:
+            data["crawl_status"] = "ok"
 
         # 写入数据库
         if args.save:

@@ -34,6 +34,8 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
 
     优先处理高市值、非稳定币、非 meme 的资产，跳过已停用资产，
     提升 tokenomics.com 命中率和批量成功率。
+
+    P1-1: not_found 墓碑 30 天冷却；parse_empty 视为待重试（不阻塞）。
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -54,7 +56,9 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_token_unlocks u
                   WHERE u.asset_id = a.asset_id
-              )
+                    AND (u.crawl_status = 'ok'
+                         OR (u.crawl_status = 'not_found'
+                             AND u.last_attempt_at > NOW() - INTERVAL '30 day')))
             ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
             LIMIT %s
             """,
@@ -82,36 +86,58 @@ def get_total_pending(conn) -> int:
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_token_unlocks u
                   WHERE u.asset_id = a.asset_id
-              )
+                    AND (u.crawl_status = 'ok'
+                         OR (u.crawl_status = 'not_found'
+                             AND u.last_attempt_at > NOW() - INTERVAL '30 day')))
             """
         )
         return cur.fetchone()[0]
 
 
-def run_single(asset_id: int, timeout: int = 60) -> tuple[str, str]:
+def run_single(asset_id: int, timeout: int = 60, allow_browser_search: bool = False) -> tuple[str, str]:
     """运行单币解锁采集，返回 (状态, 详情)。
 
-    状态：ok / not_found / fail
+    状态：ok / not_found / parse_empty / fail
     """
     script = SCRIPT_DIR / "phase_chain_token_unlocks.py"
+    cmd = [
+        sys.executable, "-u", str(script),
+        "--asset-id", str(asset_id),
+        "--save",
+    ]
+    if not allow_browser_search:
+        cmd.append("--no-browser-search")  # 默认禁用浏览器首页搜索提速
+    proc = None
     try:
-        result = subprocess.run(
-            [
-                sys.executable, "-u", str(script),
-                "--asset-id", str(asset_id),
-                "--save",
-                "--no-browser-search",  # 批量模式下禁用浏览器首页搜索，显著提速
-            ],
-            capture_output=True,
+        # start_new_session=True：超时后可用 killpg 清理整个进程组（含 Playwright chromium）
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=str(SCRIPT_DIR),
+            start_new_session=True,
         )
-        if result.returncode != 0:
-            return "fail", f"exit={result.returncode}"
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            return "fail", "timeout"
+        if proc.returncode != 0:
+            return "fail", f"exit={proc.returncode}"
 
         # 解析 stdout 最后一行 JSON
-        stdout_lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+        stdout_lines = [l for l in stdout.strip().split("\n") if l.strip()]
         if not stdout_lines:
             return "fail", "no_output"
 
@@ -120,6 +146,9 @@ def run_single(asset_id: int, timeout: int = 60) -> tuple[str, str]:
             status = data.get("status", "unknown")
             if status == "ok":
                 events = len(data.get("unlock_events", []))
+                # P1-3: overview 有信号但事件空 → parse_empty，视为疑似失败
+                if data.get("crawl_status") == "parse_empty":
+                    return "fail", "parse_empty"
                 return "ok", f"events={events}"
             elif status == "not_found":
                 return "not_found", "not_found"
@@ -128,8 +157,6 @@ def run_single(asset_id: int, timeout: int = 60) -> tuple[str, str]:
         except (json.JSONDecodeError, ValueError):
             return "fail", "parse_error"
 
-    except subprocess.TimeoutExpired:
-        return "fail", "timeout"
     except Exception as e:
         return "fail", f"error={e}"
 
@@ -175,7 +202,10 @@ def main():
         print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
               end="", flush=True)
 
-        status, info = run_single(asset_id, timeout=args.timeout)
+        # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
+        allow_browser = (i % 50 == 0)
+        status, info = run_single(asset_id, timeout=args.timeout,
+                                  allow_browser_search=allow_browser)
         if status == "ok":
             success += 1
             print(f"OK ({info})")
@@ -205,7 +235,8 @@ def main():
     print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
     print("=" * 60)
 
-    return 0
+    # P2-5: fail > 0 返回 1，让调度器能感知失败率
+    return 1 if fail > 0 else 0
 
 
 if __name__ == "__main__":

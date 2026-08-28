@@ -81,6 +81,39 @@ def _to_float(val) -> float | None:
         return None
 
 
+def _parse_token_amount_str(s: str) -> float | None:
+    """解析 '11.2M' / '1.2B' / '100K' 等代币数量字符串为数值。"""
+    if not s:
+        return None
+    import re
+    m = re.match(r'^\s*([\d,.]+)\s*([BMKbmk]?)\s*$', str(s).strip())
+    if not m:
+        return None
+    num = float(m.group(1).replace(",", ""))
+    unit = m.group(2).upper()
+    if unit == "B":
+        num *= 1_000_000_000
+    elif unit == "M":
+        num *= 1_000_000
+    elif unit == "K":
+        num *= 1_000
+    return num
+
+
+def _infer_beneficiary_type(recipients: str) -> str | None:
+    """从 recipients 文本推断受益人类别（Team / Investors / Public）。"""
+    if not recipients:
+        return None
+    r = recipients.lower()
+    if any(k in r for k in ("team", "founder", "core contributor", "contributor")):
+        return "team"
+    if any(k in r for k in ("investor", "seed", "private sale", "vc", "strategic", "advisor")):
+        return "investors"
+    if any(k in r for k in ("public", "community", "ecosystem", "treasury", "marketing", "liquidity")):
+        return "public"
+    return None
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
@@ -101,6 +134,7 @@ def main() -> int:
                     unlock_amount NUMERIC,
                     unlock_ratio_total NUMERIC,
                     unlock_ratio_circulating NUMERIC,
+                    unlock_ratio_mcap NUMERIC,
                     unlock_value_usd NUMERIC,
                     beneficiary_type VARCHAR,
                     remaining_locked NUMERIC,
@@ -119,6 +153,14 @@ def main() -> int:
                 CREATE INDEX IF NOT EXISTS idx_unlock_event_asset
                     ON biz.asset_unlock_event (asset_id)
             """)
+            # 兼容旧表：补充 unlock_ratio_mcap 列
+            try:
+                cur.execute("""
+                    ALTER TABLE biz.asset_unlock_event
+                    ADD COLUMN IF NOT EXISTS unlock_ratio_mcap NUMERIC
+                """)
+            except Exception:
+                pass
 
         # 读取需要同步的资产
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -162,13 +204,26 @@ def main() -> int:
                     if not unlock_date:
                         continue
 
+                    # P2-2: type/category 兜底；recipients 推断 beneficiary
                     unlock_type = str(ev.get("type") or ev.get("category") or "unspecified")[:50]
+                    recipients_txt = str(ev.get("allocations") or ev.get("recipients") or "")[:500]
+                    beneficiary = (
+                        str(ev.get("beneficiary") or ev.get("holder") or "")[:100]
+                        or _infer_beneficiary_type(recipients_txt)
+                    )
                     source_code = str(source)[:50]
-                    unlock_amount = _to_float(ev.get("amount") or ev.get("unlock_amount"))
-                    unlock_ratio_total = _to_float(ev.get("pct") or ev.get("unlock_pct"))
+
+                    # P2-3: unlock_amount 从 amount_str / amount 解析
+                    amount = _to_float(ev.get("amount") or ev.get("unlock_amount"))
+                    if amount is None:
+                        amount = _parse_token_amount_str(ev.get("amount_str"))
+
+                    # P2-1: pct 语义 —— 主源(tokenomics.com)为 % of MCAP，写入 ratio_mcap
+                    pct = _to_float(ev.get("pct") or ev.get("unlock_pct"))
+                    ratio_mcap = pct if ev.get("ratio_mcap") else None
+                    ratio_total = None if ev.get("ratio_mcap") else pct
                     unlock_ratio_circulating = _to_float(ev.get("pct_of_circulating"))
                     unlock_value_usd = _to_float(ev.get("value_usd"))
-                    beneficiary = str(ev.get("beneficiary") or ev.get("holder") or "")[:100] or None
                     risk_level = str(ev.get("risk_level") or "")[:20] or None
 
                     try:
@@ -176,13 +231,15 @@ def main() -> int:
                             INSERT INTO biz.asset_unlock_event
                                 (asset_id, unlock_date, unlock_type, source_code,
                                  unlock_amount, unlock_ratio_total, unlock_ratio_circulating,
-                                 unlock_value_usd, beneficiary_type, risk_level, raw_ref)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                 unlock_ratio_mcap, unlock_value_usd, beneficiary_type,
+                                 risk_level, raw_ref)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (asset_id, unlock_date, unlock_type, source_code)
                             DO UPDATE SET
                                 unlock_amount = EXCLUDED.unlock_amount,
                                 unlock_ratio_total = EXCLUDED.unlock_ratio_total,
                                 unlock_ratio_circulating = EXCLUDED.unlock_ratio_circulating,
+                                unlock_ratio_mcap = EXCLUDED.unlock_ratio_mcap,
                                 unlock_value_usd = EXCLUDED.unlock_value_usd,
                                 beneficiary_type = EXCLUDED.beneficiary_type,
                                 risk_level = EXCLUDED.risk_level,
@@ -190,8 +247,9 @@ def main() -> int:
                                 updated_at = NOW()
                         """, (
                             asset_id, unlock_date, unlock_type, source_code,
-                            unlock_amount, unlock_ratio_total, unlock_ratio_circulating,
-                            unlock_value_usd, beneficiary, risk_level,
+                            amount, ratio_total, unlock_ratio_circulating,
+                            ratio_mcap, unlock_value_usd, beneficiary,
+                            risk_level,
                             psycopg.types.json.Jsonb(ev),
                         ))
                         inserted += 1

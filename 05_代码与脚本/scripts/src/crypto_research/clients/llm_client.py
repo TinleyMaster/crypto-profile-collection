@@ -2,6 +2,7 @@
 LLM 客户端封装：优先使用火山方舟（豆包/DeepSeek），兜底使用 OpenAI 兼容接口。
 
 支持火山方舟 Responses API（/api/v3/responses）和 OpenAI Chat Completions API 两种格式。
+主 provider 调用失败（额度 402/限流/5xx 等）时自动切换兜底 provider 重试一次。
 """
 from __future__ import annotations
 
@@ -94,37 +95,55 @@ def extract_json_from_llm_response(raw: str) -> Any:
 
 
 class LLMClient:
-    """统一 LLM 调用接口。优先 ARK（火山方舟），其次 OpenAI 兼容。"""
+    """统一 LLM 调用接口。优先 ARK（火山方舟），其次 OpenAI 兼容（DeepSeek 直连等），
+    主 provider 失败时自动切换兜底 provider 重试一次。"""
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        """去掉 base_url 上可能已带的接口后缀，避免拼接时重复
+        （如 .../api/v3/responses 会再拼 /responses 变成 /responses/responses → 404）。"""
+        url = (url or "").rstrip("/")
+        for suffix in ("/responses", "/chat/completions"):
+            if url.endswith(suffix):
+                url = url[: -len(suffix)].rstrip("/")
+                break
+        return url
 
     def __init__(self, settings: Settings, rpm: int = 60) -> None:
         self.settings = settings
         self._min_interval = 60.0 / rpm
         self._last_call: float = 0.0
 
-        # 选择提供商
+        # 选择提供商：ARK 优先，OpenAI 兼容（DeepSeek 等）兜底
+        self._provider_list: list[dict[str, Any]] = []
+        if settings.ark_api_key and settings.ark_base_url and settings.ark_model:
+            self._provider_list.append({
+                "name": "ark",
+                "api_key": settings.ark_api_key,
+                "base_url": self._normalize_base_url(settings.ark_base_url),
+                "model": settings.ark_model,
+                # deepseek 模型用 responses API，doubao 用 chat completions
+                "api_type": "responses" if "deepseek" in settings.ark_model.lower() else "chat",
+            })
+        if settings.openai_api_key and settings.openai_base_url and settings.llm_model:
+            self._provider_list.append({
+                "name": "openai",
+                "api_key": settings.openai_api_key,
+                "base_url": self._normalize_base_url(settings.openai_base_url),
+                "model": settings.llm_model,
+                "api_type": "chat",
+            })
+
         self.provider: str = "none"
         self.api_key: str | None = None
         self.base_url: str | None = None
         self.model: str | None = None
         self.api_type: str = "chat"  # chat | responses
-
-        # 优先 OpenAI 兼容接口（DeepSeek 直连等），其次火山方舟 ARK
-        if settings.openai_api_key and settings.openai_base_url and settings.llm_model:
-            self.provider = "openai"
-            self.api_key = settings.openai_api_key
-            self.base_url = settings.openai_base_url.rstrip("/")
-            self.model = settings.llm_model
-            self.api_type = "chat"
-        elif settings.ark_api_key and settings.ark_base_url and settings.ark_model:
-            self.provider = "ark"
-            self.api_key = settings.ark_api_key
-            self.base_url = settings.ark_base_url.rstrip("/")
-            self.model = settings.ark_model
-            # deepseek 模型用 responses API，doubao 用 chat completions
-            if "deepseek" in settings.ark_model.lower():
-                self.api_type = "responses"
-            else:
-                self.api_type = "chat"
+        self._fallback_provider: dict[str, Any] | None = None
+        if self._provider_list:
+            self._apply_provider(self._provider_list[0])
+            if len(self._provider_list) > 1:
+                self._fallback_provider = self._provider_list[1]
 
         self.session = requests.Session()
         self._last_raw_response: str = ""
@@ -140,6 +159,13 @@ class LLMClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+    def _apply_provider(self, cfg: dict[str, Any]) -> None:
+        self.provider = cfg["name"]
+        self.api_key = cfg["api_key"]
+        self.base_url = cfg["base_url"]
+        self.model = cfg["model"]
+        self.api_type = cfg["api_type"]
+
     def _rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_call
         if elapsed < self._min_interval:
@@ -151,20 +177,44 @@ class LLMClient:
 
     def chat(self, system_prompt: str, user_prompt: str,
              temperature: float = 0.1, max_tokens: int = 2048) -> str:
-        """统一的聊天接口，自动选择底层 API 格式。"""
+        """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。"""
         self._last_diag = {
             "provider": self.provider,
             "model": self.model,
             "api_type": self.api_type,
             "base_url": self.base_url,
         }
-        if self.api_type == "responses":
-            result = self._call_responses(system_prompt, user_prompt, temperature, max_tokens)
-        else:
-            result = self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens)
+        try:
+            result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+        except Exception as exc:
+            # 主 provider 失败（额度 402 / 限流 / 5xx / 超时等），切换兜底 provider 重试一次
+            if self._fallback_provider:
+                fallback = self._fallback_provider
+                self._fallback_provider = None  # 只兜底一次，避免死循环
+                self._apply_provider(fallback)
+                self._last_diag = {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "api_type": self.api_type,
+                    "base_url": self.base_url,
+                    "fallback_from": str(exc),
+                }
+                try:
+                    result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+                except Exception as exc2:
+                    self._apply_provider(self._provider_list[0])
+                    raise exc2
+            else:
+                raise
         self._last_raw_response = result
         self._last_diag["result_len"] = len(result)
         return result
+
+    def _dispatch(self, system_prompt: str, user_prompt: str,
+                  temperature: float, max_tokens: int) -> str:
+        if self.api_type == "responses":
+            return self._call_responses(system_prompt, user_prompt, temperature, max_tokens)
+        return self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens)
 
     def _call_chat_completions(
         self, system_prompt: str, user_prompt: str,

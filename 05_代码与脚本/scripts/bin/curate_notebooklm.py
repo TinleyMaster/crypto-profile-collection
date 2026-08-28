@@ -37,25 +37,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _get_llm_config():
-    """获取 DeepSeek LLM 配置，优先 OPENAI 兼容接口，其次 ARK。"""
+    """获取 DeepSeek LLM 配置，优先 ARK，其次 OPENAI 兼容接口。"""
     import os
+    from crypto_research.clients.llm_client import LLMClient
     from crypto_research.config import get_settings
 
     settings = get_settings(require_database=True)
 
-    if settings.openai_api_key and settings.openai_base_url and settings.llm_model:
-        return {
-            "api_key": settings.openai_api_key,
-            "base_url": settings.openai_base_url.rstrip("/"),
-            "model": settings.llm_model,
-            "provider": "openai",
-        }
     if settings.ark_api_key and settings.ark_base_url and settings.ark_model:
         return {
             "api_key": settings.ark_api_key,
-            "base_url": settings.ark_base_url.rstrip("/"),
+            "base_url": LLMClient._normalize_base_url(settings.ark_base_url),
             "model": settings.ark_model,
             "provider": "ark",
+        }
+    if settings.openai_api_key and settings.openai_base_url and settings.llm_model:
+        return {
+            "api_key": settings.openai_api_key,
+            "base_url": LLMClient._normalize_base_url(settings.openai_base_url),
+            "model": settings.llm_model,
+            "provider": "openai",
         }
     raise RuntimeError("No LLM configured (need OPENAI_API_KEY or ARK_API_KEY)")
 

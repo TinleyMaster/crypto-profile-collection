@@ -217,8 +217,8 @@ def main():
     print("代币解锁数据批量采集")
     print("=" * 60)
 
-    conn = get_connection(settings.database_url)
-    try:
+    # get_connection 是 @contextmanager 生成器，必须用 with 才能拿到真实连接
+    with get_connection(settings.database_url) as conn:
         total_pending = get_total_pending(conn)
         limit = args.limit if args.limit > 0 else total_pending
         print(f"待采集总数: {total_pending}，本次处理: {limit}")
@@ -232,60 +232,59 @@ def main():
             print("无待采集资产")
             return 0
 
-        success = 0
-        fail = 0
-        not_found = 0
-        t0 = time.time()
+    success = 0
+    fail = 0
+    not_found = 0
+    t0 = time.time()
 
-        for i, asset in enumerate(assets, 1):
-            asset_id = asset["asset_id"]
-            symbol = asset.get("symbol", "?")
-            print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
-                  end="", flush=True)
+    for i, asset in enumerate(assets, 1):
+        asset_id = asset["asset_id"]
+        symbol = asset.get("symbol", "?")
+        print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
+              end="", flush=True)
 
-            # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
-            allow_browser = (i % 50 == 0)
-            status, info = run_single(asset_id, timeout=args.timeout,
-                                      allow_browser_search=allow_browser)
-            if status == "ok":
-                success += 1
-                print(f"OK ({info})")
-            elif status == "not_found":
-                not_found += 1
-                print(f"NOT_FOUND ({info})")
-            else:
-                fail += 1
-                print(f"FAIL ({info})")
-                # 隐患1: timeout 失败写墓碑，7 天冷却避免反复超时
-                if info == "timeout":
-                    try:
-                        _mark_fail_timeout(conn, asset_id)
-                    except Exception as e:
-                        print(f"    -> 写入 fail_timeout 失败: {e}")
+        # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
+        allow_browser = (i % 50 == 0)
+        status, info = run_single(asset_id, timeout=args.timeout,
+                                  allow_browser_search=allow_browser)
+        if status == "ok":
+            success += 1
+            print(f"OK ({info})")
+        elif status == "not_found":
+            not_found += 1
+            print(f"NOT_FOUND ({info})")
+        else:
+            fail += 1
+            print(f"FAIL ({info})")
+            # 隐患1: timeout 失败写墓碑，7 天冷却避免反复超时
+            if info == "timeout":
+                try:
+                    with get_connection(settings.database_url) as wconn:
+                        _mark_fail_timeout(wconn, asset_id)
+                except Exception as e:
+                    print(f"    -> 写入 fail_timeout 失败: {e}")
 
-            if i < len(assets) and args.delay > 0:
-                time.sleep(args.delay)
+        if i < len(assets) and args.delay > 0:
+            time.sleep(args.delay)
 
-            # 每 20 个打印一次进度摘要
-            if i % 20 == 0:
-                elapsed = time.time() - t0
-                rate = i / elapsed if elapsed > 0 else 0
-                eta = (len(assets) - i) / rate if rate > 0 else 0
-                print(f"  -- 进度 {i}/{len(assets)} ({i/len(assets)*100:.1f}%), "
-                      f"成功 {success}, not_found {not_found}, 失败 {fail}, "
-                      f"速度 {rate*60:.1f}/h, 预计剩余 {eta/60:.1f}min --")
+        # 每 20 个打印一次进度摘要
+        if i % 20 == 0:
+            elapsed = time.time() - t0
+            rate = i / elapsed if elapsed > 0 else 0
+            eta = (len(assets) - i) / rate if rate > 0 else 0
+            print(f"  -- 进度 {i}/{len(assets)} ({i/len(assets)*100:.1f}%), "
+                  f"成功 {success}, not_found {not_found}, 失败 {fail}, "
+                  f"速度 {rate*60:.1f}/h, 预计剩余 {eta/60:.1f}min --")
 
-        elapsed = time.time() - t0
-        print("\n" + "=" * 60)
-        print(f"全部完成，耗时 {elapsed:.1f}s ({elapsed/60:.1f}min)")
-        print(f"总计: 成功 {success}, not_found {not_found}, 失败 {fail}")
-        print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
-        print("=" * 60)
+    elapsed = time.time() - t0
+    print("\n" + "=" * 60)
+    print(f"全部完成，耗时 {elapsed:.1f}s ({elapsed/60:.1f}min)")
+    print(f"总计: 成功 {success}, not_found {not_found}, 失败 {fail}")
+    print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
+    print("=" * 60)
 
-        # P2-5: fail > 0 返回 1，让调度器能感知失败率
-        return 1 if fail > 0 else 0
-    finally:
-        conn.close()
+    # P2-5: fail > 0 返回 1，让调度器能感知失败率
+    return 1 if fail > 0 else 0
 
 
 if __name__ == "__main__":

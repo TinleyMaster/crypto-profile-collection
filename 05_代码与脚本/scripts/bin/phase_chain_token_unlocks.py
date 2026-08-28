@@ -1364,28 +1364,21 @@ def ensure_table(conn) -> None:
                 last_attempt_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-        # 兼容旧表：补充可能缺失的列
-        for col in ("revenue_json", "valuation_json", "methodology_json", "input_snapshot_json",
-                    "crawl_status", "last_attempt_at"):
-            try:
-                cur.execute(f"""
-                    ALTER TABLE biz.asset_token_unlocks
-                    ADD COLUMN IF NOT EXISTS {col} JSONB
-                """)
-            except Exception:
-                try:
-                    if col == "crawl_status":
-                        cur.execute(
-                            "ALTER TABLE biz.asset_token_unlocks "
-                            "ADD COLUMN IF NOT EXISTS crawl_status VARCHAR(20) NOT NULL DEFAULT 'ok'"
-                        )
-                    elif col == "last_attempt_at":
-                        cur.execute(
-                            "ALTER TABLE biz.asset_token_unlocks "
-                            "ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ DEFAULT NOW()"
-                        )
-                except Exception:
-                    pass  # 列已存在或表刚创建
+        # 兼容旧表：补充可能缺失的列（JSONB 列与状态列分开处理，避免类型错建）
+        for col in ("revenue_json", "valuation_json", "methodology_json", "input_snapshot_json"):
+            cur.execute(f"""
+                ALTER TABLE biz.asset_token_unlocks
+                ADD COLUMN IF NOT EXISTS {col} JSONB
+            """)
+        # 状态列必须用正确类型（VARCHAR/TIMESTAMPTZ），不能走上面的 JSONB 分支
+        cur.execute(
+            "ALTER TABLE biz.asset_token_unlocks "
+            "ADD COLUMN IF NOT EXISTS crawl_status VARCHAR(20) NOT NULL DEFAULT 'ok'"
+        )
+        cur.execute(
+            "ALTER TABLE biz.asset_token_unlocks "
+            "ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ DEFAULT NOW()"
+        )
     conn.commit()
 
 

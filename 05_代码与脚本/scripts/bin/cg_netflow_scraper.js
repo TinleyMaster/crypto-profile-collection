@@ -85,6 +85,25 @@ const num = (s) => {
       bodyHead: document.body.innerText.slice(0, 400)
     }));
     console.error('FATAL: 数据行未渲染。HTTP=' + status, JSON.stringify(diag));
+
+    // 写降级 JSON（让消费侧正确降级，而非读旧数据）
+    const degraded = {
+      fetched_at: new Date().toISOString(),
+      source: URL,
+      http_status: status,
+      main_rows: 0,
+      alert_rows: 0,
+      main_table: [],
+      alert_history: [],
+      netflow_by_exchange_coin: [],
+      summary: { total_inflow_usd: 0, total_outflow_usd: 0, net_usd: 0, distinct_coins: 0 },
+      degraded: true,
+      degrade_reason: '数据行未渲染（可能限流）'
+    };
+    const fp = path.join(__dirname, 'cg_netflow_latest.json');
+    fs.writeFileSync(fp, JSON.stringify(degraded, null, 2), 'utf8');
+    console.error('[written degraded] ' + fp);
+
     await browser.close();
     process.exit(2);
   }

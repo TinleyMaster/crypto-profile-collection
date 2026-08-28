@@ -277,6 +277,7 @@ def ingest_category_members(
     category_name: str,
     limit: int,
     dry_run: bool,
+    valid_cmc_ids: set[int] | None = None,
 ) -> tuple[int, int | None]:
     fetched_at = datetime.now(timezone.utc).isoformat()
     all_rows: list[dict] = []
@@ -336,16 +337,18 @@ def ingest_category_members(
         )
         for row in all_rows
         if row["cmc_id"] is not None
+        and (valid_cmc_ids is None or row["cmc_id"] in valid_cmc_ids)
     ]
     from crypto_research.db.upsert import execute_many
 
     try:
-        execute_many(conn, upsert_sql, params)
+        if params:
+            execute_many(conn, upsert_sql, params)
     except Exception as exc:
         _finish_run(conn, run_id, "failed", 0, str(exc))
         raise
-    _finish_run(conn, run_id, "success", len(all_rows))
-    return len(all_rows), response_id
+    _finish_run(conn, run_id, "success", len(params))
+    return len(params), response_id
 
 
 def main() -> int:
@@ -390,13 +393,21 @@ def main() -> int:
         failed = 0
         skipped_invalid: list[tuple[str, str]] = []
 
+        # 一次性加载有效 cmc_id 集合，过滤掉未映射的长尾币（FK cmc_id → cmc_asset_map）
+        valid_cmc_ids: set[int] = set()
+        with conn.cursor() as _cur:
+            _cur.execute("SELECT cmc_id FROM src_cmc.cmc_asset_map")
+            valid_cmc_ids = {r[0] for r in _cur.fetchall()}
+        print(f"有效 cmc_id 集合: {len(valid_cmc_ids)} 个（用于过滤未映射长尾币）")
+
         for cat in category_rows:
             cat_id = cat["category_id"]
             if target_ids and cat_id not in target_ids:
                 continue
             try:
                 count, _ = ingest_category_members(
-                    client, conn, cat_id, cat["category_name"], args.member_limit, dry_run=False
+                    client, conn, cat_id, cat["category_name"], args.member_limit,
+                    dry_run=False, valid_cmc_ids=valid_cmc_ids,
                 )
                 print(
                     f"  category {cat_id} ({cat['category_name']}): {count} members"

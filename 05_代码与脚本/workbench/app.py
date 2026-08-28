@@ -631,6 +631,20 @@ TASK_DEFS = {
         "default_args": ["--limit", "500", "--delay", "0.5", "--timeout", "60"],
         "category": "投研数据提取",
     },
+    "token_unlocks_batch": {
+        "name": "代币解锁批量爬取",
+        "description": "批量爬取代币解锁时间表（tokenomics.com 优先 / tokenomist.ai 兜底）。默认处理 300 个待采集资产；含 not_found 墓碑 + 30 天冷却，避免重复爬取",
+        "script": "phase_chain_token_unlocks_batch.py",
+        "default_args": ["--limit", "300", "--delay", "1", "--timeout", "60"],
+        "category": "投研数据提取",
+    },
+    "sync_unlock_events": {
+        "name": "解锁事件结构化同步",
+        "description": "将 asset_token_unlocks 的 JSON 解锁事件全量同步到 asset_unlock_event 结构化表（解锁榜/监控消费）",
+        "script": "sync_unlock_events_from_json.py",
+        "default_args": [],
+        "category": "投研数据提取",
+    },
     "rescan_low_conf_no_content": {
         "name": "历史无正文回扫",
         "description": "回扫低置信度 ai_content（conf≤0.6）链接，重新抓正文确认：抓不到则标 needs_browser 交 SPA 重抓，抓到则保留",

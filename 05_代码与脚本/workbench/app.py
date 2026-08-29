@@ -704,6 +704,13 @@ TASK_DEFS = {
         "category": "CM 链上指标",
     },
     # ═══ OBM 链上指标 ═══
+    "obm_download": {
+        "name": "OBM 从 GitHub 下载数据",
+        "description": "从 GitHub 下载 23 项 BTC 链上指标 CSV 到 /app/data_external/obm",
+        "script": "download_obm_data.py",
+        "default_args": ["--out", "/app/data_external/obm"],
+        "category": "OBM 链上指标",
+    },
     "obm_ingest": {
         "name": "OBM BTC 链上指标入库",
         "description": "从 data_external/obm/*.csv 读取 Open Bitcoin Metrics 23 项 BTC 链上指标，upsert 到 biz.obm_btc_daily（长表）",

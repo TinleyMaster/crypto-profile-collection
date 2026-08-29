@@ -19,7 +19,7 @@ INSERT INTO raw.api_response (
     %s,
     %s::timestamptz
 )
-ON CONFLICT ON CONSTRAINT uq_raw_api_response_dedup
+ON CONFLICT ON INDEX uq_raw_api_response_dedup
 DO UPDATE SET
     run_id    = EXCLUDED.run_id,
     payload   = EXCLUDED.payload,

@@ -70,13 +70,9 @@ def main() -> int:
 
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
-            # 确保表结构正确：先删除可能存在的旧表（biz/public），再重建。
-            # 当前该表无业务数据，重建安全；如有历史数据则需改用迁移脚本。
+            # 累积式写入：IF NOT EXISTS 保留历史，不再 DROP 重建
             cur.execute("""
-                DROP TABLE IF EXISTS public.protocol_metric_daily CASCADE;
-                DROP TABLE IF EXISTS biz.protocol_metric_daily CASCADE;
-
-                CREATE TABLE biz.protocol_metric_daily (
+                CREATE TABLE IF NOT EXISTS biz.protocol_metric_daily (
                     asset_id      INTEGER NOT NULL REFERENCES core.asset(asset_id) ON DELETE CASCADE,
                     metric_date   DATE NOT NULL DEFAULT CURRENT_DATE,
                     tvl           NUMERIC(20, 2),

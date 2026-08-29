@@ -30,9 +30,10 @@ from crypto_research.db.conn import get_connection
 
 
 def get_pending_assets(conn, limit: int) -> list[dict]:
-    """获取有 CG 映射但尚无社交热度的资产列表（按市值降序，优先采集高价值资产）。
+    """获取有 CG 映射但社交热度已过期或缺失的资产列表（按市值降序，优先采集高价值资产）。
 
     跳过稳定币（asset_type='stablecoin'），避免浪费配额。
+    老化重采：超过 1 天未更新的资产重新采集，确保多天记录可配对。
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -48,6 +49,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = a.asset_id
+                    AND sh.updated_at > NOW() - INTERVAL '1 day'
               )
             ORDER BY a.asset_id ASC
             LIMIT %s
@@ -69,6 +71,7 @@ def get_total_pending(conn) -> int:
               AND NOT EXISTS (
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = asm.asset_id
+                    AND sh.updated_at > NOW() - INTERVAL '1 day'
               )
             """
         )

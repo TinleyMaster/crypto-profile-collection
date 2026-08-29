@@ -1,90 +1,44 @@
 # 工作台：OBM + CM 双源链上指标入库+分位计算
 
 > 工单：FEAT-OBM-CM-ONCHAIN-PCTL
-> 状态：代码已落地，待手动执行
+> 状态：✅ 已执行完成
 
 ---
 
-## 执行顺序
+## 执行结果
 
-```
-1. 建表 → 2. OBM入库 → 3. CM收缩 → 4. 建视图 → 5. 验证
-```
-
----
-
-## 步骤 1：建表
-
-```bash
-psql -f 05_代码与脚本/scripts/sql/biz/obm_btc_daily.sql
-```
-
-验证：
-```sql
-\d biz.obm_btc_daily
--- 应看到 23 指标的长表结构，含 source_cutoff 列
-```
+| 步骤 | 状态 | 说明 |
+|------|------|------|
+| 1. 建表 | ✅ | `biz.obm_btc_daily` 创建成功 |
+| 2. OBM入库 | ✅ | 23个指标，148,217行 |
+| 3. CM入库 | ✅ | 5个币种（btc/eth/doge/xrp/ada），22,912行 |
+| 4. 分位视图 | ✅ | `obm_percentile_full`（135,042行）+ `cm_onchain_percentile_full`（21,631行） |
+| 5. 验证 | ✅ | 通过 |
 
 ---
 
-## 步骤 2：OBM 入库
+## 验证结果
 
-```bash
-cd 05_代码与脚本/scripts
-python bin/ingest_obm_btc_daily.py --data-dir ../../data_external/obm/
-```
+### OBM 验证
+- ✅ 指标数量：23/23
+- ✅ 最大日期：2026-08-24
+- ✅ Supply 单调性：无违规
 
-验证：
-```sql
-SELECT COUNT(DISTINCT metric_name) FROM biz.obm_btc_daily;
--- 应返回 23
+### CM 验证
+- ✅ 币种分布：ada(3,166) / btc(6,351) / doge(4,551) / eth(3,952) / xrp(4,892)
+- ✅ bnb/sol 已排除
+- ✅ BTC MVRV 锚点：
+  - 2018-12-15: 0.690
+  - 2021-11-10: 2.721
+  - 2022-11-21: 0.778
 
-SELECT MAX(metric_date) FROM biz.obm_btc_daily;
--- 应返回 2026-08-24
-```
-
----
-
-## 步骤 3：CM 范围收缩
-
-```bash
-cd 05_代码与脚本/scripts
-python bin/cm_range_consolidate.py --execute
-```
-
-验证：
-```sql
-SELECT cm_symbol, COUNT(*) FROM biz.cm_asset_onchain_daily GROUP BY cm_symbol;
--- 应仅有 btc,eth,doge,xrp,ada，无 bnb/sol
-```
+### 分位视图验证
+- ✅ `obm_percentile_full`: 135,042 行
+- ✅ `cm_onchain_percentile_full`: 21,631 行
 
 ---
 
-## 步骤 4：建视图
-
-```bash
-psql -f 05_代码与脚本/scripts/sql/biz/obm_percentile.sql
-```
-
-验证：
-```sql
-SELECT * FROM biz.obm_percentile_full WHERE metric_name = 'obm_mvrv_btc_daily' 
-  AND metric_date = '2021-11-10';
--- pct_full 应 ≥ 90（HIGH）
-```
-
----
-
-## 步骤 5：验证
-
-```bash
-cd 05_代码与脚本/scripts
-python bin/validate_obm_onchain.py
-```
-
----
-
-## 文件清单
+## 已创建文件
 
 | 文件 | 用途 |
 |------|------|

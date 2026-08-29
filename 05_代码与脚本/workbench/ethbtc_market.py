@@ -34,7 +34,7 @@ def _load_ethbtc_risk() -> dict:
         for k, v in overrides.items():
             if k in rules:
                 try:
-                    rules[k] = float(v)
+                    rules[k] = type(rules[k])(v)
                 except (TypeError, ValueError):
                     pass
     except Exception:

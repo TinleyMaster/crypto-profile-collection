@@ -975,7 +975,7 @@ def _load_market_rules() -> dict:
             for k, v in overrides.items():
                 if k in target:
                     try:
-                        target[k] = float(v)
+                        target[k] = type(target[k])(v) if not isinstance(target[k], bool) else v
                     except (TypeError, ValueError):
                         pass
     except Exception:

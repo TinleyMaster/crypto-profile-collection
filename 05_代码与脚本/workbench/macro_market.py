@@ -544,6 +544,85 @@ def fetch_binance_derivatives() -> dict:
         return {"status": "error", "error": str(e)}
 
 
+def fetch_onchain_anomaly_signals() -> dict:
+    """链上异动信号：从 db_stats.get_global_cex_netflow 拉取全局 CEX 净流量。
+
+    返回 {exchange_netflow: {status, netflow_7d_usd}, cefi_score, status}。
+    - exchange_netflow: 供 score_opportunities 消费（P1-3 交易所净流）
+    - cefi_score: 0-100 归一化分值，供 compute_emotion_subscore 消费
+    - 归一化算法：30d 滚动 Z-score → 映射到 0-100
+    """
+    try:
+        from db_stats import get_global_cex_netflow, get_db
+        import psycopg
+        import psycopg.rows
+        import statistics
+
+        # 7d 净流量（主力窗口）
+        net_7d = get_global_cex_netflow(hours=7 * 24)
+        if not net_7d.get("ok") or not net_7d.get("has_data"):
+            return {
+                "status": "error",
+                "error": net_7d.get("error", "no onchain data"),
+                "exchange_netflow": {"status": "error"},
+                "cefi_score": None,
+            }
+
+        netflow_7d = net_7d["netflow_usd"]
+
+        # 30d 历史净流量序列（用于 Z-score 归一化）
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT
+                        date_trunc('day', block_timestamp)::date AS day,
+                        SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END)
+                          - SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END) AS netflow
+                    FROM biz.onchain_transfer_log
+                    WHERE block_timestamp >= NOW() - INTERVAL '30 days'
+                      AND value_usd IS NOT NULL
+                      AND (from_label = 'exchange' OR to_label = 'exchange')
+                    GROUP BY 1
+                    ORDER BY 1
+                """)
+                daily_rows = cur.fetchall()
+
+        daily_netflows = [float(r["netflow"]) for r in daily_rows if r["netflow"] is not None]
+
+        # 归一化：Z-score → 0-100
+        cefi_score = None
+        if len(daily_netflows) >= 5:
+            mu = statistics.mean(daily_netflows)
+            sigma = statistics.stdev(daily_netflows)
+            if sigma > 0:
+                z = (netflow_7d - mu) / sigma
+                # Z-score → 0-100：Z=0 → 50；Z=+2 → ~84；Z=-2 → ~16
+                cefi_score = max(0, min(100, round(50 + z * 17, 1)))
+            else:
+                cefi_score = 50  # 无波动 → 中性
+
+        return {
+            "status": "ok",
+            "exchange_netflow": {
+                "status": "ok",
+                "netflow_7d_usd": round(netflow_7d, 2),
+                "inflow_7d_usd": net_7d["inflow_usd"],
+                "outflow_7d_usd": net_7d["outflow_usd"],
+                "covered_transfers": net_7d["covered_transfers"],
+                "by_exchange": net_7d.get("by_exchange", []),
+            },
+            "cefi_score": cefi_score,
+            "daily_netflows_30d": daily_netflows,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "exchange_netflow": {"status": "error"},
+            "cefi_score": None,
+        }
+
+
 def fetch_binance_etf_flows() -> dict:
     """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。"""
     api_key = os.environ.get("CRYPTOETF_KEY", "")
@@ -1880,6 +1959,15 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     etf_flows = fetch_binance_etf_flows()
     categories = fetch_cmc_categories()
     event_calendar = fetch_event_calendar()
+    onchain = fetch_onchain_anomaly_signals()
+
+    # 若链上 CEX 净流量可用，用其归一化分值覆盖 cryptoetf cefi（优先级更高）
+    if onchain.get("status") == "ok" and onchain.get("cefi_score") is not None:
+        cefi = {
+            "value": onchain["cefi_score"],
+            "status": "ok",
+            "source": "onchain_cex_netflow",
+        }
 
     # ── P2-1 历史分位：拉取历史序列 ──
     fear_greed_hist = fetch_fear_greed_history(90)
@@ -1994,6 +2082,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         },
         "event_calendar": event_calendar,
         "divergence_signals": divergence,
+        "onchain_anomaly_signals": onchain,
         "fetched_at": int(now),
     }
 

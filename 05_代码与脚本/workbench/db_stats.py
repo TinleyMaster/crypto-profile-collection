@@ -3594,6 +3594,103 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
     }
 
 
+def get_global_cex_netflow(hours: int = 24) -> dict:
+    """全局 CEX 净流量（跨所有资产）。
+
+    CEX Netflow = 从交易所转出金额 - 转入交易所金额
+      - 正值 = 净流出交易所（提币到链上，潜在看涨/惜售）
+      - 负值 = 净流入交易所（充值，潜在抛压）
+
+    数据来源：biz.onchain_transfer_log（链上大额转账监控）
+    与 get_cex_netflow 的区别：不传 asset_id，聚合全市场所有资产。
+
+    返回：
+      - netflow_usd: 指定时间窗口内全局净流量
+      - inflow_usd / outflow_usd: 流入/流出
+      - covered_transfers: 有效转账笔数
+    """
+    hours = max(1, min(720, hours))
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确保表存在
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
+                    log_id SERIAL PRIMARY KEY,
+                    asset_id INTEGER,
+                    chain TEXT NOT NULL,
+                    contract_address TEXT NOT NULL,
+                    tx_hash TEXT NOT NULL,
+                    from_address TEXT NOT NULL,
+                    to_address TEXT NOT NULL,
+                    value NUMERIC NOT NULL,
+                    value_usd NUMERIC(15,2),
+                    from_label TEXT,
+                    to_label TEXT,
+                    from_exchange TEXT,
+                    to_exchange TEXT,
+                    block_number INTEGER,
+                    block_timestamp TIMESTAMPTZ,
+                    is_to_exchange BOOLEAN DEFAULT FALSE,
+                    alert_sent_at TIMESTAMPTZ,
+                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_onchain_tx UNIQUE (chain, tx_hash, contract_address, from_address, to_address)
+                )
+            """)
+
+            # 全局净流量（仅带交易所标签的转账）
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow,
+                    COUNT(*) AS cnt
+                FROM biz.onchain_transfer_log
+                WHERE block_timestamp >= NOW() - make_interval(hours => %s)
+                  AND value_usd IS NOT NULL
+                  AND (from_label = 'exchange' OR to_label = 'exchange')
+            """, (hours,))
+            r = cur.fetchone()
+            outflow = float(r["outflow"] or 0)
+            inflow = float(r["inflow"] or 0)
+            netflow = outflow - inflow  # 正=从交易所出来=净流入链上
+
+            # 按交易所分组
+            cur.execute("""
+                SELECT
+                    COALESCE(from_exchange, to_exchange) AS exchange_name,
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow
+                FROM biz.onchain_transfer_log
+                WHERE block_timestamp >= NOW() - make_interval(hours => %s)
+                  AND value_usd IS NOT NULL
+                  AND (from_label = 'exchange' OR to_label = 'exchange')
+                GROUP BY COALESCE(from_exchange, to_exchange)
+                ORDER BY GREATEST(
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0)
+                ) DESC
+            """, (hours,))
+            by_exchange = [
+                {
+                    "exchange": row["exchange_name"],
+                    "outflow_usd": float(row["outflow"]),
+                    "inflow_usd": float(row["inflow"]),
+                    "netflow_usd": float(row["outflow"]) - float(row["inflow"]),
+                }
+                for row in cur.fetchall()
+            ]
+
+    return {
+        "ok": True,
+        "has_data": r["cnt"] > 0,
+        "netflow_usd": round(netflow, 2),
+        "inflow_usd": round(inflow, 2),
+        "outflow_usd": round(outflow, 2),
+        "covered_transfers": r["cnt"],
+        "by_exchange": by_exchange,
+    }
+
+
 def _ensure_exchange_wallet_seeds(cur) -> None:
     """确保交易所钱包种子地址已导入（幂等操作）。
 

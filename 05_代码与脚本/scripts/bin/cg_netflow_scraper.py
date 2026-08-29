@@ -69,6 +69,9 @@ def parse_page(page) -> dict:
         headers = [th.inner_text().strip() for th in t.query_selector_all("thead th")]
         is_main = "Side" in headers and "Exchanges" in headers
         is_alert = "From" in headers and "To" in headers
+        
+        # 调试日志
+        print(f"[parse] table headers={headers[:5]}, is_main={is_main}, is_alert={is_alert}", file=sys.stderr)
 
         for r in t.query_selector_all('tr[data-row-key]'):
             tds = r.query_selector_all("td")
@@ -100,7 +103,8 @@ def parse_page(page) -> dict:
                     "qty_display": tds[3].inner_text().strip() if len(tds) > 3 else "",
                     "time": tds[4].inner_text().strip() if len(tds) > 4 else "",
                 })
-
+    
+    print(f"[parse] main_rows={len(main)}, alert_rows={len(alert)}", file=sys.stderr)
     return {"main": main, "alert": alert}
 
 
@@ -189,10 +193,13 @@ def run(no_write: bool = False) -> int:
             },
         )
         page = context.new_page()
-
+        
+        print(f"[fetch] 访问 {URL}", file=sys.stderr)
         resp = page.goto(URL, wait_until="load", timeout=60000)
         status = resp.status if resp else None
+        print(f"[fetch] HTTP={status}", file=sys.stderr)
         row_count = wait_stable(page)
+        print(f"[fetch] 初始行数={row_count}", file=sys.stderr)
 
         # 空表兜底：reload + 冷却退避（capi 高频请求会节流，立即连 reload 越打越死）
         tries = 0

@@ -1891,6 +1891,8 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                     "chain_flow_ranking": chain_flow,
                     "narrative_tvl_flow": tvl_flow,
                     "category_flow": cat_flow,
+                    "stablecoin_flow_percentile": sc_flow_percentile,
+                    "stablecoin_flow_extreme": sc_flow_extreme,
                 },
             },
         },

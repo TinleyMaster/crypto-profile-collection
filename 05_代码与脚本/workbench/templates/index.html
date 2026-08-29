@@ -6733,6 +6733,19 @@
             } else {
                 html += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
+            // P2-1: 稳定币净流入分位
+            const scFlowPct = dim5data.stablecoin_flow_percentile;
+            const scFlowExtreme = dim5data.stablecoin_flow_extreme || 'NONE';
+            if (scFlowPct != null) {
+                const scBadge = scFlowExtreme !== 'NONE'
+                    ? `<span class="extreme-badge ${scFlowExtreme.toLowerCase()}">${scFlowExtreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
+                    : '';
+                html += `<div class="dim-section-label">稳定币净流入分位</div>`;
+                html += `<div class="dim-metric-row">
+                    <span class="dim-metric-label">30d 净流百分位${scBadge}</span>
+                    <span class="dim-metric-val ${scFlowExtreme !== 'NONE' ? 'extreme-' + scFlowExtreme.toLowerCase() : ''}">${Number(scFlowPct).toFixed(0)}%</span>
+                </div>`;
+            }
             html += `</div>
                 <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
             </div>`;

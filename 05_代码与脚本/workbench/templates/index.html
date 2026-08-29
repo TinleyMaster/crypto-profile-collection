@@ -3008,6 +3008,178 @@
             padding: 4px 0;
         }
 
+        /* ── P2-3 高亮信号区 ── */
+        .signal-highlight-section {
+            margin-bottom: 24px;
+            background: linear-gradient(135deg, #1a1e2e 0%, #0f1620 100%);
+            border: 1px solid #2a3a50;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .signal-highlight-section .signal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .signal-highlight-section .signal-header h2 {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0;
+            color: #e6e9ef;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .signal-highlight-section .signal-header .signal-count {
+            font-size: 12px;
+            color: #8a92a0;
+            background: #1e222a;
+            padding: 3px 10px;
+            border-radius: 12px;
+        }
+
+        .signal-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .signal-item {
+            display: flex;
+            align-items: stretch;
+            border-radius: 10px;
+            overflow: hidden;
+            transition: transform 0.15s, box-shadow 0.15s;
+            cursor: default;
+        }
+
+        .signal-item:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+
+        .signal-item .signal-bar {
+            width: 4px;
+            flex-shrink: 0;
+        }
+
+        .signal-item-high .signal-bar {
+            background: linear-gradient(180deg, #f59e0b, #ef4444);
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
+        }
+
+        .signal-item-medium .signal-bar {
+            background: linear-gradient(180deg, #3b82f6, #60a5fa);
+        }
+
+        .signal-item .signal-body {
+            flex: 1;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .signal-item-high .signal-body {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.06) 0%, rgba(239, 68, 68, 0.04) 100%);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            border-left: none;
+        }
+
+        .signal-item-medium .signal-body {
+            background: rgba(59, 130, 246, 0.05);
+            border: 1px solid rgba(59, 130, 246, 0.15);
+            border-left: none;
+        }
+
+        .signal-item .signal-top {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .signal-item .signal-target {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .signal-item-high .signal-target {
+            color: #fbbf24;
+        }
+
+        .signal-item .signal-badge {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .signal-badge-high {
+            background: linear-gradient(135deg, #f59e0b, #ef4444);
+            color: #fff;
+            box-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
+        }
+
+        .signal-badge-medium {
+            background: #1e3a5f;
+            color: #60a5fa;
+        }
+
+        .signal-item .signal-dir {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 6px;
+        }
+
+        .signal-dir-long {
+            background: rgba(0, 192, 135, 0.12);
+            color: #00c087;
+        }
+
+        .signal-dir-short {
+            background: rgba(255, 91, 91, 0.12);
+            color: #ff5b5b;
+        }
+
+        .signal-item .signal-logic {
+            font-size: 12px;
+            color: #b0b8c4;
+            line-height: 1.5;
+        }
+
+        .signal-item .signal-dims {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .signal-empty {
+            text-align: center;
+            padding: 24px 16px;
+            color: #5a6472;
+            font-size: 14px;
+        }
+
+        .signal-empty .signal-empty-icon {
+            font-size: 28px;
+            margin-bottom: 8px;
+            opacity: 0.5;
+        }
+
+        .signal-empty .signal-empty-sub {
+            font-size: 12px;
+            color: #4b5563;
+            margin-top: 4px;
+        }
+
         .dim-metric-val.up {
             color: #00c087;
         }
@@ -3266,6 +3438,20 @@
                     <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
                         <span style="font-size:12px;color:#8a92a0" id="overview-updated">-</span>
                         <button class="hot-refresh" onclick="loadMarketOverview(true)">刷新</button>
+                    </div>
+                </div>
+
+                <!-- P2-3 高亮信号区 -->
+                <div class="signal-highlight-section" id="signal-highlight-section">
+                    <div class="signal-header">
+                        <h2>⚡ 高亮信号</h2>
+                        <span class="signal-count" id="signal-count">-</span>
+                    </div>
+                    <div id="signal-highlight-content">
+                        <div class="signal-empty">
+                            <div class="signal-empty-icon">📡</div>
+                            加载中...
+                        </div>
                     </div>
                 </div>
 
@@ -6792,14 +6978,17 @@
             html += `</div>
             </div>`;
 
-            // 机会清单卡（P1-4：异常→机会评分）
+            // P2-3 高亮信号区
             const oppList = (data.opportunity_list || {}).opportunities || [];
             const oppExcluded = (data.opportunity_list || {}).excluded || [];
+            renderSignalHighlight(oppList, oppExcluded);
+
+            // 机会清单卡（P1-4：异常→机会评分）
             html += `<div class="dim-card">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🎯</span>
                     <span class="dim-card-title">机会清单</span>
-                    <span class="dim-card-score neutral">高/中置信</span>
+                    <span class="dim-card-score neutral">全部条目</span>
                 </div>
                 <div class="dim-metrics">`;
             if (oppList.length) {
@@ -6851,6 +7040,59 @@
             // 隐藏旧的综合结论区域（如果存在）
             const sumEl = document.getElementById('overview-summary');
             if (sumEl) sumEl.style.display = 'none';
+        }
+
+        // ── P2-3 高亮信号渲染 ──
+        function renderSignalHighlight (oppList, oppExcluded) {
+            const container = document.getElementById('signal-highlight-content');
+            const countEl = document.getElementById('signal-count');
+            if (!container) return;
+
+            const highItems = oppList.filter(function (o) { return o.confidence === 'high'; });
+            const medItems = oppList.filter(function (o) { return o.confidence === 'medium'; });
+            const total = highItems.length + medItems.length;
+
+            countEl.textContent = total > 0 ? total + ' 条信号' : '0 条';
+
+            if (total === 0) {
+                const excludedTxt = oppExcluded && oppExcluded.length > 0
+                    ? '<div class="signal-empty-sub">已过滤低置信 ' + oppExcluded.length + ' 条</div>'
+                    : '';
+                container.innerHTML =
+                    '<div class="signal-empty">' +
+                    '<div class="signal-empty-icon">📡</div>' +
+                    '今日无高置信信号' +
+                    excludedTxt +
+                    '</div>';
+                return;
+            }
+
+            let html = '<div class="signal-list">';
+            highItems.forEach(function (o) { html += renderSignalItem(o, 'high'); });
+            medItems.forEach(function (o) { html += renderSignalItem(o, 'medium'); });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        function renderSignalItem (o, level) {
+            const cls = level === 'high' ? 'signal-item-high' : 'signal-item-medium';
+            const badgeCls = level === 'high' ? 'signal-badge-high' : 'signal-badge-medium';
+            const confLabel = level === 'high' ? '高置信' : '中置信';
+            const dirLabel = o.direction === 'long' ? '多' : o.direction === 'short' ? '空' : '中性';
+            const dirCls = o.direction === 'long' ? 'signal-dir-long' : o.direction === 'short' ? 'signal-dir-short' : '';
+            const dims = (o.related_dims || []).join(', ');
+            return '<div class="signal-item ' + cls + '">' +
+                '<div class="signal-bar"></div>' +
+                '<div class="signal-body">' +
+                    '<div class="signal-top">' +
+                        '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
+                        '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
+                        (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
+                    '</div>' +
+                    (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
+                    (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +
+                '</div>' +
+            '</div>';
         }
 
         const HOT_PAGE_SIZE = 5;

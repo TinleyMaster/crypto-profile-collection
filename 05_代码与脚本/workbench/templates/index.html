@@ -2877,6 +2877,16 @@
             min-height: 180px;
         }
 
+        .dim-card.extreme-high {
+            border: 1px solid #ff5b5b;
+            box-shadow: 0 0 8px rgba(255, 91, 91, 0.3);
+        }
+
+        .dim-card.extreme-low {
+            border: 1px solid #00c087;
+            box-shadow: 0 0 8px rgba(0, 192, 135, 0.3);
+        }
+
         .dim-card.loading {
             display: flex;
             align-items: center;
@@ -2957,6 +2967,34 @@
 
         .dim-metric-val.down {
             color: #ff5b5b;
+        }
+
+        .dim-metric-val.extreme-high {
+            color: #ff5b5b;
+            font-weight: 600;
+        }
+
+        .dim-metric-val.extreme-low {
+            color: #00c087;
+            font-weight: 600;
+        }
+
+        .extreme-badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 1px 6px;
+            border-radius: 8px;
+            margin-left: 6px;
+        }
+
+        .extreme-badge.high {
+            color: #ff5b5b;
+            background: rgba(255, 91, 91, 0.15);
+        }
+
+        .extreme-badge.low {
+            color: #00c087;
+            background: rgba(0, 192, 135, 0.15);
         }
 
         .dim-conclusion {
@@ -6470,7 +6508,9 @@
             let html = '';
             
             // 情绪子分卡片
-            html += `<div class="dim-card">
+            const emotionExtreme = summary.emotion_subscore?.components?.fear_greed?.extreme !== 'NONE'
+                || summary.emotion_subscore?.components?.cefi?.extreme !== 'NONE';
+            html += `<div class="dim-card ${emotionExtreme ? 'extreme-high' : ''}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🧠</span>
                     <span class="dim-card-title">情绪子分</span>
@@ -6488,9 +6528,23 @@
                         }
                         const val = comp.value !== undefined ? comp.value : (comp.funding_rate !== undefined ? comp.funding_rate : '-');
                         const score = comp.score !== undefined ? comp.score : '-';
+                        // P2-1: 获取百分位和极端标记
+                        let percentile = null;
+                        let extreme = 'NONE';
+                        if (key === 'fear_greed') {
+                            percentile = summary.emotion_subscore?.data?.fear_greed_percentile;
+                            extreme = summary.emotion_subscore?.data?.fear_greed_extreme || 'NONE';
+                        } else if (key === 'cefi') {
+                            percentile = summary.emotion_subscore?.data?.cefi_percentile;
+                            extreme = summary.emotion_subscore?.data?.cefi_extreme || 'NONE';
+                        }
+                        const extremeBadge = extreme !== 'NONE'
+                            ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
+                            : '';
+                        const percentileTxt = percentile !== null ? ` (${percentile.toFixed(0)}%)` : '';
                         return `<div class="dim-metric-row">
-                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)</span>
-                            <span class="dim-metric-val">${typeof val === 'number' ? val.toFixed(2) : val} → ${score}</span>
+                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
+                            <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">${typeof val === 'number' ? val.toFixed(2) : val} → ${score}</span>
                         </div>`;
                     }).join('')}
                 </div>
@@ -6498,7 +6552,8 @@
             </div>`;
             
             // 结构子分卡片
-            html += `<div class="dim-card">
+            const structureExtreme = summary.structure_subscore?.components?.market_cap?.extreme !== 'NONE';
+            html += `<div class="dim-card ${structureExtreme ? 'extreme-high' : ''}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">📊</span>
                     <span class="dim-card-title">结构子分</span>
@@ -6515,9 +6570,20 @@
                             </div>`;
                         }
                         const score = comp.score !== undefined ? comp.score : '-';
+                        // P2-1: 获取百分位和极端标记
+                        let percentile = null;
+                        let extreme = 'NONE';
+                        if (key === 'market_cap') {
+                            percentile = summary.structure_subscore?.components?.market_cap?.percentile;
+                            extreme = summary.structure_subscore?.components?.market_cap?.extreme || 'NONE';
+                        }
+                        const extremeBadge = extreme !== 'NONE'
+                            ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
+                            : '';
+                        const percentileTxt = percentile !== null ? ` (${percentile.toFixed(0)}%)` : '';
                         return `<div class="dim-metric-row">
-                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)</span>
-                            <span class="dim-metric-val">评分: ${score}</span>
+                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
+                            <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">评分: ${score}</span>
                         </div>`;
                     }).join('')}
                 </div>

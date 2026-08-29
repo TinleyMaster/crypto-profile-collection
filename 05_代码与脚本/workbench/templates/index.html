@@ -2949,6 +2949,12 @@
             gap: 6px;
         }
 
+        /* P2-5 板块资金净流入独占整行 */
+        .sector-flow-full-section {
+            width: 100%;
+            margin-bottom: 14px;
+        }
+
         /* P2-5 板块资金净流入卡内两列布局 */
         .sector-flow-cols {
             display: grid;
@@ -2959,21 +2965,6 @@
             display: flex;
             flex-direction: column;
             gap: 4px;
-        }
-        .expand-btn {
-            background: none;
-            border: 1px solid #2a3444;
-            color: #6b7280;
-            font-size: 11px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 4px;
-            transition: all 0.2s;
-        }
-        .expand-btn:hover {
-            border-color: #3b82f6;
-            color: #3b82f6;
         }
 
         .dim-metric-row {
@@ -3485,6 +3476,9 @@
                     </div>
                 </div>
 
+                <!-- P2-5 板块资金净流入（独占整行） -->
+                <div class="sector-flow-full-section" id="sector-flow-full-section"></div>
+
                 <!-- 子分卡片网格 -->
                 <div class="overview-grid" id="overview-grid">
                     <div class="dim-card loading">加载中…</div>
@@ -3708,20 +3702,6 @@
             } else {
                 panel.classList.add('open');
                 if (arrow) arrow.classList.add('open');
-            }
-        }
-
-        // ── P2-5 叙事榜展开/收起 ──
-        function toggleNarrExtra() {
-            const extra = document.getElementById('narr-extra');
-            const btn = document.getElementById('narr-expand-btn');
-            if (!extra || !btn) return;
-            if (extra.style.display === 'none') {
-                extra.style.display = 'block';
-                btn.textContent = '收起';
-            } else {
-                extra.style.display = 'none';
-                btn.textContent = btn.getAttribute('data-total') || '展开全部';
             }
         }
 
@@ -6783,7 +6763,6 @@
         function renderOverview (data) {
             const summary = data.summary || {};
             const grid = document.getElementById('overview-grid');
-            const NARR_TOP = 5; // P2-5: 叙事榜默认显示Top5
             
             // 渲染情绪子分
             const emotion = summary.emotion_subscore || {};
@@ -6885,7 +6864,7 @@
                 <div class="dim-conclusion">权重覆盖: ${(structure.available_weight * 100).toFixed(0)}%</div>
             </div>`;
             
-            // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）- P2-5: 两列布局+折叠
+            // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）- P2-5: 独占整行 full-width
             const dim5 = (data.dimensions || {})['5板块'] || {};
             const dim5data = dim5.data || {};
             const narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
@@ -6954,26 +6933,16 @@
                 return row;
             }
             
-            // P2-5: 构建两列布局
+            // P2-5: 构建两列布局（全量显示，无折叠）
             let narrCol = '';
             let chainCol = '';
             
-            // 左列：叙事榜
+            // 左列：叙事榜（全量显示）
             if (narrFlow.length) {
                 narrCol += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}） · 点击展开成分币</div>`;
-                const visibleNarr = narrFlow.slice(0, NARR_TOP);
-                const hiddenNarr = narrFlow.slice(NARR_TOP);
-                visibleNarr.forEach(function (n, nIdx) {
+                narrFlow.forEach(function (n, nIdx) {
                     narrCol += narrRow(n, nIdx);
                 });
-                if (hiddenNarr.length > 0) {
-                    narrCol += `<button class="expand-btn" id="narr-expand-btn" onclick="toggleNarrExtra()" data-total="展开全部 ${narrFlow.length} 条">展开全部 ${narrFlow.length} 条</button>`;
-                    narrCol += `<div id="narr-extra" style="display:none">`;
-                    hiddenNarr.forEach(function (n, nIdx) {
-                        narrCol += narrRow(n, NARR_TOP + nIdx);
-                    });
-                    narrCol += `</div>`;
-                }
             } else {
                 narrCol += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
@@ -7002,8 +6971,8 @@
                 </div>`;
             }
             
-            // P2-5: 组装两列布局
-            html += `<div class="dim-card">
+            // P2-5: 组装两列布局（注入到独占整行容器）
+            let sectorFlowHtml = `<div class="dim-card">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🔄</span>
                     <span class="dim-card-title">板块资金净流入</span>
@@ -7017,6 +6986,7 @@
                 </div>
                 <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
             </div>`;
+            document.getElementById('sector-flow-full-section').innerHTML = sectorFlowHtml;
 
             // 背离检测卡（P1-2：健康/危险/背离）
             const divSignals = (data.divergence_signals || {}).signals || [];

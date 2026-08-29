@@ -6,6 +6,7 @@ ETH/BTC 汇率风险偏好开关模块。
 
 from __future__ import annotations
 
+import os
 import time
 import requests
 from typing import Any
@@ -13,9 +14,37 @@ from typing import Any
 BINANCE_BASE = "https://api.binance.com"
 TIMEOUT = 10
 
-# 风险偏好阈值（30d 变化率 %）— 默认 ±5%，后续归 P2-4 外置配置
-RISK_EXPANSION_THRESHOLD = 5.0   # > +5% → 风险偏好扩张
-RISK_FLIGHT_THRESHOLD = -5.0     # < -5% → 避险回流 BTC
+# ── P0-2 风险偏好阈值默认值（P2-4 外置 market_rules.yaml） ──
+ETHBTC_RISK_DEFAULT = {
+    "expansion_threshold": 5.0,    # > +5% → 风险偏好扩张
+    "flight_threshold": -5.0,      # < -5% → 避险回流 BTC
+}
+
+
+def _load_ethbtc_risk() -> dict:
+    """从 market_rules.yaml 加载 ETH/BTC 风险偏好阈值（缺失/解析失败回退默认值）。"""
+    rules = dict(ETHBTC_RISK_DEFAULT)
+    try:
+        import yaml
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_rules.yaml")
+        if not os.path.exists(path):
+            return rules
+        data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        overrides = data.get("ethbtc_risk") or {}
+        for k, v in overrides.items():
+            if k in rules:
+                try:
+                    rules[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    return rules
+
+
+_ETHBTC_RISK = _load_ethbtc_risk()
+RISK_EXPANSION_THRESHOLD = _ETHBTC_RISK["expansion_threshold"]
+RISK_FLIGHT_THRESHOLD = _ETHBTC_RISK["flight_threshold"]
 
 # 缓存
 _cache: dict[str, Any] = {}

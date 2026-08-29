@@ -1,5 +1,41 @@
-# 大盘模块规则外置（P2-4 演进目标：评分/背离阈值全外置于此文件）
-# 本文件由 macro_market.py 在启动时加载，缺失或解析失败时回退内置默认值，不影响运行。
+# 大盘模块规则外置（P2-4 所有评分/背离阈值全外置于此文件）
+# 本文件由 macro_market.py / ethbtc_market.py 在启动时加载，缺失或解析失败时回退内置默认值，不影响运行。
+# 改 yaml 阈值后需重启生效（不支持热更新）。
+
+# ── P0-3 情绪子分权重（和 = 1.0） ──
+emotion_weights:
+  fear_greed: 0.40       # 恐贪指数
+  altcoin_season: 0.20   # 山寨季指数
+  cefi: 0.20             # CEFI 指数
+  derivative: 0.20       # 衍生品极值
+
+# ── P0-3 结构子分权重（和 = 1.0） ──
+structure_weights:
+  market_cap: 0.25       # 体量（总市值）
+  price_action: 0.25     # 盘面（BTC/ETH 技术面）
+  institution: 0.25      # 机构（ETF 等）
+  sector: 0.25           # 板块轮动
+
+# ── P2-1 极端区阈值（百分位 > high / < low → 极端标记） ──
+extreme_zone:
+  high_pct: 90           # 百分位 > 90% → HIGH
+  low_pct: 10            # 百分位 < 10% → LOW
+
+# ── P1-1 叙事榜 / 链榜配置 ──
+narrative_chain:
+  narrative_top_n: 15    # 最多拉取 detail 聚合的叙事数（受 CMC 限流约束）
+  tvl_leg_min: 50000000  # TVL 腿阈值：低于此视为无有效 TVL，仅用市值变化
+  chain_top_n: 30        # 链榜扫描的 top 链数（按当前 TVL）
+  mcap_weight: 0.5       # 合成叙事榜：市值变化权重
+  tvl_weight: 0.5        # 合成叙事榜：TVL 变化权重
+  rank_limit: 10         # 合成叙事榜最终取前 N
+
+# ── P0-2 ETH/BTC 风险偏好阈值（30d 变化率 %） ──
+ethbtc_risk:
+  expansion_threshold: 5.0    # > +5% → 风险偏好扩张
+  flight_threshold: -5.0      # < -5% → 避险回流 BTC
+
+# ── P1-2 背离检测阈值 ──
 divergence_thresholds:
   oi_surge_pct: 30.0            # OI 7d 变化 > +30% = 暴增（杠杆过热）
   oi_flat_pct: 10.0             # OI 7d 变化 < +10% = 平稳（现货推动）
@@ -13,6 +49,7 @@ divergence_thresholds:
   corr_decouple: 0.2            # 30d Pearson r < 0.2 脱钩
   corr_prior: 0.5               # 60d 历史相关性基线（曾强相关）
 
+# ── P1-4 机会评分 / 置信度共振规则 ──
 opportunity_rules:
   narrative_min_composite: 8.0          # 叙事入榜最小合成分（低于视为弱信号）
   narrative_top_n: 3                    # 叙事机会最多取前 N
@@ -23,3 +60,39 @@ opportunity_rules:
   emotion_fear_max: 50                  # 恐贪 < 50 视为恐惧（左侧信号）
   resonance_high_min_sources: 2         # 高置信最少独立源类型数
   push_confidence_threshold: medium     # 默认只推 高+中（low 剔除）
+  protocol_top_n: 3                     # P1-3 新协议 TVL 异动取前 N
+
+# ── 评分微调参数（scoring tuning） ──
+scoring_tuning:
+  # 衍生品 funding 极值评分映射
+  funding_extreme_abs: 0.001      # |funding| > 0.001 → 极端
+  funding_high_abs: 0.0005        # |funding| > 0.0005 → 偏极端
+  funding_extreme_bull: 80        # 多头过热极端分
+  funding_extreme_bear: 20        # 空头过热极端分
+  funding_high_bull: 65           # 多头过热偏极端分
+  funding_high_bear: 35           # 空头过热偏极端分
+  funding_neutral: 50             # 中性分
+
+  # 体量（总市值）评分步进
+  mcap_step: 40000000000          # 40B 步进
+
+  # 盘面 RSI 线性映射
+  rsi_base: 50                    # RSI 中性基准
+  rsi_slope: 0.8                  # RSI→分数映射斜率
+  ma20_bonus: 5                   # 价格 > MA20 加分
+  ma50_bonus: 5                   # 价格 > MA50 加分
+
+  # ETF 资金流分级阈值（USD millions）
+  etf_flow_high: 100              # 净流入 > 100M → 80 分
+  etf_flow_low: -100              # 净流入 < -100M → 20 分
+  etf_score_inflow_high: 80
+  etf_score_inflow: 60
+  etf_score_outflow: 40
+  etf_score_outflow_high: 20
+
+  # 板块评分
+  sector_base: 50                 # 板块中性基准
+  sector_slope: 5                 # avg_change→分数映射斜率
+
+  # 可用权重阈值（低于此 → warning）
+  min_available_weight: 0.4

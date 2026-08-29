@@ -22,19 +22,60 @@ FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
 
-# ── 权重配置（P2-4 接 yaml 外置） ──
-EMOTION_WEIGHTS = {
+# ── P0-3 权重默认值（P2-4 外置 market_rules.yaml，启动时优先读 yaml） ──
+EMOTION_WEIGHTS_DEFAULT = {
     "fear_greed": 0.40,      # 恐贪指数
     "altcoin_season": 0.20,  # 山寨季指数
     "cefi": 0.20,            # CEFI 指数
     "derivative": 0.20,      # 衍生品极值
 }
 
-STRUCTURE_WEIGHTS = {
+STRUCTURE_WEIGHTS_DEFAULT = {
     "market_cap": 0.25,      # 体量（总市值）
     "price_action": 0.25,    # 盘面（BTC/ETH 技术面）
     "institution": 0.25,     # 机构（ETF 等）
     "sector": 0.25,          # 板块轮动
+}
+
+# ── P2-1 极端区阈值默认值（P2-4 外置 market_rules.yaml） ──
+EXTREME_ZONE_DEFAULT = {
+    "high_pct": 90,          # 百分位 > 90% → HIGH
+    "low_pct": 10,           # 百分位 < 10% → LOW
+}
+
+# ── P1-1 叙事榜/链榜配置默认值（P2-4 外置 market_rules.yaml） ──
+NARRATIVE_CHAIN_DEFAULT = {
+    "narrative_top_n": 15,   # 最多拉取 detail 聚合的叙事数
+    "tvl_leg_min": 50_000_000,  # TVL 腿阈值
+    "chain_top_n": 30,       # 链榜扫描的 top 链数
+    "mcap_weight": 0.5,      # 合成叙事榜：市值变化权重
+    "tvl_weight": 0.5,       # 合成叙事榜：TVL 变化权重
+    "rank_limit": 10,        # 合成叙事榜最终取前 N
+}
+
+# ── 评分微调参数默认值（P2-4 外置 market_rules.yaml） ──
+SCORING_TUNING_DEFAULT = {
+    "funding_extreme_abs": 0.001,
+    "funding_high_abs": 0.0005,
+    "funding_extreme_bull": 80,
+    "funding_extreme_bear": 20,
+    "funding_high_bull": 65,
+    "funding_high_bear": 35,
+    "funding_neutral": 50,
+    "mcap_step": 40_000_000_000,
+    "rsi_base": 50,
+    "rsi_slope": 0.8,
+    "ma20_bonus": 5,
+    "ma50_bonus": 5,
+    "etf_flow_high": 100,
+    "etf_flow_low": -100,
+    "etf_score_inflow_high": 80,
+    "etf_score_inflow": 60,
+    "etf_score_outflow": 40,
+    "etf_score_outflow_high": 20,
+    "sector_base": 50,
+    "sector_slope": 5,
+    "min_available_weight": 0.4,
 }
 
 # ── 缓存 ──
@@ -68,9 +109,7 @@ NARRATIVE_TVL_MAP = {
     "CDP": "CDP",
     "Yield Aggregator": "Yield Aggregator",
 }
-NARRATIVE_TOP_N = 15      # 最多拉取 detail 聚合的叙事数（受 CMC 限流约束）
-TVL_LEG_MIN = 50_000_000  # TVL 腿阈值：低于此视为无有效 TVL，仅用市值变化
-CHAIN_TOP_N = 30          # 链榜扫描的 top 链数（按当前 TVL）
+# P1-1 叙事/链榜配置（启动时从 yaml 加载，见 _load_market_rules）
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -110,13 +149,13 @@ def percentile_of(value: float, series: list[float]) -> float | None:
 
 def flag_extreme(percentile: float | None) -> str:
     """
-    根据百分位标记极端区：>90% → HIGH，<10% → LOW，否则 NONE。
+    根据百分位标记极端区：>high_pct → HIGH，<low_pct → LOW，否则 NONE。
     """
     if percentile is None:
         return "NONE"
-    if percentile > 90:
+    if percentile > EXTREME_ZONE["high_pct"]:
         return "HIGH"
-    if percentile < 10:
+    if percentile < EXTREME_ZONE["low_pct"]:
         return "LOW"
     return "NONE"
 
@@ -683,11 +722,13 @@ def fetch_category_tvl_flow() -> dict:
 
 def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
     """
-    合成叙事榜：有 TVL 腿（映射命中且 TVL≥阈值）= 市值变化 0.5 + TVL 变化 0.5；
-    无 TVL 腿（Meme/L1 等）= 仅市值变化。按合成值降序取前 10。
+    合成叙事榜：有 TVL 腿（映射命中且 TVL≥阈值）= 市值变化 mcap_weight + TVL 变化 tvl_weight；
+    无 TVL 腿（Meme/L1 等）= 仅市值变化。按合成值降序取前 rank_limit。
     返回 {status, ranked, degraded}。
     """
     tvl_cats = tvl_flow.get("categories", {}) if tvl_flow.get("status") == "ok" else {}
+    mc_w = NARRATIVE_CHAIN["mcap_weight"]
+    tvl_w = NARRATIVE_CHAIN["tvl_weight"]
     ranked: list[dict] = []
     for item in cat_flow.get("ranked", []):
         mcap7 = item.get("mcap_change_7d_pct")
@@ -696,7 +737,7 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
         dl_cat = NARRATIVE_TVL_MAP.get(item["narrative"])
         tvl_info = tvl_cats.get(dl_cat) if dl_cat else None
         if tvl_info and tvl_info.get("tvl", 0) >= TVL_LEG_MIN:
-            composite = 0.5 * mcap7 + 0.5 * tvl_info["tvl_change_7d_pct"]
+            composite = mc_w * mcap7 + tvl_w * tvl_info["tvl_change_7d_pct"]
             mode = "blended"
         else:
             composite = mcap7
@@ -720,7 +761,7 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
         status = "error"
     elif degraded or tvl_flow.get("status") != "ok":
         status = "partial"
-    return {"ranked": ranked[:10], "status": status, "degraded": degraded}
+    return {"ranked": ranked[:int(NARRATIVE_CHAIN["rank_limit"])], "status": status, "degraded": degraded}
 
 
 def _chain_7d_flow(chain_ident: str) -> dict | None:
@@ -874,6 +915,7 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除）
+    "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
 }
 
 
@@ -882,6 +924,11 @@ def _load_market_rules() -> dict:
     rules = {
         "divergence_thresholds": dict(DIVERGENCE_THRESHOLDS_DEFAULT),
         "opportunity_thresholds": dict(OPPORTUNITY_THRESHOLDS_DEFAULT),
+        "emotion_weights": dict(EMOTION_WEIGHTS_DEFAULT),
+        "structure_weights": dict(STRUCTURE_WEIGHTS_DEFAULT),
+        "extreme_zone": dict(EXTREME_ZONE_DEFAULT),
+        "narrative_chain": dict(NARRATIVE_CHAIN_DEFAULT),
+        "scoring_tuning": dict(SCORING_TUNING_DEFAULT),
     }
     try:
         import yaml
@@ -890,9 +937,15 @@ def _load_market_rules() -> dict:
         if not os.path.exists(path):
             return rules
         data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        # 标量覆盖（divergence / opportunity / scoring_tuning 等 flat dict）
         for section, target in (
             ("divergence_thresholds", rules["divergence_thresholds"]),
             ("opportunity_rules", rules["opportunity_thresholds"]),
+            ("emotion_weights", rules["emotion_weights"]),
+            ("structure_weights", rules["structure_weights"]),
+            ("extreme_zone", rules["extreme_zone"]),
+            ("narrative_chain", rules["narrative_chain"]),
+            ("scoring_tuning", rules["scoring_tuning"]),
         ):
             overrides = data.get(section) or {}
             for k, v in overrides.items():
@@ -909,6 +962,16 @@ def _load_market_rules() -> dict:
 _MARKET_RULES = _load_market_rules()
 DIVERGENCE_THRESHOLDS = _MARKET_RULES["divergence_thresholds"]
 OPPORTUNITY_THRESHOLDS = _MARKET_RULES["opportunity_thresholds"]
+EMOTION_WEIGHTS = _MARKET_RULES["emotion_weights"]
+STRUCTURE_WEIGHTS = _MARKET_RULES["structure_weights"]
+EXTREME_ZONE = _MARKET_RULES["extreme_zone"]
+NARRATIVE_CHAIN = _MARKET_RULES["narrative_chain"]
+SCORING_TUNING = _MARKET_RULES["scoring_tuning"]
+
+# P1-1 叙事/链榜配置（从 yaml 覆盖）
+NARRATIVE_TOP_N = int(NARRATIVE_CHAIN["narrative_top_n"])
+TVL_LEG_MIN = NARRATIVE_CHAIN["tvl_leg_min"]
+CHAIN_TOP_N = int(NARRATIVE_CHAIN["chain_top_n"])
 
 DIVERGENCE_META = {
     "price_oi": {"label": "价格 vs OI", "icon": "⚖️"},
@@ -1360,7 +1423,7 @@ def score_opportunities(overview: dict) -> dict:
     sc = by_sig.get("price_stablecoin") or {}
     scm = sc.get("metrics") or {}
     if sc.get("status") == "ok" and (scm.get("stablecoin_7d_netflow_usd") or 0) >= t["stablecoin_flow_min_usd"]:
-        if (scm.get("price_7d_pct") or 0) < 5.0:  # 价未大涨 + 稳定币净流入 = 弹药积累
+        if (scm.get("price_7d_pct") or 0) < DIVERGENCE_THRESHOLDS["price_stagnation_pct"]:  # 价未大涨 + 稳定币净流入 = 弹药积累
             btc_left_sources.append(("stablecoin_flow", "long"))
             left_metrics.append(f"稳定币 7d 净流入 {_fmt_billions(scm.get('stablecoin_7d_netflow_usd'))}")
     emo_score = emotion.get("score")
@@ -1463,7 +1526,8 @@ def score_opportunities(overview: dict) -> dict:
     # ── 6) P1-3 链上异动（若已接入） ──
     if onchain:
         protos = (onchain.get("new_protocol_tvl") or {}).get("ranked", []) or []
-        for p in protos[:3]:
+        p_top = int(t.get("protocol_top_n", 3))
+        for p in protos[:p_top]:
             if not isinstance(p, dict):
                 continue
             _push_opportunity(
@@ -1599,12 +1663,13 @@ def compute_emotion_subscore(
         # Funding rate 极值评分：绝对值越大越极端
         # 正 funding 表示多头付费（看涨过热），负 funding 表示空头付费（看跌过热）
         funding_abs = abs(funding)
-        if funding_abs > 0.001:  # 极端
-            deriv_score = 80 if funding > 0 else 20  # 多头过热=80，空头过热=20
-        elif funding_abs > 0.0005:
-            deriv_score = 65 if funding > 0 else 35
+        _ft = SCORING_TUNING
+        if funding_abs > _ft["funding_extreme_abs"]:  # 极端
+            deriv_score = _ft["funding_extreme_bull"] if funding > 0 else _ft["funding_extreme_bear"]
+        elif funding_abs > _ft["funding_high_abs"]:
+            deriv_score = _ft["funding_high_bull"] if funding > 0 else _ft["funding_high_bear"]
         else:
-            deriv_score = 50  # 中性
+            deriv_score = _ft["funding_neutral"]
 
         components["derivative"] = {
             "funding_rate": funding,
@@ -1625,7 +1690,7 @@ def compute_emotion_subscore(
     else:
         final_score = None
 
-    overall_status = "ok" if available_weights >= 0.4 else ("warning" if available_weights > 0 else "error")
+    overall_status = "ok" if available_weights >= SCORING_TUNING["min_available_weight"] else ("warning" if available_weights > 0 else "error")
 
     return {
         "score": final_score,
@@ -1656,9 +1721,8 @@ def compute_structure_subscore(
     # 体量（总市值）- 用 2.5T 为基准，归一化到 0-100
     if global_metrics.get("status") == "ok":
         total_mcap = global_metrics.get("total_market_cap", 0)
-        # 基准：2.5T = 50分，5T = 75分，1T = 25分
         if total_mcap > 0:
-            mcap_score = min(100, max(0, total_mcap / 40_000_000_000))  # 40B 步进
+            mcap_score = min(100, max(0, total_mcap / SCORING_TUNING["mcap_step"]))
         else:
             mcap_score = 50
         components["market_cap"] = {
@@ -1682,13 +1746,13 @@ def compute_structure_subscore(
         ma50 = btc_klines.get("ma50")
 
         # RSI 评分：50 中性，>70 过热，<30 超卖
-        rsi_score = 50 + (rsi - 50) * 0.8  # 线性映射
+        rsi_score = SCORING_TUNING["rsi_base"] + (rsi - SCORING_TUNING["rsi_base"]) * SCORING_TUNING["rsi_slope"]
 
         # MA 位置加分
         if ma20 and price > ma20:
-            rsi_score += 5
+            rsi_score += SCORING_TUNING["ma20_bonus"]
         if ma50 and price > ma50:
-            rsi_score += 5
+            rsi_score += SCORING_TUNING["ma50_bonus"]
 
         rsi_score = min(100, max(0, rsi_score))
 
@@ -1711,14 +1775,14 @@ def compute_structure_subscore(
     if etf_flows.get("status") == "ok":
         net_flow = etf_flows.get("net_flow_usd_m", 0)
         # 资金流评分：正流入加分，流出减分
-        if net_flow > 100:
-            inst_score = 80
+        if net_flow > SCORING_TUNING["etf_flow_high"]:
+            inst_score = SCORING_TUNING["etf_score_inflow_high"]
         elif net_flow > 0:
-            inst_score = 60
-        elif net_flow > -100:
-            inst_score = 40
+            inst_score = SCORING_TUNING["etf_score_inflow"]
+        elif net_flow > SCORING_TUNING["etf_flow_low"]:
+            inst_score = SCORING_TUNING["etf_score_outflow"]
         else:
-            inst_score = 20
+            inst_score = SCORING_TUNING["etf_score_outflow_high"]
 
         components["institution"] = {
             "net_flow_usd_m": net_flow,
@@ -1735,10 +1799,9 @@ def compute_structure_subscore(
         cats = categories.get("categories", [])
         if cats:
             avg_change = sum(c.get("market_cap_change_24h", 0) for c in cats) / len(cats)
-            # 板块评分：平均涨幅
-            sector_score = min(100, max(0, 50 + avg_change * 5))
+            sector_score = min(100, max(0, SCORING_TUNING["sector_base"] + avg_change * SCORING_TUNING["sector_slope"]))
         else:
-            sector_score = 50
+            sector_score = SCORING_TUNING["sector_base"]
 
         components["sector"] = {
             "avg_market_cap_change_24h": avg_change if cats else 0,
@@ -1757,7 +1820,7 @@ def compute_structure_subscore(
     else:
         final_score = None
 
-    overall_status = "ok" if available_weights >= 0.4 else ("warning" if available_weights > 0 else "error")
+    overall_status = "ok" if available_weights >= SCORING_TUNING["min_available_weight"] else ("warning" if available_weights > 0 else "error")
 
     return {
         "score": final_score,

@@ -257,8 +257,6 @@ def run(no_write: bool = False) -> int:
             if not no_write:
                 (SCRIPT_DIR / "cg_netflow_latest.json").write_text(
                     json.dumps(degraded, ensure_ascii=False, indent=2), encoding="utf-8")
-            browser.close()
-            return 2
                 print(f"[written degraded] {SCRIPT_DIR / 'cg_netflow_latest.json'}", file=sys.stderr)
             browser.close()
             return 2

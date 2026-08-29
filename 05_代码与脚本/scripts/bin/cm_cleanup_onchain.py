@@ -1,7 +1,7 @@
 """清理 CM 链上数据：删除不达标币种，修复 source_cutoff。
 
-根据放宽版筛选结果（15 币），清理：
-1. 删除 sol/dot/avax/matic/near/fil/op/apt/arb/atom 等不达标币种
+根据放宽版筛选结果（15 币 + matic 价格保留），清理：
+1. 删除 sol/atom/dot/avax/near/fil/op/apt/arb 等不达标币种
 2. 修复 matic 截止日期（2025-11-12）
 3. 补充 mana（漏掉的达标币）
 
@@ -24,15 +24,15 @@ if str(PROJECT_SRC) not in sys.path:
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-# 放宽版达标列表（15 币）
+# 放宽版达标列表（15 币 + matic 价格保留）= 16 币
 ALLOWED_COINS = {"btc", "eth", "ada", "xrp", "link", "uni", "aave", "ltc", "bch",
-                 "etc", "xlm", "algo", "icp", "mana", "doge"}
+                 "etc", "xlm", "algo", "icp", "mana", "doge", "matic"}
 
 # 需要删除的币种（不达标）
 DELETE_COINS_SQL = """
 DELETE FROM biz.cm_asset_onchain_daily
 WHERE cm_symbol NOT IN ('btc', 'eth', 'ada', 'xrp', 'link', 'uni', 'aave', 'ltc', 'bch',
-                         'etc', 'xlm', 'algo', 'icp', 'mana', 'doge')
+                         'etc', 'xlm', 'algo', 'icp', 'mana', 'doge', 'matic')
 """
 
 # 修复 matic 截止日期

@@ -696,6 +696,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "CM 链上指标",
     },
+    "cm_cleanup": {
+        "name": "CM 清理不达标币种",
+        "description": "清理 sol/atom/dot/avax/near/fil/op/apt/arb，修复 matic 截止日期，保留 16 币（15 白名单 + matic）",
+        "script": "cm_cleanup_onchain.py",
+        "default_args": ["--execute"],
+        "category": "CM 链上指标",
+    },
     # ═══ OBM 链上指标 ═══
     "obm_ingest": {
         "name": "OBM BTC 链上指标入库",

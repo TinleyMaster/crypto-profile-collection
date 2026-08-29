@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -133,9 +134,13 @@ def main() -> None:
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        # 默认路径：项目根目录/data_external/obm/
-        project_root = SCRIPT_DIR.parent.parent.parent
-        data_dir = project_root / "data_external" / "obm"
+        # 判断 Docker 环境
+        if os.path.exists("/app/scripts/bin"):
+            data_dir = Path("/app/data_external/obm")
+        else:
+            # 本地环境：项目根目录/data_external/obm/
+            project_root = SCRIPT_DIR.parent.parent.parent
+            data_dir = project_root / "data_external" / "obm"
 
     if not data_dir.exists():
         print(f"错误：数据目录不存在 {data_dir}", file=sys.stderr)

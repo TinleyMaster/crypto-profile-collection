@@ -222,11 +222,10 @@ def main() -> None:
         data = json.loads(list_path.read_text(encoding="utf-8"))
         coins = [c["symbol"] for c in data.get("coins", [])]
     else:
-        # 默认使用候选列表
+        # 放宽版达标列表（15 币）：MVRV + 活跃地址双核心达标
         coins = [
-            "btc", "eth", "ada", "xrp", "sol", "dot", "avax", "matic", "link",
-            "uni", "aave", "atom", "ltc", "bch", "etc", "xlm", "algo", "near",
-            "apt", "arb", "op", "fil", "icp",
+            "btc", "eth", "ada", "xrp", "link", "uni", "aave", "ltc", "bch",
+            "etc", "xlm", "algo", "icp", "mana", "doge",
         ]
 
     print(f"准备入库 {len(coins)} 个币种：{', '.join(coins)}")

@@ -6532,11 +6532,14 @@
                         let percentile = null;
                         let extreme = 'NONE';
                         if (key === 'fear_greed') {
-                            percentile = summary.emotion_subscore?.data?.fear_greed_percentile;
-                            extreme = summary.emotion_subscore?.data?.fear_greed_extreme || 'NONE';
+                            percentile = summary.emotion_subscore?.components?.fear_greed?.percentile;
+                            extreme = summary.emotion_subscore?.components?.fear_greed?.extreme || 'NONE';
                         } else if (key === 'cefi') {
-                            percentile = summary.emotion_subscore?.data?.cefi_percentile;
-                            extreme = summary.emotion_subscore?.data?.cefi_extreme || 'NONE';
+                            percentile = summary.emotion_subscore?.components?.cefi?.percentile;
+                            extreme = summary.emotion_subscore?.components?.cefi?.extreme || 'NONE';
+                        } else if (key === 'derivative') {
+                            percentile = summary.emotion_subscore?.components?.derivative?.mvrv_percentile;
+                            extreme = summary.emotion_subscore?.components?.derivative?.mvrv_extreme || 'NONE';
                         }
                         const extremeBadge = extreme !== 'NONE'
                             ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`

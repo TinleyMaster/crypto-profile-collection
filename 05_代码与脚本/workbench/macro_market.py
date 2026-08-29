@@ -297,22 +297,10 @@ def fetch_cefi_history(days: int = 30) -> dict:
 
 
 def fetch_btc_dominance_history(days: int = 30) -> dict:
-    """BTC 占比历史序列（日频）。返回 {status, series: [btc_dominance, ...]}。"""
-    try:
-        r = requests.get(
-            f"{CMC_BASE}/trial-pro-api/v1/global-metrics/quotes/latest",
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        data = r.json().get("data", {})
-        current = _safe_float(data.get("btc_dominance"))
-        if current > 0:
-            # 使用当前值作为基准，结合 BTC 价格历史估算波动范围
-            # 实际应调用历史 API，这里使用当前值 + 模拟波动
-            return {"status": "ok", "series": [current]}
-        return {"status": "error", "error": "no data", "series": []}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "series": []}
+    """BTC 占比历史序列（日频）。返回 {status, series: [btc_dominance, ...]}。
+    注意：CMC trial API 不提供 dominance 历史端点，此函数返回 error 状态。
+    需要 CoinMetrics CapBTC.DOM 或其他历史源才能计算百分位。"""
+    return {"status": "error", "error": "CMC trial API 无 dominance 历史端点", "series": []}
 
 
 def fetch_binance_btc_klines() -> dict:
@@ -1445,6 +1433,13 @@ def compute_emotion_subscore(
     altcoin_season: dict,
     cefi: dict,
     derivatives: dict,
+    *,
+    fear_greed_percentile: float | None = None,
+    fear_greed_extreme: str = "NONE",
+    cefi_percentile: float | None = None,
+    cefi_extreme: str = "NONE",
+    mvrv_percentile: float | None = None,
+    mvrv_extreme: str = "NONE",
 ) -> dict:
     """
     计算情绪子分 = 恐贪（权重）+ 山寨季 + CEFI + 衍生品极值。
@@ -1458,7 +1453,10 @@ def compute_emotion_subscore(
     fg_value = fear_greed.get("value")
     if fear_greed.get("status") == "ok" and fg_value is not None:
         fg_score = _safe_float(fg_value)
-        components["fear_greed"] = {"value": fg_value, "score": fg_score, "weight": EMOTION_WEIGHTS["fear_greed"]}
+        components["fear_greed"] = {
+            "value": fg_value, "score": fg_score, "weight": EMOTION_WEIGHTS["fear_greed"],
+            "percentile": fear_greed_percentile, "extreme": fear_greed_extreme,
+        }
         weighted_sum += fg_score * EMOTION_WEIGHTS["fear_greed"]
         available_weights += EMOTION_WEIGHTS["fear_greed"]
     else:
@@ -1478,7 +1476,10 @@ def compute_emotion_subscore(
     cefi_value = cefi.get("value")
     if cefi.get("status") == "ok" and cefi_value is not None:
         cefi_score = _safe_float(cefi_value)
-        components["cefi"] = {"value": cefi_value, "score": cefi_score, "weight": EMOTION_WEIGHTS["cefi"]}
+        components["cefi"] = {
+            "value": cefi_value, "score": cefi_score, "weight": EMOTION_WEIGHTS["cefi"],
+            "percentile": cefi_percentile, "extreme": cefi_extreme,
+        }
         weighted_sum += cefi_score * EMOTION_WEIGHTS["cefi"]
         available_weights += EMOTION_WEIGHTS["cefi"]
     else:
@@ -1504,6 +1505,8 @@ def compute_emotion_subscore(
             "open_interest": oi,
             "score": deriv_score,
             "weight": EMOTION_WEIGHTS["derivative"],
+            "mvrv_percentile": mvrv_percentile,
+            "mvrv_extreme": mvrv_extreme,
         }
         weighted_sum += deriv_score * EMOTION_WEIGHTS["derivative"]
         available_weights += EMOTION_WEIGHTS["derivative"]
@@ -1532,6 +1535,9 @@ def compute_structure_subscore(
     eth_klines: dict,
     etf_flows: dict,
     categories: dict,
+    *,
+    btc_dominance_percentile: float | None = None,
+    btc_dominance_extreme: str = "NONE",
 ) -> dict:
     """
     计算结构子分 = 体量 / 盘面 / 机构 / 板块。
@@ -1554,6 +1560,8 @@ def compute_structure_subscore(
             "btc_dominance": global_metrics.get("btc_dominance"),
             "score": mcap_score,
             "weight": STRUCTURE_WEIGHTS["market_cap"],
+            "percentile": btc_dominance_percentile,
+            "extreme": btc_dominance_extreme,
         }
         weighted_sum += mcap_score * STRUCTURE_WEIGHTS["market_cap"]
         available_weights += STRUCTURE_WEIGHTS["market_cap"]
@@ -1687,33 +1695,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     cefi_hist = fetch_cefi_history(30)
     btc_dom_hist = fetch_btc_dominance_history(30)
 
-    # ── P1-1 板块/链资金净流入（7d 视角） ──
-    cat_flow = fetch_category_flow()
-    tvl_flow = fetch_category_tvl_flow()
-    chain_flow = fetch_chain_flow()
-    narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
-
-    # ── P1-2 背离检测（价格/OI、价格/funding、价格/稳定币、BTC/纳指） ──
-    divergence = build_divergence_signals()
-
-    # ── 计算子分 ──
-    emotion_subscore = compute_emotion_subscore(
-        fear_greed=fear_greed,
-        altcoin_season=altcoin_season,
-        cefi=cefi,
-        derivatives=derivatives,
-    )
-
-    structure_subscore = compute_structure_subscore(
-        global_metrics=global_metrics,
-        btc_klines=btc_klines,
-        eth_klines=eth_klines,
-        etf_flows=etf_flows,
-        categories=categories,
-    )
-
-    # ── 组装结果 ──
-    # P2-1: 计算各核心指标的百分位和极端标记
+    # ── P2-1: 计算各核心指标的百分位和极端标记 ──
     fg_value = fear_greed.get("value")
     fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
     fg_extreme = flag_extreme(fg_percentile)
@@ -1734,6 +1716,40 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     btc_dom_percentile = percentile_of(btc_dom_value, btc_dom_hist.get("series") or []) if btc_dom_hist.get("status") == "ok" else None
     btc_dom_extreme = flag_extreme(btc_dom_percentile)
 
+    # ── P1-1 板块/链资金净流入（7d 视角） ──
+    cat_flow = fetch_category_flow()
+    tvl_flow = fetch_category_tvl_flow()
+    chain_flow = fetch_chain_flow()
+    narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
+
+    # ── P1-2 背离检测（价格/OI、价格/funding、价格/稳定币、BTC/纳指） ──
+    divergence = build_divergence_signals()
+
+    # ── 计算子分 ──
+    emotion_subscore = compute_emotion_subscore(
+        fear_greed=fear_greed,
+        altcoin_season=altcoin_season,
+        cefi=cefi,
+        derivatives=derivatives,
+        fear_greed_percentile=fg_percentile,
+        fear_greed_extreme=fg_extreme,
+        cefi_percentile=cefi_percentile,
+        cefi_extreme=cefi_extreme,
+        mvrv_percentile=mvrv_percentile,
+        mvrv_extreme=mvrv_extreme,
+    )
+
+    structure_subscore = compute_structure_subscore(
+        global_metrics=global_metrics,
+        btc_klines=btc_klines,
+        eth_klines=eth_klines,
+        etf_flows=etf_flows,
+        categories=categories,
+        btc_dominance_percentile=btc_dom_percentile,
+        btc_dominance_extreme=btc_dom_extreme,
+    )
+
+    # ── 组装结果 ──
     result = {
         "summary": {
             "emotion_subscore": emotion_subscore,
@@ -1742,11 +1758,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         "dimensions": {
             "1体量": {
                 "status": global_metrics.get("status", "error"),
-                "data": {
-                    **global_metrics,
-                    "percentile": btc_dom_percentile,
-                    "extreme": btc_dom_extreme,
-                },
+                "data": global_metrics,
             },
             "2盘面": {
                 "status": btc_klines.get("status", "error"),
@@ -1757,22 +1769,14 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             },
             "3衍生品": {
                 "status": derivatives.get("status", "error"),
-                "data": {
-                    **derivatives,
-                    "mvrv_percentile": mvrv_percentile,
-                    "mvrv_extreme": mvrv_extreme,
-                },
+                "data": derivatives,
             },
             "3情绪": {
                 "status": "ok" if all(x.get("status") == "ok" for x in [fear_greed, altcoin_season]) else "partial",
                 "data": {
                     "fear_greed": fear_greed,
-                    "fear_greed_percentile": fg_percentile,
-                    "fear_greed_extreme": fg_extreme,
                     "altcoin_season": altcoin_season,
                     "cefi": cefi,
-                    "cefi_percentile": cefi_percentile,
-                    "cefi_extreme": cefi_extreme,
                 },
             },
             "4机构": {
@@ -1790,8 +1794,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                     "chain_flow_ranking": chain_flow,
                     "narrative_tvl_flow": tvl_flow,
                     "category_flow": cat_flow,
-                    "stablecoin_flow_percentile": sc_flow_percentile,
-                    "stablecoin_flow_extreme": sc_flow_extreme,
                 },
             },
         },

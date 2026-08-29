@@ -58,7 +58,7 @@ def validate_mvrv_extremes(conn, symbol: str | None = None) -> None:
     print("MVRV 极值抽查")
     print("=" * 60)
 
-    where_clause = f"WHERE cm_symbol = '{symbol}'" if symbol else ""
+    where_clause = f"WHERE cm_symbol = '{symbol}'" if symbol else "WHERE 1=1"
 
     # BTC 2021-11 顶部应 ≥ 90 分位
     # BTC 2018-12 / 2022-11 底部应 ≤ 10 分位

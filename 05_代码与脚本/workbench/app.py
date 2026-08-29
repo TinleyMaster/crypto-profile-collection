@@ -689,13 +689,6 @@ TASK_DEFS = {
         "default_args": [],
         "category": "CM 链上指标",
     },
-    "cm_consolidate": {
-        "name": "CM 范围收缩（排除 bnb/sol）",
-        "description": "根据质检结论，排除 bnb/sol，仅保留 btc/eth/doge/xrp/ada；标注 doge/xrp/ada 净流列为 NULL",
-        "script": "cm_range_consolidate.py",
-        "default_args": ["--execute"],
-        "category": "CM 链上指标",
-    },
     "cm_validate_onchain": {
         "name": "CM 验证链上指标",
         "description": "验证入库结果：row count、MVRV 极值抽查、空值处理",

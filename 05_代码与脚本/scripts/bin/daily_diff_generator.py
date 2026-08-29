@@ -75,6 +75,9 @@ WHERE d.source_code = 'cmc'
   AND d.market_date = %s::DATE
   AND a.market_cap_rank <= 1000
   AND d.change_24h IS NOT NULL
+  AND d.change_24h BETWEEN -80 AND 80
+  AND d.volume_24h >= 500000
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
 ORDER BY ABS(d.change_24h) DESC
 LIMIT 40
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
@@ -131,7 +134,7 @@ SELECT
     COALESCE(u.unlock_value_7d_usd, 0),
     '7 天解锁价值 (USD)',
     ROW_NUMBER() OVER (ORDER BY COALESCE(u.unlock_value_7d_usd, 0) DESC),
-    'up',
+    'down',
     jsonb_build_object(
         'unlock_value_7d_usd', u.unlock_value_7d_usd,
         'unlock_amount_7d', u.unlock_amount_7d,
@@ -185,33 +188,45 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 SOCIAL_SURGE_SQL = """
 INSERT INTO biz.daily_diff_summary
     (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (sh.asset_id)
+        sh.asset_id, sh.score, sh.confidence, sh.community_json, sh.trend_json, sh.updated_at
+    FROM biz.asset_social_heat sh
+    WHERE DATE(sh.updated_at) <= %s::DATE
+      AND sh.score IS NOT NULL
+    ORDER BY sh.asset_id, sh.updated_at DESC
+),
+prev AS (
+    SELECT DISTINCT ON (p.asset_id)
+        p.asset_id, p.score, p.updated_at
+    FROM biz.asset_social_heat p
+    WHERE DATE(p.updated_at) <= %s::DATE - INTERVAL '1 day'
+      AND p.score IS NOT NULL
+      AND p.score > 0
+    ORDER BY p.asset_id, p.updated_at DESC
+)
 SELECT
     %s::DATE,
     'social_surge',
-    sh.asset_id,
-    (sh.score - prev.score) / NULLIF(prev.score, 0) * 100 AS heat_change_pct,
+    l.asset_id,
+    (l.score - pr.score) / pr.score * 100 AS heat_change_pct,
     '社交热度日增幅 (%%)',
-    ROW_NUMBER() OVER (ORDER BY (sh.score - prev.score) / NULLIF(prev.score, 0) DESC),
+    ROW_NUMBER() OVER (ORDER BY (l.score - pr.score) / pr.score DESC),
     'up',
     jsonb_build_object(
-        'heat_score', sh.score,
-        'heat_score_prev', prev.score,
-        'confidence', sh.confidence,
-        'community_json', sh.community_json,
-        'trend_json', sh.trend_json
+        'heat_score', l.score,
+        'heat_score_prev', pr.score,
+        'confidence', l.confidence,
+        'community_json', l.community_json,
+        'trend_json', l.trend_json
     )
-FROM biz.asset_social_heat sh
-JOIN core.asset a ON a.asset_id = sh.asset_id
-JOIN biz.asset_social_heat prev
-    ON prev.asset_id = sh.asset_id
-    AND DATE(prev.updated_at) = DATE(sh.updated_at) - INTERVAL '1 day'
-WHERE DATE(sh.updated_at) = %s::DATE
-  AND a.market_cap_rank <= 1000
-  AND sh.score IS NOT NULL
-  AND prev.score IS NOT NULL
-  AND prev.score > 0
-  AND sh.score > prev.score
-ORDER BY (sh.score - prev.score) / prev.score DESC
+FROM latest l
+JOIN core.asset a ON a.asset_id = l.asset_id
+JOIN prev pr ON pr.asset_id = l.asset_id
+WHERE a.market_cap_rank <= 1000
+  AND l.score > pr.score
+  AND pr.score > 0
+ORDER BY (l.score - pr.score) / pr.score DESC
 LIMIT 20
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -219,33 +234,47 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 TVL_SURGE_SQL = """
 INSERT INTO biz.daily_diff_summary
     (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (t.asset_id, t.source_code)
+        t.asset_id, t.source_code, t.tvl, t.metric_date,
+        t.tvl_change_1d, t.tvl_change_7d
+    FROM biz.protocol_metric_daily t
+    WHERE t.source_code = 'dl'
+      AND t.metric_date <= %s::DATE
+      AND t.tvl IS NOT NULL
+    ORDER BY t.asset_id, t.source_code, t.metric_date DESC
+),
+prev AS (
+    SELECT DISTINCT ON (p.asset_id, p.source_code)
+        p.asset_id, p.source_code, p.tvl, p.metric_date
+    FROM biz.protocol_metric_daily p
+    WHERE p.source_code = 'dl'
+      AND p.metric_date <= %s::DATE - INTERVAL '1 day'
+      AND p.tvl IS NOT NULL
+      AND p.tvl > 0
+    ORDER BY p.asset_id, p.source_code, p.metric_date DESC
+)
 SELECT
     %s::DATE,
     'tvl_surge_24h',
-    t.asset_id,
-    (t.tvl - prev.tvl) / NULLIF(prev.tvl, 0) * 100 AS tvl_change_pct,
+    l.asset_id,
+    (l.tvl - pr.tvl) / pr.tvl * 100 AS tvl_change_pct,
     '24h TVL 增幅 (%%)',
-    ROW_NUMBER() OVER (ORDER BY (t.tvl - prev.tvl) / NULLIF(prev.tvl, 0) DESC),
-    CASE WHEN t.tvl >= prev.tvl THEN 'up' ELSE 'down' END,
+    ROW_NUMBER() OVER (ORDER BY (l.tvl - pr.tvl) / pr.tvl DESC),
+    CASE WHEN l.tvl >= pr.tvl THEN 'up' ELSE 'down' END,
     jsonb_build_object(
-        'tvl', t.tvl,
-        'tvl_prev', prev.tvl,
-        'tvl_change_1d', t.tvl_change_1d,
-        'tvl_change_7d', t.tvl_change_7d
+        'tvl', l.tvl,
+        'tvl_prev', pr.tvl,
+        'tvl_change_1d', l.tvl_change_1d,
+        'tvl_change_7d', l.tvl_change_7d
     )
-FROM biz.protocol_metric_daily t
-JOIN core.asset a ON a.asset_id = t.asset_id
-JOIN biz.protocol_metric_daily prev
-    ON prev.asset_id = t.asset_id
-    AND prev.source_code = t.source_code
-    AND prev.metric_date = t.metric_date - INTERVAL '1 day'
-WHERE t.source_code = 'dl'
-  AND t.metric_date = %s::DATE
-  AND a.market_cap_rank <= 3000
-  AND t.tvl IS NOT NULL
-  AND prev.tvl IS NOT NULL
-  AND prev.tvl > 0
-ORDER BY ABS(t.tvl - prev.tvl) / prev.tvl DESC
+FROM latest l
+JOIN core.asset a ON a.asset_id = l.asset_id
+JOIN prev pr ON pr.asset_id = l.asset_id AND pr.source_code = l.source_code
+WHERE a.market_cap_rank <= 3000
+  AND l.tvl > pr.tvl
+  AND pr.tvl > 0
+ORDER BY (l.tvl - pr.tvl) / pr.tvl DESC
 LIMIT 20
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -272,14 +301,14 @@ def generate_for_date(cur, d: date) -> dict:
     else:
         result["unlock_7d"] = 0
 
-    # social_surge：需要前一天有数据，且当天有更新
-    cur.execute(SOCIAL_SURGE_SQL, (date_str, date_str))
+    # social_surge：需要前一天有数据，取各资产最新记录 vs 次新记录
+    cur.execute(SOCIAL_SURGE_SQL, (date_str, date_str, date_str))
     result["social_surge"] = cur.rowcount
 
-    # tvl_surge：需要 protocol_metric_daily 有数据
+    # tvl_surge：需要 protocol_metric_daily 有数据，取最近可用配对
     cur.execute("SELECT count(*) FROM biz.protocol_metric_daily WHERE source_code = 'dl'")
     if cur.fetchone()[0] > 0:
-        cur.execute(TVL_SURGE_SQL, (date_str, date_str))
+        cur.execute(TVL_SURGE_SQL, (date_str, date_str, date_str))
         result["tvl_surge_24h"] = cur.rowcount
     else:
         result["tvl_surge_24h"] = 0

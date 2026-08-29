@@ -673,6 +673,29 @@ TASK_DEFS = {
         "default_args": ["--execute"],
         "category": "维护",
     },
+
+    # ═══ CM 链上指标：主流币历史极值分位 ═══
+    "cm_filter_major": {
+        "name": "CM 筛选达标主流币",
+        "description": "扫描 CoinMetrics Community 档 CSV，筛选历史≥730d且关键列非空率≥80%的达标主流币",
+        "script": "filter_cm_major_coins.py",
+        "default_args": ["--output", "cm_major_coins.json"],
+        "category": "CM 链上指标",
+    },
+    "cm_ingest_onchain": {
+        "name": "CM 入库链上日频指标",
+        "description": "从 CoinMetrics GitHub 下载 raw CSV，解析后 upsert 到 biz.cm_asset_onchain_daily",
+        "script": "ingest_cm_onchain_daily.py",
+        "default_args": [],
+        "category": "CM 链上指标",
+    },
+    "cm_validate_onchain": {
+        "name": "CM 验证链上指标",
+        "description": "验证入库结果：row count、MVRV 极值抽查、空值处理",
+        "script": "validate_cm_onchain.py",
+        "default_args": [],
+        "category": "CM 链上指标",
+    },
 }
 
 
@@ -1932,6 +1955,31 @@ def api_watchlist_remove(watch_id: int):
     try:
         data = _get_db_stats().remove_watchlist(watch_id)
         return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── CM 链上指标：SQL 执行 ──
+
+@app.route("/api/cm/exec_sql", methods=["POST"])
+def api_cm_exec_sql():
+    """执行 CM 相关 SQL 文件（建表/视图）。body: {sql_file: 'biz/cm_asset_onchain_daily.sql'}"""
+    try:
+        body = request.get_json(silent=True) or {}
+        sql_file = body.get("sql_file", "")
+        if not sql_file:
+            return jsonify({"ok": False, "error": "缺少 sql_file 参数"}), 400
+
+        sql_path = SQL_DIR / sql_file
+        if not sql_path.exists():
+            return jsonify({"ok": False, "error": f"SQL 文件不存在: {sql_file}"}), 400
+
+        sql_content = sql_path.read_text(encoding="utf-8")
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_content)
+
+        return jsonify({"ok": True, "message": f"执行成功: {sql_file}"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

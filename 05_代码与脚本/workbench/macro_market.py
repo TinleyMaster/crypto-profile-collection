@@ -595,7 +595,7 @@ def fetch_onchain_anomaly_signals() -> dict:
             mu = statistics.mean(daily_netflows)
             sigma = statistics.stdev(daily_netflows)
             if sigma > 0:
-                z = (netflow_7d - mu) / sigma
+                z = ((netflow_7d / 7) - mu) / sigma  # 7d 日均对齐单日量纲
                 # Z-score → 0-100：Z=0 → 50；Z=+2 → ~84；Z=-2 → ~16
                 cefi_score = max(0, min(100, round(50 + z * 17, 1)))
             else:
@@ -1019,6 +1019,7 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除）
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
+    "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
 }
 
 
@@ -1537,7 +1538,7 @@ def score_opportunities(overview: dict) -> dict:
         ex = onchain.get("exchange_netflow") or {}
         if isinstance(ex, dict) and ex.get("status") == "ok":
             net = ex.get("netflow_7d_usd")
-            if net is not None and net > 0:  # 正 = 交易所净流出（积累）
+            if net is not None and net > t.get("exchange_netflow_min_usd", 100_000_000):  # 正=净流出(积累)，需超阈值
                 btc_left_sources.append(("exchange_netflow", "long"))
                 left_metrics.append(f"交易所 7d 净流出 {_fmt_billions(net)}")
     if btc_left_sources:
@@ -1990,7 +1991,11 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     sc_flow_extreme = flag_extreme(sc_flow_percentile)
 
     cefi_value = cefi.get("value")
-    cefi_percentile = percentile_of(cefi_value, cefi_hist.get("series") or []) if cefi_hist.get("status") == "ok" else None
+    # onchain 覆盖时用自身 30d 序列算 percentile（避免跨源量纲混合）
+    if cefi.get("source") == "onchain_cex_netflow" and onchain.get("daily_netflows_30d"):
+        cefi_percentile = percentile_of(cefi_value, onchain["daily_netflows_30d"])
+    else:
+        cefi_percentile = percentile_of(cefi_value, cefi_hist.get("series") or []) if cefi_hist.get("status") == "ok" else None
     cefi_extreme = flag_extreme(cefi_percentile)
 
     btc_dom_value = global_metrics.get("btc_dominance")

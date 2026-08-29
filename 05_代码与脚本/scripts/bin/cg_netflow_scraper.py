@@ -73,8 +73,22 @@ def parse_page(page) -> dict:
         # 调试日志
         print(f"[parse] table headers={headers[:5]}, is_main={is_main}, is_alert={is_alert}", file=sys.stderr)
 
-        for r in t.query_selector_all('tr[data-row-key]'):
+        # 尝试多种选择器
+        rows = t.query_selector_all('tr[data-row-key]')
+        if not rows:
+            rows = t.query_selector_all('tbody tr')
+        if not rows:
+            rows = t.query_selector_all('tr')
+            # 过滤掉表头行
+            rows = [r for r in rows if r.query_selector('td')]
+
+        print(f"[parse]   找到 {len(rows)} 行", file=sys.stderr)
+
+        for r in rows:
             tds = r.query_selector_all("td")
+            if not tds:
+                continue
+                
             sym_el = r.query_selector(".symbol-name")
             if sym_el is not None:
                 symbol = sym_el.inner_text().strip()
@@ -83,18 +97,18 @@ def parse_page(page) -> dict:
             else:
                 symbol = ""
 
-            if is_main:
+            if is_main and len(tds) >= 5:
                 main.append({
                     "symbol": symbol,
-                    "exchange": tds[1].inner_text().strip() if len(tds) > 1 else "",
-                    "side": tds[2].inner_text().strip() if len(tds) > 2 else "",
-                    "qty": _num_attr(tds[3]) if len(tds) > 3 else None,
-                    "qty_display": tds[3].inner_text().strip() if len(tds) > 3 else "",
-                    "value": _num_attr(tds[4]) if len(tds) > 4 else None,
-                    "value_display": tds[4].inner_text().strip() if len(tds) > 4 else "",
+                    "exchange": tds[1].inner_text().strip(),
+                    "side": tds[2].inner_text().strip(),
+                    "qty": _num_attr(tds[3]),
+                    "qty_display": tds[3].inner_text().strip(),
+                    "value": _num_attr(tds[4]),
+                    "value_display": tds[4].inner_text().strip(),
                     "time": tds[5].inner_text().strip() if len(tds) > 5 else "",
                 })
-            elif is_alert:
+            elif is_alert and len(tds) >= 4:
                 alert.append({
                     "symbol": symbol,
                     "from": tds[1].inner_text().strip() if len(tds) > 1 else "",

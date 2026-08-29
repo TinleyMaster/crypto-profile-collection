@@ -748,6 +748,14 @@ def _chain_7d_flow(chain_ident: str) -> dict | None:
         return None
 
 
+# DeFiLlama /v2/chains name → /protocols chain 字段别名映射
+# 实测 BSC/Binance、OP Mainnet/Optimism 等两侧命名不一致
+DL_CHAIN_ALIAS: dict[str, str] = {
+    "BSC": "Binance",
+    "OP Mainnet": "Optimism",
+}
+
+
 def fetch_chain_flow() -> dict:
     """
     DeFiLlama 链净流入榜 TOP5。/v2/chains 无 tvlPrevWeek 字段（实测），
@@ -789,8 +797,9 @@ def fetch_chain_flow() -> dict:
         if not ident:
             return None
         info = _chain_7d_flow(ident)
-        # 从预拉数据中取该链 Top 5 协议
-        protos = chain_protos.get(ident, [])
+        # 从预拉数据中取该链 Top 5 协议（支持别名映射：BSC→Binance, OP Mainnet→Optimism）
+        proto_key = DL_CHAIN_ALIAS.get(ident, ident)
+        protos = chain_protos.get(proto_key, chain_protos.get(ident, []))
         top_protos = [
             {
                 "name": p.get("name", ""),

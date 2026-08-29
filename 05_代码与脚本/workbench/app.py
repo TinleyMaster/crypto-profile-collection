@@ -511,21 +511,6 @@ TASK_DEFS = {
         "default_args": ["--fetch-only"],
         "category": "链上数据",
     },
-    # ═══ OBM + CM 链上指标 ═══
-    "obm_ingest": {
-        "name": "OBM BTC 链上指标入库",
-        "description": "从 data_external/obm/*.csv 读取 Open Bitcoin Metrics 23 项 BTC 链上指标，upsert 到 biz.obm_btc_daily（长表）",
-        "script": "ingest_obm_btc_daily.py",
-        "default_args": [],
-        "category": "链上数据",
-    },
-    "cm_consolidate": {
-        "name": "CM 范围收缩（排除 bnb/sol）",
-        "description": "根据质检结论，排除 bnb/sol，仅保留 btc/eth/doge/xrp/ada；标注 doge/xrp/ada 净流列为 NULL",
-        "script": "cm_range_consolidate.py",
-        "default_args": ["--execute"],
-        "category": "链上数据",
-    },
     # ═══ 诊断 ═══
     "diag_noise": {
         "name": "噪声诊断报告",
@@ -704,12 +689,27 @@ TASK_DEFS = {
         "default_args": [],
         "category": "CM 链上指标",
     },
+    "cm_consolidate": {
+        "name": "CM 范围收缩（排除 bnb/sol）",
+        "description": "根据质检结论，排除 bnb/sol，仅保留 btc/eth/doge/xrp/ada；标注 doge/xrp/ada 净流列为 NULL",
+        "script": "cm_range_consolidate.py",
+        "default_args": ["--execute"],
+        "category": "CM 链上指标",
+    },
     "cm_validate_onchain": {
         "name": "CM 验证链上指标",
         "description": "验证入库结果：row count、MVRV 极值抽查、空值处理",
         "script": "validate_cm_onchain.py",
         "default_args": [],
         "category": "CM 链上指标",
+    },
+    # ═══ OBM 链上指标 ═══
+    "obm_ingest": {
+        "name": "OBM BTC 链上指标入库",
+        "description": "从 data_external/obm/*.csv 读取 Open Bitcoin Metrics 23 项 BTC 链上指标，upsert 到 biz.obm_btc_daily（长表）",
+        "script": "ingest_obm_btc_daily.py",
+        "default_args": [],
+        "category": "OBM 链上指标",
     },
 }
 

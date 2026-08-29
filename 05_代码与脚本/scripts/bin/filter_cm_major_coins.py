@@ -1,8 +1,9 @@
-"""筛选 Coin Metrics Community 档达标主流币。
+"""筛选 Coin Metrics Community 档达标主流币（放宽版）。
 
 扫描 github.com/coinmetrics/data 仓库的 CSV 目录，筛选出：
 - 历史 ≥ 730 交易日（约 2 年）
-- 关键链上列非空率 ≥ 80%
+- 核心链上列（MVRV + 活跃地址）非空率 ≥ 70%
+- 交易所净流为可选维度（缺失不阻断）
 
 输出：达标主流币清单 JSON 文件。
 
@@ -25,11 +26,14 @@ from urllib.request import urlopen, Request
 # Coin Metrics CSV 基础 URL（raw GitHub）
 CM_CSV_BASE = "https://raw.githubusercontent.com/coinmetrics/data/master/csv"
 
-# 关键链上列（非空率阈值检查用）
-KEY_ONCHAIN_COLS = [
-    "AdrActCnt",      # 活跃地址
-    "TxTfrCnt",       # 转账笔数
+# 核心链上列（必须达标，否则整币 SKIP）
+CORE_ONCHAIN_COLS = [
     "CapMVRVCur",     # MVRV
+    "AdrActCnt",      # 活跃地址
+]
+
+# 可选链上列（缺失不阻断，入库时写 NULL）
+OPTIONAL_ONCHAIN_COLS = [
     "FlowInExUSD",    # 交易所流入
     "FlowOutExUSD",   # 交易所流出
 ]
@@ -37,8 +41,8 @@ KEY_ONCHAIN_COLS = [
 # 最小历史天数阈值
 MIN_HISTORY_DAYS = 730
 
-# 关键列非空率阈值
-MIN_NONNULL_RATIO = 0.80
+# 核心列非空率阈值（放宽至 0.70）
+MIN_NONNULL_RATIO = 0.70
 
 # 候选币种列表（主流币优先，可扩展）
 CANDIDATE_COINS = [
@@ -75,20 +79,33 @@ def analyze_csv(csv_content: str, symbol: str) -> dict | None:
     if total_rows < MIN_HISTORY_DAYS:
         return None
 
-    # 检查关键列非空率
-    col_stats = {}
-    for col in KEY_ONCHAIN_COLS:
+    # 检查核心列非空率
+    core_stats = {}
+    for col in CORE_ONCHAIN_COLS:
         if col not in rows[0]:
-            col_stats[col] = {"nonnull": 0, "total": total_rows, "ratio": 0.0}
+            # 核心列缺失，整币 SKIP
+            return None
+        nonnull_count = sum(1 for row in rows if row.get(col, "") not in ("", "null", "NaN"))
+        ratio = nonnull_count / total_rows if total_rows > 0 else 0.0
+        core_stats[col] = {"nonnull": nonnull_count, "total": total_rows, "ratio": ratio}
+
+    # 检查核心列非空率是否达标
+    for col, stats in core_stats.items():
+        if stats["ratio"] < MIN_NONNULL_RATIO:
+            return None
+
+    # 检查可选列（统计但不阻断）
+    optional_stats = {}
+    has_flow = False
+    for col in OPTIONAL_ONCHAIN_COLS:
+        if col not in rows[0]:
+            optional_stats[col] = {"nonnull": 0, "total": total_rows, "ratio": 0.0}
             continue
         nonnull_count = sum(1 for row in rows if row.get(col, "") not in ("", "null", "NaN"))
         ratio = nonnull_count / total_rows if total_rows > 0 else 0.0
-        col_stats[col] = {"nonnull": nonnull_count, "total": total_rows, "ratio": ratio}
-
-    # 检查非空率是否达标
-    for col, stats in col_stats.items():
-        if stats["ratio"] < MIN_NONNULL_RATIO:
-            return None
+        optional_stats[col] = {"nonnull": nonnull_count, "total": total_rows, "ratio": ratio}
+        if ratio > 0.5:
+            has_flow = True
 
     # 提取日期范围
     first_date = rows[0].get("time", "")[:10]
@@ -99,12 +116,14 @@ def analyze_csv(csv_content: str, symbol: str) -> dict | None:
         "history_days": total_rows,
         "first_date": first_date,
         "last_date": last_date,
-        "col_stats": {k: {"nonnull": v["nonnull"], "ratio": round(v["ratio"], 3)} for k, v in col_stats.items()},
+        "has_flow": has_flow,
+        "core_stats": {k: {"nonnull": v["nonnull"], "ratio": round(v["ratio"], 3)} for k, v in core_stats.items()},
+        "optional_stats": {k: {"nonnull": v["nonnull"], "ratio": round(v["ratio"], 3)} for k, v in optional_stats.items()},
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="筛选 CM Community 档达标主流币")
+    parser = argparse.ArgumentParser(description="筛选 CM Community 档达标主流币（放宽版）")
     parser.add_argument("--top", type=int, default=None, help="仅扫描 top N 候选币种")
     parser.add_argument("--output", type=str, default="cm_major_coins.json", help="输出文件路径")
     args = parser.parse_args()
@@ -112,6 +131,9 @@ def main() -> None:
     candidates = CANDIDATE_COINS[:args.top] if args.top else CANDIDATE_COINS
 
     print(f"扫描 {len(candidates)} 个候选币种...")
+    print(f"达标条件：历史 ≥ {MIN_HISTORY_DAYS}d，核心列(MVRV+活跃地址)非空率 ≥ {MIN_NONNULL_RATIO}")
+    print(f"可选列：交易所净流（缺失不阻断）\n")
+
     qualified = []
     for i, symbol in enumerate(candidates, 1):
         print(f"[{i}/{len(candidates)}] {symbol}...", end=" ", flush=True)
@@ -125,7 +147,10 @@ def main() -> None:
             print("SKIP (不达标)")
             continue
 
-        print(f"OK ({result['history_days']}d, {result['first_date']}~{result['last_date']})")
+        flow_str = "✅有净流" if result["has_flow"] else "❌无净流"
+        mvrv_pct = result["core_stats"].get("CapMVRVCur", {}).get("ratio", 0) * 100
+        adr_pct = result["core_stats"].get("AdrActCnt", {}).get("ratio", 0) * 100
+        print(f"OK ({result['history_days']}d, MVRV={mvrv_pct:.0f}%, 活跃={adr_pct:.0f}%, {flow_str})")
         qualified.append(result)
 
     # 输出结果

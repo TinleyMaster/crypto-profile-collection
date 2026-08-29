@@ -49,7 +49,7 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
                   SELECT 1 FROM biz.asset_social_heat sh
                   WHERE sh.asset_id = a.asset_id
               )
-            ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
+            ORDER BY a.asset_id ASC
             LIMIT %s
             """,
             (limit,),

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 CATEGORY_INTER_REQUEST_SLEEP = 2.0  # 分类间限速（秒），避免触发 CMC 429；trial 配额下偏保守
+CATEGORY_SKIP_WINDOW_HOURS = 168    # 续传跳过窗口（小时）：7 天，已成功分类长周期不再重抓
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -447,8 +448,8 @@ def main() -> int:
             if target_ids and cat_id not in target_ids:
                 continue
             # 24h 续传：近 24h 已成功入库则跳过，省 CMC 配额
-            if _is_recently_ingested(conn, cat_id, window_hours=24):
-                print(f"  category {cat_id} ({cat['category_name']}): skipped (ingested <24h ago)")
+            if _is_recently_ingested(conn, cat_id, window_hours=CATEGORY_SKIP_WINDOW_HOURS):
+                print(f"  category {cat_id} ({cat['category_name']}): skipped (ingested <{CATEGORY_SKIP_WINDOW_HOURS}h ago)")
                 processed += 1
                 continue
             try:

@@ -24,7 +24,7 @@ class CMCClient:
         retry = Retry(
             total=3,
             backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[500, 502, 503, 504],   # 429 不在此：交脚本层做指数退避 + Retry-After
             allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)

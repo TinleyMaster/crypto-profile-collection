@@ -25,6 +25,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+CATEGORY_INTER_REQUEST_SLEEP = 2.0  # 分类间限速（秒），避免触发 CMC 429；trial 配额下偏保守
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -75,7 +77,8 @@ def _fetch_category_members(client, category_id: str, start: int, limit: int) ->
 
     import requests as _requests
 
-    max_retries = 5
+    max_retries = 6
+    base_sleep = 2.0
     for attempt in range(max_retries):
         try:
             return client.get_cryptocurrency_category(
@@ -85,9 +88,14 @@ def _fetch_category_members(client, category_id: str, start: int, limit: int) ->
             response = getattr(exc, "response", None)
             status_code = response.status_code if response is not None else 0
 
-            # 429 限流：指数退避重试（客户端 Retry 已试 3 轮，此处再追加 5 轮长等待）
+            # 429 限流：优先 Retry-After，否则指数退避 + 抖动（客户端 Retry 已不再拦截 429）
             if status_code == 429 and attempt < max_retries - 1:
-                wait = 2 ** attempt + _random.uniform(0, 1)
+                retry_after = None
+                if response is not None:
+                    ra = response.headers.get("Retry-After")
+                    if ra and str(ra).isdigit():
+                        retry_after = int(ra)
+                wait = retry_after if retry_after else (base_sleep * (2 ** attempt) + _random.uniform(0, 1))
                 _time.sleep(wait)
                 continue
 
@@ -119,6 +127,25 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_recently_ingested(conn, category_id: str, window_hours: int = 24) -> bool:
+    """近 window_hours 内已成功入库该分类则跳过，省 CMC 配额（续传）。"""
+    from crypto_research.db.upsert import fetch_one
+
+    row = fetch_one(
+        conn,
+        """
+        SELECT 1 FROM sys.ingest_run
+        WHERE endpoint_code = 'cmc_category'
+          AND status = 'success'
+          AND finished_at >= NOW() - (%s::int || ' hours')::interval
+          AND request_params->>'id' = %s
+        LIMIT 1
+        """,
+        (window_hours, category_id),
+    )
+    return bool(row)
 
 
 def _parse_category_list(payload: dict) -> list[dict]:
@@ -419,6 +446,11 @@ def main() -> int:
             cat_id = cat["category_id"]
             if target_ids and cat_id not in target_ids:
                 continue
+            # 24h 续传：近 24h 已成功入库则跳过，省 CMC 配额
+            if _is_recently_ingested(conn, cat_id, window_hours=24):
+                print(f"  category {cat_id} ({cat['category_name']}): skipped (ingested <24h ago)")
+                processed += 1
+                continue
             try:
                 count, _ = ingest_category_members(
                     client, conn, cat_id, cat["category_name"], args.member_limit,
@@ -428,7 +460,7 @@ def main() -> int:
                     f"  category {cat_id} ({cat['category_name']}): {count} members"
                 )
                 processed += 1
-                time.sleep(0.5)  # 分类间限速，避免触发 CMC 429
+                time.sleep(CATEGORY_INTER_REQUEST_SLEEP)
             except CategoryMemberError as exc:
                 if exc.status_code == 400:
                     # CMC 列表接口仍返回的"僵尸"分类，单分类接口已不可解析，跳过即可

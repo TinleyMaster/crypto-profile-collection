@@ -21,8 +21,8 @@ WITH base AS (
 SELECT metric_name,
        metric_date,
        value,
-       round(100 * pr_full, 2)  AS pct_full,
-       round(100 * pr_roll, 2)  AS pct_roll_365d,
+       round((100 * pr_full)::numeric, 2)  AS pct_full,
+       round((100 * pr_roll)::numeric, 2)  AS pct_roll_365d,
        CASE
          WHEN pr_full >= 0.90 THEN 'HIGH'
          WHEN pr_full <= 0.10 THEN 'LOW'

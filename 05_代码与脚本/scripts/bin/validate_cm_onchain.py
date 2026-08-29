@@ -64,9 +64,9 @@ def validate_mvrv_extremes(conn, symbol: str | None = None) -> None:
     # BTC 2018-12 / 2022-11 底部应 ≤ 10 分位
     query = f"""
         SELECT cm_symbol, metric_date, cap_mvrv_cur,
-               ROUND(100.0 * PERCENT_RANK() OVER (
+               ROUND(CAST(100.0 * PERCENT_RANK() OVER (
                    PARTITION BY asset_id ORDER BY cap_mvrv_cur
-               ), 2) AS mvrv_pct
+               ) AS NUMERIC), 2) AS mvrv_pct
         FROM biz.cm_asset_onchain_daily
         {where_clause}
         AND cap_mvrv_cur IS NOT NULL

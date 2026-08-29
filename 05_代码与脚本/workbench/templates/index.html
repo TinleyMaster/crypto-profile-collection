@@ -6541,7 +6541,7 @@
                         const extremeBadge = extreme !== 'NONE'
                             ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
                             : '';
-                        const percentileTxt = percentile !== null ? ` (${percentile.toFixed(0)}%)` : '';
+                        const percentileTxt = percentile != null ? ` (${Number(percentile).toFixed(0)}%)` : '';
                         return `<div class="dim-metric-row">
                             <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
                             <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">${typeof val === 'number' ? val.toFixed(2) : val} → ${score}</span>
@@ -6580,7 +6580,7 @@
                         const extremeBadge = extreme !== 'NONE'
                             ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
                             : '';
-                        const percentileTxt = percentile !== null ? ` (${percentile.toFixed(0)}%)` : '';
+                        const percentileTxt = percentile != null ? ` (${Number(percentile).toFixed(0)}%)` : '';
                         return `<div class="dim-metric-row">
                             <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
                             <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">评分: ${score}</span>

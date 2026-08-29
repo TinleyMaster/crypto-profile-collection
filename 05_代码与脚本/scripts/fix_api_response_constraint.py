@@ -2,10 +2,12 @@
 """
 修复 raw.api_response 唯一约束问题
 
-问题：insert_api_response.sql 使用 ON CONFLICT ON CONSTRAINT
-      但 uq_raw_api_response_dedup 是索引而非约束
+问题：insert_api_response.sql 使用 ON CONFLICT ON INDEX
+      但 PostgreSQL 不支持该语法（仅支持 ON CONFLICT (columns) 或 ON CONFLICT ON CONSTRAINT）
+      且唯一索引 uq_raw_api_response_dedup 含 COALESCE 表达式，无法用列名语法
 
-修复：删除索引，创建真正的 UNIQUE 约束
+修复：创建 raw.upsert_api_response() 存储过程实现 upsert
+      insert_api_response.sql 改为调用该存储过程
 """
 
 from __future__ import annotations
@@ -98,7 +100,7 @@ def main() -> int:
         
         if index_exists:
             print("\n✅ 索引已存在，无需修复")
-            print("请确保 insert_api_response.sql 使用 ON CONFLICT ON INDEX")
+            print("请确保 raw.upsert_api_response() 存储过程已部署")
             return 0
         
         # 执行修复
@@ -115,7 +117,7 @@ def main() -> int:
             print("\n" + "=" * 60)
             print("✅ 修复完成！")
             print("=" * 60)
-            print("\n请确保 insert_api_response.sql 使用 ON CONFLICT ON INDEX")
+            print("\n请确保 raw.upsert_api_response() 存储过程已部署")
             print("\n可以重新运行失败的任务了：")
             print("  - cmc_quote_snapshot")
             print("  - cmc_pipeline")

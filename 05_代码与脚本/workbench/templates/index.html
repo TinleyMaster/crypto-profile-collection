@@ -2949,6 +2949,74 @@
             gap: 6px;
         }
 
+        /* P1: 情绪/结构子分可读性优化 */
+        .sub-score-list {
+            gap: 10px;
+        }
+        .sub-score-row {
+            padding: 8px 0;
+            border-bottom: 1px solid #1e222a;
+        }
+        .sub-score-row:last-child {
+            border-bottom: none;
+        }
+        .sub-score-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+        .sub-score-name {
+            font-size: 12px;
+            color: #e0e6ed;
+        }
+        .sub-score-name small {
+            font-size: 10px;
+        }
+        .sub-score-val {
+            font-size: 14px;
+            font-weight: 600;
+            color: #e0e6ed;
+        }
+        .sub-score-bar-wrap {
+            height: 6px;
+            background: #1e222a;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+        .sub-score-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+        .sub-score-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 10px;
+            color: #6b7280;
+        }
+        .sub-score-weight {
+            color: #6b7280;
+        }
+        .health-tag {
+            font-size: 10px;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+        .health-ok { color: #22c55e; }
+        .health-warn { color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
+        .health-error { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+        .band-label {
+            font-size: 11px;
+            font-weight: 400;
+            margin-left: 4px;
+        }
+        .band-bull { color: #22c55e; }
+        .band-neutral { color: #6b7280; }
+        .band-bear { color: #ef4444; }
+
         /* P2-5 板块资金净流入独占整行 */
         .sector-flow-full-section {
             width: 100%;
@@ -6764,6 +6832,89 @@
             const summary = data.summary || {};
             const grid = document.getElementById('overview-grid');
             
+            // P1: 分项释义字典
+            const SUB_LABEL = {
+                fear_greed: { name: '恐惧贪婪指数', desc: 'BTC 市场情绪' },
+                altcoin_season: { name: '山寨季指数', desc: 'alt 相对 BTC 强势度' },
+                cefi: { name: 'CEX 情绪', desc: '中心化交易所资金/平台币/充提' },
+                derivative: { name: '衍生品情绪', desc: 'CoinGlass 合约持仓/OI/费率' },
+                price_action: { name: '价格行为', desc: '趋势/动量/波动综合' },
+                sector: { name: '板块轮动', desc: '强势板块分布/资金集中度' },
+                market_cap: { name: '市值结构', desc: '大/中/小盘分布健康度' },
+                institution: { name: '机构/聪明钱', desc: '链上大户/VC/smart money' }
+            };
+            
+            // P1: 情绪子分区间标签
+            function emotionBand(score) {
+                if (score == null) return { label: '', cls: '' };
+                if (score <= 25) return { label: '极度恐慌', cls: 'band-bear' };
+                if (score <= 45) return { label: '恐慌', cls: 'band-bear' };
+                if (score <= 55) return { label: '中性', cls: 'band-neutral' };
+                if (score <= 75) return { label: '贪婪', cls: 'band-bull' };
+                return { label: '极度贪婪', cls: 'band-bull' };
+            }
+            
+            // P1: 结构子分区间标签
+            function structureBand(score) {
+                if (score == null) return { label: '', cls: '' };
+                if (score <= 40) return { label: '弱势', cls: 'band-bear' };
+                if (score <= 60) return { label: '一般', cls: 'band-neutral' };
+                return { label: '强势', cls: 'band-bull' };
+            }
+            
+            // P1: 健康标签
+            function healthTag(comp, key) {
+                if (comp.status && comp.status !== 'ok') {
+                    return '<span class="health-tag health-error">❌ ' + comp.status + '</span>';
+                }
+                // 检测断流兜底：原始值为0但score为50（中性兜底）
+                const val = comp.value !== undefined ? comp.value : (comp.funding_rate !== undefined ? comp.funding_rate : null);
+                const score = comp.score;
+                if (val === 0 && score === 50 && (key === 'derivative' || key === 'cefi')) {
+                    return '<span class="health-tag health-error">❌ 断流·已按中性兜底</span>';
+                }
+                // 检测滞后：通过 data_date 或 snapshot 判断
+                if (comp.data_date) {
+                    const today = new Date().toISOString().slice(0, 10);
+                    if (comp.data_date < today) {
+                        return '<span class="health-tag health-warn">⚠️ 数据滞后 ' + comp.data_date + '</span>';
+                    }
+                }
+                return '<span class="health-tag health-ok">✅</span>';
+            }
+            
+            // P1: 分项分数渲染（带进度条）
+            function subScoreRow(key, comp, weightPct) {
+                const label = SUB_LABEL[key] || { name: key, desc: '' };
+                const score = comp.score !== undefined ? comp.score : null;
+                const scoreTxt = score != null ? Number(score).toFixed(1) : '-';
+                const health = healthTag(comp, key);
+                const barWidth = score != null ? Math.min(100, Math.max(0, score)) : 0;
+                let barColor = '#6b7280';
+                if (score != null) {
+                    if (key === 'fear_greed' || key === 'cefi') {
+                        barColor = score <= 25 ? '#ef4444' : score <= 45 ? '#f59e0b' : score <= 55 ? '#6b7280' : score <= 75 ? '#22c55e' : '#22c55e';
+                    } else if (key === 'altcoin_season') {
+                        barColor = score < 50 ? '#f59e0b' : '#22c55e';
+                    } else {
+                        barColor = score <= 40 ? '#ef4444' : score <= 60 ? '#f59e0b' : '#22c55e';
+                    }
+                }
+                return `<div class="sub-score-row">
+                    <div class="sub-score-header">
+                        <span class="sub-score-name">${label.name} <small style="color:#6b7280">${label.desc}</small></span>
+                        <span class="sub-score-val">${scoreTxt}</span>
+                    </div>
+                    <div class="sub-score-bar-wrap">
+                        <div class="sub-score-bar" style="width:${barWidth}%;background:${barColor}"></div>
+                    </div>
+                    <div class="sub-score-meta">
+                        <span class="sub-score-weight">权重 ${weightPct}%</span>
+                        ${health}
+                    </div>
+                </div>`;
+            }
+            
             // 渲染情绪子分
             const emotion = summary.emotion_subscore || {};
             const emotionScore = emotion.score;
@@ -6778,90 +6929,65 @@
             
             let html = '';
             
-            // 情绪子分卡片
+            // 情绪子分卡片（P1: 可读性优化）
             const emotionExtreme = summary.emotion_subscore?.components?.fear_greed?.extreme !== 'NONE'
                 || summary.emotion_subscore?.components?.cefi?.extreme !== 'NONE';
+            const emotionBandInfo = emotionBand(emotionScore);
+            const emotionScoreTxt = emotionScore != null ? Number(emotionScore).toFixed(1) : 'N/A';
+            // 统计异常项
+            let emotionErrorCount = 0;
+            Object.entries(emotionComponents).forEach(([key, comp]) => {
+                if (comp.status && comp.status !== 'ok') emotionErrorCount++;
+                else {
+                    const val = comp.value !== undefined ? comp.value : (comp.funding_rate !== undefined ? comp.funding_rate : null);
+                    if (val === 0 && comp.score === 50 && (key === 'derivative' || key === 'cefi')) emotionErrorCount++;
+                }
+            });
             html += `<div class="dim-card ${emotionExtreme ? 'extreme-high' : ''}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🧠</span>
                     <span class="dim-card-title">情绪子分</span>
                     <span class="dim-card-score ${emotionScore >= 60 ? 'bull' : emotionScore <= 40 ? 'bear' : 'neutral'}">
-                        ${emotionScore !== null ? emotionScore + ' / 100' : 'N/A'}
+                        ${emotionScoreTxt} <small class="band-label ${emotionBandInfo.cls}">${emotionBandInfo.label}</small>
                     </span>
                 </div>
-                <div class="dim-metrics">
+                <div class="dim-metrics sub-score-list">
                     ${Object.entries(emotionComponents).map(([key, comp]) => {
-                        if (comp.status && comp.status !== 'ok') {
-                            return `<div class="dim-metric-row">
-                                <span class="dim-metric-label">${key}</span>
-                                <span class="dim-metric-val" style="color:#6b7280">⚠️ ${comp.status}</span>
-                            </div>`;
-                        }
-                        const val = comp.value !== undefined ? comp.value : (comp.funding_rate !== undefined ? comp.funding_rate : '-');
-                        const score = comp.score !== undefined ? comp.score : '-';
-                        // P2-1: 获取百分位和极端标记
-                        let percentile = null;
-                        let extreme = 'NONE';
-                        if (key === 'fear_greed') {
-                            percentile = summary.emotion_subscore?.components?.fear_greed?.percentile;
-                            extreme = summary.emotion_subscore?.components?.fear_greed?.extreme || 'NONE';
-                        } else if (key === 'cefi') {
-                            percentile = summary.emotion_subscore?.components?.cefi?.percentile;
-                            extreme = summary.emotion_subscore?.components?.cefi?.extreme || 'NONE';
-                        } else if (key === 'derivative') {
-                            percentile = summary.emotion_subscore?.components?.derivative?.mvrv_percentile;
-                            extreme = summary.emotion_subscore?.components?.derivative?.mvrv_extreme || 'NONE';
-                        }
-                        const extremeBadge = extreme !== 'NONE'
-                            ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
-                            : '';
-                        const percentileTxt = percentile != null ? ` (${Number(percentile).toFixed(0)}%)` : '';
-                        return `<div class="dim-metric-row">
-                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
-                            <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">${typeof val === 'number' ? val.toFixed(2) : val} → ${score}</span>
-                        </div>`;
+                        const weightPct = (comp.weight * 100).toFixed(0);
+                        return subScoreRow(key, comp, weightPct);
                     }).join('')}
                 </div>
-                <div class="dim-conclusion">权重覆盖: ${(emotion.available_weight * 100).toFixed(0)}%</div>
+                <div class="dim-conclusion">覆盖度 ${(emotion.available_weight * 100).toFixed(0)}%${emotionErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + emotionErrorCount + ' 项异常</span>' : ''}</div>
             </div>`;
             
-            // 结构子分卡片
+            // 结构子分卡片（P1: 可读性优化）
             const structureExtreme = summary.structure_subscore?.components?.market_cap?.extreme !== 'NONE';
+            const structureBandInfo = structureBand(structureScore);
+            const structureScoreTxt = structureScore != null ? Number(structureScore).toFixed(1) : 'N/A';
+            // 统计异常项
+            let structureErrorCount = 0;
+            Object.entries(structureComponents).forEach(([key, comp]) => {
+                if (comp.status && comp.status !== 'ok') structureErrorCount++;
+                else if (comp.data_date) {
+                    const today = new Date().toISOString().slice(0, 10);
+                    if (comp.data_date < today) structureErrorCount++;
+                }
+            });
             html += `<div class="dim-card ${structureExtreme ? 'extreme-high' : ''}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">📊</span>
                     <span class="dim-card-title">结构子分</span>
                     <span class="dim-card-score ${structureScore >= 60 ? 'bull' : structureScore <= 40 ? 'bear' : 'neutral'}">
-                        ${structureScore !== null ? structureScore + ' / 100' : 'N/A'}
+                        ${structureScoreTxt} <small class="band-label ${structureBandInfo.cls}">${structureBandInfo.label}</small>
                     </span>
                 </div>
-                <div class="dim-metrics">
+                <div class="dim-metrics sub-score-list">
                     ${Object.entries(structureComponents).map(([key, comp]) => {
-                        if (comp.status && comp.status !== 'ok') {
-                            return `<div class="dim-metric-row">
-                                <span class="dim-metric-label">${key}</span>
-                                <span class="dim-metric-val" style="color:#6b7280">⚠️ ${comp.status}</span>
-                            </div>`;
-                        }
-                        const score = comp.score !== undefined ? comp.score : '-';
-                        // P2-1: 获取百分位和极端标记
-                        let percentile = null;
-                        let extreme = 'NONE';
-                        if (key === 'market_cap') {
-                            percentile = summary.structure_subscore?.components?.market_cap?.percentile;
-                            extreme = summary.structure_subscore?.components?.market_cap?.extreme || 'NONE';
-                        }
-                        const extremeBadge = extreme !== 'NONE'
-                            ? `<span class="extreme-badge ${extreme.toLowerCase()}">${extreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
-                            : '';
-                        const percentileTxt = percentile != null ? ` (${Number(percentile).toFixed(0)}%)` : '';
-                        return `<div class="dim-metric-row">
-                            <span class="dim-metric-label">${key} (${(comp.weight * 100).toFixed(0)}%)${percentileTxt}${extremeBadge}</span>
-                            <span class="dim-metric-val ${extreme !== 'NONE' ? 'extreme-' + extreme.toLowerCase() : ''}">评分: ${score}</span>
-                        </div>`;
+                        const weightPct = (comp.weight * 100).toFixed(0);
+                        return subScoreRow(key, comp, weightPct);
                     }).join('')}
                 </div>
-                <div class="dim-conclusion">权重覆盖: ${(structure.available_weight * 100).toFixed(0)}%</div>
+                <div class="dim-conclusion">覆盖度 ${(structure.available_weight * 100).toFixed(0)}%${structureErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + structureErrorCount + ' 项数据异常</span>' : ''}</div>
             </div>`;
             
             // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）- P2-5: 独占整行 full-width

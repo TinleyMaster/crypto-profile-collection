@@ -165,7 +165,8 @@ def flag_extreme(percentile: float | None) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_cmc_global_metrics() -> dict:
-    """获取 CMC 全球市值数据。返回 {total_market_cap, volume_24h, btc_dominance, stablecoin_market_cap, ...}。"""
+    """获取全球市值数据。优先 CMC，失败时降级 CoinGecko。返回 {total_market_cap, volume_24h, btc_dominance, ...}。"""
+    # 1. 尝试 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/global-metrics/quotes/latest",
@@ -174,13 +175,36 @@ def fetch_cmc_global_metrics() -> dict:
         r.raise_for_status()
         data = r.json().get("data", {})
         quote = data.get("quote", [{}])[0] if data.get("quote") else {}
+        total_mcap = _safe_float(quote.get("total_market_cap"))
+        if total_mcap > 0:
+            return {
+                "total_market_cap": total_mcap,
+                "total_volume_24h": _safe_float(quote.get("total_volume_24h")),
+                "btc_dominance": _safe_float(data.get("btc_dominance")),
+                "eth_dominance": _safe_float(data.get("eth_dominance")),
+                "stablecoin_market_cap": _safe_float(data.get("stablecoin_market_cap")),
+                "total_cryptocurrencies": _safe_int(data.get("total_cryptocurrencies")),
+                "status": "ok",
+            }
+    except Exception:
+        pass
+    
+    # 2. 降级 CoinGecko
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/global",
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json().get("data", {})
+        mcap = data.get("total_market_cap", {})
         return {
-            "total_market_cap": _safe_float(quote.get("total_market_cap")),
-            "total_volume_24h": _safe_float(quote.get("total_volume_24h")),
-            "btc_dominance": _safe_float(data.get("btc_dominance")),
-            "eth_dominance": _safe_float(data.get("eth_dominance")),
-            "stablecoin_market_cap": _safe_float(data.get("stablecoin_market_cap")),
-            "total_cryptocurrencies": _safe_int(data.get("total_cryptocurrencies")),
+            "total_market_cap": _safe_float(mcap.get("usd")),
+            "total_volume_24h": _safe_float(data.get("total_volume", {}).get("usd")),
+            "btc_dominance": _safe_float(data.get("market_cap_percentage", {}).get("btc")),
+            "eth_dominance": _safe_float(data.get("market_cap_percentage", {}).get("eth")),
+            "stablecoin_market_cap": 0,
+            "total_cryptocurrencies": _safe_int(data.get("active_cryptocurrencies")),
             "status": "ok",
         }
     except Exception as e:

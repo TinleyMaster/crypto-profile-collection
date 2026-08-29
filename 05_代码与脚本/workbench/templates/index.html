@@ -2861,6 +2861,9 @@
             .overview-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
+            .sector-flow-cols {
+                grid-template-columns: 1fr;
+            }
         }
 
         @media (max-width: 600px) {
@@ -2944,6 +2947,33 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
+        }
+
+        /* P2-5 板块资金净流入卡内两列布局 */
+        .sector-flow-cols {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .sector-flow-col {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .expand-btn {
+            background: none;
+            border: 1px solid #2a3444;
+            color: #6b7280;
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 4px;
+            transition: all 0.2s;
+        }
+        .expand-btn:hover {
+            border-color: #3b82f6;
+            color: #3b82f6;
         }
 
         .dim-metric-row {
@@ -3678,6 +3708,20 @@
             } else {
                 panel.classList.add('open');
                 if (arrow) arrow.classList.add('open');
+            }
+        }
+
+        // ── P2-5 叙事榜展开/收起 ──
+        function toggleNarrExtra() {
+            const extra = document.getElementById('narr-extra');
+            const btn = document.getElementById('narr-expand-btn');
+            if (!extra || !btn) return;
+            if (extra.style.display === 'none') {
+                extra.style.display = 'block';
+                btn.textContent = '收起';
+            } else {
+                extra.style.display = 'none';
+                btn.textContent = btn.getAttribute('data-total') || '展开全部';
             }
         }
 
@@ -6739,6 +6783,7 @@
         function renderOverview (data) {
             const summary = data.summary || {};
             const grid = document.getElementById('overview-grid');
+            const NARR_TOP = 5; // P2-5: 叙事榜默认显示Top5
             
             // 渲染情绪子分
             const emotion = summary.emotion_subscore || {};
@@ -6840,85 +6885,109 @@
                 <div class="dim-conclusion">权重覆盖: ${(structure.available_weight * 100).toFixed(0)}%</div>
             </div>`;
             
-            // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）
+            // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）- P2-5: 两列布局+折叠
             const dim5 = (data.dimensions || {})['5板块'] || {};
             const dim5data = dim5.data || {};
             const narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
             const chainFlow = (dim5data.chain_flow_ranking || {}).ranked || [];
-            html += `<div class="dim-card">
-                <div class="dim-card-header">
-                    <span class="dim-card-icon">🔄</span>
-                    <span class="dim-card-title">板块资金净流入</span>
-                    <span class="dim-card-score neutral">7d 视角</span>
-                </div>
-                <div class="dim-metrics">`;
+            
+            // P2-5: 辅助函数渲染叙事榜单行
+            function narrRow(n, nIdx) {
+                const cls = n.composite_score >= 0 ? 'up' : 'down';
+                const sign = n.composite_score >= 0 ? '+' : '';
+                const tvlTxt = n.tvl_change_7d_pct != null
+                    ? ` TVL ${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%`
+                    : '';
+                const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
+                const coins = n.top_coins || [];
+                const hasDrill = coins.length > 0;
+                const drillClass = hasDrill ? ' has-drill' : '';
+                const drillId = 'narr-drill-' + nIdx;
+                let row = `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
+                    <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
+                    <span class="dim-metric-val ${cls}">${sign}${n.composite_score.toFixed(1)}%${tvlTxt}</span>
+                </div>`;
+                if (hasDrill) {
+                    row += `<div class="drill-panel" id="${drillId}">`;
+                    coins.forEach(function (coin) {
+                        const coinCls = (coin.percent_change_7d || 0) >= 0 ? 'up' : 'down';
+                        const coinSign = (coin.percent_change_7d || 0) >= 0 ? '+' : '';
+                        const p7Txt = coin.percent_change_7d != null ? `${coinSign}${coin.percent_change_7d.toFixed(1)}%` : '-';
+                        const mcapTxt = coin.market_cap >= 1e9 ? '$' + (coin.market_cap / 1e9).toFixed(1) + 'B' : '$' + (coin.market_cap / 1e6).toFixed(0) + 'M';
+                        row += `<div class="drill-item">
+                            <span class="drill-name">${coin.symbol ? coin.symbol + ' ' : ''}${coin.name}</span>
+                            <span class="drill-val"><small style="color:#6b7280">${mcapTxt}</small> <span class="${coinCls}">${p7Txt}</span></span>
+                        </div>`;
+                    });
+                    row += `</div>`;
+                }
+                return row;
+            }
+            
+            // P2-5: 辅助函数渲染链榜单行
+            function chainRow(c, cIdx) {
+                const cls = c.flow_7d >= 0 ? 'up' : 'down';
+                const sign = c.flow_7d >= 0 ? '+' : '';
+                const flowStr = '$' + (Math.abs(c.flow_7d) / 1e9).toFixed(2) + 'B';
+                const protos = c.protocols || [];
+                const hasDrill = protos.length > 0;
+                const drillClass = hasDrill ? ' has-drill' : '';
+                const drillId = 'chain-drill-' + cIdx;
+                let row = `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
+                    <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${c.chain}</span>
+                    <span class="dim-metric-val ${cls}">${sign}${flowStr} (${c.flow_7d_pct >= 0 ? '+' : ''}${c.flow_7d_pct.toFixed(1)}%)</span>
+                </div>`;
+                if (hasDrill) {
+                    row += `<div class="drill-panel" id="${drillId}">`;
+                    protos.forEach(function (p) {
+                        const pCls = (p.change_7d || 0) >= 0 ? 'up' : 'down';
+                        const pSign = (p.change_7d || 0) >= 0 ? '+' : '';
+                        const p7Txt = p.change_7d != null ? `${pSign}${p.change_7d.toFixed(1)}%` : '-';
+                        const tvlTxt = p.tvl >= 1e9 ? '$' + (p.tvl / 1e9).toFixed(1) + 'B' : '$' + (p.tvl / 1e6).toFixed(0) + 'M';
+                        row += `<div class="drill-item">
+                            <span class="drill-name">${p.symbol ? p.symbol + ' ' : ''}${p.name} <small style="color:#6b7280">${p.category}</small></span>
+                            <span class="drill-val"><small style="color:#6b7280">${tvlTxt}</small> <span class="${pCls}">${p7Txt}</span></span>
+                        </div>`;
+                    });
+                    row += `</div>`;
+                }
+                return row;
+            }
+            
+            // P2-5: 构建两列布局
+            let narrCol = '';
+            let chainCol = '';
+            
+            // 左列：叙事榜
             if (narrFlow.length) {
-                html += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}） · 点击展开成分币</div>`;
-                narrFlow.forEach(function (n, nIdx) {
-                    const cls = n.composite_score >= 0 ? 'up' : 'down';
-                    const sign = n.composite_score >= 0 ? '+' : '';
-                    const tvlTxt = n.tvl_change_7d_pct != null
-                        ? ` TVL ${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%`
-                        : '';
-                    const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
-                    const coins = n.top_coins || [];
-                    const hasDrill = coins.length > 0;
-                    const drillClass = hasDrill ? ' has-drill' : '';
-                    const drillId = 'narr-drill-' + nIdx;
-                    html += `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
-                        <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
-                        <span class="dim-metric-val ${cls}">${sign}${n.composite_score.toFixed(1)}%${tvlTxt}</span>
-                    </div>`;
-                    if (hasDrill) {
-                        html += `<div class="drill-panel" id="${drillId}">`;
-                        coins.forEach(function (coin) {
-                            const coinCls = (coin.percent_change_7d || 0) >= 0 ? 'up' : 'down';
-                            const coinSign = (coin.percent_change_7d || 0) >= 0 ? '+' : '';
-                            const p7Txt = coin.percent_change_7d != null ? `${coinSign}${coin.percent_change_7d.toFixed(1)}%` : '-';
-                            const mcapTxt = coin.market_cap >= 1e9 ? '$' + (coin.market_cap / 1e9).toFixed(1) + 'B' : '$' + (coin.market_cap / 1e6).toFixed(0) + 'M';
-                            html += `<div class="drill-item">
-                                <span class="drill-name">${coin.symbol ? coin.symbol + ' ' : ''}${coin.name}</span>
-                                <span class="drill-val"><small style="color:#6b7280">${mcapTxt}</small> <span class="${coinCls}">${p7Txt}</span></span>
-                            </div>`;
-                        });
-                        html += `</div>`;
-                    }
+                narrCol += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}） · 点击展开成分币</div>`;
+                const visibleNarr = narrFlow.slice(0, NARR_TOP);
+                const hiddenNarr = narrFlow.slice(NARR_TOP);
+                visibleNarr.forEach(function (n, nIdx) {
+                    narrCol += narrRow(n, nIdx);
                 });
+                if (hiddenNarr.length > 0) {
+                    narrCol += `<button class="expand-btn" id="narr-expand-btn" onclick="toggleNarrExtra()" data-total="展开全部 ${narrFlow.length} 条">展开全部 ${narrFlow.length} 条</button>`;
+                    narrCol += `<div id="narr-extra" style="display:none">`;
+                    hiddenNarr.forEach(function (n, nIdx) {
+                        narrCol += narrRow(n, NARR_TOP + nIdx);
+                    });
+                    narrCol += `</div>`;
+                }
             } else {
-                html += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
+                narrCol += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
+            
+            // 右列：链净流入TOP5 + 稳定币净流入分位
             if (chainFlow.length) {
-                html += `<div class="dim-section-label">链净流入 TOP5 · 点击展开协议</div>`;
+                chainCol += `<div class="dim-section-label">链净流入 TOP5 · 点击展开协议</div>`;
                 chainFlow.forEach(function (c, cIdx) {
-                    const cls = c.flow_7d >= 0 ? 'up' : 'down';
-                    const sign = c.flow_7d >= 0 ? '+' : '';
-                    const flowStr = '$' + (Math.abs(c.flow_7d) / 1e9).toFixed(2) + 'B';
-                    const protos = c.protocols || [];
-                    const hasDrill = protos.length > 0;
-                    const drillClass = hasDrill ? ' has-drill' : '';
-                    const drillId = 'chain-drill-' + cIdx;
-                    html += `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
-                        <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${c.chain}</span>
-                        <span class="dim-metric-val ${cls}">${sign}${flowStr} (${c.flow_7d_pct >= 0 ? '+' : ''}${c.flow_7d_pct.toFixed(1)}%)</span>
-                    </div>`;
-                    if (hasDrill) {
-                        html += `<div class="drill-panel" id="${drillId}">`;
-                        protos.forEach(function (p) {
-                            const pCls = (p.change_7d || 0) >= 0 ? 'up' : 'down';
-                            const pSign = (p.change_7d || 0) >= 0 ? '+' : '';
-                            const p7Txt = p.change_7d != null ? `${pSign}${p.change_7d.toFixed(1)}%` : '-';
-                            const tvlTxt = p.tvl >= 1e9 ? '$' + (p.tvl / 1e9).toFixed(1) + 'B' : '$' + (p.tvl / 1e6).toFixed(0) + 'M';
-                            html += `<div class="drill-item">
-                                <span class="drill-name">${p.symbol ? p.symbol + ' ' : ''}${p.name} <small style="color:#6b7280">${p.category}</small></span>
-                                <span class="drill-val"><small style="color:#6b7280">${tvlTxt}</small> <span class="${pCls}">${p7Txt}</span></span>
-                            </div>`;
-                        });
-                        html += `</div>`;
-                    }
+                    chainCol += chainRow(c, cIdx);
                 });
             } else {
-                html += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
+                chainCol += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
+            
             // P2-1: 稳定币净流入分位
             const scFlowPct = dim5data.stablecoin_flow_percentile;
             const scFlowExtreme = dim5data.stablecoin_flow_extreme || 'NONE';
@@ -6926,13 +6995,26 @@
                 const scBadge = scFlowExtreme !== 'NONE'
                     ? `<span class="extreme-badge ${scFlowExtreme.toLowerCase()}">${scFlowExtreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
                     : '';
-                html += `<div class="dim-section-label">稳定币净流入分位</div>`;
-                html += `<div class="dim-metric-row">
+                chainCol += `<div class="dim-section-label">稳定币净流入分位</div>`;
+                chainCol += `<div class="dim-metric-row">
                     <span class="dim-metric-label">30d 净流百分位${scBadge}</span>
                     <span class="dim-metric-val ${scFlowExtreme !== 'NONE' ? 'extreme-' + scFlowExtreme.toLowerCase() : ''}">${Number(scFlowPct).toFixed(0)}%</span>
                 </div>`;
             }
-            html += `</div>
+            
+            // P2-5: 组装两列布局
+            html += `<div class="dim-card">
+                <div class="dim-card-header">
+                    <span class="dim-card-icon">🔄</span>
+                    <span class="dim-card-title">板块资金净流入</span>
+                    <span class="dim-card-score neutral">7d 视角</span>
+                </div>
+                <div class="dim-metrics">
+                    <div class="sector-flow-cols">
+                        <div class="sector-flow-col">${narrCol}</div>
+                        <div class="sector-flow-col">${chainCol}</div>
+                    </div>
+                </div>
                 <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
             </div>`;
 

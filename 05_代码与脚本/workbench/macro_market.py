@@ -92,11 +92,15 @@ def _safe_int(v: Any, default: int = 0) -> int:
 def percentile_of(value: float, series: list[float]) -> float | None:
     """
     计算 value 在 series 中的历史百分位（0~100）。
-    series 不足 2 个数据点时返回 None。
+    series 不足 2 个有效数据点时返回 None。
     """
-    if not series or len(series) < 2:
+    if value is None:
         return None
-    sorted_s = sorted(series)
+    # 过滤掉 None 值
+    valid_series = [x for x in series if x is not None]
+    if len(valid_series) < 2:
+        return None
+    sorted_s = sorted(valid_series)
     count_below = sum(1 for x in sorted_s if x < value)
     count_equal = sum(1 for x in sorted_s if x == value)
     # 百分位 = (低于 + 0.5*等于) / 总数 * 100

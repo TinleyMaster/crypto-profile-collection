@@ -149,7 +149,8 @@ def fetch_cmc_global_metrics() -> dict:
 
 
 def fetch_cmc_fear_greed() -> dict:
-    """获取 CMC 恐贪指数。返回 {value, value_classification, ...}。"""
+    """获取恐贪指数。优先 CMC，失败时降级 alternative.me。返回 {value, value_classification, ...}。"""
+    # 1. 尝试 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v3/fear-and-greed",
@@ -157,6 +158,24 @@ def fetch_cmc_fear_greed() -> dict:
         )
         r.raise_for_status()
         data = r.json().get("data", {})
+        value = _safe_float(data.get("value"))
+        if value > 0:
+            return {
+                "value": value,
+                "value_classification": data.get("value_classification", ""),
+                "status": "ok",
+            }
+    except Exception:
+        pass
+    
+    # 2. 降级 alternative.me
+    try:
+        r = requests.get(
+            "https://api.alternative.me/fng/?limit=1",
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json().get("data", [{}])[0]
         return {
             "value": _safe_float(data.get("value")),
             "value_classification": data.get("value_classification", ""),
@@ -167,7 +186,8 @@ def fetch_cmc_fear_greed() -> dict:
 
 
 def fetch_cmc_altcoin_season() -> dict:
-    """获取 CMC 山寨季指数。返回 {value, status}。"""
+    """获取山寨季指数。优先 CMC，失败时降级 blockchaincenter.net。返回 {value, status}。"""
+    # 1. 尝试 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/altcoin-season-index",
@@ -175,12 +195,34 @@ def fetch_cmc_altcoin_season() -> dict:
         )
         r.raise_for_status()
         data = r.json().get("data", {})
-        return {
-            "value": _safe_float(data.get("value")),
-            "status": "ok",
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+        value = _safe_float(data.get("value"))
+        if value > 0:
+            return {
+                "value": value,
+                "status": "ok",
+            }
+    except Exception:
+        pass
+    
+    # 2. 降级 blockchaincenter.net（提取页面中的指数值）
+    try:
+        r = requests.get(
+            "https://www.blockchaincenter.net/altcoin-season-index/",
+            timeout=TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        import re
+        match = re.search(r'Altcoin Season Index.*?(\d+)', r.text[:5000])
+        if match:
+            return {
+                "value": _safe_float(match.group(1)),
+                "status": "ok",
+            }
+    except Exception:
+        pass
+    
+    return {"status": "error", "error": "All sources failed"}
 
 
 def fetch_cryptoetf_cefi() -> dict:
@@ -1395,7 +1437,7 @@ def fetch_event_calendar() -> dict:
     hardcoded_events = [
         {"date": "2026-09-16", "event": "FOMC 议息会议", "type": "macro"},
         {"date": "2026-10-28", "event": "FOMC 议息会议", "type": "macro"},
-        {"date": "2026-12-16", "event": "FOMC 议息会议", "type": "macro"},
+        {"date": "2026-12-09", "event": "FOMC 议息会议", "type": "macro"},
     ]
 
     # CoinGecko events 兜底

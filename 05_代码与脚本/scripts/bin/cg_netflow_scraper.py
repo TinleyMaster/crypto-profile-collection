@@ -182,22 +182,48 @@ def run(no_write: bool = False) -> int:
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--no-proxy-server",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
             ],
         )
         context = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"),
+            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
             extra_http_headers={
-                "accept-language": "zh-CN,zh;q=0.9",
-                "referer": "https://www.coinglass.com/",
+                "accept-language": "en-US,en;q=0.9",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "upgrade-insecure-requests": "1",
             },
         )
+        
+        # 注入反检测脚本
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {} };
+        """)
+        
         page = context.new_page()
         
         print(f"[fetch] 访问 {URL}", file=sys.stderr)
-        resp = page.goto(URL, wait_until="load", timeout=60000)
+        resp = page.goto(URL, wait_until="networkidle", timeout=60000)
         status = resp.status if resp else None
         print(f"[fetch] HTTP={status}", file=sys.stderr)
+        
+        # 等待额外时间让 JS 渲染
+        page.wait_for_timeout(3000)
+        
         row_count = wait_stable(page)
         print(f"[fetch] 初始行数={row_count}", file=sys.stderr)
 

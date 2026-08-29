@@ -57,37 +57,65 @@ def safe_float(v: str) -> float | None:
 
 
 def parse_csv_file(file_path: Path) -> list[dict]:
-    """解析单个 CSV 文件，返回记录列表。"""
+    """解析单个 CSV 文件，返回记录列表。
+
+    支持两种格式：
+    1. 单 value 列（标准长表）→ 直接读取
+    2. 多列宽表（如 age-band：1d/1w/1m/3m/6m/1yr 等）→ unpivot 为多条记录
+       metric_name = `{文件名}_{列名}`（如 obm_cdd_age_band_btcxdays_daily_1d）
+    """
     records = []
     metric_name = file_path.stem  # 用文件名作为 metric_name
 
     with open(file_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return records
+
+        # 判断是否有 value 列
+        has_value_col = "value" in reader.fieldnames
+
+        # 多列宽表：排除非数据列，剩余为 age-band 列
+        skip_cols = {"date", "value", "unit", "frequency", "release_version"}
+        data_cols = [c for c in reader.fieldnames if c not in skip_cols]
+
         for row in reader:
             # 解析日期
             date_str = row.get("date", "")
             if not date_str or len(date_str) < 10:
                 continue
+            metric_date = date_str[:10]
 
-            metric_date = date_str[:10]  # 取 YYYY-MM-DD
-
-            # 解析值
-            value = safe_float(row.get("value", ""))
-
-            # 解析其他字段
             unit = row.get("unit", "")
             frequency = row.get("frequency", "")
             release_version = row.get("release_version", "")
 
-            records.append({
-                "metric_name": metric_name,
-                "metric_date": metric_date,
-                "value": value,
-                "unit": unit,
-                "frequency": frequency,
-                "release_version": release_version,
-                "source_cutoff": SOURCE_CUTOFF,
-            })
+            if has_value_col:
+                # 标准单 value 列
+                value = safe_float(row.get("value", ""))
+                records.append({
+                    "metric_name": metric_name,
+                    "metric_date": metric_date,
+                    "value": value,
+                    "unit": unit,
+                    "frequency": frequency,
+                    "release_version": release_version,
+                    "source_cutoff": SOURCE_CUTOFF,
+                })
+            elif data_cols:
+                # 多列宽表 → unpivot
+                for col in data_cols:
+                    value = safe_float(row.get(col, ""))
+                    sub_name = f"{metric_name}_{col}"
+                    records.append({
+                        "metric_name": sub_name,
+                        "metric_date": metric_date,
+                        "value": value,
+                        "unit": unit,
+                        "frequency": frequency,
+                        "release_version": release_version,
+                        "source_cutoff": SOURCE_CUTOFF,
+                    })
 
     return records
 

@@ -2961,6 +2961,53 @@
             font-weight: 500;
         }
 
+        /* P2-2 下钻交互 */
+        .dim-metric-row.has-drill {
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 6px;
+            transition: background 0.15s;
+        }
+        .dim-metric-row.has-drill:hover {
+            background: rgba(59,130,246,0.08);
+        }
+        .drill-arrow {
+            display: inline-block;
+            font-size: 10px;
+            margin-right: 4px;
+            transition: transform 0.2s;
+            color: #6b7280;
+        }
+        .drill-arrow.open {
+            transform: rotate(90deg);
+        }
+        .drill-panel {
+            display: none;
+            padding: 6px 0 2px 16px;
+            border-top: 1px solid #1e222a;
+        }
+        .drill-panel.open {
+            display: block;
+        }
+        .drill-item {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            padding: 3px 0;
+            color: #8a92a0;
+        }
+        .drill-item .drill-name {
+            color: #c0c8d4;
+        }
+        .drill-item .drill-val {
+            font-weight: 500;
+        }
+        .drill-empty {
+            font-size: 11px;
+            color: #6b7280;
+            padding: 4px 0;
+        }
+
         .dim-metric-val.up {
             color: #00c087;
         }
@@ -3433,6 +3480,20 @@
         let logPanelCollapsed = false;
         let lastLogCount = 0;
         let taskFilter = 'all';
+
+        // ── P2-2 下钻展开/收起 ──
+        function toggleDrill(id) {
+            const panel = document.getElementById(id);
+            const arrow = document.getElementById('arrow-' + id);
+            if (!panel) return;
+            if (panel.classList.contains('open')) {
+                panel.classList.remove('open');
+                if (arrow) arrow.classList.remove('open');
+            } else {
+                panel.classList.add('open');
+                if (arrow) arrow.classList.add('open');
+            }
+        }
 
         // ── 仪表盘 ──
         async function loadDashboard () {
@@ -6606,32 +6667,68 @@
                 </div>
                 <div class="dim-metrics">`;
             if (narrFlow.length) {
-                html += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}）</div>`;
-                narrFlow.forEach(function (n) {
+                html += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}） · 点击展开成分币</div>`;
+                narrFlow.forEach(function (n, nIdx) {
                     const cls = n.composite_score >= 0 ? 'up' : 'down';
                     const sign = n.composite_score >= 0 ? '+' : '';
                     const tvlTxt = n.tvl_change_7d_pct != null
                         ? ` TVL ${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%`
                         : '';
                     const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
-                    html += `<div class="dim-metric-row">
-                        <span class="dim-metric-label">${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
+                    const coins = n.top_coins || [];
+                    const hasDrill = coins.length > 0;
+                    const drillClass = hasDrill ? ' has-drill' : '';
+                    const drillId = 'narr-drill-' + nIdx;
+                    html += `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
+                        <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
                         <span class="dim-metric-val ${cls}">${sign}${n.composite_score.toFixed(1)}%${tvlTxt}</span>
                     </div>`;
+                    if (hasDrill) {
+                        html += `<div class="drill-panel" id="${drillId}">`;
+                        coins.forEach(function (coin) {
+                            const coinCls = (coin.percent_change_7d || 0) >= 0 ? 'up' : 'down';
+                            const coinSign = (coin.percent_change_7d || 0) >= 0 ? '+' : '';
+                            const p7Txt = coin.percent_change_7d != null ? `${coinSign}${coin.percent_change_7d.toFixed(1)}%` : '-';
+                            const mcapTxt = coin.market_cap >= 1e9 ? '$' + (coin.market_cap / 1e9).toFixed(1) + 'B' : '$' + (coin.market_cap / 1e6).toFixed(0) + 'M';
+                            html += `<div class="drill-item">
+                                <span class="drill-name">${coin.symbol ? coin.symbol + ' ' : ''}${coin.name}</span>
+                                <span class="drill-val"><small style="color:#6b7280">${mcapTxt}</small> <span class="${coinCls}">${p7Txt}</span></span>
+                            </div>`;
+                        });
+                        html += `</div>`;
+                    }
                 });
             } else {
                 html += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
             if (chainFlow.length) {
-                html += `<div class="dim-section-label">链净流入 TOP5</div>`;
-                chainFlow.forEach(function (c) {
+                html += `<div class="dim-section-label">链净流入 TOP5 · 点击展开协议</div>`;
+                chainFlow.forEach(function (c, cIdx) {
                     const cls = c.flow_7d >= 0 ? 'up' : 'down';
                     const sign = c.flow_7d >= 0 ? '+' : '';
                     const flowStr = '$' + (Math.abs(c.flow_7d) / 1e9).toFixed(2) + 'B';
-                    html += `<div class="dim-metric-row">
-                        <span class="dim-metric-label">${c.chain}</span>
+                    const protos = c.protocols || [];
+                    const hasDrill = protos.length > 0;
+                    const drillClass = hasDrill ? ' has-drill' : '';
+                    const drillId = 'chain-drill-' + cIdx;
+                    html += `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
+                        <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${c.chain}</span>
                         <span class="dim-metric-val ${cls}">${sign}${flowStr} (${c.flow_7d_pct >= 0 ? '+' : ''}${c.flow_7d_pct.toFixed(1)}%)</span>
                     </div>`;
+                    if (hasDrill) {
+                        html += `<div class="drill-panel" id="${drillId}">`;
+                        protos.forEach(function (p) {
+                            const pCls = (p.change_7d || 0) >= 0 ? 'up' : 'down';
+                            const pSign = (p.change_7d || 0) >= 0 ? '+' : '';
+                            const p7Txt = p.change_7d != null ? `${pSign}${p.change_7d.toFixed(1)}%` : '-';
+                            const tvlTxt = p.tvl >= 1e9 ? '$' + (p.tvl / 1e9).toFixed(1) + 'B' : '$' + (p.tvl / 1e6).toFixed(0) + 'M';
+                            html += `<div class="drill-item">
+                                <span class="drill-name">${p.symbol ? p.symbol + ' ' : ''}${p.name} <small style="color:#6b7280">${p.category}</small></span>
+                                <span class="drill-val"><small style="color:#6b7280">${tvlTxt}</small> <span class="${pCls}">${p7Txt}</span></span>
+                            </div>`;
+                        });
+                        html += `</div>`;
+                    }
                 });
             } else {
                 html += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;

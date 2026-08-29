@@ -532,10 +532,11 @@ def fetch_cmc_categories() -> dict:
 # P1-1 板块/链资金净流入（7d 视角）
 # ══════════════════════════════════════════════════════════════
 
-def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int]:
+def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int, list]:
     """
     通过 CMC category detail 聚合成分币的 7d 市值变化%（真实 7d 视角）。
-    返回 (change_pct, used, total)，change_pct 为 None 表示聚合失败/数据不足。
+    返回 (change_pct, used, total, top_coins)，change_pct 为 None 表示聚合失败/数据不足。
+    top_coins 为按市值降序取前 5 的成分币摘要列表。
     """
     try:
         r = requests.get(
@@ -562,11 +563,28 @@ def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int]:
             cur += mcapf
             prev += mcapf / (1 + p7f / 100)
             used += 1
+        # 构造 top_coins：按市值降序取 Top 5
+        enriched = []
+        for c in coins:
+            q = (c.get("quote") or {}).get("USD") or {}
+            mcap = _safe_float(q.get("market_cap"))
+            price = _safe_float(q.get("price"))
+            p7 = q.get("percent_change_7d")
+            p7f = _safe_float(p7) if p7 is not None else None
+            enriched.append({
+                "name": c.get("name", ""),
+                "symbol": c.get("symbol", ""),
+                "market_cap": mcap,
+                "price": price,
+                "percent_change_7d": round(p7f, 2) if p7f is not None else None,
+            })
+        enriched.sort(key=lambda x: -x["market_cap"])
+        top_coins = enriched[:5]
         if prev > 0 and used >= max(1, len(coins) // 2):
-            return (cur - prev) / prev * 100, used, len(coins)
-        return None, used, len(coins)
+            return (cur - prev) / prev * 100, used, len(coins), top_coins
+        return None, used, len(coins), top_coins
     except Exception:
-        return None, 0, 0
+        return None, 0, 0, []
 
 
 def fetch_category_flow() -> dict:
@@ -606,7 +624,7 @@ def fetch_category_flow() -> dict:
 
     def work(item: tuple[str, dict]) -> dict:
         w, c = item
-        change, used, total = _cmc_category_7d_flow(c["id"])
+        change, used, total, top_coins = _cmc_category_7d_flow(c["id"])
         period = "7d" if change is not None else "24h_fallback"
         if change is None:
             change = c.get("market_cap_change")  # 24h 兜底，避免整条丢失
@@ -616,6 +634,7 @@ def fetch_category_flow() -> dict:
             "market_cap": _safe_float(c.get("market_cap")),
             "mcap_change_7d_pct": round(change, 2) if change is not None else None,
             "mcap_period": period,
+            "top_coins": top_coins,
         }
 
     with ThreadPoolExecutor(max_workers=6) as ex:
@@ -691,6 +710,7 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
             "tvl_change_7d_pct": tvl_info["tvl_change_7d_pct"] if tvl_info else None,
             "tvl_usd": tvl_info["tvl"] if tvl_info else None,
             "market_cap": item.get("market_cap"),
+            "top_coins": item.get("top_coins", []),
         })
 
     ranked.sort(key=lambda x: -x["composite_score"])
@@ -732,7 +752,8 @@ def fetch_chain_flow() -> dict:
     """
     DeFiLlama 链净流入榜 TOP5。/v2/chains 无 tvlPrevWeek 字段（实测），
     改为对 top 链逐一拉 /v2/historicalChainTvl 差分 7d 净流入。
-    返回 {status, ranked: [{chain, tvl, flow_7d, flow_7d_pct}], degraded_count, scanned}。
+    每条链同时附带该链 Top 5 协议（按 TVL 排序）供下钻。
+    返回 {status, ranked: [{chain, tvl, flow_7d, flow_7d_pct, protocols}], degraded_count, scanned}。
     """
     try:
         r = requests.get(f"{DL_BASE}/v2/chains", timeout=TIMEOUT)
@@ -740,6 +761,25 @@ def fetch_chain_flow() -> dict:
         chains = r.json()
     except Exception as e:
         return {"status": "error", "error": str(e), "ranked": [], "degraded_count": 0, "scanned": 0}
+
+    # 预拉全量协议列表，按 chain 过滤（一次请求替代 N 次）
+    all_protocols = []
+    try:
+        rp = requests.get(f"{DL_BASE}/protocols", timeout=TIMEOUT)
+        rp.raise_for_status()
+        all_protocols = rp.json() if isinstance(rp.json(), list) else []
+    except Exception:
+        pass
+
+    chain_protos: dict[str, list] = {}
+    for p in all_protocols:
+        ch = p.get("chain") or ""
+        if not ch:
+            continue
+        chain_protos.setdefault(ch, []).append(p)
+    for ch in chain_protos:
+        chain_protos[ch].sort(key=lambda x: -(_safe_float(x.get("tvl"))))
+        chain_protos[ch] = chain_protos[ch][:5]
 
     top = sorted(chains, key=lambda x: -(x.get("tvl") or 0))[:CHAIN_TOP_N]
 
@@ -749,6 +789,19 @@ def fetch_chain_flow() -> dict:
         if not ident:
             return None
         info = _chain_7d_flow(ident)
+        # 从预拉数据中取该链 Top 5 协议
+        protos = chain_protos.get(ident, [])
+        top_protos = [
+            {
+                "name": p.get("name", ""),
+                "slug": p.get("slug", ""),
+                "symbol": p.get("symbol", ""),
+                "tvl": _safe_float(p.get("tvl")),
+                "category": p.get("category", ""),
+                "change_7d": _safe_float(p.get("change_7d")) if p.get("change_7d") is not None else None,
+            }
+            for p in protos[:5]
+        ]
         if info is None:
             return {
                 "chain": c.get("name"),
@@ -756,6 +809,7 @@ def fetch_chain_flow() -> dict:
                 "flow_7d": None,
                 "flow_7d_pct": None,
                 "degraded": True,
+                "protocols": top_protos,
             }
         return {
             "chain": c.get("name"),
@@ -764,6 +818,7 @@ def fetch_chain_flow() -> dict:
             "flow_7d": info["flow_7d"],
             "flow_7d_pct": info["flow_7d_pct"],
             "degraded": False,
+            "protocols": top_protos,
         }
 
     with ThreadPoolExecutor(max_workers=8) as ex:

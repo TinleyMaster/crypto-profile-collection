@@ -68,11 +68,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）"),
     ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）"),
 
-    # ═══ 链上快照（每日全量）═══
-    ("chain_holder_snapshot_bsc", "30 5 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（每日）"),
-    ("chain_holder_snapshot_eth", "0 6 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（每日）"),
-    ("chain_holder_snapshot_base_arb", "30 6 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（每日）"),
-    ("chain_holder_snapshot_solana", "0 7 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日）"),
+    # ═══ 链上快照（隔日运行，持仓分布属周级缓慢变化）═══
+    # P2-1: 隔日运行以减少 RPC 调用
+    ("chain_holder_snapshot_bsc", "30 5 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五）"),
+    ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）"),
+    ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）"),
+    ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）"),
 
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],
@@ -82,10 +83,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）"),
 
     # ═══ 投研数据提取 ═══
-    ("cmc_quote_snapshot", "0 */6 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每 6 小时，覆盖全部 CMC 映射资产）"),
+    # P1-1: CMC 行情快照降频为每日（长尾币不需要每6h刷新，主流币行情由 ETL 处理）
+    ("cmc_quote_snapshot", "0 2 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每日凌晨，覆盖全部 CMC 映射资产）"),
     ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）"),
     ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）"),
-    ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）"),
+    # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）
+    # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily"),
     ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币，跳过稳定币）"),
     ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）"),
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
@@ -97,7 +100,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）"),
 
     # ═══ 文档深度爬取 ═══
-    ("b2_auto_loop", "0 */6 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每 6 小时）"),
+    # P1-3: B2 深度文档发现降频为每日（非实时需求）
+    ("b2_auto_loop", "0 3 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每日凌晨 3 点，非实时）"),
     ("spa_browser_crawl_auto", "0 9 * * *", "phase_b2_spa_browser_crawl_auto.py", [], "B3 SPA 无头浏览器爬取"),
     ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）"),
 
@@ -112,8 +116,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底"),
 
-    # ═══ 催化剂模块（全链路合并任务，每小时一轮）═══
-    ("catalyst_run_all", "0 */6 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 6 小时，DeepSeek 额度告警期间降频）"),
+    # ═══ 催化剂模块（全链路合并任务）═══
+    # P1-2: 催化剂降频为每12h（DeepSeek 额度有限）
+    ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）"),
 ]
 
 

@@ -3103,9 +3103,36 @@
                 formatUsdBig(data.inflow_24h_usd) + ' / ' + formatUsdBig(data.outflow_24h_usd) + '</div></div>';
             html += '</div>';
 
+            // CM 基准对照
+            const cm = data.cm_benchmark || {};
+            if (cm.status === 'ok') {
+                const cm24 = cm.netflow_24h_usd || 0;
+                const cm7d = cm.netflow_7d_usd || 0;
+                const cmCls24 = cm24 > 0 ? 'positive' : (cm24 < 0 ? 'negative' : '');
+                const cmCls7d = cm7d > 0 ? 'positive' : (cm7d < 0 ? 'negative' : '');
+                // 背离标记：onchain 与 CM 7d 符号相反
+                const divergence = (n7d > 0 && cm7d < 0) || (n7d < 0 && cm7d > 0);
+                const divBadge = divergence ? '<span style="background:#7f1d1d;color:#f87171;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:6px;">背离</span>' : '';
+
+                html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e222a;">';
+                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">CM 基准（交易所原生聚合）' + divBadge + '</div>';
+                html += '<div class="dvc-metrics">';
+                html += '<div class="dvc-metric"><div class="dvcm-label">CM 24h</div>';
+                html += '<div class="dvcm-value ' + cmCls24 + '" style="font-size:12px;">' + (cm24 >= 0 ? '+' : '') + formatUsdBig(cm24) + '</div></div>';
+                html += '<div class="dvc-metric"><div class="dvcm-label">CM 7d</div>';
+                html += '<div class="dvcm-value ' + cmCls7d + '" style="font-size:12px;">' + (cm7d >= 0 ? '+' : '') + formatUsdBig(cm7d) + '</div></div>';
+                html += '<div class="dvc-metric"><div class="dvcm-label">数据日</div>';
+                html += '<div class="dvcm-value" style="font-size:11px;color:#8a92a0;">' + (cm.latest_date || '-') + '</div></div>';
+                html += '</div>';
+                html += '<div style="font-size:9px;color:#4b5563;margin-top:3px;">CM=交易所原生聚合日频 T-1；onchain=链上大额转账（依赖地址库）</div>';
+                html += '</div>';
+            } else if (cm.status === 'unavailable') {
+                html += '<div style="margin-top:6px;font-size:10px;color:#6b7280;">CM 基准不可用（' + escapeHtml(cm.note || '免费层仅 BTC/ETH') + '）</div>';
+            }
+
             // 按交易所分布
             if (data.by_exchange && data.by_exchange.length > 0) {
-                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">按交易所分布</div>';
+                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;margin-top:8px;">按交易所分布</div>';
                 data.by_exchange.slice(0, 5).forEach(function (ex) {
                     const net = ex.netflow_usd;
                     const cls = net > 0 ? 'positive' : (net < 0 ? 'negative' : '');

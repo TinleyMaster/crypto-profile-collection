@@ -628,6 +628,7 @@ def fetch_onchain_anomaly_signals() -> dict:
                 "outflow_7d_usd": net_7d["outflow_usd"],
                 "covered_transfers": net_7d["covered_transfers"],
                 "by_exchange": net_7d.get("by_exchange", []),
+                "cm_benchmark": net_7d.get("cm_benchmark", {}),
             },
             "cefi_score": cefi_score,
             "daily_netflows_30d": daily_netflows,

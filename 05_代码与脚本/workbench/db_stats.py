@@ -3417,6 +3417,32 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
     return thesis_data
 
 
+def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
+    """从 CM 交易所原生净流获取基准对照（仅 BTC/ETH 有值）。"""
+    try:
+        cur.execute("""
+            SELECT metric_date, flow_in_ex_usd, flow_out_ex_usd
+            FROM biz.cm_asset_onchain_daily
+            WHERE asset_id = %s AND flow_in_ex_usd IS NOT NULL
+            ORDER BY metric_date DESC LIMIT 7
+        """, (asset_id,))
+        rows = cur.fetchall()
+        if not rows:
+            return {"status": "unavailable", "note": "CM 免费层净流仅 BTC/ETH"}
+        latest = rows[0]
+        cm_net_24h = float(latest["flow_out_ex_usd"] or 0) - float(latest["flow_in_ex_usd"] or 0)
+        cm_net_7d = sum(float(r["flow_out_ex_usd"] or 0) - float(r["flow_in_ex_usd"] or 0) for r in rows)
+        return {
+            "status": "ok",
+            "netflow_24h_usd": round(cm_net_24h, 2),
+            "netflow_7d_usd": round(cm_net_7d, 2),
+            "latest_date": str(latest["metric_date"]),
+            "note": "CM 交易所原生聚合净流（日频 T-1）",
+        }
+    except Exception:
+        return {"status": "unavailable", "note": "CM 基准查询异常"}
+
+
 def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
     """链上 CEX 净流入/流出计算。
 
@@ -3496,6 +3522,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     "outflow_24h_usd": None,
                     "by_exchange": [],
                     "top_transfers": [],
+                    "cm_benchmark": _get_cm_netflow_benchmark(cur, asset_id),
                 }
 
             # 24h 净流入
@@ -3591,6 +3618,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
         "by_exchange": by_exchange,
         "top_transfers": top_transfers,
         "total_transfers": total_transfers,
+        "cm_benchmark": _get_cm_netflow_benchmark(cur, asset_id),
     }
 
 
@@ -3688,6 +3716,7 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
         "outflow_usd": round(outflow, 2),
         "covered_transfers": r["cnt"],
         "by_exchange": by_exchange,
+        "cm_benchmark": _get_cm_netflow_benchmark(cur, 26195),
     }
 
 

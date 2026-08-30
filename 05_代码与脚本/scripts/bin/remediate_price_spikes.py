@@ -63,7 +63,7 @@ def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: 
                     d.market_date,
                     d.price_usd,
                     m.median_price,
-                    ROUND(d.price_usd / NULLIF(m.median_price, 0), 2) AS ratio,
+                    (d.price_usd / NULLIF(m.median_price, 0))::NUMERIC(12,2) AS ratio,
                     a.canonical_symbol
                 FROM biz.asset_market_daily d
                 JOIN medians m ON m.asset_id = d.asset_id

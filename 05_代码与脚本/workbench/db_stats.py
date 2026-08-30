@@ -8935,7 +8935,7 @@ def get_cm_mvrv_dashboard() -> dict:
                     {cte_join}
                     WHERE p.metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
                 )
-                SELECT l.asset_id, d2.cm_symbol, l.cap_mvrv_cur, l.mvrv_pct_full, l.extreme
+                SELECT l.asset_id, d2.cm_symbol, l.cap_mvrv_cur, l.mvrv_pct_full, l.extreme, l.metric_date
                 FROM latest l
                 JOIN biz.cm_asset_onchain_daily d2
                     ON l.asset_id = d2.asset_id AND l.metric_date = d2.metric_date
@@ -8980,7 +8980,7 @@ def get_cm_activity_dashboard() -> dict:
                        l.adr_pct_full, l.tx_pct_full,
                        l.roi_30d_pct_full, l.roi_1yr_pct_full,
                        d.adr_act_cnt, d.tx_tfr_cnt,
-                       d.roi_30d, d.roi_1yr
+                       d.roi_30d, d.roi_1yr, l.metric_date
                 FROM latest l
                 JOIN biz.cm_asset_onchain_daily d
                     ON l.asset_id = d.asset_id AND l.metric_date = d.metric_date

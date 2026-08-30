@@ -8674,3 +8674,45 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 "diff_date": target_date,
                 "categories": result,
             }
+
+
+def get_cm_mvrv_dashboard() -> dict:
+    """CM MVRV 多币分位仪表盘。读取 cm_onchain_percentile_full 最新日各币分位。
+    返回 {ok, cm_mvrv: [{symbol, value, pct_full, extreme}]}。"""
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT asset_id, metric_date, cap_mvrv_cur,
+                           mvrv_pct_full,
+                           CASE
+                               WHEN mvrv_pct_full > 90 THEN 'HIGH'
+                               WHEN mvrv_pct_full < 10 THEN 'LOW'
+                               ELSE 'NONE'
+                           END AS extreme
+                    FROM biz.cm_onchain_percentile_full
+                    WHERE metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
+                )
+                SELECT l.asset_id, d.cm_symbol, l.cap_mvrv_cur, l.mvrv_pct_full, l.extreme
+                FROM latest l
+                JOIN biz.cm_asset_onchain_daily d
+                    ON l.asset_id = d.asset_id AND l.metric_date = d.metric_date
+                WHERE l.cap_mvrv_cur IS NOT NULL
+                ORDER BY l.mvrv_pct_full DESC NULLS LAST
+            """)
+            rows = cur.fetchall()
+
+    cm_mvrv = []
+    for r in rows:
+        cm_mvrv.append({
+            "symbol": r["cm_symbol"],
+            "value": float(r["cap_mvrv_cur"]) if r["cap_mvrv_cur"] is not None else None,
+            "pct_full": float(r["mvrv_pct_full"]) if r["mvrv_pct_full"] is not None else None,
+            "extreme": r["extreme"] or "NONE",
+        })
+
+    return {"ok": True, "cm_mvrv": cm_mvrv}

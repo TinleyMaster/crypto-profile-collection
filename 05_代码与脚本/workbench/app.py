@@ -2020,6 +2020,16 @@ def api_cm_exec_sql():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/cm/mvrv")
+def api_cm_mvrv():
+    """CM MVRV 多币分位仪表盘。"""
+    try:
+        data = _get_db_stats().get_cm_mvrv_dashboard()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

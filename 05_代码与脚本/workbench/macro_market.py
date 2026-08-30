@@ -331,32 +331,61 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
         return {"status": "error", "error": str(e), "series": []}
 
 
-def fetch_mvrv_history(days: int = 90) -> dict:
-    """MVRV Z-Score 历史序列（日频）。返回 {status, series: [value, ...]}。
-    使用 CoinMetrics 社区 API 获取 MVRV 数据。"""
+def fetch_mvrv_history(days: int = 90, asset: str = "btc") -> dict:
+    """MVRV 历史序列（日频）。从 biz.cm_asset_onchain_daily 读取。
+    返回 {status, series: [float], value: float, pct_full: float, extreme: str, asset: str}。"""
     try:
-        r = requests.get(
-            f"{COINMETRICS_BASE}/v4/timeseries/asset-metrics",
-            params={
-                "assets": "btc",
-                "metrics": "CapMVRVCur",
-                "frequency": "1d",
-                "page_size": days,
-            },
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        series = []
-        for item in data:
-            mvrv = item.get("CapMVRVCur")
-            if mvrv is not None:
-                series.append(_safe_float(mvrv))
-        if not series:
-            return {"status": "error", "error": "empty", "series": []}
-        return {"status": "ok", "series": series}
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                # 查最新 MVRV 值 + 全历史分位
+                cur.execute("""
+                    SELECT d.cap_mvrv_cur, p.mvrv_pct_full,
+                           CASE
+                               WHEN p.mvrv_pct_full > 90 THEN 'HIGH'
+                               WHEN p.mvrv_pct_full < 10 THEN 'LOW'
+                               ELSE 'NONE'
+                           END AS extreme
+                    FROM biz.cm_asset_onchain_daily d
+                    JOIN biz.cm_onchain_percentile_full p
+                        ON d.asset_id = p.asset_id AND d.metric_date = p.metric_date
+                    JOIN core.asset_source_map asm
+                        ON asm.source_code = 'cm' AND asm.source_asset_key = d.cm_symbol
+                    WHERE d.cm_symbol = %s
+                    ORDER BY d.metric_date DESC
+                    LIMIT 1
+                """, (asset,))
+                row = cur.fetchone()
+
+                if not row or row[0] is None:
+                    return {"status": "error", "error": "no data", "series": [], "asset": asset}
+
+                mvrv_value = _safe_float(row[0])
+                pct_full = _safe_float(row[1]) if row[1] is not None else None
+                extreme = row[2] or "NONE"
+
+                # 拉历史序列（用于 percentile_of 兜底）
+                cur.execute("""
+                    SELECT cap_mvrv_cur FROM biz.cm_asset_onchain_daily
+                    WHERE cm_symbol = %s AND cap_mvrv_cur IS NOT NULL
+                    ORDER BY metric_date DESC LIMIT %s
+                """, (asset, days))
+                series = [_safe_float(r[0]) for r in cur.fetchall() if r[0] is not None]
+                series.reverse()  # 按时间正序
+
+                return {
+                    "status": "ok",
+                    "series": series,
+                    "value": mvrv_value,
+                    "pct_full": pct_full,
+                    "extreme": extreme,
+                    "asset": asset,
+                }
     except Exception as e:
-        return {"status": "error", "error": str(e), "series": []}
+        return {"status": "error", "error": str(e), "series": [], "asset": asset}
 
 
 def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
@@ -1934,6 +1963,60 @@ def compute_structure_subscore(
     }
 
 
+def _build_mvrv_universe() -> dict:
+    """构建多币 MVRV 极值汇总：max/min/median + 各币分位。"""
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH latest AS (
+                        SELECT d.cm_symbol, d.cap_mvrv_cur, p.mvrv_pct_full,
+                               CASE
+                                   WHEN p.mvrv_pct_full > 90 THEN 'HIGH'
+                                   WHEN p.mvrv_pct_full < 10 THEN 'LOW'
+                                   ELSE 'NONE'
+                               END AS extreme
+                        FROM biz.cm_onchain_percentile_full p
+                        JOIN biz.cm_asset_onchain_daily d
+                            ON p.asset_id = d.asset_id AND p.metric_date = d.metric_date
+                        WHERE p.metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
+                          AND d.cap_mvrv_cur IS NOT NULL
+                    )
+                    SELECT cm_symbol, cap_mvrv_cur, mvrv_pct_full, extreme
+                    FROM latest
+                    ORDER BY mvrv_pct_full DESC NULLS LAST
+                """)
+                rows = cur.fetchall()
+
+        if not rows:
+            return {"status": "error", "coins": []}
+
+        pcts = [float(r[2]) for r in rows if r[2] is not None]
+        coins = []
+        for r in rows:
+            coins.append({
+                "symbol": r[0],
+                "value": float(r[1]) if r[1] is not None else None,
+                "pct_full": float(r[2]) if r[2] is not None else None,
+                "extreme": r[3] or "NONE",
+            })
+
+        return {
+            "status": "ok",
+            "count": len(coins),
+            "max_pct": max(pcts) if pcts else None,
+            "min_pct": min(pcts) if pcts else None,
+            "median_pct": sorted(pcts)[len(pcts) // 2] if pcts else None,
+            "coins": coins,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "coins": []}
+
+
 # ══════════════════════════════════════════════════════════════
 # 主入口函数
 # ══════════════════════════════════════════════════════════════
@@ -1972,7 +2055,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P2-1 历史分位：拉取历史序列 ──
     fear_greed_hist = fetch_fear_greed_history(90)
-    mvrv_hist = fetch_mvrv_history(90)
+    mvrv_hist = fetch_mvrv_history(90, "btc")
     stablecoin_flow_hist = fetch_stablecoin_netflow_history(30)
     cefi_hist = fetch_cefi_history(30)
     btc_dom_hist = fetch_btc_dominance_history(30)
@@ -1982,9 +2065,10 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
     fg_extreme = flag_extreme(fg_percentile)
 
-    mvrv_value = derivatives.get("mvrv_z_score")
-    mvrv_percentile = percentile_of(mvrv_value, mvrv_hist.get("series") or []) if mvrv_hist.get("status") == "ok" else None
-    mvrv_extreme = flag_extreme(mvrv_percentile)
+    # MVRV：优先用库内全历史分位（cm_onchain_percentile_full），兜底用 percentile_of
+    mvrv_value = mvrv_hist.get("value") or derivatives.get("mvrv_z_score")
+    mvrv_percentile = mvrv_hist.get("pct_full") if mvrv_hist.get("status") == "ok" else None
+    mvrv_extreme = mvrv_hist.get("extreme", "NONE") if mvrv_hist.get("status") == "ok" else flag_extreme(mvrv_percentile)
 
     sc_flow_value = stablecoin_flow_hist.get("series", [])[-1] if stablecoin_flow_hist.get("series") else None
     sc_flow_percentile = percentile_of(sc_flow_value, stablecoin_flow_hist.get("series") or []) if stablecoin_flow_hist.get("status") == "ok" else None
@@ -2084,6 +2168,8 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                     "stablecoin_flow_extreme": sc_flow_extreme,
                 },
             },
+            # B3: 多币 MVRV 极值汇总
+            "mvrv_universe": _build_mvrv_universe(),
         },
         "event_calendar": event_calendar,
         "divergence_signals": divergence,

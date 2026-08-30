@@ -7213,6 +7213,39 @@
                 </div>
             </div>`;
             
+            // CM MVRV 估值热度卡
+            try {
+                const mvrvRes = await fetch('/api/cm/mvrv');
+                const mvrvData = await mvrvRes.json();
+                if (mvrvData.ok && mvrvData.cm_mvrv && mvrvData.cm_mvrv.length) {
+                    const mvrvList = mvrvData.cm_mvrv;
+                    const hasExtreme = mvrvList.some(m => m.extreme !== 'NONE');
+                    html += `<div class="dim-card ${hasExtreme ? 'extreme-high' : ''}">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">🌡️</span>
+                            <span class="dim-card-title">MVRV 估值热度</span>
+                            <span class="dim-card-score neutral">${mvrvList.length} 币</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${mvrvList.map(m => {
+                                const cls = m.extreme === 'HIGH' ? 'extreme-high' : m.extreme === 'LOW' ? 'extreme-low' : '';
+                                const badge = m.extreme !== 'NONE'
+                                    ? `<span class="extreme-badge ${m.extreme.toLowerCase()}">${m.extreme === 'HIGH' ? '▲' : '▼'}</span>`
+                                    : '';
+                                const pctTxt = m.pct_full != null ? m.pct_full.toFixed(0) + '%' : '-';
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${m.symbol.toUpperCase()} <small style="color:#6b7280">MVRV ${m.value != null ? m.value.toFixed(2) : '-'}</small></span>
+                                    <span class="dim-metric-val ${cls}">${pctTxt}${badge}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">数据源: CoinMetrics Community（冻结 2026-05-24）</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // MVRV 加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

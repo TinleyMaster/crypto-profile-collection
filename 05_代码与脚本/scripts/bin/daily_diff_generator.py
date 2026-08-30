@@ -107,7 +107,38 @@ WHERE d.source_code = 'cmc'
   AND a.market_cap_rank <= 1000
   AND d.volume_24h IS NOT NULL
   AND d.market_cap > 0
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
 ORDER BY d.volume_24h / d.market_cap DESC
+LIMIT 20
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+VOLUME_SURGE_DOWN_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+SELECT
+    %s::DATE,
+    'volume_surge_24h',
+    d.asset_id,
+    CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap * 100 ELSE NULL END,
+    '24h 量/市值比 (%%)',
+    ROW_NUMBER() OVER (ORDER BY CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap ELSE 0 END ASC),
+    'down',
+    jsonb_build_object(
+        'price_usd', d.price_usd,
+        'market_cap', d.market_cap,
+        'volume_24h', d.volume_24h,
+        'change_24h', d.change_24h
+    )
+FROM biz.asset_market_daily d
+JOIN core.asset a ON a.asset_id = d.asset_id
+WHERE d.source_code = 'cmc'
+  AND d.market_date = %s::DATE
+  AND a.market_cap_rank <= 1000
+  AND d.volume_24h IS NOT NULL
+  AND d.market_cap > 0
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+ORDER BY d.volume_24h / d.market_cap ASC
 LIMIT 20
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -157,13 +188,14 @@ SELECT
     %s::DATE,
     'market_cap_mover',
     d.asset_id,
-    d.market_cap - prev.market_cap AS market_cap_change_usd,
-    '24h 市值变动 (USD)',
-    ROW_NUMBER() OVER (ORDER BY ABS(d.market_cap - prev.market_cap) DESC),
+    ROUND((d.market_cap - prev.market_cap) / prev.market_cap * 100, 2) AS market_cap_change_pct,
+    '24h 市值变动率 (%%)',
+    ROW_NUMBER() OVER (ORDER BY ABS((d.market_cap - prev.market_cap) / prev.market_cap) DESC),
     CASE WHEN d.market_cap >= prev.market_cap THEN 'up' ELSE 'down' END,
     jsonb_build_object(
         'market_cap', d.market_cap,
         'market_cap_prev', prev.market_cap,
+        'market_cap_change_usd', d.market_cap - prev.market_cap,
         'price_usd', d.price_usd,
         'change_24h', d.change_24h,
         'volume_24h', d.volume_24h
@@ -180,7 +212,8 @@ WHERE d.source_code = 'cmc'
   AND d.market_cap IS NOT NULL
   AND prev.market_cap IS NOT NULL
   AND prev.market_cap > 0
-ORDER BY ABS(d.market_cap - prev.market_cap) DESC
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+ORDER BY ABS((d.market_cap - prev.market_cap) / prev.market_cap) DESC
 LIMIT 20
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -289,7 +322,10 @@ def generate_for_date(cur, d: date) -> dict:
     result["price_change_24h"] = cur.rowcount
 
     cur.execute(VOLUME_SURGE_SQL, (date_str, date_str))
-    result["volume_surge_24h"] = cur.rowcount
+    result["volume_surge_24h_up"] = cur.rowcount
+    
+    cur.execute(VOLUME_SURGE_DOWN_SQL, (date_str, date_str))
+    result["volume_surge_24h_down"] = cur.rowcount
 
     cur.execute(MARKET_CAP_MOVER_SQL, (date_str, date_str))
     result["market_cap_mover"] = cur.rowcount

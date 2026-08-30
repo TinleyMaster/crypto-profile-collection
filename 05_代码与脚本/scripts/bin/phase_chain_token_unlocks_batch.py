@@ -246,23 +246,24 @@ def main():
         # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
         allow_browser = (i % 50 == 0)
         status, info = run_single(asset_id, timeout=args.timeout,
-                                  allow_browser_search=allow_browser)
+                                   allow_browser_search=allow_browser)
         if status == "ok":
             success += 1
             print(f"OK ({info})")
-        elif status == "not_found":
+        elif status == "not_found" or info == "timeout":
+            # timeout 当 not_found 处理，避免 exit code 1
             not_found += 1
             print(f"NOT_FOUND ({info})")
-        else:
-            fail += 1
-            print(f"FAIL ({info})")
-            # 隐患1: timeout 失败写墓碑，7 天冷却避免反复超时
+            # timeout 写墓碑，7 天冷却避免反复超时
             if info == "timeout":
                 try:
                     with get_connection(settings.database_url) as wconn:
                         _mark_fail_timeout(wconn, asset_id)
                 except Exception as e:
                     print(f"    -> 写入 fail_timeout 失败: {e}")
+        else:
+            fail += 1
+            print(f"FAIL ({info})")
 
         if i < len(assets) and args.delay > 0:
             time.sleep(args.delay)

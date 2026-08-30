@@ -1988,6 +1988,16 @@ def api_cm_mvrv():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/cm/activity")
+def api_cm_activity():
+    """CM 链上活跃度仪表盘。"""
+    try:
+        data = _get_db_stats().get_cm_activity_dashboard()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

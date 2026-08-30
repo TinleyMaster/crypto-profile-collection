@@ -7285,6 +7285,40 @@
                 // MVRV 加载失败不阻塞大盘
             }
             
+            // CM 链上活跃度卡
+            try {
+                const actRes = await fetch('/api/cm/activity');
+                const actData = await actRes.json();
+                if (actData.ok && actData.cm_activity && actData.cm_activity.length) {
+                    const actList = actData.cm_activity;
+                    const hasSignal = actList.some(a => a.signals && a.signals.length);
+                    html += `<div class="dim-card ${hasSignal ? 'extreme-high' : ''}">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">📊</span>
+                            <span class="dim-card-title">链上活跃度</span>
+                            <span class="dim-card-score neutral">${actList.length} 币</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${actList.map(a => {
+                                const adrCls = a.adr_pct != null && a.adr_pct < 20 ? 'extreme-low' : a.adr_pct != null && a.adr_pct > 80 ? 'extreme-high' : '';
+                                const txCls = a.tx_pct != null && a.tx_pct < 20 ? 'extreme-low' : a.tx_pct != null && a.tx_pct > 80 ? 'extreme-high' : '';
+                                const roiTag = a.roi_30d != null
+                                    ? (a.roi_30d < 0 ? '<span style="color:#ff5b5b">亏损</span>' : '<span style="color:#00c087">盈利</span>')
+                                    : '-';
+                                const signals = (a.signals || []).map(s => '<span style="color:#f0b90b;font-size:10px">' + s + '</span>').join(' ');
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${a.symbol.toUpperCase()} <small style="color:#6b7280">活跃${a.adr_pct != null ? a.adr_pct.toFixed(0) + '%' : '-'} 交易${a.tx_pct != null ? a.tx_pct.toFixed(0) + '%' : '-'}</small></span>
+                                    <span class="dim-metric-val ${adrCls}">${roiTag} ${signals}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">低位=历史萎缩 | 高位=历史过热 | 仅展示极端区</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // 活跃度加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

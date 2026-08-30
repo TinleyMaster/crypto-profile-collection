@@ -8860,3 +8860,68 @@ def get_cm_mvrv_dashboard() -> dict:
         })
 
     return {"ok": True, "cm_mvrv": cm_mvrv}
+
+
+def get_cm_activity_dashboard() -> dict:
+    """CM 链上活跃度仪表盘。读取 cm_onchain_percentile_full 最新日各币活跃度分位。
+    返回 {ok, cm_activity: [{symbol, adr_pct, tx_pct, roi_30d, roi_1yr, roi_30d_pct, roi_1yr_pct, signals}]}。"""
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT p.asset_id, p.metric_date,
+                           p.adr_pct_full, p.tx_pct_full,
+                           p.roi_30d_pct_full, p.roi_1yr_pct_full
+                    FROM biz.cm_onchain_percentile_full p
+                    WHERE p.metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
+                )
+                SELECT d.cm_symbol,
+                       l.adr_pct_full, l.tx_pct_full,
+                       l.roi_30d_pct_full, l.roi_1yr_pct_full,
+                       d.adr_act_cnt, d.tx_tfr_cnt,
+                       d.roi_30d, d.roi_1yr
+                FROM latest l
+                JOIN biz.cm_asset_onchain_daily d
+                    ON l.asset_id = d.asset_id AND l.metric_date = d.metric_date
+                ORDER BY l.adr_pct_full DESC NULLS LAST
+            """)
+            rows = cur.fetchall()
+
+    cm_activity = []
+    for r in rows:
+        adr_pct = float(r["adr_pct_full"]) if r["adr_pct_full"] is not None else None
+        tx_pct = float(r["tx_pct_full"]) if r["tx_pct_full"] is not None else None
+        roi_30d = float(r["roi_30d"]) if r["roi_30d"] is not None else None
+        roi_1yr = float(r["roi_1yr"]) if r["roi_1yr"] is not None else None
+        roi_30d_pct = float(r["roi_30d_pct_full"]) if r["roi_30d_pct_full"] is not None else None
+        roi_1yr_pct = float(r["roi_1yr_pct_full"]) if r["roi_1yr_pct_full"] is not None else None
+
+        # 信号规则
+        signals = []
+        if adr_pct is not None and adr_pct < 20:
+            signals.append("活跃地址历史低位")
+        if tx_pct is not None and tx_pct < 20:
+            signals.append("交易数历史低位")
+        if roi_30d is not None and roi_30d < 0:
+            signals.append("近30日持币亏损")
+        if roi_1yr_pct is not None and roi_1yr_pct > 80:
+            signals.append("一年收益历史高位")
+        if roi_1yr_pct is not None and roi_1yr_pct < 20:
+            signals.append("一年收益历史低位")
+
+        cm_activity.append({
+            "symbol": r["cm_symbol"],
+            "adr_pct": adr_pct,
+            "tx_pct": tx_pct,
+            "roi_30d": roi_30d,
+            "roi_1yr": roi_1yr,
+            "roi_30d_pct": roi_30d_pct,
+            "roi_1yr_pct": roi_1yr_pct,
+            "signals": signals,
+        })
+
+    return {"ok": True, "cm_activity": cm_activity}

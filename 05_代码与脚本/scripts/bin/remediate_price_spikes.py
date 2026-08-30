@@ -36,11 +36,13 @@ def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: 
     """检测并修复价格尖刺。"""
     with conn.cursor() as cur:
         # 1. 计算每个资产近 30 天的价格中位数
-        asset_filter = ""
-        params = ()
+        asset_filter_medians = ""
+        asset_filter_anomalies = ""
+        params = []
         if asset_id:
-            asset_filter = "AND d.asset_id = %s"
-            params = (asset_id,)
+            asset_filter_medians = "AND d.asset_id = %s"
+            asset_filter_anomalies = "AND d.asset_id = %s"
+            params = [asset_id, asset_id]
         
         cur.execute(f"""
             WITH medians AS (
@@ -53,7 +55,7 @@ def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: 
                   AND d.market_date >= CURRENT_DATE - INTERVAL '30 days'
                   AND d.price_usd > 0
                   AND (d.is_anomaly IS NOT TRUE OR d.is_anomaly IS NULL)
-                  {asset_filter}
+                  {asset_filter_medians}
                 GROUP BY d.asset_id
                 HAVING COUNT(*) >= 3
             ),
@@ -73,12 +75,12 @@ def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: 
                   AND m.median_price > 0
                   AND (d.is_anomaly IS NOT TRUE OR d.is_anomaly IS NULL)
                   AND (d.price_usd / m.median_price > %s OR d.price_usd / m.median_price < 1.0/%s)
-                  {asset_filter}
+                  {asset_filter_anomalies}
             )
             SELECT asset_id, market_date, price_usd, median_price, ratio, canonical_symbol
             FROM anomalies
             ORDER BY ratio DESC
-        """, (threshold, threshold) + params)
+        """, [threshold, threshold] + params)
         
         anomalies = cur.fetchall()
         

@@ -8900,34 +8900,45 @@ def get_cm_mvrv_dashboard() -> dict:
             
             # 根据可用列构建查询
             if 'cap_mvrv_cur' in available_cols:
-                mvrv_col = 'cap_mvrv_cur'
+                mvrv_col = 'p.cap_mvrv_cur'
+                need_d_in_cte = False
             elif 'mvrv' in available_cols:
-                mvrv_col = 'mvrv'
+                mvrv_col = 'p.mvrv'
+                need_d_in_cte = False
             else:
-                # Fallback: 从 cm_asset_onchain_daily 计算
-                mvrv_col = "d.mcap_usd / NULLIF(d.sply_cur, 0)"
+                # Fallback: 从 cm_asset_onchain_daily 计算（需要 CTE 内 JOIN d）
+                mvrv_col = "d.cap_mrkt_cur_usd / NULLIF(d.sply_cur, 0)"
+                need_d_in_cte = True
             
             if 'mvrv_pct_full' in available_cols:
-                pct_col = 'mvrv_pct_full'
+                pct_col = 'p.mvrv_pct_full'
             else:
                 pct_col = 'NULL'
             
+            # CTE 内 JOIN 条件（fallback 需要 d 别名可见）
+            cte_join = """
+                JOIN biz.cm_asset_onchain_daily d
+                    ON p.asset_id = d.asset_id AND p.metric_date = d.metric_date
+            """ if need_d_in_cte else ""
+            
             cur.execute(f"""
                 WITH latest AS (
-                    SELECT asset_id, metric_date, {mvrv_col} AS cap_mvrv_cur,
+                    SELECT p.asset_id, p.metric_date,
+                           {mvrv_col} AS cap_mvrv_cur,
                            {pct_col} AS mvrv_pct_full,
                            CASE
                                WHEN {pct_col} > 90 THEN 'HIGH'
                                WHEN {pct_col} < 10 THEN 'LOW'
                                ELSE 'NONE'
                            END AS extreme
-                    FROM biz.cm_onchain_percentile_full
-                    WHERE metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
+                    FROM biz.cm_onchain_percentile_full p
+                    {cte_join}
+                    WHERE p.metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
                 )
-                SELECT l.asset_id, d.cm_symbol, l.cap_mvrv_cur, l.mvrv_pct_full, l.extreme
+                SELECT l.asset_id, d2.cm_symbol, l.cap_mvrv_cur, l.mvrv_pct_full, l.extreme
                 FROM latest l
-                JOIN biz.cm_asset_onchain_daily d
-                    ON l.asset_id = d.asset_id AND l.metric_date = d.metric_date
+                JOIN biz.cm_asset_onchain_daily d2
+                    ON l.asset_id = d2.asset_id AND l.metric_date = d2.metric_date
                 WHERE l.cap_mvrv_cur IS NOT NULL
                 ORDER BY l.mvrv_pct_full DESC NULLS LAST
             """)
@@ -9024,8 +9035,7 @@ def get_cm_valuation_dashboard() -> dict:
                        cap_mrkt_est_usd, sply_ex_usd, cap_mvrv_cur
                 FROM biz.cm_asset_onchain_daily
                 WHERE metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
-                  AND cap_mrkt_cur_usd IS NOT NULL
-                ORDER BY cap_mrkt_cur_usd DESC
+                ORDER BY cap_mrkt_cur_usd DESC NULLS LAST
             """)
             rows = cur.fetchall()
 

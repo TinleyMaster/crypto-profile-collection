@@ -111,7 +111,6 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）"),
     ("collect_exchange_wallets", "30 3 * * 1", "collect_exchange_wallets.py", ["--chains", "eth,bsc", "--sources", "community,ethplorer", "--apply"], "CEX 地址分级收集-社区源+快照标签（每周一，社区库更新慢）"),
-    ("cg_netflow_fetch", "0 8 * * *", "run_cg_netflow.py", ["--fetch-only"], "CoinGlass 净流抓取（每日早 8 点，替代 Dune）"),
 
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底"),

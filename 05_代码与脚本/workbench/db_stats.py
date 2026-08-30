@@ -8939,7 +8939,7 @@ def get_cm_mvrv_dashboard() -> dict:
                 FROM latest l
                 JOIN biz.cm_asset_onchain_daily d2
                     ON l.asset_id = d2.asset_id AND l.metric_date = d2.metric_date
-                WHERE l.cap_mvrv_cur IS NOT NULL
+                WHERE l.mvrv_pct_full IS NOT NULL
                 ORDER BY l.mvrv_pct_full DESC NULLS LAST
             """)
             rows = cur.fetchall()

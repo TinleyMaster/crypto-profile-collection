@@ -6993,9 +6993,9 @@
             // BTC 周期定位卡
             const btcCycle = data.btc_cycle || {};
             if (btcCycle.status === 'ok') {
-                const phaseColors = { accumulation: '#10b981', neutral: '#6b7280', distribution: '#ef4444' };
-                const phaseLabels = { accumulation: '积累期', neutral: '中性', distribution: '顶部风险' };
-                const phaseIcons = { accumulation: '🟢', neutral: '⚪', distribution: '🔴' };
+                const phaseColors = { accumulation: '#10b981', neutral: '#6b7280', distribution: '#ef4444', early_top: '#f59e0b' };
+                const phaseLabels = { accumulation: '积累期', neutral: '中性', distribution: '顶部风险', early_top: '顶部风险（早期）' };
+                const phaseIcons = { accumulation: '🟢', neutral: '⚪', distribution: '🔴', early_top: '🟠' };
                 const pc = btcCycle.phase || 'neutral';
                 const phaseColor = phaseColors[pc] || '#6b7280';
                 const phaseLabel = phaseLabels[pc] || btcCycle.phase_label || '未知';
@@ -7018,7 +7018,7 @@
                         </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">老币 CDD 占比</span>
-                            <span class="sub-score-value">${btcCycle.old_coin_cdd_share != null ? (btcCycle.old_coin_cdd_share * 100).toFixed(1) + '%' : 'N/A'}</span>
+                            <span class="sub-score-value">${btcCycle.old_coin_cdd_share != null ? (btcCycle.old_coin_cdd_share * 100).toFixed(1) + '%' : 'N/A'}${btcCycle.old_coin_cdd_share_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.old_coin_cdd_share_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
                         </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">算力</span>

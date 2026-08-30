@@ -3781,20 +3781,43 @@ def get_btc_cycle_position() -> dict:
             """)
             percentiles = {r["metric_name"]: {"pct_full": float(r["pct_full"]), "flag_full": r["flag_full"]} for r in cur.fetchall()}
 
-            # 老币 CDD 占比分位（用 cdd_age_band 老币合计 vs 历史）
-            old_cdd_pctile = None
-            if old_coin_cdd_share is not None:
+            # 老币 CDD 占比「真实分位」：从 obm_btc_daily 历史逐日重建 old_share 后排名
+            old_share_pct = None
+            try:
                 cur.execute("""
-                    SELECT pct_full FROM biz.obm_percentile
-                    WHERE metric_name LIKE 'obm_cdd_age_band_btcxdays_daily_%'
-                      AND metric_date = (SELECT MAX(metric_date) FROM biz.obm_percentile)
-                    LIMIT 1
+                    WITH daily AS (
+                        SELECT metric_date,
+                               SUM(CASE WHEN metric_name ~*
+                                    '(1y_2y|2y_3y|3y_5y|5y_7y|7y_10y|10y_plus|1yr_2yr|2yr_3yr|3yr_5yr|5yr_7yr|7yr_10yr|10yr_plus)'
+                                    THEN value END) AS old_cdd,
+                               SUM(value) AS total_cdd
+                        FROM biz.obm_btc_daily
+                        WHERE metric_name LIKE 'obm_cdd_age_band_btcxdays_daily_%'
+                          AND value IS NOT NULL
+                        GROUP BY metric_date
+                    ),
+                    share AS (
+                        SELECT metric_date, old_cdd / NULLIF(total_cdd, 0) AS s
+                        FROM daily WHERE total_cdd > 0
+                    ),
+                    ranked AS (
+                        SELECT metric_date, s,
+                               percent_rank() OVER (ORDER BY s) AS pct
+                        FROM share
+                    )
+                    SELECT pct FROM ranked
+                    WHERE metric_date = (SELECT MAX(metric_date) FROM ranked)
                 """)
-                # 简化：用 liveliness 分位近似（因无 pre-computed old_share 分位）
+                row = cur.fetchone()
+                if row and row["pct"] is not None:
+                    old_share_pct = round(float(row["pct"]) * 100, 2)
+            except Exception:
+                old_share_pct = None
 
-    # 4) 相位判定
+    # 4) 相位判定（自上而下，确定不回溯）
     liv_pctile = percentiles.get("obm_liveliness_ratio_daily", {})
     dorm_pctile = percentiles.get("obm_dormancy_days_daily", {})
+    liv_pct = liv_pctile.get("pct_full")
     liv_flag = liv_pctile.get("flag_full", "NONE")
     dorm_flag = dorm_pctile.get("flag_full", "NONE")
 
@@ -3808,6 +3831,13 @@ def get_btc_cycle_position() -> dict:
         phase = "distribution"
         phase_label = "顶部风险"
         signals.append(f"liveliness {liveliness:.3f} 偏高 + 老币 CDD 占比 {old_coin_cdd_share:.1%} > 55%")
+    elif (liv_pct is not None and liv_pct >= 90
+          and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.50) \
+         or (old_share_pct is not None and old_share_pct >= 90
+             and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.45):
+        phase = "early_top"
+        phase_label = "顶部风险（早期）"
+        signals.append(f"liveliness 历史高位（{liv_pct:.0f}%分位）+ 老币 CDD 占比 {old_coin_cdd_share:.1%} ≥ 50% → 顶部早期预警")
     else:
         phase = "neutral"
         phase_label = "中性"
@@ -3828,6 +3858,7 @@ def get_btc_cycle_position() -> dict:
         "dormancy": dormancy,
         "dormancy_percentile": dorm_pctile.get("pct_full"),
         "old_coin_cdd_share": old_coin_cdd_share,
+        "old_coin_cdd_share_percentile": old_share_pct,
         "cdd_total": cdd_total,
         "hashrate_ehs": hashrate,
         "signals": signals,

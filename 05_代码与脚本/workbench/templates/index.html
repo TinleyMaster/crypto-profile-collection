@@ -6821,14 +6821,14 @@
                 const res = await fetch(url);
                 const data = await res.json();
                 if (!data.ok) throw new Error(data.error || '加载失败');
-                renderOverview(data);
+                await renderOverview(data);
                 updated.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
             } catch (e) {
                 grid.innerHTML = '<div class="dim-card" style="grid-column:1/-1;color:#ff5b5b">加载失败：' + e.message + '</div>';
             }
         }
 
-        function renderOverview (data) {
+        async function renderOverview (data) {
             const summary = data.summary || {};
             const grid = document.getElementById('overview-grid');
             

@@ -8884,13 +8884,37 @@ def get_cm_mvrv_dashboard() -> dict:
 
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 先检查表结构，使用安全的列名
             cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema='biz' 
+                  AND table_name='cm_onchain_percentile_full'
+                  AND column_name IN ('cap_mvrv_cur', 'mvrv_pct_full', 'mvrv')
+            """)
+            available_cols = {r['column_name'] for r in cur.fetchall()}
+            
+            # 根据可用列构建查询
+            if 'cap_mvrv_cur' in available_cols:
+                mvrv_col = 'cap_mvrv_cur'
+            elif 'mvrv' in available_cols:
+                mvrv_col = 'mvrv'
+            else:
+                # Fallback: 从 cm_asset_onchain_daily 计算
+                mvrv_col = "d.mcap_usd / NULLIF(d.sply_cur, 0)"
+            
+            if 'mvrv_pct_full' in available_cols:
+                pct_col = 'mvrv_pct_full'
+            else:
+                pct_col = 'NULL'
+            
+            cur.execute(f"""
                 WITH latest AS (
-                    SELECT asset_id, metric_date, cap_mvrv_cur,
-                           mvrv_pct_full,
+                    SELECT asset_id, metric_date, {mvrv_col} AS cap_mvrv_cur,
+                           {pct_col} AS mvrv_pct_full,
                            CASE
-                               WHEN mvrv_pct_full > 90 THEN 'HIGH'
-                               WHEN mvrv_pct_full < 10 THEN 'LOW'
+                               WHEN {pct_col} > 90 THEN 'HIGH'
+                               WHEN {pct_col} < 10 THEN 'LOW'
                                ELSE 'NONE'
                            END AS extreme
                     FROM biz.cm_onchain_percentile_full

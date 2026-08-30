@@ -165,7 +165,7 @@ def fetch_asset_metrics(
     while current <= end_date:
         window_end = min(current + timedelta(days=API_WINDOW_DAYS - 1), end_date)
         url = (
-            f"{CM_API_BASE}/asset-metrics"
+            f"{CM_API_BASE}/timeseries/asset-metrics"
             f"?assets={symbol}"
             f"&metrics={metrics_param}"
             f"&frequency=1d"
@@ -223,25 +223,6 @@ def get_coin_start_date(conn, cm_symbol: str, fallback: date) -> date:
             from datetime import timedelta
             return last_valid + timedelta(days=1)
     return fallback
-
-
-def get_latest_date_from_api(symbol: str) -> date | None:
-    """从 CoinMetrics API 获取某币最新可用日期。"""
-    url = (
-        f"{CM_API_BASE}/asset-metrics"
-        f"?assets={symbol}"
-        f"&metrics=PriceUSD"
-        f"&frequency=1d"
-        f"&page_size=1"
-        f"&sort=time"
-        f"&sort_direction=desc"
-    )
-    data = api_get(url)
-    if data and "data" in data and data["data"]:
-        ts = data["data"][0].get("time", "")
-        if ts and len(ts) >= 10:
-            return date.fromisoformat(ts[:10])
-    return None
 
 
 def backfill_coin(
@@ -359,16 +340,8 @@ def main() -> int:
     else:
         # 回填模式
         global_start = date.fromisoformat(args.start_date) if args.start_date else BACKFILL_START
-        # 动态取最新日期
-        print("查询 CoinMetrics 最新可用日期...")
-        end_date = None
-        for sym in coins[:3]:  # 取前 3 币探测
-            d = get_latest_date_from_api(sym)
-            if d:
-                end_date = d
-                break
-        if not end_date:
-            end_date = date.today() - timedelta(days=1)
+        # T-1 完整日（数据天然滞后，已论证无需 API 探测）
+        end_date = date.today() - timedelta(days=1)
         print(f"最新完整日: {end_date}")
         start_date = global_start  # 兜底值，后续按币覆盖
 
@@ -388,50 +361,40 @@ def main() -> int:
         print("❌ DATABASE_URL 未配置")
         return 1
 
-    conn = None
-    if not dry_run:
-        conn = get_connection(settings.database_url)
-
     all_stats = []
-    try:
+    if dry_run:
+        # dry-run 不连库，仅预览拉取
         for i, sym in enumerate(coins, 1):
             print(f"[{i}/{len(coins)}] {sym.upper()}")
-            # 按币动态取起始日期（非 incremental 且未手动指定 --start-date 时）
-            if not args.incremental and not args.start_date and conn:
-                coin_start = get_coin_start_date(conn, sym, global_start)
-                if coin_start > start_date:
-                    print(f"  起始日期: {coin_start}（库内有效末日次日）")
-            else:
-                coin_start = start_date
+            metrics = list(METRIC_MAP.keys())
+            if sym in FLOW_COINS:
+                metrics.extend(FLOW_METRIC_MAP.keys())
+            day_data = fetch_asset_metrics(sym, metrics, start_date, end_date)
+            all_stats.append({
+                "symbol": sym, "rows_fetched": len(day_data),
+                "rows_upserted": len(day_data), "cutoff_updated": False, "error": None,
+            })
+            print(f"  [DRY RUN] {len(day_data)} 天数据")
+            time.sleep(REQUEST_INTERVAL)
+    else:
+        with get_connection(settings.database_url) as conn:
+            for i, sym in enumerate(coins, 1):
+                print(f"[{i}/{len(coins)}] {sym.upper()}")
+                # 按币动态取起始日期（非 incremental 且未手动指定 --start-date 时）
+                if not args.incremental and not args.start_date:
+                    coin_start = get_coin_start_date(conn, sym, global_start)
+                    if coin_start > start_date:
+                        print(f"  起始日期: {coin_start}（库内有效末日次日）")
+                else:
+                    coin_start = start_date
 
-            if coin_start > end_date:
-                print(f"  跳过：起始 {coin_start} > 终止 {end_date}（数据已最新）")
-                continue
+                if coin_start > end_date:
+                    print(f"  跳过：起始 {coin_start} > 终止 {end_date}（数据已最新）")
+                    continue
 
-            if dry_run:
-                # dry-run 模式：仅拉取不写入
-                stats = {
-                    "symbol": sym,
-                    "rows_fetched": 0,
-                    "rows_upserted": 0,
-                    "cutoff_updated": False,
-                    "error": None,
-                }
-                metrics = list(METRIC_MAP.keys())
-                if sym in FLOW_COINS:
-                    metrics.extend(FLOW_METRIC_MAP.keys())
-                day_data = fetch_asset_metrics(sym, metrics, coin_start, end_date)
-                stats["rows_fetched"] = len(day_data)
-                stats["rows_upserted"] = len(day_data)  # dry-run 假设全部写入
-                print(f"  [DRY RUN] {len(day_data)} 天数据")
-                all_stats.append(stats)
-            else:
                 stats = backfill_coin(conn, sym, coin_start, end_date, dry_run)
                 all_stats.append(stats)
-            time.sleep(REQUEST_INTERVAL)
-    finally:
-        if conn:
-            conn.close()
+                time.sleep(REQUEST_INTERVAL)
 
     # 汇总
     print("\n" + "=" * 60)

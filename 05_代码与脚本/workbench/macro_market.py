@@ -17,7 +17,6 @@ CMC_BASE = "https://pro-api.coinmarketcap.com"
 CRYPTOETF_BASE = "https://api.cryptoetf.today/api"
 BINANCE_BASE = "https://api.binance.com"
 BINANCE_FAPI = "https://fapi.binance.com"
-COINMETRICS_BASE = "https://community-api.coinmetrics.io"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
@@ -331,9 +330,9 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
         return {"status": "error", "error": str(e), "series": []}
 
 
-def fetch_mvrv_history(days: int = 90, asset: str = "btc") -> dict:
-    """MVRV 历史序列（日频）。从 biz.cm_asset_onchain_daily 读取。
-    返回 {status, series: [float], value: float, pct_full: float, extreme: str, asset: str}。"""
+def fetch_mvrv_history(asset: str = "btc") -> dict:
+    """MVRV 最新值 + 全历史分位。从 biz.cm_asset_onchain_daily 读取。
+    返回 {status, value, pct_full, extreme, asset}。"""
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
@@ -361,31 +360,21 @@ def fetch_mvrv_history(days: int = 90, asset: str = "btc") -> dict:
                 row = cur.fetchone()
 
                 if not row or row[0] is None:
-                    return {"status": "error", "error": "no data", "series": [], "asset": asset}
+                    return {"status": "error", "error": "no data", "asset": asset}
 
                 mvrv_value = _safe_float(row[0])
                 pct_full = _safe_float(row[1]) if row[1] is not None else None
                 extreme = row[2] or "NONE"
 
-                # 拉历史序列（用于 percentile_of 兜底）
-                cur.execute("""
-                    SELECT cap_mvrv_cur FROM biz.cm_asset_onchain_daily
-                    WHERE cm_symbol = %s AND cap_mvrv_cur IS NOT NULL
-                    ORDER BY metric_date DESC LIMIT %s
-                """, (asset, days))
-                series = [_safe_float(r[0]) for r in cur.fetchall() if r[0] is not None]
-                series.reverse()  # 按时间正序
-
                 return {
                     "status": "ok",
-                    "series": series,
                     "value": mvrv_value,
                     "pct_full": pct_full,
                     "extreme": extreme,
                     "asset": asset,
                 }
     except Exception as e:
-        return {"status": "error", "error": str(e), "series": [], "asset": asset}
+        return {"status": "error", "error": str(e), "asset": asset}
 
 
 def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
@@ -2055,7 +2044,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P2-1 历史分位：拉取历史序列 ──
     fear_greed_hist = fetch_fear_greed_history(90)
-    mvrv_hist = fetch_mvrv_history(90, "btc")
+    mvrv_hist = fetch_mvrv_history("btc")
     stablecoin_flow_hist = fetch_stablecoin_netflow_history(30)
     cefi_hist = fetch_cefi_history(30)
     btc_dom_hist = fetch_btc_dominance_history(30)

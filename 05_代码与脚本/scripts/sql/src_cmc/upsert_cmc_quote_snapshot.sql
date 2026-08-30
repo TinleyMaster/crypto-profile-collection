@@ -13,9 +13,10 @@ INSERT INTO src_cmc.cmc_asset_quote_snapshot (
     percent_change_7d,
     percent_change_30d,
     market_cap_dominance,
-    raw_response_id
+    raw_response_id,
+    is_anomaly
 ) VALUES (
-    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 )
 ON CONFLICT (cmc_id, quote_time) DO UPDATE SET
     price_usd = EXCLUDED.price_usd,
@@ -30,4 +31,5 @@ ON CONFLICT (cmc_id, quote_time) DO UPDATE SET
     percent_change_7d = EXCLUDED.percent_change_7d,
     percent_change_30d = EXCLUDED.percent_change_30d,
     market_cap_dominance = EXCLUDED.market_cap_dominance,
-    raw_response_id = EXCLUDED.raw_response_id;
+    raw_response_id = EXCLUDED.raw_response_id,
+    is_anomaly = EXCLUDED.is_anomaly;

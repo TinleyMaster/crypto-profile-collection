@@ -172,6 +172,74 @@ def main() -> int:
                 else:
                     skipped_new += 1
 
+            # ═══ RC-1: 价格尖刺校验 ═══
+            # 为每个 cmc_id 获取参考价（近 7 天中位数），检测 >10× 偏离的异常
+            spike_threshold = 10.0  # 偏离倍数阈值
+            anomaly_count = 0
+            
+            with conn.cursor() as cur:
+                # 批量获取近 7 天的价格中位数作为参考
+                cur.execute("""
+                    SELECT asset_id, 
+                           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY price_usd) AS median_price
+                    FROM biz.asset_market_daily
+                    WHERE source = 'cmc'
+                      AND market_date >= CURRENT_DATE - INTERVAL '7 days'
+                      AND price_usd > 0
+                      AND (is_anomaly IS NOT TRUE OR is_anomaly IS NULL)
+                    GROUP BY asset_id
+                """)
+                median_map = {r['asset_id']: float(r['median_price']) for r in cur.fetchall() if r['median_price']}
+                
+                # 获取 asset_id 到 cmc_id 的映射
+                if median_map:
+                    cur.execute("""
+                        SELECT asm.source_asset_key::INT AS cmc_id, asm.asset_id
+                        FROM core.asset_source_map asm
+                        WHERE asm.source_code = 'cmc'
+                          AND asm.asset_id = ANY(%s)
+                    """, (list(median_map.keys()),))
+                    cmc_to_asset = {r['cmc_id']: r['asset_id'] for r in cur.fetchall()}
+                else:
+                    cmc_to_asset = {}
+
+            # 标记异常价格
+            for row in filtered_rows:
+                cmc_id = row["cmc_id"]
+                price = row.get("price_usd")
+                pct_24h = row.get("percent_change_24h")
+                
+                if price is None or price <= 0:
+                    row["is_anomaly"] = False
+                    continue
+                
+                asset_id = cmc_to_asset.get(cmc_id)
+                ref_price = median_map.get(asset_id) if asset_id else None
+                
+                # 如果没有历史中位数，用 24h 涨跌幅反推昨收价
+                if ref_price is None and pct_24h is not None and abs(pct_24h) < 200:
+                    # 涨跌幅在 ±200% 以内，反推昨收价
+                    if pct_24h != -100:
+                        ref_price = price / (1 + pct_24h / 100)
+                
+                is_anomaly = False
+                if ref_price and ref_price > 0:
+                    ratio = price / ref_price
+                    # 偏离 >10× 且 CMC 自身认为日变不过 ±200% → 价格异常
+                    if ratio > spike_threshold and abs(pct_24h or 0) < 200:
+                        is_anomaly = True
+                        anomaly_count += 1
+                        print(f"[spike] cmc_id={cmc_id} price={price:.6f} ref={ref_price:.6f} ratio={ratio:.1f}x → 标记异常", file=sys.stderr)
+                    elif ratio < 1/spike_threshold and abs(pct_24h or 0) < 200:
+                        is_anomaly = True
+                        anomaly_count += 1
+                        print(f"[spike] cmc_id={cmc_id} price={price:.6f} ref={ref_price:.6f} ratio={ratio:.4f}x → 标记异常", file=sys.stderr)
+                
+                row["is_anomaly"] = is_anomaly
+
+            if anomaly_count > 0:
+                print(f"[spike] 本轮检测到 {anomaly_count} 条异常价格，已标记 is_anomaly", file=sys.stderr)
+
             row_params = [
                 (
                     row["cmc_id"],
@@ -189,6 +257,7 @@ def main() -> int:
                     row["percent_change_30d"],
                     row["market_cap_dominance"],
                     primary_raw_id,
+                    row.get("is_anomaly", False),
                 )
                 for row in filtered_rows
             ]

@@ -106,6 +106,7 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                         q.volume_24h,
                         q.percent_change_24h AS change_24h,
                         q.percent_change_7d AS change_7d,
+                        q.is_anomaly,
                         ROW_NUMBER() OVER (
                             PARTITION BY asm.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
                             ORDER BY q.quote_time DESC
@@ -114,6 +115,7 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                     JOIN core.asset_source_map asm
                         ON asm.source_code = 'cmc'
                         AND asm.source_asset_key = q.cmc_id::text
+                    WHERE (q.is_anomaly IS NOT TRUE OR q.is_anomaly IS NULL)
                     {date_filter}
                 )
                 SELECT

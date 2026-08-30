@@ -33,30 +33,46 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: float) -> dict:
-    """检测并修复价格尖刺。"""
+    """检测并修复价格尖刺。使用迭代稳健中位数（trimmed median）避免聚类尖刺污染。"""
     with conn.cursor() as cur:
-        # 1. 计算每个资产近 30 天的价格中位数
-        asset_filter_medians = ""
-        asset_filter_anomalies = ""
+        # 1. 计算每个资产近 90 天的迭代稳健中位数
+        #    第一遍：全量中位数 m0；第二遍：剔除 [0.2*m0, 5*m0] 范围外的点后再取中位数 m1
+        asset_filter = ""
         params = []
         if asset_id:
-            asset_filter_medians = "AND d.asset_id = %s"
-            asset_filter_anomalies = "AND d.asset_id = %s"
+            asset_filter = "AND d.asset_id = %s"
             params = [asset_id, asset_id]
         
         cur.execute(f"""
-            WITH medians AS (
+            WITH full_median AS (
                 SELECT 
                     d.asset_id,
-                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY d.price_usd) AS median_price,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY d.price_usd) AS m0,
                     COUNT(*) AS total_days
                 FROM biz.asset_market_daily d
                 WHERE d.source_code = 'cmc'
-                  AND d.market_date >= CURRENT_DATE - INTERVAL '30 days'
+                  AND d.market_date >= CURRENT_DATE - INTERVAL '90 days'
                   AND d.price_usd > 0
                   AND (d.is_anomaly IS NOT TRUE OR d.is_anomaly IS NULL)
-                  {asset_filter_medians}
+                  {asset_filter}
                 GROUP BY d.asset_id
+                HAVING COUNT(*) >= 5
+            ),
+            trimmed_median AS (
+                SELECT 
+                    f.asset_id,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY d.price_usd) AS m1,
+                    f.total_days
+                FROM full_median f
+                JOIN biz.asset_market_daily d 
+                    ON d.asset_id = f.asset_id 
+                    AND d.source_code = 'cmc'
+                    AND d.market_date >= CURRENT_DATE - INTERVAL '90 days'
+                    AND d.price_usd > 0
+                    AND (d.is_anomaly IS NOT TRUE OR d.is_anomaly IS NULL)
+                    AND d.price_usd >= f.m0 * 0.2
+                    AND d.price_usd <= f.m0 * 5
+                GROUP BY f.asset_id, f.total_days
                 HAVING COUNT(*) >= 3
             ),
             anomalies AS (
@@ -64,18 +80,18 @@ def detect_and_fix_spikes(conn, execute: bool, asset_id: int | None, threshold: 
                     d.asset_id,
                     d.market_date,
                     d.price_usd,
-                    m.median_price,
-                    (d.price_usd / NULLIF(m.median_price, 0))::NUMERIC(12,2) AS ratio,
+                    t.m1 AS median_price,
+                    (d.price_usd / NULLIF(t.m1, 0))::NUMERIC(12,2) AS ratio,
                     a.canonical_symbol
                 FROM biz.asset_market_daily d
-                JOIN medians m ON m.asset_id = d.asset_id
+                JOIN trimmed_median t ON t.asset_id = d.asset_id
                 JOIN core.asset a ON a.asset_id = d.asset_id
                 WHERE d.source_code = 'cmc'
                   AND d.price_usd > 0
-                  AND m.median_price > 0
+                  AND t.m1 > 0
                   AND (d.is_anomaly IS NOT TRUE OR d.is_anomaly IS NULL)
-                  AND (d.price_usd / m.median_price > %s OR d.price_usd / m.median_price < 1.0/%s)
-                  {asset_filter_anomalies}
+                  AND (d.price_usd / t.m1 > %s OR d.price_usd / t.m1 < 1.0/%s)
+                  {asset_filter}
             )
             SELECT asset_id, market_date, price_usd, median_price, ratio, canonical_symbol
             FROM anomalies

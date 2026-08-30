@@ -7278,7 +7278,7 @@
                                 </div>`;
                             }).join('')}
                         </div>
-                        <div class="dim-conclusion">数据源: CoinMetrics Community（冻结 2026-05-24）</div>
+                        <div class="dim-conclusion">数据源: CoinMetrics Community（更新至 ${mvrvData.metric_date || '未知'}）</div>
                     </div>`;
                 }
             } catch (e) {
@@ -7312,7 +7312,7 @@
                                 </div>`;
                             }).join('')}
                         </div>
-                        <div class="dim-conclusion">绿=历史低位 | 红=历史过热 | 全部币种展示</div>
+                        <div class="dim-conclusion">绿=历史低位 | 红=历史过热 | 全部币种展示${actData.metric_date ? ' | 更新至 ' + actData.metric_date : ''}</div>
                     </div>`;
                 }
             } catch (e) {
@@ -7346,7 +7346,7 @@
                                 </div>`;
                             }).join('')}
                         </div>
-                        <div class="dim-conclusion">市值=单价×供应 | MVRV>1.5偏贵 &lt;0.8偏便宜 | 黄标=源数据口径不一致</div>
+                        <div class="dim-conclusion">市值=单价×供应 | MVRV>1.5偏贵 &lt;0.8偏便宜 | 黄标=源数据口径不一致${valData.metric_date ? ' | 更新至 ' + valData.metric_date : ''}</div>
                     </div>`;
                 }
             } catch (e) {

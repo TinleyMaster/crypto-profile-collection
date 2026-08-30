@@ -8945,7 +8945,10 @@ def get_cm_mvrv_dashboard() -> dict:
             rows = cur.fetchall()
 
     cm_mvrv = []
+    metric_date = None
     for r in rows:
+        if metric_date is None and r.get("metric_date"):
+            metric_date = r["metric_date"].isoformat() if hasattr(r["metric_date"], "isoformat") else str(r["metric_date"])
         cm_mvrv.append({
             "symbol": r["cm_symbol"],
             "value": float(r["cap_mvrv_cur"]) if r["cap_mvrv_cur"] is not None else None,
@@ -8953,7 +8956,7 @@ def get_cm_mvrv_dashboard() -> dict:
             "extreme": r["extreme"] or "NONE",
         })
 
-    return {"ok": True, "cm_mvrv": cm_mvrv}
+    return {"ok": True, "metric_date": metric_date, "cm_mvrv": cm_mvrv}
 
 
 def get_cm_activity_dashboard() -> dict:
@@ -9018,7 +9021,11 @@ def get_cm_activity_dashboard() -> dict:
             "signals": signals,
         })
 
-    return {"ok": True, "cm_activity": cm_activity}
+    metric_date = None
+    if rows and rows[0].get("metric_date"):
+        metric_date = rows[0]["metric_date"].isoformat() if hasattr(rows[0]["metric_date"], "isoformat") else str(rows[0]["metric_date"])
+
+    return {"ok": True, "metric_date": metric_date, "cm_activity": cm_activity}
 
 
 def get_cm_valuation_dashboard() -> dict:
@@ -9032,7 +9039,7 @@ def get_cm_valuation_dashboard() -> dict:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("""
                 SELECT cm_symbol, price_usd, cap_mrkt_cur_usd, sply_cur,
-                       cap_mrkt_est_usd, sply_ex_usd, cap_mvrv_cur
+                       cap_mrkt_est_usd, sply_ex_usd, cap_mvrv_cur, metric_date
                 FROM biz.cm_asset_onchain_daily
                 WHERE metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
                 ORDER BY cap_mrkt_cur_usd DESC NULLS LAST
@@ -9069,4 +9076,8 @@ def get_cm_valuation_dashboard() -> dict:
             "cap_consistency": cap_consistency,
         })
 
-    return {"ok": True, "cm_valuation": cm_valuation}
+    metric_date = None
+    if rows and rows[0].get("metric_date"):
+        metric_date = rows[0]["metric_date"].isoformat() if hasattr(rows[0]["metric_date"], "isoformat") else str(rows[0]["metric_date"])
+
+    return {"ok": True, "metric_date": metric_date, "cm_valuation": cm_valuation}

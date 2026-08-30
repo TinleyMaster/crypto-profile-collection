@@ -43,7 +43,7 @@ DEFAULT_COINS = [
 # 仅 btc/eth 有交易所 flow 数据
 FLOW_COINS = {"btc", "eth"}
 
-# CoinMetrics API 指标 → 基表列映射
+# CoinMetrics API 指标 → 基表列映射（UNIVERSAL 批，多币支持）
 METRIC_MAP = {
     "CapMVRVCur": "cap_mvrv_cur",
     "AdrActCnt": "adr_act_cnt",
@@ -51,6 +51,16 @@ METRIC_MAP = {
     "ROI1yr": "roi_1yr",
     "ROI30d": "roi_30d",
     "PriceUSD": "price_usd",
+    # ── 扩展指标（免费层实测可用）──
+    "SplyCur": "sply_cur",
+    "CapMrktCurUSD": "cap_mrkt_cur_usd",
+    "CapMrktEstUSD": "cap_mrkt_est_usd",
+    "SplyExUSD": "sply_ex_usd",
+    "TxCnt": "tx_cnt",
+    "AdrBalCnt": "adr_bal_cnt",
+    "FeeTotNtv": "fee_tot_native",
+    "IssTotNtv": "iss_tot_native",
+    "IssTotUSD": "iss_tot_usd",
 }
 
 # flow 指标（仅 btc/eth）
@@ -58,6 +68,12 @@ FLOW_METRIC_MAP = {
     "FlowInExUSD": "flow_in_ex_usd",
     "FlowOutExUSD": "flow_out_ex_usd",
 }
+
+# hashrate 指标（仅 btc）
+HASHRATE_METRIC_MAP = {
+    "HashRate": "hash_rate",
+}
+HASHRATE_COINS = {"btc"}
 
 # 起始日期（兜底；实际按币动态取 MAX(metric_date) WHERE cap_mvrv_cur IS NOT NULL 次日）
 BACKFILL_START = date(2026, 5, 24)
@@ -73,11 +89,17 @@ UPSERT_SQL = """
 INSERT INTO biz.cm_asset_onchain_daily (
     asset_id, cm_symbol, metric_date, price_usd, cap_mvrv_cur,
     adr_act_cnt, tx_tfr_cnt, flow_in_ex_usd, flow_out_ex_usd,
-    roi_30d, roi_1yr, source_cutoff
+    roi_30d, roi_1yr,
+    sply_cur, cap_mrkt_cur_usd, cap_mrkt_est_usd, sply_ex_usd,
+    tx_cnt, adr_bal_cnt, fee_tot_native, iss_tot_native, iss_tot_usd,
+    hash_rate, source_cutoff
 ) VALUES (
     %(asset_id)s, %(cm_symbol)s, %(metric_date)s, %(price_usd)s, %(cap_mvrv_cur)s,
     %(adr_act_cnt)s, %(tx_tfr_cnt)s, %(flow_in_ex_usd)s, %(flow_out_ex_usd)s,
-    %(roi_30d)s, %(roi_1yr)s, %(source_cutoff)s
+    %(roi_30d)s, %(roi_1yr)s,
+    %(sply_cur)s, %(cap_mrkt_cur_usd)s, %(cap_mrkt_est_usd)s, %(sply_ex_usd)s,
+    %(tx_cnt)s, %(adr_bal_cnt)s, %(fee_tot_native)s, %(iss_tot_native)s, %(iss_tot_usd)s,
+    %(hash_rate)s, %(source_cutoff)s
 )
 ON CONFLICT (asset_id, metric_date) DO UPDATE SET
     price_usd = EXCLUDED.price_usd,
@@ -87,7 +109,17 @@ ON CONFLICT (asset_id, metric_date) DO UPDATE SET
     flow_in_ex_usd = EXCLUDED.flow_in_ex_usd,
     flow_out_ex_usd = EXCLUDED.flow_out_ex_usd,
     roi_30d = EXCLUDED.roi_30d,
-    roi_1yr = EXCLUDED.roi_1yr
+    roi_1yr = EXCLUDED.roi_1yr,
+    sply_cur = EXCLUDED.sply_cur,
+    cap_mrkt_cur_usd = EXCLUDED.cap_mrkt_cur_usd,
+    cap_mrkt_est_usd = EXCLUDED.cap_mrkt_est_usd,
+    sply_ex_usd = EXCLUDED.sply_ex_usd,
+    tx_cnt = EXCLUDED.tx_cnt,
+    adr_bal_cnt = EXCLUDED.adr_bal_cnt,
+    fee_tot_native = EXCLUDED.fee_tot_native,
+    iss_tot_native = EXCLUDED.iss_tot_native,
+    iss_tot_usd = EXCLUDED.iss_tot_usd,
+    hash_rate = EXCLUDED.hash_rate
 """
 
 # 查询 asset_id 映射
@@ -152,11 +184,15 @@ def fetch_asset_metrics(
     metrics: list[str],
     start_date: date,
     end_date: date,
+    metric_map: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     """从 CoinMetrics API 拉取单币多指标日级数据。
 
     返回 {metric_date_str: {metric_col: value, ...}}
+    metric_map: 自定义 CM指标→DB列 映射（默认用 METRIC_MAP + FLOW_METRIC_MAP）
     """
+    if metric_map is None:
+        metric_map = {**METRIC_MAP, **FLOW_METRIC_MAP}
     metrics_param = ",".join(metrics)
     result: dict[str, dict] = {}
 
@@ -185,7 +221,7 @@ def fetch_asset_metrics(
             day_str = ts[:10]
             if day_str not in result:
                 result[day_str] = {}
-            for cm_key, db_col in {**METRIC_MAP, **FLOW_METRIC_MAP}.items():
+            for cm_key, db_col in metric_map.items():
                 if cm_key in row:
                     val = safe_float(row[cm_key])
                     if val is not None:
@@ -232,7 +268,7 @@ def backfill_coin(
     end_date: date,
     dry_run: bool,
 ) -> dict:
-    """回填单币数据。返回统计信息。"""
+    """回填单币数据。三批 fetch（UNIVERSAL / FLOW / HASHRATE），合并 day_data。"""
     stats = {
         "symbol": symbol,
         "rows_fetched": 0,
@@ -247,16 +283,46 @@ def backfill_coin(
         stats["error"] = f"无 asset_id 映射"
         return stats
 
-    # 确定指标列表
-    metrics = list(METRIC_MAP.keys())
-    if symbol in FLOW_COINS:
-        metrics.extend(FLOW_METRIC_MAP.keys())
+    # 三批 fetch，各自独立容错
+    day_data: dict[str, dict] = {}
 
-    # 拉取数据
-    print(f"  拉取 {symbol} ({start_date} ~ {end_date})...", end=" ", flush=True)
-    day_data = fetch_asset_metrics(symbol, metrics, start_date, end_date)
+    # 批次 1: UNIVERSAL（多币通用）
+    universal_metrics = list(METRIC_MAP.keys())
+    try:
+        print(f"  拉取 UNIVERSAL ({start_date}~{end_date})...", end=" ", flush=True)
+        data1 = fetch_asset_metrics(symbol, universal_metrics, start_date, end_date, METRIC_MAP)
+        for d, vals in data1.items():
+            day_data.setdefault(d, {}).update(vals)
+        print(f"{len(data1)} 天")
+    except Exception as e:
+        print(f"失败: {e}")
+
+    # 批次 2: FLOW（仅 btc/eth）
+    if symbol in FLOW_COINS:
+        flow_metrics = list(FLOW_METRIC_MAP.keys())
+        try:
+            print(f"  拉取 FLOW ({start_date}~{end_date})...", end=" ", flush=True)
+            data2 = fetch_asset_metrics(symbol, flow_metrics, start_date, end_date, FLOW_METRIC_MAP)
+            for d, vals in data2.items():
+                day_data.setdefault(d, {}).update(vals)
+            print(f"{len(data2)} 天")
+        except Exception as e:
+            print(f"失败: {e}")
+
+    # 批次 3: HASHRATE（仅 btc）
+    if symbol in HASHRATE_COINS:
+        hr_metrics = list(HASHRATE_METRIC_MAP.keys())
+        try:
+            print(f"  拉取 HASHRATE ({start_date}~{end_date})...", end=" ", flush=True)
+            data3 = fetch_asset_metrics(symbol, hr_metrics, start_date, end_date, HASHRATE_METRIC_MAP)
+            for d, vals in data3.items():
+                day_data.setdefault(d, {}).update(vals)
+            print(f"{len(data3)} 天")
+        except Exception as e:
+            print(f"失败: {e}")
+
     stats["rows_fetched"] = len(day_data)
-    print(f"{len(day_data)} 天")
+    print(f"  合计 {len(day_data)} 天")
 
     if not day_data or dry_run:
         return stats
@@ -277,6 +343,17 @@ def backfill_coin(
             "flow_out_ex_usd": vals.get("flow_out_ex_usd"),
             "roi_30d": vals.get("roi_30d"),
             "roi_1yr": vals.get("roi_1yr"),
+            # ── 扩展指标 ──
+            "sply_cur": vals.get("sply_cur"),
+            "cap_mrkt_cur_usd": vals.get("cap_mrkt_cur_usd"),
+            "cap_mrkt_est_usd": vals.get("cap_mrkt_est_usd"),
+            "sply_ex_usd": vals.get("sply_ex_usd"),
+            "tx_cnt": safe_int(vals.get("tx_cnt")) if vals.get("tx_cnt") is not None else None,
+            "adr_bal_cnt": safe_int(vals.get("adr_bal_cnt")) if vals.get("adr_bal_cnt") is not None else None,
+            "fee_tot_native": vals.get("fee_tot_native"),
+            "iss_tot_native": vals.get("iss_tot_native"),
+            "iss_tot_usd": vals.get("iss_tot_usd"),
+            "hash_rate": vals.get("hash_rate"),
             "source_cutoff": source_cutoff,
         }
         batch.append(record)
@@ -363,13 +440,33 @@ def main() -> int:
 
     all_stats = []
     if dry_run:
-        # dry-run 不连库，仅预览拉取
+        # dry-run 不连库，三批 fetch 预览
         for i, sym in enumerate(coins, 1):
             print(f"[{i}/{len(coins)}] {sym.upper()}")
-            metrics = list(METRIC_MAP.keys())
+            day_data: dict[str, dict] = {}
+            # UNIVERSAL
+            try:
+                data1 = fetch_asset_metrics(sym, list(METRIC_MAP.keys()), start_date, end_date, METRIC_MAP)
+                for d, vals in data1.items():
+                    day_data.setdefault(d, {}).update(vals)
+            except Exception:
+                pass
+            # FLOW
             if sym in FLOW_COINS:
-                metrics.extend(FLOW_METRIC_MAP.keys())
-            day_data = fetch_asset_metrics(sym, metrics, start_date, end_date)
+                try:
+                    data2 = fetch_asset_metrics(sym, list(FLOW_METRIC_MAP.keys()), start_date, end_date, FLOW_METRIC_MAP)
+                    for d, vals in data2.items():
+                        day_data.setdefault(d, {}).update(vals)
+                except Exception:
+                    pass
+            # HASHRATE
+            if sym in HASHRATE_COINS:
+                try:
+                    data3 = fetch_asset_metrics(sym, list(HASHRATE_METRIC_MAP.keys()), start_date, end_date, HASHRATE_METRIC_MAP)
+                    for d, vals in data3.items():
+                        day_data.setdefault(d, {}).update(vals)
+                except Exception:
+                    pass
             all_stats.append({
                 "symbol": sym, "rows_fetched": len(day_data),
                 "rows_upserted": len(day_data), "cutoff_updated": False, "error": None,

@@ -1998,6 +1998,16 @@ def api_cm_activity():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/cm/valuation")
+def api_cm_valuation():
+    """CM 估值锚仪表盘（市值/供应/价格 + 一致性校验）。"""
+    try:
+        data = _get_db_stats().get_cm_valuation_dashboard()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

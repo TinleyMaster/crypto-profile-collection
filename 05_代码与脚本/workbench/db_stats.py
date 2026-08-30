@@ -8925,3 +8925,55 @@ def get_cm_activity_dashboard() -> dict:
         })
 
     return {"ok": True, "cm_activity": cm_activity}
+
+
+def get_cm_valuation_dashboard() -> dict:
+    """CM 估值锚仪表盘。读取 cm_asset_onchain_daily 最新日各币市值/供应/价格 + 一致性校验。
+    返回 {ok, cm_valuation: [{symbol, price_usd, market_cap, supply, market_cap_est, supply_ex, mvrv, cap_gap_pct, cap_consistency}]}。"""
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT cm_symbol, price_usd, cap_mrkt_cur_usd, sply_cur,
+                       cap_mrkt_est_usd, sply_ex_usd, cap_mvrv_cur
+                FROM biz.cm_asset_onchain_daily
+                WHERE metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
+                  AND cap_mrkt_cur_usd IS NOT NULL
+                ORDER BY cap_mrkt_cur_usd DESC
+            """)
+            rows = cur.fetchall()
+
+    cm_valuation = []
+    for r in rows:
+        price = float(r["price_usd"]) if r["price_usd"] is not None else None
+        mcap = float(r["cap_mrkt_cur_usd"]) if r["cap_mrkt_cur_usd"] is not None else None
+        supply = float(r["sply_cur"]) if r["sply_cur"] is not None else None
+        mcap_est = float(r["cap_mrkt_est_usd"]) if r["cap_mrkt_est_usd"] is not None else None
+        supply_ex = float(r["sply_ex_usd"]) if r["sply_ex_usd"] is not None else None
+        mvrv = float(r["cap_mvrv_cur"]) if r["cap_mvrv_cur"] is not None else None
+
+        # 一致性校验：implied_cap = price × supply
+        cap_gap_pct = None
+        cap_consistency = "unknown"
+        if price is not None and supply is not None and supply > 0 and mcap is not None:
+            implied_cap = price * supply
+            if implied_cap > 0:
+                cap_gap_pct = round((mcap - implied_cap) / implied_cap * 100, 2)
+                cap_consistency = "ok" if abs(cap_gap_pct) <= 5 else "mismatch"
+
+        cm_valuation.append({
+            "symbol": r["cm_symbol"],
+            "price_usd": price,
+            "market_cap": mcap,
+            "supply": supply,
+            "market_cap_est": mcap_est,
+            "supply_ex": supply_ex,
+            "mvrv": mvrv,
+            "cap_gap_pct": cap_gap_pct,
+            "cap_consistency": cap_consistency,
+        })
+
+    return {"ok": True, "cm_valuation": cm_valuation}

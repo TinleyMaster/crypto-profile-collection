@@ -7319,6 +7319,40 @@
                 // 活跃度加载失败不阻塞大盘
             }
             
+            // CM 估值锚卡
+            try {
+                const valRes = await fetch('/api/cm/valuation');
+                const valData = await valRes.json();
+                if (valData.ok && valData.cm_valuation && valData.cm_valuation.length) {
+                    const valList = valData.cm_valuation;
+                    const hasMismatch = valList.some(v => v.cap_consistency === 'mismatch');
+                    html += `<div class="dim-card ${hasMismatch ? 'extreme-high' : ''}">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">💎</span>
+                            <span class="dim-card-title">估值锚</span>
+                            <span class="dim-card-score neutral">${valList.length} 币</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${valList.map(v => {
+                                const priceTxt = v.price_usd != null ? (v.price_usd >= 1 ? '$' + v.price_usd.toFixed(2) : '$' + v.price_usd.toPrecision(4)) : '-';
+                                const mcapTxt = v.market_cap != null ? (v.market_cap >= 1e12 ? '$' + (v.market_cap / 1e12).toFixed(2) + 'T' : v.market_cap >= 1e9 ? '$' + (v.market_cap / 1e9).toFixed(2) + 'B' : '$' + (v.market_cap / 1e6).toFixed(0) + 'M') : '-';
+                                const supplyTxt = v.supply != null ? (v.supply >= 1e9 ? (v.supply / 1e9).toFixed(1) + 'B' : v.supply >= 1e6 ? (v.supply / 1e6).toFixed(0) + 'M' : v.supply.toFixed(0)) : '-';
+                                const mvrvCls = v.mvrv != null ? (v.mvrv > 1.5 ? 'extreme-high' : v.mvrv < 0.8 ? 'extreme-low' : '') : '';
+                                const mvrvTxt = v.mvrv != null ? v.mvrv.toFixed(2) : '-';
+                                const mismatchTag = v.cap_consistency === 'mismatch' ? '<span style="color:#f0b90b;font-size:10px;margin-left:4px">⚠ 市值≠单价×供应</span>' : '';
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${v.symbol.toUpperCase()} <small style="color:#6b7280">${priceTxt} · 供应${supplyTxt}</small>${mismatchTag}</span>
+                                    <span class="dim-metric-val ${mvrvCls}">${mcapTxt} · MVRV ${mvrvTxt}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">市值=单价×供应 | MVRV>1.5偏贵 &lt;0.8偏便宜 | 黄标=源数据口径不一致</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // 估值锚加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

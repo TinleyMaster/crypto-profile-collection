@@ -652,13 +652,6 @@ TASK_DEFS = {
         "default_args": [],
         "category": "维护",
     },
-    "probe_no_content_dryrun": {
-        "name": "无正文链接甄别（预览）",
-        "description": "探测无正文链接的 HTTP 状态，区分死链/反爬/JS渲染/可恢复，仅预览不删除",
-        "script": "probe_no_content_links.py",
-        "default_args": ["--dry-run"],
-        "category": "维护",
-    },
     "probe_no_content_execute": {
         "name": "无正文链接甄别（删死链）",
         "description": "探测无正文链接并删除真死链（404/域名失效），保留反爬/JS渲染链接供重抓",
@@ -667,47 +660,12 @@ TASK_DEFS = {
         "category": "维护",
     },
 
-    # ═══ CM 链上指标：主流币历史极值分位 ═══
-    "cm_filter_major": {
-        "name": "CM 筛选达标主流币",
-        "description": "扫描 CoinMetrics Community 档 CSV，筛选历史≥730d且关键列非空率≥80%的达标主流币",
-        "script": "filter_cm_major_coins.py",
-        "default_args": ["--output", "cm_major_coins.json"],
-        "category": "CM 链上指标",
-    },
-    "cm_ingest_onchain": {
-        "name": "CM 入库链上日频指标",
-        "description": "从 CoinMetrics GitHub 下载 raw CSV，解析后 upsert 到 biz.cm_asset_onchain_daily",
-        "script": "ingest_cm_onchain_daily.py",
-        "default_args": [],
-        "category": "CM 链上指标",
-    },
+    # ═══ CM 链上指标：日常增量与验证 ═══
     "cm_validate_onchain": {
         "name": "CM 验证链上指标",
         "description": "验证入库结果：row count、MVRV 极值抽查、空值处理",
         "script": "validate_cm_onchain.py",
         "default_args": [],
-        "category": "CM 链上指标",
-    },
-    "cm_cleanup": {
-        "name": "CM 清理不达标币种",
-        "description": "清理 sol/atom/dot/avax/near/fil/op/apt/arb，修复 matic 截止日期，保留 16 币（15 白名单 + matic）",
-        "script": "cm_cleanup_onchain.py",
-        "default_args": ["--execute"],
-        "category": "CM 链上指标",
-    },
-    "cm_backfill": {
-        "name": "CM 回填链上指标缺口",
-        "description": "从 CoinMetrics Community API 回填 2026-05-25~最新完整日的链上指标缺口（14 币，约 97 天）",
-        "script": "backfill_cm_onchain.py",
-        "default_args": [],
-        "category": "CM 链上指标",
-    },
-    "cm_backfill_dry": {
-        "name": "CM 回填缺口（预览）",
-        "description": "预览回填范围和数据量，不写入数据库",
-        "script": "backfill_cm_onchain.py",
-        "default_args": ["--dry-run"],
         "category": "CM 链上指标",
     },
     "cm_incremental": {

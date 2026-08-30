@@ -118,6 +118,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # ═══ 催化剂模块（全链路合并任务）═══
     # P1-2: 催化剂降频为每12h（DeepSeek 额度有限）
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）"),
+
+    # ═══ CM / OBM 链上指标定时调度 ═══
+    # OBM 数据源活跃但指标慢变（源 CSV 滞后 1 天），降为周一三五；
+    # CM MVRV 为实时估值信号，保持每日 T-1 增量。
+    ("cm_obm_download", "0 4 * * 1,3,5", "download_obm_data.py", ["--out", "/app/data_external/obm"], "OBM 从 GitHub 下载数据（周一三五 04:00）"),
+    ("cm_obm_ingest", "30 4 * * 1,3,5", "ingest_obm_btc_daily.py", [], "OBM BTC 链上指标入库（周一三五 04:30）"),
+    ("cm_incremental", "30 6 * * *", "backfill_cm_onchain.py", ["--incremental"], "CM 链上指标 T-1 增量拉取（每日 06:30）"),
+    ("cm_validate_onchain", "0 7 * * *", "validate_cm_onchain.py", [], "CM 链上指标入库验证（每日 07:00）"),
 ]
 
 

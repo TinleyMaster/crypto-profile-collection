@@ -3420,8 +3420,8 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
 def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
     """从 CM 交易所原生净流获取基准对照（仅 BTC/ETH 有值）。
 
-    先按 asset_id 精确查找；无数据时回退按 cm_symbol='btc'/'eth' 查找
-    （解决 ETH 主 id ≠ CM 数据 id 的映射问题）。
+    先按 asset_id 精确查找；无数据时回退按同一 cm_symbol 查找
+    （解决 ETH 主 id ≠ CM 数据 id 的映射问题，避免 BTC/ETH 混回）。
     """
     try:
         # 1. 直接按 asset_id 查
@@ -3433,17 +3433,23 @@ def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
         """, (asset_id,))
         rows = cur.fetchall()
 
-        # 2. 无数据时回退按 cm_symbol 查（BTC/ETH 映射兜底）
+        # 2. 无数据时回退按同一 cm_symbol 查（精确回退，避免混回）
         if not rows:
+            # 先查 asset_id 对应的 cm_symbol
             cur.execute("""
-                SELECT metric_date, flow_in_ex_usd, flow_out_ex_usd
-                FROM biz.cm_asset_onchain_daily
-                WHERE cm_symbol IN ('btc', 'eth')
-                  AND flow_in_ex_usd IS NOT NULL
-                  AND asset_id != %s
-                ORDER BY metric_date DESC LIMIT 7
+                SELECT cm_symbol FROM biz.cm_asset_onchain_daily
+                WHERE asset_id = %s LIMIT 1
             """, (asset_id,))
-            rows = cur.fetchall()
+            sym_row = cur.fetchone()
+            if sym_row and sym_row["cm_symbol"]:
+                target_sym = sym_row["cm_symbol"]
+                cur.execute("""
+                    SELECT metric_date, flow_in_ex_usd, flow_out_ex_usd
+                    FROM biz.cm_asset_onchain_daily
+                    WHERE cm_symbol = %s AND flow_in_ex_usd IS NOT NULL
+                    ORDER BY metric_date DESC LIMIT 7
+                """, (target_sym,))
+                rows = cur.fetchall()
 
         if not rows:
             return {"status": "unavailable", "note": "CM 免费层净流仅 BTC/ETH"}

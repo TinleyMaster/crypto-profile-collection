@@ -703,6 +703,27 @@ TASK_DEFS = {
         "default_args": ["--execute"],
         "category": "CM 链上指标",
     },
+    "cm_backfill": {
+        "name": "CM 回填链上指标缺口",
+        "description": "从 CoinMetrics Community API 回填 2026-05-25~最新完整日的链上指标缺口（14 币，约 97 天）",
+        "script": "backfill_cm_onchain.py",
+        "default_args": [],
+        "category": "CM 链上指标",
+    },
+    "cm_backfill_dry": {
+        "name": "CM 回填缺口（预览）",
+        "description": "预览回填范围和数据量，不写入数据库",
+        "script": "backfill_cm_onchain.py",
+        "default_args": ["--dry-run"],
+        "category": "CM 链上指标",
+    },
+    "cm_incremental": {
+        "name": "CM 增量拉取 T-1",
+        "description": "增量模式：仅拉取昨日完整日数据，保持链上指标持续更新",
+        "script": "backfill_cm_onchain.py",
+        "default_args": ["--incremental"],
+        "category": "CM 链上指标",
+    },
     # ═══ OBM 链上指标 ═══
     "obm_download": {
         "name": "OBM 从 GitHub 下载数据",

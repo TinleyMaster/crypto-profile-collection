@@ -3418,8 +3418,13 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
 
 
 def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
-    """从 CM 交易所原生净流获取基准对照（仅 BTC/ETH 有值）。"""
+    """从 CM 交易所原生净流获取基准对照（仅 BTC/ETH 有值）。
+
+    先按 asset_id 精确查找；无数据时回退按 cm_symbol='btc'/'eth' 查找
+    （解决 ETH 主 id ≠ CM 数据 id 的映射问题）。
+    """
     try:
+        # 1. 直接按 asset_id 查
         cur.execute("""
             SELECT metric_date, flow_in_ex_usd, flow_out_ex_usd
             FROM biz.cm_asset_onchain_daily
@@ -3427,6 +3432,19 @@ def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
             ORDER BY metric_date DESC LIMIT 7
         """, (asset_id,))
         rows = cur.fetchall()
+
+        # 2. 无数据时回退按 cm_symbol 查（BTC/ETH 映射兜底）
+        if not rows:
+            cur.execute("""
+                SELECT metric_date, flow_in_ex_usd, flow_out_ex_usd
+                FROM biz.cm_asset_onchain_daily
+                WHERE cm_symbol IN ('btc', 'eth')
+                  AND flow_in_ex_usd IS NOT NULL
+                  AND asset_id != %s
+                ORDER BY metric_date DESC LIMIT 7
+            """, (asset_id,))
+            rows = cur.fetchall()
+
         if not rows:
             return {"status": "unavailable", "note": "CM 免费层净流仅 BTC/ETH"}
         latest = rows[0]
@@ -3510,6 +3528,9 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
             """, (asset_id,))
             total_transfers = cur.fetchone()["cnt"]
 
+            # CM 基准：在 with 块内计算，避免 cursor 作用域问题
+            cm_benchmark = _get_cm_netflow_benchmark(cur, asset_id)
+
             if total_transfers == 0:
                 return {
                     "ok": True,
@@ -3522,7 +3543,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     "outflow_24h_usd": None,
                     "by_exchange": [],
                     "top_transfers": [],
-                    "cm_benchmark": _get_cm_netflow_benchmark(cur, asset_id),
+                    "cm_benchmark": cm_benchmark,
                 }
 
             # 24h 净流入
@@ -3618,7 +3639,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
         "by_exchange": by_exchange,
         "top_transfers": top_transfers,
         "total_transfers": total_transfers,
-        "cm_benchmark": _get_cm_netflow_benchmark(cur, asset_id),
+        "cm_benchmark": cm_benchmark,
     }
 
 
@@ -3708,6 +3729,9 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
                 for row in cur.fetchall()
             ]
 
+            # CM 基准：在 with 块内计算（BTC asset_id=26195）
+            cm_benchmark = _get_cm_netflow_benchmark(cur, 26195)
+
     return {
         "ok": True,
         "has_data": r["cnt"] > 0,
@@ -3716,7 +3740,7 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
         "outflow_usd": round(outflow, 2),
         "covered_transfers": r["cnt"],
         "by_exchange": by_exchange,
-        "cm_benchmark": _get_cm_netflow_benchmark(cur, 26195),
+        "cm_benchmark": cm_benchmark,
     }
 
 

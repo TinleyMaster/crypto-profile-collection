@@ -6990,6 +6990,45 @@
                 <div class="dim-conclusion">覆盖度 ${(structure.available_weight * 100).toFixed(0)}%${structureErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + structureErrorCount + ' 项数据异常</span>' : ''}</div>
             </div>`;
             
+            // BTC 周期定位卡
+            const btcCycle = data.btc_cycle || {};
+            if (btcCycle.status === 'ok') {
+                const phaseColors = { accumulation: '#10b981', neutral: '#6b7280', distribution: '#ef4444' };
+                const phaseLabels = { accumulation: '积累期', neutral: '中性', distribution: '顶部风险' };
+                const phaseIcons = { accumulation: '🟢', neutral: '⚪', distribution: '🔴' };
+                const pc = btcCycle.phase || 'neutral';
+                const phaseColor = phaseColors[pc] || '#6b7280';
+                const phaseLabel = phaseLabels[pc] || btcCycle.phase_label || '未知';
+                const phaseIcon = phaseIcons[pc] || '⚪';
+                const signals = (btcCycle.signals || []).map(s => `<span style="color:#9ca3af;font-size:0.8em">• ${s}</span>`).join('<br>');
+                html += `<div class="dim-card">
+                    <div class="dim-card-header">
+                        <span class="dim-card-icon">🔄</span>
+                        <span class="dim-card-title">BTC 周期定位</span>
+                        <span class="dim-card-score" style="color:${phaseColor};font-weight:700">${phaseIcon} ${phaseLabel}</span>
+                    </div>
+                    <div class="dim-metrics sub-score-list">
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">Liveliness</span>
+                            <span class="sub-score-value">${btcCycle.liveliness != null ? btcCycle.liveliness.toFixed(3) : 'N/A'}${btcCycle.liveliness_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.liveliness_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
+                        </div>
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">Dormancy</span>
+                            <span class="sub-score-value">${btcCycle.dormancy != null ? btcCycle.dormancy.toFixed(1) + ' 天' : 'N/A'}${btcCycle.dormancy_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.dormancy_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
+                        </div>
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">老币 CDD 占比</span>
+                            <span class="sub-score-value">${btcCycle.old_coin_cdd_share != null ? (btcCycle.old_coin_cdd_share * 100).toFixed(1) + '%' : 'N/A'}</span>
+                        </div>
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">算力</span>
+                            <span class="sub-score-value">${btcCycle.hashrate_ehs != null ? btcCycle.hashrate_ehs.toFixed(1) + ' EH/s' : 'N/A'}</span>
+                        </div>
+                    </div>
+                    ${signals ? '<div class="dim-conclusion" style="line-height:1.6">' + signals + '</div>' : ''}
+                </div>`;
+            }
+
             // 板块资金净流入卡（P1-1：7d 叙事榜 + 链榜）- P2-5: 独占整行 full-width
             const dim5 = (data.dimensions || {})['5板块'] || {};
             const dim5data = dim5.data || {};

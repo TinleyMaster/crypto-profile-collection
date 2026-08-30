@@ -2084,6 +2084,13 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     # ── P1-2 背离检测（价格/OI、价格/funding、价格/稳定币、BTC/纳指） ──
     divergence = build_divergence_signals()
 
+    # ── BTC 周期定位（OBM 链上指标） ──
+    try:
+        from db_stats import get_btc_cycle_position
+        btc_cycle = get_btc_cycle_position()
+    except Exception:
+        btc_cycle = {"status": "error", "phase": "unknown", "phase_label": "数据不可用", "signals": []}
+
     # ── 计算子分 ──
     emotion_subscore = compute_emotion_subscore(
         fear_greed=fear_greed,
@@ -2163,6 +2170,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         "event_calendar": event_calendar,
         "divergence_signals": divergence,
         "onchain_anomaly_signals": onchain,
+        "btc_cycle": btc_cycle,
         "fetched_at": int(now),
     }
 

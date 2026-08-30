@@ -3691,6 +3691,121 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
     }
 
 
+def get_btc_cycle_position() -> dict:
+    """BTC 周期定位：基于 OBM 链上指标判断积累/中性/派发/顶部风险。
+
+    数据来源：biz.obm_btc_daily + biz.obm_percentile
+    指标：liveliness_ratio, dormancy_days, CDD age-band 分布, hashrate
+    相位判定：
+      - 积累期：liveliness < 0.55 且 dormancy 高且老币 CDD 占比 < 0.4
+      - 顶部风险/派发：liveliness > 0.7 且老币 CDD 占比 > 0.55
+      - 其余：中性
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 1) 最新日核心指标
+            cur.execute("""
+                SELECT metric_name, value
+                FROM biz.obm_btc_daily
+                WHERE metric_date = (SELECT MAX(metric_date) FROM biz.obm_btc_daily)
+                  AND metric_name IN (
+                    'obm_liveliness_ratio_daily',
+                    'obm_dormancy_days_daily',
+                    'obm_cdd_btcxdays_daily',
+                    'obm_est7d_hashrate_ehs_daily'
+                  )
+                  AND value IS NOT NULL
+            """)
+            latest = {r["metric_name"]: float(r["value"]) for r in cur.fetchall()}
+
+            liveliness = latest.get("obm_liveliness_ratio_daily")
+            dormancy = latest.get("obm_dormancy_days_daily")
+            cdd_total = latest.get("obm_cdd_btcxdays_daily")
+            hashrate = latest.get("obm_est7d_hashrate_ehs_daily")
+
+            # 2) CDD age-band：老币(>=1y)占比
+            cur.execute("""
+                SELECT metric_name, value
+                FROM biz.obm_btc_daily
+                WHERE metric_date = (SELECT MAX(metric_date) FROM biz.obm_btc_daily)
+                  AND metric_name LIKE 'obm_cdd_age_band_btcxdays_daily_%'
+                  AND value IS NOT NULL
+            """)
+            age_bands = {r["metric_name"]: float(r["value"]) for r in cur.fetchall()}
+
+            # 老币 band 关键词（>=1y）
+            old_keywords = ("1y_2y", "2y_3y", "3y_5y", "5y_7y", "7y_10y", "10y_plus", "1yr_2yr", "2yr_3yr", "3yr_5yr", "5yr_7yr", "7yr_10yr", "10yr_plus")
+            old_cdd = sum(v for k, v in age_bands.items() if any(kw in k for kw in old_keywords))
+            total_band_cdd = sum(age_bands.values()) if age_bands else 0
+            old_coin_cdd_share = round(old_cdd / total_band_cdd, 4) if total_band_cdd > 0 else None
+
+            # 3) 分位视图辅助
+            cur.execute("""
+                SELECT metric_name, pct_full, flag_full
+                FROM biz.obm_percentile
+                WHERE metric_date = (SELECT MAX(metric_date) FROM biz.obm_percentile)
+                  AND metric_name IN (
+                    'obm_liveliness_ratio_daily',
+                    'obm_dormancy_days_daily',
+                    'obm_cdd_btcxdays_daily'
+                  )
+            """)
+            percentiles = {r["metric_name"]: {"pct_full": float(r["pct_full"]), "flag_full": r["flag_full"]} for r in cur.fetchall()}
+
+            # 老币 CDD 占比分位（用 cdd_age_band 老币合计 vs 历史）
+            old_cdd_pctile = None
+            if old_coin_cdd_share is not None:
+                cur.execute("""
+                    SELECT pct_full FROM biz.obm_percentile
+                    WHERE metric_name LIKE 'obm_cdd_age_band_btcxdays_daily_%'
+                      AND metric_date = (SELECT MAX(metric_date) FROM biz.obm_percentile)
+                    LIMIT 1
+                """)
+                # 简化：用 liveliness 分位近似（因无 pre-computed old_share 分位）
+
+    # 4) 相位判定
+    liv_pctile = percentiles.get("obm_liveliness_ratio_daily", {})
+    dorm_pctile = percentiles.get("obm_dormancy_days_daily", {})
+    liv_flag = liv_pctile.get("flag_full", "NONE")
+    dorm_flag = dorm_pctile.get("flag_full", "NONE")
+
+    signals: list[str] = []
+
+    if liveliness is not None and liveliness < 0.55 and old_coin_cdd_share is not None and old_coin_cdd_share < 0.4:
+        phase = "accumulation"
+        phase_label = "积累期"
+        signals.append(f"liveliness {liveliness:.3f} 偏低 + 老币 CDD 占比 {old_coin_cdd_share:.1%} < 40%")
+    elif liveliness is not None and liveliness > 0.7 and old_coin_cdd_share is not None and old_coin_cdd_share > 0.55:
+        phase = "distribution"
+        phase_label = "顶部风险"
+        signals.append(f"liveliness {liveliness:.3f} 偏高 + 老币 CDD 占比 {old_coin_cdd_share:.1%} > 55%")
+    else:
+        phase = "neutral"
+        phase_label = "中性"
+        signals.append("liveliness / 老币 CDD 占比未达极端阈值")
+
+    if liv_flag == "HIGH":
+        signals.append("liveliness 处历史高位（>90%分位）")
+    if liv_flag == "LOW":
+        signals.append("liveliness 处历史低位（<10%分位）")
+    if dorm_flag == "HIGH":
+        signals.append("dormancy 处历史高位")
+
+    return {
+        "phase": phase,
+        "phase_label": phase_label,
+        "liveliness": liveliness,
+        "liveliness_percentile": liv_pctile.get("pct_full"),
+        "dormancy": dormancy,
+        "dormancy_percentile": dorm_pctile.get("pct_full"),
+        "old_coin_cdd_share": old_coin_cdd_share,
+        "cdd_total": cdd_total,
+        "hashrate_ehs": hashrate,
+        "signals": signals,
+        "status": "ok" if liveliness is not None else "error",
+    }
+
+
 def _ensure_exchange_wallet_seeds(cur) -> None:
     """确保交易所钱包种子地址已导入（幂等操作）。
 

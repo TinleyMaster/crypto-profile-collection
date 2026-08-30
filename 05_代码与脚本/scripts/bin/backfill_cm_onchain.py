@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""回填 CoinMetrics 链上指标缺口（2026-05-25 ~ 最新完整日）。
+"""回填 CoinMetrics 链上指标缺口（按币动态取起始日 ~ 最新完整日）。
 
 从 CoinMetrics Community API (REST) 拉取日级指标，UPSERT 到 biz.cm_asset_onchain_daily。
 支持一次性回填 + 每日增量模式。
+起始日期按币动态取库内 MAX(metric_date) WHERE cap_mvrv_cur IS NOT NULL 次日（兜底 2026-05-24）。
 
 用法：
     python backfill_cm_onchain.py                     # 回填缺口（默认 14 币）
@@ -58,8 +59,8 @@ FLOW_METRIC_MAP = {
     "FlowOutExUSD": "flow_out_ex_usd",
 }
 
-# 起始日期
-BACKFILL_START = date(2026, 5, 25)
+# 起始日期（兜底；实际按币动态取 MAX(metric_date) WHERE cap_mvrv_cur IS NOT NULL 次日）
+BACKFILL_START = date(2026, 5, 24)
 
 # 每次 API 请求最多拉 90 天（避免超时）
 API_WINDOW_DAYS = 90
@@ -205,6 +206,25 @@ def resolve_asset_id(conn, cm_symbol: str) -> int | None:
     return None
 
 
+def get_coin_start_date(conn, cm_symbol: str, fallback: date) -> date:
+    """从库内取该币最新有效日期（cap_mvrv_cur IS NOT NULL）的次日。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily
+            WHERE cm_symbol = %s AND cap_mvrv_cur IS NOT NULL
+            """,
+            (cm_symbol,),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            last_valid = row[0]
+            # last_valid 是 date 对象，加 1 天
+            from datetime import timedelta
+            return last_valid + timedelta(days=1)
+    return fallback
+
+
 def get_latest_date_from_api(symbol: str) -> date | None:
     """从 CoinMetrics API 获取某币最新可用日期。"""
     url = (
@@ -319,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--start-date",
         type=str,
         default=None,
-        help="覆盖起始日期（YYYY-MM-DD），默认 2026-05-25",
+        help="覆盖起始日期（YYYY-MM-DD），默认按币动态取库内有效末日次日（兜底 2026-05-24）",
     )
     return parser
 
@@ -338,7 +358,7 @@ def main() -> int:
         start_date = end_date
     else:
         # 回填模式
-        start_date = date.fromisoformat(args.start_date) if args.start_date else BACKFILL_START
+        global_start = date.fromisoformat(args.start_date) if args.start_date else BACKFILL_START
         # 动态取最新日期
         print("查询 CoinMetrics 最新可用日期...")
         end_date = None
@@ -350,6 +370,7 @@ def main() -> int:
         if not end_date:
             end_date = date.today() - timedelta(days=1)
         print(f"最新完整日: {end_date}")
+        start_date = global_start  # 兜底值，后续按币覆盖
 
     if start_date > end_date:
         print(f"起始日期 {start_date} > 终止日期 {end_date}，无需回填")
@@ -375,11 +396,20 @@ def main() -> int:
     try:
         for i, sym in enumerate(coins, 1):
             print(f"[{i}/{len(coins)}] {sym.upper()}")
+            # 按币动态取起始日期（非 incremental 且未手动指定 --start-date 时）
+            if not args.incremental and not args.start_date and conn:
+                coin_start = get_coin_start_date(conn, sym, global_start)
+                if coin_start > start_date:
+                    print(f"  起始日期: {coin_start}（库内有效末日次日）")
+            else:
+                coin_start = start_date
+
+            if coin_start > end_date:
+                print(f"  跳过：起始 {coin_start} > 终止 {end_date}（数据已最新）")
+                continue
+
             if dry_run:
                 # dry-run 模式：仅拉取不写入
-                asset_id = None
-                if conn:
-                    asset_id = resolve_asset_id(conn, sym)
                 stats = {
                     "symbol": sym,
                     "rows_fetched": 0,
@@ -390,13 +420,13 @@ def main() -> int:
                 metrics = list(METRIC_MAP.keys())
                 if sym in FLOW_COINS:
                     metrics.extend(FLOW_METRIC_MAP.keys())
-                day_data = fetch_asset_metrics(sym, metrics, start_date, end_date)
+                day_data = fetch_asset_metrics(sym, metrics, coin_start, end_date)
                 stats["rows_fetched"] = len(day_data)
                 stats["rows_upserted"] = len(day_data)  # dry-run 假设全部写入
                 print(f"  [DRY RUN] {len(day_data)} 天数据")
                 all_stats.append(stats)
             else:
-                stats = backfill_coin(conn, sym, start_date, end_date, dry_run)
+                stats = backfill_coin(conn, sym, coin_start, end_date, dry_run)
                 all_stats.append(stats)
             time.sleep(REQUEST_INTERVAL)
     finally:

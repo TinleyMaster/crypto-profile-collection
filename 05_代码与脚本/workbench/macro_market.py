@@ -642,6 +642,111 @@ def fetch_onchain_anomaly_signals() -> dict:
         }
 
 
+def fetch_btc_onchain_signals() -> dict:
+    """BTC 链上积累/分配信号：从 biz.cm_asset_onchain_daily 读取 CM Community 免费档指标。
+
+    返回 {exchange_netflow, exchange_balance, hashrate, active_addresses,
+           roi_1yr, roi_30d, status}。
+    - exchange_netflow: FlowOutExUSD - FlowInExUSD（正=净流出=积累）
+    - exchange_balance: SplyExUSD 趋势（30d 斜率）
+    - hashrate: HashRate 趋势（30d 变化率）
+    - active_addresses: AdrActCnt 趋势（30d 变化率）
+    - roi_1yr/roi_30d: 收益率（用于 conviction 调制）
+    """
+    try:
+        from db_stats import get_db
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH btc_daily AS (
+                        SELECT metric_date,
+                               flow_in_ex_usd, flow_out_ex_usd,
+                               sply_ex_usd, hash_rate, adr_act_cnt,
+                               roi_1yr, roi_30d, price_usd
+                        FROM biz.cm_asset_onchain_daily
+                        WHERE asset_id = (SELECT asset_id FROM core.asset WHERE UPPER(canonical_symbol) = 'BTC' LIMIT 1)
+                          AND metric_date >= (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily) - INTERVAL '35 days'
+                        ORDER BY metric_date
+                    )
+                    SELECT
+                        -- 最新日交易所净流（FlowOut - FlowIn；正=净流出=积累）
+                        (SELECT flow_out_ex_usd - flow_in_ex_usd FROM btc_daily
+                         WHERE flow_in_ex_usd IS NOT NULL AND flow_out_ex_usd IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS exchange_netflow_1d,
+                        -- 7d 累计净流
+                        (SELECT SUM(flow_out_ex_usd - flow_in_ex_usd) FROM btc_daily
+                         WHERE flow_in_ex_usd IS NOT NULL AND flow_out_ex_usd IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 7) AS exchange_netflow_7d,
+                        -- 交易所余额趋势：最新 vs 30d 前
+                        (SELECT sply_ex_usd FROM btc_daily
+                         WHERE sply_ex_usd IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS exchange_balance_latest,
+                        (SELECT sply_ex_usd FROM btc_daily
+                         WHERE sply_ex_usd IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1 OFFSET 29) AS exchange_balance_30d_ago,
+                        -- HashRate 趋势：最新 vs 30d 前
+                        (SELECT hash_rate FROM btc_daily
+                         WHERE hash_rate IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS hashrate_latest,
+                        (SELECT hash_rate FROM btc_daily
+                         WHERE hash_rate IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1 OFFSET 29) AS hashrate_30d_ago,
+                        -- 活跃地址趋势：最新 vs 30d 前
+                        (SELECT adr_act_cnt FROM btc_daily
+                         WHERE adr_act_cnt IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS adr_latest,
+                        (SELECT adr_act_cnt FROM btc_daily
+                         WHERE adr_act_cnt IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1 OFFSET 29) AS adr_30d_ago,
+                        -- ROI
+                        (SELECT roi_1yr FROM btc_daily
+                         WHERE roi_1yr IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS roi_1yr,
+                        (SELECT roi_30d FROM btc_daily
+                         WHERE roi_30d IS NOT NULL
+                         ORDER BY metric_date DESC LIMIT 1) AS roi_30d
+                """)
+                row = cur.fetchone()
+
+        if not row:
+            return {"status": "error", "error": "no BTC onchain data"}
+
+        # 解包（psycopg TupleCursor）
+        (netflow_1d, netflow_7d, ex_bal_latest, ex_bal_30d,
+         hr_latest, hr_30d, adr_latest, adr_30d,
+         roi_1yr, roi_30d) = row
+
+        # 趋势计算
+        ex_bal_trend = None
+        if ex_bal_latest is not None and ex_bal_30d and ex_bal_30d > 0:
+            ex_bal_trend = (ex_bal_latest - ex_bal_30d) / ex_bal_30d * 100
+
+        hr_trend = None
+        if hr_latest is not None and hr_30d and hr_30d > 0:
+            hr_trend = (hr_latest - hr_30d) / hr_30d * 100
+
+        adr_trend = None
+        if adr_latest is not None and adr_30d and adr_30d > 0:
+            adr_trend = (adr_latest - adr_30d) / adr_30d * 100
+
+        return {
+            "status": "ok",
+            "exchange_netflow_1d": float(netflow_1d) if netflow_1d is not None else None,
+            "exchange_netflow_7d": float(netflow_7d) if netflow_7d is not None else None,
+            "exchange_balance_latest": float(ex_bal_latest) if ex_bal_latest is not None else None,
+            "exchange_balance_trend_pct": round(ex_bal_trend, 2) if ex_bal_trend is not None else None,
+            "hashrate_latest": float(hr_latest) if hr_latest is not None else None,
+            "hashrate_trend_pct": round(hr_trend, 2) if hr_trend is not None else None,
+            "active_addresses_latest": int(adr_latest) if adr_latest is not None else None,
+            "active_addresses_trend_pct": round(adr_trend, 2) if adr_trend is not None else None,
+            "roi_1yr": float(roi_1yr) if roi_1yr is not None else None,
+            "roi_30d": float(roi_30d) if roi_30d is not None else None,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def fetch_binance_etf_flows() -> dict:
     """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。"""
     api_key = os.environ.get("CRYPTOETF_KEY", "")
@@ -1045,11 +1150,12 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "mvrv_undervalued_pct": 30,              # MVRV 百分位 ≤ 此值 → 低估
     "mvrv_overvalued_pct": 85,               # MVRV 百分位 ≥ 此值 → 高估
     # P0-3 conviction 各轴权重（总和 = 1.0）
-    "conviction_weight_mvrv": 0.30,          # MVRV 估值权重
+    "conviction_weight_mvrv": 0.25,          # MVRV 估值权重
     "conviction_weight_cycle": 0.20,         # 周期相位权重
-    "conviction_weight_funding": 0.20,       # funding 极性权重
+    "conviction_weight_funding": 0.15,       # funding 极性权重
     "conviction_weight_netflow": 0.15,       # 交易所净流权重
-    "conviction_weight_stable": 0.15,        # 稳定币流向权重
+    "conviction_weight_stable": 0.10,        # 稳定币流向权重
+    "conviction_weight_roi": 0.15,           # ROI 动量权重
 }
 
 
@@ -1538,6 +1644,7 @@ def _compute_conviction_score(
     funding: float | None,
     exchange_netflow: float | None,
     stablecoin_flow: float | None,
+    roi_1yr: float | None = None,
     t: dict,
 ) -> int:
     """P0-3: 多轴加权合成 conviction 分 (0-100)。
@@ -1576,11 +1683,19 @@ def _compute_conviction_score(
     else:
         stable_score = 50
 
-    w_mvrv = t.get("conviction_weight_mvrv", 0.30)
+    # ── ROI 轴：深度负(超跌)=高做多分，深度正(过热)=高做空分 ──
+    if roi_1yr is not None:
+        # ROI1yr -50% → 80 (超跌做多)；+100% → 20 (过热风险)
+        roi_score = max(0, min(100, 50 - roi_1yr * 30))
+    else:
+        roi_score = 50
+
+    w_mvrv = t.get("conviction_weight_mvrv", 0.25)
     w_cycle = t.get("conviction_weight_cycle", 0.20)
-    w_funding = t.get("conviction_weight_funding", 0.20)
+    w_funding = t.get("conviction_weight_funding", 0.15)
     w_netflow = t.get("conviction_weight_netflow", 0.15)
-    w_stable = t.get("conviction_weight_stable", 0.15)
+    w_stable = t.get("conviction_weight_stable", 0.10)
+    w_roi = t.get("conviction_weight_roi", 0.15)
 
     raw = (
         mvrv_score * w_mvrv
@@ -1588,6 +1703,7 @@ def _compute_conviction_score(
         + funding_score * w_funding
         + netflow_score * w_netflow
         + stable_score * w_stable
+        + roi_score * w_roi
     )
     return max(0, min(100, round(raw)))
 
@@ -1612,6 +1728,9 @@ def score_opportunities(overview: dict) -> dict:
     divergence = (overview.get("divergence_signals") or {}).get("signals", []) or []
     emotion = ((overview.get("summary") or {}).get("emotion_subscore") or {})
     onchain = overview.get("onchain_anomaly_signals")  # P1-3（可能未接入）
+    # CM Community BTC 链上指标（替代死链路 CoinGlass）
+    d6 = (overview.get("dimensions") or {}).get("6链上") or {}
+    btc_onchain = d6.get("data") or {}
     by_sig = {s.get("signal"): s for s in divergence}
 
     # P0-1: MVRV 多币极值数据
@@ -1636,6 +1755,13 @@ def score_opportunities(overview: dict) -> dict:
     onchain_ex = (onchain or {}).get("exchange_netflow") or {}
     ex_netflow = onchain_ex.get("netflow_7d_usd") if isinstance(onchain_ex, dict) else None
 
+    # 优先用 CM 原生 BTC 链上净流（替代死链路 CoinGlass）
+    cm_netflow_7d = btc_onchain.get("exchange_netflow_7d")
+    if cm_netflow_7d is not None:
+        ex_netflow = cm_netflow_7d
+
+    btc_roi_1yr = btc_onchain.get("roi_1yr")
+
     opportunities: list[dict] = []
     excluded: list[dict] = []
     degraded: list[str] = []
@@ -1654,7 +1780,7 @@ def score_opportunities(overview: dict) -> dict:
             conviction = _compute_conviction_score(
                 mvrv_pct=pct, cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
-                stablecoin_flow=stable_7d, t=t,
+                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
             trigger = (
                 f"MVRV 百分位 {pct:.1f}%（深度低估 ≤{deep_undervalued_pct}%）→ "
@@ -1672,7 +1798,7 @@ def score_opportunities(overview: dict) -> dict:
             conviction = _compute_conviction_score(
                 mvrv_pct=pct, cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
-                stablecoin_flow=stable_7d, t=t,
+                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
             trigger = (
                 f"MVRV 百分位 {pct:.1f}%（低估 ≤{undervalued_pct}%）→ "
@@ -1706,19 +1832,28 @@ def score_opportunities(overview: dict) -> dict:
             if net is not None and net > t.get("exchange_netflow_min_usd", 100_000_000):
                 btc_left_sources.append(("exchange_netflow", "long"))
                 left_metrics.append(f"交易所 7d 净流出 {_fmt_billions(net)}")
+    # CM BTC 链上积累信号（CM Community 原生，比 CoinGlass 可靠）
+    if btc_onchain.get("status") == "ok":
+        cm_net = btc_onchain.get("exchange_netflow_7d")
+        if cm_net is not None and cm_net > t.get("exchange_netflow_min_usd", 100_000_000):
+            if ("exchange_netflow", "long") not in btc_left_sources:
+                btc_left_sources.append(("exchange_netflow_cm", "long"))
+                left_metrics.append(f"CM BTC 链上 7d 净流出 {_fmt_billions(cm_net)}")
     if btc_left_sources:
         conf, direction = _resolve_confidence(btc_left_sources, t)
         conviction = _compute_conviction_score(
             mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, t=t,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
         related = ["P1-2 价格vs稳定币"]
         if "emotion" in {typ for typ, _ in btc_left_sources}:
             related.append("P0-3 情绪")
         if "exchange_netflow" in {typ for typ, _ in btc_left_sources}:
             related.append("P1-3 交易所净流")
+        if "exchange_netflow_cm" in {typ for typ, _ in btc_left_sources}:
+            related.append("6链上 CM BTC 链上净流")
         trigger = f"{' / '.join(left_metrics)} → 场外弹药积累，左侧布局窗口"
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
@@ -1743,7 +1878,7 @@ def score_opportunities(overview: dict) -> dict:
             mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, t=t,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
         trigger = f"{' / '.join(risk_metrics) if risk_metrics else '杠杆信号'} → 杠杆过热，防回撤"
         _push_opportunity(
@@ -1775,7 +1910,7 @@ def score_opportunities(overview: dict) -> dict:
             mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, t=t,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
@@ -1797,7 +1932,7 @@ def score_opportunities(overview: dict) -> dict:
             mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, t=t,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
@@ -1815,7 +1950,7 @@ def score_opportunities(overview: dict) -> dict:
             mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, t=t,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
         _push_opportunity(
             {"target": "BTC", "direction": "neutral", "confidence": "medium",
@@ -1835,7 +1970,7 @@ def score_opportunities(overview: dict) -> dict:
                 mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
                 cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
-                stablecoin_flow=stable_7d, t=t,
+                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
             _push_opportunity(
                 {"target": p.get("name") or "新协议", "direction": "long", "confidence": "medium",
@@ -2225,6 +2360,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     categories = fetch_cmc_categories()
     event_calendar = fetch_event_calendar()
     onchain = fetch_onchain_anomaly_signals()
+    btc_onchain = fetch_btc_onchain_signals()  # CM Community BTC 链上指标
 
     # 若链上 CEX 净流量可用，用其归一化分值覆盖 cryptoetf cefi（优先级更高）
     if onchain.get("status") == "ok" and onchain.get("cefi_score") is not None:
@@ -2363,6 +2499,11 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             "mvrv_universe": {
                 "data": mvrv_data,
                 "status": mvrv_data.get("status", "error"),
+            },
+            # 6链上: BTC 链上积累/分配信号（CM Community 免费档）
+            "6链上": {
+                "data": btc_onchain,
+                "status": btc_onchain.get("status", "error"),
             },
         },
         "event_calendar": event_calendar,

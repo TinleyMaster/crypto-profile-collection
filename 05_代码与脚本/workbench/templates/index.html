@@ -7205,28 +7205,55 @@
             const medOpps = oppList.filter(o => o.conviction_tier === 'MED');
             const lowOpps = oppList.filter(o => !o.conviction_tier || o.conviction_tier === 'LOW');
 
-            html += `<div class="dim-card" style="border-left:3px solid ${highOpps.length ? '#dc2626' : medOpps.length ? '#f59e0b' : '#94a3b8'}">
+            // 分级标签
+            const tierTags = [];
+            if (highOpps.length) tierTags.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(220,38,38,0.15);color:#f87171;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700">● HIGH ${highOpps.length}</span>`);
+            if (medOpps.length) tierTags.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(245,158,11,0.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700">● MED ${medOpps.length}</span>`);
+
+            html += `<div class="dim-card" style="border:1px solid ${highOpps.length ? 'rgba(220,38,38,0.4)' : medOpps.length ? 'rgba(245,158,11,0.3)' : '#1e2a3a'}; ${highOpps.length ? 'box-shadow:0 0 20px rgba(220,38,38,0.08)' : ''}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🎯</span>
                     <span class="dim-card-title">机会清单</span>
-                    <span class="dim-card-score neutral">${highOpps.length ? '🔴 ' + highOpps.length + ' HIGH' : ''} ${medOpps.length ? '🟡 ' + medOpps.length + ' MED' : ''} ${oppList.length} 条</span>
+                    <span class="dim-card-score neutral" style="display:flex;gap:6px;align-items:center">${tierTags.join('')}<span style="color:#94a3b8;font-size:11px">${oppList.length} 条</span></span>
                 </div>
-                <div class="dim-metrics">`;
+                <div style="display:flex;flex-direction:column;gap:8px">`;
 
             function renderOpp(o) {
                 const tier = o.conviction_tier || '?';
                 const score = o.conviction_score != null ? o.conviction_score : '?';
-                const tierColor = tier === 'HIGH' ? '#dc2626' : tier === 'MED' ? '#f59e0b' : '#94a3b8';
-                const tierBg = tier === 'HIGH' ? '#fef2f2' : tier === 'MED' ? '#fffbeb' : '#f8fafc';
-                const dirTxt = o.direction === 'long' ? '📈 多' : o.direction === 'short' ? '📉 空' : '➡️ 中性';
-                const dirCls = o.direction === 'long' ? 'up' : o.direction === 'short' ? 'down' : 'neutral';
-                return `<div style="padding:8px;margin:4px 0;border-radius:6px;border-left:3px solid ${tierColor};background:${tierBg}">
-                    <div style="display:flex;justify-content:space-between;align-items:center">
-                        <span><b>${o.target}</b> <span class="${dirCls}" style="font-weight:600">${dirTxt}</span></span>
-                        <span style="font-size:12px;color:${tierColor};font-weight:600">${tier} · ${score}</span>
+                const isHigh = tier === 'HIGH';
+                const isMed = tier === 'MED';
+
+                // Tier 颜色方案
+                const borderColor = isHigh ? '#dc2626' : isMed ? '#d97706' : '#475569';
+                const glowColor = isHigh ? 'rgba(220,38,38,0.12)' : isMed ? 'rgba(245,158,11,0.08)' : 'transparent';
+                const scoreBg = isHigh ? 'rgba(220,38,38,0.2)' : isMed ? 'rgba(245,158,11,0.15)' : 'rgba(71,85,105,0.2)';
+                const scoreColor = isHigh ? '#f87171' : isMed ? '#fbbf24' : '#94a3b8';
+
+                // 方向指示
+                const dirArrow = o.direction === 'long' ? '↗' : o.direction === 'short' ? '↘' : '→';
+                const dirColor = o.direction === 'long' ? '#4ade80' : o.direction === 'short' ? '#f87171' : '#94a3b8';
+                const dirLabel = o.direction === 'long' ? '看多' : o.direction === 'short' ? '看空' : '中性';
+
+                // 目标名称样式
+                const targetStyle = isHigh ? 'color:#f87171;font-weight:700;font-size:14px' : isMed ? 'color:#fbbf24;font-weight:600;font-size:13px' : 'color:#e2e8f0;font-weight:500;font-size:13px';
+
+                // 触发逻辑分段
+                const trigger = o.trigger_logic || '';
+
+                return `<div style="background:#111827;border:1px solid ${borderColor}33;border-left:3px solid ${borderColor};border-radius:8px;padding:12px 14px;${isHigh ? 'box-shadow:0 0 16px ' + glowColor : ''}">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="${targetStyle}">${o.target}</span>
+                            <span style="display:inline-flex;align-items:center;gap:3px;font-size:12px;font-weight:600;color:${dirColor}">${dirArrow} ${dirLabel}</span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:6px">
+                            <span style="font-size:11px;color:#6b7280;background:#1e293b;padding:2px 6px;border-radius:4px">${o.confidence || ''}</span>
+                            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:24px;background:${scoreBg};color:${scoreColor};border-radius:12px;font-size:12px;font-weight:700;padding:0 6px">${score}</span>
+                        </div>
                     </div>
-                    <div style="font-size:12px;color:#475569;margin-top:3px">${o.trigger_logic || ''}</div>
-                    <div style="font-size:11px;color:#94a3b8;margin-top:2px">${(o.related_dims || []).map(d => '<span style="background:#e2e8f0;padding:1px 4px;border-radius:3px;margin-right:3px">' + d + '</span>').join('')}</div>
+                    <div style="font-size:12px;color:#cbd5e1;line-height:1.5;margin-bottom:6px">${trigger}</div>
+                    ${(o.related_dims || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:4px">${(o.related_dims || []).map(d => `<span style="font-size:10px;color:#94a3b8;background:#1e293b;border:1px solid #334155;padding:1px 6px;border-radius:4px">${d}</span>`).join('')}</div>` : ''}
                 </div>`;
             }
 
@@ -7236,16 +7263,16 @@
             medOpps.forEach(o => { html += renderOpp(o); });
             // LOW 折叠
             if (lowOpps.length) {
-                html += `<details style="margin-top:6px"><summary style="font-size:12px;color:#6b7280;cursor:pointer">观察池 (${lowOpps.length} 条低置信)</summary>`;
+                html += `<details style="margin-top:4px"><summary style="font-size:12px;color:#6b7280;cursor:pointer;padding:4px 0">观察池 (${lowOpps.length} 条低置信)</summary>`;
                 lowOpps.forEach(o => { html += renderOpp(o); });
                 html += `</details>`;
             }
 
             if (!oppList.length) {
-                html += `<div class="dim-metric-row"><span class="dim-metric-label">机会清单</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无高置信机会</span></div>`;
+                html += `<div style="text-align:center;padding:20px;color:#6b7280">⚠️ 暂无高置信机会</div>`;
             }
             if (oppExcluded.length) {
-                html += `<div class="dim-warn">已剔除低置信 ${oppExcluded.length} 条（可追溯）</div>`;
+                html += `<div style="font-size:11px;color:#6b7280;margin-top:6px;padding:4px 8px;background:#1e293b;border-radius:4px">已剔除低置信 ${oppExcluded.length} 条（可追溯）</div>`;
             }
             html += `</div>
             </div>`;

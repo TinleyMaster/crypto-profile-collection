@@ -3853,6 +3853,29 @@ def get_btc_cycle_position() -> dict:
     liv_flag = liv_pctile.get("flag_full", "NONE")
     dorm_flag = dorm_pctile.get("flag_full", "NONE")
 
+    # C-1: CM MVRV 分位（宽表 cm_onchain_percentile_full，BTC 用 cm_symbol='btc' 小写）
+    # prod 实测：2026-08-29 mvrv_pct_full=37.44, mvrv_extreme='NONE'
+    mvrv_pct_full = None
+    mvrv_extreme = None
+    try:
+        with get_db() as conn2:
+            with conn2.cursor(row_factory=psycopg.rows.dict_row) as cur2:
+                cur2.execute("""
+                    SELECT mvrv_pct_full, mvrv_extreme
+                    FROM biz.cm_onchain_percentile_full
+                    WHERE cm_symbol = 'btc'
+                      AND metric_date = (
+                          SELECT MAX(metric_date) FROM biz.cm_onchain_percentile_full WHERE cm_symbol = 'btc'
+                      )
+                """)
+                mvrv_row = cur2.fetchone()
+                if mvrv_row:
+                    mvrv_pct_full = float(mvrv_row["mvrv_pct_full"]) if mvrv_row["mvrv_pct_full"] is not None else None
+                    mvrv_extreme = mvrv_row["mvrv_extreme"]
+    except Exception:
+        mvrv_pct_full = None
+        mvrv_extreme = None
+
     signals: list[str] = []
 
     if liveliness is not None and liveliness < 0.55 and old_coin_cdd_share is not None and old_coin_cdd_share < 0.4:
@@ -3886,7 +3909,7 @@ def get_btc_cycle_position() -> dict:
     if dorm_flag == "HIGH":
         signals.append("dormancy 处历史高位")
 
-    # B-1: 复合周期热度评分（0-100）
+    # B-1 + C-2: 复合周期热度评分（三维 0-100）
     # NUPL 近似（B-2a）：1 - liveliness，取全历史分位
     nupl_approx_pct = None
     if liveliness is not None:
@@ -3895,12 +3918,15 @@ def get_btc_cycle_position() -> dict:
         # 简化：直接用 100 - liv_pct 作为近似（liveliness 高 → NUPL 低 → 顶部）
         nupl_approx_pct = round(100 - liv_pct, 1) if liv_pct is not None else None
 
+    # 三维：MVRV(估值,主 0.40) + NUPL近似(LTH派发 0.30) + OBM活跃度(过热 0.30)
+    # liv_pct 取 A 修好的滚动分位 pct_roll_365d；若 VIEW 未修则回退 pct_full
+    liv_pct_for_score = liv_pct_roll if liv_pct_roll is not None else liv_pct
     cycle_heat_score = None
-    if liv_pct_roll is not None and old_coin_cdd_share is not None and nupl_approx_pct is not None:
+    if mvrv_pct_full is not None and nupl_approx_pct is not None and liv_pct_for_score is not None:
         cycle_heat_score = round(
-            0.45 * liv_pct_roll
-            + 0.30 * (old_coin_cdd_share * 100)
-            + 0.25 * nupl_approx_pct,
+            0.40 * mvrv_pct_full
+            + 0.30 * nupl_approx_pct
+            + 0.30 * liv_pct_for_score,
             1,
         )
 
@@ -3930,6 +3956,9 @@ def get_btc_cycle_position() -> dict:
         "old_coin_cdd_share_percentile": old_share_pct,
         "cdd_total": cdd_total,
         "hashrate_ehs": hashrate,
+        "mvrv_pct_full": mvrv_pct_full,
+        "mvrv_extreme": mvrv_extreme,
+        "nupl_approx_pct": nupl_approx_pct,
         "cycle_heat_score": cycle_heat_score,
         "cycle_heat_label": heat_label,
         "signals": signals,

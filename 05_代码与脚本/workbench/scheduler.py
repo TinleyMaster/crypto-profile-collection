@@ -119,6 +119,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     # P1-2: 催化剂降频为每12h（DeepSeek 额度有限）
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）"),
 
+    # ═══ 大盘早报邮件 ═══
+    ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）"),
+
     # ═══ CM / OBM 链上指标定时调度 ═══
     # OBM 数据源活跃但指标慢变（源 CSV 滞后 1 天），降为周一三五；
     # CM MVRV 为实时估值信号，保持每日 T-1 增量。

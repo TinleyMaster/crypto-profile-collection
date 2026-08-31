@@ -1876,7 +1876,8 @@ def score_opportunities(overview: dict) -> dict:
     - P0-2: BTC 周期相位 → conviction 调制器
     - P0-3: 复合 conviction 分 (0-100) + tier (HIGH/MED/LOW，LOW 剔除)
     """
-    t = OPPORTUNITY_THRESHOLDS
+    # 第四刀：从 yaml 规则读阈值（而非 in-code 常量），yaml 失败兜底默认值
+    t = _load_market_rules().get("opportunity_thresholds", dict(OPPORTUNITY_THRESHOLDS_DEFAULT))
     d5 = (overview.get("dimensions") or {}).get("5板块") or {}
     d5data = d5.get("data") or {}
     narrative = d5data.get("narrative_flow_ranking", {}).get("ranked", []) or []

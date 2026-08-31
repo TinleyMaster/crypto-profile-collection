@@ -255,13 +255,13 @@ def _link_repo_to_assets(
             -- 按 URL 特征判断是否为主仓库（source_code 链接优先）
             CASE
                 WHEN d.entry_type = 'source_code' THEN 1.0
-                WHEN d.entry_url LIKE '%/tree/%' THEN 0.7
-                WHEN d.entry_url LIKE '%/wiki%' THEN 0.5
+                WHEN d.entry_url LIKE '%%/tree/%%' THEN 0.7
+                WHEN d.entry_url LIKE '%%/wiki%%' THEN 0.5
                 ELSE 0.8
             END AS confidence
         FROM biz.doc_source_entry d
         JOIN core.asset a ON a.asset_id = d.asset_id
-        WHERE d.entry_url LIKE 'https://github.com/' || %s || '/' || %s || '%'
+        WHERE d.entry_url LIKE 'https://github.com/' || %s || '/' || %s || '%%'
            OR d.entry_url LIKE 'https://github.com/' || %s || '/' || %s
         ORDER BY d.asset_id, confidence DESC
     """
@@ -409,8 +409,9 @@ def main() -> int:
                 success_count += 1
 
             except requests.HTTPError as exc:
-                status = exc.response.status_code if exc.response else None
-                if status == 404:
+                status = exc.response.status_code if exc.response is not None else None
+                msg = str(exc)
+                if status == 404 or "404" in msg:
                     print("NOT_FOUND (repo deleted/private)")
                     skip_count += 1
                 elif status == 403:

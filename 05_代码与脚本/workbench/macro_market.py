@@ -1040,6 +1040,16 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除）
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
+    # P0-1 MVRV 估值回归
+    "mvrv_deep_undervalued_pct": 15,         # MVRV 百分位 ≤ 此值 → 深度低估
+    "mvrv_undervalued_pct": 30,              # MVRV 百分位 ≤ 此值 → 低估
+    "mvrv_overvalued_pct": 85,               # MVRV 百分位 ≥ 此值 → 高估
+    # P0-3 conviction 各轴权重（总和 = 1.0）
+    "conviction_weight_mvrv": 0.30,          # MVRV 估值权重
+    "conviction_weight_cycle": 0.20,         # 周期相位权重
+    "conviction_weight_funding": 0.20,       # funding 极性权重
+    "conviction_weight_netflow": 0.15,       # 交易所净流权重
+    "conviction_weight_stable": 0.15,        # 稳定币流向权重
 }
 
 
@@ -1521,11 +1531,78 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
         excluded.append(opp)
 
 
+def _compute_conviction_score(
+    *,
+    mvrv_pct: float | None,
+    cycle_phase: str,
+    funding: float | None,
+    exchange_netflow: float | None,
+    stablecoin_flow: float | None,
+    t: dict,
+) -> int:
+    """P0-3: 多轴加权合成 conviction 分 (0-100)。
+
+    各轴归一化到 0~100 后加权求和，cycle phase 作为调制系数乘入。
+    """
+    # ── MVRV 轴：低估=高分（均值回归逻辑），高估=低分 ──
+    if mvrv_pct is not None:
+        mvrv_score = max(0, min(100, 100 - mvrv_pct))
+    else:
+        mvrv_score = 50  # 无数据时中性
+
+    # ── Cycle 轴：phase → score ──
+    cycle_scores = {
+        "early_top": 25, "late_top": 15, "top": 20,
+        "early_bottom": 85, "late_bottom": 75, "bottom": 80,
+        "mid_cycle": 50, "unknown": 50,
+    }
+    cycle_score = cycle_scores.get(cycle_phase, 50)
+
+    # ── Funding 轴：正=过热（做空机会/风险），负=恐慌（做多机会） ──
+    if funding is not None:
+        funding_score = max(0, min(100, 50 - funding * 10000))
+    else:
+        funding_score = 50
+
+    # ── 交易所净流轴：正=净流出(积累)=做多信号 ──
+    if exchange_netflow is not None and exchange_netflow != 0:
+        netflow_score = max(0, min(100, 50 + (exchange_netflow / 1e9) * 20))
+    else:
+        netflow_score = 50
+
+    # ── 稳定币流轴：正=场外弹药充裕=做多信号 ──
+    if stablecoin_flow is not None and stablecoin_flow != 0:
+        stable_score = max(0, min(100, 50 + (stablecoin_flow / 1e10) * 30))
+    else:
+        stable_score = 50
+
+    w_mvrv = t.get("conviction_weight_mvrv", 0.30)
+    w_cycle = t.get("conviction_weight_cycle", 0.20)
+    w_funding = t.get("conviction_weight_funding", 0.20)
+    w_netflow = t.get("conviction_weight_netflow", 0.15)
+    w_stable = t.get("conviction_weight_stable", 0.15)
+
+    raw = (
+        mvrv_score * w_mvrv
+        + cycle_score * w_cycle
+        + funding_score * w_funding
+        + netflow_score * w_netflow
+        + stable_score * w_stable
+    )
+    return max(0, min(100, round(raw)))
+
+
 def score_opportunities(overview: dict) -> dict:
     """
     聚合 P1-1~P1-3 + P0-3 真实字段合成机会清单。
-    返回 {status, opportunities: [{target, direction, confidence, trigger_logic, related_dims}], excluded, degraded}。
+    返回 {status, opportunities: [{target, direction, confidence, conviction_score,
+          trigger_logic, related_dims}], excluded, degraded}。
     任一上游信号缺失 → 该机会剔除/降级，不崩溃。
+
+    P0 改进：
+    - P0-1: MVRV 极值 → 估值回归机会类
+    - P0-2: BTC 周期相位 → conviction 调制器
+    - P0-3: 复合 conviction 分 (0-100)
     """
     t = OPPORTUNITY_THRESHOLDS
     d5 = (overview.get("dimensions") or {}).get("5板块") or {}
@@ -1537,17 +1614,85 @@ def score_opportunities(overview: dict) -> dict:
     onchain = overview.get("onchain_anomaly_signals")  # P1-3（可能未接入）
     by_sig = {s.get("signal"): s for s in divergence}
 
+    # P0-1: MVRV 多币极值数据
+    mvrv_dim = (overview.get("dimensions") or {}).get("mvrv_universe") or {}
+    mvrv_data = mvrv_dim.get("data") or {}
+    mvrv_coins = mvrv_data.get("coins") or []
+
+    # P0-2: BTC 周期相位
+    btc_cycle = overview.get("btc_cycle") or {}
+    cycle_phase = btc_cycle.get("phase", "unknown")
+
+    # ── 预提取各轴信号（供 conviction 计算） ──
+    sc = by_sig.get("price_stablecoin") or {}
+    scm = sc.get("metrics") or {}
+    stable_7d = scm.get("stablecoin_7d_netflow_usd")
+
+    oi_sig = by_sig.get("price_oi") or {}
+    funding_sig = by_sig.get("price_funding") or {}
+    fm = funding_sig.get("metrics") or {}
+    funding_latest = fm.get("funding_latest")
+
+    onchain_ex = (onchain or {}).get("exchange_netflow") or {}
+    ex_netflow = onchain_ex.get("netflow_7d_usd") if isinstance(onchain_ex, dict) else None
+
     opportunities: list[dict] = []
     excluded: list[dict] = []
     degraded: list[str] = []
 
+    # ── P0-1: MVRV 估值回归（long，低估值深度低估币） ──
+    deep_undervalued_pct = t.get("mvrv_deep_undervalued_pct", 15)
+    undervalued_pct = t.get("mvrv_undervalued_pct", 30)
+    for coin in mvrv_coins:
+        pct = coin.get("pct_full")
+        symbol = coin.get("symbol", "?")
+        if pct is None:
+            continue
+        if pct <= deep_undervalued_pct:
+            # 深度低估 → 高确定性均值回归机会
+            mvrv_score_val = max(0, min(100, 100 - pct))
+            conviction = _compute_conviction_score(
+                mvrv_pct=pct, cycle_phase=cycle_phase,
+                funding=funding_latest, exchange_netflow=ex_netflow,
+                stablecoin_flow=stable_7d, t=t,
+            )
+            trigger = (
+                f"MVRV 百分位 {pct:.1f}%（深度低估 ≤{deep_undervalued_pct}%）→ "
+                f"历史均值回归信号"
+            )
+            _push_opportunity(
+                {"target": symbol, "direction": "long", "confidence": "high",
+                 "conviction_score": conviction,
+                 "trigger_logic": trigger,
+                 "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
+                opportunities, excluded, t,
+            )
+        elif pct <= undervalued_pct:
+            # 低估 → 中置信
+            conviction = _compute_conviction_score(
+                mvrv_pct=pct, cycle_phase=cycle_phase,
+                funding=funding_latest, exchange_netflow=ex_netflow,
+                stablecoin_flow=stable_7d, t=t,
+            )
+            trigger = (
+                f"MVRV 百分位 {pct:.1f}%（低估 ≤{undervalued_pct}%）→ "
+                f"估值偏低，关注回归"
+            )
+            _push_opportunity(
+                {"target": symbol, "direction": "long", "confidence": "medium",
+                 "conviction_score": conviction,
+                 "trigger_logic": trigger,
+                 "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
+                opportunities, excluded, t,
+            )
+    if not mvrv_coins:
+        degraded.append("mvrv_universe 数据缺失")
+
     # ── 1) BTC 左侧积累 / 场外弹药（long） ──
     btc_left_sources: list[tuple[str, str]] = []
     left_metrics: list[str] = []
-    sc = by_sig.get("price_stablecoin") or {}
-    scm = sc.get("metrics") or {}
     if sc.get("status") == "ok" and (scm.get("stablecoin_7d_netflow_usd") or 0) >= t["stablecoin_flow_min_usd"]:
-        if (scm.get("price_7d_pct") or 0) < DIVERGENCE_THRESHOLDS["price_stagnation_pct"]:  # 价未大涨 + 稳定币净流入 = 弹药积累
+        if (scm.get("price_7d_pct") or 0) < DIVERGENCE_THRESHOLDS["price_stagnation_pct"]:
             btc_left_sources.append(("stablecoin_flow", "long"))
             left_metrics.append(f"稳定币 7d 净流入 {_fmt_billions(scm.get('stablecoin_7d_netflow_usd'))}")
     emo_score = emotion.get("score")
@@ -1558,11 +1703,17 @@ def score_opportunities(overview: dict) -> dict:
         ex = onchain.get("exchange_netflow") or {}
         if isinstance(ex, dict) and ex.get("status") == "ok":
             net = ex.get("netflow_7d_usd")
-            if net is not None and net > t.get("exchange_netflow_min_usd", 100_000_000):  # 正=净流出(积累)，需超阈值
+            if net is not None and net > t.get("exchange_netflow_min_usd", 100_000_000):
                 btc_left_sources.append(("exchange_netflow", "long"))
                 left_metrics.append(f"交易所 7d 净流出 {_fmt_billions(net)}")
     if btc_left_sources:
         conf, direction = _resolve_confidence(btc_left_sources, t)
+        conviction = _compute_conviction_score(
+            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, t=t,
+        )
         related = ["P1-2 价格vs稳定币"]
         if "emotion" in {typ for typ, _ in btc_left_sources}:
             related.append("P0-3 情绪")
@@ -1571,28 +1722,33 @@ def score_opportunities(overview: dict) -> dict:
         trigger = f"{' / '.join(left_metrics)} → 场外弹药积累，左侧布局窗口"
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
+             "conviction_score": conviction,
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
         )
 
     # ── 2) 杠杆过热 / 风险规避（short） ──
-    oi_sig = by_sig.get("price_oi") or {}
-    funding_sig = by_sig.get("price_funding") or {}
     risk_sources: list[tuple[str, str]] = []
     risk_metrics: list[str] = []
     oim = oi_sig.get("metrics") or {}
     if oi_sig.get("status") == "ok" and oi_sig.get("label") == "DANGEROUS":
         risk_sources.append(("oi", "short"))
         risk_metrics.append(f"OI 7d {oim.get('oi_7d_pct', 0):+.1f}%")
-    fm = funding_sig.get("metrics") or {}
     if funding_sig.get("status") == "ok" and funding_sig.get("label") in ("DANGEROUS", "DIVERGENT"):
         risk_sources.append(("funding", "short"))
         risk_metrics.append(f"funding {fm.get('funding_latest', 0) * 100:.3f}%/期")
     if risk_sources:
         conf, direction = _resolve_confidence(risk_sources, t)
+        conviction = _compute_conviction_score(
+            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, t=t,
+        )
         trigger = f"{' / '.join(risk_metrics) if risk_metrics else '杠杆信号'} → 杠杆过热，防回撤"
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
+             "conviction_score": conviction,
              "trigger_logic": trigger, "related_dims": ["P1-2 价格vs OI", "P1-2 价格vs funding"]},
             opportunities, excluded, t,
         )
@@ -1604,7 +1760,7 @@ def score_opportunities(overview: dict) -> dict:
         if composite is None or composite < t.get("narrative_min_composite", 8.0):
             continue
         mode = row.get("mode")
-        if mode == "blended":  # CMC 市值 + DL TVL 两独立源同向
+        if mode == "blended":
             conf, direction = "high", "long"
             related = ["P1-1 叙事榜（市值+TVL）"]
             trigger = (
@@ -1615,8 +1771,15 @@ def score_opportunities(overview: dict) -> dict:
             conf, direction = "medium", "long"
             related = ["P1-1 叙事榜（市值）"]
             trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
+        conviction = _compute_conviction_score(
+            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, t=t,
+        )
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
+             "conviction_score": conviction,
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
         )
@@ -1630,8 +1793,15 @@ def score_opportunities(overview: dict) -> dict:
             continue
         if flow < t.get("chain_min_flow_usd", 200_000_000) or flow_pct < t.get("chain_min_flow_pct", 3.0):
             continue
+        conviction = _compute_conviction_score(
+            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, t=t,
+        )
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
+             "conviction_score": conviction,
              "trigger_logic": f"{row.get('chain')} 链 7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）→ 资金净流入",
              "related_dims": ["P1-1 链净流入榜"]},
             opportunities, excluded, t,
@@ -1641,8 +1811,15 @@ def score_opportunities(overview: dict) -> dict:
     ndx_sig = by_sig.get("btc_nasdaq") or {}
     if ndx_sig.get("status") == "ok" and ndx_sig.get("label") == "DIVERGENT":
         interp = ndx_sig.get("interpretation", "宏观脱钩")
+        conviction = _compute_conviction_score(
+            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, t=t,
+        )
         _push_opportunity(
             {"target": "BTC", "direction": "neutral", "confidence": "medium",
+             "conviction_score": conviction,
              "trigger_logic": interp, "related_dims": ["P1-2 BTC vs 纳指"]},
             opportunities, excluded, t,
         )
@@ -1654,8 +1831,15 @@ def score_opportunities(overview: dict) -> dict:
         for p in protos[:p_top]:
             if not isinstance(p, dict):
                 continue
+            conviction = _compute_conviction_score(
+                mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+                cycle_phase=cycle_phase,
+                funding=funding_latest, exchange_netflow=ex_netflow,
+                stablecoin_flow=stable_7d, t=t,
+            )
             _push_opportunity(
                 {"target": p.get("name") or "新协议", "direction": "long", "confidence": "medium",
+                 "conviction_score": conviction,
                  "trigger_logic": f"{p.get('name')} 7d TVL {p.get('change_7d_pct') if p.get('change_7d_pct') is not None else '?'}% 异动增长",
                  "related_dims": ["P1-3 新协议 TVL"]},
                 opportunities, excluded, t,
@@ -1669,6 +1853,9 @@ def score_opportunities(overview: dict) -> dict:
         degraded.append("P1-1 链榜缺失")
     if not divergence:
         degraded.append("P1-2 背离信号缺失")
+
+    # 按 conviction_score 降序排列
+    opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
 
     status = "ok"
     if not opportunities:

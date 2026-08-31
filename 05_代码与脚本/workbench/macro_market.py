@@ -747,6 +747,66 @@ def fetch_btc_onchain_signals() -> dict:
         return {"status": "error", "error": str(e)}
 
 
+def fetch_cm_activity_signals() -> dict:
+    """CM 多资产链上活跃/采用信号（网络健康/采用背离）。
+
+    读取 biz.cm_asset_onchain_daily + cm_onchain_percentile_full 的活跃地址分位，
+    用于机会引擎「静默积累/采用增长」与「网络衰退」判定。
+
+    - SOL 免费档 403，排除。
+    - adr_pct（活跃地址历史分位）+ roi_30d（近30日收益）构造背离：
+      活跃地址高位 + 价格未跟上（roi30d 低/负）= 静默积累/采用增长（long）
+      活跃地址崩盘（adr_pct < 10）= 网络衰退（watch）
+
+    返回 {status, coins: [{symbol, adr_pct, tx_pct, roi_30d, roi_1yr, signal}], metric_date}。
+    """
+    try:
+        from db_stats import get_cm_activity_dashboard
+
+        data = get_cm_activity_dashboard()
+        if not data.get("ok"):
+            return {"status": "error", "error": "no cm activity data", "coins": []}
+
+        coins = []
+        for a in data.get("cm_activity") or []:
+            symbol = (a.get("symbol") or "").upper()
+            # SOL 免费档 403，明确排除
+            if symbol == "SOL":
+                continue
+            adr_pct = a.get("adr_pct")
+            tx_pct = a.get("tx_pct")
+            roi_30d = a.get("roi_30d")
+            roi_1yr = a.get("roi_1yr")
+            roi_30d_pct = a.get("roi_30d_pct")
+
+            signal = "neutral"
+            if adr_pct is not None:
+                # 活跃地址高位 + 30d 收益分位偏低 → 采用增长但价格未跟上（静默积累）
+                if adr_pct >= 70 and roi_30d_pct is not None and roi_30d_pct <= 45:
+                    signal = "accumulation"  # 静默积累 / 采用增长
+                elif adr_pct < 10:
+                    signal = "decline"       # 网络衰退
+                elif roi_30d is not None and roi_30d < 0:
+                    signal = "weak"          # 活跃尚可但短期承压
+
+            coins.append({
+                "symbol": symbol,
+                "adr_pct": round(adr_pct, 1) if adr_pct is not None else None,
+                "tx_pct": round(tx_pct, 1) if tx_pct is not None else None,
+                "roi_30d": round(roi_30d, 2) if roi_30d is not None else None,
+                "roi_1yr": round(roi_1yr, 2) if roi_1yr is not None else None,
+                "signal": signal,
+            })
+
+        return {
+            "status": "ok",
+            "coins": coins,
+            "metric_date": data.get("metric_date"),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "coins": []}
+
+
 def fetch_binance_etf_flows() -> dict:
     """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。"""
     api_key = os.environ.get("CRYPTOETF_KEY", "")
@@ -1862,6 +1922,39 @@ def score_opportunities(overview: dict) -> dict:
             opportunities, excluded, t,
         )
 
+    # ── 1b) 多资产采用背离 / 网络健康（CM 第三刀） ──
+    cm_act = ((overview.get("dimensions") or {}).get("6a网络健康") or {}).get("data") or {}
+    if cm_act.get("status") == "ok":
+        for act_coin in (cm_act.get("coins") or []):
+            sig = act_coin.get("signal")
+            if sig == "accumulation":
+                conviction = _compute_conviction_score(
+                    mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+                    cycle_phase=cycle_phase,
+                    funding=funding_latest, exchange_netflow=ex_netflow,
+                    stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+                )
+                _push_opportunity(
+                    {"target": act_coin["symbol"], "direction": "long", "confidence": "medium",
+                     "conviction_score": conviction,
+                     "trigger_logic": (
+                         f"{act_coin['symbol']} 活跃地址 {act_coin.get('adr_pct')}% 分位 + "
+                         f"30d 收益 {act_coin.get('roi_30d')}% → 采用增长但价格未跟上（静默积累）"
+                     ),
+                     "related_dims": ["6a网络健康 CM 采用背离"]},
+                    opportunities, excluded, t,
+                )
+            elif sig == "decline":
+                _push_opportunity(
+                    {"target": act_coin["symbol"], "direction": "watch", "confidence": "low",
+                     "conviction_score": 0,
+                     "trigger_logic": (
+                         f"{act_coin['symbol']} 活跃地址 {act_coin.get('adr_pct')}% 分位 → 网络衰退警示"
+                     ),
+                     "related_dims": ["6a网络健康 CM 网络衰退"]},
+                    opportunities, excluded, t,
+                )
+
     # ── 2) 杠杆过热 / 风险规避（short） ──
     risk_sources: list[tuple[str, str]] = []
     risk_metrics: list[str] = []
@@ -2361,6 +2454,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     event_calendar = fetch_event_calendar()
     onchain = fetch_onchain_anomaly_signals()
     btc_onchain = fetch_btc_onchain_signals()  # CM Community BTC 链上指标
+    cm_activity = fetch_cm_activity_signals()  # CM 多资产活跃/采用信号
 
     # 若链上 CEX 净流量可用，用其归一化分值覆盖 cryptoetf cefi（优先级更高）
     if onchain.get("status") == "ok" and onchain.get("cefi_score") is not None:
@@ -2504,6 +2598,11 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             "6链上": {
                 "data": btc_onchain,
                 "status": btc_onchain.get("status", "error"),
+            },
+            # 6a网络健康: CM 多资产活跃/采用信号（第三刀）
+            "6a网络健康": {
+                "data": cm_activity,
+                "status": cm_activity.get("status", "error"),
             },
         },
         "event_calendar": event_calendar,

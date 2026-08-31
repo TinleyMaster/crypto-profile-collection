@@ -7200,26 +7200,48 @@
             const oppExcluded = (data.opportunity_list || {}).excluded || [];
             renderSignalHighlight(oppList, oppExcluded);
 
-            // 机会清单卡（P1-4：异常→机会评分）
-            html += `<div class="dim-card">
+            // 机会清单卡（第五刀：HIGH/MED/LOW 分级渲染 + conviction_score）
+            const highOpps = oppList.filter(o => o.conviction_tier === 'HIGH');
+            const medOpps = oppList.filter(o => o.conviction_tier === 'MED');
+            const lowOpps = oppList.filter(o => !o.conviction_tier || o.conviction_tier === 'LOW');
+
+            html += `<div class="dim-card" style="border-left:3px solid ${highOpps.length ? '#dc2626' : medOpps.length ? '#f59e0b' : '#94a3b8'}">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🎯</span>
                     <span class="dim-card-title">机会清单</span>
-                    <span class="dim-card-score neutral">全部条目</span>
+                    <span class="dim-card-score neutral">${highOpps.length ? '🔴 ' + highOpps.length + ' HIGH' : ''} ${medOpps.length ? '🟡 ' + medOpps.length + ' MED' : ''} ${oppList.length} 条</span>
                 </div>
                 <div class="dim-metrics">`;
-            if (oppList.length) {
-                oppList.forEach(function (o) {
-                    const confCls = o.confidence === 'high' ? 'up' : (o.confidence === 'medium' ? 'neutral' : 'down');
-                    const dirTxt = o.direction === 'long' ? '多' : o.direction === 'short' ? '空' : '中性';
-                    const dirCls = o.direction === 'long' ? 'up' : o.direction === 'short' ? 'down' : 'neutral';
-                    html += `<div class="dim-metric-row">
-                        <span class="dim-metric-label">${o.target} <small style="color:#6b7280">${o.direction}</small></span>
-                        <span class="dim-metric-val ${dirCls}">${dirTxt} · ${o.confidence}</span>
-                    </div>`;
-                    html += `<div class="dim-conclusion" style="margin-top:2px;padding-top:2px;border-top:none;font-size:11px">${o.trigger_logic || ''} <small style="color:#6b7280">[${(o.related_dims || []).join(', ')}]</small></div>`;
-                });
-            } else {
+
+            function renderOpp(o) {
+                const tier = o.conviction_tier || '?';
+                const score = o.conviction_score != null ? o.conviction_score : '?';
+                const tierColor = tier === 'HIGH' ? '#dc2626' : tier === 'MED' ? '#f59e0b' : '#94a3b8';
+                const tierBg = tier === 'HIGH' ? '#fef2f2' : tier === 'MED' ? '#fffbeb' : '#f8fafc';
+                const dirTxt = o.direction === 'long' ? '📈 多' : o.direction === 'short' ? '📉 空' : '➡️ 中性';
+                const dirCls = o.direction === 'long' ? 'up' : o.direction === 'short' ? 'down' : 'neutral';
+                return `<div style="padding:8px;margin:4px 0;border-radius:6px;border-left:3px solid ${tierColor};background:${tierBg}">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <span><b>${o.target}</b> <span class="${dirCls}" style="font-weight:600">${dirTxt}</span></span>
+                        <span style="font-size:12px;color:${tierColor};font-weight:600">${tier} · ${score}</span>
+                    </div>
+                    <div style="font-size:12px;color:#475569;margin-top:3px">${o.trigger_logic || ''}</div>
+                    <div style="font-size:11px;color:#94a3b8;margin-top:2px">${(o.related_dims || []).map(d => '<span style="background:#e2e8f0;padding:1px 4px;border-radius:3px;margin-right:3px">' + d + '</span>').join('')}</div>
+                </div>`;
+            }
+
+            // HIGH 置顶
+            highOpps.forEach(o => { html += renderOpp(o); });
+            // MED 次之
+            medOpps.forEach(o => { html += renderOpp(o); });
+            // LOW 折叠
+            if (lowOpps.length) {
+                html += `<details style="margin-top:6px"><summary style="font-size:12px;color:#6b7280;cursor:pointer">观察池 (${lowOpps.length} 条低置信)</summary>`;
+                lowOpps.forEach(o => { html += renderOpp(o); });
+                html += `</details>`;
+            }
+
+            if (!oppList.length) {
                 html += `<div class="dim-metric-row"><span class="dim-metric-label">机会清单</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无高置信机会</span></div>`;
             }
             if (oppExcluded.length) {

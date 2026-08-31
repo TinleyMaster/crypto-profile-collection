@@ -126,6 +126,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("cm_obm_ingest", "30 4 * * 1,3,5", "ingest_obm_btc_daily.py", [], "OBM BTC 链上指标入库（周一三五 04:30）"),
     ("cm_incremental", "30 6 * * *", "backfill_cm_onchain.py", ["--incremental"], "CM 链上指标 T-1 增量拉取（每日 06:30）"),
     ("cm_validate_onchain", "0 7 * * *", "validate_cm_onchain.py", [], "CM 链上指标入库验证（每日 07:00）"),
+
+    # ═══ 每日早报（P1-4 第二刀：快照落库 + 趋势 diff，早于邮件发送）═══
+    ("daily_brief_snapshot", "30 8 * * *", "build_daily_brief.py", [], "每日早报快照落库+趋势diff（Asia/Shanghai 08:30）"),
 ]
 
 

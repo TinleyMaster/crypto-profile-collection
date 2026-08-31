@@ -2163,6 +2163,243 @@ def score_opportunities(overview: dict) -> dict:
     }
 
 
+# ══════════════════════════════════════════════════════════════
+# P1-4 第二刀 · 早报趋势层（走势感 + 流动性 regime）
+# ══════════════════════════════════════════════════════════════
+
+def _ensure_snapshot_table(conn) -> None:
+    """确保快照表存在（Zeabur FS ephemeral，必须落 DB）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS biz.market_overview_snapshot (
+                snap_date  DATE PRIMARY KEY,
+                payload    JSONB NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snap_date ON biz.market_overview_snapshot (snap_date DESC)"
+        )
+
+
+def save_snapshot(snap_date: str, overview: dict) -> None:
+    """落库当日 overview 快照，供次日 diff。"""
+    import json
+
+    from db_stats import get_db
+
+    with get_db() as conn:
+        _ensure_snapshot_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO biz.market_overview_snapshot (snap_date, payload)
+                VALUES (%s, %s::jsonb)
+                ON CONFLICT (snap_date) DO UPDATE SET
+                    payload = EXCLUDED.payload, created_at = now()
+                """,
+                (snap_date, json.dumps(overview, default=str)),
+            )
+
+
+def load_snapshot(snap_date: str) -> dict | None:
+    """读某日 overview 快照；无则返回 None（表未建/无行均返回 None，不报错）。"""
+    from db_stats import get_db
+
+    with get_db() as conn:
+        _ensure_snapshot_table(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload FROM biz.market_overview_snapshot WHERE snap_date = %s",
+                (snap_date,),
+            )
+            row = cur.fetchone()
+            return dict(row[0]) if row and row[0] else None
+
+
+def _pct(cur, prev):
+    """百分比变化（%）；prev 缺失/0 返回 None。"""
+    if prev in (None, 0):
+        return None
+    return round((cur - prev) / abs(prev) * 100, 2)
+
+
+def _fg_value(sub: dict) -> float | None:
+    """从 emotion_subscore 取恐贪原始值（components.fear_greed.value），缺失回退 composite score。"""
+    comp = ((sub or {}).get("components") or {}).get("fear_greed") or {}
+    v = comp.get("value")
+    if v is None:
+        v = (sub or {}).get("score")
+    return v
+
+
+def _flow_dir_change(y_flow, t_flow):
+    """机构 ETF 净流方向变化：in/out/flat × 前后 → 'in→out' 等；缺失 None。"""
+    def _sign(v):
+        if v is None:
+            return None
+        if v > 100:
+            return "in"
+        if v < -100:
+            return "out"
+        return "flat"
+
+    ys, ts = _sign(y_flow), _sign(t_flow)
+    if ys is None or ts is None:
+        return None
+    if ys == ts:
+        return "stable"
+    return f"{ys}→{ts}"
+
+
+def _netflow_slope(t: dict) -> float | None:
+    """链上净流 7d 斜率（近 7d 均值 vs 前 7d 均值 %）。字段缺失 → None（降级铁律）。"""
+    oc = (t.get("onchain_anomaly_signals") or {}).get("daily_netflows_30d")
+    if not isinstance(oc, list):
+        return None
+    pts = [
+        float(x.get("netflow"))
+        for x in oc
+        if isinstance(x, dict) and x.get("netflow") is not None
+    ]
+    if len(pts) < 14:
+        return None
+    recent = sum(pts[-7:]) / 7
+    prior = sum(pts[-14:-7]) / 7
+    if prior == 0:
+        return None
+    return round((recent - prior) / abs(prior) * 100, 2)
+
+
+def diff_overview(y: dict, t: dict) -> dict:
+    """字段级 diff（走势感主干）。y=昨日，t=今日；缺失项显式 None，不插值不补 0。"""
+    yg = ((y.get("dimensions") or {}).get("1体量") or {}).get("data") or {}
+    tg = ((t.get("dimensions") or {}).get("1体量") or {}).get("data") or {}
+    ye = (y.get("summary") or {}).get("emotion_subscore") or {}
+    te = (t.get("summary") or {}).get("emotion_subscore") or {}
+    yf = ((y.get("dimensions") or {}).get("4机构") or {}).get("data") or {}
+    tf = ((t.get("dimensions") or {}).get("4机构") or {}).get("data") or {}
+
+    y_opps = {o.get("target"): o for o in ((y.get("opportunity_list") or {}).get("opportunities") or [])}
+    t_opps = {o.get("target"): o for o in ((t.get("opportunity_list") or {}).get("opportunities") or [])}
+    new_high = [
+        k for k, o in t_opps.items()
+        if o.get("conviction_tier") == "HIGH" and k not in y_opps
+    ]
+    gone = [k for k in y_opps if k not in t_opps]
+
+    return {
+        "total_mcap_pct": _pct(tg.get("total_market_cap"), yg.get("total_market_cap")),
+        "btc_dom_pct_chg": round(
+            (tg.get("btc_dominance") or 0) - (yg.get("btc_dominance") or 0), 2
+        ),
+        "fear_greed_chg": round((_fg_value(te) or 0) - (_fg_value(ye) or 0), 2),
+        "inst_netflow_dir": _flow_dir_change(
+            yf.get("net_flow_usd_m"), tf.get("net_flow_usd_m")
+        ),
+        "onchain_7d_slope": _netflow_slope(t),
+        "new_high_opps": new_high,
+        "gone_opps": gone,
+    }
+
+
+def fetch_stablecoin_supply_trend() -> dict:
+    """DeFiLlama 免费：稳定币总供给 + 1d/7d 环比（stablecoincharts/All 末点差分）。
+    返回 {total_usd, change_1d_pct, change_7d_pct, status}；失败 status=error（降级不显 0）。"""
+    try:
+        r = requests.get(
+            "https://stablecoins.llama.fi/stablecoincharts/All",
+            timeout=30,  # 响应 ~1.2MB，给足读超时
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error"}
+        def _val(row):
+            return ((row or {}).get("totalCirculating") or {}).get("peggedUSD")
+        pts = [v for v in (_val(x) for x in rows) if v is not None]
+        if not pts:
+            return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error"}
+        total = _safe_float(pts[-1])
+        return {
+            "total_usd": total,
+            "change_1d_pct": _pct(pts[-1], pts[-2]) if len(pts) >= 2 else None,
+            "change_7d_pct": _pct(pts[-1], pts[-8]) if len(pts) >= 8 else None,
+            "status": "ok",
+        }
+    except Exception as e:
+        return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error", "error": str(e)}
+
+
+def _build_tldr(today: dict, opps: list) -> str:
+    cycle = today.get("btc_cycle") or {}
+    parts = [f"BTC 周期：{cycle.get('phase_label') or cycle.get('phase') or '未知'}"]
+    high = [o for o in opps if o.get("conviction_tier") == "HIGH"]
+    if high:
+        parts.append(f"高确定性机会 {len(high)} 条（{', '.join(str(o.get('target')) for o in high[:3])}）")
+    else:
+        parts.append("无 HIGH 机会（观察 MED）")
+    return "；".join(parts)
+
+
+def _build_flow(today: dict, diff: dict | None, stab: dict) -> dict:
+    g = ((today.get("dimensions") or {}).get("1体量") or {}).get("data") or {}
+    return {
+        "total_market_cap": g.get("total_market_cap"),
+        "btc_dominance": g.get("btc_dominance"),
+        "total_mcap_pct_chg": (diff or {}).get("total_mcap_pct"),
+        "stablecoin_total_usd": stab.get("total_usd"),
+        "stablecoin_change_1d_pct": stab.get("change_1d_pct"),
+        "stablecoin_change_7d_pct": stab.get("change_7d_pct"),
+        "stablecoin_status": stab.get("status"),
+    }
+
+
+def _collect_degraded(today: dict) -> list[str]:
+    out: list[str] = []
+    for k, v in (today.get("dimensions") or {}).items():
+        if isinstance(v, dict) and v.get("status") in ("error", "degraded"):
+            out.append(f"{k}: {v.get('status')}")
+    for block in ("divergence_signals", "opportunity_list"):
+        b = today.get(block) or {}
+        for d in (b.get("degraded") or []):
+            out.append(f"{block}: {d}")
+    return out
+
+
+def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
+    """
+    早报结构化骨架（设计文档第七节）。消费 overview 已有字段，不改 API 层。
+    返回 {M0~M6, DIFF}；首跑 yesterday=None → DIFF=None 不报错。
+    """
+    cycle = today.get("btc_cycle") or {}
+    diff = diff_overview(yesterday, today) if yesterday else None
+    stab = fetch_stablecoin_supply_trend()
+    opps = (today.get("opportunity_list") or {}).get("opportunities") or []
+    divs = (today.get("divergence_signals") or {}).get("signals") or []
+
+    return {
+        "M0_tldr": _build_tldr(today, opps),
+        "M1_cycle": cycle,
+        "M2_flow": _build_flow(today, diff, stab),
+        "M3_divergence": [
+            d for d in divs
+            if d.get("label") in ("DANGEROUS", "DIVERGENT")
+        ],
+        "M4_opportunities": [
+            o for o in opps if o.get("conviction_tier") == "HIGH"
+        ],
+        "M4_watchlist": [
+            o for o in opps if o.get("conviction_tier") != "HIGH"
+        ],
+        "M5_catalyst": today.get("event_calendar") or {},
+        "M6_degraded": _collect_degraded(today),
+        "DIFF": diff,
+    }
+
+
 def fetch_event_calendar() -> dict:
     """获取事件日历（硬编码 FOMC + CoinGecko events）。仅展示，不参与子分。"""
     # 硬编码重要事件

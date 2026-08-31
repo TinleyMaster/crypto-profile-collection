@@ -1712,6 +1712,31 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
         opportunities.append(opp)
 
 
+def _normalize_symbol(target: str) -> str:
+    """机会 target → MVRV map 的 symbol 键（小写、去「链」后缀、别名归一）。匹配不到返回原小写。"""
+    if not target:
+        return ""
+    s = target.lower().strip()
+    for suf in (" 链", "链"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    aliases = {
+        "bitcoin": "btc", "ethereum": "eth", "solana": "sol",
+    }
+    return aliases.get(s, s)
+
+
+def _mvrv_pct_for(target: str, mvrv_map: dict) -> float | None:
+    """取机会对应币种的 MVRV 百分位；匹配不到回退 BTC 市场锚；map 空返回 None（不惩罚）。"""
+    if not mvrv_map:
+        return None
+    coin = mvrv_map.get(_normalize_symbol(target))
+    if coin is None:
+        coin = mvrv_map.get("btc")
+    return coin.get("pct_full") if coin else None
+
+
 def _compute_conviction_score(
     *,
     mvrv_pct: float | None,
@@ -1787,13 +1812,13 @@ def score_opportunities(overview: dict) -> dict:
     """
     聚合 P1-1~P1-3 + P0-3 真实字段合成机会清单。
     返回 {status, opportunities: [{target, direction, confidence, conviction_score,
-          trigger_logic, related_dims}], excluded, degraded}。
+          conviction_tier, trigger_logic, related_dims}], excluded, degraded}。
     任一上游信号缺失 → 该机会剔除/降级，不崩溃。
 
     P0 改进：
-    - P0-1: MVRV 极值 → 估值回归机会类
+    - P0-1: MVRV 极值 → 估值回归机会类（按标的 symbol 匹配 MVRV 百分位）
     - P0-2: BTC 周期相位 → conviction 调制器
-    - P0-3: 复合 conviction 分 (0-100)
+    - P0-3: 复合 conviction 分 (0-100) + tier (HIGH/MED/LOW，LOW 剔除)
     """
     t = OPPORTUNITY_THRESHOLDS
     d5 = (overview.get("dimensions") or {}).get("5板块") or {}
@@ -1812,6 +1837,7 @@ def score_opportunities(overview: dict) -> dict:
     mvrv_dim = (overview.get("dimensions") or {}).get("mvrv_universe") or {}
     mvrv_data = mvrv_dim.get("data") or {}
     mvrv_coins = mvrv_data.get("coins") or []
+    mvrv_map = {str(c.get("symbol", "")).lower(): c for c in mvrv_coins if c.get("symbol")}
 
     # P0-2: BTC 周期相位
     btc_cycle = overview.get("btc_cycle") or {}
@@ -1917,7 +1943,7 @@ def score_opportunities(overview: dict) -> dict:
     if btc_left_sources:
         conf, direction = _resolve_confidence(btc_left_sources, t)
         conviction = _compute_conviction_score(
-            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -1944,7 +1970,7 @@ def score_opportunities(overview: dict) -> dict:
             sig = act_coin.get("signal")
             if sig == "accumulation":
                 conviction = _compute_conviction_score(
-                    mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+                    mvrv_pct=_mvrv_pct_for(act_coin.get("symbol"), mvrv_map),
                     cycle_phase=cycle_phase,
                     funding=funding_latest, exchange_netflow=ex_netflow,
                     stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -1983,7 +2009,7 @@ def score_opportunities(overview: dict) -> dict:
     if risk_sources:
         conf, direction = _resolve_confidence(risk_sources, t)
         conviction = _compute_conviction_score(
-            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -2015,7 +2041,7 @@ def score_opportunities(overview: dict) -> dict:
             related = ["P1-1 叙事榜（市值）"]
             trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
         conviction = _compute_conviction_score(
-            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            mvrv_pct=_mvrv_pct_for(row.get("narrative"), mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -2037,7 +2063,7 @@ def score_opportunities(overview: dict) -> dict:
         if flow < t.get("chain_min_flow_usd", 200_000_000) or flow_pct < t.get("chain_min_flow_pct", 3.0):
             continue
         conviction = _compute_conviction_score(
-            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            mvrv_pct=_mvrv_pct_for(f"{row.get('chain')} 链", mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -2055,7 +2081,7 @@ def score_opportunities(overview: dict) -> dict:
     if ndx_sig.get("status") == "ok" and ndx_sig.get("label") == "DIVERGENT":
         interp = ndx_sig.get("interpretation", "宏观脱钩")
         conviction = _compute_conviction_score(
-            mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+            mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
@@ -2075,7 +2101,7 @@ def score_opportunities(overview: dict) -> dict:
             if not isinstance(p, dict):
                 continue
             conviction = _compute_conviction_score(
-                mvrv_pct=(mvrv_coins[0].get("pct_full") if mvrv_coins else None),
+                mvrv_pct=_mvrv_pct_for(p.get("name"), mvrv_map),
                 cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,

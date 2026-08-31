@@ -59,7 +59,9 @@ opportunity_rules:
   stablecoin_flow_min_usd: 5000000000   # 稳定币净流入显著阈值（50 亿美元）
   emotion_fear_max: 50                  # 恐贪 < 50 视为恐惧（左侧信号）
   resonance_high_min_sources: 2         # 高置信最少独立源类型数
-  push_confidence_threshold: medium     # 默认只推 高+中（low 剔除）
+  push_confidence_threshold: medium     # 默认只推 高+中（low 剔除，语义由 conviction 承接）
+  conviction_high_min: 75               # conviction ≥75 → HIGH 置顶
+  conviction_med_min: 55                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
   protocol_top_n: 3                     # P1-3 新协议 TVL 异动取前 N
   exchange_netflow_min_usd: 100000000   # 交易所净流出触发 long 信号最小阈值（1 亿美元）
 

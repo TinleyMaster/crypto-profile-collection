@@ -282,6 +282,10 @@ def insert_signal(data: dict) -> dict | None:
         "symbol", "entry_condition", "entry_price", "stop_loss",
         "take_profit", "leverage", "support_level", "resistance_level",
         "already_entered", "has_pnl_number", "confidence",
+        # 链上信号维度（onchain 专用，trading 类为 null）
+        "signal_category", "signal_subtype", "event_direction",
+        "from_address", "to_address", "event_amount", "event_token",
+        "event_usd_value", "tx_hash", "event_exchange", "address_label", "event_time",
     ]
     columns = ", ".join(fields)
     placeholders = ", ".join([f"%({f})s" for f in fields])
@@ -349,6 +353,7 @@ def list_signals_pending_alert(confidence_threshold: float = 0.8,
             "JOIN biz.kol_post p ON s.post_id = p.post_id "
             "JOIN biz.kol_profile pr ON s.profile_id = pr.profile_id "
             "WHERE s.post_type IN ('prediction', 'analysis') "
+            "  AND COALESCE(s.signal_category, 'trading') <> 'onchain' "
             "  AND s.already_entered = FALSE "
             "  AND s.confidence >= %s "
             "  AND s.is_alerted = FALSE "

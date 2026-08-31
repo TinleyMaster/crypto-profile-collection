@@ -46,11 +46,12 @@ def _get_llm() -> LLMClient | None:
 SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任务是分析 KOL（关键意见领袖）发布的帖子，
 判断其类型并提取结构化交易信息。
 
-## 分类总览（四选一）
+## 分类总览（五选一）
 
 | 类型 | 含义 | 跟单价值 |
 |---|---|---|
 | noise | 与交易/行情完全无关的内容（生活、营销、广告、闲聊、转发等） | 无 |
+| onchain | 链上数据/资金流监控（鲸鱼转账、交易所流入流出、爆仓清算、吸筹派发、聪明钱异动），客观事实情报，无主观操作建议 | 中（情报/归因） |
 | analysis | 纯行情分析/观点分享，无明确操作建议 | 低（参考） |
 | prediction | 前瞻喊单：给出明确入场条件，博主尚未进场 | 高（可跟单） |
 | after_action | 事后晒单：已进场或已有盈亏结果 | 中（验证用） |
@@ -64,6 +65,26 @@ SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任�
 - 纯闲聊/吐槽/灌水，无实质观点
 - 纯转发/搬运，无自己的分析
 - 只有图片/表情，无有效文字内容
+
+### 第 1.5 优先级：onchain（链上情报）
+满足以下任一特征即为 onchain（signal_category="onchain"）：
+- 出现链上主体词："某地址"、"某大户"、"某鲸鱼"、"巨鲸"、"聪明钱"、"0x..."、"机构地址"、"基金地址"
+- 出现链上动作词："充值"、"提现"、"转入"、"转出"、"转账"、"流入"、"流出"、"清算"、"爆仓"、"加仓"、"减仓"、"建仓"、"出货"、"吸筹"、"派发"、"解锁"
+- 出现交易所名 + 资金方向："转入 Binance"、"从 OKX 提走"、"充值至 Coinbase"
+- 出现具体链上金额 + 币种："3.2 万枚 ETH"、"5000 万 USDT"、"1200 枚 BTC"
+- 出现清算/爆仓描述："在 $2487 被清算"、"多头爆仓 X 万"、"空单被强平"
+
+细分 signal_subtype：
+- 大额转账且涉及交易所 ↔ exchange_flow（inflow/outflow 由方向判断）
+- 纯地址间大额转移 ↔ whale_move
+- 明确"爆仓/清算" ↔ liquidation
+- "持续买入/建仓 N 天" ↔ accumulation
+- "出货/减仓" ↔ distribution（event_direction=distributing）
+- 已知机构/聪明钱地址异动 ↔ smart_money
+
+注意：
+- onchain 帖子若同时含主观操作建议（如"我也跟着买"），优先 onchain（情报为主），direction 仍提取但 signal_category 不变
+- onchain 帖子 direction 通常留 null，改用 event_direction 描述事实方向
 
 ### 第 2 优先级：after_action（事后晒单）
 满足以下任一条件即为 after_action：
@@ -122,7 +143,7 @@ SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任�
 严格输出 JSON，不要任何解释文字，不要 markdown 代码块。字段如下：
 
 {
-  "post_type": "noise | prediction | after_action | analysis",
+  "post_type": "noise | onchain | prediction | after_action | analysis",
   "direction": "long | short | neutral",
   "symbol": "BTC",
   "entry_condition": "突破 66600 做多",
@@ -134,8 +155,33 @@ SYSTEM_PROMPT = """你是一个加密货币交易信号分析专家。你的任�
   "resistance_level": 68000.0,
   "already_entered": false,
   "has_pnl_number": false,
-  "confidence": 0.95
+  "confidence": 0.95,
+  "signal_category": "trading",
+  "signal_subtype": null,
+  "event_direction": null,
+  "from_address": null,
+  "to_address": null,
+  "event_amount": null,
+  "event_token": null,
+  "event_usd_value": null,
+  "tx_hash": null,
+  "event_exchange": null,
+  "address_label": null,
+  "event_time": null
 }
+
+## 链上字段说明（仅 onchain 类型填写）
+- signal_category: "onchain"（链上情报类）
+- signal_subtype: whale_move / exchange_flow / liquidation / accumulation / distribution / smart_money
+- event_direction: inflow / outflow / liquidated_long / liquidated_short / accumulating / distributing
+- from_address / to_address: 转账地址或交易所名
+- event_amount: 转账数量（数值）
+- event_token: 币种符号（大写）
+- event_usd_value: 折算美元金额（数值）
+- tx_hash: 交易哈希（如有）
+- event_exchange: 涉及交易所（Binance/Coinbase/OKX 等）
+- address_label: 地址标签（Jump/Wintermute/某巨鲸/未知）
+- event_time: 链上实际发生时间（ISO 格式，如有）
 
 ## 注意事项
 - 如果帖子提到多个币种，取最主要的那个
@@ -253,6 +299,41 @@ def _normalize_result(data: dict) -> dict:
     if post_type != "noise" and (already_entered or has_pnl_number):
         post_type = "after_action"
 
+    # ── 链上信号维度（onchain 专用）──
+    signal_category = str(data.get("signal_category", "trading")).lower().strip()
+    if signal_category not in ("trading", "onchain", "news"):
+        signal_category = "trading"
+    # post_type=onchain 时 signal_category 强制 onchain
+    if post_type == "onchain":
+        signal_category = "onchain"
+
+    signal_subtype = data.get("signal_subtype")
+    if signal_subtype:
+        signal_subtype = str(signal_subtype).strip() or None
+
+    event_direction = data.get("event_direction")
+    if event_direction:
+        event_direction = str(event_direction).lower().strip()
+        if event_direction not in ("inflow", "outflow", "liquidated_long",
+                                   "liquidated_short", "accumulating", "distributing"):
+            event_direction = None
+
+    # onchain 类若无主观 direction，强制留 null
+    if signal_category == "onchain" and not data.get("direction"):
+        direction = None
+
+    from_address = data.get("from_address") or None
+    to_address = data.get("to_address") or None
+    event_amount = _to_float(data.get("event_amount"))
+    event_token = data.get("event_token")
+    if event_token:
+        event_token = str(event_token).upper().strip() or None
+    event_usd_value = _to_float(data.get("event_usd_value"))
+    tx_hash = data.get("tx_hash") or None
+    event_exchange = data.get("event_exchange") or None
+    address_label = data.get("address_label") or None
+    event_time = data.get("event_time") or None
+
     return {
         "post_type": post_type,
         "direction": direction,
@@ -267,6 +348,18 @@ def _normalize_result(data: dict) -> dict:
         "already_entered": already_entered,
         "has_pnl_number": has_pnl_number,
         "confidence": confidence,
+        "signal_category": signal_category,
+        "signal_subtype": signal_subtype,
+        "event_direction": event_direction,
+        "from_address": from_address,
+        "to_address": to_address,
+        "event_amount": event_amount,
+        "event_token": event_token,
+        "event_usd_value": event_usd_value,
+        "tx_hash": tx_hash,
+        "event_exchange": event_exchange,
+        "address_label": address_label,
+        "event_time": event_time,
     }
 
 

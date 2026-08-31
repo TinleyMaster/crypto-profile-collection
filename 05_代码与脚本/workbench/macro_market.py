@@ -173,7 +173,7 @@ def fetch_cmc_global_metrics() -> dict:
         )
         r.raise_for_status()
         data = r.json().get("data", {})
-        quote = data.get("quote", [{}])[0] if data.get("quote") else {}
+        quote = (data.get("quote") or {}).get("USD", {})
         total_mcap = _safe_float(quote.get("total_market_cap"))
         if total_mcap > 0:
             return {
@@ -655,9 +655,10 @@ def fetch_binance_etf_flows() -> dict:
         )
         r.raise_for_status()
         data = r.json().get("data", {})
+        raw_flow = data.get("netFlowUsdM")
         return {
-            "net_flow_usd_m": _safe_float(data.get("netFlowUsdM")),
-            "status": "ok",
+            "net_flow_usd_m": _safe_float(raw_flow) if raw_flow is not None else None,
+            "status": "ok" if raw_flow is not None else "partial",
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -675,7 +676,7 @@ def fetch_cmc_categories() -> dict:
         data = r.json().get("data", [])
         categories = []
         for cat in data[:10]:
-            quote = cat.get("quote", [{}])[0] if cat.get("quote") else {}
+            quote = (cat.get("quote") or {}).get("USD", {})
             categories.append({
                 "name": cat.get("name", ""),
                 "market_cap_change_24h": _safe_float(quote.get("market_cap_change_24h")),
@@ -1693,6 +1694,7 @@ def fetch_event_calendar() -> dict:
 
     # CoinGecko events 兜底
     gecko_events = []
+    gecko_error = None
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/events",
@@ -1707,13 +1709,15 @@ def fetch_event_calendar() -> dict:
                 "event": evt.get("title", ""),
                 "type": "crypto",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        gecko_error = str(e)
 
+    gecko_ok = bool(gecko_events)
     return {
         "hardcoded": hardcoded_events,
         "gecko": gecko_events,
-        "status": "ok",
+        "status": "ok" if gecko_ok else "degraded",
+        "gecko_error": gecko_error if not gecko_ok else None,
     }
 
 
@@ -2116,6 +2120,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         btc_dominance_extreme=btc_dom_extreme,
     )
 
+    # ── B3: 多币 MVRV 极值（提前计算，避免重复调用） ──
+    mvrv_data = _build_mvrv_universe()
+
     # ── 组装结果 ──
     result = {
         "summary": {
@@ -2139,7 +2146,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                 "data": derivatives,
             },
             "3情绪": {
-                "status": "ok" if all(x.get("status") == "ok" for x in [fear_greed, altcoin_season]) else "partial",
+                "status": "ok" if all(x.get("status") == "ok" for x in [fear_greed, altcoin_season, cefi]) else "partial",
                 "data": {
                     "fear_greed": fear_greed,
                     "altcoin_season": altcoin_season,
@@ -2165,8 +2172,11 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                     "stablecoin_flow_extreme": sc_flow_extreme,
                 },
             },
-            # B3: 多币 MVRV 极值汇总
-            "mvrv_universe": _build_mvrv_universe(),
+            # B3: 多币 MVRV 极值汇总（统一包裹 data+status）
+            "mvrv_universe": {
+                "data": mvrv_data,
+                "status": mvrv_data.get("status", "error"),
+            },
         },
         "event_calendar": event_calendar,
         "divergence_signals": divergence,

@@ -245,73 +245,92 @@ def _search_tokenomist_slug(symbol: str, name: str) -> str | None:
     return None
 
 
-def _search_tokenomist_slug_browser(symbol: str, name: str = "") -> str | None:
+def _search_tokenomist_slug_browser(symbol: str, name: str = "",
+                                     playwright_p=None) -> str | None:
     """用无头浏览器打开 tokenomics.com 首页，按 symbol 匹配代币 slug。
 
     /api/search 用 requests 常被 Cloudflare 拦截，改用真实浏览器渲染首页后，
     从页面里的 token 链接（/tokenomics/{slug}）匹配 symbol 得到正确 slug。
     用于解决数据库 name 与 tokenomics slug 不一致的情况（如 AKEDO → akedo-games）。
+
+    复用 scrape_tokenomist 已启动的 Playwright 实例（playwright_p），
+    避免同一进程内嵌套 sync_playwright() 触发 "Sync API inside asyncio loop"。
+    playwright_p=None 时自行启动并收口（向后兼容独立调用）。
     """
+    own_p = playwright_p is None
+    p = playwright_p
+    browser = None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ])
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/151.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+        if p is None:
+            p = sync_playwright().start()
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ])
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
 
-            _log("  [浏览器搜索] 打开 tokenomics.com 首页...")
-            try:
-                page.goto("https://app.tokenomics.com/", wait_until="domcontentloaded",
-                          timeout=NAV_TIMEOUT * 1000)
-            except PlaywrightTimeout:
-                _log("  [浏览器搜索] 首页加载超时，尝试用已有内容")
-            except Exception as e:
-                _log(f"  [浏览器搜索] 首页导航失败: {e}")
-                browser.close()
-                return None
-
-            page.wait_for_timeout(WAIT_MS)
-
-            # 优先尝试首页搜索框，缩小结果范围
-            _try_search_box(page, symbol)
-
-            # 遍历页面所有 token 链接，按 symbol 精确匹配
-            links = page.evaluate(
-                """() => Array.from(document.querySelectorAll('a[href*="/tokenomics/"]'))
-                    .map(a => ({href: a.href, text: (a.textContent || '').trim()}))
-                    .filter(x => x.href)"""
-            )
-            browser.close()
-
-            target = (symbol or "").strip().upper()
-            if not target:
-                return None
-
-            # 精确词边界匹配 symbol（避免 AKE 误匹配 AKEDO/AKEB 等）
-            pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(target)}(?![A-Za-z0-9])")
-            for it in links:
-                m = re.search(r"/tokenomics/([^/?#]+)", it.get("href", ""))
-                if not m:
-                    continue
-                slug = m.group(1)
-                if pattern.search((it.get("text") or "").upper()):
-                    _log(f"  [浏览器搜索] 首页匹配到 symbol {target} → slug: {slug}")
-                    return slug
-
-            _log(f"  [浏览器搜索] 首页未匹配到 symbol {target}")
+        _log("  [浏览器搜索] 打开 tokenomics.com 首页...")
+        try:
+            page.goto("https://app.tokenomics.com/", wait_until="domcontentloaded",
+                      timeout=NAV_TIMEOUT * 1000)
+        except PlaywrightTimeout:
+            _log("  [浏览器搜索] 首页加载超时，尝试用已有内容")
+        except Exception as e:
+            _log(f"  [浏览器搜索] 首页导航失败: {e}")
             return None
+
+        page.wait_for_timeout(WAIT_MS)
+
+        # 优先尝试首页搜索框，缩小结果范围
+        _try_search_box(page, symbol)
+
+        # 遍历页面所有 token 链接，按 symbol 精确匹配
+        links = page.evaluate(
+            """() => Array.from(document.querySelectorAll('a[href*="/tokenomics/"]'))
+                .map(a => ({href: a.href, text: (a.textContent || '').trim()}))
+                .filter(x => x.href)"""
+        )
+
+        target = (symbol or "").strip().upper()
+        if not target:
+            return None
+
+        # 精确词边界匹配 symbol（避免 AKE 误匹配 AKEDO/AKEB 等）
+        pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(target)}(?![A-Za-z0-9])")
+        for it in links:
+            m = re.search(r"/tokenomics/([^/?#]+)", it.get("href", ""))
+            if not m:
+                continue
+            slug = m.group(1)
+            if pattern.search((it.get("text") or "").upper()):
+                _log(f"  [浏览器搜索] 首页匹配到 symbol {target} → slug: {slug}")
+                return slug
+
+        _log(f"  [浏览器搜索] 首页未匹配到 symbol {target}")
+        return None
     except Exception as e:
         _log(f"  [WARN] 浏览器搜索 slug 失败: {e}")
         return None
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        # 仅当本函数自行启动时，才负责 stop；复用外层实例绝不碰 p
+        if own_p and p is not None:
+            try:
+                p.stop()
+            except Exception:
+                pass
 
 
 def _try_search_box(page, symbol: str) -> None:
@@ -592,7 +611,7 @@ def scrape_tokenomist(slugs: list[str], symbol: str = "", name: str = "",
 
             # 兜底2：无头浏览器在首页搜索（API 常被 Cloudflare 拦截）
             if not no_browser_search:
-                browser_slug = _search_tokenomist_slug_browser(symbol, name)
+                browser_slug = _search_tokenomist_slug_browser(symbol, name, playwright_p=p)
                 if browser_slug and browser_slug not in slugs:
                     _log(f"  [浏览器搜索兜底] 首页匹配到 slug: {browser_slug}")
                     return scrape_tokenomist([browser_slug], symbol, name,

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 # 路径兼容
@@ -153,7 +154,8 @@ def build_signal_alert_html(signal: dict, cross_data: dict) -> str:
     try:
         if isinstance(posted_at, str) and posted_at:
             dt = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
-            posted_at_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            dt_beijing = dt.astimezone(ZoneInfo("Asia/Shanghai"))
+            posted_at_str = dt_beijing.strftime("%Y-%m-%d %H:%M:%S 北京时间")
             delay = (datetime.now(timezone.utc) - dt).total_seconds()
             if delay < 60:
                 delay_str = f"{delay:.0f} 秒"

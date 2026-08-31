@@ -665,7 +665,7 @@ def fetch_btc_onchain_signals() -> dict:
                                sply_ex_usd, hash_rate, adr_act_cnt,
                                roi_1yr, roi_30d, price_usd
                         FROM biz.cm_asset_onchain_daily
-                        WHERE asset_id = (SELECT asset_id FROM core.asset WHERE UPPER(canonical_symbol) = 'BTC' LIMIT 1)
+                        WHERE cm_symbol = 'btc'
                           AND metric_date >= (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily) - INTERVAL '35 days'
                         ORDER BY metric_date
                     )
@@ -674,10 +674,12 @@ def fetch_btc_onchain_signals() -> dict:
                         (SELECT flow_out_ex_usd - flow_in_ex_usd FROM btc_daily
                          WHERE flow_in_ex_usd IS NOT NULL AND flow_out_ex_usd IS NOT NULL
                          ORDER BY metric_date DESC LIMIT 1) AS exchange_netflow_1d,
-                        -- 7d 累计净流
-                        (SELECT SUM(flow_out_ex_usd - flow_in_ex_usd) FROM btc_daily
-                         WHERE flow_in_ex_usd IS NOT NULL AND flow_out_ex_usd IS NOT NULL
-                         ORDER BY metric_date DESC LIMIT 7) AS exchange_netflow_7d,
+                        -- 7d 累计净流（子查询包裹避免 PG GROUP BY 问题）
+                        (SELECT SUM(net) FROM (
+                            SELECT flow_out_ex_usd - flow_in_ex_usd AS net FROM btc_daily
+                            WHERE flow_in_ex_usd IS NOT NULL AND flow_out_ex_usd IS NOT NULL
+                            ORDER BY metric_date DESC LIMIT 7
+                        ) _s) AS exchange_netflow_7d,
                         -- 交易所余额趋势：最新 vs 30d 前
                         (SELECT sply_ex_usd FROM btc_daily
                          WHERE sply_ex_usd IS NOT NULL
@@ -1202,7 +1204,9 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "stablecoin_flow_min_usd": 5_000_000_000,  # 稳定币净流入显著阈值（50 亿美元）
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
-    "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除）
+    "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除，语义由 conviction 承接）
+    "conviction_high_min": 75,               # conviction ≥75 → HIGH 置顶
+    "conviction_med_min": 55,                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
     # P0-1 MVRV 估值回归
@@ -1689,12 +1693,23 @@ def _resolve_confidence(sources: list[tuple[str, str]], t: dict) -> tuple[str, s
 
 
 def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict], t: dict) -> None:
-    """按推送阈值去噪：仅 高+中 进清单，low 进 excluded（可追溯）。"""
-    threshold = t.get("push_confidence_threshold", "medium")
-    if opp["confidence"] == threshold or opp["confidence"] == "high":
-        opportunities.append(opp)
-    else:
+    """写入 conviction_tier 并按 tier 过滤：LOW 进 excluded（可追溯），保留 confidence 向后兼容。
+
+    tier 语义（P1-4 第一刀）：conviction_score ≥ conviction_high_min → HIGH 置顶；
+    ≥ conviction_med_min → MED（观察池）；否则 LOW 剔除。旧 push_confidence_threshold 语义由 tier 承接。
+    """
+    score = opp.get("conviction_score")
+    if score is None:
+        score = 45
+        opp["conviction_score"] = score
+    high_min = int(t.get("conviction_high_min", 75))
+    med_min = int(t.get("conviction_med_min", 55))
+    tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
+    opp["conviction_tier"] = tier
+    if tier == "LOW":
         excluded.append(opp)
+    else:
+        opportunities.append(opp)
 
 
 def _compute_conviction_score(

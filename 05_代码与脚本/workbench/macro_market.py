@@ -830,12 +830,27 @@ def fetch_binance_etf_flows() -> dict:
             timeout=TIMEOUT,
         )
         r.raise_for_status()
-        data = r.json().get("data", {})
-        raw_flow = data.get("netFlowUsdM")
+        payload = r.json()
+        assets = payload.get("assets") or []
+        if not assets:
+            return {"status": "partial", "error": "empty assets", "net_flow_usd_m": None}
+        total = 0.0
+        btc_flow = None
+        for a in assets:
+            v = _safe_float(a.get("netFlowUsdM"))
+            if v is not None:
+                total += v
+            if a.get("symbol") == "BTC":
+                btc_flow = v
         return {
-            "net_flow_usd_m": _safe_float(raw_flow) if raw_flow is not None else None,
-            "status": "ok" if raw_flow is not None else "partial",
+            "net_flow_usd_m": round(total, 2),
+            "btc_net_flow_usd_m": btc_flow,
+            "as_of_date": assets[0].get("date"),
+            "status": "ok",
         }
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response else None
+        return {"status": "error", "error": f"HTTP {code}"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 

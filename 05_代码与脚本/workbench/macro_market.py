@@ -818,6 +818,38 @@ def fetch_cm_activity_signals() -> dict:
         return {"status": "error", "error": str(e), "coins": []}
 
 
+def fetch_btc_netflow_7d() -> float | None:
+    """从 CM 落库表取 BTC 近 7d 交易所净流(USD)。None=缺失(降级)。
+
+    净流 = FlowOutExUSD - FlowInExUSD（正=净流出=积累，负=净流入=抛压）。
+    以库内最新完整日为基准回看 7 天，避免 CURRENT_DATE 与数据滞后错位。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT SUM(flow_out_ex_usd - flow_in_ex_usd)
+                    FROM biz.cm_asset_onchain_daily
+                    WHERE cm_symbol = 'btc'
+                      AND flow_in_ex_usd IS NOT NULL
+                      AND flow_out_ex_usd IS NOT NULL
+                      AND metric_date > (
+                          SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily
+                          WHERE cm_symbol = 'btc'
+                      ) - INTERVAL '7 days'
+                """)
+                row = cur.fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+        return None
+    except Exception:
+        return None
+
+
 def fetch_binance_etf_flows() -> dict:
     """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。"""
     api_key = os.environ.get("CRYPTOETF_KEY", "")
@@ -1884,6 +1916,10 @@ def score_opportunities(overview: dict) -> dict:
     cm_netflow_7d = btc_onchain.get("exchange_netflow_7d")
     if cm_netflow_7d is not None:
         ex_netflow = cm_netflow_7d
+    # 第三刀：BTC per-asset 净流优先取 CM 落库表（可算 7d 斜率，最稳）
+    btc_db_netflow = fetch_btc_netflow_7d()
+    if btc_db_netflow is not None:
+        ex_netflow = btc_db_netflow
 
     btc_roi_1yr = btc_onchain.get("roi_1yr")
 
@@ -2401,40 +2437,32 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
 
 
 def fetch_event_calendar() -> dict:
-    """获取事件日历（硬编码 FOMC + CoinGecko events）。仅展示，不参与子分。"""
-    # 硬编码重要事件
+    """事件日历：宏观硬日程（FOMC/CPI/NFP）+ 已知重大解锁峰。仅展示，不参与子分。
+
+    原 CoinGecko events 兜底已废弃（端点实测 404/返空），显式置空避免误导。
+    宏观日程为公开固定节奏，由 dev 按当年官方日程维护（每季度更新）。
+    """
+    # ① 宏观硬日程（手动维护近 3 个月，来源 FRED/FOMC 官网公开日程；零依赖）
     hardcoded_events = [
-        {"date": "2026-09-16", "event": "FOMC 议息会议", "type": "macro"},
-        {"date": "2026-10-28", "event": "FOMC 议息会议", "type": "macro"},
-        {"date": "2026-12-09", "event": "FOMC 议息会议", "type": "macro"},
+        {"date": "2026-09-16", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
+        {"date": "2026-09-22", "event": "CPI 公布", "type": "macro", "source": "hardcoded"},
+        {"date": "2026-10-02", "event": "NFP 非农", "type": "macro", "source": "hardcoded"},
+        {"date": "2026-10-28", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
+        {"date": "2026-11-13", "event": "CPI 公布", "type": "macro", "source": "hardcoded"},
+        {"date": "2026-12-09", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
     ]
+    # ② 已知重大解锁峰（手动维护；TokenUnlocks 网页可查，本期不抓）
+    unlock_events: list[dict] = [
+        # {"date": "2026-10-XX", "event": "XXX 解锁峰", "type": "unlock", "source": "hardcoded"},
+    ]
+    # ③ （follow-up）CoinMarketCal：需 CMCAL_API_KEY，返回 crypto 专属事件（mainnet/解锁/空投）
+    # cmcal = fetch_coinmarketcal() if os.getenv("CMCAL_API_KEY") else []
 
-    # CoinGecko events 兜底
-    gecko_events = []
-    gecko_error = None
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/events",
-            params={"limit": 5},
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        for evt in data[:5]:
-            gecko_events.append({
-                "date": evt.get("date", ""),
-                "event": evt.get("title", ""),
-                "type": "crypto",
-            })
-    except Exception as e:
-        gecko_error = str(e)
-
-    gecko_ok = bool(gecko_events)
+    events = hardcoded_events + unlock_events
     return {
-        "hardcoded": hardcoded_events,
-        "gecko": gecko_events,
-        "status": "ok" if gecko_ok else "degraded",
-        "gecko_error": gecko_error if not gecko_ok else None,
+        "status": "ok" if events else "partial",
+        "hardcoded": events,
+        "gecko": [],  # 已废弃，显式空（不再静默失败）
     }
 
 

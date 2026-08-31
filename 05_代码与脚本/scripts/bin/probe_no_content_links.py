@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import psycopg
 import sys
 import time
 from pathlib import Path
@@ -144,12 +145,12 @@ def main() -> int:
     where_param = f"{args.classify_error}%"
 
     def _count(conn):
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"SELECT count(*) FROM biz.doc_source_entry WHERE {where_clause}",
                 (where_param,),
             )
-            return cur.fetchone()[0]
+            return cur.fetchone()["count"]
 
     total = _db_retry(db_url, _count)
     print(f"待甄别无正文链接总数: {total:,}")
@@ -161,7 +162,7 @@ def main() -> int:
     print(f"本次探测上限: {limit:,} | 模式: {'DRY-RUN' if args.dry_run else '执行删除死链' if args.execute else '仅报告'}\n")
 
     def _fetch_batch(conn, last_id):
-        with conn.cursor() as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 f"""
                 SELECT entry_id, entry_url
@@ -172,7 +173,7 @@ def main() -> int:
                 """,
                 (last_id, where_param, 500),
             )
-            return [dict(r) for r in cur.fetchall()]
+            return cur.fetchall()
 
     stats = {"dead": 0, "blocked": 0, "js_rendered": 0, "recovered": 0}
     dead_ids: list[int] = []
@@ -215,7 +216,7 @@ def main() -> int:
 
     if args.execute and dead_ids:
         def _delete(conn):
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     "DELETE FROM biz.doc_source_entry WHERE entry_id = ANY(%s)",
                     (dead_ids,),

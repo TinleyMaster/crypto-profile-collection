@@ -378,7 +378,10 @@ def fetch_mvrv_history(asset: str = "btc") -> dict:
 
 
 def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
-    """稳定币净流入历史序列（日频）。返回 {status, series: [netflow_usd, ...]}。"""
+    """稳定币净流入历史序列（日频）。返回 {status, series: [netflow_usd, ...], rolling_7d: [...]}。
+
+    rolling_7d：7d 滚动累计净流入，与前端 7d 视角对齐（分位计算用此口径）。
+    """
     try:
         r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
         r.raise_for_status()
@@ -389,12 +392,18 @@ def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
             if usd is not None:
                 series.append(_safe_float(usd))
         if len(series) < 2:
-            return {"status": "error", "error": "insufficient", "series": []}
+            return {"status": "error", "error": "insufficient", "series": [], "rolling_7d": []}
         # 计算日净流入
         netflows = [series[i] - series[i - 1] for i in range(1, len(series))]
-        return {"status": "ok", "series": netflows[-days:]}
+        # 7d 滚动累计，与前端 7d 视角对齐
+        rolling_7d = [sum(netflows[max(0, i - 6):i + 1]) for i in range(len(netflows))]
+        return {
+            "status": "ok",
+            "series": netflows[-days:],
+            "rolling_7d": rolling_7d[-days:],
+        }
     except Exception as e:
-        return {"status": "error", "error": str(e), "series": []}
+        return {"status": "error", "error": str(e), "series": [], "rolling_7d": []}
 
 
 def fetch_cefi_history(days: int = 30) -> dict:
@@ -2522,8 +2531,13 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     mvrv_percentile = mvrv_hist.get("pct_full") if mvrv_hist.get("status") == "ok" else None
     mvrv_extreme = mvrv_hist.get("extreme", "NONE") if mvrv_hist.get("status") == "ok" else flag_extreme(mvrv_percentile)
 
-    sc_flow_value = stablecoin_flow_hist.get("series", [])[-1] if stablecoin_flow_hist.get("series") else None
-    sc_flow_percentile = percentile_of(sc_flow_value, stablecoin_flow_hist.get("series") or []) if stablecoin_flow_hist.get("status") == "ok" else None
+    # 稳定币分位：优先用 7d 滚动累计口径（与前端 7d 视角对齐），回退单日
+    sc_rolling_7d = stablecoin_flow_hist.get("rolling_7d") or []
+    sc_flow_value = sc_rolling_7d[-1] if sc_rolling_7d else (
+        stablecoin_flow_hist.get("series", [])[-1] if stablecoin_flow_hist.get("series") else None
+    )
+    sc_flow_ref = sc_rolling_7d if len(sc_rolling_7d) >= 2 else (stablecoin_flow_hist.get("series") or [])
+    sc_flow_percentile = percentile_of(sc_flow_value, sc_flow_ref) if stablecoin_flow_hist.get("status") == "ok" else None
     sc_flow_extreme = flag_extreme(sc_flow_percentile)
 
     cefi_value = cefi.get("value")

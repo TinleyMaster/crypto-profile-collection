@@ -64,6 +64,17 @@ opportunity_rules:
   conviction_med_min: 55                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
   protocol_top_n: 3                     # P1-3 新协议 TVL 异动取前 N
   exchange_netflow_min_usd: 100000000   # 交易所净流出触发 long 信号最小阈值（1 亿美元）
+  # P0-3 conviction 各轴权重（总和 = 1.0，7 轴含 catalyst）
+  conviction_weight_mvrv: 0.23
+  conviction_weight_cycle: 0.18
+  conviction_weight_funding: 0.14
+  conviction_weight_netflow: 0.14
+  conviction_weight_stable: 0.09
+  conviction_weight_roi: 0.14
+  conviction_weight_catalyst: 0.08     # 新增，保守初值（未校准+单源+无方向精度），待 FEAT-CATALYST-002 回测校准
+  # P0-B 催化剂因子
+  catalyst_window_days: 14             # 催化剂回溯窗口（天）
+  catalyst_min_score: 50               # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
 
 # ── 评分微调参数（scoring tuning） ──
 scoring_tuning:

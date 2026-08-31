@@ -1269,13 +1269,17 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "mvrv_deep_undervalued_pct": 15,         # MVRV 百分位 ≤ 此值 → 深度低估
     "mvrv_undervalued_pct": 30,              # MVRV 百分位 ≤ 此值 → 低估
     "mvrv_overvalued_pct": 85,               # MVRV 百分位 ≥ 此值 → 高估
-    # P0-3 conviction 各轴权重（总和 = 1.0）
-    "conviction_weight_mvrv": 0.25,          # MVRV 估值权重
-    "conviction_weight_cycle": 0.20,         # 周期相位权重
-    "conviction_weight_funding": 0.15,       # funding 极性权重
-    "conviction_weight_netflow": 0.15,       # 交易所净流权重
-    "conviction_weight_stable": 0.10,        # 稳定币流向权重
-    "conviction_weight_roi": 0.15,           # ROI 动量权重
+    # P0-3 conviction 各轴权重（总和 = 1.0，7 轴含 catalyst）
+    "conviction_weight_mvrv": 0.23,          # MVRV 估值权重
+    "conviction_weight_cycle": 0.18,         # 周期相位权重
+    "conviction_weight_funding": 0.14,       # funding 极性权重
+    "conviction_weight_netflow": 0.14,       # 交易所净流权重
+    "conviction_weight_stable": 0.09,        # 稳定币流向权重
+    "conviction_weight_roi": 0.14,           # ROI 动量权重
+    "conviction_weight_catalyst": 0.08,      # 催化剂因子权重（保守初值，未校准，待 FEAT-CATALYST-002 回测校准）
+    # P0-B 催化剂因子
+    "catalyst_window_days": 14,              # 催化剂回溯窗口（天）
+    "catalyst_min_score": 50,                # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
 }
 
 
@@ -1801,17 +1805,20 @@ def _compute_conviction_score(
     exchange_netflow: float | None,
     stablecoin_flow: float | None,
     roi_1yr: float | None = None,
+    catalyst_score: float | None = None,
     t: dict,
 ) -> int:
     """P0-3: 多轴加权合成 conviction 分 (0-100)。返回整数分。
 
     各轴归一化到 0~100 后加权求和，cycle phase 作为调制系数乘入。
+    catalyst_score: 催化剂因子分数（0-100），None 时取中性 50。
     与 _conviction_breakdown 同口径，避免漂移。
     """
     return _conviction_breakdown(
         mvrv_pct=mvrv_pct, cycle_phase=cycle_phase,
         funding=funding, exchange_netflow=exchange_netflow,
-        stablecoin_flow=stablecoin_flow, roi_1yr=roi_1yr, t=t,
+        stablecoin_flow=stablecoin_flow, roi_1yr=roi_1yr,
+        catalyst_score=catalyst_score, t=t,
     )["total"]
 
 
@@ -1823,6 +1830,7 @@ def _conviction_breakdown(
     exchange_netflow: float | None,
     stablecoin_flow: float | None,
     roi_1yr: float | None = None,
+    catalyst_score: float | None = None,
     t: dict,
 ) -> dict:
     """P0-3 提质：返回各轴子分与加权贡献，供前端解释「为什么是它」。
@@ -1853,6 +1861,9 @@ def _conviction_breakdown(
     # ── ROI 轴：深度负(超跌)=高做多分，深度正(过热)=高做空分 ──
     roi_score = max(0, min(100, 50 - roi_1yr * 30)) if roi_1yr is not None else 50
 
+    # ── Catalyst 轴：净情绪分数（0~100），None 时取中性 50 ──
+    cat_norm = max(0, min(100, catalyst_score)) if catalyst_score is not None else 50
+
     def _w(k: str) -> float:
         return t.get(k, 0.0)
 
@@ -1863,6 +1874,7 @@ def _conviction_breakdown(
         "netflow": (netflow_score, _w("conviction_weight_netflow")),
         "stable": (stable_score, _w("conviction_weight_stable")),
         "roi": (roi_score, _w("conviction_weight_roi")),
+        "catalyst": (cat_norm, _w("conviction_weight_catalyst")),
     }
     breakdown: dict = {}
     total = 0.0
@@ -1871,6 +1883,66 @@ def _conviction_breakdown(
         total += contrib
         breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib}
     return {"axes": breakdown, "total": max(0, min(100, round(total)))}
+
+
+def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, float]]:
+    """查询近 N 天内有催化剂的资产，返回 [(asset_id, symbol, score), ...]。
+
+    score = 净加权情绪分（0-100）：bullish=+1, bearish=-1, neutral=0；
+    权重：strong=1.0, medium=0.6, weak=0.3。归一化到 0-100。
+    """
+    try:
+        from crypto_research.db.conn import get_db
+        from datetime import timedelta
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ci.asset_id,
+                           a.canonical_symbol,
+                           SUM(
+                               CASE ci.impact_direction
+                                   WHEN 'bullish' THEN 1
+                                   WHEN 'bearish' THEN -1
+                                   ELSE 0
+                               END
+                               * CASE ci.impact_strength
+                                   WHEN 'strong' THEN 1.0
+                                   WHEN 'medium' THEN 0.6
+                                   ELSE 0.3
+                               END
+                           ) AS raw_score,
+                           COUNT(*) AS event_count
+                    FROM biz.catalyst_impact ci
+                    JOIN core.asset a ON a.asset_id = ci.asset_id
+                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+                    WHERE ac.published_at >= NOW() - make_interval(days => %s)
+                    GROUP BY ci.asset_id, a.canonical_symbol
+                    HAVING SUM(
+                               CASE ci.impact_direction
+                                   WHEN 'bullish' THEN 1
+                                   WHEN 'bearish' THEN -1
+                                   ELSE 0
+                               END
+                               * CASE ci.impact_strength
+                                   WHEN 'strong' THEN 1.0
+                                   WHEN 'medium' THEN 0.6
+                                   ELSE 0.3
+                               END
+                           ) > 0
+                    ORDER BY raw_score DESC
+                    LIMIT 20
+                """, (window_days,))
+                rows = cur.fetchall()
+                results = []
+                for aid, symbol, raw_score, cnt in rows:
+                    # 归一化到 0-100：raw_score 范围 [-inf, +inf]，clip 后映射
+                    clipped = max(-100, min(100, raw_score * 10))
+                    score = (clipped + 100) / 2.0
+                    results.append((aid, symbol or "", round(score, 1)))
+                return results
+    except Exception:
+        return []
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -2090,6 +2162,31 @@ def score_opportunities(overview: dict) -> dict:
                      "related_dims": ["6a网络健康 CM 网络衰退"]},
                     opportunities, excluded, t,
                 )
+
+    # ── 1c) 催化剂驱动机会 (P0-B) ──
+    cat_window = t.get("catalyst_window_days", 14)
+    cat_min_score = t.get("catalyst_min_score", 50)
+    cat_targets = _recent_catalyst_targets(cat_window)
+    for aid, symbol, cscore in cat_targets:
+        if cscore < cat_min_score:
+            continue
+        breakdown = _conviction_breakdown(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr,
+            catalyst_score=cscore, t=t,
+        )
+        conviction = breakdown["total"]
+        _push_opportunity(
+            {"target": symbol, "direction": "long",
+             "confidence": "high" if cscore >= 70 else "medium",
+             "conviction_score": conviction,
+             "conviction_breakdown": breakdown,
+             "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
+             "related_dims": ["catalyst_events", "P0-B 催化剂驱动"]},
+            opportunities, excluded, t,
+        )
 
     # ── 2) 杠杆过热 / 风险规避（short） ──
     risk_sources: list[tuple[str, str]] = []

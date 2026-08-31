@@ -1,7 +1,7 @@
 -- OBM 链上指标历史极值分位视图（长表，PARTITION BY metric_name）
 -- 复用 P2-1 极端阈值（>=90% HIGH / <=10% LOW）
 -- 全历史百分位 + 滚动 365d 百分位 + 极端标记
--- 数据截至 2026-08-24，纯历史分位用
+-- 实时 VIEW，随 obm_btc_daily 更新
 
 CREATE OR REPLACE VIEW biz.obm_percentile AS
 WITH base AS (
@@ -12,7 +12,7 @@ WITH base AS (
              PARTITION BY metric_name ORDER BY value
          ) AS pr_full,
          percent_rank() OVER (
-             PARTITION BY metric_name ORDER BY value
+             PARTITION BY metric_name ORDER BY metric_date
              ROWS BETWEEN 364 PRECEDING AND CURRENT ROW
          ) AS pr_roll
   FROM biz.obm_btc_daily
@@ -30,4 +30,4 @@ SELECT metric_name,
        END                       AS flag_full
 FROM base;
 
-COMMENT ON VIEW biz.obm_percentile IS 'OBM 链上指标历史极值分位（全历史+滚动365d，截至 2026-08-24）';
+COMMENT ON VIEW biz.obm_percentile IS 'OBM 链上指标历史极值分位（全历史+滚动365d），实时 VIEW，随 obm_btc_daily 更新';

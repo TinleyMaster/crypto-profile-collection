@@ -3751,12 +3751,15 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
 def get_btc_cycle_position() -> dict:
     """BTC 周期定位：基于 OBM 链上指标判断积累/中性/派发/顶部风险。
 
-    数据来源：biz.obm_btc_daily + biz.obm_percentile
+    数据来源：biz.obm_btc_daily + biz.obm_percentile（实时 VIEW）
     指标：liveliness_ratio, dormancy_days, CDD age-band 分布, hashrate
     相位判定：
-      - 积累期：liveliness < 0.55 且 dormancy 高且老币 CDD 占比 < 0.4
-      - 顶部风险/派发：liveliness > 0.7 且老币 CDD 占比 > 0.55
+      - 积累期：liveliness < 0.55 且老币 CDD 占比 < 0.40
+      - 顶部风险/派发：liveliness > 0.70 且老币 CDD 占比 > 0.55
+      - 顶部风险（早期）：liveliness 近一年滚动分位 ≥ 90 且 liveliness ≥ 0.65 且老币 CDD 占比 ≥ 0.50
+        或老币 CDD 占比分位 ≥ 90 且老币 CDD 占比 ≥ 0.45
       - 其余：中性
+    复合周期热度评分（0-100）：0.45×liveliness滚动分位 + 0.30×老币CDD占比 + 0.25×NUPL近似分位
     """
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -3796,9 +3799,9 @@ def get_btc_cycle_position() -> dict:
             total_band_cdd = sum(age_bands.values()) if age_bands else 0
             old_coin_cdd_share = round(old_cdd / total_band_cdd, 4) if total_band_cdd > 0 else None
 
-            # 3) 分位视图辅助
+            # 3) 分位视图辅助（全历史 + 近一年滚动）
             cur.execute("""
-                SELECT metric_name, pct_full, flag_full
+                SELECT metric_name, pct_full, pct_roll_365d, flag_full
                 FROM biz.obm_percentile
                 WHERE metric_date = (SELECT MAX(metric_date) FROM biz.obm_percentile)
                   AND metric_name IN (
@@ -3807,7 +3810,7 @@ def get_btc_cycle_position() -> dict:
                     'obm_cdd_btcxdays_daily'
                   )
             """)
-            percentiles = {r["metric_name"]: {"pct_full": float(r["pct_full"]), "flag_full": r["flag_full"]} for r in cur.fetchall()}
+            percentiles = {r["metric_name"]: {"pct_full": float(r["pct_full"]), "pct_roll_365d": float(r["pct_roll_365d"]), "flag_full": r["flag_full"]} for r in cur.fetchall()}
 
             # 老币 CDD 占比「真实分位」：从 obm_btc_daily 历史逐日重建 old_share 后排名
             old_share_pct = None
@@ -3845,7 +3848,8 @@ def get_btc_cycle_position() -> dict:
     # 4) 相位判定（自上而下，确定不回溯）
     liv_pctile = percentiles.get("obm_liveliness_ratio_daily", {})
     dorm_pctile = percentiles.get("obm_dormancy_days_daily", {})
-    liv_pct = liv_pctile.get("pct_full")
+    liv_pct = liv_pctile.get("pct_full")           # 全历史分位（参考）
+    liv_pct_roll = liv_pctile.get("pct_roll_365d")  # 近一年滚动分位（主信号）
     liv_flag = liv_pctile.get("flag_full", "NONE")
     dorm_flag = dorm_pctile.get("flag_full", "NONE")
 
@@ -3859,13 +3863,17 @@ def get_btc_cycle_position() -> dict:
         phase = "distribution"
         phase_label = "顶部风险"
         signals.append(f"liveliness {liveliness:.3f} 偏高 + 老币 CDD 占比 {old_coin_cdd_share:.1%} > 55%")
-    elif (liv_pct is not None and liv_pct >= 90
-          and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.50) \
-         or (old_share_pct is not None and old_share_pct >= 90
-             and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.45):
+    elif (liv_pct_roll is not None and liv_pct_roll >= 90
+          and liveliness is not None and liveliness >= 0.65
+          and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.50):
         phase = "early_top"
         phase_label = "顶部风险（早期）"
-        signals.append(f"liveliness 历史高位（{liv_pct:.0f}%分位）+ 老币 CDD 占比 {old_coin_cdd_share:.1%} ≥ 50% → 顶部早期预警")
+        signals.append(f"liveliness 近一年高位（滚动分位 {liv_pct_roll:.0f}）+ 老币 CDD 占比 {old_coin_cdd_share:.1%} ≥ 50% → 顶部早期预警")
+    elif (old_share_pct is not None and old_share_pct >= 90
+          and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.45):
+        phase = "early_top"
+        phase_label = "顶部风险（早期）"
+        signals.append(f"老币 CDD 占比历史高位（{old_share_pct:.0f}%分位）+ 占比 {old_coin_cdd_share:.1%} ≥ 45% → 顶部早期预警")
     else:
         phase = "neutral"
         phase_label = "中性"
@@ -3878,17 +3886,52 @@ def get_btc_cycle_position() -> dict:
     if dorm_flag == "HIGH":
         signals.append("dormancy 处历史高位")
 
+    # B-1: 复合周期热度评分（0-100）
+    # NUPL 近似（B-2a）：1 - liveliness，取全历史分位
+    nupl_approx_pct = None
+    if liveliness is not None:
+        nupl_approx = 1.0 - liveliness
+        # 用 liveliness 的全历史分位反查 NUPL 近似分位（对称分布）
+        # 简化：直接用 100 - liv_pct 作为近似（liveliness 高 → NUPL 低 → 顶部）
+        nupl_approx_pct = round(100 - liv_pct, 1) if liv_pct is not None else None
+
+    cycle_heat_score = None
+    if liv_pct_roll is not None and old_coin_cdd_share is not None and nupl_approx_pct is not None:
+        cycle_heat_score = round(
+            0.45 * liv_pct_roll
+            + 0.30 * (old_coin_cdd_share * 100)
+            + 0.25 * nupl_approx_pct,
+            1,
+        )
+
+    # 档位映射
+    heat_label = None
+    if cycle_heat_score is not None:
+        if cycle_heat_score < 30:
+            heat_label = "积累期"
+        elif cycle_heat_score < 65:
+            heat_label = "中段"
+        elif cycle_heat_score < 85:
+            heat_label = "升温"
+        elif cycle_heat_score < 95:
+            heat_label = "顶部风险（早期）"
+        else:
+            heat_label = "顶部确认"
+
     return {
         "phase": phase,
         "phase_label": phase_label,
         "liveliness": liveliness,
-        "liveliness_percentile": liv_pctile.get("pct_full"),
+        "liveliness_pct_full": liv_pctile.get("pct_full"),
+        "liveliness_pct_roll_365d": liv_pctile.get("pct_roll_365d"),
         "dormancy": dormancy,
         "dormancy_percentile": dorm_pctile.get("pct_full"),
         "old_coin_cdd_share": old_coin_cdd_share,
         "old_coin_cdd_share_percentile": old_share_pct,
         "cdd_total": cdd_total,
         "hashrate_ehs": hashrate,
+        "cycle_heat_score": cycle_heat_score,
+        "cycle_heat_label": heat_label,
         "signals": signals,
         "status": "ok" if liveliness is not None else "error",
     }

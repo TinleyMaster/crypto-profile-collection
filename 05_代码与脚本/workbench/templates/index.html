@@ -3250,6 +3250,51 @@
             color: #6b7280;
         }
 
+        .signal-item .signal-score {
+            margin-left: auto;
+            font-size: 11px;
+            color: #f0b90b;
+            font-weight: 600;
+            padding: 1px 6px;
+            border: 1px solid rgba(240, 185, 11, 0.4);
+            border-radius: 3px;
+            background: rgba(240, 185, 11, 0.08);
+        }
+
+        .signal-item .signal-cs-wrap {
+            height: 4px;
+            background: #1e222a;
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 4px 0 2px;
+        }
+
+        .signal-item .signal-cs-bar {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        .signal-item .signal-reason {
+            font-size: 11px;
+            color: #9aa4b2;
+            margin-top: 2px;
+        }
+
+        .signal-item .signal-action {
+            font-size: 11px;
+            color: #f0b90b;
+            margin-top: 4px;
+        }
+
+        .signal-item .signal-invalid {
+            font-size: 10px;
+            color: #8b5cf6;
+            margin-top: 3px;
+            border-top: 1px dashed rgba(139, 92, 246, 0.25);
+            padding-top: 3px;
+        }
+
         .signal-empty {
             text-align: center;
             padding: 24px 16px;
@@ -7457,8 +7502,8 @@
             const countEl = document.getElementById('signal-count');
             if (!container) return;
 
-            const highItems = oppList.filter(function (o) { return o.confidence === 'high'; });
-            const medItems = oppList.filter(function (o) { return o.confidence === 'medium'; });
+            const highItems = oppList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high'; });
+            const medItems = oppList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'MED' || o.confidence === 'medium'; });
             const total = highItems.length + medItems.length;
 
             countEl.textContent = total > 0 ? total + ' 条信号' : '0 条';
@@ -7490,6 +7535,20 @@
             const dirLabel = o.direction === 'long' ? '多' : o.direction === 'short' ? '空' : '中性';
             const dirCls = o.direction === 'long' ? 'signal-dir-long' : o.direction === 'short' ? 'signal-dir-short' : '';
             const dims = (o.related_dims || []).join(', ');
+            const score = o.conviction_score != null ? o.conviction_score : '?';
+            const scoreNum = o.conviction_score != null ? Number(o.conviction_score) : 0;
+            const scoreBar = o.conviction_score != null
+                ? '<div class="signal-cs-wrap"><div class="signal-cs-bar" style="width:' + Math.min(100, Math.max(0, scoreNum)) + '%;background:' + (scoreNum >= 75 ? '#22c55e' : scoreNum >= 55 ? '#f0b90b' : '#6b7280') + '"></div></div>'
+                : '';
+            // 主因轴：从 breakdown 取贡献最高（方案 A）
+            let mainReason = '';
+            const bd = o.conviction_breakdown && o.conviction_breakdown.axes;
+            if (bd) {
+                let top = null, topC = -1;
+                for (const k in bd) { if (bd[k].contribution > topC) { topC = bd[k].contribution; top = k; } }
+                const labelMap = {mvrv:'MVRV低估', cycle:'周期相位', funding:'资金费率', netflow:'链上净流', stable:'稳定币流', roi:'ROI动量'};
+                if (top) mainReason = '主因：' + (labelMap[top] || top);
+            }
             return '<div class="signal-item ' + cls + '">' +
                 '<div class="signal-bar"></div>' +
                 '<div class="signal-body">' +
@@ -7497,8 +7556,13 @@
                         '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
                         '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
                         (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
+                        '<span class="signal-score">conv ' + score + '</span>' +
                     '</div>' +
                     (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
+                    scoreBar +
+                    (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
+                    (o.action_hint ? '<div class="signal-action">🎯 ' + escapeHtml(o.action_hint) + '</div>' : '') +
+                    (o.invalidation ? '<div class="signal-invalid">⚠️ 失效：' + escapeHtml(o.invalidation) + '</div>' : '') +
                     (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +
                 '</div>' +
             '</div>';

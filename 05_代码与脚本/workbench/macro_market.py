@@ -1803,15 +1803,35 @@ def _compute_conviction_score(
     roi_1yr: float | None = None,
     t: dict,
 ) -> int:
-    """P0-3: 多轴加权合成 conviction 分 (0-100)。
+    """P0-3: 多轴加权合成 conviction 分 (0-100)。返回整数分。
 
     各轴归一化到 0~100 后加权求和，cycle phase 作为调制系数乘入。
+    与 _conviction_breakdown 同口径，避免漂移。
+    """
+    return _conviction_breakdown(
+        mvrv_pct=mvrv_pct, cycle_phase=cycle_phase,
+        funding=funding, exchange_netflow=exchange_netflow,
+        stablecoin_flow=stablecoin_flow, roi_1yr=roi_1yr, t=t,
+    )["total"]
+
+
+def _conviction_breakdown(
+    *,
+    mvrv_pct: float | None,
+    cycle_phase: str,
+    funding: float | None,
+    exchange_netflow: float | None,
+    stablecoin_flow: float | None,
+    roi_1yr: float | None = None,
+    t: dict,
+) -> dict:
+    """P0-3 提质：返回各轴子分与加权贡献，供前端解释「为什么是它」。
+
+    返回 {axes: {name: {score, weight, contribution}}, total}。
+    total 与 _compute_conviction_score 返回值一致（同口径，避免漂移）。
     """
     # ── MVRV 轴：低估=高分（均值回归逻辑），高估=低分 ──
-    if mvrv_pct is not None:
-        mvrv_score = max(0, min(100, 100 - mvrv_pct))
-    else:
-        mvrv_score = 50  # 无数据时中性
+    mvrv_score = max(0, min(100, 100 - mvrv_pct)) if mvrv_pct is not None else 50
 
     # ── Cycle 轴：phase → score ──
     cycle_scores = {
@@ -1822,46 +1842,35 @@ def _compute_conviction_score(
     cycle_score = cycle_scores.get(cycle_phase, 50)
 
     # ── Funding 轴：正=过热（做空机会/风险），负=恐慌（做多机会） ──
-    if funding is not None:
-        funding_score = max(0, min(100, 50 - funding * 10000))
-    else:
-        funding_score = 50
+    funding_score = max(0, min(100, 50 - funding * 10000)) if funding is not None else 50
 
     # ── 交易所净流轴：正=净流出(积累)=做多信号 ──
-    if exchange_netflow is not None and exchange_netflow != 0:
-        netflow_score = max(0, min(100, 50 + (exchange_netflow / 1e9) * 20))
-    else:
-        netflow_score = 50
+    netflow_score = max(0, min(100, 50 + (exchange_netflow / 1e9) * 20)) if exchange_netflow else 50
 
     # ── 稳定币流轴：正=场外弹药充裕=做多信号 ──
-    if stablecoin_flow is not None and stablecoin_flow != 0:
-        stable_score = max(0, min(100, 50 + (stablecoin_flow / 1e10) * 30))
-    else:
-        stable_score = 50
+    stable_score = max(0, min(100, 50 + (stablecoin_flow / 1e10) * 30)) if stablecoin_flow else 50
 
     # ── ROI 轴：深度负(超跌)=高做多分，深度正(过热)=高做空分 ──
-    if roi_1yr is not None:
-        # ROI1yr -50% → 80 (超跌做多)；+100% → 20 (过热风险)
-        roi_score = max(0, min(100, 50 - roi_1yr * 30))
-    else:
-        roi_score = 50
+    roi_score = max(0, min(100, 50 - roi_1yr * 30)) if roi_1yr is not None else 50
 
-    w_mvrv = t.get("conviction_weight_mvrv", 0.25)
-    w_cycle = t.get("conviction_weight_cycle", 0.20)
-    w_funding = t.get("conviction_weight_funding", 0.15)
-    w_netflow = t.get("conviction_weight_netflow", 0.15)
-    w_stable = t.get("conviction_weight_stable", 0.10)
-    w_roi = t.get("conviction_weight_roi", 0.15)
+    def _w(k: str) -> float:
+        return t.get(k, 0.0)
 
-    raw = (
-        mvrv_score * w_mvrv
-        + cycle_score * w_cycle
-        + funding_score * w_funding
-        + netflow_score * w_netflow
-        + stable_score * w_stable
-        + roi_score * w_roi
-    )
-    return max(0, min(100, round(raw)))
+    axes = {
+        "mvrv": (mvrv_score, _w("conviction_weight_mvrv")),
+        "cycle": (cycle_score, _w("conviction_weight_cycle")),
+        "funding": (funding_score, _w("conviction_weight_funding")),
+        "netflow": (netflow_score, _w("conviction_weight_netflow")),
+        "stable": (stable_score, _w("conviction_weight_stable")),
+        "roi": (roi_score, _w("conviction_weight_roi")),
+    }
+    breakdown: dict = {}
+    total = 0.0
+    for name, (sc, wt) in axes.items():
+        contrib = round(sc * wt, 1)
+        total += contrib
+        breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib}
+    return {"axes": breakdown, "total": max(0, min(100, round(total)))}
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -1939,37 +1948,58 @@ def score_opportunities(overview: dict) -> dict:
         if pct <= deep_undervalued_pct:
             # 深度低估 → 高确定性均值回归机会
             mvrv_score_val = max(0, min(100, 100 - pct))
-            conviction = _compute_conviction_score(
+            breakdown = _conviction_breakdown(
                 mvrv_pct=pct, cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
+            conviction = breakdown["total"]
             trigger = (
-                f"MVRV 百分位 {pct:.1f}%（深度低估 ≤{deep_undervalued_pct}%）→ "
-                f"历史均值回归信号"
+                f"MVRV 百分位 {pct:.1f}%：处于历史极低区间（≤{deep_undervalued_pct}%），"
+                f"价格远低于长期持有者成本均值，修复空间较大"
             )
             _push_opportunity(
                 {"target": symbol, "direction": "long", "confidence": "high",
                  "conviction_score": conviction,
+                 "conviction_breakdown": breakdown,
                  "trigger_logic": trigger,
+                 "action_hint": "左侧重仓，中线持有",
+                 "invalidation": "MVRV 回升 >30% 即获利了结一半",
                  "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
                 opportunities, excluded, t,
             )
         elif pct <= undervalued_pct:
-            # 低估 → 中置信
-            conviction = _compute_conviction_score(
+            # 低估 → 中置信；文案按分位区间差异化（方案 B，三档分层去复读机）
+            breakdown = _conviction_breakdown(
                 mvrv_pct=pct, cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
-            trigger = (
-                f"MVRV 百分位 {pct:.1f}%（低估 ≤{undervalued_pct}%）→ "
-                f"估值偏低，关注回归"
-            )
+            conviction = breakdown["total"]
+            if pct <= 10:
+                trigger = (
+                    f"MVRV 百分位 {pct:.1f}%：处于历史极低区间，价格远低于"
+                    f"长期持有者成本均值，修复空间较大"
+                )
+                action_hint = "左侧分批，中线持有（数周~数月）"
+            elif pct <= 20:
+                trigger = (
+                    f"MVRV 百分位 {pct:.1f}%：估值偏低，需配合资金流入或情绪低点确认"
+                )
+                action_hint = "观察+条件单，右侧放量确认后介入"
+            else:
+                trigger = (
+                    f"MVRV 百分位 {pct:.1f}%：轻度低估，单独信号弱，须多轴共振才有效"
+                )
+                action_hint = "仅作观察池，不单独下注"
+            invalidation = "若 MVRV 继续下破≤10%或BTC周期进入late_top，信号降级"
             _push_opportunity(
                 {"target": symbol, "direction": "long", "confidence": "medium",
                  "conviction_score": conviction,
+                 "conviction_breakdown": breakdown,
                  "trigger_logic": trigger,
+                 "action_hint": action_hint,
+                 "invalidation": invalidation,
                  "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
                 opportunities, excluded, t,
             )
@@ -2003,12 +2033,13 @@ def score_opportunities(overview: dict) -> dict:
                 left_metrics.append(f"CM BTC 链上 7d 净流出 {_fmt_billions(cm_net)}")
     if btc_left_sources:
         conf, direction = _resolve_confidence(btc_left_sources, t)
-        conviction = _compute_conviction_score(
+        btc_breakdown = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = btc_breakdown["total"]
         related = ["P1-2 价格vs稳定币"]
         if "emotion" in {typ for typ, _ in btc_left_sources}:
             related.append("P0-3 情绪")
@@ -2020,6 +2051,9 @@ def score_opportunities(overview: dict) -> dict:
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
              "conviction_score": conviction,
+             "conviction_breakdown": btc_breakdown,
+             "action_hint": "左侧布局窗口，分批建仓",
+             "invalidation": "若交易所转为净流入或稳定币流向转负，信号失效",
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
         )

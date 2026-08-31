@@ -3749,17 +3749,19 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
 
 
 def get_btc_cycle_position() -> dict:
-    """BTC 周期定位：基于 OBM 链上指标判断积累/中性/派发/顶部风险。
+    """BTC 周期定位：三维交叉（CM MVRV 估值 + NUPL 近似 + OBM 活跃度）判断积累/中性/派发/顶部风险。
 
-    数据来源：biz.obm_btc_daily + biz.obm_percentile（实时 VIEW）
-    指标：liveliness_ratio, dormancy_days, CDD age-band 分布, hashrate
-    相位判定：
+    数据来源：biz.obm_btc_daily + biz.obm_percentile（实时 VIEW）+ biz.cm_onchain_percentile_full（CM MVRV）
+    指标：liveliness_ratio, dormancy_days, CDD age-band 分布, hashrate, CM mvrv_pct_full
+    相位判定（旧判定树，决定 phase/phase_label）：
       - 积累期：liveliness < 0.55 且老币 CDD 占比 < 0.40
       - 顶部风险/派发：liveliness > 0.70 且老币 CDD 占比 > 0.55
       - 顶部风险（早期）：liveliness 近一年滚动分位 ≥ 90 且 liveliness ≥ 0.65 且老币 CDD 占比 ≥ 0.50
         或老币 CDD 占比分位 ≥ 90 且老币 CDD 占比 ≥ 0.45
       - 其余：中性
-    复合周期热度评分（0-100）：0.45×liveliness滚动分位 + 0.30×老币CDD占比 + 0.25×NUPL近似分位
+    复合周期热度评分（0-100，三维，主导信号）：
+      0.40×MVRV分位(mvrv_pct_full) + 0.30×NUPL近似分位(1-liveliness) + 0.30×活跃度分位(pct_roll_365d)
+    档位：<30 积累期 / 30-65 中段 / 65-85 升温 / 85-95 顶部风险（早期） / >95 顶部确认
     """
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -3881,22 +3883,18 @@ def get_btc_cycle_position() -> dict:
     if liveliness is not None and liveliness < 0.55 and old_coin_cdd_share is not None and old_coin_cdd_share < 0.4:
         phase = "accumulation"
         phase_label = "积累期"
-        signals.append(f"liveliness {liveliness:.3f} 偏低 + 老币 CDD 占比 {old_coin_cdd_share:.1%} < 40%")
     elif liveliness is not None and liveliness > 0.7 and old_coin_cdd_share is not None and old_coin_cdd_share > 0.55:
         phase = "distribution"
         phase_label = "顶部风险"
-        signals.append(f"liveliness {liveliness:.3f} 偏高 + 老币 CDD 占比 {old_coin_cdd_share:.1%} > 55%")
     elif (liv_pct_roll is not None and liv_pct_roll >= 90
           and liveliness is not None and liveliness >= 0.65
           and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.50):
         phase = "early_top"
         phase_label = "顶部风险（早期）"
-        signals.append(f"liveliness 近一年高位（滚动分位 {liv_pct_roll:.0f}）+ 老币 CDD 占比 {old_coin_cdd_share:.1%} ≥ 50% → 顶部早期预警")
     elif (old_share_pct is not None and old_share_pct >= 90
           and old_coin_cdd_share is not None and old_coin_cdd_share >= 0.45):
         phase = "early_top"
         phase_label = "顶部风险（早期）"
-        signals.append(f"老币 CDD 占比历史高位（{old_share_pct:.0f}%分位）+ 占比 {old_coin_cdd_share:.1%} ≥ 45% → 顶部早期预警")
     else:
         phase = "neutral"
         phase_label = "中性"

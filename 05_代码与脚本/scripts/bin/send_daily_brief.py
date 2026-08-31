@@ -34,14 +34,20 @@ def render_brief_html(brief: dict) -> str:
     today = date.today().isoformat()
     m0 = brief.get("M0_tldr", {})
     diff = brief.get("DIFF", {})
-    opportunities = brief.get("opportunities", [])
+    opportunities = sorted(
+        (brief.get("M4_opportunities") or []) + (brief.get("M4_watchlist") or []),
+        key=lambda o: o.get("conviction_score", 0), reverse=True
+    )[:5]
 
     # ── M0 头部 ──
     btc_price = m0.get("btc_price")
     btc_str = f"${btc_price:,.0f}" if btc_price else "N/A"
     fear_greed = m0.get("fear_greed")
     fg_str = f"{fear_greed}" if fear_greed is not None else "N/A"
+    fg_label = m0.get("fear_greed_label", "")
     phase = m0.get("btc_cycle_phase", "unknown")
+    btc_mvrv = m0.get("btc_mvrv_pct")
+    mvrv_str = f" · MVRV {btc_mvrv:.0f}%" if btc_mvrv is not None else ""
 
     html_parts = [f"""
     <div style="font-family:sans-serif;max-width:680px;margin:auto;background:#fff;padding:20px">
@@ -50,7 +56,7 @@ def render_brief_html(brief: dict) -> str:
         <tr>
           <td style="padding:8px;background:#f8fafc;border-radius:6px;text-align:center">
             <div style="font-size:24px;font-weight:bold">BTC {btc_str}</div>
-            <div style="color:#64748b;font-size:12px">恐贪 {fg_str} · 周期 {phase}</div>
+            <div style="color:#64748b;font-size:12px">恐贪 {fg_str}{(' ' + fg_label) if fg_label else ''} · 周期 {phase}{mvrv_str}</div>
           </td>
         </tr>
       </table>

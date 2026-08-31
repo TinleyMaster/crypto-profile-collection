@@ -2370,15 +2370,30 @@ def fetch_stablecoin_supply_trend() -> dict:
         return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error", "error": str(e)}
 
 
-def _build_tldr(today: dict, opps: list) -> str:
+def _build_tldr(today: dict, opps: list) -> dict:
+    """M0 头部：从 overview 抽取关键指标 + 一句话摘要。"""
+    dims = today.get("dimensions") or {}
+    btc_data = ((dims.get("2盘面") or {}).get("data") or {}).get("btc") or {}
+    fg_data = ((dims.get("3情绪") or {}).get("data") or {}).get("fear_greed") or {}
+    mvrv_dim = (dims.get("mvrv_universe") or {}).get("data") or {}
+    mvrv_coins = mvrv_dim.get("coins") or []
+    btc_mvrv = next((c for c in mvrv_coins if c.get("symbol") == "BTC"), {})
     cycle = today.get("btc_cycle") or {}
-    parts = [f"BTC 周期：{cycle.get('phase_label') or cycle.get('phase') or '未知'}"]
+
     high = [o for o in opps if o.get("conviction_tier") == "HIGH"]
-    if high:
-        parts.append(f"高确定性机会 {len(high)} 条（{', '.join(str(o.get('target')) for o in high[:3])}）")
-    else:
-        parts.append("无 HIGH 机会（观察 MED）")
-    return "；".join(parts)
+    high_summary = f"{len(high)} 条（{', '.join(str(o.get('target')) for o in high[:3])}）" if high else "无"
+
+    return {
+        "btc_price": btc_data.get("price"),
+        "btc_change_24h": btc_data.get("change_24h"),
+        "fear_greed": fg_data.get("value"),
+        "fear_greed_label": fg_data.get("value_classification"),
+        "btc_cycle_phase": cycle.get("phase_label") or cycle.get("phase"),
+        "btc_mvrv_pct": btc_mvrv.get("pct_full"),
+        "total_market_cap": ((dims.get("1体量") or {}).get("data") or {}).get("total_market_cap"),
+        "btc_dominance": ((dims.get("1体量") or {}).get("data") or {}).get("btc_dominance"),
+        "summary": f"BTC 周期：{cycle.get('phase_label') or cycle.get('phase') or '未知'}；高确定性 {high_summary}",
+    }
 
 
 def _build_flow(today: dict, diff: dict | None, stab: dict) -> dict:

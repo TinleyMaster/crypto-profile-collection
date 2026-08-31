@@ -6990,42 +6990,84 @@
                 <div class="dim-conclusion">覆盖度 ${(structure.available_weight * 100).toFixed(0)}%${structureErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + structureErrorCount + ' 项数据异常</span>' : ''}</div>
             </div>`;
             
-            // BTC 周期定位卡
+            // BTC 周期定位卡（三维交叉：MVRV估值 + NUPL近似 + OBM活跃度）
             const btcCycle = data.btc_cycle || {};
             if (btcCycle.status === 'ok') {
-                const phaseColors = { accumulation: '#10b981', neutral: '#6b7280', distribution: '#ef4444', early_top: '#f59e0b' };
-                const phaseLabels = { accumulation: '积累期', neutral: '中性', distribution: '顶部风险', early_top: '顶部风险（早期）' };
-                const phaseIcons = { accumulation: '🟢', neutral: '⚪', distribution: '🔴', early_top: '🟠' };
-                const pc = btcCycle.phase || 'neutral';
-                const phaseColor = phaseColors[pc] || '#6b7280';
-                const phaseLabel = phaseLabels[pc] || btcCycle.phase_label || '未知';
-                const phaseIcon = phaseIcons[pc] || '⚪';
-                const signals = (btcCycle.signals || []).map(s => `<span style="color:#9ca3af;font-size:0.8em">• ${s}</span>`).join('<br>');
+                // 档位颜色：越热越红
+                const score = btcCycle.cycle_heat_score != null ? btcCycle.cycle_heat_score : null;
+                const heatLabel = btcCycle.cycle_heat_label || btcCycle.phase_label || '未知';
+                let heatColor = '#6b7280'; // 默认灰
+                if (score != null) {
+                    if (score < 30) heatColor = '#10b981';      // 积累：绿
+                    else if (score < 65) heatColor = '#3b82f6'; // 中段：蓝
+                    else if (score < 85) heatColor = '#f59e0b'; // 升温：橙
+                    else if (score < 95) heatColor = '#ef4444'; // 顶部风险早期：红
+                    else heatColor = '#7f1d1d';                 // 顶部确认：深红
+                }
+
+                // 进度条宽度
+                const scoreWidth = score != null ? Math.min(100, Math.max(0, score)).toFixed(1) : 0;
+
+                // 单个指标行渲染辅助函数
+                const fmtPct = (v) => v != null ? v.toFixed(1) + '%' : 'N/A';
+                const fmtSmall = (label, full, roll) => {
+                    let s = '';
+                    if (full != null) s += `<small style="color:#9ca3af">全历史 ${full.toFixed(0)}%</small>`;
+                    if (roll != null) {
+                        if (s) s += ' / ';
+                        s += `<small style="color:#9ca3af">近1年 ${roll.toFixed(0)}%</small>`;
+                    }
+                    return s ? ` (${s})` : '';
+                };
+
                 html += `<div class="dim-card">
                     <div class="dim-card-header">
                         <span class="dim-card-icon">🔄</span>
                         <span class="dim-card-title">BTC 周期定位</span>
-                        <span class="dim-card-score" style="color:${phaseColor};font-weight:700">${phaseIcon} ${phaseLabel}</span>
+                        <span class="dim-card-score" style="color:${heatColor};font-weight:700">${heatLabel}</span>
                     </div>
-                    <div class="dim-metrics sub-score-list">
+                    <div style="padding:8px 12px 0 12px">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                            <span style="font-size:0.85em;color:#9ca3af">周期热度评分</span>
+                            <span style="font-weight:700;color:${heatColor}">${score != null ? score.toFixed(1) : 'N/A'}</span>
+                        </div>
+                        <div style="width:100%;height:6px;background:#374151;border-radius:3px;overflow:hidden">
+                            <div style="width:${scoreWidth}%;height:100%;background:${heatColor};border-radius:3px"></div>
+                        </div>
+                        <div style="font-size:0.75em;color:#6b7280;margin-top:4px">
+                            0=积累 · 30=中段 · 65=升温 · 85=顶部风险 · 95=顶部确认
+                        </div>
+                    </div>
+                    <div class="dim-metrics sub-score-list" style="margin-top:8px">
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">MVRV 估值分位</span>
+                            <span class="sub-score-value">${fmtPct(btcCycle.mvrv_pct_full)}${btcCycle.mvrv_extreme && btcCycle.mvrv_extreme !== 'NONE' ? ' <small style="color:#ef4444">(' + btcCycle.mvrv_extreme + ')</small>' : ''}</span>
+                        </div>
+                        <div class="sub-score-row">
+                            <span class="sub-score-label">NUPL 近似分位</span>
+                            <span class="sub-score-value">${fmtPct(btcCycle.nupl_approx_pct)}</span>
+                        </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">Liveliness</span>
-                            <span class="sub-score-value">${btcCycle.liveliness != null ? btcCycle.liveliness.toFixed(3) : 'N/A'}${btcCycle.liveliness_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.liveliness_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
+                            <span class="sub-score-value">${btcCycle.liveliness != null ? btcCycle.liveliness.toFixed(3) : 'N/A'}${fmtSmall('分位', btcCycle.liveliness_pct_full, btcCycle.liveliness_pct_roll_365d)}</span>
                         </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">Dormancy</span>
-                            <span class="sub-score-value">${btcCycle.dormancy != null ? btcCycle.dormancy.toFixed(1) + ' 天' : 'N/A'}${btcCycle.dormancy_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.dormancy_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
+                            <span class="sub-score-value">${btcCycle.dormancy != null ? btcCycle.dormancy.toFixed(1) + ' 天' : 'N/A'}${btcCycle.dormancy_percentile != null ? ' <small style="color:#9ca3af">全历史 ' + btcCycle.dormancy_percentile.toFixed(0) + '%</small>' : ''}</span>
                         </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">老币 CDD 占比</span>
-                            <span class="sub-score-value">${btcCycle.old_coin_cdd_share != null ? (btcCycle.old_coin_cdd_share * 100).toFixed(1) + '%' : 'N/A'}${btcCycle.old_coin_cdd_share_percentile != null ? ' <small style="color:#9ca3af">(' + btcCycle.old_coin_cdd_share_percentile.toFixed(0) + '%分位)</small>' : ''}</span>
+                            <span class="sub-score-value">${btcCycle.old_coin_cdd_share != null ? (btcCycle.old_coin_cdd_share * 100).toFixed(1) + '%' : 'N/A'}${btcCycle.old_coin_cdd_share_percentile != null ? ' <small style="color:#9ca3af">全历史 ' + btcCycle.old_coin_cdd_share_percentile.toFixed(0) + '%</small>' : ''}</span>
                         </div>
                         <div class="sub-score-row">
                             <span class="sub-score-label">算力</span>
                             <span class="sub-score-value">${btcCycle.hashrate_ehs != null ? btcCycle.hashrate_ehs.toFixed(1) + ' EH/s' : 'N/A'}</span>
                         </div>
                     </div>
-                    ${signals ? '<div class="dim-conclusion" style="line-height:1.6">' + signals + '</div>' : ''}
+                    <div class="dim-conclusion" style="line-height:1.6;font-size:0.85em;color:#9ca3af">
+                        <div>评分构成：0.40×MVRV分位 + 0.30×NUPL近似分位 + 0.30×Liveliness近1年滚动分位</div>
+                        <div style="margin-top:4px">${(btcCycle.signals || []).map(s => `<span>• ${s}</span>`).join('<br>')}</div>
+                    </div>
                 </div>`;
             }
 

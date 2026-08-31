@@ -3900,14 +3900,6 @@ def get_btc_cycle_position() -> dict:
     else:
         phase = "neutral"
         phase_label = "中性"
-        signals.append("liveliness / 老币 CDD 占比未达极端阈值")
-
-    if liv_flag == "HIGH":
-        signals.append("liveliness 处历史高位（>90%分位）")
-    if liv_flag == "LOW":
-        signals.append("liveliness 处历史低位（<10%分位）")
-    if dorm_flag == "HIGH":
-        signals.append("dormancy 处历史高位")
 
     # B-1 + C-2: 复合周期热度评分（三维 0-100）
     # NUPL 近似（B-2a）：1 - liveliness，取全历史分位
@@ -3943,6 +3935,28 @@ def get_btc_cycle_position() -> dict:
             heat_label = "顶部风险（早期）"
         else:
             heat_label = "顶部确认"
+
+    # H2: signals 文案统一用评分口径（替换旧判定树文案）
+    signals = []
+    if cycle_heat_score is not None:
+        signals.append(f"周期热度评分 {cycle_heat_score:.1f}（{heat_label}）")
+        signals.append(
+            f"评分构成：MVRV {mvrv_pct_full:.1f}% ×0.40 + NUPL近似 {nupl_approx_pct:.1f}% ×0.30 + "
+            f"活跃度 {liv_pct_for_score:.1f}% ×0.30"
+        )
+        # 解释主导因素
+        contributors = [
+            ("MVRV估值", mvrv_pct_full, 0.40),
+            ("NUPL近似", nupl_approx_pct, 0.30),
+            ("链上活跃度", liv_pct_for_score, 0.30),
+        ]
+        # 按加权贡献排序
+        contributors.sort(key=lambda x: (x[1] or 0) * x[2], reverse=True)
+        top_name, top_val, top_w = contributors[0]
+        if top_val is not None:
+            signals.append(f"当前主导因素：{top_name}（加权贡献 {top_val * top_w / cycle_heat_score * 100:.0f}%）")
+    else:
+        signals.append("周期评分数据不足（MVRV/NUPL/活跃度任一缺失）")
 
     return {
         "phase": phase,

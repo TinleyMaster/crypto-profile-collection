@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import date
 
@@ -92,6 +93,21 @@ def render_brief_html(brief: dict) -> str:
             </div>""")
         html_parts.append("</div>")
 
+    # ── AI 解读（如果有） ──
+    ai_narrative = brief.get("ai_narrative")
+    if ai_narrative:
+        # 最简 markdown → HTML 转换
+        ai_html = ai_narrative
+        ai_html = ai_html.replace("\n\n", "</p><p>")
+        ai_html = ai_html.replace("\n", "<br>")
+        ai_html = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', ai_html)
+        ai_html = re.sub(r'`(.*?)`', r'<code style="background:#e2e8f0;padding:1px 4px;border-radius:3px">\1</code>', ai_html)
+        html_parts.append(f'''
+        <div style="margin:16px 0;padding:14px 16px;background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px">
+          <div style="font-weight:700;color:#1e40af;margin-bottom:8px;font-size:14px">🤖 AI 解读</div>
+          <div style="color:#334155;font-size:13px;line-height:1.6">{ai_html}</div>
+        </div>''')
+
     # ── 降级标注 ──
     degraded = brief.get("degraded", [])
     if degraded:
@@ -113,6 +129,22 @@ def main():
     except Exception as e:
         print(f"[ERROR] 生成 brief 失败: {e}")
         return 1
+
+    # 1.5 AI 叙事（独立 try/except，绝不阻断邮件发送）
+    try:
+        from crypto_research.config import get_settings as _get_settings
+        from crypto_research.brief_ai import generate_ai_narrative
+        _settings = _get_settings(require_database=False)
+        ai_text = generate_ai_narrative(_settings, brief)
+        if ai_text:
+            brief["ai_narrative"] = ai_text
+            print(f"[OK] AI 叙事已生成（{len(ai_text)} 字符）")
+        else:
+            brief.setdefault("degraded", []).append("ai_narrative")
+            print("[INFO] AI 叙事未生成（LLM 不可用或返回空），已降级")
+    except Exception as e:
+        brief.setdefault("degraded", []).append("ai_narrative")
+        print(f"[WARN] AI 叙事生成异常（已降级）: {e}")
 
     # 2. 渲染 HTML
     try:

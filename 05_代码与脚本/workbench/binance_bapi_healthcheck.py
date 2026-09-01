@@ -88,6 +88,24 @@ _PROBES = {
 
 _FAIL: dict[str, int] = {}   # 连续失败计数（429 不累计）
 _NOTIFIER = None
+STATE_PATH = Path(os.getenv("HEALTH_STATE_DIR", "/tmp")) / "binance_bapi_health.json"
+
+
+def _load_state() -> dict:
+    """从文件加载跨进程失败计数状态。"""
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.exists() else {}
+    except Exception:
+        return {}
+
+
+def _save_state() -> None:
+    """将失败计数持久化到文件（跨 cron 调用存活）。"""
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(_FAIL, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _get_notifier():
@@ -131,6 +149,8 @@ def _recover_html(cn: str) -> str:
 
 def run_healthcheck() -> dict:
     """探测全部管道；连续 2 次失败发告警，恢复发恢复通知。返回 {管道: {ok, diag, cn}}。"""
+    global _FAIL
+    _FAIL = _load_state()  # 跨进程持久化：从文件恢复失败计数
     out: dict = {}
     notifier = _get_notifier()
 
@@ -162,6 +182,7 @@ def run_healthcheck() -> dict:
             except Exception as e:
                 logger.error("告警邮件发送失败 %s: %s", cn, e)
 
+    _save_state()  # 跨进程持久化：落盘失败计数
     return out
 
 

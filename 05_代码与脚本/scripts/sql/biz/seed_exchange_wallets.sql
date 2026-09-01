@@ -86,6 +86,56 @@ INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, c
 ON CONFLICT (address, chain) DO NOTHING;
 
 -- ============================================================
+-- Coinbase (BSC) - 高可信度（BSCScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('0x3c783c21a0383057D128bAe4318B9Cfc870298C4', 'Coinbase', 'bsc', 'exchange', 'high', 'bscscan-label'),
+    ('0x599d6FA1CAE44E6B99E1a3B6C1e49a93be934892', 'Coinbase', 'bsc', 'exchange', 'high', 'bscscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
+-- OKX (BSC) - 高可信度（BSCScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('0x6aA6a0F7B50d43F39b5B4C6521F3cA8888b070C0', 'OKX', 'bsc', 'exchange', 'high', 'bscscan-label'),
+    ('0x242cF37340B23B87a56B5b7D78C06c2640564900', 'OKX', 'bsc', 'exchange', 'high', 'bscscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
+-- KuCoin (BSC) - 高可信度（BSCScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('0xd6216fC19DB775Df9774a6E33526131dA7D19a2c', 'KuCoin', 'bsc', 'exchange', 'high', 'bscscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
+-- Binance (TRON) - 高可信度（TRONScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('TFRyoLeBd4MUha4F4pCmjq3mPMPmWEWqxB', 'Binance', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('THhKHh1bMJonU8V8VCdFb2dGvpi4eMn4Vc', 'Binance', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('TJDENsfBJs4RFETt1X1W8wMDc8M5XnJhCe', 'Binance', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('TMnaj37Bf3MK1DSbNRnKzkbvA9Uc1ZjR6p', 'Binance', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('TVGDf8nMmQi8Txb7Z6uK6VwTi1TP5hD6pJ', 'Binance', 'tron', 'exchange', 'high', 'tronscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
+-- OKX (TRON) - 高可信度（TRONScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('TFRoVfMCz7dBVzUJQf4bZ7VN4ab6XvZ7xD', 'OKX', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('TWd4WrZ9wn84f5x1hZhL4DHvk738ns5jwb', 'OKX', 'tron', 'exchange', 'high', 'tronscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
+-- Huobi (TRON) - 高可信度（TRONScan 标签）
+-- ============================================================
+INSERT INTO biz.onchain_exchange_wallet (address, exchange_name, chain, label, confidence, source) VALUES
+    ('THDmzHMzECN3aMUy5xqJaQxUjFENv3uDcP', 'Huobi', 'tron', 'exchange', 'high', 'tronscan-label'),
+    ('TNaRA1RFrzm9JPh3E6VC4C3VZPt6sW7VgZ', 'Huobi', 'tron', 'exchange', 'high', 'tronscan-label')
+ON CONFLICT (address, chain) DO NOTHING;
+
+-- ============================================================
 -- 统计信息
 -- ============================================================
 -- 执行后可运行以下查询确认：

@@ -1280,6 +1280,27 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     # P0-B 催化剂因子
     "catalyst_window_days": 14,              # 催化剂回溯窗口（天）
     "catalyst_min_score": 50,                # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
+    "catalyst_top_n": 5,                     # 催化剂机会最多取前 N（去重后）
+    # 高亮信号板块接入（2026-09-01 工单集合）
+    # 工单1: 链上巨鲸异常
+    "whale_window_hours": 24,                # 巨鲸回看窗口（小时）
+    "whale_usd_min": 1000000,                # 单笔最低美元（默认 100 万刀）
+    "whale_top_n": 5,                        # 最多展示巨鲸卡数
+    # 工单3: GitHub dev 活跃异动
+    "github_window_days": 60,                # 拉取新鲜度窗口（天）
+    "github_burst_ratio": 1.5,               # last4 > 1.5*prev4 → 爆发
+    "github_decline_ratio": 0.5,             # last4 < 0.5*prev4 → 骤降
+    "github_top_n": 5,
+    # 工单4: 融资落地
+    "raise_window_days": 90,                 # 融资回看窗口（天，低频用 90d 避免空板）
+    "raise_top_n": 5,
+    # 工单5: 代币解锁抛压
+    "unlock_window_days": 14,                # 未来解锁窗口（天）
+    "unlock_ratio_min": 1.0,                 # unlock_ratio_mcap 最小阈值（%）
+    "unlock_top_n": 5,
+    # 工单6: KOL onchain 情报
+    "kol_window_days": 7,                    # KOL 信号回看窗口（天）
+    "kol_top_n": 5,
 }
 
 
@@ -1892,10 +1913,12 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
     权重：strong=1.0, medium=0.6, weak=0.3。归一化到 0-100。
     """
     try:
-        from crypto_research.db.conn import get_db
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
         from datetime import timedelta
 
-        with get_db() as conn:
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT ci.asset_id,
@@ -1936,11 +1959,229 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                 rows = cur.fetchall()
                 results = []
                 for aid, symbol, raw_score, cnt in rows:
-                    # 归一化到 0-100：raw_score 范围 [-inf, +inf]，clip 后映射
-                    clipped = max(-100, min(100, raw_score * 10))
-                    score = (clipped + 100) / 2.0
+                    # 归一化到 0-100：raw_score(Decimal) 先转 float，clip 后映射
+                    try:
+                        raw_f = float(raw_score)
+                    except (TypeError, ValueError):
+                        raw_f = 0.0
+                    clipped = max(-100.0, min(100.0, raw_f * 10))
+                    score = (clipped + 100.0) / 2.0
                     results.append((aid, symbol or "", round(score, 1)))
                 return results
+    except Exception:
+        return []
+
+
+def _recent_whale_flow_targets(
+    hours: float = 24, usd_min: float = 1_000_000, limit: int = 5,
+) -> list[tuple]:
+    """近 N 小时链上巨鲸大额转账（onchain_transfer_log），按 asset 聚合。
+
+    返回 [(asset_id, symbol, usd_total, n_tx, max_value_usd, is_to_exchange, chain), ...]。
+    失败返回 []（降级不崩）。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT t.asset_id, a.canonical_symbol,
+                           SUM(t.value_usd) AS usd_total,
+                           COUNT(*) AS n_tx,
+                           MAX(t.value_usd) AS max_val,
+                           BOOL_OR(t.is_to_exchange) AS any_to_ex,
+                           MAX(t.chain) AS chain
+                    FROM biz.onchain_transfer_log t
+                    JOIN core.asset a ON a.asset_id = t.asset_id
+                    WHERE (t.is_to_exchange OR t.from_exchange IS NOT NULL)
+                      AND t.value_usd >= %s
+                      AND t.block_timestamp >= NOW() - make_interval(hours => %s)
+                    GROUP BY t.asset_id, a.canonical_symbol
+                    ORDER BY usd_total DESC
+                    LIMIT %s
+                """, (usd_min, int(hours), limit))
+                rows = cur.fetchall()
+                return [
+                    (
+                        r[0], r[1] or "?", float(r[2] or 0), int(r[3] or 0),
+                        float(r[4] or 0), bool(r[5]), r[6] or "",
+                    )
+                    for r in rows
+                ]
+    except Exception:
+        return []
+
+
+def _github_activity_targets(
+    window_days: int = 60, burst_ratio: float = 1.5,
+    decline_ratio: float = 0.5, limit: int = 5,
+) -> list[tuple]:
+    """GitHub dev 活跃异动：weekly_commit_counts 末 4 周 vs 前 4 周。
+
+    返回 [(asset_id, symbol, last4, prev4, ratio, direction), ...]。
+    direction: 'burst'(last4 > burst_ratio*prev4) / 'decline'(last4 < decline_ratio*prev4)。
+    失败返回 []。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        from datetime import datetime, timezone
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT g.asset_id, a.canonical_symbol,
+                           r.weekly_commit_counts
+                    FROM biz.github_repo_activity r
+                    JOIN biz.asset_github_repo g
+                      ON g.owner_login = r.owner_login AND g.repo_name = r.repo_name
+                    JOIN core.asset a ON a.asset_id = g.asset_id
+                    WHERE r.fetched_at >= NOW() - make_interval(days => %s)
+                    ORDER BY r.fetched_at DESC
+                """, (window_days,))
+                rows = cur.fetchall()
+
+        results: list[tuple] = []
+        for asset_id, symbol, weekly in rows:
+            if not weekly or not isinstance(weekly, list) or len(weekly) < 8:
+                continue
+            vals = []
+            for v in weekly[-8:]:
+                try:
+                    vals.append(int(float(v)))
+                except (TypeError, ValueError):
+                    vals.append(0)
+            last4 = sum(vals[-4:])
+            prev4 = sum(vals[:4])
+            if prev4 <= 0:
+                continue
+            ratio = last4 / prev4
+            if last4 > burst_ratio * prev4:
+                direction = "burst"
+            elif last4 < decline_ratio * prev4:
+                direction = "decline"
+            else:
+                continue
+            results.append((asset_id, symbol or "?", last4, prev4, round(ratio, 2), direction))
+            if len(results) >= limit:
+                break
+        return results
+    except Exception:
+        return []
+
+
+def _recent_raises(
+    window_days: int = 90, limit: int = 5,
+) -> list[tuple]:
+    """近期融资落地（asset_raises）。返回 [(asset_id, symbol, round, amount_m, lead, raise_date, protocol_name), ...]。
+
+    amount 单位为百万美元（实测：Crypto.com 400 = $400M）；协议名用于 symbol 缺失兜底。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT r.asset_id, a.canonical_symbol,
+                           r.round, r.amount, r.lead_investors, r.raise_date, r.protocol_name
+                    FROM biz.asset_raises r
+                    JOIN core.asset a ON a.asset_id = r.asset_id
+                    WHERE r.raise_date >= NOW() - make_interval(days => %s)
+                    ORDER BY r.raise_date DESC
+                    LIMIT %s
+                """, (window_days, limit))
+                rows = cur.fetchall()
+        results = []
+        for r in rows:
+            lead = r[4]
+            if isinstance(lead, (list, tuple)):
+                lead = ", ".join(str(x) for x in lead[:2])
+            amount_m = float(r[3]) if r[3] is not None else None
+            results.append((r[0], r[1] or "", r[2] or "", amount_m, lead or "", str(r[5] or ""), r[6] or ""))
+        return results
+    except Exception:
+        return []
+
+
+def _upcoming_unlocks(
+    window_days: int = 14, ratio_min: float = 1.0, limit: int = 5,
+) -> list[tuple]:
+    """未来 N 天代币解锁（asset_unlock_event，含解锁价值与市值占比）。
+
+    返回 [(asset_id, symbol, unlock_value_usd, unlock_date, ratio_mcap), ...]。
+    失败返回 []。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT u.asset_id, a.canonical_symbol,
+                           u.unlock_value_usd, u.unlock_date, u.unlock_ratio_mcap
+                    FROM biz.asset_unlock_event u
+                    JOIN core.asset a ON a.asset_id = u.asset_id
+                    WHERE u.unlock_date BETWEEN NOW() AND NOW() + make_interval(days => %s)
+                      AND u.unlock_value_usd IS NOT NULL
+                    ORDER BY u.unlock_value_usd DESC
+                    LIMIT %s
+                """, (window_days, limit))
+                rows = cur.fetchall()
+        results = []
+        for r in rows:
+            ratio_mcap = float(r[4]) if r[4] is not None else 0.0
+            if ratio_mcap <= 0:
+                continue
+            results.append((r[0], r[1] or "?", float(r[2] or 0), str(r[3] or ""), ratio_mcap))
+        return results
+    except Exception:
+        return []
+
+
+def _kol_onchain_signals(
+    days: int = 7, limit: int = 5,
+) -> list[tuple]:
+    """KOL 链上异动情报（kol_signal，仅回测达标 onchain 类）。
+
+    返回 [(asset_id, symbol, subtype, usd_value, exchange, profile_id), ...]。
+    回测未达标（backtest_done=False）一律不进板，避免污染专业感。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT k.asset_id, COALESCE(k.symbol, a.canonical_symbol),
+                           k.signal_subtype, k.event_usd_value, k.event_exchange, k.profile_id
+                    FROM biz.kol_signal k
+                    LEFT JOIN core.asset a ON a.asset_id = k.asset_id
+                    WHERE k.backtest_done = TRUE
+                      AND (k.from_address IS NOT NULL OR k.to_address IS NOT NULL
+                           OR k.event_amount IS NOT NULL OR k.event_exchange IS NOT NULL)
+                      AND k.created_at >= NOW() - make_interval(days => %s)
+                    ORDER BY COALESCE(k.event_usd_value, 0) DESC
+                    LIMIT %s
+                """, (days, limit))
+                rows = cur.fetchall()
+        results = []
+        for r in rows:
+            if r[0] is None:
+                continue
+            usd_val = float(r[3]) if r[3] is not None else None
+            results.append((r[0], r[1] or "?", r[2] or "", usd_val, r[4] or "", r[5] or ""))
+        return results
     except Exception:
         return []
 
@@ -2166,10 +2407,20 @@ def score_opportunities(overview: dict) -> dict:
     # ── 1c) 催化剂驱动机会 (P0-B) ──
     cat_window = t.get("catalyst_window_days", 14)
     cat_min_score = t.get("catalyst_min_score", 50)
+    cat_top_n = int(t.get("catalyst_top_n", 5))
     cat_targets = _recent_catalyst_targets(cat_window)
+    _cat_seen: set[str] = set()
+    _cat_pushed = 0
     for aid, symbol, cscore in cat_targets:
         if cscore < cat_min_score:
             continue
+        # 同 symbol 去重（不同 asset_id 可能映射同一标的），保留分高者
+        if symbol in _cat_seen:
+            continue
+        if _cat_pushed >= cat_top_n:
+            break
+        _cat_seen.add(symbol)
+        _cat_pushed += 1
         breakdown = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             cycle_phase=cycle_phase,
@@ -2183,8 +2434,178 @@ def score_opportunities(overview: dict) -> dict:
              "confidence": "high" if cscore >= 70 else "medium",
              "conviction_score": conviction,
              "conviction_breakdown": breakdown,
+             "signal_type": "catalyst",
              "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
+             "action_hint": "事件驱动，窗口内跟进",
+             "invalidation": "催化剂事件兑现/热度消退后信号失效",
              "related_dims": ["catalyst_events", "P0-B 催化剂驱动"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 1d) 链上巨鲸异常卡（工单1：onchain_transfer_log 24h） ──
+    _whale_targets = _recent_whale_flow_targets(
+        hours=float(t.get("whale_window_hours", 24)),
+        usd_min=float(t.get("whale_usd_min", 1_000_000)),
+        limit=int(t.get("whale_top_n", 5)),
+    )
+    for wt in _whale_targets:
+        # wt: (asset_id, symbol, usd_total, n_tx, max_value_usd, is_to_exchange, chain)
+        aid, symbol, usd_total, n_tx, max_val, is_to_ex, chain = wt
+        if is_to_ex:
+            direction = "short"
+            action = "抛压预警，观察 T+3 是否跌破阈值"
+            invalid = "若 T+3 内未跌破或出现等量回补，信号失效"
+        else:
+            direction = "long"
+            action = "吸筹观察，左侧关注"
+            invalid = "若 T+3 内出现同额反手转出，信号失效"
+        conviction = _compute_conviction_score(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": symbol, "direction": direction, "confidence": "medium",
+             "conviction_score": conviction,
+             "signal_type": "whale_flow",
+             "asset_id": aid,
+             "trigger_logic": (
+                 f"{symbol} 近{t.get('whale_window_hours', 24)}h {n_tx} 笔大额"
+                 f"（单笔最大 ${max_val / 1e6:.1f}M，合计 ${usd_total / 1e6:.1f}M）"
+                 f"{'转入交易所（抛压）' if is_to_ex else '从交易所转出（吸筹）'}"
+             ),
+             "action_hint": action,
+             "invalidation": invalid,
+             "related_dims": ["onchain_transfer_log", "P1-3 链上巨鲸"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 1e) GitHub 开发者活跃异动卡（工单3） ──
+    _gh_targets = _github_activity_targets(
+        window_days=int(t.get("github_window_days", 60)),
+        burst_ratio=float(t.get("github_burst_ratio", 1.5)),
+        decline_ratio=float(t.get("github_decline_ratio", 0.5)),
+        limit=int(t.get("github_top_n", 5)),
+    )
+    for gt in _gh_targets:
+        # gt: (asset_id, symbol, last4, prev4, ratio, direction)
+        aid, symbol, last4, prev4, ratio, gdir = gt
+        if gdir == "burst":
+            direction, action, invalid = "long", "dev 活跃爆发，关注主网上线/交付", "若后续 4 周回落至均值以下，信号失效"
+            label = "dev 活跃爆发"
+        else:
+            direction, action, invalid = "watch", "开发停滞风险，配合解锁抛压=双杀", "若后续 4 周恢复活跃，信号失效"
+            label = "dev 活跃骤降"
+        conviction = _compute_conviction_score(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": symbol, "direction": direction, "confidence": "medium",
+             "conviction_score": conviction,
+             "signal_type": "github_activity",
+             "asset_id": aid,
+             "trigger_logic": (
+                 f"{symbol} {label}：近 4 周 {last4} commits vs 前 4 周 {prev4}（{ratio:.1f}x）"
+             ),
+             "action_hint": action,
+             "invalidation": invalid,
+             "related_dims": ["github_repo_activity", "P1 GitHub 开发活跃"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 1f) 融资近期落地卡（工单4） ──
+    _raise_targets = _recent_raises(
+        window_days=int(t.get("raise_window_days", 90)),
+        limit=int(t.get("raise_top_n", 5)),
+    )
+    for rt in _raise_targets:
+        # rt: (asset_id, symbol, round, amount_m, lead, raise_date, protocol_name)
+        aid, symbol, rnd, amount_m, lead, rdate, proto = rt
+        amount_str = f"${amount_m:.0f}M" if amount_m else "N/A"
+        lead_str = lead or "未披露"
+        target = symbol if symbol not in ("", "-") else (proto or "?")
+        conviction = _compute_conviction_score(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": target, "direction": "long", "confidence": "medium",
+             "conviction_score": conviction,
+             "signal_type": "funding",
+             "asset_id": aid,
+             "trigger_logic": (
+                 f"{target} {rnd} 轮融资落地 {amount_str}（领投 {lead_str}，{rdate}）"
+             ),
+             "action_hint": "机构入场信心信号，关注后续解锁抛压",
+             "invalidation": "若大额 vesting 解锁临近，潜在抛压对冲",
+             "related_dims": ["asset_raises", "P1 融资落地"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 1g) 代币解锁抛压卡（工单5） ──
+    _unlock_targets = _upcoming_unlocks(
+        window_days=int(t.get("unlock_window_days", 14)),
+        ratio_min=float(t.get("unlock_ratio_min", 1.0)),
+        limit=int(t.get("unlock_top_n", 5)),
+    )
+    for ut in _unlock_targets:
+        # ut: (asset_id, symbol, unlock_value_usd, unlock_date, ratio_mcap)
+        aid, symbol, uval, udate, ratio_mcap = ut
+        conviction = _compute_conviction_score(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": symbol, "direction": "short", "confidence": "medium",
+             "conviction_score": conviction,
+             "signal_type": "token_unlock",
+             "asset_id": aid,
+             "trigger_logic": (
+                 f"{symbol} 解锁临近 {udate}（价值 ${uval / 1e6:.1f}M，占市值 "
+                 f"{ratio_mcap:.1f}%）→ 供给侧抛压"
+             ),
+             "action_hint": "cliff 前减仓或对冲，配合 dev 停滞=双杀",
+             "invalidation": "解锁后若流通未抛售，抛压证伪",
+             "related_dims": ["asset_unlock_event", "P1 解锁抛压"]},
+            opportunities, excluded, t,
+        )
+
+    # ── 1h) KOL onchain 情报卡（工单6，需回测达标过滤） ──
+    _kol_targets = _kol_onchain_signals(
+        days=int(t.get("kol_window_days", 7)),
+        limit=int(t.get("kol_top_n", 5)),
+    )
+    for kt in _kol_targets:
+        # kt: (asset_id, symbol, subtype, usd_value, exchange, profile_id)
+        aid, symbol, subtype, usd_val, exchange, profile_id = kt
+        conv_label = "链上" if subtype else "信号"
+        conviction = _compute_conviction_score(
+            mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+            cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": symbol, "direction": "watch", "confidence": "medium",
+             "conviction_score": conviction,
+             "signal_type": "kol_onchain",
+             "asset_id": aid,
+             "trigger_logic": (
+                 f"KOL {profile_id} 链上异动（{subtype or conv_label}"
+                 f"{f' @{exchange}' if exchange else ''}"
+                 f"{f' ${usd_val / 1e3:.0f}K' if usd_val else ''}）"
+             ),
+             "action_hint": "情报参考，独立核验后跟进",
+             "invalidation": "回测未达标的 KOL 不进板",
+             "related_dims": ["kol_signal", "P1 KOL onchain"]},
             opportunities, excluded, t,
         )
 

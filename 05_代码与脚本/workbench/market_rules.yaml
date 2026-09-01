@@ -75,6 +75,27 @@ opportunity_rules:
   # P0-B 催化剂因子
   catalyst_window_days: 14             # 催化剂回溯窗口（天）
   catalyst_min_score: 50               # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
+  catalyst_top_n: 5                    # 催化剂机会最多取前 N（去重后）
+  # ── 高亮信号板块接入（2026-09-01 工单集合） ──
+  # 工单1: 链上巨鲸异常
+  whale_window_hours: 24               # 巨鲸回看窗口（小时）
+  whale_usd_min: 1000000               # 单笔最低美元（默认 100 万刀）
+  whale_top_n: 5                       # 最多展示巨鲸卡数
+  # 工单3: GitHub dev 活跃异动
+  github_window_days: 60               # 拉取新鲜度窗口（天）
+  github_burst_ratio: 1.5              # last4 > 1.5*prev4 → 爆发
+  github_decline_ratio: 0.5            # last4 < 0.5*prev4 → 骤降
+  github_top_n: 5
+  # 工单4: 融资落地
+  raise_window_days: 90                # 融资回看窗口（天，低频用 90d 避免空板）
+  raise_top_n: 5
+  # 工单5: 代币解锁抛压
+  unlock_window_days: 14               # 未来解锁窗口（天）
+  unlock_ratio_min: 1.0                # unlock_ratio_mcap 最小阈值（%）
+  unlock_top_n: 5
+  # 工单6: KOL onchain 情报
+  kol_window_days: 7                   # KOL 信号回看窗口（天）
+  kol_top_n: 5
 
 # ── 评分微调参数（scoring tuning） ──
 scoring_tuning:

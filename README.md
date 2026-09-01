@@ -48,6 +48,8 @@
 | Tokenomist / tokenomics.com | 代币解锁时间表 + 代币经济学四板块（overview / unlocks / revenue / valuation） | 网页爬取（Playwright 无头浏览器） |
 | Binance / OKX / Bybit / Bitget / Gate 永续合约公开接口 | 衍生品资金面（资金费率 / OI / 成交，本地多交易所求和） | 匿名 REST API |
 | Binance Square（币安广场） | KOL 交易信号监控（实时喊单识别 + 邮件提醒） | Playwright 无头浏览器 + bapi 接口 |
+| CoinMetrics Community API | BTC/ETH 多币链上指标（交易所净流/余额/活跃地址/HashRate/ROI/手续费），免费档 | REST API（日频） |
+| Open Bitcoin Metrics (OBM) | 23 项 BTC 链上指标（liveliness/dormancy/CDD/hashrate/age-band），GitHub CSV | GitHub raw CSV |
 
 ---
 
@@ -393,7 +395,81 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 
 ---
 
-## KOL 信号监控模块
+## 大盘分析板块（宏观市场）
+
+`/api/market/overview` + `macro_market.py`（2900+ 行），聚合多维数据输出大盘分析 + 机会发现。
+
+### 七维度数据架构
+
+| 维度 | 数据源 | 说明 |
+|------|--------|------|
+| 1 体量 | CMC + CoinGecko | 总市值/总量/BTC主导率/ETH主导率/稳定币市值 |
+| 2 盘面 | Binance REST API | BTC/ETH/ETHBTC 价格+技术面 |
+| 3 情绪 | CMC 恐贪 + altcoin_season + CEFI（链上净流覆盖） | 情绪子分 |
+| 3 衍生品 | Binance/OKX/Bybit/Bitget/Gate | funding_rate / open_interest / 多空比 |
+| 4 机构 | CRYPTOETF API | ETF 净流入 |
+| 5 板块 | CMC 分类 + DeFiLlama TVL | 叙事/链/稳定币净流入排名 |
+| mvrv_universe | biz.cm_asset_onchain_daily | 14 币 MVRV 百分位极值 |
+| 6 链上 | CM Community（BTC 专属） | 交易所净流/余额趋势/HashRate/活跃地址/ROI |
+| 6a 网络健康 | CM Community（14 币） | AdrActCnt 分位 + ROI_30d + 网络衰退检测 |
+
+### 机会发现引擎（conviction_score 0-100）
+
+`score_opportunities()` 聚合 P0-3 真实字段合成机会清单：
+
+- **P0-1 MVRV 估值回归**：MVRV 百分位 ≤15% → HIGH，≤30% → MED
+- **P0-2 BTC 周期调制**：phase 作为 conviction 调制器（early_bottom 抬高 long，early_top 压低）
+- **P0-3 复合 conviction**：六轴加权（MVRV 25% + cycle 20% + funding 15% + netflow 15% + stable 10% + ROI 15%）
+- **CM BTC 链上积累**：CM 原生交易所净流（替代死链路 CoinGlass）
+- 机会按 conviction_score 降序排列，HIGH 红色置顶 / MED 黄色 / LOW 折叠观察池
+
+### 大盘早报邮件
+
+`send_daily_brief.py` → `render_brief_html` → `EmailNotifier`（复用已有 SMTP 封装）：
+
+1. `build_daily_brief.py` 生成 brief（M0~M6 + DIFF）
+2. `brief_ai.py` 喂 LLM 生成 AI 叙事段落（Ark 优先，降级不崩溃）
+3. 渲染 HTML（HIGH 红/MED 黄卡片 + DIFF 趋势箭头 + AI 解读蓝框）
+4. 调度：每日 08:30 快照 → 09:00 邮件
+
+### 降级铁律
+
+每个维度独立 try/except，源异常标 `status=error/degraded`（211 处），AI 不可用时省略 AI 段，结构化早报照发。
+
+---
+
+## CM/OBM 链上指标模块
+
+从 CoinMetrics Community 免费档拉取 BTC/ETH 多币链上指标，支撑大盘板信号发现。
+
+### 数据管道
+
+```
+CM Community API (免费)
+   ↓ backfill_cm_onchain.py (T-1 增量)
+biz.cm_asset_onchain_daily (18+ 列: flow_in/out_ex_usd / sply_ex_usd /
+   adr_act_cnt / hash_rate / roi_1yr / roi_30d / fee_tot_ntv ...)
+   ↓  percentile 预计算 (cm_onchain_percentile_full)
+大盘板 macro_market.py 消费 → 6链上 + 6a网络健康 + conviction 调制
+```
+
+### 关键边界
+
+1. **交易所流量 = BTC 专属**：ETH/LINK/UNI 的 flow 字段返回 None，SOL 整体 403
+2. **活跃地址多资产可用**：ETH 849K、LINK 4.4K 均正常
+3. **SOL 免费档 403**：任何 CM 信号都不含 SOL
+4. **100 行窗口**：免费 call 只返近期快照，长分位靠 DB 历史累积
+
+---
+
+## 催化剂事件因子化
+
+`build_catalyst_impact.py`：规则推导 event_type → 定向市场影响（零 LLM）。
+
+- **title 兜底**：从标题提取 token（3-6 位大写 + 混合大小写），匹配 core.asset（DISTINCT ON symbol 取市值最大 1 个，防扩散）
+- **规则表**：listing→bullish/strong/7d，delisting→bearish/strong/0d，tech_upgrade→bullish/medium/14d 等
+- **误配词库**：HIP/API/USD/COIN/BTC/ETH/SOL/BNB 已排除
+- **delisting 专用**：混合大小写匹配覆盖 HyENA/Lakala 等非全大写币名
 
 监控币安广场等平台的交易类 KOL 发帖，通过 AI 自动区分「实时喊单」与「事后晒单」，只对有跟单价值的实时信号发邮件提醒，同时全量存档用于后续回测博主胜率。
 
@@ -425,11 +501,12 @@ LLM AI 结构化分类（14 个字段，规则强制校验）
   邮件内容：信号详情 + 原文摘要 + 交叉验证数据（解锁/转账/资金费率/OI）
 ```
 
-### AI 分类体系（四分类，优先级从高到低）
+### AI 分类体系（五分类 + 链上信号维度，优先级从高到低）
 
 | 类型 | 含义 | 跟单价值 |
 |---|---|---|
 | `noise` | 与交易/行情完全无关（生活、营销、广告、闲聊、转发等） | 无 |
+| `onchain` | 链上数据/资金流监控（鲸鱼转账、交易所流入流出、爆仓清算、吸筹派发、聪明钱异动），客观事实情报 | 中（情报/归因） |
 | `after_action` | 事后晒单：已进场或已有盈亏结果 | 中（验证用） |
 | `prediction` | 前瞻喊单：给出明确入场条件，博主尚未进场 | 高（可跟单） |
 | `analysis` | 纯行情分析/观点分享，无明确操作建议 | 低（参考） |
@@ -449,7 +526,7 @@ LLM AI 结构化分类（14 个字段，规则强制校验）
 |----|------|---------|
 | `biz.kol_profile` | 博主档案 | platform_code, platform_user_id, nickname, follower_count, is_active, last_post_id, win_rate, total_signals |
 | `biz.kol_post` | 帖子原文（全量存档） | platform_post_id（唯一）, content_text, image_urls, posted_at, raw_json, ai_failed, ai_retry_count |
-| `biz.kol_signal` | AI 分析信号 | post_type（四分类：prediction/after_action/analysis/noise）, direction, symbol, entry_condition, entry_price, stop_loss, take_profit, leverage, **support_level, resistance_level**, already_entered, has_pnl_number, confidence, is_alerted, backtest_*（回测预留） |
+| `biz.kol_signal` | AI 分析信号 | post_type（五分类：prediction/after_action/analysis/noise/onchain）, direction, symbol, entry_condition, entry_price, stop_loss, take_profit, leverage, **support_level, resistance_level**, already_entered, has_pnl_number, confidence, is_alerted, **signal_category**（trading/onchain/news）, **signal_subtype**（whale_move/exchange_flow/liquidation/accumulation/distribution/smart_money）, **event_direction**（inflow/outflow/liquidated_long/liquidated_short/accumulating/distributing）, **from_address/to_address/event_amount/event_token/event_usd_value/tx_hash/event_exchange/address_label/event_time**（链上事件字段）, backtest_*（回测预留） |
 
 ### Web 面板功能（3 个 Tab）
 
@@ -944,7 +1021,15 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 | 每周一 08:30 | 链上异常事件（hacks） | — |
 | 每 6 小时 | B2 深度文档发现 | 自循环 |
 | 每日 09:00 | B3 SPA 无头浏览器爬取 | 自循环 |
+| 每日 09:00 | 代币解锁数据采集（100 币） | tokenomics.com 爬取 |
 | 每日 10:00 | B4 AI 噪声清理 | 自循环 |
+| 每日 10:00 | 催化剂全链路（摄入→AI→thesis） | 每 12 小时 |
+| 每日 08:30 | 每日早报快照 + 趋势 diff | 早报落库 |
+| 每日 09:00 | 每日早报邮件发送 | AI 叙事 + HTML |
+| 每日 06:30 | CM 链上指标 T-1 增量拉取 | CoinMetrics |
+| 每日 07:00 | CM 链上指标入库验证 | 自动验证 |
+| 周一三五 04:00 | OBM BTC 数据下载 | GitHub CSV |
+| 周一三五 04:30 | OBM BTC 链上指标入库 | 长表 |
 | 每 30 分钟 | 大额转账监控 + 解锁/空头/大户监控 | 跑到完/单次 |
 
 **环境变量**（可选）：`SCHEDULER_TIMEZONE`（默认 `Asia/Shanghai`）、`SCHEDULER_ENABLED`（逗号分隔 key 白名单，空=全部）、`SCHEDULER_LOG_DIR`（默认 `/app/task_state/scheduler`）。

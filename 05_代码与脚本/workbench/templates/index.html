@@ -7532,6 +7532,43 @@
                 // GitHub 活跃度加载失败不阻塞大盘
             }
             
+            // 黑客事件卡
+            try {
+                const hackRes = await fetch('/api/hack/feed');
+                const hackData = await hackRes.json();
+                if (hackData.ok && hackData.events && hackData.events.length) {
+                    const events = hackData.events.slice(0, 10);
+                    const totalLoss = events.reduce((s, e) => s + (e.amount_usd || 0), 0);
+                    const lossTxt = totalLoss >= 1e9 ? '$' + (totalLoss / 1e9).toFixed(1) + 'B'
+                        : totalLoss >= 1e6 ? '$' + (totalLoss / 1e6).toFixed(0) + 'M' : '$' + totalLoss.toFixed(0);
+                    html += `<div class="dim-card">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">🚨</span>
+                            <span class="dim-card-title">安全事件</span>
+                            <span class="dim-card-score neutral">${events.length} 起 · 损失 ${lossTxt}</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${events.map(e => {
+                                const amtTxt = e.amount_usd != null
+                                    ? (e.amount_usd >= 1e9 ? '$' + (e.amount_usd / 1e9).toFixed(1) + 'B'
+                                        : e.amount_usd >= 1e6 ? '$' + (e.amount_usd / 1e6).toFixed(0) + 'M'
+                                        : '$' + e.amount_usd.toFixed(0))
+                                    : '-';
+                                const chainTxt = (e.chain || []).join(', ') || '-';
+                                const bridgeTag = e.bridge_hack ? ' <small style="color:#f0b90b">跨链桥</small>' : '';
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${e.hack_date || '?'} ${e.name || e.asset_name || '?'}${bridgeTag}</span>
+                                    <span class="dim-metric-val" style="color:#ff5b5b">${amtTxt}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">数据源: DefiLlama /hacks | 仅展示近期事件</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // 黑客事件加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

@@ -2008,6 +2008,45 @@ def api_cm_valuation():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/hack/feed")
+def api_hack_feed():
+    """近期黑客/安全事件列表。"""
+    try:
+        from db_stats import get_conn
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT h.id, h.name, h.technique, h.amount, h.returned_funds,
+                       h.chain, h.hack_date, h.classification, h.bridge_hack,
+                       a.symbol, a.name as asset_name
+                FROM biz.asset_hacks h
+                LEFT JOIN core.asset a ON a.asset_id = h.asset_id
+                ORDER BY h.hack_date DESC NULLS LAST
+                LIMIT 50
+            """).fetchall()
+
+            events = []
+            for r in rows:
+                amt = r["amount"]
+                ret = r["returned_funds"]
+                events.append({
+                    "id": r["id"],
+                    "name": r["name"],
+                    "technique": r["technique"],
+                    "amount_usd": float(amt) if amt else None,
+                    "returned_usd": float(ret) if ret else None,
+                    "chain": r["chain"],
+                    "hack_date": str(r["hack_date"]) if r["hack_date"] else None,
+                    "classification": r["classification"],
+                    "bridge_hack": r["bridge_hack"],
+                    "symbol": r["symbol"],
+                    "asset_name": r["asset_name"],
+                })
+
+            return jsonify({"ok": True, "events": events, "total": len(events)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/github/overview")
 def api_github_overview():
     """GitHub 活跃度总览：Top-N 活跃 repo + 僵尸 repo 预警。"""

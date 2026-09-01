@@ -54,7 +54,7 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str) -> int:
     )
     links = cur.fetchall()
 
-    # 2) 兜底：从 title 提取大写 token，匹配 core.asset.canonical_symbol
+    # 2) 兜底：从 title 提取 token，匹配 core.asset.canonical_symbol
     if not links:
         cur.execute(
             "SELECT title FROM biz.asset_catalyst WHERE catalyst_id = %s",
@@ -63,20 +63,53 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str) -> int:
         row = cur.fetchone()
         title = (row[0] or "") if row else ""
         if title:
-            # 提取 2-6 位大写字母 token（排除常见非资产词）
-            tokens = _re.findall(r'\b([A-Z]{2,6})\b', title)
-            # 排除常见非资产缩写
-            skip_words = {"THE", "FOR", "AND", "NOT", "HAS", "ITS", "ARE", "WAS", "CEO",
-                          "CFO", "SEC", "FDA", "GDP", "ETF", "IPO", "OTC", "ALL", "NEW"}
+            # P0-2: token 长度下限 3（过滤 2 位介词/缩写噪声）+ 扩充 skip_words
+            tokens = _re.findall(r'\b([A-Z]{3,6})\b', title)
+            skip_words = {
+                "THE", "FOR", "AND", "NOT", "HAS", "ITS", "ARE", "WAS", "CEO",
+                "CFO", "SEC", "FDA", "GDP", "ETF", "IPO", "OTC", "ALL", "NEW",
+                "HIP", "API", "USD", "COIN", "BTC", "ETH", "SOL", "BNB",
+            }
             tokens = [t for t in tokens if t not in skip_words]
             if tokens:
+                # P0-1: 同 symbol 只取 1 个资产（按市值降序取 canonical）
+                # 避免 "ETH Staking" 扩散到 15 个 symbol=ETH 的脏资产
                 cur.execute(
-                    "SELECT asset_id, UPPER(canonical_symbol) FROM core.asset "
-                    "WHERE UPPER(canonical_symbol) = ANY(%s)",
+                    "SELECT DISTINCT ON (UPPER(k.canonical_symbol)) "
+                    "  k.asset_id, UPPER(k.canonical_symbol) "
+                    "FROM core.asset k "
+                    "WHERE UPPER(k.canonical_symbol) = ANY(%s) "
+                    "ORDER BY UPPER(k.canonical_symbol), "
+                    "         COALESCE(k.market_cap, 0) DESC NULLS LAST",
                     (tokens,),
                 )
                 matched = cur.fetchall()
                 links = [(r[0],) for r in matched]
+
+    # P1-3: delisting 类事件额外尝试混合大小写匹配（覆盖 HyENA/Lakala 等）
+    if not links and event_type == "delisting" and title:
+        # 提取 3-8 位混合大小写 token（非全大写，也非全小写）
+        mixed_tokens = _re.findall(r'\b([A-Za-z]{3,8})\b', title)
+        # 过滤纯小写（介词）和 skip_words
+        mixed_tokens = [
+            t.upper() for t in mixed_tokens
+            if t.upper() not in skip_words
+            and t != t.lower()  # 排除全小写
+            and t != t.upper()  # 排除全大写（已处理过）
+            and not t[0].isdigit()  # 排除数字开头
+        ]
+        if mixed_tokens:
+            cur.execute(
+                "SELECT DISTINCT ON (UPPER(k.canonical_symbol)) "
+                "  k.asset_id, UPPER(k.canonical_symbol) "
+                "FROM core.asset k "
+                "WHERE UPPER(k.canonical_symbol) = ANY(%s) "
+                "ORDER BY UPPER(k.canonical_symbol), "
+                "         COALESCE(k.market_cap, 0) DESC NULLS LAST",
+                (mixed_tokens,),
+            )
+            matched = cur.fetchall()
+            links = [(r[0],) for r in matched]
 
     if not links:
         return 0

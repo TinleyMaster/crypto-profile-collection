@@ -65,6 +65,22 @@ class CatalystArticle:
 class BinanceNewsScraper:
     """币安 CMS 新闻抓取器（免认证公开接口）"""
 
+    @classmethod
+    def health_check(cls) -> tuple[bool, str]:
+        """存活探测：公告 CMS bapi 是否可访问。连续失败由 binance_bapi_healthcheck 告警，不阻断抓取。"""
+        try:
+            from binance_bapi_healthcheck import _probe
+        except ImportError:
+            try:
+                from ..binance_bapi_healthcheck import _probe  # noqa: F811
+            except ImportError:
+                return False, "healthcheck 模块不可用"
+        return _probe(
+            LIST_URL,
+            method="POST",
+            json={"type": 1, "catalogId": 49, "pageNo": 1, "pageSize": 1},
+        )
+
     def __init__(self, request_interval: float = 1.2, timeout: int = 15):
         """
         Args:
@@ -90,31 +106,49 @@ class BinanceNewsScraper:
             time.sleep(self.request_interval - elapsed)
         self._last_request_ts = time.time()
 
-    def _get(self, url: str, params: dict) -> dict | None:
-        """统一 GET 请求封装
+    def _get(self, url: str, params: dict, retries: int = 3) -> dict | None:
+        """统一 GET 请求封装（带 429 指数退避重试 + 存活探测）
+
+        P1 修复（BUG-BAPI-HEALTH-001 关联）：429 不再立即短路整个源，
+        指数退避重试 retries 次后仍 429 才抛 RateLimitedError 由上层短路。
 
         Returns:
-            dict 或 None；429 限流抛 RateLimitedError 由上层短路
+            dict 或 None；重试耗尽后仍 429 → 抛 RateLimitedError
         """
-        self._throttle()
-        try:
-            resp = self.session.get(url, params=params, timeout=self.timeout)
-            if resp.status_code == 429:
-                logger.warning("GET %s status=429 (rate limited)", url)
-                raise RateLimitedError(url)
-            if resp.status_code != 200:
-                logger.warning("GET %s status=%s", url, resp.status_code)
+        for attempt in range(retries):
+            self._throttle()
+            try:
+                resp = self.session.get(url, params=params, timeout=self.timeout)
+                if resp.status_code == 429:
+                    wait = 2 ** attempt + 1
+                    logger.warning(
+                        "GET %s status=429 (rate limited), attempt %d/%d, retry in %ds",
+                        url, attempt + 1, retries, wait,
+                    )
+                    if attempt < retries - 1:
+                        time.sleep(wait)
+                        continue
+                    logger.error("GET %s 429 重试 %d 次仍失败，短路整个源", url, retries)
+                    raise RateLimitedError(url)
+                if resp.status_code != 200:
+                    logger.warning("GET %s status=%s", url, resp.status_code)
+                    return None
+                data = resp.json()
+                if data.get("code") != "000000":
+                    logger.warning("GET %s code=%s msg=%s", url, data.get("code"), data.get("message"))
+                    return None
+                return data.get("data")
+            except RateLimitedError:
+                raise
+            except Exception as e:
+                logger.error("GET %s error: %s", url, e)
+                if attempt < retries - 1:
+                    wait = 2 ** attempt + 1
+                    logger.warning("GET %s 异常，retry in %ds", url, wait)
+                    time.sleep(wait)
+                    continue
                 return None
-            data = resp.json()
-            if data.get("code") != "000000":
-                logger.warning("GET %s code=%s msg=%s", url, data.get("code"), data.get("message"))
-                return None
-            return data.get("data")
-        except RateLimitedError:
-            raise
-        except Exception as e:
-            logger.error("GET %s error: %s", url, e)
-            return None
+        return None
 
     def fetch_catalog_page(
         self,

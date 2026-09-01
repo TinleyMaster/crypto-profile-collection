@@ -84,6 +84,21 @@ class BinanceSquareScraper(BaseScraper):
 
     platform_code = "binance_square"
 
+    @classmethod
+    def health_check(cls) -> tuple[bool, str]:
+        """存活探测：广场 PGC 热门 feed bapi 是否可访问。连续失败由 binance_bapi_healthcheck 告警，不阻断抓取。"""
+        try:
+            from binance_bapi_healthcheck import _probe
+        except ImportError:
+            try:
+                from ..binance_bapi_healthcheck import _probe  # noqa: F811
+            except ImportError:
+                return False, "healthcheck 模块不可用"
+        return _probe(
+            cls.HOT_FEED_API,
+            params={"timeOffset": "-1", "filterType": "ALL", "topicId": ""},
+        )
+
     USER_API = "https://www.binance.com/bapi/composite/v3/friendly/pgc/user/client"
     FEED_API = ("https://www.binance.com/bapi/composite/v2/friendly/pgc/content/"
                 "queryUserProfilePageContentsWithFilter")

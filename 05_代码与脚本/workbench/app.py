@@ -2012,17 +2012,18 @@ def api_cm_valuation():
 def api_hack_feed():
     """近期黑客/安全事件列表。"""
     try:
-        from db_stats import get_conn
-        with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT h.id, h.name, h.technique, h.amount, h.returned_funds,
-                       h.chain, h.hack_date, h.classification, h.bridge_hack,
-                       a.symbol, a.name as asset_name
-                FROM biz.asset_hacks h
-                LEFT JOIN core.asset a ON a.asset_id = h.asset_id
-                ORDER BY h.hack_date DESC NULLS LAST
-                LIMIT 50
-            """).fetchall()
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT h.id, h.name, h.technique, h.amount, h.returned_funds,
+                           h.chain, h.hack_date, h.classification, h.bridge_hack,
+                           a.symbol, a.name as asset_name
+                    FROM biz.asset_hacks h
+                    LEFT JOIN core.asset a ON a.asset_id = h.asset_id
+                    ORDER BY h.hack_date DESC NULLS LAST
+                    LIMIT 50
+                """)
+                rows = cur.fetchall()
 
             events = []
             for r in rows:
@@ -2051,18 +2052,19 @@ def api_hack_feed():
 def api_funding_rounds():
     """近期融资轮次列表。"""
     try:
-        from db_stats import get_conn
-        with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT r.id, r.protocol_name, r.round, r.raise_date,
-                       r.amount, r.sector, r.category,
-                       r.lead_investors, r.other_investors, r.valuation,
-                       a.symbol, a.name as asset_name
-                FROM biz.asset_raises r
-                LEFT JOIN core.asset a ON a.asset_id = r.asset_id
-                ORDER BY r.raise_date DESC NULLS LAST
-                LIMIT 50
-            """).fetchall()
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT r.id, r.protocol_name, r.round, r.raise_date,
+                           r.amount, r.sector, r.category,
+                           r.lead_investors, r.other_investors, r.valuation,
+                           a.symbol, a.name as asset_name
+                    FROM biz.asset_raises r
+                    LEFT JOIN core.asset a ON a.asset_id = r.asset_id
+                    ORDER BY r.raise_date DESC NULLS LAST
+                    LIMIT 50
+                """)
+                rows = cur.fetchall()
 
             rounds = []
             for r in rows:
@@ -2097,17 +2099,18 @@ def api_funding_rounds():
 def api_github_overview():
     """GitHub 活跃度总览：Top-N 活跃 repo + 僵尸 repo 预警。"""
     try:
-        from db_stats import get_conn
-        with get_conn() as conn:
-            rows = conn.execute("""
-                SELECT owner_login, repo_name, stars_count, forks_count,
-                       total_commits_52w, contributor_count_52w,
-                       pushed_at, language, archived,
-                       weekly_commit_counts
-                FROM biz.github_repo_activity
-                ORDER BY pushed_at DESC NULLS LAST
-                LIMIT 100
-            """).fetchall()
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT owner_login, repo_name, stars_count, forks_count,
+                           total_commits_52w, contributor_count_52w,
+                           pushed_at, language, archived,
+                           weekly_commit_counts
+                    FROM biz.github_repo_activity
+                    ORDER BY pushed_at DESC NULLS LAST
+                    LIMIT 100
+                """)
+                rows = cur.fetchall()
 
             repos = []
             for r in rows:

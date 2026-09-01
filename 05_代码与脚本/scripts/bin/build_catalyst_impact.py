@@ -43,14 +43,41 @@ def _load_sql(relative: str) -> str:
 
 def build_for_catalyst(cur, catalyst_id: int, event_type: str) -> int:
     """为单条 catalyst 推导 impact 并 upsert，返回写入行数。"""
+    import re as _re
+
     direction, strength, horizon = RULE.get(event_type, DEFAULT_RULE)
 
-    # 查找该 catalyst 关联的所有资产
+    # 1) 优先：catalyst_asset_link（已建立的链接关系）
     cur.execute(
         "SELECT asset_id FROM biz.catalyst_asset_link WHERE catalyst_id = %s",
         (catalyst_id,),
     )
     links = cur.fetchall()
+
+    # 2) 兜底：从 title 提取大写 token，匹配 core.asset.canonical_symbol
+    if not links:
+        cur.execute(
+            "SELECT title FROM biz.asset_catalyst WHERE catalyst_id = %s",
+            (catalyst_id,),
+        )
+        row = cur.fetchone()
+        title = (row[0] or "") if row else ""
+        if title:
+            # 提取 2-6 位大写字母 token（排除常见非资产词）
+            tokens = _re.findall(r'\b([A-Z]{2,6})\b', title)
+            # 排除常见非资产缩写
+            skip_words = {"THE", "FOR", "AND", "NOT", "HAS", "ITS", "ARE", "WAS", "CEO",
+                          "CFO", "SEC", "FDA", "GDP", "ETF", "IPO", "OTC", "ALL", "NEW"}
+            tokens = [t for t in tokens if t not in skip_words]
+            if tokens:
+                cur.execute(
+                    "SELECT asset_id, UPPER(canonical_symbol) FROM core.asset "
+                    "WHERE UPPER(canonical_symbol) = ANY(%s)",
+                    (tokens,),
+                )
+                matched = cur.fetchall()
+                links = [(r[0],) for r in matched]
+
     if not links:
         return 0
 

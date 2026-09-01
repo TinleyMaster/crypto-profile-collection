@@ -329,7 +329,7 @@ def main() -> int:
             name=desc,
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=3600,
+            misfire_grace_time=int(os.getenv("SCHEDULER_MISFIRE_GRACE", "21600")),
             replace_existing=True,
         )
         print(f"[调度] 注册 {key:<32} {cron:<18} {script}  ({desc})")
@@ -340,7 +340,15 @@ def main() -> int:
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        print("[调度] 已停止")
+        # 收到停止信号（supervisord stop / Ctrl+C）→ 正常退出
+        print("[调度] 收到停止信号，正常退出")
+        return 0
+    except Exception as e:
+        # 调度器崩溃 → 非 0 退出，触发 supervisord/Zeabur 重启
+        print(f"[调度] 调度器崩溃: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
     return 0
 
 

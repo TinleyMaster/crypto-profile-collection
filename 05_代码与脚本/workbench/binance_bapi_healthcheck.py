@@ -37,6 +37,8 @@ if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
 
 TIMEOUT = 10
+# 探测必须复用 scraper 同款「浏览器指纹」请求武器，否则会被 Akamai 风控 403/404
+# 导致「探测失败 ≠ 真失败」的假阳性（复验修正 2026-09-01）。
 DETECT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -44,19 +46,50 @@ DETECT_HEADERS = {
         "Chrome/126.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Origin": "https://www.binance.com",
     "Referer": "https://www.binance.com/",
+    "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
 }
+
+# 单例 Session + cookie jar（跨探测调用累积 csrftoken，与真实 scraper 行为一致）
+_sess: requests.Session | None = None
+_sess_ts: float = 0.0
+
+
+def _get_session() -> requests.Session:
+    """惰性创建带浏览器指纹的 Session；首次使用时预热币安首页拿 csrftoken cookie。"""
+    global _sess, _sess_ts
+    now = __import__("time").time()
+    if _sess is not None and (now - _sess_ts) < 300:  # 5 分钟复用
+        return _sess
+    s = requests.Session()
+    s.headers.update(DETECT_HEADERS)
+    try:
+        # 预热首页：拿 csrftoken cookie（真实 scraper 跨请求累积），增强风控通过率
+        s.get("https://www.binance.com/", timeout=TIMEOUT)
+    except Exception:
+        pass  # 预热失败不阻断探测，仍带指纹头直探
+    _sess = s
+    _sess_ts = now
+    return s
 
 
 def _probe(url: str, method: str = "GET", json: dict | None = None,
            params: dict | None = None) -> tuple[bool, str]:
-    """轻量存活探测。返回 (ok, diag)。"""
+    """轻量存活探测。返回 (ok, diag)。
+
+    用 Session + 完整浏览器指纹 + cookie jar（与真实 scraper 同款武器），
+    避免被 Akamai 风控挡成 403/404 的假阳性。
+    """
+    sess = _get_session()
     try:
-        r = requests.request(
-            method, url, json=json, params=params,
-            headers=DETECT_HEADERS, timeout=TIMEOUT,
-        )
+        if method.upper() == "POST":
+            r = sess.post(url, json=json, params=params, timeout=TIMEOUT)
+        else:
+            r = sess.get(url, params=params, timeout=TIMEOUT)
     except Exception as e:
         return False, f"请求异常: {type(e).__name__}: {e}"
     if r.status_code == 429:

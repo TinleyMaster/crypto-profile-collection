@@ -2017,7 +2017,7 @@ def api_hack_feed():
                 cur.execute("""
                     SELECT h.id, h.name, h.technique, h.amount, h.returned_funds,
                            h.chain, h.hack_date, h.classification, h.bridge_hack,
-                           a.symbol, a.name as asset_name
+                           a.canonical_symbol AS symbol, a.canonical_name AS asset_name
                     FROM biz.asset_hacks h
                     LEFT JOIN core.asset a ON a.asset_id = h.asset_id
                     ORDER BY h.hack_date DESC NULLS LAST
@@ -2058,7 +2058,7 @@ def api_funding_rounds():
                     SELECT r.id, r.protocol_name, r.round, r.raise_date,
                            r.amount, r.sector, r.category,
                            r.lead_investors, r.other_investors, r.valuation,
-                           a.symbol, a.name as asset_name
+                           a.canonical_symbol AS symbol, a.canonical_name AS asset_name
                     FROM biz.asset_raises r
                     LEFT JOIN core.asset a ON a.asset_id = r.asset_id
                     ORDER BY r.raise_date DESC NULLS LAST

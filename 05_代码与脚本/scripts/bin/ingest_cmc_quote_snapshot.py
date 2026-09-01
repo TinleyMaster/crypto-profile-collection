@@ -239,7 +239,8 @@ def main() -> int:
                     continue
                 
                 asset_id = cmc_to_asset.get(cmc_id)
-                ref_price = median_map.get(asset_id) if asset_id else None
+                ref_median = median_map.get(asset_id) if asset_id else None
+                ref_price = ref_median if (ref_median and ref_median > 0) else None
                 
                 # 如果没有历史中位数，用 24h 涨跌幅反推昨收价（仅作兜底）
                 if ref_price is None and pct_24h is not None:

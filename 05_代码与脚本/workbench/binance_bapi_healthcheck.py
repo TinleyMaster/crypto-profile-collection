@@ -92,20 +92,26 @@ STATE_PATH = Path(os.getenv("HEALTH_STATE_DIR", "/tmp")) / "binance_bapi_health.
 
 
 def _load_state() -> dict:
-    """从文件加载跨进程失败计数状态。"""
+    """从文件加载跨进程失败计数状态；缺失/解析失败返回 {}（自愈，warning 可见）。"""
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.exists() else {}
-    except Exception:
+        if not STATE_PATH.exists():
+            return {}
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning("健康状态读取失败（按空态处理，丢一次计数）: %s", e)
         return {}
 
 
 def _save_state() -> None:
-    """将失败计数持久化到文件（跨 cron 调用存活）。"""
+    """将失败计数持久化到文件（跨 cron 调用存活）。原子写：tmp + os.replace，避免半截文件。"""
     try:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(_FAIL, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+        tmp = STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_FAIL, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, STATE_PATH)
+    except Exception as e:
+        logger.warning("健康状态落盘失败（特性将无持久化）: %s", e)
 
 
 def _get_notifier():
@@ -169,13 +175,14 @@ def run_healthcheck() -> dict:
             continue
 
         if diag == "HTTP 429 限流":
-            # 限流不计入「不可用」告警（避免抖动误报），仅记日志
+            # 限流不计入告警，也不清零既往真实失败（避免"免死"，也不因抖动误报）
             logger.warning("[%s] 429 限流（不计入告警）", name)
-            _FAIL[name] = 0
             continue
 
-        _FAIL[name] = _FAIL.get(name, 0) + 1
-        if _FAIL[name] >= 2 and notifier:
+        prev = _FAIL.get(name, 0)
+        _FAIL[name] = prev + 1
+        # P1 锁存：仅在 1→2 穿越阈值瞬间发一次告警，持续失败不再每轮重发（防告警风暴）
+        if prev == 1 and _FAIL[name] >= 2 and notifier:
             try:
                 notifier.send(f"【数据告警】Binance bapi 不可用 - {cn}", _alert_html(cn, url, diag))
                 logger.info("告警邮件已发送: %s", cn)

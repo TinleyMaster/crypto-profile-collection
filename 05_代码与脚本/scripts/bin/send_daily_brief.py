@@ -36,7 +36,7 @@ def render_brief_html(brief: dict) -> str:
     diff = brief.get("DIFF", {})
     opportunities = sorted(
         (brief.get("M4_opportunities") or []) + (brief.get("M4_watchlist") or []),
-        key=lambda o: o.get("conviction_score", 0), reverse=True
+        key=lambda o: (o.get("conviction_score") if isinstance(o.get("conviction_score"), (int, float)) else 0), reverse=True
     )[:5]
 
     # ── M0 头部 ──
@@ -68,10 +68,17 @@ def render_brief_html(brief: dict) -> str:
         for key, val in diff.items():
             if val is None:
                 continue
-            arrow = "↑" if val > 0 else ("↓" if val < 0 else "→")
-            color = "#dc2626" if val < 0 else "#16a34a"
             label = key.replace("_", " ").title()
-            html_parts.append(f'<li>{label}: <span style="color:{color}">{arrow} {val:+.1f}%</span></li>')
+            if isinstance(val, (int, float)):
+                arrow = "↑" if val > 0 else ("↓" if val < 0 else "→")
+                color = "#dc2626" if val < 0 else "#16a34a"
+                html_parts.append(f'<li>{label}: <span style="color:{color}">{arrow} {val:+.1f}%</span></li>')
+            elif isinstance(val, list):
+                if val:  # 空列表不展示
+                    html_parts.append(f'<li>{label}: {", ".join(str(x) for x in val)}</li>')
+            elif isinstance(val, str):
+                html_parts.append(f'<li>{label}: {val}</li>')
+            # dict 等其他类型跳过
         html_parts.append("</ul></div>")
 
     # ── 机会清单 ──

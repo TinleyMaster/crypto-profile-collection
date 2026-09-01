@@ -6,6 +6,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -177,7 +179,7 @@ def main() -> int:
             spike_threshold = 10.0  # 偏离倍数阈值
             anomaly_count = 0
             
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 # 批量获取近 90 天的迭代稳健中位数作为参考
                 # 第一遍：全量中位数；第二遍：剔除 [0.2*m0, 5*m0] 范围外的点后再取中位数
                 cur.execute("""

@@ -1047,6 +1047,32 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 
 ---
 
+## 数据覆盖与基础设施（09-01 复验）
+
+### 已接入前端的数据烟囱
+
+| 数据 | 数据源 | 表 | 前端路由 | 状态 |
+|------|--------|-----|---------|------|
+| TVL（DeFi 总锁仓量） | DeFiLlama | 内嵌于 macro_market | 维度5 叙事榜 | ✅ 已展示（含绝对值+变化率） |
+| GitHub 活跃度 | GitHub API | biz.github_repo_activity | /api/github/overview | ✅ 已接入 |
+| 黑客/安全事件 | DefiLlama /hacks | biz.asset_hacks | /api/hack/feed | ✅ 已接入 |
+| 融资轮次 | DefiLlama /raises | biz.asset_raises | /api/funding/rounds | ✅ 已接入（含数据截止日期） |
+
+### CEX 地址覆盖
+
+| 链 | 地址数 | 主要交易所 | 备注 |
+|----|--------|-----------|------|
+| ETH | 13 | Binance(7), Coinbase(3), OKX(2), Huobi(1) | 完善 |
+| BSC | 7 | Binance(3), Coinbase(2), OKX(2), KuCoin(1) | 09-01 补充 |
+| TRON | 9 | Binance(5), OKX(2), Huobi(2) | 09-01 新增 |
+
+### 待观察项
+
+- **孤儿表**：`token_discovery_*` 等表在代码库中未发现（可能已清理），无需处置。
+- **CEX 净流准确性**：BSC/TRON 地址补充后需重算净流验证量级合理性。
+
+---
+
 ## 部署平台
 
 - **数据库**：Zeabur PostgreSQL

@@ -1084,7 +1084,11 @@ CREATE TABLE IF NOT EXISTS biz.onchain_holder_snapshot (
     top_holders_json JSONB,
     tier_distribution_json JSONB,
     source_url TEXT,
-    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    holder_change_7d          INTEGER,
+    holder_change_30d         INTEGER,
+    whale_balance_change_7d_pct  NUMERIC(6,2),
+    whale_balance_change_30d_pct NUMERIC(6,2)
 );
 CREATE INDEX IF NOT EXISTS idx_holder_snapshot_asset_date
     ON biz.onchain_holder_snapshot (asset_id, snapshot_date DESC);
@@ -1095,13 +1099,17 @@ INSERT INTO biz.onchain_holder_snapshot (
     asset_id, chain, contract_address, snapshot_date,
     top10_concentration, top50_concentration, top100_concentration,
     total_holders, top_holders_json, tier_distribution_json,
-    source_url, fetched_at
+    source_url, fetched_at,
+    holder_change_7d, holder_change_30d,
+    whale_balance_change_7d_pct, whale_balance_change_30d_pct
 ) VALUES (
     %(asset_id)s, %(chain)s, %(contract_address)s,
     (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date,
     %(top10_concentration)s, %(top50_concentration)s, %(top100_concentration)s,
     %(total_holders)s, %(top_holders_json)s, %(tier_distribution_json)s,
-    %(source_url)s, NOW()
+    %(source_url)s, NOW(),
+    %(holder_change_7d)s, %(holder_change_30d)s,
+    %(whale_balance_change_7d_pct)s, %(whale_balance_change_30d_pct)s
 )
 ON CONFLICT DO NOTHING
 """
@@ -1124,6 +1132,45 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
             "AND snapshot_date = (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date",
             (asset_id, chain),
         )
+
+        # 查询 7d/30d 前历史快照，计算变化率
+        cur.execute(
+            "SELECT total_holders, top10_concentration "
+            "FROM biz.onchain_holder_snapshot "
+            "WHERE asset_id = %s AND chain = %s "
+            "AND snapshot_date <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date - INTERVAL '7 day' "
+            "ORDER BY snapshot_date DESC LIMIT 1",
+            (asset_id, chain),
+        )
+        prev7 = cur.fetchone()
+
+        cur.execute(
+            "SELECT total_holders, top10_concentration "
+            "FROM biz.onchain_holder_snapshot "
+            "WHERE asset_id = %s AND chain = %s "
+            "AND snapshot_date <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date - INTERVAL '30 day' "
+            "ORDER BY snapshot_date DESC LIMIT 1",
+            (asset_id, chain),
+        )
+        prev30 = cur.fetchone()
+
+        cur_total = data.get("total_holders") or 0
+        cur_top10 = data.get("top_10_pct")
+
+        holder_change_7d = None
+        holder_change_30d = None
+        whale_7d_pct = None
+        whale_30d_pct = None
+
+        if prev7 and prev7[0] is not None:
+            holder_change_7d = cur_total - prev7[0]
+        if prev30 and prev30[0] is not None:
+            holder_change_30d = cur_total - prev30[0]
+        if prev7 and prev7[1] is not None and cur_top10 is not None:
+            whale_7d_pct = round(float(cur_top10) - float(prev7[1]), 2)
+        if prev30 and prev30[1] is not None and cur_top10 is not None:
+            whale_30d_pct = round(float(cur_top10) - float(prev30[1]), 2)
+
         cur.execute(UPSERT_SQL, {
             "asset_id": asset_id,
             "chain": chain,
@@ -1131,13 +1178,19 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
             "top10_concentration": data.get("top_10_pct"),
             "top50_concentration": data.get("top_50_pct"),
             "top100_concentration": data.get("top_100_pct"),
-            "total_holders": data.get("total_holders", 0),
+            "total_holders": cur_total,
             "top_holders_json": json.dumps(data.get("top_holders_json", []), ensure_ascii=False),
             "tier_distribution_json": json.dumps(data.get("tier_distribution_json", []), ensure_ascii=False),
             "source_url": token_url,
+            "holder_change_7d": holder_change_7d,
+            "holder_change_30d": holder_change_30d,
+            "whale_balance_change_7d_pct": whale_7d_pct,
+            "whale_balance_change_30d_pct": whale_30d_pct,
         })
     conn.commit()
-    print("  已写入 biz.onchain_holder_snapshot")
+    print("  已写入 biz.onchain_holder_snapshot"
+          f" (7d: {'+' if (holder_change_7d or 0) >= 0 else ''}{holder_change_7d or '—'}"
+          f" | whale7d: {'+' if (whale_7d_pct or 0) >= 0 else ''}{whale_7d_pct or '—'}%)")
 
 
 # ── 主流程 ─────────────────────────────────────────────────

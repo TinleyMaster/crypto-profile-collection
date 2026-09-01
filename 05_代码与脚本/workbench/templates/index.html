@@ -7569,6 +7569,43 @@
                 // 黑客事件加载失败不阻塞大盘
             }
             
+            // 融资轮次卡
+            try {
+                const fundRes = await fetch('/api/funding/rounds');
+                const fundData = await fundRes.json();
+                if (fundData.ok && fundData.rounds && fundData.rounds.length) {
+                    const rounds = fundData.rounds.slice(0, 10);
+                    const totalRaise = rounds.reduce((s, r) => s + (r.amount_millions || 0), 0);
+                    const raiseTxt = totalRaise >= 1000 ? '$' + (totalRaise / 1000).toFixed(1) + 'B'
+                        : '$' + totalRaise.toFixed(0) + 'M';
+                    const cutoffTxt = fundData.data_cutoff ? `数据截止 ${fundData.data_cutoff}` : '';
+                    html += `<div class="dim-card">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">💰</span>
+                            <span class="dim-card-title">近期融资</span>
+                            <span class="dim-card-score neutral">${rounds.length} 轮 · ${raiseTxt}</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${rounds.map(r => {
+                                const amtTxt = r.amount_millions != null
+                                    ? (r.amount_millions >= 1000 ? '$' + (r.amount_millions / 1000).toFixed(1) + 'B'
+                                        : '$' + r.amount_millions.toFixed(0) + 'M')
+                                    : '-';
+                                const roundTxt = r.round || '-';
+                                const leadTxt = (r.lead_investors || []).slice(0, 2).join(', ');
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${r.raise_date || '?'} ${r.protocol || r.asset_name || '?'} <small style="color:#6b7280">${roundTxt}</small></span>
+                                    <span class="dim-metric-val" style="color:#00c087">${amtTxt}${leadTxt ? ' <small style="color:#6b7280">' + leadTxt + '</small>' : ''}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">数据源: DefiLlama /raises | ${cutoffTxt || '更新频率较慢'}</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // 融资轮次加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

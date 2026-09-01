@@ -2047,6 +2047,52 @@ def api_hack_feed():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/funding/rounds")
+def api_funding_rounds():
+    """近期融资轮次列表。"""
+    try:
+        from db_stats import get_conn
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT r.id, r.protocol_name, r.round, r.raise_date,
+                       r.amount, r.sector, r.category,
+                       r.lead_investors, r.other_investors, r.valuation,
+                       a.symbol, a.name as asset_name
+                FROM biz.asset_raises r
+                LEFT JOIN core.asset a ON a.asset_id = r.asset_id
+                ORDER BY r.raise_date DESC NULLS LAST
+                LIMIT 50
+            """).fetchall()
+
+            rounds = []
+            for r in rows:
+                amt = r["amount"]
+                val = r["valuation"]
+                rounds.append({
+                    "id": r["id"],
+                    "protocol": r["protocol_name"],
+                    "round": r["round"],
+                    "raise_date": str(r["raise_date"]) if r["raise_date"] else None,
+                    "amount_millions": float(amt) if amt else None,
+                    "sector": r["sector"],
+                    "category": r["category"],
+                    "lead_investors": r["lead_investors"],
+                    "other_investors": r["other_investors"],
+                    "valuation_millions": float(val) if val else None,
+                    "symbol": r["symbol"],
+                    "asset_name": r["asset_name"],
+                })
+
+            # 数据截止日期
+            cutoff = None
+            if rounds and rounds[0].get("raise_date"):
+                cutoff = max(r["raise_date"] for r in rounds if r.get("raise_date"))
+
+            return jsonify({"ok": True, "rounds": rounds, "total": len(rounds), "data_cutoff": cutoff})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/github/overview")
 def api_github_overview():
     """GitHub 活跃度总览：Top-N 活跃 repo + 僵尸 repo 预警。"""

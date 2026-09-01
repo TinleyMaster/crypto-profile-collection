@@ -7126,9 +7126,14 @@
             function narrRow(n, nIdx) {
                 const cls = n.composite_score >= 0 ? 'up' : 'down';
                 const sign = n.composite_score >= 0 ? '+' : '';
-                const tvlTxt = n.tvl_change_7d_pct != null
-                    ? ` TVL ${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%`
-                    : '';
+                let tvlTxt = '';
+                if (n.mode === 'blended' && n.tvl_usd != null) {
+                    const tvlAbs = n.tvl_usd >= 1e9 ? '$' + (n.tvl_usd / 1e9).toFixed(1) + 'B' : '$' + (n.tvl_usd / 1e6).toFixed(0) + 'M';
+                    const tvlChg = n.tvl_change_7d_pct != null ? ` (${n.tvl_change_7d_pct >= 0 ? '+' : ''}${n.tvl_change_7d_pct.toFixed(1)}%)` : '';
+                    tvlTxt = ` <small style="color:#6b7280">${tvlAbs}${tvlChg}</small>`;
+                } else if (n.mode === 'mcap_only') {
+                    tvlTxt = ' <small style="color:#9ca3af">暂无TVL</small>';
+                }
                 const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
                 const coins = n.top_coins || [];
                 const hasDrill = coins.length > 0;

@@ -537,7 +537,7 @@ LLM AI 结构化分类（14 个字段，规则强制校验）
 ### 调度方式
 
 - **主监控**：`kol_daemon.py` 常驻守护进程（30 秒间隔，由 supervisord 管理）
-- **兜底调度**：`kol_monitor_run.py` 注册到 scheduler.py（每 5 分钟，防止常驻进程挂掉）
+- **兜底调度**：已迁移到 `kol_daemon.py` 常驻进程（`kol_monitor_run.py` 已弃用删除）
 
 ### 可扩展性
 

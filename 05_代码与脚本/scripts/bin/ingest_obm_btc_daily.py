@@ -25,11 +25,10 @@ if str(PROJECT_SRC) not in sys.path:
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-# 数据截止日期
-SOURCE_CUTOFF = date(2026, 8, 24)
-
 # BTC asset_id（固定值，预期为 1）
 BTC_ASSET_ID = 1
+
+# 数据截止日期：动态取各 CSV 的最大 metric_date（不再硬编码，避免 source_cutoff 语义失真）
 
 # UPSERT SQL
 UPSERT_SQL = """
@@ -100,7 +99,6 @@ def parse_csv_file(file_path: Path) -> list[dict]:
                     "unit": unit,
                     "frequency": frequency,
                     "release_version": release_version,
-                    "source_cutoff": SOURCE_CUTOFF,
                 })
             elif data_cols:
                 # 多列宽表 → unpivot
@@ -114,8 +112,13 @@ def parse_csv_file(file_path: Path) -> list[dict]:
                         "unit": unit,
                         "frequency": frequency,
                         "release_version": release_version,
-                        "source_cutoff": SOURCE_CUTOFF,
                     })
+
+    # 动态 source_cutoff：取本 CSV 最大 metric_date（真实数据截止日，避免硬编码误导）
+    if records:
+        max_date = max(r["metric_date"] for r in records)
+        for r in records:
+            r["source_cutoff"] = max_date
 
     return records
 
@@ -199,6 +202,27 @@ def main() -> None:
             except Exception as e:
                 print(f"  [ERROR] {csv_file.name}: {e}", file=sys.stderr)
                 total_stats["errors"] += 1
+
+        # 上游新鲜度校验：max(metric_date) 明显落后当日 → 告警（不失败），task 日志可见
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(metric_date) FROM biz.obm_btc_daily")
+                row = cur.fetchone()
+                max_date = row[0] if row else None
+            if max_date is not None:
+                stale_days = (date.today() - max_date).days
+                if stale_days > 3:
+                    print(
+                        f"\n⚠️ [STALE] OBM 数据停留 {max_date}（滞后 {stale_days} 天）"
+                        f"，上游未更新或下载失败，请关注 OBM 源",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"\n✓ 数据新鲜度 OK：最新 {max_date}（滞后 {stale_days} 天）")
+            else:
+                print("\n⚠️ [STALE] OBM 表无数据", file=sys.stderr)
+        except Exception as e:
+            print(f"\n⚠️ 新鲜度校验失败：{e}", file=sys.stderr)
 
     print(f"\n{'='*50}")
     print(f"入库完成：{total_stats['files']} 个文件")

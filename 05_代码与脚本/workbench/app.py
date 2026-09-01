@@ -2008,6 +2008,67 @@ def api_cm_valuation():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/github/overview")
+def api_github_overview():
+    """GitHub 活跃度总览：Top-N 活跃 repo + 僵尸 repo 预警。"""
+    try:
+        from db_stats import get_conn
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT owner_login, repo_name, stars_count, forks_count,
+                       total_commits_52w, contributor_count_52w,
+                       pushed_at, language, archived,
+                       weekly_commit_counts
+                FROM biz.github_repo_activity
+                ORDER BY pushed_at DESC NULLS LAST
+                LIMIT 100
+            """).fetchall()
+
+            repos = []
+            for r in rows:
+                pushed = r["pushed_at"]
+                is_stale = False
+                if pushed:
+                    from datetime import datetime, timezone, timedelta
+                    now = datetime.now(timezone.utc)
+                    if hasattr(pushed, 'tzinfo') and pushed.tzinfo is None:
+                        pushed = pushed.replace(tzinfo=timezone.utc)
+                    days_since = (now - pushed).days
+                    is_stale = days_since > 90
+                else:
+                    days_since = None
+
+                repos.append({
+                    "owner": r["owner_login"],
+                    "repo": r["repo_name"],
+                    "stars": r["stars_count"],
+                    "forks": r["forks_count"],
+                    "commits_52w": r["total_commits_52w"],
+                    "contributors": r["contributor_count_52w"],
+                    "pushed_at": str(pushed) if pushed else None,
+                    "days_since_push": days_since,
+                    "is_stale": is_stale,
+                    "language": r["language"],
+                    "archived": r["archived"],
+                })
+
+            active = [r for r in repos if not r["is_stale"] and not r["archived"]]
+            stale = [r for r in repos if r["is_stale"] and not r["archived"]]
+            archived_repos = [r for r in repos if r["archived"]]
+
+            return jsonify({
+                "ok": True,
+                "total": len(repos),
+                "active_count": len(active),
+                "stale_count": len(stale),
+                "archived_count": len(archived_repos),
+                "active_top10": active[:10],
+                "stale_top10": stale[:10],
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

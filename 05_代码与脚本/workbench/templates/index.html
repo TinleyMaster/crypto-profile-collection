@@ -7494,6 +7494,44 @@
                 // 估值锚加载失败不阻塞大盘
             }
             
+            // GitHub 活跃度卡
+            try {
+                const ghRes = await fetch('/api/github/overview');
+                const ghData = await ghRes.json();
+                if (ghData.ok && ghData.total > 0) {
+                    const staleTxt = ghData.stale_count > 0
+                        ? `<span style="color:#ff5b5b">${ghData.stale_count} 个僵尸</span>`
+                        : '<span style="color:#00c087">无僵尸</span>';
+                    html += `<div class="dim-card">
+                        <div class="dim-card-header">
+                            <span class="dim-card-icon">💻</span>
+                            <span class="dim-card-title">GitHub 活跃度</span>
+                            <span class="dim-card-score neutral">${ghData.active_count} 活跃 · ${staleTxt}</span>
+                        </div>
+                        <div class="dim-metrics">
+                            ${(ghData.active_top10 || []).map(r => {
+                                const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
+                                const langTxt = r.language ? `<small style="color:#6b7280">${r.language}</small>` : '';
+                                return `<div class="dim-metric-row">
+                                    <span class="dim-metric-label">${r.owner}/${r.repo} ${langTxt}</span>
+                                    <span class="dim-metric-val">⭐${r.stars || 0} · 提交${r.commits_52w || 0}/年 · ${pushTxt}</span>
+                                </div>`;
+                            }).join('')}
+                            ${(ghData.stale_top10 || []).map(r => {
+                                const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
+                                return `<div class="dim-metric-row" style="opacity:0.7">
+                                    <span class="dim-metric-label" style="color:#ff5b5b">💀 ${r.owner}/${r.repo}</span>
+                                    <span class="dim-metric-val" style="color:#ff5b5b">僵尸 ${pushTxt}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="dim-conclusion">僵尸 = 90天无 push | 数据源: GitHub API</div>
+                    </div>`;
+                }
+            } catch (e) {
+                // GitHub 活跃度加载失败不阻塞大盘
+            }
+            
             grid.innerHTML = html;
             
             // 隐藏旧的综合结论区域（如果存在）

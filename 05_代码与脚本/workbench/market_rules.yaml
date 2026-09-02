@@ -186,5 +186,6 @@ meme_risk:
   social:
     red: 70
     yellow: 40
-    kol_max_count: 5        # 近 30 天 KOL 信号 ≥ 5 → red
-    gh_min_activity: 5      # 近 30 天 GitHub 活跃度 ≥ 5 → green
+    kol_max_count: 5      # 近 30 天 KOL 信号 ≥5 → 高关注(低分)；0 → dead_kol
+    gh_min_activity: 5    # 近 30 天 GitHub 活跃 ≥5 → active(低分)；0 → dead_github
+    # 方向语义 A：死盘/零社交=风险(高分)，活跃=正面(低分)，取各渠道最活跃值

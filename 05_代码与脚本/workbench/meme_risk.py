@@ -21,6 +21,30 @@ def _to_float(v: Any) -> float | None:
         return None
 
 
+def _load_meme_risk() -> dict:
+    """从 market_rules.yaml 加载 [meme_risk] 段（缺失/解析失败回退内建默认值）。"""
+    weights = {"contract": 0.30, "liquidity": 0.25, "holder": 0.20, "lifecycle": 0.15, "social": 0.10}
+    thresholds: dict[str, dict] = {}
+    block_flags = ["is_honeypot", "mint_authority", "freeze_authority"]
+    try:
+        import yaml
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_rules.yaml")
+        if not os.path.exists(path):
+            return {"weights": weights, "thresholds": thresholds, "block_flags": block_flags}
+        data = (yaml.safe_load(open(path, encoding="utf-8")) or {}).get("meme_risk") or {}
+        if isinstance(data.get("weights"), dict) and data["weights"]:
+            weights.update({k: float(v) for k, v in data["weights"].items() if k in weights})
+        if isinstance(data.get("block_flags"), list) and data["block_flags"]:
+            block_flags = [str(x) for x in data["block_flags"]]
+        for axis in ("contract", "liquidity", "holder", "lifecycle", "social"):
+            if isinstance(data.get(axis), dict):
+                thresholds[axis] = data[axis]
+    except Exception:
+        pass
+    return {"weights": weights, "thresholds": thresholds, "block_flags": block_flags}
+
+
 def _label(score: float | None, thresholds: dict) -> str:
     """根据分数给 red/yellow/green/unknown 标签。"""
     if score is None:
@@ -140,32 +164,32 @@ def score_lifecycle(data: dict, thresholds: dict) -> tuple[float | None, str, li
 
 
 def score_social(data: dict, thresholds: dict) -> tuple[float | None, str, list[str]]:
-    """社交热度轴: kol_signal 近 30 天信号数 + github_repo_activity 活跃度。"""
-    flags: list[str] = []
-    kol_count = _to_float(data.get("kol_signal_count_30d"))
-    gh_active = _to_float(data.get("github_activity_30d"))
-
-    if kol_count is None and gh_active is None:
+    """社交热度轴（方案 A）：死盘/零社交=风险；高热度=关注度（正面，低分）。取各渠道最活跃值。"""
+    kol = _to_float(data.get("kol_signal_count_30d"))
+    gh = _to_float(data.get("github_activity_30d"))
+    if kol is None and gh is None:
         return None, "unknown", ["no_social_data"]
 
-    score = 50
-    if kol_count is not None:
+    flags: list[str] = []
+    parts: list[float] = []
+    if kol is not None:
         max_kol = thresholds.get("kol_max_count", 5)
-        if kol_count >= max_kol:
-            score = 70
-            flags.append("high_kol_signal")
-        elif kol_count > 0:
-            score = 40
-
-    if gh_active is not None:
+        if kol >= max_kol:
+            parts.append(25); flags.append("high_kol_attention")
+        elif kol > 0:
+            parts.append(45); flags.append("some_kol_signal")
+        else:
+            parts.append(85); flags.append("dead_kol")
+    if gh is not None:
         min_active = thresholds.get("gh_min_activity", 5)
-        if gh_active >= min_active:
-            score = max(score, 60)
-            flags.append("active_github")
-        elif gh_active == 0:
-            score = max(score, 70)
-            flags.append("dead_github")
+        if gh >= min_active:
+            parts.append(25); flags.append("active_github")
+        elif gh > 0:
+            parts.append(50); flags.append("low_github")
+        else:
+            parts.append(85); flags.append("dead_github")
 
+    score = min(parts)  # 任一渠道活跃即不算死盘
     return min(100, score), _label(score, thresholds), flags
 
 
@@ -173,10 +197,10 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
     """计算单资产的五维风险标签。返回 UPSERT 兼容 dict。"""
     from crypto_research.db.conn import get_connection
 
-    # 加载阈值/权重（内建默认值，yaml 覆盖由调用方注入）
-    weights = {"contract": 0.30, "liquidity": 0.25, "holder": 0.20, "lifecycle": 0.15, "social": 0.10}
-    risk_thresholds: dict[str, dict] = {}
-    block_flags = {"is_honeypot", "mint_authority", "freeze_authority"}
+    # 加载阈值/权重（yaml 覆盖内建默认值）
+    rules = _load_meme_risk()
+    weights = rules["weights"]
+    block_flags = rules["block_flags"]
 
     # 从各表取数据（每个查询独立 try/except，一个失败不阻断其余）
     data: dict[str, Any] = {}
@@ -250,11 +274,11 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
         conn.rollback()
 
     # 五轴评分
-    contract_score, contract_label, contract_flags = score_contract(data, risk_thresholds)
-    liquidity_score, liquidity_label, liquidity_flags = score_liquidity(data, risk_thresholds)
-    holder_score, holder_label, holder_flags = score_holder(data, risk_thresholds)
-    lifecycle_score, lifecycle_label, lifecycle_flags = score_lifecycle(data, risk_thresholds)
-    social_score, social_label, social_flags = score_social(data, risk_thresholds)
+    contract_score, contract_label, contract_flags = score_contract(data, rules["thresholds"].get("contract", {}))
+    liquidity_score, liquidity_label, liquidity_flags = score_liquidity(data, rules["thresholds"].get("liquidity", {}))
+    holder_score, holder_label, holder_flags = score_holder(data, rules["thresholds"].get("holder", {}))
+    lifecycle_score, lifecycle_label, lifecycle_flags = score_lifecycle(data, rules["thresholds"].get("lifecycle", {}))
+    social_score, social_label, social_flags = score_social(data, rules["thresholds"].get("social", {}))
 
     all_flags = contract_flags + liquidity_flags + holder_flags + lifecycle_flags + social_flags
 
@@ -262,15 +286,11 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
     risk_label = "unknown"
     total_score = 0
     block = False
-    if data.get("is_honeypot") is True:
-        block = True
-        all_flags.insert(0, "BLOCK:honeypot")
-    if data.get("mint_authority"):
-        block = True
-        all_flags.insert(0, "BLOCK:mint_authority")
-    if data.get("freeze_authority"):
-        block = True
-        all_flags.insert(0, "BLOCK:freeze_authority")
+    for flag in block_flags:
+        v = data.get(flag)
+        if v is True or (v is not None and not isinstance(v, bool) and v != "" and v != []):
+            block = True
+            all_flags.insert(0, f"BLOCK:{flag}")
 
     # 加权合成
     axes = [

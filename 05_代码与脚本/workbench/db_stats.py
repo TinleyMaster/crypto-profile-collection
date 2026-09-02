@@ -3589,7 +3589,10 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
                   AND (from_label = 'exchange' OR to_label = 'exchange')
                 GROUP BY COALESCE(from_exchange, to_exchange)
-                ORDER BY GREATEST(outflow, inflow) DESC
+                ORDER BY GREATEST(
+                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0)
+                ) DESC
                 LIMIT 10
             """, (asset_id,))
             by_exchange = [
@@ -5591,7 +5594,7 @@ def get_divergence_signals(asset_id: int) -> dict:
                 if md:
                     price_change_24h = md.get("change_24h")
                     price_change_7d = md.get("change_7d")
-                    market_cap = md.get("market_cap")
+                    market_cap = float(md.get("market_cap") or 0) if md.get("market_cap") else None
             except psycopg.errors.UndefinedTable:
                 pass
 
@@ -5611,7 +5614,7 @@ def get_divergence_signals(asset_id: int) -> dict:
                 if price_change_7d is None:
                     price_change_7d = market.get("price_change_7d")
                 if market_cap is None:
-                    market_cap = market.get("market_cap_usd")
+                    market_cap = float(market.get("market_cap_usd") or 0) if market.get("market_cap_usd") else None
 
             # 3. 链上持仓变化（取最新一条，主链优先）
             cur.execute("""

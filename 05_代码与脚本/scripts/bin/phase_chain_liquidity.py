@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -51,45 +52,45 @@ ON CONFLICT (asset_id) DO UPDATE SET
 """
 
 
+@contextmanager
 def _get_db():
     from crypto_research.config import get_settings
     from crypto_research.db.conn import get_connection
     settings = get_settings(require_database=True)
-    return get_connection(settings.database_url)
+    with get_connection(settings.database_url) as conn:
+        yield conn
 
 
 def query_asset_contracts(limit: int, chain: str | None = None) -> list[tuple[int, str, str]]:
     """返回 [(asset_id, chain, contract_address), ...]。"""
-    conn = _get_db()
-    with conn.cursor() as cur:
-        if chain:
-            cur.execute(
-                "SELECT asset_id, chain, contract_address FROM core.asset_contract "
-                "WHERE chain = %s AND contract_address IS NOT NULL "
-                "ORDER BY asset_id LIMIT %s",
-                (chain, limit),
-            )
-        else:
-            cur.execute(
-                "SELECT asset_id, chain, contract_address FROM core.asset_contract "
-                "WHERE contract_address IS NOT NULL "
-                "ORDER BY asset_id LIMIT %s",
-                (limit,),
-            )
-        rows = cur.fetchall()
-    conn.close()
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            if chain:
+                cur.execute(
+                    "SELECT asset_id, chain, contract_address FROM core.asset_contract "
+                    "WHERE chain = %s AND contract_address IS NOT NULL "
+                    "ORDER BY asset_id LIMIT %s",
+                    (chain, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT asset_id, chain, contract_address FROM core.asset_contract "
+                    "WHERE contract_address IS NOT NULL "
+                    "ORDER BY asset_id LIMIT %s",
+                    (limit,),
+                )
+            rows = cur.fetchall()
     return [(r[0], r[1], r[2]) for r in rows]
 
 
 def get_asset_derivatives(asset_id: int) -> dict | None:
-    conn = _get_db()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT available_exchanges FROM biz.asset_derivatives WHERE asset_id = %s",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-    conn.close()
+    with _get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT available_exchanges FROM biz.asset_derivatives WHERE asset_id = %s",
+                (asset_id,),
+            )
+            row = cur.fetchone()
     if not row or not row[0]:
         return None
     return {"available_exchanges": row[0]}
@@ -132,37 +133,39 @@ def main() -> int:
 
     processed = 0
     failed = 0
-    conn = _get_db() if not args.dry_run else None
 
-    for aid, chain, addr in assets:
-        # 双源：Solana 主 GeckoTerminal / 其他主 DexScreener
-        if (chain or "").lower() in GECKO_SOLANA_LIKE:
-            liq = geo_client.get_liquidity(chain, addr)
-            if liq.get("source_status") in ("na", "error", "not_cached"):
-                liq = dex_client.get_liquidity(addr)
-        else:
-            liq = dex_client.get_liquidity(addr)
-            if liq.get("source_status") == "error":
+    if args.dry_run:
+        for aid, chain, addr in assets:
+            if (chain or "").lower() in GECKO_SOLANA_LIKE:
                 liq = geo_client.get_liquidity(chain, addr)
-
-        result = build_result(aid, chain, addr, liq)
-
-        if args.dry_run:
+                if liq.get("source_status") in ("na", "error", "not_cached"):
+                    liq = dex_client.get_liquidity(addr)
+            else:
+                liq = dex_client.get_liquidity(addr)
+                if liq.get("source_status") == "error":
+                    liq = geo_client.get_liquidity(chain, addr)
+            result = build_result(aid, chain, addr, liq)
             print(json.dumps(result, ensure_ascii=False, default=str))
             processed += 1
-            continue
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(UPSERT_SQL, result)
-            processed += 1
-        except Exception as e:
-            print(f"  asset_id={aid} FAILED: {e}", file=sys.stderr)
-            failed += 1
-
-    if conn:
-        conn.commit()
-        conn.close()
+    else:
+        with _get_db() as conn:
+            for aid, chain, addr in assets:
+                if (chain or "").lower() in GECKO_SOLANA_LIKE:
+                    liq = geo_client.get_liquidity(chain, addr)
+                    if liq.get("source_status") in ("na", "error", "not_cached"):
+                        liq = dex_client.get_liquidity(addr)
+                else:
+                    liq = dex_client.get_liquidity(addr)
+                    if liq.get("source_status") == "error":
+                        liq = geo_client.get_liquidity(chain, addr)
+                result = build_result(aid, chain, addr, liq)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(UPSERT_SQL, result)
+                    processed += 1
+                except Exception as e:
+                    print(f"  asset_id={aid} FAILED: {e}", file=sys.stderr)
+                    failed += 1
 
     print(json.dumps({
         "status": "success" if failed == 0 else "partial",

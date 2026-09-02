@@ -72,32 +72,50 @@ def _resolve_symbol_to_asset_id(cur, symbol: str) -> int | None:
 
 
 def _get_price_from_db(cur, asset_id: int, target_date: date) -> float | None:
-    """从快照日价表取价（如有）。"""
-    cur.execute(
-        "SELECT close_price FROM biz.cm_quote_daily "
-        "WHERE asset_id = %s AND metric_date = %s",
-        (asset_id, target_date),
-    )
-    row = cur.fetchone()
-    return float(row[0]) if row else None
+    """从 asset_market_daily 取日价（FIX-1: 表名对齐 + FIX-2: 异常兜底 + FIX-5: source_code 去歧义）。"""
+    try:
+        cur.execute(
+            "SELECT price_usd FROM biz.asset_market_daily "
+            "WHERE asset_id = %s AND market_date = %s AND price_usd > 0 "
+            "ORDER BY market_date DESC LIMIT 1",
+            (asset_id, target_date),
+        )
+        row = cur.fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
 
 
-def _get_price_external(symbol: str) -> float | None:
-    """外部实时报价 fallback（Binance fapi 或 CMC quotes）。仅回测用，不写库。"""
+def _get_price_external(symbol: str, target_date: date | None = None) -> float | None:
+    """外部 fallback：target_date 有值时用 Binance klines 历史收盘（FIX-4），否则实时价。"""
     try:
         import requests as _req
-        # Binance 免费公开报价
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}USDT"
-        r = _req.get(url, timeout=10)
-        if r.status_code == 200:
-            return float(r.json().get("price", 0)) or None
+        pair = f"{symbol.upper()}USDT"
+        if target_date:
+            # Binance klines 历史日收盘
+            import time as _time
+            start_ms = int(target_date.strftime("%s")) * 1000
+            end_ms = start_ms + 86400000 - 1
+            url = (f"https://api.binance.com/api/v3/klines?symbol={pair}"
+                   f"&interval=1d&startTime={start_ms}&endTime={end_ms}&limit=1")
+            r = _req.get(url, timeout=10)
+            if r.status_code == 200:
+                klines = r.json()
+                if klines and len(klines) >= 1:
+                    return float(klines[0][4])  # close price
+        else:
+            # 实时价（fallback）
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={pair}"
+            r = _req.get(url, timeout=10)
+            if r.status_code == 200:
+                return float(r.json().get("price", 0)) or None
     except Exception:
         pass
     return None
 
 
 def get_price_at(cur, asset_id: int, symbol: str, target_date: date) -> float | None:
-    """三段式取价：DB日价 → symbol→asset_id 解析 + DB日价 → 外部 fallback。"""
+    """三段式取价：DB日价 → symbol→asset_id 解析 + DB日价 → 外部 klines 历史 fallback。"""
     # 1) 直接查 DB 日价
     price = _get_price_from_db(cur, asset_id, target_date)
     if price is not None:
@@ -109,8 +127,8 @@ def get_price_at(cur, asset_id: int, symbol: str, target_date: date) -> float | 
             price = _get_price_from_db(cur, resolved, target_date)
             if price is not None:
                 return price
-    # 3) 外部实时 fallback
-    return _get_price_external(symbol) if symbol else None
+    # 3) 外部 fallback：target_date 有值用 klines 历史收盘
+    return _get_price_external(symbol, target_date) if symbol else None
 
 
 # ── 方向符号 ──
@@ -125,17 +143,24 @@ def direction_multiplier(direction: str) -> int:
 # ── BTC 收益基准 ──
 
 def _get_btc_benchmark(cur, entry_date: date, exit_date: date) -> float | None:
-    """取 BTC 在 [entry, exit] 的收益（%）。"""
-    cur.execute(
-        "SELECT close_price FROM biz.cm_quote_daily "
-        "WHERE asset_id = (SELECT asset_id FROM core.asset WHERE canonical_symbol = 'BTC' LIMIT 1) "
-        "AND metric_date IN (%s, %s) ORDER BY metric_date",
-        (entry_date, exit_date),
-    )
-    rows = cur.fetchall()
-    if len(rows) < 2:
-        return None
-    return round((rows[1][0] - rows[0][0]) / rows[0][0] * 100, 4)
+    """取 BTC 在 [entry, exit] 的收益（%）。FIX-3: 用 Binance klines 历史收盘（避免 DB 脏值）。"""
+    try:
+        import requests as _req
+        start_ms = int(entry_date.strftime("%s")) * 1000
+        end_ms = int(exit_date.strftime("%s")) * 1000 + 86400000 - 1
+        url = (f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT"
+               f"&interval=1d&startTime={start_ms}&endTime={end_ms}&limit=2")
+        r = _req.get(url, timeout=10)
+        if r.status_code == 200:
+            klines = r.json()
+            if len(klines) >= 2:
+                p_entry = float(klines[0][4])
+                p_exit = float(klines[-1][4])
+                if p_entry > 0:
+                    return round((p_exit - p_entry) / p_entry * 100, 4)
+    except Exception:
+        pass
+    return None
 
 
 # ── 回测核心 ──

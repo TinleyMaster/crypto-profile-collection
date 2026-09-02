@@ -12,6 +12,7 @@ from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import ReadTimeoutError
 from urllib3.util.retry import Retry
 
 from crypto_research.config import Settings
@@ -109,10 +110,11 @@ class LLMClient:
                 break
         return url
 
-    def __init__(self, settings: Settings, rpm: int = 60) -> None:
+    def __init__(self, settings: Settings, rpm: int = 60, timeout: int | None = None) -> None:
         self.settings = settings
         self._min_interval = 60.0 / rpm
         self._last_call: float = 0.0
+        self._timeout = timeout or settings.request_timeout_seconds
 
         # 选择提供商：ARK 优先，OpenAI 兼容（DeepSeek 等）兜底
         self._provider_list: list[dict[str, Any]] = []
@@ -176,39 +178,66 @@ class LLMClient:
         return self.provider != "none"
 
     def chat(self, system_prompt: str, user_prompt: str,
-             temperature: float = 0.1, max_tokens: int = 2048) -> str:
-        """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。"""
+             temperature: float = 0.1, max_tokens: int = 2048,
+             timeout_retries: int = 3) -> str:
+        """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。
+
+        timeout_retries: ReadTimeoutError 重试次数（指数退避），默认 3。
+        """
         self._last_diag = {
             "provider": self.provider,
             "model": self.model,
             "api_type": self.api_type,
             "base_url": self.base_url,
         }
-        try:
-            result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
-        except Exception as exc:
-            # 主 provider 失败（额度 402 / 限流 / 5xx / 超时等），切换兜底 provider 重试一次
-            if self._fallback_provider:
-                fallback = self._fallback_provider
-                self._fallback_provider = None  # 只兜底一次，避免死循环
-                self._apply_provider(fallback)
-                self._last_diag = {
-                    "provider": self.provider,
-                    "model": self.model,
-                    "api_type": self.api_type,
-                    "base_url": self.base_url,
-                    "fallback_from": str(exc),
-                }
-                try:
-                    result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
-                except Exception as exc2:
-                    self._apply_provider(self._provider_list[0])
-                    raise exc2
-            else:
-                raise
-        self._last_raw_response = result
-        self._last_diag["result_len"] = len(result)
-        return result
+        last_exc = None
+        for attempt in range(timeout_retries):
+            try:
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+                self._last_raw_response = result
+                self._last_diag["result_len"] = len(result)
+                return result
+            except ReadTimeoutError as e:
+                last_exc = e
+                if attempt < timeout_retries - 1:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    self._last_diag["timeout_retry"] = attempt + 1
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "LLM ReadTimeout (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, timeout_retries, wait, e,
+                    )
+                    time.sleep(wait)
+                    continue
+                # 最后一次尝试失败，走兜底逻辑
+                break
+            except Exception as exc:
+                last_exc = exc
+                break
+
+        # 主 provider 失败（额度 402 / 限流 / 5xx / 超时等），切换兜底 provider 重试一次
+        exc = last_exc
+        if self._fallback_provider:
+            fallback = self._fallback_provider
+            self._fallback_provider = None  # 只兜底一次，避免死循环
+            self._apply_provider(fallback)
+            self._last_diag = {
+                "provider": self.provider,
+                "model": self.model,
+                "api_type": self.api_type,
+                "base_url": self.base_url,
+                "fallback_from": str(exc),
+            }
+            try:
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+                self._last_raw_response = result
+                self._last_diag["result_len"] = len(result)
+                return result
+            except Exception as exc2:
+                self._apply_provider(self._provider_list[0])
+                raise exc2
+        else:
+            raise exc
 
     def _dispatch(self, system_prompt: str, user_prompt: str,
                   temperature: float, max_tokens: int) -> str:
@@ -249,7 +278,7 @@ class LLMClient:
 
         resp = self.session.post(
             url, headers=headers, json=payload,
-            timeout=self.settings.request_timeout_seconds,
+            timeout=self._timeout,
         )
         resp.raise_for_status()
 
@@ -301,7 +330,7 @@ class LLMClient:
 
         resp = self.session.post(
             url, headers=headers, json=payload,
-            timeout=self.settings.request_timeout_seconds,
+            timeout=self._timeout,
         )
         resp.raise_for_status()
 

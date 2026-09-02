@@ -6167,7 +6167,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
     settings = get_settings(require_database=True)
-    llm = LLMClient(settings, rpm=30)
+    llm = LLMClient(settings, rpm=30, timeout=90)
     if not llm.is_available():
         return {"ok": False, "error": "LLM 未配置，无法生成结论"}
 

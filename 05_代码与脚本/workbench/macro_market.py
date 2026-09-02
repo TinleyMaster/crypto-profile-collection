@@ -1266,7 +1266,7 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除，语义由 conviction 承接）
-    "conviction_high_min": 75,               # conviction ≥75 → HIGH 置顶
+    "conviction_high_min": 70,               # conviction ≥70 → HIGH 置顶（从 75 降至 70）
     "conviction_med_min": 55,                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
@@ -2194,29 +2194,27 @@ def _kol_onchain_signals(
 
 
 def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> list[dict]:
-    """从全部机会中精选高亮信号：按类型配额 + 多轴共振优先（FEAT-HIGHLIGHT-001）。
-
-    配额是「最多」而非「必须」：某类无信号不强制填充。返回 ≤ max_total 条。
-    """
+    """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。"""
     quotas = {
-        "mvrv_deep_under": 2,
-        "mvrv_under_watch": 1,
-        "catalyst": 2,
-        "whale_flow": 2,
-        "github_activity": 1,
-        "funding": 1,
-        "token_unlock": 1,
-        "kol_onchain": 1,
+        "mvrv_deep_under": 2, "mvrv_under_watch": 1,
+        "catalyst": 2, "whale_flow": 2, "github_activity": 1,
+        "funding": 1, "token_unlock": 1, "kol_onchain": 1,
+        # 第二刀新增
+        "fng_extreme": 1, "leverage_extreme": 1, "stablecoin_inflow": 1,
         "__default__": 1,
     }
     type_counts: dict[str, int] = {}
+    dir_counts: dict[str, int] = {}
     selected: list[dict] = []
 
     def _sort_key(o):
+        is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
         score = o.get("conviction_score", 0) or 0
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
-        return (is_new, resonance, score)
+        d = o.get("direction", "long")
+        dir_pen = dir_counts.get(d, 0) * 5
+        return (is_high, is_new, resonance, score - dir_pen)
 
     for o in sorted(opportunities, key=_sort_key, reverse=True):
         st = o.get("signal_type") or "__default__"
@@ -2224,6 +2222,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
         if type_counts.get(st, 0) >= q:
             continue
         type_counts[st] = type_counts.get(st, 0) + 1
+        dir_counts[o.get("direction", "long")] = dir_counts.get(o.get("direction", "long"), 0) + 1
         selected.append(o)
         if len(selected) >= max_total:
             break
@@ -2775,6 +2774,69 @@ def score_opportunities(overview: dict) -> dict:
         degraded.append("P1-1 链榜缺失")
     if not divergence:
         degraded.append("P1-2 背离信号缺失")
+
+    # ════════ 第二刀独立高亮维度（FEAT-HIGHLIGHT-002）══════
+    # 事件驱动、间歇触发，高信息熵可执行信号，与"状态类"信号互补
+    _fear_max = t.get("fng_fear_max", 25)
+    _greed_min = t.get("fng_greed_min", 75)
+
+    # A. 恐贪极值
+    _fg = (overview.get("dimensions") or {}).get("3情绪") or {}
+    _fg_val = (((_fg.get("data") or {}).get("fear_greed") or {}).get("value"))
+    if _fg_val is None:
+        _emo = (overview.get("summary") or {}).get("emotion_subscore") or {}
+        _fg_val = ((_emo.get("components") or {}).get("fear_greed") or {}).get("value")
+    if _fg_val is not None:
+        if _fg_val <= _fear_max:
+            _push_opportunity(
+                {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
+                 "conviction_score": 70 + min(15, int(_fear_max - _fg_val)),
+                 "signal_type": "fng_extreme",
+                 "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≤ {_fear_max}：市场极度恐惧，历史级积累区",
+                 "action_hint": "情绪极端悲观时分批建仓，止损设宽",
+                 "invalidation": "恐贪回升 >40 或 BTC 破位下行",
+                 "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
+                opportunities, excluded, t)
+        elif _fg_val >= _greed_min:
+            _push_opportunity(
+                {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
+                 "conviction_score": 70 + min(15, int(_fg_val - _greed_min)),
+                 "signal_type": "fng_extreme",
+                 "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≥ {_greed_min}：市场极度贪婪，防回撤",
+                 "action_hint": "减仓/对冲，警惕顶部",
+                 "invalidation": "恐贪回落 <65 或 BTC 突破新高放量",
+                 "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
+                opportunities, excluded, t)
+
+    # B. 杠杆极值
+    _funding_sig = by_sig.get("price_funding") or {}
+    _funding_label = _funding_sig.get("label")
+    if _funding_label in ("DANGEROUS", "DIVERGENT"):
+        _fm = _funding_sig.get("metrics") or {}
+        _fl = _fm.get("funding_latest") or 0
+        _lev_dir = "short" if _fl > 0 else "long"
+        _push_opportunity(
+            {"target": "衍生品杠杆极值", "direction": _lev_dir, "confidence": "high",
+             "conviction_score": 72,
+             "signal_type": "leverage_extreme",
+             "trigger_logic": f"funding {_fl*100:.3f}%/期 极端 + 价滞涨：{'多头拥挤挤仓风险' if _lev_dir=='short' else '空头拥挤逼空风险'}",
+             "action_hint": "警惕杠杆踩踏，降低合约敞口" if _lev_dir == "short" else "关注逼空反弹窗口",
+             "invalidation": "funding 回归正常区间 或 价格放量突破",
+             "related_dims": ["derivatives", "price_funding"], "involved_symbols": ["BTC"]},
+            opportunities, excluded, t)
+
+    # C. 稳定币大幅净流入
+    _sc_min = t.get("stablecoin_inflow_min", 5_000_000_000)
+    if stable_7d is not None and stable_7d >= _sc_min:
+        _push_opportunity(
+            {"target": "稳定币大幅净流入", "direction": "long", "confidence": "medium",
+             "conviction_score": 66,
+             "signal_type": "stablecoin_inflow",
+             "trigger_logic": f"稳定币 7d 净流 ${stable_7d/1e9:.1f}B ≥ 阈值：场外弹药积累，潜在买盘",
+             "action_hint": "关注 BTC/大盘承接与突破",
+             "invalidation": "净流转负 或 BTC 放量下跌",
+             "related_dims": ["stablecoin_flow"], "involved_symbols": ["BTC"]},
+            opportunities, excluded, t)
 
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)

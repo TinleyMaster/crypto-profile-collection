@@ -153,9 +153,9 @@ def _check_key(key: str, desc: str, check_only: bool) -> dict:
     # 补跑（check_only 时不补）
     task_id = None
     if not check_only:
-        for _key, _cron, script, a, d in __import__("scheduler").SCHEDULE:
+        for _key, _cron, script, a, d, cat in __import__("scheduler").SCHEDULE:
             if _key == key:
-                task_id = submit_scheduled_task(key, script, a, d)
+                task_id = submit_scheduled_task(key, script, a, d, category=cat)
                 break
 
     return {

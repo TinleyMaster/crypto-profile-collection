@@ -108,7 +108,6 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）", "core"),
 
     # ═══ 监控告警 ═══
-<<<<<<< HEAD
     ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
     ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
     ("binance_bapi_health", "*/30 * * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每30分钟）", "monitor"),

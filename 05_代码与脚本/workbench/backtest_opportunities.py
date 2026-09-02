@@ -55,9 +55,23 @@ NOT_CALIBRABLE = {"mvrv_deep_under"}
 # ── 价格取数（三段式）──
 
 def _resolve_symbol_to_asset_id(cur, symbol: str) -> int | None:
-    """symbol → asset_id 解析（精确匹配 canonical_symbol 或 canonical_name）。"""
+    """symbol → asset_id 解析（精确匹配 canonical_symbol，排除桥接/包装币）。"""
+    # FIX-R2: 排除 Bridged/Wrapped/Peg/allSOL 后缀，优先取主币
     cur.execute(
-        "SELECT asset_id FROM core.asset WHERE canonical_symbol = %s LIMIT 1",
+        "SELECT asset_id FROM core.asset WHERE UPPER(canonical_symbol) = %s "
+        "AND canonical_name NOT LIKE '%Bridged%' "
+        "AND canonical_name NOT LIKE '%Wrapped%' "
+        "AND canonical_name NOT LIKE '%Peg %' "
+        "AND canonical_name NOT LIKE '%allSOL%' "
+        "ORDER BY asset_id LIMIT 1",
+        (symbol.upper().strip(),),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    # fallback：不排除桥接币（至少有 asset_id）
+    cur.execute(
+        "SELECT asset_id FROM core.asset WHERE UPPER(canonical_symbol) = %s LIMIT 1",
         (symbol.upper().strip(),),
     )
     row = cur.fetchone()
@@ -179,6 +193,10 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
     except (ValueError, TypeError):
         return None
 
+    # FIX-R1: snap_date 视为北京时间日 → 转 UTC 日（北京时间 9/2 00:00 = UTC 9/1 16:00）
+    # asset_market_daily.market_date 按 UTC 日存储，北京日落库会晚 8 小时
+    entry_date = snap_date - timedelta(days=1)
+
     # 解析 asset_id（可能为 None）
     asset_id = opportunity.get("_asset_id")
     symbol = target.upper().strip() if target else ""
@@ -189,8 +207,8 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
     dm = direction_multiplier(direction)
 
     for h_days in horizons:
-        exit_date = snap_date + timedelta(days=h_days)
-        price_entry = get_price_at(cur, asset_id, symbol, snap_date)
+        exit_date = entry_date + timedelta(days=h_days)
+        price_entry = get_price_at(cur, asset_id, symbol, entry_date)
         price_exit = get_price_at(cur, asset_id, symbol, exit_date)
 
         if price_entry is None or price_exit is None or price_entry == 0:
@@ -202,7 +220,7 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
         loss = 1 if pnl_pct < 0 else 0
 
         # BTC 基准
-        btc_ret = _get_btc_benchmark(cur, snap_date, exit_date)
+        btc_ret = _get_btc_benchmark(cur, entry_date, exit_date)
         alpha = round(pnl_pct - (btc_ret or 0) * dm, 4) if btc_ret is not None else None
 
         results.append({
@@ -223,7 +241,7 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
         "signal_type": signal_type,
         "target": target,
         "direction": direction,
-        "entry_date": snap_date_str,
+        "entry_date": entry_date.isoformat(),
         "horizon_days": primary["horizon_days"],
         "pnl_pct": primary["pnl_pct"],
         "win": primary["win"],
@@ -262,7 +280,16 @@ def backtest_opportunities(days: int = 30) -> dict:
                     continue
                 payload = dict(row[0]) if row[0] else {}
                 opps = ((payload.get("opportunity_list") or {}).get("opportunities") or [])
+                # FIX-R3: 过滤 KOL 噪声（无 signal_type / 同 target 去重）
+                seen_targets: set[str] = set()
                 for opp in opps:
+                    st = opp.get("signal_type")
+                    tgt = opp.get("target", "")
+                    if not st or not tgt:
+                        continue  # 跳过无 signal_type 的噪声行
+                    if tgt in seen_targets:
+                        continue  # 同 target 去重
+                    seen_targets.add(tgt)
                     opp["_snap_date"] = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
                     # 尝试从 involved_symbols 或 target 解析 asset_id
                     opp["_asset_id"] = None

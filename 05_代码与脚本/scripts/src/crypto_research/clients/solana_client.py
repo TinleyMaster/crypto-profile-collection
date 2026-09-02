@@ -80,6 +80,20 @@ class SolanaClient:
             return data.get("result")
         return None
 
+    # ── mint/freeze authority（合约安全扫描用）──
+    def get_mint_authorities(self, mint: str) -> dict[str, Any] | None:
+        """取 mint 账户的增发/冻结权限（null = 已放弃）。复用 _json_rpc + 限流。"""
+        result = self._json_rpc("getAccountInfo", [mint, {"encoding": "jsonParsed"}])
+        if not result or not result.get("value"):
+            return None
+        info = result["value"].get("data", {}).get("parsed", {}).get("info", {})
+        return {
+            "mint_authority": info.get("mintAuthority"),
+            "freeze_authority": info.get("freezeAuthority"),
+            "supply": info.get("supply"),
+            "decimals": info.get("decimals"),
+        }
+
     # ── 代币元数据 ─────────────────────────────────────────
     def get_token_supply(self, mint: str) -> dict[str, Any] | None:
         """返回 {decimals, ui_amount, total}，带缓存。"""

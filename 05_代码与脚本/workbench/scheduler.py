@@ -74,6 +74,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
     ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）"),
     ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）"),
     ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）"),
+    ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）"),
 
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],

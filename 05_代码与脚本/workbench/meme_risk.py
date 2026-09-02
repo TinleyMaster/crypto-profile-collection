@@ -178,70 +178,76 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
     risk_thresholds: dict[str, dict] = {}
     block_flags = {"is_honeypot", "mint_authority", "freeze_authority"}
 
-    # 从各表取数据
+    # 从各表取数据（每个查询独立 try/except，一个失败不阻断其余）
     data: dict[str, Any] = {}
 
     # contract 轴
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT * FROM biz.asset_contract_security WHERE asset_id = %s",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-    if row:
-        data.update(dict(row))
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM biz.asset_contract_security WHERE asset_id = %s", (asset_id,))
+            row = cur.fetchone()
+        if row:
+            data.update(dict(row))
+    except Exception:
+        conn.rollback()
 
     # liquidity 轴
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT * FROM biz.asset_liquidity WHERE asset_id = %s LIMIT 1",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-    if row:
-        data.update(dict(row))
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM biz.asset_liquidity WHERE asset_id = %s LIMIT 1", (asset_id,))
+            row = cur.fetchone()
+        if row:
+            data.update(dict(row))
+    except Exception:
+        conn.rollback()
 
     # holder 轴
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT whale_balance_change_7d_pct, holder_change_7d "
-            "FROM biz.onchain_holder_snapshot "
-            "WHERE asset_id = %s ORDER BY snapshot_date DESC LIMIT 1",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-    if row:
-        data.update(dict(row))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT whale_balance_change_7d_pct, holder_change_7d "
+                "FROM biz.onchain_holder_snapshot "
+                "WHERE asset_id = %s ORDER BY snapshot_date DESC LIMIT 1",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+        if row:
+            data.update(dict(row))
+    except Exception:
+        conn.rollback()
 
     # lifecycle 轴
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT launch_date FROM core.asset WHERE asset_id = %s",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-    if row:
-        data["launch_date"] = row[0]
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT launch_date FROM core.asset WHERE asset_id = %s", (asset_id,))
+            row = cur.fetchone()
+        if row:
+            data["launch_date"] = row[0]
+    except Exception:
+        conn.rollback()
 
     # social 轴（双代理：kol_signal + github_repo_activity）
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM biz.kol_signal "
-            "WHERE symbol = (SELECT UPPER(canonical_symbol) FROM core.asset WHERE asset_id = %s) "
-            "AND posted_at >= NOW() - INTERVAL '30 days'",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-        data["kol_signal_count_30d"] = row[0] if row else 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.kol_signal "
+                "WHERE symbol = (SELECT UPPER(canonical_symbol) FROM core.asset WHERE asset_id = %s) "
+                "AND created_at >= NOW() - INTERVAL '30 days'",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            data["kol_signal_count_30d"] = row[0] if row else 0
 
-        cur.execute(
-            "SELECT COUNT(*) FROM biz.github_repo_activity "
-            "WHERE repo_id IN (SELECT repo_id FROM biz.asset_github_repo WHERE asset_id = %s) "
-            "AND activity_date >= CURRENT_DATE - INTERVAL '30 days'",
-            (asset_id,),
-        )
-        row = cur.fetchone()
-        data["github_activity_30d"] = row[0] if row else 0
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.github_repo_activity "
+                "WHERE repo_id IN (SELECT repo_id FROM biz.asset_github_repo WHERE asset_id = %s) "
+                "AND activity_date >= CURRENT_DATE - INTERVAL '30 days'",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            data["github_activity_30d"] = row[0] if row else 0
+    except Exception:
+        conn.rollback()
 
     # 五轴评分
     contract_score, contract_label, contract_flags = score_contract(data, risk_thresholds)

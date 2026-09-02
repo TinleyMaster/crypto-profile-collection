@@ -266,7 +266,9 @@ def main() -> int:
             failed += 1
 
     # 游标模式下，成功处理后更新游标
-    if is_cursor_mode and success > 0:
+    # 关键修复：有失败资产时不推进游标，确保失败资产下轮能被重新取到
+    # （成功资产有 thesis，fresh-hours 闸门会自动跳过；失败资产无 thesis，会被重新选取）
+    if is_cursor_mode and success > 0 and failed == 0:
         if is_complete:
             # 追平（不满批）：游标推进到本批最后一行的复合键，下次只取之后的新数据。
             # 绝不清空游标——清空会让下轮重扫近 7 天窗口，同一批资产反复重生，
@@ -278,6 +280,8 @@ def main() -> int:
             # 满批 = 还有下一批，游标推进到最后一行
             _save_cursor(new_ts, new_aid, success)
             print(f"\n游标已更新: ({new_ts}, {new_aid})")
+    elif is_cursor_mode and failed > 0:
+        print(f"\n⚠️ 有 {failed} 个资产失败，游标不推进，下轮重试全部资产")
 
     print()
     print("=" * 60)

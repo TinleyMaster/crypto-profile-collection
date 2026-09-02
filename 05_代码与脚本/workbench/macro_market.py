@@ -2340,6 +2340,7 @@ def score_opportunities(overview: dict) -> dict:
              "direction": "long", "confidence": "high",
              "conviction_score": strength,
              "signal_type": "mvrv_deep_under",
+             "key_metric": f"MVRV {avg_pct:.0f}% · {n_coins}币",
              "trigger_logic": (
                  f"{symbols} 等 {n_coins} 个代币 MVRV 百分位 ≤{deep_undervalued_pct}%"
                  f"（平均 {avg_pct:.1f}%），处于历史极低区间"
@@ -2366,6 +2367,7 @@ def score_opportunities(overview: dict) -> dict:
              "direction": "watch", "confidence": "medium",
              "conviction_score": strength,
              "signal_type": "mvrv_under_watch",
+             "key_metric": f"MVRV {avg_pct:.0f}% · {len(under)}币",
              "trigger_logic": (
                  f"{symbols}{' 等' if len(under) > 5 else ''} {len(under)} 个代币 "
                  f"MVRV 百分位 {deep_undervalued_pct}-{undervalued_pct}%（平均 {avg_pct:.1f}%）"
@@ -2425,6 +2427,8 @@ def score_opportunities(overview: dict) -> dict:
             {"target": "BTC", "direction": direction, "confidence": conf,
              "conviction_score": conviction,
              "conviction_breakdown": btc_breakdown,
+             "signal_type": "btc_left_accum",
+             "key_metric": "左侧积累窗口",
              "action_hint": "左侧布局窗口，分批建仓",
              "invalidation": "若交易所转为净流入或稳定币流向转负，信号失效",
              "trigger_logic": trigger, "related_dims": related},
@@ -2446,6 +2450,8 @@ def score_opportunities(overview: dict) -> dict:
                 _push_opportunity(
                     {"target": act_coin["symbol"], "direction": "long", "confidence": "medium",
                      "conviction_score": conviction,
+                     "signal_type": "cm_adoption_divergence",
+                     "key_metric": f"活跃 {act_coin.get('adr_pct', '?')}%分位",
                      "trigger_logic": (
                          f"{act_coin['symbol']} 活跃地址 {act_coin.get('adr_pct')}% 分位 + "
                          f"30d 收益 {act_coin.get('roi_30d')}% → 采用增长但价格未跟上（静默积累）"
@@ -2458,6 +2464,7 @@ def score_opportunities(overview: dict) -> dict:
                 _push_opportunity(
                     {"target": act_coin["symbol"], "direction": "watch", "confidence": "low",
                      "conviction_score": 0,
+                     "signal_type": "cm_adoption_divergence",
                      "trigger_logic": (
                          f"{act_coin['symbol']} 活跃地址 {act_coin.get('adr_pct')}% 分位 → 网络衰退警示"
                      ),
@@ -2495,6 +2502,7 @@ def score_opportunities(overview: dict) -> dict:
              "conviction_score": strength,
              "conviction_breakdown": breakdown,
              "signal_type": "catalyst",
+             "key_metric": f"催化剂 {cscore:.0f}分",
              "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
              "action_hint": "事件驱动，窗口内跟进",
              "invalidation": "催化剂事件兑现/热度消退后信号失效",
@@ -2529,6 +2537,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
              "signal_type": "whale_flow",
+             "key_metric": f"巨鲸 ${usd_total / 1e6:.1f}M",
              "asset_id": aid,
              "trigger_logic": (
                  f"{symbol} 近{t.get('whale_window_hours', 24)}h {n_tx} 笔大额"
@@ -2566,6 +2575,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
              "signal_type": "github_activity",
+             "key_metric": f"Dev {ratio:.1f}x",
              "asset_id": aid,
              "trigger_logic": (
                  f"{symbol} {label}：近 4 周 {last4} commits vs 前 4 周 {prev4}（{ratio:.1f}x）"
@@ -2596,6 +2606,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": target, "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
              "signal_type": "funding",
+             "key_metric": f"融资 {amount_str}",
              "asset_id": aid,
              "trigger_logic": (
                  f"{target} {rnd} 轮融资落地 {amount_str}（领投 {lead_str}，{rdate}）"
@@ -2624,6 +2635,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": "short", "confidence": "medium",
              "conviction_score": conviction,
              "signal_type": "token_unlock",
+             "key_metric": f"解锁 ${uval / 1e6:.1f}M ({ratio_mcap:.1f}%)",
              "asset_id": aid,
              "trigger_logic": (
                  f"{symbol} 解锁临近 {udate}（价值 ${uval / 1e6:.1f}M，占市值 "
@@ -2653,6 +2665,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": "watch", "confidence": "medium",
              "conviction_score": conviction,
              "signal_type": "kol_onchain",
+             "key_metric": f"KOL ${usd_val / 1e3:.0f}K" if usd_val else None,
              "asset_id": aid,
              "trigger_logic": (
                  f"KOL {profile_id} 链上异动（{subtype or conv_label}"
@@ -2800,11 +2813,12 @@ def score_opportunities(overview: dict) -> dict:
         _fg_val = ((_emo.get("components") or {}).get("fear_greed") or {}).get("value")
     if _fg_val is not None:
         if _fg_val <= _fear_max:
-            strength = max(70, min(95, 50 + 50 * ((_fear_max - _fg_val) / 50)))
+            strength = max(70, min(95, 50 + 50 * ((50 - _fg_val) / 50)))
             _push_opportunity(
                 {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
                  "conviction_score": strength,
                  "signal_type": "fng_extreme",
+                 "key_metric": f"恐贪 {_fg_val:.0f}",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≤ {_fear_max}：市场极度恐惧，历史级积累区",
                  "action_hint": "情绪极端悲观时分批建仓，止损设宽",
                  "invalidation": "恐贪回升 >40 或 BTC 破位下行",
@@ -2817,6 +2831,7 @@ def score_opportunities(overview: dict) -> dict:
                 {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
                  "conviction_score": strength,
                  "signal_type": "fng_extreme",
+                 "key_metric": f"恐贪 {_fg_val:.0f}",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≥ {_greed_min}：市场极度贪婪，防回撤",
                  "action_hint": "减仓/对冲，警惕顶部",
                  "invalidation": "恐贪回落 <65 或 BTC 突破新高放量",
@@ -2838,6 +2853,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": "衍生品杠杆极值", "direction": _lev_dir, "confidence": "high",
              "conviction_score": strength,
              "signal_type": "leverage_extreme",
+             "key_metric": f"资金费率 {_fl*100:.2f}%",
              "trigger_logic": f"funding {_fl*100:.3f}%/期 极端 + 价滞涨：{'多头拥挤挤仓风险' if _lev_dir=='short' else '空头拥挤逼空风险'}",
              "action_hint": "警惕杠杆踩踏，降低合约敞口" if _lev_dir == "short" else "关注逼空反弹窗口",
              "invalidation": "funding 回归正常区间 或 价格放量突破",
@@ -2855,6 +2871,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": "稳定币大幅净流入", "direction": "long", "confidence": "medium",
              "conviction_score": strength,
              "signal_type": "stablecoin_inflow",
+             "key_metric": f"净流入 +${stable_7d/1e9:.1f}B",
              "trigger_logic": f"稳定币 7d 净流 ${stable_7d/1e9:.1f}B ≥ 阈值：场外弹药积累，潜在买盘",
              "action_hint": "关注 BTC/大盘承接与突破",
              "invalidation": "净流转负 或 BTC 放量下跌",

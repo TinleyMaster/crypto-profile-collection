@@ -96,6 +96,8 @@ opportunity_rules:
   # 工单6: KOL onchain 情报
   kol_window_days: 7                   # KOL 信号回看窗口（天）
   kol_top_n: 5
+  # FEAT-HIGHLIGHT-001: 高亮信号精选
+  highlight_max_total: 10              # 高亮信号总数上限
 
 # ── 评分微调参数（scoring tuning） ──
 scoring_tuning:

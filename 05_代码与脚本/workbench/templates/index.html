@@ -7287,10 +7287,11 @@
             html += `</div>
             </div>`;
 
-            // P2-3 高亮信号区
+            // P2-3 高亮信号区（FEAT-HIGHLIGHT-001：优先用精选 highlight_signals）
             const oppList = (data.opportunity_list || {}).opportunities || [];
             const oppExcluded = (data.opportunity_list || {}).excluded || [];
-            renderSignalHighlight(oppList, oppExcluded);
+            const highlightList = (data.opportunity_list || {}).highlight_signals || oppList;
+            renderSignalHighlight(highlightList, oppExcluded);
 
             // 机会清单卡（第五刀：HIGH/MED/LOW 分级渲染 + conviction_score）
             const highOpps = oppList.filter(o => o.conviction_tier === 'HIGH');

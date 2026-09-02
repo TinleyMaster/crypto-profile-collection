@@ -150,3 +150,41 @@ scoring_tuning:
 
   # 可用权重阈值（低于此 → warning）
   min_available_weight: 0.4
+
+# ── Meme 五维风险标签（MEME-04）──
+meme_risk:
+  # 五轴加权（归一化到 Σ=1.0）
+  weights:
+    contract: 0.30      # 合约安全（honeypot/增发/冻结/风险分）
+    liquidity: 0.25     # 流动性（DEX TVL + CEX 列表）
+    holder: 0.20        # 筹码集中度（鲸鱼变化 + 持仓变化）
+    lifecycle: 0.15     # 生命周期（launch_date 年龄分桶）
+    social: 0.10        # 社交热度（KOL 信号 + GitHub 活跃度，代理源）
+  # 一票否决标记（命中 → risk_label=block, total_score=100）
+  block_flags:
+    - is_honeypot
+    - mint_authority
+    - freeze_authority
+  # 各轴阈值
+  contract:
+    red: 70
+    yellow: 40
+  liquidity:
+    red: 70
+    yellow: 40
+    min_usd: 100000         # total_liquidity_usd < 此 → red
+    top_pool_pct: 80        # 单池占比 > 此 → 红旗
+  holder:
+    red: 70
+    yellow: 40
+    whale_inflow_pct: 3.0   # 鲸鱼 7d 增持 > 3% → red
+  lifecycle:
+    age_buckets:
+      red_max: 7            # <7 天 → red
+      yellow_max: 30        # 7-30 天 → yellow
+      green_min: 90         # ≥90 天 → green
+  social:
+    red: 70
+    yellow: 40
+    kol_max_count: 5        # 近 30 天 KOL 信号 ≥ 5 → red
+    gh_min_activity: 5      # 近 30 天 GitHub 活跃度 ≥ 5 → green

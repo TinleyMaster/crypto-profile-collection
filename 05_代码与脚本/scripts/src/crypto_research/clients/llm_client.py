@@ -156,7 +156,6 @@ class LLMClient:
             backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST"],
-            retry_on_timeout=True,
         )
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)

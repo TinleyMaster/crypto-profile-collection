@@ -110,6 +110,9 @@ NARRATIVE_TVL_MAP = {
 }
 # P1-1 叙事/链榜配置（启动时从 yaml 加载，见 _load_market_rules）
 
+# 协议级 change_7d 异常阈值（%）：超过视为低基数/历史回填导致的数据异常，加权时剔除
+TVL_CHANGE_CAP = 1000.0
+
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     """安全转换为 float。"""
@@ -1048,16 +1051,18 @@ def fetch_category_tvl_flow() -> dict:
         cat = p.get("category") or "Unknown"
         tvl = _safe_float(p.get("tvl"))
         ch7 = p.get("change_7d")
-        e = agg.setdefault(cat, {"tvl": 0.0, "wsum": 0.0, "n": 0})
-        e["tvl"] += tvl
-        if ch7 is not None:
+        e = agg.setdefault(cat, {"tvl": 0.0, "wtvl": 0.0, "wsum": 0.0, "n": 0})
+        e["tvl"] += tvl  # 赛道总 TVL（展示用，含全部协议）
+        if ch7 is not None and abs(_safe_float(ch7)) <= TVL_CHANGE_CAP:
+            # 加权分母仅含正常协议：剔除 |change_7d| 天文值（低基数/历史回填），防撑爆赛道均值
+            e["wtvl"] += tvl
             e["wsum"] += _safe_float(ch7) * tvl
             e["n"] += 1
 
     categories: dict[str, dict] = {}
     for cat, e in agg.items():
         tvl = e["tvl"]
-        change = (e["wsum"] / tvl) if tvl > 0 else 0.0
+        change = (e["wsum"] / e["wtvl"]) if e["wtvl"] > 0 else 0.0
         categories[cat] = {
             "tvl": tvl,
             "tvl_change_7d_pct": round(change, 2),

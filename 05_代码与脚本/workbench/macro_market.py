@@ -110,6 +110,9 @@ NARRATIVE_TVL_MAP = {
 }
 # P1-1 叙事/链榜配置（启动时从 yaml 加载，见 _load_market_rules）
 
+# 协议级 change_7d 异常阈值（%）：超过视为低基数/历史回填导致的数据异常，加权时剔除
+TVL_CHANGE_CAP = 1000.0
+
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     """安全转换为 float。"""
@@ -1048,16 +1051,18 @@ def fetch_category_tvl_flow() -> dict:
         cat = p.get("category") or "Unknown"
         tvl = _safe_float(p.get("tvl"))
         ch7 = p.get("change_7d")
-        e = agg.setdefault(cat, {"tvl": 0.0, "wsum": 0.0, "n": 0})
-        e["tvl"] += tvl
-        if ch7 is not None:
+        e = agg.setdefault(cat, {"tvl": 0.0, "wtvl": 0.0, "wsum": 0.0, "n": 0})
+        e["tvl"] += tvl  # 赛道总 TVL（展示用，含全部协议）
+        if ch7 is not None and abs(_safe_float(ch7)) <= TVL_CHANGE_CAP:
+            # 加权分母仅含正常协议：剔除 |change_7d| 天文值（低基数/历史回填），防撑爆赛道均值
+            e["wtvl"] += tvl
             e["wsum"] += _safe_float(ch7) * tvl
             e["n"] += 1
 
     categories: dict[str, dict] = {}
     for cat, e in agg.items():
         tvl = e["tvl"]
-        change = (e["wsum"] / tvl) if tvl > 0 else 0.0
+        change = (e["wsum"] / e["wtvl"]) if e["wtvl"] > 0 else 0.0
         categories[cat] = {
             "tvl": tvl,
             "tvl_change_7d_pct": round(change, 2),
@@ -1261,7 +1266,7 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除，语义由 conviction 承接）
-    "conviction_high_min": 75,               # conviction ≥75 → HIGH 置顶
+    "conviction_high_min": 70,               # conviction ≥70 → HIGH 置顶（从 75 降至 70）
     "conviction_med_min": 55,                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
@@ -1301,6 +1306,8 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     # 工单6: KOL onchain 情报
     "kol_window_days": 7,                    # KOL 信号回看窗口（天）
     "kol_top_n": 5,
+    # FEAT-HIGHLIGHT-001: 高亮信号精选
+    "highlight_max_total": 10,               # 高亮信号总数上限
 }
 
 
@@ -2186,6 +2193,42 @@ def _kol_onchain_signals(
         return []
 
 
+def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> list[dict]:
+    """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。"""
+    quotas = {
+        "mvrv_deep_under": 2, "mvrv_under_watch": 1,
+        "catalyst": 2, "whale_flow": 2, "github_activity": 1,
+        "funding": 1, "token_unlock": 1, "kol_onchain": 1,
+        # 第二刀新增
+        "fng_extreme": 1, "leverage_extreme": 1, "stablecoin_inflow": 1,
+        "__default__": 1,
+    }
+    type_counts: dict[str, int] = {}
+    dir_counts: dict[str, int] = {}
+    selected: list[dict] = []
+
+    def _sort_key(o):
+        is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
+        score = o.get("conviction_score", 0) or 0
+        resonance = len(o.get("related_dims", []) or [])
+        is_new = 1 if o.get("is_new_today") else 0
+        d = o.get("direction", "long")
+        dir_pen = dir_counts.get(d, 0) * 5
+        return (is_high, is_new, resonance, score - dir_pen)
+
+    for o in sorted(opportunities, key=_sort_key, reverse=True):
+        st = o.get("signal_type") or "__default__"
+        q = quotas.get(st, quotas["__default__"])
+        if type_counts.get(st, 0) >= q:
+            continue
+        type_counts[st] = type_counts.get(st, 0) + 1
+        dir_counts[o.get("direction", "long")] = dir_counts.get(o.get("direction", "long"), 0) + 1
+        selected.append(o)
+        if len(selected) >= max_total:
+            break
+    return selected
+
+
 def score_opportunities(overview: dict) -> dict:
     """
     聚合 P1-1~P1-3 + P0-3 真实字段合成机会清单。
@@ -2250,72 +2293,68 @@ def score_opportunities(overview: dict) -> dict:
     excluded: list[dict] = []
     degraded: list[str] = []
 
-    # ── P0-1: MVRV 估值回归（long，低估值深度低估币） ──
+    # ── P0-1: MVRV 估值回归（聚合展示，避免「资产清单」当「高亮信号」） ──
     deep_undervalued_pct = t.get("mvrv_deep_undervalued_pct", 15)
     undervalued_pct = t.get("mvrv_undervalued_pct", 30)
-    for coin in mvrv_coins:
-        pct = coin.get("pct_full")
-        symbol = coin.get("symbol", "?")
-        if pct is None:
-            continue
-        if pct <= deep_undervalued_pct:
-            # 深度低估 → 高确定性均值回归机会
-            mvrv_score_val = max(0, min(100, 100 - pct))
-            breakdown = _conviction_breakdown(
-                mvrv_pct=pct, cycle_phase=cycle_phase,
-                funding=funding_latest, exchange_netflow=ex_netflow,
-                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
-            )
-            conviction = breakdown["total"]
-            trigger = (
-                f"MVRV 百分位 {pct:.1f}%：处于历史极低区间（≤{deep_undervalued_pct}%），"
-                f"价格远低于长期持有者成本均值，修复空间较大"
-            )
-            _push_opportunity(
-                {"target": symbol, "direction": "long", "confidence": "high",
-                 "conviction_score": conviction,
-                 "conviction_breakdown": breakdown,
-                 "trigger_logic": trigger,
-                 "action_hint": "左侧重仓，中线持有",
-                 "invalidation": "MVRV 回升 >30% 即获利了结一半",
-                 "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
-                opportunities, excluded, t,
-            )
-        elif pct <= undervalued_pct:
-            # 低估 → 中置信；文案按分位区间差异化（方案 B，三档分层去复读机）
-            breakdown = _conviction_breakdown(
-                mvrv_pct=pct, cycle_phase=cycle_phase,
-                funding=funding_latest, exchange_netflow=ex_netflow,
-                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
-            )
-            conviction = breakdown["total"]
-            if pct <= 10:
-                trigger = (
-                    f"MVRV 百分位 {pct:.1f}%：处于历史极低区间，价格远低于"
-                    f"长期持有者成本均值，修复空间较大"
-                )
-                action_hint = "左侧分批，中线持有（数周~数月）"
-            elif pct <= 20:
-                trigger = (
-                    f"MVRV 百分位 {pct:.1f}%：估值偏低，需配合资金流入或情绪低点确认"
-                )
-                action_hint = "观察+条件单，右侧放量确认后介入"
-            else:
-                trigger = (
-                    f"MVRV 百分位 {pct:.1f}%：轻度低估，单独信号弱，须多轴共振才有效"
-                )
-                action_hint = "仅作观察池，不单独下注"
-            invalidation = "若 MVRV 继续下破≤10%或BTC周期进入late_top，信号降级"
-            _push_opportunity(
-                {"target": symbol, "direction": "long", "confidence": "medium",
-                 "conviction_score": conviction,
-                 "conviction_breakdown": breakdown,
-                 "trigger_logic": trigger,
-                 "action_hint": action_hint,
-                 "invalidation": invalidation,
-                 "related_dims": ["mvrv_universe", "P0-1 估值回归"]},
-                opportunities, excluded, t,
-            )
+    # 深度低估：最多取 3 个代表性币种单独聚合展示
+    deep_under = sorted(
+        [c for c in mvrv_coins if (c.get("pct_full") or 100) <= deep_undervalued_pct],
+        key=lambda c: c.get("pct_full", 100),
+    )[:3]
+    if deep_under:
+        symbols = ", ".join(str(c.get("symbol", "?")) for c in deep_under)
+        avg_pct = sum(c.get("pct_full", 0) for c in deep_under) / len(deep_under)
+        breakdown = _conviction_breakdown(
+            mvrv_pct=avg_pct, cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": f"{len(deep_under)} 币 MVRV 深度低估",
+             "direction": "long", "confidence": "high",
+             "conviction_score": breakdown["total"],
+             "conviction_breakdown": breakdown,
+             "signal_type": "mvrv_deep_under",
+             "trigger_logic": (
+                 f"{symbols} 等 {len(deep_under)} 个代币 MVRV 百分位 ≤{deep_undervalued_pct}%"
+                 f"（平均 {avg_pct:.1f}%），处于历史极低区间"
+             ),
+             "action_hint": "左侧分批，中线持有",
+             "invalidation": "MVRV 回升 >30% 或 BTC 周期进入 late_top",
+             "related_dims": ["mvrv_universe", "P0-1 估值回归"],
+             "involved_symbols": [c.get("symbol") for c in deep_under]},
+            opportunities, excluded, t,
+        )
+
+    # 轻度低估：聚合成 1 条观察池
+    under = [
+        c for c in mvrv_coins
+        if deep_undervalued_pct < (c.get("pct_full") or 0) <= undervalued_pct
+    ]
+    if under:
+        symbols = ", ".join(str(c.get("symbol", "?")) for c in under[:5])
+        avg_pct = sum(c.get("pct_full", 0) for c in under) / len(under)
+        breakdown = _conviction_breakdown(
+            mvrv_pct=avg_pct, cycle_phase=cycle_phase,
+            funding=funding_latest, exchange_netflow=ex_netflow,
+            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
+        )
+        _push_opportunity(
+            {"target": f"{len(under)} 币 MVRV 低估观察池",
+             "direction": "watch", "confidence": "medium",
+             "conviction_score": breakdown["total"],
+             "conviction_breakdown": breakdown,
+             "signal_type": "mvrv_under_watch",
+             "trigger_logic": (
+                 f"{symbols}{' 等' if len(under) > 5 else ''} {len(under)} 个代币 "
+                 f"MVRV 百分位 {deep_undervalued_pct}-{undervalued_pct}%（平均 {avg_pct:.1f}%）"
+             ),
+             "action_hint": "仅作观察池，不单独下注",
+             "invalidation": f"若 MVRV 继续下破 ≤{deep_undervalued_pct}% 或 BTC 周期恶化",
+             "related_dims": ["mvrv_universe", "P0-1 估值回归"],
+             "involved_symbols": [c.get("symbol") for c in under]},
+            opportunities, excluded, t,
+        )
     if not mvrv_coins:
         degraded.append("mvrv_universe 数据缺失")
 
@@ -2736,8 +2775,75 @@ def score_opportunities(overview: dict) -> dict:
     if not divergence:
         degraded.append("P1-2 背离信号缺失")
 
+    # ════════ 第二刀独立高亮维度（FEAT-HIGHLIGHT-002）══════
+    # 事件驱动、间歇触发，高信息熵可执行信号，与"状态类"信号互补
+    _fear_max = t.get("fng_fear_max", 25)
+    _greed_min = t.get("fng_greed_min", 75)
+
+    # A. 恐贪极值
+    _fg = (overview.get("dimensions") or {}).get("3情绪") or {}
+    _fg_val = (((_fg.get("data") or {}).get("fear_greed") or {}).get("value"))
+    if _fg_val is None:
+        _emo = (overview.get("summary") or {}).get("emotion_subscore") or {}
+        _fg_val = ((_emo.get("components") or {}).get("fear_greed") or {}).get("value")
+    if _fg_val is not None:
+        if _fg_val <= _fear_max:
+            _push_opportunity(
+                {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
+                 "conviction_score": 70 + min(15, int(_fear_max - _fg_val)),
+                 "signal_type": "fng_extreme",
+                 "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≤ {_fear_max}：市场极度恐惧，历史级积累区",
+                 "action_hint": "情绪极端悲观时分批建仓，止损设宽",
+                 "invalidation": "恐贪回升 >40 或 BTC 破位下行",
+                 "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
+                opportunities, excluded, t)
+        elif _fg_val >= _greed_min:
+            _push_opportunity(
+                {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
+                 "conviction_score": 70 + min(15, int(_fg_val - _greed_min)),
+                 "signal_type": "fng_extreme",
+                 "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≥ {_greed_min}：市场极度贪婪，防回撤",
+                 "action_hint": "减仓/对冲，警惕顶部",
+                 "invalidation": "恐贪回落 <65 或 BTC 突破新高放量",
+                 "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
+                opportunities, excluded, t)
+
+    # B. 杠杆极值
+    _funding_sig = by_sig.get("price_funding") or {}
+    _funding_label = _funding_sig.get("label")
+    if _funding_label in ("DANGEROUS", "DIVERGENT"):
+        _fm = _funding_sig.get("metrics") or {}
+        _fl = _fm.get("funding_latest") or 0
+        _lev_dir = "short" if _fl > 0 else "long"
+        _push_opportunity(
+            {"target": "衍生品杠杆极值", "direction": _lev_dir, "confidence": "high",
+             "conviction_score": 72,
+             "signal_type": "leverage_extreme",
+             "trigger_logic": f"funding {_fl*100:.3f}%/期 极端 + 价滞涨：{'多头拥挤挤仓风险' if _lev_dir=='short' else '空头拥挤逼空风险'}",
+             "action_hint": "警惕杠杆踩踏，降低合约敞口" if _lev_dir == "short" else "关注逼空反弹窗口",
+             "invalidation": "funding 回归正常区间 或 价格放量突破",
+             "related_dims": ["derivatives", "price_funding"], "involved_symbols": ["BTC"]},
+            opportunities, excluded, t)
+
+    # C. 稳定币大幅净流入
+    _sc_min = t.get("stablecoin_inflow_min", 5_000_000_000)
+    if stable_7d is not None and stable_7d >= _sc_min:
+        _push_opportunity(
+            {"target": "稳定币大幅净流入", "direction": "long", "confidence": "medium",
+             "conviction_score": 66,
+             "signal_type": "stablecoin_inflow",
+             "trigger_logic": f"稳定币 7d 净流 ${stable_7d/1e9:.1f}B ≥ 阈值：场外弹药积累，潜在买盘",
+             "action_hint": "关注 BTC/大盘承接与突破",
+             "invalidation": "净流转负 或 BTC 放量下跌",
+             "related_dims": ["stablecoin_flow"], "involved_symbols": ["BTC"]},
+            opportunities, excluded, t)
+
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+
+    # 精选高亮信号（FEAT-HIGHLIGHT-001）：与完整机会池分离
+    highlight_max_total = int(t.get("highlight_max_total", 10))
+    highlights = select_highlight_signals(opportunities, max_total=highlight_max_total)
 
     status = "ok"
     if not opportunities:
@@ -2747,6 +2853,7 @@ def score_opportunities(overview: dict) -> dict:
     return {
         "status": status,
         "opportunities": opportunities,
+        "highlight_signals": highlights,
         "excluded": excluded,
         "degraded": degraded,
     }

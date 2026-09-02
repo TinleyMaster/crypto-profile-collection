@@ -75,6 +75,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）", "chain"),
     ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）", "chain"),
     ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）", "chain"),
+    ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
 
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],
@@ -107,6 +108,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）", "core"),
 
     # ═══ 监控告警 ═══
+<<<<<<< HEAD
     ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
     ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
     ("binance_bapi_health", "*/30 * * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每30分钟）", "monitor"),
@@ -123,6 +125,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),
+
+    # ═══ DEX 流动性扫描（MEME-03）═══
+    ("liquidity_scan", "10 8 * * *", "phase_chain_liquidity.py", ["--limit", "100"], "DEX 流动性扫描（DexScreener+GeckoTerminal，每日 08:10）"),
 
     # ═══ CM / OBM 链上指标定时调度 ═══
     # OBM 数据源为日更（周一三五会系统性滞后），改为每日；CM MVRV 为实时估值信号，保持每日 T-1 增量。

@@ -1,0 +1,486 @@
+{
+  "timestamp": "2026-08-28T05:30:43.068392+00:00",
+  "total_fake": 48,
+  "fake_addresses": [
+    {
+      "wallet_id": 253,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 256,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 254,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 177,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "bsc",
+      "confidence": "medium",
+      "source": "bscscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 255,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 252,
+      "address": "0xBd7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B7D7B",
+      "exchange_name": "Binance",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "alternating repeat 7D7B"
+    },
+    {
+      "wallet_id": 298,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 303,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 301,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 306,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 299,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 304,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 156,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 157,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 300,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 305,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 297,
+      "address": "0x0639556F03714A0a2c0E61F4DbA3C0C0c0c0c0c0",
+      "exchange_name": "Bitget",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 302,
+      "address": "0x1ABa973059A89D7b9b0b0b0b0b0b0b0b0b0b0b0",
+      "exchange_name": "Bitget",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 308,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 311,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 309,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 164,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 310,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 307,
+      "address": "0xdf5020a9a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4",
+      "exchange_name": "Bithumb",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 313,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 316,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 314,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 166,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 315,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 312,
+      "address": "0x00bdb5699745f5b460228e8a8b8b8b8b8b8b8b8b",
+      "exchange_name": "Bitstamp",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 368,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 371,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 369,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 167,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 370,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 367,
+      "address": "0x77021d475E36b3ab1921a0e69a0a0a0a0a0a0a0a",
+      "exchange_name": "Deribit",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 493,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 496,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 494,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 163,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 495,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 492,
+      "address": "0x0aEFd55a2f0B13556B5e8B5B5B5B5B5B5B5B5B5B",
+      "exchange_name": "Upbit",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 503,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "arbitrum",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 506,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "avalanche",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 504,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "base",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 168,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "eth",
+      "confidence": "medium",
+      "source": "etherscan-label",
+      "added_at": "2026-08-24T05:48:37.775718+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 505,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "optimism",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    },
+    {
+      "wallet_id": 502,
+      "address": "0x0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "exchange_name": "XT.COM",
+      "chain": "polygon",
+      "confidence": "medium",
+      "source": "evm-propagate",
+      "added_at": "2026-08-24T19:00:01.716552+00:00",
+      "detection_reason": "2-hex repeat >=4"
+    }
+  ]
+}

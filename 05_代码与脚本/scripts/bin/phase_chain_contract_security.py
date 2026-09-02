@@ -118,9 +118,17 @@ def main() -> int:
             print(f"  [{i}/{len(assets)}] asset_id={aid} chain={chain} {addr[:12]}... ", end="", flush=True)
 
             result = client.scan(aid, chain, addr)
-            # raw_json 序列化
+            # 补 UPSERT 占位符：client 返回 dict 不含 contract_addr
+            result["contract_addr"] = addr
+            # raw_json 序列化（hit 分支才有 dict，降级分支补 None）
             if result.get("raw_json"):
                 result["raw_json"] = json.dumps(result["raw_json"], ensure_ascii=False, default=str)
+            # 兜底：client 降级/异常分支字段不全，缺失项填 None 避免 KeyError
+            for _k in ("is_honeypot", "is_open_source", "is_mintable", "can_take_back_ownership",
+                       "hidden_owner", "is_blacklisted", "freeze_authority", "mint_authority",
+                       "buy_tax", "sell_tax", "lp_locked_pct", "top_holders_pct", "holder_count",
+                       "creator_percent", "risk_score", "raw_json"):
+                result.setdefault(_k, None)
 
             with conn.cursor() as cur:
                 cur.execute(UPSERT_SQL, result)

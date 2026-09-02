@@ -1276,7 +1276,7 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "mvrv_overvalued_pct": 85,               # MVRV 百分位 ≥ 此值 → 高估
     # P0-3 conviction 各轴权重（总和 = 1.0，7 轴含 catalyst）
     "conviction_weight_mvrv": 0.23,          # MVRV 估值权重
-    "conviction_weight_cycle": 0.18,         # 周期相位权重
+    "conviction_weight_cycle": 0.18,         # 周期相位权重（保留，已由 _finalize_conviction 用 regime_mult 替代加性轴）
     "conviction_weight_funding": 0.14,       # funding 极性权重
     "conviction_weight_netflow": 0.14,       # 交易所净流权重
     "conviction_weight_stable": 0.09,        # 稳定币流向权重
@@ -1284,7 +1284,20 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "conviction_weight_catalyst": 0.08,      # 催化剂因子权重（保守初值，未校准，待 FEAT-CATALYST-002 回测校准）
     # P0-B 催化剂因子
     "catalyst_window_days": 14,              # 催化剂回溯窗口（天）
-    "catalyst_min_score": 50,                # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
+    "catalyst_min_score": 50,                # 独立强事件机会类入场门槛
+    # FEAT-HIGHLIGHT-003 第三刀：评分重构
+    "conviction_resonance_step": 6,          # 每多 1 个独立确认源 +6 分
+    "conviction_resonance_cap": 18,          # 共振加分上限
+    "mvrv_deep_strength_base": 60,
+    "mvrv_deep_strength_per_pct": 2.0,
+    "mvrv_deep_strength_per_coin": 3,
+    "mvrv_deep_strength_cap": 12,
+    "fng_strength_base": 50,
+    "fng_strength_span": 50,
+    "leverage_strength_base": 70,
+    "leverage_strength_k": 20000,
+    "stablecoin_strength_base": 58,
+    "stablecoin_strength_per_1b": 3,
     "catalyst_top_n": 5,                     # 催化剂机会最多取前 N（去重后）
     # 高亮信号板块接入（2026-09-01 工单集合）
     # 工单1: 链上巨鲸异常
@@ -1780,16 +1793,21 @@ def _resolve_confidence(sources: list[tuple[str, str]], t: dict) -> tuple[str, s
     return "medium", direction
 
 
-def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict], t: dict) -> None:
-    """写入 conviction_tier 并按 tier 过滤：LOW 进 excluded（可追溯），保留 confidence 向后兼容。
+def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict], t: dict,
+                      cycle_phase: str = "unknown", n_confirm: int = 1) -> None:
+    """FEAT-HIGHLIGHT-003：写入 conviction_tier 并按 tier 过滤。
 
-    tier 语义（P1-4 第一刀）：conviction_score ≥ conviction_high_min → HIGH 置顶；
-    ≥ conviction_med_min → MED（观察池）；否则 LOW 剔除。旧 push_confidence_threshold 语义由 tier 承接。
+    score = _finalize_conviction(raw, cycle_phase, n_confirm, t)
+    raw_strength / regime_mult / resonance_bonus 写入 opp 供前端解释。
     """
-    score = opp.get("conviction_score")
-    if score is None:
-        score = 45
-        opp["conviction_score"] = score
+    raw = opp.get("conviction_score")
+    if raw is None:
+        raw = 45
+    score, extra = _finalize_conviction(raw, cycle_phase, n_confirm, t)
+    opp["conviction_score"] = score
+    opp["conviction_strength"] = extra["raw_strength"]
+    opp["regime_mult"] = extra["regime_mult"]
+    opp["resonance_bonus"] = extra["resonance_bonus"]
     high_min = int(t.get("conviction_high_min", 75))
     med_min = int(t.get("conviction_med_min", 55))
     tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
@@ -1828,7 +1846,6 @@ def _mvrv_pct_for(target: str, mvrv_map: dict) -> float | None:
 def _compute_conviction_score(
     *,
     mvrv_pct: float | None,
-    cycle_phase: str,
     funding: float | None,
     exchange_netflow: float | None,
     stablecoin_flow: float | None,
@@ -1836,24 +1853,18 @@ def _compute_conviction_score(
     catalyst_score: float | None = None,
     t: dict,
 ) -> int:
-    """P0-3: 多轴加权合成 conviction 分 (0-100)。返回整数分。
-
-    各轴归一化到 0~100 后加权求和，cycle phase 作为调制系数乘入。
-    catalyst_score: 催化剂因子分数（0-100），None 时取中性 50。
-    与 _conviction_breakdown 同口径，避免漂移。
-    """
+    """返回 raw_strength (不含周期调制)。cycle 由 _finalize_conviction 乘入。"""
     return _conviction_breakdown(
-        mvrv_pct=mvrv_pct, cycle_phase=cycle_phase,
+        mvrv_pct=mvrv_pct,
         funding=funding, exchange_netflow=exchange_netflow,
         stablecoin_flow=stablecoin_flow, roi_1yr=roi_1yr,
         catalyst_score=catalyst_score, t=t,
-    )["total"]
+    )["raw_strength"]
 
 
 def _conviction_breakdown(
     *,
     mvrv_pct: float | None,
-    cycle_phase: str,
     funding: float | None,
     exchange_netflow: float | None,
     stablecoin_flow: float | None,
@@ -1861,21 +1872,13 @@ def _conviction_breakdown(
     catalyst_score: float | None = None,
     t: dict,
 ) -> dict:
-    """P0-3 提质：返回各轴子分与加权贡献，供前端解释「为什么是它」。
+    """P0-3 + FEAT-HIGHLIGHT-003：返回各轴子分与加权贡献，供前端解释。
 
-    返回 {axes: {name: {score, weight, contribution}}, total}。
-    total 与 _compute_conviction_score 返回值一致（同口径，避免漂移）。
+    返回 {axes: {name: {score, weight, contribution}}, raw_strength}。
+    raw_strength 不含周期调制（由 _finalize_conviction 乘入 regime_mult）。
     """
     # ── MVRV 轴：低估=高分（均值回归逻辑），高估=低分 ──
     mvrv_score = max(0, min(100, 100 - mvrv_pct)) if mvrv_pct is not None else 50
-
-    # ── Cycle 轴：phase → score ──
-    cycle_scores = {
-        "early_top": 25, "late_top": 15, "top": 20,
-        "early_bottom": 85, "late_bottom": 75, "bottom": 80,
-        "mid_cycle": 50, "unknown": 50,
-    }
-    cycle_score = cycle_scores.get(cycle_phase, 50)
 
     # ── Funding 轴：正=过热（做空机会/风险），负=恐慌（做多机会） ──
     funding_score = max(0, min(100, 50 - funding * 10000)) if funding is not None else 50
@@ -1897,7 +1900,6 @@ def _conviction_breakdown(
 
     axes = {
         "mvrv": (mvrv_score, _w("conviction_weight_mvrv")),
-        "cycle": (cycle_score, _w("conviction_weight_cycle")),
         "funding": (funding_score, _w("conviction_weight_funding")),
         "netflow": (netflow_score, _w("conviction_weight_netflow")),
         "stable": (stable_score, _w("conviction_weight_stable")),
@@ -1910,7 +1912,29 @@ def _conviction_breakdown(
         contrib = round(sc * wt, 1)
         total += contrib
         breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib}
-    return {"axes": breakdown, "total": max(0, min(100, round(total)))}
+    return {"axes": breakdown, "raw_strength": max(0, min(100, round(total)))}
+
+
+# ── FEAT-HIGHLIGHT-003：周期调制乘子 ──
+_CYCLE_REGIME_MULT = {
+    "early_bottom": 1.15, "late_bottom": 1.10, "bottom": 1.12,
+    "mid_cycle": 1.00, "early_top": 0.85, "late_top": 0.80,
+    "top": 0.82, "unknown": 1.00,
+}
+
+def _cycle_regime_mult(cycle_phase: str) -> float:
+    """周期相位 → 调制乘子（积/底部放大多头信号，顶/顶收敛空头信号）。"""
+    return _CYCLE_REGIME_MULT.get(cycle_phase, 1.00)
+
+
+def _finalize_conviction(raw_strength: float, cycle_phase: str, n_confirm: int, t: dict) -> tuple[int, dict]:
+    """FEAT-HIGHLIGHT-003：raw_strength × regime_mult + 多源共振加分 → 最终 conviction。"""
+    regime_mult = _cycle_regime_mult(cycle_phase)
+    step = int(t.get("conviction_resonance_step", 6))
+    cap = int(t.get("conviction_resonance_cap", 18))
+    bonus = min(cap, max(0, int(n_confirm) - 1) * step)
+    score = max(0, min(100, round(raw_strength * regime_mult + bonus)))
+    return score, {"raw_strength": raw_strength, "regime_mult": regime_mult, "resonance_bonus": bonus}
 
 
 def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, float]]:
@@ -2304,19 +2328,20 @@ def score_opportunities(overview: dict) -> dict:
     if deep_under:
         symbols = ", ".join(str(c.get("symbol", "?")) for c in deep_under)
         avg_pct = sum(c.get("pct_full", 0) for c in deep_under) / len(deep_under)
-        breakdown = _conviction_breakdown(
-            mvrv_pct=avg_pct, cycle_phase=cycle_phase,
-            funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
-        )
+        n_coins = len(deep_under)
+        # FEAT-HIGHLIGHT-003: 实例强度公式
+        strength_base = int(t.get("mvrv_deep_strength_base", 60))
+        per_pct = float(t.get("mvrv_deep_strength_per_pct", 2.0))
+        per_coin = int(t.get("mvrv_deep_strength_per_coin", 3))
+        strength_cap = int(t.get("mvrv_deep_strength_cap", 12))
+        strength = max(40, min(100, strength_base + int((deep_undervalued_pct - avg_pct) * per_pct) + min(strength_cap, n_coins * per_coin)))
         _push_opportunity(
-            {"target": f"{len(deep_under)} 币 MVRV 深度低估",
+            {"target": f"{n_coins} 币 MVRV 深度低估",
              "direction": "long", "confidence": "high",
-             "conviction_score": breakdown["total"],
-             "conviction_breakdown": breakdown,
+             "conviction_score": strength,
              "signal_type": "mvrv_deep_under",
              "trigger_logic": (
-                 f"{symbols} 等 {len(deep_under)} 个代币 MVRV 百分位 ≤{deep_undervalued_pct}%"
+                 f"{symbols} 等 {n_coins} 个代币 MVRV 百分位 ≤{deep_undervalued_pct}%"
                  f"（平均 {avg_pct:.1f}%），处于历史极低区间"
              ),
              "action_hint": "左侧分批，中线持有",
@@ -2324,6 +2349,7 @@ def score_opportunities(overview: dict) -> dict:
              "related_dims": ["mvrv_universe", "P0-1 估值回归"],
              "involved_symbols": [c.get("symbol") for c in deep_under]},
             opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=2,
         )
 
     # 轻度低估：聚合成 1 条观察池
@@ -2334,16 +2360,11 @@ def score_opportunities(overview: dict) -> dict:
     if under:
         symbols = ", ".join(str(c.get("symbol", "?")) for c in under[:5])
         avg_pct = sum(c.get("pct_full", 0) for c in under) / len(under)
-        breakdown = _conviction_breakdown(
-            mvrv_pct=avg_pct, cycle_phase=cycle_phase,
-            funding=funding_latest, exchange_netflow=ex_netflow,
-            stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
-        )
+        strength = max(40, min(70, 55 - int(avg_pct - deep_undervalued_pct)))
         _push_opportunity(
             {"target": f"{len(under)} 币 MVRV 低估观察池",
              "direction": "watch", "confidence": "medium",
-             "conviction_score": breakdown["total"],
-             "conviction_breakdown": breakdown,
+             "conviction_score": strength,
              "signal_type": "mvrv_under_watch",
              "trigger_logic": (
                  f"{symbols}{' 等' if len(under) > 5 else ''} {len(under)} 个代币 "
@@ -2354,6 +2375,7 @@ def score_opportunities(overview: dict) -> dict:
              "related_dims": ["mvrv_universe", "P0-1 估值回归"],
              "involved_symbols": [c.get("symbol") for c in under]},
             opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=1,
         )
     if not mvrv_coins:
         degraded.append("mvrv_universe 数据缺失")
@@ -2387,11 +2409,10 @@ def score_opportunities(overview: dict) -> dict:
         conf, direction = _resolve_confidence(btc_left_sources, t)
         btc_breakdown = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = btc_breakdown["total"]
+        conviction = btc_breakdown["raw_strength"]
         related = ["P1-2 价格vs稳定币"]
         if "emotion" in {typ for typ, _ in btc_left_sources}:
             related.append("P0-3 情绪")
@@ -2408,6 +2429,7 @@ def score_opportunities(overview: dict) -> dict:
              "invalidation": "若交易所转为净流入或稳定币流向转负，信号失效",
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=len(btc_left_sources),
         )
 
     # ── 1b) 多资产采用背离 / 网络健康（CM 第三刀） ──
@@ -2418,7 +2440,6 @@ def score_opportunities(overview: dict) -> dict:
             if sig == "accumulation":
                 conviction = _compute_conviction_score(
                     mvrv_pct=_mvrv_pct_for(act_coin.get("symbol"), mvrv_map),
-                    cycle_phase=cycle_phase,
                     funding=funding_latest, exchange_netflow=ex_netflow,
                     stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
                 )
@@ -2431,6 +2452,7 @@ def score_opportunities(overview: dict) -> dict:
                      ),
                      "related_dims": ["6a网络健康 CM 采用背离"]},
                     opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=2,
                 )
             elif sig == "decline":
                 _push_opportunity(
@@ -2462,16 +2484,15 @@ def score_opportunities(overview: dict) -> dict:
         _cat_pushed += 1
         breakdown = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr,
             catalyst_score=cscore, t=t,
         )
-        conviction = breakdown["total"]
+        strength = breakdown["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": "long",
              "confidence": "high" if cscore >= 70 else "medium",
-             "conviction_score": conviction,
+             "conviction_score": strength,
              "conviction_breakdown": breakdown,
              "signal_type": "catalyst",
              "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
@@ -2479,6 +2500,7 @@ def score_opportunities(overview: dict) -> dict:
              "invalidation": "催化剂事件兑现/热度消退后信号失效",
              "related_dims": ["catalyst_events", "P0-B 催化剂驱动"]},
             opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=1,
         )
 
     # ── 1d) 链上巨鲸异常卡（工单1：onchain_transfer_log 24h） ──
@@ -2500,7 +2522,6 @@ def score_opportunities(overview: dict) -> dict:
             invalid = "若 T+3 内出现同额反手转出，信号失效"
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2538,7 +2559,6 @@ def score_opportunities(overview: dict) -> dict:
             label = "dev 活跃骤降"
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2569,7 +2589,6 @@ def score_opportunities(overview: dict) -> dict:
         target = symbol if symbol not in ("", "-") else (proto or "?")
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2598,7 +2617,6 @@ def score_opportunities(overview: dict) -> dict:
         aid, symbol, uval, udate, ratio_mcap = ut
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2628,7 +2646,6 @@ def score_opportunities(overview: dict) -> dict:
         conv_label = "链上" if subtype else "信号"
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2662,7 +2679,6 @@ def score_opportunities(overview: dict) -> dict:
         conf, direction = _resolve_confidence(risk_sources, t)
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2694,7 +2710,6 @@ def score_opportunities(overview: dict) -> dict:
             trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(row.get("narrative"), mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2716,7 +2731,6 @@ def score_opportunities(overview: dict) -> dict:
             continue
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(f"{row.get('chain')} 链", mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2734,7 +2748,6 @@ def score_opportunities(overview: dict) -> dict:
         interp = ndx_sig.get("interpretation", "宏观脱钩")
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
-            cycle_phase=cycle_phase,
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
@@ -2754,7 +2767,6 @@ def score_opportunities(overview: dict) -> dict:
                 continue
             conviction = _compute_conviction_score(
                 mvrv_pct=_mvrv_pct_for(p.get("name"), mvrv_map),
-                cycle_phase=cycle_phase,
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
@@ -2788,25 +2800,29 @@ def score_opportunities(overview: dict) -> dict:
         _fg_val = ((_emo.get("components") or {}).get("fear_greed") or {}).get("value")
     if _fg_val is not None:
         if _fg_val <= _fear_max:
+            strength = max(70, min(95, 50 + 50 * ((_fear_max - _fg_val) / 50)))
             _push_opportunity(
                 {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
-                 "conviction_score": 70 + min(15, int(_fear_max - _fg_val)),
+                 "conviction_score": strength,
                  "signal_type": "fng_extreme",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≤ {_fear_max}：市场极度恐惧，历史级积累区",
                  "action_hint": "情绪极端悲观时分批建仓，止损设宽",
                  "invalidation": "恐贪回升 >40 或 BTC 破位下行",
                  "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
-                opportunities, excluded, t)
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=2)
         elif _fg_val >= _greed_min:
+            strength = max(70, min(95, 50 + 50 * ((_fg_val - 50) / 50)))
             _push_opportunity(
                 {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
-                 "conviction_score": 70 + min(15, int(_fg_val - _greed_min)),
+                 "conviction_score": strength,
                  "signal_type": "fng_extreme",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≥ {_greed_min}：市场极度贪婪，防回撤",
                  "action_hint": "减仓/对冲，警惕顶部",
                  "invalidation": "恐贪回落 <65 或 BTC 突破新高放量",
                  "related_dims": ["emotion_subscore", "3情绪"], "involved_symbols": ["BTC"]},
-                opportunities, excluded, t)
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=2)
 
     # B. 杠杆极值
     _funding_sig = by_sig.get("price_funding") or {}
@@ -2815,28 +2831,36 @@ def score_opportunities(overview: dict) -> dict:
         _fm = _funding_sig.get("metrics") or {}
         _fl = _fm.get("funding_latest") or 0
         _lev_dir = "short" if _fl > 0 else "long"
+        lev_base = int(t.get("leverage_strength_base", 70))
+        lev_k = float(t.get("leverage_strength_k", 20000))
+        strength = max(70, min(95, lev_base + min(20, int(abs(_fl) * lev_k))))
         _push_opportunity(
             {"target": "衍生品杠杆极值", "direction": _lev_dir, "confidence": "high",
-             "conviction_score": 72,
+             "conviction_score": strength,
              "signal_type": "leverage_extreme",
              "trigger_logic": f"funding {_fl*100:.3f}%/期 极端 + 价滞涨：{'多头拥挤挤仓风险' if _lev_dir=='short' else '空头拥挤逼空风险'}",
              "action_hint": "警惕杠杆踩踏，降低合约敞口" if _lev_dir == "short" else "关注逼空反弹窗口",
              "invalidation": "funding 回归正常区间 或 价格放量突破",
              "related_dims": ["derivatives", "price_funding"], "involved_symbols": ["BTC"]},
-            opportunities, excluded, t)
+            opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=2)
 
     # C. 稳定币大幅净流入
     _sc_min = t.get("stablecoin_inflow_min", 5_000_000_000)
     if stable_7d is not None and stable_7d >= _sc_min:
+        sc_base = int(t.get("stablecoin_strength_base", 58))
+        sc_per_1b = float(t.get("stablecoin_strength_per_1b", 3))
+        strength = max(58, min(92, sc_base + int((stable_7d / 1e9 - 5) * sc_per_1b)))
         _push_opportunity(
             {"target": "稳定币大幅净流入", "direction": "long", "confidence": "medium",
-             "conviction_score": 66,
+             "conviction_score": strength,
              "signal_type": "stablecoin_inflow",
              "trigger_logic": f"稳定币 7d 净流 ${stable_7d/1e9:.1f}B ≥ 阈值：场外弹药积累，潜在买盘",
              "action_hint": "关注 BTC/大盘承接与突破",
              "invalidation": "净流转负 或 BTC 放量下跌",
              "related_dims": ["stablecoin_flow"], "involved_symbols": ["BTC"]},
-            opportunities, excluded, t)
+            opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=2)
 
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)

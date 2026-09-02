@@ -79,6 +79,19 @@ opportunity_rules:
   # P0-B 催化剂因子
   catalyst_window_days: 14             # 催化剂回溯窗口（天）
   catalyst_min_score: 50               # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值
+  # FEAT-HIGHLIGHT-003 第三刀：评分重构
+  conviction_resonance_step: 6        # 每多 1 个独立确认源 +6 分
+  conviction_resonance_cap: 18        # 共振加分上限
+  mvrv_deep_strength_base: 60
+  mvrv_deep_strength_per_pct: 2.0     # 每低 1 个百分位 +2
+  mvrv_deep_strength_per_coin: 3
+  mvrv_deep_strength_cap: 12          # 广度加分上限
+  fng_strength_base: 50
+  fng_strength_span: 50               # 距中性 50 越远分越高
+  leverage_strength_base: 70
+  leverage_strength_k: 20000          # |funding| 放大系数
+  stablecoin_strength_base: 58
+  stablecoin_strength_per_1b: 3       # 每超 50 亿刀 1B +3
   catalyst_top_n: 5                    # 催化剂机会最多取前 N（去重后）
   # ── 高亮信号板块接入（2026-09-01 工单集合） ──
   # 工单1: 链上巨鲸异常

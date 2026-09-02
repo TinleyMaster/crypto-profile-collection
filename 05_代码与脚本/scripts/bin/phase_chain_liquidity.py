@@ -38,7 +38,7 @@ INSERT INTO biz.asset_liquidity (
     %(cex_listed)s, %(cex_exchanges)s, %(source)s, %(source_status)s,
     %(raw_json)s::jsonb, NOW()
 )
-ON CONFLICT (asset_id) DO UPDATE SET
+ON CONFLICT (asset_id, chain) DO UPDATE SET
     chain = EXCLUDED.chain,
     pool_count = EXCLUDED.pool_count,
     total_liquidity_usd = EXCLUDED.total_liquidity_usd,

@@ -147,8 +147,8 @@ def _insert_task(task: dict) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO sys.task (task_id, name, status, cmd, started_at, ended_at, stats, error)
-                VALUES (%s, %s, %s, %s::text[], %s, %s, %s::jsonb, %s)
+                INSERT INTO sys.task (task_id, name, status, cmd, started_at, ended_at, stats, error, category)
+                VALUES (%s, %s, %s, %s::text[], %s, %s, %s::jsonb, %s, %s)
                 """,
                 (
                     task["task_id"],
@@ -159,6 +159,7 @@ def _insert_task(task: dict) -> None:
                     _to_ts(task.get("ended_at")),
                     json.dumps(task.get("stats") or {}),
                     task.get("error"),
+                    task.get("category", "core"),
                 ),
             )
 
@@ -278,6 +279,13 @@ def _save_state(state: dict) -> None:
                 _update_task(task_id, **changed)
 
 
+# ── 类别并发配置 ──────────────────────────────────────────────
+# chain: 链上重任务（易卡死/耗时数小时），限1槽防垄断
+# core:  核心业务（催化剂/早报/采集），保底可用
+# monitor: 监控类（低优先级，仅空闲时跑）
+CATEGORY_MAX = {"chain": 1, "core": 2, "monitor": 1}
+
+
 # ── TaskManager ─────────────────────────────────────────────
 
 class TaskManager:
@@ -290,7 +298,7 @@ class TaskManager:
 
     # ── 公共 API ──
 
-    def submit_task(self, name: str, cmd: list[str]) -> str:
+    def submit_task(self, name: str, cmd: list[str], category: str = "core") -> str:
         task_id = uuid.uuid4().hex[:12]
         now = time.time()
         task = {
@@ -302,6 +310,7 @@ class TaskManager:
             "ended_at": None,
             "stats": {},
             "error": None,
+            "category": category,
         }
         _insert_task(task)
         # 提交后立刻写一条启动日志，确认任务注册成功
@@ -309,7 +318,7 @@ class TaskManager:
         _append_log(task_id, f"[TASK] CMD: {' '.join(cmd)}")
         return task_id
 
-    def submit_func_task(self, name: str, func) -> str:
+    def submit_func_task(self, name: str, func, category: str = "core") -> str:
         """提交一个 Python 可调用任务（后台线程执行 + 实时日志流），返回 task_id。
 
         func 签名为 func(log) -> dict：
@@ -327,6 +336,7 @@ class TaskManager:
             "ended_at": None,
             "stats": {},
             "error": None,
+            "category": category,
         }
         _insert_task(task)
         _append_log(task_id, f"[TASK] 任务已提交: {name}")
@@ -456,30 +466,41 @@ class TaskManager:
 
                 with _get_db() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT COUNT(*) FROM sys.task WHERE status = 'running'")
-                        running = cur.fetchone()[0]
-                        if running < self._max_concurrent:
-                            # 让槽逻辑：监控类任务（name 含 monitor）设为低优先级。
-                            # 只要队列中还有非监控任务在等待，监控任务就排到末尾、主动让槽；
-                            # 只有当没有非监控 pending 时，监控任务才会占用空闲的执行槽。
+                        # 按类别统计 running 数
+                        cur.execute(
+                            """
+                            SELECT category, COUNT(*) FROM sys.task
+                            WHERE status = 'running' GROUP BY category
+                            """
+                        )
+                        running_by_cat = {row[0]: row[1] for row in cur.fetchall()}
+                        total_running = sum(running_by_cat.values())
+
+                        if total_running < self._max_concurrent:
+                            # 优先取非 monitor 任务（与旧行为兼容）
                             cur.execute(
                                 """
-                                SELECT task_id FROM sys.task
+                                SELECT task_id, category FROM sys.task
                                 WHERE status = 'pending'
                                 ORDER BY
                                     (CASE WHEN name ILIKE '%monitor%' THEN 1 ELSE 0 END),
                                     started_at ASC
-                                LIMIT 1
+                                LIMIT 5
                                 FOR UPDATE SKIP LOCKED
                                 """
                             )
-                            row = cur.fetchone()
-                            if row:
-                                task_id = row[0]
-                                cur.execute(
-                                    "UPDATE sys.task SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE task_id = %s",
-                                    (task_id,),
-                                )
+                            candidates = cur.fetchall()
+                            # 从候选中选一个 category 未满的
+                            for row in candidates:
+                                cid, cat = row[0], row[1]
+                                cat_max = CATEGORY_MAX.get(cat, 2)
+                                if running_by_cat.get(cat, 0) < cat_max:
+                                    task_id = cid
+                                    cur.execute(
+                                        "UPDATE sys.task SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE task_id = %s",
+                                        (cid,),
+                                    )
+                                    break
             except Exception as e:
                 print(f"[TaskManager] runner_loop error: {e}", file=sys.stderr)
                 time.sleep(5)

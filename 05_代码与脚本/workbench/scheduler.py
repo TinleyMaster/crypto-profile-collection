@@ -60,78 +60,79 @@ import uuid  # noqa: E402
 
 TZ = os.getenv("SCHEDULER_TIMEZONE", "Asia/Shanghai")
 
-# 调度表：(key, cron, script, args, 说明)
+# 调度表：(key, cron, script, args, 说明, category)
 # cron 为 5 段式（分 时 日 月 周）。
-SCHEDULE: list[tuple[str, str, str, list[str], str]] = [
+# category: core(默认) / chain(链上重任务) / monitor(监控)
+SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ 数据源流水线 ═══
-    ("cmc_pipeline", "0 3 * * *", "run_cmc_pipeline.py", [], "CMC 一键流水线（每日）"),
-    ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）"),
-    ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）"),
+    ("cmc_pipeline", "0 3 * * *", "run_cmc_pipeline.py", [], "CMC 一键流水线（每日）", "core"),
+    ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）", "core"),
+    ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）", "core"),
 
     # ═══ 链上快照（隔日运行，持仓分布属周级缓慢变化）═══
     # P2-1: 隔日运行以减少 RPC 调用
-    ("chain_holder_snapshot_bsc", "30 5 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五）"),
-    ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）"),
-    ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）"),
-    ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）"),
+    ("chain_holder_snapshot_bsc", "30 5 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五）", "chain"),
+    ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）", "chain"),
+    ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）", "chain"),
+    ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）", "chain"),
 
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],
-     "每日数据同步/矫正总调度（赛道→去重→文档入口→第三方→supply对齐→diff→链接重标→解锁→KOL回测）"),
+     "每日数据同步/矫正总调度（赛道→去重→文档入口→第三方→supply对齐→diff→链接重标→解锁→KOL回测）", "core"),
 
     # ═══ 每周专项 ═══
-    ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）"),
+    ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）", "core"),
 
     # ═══ 投研数据提取 ═══
     # P1-1: CMC 行情快照降频为每日（长尾币不需要每6h刷新，主流币行情由 ETL 处理）
-    ("cmc_quote_snapshot", "0 2 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每日凌晨，覆盖全部 CMC 映射资产）"),
-    ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）"),
-    ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）"),
+    ("cmc_quote_snapshot", "0 2 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每日凌晨，覆盖全部 CMC 映射资产）", "core"),
+    ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）", "core"),
+    ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）", "core"),
     # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）
-    # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily"),
-    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币，跳过稳定币）"),
-    ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）"),
-    ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）"),
-    ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）"),
-    ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）"),
-    ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）"),
+    # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily", "core"),
+    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币，跳过稳定币）", "core"),
+    ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）", "core"),
+    ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）", "core"),
+    ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）", "core"),
+    ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）", "core"),
+    ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）", "core"),
 
     # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══
-    # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）"),
+    # ("notebooklm_curate_batch", "0 12 * * *", "curate_notebooklm.py", ["--batch", "20"], "NotebookLM 精选批量（每日 20 个资产，需 LLM）", "core"),
 
     # ═══ 文档深度爬取 ═══
     # P1-3: B2 深度文档发现降频为每日（非实时需求）
-    ("b2_auto_loop", "0 3 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每日凌晨 3 点，非实时）"),
-    ("spa_browser_crawl_auto", "0 9 * * *", "phase_b2_spa_browser_crawl_auto.py", [], "B3 SPA 无头浏览器爬取"),
-    ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）"),
+    ("b2_auto_loop", "0 3 * * *", "phase_b2_auto_loop.py", [], "B2 深度文档发现（每日凌晨 3 点，非实时）", "core"),
+    ("spa_browser_crawl_auto", "0 9 * * *", "phase_b2_spa_browser_crawl_auto.py", [], "B3 SPA 无头浏览器爬取", "core"),
+    ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）", "core"),
 
     # ═══ 监控告警 ═══
-    ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）"),
-    ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）"),
-    ("binance_bapi_health", "*/30 * * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每30分钟）"),
+    ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
+    ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
+    ("binance_bapi_health", "*/30 * * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每30分钟）", "monitor"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
-    # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）"),
-    ("collect_exchange_wallets", "30 3 * * 1", "collect_exchange_wallets.py", ["--chains", "eth,bsc", "--sources", "community,ethplorer", "--apply"], "CEX 地址分级收集-社区源+快照标签（每周一，社区库更新慢）"),
+    # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
+    ("collect_exchange_wallets", "30 3 * * 1", "collect_exchange_wallets.py", ["--chains", "eth,bsc", "--sources", "community,ethplorer", "--apply"], "CEX 地址分级收集-社区源+快照标签（每周一，社区库更新慢）", "core"),
 
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
-    # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底"),
+    # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底", "core"),
 
     # ═══ 催化剂模块（全链路合并任务）═══
     # P1-2: 催化剂降频为每12h（DeepSeek 额度有限）
-    ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）"),
+    ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
 
     # ═══ 大盘早报邮件 ═══
-    ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）"),
+    ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),
 
     # ═══ CM / OBM 链上指标定时调度 ═══
     # OBM 数据源为日更（周一三五会系统性滞后），改为每日；CM MVRV 为实时估值信号，保持每日 T-1 增量。
-    ("cm_obm_download", "0 4 * * *", "download_obm_data.py", ["--out", "/app/data_external/obm"], "OBM 从 GitHub 下载数据（每日 04:00，上游日更）"),
-    ("cm_obm_ingest", "30 4 * * *", "ingest_obm_btc_daily.py", [], "OBM BTC 链上指标入库（每日 04:30，含新鲜度告警）"),
-    ("cm_incremental", "30 6 * * *", "backfill_cm_onchain.py", ["--incremental"], "CM 链上指标 T-1 增量拉取（每日 06:30）"),
-    ("cm_validate_onchain", "0 7 * * *", "validate_cm_onchain.py", [], "CM 链上指标入库验证（每日 07:00）"),
+    ("cm_obm_download", "0 4 * * *", "download_obm_data.py", ["--out", "/app/data_external/obm"], "OBM 从 GitHub 下载数据（每日 04:00，上游日更）", "core"),
+    ("cm_obm_ingest", "30 4 * * *", "ingest_obm_btc_daily.py", [], "OBM BTC 链上指标入库（每日 04:30，含新鲜度告警）", "core"),
+    ("cm_incremental", "30 6 * * *", "backfill_cm_onchain.py", ["--incremental"], "CM 链上指标 T-1 增量拉取（每日 06:30）", "core"),
+    ("cm_validate_onchain", "0 7 * * *", "validate_cm_onchain.py", [], "CM 链上指标入库验证（每日 07:00）", "core"),
 
     # ═══ 每日早报（P1-4 第二刀：快照落库 + 趋势 diff，早于邮件发送）═══
-    ("daily_brief_snapshot", "30 8 * * *", "build_daily_brief.py", [], "每日早报快照落库+趋势diff（Asia/Shanghai 08:30）"),
+    ("daily_brief_snapshot", "30 8 * * *", "build_daily_brief.py", [], "每日早报快照落库+趋势diff（Asia/Shanghai 08:30）", "core"),
 ]
 
 
@@ -161,7 +162,7 @@ def _has_active_task(name_prefix: str) -> bool:
         return False  # 出错时放行，避免调度器彻底停摆
 
 
-def submit_scheduled_task(key: str, script: str, args: list[str], desc: str) -> str | None:
+def submit_scheduled_task(key: str, script: str, args: list[str], desc: str, category: str = "core") -> str | None:
     """提交一个调度任务到 TaskManager 队列。返回 task_id 或 None（被去重跳过）。"""
     name = f"[调度] {key} - {desc}"
 
@@ -183,6 +184,7 @@ def submit_scheduled_task(key: str, script: str, args: list[str], desc: str) -> 
         "ended_at": None,
         "stats": {"scheduler_key": key},
         "error": None,
+        "category": category,
     }
     try:
         _insert_task(task)
@@ -235,10 +237,10 @@ def _send_alert_email(subject: str, body_text: str) -> bool:
         return False
 
 
-def _scheduler_job(key: str, script: str, args: list[str], desc: str) -> None:
+def _scheduler_job(key: str, script: str, args: list[str], desc: str, category: str = "core") -> None:
     """APScheduler 回调：提交任务 + 异步等待完成 + 失败发邮件。"""
     try:
-        task_id = submit_scheduled_task(key, script, args, desc)
+        task_id = submit_scheduled_task(key, script, args, desc, category=category)
     except Exception as e:
         print(f"[调度] 提交任务异常 {key}: {e}", file=sys.stderr)
         return
@@ -293,16 +295,16 @@ def main() -> int:
     if args.list:
         print(f"{'key':<32} {'cron':<18} {'script':<48} 说明")
         print("-" * 120)
-        for key, cron, script, _a, desc in SCHEDULE:
+        for key, cron, script, _a, desc, _cat in SCHEDULE:
             print(f"{key:<32} {cron:<18} {script:<48} {desc}")
         print(f"\n状态文件: {STATE_FILE}")
         print(f"日志目录: {LOG_DIR}")
         return 0
 
     if args.run_once:
-        for key, _cron, script, a, desc in SCHEDULE:
+        for key, _cron, script, a, desc, cat in SCHEDULE:
             if key == args.run_once:
-                task_id = submit_scheduled_task(key, script, a, desc)
+                task_id = submit_scheduled_task(key, script, a, desc, category=cat)
                 if task_id:
                     print(f"已提交: task_id={task_id}")
                 return 0
@@ -317,14 +319,14 @@ def main() -> int:
     enabled = [x.strip() for x in os.getenv("SCHEDULER_ENABLED", "").split(",") if x.strip()]
 
     scheduler = BlockingScheduler(timezone=tz)
-    for key, cron, script, a, desc in SCHEDULE:
+    for key, cron, script, a, desc, cat in SCHEDULE:
         if enabled and key not in enabled:
             print(f"[调度] 跳过（未启用） {key}")
             continue
         scheduler.add_job(
             _scheduler_job,
             CronTrigger.from_crontab(cron, timezone=tz),
-            args=[key, script, a, desc],
+            args=[key, script, a, desc, cat],
             id=key,
             name=desc,
             max_instances=1,

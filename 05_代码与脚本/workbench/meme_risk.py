@@ -115,6 +115,44 @@ def score_liquidity(data: dict, thresholds: dict) -> tuple[float | None, str, li
     return min(100, score), _label(score, thresholds), flags
 
 
+def estimate_from_transfers(asset_id: int, conn) -> list[dict]:
+    """从 biz.onchain_transfer_log 聚合近 30d 活跃度，按链返回 high/mid/low 定性。
+
+    返回 [{"chain", "activity_level", "tx_n", "active_addrs", "cex_in_ratio"}, ...]
+    无数据返回 []。
+    """
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=30)
+    sql = """
+        SELECT chain,
+               COUNT(*)                                              AS tx_n,
+               COUNT(DISTINCT from_address) + COUNT(DISTINCT to_address) AS active_addrs,
+               AVG(is_to_exchange::int)                              AS cex_in_ratio
+        FROM biz.onchain_transfer_log
+        WHERE asset_id = %s AND block_timestamp >= %s
+        GROUP BY chain
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (asset_id, cutoff))
+        rows = cur.fetchall()
+    out = []
+    for chain, tx_n, active_addrs, cex_in_ratio in rows:
+        if tx_n >= 500:
+            level = "high"
+        elif tx_n >= 100:
+            level = "mid"
+        else:
+            level = "low"
+        out.append({
+            "chain": chain,
+            "activity_level": level,
+            "tx_n": tx_n,
+            "active_addrs": active_addrs,
+            "cex_in_ratio": float(cex_in_ratio or 0),
+        })
+    return out
+
+
 def score_holder(data: dict, thresholds: dict) -> tuple[float | None, str, list[str]]:
     """筹码集中度轴: whale_balance_change_7d_pct + holder_change_7d。"""
     flags: list[str] = []
@@ -255,13 +293,19 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
             row = cur.fetchone()
         if row:
             data.update(dict(row))
-        else:
-            # 精确快照无数据 → 尝试 transfer-log 定性兜底
-            qual = estimate_from_transfers(asset_id, conn)
-            if qual:
-                data["qualitative_activity"] = qual
     except Exception:
         conn.rollback()
+
+    # 定性兜底：精确快照无数据时用 transfer-log 活跃度
+    if "whale_balance_change_7d_pct" not in data and "holder_change_7d" not in data:
+        try:
+            qual_list = estimate_from_transfers(asset_id, conn)
+            if qual_list:
+                # 取活跃度最高的链作为代表
+                best = max(qual_list, key=lambda x: {"high": 3, "mid": 2, "low": 1}.get(x["activity_level"], 0))
+                data["qualitative_activity"] = best
+        except Exception:
+            pass  # 兜底失败不阻断主流程
 
     # lifecycle 轴
     try:

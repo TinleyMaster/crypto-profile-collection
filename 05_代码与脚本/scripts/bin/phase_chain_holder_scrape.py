@@ -55,9 +55,7 @@ BLOCKSCOUT_BASE = {
     "base": "https://base.blockscout.com",
     "arb": "https://arbitrum.blockscout.com",
     "polygon": "https://polygon.blockscout.com",
-    "avalanche": "https://avalanche.blockscout.com",
     "optimism": "https://optimism.blockscout.com",
-    "fantom": "https://ftm.blockscout.com",
 }
 
 # 链名别名：数据库用完整名（ethereum/arbitrum/avalanche），脚本用简称

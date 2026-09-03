@@ -176,14 +176,19 @@ def compute_lifecycle(asset_id: int, conn) -> dict:
             row = cur.fetchone()
         if row:
             asset["holder_change_30d"] = row[0]
-        else:
-            # 精确快照无数据 → 尝试 transfer-log 定性兜底
-            from meme_risk import estimate_from_transfers
-            qual = estimate_from_transfers(asset_id, conn)
-            if qual:
-                asset["qualitative_activity"] = qual
     except Exception:
         conn.rollback()
+
+    # 定性兜底：精确快照无数据时用 transfer-log 活跃度
+    if "holder_change_30d" not in asset:
+        try:
+            from meme_risk import estimate_from_transfers
+            qual_list = estimate_from_transfers(asset_id, conn)
+            if qual_list:
+                best = max(qual_list, key=lambda x: {"high": 3, "mid": 2, "low": 1}.get(x["activity_level"], 0))
+                asset["qualitative_activity"] = best
+        except Exception:
+            pass  # 兜底失败不阻断主流程
 
     # 判定
     stage, detail = classify_stage(asset, rules)

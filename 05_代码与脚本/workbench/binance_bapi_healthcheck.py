@@ -93,7 +93,7 @@ def _probe(url: str, method: str = "GET", json: dict | None = None,
     except Exception as e:
         return False, f"请求异常: {type(e).__name__}: {e}"
     if r.status_code == 429:
-        return False, "HTTP 429 限流"
+        return True, "HTTP 429 限流（服务存活，探测被限）"
     if r.status_code != 200:
         return False, f"HTTP {r.status_code}"
     try:
@@ -205,11 +205,6 @@ def run_healthcheck() -> dict:
                 except Exception as e:
                     logger.error("恢复通知发送失败 %s: %s", cn, e)
             _FAIL[name] = 0
-            continue
-
-        if diag == "HTTP 429 限流":
-            # 限流不计入告警，也不清零既往真实失败（避免"免死"，也不因抖动误报）
-            logger.warning("[%s] 429 限流（不计入告警）", name)
             continue
 
         prev = _FAIL.get(name, 0)

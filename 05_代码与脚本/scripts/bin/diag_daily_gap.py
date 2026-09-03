@@ -98,10 +98,10 @@ def diagnose_gap(target_dates: list[date]) -> dict:
 
             # 5. 检查 ingest_run 中 cmc_listings_latest 的记录
             cur.execute("""
-                SELECT run_id, source_code, workflow_name, status, 
-                       http_status, row_count, error_message, started_at, finished_at
+                SELECT run_id, platform_code, workflow_name, status,
+                       row_count, error_message, started_at, finished_at
                 FROM sys.ingest_run
-                WHERE source_code = 'cmc'
+                WHERE platform_code = 'cmc'
                   AND workflow_name = 'WF_CMC_QUOTE_SNAPSHOT'
                   AND started_at >= NOW() - INTERVAL '30 days'
                 ORDER BY started_at DESC
@@ -111,12 +111,12 @@ def diagnose_gap(target_dates: list[date]) -> dict:
             for row in cur.fetchall():
                 ingest_runs.append({
                     "run_id": row[0],
+                    "platform": row[1],
                     "status": row[3],
-                    "http_status": row[4],
-                    "row_count": row[5],
-                    "error": row[6][:200] if row[6] else None,
-                    "started_at": str(row[7]) if row[7] else None,
-                    "finished_at": str(row[8]) if row[8] else None,
+                    "row_count": row[4],
+                    "error": row[5][:200] if row[5] else None,
+                    "started_at": str(row[6]) if row[6] else None,
+                    "finished_at": str(row[7]) if row[7] else None,
                 })
 
             # 6. 检查 ETL 相关任务

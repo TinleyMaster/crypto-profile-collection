@@ -140,13 +140,7 @@ def main() -> int:
                 processed += 1
                 continue
 
-            # 占位符 − dict keys 核对（新铁律）
-            missing = UPSERT_KEYS - set(result.keys())
-            if missing:
-                print(f"  ERROR: 缺失占位符 {missing}", file=sys.stderr)
-                continue
-
-            # detail 序列化
+            # detail 序列化（phase 负责补的键，必须在缺失核对前补齐）
             result["detail"] = json.dumps({
                 "contract": {"score": result["contract_score"], "flags": []},
                 "liquidity": {"score": result["liquidity_score"], "flags": []},
@@ -154,6 +148,12 @@ def main() -> int:
                 "lifecycle": {"score": result["lifecycle_score"], "flags": []},
                 "social": {"score": result["social_score"], "flags": []},
             }, ensure_ascii=False)
+
+            # 占位符 − dict keys 核对（新铁律）：补完 phase 键后再核，避免误杀
+            missing = UPSERT_KEYS - set(result.keys())
+            if missing:
+                print(f"  ERROR: 缺失占位符 {missing}", file=sys.stderr)
+                continue
 
             with conn.cursor() as cur:
                 cur.execute(UPSERT_SQL, result)

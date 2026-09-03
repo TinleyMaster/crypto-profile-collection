@@ -450,7 +450,7 @@ def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
     parser.add_argument("--chain", type=str, default=None, help="指定链（eth/bsc/solana/polygon/arbitrum/base/optimism/avalanche/tron/ton/sui/aptos）")
-    parser.add_argument("--limit", type=int, default=50, help="单轮最大处理资产数")
+    parser.add_argument("--limit", type=int, default=0, help="单轮最大处理资产数 (0=不限量)")
     parser.add_argument("--offset", type=int, default=0, help="资产列表起始偏移（自动循环分批扫描用）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
     parser.add_argument("--alarm-only", action="store_true", help="告警模式：只存储转入交易所的大额转账")

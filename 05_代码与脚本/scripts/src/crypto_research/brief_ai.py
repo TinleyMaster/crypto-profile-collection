@@ -73,6 +73,21 @@ def build_brief_context(brief: dict) -> str:
     else:
         parts.append("[M4 机会] 无高置信机会")
 
+    # M4 共振榜
+    m4r = brief.get("M4_resonance") or {}
+    if isinstance(m4r, dict):
+        r_signals = m4r.get("signals") or []
+        if r_signals:
+            r_lines = []
+            for s in r_signals[:5]:
+                r_lines.append(
+                    f"  {s.get('symbol','?')} {s.get('direction','?')} "
+                    f"conviction={s.get('conviction_score','?')} "
+                    f"consensus={s.get('consensus_score','?')} "
+                    f"sources={s.get('source_count','?')}"
+                )
+            parts.append("[M4 共振榜]\n" + "\n".join(r_lines))
+
     # M5 催化剂（event_calendar dict: hardcoded, gecko）
     m5 = brief.get("M5_catalyst") or {}
     if isinstance(m5, dict):

@@ -148,6 +148,41 @@ def render_brief_html(brief: dict) -> str:
             </div>""")
         html_parts.append("</div>")
 
+    # ── 共振榜（M4_resonance）──
+    resonance = brief.get("M4_resonance") or {}
+    resonance_signals = resonance.get("signals") if isinstance(resonance, dict) else None
+    if resonance_signals:
+        html_parts.append('<div style="margin-bottom:16px"><b>🎯 共振榜（共识动量 ∩ 宏观 conviction）</b>')
+        for sig in resonance_signals[:5]:
+            sym = sig.get("symbol", "?")
+            direction = sig.get("direction", "?")
+            conv_score = sig.get("conviction_score", "?")
+            cons_score = sig.get("consensus_score", "?")
+            source_count = sig.get("source_count", "?")
+            trigger = sig.get("trigger_logic", "")
+            action = sig.get("action_hint", "")
+
+            if direction == "long":
+                color = "#dc2626"
+                icon = "↗"
+            elif direction == "short":
+                color = "#16a34a"
+                icon = "↘"
+            else:
+                color = "#64748b"
+                icon = "→"
+
+            html_parts.append(f"""
+            <div style="padding:10px;margin:6px 0;border-radius:4px;border-left:4px solid #7c3aed;background:#faf5ff">
+              <b>{sym}</b> <span style="color:{color}">{icon} {direction}</span>
+              <span style="float:right;color:#64748b">Conviction {conv_score} · 共识 {cons_score} · {source_count}源</span>
+              <div style="color:#475569;font-size:13px;margin-top:4px">{trigger}</div>
+              {'<div style="color:#7c3aed;font-size:12px;margin-top:4px">💡 ' + action + '</div>' if action else ''}
+            </div>""")
+        html_parts.append("</div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>🎯 共振榜</b> <span style="color:#64748b">暂无共识动量与宏观 conviction 共振标的</span></div>')
+
     # ── AI 解读（如果有） ──
     ai_narrative = brief.get("ai_narrative")
     if ai_narrative:

@@ -81,6 +81,48 @@ def render_brief_html(brief: dict) -> str:
             # dict 等其他类型跳过
         html_parts.append("</ul></div>")
 
+    # ── 宏观背离（M3）──
+    divs = brief.get("M3_divergence") or []
+    if divs:
+        html_parts.append('<div style="margin-bottom:16px"><b>📡 宏观背离</b><ul style="margin:4px 0;padding-left:20px">')
+        for d in divs:
+            sig_name = d.get("signal", "?")
+            label = d.get("label", "?")
+            interp = d.get("interpretation", "")
+            metrics = d.get("metrics") or {}
+            metrics_str = " · ".join(f"{k}={v}" for k, v in metrics.items()) if metrics else ""
+            color = "#dc2626" if label == "DANGEROUS" else "#f59e0b" if label == "DIVERGENT" else "#64748b"
+            icon = "🔴" if label == "DANGEROUS" else "🟡"
+            html_parts.append(
+                f'<li>{icon} <b style="color:{color}">{label}</b> '
+                f'({sig_name}) {interp}'
+                f'{f""" <span style="color:#64748b;font-size:12px">{metrics_str}</span>""" if metrics_str else ""}</li>'
+            )
+        html_parts.append("</ul></div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>📡 宏观背离</b> <span style="color:#64748b">暂无异常信号</span></div>')
+
+    # ── 催化剂日历（M5）──
+    catalyst = brief.get("M5_catalyst") or {}
+    events = catalyst.get("hardcoded") or []
+    if events:
+        today_date = date.today().isoformat()
+        html_parts.append('<div style="margin-bottom:16px"><b>📅 催化剂日历</b><ul style="margin:4px 0;padding-left:20px">')
+        for ev in events[:6]:  # 最多展示 6 条
+            ev_date = ev.get("date", "")
+            ev_name = ev.get("event", "?")
+            ev_type = ev.get("type", "macro")
+            # 标注距离今天天数
+            try:
+                days_until = (date.fromisoformat(ev_date) - date.today()).days
+                days_str = f"（{days_until}天后）" if days_until > 0 else f"（今天）" if days_until == 0 else f"（已过）"
+            except Exception:
+                days_str = ""
+            html_parts.append(f'<li><b>{ev_date}</b> {ev_name} {days_str}</li>')
+        html_parts.append("</ul></div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>📅 催化剂日历</b> <span style="color:#64748b">暂无近期事件</span></div>')
+
     # ── 机会清单 ──
     if opportunities:
         html_parts.append('<div style="margin-bottom:16px"><b>🎯 机会清单</b>')

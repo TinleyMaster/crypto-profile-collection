@@ -2070,7 +2070,7 @@
                 const label = stanceMap[d.thesis.stance] || '中性';
                 stanceEl.textContent = label;
                 stanceEl.className = 'op-stance ' + (d.thesis.stance || 'neutral');
-                thesisEl.textContent = (convMap[d.thesis.conviction] || '') + ' · AI 投研结论';
+                thesisEl.textContent = convMap[d.thesis.conviction] || 'AI 已研判';
             } else {
                 stanceEl.textContent = '待生成';
                 stanceEl.className = 'op-stance neutral';

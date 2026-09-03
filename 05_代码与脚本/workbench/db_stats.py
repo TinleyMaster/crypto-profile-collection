@@ -5284,15 +5284,15 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
                 )
             """)
 
-            # 取过去 N 天的 Top N 推荐
+            # 取过去 N 天的全量推荐（不截断 rank）
+            # 修复：消除 rank <= top_n 截断，获取全量推荐以避免样本偏置
             cur.execute("""
                 SELECT rec_date, rank, symbol, name, chain, contract, sector,
                        source_count, composite_score, price_usd, market_cap_usd
                 FROM biz.daily_recommendation
                 WHERE rec_date >= CURRENT_DATE - %s * INTERVAL '1 day'
-                  AND rank <= %s
                 ORDER BY rec_date DESC, rank ASC
-            """, (days, top_n))
+            """, (days,))
             recs = [dict(r) for r in cur.fetchall()]
 
             if not recs:
@@ -5409,6 +5409,58 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
                     key = (r["symbol_upper"], "")
                     if r["current_price"] and key not in price_map:
                         price_map[key] = float(r["current_price"])
+
+            # 第三步：补充价格匹配 - 从 biz.asset_market_daily 获取当前价格
+            # 对于 price_map 中未匹配到的推荐，尝试从 asset_market_daily 获取最新价格
+            unmatched_symbols = []
+            for r in recs:
+                key = (r["symbol"].upper(), (r["chain"] or "").lower())
+                if key not in price_map and r.get("price_usd") and float(r["price_usd"]) > 0:
+                    unmatched_symbols.append(r["symbol"].upper())
+
+            if unmatched_symbols:
+                unique_symbols = list(set(unmatched_symbols))
+                placeholders = ",".join(["%s"] * len(unique_symbols))
+                cur.execute(f"""
+                    WITH ranked_prices AS (
+                        SELECT 
+                            a.canonical_symbol,
+                            amd.price_usd,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY a.canonical_symbol 
+                                ORDER BY amd.market_date DESC
+                            ) AS rn
+                        FROM biz.asset_market_daily amd
+                        JOIN core.asset a ON a.asset_id = amd.asset_id
+                        WHERE UPPER(a.canonical_symbol) IN ({placeholders})
+                          AND amd.price_usd IS NOT NULL
+                          AND amd.price_usd > 0
+                    )
+                    SELECT canonical_symbol, price_usd
+                    FROM ranked_prices
+                    WHERE rn = 1
+                """, unique_symbols)
+
+                for r in cur.fetchall():
+                    symbol_upper = r["canonical_symbol"].upper()
+                    # 尝试匹配到对应的推荐记录
+                    for rec in recs:
+                        if rec["symbol"].upper() == symbol_upper:
+                            key = (symbol_upper, (rec["chain"] or "").lower())
+                            if key not in price_map:
+                                price_map[key] = float(r["price_usd"])
+
+            # 分层抽样：确保各评分层均衡覆盖
+            # 按 composite_score 分层：HIGH (≥70), MED (50-70), LOW (<50)
+            tier_buckets = {"HIGH": [], "MED": [], "LOW": []}
+            for r in recs:
+                score = float(r.get("composite_score") or 0)
+                if score >= 70:
+                    tier_buckets["HIGH"].append(r)
+                elif score >= 50:
+                    tier_buckets["MED"].append(r)
+                else:
+                    tier_buckets["LOW"].append(r)
 
             # 计算每个推荐的收益率
             results = []
@@ -5531,6 +5583,11 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
         "by_sector": by_sector,
         "best": best,
         "worst": worst,
+        "tier_coverage": {
+            "HIGH": len(tier_buckets.get("HIGH", [])),
+            "MED": len(tier_buckets.get("MED", [])),
+            "LOW": len(tier_buckets.get("LOW", [])),
+        },
     }
 
 

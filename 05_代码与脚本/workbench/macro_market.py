@@ -3301,18 +3301,49 @@ def score_opportunities(overview: dict) -> dict:
     highlight_max_total = int(t.get("highlight_max_total", 10))
     highlights = select_highlight_signals(opportunities, max_total=highlight_max_total)
 
+    # P1：为所有机会/excluded 解析 asset_id，供前端跳转 /research/<asset_id>
+    all_symbols: set[str] = set()
+    for o in opportunities + excluded:
+        all_symbols.update(_symbols_from_opportunity(o))
+    symbol_to_asset = _resolve_symbols_to_asset_ids(all_symbols)
+    for o in opportunities + excluded:
+        syms = _symbols_from_opportunity(o)
+        # 优先用 involved_symbols 中第一个能解析到的 asset_id
+        asset_id = None
+        involved = o.get("involved_symbols") or []
+        if isinstance(involved, list):
+            for s in involved:
+                if s and symbol_to_asset.get(str(s).upper().strip()):
+                    asset_id = symbol_to_asset[str(s).upper().strip()]
+                    break
+        # 否则用 target
+        if asset_id is None and o.get("target"):
+            asset_id = symbol_to_asset.get(str(o["target"]).upper().strip())
+        if asset_id is not None:
+            o["asset_id"] = asset_id
+
     status = "ok"
     if not opportunities:
         # 0 机会但上游数据齐全（平静日）= empty，非故障
         status = "empty" if not degraded else "partial"
     elif degraded:
         status = "partial"
+
+    # P1：检查观察列表告警（轻量，失败不影响主返回）
+    watch_alerts = {"ok": True, "alerts": [], "count": 0}
+    try:
+        from db_stats import check_opportunity_watchlist_alerts
+        watch_alerts = check_opportunity_watchlist_alerts(opportunities)
+    except Exception:
+        pass
+
     return {
         "status": status,
         "opportunities": opportunities,
         "highlight_signals": highlights,
         "excluded": excluded,
         "degraded": degraded,
+        "watchlist_alerts": watch_alerts,
     }
 
 
@@ -3336,61 +3367,134 @@ def _symbols_from_opportunity(opp: dict) -> set[str]:
     return set()
 
 
+def _resolve_symbols_to_asset_ids(symbols: set[str]) -> dict[str, int]:
+    """批量 symbol → asset_id 映射。返回 {symbol_upper: asset_id}。"""
+    if not symbols:
+        return {}
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                placeholders = ",".join(["%s"] * len(symbols))
+                cur.execute(f"""
+                    SELECT DISTINCT ON (UPPER(canonical_symbol))
+                           UPPER(canonical_symbol) AS symbol,
+                           asset_id
+                    FROM core.asset
+                    WHERE UPPER(canonical_symbol) IN ({placeholders})
+                      AND canonical_name NOT LIKE '%Bridged%'
+                      AND canonical_name NOT LIKE '%Wrapped%'
+                      AND canonical_name NOT LIKE '%Peg %'
+                    ORDER BY UPPER(canonical_symbol), asset_id
+                """, tuple(s.upper().strip() for s in symbols))
+                rows = cur.fetchall()
+        mapping = {r["symbol"]: int(r["asset_id"]) for r in rows if r.get("symbol") and r.get("asset_id") is not None}
+
+        # 对未命中的 symbol 回退（不排除桥接币）
+        unresolved = symbols - set(mapping.keys())
+        if unresolved:
+            with get_connection(settings.database_url) as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    placeholders = ",".join(["%s"] * len(unresolved))
+                    cur.execute(f"""
+                        SELECT DISTINCT ON (UPPER(canonical_symbol))
+                               UPPER(canonical_symbol) AS symbol,
+                               asset_id
+                        FROM core.asset
+                        WHERE UPPER(canonical_symbol) IN ({placeholders})
+                        ORDER BY UPPER(canonical_symbol), asset_id
+                    """, tuple(s.upper().strip() for s in unresolved))
+                    rows = cur.fetchall()
+            for r in rows:
+                if r.get("symbol") and r.get("asset_id") is not None:
+                    mapping[r["symbol"]] = int(r["asset_id"])
+        return mapping
+    except Exception:
+        return {}
+
+
+def _fetch_daily_recommendation_latest() -> dict[str, dict]:
+    """读取 biz.daily_recommendation 最新日全量推荐，返回 {symbol_upper: row_dict}。"""
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT rec_date, rank, symbol, name, chain, contract, sector,
+                           source_count, composite_score, change_24h, volume_24h,
+                           price_usd, market_cap_usd
+                    FROM biz.daily_recommendation
+                    WHERE rec_date = (SELECT MAX(rec_date) FROM biz.daily_recommendation)
+                    ORDER BY rank ASC
+                """)
+                rows = cur.fetchall()
+        result: dict[str, dict] = {}
+        for r in rows:
+            sym = str(r.get("symbol") or "").upper().strip()
+            if sym and sym not in result:
+                result[sym] = dict(r)
+        return result
+    except Exception:
+        return {}
+
+
 def build_resonance_signals(overview: dict) -> dict:
     """
-    共振榜：共识动量（多源交叉验证）与宏观 conviction（HIGH tier 机会）的交集。
+    共振榜：每日共识推荐（daily_recommendation）与宏观 conviction（HIGH/MED 机会）的交集。
 
-    定义：
-      - 共识动量 = cross_market 多源交叉验证中 source_count ≥ 2 的标的；
-      - 宏观 conviction = opportunity_list 中 conviction_tier == HIGH 的机会；
-      - 共振 = 同一 symbol 同时出现在上述两个集合中。
+    P1 修复：
+      - 共识来源从 cross_market 改为 biz.daily_recommendation（与工单对齐）；
+      - conviction 范围从仅 HIGH 扩展为 HIGH + MED；
+      - 交集为空时保留原 cross_market 逻辑作为 fallback，避免空态。
 
-    返回 {status, definition, signals, count}。
+    返回 {status, definition, signals, count, source}。
     """
     t = _load_market_rules().get("opportunity_thresholds", dict(OPPORTUNITY_THRESHOLDS_DEFAULT))
     min_sources = int(t.get("resonance_min_source_count", 2))
     consensus_top_n = int(t.get("resonance_consensus_top_n", 50))
     max_results = int(t.get("resonance_max_results", 10))
-    definition = "共识动量（多源交叉验证 source_count≥2）与宏观 conviction（HIGH tier）的交集"
+    definition = "每日共识推荐（daily_recommendation）与宏观 conviction（HIGH/MED）的交集"
 
-    # 拉取共识动量榜
-    consensus_results: list[dict] = []
-    try:
-        import cross_market
+    # 优先从 daily_recommendation 读共识
+    consensus_map = _fetch_daily_recommendation_latest()
+    source = "daily_recommendation"
 
-        consensus_data = cross_market.get_cross_validated(limit=consensus_top_n)
-        if isinstance(consensus_data, dict):
-            consensus_results = consensus_data.get("results") or []
-    except Exception:
-        return {
-            "status": "partial",
-            "definition": definition,
-            "signals": [],
-            "count": 0,
-            "error": "consensus data unavailable",
-        }
+    # fallback：daily_recommendation 为空时回退 cross_market
+    if not consensus_map:
+        try:
+            import cross_market
 
-    # 仅保留高共识标的，按 source_count / composite_score 排序
-    consensus_results = [
-        r for r in consensus_results
-        if isinstance(r, dict) and r.get("source_count", 0) >= min_sources
-    ]
-    consensus_results.sort(
-        key=lambda x: (x.get("source_count", 0), x.get("composite_score", 0)),
-        reverse=True,
-    )
-    consensus_map: dict[str, dict] = {}
-    for r in consensus_results:
-        sym = str(r.get("symbol") or "").upper().strip()
-        if sym and sym not in consensus_map:
-            consensus_map[sym] = r
+            consensus_data = cross_market.get_cross_validated(limit=consensus_top_n)
+            consensus_results = (consensus_data or {}).get("results") or []
+            consensus_results = [
+                r for r in consensus_results
+                if isinstance(r, dict) and r.get("source_count", 0) >= min_sources
+            ]
+            consensus_results.sort(
+                key=lambda x: (x.get("source_count", 0), x.get("composite_score", 0)),
+                reverse=True,
+            )
+            for r in consensus_results:
+                sym = str(r.get("symbol") or "").upper().strip()
+                if sym and sym not in consensus_map:
+                    consensus_map[sym] = r
+            source = "cross_market"
+        except Exception:
+            pass
 
     opps = (overview.get("opportunity_list") or {}).get("opportunities") or []
-    high_opps = [o for o in opps if o.get("conviction_tier") == "HIGH"]
+    # P1：HIGH + MED 均参与共振
+    valid_opps = [o for o in opps if o.get("conviction_tier") in ("HIGH", "MED")]
 
     signals: list[dict] = []
     seen: set[str] = set()
-    for opp in high_opps:
+    for opp in valid_opps:
         opp_syms = _symbols_from_opportunity(opp)
         if not opp_syms:
             continue
@@ -3432,6 +3536,7 @@ def build_resonance_signals(overview: dict) -> dict:
         "definition": definition,
         "signals": signals,
         "count": len(signals),
+        "source": source if consensus_map else None,
     }
 
 
@@ -3693,9 +3798,10 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
 
 
 def fetch_event_calendar() -> dict:
-    """事件日历：宏观硬日程（FOMC/CPI/NFP）+ 已知重大解锁峰。仅展示，不参与子分。
+    """事件日历：宏观硬日程 + 代币级催化剂事件。仅展示，不参与子分。
 
-    原 CoinGecko events 兜底已废弃（端点实测 404/返空），显式置空避免误导。
+    P1 修复：原 CoinGecko /events 免费端点已废弃，改为从 biz.asset_catalyst
+    读取代币级已知事件（上币/解锁/主网上线/空投等），并映射到具体 asset_id。
     宏观日程为公开固定节奏，由 dev 按当年官方日程维护（每季度更新）。
     """
     # ① 宏观硬日程（手动维护近 3 个月，来源 FRED/FOMC 官网公开日程；零依赖）
@@ -3711,14 +3817,52 @@ def fetch_event_calendar() -> dict:
     unlock_events: list[dict] = [
         # {"date": "2026-10-XX", "event": "XXX 解锁峰", "type": "unlock", "source": "hardcoded"},
     ]
-    # ③ （follow-up）CoinMarketCal：需 CMCAL_API_KEY，返回 crypto 专属事件（mainnet/解锁/空投）
-    # cmcal = fetch_coinmarketcal() if os.getenv("CMCAL_API_KEY") else []
 
-    events = hardcoded_events + unlock_events
+    # ③ P1：代币级催化剂事件（biz.asset_catalyst）
+    token_events: list[dict] = []
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 取未来 30 天 + 过去 3 天内的事件
+                cur.execute("""
+                    SELECT ac.catalyst_id, ac.asset_id, a.canonical_symbol AS symbol,
+                           ac.title, ac.event_category, ac.event_subcategory,
+                           ac.published_at::date AS event_date,
+                           ac.source_code, ac.source_url
+                    FROM biz.asset_catalyst ac
+                    LEFT JOIN core.asset a ON a.asset_id = ac.asset_id
+                    WHERE ac.published_at >= CURRENT_DATE - INTERVAL '3 days'
+                      AND ac.published_at <= CURRENT_DATE + INTERVAL '30 days'
+                      AND ac.event_category IS NOT NULL
+                    ORDER BY ac.published_at ASC
+                    LIMIT 50
+                """)
+                for r in cur.fetchall():
+                    token_events.append({
+                        "date": str(r["event_date"]) if r.get("event_date") else None,
+                        "event": r["title"] or f"{r.get('event_category')} 事件",
+                        "type": r.get("event_category") or "catalyst",
+                        "sub_type": r.get("event_subcategory"),
+                        "source": r.get("source_code") or "asset_catalyst",
+                        "asset_id": r.get("asset_id"),
+                        "symbol": r.get("symbol"),
+                        "catalyst_id": r.get("catalyst_id"),
+                        "url": r.get("source_url"),
+                    })
+    except Exception:
+        pass
+
+    events = hardcoded_events + unlock_events + token_events
     return {
         "status": "ok" if events else "partial",
-        "hardcoded": events,
-        "gecko": [],  # 已废弃，显式空（不再静默失败）
+        "hardcoded": hardcoded_events,
+        "unlock": unlock_events,
+        "token_events": token_events,
+        "gecko": [],  # CoinGecko /events 已废弃，显式空
     }
 
 

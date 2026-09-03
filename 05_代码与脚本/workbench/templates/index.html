@@ -6376,7 +6376,30 @@
             document.getElementById('add-asset-modal').classList.remove('active');
         }
 
-        // 点击遮罩关闭（DOM 未加载完成时跳过）
+
+
+        // 观察列表操作
+        async function toggleOpportunityWatch (assetId, symbol, btn) {
+            if (!assetId) return;
+            try {
+                const res = await fetch('/api/opportunity/watchlist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({asset_id: parseInt(assetId), symbol: symbol || ''})
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    btn.textContent = data.watching ? '✅ 已观察' : '🔔 加入观察';
+                    btn.style.background = data.watching ? '#065f46' : '#334155';
+                } else {
+                    btn.textContent = '❌ 失败';
+                }
+            } catch (e) {
+                btn.textContent = '❌ 失败';
+            }
+        }
+
+        // 点击遮罩关闭 + 观察按钮事件委托（DOM 未加载完成时跳过）
         document.addEventListener('DOMContentLoaded', function () {
             const modal = document.getElementById('add-asset-modal');
             if (modal) {
@@ -6384,6 +6407,15 @@
                     if (e.target === this) closeAddAssetModal();
                 });
             }
+            // P1：机会卡"加入观察"按钮事件委托
+            document.body.addEventListener('click', function (e) {
+                const btn = e.target.closest('.watch-btn');
+                if (!btn) return;
+                e.preventDefault();
+                const assetId = btn.getAttribute('data-asset-id');
+                const symbol = btn.getAttribute('data-symbol');
+                toggleOpportunityWatch(assetId, symbol, btn);
+            });
         });
 
         function switchAssetTab (tab) {
@@ -7406,7 +7438,16 @@
                 // 触发逻辑分段
                 const trigger = o.trigger_logic || '';
 
-                return `<div style="background:#111827;border:1px solid ${borderColor}33;border-left:3px solid ${borderColor};border-radius:8px;padding:12px 14px;${isHigh ? 'box-shadow:0 0 16px ' + glowColor : ''}">
+                // P1：可操作化按钮
+                let actionButtons = '';
+                if (o.asset_id) {
+                    actionButtons = `<div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                        <a href="/research/${o.asset_id}" target="_blank" style="font-size:11px;color:#60a5fa;text-decoration:none;background:#1e293b;padding:3px 8px;border-radius:4px;border:1px solid #334155">📄 研报</a>
+                        <button class="watch-btn" data-asset-id="${o.asset_id}" data-symbol="${o.target}" style="font-size:11px;color:#e2e8f0;background:#334155;padding:3px 8px;border-radius:4px;border:none;cursor:pointer">🔔 加入观察</button>
+                    </div>`;
+                }
+
+                return `<div class="opp-card" style="background:#111827;border:1px solid ${borderColor}33;border-left:3px solid ${borderColor};border-radius:8px;padding:12px 14px;${isHigh ? 'box-shadow:0 0 16px ' + glowColor : ''}">
                     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
                         <div style="display:flex;align-items:center;gap:8px">
                             <span style="${targetStyle}">${o.target}</span>
@@ -7419,6 +7460,7 @@
                     </div>
                     <div style="font-size:12px;color:#cbd5e1;line-height:1.5;margin-bottom:6px">${trigger}</div>
                     ${(o.related_dims || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:4px">${(o.related_dims || []).map(d => `<span style="font-size:10px;color:#94a3b8;background:#1e293b;border:1px solid #334155;padding:1px 6px;border-radius:4px">${d}</span>`).join('')}</div>` : ''}
+                    ${actionButtons}
                 </div>`;
             }
 

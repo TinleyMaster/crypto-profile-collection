@@ -53,6 +53,7 @@ class InsiderClusterClient:
     def _parse(self, asset_id: int, mint: str, d: dict, total_supply: Optional[float]) -> dict:
         import json as _json
 
+        ins = d.get("insiderNetworks") or []
         rug_supply = d.get("token", {}).get("supply")
         holders = d.get("totalHolders") or 0
         g = d.get("graphInsidersDetected") or 0

@@ -1912,6 +1912,35 @@ def api_market_backtest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── P1 机会观察列表（opportunity_watchlist） ──
+
+@app.route("/api/opportunity/watchlist", methods=["GET"])
+def api_opportunity_watchlist_list():
+    """机会观察列表。"""
+    try:
+        data = _get_db_stats().list_opportunity_watchlist()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/opportunity/watchlist", methods=["POST"])
+def api_opportunity_watchlist_toggle():
+    """切换机会观察状态。body: {asset_id, symbol?}"""
+    try:
+        body = request.get_json(silent=True) or {}
+        asset_id = body.get("asset_id")
+        if not asset_id:
+            return jsonify({"ok": False, "error": "缺少 asset_id"}), 400
+        data = _get_db_stats().toggle_opportunity_watch(
+            asset_id=int(asset_id),
+            symbol=body.get("symbol") or "",
+        )
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── 解锁追踪列表（watchlist） ──
 
 @app.route("/api/watchlist", methods=["GET"])

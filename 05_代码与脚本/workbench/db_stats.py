@@ -9234,3 +9234,128 @@ def get_cm_valuation_dashboard() -> dict:
         metric_date = rows[0]["metric_date"].isoformat() if hasattr(rows[0]["metric_date"], "isoformat") else str(rows[0]["metric_date"])
 
     return {"ok": True, "metric_date": metric_date, "cm_valuation": cm_valuation}
+
+
+# ══════════════════════════════════════════════════════════════
+# P1 机会观察列表（opportunity_watchlist）
+# ══════════════════════════════════════════════════════════════
+
+def _ensure_opportunity_watchlist_table(cur) -> None:
+    """确保观察列表表存在。"""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS biz.opportunity_watchlist (
+            watch_id SERIAL PRIMARY KEY,
+            asset_id INTEGER NOT NULL,
+            symbol TEXT,
+            trigger_rule TEXT DEFAULT 'conviction_upgrade',
+            added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_alerted_at TIMESTAMPTZ,
+            alert_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (asset_id)
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_opportunity_watchlist_asset_id
+        ON biz.opportunity_watchlist(asset_id)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_opportunity_watchlist_added_at
+        ON biz.opportunity_watchlist(added_at DESC)
+    """)
+
+
+def toggle_opportunity_watch(asset_id: int, symbol: str | None = None) -> dict:
+    """切换观察状态：已在表中就删除，不在就插入。返回当前状态。"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                _ensure_opportunity_watchlist_table(cur)
+                cur.execute(
+                    "SELECT watch_id FROM biz.opportunity_watchlist WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    cur.execute(
+                        "DELETE FROM biz.opportunity_watchlist WHERE asset_id = %s",
+                        (asset_id,),
+                    )
+                    watching = False
+                else:
+                    cur.execute("""
+                        INSERT INTO biz.opportunity_watchlist (asset_id, symbol, trigger_rule)
+                        VALUES (%s, %s, 'conviction_upgrade')
+                        ON CONFLICT (asset_id) DO NOTHING
+                    """, (asset_id, symbol or ""))
+                    watching = True
+                conn.commit()
+        return {"ok": True, "watching": watching, "asset_id": asset_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "asset_id": asset_id}
+
+
+def list_opportunity_watchlist() -> dict:
+    """返回当前观察列表。"""
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                _ensure_opportunity_watchlist_table(cur)
+                cur.execute("""
+                    SELECT watch_id, asset_id, symbol, trigger_rule, added_at,
+                           last_alerted_at, alert_count
+                    FROM biz.opportunity_watchlist
+                    ORDER BY added_at DESC
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+        return {"ok": True, "count": len(rows), "items": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "items": []}
+
+
+def check_opportunity_watchlist_alerts(current_opportunities: list[dict]) -> dict:
+    """检查观察列表中资产的 conviction 升级，返回应告警列表。
+
+    规则：当前 opportunities 中 conviction_tier 为 HIGH/MED 且 asset_id 在 watchlist 中。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                _ensure_opportunity_watchlist_table(cur)
+                cur.execute("""
+                    SELECT asset_id, symbol, last_alerted_at, alert_count
+                    FROM biz.opportunity_watchlist
+                """)
+                watched = {r["asset_id"]: dict(r) for r in cur.fetchall()}
+
+        alerts = []
+        for opp in current_opportunities or []:
+            aid = opp.get("asset_id")
+            tier = opp.get("conviction_tier")
+            if aid is None or tier not in ("HIGH", "MED"):
+                continue
+            if aid not in watched:
+                continue
+            info = watched[aid]
+            alerts.append({
+                "asset_id": aid,
+                "symbol": info.get("symbol") or opp.get("target"),
+                "tier": tier,
+                "conviction_score": opp.get("conviction_score"),
+                "trigger_logic": opp.get("trigger_logic"),
+            })
+
+        # 更新告警时间/次数
+        if alerts:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    for a in alerts:
+                        cur.execute("""
+                            UPDATE biz.opportunity_watchlist
+                            SET last_alerted_at = NOW(), alert_count = alert_count + 1
+                            WHERE asset_id = %s
+                        """, (a["asset_id"],))
+                    conn.commit()
+
+        return {"ok": True, "alerts": alerts, "count": len(alerts)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "alerts": []}

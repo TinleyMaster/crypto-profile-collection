@@ -70,7 +70,9 @@ def ensure_source_platform(conn) -> None:
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO sys.source_platform (platform_code, platform_name, base_url, description, is_active)
-            VALUES ('cmc_historical', 'CoinMarketCap Historical Quotes', 'https://coinmarketcap.com', 'CMC 专业版历史行情 API 回填', TRUE)
+            VALUES 
+                ('cmc_historical', 'CoinMarketCap Historical Quotes', 'https://coinmarketcap.com', 'CMC 专业版历史行情 API 回填', TRUE),
+                ('binance_klines', 'Binance Klines', 'https://api.binance.com', 'Binance 历史日K线回填', TRUE)
             ON CONFLICT (platform_code) DO NOTHING
         """)
 
@@ -321,6 +323,138 @@ def backfill_via_cmc_historical(
     }
 
 
+def backfill_via_binance_klines(
+    conn,
+    target_dates: list[date],
+    top_n: int = 2000,
+    dry_run: bool = False,
+    log=None,
+) -> dict:
+    """通过 Binance klines API 兜底回填（CMC 不可用时）。
+
+    从 core.asset_source_map 取有 Binance symbol 的资产，
+    用 /api/v3/klines 拉历史日收盘价写入 asset_market_daily。
+    """
+    import requests as req
+
+    def _log(msg):
+        print(msg)
+        if log:
+            log(msg)
+
+    # 获取有 symbol 的资产（优先从 core.asset 取）
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT a.asset_id, UPPER(a.canonical_symbol) AS symbol
+            FROM core.asset a
+            WHERE a.canonical_symbol IS NOT NULL
+              AND LENGTH(a.canonical_symbol) BETWEEN 2 AND 10
+            ORDER BY a.asset_id
+            LIMIT %s
+        """, (top_n,))
+        assets = [(row[0], row[1]) for row in cur.fetchall()]
+
+    if not assets:
+        return {"skipped": True, "reason": "No assets with Binance symbol found"}
+
+    _log(f"[BINANCE] Assets with symbol: {len(assets)}")
+
+    # 准备日期参数
+    min_date = min(target_dates)
+    max_date = max(target_dates)
+    start_ms = int(datetime.combine(min_date, datetime.min.time()).timestamp() * 1000)
+    end_ms = int(datetime.combine(max_date + timedelta(days=1), datetime.min.time()).timestamp() * 1000) - 1
+
+    total_rows = 0
+    errors = []
+    symbol_map = {}  # asset_id -> symbol
+
+    for asset_id, symbol in assets:
+        pair = f"{symbol}USDT"
+        try:
+            url = (
+                f"https://api.binance.com/api/v3/klines"
+                f"?symbol={pair}&interval=1d"
+                f"&startTime={start_ms}&endTime={end_ms}&limit=10"
+            )
+            r = req.get(url, timeout=10)
+            if r.status_code == 429:
+                _log(f"[BINANCE] Rate limited, sleeping 10s")
+                time.sleep(10)
+                r = req.get(url, timeout=10)
+            if r.status_code != 200:
+                continue
+
+            klines = r.json()
+            if not klines:
+                continue
+
+            symbol_map[asset_id] = symbol
+            rows = []
+            for k in klines:
+                # k = [open_time, open, high, low, close, volume, close_time, ...]
+                open_time_ms = k[0]
+                close_price = float(k[4])
+                volume = float(k[5])
+                market_date = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc).date()
+
+                if market_date not in target_dates:
+                    continue
+                if close_price <= 0:
+                    continue
+
+                rows.append({
+                    "asset_id": asset_id,
+                    "market_date": market_date,
+                    "source_code": "binance_klines",
+                    "price_usd": close_price,
+                    "market_cap": None,
+                    "fdv": None,
+                    "circulating_supply": None,
+                    "total_supply": None,
+                    "volume_24h": volume,
+                    "change_24h": None,
+                    "change_7d": None,
+                })
+
+            if rows and not dry_run:
+                sql = """
+                    INSERT INTO biz.asset_market_daily
+                        (asset_id, market_date, source_code, price_usd,
+                         market_cap, fdv, circulating_supply, total_supply,
+                         volume_24h, change_24h, change_7d, raw_ref)
+                    VALUES (
+                        %(asset_id)s, %(market_date)s, %(source_code)s, %(price_usd)s,
+                        %(market_cap)s, %(fdv)s, %(circulating_supply)s, %(total_supply)s,
+                        %(volume_24h)s, %(change_24h)s, %(change_7d)s,
+                        '{"source": "binance_klines_backfill"}'::jsonb
+                    )
+                    ON CONFLICT (asset_id, market_date, source_code) DO UPDATE SET
+                        price_usd = EXCLUDED.price_usd,
+                        volume_24h = EXCLUDED.volume_24h,
+                        updated_at = NOW()
+                """
+                with conn.cursor() as cur:
+                    cur.executemany(sql, rows)
+                conn.commit()
+                total_rows += len(rows)
+            elif dry_run:
+                total_rows += len(rows)
+
+            time.sleep(0.1)  # Binance 限速：1200 req/min
+
+        except Exception as e:
+            errors.append(f"{symbol}: {str(e)[:100]}")
+            continue
+
+    _log(f"[BINANCE] Total inserted: {total_rows} rows, errors: {len(errors)}")
+    return {
+        "total_rows": total_rows,
+        "assets_with_symbol": len(symbol_map),
+        "errors": errors[:20],
+    }
+
+
 def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False, log=None) -> dict:
     """从已有快照重新 ETL（兜底）。"""
     def _log(msg):
@@ -495,6 +629,22 @@ def main() -> int:
         etl_result = re_etl_from_snapshots(conn, missing_dates)
         result["etl"] = etl_result
         print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
+
+        # CMC + re-ETL 都没数据时，走 Binance klines 兜底
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(missing_dates))
+            cur.execute(f"""
+                SELECT COUNT(*) FROM biz.asset_market_daily
+                WHERE market_date IN ({placeholders})
+            """, missing_dates)
+            total_count = cur.fetchone()[0]
+
+        if total_count < len(missing_dates) * 100:
+            print(f"\n[BACKFILL] CMC/ETL 数据不足({total_count}行)，启动 Binance klines 兜底...")
+            ensure_source_platform(conn)
+            binance_result = backfill_via_binance_klines(conn, missing_dates, top_n=args.top)
+            result["binance"] = binance_result
+            print(f"[BACKFILL] Binance 完成: {binance_result}")
 
         # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
         task_id = create_task_card(conn, missing_dates, coverage, result)

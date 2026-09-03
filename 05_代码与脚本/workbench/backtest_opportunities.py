@@ -51,6 +51,9 @@ MIN_SAMPLES = 30
 # NOT_CALIBRABLE：无法靠回测校准的轴
 NOT_CALIBRABLE = {"mvrv_deep_under"}
 
+# NOT_BACKTESTABLE：target 不是可交易 asset（KOL 人名 / 聚合观察池），无法取价回测
+NOT_BACKTESTABLE = {"funding", "mvrv_under_watch"}
+
 
 # ── 价格取数（三段式）──
 
@@ -270,6 +273,7 @@ def backtest_opportunities(days: int = 30) -> dict:
                 return {"status": "no_data", "message": f"无 {days} 天内快照"}
 
             all_results: list[dict] = []
+            total_skipped_not_backtestable = 0
             for sd in snap_dates:
                 cur.execute(
                     "SELECT payload FROM biz.market_overview_snapshot WHERE snap_date = %s",
@@ -282,11 +286,15 @@ def backtest_opportunities(days: int = 30) -> dict:
                 opps = ((payload.get("opportunity_list") or {}).get("opportunities") or [])
                 # FIX-R3: 过滤 KOL 噪声（无 signal_type / 同 target 去重）
                 seen_targets: set[str] = set()
+                skipped_backtestable = 0
                 for opp in opps:
                     st = opp.get("signal_type")
                     tgt = opp.get("target", "")
                     if not st or not tgt:
                         continue  # 跳过无 signal_type 的噪声行
+                    if st in NOT_BACKTESTABLE:
+                        skipped_backtestable += 1
+                        continue  # target 不是可交易 asset（KOL 人名 / 聚合池）
                     if tgt in seen_targets:
                         continue  # 同 target 去重
                     seen_targets.add(tgt)
@@ -296,6 +304,7 @@ def backtest_opportunities(days: int = 30) -> dict:
                     bt = backtest_single(opp, cur)
                     if bt:
                         all_results.append(bt)
+                total_skipped_not_backtestable += skipped_backtestable
 
     # 按 signal_type 聚合
     by_type: dict[str, list[dict]] = {}
@@ -332,6 +341,7 @@ def backtest_opportunities(days: int = 30) -> dict:
         "status": "ok",
         "snapshots": len(snap_dates),
         "total_opportunities": len(all_results),
+        "skipped_not_backtestable": total_skipped_not_backtestable,
         "signal_types": summary,
     }
 

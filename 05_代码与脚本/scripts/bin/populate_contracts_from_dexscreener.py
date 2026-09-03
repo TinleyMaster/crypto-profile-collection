@@ -106,6 +106,7 @@ def _pick_contracts(pairs: list[dict], symbol: str, name: str, min_fdv: float, m
                 "fdv": fdv,
                 "name": bt.get("name"),
                 "symbol": bt.get("symbol"),
+                "pair_created_at": p.get("pairCreatedAt"),
             }
 
     # 每条链取 fdv 最高的一条，按 fdv 降序，最多 max_chains 条
@@ -156,6 +157,29 @@ def _upsert_contract(conn, asset_id: int, c: dict, is_primary: bool) -> None:
     )
 
 
+def _fill_launch_date(conn, asset_id: int, pair_created_at) -> bool:
+    """若 core.asset.launch_date 为 NULL 且 pairCreatedAt 可用，则回填。返回是否更新。"""
+    if not pair_created_at:
+        return False
+    try:
+        from datetime import datetime, timezone
+        # pairCreatedAt 可能是 ISO 字符串或毫秒时间戳
+        if isinstance(pair_created_at, (int, float)):
+            dt = datetime.fromtimestamp(pair_created_at / 1000, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(pair_created_at).replace("Z", "+00:00"))
+        launch = dt.date()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE core.asset SET launch_date = %s, updated_at = NOW() "
+            "WHERE asset_id = %s AND launch_date IS NULL",
+            (launch, asset_id),
+        )
+        return cur.rowcount > 0
+    except Exception:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="从 DexScreener 补充无合约地址资产的合约地址")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少个资产（0=全部）")
@@ -196,6 +220,11 @@ def main() -> int:
                 with get_connection(settings.database_url) as conn:
                     for i, c in enumerate(candidates):
                         _upsert_contract(conn, a["asset_id"], c, is_primary=(i == 0))
+                    # 补 launch_date（取 fdv 最高 pair 的 pairCreatedAt）
+                    primary = candidates[0]
+                    if _fill_launch_date(conn, a["asset_id"], primary.get("pair_created_at")):
+                        print(f"    → launch_date 已回填 (pairCreatedAt={primary.get('pair_created_at')})", flush=True)
+                    conn.commit()
                 filled += 1
 
         time.sleep(1)  # DexScreener 免费接口限流

@@ -77,6 +77,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),
+    ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "100"], "Meme 四阶段生命周期（每日 09:00）", "core"),
 
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],

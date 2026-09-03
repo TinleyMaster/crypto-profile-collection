@@ -189,3 +189,15 @@ meme_risk:
     kol_max_count: 5      # 近 30 天 KOL 信号 ≥5 → 高关注(低分)；0 → dead_kol
     gh_min_activity: 5    # 近 30 天 GitHub 活跃 ≥5 → active(低分)；0 → dead_github
     # 方向语义 A：死盘/零社交=风险(高分)，活跃=正面(低分)，取各渠道最活跃值
+
+# ── Meme 四阶段生命周期（MEME-05）──
+meme_lifecycle:
+  thresholds:
+    launch_max_days: 14      # <14 天 → launch（需流动性起量）
+    bloom_max_days: 60       # 14-60 天 → bloom（需高流动性+高热度）
+    old_no_social_days: 90   # >90 天无社交热度 → decay
+    liq_launch_min: 10000    # launch 阶段最低流动性 $10K
+    liq_bloom_min: 50000     # bloom 阶段最低流动性 $50K
+    liq_decay_max: 5000      # 流动性 <$5K → decay
+    social_hot_min: 2        # 30d 内 KOL/GitHub 信号 ≥2 → 有热度
+    holder_bleed_max: -10    # holder 30d 变化 ≤-10% → 流失

@@ -1,17 +1,17 @@
-"""日价缺口回填脚本（RT-BACKTEST-D1-001 改动 2）
+"""日价缺口自动检测+回填（RT-BACKTEST-D1-001 改动 2）
 
-回填 biz.asset_market_daily 中指定日期的缺失日价。
+自动扫描最近 N 天的 biz.asset_market_daily，检测缺失日期并回填。
+回填完成后在 sys.task 生成任务卡，方便日后追溯。
 
 数据源优先级：
-1. CMC 历史行情 API（source_code='cmc_historical'）- 首选，覆盖面广
+1. CMC 历史行情 API（source_code='cmc_historical'）
 2. 从已有快照重新 ETL（若 cmc_asset_quote_snapshot 有数据但 asset_market_daily 缺失）
-3. Binance klines 历史收盘（仅 top 资产兜底）
 
 用法：
-    python backfill_daily_gap.py --dates 2026-08-30 2026-08-31    # 回填指定日期
-    python backfill_daily_gap.py --days 3                         # 回填最近 3 天的缺口
-    python backfill_daily_gap.py --dates 2026-08-30 --dry-run    # 预览，不写入
-    python backfill_daily_gap.py --dates 2026-08-30 --verify     # 回填后自动校验
+    python backfill_daily_gap.py                    # 自动检测+回填最近 30 天缺口
+    python backfill_daily_gap.py --lookback 60      # 扫描最近 60 天
+    python backfill_daily_gap.py --dry-run          # 预览，不写入
+    python backfill_daily_gap.py --top 500          # 只回填 top 500 资产
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import argparse
 import json
 import sys
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,6 +33,38 @@ from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
 
 
+# ── 缺口检测 ──
+
+def detect_missing_dates(conn, lookback_days: int, min_assets: int = 100) -> list[date]:
+    """扫描最近 lookback_days 天，返回缺失日期列表。
+
+    判定逻辑：
+    - 取最近 lookback_days 天中 asset_market_daily 有记录的日期
+    - 与完整日期序列对比，资产数 < min_assets 的日期视为缺失
+    - 排除"今天"（数据尚未产出是正常的）
+    """
+    today = date.today()
+    cutoff = today - timedelta(days=1)  # 排除今天
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT market_date, COUNT(DISTINCT asset_id) AS assets
+            FROM biz.asset_market_daily
+            WHERE market_date >= %s AND market_date <= %s
+            GROUP BY market_date
+        """, (cutoff - timedelta(days=lookback_days), cutoff))
+        coverage = {row[0]: row[1] for row in cur.fetchall()}
+
+    # 完整日期序列（排除周末？不，crypto 每天都有数据）
+    expected = [cutoff - timedelta(days=i) for i in range(lookback_days)]
+    missing = [d for d in expected if coverage.get(d, 0) < min_assets]
+    missing.sort()
+
+    return missing, coverage
+
+
+# ── 回填逻辑 ──
+
 def ensure_source_platform(conn) -> None:
     """确保 source_code 外键存在。"""
     with conn.cursor() as cur:
@@ -40,19 +73,6 @@ def ensure_source_platform(conn) -> None:
             VALUES ('cmc_historical', 'CoinMarketCap Historical Quotes', 'https://coinmarketcap.com', 'CMC 专业版历史行情 API 回填', TRUE)
             ON CONFLICT (platform_code) DO NOTHING
         """)
-
-
-def check_existing_coverage(conn, target_dates: list[date]) -> dict[date, int]:
-    """检查目标日期已有的资产覆盖数。"""
-    with conn.cursor() as cur:
-        placeholders = ",".join(["%s"] * len(target_dates))
-        cur.execute(f"""
-            SELECT market_date, COUNT(DISTINCT asset_id)
-            FROM biz.asset_market_daily
-            WHERE market_date IN ({placeholders})
-            GROUP BY market_date
-        """, target_dates)
-        return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def fetch_assets_for_backfill(conn, top_n: int = 8000) -> list[tuple[int, int]]:
@@ -76,6 +96,7 @@ def backfill_via_cmc_historical(
     assets: list[tuple[int, int]],
     batch_size: int = 50,
     dry_run: bool = False,
+    log=None,
 ) -> dict:
     """通过 CMC 历史行情 API 回填指定日期。"""
     from crypto_research.clients.cmc_client import CMCClient
@@ -84,11 +105,10 @@ def backfill_via_cmc_historical(
     cmc = CMCClient(settings)
     ensure_source_platform(conn)
 
-    # CMC API 按时间范围拉取，取覆盖目标日期的最小范围
     min_date = min(target_dates)
     max_date = max(target_dates)
     time_start = min_date.isoformat()
-    time_end = (max_date + timedelta(days=1)).isoformat()  # API end 是 exclusive
+    time_end = (max_date + timedelta(days=1)).isoformat()
 
     asset_id_map = {cmc_id: aid for aid, cmc_id in assets}
     batch_size = min(batch_size, 100)
@@ -96,12 +116,17 @@ def backfill_via_cmc_historical(
     total_rows = 0
     errors = []
 
+    def _log(msg):
+        print(msg)
+        if log:
+            log(msg)
+
     for batch_idx in range(total_batches):
         batch_start = batch_idx * batch_size
         batch_end = min(batch_start + batch_size, len(assets))
         batch_cmc_ids = [cmc_id for _, cmc_id in assets[batch_start:batch_end]]
 
-        print(f"[CMC] Batch {batch_idx + 1}/{total_batches}: {len(batch_cmc_ids)} assets")
+        _log(f"[CMC] Batch {batch_idx + 1}/{total_batches}: {len(batch_cmc_ids)} assets")
 
         try:
             resp = cmc.get_quotes_historical(
@@ -112,12 +137,11 @@ def backfill_via_cmc_historical(
             )
         except Exception as e:
             err_msg = f"Batch {batch_idx + 1} API error: {e}"
-            print(f"[CMC] {err_msg}", file=sys.stderr)
+            _log(f"[CMC] {err_msg}")
             errors.append(err_msg)
             time.sleep(2)
             continue
 
-        # 解析响应
         data = resp.get("data") or {}
         rows = []
         for cmc_id_str, coin_data in data.items():
@@ -181,14 +205,14 @@ def backfill_via_cmc_historical(
                 cur.executemany(sql, rows)
             conn.commit()
             total_rows += len(rows)
-            print(f"[CMC]   Inserted {len(rows)} rows")
+            _log(f"[CMC]   Inserted {len(rows)} rows")
         elif dry_run:
             total_rows += len(rows)
-            print(f"[CMC]   Would insert {len(rows)} rows (dry-run)")
+            _log(f"[CMC]   Would insert {len(rows)} rows (dry-run)")
         else:
-            print(f"[CMC]   No rows for target dates")
+            _log(f"[CMC]   No rows for target dates")
 
-        time.sleep(1.5)  # 限速
+        time.sleep(1.5)
 
     return {
         "total_rows": total_rows,
@@ -197,10 +221,14 @@ def backfill_via_cmc_historical(
     }
 
 
-def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False) -> dict:
-    """从已有快照重新 ETL 到 asset_market_daily（兜底方案）。"""
+def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False, log=None) -> dict:
+    """从已有快照重新 ETL（兜底）。"""
+    def _log(msg):
+        print(msg)
+        if log:
+            log(msg)
+
     with conn.cursor() as cur:
-        # 检查快照是否存在
         placeholders = ",".join(["%s"] * len(target_dates))
         cur.execute(f"""
             SELECT DATE(quote_time AT TIME ZONE 'UTC') AS snap_date, COUNT(*) AS cnt
@@ -211,12 +239,11 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False)
         snap_dates = {row[0]: row[1] for row in cur.fetchall()}
 
         if not snap_dates:
-            return {"skipped": True, "reason": "No snapshots found for target dates"}
+            return {"skipped": True, "reason": "No snapshots found"}
 
         if dry_run:
             return {"dry_run": True, "snap_dates": {k.isoformat(): v for k, v in snap_dates.items()}}
 
-        # 对有快照的日期执行 ETL
         affected = 0
         for snap_date, snap_count in snap_dates.items():
             cur.execute("""
@@ -228,15 +255,11 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False)
                     SELECT
                         asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
-                        q.price_usd,
-                        q.market_cap,
-                        q.fdv,
-                        q.circulating_supply,
-                        q.total_supply,
+                        q.price_usd, q.market_cap, q.fdv,
+                        q.circulating_supply, q.total_supply,
                         q.volume_24h,
                         q.percent_change_24h AS change_24h,
                         q.percent_change_7d AS change_7d,
-                        q.is_anomaly,
                         ROW_NUMBER() OVER (
                             PARTITION BY asm.asset_id, DATE(q.quote_time AT TIME ZONE 'UTC')
                             ORDER BY q.quote_time DESC
@@ -248,26 +271,21 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False)
                     WHERE DATE(q.quote_time AT TIME ZONE 'UTC') = %s
                       AND (q.is_anomaly IS NOT TRUE OR q.is_anomaly IS NULL)
                 )
-                SELECT
-                    asset_id, market_date, 'cmc', price_usd,
-                    market_cap, fdv, circulating_supply, total_supply,
-                    volume_24h, change_24h, change_7d,
-                    '{"source": "re_etl_backfill"}'::jsonb
+                SELECT asset_id, market_date, 'cmc', price_usd,
+                       market_cap, fdv, circulating_supply, total_supply,
+                       volume_24h, change_24h, change_7d,
+                       '{"source": "re_etl_backfill"}'::jsonb
                 FROM ranked
                 WHERE rn = 1 AND asset_id IS NOT NULL
                 ON CONFLICT (asset_id, market_date, source_code) DO UPDATE SET
-                    price_usd = EXCLUDED.price_usd,
-                    market_cap = EXCLUDED.market_cap,
-                    fdv = EXCLUDED.fdv,
-                    circulating_supply = EXCLUDED.circulating_supply,
-                    total_supply = EXCLUDED.total_supply,
-                    volume_24h = EXCLUDED.volume_24h,
-                    change_24h = EXCLUDED.change_24h,
-                    change_7d = EXCLUDED.change_7d,
+                    price_usd = EXCLUDED.price_usd, market_cap = EXCLUDED.market_cap,
+                    fdv = EXCLUDED.fdv, circulating_supply = EXCLUDED.circulating_supply,
+                    total_supply = EXCLUDED.total_supply, volume_24h = EXCLUDED.volume_24h,
+                    change_24h = EXCLUDED.change_24h, change_7d = EXCLUDED.change_7d,
                     updated_at = NOW()
             """, (snap_date,))
             affected += cur.rowcount
-            print(f"[ETL] Re-ETL {snap_date}: {cur.rowcount} rows")
+            _log(f"[ETL] Re-ETL {snap_date}: {cur.rowcount} rows")
 
         conn.commit()
         return {"affected": affected, "snap_dates_processed": len(snap_dates)}
@@ -278,101 +296,118 @@ def verify_backfill(conn, target_dates: list[date]) -> dict:
     with conn.cursor() as cur:
         placeholders = ",".join(["%s"] * len(target_dates))
         cur.execute(f"""
-            SELECT market_date, COUNT(DISTINCT asset_id) AS assets, COUNT(*) AS rows,
-                   MIN(price_usd) AS min_price, MAX(price_usd) AS max_price
-            FROM biz.asset_market_daily
-            WHERE market_date IN ({placeholders})
-            GROUP BY market_date
-            ORDER BY market_date
-        """, target_dates)
-        stats = {}
-        for row in cur.fetchall():
-            stats[row[0].isoformat()] = {
-                "assets": row[1],
-                "rows": row[2],
-                "min_price": float(row[3]) if row[3] else None,
-                "max_price": float(row[4]) if row[4] else None,
-            }
-
-        # 对比相邻日期
-        cur.execute("""
             SELECT market_date, COUNT(DISTINCT asset_id) AS assets
             FROM biz.asset_market_daily
-            WHERE market_date >= %s - INTERVAL '7 days'
-              AND market_date <= %s + INTERVAL '7 days'
-            GROUP BY market_date
-            ORDER BY market_date
-        """, (min(target_dates), max(target_dates)))
-        context = {row[0].isoformat(): row[1] for row in cur.fetchall()}
+            WHERE market_date IN ({placeholders})
+            GROUP BY market_date ORDER BY market_date
+        """, target_dates)
+        stats = {row[0].isoformat(): row[1] for row in cur.fetchall()}
 
     return {
         "backfilled_dates": stats,
-        "context_7d": context,
-        "pass": all(
-            s["assets"] >= 7000
-            for s in stats.values()
-        ),
+        "pass": all(v >= 7000 for v in stats.values()),
     }
 
 
+# ── 任务卡 ──
+
+def create_task_card(conn, missing_dates: list[date], coverage: dict, result: dict) -> str:
+    """在 sys.task 中写入一张任务卡，方便日后追溯。"""
+    task_id = uuid.uuid4().hex[:12]
+    name = f"[回填] 日价缺口自动回填 {len(missing_dates)}天"
+    cmd = ["python", "backfill_daily_gap.py"]
+
+    coverage_before = {d.isoformat(): coverage.get(d, 0) for d in missing_dates}
+
+    # 回填后覆盖
+    verify = {}
+    if result.get("cmc", {}).get("total_rows", 0) > 0 or result.get("etl", {}).get("affected", 0) > 0:
+        placeholders = ",".join(["%s"] * len(missing_dates))
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT market_date, COUNT(DISTINCT asset_id)
+                FROM biz.asset_market_daily
+                WHERE market_date IN ({placeholders})
+                GROUP BY market_date
+            """, missing_dates)
+            verify = {row[0].isoformat(): row[1] for row in cur.fetchall()}
+
+    stats = {
+        "missing_dates": [d.isoformat() for d in missing_dates],
+        "coverage_before": coverage_before,
+        "coverage_after": verify,
+        "cmc_result": result.get("cmc", {}),
+        "etl_result": result.get("etl", {}),
+    }
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO sys.task (task_id, name, status, cmd, started_at, ended_at, stats, error, category)
+            VALUES (%s, %s, %s, %s::text[], NOW(), NOW(), %s::jsonb, %s, 'core')
+        """, (
+            task_id, name, "done", cmd,
+            json.dumps(stats, ensure_ascii=False, default=str),
+            None,
+        ))
+
+    return task_id
+
+
+# ── 主流程 ──
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="日价缺口回填")
-    parser.add_argument("--dates", nargs="+", help="指定回填日期（YYYY-MM-DD）")
-    parser.add_argument("--days", type=int, default=3, help="回填最近 N 天的缺口（默认3）")
-    parser.add_argument("--top", type=int, default=8000, help="回填资产数量上限（默认8000）")
+    parser = argparse.ArgumentParser(description="日价缺口自动检测+回填")
+    parser.add_argument("--lookback", type=int, default=30, help="扫描最近 N 天（默认30）")
+    parser.add_argument("--top", type=int, default=8000, help="回填资产上限（默认8000）")
+    parser.add_argument("--min-assets", type=int, default=100, help="低于此数视为缺失（默认100）")
     parser.add_argument("--dry-run", action="store_true", help="预览，不写入")
-    parser.add_argument("--verify", action="store_true", help="回填后自动校验")
     parser.add_argument("--skip-cmc", action="store_true", help="跳过 CMC 历史 API，仅 re-ETL")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
 
-    if args.dates:
-        target_dates = [date.fromisoformat(d) for d in args.dates]
-    else:
-        today = date.today()
-        target_dates = [today - timedelta(days=i) for i in range(args.days, 0, -1)]
-
-    print(f"[BACKFILL] Target dates: {[d.isoformat() for d in target_dates]}")
-    print(f"[BACKFILL] Mode: {'dry-run' if args.dry_run else 'live'}")
-
     with get_connection(settings.database_url) as conn:
-        # 检查现有覆盖
-        existing = check_existing_coverage(conn, target_dates)
-        print(f"[BACKFILL] Existing coverage: {existing}")
+        # 1. 自动检测缺失日期
+        print(f"[BACKFILL] 扫描最近 {args.lookback} 天...")
+        missing_dates, coverage = detect_missing_dates(conn, args.lookback, args.min_assets)
 
-        missing_dates = [d for d in target_dates if existing.get(d, 0) < 100]
         if not missing_dates:
-            print("[BACKFILL] All target dates already have sufficient coverage. Nothing to do.")
+            print("[BACKFILL] 无缺口，一切正常。")
             return 0
 
-        print(f"[BACKFILL] Missing dates (need backfill): {[d.isoformat() for d in missing_dates]}")
+        print(f"[BACKFILL] 检测到 {len(missing_dates)} 天缺口: {[d.isoformat() for d in missing_dates]}")
+        for d in missing_dates:
+            print(f"  {d.isoformat()}: {coverage.get(d, 0)} 资产")
 
-        # 方案1: CMC 历史 API
+        if args.dry_run:
+            print("[BACKFILL] dry-run 模式，跳过回填。")
+            return 0
+
+        # 2. 执行回填
+        result = {}
+
         if not args.skip_cmc:
             assets = fetch_assets_for_backfill(conn, args.top)
-            print(f"[BACKFILL] Assets for CMC backfill: {len(assets)}")
+            print(f"\n[BACKFILL] CMC 历史 API 回填 ({len(assets)} 资产)...")
+            cmc_result = backfill_via_cmc_historical(conn, missing_dates, assets)
+            result["cmc"] = cmc_result
+            print(f"[BACKFILL] CMC 完成: {cmc_result}")
 
-            cmc_result = backfill_via_cmc_historical(
-                conn, missing_dates, assets, dry_run=args.dry_run
-            )
-            print(f"[BACKFILL] CMC result: {cmc_result}")
+        print(f"\n[BACKFILL] Re-ETL 兜底...")
+        etl_result = re_etl_from_snapshots(conn, missing_dates)
+        result["etl"] = etl_result
+        print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
 
-        # 方案2: re-ETL from snapshots（兜底）
-        etl_result = re_etl_from_snapshots(conn, missing_dates, dry_run=args.dry_run)
-        print(f"[BACKFILL] Re-ETL result: {etl_result}")
+        # 3. 校验
+        print(f"\n[VERIFY] 校验回填结果...")
+        verify = verify_backfill(conn, missing_dates)
+        print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
 
-    # 校验
-    if args.verify and not args.dry_run:
-        with get_connection(settings.database_url) as conn:
-            verify_result = verify_backfill(conn, target_dates)
-            print(f"[VERIFY] {json.dumps(verify_result, ensure_ascii=False, indent=2, default=str)}")
-            if not verify_result["pass"]:
-                print("[VERIFY] WARNING: Some dates still have low coverage!", file=sys.stderr)
-                return 1
+        # 4. 写入任务卡
+        task_id = create_task_card(conn, missing_dates, coverage, result)
+        print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
 
-    print("[BACKFILL] Done.")
-    return 0
+    return 0 if verify.get("pass") else 1
 
 
 if __name__ == "__main__":

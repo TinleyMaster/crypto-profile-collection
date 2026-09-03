@@ -689,20 +689,23 @@ def main() -> int:
         result["etl"] = etl_result
         print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
 
-        # CMC + re-ETL 都没数据时，走 Binance klines 兜底
+        # CMC + re-ETL 后仍有日期 < 7000 资产时，走 Binance klines 兜底
         with conn.cursor() as cur:
             placeholders = ",".join(["%s"] * len(missing_dates))
             cur.execute(f"""
-                SELECT COUNT(*) FROM biz.asset_market_daily
+                SELECT market_date, COUNT(DISTINCT asset_id)
+                FROM biz.asset_market_daily
                 WHERE market_date IN ({placeholders})
+                GROUP BY market_date
             """, missing_dates)
-            total_count = cur.fetchone()[0]
+            coverage_after = {row[0]: row[1] for row in cur.fetchall()}
 
-        if total_count < len(missing_dates) * 100:
-            print(f"\n[BACKFILL] CMC/ETL 数据不足({total_count}行)，启动 Binance klines 兜底...")
+        gap_days = [d for d in missing_dates if coverage_after.get(d, 0) < 7000]
+        if gap_days:
+            print(f"\n[BACKFILL] CMC/ETL 后仍有 {len(gap_days)} 天覆盖不足7000: {[d.isoformat() for d in gap_days]}，启动 Binance klines 兜底...")
             ensure_source_platform(conn)
             binance_result = backfill_via_binance_klines(
-                conn, missing_dates, top_n=args.top, request_delay=args.binance_delay
+                conn, gap_days, top_n=args.top, request_delay=args.binance_delay
             )
             result["binance"] = binance_result
             print(f"[BACKFILL] Binance 完成: {binance_result}")

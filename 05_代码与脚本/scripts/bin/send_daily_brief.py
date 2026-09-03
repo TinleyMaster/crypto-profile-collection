@@ -183,6 +183,127 @@ def render_brief_html(brief: dict) -> str:
     else:
         html_parts.append('<div style="margin-bottom:16px"><b>🎯 共振榜</b> <span style="color:#64748b">暂无共识动量与宏观 conviction 共振标的</span></div>')
 
+    # ── Meme 五维风险标签池（P0-4）──
+    meme = brief.get("M4_meme") or {}
+    if isinstance(meme, dict) and meme.get("status") == "ok":
+        buckets = meme.get("buckets") or {}
+        summary = meme.get("summary") or {}
+        block = buckets.get("block") or []
+        high = buckets.get("high") or []
+        low = buckets.get("low") or []
+        html_parts.append('<div style="margin-bottom:16px"><b>🐸 Meme 机会池 & 排雷</b>')
+        if block:
+            html_parts.append('<div style="font-size:13px;color:#dc2626;margin:4px 0"><b>🚫 一票否决/高危</b></div>')
+            for item in block[:3]:
+                flags = item.get("flags") or []
+                flag_str = " | ".join(flags[:3]) if flags else ""
+                html_parts.append(
+                    f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#fef2f2;border-radius:4px">'
+                    f'<b>{item.get("symbol", "?")}</b> {item.get("total_score")}分 '
+                    f'{flag_str}</div>'
+                )
+        if low:
+            html_parts.append('<div style="font-size:13px;color:#16a34a;margin:4px 0"><b>✅ 低风险观察池</b></div>')
+            html_parts.append('<ul style="margin:4px 0;padding-left:20px;font-size:13px">' +
+                "".join(f'<li>{it.get("symbol","?")} {it.get("total_score")}分 '
+                        f'(合约{it.get("contract_label","?")}/流动性{it.get("liquidity_label","?")}/筹码{it.get("holder_label","?")})</li>'
+                        for it in low[:5]) +
+                '</ul>')
+        if not block and not low and not high:
+            html_parts.append('<div style="color:#64748b;font-size:13px">暂无有效标签数据</div>')
+        html_parts.append(
+            f'<div style="color:#64748b;font-size:12px">统计: block={summary.get("block",0)} high={summary.get("high",0)} '
+            f'medium={summary.get("medium",0)} low={summary.get("low",0)}</div>'
+        )
+        html_parts.append("</div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>🐸 Meme 机会池 & 排雷</b> <span style="color:#64748b">暂无数据</span></div>')
+
+    # ── 四烟囱信号（P1-3：TVL / GitHub / 融资 / 黑客）──
+    chimney = brief.get("M4_chimney") or {}
+    if isinstance(chimney, dict) and chimney.get("status") in ("ok", "partial"):
+        html_parts.append('<div style="margin-bottom:16px"><b>🏭 四烟囱信号</b>')
+        # TVL
+        tvl_items = []
+        for t in (chimney.get("tvl") or []):
+            if t.get("type") == "category":
+                for it in (t.get("items") or []):
+                    chg = it.get("tvl_change_7d_pct")
+                    if chg is not None:
+                        tvl_items.append(f"{it.get('category','?')} {chg:+.1f}%")
+            elif t.get("type") == "chain":
+                for it in (t.get("items") or []):
+                    chg = it.get("flow_7d_pct")
+                    if chg is not None:
+                        tvl_items.append(f"{it.get('chain','?')} 链 {chg:+.1f}%")
+        if tvl_items:
+            html_parts.append('<div style="font-size:13px"><b>TVL 异动:</b> ' + " / ".join(tvl_items[:6]) + '</div>')
+        # GitHub
+        gh = chimney.get("github") or []
+        if gh:
+            html_parts.append('<div style="font-size:13px;margin-top:4px"><b>GitHub:</b> ' +
+                " / ".join(f"{g.get('symbol','?')} {g.get('direction','')}" for g in gh[:3]) + '</div>')
+        # Funding
+        funding = chimney.get("funding") or []
+        if funding:
+            html_parts.append('<div style="font-size:13px;margin-top:4px"><b>融资:</b> ' +
+                " / ".join(f"{f.get('symbol','?')} {f.get('round','')} ${f.get('amount_m','?')}M" for f in funding[:3]) + '</div>')
+        # Hacks
+        hacks = chimney.get("hacks") or []
+        if hacks:
+            html_parts.append('<div style="font-size:13px;margin-top:4px;color:#dc2626"><b>安全事件:</b> ' +
+                " / ".join(f"{h.get('symbol','?')} ${h.get('amount_usd',0)/1e6:.1f}M {h.get('technique','')}" for h in hacks[:3]) + '</div>')
+        html_parts.append("</div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>🏭 四烟囱信号</b> <span style="color:#64748b">暂无数据</span></div>')
+
+    # ── 聪明钱背离（P1-1）──
+    sm = brief.get("M4_smart_money") or {}
+    if isinstance(sm, dict) and sm.get("status") == "ok" and (sm.get("bullish") or sm.get("bearish")):
+        html_parts.append('<div style="margin-bottom:16px"><b>🐋 聪明钱背离</b>')
+        for s in (sm.get("bullish") or [])[:3]:
+            html_parts.append(
+                f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#f0fdf4;border-radius:4px">'
+                f'<b>{s.get("symbol","?")}</b> {s.get("label","")} '
+                f'置信{s.get("confidence","?")}% · {s.get("description","")}</div>'
+            )
+        for s in (sm.get("bearish") or [])[:3]:
+            html_parts.append(
+                f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#fef2f2;border-radius:4px">'
+                f'<b>{s.get("symbol","?")}</b> {s.get("label","")} '
+                f'置信{s.get("confidence","?")}% · {s.get("description","")}</div>'
+            )
+        html_parts.append("</div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>🐋 聪明钱背离</b> <span style="color:#64748b">暂无信号</span></div>')
+
+    # ── 深加工：机构净流结构 + MVRV 分层 + 可操作建议（P2）──
+    inst = brief.get("M2_institutional") or {}
+    if isinstance(inst, dict) and inst.get("status") in ("ok", "partial"):
+        html_parts.append('<div style="margin-bottom:16px"><b>🏦 机构面 & MVRV 分层</b>')
+        inst_data = inst.get("institutional") or {}
+        etf = inst_data.get("etf_net_flow_usd_m")
+        cex = inst_data.get("cex_netflow_7d_usd")
+        bias = inst_data.get("bias", "neutral")
+        bias_text = {"accumulation": "累积", "distribution": "派发", "neutral": "中性"}.get(bias, bias)
+        etf_str = f"{etf:+.0f}M" if isinstance(etf, (int, float)) else "N/A"
+        cex_str = f"{'+' if cex > 0 else ''}{cex/1e9:.2f}B" if isinstance(cex, (int, float)) else "N/A"
+        html_parts.append(
+            f'<div style="font-size:13px">机构净流: ETF {etf_str} · CEX 7d 净流 {cex_str} → <b>{bias_text}</b></div>'
+        )
+        layers = inst.get("mvrv_layers") or {}
+        html_parts.append(
+            f'<div style="font-size:13px;margin-top:4px">MVRV: 深度低估{layers.get("deep_under",{}).get("count",0)} '
+            f'低估{layers.get("under",{}).get("count",0)} 合理{layers.get("fair",{}).get("count",0)} 高估{layers.get("overvalued",{}).get("count",0)}</div>'
+        )
+        hints = inst.get("actionable_hints") or []
+        if hints:
+            html_parts.append('<ul style="margin:4px 0;padding-left:20px;font-size:13px">' +
+                "".join(f'<li>{h}</li>' for h in hints[:3]) + '</ul>')
+        html_parts.append("</div>")
+    else:
+        html_parts.append('<div style="margin-bottom:16px"><b>🏦 机构面 & MVRV 分层</b> <span style="color:#64748b">暂无数据</span></div>')
+
     # ── AI 解读（如果有） ──
     ai_narrative = brief.get("ai_narrative")
     if ai_narrative:

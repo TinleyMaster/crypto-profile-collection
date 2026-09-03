@@ -88,6 +88,43 @@ def build_brief_context(brief: dict) -> str:
                 )
             parts.append("[M4 共振榜]\n" + "\n".join(r_lines))
 
+    # M4 Meme 风险标签
+    m4m = brief.get("M4_meme") or {}
+    if isinstance(m4m, dict):
+        summary = m4m.get("summary") or {}
+        if summary:
+            parts.append(
+                f"[M4 Meme 风险池] block={summary.get('block',0)} high={summary.get('high',0)} "
+                f"medium={summary.get('medium',0)} low={summary.get('low',0)}"
+            )
+
+    # M4 四烟囱信号
+    m4c = brief.get("M4_chimney") or {}
+    if isinstance(m4c, dict):
+        avail = m4c.get("available") or []
+        if avail:
+            parts.append(f"[M4 四烟囱] 可用信号: {', '.join(avail)}")
+
+    # M4 聪明钱背离
+    m4s = brief.get("M4_smart_money") or {}
+    if isinstance(m4s, dict):
+        b_count = len(m4s.get("bullish") or [])
+        s_count = len(m4s.get("bearish") or [])
+        if b_count or s_count:
+            parts.append(f"[M4 聪明钱背离] 看多{b_count} / 看空{s_count}")
+
+    # M2 深加工
+    m2i = brief.get("M2_institutional") or {}
+    if isinstance(m2i, dict):
+        inst = m2i.get("institutional") or {}
+        layers = m2i.get("mvrv_layers") or {}
+        if inst.get("bias"):
+            parts.append(
+                f"[M2 机构/MVRV] 机构倾向={inst.get('bias')} "
+                f"深度低估={layers.get('deep_under',{}).get('count',0)} "
+                f"高估={layers.get('overvalued',{}).get('count',0)}"
+            )
+
     # M5 催化剂（event_calendar dict: hardcoded, gecko）
     m5 = brief.get("M5_catalyst") or {}
     if isinstance(m5, dict):

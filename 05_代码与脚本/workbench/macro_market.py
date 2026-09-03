@@ -2240,6 +2240,355 @@ def _kol_onchain_signals(
         return []
 
 
+# ══════════════════════════════════════════════════════════════
+# 批④ 数据驱动层：Meme 五维标签 / 4 烟囱 / 深加工 / 聪明钱背离
+# ══════════════════════════════════════════════════════════════
+
+def fetch_meme_risk_summary(limit_per_bucket: int = 5) -> dict:
+    """
+    P0-4：读取 biz.asset_risk_labels，按风险等级聚合 Meme 五维标签池。
+    返回 {status, count, buckets, summary}。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT a.canonical_symbol AS symbol,
+                           a.canonical_name AS name,
+                           a.primary_sector AS sector,
+                           r.total_score, r.risk_label, r.axes_computed,
+                           r.contract_label, r.liquidity_label, r.holder_label,
+                           r.lifecycle_label, r.social_label,
+                           r.flags, r.computed_at
+                    FROM biz.asset_risk_labels r
+                    JOIN core.asset a ON a.asset_id = r.asset_id
+                    WHERE a.status = 'active'
+                      AND r.risk_label IS NOT NULL
+                    ORDER BY r.total_score DESC
+                    LIMIT 500
+                """)
+                rows = cur.fetchall()
+
+        if not rows:
+            return {"status": "empty", "count": 0, "buckets": {}, "summary": {}}
+
+        buckets: dict[str, list[dict]] = {
+            "block": [], "high": [], "medium": [], "low": [], "unknown": []
+        }
+        for r in rows:
+            label = r.get("risk_label") or "unknown"
+            buckets.setdefault(label, []).append({
+                "symbol": r.get("symbol"),
+                "name": r.get("name"),
+                "sector": r.get("sector"),
+                "total_score": float(r["total_score"]) if r.get("total_score") is not None else None,
+                "axes_computed": r.get("axes_computed"),
+                "contract_label": r.get("contract_label"),
+                "liquidity_label": r.get("liquidity_label"),
+                "holder_label": r.get("holder_label"),
+                "lifecycle_label": r.get("lifecycle_label"),
+                "social_label": r.get("social_label"),
+                "flags": r.get("flags") or [],
+            })
+
+        return {
+            "status": "ok",
+            "count": len(rows),
+            "buckets": {k: v[:limit_per_bucket] for k, v in buckets.items()},
+            "summary": {k: len(v) for k, v in buckets.items()},
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "count": 0, "buckets": {}, "summary": {}}
+
+
+def _recent_hacks(window_days: int = 14, limit: int = 5) -> list[tuple]:
+    """P1-3：近期黑客/安全事件（biz.asset_hacks）。返回 [(asset_id, symbol, name, amount, hack_date, technique), ...]。"""
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT h.asset_id, a.canonical_symbol,
+                           h.name, h.amount, h.hack_date, h.technique
+                    FROM biz.asset_hacks h
+                    LEFT JOIN core.asset a ON a.asset_id = h.asset_id
+                    WHERE h.hack_date >= NOW() - make_interval(days => %s)
+                      AND h.amount IS NOT NULL
+                    ORDER BY h.amount DESC
+                    LIMIT %s
+                """, (window_days, limit))
+                rows = cur.fetchall()
+        return [
+            (r[0], r[1] or "?", r[2] or "?", float(r[3]) if r[3] is not None else 0.0,
+             str(r[4]) if r[4] else "", r[5] or "")
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+def build_chimney_signals(overview: dict) -> dict:
+    """
+    P1-3：四烟囱信号消费层（TVL / GitHub / 融资 / 黑客）。
+    TVL 取自 overview 已计算的 narrative_tvl_flow / chain_flow；
+    GitHub / 融资 / 黑客直接读库。
+    返回 {status, tvl, github, funding, hacks}。
+    """
+    status_parts: list[str] = []
+
+    # ── TVL 异动 ──
+    tvl_signals: list[dict] = []
+    try:
+        d5 = (overview.get("dimensions") or {}).get("5板块") or {}
+        d5data = d5.get("data") or {}
+        tvl_cats = (d5data.get("narrative_tvl_flow") or {}).get("categories") or {}
+        chain_flow = (d5data.get("chain_flow_ranking") or {}).get("ranked") or []
+
+        cat_items = []
+        for cat, info in (tvl_cats or {}).items():
+            chg = info.get("tvl_change_7d_pct")
+            if chg is None:
+                continue
+            cat_items.append({
+                "category": cat,
+                "tvl_change_7d_pct": chg,
+                "tvl_usd": info.get("tvl"),
+                "protocols": info.get("protocols"),
+            })
+        cat_items.sort(key=lambda x: abs(x["tvl_change_7d_pct"]), reverse=True)
+
+        chain_items = []
+        for row in chain_flow:
+            flow_pct = row.get("flow_7d_pct")
+            if flow_pct is None:
+                continue
+            chain_items.append({
+                "chain": row.get("chain"),
+                "flow_7d_pct": flow_pct,
+                "flow_7d_usd": row.get("flow_7d"),
+                "tvl": row.get("tvl"),
+            })
+        chain_items.sort(key=lambda x: abs(x["flow_7d_pct"]), reverse=True)
+
+        if cat_items or chain_items:
+            tvl_signals = [
+                {"type": "category", "items": cat_items[:3]},
+                {"type": "chain", "items": chain_items[:3]},
+            ]
+    except Exception as e:
+        tvl_signals = [{"type": "error", "error": str(e)}]
+
+    if tvl_signals:
+        status_parts.append("tvl")
+
+    # ── GitHub dev 活跃 ──
+    github_signals: list[dict] = []
+    try:
+        for gt in _github_activity_targets(window_days=60, burst_ratio=1.5, decline_ratio=0.5, limit=5):
+            aid, symbol, last4, prev4, ratio, direction = gt
+            github_signals.append({
+                "asset_id": aid,
+                "symbol": symbol,
+                "direction": direction,
+                "last4_commits": last4,
+                "prev4_commits": prev4,
+                "ratio": ratio,
+            })
+    except Exception:
+        pass
+    if github_signals:
+        status_parts.append("github")
+
+    # ── 融资落地 ──
+    funding_signals: list[dict] = []
+    try:
+        for rt in _recent_raises(window_days=90, limit=5):
+            aid, symbol, rnd, amount_m, lead, rdate, proto = rt
+            funding_signals.append({
+                "asset_id": aid,
+                "symbol": symbol,
+                "round": rnd,
+                "amount_m": amount_m,
+                "lead": lead,
+                "date": rdate,
+                "protocol": proto,
+            })
+    except Exception:
+        pass
+    if funding_signals:
+        status_parts.append("funding")
+
+    # ── 黑客事件 ──
+    hack_signals: list[dict] = []
+    try:
+        for ht in _recent_hacks(window_days=14, limit=5):
+            aid, symbol, name, amount, hdate, technique = ht
+            hack_signals.append({
+                "asset_id": aid,
+                "symbol": symbol,
+                "name": name,
+                "amount_usd": amount,
+                "date": hdate,
+                "technique": technique,
+            })
+    except Exception:
+        pass
+    if hack_signals:
+        status_parts.append("hacks")
+
+    status = "ok" if status_parts else "empty"
+    if any(isinstance(s, dict) and s.get("type") == "error" for s in tvl_signals):
+        status = "partial"
+
+    return {
+        "status": status,
+        "available": status_parts,
+        "tvl": tvl_signals,
+        "github": github_signals,
+        "funding": funding_signals,
+        "hacks": hack_signals,
+    }
+
+
+def build_institutional_mvrv_summary(overview: dict) -> dict:
+    """
+    P2：深加工——机构净流结构 + MVRV 分层 + 可操作建议。
+    """
+    etf_flows = ((overview.get("dimensions") or {}).get("4机构") or {}).get("data") or {}
+    onchain = overview.get("onchain_anomaly_signals") or {}
+    ex_net = (onchain.get("exchange_netflow") or {}) if isinstance(onchain, dict) else {}
+
+    etf_net = etf_flows.get("net_flow_usd_m")
+    cex_netflow_7d = ex_net.get("netflow_7d_usd") if isinstance(ex_net, dict) else None
+
+    # 机构净流定性
+    inst_bias = "neutral"
+    if etf_net is not None and cex_netflow_7d is not None:
+        if etf_net > 100 and cex_netflow_7d > 200_000_000:
+            inst_bias = "accumulation"
+        elif etf_net < -100 and cex_netflow_7d < -200_000_000:
+            inst_bias = "distribution"
+    elif etf_net is not None:
+        inst_bias = "accumulation" if etf_net > 100 else "distribution" if etf_net < -100 else "neutral"
+    elif cex_netflow_7d is not None:
+        inst_bias = "accumulation" if cex_netflow_7d > 200_000_000 else "distribution" if cex_netflow_7d < -200_000_000 else "neutral"
+
+    # MVRV 分层
+    mvrv = ((overview.get("dimensions") or {}).get("mvrv_universe") or {}).get("data") or {}
+    coins = mvrv.get("coins") or []
+
+    deep_under = [c for c in coins if c.get("pct_full") is not None and c.get("pct_full", 100) <= 15]
+    under = [c for c in coins if 15 < c.get("pct_full", 100) <= 30]
+    fair = [c for c in coins if 30 < c.get("pct_full", 100) < 85]
+    over = [c for c in coins if c.get("pct_full", 100) >= 85]
+
+    def _coin_summary(c):
+        return {
+            "symbol": c.get("symbol"),
+            "pct_full": c.get("pct_full"),
+            "value": c.get("value"),
+        }
+
+    mvrv_layers = {
+        "deep_under": {"count": len(deep_under), "coins": [_coin_summary(c) for c in deep_under[:3]]},
+        "under": {"count": len(under), "coins": [_coin_summary(c) for c in under[:3]]},
+        "fair": {"count": len(fair)},
+        "overvalued": {"count": len(over), "coins": [_coin_summary(c) for c in over[:3]]},
+    }
+
+    # 可操作建议
+    actions: list[str] = []
+    if inst_bias == "accumulation":
+        actions.append("机构+CEX 同步净流入 → 中线偏多，关注回调加仓")
+    elif inst_bias == "distribution":
+        actions.append("机构+CEX 同步净流出 → 降低敞口，警惕高位回落")
+    if deep_under:
+        actions.append(f"{len(deep_under)} 个标的 MVRV 深度低估 → 左侧分批关注")
+    if over:
+        actions.append(f"{len(over)} 个标的 MVRV 高估 → 不追高中线止盈")
+
+    return {
+        "status": "ok" if coins else "partial",
+        "institutional": {
+            "etf_net_flow_usd_m": etf_net,
+            "cex_netflow_7d_usd": cex_netflow_7d,
+            "bias": inst_bias,
+        },
+        "mvrv_layers": mvrv_layers,
+        "actionable_hints": actions,
+    }
+
+
+def build_smart_money_divergence(overview: dict, max_assets: int = 20) -> dict:
+    """
+    P1-1：聪明钱背离段。遍历 opportunity_list 中含 asset_id 的标的，
+    调用 db_stats.get_divergence_signals，聚合 bullish/bearish 信号。
+    硬依赖：MEME-01 修复后 onchain_holder_snapshot 4 列非空。
+    """
+    opps = (overview.get("opportunity_list") or {}).get("opportunities") or []
+    asset_ids: list[int] = []
+    seen: set[int] = set()
+    for o in opps:
+        aid = o.get("asset_id")
+        if isinstance(aid, int) and aid not in seen:
+            asset_ids.append(aid)
+            seen.add(aid)
+    asset_ids = asset_ids[:max_assets]
+
+    if not asset_ids:
+        return {"status": "empty", "bullish": [], "bearish": [], "count": 0}
+
+    try:
+        from db_stats import get_divergence_signals
+    except Exception as e:
+        return {"status": "error", "error": str(e), "bullish": [], "bearish": [], "count": 0}
+
+    bullish: list[dict] = []
+    bearish: list[dict] = []
+    for aid in asset_ids:
+        try:
+            res = get_divergence_signals(aid)
+            if not res.get("ok"):
+                continue
+            symbol = res.get("symbol") or "?"
+            for sig in res.get("signals") or []:
+                entry = {
+                    "asset_id": aid,
+                    "symbol": symbol,
+                    "type": sig.get("type"),
+                    "label": sig.get("label"),
+                    "severity": sig.get("severity"),
+                    "confidence": sig.get("confidence"),
+                    "description": sig.get("description"),
+                }
+                if sig.get("type") == "bullish_divergence":
+                    bullish.append(entry)
+                elif sig.get("type") == "bearish_divergence":
+                    bearish.append(entry)
+        except Exception:
+            continue
+
+    status = "ok" if (bullish or bearish) else "empty"
+    return {
+        "status": status,
+        "bullish": bullish,
+        "bearish": bearish,
+        "count": len(bullish) + len(bearish),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# FEAT-HIGHLIGHT-002：高亮信号精选
+# ══════════════════════════════════════════════════════════════
+
 def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> list[dict]:
     """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。"""
     quotas = {
@@ -3333,6 +3682,10 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
             o for o in opps if o.get("conviction_tier") != "HIGH"
         ],
         "M4_resonance": today.get("resonance") or {},
+        "M4_meme": today.get("meme_risk") or {},
+        "M4_chimney": today.get("chimney_signals") or {},
+        "M4_smart_money": today.get("smart_money_divergence") or {},
+        "M2_institutional": today.get("institutional_mvrv") or {},
         "M5_catalyst": today.get("event_calendar") or {},
         "M6_degraded": _collect_degraded(today),
         "DIFF": diff,
@@ -3912,6 +4265,12 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P0-3 共振榜（共识动量 ∩ 宏观 conviction） ──
     result["resonance"] = build_resonance_signals(result)
+
+    # ── 批④ 数据驱动层 ──
+    result["meme_risk"] = fetch_meme_risk_summary()
+    result["chimney_signals"] = build_chimney_signals(result)
+    result["institutional_mvrv"] = build_institutional_mvrv_summary(result)
+    result["smart_money_divergence"] = build_smart_money_divergence(result)
 
     _cache = result
     _cache_ts = now

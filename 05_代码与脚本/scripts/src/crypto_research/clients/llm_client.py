@@ -249,7 +249,7 @@ class LLMClient:
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
     ) -> str:
-        """OpenAI 兼容的 /chat/completions 接口。"""
+        """OpenAI 兼容的 /chat/completions 接口（流式）。"""
         if not self.is_available():
             raise RuntimeError("No LLM provider configured.")
 
@@ -267,6 +267,7 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "max_tokens": max_tokens,
+            "stream": True,
         }
 
         # DeepSeek V4 默认启用思考模式，噪声判断不需要深度推理，显式禁用
@@ -276,39 +277,35 @@ class LLMClient:
         else:
             payload["temperature"] = temperature
 
+        # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
         resp = self.session.post(
             url, headers=headers, json=payload,
-            timeout=self._timeout,
+            timeout=(10, 60), stream=True,
         )
         resp.raise_for_status()
 
-        # 内容类型校验：防止代理/网关返回 HTML 错误页被当成 JSON 解析
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" not in content_type.lower():
-            snippet = resp.text[:500]
-            raise RuntimeError(
-                f"LLM API 返回非 JSON 响应 (Content-Type: {content_type})。"
-                f"状态码: {resp.status_code}，前 500 字符: {snippet}"
-            )
+        content = ""
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[len("data:"):].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                data = json.loads(chunk)
+                delta = data["choices"][0]["delta"].get("content") or ""
+                content += delta
+            except Exception:
+                continue
 
-        data = resp.json()
-        self._last_full_response = data
-
-        content = data["choices"][0]["message"].get("content") or ""
-        # 兜底：如果 content 为空，尝试从 reasoning_content 获取
-        if not content:
-            reasoning = data["choices"][0]["message"].get("reasoning_content") or ""
-            if reasoning:
-                self._last_diag["used_reasoning_content"] = True
-                return reasoning
-
+        self._last_full_response = {"streamed_content_length": len(content)}
         return content
 
     def _call_responses(
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
     ) -> str:
-        """火山方舟 /api/v3/responses 接口（DeepSeek 系列模型）。"""
+        """火山方舟 /api/v3/responses 接口（DeepSeek 系列模型，流式）。"""
         if not self.is_available():
             raise RuntimeError("No LLM provider configured.")
 
@@ -321,72 +318,44 @@ class LLMClient:
         }
         payload: dict[str, Any] = {
             "model": self.model,
-            "stream": False,
+            "stream": True,
             "input": [
                 {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
                 {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
             ],
         }
 
+        # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
         resp = self.session.post(
             url, headers=headers, json=payload,
-            timeout=self._timeout,
+            timeout=(10, 60), stream=True,
         )
         resp.raise_for_status()
 
-        # 内容类型校验：防止代理/网关返回 HTML 错误页被当成 JSON 解析
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" not in content_type.lower():
-            snippet = resp.text[:500]
-            raise RuntimeError(
-                f"LLM API 返回非 JSON 响应 (Content-Type: {content_type})。"
-                f"状态码: {resp.status_code}，前 500 字符: {snippet}"
-            )
+        # 消费 SSE，按 Responses API 格式重建 content
+        content = ""
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[len("data:"):].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                data = json.loads(chunk)
+                # 格式1: output_message item，delta.content 为 text
+                if data.get("type") == "output_message":
+                    for c in data.get("content", []):
+                        if isinstance(c, dict) and c.get("type") == "output_text":
+                            content += c.get("text", "")
+                # 格式2: choices delta（部分 provider 用此格式）
+                elif "choices" in data:
+                    delta = data["choices"][0].get("delta", {})
+                    content += delta.get("content") or ""
+            except Exception:
+                continue
 
-        data = resp.json()
-        self._last_full_response = data  # 保存完整响应用于调试
-
-        # 多种格式兼容提取
-        # 格式1: output[].content[].text (type=output_text 或 type=text)
-        output = data.get("output", [])
-        for item in output:
-            if item.get("type") == "message" and item.get("role") == "assistant":
-                content = item.get("content", [])
-                # content 可能是字符串
-                if isinstance(content, str):
-                    return content
-                # content 可能是列表，尝试多种 type
-                if isinstance(content, list):
-                    parts = []
-                    for c in content:
-                        if isinstance(c, dict) and "text" in c:
-                            parts.append(c["text"])
-                    if parts:
-                        return "".join(parts)
-
-        # 格式2: 顶层 output_text
-        if data.get("output_text"):
-            return str(data["output_text"])
-
-        # 格式3: choices (OpenAI 兼容格式)
-        choices = data.get("choices", [])
-        if choices:
-            msg = choices[0].get("message", {})
-            if msg.get("content"):
-                return str(msg["content"])
-
-        # 格式4: output 里直接是文本
-        if isinstance(output, str) and output:
-            return output
-
-        # 兜底：返回空字符串（上层会当失败处理）
-        self._last_diag = {
-            "keys": list(data.keys()),
-            "output_type": type(output).__name__,
-            "output_len": len(output) if isinstance(output, list) else None,
-            "first_item_keys": list(output[0].keys()) if isinstance(output, list) and output else None,
-        }
-        return ""
+        self._last_full_response = {"streamed_content_length": len(content)}
+        return content
 
     def batch_check_crypto_relevance(
         self,

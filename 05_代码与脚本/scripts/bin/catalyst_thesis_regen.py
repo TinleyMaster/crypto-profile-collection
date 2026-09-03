@@ -205,6 +205,140 @@ def regen_thesis(asset_id: int) -> dict:
     return generate_research_thesis(asset_id)
 
 
+# ── 失败重试队列（bounded-retry + 死信）──
+
+def _ensure_failed_table():
+    """确保 catalyst_regen_failed 表存在。"""
+    settings = get_settings(require_database=True)
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biz.catalyst_regen_failed (
+                    asset_id        BIGINT PRIMARY KEY,
+                    error_msg       TEXT,
+                    attempt_count   INT DEFAULT 1,
+                    next_retry_at   TIMESTAMPTZ DEFAULT NOW(),
+                    status          TEXT DEFAULT 'pending',  -- pending / dead
+                    created_at      TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        conn.commit()
+
+
+def _enqueue_failed(failed_list: list[tuple[int, str]]):
+    """将失败资产写入重试队列（UPSERT，attempt_count+1，指数退避）。"""
+    if not failed_list:
+        return
+    _ensure_failed_table()
+    settings = get_settings(require_database=True)
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            for aid, err in failed_list:
+                cur.execute("""
+                    INSERT INTO biz.catalyst_regen_failed
+                        (asset_id, error_msg, attempt_count, next_retry_at, status, updated_at)
+                    VALUES (%s, %s, 1, NOW() + INTERVAL '5 minutes', 'pending', NOW())
+                    ON CONFLICT (asset_id) DO UPDATE SET
+                        error_msg = EXCLUDED.error_msg,
+                        attempt_count = biz.catalyst_regen_failed.attempt_count + 1,
+                        next_retry_at = NOW() + (
+                            CASE biz.catalyst_regen_failed.attempt_count
+                                WHEN 1 THEN INTERVAL '10 minutes'
+                                WHEN 2 THEN INTERVAL '30 minutes'
+                                ELSE INTERVAL '2 hours'
+                            END
+                        ),
+                        status = CASE
+                            WHEN biz.catalyst_regen_failed.attempt_count >= 3 THEN 'dead'
+                            ELSE 'pending'
+                        END,
+                        updated_at = NOW()
+                """, (aid, err[:500]))
+        conn.commit()
+
+
+def _retry_from_queue(max_attempts: int = 3) -> tuple[int, int]:
+    """从重试队列捞 pending 资产重试，返回 (retried_success, dead_count)。"""
+    _ensure_failed_table()
+    settings = get_settings(require_database=True)
+    retried = 0
+    dead = 0
+
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT asset_id, attempt_count
+                FROM biz.catalyst_regen_failed
+                WHERE status = 'pending' AND next_retry_at <= NOW()
+                ORDER BY next_retry_at
+                LIMIT 10
+            """)
+            rows = cur.fetchall()
+
+    if not rows:
+        # 统计 dead 数
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM biz.catalyst_regen_failed WHERE status = 'dead'")
+                dead = cur.fetchone()[0]
+        return 0, dead
+
+    for aid, attempt in rows:
+        print(f"  🔁 重试 asset_id={aid} (第 {attempt} 次) ...")
+        try:
+            result = regen_thesis(aid)
+            if result.get("ok"):
+                print(f"    ✅ 重试成功")
+                retried += 1
+                # 删除成功记录
+                with get_connection(settings.database_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM biz.catalyst_regen_failed WHERE asset_id = %s", (aid,))
+                    conn.commit()
+            else:
+                err = result.get("error", "unknown")
+                print(f"    ❌ 重试失败: {err}")
+                _update_failed(aid, err)
+        except Exception as e:
+            print(f"    ❌ 重试异常: {e}")
+            _update_failed(aid, str(e))
+
+    # 统计 dead 数
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM biz.catalyst_regen_failed WHERE status = 'dead'")
+            dead = cur.fetchone()[0]
+
+    return retried, dead
+
+
+def _update_failed(aid: int, err: str):
+    """更新失败记录：attempt_count+1，超限则标 dead。"""
+    settings = get_settings(require_database=True)
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE biz.catalyst_regen_failed
+                SET attempt_count = attempt_count + 1,
+                    error_msg = %s,
+                    status = CASE
+                        WHEN attempt_count >= 3 THEN 'dead'
+                        ELSE 'pending'
+                    END,
+                    next_retry_at = NOW() + (
+                        CASE attempt_count
+                            WHEN 1 THEN INTERVAL '10 minutes'
+                            WHEN 2 THEN INTERVAL '30 minutes'
+                            ELSE INTERVAL '2 hours'
+                        END
+                    ),
+                    updated_at = NOW()
+                WHERE asset_id = %s
+            """, (err[:500], aid))
+        conn.commit()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="催化剂驱动 thesis 重生（DB 复合游标）")
     parser.add_argument("--max-assets", type=int, default=100,
@@ -250,6 +384,7 @@ def main() -> int:
 
     success = 0
     failed = 0
+    failed_list: list[tuple[int, str]] = []  # (asset_id, error_msg)
 
     for i, aid in enumerate(asset_ids, 1):
         print(f"\n[{i}/{len(asset_ids)}] 重生 asset_id={aid} ...")
@@ -259,29 +394,36 @@ def main() -> int:
                 print(f"  ✅ 成功 (stance={result.get('stance', '?')})")
                 success += 1
             else:
-                print(f"  ❌ 失败: {result.get('error', 'unknown')}")
+                err = result.get("error", "unknown")
+                print(f"  ❌ 失败: {err}")
                 failed += 1
+                failed_list.append((aid, err))
         except Exception as e:
             print(f"  ❌ 异常: {e}")
             failed += 1
+            failed_list.append((aid, str(e)))
 
-    # 游标模式下，成功处理后更新游标
-    # 关键修复：有失败资产时不推进游标，确保失败资产下轮能被重新取到
-    # （成功资产有 thesis，fresh-hours 闸门会自动跳过；失败资产无 thesis，会被重新选取）
-    if is_cursor_mode and success > 0 and failed == 0:
+    # 游标模式：始终推进游标到本批末行，保证前向进度
+    if is_cursor_mode:
         if is_complete:
-            # 追平（不满批）：游标推进到本批最后一行的复合键，下次只取之后的新数据。
-            # 绝不清空游标——清空会让下轮重扫近 7 天窗口，同一批资产反复重生，
-            # 每次都是一次 20K+ token 的重型 LLM 调用（DeepSeek 额度暴耗根因）。
             save_ts = new_ts or datetime.now(timezone.utc).isoformat()
             _save_cursor(save_ts, new_aid or 0, success)
             print(f"\n游标已追平（推进到 ({save_ts}, {new_aid or 0})，下次只取新数据）")
         else:
-            # 满批 = 还有下一批，游标推进到最后一行
             _save_cursor(new_ts, new_aid, success)
             print(f"\n游标已更新: ({new_ts}, {new_aid})")
-    elif is_cursor_mode and failed > 0:
-        print(f"\n⚠️ 有 {failed} 个资产失败，游标不推进，下轮重试全部资产")
+        # 失败资产隔离进重试队列（不阻塞游标前进）
+        if failed_list:
+            _enqueue_failed(failed_list)
+            print(f"  ⚠️ {failed} 个失败资产已写入重试队列，下轮/本 run 末尾单独重试")
+
+    # 重试队列处理（每轮 run 末尾）
+    if is_cursor_mode:
+        retried, dead = _retry_from_queue(max_attempts=3)
+        if retried > 0:
+            print(f"\n🔁 重试队列: 成功 {retried} 个")
+        if dead > 0:
+            print(f"  💀 死信: {dead} 个资产超限（已放弃，不阻塞流水线）")
 
     print()
     print("=" * 60)

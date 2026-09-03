@@ -182,9 +182,15 @@ def main() -> int:
                 hit += 1
                 continue
 
-            with conn.cursor() as cur:
-                cur.execute(UPSERT_SQL, result)
-            conn.commit()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(UPSERT_SQL, result)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"  ERROR UPSERT asset_id={aid}: {e}", file=sys.stderr)
+                miss += 1
+                continue
             hit += 1
 
             if i < len(assets):

@@ -53,14 +53,13 @@ class InsiderClusterClient:
     def _parse(self, asset_id: int, mint: str, d: dict, total_supply: Optional[float]) -> dict:
         import json as _json
 
-        ins = d.get("insiderNetworks") or []
-        g = d.get("graphInsidersDetected") or 0
+        rug_supply = d.get("token", {}).get("supply")
         holders = d.get("totalHolders") or 0
-        supply = total_supply or d.get("token", {}).get("supply")
+        g = d.get("graphInsidersDetected") or 0
 
         top = max(ins, key=lambda x: float(x.get("tokenAmount") or 0), default={})
         top_amt = float(top.get("tokenAmount") or 0)
-        dominance = round(top_amt / float(supply), 4) if supply else None
+        dominance = round(top_amt / float(rug_supply), 4) if rug_supply else None
         acct_ratio = round(g / holders, 4) if holders else None
 
         bundle = any(
@@ -79,7 +78,7 @@ class InsiderClusterClient:
             "top_network_size": top.get("size"),
             "top_network_active_accounts": top.get("activeAccounts"),
             "top_network_token_amount": top_amt,
-            "total_supply": supply,
+            "total_supply": rug_supply if rug_supply else (total_supply or None),
             "total_holders": holders,
             "insider_dominance": dominance,
             "insider_account_ratio": acct_ratio,
@@ -92,7 +91,7 @@ class InsiderClusterClient:
                 "graphInsidersDetected": g,
                 "insiderNetworks": ins[:5],
                 "totalHolders": holders,
-                "total_supply": supply,
+                "total_supply": rug_supply,
                 "rugged": d.get("rugged"),
             },
         }

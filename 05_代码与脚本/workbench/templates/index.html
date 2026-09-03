@@ -7433,10 +7433,41 @@
                 html += `</details>`;
             }
 
-            if (!oppList.length) {
+            // P0-3 修复： opportunities 空态时降级展示 excluded（低置信观测池）
+            if (!oppList.length && oppExcluded.length) {
+                // 按 signal_type 聚合
+                const grouped = {};
+                oppExcluded.forEach(o => {
+                    const st = o.signal_type || 'other';
+                    if (!grouped[st]) grouped[st] = [];
+                    grouped[st].push(o);
+                });
+
+                html += `<div style="margin:12px 0;padding:10px 12px;background:rgba(71,85,105,0.15);border:1px dashed #475569;border-radius:8px">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                        <span style="font-size:13px;color:#e2e8f0;font-weight:600">🔭 低置信观测池</span>
+                        <span style="font-size:11px;color:#94a3b8">当前无 HIGH/MED 信号，以下 ${oppExcluded.length} 条为引擎算出的低置信候选</span>
+                    </div>`;
+
+                Object.keys(grouped).forEach(st => {
+                    const items = grouped[st];
+                    const stMap = (typeof SIGNAL_TYPE_LABEL !== 'undefined' ? SIGNAL_TYPE_LABEL : {}) || {};
+                    const typeLabel = (stMap[st] || {label: st}).label;
+                    html += `<details style="margin-bottom:6px" open>
+                        <summary style="font-size:12px;color:#94a3b8;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:6px">
+                            <span style="background:#1e293b;padding:1px 6px;border-radius:4px">${typeLabel}</span>
+                            <span>${items.length} 条</span>
+                        </summary>
+                        <div style="opacity:0.85">`;
+                    items.forEach(o => { html += renderOpp(o); });
+                    html += `</div></details>`;
+                });
+
+                html += `</div>`;
+            } else if (!oppList.length) {
                 html += `<div style="text-align:center;padding:20px;color:#6b7280">⚠️ 暂无高置信机会</div>`;
             }
-            if (oppExcluded.length) {
+            if (oppExcluded.length && oppList.length) {
                 html += `<div style="font-size:11px;color:#6b7280;margin-top:6px;padding:4px 8px;background:#1e293b;border-radius:4px">已剔除低置信 ${oppExcluded.length} 条（可追溯）</div>`;
             }
             html += `</div>

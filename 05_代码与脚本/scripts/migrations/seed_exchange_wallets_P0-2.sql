@@ -31,7 +31,7 @@ VALUES
     -- 已有 3 个（保留）
     ('0x8894e0a0c962cb723c1976a4421c95949be2d4e3', 'Binance', 'bsc', 'exchange', 'high', 'bscscan-label-P0-2'),
     ('0x0d0707963952f2fba59dd06f2b425ace40b492fe', 'Binance', 'bsc', 'exchange', 'high', 'bscscan-label-P0-2'),
-    ('0x18b2a687610328590bc8f2e5fedde3b582a49cda', 'Binance', 'bsc', 'exchange', 'medium', 'bscscan-label-P0-2'),
+    ('0x18b2a687610328590bc8f2e5fedde3b582a49cda', 'Binance', 'bsc', 'exchange', 'medium', 'bscscan-label-P0-2')
     -- 新增 3 个（示例占位符，需替换为真实高可信地址）
     -- TODO: 请女王侧补充真实 BSC 交易所地址；以下为占位，执行前必须替换或删除
     -- ('0x______________________________', 'Binance', 'bsc', 'exchange', 'high', 'bscscan-label-P0-2'),

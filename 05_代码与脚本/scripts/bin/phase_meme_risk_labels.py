@@ -142,11 +142,11 @@ def main() -> int:
 
             # detail 序列化（phase 负责补的键，必须在缺失核对前补齐）
             result["detail"] = json.dumps({
-                "contract": {"score": result["contract_score"], "flags": []},
-                "liquidity": {"score": result["liquidity_score"], "flags": []},
-                "holder": {"score": result["holder_score"], "flags": []},
-                "lifecycle": {"score": result["lifecycle_score"], "flags": []},
-                "social": {"score": result["social_score"], "flags": []},
+                "contract": {"score": result["contract_score"], "flags": result.get("contract_flags", [])},
+                "liquidity": {"score": result["liquidity_score"], "flags": result.get("liquidity_flags", [])},
+                "holder": {"score": result["holder_score"], "flags": result.get("holder_flags", [])},
+                "lifecycle": {"score": result["lifecycle_score"], "flags": result.get("lifecycle_flags", [])},
+                "social": {"score": result["social_score"], "flags": result.get("social_flags", [])},
             }, ensure_ascii=False)
 
             # 占位符 − dict keys 核对（新铁律）：补完 phase 键后再核，避免误杀

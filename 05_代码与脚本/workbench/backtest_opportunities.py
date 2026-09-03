@@ -233,6 +233,7 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
             "loss": loss,
             "alpha": alpha,
             "btc_ret_pct": btc_ret,
+            "raw_strength": opportunity.get("conviction_strength"),
         })
 
     if not results:
@@ -273,6 +274,7 @@ def backtest_opportunities(days: int = 30) -> dict:
                 return {"status": "no_data", "message": f"无 {days} 天内快照"}
 
             all_results: list[dict] = []
+            total_skipped_not_backtestable = 0
             for sd in snap_dates:
                 cur.execute(
                     "SELECT payload FROM biz.market_overview_snapshot WHERE snap_date = %s",
@@ -283,12 +285,26 @@ def backtest_opportunities(days: int = 30) -> dict:
                     continue
                 payload = dict(row[0]) if row[0] else {}
                 opps = ((payload.get("opportunity_list") or {}).get("opportunities") or [])
+                # D2 过滤：跳过不可回测的 signal_type + 同 target 去重
+                seen_targets: set[str] = set()
+                skipped_backtestable = 0
                 for opp in opps:
+                    st = opp.get("signal_type")
+                    tgt = opp.get("target", "")
+                    if not st or not tgt:
+                        continue
+                    if st in NOT_BACKTESTABLE:
+                        skipped_backtestable += 1
+                        continue
+                    if tgt in seen_targets:
+                        continue
+                    seen_targets.add(tgt)
                     opp["_snap_date"] = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
                     opp["_asset_id"] = None
                     bt = backtest_single(opp, cur)
                     if bt:
                         all_results.append(bt)
+                total_skipped_not_backtestable += skipped_backtestable
 
     # 按 signal_type 聚合
     by_type: dict[str, list[dict]] = {}

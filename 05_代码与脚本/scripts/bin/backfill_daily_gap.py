@@ -97,8 +97,10 @@ def backfill_via_cmc_historical(
     batch_size: int = 50,
     dry_run: bool = False,
     log=None,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
 ) -> dict:
-    """通过 CMC 历史行情 API 回填指定日期。"""
+    """通过 CMC 历史行情 API 回填指定日期，带指数退避重试。"""
     from crypto_research.clients.cmc_client import CMCClient
 
     settings = get_settings(require_database=True)
@@ -115,19 +117,15 @@ def backfill_via_cmc_historical(
     total_batches = (len(assets) + batch_size - 1) // batch_size
     total_rows = 0
     errors = []
+    failed_batches = []  # (batch_idx, cmc_ids) 待重试
 
     def _log(msg):
         print(msg)
         if log:
             log(msg)
 
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, len(assets))
-        batch_cmc_ids = [cmc_id for _, cmc_id in assets[batch_start:batch_end]]
-
-        _log(f"[CMC] Batch {batch_idx + 1}/{total_batches}: {len(batch_cmc_ids)} assets")
-
+    def _fetch_batch(batch_cmc_ids: list[int], attempt: int = 0) -> dict | None:
+        """单次 API 调用，失败返回 None。"""
         try:
             resp = cmc.get_quotes_historical(
                 ids=batch_cmc_ids,
@@ -135,11 +133,28 @@ def backfill_via_cmc_historical(
                 time_end=time_end,
                 interval="daily",
             )
+            return resp
         except Exception as e:
-            err_msg = f"Batch {batch_idx + 1} API error: {e}"
-            _log(f"[CMC] {err_msg}")
-            errors.append(err_msg)
-            time.sleep(2)
+            if "429" in str(e) and attempt < max_retries:
+                delay = base_delay * (2 ** attempt)  # 指数退避: 2s, 4s, 8s
+                _log(f"[CMC]   429 限流，等待 {delay:.0f}s 后重试 ({attempt+1}/{max_retries})")
+                time.sleep(delay)
+                return _fetch_batch(batch_cmc_ids, attempt + 1)
+            return None
+
+    # 第一轮：正常遍历
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(assets))
+        batch_cmc_ids = [cmc_id for _, cmc_id in assets[batch_start:batch_end]]
+
+        _log(f"[CMC] Batch {batch_idx + 1}/{total_batches}: {len(batch_cmc_ids)} assets")
+
+        resp = _fetch_batch(batch_cmc_ids)
+        if resp is None:
+            failed_batches.append((batch_idx, batch_cmc_ids))
+            _log(f"[CMC]   Batch {batch_idx + 1} 失败，加入重试队列")
+            time.sleep(base_delay)
             continue
 
         data = resp.get("data") or {}
@@ -212,12 +227,97 @@ def backfill_via_cmc_historical(
         else:
             _log(f"[CMC]   No rows for target dates")
 
-        time.sleep(1.5)
+        time.sleep(base_delay)
+
+    # 第二轮：重试失败的 batch（更长间隔）
+    if failed_batches:
+        _log(f"\n[CMC] === 重试 {len(failed_batches)} 个失败 batch ===")
+        retry_delay = base_delay * 5  # 重试间隔更长
+        still_failed = []
+
+        for batch_idx, batch_cmc_ids in failed_batches:
+            _log(f"[CMC] Retry Batch {batch_idx + 1}: {len(batch_cmc_ids)} assets")
+            time.sleep(retry_delay)
+
+            resp = _fetch_batch(batch_cmc_ids)
+            if resp is None:
+                still_failed.append(batch_idx)
+                _log(f"[CMC]   Batch {batch_idx + 1} 重试仍失败")
+                continue
+
+            data = resp.get("data") or {}
+            rows = []
+            for cmc_id_str, coin_data in data.items():
+                cmc_id = int(cmc_id_str)
+                asset_id = asset_id_map.get(cmc_id)
+                if asset_id is None:
+                    continue
+                for quote_entry in (coin_data.get("quotes") or []):
+                    timestamp_str = quote_entry.get("timestamp")
+                    if not timestamp_str:
+                        continue
+                    try:
+                        quote_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+                    except (ValueError, AttributeError):
+                        continue
+                    market_date = quote_time.date()
+                    if market_date not in target_dates:
+                        continue
+                    quote_usd = (quote_entry.get("quote") or {}).get("USD") or {}
+                    rows.append({
+                        "asset_id": asset_id,
+                        "market_date": market_date,
+                        "source_code": "cmc_historical",
+                        "price_usd": quote_usd.get("price"),
+                        "market_cap": quote_usd.get("market_cap"),
+                        "fdv": quote_usd.get("fully_diluted_market_cap"),
+                        "circulating_supply": quote_usd.get("circulating_supply"),
+                        "total_supply": quote_usd.get("total_supply"),
+                        "volume_24h": quote_usd.get("volume_24h"),
+                        "change_24h": quote_usd.get("percent_change_24h"),
+                        "change_7d": quote_usd.get("percent_change_7d"),
+                    })
+
+            if rows and not dry_run:
+                sql = """
+                    INSERT INTO biz.asset_market_daily
+                        (asset_id, market_date, source_code, price_usd,
+                         market_cap, fdv, circulating_supply, total_supply,
+                         volume_24h, change_24h, change_7d, raw_ref)
+                    VALUES (
+                        %(asset_id)s, %(market_date)s, %(source_code)s, %(price_usd)s,
+                        %(market_cap)s, %(fdv)s, %(circulating_supply)s, %(total_supply)s,
+                        %(volume_24h)s, %(change_24h)s, %(change_7d)s,
+                        '{"source": "cmc_historical_backfill"}'::jsonb
+                    )
+                    ON CONFLICT (asset_id, market_date, source_code) DO UPDATE SET
+                        price_usd = EXCLUDED.price_usd,
+                        market_cap = EXCLUDED.market_cap,
+                        fdv = EXCLUDED.fdv,
+                        circulating_supply = EXCLUDED.circulating_supply,
+                        total_supply = EXCLUDED.total_supply,
+                        volume_24h = EXCLUDED.volume_24h,
+                        change_24h = EXCLUDED.change_24h,
+                        change_7d = EXCLUDED.change_7d,
+                        updated_at = NOW()
+                """
+                with conn.cursor() as cur:
+                    cur.executemany(sql, rows)
+                conn.commit()
+                total_rows += len(rows)
+                _log(f"[CMC]   Retry inserted {len(rows)} rows")
+            elif dry_run:
+                total_rows += len(rows)
+
+        if still_failed:
+            errors.append(f"{len(still_failed)} batches failed after retry")
 
     return {
         "total_rows": total_rows,
         "errors": errors,
         "batches": total_batches,
+        "failed_batches": len(failed_batches),
+        "retry_failed": len(still_failed) if failed_batches else 0,
     }
 
 

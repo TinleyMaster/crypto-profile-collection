@@ -196,6 +196,16 @@ meme_risk:
     gh_min_activity: 5    # 近 30 天 GitHub 活跃 ≥5 → active(低分)；0 → dead_github
     # 方向语义 A：死盘/零社交=风险(高分)，活跃=正面(低分)，取各渠道最活跃值
 
+# ── Meme insider 网络聚类（MEME-07）──
+insider_cluster:
+  top_n_networks: 5
+  dominance_high: 0.20        # insider 最大网络持币占比 > 20% → high
+  dominance_medium: 0.10      # 10~20% → medium
+  account_ratio_high: 0.30   # insider 账户占全 holder > 30% → high
+  account_ratio_medium: 0.15
+  bundle_token_amount_pct: 0.05  # size<=10 网络持币 > top 5% → bundle_flag
+  # 多信号加权：high 若任一 high 信号；medium 若任一 medium；否则 clean
+
 # ── Meme 四阶段生命周期（MEME-05）──
 meme_lifecycle:
   thresholds:

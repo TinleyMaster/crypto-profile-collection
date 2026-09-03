@@ -1812,7 +1812,7 @@
         <div class="r-title" id="r-title">🤖 一键投研</div>
         <div class="r-actions">
             <button id="r-fill-btn" onclick="fillMissing()">补齐缺失</button>
-            <button onclick="window.open('/research/' + ASSET_ID, '_blank', 'noopener')">🔗 投研链接</button>
+            <button onclick="showResearchLinks()">🔗 投研链接</button>
             <button onclick="location.href='/'">关闭</button>
         </div>
     </header>
@@ -2184,6 +2184,7 @@
         }
 
         function render (d) {
+            window.RESEARCH_DATA = d;  // FIX-F: 供「投研链接」按钮读取已加载的外部链接
             const title = d.title || '一键投研';
             document.getElementById('r-title').textContent = '🤖 ' + title;
             document.title = title;
@@ -3525,6 +3526,55 @@
             }
 
             document.getElementById('r-sidebar').innerHTML = side;
+        }
+
+        function showResearchLinks () {
+            const d = window.RESEARCH_DATA;
+            if (!d) { alert('笔记本尚未打开'); return; }
+            const links = [];
+            // 1) 投研资料完整性里的外部链接
+            (d.missing || []).forEach(function (m) {
+                (m.links || []).forEach(function (l) {
+                    if (l && l.url) links.push({ url: l.url, title: l.title || l.url, type: l.type || '资料' });
+                });
+            });
+            // 2) thesis 引用来源
+            (d.sources || []).forEach(function (s) {
+                if (s && s.url && !links.some(function (x) { return x.url === s.url; })) {
+                    links.push({ url: s.url, title: s.title || s.url, type: s.type || '来源' });
+                }
+            });
+            // 3) 去重
+            const seen = {};
+            const uniq = links.filter(function (x) {
+                if (seen[x.url]) return false;
+                seen[x.url] = true; return true;
+            });
+            // 4) 渲染 popover
+            let html = '<div id="rl-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center" onclick="closeResearchLinks()">';
+            html += '<div style="background:#1e2230;color:#e5e7eb;max-width:560px;width:90%;max-height:80vh;overflow:auto;padding:20px;border-radius:10px" onclick="event.stopPropagation()">';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong style="font-size:15px">🔗 投研链接</strong><button onclick="closeResearchLinks()" style="background:#374151;color:#e5e7eb;border:none;border-radius:6px;padding:4px 10px;cursor:pointer">关闭</button></div>';
+            if (uniq.length === 0) {
+                html += '<div style="color:#9ca3af;font-size:13px">暂无外部投研链接</div>';
+            } else {
+                uniq.forEach(function (x) {
+                    html += '<div style="padding:8px 0;border-bottom:1px solid #374151">'
+                        + '<a href="' + attrEscape(x.url) + '" target="_blank" rel="noopener" style="color:#60a5fa;word-break:break-all">'
+                        + escapeHtml(x.title)
+                        + '</a>'
+                        + (x.type ? ' <span style="color:#9ca3af;font-size:11px">· ' + escapeHtml(x.type) + '</span>' : '')
+                        + '</div>';
+                });
+            }
+            html += '</div></div>';
+            const prev = document.getElementById('rl-overlay');
+            if (prev) prev.remove();
+            document.body.insertAdjacentHTML('beforeend', html);
+        }
+
+        function closeResearchLinks () {
+            const o = document.getElementById('rl-overlay');
+            if (o) o.remove();
         }
 
         function renderSourceItem (s) {

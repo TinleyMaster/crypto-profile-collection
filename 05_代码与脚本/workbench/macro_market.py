@@ -2931,7 +2931,8 @@ def score_opportunities(overview: dict) -> dict:
 
     status = "ok"
     if not opportunities:
-        status = "error" if not degraded else "partial"
+        # 0 机会但上游数据齐全（平静日）= empty，非故障
+        status = "empty" if not degraded else "partial"
     elif degraded:
         status = "partial"
     return {

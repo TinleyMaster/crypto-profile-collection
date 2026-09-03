@@ -38,10 +38,10 @@ from crypto_research.db.conn import get_connection
 def detect_missing_dates(conn, lookback_days: int, min_assets: int = 100) -> list[date]:
     """扫描最近 lookback_days 天，返回缺失日期列表。
 
-    判定逻辑：
-    - 取最近 lookback_days 天中 asset_market_daily 有记录的日期
-    - 与完整日期序列对比，资产数 < min_assets 的日期视为缺失
-    - 排除"今天"（数据尚未产出是正常的）
+    判定逻辑（双阈值）：
+    1. 绝对阈值：资产数 < min_assets → 直接视为缺失（如 0 条）
+    2. 相对阈值：资产数 < 相邻7日中位数 × 0.85 → 视为部分缺失（如6888 vs ~7968）
+    排除"今天"（数据尚未产出是正常的）
     """
     today = date.today()
     cutoff = today - timedelta(days=1)  # 排除今天
@@ -55,11 +55,31 @@ def detect_missing_dates(conn, lookback_days: int, min_assets: int = 100) -> lis
         """, (cutoff - timedelta(days=lookback_days), cutoff))
         coverage = {row[0]: row[1] for row in cur.fetchall()}
 
-    # 完整日期序列（排除周末？不，crypto 每天都有数据）
+    # 完整日期序列
     expected = [cutoff - timedelta(days=i) for i in range(lookback_days)]
-    missing = [d for d in expected if coverage.get(d, 0) < min_assets]
-    missing.sort()
 
+    # 计算每个日期的相邻7日中位数作为基准
+    def _neighbor_median(d: date) -> int:
+        neighbors = [coverage.get(d + timedelta(days=offset), 0) for offset in range(-3, 4)]
+        neighbors = [n for n in neighbors if n > 0]
+        if not neighbors:
+            return 0
+        neighbors.sort()
+        return neighbors[len(neighbors) // 2]
+
+    missing = []
+    for d in expected:
+        count = coverage.get(d, 0)
+        if count < min_assets:
+            # 绝对缺失（如 0 条）
+            missing.append(d)
+        else:
+            # 相对缺失：低于相邻中位数的85%
+            median = _neighbor_median(d)
+            if median > 0 and count < median * 0.85:
+                missing.append(d)
+
+    missing.sort()
     return missing, coverage
 
 
@@ -591,7 +611,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="日价缺口自动检测+回填")
     parser.add_argument("--lookback", type=int, default=30, help="扫描最近 N 天（默认30）")
     parser.add_argument("--top", type=int, default=8000, help="回填资产上限（默认8000）")
-    parser.add_argument("--min-assets", type=int, default=100, help="低于此数视为缺失（默认100）")
+    parser.add_argument("--min-assets", type=int, default=100, help="绝对缺失阈值（默认100）；同时会自动检测低于相邻日中位数85%的日期")
     parser.add_argument("--dry-run", action="store_true", help="预览，不写入")
     parser.add_argument("--skip-cmc", action="store_true", help="跳过 CMC 历史 API，仅 re-ETL")
     args = parser.parse_args()

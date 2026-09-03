@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -156,9 +157,78 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
             }
 
 
+def check_daily_continuity() -> dict:
+    """日价连续性自检：检测昨日是否有缺失，若有则告警+自动重试一次。
+
+    RT-BACKTEST-D1-001 改动 3：在 ETL 末尾执行，确保单日失败可重试而非静默缺日。
+    """
+    from datetime import date, timedelta
+
+    settings = get_settings(require_database=True)
+    yesterday = date.today() - timedelta(days=1)
+
+    with get_connection(settings.database_url) as conn:
+        with conn.cursor() as cur:
+            # 检查昨日 asset_market_daily 覆盖
+            cur.execute("""
+                SELECT COUNT(DISTINCT asset_id)
+                FROM biz.asset_market_daily
+                WHERE market_date = %s
+            """, (yesterday,))
+            row = cur.fetchone()
+            asset_count = row[0] if row else 0
+
+            # 对比前日作为基准
+            day_before = yesterday - timedelta(days=1)
+            cur.execute("""
+                SELECT COUNT(DISTINCT asset_id)
+                FROM biz.asset_market_daily
+                WHERE market_date = %s
+            """, (day_before,))
+            row2 = cur.fetchone()
+            baseline_count = row2[0] if row2 else 0
+
+    result = {
+        "check_date": yesterday.isoformat(),
+        "asset_count": asset_count,
+        "baseline_count": baseline_count,
+        "has_gap": asset_count < 100,
+        "retry_triggered": False,
+    }
+
+    if asset_count < 100 and baseline_count > 100:
+        # 昨日缺失，尝试重试 ETL
+        print(f"[CONTINUITY] 昨日 {yesterday} 仅 {asset_count} 条记录（基准 {baseline_count}），触发自动重试",
+              file=sys.stderr)
+        try:
+            retry_result = etl_cmc_to_daily(days=2, dry_run=False)
+            result["retry_triggered"] = True
+            result["retry_result"] = retry_result
+            print(f"[CONTINUITY] 重试完成: affected={retry_result.get('affected', 0)}", file=sys.stderr)
+        except Exception as e:
+            result["retry_error"] = str(e)
+            print(f"[CONTINUITY] 重试失败: {e}", file=sys.stderr)
+    elif asset_count >= 100:
+        print(f"[CONTINUITY] 昨日 {yesterday} 正常: {asset_count} 条记录")
+    else:
+        print(f"[CONTINUITY] 昨日 {yesterday} 缺失但无基准可对比（前日也缺失）", file=sys.stderr)
+
+    return result
+
+
 def main() -> int:
     parser = build_parser()
+    parser.add_argument(
+        "--check-continuity",
+        action="store_true",
+        help="仅执行昨日连续性自检（不执行主 ETL）",
+    )
     args = parser.parse_args()
+
+    if args.check_continuity:
+        result = check_daily_continuity()
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0 if not result.get("has_gap") or result.get("retry_triggered") else 1
 
     print(f"[ETL] asset_market_daily from CMC snapshots")
     if args.days:
@@ -177,6 +247,13 @@ def main() -> int:
         print(f"[ETL] Total now: {result['total']:,} rows ({result['assets']:,} assets)")
         if result.get("date_from"):
             print(f"[ETL] Date range: {result['date_from']} ~ {result['date_to']}")
+
+    # RT-BACKTEST-D1-001 改动 3：日价连续性自检
+    if not args.dry_run:
+        print(f"\n[ETL] === 日价连续性自检 ===")
+        continuity = check_daily_continuity()
+        if continuity.get("has_gap") and not continuity.get("retry_triggered"):
+            print(f"[ETL] WARNING: 连续性自检发现缺口且重试未触发", file=sys.stderr)
 
     return 0
 

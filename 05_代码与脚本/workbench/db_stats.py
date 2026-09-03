@@ -5534,18 +5534,26 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
                 ("low", "低评分 (<50)", lambda r: r["score"] < 50),
             ]
             by_score_tier = []
+            tier_notes = []
             for tid, tlabel, tfn in tiers:
                 group = [r for r in results if tfn(r)]
                 if not group:
+                    # 显式标注样本不足的层级
+                    tier_notes.append(f"{tlabel} 样本不足(0)，实盘 composite_score 无此档推荐")
                     continue
                 g_returns = [r["return_pct"] for r in group]
                 g_wins = [r for r in group if r["return_pct"] > 0]
+                g_losses = [r for r in group if r["return_pct"] < 0]
+                g_avg_win = sum(r["return_pct"] for r in g_wins) / len(g_wins) if g_wins else 0
+                g_avg_loss = abs(sum(r["return_pct"] for r in g_losses) / len(g_losses)) if g_losses else 0
+                g_profit_factor = round(g_avg_win / g_avg_loss, 2) if g_avg_loss > 0 else None
                 by_score_tier.append({
                     "tier": tid,
                     "label": tlabel,
                     "count": len(group),
                     "avg_return_pct": round(sum(g_returns) / len(group), 2),
                     "win_rate_pct": round(len(g_wins) / len(group) * 100, 1),
+                    "profit_factor": g_profit_factor,
                 })
 
             # 按赛道分层
@@ -5588,6 +5596,7 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
             "MED": len(tier_buckets.get("MED", [])),
             "LOW": len(tier_buckets.get("LOW", [])),
         },
+        "tier_notes": tier_notes,
     }
 
 

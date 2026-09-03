@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
@@ -1265,9 +1266,15 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "stablecoin_flow_min_usd": 5_000_000_000,  # 稳定币净流入显著阈值（50 亿美元）
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
+    "resonance_min_source_count": 2,         # 共识动量最少独立数据源数
+    "resonance_consensus_top_n": 50,         # 扫描共识榜前 N
+    "resonance_max_results": 10,             # 共振榜最多返回条数
     "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除，语义由 conviction 承接）
     "conviction_high_min": 70,               # conviction ≥70 → HIGH 置顶（从 75 降至 70）
     "conviction_med_min": 55,                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
+    # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会
+    "conviction_med_min_low_coverage": 50,   # 可用轴权重 < min_available_weight 时 MED 阈值
+    "min_available_weight": 0.5,             # 可用轴权重和低于此值视为覆盖度不足
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
     # P0-1 MVRV 估值回归
@@ -1799,6 +1806,9 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
 
     score = _finalize_conviction(raw, cycle_phase, n_confirm, t)
     raw_strength / regime_mult / resonance_bonus 写入 opp 供前端解释。
+
+    P0-2 修复：当可用轴权重和不足（coverage_weight < min_available_weight）时，
+    降低 MED 阈值，避免低覆盖资产被统一剔除。
     """
     raw = opp.get("conviction_score")
     if raw is None:
@@ -1810,6 +1820,16 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
     opp["resonance_bonus"] = extra["resonance_bonus"]
     high_min = int(t.get("conviction_high_min", 75))
     med_min = int(t.get("conviction_med_min", 55))
+
+    # P0-2：覆盖度不足时放宽 MED 阈值，避免数据饿死导致 0 机会
+    breakdown = opp.get("conviction_breakdown")
+    if breakdown:
+        coverage_weight = breakdown.get("coverage_weight", 1.0)
+        min_available_weight = float(t.get("min_available_weight", 0.4))
+        if coverage_weight < min_available_weight:
+            med_min = int(t.get("conviction_med_min_low_coverage", 50))
+            opp["coverage_note"] = f"覆盖度不足({coverage_weight:.2f})，MED 阈值降至 {med_min}"
+
     tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
     opp["conviction_tier"] = tier
     if tier == "LOW":
@@ -1899,20 +1919,23 @@ def _conviction_breakdown(
         return t.get(k, 0.0)
 
     axes = {
-        "mvrv": (mvrv_score, _w("conviction_weight_mvrv")),
-        "funding": (funding_score, _w("conviction_weight_funding")),
-        "netflow": (netflow_score, _w("conviction_weight_netflow")),
-        "stable": (stable_score, _w("conviction_weight_stable")),
-        "roi": (roi_score, _w("conviction_weight_roi")),
-        "catalyst": (cat_norm, _w("conviction_weight_catalyst")),
+        "mvrv": (mvrv_score, _w("conviction_weight_mvrv"), mvrv_pct is not None),
+        "funding": (funding_score, _w("conviction_weight_funding"), funding is not None),
+        "netflow": (netflow_score, _w("conviction_weight_netflow"), exchange_netflow is not None),
+        "stable": (stable_score, _w("conviction_weight_stable"), stablecoin_flow is not None),
+        "roi": (roi_score, _w("conviction_weight_roi"), roi_1yr is not None),
+        "catalyst": (cat_norm, _w("conviction_weight_catalyst"), catalyst_score is not None),
     }
     breakdown: dict = {}
     total = 0.0
-    for name, (sc, wt) in axes.items():
+    coverage_weight = 0.0
+    for name, (sc, wt, available) in axes.items():
         contrib = round(sc * wt, 1)
         total += contrib
-        breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib}
-    return {"axes": breakdown, "raw_strength": max(0, min(100, round(total)))}
+        if available:
+            coverage_weight += wt
+        breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib, "available": available}
+    return {"axes": breakdown, "raw_strength": max(0, min(100, round(total))), "coverage_weight": round(coverage_weight, 2)}
 
 
 # ── FEAT-HIGHLIGHT-003：周期调制乘子 ──
@@ -2945,6 +2968,125 @@ def score_opportunities(overview: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+# P0-3 共振榜：共识动量 ∩ 宏观 conviction
+# ══════════════════════════════════════════════════════════════
+
+def _symbols_from_opportunity(opp: dict) -> set[str]:
+    """从机会条目中提取可交叉的 symbol 集合。"""
+    involved = opp.get("involved_symbols") or []
+    if isinstance(involved, list) and involved:
+        syms = {str(s).upper().strip() for s in involved if s is not None}
+        if syms:
+            return syms
+    target = opp.get("target")
+    if isinstance(target, str):
+        t = target.upper().strip()
+        # 单一代币代码（如 BTC / ETH / 1INCH），排除中文描述性 target
+        if re.match(r"^[A-Z0-9]{2,10}$", t):
+            return {t}
+    return set()
+
+
+def build_resonance_signals(overview: dict) -> dict:
+    """
+    共振榜：共识动量（多源交叉验证）与宏观 conviction（HIGH tier 机会）的交集。
+
+    定义：
+      - 共识动量 = cross_market 多源交叉验证中 source_count ≥ 2 的标的；
+      - 宏观 conviction = opportunity_list 中 conviction_tier == HIGH 的机会；
+      - 共振 = 同一 symbol 同时出现在上述两个集合中。
+
+    返回 {status, definition, signals, count}。
+    """
+    t = _load_market_rules().get("opportunity_thresholds", dict(OPPORTUNITY_THRESHOLDS_DEFAULT))
+    min_sources = int(t.get("resonance_min_source_count", 2))
+    consensus_top_n = int(t.get("resonance_consensus_top_n", 50))
+    max_results = int(t.get("resonance_max_results", 10))
+    definition = "共识动量（多源交叉验证 source_count≥2）与宏观 conviction（HIGH tier）的交集"
+
+    # 拉取共识动量榜
+    consensus_results: list[dict] = []
+    try:
+        import cross_market
+
+        consensus_data = cross_market.get_cross_validated(limit=consensus_top_n)
+        if isinstance(consensus_data, dict):
+            consensus_results = consensus_data.get("results") or []
+    except Exception:
+        return {
+            "status": "partial",
+            "definition": definition,
+            "signals": [],
+            "count": 0,
+            "error": "consensus data unavailable",
+        }
+
+    # 仅保留高共识标的，按 source_count / composite_score 排序
+    consensus_results = [
+        r for r in consensus_results
+        if isinstance(r, dict) and r.get("source_count", 0) >= min_sources
+    ]
+    consensus_results.sort(
+        key=lambda x: (x.get("source_count", 0), x.get("composite_score", 0)),
+        reverse=True,
+    )
+    consensus_map: dict[str, dict] = {}
+    for r in consensus_results:
+        sym = str(r.get("symbol") or "").upper().strip()
+        if sym and sym not in consensus_map:
+            consensus_map[sym] = r
+
+    opps = (overview.get("opportunity_list") or {}).get("opportunities") or []
+    high_opps = [o for o in opps if o.get("conviction_tier") == "HIGH"]
+
+    signals: list[dict] = []
+    seen: set[str] = set()
+    for opp in high_opps:
+        opp_syms = _symbols_from_opportunity(opp)
+        if not opp_syms:
+            continue
+        for sym in opp_syms:
+            if sym in seen or sym not in consensus_map:
+                continue
+            con = consensus_map[sym]
+            seen.add(sym)
+            signals.append({
+                "symbol": sym,
+                "direction": opp.get("direction", "long"),
+                "conviction_score": opp.get("conviction_score"),
+                "conviction_tier": opp.get("conviction_tier"),
+                "consensus_score": con.get("composite_score"),
+                "source_count": con.get("source_count"),
+                "consensus": con.get("consensus"),
+                "change_24h": con.get("change_24h"),
+                "volume_24h": con.get("volume_24h"),
+                "sector": con.get("sector"),
+                "trigger_logic": opp.get("trigger_logic", ""),
+                "action_hint": opp.get("action_hint", ""),
+                "invalidation": opp.get("invalidation", ""),
+                "related_dims": opp.get("related_dims", []),
+            })
+            if len(signals) >= max_results:
+                break
+        if len(signals) >= max_results:
+            break
+
+    # 最终排序：conviction 优先，其次 consensus 综合分
+    signals.sort(
+        key=lambda x: ((x.get("conviction_score") or 0), (x.get("consensus_score") or 0)),
+        reverse=True,
+    )
+
+    status = "ok" if signals else "empty"
+    return {
+        "status": status,
+        "definition": definition,
+        "signals": signals,
+        "count": len(signals),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # P1-4 第二刀 · 早报趋势层（走势感 + 流动性 regime）
 # ══════════════════════════════════════════════════════════════
 
@@ -3190,6 +3332,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         "M4_watchlist": [
             o for o in opps if o.get("conviction_tier") != "HIGH"
         ],
+        "M4_resonance": today.get("resonance") or {},
         "M5_catalyst": today.get("event_calendar") or {},
         "M6_degraded": _collect_degraded(today),
         "DIFF": diff,
@@ -3462,8 +3605,13 @@ def compute_structure_subscore(
     }
 
 
-def _build_mvrv_universe() -> dict:
-    """构建多币 MVRV 极值汇总：max/min/median + 各币分位。"""
+def _build_mvrv_universe(top_n: int = 100) -> dict:
+    """构建多币 MVRV 极值汇总：max/min/median + 各币分位。
+
+    P0-2 修复：从仅 15 币扩展到 top 100（按 CM 市值）。
+    优先使用 cm_onchain_percentile_full 的全历史分位；无分位的币用 90 天自身历史分位近似；
+    历史不足时回退 MVRV 绝对值，不惩罚、不拉入极端标记。
+    """
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
@@ -3471,37 +3619,89 @@ def _build_mvrv_universe() -> dict:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
+                # 1) 取最新日 top N 有 MVRV 的币（CM 市值排序）
                 cur.execute("""
-                    WITH latest AS (
-                        SELECT d.cm_symbol, d.cap_mvrv_cur, p.mvrv_pct_full,
-                               CASE
-                                   WHEN p.mvrv_pct_full > 90 THEN 'HIGH'
-                                   WHEN p.mvrv_pct_full < 10 THEN 'LOW'
-                                   ELSE 'NONE'
-                               END AS extreme
-                        FROM biz.cm_onchain_percentile_full p
-                        JOIN biz.cm_asset_onchain_daily d
-                            ON p.asset_id = d.asset_id AND p.metric_date = d.metric_date
-                        WHERE p.metric_date = (SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily)
-                          AND d.cap_mvrv_cur IS NOT NULL
+                    WITH latest_date AS (
+                        SELECT MAX(metric_date) AS d FROM biz.cm_asset_onchain_daily
+                    ),
+                    top_coins AS (
+                        SELECT asset_id, cm_symbol, cap_mvrv_cur, cap_mrkt_cur_usd
+                        FROM biz.cm_asset_onchain_daily
+                        WHERE metric_date = (SELECT d FROM latest_date)
+                          AND cap_mvrv_cur IS NOT NULL
+                          AND cap_mrkt_cur_usd IS NOT NULL
+                        ORDER BY cap_mrkt_cur_usd DESC NULLS LAST
+                        LIMIT %s
                     )
-                    SELECT cm_symbol, cap_mvrv_cur, mvrv_pct_full, extreme
-                    FROM latest
-                    ORDER BY mvrv_pct_full DESC NULLS LAST
-                """)
-                rows = cur.fetchall()
+                    SELECT tc.asset_id, tc.cm_symbol, tc.cap_mvrv_cur,
+                           p.mvrv_pct_full,
+                           CASE
+                               WHEN p.mvrv_pct_full > 90 THEN 'HIGH'
+                               WHEN p.mvrv_pct_full < 10 THEN 'LOW'
+                               ELSE 'NONE'
+                           END AS extreme
+                    FROM top_coins tc
+                    LEFT JOIN biz.cm_onchain_percentile_full p
+                        ON p.asset_id = tc.asset_id
+                       AND p.metric_date = (SELECT d FROM latest_date)
+                    ORDER BY tc.cap_mrkt_cur_usd DESC NULLS LAST
+                """, (top_n,))
+                latest_rows = cur.fetchall()
 
-        if not rows:
-            return {"status": "error", "coins": []}
+                if not latest_rows:
+                    return {"status": "error", "coins": []}
 
-        pcts = [float(r[2]) for r in rows if r[2] is not None]
+                # 2) 对无全历史分位的币，计算 90 天自身历史分位
+                asset_ids = [r[0] for r in latest_rows if r[3] is None]
+                hist_pct_map: dict[int, float] = {}
+                if asset_ids:
+                    placeholders = ",".join(["%s"] * len(asset_ids))
+                    cur.execute(f"""
+                        WITH latest_date AS (
+                            SELECT MAX(metric_date) AS d FROM biz.cm_asset_onchain_daily
+                        ),
+                        hist AS (
+                            SELECT asset_id, cap_mvrv_cur,
+                                   PERCENT_RANK() OVER (
+                                       PARTITION BY asset_id ORDER BY cap_mvrv_cur
+                                   ) AS pct_rank,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY asset_id ORDER BY metric_date DESC
+                                   ) AS rn
+                            FROM biz.cm_asset_onchain_daily
+                            WHERE asset_id IN ({placeholders})
+                              AND metric_date >= (SELECT d FROM latest_date) - INTERVAL '90 days'
+                              AND cap_mvrv_cur IS NOT NULL
+                        )
+                        SELECT asset_id, pct_rank * 100 AS hist_pct
+                        FROM hist
+                        WHERE rn = 1
+                    """, tuple(asset_ids))
+                    for r in cur.fetchall():
+                        hist_pct_map[r[0]] = float(r[1]) if r[1] is not None else None
+
         coins = []
-        for r in rows:
+        pcts = []
+        for r in latest_rows:
+            asset_id, symbol, mvrv_value, pct_full, extreme = r
+            # 优先用全历史分位，没有则用 90 天自身历史分位
+            pct = float(pct_full) if pct_full is not None else hist_pct_map.get(asset_id)
+            if pct is not None:
+                pcts.append(pct)
+                # 若用 90 天近似分位，也计算 extreme 标记
+                if extreme is None:
+                    if pct > 90:
+                        extreme = "HIGH"
+                    elif pct < 10:
+                        extreme = "LOW"
+                    else:
+                        extreme = "NONE"
             coins.append({
-                "symbol": r[0],
-                "value": float(r[1]) if r[1] is not None else None,
-                "pct_full": float(r[2]) if r[2] is not None else None,
-                "extreme": r[3] or "NONE",
+                "symbol": symbol,
+                "value": float(mvrv_value) if mvrv_value is not None else None,
+                "pct_full": round(pct, 2) if pct is not None else None,
+                "extreme": extreme or "NONE",
+                "has_full_history": pct_full is not None,
             })
 
         return {
@@ -3709,6 +3909,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P1-4 机会清单（消费 P1-1~P1-3 + P0-3 真实字段） ──
     result["opportunity_list"] = score_opportunities(result)
+
+    # ── P0-3 共振榜（共识动量 ∩ 宏观 conviction） ──
+    result["resonance"] = build_resonance_signals(result)
 
     _cache = result
     _cache_ts = now

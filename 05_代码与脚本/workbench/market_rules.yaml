@@ -59,9 +59,15 @@ opportunity_rules:
   stablecoin_flow_min_usd: 5000000000   # 稳定币净流入显著阈值（50 亿美元）
   emotion_fear_max: 50                  # 恐贪 < 50 视为恐惧（左侧信号）
   resonance_high_min_sources: 2         # 高置信最少独立源类型数
+  resonance_min_source_count: 2          # 共识动量最少独立数据源数（source_count ≥ 2）
+  resonance_consensus_top_n: 50          # 扫描共识榜前 N
+  resonance_max_results: 10              # 共振榜最多返回条数
   push_confidence_threshold: medium     # 默认只推 高+中（low 剔除，语义由 conviction 承接）
   conviction_high_min: 70               # conviction ≥70 → HIGH 置顶（从 75 降至 70，让第二刀高 conv 信号进 HIGH）
   conviction_med_min: 55                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
+  # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会
+  conviction_med_min_low_coverage: 50   # 可用轴权重 < min_available_weight 时 MED 阈值
+  min_available_weight: 0.5             # 可用轴权重和低于此值视为覆盖度不足
   # 第二刀新增阈值
   fng_fear_max: 25                      # 恐贪 ≤25 → 极度恐惧 long 信号
   fng_greed_min: 75                     # 恐贪 ≥75 → 极度贪婪 short 信号
@@ -75,7 +81,7 @@ opportunity_rules:
   conviction_weight_netflow: 0.14
   conviction_weight_stable: 0.09
   conviction_weight_roi: 0.14
-  conviction_weight_catalyst: 0.08     # 新增，保守初值（未校准+单源+无方向精度），待 FEAT-CATALYST-002 回测校准
+  conviction_weight_catalyst: 0.08     # P0-2 临时保持 0.08：P0-1 回测无 HIGH 样本（MED=29/LOW=481），无法按 tier 校准；待本刀数据轴扩建后 score 分布改善、回测出现 HIGH 档再校准
   # P0-B 催化剂因子
   catalyst_window_days: 14             # 催化剂回溯窗口（天）
   catalyst_min_score: 50               # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值

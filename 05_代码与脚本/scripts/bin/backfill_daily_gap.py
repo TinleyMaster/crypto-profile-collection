@@ -364,14 +364,22 @@ def backfill_via_binance_klines(
         if log:
             log(msg)
 
-    # 获取有 symbol 的资产（优先从 core.asset 取）
+    # 获取有 symbol 的资产，按最新市值降序（优先覆盖头部主流币）
     with conn.cursor() as cur:
         cur.execute("""
             SELECT a.asset_id, UPPER(a.canonical_symbol) AS symbol
             FROM core.asset a
+            LEFT JOIN LATERAL (
+                SELECT amd.market_cap
+                FROM biz.asset_market_daily amd
+                WHERE amd.asset_id = a.asset_id
+                  AND amd.market_cap IS NOT NULL
+                ORDER BY amd.market_date DESC
+                LIMIT 1
+            ) m ON TRUE
             WHERE a.canonical_symbol IS NOT NULL
               AND LENGTH(a.canonical_symbol) BETWEEN 2 AND 10
-            ORDER BY a.asset_id
+            ORDER BY m.market_cap DESC NULLS LAST
             LIMIT %s
         """, (top_n,))
         assets = [(row[0], row[1]) for row in cur.fetchall()]
@@ -379,7 +387,7 @@ def backfill_via_binance_klines(
     if not assets:
         return {"skipped": True, "reason": "No assets with Binance symbol found"}
 
-    _log(f"[BINANCE] Assets with symbol: {len(assets)}")
+    _log(f"[BINANCE] Assets with symbol (ordered by market_cap): {len(assets)}")
 
     # 准备日期参数
     min_date = min(target_dates)

@@ -2473,6 +2473,8 @@ def score_opportunities(overview: dict) -> dict:
                 )
 
     # ── 1c) 催化剂驱动机会 (P0-B) ──
+    # P1-2: 币安广场宏观噪音过滤（金十/SpaceX 等非加密直接关联噪音）
+    _CATALYST_NOISE_KEYWORDS = {"金十", "SpaceX", "马斯克", "特斯拉", "SEC", "美联储", "CPI", "GDP"}
     cat_window = t.get("catalyst_window_days", 14)
     cat_min_score = t.get("catalyst_min_score", 50)
     cat_top_n = int(t.get("catalyst_top_n", 5))
@@ -2481,6 +2483,9 @@ def score_opportunities(overview: dict) -> dict:
     _cat_pushed = 0
     for aid, symbol, cscore in cat_targets:
         if cscore < cat_min_score:
+            continue
+        # P1-2: 过滤宏观噪音（金十/SpaceX 等非加密直接关联）
+        if any(kw in symbol.upper() for kw in _CATALYST_NOISE_KEYWORDS):
             continue
         # 同 symbol 去重（不同 asset_id 可能映射同一标的），保留分高者
         if symbol in _cat_seen:
@@ -2881,6 +2886,44 @@ def score_opportunities(overview: dict) -> dict:
 
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+
+    # P1-2: 多空冲突合并 — 同标的 long+short 合并为"博弈/观望"卡
+    _symbol_dir_map: dict[str, dict] = {}  # {symbol: {directions: set, opps: list}}
+    for opp in opportunities:
+        sym = opp.get("target", "").upper().strip()
+        if not sym:
+            continue
+        d = opp.get("direction", "long")
+        entry = _symbol_dir_map.setdefault(sym, {"directions": set(), "opps": [], "tier": opp.get("conviction_tier", "?")})
+        entry["directions"].add(d)
+        entry["opps"].append(opp)
+    # 找出有冲突的方向（同时有 long 和 short）
+    conflict_symbols = {sym for sym, info in _symbol_dir_map.items()
+                        if len(info["directions"]) > 1}
+    if conflict_symbols:
+        # 从机会池移除冲突标的
+        opportunities = [o for o in opportunities
+                         if o.get("target", "").upper().strip() not in conflict_symbols]
+        # 合并为博弈卡
+        for sym, info in _symbol_dir_map.items():
+            if sym not in conflict_symbols:
+                continue
+            opps_in_conflict = info["opps"]
+            max_score = max(o.get("conviction_score", 0) for o in opps_in_conflict)
+            trigger_parts = [o.get("trigger_logic", "") for o in opps_in_conflict if o.get("trigger_logic")]
+            _push_opportunity(
+                {"target": sym, "direction": "watch",
+                 "confidence": "medium",
+                 "conviction_score": max_score,
+                 "signal_type": "catalyst",
+                 "key_metric": "多空博弈",
+                 "trigger_logic": f"多空信号交织：{' / '.join(trigger_parts[:3])}",
+                 "action_hint": "观望，等待多空博弈明朗",
+                 "invalidation": "单一方向信号消失后可追",
+                 "related_dims": ["catalyst_events", "P1-2 多空博弈"]},
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=2,
+            )
 
     # 精选高亮信号（FEAT-HIGHLIGHT-001）：与完整机会池分离
     highlight_max_total = int(t.get("highlight_max_total", 10))

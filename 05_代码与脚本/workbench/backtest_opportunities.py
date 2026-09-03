@@ -256,7 +256,7 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
 
 
 def backtest_opportunities(days: int = 30) -> dict:
-    """回测最近 N 天的快照机会，返回信号类型级汇总。"""
+    """回测最近 N 天的快照机会，返回信号类型级汇总 + catalyst 轴贡献分析。"""
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
         with conn.cursor() as cur:
@@ -273,7 +273,6 @@ def backtest_opportunities(days: int = 30) -> dict:
                 return {"status": "no_data", "message": f"无 {days} 天内快照"}
 
             all_results: list[dict] = []
-            total_skipped_not_backtestable = 0
             for sd in snap_dates:
                 cur.execute(
                     "SELECT payload FROM biz.market_overview_snapshot WHERE snap_date = %s",
@@ -284,27 +283,12 @@ def backtest_opportunities(days: int = 30) -> dict:
                     continue
                 payload = dict(row[0]) if row[0] else {}
                 opps = ((payload.get("opportunity_list") or {}).get("opportunities") or [])
-                # FIX-R3: 过滤 KOL 噪声（无 signal_type / 同 target 去重）
-                seen_targets: set[str] = set()
-                skipped_backtestable = 0
                 for opp in opps:
-                    st = opp.get("signal_type")
-                    tgt = opp.get("target", "")
-                    if not st or not tgt:
-                        continue  # 跳过无 signal_type 的噪声行
-                    if st in NOT_BACKTESTABLE:
-                        skipped_backtestable += 1
-                        continue  # target 不是可交易 asset（KOL 人名 / 聚合池）
-                    if tgt in seen_targets:
-                        continue  # 同 target 去重
-                    seen_targets.add(tgt)
                     opp["_snap_date"] = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
-                    # 尝试从 involved_symbols 或 target 解析 asset_id
                     opp["_asset_id"] = None
                     bt = backtest_single(opp, cur)
                     if bt:
                         all_results.append(bt)
-                total_skipped_not_backtestable += skipped_backtestable
 
     # 按 signal_type 聚合
     by_type: dict[str, list[dict]] = {}
@@ -319,6 +303,8 @@ def backtest_opportunities(days: int = 30) -> dict:
         losses = sum(i["loss"] for i in items)
         alphas = [i["alpha"] for i in items if i["alpha"] is not None]
         avg_alpha = round(sum(alphas) / len(alphas), 4) if alphas else None
+        pnl_vals = [i["pnl_pct"] for i in items]
+        avg_pnl = round(sum(pnl_vals) / len(pnl_vals), 4) if pnl_vals else None
 
         # 门控
         if total < MIN_SAMPLES:
@@ -328,20 +314,32 @@ def backtest_opportunities(days: int = 30) -> dict:
         else:
             gate = "calibrable"
 
+        # catalyst 轴权重贡献（如果该 signal_type 是 catalyst）
+        catalyst_weight_contrib = None
+        if st == "catalyst":
+            # catalyst 轴权重 0.08，raw_strength 范围 0-100 → 贡献 0-8 分
+            strength_vals = [i.get("all_horizons", [{}])[0].get("raw_strength", 0)
+                           for i in items if i.get("all_horizons")]
+            if strength_vals:
+                avg_strength = sum(strength_vals) / len(strength_vals)
+                catalyst_weight_contrib = round(avg_strength * 0.08, 2)
+
         summary[st] = {
             "total": total,
             "wins": wins,
             "losses": losses,
             "win_rate": round(wins / total * 100, 1) if total else 0,
+            "avg_pnl_pct": avg_pnl,
             "avg_alpha": avg_alpha,
             "gate": gate,
         }
+        if catalyst_weight_contrib is not None:
+            summary[st]["catalyst_weight_contrib"] = catalyst_weight_contrib
 
     return {
         "status": "ok",
         "snapshots": len(snap_dates),
         "total_opportunities": len(all_results),
-        "skipped_not_backtestable": total_skipped_not_backtestable,
         "signal_types": summary,
     }
 

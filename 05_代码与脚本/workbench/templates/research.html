@@ -3403,7 +3403,7 @@
                 const intervalDays = Math.max(1, Math.round((Date.now() - new Date(first.date).getTime()) / 86400000));
                 const intervalPct = first.price_usd > 0 ? (latest.price_usd - first.price_usd) / first.price_usd * 100 : null;
                 html += '<div class="m-grid">';
-                html += '<div class="m-cell"><div class="m-label">' + intervalDays + 'd 涨跌</div><div class="m-value ' + cls(intervalPct) + '">' + (intervalPct != null ? ((intervalPct >= 0 ? '+' : '') + fmtPct(intervalPct)) : NA_HTML) + '</div></div>';
+                html += '<div class="m-cell"><div class="m-label">区间涨跌 (' + intervalDays + '天)</div><div class="m-value ' + cls(intervalPct) + '">' + (intervalPct != null ? ((intervalPct >= 0 ? '+' : '') + fmtPct(intervalPct)) : NA_HTML) + '</div></div>';
                 html += '<div class="m-cell"><div class="m-label">数据点数</div><div class="m-value">' + fmtNumber(series.length) + '</div></div>';
                 html += '<div class="m-cell"><div class="m-label">最新日期</div><div class="m-value">' + escapeHtml(latest.date) + '</div></div>';
                 html += '</div>';

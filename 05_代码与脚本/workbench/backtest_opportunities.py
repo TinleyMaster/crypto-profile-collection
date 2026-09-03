@@ -233,7 +233,7 @@ def backtest_single(opportunity: dict, cur) -> dict | None:
             "loss": loss,
             "alpha": alpha,
             "btc_ret_pct": btc_ret,
-            "raw_strength": opportunity.get("conviction_strength"),
+            "raw_strength": opportunity.get("conviction_strength") or 0,
         })
 
     if not results:
@@ -334,7 +334,7 @@ def backtest_opportunities(days: int = 30) -> dict:
         catalyst_weight_contrib = None
         if st == "catalyst":
             # catalyst 轴权重 0.08，raw_strength 范围 0-100 → 贡献 0-8 分
-            strength_vals = [i.get("all_horizons", [{}])[0].get("raw_strength", 0)
+            strength_vals = [(i.get("all_horizons", [{}])[0].get("raw_strength") or 0)
                            for i in items if i.get("all_horizons")]
             if strength_vals:
                 avg_strength = sum(strength_vals) / len(strength_vals)

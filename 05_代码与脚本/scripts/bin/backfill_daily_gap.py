@@ -392,7 +392,7 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False,
 
 
 def verify_backfill(conn, target_dates: list[date]) -> dict:
-    """校验回填结果。"""
+    """校验回填结果。返回 {date_str: asset_count, ..., "pass": bool}。"""
     with conn.cursor() as cur:
         placeholders = ",".join(["%s"] * len(target_dates))
         cur.execute(f"""
@@ -403,10 +403,8 @@ def verify_backfill(conn, target_dates: list[date]) -> dict:
         """, target_dates)
         stats = {row[0].isoformat(): row[1] for row in cur.fetchall()}
 
-    return {
-        "backfilled_dates": stats,
-        "pass": all(v >= 7000 for v in stats.values()),
-    }
+    stats["pass"] = all(v >= 7000 for v in stats.values())
+    return stats
 
 
 # ── 任务卡 ──
@@ -498,14 +496,14 @@ def main() -> int:
         result["etl"] = etl_result
         print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
 
-        # 3. 校验
+        # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
+        task_id = create_task_card(conn, missing_dates, coverage, result)
+        print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
+
+        # 4. 校验
         print(f"\n[VERIFY] 校验回填结果...")
         verify = verify_backfill(conn, missing_dates)
         print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
-
-        # 4. 写入任务卡
-        task_id = create_task_card(conn, missing_dates, coverage, result)
-        print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
 
     return 0 if verify.get("pass") else 1
 

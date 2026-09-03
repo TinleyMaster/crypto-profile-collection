@@ -120,6 +120,11 @@ def score_holder(data: dict, thresholds: dict) -> tuple[float | None, str, list[
     flags: list[str] = []
     whale_chg = _to_float(data.get("whale_balance_change_7d_pct"))
     holder_chg = _to_float(data.get("holder_change_7d"))
+    qual = data.get("qualitative_activity")  # transfer-log 降级
+
+    # 若精确快照全无且定性也无 → 显式声明不可用（非 silent unknown）
+    if whale_chg is None and holder_chg is None and qual is None:
+        return None, "unknown", ["qualitative_unavailable"]
 
     score = 50
     if whale_chg is not None:
@@ -133,6 +138,19 @@ def score_holder(data: dict, thresholds: dict) -> tuple[float | None, str, list[
         if holder_chg < 0:
             score = max(score, 65)
             flags.append("holder_decline")
+
+    # 定性兜底：精确数据缺失时用 transfer-log 活跃度调制
+    if qual is not None and whale_chg is None and holder_chg is None:
+        level = qual.get("activity_level", "low")
+        if level == "high":
+            score = 40  # 高活跃 → 偏正面
+            flags.append("qual_high_activity")
+        elif level == "mid":
+            score = 55
+            flags.append("qual_mid_activity")
+        else:
+            score = 75  # 低活跃 → 偏负面
+            flags.append("qual_low_activity")
 
     return min(100, score), _label(score, thresholds), flags
 
@@ -225,7 +243,7 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
     except Exception:
         conn.rollback()
 
-    # holder 轴
+    # holder 轴（精确快照优先，无则 transfer-log 定性兜底）
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -237,6 +255,11 @@ def compute_meme_risk(asset_id: int, conn) -> dict:
             row = cur.fetchone()
         if row:
             data.update(dict(row))
+        else:
+            # 精确快照无数据 → 尝试 transfer-log 定性兜底
+            qual = estimate_from_transfers(asset_id, conn)
+            if qual:
+                data["qualitative_activity"] = qual
     except Exception:
         conn.rollback()
 

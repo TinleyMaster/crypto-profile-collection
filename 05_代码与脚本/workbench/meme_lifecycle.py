@@ -85,6 +85,13 @@ def classify_stage(asset: dict, rules: dict) -> tuple[str, dict]:
     social_hot = social is not None and social >= th["social_hot_min"]
     holder_bleed = holder30 is not None and holder30 <= th["holder_bleed_max"]
 
+    # 定性兜底：精确 holder 数据缺失时用 transfer-log 活跃度辅助判断
+    qual = asset.get("qualitative_activity")
+    if not holder_bleed and holder30 is None and qual is not None:
+        level = qual.get("activity_level", "low")
+        if level == "low":
+            holder_bleed = True  # 低活跃 ≈ 流失信号
+
     # launch：新发且流动性已起量
     if age < th["launch_max_days"] and liq_usd is not None and liq_usd >= th["liq_launch_min"]:
         return "launch", {"age": age, "liq_usd": liq_usd, "proxy_used": proxy_used}
@@ -158,7 +165,7 @@ def compute_lifecycle(asset_id: int, conn) -> dict:
     except Exception:
         conn.rollback()
 
-    # holder_change_30d
+    # holder_change_30d（精确快照优先，无则 transfer-log 定性兜底）
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -169,6 +176,12 @@ def compute_lifecycle(asset_id: int, conn) -> dict:
             row = cur.fetchone()
         if row:
             asset["holder_change_30d"] = row[0]
+        else:
+            # 精确快照无数据 → 尝试 transfer-log 定性兜底
+            from meme_risk import estimate_from_transfers
+            qual = estimate_from_transfers(asset_id, conn)
+            if qual:
+                asset["qualitative_activity"] = qual
     except Exception:
         conn.rollback()
 

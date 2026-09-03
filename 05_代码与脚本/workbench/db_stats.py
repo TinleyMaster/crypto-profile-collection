@@ -5994,7 +5994,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     price = m.get("price_usd")
                     fdv = m.get("fdv")
                     if mcap or price or fdv:
-                        return (mcap or fdv, price, fdv)
+                        return (mcap, price, fdv)
                 # 2. 从 unlock input_snapshot 取
                 row = unlock_map.get(aid)
                 if row:
@@ -6003,7 +6003,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     price = snap.get("price") or snap.get("price_usd")
                     fdv = snap.get("fdv") or snap.get("fdv_usd")
                     if mcap or price:
-                        return (mcap or fdv, price, fdv)
+                        return (mcap, price, fdv)
                 # 3. 从 social_heat market_json 取
                 s = social_map.get(aid)
                 if s:
@@ -6012,7 +6012,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     price = mj.get("price") or mj.get("price_usd")
                     fdv = mj.get("fdv") or mj.get("fully_diluted_valuation")
                     if mcap or price:
-                        return (mcap or fdv, price, fdv)
+                        return (mcap, price, fdv)
                 # 3. 从 CMC 报价快照取（最可靠的 fallback）
                 q = cmc_quote_map.get(aid)
                 if q:

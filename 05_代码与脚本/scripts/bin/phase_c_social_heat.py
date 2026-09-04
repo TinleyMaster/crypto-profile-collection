@@ -355,7 +355,7 @@ def analyze_sentiment(settings, symbol: str, name: str,
         + "\n".join(text_parts[:40])
     )
     try:
-        raw = llm.chat(SENTIMENT_PROMPT, user_prompt, temperature=0.1, max_tokens=1024)
+        raw = llm.chat(SENTIMENT_PROMPT, user_prompt, temperature=0.1, max_tokens=1024, response_format={"type": "json_object"})
         data = extract_json_from_llm_response(raw)
         return {
             "sentiment": str(data.get("sentiment", "neutral")),

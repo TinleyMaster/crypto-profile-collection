@@ -183,7 +183,7 @@ def select_relevant_links(llm: LLMClient, asset: dict, all_links: list[dict]) ->
     try:
         raw = llm.chat(
             "你是一个加密货币投研分析助手。只输出 JSON，不要输出其他内容。",
-            prompt, temperature=0.1, max_tokens=4096,
+            prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"},
         )
     except Exception as e:
         print(f"  [WARN] LLM 链接筛选失败: {e}，回退取前 {MAX_PAGES} 个")
@@ -640,7 +640,7 @@ def extract_with_llm(llm: LLMClient, asset: dict, doc_contents: list[dict],
     print(f"  API 数据源: {[d['source'] for d in api_data]}")
 
     try:
-        raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=4096)
+        raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
     except Exception as e:
         print(f"  [ERROR] LLM 调用失败: {e}")
         return None

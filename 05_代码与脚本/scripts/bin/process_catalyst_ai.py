@@ -78,7 +78,7 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
         f"请分析这条新闻。"
     )
 
-    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=512)
+    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=512, response_format={"type": "json_object"})
 
     # 解析 JSON
     result = extract_json_from_llm_response(raw)

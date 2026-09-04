@@ -3250,7 +3250,7 @@ def ask_research_notebook(notebook_id: int, question: str, log=None) -> dict:
     )
 
     try:
-        raw = llm.chat(system_prompt, user_prompt, temperature=0.2, max_tokens=4096)
+        raw = llm.chat(system_prompt, user_prompt, temperature=0.2, max_tokens=4096, response_format={"type": "json_object"})
     except Exception as e:
         return {"ok": False, "error": f"LLM 调用失败: {e}"}
 
@@ -6638,7 +6638,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     )
 
     try:
-        raw = llm.chat(system_prompt, user_prompt, temperature=0.3, max_tokens=4096)
+        raw = llm.chat(system_prompt, user_prompt, temperature=0.3, max_tokens=8192, response_format={"type": "json_object"})
     except Exception as e:
         return {"ok": False, "error": f"LLM 调用失败: {e}"}
 
@@ -8583,7 +8583,7 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict
     try:
         raw = llm.chat(
             "你是一个加密货币解锁时间表分析专家。只输出 JSON。",
-            prompt, temperature=0.1, max_tokens=8192,
+            prompt, temperature=0.1, max_tokens=8192, response_format={"type": "json_object"},
         )
     except Exception as e:
         return {"ok": False, "error": f"LLM 调用失败: {e}",

@@ -227,6 +227,7 @@ def classify_post(content_text: str, image_count: int = 0) -> dict[str, Any] | N
             user_prompt=user_prompt,
             temperature=0.1,
             max_tokens=1024,
+            response_format={"type": "json_object"},
         )
     except Exception as e:
         print(f"[KOL][classifier] LLM 调用失败: {e}")

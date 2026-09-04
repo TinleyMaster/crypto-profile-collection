@@ -94,7 +94,7 @@ def extract_whitepaper_summary(llm: LLMClient, pdf_text: str, symbol: str, name:
         f"请根据以上白皮书内容，提取结构化投研摘要。"
     )
 
-    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=4096)
+    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
     data = extract_json_from_llm_response(raw)
     return data
 

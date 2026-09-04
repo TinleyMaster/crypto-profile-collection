@@ -27,6 +27,7 @@ def extract_json_from_llm_response(raw: str) -> Any:
     - markdown 代码块包裹（```json ... ``` 或 ``` ... ```）
     - JSON 前后有说明文字（从第一个 { 到最后一个 } 提取）
     - 被截断的 JSON（max_tokens 不足导致末尾不完整）
+    - 字符串中间截断（半截字符串）
     - 空内容
     """
     if not raw or not raw.strip():
@@ -91,6 +92,58 @@ def extract_json_from_llm_response(raw: str) -> Any:
                     return json.loads(candidate[:pos + len(ch)])
                 except json.JSONDecodeError:
                     continue
+
+    # 策略5：处理字符串中间截断（半截字符串）
+    # 尝试在更多位置截断，如 ":" 后、"\"" 后等
+    if start >= 0:
+        candidate = text[start:]
+        # 尝试在最后一个 ":" 后截断
+        last_colon = candidate.rfind(":")
+        if last_colon > 0:
+            # 找到 ":" 后的下一个非空白字符位置
+            after_colon = last_colon + 1
+            while after_colon < len(candidate) and candidate[after_colon] in " \t\n\r":
+                after_colon += 1
+            if after_colon < len(candidate):
+                # 如果是字符串（以 " 开头），尝试找到完整的字符串
+                if candidate[after_colon] == '"':
+                    # 从 ":" 后的 " 开始，找到下一个未转义的 "
+                    i = after_colon + 1
+                    while i < len(candidate):
+                        if candidate[i] == '"' and candidate[i - 1] != '\\':
+                            # 找到完整字符串，尝试解析
+                            try:
+                                return json.loads(candidate[:i + 1] + "}")
+                            except json.JSONDecodeError:
+                                pass
+                            break
+                        i += 1
+                # 如果是数字或布尔值，尝试截断到完整值
+                elif candidate[after_colon] in "0123456789-":
+                    # 找到数字的结束位置
+                    i = after_colon
+                    while i < len(candidate) and (candidate[i].isdigit() or candidate[i] in ".eE+-"):
+                        i += 1
+                    if i > after_colon:
+                        try:
+                            return json.loads(candidate[:i] + "}")
+                        except json.JSONDecodeError:
+                            pass
+                elif candidate[after_colon:].startswith("true"):
+                    try:
+                        return json.loads(candidate[:after_colon + 4] + "}")
+                    except json.JSONDecodeError:
+                        pass
+                elif candidate[after_colon:].startswith("false"):
+                    try:
+                        return json.loads(candidate[:after_colon + 5] + "}")
+                    except json.JSONDecodeError:
+                        pass
+                elif candidate[after_colon:].startswith("null"):
+                    try:
+                        return json.loads(candidate[:after_colon + 4] + "}")
+                    except json.JSONDecodeError:
+                        pass
 
     raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
 
@@ -179,10 +232,12 @@ class LLMClient:
 
     def chat(self, system_prompt: str, user_prompt: str,
              temperature: float = 0.1, max_tokens: int = 2048,
-             timeout_retries: int = 3) -> str:
+             timeout_retries: int = 3,
+             response_format: dict | None = None) -> str:
         """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。
 
         timeout_retries: ReadTimeoutError 重试次数（指数退避），默认 3。
+        response_format: 可选，如 {"type": "json_object"}，强制模型输出 JSON。
         """
         self._last_diag = {
             "provider": self.provider,
@@ -193,7 +248,7 @@ class LLMClient:
         last_exc = None
         for attempt in range(timeout_retries):
             try:
-                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
                 return result
@@ -229,7 +284,7 @@ class LLMClient:
                 "fallback_from": str(exc),
             }
             try:
-                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens)
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
                 return result
@@ -240,14 +295,16 @@ class LLMClient:
             raise exc
 
     def _dispatch(self, system_prompt: str, user_prompt: str,
-                  temperature: float, max_tokens: int) -> str:
+                  temperature: float, max_tokens: int,
+                  response_format: dict | None = None) -> str:
         if self.api_type == "responses":
-            return self._call_responses(system_prompt, user_prompt, temperature, max_tokens)
-        return self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens)
+            return self._call_responses(system_prompt, user_prompt, temperature, max_tokens, response_format)
+        return self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens, response_format)
 
     def _call_chat_completions(
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
+        response_format: dict | None = None,
     ) -> str:
         """OpenAI 兼容的 /chat/completions 接口（流式）。"""
         if not self.is_available():
@@ -277,6 +334,10 @@ class LLMClient:
         else:
             payload["temperature"] = temperature
 
+        # JSON 模式：强制模型输出合法 JSON（DeepSeek/OpenAI 兼容）
+        if response_format:
+            payload["response_format"] = response_format
+
         # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
         resp = self.session.post(
             url, headers=headers, json=payload,
@@ -304,6 +365,7 @@ class LLMClient:
     def _call_responses(
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
+        response_format: dict | None = None,
     ) -> str:
         """火山方舟 /api/v3/responses 接口（DeepSeek 系列模型，流式）。"""
         if not self.is_available():
@@ -324,6 +386,10 @@ class LLMClient:
                 {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
             ],
         }
+
+        # JSON 模式：强制模型输出合法 JSON（DeepSeek/OpenAI 兼容）
+        if response_format:
+            payload["response_format"] = response_format
 
         # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
         resp = self.session.post(

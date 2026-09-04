@@ -474,6 +474,13 @@ class LLMClient:
             ],
         }
 
+        # DeepSeek V4 默认启用思考模式，显式禁用（对齐 chat 路径）
+        # 避免 max_tokens 被思维链吃掉导致 content 为空
+        if "deepseek" in (self.model or "").lower():
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["temperature"] = temperature
+
         # JSON 模式：强制模型输出合法 JSON（DeepSeek/OpenAI 兼容）
         if response_format:
             payload["response_format"] = response_format

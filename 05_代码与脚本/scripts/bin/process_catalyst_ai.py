@@ -78,7 +78,7 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
         f"请分析这条新闻。"
     )
 
-    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=512, response_format={"type": "json_object"})
+    raw = llm.chat(SYSTEM_PROMPT, user_prompt, temperature=0.1, max_tokens=768, response_format={"type": "json_object"})
 
     # 解析 JSON
     result = extract_json_from_llm_response(raw)
@@ -109,6 +109,121 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
         "ai_summary": summary,
         "ai_keywords": keywords,
     }
+
+
+PACK_SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据给定的多条新闻，为每条输出结构化分析结果。
+
+只输出 JSON，不要输出其他内容。JSON 格式：
+{
+  "results": [
+    {
+      "catalyst_id": 123,
+      "event_type": "listing|delisting|burn|partnership|regulation|tech_upgrade|funding|market_update|other",
+      "sentiment": "bullish|bearish|neutral",
+      "summary": "一句话摘要（不超过100字）",
+      "keywords": ["关键词1", "关键词2", "关键词3"]
+    }
+  ]
+}
+
+事件类型说明：
+- listing: 上新/上线/新币发行
+- delisting: 下架/退市/停止交易
+- burn: 销毁/回购销毁
+- partnership: 合作/集成/生态扩展
+- regulation: 监管/合规/政策
+- tech_upgrade: 技术升级/主网升级/硬分叉
+- funding: 融资/投资/募资
+- market_update: 市场动态/行情更新/产品更新
+- other: 其他
+
+情感判断说明：
+- bullish: 明显利好（上新、合作、融资、销毁等）
+- bearish: 明显利空（下架、监管处罚、安全事件等）
+- neutral: 中性（技术升级、常规公告、无法判断）
+"""
+
+
+def process_pack(llm: LLMClient, cats: list[dict]) -> dict[int, dict]:
+    """批量处理多条催化剂，返回 {catalyst_id: ai_* 字段 dict}。
+
+    一次 LLM 请求处理 N 条催化剂，要求模型返回数组格式。
+    """
+    # 构建用户 prompt：每条催化剂带编号
+    items_text = []
+    for i, cat in enumerate(cats, 1):
+        title = cat.get("title") or ""
+        body = cat.get("body_text") or cat.get("body_html") or ""
+        event_category = cat.get("event_category") or ""
+        related_pairs = cat.get("related_pairs") or []
+
+        # 截断正文，避免 token 浪费
+        if len(body) > 500:
+            body = body[:500] + "..."
+
+        items_text.append(
+            f"【第{i}条】catalyst_id={cat['catalyst_id']}\n"
+            f"标题：{title}\n"
+            f"分类：{event_category}\n"
+            f"关联交易对：{', '.join(related_pairs) if related_pairs else '无'}\n"
+            f"正文：\n{body}"
+        )
+
+    user_prompt = (
+        f"请分析以下 {len(cats)} 条催化剂新闻：\n\n"
+        + "\n\n".join(items_text)
+        + "\n\n请为每条新闻输出结构化分析结果。"
+    )
+
+    # 动态调整 max_tokens：每条约 600 token，加上缓冲
+    max_tokens = min(len(cats) * 600 + 256, 8192)
+
+    raw = llm.chat(PACK_SYSTEM_PROMPT, user_prompt, temperature=0.1,
+                   max_tokens=max_tokens, response_format={"type": "json_object"})
+
+    # 解析 JSON
+    data = extract_json_from_llm_response(raw)
+    results = data.get("results", [])
+
+    if not isinstance(results, list):
+        raise ValueError(f"results 不是列表，类型: {type(results).__name__}")
+
+    # 构建 catalyst_id → ai_data 映射
+    result_map = {}
+    for r in results:
+        cid = r.get("catalyst_id")
+        if cid is None:
+            continue
+        cid = int(cid)
+
+        # 字段校验 + 归一化
+        event_type = (r.get("event_type") or "other").lower()
+        valid_types = {"listing", "delisting", "burn", "partnership", "regulation",
+                       "tech_upgrade", "funding", "market_update", "other"}
+        if event_type not in valid_types:
+            event_type = "other"
+
+        sentiment = (r.get("sentiment") or "neutral").lower()
+        if sentiment not in {"bullish", "bearish", "neutral"}:
+            sentiment = "neutral"
+
+        summary = (r.get("summary") or "").strip()
+        if len(summary) > 200:
+            summary = summary[:200]
+
+        keywords = r.get("keywords") or []
+        if not isinstance(keywords, list):
+            keywords = []
+        keywords = [str(k).strip() for k in keywords if k][:10]
+
+        result_map[cid] = {
+            "ai_event_type": event_type,
+            "ai_sentiment": sentiment,
+            "ai_summary": summary,
+            "ai_keywords": keywords,
+        }
+
+    return result_map
 
 
 def fetch_pending(conn, batch_size: int = 50, force: bool = False, offset: int = 0) -> list[dict]:
@@ -215,6 +330,8 @@ def main():
     parser.add_argument("--catalyst-id", type=int, help="只处理指定 catalyst_id")
     parser.add_argument("--force", action="store_true", help="忽略 ai_processed 状态强制重跑")
     parser.add_argument("--sleep", type=float, default=0.5, help="每条之间的间隔秒数")
+    parser.add_argument("--pack-size", type=int, default=0,
+                        help="批量打包大小（0=逐条处理，>0=每 pack_size 条一次 LLM 请求）")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -243,6 +360,7 @@ def main():
         processed = 0
         failed = 0
         offset = 0
+        use_pack = args.pack_size > 0
 
         while True:
             pending = fetch_pending(conn, args.batch_size, force=args.force, offset=offset)
@@ -252,26 +370,81 @@ def main():
 
             print(f"\n获取到 {len(pending)} 条待处理催化剂")
 
-            for cat in pending:
-                if args.max_items and processed >= args.max_items:
-                    print(f"已达到 max_items={args.max_items}，停止。")
-                    break
+            if use_pack:
+                # 批量打包模式：每 pack_size 条一次 LLM 请求
+                for pack_start in range(0, len(pending), args.pack_size):
+                    if args.max_items and processed >= args.max_items:
+                        print(f"已达到 max_items={args.max_items}，停止。")
+                        break
 
-                cid = cat["catalyst_id"]
-                title_preview = (cat.get("title") or "(无标题)")[:60]
-                print(f"[{processed + 1}] 处理 catalyst_id={cid}: {title_preview}")
+                    pack = pending[pack_start:pack_start + args.pack_size]
+                    pack_num = pack_start // args.pack_size + 1
+                    total_packs = (len(pending) + args.pack_size - 1) // args.pack_size
+                    print(f"[pack {pack_num}/{total_packs}] 处理 {len(pack)} 条催化剂")
 
-                try:
-                    result = process_one(llm, cat)
-                    update_result(conn, cid, result)
-                    processed += 1
-                    print(f"     ✓ event_type={result['ai_event_type']}, "
-                          f"sentiment={result['ai_sentiment']}")
-                except Exception as e:
-                    failed += 1
-                    print(f"     ✗ 失败: {e}")
+                    try:
+                        pack_results = process_pack(llm, pack)
+                        for cat in pack:
+                            cid = cat["catalyst_id"]
+                            if cid in pack_results:
+                                update_result(conn, cid, pack_results[cid])
+                                processed += 1
+                                print(f"  ✓ catalyst_id={cid}: "
+                                      f"{pack_results[cid]['ai_event_type']}, "
+                                      f"{pack_results[cid]['ai_sentiment']}")
+                            else:
+                                # pack 解析成功但缺少该 catalyst_id，降级到单条处理
+                                print(f"  ⚠ catalyst_id={cid} 未在 pack 结果中，降级单条处理")
+                                try:
+                                    result = process_one(llm, cat)
+                                    update_result(conn, cid, result)
+                                    processed += 1
+                                    print(f"  ✓ (降级) catalyst_id={cid}: "
+                                          f"{result['ai_event_type']}, {result['ai_sentiment']}")
+                                except Exception as e:
+                                    failed += 1
+                                    print(f"  ✗ (降级) catalyst_id={cid} 失败: {e}")
+                    except Exception as e:
+                        # pack 解析失败，降级到逐条处理
+                        print(f"  ✗ pack 解析失败: {e}，降级到逐条处理")
+                        for cat in pack:
+                            if args.max_items and processed >= args.max_items:
+                                break
+                            cid = cat["catalyst_id"]
+                            try:
+                                result = process_one(llm, cat)
+                                update_result(conn, cid, result)
+                                processed += 1
+                                print(f"  ✓ (降级) catalyst_id={cid}: "
+                                      f"{result['ai_event_type']}, {result['ai_sentiment']}")
+                            except Exception as e2:
+                                failed += 1
+                                print(f"  ✗ (降级) catalyst_id={cid} 失败: {e2}")
+                            time.sleep(args.sleep)
 
-                time.sleep(args.sleep)
+                    time.sleep(args.sleep)
+            else:
+                # 逐条处理模式（原有逻辑）
+                for cat in pending:
+                    if args.max_items and processed >= args.max_items:
+                        print(f"已达到 max_items={args.max_items}，停止。")
+                        break
+
+                    cid = cat["catalyst_id"]
+                    title_preview = (cat.get("title") or "(无标题)")[:60]
+                    print(f"[{processed + 1}] 处理 catalyst_id={cid}: {title_preview}")
+
+                    try:
+                        result = process_one(llm, cat)
+                        update_result(conn, cid, result)
+                        processed += 1
+                        print(f"     ✓ event_type={result['ai_event_type']}, "
+                              f"sentiment={result['ai_sentiment']}")
+                    except Exception as e:
+                        failed += 1
+                        print(f"     ✗ 失败: {e}")
+
+                    time.sleep(args.sleep)
 
             if args.max_items and processed >= args.max_items:
                 break

@@ -735,6 +735,31 @@ def api_coverage_by_tier():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/chain-coverage")
+def api_chain_coverage():
+    """链覆盖状态：已覆盖 vs 降级（动态检测）。"""
+    try:
+        from db_stats import get_db
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT chain, coverage_status, has_native_snapshot, asset_count, note, updated_at FROM biz.chain_coverage ORDER BY coverage_status DESC, chain")
+                rows = cur.fetchall()
+        covered = []
+        degraded = []
+        updated_at = None
+        for r in rows:
+            item = {"chain": r[0], "asset_count": r[3], "note": r[4]}
+            if r[5]:
+                updated_at = r[5].isoformat() if hasattr(r[5], 'isoformat') else str(r[5])
+            if r[1] == "covered":
+                covered.append(item)
+            else:
+                degraded.append(item)
+        return jsonify({"ok": True, "covered": covered, "degraded": degraded, "updated_at": updated_at})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/pending")
 def api_pending():
     try:

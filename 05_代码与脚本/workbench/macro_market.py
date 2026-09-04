@@ -4189,6 +4189,150 @@ def _collect_degraded(today: dict) -> list[str]:
     return out
 
 
+def fetch_sector_flow_with_leaders() -> dict:
+    """12 赛道资金流向 + 各赛道领涨币（用于早报）。
+
+    数据口径说明：
+    - 资金流用「市值变化率」近似（真实净流入 ETL 待实现，flow_7d_usd 暂为 0）
+    - 24h 成交量从 CMC 快照聚合
+    - 领涨币按 7d 涨幅排序，过滤掉市值过小的（< 10M）
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 1) 12 赛道市值变化 + 基础信息
+                cur.execute("""
+                    SELECT sector_type, sector_key, sector_label, metric_date,
+                           market_cap, mcap_change_1d_pct, mcap_change_7d_pct, mcap_change_30d_pct,
+                           coin_count, composite_score, mode
+                    FROM biz.sector_flow_daily
+                    WHERE metric_date = (SELECT MAX(metric_date) FROM biz.sector_flow_daily)
+                      AND sector_type = 'sector_12'
+                    ORDER BY mcap_change_7d_pct DESC NULLS LAST
+                """)
+                sectors = [dict(r) for r in cur.fetchall()]
+
+                if not sectors:
+                    return {"status": "empty", "sectors": []}
+
+                # 2) 每个赛道取领涨币 TOP3（按 7d 涨幅，市值 > 10M 过滤小币）
+                for s in sectors:
+                    cur.execute("""
+                        SELECT a.canonical_symbol AS symbol, a.name,
+                               q.market_cap, q.percent_change_24h, q.percent_change_7d,
+                               q.volume_24h
+                        FROM biz.asset_sector s
+                        JOIN core.asset a ON s.asset_id = a.asset_id
+                        JOIN core.asset_source_map asm
+                          ON a.asset_id = asm.asset_id AND asm.source_code = 'cmc'
+                        JOIN (
+                            SELECT DISTINCT ON (cmc_id) cmc_id, market_cap,
+                                   percent_change_24h, percent_change_7d, volume_24h, quote_time
+                            FROM src_cmc.cmc_asset_quote_snapshot
+                            WHERE market_cap IS NOT NULL
+                              AND quote_time::date = (
+                                SELECT MAX(quote_time)::date FROM src_cmc.cmc_asset_quote_snapshot
+                              )
+                            ORDER BY cmc_id, quote_time DESC
+                        ) q ON asm.source_asset_key::bigint = q.cmc_id
+                        WHERE s.sector = %s AND s.is_primary = TRUE
+                          AND q.market_cap >= 10000000
+                        ORDER BY q.percent_change_7d DESC NULLS LAST
+                        LIMIT 3
+                    """, (s["sector_key"],))
+                    s["leaders"] = [dict(r) for r in cur.fetchall()]
+
+                # 3) 全市场 24h 总成交量
+                cur.execute("""
+                    SELECT SUM(volume_24h) as total_volume
+                    FROM (
+                        SELECT DISTINCT ON (cmc_id) cmc_id, volume_24h
+                        FROM src_cmc.cmc_asset_quote_snapshot
+                        WHERE quote_time::date = (
+                            SELECT MAX(quote_time)::date FROM src_cmc.cmc_asset_quote_snapshot
+                        )
+                        ORDER BY cmc_id, quote_time DESC
+                    ) q
+                """)
+                total_vol = cur.fetchone()
+                total_volume = float(total_vol["total_volume"]) if total_vol and total_vol["total_volume"] else 0
+
+                return {
+                    "status": "ok",
+                    "sectors": sectors,
+                    "total_volume_24h": total_volume,
+                    "metric_date": sectors[0].get("metric_date"),
+                }
+    except Exception as e:
+        return {"status": "error", "sectors": [], "error": str(e)}
+
+
+def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
+    """KOL 链上分析师近 N 小时信号（用于早报链上异动板块）。
+
+    只取 onchain 类信号（exchange_flow / smart_money / accumulation /
+    whale_move / distribution / liquidation）。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT s.signal_id, s.created_at, s.signal_category, s.signal_subtype,
+                           s.symbol, s.event_direction, s.event_amount, s.event_token,
+                           s.event_usd_value, s.tx_hash, s.address_label, s.event_exchange,
+                           s.event_time, s.confidence, s.reason,
+                           p.nickname as kol_name
+                    FROM biz.kol_signal s
+                    JOIN biz.kol_profile p ON s.profile_id = p.profile_id
+                    WHERE s.signal_category = 'onchain'
+                      AND s.created_at >= NOW() - (%s || ' hours')::INTERVAL
+                    ORDER BY s.created_at DESC
+                    LIMIT %s
+                """, (hours, limit))
+                signals = [dict(r) for r in cur.fetchall()]
+
+                # 统计各子类型数量
+                cur.execute("""
+                    SELECT signal_subtype, count(*) as cnt
+                    FROM biz.kol_signal
+                    WHERE signal_category = 'onchain'
+                      AND created_at >= NOW() - (%s || ' hours')::INTERVAL
+                    GROUP BY signal_subtype
+                    ORDER BY cnt DESC
+                """, (hours,))
+                stats = [dict(r) for r in cur.fetchall()]
+
+                # 有哪些 KOL
+                cur.execute("""
+                    SELECT DISTINCT p.nickname
+                    FROM biz.kol_signal s
+                    JOIN biz.kol_profile p ON s.profile_id = p.profile_id
+                    WHERE s.signal_category = 'onchain'
+                      AND s.created_at >= NOW() - (%s || ' hours')::INTERVAL
+                """, (hours,))
+                kols = [r["nickname"] for r in cur.fetchall()]
+
+                return {
+                    "status": "ok",
+                    "signals": signals,
+                    "stats": stats,
+                    "kols": kols,
+                    "hours": hours,
+                }
+    except Exception as e:
+        return {"status": "error", "signals": [], "error": str(e)}
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     """
     早报结构化骨架（设计文档第七节）。消费 overview 已有字段，不改 API 层。
@@ -4199,6 +4343,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     stab = fetch_stablecoin_supply_trend()
     opps = (today.get("opportunity_list") or {}).get("opportunities") or []
     divs = (today.get("divergence_signals") or {}).get("signals") or []
+    sector_flow = fetch_sector_flow_with_leaders()
+    kol_onchain = fetch_kol_onchain_signals()
 
     return {
         "M0_tldr": _build_tldr(today, opps),
@@ -4221,6 +4367,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         "M2_institutional": today.get("institutional_mvrv") or {},
         "M5_catalyst": today.get("event_calendar") or {},
         "M6_degraded": _collect_degraded(today),
+        "sector_flow": sector_flow,
+        "kol_onchain": kol_onchain,
         "DIFF": diff,
     }
 

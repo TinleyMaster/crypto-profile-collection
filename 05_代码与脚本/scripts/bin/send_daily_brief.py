@@ -29,285 +29,445 @@ if os.path.isdir(_scripts_src) and _scripts_src not in sys.path:
     sys.path.insert(0, _scripts_src)
 
 
+def _fmt_num(v, decimals=0):
+    """安全格式化数字，None → N/A。"""
+    if v is None:
+        return "N/A"
+    try:
+        f = float(v)
+        return f"{f:,.{decimals}f}"
+    except Exception:
+        return str(v)
+
+
+def _fmt_pct(v, decimals=1, signed=True):
+    """安全格式化百分比，带颜色方向。"""
+    if v is None:
+        return "N/A", "#64748b"
+    try:
+        f = float(v)
+    except Exception:
+        return str(v), "#64748b"
+    color = "#dc2626" if f > 0 else ("#16a34a" if f < 0 else "#64748b")
+    sign = "+" if signed and f >= 0 else ""
+    return f"{sign}{f:.{decimals}f}%", color
+
+
+def _fmt_mcap(v):
+    """市值/金额缩写：B / M / K。"""
+    if v is None:
+        return "N/A"
+    try:
+        f = float(v)
+    except Exception:
+        return str(v)
+    if f >= 1e9:
+        return f"${f/1e9:.1f}B"
+    if f >= 1e6:
+        return f"${f/1e6:.1f}M"
+    if f >= 1e3:
+        return f"${f/1e3:.0f}K"
+    return f"${f:.0f}"
+
+
 def render_brief_html(brief: dict) -> str:
-    """将 brief dict 渲染为简洁 HTML 邮件。"""
+    """早报 HTML 四屏版式：仪表盘 → 赛道资金流 → 机会清单 → 链上异动+事件。"""
     today = date.today().isoformat()
     m0 = brief.get("M0_tldr", {})
     diff = brief.get("DIFF", {})
-    opportunities = sorted(
+    sector_flow = brief.get("sector_flow") or {}
+    kol_onchain = brief.get("kol_onchain") or {}
+
+    # 全部机会（HIGH + 其他）按评分排序
+    all_opps = sorted(
         (brief.get("M4_opportunities") or []) + (brief.get("M4_watchlist") or []),
-        key=lambda o: (o.get("conviction_score") if isinstance(o.get("conviction_score"), (int, float)) else 0), reverse=True
-    )[:5]
+        key=lambda o: (o.get("conviction_score") if isinstance(o.get("conviction_score"), (int, float)) else 0),
+        reverse=True,
+    )
 
-    # ── M0 头部 ──
+    html_parts = []
+    # 外层容器
+    html_parts.append(f"""
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:720px;margin:auto;background:#fff;padding:16px;color:#0f172a;line-height:1.5">
+    """)
+
+    # ════════════════════════════════════════════════════════
+    # 第 1 屏：大盘仪表盘
+    # ════════════════════════════════════════════════════════
     btc_price = m0.get("btc_price")
-    btc_str = f"${btc_price:,.0f}" if btc_price else "N/A"
+    btc_change = m0.get("btc_change_24h_pct")
+    btc_chg_str, btc_chg_color = _fmt_pct(btc_change)
     fear_greed = m0.get("fear_greed")
-    fg_str = f"{fear_greed}" if fear_greed is not None else "N/A"
     fg_label = m0.get("fear_greed_label", "")
-    phase = m0.get("btc_cycle_phase", "unknown")
-    btc_mvrv = m0.get("btc_mvrv_pct")
-    mvrv_str = f" · MVRV {btc_mvrv:.0f}%" if btc_mvrv is not None else ""
+    phase = m0.get("btc_cycle_phase", "—")
 
-    html_parts = [f"""
-    <div style="font-family:sans-serif;max-width:680px;margin:auto;background:#fff;padding:20px">
-      <h2 style="color:#1e293b;margin:0 0 8px">📊 加密大盘早报 {today}</h2>
-      <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
-        <tr>
-          <td style="padding:8px;background:#f8fafc;border-radius:6px;text-align:center">
-            <div style="font-size:24px;font-weight:bold">BTC {btc_str}</div>
-            <div style="color:#64748b;font-size:12px">恐贪 {fg_str}{(' ' + fg_label) if fg_label else ''} · 周期 {phase}{mvrv_str}</div>
-          </td>
-        </tr>
-      </table>
-    """]
+    # 总市值 & 24h 变化（从 diff 或者 M2_flow 取）
+    m2 = brief.get("M2_flow") or {}
+    total_mcap = m2.get("total_market_cap") or m0.get("total_market_cap")
+    total_mcap_chg = diff.get("total_market_cap_pct") if diff else None
+    mcap_chg_str, mcap_chg_color = _fmt_pct(total_mcap_chg)
 
-    # ── DIFF 段 ──
-    if diff:
-        html_parts.append('<div style="margin-bottom:16px"><b>📈 昨日变化</b><ul style="margin:4px 0;padding-left:20px">')
-        for key, val in diff.items():
-            if val is None:
-                continue
-            label = key.replace("_", " ").title()
-            if isinstance(val, (int, float)):
-                arrow = "↑" if val > 0 else ("↓" if val < 0 else "→")
-                color = "#dc2626" if val < 0 else "#16a34a"
-                html_parts.append(f'<li>{label}: <span style="color:{color}">{arrow} {val:+.1f}%</span></li>')
-            elif isinstance(val, list):
-                if val:  # 空列表不展示
-                    html_parts.append(f'<li>{label}: {", ".join(str(x) for x in val)}</li>')
-            elif isinstance(val, str):
-                html_parts.append(f'<li>{label}: {val}</li>')
-            # dict 等其他类型跳过
-        html_parts.append("</ul></div>")
+    # 24h 总成交量
+    total_vol = sector_flow.get("total_volume_24h")
+    vol_str = _fmt_mcap(total_vol) if total_vol else "N/A"
 
-    # ── 宏观背离（M3）──
-    divs = brief.get("M3_divergence") or []
-    if divs:
-        html_parts.append('<div style="margin-bottom:16px"><b>📡 宏观背离</b><ul style="margin:4px 0;padding-left:20px">')
-        for d in divs:
-            sig_name = d.get("signal", "?")
-            label = d.get("label", "?")
-            interp = d.get("interpretation", "")
-            metrics = d.get("metrics") or {}
-            metrics_str = " · ".join(f"{k}={v}" for k, v in metrics.items()) if metrics else ""
-            color = "#dc2626" if label == "DANGEROUS" else "#f59e0b" if label == "DIVERGENT" else "#64748b"
-            icon = "🔴" if label == "DANGEROUS" else "🟡"
-            html_parts.append(
-                f'<li>{icon} <b style="color:{color}">{label}</b> '
-                f'({sig_name}) {interp}'
-                f'{f""" <span style="color:#64748b;font-size:12px">{metrics_str}</span>""" if metrics_str else ""}</li>'
-            )
-        html_parts.append("</ul></div>")
+    # 一句话结论（用 M0 的 TLDR 或者 AI 结论）
+    tldr_text = m0.get("summary") or m0.get("tldr") or ""
+    if not tldr_text:
+        # 从已有指标拼一句话
+        direction = "偏多" if (btc_change is not None and btc_change > 0) else "偏空"
+        tldr_text = f"大盘今日{direction}，BTC 位于 {phase} 周期阶段。"
+
+    html_parts.append(f"""
+      <div style="margin-bottom:20px">
+        <div style="font-size:18px;font-weight:700;color:#0f172a;margin-bottom:2px">📊 加密大盘早报</div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:12px">{today} · Asia/Shanghai</div>
+
+        <!-- 四宫格仪表盘 -->
+        <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin-bottom:10px">
+          <tr>
+            <!-- BTC -->
+            <td style="width:25%;background:linear-gradient(135deg,#1e293b,#334155);color:#fff;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
+              <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">BTC 价格</div>
+              <div style="font-size:20px;font-weight:700;letter-spacing:-0.5px">{_fmt_mcap(btc_price) if btc_price else 'N/A'}</div>
+              <div style="font-size:12px;color:{btc_chg_color};margin-top:2px">{btc_chg_str} (24h)</div>
+            </td>
+            <!-- 总市值 -->
+            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
+              <div style="font-size:11px;color:#64748b;margin-bottom:2px">总市值</div>
+              <div style="font-size:18px;font-weight:700;color:#0f172a">{_fmt_mcap(total_mcap)}</div>
+              <div style="font-size:12px;color:{mcap_chg_color};margin-top:2px">{mcap_chg_str} (24h)</div>
+            </td>
+            <!-- 恐贪 -->
+            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
+              <div style="font-size:11px;color:#64748b;margin-bottom:2px">恐贪指数</div>
+              <div style="font-size:20px;font-weight:700;color:{_fear_greed_color(fear_greed)}">{fear_greed if fear_greed is not None else 'N/A'}</div>
+              <div style="font-size:12px;color:#64748b;margin-top:2px">{fg_label or '—'}</div>
+            </td>
+            <!-- 24h 成交量 -->
+            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
+              <div style="font-size:11px;color:#64748b;margin-bottom:2px">24h 成交量</div>
+              <div style="font-size:18px;font-weight:700;color:#0f172a">{vol_str}</div>
+              <div style="font-size:12px;color:#64748b;margin-top:2px">周期: {phase}</div>
+            </td>
+          </tr>
+        </table>
+
+        <!-- 一句话结论 -->
+        <div style="background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px;padding:10px 14px;font-size:13px;color:#1e40af">
+          <b>今日观点</b>：{tldr_text}
+        </div>
+      </div>
+    """)
+
+    # ════════════════════════════════════════════════════════
+    # 第 2 屏：🏭 12 赛道资金流向
+    # ════════════════════════════════════════════════════════
+    html_parts.append("""
+      <div style="margin-bottom:20px">
+        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
+          🏭 12 赛道资金流向
+        </div>
+    """)
+
+    sectors = sector_flow.get("sectors") or []
+    if sectors and sector_flow.get("status") == "ok":
+        # 找出最大市值用于进度条归一化
+        max_mcap = max((float(s.get("market_cap") or 0)) for s in sectors) or 1
+
+        for idx, s in enumerate(sectors):
+            label = s.get("sector_label") or s.get("sector_key") or "?"
+            mcap = float(s.get("market_cap") or 0)
+            mcap_7d = s.get("mcap_change_7d_pct")
+            mcap_1d = s.get("mcap_change_1d_pct")
+            chg_7d_str, chg_7d_color = _fmt_pct(mcap_7d)
+            chg_1d_str, chg_1d_color = _fmt_pct(mcap_1d)
+            bar_pct = max(2, min(100, (mcap / max_mcap) * 100)) if max_mcap > 0 else 2
+
+            # 领涨币
+            leaders = s.get("leaders") or []
+            leader_html = ""
+            if leaders:
+                parts = []
+                for l in leaders:
+                    sym = l.get("symbol", "?")
+                    p7d = l.get("percent_change_7d")
+                    p7d_str, p7d_color = _fmt_pct(p7d)
+                    parts.append(
+                        f'<span style="background:#f1f5f9;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px">'
+                        f'<b>{sym}</b> <span style="color:{p7d_color}">{p7d_str}</span></span>'
+                    )
+                leader_html = f'<div style="margin-top:4px">{"".join(parts)}</div>'
+
+            # 前三赛道用高亮背景
+            row_bg = "#f0fdf4" if idx < 3 else ("#fef2f2" if idx >= len(sectors) - 2 else "#fafafa")
+            rank_badge = ""
+            if idx == 0:
+                rank_badge = '<span style="background:#16a34a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px">TOP</span>'
+            elif idx >= len(sectors) - 2:
+                rank_badge = '<span style="background:#dc2626;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px">LAG</span>'
+
+            html_parts.append(f"""
+            <div style="padding:8px 10px;margin-bottom:4px;border-radius:6px;background:{row_bg}">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+                <div style="font-size:13px;font-weight:600">
+                  {rank_badge}{label}
+                  <span style="color:#94a3b8;font-weight:400;font-size:11px;margin-left:4px">{_fmt_mcap(mcap)}</span>
+                </div>
+                <div style="font-size:12px">
+                  <span style="color:{chg_7d_color};font-weight:600">7d {chg_7d_str}</span>
+                  <span style="color:#94a3b8;margin:0 4px">·</span>
+                  <span style="color:{chg_1d_color}">1d {chg_1d_str}</span>
+                </div>
+              </div>
+              <!-- 市值条形 -->
+              <div style="height:4px;background:#e2e8f0;border-radius:2px;overflow:hidden">
+                <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:2px"></div>
+              </div>
+              {leader_html}
+            </div>
+            """)
     else:
-        html_parts.append('<div style="margin-bottom:16px"><b>📡 宏观背离</b> <span style="color:#64748b">暂无异常信号</span></div>')
+        html_parts.append('<div style="color:#64748b;font-size:13px;padding:10px;background:#f8fafc;border-radius:6px">暂无赛道数据</div>')
 
-    # ── 催化剂日历（M5）──
-    catalyst = brief.get("M5_catalyst") or {}
-    events = catalyst.get("hardcoded") or []
-    if events:
-        today_date = date.today().isoformat()
-        html_parts.append('<div style="margin-bottom:16px"><b>📅 催化剂日历</b><ul style="margin:4px 0;padding-left:20px">')
-        for ev in events[:6]:  # 最多展示 6 条
-            ev_date = ev.get("date", "")
-            ev_name = ev.get("event", "?")
-            ev_type = ev.get("type", "macro")
-            # 标注距离今天天数
-            try:
-                days_until = (date.fromisoformat(ev_date) - date.today()).days
-                days_str = f"（{days_until}天后）" if days_until > 0 else f"（今天）" if days_until == 0 else f"（已过）"
-            except Exception:
-                days_str = ""
-            html_parts.append(f'<li><b>{ev_date}</b> {ev_name} {days_str}</li>')
-        html_parts.append("</ul></div>")
-    else:
-        html_parts.append('<div style="margin-bottom:16px"><b>📅 催化剂日历</b> <span style="color:#64748b">暂无近期事件</span></div>')
+    html_parts.append("</div>")
 
-    # ── 机会清单 ──
-    if opportunities:
-        html_parts.append('<div style="margin-bottom:16px"><b>🎯 机会清单</b>')
-        for opp in opportunities[:5]:
-            tier = opp.get("conviction_tier", opp.get("confidence", "?"))
+    # ════════════════════════════════════════════════════════
+    # 第 3 屏：🎯 机会清单
+    # ════════════════════════════════════════════════════════
+    html_parts.append("""
+      <div style="margin-bottom:20px">
+        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
+          🎯 机会清单（按综合评分排序）
+        </div>
+    """)
+
+    if all_opps:
+        for opp in all_opps[:5]:
+            tier = opp.get("conviction_tier", "?")
             score = opp.get("conviction_score", "?")
             target = opp.get("target", "?")
             direction = opp.get("direction", "?")
             trigger = opp.get("trigger_logic", "")
+            sector = opp.get("sector", "")
+            sources = opp.get("source_count") or opp.get("signals_count") or ""
 
             if tier == "HIGH":
-                border = "border-left:4px solid #dc2626;background:#fef2f2"
+                border_color = "#dc2626"
+                bg = "#fef2f2"
             elif tier == "MED":
-                border = "border-left:4px solid #f59e0b;background:#fffbeb"
+                border_color = "#f59e0b"
+                bg = "#fffbeb"
             else:
-                border = "border-left:4px solid #94a3b8;background:#f8fafc"
+                border_color = "#94a3b8"
+                bg = "#f8fafc"
+
+            dir_icon = "↗" if direction == "long" else "↘" if direction == "short" else "→"
+            dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
+
+            meta_parts = []
+            if sector:
+                meta_parts.append(f"🏷️ {sector}")
+            if sources:
+                meta_parts.append(f"📡 {sources}信号源")
+            meta_str = " · ".join(meta_parts)
 
             html_parts.append(f"""
-            <div style="padding:10px;margin:6px 0;border-radius:4px;{border}">
-              <b>{target}</b> <span style="color:{'#dc2626' if direction=='long' else '#16a34a' if direction=='short' else '#64748b'}">{'↗' if direction=='long' else '↘' if direction=='short' else '→'} {direction}</span>
-              <span style="float:right;color:#64748b">Tier: {tier} · Score: {score}</span>
-              <div style="color:#475569;font-size:13px;margin-top:4px">{trigger}</div>
-            </div>""")
-        html_parts.append("</div>")
+            <div style="padding:10px 12px;margin:6px 0;border-radius:6px;border-left:4px solid {border_color};background:{bg}">
+              <div style="display:flex;justify-content:space-between;align-items:baseline">
+                <div>
+                  <span style="font-size:15px;font-weight:700">{target}</span>
+                  <span style="color:{dir_color};font-size:13px;margin-left:6px">{dir_icon} {direction}</span>
+                </div>
+                <div style="font-size:12px;color:#64748b">
+                  <span style="background:{border_color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600">{tier}</span>
+                  <span style="margin-left:4px">Score: {score}</span>
+                </div>
+              </div>
+              {f'<div style="font-size:12px;color:#64748b;margin-top:2px">{meta_str}</div>' if meta_str else ''}
+              <div style="color:#475569;font-size:12px;margin-top:4px;line-height:1.4">{trigger}</div>
+            </div>
+            """)
+    else:
+        html_parts.append('<div style="color:#64748b;font-size:13px;padding:10px;background:#f8fafc;border-radius:6px">暂无推荐机会</div>')
 
-    # ── 共振榜（M4_resonance）──
-    resonance = brief.get("M4_resonance") or {}
-    resonance_signals = resonance.get("signals") if isinstance(resonance, dict) else None
-    if resonance_signals:
-        html_parts.append('<div style="margin-bottom:16px"><b>🎯 共振榜（共识动量 ∩ 宏观 conviction）</b>')
-        for sig in resonance_signals[:5]:
-            sym = sig.get("symbol", "?")
-            direction = sig.get("direction", "?")
-            conv_score = sig.get("conviction_score", "?")
-            cons_score = sig.get("consensus_score", "?")
-            source_count = sig.get("source_count", "?")
-            trigger = sig.get("trigger_logic", "")
-            action = sig.get("action_hint", "")
+    html_parts.append("</div>")
 
-            if direction == "long":
-                color = "#dc2626"
-                icon = "↗"
-            elif direction == "short":
-                color = "#16a34a"
-                icon = "↘"
+    # ════════════════════════════════════════════════════════
+    # 第 4 屏：🔗 链上异动 + 📅 近期事件
+    # ════════════════════════════════════════════════════════
+    html_parts.append("""
+      <div style="margin-bottom:20px">
+        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
+          🔗 链上异动 & 近期事件
+        </div>
+    """)
+
+    # 左：链上信号
+    signals = kol_onchain.get("signals") or []
+    kol_count = len(kol_onchain.get("kols") or [])
+    html_parts.append(f"""
+      <div style="margin-bottom:10px">
+        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:4px">
+          链上信号（{kol_onchain.get('hours',24)}h · {kol_count}位分析师）
+        </div>
+    """)
+    if signals and kol_onchain.get("status") == "ok":
+        for sig in signals[:6]:
+            subtype = sig.get("signal_subtype") or ""
+            direction = sig.get("event_direction") or ""
+            sym = sig.get("symbol") or "?"
+            amount = sig.get("event_usd_value")
+            amt_str = _fmt_mcap(amount) if amount else (sig.get("event_amount") or "")
+            kol = sig.get("kol_name") or ""
+            addr_label = sig.get("address_label") or ""
+
+            # 方向颜色
+            if "in" in str(direction).lower() or "accum" in str(subtype).lower():
+                dir_c = "#dc2626"
+                dir_i = "↗"
+            elif "out" in str(direction).lower() or "distribut" in str(subtype).lower():
+                dir_c = "#16a34a"
+                dir_i = "↘"
             else:
-                color = "#64748b"
-                icon = "→"
+                dir_c = "#64748b"
+                dir_i = "→"
 
             html_parts.append(f"""
-            <div style="padding:10px;margin:6px 0;border-radius:4px;border-left:4px solid #7c3aed;background:#faf5ff">
-              <b>{sym}</b> <span style="color:{color}">{icon} {direction}</span>
-              <span style="float:right;color:#64748b">Conviction {conv_score} · 共识 {cons_score} · {source_count}源</span>
-              <div style="color:#475569;font-size:13px;margin-top:4px">{trigger}</div>
-              {'<div style="color:#7c3aed;font-size:12px;margin-top:4px">💡 ' + action + '</div>' if action else ''}
-            </div>""")
-        html_parts.append("</div>")
+            <div style="padding:6px 8px;margin:3px 0;border-radius:5px;background:#fafafa;font-size:12px">
+              <span style="color:{dir_c};font-weight:600">{dir_i} {subtype}</span>
+              · <b>{sym}</b> {amt_str}
+              {f'· <span style="color:#64748b">{addr_label}</span>' if addr_label else ''}
+              <span style="float:right;color:#94a3b8">{kol}</span>
+            </div>
+            """)
     else:
-        html_parts.append('<div style="margin-bottom:16px"><b>🎯 共振榜</b> <span style="color:#64748b">暂无共识动量与宏观 conviction 共振标的</span></div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:8px;background:#f8fafc;border-radius:5px">近 24h 无链上信号</div>')
+    html_parts.append("</div>")
 
-    # ── Meme 五维风险标签池（P0-4）──
-    meme = brief.get("M4_meme") or {}
-    if isinstance(meme, dict) and meme.get("status") == "ok":
-        buckets = meme.get("buckets") or {}
-        summary = meme.get("summary") or {}
-        block = buckets.get("block") or []
-        high = buckets.get("high") or []
-        low = buckets.get("low") or []
-        html_parts.append('<div style="margin-bottom:16px"><b>🐸 Meme 机会池 & 排雷</b>')
-        if block:
-            html_parts.append('<div style="font-size:13px;color:#dc2626;margin:4px 0"><b>🚫 一票否决/高危</b></div>')
-            for item in block[:3]:
-                flags = item.get("flags") or []
-                flag_str = " | ".join(flags[:3]) if flags else ""
-                html_parts.append(
-                    f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#fef2f2;border-radius:4px">'
-                    f'<b>{item.get("symbol", "?")}</b> {item.get("total_score")}分 '
-                    f'{flag_str}</div>'
-                )
-        if low:
-            html_parts.append('<div style="font-size:13px;color:#16a34a;margin:4px 0"><b>✅ 低风险观察池</b></div>')
-            html_parts.append('<ul style="margin:4px 0;padding-left:20px;font-size:13px">' +
-                "".join(f'<li>{it.get("symbol","?")} {it.get("total_score")}分 '
-                        f'(合约{it.get("contract_label","?")}/流动性{it.get("liquidity_label","?")}/筹码{it.get("holder_label","?")})</li>'
-                        for it in low[:5]) +
-                '</ul>')
-        if not block and not low and not high:
-            html_parts.append('<div style="color:#64748b;font-size:13px">暂无有效标签数据</div>')
-        html_parts.append(
-            f'<div style="color:#64748b;font-size:12px">统计: block={summary.get("block",0)} high={summary.get("high",0)} '
-            f'medium={summary.get("medium",0)} low={summary.get("low",0)}</div>'
-        )
-        html_parts.append("</div>")
+    # 右：催化剂日历
+    catalyst = brief.get("M5_catalyst") or {}
+    events = (catalyst.get("hardcoded") or []) + (catalyst.get("token_events") or [])
+    # 按日期排序
+    try:
+        events.sort(key=lambda e: e.get("date", "9999"))
+    except Exception:
+        pass
+
+    html_parts.append("""
+      <div>
+        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:4px">📅 近期催化剂</div>
+    """)
+    if events:
+        for ev in events[:5]:
+            ev_date = ev.get("date", "")
+            ev_name = ev.get("event", "?")
+            ev_type = ev.get("type", "")
+            try:
+                days_until = (date.fromisoformat(ev_date) - date.today()).days
+                days_str = f"{days_until}天后" if days_until > 0 else "今天" if days_until == 0 else "已过"
+                days_color = "#16a34a" if days_until <= 7 and days_until >= 0 else "#94a3b8"
+            except Exception:
+                days_str = ""
+                days_color = "#94a3b8"
+
+            type_badge = ""
+            if ev_type == "macro":
+                type_badge = '<span style="background:#e0e7ff;color:#4338ca;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">宏观</span>'
+            elif ev_type == "unlock":
+                type_badge = '<span style="background:#fef3c7;color:#92400e;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">解锁</span>'
+            elif ev_type in ("listing", "exchange_listing"):
+                type_badge = '<span style="background:#dcfce7;color:#166534;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">上币</span>'
+
+            html_parts.append(f"""
+            <div style="padding:5px 8px;margin:2px 0;font-size:12px;border-bottom:1px solid #f1f5f9">
+              {type_badge}<b>{ev_date}</b> {ev_name}
+              <span style="float:right;color:{days_color}">{days_str}</span>
+            </div>
+            """)
     else:
-        html_parts.append('<div style="margin-bottom:16px"><b>🐸 Meme 机会池 & 排雷</b> <span style="color:#64748b">暂无数据</span></div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:8px;background:#f8fafc;border-radius:5px">暂无近期事件</div>')
+    html_parts.append("</div>")
 
-    # ── 四烟囱信号（P1-3：TVL / GitHub / 融资 / 黑客）──
-    chimney = brief.get("M4_chimney") or {}
-    if isinstance(chimney, dict) and chimney.get("status") in ("ok", "partial"):
-        html_parts.append('<div style="margin-bottom:16px"><b>🏭 四烟囱信号</b>')
-        # TVL
-        tvl_items = []
-        for t in (chimney.get("tvl") or []):
-            if t.get("type") == "category":
-                for it in (t.get("items") or []):
-                    chg = it.get("tvl_change_7d_pct")
-                    if chg is not None:
-                        tvl_items.append(f"{it.get('category','?')} {chg:+.1f}%")
-            elif t.get("type") == "chain":
-                for it in (t.get("items") or []):
-                    chg = it.get("flow_7d_pct")
-                    if chg is not None:
-                        tvl_items.append(f"{it.get('chain','?')} 链 {chg:+.1f}%")
-        if tvl_items:
-            html_parts.append('<div style="font-size:13px"><b>TVL 异动:</b> ' + " / ".join(tvl_items[:6]) + '</div>')
-        # GitHub
-        gh = chimney.get("github") or []
-        if gh:
-            html_parts.append('<div style="font-size:13px;margin-top:4px"><b>GitHub:</b> ' +
-                " / ".join(f"{g.get('symbol','?')} {g.get('direction','')}" for g in gh[:3]) + '</div>')
-        # Funding
-        funding = chimney.get("funding") or []
-        if funding:
-            html_parts.append('<div style="font-size:13px;margin-top:4px"><b>融资:</b> ' +
-                " / ".join(f"{f.get('symbol','?')} {f.get('round','')} ${f.get('amount_m','?')}M" for f in funding[:3]) + '</div>')
-        # Hacks
-        hacks = chimney.get("hacks") or []
-        if hacks:
-            html_parts.append('<div style="font-size:13px;margin-top:4px;color:#dc2626"><b>安全事件:</b> ' +
-                " / ".join(f"{h.get('symbol','?')} ${h.get('amount_usd',0)/1e6:.1f}M {h.get('technique','')}" for h in hacks[:3]) + '</div>')
-        html_parts.append("</div>")
-    else:
-        html_parts.append('<div style="margin-bottom:16px"><b>🏭 四烟囱信号</b> <span style="color:#64748b">暂无数据</span></div>')
+    html_parts.append("</div>")
 
-    # ── 聪明钱背离（P1-1）──
+    # ════════════════════════════════════════════════════════
+    # 其他信号（折叠显示，精简）
+    # ════════════════════════════════════════════════════════
+    extra_blocks = []
+
+    # 宏观背离（M3）
+    divs = brief.get("M3_divergence") or []
+    if divs:
+        items = []
+        for d in divs[:3]:
+            sig_name = d.get("signal", "?")
+            label = d.get("label", "?")
+            interp = d.get("interpretation", "")
+            color = "#dc2626" if label == "DANGEROUS" else "#f59e0b"
+            icon = "🔴" if label == "DANGEROUS" else "🟡"
+            items.append(f'<span style="background:#fffbeb;color:#92400e;font-size:11px;padding:2px 6px;border-radius:4px;margin-right:4px">{icon} {sig_name}</span> {interp}')
+        extra_blocks.append(("📡 宏观背离", "<br>".join(items)))
+
+    # 聪明钱背离
     sm = brief.get("M4_smart_money") or {}
     if isinstance(sm, dict) and sm.get("status") == "ok" and (sm.get("bullish") or sm.get("bearish")):
-        html_parts.append('<div style="margin-bottom:16px"><b>🐋 聪明钱背离</b>')
-        for s in (sm.get("bullish") or [])[:3]:
-            html_parts.append(
-                f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#f0fdf4;border-radius:4px">'
-                f'<b>{s.get("symbol","?")}</b> {s.get("label","")} '
-                f'置信{s.get("confidence","?")}% · {s.get("description","")}</div>'
-            )
-        for s in (sm.get("bearish") or [])[:3]:
-            html_parts.append(
-                f'<div style="font-size:13px;margin:2px 0;padding:4px 6px;background:#fef2f2;border-radius:4px">'
-                f'<b>{s.get("symbol","?")}</b> {s.get("label","")} '
-                f'置信{s.get("confidence","?")}% · {s.get("description","")}</div>'
-            )
-        html_parts.append("</div>")
-    else:
-        html_parts.append('<div style="margin-bottom:16px"><b>🐋 聪明钱背离</b> <span style="color:#64748b">暂无信号</span></div>')
+        bull = sm.get("bullish") or []
+        bear = sm.get("bearish") or []
+        bull_str = " ".join(f'<span style="color:#16a34a">🐂{s.get("symbol","?")}</span>' for s in bull[:3])
+        bear_str = " ".join(f'<span style="color:#dc2626">🐻{s.get("symbol","?")}</span>' for s in bear[:3])
+        extra_blocks.append(("🐋 聪明钱", f"{bull_str} {bear_str}"))
 
-    # ── 深加工：机构净流结构 + MVRV 分层 + 可操作建议（P2）──
-    inst = brief.get("M2_institutional") or {}
-    if isinstance(inst, dict) and inst.get("status") in ("ok", "partial"):
-        html_parts.append('<div style="margin-bottom:16px"><b>🏦 机构面 & MVRV 分层</b>')
-        inst_data = inst.get("institutional") or {}
-        etf = inst_data.get("etf_net_flow_usd_m")
-        cex = inst_data.get("cex_netflow_7d_usd")
-        bias = inst_data.get("bias", "neutral")
-        bias_text = {"accumulation": "累积", "distribution": "派发", "neutral": "中性"}.get(bias, bias)
-        etf_str = f"{etf:+.0f}M" if isinstance(etf, (int, float)) else "N/A"
-        cex_str = f"{'+' if cex > 0 else ''}{cex/1e9:.2f}B" if isinstance(cex, (int, float)) else "N/A"
-        html_parts.append(
-            f'<div style="font-size:13px">机构净流: ETF {etf_str} · CEX 7d 净流 {cex_str} → <b>{bias_text}</b></div>'
-        )
-        layers = inst.get("mvrv_layers") or {}
-        html_parts.append(
-            f'<div style="font-size:13px;margin-top:4px">MVRV: 深度低估{layers.get("deep_under",{}).get("count",0)} '
-            f'低估{layers.get("under",{}).get("count",0)} 合理{layers.get("fair",{}).get("count",0)} 高估{layers.get("overvalued",{}).get("count",0)}</div>'
-        )
-        hints = inst.get("actionable_hints") or []
-        if hints:
-            html_parts.append('<ul style="margin:4px 0;padding-left:20px;font-size:13px">' +
-                "".join(f'<li>{h}</li>' for h in hints[:3]) + '</ul>')
-        html_parts.append("</div>")
-    else:
-        html_parts.append('<div style="margin-bottom:16px"><b>🏦 机构面 & MVRV 分层</b> <span style="color:#64748b">暂无数据</span></div>')
+    # 四烟囱
+    chimney = brief.get("M4_chimney") or {}
+    if isinstance(chimney, dict) and chimney.get("status") in ("ok", "partial"):
+        ch_items = []
+        for t in (chimney.get("tvl") or []):
+            if t.get("type") == "category":
+                for it in (t.get("items") or [])[:2]:
+                    chg = it.get("tvl_change_7d_pct")
+                    if chg is not None:
+                        ch_items.append(f"{it.get('category','?')} {chg:+.1f}%")
+        gh = chimney.get("github") or []
+        if gh:
+            ch_items.append(f"GitHub: {'/'.join(g.get('symbol','?') for g in gh[:2])}")
+        funding = chimney.get("funding") or []
+        if funding:
+            ch_items.append(f"融资: {'/'.join(f.get('symbol','?') for f in funding[:2])}")
+        if ch_items:
+            extra_blocks.append(("🏭 基本面", " · ".join(ch_items[:4])))
 
-    # ── AI 解读（如果有） ──
+    # Meme
+    meme = brief.get("M4_meme") or {}
+    if isinstance(meme, dict) and meme.get("status") == "ok":
+        summary = meme.get("summary") or {}
+        if summary:
+            extra_blocks.append((
+                "🐸 Meme",
+                f"高危{summary.get('high',0)} · 中危{summary.get('medium',0)} · 低风险{summary.get('low',0)} · 排雷{summary.get('block',0)}"
+            ))
+
+    if extra_blocks:
+        html_parts.append("""
+          <div style="margin-bottom:16px">
+            <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
+              📌 其他信号
+            </div>
+        """)
+        for title, content in extra_blocks:
+            html_parts.append(f"""
+            <div style="padding:8px 10px;margin:4px 0;background:#f8fafc;border-radius:6px;font-size:12px">
+              <b style="color:#334155">{title}</b>
+              <div style="color:#475569;margin-top:2px">{content}</div>
+            </div>
+            """)
+        html_parts.append("</div>")
+
+    # ════════════════════════════════════════════════════════
+    # AI 解读
+    # ════════════════════════════════════════════════════════
     ai_narrative = brief.get("ai_narrative")
     if ai_narrative:
-        # 最简 markdown → HTML 转换
         ai_html = ai_narrative
         ai_html = ai_html.replace("\n\n", "</p><p>")
         ai_html = ai_html.replace("\n", "<br>")
@@ -315,17 +475,36 @@ def render_brief_html(brief: dict) -> str:
         ai_html = re.sub(r'`(.*?)`', r'<code style="background:#e2e8f0;padding:1px 4px;border-radius:3px">\1</code>', ai_html)
         html_parts.append(f'''
         <div style="margin:16px 0;padding:14px 16px;background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px">
-          <div style="font-weight:700;color:#1e40af;margin-bottom:8px;font-size:14px">🤖 AI 解读</div>
+          <div style="font-weight:700;color:#1e40af;margin-bottom:8px;font-size:14px">🤖 AI 深度解读</div>
           <div style="color:#334155;font-size:13px;line-height:1.6">{ai_html}</div>
         </div>''')
 
-    # ── 降级标注 ──
+    # 降级标注
     degraded = brief.get("degraded", [])
     if degraded:
-        html_parts.append(f'<div style="padding:8px;background:#fef9c3;border-radius:4px;color:#92400e;font-size:13px">⚠️ 降级项: {", ".join(degraded)}</div>')
+        html_parts.append(f'<div style="padding:8px;background:#fef9c3;border-radius:4px;color:#92400e;font-size:12px">⚠️ 降级项: {", ".join(degraded)}</div>')
 
     html_parts.append("</div>")
     return "\n".join(html_parts)
+
+
+def _fear_greed_color(value):
+    """恐贪指数颜色。"""
+    if value is None:
+        return "#64748b"
+    try:
+        v = int(value)
+    except Exception:
+        return "#64748b"
+    if v >= 75:
+        return "#16a34a"  # 极度贪婪 - 绿
+    if v >= 55:
+        return "#65a30d"  # 贪婪
+    if v >= 45:
+        return "#64748b"  # 中性
+    if v >= 25:
+        return "#f59e0b"  # 恐惧
+    return "#dc2626"  # 极度恐惧 - 红
 
 
 def main():

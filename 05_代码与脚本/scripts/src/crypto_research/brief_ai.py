@@ -11,14 +11,18 @@ from __future__ import annotations
 
 SYSTEM_PROMPT = """你是一位硬核加密数据分析师。根据以下结构化大盘数据，撰写简洁的市场早报解读。
 
+输出结构（严格遵守）：
+1. **一句话结论**（≤40字，点明今日市场状态 + 核心驱动因素）
+2. **赛道洞察**（12赛道资金流向中，哪些赛道在领涨/领跌？背后可能的逻辑是什么？领涨币有哪些共性？）
+3. **机会排序**（从 HIGH/MED 机会中挑出 2-3 个最值得关注的，说明理由：赛道 + 信号共振 + 催化剂）
+4. **链上异动提示**（KOL 链上分析师捕捉到的异常资金流向，哪些值得警惕？）
+5. **风险提示**（当前最大的 1-2 个风险点，标注「非投资建议」）
+
 要求：
-1. 一句话 TL;DR（≤30字，点明今日核心信号）
-2. 逐模块解读（为什么这些数值重要、互相印证还是背离）
-3. 策略暗示（仅基于数据推导，标注「非投资建议」+风险提示）
-4. 中文，markdown 格式
-5. 禁止编造 brief 中不存在的数据或事件
-6. 如有降级项，简要说明哪些维度缺失及影响
-7. 控制在 800 字以内"""
+- 中文，markdown 格式
+- 禁止编造 brief 中不存在的数据或事件
+- 如有降级项，简要说明哪些维度缺失及影响
+- 控制在 600 字以内，结论先行，干货密集"""
 
 
 def build_brief_context(brief: dict) -> str:
@@ -132,6 +136,59 @@ def build_brief_context(brief: dict) -> str:
         if events:
             evts_str = "; ".join(f"{e.get('date','')} {e.get('event','')}" for e in events[:5])
             parts.append(f"[M5 催化剂] {evts_str}")
+
+    # 12 赛道资金流向（新增核心模块）
+    sf = brief.get("sector_flow") or {}
+    if isinstance(sf, dict) and sf.get("status") == "ok":
+        sectors = sf.get("sectors") or []
+        if sectors:
+            # TOP3 领涨赛道 + 领跌赛道 + 各赛道领涨币
+            top3 = sectors[:3]
+            bottom2 = sectors[-2:] if len(sectors) >= 2 else []
+            top_str = "; ".join(
+                f"{s.get('sector_label','?')} 7d={s.get('mcap_change_7d_pct','?')}%"
+                for s in top3
+            )
+            bot_str = "; ".join(
+                f"{s.get('sector_label','?')} 7d={s.get('mcap_change_7d_pct','?')}%"
+                for s in bottom2
+            )
+            parts.append(f"[赛道资金流-领涨] {top_str}")
+            if bot_str:
+                parts.append(f"[赛道资金流-领跌] {bot_str}")
+            # 每个赛道的领涨币（取前6个赛道）
+            leader_lines = []
+            for s in sectors[:6]:
+                leaders = s.get("leaders") or []
+                if leaders:
+                    ldr_str = ", ".join(
+                        f"{l.get('symbol','?')}(7d{l.get('percent_change_7d','?')}%)"
+                        for l in leaders[:3]
+                    )
+                    leader_lines.append(f"  {s.get('sector_label','?')}: {ldr_str}")
+            if leader_lines:
+                parts.append("[赛道领涨币]\n" + "\n".join(leader_lines))
+
+    # KOL 链上信号（新增模块）
+    ko = brief.get("kol_onchain") or {}
+    if isinstance(ko, dict) and ko.get("status") == "ok":
+        signals = ko.get("signals") or []
+        stats = ko.get("stats") or []
+        kols = ko.get("kols") or []
+        if signals:
+            sig_lines = []
+            for s in signals[:8]:
+                amt = s.get("event_usd_value")
+                amt_str = f" ${amt/1e6:.1f}M" if isinstance(amt, (int, float)) and amt else ""
+                sig_lines.append(
+                    f"  {s.get('kol_name','?')}: {s.get('signal_subtype','?')} "
+                    f"{s.get('symbol','?')} {s.get('event_direction','?')}{amt_str}"
+                )
+            parts.append(f"[KOL链上信号] 分析师={len(kols)}位 | 近{ko.get('hours',24)}h {len(signals)}条")
+            if stats:
+                stat_str = ", ".join(f"{st.get('signal_subtype','?')}:{st.get('cnt',0)}" for st in stats)
+                parts.append(f"  类型分布: {stat_str}")
+            parts.append("  明细:\n" + "\n".join(sig_lines))
 
     # M6 降级
     m6 = brief.get("M6_degraded") or []

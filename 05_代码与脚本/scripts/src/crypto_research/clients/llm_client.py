@@ -93,7 +93,7 @@ def extract_json_from_llm_response(raw: str) -> Any:
                 except json.JSONDecodeError:
                     continue
 
-    # 策略5：处理字符串中间截断（半截字符串）
+    # 策略5：处理字符串中间截断（半截字符串）和数组/对象中途截断
     # 尝试在更多位置截断，如 ":" 后、"\"" 后等
     if start >= 0:
         candidate = text[start:]
@@ -144,6 +144,93 @@ def extract_json_from_llm_response(raw: str) -> Any:
                         return json.loads(candidate[:after_colon + 4] + "}")
                     except json.JSONDecodeError:
                         pass
+                # 如果是数组或对象开头，尝试找到完整的结构
+                elif candidate[after_colon] in "[{":
+                    # 找到匹配的闭合括号
+                    open_char = candidate[after_colon]
+                    close_char = "]" if open_char == "[" else "}"
+                    depth = 1
+                    i = after_colon + 1
+                    in_string = False
+                    while i < len(candidate) and depth > 0:
+                        c = candidate[i]
+                        if c == '"' and (i == 0 or candidate[i - 1] != '\\'):
+                            in_string = not in_string
+                        elif not in_string:
+                            if c == open_char:
+                                depth += 1
+                            elif c == close_char:
+                                depth -= 1
+                        i += 1
+                    # 如果找到了完整的结构，尝试解析
+                    if depth == 0:
+                        try:
+                            return json.loads(candidate[:i] + "}")
+                        except json.JSONDecodeError:
+                            pass
+
+    # 策略6：尝试找到最后一个完整的键值对，去掉不完整的后半部分
+    # 从后往前扫描，找到最后一个完整的 "key": value 结构
+    if start >= 0:
+        candidate = text[start:]
+        # 找到最后一个 " 后跟 : 的位置（键的结束）
+        pos = len(candidate) - 1
+        while pos > 0:
+            # 找到最后一个 "
+            quote_pos = candidate.rfind('"', 0, pos + 1)
+            if quote_pos < 0:
+                break
+            # 找到 " 后的 :
+            colon_pos = candidate.find(':', quote_pos + 1)
+            if colon_pos < 0:
+                break
+            # 找到 : 后的值
+            value_start = colon_pos + 1
+            while value_start < len(candidate) and candidate[value_start] in " \t\n\r":
+                value_start += 1
+            if value_start >= len(candidate):
+                break
+            # 尝试截断到这个键值对的末尾
+            value_char = candidate[value_start]
+            if value_char == '"':
+                # 字符串值：找到闭合 "
+                i = value_start + 1
+                while i < len(candidate):
+                    if candidate[i] == '"' and candidate[i - 1] != '\\':
+                        # 尝试解析到这个位置
+                        try:
+                            return json.loads(candidate[:i + 1] + "}")
+                        except json.JSONDecodeError:
+                            pass
+                        break
+                    i += 1
+            elif value_char in "0123456789-":
+                # 数字值：找到结束位置
+                i = value_start
+                while i < len(candidate) and (candidate[i].isdigit() or candidate[i] in ".eE+-"):
+                    i += 1
+                if i > value_start:
+                    try:
+                        return json.loads(candidate[:i] + "}")
+                    except json.JSONDecodeError:
+                        pass
+            elif candidate[value_start:].startswith("true"):
+                try:
+                    return json.loads(candidate[:value_start + 4] + "}")
+                except json.JSONDecodeError:
+                    pass
+            elif candidate[value_start:].startswith("false"):
+                try:
+                    return json.loads(candidate[:value_start + 5] + "}")
+                except json.JSONDecodeError:
+                    pass
+            elif candidate[value_start:].startswith("null"):
+                try:
+                    return json.loads(candidate[:value_start + 4] + "}")
+                except json.JSONDecodeError:
+                    pass
+            # 移动到下一个位置继续搜索
+            pos = quote_pos - 1
 
     raise ValueError(f"无法解析 LLM 返回的 JSON，前 200 字符: {text[:200]}")
 
@@ -466,7 +553,7 @@ class LLMClient:
         user_prompt = f"请判断以下 {len(items)} 个链接的相关性：\n\n{items_text}"
 
         try:
-            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
         except Exception as e:
             # 调用失败时全部默认保留（宁可留错，不可误删）
             return [
@@ -608,7 +695,7 @@ class LLMClient:
         )
 
         try:
-            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
         except Exception as e:
             return [
                 {"domain": g["domain"], "decision": "relevant", "reason": f"AI调用失败: {e}",
@@ -707,7 +794,7 @@ class LLMClient:
         )
 
         try:
-            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
         except Exception as e:
             return [
                 {"entry_id": l["entry_id"], "url": l["url"], "keep": True,
@@ -799,7 +886,7 @@ class LLMClient:
         )
 
         try:
-            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096)
+            raw = self.chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4096, response_format={"type": "json_object"})
         except Exception as e:
             return [
                 {"entry_id": it["entry_id"], "url": it["url"], "noise": False,
@@ -917,7 +1004,7 @@ class LLMClient:
         )
 
         try:
-            raw = self.chat(system_prompt, user_prompt, temperature=0.0, max_tokens=4096)
+            raw = self.chat(system_prompt, user_prompt, temperature=0.0, max_tokens=4096, response_format={"type": "json_object"})
         except Exception as e:
             return [
                 {"entry_id": str(it["entry_id"]), "url": it["url"],

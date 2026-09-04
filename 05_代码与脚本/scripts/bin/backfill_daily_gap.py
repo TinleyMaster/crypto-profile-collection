@@ -616,7 +616,7 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False,
         return {"affected": affected, "snap_dates_processed": len(snap_dates)}
 
 
-def verify_backfill(conn, target_dates: list[date]) -> dict:
+def verify_backfill(conn, target_dates: list[date], min_pass: int = 7000) -> dict:
     """校验回填结果。返回 {date_str: asset_count, ..., "pass": bool}。"""
     with conn.cursor() as cur:
         placeholders = ",".join(["%s"] * len(target_dates))
@@ -628,7 +628,7 @@ def verify_backfill(conn, target_dates: list[date]) -> dict:
         """, target_dates)
         stats = {row[0].isoformat(): row[1] for row in cur.fetchall()}
 
-    stats["pass"] = all(v >= 7000 for v in stats.values())
+    stats["pass"] = all(v >= min_pass for v in stats.values())
     return stats
 
 
@@ -687,6 +687,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="预览，不写入")
     parser.add_argument("--skip-cmc", action="store_true", help="跳过 CMC 历史 API，仅 re-ETL")
     parser.add_argument("--binance-delay", type=float, default=0.2, help="Binance API 请求间隔秒数（默认0.2，被限流时建议0.5-1.0）")
+    parser.add_argument("--min-pass", type=int, default=7000, help="verify通过的最低资产数（默认7000，Binance兜底场景建议500）")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -750,7 +751,7 @@ def main() -> int:
 
         # 4. 校验
         print(f"\n[VERIFY] 校验回填结果...")
-        verify = verify_backfill(conn, missing_dates)
+        verify = verify_backfill(conn, missing_dates, min_pass=args.min_pass)
         print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
 
     return 0 if verify.get("pass") else 1

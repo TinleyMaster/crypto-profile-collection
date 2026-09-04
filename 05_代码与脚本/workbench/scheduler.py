@@ -89,8 +89,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）", "core"),
 
     # ═══ 投研数据提取 ═══
-    # P1-1: CMC 行情快照降频为每日（长尾币不需要每6h刷新，主流币行情由 ETL 处理）
-    ("cmc_quote_snapshot", "0 2 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每日凌晨，覆盖全部 CMC 映射资产）", "core"),
+    # P1-1: CMC 行情快照每日 3 次（04/12/20 UTC），防单日采集失败导致快照缺口
+    # 脚本内建失败重试 3 次（指数退避），多时段 + 重试 = 单日零缺漏
+    ("cmc_quote_snapshot", "0 4,12,20 * * *", "ingest_cmc_quote_snapshot.py", ["--top", "10000"], "CMC 行情快照（每日3次 04/12/20 UTC，全量映射资产，内建重试）", "core"),
+    # A 补：快照缺口自检 + 自动回填（每天 09:00 检查最近 3 天，低于 7000 行用 historical API 自动补）
+    ("cmc_snapshot_gap_check", "0 9 * * *", "check_cmc_snapshot_gap.py", ["--days", "3", "--threshold", "7000", "--apply", "--batch-size", "100"], "CMC 快照缺口自检+自动回填（每日检查，historical API 兜底）", "core"),
     ("etl_asset_market_daily", "15 */6 * * *", "etl_asset_market_daily_from_cmc.py", [], "行情快照→日级 ETL（每 6 小时，全量回填，CMC 快照后）", "core"),
     ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）", "core"),
     # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）

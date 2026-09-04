@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,31 +57,55 @@ def main() -> int:
     all_raw_responses: list[tuple[str, str, str]] = []  # (page_key, payload_text, payload_hash)
     fetched_at = datetime.now(timezone.utc).isoformat()
 
-    # Paginate through listings
-    start = 1
-    remaining = args.top
-    page_size = min(args.page_size, 5000)
+    # ═══ 带重试的分页采集（失败重试 3 次，指数退避：5s / 15s / 45s）═══
+    MAX_RETRY = 3
+    RETRY_BACKOFF = [5, 15, 45]  # 秒
 
-    while remaining > 0:
-        limit = min(remaining, page_size)
-        payload = client.get_listings_latest(start=start, limit=limit)
-        payload_text = stable_json_dumps(payload)
-        payload_hash = md5_text(payload_text)
-        page_key = f"start={start},limit={limit}"
-        all_raw_responses.append((page_key, payload_text, payload_hash))
+    def fetch_all_pages() -> None:
+        """分页拉取所有 listing 数据。任何一页连续失败 MAX_RETRY 次则抛异常。"""
+        start = 1
+        remaining = args.top
+        page_size = min(args.page_size, 5000)
 
-        data = payload.get("data") or []
-        if not data:
-            break
+        while remaining > 0:
+            limit = min(remaining, page_size)
+            page_key = f"start={start},limit={limit}"
+            last_exc: Exception | None = None
 
-        parsed = parse_cmc_quote_snapshot_payload(payload, raw_response_id=None)
-        all_rows.extend(parsed)
+            for attempt in range(MAX_RETRY):
+                try:
+                    payload = client.get_listings_latest(start=start, limit=limit)
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if attempt < MAX_RETRY - 1:
+                        wait = RETRY_BACKOFF[attempt]
+                        print(f"[retry] page {page_key} 第{attempt + 1}次失败: {e}，{wait}s 后重试...",
+                              file=sys.stderr)
+                        time.sleep(wait)
+                    else:
+                        print(f"[retry] page {page_key} 重试{MAX_RETRY}次全部失败，放弃",
+                              file=sys.stderr)
+                        raise RuntimeError(f"CMC listings 分页失败（{page_key}）：{e}") from e
 
-        remaining -= len(data)
-        start += len(data)
+            payload_text = stable_json_dumps(payload)
+            payload_hash = md5_text(payload_text)
+            all_raw_responses.append((page_key, payload_text, payload_hash))
 
-        if len(data) < limit:
-            break
+            data = payload.get("data") or []
+            if not data:
+                break
+
+            parsed = parse_cmc_quote_snapshot_payload(payload, raw_response_id=None)
+            all_rows.extend(parsed)
+
+            remaining -= len(data)
+            start += len(data)
+
+            if len(data) < limit:
+                break
+
+    fetch_all_pages()
 
     if args.dry_run:
         print(

@@ -7893,20 +7893,20 @@
                 var drillClass = hasDrill ? ' has-drill' : '';
                 var drillId = 'narr-drill-' + nIdx;
                 var pageSize = 10;
-                var row = '<div class="dim-metric-row' + drillClass + '"' + (hasDrill ? ' onclick="toggleDrill(\'' + drillId + '\')"' : '') + '>
-                    < span class="dim-metric-label" > ' + (hasDrill ? ' < span class="drill-arrow" id = "arrow-' + drillId + '" >▶</span > ' : '') + n.narrative + ' ' + trendBadge + ' < small style = "color:#6b7280" > ' + modeTxt + '</small ></span >
-                        <span class="dim-metric-val ' + cls + '">' + sign + score.toFixed(1) + '%' + tvlTxt + '</span>
-                </div > ';
+                var row = `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
+                    <span class="dim-metric-label">${hasDrill ? `<span class="drill-arrow" id="arrow-${drillId}">▶</span>` : ''}${n.narrative} ${trendBadge} <small style="color:#6b7280">${modeTxt}</small></span>
+                        <span class="dim-metric-val ${cls}">${sign}${score.toFixed(1)}%${tvlTxt}</span>
+                </div>`;
                 if (hasDrill) {
                     row += '<div class="drill-panel" id="' + drillId + '">';
                     row += renderNarrCoins(allCoins, drillId, 0, pageSize);
                     var totalPages = Math.ceil(allCoins.length / pageSize);
                     if (totalPages > 1) {
-                        row += '<div class="drill-paginator" data-drill="' + drillId + '" data-page="0" data-total="' + totalPages + '" data-total-coins="' + totalCoins + '">
-                            < span class="drill-page-info" > 1 / ' + totalPages + ' · 共 ' + totalCoins + ' 币</span >
-                            <button class="drill-page-btn" onclick="narrPage(\'' + drillId + '\', -1, event)" disabled>◀</button>
-                            <button class="drill-page-btn" onclick="narrPage(\'' + drillId + '\', 1, event)">▶</button>
-                        </div > ';
+                        row += `<div class="drill-paginator" data-drill="${drillId}" data-page="0" data-total="${totalPages}" data-total-coins="${totalCoins}">
+                            <span class="drill-page-info">1 / ${totalPages} · 共 ${totalCoins} 币</span>
+                            <button class="drill-page-btn" onclick="narrPage('${drillId}', -1, event)" disabled>◀</button>
+                            <button class="drill-page-btn" onclick="narrPage('${drillId}', 1, event)">▶</button>
+                        </div>`;
                     }
                     row += '</div>';
                 }

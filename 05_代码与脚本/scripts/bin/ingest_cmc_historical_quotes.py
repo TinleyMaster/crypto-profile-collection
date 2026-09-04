@@ -241,8 +241,31 @@ def parse_historical_quotes(
 
 
 def insert_daily_quotes(conn, rows: list[dict]) -> int:
-    """批量写入 asset_market_daily，幂等更新。"""
+    """批量写入 asset_market_daily，幂等更新。
+
+    range guard：change_24h / change_7d 超 1e10 的脏值跳过，
+    防 NUMERIC(18,8) 溢出（同 0c2a639 修复思路）。
+    """
     if not rows:
+        return 0
+
+    PCT_LIMIT = 1e10
+    clean_rows = []
+    skipped = 0
+    for r in rows:
+        bad = False
+        for k in ("change_24h", "change_7d"):
+            v = r.get(k)
+            if v is not None and abs(float(v)) >= PCT_LIMIT:
+                bad = True
+                break
+        if bad:
+            skipped += 1
+            continue
+        clean_rows.append(r)
+    if skipped:
+        print(f"[CMC]   daily skipped {skipped} rows (range guard)")
+    if not clean_rows:
         return 0
 
     sql = """
@@ -268,7 +291,7 @@ def insert_daily_quotes(conn, rows: list[dict]) -> int:
             updated_at = NOW()
     """
     with conn.cursor() as cur:
-        cur.executemany(sql, rows)
+        cur.executemany(sql, clean_rows)
         return cur.rowcount
 
 

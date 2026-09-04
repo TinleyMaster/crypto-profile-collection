@@ -353,9 +353,9 @@ def backfill_via_binance_klines(
 ) -> dict:
     """通过 Binance klines API 兜底回填（CMC 不可用时）。
 
-    从 core.asset 取有 canonical_symbol 的资产，
+    从 core.asset 取有 canonical_symbol 的资产（按市值降序），
     用 /api/v3/klines 拉历史日收盘价写入 asset_market_daily。
-    429/限流时指数退避重试。
+    429/限流时指数退避重试；网络异常不中断循环。
     """
     import requests as req
 
@@ -400,9 +400,12 @@ def backfill_via_binance_klines(
     symbol_map = {}  # asset_id -> symbol
     empty_count = 0
     rate_limited_count = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 50
 
     def _fetch_with_retry(pair: str, max_retries: int = 3) -> tuple[list, bool]:
         """拉取 klines，返回 (klines_list, is_rate_limited)。"""
+        nonlocal rate_limited_count
         url = (
             f"https://api.binance.com/api/v3/klines"
             f"?symbol={pair}&interval=1d"
@@ -412,7 +415,7 @@ def backfill_via_binance_klines(
             try:
                 r = req.get(url, timeout=10)
                 if r.status_code == 429:
-                    rate_limited_count_local = rate_limited_count + 1
+                    rate_limited_count += 1
                     _log(f"[BINANCE] 429 rate limited ({pair})，等待 {10 * (attempt + 1)}s 重试")
                     time.sleep(10 * (attempt + 1))
                     continue
@@ -426,92 +429,114 @@ def backfill_via_binance_klines(
                 if r.status_code != 200:
                     return [], False
                 return r.json(), False
-            except Exception as e:
+            except req.exceptions.Timeout:
                 if attempt < max_retries - 1:
                     time.sleep(2 * (attempt + 1))
                     continue
+                return [], False
+            except req.exceptions.ConnectionError as e:
+                _log(f"[BINANCE] Connection error ({pair}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                return [], False
+            except Exception as e:
+                _log(f"[BINANCE] Unexpected error ({pair}): {type(e).__name__}: {e}")
                 return [], False
         return [], True
 
     for idx, (asset_id, symbol) in enumerate(assets):
         pair = f"{symbol}USDT"
 
-        klines, was_rate_limited = _fetch_with_retry(pair)
-        if was_rate_limited:
-            rate_limited_count += 1
-            if rate_limited_count >= 5:
-                _log(f"[BINANCE] 连续限流 {rate_limited_count} 次，提前终止")
-                break
-            continue
+        try:
+            klines, was_rate_limited = _fetch_with_retry(pair)
+            if was_rate_limited:
+                if rate_limited_count >= 10:
+                    _log(f"[BINANCE] 连续限流 {rate_limited_count} 次，提前终止")
+                    break
+                continue
 
-        if not klines:
-            empty_count += 1
+            if not klines:
+                empty_count += 1
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    _log(f"[BINANCE] 连续 {consecutive_failures} 次无数据，提前终止（可能全部无交易对）")
+                    break
+                if (idx + 1) % 100 == 0:
+                    _log(f"[BINANCE] Processed {idx + 1}/{len(assets)}, success={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}")
+                time.sleep(request_delay)
+                continue
+
+            consecutive_failures = 0
+            symbol_map[asset_id] = symbol
+            rows = []
+            for k in klines:
+                # k = [open_time, open, high, low, close, volume, close_time, ...]
+                open_time_ms = k[0]
+                try:
+                    close_price = float(k[4])
+                    volume = float(k[5])
+                except (ValueError, TypeError, IndexError):
+                    continue
+                market_date = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc).date()
+
+                if market_date not in target_dates:
+                    continue
+                if close_price <= 0:
+                    continue
+
+                rows.append({
+                    "asset_id": asset_id,
+                    "market_date": market_date,
+                    "source_code": "binance_klines",
+                    "price_usd": close_price,
+                    "market_cap": None,
+                    "fdv": None,
+                    "circulating_supply": None,
+                    "total_supply": None,
+                    "volume_24h": volume,
+                    "change_24h": None,
+                    "change_7d": None,
+                })
+
+            if rows and not dry_run:
+                sql = """
+                    INSERT INTO biz.asset_market_daily
+                        (asset_id, market_date, source_code, price_usd,
+                         market_cap, fdv, circulating_supply, total_supply,
+                         volume_24h, change_24h, change_7d, raw_ref)
+                    VALUES (
+                        %(asset_id)s, %(market_date)s, %(source_code)s, %(price_usd)s,
+                        %(market_cap)s, %(fdv)s, %(circulating_supply)s, %(total_supply)s,
+                        %(volume_24h)s, %(change_24h)s, %(change_7d)s,
+                        '{"source": "binance_klines_backfill"}'::jsonb
+                    )
+                    ON CONFLICT (asset_id, market_date, source_code) DO UPDATE SET
+                        price_usd = EXCLUDED.price_usd,
+                        volume_24h = EXCLUDED.volume_24h,
+                        updated_at = NOW()
+                """
+                with conn.cursor() as cur:
+                    cur.executemany(sql, rows)
+                conn.commit()
+                total_rows += len(rows)
+            elif dry_run:
+                total_rows += len(rows)
+
             if (idx + 1) % 100 == 0:
-                _log(f"[BINANCE] Processed {idx + 1}/{len(assets)}, success={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}")
+                _log(f"[BINANCE] Processed {idx + 1}/{len(assets)}, success={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}, rows={total_rows}")
+
+            time.sleep(request_delay)
+
+        except Exception as e:
+            # 捕获任何未预期的异常，不中断循环
+            errors.append(f"{symbol}: {type(e).__name__}: {str(e)[:100]}")
+            _log(f"[BINANCE] Error processing {symbol}: {type(e).__name__}: {str(e)[:100]}")
+            consecutive_failures += 1
             time.sleep(request_delay)
             continue
 
-        symbol_map[asset_id] = symbol
-        rows = []
-        for k in klines:
-            # k = [open_time, open, high, low, close, volume, close_time, ...]
-            open_time_ms = k[0]
-            try:
-                close_price = float(k[4])
-                volume = float(k[5])
-            except (ValueError, TypeError, IndexError):
-                continue
-            market_date = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc).date()
-
-            if market_date not in target_dates:
-                continue
-            if close_price <= 0:
-                continue
-
-            rows.append({
-                "asset_id": asset_id,
-                "market_date": market_date,
-                "source_code": "binance_klines",
-                "price_usd": close_price,
-                "market_cap": None,
-                "fdv": None,
-                "circulating_supply": None,
-                "total_supply": None,
-                "volume_24h": volume,
-                "change_24h": None,
-                "change_7d": None,
-            })
-
-        if rows and not dry_run:
-            sql = """
-                INSERT INTO biz.asset_market_daily
-                    (asset_id, market_date, source_code, price_usd,
-                     market_cap, fdv, circulating_supply, total_supply,
-                     volume_24h, change_24h, change_7d, raw_ref)
-                VALUES (
-                    %(asset_id)s, %(market_date)s, %(source_code)s, %(price_usd)s,
-                    %(market_cap)s, %(fdv)s, %(circulating_supply)s, %(total_supply)s,
-                    %(volume_24h)s, %(change_24h)s, %(change_7d)s,
-                    '{"source": "binance_klines_backfill"}'::jsonb
-                )
-                ON CONFLICT (asset_id, market_date, source_code) DO UPDATE SET
-                    price_usd = EXCLUDED.price_usd,
-                    volume_24h = EXCLUDED.volume_24h,
-                    updated_at = NOW()
-            """
-            with conn.cursor() as cur:
-                cur.executemany(sql, rows)
-            conn.commit()
-            total_rows += len(rows)
-        elif dry_run:
-            total_rows += len(rows)
-
-        if (idx + 1) % 100 == 0:
-            _log(f"[BINANCE] Processed {idx + 1}/{len(assets)}, success={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}, rows={total_rows}")
-
-        time.sleep(request_delay)
-
-    _log(f"[BINANCE] Total inserted: {total_rows} rows, success symbols={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}")
+    _log(f"[BINANCE] Total inserted: {total_rows} rows, success symbols={len(symbol_map)}, empty={empty_count}, rate_limited={rate_limited_count}, errors={len(errors)}")
     return {
         "total_rows": total_rows,
         "assets_with_symbol": len(symbol_map),
@@ -636,6 +661,7 @@ def create_task_card(conn, missing_dates: list[date], coverage: dict, result: di
         "coverage_after": verify,
         "cmc_result": result.get("cmc", {}),
         "etl_result": result.get("etl", {}),
+        "binance_result": result.get("binance", {}),
     }
 
     with conn.cursor() as cur:

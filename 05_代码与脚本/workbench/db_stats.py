@@ -2587,22 +2587,71 @@ def _date_sort_key(date_str: str | None) -> tuple[int, str]:
         return (1, "")
 
 
-def _format_research_context(sources: list[dict]) -> str:
-    """把引用来源格式化成 LLM 上下文文本。"""
+def _format_research_context(sources: list[dict], max_snippets_chars: int = 8000) -> str:
+    """把引用来源格式化成 LLM 上下文文本。
+
+    Token 优化策略：
+    - 结构化数据（tokenomics/onchain/social/unlocks）完整保留（研报核心依据）
+    - 非结构化文档（白皮书/docs/官网/medium）只保留标题 + 摘要截断
+    - 单文档 snippet 最长 600 字（白皮书 1200 字），避免单文档吃掉太多 token
+    - 所有 snippet 总字符数控制在 max_snippets_chars 以内
+    """
     lines = []
+    total_snippet_chars = 0
+    budget_remaining = max_snippets_chars
+
     for i, s in enumerate(sources, 1):
         if s.get("type") == "structured":
             head = f"[{i}] {s['title']}"
-        else:
-            pub = s.get("published_at")
-            pub_tag = f"（发布: {pub}）" if pub else ""
-            head = f"[{i}] {s.get('title') or s.get('url')}（类型: {s.get('type')}）{pub_tag}"
-        lines.append(head)
-        if s.get("url"):
-            lines.append(f"    链接: {s['url']}")
+            lines.append(head)
+            snip = (s.get("snippet") or "").strip()
+            if snip:
+                lines.append(f"    内容: {snip}")
+            continue
+
+        # 非结构化文档：计算本次可分配的预算
+        pub = s.get("published_at")
+        pub_tag = f"（发布: {pub}）" if pub else ""
+        doc_type = s.get("type") or "doc"
+        head = f"[{i}] {s.get('title') or s.get('url')}（类型: {doc_type}）{pub_tag}"
+
         snip = (s.get("snippet") or "").strip()
-        if snip:
-            lines.append(f"    内容: {snip}")
+        # 不同类型文档不同长度上限
+        if doc_type in ("whitepaper_page", "docs", "docs_portal", "official_website"):
+            max_len = 1000
+        elif doc_type in ("audit", "github"):
+            max_len = 500
+        else:
+            max_len = 600
+
+        if snip and budget_remaining > 0:
+            actual_len = min(max_len, budget_remaining)
+            if len(snip) > actual_len:
+                # 智能截断：尽量在句号/换行处断开
+                cut_point = actual_len
+                for sep in ["。\n", "。", "\n\n", "\n", "．"]:
+                    idx = snip.rfind(sep, max(100, actual_len - 200), actual_len)
+                    if idx > 0:
+                        cut_point = idx + len(sep)
+                        break
+                snip_trimmed = snip[:cut_point].rstrip() + "..."
+            else:
+                snip_trimmed = snip
+
+            total_snippet_chars += len(snip_trimmed)
+            budget_remaining -= len(snip_trimmed)
+
+            lines.append(head)
+            if s.get("url"):
+                lines.append(f"    链接: {s['url']}")
+            lines.append(f"    摘要: {snip_trimmed}")
+        else:
+            # 预算用完了，只保留标题引用（用于 citation 编号对齐）
+            lines.append(head)
+            if s.get("url"):
+                lines.append(f"    链接: {s['url']}")
+            lines.append(f"    （内容略，可通过链接查看原文）")
+
     return "\n".join(lines)
 
 

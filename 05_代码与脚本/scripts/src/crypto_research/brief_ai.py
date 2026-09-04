@@ -167,7 +167,7 @@ def generate_ai_narrative(settings, brief: dict) -> str | None:
         raw = llm.chat(
             SYSTEM_PROMPT,
             f"以下是今日加密大盘结构化数据摘要：\n\n{context}",
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=1200,
         )
         if not raw or not raw.strip():

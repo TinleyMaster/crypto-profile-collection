@@ -4492,6 +4492,73 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                 "is_fallback": True,
             })
 
+        # 4) 补全合约地址 + 链信息（通过 symbol → core.asset → core.asset_contract）
+        if result:
+            try:
+                syms = [o["target"].upper() for o in result]
+                placeholders = ",".join(["%s"] * len(syms))
+                settings = get_settings(require_database=True)  # noqa: F821
+                with get_connection(settings.database_url) as conn2:  # noqa: F821
+                    with conn2.cursor(row_factory=psycopg.rows.dict_row) as cur2:  # noqa: F821
+                        # 取 is_primary=TRUE 的合约，没有的话取任意一条
+                        cur2.execute(f"""
+                            SELECT DISTINCT ON (UPPER(a.canonical_symbol))
+                                   UPPER(a.canonical_symbol) AS symbol,
+                                   ac.chain,
+                                   ac.contract_address
+                            FROM core.asset a
+                            LEFT JOIN core.asset_contract ac
+                              ON ac.asset_id = a.asset_id
+                             AND ac.is_primary = TRUE
+                            WHERE UPPER(a.canonical_symbol) IN ({placeholders})
+                              AND a.canonical_name NOT LIKE '%Bridged%'
+                              AND a.canonical_name NOT LIKE '%Wrapped%'
+                              AND a.canonical_name NOT LIKE '%Peg %'
+                            ORDER BY UPPER(a.canonical_symbol),
+                                     CASE WHEN ac.contract_address IS NOT NULL THEN 0 ELSE 1 END,
+                                     ac.is_primary DESC, a.asset_id
+                        """, tuple(syms))
+                        contract_map = {
+                            r["symbol"]: {
+                                "chain": r.get("chain"),
+                                "contract_address": r.get("contract_address"),
+                            }
+                            for r in cur2.fetchall()
+                            if r.get("symbol")
+                        }
+                        # 对没有 is_primary 的，再找任意一条合约地址兜底
+                        missing = [s for s in syms if s not in contract_map or not contract_map[s].get("contract_address")]
+                        if missing:
+                            placeholders2 = ",".join(["%s"] * len(missing))
+                            cur2.execute(f"""
+                                SELECT DISTINCT ON (UPPER(a.canonical_symbol))
+                                       UPPER(a.canonical_symbol) AS symbol,
+                                       ac.chain,
+                                       ac.contract_address
+                                FROM core.asset a
+                                JOIN core.asset_contract ac ON ac.asset_id = a.asset_id
+                                WHERE UPPER(a.canonical_symbol) IN ({placeholders2})
+                                  AND a.canonical_name NOT LIKE '%Bridged%'
+                                  AND a.canonical_name NOT LIKE '%Wrapped%'
+                                ORDER BY UPPER(a.canonical_symbol), ac.is_primary DESC
+                            """, tuple(missing))
+                            for r in cur2.fetchall():
+                                sym = r.get("symbol")
+                                if sym and r.get("contract_address"):
+                                    contract_map[sym] = {
+                                        "chain": r.get("chain"),
+                                        "contract_address": r.get("contract_address"),
+                                    }
+                # 回填到 result
+                for o in result:
+                    key = o["target"].upper()
+                    if key in contract_map:
+                        o["chain"] = contract_map[key].get("chain")
+                        o["contract_address"] = contract_map[key].get("contract_address")
+            except Exception:
+                # 合约地址补全失败不影响主流程
+                pass
+
         # 排序 + 截断
         result.sort(key=lambda o: o["conviction_score"], reverse=True)
         return result[:limit]

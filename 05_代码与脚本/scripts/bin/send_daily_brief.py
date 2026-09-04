@@ -282,6 +282,42 @@ def render_brief_html(brief: dict) -> str:
             trigger = opp.get("trigger_logic", "")
             sector = opp.get("sector", "")
             sources = opp.get("source_count") or opp.get("signals_count") or 0
+            chain = opp.get("chain")
+            contract = opp.get("contract_address")
+
+            # 链标签 + 区块浏览器链接
+            CHAIN_LABEL = {
+                "ethereum": "ETH", "bsc": "BSC", "solana": "SOL",
+                "polygon": "POLY", "arbitrum": "ARB", "base": "BASE",
+                "optimism": "OP", "avalanche": "AVAX", "tron": "TRON",
+                "ton": "TON", "sui": "SUI", "aptos": "APT",
+            }
+            CHAIN_EXPLORER = {
+                "ethereum": "https://etherscan.io/address/{}",
+                "bsc": "https://bscscan.com/address/{}",
+                "solana": "https://solscan.io/token/{}",
+                "polygon": "https://polygonscan.com/address/{}",
+                "arbitrum": "https://arbiscan.io/address/{}",
+                "base": "https://basescan.org/address/{}",
+                "optimism": "https://optimistic.etherscan.io/address/{}",
+                "avalanche": "https://snowtrace.io/address/{}",
+                "tron": "https://tronscan.io/#/contract/{}",
+                "ton": "https://tonscan.org/jetton/{}",
+                "sui": "https://suiscan.xyz/coin/{}",
+                "aptos": "https://aptoscan.com/coin/{}",
+            }
+            chain_label = CHAIN_LABEL.get(chain, chain.upper() if chain else "")
+            chain_badge = f'<span style="background:#e2e8f0;color:#475569;font-size:10px;padding:1px 5px;border-radius:3px;font-weight:700;margin-left:6px">{chain_label}</span>' if chain_label else ""
+
+            # 合约地址截断显示（前6后4）
+            contract_display = ""
+            if contract:
+                short_contract = contract[:6] + "…" + contract[-4:] if len(contract) > 10 else contract
+                if chain and chain in CHAIN_EXPLORER:
+                    explorer_url = CHAIN_EXPLORER[chain].format(contract)
+                    contract_display = f'<a href="{explorer_url}" target="_blank" style="color:#64748b;font-size:10px;font-family:Monaco,Consolas,monospace;text-decoration:none">{short_contract}</a>'
+                else:
+                    contract_display = f'<span style="color:#64748b;font-size:10px;font-family:Monaco,Consolas,monospace">{short_contract}</span>'
 
             if tier == "HIGH":
                 accent = "#dc2626"
@@ -313,8 +349,9 @@ def render_brief_html(brief: dict) -> str:
             html_parts.append(f"""
             <div style="padding:10px 12px;margin:5px 0;border-radius:7px;border-left:3px solid {accent};background:{card_bg}">
               <div style="display:flex;justify-content:space-between;align-items:center">
-                <div style="display:flex;align-items:center">
+                <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0">
                   <span style="font-size:14px;font-weight:700;color:#0f172a">{target}</span>
+                  {chain_badge}
                   <span style="color:{dir_color};font-size:12px;font-weight:600;margin-left:8px">{dir_icon} {dir_cn}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px">
@@ -324,6 +361,7 @@ def render_brief_html(brief: dict) -> str:
               </div>
               {f'<div style="font-size:11px;color:#64748b;margin-top:3px">{meta_str}</div>' if meta_str else ''}
               <div style="color:#475569;font-size:11.5px;margin-top:4px;line-height:1.4">{trigger}</div>
+              {f'<div style="margin-top:5px;display:flex;align-items:center;gap:6px">{contract_display}</div>' if contract_display else ''}
             </div>
             """)
     else:

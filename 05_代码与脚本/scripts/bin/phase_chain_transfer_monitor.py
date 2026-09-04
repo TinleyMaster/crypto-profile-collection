@@ -33,6 +33,10 @@ from crypto_research.clients.aptos_client import get_aptos_client
 
 # 大额转账阈值（美元）
 LARGE_TRANSFER_THRESHOLD_USD = 50_000
+# 小 Meme 放宽阈值（低于此市值的资产用更低下限，避免漏早期异动）
+SMALL_MEME_THRESHOLD_USD = 5_000
+# 市值分界线（低于此市值视为小 Meme，用 SMALL_MEME_THRESHOLD_USD）
+SMALL_MEME_MCAP_FLOOR = 10_000_000  # $10M
 
 # asset_contract_map 表中的链名（全称）-> 数据源客户端使用的内部短名
 CHAIN_NAME_MAP = {
@@ -93,7 +97,7 @@ def get_asset_contracts(conn, asset_id: int | None = None) -> list[dict]:
         if asset_id:
             cur.execute("""
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name,
-                       m.chain, m.contract_address
+                       m.chain, m.contract_address, a.market_cap
                 FROM core.asset a
                 INNER JOIN core.asset_contract_map m ON m.asset_id = a.asset_id
                 WHERE a.asset_id = %s AND a.status = 'active'
@@ -101,7 +105,7 @@ def get_asset_contracts(conn, asset_id: int | None = None) -> list[dict]:
         else:
             cur.execute("""
                 SELECT a.asset_id, a.canonical_symbol, a.canonical_name,
-                       m.chain, m.contract_address
+                       m.chain, m.contract_address, a.market_cap
                 FROM core.asset a
                 INNER JOIN core.asset_contract_map m ON m.asset_id = a.asset_id
                 WHERE a.status = 'active'
@@ -240,6 +244,7 @@ def collect_transfers(
     alarm_only: bool = False,
     client_type: str = "explorer",
     price_usd: float | None = None,
+    market_cap: float | None = None,
 ) -> dict:
     """采集单个资产的大额转账。
 
@@ -300,8 +305,21 @@ def collect_transfers(
                 # 估算美元价值
                 value_usd = round(value * price_usd, 2) if price_usd > 0 else None
 
+                # 动态阈值：小市值资产用更低下限（Plan A）
+                threshold = LARGE_TRANSFER_THRESHOLD_USD
+                if market_cap and market_cap > 0 and market_cap < SMALL_MEME_MCAP_FLOOR:
+                    threshold = SMALL_MEME_THRESHOLD_USD
+
                 # 过滤：只保留大额转账
-                if value_usd is not None and value_usd < LARGE_TRANSFER_THRESHOLD_USD:
+                # Plan B：value_usd=None（价格缺失）时用 token value × 最低估算价兜底，而非直接丢弃
+                if value_usd is None:
+                    # 用 $0.0001 作为极低估算价兜底，确保转账不被 None 静默丢弃
+                    # 若连估算后仍 < threshold，仍跳过（去噪）
+                    if price_usd == 0 and value > 0:
+                        value_usd = round(value * 0.0001, 2)
+                    if value_usd is None or value_usd < threshold:
+                        continue
+                elif value_usd < threshold:
                     continue
 
                 from_addr = (tx.get("from", "") or "")
@@ -521,6 +539,7 @@ def main():
                         alarm_only=args.alarm_only,
                         client_type=stype,
                         price_usd=price_usd,
+                        market_cap=asset.get("market_cap"),
                     )
                     if result.get("processed", 0) > 0:
                         chain_clients[chain] = (client, stype)
@@ -547,6 +566,7 @@ def main():
                     alarm_only=args.alarm_only,
                     client_type=client_type,
                     price_usd=price_usd,
+                    market_cap=asset.get("market_cap"),
                 )
 
             total_processed += result.get("processed", 0)

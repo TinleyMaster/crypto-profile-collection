@@ -4333,6 +4333,64 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
         return {"status": "error", "signals": [], "error": str(e)}
 
 
+def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
+    """机会清单兜底：从 biz.daily_recommendation 取最新热门币种。
+
+    当 score_opportunities() 因模块降级/数据缺失返回空时使用，
+    保证早报不会出现"暂无推荐机会"的空窗。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT symbol, name, sector, source_count, composite_score,
+                           change_24h, volume_24h, price_usd, market_cap_usd, rec_date
+                    FROM biz.daily_recommendation
+                    WHERE rec_date = (SELECT MAX(rec_date) FROM biz.daily_recommendation)
+                      AND composite_score IS NOT NULL
+                    ORDER BY composite_score DESC NULLS LAST
+                    LIMIT %s
+                """, (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+
+        result = []
+        for r in rows:
+            score = float(r.get("composite_score") or 0)
+            # 用 composite_score 简单映射 tier（0-100 分制）
+            if score >= 70:
+                tier = "HIGH"
+            elif score >= 50:
+                tier = "MED"
+            else:
+                tier = "LOW"
+            # 方向根据 24h 涨跌粗略判断（兜底用，不精确）
+            chg = r.get("change_24h")
+            direction = "long" if chg is not None and chg > 0 else "short" if chg is not None and chg < 0 else "neutral"
+
+            result.append({
+                "target": r.get("symbol") or "?",
+                "symbol": r.get("symbol") or "?",
+                "name": r.get("name") or "",
+                "conviction_score": score,
+                "conviction_tier": tier,
+                "direction": direction,
+                "sector": r.get("sector") or "",
+                "source_count": r.get("source_count") or 0,
+                "trigger_logic": f"综合热度评分 {score:.0f}，24h {'上涨' if chg and chg > 0 else '下跌' if chg else '持平'}",
+                "change_24h": float(chg) if chg else None,
+                "market_cap_usd": float(r.get("market_cap_usd") or 0),
+                "is_fallback": True,  # 标记为兜底数据
+            })
+        return result
+    except Exception:
+        return []
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     """
     早报结构化骨架（设计文档第七节）。消费 overview 已有字段，不改 API 层。
@@ -4345,6 +4403,12 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     divs = (today.get("divergence_signals") or {}).get("signals") or []
     sector_flow = fetch_sector_flow_with_leaders()
     kol_onchain = fetch_kol_onchain_signals()
+
+    # 兜底：如果评分系统返回空机会，从 daily_recommendation 表取热门币种
+    if not opps:
+        fallback = _fetch_fallback_recommendations()
+        if fallback:
+            opps = fallback
 
     return {
         "M0_tldr": _build_tldr(today, opps),

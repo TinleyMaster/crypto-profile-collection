@@ -184,18 +184,18 @@ def render_brief_html(brief: dict) -> str:
             chg_1d_str, chg_1d_color = _fmt_pct(mcap_1d)
             bar_pct = max(2, min(100, (mcap / max_mcap) * 100)) if max_mcap > 0 else 2
 
-            # 领涨币
+            # 领涨币（排序用7d，显示用24h更直观，每日早报看今日表现）
             leaders = s.get("leaders") or []
             leader_html = ""
             if leaders:
                 parts = []
                 for l in leaders:
                     sym = l.get("symbol", "?")
-                    p7d = l.get("percent_change_7d")
-                    p7d_str, p7d_color = _fmt_pct(p7d)
+                    p24h = l.get("percent_change_24h")
+                    p24h_str, p24h_color = _fmt_pct(p24h)
                     parts.append(
-                        f'<span style="background:#f1f5f9;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px">'
-                        f'<b>{sym}</b> <span style="color:{p7d_color}">{p7d_str}</span></span>'
+                        f'<span style="background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px">'
+                        f'<b style="color:#0f172a">{sym}</b> <span style="color:{p24h_color};font-weight:600">{p24h_str}</span></span>'
                     )
                 leader_html = f'<div style="margin-top:4px">{"".join(parts)}</div>'
 
@@ -235,17 +235,28 @@ def render_brief_html(brief: dict) -> str:
     # ════════════════════════════════════════════════════════
     # 第 3 屏：🎯 机会清单
     # ════════════════════════════════════════════════════════
-    html_parts.append("""
+    # 判断是否为兜底数据（热门榜）
+    is_fallback = bool(all_opps and all_opps[0].get("is_fallback"))
+    section_title = "🔥 热门币种榜（综合热度）" if is_fallback else "🎯 机会清单（按综合评分排序）"
+    section_note = '<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">注：评分系统模块降级中，当前展示热门币种榜</div>' if is_fallback else ''
+
+    html_parts.append(f"""
       <div style="margin-bottom:20px">
-        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
-          🎯 机会清单（按综合评分排序）
+        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:4px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
+          {section_title}
         </div>
+        {section_note}
     """)
 
     if all_opps:
-        for opp in all_opps[:5]:
+        for opp in all_opps[:8 if is_fallback else 5]:
             tier = opp.get("conviction_tier", "?")
             score = opp.get("conviction_score", "?")
+            # score 格式化：数字保留1位小数，非数字直接显示
+            if isinstance(score, (int, float)):
+                score_str = f"{score:.0f}"
+            else:
+                score_str = str(score)
             target = opp.get("target", "?")
             direction = opp.get("direction", "?")
             trigger = opp.get("trigger_logic", "")
@@ -264,6 +275,7 @@ def render_brief_html(brief: dict) -> str:
 
             dir_icon = "↗" if direction == "long" else "↘" if direction == "short" else "→"
             dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
+            dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
 
             meta_parts = []
             if sector:
@@ -277,11 +289,11 @@ def render_brief_html(brief: dict) -> str:
               <div style="display:flex;justify-content:space-between;align-items:baseline">
                 <div>
                   <span style="font-size:15px;font-weight:700">{target}</span>
-                  <span style="color:{dir_color};font-size:13px;margin-left:6px">{dir_icon} {direction}</span>
+                  <span style="color:{dir_color};font-size:13px;margin-left:6px">{dir_icon} {dir_cn}</span>
                 </div>
                 <div style="font-size:12px;color:#64748b">
-                  <span style="background:{border_color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600">{tier}</span>
-                  <span style="margin-left:4px">Score: {score}</span>
+                  <span style="background:{border_color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;font-size:11px">{tier}</span>
+                  <span style="margin-left:4px">Score {score_str}</span>
                 </div>
               </div>
               {f'<div style="font-size:12px;color:#64748b;margin-top:2px">{meta_str}</div>' if meta_str else ''}
@@ -307,42 +319,86 @@ def render_brief_html(brief: dict) -> str:
     signals = kol_onchain.get("signals") or []
     kol_count = len(kol_onchain.get("kols") or [])
     html_parts.append(f"""
-      <div style="margin-bottom:10px">
-        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:4px">
-          链上信号（{kol_onchain.get('hours',24)}h · {kol_count}位分析师）
+      <div style="margin-bottom:12px">
+        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:6px">
+          🔍 链上异动（{kol_onchain.get('hours',24)}h · {kol_count}位分析师）
         </div>
     """)
     if signals and kol_onchain.get("status") == "ok":
-        for sig in signals[:6]:
+        # 信号类型中文化
+        SUBTYPE_CN = {
+            "exchange_flow": "交易所异动",
+            "smart_money": "聪明钱",
+            "accumulation": "大额吸筹",
+            "whale_move": "巨鲸转账",
+            "distribution": "大额派发",
+            "liquidation": "爆仓清算",
+        }
+        # 方向动作中文化
+        DIR_CN = {
+            "inflow": "流入",
+            "outflow": "流出",
+            "accumulating": "吸筹中",
+            "distributing": "派发中",
+        }
+        for sig in signals[:7]:
             subtype = sig.get("signal_subtype") or ""
+            subtype_cn = SUBTYPE_CN.get(subtype, subtype)
             direction = sig.get("event_direction") or ""
-            sym = sig.get("symbol") or "?"
+            dir_cn = DIR_CN.get(direction, direction)
+            sym = sig.get("symbol") or sig.get("event_token") or "?"
             amount = sig.get("event_usd_value")
-            amt_str = _fmt_mcap(amount) if amount else (sig.get("event_amount") or "")
+            amt_str = _fmt_mcap(amount) if amount else ""
             kol = sig.get("kol_name") or ""
             addr_label = sig.get("address_label") or ""
+            exchange = sig.get("event_exchange") or ""
 
-            # 方向颜色
-            if "in" in str(direction).lower() or "accum" in str(subtype).lower():
-                dir_c = "#dc2626"
-                dir_i = "↗"
-            elif "out" in str(direction).lower() or "distribut" in str(subtype).lower():
-                dir_c = "#16a34a"
-                dir_i = "↘"
+            # 判断多空颜色
+            is_bullish = (
+                "in" in str(direction).lower()
+                or "accum" in str(subtype).lower()
+            )
+            is_bearish = (
+                "out" in str(direction).lower()
+                or "distribut" in str(subtype).lower()
+                or "liquidat" in str(subtype).lower()
+            )
+            if is_bullish:
+                tag_bg = "#fee2e2"
+                tag_color = "#b91c1c"
+                arrow = "▲"
+            elif is_bearish:
+                tag_bg = "#dcfce7"
+                tag_color = "#15803d"
+                arrow = "▼"
             else:
-                dir_c = "#64748b"
-                dir_i = "→"
+                tag_bg = "#e2e8f0"
+                tag_color = "#334155"
+                arrow = "◆"
+
+            # 描述文本：交易所+地址标签组合
+            desc_parts = []
+            if exchange:
+                desc_parts.append(f"交易所：{exchange}")
+            if addr_label:
+                desc_parts.append(addr_label)
+            desc = " · ".join(desc_parts)
 
             html_parts.append(f"""
-            <div style="padding:6px 8px;margin:3px 0;border-radius:5px;background:#fafafa;font-size:12px">
-              <span style="color:{dir_c};font-weight:600">{dir_i} {subtype}</span>
-              · <b>{sym}</b> {amt_str}
-              {f'· <span style="color:#64748b">{addr_label}</span>' if addr_label else ''}
-              <span style="float:right;color:#94a3b8">{kol}</span>
+            <div style="padding:8px 10px;margin:4px 0;border-radius:6px;background:#fafafa;border-left:3px solid {tag_color}">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+                <div>
+                  <span style="background:{tag_bg};color:{tag_color};font-size:11px;padding:1px 6px;border-radius:3px;font-weight:600">{subtype_cn}</span>
+                  <span style="font-weight:700;font-size:13px;margin-left:6px">{sym}</span>
+                  <span style="color:{tag_color};font-size:12px;font-weight:600;margin-left:4px">{arrow} {dir_cn}{(' ' + amt_str) if amt_str else ''}</span>
+                </div>
+                <span style="color:#94a3b8;font-size:11px">{kol}</span>
+              </div>
+              {f'<div style="color:#64748b;font-size:11px;margin-top:2px">{desc}</div>' if desc else ''}
             </div>
             """)
     else:
-        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:8px;background:#f8fafc;border-radius:5px">近 24h 无链上信号</div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:10px;background:#f8fafc;border-radius:6px">近 24h 无链上异动信号</div>')
     html_parts.append("</div>")
 
     # 右：催化剂日历

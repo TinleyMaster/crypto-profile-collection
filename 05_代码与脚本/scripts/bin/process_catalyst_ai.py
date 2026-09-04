@@ -7,9 +7,15 @@
   - ai_summary: 一句话摘要（≤100字）
   - ai_keywords: 关键词数组
 
+优化策略（省 Token）：
+  1. 规则前置：从标题/分类关键词能直接判断的，不调 LLM
+  2. 批量模式：多条一次 LLM 请求（--pack-size）
+  3. 正文截断：限制 500~1000 字，避免浪费
+
 用法：
     python scripts/bin/process_catalyst_ai.py [--batch-size 50] [--max-items 1000]
     python scripts/bin/process_catalyst_ai.py --catalyst-id 123
+    python scripts/bin/process_catalyst_ai.py --pack-size 10
 """
 from __future__ import annotations
 
@@ -59,8 +65,78 @@ SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据给定�
 """
 
 
+# ── 规则前置：从标题/分类快速判断，跳过 LLM ──
+
+RULE_EVENT_PATTERNS: list[tuple[str, list[str], str]] = [
+    # (event_type, [关键词...], 默认情感)
+    ("listing", ["上线", "上新", "listing", "list on", "launch", "上币", "首发", "开售", "发行"], "bullish"),
+    ("delisting", ["下架", "退市", "delist", "removal", "remove", "下线", "停止交易", "下币"], "bearish"),
+    ("burn", ["销毁", "burn", "回购销毁", "回购并销毁", "token burn", "燃烧"], "bullish"),
+    ("funding", ["融资", "funding", "募资", "投资", "领投", "跟投", "完成融资", "种子轮", "A轮", "B轮", "战略投资", "strategic investment"], "bullish"),
+    ("partnership", ["合作", "partnership", "集成", "integration", "生态", "ecosystem", "联手", "携手", "战略合作"], "bullish"),
+    ("regulation", ["监管", "regulation", "合规", "SEC", "CFTC", "政策", "法案", "监管处罚", "罚款", "penalty"], "neutral"),
+    ("tech_upgrade", ["升级", "主网", "硬分叉", "hard fork", "技术升级", "版本更新", "mainnet", "V2", "V3", "升级上线"], "neutral"),
+]
+
+
+def rule_based_classify(catalyst: dict) -> dict | None:
+    """规则前置快速判断。能从标题/分类直接确定的返回结果 dict，否则返回 None。"""
+    title = (catalyst.get("title") or "").lower()
+    event_category = (catalyst.get("event_category") or "").lower()
+    text = title + " " + event_category
+
+    # 先看 event_category 粗分类（很多来源已经有分类标签）
+    category_map = {
+        "listing": "listing",
+        "delisting": "delisting",
+        "burn": "burn",
+        "funding": "funding",
+        "partnership": "partnership",
+        "regulation": "regulation",
+        "tech_upgrade": "tech_upgrade",
+        "exchange_listing": "listing",
+        "token_launch": "listing",
+    }
+    for cat_key, event_type in category_map.items():
+        if cat_key in event_category:
+            sentiment = next((s for t, _, s in RULE_EVENT_PATTERNS if t == event_type), "neutral")
+            return _make_rule_result(catalyst, event_type, sentiment, "规则: event_category 匹配")
+
+    # 再看标题关键词（高置信度匹配）
+    for event_type, keywords, sentiment in RULE_EVENT_PATTERNS:
+        for kw in keywords:
+            if kw.lower() in text:
+                # 标题明确包含关键词，置信度高
+                return _make_rule_result(catalyst, event_type, sentiment, f"规则: 关键词匹配 '{kw}'")
+
+    return None
+
+
+def _make_rule_result(catalyst: dict, event_type: str, sentiment: str, reason: str) -> dict:
+    title = catalyst.get("title") or ""
+    # 摘要直接用标题
+    summary = title[:100] if title else event_type
+    # 关键词从标题里提几个词
+    words = [w for w in title.split() if len(w) > 1][:3]
+    if not words:
+        words = [event_type]
+    return {
+        "ai_event_type": event_type,
+        "ai_sentiment": sentiment,
+        "ai_summary": summary,
+        "ai_keywords": words,
+        "_rule_based": True,
+        "_rule_reason": reason,
+    }
+
+
 def process_one(llm: LLMClient, catalyst: dict) -> dict:
     """处理单条催化剂，返回 ai_* 字段 dict。"""
+    # 规则前置：能直接判断的跳过 LLM
+    quick = rule_based_classify(catalyst)
+    if quick is not None:
+        return quick
+
     title = catalyst.get("title") or ""
     body = catalyst.get("body_text") or catalyst.get("body_html") or ""
     event_category = catalyst.get("event_category") or ""
@@ -148,10 +224,27 @@ def process_pack(llm: LLMClient, cats: list[dict]) -> dict[int, dict]:
     """批量处理多条催化剂，返回 {catalyst_id: ai_* 字段 dict}。
 
     一次 LLM 请求处理 N 条催化剂，要求模型返回数组格式。
+    规则前置：能从标题/分类直接判断的，不调 LLM。
     """
+    result_map: dict[int, dict] = {}
+
+    # ── 第 1 步：规则前置，能直接判断的先搞定 ──
+    ai_cats: list[dict] = []
+    for cat in cats:
+        quick = rule_based_classify(cat)
+        if quick is not None:
+            result_map[cat["catalyst_id"]] = quick
+        else:
+            ai_cats.append(cat)
+
+    # 全部命中规则，不用调 LLM
+    if not ai_cats:
+        return result_map
+
+    # ── 第 2 步：剩下的走批量 LLM ──
     # 构建用户 prompt：每条催化剂带编号
     items_text = []
-    for i, cat in enumerate(cats, 1):
+    for i, cat in enumerate(ai_cats, 1):
         title = cat.get("title") or ""
         body = cat.get("body_text") or cat.get("body_html") or ""
         event_category = cat.get("event_category") or ""
@@ -170,13 +263,13 @@ def process_pack(llm: LLMClient, cats: list[dict]) -> dict[int, dict]:
         )
 
     user_prompt = (
-        f"请分析以下 {len(cats)} 条催化剂新闻：\n\n"
+        f"请分析以下 {len(ai_cats)} 条催化剂新闻：\n\n"
         + "\n\n".join(items_text)
         + "\n\n请为每条新闻输出结构化分析结果。"
     )
 
     # 动态调整 max_tokens：每条约 600 token，加上缓冲
-    max_tokens = min(len(cats) * 600 + 256, 8192)
+    max_tokens = min(len(ai_cats) * 600 + 256, 8192)
 
     raw = llm.chat(PACK_SYSTEM_PROMPT, user_prompt, temperature=0.1,
                    max_tokens=max_tokens, response_format={"type": "json_object"})

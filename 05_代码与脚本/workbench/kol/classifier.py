@@ -364,20 +364,194 @@ def _normalize_result(data: dict) -> dict:
     }
 
 
-def batch_classify(posts: list[dict]) -> list[dict | None]:
+def _rule_based_quick_check(content_text: str, image_count: int) -> dict | None:
+    """规则前置快速判断：明显是噪声或内容极短的，直接返回结果，跳过 LLM。
+
+    返回 None 表示需要走 AI。
     """
-    批量分类帖子。
+    content = (content_text or "").strip()
+    if not content:
+        return {
+            "post_type": "noise",
+            "direction": None,
+            "symbol": None,
+            "entry_condition": None,
+            "entry_price": None,
+            "stop_loss": None,
+            "take_profit": None,
+            "leverage": None,
+            "support_level": None,
+            "resistance_level": None,
+            "already_entered": False,
+            "has_pnl_number": False,
+            "confidence": 0.9,
+            "signal_category": "trading",
+            "signal_subtype": None,
+            "event_direction": None,
+            "from_address": None,
+            "to_address": None,
+            "event_amount": None,
+            "event_token": None,
+            "event_usd_value": None,
+            "tx_hash": None,
+            "event_exchange": None,
+            "address_label": None,
+            "event_time": None,
+            "_rule_based": True,
+        }
+
+    # 纯表情/符号为主的内容（少于 5 个汉字或 10 个英文单词）
+    cn_count = sum(1 for c in content if '\u4e00' <= c <= '\u9fff')
+    en_words = [w for w in content.split() if w.isascii() and len(w) > 1]
+    if cn_count < 5 and len(en_words) < 3 and image_count == 0:
+        result = _rule_based_quick_check("", 0)
+        result["confidence"] = 0.8
+        return result
+
+    return None
+
+
+def batch_classify(posts: list[dict], batch_size: int = 10) -> list[dict | None]:
+    """批量分类帖子（真批量：一次 LLM 调用处理多条，省 token + 提速度）。
+
+    优化策略：
+    1. 规则前置：明显噪声/空内容直接判定，不走 LLM
+    2. 真批量：多条帖子一次 LLM 请求，system prompt 只传一次
+    3. 失败降级：批量调用失败时回退到单条调用
 
     Args:
-        posts: 帖子字典列表，需包含 content_text 和 image_urls 字段
+        posts: 帖子字典列表，需包含 post_id、content_text、image_urls 字段
+        batch_size: 每批多少条一起发给 LLM（建议 5-15，太多容易截断或漏项）
 
     Returns:
         与输入等长的结果列表，失败项为 None
     """
-    results = []
-    for post in posts:
+    if not posts:
+        return []
+
+    llm = _get_llm()
+    if llm is None:
+        print("[KOL][classifier] LLM 未配置，跳过 AI 分类")
+        return [None] * len(posts)
+
+    results: list[dict | None] = [None] * len(posts)
+
+    # ── 第 1 步：规则前置，快速搞定明显噪声 ──
+    ai_indices: list[int] = []
+    ai_posts: list[dict] = []
+    for i, post in enumerate(posts):
         content = post.get("content_text", "")
         img_count = len(post.get("image_urls", []))
-        result = classify_post(content, img_count)
-        results.append(result)
+        quick = _rule_based_quick_check(content, img_count)
+        if quick is not None:
+            results[i] = quick
+        else:
+            ai_indices.append(i)
+            ai_posts.append(post)
+
+    if not ai_posts:
+        return results
+
+    # ── 第 2 步：批量 AI 分类 ──
+    # 记录 AI 待处理数，用于日志
+    total_ai = len(ai_posts)
+    ai_results: list[dict | None] = [None] * total_ai
+
+    for batch_start in range(0, total_ai, batch_size):
+        batch_end = min(batch_start + batch_size, total_ai)
+        batch_posts = ai_posts[batch_start:batch_end]
+        batch_indices = list(range(batch_start, batch_end))
+
+        # 构建批量 user prompt
+        items_text = []
+        for j, post in enumerate(batch_posts, 1):
+            content = post.get("content_text", "")
+            img_count = len(post.get("image_urls", []))
+            # 截断超长内容（避免单条吃掉太多 token）
+            if len(content) > 2000:
+                content = content[:2000] + "..."
+            post_id = post.get("post_id", f"idx_{j}")
+            items_text.append(
+                f"【帖子 {j}】post_id={post_id}\n"
+                f"图片数量：{img_count} 张\n"
+                f"正文：\n{content}\n"
+            )
+
+        user_prompt = (
+            f"请分析以下 {len(batch_posts)} 条 KOL 帖子，为每条输出结构化分析结果。\n\n"
+            + "\n---\n".join(items_text)
+            + "\n\n请按照系统提示的规则，输出 JSON 格式的分析结果。"
+            'JSON 格式：{"results": [{"post_id": "...", "post_type": "...", ...}, ...]}'
+            "\nresults 数组顺序必须与输入帖子顺序一致。"
+        )
+
+        # 动态 max_tokens：每条约 800 token 输出
+        max_tokens = min(len(batch_posts) * 800 + 512, 8192)
+
+        try:
+            raw = llm.chat(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.1,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            print(f"[KOL][classifier] 批量 AI 调用失败（{len(batch_posts)}条）: {e}")
+            # 批量失败，回退到单条调用
+            for j, post in zip(batch_indices, batch_posts):
+                try:
+                    content = post.get("content_text", "")
+                    img_count = len(post.get("image_urls", []))
+                    single = classify_post(content, img_count)
+                    ai_results[j] = single
+                except Exception as e2:
+                    print(f"[KOL][classifier]   单条回退也失败: {e2}")
+                    ai_results[j] = None
+            continue
+
+        if not raw:
+            ai_results[batch_start:batch_end] = [None] * len(batch_posts)
+            continue
+
+        try:
+            data = extract_json_from_llm_response(raw)
+            batch_results = data.get("results", []) if isinstance(data, dict) else []
+            if not isinstance(batch_results, list):
+                batch_results = []
+        except Exception:
+            batch_results = []
+
+        if len(batch_results) != len(batch_posts):
+            # 条数不匹配，尝试用 post_id 匹配
+            result_map = {}
+            for r in batch_results:
+                if isinstance(r, dict) and r.get("post_id") is not None:
+                    result_map[str(r["post_id"])] = r
+
+            for j, post in zip(batch_indices, batch_posts):
+                pid = str(post.get("post_id", ""))
+                if pid and pid in result_map:
+                    normalized = _normalize_result(result_map[pid])
+                    ai_results[j] = normalized
+                else:
+                    # 匹配失败，回退单条
+                    try:
+                        content = post.get("content_text", "")
+                        img_count = len(post.get("image_urls", []))
+                        ai_results[j] = classify_post(content, img_count)
+                    except Exception:
+                        ai_results[j] = None
+        else:
+            # 顺序匹配
+            for j, r in zip(batch_indices, batch_results):
+                if isinstance(r, dict):
+                    ai_results[j] = _normalize_result(r)
+                else:
+                    ai_results[j] = None
+
+    # 把 AI 结果回填到总结果数组
+    for idx_in_ai, idx_in_total in enumerate(ai_indices):
+        results[idx_in_total] = ai_results[idx_in_ai]
+
     return results

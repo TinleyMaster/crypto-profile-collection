@@ -3,11 +3,17 @@ LLM 客户端封装：优先使用火山方舟（豆包/DeepSeek），兜底使�
 
 支持火山方舟 Responses API（/api/v3/responses）和 OpenAI Chat Completions API 两种格式。
 主 provider 调用失败（额度 402/限流/5xx 等）时自动切换兜底 provider 重试一次。
+
+Token 优化特性：
+- prompt_cache: 相同输入短时间内复用结果（纯函数式 AI 调用场景）
+- 粗略 token 估算（基于字符数）+ 累计统计，方便成本归因
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from collections import OrderedDict
 from typing import Any
 
 import requests
@@ -17,6 +23,19 @@ from urllib3.util.retry import Retry
 
 from crypto_research.config import Settings
 from crypto_research.mapping.taxonomy import CONTENT_TOPICS
+
+
+def estimate_tokens(text: str) -> int:
+    """粗略估算 token 数（中英混合场景）。
+
+    近似公式：中文约 1.5 字/token，英文约 4 字符/token，按字符类型加权估算。
+    比直接 len/4 更准，用于成本归因而非计费。
+    """
+    if not text:
+        return 0
+    cn = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    other = len(text) - cn
+    return int(cn / 1.5 + other / 4.0 + 0.5)
 
 
 def extract_json_from_llm_response(raw: str) -> Any:
@@ -250,11 +269,31 @@ class LLMClient:
                 break
         return url
 
-    def __init__(self, settings: Settings, rpm: int = 60, timeout: int | None = None) -> None:
+    def __init__(self, settings: Settings, rpm: int = 60, timeout: int | None = None,
+                 cache_ttl: int = 3600, cache_max: int = 200) -> None:
+        """
+        Args:
+            cache_ttl: prompt 缓存 TTL（秒），0 表示禁用缓存。
+                       仅对「纯函数式」AI 调用有意义（相同输入→相同输出）。
+            cache_max: 缓存最大条目数（LRU 淘汰）。
+        """
         self.settings = settings
         self._min_interval = 60.0 / rpm
         self._last_call: float = 0.0
         self._timeout = timeout or settings.request_timeout_seconds
+
+        # Prompt 缓存（LRU + TTL）
+        self._cache_ttl = cache_ttl
+        self._cache: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+        self._cache_max = cache_max
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+        # Token 累计统计（粗略估算，用于趋势观察）
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_calls = 0
+        self._total_cached_calls = 0
 
         # 选择提供商：ARK 优先，OpenAI 兼容（DeepSeek 等）兜底
         self._provider_list: list[dict[str, Any]] = []
@@ -317,14 +356,64 @@ class LLMClient:
     def is_available(self) -> bool:
         return self.provider != "none"
 
+    # ── 缓存 ──
+
+    def _cache_key(self, system_prompt: str, user_prompt: str,
+                   temperature: float, max_tokens: int,
+                   response_format: dict | None) -> str:
+        raw = f"{self.model}|{temperature}|{max_tokens}|{system_prompt}|{user_prompt}|{json.dumps(response_format, sort_keys=True) if response_format else ''}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    def _cache_get(self, key: str) -> str | None:
+        if self._cache_ttl <= 0 or not self._cache_max:
+            return None
+        if key not in self._cache:
+            self._cache_misses += 1
+            return None
+        value, ts = self._cache[key]
+        if time.monotonic() - ts > self._cache_ttl:
+            del self._cache[key]
+            self._cache_misses += 1
+            return None
+        # 命中，移到末尾（LRU）
+        self._cache.move_to_end(key)
+        self._cache_hits += 1
+        return value
+
+    def _cache_set(self, key: str, value: str) -> None:
+        if self._cache_ttl <= 0 or not self._cache_max:
+            return
+        self._cache[key] = (value, time.monotonic())
+        self._cache.move_to_end(key)
+        # LRU 淘汰
+        while len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
+
+    def get_stats(self) -> dict:
+        """返回累计统计信息（调用数、token、缓存命中率等）。"""
+        total = self._cache_hits + self._cache_misses
+        hit_rate = self._cache_hits / total if total > 0 else 0.0
+        return {
+            "total_calls": self._total_calls,
+            "cached_calls": self._total_cached_calls,
+            "prompt_tokens_est": self._total_prompt_tokens,
+            "completion_tokens_est": self._total_completion_tokens,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "cache_hit_rate": round(hit_rate, 4),
+            "cache_size": len(self._cache),
+        }
+
     def chat(self, system_prompt: str, user_prompt: str,
              temperature: float = 0.1, max_tokens: int = 2048,
              timeout_retries: int = 3,
-             response_format: dict | None = None) -> str:
+             response_format: dict | None = None,
+             use_cache: bool = True) -> str:
         """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。
 
         timeout_retries: ReadTimeoutError 重试次数（指数退避），默认 3。
         response_format: 可选，如 {"type": "json_object"}，强制模型输出 JSON。
+        use_cache: 是否使用 prompt 缓存（相同输入直接返回缓存结果）。
         """
         self._last_diag = {
             "provider": self.provider,
@@ -332,12 +421,35 @@ class LLMClient:
             "api_type": self.api_type,
             "base_url": self.base_url,
         }
+
+        # ── 缓存命中短路 ──
+        if use_cache and temperature <= 0.1:
+            key = self._cache_key(system_prompt, user_prompt, temperature, max_tokens, response_format)
+            cached = self._cache_get(key)
+            if cached is not None:
+                self._total_cached_calls += 1
+                self._last_diag["from_cache"] = True
+                return cached
+
+        # 估算 prompt token
+        prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
+        self._total_prompt_tokens += prompt_tokens
+        self._total_calls += 1
+        self._last_diag["prompt_tokens_est"] = prompt_tokens
+
         last_exc = None
         for attempt in range(timeout_retries):
             try:
                 result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
+                completion_tokens = estimate_tokens(result)
+                self._total_completion_tokens += completion_tokens
+                self._last_diag["completion_tokens_est"] = completion_tokens
+
+                # 写缓存（仅确定性调用）
+                if use_cache and temperature <= 0.1:
+                    self._cache_set(key, result)
                 return result
             except ReadTimeoutError as e:
                 last_exc = e
@@ -374,6 +486,11 @@ class LLMClient:
                 result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
+                completion_tokens = estimate_tokens(result)
+                self._total_completion_tokens += completion_tokens
+                self._last_diag["completion_tokens_est"] = completion_tokens
+                if use_cache and temperature <= 0.1:
+                    self._cache_set(key, result)
                 return result
             except Exception as exc2:
                 self._apply_provider(self._provider_list[0])

@@ -29,7 +29,7 @@ if str(SCRIPTS_SRC) not in sys.path:
 
 from . import db  # noqa: E402
 from .scraper import get_scraper_class  # noqa: E402
-from .classifier import classify_post  # noqa: E402
+from .classifier import batch_classify  # noqa: E402
 from .asset_match import match_asset  # noqa: E402
 from .notifier import send_signal_alert  # noqa: E402
 
@@ -207,25 +207,28 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
 
 
 def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
-    """处理待 AI 分类的帖子。"""
+    """处理待 AI 分类的帖子（批量处理，省 token）。"""
     pending = db.list_posts_pending_ai(limit=batch_size)
     if not pending:
         return
 
-    print(f"[KOL][runner] 待 AI 分类: {len(pending)} 条")
+    print(f"[KOL][runner] 待 AI 分类: {len(pending)} 条（批量模式）")
 
-    for post in pending:
+    # 批量分类
+    results = batch_classify(pending, batch_size=10)
+
+    for post, result in zip(pending, results):
         post_id = post["post_id"]
         try:
-            result = classify_post(
-                content_text=post["content_text"],
-                image_count=len(post.get("image_urls", [])),
-            )
-
             if result is None:
                 db.mark_post_ai_failed(post_id)
                 print(f"[KOL][runner]   AI 分类失败 post_id={post_id}")
+                stats["posts_ai_failed"] = stats.get("posts_ai_failed", 0) + 1
                 continue
+
+            # 规则前置命中的，记一下数
+            if result.get("_rule_based"):
+                stats["posts_rule_based"] = stats.get("posts_rule_based", 0) + 1
 
             # 币种匹配
             asset_id = match_asset(result.get("symbol"))
@@ -235,7 +238,7 @@ def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
                 "post_id": post_id,
                 "profile_id": post["profile_id"],
                 "asset_id": asset_id,
-                **result,
+                **{k: v for k, v in result.items() if not k.startswith("_")},
             }
 
             signal = db.insert_signal(signal_data)
@@ -251,7 +254,8 @@ def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
 
             print(f"[KOL][runner]   信号: {result['post_type']} "
                   f"{result.get('symbol', '?')} "
-                  f"(置信度 {result['confidence']:.2f})")
+                  f"(置信度 {result.get('confidence', 0):.2f})"
+                  f"{' [规则]' if result.get('_rule_based') else ''}")
 
         except Exception as e:
             db.mark_post_ai_failed(post_id)

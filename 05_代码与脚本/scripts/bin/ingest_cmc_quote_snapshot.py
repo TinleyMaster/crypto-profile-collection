@@ -265,6 +265,31 @@ def main() -> int:
             if anomaly_count > 0:
                 print(f"[spike] 本轮检测到 {anomaly_count} 条异常价格，已标记 is_anomaly", file=sys.stderr)
 
+            # range guard: 拦截 NUMERIC(18,8) 溢出的脏数据（percent_change_*, market_cap_dominance）
+            PCT_LIMIT = 1e10   # percent_change_* 列 NUMERIC(18,8) 物理上限
+            DOM_LIMIT = 100.0  # market_cap_dominance 合理上限（BTC 约 50）
+            clean_rows = []
+            skipped_dirty = 0
+            for row in filtered_rows:
+                dirty = False
+                for key in ("percent_change_1h", "percent_change_24h",
+                            "percent_change_7d", "percent_change_30d"):
+                    val = row.get(key)
+                    if val is not None and abs(float(val)) >= PCT_LIMIT:
+                        dirty = True
+                        break
+                if not dirty:
+                    dom = row.get("market_cap_dominance")
+                    if dom is not None and abs(float(dom)) >= DOM_LIMIT:
+                        dirty = True
+                if dirty:
+                    skipped_dirty += 1
+                    print(f"[dirty-skip] cmc_id={row.get('cmc_id')} 数值超界，跳过写入（防 NUMERIC 溢出）", file=sys.stderr)
+                    continue
+                clean_rows.append(row)
+            if skipped_dirty > 0:
+                print(f"[dirty-skip] 本轮跳过 {skipped_dirty} 条脏数据", file=sys.stderr)
+
             row_params = [
                 (
                     row["cmc_id"],
@@ -284,7 +309,7 @@ def main() -> int:
                     primary_raw_id,
                     row.get("is_anomaly", False),
                 )
-                for row in filtered_rows
+                for row in clean_rows
             ]
             execute_many(conn, upsert_quote_sql, row_params)
 

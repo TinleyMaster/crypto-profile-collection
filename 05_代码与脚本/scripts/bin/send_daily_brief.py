@@ -88,7 +88,7 @@ def render_brief_html(brief: dict) -> str:
     html_parts = []
     # 外层容器
     html_parts.append(f"""
-    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:720px;margin:auto;background:#fff;padding:16px;color:#0f172a;line-height:1.5">
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;max-width:680px;margin:auto;background:#f8fafc;padding:12px;color:#0f172a;line-height:1.45">
     """)
 
     # ════════════════════════════════════════════════════════
@@ -119,43 +119,50 @@ def render_brief_html(brief: dict) -> str:
         tldr_text = f"大盘今日{direction}，BTC 位于 {phase} 周期阶段。"
 
     html_parts.append(f"""
-      <div style="margin-bottom:20px">
-        <div style="font-size:18px;font-weight:700;color:#0f172a;margin-bottom:2px">📊 加密大盘早报</div>
-        <div style="font-size:12px;color:#64748b;margin-bottom:12px">{today} · Asia/Shanghai</div>
+      <!-- 第1屏：大盘仪表盘卡片 -->
+      <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:-0.3px">📊 加密大盘早报</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:1px">{today} · Asia/Shanghai</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:10px;color:#94a3b8">BTC 周期</div>
+            <div style="font-size:12px;font-weight:600;color:#475569">{phase}</div>
+          </div>
+        </div>
 
-        <!-- 四宫格仪表盘 -->
-        <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin-bottom:10px">
-          <tr>
-            <!-- BTC -->
-            <td style="width:25%;background:linear-gradient(135deg,#1e293b,#334155);color:#fff;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
-              <div style="font-size:11px;color:#94a3b8;margin-bottom:2px">BTC 价格</div>
-              <div style="font-size:20px;font-weight:700;letter-spacing:-0.5px">{_fmt_mcap(btc_price) if btc_price else 'N/A'}</div>
-              <div style="font-size:12px;color:{btc_chg_color};margin-top:2px">{btc_chg_str} (24h)</div>
-            </td>
-            <!-- 总市值 -->
-            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
-              <div style="font-size:11px;color:#64748b;margin-bottom:2px">总市值</div>
-              <div style="font-size:18px;font-weight:700;color:#0f172a">{_fmt_mcap(total_mcap)}</div>
-              <div style="font-size:12px;color:{mcap_chg_color};margin-top:2px">{mcap_chg_str} (24h)</div>
-            </td>
-            <!-- 恐贪 -->
-            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
-              <div style="font-size:11px;color:#64748b;margin-bottom:2px">恐贪指数</div>
-              <div style="font-size:20px;font-weight:700;color:{_fear_greed_color(fear_greed)}">{fear_greed if fear_greed is not None else 'N/A'}</div>
-              <div style="font-size:12px;color:#64748b;margin-top:2px">{fg_label or '—'}</div>
-            </td>
-            <!-- 24h 成交量 -->
-            <td style="width:25%;background:#f8fafc;border-radius:10px;padding:12px 8px;text-align:center;vertical-align:top">
-              <div style="font-size:11px;color:#64748b;margin-bottom:2px">24h 成交量</div>
-              <div style="font-size:18px;font-weight:700;color:#0f172a">{vol_str}</div>
-              <div style="font-size:12px;color:#64748b;margin-top:2px">周期: {phase}</div>
-            </td>
-          </tr>
-        </table>
+        <!-- 四宫格 Grid -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+          <!-- BTC -->
+          <div style="background:linear-gradient(135deg,#1e293b,#334155);border-radius:8px;padding:10px 6px;text-align:center">
+            <div style="font-size:10px;color:#94a3b8;margin-bottom:2px">BTC 价格</div>
+            <div style="font-size:17px;font-weight:700;color:#fff;letter-spacing:-0.5px">{_fmt_mcap(btc_price) if btc_price else 'N/A'}</div>
+            <div style="font-size:10px;color:{btc_chg_color};margin-top:1px;font-weight:500">{btc_chg_str}</div>
+          </div>
+          <!-- 总市值 -->
+          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
+            <div style="font-size:10px;color:#64748b;margin-bottom:2px">总市值</div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a">{_fmt_mcap(total_mcap)}</div>
+            <div style="font-size:10px;color:{mcap_chg_color};margin-top:1px;font-weight:500">{mcap_chg_str}</div>
+          </div>
+          <!-- 恐贪 -->
+          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
+            <div style="font-size:10px;color:#64748b;margin-bottom:2px">恐贪指数</div>
+            <div style="font-size:18px;font-weight:700;color:{_fear_greed_color(fear_greed)}">{fear_greed if fear_greed is not None else 'N/A'}</div>
+            <div style="font-size:10px;color:#64748b;margin-top:1px">{fg_label or '—'}</div>
+          </div>
+          <!-- 24h成交量 -->
+          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
+            <div style="font-size:10px;color:#64748b;margin-bottom:2px">24h 成交量</div>
+            <div style="font-size:15px;font-weight:700;color:#0f172a">{vol_str}</div>
+            <div style="font-size:10px;color:#94a3b8;margin-top:2px">全市场</div>
+          </div>
+        </div>
 
-        <!-- 一句话结论 -->
-        <div style="background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px;padding:10px 14px;font-size:13px;color:#1e40af">
-          <b>今日观点</b>：{tldr_text}
+        <!-- 今日观点 -->
+        <div style="margin-top:10px;background:linear-gradient(90deg,#eff6ff,#f0f9ff);border-left:3px solid #3b82f6;border-radius:4px;padding:8px 12px;font-size:12px;color:#1e40af">
+          <b>今日观点：</b>{tldr_text}
         </div>
       </div>
     """)
@@ -164,9 +171,11 @@ def render_brief_html(brief: dict) -> str:
     # 第 2 屏：🏭 12 赛道资金流向
     # ════════════════════════════════════════════════════════
     html_parts.append("""
-      <div style="margin-bottom:20px">
-        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
-          🏭 12 赛道资金流向
+      <!-- 第2屏：赛道资金流卡片 -->
+      <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;display:flex;align-items:center">
+          <span style="margin-right:6px">🏭</span>12 赛道资金流向
+          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">按 7d 涨幅排序 · 条宽=市值占比</span>
         </div>
     """)
 
@@ -174,6 +183,7 @@ def render_brief_html(brief: dict) -> str:
     if sectors and sector_flow.get("status") == "ok":
         # 找出最大市值用于进度条归一化
         max_mcap = max((float(s.get("market_cap") or 0)) for s in sectors) or 1
+        n_sec = len(sectors)
 
         for idx, s in enumerate(sectors):
             label = s.get("sector_label") or s.get("sector_key") or "?"
@@ -182,53 +192,65 @@ def render_brief_html(brief: dict) -> str:
             mcap_1d = s.get("mcap_change_1d_pct")
             chg_7d_str, chg_7d_color = _fmt_pct(mcap_7d)
             chg_1d_str, chg_1d_color = _fmt_pct(mcap_1d)
-            bar_pct = max(2, min(100, (mcap / max_mcap) * 100)) if max_mcap > 0 else 2
+            bar_pct = max(3, min(100, (mcap / max_mcap) * 100)) if max_mcap > 0 else 3
 
-            # 领涨币（排序用7d，显示用24h更直观，每日早报看今日表现）
+            # 领涨币（显示用24h）
             leaders = s.get("leaders") or []
             leader_html = ""
             if leaders:
                 parts = []
-                for l in leaders:
+                for l in leaders[:3]:
                     sym = l.get("symbol", "?")
                     p24h = l.get("percent_change_24h")
                     p24h_str, p24h_color = _fmt_pct(p24h)
                     parts.append(
-                        f'<span style="background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:1px 6px;font-size:11px;margin-right:4px">'
+                        f'<span style="display:inline-block;background:#fff;border:1px solid #e2e8f0;border-radius:3px;padding:1px 5px;font-size:10.5px;margin-right:4px;margin-bottom:2px">'
                         f'<b style="color:#0f172a">{sym}</b> <span style="color:{p24h_color};font-weight:600">{p24h_str}</span></span>'
                     )
-                leader_html = f'<div style="margin-top:4px">{"".join(parts)}</div>'
+                leader_html = f'<div style="margin-top:4px;margin-left:28px">{"".join(parts)}</div>'
 
-            # 前三赛道用高亮背景
-            row_bg = "#f0fdf4" if idx < 3 else ("#fef2f2" if idx >= len(sectors) - 2 else "#fafafa")
-            rank_badge = ""
+            # 排名徽章 + 涨跌背景
+            is_top3 = idx < 3
+            is_bottom2 = idx >= n_sec - 2
+            if is_top3:
+                row_bg = "#f0fdf4"
+            elif is_bottom2:
+                row_bg = "#fef2f2"
+            else:
+                row_bg = "#fafafa"
+
             if idx == 0:
-                rank_badge = '<span style="background:#16a34a;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px">TOP</span>'
-            elif idx >= len(sectors) - 2:
-                rank_badge = '<span style="background:#dc2626;color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px">LAG</span>'
+                rank_badge = '<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#16a34a;color:#fff;font-size:10.5px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">TOP</span>'
+            elif idx < 3:
+                rank_badge = f'<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#86efac;color:#166534;font-size:10.5px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">{idx+1}</span>'
+            elif is_bottom2:
+                rank_badge = '<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#dc2626;color:#fff;font-size:10px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">LAG</span>'
+            else:
+                rank_badge = f'<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#e2e8f0;color:#475569;font-size:10.5px;font-weight:600;border-radius:4px;margin-right:7px;flex-shrink:0">{idx+1}</span>'
 
             html_parts.append(f"""
-            <div style="padding:8px 10px;margin-bottom:4px;border-radius:6px;background:{row_bg}">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
-                <div style="font-size:13px;font-weight:600">
-                  {rank_badge}{label}
-                  <span style="color:#94a3b8;font-weight:400;font-size:11px;margin-left:4px">{_fmt_mcap(mcap)}</span>
+            <div style="padding:7px 8px;margin-bottom:3px;border-radius:6px;background:{row_bg}">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                <div style="display:flex;align-items:center;min-width:0">
+                  {rank_badge}
+                  <span style="font-size:12.5px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{label}</span>
+                  <span style="color:#94a3b8;font-weight:400;font-size:10.5px;margin-left:5px;flex-shrink:0">{_fmt_mcap(mcap)}</span>
                 </div>
-                <div style="font-size:12px">
-                  <span style="color:{chg_7d_color};font-weight:600">7d {chg_7d_str}</span>
-                  <span style="color:#94a3b8;margin:0 4px">·</span>
+                <div style="font-size:11.5px;white-space:nowrap;margin-left:8px">
+                  <span style="color:{chg_7d_color};font-weight:700">7d {chg_7d_str}</span>
+                  <span style="color:#cbd5e1;margin:0 4px">·</span>
                   <span style="color:{chg_1d_color}">1d {chg_1d_str}</span>
                 </div>
               </div>
-              <!-- 市值条形 -->
-              <div style="height:4px;background:#e2e8f0;border-radius:2px;overflow:hidden">
-                <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:2px"></div>
+              <!-- 市值条形（8px加粗） -->
+              <div style="height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-left:28px">
+                <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:4px"></div>
               </div>
               {leader_html}
             </div>
             """)
     else:
-        html_parts.append('<div style="color:#64748b;font-size:13px;padding:10px;background:#f8fafc;border-radius:6px">暂无赛道数据</div>')
+        html_parts.append('<div style="color:#64748b;font-size:12px;padding:16px;text-align:center">暂无赛道数据</div>')
 
     html_parts.append("</div>")
 
@@ -237,43 +259,47 @@ def render_brief_html(brief: dict) -> str:
     # ════════════════════════════════════════════════════════
     # 判断是否为兜底数据（热门榜）
     is_fallback = bool(all_opps and all_opps[0].get("is_fallback"))
-    section_title = "🔥 热门币种榜（综合热度）" if is_fallback else "🎯 机会清单（按综合评分排序）"
-    section_note = '<div style="font-size:11px;color:#94a3b8;margin-bottom:4px">注：评分系统模块降级中，当前展示热门币种榜</div>' if is_fallback else ''
+    section_title = "🔥 今日热门币种" if is_fallback else "🎯 机会清单"
+    section_sub = "赛道×链上交叉筛选 · 按综合评分" if is_fallback else "按综合评分排序"
 
     html_parts.append(f"""
-      <div style="margin-bottom:20px">
-        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:4px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
-          {section_title}
+      <!-- 第3屏：机会清单卡片 -->
+      <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:2px;display:flex;align-items:center">
+          <span style="margin-right:6px">{section_title.split()[0]}</span>{section_title.split(" ",1)[1] if " " in section_title else section_title}
         </div>
-        {section_note}
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">{section_sub}</div>
     """)
 
     if all_opps:
-        for opp in all_opps[:8 if is_fallback else 5]:
+        display_opps = all_opps[:8 if is_fallback else 6]
+        for opp in display_opps:
             tier = opp.get("conviction_tier", "?")
-            score = opp.get("conviction_score", "?")
-            # score 格式化：数字保留1位小数，非数字直接显示
-            if isinstance(score, (int, float)):
-                score_str = f"{score:.0f}"
-            else:
-                score_str = str(score)
+            score = opp.get("conviction_score", 0)
+            score_str = f"{score:.0f}" if isinstance(score, (int, float)) else str(score)
             target = opp.get("target", "?")
             direction = opp.get("direction", "?")
             trigger = opp.get("trigger_logic", "")
             sector = opp.get("sector", "")
-            sources = opp.get("source_count") or opp.get("signals_count") or ""
+            sources = opp.get("source_count") or opp.get("signals_count") or 0
 
             if tier == "HIGH":
-                border_color = "#dc2626"
-                bg = "#fef2f2"
+                accent = "#dc2626"
+                badge_bg = "#fee2e2"
+                badge_color = "#991b1b"
+                card_bg = "#fff1f2"
             elif tier == "MED":
-                border_color = "#f59e0b"
-                bg = "#fffbeb"
+                accent = "#f59e0b"
+                badge_bg = "#fef3c7"
+                badge_color = "#92400e"
+                card_bg = "#fffbeb"
             else:
-                border_color = "#94a3b8"
-                bg = "#f8fafc"
+                accent = "#94a3b8"
+                badge_bg = "#f1f5f9"
+                badge_color = "#475569"
+                card_bg = "#f8fafc"
 
-            dir_icon = "↗" if direction == "long" else "↘" if direction == "short" else "→"
+            dir_icon = "▲" if direction == "long" else "▼" if direction == "short" else "◆"
             dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
             dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
 
@@ -285,23 +311,23 @@ def render_brief_html(brief: dict) -> str:
             meta_str = " · ".join(meta_parts)
 
             html_parts.append(f"""
-            <div style="padding:10px 12px;margin:6px 0;border-radius:6px;border-left:4px solid {border_color};background:{bg}">
-              <div style="display:flex;justify-content:space-between;align-items:baseline">
-                <div>
-                  <span style="font-size:15px;font-weight:700">{target}</span>
-                  <span style="color:{dir_color};font-size:13px;margin-left:6px">{dir_icon} {dir_cn}</span>
+            <div style="padding:10px 12px;margin:5px 0;border-radius:7px;border-left:3px solid {accent};background:{card_bg}">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div style="display:flex;align-items:center">
+                  <span style="font-size:14px;font-weight:700;color:#0f172a">{target}</span>
+                  <span style="color:{dir_color};font-size:12px;font-weight:600;margin-left:8px">{dir_icon} {dir_cn}</span>
                 </div>
-                <div style="font-size:12px;color:#64748b">
-                  <span style="background:{border_color};color:#fff;padding:1px 6px;border-radius:3px;font-weight:600;font-size:11px">{tier}</span>
-                  <span style="margin-left:4px">Score {score_str}</span>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="background:{badge_bg};color:{badge_color};font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700">{tier}</span>
+                  <span style="font-size:11px;color:#64748b;font-weight:600">{score_str}</span>
                 </div>
               </div>
-              {f'<div style="font-size:12px;color:#64748b;margin-top:2px">{meta_str}</div>' if meta_str else ''}
-              <div style="color:#475569;font-size:12px;margin-top:4px;line-height:1.4">{trigger}</div>
+              {f'<div style="font-size:11px;color:#64748b;margin-top:3px">{meta_str}</div>' if meta_str else ''}
+              <div style="color:#475569;font-size:11.5px;margin-top:4px;line-height:1.4">{trigger}</div>
             </div>
             """)
     else:
-        html_parts.append('<div style="color:#64748b;font-size:13px;padding:10px;background:#f8fafc;border-radius:6px">暂无推荐机会</div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:16px;text-align:center">暂无推荐机会</div>')
 
     html_parts.append("</div>")
 
@@ -309,39 +335,34 @@ def render_brief_html(brief: dict) -> str:
     # 第 4 屏：🔗 链上异动 + 📅 近期事件
     # ════════════════════════════════════════════════════════
     html_parts.append("""
-      <div style="margin-bottom:20px">
-        <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
-          🔗 链上异动 & 近期事件
-        </div>
+      <!-- 第4屏：链上异动 + 近期事件 双栏 -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
     """)
 
-    # 左：链上信号
+    # 左栏：链上信号
     signals = kol_onchain.get("signals") or []
     kol_count = len(kol_onchain.get("kols") or [])
     html_parts.append(f"""
-      <div style="margin-bottom:12px">
-        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:6px">
-          🔍 链上异动（{kol_onchain.get('hours',24)}h · {kol_count}位分析师）
-        </div>
+      <div style="background:#fff;border-radius:10px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">🔍 链上异动</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">{kol_onchain.get('hours',24)}h · {kol_count}位分析师</div>
     """)
     if signals and kol_onchain.get("status") == "ok":
-        # 信号类型中文化
         SUBTYPE_CN = {
-            "exchange_flow": "交易所异动",
+            "exchange_flow": "交易所",
             "smart_money": "聪明钱",
             "accumulation": "大额吸筹",
             "whale_move": "巨鲸转账",
             "distribution": "大额派发",
             "liquidation": "爆仓清算",
         }
-        # 方向动作中文化
         DIR_CN = {
             "inflow": "流入",
             "outflow": "流出",
-            "accumulating": "吸筹中",
-            "distributing": "派发中",
+            "accumulating": "吸筹",
+            "distributing": "派发",
         }
-        for sig in signals[:7]:
+        for sig in signals[:6]:
             subtype = sig.get("signal_subtype") or ""
             subtype_cn = SUBTYPE_CN.get(subtype, subtype)
             direction = sig.get("event_direction") or ""
@@ -353,7 +374,6 @@ def render_brief_html(brief: dict) -> str:
             addr_label = sig.get("address_label") or ""
             exchange = sig.get("event_exchange") or ""
 
-            # 判断多空颜色
             is_bullish = (
                 "in" in str(direction).lower()
                 or "accum" in str(subtype).lower()
@@ -364,19 +384,15 @@ def render_brief_html(brief: dict) -> str:
                 or "liquidat" in str(subtype).lower()
             )
             if is_bullish:
-                tag_bg = "#fee2e2"
-                tag_color = "#b91c1c"
+                dot = "#dc2626"
                 arrow = "▲"
             elif is_bearish:
-                tag_bg = "#dcfce7"
-                tag_color = "#15803d"
+                dot = "#16a34a"
                 arrow = "▼"
             else:
-                tag_bg = "#e2e8f0"
-                tag_color = "#334155"
+                dot = "#64748b"
                 arrow = "◆"
 
-            # 描述文本：交易所+地址标签组合
             desc_parts = []
             if exchange:
                 desc_parts.append(f"交易所：{exchange}")
@@ -385,67 +401,67 @@ def render_brief_html(brief: dict) -> str:
             desc = " · ".join(desc_parts)
 
             html_parts.append(f"""
-            <div style="padding:8px 10px;margin:4px 0;border-radius:6px;background:#fafafa;border-left:3px solid {tag_color}">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+            <div style="padding:7px 8px;margin:3px 0;border-radius:5px;background:#fafafa;border-left:2px solid {dot}">
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:11.5px">
                 <div>
-                  <span style="background:{tag_bg};color:{tag_color};font-size:11px;padding:1px 6px;border-radius:3px;font-weight:600">{subtype_cn}</span>
-                  <span style="font-weight:700;font-size:13px;margin-left:6px">{sym}</span>
-                  <span style="color:{tag_color};font-size:12px;font-weight:600;margin-left:4px">{arrow} {dir_cn}{(' ' + amt_str) if amt_str else ''}</span>
+                  <span style="font-weight:700;color:#0f172a">{sym}</span>
+                  <span style="color:{dot};font-weight:600;margin-left:4px">{arrow} {dir_cn}</span>
+                  {f'<span style="color:#64748b;margin-left:4px">{amt_str}</span>' if amt_str else ''}
                 </div>
-                <span style="color:#94a3b8;font-size:11px">{kol}</span>
+                <span style="font-size:10px;color:#94a3b8">{kol}</span>
               </div>
-              {f'<div style="color:#64748b;font-size:11px;margin-top:2px">{desc}</div>' if desc else ''}
+              {f'<div style="font-size:10px;color:#64748b;margin-top:2px"><span style="background:#eef2ff;color:#4338ca;padding:0 4px;border-radius:2px;font-weight:500;margin-right:4px">{subtype_cn}</span>{desc}</div>' if subtype_cn or desc else ''}
             </div>
             """)
     else:
-        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:10px;background:#f8fafc;border-radius:6px">近 24h 无链上异动信号</div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:11px;padding:15px;text-align:center">近 24h 无链上异动</div>')
     html_parts.append("</div>")
 
-    # 右：催化剂日历
+    # 右栏：催化剂日历
     catalyst = brief.get("M5_catalyst") or {}
     events = (catalyst.get("hardcoded") or []) + (catalyst.get("token_events") or [])
-    # 按日期排序
     try:
         events.sort(key=lambda e: e.get("date", "9999"))
     except Exception:
         pass
 
     html_parts.append("""
-      <div>
-        <div style="font-size:13px;font-weight:600;color:#334155;margin-bottom:4px">📅 近期催化剂</div>
+      <div style="background:#fff;border-radius:10px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+        <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">📅 近期催化剂</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">宏观 & 代币事件</div>
     """)
     if events:
-        for ev in events[:5]:
+        for ev in events[:6]:
             ev_date = ev.get("date", "")
             ev_name = ev.get("event", "?")
             ev_type = ev.get("type", "")
             try:
                 days_until = (date.fromisoformat(ev_date) - date.today()).days
-                days_str = f"{days_until}天后" if days_until > 0 else "今天" if days_until == 0 else "已过"
-                days_color = "#16a34a" if days_until <= 7 and days_until >= 0 else "#94a3b8"
+                days_str = f"{days_until}d" if days_until > 0 else "今天" if days_until == 0 else "已过"
+                days_color = "#dc2626" if 0 <= days_until <= 7 else ("#f59e0b" if 7 < days_until <= 14 else "#94a3b8")
             except Exception:
                 days_str = ""
                 days_color = "#94a3b8"
 
             type_badge = ""
             if ev_type == "macro":
-                type_badge = '<span style="background:#e0e7ff;color:#4338ca;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">宏观</span>'
+                type_badge = '<span style="background:#e0e7ff;color:#4338ca;font-size:9.5px;padding:0 4px;border-radius:2px;font-weight:500;margin-right:5px">宏观</span>'
             elif ev_type == "unlock":
-                type_badge = '<span style="background:#fef3c7;color:#92400e;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">解锁</span>'
+                type_badge = '<span style="background:#fef3c7;color:#92400e;font-size:9.5px;padding:0 4px;border-radius:2px;font-weight:500;margin-right:5px">解锁</span>'
             elif ev_type in ("listing", "exchange_listing"):
-                type_badge = '<span style="background:#dcfce7;color:#166534;font-size:10px;padding:1px 4px;border-radius:3px;margin-right:4px">上币</span>'
+                type_badge = '<span style="background:#dcfce7;color:#166534;font-size:9.5px;padding:0 4px;border-radius:2px;font-weight:500;margin-right:5px">上币</span>'
 
             html_parts.append(f"""
-            <div style="padding:5px 8px;margin:2px 0;font-size:12px;border-bottom:1px solid #f1f5f9">
-              {type_badge}<b>{ev_date}</b> {ev_name}
-              <span style="float:right;color:{days_color}">{days_str}</span>
+            <div style="padding:6px 0;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+              <div style="font-size:11.5px;color:#334155;min-width:0;overflow:hidden;text-overflow:ellipsis">
+                {type_badge}{ev_name}
+              </div>
+              <span style="font-size:10.5px;color:{days_color};font-weight:600;flex-shrink:0;margin-left:8px">{days_str}</span>
             </div>
             """)
     else:
-        html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:8px;background:#f8fafc;border-radius:5px">暂无近期事件</div>')
-    html_parts.append("</div>")
-
-    html_parts.append("</div>")
+        html_parts.append('<div style="color:#94a3b8;font-size:11px;padding:15px;text-align:center">暂无事件</div>')
+    html_parts.append("</div></div>")
 
     # ════════════════════════════════════════════════════════
     # 其他信号（折叠显示，精简）
@@ -505,14 +521,13 @@ def render_brief_html(brief: dict) -> str:
 
     if extra_blocks:
         html_parts.append("""
-          <div style="margin-bottom:16px">
-            <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;border-bottom:2px solid #e2e8f0;padding-bottom:4px">
-              📌 其他信号
-            </div>
+          <!-- 其他信号卡片 -->
+          <div style="background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+            <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px">📌 其他信号</div>
         """)
         for title, content in extra_blocks:
             html_parts.append(f"""
-            <div style="padding:8px 10px;margin:4px 0;background:#f8fafc;border-radius:6px;font-size:12px">
+            <div style="padding:6px 8px;margin:3px 0;background:#f8fafc;border-radius:5px;font-size:11.5px">
               <b style="color:#334155">{title}</b>
               <div style="color:#475569;margin-top:2px">{content}</div>
             </div>
@@ -528,19 +543,25 @@ def render_brief_html(brief: dict) -> str:
         ai_html = ai_html.replace("\n\n", "</p><p>")
         ai_html = ai_html.replace("\n", "<br>")
         ai_html = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', ai_html)
-        ai_html = re.sub(r'`(.*?)`', r'<code style="background:#e2e8f0;padding:1px 4px;border-radius:3px">\1</code>', ai_html)
+        ai_html = re.sub(r'`(.*?)`', r'<code style="background:#e2e8f0;padding:1px 4px;border-radius:3px;font-size:10.5px">\1</code>', ai_html)
         html_parts.append(f'''
-        <div style="margin:16px 0;padding:14px 16px;background:#f0f9ff;border-left:4px solid #3b82f6;border-radius:6px">
-          <div style="font-weight:700;color:#1e40af;margin-bottom:8px;font-size:14px">🤖 AI 深度解读</div>
-          <div style="color:#334155;font-size:13px;line-height:1.6">{ai_html}</div>
+        <div style="margin-top:10px;padding:10px 12px;background:#f0f9ff;border-left:3px solid #3b82f6;border-radius:5px">
+          <div style="font-weight:700;color:#1e40af;margin-bottom:5px;font-size:12px">🤖 AI 深度解读</div>
+          <div style="color:#334155;font-size:11.5px;line-height:1.55">{ai_html}</div>
         </div>''')
 
     # 降级标注
     degraded = brief.get("degraded", [])
     if degraded:
-        html_parts.append(f'<div style="padding:8px;background:#fef9c3;border-radius:4px;color:#92400e;font-size:12px">⚠️ 降级项: {", ".join(degraded)}</div>')
+        html_parts.append(f'<div style="margin-top:8px;padding:6px 10px;background:#fef9c3;border-radius:4px;color:#92400e;font-size:11px">⚠️ 降级项: {", ".join(degraded)}</div>')
 
-    html_parts.append("</div>")
+    # 页脚
+    html_parts.append("""
+      <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:12px">
+        数据仅供参考，不构成投资建议 · 加密大盘早报
+      </div>
+    </div>
+    """)
     return "\n".join(html_parts)
 
 

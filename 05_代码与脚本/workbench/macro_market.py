@@ -4334,59 +4334,167 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
 
 
 def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
-    """机会清单兜底：从 biz.daily_recommendation 取最新热门币种。
+    """机会清单兜底：赛道领涨 × 链上信号 交叉筛选。
 
-    当 score_opportunities() 因模块降级/数据缺失返回空时使用，
-    保证早报不会出现"暂无推荐机会"的空窗。
+    当 score_opportunities() 因模块降级/数据缺失返回空时使用。
+    数据源：sector_flow（赛道领涨币） + kol_onchain（链上信号）。
+
+    分级逻辑：
+    - HIGH：赛道领涨 + 链上信号共振，或强势赛道龙头（TOP3赛道TOP1）
+    - MED：赛道领涨币（非龙头），或大额链上异动(>$5M)
+    - LOW：其他
     """
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
         import psycopg.rows
 
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                cur.execute("""
-                    SELECT symbol, name, sector, source_count, composite_score,
-                           change_24h, volume_24h, price_usd, market_cap_usd, rec_date
-                    FROM biz.daily_recommendation
-                    WHERE rec_date = (SELECT MAX(rec_date) FROM biz.daily_recommendation)
-                      AND composite_score IS NOT NULL
-                    ORDER BY composite_score DESC NULLS LAST
-                    LIMIT %s
-                """, (limit,))
-                rows = [dict(r) for r in cur.fetchall()]
+        sector_data = fetch_sector_flow_with_leaders()
+        kol_data = fetch_kol_onchain_signals(hours=24, limit=20)
 
+        sectors = sector_data.get("sectors", []) if sector_data.get("status") == "ok" else []
+        signals = kol_data.get("signals", []) if kol_data.get("status") == "ok" else []
+
+        if not sectors and not signals:
+            return []
+
+        # 1) 收集赛道领涨币（symbol → 完整信息）
+        leader_map = {}
+        for s in sectors:
+            for rank, l in enumerate(s.get("leaders", [])):
+                sym = l.get("symbol")
+                if not sym:
+                    continue
+                entry = {
+                    **l,
+                    "sector": s.get("sector_label") or s.get("sector_key") or "",
+                    "sector_key": s.get("sector_key") or "",
+                    "sector_rank": rank,
+                    "sector_7d": float(s.get("mcap_change_7d_pct") or 0),
+                    "sector_mcap": float(s.get("market_cap") or 0),
+                }
+                # 同一个币出现在多个赛道，取排名更靠前的
+                if sym not in leader_map or rank < leader_map[sym]["sector_rank"]:
+                    leader_map[sym] = entry
+
+        # 2) 收集链上信号（symbol → [signals]）
+        sig_map = {}
+        for sig in signals:
+            sym = sig.get("symbol") or sig.get("event_token")
+            if not sym:
+                continue
+            sig_map.setdefault(sym, []).append(sig)
+
+        # 3) 分级打分
         result = []
-        for r in rows:
-            score = float(r.get("composite_score") or 0)
-            # 用 composite_score 简单映射 tier（0-100 分制）
-            if score >= 70:
-                tier = "HIGH"
-            elif score >= 50:
-                tier = "MED"
-            else:
-                tier = "LOW"
-            # 方向根据 24h 涨跌粗略判断（兜底用，不精确）
-            chg = r.get("change_24h")
-            direction = "long" if chg is not None and chg > 0 else "short" if chg is not None and chg < 0 else "neutral"
 
+        # 3a. 赛道领涨 + 链上信号共振 → HIGH（最有价值）
+        for sym, lc in leader_map.items():
+            if sym in sig_map:
+                sigs = sig_map[sym]
+                big_sigs = [s for s in sigs if s.get("event_usd_value") and float(s["event_usd_value"]) > 1000000]
+                score = 78 + min(3, len(big_sigs)) * 4 - lc["sector_rank"] * 2
+                # 方向：24h涨+看涨信号=long，否则混合判断
+                p24h = float(lc.get("percent_change_24h") or 0)
+                is_bullish = any(
+                    "in" in str(s.get("event_direction", "")).lower()
+                    or "accum" in str(s.get("signal_subtype", "")).lower()
+                    for s in sigs
+                )
+                direction = "long" if (p24h >= 0 and is_bullish) else "short" if p24h < 0 else "neutral"
+                subtypes = list(set(s.get("signal_subtype", "") for s in sigs if s.get("signal_subtype")))
+                result.append({
+                    "target": sym,
+                    "symbol": sym,
+                    "name": lc.get("name") or sym,
+                    "conviction_score": score,
+                    "conviction_tier": "HIGH",
+                    "direction": direction,
+                    "sector": lc["sector"],
+                    "source_count": 1 + len(sigs),
+                    "trigger_logic": f"{lc['sector']}赛道领涨 + {len(sigs)}个链上信号共振（{', '.join(subtypes[:3])}），7日 +{float(lc.get('percent_change_7d') or 0):.1f}% / 24日 {p24h:+.1f}%",
+                    "change_24h": p24h,
+                    "market_cap_usd": float(lc.get("market_cap") or 0),
+                    "is_fallback": True,
+                })
+
+        # 3b. 强势赛道龙头（7d涨幅>10%的赛道TOP1） → HIGH
+        for sym, lc in leader_map.items():
+            if any(o["target"] == sym for o in result):
+                continue
+            if lc["sector_rank"] == 0 and lc["sector_7d"] > 10:
+                p24h = float(lc.get("percent_change_24h") or 0)
+                score = 72 + min(10, lc["sector_7d"] / 10)
+                result.append({
+                    "target": sym,
+                    "symbol": sym,
+                    "name": lc.get("name") or sym,
+                    "conviction_score": score,
+                    "conviction_tier": "HIGH",
+                    "direction": "long" if p24h >= 0 else "short",
+                    "sector": lc["sector"],
+                    "source_count": 1,
+                    "trigger_logic": f"{lc['sector']}赛道龙头，赛道7日涨幅 +{lc['sector_7d']:.1f}%，币价7日 +{float(lc.get('percent_change_7d') or 0):.1f}%",
+                    "change_24h": p24h,
+                    "market_cap_usd": float(lc.get("market_cap") or 0),
+                    "is_fallback": True,
+                })
+
+        # 3c. 其他赛道领涨币 → MED
+        for sym, lc in leader_map.items():
+            if any(o["target"] == sym for o in result):
+                continue
+            p24h = float(lc.get("percent_change_24h") or 0)
+            p7d = float(lc.get("percent_change_7d") or 0)
+            score = 55 + min(20, p7d / 3) - lc["sector_rank"] * 3
             result.append({
-                "target": r.get("symbol") or "?",
-                "symbol": r.get("symbol") or "?",
-                "name": r.get("name") or "",
+                "target": sym,
+                "symbol": sym,
+                "name": lc.get("name") or sym,
                 "conviction_score": score,
-                "conviction_tier": tier,
-                "direction": direction,
-                "sector": r.get("sector") or "",
-                "source_count": r.get("source_count") or 0,
-                "trigger_logic": f"综合热度评分 {score:.0f}，24h {'上涨' if chg and chg > 0 else '下跌' if chg else '持平'}",
-                "change_24h": float(chg) if chg else None,
-                "market_cap_usd": float(r.get("market_cap_usd") or 0),
-                "is_fallback": True,  # 标记为兜底数据
+                "conviction_tier": "MED",
+                "direction": "long" if p24h >= 0 else "short",
+                "sector": lc["sector"],
+                "source_count": 1,
+                "trigger_logic": f"{lc['sector']}赛道领涨榜第{lc['sector_rank']+1}，7日 +{p7d:.1f}% / 24h {p24h:+.1f}%",
+                "change_24h": p24h,
+                "market_cap_usd": float(lc.get("market_cap") or 0),
+                "is_fallback": True,
             })
-        return result
+
+        # 3d. 大额链上异动(>$3M)但不在赛道领涨里 → MED
+        for sym, sigs in sig_map.items():
+            if any(o["target"] == sym for o in result):
+                continue
+            big_sigs = [s for s in sigs if s.get("event_usd_value") and float(s["event_usd_value"]) > 3000000]
+            if not big_sigs:
+                continue
+            total_usd = sum(float(s["event_usd_value"]) for s in big_sigs)
+            is_bullish = any(
+                "in" in str(s.get("event_direction", "")).lower()
+                or "accum" in str(s.get("signal_subtype", "")).lower()
+                for s in big_sigs
+            )
+            score = 58 + min(12, total_usd / 1000000)
+            subtypes = list(set(s.get("signal_subtype", "") for s in big_sigs if s.get("signal_subtype")))
+            result.append({
+                "target": sym,
+                "symbol": sym,
+                "name": sym,
+                "conviction_score": score,
+                "conviction_tier": "MED",
+                "direction": "long" if is_bullish else "short",
+                "sector": "链上异动",
+                "source_count": len(big_sigs),
+                "trigger_logic": f"{len(big_sigs)}笔大额链上异动（合计约 ${total_usd/1e6:.1f}M），类型：{', '.join(subtypes[:3])}",
+                "change_24h": None,
+                "market_cap_usd": 0,
+                "is_fallback": True,
+            })
+
+        # 排序 + 截断
+        result.sort(key=lambda o: o["conviction_score"], reverse=True)
+        return result[:limit]
     except Exception:
         return []
 

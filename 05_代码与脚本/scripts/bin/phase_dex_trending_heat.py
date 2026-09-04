@@ -43,6 +43,7 @@ CHAIN_MAP = {
     "op": "optimism",
     "avalanche": "avalanche",
     "avax": "avalanche",
+    "robinhood": "robinhood",
 }
 
 UPSERT_SQL = """
@@ -131,9 +132,38 @@ def fetch_dexscreener_boosts() -> list[dict]:
             "chain": chain_norm,
             "token_address": addr,
             "boost_amount": item.get("totalAmount") or 0,
+            "volume_24h": 0,  # 后续 enrich 补
             "source": "dexscreener",
         })
     return out
+
+
+def enrich_dexscreener_volume(entries: list[dict]) -> list[dict]:
+    """对 DexScreener 命中的 token 批量拉取 volume_24h（/tokens/v1 多 token 查询）。"""
+    dex_entries = [e for e in entries if e["source"] == "dexscreener"]
+    if not dex_entries:
+        return entries
+    # DexScreener /tokens/v1/{chainId}/{tokenAddress} 逐条拉，限 10 条防限流
+    for e in dex_entries[:10]:
+        chain_raw = ""
+        for k, v in CHAIN_MAP.items():
+            if v == e["chain"]:
+                chain_raw = k
+                break
+        if not chain_raw:
+            chain_raw = e["chain"]
+        url = f"https://api.dexscreener.com/tokens/v1/{chain_raw}/{e['token_address']}"
+        try:
+            r = requests.get(url, headers={"Accept": "application/json"}, timeout=TIMEOUT)
+            if r.status_code == 200:
+                pairs = r.json()
+                if isinstance(pairs, list) and pairs:
+                    vol = pairs[0].get("volume") or {}
+                    e["volume_24h"] = float(vol.get("h24") or 0)
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return entries
 
 
 # ── 映射 + 聚合 ───────────────────────────────────────────────────────
@@ -239,6 +269,9 @@ def main() -> int:
         print("拉取 DexScreener token-boosts...")
         ds = fetch_dexscreener_boosts()
         print(f"  DexScreener: {len(ds)} 条")
+
+        print("补充 DexScreener volume_24h...")
+        ds = enrich_dexscreener_volume(ds)
 
         all_entries = geo + ds
         if not all_entries:

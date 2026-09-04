@@ -4223,7 +4223,7 @@ def fetch_sector_flow_with_leaders() -> dict:
                 # 2) 每个赛道取领涨币 TOP3（按 7d 涨幅，市值 > 10M 过滤小币）
                 for s in sectors:
                     cur.execute("""
-                        SELECT a.canonical_symbol AS symbol, a.name,
+                        SELECT a.canonical_symbol AS symbol, a.canonical_name AS name,
                                q.market_cap, q.percent_change_24h, q.percent_change_7d,
                                q.volume_24h
                         FROM biz.asset_sector s
@@ -4290,7 +4290,7 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
                     SELECT s.signal_id, s.created_at, s.signal_category, s.signal_subtype,
                            s.symbol, s.event_direction, s.event_amount, s.event_token,
                            s.event_usd_value, s.tx_hash, s.address_label, s.event_exchange,
-                           s.event_time, s.confidence, s.reason,
+                           s.event_time, s.confidence, s.address_label as reason,
                            p.nickname as kol_name
                     FROM biz.kol_signal s
                     JOIN biz.kol_profile p ON s.profile_id = p.profile_id

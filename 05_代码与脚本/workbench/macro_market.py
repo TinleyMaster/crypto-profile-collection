@@ -382,32 +382,135 @@ def fetch_mvrv_history(asset: str = "btc") -> dict:
 
 
 def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
-    """稳定币净流入历史序列（日频）。返回 {status, series: [netflow_usd, ...], rolling_7d: [...]}。
+    """稳定币净流入历史序列（日频）。返回 {status, series, rolling_7d, dates, total_supply, anomaly}。
 
-    rolling_7d：7d 滚动累计净流入，与前端 7d 视角对齐（分位计算用此口径）。
+    series/rolling_7d：日净流入 / 7d 滚动累计净流入。
+    dates：对应日期（YYYY-MM-DD）。
+    total_supply：总供给序列（用于画分位折线）。
+    anomaly：异动信号 {type, strength, message}。
     """
     try:
         r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
         r.raise_for_status()
         rows = r.json()
-        series = []
+        dates = []
+        supplies = []
         for row in rows:
             usd = (row.get("totalCirculating") or {}).get("peggedUSD")
-            if usd is not None:
-                series.append(_safe_float(usd))
-        if len(series) < 2:
-            return {"status": "error", "error": "insufficient", "series": [], "rolling_7d": []}
+            ts = row.get("date")
+            if usd is not None and ts is not None:
+                supplies.append(_safe_float(usd))
+                # ts 是 unix timestamp（秒）
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                dates.append(dt.strftime("%Y-%m-%d"))
+        if len(supplies) < 2:
+            return {"status": "error", "error": "insufficient", "series": [], "rolling_7d": [],
+                    "dates": [], "total_supply": [], "anomaly": None}
         # 计算日净流入
-        netflows = [series[i] - series[i - 1] for i in range(1, len(series))]
+        netflows = [supplies[i] - supplies[i - 1] for i in range(1, len(supplies))]
+        flow_dates = dates[1:]  # 净流对应后一天
         # 7d 滚动累计，与前端 7d 视角对齐
         rolling_7d = [sum(netflows[max(0, i - 6):i + 1]) for i in range(len(netflows))]
+        # 异动检测
+        anomaly = _detect_stablecoin_anomaly(netflows, rolling_7d, supplies)
         return {
             "status": "ok",
             "series": netflows[-days:],
             "rolling_7d": rolling_7d[-days:],
+            "dates": flow_dates[-days:],
+            "total_supply": supplies[-days:],
+            "supply_dates": dates[-days:],
+            "anomaly": anomaly,
         }
     except Exception as e:
-        return {"status": "error", "error": str(e), "series": [], "rolling_7d": []}
+        return {"status": "error", "error": str(e), "series": [], "rolling_7d": [],
+                "dates": [], "total_supply": [], "anomaly": None}
+
+
+def _detect_stablecoin_anomaly(netflows: list[float], rolling_7d: list[float],
+                                supplies: list[float]) -> dict | None:
+    """
+    稳定币异动检测：
+    - 单日巨量流入/流出（> 30d 均值的 3σ 或 > 50 亿美金）
+    - 7d 滚动趋势反转（连续 3 天方向变化）
+    - 供给突破 N 日新高/新低
+    返回 {type, direction, strength, message, metric} 或 None。
+    """
+    if len(netflows) < 14 or len(rolling_7d) < 7:
+        return None
+    import statistics
+    # ── 1. 单日巨量异动 ──
+    latest = netflows[-1]
+    abs_latest = abs(latest)
+    recent_30d = netflows[-30:] if len(netflows) >= 30 else netflows
+    mean_abs = statistics.mean(abs(x) for x in recent_30d)
+    stdev_abs = statistics.stdev(abs(x) for x in recent_30d) if len(recent_30d) >= 2 else 0
+    z_score = (abs_latest - mean_abs) / stdev_abs if stdev_abs > 0 else 0
+
+    if abs_latest > 5_000_000_000 or z_score > 2.5:
+        direction = "inflow" if latest > 0 else "outflow"
+        strength = "high" if abs_latest > 10_000_000_000 or z_score > 3 else "medium"
+        label = "巨量流入" if latest > 0 else "巨量流出"
+        return {
+            "type": "daily_surge",
+            "direction": direction,
+            "strength": strength,
+            "label": label,
+            "message": f"单日净{'流入' if latest > 0 else '流出'} ${latest / 1e9:+.1f}B，{'超过阈值' if z_score > 2.5 else '规模显著'}",
+            "metric": round(latest, 0),
+            "z_score": round(z_score, 2),
+        }
+
+    # ── 2. 7d 趋势反转 ──
+    if len(rolling_7d) >= 10:
+        # 前 7 天 vs 后 3 天的方向是否反转
+        prev_avg = sum(rolling_7d[-10:-3]) / 7
+        last_3_avg = sum(rolling_7d[-3:]) / 3
+        if prev_avg != 0 and last_3_avg != 0:
+            if prev_avg > 0 and last_3_avg < 0 and abs(last_3_avg) > abs(prev_avg) * 0.5:
+                return {
+                    "type": "trend_reversal",
+                    "direction": "outflow",
+                    "strength": "medium",
+                    "label": "趋势转流出",
+                    "message": f"7d 滚动净流由 ${prev_avg/1e9:+.1f}B 转负 ${last_3_avg/1e9:+.1f}B",
+                    "metric": round(last_3_avg, 0),
+                }
+            if prev_avg < 0 and last_3_avg > 0 and abs(last_3_avg) > abs(prev_avg) * 0.5:
+                return {
+                    "type": "trend_reversal",
+                    "direction": "inflow",
+                    "strength": "medium",
+                    "label": "趋势转流入",
+                    "message": f"7d 滚动净流由 ${prev_avg/1e9:+.1f}B 转正 ${last_3_avg/1e9:+.1f}B",
+                    "metric": round(last_3_avg, 0),
+                }
+
+    # ── 3. 供给创 30d 新高/新低 ──
+    if len(supplies) >= 30:
+        latest_supply = supplies[-1]
+        prev_30d = supplies[-30:-1]
+        if latest_supply > max(prev_30d):
+            return {
+                "type": "supply_extreme",
+                "direction": "inflow",
+                "strength": "low",
+                "label": "供给创新高",
+                "message": f"稳定币总供给 ${latest_supply/1e9:.0f}B，创 30 日新高",
+                "metric": round(latest_supply, 0),
+            }
+        if latest_supply < min(prev_30d):
+            return {
+                "type": "supply_extreme",
+                "direction": "outflow",
+                "strength": "low",
+                "label": "供给创新低",
+                "message": f"稳定币总供给 ${latest_supply/1e9:.0f}B，创 30 日新低",
+                "metric": round(latest_supply, 0),
+            }
+
+    return None
 
 
 def fetch_cefi_history(days: int = 30) -> dict:
@@ -921,12 +1024,95 @@ def fetch_cmc_categories() -> dict:
 # P1-1 板块/链资金净流入（7d 视角）
 # ══════════════════════════════════════════════════════════════
 
-def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int, list]:
+def _fetch_narratives_from_db() -> tuple[dict[str, dict], list[str]]:
     """
-    通过 CMC category detail 聚合成分币的 7d 市值变化%（真实 7d 视角）。
-    返回 (change_pct, used, total, top_coins)，change_pct 为 None 表示聚合失败/数据不足。
-    top_coins 为按市值降序取前 5 的成分币摘要列表。
+    从 biz.sector_narrative_asset 读最新一天的叙事成分币全量数据。
+    返回 (narrative_data, matched_narratives)
+      narrative_data: {narrative: {"market_cap": float, "top_coins_all": [...]}}
+      top_coins_all 元素: {asset_id, symbol, name, market_cap, percent_change_24h, weight_pct, rank_in_category}
     """
+    result: dict[str, dict] = {}
+    matched: list[str] = []
+    try:
+        from db_stats import get_db
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # 取最新有数据的日期
+                cur.execute("SELECT MAX(as_of_date) FROM biz.sector_narrative_asset")
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    return {}, []
+                latest_date = row[0]
+
+                # 一次性拉取所有叙事的成分币
+                cur.execute("""
+                    SELECT
+                        narrative,
+                        cmc_category_name,
+                        asset_id,
+                        symbol,
+                        name,
+                        market_cap,
+                        percent_change_24h,
+                        weight_pct,
+                        rank_in_category
+                    FROM biz.sector_narrative_asset
+                    WHERE as_of_date = %s
+                    ORDER BY narrative, market_cap DESC NULLS LAST
+                """, (latest_date,))
+                rows = cur.fetchall()
+
+        cur_narr = None
+        cur_mcap = 0.0
+        cur_coins: list[dict] = []
+        cur_cat_name = ""
+
+        for r in rows:
+            narr = r[0]
+            if narr != cur_narr:
+                if cur_narr is not None:
+                    result[cur_narr] = {
+                        "cmc_category": cur_cat_name,
+                        "market_cap": cur_mcap,
+                        "top_coins_all": cur_coins,
+                    }
+                cur_narr = narr
+                cur_cat_name = r[1]
+                cur_mcap = 0.0
+                cur_coins = []
+            mcap = float(r[5]) if r[5] else 0.0
+            cur_mcap += mcap
+            cur_coins.append({
+                "asset_id": int(r[2]) if r[2] else None,
+                "symbol": r[3] or "",
+                "name": r[4] or "",
+                "market_cap": mcap,
+                "percent_change_24h": float(r[6]) if r[6] is not None else None,
+                "weight_pct": float(r[7]) if r[7] is not None else None,
+                "rank_in_category": int(r[8]) if r[8] else None,
+            })
+        if cur_narr is not None:
+            result[cur_narr] = {
+                "cmc_category": cur_cat_name,
+                "market_cap": cur_mcap,
+                "top_coins_all": cur_coins,
+            }
+        matched = list(result.keys())
+        return result, matched
+    except Exception:
+        return {}, []
+
+
+def _cmc_category_multi_window(category_id: str) -> dict:
+    """
+    通过 CMC category detail 聚合成分币的多窗口市值变化%。
+    返回 {
+        "change_1d": float|None, "change_7d": float|None, "change_30d": float|None,
+        "used": int, "total": int, "top_coins": list
+    }
+    """
+    result = {"change_1d": None, "change_7d": None, "change_30d": None,
+              "used": 0, "total": 0, "top_coins": []}
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/category",
@@ -936,52 +1122,145 @@ def _cmc_category_7d_flow(category_id: str) -> tuple[float | None, int, int, lis
         r.raise_for_status()
         data = r.json().get("data", {})
         coins = data.get("coins", []) or []
-        cur = 0.0
-        prev = 0.0
-        used = 0
+        result["total"] = len(coins)
+
+        # 三个窗口：1d/7d/30d，每个窗口独立聚合
+        cur = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
+        prev = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
+        used = {"1d": 0, "7d": 0, "30d": 0}
+        min_used_ratio = 0.5  # 至少一半成分币有数据才信任
+
         for c in coins:
             q = (c.get("quote") or {}).get("USD") or {}
             mcap = q.get("market_cap")
-            p7 = q.get("percent_change_7d")
-            if mcap is None or p7 is None:
+            if mcap is None:
                 continue
-            p7f = _safe_float(p7)
-            if p7f <= -100:
-                continue  # 价格归零，避免除零
             mcapf = _safe_float(mcap)
-            cur += mcapf
-            prev += mcapf / (1 + p7f / 100)
-            used += 1
-        # 构造 top_coins：按市值降序取 Top 5
+            if mcapf <= 0:
+                continue
+
+            for window, key in [("1d", "percent_change_24h"), ("7d", "percent_change_7d"), ("30d", "percent_change_30d")]:
+                p = q.get(key)
+                if p is None:
+                    continue
+                pf = _safe_float(p)
+                if pf <= -100:
+                    continue  # 价格归零
+                cur[window] += mcapf
+                prev[window] += mcapf / (1 + pf / 100)
+                used[window] += 1
+
+        for w in ["1d", "7d", "30d"]:
+            if prev[w] > 0 and used[w] >= max(1, int(len(coins) * min_used_ratio)):
+                change = (cur[w] - prev[w]) / prev[w] * 100
+                result[f"change_{w}"] = round(change, 2)
+                result["used"] = max(result["used"], used[w])
+
+        # 构造 top_coins：按市值降序取 Top 5（保留多周期变化率）
         enriched = []
         for c in coins:
             q = (c.get("quote") or {}).get("USD") or {}
             mcap = _safe_float(q.get("market_cap"))
             price = _safe_float(q.get("price"))
+            p1 = q.get("percent_change_24h")
             p7 = q.get("percent_change_7d")
-            p7f = _safe_float(p7) if p7 is not None else None
+            p30 = q.get("percent_change_30d")
             enriched.append({
                 "name": c.get("name", ""),
                 "symbol": c.get("symbol", ""),
                 "market_cap": mcap,
                 "price": price,
-                "percent_change_7d": round(p7f, 2) if p7f is not None else None,
+                "percent_change_24h": round(_safe_float(p1), 2) if p1 is not None else None,
+                "percent_change_7d": round(_safe_float(p7), 2) if p7 is not None else None,
+                "percent_change_30d": round(_safe_float(p30), 2) if p30 is not None else None,
             })
         enriched.sort(key=lambda x: -x["market_cap"])
-        top_coins = enriched[:5]
-        if prev > 0 and used >= max(1, len(coins) // 2):
-            return (cur - prev) / prev * 100, used, len(coins), top_coins
-        return None, used, len(coins), top_coins
+        result["top_coins"] = enriched[:5]
+
+        return result
     except Exception:
-        return None, 0, 0, []
+        return result
+
+
+def _calc_narrative_momentum(chg_1d: float | None, chg_7d: float | None, chg_30d: float | None,
+                             weights: dict | None = None) -> float | None:
+    """
+    三窗动量合成评分：加权求和。
+    weights: {"1d": w1, "7d": w7, "30d": w30}，默认 1d=0.2, 7d=0.5, 30d=0.3
+    """
+    if weights is None:
+        weights = {"1d": 0.2, "7d": 0.5, "30d": 0.3}
+    total_w = 0.0
+    score = 0.0
+    for w, val in [("1d", chg_1d), ("7d", chg_7d), ("30d", chg_30d)]:
+        if val is not None:
+            score += weights.get(w, 0) * val
+            total_w += weights.get(w, 0)
+    if total_w == 0:
+        return None
+    return round(score / total_w, 2)
+
+
+def _calc_trend_label(chg_1d: float | None, chg_7d: float | None, chg_30d: float | None) -> str:
+    """
+    趋势标签：根据三窗变化率的方向和加速度判断。
+    返回: '加速上涨' | '减速上涨' | '震荡上涨' | '加速下跌' | '减速下跌' | '震荡下跌' | '横盘'
+    """
+    vals = {k: v for k, v in [("1d", chg_1d), ("7d", chg_7d), ("30d", chg_30d)] if v is not None}
+    if not vals:
+        return "横盘"
+
+    # 7d 为主方向判断
+    main = vals.get("7d", vals.get("30d", vals.get("1d", 0)))
+    if abs(main) < 1.0:  # 主方向变化<1% 视为横盘
+        return "横盘"
+
+    direction = "up" if main > 0 else "down"
+
+    # 加速度：比较 1d 变化 vs 7d 日均变化
+    if "1d" in vals and "7d" in vals:
+        daily_1d = vals["1d"]
+        daily_7d_avg = vals["7d"] / 7
+        ratio = abs(daily_1d) / abs(daily_7d_avg) if daily_7d_avg != 0 else 0
+        if direction == "up":
+            if daily_1d > 0 and ratio > 1.5:
+                return "加速上涨"
+            elif daily_1d < 0 and abs(daily_1d) > 0.5:
+                return "减速上涨"
+            else:
+                return "震荡上涨"
+        else:
+            if daily_1d < 0 and ratio > 1.5:
+                return "加速下跌"
+            elif daily_1d > 0 and abs(daily_1d) > 0.5:
+                return "减速下跌"
+            else:
+                return "震荡下跌"
+
+    # 只有 7d 和 30d
+    if "7d" in vals and "30d" in vals:
+        weekly_7d = vals["7d"]
+        weekly_30d = vals["30d"] / (30 / 7)
+        if direction == "up":
+            return "加速上涨" if weekly_7d > weekly_30d * 1.2 else "震荡上涨"
+        else:
+            return "加速下跌" if weekly_7d < weekly_30d * 1.2 else "震荡下跌"
+
+    return "上涨" if direction == "up" else "下跌"
 
 
 def fetch_category_flow() -> dict:
     """
     CMC categories 7d 市值变化%（叙事榜 mcap 腿）。
-    返回 {status, ranked: [{narrative, cmc_category, market_cap, mcap_change_7d_pct, mcap_period}], degraded}。
-    detail 聚合失败时降级用 list 的 market_cap_change（24h）并标记 mcap_period='24h_fallback'。
+    成分币列表优先从 biz.sector_narrative_asset 读（全量 + asset_id），
+    7d 变化通过 CMC category detail API 聚合。
+    返回 {status, ranked: [{narrative, cmc_category, market_cap, mcap_change_7d_pct,
+             mcap_period, top_coins, top_coins_all, total_coins, from_db}], degraded}。
     """
+    # 先从数据库取叙事成分币（全量 + asset_id）
+    db_data, db_matched = _fetch_narratives_from_db()
+
+    # 拉取 CMC 分类列表（用于 7d 变化计算 + 数据库没有的叙事兜底）
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/categories",
@@ -991,45 +1270,105 @@ def fetch_category_flow() -> dict:
         r.raise_for_status()
         cats = r.json().get("data", [])
     except Exception as e:
+        # API 失败但有数据库数据：降级返回 24h 视角
+        if db_data:
+            ranked = []
+            for narr, info in db_data.items():
+                coins = info["top_coins_all"]
+                top5 = coins[:5] if coins else []
+                ranked.append({
+                    "narrative": narr,
+                    "cmc_category": info["cmc_category"],
+                    "market_cap": info["market_cap"],
+                    "mcap_change_7d_pct": None,
+                    "mcap_period": "db_only_24h",
+                    "top_coins": top5,
+                    "top_coins_all": coins,
+                    "total_coins": len(coins),
+                    "from_db": True,
+                })
+            ranked.sort(key=lambda x: -x["market_cap"])
+            return {"status": "ok", "ranked": ranked, "degraded": [x["narrative"] for x in ranked], "note": "cmc api failed, db-only mode"}
         return {"status": "error", "error": str(e), "ranked": [], "degraded": []}
 
-    wanted: dict[str, dict] = {}
-    # 两遍匹配：先精确、后前缀，避免前缀误配（如 Gaming 匹配到 Gaming Guild）
+    # 构建叙事 → CMC 分类映射
+    cat_map: dict[str, dict] = {}  # narrative -> cmc category info
+    cat_name_map: dict[str, str] = {}  # narrative -> cmc name
+    # 第一遍：精确匹配
     for c in cats:
         name = (c.get("name") or "").strip().lower()
         for w in NARRATIVE_WATCHLIST:
-            if name == w.lower() and w not in wanted:
-                wanted[w] = c
+            if name == w.lower() and w not in cat_map:
+                cat_map[w] = c
+    # 第二遍：前缀匹配兜底
     for c in cats:
         name = (c.get("name") or "").strip().lower()
         for w in NARRATIVE_WATCHLIST:
-            if w not in wanted and name.startswith(w.lower()):
-                wanted[w] = c
-    if not wanted:
+            if w not in cat_map and name.startswith(w.lower()):
+                cat_map[w] = c
+    # 第三遍：用数据库里的 cmc_category_name 反查（兜底名称不匹配的）
+    for narr, info in db_data.items():
+        if narr not in cat_map:
+            db_name = info["cmc_category"]
+            for c in cats:
+                if (c.get("name") or "").strip() == db_name:
+                    cat_map[narr] = c
+                    break
+
+    if not cat_map:
         return {"status": "ok", "ranked": [], "degraded": [], "note": "no watchlist category matched"}
 
-    # 按市值取 top N，优先计算大盘叙事
-    selected = sorted(wanted.items(), key=lambda x: -_safe_float(x[1].get("market_cap")))[:NARRATIVE_TOP_N]
+    # 按市值取 top N
+    selected = sorted(cat_map.items(), key=lambda x: -_safe_float(x[1].get("market_cap")))[:NARRATIVE_TOP_N]
 
     def work(item: tuple[str, dict]) -> dict:
         w, c = item
-        change, used, total, top_coins = _cmc_category_7d_flow(c["id"])
-        period = "7d" if change is not None else "24h_fallback"
-        if change is None:
-            change = c.get("market_cap_change")  # 24h 兜底，避免整条丢失
+        # 多窗口变化率用 CMC detail API 计算
+        mw = _cmc_category_multi_window(c["id"])
+        change7d = mw["change_7d"]
+        change1d = mw["change_1d"]
+        change30d = mw["change_30d"]
+        period = "7d" if change7d is not None else "24h_fallback"
+        if change7d is None:
+            change7d = c.get("market_cap_change")
+
+        # 三窗动量评分 + 趋势标签
+        momentum = _calc_narrative_momentum(change1d, change7d, change30d)
+        trend_label = _calc_trend_label(change1d, change7d, change30d)
+
+        # 成分币：优先数据库全量（带 asset_id），兜底 API top5
+        db_info = db_data.get(w)
+        if db_info and db_info.get("top_coins_all"):
+            all_coins = db_info["top_coins_all"]
+            top5 = all_coins[:5]
+            mcap = db_info["market_cap"] or _safe_float(c.get("market_cap"))
+            from_db = True
+        else:
+            all_coins = mw["top_coins"]
+            top5 = mw["top_coins"]
+            mcap = _safe_float(c.get("market_cap"))
+            from_db = False
+
         return {
             "narrative": w,
             "cmc_category": c.get("name"),
-            "market_cap": _safe_float(c.get("market_cap")),
-            "mcap_change_7d_pct": round(change, 2) if change is not None else None,
+            "market_cap": mcap,
+            "mcap_change_1d_pct": round(change1d, 2) if change1d is not None else None,
+            "mcap_change_7d_pct": round(change7d, 2) if change7d is not None else None,
+            "mcap_change_30d_pct": round(change30d, 2) if change30d is not None else None,
+            "momentum_score": momentum,
+            "trend_label": trend_label,
             "mcap_period": period,
-            "top_coins": top_coins,
+            "top_coins": top5,
+            "top_coins_all": all_coins,
+            "total_coins": len(all_coins),
+            "from_db": from_db,
         }
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         ranked = list(ex.map(work, selected))
 
-    degraded = [item["narrative"] for item in ranked if item["mcap_period"] == "24h_fallback"]
+    degraded = [item["narrative"] for item in ranked if item["mcap_period"] != "7d"]
 
     return {"status": "ok", "ranked": ranked, "degraded": degraded}
 
@@ -1074,36 +1413,47 @@ def fetch_category_tvl_flow() -> dict:
 
 def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
     """
-    合成叙事榜：有 TVL 腿（映射命中且 TVL≥阈值）= 市值变化 mcap_weight + TVL 变化 tvl_weight；
-    无 TVL 腿（Meme/L1 等）= 仅市值变化。按合成值降序取前 rank_limit。
-    返回 {status, ranked, degraded}。
+    合成叙事榜：三窗动量评分（市值腿）+ TVL 变化（TVL 腿）。
+    有 TVL 腿（映射命中且 TVL≥阈值）= momentum_score * mcap_weight + tvl_change * tvl_weight；
+    无 TVL 腿（Meme/L1 等）= momentum_score。
+    按合成值降序取前 rank_limit。返回 {status, ranked, degraded}。
     """
     tvl_cats = tvl_flow.get("categories", {}) if tvl_flow.get("status") == "ok" else {}
     mc_w = NARRATIVE_CHAIN["mcap_weight"]
     tvl_w = NARRATIVE_CHAIN["tvl_weight"]
     ranked: list[dict] = []
     for item in cat_flow.get("ranked", []):
+        momentum = item.get("momentum_score")
         mcap7 = item.get("mcap_change_7d_pct")
-        if mcap7 is None:
+        # 用 momentum 做主评分，没有的话兜底用 7d
+        score = momentum if momentum is not None else mcap7
+        if score is None:
             continue
         dl_cat = NARRATIVE_TVL_MAP.get(item["narrative"])
         tvl_info = tvl_cats.get(dl_cat) if dl_cat else None
         if tvl_info and tvl_info.get("tvl", 0) >= TVL_LEG_MIN:
-            composite = mc_w * mcap7 + tvl_w * tvl_info["tvl_change_7d_pct"]
+            composite = mc_w * score + tvl_w * tvl_info["tvl_change_7d_pct"]
             mode = "blended"
         else:
-            composite = mcap7
+            composite = score
             mode = "mcap_only"
         ranked.append({
             "narrative": item["narrative"],
             "composite_score": round(composite, 2),
             "mode": mode,
+            "momentum_score": momentum,
+            "trend_label": item.get("trend_label", "横盘"),
+            "mcap_change_1d_pct": item.get("mcap_change_1d_pct"),
             "mcap_change_7d_pct": mcap7,
+            "mcap_change_30d_pct": item.get("mcap_change_30d_pct"),
             "mcap_period": item.get("mcap_period"),
             "tvl_change_7d_pct": tvl_info["tvl_change_7d_pct"] if tvl_info else None,
             "tvl_usd": tvl_info["tvl"] if tvl_info else None,
             "market_cap": item.get("market_cap"),
             "top_coins": item.get("top_coins", []),
+            "top_coins_all": item.get("top_coins_all", []),
+            "total_coins": item.get("total_coins", 0),
+            "from_db": item.get("from_db", False),
         })
 
     ranked.sort(key=lambda x: -x["composite_score"])
@@ -1147,6 +1497,69 @@ DL_CHAIN_ALIAS: dict[str, str] = {
     "BSC": "Binance",
     "OP Mainnet": "Optimism",
 }
+
+
+def _enrich_protocols_with_asset(protocols: list[dict]) -> list[dict]:
+    """
+    为协议列表批量补充 asset_id / canonical_symbol，支持前端点击跳转资产详情。
+    匹配策略：symbol 大写精确匹配 core.asset.canonical_symbol（验证覆盖率 99.9% @ TVL>10M）。
+    返回新列表（不修改输入），每个协议新增 asset_id / canonical_symbol 字段（无匹配则为 null）。
+    """
+    if not protocols:
+        return protocols
+
+    symbols = [
+        (p.get("symbol") or "").strip().upper()
+        for p in protocols
+        if p.get("symbol") and str(p.get("symbol")).strip()
+    ]
+    if not symbols:
+        return protocols
+
+    try:
+        from db_stats import get_db
+        import psycopg.rows
+    except Exception:
+        return protocols
+
+    symbol_to_asset: dict[str, dict] = {}
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                placeholders = ",".join(["%s"] * len(symbols))
+                cur.execute(
+                    f"""
+                    SELECT asset_id, canonical_symbol
+                    FROM core.asset
+                    WHERE UPPER(canonical_symbol) IN ({placeholders})
+                      AND status = 'active'
+                    """,
+                    symbols,
+                )
+                for row in cur.fetchall():
+                    sym = (row["canonical_symbol"] or "").upper()
+                    if sym and sym not in symbol_to_asset:
+                        symbol_to_asset[sym] = {
+                            "asset_id": str(row["asset_id"]),
+                            "canonical_symbol": row["canonical_symbol"],
+                        }
+    except Exception:
+        # 数据库不可用时静默降级，不影响链榜展示
+        return protocols
+
+    enriched = []
+    for p in protocols:
+        p2 = dict(p)
+        sym = (p.get("symbol") or "").strip().upper()
+        hit = symbol_to_asset.get(sym)
+        if hit:
+            p2["asset_id"] = hit["asset_id"]
+            p2["canonical_symbol"] = hit["canonical_symbol"]
+        else:
+            p2["asset_id"] = None
+            p2["canonical_symbol"] = None
+        enriched.append(p2)
+    return enriched
 
 
 def fetch_chain_flow() -> dict:
@@ -1228,10 +1641,25 @@ def fetch_chain_flow() -> dict:
 
     valid = [x for x in results if x.get("flow_7d") is not None]
     valid.sort(key=lambda x: -x["flow_7d"])
+    top5 = valid[:5]
+
+    # FEAT-SECTOR-001: 批量为协议补 asset_id / canonical_symbol，支持前端点击跳转
+    all_protos: list[dict] = []
+    for c in top5:
+        all_protos.extend(c.get("protocols") or [])
+    enriched_protos = _enrich_protocols_with_asset(all_protos)
+    if enriched_protos is not all_protos:
+        idx = 0
+        for c in top5:
+            protos = c.get("protocols") or []
+            for i in range(len(protos)):
+                protos[i] = enriched_protos[idx]
+                idx += 1
+
     degraded_count = sum(1 for x in results if x.get("degraded"))
     return {
         "status": "ok",
-        "ranked": valid[:5],
+        "ranked": top5,
         "degraded_count": degraded_count,
         "scanned": len(results),
     }
@@ -4379,6 +4807,12 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                     "category_flow": cat_flow,
                     "stablecoin_flow_percentile": sc_flow_percentile,
                     "stablecoin_flow_extreme": sc_flow_extreme,
+                    "stablecoin_flow_history": stablecoin_flow_hist.get("series", []),
+                    "stablecoin_flow_rolling_7d": stablecoin_flow_hist.get("rolling_7d", []),
+                    "stablecoin_flow_dates": stablecoin_flow_hist.get("dates", []),
+                    "stablecoin_supply_history": stablecoin_flow_hist.get("total_supply", []),
+                    "stablecoin_supply_dates": stablecoin_flow_hist.get("supply_dates", []),
+                    "stablecoin_anomaly": stablecoin_flow_hist.get("anomaly"),
                 },
             },
             # B3: 多币 MVRV 极值汇总（统一包裹 data+status）

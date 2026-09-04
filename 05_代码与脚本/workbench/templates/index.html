@@ -2861,6 +2861,7 @@
             .overview-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
+
             .sector-flow-cols {
                 grid-template-columns: 1fr;
             }
@@ -2953,31 +2954,38 @@
         .sub-score-list {
             gap: 10px;
         }
+
         .sub-score-row {
             padding: 8px 0;
             border-bottom: 1px solid #1e222a;
         }
+
         .sub-score-row:last-child {
             border-bottom: none;
         }
+
         .sub-score-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 4px;
         }
+
         .sub-score-name {
             font-size: 12px;
             color: #e0e6ed;
         }
+
         .sub-score-name small {
             font-size: 10px;
         }
+
         .sub-score-val {
             font-size: 14px;
             font-weight: 600;
             color: #e0e6ed;
         }
+
         .sub-score-bar-wrap {
             height: 6px;
             background: #1e222a;
@@ -2985,11 +2993,13 @@
             overflow: hidden;
             margin-bottom: 4px;
         }
+
         .sub-score-bar {
             height: 100%;
             border-radius: 3px;
             transition: width 0.3s;
         }
+
         .sub-score-meta {
             display: flex;
             justify-content: space-between;
@@ -2997,25 +3007,48 @@
             font-size: 10px;
             color: #6b7280;
         }
+
         .sub-score-weight {
             color: #6b7280;
         }
+
         .health-tag {
             font-size: 10px;
             padding: 1px 4px;
             border-radius: 3px;
         }
-        .health-ok { color: #22c55e; }
-        .health-warn { color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
-        .health-error { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+
+        .health-ok {
+            color: #22c55e;
+        }
+
+        .health-warn {
+            color: #f59e0b;
+            background: rgba(245, 158, 11, 0.1);
+        }
+
+        .health-error {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.1);
+        }
+
         .band-label {
             font-size: 11px;
             font-weight: 400;
             margin-left: 4px;
         }
-        .band-bull { color: #22c55e; }
-        .band-neutral { color: #6b7280; }
-        .band-bear { color: #ef4444; }
+
+        .band-bull {
+            color: #22c55e;
+        }
+
+        .band-neutral {
+            color: #6b7280;
+        }
+
+        .band-bear {
+            color: #ef4444;
+        }
 
         /* P2-5 板块资金净流入独占整行 */
         .sector-flow-full-section {
@@ -3029,6 +3062,7 @@
             grid-template-columns: 1fr 1fr;
             gap: 12px;
         }
+
         .sector-flow-col {
             display: flex;
             flex-direction: column;
@@ -3057,9 +3091,11 @@
             border-radius: 6px;
             transition: background 0.15s;
         }
+
         .dim-metric-row.has-drill:hover {
-            background: rgba(59,130,246,0.08);
+            background: rgba(59, 130, 246, 0.08);
         }
+
         .drill-arrow {
             display: inline-block;
             font-size: 10px;
@@ -3067,17 +3103,21 @@
             transition: transform 0.2s;
             color: #6b7280;
         }
+
         .drill-arrow.open {
             transform: rotate(90deg);
         }
+
         .drill-panel {
             display: none;
             padding: 6px 0 2px 16px;
             border-top: 1px solid #1e222a;
         }
+
         .drill-panel.open {
             display: block;
         }
+
         .drill-item {
             display: flex;
             justify-content: space-between;
@@ -3085,16 +3125,205 @@
             padding: 3px 0;
             color: #8a92a0;
         }
+
         .drill-item .drill-name {
             color: #c0c8d4;
         }
+
         .drill-item .drill-val {
             font-weight: 500;
         }
+
         .drill-empty {
             font-size: 11px;
             color: #6b7280;
             padding: 4px 0;
+        }
+
+        /* FEAT-SECTOR-004: 趋势标签 */
+        .trend-badge {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+            position: relative;
+            top: -1px;
+        }
+
+        .trend-badge.trend-up {
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.12);
+        }
+
+        .trend-badge.trend-down {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.12);
+        }
+
+        .trend-badge.trend-flat {
+            color: #9ca3af;
+            background: rgba(156, 163, 175, 0.12);
+        }
+
+        /* FEAT-SECTOR-005: 稳定币迷你折线图 */
+        .sc-sparkline-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            background: #1a1d23;
+            border-radius: 4px;
+            margin: 4px 0;
+        }
+
+        .sc-sparkline {
+            width: 100%;
+            height: 40px;
+            flex: 1;
+        }
+
+        .sc-sparkline.spark-up {
+            color: #10b981;
+        }
+
+        .sc-sparkline.spark-down {
+            color: #ef4444;
+        }
+
+        .spark-zero {
+            stroke: #374151;
+            stroke-width: 1;
+            stroke-dasharray: 2, 2;
+        }
+
+        .sc-spark-label {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            min-width: 60px;
+        }
+
+        .sc-spark-label span {
+            font-size: 11px;
+            font-weight: 600;
+            color: #d1d5db;
+        }
+
+        .sc-spark-label small {
+            font-size: 9px;
+            color: #6b7280;
+        }
+
+        /* FEAT-SECTOR-005: 稳定币异动信号 */
+        .sc-anomaly {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-top: 4px;
+            line-height: 1.4;
+        }
+
+        .sc-anomaly.sc-anom-inflow {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 3px solid #10b981;
+        }
+
+        .sc-anomaly.sc-anom-outflow {
+            background: rgba(239, 68, 68, 0.1);
+            border-left: 3px solid #ef4444;
+        }
+
+        .sc-anomaly.strength-high {
+            border-left-width: 4px;
+            font-weight: 500;
+        }
+
+        .sc-anom-icon {
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+
+        .sc-anom-label {
+            font-weight: 600;
+            color: #d1d5db;
+            white-space: nowrap;
+        }
+
+        .sc-anom-msg {
+            color: #9ca3af;
+            font-size: 10px;
+        }
+
+        /* FEAT-SECTOR-006: 板块时间窗切换 */
+        .sector-window-switch {
+            display: flex;
+            gap: 2px;
+            background: #1a1d23;
+            border-radius: 4px;
+            padding: 2px;
+        }
+
+        .sector-window-switch .sw-btn {
+            background: transparent;
+            border: none;
+            color: #6b7280;
+            font-size: 11px;
+            font-weight: 500;
+            padding: 2px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .sector-window-switch .sw-btn:hover {
+            color: #d1d5db;
+        }
+
+        .sector-window-switch .sw-btn.active {
+            background: #374151;
+            color: #fff;
+        }
+
+        /* FEAT-SECTOR-002: 叙事成分币分页控件 */
+        .drill-paginator {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 0 2px 0;
+            border-top: 1px solid #1e222a;
+            margin-top: 4px;
+        }
+
+        .drill-page-info {
+            font-size: 10px;
+            color: #6b7280;
+        }
+
+        .drill-page-btn {
+            background: #1e222a;
+            border: 1px solid #374151;
+            color: #9ca3af;
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            margin-left: 4px;
+        }
+
+        .drill-page-btn:hover:not(:disabled) {
+            background: #374151;
+            color: #fff;
+        }
+
+        .drill-page-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
         }
 
         /* ── P2-3 高亮信号区 ── */
@@ -3303,18 +3532,66 @@
             font-weight: 700;
             margin-right: 6px;
         }
-        .st-mvrv { background: rgba(59,130,246,.18); color: #60a5fa; }
-        .st-fng { background: rgba(168,85,247,.18); color: #c084fc; }
-        .st-lev { background: rgba(249,115,22,.18); color: #fb923c; }
-        .st-stable { background: rgba(34,197,94,.18); color: #4ade80; }
-        .st-btc { background: rgba(234,179,8,.18); color: #facc15; }
-        .st-cm { background: rgba(20,184,166,.18); color: #2dd4bf; }
-        .st-catalyst { background: rgba(236,72,153,.18); color: #f472b6; }
-        .st-whale { background: rgba(99,102,241,.18); color: #a5b4fc; }
-        .st-dev { background: rgba(156,163,175,.18); color: #9ca3af; }
-        .st-unlock { background: rgba(239,68,68,.18); color: #f87171; }
-        .st-kol { background: rgba(245,158,11,.18); color: #fbbf24; }
-        .st-other { background: rgba(148,163,184,.18); color: #94a3b8; }
+
+        .st-mvrv {
+            background: rgba(59, 130, 246, .18);
+            color: #60a5fa;
+        }
+
+        .st-fng {
+            background: rgba(168, 85, 247, .18);
+            color: #c084fc;
+        }
+
+        .st-lev {
+            background: rgba(249, 115, 22, .18);
+            color: #fb923c;
+        }
+
+        .st-stable {
+            background: rgba(34, 197, 94, .18);
+            color: #4ade80;
+        }
+
+        .st-btc {
+            background: rgba(234, 179, 8, .18);
+            color: #facc15;
+        }
+
+        .st-cm {
+            background: rgba(20, 184, 166, .18);
+            color: #2dd4bf;
+        }
+
+        .st-catalyst {
+            background: rgba(236, 72, 153, .18);
+            color: #f472b6;
+        }
+
+        .st-whale {
+            background: rgba(99, 102, 241, .18);
+            color: #a5b4fc;
+        }
+
+        .st-dev {
+            background: rgba(156, 163, 175, .18);
+            color: #9ca3af;
+        }
+
+        .st-unlock {
+            background: rgba(239, 68, 68, .18);
+            color: #f87171;
+        }
+
+        .st-kol {
+            background: rgba(245, 158, 11, .18);
+            color: #fbbf24;
+        }
+
+        .st-other {
+            background: rgba(148, 163, 184, .18);
+            color: #94a3b8;
+        }
 
         /* ── FEAT-HIGHLIGHT-004: 关键数值直显 ── */
         .signal-km {
@@ -3335,7 +3612,7 @@
         /* ── FEAT-HIGHLIGHT-004: HIGH 角标 ── */
         .signal-fire {
             margin-left: auto;
-            background: rgba(220,38,38,.22);
+            background: rgba(220, 38, 38, .22);
             color: #f87171;
             padding: 1px 6px;
             border-radius: 8px;
@@ -3346,7 +3623,7 @@
         /* ── FEAT-HIGHLIGHT-004: HIGH 视觉增强 ── */
         .signal-item-high {
             border-left: 3px solid #f87171;
-            background: rgba(220,38,38,.06);
+            background: rgba(220, 38, 38, .06);
         }
 
         /* ── FEAT-HIGHLIGHT-004: 折叠控制 ── */
@@ -3354,8 +3631,8 @@
             display: inline-block;
             margin: 8px auto 0;
             padding: 6px 16px;
-            background: rgba(59,130,246,.12);
-            border: 1px solid rgba(59,130,246,.25);
+            background: rgba(59, 130, 246, .12);
+            border: 1px solid rgba(59, 130, 246, .25);
             border-radius: 8px;
             color: #60a5fa;
             font-size: 12px;
@@ -3363,8 +3640,9 @@
             cursor: pointer;
             transition: background 0.15s;
         }
+
         .signal-collapse-btn:hover {
-            background: rgba(59,130,246,.22);
+            background: rgba(59, 130, 246, .22);
         }
 
         .signal-empty {
@@ -3877,7 +4155,7 @@
         let taskFilter = 'all';
 
         // ── P2-2 下钻展开/收起 ──
-        function toggleDrill(id) {
+        function toggleDrill (id) {
             const panel = document.getElementById(id);
             const arrow = document.getElementById('arrow-' + id);
             if (!panel) return;
@@ -6384,8 +6662,8 @@
             try {
                 const res = await fetch('/api/opportunity/watchlist', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({asset_id: parseInt(assetId), symbol: symbol || ''})
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ asset_id: parseInt(assetId), symbol: symbol || '' })
                 });
                 const data = await res.json();
                 if (data.ok) {
@@ -6980,7 +7258,7 @@
         async function renderOverview (data) {
             const summary = data.summary || {};
             const grid = document.getElementById('overview-grid');
-            
+
             // P1: 分项释义字典
             const SUB_LABEL = {
                 fear_greed: { name: '恐惧贪婪指数', desc: 'BTC 市场情绪' },
@@ -6992,9 +7270,9 @@
                 market_cap: { name: '市值结构', desc: '大/中/小盘分布健康度' },
                 institution: { name: '机构/聪明钱', desc: '链上大户/VC/smart money' }
             };
-            
+
             // P1: 情绪子分区间标签
-            function emotionBand(score) {
+            function emotionBand (score) {
                 if (score == null) return { label: '', cls: '' };
                 if (score <= 25) return { label: '极度恐慌', cls: 'band-bear' };
                 if (score <= 45) return { label: '恐慌', cls: 'band-bear' };
@@ -7002,17 +7280,17 @@
                 if (score <= 75) return { label: '贪婪', cls: 'band-bull' };
                 return { label: '极度贪婪', cls: 'band-bull' };
             }
-            
+
             // P1: 结构子分区间标签
-            function structureBand(score) {
+            function structureBand (score) {
                 if (score == null) return { label: '', cls: '' };
                 if (score <= 40) return { label: '弱势', cls: 'band-bear' };
                 if (score <= 60) return { label: '一般', cls: 'band-neutral' };
                 return { label: '强势', cls: 'band-bull' };
             }
-            
+
             // P1: 健康标签
-            function healthTag(comp, key) {
+            function healthTag (comp, key) {
                 if (comp.status && comp.status !== 'ok') {
                     return '<span class="health-tag health-error">❌ ' + comp.status + '</span>';
                 }
@@ -7031,9 +7309,9 @@
                 }
                 return '<span class="health-tag health-ok">✅</span>';
             }
-            
+
             // P1: 分项分数渲染（带进度条）
-            function subScoreRow(key, comp, weightPct) {
+            function subScoreRow (key, comp, weightPct) {
                 const label = SUB_LABEL[key] || { name: key, desc: '' };
                 const score = comp.score !== undefined ? comp.score : null;
                 const scoreTxt = score != null ? Number(score).toFixed(1) : '-';
@@ -7063,21 +7341,21 @@
                     </div>
                 </div>`;
             }
-            
+
             // 渲染情绪子分
             const emotion = summary.emotion_subscore || {};
             const emotionScore = emotion.score;
             const emotionStatus = emotion.status || 'error';
             const emotionComponents = emotion.components || {};
-            
+
             // 渲染结构子分
             const structure = summary.structure_subscore || {};
             const structureScore = structure.score;
             const structureStatus = structure.status || 'error';
             const structureComponents = structure.components || {};
-            
+
             let html = '';
-            
+
             // 情绪子分卡片（P1: 可读性优化）
             const emotionExtreme = summary.emotion_subscore?.components?.fear_greed?.extreme !== 'NONE'
                 || summary.emotion_subscore?.components?.cefi?.extreme !== 'NONE';
@@ -7102,13 +7380,13 @@
                 </div>
                 <div class="dim-metrics sub-score-list">
                     ${Object.entries(emotionComponents).map(([key, comp]) => {
-                        const weightPct = (comp.weight * 100).toFixed(0);
-                        return subScoreRow(key, comp, weightPct);
-                    }).join('')}
+                const weightPct = (comp.weight * 100).toFixed(0);
+                return subScoreRow(key, comp, weightPct);
+            }).join('')}
                 </div>
                 <div class="dim-conclusion">覆盖度 ${(emotion.available_weight * 100).toFixed(0)}%${emotionErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + emotionErrorCount + ' 项异常</span>' : ''}</div>
             </div>`;
-            
+
             // 结构子分卡片（P1: 可读性优化）
             const structureExtreme = summary.structure_subscore?.components?.market_cap?.extreme !== 'NONE';
             const structureBandInfo = structureBand(structureScore);
@@ -7132,13 +7410,13 @@
                 </div>
                 <div class="dim-metrics sub-score-list">
                     ${Object.entries(structureComponents).map(([key, comp]) => {
-                        const weightPct = (comp.weight * 100).toFixed(0);
-                        return subScoreRow(key, comp, weightPct);
-                    }).join('')}
+                const weightPct = (comp.weight * 100).toFixed(0);
+                return subScoreRow(key, comp, weightPct);
+            }).join('')}
                 </div>
                 <div class="dim-conclusion">覆盖度 ${(structure.available_weight * 100).toFixed(0)}%${structureErrorCount > 0 ? ' ｜ <span style="color:#f59e0b">' + structureErrorCount + ' 项数据异常</span>' : ''}</div>
             </div>`;
-            
+
             // BTC 周期定位卡（三维交叉：MVRV估值 + NUPL近似 + OBM活跃度）
             const btcCycle = data.btc_cycle || {};
             if (btcCycle.status === 'ok') {
@@ -7225,9 +7503,9 @@
             const dim5data = dim5.data || {};
             const narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
             const chainFlow = (dim5data.chain_flow_ranking || {}).ranked || [];
-            
+
             // P2-5: 辅助函数渲染叙事榜单行
-            function narrRow(n, nIdx) {
+            function narrRow (n, nIdx) {
                 const cls = n.composite_score >= 0 ? 'up' : 'down';
                 const sign = n.composite_score >= 0 ? '+' : '';
                 let tvlTxt = '';
@@ -7239,33 +7517,235 @@
                     tvlTxt = ' <small style="color:#9ca3af">暂无TVL</small>';
                 }
                 const modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
-                const coins = n.top_coins || [];
-                const hasDrill = coins.length > 0;
+                // FEAT-SECTOR-004: 趋势标签
+                const trendLabel = n.trend_label || '';
+                const trendCls = trendLabel.includes('上涨') ? 'trend-up' :
+                    trendLabel.includes('下跌') ? 'trend-down' :
+                        trendLabel.includes('横盘') ? 'trend-flat' : '';
+                const trendBadge = trendLabel ? `<span class="trend-badge ${trendCls}">${trendLabel}</span>` : '';
+                // FEAT-SECTOR-002: 优先用数据库全量成分币（带asset_id），兜底API top5
+                const allCoins = n.top_coins_all || n.top_coins || [];
+                const totalCoins = n.total_coins || allCoins.length;
+                const hasDrill = allCoins.length > 0;
                 const drillClass = hasDrill ? ' has-drill' : '';
                 const drillId = 'narr-drill-' + nIdx;
+                const pageSize = 10;
                 let row = `<div class="dim-metric-row${drillClass}"${hasDrill ? ` onclick="toggleDrill('${drillId}')"` : ''}>
-                    <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${n.narrative} <small style="color:#6b7280">${modeTxt}</small></span>
+                    <span class="dim-metric-label">${hasDrill ? '<span class="drill-arrow" id="arrow-' + drillId + '">▶</span>' : ''}${n.narrative} ${trendBadge} <small style="color:#6b7280">${modeTxt}</small></span>
                     <span class="dim-metric-val ${cls}">${sign}${n.composite_score.toFixed(1)}%${tvlTxt}</span>
                 </div>`;
                 if (hasDrill) {
                     row += `<div class="drill-panel" id="${drillId}">`;
-                    coins.forEach(function (coin) {
-                        const coinCls = (coin.percent_change_7d || 0) >= 0 ? 'up' : 'down';
-                        const coinSign = (coin.percent_change_7d || 0) >= 0 ? '+' : '';
-                        const p7Txt = coin.percent_change_7d != null ? `${coinSign}${coin.percent_change_7d.toFixed(1)}%` : '-';
-                        const mcapTxt = coin.market_cap >= 1e9 ? '$' + (coin.market_cap / 1e9).toFixed(1) + 'B' : '$' + (coin.market_cap / 1e6).toFixed(0) + 'M';
-                        row += `<div class="drill-item">
-                            <span class="drill-name">${coin.symbol ? coin.symbol + ' ' : ''}${coin.name}</span>
-                            <span class="drill-val"><small style="color:#6b7280">${mcapTxt}</small> <span class="${coinCls}">${p7Txt}</span></span>
+                    // 渲染第一页
+                    row += renderNarrCoins(allCoins, drillId, 0, pageSize);
+                    // 如果超过一页，加分页控件
+                    const totalPages = Math.ceil(allCoins.length / pageSize);
+                    if (totalPages > 1) {
+                        row += `<div class="drill-paginator" data-drill="${drillId}" data-page="0" data-total="${totalPages}" data-total-coins="${totalCoins}">
+                            <span class="drill-page-info">1 / ${totalPages} · 共 ${totalCoins} 币</span>
+                            <button class="drill-page-btn" onclick="narrPage('${drillId}', -1, event)" disabled>◀</button>
+                            <button class="drill-page-btn" onclick="narrPage('${drillId}', 1, event)">▶</button>
                         </div>`;
-                    });
+                    }
                     row += `</div>`;
                 }
                 return row;
             }
-            
+
+            // FEAT-SECTOR-002: 渲染叙事成分币指定页
+            function renderNarrCoins (coins, drillId, page, pageSize) {
+                const start = page * pageSize;
+                const end = Math.min(start + pageSize, coins.length);
+                let html = `<div class="drill-coins-page" id="${drillId}-coins">`;
+                for (let i = start; i < end; i++) {
+                    const coin = coins[i];
+                    // 用7d变化，没有就用24h
+                    let pct = coin.percent_change_7d;
+                    let pctLabel = '7d';
+                    if (pct == null) {
+                        pct = coin.percent_change_24h;
+                        pctLabel = '24h';
+                    }
+                    const coinCls = (pct || 0) >= 0 ? 'up' : 'down';
+                    const coinSign = (pct || 0) >= 0 ? '+' : '';
+                    const pTxt = pct != null ? `${coinSign}${pct.toFixed(1)}%` : '-';
+                    const mcapTxt = coin.market_cap >= 1e9 ? '$' + (coin.market_cap / 1e9).toFixed(1) + 'B' : '$' + (coin.market_cap / 1e6).toFixed(0) + 'M';
+                    const weightTxt = coin.weight_pct != null ? `${coin.weight_pct.toFixed(1)}%` : '';
+                    // 有asset_id可点击跳转资产详情
+                    let nameHtml = '';
+                    if (coin.asset_id && coin.symbol) {
+                        nameHtml = `<a href="#" onclick="selectAssetById(${coin.asset_id}); event.stopPropagation();" style="color:#60a5fa;text-decoration:none;font-weight:600">${coin.symbol}</a> <span style="color:#d1d5db">${coin.name}</span>`;
+                    } else {
+                        nameHtml = `${coin.symbol ? coin.symbol + ' ' : ''}<span style="color:#9ca3af">${coin.name}</span>`;
+                    }
+                    html += `<div class="drill-item">
+                        <span class="drill-name">${nameHtml} ${weightTxt ? `<small style="color:#6b7280">权重 ${weightTxt}</small>` : ''}</span>
+                        <span class="drill-val"><small style="color:#6b7280">${mcapTxt}</small> <span class="${coinCls}">${pTxt}</span></span>
+                    </div>`;
+                }
+                html += `</div>`;
+                return html;
+            }
+
+            // FEAT-SECTOR-002: 叙事成分币翻页
+            function narrPage (drillId, dir, event) {
+                event.stopPropagation();
+                const paginator = document.querySelector(`.drill-paginator[data-drill="${drillId}"]`);
+                if (!paginator) return;
+                let page = parseInt(paginator.getAttribute('data-page'));
+                const total = parseInt(paginator.getAttribute('data-total'));
+                const totalCoins = parseInt(paginator.getAttribute('data-total-coins'));
+                page = Math.max(0, Math.min(total - 1, page + dir));
+                paginator.setAttribute('data-page', page);
+                // 找到对应叙事的 allCoins
+                const narrIdx = parseInt(drillId.replace('narr-drill-', ''));
+                const dim5 = dim5data || {};
+                const narrFlow = (dim5.narrative_flow_ranking || {}).ranked || [];
+                const n = narrFlow[narrIdx];
+                if (!n) return;
+                const allCoins = n.top_coins_all || n.top_coins || [];
+                const coinsDiv = document.getElementById(drillId + '-coins');
+                if (coinsDiv) {
+                    coinsDiv.outerHTML = renderNarrCoins(allCoins, drillId, page, 10);
+                }
+                // 更新分页信息
+                const infoSpan = paginator.querySelector('.drill-page-info');
+                if (infoSpan) infoSpan.textContent = `${page + 1} / ${total} · 共 ${totalCoins} 币`;
+                const btns = paginator.querySelectorAll('.drill-page-btn');
+                if (btns[0]) btns[0].disabled = page === 0;
+                if (btns[1]) btns[1].disabled = page === total - 1;
+            }
+
+            // FEAT-SECTOR-005: 稳定币净流迷你折线图（SVG sparkline）
+            function renderScSparkline (values, dates) {
+                const w = 200, h = 40, pad = 2;
+                const len = values.length;
+                if (len < 2) return '';
+                const maxV = Math.max(...values);
+                const minV = Math.min(...values);
+                const range = maxV - minV || 1;
+                const pts = values.map(function (v, i) {
+                    const x = pad + (i / (len - 1)) * (w - pad * 2);
+                    const y = h - pad - ((v - minV) / range) * (h - pad * 2);
+                    return x.toFixed(1) + ',' + y.toFixed(1);
+                });
+                const lastV = values[len - 1];
+                const firstV = values[0];
+                const lineCls = lastV >= firstV ? 'spark-up' : 'spark-down';
+                // 零线位置（如果零在范围内）
+                let zeroLine = '';
+                if (minV < 0 && maxV > 0) {
+                    const zy = h - pad - ((0 - minV) / range) * (h - pad * 2);
+                    zeroLine = `<line x1="${pad}" y1="${zy.toFixed(1)}" x2="${w - pad}" y2="${zy.toFixed(1)}" class="spark-zero" />`;
+                }
+                // 最新点标记
+                const lastX = pad + ((len - 1) / (len - 1)) * (w - pad * 2);
+                const lastY = h - pad - ((lastV - minV) / range) * (h - pad * 2);
+                // 格式化标签
+                const labelB = Math.abs(lastV) >= 1e9
+                    ? (lastV / 1e9).toFixed(1) + 'B'
+                    : (lastV / 1e6).toFixed(0) + 'M';
+                const lastDate = dates && dates.length ? dates[dates.length - 1] : '';
+                return `<svg class="sc-sparkline ${lineCls}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+                    ${zeroLine}
+                    <polyline points="${pts.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="2.5" fill="currentColor" />
+                </svg>
+                <div class="sc-spark-label">
+                    <span>${lastV >= 0 ? '+' : ''}$${labelB}</span>
+                    <small>${lastDate}</small>
+                </div>`;
+            }
+
+            // FEAT-SECTOR-006: 板块时间窗切换（1d/7d/30d）
+            var currentSectorWindow = '7d';
+            function switchSectorWindow (win) {
+                currentSectorWindow = win;
+                // 更新按钮状态
+                var btns = document.querySelectorAll('#sector-window-switch .sw-btn');
+                btns.forEach(function (b) {
+                    b.classList.toggle('active', b.getAttribute('data-win') === win);
+                });
+                // 重新渲染叙事榜
+                var narrCol = document.getElementById('sector-narr-col');
+                if (!narrCol || !dim5data) return;
+                var narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
+                if (!narrFlow.length) return;
+
+                // 按当前时间窗的变化率重新排序（blended 模式也基于此周期）
+                var sorted = narrFlow.slice().sort(function (a, b) {
+                    var va = getNarrChangeByWindow(a, win);
+                    var vb = getNarrChangeByWindow(b, win);
+                    if (va == null && vb == null) return 0;
+                    if (va == null) return 1;
+                    if (vb == null) return -1;
+                    return vb - va;
+                });
+
+                var html = '<div class="dim-section-label">叙事榜（市值' + (dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : '') + '） · 点击展开成分币</div>';
+                sorted.forEach(function (n, nIdx) {
+                    html += narrRowWithWindow(n, nIdx, win);
+                });
+                narrCol.innerHTML = html;
+            }
+
+            // FEAT-SECTOR-006: 获取指定时间窗的变化率
+            function getNarrChangeByWindow (n, win) {
+                if (win === '1d') return n.mcap_change_1d_pct;
+                if (win === '30d') return n.mcap_change_30d_pct;
+                return n.composite_score; // 7d 默认用合成评分
+            }
+
+            // FEAT-SECTOR-006: 用指定时间窗渲染叙事榜行
+            function narrRowWithWindow (n, nIdx, win) {
+                var score = getNarrChangeByWindow(n, win);
+                if (score == null) score = n.composite_score;
+                var cls = score >= 0 ? 'up' : 'down';
+                var sign = score >= 0 ? '+' : '';
+                var tvlTxt = '';
+                if (n.mode === 'blended' && n.tvl_usd != null) {
+                    var tvlAbs = n.tvl_usd >= 1e9 ? '$' + (n.tvl_usd / 1e9).toFixed(1) + 'B' : '$' + (n.tvl_usd / 1e6).toFixed(0) + 'M';
+                    var tvlChg = n.tvl_change_7d_pct != null ? ' (' + (n.tvl_change_7d_pct >= 0 ? '+' : '') + n.tvl_change_7d_pct.toFixed(1) + '%)' : '';
+                    tvlTxt = ' <small style="color:#6b7280">' + tvlAbs + tvlChg + '</small>';
+                } else if (n.mode === 'mcap_only') {
+                    tvlTxt = ' <small style="color:#9ca3af">暂无TVL</small>';
+                }
+                var modeTxt = n.mode === 'blended' ? '市值+TVL' : '仅市值';
+                var winLabel = win === '1d' ? '1d' : (win === '30d' ? '30d' : '7d');
+                // 趋势标签（用三窗数据重算）
+                var trendLabel = n.trend_label || '';
+                var trendCls = trendLabel.includes('上涨') ? 'trend-up' :
+                    trendLabel.includes('下跌') ? 'trend-down' :
+                        trendLabel.includes('横盘') ? 'trend-flat' : '';
+                var trendBadge = trendLabel ? '<span class="trend-badge ' + trendCls + '">' + trendLabel + '</span>' : '';
+                var allCoins = n.top_coins_all || n.top_coins || [];
+                var totalCoins = n.total_coins || allCoins.length;
+                var hasDrill = allCoins.length > 0;
+                var drillClass = hasDrill ? ' has-drill' : '';
+                var drillId = 'narr-drill-' + nIdx;
+                var pageSize = 10;
+                var row = '<div class="dim-metric-row' + drillClass + '"' + (hasDrill ? ' onclick="toggleDrill(\'' + drillId + '\')"' : '') + '>
+                    < span class="dim-metric-label" > ' + (hasDrill ? ' < span class="drill-arrow" id = "arrow-' + drillId + '" >▶</span > ' : '') + n.narrative + ' ' + trendBadge + ' < small style = "color:#6b7280" > ' + modeTxt + '</small ></span >
+                        <span class="dim-metric-val ' + cls + '">' + sign + score.toFixed(1) + '%' + tvlTxt + '</span>
+                </div > ';
+                if (hasDrill) {
+                    row += '<div class="drill-panel" id="' + drillId + '">';
+                    row += renderNarrCoins(allCoins, drillId, 0, pageSize);
+                    var totalPages = Math.ceil(allCoins.length / pageSize);
+                    if (totalPages > 1) {
+                        row += '<div class="drill-paginator" data-drill="' + drillId + '" data-page="0" data-total="' + totalPages + '" data-total-coins="' + totalCoins + '">
+                            < span class="drill-page-info" > 1 / ' + totalPages + ' · 共 ' + totalCoins + ' 币</span >
+                            <button class="drill-page-btn" onclick="narrPage(\'' + drillId + '\', -1, event)" disabled>◀</button>
+                            <button class="drill-page-btn" onclick="narrPage(\'' + drillId + '\', 1, event)">▶</button>
+                        </div > ';
+                    }
+                    row += '</div>';
+                }
+                return row;
+            }
+
             // P2-5: 辅助函数渲染链榜单行
-            function chainRow(c, cIdx) {
+            function chainRow (c, cIdx) {
                 const cls = c.flow_7d >= 0 ? 'up' : 'down';
                 const sign = c.flow_7d >= 0 ? '+' : '';
                 const flowStr = '$' + (Math.abs(c.flow_7d) / 1e9).toFixed(2) + 'B';
@@ -7284,8 +7764,15 @@
                         const pSign = (p.change_7d || 0) >= 0 ? '+' : '';
                         const p7Txt = p.change_7d != null ? `${pSign}${p.change_7d.toFixed(1)}%` : '-';
                         const tvlTxt = p.tvl >= 1e9 ? '$' + (p.tvl / 1e9).toFixed(1) + 'B' : '$' + (p.tvl / 1e6).toFixed(0) + 'M';
+                        // FEAT-SECTOR-001: 有 asset_id 的协议可点击跳转资产详情
+                        let nameHtml = '';
+                        if (p.asset_id && p.canonical_symbol) {
+                            nameHtml = `<a href="#" onclick="selectAssetById('${p.asset_id}'); event.stopPropagation();" style="color:#60a5fa;text-decoration:none;font-weight:600">${p.canonical_symbol}</a> <span style="color:#d1d5db">${p.name}</span>`;
+                        } else {
+                            nameHtml = `${p.symbol ? p.symbol + ' ' : ''}<span style="color:#9ca3af">${p.name}</span>`;
+                        }
                         row += `<div class="drill-item">
-                            <span class="drill-name">${p.symbol ? p.symbol + ' ' : ''}${p.name} <small style="color:#6b7280">${p.category}</small></span>
+                            <span class="drill-name">${nameHtml} <small style="color:#6b7280">${p.category}</small></span>
                             <span class="drill-val"><small style="color:#6b7280">${tvlTxt}</small> <span class="${pCls}">${p7Txt}</span></span>
                         </div>`;
                     });
@@ -7293,11 +7780,11 @@
                 }
                 return row;
             }
-            
+
             // P2-5: 构建两列布局（全量显示，无折叠）
             let narrCol = '';
             let chainCol = '';
-            
+
             // 左列：叙事榜（全量显示）
             if (narrFlow.length) {
                 narrCol += `<div class="dim-section-label">叙事榜（市值${dim5data.narrative_tvl_flow && dim5data.narrative_tvl_flow.status === 'ok' ? '+TVL' : ''}） · 点击展开成分币</div>`;
@@ -7307,7 +7794,7 @@
             } else {
                 narrCol += `<div class="dim-metric-row"><span class="dim-metric-label">叙事榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
-            
+
             // 右列：链净流入TOP5 + 稳定币净流入分位
             if (chainFlow.length) {
                 chainCol += `<div class="dim-section-label">链净流入 TOP5 · 点击展开协议</div>`;
@@ -7317,10 +7804,13 @@
             } else {
                 chainCol += `<div class="dim-metric-row"><span class="dim-metric-label">链榜</span><span class="dim-metric-val" style="color:#6b7280">⚠️ 暂无数据</span></div>`;
             }
-            
-            // P2-1: 稳定币净流入分位
+
+            // P2-1: 稳定币净流入分位 + 迷你折线 + 异动信号
             const scFlowPct = dim5data.stablecoin_flow_percentile;
             const scFlowExtreme = dim5data.stablecoin_flow_extreme || 'NONE';
+            const scRolling7d = dim5data.stablecoin_flow_rolling_7d || [];
+            const scFlowDates = dim5data.stablecoin_flow_dates || [];
+            const scAnomaly = dim5data.stablecoin_anomaly;
             if (scFlowPct != null) {
                 const scBadge = scFlowExtreme !== 'NONE'
                     ? `<span class="extreme-badge ${scFlowExtreme.toLowerCase()}">${scFlowExtreme === 'HIGH' ? '▲ 极高' : '▼ 极低'}</span>`
@@ -7330,22 +7820,41 @@
                     <span class="dim-metric-label">30d 净流百分位${scBadge}</span>
                     <span class="dim-metric-val ${scFlowExtreme !== 'NONE' ? 'extreme-' + scFlowExtreme.toLowerCase() : ''}">${Number(scFlowPct).toFixed(0)}%</span>
                 </div>`;
+                // FEAT-SECTOR-005: 迷你折线图（7d 滚动净流）
+                if (scRolling7d.length >= 2) {
+                    chainCol += `<div class="sc-sparkline-wrap">${renderScSparkline(scRolling7d, scFlowDates)}</div>`;
+                }
+                // FEAT-SECTOR-005: 异动信号
+                if (scAnomaly && scAnomaly.label) {
+                    const aCls = scAnomaly.direction === 'inflow' ? 'sc-anom-inflow' : 'sc-anom-outflow';
+                    const aStrength = scAnomaly.strength || 'low';
+                    chainCol += `<div class="sc-anomaly ${aCls} strength-${aStrength}">
+                        <span class="sc-anom-icon">⚠️</span>
+                        <span class="sc-anom-label">${scAnomaly.label}</span>
+                        <span class="sc-anom-msg">${scAnomaly.message || ''}</span>
+                    </div>`;
+                }
             }
-            
+
             // P2-5: 组装两列布局（注入到独占整行容器）
+            // FEAT-SECTOR-006: 时间窗切换（1d/7d/30d）
             let sectorFlowHtml = `<div class="dim-card">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">🔄</span>
                     <span class="dim-card-title">板块资金净流入</span>
-                    <span class="dim-card-score neutral">7d 视角</span>
+                    <div class="sector-window-switch" id="sector-window-switch">
+                        <button class="sw-btn" data-win="1d" onclick="switchSectorWindow('1d')">1d</button>
+                        <button class="sw-btn active" data-win="7d" onclick="switchSectorWindow('7d')">7d</button>
+                        <button class="sw-btn" data-win="30d" onclick="switchSectorWindow('30d')">30d</button>
+                    </div>
                 </div>
                 <div class="dim-metrics">
                     <div class="sector-flow-cols">
-                        <div class="sector-flow-col">${narrCol}</div>
+                        <div class="sector-flow-col" id="sector-narr-col">${narrCol}</div>
                         <div class="sector-flow-col">${chainCol}</div>
                     </div>
                 </div>
-                <div class="dim-conclusion">单源失败自动降级标注，不中断主流程</div>
+                <div class="dim-conclusion">单源失败自动降级标注，不中断主流程 · 点击切换时间窗</div>
             </div>`;
             document.getElementById('sector-flow-full-section').innerHTML = sectorFlowHtml;
 
@@ -7415,7 +7924,7 @@
                 </div>
                 <div style="display:flex;flex-direction:column;gap:8px">`;
 
-            function renderOpp(o) {
+            function renderOpp (o) {
                 const tier = o.conviction_tier || '?';
                 const score = o.conviction_score != null ? o.conviction_score : '?';
                 const isHigh = tier === 'HIGH';
@@ -7494,7 +8003,7 @@
                 Object.keys(grouped).forEach(st => {
                     const items = grouped[st];
                     const stMap = (typeof SIGNAL_TYPE_LABEL !== 'undefined' ? SIGNAL_TYPE_LABEL : {}) || {};
-                    const typeLabel = (stMap[st] || {label: st}).label;
+                    const typeLabel = (stMap[st] || { label: st }).label;
                     html += `<details style="margin-bottom:6px" open>
                         <summary style="font-size:12px;color:#94a3b8;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:6px">
                             <span style="background:#1e293b;padding:1px 6px;border-radius:4px">${typeLabel}</span>
@@ -7538,7 +8047,7 @@
                     `).join('')}
                 </div>
             </div>`;
-            
+
             // CM MVRV 估值热度卡
             try {
                 const mvrvRes = await fetch('/api/cm/mvrv');
@@ -7554,16 +8063,16 @@
                         </div>
                         <div class="dim-metrics">
                             ${mvrvList.map(m => {
-                                const cls = m.extreme === 'HIGH' ? 'extreme-high' : m.extreme === 'LOW' ? 'extreme-low' : '';
-                                const badge = m.extreme !== 'NONE'
-                                    ? `<span class="extreme-badge ${m.extreme.toLowerCase()}">${m.extreme === 'HIGH' ? '▲' : '▼'}</span>`
-                                    : '';
-                                const pctTxt = m.pct_full != null ? m.pct_full.toFixed(0) + '%' : '-';
-                                return `<div class="dim-metric-row">
+                        const cls = m.extreme === 'HIGH' ? 'extreme-high' : m.extreme === 'LOW' ? 'extreme-low' : '';
+                        const badge = m.extreme !== 'NONE'
+                            ? `<span class="extreme-badge ${m.extreme.toLowerCase()}">${m.extreme === 'HIGH' ? '▲' : '▼'}</span>`
+                            : '';
+                        const pctTxt = m.pct_full != null ? m.pct_full.toFixed(0) + '%' : '-';
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${m.symbol.toUpperCase()} <small style="color:#6b7280">MVRV ${m.value != null ? m.value.toFixed(2) : '-'}</small></span>
                                     <span class="dim-metric-val ${cls}">${pctTxt}${badge}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">数据源: CoinMetrics Community（更新至 ${mvrvData.metric_date || '未知'}）</div>
                     </div>`;
@@ -7571,7 +8080,7 @@
             } catch (e) {
                 // MVRV 加载失败不阻塞大盘
             }
-            
+
             // CM 链上活跃度卡
             try {
                 const actRes = await fetch('/api/cm/activity');
@@ -7587,17 +8096,17 @@
                         </div>
                         <div class="dim-metrics">
                             ${actList.map(a => {
-                                const adrColor = a.adr_pct != null && a.adr_pct < 20 ? '#00c087' : a.adr_pct != null && a.adr_pct > 80 ? '#ff5b5b' : '#e0e6ed';
-                                const txColor = a.tx_pct != null && a.tx_pct < 20 ? '#00c087' : a.tx_pct != null && a.tx_pct > 80 ? '#ff5b5b' : '#e0e6ed';
-                                const roiTag = a.roi_30d != null
-                                    ? (a.roi_30d < 0 ? '<span style="color:#ff5b5b">亏损</span>' : '<span style="color:#00c087">盈利</span>')
-                                    : '-';
-                                const signals = (a.signals || []).map(s => '<span style="color:#f0b90b;font-size:10px">' + s + '</span>').join(' ');
-                                return `<div class="dim-metric-row">
+                        const adrColor = a.adr_pct != null && a.adr_pct < 20 ? '#00c087' : a.adr_pct != null && a.adr_pct > 80 ? '#ff5b5b' : '#e0e6ed';
+                        const txColor = a.tx_pct != null && a.tx_pct < 20 ? '#00c087' : a.tx_pct != null && a.tx_pct > 80 ? '#ff5b5b' : '#e0e6ed';
+                        const roiTag = a.roi_30d != null
+                            ? (a.roi_30d < 0 ? '<span style="color:#ff5b5b">亏损</span>' : '<span style="color:#00c087">盈利</span>')
+                            : '-';
+                        const signals = (a.signals || []).map(s => '<span style="color:#f0b90b;font-size:10px">' + s + '</span>').join(' ');
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${a.symbol.toUpperCase()} <small style="color:${adrColor}">活跃${a.adr_pct != null ? a.adr_pct.toFixed(0) + '%' : '-'}</small> <small style="color:${txColor}">交易${a.tx_pct != null ? a.tx_pct.toFixed(0) + '%' : '-'}</small></span>
                                     <span class="dim-metric-val">${roiTag} ${signals}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">绿=历史低位 | 红=历史过热 | 全部币种展示${actData.metric_date ? ' | 更新至 ' + actData.metric_date : ''}</div>
                     </div>`;
@@ -7605,7 +8114,7 @@
             } catch (e) {
                 // 活跃度加载失败不阻塞大盘
             }
-            
+
             // CM 估值锚卡
             try {
                 const valRes = await fetch('/api/cm/valuation');
@@ -7621,17 +8130,17 @@
                         </div>
                         <div class="dim-metrics">
                             ${valList.map(v => {
-                                const priceTxt = v.price_usd != null ? (v.price_usd >= 1 ? '$' + v.price_usd.toFixed(2) : '$' + v.price_usd.toPrecision(4)) : '-';
-                                const mcapTxt = v.market_cap != null ? (v.market_cap >= 1e12 ? '$' + (v.market_cap / 1e12).toFixed(2) + 'T' : v.market_cap >= 1e9 ? '$' + (v.market_cap / 1e9).toFixed(2) + 'B' : '$' + (v.market_cap / 1e6).toFixed(0) + 'M') : '-';
-                                const supplyTxt = v.supply != null ? (v.supply >= 1e9 ? (v.supply / 1e9).toFixed(1) + 'B' : v.supply >= 1e6 ? (v.supply / 1e6).toFixed(0) + 'M' : v.supply.toFixed(0)) : '-';
-                                const mvrvCls = v.mvrv != null ? (v.mvrv > 1.5 ? 'extreme-high' : v.mvrv < 0.8 ? 'extreme-low' : '') : '';
-                                const mvrvTxt = v.mvrv != null ? v.mvrv.toFixed(2) : '-';
-                                const mismatchTag = v.cap_consistency === 'mismatch' ? '<span style="color:#f0b90b;font-size:10px;margin-left:4px">⚠ 市值≠单价×供应</span>' : '';
-                                return `<div class="dim-metric-row">
+                        const priceTxt = v.price_usd != null ? (v.price_usd >= 1 ? '$' + v.price_usd.toFixed(2) : '$' + v.price_usd.toPrecision(4)) : '-';
+                        const mcapTxt = v.market_cap != null ? (v.market_cap >= 1e12 ? '$' + (v.market_cap / 1e12).toFixed(2) + 'T' : v.market_cap >= 1e9 ? '$' + (v.market_cap / 1e9).toFixed(2) + 'B' : '$' + (v.market_cap / 1e6).toFixed(0) + 'M') : '-';
+                        const supplyTxt = v.supply != null ? (v.supply >= 1e9 ? (v.supply / 1e9).toFixed(1) + 'B' : v.supply >= 1e6 ? (v.supply / 1e6).toFixed(0) + 'M' : v.supply.toFixed(0)) : '-';
+                        const mvrvCls = v.mvrv != null ? (v.mvrv > 1.5 ? 'extreme-high' : v.mvrv < 0.8 ? 'extreme-low' : '') : '';
+                        const mvrvTxt = v.mvrv != null ? v.mvrv.toFixed(2) : '-';
+                        const mismatchTag = v.cap_consistency === 'mismatch' ? '<span style="color:#f0b90b;font-size:10px;margin-left:4px">⚠ 市值≠单价×供应</span>' : '';
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${v.symbol.toUpperCase()} <small style="color:#6b7280">${priceTxt} · 供应${supplyTxt}</small>${mismatchTag}</span>
                                     <span class="dim-metric-val ${mvrvCls}">${mcapTxt} · MVRV ${mvrvTxt}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">市值=单价×供应 | MVRV>1.5偏贵 &lt;0.8偏便宜 | 黄标=源数据口径不一致${valData.metric_date ? ' | 更新至 ' + valData.metric_date : ''}</div>
                     </div>`;
@@ -7639,7 +8148,7 @@
             } catch (e) {
                 // 估值锚加载失败不阻塞大盘
             }
-            
+
             // GitHub 活跃度卡
             try {
                 const ghRes = await fetch('/api/github/overview');
@@ -7656,20 +8165,20 @@
                         </div>
                         <div class="dim-metrics">
                             ${(ghData.active_top10 || []).map(r => {
-                                const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
-                                const langTxt = r.language ? `<small style="color:#6b7280">${r.language}</small>` : '';
-                                return `<div class="dim-metric-row">
+                        const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
+                        const langTxt = r.language ? `<small style="color:#6b7280">${r.language}</small>` : '';
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${r.owner}/${r.repo} ${langTxt}</span>
                                     <span class="dim-metric-val">⭐${r.stars || 0} · 提交${r.commits_52w || 0}/年 · ${pushTxt}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                             ${(ghData.stale_top10 || []).map(r => {
-                                const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
-                                return `<div class="dim-metric-row" style="opacity:0.7">
+                        const pushTxt = r.days_since_push != null ? r.days_since_push + '天前' : '-';
+                        return `<div class="dim-metric-row" style="opacity:0.7">
                                     <span class="dim-metric-label" style="color:#ff5b5b">💀 ${r.owner}/${r.repo}</span>
                                     <span class="dim-metric-val" style="color:#ff5b5b">僵尸 ${pushTxt}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">僵尸 = 90天无 push | 数据源: GitHub API</div>
                     </div>`;
@@ -7677,7 +8186,7 @@
             } catch (e) {
                 // GitHub 活跃度加载失败不阻塞大盘
             }
-            
+
             // 黑客事件卡
             try {
                 const hackRes = await fetch('/api/hack/feed');
@@ -7695,18 +8204,18 @@
                         </div>
                         <div class="dim-metrics">
                             ${events.map(e => {
-                                const amtTxt = e.amount_usd != null
-                                    ? (e.amount_usd >= 1e9 ? '$' + (e.amount_usd / 1e9).toFixed(1) + 'B'
-                                        : e.amount_usd >= 1e6 ? '$' + (e.amount_usd / 1e6).toFixed(0) + 'M'
-                                        : '$' + e.amount_usd.toFixed(0))
-                                    : '-';
-                                const chainTxt = (e.chain || []).join(', ') || '-';
-                                const bridgeTag = e.bridge_hack ? ' <small style="color:#f0b90b">跨链桥</small>' : '';
-                                return `<div class="dim-metric-row">
+                        const amtTxt = e.amount_usd != null
+                            ? (e.amount_usd >= 1e9 ? '$' + (e.amount_usd / 1e9).toFixed(1) + 'B'
+                                : e.amount_usd >= 1e6 ? '$' + (e.amount_usd / 1e6).toFixed(0) + 'M'
+                                    : '$' + e.amount_usd.toFixed(0))
+                            : '-';
+                        const chainTxt = (e.chain || []).join(', ') || '-';
+                        const bridgeTag = e.bridge_hack ? ' <small style="color:#f0b90b">跨链桥</small>' : '';
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${e.hack_date || '?'} ${e.name || e.asset_name || '?'}${bridgeTag}</span>
                                     <span class="dim-metric-val" style="color:#ff5b5b">${amtTxt}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">数据源: DefiLlama /hacks | 仅展示近期事件</div>
                     </div>`;
@@ -7714,7 +8223,7 @@
             } catch (e) {
                 // 黑客事件加载失败不阻塞大盘
             }
-            
+
             // 融资轮次卡
             try {
                 const fundRes = await fetch('/api/funding/rounds');
@@ -7733,17 +8242,17 @@
                         </div>
                         <div class="dim-metrics">
                             ${rounds.map(r => {
-                                const amtTxt = r.amount_millions != null
-                                    ? (r.amount_millions >= 1000 ? '$' + (r.amount_millions / 1000).toFixed(1) + 'B'
-                                        : '$' + r.amount_millions.toFixed(0) + 'M')
-                                    : '-';
-                                const roundTxt = r.round || '-';
-                                const leadTxt = (r.lead_investors || []).slice(0, 2).join(', ');
-                                return `<div class="dim-metric-row">
+                        const amtTxt = r.amount_millions != null
+                            ? (r.amount_millions >= 1000 ? '$' + (r.amount_millions / 1000).toFixed(1) + 'B'
+                                : '$' + r.amount_millions.toFixed(0) + 'M')
+                            : '-';
+                        const roundTxt = r.round || '-';
+                        const leadTxt = (r.lead_investors || []).slice(0, 2).join(', ');
+                        return `<div class="dim-metric-row">
                                     <span class="dim-metric-label">${r.raise_date || '?'} ${r.protocol || r.asset_name || '?'} <small style="color:#6b7280">${roundTxt}</small></span>
                                     <span class="dim-metric-val" style="color:#00c087">${amtTxt}${leadTxt ? ' <small style="color:#6b7280">' + leadTxt + '</small>' : ''}</span>
                                 </div>`;
-                            }).join('')}
+                    }).join('')}
                         </div>
                         <div class="dim-conclusion">数据源: DefiLlama /raises | ${cutoffTxt || '更新频率较慢'}</div>
                     </div>`;
@@ -7751,9 +8260,9 @@
             } catch (e) {
                 // 融资轮次加载失败不阻塞大盘
             }
-            
+
             grid.innerHTML = html;
-            
+
             // 隐藏旧的综合结论区域（如果存在）
             const sumEl = document.getElementById('overview-summary');
             if (sumEl) sumEl.style.display = 'none';
@@ -7817,20 +8326,20 @@
 
         // ── FEAT-HIGHLIGHT-004: 信号类型映射表 ──
         var SIGNAL_TYPE_LABEL = {
-            mvrv_deep_under:    {label:'MVRV深度低估', cls:'st-mvrv'},
-            mvrv_under_watch:   {label:'MVRV观察',    cls:'st-mvrv'},
-            mvrv_watch:         {label:'MVRV观察',    cls:'st-mvrv'},
-            fng_extreme:        {label:'恐贪极值',    cls:'st-fng'},
-            leverage_extreme:   {label:'杠杆极值',    cls:'st-lev'},
-            stablecoin_inflow:  {label:'稳定币净流入', cls:'st-stable'},
-            btc_left_accum:     {label:'BTC左侧积累', cls:'st-btc'},
-            cm_adoption_divergence:{label:'CM采用背离', cls:'st-cm'},
-            catalyst:           {label:'催化剂驱动',  cls:'st-catalyst'},
-            whale_flow:         {label:'链上巨鲸',    cls:'st-whale'},
-            github_activity:    {label:'开发活跃',    cls:'st-dev'},
-            token_unlock:       {label:'解锁抛压',    cls:'st-unlock'},
-            kol_onchain:        {label:'KOL链上',     cls:'st-kol'},
-            funding:            {label:'融资落地',    cls:'st-other'},
+            mvrv_deep_under: { label: 'MVRV深度低估', cls: 'st-mvrv' },
+            mvrv_under_watch: { label: 'MVRV观察', cls: 'st-mvrv' },
+            mvrv_watch: { label: 'MVRV观察', cls: 'st-mvrv' },
+            fng_extreme: { label: '恐贪极值', cls: 'st-fng' },
+            leverage_extreme: { label: '杠杆极值', cls: 'st-lev' },
+            stablecoin_inflow: { label: '稳定币净流入', cls: 'st-stable' },
+            btc_left_accum: { label: 'BTC左侧积累', cls: 'st-btc' },
+            cm_adoption_divergence: { label: 'CM采用背离', cls: 'st-cm' },
+            catalyst: { label: '催化剂驱动', cls: 'st-catalyst' },
+            whale_flow: { label: '链上巨鲸', cls: 'st-whale' },
+            github_activity: { label: '开发活跃', cls: 'st-dev' },
+            token_unlock: { label: '解锁抛压', cls: 'st-unlock' },
+            kol_onchain: { label: 'KOL链上', cls: 'st-kol' },
+            funding: { label: '融资落地', cls: 'st-other' },
         };
 
         function renderSignalItem (o, level) {
@@ -7847,7 +8356,7 @@
                 : '';
 
             // FEAT-HIGHLIGHT-004: 信号类型徽章
-            var st = SIGNAL_TYPE_LABEL[o.signal_type] || {label: (o.signal_type || '信号'), cls:'st-other'};
+            var st = SIGNAL_TYPE_LABEL[o.signal_type] || { label: (o.signal_type || '信号'), cls: 'st-other' };
             var typeBadge = '<span class="signal-type ' + st.cls + '">' + escapeHtml(st.label) + '</span>';
 
             // FEAT-HIGHLIGHT-004: 关键数值直显
@@ -7870,30 +8379,30 @@
             if (bd) {
                 var top = null, topC = -1;
                 for (var k in bd) { if (bd[k].contribution > topC) { topC = bd[k].contribution; top = k; } }
-                var labelMap = {mvrv:'MVRV低估', cycle:'周期相位', funding:'资金费率', netflow:'链上净流', stable:'稳定币流', roi:'ROI动量'};
+                var labelMap = { mvrv: 'MVRV低估', cycle: '周期相位', funding: '资金费率', netflow: '链上净流', stable: '稳定币流', roi: 'ROI动量' };
                 if (top) mainReason = '主因：' + (labelMap[top] || top);
             }
             return '<div class="signal-item ' + cls + '">' +
                 '<div class="signal-bar"></div>' +
                 '<div class="signal-body">' +
-                    '<div class="signal-top">' +
-                        typeBadge +
-                        '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
-                        '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
-                        (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
-                        km +
-                        '<span class="signal-score">conv ' + score + '</span>' +
-                        fireBadge +
-                    '</div>' +
-                    (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
-                    scoreBar +
-                    strengthLine +
-                    (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
-                    (o.action_hint ? '<div class="signal-action">🎯 ' + escapeHtml(o.action_hint) + '</div>' : '') +
-                    (o.invalidation ? '<div class="signal-invalid">⚠️ 失效：' + escapeHtml(o.invalidation) + '</div>' : '') +
-                    (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +
+                '<div class="signal-top">' +
+                typeBadge +
+                '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
+                '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
+                (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
+                km +
+                '<span class="signal-score">conv ' + score + '</span>' +
+                fireBadge +
                 '</div>' +
-            '</div>';
+                (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
+                scoreBar +
+                strengthLine +
+                (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
+                (o.action_hint ? '<div class="signal-action">🎯 ' + escapeHtml(o.action_hint) + '</div>' : '') +
+                (o.invalidation ? '<div class="signal-invalid">⚠️ 失效：' + escapeHtml(o.invalidation) + '</div>' : '') +
+                (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +
+                '</div>' +
+                '</div>';
         }
 
         const HOT_PAGE_SIZE = 5;

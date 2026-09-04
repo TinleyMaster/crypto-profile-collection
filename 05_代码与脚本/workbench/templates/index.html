@@ -3140,6 +3140,100 @@
             padding: 4px 0;
         }
 
+        /* 投研列表 */
+        .research-stat-card {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            padding: 10px 16px;
+            min-width: 100px;
+        }
+
+        .research-stat-card .rs-num {
+            font-size: 20px;
+            font-weight: 700;
+            color: #e2e8f0;
+            line-height: 1.2;
+        }
+
+        .research-stat-card .rs-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        .research-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 12px;
+        }
+
+        .research-item {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 10px;
+            padding: 14px 16px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .research-item:hover {
+            border-color: #3b82f6;
+            background: #0f172a;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+        }
+
+        .research-item .ri-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+        }
+
+        .research-item .ri-symbol {
+            font-size: 16px;
+            font-weight: 700;
+            color: #60a5fa;
+        }
+
+        .research-item .ri-name {
+            font-size: 12px;
+            color: #94a3b8;
+            margin-top: 2px;
+        }
+
+        .research-item .ri-type {
+            font-size: 10px;
+            color: #6b7280;
+            background: #1e293b;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .research-item .ri-meta {
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #1f2937;
+        }
+
+        .research-item .ri-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .research-item .ri-date {
+            font-size: 10px;
+            color: #4b5563;
+            margin-top: 6px;
+        }
+
         /* FEAT-SECTOR-004: 趋势标签 */
         .trend-badge {
             display: inline-block;
@@ -3749,6 +3843,7 @@
             <a class="nav-tab" href="#daily-diff" data-section="daily-diff">信号</a>
             <a class="nav-tab" href="#heat" data-section="heat">热力</a>
             <a class="nav-tab" href="#backtest" data-section="backtest">回测</a>
+            <a class="nav-tab" href="#research" data-section="research">投研</a>
             <a class="nav-tab" href="#tasks" data-section="tasks">任务</a>
             <a class="nav-tab" href="/kol">KOL</a>
         </div>
@@ -4077,6 +4172,52 @@
             </section>
 
             <!-- #tasks 调度 & 任务 -->
+            <!-- #research 投研列表 -->
+            <section id="research" class="module-card" style="display:none">
+                <div class="module-header">
+                    <h2>🔬 投研库</h2>
+                    <p class="module-desc">已投研代币一览 · 研报/笔记本/对话记录</p>
+                </div>
+
+                <!-- 搜索 + 统计 -->
+                <div
+                    style="display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+                    <div style="display:flex;gap:12px;flex-wrap:wrap">
+                        <div class="research-stat-card">
+                            <div class="rs-num" id="rs-total">--</div>
+                            <div class="rs-label">投研代币</div>
+                        </div>
+                        <div class="research-stat-card">
+                            <div class="rs-num" id="rs-thesis">--</div>
+                            <div class="rs-label">研报数</div>
+                        </div>
+                        <div class="research-stat-card">
+                            <div class="rs-num" id="rs-docs">--</div>
+                            <div class="rs-label">资料总数</div>
+                        </div>
+                    </div>
+                    <div class="search-box" style="max-width:360px;flex:1;min-width:200px">
+                        <div class="search-input-wrap">
+                            <input type="text" id="research-search-input" placeholder="搜索代币符号或名称..."
+                                oninput="searchResearchList()" autocomplete="off">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 投研代币列表 -->
+                <div class="research-list" id="research-list">
+                    <div style="color:#6b7280;text-align:center;padding:40px 0">加载中...</div>
+                </div>
+
+                <!-- 分页 -->
+                <div class="drill-paginator" id="research-paginator"
+                    style="justify-content:center;margin-top:16px;display:none">
+                    <button class="drill-page-btn" onclick="researchPage(-1)">上一页</button>
+                    <span class="drill-page-info" id="research-page-info"></span>
+                    <button class="drill-page-btn" onclick="researchPage(1)">下一页</button>
+                </div>
+            </section>
+
             <section id="tasks" class="module-card">
                 <div class="module-header">
                     <h2>⚙️ 调度 &amp; 任务</h2>
@@ -4331,11 +4472,10 @@
             return `${s}s`;
         }
 
+        const _htmlEscapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
         function escapeHtml (s) {
             if (s == null) return '';
-            const div = document.createElement('div');
-            div.textContent = s;
-            return div.innerHTML;
+            return String(s).replace(/[&<>"']/g, c => _htmlEscapeMap[c]);
         }
 
         function formatFileSize (bytes) {
@@ -6406,11 +6546,13 @@
         }
 
         // ── 日志面板 ──
+        let _logCache = { taskId: null, lines: [], maxLines: 1000 };
+
         async function loadTaskLog (taskId) {
             try {
                 // 并行请求：日志 + 任务状态，减少串行延迟
                 const [logRes, taskRes] = await Promise.all([
-                    fetch(`/api/tasks/${taskId}/log?limit=300`),
+                    fetch(`/api/tasks/${taskId}/log?limit=500`),
                     fetch(`/api/tasks/${taskId}`)
                 ]);
                 const logData = await logRes.json();
@@ -6430,15 +6572,42 @@
 
                 if (logs.length === 0) {
                     panel.innerHTML = '<div class="empty">暂无日志输出</div>';
+                    _logCache = { taskId, lines: [], maxLines: 1000 };
                     return;
                 }
 
-                // 检测是否滚动到底部（如果用户没手动往上滚，就自动跟到底）
-                const isAtBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 50
-                    || lastLogCount !== logs.length;
+                // 切换任务 → 全量重建
+                if (_logCache.taskId !== taskId) {
+                    _logCache = { taskId, lines: [], maxLines: 1000 };
+                    panel.innerHTML = '';
+                }
 
-                panel.innerHTML = logs.map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+                // 只追加新增的行（增量更新，避免全量重渲）
+                const newLines = logs.slice(_logCache.lines.length);
+                if (newLines.length > 0) {
+                    const frag = document.createDocumentFragment();
+                    for (let i = 0; i < newLines.length; i++) {
+                        const div = document.createElement('div');
+                        div.className = 'log-line';
+                        div.textContent = newLines[i];
+                        frag.appendChild(div);
+                    }
+                    panel.appendChild(frag);
+                    _logCache.lines = logs;
 
+                    // 裁剪到 maxLines（从头部删）
+                    const children = panel.children;
+                    if (children.length > _logCache.maxLines) {
+                        const removeCount = children.length - _logCache.maxLines;
+                        for (let i = 0; i < removeCount; i++) {
+                            panel.removeChild(children[0]);
+                        }
+                    }
+                }
+
+                // 自动滚动到底部（用户没手动上滚时）
+                const isAtBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80
+                    || lastLogCount === 0;
                 if (isAtBottom) {
                     panel.scrollTop = panel.scrollHeight;
                 }
@@ -8568,6 +8737,114 @@
             window.open('/research/' + selectedAssetId, '_blank');
         }
 
+        // ── 投研列表页 ──
+        let _researchState = {
+            loaded: false,
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 20,
+            q: '',
+            searchTimer: null,
+        };
+
+        function loadResearchList (force) {
+            if (_researchState.loaded && !force && !_researchState.q) return;
+            const listEl = document.getElementById('research-list');
+            listEl.innerHTML = '<div style="color:#6b7280;text-align:center;padding:40px 0">加载中...</div>';
+
+            const offset = (_researchState.page - 1) * _researchState.pageSize;
+            const url = '/api/research/list?limit=' + _researchState.pageSize
+                + '&offset=' + offset
+                + (_researchState.q ? '&q=' + encodeURIComponent(_researchState.q) : '');
+
+            fetch(url).then(r => r.json()).then(data => {
+                if (!data.ok) {
+                    listEl.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px 0">加载失败：' + escapeHtml(data.error) + '</div>';
+                    return;
+                }
+                _researchState.loaded = true;
+                _researchState.total = data.total || 0;
+                _researchState.items = data.items || [];
+                renderResearchList();
+                renderResearchStats(data);
+            }).catch(e => {
+                listEl.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px 0">网络错误：' + escapeHtml(e.message) + '</div>';
+            });
+        }
+
+        function renderResearchStats (data) {
+            const items = data.items || [];
+            const totalDocs = items.reduce((s, i) => s + (i.doc_count || 0), 0);
+            const totalThesis = items.reduce((s, i) => s + (i.thesis_count || 0), 0);
+            document.getElementById('rs-total').textContent = data.total || 0;
+            document.getElementById('rs-thesis').textContent = totalThesis;
+            document.getElementById('rs-docs').textContent = totalDocs;
+        }
+
+        function renderResearchList () {
+            const listEl = document.getElementById('research-list');
+            const items = _researchState.items;
+            const paginator = document.getElementById('research-paginator');
+
+            if (items.length === 0) {
+                listEl.innerHTML = '<div style="color:#6b7280;text-align:center;padding:40px 0">暂无投研记录</div>';
+                paginator.style.display = 'none';
+                return;
+            }
+
+            let html = '';
+            items.forEach(function (item) {
+                const updated = item.updated_at ? new Date(item.updated_at).toLocaleDateString('zh-CN') : '';
+                const typeLabel = item.type === 'coin' ? 'Coin' : 'Token';
+                html += `
+                <div class="research-item" onclick="window.open('/research/${item.asset_id}', '_blank')">
+                    <div class="ri-header">
+                        <div>
+                            <div class="ri-symbol">${escapeHtml(item.symbol || '?')}</div>
+                            <div class="ri-name">${escapeHtml(item.name || '')}</div>
+                        </div>
+                        <span class="ri-type">${typeLabel}</span>
+                    </div>
+                    <div class="ri-meta">
+                        <span>📄 ${item.doc_count || 0} 资料</span>
+                        <span>📝 ${item.thesis_count || 0} 研报</span>
+                        <span>💬 ${item.message_count || 0} 对话</span>
+                    </div>
+                    <div class="ri-date">更新于 ${escapeHtml(updated)}</div>
+                </div>`;
+            });
+            listEl.innerHTML = html;
+
+            // 分页
+            const totalPages = Math.ceil(_researchState.total / _researchState.pageSize) || 1;
+            if (totalPages > 1) {
+                paginator.style.display = 'flex';
+                document.getElementById('research-page-info').textContent =
+                    '第 ' + _researchState.page + ' / ' + totalPages + ' 页 （共 ' + _researchState.total + ' 条）';
+            } else {
+                paginator.style.display = 'none';
+            }
+        }
+
+        function researchPage (delta) {
+            const totalPages = Math.ceil(_researchState.total / _researchState.pageSize) || 1;
+            const newPage = _researchState.page + delta;
+            if (newPage < 1 || newPage > totalPages) return;
+            _researchState.page = newPage;
+            loadResearchList(true);
+        }
+
+        function searchResearchList () {
+            const q = document.getElementById('research-search-input').value.trim();
+            if (_researchState.searchTimer) clearTimeout(_researchState.searchTimer);
+            _researchState.searchTimer = setTimeout(function () {
+                _researchState.q = q;
+                _researchState.page = 1;
+                loadResearchList(true);
+            }, 300);
+        }
+
         // 初始加载 & 定时刷新
         applyDiffColorScheme();
         loadDailyDiff();
@@ -8582,9 +8859,24 @@
 
         // ── 导航滚动高亮（IntersectionObserver） ──
         (function () {
-            var sections = ['assets', 'overview', 'daily-diff', 'market', 'unlock', 'heat', 'backtest', 'tasks'];
+            var sections = ['assets', 'overview', 'daily-diff', 'market', 'unlock', 'heat', 'backtest', 'research', 'tasks'];
             var tabs = document.querySelectorAll('.top-nav .nav-tab[data-section]');
             if (!('IntersectionObserver' in window) || tabs.length === 0) return;
+
+            // 点击导航时懒加载对应模块
+            tabs.forEach(function (tab) {
+                tab.addEventListener('click', function (e) {
+                    var section = tab.getAttribute('data-section');
+                    if (section === 'research') {
+                        setTimeout(function () { loadResearchList(false); }, 50);
+                    }
+                });
+            });
+
+            // 如果 URL hash 直接是 research，立即加载
+            if (window.location.hash === '#research') {
+                setTimeout(function () { loadResearchList(false); }, 100);
+            }
 
             var observer = new IntersectionObserver(function (entries) {
                 entries.forEach(function (entry) {
@@ -8593,6 +8885,10 @@
                         tabs.forEach(function (tab) {
                             tab.classList.toggle('active', tab.getAttribute('data-section') === id);
                         });
+                        // 滚动到投研模块时触发加载
+                        if (id === 'research') {
+                            loadResearchList(false);
+                        }
                     }
                 });
             }, { rootMargin: '-30% 0px -60% 0px', threshold: 0 });

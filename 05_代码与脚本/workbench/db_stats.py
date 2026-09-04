@@ -2916,6 +2916,69 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
     return result
 
 
+def list_research_notebooks(limit: int = 50, offset: int = 0, q: str = "") -> dict:
+    """投研笔记本列表（带资产基本信息 + 投研概况）。
+
+    返回：{total, items: [{notebook_id, asset_id, symbol, name, type,
+            doc_count, thesis_count, message_count, updated_at, created_at}]}
+    """
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            where_sql = ""
+            params: list = []
+            if q:
+                where_sql = """
+                    WHERE ca.canonical_symbol ILIKE %s
+                       OR ca.name ILIKE %s
+                       OR rn.title ILIKE %s
+                """
+                like = f"%{q}%"
+                params = [like, like, like]
+
+            cur.execute(f"""
+                SELECT COUNT(*) AS total
+                FROM biz.research_notebook rn
+                JOIN core.asset ca ON ca.asset_id = rn.asset_id
+                {where_sql}
+            """, params)
+            total = cur.fetchone()["total"]
+
+            cur.execute(f"""
+                SELECT
+                    rn.notebook_id,
+                    rn.asset_id,
+                    ca.canonical_symbol AS symbol,
+                    ca.name,
+                    COALESCE((rn.snapshot_json->>'type')::varchar, 'token') AS type,
+                    COALESCE((rn.snapshot_json->'counts'->>'doc_assets')::int, 0)
+                        + COALESCE((rn.snapshot_json->'counts'->>'research_urls')::int, 0)
+                        + COALESCE((rn.snapshot_json->'counts'->>'contracts')::int, 0) AS doc_count,
+                    COALESCE(t.cnt, 0) AS thesis_count,
+                    COALESCE(m.cnt, 0) AS message_count,
+                    rn.updated_at,
+                    rn.created_at
+                FROM biz.research_notebook rn
+                JOIN core.asset ca ON ca.asset_id = rn.asset_id
+                LEFT JOIN (
+                    SELECT asset_id, COUNT(*) AS cnt
+                    FROM biz.research_thesis
+                    GROUP BY asset_id
+                ) t ON t.asset_id = rn.asset_id
+                LEFT JOIN (
+                    SELECT notebook_id, COUNT(*) AS cnt
+                    FROM biz.research_message
+                    GROUP BY notebook_id
+                ) m ON m.notebook_id = rn.notebook_id
+                {where_sql}
+                ORDER BY rn.updated_at DESC
+                LIMIT %s OFFSET %s
+            """, params + [limit, offset])
+            items = [dict(r) for r in cur.fetchall()]
+
+    return {"total": total, "items": items, "limit": limit, "offset": offset}
+
+
 def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) -> dict:
     """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。
 

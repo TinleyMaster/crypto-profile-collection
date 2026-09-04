@@ -1457,6 +1457,19 @@ def api_notebooklm_curate(asset_id: int):
 # ── 一键投研（NotebookLM 风格） ──
 
 
+@app.route("/api/research/list")
+def api_research_list():
+    """投研过的代币列表（含概况）。支持 ?limit=50&offset=0&q=关键词筛选。"""
+    try:
+        limit = min(request.args.get("limit", default=50, type=int), 200)
+        offset = request.args.get("offset", default=0, type=int)
+        q = (request.args.get("q", "") or "").strip()
+        data = _get_db_stats().list_research_notebooks(limit=limit, offset=offset, q=q)
+        return jsonify({"ok": True, **data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/<int:asset_id>/notebook")
 def api_research_notebook(asset_id: int):
     """打开（不存在则创建）一个代币对应的一键投研笔记本。支持 ?refresh=1 强制重采快照。"""

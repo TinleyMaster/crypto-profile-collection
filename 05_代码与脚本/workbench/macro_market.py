@@ -2419,7 +2419,16 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
 
     P0-2 修复：当可用轴权重和不足（coverage_weight < min_available_weight）时，
     降低 MED 阈值，避免低覆盖资产被统一剔除。
+
+    去重：按 (signal_type, target) 去重，已存在的同类型同标的信号不再重复添加。
     """
+    # 去重检查：同 signal_type + 同 target 不重复添加
+    st = opp.get("signal_type") or ""
+    tgt = (opp.get("target") or "").strip()
+    for existing in opportunities + excluded:
+        if (existing.get("signal_type") or "") == st \
+           and (existing.get("target") or "").strip() == tgt:
+            return  # 已存在，跳过
     raw = opp.get("conviction_score")
     if raw is None:
         raw = 45
@@ -2632,6 +2641,50 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                     score = (clipped + 100.0) / 2.0
                     results.append((aid, symbol or "", round(score, 1)))
                 return results
+    except Exception:
+        return []
+
+
+def _fetch_catalyst_events(asset_id: int, window_days: int = 14, limit: int = 3) -> list[dict]:
+    """获取指定资产近 N 天的催化剂事件列表，按重要性+时间排序。
+
+    返回 [{title, event_date, direction, strength, category, source}, ...]。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ac.title, ac.published_at, ci.impact_direction,
+                           ci.impact_strength, ac.event_category, ac.source_code
+                    FROM biz.catalyst_impact ci
+                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+                    WHERE ci.asset_id = %s
+                      AND ac.published_at >= NOW() - make_interval(days => %s)
+                    ORDER BY
+                        CASE ci.impact_strength
+                            WHEN 'strong' THEN 3
+                            WHEN 'medium' THEN 2
+                            ELSE 1
+                        END DESC,
+                        ac.published_at DESC
+                    LIMIT %s
+                """, (asset_id, window_days, limit))
+                rows = cur.fetchall()
+                return [
+                    {
+                        "title": title or "",
+                        "event_date": str(published_at.date()) if published_at else "",
+                        "direction": direction or "neutral",
+                        "strength": strength or "weak",
+                        "category": category or "",
+                        "source": source_code or "",
+                    }
+                    for title, published_at, direction, strength, category, source_code in rows
+                ]
     except Exception:
         return []
 
@@ -3213,6 +3266,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
     type_counts: dict[str, int] = {}
     dir_counts: dict[str, int] = {}
     selected: list[dict] = []
+    seen_targets: set[str] = set()  # 同标的去重：一个 target 只留一条最强信号
 
     def _sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
@@ -3228,6 +3282,11 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
         q = quotas.get(st, quotas["__default__"])
         if type_counts.get(st, 0) >= q:
             continue
+        # 同标的去重：相同 target 只留一条最强的
+        tgt = (o.get("target") or "").strip().lower()
+        if tgt and tgt in seen_targets:
+            continue
+        seen_targets.add(tgt)
         type_counts[st] = type_counts.get(st, 0) + 1
         dir_counts[o.get("direction", "long")] = dir_counts.get(o.get("direction", "long"), 0) + 1
         selected.append(o)
@@ -3484,6 +3543,8 @@ def score_opportunities(overview: dict) -> dict:
             catalyst_score=cscore, t=t,
         )
         strength = breakdown["raw_strength"]
+        # 取具体催化剂事件列表（TOP 3），供前端展示
+        cat_events = _fetch_catalyst_events(aid, cat_window, limit=3)
         _push_opportunity(
             {"target": symbol, "direction": "long",
              "confidence": "high" if cscore >= 70 else "medium",
@@ -3492,6 +3553,8 @@ def score_opportunities(overview: dict) -> dict:
              "signal_type": "catalyst",
              "key_metric": f"催化剂 {cscore:.0f}分",
              "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
+             "catalyst_events": cat_events,
+             "catalyst_event_count": len(cat_events),
              "action_hint": "事件驱动，窗口内跟进",
              "invalidation": "催化剂事件兑现/热度消退后信号失效",
              "related_dims": ["catalyst_events", "P0-B 催化剂驱动"]},

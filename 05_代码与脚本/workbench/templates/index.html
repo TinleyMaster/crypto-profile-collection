@@ -3604,6 +3604,53 @@
             margin-top: 2px;
         }
 
+        .signal-item .signal-catalyst-events {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: rgba(139, 92, 246, 0.08);
+            border: 1px solid rgba(139, 92, 246, 0.2);
+            border-radius: 6px;
+        }
+
+        .signal-item .signal-catalyst-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #a78bfa;
+            margin-bottom: 4px;
+        }
+
+        .signal-item .signal-catalyst-item {
+            font-size: 10.5px;
+            color: #cbd5e1;
+            line-height: 1.5;
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+            margin-bottom: 2px;
+        }
+
+        .signal-item .signal-cat-dir {
+            flex-shrink: 0;
+            font-size: 10px;
+        }
+
+        .signal-item .signal-cat-date {
+            flex-shrink: 0;
+            color: #64748b;
+            font-size: 10px;
+        }
+
+        .signal-item .signal-cat-strength {
+            flex-shrink: 0;
+            color: #94a3b8;
+            font-size: 10px;
+        }
+
+        .signal-item .signal-cat-title {
+            color: #cbd5e1;
+            flex: 1;
+        }
+
         .signal-item .signal-action {
             font-size: 11px;
             color: #f0b90b;
@@ -8567,6 +8614,25 @@
                 scoreBar +
                 strengthLine +
                 (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
+                // 催化剂事件列表（仅 catalyst 类型且有事件时展示）
+                (o.signal_type === 'catalyst' && o.catalyst_events && o.catalyst_events.length
+                    ? '<div class="signal-catalyst-events">' +
+                    '<div class="signal-catalyst-title">📰 关键催化事件</div>' +
+                    o.catalyst_events.map(function (ev) {
+                        var dirIcon = ev.direction === 'bullish' ? '🟢' : (ev.direction === 'bearish' ? '🔴' : '⚪');
+                        var strengthLabel = ev.strength === 'strong' ? '强' : (ev.strength === 'medium' ? '中' : '弱');
+                        var title = (ev.title || '').length > 50
+                            ? (ev.title || '').substring(0, 50) + '...'
+                            : (ev.title || '');
+                        return '<div class="signal-catalyst-item">' +
+                            '<span class="signal-cat-dir">' + dirIcon + '</span>' +
+                            '<span class="signal-cat-date">' + (ev.event_date || '') + '</span>' +
+                            '<span class="signal-cat-strength">[' + strengthLabel + ']</span>' +
+                            '<span class="signal-cat-title">' + escapeHtml(title) + '</span>' +
+                            '</div>';
+                    }).join('') +
+                    '</div>'
+                    : '') +
                 (o.action_hint ? '<div class="signal-action">🎯 ' + escapeHtml(o.action_hint) + '</div>' : '') +
                 (o.invalidation ? '<div class="signal-invalid">⚠️ 失效：' + escapeHtml(o.invalidation) + '</div>' : '') +
                 (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +

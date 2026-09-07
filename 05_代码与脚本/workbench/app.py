@@ -769,6 +769,189 @@ def api_pending():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── 交易所地址验证 ──────────────────────────────────────
+
+@app.route("/api/exchange-wallets/pending")
+def api_exchange_wallets_pending():
+    """获取待验证的交易所地址列表（medium 置信度）+ 统计数据。
+    一次查询返回列表 + 各链统计 + 总数，减少往返。
+    """
+    try:
+        chain = request.args.get("chain", "").strip()
+        limit = int(request.args.get("limit", 50))
+        offset = int(request.args.get("offset", 0))
+        from db_stats import get_db
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                where = "WHERE confidence = 'medium'"
+                params = []
+                if chain:
+                    where += " AND chain = %s"
+                    params.append(chain)
+                # 总数
+                cur.execute(f"SELECT count(*) as cnt FROM biz.onchain_exchange_wallet {where}", params)
+                total = cur.fetchone()["cnt"]
+                # 列表：按链 + 交易所排序，优先头部交易所
+                cur.execute(f"""
+                    SELECT wallet_id, address, exchange_name, chain, confidence, source, added_at
+                    FROM biz.onchain_exchange_wallet
+                    {where}
+                    ORDER BY
+                        CASE exchange_name
+                            WHEN 'Binance' THEN 1
+                            WHEN 'Coinbase' THEN 2
+                            WHEN 'OKX' THEN 3
+                            WHEN 'Kraken' THEN 4
+                            WHEN 'Bybit' THEN 5
+                            WHEN 'KuCoin' THEN 6
+                            WHEN 'Gate.io' THEN 7
+                            WHEN 'Bitget' THEN 8
+                            WHEN 'Huobi' THEN 9
+                            WHEN 'MEXC' THEN 10
+                            ELSE 99
+                        END,
+                        chain, exchange_name, wallet_id
+                    LIMIT %s OFFSET %s
+                """, params + [limit, offset])
+                rows = cur.fetchall()
+
+                # 统计：各链 medium 数量 + 全局 high/medium 总数
+                cur.execute("""
+                    SELECT chain, confidence, count(*) as cnt
+                    FROM biz.onchain_exchange_wallet
+                    GROUP BY chain, confidence
+                    ORDER BY chain, confidence
+                """)
+                stat_rows = cur.fetchall()
+
+        # 格式化列表
+        items = []
+        for r in rows:
+            items.append({
+                "wallet_id": r["wallet_id"],
+                "address": r["address"],
+                "exchange_name": r["exchange_name"],
+                "chain": r["chain"],
+                "confidence": r["confidence"],
+                "source": r["source"],
+                "added_at": r["added_at"].isoformat() if r["added_at"] else None,
+            })
+
+        # 格式化统计
+        by_chain = {}
+        total_high = 0
+        total_medium = 0
+        total_low = 0
+        for r in stat_rows:
+            c = r["chain"]
+            conf = r["confidence"]
+            cnt = r["cnt"]
+            by_chain.setdefault(c, {"high": 0, "medium": 0, "low": 0})
+            by_chain[c][conf] = cnt
+            if conf == "high":
+                total_high += cnt
+            elif conf == "medium":
+                total_medium += cnt
+            else:
+                total_low += cnt
+
+        return jsonify({
+            "ok": True,
+            "data": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "stats": {
+                "by_chain": by_chain,
+                "totals": {
+                    "high": total_high,
+                    "medium": total_medium,
+                    "low": total_low,
+                    "all": total_high + total_medium + total_low,
+                }
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/exchange-wallets/verify", methods=["POST"])
+def api_exchange_wallets_verify():
+    """提交验证结果：
+    action: 'approve' (验证通过→high) / 'reject' (非交易所→删除或标为invalid)
+    """
+    try:
+        data = request.get_json() or {}
+        wallet_id = data.get("wallet_id")
+        action = data.get("action", "").strip().lower()
+        if not wallet_id:
+            return jsonify({"ok": False, "error": "缺少 wallet_id"}), 400
+        if action not in ("approve", "reject"):
+            return jsonify({"ok": False, "error": "action 必须是 approve 或 reject"}), 400
+
+        from db_stats import get_db
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if action == "approve":
+                    cur.execute("""
+                        UPDATE biz.onchain_exchange_wallet
+                        SET confidence = 'high',
+                            source = COALESCE(source, '') || ';manual_verified'
+                        WHERE wallet_id = %s AND confidence = 'medium'
+                    """, (wallet_id,))
+                else:  # reject: 非交易所地址，直接删除
+                    cur.execute("""
+                        DELETE FROM biz.onchain_exchange_wallet
+                        WHERE wallet_id = %s AND confidence = 'medium'
+                    """, (wallet_id,))
+                changed = cur.rowcount > 0
+            conn.commit()
+        return jsonify({"ok": True, "changed": changed})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/exchange-wallets/stats")
+def api_exchange_wallets_stats():
+    """交易所地址统计：各链 + 各置信度的数量。"""
+    try:
+        from db_stats import get_db
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT chain, confidence, count(*) as cnt
+                    FROM biz.onchain_exchange_wallet
+                    GROUP BY chain, confidence
+                    ORDER BY chain, confidence
+                """)
+                rows = cur.fetchall()
+        # 整理成 { chain: { high: n, medium: n, low: n } }
+        stats = {}
+        total_high = 0
+        total_medium = 0
+        total_low = 0
+        for r in rows:
+            chain = r["chain"]
+            conf = r["confidence"]
+            cnt = r["cnt"]
+            stats.setdefault(chain, {"high": 0, "medium": 0, "low": 0})
+            stats[chain][conf] = cnt
+            if conf == "high":
+                total_high += cnt
+            elif conf == "medium":
+                total_medium += cnt
+            else:
+                total_low += cnt
+        return jsonify({
+            "ok": True,
+            "by_chain": stats,
+            "totals": {"high": total_high, "medium": total_medium, "low": total_low,
+                       "all": total_high + total_medium + total_low}
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/tasks", methods=["GET"])
 def api_list_tasks():
     limit = int(request.args.get("limit", 20))

@@ -1696,7 +1696,9 @@ def _fetch_chain_flow_from_db() -> dict | None:
     """
     从 src_dl.chain_tvl_snapshot 读链净流入 TOP5。
     有数据返回与 fetch_chain_flow 同结构的 dict，无数据返回 None。
+    若链数不足 MIN_CHAINS 条，返回 None 触发降级到实时 API。
     """
+    MIN_CHAINS = 5
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
@@ -1718,24 +1720,89 @@ def _fetch_chain_flow_from_db() -> dict | None:
                     LIMIT 20
                 """)
                 rows = [dict(r) for r in cur.fetchall()]
-                if not rows:
+                if not rows or len(rows) < MIN_CHAINS:
                     return None
 
                 # 取净流入 TOP 5 + 净流出 TOP 5（共 10 条，前端按需求取）
                 top_by_flow = sorted(rows, key=lambda x: -(x.get("flow_7d_usd") or 0))
                 top5 = top_by_flow[:5]
 
+                # 批量查询每条链的 TOP 5 协议（从 src_dl.protocol_list）
+                chain_proto_map: dict[str, list[dict]] = {}
+                chain_names = [r["chain_name"] for r in top5]
+                if chain_names:
+                    # 构造要查询的链名列表（包含别名映射后的名字）
+                    # chain_tvl_snapshot.chain_name -> protocol_list.chain
+                    name_to_proto = {
+                        "BSC": "Binance",
+                        "OP Mainnet": "Optimism",
+                    }
+                    query_chains = set()
+                    for cn in chain_names:
+                        query_chains.add(cn)
+                        if cn in name_to_proto:
+                            query_chains.add(name_to_proto[cn])
+                    query_chains = list(query_chains)
+                    placeholders = ",".join(["%s"] * len(query_chains))
+
+                    cur.execute(f"""
+                        SELECT name, symbol, slug, tvl, change_7d, category, chain
+                        FROM src_dl.protocol_list
+                        WHERE chain IN ({placeholders})
+                        ORDER BY tvl DESC NULLS LAST
+                    """, query_chains)
+                    all_protos = [dict(r) for r in cur.fetchall()]
+
+                    # 按 chain 分组，每条链取 top 5
+                    temp_map: dict[str, list[dict]] = {}
+                    for p in all_protos:
+                        ch = p.get("chain") or ""
+                        if ch not in temp_map or len(temp_map[ch]) < 5:
+                            temp_map.setdefault(ch, []).append(p)
+
+                    # 映射回 chain_name（处理别名：protocol_list 用 Binance，我们用 BSC）
+                    proto_to_name = {"Binance": "BSC", "Optimism": "OP Mainnet"}
+                    for r in top5:
+                        cname = r["chain_name"]
+                        protos = temp_map.get(cname, [])
+                        # 试试反向别名（Binance -> BSC）
+                        if not protos:
+                            for proto_ch, our_ch in proto_to_name.items():
+                                if our_ch == cname:
+                                    protos = temp_map.get(proto_ch, [])
+                                    break
+                        chain_proto_map[cname] = protos
+
                 # 转成和 fetch_chain_flow 一样的结构
                 ranked = []
                 for r in top5:
+                    cname = r["chain_name"]
+                    protos_raw = chain_proto_map.get(cname, [])
+                    protocols = [
+                        {
+                            "name": p.get("name", ""),
+                            "slug": p.get("slug", ""),
+                            "symbol": p.get("symbol", ""),
+                            "tvl": float(p["tvl"]) if p.get("tvl") is not None else 0.0,
+                            "category": p.get("category", ""),
+                            "change_7d": float(p["change_7d"]) if p.get("change_7d") is not None else None,
+                        }
+                        for p in protos_raw
+                    ]
+                    # 用 _enrich_protocols_with_asset 补充 asset_id（支持前端跳转）
+                    try:
+                        protocols = _enrich_protocols_with_asset(protocols)
+                    except Exception:
+                        pass
+
                     ranked.append({
-                        "chain": r["chain_name"],
+                        "chain": cname,
                         "chain_key": r["chain_key"],
                         "tvl": float(r["tvl_usd"]) if r["tvl_usd"] else None,
                         "flow_7d": float(r["flow_7d_usd"]) if r["flow_7d_usd"] is not None else None,
                         "flow_7d_pct": float(r["flow_7d_pct"]) if r["flow_7d_pct"] is not None else None,
                         "degraded": False,
-                        "protocols": [],  # 数据库版不带协议列表，前端可不展示
+                        "protocols": protocols,
                         "source": "db",
                     })
 

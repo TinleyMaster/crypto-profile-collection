@@ -3049,14 +3049,14 @@
             border-bottom-color: #4ea1ff;
         }
 
-        /* ── 主布局：主内容 + 右侧侧栏 ── */
+        /* ── 主布局：左栏（待验证地址）+ 主内容 + 右侧侧栏 ── */
         .main-layout {
             display: grid;
-            grid-template-columns: 1fr 340px;
-            gap: 24px;
-            max-width: 1760px;
+            grid-template-columns: 300px 1fr 340px;
+            gap: 20px;
+            max-width: 1920px;
             margin: 0 auto;
-            padding: 20px 24px 60px;
+            padding: 20px 20px 60px;
         }
 
         .main-content {
@@ -3142,6 +3142,252 @@
             font-size: 11px;
             font-weight: 700;
             margin: 0 2px;
+        }
+
+        /* ── 左侧：交易所地址验证栏 ── */
+        .wallet-sidebar {
+            position: sticky;
+            top: 60px;
+            align-self: start;
+            background: #161a21;
+            border: 1px solid #232a36;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 80px);
+            overflow: hidden;
+        }
+
+        .wallet-sidebar .ws-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid #232a36;
+            flex-shrink: 0;
+        }
+
+        .wallet-sidebar .ws-title {
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+
+        .wallet-sidebar .ws-subtitle {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .wallet-sidebar .ws-stats {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .wallet-sidebar .ws-stat {
+            flex: 1;
+            text-align: center;
+            padding: 6px 4px;
+            background: #1f242d;
+            border-radius: 6px;
+        }
+
+        .wallet-sidebar .ws-stat .num {
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .wallet-sidebar .ws-stat .num.pending {
+            color: #f59e0b;
+        }
+
+        .wallet-sidebar .ws-stat .num.high {
+            color: #22c55e;
+        }
+
+        .wallet-sidebar .ws-stat .lbl {
+            font-size: 10px;
+            color: #6b7280;
+            margin-top: 1px;
+        }
+
+        .wallet-sidebar .ws-filter {
+            padding: 10px 12px;
+            border-bottom: 1px solid #232a36;
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+
+        .wallet-sidebar .ws-filter button {
+            background: #1f242d;
+            color: #9ca3af;
+            border: 1px solid #2a2f3a;
+            padding: 4px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }
+
+        .wallet-sidebar .ws-filter button:hover {
+            background: #2a2f3a;
+            color: #e6e8eb;
+        }
+
+        .wallet-sidebar .ws-filter button.active {
+            background: rgba(78, 161, 255, 0.15);
+            color: #4ea1ff;
+            border-color: rgba(78, 161, 255, 0.3);
+        }
+
+        .wallet-sidebar .ws-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .wallet-sidebar .ws-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .wallet-sidebar .ws-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .wallet-sidebar .ws-list::-webkit-scrollbar-thumb {
+            background: #2a2f3a;
+            border-radius: 3px;
+        }
+
+        .wallet-item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 6px;
+            background: #1a1f27;
+            border: 1px solid #232a36;
+            transition: all 0.15s;
+        }
+
+        .wallet-item:hover {
+            border-color: #3b82f6;
+            background: #1c2533;
+        }
+
+        .wallet-item.removing {
+            opacity: 0;
+            transform: translateX(-20px);
+            transition: all 0.2s;
+        }
+
+        .wallet-item .wi-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .wallet-item .wi-exchange {
+            font-weight: 600;
+            font-size: 13px;
+        }
+
+        .wallet-item .wi-chain {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(78, 161, 255, 0.12);
+            color: #4ea1ff;
+            text-transform: uppercase;
+        }
+
+        .wallet-item .wi-address {
+            font-family: "SF Mono", Monaco, Consolas, "Courier New", monospace;
+            font-size: 11px;
+            color: #9ca3af;
+            word-break: break-all;
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+
+        .wallet-item .wi-address a {
+            color: #6b7280;
+            text-decoration: none;
+        }
+
+        .wallet-item .wi-address a:hover {
+            color: #4ea1ff;
+        }
+
+        .wallet-item .wi-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .wallet-item .wi-actions button {
+            flex: 1;
+            padding: 5px 8px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+
+        .wallet-item .btn-approve {
+            background: rgba(34, 197, 94, 0.15);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.3) !important;
+        }
+
+        .wallet-item .btn-approve:hover {
+            background: rgba(34, 197, 94, 0.25);
+        }
+
+        .wallet-item .btn-reject {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.25) !important;
+        }
+
+        .wallet-item .btn-reject:hover {
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        .wallet-load-more {
+            text-align: center;
+            padding: 12px;
+        }
+
+        .wallet-load-more button {
+            background: #1f2937;
+            color: #94a3b8;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 6px 16px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .wallet-load-more button:hover {
+            background: #334155;
+            color: #e2e8f0;
+            border-color: #475569;
+        }
+
+        .wallet-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6b7280;
+            font-size: 12px;
+        }
+
+        .wallet-empty .emoji {
+            font-size: 32px;
+            margin-bottom: 8px;
         }
 
         /* ── 右侧调度日志侧栏 ── */
@@ -4809,6 +5055,16 @@
             color: #f0b90b;
         }
 
+        @media (max-width: 1500px) {
+            .main-layout {
+                grid-template-columns: 1fr 340px;
+            }
+
+            .wallet-sidebar {
+                display: none;
+            }
+        }
+
         @media (max-width: 1200px) {
             .main-layout {
                 grid-template-columns: 1fr;
@@ -4839,6 +5095,33 @@
         </div>
     </nav>
     <div class="main-layout">
+        <!-- 左侧栏：待验证交易所地址 -->
+        <aside class="wallet-sidebar">
+            <div class="ws-header">
+                <div class="ws-title">🔍 交易所地址验证</div>
+                <div class="ws-subtitle">验证通过后参与净流入计算</div>
+                <div class="ws-stats">
+                    <div class="ws-stat">
+                        <div class="num pending" id="ws-pending-count">-</div>
+                        <div class="lbl">待验证</div>
+                    </div>
+                    <div class="ws-stat">
+                        <div class="num high" id="ws-high-count">-</div>
+                        <div class="lbl">已通过</div>
+                    </div>
+                </div>
+            </div>
+            <div class="ws-filter" id="ws-chain-filter">
+                <!-- 链筛选按钮由 JS 动态生成 -->
+            </div>
+            <div class="ws-list" id="ws-wallet-list">
+                <div class="wallet-empty">
+                    <div class="emoji">⏳</div>
+                    加载中...
+                </div>
+            </div>
+        </aside>
+
         <div class="main-content">
             <!-- #assets 资产资料库 -->
             <section id="assets" class="module-card">
@@ -10957,11 +11240,267 @@
             if (btn) btn.classList.toggle('active', _scheduler.autoScroll);
         }
 
+        // ── 交易所地址验证栏 ──────────────────────────────────
+        const _walletSidebar = {
+            currentChain: '',
+            pendingList: [],
+            hasMore: true,
+            loadingMore: false,
+            totalCount: 0,
+            lastStats: null,
+            explorerMap: {
+                eth: 'https://etherscan.io/address/',
+                bsc: 'https://bscscan.com/address/',
+                arbitrum: 'https://arbiscan.io/address/',
+                base: 'https://basescan.org/address/',
+                optimism: 'https://optimistic.etherscan.io/address/',
+                polygon: 'https://polygonscan.com/address/',
+                avalanche: 'https://snowtrace.io/address/',
+                solana: 'https://solscan.io/account/',
+                tron: 'https://tronscan.org/#/address/',
+            },
+            exchangeColors: {
+                'Binance': '#f3ba2f',
+                'Coinbase': '#0052ff',
+                'OKX': '#37b8f2',
+                'Kraken': '#5741d9',
+                'Bybit': '#f7a600',
+                'KuCoin': '#23af91',
+                'Gate.io': '#2354e6',
+                'Bitget': '#34a3ff',
+                'Huobi': '#1e88e5',
+                'MEXC': '#00b272',
+            }
+        };
+
+        function getExplorerUrl (chain, address) {
+            const base = _walletSidebar.explorerMap[chain] || 'https://debank.com/profile/';
+            return base + address;
+        }
+
+        function truncateAddr (addr, chain) {
+            if (!addr) return '';
+            if (chain === 'solana' || chain === 'tron') {
+                if (addr.length <= 12) return addr;
+                return addr.slice(0, 6) + '...' + addr.slice(-4);
+            }
+            if (addr.length <= 14) return addr;
+            return addr.slice(0, 8) + '...' + addr.slice(-6);
+        }
+
+        function applyWalletStats (stats) {
+            const p = document.getElementById('ws-pending-count');
+            const h = document.getElementById('ws-high-count');
+            if (p) p.textContent = stats.totals.medium;
+            if (h) h.textContent = stats.totals.high;
+
+            // 生成链筛选按钮
+            const filterEl = document.getElementById('ws-chain-filter');
+            if (filterEl) {
+                const chains = Object.keys(stats.by_chain).filter(c => stats.by_chain[c].medium > 0).sort();
+                let html = `<button class="${_walletSidebar.currentChain === '' ? 'active' : ''}" data-chain="">全部 (${stats.totals.medium})</button>`;
+                for (const c of chains) {
+                    const n = stats.by_chain[c].medium;
+                    html += `<button class="${_walletSidebar.currentChain === c ? 'active' : ''}" data-chain="${c}">${c.toUpperCase()} (${n})</button>`;
+                }
+                filterEl.innerHTML = html;
+                filterEl.querySelectorAll('button').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        _walletSidebar.currentChain = btn.dataset.chain;
+                        loadWalletPendingList(true); // 重置并重新加载
+                    });
+                });
+            }
+        }
+
+        async function loadWalletStats () {
+            // 兼容保留：直接从 pending 接口取 stats（减少一次独立请求）
+            // 如果已有缓存就用缓存
+            if (_walletSidebar.lastStats) {
+                applyWalletStats(_walletSidebar.lastStats);
+                return;
+            }
+            try {
+                const r = await fetch('/api/exchange-wallets/pending?limit=1');
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.error);
+                if (j.stats) {
+                    _walletSidebar.lastStats = j.stats;
+                    applyWalletStats(j.stats);
+                }
+            } catch (e) {
+                console.error('load wallet stats error:', e);
+            }
+        }
+
+        async function loadWalletPendingList (reset) {
+            const listEl = document.getElementById('ws-wallet-list');
+            if (!listEl) return;
+
+            if (reset) {
+                _walletSidebar.pendingList = [];
+                _walletSidebar.hasMore = true;
+            }
+
+            if (_walletSidebar.loadingMore) return;
+            _walletSidebar.loadingMore = true;
+
+            const isFirst = _walletSidebar.pendingList.length === 0;
+            if (isFirst) {
+                listEl.innerHTML = '<div class="wallet-empty"><div class="emoji">⏳</div>加载中...</div>';
+            }
+
+            try {
+                const params = new URLSearchParams();
+                if (_walletSidebar.currentChain) params.set('chain', _walletSidebar.currentChain);
+                params.set('limit', 50);
+                params.set('offset', _walletSidebar.pendingList.length);
+                const r = await fetch('/api/exchange-wallets/pending?' + params.toString());
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.error);
+
+                // 应用统计数据（一次请求拿列表+统计）
+                if (j.stats) {
+                    _walletSidebar.lastStats = j.stats;
+                    applyWalletStats(j.stats);
+                }
+
+                const newItems = j.data || [];
+                if (isFirst) {
+                    _walletSidebar.pendingList = newItems;
+                } else {
+                    _walletSidebar.pendingList = _walletSidebar.pendingList.concat(newItems);
+                }
+                _walletSidebar.hasMore = _walletSidebar.pendingList.length < j.total;
+                _walletSidebar.totalCount = j.total;
+
+                renderWalletList();
+            } catch (e) {
+                console.error('load wallet list error:', e);
+                if (isFirst) {
+                    listEl.innerHTML = `<div class="wallet-empty"><div class="emoji">❌</div>加载失败<br>${e.message || e}</div>`;
+                }
+            } finally {
+                _walletSidebar.loadingMore = false;
+            }
+        }
+
+        function renderWalletList () {
+            const listEl = document.getElementById('ws-wallet-list');
+            if (!listEl) return;
+            const items = _walletSidebar.pendingList;
+            if (!items || items.length === 0) {
+                listEl.innerHTML = '<div class="wallet-empty"><div class="emoji">✅</div>暂无待验证地址</div>';
+                return;
+            }
+
+            let html = '';
+            for (const w of items) {
+                const color = _walletSidebar.exchangeColors[w.exchange_name] || '#4ea1ff';
+                const explorerUrl = getExplorerUrl(w.chain, w.address);
+                const shortAddr = truncateAddr(w.address, w.chain);
+                const source = w.source ? w.source.replace('auto_', '').replace(';manual_verified', '') : '';
+                html += `
+                <div class="wallet-item" data-id="${w.wallet_id}">
+                    <div class="wi-top">
+                        <span class="wi-exchange" style="color:${color}">${w.exchange_name}</span>
+                        <span class="wi-chain">${w.chain}</span>
+                    </div>
+                    <div class="wi-address">
+                        <a href="${explorerUrl}" target="_blank" rel="noopener" title="${w.address}">${shortAddr}</a>
+                    </div>
+                    <div class="wi-actions">
+                        <button class="btn-approve" onclick="verifyWallet(${w.wallet_id}, 'approve')">✅ 验证通过</button>
+                        <button class="btn-reject" onclick="verifyWallet(${w.wallet_id}, 'reject')">❌ 非交易所</button>
+                    </div>
+                </div>`;
+            }
+
+            // 加载更多 / 计数
+            const total = _walletSidebar.totalCount || items.length;
+            if (_walletSidebar.hasMore) {
+                html += `<div class="wallet-load-more"><button onclick="loadWalletPendingList()">加载更多 (${items.length} / ${total})</button></div>`;
+            } else if (items.length > 50) {
+                html += `<div class="wallet-load-more" style="opacity:.6">已显示全部 ${items.length} 条</div>`;
+            }
+            listEl.innerHTML = html;
+        }
+
+        async function verifyWallet (walletId, action) {
+            const itemEl = document.querySelector(`.wallet-item[data-id="${walletId}"]`);
+            if (itemEl) {
+                itemEl.style.opacity = '0.6';
+                itemEl.style.pointerEvents = 'none';
+            }
+
+            try {
+                const r = await fetch('/api/exchange-wallets/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ wallet_id: walletId, action: action })
+                });
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.error);
+
+                if (itemEl) {
+                    itemEl.classList.add('removing');
+                    setTimeout(() => {
+                        if (itemEl.parentNode) itemEl.parentNode.removeChild(itemEl);
+                    }, 200);
+                }
+
+                // 从本地列表移除
+                _walletSidebar.pendingList = _walletSidebar.pendingList.filter(w => w.wallet_id !== walletId);
+                if (_walletSidebar.totalCount) _walletSidebar.totalCount--;
+
+                // 本地更新统计（无需重新请求）
+                const wallet = _walletSidebar.pendingList.find(w => w.wallet_id === walletId) ||
+                    { chain: itemEl?.querySelector('.wi-chain')?.textContent };
+                if (_walletSidebar.lastStats) {
+                    _walletSidebar.lastStats.totals.medium = Math.max(0, _walletSidebar.lastStats.totals.medium - 1);
+                    if (action === 'approve') {
+                        _walletSidebar.lastStats.totals.high = (_walletSidebar.lastStats.totals.high || 0) + 1;
+                    }
+                    if (wallet.chain && _walletSidebar.lastStats.by_chain[wallet.chain]) {
+                        _walletSidebar.lastStats.by_chain[wallet.chain].medium = Math.max(0, _walletSidebar.lastStats.by_chain[wallet.chain].medium - 1);
+                        if (action === 'approve') {
+                            _walletSidebar.lastStats.by_chain[wallet.chain].high = (_walletSidebar.lastStats.by_chain[wallet.chain].high || 0) + 1;
+                        }
+                    }
+                    applyWalletStats(_walletSidebar.lastStats);
+                }
+
+                // 如果列表空了，显示空状态
+                if (_walletSidebar.pendingList.length === 0) {
+                    renderWalletList();
+                } else {
+                    // 重新渲染以更新计数
+                    renderWalletList();
+                }
+            } catch (e) {
+                console.error('verify wallet error:', e);
+                if (itemEl) {
+                    itemEl.style.opacity = '';
+                    itemEl.style.pointerEvents = '';
+                }
+                alert('操作失败: ' + (e.message || e));
+            }
+        }
+
         // 页面加载完成后初始化
+        function initWalletSidebar () {
+            // 只发一次请求：pending 接口已包含 stats 数据
+            loadWalletPendingList(true);
+        }
+
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initSchedulerFeed);
+            document.addEventListener('DOMContentLoaded', () => {
+                initSchedulerFeed();
+                initWalletSidebar();
+            });
         } else {
             initSchedulerFeed();
+            initWalletSidebar();
         }
     </script>
 

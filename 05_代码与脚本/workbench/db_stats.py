@@ -9067,7 +9067,10 @@ def remove_watchlist(watch_id: int) -> dict:
 
 def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] | None = None,
                             sectors: list[str] | None = None,
-                            mcap_tiers: list[str] | None = None) -> dict:
+                            mcap_tiers: list[str] | None = None,
+                            date_offset: int = 0,
+                            watchlist_only: bool = False,
+                            filter_noise: bool = False) -> dict:
     """获取每日 diff 变化榜。
 
     Args:
@@ -9075,6 +9078,9 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
         categories: 过滤榜单类型，None 返回全部
         sectors: 按赛道过滤（primary_sector 值列表），None 不过滤
         mcap_tiers: 按市值分层过滤（top10/top100/top500/top1000/top3000），None 不过滤
+        date_offset: 相对最新日期的偏移天数（0=最新, 1=前一天, 3=前3天），diff_date 为 None 时生效
+        watchlist_only: 仅返回机会观察列表（opportunity_watchlist）中的币种
+        filter_noise: 过滤噪音（稳定币、上线不足7天的新币等）
 
     Returns:
         {
@@ -9102,7 +9108,19 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 if not row or not row["d"]:
                     return {"ok": True, "diff_date": None, "available_sectors": [],
                             "available_tiers": [], "categories": {}}
-                target_date = str(row["d"])
+                latest = row["d"]
+                if date_offset and date_offset > 0:
+                    target_date = str(latest)
+                    # 往前推 offset 天，找到最近的有数据的日期
+                    cur.execute(
+                        "SELECT max(diff_date) AS d FROM biz.daily_diff_summary WHERE diff_date <= %s::DATE - %s * INTERVAL '1 day'",
+                        (latest, date_offset),
+                    )
+                    offset_row = cur.fetchone()
+                    if offset_row and offset_row["d"]:
+                        target_date = str(offset_row["d"])
+                else:
+                    target_date = str(latest)
 
             cat_filter = ""
             params: list = [target_date]
@@ -9124,6 +9142,22 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 placeholders = ",".join(["%s"] * len(mcap_tiers))
                 tier_filter = f" AND d.detail_json->>'mcap_tier' IN ({placeholders})"
                 params.extend(mcap_tiers)
+
+            # 自选观察列表过滤
+            watchlist_join = ""
+            if watchlist_only:
+                watchlist_join = "JOIN biz.opportunity_watchlist w ON w.asset_id = d.asset_id"
+
+            # 噪音过滤：稳定币 + 上线不足7天的新币（小市值才过滤，避免误伤头部新币）
+            noise_filter = ""
+            if filter_noise:
+                noise_filter = (
+                    " AND a.asset_type <> 'stablecoin'"
+                    " AND NOT ("
+                    "   a.created_at > NOW() - INTERVAL '7 days'"
+                    "   AND COALESCE(a.market_cap_rank, 999999) > 200"
+                    " )"
+                )
 
             cur.execute(
                 f"""
@@ -9147,10 +9181,12 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                      LIMIT 1) AS chain
                 FROM biz.daily_diff_summary d
                 JOIN core.asset a ON a.asset_id = d.asset_id
+                {watchlist_join}
                 WHERE d.diff_date = %s
                   {cat_filter}
                   {sector_filter}
                   {tier_filter}
+                  {noise_filter}
                 ORDER BY d.category, d.direction, d.rank
                 """,
                 tuple(params),
@@ -9209,6 +9245,307 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 "available_tiers": available_tiers,
                 "categories": result,
             }
+
+
+def get_fund_flow_rank(diff_date: str | None = None, limit: int = 10,
+                       date_offset: int = 0,
+                       watchlist_only: bool = False,
+                       filter_noise: bool = False) -> dict:
+    """资金流向榜：赛道级 + 币种级两层。
+
+    Args:
+        diff_date: 指定日期，None 取最新
+        limit: 每侧返回 Top N
+        date_offset: 相对最新日期的偏移天数，diff_date 为 None 时生效
+        watchlist_only: 仅返回机会观察列表中的币种（币种级）
+        filter_noise: 过滤噪音（稳定币、新币等）
+
+    Returns:
+        {
+            "ok": True,
+            "metric_date": "2026-08-20",
+            "sectors": {
+                "inflow": [{sector_key, sector_label, mcap_change_1d_pct, market_cap, leaders}, ...],
+                "outflow": [...]
+            },
+            "coins": {
+                "inflow": [{asset_id, symbol, name, market_cap, change_24h, market_cap_change_usd, primary_sector, mcap_tier, rank}, ...],
+                "outflow": [...]
+            }
+        }
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 确定日期（优先用 daily_diff_summary 的最新日期，确保一致性）
+            if diff_date:
+                target_date = diff_date
+            else:
+                cur.execute("SELECT max(diff_date) AS d FROM biz.daily_diff_summary")
+                row = cur.fetchone()
+                if not row or not row["d"]:
+                    return {"ok": True, "metric_date": None, "sectors": {"inflow": [], "outflow": []},
+                            "coins": {"inflow": [], "outflow": []}}
+                latest = row["d"]
+                if date_offset and date_offset > 0:
+                    target_date = str(latest)
+                    cur.execute(
+                        "SELECT max(diff_date) AS d FROM biz.daily_diff_summary WHERE diff_date <= %s::DATE - %s * INTERVAL '1 day'",
+                        (latest, date_offset),
+                    )
+                    offset_row = cur.fetchone()
+                    if offset_row and offset_row["d"]:
+                        target_date = str(offset_row["d"])
+                else:
+                    target_date = str(latest)
+
+            result = {"ok": True, "metric_date": target_date}
+
+            # ── 1. 赛道级：从 biz.sector_flow_daily 取 12 赛道 ──
+            try:
+                cur.execute("""
+                    SELECT sector_key, sector_label, market_cap, mcap_change_1d_pct,
+                           mcap_change_7d_pct, coin_count, composite_score
+                    FROM biz.sector_flow_daily
+                    WHERE metric_date = (
+                        SELECT MAX(metric_date) FROM biz.sector_flow_daily
+                        WHERE metric_date <= %s::DATE
+                    )
+                      AND sector_type = 'sector_12'
+                    ORDER BY mcap_change_1d_pct DESC NULLS LAST
+                """, (target_date,))
+                all_sectors = [dict(r) for r in cur.fetchall()]
+
+                # 每个赛道取领涨币 TOP3
+                for s in all_sectors:
+                    try:
+                        cur.execute("""
+                            SELECT a.canonical_symbol AS symbol, a.canonical_name AS name,
+                                   q.market_cap, q.percent_change_24h, q.percent_change_7d
+                            FROM biz.asset_sector s2
+                            JOIN core.asset a ON s2.asset_id = a.asset_id
+                            JOIN core.asset_source_map asm
+                              ON a.asset_id = asm.asset_id AND asm.source_code = 'cmc'
+                            JOIN (
+                                SELECT DISTINCT ON (cmc_id) cmc_id, market_cap,
+                                       percent_change_24h, percent_change_7d,
+                                       quote_time::date as qdate
+                                FROM src_cmc.cmc_asset_quote_snapshot
+                                WHERE market_cap IS NOT NULL
+                                  AND quote_time::date <= %s::DATE
+                                ORDER BY cmc_id, quote_time DESC
+                            ) q ON asm.source_asset_key::bigint = q.cmc_id
+                            WHERE s2.sector = %s AND s2.is_primary = TRUE
+                              AND q.market_cap >= 10000000
+                            ORDER BY q.percent_change_24h DESC NULLS LAST
+                            LIMIT 3
+                        """, (target_date, s["sector_key"]))
+                        s["leaders"] = [dict(r) for r in cur.fetchall()]
+                    except Exception:
+                        s["leaders"] = []
+
+                inflow_sectors = [s for s in all_sectors if (s.get("mcap_change_1d_pct") or 0) > 0][:limit]
+                outflow_sectors = list(reversed([s for s in all_sectors if (s.get("mcap_change_1d_pct") or 0) < 0]))[:limit]
+                result["sectors"] = {"inflow": inflow_sectors, "outflow": outflow_sectors}
+            except Exception:
+                result["sectors"] = {"inflow": [], "outflow": []}
+
+            # ── 2. 币种级：从 daily_diff_summary 的 market_cap_mover 取（按市值变动绝对值排序）──
+            try:
+                coin_params: list = [target_date]
+                watchlist_join_coin = ""
+                noise_filter_coin = ""
+                if watchlist_only:
+                    watchlist_join_coin = "JOIN biz.opportunity_watchlist w ON w.asset_id = d.asset_id"
+                if filter_noise:
+                    noise_filter_coin = (
+                        " AND a.asset_type <> 'stablecoin'"
+                        " AND NOT ("
+                        "   a.created_at > NOW() - INTERVAL '7 days'"
+                        "   AND COALESCE(a.market_cap_rank, 999999) > 200"
+                        " )"
+                    )
+                coin_params.append(limit * 2)
+                cur.execute(f"""
+                    SELECT
+                        d.asset_id,
+                        a.canonical_symbol AS symbol,
+                        a.canonical_name AS name,
+                        a.market_cap_rank,
+                        a.primary_sector,
+                        d.metric_value,
+                        d.metric_label,
+                        d.rank,
+                        d.direction,
+                        d.detail_json
+                    FROM biz.daily_diff_summary d
+                    JOIN core.asset a ON a.asset_id = d.asset_id
+                    {watchlist_join_coin}
+                    WHERE d.diff_date = %s
+                      AND d.category = 'market_cap_mover'
+                      {noise_filter_coin}
+                    ORDER BY d.rank
+                    LIMIT %s
+                """, tuple(coin_params))
+                all_coins = [dict(r) for r in cur.fetchall()]
+
+                inflow_coins = []
+                outflow_coins = []
+                for c in all_coins:
+                    detail = c.get("detail_json") or {}
+                    coin_data = {
+                        "asset_id": c["asset_id"],
+                        "symbol": c["symbol"],
+                        "name": c["name"],
+                        "market_cap_rank": c["market_cap_rank"],
+                        "primary_sector": c["primary_sector"],
+                        "metric_value": float(c["metric_value"]) if c["metric_value"] is not None else None,
+                        "metric_label": c["metric_label"],
+                        "rank": c["rank"],
+                        "market_cap": detail.get("market_cap"),
+                        "market_cap_change_usd": detail.get("market_cap_change_usd"),
+                        "change_24h": detail.get("change_24h"),
+                        "mcap_tier": detail.get("mcap_tier"),
+                        "chain": detail.get("chain"),
+                    }
+                    if c["direction"] == "up":
+                        inflow_coins.append(coin_data)
+                    else:
+                        outflow_coins.append(coin_data)
+
+                result["coins"] = {
+                    "inflow": inflow_coins[:limit],
+                    "outflow": outflow_coins[:limit],
+                }
+            except Exception:
+                result["coins"] = {"inflow": [], "outflow": []}
+
+            return result
+
+
+def get_diff_attribution(asset_id: int, diff_date: str | None = None,
+                         date_offset: int = 0) -> dict:
+    """异动归因：给定币种和日期，返回可能导致异动的原因。
+
+    覆盖三类原因：
+    1. catalysts — 近 7 天催化剂事件（币安公告、新闻等）
+    2. unlocks — 近 3 天已解锁 + 未来 7 天即将解锁
+    3. large_tx — 大额转账（如有数据，近 24h 单笔 > 100 万 USD）
+
+    Args:
+        asset_id: 资产 ID
+        diff_date: 异动日期（YYYY-MM-DD），None 取最新
+        date_offset: 相对最新日期的偏移天数，diff_date 为 None 时生效
+
+    Returns:
+        {ok, asset_id, symbol, diff_date, catalysts: [], unlocks: [], large_tx: []}
+    """
+    from datetime import datetime, timedelta
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 先拿 symbol 和日期
+            cur.execute("SELECT canonical_symbol AS symbol FROM core.asset WHERE asset_id = %s", (asset_id,))
+            row = cur.fetchone()
+            if not row:
+                return {"ok": False, "error": "asset not found", "asset_id": asset_id}
+            symbol = row["symbol"]
+
+            if diff_date:
+                target_date = diff_date
+            else:
+                cur.execute("SELECT max(diff_date) AS d FROM biz.daily_diff_summary")
+                d_row = cur.fetchone()
+                latest = d_row["d"] if d_row and d_row["d"] else datetime.now().date()
+                if date_offset and date_offset > 0:
+                    cur.execute(
+                        "SELECT max(diff_date) AS d FROM biz.daily_diff_summary WHERE diff_date <= %s::DATE - %s * INTERVAL '1 day'",
+                        (latest, date_offset),
+                    )
+                    offset_row = cur.fetchone()
+                    if offset_row and offset_row["d"]:
+                        target_date = str(offset_row["d"])
+                    else:
+                        target_date = str(latest)
+                else:
+                    target_date = str(latest)
+
+            result = {
+                "ok": True,
+                "asset_id": asset_id,
+                "symbol": symbol,
+                "diff_date": target_date,
+                "catalysts": [],
+                "unlocks": [],
+                "large_tx": [],
+            }
+
+            # ── 1. 催化剂事件：异动日期前后 3 天 ──
+            try:
+                cur.execute("""
+                    SELECT
+                        source_code,
+                        title,
+                        event_category,
+                        event_subcategory,
+                        published_at,
+                        body_text,
+                        source_article_code
+                    FROM biz.asset_catalyst
+                    WHERE asset_id = %s
+                      AND published_at BETWEEN %s::DATE - INTERVAL '3 days'
+                                           AND %s::DATE + INTERVAL '3 days'
+                    ORDER BY published_at DESC
+                    LIMIT 20
+                """, (asset_id, target_date, target_date))
+                rows = cur.fetchall()
+                result["catalysts"] = [
+                    {
+                        "source": r["source_code"],
+                        "title": r["title"],
+                        "category": r["event_category"],
+                        "subcategory": r["event_subcategory"],
+                        "published_at": str(r["published_at"]) if r["published_at"] else None,
+                        "summary": (r["body_text"] or "")[:200] if r["body_text"] else "",
+                        "article_code": r["source_article_code"],
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                result["catalysts"] = []
+
+            # ── 2. 解锁事件：近 3 天已解锁 + 未来 7 天即将解锁 ──
+            try:
+                cur.execute("""
+                    SELECT
+                        unlock_date,
+                        unlock_value_usd,
+                        unlock_pct_supply,
+                        description
+                    FROM biz.asset_unlock_event
+                    WHERE asset_id = %s
+                      AND unlock_date BETWEEN %s::DATE - INTERVAL '3 days'
+                                          AND %s::DATE + INTERVAL '7 days'
+                    ORDER BY unlock_date ASC
+                    LIMIT 20
+                """, (asset_id, target_date, target_date))
+                rows = cur.fetchall()
+                result["unlocks"] = [
+                    {
+                        "unlock_date": str(r["unlock_date"]) if r["unlock_date"] else None,
+                        "value_usd": float(r["unlock_value_usd"]) if r["unlock_value_usd"] is not None else None,
+                        "pct_supply": float(r["unlock_pct_supply"]) if r["unlock_pct_supply"] is not None else None,
+                        "description": r["description"],
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                result["unlocks"] = []
+
+            # ── 3. 大额转账：暂不实现（需要专门的链上数据接入），返回空数组占个位
+            # 后续有数据后可以从 onchain_holder_snapshot 或专门的大额转账表取
+            result["large_tx"] = []
+
+            return result
 
 
 def get_cm_mvrv_dashboard() -> dict:
@@ -9413,6 +9750,328 @@ def get_cm_valuation_dashboard() -> dict:
         metric_date = rows[0]["metric_date"].isoformat() if hasattr(rows[0]["metric_date"], "isoformat") else str(rows[0]["metric_date"])
 
     return {"ok": True, "metric_date": metric_date, "cm_valuation": cm_valuation}
+
+
+# ══════════════════════════════════════════════════════════════
+# P1 链上历史极值（onchain_extremes / onchain_thermometer）
+# ══════════════════════════════════════════════════════════════
+
+ONCHAIN_METRIC_META = {
+    "mvrv":      {"name": "MVRV 估值",       "unit": "倍",    "desc": "市值 / 已实现市值，衡量估值高低", "inverse": False},
+    "adr_act":   {"name": "活跃地址数",      "unit": "个",    "desc": "每日活跃地址数，反映链上活跃度", "inverse": False},
+    "tx_tfr":    {"name": "转账交易数",      "unit": "笔",    "desc": "每日转账交易笔数",                "inverse": False},
+    "flow_in":   {"name": "交易所流入",      "unit": "USD",   "desc": "流入交易所的链上金额（潜在抛压）", "inverse": True},
+    "flow_out":  {"name": "交易所流出",      "unit": "USD",   "desc": "流出交易所的链上金额（潜在惜售）", "inverse": False},
+    "roi1yr":    {"name": "1 年 ROI",       "unit": "%",     "desc": "近 365 天持有收益率",              "inverse": False},
+    "roi30d":    {"name": "30 天 ROI",      "unit": "%",     "desc": "近 30 天持有收益率",               "inverse": False},
+}
+
+
+def get_onchain_extremes(asset_id: int) -> dict:
+    """单个币种的链上历史极值卡片数据。
+
+    从 biz.cm_onchain_percentile（长表视图）读取最新日的所有指标：
+    - 当前值
+    - 全历史百分位（0-100）
+    - 滚动 365 天百分位
+    - 极值标记（HIGH / LOW / NONE）
+
+    返回 {ok, metric_date, asset_id, symbol, name, metrics: [{metric, name, value, unit, pct_full, pct_roll_365d, flag, desc}], summary}
+    """
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 1. 查最新日期（该币有数据的最近一天）
+            cur.execute("""
+                SELECT MAX(metric_date) AS latest_date
+                FROM biz.cm_onchain_percentile
+                WHERE asset_id = %s
+            """, (asset_id,))
+            date_row = cur.fetchone()
+            if not date_row or not date_row["latest_date"]:
+                return {"ok": False, "error": "该币种无链上历史数据（CoinMetrics 社区档未覆盖）"}
+
+            latest_date = date_row["latest_date"]
+
+            # 2. 查该币基本信息（兜底显示用）
+            cur.execute("""
+                SELECT canonical_symbol, canonical_name, cm_symbol
+                FROM core.asset
+                WHERE asset_id = %s
+            """, (asset_id,))
+            info_row = cur.fetchone()
+            cm_symbol = info_row["cm_symbol"] if info_row else None
+            canonical_symbol = info_row["canonical_symbol"] if info_row else None
+            canonical_name = info_row["canonical_name"] if info_row else None
+
+            # 3. 如果 asset_id 直接查不到数据，尝试按 cm_symbol 映射查
+            cur.execute("""
+                SELECT COUNT(*) AS cnt
+                FROM biz.cm_onchain_percentile
+                WHERE asset_id = %s AND metric_date = %s
+            """, (asset_id, latest_date))
+            has_direct = cur.fetchone()["cnt"] > 0
+
+            query_asset_id = asset_id
+            if not has_direct and cm_symbol:
+                # 用 cm_symbol 找对应的 asset_id
+                cur.execute("""
+                    SELECT asset_id
+                    FROM biz.cm_asset_onchain_daily
+                    WHERE cm_symbol = %s
+                    LIMIT 1
+                """, (cm_symbol.lower(),))
+                mapped = cur.fetchone()
+                if mapped:
+                    query_asset_id = mapped["asset_id"]
+                    cur.execute("""
+                        SELECT MAX(metric_date) AS latest_date
+                        FROM biz.cm_onchain_percentile
+                        WHERE asset_id = %s
+                    """, (query_asset_id,))
+                    new_date = cur.fetchone()
+                    if new_date and new_date["latest_date"]:
+                        latest_date = new_date["latest_date"]
+
+            # 4. 查询该日所有指标的百分位
+            cur.execute("""
+                SELECT p.metric, p.value, p.pct_full, p.pct_roll_365d, p.flag_full
+                FROM biz.cm_onchain_percentile p
+                WHERE p.asset_id = %s
+                  AND p.metric_date = %s
+                ORDER BY p.metric
+            """, (query_asset_id, latest_date))
+            rows = cur.fetchall()
+
+    if not rows:
+        return {"ok": False, "error": "无链上百分位数据"}
+
+    metrics = []
+    high_count = 0
+    low_count = 0
+    for r in rows:
+        metric = r["metric"]
+        meta = ONCHAIN_METRIC_META.get(metric, {"name": metric, "unit": "", "desc": ""})
+        value = float(r["value"]) if r["value"] is not None else None
+        pct_full = float(r["pct_full"]) if r["pct_full"] is not None else None
+        pct_roll = float(r["pct_roll_365d"]) if r["pct_roll_365d"] is not None else None
+        flag = r["flag_full"] or "NONE"
+
+        if flag == "HIGH":
+            high_count += 1
+        elif flag == "LOW":
+            low_count += 1
+
+        # 格式化 value
+        value_display = None
+        if value is not None:
+            if meta["unit"] == "USD":
+                if value >= 1e9:
+                    value_display = f"{value/1e9:.2f}B"
+                elif value >= 1e6:
+                    value_display = f"{value/1e6:.2f}M"
+                elif value >= 1e3:
+                    value_display = f"{value/1e3:.2f}K"
+                else:
+                    value_display = f"{value:.2f}"
+            elif meta["unit"] == "%":
+                value_display = f"{value:.2f}"
+            elif meta["unit"] == "倍":
+                value_display = f"{value:.3f}"
+            elif meta["unit"] == "个" or meta["unit"] == "笔":
+                if value >= 1e6:
+                    value_display = f"{value/1e6:.2f}M"
+                elif value >= 1e3:
+                    value_display = f"{value/1e3:.2f}K"
+                else:
+                    value_display = f"{value:,.0f}"
+            else:
+                value_display = f"{value:.4f}"
+
+        metrics.append({
+            "metric": metric,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "desc": meta["desc"],
+            "value": value,
+            "value_display": value_display,
+            "pct_full": pct_full,
+            "pct_roll_365d": pct_roll,
+            "flag": flag,
+            "inverse": meta.get("inverse", False),
+        })
+
+    # 综合评估
+    if high_count >= 3:
+        summary = {
+            "level": "overheated",
+            "label": "链上过热",
+            "icon": "🔥",
+            "text": f"{high_count} 项指标处于历史高位，警惕回调风险"
+        }
+    elif low_count >= 3:
+        summary = {
+            "level": "cold",
+            "label": "链上冰冻",
+            "icon": "❄️",
+            "text": f"{low_count} 项指标处于历史低位，可能是底部区域"
+        }
+    elif high_count >= 2:
+        summary = {
+            "level": "warm",
+            "label": "偏热",
+            "icon": "🌡️",
+            "text": f"{high_count} 项指标偏高，关注估值压力"
+        }
+    elif low_count >= 2:
+        summary = {
+            "level": "cool",
+            "label": "偏冷",
+            "icon": "💧",
+            "text": f"{low_count} 项指标偏低，关注左侧机会"
+        }
+    else:
+        summary = {
+            "level": "neutral",
+            "label": "中性",
+            "icon": "⚖️",
+            "text": "链上指标大多处于历史中间区间"
+        }
+
+    return {
+        "ok": True,
+        "metric_date": latest_date.isoformat() if hasattr(latest_date, "isoformat") else str(latest_date),
+        "asset_id": asset_id,
+        "query_asset_id": query_asset_id,
+        "symbol": cm_symbol or canonical_symbol,
+        "name": canonical_name,
+        "metrics": metrics,
+        "summary": summary,
+        "data_note": "CoinMetrics 社区档历史数据（冻结），用于历史极值参考，不代表实时状态"
+    }
+
+
+def get_onchain_thermometer(limit: int = 10) -> dict:
+    """主流币链上估值温度计。
+
+    从 biz.cm_onchain_percentile_full 宽表读取市值前 N 个币的核心指标百分位，
+    计算综合温度（0-100），用于宏观看板快速扫描主流币估值冷热。
+
+    综合温度 = 0.35 * mvrv_pct + 0.25 * roi_1yr_pct + 0.20 * adr_pct + 0.20 * tx_pct
+
+    返回 {ok, metric_date, tokens: [{symbol, name, market_cap, temperature, level,
+            mvrv_pct, roi_1yr_pct, adr_pct, tx_pct, mvrv_value, roi_1yr_value}]}
+    """
+    from crypto_research.config import get_settings
+
+    settings = get_settings(require_database=True)
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT p.asset_id, p.metric_date,
+                           p.mvrv_pct_full,
+                           p.roi_1yr_pct_full,
+                           p.adr_pct_full,
+                           p.tx_pct_full
+                    FROM biz.cm_onchain_percentile_full p
+                    WHERE p.metric_date = (
+                        SELECT MAX(metric_date) FROM biz.cm_asset_onchain_daily
+                    )
+                )
+                SELECT d.cm_symbol,
+                       d.cap_mrkt_cur_usd AS market_cap,
+                       d.cap_mvrv_cur AS mvrv_value,
+                       d.roi_1yr AS roi_1yr_value,
+                       d.adr_act_cnt AS adr_value,
+                       d.tx_tfr_cnt AS tx_value,
+                       l.mvrv_pct_full,
+                       l.roi_1yr_pct_full,
+                       l.adr_pct_full,
+                       l.tx_pct_full,
+                       l.metric_date
+                FROM latest l
+                JOIN biz.cm_asset_onchain_daily d
+                    ON l.asset_id = d.asset_id AND l.metric_date = d.metric_date
+                WHERE d.cap_mrkt_cur_usd IS NOT NULL
+                ORDER BY d.cap_mrkt_cur_usd DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+
+    if not rows:
+        return {"ok": False, "error": "无链上百分位数据"}
+
+    tokens = []
+    for r in rows:
+        mvrv_pct = float(r["mvrv_pct_full"]) if r["mvrv_pct_full"] is not None else None
+        roi_pct = float(r["roi_1yr_pct_full"]) if r["roi_1yr_pct_full"] is not None else None
+        adr_pct = float(r["adr_pct_full"]) if r["adr_pct_full"] is not None else None
+        tx_pct = float(r["tx_pct_full"]) if r["tx_pct_full"] is not None else None
+
+        # 计算综合温度（权重：MVRV 35% / ROI-1Y 25% / 活跃地址 20% / 交易数 20%）
+        parts = []
+        weights = []
+        if mvrv_pct is not None:
+            parts.append(mvrv_pct * 0.35)
+            weights.append(0.35)
+        if roi_pct is not None:
+            parts.append(roi_pct * 0.25)
+            weights.append(0.25)
+        if adr_pct is not None:
+            parts.append(adr_pct * 0.20)
+            weights.append(0.20)
+        if tx_pct is not None:
+            parts.append(tx_pct * 0.20)
+            weights.append(0.20)
+
+        temperature = None
+        level = "unknown"
+        if parts and sum(weights) > 0:
+            temperature = round(sum(parts) / sum(weights), 1)
+            if temperature >= 85:
+                level = "extreme_hot"
+            elif temperature >= 70:
+                level = "hot"
+            elif temperature >= 55:
+                level = "warm"
+            elif temperature >= 40:
+                level = "neutral"
+            elif temperature >= 20:
+                level = "cool"
+            else:
+                level = "cold"
+
+        mvrv_val = float(r["mvrv_value"]) if r["mvrv_value"] is not None else None
+        roi_val = float(r["roi_1yr_value"]) if r["roi_1yr_value"] is not None else None
+        mcap = float(r["market_cap"]) if r["market_cap"] is not None else None
+
+        tokens.append({
+            "symbol": r["cm_symbol"].upper() if r["cm_symbol"] else None,
+            "market_cap": mcap,
+            "market_cap_display": f"${mcap/1e9:.2f}B" if mcap and mcap >= 1e9 else (f"${mcap/1e6:.1f}M" if mcap else None),
+            "temperature": temperature,
+            "level": level,
+            "mvrv_pct": mvrv_pct,
+            "roi_1yr_pct": roi_pct,
+            "adr_pct": adr_pct,
+            "tx_pct": tx_pct,
+            "mvrv_value": round(mvrv_val, 3) if mvrv_val is not None else None,
+            "roi_1yr_value": round(roi_val, 2) if roi_val is not None else None,
+        })
+
+    metric_date = rows[0]["metric_date"]
+    return {
+        "ok": True,
+        "metric_date": metric_date.isoformat() if hasattr(metric_date, "isoformat") else str(metric_date),
+        "tokens": tokens,
+        "data_note": "CoinMetrics 社区档历史数据（冻结），用于历史极值对比参考",
+        "methodology": "综合温度 = MVRV 35% + 1年ROI 25% + 活跃地址 20% + 交易数 20%"
+    }
 
 
 # ══════════════════════════════════════════════════════════════

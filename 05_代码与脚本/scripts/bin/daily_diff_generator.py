@@ -22,8 +22,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
+from datetime import timedelta
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -195,7 +197,7 @@ SELECT
     %s::DATE,
     'price_volume_surge',
     asset_id,
-    ROUND((price_pct + vol_pct) / 2, 2) AS composite_score,
+    ROUND(((price_pct + vol_pct) / 2)::numeric, 2) AS composite_score,
     '量价共振得分',
     ROW_NUMBER() OVER (ORDER BY (price_pct + vol_pct) / 2 DESC),
     'up',
@@ -204,9 +206,9 @@ SELECT
         'market_cap', market_cap,
         'volume_24h', volume_24h,
         'change_24h', change_24h,
-        'vol_mcap_ratio', ROUND(vol_mcap_ratio, 2),
-        'price_pct_rank', ROUND(price_pct, 1),
-        'volume_pct_rank', ROUND(vol_pct, 1),
+        'vol_mcap_ratio', ROUND(vol_mcap_ratio::numeric, 2),
+        'price_pct_rank', ROUND(price_pct::numeric, 1),
+        'volume_pct_rank', ROUND(vol_pct::numeric, 1),
         'primary_sector', primary_sector,
         'mcap_tier', CASE
             WHEN market_cap_rank <= 10 THEN 'top10'
@@ -401,6 +403,214 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
 
+SECTOR_ROTATION_SQL = """
+-- 计算指定日期的赛道强度分
+WITH price_top AS (
+    SELECT
+        a.primary_sector AS sector,
+        COUNT(*) AS up_count,
+        AVG(d.change_24h) AS avg_change
+    FROM biz.asset_market_daily d
+    JOIN core.asset a ON a.asset_id = d.asset_id
+    WHERE d.source_code = 'cmc'
+      AND d.market_date = %s::DATE
+      AND a.market_cap_rank <= 500
+      AND d.change_24h IS NOT NULL
+      AND d.change_24h > 0
+      AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+      AND a.primary_sector IS NOT NULL
+      AND a.primary_sector != 'other'
+    GROUP BY a.primary_sector
+),
+vol_top AS (
+    SELECT
+        a.primary_sector AS sector,
+        COUNT(*) AS vol_count
+    FROM biz.asset_market_daily d
+    JOIN core.asset a ON a.asset_id = d.asset_id
+    WHERE d.source_code = 'cmc'
+      AND d.market_date = %s::DATE
+      AND a.market_cap_rank <= 500
+      AND d.volume_24h IS NOT NULL
+      AND d.market_cap > 0
+      AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+      AND a.primary_sector IS NOT NULL
+      AND a.primary_sector != 'other'
+      AND CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap ELSE 0 END >= 0.05
+    GROUP BY a.primary_sector
+)
+SELECT
+    COALESCE(p.sector, v.sector) AS sector,
+    COALESCE(p.up_count, 0) AS up_count,
+    COALESCE(p.avg_change, 0) AS avg_change,
+    COALESCE(v.vol_count, 0) AS vol_count,
+    -- 赛道强度分 = 上涨家数得分 + 平均涨幅得分 + 放量家数得分
+    (COALESCE(p.up_count, 0) * 2.0 +
+     COALESCE(p.avg_change, 0) * 1.5 +
+     COALESCE(v.vol_count, 0) * 1.5) AS strength_score
+FROM price_top p
+FULL OUTER JOIN vol_top v ON p.sector = v.sector
+ORDER BY strength_score DESC
+"""
+
+SECTOR_LEADERS_SQL = """
+-- 找某赛道在量价齐升榜里的领涨龙头
+SELECT
+    d.asset_id,
+    d.metric_value AS composite_score,
+    d.detail_json->>'change_24h' AS change_24h,
+    d.detail_json->>'volume_pct_rank' AS volume_pct_rank,
+    d.detail_json->>'market_cap' AS market_cap,
+    a.canonical_symbol,
+    a.canonical_name,
+    a.market_cap_rank
+FROM biz.daily_diff_summary d
+JOIN core.asset a ON a.asset_id = d.asset_id
+WHERE d.diff_date = %s::DATE
+  AND d.category = 'price_volume_surge'
+  AND d.direction = 'up'
+  AND d.detail_json->>'primary_sector' = %s
+  AND a.market_cap_rank <= 500
+ORDER BY d.metric_value DESC
+LIMIT 3
+"""
+
+INSERT_SECTOR_ROTATION_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+VALUES (%s, 'sector_rotation', %s, %s, '板块轮动-龙头得分', %s, 'up', %s)
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+
+def _compute_sector_strength(cur, d: date) -> list[dict]:
+    """计算指定日期各赛道的强度分，返回 [{sector, strength_score, rank, ...}]"""
+    cur.execute(SECTOR_ROTATION_SQL, (str(d), str(d)))
+    rows = cur.fetchall()
+    result = []
+    for i, row in enumerate(rows):
+        result.append({
+            "sector": row["sector"],
+            "up_count": row["up_count"],
+            "avg_change": float(row["avg_change"] or 0),
+            "vol_count": row["vol_count"],
+            "strength_score": float(row["strength_score"] or 0),
+            "rank": i + 1,
+        })
+    return result
+
+
+def _generate_sector_rotation(cur, d: date, lookback_days: int = 3, top_n_sectors: int = 5) -> int:
+    """
+    生成 sector_rotation 板块轮动信号。
+
+    逻辑：
+    1. 回溯 lookback_days 天，每天算赛道强度排名
+    2. 连续 top_n_sectors 名的赛道 → 确认强势赛道
+    3. 从强势赛道里挑当日 price_volume_surge 得分最高的 1-2 个作为龙头
+    4. 龙头得分 = 赛道连续强度 + 个股量价齐升分
+    """
+    # 1. 回溯计算每天的赛道强度排名
+    daily_ranks: dict[str, list[int]] = {}  # sector -> [rank_day1, rank_day2, ...]
+    daily_scores: dict[str, list[float]] = {}  # sector -> [score_day1, ...]
+    days_available = 0
+
+    for offset in range(lookback_days - 1, -1, -1):
+        day = d - timedelta(days=offset)
+        strengths = _compute_sector_strength(cur, day)
+        if not strengths:
+            continue
+        days_available += 1
+        for s in strengths:
+            sector = s["sector"]
+            daily_ranks.setdefault(sector, []).append(s["rank"])
+            daily_scores.setdefault(sector, []).append(s["strength_score"])
+
+    if days_available < lookback_days:
+        # 历史数据不够，降低门槛：至少要有 2 天数据
+        if days_available < 2:
+            return 0
+
+    # 2. 筛选连续强势赛道（所有有数据的日子里都在前 top_n_sectors）
+    strong_sectors = []
+    for sector, ranks in daily_ranks.items():
+        if len(ranks) < min(2, days_available):
+            continue
+        if max(ranks) <= top_n_sectors:
+            # 计算趋势（后段排名 - 前段排名，负=排名在上升）
+            avg_score = sum(daily_scores[sector]) / len(daily_scores[sector])
+            trend = 0
+            if len(ranks) >= 2:
+                first_half = sum(ranks[:len(ranks)//2]) / (len(ranks)//2)
+                second_half = sum(ranks[len(ranks)//2:]) / (len(ranks) - len(ranks)//2)
+                trend = round(first_half - second_half, 1)  # 正=排名在上升（越来越好）
+            strong_sectors.append({
+                "sector": sector,
+                "consecutive_days": len(ranks),
+                "best_rank": min(ranks),
+                "worst_rank": max(ranks),
+                "avg_strength_score": round(avg_score, 2),
+                "rank_trend": trend,  # 正数=排名上升（好）
+            })
+
+    if not strong_sectors:
+        return 0
+
+    # 按赛道综合强度排序（连续天数 + 平均强度分）
+    strong_sectors.sort(key=lambda x: (-x["consecutive_days"], -x["avg_strength_score"]))
+
+    # 3. 找每个强势赛道的领涨龙头
+    inserted = 0
+    rank = 1
+    for sec_info in strong_sectors:
+        sector = sec_info["sector"]
+        cur.execute(SECTOR_LEADERS_SQL, (str(d), sector))
+        leaders = cur.fetchall()
+        if not leaders:
+            continue
+
+        # 取前 2 个龙头
+        for i, leader in enumerate(leaders[:2]):
+            comp_score = float(leader["composite_score"] or 0)
+            # 综合得分 = 赛道连续天数 * 10 + 个股量价齐升分 + 排名趋势奖励
+            total_score = round(
+                sec_info["consecutive_days"] * 10 + comp_score + sec_info["rank_trend"] * 2,
+                2
+            )
+
+            detail = {
+                "sector": sector,
+                "sector_label": sector,  # 前端自己映射
+                "consecutive_days": sec_info["consecutive_days"],
+                "sector_best_rank": sec_info["best_rank"],
+                "sector_worst_rank": sec_info["worst_rank"],
+                "sector_avg_strength": sec_info["avg_strength_score"],
+                "sector_rank_trend": sec_info["rank_trend"],
+                "leader_index": i + 1,  # 1=龙头, 2=次龙头
+                "composite_score": comp_score,
+                "change_24h": float(leader["change_24h"] or 0),
+                "volume_pct_rank": float(leader["volume_pct_rank"] or 0),
+                "market_cap": float(leader["market_cap"] or 0),
+                "market_cap_rank": leader["market_cap_rank"],
+                "primary_sector": sector,
+                "mcap_tier": (
+                    "top10" if leader["market_cap_rank"] and leader["market_cap_rank"] <= 10
+                    else "top100" if leader["market_cap_rank"] and leader["market_cap_rank"] <= 100
+                    else "top500" if leader["market_cap_rank"] and leader["market_cap_rank"] <= 500
+                    else "top1000"
+                ),
+            }
+
+            cur.execute(
+                INSERT_SECTOR_ROTATION_SQL,
+                (str(d), leader["asset_id"], total_score, rank, json.dumps(detail))
+            )
+            inserted += 1
+            rank += 1
+
+    return inserted
+
+
 def generate_for_date(cur, d: date) -> dict:
     """为指定日期生成所有榜单，返回 {category: count}。"""
     date_str = str(d)
@@ -439,6 +649,9 @@ def generate_for_date(cur, d: date) -> dict:
         result["tvl_surge_24h"] = cur.rowcount
     else:
         result["tvl_surge_24h"] = 0
+
+    # sector_rotation：板块轮动信号（依赖 price_volume_surge 已生成）
+    result["sector_rotation"] = _generate_sector_rotation(cur, d)
 
     return result
 

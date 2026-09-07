@@ -1202,6 +1202,186 @@
             color: #e6e8eb;
         }
 
+        .diff-item .highlight-star {
+            font-size: 11px;
+            margin-right: 2px;
+            vertical-align: middle;
+            animation: star-pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes star-pulse {
+
+            0%,
+            100% {
+                opacity: 0.9;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .diff-item .streak-badge {
+            font-size: 9px;
+            padding: 1px 5px;
+            margin-left: 4px;
+            background: linear-gradient(90deg, #ef4444, #f97316);
+            color: #fff;
+            border-radius: 8px;
+            font-weight: 600;
+            line-height: 1.4;
+            vertical-align: middle;
+        }
+
+        .diff-item .attr-btn {
+            font-size: 12px;
+            padding: 0 4px;
+            color: #4b5563;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s;
+            flex-shrink: 0;
+        }
+
+        .diff-item:hover .attr-btn {
+            opacity: 1;
+        }
+
+        .diff-item .attr-btn:hover {
+            color: #9ca3af;
+        }
+
+        /* 异动归因弹窗 */
+        .attr-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            backdrop-filter: blur(3px);
+        }
+
+        .attr-modal {
+            background: #1e222a;
+            border: 1px solid #2a3040;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 560px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .attr-modal-head {
+            padding: 14px 18px;
+            border-bottom: 1px solid #2a3040;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .attr-modal-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .attr-modal-close {
+            font-size: 18px;
+            color: #6b7280;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0 4px;
+        }
+
+        .attr-modal-close:hover {
+            color: #e6e8eb;
+        }
+
+        .attr-modal-body {
+            padding: 16px 18px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .attr-section {
+            margin-bottom: 18px;
+        }
+
+        .attr-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .attr-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #d1d5db;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .attr-empty {
+            font-size: 12px;
+            color: #4b5563;
+            padding: 8px 0;
+            font-style: italic;
+        }
+
+        .attr-item {
+            background: #171a21;
+            border: 1px solid #2a3040;
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+        }
+
+        .attr-item-title {
+            font-size: 12px;
+            font-weight: 500;
+            color: #e6e8eb;
+            margin-bottom: 4px;
+        }
+
+        .attr-item-meta {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .attr-item-summary {
+            font-size: 11px;
+            color: #9ca3af;
+            line-height: 1.5;
+        }
+
+        .attr-unlock-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #171a21;
+            border: 1px solid #2a3040;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .attr-unlock-date {
+            color: #9ca3af;
+        }
+
+        .attr-unlock-value {
+            color: #f59e0b;
+            font-weight: 600;
+        }
+
         .diff-item .name {
             flex: 1;
             color: #8a92a0;
@@ -1307,12 +1487,156 @@
         }
 
         /* 单列模式（如解锁/量价齐升只有up单列表） */
+        .diff-date-tabs {
+            display: flex;
+            gap: 2px;
+            background: #1a1f2b;
+            border-radius: 6px;
+            padding: 2px;
+        }
+
+        .diff-date-tab {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 4px;
+            color: #6b7280;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .diff-date-tab:hover {
+            color: #9ca3af;
+        }
+
+        .diff-date-tab.active {
+            background: #374151;
+            color: #e0e6ed;
+            font-weight: 500;
+        }
+
+        .diff-filter-toggles {
+            display: flex;
+            gap: 4px;
+            margin-left: 6px;
+        }
+
+        .diff-filter-toggle {
+            font-size: 11px;
+            padding: 3px 8px;
+            background: #1a1f2b;
+            color: #6b7280;
+            border: 1px solid #2a3040;
+            border-radius: 6px;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.15s;
+        }
+
+        .diff-filter-toggle:hover {
+            color: #9ca3af;
+            border-color: #3a4050;
+        }
+
+        .diff-filter-toggle.active {
+            background: #2a3a2d;
+            color: #4ade80;
+            border-color: #3a5a40;
+        }
+
+        /* 资金流向榜两层结构 */
+        .fund-flow-layer {
+            margin-bottom: 20px;
+        }
+
+        .fund-flow-layer:last-child {
+            margin-bottom: 0;
+        }
+
+        .fund-flow-layer-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #1e293b;
+        }
+
+        .ff-layer-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e0e6ed;
+        }
+
+        .ff-layer-tip {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
         .daily-diff-grid-single {
             grid-template-columns: 1fr;
         }
 
         .daily-diff-grid-single .daily-diff-col {
             max-width: 100%;
+        }
+
+        /* 板块轮动分组样式 */
+        .rotation-sector-group {
+            margin-bottom: 12px;
+            border: 1px solid #2a2f3a;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #1a1d24;
+        }
+
+        .rotation-sector-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: linear-gradient(90deg, #2a2518 0%, #1a1d24 100%);
+            border-bottom: 1px solid #2a2f3a;
+        }
+
+        .rotation-sector-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fbbf24;
+        }
+
+        .rotation-sector-meta {
+            font-size: 11px;
+            color: #8a92a0;
+        }
+
+        .rotation-leaders {
+            padding: 4px 8px;
+        }
+
+        .rotation-leaders .diff-item {
+            padding: 5px 6px;
+        }
+
+        .leader-badge {
+            display: inline-block;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+            text-align: center;
+            width: 26px;
+            line-height: 1.4;
+        }
+
+        .leader-badge.leader {
+            background: linear-gradient(135deg, #fbbf24, #f59e0b);
+            color: #1a1d24;
+        }
+
+        .leader-badge.follower {
+            background: #2a2f3a;
+            color: #c2c8d2;
+            border: 1px solid #3a4050;
         }
 
         /* 赛道轮动热力图 */
@@ -3286,6 +3610,215 @@
             padding: 4px 0;
         }
 
+        /* 链上估值温度计 */
+        .thermometer-section {
+            margin-top: 20px;
+            background: #0f1620;
+            border: 1px solid #1e2a3a;
+            border-radius: 10px;
+            padding: 16px 18px;
+        }
+
+        .thermometer-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .thermometer-head h3 {
+            font-size: 14px;
+            font-weight: 600;
+            margin: 0 0 2px 0;
+            color: #e0e6ed;
+        }
+
+        .thermometer-sub {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .thermometer-date {
+            font-size: 11px;
+            color: #5a6472;
+        }
+
+        .thermometer-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 10px;
+        }
+
+        .thermo-card {
+            background: #111827;
+            border: 1px solid #1f2937;
+            border-radius: 8px;
+            padding: 10px 12px;
+            text-align: center;
+            position: relative;
+            transition: all 0.15s ease;
+        }
+
+        .thermo-card:hover {
+            border-color: #374151;
+            transform: translateY(-1px);
+        }
+
+        .thermo-card .thermo-symbol {
+            font-size: 13px;
+            font-weight: 700;
+            color: #e0e6ed;
+            margin-bottom: 4px;
+            letter-spacing: 0.5px;
+        }
+
+        .thermo-card .thermo-mcap {
+            font-size: 10px;
+            color: #6b7280;
+            margin-bottom: 8px;
+        }
+
+        .thermo-card .thermo-bar {
+            height: 6px;
+            background: #1e293b;
+            border-radius: 3px;
+            margin-bottom: 6px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .thermo-card .thermo-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .thermo-card .thermo-temp {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+
+        .thermo-card .thermo-level {
+            font-size: 10px;
+            font-weight: 500;
+            padding: 1px 6px;
+            border-radius: 8px;
+            display: inline-block;
+        }
+
+        /* 6档温度配色 */
+        .thermo-extreme_hot .thermo-fill {
+            background: linear-gradient(90deg, #f59e0b, #ef4444);
+        }
+
+        .thermo-extreme_hot .thermo-temp {
+            color: #ef4444;
+        }
+
+        .thermo-extreme_hot .thermo-level {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+
+        .thermo-hot .thermo-fill {
+            background: linear-gradient(90deg, #f59e0b, #f97316);
+        }
+
+        .thermo-hot .thermo-temp {
+            color: #f97316;
+        }
+
+        .thermo-hot .thermo-level {
+            background: rgba(249, 115, 22, 0.2);
+            color: #fb923c;
+        }
+
+        .thermo-warm .thermo-fill {
+            background: linear-gradient(90deg, #eab308, #f59e0b);
+        }
+
+        .thermo-warm .thermo-temp {
+            color: #fbbf24;
+        }
+
+        .thermo-warm .thermo-level {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fcd34d;
+        }
+
+        .thermo-neutral .thermo-fill {
+            background: linear-gradient(90deg, #6b7280, #9ca3af);
+        }
+
+        .thermo-neutral .thermo-temp {
+            color: #9ca3af;
+        }
+
+        .thermo-neutral .thermo-level {
+            background: rgba(156, 163, 175, 0.2);
+            color: #d1d5db;
+        }
+
+        .thermo-cool .thermo-fill {
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+        }
+
+        .thermo-cool .thermo-temp {
+            color: #60a5fa;
+        }
+
+        .thermo-cool .thermo-level {
+            background: rgba(96, 165, 250, 0.2);
+            color: #93c5fd;
+        }
+
+        .thermo-cold .thermo-fill {
+            background: linear-gradient(90deg, #06b6d4, #0891b2);
+        }
+
+        .thermo-cold .thermo-temp {
+            color: #22d3ee;
+        }
+
+        .thermo-cold .thermo-level {
+            background: rgba(34, 211, 238, 0.2);
+            color: #67e8f9;
+        }
+
+        .thermo-metrics {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            color: #6b7280;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid #1e293b;
+        }
+
+        .thermo-metrics span b {
+            color: #c0c8d4;
+            font-weight: 600;
+        }
+
+        .thermo-loading,
+        .thermo-empty {
+            grid-column: 1 / -1;
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+            padding: 20px;
+        }
+
+        .thermometer-note {
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1px solid #1e2a3a;
+            font-size: 10px;
+            color: #4b5563;
+            text-align: right;
+        }
+
         /* 投研列表 */
         .research-stat-card {
             background: #111827;
@@ -4349,6 +4882,21 @@
                     <div class="dim-card loading">加载中…</div>
                     <div class="dim-card loading">加载中…</div>
                 </div>
+
+                <!-- 链上估值温度计 -->
+                <div class="thermometer-section" id="thermometer-section">
+                    <div class="thermometer-head">
+                        <div>
+                            <h3>🌡️ 链上估值温度计</h3>
+                            <span class="thermometer-sub">主流币综合估值百分位（MVRV + ROI + 活跃度）</span>
+                        </div>
+                        <span class="thermometer-date" id="thermo-date">—</span>
+                    </div>
+                    <div class="thermometer-grid" id="thermo-grid">
+                        <div class="thermo-loading">加载中…</div>
+                    </div>
+                    <div class="thermometer-note" id="thermo-note" style="display:none"></div>
+                </div>
             </section>
 
             <!-- #market 行情 & 每日推荐 -->
@@ -4418,7 +4966,21 @@
                 </div>
                 <div class="daily-diff-section">
                     <div class="section-header">
-                        <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
+                            <div class="diff-date-tabs" id="diff-date-tabs">
+                                <div class="diff-date-tab active" data-offset="0" onclick="switchDiffDateOffset(0)">今天
+                                </div>
+                                <div class="diff-date-tab" data-offset="1" onclick="switchDiffDateOffset(1)">昨天</div>
+                                <div class="diff-date-tab" data-offset="3" onclick="switchDiffDateOffset(3)">3天前</div>
+                            </div>
+                            <div class="diff-filter-toggles">
+                                <span class="diff-filter-toggle" id="diff-toggle-watchlist"
+                                    onclick="toggleDiffWatchlist()" title="仅显示自选观察列表中的币种">⭐ 自选</span>
+                                <span class="diff-filter-toggle" id="diff-toggle-noise" onclick="toggleDiffNoise()"
+                                    title="过滤稳定币、新币等噪音">🧹 去噪</span>
+                            </div>
+                        </div>
                         <div style="display:flex;gap:6px;align-items:center">
                             <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0"
                                 title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
@@ -7362,12 +7924,16 @@
             'price_change_24h': '24h 涨跌幅',
             'volume_surge_24h': '成交量异动',
             'price_volume_surge': '量价齐升',
+            'sector_rotation': '板块轮动',
+            'fund_flow': '资金流向',
             'unlock_7d': '解锁抛压'
         };
         const DIFF_CATEGORY_TIP = {
             'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
             'volume_surge_24h': '按成交量较近期均值的异动倍数排序：左列为放量最显著，右列为缩量/异动最显著',
             'price_volume_surge': '涨幅前 50% 且 放量前 50% 的交集，按量价共振综合分排序：真正有资金推动的异动',
+            'sector_rotation': '连续 3 天赛道强度排名前 5 的板块，搭配量价齐升领涨龙头：高确定性的板块轮动机会',
+            'fund_flow': '资金流向榜：上层为赛道级资金净流入/净流出，下层为币种级大资金进出（以市值变动近似）',
             'unlock_7d': '按未来 7 天代币解锁抛压占流通市值比例排序：左列为抛压最大'
         };
         const SECTOR_LABELS_SHORT = {
@@ -7385,6 +7951,19 @@
         let currentDiffCategory = 'price_change_24h';
         let selectedDiffSectors = [];   // 已选赛道，[] = 全部
         let selectedDiffTier = 'all';   // 当前市值分层：all / top10 / top100 / top500 / top1000
+
+        // 高亮信号 asset_id 集合（用于变化榜标注 ⭐）
+        let highlightAssetIdSet = new Set();
+
+        // 资金流向数据缓存
+        let fundFlowData = null;
+
+        // 每日变化榜：当前查看的日期偏移（0=最新, 1=昨天, 3=3天前）
+        let diffDateOffset = 0;
+        let diffWatchlistOnly = false;
+        let diffFilterNoise = false;
+        // 昨日榜单缓存（用于连续上榜对比）
+        let yesterdayDiffData = null;
 
         // 涨跌颜色惯例：green-up（国际：绿涨红跌） / red-up（A股：红涨绿跌）
         let diffColorScheme = localStorage.getItem('diffColorScheme') || 'green-up';
@@ -7416,6 +7995,9 @@
                 const params = new URLSearchParams();
                 if (selectedDiffSectors.length > 0) params.set('sectors', selectedDiffSectors.join(','));
                 if (selectedDiffTier !== 'all') params.set('mcap_tiers', selectedDiffTier);
+                if (diffDateOffset > 0) params.set('date_offset', diffDateOffset);
+                if (diffWatchlistOnly) params.set('watchlist_only', 1);
+                if (diffFilterNoise) params.set('filter_noise', 1);
                 const qs = params.toString();
                 const r = await fetch('/api/daily-diff' + (qs ? '?' + qs : ''));
                 const data = await r.json();
@@ -7431,11 +8013,21 @@
                 const now = new Date();
                 const hh = String(now.getHours()).padStart(2, '0');
                 const mm = String(now.getMinutes()).padStart(2, '0');
-                dateEl.textContent = '数据日期: ' + data.diff_date + '　·　更新于 ' + hh + ':' + mm;
+                const offsetLabel = diffDateOffset === 0 ? '' :
+                    diffDateOffset === 1 ? '　·　昨天' :
+                        diffDateOffset === 3 ? '　·　3天前' :
+                            '　·　' + diffDateOffset + '天前';
+                dateEl.textContent = '数据日期: ' + data.diff_date + offsetLabel + '　·　更新于 ' + hh + ':' + mm;
+
+                // 如果是最新日期，顺便加载昨天的数据用于连续上榜对比
+                if (diffDateOffset === 0) {
+                    _loadYesterdayDiff(data.diff_date);
+                }
 
                 // 副标题动态反映实际可用的信号口径
                 const cats = Object.keys(data.categories);
-                if (!cats.includes(currentDiffCategory)) {
+                const allCats = cats.concat(['fund_flow']);
+                if (!allCats.includes(currentDiffCategory)) {
                     currentDiffCategory = cats[0];
                 }
                 if (captionEl) {
@@ -7477,7 +8069,18 @@
                     const active = cat === currentDiffCategory ? ' active' : '';
                     html += '<div class="daily-diff-tab' + active + '" onclick="switchDiffCategory(\'' + cat + '\')">' + label + '</div>';
                 });
+                // 资金流向（独立 tab，不走 categories）
+                const ffActive = currentDiffCategory === 'fund_flow' ? ' active' : '';
+                html += '<div class="daily-diff-tab' + ffActive + '" onclick="switchDiffCategory(\'fund_flow\')">资金流向</div>';
                 html += '</div>';
+
+                // 资金流向：独立接口 + 两层结构
+                if (currentDiffCategory === 'fund_flow') {
+                    html += '<div id="fund-flow-container">加载中...</div>';
+                    content.innerHTML = html;
+                    loadFundFlow(data.diff_date);
+                    return;
+                }
 
                 const catData = data.categories[currentDiffCategory];
                 const upList = catData.up || [];
@@ -7491,19 +8094,23 @@
                     'price_change_24h': ['📈 涨幅榜', '全市场 Top（24h 涨幅最大）'],
                     'volume_surge_24h': ['📈 放量榜', '全市场 Top（成交量异动最大）'],
                     'price_volume_surge': ['🔥 量价齐升', '涨幅 + 放量双确认（共振得分）'],
+                    'sector_rotation': ['🌀 板块轮动', '强势赛道 + 领涨龙头（高确定性）'],
                     'unlock_7d': ['🔓 抛压榜', '全市场 Top（未来 7d 解锁抛压最大）']
                 };
                 const downHeadMap = {
                     'price_change_24h': ['📉 跌幅榜', '全市场 Bottom（24h 跌幅最大）'],
                     'volume_surge_24h': ['📉 缩量榜', '全市场 Bottom（成交量异动最小）'],
                     'price_volume_surge': ['💤 低位盘整', '跌幅 + 缩量（资金不关注）'],
+                    'sector_rotation': ['', ''],
                     'unlock_7d': ['🔒 轻压榜', '全市场 Bottom（未来 7d 解锁抛压最小）']
                 };
                 const upHead = upHeadMap[currentDiffCategory] || ['📈 正向榜', '全市场 Top'];
                 const downHead = downHeadMap[currentDiffCategory] || ['📉 负向榜', '全市场 Bottom'];
 
-                // 判断当前 category 是否只有 up 列（如 unlock_7d、price_volume_surge）
-                const onlyUp = currentDiffCategory === 'unlock_7d' || currentDiffCategory === 'price_volume_surge';
+                // 判断当前 category 是否只有 up 列（如 unlock_7d、price_volume_surge、sector_rotation）
+                const onlyUp = currentDiffCategory === 'unlock_7d'
+                    || currentDiffCategory === 'price_volume_surge'
+                    || currentDiffCategory === 'sector_rotation';
                 const gridClass = onlyUp ? ' daily-diff-grid-single' : '';
 
                 // 上涨/正向
@@ -7511,6 +8118,9 @@
                 html += '<h4 class="col-head" title="' + tip + '">' + upHead[0] + ' <span class="col-tip">' + upHead[1] + '</span></h4>';
                 if (upList.length === 0) {
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+                } else if (currentDiffCategory === 'sector_rotation') {
+                    // 板块轮动：按赛道分组展示
+                    html += _renderSectorRotationGroups(upList);
                 } else {
                     upList.slice(0, 10).forEach(item => {
                         html += _renderDiffItem(item, 'up', currentDiffCategory);
@@ -7565,14 +8175,395 @@
             let html = '';
             html += '<div class="diff-item ' + direction + '" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
             html += '<span class="rank" title="全市场排名（非榜单内序号）">' + rankLabel + item.rank + '</span>';
-            html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
+            html += '<span class="symbol">';
+            if (highlightAssetIdSet.has(Number(item.asset_id))) {
+                html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';
+            }
+            html += escapeHtml(item.symbol) + '</span>';
             html += '<span class="name">';
             if (item.chain) html += '<span class="chain-badge">' + escapeHtml(item.chain) + '</span>';
             html += escapeHtml(item.name || '');
             if (sectorLabel) html += '<span class="sector-tag">' + sectorLabel + '</span>';
+            // 连续上榜标记（仅在最新日期视图下显示）
+            if (diffDateOffset === 0 && _isInYesterdayList(item.asset_id, category, direction)) {
+                html += '<span class="streak-badge" title="连续在榜（昨天也在榜单上）">🔥 连续</span>';
+            }
             html += '</span>';
             html += '<span class="value">' + valSign + val + '</span>';
+            html += '<span class="attr-btn" onclick="event.stopPropagation();showDiffAttribution(' + item.asset_id + ', \'' + category + '\', \'' + direction + '\')" title="查看异动归因">📋</span>';
             html += '</div>';
+            return html;
+        }
+
+        // 异步加载昨天的榜单数据（用于连续上榜对比）
+        async function _loadYesterdayDiff (todayDate) {
+            try {
+                const params = new URLSearchParams();
+                if (selectedDiffSectors.length > 0) params.set('sectors', selectedDiffSectors.join(','));
+                if (selectedDiffTier !== 'all') params.set('mcap_tiers', selectedDiffTier);
+                if (diffWatchlistOnly) params.set('watchlist_only', 1);
+                if (diffFilterNoise) params.set('filter_noise', 1);
+                params.set('date_offset', 1);
+                const qs = params.toString();
+                const r = await fetch('/api/daily-diff' + (qs ? '?' + qs : ''));
+                const data = await r.json();
+                if (data.ok && data.categories) {
+                    yesterdayDiffData = data;
+                }
+            } catch (e) {
+                // 静默失败，不影响主流程
+            }
+        }
+
+        // 检查某个 asset_id 是否在昨天的某 category 的某 direction 榜单里
+        function _isInYesterdayList (assetId, category, direction) {
+            if (!yesterdayDiffData || !yesterdayDiffData.categories) return false;
+            const cat = yesterdayDiffData.categories[category];
+            if (!cat || !cat[direction]) return false;
+            return cat[direction].some(function (item) {
+                return Number(item.asset_id) === Number(assetId);
+            });
+        }
+
+        // 显示异动归因弹窗
+        async function showDiffAttribution (assetId, category, direction) {
+            // 已有弹窗则先关闭
+            _closeAttrModal();
+
+            const overlay = document.createElement('div');
+            overlay.className = 'attr-modal-overlay';
+            overlay.id = 'attr-modal-overlay';
+            overlay.onclick = function (e) {
+                if (e.target === overlay) _closeAttrModal();
+            };
+            document.body.appendChild(overlay);
+
+            const catLabel = DIFF_CATEGORY_LABELS[category] || category;
+            const dirLabel = direction === 'up' ? '上涨 / 流入' : '下跌 / 流出';
+
+            overlay.innerHTML = `
+                <div class="attr-modal">
+                    <div class="attr-modal-head">
+                        <span class="attr-modal-title">📊 异动归因</span>
+                        <button class="attr-modal-close" onclick="_closeAttrModal()">✕</button>
+                    </div>
+                    <div class="attr-modal-body" id="attr-modal-body">
+                        <div style="text-align:center;color:#6b7280;padding:20px">加载中...</div>
+                    </div>
+                </div>
+            `;
+
+            try {
+                const r = await fetch('/api/daily-diff/attribution?asset_id=' + assetId +
+                    (diffDateOffset > 0 ? '&date_offset=' + diffDateOffset : ''));
+                const data = await r.json();
+                const body = document.getElementById('attr-modal-body');
+                if (!body) return;
+
+                if (!data.ok) {
+                    body.innerHTML = '<div style="color:#ef4444;text-align:center;padding:20px">加载失败: ' + escapeHtml(data.error || '未知错误') + '</div>';
+                    return;
+                }
+
+                let html = '';
+
+                // 头部：币种 + 类别
+                html += '<div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #2a3040">';
+                html += '<div style="font-size:16px;font-weight:600;color:#fff;margin-bottom:4px">' +
+                    escapeHtml(data.symbol || '') + ' — ' + catLabel + '（' + dirLabel + '）</div>';
+                html += '<div style="font-size:11px;color:#6b7280">数据日期: ' + escapeHtml(data.diff_date || '') + '</div>';
+                html += '</div>';
+
+                // 1. 催化剂
+                html += '<div class="attr-section">';
+                html += '<div class="attr-section-title">📰 催化剂事件</div>';
+                if (data.catalysts && data.catalysts.length > 0) {
+                    data.catalysts.forEach(function (c) {
+                        html += '<div class="attr-item">';
+                        html += '<div class="attr-item-title">' + escapeHtml(c.title || '无标题') + '</div>';
+                        html += '<div class="attr-item-meta">';
+                        if (c.category) html += '<span style="margin-right:8px">' + escapeHtml(c.category) + '</span>';
+                        if (c.published_at) {
+                            const d = new Date(c.published_at);
+                            html += '<span>' + d.toLocaleDateString('zh-CN') + '</span>';
+                        }
+                        html += '</div>';
+                        if (c.summary) html += '<div class="attr-item-summary">' + escapeHtml(c.summary) + '...</div>';
+                        html += '</div>';
+                    });
+                } else {
+                    html += '<div class="attr-empty">近 3 天无相关催化剂事件</div>';
+                }
+                html += '</div>';
+
+                // 2. 解锁事件
+                html += '<div class="attr-section">';
+                html += '<div class="attr-section-title">🔓 解锁事件（近3天 + 未来7天）</div>';
+                if (data.unlocks && data.unlocks.length > 0) {
+                    data.unlocks.forEach(function (u) {
+                        const valStr = u.value_usd != null
+                            ? (u.value_usd >= 1e9 ? (u.value_usd / 1e9).toFixed(2) + 'B USD'
+                                : u.value_usd >= 1e6 ? (u.value_usd / 1e6).toFixed(1) + 'M USD'
+                                    : u.value_usd.toFixed(0) + ' USD')
+                            : '—';
+                        const pctStr = u.pct_supply != null ? '（' + u.pct_supply.toFixed(2) + '% 供给）' : '';
+                        html += '<div class="attr-unlock-item">';
+                        html += '<span class="attr-unlock-date">' + escapeHtml(u.unlock_date || '—') + '</span>';
+                        html += '<span class="attr-unlock-value">$' + valStr + pctStr + '</span>';
+                        html += '</div>';
+                    });
+                } else {
+                    html += '<div class="attr-empty">近 10 天无相关解锁事件</div>';
+                }
+                html += '</div>';
+
+                // 3. 大额转账（占位）
+                html += '<div class="attr-section">';
+                html += '<div class="attr-section-title">🐋 大额转账</div>';
+                html += '<div class="attr-empty">链上大额转账监控接入中，敬请期待</div>';
+                html += '</div>';
+
+                // 底部：查看完整研报
+                html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #2a3040;text-align:right">';
+                html += '<button style="background:#2563eb;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer" ' +
+                    'onclick="window.open(\'/research/' + assetId + '\', \'_blank\')">查看完整研报 →</button>';
+                html += '</div>';
+
+                body.innerHTML = html;
+            } catch (e) {
+                const body = document.getElementById('attr-modal-body');
+                if (body) {
+                    body.innerHTML = '<div style="color:#ef4444;text-align:center;padding:20px">加载失败: ' + escapeHtml(e.message) + '</div>';
+                }
+            }
+        }
+
+        function _closeAttrModal () {
+            const o = document.getElementById('attr-modal-overlay');
+            if (o) o.remove();
+        }
+
+        // 加载资金流向榜
+        async function loadFundFlow (dateStr) {
+            const container = document.getElementById('fund-flow-container');
+            if (!container) return;
+            try {
+                const params = new URLSearchParams();
+                if (dateStr) params.set('date', dateStr);
+                if (diffDateOffset > 0 && !dateStr) params.set('date_offset', diffDateOffset);
+                if (diffWatchlistOnly) params.set('watchlist_only', 1);
+                if (diffFilterNoise) params.set('filter_noise', 1);
+                const qs = params.toString();
+                const r = await fetch('/api/daily-diff/fund-flow' + (qs ? '?' + qs : ''));
+                const data = await r.json();
+                if (!data.ok) {
+                    container.innerHTML = '<div style="color:#6b7280;text-align:center;padding:20px">资金流向数据加载失败</div>';
+                    return;
+                }
+                fundFlowData = data;
+                container.innerHTML = _renderFundFlow(data);
+            } catch (e) {
+                container.innerHTML = '<div style="color:#6b7280;text-align:center;padding:20px">网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        // 渲染资金流向榜（赛道级 + 币种级 两层）
+        function _renderFundFlow (data) {
+            const sectors = data.sectors || { inflow: [], outflow: [] };
+            const coins = data.coins || { inflow: [], outflow: [] };
+
+            let html = '';
+
+            // ── 第一层：赛道级 ──
+            html += '<div class="fund-flow-layer">';
+            html += '<div class="fund-flow-layer-head">';
+            html += '<span class="ff-layer-title">🏛️ 赛道级资金流向</span>';
+            html += '<span class="ff-layer-tip">以市值变动率近似净流入/流出</span>';
+            html += '</div>';
+            html += '<div class="daily-diff-grid">';
+
+            // 左侧：流入赛道
+            html += '<div class="daily-diff-col up">';
+            html += '<h4 class="col-head">📈 资金流入 <span class="col-tip">市值增长最快的赛道</span></h4>';
+            if (sectors.inflow.length === 0) {
+                html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+            } else {
+                sectors.inflow.forEach(function (s, i) {
+                    html += _renderSectorFlowItem(s, 'up', i + 1);
+                });
+            }
+            html += '</div>';
+
+            // 右侧：流出赛道
+            html += '<div class="daily-diff-col down">';
+            html += '<h4 class="col-head">📉 资金流出 <span class="col-tip">市值下降最快的赛道</span></h4>';
+            if (sectors.outflow.length === 0) {
+                html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+            } else {
+                sectors.outflow.forEach(function (s, i) {
+                    html += _renderSectorFlowItem(s, 'down', i + 1);
+                });
+            }
+            html += '</div>';
+
+            html += '</div></div>';
+
+            // ── 第二层：币种级 ──
+            html += '<div class="fund-flow-layer">';
+            html += '<div class="fund-flow-layer-head">';
+            html += '<span class="ff-layer-title">💰 币种级大资金进出</span>';
+            html += '<span class="ff-layer-tip">市值变动绝对值排序（大资金进出规模）</span>';
+            html += '</div>';
+            html += '<div class="daily-diff-grid">';
+
+            // 左侧：流入币种
+            html += '<div class="daily-diff-col up">';
+            html += '<h4 class="col-head">📈 市值增长 <span class="col-tip">全市场 Top（大资金流入）</span></h4>';
+            if (coins.inflow.length === 0) {
+                html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+            } else {
+                coins.inflow.forEach(function (c) {
+                    html += _renderFundCoinItem(c, 'up');
+                });
+            }
+            html += '</div>';
+
+            // 右侧：流出币种
+            html += '<div class="daily-diff-col down">';
+            html += '<h4 class="col-head">📉 市值缩水 <span class="col-tip">全市场 Top（大资金流出）</span></h4>';
+            if (coins.outflow.length === 0) {
+                html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+            } else {
+                coins.outflow.forEach(function (c) {
+                    html += _renderFundCoinItem(c, 'down');
+                });
+            }
+            html += '</div>';
+
+            html += '</div></div>';
+
+            return html;
+        }
+
+        // 渲染单条赛道资金流向
+        function _renderSectorFlowItem (s, direction, rank) {
+            const pct = s.mcap_change_1d_pct != null ? s.mcap_change_1d_pct : 0;
+            const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+            const label = s.sector_label || s.sector_key || '未知';
+            const leaders = s.leaders || [];
+            const leaderStr = leaders.slice(0, 3).map(function (l) {
+                return l.symbol;
+            }).join(' · ');
+
+            let html = '';
+            html += '<div class="diff-item ' + direction + '">';
+            html += '<span class="rank">Top ' + rank + '</span>';
+            html += '<span class="symbol">' + escapeHtml(label) + '</span>';
+            html += '<span class="name">';
+            html += '<span class="sector-tag" style="margin:0">' + (s.coin_count || 0) + '币</span>';
+            if (leaderStr) html += '<span style="margin-left:4px;color:#6b7280;font-size:10px">' + escapeHtml(leaderStr) + '</span>';
+            html += '</span>';
+            html += '<span class="value">' + pctStr + '</span>';
+            html += '</div>';
+            return html;
+        }
+
+        // 渲染单条币种资金流向
+        function _renderFundCoinItem (c, direction) {
+            const pct = c.metric_value != null ? c.metric_value : 0;
+            const pctStr = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+            const changeUsd = c.market_cap_change_usd;
+            const changeUsdStr = changeUsd != null
+                ? (Math.abs(changeUsd) >= 1e9 ? (Math.abs(changeUsd) / 1e9).toFixed(2) + 'B'
+                    : Math.abs(changeUsd) >= 1e6 ? (Math.abs(changeUsd) / 1e6).toFixed(1) + 'M'
+                        : Math.abs(changeUsd).toFixed(0))
+                : '';
+            const sector = c.primary_sector;
+            const sectorLabel = sector ? (SECTOR_LABELS_SHORT[sector] || sector) : '';
+
+            let html = '';
+            html += '<div class="diff-item ' + direction + '" title="市值变动 $' + changeUsdStr + '｜点击查看研报" onclick="window.open(\'/research/' + c.asset_id + '\', \'_blank\')">';
+            html += '<span class="rank">Top ' + c.rank + '</span>';
+            html += '<span class="symbol">';
+            if (highlightAssetIdSet.has(Number(c.asset_id))) {
+                html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';
+            }
+            html += escapeHtml(c.symbol || '?') + '</span>';
+            html += '<span class="name">';
+            if (sectorLabel) html += '<span class="sector-tag">' + sectorLabel + '</span>';
+            if (changeUsdStr) html += '<span style="margin-left:4px;color:#6b7280;font-size:10px">$' + changeUsdStr + '</span>';
+            html += '</span>';
+            html += '<span class="value">' + pctStr + '</span>';
+            html += '<span class="attr-btn" onclick="event.stopPropagation();showDiffAttribution(' + c.asset_id + ', \'market_cap_mover\', \'' + direction + '\')" title="查看异动归因">📋</span>';
+            html += '</div>';
+            return html;
+        }
+
+        // 板块轮动：按赛道分组渲染
+        function _renderSectorRotationGroups (items) {
+            // 按赛道分组（从 detail_json / primary_sector 里取赛道信息）
+            const groups = {};
+            items.forEach(item => {
+                const sector = item.primary_sector || (item.detail && item.detail.primary_sector) || 'other';
+                if (!groups[sector]) groups[sector] = [];
+                groups[sector].push(item);
+            });
+
+            let html = '';
+            // 按赛道内的最高得分排序（最强赛道排前面）
+            const sortedSectors = Object.keys(groups).sort((a, b) => {
+                const maxA = Math.max(...groups[a].map(i => i.metric_value || 0));
+                const maxB = Math.max(...groups[b].map(i => i.metric_value || 0));
+                return maxB - maxA;
+            });
+
+            sortedSectors.forEach(sector => {
+                const sectorItems = groups[sector];
+                const sectorLabel = SECTOR_LABELS_SHORT[sector] || sector;
+                // 取第一个币的赛道元信息（同组都一样）
+                const first = sectorItems[0];
+                const detail = first.detail || first.detail_json || {};
+                const consecDays = detail.consecutive_days || first.consecutive_days || 0;
+                const rankTrend = detail.sector_rank_trend !== undefined ? detail.sector_rank_trend : 0;
+                const bestRank = detail.sector_best_rank || first.sector_best_rank || '-';
+
+                // 趋势图标
+                let trendIcon = '';
+                if (rankTrend > 0) trendIcon = ' <span style="color:#4ade80;font-size:10px">↗ 上升</span>';
+                else if (rankTrend < 0) trendIcon = ' <span style="color:#f87171;font-size:10px">↘ 回落</span>';
+                else trendIcon = ' <span style="color:#6b7280;font-size:10px">→ 稳定</span>';
+
+                html += '<div class="rotation-sector-group">';
+                html += '<div class="rotation-sector-head">';
+                html += '<span class="rotation-sector-name">🔥 ' + sectorLabel + '</span>';
+                html += '<span class="rotation-sector-meta">';
+                html += '连续 ' + consecDays + ' 天 · 最佳第 ' + bestRank + ' 名';
+                html += trendIcon;
+                html += '</span>';
+                html += '</div>';
+                html += '<div class="rotation-leaders">';
+                sectorItems.forEach((item, idx) => {
+                    const isLeader = (item.detail && item.detail.leader_index === 1) || idx === 0;
+                    const badge = isLeader
+                        ? '<span class="leader-badge leader">龙头</span>'
+                        : '<span class="leader-badge follower">次龙</span>';
+                    let val = item.metric_value !== null && item.metric_value !== undefined
+                        ? item.metric_value.toFixed(1) + ' 分'
+                        : '-';
+
+                    html += '<div class="diff-item up rotation-item" title="板块轮动综合得分 · 点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
+                    html += '<span class="rank">' + badge + '</span>';
+                    html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
+                    html += '<span class="name">';
+                    html += escapeHtml(item.name || '');
+                    html += '</span>';
+                    html += '<span class="value" style="color:#fbbf24">' + val + '</span>';
+                    html += '</div>';
+                });
+                html += '</div>';
+                html += '</div>';
+            });
+
             return html;
         }
 
@@ -7595,6 +8586,33 @@
                     selectedDiffSectors.push(sector);
                 }
             }
+            loadDailyDiff();
+        }
+        function switchDiffDateOffset (offset) {
+            diffDateOffset = offset;
+            // 更新按钮状态
+            const tabs = document.querySelectorAll('#diff-date-tabs .diff-date-tab');
+            tabs.forEach(function (t) {
+                const o = parseInt(t.getAttribute('data-offset'));
+                t.classList.toggle('active', o === offset);
+            });
+            loadDailyDiff();
+        }
+
+        // 切换「自选」过滤
+        function toggleDiffWatchlist () {
+            diffWatchlistOnly = !diffWatchlistOnly;
+            document.getElementById('diff-toggle-watchlist').classList.toggle('active', diffWatchlistOnly);
+            // 切换时清空昨日缓存，保证对比口径一致
+            yesterdayDiffData = null;
+            loadDailyDiff();
+        }
+
+        // 切换「去噪」过滤
+        function toggleDiffNoise () {
+            diffFilterNoise = !diffFilterNoise;
+            document.getElementById('diff-toggle-noise').classList.toggle('active', diffFilterNoise);
+            yesterdayDiffData = null;
             loadDailyDiff();
         }
 
@@ -7819,6 +8837,16 @@
                 if (!data.ok) throw new Error(data.error || '加载失败');
                 await renderOverview(data);
                 updated.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+
+                // 更新高亮信号 asset_id 集合（用于变化榜标注）
+                const oppList = data.opportunity_list || {};
+                const hlSignals = oppList.highlight_signals || oppList.opportunities || [];
+                const newSet = new Set();
+                hlSignals.forEach(function (s) {
+                    const aid = s && s.asset_id;
+                    if (aid != null) newSet.add(Number(aid));
+                });
+                highlightAssetIdSet = newSet;
             } catch (e) {
                 grid.innerHTML = '<div class="dim-card" style="grid-column:1/-1;color:#ff5b5b">加载失败：' + e.message + '</div>';
             }
@@ -9119,6 +10147,74 @@
                 '</div>';
         }
 
+        // 链上估值温度计
+        const THERMO_LEVEL_LABELS = {
+            extreme_hot: '极度高估',
+            hot: '高估',
+            warm: '偏热',
+            neutral: '中性',
+            cool: '偏冷',
+            cold: '底部冰冻'
+        };
+
+        async function loadOnchainThermometer () {
+            const grid = document.getElementById('thermo-grid');
+            const dateEl = document.getElementById('thermo-date');
+            const noteEl = document.getElementById('thermo-note');
+            const section = document.getElementById('thermometer-section');
+            if (!grid || !section) return;
+
+            try {
+                const res = await fetch('/api/market/onchain-thermometer?limit=10');
+                const data = await res.json();
+                if (!data.ok) {
+                    section.style.display = 'none';
+                    return;
+                }
+                section.style.display = 'block';
+                dateEl.textContent = '数据日期: ' + (data.metric_date || '—');
+
+                const tokens = data.tokens || [];
+                if (tokens.length === 0) {
+                    grid.innerHTML = '<div class="thermo-empty">暂无数据</div>';
+                    return;
+                }
+
+                grid.innerHTML = tokens.map(function (t) {
+                    const temp = t.temperature != null ? t.temperature : 50;
+                    const level = t.level || 'neutral';
+                    const label = THERMO_LEVEL_LABELS[level] || '中性';
+                    const mvrv = t.mvrv_value != null ? t.mvrv_value.toFixed(2) : '—';
+                    const roiPct = t.roi_1yr_pct != null ? t.roi_1yr_pct.toFixed(0) : '—';
+                    const adrPct = t.adr_pct != null ? t.adr_pct.toFixed(0) : '—';
+                    const txPct = t.tx_pct != null ? t.tx_pct.toFixed(0) : '—';
+
+                    return '<div class="thermo-card thermo-' + level + '" title="' +
+                        'MVRV: ' + mvrv + 'x\n1年ROI分位: ' + roiPct + '%\n活跃地址分位: ' + adrPct + '%\n交易数分位: ' + txPct + '%' +
+                        '">' +
+                        '<div class="thermo-symbol">' + escapeHtml(t.symbol || '?') + '</div>' +
+                        '<div class="thermo-mcap">' + escapeHtml(t.market_cap_display || '') + '</div>' +
+                        '<div class="thermo-bar"><div class="thermo-fill" style="width:' + Math.min(100, Math.max(0, temp)) + '%"></div></div>' +
+                        '<div class="thermo-temp">' + (t.temperature != null ? t.temperature.toFixed(1) : '—') + '</div>' +
+                        '<div class="thermo-level">' + label + '</div>' +
+                        '<div class="thermo-metrics">' +
+                        '<span>MVRV <b>' + mvrv + '</b></span>' +
+                        '<span>ROI <b>' + roiPct + '</b></span>' +
+                        '</div>' +
+                        '</div>';
+                }).join('');
+
+                if (data.data_note) {
+                    noteEl.textContent = data.data_note;
+                    noteEl.style.display = 'block';
+                } else {
+                    noteEl.style.display = 'none';
+                }
+            } catch (e) {
+                section.style.display = 'none';
+            }
+        }
+
         const HOT_PAGE_SIZE = 5;
         let hotAllTokens = [];
         let hotShowingAll = false;
@@ -9397,10 +10493,12 @@
         loadBacktest();
         loadHotTokens();
         loadMarketOverview();
+        loadOnchainThermometer();
         setInterval(loadHotTokens, 5 * 60 * 1000); // 每 5 分钟刷新
         setInterval(loadSectorHeatmap, 5 * 60 * 1000);
         setInterval(loadDailyDiff, 10 * 60 * 1000);
         setInterval(loadMarketOverview, 3 * 60 * 1000);
+        setInterval(loadOnchainThermometer, 10 * 60 * 1000);
 
         // ── 导航滚动高亮（IntersectionObserver） ──
         (function () {

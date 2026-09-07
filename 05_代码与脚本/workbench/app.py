@@ -1619,6 +1619,16 @@ def api_research_whale_flow(asset_id: int):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/research/<int:asset_id>/onchain-extremes")
+def api_research_onchain_extremes(asset_id: int):
+    """链上历史极值卡片：MVRV / 活跃地址 / 交易数 / ROI 等全历史百分位。"""
+    try:
+        result = _get_db_stats().get_onchain_extremes(asset_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/research/notebook/<int:notebook_id>/ask", methods=["POST"])
 def api_research_ask(notebook_id: int):
     """基于笔记本资料库进行 AI 问答（后台任务 + 实时日志）。"""
@@ -1925,6 +1935,18 @@ def api_market_overview():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/onchain-thermometer")
+def api_onchain_thermometer():
+    """主流币链上估值温度计：MVRV + ROI + 活跃地址 + 交易数 综合百分位。"""
+    try:
+        limit = request.args.get("limit", "10", type=int)
+        limit = max(3, min(30, limit))
+        result = _get_db_stats().get_onchain_thermometer(limit=limit)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/daily-diff")
 def api_daily_diff():
     """每日 diff 变化榜：涨跌幅/成交量异动/量价齐升/解锁抛压等。
@@ -1940,12 +1962,44 @@ def api_daily_diff():
         categories = request.args.get("categories")
         sectors = request.args.get("sectors")
         mcap_tiers = request.args.get("mcap_tiers")
+        date_offset = request.args.get("date_offset", default=0, type=int)
+        watchlist_only = request.args.get("watchlist_only", default=0, type=int) == 1
+        filter_noise = request.args.get("filter_noise", default=0, type=int) == 1
         cat_list = categories.split(",") if categories else None
         sector_list = sectors.split(",") if sectors else None
         tier_list = mcap_tiers.split(",") if mcap_tiers else None
         result = _get_db_stats().get_daily_diff_summary(
             diff_date=diff_date, categories=cat_list,
             sectors=sector_list, mcap_tiers=tier_list,
+            date_offset=max(0, min(30, date_offset)),
+            watchlist_only=watchlist_only,
+            filter_noise=filter_noise,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/daily-diff/fund-flow")
+def api_daily_diff_fund_flow():
+    """资金流向榜：赛道级 + 币种级两层。
+
+    Query params:
+        date: 指定日期（YYYY-MM-DD）
+        limit: 每侧返回数量，默认 10
+    """
+    try:
+        diff_date = request.args.get("date")
+        limit = request.args.get("limit", default=10, type=int)
+        date_offset = request.args.get("date_offset", default=0, type=int)
+        watchlist_only = request.args.get("watchlist_only", default=0, type=int) == 1
+        filter_noise = request.args.get("filter_noise", default=0, type=int) == 1
+        limit = max(3, min(30, limit))
+        result = _get_db_stats().get_fund_flow_rank(
+            diff_date=diff_date, limit=limit,
+            date_offset=max(0, min(30, date_offset)),
+            watchlist_only=watchlist_only,
+            filter_noise=filter_noise,
         )
         return jsonify(result)
     except Exception as e:
@@ -1959,6 +2013,32 @@ def api_market_backtest():
         days = request.args.get("days", default=30, type=int)
         top_n = request.args.get("top_n", default=10, type=int)
         result = _get_db_stats().get_recommendation_backtest(days, top_n)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── 异动归因 ──
+
+@app.route("/api/daily-diff/attribution", methods=["GET"])
+def api_diff_attribution():
+    """异动归因：给定 asset_id 和日期，返回可能的异动原因。
+
+    Query params:
+        asset_id: 资产 ID
+        date: 异动日期（YYYY-MM-DD），默认最新
+        date_offset: 相对最新日期的偏移天数，默认 0
+    """
+    try:
+        asset_id = request.args.get("asset_id", type=int)
+        diff_date = request.args.get("date")
+        date_offset = request.args.get("date_offset", default=0, type=int)
+        if not asset_id:
+            return jsonify({"ok": False, "error": "缺少 asset_id"}), 400
+        result = _get_db_stats().get_diff_attribution(
+            asset_id=asset_id, diff_date=diff_date,
+            date_offset=max(0, min(30, date_offset)),
+        )
         return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -4483,6 +4483,21 @@
             color: #94a3b8;
         }
 
+        .st-price {
+            background: rgba(249, 115, 22, .18);
+            color: #fb923c;
+        }
+
+        .st-volume {
+            background: rgba(168, 85, 247, .18);
+            color: #c084fc;
+        }
+
+        .st-sector {
+            background: rgba(6, 182, 212, .18);
+            color: #22d3ee;
+        }
+
         .st-etf {
             background: rgba(14, 165, 233, .18);
             color: #38bdf8;
@@ -10254,6 +10269,13 @@
             token_unlock: { label: '解锁抛压', cls: 'st-unlock' },
             kol_onchain: { label: 'KOL链上', cls: 'st-kol' },
             funding: { label: '融资落地', cls: 'st-other' },
+            // FEAT-SIGNAL-SRC 新增
+            price_surge: { label: '价格暴涨', cls: 'st-price' },
+            price_crash: { label: '价格暴跌', cls: 'st-price' },
+            price_volume_surge: { label: '量价齐升', cls: 'st-volume' },
+            volume_surge: { label: '成交量异动', cls: 'st-volume' },
+            sector_inflow: { label: '赛道资金流入', cls: 'st-sector' },
+            sector_outflow: { label: '赛道资金流出', cls: 'st-sector' },
         };
 
         function renderSignalItem (o, level) {

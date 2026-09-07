@@ -3317,10 +3317,24 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         "fng_extreme": 1, "leverage_extreme": 1, "stablecoin_inflow": 1,
         # 第三刀新增
         "etf_flow": 1,
+        # FEAT-SIGNAL-SRC 新增
+        "price_surge": 2, "price_volume_surge": 2, "volume_surge": 1,
+        "sector_inflow": 1,
         "__default__": 1,
     }
 
-    # ── 1. 全量按排序取候选池 ──
+    # ── 1. 筛选多头方向信号（高亮信号 = 机会/看多） ──
+    # FEAT-HIGHLIGHT-FIX: 严格过滤 direction，避免空头信号混进机会区
+    long_opps = [
+        o for o in opportunities
+        if o.get("direction") in ("long", None, "", "bullish")
+        and o.get("signal_type") not in ("mvrv_deep_over", "mvrv_over_watch")
+    ]
+
+    if not long_opps:
+        return []
+
+    # ── 2. 全量按排序取候选池 ──
     def _sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
         score = o.get("conviction_score", 0) or 0
@@ -3329,7 +3343,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         return (is_high, is_new, resonance, score)
 
     # 取足够多的候选，确保合并和筛选后还有量
-    candidates = sorted(opportunities, key=_sort_key, reverse=True)[:max_total * 10]
+    candidates = sorted(long_opps, key=_sort_key, reverse=True)[:max_total * 10]
 
     # ── 2. 同标的合并：同一 target 聚合成一张卡片 ──
     merged_map: dict[str, dict] = {}  # target_lower -> merged_opp
@@ -3432,6 +3446,9 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
         "leverage_extreme": 1,
         "github_activity": 1,
         "catalyst": 1,
+        # FEAT-SIGNAL-SRC 新增
+        "price_crash": 2,
+        "sector_outflow": 1,
         "__default__": 1,
     }
 
@@ -3439,6 +3456,8 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
     risk_types = {
         "token_unlock", "whale_flow", "mvrv_deep_over", "mvrv_over_watch",
         "fng_extreme", "leverage_extreme",
+        # FEAT-SIGNAL-SRC 新增
+        "price_crash", "sector_outflow",
     }
     risk_opps = [
         o for o in opportunities
@@ -3584,6 +3603,22 @@ def score_opportunities(overview: dict) -> dict:
     excluded: list[dict] = []
     degraded: list[str] = []
 
+    # ── FEAT-SIGNAL-SRC: 预加载 daily_diff_summary（变化榜信号用） ──
+    # 如果 overview 里没有，从 DB 补拉
+    if not overview.get("daily_diff_summary"):
+        try:
+            from crypto_research.db.conn import get_connection
+            from crypto_research.config import get_settings
+            from crypto_research.db import db_stats
+
+            settings = get_settings(require_database=True)
+            with get_connection(settings.database_url) as conn:
+                diff_data = db_stats.get_daily_diff_summary(conn)
+                if diff_data and diff_data.get("ok"):
+                    overview["daily_diff_summary"] = diff_data
+        except Exception:
+            pass
+
     # ── P0-1: MVRV 估值回归（聚合展示，避免「资产清单」当「高亮信号」） ──
     deep_undervalued_pct = t.get("mvrv_deep_undervalued_pct", 15)
     undervalued_pct = t.get("mvrv_undervalued_pct", 30)
@@ -3707,6 +3742,163 @@ def score_opportunities(overview: dict) -> dict:
 
     if not mvrv_coins:
         degraded.append("mvrv_universe 数据缺失")
+
+    # ── FEAT-SIGNAL-SRC-001：每日变化榜信号（从 daily_diff_summary 挖掘） ──
+    # 从价格异动、成交量异动、量价齐升中提取机会/风险信号
+    diff_cats = (overview.get("daily_diff_summary") or {}).get("categories") or {}
+    if diff_cats:
+        # 价格涨幅 Top（机会：强势突破）
+        price_up = (diff_cats.get("price_change_24h") or {}).get("up") or []
+        if price_up:
+            strong = [it for it in price_up if (it.get("metric_value") or 0) >= t.get("diff_price_surge_pct", 15)]
+            if strong:
+                syms = [str(it.get("symbol", "?")) for it in strong[:5]]
+                top_pct = strong[0].get("metric_value", 0)
+                avg_pct = sum(it.get("metric_value", 0) for it in strong) / len(strong)
+                strength = min(90, 45 + int(top_pct * 0.8) + len(strong) * 3)
+                _push_opportunity(
+                    {"target": f"{len(strong)} 币 24h 暴涨",
+                     "direction": "long", "confidence": "medium",
+                     "conviction_score": strength,
+                     "signal_type": "price_surge",
+                     "key_metric": f"24h 涨幅 ≥{t.get('diff_price_surge_pct', 15)}%",
+                     "trigger_logic": (
+                         f"{', '.join(syms)} 24h 涨幅超 {t.get('diff_price_surge_pct', 15)}%，"
+                         f"最高 {top_pct:.1f}%，平均 {avg_pct:.1f}%"
+                     ),
+                     "action_hint": "关注强势突破，追高需谨慎",
+                     "invalidation": "若 48h 内回落至涨幅 50% 以下",
+                     "related_dims": ["P1-3 价格异动", "price_surge"],
+                     "involved_symbols": syms},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=1,
+                )
+
+        # 价格跌幅 Top（风险：暴跌/崩盘风险）
+        price_down = (diff_cats.get("price_change_24h") or {}).get("down") or []
+        if price_down:
+            crash = [it for it in price_down if abs(it.get("metric_value") or 0) >= t.get("diff_price_crash_pct", 12)]
+            if crash:
+                syms = [str(it.get("symbol", "?")) for it in crash[:5]]
+                max_drop = abs(crash[0].get("metric_value", 0))
+                avg_drop = sum(abs(it.get("metric_value", 0)) for it in crash) / len(crash)
+                strength = min(92, 50 + int(max_drop * 0.6) + len(crash) * 4)
+                _push_opportunity(
+                    {"target": f"{len(crash)} 币 24h 暴跌",
+                     "direction": "short", "confidence": "medium",
+                     "conviction_score": strength,
+                     "signal_type": "price_crash",
+                     "key_metric": f"24h 跌幅 ≥{t.get('diff_price_crash_pct', 12)}%",
+                     "trigger_logic": (
+                         f"{', '.join(syms)} 24h 跌幅超 {t.get('diff_price_crash_pct', 12)}%，"
+                         f"最大 {max_drop:.1f}%，平均 {avg_drop:.1f}%"
+                     ),
+                     "action_hint": "警惕继续下行，抄底需等待企稳",
+                     "invalidation": "若 48h 内收复跌幅 50% 以上",
+                     "related_dims": ["P1-3 价格异动", "price_crash"],
+                     "involved_symbols": syms},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=1,
+                )
+
+        # 量价齐升（机会：资金入场 + 价格突破共振）
+        pvs = (diff_cats.get("price_volume_surge") or {}).get("up") or []
+        if pvs:
+            top_pvs = pvs[:5]
+            syms = [str(it.get("symbol", "?")) for it in top_pvs]
+            top_price_change = top_pvs[0].get("metric_value", 0)
+            strength = min(88, 55 + int(top_price_change * 0.5) + len(top_pvs) * 2)
+            _push_opportunity(
+                {"target": f"{len(top_pvs)} 币 量价齐升",
+                 "direction": "long", "confidence": "high",
+                 "conviction_score": strength,
+                 "signal_type": "price_volume_surge",
+                 "key_metric": "价格 + 成交量双升",
+                 "trigger_logic": (
+                     f"{', '.join(syms)} 量价齐升，价格涨幅最高 {top_price_change:.1f}%"
+                 ),
+                 "action_hint": "量价共振，关注趋势延续性",
+                 "invalidation": "若成交量快速萎缩或价格跌破支撑",
+                 "related_dims": ["P1-3 价格异动", "volume_surge"],
+                 "involved_symbols": syms},
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=1,
+            )
+
+        # 成交量异动（机会/中性：关注度激增）
+        vol_surge = (diff_cats.get("volume_surge_24h") or {}).get("up") or []
+        if vol_surge:
+            top_vol = vol_surge[:5]
+            syms = [str(it.get("symbol", "?")) for it in top_vol]
+            top_vol_pct = top_vol[0].get("metric_value", 0)
+            strength = min(80, 40 + min(40, top_vol_pct * 0.3) + len(top_vol) * 2)
+            _push_opportunity(
+                {"target": f"{len(top_vol)} 币 成交量异动",
+                 "direction": "long", "confidence": "medium",
+                 "conviction_score": strength,
+                 "signal_type": "volume_surge",
+                 "key_metric": f"24h 成交量放大",
+                 "trigger_logic": (
+                     f"{', '.join(syms)} 24h 成交量显著放大，最高 +{top_vol_pct:.0f}%"
+                 ),
+                 "action_hint": "关注度激增，关注方向选择",
+                 "invalidation": "若成交量迅速回落至正常水平",
+                 "related_dims": ["P1-3 成交量异动", "volume_surge"],
+                 "involved_symbols": syms},
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=1,
+            )
+
+    # ── FEAT-SIGNAL-SRC-002：赛道资金流信号（从 sector_flow_daily 挖掘） ──
+    sector_flow_data = (overview.get("sector_flow") or {}).get("sectors") or []
+    if not sector_flow_data:
+        # 降级：从 overview.dimensions.5板块 读叙事榜
+        if narrative:
+            top_inflow = narrative[:3]
+            if top_inflow and top_inflow[0].get("net_flow_7d_usd", 0) > 0:
+                names = [str(x.get("narrative", x.get("sector", "?"))) for x in top_inflow]
+                top_flow = top_inflow[0].get("net_flow_7d_usd", 0)
+                strength = min(82, 50 + min(30, top_flow / 1e7) * 2)
+                _push_opportunity(
+                    {"target": f"{len(top_inflow)} 赛道 资金持续流入",
+                     "direction": "long", "confidence": "medium",
+                     "conviction_score": strength,
+                     "signal_type": "sector_inflow",
+                     "key_metric": "7d 资金净流入",
+                     "trigger_logic": (
+                         f"{', '.join(names)} 赛道 7 天资金持续净流入，"
+                         f"榜首流入 ${top_flow/1e6:.0f}M"
+                     ),
+                     "action_hint": "关注领涨赛道龙头币",
+                     "invalidation": "若连续 3 天转为净流出",
+                     "related_dims": ["5板块", "P0-1 叙事轮动"],
+                     "involved_symbols": []},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=1,
+                )
+            bottom_outflow = narrative[-3:] if len(narrative) >= 3 else []
+            outflow_neg = [x for x in bottom_outflow if x.get("net_flow_7d_usd", 0) < 0]
+            if outflow_neg:
+                names = [str(x.get("narrative", x.get("sector", "?"))) for x in outflow_neg]
+                bottom_flow = abs(outflow_neg[-1].get("net_flow_7d_usd", 0))
+                strength = min(85, 52 + min(30, bottom_flow / 1e7) * 2)
+                _push_opportunity(
+                    {"target": f"{len(outflow_neg)} 赛道 资金持续流出",
+                     "direction": "short", "confidence": "medium",
+                     "conviction_score": strength,
+                     "signal_type": "sector_outflow",
+                     "key_metric": "7d 资金净流出",
+                     "trigger_logic": (
+                         f"{', '.join(names)} 赛道 7 天资金持续净流出，"
+                         f"榜尾流出 ${bottom_flow/1e6:.0f}M"
+                     ),
+                     "action_hint": "规避弱势赛道，警惕进一步下跌",
+                     "invalidation": "若连续 3 天转为净流入",
+                     "related_dims": ["5板块", "P0-1 叙事轮动"],
+                     "involved_symbols": []},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=1,
+                )
 
     # ── 1) BTC 左侧积累 / 场外弹药（long） ──
     btc_left_sources: list[tuple[str, str]] = []

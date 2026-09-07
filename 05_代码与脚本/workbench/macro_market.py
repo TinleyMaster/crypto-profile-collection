@@ -4781,8 +4781,15 @@ def fetch_stablecoin_supply_trend() -> dict:
         return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error", "error": str(e)}
 
 
-def _build_tldr(today: dict, opps: list) -> dict:
-    """M0 头部：从 overview 抽取关键指标 + 一句话摘要。"""
+def _build_tldr(today: dict, opps: list, highlights: list | None = None,
+                 risk_signals: list | None = None) -> dict:
+    """M0 头部：从 overview 抽取关键指标 + 一句话摘要 + 多空倾向。
+
+    升级（BRIEF-OPT-001）：
+    - 加入高亮信号/高危信号数量
+    - 根据机会-风险比值给出多空倾向（偏多/偏空/震荡）
+    - 给出操作建议（进攻/防守/观望）
+    """
     dims = today.get("dimensions") or {}
     btc_data = ((dims.get("2盘面") or {}).get("data") or {}).get("btc") or {}
     fg_data = ((dims.get("3情绪") or {}).get("data") or {}).get("fear_greed") or {}
@@ -4791,19 +4798,64 @@ def _build_tldr(today: dict, opps: list) -> dict:
     btc_mvrv = next((c for c in mvrv_coins if c.get("symbol") == "BTC"), {})
     cycle = today.get("btc_cycle") or {}
 
-    high = [o for o in opps if o.get("conviction_tier") == "HIGH"]
-    high_summary = f"{len(high)} 条（{', '.join(str(o.get('target')) for o in high[:3])}）" if high else "无"
+    highlights = highlights or []
+    risk_signals = risk_signals or []
+    n_high = len(highlights)
+    n_risk = len(risk_signals)
+
+    # 多空倾向：机会数 vs 风险数的比值 + 周期阶段调整
+    if n_risk == 0 and n_high > 0:
+        bias = "偏多"
+    elif n_high == 0 and n_risk > 0:
+        bias = "偏空"
+    elif n_high == 0 and n_risk == 0:
+        bias = "震荡"
+    else:
+        ratio = n_high / max(n_risk, 1)
+        if ratio >= 1.5:
+            bias = "偏多"
+        elif ratio <= 0.6:
+            bias = "偏空"
+        else:
+            bias = "震荡"
+
+    # 操作建议：结合周期阶段 + 恐贪 + 多空比
+    fg_val = fg_data.get("value")
+    cycle_phase = cycle.get("phase") or ""
+    if bias == "偏多" and cycle_phase in ("accumulation", "recovery"):
+        action = "进攻"
+    elif bias == "偏空":
+        action = "防守"
+    elif fg_val is not None and fg_val > 85:
+        action = "谨慎"
+    elif fg_val is not None and fg_val < 20:
+        action = "布局"
+    else:
+        action = "观望"
+
+    high_summary = f"{n_high} 条（{', '.join(str(o.get('target')) for o in highlights[:3])}）" if highlights else "无"
+    risk_summary = f"{n_risk} 条（{', '.join(str(o.get('target')) for o in risk_signals[:3])}）" if risk_signals else "无"
 
     return {
         "btc_price": btc_data.get("price"),
         "btc_change_24h": btc_data.get("change_24h"),
-        "fear_greed": fg_data.get("value"),
+        "fear_greed": fg_val,
         "fear_greed_label": fg_data.get("value_classification"),
         "btc_cycle_phase": cycle.get("phase_label") or cycle.get("phase"),
         "btc_mvrv_pct": btc_mvrv.get("pct_full"),
         "total_market_cap": ((dims.get("1体量") or {}).get("data") or {}).get("total_market_cap"),
         "btc_dominance": ((dims.get("1体量") or {}).get("data") or {}).get("btc_dominance"),
-        "summary": f"BTC 周期：{cycle.get('phase_label') or cycle.get('phase') or '未知'}；高确定性 {high_summary}",
+        "n_highlights": n_high,
+        "n_risks": n_risk,
+        "bias": bias,
+        "action": action,
+        "highlights_summary": high_summary,
+        "risks_summary": risk_summary,
+        "summary": (
+            f"BTC 周期：{cycle.get('phase_label') or cycle.get('phase') or '未知'}；"
+            f"今日倾向：{bias}（{action}）；"
+            f"机会 {high_summary}；风险 {risk_summary}"
+        ),
     }
 
 
@@ -5215,6 +5267,73 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
         return []
 
 
+def _build_daily_diff_brief(today: dict, highlights: list,
+                            risk_signals: list) -> dict:
+    """M5 每日变化榜早报精简版（BRIEF-OPT-002）。
+
+    从 overview 的 daily_diff_summary 里取各分类 Top5，
+    并给每条打上 ⭐ 高亮信号 / ⚠️ 高危信号 标记。
+    如果 overview 里没有变化榜数据（降级场景），从 DB 直接取。
+    """
+    diff_data = today.get("daily_diff_summary") or {}
+    if not diff_data:
+        try:
+            from crypto_research.db.conn import get_connection
+            from crypto_research.config import get_settings
+
+            settings = get_settings(require_database=True)
+            with get_connection(settings.database_url) as conn:
+                from crypto_research.db import db_stats
+                diff_data = db_stats.get_daily_diff_summary(conn)
+        except Exception:
+            diff_data = {}
+
+    highlight_syms: set[str] = set()
+    risk_syms: set[str] = set()
+    for o in highlights:
+        for s in (o.get("involved_symbols") or []):
+            if s:
+                highlight_syms.add(str(s).upper())
+        tgt = (o.get("target") or "").strip().upper()
+        if tgt and len(tgt) <= 10 and tgt.isalpha():
+            highlight_syms.add(tgt)
+    for o in risk_signals:
+        for s in (o.get("involved_symbols") or []):
+            if s:
+                risk_syms.add(str(s).upper())
+        tgt = (o.get("target") or "").strip().upper()
+        if tgt and len(tgt) <= 10 and tgt.isalpha():
+            risk_syms.add(tgt)
+
+    CATEGORY_LIMIT = 5
+    CATEGORY_LABELS = {
+        "price_change_24h": "价格涨幅榜",
+        "price_change_24h_down": "价格跌幅榜",
+        "volume_surge_24h": "成交量异动",
+        "price_volume_surge": "量价齐升",
+        "sector_rotation": "赛道轮动",
+        "unlock_7d": "即将解锁",
+        "market_cap_mover": "市值变化榜",
+    }
+
+    result: dict[str, list[dict]] = {}
+    for cat, items in (diff_data or {}).items():
+        if not items or not isinstance(items, list):
+            continue
+        top = items[:CATEGORY_LIMIT]
+        tagged = []
+        for it in top:
+            sym = str(it.get("symbol") or "").upper()
+            entry = dict(it)
+            entry["is_highlight"] = sym in highlight_syms
+            entry["is_risk"] = sym in risk_syms
+            tagged.append(entry)
+        label = CATEGORY_LABELS.get(cat, cat)
+        result[label] = tagged
+
+    return result
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     """
     早报结构化骨架（设计文档第七节）。消费 overview 已有字段，不改 API 层。
@@ -5258,28 +5377,44 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         if fallback:
             opps = fallback
 
+    # ── 高亮信号 + 高危信号（BRIEF-OPT-001：直接复用大盘分析同一套） ──
+    opp_list = today.get("opportunity_list") or {}
+    highlights = opp_list.get("highlight_signals") or []
+    risk_signals = opp_list.get("risk_signals") or []
+    # 兜底：如果 overview 里没有精选信号（降级场景），手动生成
+    if not highlights and opps:
+        highlights = select_highlight_signals(opps, max_total=6)
+    if not risk_signals and opps:
+        risk_signals = select_risk_signals(opps, max_total=6)
+
+    # ── 每日变化榜精简版（BRIEF-OPT-003） ──
+    daily_diff_brief = _build_daily_diff_brief(today, highlights, risk_signals)
+
     return {
-        "M0_tldr": _build_tldr(today, opps),
+        "M0_tldr": _build_tldr(today, opps, highlights, risk_signals),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),
-        "M3_divergence": [
+        "M2_institutional": today.get("institutional_mvrv") or {},
+        "M2_sector_flow": sector_flow,
+        "M3_highlights": highlights,
+        "M4_risks": risk_signals,
+        "M5_daily_diff": daily_diff_brief,
+        "M6_catalyst": today.get("event_calendar") or {},
+        "M7_divergence": [
             d for d in divs
             if d.get("label") in ("DANGEROUS", "DIVERGENT")
         ],
-        "M4_opportunities": [
+        "M8_opportunities": [
             o for o in opps if o.get("conviction_tier") == "HIGH"
         ],
-        "M4_watchlist": [
+        "M8_watchlist": [
             o for o in opps if o.get("conviction_tier") != "HIGH"
         ],
-        "M4_resonance": today.get("resonance") or {},
-        "M4_meme": today.get("meme_risk") or {},
-        "M4_chimney": today.get("chimney_signals") or {},
-        "M4_smart_money": today.get("smart_money_divergence") or {},
-        "M2_institutional": today.get("institutional_mvrv") or {},
-        "M5_catalyst": today.get("event_calendar") or {},
-        "M6_degraded": _collect_degraded(today),
-        "sector_flow": sector_flow,
+        "M8_resonance": today.get("resonance") or {},
+        "M8_meme": today.get("meme_risk") or {},
+        "M8_chimney": today.get("chimney_signals") or {},
+        "M8_smart_money": today.get("smart_money_divergence") or {},
+        "M9_degraded": _collect_degraded(today),
         "narrative_flow": narrative_flow,
         "chain_flow": chain_flow,
         "kol_onchain": kol_onchain,

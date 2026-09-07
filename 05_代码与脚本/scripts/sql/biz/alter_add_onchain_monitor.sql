@@ -80,10 +80,21 @@ CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
 -- 2b. 数据质量标记列（TXQUAL-001）
 --   is_suspect:    金额量纲异常 / 无法反查的脏时间戳等，标脏保留溯源（聚合须过滤）
 --   threshold_used: 入库时使用的美元阈值（历史 5k 残留行=5000，现行=50000）
+--
+-- 语义：is_suspect 默认 NULL = "未检查"（与 False="已确认干净" 严格区分）。
+--   新数据写入时显式标 True(脏)/False(干净)；存量由
+--   backfill_onchain_transfer_log_suspect.sql 显式标脏。
+--   下游过滤统一 `WHERE is_suspect IS NOT TRUE`（仅排除 True，保留 False 与 NULL）。
 -- ============================================================
 ALTER TABLE biz.onchain_transfer_log
-    ADD COLUMN IF NOT EXISTS is_suspect     boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS is_suspect     boolean DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS threshold_used numeric;
+
+-- 存量已以 DEFAULT false 建列（prod 2026-09-07）：改为 NULL 语义，存量 False 由 backfill 覆盖
+ALTER TABLE biz.onchain_transfer_log
+    ALTER COLUMN is_suspect DROP DEFAULT;
+ALTER TABLE biz.onchain_transfer_log
+    ALTER COLUMN is_suspect SET DEFAULT NULL;
 
 COMMENT ON COLUMN biz.onchain_transfer_log.is_suspect IS
     '数据质量标记（TXQUAL-001）：金额量纲异常/无法反查脏时间戳等。TRUE 时下游聚合须过滤（WHERE NOT is_suspect）。';

@@ -699,71 +699,70 @@ def main() -> int:
 
     try:
         with get_connection(settings.database_url) as conn:
-        # 1. 自动检测缺失日期
-        print(f"[BACKFILL] 扫描最近 {args.lookback} 天...")
-        missing_dates, coverage = detect_missing_dates(conn, args.lookback, args.min_assets)
+            # 1. 自动检测缺失日期
+            print(f"[BACKFILL] 扫描最近 {args.lookback} 天...")
+            missing_dates, coverage = detect_missing_dates(conn, args.lookback, args.min_assets)
 
-        if not missing_dates:
-            print("[BACKFILL] 无缺口，一切正常。")
-            return 0
+            if not missing_dates:
+                print("[BACKFILL] 无缺口，一切正常。")
+                return 0
 
-        print(f"[BACKFILL] 检测到 {len(missing_dates)} 天缺口: {[d.isoformat() for d in missing_dates]}")
-        for d in missing_dates:
-            print(f"  {d.isoformat()}: {coverage.get(d, 0)} 资产")
+            print(f"[BACKFILL] 检测到 {len(missing_dates)} 天缺口: {[d.isoformat() for d in missing_dates]}")
+            for d in missing_dates:
+                print(f"  {d.isoformat()}: {coverage.get(d, 0)} 资产")
 
-        if args.dry_run:
-            print("[BACKFILL] dry-run 模式，跳过回填。")
-            return 0
+            if args.dry_run:
+                print("[BACKFILL] dry-run 模式，跳过回填。")
+                return 0
 
-        # 2. 执行回填
-        result = {}
+            # 2. 执行回填
+            result = {}
 
-        if not args.skip_cmc:
-            assets = fetch_assets_for_backfill(conn, args.top)
-            print(f"\n[BACKFILL] CMC 历史 API 回填 ({len(assets)} 资产)...")
-            cmc_result = backfill_via_cmc_historical(conn, missing_dates, assets)
-            result["cmc"] = cmc_result
-            print(f"[BACKFILL] CMC 完成: {cmc_result}")
+            if not args.skip_cmc:
+                assets = fetch_assets_for_backfill(conn, args.top)
+                print(f"\n[BACKFILL] CMC 历史 API 回填 ({len(assets)} 资产)...")
+                cmc_result = backfill_via_cmc_historical(conn, missing_dates, assets)
+                result["cmc"] = cmc_result
+                print(f"[BACKFILL] CMC 完成: {cmc_result}")
 
-        print(f"\n[BACKFILL] Re-ETL 兜底...")
-        etl_result = re_etl_from_snapshots(conn, missing_dates)
-        result["etl"] = etl_result
-        print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
+            print(f"\n[BACKFILL] Re-ETL 兜底...")
+            etl_result = re_etl_from_snapshots(conn, missing_dates)
+            result["etl"] = etl_result
+            print(f"[BACKFILL] Re-ETL 完成: {etl_result}")
 
-        # CMC + re-ETL 后仍有日期 < 7000 资产时，走 Binance klines 兜底
-        with conn.cursor() as cur:
-            placeholders = ",".join(["%s"] * len(missing_dates))
-            cur.execute(f"""
-                SELECT market_date, COUNT(DISTINCT asset_id)
-                FROM biz.asset_market_daily
-                WHERE market_date IN ({placeholders})
-                GROUP BY market_date
-            """, missing_dates)
-            coverage_after = {row[0]: row[1] for row in cur.fetchall()}
+            # CMC + re-ETL 后仍有日期 < 7000 资产时，走 Binance klines 兜底
+            with conn.cursor() as cur:
+                placeholders = ",".join(["%s"] * len(missing_dates))
+                cur.execute(f"""
+                    SELECT market_date, COUNT(DISTINCT asset_id)
+                    FROM biz.asset_market_daily
+                    WHERE market_date IN ({placeholders})
+                    GROUP BY market_date
+                """, missing_dates)
+                coverage_after = {row[0]: row[1] for row in cur.fetchall()}
 
-        gap_days = [d for d in missing_dates if coverage_after.get(d, 0) < 7000]
-        if gap_days:
-            print(f"\n[BACKFILL] CMC/ETL 后仍有 {len(gap_days)} 天覆盖不足7000: {[d.isoformat() for d in gap_days]}，启动 Binance klines 兜底...")
-            ensure_source_platform(conn)
-            try:
-                binance_result = backfill_via_binance_klines(
-                    conn, gap_days, top_n=args.top, request_delay=args.binance_delay
-                )
-                result["binance"] = binance_result
-                print(f"[BACKFILL] Binance 完成: {binance_result}")
-            except Exception as e:
-                print(f"[BACKFILL] Binance 兜底异常: {e}", file=sys.stderr)
-                result["binance"] = {"error": str(e)[:200]}
+            gap_days = [d for d in missing_dates if coverage_after.get(d, 0) < 7000]
+            if gap_days:
+                print(f"\n[BACKFILL] CMC/ETL 后仍有 {len(gap_days)} 天覆盖不足7000: {[d.isoformat() for d in gap_days]}，启动 Binance klines 兜底...")
+                ensure_source_platform(conn)
+                try:
+                    binance_result = backfill_via_binance_klines(
+                        conn, gap_days, top_n=args.top, request_delay=args.binance_delay
+                    )
+                    result["binance"] = binance_result
+                    print(f"[BACKFILL] Binance 完成: {binance_result}")
+                except Exception as e:
+                    print(f"[BACKFILL] Binance 兜底异常: {e}", file=sys.stderr)
+                    result["binance"] = {"error": str(e)[:200]}
 
-        # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
-        # 把 binance_result 写入 stats
-        task_id = create_task_card(conn, missing_dates, coverage, result)
-        print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
+            # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
+            task_id = create_task_card(conn, missing_dates, coverage, result)
+            print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
 
-        # 4. 校验
-        print(f"\n[VERIFY] 校验回填结果...")
-        verify = verify_backfill(conn, missing_dates, min_pass=args.min_pass)
-        print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
+            # 4. 校验
+            print(f"\n[VERIFY] 校验回填结果...")
+            verify = verify_backfill(conn, missing_dates, min_pass=args.min_pass)
+            print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
 
     except Exception as e:
         print(f"[BACKFILL] 执行异常: {e}", file=sys.stderr)

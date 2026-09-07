@@ -34,10 +34,21 @@ from crypto_research.db.conn import get_connection
 # ── CoinMetrics Community API ──
 CM_API_BASE = "https://community-api.coinmetrics.io/v4"
 
-# 14 有效币种（matic 排除：8 指标全 NULL）
+# ~50 有效币种（排除：sol=403免费档不可用，matic=8指标全NULL）
 DEFAULT_COINS = [
+    # 原14币
     "btc", "eth", "ada", "xrp", "link", "uni", "aave",
     "ltc", "bch", "etc", "xlm", "algo", "icp", "doge",
+    # 扩展：L1/L0
+    "dot", "atom", "near", "avax", "egld", "ftm", "theta",
+    "waves", "neo", "zil", "one", "iota", "vet", "hbar",
+    # 扩展：DeFi/DEX
+    "crv", "snx", "comp", "mkr", "sushi", "yfi", "1inch",
+    "bal", "dydx", "gmx", "pendle", "jup",
+    # 扩展：基础设施/预言机/存储
+    "grt", "theta", "fil", "ar", "storj", "ocean",
+    # 扩展：MEME/热门
+    "shib", "pepe", "bonk", "wif", "floki",
 ]
 
 # 仅 btc/eth 有交易所 flow 数据

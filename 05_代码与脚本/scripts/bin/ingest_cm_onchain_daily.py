@@ -222,10 +222,21 @@ def main() -> None:
         data = json.loads(list_path.read_text(encoding="utf-8"))
         coins = [c["symbol"] for c in data.get("coins", [])]
     else:
-        # 放宽版达标列表（15 币）：MVRV + 活跃地址双核心达标
+        # 扩展列表（~50 币）：MVRV + 活跃地址双核心达标，与 backfill_cm_onchain.py 同步
         coins = [
-            "btc", "eth", "ada", "xrp", "link", "uni", "aave", "ltc", "bch",
-            "etc", "xlm", "algo", "icp", "mana", "doge",
+            # 原14币
+            "btc", "eth", "ada", "xrp", "link", "uni", "aave",
+            "ltc", "bch", "etc", "xlm", "algo", "icp", "doge",
+            # 扩展：L1/L0
+            "dot", "atom", "near", "avax", "egld", "ftm", "theta",
+            "waves", "neo", "zil", "one", "iota", "vet", "hbar",
+            # 扩展：DeFi/DEX
+            "crv", "snx", "comp", "mkr", "sushi", "yfi", "1inch",
+            "bal", "dydx", "gmx", "pendle", "jup",
+            # 扩展：基础设施/预言机/存储
+            "grt", "fil", "ar", "storj", "ocean",
+            # 扩展：MEME/热门
+            "shib", "pepe", "bonk", "wif", "floki",
         ]
 
     print(f"准备入库 {len(coins)} 个币种：{', '.join(coins)}")

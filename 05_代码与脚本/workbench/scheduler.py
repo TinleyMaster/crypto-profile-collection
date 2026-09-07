@@ -136,6 +136,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ DEX 流动性扫描（MEME-03）═══
     ("liquidity_scan", "10 8 * * *", "phase_chain_liquidity.py", ["--limit", "100"], "DEX 流动性扫描（DexScreener+GeckoTerminal，每日 08:10）", "chain"),
 
+    # ═══ P2-① 长尾轻量初筛 ═══
+    ("long_tail_screen_daily", "37 6 * * *", "phase_long_tail_screen.py", [], "长尾初筛：全市场 7000+ 资产 holder/social/momentum 三轴评分（每日 06:37）", "core"),
+
     # ═══ CM / OBM 链上指标定时调度 ═══
     # OBM 数据源为日更（周一三五会系统性滞后），改为每日；CM MVRV 为实时估值信号，保持每日 T-1 增量。
     ("cm_obm_download", "0 4 * * *", "download_obm_data.py", ["--out", "/app/data_external/obm"], "OBM 从 GitHub 下载数据（每日 04:00，上游日更）", "core"),

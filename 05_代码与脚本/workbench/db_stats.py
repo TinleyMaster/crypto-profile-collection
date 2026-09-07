@@ -10075,6 +10075,30 @@ def get_onchain_thermometer(limit: int = 10) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+# P2-① 长尾轻量初筛（long_tail_screen）
+# ══════════════════════════════════════════════════════════════
+
+def get_long_tail_screen(limit: int = 50, min_score: float = 0) -> dict:
+    """查询长尾初筛结果。返回 {ok, count, results: [...]}。"""
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT screen_id, asset_id, symbol, chain, screen_date,
+                           holder_score, social_score, momentum_score,
+                           composite_lowfi, mvrv_bonus, signals_json, created_at
+                    FROM biz.long_tail_screen
+                    WHERE composite_lowfi >= %s
+                    ORDER BY composite_lowfi DESC
+                    LIMIT %s
+                """, (min_score, limit))
+                rows = [dict(r) for r in cur.fetchall()]
+        return {"ok": True, "count": len(rows), "results": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "results": []}
+
+
+# ══════════════════════════════════════════════════════════════
 # P1 机会观察列表（opportunity_watchlist）
 # ══════════════════════════════════════════════════════════════
 

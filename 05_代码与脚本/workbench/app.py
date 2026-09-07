@@ -2061,6 +2061,18 @@ def api_market_hot():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/long-tail")
+def api_market_long_tail():
+    """P2-① 长尾轻量初筛结果（全市场 7000+ 资产 holder/social/momentum 三轴评分）。"""
+    try:
+        limit = int(request.args.get("limit", "50"))
+        min_score = float(request.args.get("min_score", "0"))
+        result = _get_db_stats().get_long_tail_screen(limit=limit, min_score=min_score)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/market/gainers")
 def api_market_gainers():
     """24h 涨幅榜：多源交叉验证。"""

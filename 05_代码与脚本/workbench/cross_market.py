@@ -228,6 +228,7 @@ def get_cross_validated(limit: int = 30, tier: str | None = None) -> dict:
     """获取多源交叉验证的投研推荐（带缓存）。
 
     tier: 市值分层过滤（top100/top500/top1000/other），None 表示不过滤。
+    P2-②：bapi 不可达时 fallback DexScreener trending；返回 bapi_status 字段。
     """
     global _cache, _cache_ts
 
@@ -240,7 +241,38 @@ def get_cross_validated(limit: int = 30, tier: str | None = None) -> dict:
 
     # 并行获取各数据源（Binance 评分套用分赛道权重）
     sector_map = _load_sector_map()
-    binance_data = get_binance_tokens(100, sector_map)
+    bapi_status = "ok"
+    try:
+        binance_data = get_binance_tokens(100, sector_map)
+    except Exception:
+        binance_data = {"tokens": []}
+        bapi_status = "error"
+
+    # P2-②：bapi 返回空时 fallback DexScreener trending
+    if not binance_data.get("tokens") and bapi_status == "ok":
+        bapi_status = "degraded"
+    if not binance_data.get("tokens"):
+        try:
+            import requests as _req
+            resp = _req.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10)
+            if resp.ok:
+                ds_tokens = resp.json() or []
+                binance_data = {"tokens": [
+                    {
+                        "symbol": t.get("description", "").upper().split()[0] if t.get("description") else "",
+                        "name": t.get("description", ""),
+                        "chain": t.get("chainId", ""),
+                        "contract": t.get("tokenAddress", ""),
+                        "volume_24h": 0, "change_24h": 0, "price": 0,
+                        "score": 50,  # 兜底中性分
+                    }
+                    for t in ds_tokens[:100]
+                    if t.get("tokenAddress")
+                ]}
+                bapi_status = "fallback_dexscreener"
+        except Exception:
+            pass  # 兜底也失败，继续用空数据
+
     cmc_data = get_cmc_tokens(100)
 
     binance_idx = _build_index(binance_data.get("tokens", []))
@@ -284,6 +316,7 @@ def get_cross_validated(limit: int = 30, tier: str | None = None) -> dict:
                             "total": len(filtered),
                             "fetched_at": int(now),
                             "from_archive": True,
+                            "bapi_status": "archive_fallback",
                             "source_stats": {"binance": 0, "cmc": 0, "both": 0},
                         }
         except Exception:
@@ -304,6 +337,7 @@ def get_cross_validated(limit: int = 30, tier: str | None = None) -> dict:
         "results": filtered[:limit],
         "total": len(filtered),
         "fetched_at": int(now),
+        "bapi_status": bapi_status,  # P2-②: ok/degraded/fallback_dexscreener/error
         "source_stats": {
             "binance": len(binance_idx),
             "cmc": len(cmc_idx),

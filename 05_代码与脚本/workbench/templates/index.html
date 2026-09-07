@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -3343,6 +3343,38 @@
             }
         }
 
+        /* 大盘分析子区块（热力图 / 每日变化榜 等） */
+        .overview-subsection {
+            margin-top: 28px;
+            padding-top: 24px;
+            border-top: 1px solid #2a3040;
+        }
+
+        .overview-subsection:first-of-type {
+            margin-top: 20px;
+        }
+
+        .subsection-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .subsection-head h3 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+
+        .subsection-sub {
+            font-size: 12px;
+            color: #8a92a0;
+        }
+
         .dim-card {
             background: #0f1620;
             border: 1px solid #1e2a3a;
@@ -4676,8 +4708,6 @@
             <a class="nav-tab" href="#overview" data-section="overview">大盘</a>
             <a class="nav-tab" href="#market" data-section="market">行情</a>
             <a class="nav-tab" href="#unlock" data-section="unlock">解锁</a>
-            <a class="nav-tab" href="#daily-diff" data-section="daily-diff">信号</a>
-            <a class="nav-tab" href="#heat" data-section="heat">热力</a>
             <a class="nav-tab" href="#backtest" data-section="backtest">回测</a>
             <a class="nav-tab" href="#research" data-section="research">投研</a>
             <a class="nav-tab" href="#tasks" data-section="tasks">任务</a>
@@ -4897,6 +4927,62 @@
                     </div>
                     <div class="thermometer-note" id="thermo-note" style="display:none"></div>
                 </div>
+
+                <!-- 赛道轮动热力图（子区块） -->
+                <div class="overview-subsection" id="heat">
+                    <div class="subsection-head">
+                        <h3>🌡️ 赛道轮动热力图</h3>
+                        <span class="subsection-sub">各赛道资金流向与热度变化，把握轮动节奏</span>
+                    </div>
+                    <div class="sector-heatmap-section">
+                        <div class="section-header">
+                            <h2 style="display:none">赛道轮动热力图</h2>
+                            <span style="font-size:12px;color:#8a92a0" id="sector-heat-updated"></span>
+                        </div>
+                        <div id="sector-heatmap-content">
+                            <div class="sector-heatmap-loading">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 每日变化榜（子区块） -->
+                <div class="overview-subsection" id="daily-diff">
+                    <div class="subsection-head">
+                        <h3>⚡ 每日变化榜</h3>
+                        <span class="subsection-sub" id="daily-diff-caption">今日异动信号：涨跌幅 / 成交量 / 解锁抛压</span>
+                    </div>
+                    <div class="daily-diff-section">
+                        <div class="section-header">
+                            <div style="display:flex;align-items:center;gap:8px">
+                                <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
+                                <div class="diff-date-tabs" id="diff-date-tabs">
+                                    <div class="diff-date-tab active" data-offset="0" onclick="switchDiffDateOffset(0)">
+                                        今天
+                                    </div>
+                                    <div class="diff-date-tab" data-offset="1" onclick="switchDiffDateOffset(1)">昨天
+                                    </div>
+                                    <div class="diff-date-tab" data-offset="3" onclick="switchDiffDateOffset(3)">3天前
+                                    </div>
+                                </div>
+                                <div class="diff-filter-toggles">
+                                    <span class="diff-filter-toggle" id="diff-toggle-watchlist"
+                                        onclick="toggleDiffWatchlist()" title="仅显示自选观察列表中的币种">⭐ 自选</span>
+                                    <span class="diff-filter-toggle" id="diff-toggle-noise" onclick="toggleDiffNoise()"
+                                        title="过滤稳定币、新币等噪音">🧹 去噪</span>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:6px;align-items:center">
+                                <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0"
+                                    title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
+                                <button class="hot-refresh" id="daily-diff-refresh"
+                                    onclick="loadDailyDiff(true)">刷新</button>
+                            </div>
+                        </div>
+                        <div id="daily-diff-content">
+                            <div class="hot-tokens-loading">加载中...</div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- #market 行情 & 每日推荐 -->
@@ -4956,60 +5042,6 @@
                 </div>
             </section>
 
-            <!-- #daily-diff 每日变化榜 -->
-            <section id="daily-diff" class="module-card">
-                <div class="module-header">
-                    <h2>⚡ 每日变化榜</h2>
-                    <p class="module-desc" id="daily-diff-caption">今日异动信号：涨跌幅 / 成交量 / 解锁抛压</p>
-                    <p class="module-note">全市场按所选信号排序后的「头部」与「尾部」：左列为涨幅/正向最大的 <b>Top N</b>，右列为跌幅/负向最大的 <b>Bottom
-                            N</b>；左侧序号为该资产的<b>全市场排名</b>（非榜单内第几名），因此左右两栏数字并不连续。切换上方标签可查看不同信号口径。</p>
-                </div>
-                <div class="daily-diff-section">
-                    <div class="section-header">
-                        <div style="display:flex;align-items:center;gap:8px">
-                            <span style="font-size:12px;color:#8a92a0" id="daily-diff-date"></span>
-                            <div class="diff-date-tabs" id="diff-date-tabs">
-                                <div class="diff-date-tab active" data-offset="0" onclick="switchDiffDateOffset(0)">今天
-                                </div>
-                                <div class="diff-date-tab" data-offset="1" onclick="switchDiffDateOffset(1)">昨天</div>
-                                <div class="diff-date-tab" data-offset="3" onclick="switchDiffDateOffset(3)">3天前</div>
-                            </div>
-                            <div class="diff-filter-toggles">
-                                <span class="diff-filter-toggle" id="diff-toggle-watchlist"
-                                    onclick="toggleDiffWatchlist()" title="仅显示自选观察列表中的币种">⭐ 自选</span>
-                                <span class="diff-filter-toggle" id="diff-toggle-noise" onclick="toggleDiffNoise()"
-                                    title="过滤稳定币、新币等噪音">🧹 去噪</span>
-                            </div>
-                        </div>
-                        <div style="display:flex;gap:6px;align-items:center">
-                            <span class="color-scheme-toggle" id="diff-color-toggle" role="button" tabindex="0"
-                                title="切换涨跌颜色惯例：国际（绿涨红跌）／A股（红涨绿跌）" onclick="toggleDiffColorScheme()">🌐 绿涨红跌</span>
-                            <button class="hot-refresh" id="daily-diff-refresh"
-                                onclick="loadDailyDiff(true)">刷新</button>
-                        </div>
-                    </div>
-                    <div id="daily-diff-content">
-                        <div class="hot-tokens-loading">加载中...</div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- #heat 赛道轮动热力图 -->
-            <section id="heat" class="module-card">
-                <div class="module-header">
-                    <h2>🌡️ 赛道轮动热力图</h2>
-                    <p class="module-desc">各赛道资金流向与热度变化，把握轮动节奏</p>
-                </div>
-                <div class="sector-heatmap-section">
-                    <div class="section-header">
-                        <h2 style="display:none">赛道轮动热力图</h2>
-                        <span style="font-size:12px;color:#8a92a0" id="sector-heat-updated"></span>
-                    </div>
-                    <div id="sector-heatmap-content">
-                        <div class="sector-heatmap-loading">加载中...</div>
-                    </div>
-                </div>
-            </section>
 
             <!-- #backtest 推荐质量回测 -->
             <section id="backtest" class="module-card">
@@ -10502,7 +10534,7 @@
 
         // ── 导航滚动高亮（IntersectionObserver） ──
         (function () {
-            var sections = ['assets', 'overview', 'daily-diff', 'market', 'unlock', 'heat', 'backtest', 'research', 'tasks'];
+            var sections = ['assets', 'overview', 'market', 'unlock', 'backtest', 'research', 'tasks'];
             var tabs = document.querySelectorAll('.top-nav .nav-tab[data-section]');
             if (!('IntersectionObserver' in window) || tabs.length === 0) return;
 
@@ -10701,7 +10733,8 @@
         <div class="modal-dialog">
             <h3>➕ 添加代币</h3>
             <div class="modal-tabs">
-                <button class="tab-btn active" id="tab-ds" onclick="switchAssetTab('ds')">DexScreener 搜索</button>
+                <button class="tab-btn active" id="tab-ds" onclick="switchAssetTab('ds')">DexScreener
+                    搜索</button>
                 <button class="tab-btn" id="tab-manual" onclick="switchAssetTab('manual')">手动输入</button>
             </div>
 

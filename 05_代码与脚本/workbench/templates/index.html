@@ -1224,6 +1224,97 @@
             color: #f87171;
         }
 
+        /* 市值分层 Tabs */
+        .diff-tier-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .diff-tier-tab {
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            background: #1a1d24;
+            color: #6b7280;
+            border: 1px solid #252a35;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        .diff-tier-tab:hover {
+            color: #c2c8d2;
+            border-color: #3a4050;
+        }
+
+        .diff-tier-tab.active {
+            background: #2a2f3a;
+            color: #e6e8eb;
+            border-color: #3a4050;
+        }
+
+        /* 赛道过滤 Chips */
+        .diff-sector-chips {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+
+        .diff-filter-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-right: 2px;
+        }
+
+        .diff-sector-chip {
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            cursor: pointer;
+            background: #1a1d24;
+            color: #6b7280;
+            border: 1px solid #252a35;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .diff-sector-chip:hover {
+            color: #c2c8d2;
+            border-color: #3a4050;
+        }
+
+        .diff-sector-chip.active {
+            background: #3b5998;
+            color: #fff;
+            border-color: #3b5998;
+        }
+
+        /* 榜单内的赛道小标签 */
+        .diff-item .sector-tag {
+            display: inline-block;
+            margin-left: 4px;
+            padding: 0 4px;
+            border-radius: 3px;
+            font-size: 9px;
+            background: #2a2f3a;
+            color: #8a92a0;
+            vertical-align: middle;
+            line-height: 1.5;
+        }
+
+        /* 单列模式（如解锁/量价齐升只有up单列表） */
+        .daily-diff-grid-single {
+            grid-template-columns: 1fr;
+        }
+
+        .daily-diff-grid-single .daily-diff-col {
+            max-width: 100%;
+        }
+
         /* 赛道轮动热力图 */
         .sector-heatmap-section {
             margin-bottom: 28px;
@@ -3907,6 +3998,12 @@
             font-size: 11px;
             color: #94a3b8;
             margin-top: 2px;
+            cursor: help;
+        }
+
+        .signal-strength-hint {
+            color: #64748b;
+            margin-left: 2px;
         }
 
         /* ── FEAT-HIGHLIGHT-004: HIGH 角标 ── */
@@ -7264,14 +7361,30 @@
         const DIFF_CATEGORY_LABELS = {
             'price_change_24h': '24h 涨跌幅',
             'volume_surge_24h': '成交量异动',
+            'price_volume_surge': '量价齐升',
             'unlock_7d': '解锁抛压'
         };
         const DIFF_CATEGORY_TIP = {
             'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
             'volume_surge_24h': '按成交量较近期均值的异动倍数排序：左列为放量最显著，右列为缩量/异动最显著',
+            'price_volume_surge': '涨幅前 50% 且 放量前 50% 的交集，按量价共振综合分排序：真正有资金推动的异动',
             'unlock_7d': '按未来 7 天代币解锁抛压占流通市值比例排序：左列为抛压最大'
         };
+        const SECTOR_LABELS_SHORT = {
+            'l1': 'L1', 'l2': 'L2', 'defi': 'DeFi', 'meme': 'Meme',
+            'gamefi': 'GameFi', 'ai': 'AI', 'rwa': 'RWA',
+            'stablecoin': '稳定币', 'cex_token': 'CEX',
+            'derivatives': '衍生品', 'depin': 'DePIN', 'infra': '基础设施',
+            'other': '其他'
+        };
+        const MCAP_TIER_LABELS = {
+            'top10': 'TOP10', 'top100': 'TOP100',
+            'top500': 'TOP500', 'top1000': 'TOP1000',
+            'top3000': 'TOP3000'
+        };
         let currentDiffCategory = 'price_change_24h';
+        let selectedDiffSectors = [];   // 已选赛道，[] = 全部
+        let selectedDiffTier = 'all';   // 当前市值分层：all / top10 / top100 / top500 / top1000
 
         // 涨跌颜色惯例：green-up（国际：绿涨红跌） / red-up（A股：红涨绿跌）
         let diffColorScheme = localStorage.getItem('diffColorScheme') || 'green-up';
@@ -7299,7 +7412,12 @@
             }
             content.innerHTML = '<div class="hot-tokens-loading">加载中...</div>';
             try {
-                const r = await fetch('/api/daily-diff');
+                // 组装查询参数
+                const params = new URLSearchParams();
+                if (selectedDiffSectors.length > 0) params.set('sectors', selectedDiffSectors.join(','));
+                if (selectedDiffTier !== 'all') params.set('mcap_tiers', selectedDiffTier);
+                const qs = params.toString();
+                const r = await fetch('/api/daily-diff' + (qs ? '?' + qs : ''));
                 const data = await r.json();
                 if (!data.ok) {
                     content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
@@ -7324,8 +7442,36 @@
                     captionEl.textContent = '信号口径：' + cats.map(c => DIFF_CATEGORY_LABELS[c] || c).join(' / ');
                 }
 
-                // 渲染 tab
-                let html = '<div class="daily-diff-tabs">';
+                let html = '';
+
+                // ── 市值分层 Tabs ──
+                const tiers = data.available_tiers || [];
+                if (tiers.length > 0) {
+                    html += '<div class="diff-tier-tabs">';
+                    html += '<div class="diff-tier-tab' + (selectedDiffTier === 'all' ? ' active' : '') + '" onclick="switchDiffTier(\'all\')">全部</div>';
+                    tiers.forEach(t => {
+                        const label = MCAP_TIER_LABELS[t] || t;
+                        html += '<div class="diff-tier-tab' + (selectedDiffTier === t ? ' active' : '') + '" onclick="switchDiffTier(\'' + t + '\')">' + label + '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                // ── 赛道过滤 Chips ──
+                const sectors = data.available_sectors || [];
+                if (sectors.length > 0) {
+                    html += '<div class="diff-sector-chips">';
+                    html += '<span class="diff-filter-label">赛道：</span>';
+                    html += '<div class="diff-sector-chip' + (selectedDiffSectors.length === 0 ? ' active' : '') + '" onclick="toggleDiffSector(\'__all__\')">全部</div>';
+                    sectors.forEach(s => {
+                        const label = SECTOR_LABELS_SHORT[s] || s;
+                        const active = selectedDiffSectors.includes(s) ? ' active' : '';
+                        html += '<div class="diff-sector-chip' + active + '" onclick="toggleDiffSector(\'' + s + '\')">' + label + '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                // ── 信号口径 Tabs ──
+                html += '<div class="daily-diff-tabs">';
                 cats.forEach(cat => {
                     const label = DIFF_CATEGORY_LABELS[cat] || cat;
                     const active = cat === currentDiffCategory ? ' active' : '';
@@ -7340,19 +7486,25 @@
 
                 html += '<div class="daily-diff-grid">';
 
-                // 根据当前信号口径动态生成左右两栏表头，避免"上涨/下跌"语义空泛
+                // 根据当前信号口径动态生成左右两栏表头
                 const upHeadMap = {
                     'price_change_24h': ['📈 涨幅榜', '全市场 Top（24h 涨幅最大）'],
                     'volume_surge_24h': ['📈 放量榜', '全市场 Top（成交量异动最大）'],
+                    'price_volume_surge': ['🔥 量价齐升', '涨幅 + 放量双确认（共振得分）'],
                     'unlock_7d': ['🔓 抛压榜', '全市场 Top（未来 7d 解锁抛压最大）']
                 };
                 const downHeadMap = {
                     'price_change_24h': ['📉 跌幅榜', '全市场 Bottom（24h 跌幅最大）'],
                     'volume_surge_24h': ['📉 缩量榜', '全市场 Bottom（成交量异动最小）'],
+                    'price_volume_surge': ['💤 低位盘整', '跌幅 + 缩量（资金不关注）'],
                     'unlock_7d': ['🔒 轻压榜', '全市场 Bottom（未来 7d 解锁抛压最小）']
                 };
                 const upHead = upHeadMap[currentDiffCategory] || ['📈 正向榜', '全市场 Top'];
                 const downHead = downHeadMap[currentDiffCategory] || ['📉 负向榜', '全市场 Bottom'];
+
+                // 判断当前 category 是否只有 up 列（如 unlock_7d、price_volume_surge）
+                const onlyUp = currentDiffCategory === 'unlock_7d' || currentDiffCategory === 'price_volume_surge';
+                const gridClass = onlyUp ? ' daily-diff-grid-single' : '';
 
                 // 上涨/正向
                 html += '<div class="daily-diff-col up">';
@@ -7361,34 +7513,24 @@
                     html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
                 } else {
                     upList.slice(0, 10).forEach(item => {
-                        const val = item.metric_value !== null ? item.metric_value.toFixed(2) + '%' : '-';
-                        html += '<div class="diff-item up" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
-                        html += '<span class="rank" title="全市场排名（非榜单内序号）">Top ' + item.rank + '</span>';
-                        html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
-                        html += '<span class="name">' + (item.chain ? '<span class="chain-badge">' + escapeHtml(item.chain) + '</span>' : '') + escapeHtml(item.name || '') + '</span>';
-                        html += '<span class="value">+' + val + '</span>';
-                        html += '</div>';
+                        html += _renderDiffItem(item, 'up', currentDiffCategory);
                     });
                 }
                 html += '</div>';
 
-                // 下跌/负向
-                html += '<div class="daily-diff-col down">';
-                html += '<h4 class="col-head" title="' + tip + '">' + downHead[0] + ' <span class="col-tip">' + downHead[1] + '</span></h4>';
-                if (downList.length === 0) {
-                    html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
-                } else {
-                    downList.slice(0, 10).forEach(item => {
-                        const val = item.metric_value !== null ? item.metric_value.toFixed(2) + '%' : '-';
-                        html += '<div class="diff-item down" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
-                        html += '<span class="rank" title="全市场排名（非榜单内序号）">Bottom ' + item.rank + '</span>';
-                        html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
-                        html += '<span class="name">' + (item.chain ? '<span class="chain-badge">' + escapeHtml(item.chain) + '</span>' : '') + escapeHtml(item.name || '') + '</span>';
-                        html += '<span class="value">' + val + '</span>';
-                        html += '</div>';
-                    });
+                // 下跌/负向（仅双列模式显示）
+                if (!onlyUp) {
+                    html += '<div class="daily-diff-col down">';
+                    html += '<h4 class="col-head" title="' + tip + '">' + downHead[0] + ' <span class="col-tip">' + downHead[1] + '</span></h4>';
+                    if (downList.length === 0) {
+                        html += '<div style="color:#6b7280;font-size:12px">暂无数据</div>';
+                    } else {
+                        downList.slice(0, 10).forEach(item => {
+                            html += _renderDiffItem(item, 'down', currentDiffCategory);
+                        });
+                    }
+                    html += '</div>';
                 }
-                html += '</div>';
 
                 html += '</div>';
                 content.innerHTML = html;
@@ -7402,8 +7544,57 @@
             }
         }
 
+        // 渲染单条 diff 记录
+        function _renderDiffItem (item, direction, category) {
+            let val = '-';
+            let valSign = '';
+            if (item.metric_value !== null && item.metric_value !== undefined) {
+                if (category === 'price_volume_surge') {
+                    val = item.metric_value.toFixed(1) + ' 分';
+                } else {
+                    val = item.metric_value.toFixed(2) + '%';
+                }
+                valSign = direction === 'up' ? '+' : '';
+            }
+            const rankLabel = direction === 'up' ? 'Top ' : 'Bottom ';
+            const sector = item.primary_sector;
+            const sectorLabel = sector ? (SECTOR_LABELS_SHORT[sector] || sector) : '';
+            const tier = item.mcap_tier;
+            const tierLabel = tier ? (MCAP_TIER_LABELS[tier] || tier) : '';
+
+            let html = '';
+            html += '<div class="diff-item ' + direction + '" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
+            html += '<span class="rank" title="全市场排名（非榜单内序号）">' + rankLabel + item.rank + '</span>';
+            html += '<span class="symbol">' + escapeHtml(item.symbol) + '</span>';
+            html += '<span class="name">';
+            if (item.chain) html += '<span class="chain-badge">' + escapeHtml(item.chain) + '</span>';
+            html += escapeHtml(item.name || '');
+            if (sectorLabel) html += '<span class="sector-tag">' + sectorLabel + '</span>';
+            html += '</span>';
+            html += '<span class="value">' + valSign + val + '</span>';
+            html += '</div>';
+            return html;
+        }
+
         function switchDiffCategory (cat) {
             currentDiffCategory = cat;
+            loadDailyDiff();
+        }
+        function switchDiffTier (tier) {
+            selectedDiffTier = tier;
+            loadDailyDiff();
+        }
+        function toggleDiffSector (sector) {
+            if (sector === '__all__') {
+                selectedDiffSectors = [];  // 全部 = 空数组
+            } else {
+                const idx = selectedDiffSectors.indexOf(sector);
+                if (idx >= 0) {
+                    selectedDiffSectors.splice(idx, 1);
+                } else {
+                    selectedDiffSectors.push(sector);
+                }
+            }
             loadDailyDiff();
         }
 
@@ -7646,7 +7837,7 @@
                 price_action: { name: '价格行为', desc: '趋势/动量/波动综合' },
                 sector: { name: '板块轮动', desc: '强势板块分布/资金集中度' },
                 market_cap: { name: '市值结构', desc: '大/中/小盘分布健康度' },
-                institution: { name: '机构/聪明钱', desc: '链上大户/VC/smart money' }
+                institution: { name: '机构/聪明钱', desc: 'ETF资金流（cryptoetf.today）' }
             };
 
             // P1: 情绪子分区间标签
@@ -8825,8 +9016,15 @@
             var strength = o.conviction_strength != null ? o.conviction_strength : scoreNum;
             var bonus = o.resonance_bonus != null ? ('共振 +' + o.resonance_bonus) : '';
             var regime = o.regime_mult != null ? ('周期 ×' + Number(o.regime_mult).toFixed(2)) : '';
+            var strengthTooltip = '最终置信分 = 基础强度 × 周期乘子 + 共振加分\n\n' +
+                '• 基础强度：从估值/资金/动量等多轴加权得出的原始置信度（0-100）\n' +
+                '• 共振加分：多个独立信号源同向确认时叠加（每多一个 +6 分，上限 +18）\n' +
+                '• 周期乘子：根据 BTC 市场周期相位调制（底部1.10~1.15× 放大，顶部0.80~0.85× 收敛，中期1.00×）';
             var strengthLine = (o.conviction_strength != null)
-                ? '<div class="signal-strength">强度 ' + strength + ' · ' + bonus + ' · ' + regime + '</div>'
+                ? '<div class="signal-strength" title="' + strengthTooltip.replace(/\n/g, '&#10;') + '">' +
+                '强度 ' + strength + ' · ' + bonus + ' · ' + regime +
+                ' <span class="signal-strength-hint">ⓘ</span>' +
+                '</div>'
                 : '';
 
             // FEAT-HIGHLIGHT-004: HIGH 角标

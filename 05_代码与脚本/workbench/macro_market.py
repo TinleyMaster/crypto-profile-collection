@@ -976,16 +976,27 @@ def fetch_binance_etf_flows() -> dict:
             return {"status": "partial", "error": "empty assets", "net_flow_usd_m": None}
         total = 0.0
         btc_flow = None
+        assets_detail = []  # 全币种明细，按净流入绝对值降序
         for a in assets:
             v = _safe_float(a.get("netFlowUsdM"))
             if v is not None:
                 total += v
-            if a.get("symbol") == "BTC":
+            sym = a.get("symbol", "")
+            if sym == "BTC":
                 btc_flow = v
+            assets_detail.append({
+                "symbol": sym,
+                "asset": a.get("asset", ""),
+                "net_flow_usd_m": v,
+                "date": a.get("date", ""),
+            })
+        # 按净流入绝对值降序排列，方便展示
+        assets_detail.sort(key=lambda x: abs(x.get("net_flow_usd_m") or 0), reverse=True)
         return {
             "net_flow_usd_m": round(total, 2),
             "btc_net_flow_usd_m": btc_flow,
             "as_of_date": assets[0].get("date"),
+            "assets_detail": assets_detail,
             "status": "ok",
         }
     except requests.exceptions.HTTPError as e:
@@ -3276,12 +3287,28 @@ def build_smart_money_divergence(overview: dict, max_assets: int = 20) -> dict:
 # FEAT-HIGHLIGHT-002：高亮信号精选
 # ══════════════════════════════════════════════════════════════
 
-def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> list[dict]:
-    """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。
+def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
+                              min_resonance: int = 2) -> list[dict]:
+    """从全部机会中精选高亮信号：HIGH 优先 + 共振筛选 + 类型配额（FEAT-HIGHLIGHT-002）。
 
-    同标的多信号合并：同一 target 的多条信号合并为一张卡片，
-    保留分数最高的为主卡，其余信号挂在 all_signals 字段，前端展示所有触发原由。
+    处理流程：
+    1. 全量按分数排序取候选池
+    2. 同标的合并：同一 target 的多条信号合并为一张卡片，主卡为分数最高的
+    3. 共振筛选：币种级 target（如 BTC/ETH）需 ≥ min_resonance 种不同 signal_type 才入选
+       宏观/聚合类 target 不受共振限制（如"恐贪指数极度恐惧"）
+    4. 按类型配额限制每种卡片数量（以主卡 signal_type 为准）
+    5. 按分数降序，限制 max_total
     """
+    import re
+    _symbol_re = re.compile(r'^[A-Z0-9]{2,10}$')
+
+    def _is_symbol_target(tgt: str) -> bool:
+        """判断 target 是否为具体币种 symbol（如 BTC、ETH、SOL）。"""
+        t = (tgt or "").strip()
+        if not t:
+            return False
+        return bool(_symbol_re.match(t))
+
     quotas = {
         "mvrv_deep_under": 2, "mvrv_under_watch": 1,
         "catalyst": 2, "whale_flow": 2, "github_activity": 1,
@@ -3292,42 +3319,29 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
         "etf_flow": 1,
         "__default__": 1,
     }
-    type_counts: dict[str, int] = {}
-    dir_counts: dict[str, int] = {}
-    selected: list[dict] = []
 
+    # ── 1. 全量按排序取候选池 ──
     def _sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
         score = o.get("conviction_score", 0) or 0
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
-        d = o.get("direction", "long")
-        dir_pen = dir_counts.get(d, 0) * 5
-        return (is_high, is_new, resonance, score - dir_pen)
+        return (is_high, is_new, resonance, score)
 
-    for o in sorted(opportunities, key=_sort_key, reverse=True):
-        st = o.get("signal_type") or "__default__"
-        q = quotas.get(st, quotas["__default__"])
-        if type_counts.get(st, 0) >= q:
-            continue
-        type_counts[st] = type_counts.get(st, 0) + 1
-        dir_counts[o.get("direction", "long")] = dir_counts.get(o.get("direction", "long"), 0) + 1
-        selected.append(o)
-        if len(selected) >= max_total * 3:  # 多取一些，合并后可能不够
-            break
+    # 取足够多的候选，确保合并和筛选后还有量
+    candidates = sorted(opportunities, key=_sort_key, reverse=True)[:max_total * 10]
 
-    # ── 同标的合并：同一 target 聚合成一张卡片 ──
+    # ── 2. 同标的合并：同一 target 聚合成一张卡片 ──
     merged_map: dict[str, dict] = {}  # target_lower -> merged_opp
     merged_order: list[str] = []
-    for o in selected:
+    for o in candidates:
         tgt = (o.get("target") or "").strip()
         tgt_key = tgt.lower()
         if not tgt_key:
             continue
         if tgt_key not in merged_map:
-            # 第一条作为主卡（因为已排序，它分数最高）
-            merged = dict(o)  # 浅拷贝主卡
-            merged["all_signals"] = [o]  # 所有信号列表
+            merged = dict(o)  # 浅拷贝主卡（分数最高的）
+            merged["all_signals"] = [o]
             merged_map[tgt_key] = merged
             merged_order.append(tgt_key)
         else:
@@ -3338,15 +3352,47 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
                 (merged.get("related_dims") or []) + (o.get("related_dims") or [])
             ))
             merged["related_dims"] = all_dims
-            # 如果有更高分数的（理论上不会，因为已排序），更新主卡分数
+            # 主卡分数取最高的
             if o.get("conviction_score", 0) > merged.get("conviction_score", 0):
                 merged["conviction_score"] = o["conviction_score"]
                 merged["conviction_tier"] = o.get("conviction_tier", merged.get("conviction_tier"))
 
-    # 按主卡分数降序，再限制 max_total
-    merged_list = [merged_map[k] for k in merged_order]
-    merged_list.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
-    return merged_list[:max_total]
+    # 计算每张合并卡的共振维度数（不同 signal_type 数量）
+    for k, merged in merged_map.items():
+        sig_types = list(dict.fromkeys(
+            s.get("signal_type") for s in merged.get("all_signals", [])
+            if s.get("signal_type")
+        ))
+        merged["resonance_count"] = len(sig_types)
+        merged["signal_types"] = sig_types
+
+    # ── 3. 共振筛选：币种级 target 需满足 min_resonance ──
+    after_resonance: list[dict] = []
+    for k in merged_order:
+        merged = merged_map[k]
+        tgt = merged.get("target", "")
+        res_count = merged.get("resonance_count", 1)
+        if _is_symbol_target(tgt) and res_count < min_resonance:
+            continue  # 币种级信号不满足共振条件，跳过
+        after_resonance.append(merged)
+
+    # 按主卡分数降序
+    after_resonance.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+
+    # ── 4. 按类型配额限制（配额是合并后的卡片数，不是信号数） ──
+    type_counts: dict[str, int] = {}
+    result: list[dict] = []
+    for merged in after_resonance:
+        st = merged.get("signal_type") or "__default__"
+        q = quotas.get(st, quotas["__default__"])
+        if type_counts.get(st, 0) >= q:
+            continue
+        type_counts[st] = type_counts.get(st, 0) + 1
+        result.append(merged)
+        if len(result) >= max_total:
+            break
+
+    return result
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -4031,6 +4077,66 @@ def score_opportunities(overview: dict) -> dict:
                      "etf_detail": {"total_net_usd_m": etf_net_total, "btc_net_usd_m": etf_btc, "date": etf_date}},
                     opportunities, excluded, t,
                     cycle_phase=cycle_phase, n_confirm=2)
+
+        # D2) 非 BTC 币种 ETF 资金流（按市值分层阈值，最多触发 top 5 异动币种）
+        assets_detail = _etf_data.get("assets_detail") or []
+        # 按市值规模分层设定阈值（单位：百万美元）
+        # L1 龙头：BTC（已单独处理）
+        # L2 主流：ETH
+        # L3 次主流：SOL, XRP
+        # L4 小众：其他
+        _etf_tiers = {
+            "ETH":   {"high": 30,  "medium": 15,  "base_str_high": 68, "base_str_med": 56, "step": 15},
+            "SOL":   {"high": 10,  "medium": 5,   "base_str_high": 65, "base_str_med": 54, "step": 5},
+            "XRP":   {"high": 10,  "medium": 5,   "base_str_high": 65, "base_str_med": 54, "step": 5},
+            "__default__": {"high": 3, "medium": 1.5, "base_str_high": 62, "base_str_med": 52, "step": 2},
+        }
+        etf_signals_emitted = 0
+        for item in assets_detail:
+            sym = item.get("symbol", "")
+            if not sym or sym == "BTC":
+                continue
+            flow = item.get("net_flow_usd_m")
+            if flow is None:
+                continue
+            tier = _etf_tiers.get(sym, _etf_tiers["__default__"])
+            abs_flow = abs(flow)
+            # 判断是否触发（至少 medium 阈值）
+            if flow >= tier["medium"]:
+                direction = "long"
+                is_high = flow >= tier["high"]
+            elif flow <= -tier["medium"]:
+                direction = "short"
+                is_high = flow <= -tier["high"]
+            else:
+                continue  # 未达阈值
+
+            conf = "high" if is_high else "medium"
+            base_str = tier["base_str_high"] if is_high else tier["base_str_med"]
+            exceed = abs_flow - (tier["high"] if is_high else tier["medium"])
+            strength = min(90, base_str + int(min(18, exceed / tier["step"])))
+
+            flow_label = f"+${flow:.1f}M" if flow > 0 else f"${flow:.1f}M"
+            action = "机构资金加仓，关注联动机会" if direction == "long" else "机构资金离场，短期规避"
+            invalid = "ETF 连续 3 日净流出" if direction == "long" else "ETF 连续 3 日净流入"
+
+            _push_opportunity(
+                {"target": sym, "direction": direction, "confidence": conf,
+                 "conviction_score": strength,
+                 "signal_type": "etf_flow",
+                 "key_metric": f"ETF 净流入 {flow_label}",
+                 "trigger_logic": f"{sym} ETF 单日净流入 {flow_label}（{item.get('date', etf_date)}）→ 机构资金{'加仓' if direction=='long' else '减仓'}",
+                 "action_hint": action,
+                 "invalidation": invalid,
+                 "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
+                 "involved_symbols": [sym],
+                 "etf_detail": {"net_usd_m": flow, "date": item.get("date", etf_date),
+                                "tier": "L2主流" if sym == "ETH" else ("L3次主流" if sym in ("SOL", "XRP") else "L4小众")}},
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=2)
+            etf_signals_emitted += 1
+            if etf_signals_emitted >= 5:
+                break  # 非 BTC 币种最多 5 个 ETF 信号
 
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)

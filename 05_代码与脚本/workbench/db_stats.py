@@ -9065,17 +9065,23 @@ def remove_watchlist(watch_id: int) -> dict:
 # 每日 diff 变化榜
 # ═══════════════════════════════════════════════════════════════
 
-def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] | None = None) -> dict:
+def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] | None = None,
+                            sectors: list[str] | None = None,
+                            mcap_tiers: list[str] | None = None) -> dict:
     """获取每日 diff 变化榜。
 
     Args:
         diff_date: 指定日期（YYYY-MM-DD），None 取最新一天
         categories: 过滤榜单类型，None 返回全部
+        sectors: 按赛道过滤（primary_sector 值列表），None 不过滤
+        mcap_tiers: 按市值分层过滤（top10/top100/top500/top1000/top3000），None 不过滤
 
     Returns:
         {
             "ok": True,
             "diff_date": "2026-08-20",
+            "available_sectors": ["ai", "l2", ...],   # 当日有数据的赛道
+            "available_tiers": ["top10", "top100", ...], # 当日有数据的市值分层
             "categories": {
                 "price_change_24h": {
                     "up": [...],
@@ -9094,7 +9100,8 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 cur.execute("SELECT max(diff_date) AS d FROM biz.daily_diff_summary")
                 row = cur.fetchone()
                 if not row or not row["d"]:
-                    return {"ok": True, "diff_date": None, "categories": {}}
+                    return {"ok": True, "diff_date": None, "available_sectors": [],
+                            "available_tiers": [], "categories": {}}
                 target_date = str(row["d"])
 
             cat_filter = ""
@@ -9103,6 +9110,20 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 placeholders = ",".join(["%s"] * len(categories))
                 cat_filter = f" AND category IN ({placeholders})"
                 params.extend(categories)
+
+            # 赛道筛选（从 detail_json 里取 primary_sector 字段）
+            sector_filter = ""
+            if sectors:
+                placeholders = ",".join(["%s"] * len(sectors))
+                sector_filter = f" AND d.detail_json->>'primary_sector' IN ({placeholders})"
+                params.extend(sectors)
+
+            # 市值分层筛选
+            tier_filter = ""
+            if mcap_tiers:
+                placeholders = ",".join(["%s"] * len(mcap_tiers))
+                tier_filter = f" AND d.detail_json->>'mcap_tier' IN ({placeholders})"
+                params.extend(mcap_tiers)
 
             cur.execute(
                 f"""
@@ -9117,8 +9138,8 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                     a.canonical_symbol,
                     a.canonical_name,
                     a.market_cap_rank,
-                    -- 同名 symbol 可能对应多个项目（如 TUT=Tutorial 与 TUT=Tutellus），
-                    -- 取主链以便前端展示，避免两个 TUT 在榜单上被误认为同一资产。
+                    a.primary_sector,
+                    -- 同名 symbol 可能对应多个项目
                     (SELECT ac.chain
                      FROM core.asset_contract ac
                      WHERE ac.asset_id = a.asset_id
@@ -9128,11 +9149,37 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 JOIN core.asset a ON a.asset_id = d.asset_id
                 WHERE d.diff_date = %s
                   {cat_filter}
+                  {sector_filter}
+                  {tier_filter}
                 ORDER BY d.category, d.direction, d.rank
                 """,
                 tuple(params),
             )
             rows = cur.fetchall()
+
+            # 收集当日可用的赛道和分层（不卡 category/sector/tier 过滤，取全量去重）
+            avail_params: list = [target_date]
+            avail_cat_filter = ""
+            if categories:
+                placeholders = ",".join(["%s"] * len(categories))
+                avail_cat_filter = f" AND category IN ({placeholders})"
+                avail_params.extend(categories)
+            cur.execute(
+                f"""
+                SELECT DISTINCT
+                    d.detail_json->>'primary_sector' AS sector,
+                    d.detail_json->>'mcap_tier' AS tier
+                FROM biz.daily_diff_summary d
+                WHERE d.diff_date = %s
+                  {avail_cat_filter}
+                  AND d.detail_json->>'primary_sector' IS NOT NULL
+                """,
+                tuple(avail_params),
+            )
+            avail_rows = cur.fetchall()
+            available_sectors = sorted({r["sector"] for r in avail_rows if r["sector"]})
+            available_tiers = sorted({r["tier"] for r in avail_rows if r["tier"]},
+                                     key=lambda x: int(x.replace("top", "")) if x.replace("top", "").isdigit() else 9999)
 
             result: dict = {}
             for r in rows:
@@ -9140,21 +9187,26 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 direction = r["direction"]
                 if cat not in result:
                     result[cat] = {"up": [], "down": []}
+                detail = r["detail_json"] or {}
                 result[cat][direction].append({
                     "asset_id": r["asset_id"],
                     "symbol": r["canonical_symbol"],
                     "name": r["canonical_name"],
                     "chain": r["chain"],
                     "market_cap_rank": r["market_cap_rank"],
+                    "primary_sector": r["primary_sector"] or detail.get("primary_sector"),
+                    "mcap_tier": detail.get("mcap_tier"),
                     "rank": r["rank"],
                     "metric_value": float(r["metric_value"]) if r["metric_value"] is not None else None,
                     "metric_label": r["metric_label"],
-                    "detail": r["detail_json"] or {},
+                    "detail": detail,
                 })
 
             return {
                 "ok": True,
                 "diff_date": target_date,
+                "available_sectors": available_sectors,
+                "available_tiers": available_tiers,
                 "categories": result,
             }
 

@@ -67,7 +67,14 @@ SELECT
     jsonb_build_object(
         'price_usd', d.price_usd,
         'market_cap', d.market_cap,
-        'volume_24h', d.volume_24h
+        'volume_24h', d.volume_24h,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top1000'
+        END
     )
 FROM biz.asset_market_daily d
 JOIN core.asset a ON a.asset_id = d.asset_id
@@ -79,7 +86,7 @@ WHERE d.source_code = 'cmc'
   AND d.volume_24h >= 500000
   AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
 ORDER BY ABS(d.change_24h) DESC
-LIMIT 40
+LIMIT 60
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
@@ -98,7 +105,14 @@ SELECT
         'price_usd', d.price_usd,
         'market_cap', d.market_cap,
         'volume_24h', d.volume_24h,
-        'change_24h', d.change_24h
+        'change_24h', d.change_24h,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top1000'
+        END
     )
 FROM biz.asset_market_daily d
 JOIN core.asset a ON a.asset_id = d.asset_id
@@ -109,7 +123,7 @@ WHERE d.source_code = 'cmc'
   AND d.market_cap > 0
   AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
 ORDER BY d.volume_24h / d.market_cap DESC
-LIMIT 20
+LIMIT 40
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
@@ -128,7 +142,14 @@ SELECT
         'price_usd', d.price_usd,
         'market_cap', d.market_cap,
         'volume_24h', d.volume_24h,
-        'change_24h', d.change_24h
+        'change_24h', d.change_24h,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top1000'
+        END
     )
 FROM biz.asset_market_daily d
 JOIN core.asset a ON a.asset_id = d.asset_id
@@ -139,7 +160,67 @@ WHERE d.source_code = 'cmc'
   AND d.market_cap > 0
   AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
 ORDER BY d.volume_24h / d.market_cap ASC
-LIMIT 20
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+PRICE_VOLUME_SURGE_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH ranked AS (
+    SELECT
+        d.asset_id,
+        d.change_24h,
+        CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap * 100 ELSE NULL END AS vol_mcap_ratio,
+        d.price_usd,
+        d.market_cap,
+        d.volume_24h,
+        a.market_cap_rank,
+        a.primary_sector,
+        -- 涨幅百分位排名（越高越好，100=涨幅最大）
+        PERCENT_RANK() OVER (ORDER BY d.change_24h ASC) * 100 AS price_pct,
+        -- 量市比百分位排名（越高越好，100=量最大）
+        PERCENT_RANK() OVER (ORDER BY CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap ELSE 0 END ASC) * 100 AS vol_pct
+    FROM biz.asset_market_daily d
+    JOIN core.asset a ON a.asset_id = d.asset_id
+    WHERE d.source_code = 'cmc'
+      AND d.market_date = %s::DATE
+      AND a.market_cap_rank <= 1000
+      AND d.change_24h IS NOT NULL
+      AND d.volume_24h IS NOT NULL
+      AND d.market_cap > 0
+      AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+)
+SELECT
+    %s::DATE,
+    'price_volume_surge',
+    asset_id,
+    ROUND((price_pct + vol_pct) / 2, 2) AS composite_score,
+    '量价共振得分',
+    ROW_NUMBER() OVER (ORDER BY (price_pct + vol_pct) / 2 DESC),
+    'up',
+    jsonb_build_object(
+        'price_usd', price_usd,
+        'market_cap', market_cap,
+        'volume_24h', volume_24h,
+        'change_24h', change_24h,
+        'vol_mcap_ratio', ROUND(vol_mcap_ratio, 2),
+        'price_pct_rank', ROUND(price_pct, 1),
+        'volume_pct_rank', ROUND(vol_pct, 1),
+        'primary_sector', primary_sector,
+        'mcap_tier', CASE
+            WHEN market_cap_rank <= 10 THEN 'top10'
+            WHEN market_cap_rank <= 100 THEN 'top100'
+            WHEN market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top1000'
+        END
+    )
+FROM ranked
+WHERE change_24h > 0          -- 只看涨的（量价齐升）
+  AND price_pct >= 50         -- 涨幅前 50%
+  AND vol_pct >= 50           -- 放量前 50%
+ORDER BY (price_pct + vol_pct) / 2 DESC
+LIMIT 30
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
@@ -171,7 +252,14 @@ SELECT
         'unlock_amount_7d', u.unlock_amount_7d,
         'event_count_7d', u.event_count_7d,
         'market_cap', a.market_cap,
-        'market_cap_rank', a.market_cap_rank
+        'market_cap_rank', a.market_cap_rank,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
     )
 FROM upcoming u
 JOIN core.asset a ON a.asset_id = u.asset_id
@@ -320,6 +408,9 @@ def generate_for_date(cur, d: date) -> dict:
 
     cur.execute(PRICE_CHANGE_SQL, (date_str, date_str))
     result["price_change_24h"] = cur.rowcount
+
+    cur.execute(PRICE_VOLUME_SURGE_SQL, (date_str, date_str))
+    result["price_volume_surge"] = cur.rowcount
 
     cur.execute(VOLUME_SURGE_SQL, (date_str, date_str))
     result["volume_surge_24h_up"] = cur.rowcount

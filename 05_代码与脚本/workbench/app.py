@@ -1927,12 +1927,26 @@ def api_market_overview():
 
 @app.route("/api/daily-diff")
 def api_daily_diff():
-    """每日 diff 变化榜：涨跌幅/成交量异动/解锁抛压等。"""
+    """每日 diff 变化榜：涨跌幅/成交量异动/量价齐升/解锁抛压等。
+
+    Query params:
+        date: 指定日期（YYYY-MM-DD）
+        categories: 逗号分隔的类型列表，如 price_change_24h,volume_surge_24h
+        sectors: 逗号分隔的赛道列表，如 ai,l2,defi
+        mcap_tiers: 逗号分隔的市值分层，如 top10,top100
+    """
     try:
         diff_date = request.args.get("date")
         categories = request.args.get("categories")
+        sectors = request.args.get("sectors")
+        mcap_tiers = request.args.get("mcap_tiers")
         cat_list = categories.split(",") if categories else None
-        result = _get_db_stats().get_daily_diff_summary(diff_date=diff_date, categories=cat_list)
+        sector_list = sectors.split(",") if sectors else None
+        tier_list = mcap_tiers.split(",") if mcap_tiers else None
+        result = _get_db_stats().get_daily_diff_summary(
+            diff_date=diff_date, categories=cat_list,
+            sectors=sector_list, mcap_tiers=tier_list,
+        )
         return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -168,91 +168,131 @@ def render_brief_html(brief: dict) -> str:
     """)
 
     # ════════════════════════════════════════════════════════
-    # 第 2 屏：🏭 12 赛道资金流向
+    # 第 2 屏：🏭 板块资金净流入（叙事榜 + 链净流入 双栏）
     # ════════════════════════════════════════════════════════
     html_parts.append("""
-      <!-- 第2屏：赛道资金流卡片 -->
+      <!-- 第2屏：板块资金流双栏卡片 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
-        <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;display:flex;align-items:center">
-          <span style="margin-right:6px">🏭</span>12 赛道资金流向
-          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">按 7d 涨幅排序 · 条宽=市值占比</span>
+        <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:10px;display:flex;align-items:center">
+          <span style="margin-right:6px">🏭</span>板块资金净流入
+          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">7日数据</span>
         </div>
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse">
+          <tr>
+            <td width="58%" valign="top" style="padding-right:8px">
+              <div style="font-size:11.5px;font-weight:700;color:#f59e0b;margin-bottom:6px">📊 叙事榜（市值+TVL）</div>
     """)
 
-    sectors = sector_flow.get("sectors") or []
-    if sectors and sector_flow.get("status") == "ok":
-        # 找出最大市值用于进度条归一化
-        max_mcap = max((float(s.get("market_cap") or 0)) for s in sectors) or 1
-        n_sec = len(sectors)
+    narratives = brief.get("narrative_flow", {}).get("ranked") or []
+    if narratives:
+        max_score = max((float(n.get("composite_score") or 0)) for n in narratives) or 1
+        for idx, n in enumerate(narratives[:12]):
+            name = n.get("narrative", "?")
+            score = float(n.get("composite_score") or 0)
+            mcap7d = n.get("mcap_change_7d_pct")
+            tvl7d = n.get("tvl_change_7d_pct")
+            mode = n.get("mode", "mcap_only")
+            mcap = float(n.get("market_cap") or 0)
+            trend = n.get("trend_label", "")
+            top_coins = n.get("top_coins") or []
 
-        for idx, s in enumerate(sectors):
-            label = s.get("sector_label") or s.get("sector_key") or "?"
-            mcap = float(s.get("market_cap") or 0)
-            mcap_7d = s.get("mcap_change_7d_pct")
-            mcap_1d = s.get("mcap_change_1d_pct")
-            chg_7d_str, chg_7d_color = _fmt_pct(mcap_7d)
-            chg_1d_str, chg_1d_color = _fmt_pct(mcap_1d)
-            bar_pct = max(3, min(100, (mcap / max_mcap) * 100)) if max_mcap > 0 else 3
+            chg_str, chg_color = _fmt_pct(mcap7d)
+            tvl_str, tvl_color = _fmt_pct(tvl7d) if tvl7d is not None else ("—", "#94a3b8")
+            bar_pct = max(3, min(100, (score / max_score) * 100)) if max_score > 0 else 3
 
-            # 领涨币（显示用24h）
-            leaders = s.get("leaders") or []
-            leader_html = ""
-            if leaders:
-                parts = []
-                for l in leaders[:3]:
-                    sym = l.get("symbol", "?")
-                    p24h = l.get("percent_change_24h")
-                    p24h_str, p24h_color = _fmt_pct(p24h)
-                    parts.append(
-                        f'<span style="display:inline-block;background:#fff;border:1px solid #e2e8f0;border-radius:3px;padding:1px 5px;font-size:10.5px;margin-right:4px;margin-bottom:2px">'
-                        f'<b style="color:#0f172a">{sym}</b> <span style="color:{p24h_color};font-weight:600">{p24h_str}</span></span>'
+            # 趋势标签
+            trend_badge = ""
+            if trend == "加速上涨":
+                trend_badge = '<span style="background:#dcfce7;color:#166534;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">加速上涨</span>'
+            elif trend == "反弹":
+                trend_badge = '<span style="background:#dbeafe;color:#1e40af;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">反弹</span>'
+            elif trend == "横盘":
+                trend_badge = '<span style="background:#f1f5f9;color:#64748b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">横盘</span>'
+
+            # 领涨币
+            coins_html = ""
+            if top_coins:
+                coin_parts = []
+                for c in top_coins[:3]:
+                    sym = c if isinstance(c, str) else c.get("symbol", "?")
+                    coin_parts.append(
+                        f'<span style="font-size:10px;color:#64748b">{sym}</span>'
                     )
-                leader_html = f'<div style="margin-top:4px;margin-left:28px">{"".join(parts)}</div>'
+                coins_html = f'<div style="font-size:10px;color:#94a3b8;margin-top:2px;margin-left:22px">{" · ".join(coin_parts)}</div>'
 
-            # 排名徽章 + 涨跌背景
-            is_top3 = idx < 3
-            is_bottom2 = idx >= n_sec - 2
-            if is_top3:
-                row_bg = "#f0fdf4"
-            elif is_bottom2:
-                row_bg = "#fef2f2"
+            # 数据源标签
+            mode_tag = ""
+            if mode == "blended":
+                mode_tag = f'<span style="font-size:9.5px;color:#8b5cf6;margin-left:4px">市值+TVL</span>'
             else:
-                row_bg = "#fafafa"
-
-            if idx == 0:
-                rank_badge = '<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#16a34a;color:#fff;font-size:10.5px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">TOP</span>'
-            elif idx < 3:
-                rank_badge = f'<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#86efac;color:#166534;font-size:10.5px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">{idx+1}</span>'
-            elif is_bottom2:
-                rank_badge = '<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#dc2626;color:#fff;font-size:10px;font-weight:700;border-radius:4px;margin-right:7px;flex-shrink:0">LAG</span>'
-            else:
-                rank_badge = f'<span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#e2e8f0;color:#475569;font-size:10.5px;font-weight:600;border-radius:4px;margin-right:7px;flex-shrink:0">{idx+1}</span>'
+                mode_tag = f'<span style="font-size:9.5px;color:#94a3b8;margin-left:4px">仅市值</span>'
 
             html_parts.append(f"""
-            <div style="padding:7px 8px;margin-bottom:3px;border-radius:6px;background:{row_bg}">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
-                <div style="display:flex;align-items:center;min-width:0">
-                  {rank_badge}
-                  <span style="font-size:12.5px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{label}</span>
-                  <span style="color:#94a3b8;font-weight:400;font-size:10.5px;margin-left:5px;flex-shrink:0">{_fmt_mcap(mcap)}</span>
+              <div style="padding:5px 6px;margin-bottom:2px;border-radius:5px;background:#fafafa">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">
+                  <div style="display:flex;align-items:center;min-width:0">
+                    <span style="display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;background:#e2e8f0;color:#475569;font-size:10px;font-weight:600;border-radius:3px;margin-right:5px;flex-shrink:0">{idx+1}</span>
+                    <span style="font-size:12px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</span>
+                    {trend_badge}
+                  </div>
+                  <div style="font-size:11px;white-space:nowrap;margin-left:6px">
+                    <span style="color:{chg_color};font-weight:700">{chg_str}</span>
+                  </div>
                 </div>
-                <div style="font-size:11.5px;white-space:nowrap;margin-left:8px">
-                  <span style="color:{chg_7d_color};font-weight:700">7d {chg_7d_str}</span>
-                  <span style="color:#cbd5e1;margin:0 4px">·</span>
-                  <span style="color:{chg_1d_color}">1d {chg_1d_str}</span>
+                <div style="height:5px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-left:23px">
+                  <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:3px"></div>
                 </div>
+                {coins_html}
               </div>
-              <!-- 市值条形（8px加粗） -->
-              <div style="height:8px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-left:28px">
-                <div style="height:100%;width:{bar_pct}%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:4px"></div>
-              </div>
-              {leader_html}
-            </div>
             """)
     else:
-        html_parts.append('<div style="color:#64748b;font-size:12px;padding:16px;text-align:center">暂无赛道数据</div>')
+        html_parts.append('<div style="color:#94a3b8;font-size:11px;padding:12px;text-align:center">暂无叙事数据</div>')
 
-    html_parts.append("</div>")
+    html_parts.append("""
+            </td>
+            <td width="42%" valign="top" style="padding-left:8px;border-left:1px solid #f1f5f9">
+              <div style="font-size:11.5px;font-weight:700;color:#10b981;margin-bottom:6px">🔗 链净流入 TOP5</div>
+    """)
+
+    chains = brief.get("chain_flow", {}).get("ranked") or []
+    if chains:
+        max_flow = max((abs(float(c.get("flow_7d") or 0))) for c in chains) or 1
+        for idx, c in enumerate(chains[:5]):
+            chain_name = c.get("chain", "?")
+            tvl = float(c.get("tvl") or 0)
+            flow = float(c.get("flow_7d") or 0)
+            flow_pct = c.get("flow_7d_pct")
+            flow_color = "#16a34a" if flow >= 0 else "#dc2626"
+            sign = "+" if flow >= 0 else ""
+            flow_str = f"${flow/1e9:.2f}B" if abs(flow) >= 1e9 else f"${flow/1e6:.0f}M"
+            flow_pct_str, _ = _fmt_pct(flow_pct) if flow_pct is not None else ("—", "#94a3b8")
+
+            bar_pct = max(3, min(100, (abs(flow) / max_flow) * 100))
+            bar_color = "#22c55e" if flow >= 0 else "#ef4444"
+
+            html_parts.append(f"""
+              <div style="padding:6px 6px;margin-bottom:3px;border-radius:5px;background:#fafafa">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                  <span style="font-size:12px;font-weight:600;color:#0f172a">{chain_name}</span>
+                  <span style="font-size:11px;color:{flow_color};font-weight:700">{sign}{flow_str}</span>
+                </div>
+                <div style="height:5px;background:#e2e8f0;border-radius:3px;overflow:hidden">
+                  <div style="height:100%;width:{bar_pct}%;background:{bar_color};border-radius:3px"></div>
+                </div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:2px">
+                  TVL ${tvl/1e9:.1f}B · {flow_pct_str}
+                </div>
+              </div>
+            """)
+    else:
+        html_parts.append('<div style="color:#94a3b8;font-size:11px;padding:12px;text-align:center">暂无链数据</div>')
+
+    html_parts.append("""
+            </td>
+          </tr>
+        </table>
+      </div>
+    """)
 
     # ════════════════════════════════════════════════════════
     # 第 3 屏：🎯 机会清单
@@ -284,6 +324,18 @@ def render_brief_html(brief: dict) -> str:
             sources = opp.get("source_count") or opp.get("signals_count") or 0
             chain = opp.get("chain")
             contract = opp.get("contract_address")
+            signal_sources = opp.get("signal_sources") or []
+
+            # 信号源标签映射（图标 + 中文名 + 颜色）
+            SRC_LABEL = {
+                "sector_leader": ("📈", "赛道领涨", "#059669", "#d1fae5"),
+                "smart_money": ("🔵", "聪明钱", "#2563eb", "#dbeafe"),
+                "exchange_flow": ("🏦", "交易所", "#d97706", "#fef3c7"),
+                "accumulation": ("🟢", "吸筹", "#059669", "#d1fae5"),
+                "whale_move": ("🐳", "巨鲸", "#7c3aed", "#ede9fe"),
+                "distribution": ("🔴", "派发", "#dc2626", "#fee2e2"),
+                "liquidation": ("💥", "清算", "#b91c1c", "#fee2e2"),
+            }
 
             # 链标签 + 区块浏览器链接
             CHAIN_LABEL = {
@@ -342,7 +394,25 @@ def render_brief_html(brief: dict) -> str:
             meta_parts = []
             if sector:
                 meta_parts.append(f"🏷️ {sector}")
-            if sources:
+
+            # 信号源：有具体列表就展示彩色标签，没有就退化为数字
+            if signal_sources:
+                src_tags = []
+                for src in signal_sources[:4]:  # 最多显示4个
+                    if src in SRC_LABEL:
+                        icon, name, color, bg = SRC_LABEL[src]
+                        src_tags.append(
+                            f'<span style="background:{bg};color:{color};font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600">{icon} {name}</span>'
+                        )
+                    else:
+                        src_tags.append(
+                            f'<span style="background:#f1f5f9;color:#475569;font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600">{src}</span>'
+                        )
+                src_html = " ".join(src_tags)
+                if len(signal_sources) > 4:
+                    src_html += f' <span style="color:#94a3b8;font-size:10px">+{len(signal_sources)-4}</span>'
+                meta_parts.append(src_html)
+            elif sources:
                 meta_parts.append(f"📡 {sources}信号源")
             meta_str = " · ".join(meta_parts)
 

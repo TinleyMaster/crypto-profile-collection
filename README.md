@@ -9,30 +9,37 @@
 ## 技术架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  biz    业务消费层  doc_source_entry / doc_asset             │
-│                    research_url / coin_basic                 │
-│                    asset_tokenomics / asset_token_unlocks    │
-│                    onchain_holder_snapshot / transfer_log    │
-│                    onchain_exchange_wallet                   │
-│                    asset_social_heat / onchain_holder_snapshot   │
-│                    asset_raises / asset_hacks                │
-│                    asset_derivatives / daily_recommendation  │
-│                    asset_market_daily                         │
-│                    doc_source_notebooklm / research_notebook │
-│                    research_thesis / research_message        │
-│                    unlock_watchlist / dl_protocol_checked    │
-│                    kol_profile / kol_post / kol_signal       │
-├─────────────────────────────────────────────────────────────┤
-│  core   统一实体层  asset / asset_source_map                  │
-│                    asset_contract_map                        │
-├─────────────────────────────────────────────────────────────┤
-│  src_*  来源解析层  src_cmc / src_cg / src_dl / dexscreener  │
-├─────────────────────────────────────────────────────────────┤
-│  raw    原始响应层  api_response                             │
-├─────────────────────────────────────────────────────────────┤
-│  sys    系统元数据  ingest_run / source_platform              │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│  biz    业务消费层  doc_source_entry / doc_asset / research_url   │
+│                    coin_basic / asset_sector                      │
+│                    asset_tokenomics / asset_token_unlocks         │
+│                    onchain_holder_snapshot / onchain_transfer_log │
+│                    onchain_exchange_wallet                        │
+│                    asset_social_heat / asset_market_daily         │
+│                    asset_raises / asset_hacks                     │
+│                    asset_derivatives / daily_recommendation       │
+│                    asset_contract_security / asset_liquidity      │
+│                    asset_insider_clusters                         │
+│                    asset_holder_qualitative                       │
+│                    asset_risk_labels / asset_lifecycle            │
+│                    asset_catalyst / catalyst_impact               │
+│                    cm_asset_onchain_daily / obm_btc_daily         │
+│                    doc_source_notebooklm / research_notebook      │
+│                    research_thesis / research_message             │
+│                    unlock_watchlist / opportunity_watchlist       │
+│                    dl_protocol_checked                            │
+│                    kol_profile / kol_post / kol_signal            │
+├───────────────────────────────────────────────────────────────────┤
+│  core   统一实体层  asset / asset_source_map                       │
+│                    asset_contract_map                             │
+├───────────────────────────────────────────────────────────────────┤
+│  src_*  来源解析层  src_cmc / src_cg / src_dl / dexscreener       │
+│                    src_binance                                    │
+├───────────────────────────────────────────────────────────────────┤
+│  raw    原始响应层  api_response                                  │
+├───────────────────────────────────────────────────────────────────┤
+│  sys    系统元数据  ingest_run / source_platform / task_run       │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 **主要数据源：**
@@ -50,6 +57,9 @@
 | Binance Square（币安广场） | KOL 交易信号监控（实时喊单识别 + 邮件提醒） | Playwright 无头浏览器 + bapi 接口 |
 | CoinMetrics Community API | BTC/ETH 多币链上指标（交易所净流/余额/活跃地址/HashRate/ROI/手续费），免费档 | REST API（日频） |
 | Open Bitcoin Metrics (OBM) | 23 项 BTC 链上指标（liveliness/dormancy/CDD/hashrate/age-band），GitHub CSV | GitHub raw CSV |
+| RugCheck | Solana 合约安全扫描 + Insider 网络聚类检测（mint 权限/流动性锁定/内幕关联钱包） | 公开 REST API（/report） |
+| DexScreener + GeckoTerminal | DEX 流动性扫描（双源聚合）：流动池数量 / 总流动性 USD / Top 池占比 | 公开 REST API |
+| Binance News / Binance Square News | 催化剂事件摄入（币安公告 + 广场新闻），因子化标记市场影响 | Playwright + bapi 接口 |
 
 ---
 
@@ -296,6 +306,87 @@ B2 深度爬取发现的新链接不是一步到位精确分类，而是「规�
 **容错：** 各维度独立 try/except，单源失败不阻断整体；无 CoinGecko 映射且各源均无数据时返回 `not_found`；CoinGecko demo key 限流(429)时自动重试并回退公共 API；Reddit 无鉴权接口常被 403 拦截，自动降级到 Google News；搜索词附带 `crypto` 关键词以消除通用符号歧义（如 APR=年利率）。LLM 情绪仅在拿到 Reddit/项目动态/新闻文本时调用。本期不含 X/Twitter 抓取（免费 API 已停用，爬取脆弱）。
 
 **数据表：** `biz.asset_social_heat`（按 asset_id 唯一），含 `community_json` / `sentiment_json` / `trend_json` / `market_json` / `score_detail_json` / `methodology_json` / `input_snapshot_json`。
+
+### 合约安全扫描
+
+`phase_chain_contract_security.py` + `contract_security_client.py`：按链分流扫描合约安全风险，首期支持 **Solana（RugCheck）**，结果 UPSERT 到 `biz.asset_contract_security`（asset_id 唯一）。
+
+**扫描内容：**
+- Mint 权限 / 冻结权限 / 黑名单权限
+- 流动性锁定状态（LP locked）
+- Top 持有者集中度
+- 合约是否已放弃（renounced）
+- 综合风险评分（risk_score）+ 风险标签（risk_label: safe / warning / danger）
+
+**数据表：** `biz.asset_contract_security`（asset_id + chain 复合主键）
+
+### DEX 流动性扫描
+
+`phase_chain_liquidity.py` + 双源客户端（`dexscreener_liquidity_client.py` + `geckoterminal_liquidity_client.py`）：聚合 DexScreener + GeckoTerminal 两个 DEX 搜索引擎，取最全面结果入库。
+
+**采集指标：**
+- `pool_count`：流动池数量
+- `total_liquidity_usd`：总锁仓流动性（USD）
+- `top_pool_share_pct`：Top 流动池占比（集中度风险）
+- `top_pair_address` / `top_pair_dex`：主力交易池信息
+
+**数据源降级：** GeckoTerminal 优先（免费且数据全），DexScreener 兜底；任一源有数据即入库。
+**数据表：** `biz.asset_liquidity`（asset_id + chain 复合主键）
+
+### Solana Insider 网络聚类
+
+`phase_chain_insider_clusters.py` + `insider_cluster_client.py`：调用 RugCheck `/report` 接口，检测 Solana 代币的 **内幕关联钱包网络**——识别部署者、早期持有者、流动性提供者之间的关联聚类，判断是否为「关联高度集中的内部人控盘」。
+
+**核心指标：**
+- `graph_insiders_detected`：检测到的内幕钱包数
+- `insider_network_count`：关联网络中的地址数
+- `insider_dominance`：内幕地址持仓占比（集中度）
+- `insider_account_ratio`：内幕地址数占总持有者比例
+- `risk_label`：综合风险标签（low / medium / high）
+
+**数据表：** `biz.asset_insider_clusters`（asset_id 唯一）
+
+### Meme 专项分析
+
+针对 Meme 赛道的专项投研工具链，基于多源链上+社交数据做纯规则判定（零 LLM、零 API 成本）。
+
+#### 五维风险标签（`phase_meme_risk_labels.py`）
+
+**五轴评分模型**（每轴 0-100 分 + red/yellow/green/unknown 四档标签，加权合成总风险）：
+
+| 轴 | 数据源 | 评分逻辑 |
+|---|--------|---------|
+| `contract` 合约安全 | `biz.asset_contract_security` | risk_score 直读 + 布尔红旗叠加（mint/冻结/黑名单权限） |
+| `liquidity` 流动性 | `biz.asset_liquidity` | 总流动性 USD + 池数 + Top 池占比（流动性越低风险越高） |
+| `holder` 筹码集中度 | `biz.onchain_holder_snapshot` / `asset_holder_qualitative` | 鲸鱼持仓变化率 + 持有者数变化（精确快照优先，无则定性兜底） |
+| `lifecycle` 生命周期 | `biz.asset_lifecycle` | 上线年龄分桶（越早期风险越高） |
+| `social` 社交热度 | `biz.kol_signal` + `biz.asset_github_repo` | 死盘/零社交=高风险；高关注度=低分 |
+
+**输出：** `biz.asset_risk_labels`——`axes_computed`（计算到的轴数）、`total_score`（加权总分）、`risk_label`（综合评级：block/high/medium/low/unknown）、`flags`（红旗列表）、`detail`（各轴明细 JSON）。
+
+#### 四阶段生命周期（`phase_meme_lifecycle.py`）
+
+**四阶段模型**（纯规则，阈值外置在 `market_rules.yaml`）：
+
+- `launch` 首发期：上线 ≤7 天，成交量低，流动性薄
+- `bloom` 爆发期：成交量放大，持有者快速增长，社交媒体热议
+- `diverge` 分化期：成交量回落，鲸鱼开始出货，价格剧烈震荡
+- `decay` 衰退期：流动性萎缩，持有者持续流失，社区死寂
+- `unknown`：数据不足无法判定
+
+**输入：** 流动性 + 持仓快照 + KOL 信号 + GitHub 活跃度 + 衍生品信号（任一有数据即触发计算）。
+**数据表：** `biz.asset_lifecycle`（asset_id 唯一）
+
+#### 定性持仓活跃度（`phase_meme_holder_qualitative.py`）
+
+针对「有转账日志但无精确持仓快照」的长尾小币，从 `biz.onchain_transfer_log` 聚合出定性的筹码活跃度指标，作为风险/生命周期计算的兜底数据源：
+
+- `active_addresses_24h / 7d`：活跃地址数
+- `transfer_count_24h / 7d`：转账笔数
+- `whale_transfer_count_24h / 7d`：大额转账笔数
+- `exchange_inflow_usd_24h / 7d`：交易所净流入 USD
+
+**数据表：** `biz.asset_holder_qualitative`（asset_id + chain 复合主键）
 
 ### 竞品结构化对比
 

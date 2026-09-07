@@ -4403,6 +4403,8 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                 )
                 direction = "long" if (p24h >= 0 and is_bullish) else "short" if p24h < 0 else "neutral"
                 subtypes = list(set(s.get("signal_subtype", "") for s in sigs if s.get("signal_subtype")))
+                # 信号源列表（赛道领涨 + 各链上信号类型
+                src_list = ["sector_leader"] + subtypes
                 result.append({
                     "target": sym,
                     "symbol": sym,
@@ -4412,6 +4414,7 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                     "direction": direction,
                     "sector": lc["sector"],
                     "source_count": 1 + len(sigs),
+                    "signal_sources": src_list,
                     "trigger_logic": f"{lc['sector']}赛道领涨 + {len(sigs)}个链上信号共振（{', '.join(subtypes[:3])}），7日 +{float(lc.get('percent_change_7d') or 0):.1f}% / 24日 {p24h:+.1f}%",
                     "change_24h": p24h,
                     "market_cap_usd": float(lc.get("market_cap") or 0),
@@ -4434,6 +4437,7 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                     "direction": "long" if p24h >= 0 else "short",
                     "sector": lc["sector"],
                     "source_count": 1,
+                    "signal_sources": ["sector_leader"],
                     "trigger_logic": f"{lc['sector']}赛道龙头，赛道7日涨幅 +{lc['sector_7d']:.1f}%，币价7日 +{float(lc.get('percent_change_7d') or 0):.1f}%",
                     "change_24h": p24h,
                     "market_cap_usd": float(lc.get("market_cap") or 0),
@@ -4456,6 +4460,7 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                 "direction": "long" if p24h >= 0 else "short",
                 "sector": lc["sector"],
                 "source_count": 1,
+                "signal_sources": ["sector_leader"],
                 "trigger_logic": f"{lc['sector']}赛道领涨榜第{lc['sector_rank']+1}，7日 +{p7d:.1f}% / 24h {p24h:+.1f}%",
                 "change_24h": p24h,
                 "market_cap_usd": float(lc.get("market_cap") or 0),
@@ -4486,6 +4491,7 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                 "direction": "long" if is_bullish else "short",
                 "sector": "链上异动",
                 "source_count": len(big_sigs),
+                "signal_sources": subtypes,
                 "trigger_logic": f"{len(big_sigs)}笔大额链上异动（合计约 ${total_usd/1e6:.1f}M），类型：{', '.join(subtypes[:3])}",
                 "change_24h": None,
                 "market_cap_usd": 0,
@@ -4579,6 +4585,25 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     sector_flow = fetch_sector_flow_with_leaders()
     kol_onchain = fetch_kol_onchain_signals()
 
+    # 从 overview 取叙事榜 + 链净流入（首页同一套数据源）
+    d5data = (today.get("dimensions") or {}).get("5板块") or {}
+    narrative_flow = d5data.get("narrative_flow_ranking") or {}
+    chain_flow = d5data.get("chain_flow_ranking") or {}
+
+    # 兜底：如果 overview 里没有（降级场景），直接调 API 补
+    if not narrative_flow.get("ranked"):
+        try:
+            cat_flow = fetch_category_flow()
+            tvl_flow = fetch_category_tvl_flow()
+            narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
+        except Exception:
+            narrative_flow = {"status": "error", "ranked": []}
+    if not chain_flow.get("ranked"):
+        try:
+            chain_flow = fetch_chain_flow()
+        except Exception:
+            chain_flow = {"status": "error", "ranked": []}
+
     # 兜底：如果评分系统返回空机会，从 daily_recommendation 表取热门币种
     if not opps:
         fallback = _fetch_fallback_recommendations()
@@ -4607,6 +4632,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         "M5_catalyst": today.get("event_calendar") or {},
         "M6_degraded": _collect_degraded(today),
         "sector_flow": sector_flow,
+        "narrative_flow": narrative_flow,
+        "chain_flow": chain_flow,
         "kol_onchain": kol_onchain,
         "DIFF": diff,
     }

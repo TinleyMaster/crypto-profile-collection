@@ -3254,19 +3254,24 @@ def build_smart_money_divergence(overview: dict, max_assets: int = 20) -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> list[dict]:
-    """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。"""
+    """从全部机会中精选高亮信号：HIGH 优先 + 类型配额 + 方向多样性惩罚（FEAT-HIGHLIGHT-002）。
+
+    同标的多信号合并：同一 target 的多条信号合并为一张卡片，
+    保留分数最高的为主卡，其余信号挂在 all_signals 字段，前端展示所有触发原由。
+    """
     quotas = {
         "mvrv_deep_under": 2, "mvrv_under_watch": 1,
         "catalyst": 2, "whale_flow": 2, "github_activity": 1,
         "funding": 1, "token_unlock": 1, "kol_onchain": 1,
         # 第二刀新增
         "fng_extreme": 1, "leverage_extreme": 1, "stablecoin_inflow": 1,
+        # 第三刀新增
+        "etf_flow": 1,
         "__default__": 1,
     }
     type_counts: dict[str, int] = {}
     dir_counts: dict[str, int] = {}
     selected: list[dict] = []
-    seen_targets: set[str] = set()  # 同标的去重：一个 target 只留一条最强信号
 
     def _sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
@@ -3282,17 +3287,43 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10) -> 
         q = quotas.get(st, quotas["__default__"])
         if type_counts.get(st, 0) >= q:
             continue
-        # 同标的去重：相同 target 只留一条最强的
-        tgt = (o.get("target") or "").strip().lower()
-        if tgt and tgt in seen_targets:
-            continue
-        seen_targets.add(tgt)
         type_counts[st] = type_counts.get(st, 0) + 1
         dir_counts[o.get("direction", "long")] = dir_counts.get(o.get("direction", "long"), 0) + 1
         selected.append(o)
-        if len(selected) >= max_total:
+        if len(selected) >= max_total * 3:  # 多取一些，合并后可能不够
             break
-    return selected
+
+    # ── 同标的合并：同一 target 聚合成一张卡片 ──
+    merged_map: dict[str, dict] = {}  # target_lower -> merged_opp
+    merged_order: list[str] = []
+    for o in selected:
+        tgt = (o.get("target") or "").strip()
+        tgt_key = tgt.lower()
+        if not tgt_key:
+            continue
+        if tgt_key not in merged_map:
+            # 第一条作为主卡（因为已排序，它分数最高）
+            merged = dict(o)  # 浅拷贝主卡
+            merged["all_signals"] = [o]  # 所有信号列表
+            merged_map[tgt_key] = merged
+            merged_order.append(tgt_key)
+        else:
+            merged = merged_map[tgt_key]
+            merged["all_signals"].append(o)
+            # 合并相关维度（去重）
+            all_dims = list(dict.fromkeys(
+                (merged.get("related_dims") or []) + (o.get("related_dims") or [])
+            ))
+            merged["related_dims"] = all_dims
+            # 如果有更高分数的（理论上不会，因为已排序），更新主卡分数
+            if o.get("conviction_score", 0) > merged.get("conviction_score", 0):
+                merged["conviction_score"] = o["conviction_score"]
+                merged["conviction_tier"] = o.get("conviction_tier", merged.get("conviction_tier"))
+
+    # 按主卡分数降序，再限制 max_total
+    merged_list = [merged_map[k] for k in merged_order]
+    merged_list.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+    return merged_list[:max_total]
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -3929,6 +3960,54 @@ def score_opportunities(overview: dict) -> dict:
              "related_dims": ["stablecoin_flow"], "involved_symbols": ["BTC"]},
             opportunities, excluded, t,
             cycle_phase=cycle_phase, n_confirm=2)
+
+    # D. ETF 资金流异动（机构资金信号）
+    _etf_data = (((overview.get("dimensions") or {}).get("4机构") or {}).get("data") or {})
+    if _etf_data.get("status") == "ok":
+        etf_net_total = _etf_data.get("net_flow_usd_m")
+        etf_btc = _etf_data.get("btc_net_flow_usd_m")
+        etf_date = _etf_data.get("as_of_date", "")
+        etf_flow_high = float(t.get("etf_flow_high_threshold", 100))   # 单日净流入 > 1亿美金
+        etf_flow_low = float(t.get("etf_flow_low_threshold", -100))    # 单日净流出 < -1亿美金
+
+        # D1) BTC ETF 资金流（单独信号，target = BTC）
+        if etf_btc is not None:
+            if etf_btc >= etf_flow_high:
+                direction = "long"
+                conf = "high" if etf_btc >= etf_flow_high * 2 else "medium"
+                base_str = 72 if etf_btc >= etf_flow_high * 2 else 60
+                strength = min(92, base_str + int(min(20, (etf_btc - etf_flow_high) / 50)))
+                _push_opportunity(
+                    {"target": "BTC", "direction": direction, "confidence": conf,
+                     "conviction_score": strength,
+                     "signal_type": "etf_flow",
+                     "key_metric": f"ETF 净流入 +${etf_btc:.0f}M",
+                     "trigger_logic": f"BTC ETF 单日净流入 ${etf_btc:.0f}M（{etf_date}）→ 机构资金持续加仓",
+                     "action_hint": "机构入场确认，回踩可加仓",
+                     "invalidation": "ETF 连续 3 日净流出 或 BTC 破位",
+                     "related_dims": ["4机构 ETF资金流", "P1 机构行为"],
+                     "involved_symbols": ["BTC"],
+                     "etf_detail": {"total_net_usd_m": etf_net_total, "btc_net_usd_m": etf_btc, "date": etf_date}},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=2)
+            elif etf_btc <= etf_flow_low:
+                direction = "short"
+                conf = "high" if etf_btc <= etf_flow_low * 2 else "medium"
+                base_str = 72 if etf_btc <= etf_flow_low * 2 else 60
+                strength = min(92, base_str + int(min(20, (etf_flow_low - etf_btc) / 50)))
+                _push_opportunity(
+                    {"target": "BTC", "direction": direction, "confidence": conf,
+                     "conviction_score": strength,
+                     "signal_type": "etf_flow",
+                     "key_metric": f"ETF 净流出 ${etf_btc:.0f}M",
+                     "trigger_logic": f"BTC ETF 单日净流出 ${etf_btc:.0f}M（{etf_date}）→ 机构资金离场",
+                     "action_hint": "机构抛压显现，降低仓位",
+                     "invalidation": "ETF 连续 3 日净流入 或 BTC 放量上攻",
+                     "related_dims": ["4机构 ETF资金流", "P1 机构行为"],
+                     "involved_symbols": ["BTC"],
+                     "etf_detail": {"total_net_usd_m": etf_net_total, "btc_net_usd_m": etf_btc, "date": etf_date}},
+                    opportunities, excluded, t,
+                    cycle_phase=cycle_phase, n_confirm=2)
 
     # 按 conviction_score 降序排列
     opportunities.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
@@ -4893,8 +4972,10 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
 def fetch_event_calendar() -> dict:
     """事件日历：宏观硬日程 + 代币级催化剂事件。仅展示，不参与子分。
 
-    P1 修复：原 CoinGecko /events 免费端点已废弃，改为从 biz.asset_catalyst
-    读取代币级已知事件（上币/解锁/主网上线/空投等），并映射到具体 asset_id。
+    P1-followup 修复：原实现误用 biz.asset_catalyst（新闻文章表），
+    其 published_at 是文章发布时间而非未来事件日期，导致 token_events 恒为 0。
+    改为读 biz.asset_unlock_event（真实未来解锁日程），配合 biz.asset_catalyst
+    的 published_at>=NOW() 兜底（极少数新闻有明确未来事件日期）。
     宏观日程为公开固定节奏，由 dev 按当年官方日程维护（每季度更新）。
     """
     # ① 宏观硬日程（手动维护近 3 个月，来源 FRED/FOMC 官网公开日程；零依赖）
@@ -4911,7 +4992,7 @@ def fetch_event_calendar() -> dict:
         # {"date": "2026-10-XX", "event": "XXX 解锁峰", "type": "unlock", "source": "hardcoded"},
     ]
 
-    # ③ P1：代币级催化剂事件（biz.asset_catalyst）
+    # ③ P1-followup：代币级未来事件日程（主源：biz.asset_unlock_event；兜底：biz.asset_catalyst）
     token_events: list[dict] = []
     try:
         from crypto_research.config import get_settings
@@ -4920,32 +5001,59 @@ def fetch_event_calendar() -> dict:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                # 取未来 30 天 + 过去 3 天内的事件
+                # 主源：真实未来解锁日程（unlock_date > NOW）
                 cur.execute("""
-                    SELECT ac.catalyst_id, ac.asset_id, a.canonical_symbol AS symbol,
-                           ac.title, ac.event_category, ac.event_subcategory,
-                           ac.published_at::date AS event_date,
-                           ac.source_code, ac.source_url
-                    FROM biz.asset_catalyst ac
-                    LEFT JOIN core.asset a ON a.asset_id = ac.asset_id
-                    WHERE ac.published_at >= CURRENT_DATE - INTERVAL '3 days'
-                      AND ac.published_at <= CURRENT_DATE + INTERVAL '30 days'
-                      AND ac.event_category IS NOT NULL
-                    ORDER BY ac.published_at ASC
+                    SELECT u.asset_id, a.canonical_symbol AS symbol,
+                           u.unlock_date, u.unlock_value_usd,
+                           u.unlock_amount, u.unlock_pct_of_supply,
+                           u.unlock_event_type,
+                           'unlock' AS event_type
+                    FROM biz.asset_unlock_event u
+                    JOIN core.asset a ON a.asset_id = u.asset_id
+                    WHERE u.unlock_date > CURRENT_TIMESTAMP
+                      AND u.unlock_date < CURRENT_TIMESTAMP + INTERVAL '33 days'
+                    ORDER BY u.unlock_date ASC
                     LIMIT 50
                 """)
                 for r in cur.fetchall():
+                    event_date = r["unlock_date"]
                     token_events.append({
-                        "date": str(r["event_date"]) if r.get("event_date") else None,
-                        "event": r["title"] or f"{r.get('event_category')} 事件",
-                        "type": r.get("event_category") or "catalyst",
-                        "sub_type": r.get("event_subcategory"),
-                        "source": r.get("source_code") or "asset_catalyst",
+                        "date": str(event_date.date()) if event_date else None,
+                        "event": f"{r['symbol']} 解锁"
+                                 + (f" {r['unlock_pct_of_supply']:.2f}%" if r.get("unlock_pct_of_supply") else ""),
+                        "type": r.get("event_type") or "unlock",
+                        "sub_type": r.get("unlock_event_type"),
+                        "source": "asset_unlock_event",
                         "asset_id": r.get("asset_id"),
                         "symbol": r.get("symbol"),
-                        "catalyst_id": r.get("catalyst_id"),
-                        "url": r.get("source_url"),
+                        "unlock_value_usd": float(r["unlock_value_usd"]) if r.get("unlock_value_usd") else None,
+                        "unlock_pct": float(r["unlock_pct_of_supply"]) if r.get("unlock_pct_of_supply") else None,
                     })
+
+                # 兜底：biz.asset_catalyst 中 published_at 在未来的极少数条目
+                if not token_events:
+                    cur.execute("""
+                        SELECT ac.catalyst_id, ac.asset_id, a.canonical_symbol AS symbol,
+                               ac.title, ac.event_category, ac.published_at,
+                               ac.source_code
+                        FROM biz.asset_catalyst ac
+                        LEFT JOIN core.asset a ON a.asset_id = ac.asset_id
+                        WHERE ac.published_at > CURRENT_TIMESTAMP
+                          AND ac.published_at < CURRENT_TIMESTAMP + INTERVAL '33 days'
+                        ORDER BY ac.published_at ASC
+                        LIMIT 20
+                    """)
+                    for r in cur.fetchall():
+                        pub_at = r["published_at"]
+                        token_events.append({
+                            "date": str(pub_at.date()) if pub_at else None,
+                            "event": r["title"] or f"{r.get('event_category')} 事件",
+                            "type": r.get("event_category") or "catalyst",
+                            "source": r.get("source_code") or "asset_catalyst",
+                            "asset_id": r.get("asset_id"),
+                            "symbol": r.get("symbol"),
+                            "catalyst_id": r.get("catalyst_id"),
+                        })
     except Exception:
         pass
 

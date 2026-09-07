@@ -3734,6 +3734,91 @@
             color: #94a3b8;
         }
 
+        .st-etf {
+            background: rgba(14, 165, 233, .18);
+            color: #38bdf8;
+        }
+
+        /* ── 多信号共振角标 ── */
+        .signal-resonance {
+            margin-left: auto;
+            background: rgba(139, 92, 246, .22);
+            color: #a78bfa;
+            padding: 1px 8px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        /* ── 多信号原由区块 ── */
+        .signal-multi-block {
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: rgba(30, 41, 59, .6);
+            border-radius: 8px;
+            border: 1px solid rgba(148, 163, 184, .15);
+        }
+
+        .signal-multi-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #cbd5e1;
+            margin-bottom: 6px;
+        }
+
+        .signal-multi-item {
+            padding: 5px 0;
+            border-top: 1px dashed rgba(148, 163, 184, .15);
+        }
+
+        .signal-multi-item:first-of-type {
+            border-top: none;
+            padding-top: 0;
+        }
+
+        .signal-multi-header {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 4px;
+            font-size: 11px;
+        }
+
+        .signal-multi-idx {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            line-height: 16px;
+            text-align: center;
+            background: rgba(100, 116, 139, .3);
+            color: #94a3b8;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            margin-right: 2px;
+        }
+
+        .signal-multi-km {
+            color: #e2e8f0;
+            font-weight: 600;
+            margin-left: 4px;
+        }
+
+        .signal-multi-score {
+            margin-left: auto;
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .signal-multi-logic {
+            font-size: 11px;
+            color: #94a3b8;
+            margin-top: 3px;
+            line-height: 1.5;
+            padding-left: 20px;
+        }
+
         /* ── FEAT-HIGHLIGHT-004: 关键数值直显 ── */
         .signal-km {
             display: inline-block;
@@ -8548,6 +8633,7 @@
             fng_extreme: { label: '恐贪极值', cls: 'st-fng' },
             leverage_extreme: { label: '杠杆极值', cls: 'st-lev' },
             stablecoin_inflow: { label: '稳定币净流入', cls: 'st-stable' },
+            etf_flow: { label: 'ETF资金流', cls: 'st-etf' },
             btc_left_accum: { label: 'BTC左侧积累', cls: 'st-btc' },
             cm_adoption_divergence: { label: 'CM采用背离', cls: 'st-cm' },
             catalyst: { label: '催化剂驱动', cls: 'st-catalyst' },
@@ -8571,14 +8657,25 @@
                 ? '<div class="signal-cs-wrap"><div class="signal-cs-bar" style="width:' + Math.min(100, Math.max(0, scoreNum)) + '%;background:' + (scoreNum >= 75 ? '#22c55e' : scoreNum >= 55 ? '#f0b90b' : '#6b7280') + '"></div></div>'
                 : '';
 
-            // FEAT-HIGHLIGHT-004: 信号类型徽章
-            var st = SIGNAL_TYPE_LABEL[o.signal_type] || { label: (o.signal_type || '信号'), cls: 'st-other' };
-            var typeBadge = '<span class="signal-type ' + st.cls + '">' + escapeHtml(st.label) + '</span>';
+            // 多信号合并：all_signals 数组（主卡 + 其他信号）
+            var allSignals = o.all_signals && o.all_signals.length ? o.all_signals : [o];
+            var isMerged = allSignals.length > 1;
 
-            // FEAT-HIGHLIGHT-004: 关键数值直显
+            // 信号类型标签（可能多个）
+            var typeBadges = allSignals.map(function (s) {
+                var st = SIGNAL_TYPE_LABEL[s.signal_type] || { label: (s.signal_type || '信号'), cls: 'st-other' };
+                return '<span class="signal-type ' + st.cls + '">' + escapeHtml(st.label) + '</span>';
+            }).join('');
+
+            // 共振角标
+            var resonanceBadge = isMerged
+                ? '<span class="signal-resonance">💫 ' + allSignals.length + '信号共振</span>'
+                : '';
+
+            // FEAT-HIGHLIGHT-004: 关键数值直显（主卡的）
             var km = o.key_metric ? '<span class="signal-km">' + escapeHtml(o.key_metric) + '</span>' : '';
 
-            // FEAT-HIGHLIGHT-004: 强度拆解
+            // FEAT-HIGHLIGHT-004: 强度拆解（主卡）
             var strength = o.conviction_strength != null ? o.conviction_strength : scoreNum;
             var bonus = o.resonance_bonus != null ? ('共振 +' + o.resonance_bonus) : '';
             var regime = o.regime_mult != null ? ('周期 ×' + Number(o.regime_mult).toFixed(2)) : '';
@@ -8598,27 +8695,41 @@
                 var labelMap = { mvrv: 'MVRV低估', cycle: '周期相位', funding: '资金费率', netflow: '链上净流', stable: '稳定币流', roi: 'ROI动量' };
                 if (top) mainReason = '主因：' + (labelMap[top] || top);
             }
-            return '<div class="signal-item ' + cls + '">' +
-                '<div class="signal-bar"></div>' +
-                '<div class="signal-body">' +
-                '<div class="signal-top">' +
-                typeBadge +
-                '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
-                '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
-                (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
-                km +
-                '<span class="signal-score">conv ' + score + '</span>' +
-                fireBadge +
-                '</div>' +
-                (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
-                scoreBar +
-                strengthLine +
-                (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
-                // 催化剂事件列表（仅 catalyst 类型且有事件时展示）
-                (o.signal_type === 'catalyst' && o.catalyst_events && o.catalyst_events.length
-                    ? '<div class="signal-catalyst-events">' +
+
+            // ── 多信号原由区块（合并卡片才有）──
+            var multiSignalHtml = '';
+            if (isMerged) {
+                multiSignalHtml = '<div class="signal-multi-block">' +
+                    '<div class="signal-multi-title">📊 全部信号原由（' + allSignals.length + '个）</div>';
+                allSignals.forEach(function (s, idx) {
+                    var sSt = SIGNAL_TYPE_LABEL[s.signal_type] || { label: (s.signal_type || '信号'), cls: 'st-other' };
+                    var sDir = s.direction === 'long' ? '多' : s.direction === 'short' ? '空' : '中性';
+                    var sDirCls = s.direction === 'long' ? 'signal-dir-long' : s.direction === 'short' ? 'signal-dir-short' : '';
+                    var sScore = s.conviction_score != null ? s.conviction_score : '?';
+                    var sKm = s.key_metric ? '<span class="signal-multi-km">' + escapeHtml(s.key_metric) + '</span>' : '';
+                    multiSignalHtml += '<div class="signal-multi-item">' +
+                        '<div class="signal-multi-header">' +
+                        '<span class="signal-multi-idx">' + (idx + 1) + '</span>' +
+                        '<span class="signal-type ' + sSt.cls + '">' + escapeHtml(sSt.label) + '</span>' +
+                        '<span class="signal-dir ' + sDirCls + '">' + sDir + '</span>' +
+                        sKm +
+                        '<span class="signal-multi-score">conv ' + sScore + '</span>' +
+                        '</div>' +
+                        (s.trigger_logic ? '<div class="signal-multi-logic">' + escapeHtml(s.trigger_logic) + '</div>' : '') +
+                        '</div>';
+                });
+                multiSignalHtml += '</div>';
+            }
+
+            // ── 催化剂事件列表（从 all_signals 中找 catalyst 类型）──
+            var catalystHtml = '';
+            var catSignal = allSignals.find(function (s) {
+                return s.signal_type === 'catalyst' && s.catalyst_events && s.catalyst_events.length;
+            });
+            if (catSignal) {
+                catalystHtml = '<div class="signal-catalyst-events">' +
                     '<div class="signal-catalyst-title">📰 关键催化事件</div>' +
-                    o.catalyst_events.map(function (ev) {
+                    catSignal.catalyst_events.map(function (ev) {
                         var dirIcon = ev.direction === 'bullish' ? '🟢' : (ev.direction === 'bearish' ? '🔴' : '⚪');
                         var strengthLabel = ev.strength === 'strong' ? '强' : (ev.strength === 'medium' ? '中' : '弱');
                         var title = (ev.title || '').length > 50
@@ -8631,8 +8742,28 @@
                             '<span class="signal-cat-title">' + escapeHtml(title) + '</span>' +
                             '</div>';
                     }).join('') +
-                    '</div>'
-                    : '') +
+                    '</div>';
+            }
+
+            return '<div class="signal-item ' + cls + '">' +
+                '<div class="signal-bar"></div>' +
+                '<div class="signal-body">' +
+                '<div class="signal-top">' +
+                typeBadges +
+                '<span class="signal-target">' + escapeHtml(o.target || '') + '</span>' +
+                '<span class="signal-badge ' + badgeCls + '">' + confLabel + '</span>' +
+                (dirLabel ? '<span class="signal-dir ' + dirCls + '">' + dirLabel + '</span>' : '') +
+                km +
+                '<span class="signal-score">conv ' + score + '</span>' +
+                fireBadge +
+                resonanceBadge +
+                '</div>' +
+                (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
+                scoreBar +
+                strengthLine +
+                (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
+                multiSignalHtml +
+                catalystHtml +
                 (o.action_hint ? '<div class="signal-action">🎯 ' + escapeHtml(o.action_hint) + '</div>' : '') +
                 (o.invalidation ? '<div class="signal-invalid">⚠️ 失效：' + escapeHtml(o.invalidation) + '</div>' : '') +
                 (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +

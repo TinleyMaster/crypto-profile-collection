@@ -49,3 +49,18 @@ class DefiLlamaClient:
     def get_protocol(self, slug: str) -> dict[str, Any]:
         """Get single protocol detail by slug."""
         return self._get(f"/protocol/{slug}")
+
+    def get_chains(self) -> list[dict[str, Any]]:
+        """Get all chains with latest TVL data.
+
+        Returns list of {name, tvl, symbol, gecko_id, cmcId, ...}.
+        """
+        return self._get("/v2/chains")
+
+    def get_chain_historical_tvl(self, chain: str) -> list[dict[str, Any]]:
+        """Get historical TVL for a single chain (daily resolution).
+
+        Returns list of {date: int (unix ts), tvl: float}.
+        Chain name is case-sensitive; use the exact name from get_chains().
+        """
+        return self._get(f"/v2/historicalChainTvl/{chain}")

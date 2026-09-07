@@ -71,6 +71,13 @@ CASE_SENSITIVE_CHAINS = frozenset({"solana", "tron", "ton", "sui", "aptos"})
 SUPPORTED_CHAINS = ("eth", "bsc", "solana", "polygon", "arbitrum", "base", "optimism", "avalanche",
                     "tron", "ton", "sui", "aptos")
 
+# P2-2: 空/零地址集合（EVM 零地址 + 常见全 0 变体）
+_ZERO_ADDRESSES = frozenset({
+    "0x0", "0x00", "0x0000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+})
+
 # 热门代币的参考价格（美元），用于粗略估算
 # 实际使用时可通过 CoinGecko API 获取实时价格
 FALLBACK_PRICES = {
@@ -183,8 +190,93 @@ def get_last_block(conn, chain: str, contract_address: str) -> int:
         return row["last_block"] or 0 if row else 0
 
 
+def get_asset_supply_decimals(conn, asset_id: int, chain: str, contract_address: str) -> dict:
+    """查询资产的权威供应量与合约精度（用于金额量纲 sanity check，P0-1）。
+
+    返回 {total_supply, circulating_supply, decimals}。
+    supply 优先取 core.asset（CMC 同步权威源），缺则用 biz.asset_tokenomics 兜底；
+    decimals 优先 core.asset_contract.decimals（RPC 实测精度），缺则 18。
+    """
+    out = {"total_supply": None, "circulating_supply": None, "decimals": None}
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT a.total_supply, a.circulating_supply, c.decimals
+                FROM core.asset a
+                LEFT JOIN core.asset_contract c
+                       ON LOWER(c.contract_address) = LOWER(%s)
+                WHERE a.asset_id = %s
+                LIMIT 1
+            """, (contract_address, asset_id))
+            row = cur.fetchone()
+            if row:
+                out["total_supply"] = float(row["total_supply"]) if row.get("total_supply") else None
+                out["circulating_supply"] = float(row["circulating_supply"]) if row.get("circulating_supply") else None
+                out["decimals"] = int(row["decimals"]) if row.get("decimals") is not None else None
+    except Exception:
+        pass
+    return out
+
+
+def _resolve_block_timestamp(client, client_type: str, block_number: int) -> int | None:
+    """按区块号反查真实区块时间戳（Unix 秒）。失败返回 None。"""
+    if not block_number or block_number <= 0:
+        return None
+    try:
+        # EVM RPC 客户端：eth_getBlockByNumber
+        if client_type in ("rpc", "explorer") and hasattr(client, "get_block_timestamp"):
+            return client.get_block_timestamp(block_number)
+        # 其他客户端（etherscan 等）暂不支持按区块号反查时间
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_timestamp(client, client_type: str, block_number: int, raw_ts: int) -> datetime | None:
+    """解析转账时间戳（P0-2）。
+
+    - raw_ts>0 且年份 >= 2015 → 直接使用（返回时间）
+    - raw_ts 无效或年份 < 2015（脏时间）→ 尝试按 block_number 反查真实区块时间
+    - 无 raw_ts（RPC 模式）→ 按 12s/block 估算，年份 < 2015 视为脏，尝试反查
+    - 反查失败且无合理估算 → 返回 None（调用方跳过，脏时间不进表）
+    """
+    def _safe_from_ts(ts: int) -> datetime | None:
+        if not ts or ts <= 0:
+            return None
+        try:
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt if dt.year >= 2015 else None
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    dt = _safe_from_ts(raw_ts)
+    if dt:
+        return dt
+
+    # 有区块号：优先反查真实时间
+    if block_number and block_number > 0:
+        real_ts = _resolve_block_timestamp(client, client_type, block_number)
+        if real_ts:
+            dt = _safe_from_ts(real_ts)
+            if dt:
+                return dt
+
+    # 无时间戳且无法反查：用 12s/block 估算兜底（仅接受合理年份）
+    if raw_ts <= 0 and block_number and block_number > 0:
+        estimated_ts = int(time.time()) - max(0, _get_latest_block_approx(client, client_type) - block_number) * 12
+        dt = _safe_from_ts(estimated_ts)
+        if dt:
+            return dt
+
+    return None
+
+
 def save_transfers(conn, transfers: list[dict]) -> int:
-    """批量保存转账记录。"""
+    """批量保存转账记录。
+
+    ON CONFLICT 时更新交易所标签列（is_to_exchange/to_exchange/from_exchange/to_label/from_label），
+    使 P1-3 补全交易所地址库后重跑能回填旧行的砸盘信号。
+    """
     written = 0
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         for t in transfers:
@@ -194,14 +286,27 @@ def save_transfers(conn, transfers: list[dict]) -> int:
                         asset_id, chain, contract_address, tx_hash,
                         from_address, to_address, value, value_usd,
                         from_label, to_label, from_exchange, to_exchange,
-                        block_number, block_timestamp, is_to_exchange
+                        block_number, block_timestamp, is_to_exchange,
+                        is_suspect, threshold_used
                     ) VALUES (
                         %(asset_id)s, %(chain)s, %(contract_address)s, %(tx_hash)s,
                         %(from_address)s, %(to_address)s, %(value)s, %(value_usd)s,
                         %(from_label)s, %(to_label)s, %(from_exchange)s, %(to_exchange)s,
-                        %(block_number)s, %(block_timestamp)s, %(is_to_exchange)s
+                        %(block_number)s, %(block_timestamp)s, %(is_to_exchange)s,
+                        %(is_suspect)s, %(threshold_used)s
                     )
-                    ON CONFLICT (chain, tx_hash, contract_address, from_address, to_address) DO NOTHING
+                    ON CONFLICT (chain, tx_hash, contract_address, from_address, to_address) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        value_usd = EXCLUDED.value_usd,
+                        from_label = EXCLUDED.from_label,
+                        to_label = EXCLUDED.to_label,
+                        from_exchange = EXCLUDED.from_exchange,
+                        to_exchange = EXCLUDED.to_exchange,
+                        is_to_exchange = EXCLUDED.is_to_exchange,
+                        block_number = EXCLUDED.block_number,
+                        block_timestamp = EXCLUDED.block_timestamp,
+                        is_suspect = EXCLUDED.is_suspect,
+                        threshold_used = EXCLUDED.threshold_used
                 """, t)
                 if cur.rowcount:
                     written += 1
@@ -266,6 +371,10 @@ def collect_transfers(
     # 获取代币价格（从数据库多源 fallback，最后用硬编码兜底）
     price_usd = get_asset_price(conn, asset_id, symbol)
 
+    # P0-1: 权威 supply/decimals（一次查好，用于金额量纲 sanity check）
+    supply_dec = get_asset_supply_decimals(conn, asset_id, chain, contract_address)
+    supply_cap = supply_dec["total_supply"] or supply_dec["circulating_supply"]
+
     all_transfers = []
     total_processed = 0
     seen_raw = set()          # 已见过的 tx_hash
@@ -298,28 +407,34 @@ def collect_transfers(
 
         for tx in transfers:
             try:
+                # P2-1: 原始值 <= 0 无意义，跳过
                 value_raw = float(tx.get("value", 0))
-                decimals = int(tx.get("tokenDecimal", 18))
+                if value_raw <= 0:
+                    continue
+
+                # P0-1: decimals 兜底（源缺失/为 0 时用 DB 权威精度，再兜底 18）
+                decimals = int(tx.get("tokenDecimal") or 0)
+                if decimals <= 0 or decimals > 36:
+                    decimals = supply_dec["decimals"] or 18
                 value = value_raw / (10 ** decimals)
 
-                # 估算美元价值
-                value_usd = round(value * price_usd, 2) if price_usd > 0 else None
+                # P0-1: 金额量纲 sanity check：value 远超流通量（>5×）→ 标 is_suspect
+                is_suspect = False
+                if supply_cap and supply_cap > 0 and value > supply_cap * 5:
+                    is_suspect = True
+                    print(f"[suspect] {symbol}/{chain} tx={tx.get('hash', '')[:12]} "
+                          f"value={value:.4g} > supply×5({supply_cap:.4g}) → 标脏", file=sys.stderr)
+
+                # 估算美元价值（P1-1: 价格缺失 → value_usd=None → 直接不入库）
+                value_usd = round(value * price_usd, 2) if price_usd and price_usd > 0 else None
 
                 # 动态阈值：小市值资产用更低下限（Plan A）
                 threshold = LARGE_TRANSFER_THRESHOLD_USD
                 if market_cap and market_cap > 0 and market_cap < SMALL_MEME_MCAP_FLOOR:
                     threshold = SMALL_MEME_THRESHOLD_USD
 
-                # 过滤：只保留大额转账
-                # Plan B：value_usd=None（价格缺失）时用 token value × 最低估算价兜底，而非直接丢弃
-                if value_usd is None:
-                    # 用 $0.0001 作为极低估算价兜底，确保转账不被 None 静默丢弃
-                    # 若连估算后仍 < threshold，仍跳过（去噪）
-                    if price_usd == 0 and value > 0:
-                        value_usd = round(value * 0.0001, 2)
-                    if value_usd is None or value_usd < threshold:
-                        continue
-                elif value_usd < threshold:
+                # P1-1: value_usd 缺失（价格缺失）或低于阈值 → 不当"大额"入库
+                if value_usd is None or value_usd < threshold:
                     continue
 
                 from_addr = (tx.get("from", "") or "")
@@ -329,6 +444,11 @@ def collect_transfers(
                     from_addr = from_addr.lower()
                     to_addr = to_addr.lower()
 
+                # P2-2: 空/零地址过滤
+                if (not from_addr or not to_addr
+                        or from_addr in _ZERO_ADDRESSES or to_addr in _ZERO_ADDRESSES):
+                    continue
+
                 from_exchange = exchange_map.get(from_addr)
                 to_exchange = exchange_map.get(to_addr)
 
@@ -337,14 +457,16 @@ def collect_transfers(
 
                 is_to_exchange = to_exchange is not None
 
-                block_ts_raw = int(tx.get("timeStamp", 0))
-                if block_ts_raw > 0:
-                    block_ts = datetime.fromtimestamp(block_ts_raw, tz=timezone.utc)
-                else:
-                    # RPC 模式下日志不含时间戳，用区块号估算（按 12s/block）
-                    block_num = int(tx.get("blockNumber", 0))
-                    estimated_ts = int(time.time()) - max(0, _get_latest_block_approx(client, client_type) - block_num) * 12
-                    block_ts = datetime.fromtimestamp(estimated_ts, tz=timezone.utc)
+                # P0-2: 时间戳处理（年份 < 2015 视为脏，反查区块时间，失败则跳过）
+                block_num = int(tx.get("blockNumber", 0))
+                block_ts = _resolve_timestamp(
+                    client, client_type, block_num,
+                    int(tx.get("timeStamp", 0)),
+                )
+                if block_ts is None:
+                    print(f"[dirty-ts] {symbol}/{chain} tx={tx.get('hash', '')[:12]} "
+                          f"脏时间戳且无法反查 → 跳过", file=sys.stderr)
+                    continue
 
                 all_transfers.append({
                     "asset_id": asset_id,
@@ -359,9 +481,11 @@ def collect_transfers(
                     "to_label": to_label,
                     "from_exchange": from_exchange,
                     "to_exchange": to_exchange,
-                    "block_number": int(tx.get("blockNumber", 0)),
+                    "block_number": block_num,
                     "block_timestamp": block_ts,
                     "is_to_exchange": is_to_exchange,
+                    "is_suspect": is_suspect,
+                    "threshold_used": threshold,
                 })
             except (ValueError, TypeError):
                 continue
@@ -471,7 +595,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="单轮最大处理资产数 (0=不限量)")
     parser.add_argument("--offset", type=int, default=0, help="资产列表起始偏移（自动循环分批扫描用）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印，不写入")
-    parser.add_argument("--alarm-only", action="store_true", help="告警模式：只存储转入交易所的大额转账")
+    parser.add_argument("--alarm-only", action="store_true",
+                        help="告警模式：存储双向大额转账（保证 netflow 完整），仅标记转入交易所的为告警关注")
     parser.add_argument("--source", type=str, default="explorer",
                         choices=["auto", "explorer", "etherscan", "rpc"],
                         help="转账数据源：explorer=免Key免费源(默认)；etherscan=需付费Key；"

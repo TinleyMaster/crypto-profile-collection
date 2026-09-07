@@ -92,6 +92,7 @@ def get_cross_validation_data(asset_id: int | None) -> dict:
                 "FROM biz.onchain_transfer_log "
                 "WHERE asset_id = %s "
                 "  AND to_exchange = TRUE "
+                "  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL) "
                 "  AND created_at >= NOW() - INTERVAL '24 hours'",
                 (asset_id,),
             ).fetchone()

@@ -76,6 +76,20 @@ CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
     CONSTRAINT uq_onchain_tx UNIQUE (chain, tx_hash, contract_address, from_address, to_address)
 );
 
+-- ============================================================
+-- 2b. 数据质量标记列（TXQUAL-001）
+--   is_suspect:    金额量纲异常 / 无法反查的脏时间戳等，标脏保留溯源（聚合须过滤）
+--   threshold_used: 入库时使用的美元阈值（历史 5k 残留行=5000，现行=50000）
+-- ============================================================
+ALTER TABLE biz.onchain_transfer_log
+    ADD COLUMN IF NOT EXISTS is_suspect     boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS threshold_used numeric;
+
+COMMENT ON COLUMN biz.onchain_transfer_log.is_suspect IS
+    '数据质量标记（TXQUAL-001）：金额量纲异常/无法反查脏时间戳等。TRUE 时下游聚合须过滤（WHERE NOT is_suspect）。';
+COMMENT ON COLUMN biz.onchain_transfer_log.threshold_used IS
+    '入库时使用的美元阈值：历史 5k-50k 残留行=5000，现行=50000。按口径区分。';
+
 COMMENT ON TABLE biz.onchain_transfer_log IS
     '大额转账日志：监控单笔大额转入交易所、跨链转出、巨鲸互转等异动。';
 

@@ -3669,6 +3669,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
             """, (asset_id,))
             r24 = cur.fetchone()
@@ -3683,6 +3684,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '7 days'
             """, (asset_id,))
             r7 = cur.fetchone()
@@ -3698,6 +3700,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
                   AND (from_label = 'exchange' OR to_label = 'exchange')
                 GROUP BY COALESCE(from_exchange, to_exchange)
@@ -3723,6 +3726,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                        from_exchange, to_exchange, value, value_usd, block_timestamp
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
                   AND (from_label = 'exchange' OR to_label = 'exchange')
                 ORDER BY value_usd DESC NULLS LAST
@@ -3815,6 +3819,7 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
                 FROM biz.onchain_transfer_log
                 WHERE block_timestamp >= NOW() - make_interval(hours => %s)
                   AND value_usd IS NOT NULL
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND (from_label = 'exchange' OR to_label = 'exchange')
             """, (hours,))
             r = cur.fetchone()
@@ -3831,6 +3836,7 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
                 FROM biz.onchain_transfer_log
                 WHERE block_timestamp >= NOW() - make_interval(hours => %s)
                   AND value_usd IS NOT NULL
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND (from_label = 'exchange' OR to_label = 'exchange')
                 GROUP BY COALESCE(from_exchange, to_exchange)
                 ORDER BY GREATEST(
@@ -4252,6 +4258,7 @@ def get_whale_flow(asset_id: int) -> dict:
                         COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd END), 0) AS outflow_from_exchange
                     FROM biz.onchain_transfer_log
                     WHERE asset_id = %s
+                      AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                       AND block_timestamp >= NOW() - INTERVAL '24 hours'
                 """, (asset_id,))
                 r24 = cur.fetchone()
@@ -4277,6 +4284,7 @@ def get_whale_flow(asset_id: int) -> dict:
                         COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd END), 0) AS outflow_from_exchange
                     FROM biz.onchain_transfer_log
                     WHERE asset_id = %s
+                      AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                       AND block_timestamp >= NOW() - INTERVAL '7 days'
                 """, (asset_id,))
                 r7 = cur.fetchone()
@@ -4298,6 +4306,7 @@ def get_whale_flow(asset_id: int) -> dict:
                            block_timestamp, is_to_exchange
                     FROM biz.onchain_transfer_log
                     WHERE asset_id = %s
+                      AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                       AND block_timestamp >= NOW() - INTERVAL '24 hours'
                       AND value_usd >= 10000
                     ORDER BY value_usd DESC
@@ -5827,6 +5836,7 @@ def get_divergence_signals(asset_id: int) -> dict:
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
                   AND is_to_exchange = TRUE
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
             """, (asset_id,))
             transfer_row = cur.fetchone()

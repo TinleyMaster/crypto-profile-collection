@@ -185,6 +185,23 @@ class RpcTransferClient:
             return int(result, 16)
         return 0
 
+    def get_block_timestamp(self, block_number: int) -> int | None:
+        """按区块号查询区块时间戳（Unix 秒）。查询失败返回 None。"""
+        if not block_number or block_number <= 0:
+            return None
+        result = self._json_rpc("eth_getBlockByNumber", [hex(block_number), False])
+        if not isinstance(result, dict):
+            return None
+        ts = result.get("timestamp")
+        if isinstance(ts, str) and ts.startswith("0x"):
+            try:
+                return int(ts, 16)
+            except ValueError:
+                return None
+        if isinstance(ts, (int, float)):
+            return int(ts)
+        return None
+
     def get_token_decimals(self, contract_address: str) -> int:
         """查询 ERC20 代币精度（decimals），带缓存。
 

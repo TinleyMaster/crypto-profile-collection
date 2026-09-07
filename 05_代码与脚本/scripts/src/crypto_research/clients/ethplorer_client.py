@@ -162,6 +162,10 @@ class EthplorerClient:
                 "to": to_addr.lower(),
                 "hash": tx_hash,
                 "timeStamp": str(int(op.get("timestamp", 0) or 0)),
+                # Ethplorer getTokenHistory 不返回 blockNumber（免费源限制），置 0。
+                # 影响：get_last_block 恒返 0 → 每次全扫（靠 UNIQUE 去重），且
+                # P0-2 脏时间戳无法按区块号反查。需要增量/反查能力的 eth/bsc 请走
+                # etherscan（付费）或 rpc 源（rpc_client 返回真实 blockNumber）。
                 "blockNumber": "0",
                 "sort": sort,
                 "start_block": start_block,

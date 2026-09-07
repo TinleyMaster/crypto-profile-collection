@@ -690,9 +690,15 @@ def main() -> int:
     parser.add_argument("--min-pass", type=int, default=7000, help="verify通过的最低资产数（默认7000，Binance兜底场景建议500）")
     args = parser.parse_args()
 
-    settings = get_settings(require_database=True)
+    verify = {"pass": False}
+    try:
+        settings = get_settings(require_database=True)
+    except Exception as e:
+        print(f"[BACKFILL] 配置加载失败: {e}", file=sys.stderr)
+        return 1
 
-    with get_connection(settings.database_url) as conn:
+    try:
+        with get_connection(settings.database_url) as conn:
         # 1. 自动检测缺失日期
         print(f"[BACKFILL] 扫描最近 {args.lookback} 天...")
         missing_dates, coverage = detect_missing_dates(conn, args.lookback, args.min_assets)
@@ -739,13 +745,18 @@ def main() -> int:
         if gap_days:
             print(f"\n[BACKFILL] CMC/ETL 后仍有 {len(gap_days)} 天覆盖不足7000: {[d.isoformat() for d in gap_days]}，启动 Binance klines 兜底...")
             ensure_source_platform(conn)
-            binance_result = backfill_via_binance_klines(
-                conn, gap_days, top_n=args.top, request_delay=args.binance_delay
-            )
-            result["binance"] = binance_result
-            print(f"[BACKFILL] Binance 完成: {binance_result}")
+            try:
+                binance_result = backfill_via_binance_klines(
+                    conn, gap_days, top_n=args.top, request_delay=args.binance_delay
+                )
+                result["binance"] = binance_result
+                print(f"[BACKFILL] Binance 完成: {binance_result}")
+            except Exception as e:
+                print(f"[BACKFILL] Binance 兜底异常: {e}", file=sys.stderr)
+                result["binance"] = {"error": str(e)[:200]}
 
         # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
+        # 把 binance_result 写入 stats
         task_id = create_task_card(conn, missing_dates, coverage, result)
         print(f"\n[TASK] 任务卡已生成: task_id={task_id}")
 
@@ -753,6 +764,11 @@ def main() -> int:
         print(f"\n[VERIFY] 校验回填结果...")
         verify = verify_backfill(conn, missing_dates, min_pass=args.min_pass)
         print(f"[VERIFY] {json.dumps(verify, ensure_ascii=False, indent=2, default=str)}")
+
+    except Exception as e:
+        print(f"[BACKFILL] 执行异常: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
 
     return 0 if verify.get("pass") else 1
 

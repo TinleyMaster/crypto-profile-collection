@@ -4008,7 +4008,7 @@ def score_opportunities(overview: dict) -> dict:
                      "trigger_logic": f"BTC ETF 单日净流入 ${etf_btc:.0f}M（{etf_date}）→ 机构资金持续加仓",
                      "action_hint": "机构入场确认，回踩可加仓",
                      "invalidation": "ETF 连续 3 日净流出 或 BTC 破位",
-                     "related_dims": ["4机构 ETF资金流", "P1 机构行为"],
+                     "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
                      "involved_symbols": ["BTC"],
                      "etf_detail": {"total_net_usd_m": etf_net_total, "btc_net_usd_m": etf_btc, "date": etf_date}},
                     opportunities, excluded, t,
@@ -4026,7 +4026,7 @@ def score_opportunities(overview: dict) -> dict:
                      "trigger_logic": f"BTC ETF 单日净流出 ${etf_btc:.0f}M（{etf_date}）→ 机构资金离场",
                      "action_hint": "机构抛压显现，降低仓位",
                      "invalidation": "ETF 连续 3 日净流入 或 BTC 放量上攻",
-                     "related_dims": ["4机构 ETF资金流", "P1 机构行为"],
+                     "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
                      "involved_symbols": ["BTC"],
                      "etf_detail": {"total_net_usd_m": etf_net_total, "btc_net_usd_m": etf_btc, "date": etf_date}},
                     opportunities, excluded, t,
@@ -5018,6 +5018,7 @@ def fetch_event_calendar() -> dict:
     # ③ P1-followup：代币级未来事件日程（主源：biz.asset_unlock_event；兜底：biz.asset_catalyst）
     token_events: list[dict] = []
     try:
+        import logging
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
 
@@ -5028,8 +5029,8 @@ def fetch_event_calendar() -> dict:
                 cur.execute("""
                     SELECT u.asset_id, a.canonical_symbol AS symbol,
                            u.unlock_date, u.unlock_value_usd,
-                           u.unlock_amount, u.unlock_pct_of_supply,
-                           u.unlock_event_type,
+                           u.unlock_amount, u.unlock_ratio_mcap,
+                           u.unlock_type,
                            'unlock' AS event_type
                     FROM biz.asset_unlock_event u
                     JOIN core.asset a ON a.asset_id = u.asset_id
@@ -5040,17 +5041,18 @@ def fetch_event_calendar() -> dict:
                 """)
                 for r in cur.fetchall():
                     event_date = r["unlock_date"]
+                    ratio_mcap = r.get("unlock_ratio_mcap")
                     token_events.append({
                         "date": str(event_date.date()) if event_date else None,
                         "event": f"{r['symbol']} 解锁"
-                                 + (f" {r['unlock_pct_of_supply']:.2f}%" if r.get("unlock_pct_of_supply") else ""),
+                                 + (f" {ratio_mcap:.2f}%" if ratio_mcap else ""),
                         "type": r.get("event_type") or "unlock",
-                        "sub_type": r.get("unlock_event_type"),
+                        "sub_type": r.get("unlock_type"),
                         "source": "asset_unlock_event",
                         "asset_id": r.get("asset_id"),
                         "symbol": r.get("symbol"),
                         "unlock_value_usd": float(r["unlock_value_usd"]) if r.get("unlock_value_usd") else None,
-                        "unlock_pct": float(r["unlock_pct_of_supply"]) if r.get("unlock_pct_of_supply") else None,
+                        "unlock_pct": float(ratio_mcap) if ratio_mcap else None,
                     })
 
                 # 兜底：biz.asset_catalyst 中 published_at 在未来的极少数条目
@@ -5075,10 +5077,10 @@ def fetch_event_calendar() -> dict:
                             "source": r.get("source_code") or "asset_catalyst",
                             "asset_id": r.get("asset_id"),
                             "symbol": r.get("symbol"),
-                            "catalyst_id": r.get("catalyst_id"),
+                             "catalyst_id": r.get("catalyst_id"),
                         })
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning("fetch_event_calendar token_events query failed: %s", e)
 
     events = hardcoded_events + unlock_events + token_events
     return {

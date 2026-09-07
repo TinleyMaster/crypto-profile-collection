@@ -57,6 +57,7 @@ def get_cached_transfers(conn, asset_id: int, limit: int = 20) -> list[dict]:
         cur.execute("""
             SELECT * FROM biz.onchain_transfer_log
             WHERE asset_id = %s
+              AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
               AND block_timestamp >= NOW() - INTERVAL '7 days'
             ORDER BY block_timestamp DESC
             LIMIT %s

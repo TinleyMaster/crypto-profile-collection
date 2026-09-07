@@ -715,6 +715,7 @@ def fetch_onchain_anomaly_signals() -> dict:
                     FROM biz.onchain_transfer_log
                     WHERE block_timestamp >= NOW() - INTERVAL '30 days'
                       AND value_usd IS NOT NULL
+                      AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                       AND (from_label = 'exchange' OR to_label = 'exchange')
                     GROUP BY 1
                     ORDER BY 1
@@ -2479,6 +2480,7 @@ def _recent_whale_flow_targets(
                     FROM biz.onchain_transfer_log t
                     JOIN core.asset a ON a.asset_id = t.asset_id
                     WHERE (t.is_to_exchange OR t.from_exchange IS NOT NULL)
+                      AND (t.is_suspect IS NOT TRUE OR t.is_suspect IS NULL)
                       AND t.value_usd >= %s
                       AND t.block_timestamp >= NOW() - make_interval(hours => %s)
                     GROUP BY t.asset_id, a.canonical_symbol

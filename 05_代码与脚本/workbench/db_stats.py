@@ -564,11 +564,11 @@ def get_task_progress() -> list[dict]:
 
             # 7. 大额转账监控告警（24h）
             cur.execute(
-                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE"
+                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)"
             )
             total_alerts = cur.fetchone()[0]
             cur.execute(
-                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE AND block_timestamp >= NOW() - INTERVAL '24 hours'"
+                "SELECT COUNT(*) FROM biz.onchain_transfer_log WHERE is_to_exchange = TRUE AND block_timestamp >= NOW() - INTERVAL '24 hours' AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)"
             )
             alerts_24h = cur.fetchone()[0]
             result.append({
@@ -7065,6 +7065,8 @@ def get_onchain_transfers(
 
             # 排除测试数据
             conditions.append("tl.tx_hash NOT LIKE '0xtest%'")
+            # 排除标脏行（TXQUAL-001：金额量纲异常/脏时间戳）
+            conditions.append("(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)")
 
             where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -7113,6 +7115,7 @@ def get_onchain_alert_summary() -> dict:
                 SELECT COUNT(*) AS real_count
                 FROM biz.onchain_transfer_log
                 WHERE tx_hash NOT LIKE '0xtest%'
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
             """)
             real_count = cur.fetchone()["real_count"] or 0
             is_enabled = real_count > 0
@@ -7127,6 +7130,7 @@ def get_onchain_alert_summary() -> dict:
                 FROM biz.onchain_transfer_log tl
                 LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
                 WHERE tl.is_to_exchange = TRUE
+                  AND (tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)
                   AND tl.block_timestamp >= NOW() - INTERVAL '24 hours'
                   AND tl.tx_hash NOT LIKE '0xtest%'
                 GROUP BY a.canonical_symbol, tl.chain
@@ -7153,6 +7157,7 @@ def get_onchain_alert_summary() -> dict:
                     COALESCE(SUM(value_usd), 0) AS total_value_usd
                 FROM biz.onchain_transfer_log
                 WHERE tx_hash NOT LIKE '0xtest%'
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
             """)
             totals = dict(cur.fetchone()) if cur.rowcount else {}
 

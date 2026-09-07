@@ -149,6 +149,7 @@ def _check_whale_transfers(conn, notifier, asset_id: int, symbol: str, name: str
                 SELECT chain, value_usd, is_to_exchange
                 FROM biz.onchain_transfer_log
                 WHERE asset_id = %s
+                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
                   AND block_timestamp >= NOW() - INTERVAL '24 hours'
                   AND value_usd >= %s
                 ORDER BY value_usd DESC

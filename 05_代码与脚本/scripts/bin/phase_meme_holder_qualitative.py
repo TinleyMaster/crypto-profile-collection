@@ -85,6 +85,7 @@ def aggregate_transfers(conn, asset_id: int, chain: str) -> dict | None:
                AVG(is_to_exchange::int)                              AS cex_in_ratio
         FROM biz.onchain_transfer_log
         WHERE asset_id = %s AND chain = %s AND block_timestamp >= %s
+          AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
     """
     with conn.cursor() as cur:
         cur.execute(sql, (asset_id, chain, cutoff))

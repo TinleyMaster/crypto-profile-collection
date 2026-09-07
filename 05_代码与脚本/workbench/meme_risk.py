@@ -130,6 +130,7 @@ def estimate_from_transfers(asset_id: int, conn) -> list[dict]:
                AVG(is_to_exchange::int)                              AS cex_in_ratio
         FROM biz.onchain_transfer_log
         WHERE asset_id = %s AND block_timestamp >= %s
+          AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
         GROUP BY chain
     """
     with conn.cursor() as cur:

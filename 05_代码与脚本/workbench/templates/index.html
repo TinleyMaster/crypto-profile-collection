@@ -1209,6 +1209,25 @@
             animation: star-pulse 2s ease-in-out infinite;
         }
 
+        .diff-item .risk-badge {
+            font-size: 11px;
+            margin-right: 2px;
+            vertical-align: middle;
+            animation: risk-pulse 1.8s ease-in-out infinite;
+        }
+
+        @keyframes risk-pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
         @keyframes star-pulse {
 
             0%,
@@ -4620,6 +4639,96 @@
             opacity: 0.5;
         }
 
+        /* ── FEAT-RISK-001: 信号区双栏布局 ── */
+        .signals-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        @media (max-width: 900px) {
+            .signals-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* 高危信号区：红色系 */
+        .risk-signal-section {
+            background: linear-gradient(135deg, #1a1520 0%, #0f1620 100%);
+            border: 1px solid #3a2a40;
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .risk-signal-section .signal-header.risk-header h2 {
+            color: #fca5a5;
+        }
+
+        .risk-signal-section .risk-count {
+            background: rgba(239, 68, 68, 0.12);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        /* 高危信号卡片：高危/中危 */
+        .risk-signal-section .signal-item-high .signal-bar {
+            background: linear-gradient(180deg, #dc2626, #991b1b);
+            box-shadow: 0 0 8px rgba(220, 38, 38, 0.5);
+        }
+
+        .risk-signal-section .signal-item-high .signal-body {
+            background: linear-gradient(135deg, rgba(220, 38, 38, 0.08) 0%, rgba(127, 29, 29, 0.05) 100%);
+            border: 1px solid rgba(220, 38, 38, 0.25);
+            border-left: none;
+        }
+
+        .risk-signal-section .signal-item-high .signal-target {
+            color: #fca5a5;
+        }
+
+        .risk-signal-section .signal-item-medium .signal-bar {
+            background: linear-gradient(180deg, #f97316, #ea580c);
+        }
+
+        .risk-signal-section .signal-item-medium .signal-body {
+            background: rgba(249, 115, 22, 0.05);
+            border: 1px solid rgba(249, 115, 22, 0.2);
+            border-left: none;
+        }
+
+        .risk-signal-section .signal-badge-high {
+            background: linear-gradient(135deg, #dc2626, #991b1b);
+            color: #fff;
+            box-shadow: 0 0 6px rgba(220, 38, 38, 0.4);
+        }
+
+        .risk-signal-section .signal-badge-medium {
+            background: #4a2010;
+            color: #fb923c;
+        }
+
+        .risk-signal-section .signal-fire {
+            background: rgba(220, 38, 38, .22);
+            color: #fca5a5;
+        }
+
+        .risk-signal-section .signal-item .signal-score {
+            color: #f87171;
+            border-color: rgba(248, 113, 113, 0.4);
+            background: rgba(248, 113, 113, 0.08);
+        }
+
+        .risk-signal-section .signal-resonance {
+            background: rgba(239, 68, 68, .22);
+            color: #fca5a5;
+        }
+
+        .risk-signal-section .signal-multi-block {
+            background: rgba(40, 20, 20, .6);
+            border-color: rgba(248, 113, 113, .15);
+        }
+
         .signal-empty .signal-empty-sub {
             font-size: 12px;
             color: #4b5563;
@@ -4890,15 +4999,31 @@
                 </div>
 
                 <!-- P2-3 高亮信号区 -->
-                <div class="signal-highlight-section" id="signal-highlight-section">
-                    <div class="signal-header">
-                        <h2>⚡ 高亮信号</h2>
-                        <span class="signal-count" id="signal-count">-</span>
+                <!-- 信号区：高亮 + 高危双栏 -->
+                <div class="signals-row">
+                    <div class="signal-highlight-section" id="signal-highlight-section">
+                        <div class="signal-header">
+                            <h2>⚡ 高亮信号</h2>
+                            <span class="signal-count" id="signal-count">-</span>
+                        </div>
+                        <div id="signal-highlight-content">
+                            <div class="signal-empty">
+                                <div class="signal-empty-icon">📡</div>
+                                加载中...
+                            </div>
+                        </div>
                     </div>
-                    <div id="signal-highlight-content">
-                        <div class="signal-empty">
-                            <div class="signal-empty-icon">📡</div>
-                            加载中...
+
+                    <div class="risk-signal-section" id="risk-signal-section">
+                        <div class="signal-header risk-header">
+                            <h2>⚠️ 高危信号</h2>
+                            <span class="signal-count risk-count" id="risk-signal-count">-</span>
+                        </div>
+                        <div id="risk-signal-content">
+                            <div class="signal-empty">
+                                <div class="signal-empty-icon">🛡️</div>
+                                加载中...
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -7996,6 +8121,10 @@
         let diffFilterNoise = false;
         // 昨日榜单缓存（用于连续上榜对比）
         let yesterdayDiffData = null;
+        // 高危信号币种集合（变化榜 ⚠️ 标记用）
+        let riskSignalSymbols = new Set();
+        // 高亮信号币种集合（变化榜 ⭐ 标记用）
+        let highlightSignalSymbols = new Set();
 
         // 涨跌颜色惯例：green-up（国际：绿涨红跌） / red-up（A股：红涨绿跌）
         let diffColorScheme = localStorage.getItem('diffColorScheme') || 'green-up';
@@ -8210,6 +8339,9 @@
             html += '<span class="symbol">';
             if (highlightAssetIdSet.has(Number(item.asset_id))) {
                 html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';
+            }
+            if (riskSignalSymbols.has(item.symbol.toUpperCase())) {
+                html += '<span class="risk-badge" title="⚠️ 高危信号覆盖">⚠️</span> ';
             }
             html += escapeHtml(item.symbol) + '</span>';
             html += '<span class="name">';
@@ -8519,6 +8651,9 @@
             html += '<span class="symbol">';
             if (highlightAssetIdSet.has(Number(c.asset_id))) {
                 html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';
+            }
+            if (riskSignalSymbols.has((c.symbol || '').toUpperCase())) {
+                html += '<span class="risk-badge" title="⚠️ 高危信号覆盖">⚠️</span> ';
             }
             html += escapeHtml(c.symbol || '?') + '</span>';
             html += '<span class="name">';
@@ -9604,6 +9739,10 @@
             const highlightList = (data.opportunity_list || {}).highlight_signals || oppList;
             renderSignalHighlight(highlightList, oppExcluded);
 
+            // FEAT-RISK-001: 高危信号
+            const riskList = (data.opportunity_list || {}).risk_signals || [];
+            renderRiskSignals(riskList);
+
             // 机会清单卡（第五刀：HIGH/MED/LOW 分级渲染 + conviction_score）
             const highOpps = oppList.filter(o => o.conviction_tier === 'HIGH');
             const medOpps = oppList.filter(o => o.conviction_tier === 'MED');
@@ -10020,6 +10159,80 @@
             // 保存引用供折叠按钮回调
             window.__signalOppList = oppList;
             window.__signalOppExcluded = oppExcluded;
+
+            // 收集高亮信号中的币种符号（供变化榜 ⭐ 标记）
+            highlightSignalSymbols = new Set();
+            (oppList || []).forEach(function (o) {
+                var syms = o.involved_symbols || [];
+                if (Array.isArray(syms)) {
+                    syms.forEach(function (s) { if (s) highlightSignalSymbols.add(String(s).toUpperCase()); });
+                }
+                if (o.target && /^[A-Z0-9]{2,10}$/.test(o.target.toUpperCase())) {
+                    highlightSignalSymbols.add(o.target.toUpperCase());
+                }
+            });
+        }
+
+        // ── FEAT-RISK-001: 高危信号渲染 ──
+        function renderRiskSignals (riskList) {
+            const container = document.getElementById('risk-signal-content');
+            const countEl = document.getElementById('risk-signal-count');
+            if (!container) return;
+
+            const highItems = riskList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high'; });
+            const medItems = riskList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'MED' || o.confidence === 'medium'; });
+            const total = riskList.length;
+
+            countEl.textContent = total > 0 ? total + ' 条风险' : '0 条';
+
+            if (total === 0) {
+                container.innerHTML =
+                    '<div class="signal-empty">' +
+                    '<div class="signal-empty-icon">🛡️</div>' +
+                    '暂无高危信号' +
+                    '<div class="signal-empty-sub">市场整体风险可控</div>' +
+                    '</div>';
+                return;
+            }
+
+            // 折叠逻辑（同高亮信号）
+            var COLLAPSE_THRESHOLD = 6;
+            var showAll = window.__riskShowAll || false;
+            var renderList = [];
+            var collapsedCount = 0;
+            if (total > COLLAPSE_THRESHOLD && !showAll) {
+                var maxMed = Math.max(0, COLLAPSE_THRESHOLD - highItems.length);
+                renderList = highItems.concat(medItems.slice(0, maxMed));
+                collapsedCount = medItems.length - maxMed + riskList.filter(function (o) { return !highItems.includes(o) && !medItems.includes(o); }).length;
+            } else {
+                renderList = highItems.concat(medItems);
+            }
+
+            let html = '<div class="signal-list">';
+            renderList.forEach(function (o) {
+                var lvl = (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high' ? 'high' : 'medium';
+                html += renderSignalItem(o, lvl);
+            });
+            html += '</div>';
+
+            if (collapsedCount > 0) {
+                html += '<div style="text-align:center"><button class="signal-collapse-btn" onclick="window.__riskShowAll=true;renderRiskSignals(window.__riskList)">展开全部(' + total + ')</button></div>';
+            }
+
+            container.innerHTML = html;
+            window.__riskList = riskList;
+
+            // 收集高危信号中的币种符号（供变化榜 ⚠️ 标记）
+            riskSignalSymbols = new Set();
+            riskList.forEach(function (o) {
+                var syms = o.involved_symbols || [];
+                if (Array.isArray(syms)) {
+                    syms.forEach(function (s) { if (s) riskSignalSymbols.add(String(s).toUpperCase()); });
+                }
+                if (o.target && /^[A-Z0-9]{2,10}$/.test(o.target.toUpperCase())) {
+                    riskSignalSymbols.add(o.target.toUpperCase());
+                }
+            });
         }
 
         // ── FEAT-HIGHLIGHT-004: 信号类型映射表 ──
@@ -10027,6 +10240,8 @@
             mvrv_deep_under: { label: 'MVRV深度低估', cls: 'st-mvrv' },
             mvrv_under_watch: { label: 'MVRV观察', cls: 'st-mvrv' },
             mvrv_watch: { label: 'MVRV观察', cls: 'st-mvrv' },
+            mvrv_deep_over: { label: 'MVRV极度高估', cls: 'st-mvrv' },
+            mvrv_over_watch: { label: 'MVRV高估观察', cls: 'st-mvrv' },
             fng_extreme: { label: '恐贪极值', cls: 'st-fng' },
             leverage_extreme: { label: '杠杆极值', cls: 'st-lev' },
             stablecoin_inflow: { label: '稳定币净流入', cls: 'st-stable' },

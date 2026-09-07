@@ -3395,6 +3395,131 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     return result
 
 
+# FEAT-RISK-001：高危信号精选
+# ══════════════════════════════════════════════════════════════
+
+def select_risk_signals(opportunities: list[dict], max_total: int = 8,
+                         min_resonance: int = 1) -> list[dict]:
+    """从全部机会中精选高危（看空）信号：HIGH 优先 + 共振筛选 + 类型配额。
+
+    对称于 select_highlight_signals，但聚焦 direction=short / 风险类信号。
+
+    处理流程：
+    1. 筛选 direction == 'short' 或风险类 signal_type
+    2. 全量按风险强度排序（解锁金额/巨鲸额/MVRV百分位/置信分数）
+    3. 同标的合并：同一 target 的多条风险合并为一张卡片
+    4. 共振筛选：币种级 target 需 ≥ min_resonance 种不同 signal_type 才入选
+       宏观/聚合类 target 不受共振限制
+    5. 按类型配额限制
+    6. 限制 max_total
+    """
+    import re
+    _symbol_re = re.compile(r'^[A-Z0-9]{2,10}$')
+
+    def _is_symbol_target(tgt: str) -> bool:
+        t = (tgt or "").strip()
+        if not t:
+            return False
+        return bool(_symbol_re.match(t))
+
+    # 风险信号类型配额（合并后的卡片数）
+    quotas = {
+        "token_unlock": 2,
+        "whale_flow": 2,
+        "mvrv_deep_over": 2,
+        "mvrv_over_watch": 1,
+        "fng_extreme": 1,
+        "leverage_extreme": 1,
+        "github_activity": 1,
+        "catalyst": 1,
+        "__default__": 1,
+    }
+
+    # ── 1. 筛选风险类信号 ──
+    risk_types = {
+        "token_unlock", "whale_flow", "mvrv_deep_over", "mvrv_over_watch",
+        "fng_extreme", "leverage_extreme",
+    }
+    risk_opps = [
+        o for o in opportunities
+        if o.get("direction") == "short" or o.get("signal_type") in risk_types
+    ]
+
+    if not risk_opps:
+        return []
+
+    # ── 2. 按风险强度排序 ──
+    def _risk_sort_key(o):
+        is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
+        score = o.get("conviction_score", 0) or 0
+        resonance = len(o.get("related_dims", []) or [])
+        is_new = 1 if o.get("is_new_today") else 0
+        # 解锁优先（确定性高）
+        is_unlock = 1 if o.get("signal_type") == "token_unlock" else 0
+        return (is_unlock, is_high, is_new, resonance, score)
+
+    candidates = sorted(risk_opps, key=_risk_sort_key, reverse=True)[:max_total * 10]
+
+    # ── 3. 同标的合并 ──
+    merged_map: dict[str, dict] = {}
+    merged_order: list[str] = []
+    for o in candidates:
+        tgt = (o.get("target") or "").strip()
+        tgt_key = tgt.lower()
+        if not tgt_key:
+            continue
+        if tgt_key not in merged_map:
+            merged = dict(o)
+            merged["all_signals"] = [o]
+            merged_map[tgt_key] = merged
+            merged_order.append(tgt_key)
+        else:
+            merged = merged_map[tgt_key]
+            merged["all_signals"].append(o)
+            all_dims = list(dict.fromkeys(
+                (merged.get("related_dims") or []) + (o.get("related_dims") or [])
+            ))
+            merged["related_dims"] = all_dims
+            if o.get("conviction_score", 0) > merged.get("conviction_score", 0):
+                merged["conviction_score"] = o["conviction_score"]
+                merged["conviction_tier"] = o.get("conviction_tier", merged.get("conviction_tier"))
+
+    for k, merged in merged_map.items():
+        sig_types = list(dict.fromkeys(
+            s.get("signal_type") for s in merged.get("all_signals", [])
+            if s.get("signal_type")
+        ))
+        merged["resonance_count"] = len(sig_types)
+        merged["signal_types"] = sig_types
+
+    # ── 4. 共振筛选 ──
+    after_resonance: list[dict] = []
+    for k in merged_order:
+        merged = merged_map[k]
+        tgt = merged.get("target", "")
+        res_count = merged.get("resonance_count", 1)
+        if _is_symbol_target(tgt) and res_count < min_resonance:
+            continue
+        after_resonance.append(merged)
+
+    after_resonance.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+
+    # ── 5. 类型配额 ──
+    type_counts: dict[str, int] = {}
+    result: list[dict] = []
+    for merged in after_resonance:
+        st = merged.get("signal_type") or "__default__"
+        q = quotas.get(st, quotas["__default__"])
+        if type_counts.get(st, 0) >= q:
+            continue
+        type_counts[st] = type_counts.get(st, 0) + 1
+        result.append(merged)
+        if len(result) >= max_total:
+            break
+
+    return result
+
+
 def score_opportunities(overview: dict) -> dict:
     """
     聚合 P1-1~P1-3 + P0-3 真实字段合成机会清单。
@@ -3521,6 +3646,65 @@ def score_opportunities(overview: dict) -> dict:
             opportunities, excluded, t,
             cycle_phase=cycle_phase, n_confirm=1,
         )
+
+    # ── MVRV 高估/极度高估（short 风险信号） ──
+    # 对称于深度低估/低估观察池，用于高危信号面板
+    overvalued_pct = t.get("mvrv_overvalued_pct", 75)
+    deep_over_pct = t.get("mvrv_deep_overvalued_pct", 85)
+    deep_over = sorted(
+        [c for c in mvrv_coins if (c.get("pct_full") or 0) >= deep_over_pct],
+        key=lambda c: c.get("pct_full", 0), reverse=True,
+    )
+    if deep_over:
+        symbols = ", ".join(str(c.get("symbol", "?")) for c in deep_over)
+        avg_pct = sum(c.get("pct_full", 0) for c in deep_over) / len(deep_over)
+        n_coins = len(deep_over)
+        strength_base = 60
+        per_pct = 1.5
+        per_coin = 5
+        strength_cap = 40
+        strength = max(55, min(95, strength_base + int((avg_pct - deep_over_pct) * per_pct) + min(strength_cap, n_coins * per_coin)))
+        _push_opportunity(
+            {"target": f"{len(deep_over)} 币 MVRV 极度高估",
+             "direction": "short", "confidence": "high",
+             "conviction_score": strength,
+             "signal_type": "mvrv_deep_over",
+             "key_metric": f"MVRV ≥{deep_over_pct}%",
+             "trigger_logic": (
+                 f"{symbols} 等 {n_coins} 个代币 MVRV 百分位 ≥{deep_over_pct}%"
+             ),
+             "action_hint": "估值极度偏高，注意回调风险",
+             "invalidation": f"若 MVRV 回落至 <{deep_over_pct}% 或出现新催化剂",
+             "related_dims": ["mvrv_universe", "P0-1 估值回归"],
+             "involved_symbols": [c.get("symbol") for c in deep_over]},
+            opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=1,
+        )
+
+    over_watch = [
+        c for c in mvrv_coins
+        if overvalued_pct <= (c.get("pct_full") or 0) < deep_over_pct
+    ]
+    if over_watch and len(over_watch) >= 3:
+        avg_pct = sum(c.get("pct_full", 0) for c in over_watch) / len(over_watch)
+        strength = max(35, min(60, 50 + int(avg_pct - overvalued_pct)))
+        _push_opportunity(
+            {"target": f"{len(over_watch)} 币 MVRV 高估观察池",
+             "direction": "short", "confidence": "medium",
+             "conviction_score": strength,
+             "signal_type": "mvrv_over_watch",
+             "key_metric": f"MVRV {overvalued_pct}-{deep_over_pct}%",
+             "trigger_logic": (
+                 f"MVRV 百分位 {overvalued_pct}-{deep_over_pct}%（平均 {avg_pct:.1f}%）"
+             ),
+             "action_hint": "估值偏高区域，追高需谨慎",
+             "invalidation": f"若 MVRV 回落 <{overvalued_pct}%",
+             "related_dims": ["mvrv_universe", "P0-1 估值回归"],
+             "involved_symbols": [c.get("symbol") for c in over_watch]},
+            opportunities, excluded, t,
+            cycle_phase=cycle_phase, n_confirm=1,
+        )
+
     if not mvrv_coins:
         degraded.append("mvrv_universe 数据缺失")
 
@@ -4183,6 +4367,10 @@ def score_opportunities(overview: dict) -> dict:
     highlight_max_total = int(t.get("highlight_max_total", 10))
     highlights = select_highlight_signals(opportunities, max_total=highlight_max_total)
 
+    # 精选高危信号（FEAT-RISK-001）：对称于高亮信号，聚焦看空/风险
+    risk_max_total = int(t.get("risk_max_total", 8))
+    risk_signals = select_risk_signals(opportunities, max_total=risk_max_total)
+
     # P1：为所有机会/excluded 解析 asset_id，供前端跳转 /research/<asset_id>
     all_symbols: set[str] = set()
     for o in opportunities + excluded:
@@ -4223,6 +4411,7 @@ def score_opportunities(overview: dict) -> dict:
         "status": status,
         "opportunities": opportunities,
         "highlight_signals": highlights,
+        "risk_signals": risk_signals,
         "excluded": excluded,
         "degraded": degraded,
         "watchlist_alerts": watch_alerts,

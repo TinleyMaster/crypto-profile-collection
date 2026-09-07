@@ -24,15 +24,35 @@ if str(PROJECT_SRC) not in sys.path:
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-# 放宽版达标列表（15 币 + matic 价格保留）= 16 币
-ALLOWED_COINS = {"btc", "eth", "ada", "xrp", "link", "uni", "aave", "ltc", "bch",
-                 "etc", "xlm", "algo", "icp", "mana", "doge", "matic"}
+# P0-2 收口：与 backfill_cm_onchain.py / ingest_cm_onchain_daily.py 同步扩到 ~50 币
+# 禁含 sol（CM 免费档 403）、matic（指标全 NULL）
+ALLOWED_COINS = {
+    # 原14币
+    "btc", "eth", "ada", "xrp", "link", "uni", "aave",
+    "ltc", "bch", "etc", "xlm", "algo", "icp", "doge",
+    # 扩展：L1/L0
+    "dot", "atom", "near", "avax", "egld", "ftm", "theta",
+    "waves", "neo", "zil", "one", "iota", "vet", "hbar",
+    # 扩展：DeFi/DEX
+    "crv", "snx", "comp", "mkr", "sushi", "yfi", "1inch",
+    "bal", "dydx", "gmx", "pendle", "jup",
+    # 扩展：基础设施/预言机/存储
+    "grt", "fil", "ar", "storj", "ocean",
+    # 扩展：MEME/热门
+    "shib", "pepe", "bonk", "wif", "floki",
+}
 
-# 需要删除的币种（不达标）
+# 需要删除的币种（不在达标列表中的）
 DELETE_COINS_SQL = """
 DELETE FROM biz.cm_asset_onchain_daily
 WHERE cm_symbol NOT IN ('btc', 'eth', 'ada', 'xrp', 'link', 'uni', 'aave', 'ltc', 'bch',
-                         'etc', 'xlm', 'algo', 'icp', 'mana', 'doge', 'matic')
+                         'etc', 'xlm', 'algo', 'icp', 'doge',
+                         'dot', 'atom', 'near', 'avax', 'egld', 'ftm', 'theta',
+                         'waves', 'neo', 'zil', 'one', 'iota', 'vet', 'hbar',
+                         'crv', 'snx', 'comp', 'mkr', 'sushi', 'yfi', '1inch',
+                         'bal', 'dydx', 'gmx', 'pendle', 'jup',
+                         'grt', 'fil', 'ar', 'storj', 'ocean',
+                         'shib', 'pepe', 'bonk', 'wif', 'floki')
 """
 
 # 修复 matic 截止日期

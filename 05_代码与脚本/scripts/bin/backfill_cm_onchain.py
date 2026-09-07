@@ -6,7 +6,7 @@
 起始日期按币动态取库内 MAX(metric_date) WHERE cap_mvrv_cur IS NOT NULL 次日（兜底 2026-05-24）。
 
 用法：
-    python backfill_cm_onchain.py                     # 回填缺口（默认 14 币）
+    python backfill_cm_onchain.py                     # 回填缺口（默认 ~50 币，禁含 sol）
     python backfill_cm_onchain.py --coins btc,eth     # 仅回填指定币种
     python backfill_cm_onchain.py --incremental       # 增量模式：仅拉 T-1 完整日
     python backfill_cm_onchain.py --dry-run            # 预览，不写入

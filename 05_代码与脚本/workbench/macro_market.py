@@ -2648,7 +2648,8 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
 def _fetch_catalyst_events(asset_id: int, window_days: int = 14, limit: int = 3) -> list[dict]:
     """获取指定资产近 N 天的催化剂事件列表，按重要性+时间排序。
 
-    返回 [{title, event_date, direction, strength, category, source}, ...]。
+    返回 [{catalyst_id, title, event_date, direction, strength, category, source, source_url, body_text}, ...]。
+    同一条 catalyst 只取 impact 最强的一条（DISTINCT 去重）。
     """
     try:
         from crypto_research.config import get_settings
@@ -2657,33 +2658,55 @@ def _fetch_catalyst_events(asset_id: int, window_days: int = 14, limit: int = 3)
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
+                # 先用子查询按 catalyst_id 取 impact 最强的一条，再整体排序取 TOP N
+                # （解决同一条 catalyst 因多个 horizon_days 或多条 impact 导致重复的问题）
                 cur.execute("""
-                    SELECT ac.title, ac.published_at, ci.impact_direction,
-                           ci.impact_strength, ac.event_category, ac.source_code
-                    FROM biz.catalyst_impact ci
-                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
-                    WHERE ci.asset_id = %s
-                      AND ac.published_at >= NOW() - make_interval(days => %s)
+                    WITH ranked AS (
+                        SELECT ac.catalyst_id, ac.title, ac.published_at, ac.body_text,
+                               ac.event_category, ac.source_code, ac.source_url,
+                               ci.impact_direction, ci.impact_strength,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY ac.catalyst_id
+                                   ORDER BY
+                                       CASE ci.impact_strength
+                                           WHEN 'strong' THEN 3
+                                           WHEN 'medium' THEN 2
+                                           ELSE 1
+                                       END DESC,
+                                       ci.impact_direction DESC
+                               ) AS rn
+                        FROM biz.catalyst_impact ci
+                        JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+                        WHERE ci.asset_id = %s
+                          AND ac.published_at >= NOW() - make_interval(days => %s)
+                    )
+                    SELECT catalyst_id, title, published_at, body_text, event_category,
+                           source_code, source_url, impact_direction, impact_strength
+                    FROM ranked
+                    WHERE rn = 1
                     ORDER BY
-                        CASE ci.impact_strength
+                        CASE impact_strength
                             WHEN 'strong' THEN 3
                             WHEN 'medium' THEN 2
                             ELSE 1
                         END DESC,
-                        ac.published_at DESC
+                        published_at DESC
                     LIMIT %s
                 """, (asset_id, window_days, limit))
                 rows = cur.fetchall()
                 return [
                     {
+                        "catalyst_id": cid,
                         "title": title or "",
                         "event_date": str(published_at.date()) if published_at else "",
                         "direction": direction or "neutral",
                         "strength": strength or "weak",
                         "category": category or "",
                         "source": source_code or "",
+                        "source_url": source_url or "",
+                        "body_text": body_text or "",
                     }
-                    for title, published_at, direction, strength, category, source_code in rows
+                    for cid, title, published_at, body_text, category, source_code, source_url, direction, strength in rows
                 ]
     except Exception:
         return []

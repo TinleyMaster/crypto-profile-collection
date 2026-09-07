@@ -8,7 +8,9 @@ DL 一键流水线：按正确依赖顺序自动执行 DefiLlama 的 3 个步骤
   ④ 官网 primary 裁决       run_refresh_primary_website.py             → biz.doc_source_entry.is_primary
   ⑤ 赛道标签全量刷新       run_refresh_sectors.py                     → biz.asset_sector + core.asset.primary_sector
   ⑥ TVL 业务层聚合           ingest_dl_tvl_daily.py                      → biz.protocol_metric_daily
-  ⑦ 资产去重清理           dedup_assets.py --apply                     → core.asset（合并完全同名重复）
+  ⑦ 链级 TVL 快照             ingest_llama_chain_tvl.py --top-n 100       → src_dl.chain_tvl_snapshot
+  ⑧ 赛道日频快照（TVL部分）   etl_sector_flow_daily.py                     → biz.sector_flow_daily 补 TVL 字段
+  ⑨ 资产去重清理           dedup_assets.py --apply                     → core.asset（合并完全同名重复）
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -125,8 +127,18 @@ def main() -> int:
     if code != 0:
         return code
 
-    # ⑦ 资产去重清理（依赖②，合并完全同名重复，防止 symbol 污染）
-    code, _ = _run(_python("dedup_assets.py", "--apply"), "⑦ 资产去重")
+    # ⑦ 链级 TVL 快照（DeFiLlama chains API，TOP 100 链）
+    code, _ = _run(_python("ingest_llama_chain_tvl.py", "--top-n", "100"), "⑦ 链级TVL")
+    if code != 0:
+        return code
+
+    # ⑧ 赛道日频快照（TVL 部分）— 触发重算，补齐 TVL / 净流入 / 综合评分
+    code, _ = _run(_python("etl_sector_flow_daily.py"), "⑧ 赛道快照")
+    if code != 0:
+        return code
+
+    # ⑨ 资产去重清理（依赖②，合并完全同名重复，防止 symbol 污染）
+    code, _ = _run(_python("dedup_assets.py", "--apply"), "⑨ 资产去重")
     if code != 0:
         return code
 

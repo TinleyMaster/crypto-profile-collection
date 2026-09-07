@@ -1563,13 +1563,194 @@ def _enrich_protocols_with_asset(protocols: list[dict]) -> list[dict]:
     return enriched
 
 
+def _fetch_narrative_flow_from_db() -> dict | None:
+    """
+    从 biz.sector_flow_daily 读 12 赛道数据，转成叙事榜同构格式。
+    用于 API 失败时的二级兜底。返回 None 表示无数据。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT sector_key, sector_label, metric_date,
+                           market_cap, mcap_change_1d_pct, mcap_change_7d_pct, mcap_change_30d_pct,
+                           coin_count, tvl, tvl_change_7d_pct, flow_7d_usd,
+                           composite_score, mode
+                    FROM biz.sector_flow_daily
+                    WHERE metric_date = (
+                        SELECT MAX(metric_date) FROM biz.sector_flow_daily
+                    )
+                      AND sector_type = 'sector_12'
+                      AND market_cap IS NOT NULL
+                    ORDER BY composite_score DESC NULLS LAST, mcap_change_7d_pct DESC NULLS LAST
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                if not rows:
+                    return None
+
+                # 取每条赛道的领涨币 TOP 3
+                for s in rows:
+                    cur.execute("""
+                        SELECT a.canonical_symbol AS symbol, a.canonical_name AS name,
+                               q.market_cap, q.percent_change_7d
+                        FROM biz.asset_sector s
+                        JOIN core.asset a ON s.asset_id = a.asset_id
+                        JOIN core.asset_source_map asm
+                          ON a.asset_id = asm.asset_id AND asm.source_code = 'cmc'
+                        JOIN (
+                            SELECT DISTINCT ON (cmc_id) cmc_id, market_cap,
+                                   percent_change_7d
+                            FROM src_cmc.cmc_asset_quote_snapshot
+                            WHERE market_cap IS NOT NULL
+                              AND quote_time::date = (
+                                SELECT MAX(quote_time)::date FROM src_cmc.cmc_asset_quote_snapshot
+                              )
+                            ORDER BY cmc_id, quote_time DESC
+                        ) q ON asm.source_asset_key::bigint = q.cmc_id
+                        WHERE s.sector = %s AND s.is_primary = TRUE
+                          AND q.market_cap >= 10000000
+                        ORDER BY q.percent_change_7d DESC NULLS LAST
+                        LIMIT 3
+                    """, (s["sector_key"],))
+                    leaders = [dict(r) for r in cur.fetchall()]
+                    s["top_coins"] = [
+                        {
+                            "symbol": l["symbol"],
+                            "name": l["name"],
+                            "market_cap": float(l["market_cap"]) if l["market_cap"] else None,
+                            "change_7d_pct": float(l["percent_change_7d"]) if l["percent_change_7d"] is not None else None,
+                        }
+                        for l in leaders
+                    ]
+
+                # 转成叙事榜同构格式
+                ranked = []
+                for r in rows:
+                    comp = r.get("composite_score")
+                    if comp is None:
+                        comp = r.get("mcap_change_7d_pct") or 0
+
+                    # 趋势标签
+                    m7 = r.get("mcap_change_7d_pct") or 0
+                    if m7 > 10:
+                        trend = "强势上涨"
+                    elif m7 > 3:
+                        trend = "上涨"
+                    elif m7 > -3:
+                        trend = "横盘"
+                    elif m7 > -10:
+                        trend = "下跌"
+                    else:
+                        trend = "强势下跌"
+
+                    ranked.append({
+                        "narrative": r["sector_label"],
+                        "narrative_key": r["sector_key"],
+                        "composite_score": round(float(comp), 2) if comp is not None else 0,
+                        "mode": r["mode"] or "mcap_only",
+                        "momentum_score": round(float(r["mcap_change_7d_pct"]), 2) if r["mcap_change_7d_pct"] is not None else None,
+                        "trend_label": trend,
+                        "mcap_change_1d_pct": float(r["mcap_change_1d_pct"]) if r["mcap_change_1d_pct"] is not None else None,
+                        "mcap_change_7d_pct": float(r["mcap_change_7d_pct"]) if r["mcap_change_7d_pct"] is not None else None,
+                        "mcap_change_30d_pct": float(r["mcap_change_30d_pct"]) if r["mcap_change_30d_pct"] is not None else None,
+                        "mcap_period": "7d",
+                        "tvl_change_7d_pct": float(r["tvl_change_7d_pct"]) if r["tvl_change_7d_pct"] is not None else None,
+                        "tvl_usd": float(r["tvl"]) if r["tvl"] else None,
+                        "market_cap": float(r["market_cap"]) if r["market_cap"] else None,
+                        "top_coins": r.get("top_coins", []),
+                        "top_coins_all": r.get("top_coins", []),
+                        "total_coins": r["coin_count"],
+                        "flow_7d_usd": float(r["flow_7d_usd"]) if r["flow_7d_usd"] is not None else None,
+                        "from_db": True,
+                        "source": "db_12sector",
+                    })
+
+                return {
+                    "status": "ok",
+                    "ranked": ranked,
+                    "degraded": [],
+                    "source": "db_12sector",
+                    "metric_date": str(rows[0]["metric_date"]),
+                }
+    except Exception:
+        return None
+
+
+def _fetch_chain_flow_from_db() -> dict | None:
+    """
+    从 src_dl.chain_tvl_snapshot 读链净流入 TOP5。
+    有数据返回与 fetch_chain_flow 同结构的 dict，无数据返回 None。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT chain_key, chain_name, tvl_usd,
+                           flow_7d_usd, tvl_change_7d as flow_7d_pct,
+                           snapshot_date
+                    FROM src_dl.chain_tvl_snapshot
+                    WHERE snapshot_date = (
+                        SELECT MAX(snapshot_date) FROM src_dl.chain_tvl_snapshot
+                    )
+                      AND flow_7d_usd IS NOT NULL
+                    ORDER BY flow_7d_usd DESC
+                    LIMIT 20
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                if not rows:
+                    return None
+
+                # 取净流入 TOP 5 + 净流出 TOP 5（共 10 条，前端按需求取）
+                top_by_flow = sorted(rows, key=lambda x: -(x.get("flow_7d_usd") or 0))
+                top5 = top_by_flow[:5]
+
+                # 转成和 fetch_chain_flow 一样的结构
+                ranked = []
+                for r in top5:
+                    ranked.append({
+                        "chain": r["chain_name"],
+                        "chain_key": r["chain_key"],
+                        "tvl": float(r["tvl_usd"]) if r["tvl_usd"] else None,
+                        "flow_7d": float(r["flow_7d_usd"]) if r["flow_7d_usd"] is not None else None,
+                        "flow_7d_pct": float(r["flow_7d_pct"]) if r["flow_7d_pct"] is not None else None,
+                        "degraded": False,
+                        "protocols": [],  # 数据库版不带协议列表，前端可不展示
+                        "source": "db",
+                    })
+
+                return {
+                    "status": "ok",
+                    "ranked": ranked,
+                    "degraded_count": 0,
+                    "scanned": len(rows),
+                    "snapshot_date": str(rows[0]["snapshot_date"]),
+                    "source": "db",
+                }
+    except Exception:
+        return None
+
+
 def fetch_chain_flow() -> dict:
     """
-    DeFiLlama 链净流入榜 TOP5。/v2/chains 无 tvlPrevWeek 字段（实测），
-    改为对 top 链逐一拉 /v2/historicalChainTvl 差分 7d 净流入。
-    每条链同时附带该链 Top 5 协议（按 TVL 排序）供下钻。
-    返回 {status, ranked: [{chain, tvl, flow_7d, flow_7d_pct, protocols}], degraded_count, scanned}。
+    链净流入榜 TOP5。优先读数据库（src_dl.chain_tvl_snapshot），
+    无数据兜底实时调 DeFiLlama API。
     """
+    # 优先读数据库
+    db_result = _fetch_chain_flow_from_db()
+    if db_result and db_result.get("ranked"):
+        return db_result
+
+    # 兜底：实时 API
     try:
         r = requests.get(f"{DL_BASE}/v2/chains", timeout=TIMEOUT)
         r.raise_for_status()
@@ -4600,6 +4781,11 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
             narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
         except Exception:
             narrative_flow = {"status": "error", "ranked": []}
+    # 二级兜底：API 也失败的话，从 biz.sector_flow_daily 读 12 赛道数据
+    if not narrative_flow.get("ranked"):
+        db_narrative = _fetch_narrative_flow_from_db()
+        if db_narrative:
+            narrative_flow = db_narrative
     if not chain_flow.get("ranked"):
         try:
             chain_flow = fetch_chain_flow()

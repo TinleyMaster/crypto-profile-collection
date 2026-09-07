@@ -10,6 +10,10 @@ CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 6 个步骤。
   ⑥ CMC 补充文档入口       refresh_doc_source_entries_from_cmc_auto.py → biz.doc_source_entry
   ⑦ 官网 primary 裁决       run_refresh_primary_website.py          → biz.doc_source_entry.is_primary
   ⑧ 赛道标签全量刷新       run_refresh_sectors.py                 → biz.asset_sector + core.asset.primary_sector
+  ⑨ coin_basic 刷新       phase_a_build_core.py --step coin_basic  → core.asset
+  ⑩ supply 对齐           sync_core_supply_from_cmc.py --sync      → core.asset
+  ⑪ 资产去重              dedup_assets.py --apply                  → core.asset
+  ⑫ 赛道日频快照          etl_sector_flow_daily.py                 → biz.sector_flow_daily（市值部分）
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -139,6 +143,11 @@ def main() -> int:
 
     # ⑪ 资产去重清理（依赖③，合并完全同名重复，防止 symbol 污染）
     code, _ = _run(_python("dedup_assets.py", "--apply"), "⑪ 资产去重")
+    if code != 0:
+        return code
+
+    # ⑫ 赛道日频快照（依赖⑧赛道刷新，生成 biz.sector_flow_daily 的市值部分）
+    code, _ = _run(_python("etl_sector_flow_daily.py"), "⑫ 赛道快照")
     if code != 0:
         return code
 

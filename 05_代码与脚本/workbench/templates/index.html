@@ -2655,6 +2655,61 @@
             margin: 0;
         }
 
+        /* ── 大盘一句话总结 ── */
+        .overview-summary {
+            margin-top: 10px;
+            padding: 10px 14px;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
+            border: 1px solid rgba(99, 102, 241, 0.15);
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #cbd5e1;
+        }
+
+        .overview-summary-loading {
+            color: #64748b;
+            font-style: italic;
+        }
+
+        .overview-summary strong {
+            color: #e2e8f0;
+            font-weight: 700;
+        }
+
+        .overview-summary .tag-bull {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            font-size: 11px;
+            font-weight: 700;
+            margin: 0 2px;
+        }
+
+        .overview-summary .tag-bear {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            font-size: 11px;
+            font-weight: 700;
+            margin: 0 2px;
+        }
+
+        .overview-summary .tag-neutral {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(100, 116, 139, 0.15);
+            color: #94a3b8;
+            font-size: 11px;
+            font-weight: 700;
+            margin: 0 2px;
+        }
+
         /* ── 右侧调度日志侧栏 ── */
         .scheduler-sidebar {
             position: sticky;
@@ -4146,6 +4201,9 @@
                 <div class="module-header">
                     <h2>🌐 大盘分析</h2>
                     <p class="module-desc">情绪子分 + 结构子分 + 事件日历（事件日历不参与子分计算）</p>
+                    <div class="overview-summary" id="overview-summary">
+                        <span class="overview-summary-loading">加载中...</span>
+                    </div>
                     <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
                         <span style="font-size:12px;color:#8a92a0" id="overview-updated">-</span>
                         <button class="hot-refresh" onclick="loadMarketOverview(true)">刷新</button>
@@ -7654,6 +7712,75 @@
             const structureScore = structure.score;
             const structureStatus = structure.status || 'error';
             const structureComponents = structure.components || {};
+
+            // ── 大盘一句话总结 ──
+            (function renderOverviewSummary () {
+                const el = document.getElementById('overview-summary');
+                if (!el) return;
+
+                const eBand = emotionBand(emotionScore);
+                const sBand = structureBand(structureScore);
+                const btcCycle = (data.btc_cycle || {}).phase || '未知';
+                const cycleMap = {
+                    'accumulation': '积累期', 'early_bull': '牛市早期',
+                    'late_bull': '牛市晚期', 'bear': '熊市', 'recovery': '复苏期'
+                };
+                const cycleLabel = cycleMap[btcCycle] || btcCycle;
+
+                // 亮点采集
+                const highlights = [];
+
+                // 亮点1：恐贪极值
+                const fgVal = (emotionComponents.fear_greed || {}).value;
+                if (fgVal != null) {
+                    if (fgVal <= 25) highlights.push('恐贪 <span class="tag-bear">极度恐惧</span>，历史级抄底窗口');
+                    else if (fgVal >= 75) highlights.push('恐贪 <span class="tag-bull">极度贪婪</span>，警惕回调');
+                }
+
+                // 亮点2：ETF 资金
+                const etfData = (((data.dimensions || {})['4机构'] || {}).data || {});
+                const etfNet = etfData.btc_net_flow_usd_m;
+                if (etfNet != null && etfData.status === 'ok') {
+                    if (etfNet >= 100) highlights.push('BTC ETF <span class="tag-bull">净流入 $' + Math.round(etfNet) + 'M</span>，机构加仓');
+                    else if (etfNet <= -100) highlights.push('BTC ETF <span class="tag-bear">净流出 $' + Math.round(Math.abs(etfNet)) + 'M</span>，机构减仓');
+                }
+
+                // 亮点3：稳定币流（从 5板块 维度取）
+                const dim5 = (data.dimensions || {})['5板块'] || {};
+                const dim5data = dim5.data || {};
+                const scRolling = dim5data.stablecoin_flow_rolling_7d || [];
+                const stableFlow7d = scRolling.length ? scRolling[scRolling.length - 1] : null;
+                if (stableFlow7d != null && Math.abs(stableFlow7d) >= 3e9) {
+                    if (stableFlow7d > 0) highlights.push('稳定币 7d <span class="tag-bull">净流入 +$' + (stableFlow7d / 1e9).toFixed(1) + 'B</span>，弹药充足');
+                    else highlights.push('稳定币 7d <span class="tag-bear">净流出 $' + (Math.abs(stableFlow7d) / 1e9).toFixed(1) + 'B</span>，资金离场');
+                }
+
+                // 亮点4：杠杆极值
+                const fundingVal = (emotionComponents.derivative || {}).funding_rate;
+                if (fundingVal != null) {
+                    if (fundingVal > 0.001) highlights.push('资金费率 <span class="tag-bear">偏高</span>，多头拥挤');
+                    else if (fundingVal < -0.0005) highlights.push('资金费率 <span class="tag-bull">负费率</span>，空头拥挤');
+                }
+
+                // 亮点5：高亮信号数
+                const oppList = data.opportunity_list || {};
+                const highlightCount = oppList.highlight_count || ((oppList.opportunities || []).length);
+                if (highlightCount > 0) {
+                    highlights.push('<strong>' + highlightCount + '</strong> 个高亮信号待关注');
+                }
+
+                // 组装一句话
+                let summaryHtml = '';
+                summaryHtml += '当前处于<strong>' + cycleLabel + '</strong>，';
+                summaryHtml += '市场情绪<span class="tag-' + (eBand.cls === 'band-bull' ? 'bull' : eBand.cls === 'band-bear' ? 'bear' : 'neutral') + '">' + (eBand.label || '—') + '</span>';
+                summaryHtml += '，结构<span class="tag-' + (sBand.cls === 'band-bull' ? 'bull' : sBand.cls === 'band-bear' ? 'bear' : 'neutral') + '">' + (sBand.label || '—') + '</span>';
+                if (highlights.length) {
+                    summaryHtml += '；' + highlights.slice(0, 3).join(' · ');
+                }
+                summaryHtml += '。';
+
+                el.innerHTML = summaryHtml;
+            })();
 
             let html = '';
 

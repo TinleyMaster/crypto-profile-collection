@@ -899,10 +899,10 @@ def api_exchange_wallets_verify():
                             source = COALESCE(source, '') || ';manual_verified'
                         WHERE wallet_id = %s AND confidence = 'medium'
                     """, (wallet_id,))
-                else:  # reject: 非交易所地址，直接删除
+                else:  # reject: 非交易所地址，直接删除（不管 confidence）
                     cur.execute("""
                         DELETE FROM biz.onchain_exchange_wallet
-                        WHERE wallet_id = %s AND confidence = 'medium'
+                        WHERE wallet_id = %s
                     """, (wallet_id,))
                 changed = cur.rowcount > 0
             conn.commit()

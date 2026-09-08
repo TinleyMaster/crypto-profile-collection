@@ -12332,10 +12332,18 @@
 
         async function verifyWallet (walletId, action) {
             const itemEl = document.querySelector(`.wallet-item[data-id="${walletId}"]`);
-            if (itemEl) {
-                itemEl.style.opacity = '0.6';
-                itemEl.style.pointerEvents = 'none';
+            const btnSelector = action === 'approve' ? '.btn-approve' : '.btn-reject';
+            const btnEl = itemEl ? itemEl.querySelector(btnSelector) : null;
+
+            if (!itemEl) return;
+
+            // 立即视觉反馈：按钮变"处理中"，整体半透明
+            if (btnEl) {
+                btnEl._originalText = btnEl.textContent;
+                btnEl.textContent = '处理中...';
+                btnEl.style.opacity = '0.6';
             }
+            itemEl.style.pointerEvents = 'none';
 
             try {
                 const r = await fetch('/api/exchange-wallets/verify', {
@@ -12344,7 +12352,23 @@
                     body: JSON.stringify({ wallet_id: walletId, action: action })
                 });
                 const j = await r.json();
-                if (!j.ok) throw new Error(j.error);
+                if (!j.ok) throw new Error(j.error || '操作失败');
+
+                if (j.changed === false) {
+                    // 没有实际变更（可能已经处理过）
+                    if (btnEl) {
+                        btnEl.textContent = btnEl._originalText || (action === 'approve' ? '✅ 验证通过' : '❌ 非交易所');
+                        btnEl.style.opacity = '';
+                    }
+                    itemEl.style.pointerEvents = '';
+                    // 闪烁一下表示已处理过
+                    itemEl.style.transition = 'background 0.3s';
+                    itemEl.style.background = 'rgba(245, 158, 11, 0.1)';
+                    setTimeout(() => {
+                        if (itemEl) itemEl.style.background = '';
+                    }, 800);
+                    return;
+                }
 
                 if (itemEl) {
                     itemEl.classList.add('removing');
@@ -12383,11 +12407,28 @@
                 }
             } catch (e) {
                 console.error('verify wallet error:', e);
-                if (itemEl) {
-                    itemEl.style.opacity = '';
-                    itemEl.style.pointerEvents = '';
+                // 恢复按钮状态
+                if (btnEl) {
+                    btnEl.textContent = (btnEl._originalText || (action === 'approve' ? '✅ 验证通过' : '❌ 非交易所'));
+                    btnEl.style.opacity = '';
                 }
-                alert('操作失败: ' + (e.message || e));
+                if (itemEl) {
+                    itemEl.style.pointerEvents = '';
+                    // 闪烁红色表示错误
+                    itemEl.style.transition = 'background 0.3s';
+                    itemEl.style.background = 'rgba(239, 68, 68, 0.15)';
+                    setTimeout(() => {
+                        if (itemEl) itemEl.style.background = '';
+                    }, 800);
+                }
+                // 错误提示：在按钮下方显示文字，不用 alert（避免被拦截）
+                const errMsg = document.createElement('div');
+                errMsg.style.cssText = 'color:#f87171;font-size:11px;margin-top:4px;text-align:center;';
+                errMsg.textContent = '失败：' + (e.message || e);
+                if (itemEl) {
+                    itemEl.appendChild(errMsg);
+                    setTimeout(() => { if (errMsg.parentNode) errMsg.remove(); }, 3000);
+                }
             }
         }
 

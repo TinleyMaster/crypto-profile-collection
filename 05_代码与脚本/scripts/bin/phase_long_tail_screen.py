@@ -111,13 +111,15 @@ def screen_all(dry_run: bool = False, limit: int | None = None) -> dict:
 
             # holder 数据
             cur.execute(f"""
-                SELECT hs.asset_id, a.canonical_symbol AS symbol, a.primary_chain AS chain,
+                SELECT hs.asset_id, a.canonical_symbol AS symbol, ac.chain,
                        hs.top10_concentration, hs.total_holders,
                        hs.holder_change_7d, hs.holder_change_30d,
                        hs.whale_balance_change_7d_pct, hs.whale_balance_change_30d_pct,
                        hs.exchange_wallet_pct
                 FROM biz.onchain_holder_snapshot hs
                 JOIN core.asset a ON a.asset_id = hs.asset_id
+                LEFT JOIN core.asset_contract ac
+                  ON ac.asset_id = a.asset_id AND ac.is_primary = true
                 WHERE hs.asset_id IN ({placeholders})
                   AND hs.snapshot_date = (
                       SELECT MAX(snapshot_date) FROM biz.onchain_holder_snapshot

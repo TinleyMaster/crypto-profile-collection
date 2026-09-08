@@ -4911,6 +4911,263 @@
             margin-left: 2px;
         }
 
+        /* ── 催化剂事件板块 ── */
+        .catalyst-section {
+            background: rgba(15, 23, 42, .6);
+            border: 1px solid rgba(51, 65, 85, .5);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 20px;
+            backdrop-filter: blur(10px);
+        }
+
+        .catalyst-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .catalyst-head h3 {
+            margin: 0;
+            font-size: 16px;
+            color: #e2e8f0;
+            font-weight: 700;
+        }
+
+        .catalyst-sub {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 4px;
+            display: block;
+        }
+
+        .catalyst-count {
+            font-size: 12px;
+            color: #94a3b8;
+            background: rgba(51, 65, 85, .4);
+            padding: 4px 10px;
+            border-radius: 12px;
+        }
+
+        .catalyst-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .cat-item {
+            background: rgba(30, 41, 59, .6);
+            border: 1px solid rgba(71, 85, 105, .35);
+            border-radius: 8px;
+            padding: 12px 14px;
+            transition: all .2s;
+        }
+
+        .cat-item:hover {
+            border-color: rgba(99, 102, 241, .4);
+            background: rgba(30, 41, 59, .85);
+        }
+
+        /* strong 级事件高亮 */
+        .cat-item.cat-strength-strong {
+            border-left: 3px solid #f0b90b;
+            background: linear-gradient(90deg, rgba(240, 185, 11, .08), rgba(30, 41, 59, .6));
+        }
+
+        .cat-item.cat-strength-medium {
+            border-left: 3px solid #3b82f6;
+        }
+
+        .cat-item.cat-strength-weak {
+            border-left: 3px solid #475569;
+            opacity: .9;
+        }
+
+        .cat-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .cat-dir {
+            font-size: 14px;
+            line-height: 1;
+        }
+
+        .cat-date {
+            font-size: 12px;
+            color: #64748b;
+            font-variant-numeric: tabular-nums;
+            min-width: 40px;
+        }
+
+        .cat-strength {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 6px;
+            background: rgba(51, 65, 85, .6);
+            color: #94a3b8;
+        }
+
+        .cat-strength-strong .cat-strength {
+            color: #f0b90b;
+            background: rgba(240, 185, 11, .15);
+        }
+
+        .cat-strength-medium .cat-strength {
+            color: #60a5fa;
+            background: rgba(59, 130, 246, .15);
+        }
+
+        .cat-strength-weak .cat-strength {
+            color: #94a3b8;
+            background: rgba(71, 85, 105, .3);
+        }
+
+        .cat-category {
+            font-size: 11px;
+            color: #64748b;
+            background: rgba(51, 65, 85, .35);
+            padding: 1px 6px;
+            border-radius: 6px;
+        }
+
+        .cat-title {
+            font-size: 13px;
+            color: #e2e8f0;
+            font-weight: 600;
+            text-decoration: none;
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .cat-title:hover {
+            color: #818cf8;
+        }
+
+        a.cat-title {
+            color: #93c5fd;
+        }
+
+        a.cat-title:hover {
+            color: #60a5fa;
+            text-decoration: underline;
+        }
+
+        .cat-summary {
+            font-size: 12px;
+            color: #94a3b8;
+            line-height: 1.5;
+            margin-top: 8px;
+            padding: 8px 10px;
+            background: rgba(15, 23, 42, .5);
+            border-radius: 6px;
+            border-left: 2px solid #6366f1;
+        }
+
+        .cat-assets {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .cat-assets-label {
+            font-size: 11px;
+            color: #64748b;
+            flex-shrink: 0;
+        }
+
+        .cat-asset-list {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            flex: 1;
+        }
+
+        .cat-asset-tag {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: rgba(51, 65, 85, .5);
+            color: #cbd5e1;
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .cat-asset-tag:hover {
+            background: rgba(99, 102, 241, .3);
+            color: #a5b4fc;
+        }
+
+        .cat-asset-strong {
+            background: rgba(240, 185, 11, .15);
+            color: #f0b90b;
+        }
+
+        .cat-asset-strong:hover {
+            background: rgba(240, 185, 11, .25);
+            color: #facc15;
+        }
+
+        .cat-asset-medium {
+            background: rgba(59, 130, 246, .15);
+            color: #60a5fa;
+        }
+
+        .cat-asset-medium:hover {
+            background: rgba(59, 130, 246, .25);
+            color: #93c5fd;
+        }
+
+        .cat-asset-weak {
+            background: rgba(71, 85, 105, .35);
+            color: #94a3b8;
+        }
+
+        .cat-asset-more {
+            font-size: 11px;
+            color: #64748b;
+            padding: 2px 6px;
+        }
+
+        .catalyst-more-wrap {
+            text-align: center;
+            margin-top: 14px;
+        }
+
+        .catalyst-more-btn {
+            background: rgba(51, 65, 85, .4);
+            border: 1px solid rgba(71, 85, 105, .5);
+            color: #94a3b8;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all .2s;
+        }
+
+        .catalyst-more-btn:hover {
+            background: rgba(71, 85, 105, .5);
+            color: #e2e8f0;
+            border-color: rgba(99, 102, 241, .4);
+        }
+
+        .catalyst-empty {
+            text-align: center;
+            color: #64748b;
+            padding: 20px;
+            font-size: 13px;
+        }
+
         /* ── FEAT-HIGHLIGHT-004: HIGH 角标 ── */
         .signal-fire {
             margin-left: auto;
@@ -5388,6 +5645,26 @@
 
                 <!-- P2-5 板块资金净流入（独占整行） -->
                 <div class="sector-flow-full-section" id="sector-flow-full-section"></div>
+
+                <!-- 催化剂事件板块 -->
+                <div class="catalyst-section" id="catalyst-section" style="display:none">
+                    <div class="catalyst-head">
+                        <div>
+                            <h3>📰 催化剂事件日历</h3>
+                            <span class="catalyst-sub">近期重要事件与关联代币，按AI影响权重排序</span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span class="catalyst-count" id="catalyst-count">-</span>
+                        </div>
+                    </div>
+                    <div class="catalyst-list" id="catalyst-list">
+                        <div class="catalyst-empty">加载中...</div>
+                    </div>
+                    <div class="catalyst-more-wrap" id="catalyst-more-wrap" style="display:none">
+                        <button class="catalyst-more-btn" id="catalyst-more-btn"
+                            onclick="toggleCatalystMore()">查看更多</button>
+                    </div>
+                </div>
 
                 <!-- 子分卡片网格 -->
                 <div class="overview-grid" id="overview-grid">
@@ -10101,6 +10378,10 @@
             const riskList = (data.opportunity_list || {}).risk_signals || [];
             renderRiskSignals(riskList);
 
+            // 催化剂事件板块
+            const catData = (data.opportunity_list || {}).catalyst_events || {};
+            renderCatalystSection(catData);
+
             // 机会清单卡（第五刀：HIGH/MED/LOW 分级渲染 + conviction_score）
             const highOpps = oppList.filter(o => o.conviction_tier === 'HIGH');
             const medOpps = oppList.filter(o => o.conviction_tier === 'MED');
@@ -10786,6 +11067,117 @@
                 (dims ? '<div class="signal-dims">关联维度：' + escapeHtml(dims) + '</div>' : '') +
                 '</div>' +
                 '</div>';
+        }
+
+        // ── 催化剂事件板块渲染 ──
+        const CAT_VISIBLE = 10;  // 默认显示前 10 条
+        var catalystAllEvents = [];
+        var catalystExpanded = false;
+
+        function renderCatalystSection (catData) {
+            const section = document.getElementById('catalyst-section');
+            const list = document.getElementById('catalyst-list');
+            const count = document.getElementById('catalyst-count');
+            const moreWrap = document.getElementById('catalyst-more-wrap');
+
+            const events = catData.catalyst_events || [];
+            const total = catData.total || 0;
+            const windowDays = catData.window_days || 14;
+
+            if (!events.length) {
+                section.style.display = 'none';
+                return;
+            }
+            section.style.display = 'block';
+            catalystAllEvents = events;
+            catalystExpanded = false;
+
+            count.textContent = total + ' 条 · 近' + windowDays + '天';
+
+            renderCatalystList();
+
+            if (events.length > CAT_VISIBLE) {
+                moreWrap.style.display = 'block';
+                document.getElementById('catalyst-more-btn').textContent = '查看更多（还有 ' + (events.length - CAT_VISIBLE) + ' 条）';
+            } else {
+                moreWrap.style.display = 'none';
+            }
+        }
+
+        function renderCatalystList () {
+            const list = document.getElementById('catalyst-list');
+            const showCount = catalystExpanded ? catalystAllEvents.length : CAT_VISIBLE;
+            const events = catalystAllEvents.slice(0, showCount);
+
+            const CAT_CN = {
+                regulation: '政策监管',
+                listing: '上线交易',
+                delisting: '退市下架',
+                tech_upgrade: '技术升级',
+                partnership: '合作生态',
+                funding: '融资动态',
+                market_update: '市场动态',
+                burn: '销毁',
+                other: '其他',
+            };
+
+            list.innerHTML = events.map(function (ev) {
+                const dirIcon = ev.direction === 'bullish' ? '🟢' : (ev.direction === 'bearish' ? '🔴' : '⚪');
+                const strengthCls = 'cat-strength-' + (ev.strength || 'weak');
+                const strengthLabel = ev.strength === 'strong' ? '强' : (ev.strength === 'medium' ? '中' : '弱');
+                const catCn = CAT_CN[ev.category] || ev.category || '其他';
+                const dateShort = (ev.event_date || '').slice(5);  // MM-DD
+
+                // 关联代币
+                const assets = ev.related_assets || [];
+                const assetTags = assets.slice(0, 8).map(function (a) {
+                    const sCls = a.impact_strength === 'strong' ? 'cat-asset-strong' :
+                        a.impact_strength === 'medium' ? 'cat-asset-medium' : 'cat-asset-weak';
+                    return '<span class="cat-asset-tag ' + sCls + '">' + escapeHtml(a.symbol || '') + '</span>';
+                }).join('');
+                const moreAssets = assets.length > 8 ? '<span class="cat-asset-more">+' + (assets.length - 8) + '</span>' : '';
+
+                // 标题（带链接）
+                const titleHtml = ev.source_url
+                    ? '<a class="cat-title" href="' + escapeHtml(ev.source_url) + '" target="_blank" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + ' ↗</a>'
+                    : '<span class="cat-title" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + '</span>';
+
+                // 摘要（AI 生成）
+                const summaryHtml = ev.summary
+                    ? '<div class="cat-summary">' + escapeHtml(ev.summary) + '</div>'
+                    : '';
+
+                return '<div class="cat-item ' + strengthCls + '">' +
+                    '<div class="cat-head">' +
+                    '<span class="cat-dir">' + dirIcon + '</span>' +
+                    '<span class="cat-date">' + dateShort + '</span>' +
+                    '<span class="cat-strength">' + strengthLabel + '</span>' +
+                    '<span class="cat-category">' + catCn + '</span>' +
+                    titleHtml +
+                    '</div>' +
+                    summaryHtml +
+                    '<div class="cat-assets">' +
+                    '<span class="cat-assets-label">🏷️ 关联代币</span>' +
+                    '<div class="cat-asset-list">' + assetTags + moreAssets + '</div>' +
+                    '</div>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function toggleCatalystMore () {
+            catalystExpanded = !catalystExpanded;
+            const btn = document.getElementById('catalyst-more-btn');
+            if (catalystExpanded) {
+                btn.textContent = '收起';
+            } else {
+                const remain = catalystAllEvents.length - CAT_VISIBLE;
+                btn.textContent = '查看更多（还有 ' + remain + ' 条）';
+            }
+            renderCatalystList();
+            // 滚动到按钮位置
+            if (!catalystExpanded) {
+                document.getElementById('catalyst-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
         }
 
         // 链上估值温度计

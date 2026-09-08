@@ -2947,6 +2947,186 @@ def _fetch_catalyst_events(asset_id: int, window_days: int = 14, limit: int = 3)
         return []
 
 
+def get_market_catalysts(window_days: int = 14, limit: int = 50) -> dict:
+    """获取大盘级催化剂事件列表（按事件聚合，关联多个代币）。
+
+    排序逻辑：AI 影响权重优先（strength × direction_sign × asset_count），
+    其次按时间倒序。strong 且影响多资产的事件排在最前面。
+
+    返回:
+        {
+            "catalyst_events": [
+                {
+                    "catalyst_id": int,
+                    "title": str,
+                    "event_date": str,          # YYYY-MM-DD
+                    "direction": str,           # bullish / bearish / neutral
+                    "strength": str,            # strong / medium / weak
+                    "category": str,            # ai_event_type 或 event_category
+                    "source": str,
+                    "source_url": str,
+                    "summary": str,             # ai_summary，可能为空
+                    "related_assets": [
+                        {"symbol": str, "asset_id": int, "impact_strength": str},
+                        ...
+                    ],
+                    "n_assets": int,
+                    "impact_score": float,      # 综合影响分，用于排序
+                },
+                ...
+            ],
+            "total": int,
+            "window_days": int,
+        }
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                # 第一步：按事件聚合，计算综合影响分，取 TOP N
+                # 影响分 = strength权重 × direction符号 × 资产数因子
+                # strength: strong=3, medium=2, weak=1
+                # direction: bullish=+1, bearish=-1, neutral=0.3
+                cur.execute("""
+                    WITH event_stats AS (
+                        SELECT
+                            ac.catalyst_id,
+                            ac.title,
+                            ac.published_at,
+                            COALESCE(ac.ai_event_type, ac.event_category, '') AS category,
+                            ac.source_code,
+                            ac.source_url,
+                            COALESCE(ac.ai_summary, '') AS summary,
+                            -- 主方向：取资产数量最多的那个方向
+                            (
+                                SELECT ci2.impact_direction
+                                FROM biz.catalyst_impact ci2
+                                WHERE ci2.catalyst_id = ac.catalyst_id
+                                GROUP BY ci2.impact_direction
+                                ORDER BY COUNT(*) DESC
+                                LIMIT 1
+                            ) AS main_direction,
+                            -- 主强度：取最强的那个强度
+                            (
+                                SELECT ci2.impact_strength
+                                FROM biz.catalyst_impact ci2
+                                WHERE ci2.catalyst_id = ac.catalyst_id
+                                ORDER BY
+                                    CASE ci2.impact_strength
+                                        WHEN 'strong' THEN 3
+                                        WHEN 'medium' THEN 2
+                                        ELSE 1
+                                    END DESC
+                                LIMIT 1
+                            ) AS main_strength,
+                            COUNT(DISTINCT ci.asset_id) AS n_assets,
+                            -- 综合影响分（绝对值越大越重要）
+                            SUM(
+                                CASE ci.impact_strength
+                                    WHEN 'strong' THEN 3.0
+                                    WHEN 'medium' THEN 2.0
+                                    ELSE 1.0
+                                END
+                                * CASE ci.impact_direction
+                                    WHEN 'bullish' THEN 1.0
+                                    WHEN 'bearish' THEN -1.0
+                                    ELSE 0.3
+                                END
+                            ) AS raw_score
+                        FROM biz.asset_catalyst ac
+                        JOIN biz.catalyst_impact ci ON ac.catalyst_id = ci.catalyst_id
+                        WHERE ac.published_at >= NOW() - INTERVAL '1 day' * %s
+                          AND ac.title IS NOT NULL
+                          AND ac.title <> ''
+                        GROUP BY ac.catalyst_id, ac.title, ac.published_at,
+                                 ac.ai_event_type, ac.event_category,
+                                 ac.source_code, ac.source_url, ac.ai_summary
+                    )
+                    SELECT
+                        catalyst_id, title, published_at, category,
+                        source_code, source_url, summary,
+                        main_direction, main_strength, n_assets,
+                        raw_score
+                    FROM event_stats
+                    ORDER BY
+                        -- 核心排序：影响分绝对值越大越靠前（事件越重要）
+                        ABS(raw_score) DESC,
+                        -- 同分：时间越新越靠前
+                        published_at DESC
+                    LIMIT %s
+                """, (window_days, limit))
+                rows = cur.fetchall()
+
+                if not rows:
+                    return {"catalyst_events": [], "total": 0, "window_days": window_days}
+
+                # 第二步：批量获取每个事件的关联资产列表
+                cat_ids = [r[0] for r in rows]
+                placeholders = ",".join(["%s"] * len(cat_ids))
+                cur.execute(f"""
+                    SELECT ci.catalyst_id, ci.asset_id, a.canonical_symbol,
+                           ci.impact_strength, ci.impact_direction
+                    FROM biz.catalyst_impact ci
+                    JOIN core.asset a ON a.asset_id = ci.asset_id
+                    WHERE ci.catalyst_id IN ({placeholders})
+                      AND a.canonical_name NOT LIKE '%%Bridged%%'
+                      AND a.canonical_name NOT LIKE '%%Wrapped%%'
+                      AND a.canonical_name NOT LIKE 'Peg %%'
+                    ORDER BY
+                        ci.catalyst_id,
+                        CASE ci.impact_strength
+                            WHEN 'strong' THEN 1
+                            WHEN 'medium' THEN 2
+                            ELSE 3
+                        END,
+                        a.canonical_symbol
+                """, tuple(cat_ids))
+                asset_rows = cur.fetchall()
+
+                # 组装 {catalyst_id: [assets]}
+                assets_by_cat: dict[int, list[dict]] = {}
+                for cid, aid, symbol, istr, idir in asset_rows:
+                    if cid not in assets_by_cat:
+                        assets_by_cat[cid] = []
+                    assets_by_cat[cid].append({
+                        "symbol": symbol or "",
+                        "asset_id": int(aid),
+                        "impact_strength": istr or "weak",
+                        "impact_direction": idir or "neutral",
+                    })
+
+                # 组装最终结果
+                events = []
+                for (cid, title, pub_at, category, src, src_url, summary,
+                     mdir, mstr, n_assets, raw_score) in rows:
+                    events.append({
+                        "catalyst_id": int(cid),
+                        "title": title or "",
+                        "event_date": str(pub_at.date()) if pub_at else "",
+                        "direction": mdir or "neutral",
+                        "strength": mstr or "weak",
+                        "category": category or "",
+                        "source": src or "",
+                        "source_url": src_url or "",
+                        "summary": summary or "",
+                        "related_assets": assets_by_cat.get(int(cid), []),
+                        "n_assets": int(n_assets),
+                        "impact_score": float(raw_score or 0),
+                    })
+
+                return {
+                    "catalyst_events": events,
+                    "total": len(events),
+                    "window_days": window_days,
+                }
+    except Exception as e:
+        return {"catalyst_events": [], "total": 0, "window_days": window_days,
+                "error": str(e)}
+
+
 def _recent_whale_flow_targets(
     hours: float = 24, usd_min: float = 1_000_000, limit: int = 5,
 ) -> list[tuple]:
@@ -4840,6 +5020,15 @@ def score_opportunities(overview: dict) -> dict:
     except Exception:
         pass
 
+    # P1：催化剂事件板块（大盘级事件，按影响权重排序）
+    catalyst_events = {"catalyst_events": [], "total": 0, "window_days": 14}
+    try:
+        cat_window = int(t.get("catalyst_window_days", 14))
+        cat_limit = int(t.get("catalyst_market_limit", 50))
+        catalyst_events = get_market_catalysts(window_days=cat_window, limit=cat_limit)
+    except Exception:
+        pass
+
     return {
         "status": status,
         "opportunities": opportunities,
@@ -4848,6 +5037,7 @@ def score_opportunities(overview: dict) -> dict:
         "excluded": excluded,
         "degraded": degraded,
         "watchlist_alerts": watch_alerts,
+        "catalyst_events": catalyst_events,
     }
 
 

@@ -3390,6 +3390,141 @@
             margin-bottom: 8px;
         }
 
+        /* ── 钱包验证编辑弹窗 ── */
+        .wallet-verify-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .wvm-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(3px);
+        }
+
+        .wvm-dialog {
+            position: relative;
+            width: 420px;
+            max-width: 90vw;
+            background: #1a1f27;
+            border: 1px solid #2a3040;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            overflow: hidden;
+        }
+
+        .wvm-title {
+            padding: 16px 20px;
+            font-size: 16px;
+            font-weight: 600;
+            color: #e8ecf0;
+            border-bottom: 1px solid #232a36;
+            background: #171c23;
+        }
+
+        .wvm-body {
+            padding: 18px 20px;
+        }
+
+        .wvm-field {
+            margin-bottom: 14px;
+        }
+
+        .wvm-field label {
+            display: block;
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .wvm-field label .required {
+            color: #ef4444;
+        }
+
+        .wvm-field input[type="text"] {
+            width: 100%;
+            padding: 9px 12px;
+            background: #11151c;
+            border: 1px solid #2a3040;
+            border-radius: 6px;
+            color: #e8ecf0;
+            font-size: 13px;
+            outline: none;
+            box-sizing: border-box;
+            transition: border-color 0.15s;
+        }
+
+        .wvm-field input[type="text"]:focus {
+            border-color: #3b82f6;
+        }
+
+        .wvm-address,
+        .wvm-chain {
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 12px;
+            color: #d1d5db;
+            background: #11151c;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #232a36;
+            word-break: break-all;
+        }
+
+        .wvm-hint {
+            margin-top: 4px;
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .wvm-actions {
+            padding: 14px 20px;
+            border-top: 1px solid #232a36;
+            background: #171c23;
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .wvm-btn {
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            transition: all 0.15s;
+        }
+
+        .wvm-btn-cancel {
+            background: #2a3040;
+            color: #d1d5db;
+        }
+
+        .wvm-btn-cancel:hover {
+            background: #3a4152;
+        }
+
+        .wvm-btn-confirm {
+            background: #10b981;
+            color: #fff;
+        }
+
+        .wvm-btn-confirm:hover {
+            background: #059669;
+        }
+
         /* ── 右侧调度日志侧栏 ── */
         .scheduler-sidebar {
             position: sticky;
@@ -6215,6 +6350,38 @@
                 </div>
             </div>
         </aside>
+
+        <!-- 钱包验证编辑弹窗 -->
+        <div class="wallet-verify-modal" id="wallet-verify-modal" style="display:none">
+            <div class="wvm-overlay" onclick="closeWalletVerifyModal()"></div>
+            <div class="wvm-dialog">
+                <div class="wvm-title">验证并编辑地址信息</div>
+                <div class="wvm-body">
+                    <div class="wvm-field">
+                        <label>地址</label>
+                        <div class="wvm-address" id="wvm-address">-</div>
+                    </div>
+                    <div class="wvm-field">
+                        <label>链</label>
+                        <div class="wvm-chain" id="wvm-chain">-</div>
+                    </div>
+                    <div class="wvm-field">
+                        <label>交易所名称 <span class="required">*</span></label>
+                        <input type="text" id="wvm-exchange-name" placeholder="如：Binance、Gate.io、OKX" />
+                        <div class="wvm-hint">如原标签标注错误，可修改为正确的交易所名称</div>
+                    </div>
+                    <div class="wvm-field">
+                        <label>备注标签</label>
+                        <input type="text" id="wvm-label" placeholder="如：Hot Wallet、Cold Wallet、Deposit" />
+                        <div class="wvm-hint">可选，标注钱包类型或用途</div>
+                    </div>
+                </div>
+                <div class="wvm-actions">
+                    <button class="wvm-btn wvm-btn-cancel" onclick="closeWalletVerifyModal()">取消</button>
+                    <button class="wvm-btn wvm-btn-confirm" onclick="submitWalletVerify()">✅ 确认通过</button>
+                </div>
+            </div>
+        </div>
 
         <div class="main-content">
             <!-- #assets 资产资料库 -->
@@ -13133,14 +13300,159 @@
             listEl.innerHTML = html;
         }
 
-        async function verifyWallet (walletId, action) {
+        function verifyWallet (walletId, action) {
             const itemEl = document.querySelector(`.wallet-item[data-id="${walletId}"]`);
+            if (!itemEl) return;
+
+            // approve 走弹窗编辑后提交（可以修改交易所名称和标签
+            if (action === 'approve') {
+                openWalletVerifyModal(walletId);
+                return;
+            }
+
+            // reject 直接执行删除（无需弹窗
+            _doVerifyWallet(walletId, 'reject', null, null, itemEl);
+        }
+
+        // 打开验证编辑弹窗
+        function openWalletVerifyModal (walletId) {
+            const wallet = _walletSidebar.pendingList.find(w => w.wallet_id === walletId);
+            if (!wallet) return;
+
+            const modal = document.getElementById('wallet-verify-modal');
+            if (!modal) return;
+
+            document.getElementById('wvm-address').textContent = wallet.address;
+            document.getElementById('wvm-chain').textContent = wallet.chain.toUpperCase();
+            document.getElementById('wvm-exchange-name').value = wallet.exchange_name || '';
+            document.getElementById('wvm-label').value = wallet.label || '';
+
+            // 存当前 walletId
+            modal._walletId = walletId;
+            modal.style.display = 'flex';
+
+            // 聚焦到交易所名称输入框
+            setTimeout(() => {
+                const input = document.getElementById('wvm-exchange-name');
+                if (input) {
+                    input.focus();
+                    input.select();
+                }
+            }, 50);
+        }
+
+        function closeWalletVerifyModal () {
+            const modal = document.getElementById('wallet-verify-modal');
+            if (modal) {
+                modal.style.display = 'none';
+                modal._walletId = null;
+            }
+        }
+
+        async function submitWalletVerify () {
+            const modal = document.getElementById('wallet-verify-modal');
+            if (!modal || !modal._walletId) return;
+
+            const walletId = modal._walletId;
+            const exchangeName = document.getElementById('wvm-exchange-name').value.trim();
+            const label = document.getElementById('wvm-label').value.trim();
+
+            if (!exchangeName) {
+                alert('请输入交易所名称');
+                return;
+            }
+
+            const itemEl = document.querySelector(`.wallet-item[data-id="${walletId}"]`);
+            const confirmBtn = document.querySelector('#wallet-verify-modal .wvm-btn-confirm');
+            if (confirmBtn) {
+                confirmBtn._originalText = confirmBtn.textContent;
+                confirmBtn.textContent = '提交中...';
+                confirmBtn.style.opacity = '0.6';
+                confirmBtn.disabled = true;
+            }
+
+            try {
+                const r = await fetch('/api/exchange-wallets/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        wallet_id: walletId,
+                        action: 'approve',
+                        exchange_name: exchangeName,
+                        label: label
+                    })
+                });
+                const j = await r.json();
+                if (!j.ok) throw new Error(j.error || '操作失败');
+
+                closeWalletVerifyModal();
+
+                // 复用原 verify 的成功处理逻辑
+                if (j.changed === false) {
+                    if (itemEl) {
+                        const btnEl = itemEl.querySelector('.btn-approve');
+                        if (btnEl) {
+                            btnEl.textContent = '✅ 验证通过';
+                            btnEl.style.opacity = '';
+                        }
+                        itemEl.style.pointerEvents = '';
+                        itemEl.style.transition = 'background 0.3s';
+                        itemEl.style.background = 'rgba(245, 158, 11, 0.1)';
+                        setTimeout(() => {
+                            if (itemEl) itemEl.style.background = '';
+                        }, 800);
+                    }
+                    return;
+                }
+
+                if (itemEl) {
+                    itemEl.classList.add('removing');
+                    setTimeout(() => {
+                        if (itemEl.parentNode) itemEl.parentNode.removeChild(itemEl);
+                    }, 200);
+                }
+
+                _walletSidebar.pendingList = _walletSidebar.pendingList.filter(w => w.wallet_id !== walletId);
+                if (_walletSidebar.totalCount) _walletSidebar.totalCount--;
+
+                const wallet = _walletSidebar.pendingList.find(w => w.wallet_id === walletId) ||
+                    { chain: itemEl?.querySelector('.wi-chain')?.textContent };
+                if (_walletSidebar.lastStats) {
+                    _walletSidebar.lastStats.totals.medium = Math.max(0, _walletSidebar.lastStats.totals.medium - 1);
+                    _walletSidebar.lastStats.totals.high = (_walletSidebar.lastStats.totals.high || 0) + 1;
+                    const chainKey = wallet.chain || itemEl?.querySelector('.wi-chain')?.textContent;
+                    if (chainKey && _walletSidebar.lastStats.by_chain[chainKey]) {
+                        _walletSidebar.lastStats.by_chain[chainKey].medium = Math.max(0, _walletSidebar.lastStats.by_chain[chainKey].medium - 1);
+                        _walletSidebar.lastStats.by_chain[chainKey].high = (_walletSidebar.lastStats.by_chain[chainKey].high || 0) + 1;
+                    }
+                    applyWalletStats(_walletSidebar.lastStats);
+                }
+
+                if (_walletSidebar.pendingList.length === 0) {
+                    renderWalletList();
+                } else {
+                    renderWalletList();
+                }
+            } catch (e) {
+                console.error('submit wallet verify error:', e);
+                // 恢复按钮
+                if (confirmBtn) {
+                    confirmBtn.textContent = confirmBtn._originalText || '✅ 确认通过';
+                    confirmBtn.style.opacity = '';
+                    confirmBtn.disabled = false;
+                }
+                alert('验证失败：' + (e.message || e));
+            }
+        }
+
+        // 内部执行 verify 的底层函数（reject 直接走这里）
+        async function _doVerifyWallet (walletId, action, exchangeName, label, itemEl) {
             const btnSelector = action === 'approve' ? '.btn-approve' : '.btn-reject';
             const btnEl = itemEl ? itemEl.querySelector(btnSelector) : null;
 
             if (!itemEl) return;
 
-            // 立即视觉反馈：按钮变"处理中"，整体半透明
+            // 立即视觉反馈
             if (btnEl) {
                 btnEl._originalText = btnEl.textContent;
                 btnEl.textContent = '处理中...';
@@ -13149,10 +13461,14 @@
             itemEl.style.pointerEvents = 'none';
 
             try {
+                const body = { wallet_id: walletId, action: action };
+                if (exchangeName) body.exchange_name = exchangeName;
+                if (label) body.label = label;
+
                 const r = await fetch('/api/exchange-wallets/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ wallet_id: walletId, action: action })
+                    body: JSON.stringify(body)
                 });
                 const j = await r.json();
                 if (!j.ok) throw new Error(j.error || '操作失败');

@@ -28,6 +28,8 @@ from datetime import date
 from datetime import timedelta
 from pathlib import Path
 
+import psycopg.rows
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
@@ -669,6 +671,7 @@ def main() -> int:
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
+        conn.row_factory = psycopg.rows.dict_row
         with conn.cursor() as cur:
             # 确保表存在
             cur.execute(CREATE_TABLE_SQL)

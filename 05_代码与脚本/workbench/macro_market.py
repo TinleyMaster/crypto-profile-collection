@@ -3410,12 +3410,13 @@ def _upcoming_unlocks(
 
 
 def _kol_onchain_signals(
-    days: int = 7, limit: int = 5,
-) -> list[tuple]:
-    """KOL 链上异动情报（kol_signal，仅回测达标 onchain 类）。
+    days: int = 7, limit: int = 10,
+) -> list[dict]:
+    """KOL 链上异动情报（kol_signal，onchain 类）。
 
-    返回 [(asset_id, symbol, subtype, usd_value, exchange, profile_id), ...]。
-    回测未达标（backtest_done=False）一律不进板，避免污染专业感。
+    返回 [dict, ...]，dict 包含：
+        asset_id, symbol, subtype, usd_value, exchange, profile_id,
+        kol_name, direction, address_label, event_direction, content_text, post_url
     """
     try:
         from crypto_research.config import get_settings
@@ -3426,13 +3427,17 @@ def _kol_onchain_signals(
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT k.asset_id, COALESCE(k.symbol, a.canonical_symbol),
-                           k.signal_subtype, k.event_usd_value, k.event_exchange, k.profile_id
+                           k.signal_subtype, k.event_usd_value, k.event_exchange,
+                           k.profile_id, p.nickname,
+                           k.direction, k.address_label, k.event_direction,
+                           COALESCE(post.content_text, ''), COALESCE(post.post_url, '')
                     FROM biz.kol_signal k
+                    LEFT JOIN biz.kol_profile p ON p.profile_id = k.profile_id
+                    LEFT JOIN biz.kol_post post ON post.post_id = k.post_id
                     LEFT JOIN core.asset a ON a.asset_id = k.asset_id
-                    WHERE k.backtest_done = TRUE
-                      AND (k.from_address IS NOT NULL OR k.to_address IS NOT NULL
-                           OR k.event_amount IS NOT NULL OR k.event_exchange IS NOT NULL)
-                      AND k.created_at >= NOW() - make_interval(days => %s)
+                    WHERE k.signal_category = 'onchain'
+                      AND k.symbol IS NOT NULL
+                      AND k.created_at >= NOW() - (%s || ' days')::interval
                     ORDER BY COALESCE(k.event_usd_value, 0) DESC
                     LIMIT %s
                 """, (days, limit))
@@ -3441,8 +3446,21 @@ def _kol_onchain_signals(
         for r in rows:
             if r[0] is None:
                 continue
-            usd_val = float(r[3]) if r[3] is not None else None
-            results.append((r[0], r[1] or "?", r[2] or "", usd_val, r[4] or "", r[5] or ""))
+            usd_val = float(r[3]) if r[3] is not None else 0.0
+            results.append({
+                "asset_id": r[0],
+                "symbol": r[1] or "?",
+                "subtype": r[2] or "",
+                "usd_value": usd_val,
+                "exchange": r[4] or "",
+                "profile_id": r[5] or "",
+                "kol_name": r[6] or "",
+                "direction": r[7] or "",
+                "address_label": r[8] or "",
+                "event_direction": r[9] or "",
+                "content_text": r[10] or "",
+                "post_url": r[11] or "",
+            })
         return results
     except Exception:
         return []
@@ -4690,33 +4708,105 @@ def score_opportunities(overview: dict) -> dict:
             opportunities, excluded, t,
         )
 
-    # ── 1h) KOL onchain 情报卡（工单6，需回测达标过滤） ──
+    # ── 1h) KOL onchain 链上异动信号 ──
     _kol_targets = _kol_onchain_signals(
-        days=int(t.get("kol_window_days", 7)),
-        limit=int(t.get("kol_top_n", 5)),
+        days=int(t.get("kol_window_days", 3)),
+        limit=int(t.get("kol_top_n", 10)),
     )
-    for kt in _kol_targets:
-        # kt: (asset_id, symbol, subtype, usd_value, exchange, profile_id)
-        aid, symbol, subtype, usd_val, exchange, profile_id = kt
-        conv_label = "链上" if subtype else "信号"
+    for ks in _kol_targets:
+        # ks 是 dict: asset_id, symbol, subtype, usd_value, exchange,
+        #           kol_name, direction, address_label, event_direction, content_text, post_url
+        symbol = ks["symbol"]
+        usd_val = ks["usd_value"]
+        subtype = ks["subtype"]
+        exchange = ks["exchange"]
+        addr_label = ks["address_label"]
+        kol_name = ks["kol_name"]
+        evt_dir = (ks["event_direction"] or ks["direction"] or "").lower()
+
+        # ── 方向判定 ──
+        # 流出/吸筹 → 看多（抛压减小/大资金抄底）
+        # 流入/派发 → 看空（抛压增大/大资金出货）
+        # 爆仓 → 中性（偏短期波动）
+        if evt_dir in ("outflow", "out") or subtype in ("accumulation",):
+            sig_direction = "long"
+        elif evt_dir in ("inflow", "in") or subtype in ("distribution",):
+            sig_direction = "short"
+        elif "liquidat" in evt_dir or subtype == "liquidation":
+            sig_direction = "watch"
+        elif ks["direction"] == "long":
+            sig_direction = "long"
+        elif ks["direction"] == "short":
+            sig_direction = "short"
+        else:
+            sig_direction = "watch"
+
+        # ── 置信度判定 ──
+        # HIGH: 金额 >$10M 且有巨鲸/聪明钱/项目方标签
+        # MED:  金额 >$3M 或 有名地址标签
+        # LOW:  其他
+        is_big_amount = usd_val >= 10_000_000
+        is_mid_amount = usd_val >= 3_000_000
+        has_smart_label = any(kw in addr_label for kw in [
+            "巨鲸", "聪明钱", "项目方", "创始人", "巨鳄",
+            "whale", "smart", "founder", "insider",
+        ])
+
+        if is_big_amount and has_smart_label and sig_direction != "watch":
+            confidence = "high"
+        elif is_mid_amount or has_smart_label:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        # ── 关键指标文案 ──
+        type_cn = {
+            "exchange_flow": "交易所流",
+            "whale_move": "巨鲸转账",
+            "smart_money": "聪明钱",
+            "liquidation": "爆仓清算",
+            "accumulation": "吸筹",
+            "distribution": "派发",
+        }.get(subtype, subtype or "链上异动")
+
+        usd_str = (
+            f"${usd_val / 1e6:.1f}M" if usd_val >= 1e6
+            else f"${usd_val / 1e3:.0f}K" if usd_val >= 1e3
+            else f"${usd_val:.0f}"
+        )
+
+        trigger_parts = [f"KOL链上异动：{type_cn}"]
+        if usd_val > 0:
+            trigger_parts.append(usd_str)
+        if exchange:
+            trigger_parts.append(f"@{exchange}")
+        if addr_label:
+            trigger_parts.append(f"[{addr_label}]")
+        if kol_name:
+            trigger_parts.append(f"by {kol_name}")
+
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+
+        action_hint_map = {
+            "long": "链上资金流出 + 大资金异动，关注后续上行动力",
+            "short": "链上资金流入 + 大资金异动，警惕短期抛压",
+            "watch": "情报参考，结合其他维度确认后跟进",
+        }
+
         _push_opportunity(
-            {"target": symbol, "direction": "watch", "confidence": "medium",
+            {"target": symbol, "direction": sig_direction,
+             "confidence": confidence,
              "conviction_score": conviction,
              "signal_type": "kol_onchain",
-             "key_metric": f"KOL ${usd_val / 1e3:.0f}K" if usd_val else None,
-             "asset_id": aid,
-             "trigger_logic": (
-                 f"KOL {profile_id} 链上异动（{subtype or conv_label}"
-                 f"{f' @{exchange}' if exchange else ''}"
-                 f"{f' ${usd_val / 1e3:.0f}K' if usd_val else ''}）"
-             ),
-             "action_hint": "情报参考，独立核验后跟进",
-             "invalidation": "回测未达标的 KOL 不进板",
+             "key_metric": f"{type_cn} {usd_str}" if usd_val > 0 else type_cn,
+             "asset_id": ks["asset_id"],
+             "trigger_logic": " ".join(trigger_parts),
+             "action_hint": action_hint_map.get(sig_direction, "情报参考"),
+             "invalidation": "KOL信号时效性强，24h内未验证需重估",
              "related_dims": ["kol_signal", "P1 KOL onchain"]},
             opportunities, excluded, t,
         )

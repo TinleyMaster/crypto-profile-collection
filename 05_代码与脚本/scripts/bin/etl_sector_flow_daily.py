@@ -9,17 +9,18 @@ FEAT-SECTOR-003: 赛道日频快照 ETL（市值 + TVL + 净流入）
 
 写入：biz.sector_flow_daily（sector_type = 'sector_12'）
 """
-import os
 import sys
 import argparse
 from datetime import date, datetime
-import psycopg2
-from psycopg2.extras import execute_values
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parent / "src"
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.db.conn import get_connection  # noqa: E402
 
 # 12 赛道 → 展示名映射
 SECTOR_LABELS = {
@@ -39,10 +40,6 @@ SECTOR_LABELS = {
 
 # 截尾比例（去掉最高最低各 TRIM_PCT 的变化率异常值）
 TRIM_PCT = 0.05
-
-
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
 
 
 def get_available_dates(conn) -> list[date]:
@@ -279,28 +276,14 @@ def etl_date(conn, metric_date: date, dry_run: bool = False) -> int:
                   f"[{s['mode']}]")
         return len(sectors)
 
-    # 写入：UPSERT 模式
+    # 写入：UPSERT 模式（先 DELETE 再 INSERT，幂等）
     with conn.cursor() as cur:
-        # 先删当天（幂等）
         cur.execute("""
             DELETE FROM biz.sector_flow_daily
             WHERE sector_type = 'sector_12' AND metric_date = %s
         """, (metric_date,))
 
-        # 批量插入（全字段）
-        insert_rows = [
-            (
-                s["sector_type"], s["sector_key"], s["sector_label"], s["metric_date"],
-                s["market_cap"], s["mcap_change_1d_pct"], s["mcap_change_7d_pct"],
-                s["mcap_change_30d_pct"], s["coin_count"], s["mcap_period"],
-                s["tvl"], s["tvl_change_1d_pct"], s["tvl_change_7d_pct"],
-                s["tvl_change_30d_pct"], s["protocol_count"],
-                s["flow_7d_usd"], s["flow_7d_pct"],
-                s["composite_score"], s["mode"],
-            )
-            for s in sectors
-        ]
-        execute_values(cur, """
+        INSERT_SQL = """
             INSERT INTO biz.sector_flow_daily (
                 sector_type, sector_key, sector_label, metric_date,
                 market_cap, mcap_change_1d_pct, mcap_change_7d_pct,
@@ -309,8 +292,26 @@ def etl_date(conn, metric_date: date, dry_run: bool = False) -> int:
                 tvl_change_30d_pct, protocol_count,
                 flow_7d_usd, flow_7d_pct,
                 composite_score, mode
-            ) VALUES %s
-        """, insert_rows)
+            ) VALUES (
+                %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s
+            )
+        """
+        for s in sectors:
+            cur.execute(INSERT_SQL, (
+                s["sector_type"], s["sector_key"], s["sector_label"], s["metric_date"],
+                s["market_cap"], s["mcap_change_1d_pct"], s["mcap_change_7d_pct"],
+                s["mcap_change_30d_pct"], s["coin_count"], s["mcap_period"],
+                s["tvl"], s["tvl_change_1d_pct"], s["tvl_change_7d_pct"],
+                s["tvl_change_30d_pct"], s["protocol_count"],
+                s["flow_7d_usd"], s["flow_7d_pct"],
+                s["composite_score"], s["mode"],
+            ))
 
     print(f"  {metric_date}: {len(sectors)} 赛道 [已写入]")
     return len(sectors)
@@ -323,12 +324,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只计算不写入")
     args = parser.parse_args()
 
-    if not DATABASE_URL:
-        print("[ERROR] 未找到 DATABASE_URL 环境变量")
-        return 1
-
-    conn = get_conn()
-    try:
+    settings = get_settings(require_database=True)
+    with get_connection(settings.database_url) as conn:
         dates = []
         if args.backfill:
             dates = get_available_dates(conn)
@@ -357,13 +354,6 @@ def main():
             print(f"\n[DONE] 共 {len(dates)} 天, {total} 条记录")
         else:
             print(f"\n[DONE] 共 {len(dates)} 天, {total} 条记录 [DRY-RUN]")
-    except Exception as e:
-        conn.rollback()
-        print(f"[ERROR] {e}")
-        import traceback; traceback.print_exc()
-        return 1
-    finally:
-        conn.close()
 
     return 0
 

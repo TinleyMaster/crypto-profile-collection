@@ -3127,6 +3127,112 @@ def get_market_catalysts(window_days: int = 14, limit: int = 50) -> dict:
                 "error": str(e)}
 
 
+def get_onchain_anomalies(hours: int = 24, limit: int = 20) -> dict:
+    """获取链上异动信号（KOL 分析博主发现的链上大额转账/爆仓/吸筹等）。
+
+    排序：按 event_usd_value 倒序（金额越大越靠前），其次按时间倒序。
+    筛选：只取 signal_category = 'onchain' 的链上异动（排除普通交易信号）。
+
+    返回:
+        {
+            "anomalies": [
+                {
+                    "signal_id": int,
+                    "symbol": str,
+                    "direction": str,           # long / short / neutral / outflow / inflow ...
+                    "event_type": str,          # exchange_flow / whale_move / smart_money / liquidation / ...
+                    "event_usd_value": float,
+                    "event_amount": float,
+                    "event_token": str,
+                    "event_exchange": str,
+                    "address_label": str,
+                    "event_direction": str,     # inflow / outflow / accumulation / distribution ...
+                    "kol_name": str,
+                    "content_text": str,
+                    "post_url": str,
+                    "created_at": str,          # ISO datetime
+                },
+                ...
+            ],
+            "total": int,
+            "hours": int,
+            "n_kols": int,
+        }
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        ks.signal_id,
+                        ks.symbol,
+                        COALESCE(ks.direction, '') as direction,
+                        COALESCE(ks.signal_subtype, ks.signal_category, '') as event_type,
+                        ks.event_usd_value,
+                        ks.event_amount,
+                        ks.event_token,
+                        COALESCE(ks.event_exchange, '') as event_exchange,
+                        COALESCE(ks.address_label, '') as address_label,
+                        COALESCE(ks.event_direction, '') as event_direction,
+                        kp.nickname as kol_name,
+                        COALESCE(kp2.content_text, '') as content_text,
+                        COALESCE(kp2.post_url, '') as post_url,
+                        ks.created_at,
+                        kp.win_rate,
+                        kp.total_signals
+                    FROM biz.kol_signal ks
+                    JOIN biz.kol_profile kp ON ks.profile_id = kp.profile_id
+                    JOIN biz.kol_post kp2 ON ks.post_id = kp2.post_id
+                    WHERE ks.created_at >= NOW() - (%s || ' hours')::interval
+                      AND ks.signal_category = 'onchain'
+                      AND ks.symbol IS NOT NULL
+                    ORDER BY
+                        ks.event_usd_value DESC NULLS LAST,
+                        ks.created_at DESC
+                    LIMIT %s
+                """, (hours, limit))
+                rows = cur.fetchall()
+
+                anomalies = []
+                kol_set = set()
+                for (sid, symbol, direction, event_type, usd_val, amt, token,
+                     exch, addr_label, evt_dir, kol_name, content, post_url,
+                     created_at, win_rate, total_sigs) in rows:
+                    kol_set.add(kol_name)
+                    anomalies.append({
+                        "signal_id": int(sid),
+                        "symbol": symbol or "",
+                        "direction": direction or "",
+                        "event_type": event_type or "",
+                        "event_usd_value": float(usd_val) if usd_val is not None else 0.0,
+                        "event_amount": float(amt) if amt is not None else 0.0,
+                        "event_token": token or "",
+                        "event_exchange": exch or "",
+                        "address_label": addr_label or "",
+                        "event_direction": evt_dir or "",
+                        "kol_name": kol_name or "",
+                        "kol_win_rate": float(win_rate) if win_rate is not None else None,
+                        "kol_total_signals": int(total_sigs) if total_sigs is not None else 0,
+                        "content_text": content or "",
+                        "post_url": post_url or "",
+                        "created_at": str(created_at) if created_at else "",
+                    })
+
+                return {
+                    "anomalies": anomalies,
+                    "total": len(anomalies),
+                    "hours": hours,
+                    "n_kols": len(kol_set),
+                }
+    except Exception as e:
+        return {"anomalies": [], "total": 0, "hours": hours, "n_kols": 0,
+                "error": str(e)}
+
+
 def _recent_whale_flow_targets(
     hours: float = 24, usd_min: float = 1_000_000, limit: int = 5,
 ) -> list[tuple]:
@@ -5029,6 +5135,15 @@ def score_opportunities(overview: dict) -> dict:
     except Exception:
         pass
 
+    # 链上异动板块（KOL 分析博主发现的链上大额异动）
+    onchain_anomalies = {"anomalies": [], "total": 0, "hours": 24, "n_kols": 0}
+    try:
+        oa_hours = int(t.get("onchain_anomaly_hours", 24))
+        oa_limit = int(t.get("onchain_anomaly_limit", 20))
+        onchain_anomalies = get_onchain_anomalies(hours=oa_hours, limit=oa_limit)
+    except Exception:
+        pass
+
     return {
         "status": status,
         "opportunities": opportunities,
@@ -5038,6 +5153,7 @@ def score_opportunities(overview: dict) -> dict:
         "degraded": degraded,
         "watchlist_alerts": watch_alerts,
         "catalyst_events": catalyst_events,
+        "onchain_anomalies": onchain_anomalies,
     }
 
 

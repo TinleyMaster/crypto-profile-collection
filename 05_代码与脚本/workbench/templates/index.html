@@ -5168,6 +5168,253 @@
             font-size: 13px;
         }
 
+        /* ── 链上异动板块 ── */
+        .onchain-section {
+            background: rgba(15, 23, 42, .6);
+            border: 1px solid rgba(51, 65, 85, .5);
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 20px;
+            backdrop-filter: blur(10px);
+        }
+
+        .onchain-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .onchain-head h3 {
+            margin: 0;
+            font-size: 16px;
+            color: #e2e8f0;
+            font-weight: 700;
+        }
+
+        .onchain-sub {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 4px;
+            display: block;
+        }
+
+        .onchain-count {
+            font-size: 12px;
+            color: #94a3b8;
+            background: rgba(51, 65, 85, .4);
+            padding: 4px 10px;
+            border-radius: 12px;
+        }
+
+        .onchain-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .oa-item {
+            background: rgba(30, 41, 59, .6);
+            border: 1px solid rgba(71, 85, 105, .35);
+            border-radius: 8px;
+            padding: 10px 14px;
+            border-left: 3px solid #475569;
+            transition: all .2s;
+        }
+
+        .oa-item:hover {
+            border-color: rgba(99, 102, 241, .4);
+            background: rgba(30, 41, 59, .85);
+        }
+
+        /* 方向色：流入=红(下跌信号)，流出=绿(上涨信号)，吸筹=红，派发=绿 */
+        .oa-item.oa-dir-in {
+            border-left-color: #ef4444;
+        }
+
+        .oa-item.oa-dir-out {
+            border-left-color: #22c55e;
+        }
+
+        .oa-item.oa-dir-accum {
+            border-left-color: #ef4444;
+        }
+
+        .oa-item.oa-dir-dist {
+            border-left-color: #22c55e;
+        }
+
+        .oa-item.oa-dir-liquid {
+            border-left-color: #f59e0b;
+        }
+
+        .oa-item.oa-dir-neutral {
+            border-left-color: #64748b;
+        }
+
+        .oa-main {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .oa-dir {
+            font-size: 14px;
+            font-weight: 700;
+            width: 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .oa-dir-in .oa-dir,
+        .oa-dir-accum .oa-dir {
+            color: #f87171;
+        }
+
+        .oa-dir-out .oa-dir,
+        .oa-dir-dist .oa-dir {
+            color: #4ade80;
+        }
+
+        .oa-dir-liquid .oa-dir {
+            color: #fbbf24;
+        }
+
+        .oa-dir-neutral .oa-dir {
+            color: #94a3b8;
+        }
+
+        .oa-symbol {
+            font-size: 15px;
+            font-weight: 700;
+            color: #e2e8f0;
+            min-width: 50px;
+        }
+
+        .oa-direction {
+            font-size: 13px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .oa-dir-in .oa-direction,
+        .oa-dir-accum .oa-direction {
+            background: rgba(239, 68, 68, .15);
+            color: #fca5a5;
+        }
+
+        .oa-dir-out .oa-direction,
+        .oa-dir-dist .oa-direction {
+            background: rgba(34, 197, 94, .15);
+            color: #86efac;
+        }
+
+        .oa-dir-liquid .oa-direction {
+            background: rgba(245, 158, 11, .15);
+            color: #fcd34d;
+        }
+
+        .oa-dir-neutral .oa-direction {
+            background: rgba(100, 116, 139, .2);
+            color: #94a3b8;
+        }
+
+        .oa-amount {
+            font-size: 14px;
+            font-weight: 700;
+            color: #cbd5e1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .oa-spacer {
+            flex: 1;
+        }
+
+        .oa-kol {
+            font-size: 12px;
+            color: #94a3b8;
+            background: rgba(51, 65, 85, .4);
+            padding: 3px 10px;
+            border-radius: 12px;
+            flex-shrink: 0;
+        }
+
+        .oa-tags {
+            display: flex;
+            gap: 6px;
+            margin-top: 6px;
+            flex-wrap: wrap;
+        }
+
+        .oa-tag {
+            font-size: 11px;
+            color: #64748b;
+            background: rgba(51, 65, 85, .35);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .oa-tag-type {
+            background: rgba(99, 102, 241, .15);
+            color: #a5b4fc;
+            font-weight: 600;
+        }
+
+        .oa-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid rgba(51, 65, 85, .3);
+        }
+
+        .oa-time {
+            font-size: 11px;
+            color: #475569;
+        }
+
+        .oa-link {
+            font-size: 11px;
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .oa-link:hover {
+            color: #93c5fd;
+            text-decoration: underline;
+        }
+
+        .onchain-more-wrap {
+            text-align: center;
+            margin-top: 14px;
+        }
+
+        .onchain-more-btn {
+            background: rgba(51, 65, 85, .4);
+            border: 1px solid rgba(71, 85, 105, .5);
+            color: #94a3b8;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all .2s;
+        }
+
+        .onchain-more-btn:hover {
+            background: rgba(71, 85, 105, .5);
+            color: #e2e8f0;
+            border-color: rgba(99, 102, 241, .4);
+        }
+
+        .onchain-empty {
+            text-align: center;
+            color: #64748b;
+            padding: 20px;
+            font-size: 13px;
+        }
+
         /* ── FEAT-HIGHLIGHT-004: HIGH 角标 ── */
         .signal-fire {
             margin-left: auto;
@@ -5663,6 +5910,26 @@
                     <div class="catalyst-more-wrap" id="catalyst-more-wrap" style="display:none">
                         <button class="catalyst-more-btn" id="catalyst-more-btn"
                             onclick="toggleCatalystMore()">查看更多</button>
+                    </div>
+                </div>
+
+                <!-- 链上异动板块 -->
+                <div class="onchain-section" id="onchain-section" style="display:none">
+                    <div class="onchain-head">
+                        <div>
+                            <h3>🔍 链上异动</h3>
+                            <span class="onchain-sub">KOL 分析博主发现的链上大额异动，按金额排序</span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span class="onchain-count" id="onchain-count">-</span>
+                        </div>
+                    </div>
+                    <div class="onchain-list" id="onchain-list">
+                        <div class="onchain-empty">加载中...</div>
+                    </div>
+                    <div class="onchain-more-wrap" id="onchain-more-wrap" style="display:none">
+                        <button class="onchain-more-btn" id="onchain-more-btn"
+                            onclick="toggleOnchainMore()">查看更多</button>
                     </div>
                 </div>
 
@@ -10382,6 +10649,10 @@
             const catData = (data.opportunity_list || {}).catalyst_events || {};
             renderCatalystSection(catData);
 
+            // 链上异动板块
+            const oaData = (data.opportunity_list || {}).onchain_anomalies || {};
+            renderOnchainSection(oaData);
+
             // 机会清单卡（第五刀：HIGH/MED/LOW 分级渲染 + conviction_score）
             const highOpps = oppList.filter(o => o.conviction_tier === 'HIGH');
             const medOpps = oppList.filter(o => o.conviction_tier === 'MED');
@@ -11177,6 +11448,158 @@
             // 滚动到按钮位置
             if (!catalystExpanded) {
                 document.getElementById('catalyst-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
+        // ── 链上异动板块渲染 ──
+        const OA_VISIBLE = 8;  // 默认显示前 8 条
+        var oaAllItems = [];
+        var oaExpanded = false;
+
+        function renderOnchainSection (oaData) {
+            const section = document.getElementById('onchain-section');
+            const list = document.getElementById('onchain-list');
+            const count = document.getElementById('onchain-count');
+            const moreWrap = document.getElementById('onchain-more-wrap');
+
+            const items = oaData.anomalies || [];
+            const total = oaData.total || 0;
+            const hours = oaData.hours || 24;
+            const nKols = oaData.n_kols || 0;
+
+            if (!items.length) {
+                section.style.display = 'none';
+                return;
+            }
+            section.style.display = 'block';
+            oaAllItems = items;
+            oaExpanded = false;
+
+            count.textContent = total + ' 条 · ' + hours + 'h · ' + nKols + ' 位分析师';
+
+            renderOnchainList();
+
+            if (items.length > OA_VISIBLE) {
+                moreWrap.style.display = 'block';
+                document.getElementById('onchain-more-btn').textContent = '查看更多（还有 ' + (items.length - OA_VISIBLE) + ' 条）';
+            } else {
+                moreWrap.style.display = 'none';
+            }
+        }
+
+        function renderOnchainList () {
+            const list = document.getElementById('onchain-list');
+            const showCount = oaExpanded ? oaAllItems.length : OA_VISIBLE;
+            const items = oaAllItems.slice(0, showCount);
+
+            const TYPE_CN = {
+                exchange_flow: '交易所流',
+                whale_move: '巨鲸转账',
+                smart_money: '聪明钱',
+                liquidation: '爆仓清算',
+                accumulation: '吸筹',
+                distribution: '派发',
+            };
+
+            list.innerHTML = items.map(function (it) {
+                // 方向判断：流入/流出/吸筹/派发/爆仓
+                const evtDir = (it.event_direction || it.direction || '').toLowerCase();
+                let dirCls = '';
+                let dirIcon = '';
+                let dirLabel = '';
+                if (evtDir.indexOf('inflow') >= 0 || evtDir === 'long' || evtDir === 'bullish') {
+                    dirCls = 'oa-dir-in';
+                    dirIcon = '▼';
+                    dirLabel = '流入';
+                } else if (evtDir.indexOf('outflow') >= 0 || evtDir === 'short' || evtDir === 'bearish') {
+                    dirCls = 'oa-dir-out';
+                    dirIcon = '▲';
+                    dirLabel = '流出';
+                } else if (evtDir === 'accumulation') {
+                    dirCls = 'oa-dir-accum';
+                    dirIcon = '▲';
+                    dirLabel = '吸筹';
+                } else if (evtDir === 'distribution') {
+                    dirCls = 'oa-dir-dist';
+                    dirIcon = '▼';
+                    dirLabel = '派发';
+                } else if (evtDir.indexOf('liquidat') >= 0 || it.event_type === 'liquidation') {
+                    dirCls = 'oa-dir-liquid';
+                    dirIcon = '✕';
+                    dirLabel = '爆仓';
+                } else {
+                    dirCls = 'oa-dir-neutral';
+                    dirIcon = '◆';
+                    dirLabel = '异动';
+                }
+
+                // 金额格式化
+                let usdStr = '-';
+                if (it.event_usd_value && it.event_usd_value > 0) {
+                    if (it.event_usd_value >= 1e9) usdStr = '$' + (it.event_usd_value / 1e9).toFixed(1) + 'B';
+                    else if (it.event_usd_value >= 1e6) usdStr = '$' + (it.event_usd_value / 1e6).toFixed(1) + 'M';
+                    else if (it.event_usd_value >= 1e3) usdStr = '$' + (it.event_usd_value / 1e3).toFixed(0) + 'K';
+                    else usdStr = '$' + it.event_usd_value.toFixed(0);
+                }
+
+                const typeCn = TYPE_CN[it.event_type] || it.event_type || '异动';
+                const symbol = it.symbol || '';
+
+                // 标签行：异动类型 + 交易所 + 地址标签
+                const tags = [];
+                tags.push('<span class="oa-tag oa-tag-type">' + typeCn + '</span>');
+                if (it.event_exchange) {
+                    tags.push('<span class="oa-tag">交易所：' + escapeHtml(it.event_exchange) + '</span>');
+                }
+                if (it.address_label) {
+                    tags.push('<span class="oa-tag">' + escapeHtml(it.address_label) + '</span>');
+                }
+
+                // 时间（相对）
+                let timeStr = '';
+                if (it.created_at) {
+                    const d = new Date(it.created_at);
+                    const now = new Date();
+                    const diff = (now - d) / 1000 / 60;
+                    if (diff < 60) timeStr = Math.floor(diff) + '分钟前';
+                    else if (diff < 1440) timeStr = Math.floor(diff / 60) + '小时前';
+                    else timeStr = Math.floor(diff / 1440) + '天前';
+                }
+
+                // KOL 名
+                const kolHtml = '<span class="oa-kol" title="' + escapeHtml(it.kol_name || '') + '">' +
+                    escapeHtml(it.kol_name || '') + '</span>';
+
+                return '<div class="oa-item ' + dirCls + '">' +
+                    '<div class="oa-main">' +
+                    '<div class="oa-dir">' + dirIcon + '</div>' +
+                    '<div class="oa-symbol">' + escapeHtml(symbol) + '</div>' +
+                    '<div class="oa-direction">' + dirLabel + '</div>' +
+                    '<div class="oa-amount">' + usdStr + '</div>' +
+                    '<div class="oa-spacer"></div>' +
+                    kolHtml +
+                    '</div>' +
+                    '<div class="oa-tags">' + tags.join('') + '</div>' +
+                    '<div class="oa-meta">' +
+                    '<span class="oa-time">' + timeStr + '</span>' +
+                    (it.post_url ? '<a class="oa-link" href="' + escapeHtml(it.post_url) + '" target="_blank">查看原文 ↗</a>' : '') +
+                    '</div>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function toggleOnchainMore () {
+            oaExpanded = !oaExpanded;
+            const btn = document.getElementById('onchain-more-btn');
+            if (oaExpanded) {
+                btn.textContent = '收起';
+            } else {
+                const remain = oaAllItems.length - OA_VISIBLE;
+                btn.textContent = '查看更多（还有 ' + remain + ' 条）';
+            }
+            renderOnchainList();
+            if (!oaExpanded) {
+                document.getElementById('onchain-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
         }
 

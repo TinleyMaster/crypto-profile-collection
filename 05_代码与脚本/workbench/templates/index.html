@@ -13327,6 +13327,15 @@
             document.getElementById('wvm-exchange-name').value = wallet.exchange_name || '';
             document.getElementById('wvm-label').value = wallet.label || '';
 
+            // 重置确认按钮状态（防止上次提交后残留"提交中"）
+            const confirmBtn = modal.querySelector('.wvm-btn-confirm');
+            if (confirmBtn) {
+                confirmBtn.textContent = '确认通过';
+                confirmBtn.style.opacity = '';
+                confirmBtn.disabled = false;
+                confirmBtn._originalText = null;
+            }
+
             // 存当前 walletId
             modal._walletId = walletId;
             modal.style.display = 'flex';
@@ -13344,6 +13353,14 @@
         function closeWalletVerifyModal () {
             const modal = document.getElementById('wallet-verify-modal');
             if (modal) {
+                // 关闭前重置按钮状态，防止下次打开残留"提交中"
+                const confirmBtn = modal.querySelector('.wvm-btn-confirm');
+                if (confirmBtn) {
+                    confirmBtn.textContent = '确认通过';
+                    confirmBtn.style.opacity = '';
+                    confirmBtn.disabled = false;
+                    confirmBtn._originalText = null;
+                }
                 modal.style.display = 'none';
                 modal._walletId = null;
             }

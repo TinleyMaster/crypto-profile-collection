@@ -291,7 +291,7 @@ def backfill_coin(
     # 解析 asset_id
     asset_id = resolve_asset_id(conn, symbol)
     if asset_id is None:
-        stats["error"] = f"无 asset_id 映射"
+        stats["skip_reason"] = "无 asset_id 映射"
         return stats
 
     # 三批 fetch，各自独立容错
@@ -511,23 +511,45 @@ def main() -> int:
     total_fetched = sum(s["rows_fetched"] for s in all_stats)
     total_upserted = sum(s["rows_upserted"] for s in all_stats)
     errors = [s for s in all_stats if s.get("error")]
-    print(f"币种: {len(coins)} | 拉取: {total_fetched} 天 | 写入: {total_upserted} 行")
+    skipped = [s for s in all_stats if s.get("skip_reason")]
+    success_count = len(all_stats) - len(errors) - len(skipped)
+    print(f"币种: {len(coins)} | 成功: {success_count} | 跳过: {len(skipped)} | 失败: {len(errors)}")
+    print(f"拉取: {total_fetched} 天 | 写入: {total_upserted} 行")
+    if skipped:
+        print(f"跳过 ({len(skipped)} 币):")
+        for s in skipped:
+            print(f"  {s['symbol']}: {s['skip_reason']}")
     if errors:
-        print(f"错误: {len(errors)} 币")
+        print(f"错误 ({len(errors)} 币):")
         for e in errors:
             print(f"  {e['symbol']}: {e['error']}")
 
+    # status 判定：
+    #   - 无错误且无跳过 → success
+    #   - 有成功有跳过（无错误） → success（跳过是正常的）
+    #   - 有成功也有错误 → partial
+    #   - 全失败 → failed
+    if not errors and success_count > 0:
+        status = "success"
+    elif errors and success_count > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
     print(json.dumps({
-        "status": "success" if not errors else "partial",
+        "status": status,
         "coins": len(coins),
+        "success": success_count,
+        "skipped": len(skipped),
+        "errors": len(errors),
         "start_date": str(start_date),
         "end_date": str(end_date),
         "total_fetched": total_fetched,
         "total_upserted": total_upserted,
-        "errors": len(errors),
     }, ensure_ascii=False, indent=2))
 
-    return 0 if not errors else 1
+    # 退出码：有成功数据写入就返回 0，全失败才返回 1
+    return 0 if success_count > 0 else 1
 
 
 if __name__ == "__main__":

@@ -5986,6 +5986,518 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
         return {"status": "error", "signals": [], "error": str(e)}
 
 
+def fetch_etf_flow_trend(days: int = 7) -> dict:
+    """ETF 资金流趋势（用于早报）。
+
+    从 biz.etf_flow_daily 读取，返回各资产近 N 日净流入趋势 + 当日数据。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 最新日期
+                cur.execute("SELECT MAX(flow_date) AS latest FROM biz.etf_flow_daily")
+                latest_row = cur.fetchone()
+                if not latest_row or not latest_row["latest"]:
+                    return {"status": "empty", "assets": []}
+                latest_date = latest_row["latest"]
+
+                # 近 N 日各资产净流入 + AUM
+                cur.execute("""
+                    SELECT symbol, flow_date, net_flow_usd, net_flow_usd_m, aum_usd,
+                           total_inflow_usd, total_outflow_usd
+                    FROM biz.etf_flow_daily
+                    WHERE flow_date >= %s::DATE - (%s || ' days')::INTERVAL
+                      AND net_flow_usd IS NOT NULL
+                    ORDER BY symbol, flow_date DESC
+                """, (latest_date, days))
+                rows = [dict(r) for r in cur.fetchall()]
+
+                # 按 symbol 聚合
+                assets: dict[str, dict] = {}
+                for r in rows:
+                    sym = r["symbol"]
+                    if sym not in assets:
+                        assets[sym] = {
+                            "symbol": sym,
+                            "latest_flow_usd": None,
+                            "latest_flow_date": None,
+                            "flow_7d_usd": 0,
+                            "aum_usd": None,
+                            "daily_data": [],
+                        }
+                    a = assets[sym]
+                    if a["latest_flow_date"] is None:
+                        a["latest_flow_usd"] = float(r["net_flow_usd"] or 0)
+                        a["latest_flow_date"] = str(r["flow_date"])
+                        a["aum_usd"] = float(r["aum_usd"]) if r["aum_usd"] else None
+                    a["flow_7d_usd"] += float(r["net_flow_usd"] or 0)
+                    a["daily_data"].append({
+                        "date": str(r["flow_date"]),
+                        "net_flow_usd": float(r["net_flow_usd"] or 0),
+                    })
+
+                asset_list = sorted(
+                    assets.values(),
+                    key=lambda x: abs(x["flow_7d_usd"] or 0),
+                    reverse=True,
+                )
+
+                return {
+                    "status": "ok" if asset_list else "empty",
+                    "latest_date": str(latest_date),
+                    "assets": asset_list,
+                    "days": days,
+                }
+    except Exception as e:
+        return {"status": "error", "assets": [], "error": str(e)}
+
+
+def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
+    """链上大额转账异动（用于早报链上异动板块）。
+
+    从 biz.onchain_transfer_log 读取近 N 小时大额转账，按金额排序。
+    区分：交易所充值/提现、巨鲸地址间转账。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT t.log_id, t.asset_id, t.chain, t.value_usd,
+                           t.from_address, t.to_address, t.from_label, t.to_label,
+                           t.from_exchange, t.to_exchange, t.tx_hash,
+                           t.block_timestamp,
+                           a.canonical_symbol AS symbol, a.canonical_name AS name
+                    FROM biz.onchain_transfer_log t
+                    JOIN core.asset a ON a.asset_id = t.asset_id
+                    WHERE t.block_timestamp >= NOW() - (%s || ' hours')::INTERVAL
+                      AND t.value_usd >= 1000000
+                    ORDER BY t.value_usd DESC
+                    LIMIT %s
+                """, (hours, limit))
+                transfers = [dict(r) for r in cur.fetchall()]
+
+                # 按类型分类
+                exchange_in = [t for t in transfers if t.get("to_exchange")]
+                exchange_out = [t for t in transfers if t.get("from_exchange") and not t.get("to_exchange")]
+                whale_to_whale = [t for t in transfers if not t.get("from_exchange") and not t.get("to_exchange")]
+
+                # 统计维度
+                total_usd = sum(float(t["value_usd"] or 0) for t in transfers)
+                exchange_in_usd = sum(float(t["value_usd"] or 0) for t in exchange_in)
+                exchange_out_usd = sum(float(t["value_usd"] or 0) for t in exchange_out)
+                net_exchange_usd = exchange_in_usd - exchange_out_usd
+
+                return {
+                    "status": "ok" if transfers else "empty",
+                    "transfers": transfers,
+                    "total_count": len(transfers),
+                    "total_usd": total_usd,
+                    "exchange_in_count": len(exchange_in),
+                    "exchange_in_usd": exchange_in_usd,
+                    "exchange_out_count": len(exchange_out),
+                    "exchange_out_usd": exchange_out_usd,
+                    "net_exchange_usd": net_exchange_usd,
+                    "whale_to_whale_count": len(whale_to_whale),
+                    "hours": hours,
+                }
+    except Exception as e:
+        return {"status": "error", "transfers": [], "error": str(e)}
+
+
+def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
+    """持仓集中度摘要（用于早报）。
+
+    从 biz.onchain_holder_snapshot 读取最新快照，
+    返回 Top10 集中度最高/最低的资产 + 巨鲸余额变化趋势。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 最新快照日期
+                cur.execute("SELECT MAX(snapshot_date) AS latest FROM biz.onchain_holder_snapshot")
+                latest_row = cur.fetchone()
+                if not latest_row or not latest_row["latest"]:
+                    return {"status": "empty", "assets": []}
+                latest_date = latest_row["latest"]
+
+                # 集中度 Top N（最集中）- 过滤市值前500
+                cur.execute("""
+                    SELECT h.asset_id, h.chain, h.top10_concentration, h.top50_concentration,
+                           h.total_holders, h.whale_balance_change_7d_pct,
+                           h.exchange_wallet_pct, h.smart_money_pct,
+                           a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           a.market_cap_rank
+                    FROM biz.onchain_holder_snapshot h
+                    JOIN core.asset a ON a.asset_id = h.asset_id
+                    WHERE h.snapshot_date = %s
+                      AND a.market_cap_rank <= 500
+                      AND h.top10_concentration IS NOT NULL
+                    ORDER BY h.top10_concentration DESC
+                    LIMIT %s
+                """, (latest_date, top_n))
+                most_concentrated = [dict(r) for r in cur.fetchall()]
+
+                # 巨鲸 7 日增仓 Top N
+                cur.execute("""
+                    SELECT h.asset_id, h.chain, h.top10_concentration,
+                           h.whale_balance_change_7d_pct,
+                           a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           a.market_cap_rank
+                    FROM biz.onchain_holder_snapshot h
+                    JOIN core.asset a ON a.asset_id = h.asset_id
+                    WHERE h.snapshot_date = %s
+                      AND a.market_cap_rank <= 500
+                      AND h.whale_balance_change_7d_pct IS NOT NULL
+                      AND h.whale_balance_change_7d_pct != 0
+                    ORDER BY h.whale_balance_change_7d_pct DESC
+                    LIMIT %s
+                """, (latest_date, top_n))
+                whale_buying = [dict(r) for r in cur.fetchall()]
+
+                # 巨鲸 7 日减仓 Top N
+                cur.execute("""
+                    SELECT h.asset_id, h.chain, h.top10_concentration,
+                           h.whale_balance_change_7d_pct,
+                           a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           a.market_cap_rank
+                    FROM biz.onchain_holder_snapshot h
+                    JOIN core.asset a ON a.asset_id = h.asset_id
+                    WHERE h.snapshot_date = %s
+                      AND a.market_cap_rank <= 500
+                      AND h.whale_balance_change_7d_pct IS NOT NULL
+                      AND h.whale_balance_change_7d_pct != 0
+                    ORDER BY h.whale_balance_change_7d_pct ASC
+                    LIMIT %s
+                """, (latest_date, top_n))
+                whale_selling = [dict(r) for r in cur.fetchall()]
+
+                return {
+                    "status": "ok",
+                    "snapshot_date": str(latest_date),
+                    "most_concentrated": most_concentrated,
+                    "whale_buying": whale_buying,
+                    "whale_selling": whale_selling,
+                }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def fetch_exchange_net_flow_summary(days: int = 7) -> dict:
+    """交易所净流量摘要（从 CM 链上数据）。
+
+    从 biz.cm_asset_onchain_daily 读取主流币的交易所净流入/流出。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 最新日期
+                cur.execute("SELECT MAX(metric_date) AS latest FROM biz.cm_asset_onchain_daily")
+                latest_row = cur.fetchone()
+                if not latest_row or not latest_row["latest"]:
+                    return {"status": "empty", "assets": []}
+                latest_date = latest_row["latest"]
+
+                # 近 N 日各资产交易所净流量
+                cur.execute("""
+                    SELECT a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           d.asset_id,
+                           SUM(d.flow_in_ex_usd) AS total_in_usd,
+                           SUM(d.flow_out_ex_usd) AS total_out_usd,
+                           SUM(d.flow_in_ex_usd - d.flow_out_ex_usd) AS net_flow_usd,
+                           (SELECT net_1d.flow_in_ex_usd - net_1d.flow_out_ex_usd
+                            FROM biz.cm_asset_onchain_daily net_1d
+                            WHERE net_1d.asset_id = d.asset_id
+                              AND net_1d.metric_date = MAX(d.metric_date)
+                            LIMIT 1) AS latest_net_usd
+                    FROM biz.cm_asset_onchain_daily d
+                    JOIN core.asset a ON a.asset_id = d.asset_id
+                    WHERE d.metric_date >= %s::DATE - (%s || ' days')::INTERVAL
+                      AND d.flow_in_ex_usd IS NOT NULL
+                      AND d.flow_out_ex_usd IS NOT NULL
+                      AND a.market_cap_rank <= 100
+                    GROUP BY a.canonical_symbol, a.canonical_name, d.asset_id
+                    ORDER BY ABS(SUM(d.flow_in_ex_usd - d.flow_out_ex_usd)) DESC
+                    LIMIT 20
+                """, (latest_date, days))
+                assets = [dict(r) for r in cur.fetchall()]
+
+                return {
+                    "status": "ok" if assets else "empty",
+                    "latest_date": str(latest_date),
+                    "assets": assets,
+                    "days": days,
+                }
+    except Exception as e:
+        return {"status": "error", "assets": [], "error": str(e)}
+
+
+def fetch_upcoming_unlocks(days: int = 14) -> dict:
+    """即将解锁事件（用于早报催化剂板块）。
+
+    从 biz.asset_unlock_event 读取未来 N 天解锁事件，按解锁金额排序。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT e.asset_id, e.unlock_date, e.unlock_type, e.unlock_amount,
+                           e.unlock_ratio_total, e.unlock_ratio_circulating,
+                           e.unlock_ratio_mcap, e.unlock_value_usd, e.risk_level,
+                           e.beneficiary_type, e.source_code,
+                           a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           a.market_cap_rank
+                    FROM biz.asset_unlock_event e
+                    JOIN core.asset a ON a.asset_id = e.asset_id
+                    WHERE e.unlock_date >= CURRENT_DATE
+                      AND e.unlock_date <= CURRENT_DATE + (%s || ' days')::INTERVAL
+                      AND e.unlock_value_usd >= 1000000
+                    ORDER BY e.unlock_value_usd DESC NULLS LAST
+                    LIMIT 20
+                """, (days,))
+                unlocks = [dict(r) for r in cur.fetchall()]
+
+                return {
+                    "status": "ok" if unlocks else "empty",
+                    "unlocks": unlocks,
+                    "days": days,
+                }
+    except Exception as e:
+        return {"status": "error", "unlocks": [], "error": str(e)}
+
+
+def generate_morning_brief_ai_summary(brief: dict) -> dict:
+    """用 LLM 生成早报今日定调 + 交易方向建议。
+
+    输入：brief 完整数据
+    输出：{headline, market_regime, bias, conviction, key_drivers, trade_suggestions, risk_warnings}
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
+
+        settings = get_settings(require_database=False)
+        llm = LLMClient(settings, rpm=30, timeout=120)
+
+        if not llm.is_available():
+            return {"status": "error", "error": "LLM 不可用（未配置 API Key）"}
+
+        # 提取核心数据，压缩后传给 LLM
+        m0 = brief.get("M0_tldr", {})
+        m1 = brief.get("M1_cycle", {})
+        m2 = brief.get("M2_flow", {})
+        sector_flow = brief.get("M2_sector_flow") or {}
+        etf_flow = brief.get("M2_etf_flow") or {}
+        whale_moves = brief.get("M2_whale_moves") or {}
+        exchange_flow = brief.get("M2_exchange_flow") or {}
+        holder_conc = brief.get("M2_holder_concentration") or {}
+        highlights = brief.get("M3_highlights", [])
+        risks = brief.get("M4_risks", [])
+        catalyst = brief.get("M6_catalyst", {})
+        unlocks = brief.get("M6_upcoming_unlocks", {})
+
+        # 赛道数据精简
+        sectors_top = []
+        for s in (sector_flow.get("sectors") or [])[:8]:
+            sectors_top.append({
+                "赛道": s.get("sector_label") or s.get("sector_key"),
+                "7日涨幅": round(float(s.get("mcap_change_7d_pct") or 0), 2),
+                "市值": round(float(s.get("market_cap") or 0) / 1e9, 2),
+            })
+
+        # ETF 数据精简
+        etf_top = []
+        for a in (etf_flow.get("assets") or [])[:8]:
+            etf_top.append({
+                "币种": a.get("symbol"),
+                "当日净流入_M": round(float(a.get("latest_flow_usd") or 0) / 1e6, 2),
+                "7日净流入_M": round(float(a.get("flow_7d_usd") or 0) / 1e6, 2),
+            })
+
+        # 巨鲸转账精简
+        whale_top = []
+        for t in (whale_moves.get("transfers") or [])[:5]:
+            whale_top.append({
+                "币种": t.get("symbol"),
+                "金额_万USD": round(float(t.get("value_usd") or 0) / 10000, 0),
+                "方向": "入交易所" if t.get("to_exchange") else ("出交易所" if t.get("from_exchange") else "巨鲸间转账"),
+                "链": t.get("chain"),
+            })
+
+        # 交易所净流精简
+        exch_top = []
+        for a in (exchange_flow.get("assets") or [])[:8]:
+            exch_top.append({
+                "币种": a.get("symbol"),
+                "7日净流_M": round(float(a.get("net_flow_usd") or 0) / 1e6, 2),
+            })
+
+        # 巨鲸增减持精简
+        whale_buy_top = []
+        for a in (holder_conc.get("whale_buying") or [])[:5]:
+            whale_buy_top.append({
+                "币种": a.get("symbol"),
+                "7日增仓_pct": round(float(a.get("whale_balance_change_7d_pct") or 0), 2),
+            })
+        whale_sell_top = []
+        for a in (holder_conc.get("whale_selling") or [])[:5]:
+            whale_sell_top.append({
+                "币种": a.get("symbol"),
+                "7日减仓_pct": round(float(a.get("whale_balance_change_7d_pct") or 0), 2),
+            })
+
+        # 高亮/风险信号精简
+        hl_symbols = list(set(
+            (h.get("target") or "").upper()
+            for h in (highlights or [])[:5]
+            if h.get("target")
+        ))
+        risk_symbols = list(set(
+            (r.get("target") or "").upper()
+            for r in (risks or [])[:5]
+            if r.get("target")
+        ))
+
+        # 即将解锁精简
+        unlock_top = []
+        for u in (unlocks.get("unlocks") or [])[:8]:
+            unlock_top.append({
+                "币种": u.get("symbol"),
+                "日期": str(u.get("unlock_date")),
+                "金额_M": round(float(u.get("unlock_value_usd") or 0) / 1e6, 2),
+                "占流通_pct": round(float(u.get("unlock_ratio_circulating") or 0), 2),
+                "风险等级": u.get("risk_level"),
+            })
+
+        system_prompt = """你是一位经验丰富的加密货币宏观分析师，每天早上根据多维度链上和市场数据生成简明的市场定调和交易建议。
+
+你的输出必须是严格的 JSON 格式，包含以下字段：
+{
+  "headline": "一句话市场定调，25字以内，比如 'BTC 高位震荡，资金从 L2 转向 AI 赛道'",
+  "market_regime": "市场状态：牛市/熊市/震荡/趋势不明 四选一",
+  "bias": "整体方向偏多/偏空/中性 三选一",
+  "conviction": "信心等级：high/medium/low",
+  "key_drivers": ["3-5个核心驱动因素，每条一句话"],
+  "sector_rotation": "赛道轮动结论，一句话，比如 '资金从 L2 流出，AI + DePIN 承接'",
+  "trade_suggestions": [
+    {
+      "direction": "做多/做空/观望",
+      "asset": "标的，如 BTC/ETH/SOL/AI板块",
+      "horizon": "持有周期：短线(1-3天)/波段(1-2周)/中期(1月+)",
+      "reason": "一句话理由",
+      "confidence": "high/medium/low"
+    }
+  ],
+  "risk_warnings": ["2-3个主要风险点，每条一句话"],
+  "watchlist": ["3-5个值得重点关注的币种或赛道"]
+}
+
+要求：
+1. 结论要明确，不要模棱两可，必须给出具体的方向判断
+2. 交易建议要具体到标的和方向，不能只说"关注"
+3. 基于数据说话，不要凭空编造信息
+4. 中文输出，简洁专业
+"""
+
+        user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
+
+【大盘概况】
+- BTC 周期阶段：{m1.get('phase', '未知')}
+- BTC 趋势：{m1.get('trend', '未知')}
+- 恐贪指数：{m2.get('fear_greed', {}).get('value', '未知')}（{m2.get('fear_greed', {}).get('label', '')}）
+- 24h 涨跌幅：{m2.get('btc_change', {}).get('change_24h', '未知')}%
+- 总市值：{m2.get('total_market_cap', '未知')}
+- 24h 成交量：{m2.get('total_volume_24h', '未知')}
+
+【赛道表现（按7日涨幅排序）】
+{chr(10).join(f'- {s["赛道"]}: {s["7日涨幅"]}%，市值 {s["市值"]}B' for s in sectors_top)}
+
+【ETF 资金流】
+{chr(10).join(f'- {e["币种"]}: 当日 {e["当日净流入_M"]}M，7日 {e["7日净流入_M"]}M' for e in etf_top)}
+
+【交易所净流量（7日，正值=净流入）】
+{chr(10).join(f'- {e["币种"]}: {e["7日净流_M"]}M' for e in exch_top)}
+
+【大额链上转账（24h）】
+- 总笔数：{whale_moves.get('total_count', 0)} 笔
+- 总金额：约 {round(whale_moves.get('total_usd', 0) / 1e6, 1)}M USD
+- 交易所净流入：{round(whale_moves.get('net_exchange_usd', 0) / 1e6, 1)}M USD
+{chr(10).join(f'- {w["币种"]} {w["方向"]} {w["金额_万USD"]:.0f}万USD ({w["链"]})' for w in whale_top)}
+
+【巨鲸持仓变化（7日）】
+增仓 Top5：
+{chr(10).join(f'- {w["币种"]}: +{w["7日增仓_pct"]}%' for w in whale_buy_top)}
+减仓 Top5：
+{chr(10).join(f'- {w["币种"]}: {w["7日减仓_pct"]}%' for w in whale_sell_top)}
+
+【信号】
+- 看多信号（{len(hl_symbols)}个）：{', '.join(hl_symbols) if hl_symbols else '无'}
+- 看空风险（{len(risk_symbols)}个）：{', '.join(risk_symbols) if risk_symbols else '无'}
+
+【即将解锁（未来14天，按金额排序）】
+{chr(10).join(f'- {u["币种"]}: {u["日期"]} 解锁 {u["金额_M"]}M USD，占流通 {u["占流通_pct"]}%，风险{u["风险等级"]}' for u in unlock_top)}
+
+请基于以上数据，生成今日的市场定调和交易建议。"""
+
+        raw = llm.chat(
+            system_prompt, user_prompt,
+            temperature=0.3,
+            max_tokens=4096,
+            response_format={"type": "json_object"},
+            use_cache=False,
+        )
+
+        data = extract_json_from_llm_response(raw)
+
+        return {
+            "status": "ok",
+            "headline": str(data.get("headline", ""))[:80],
+            "market_regime": str(data.get("market_regime", "震荡")),
+            "bias": str(data.get("bias", "中性")),
+            "conviction": str(data.get("conviction", "medium")).lower(),
+            "key_drivers": [str(x)[:200] for x in (data.get("key_drivers") or [])][:5],
+            "sector_rotation": str(data.get("sector_rotation", ""))[:200],
+            "trade_suggestions": [
+                {
+                    "direction": str(s.get("direction", "")),
+                    "asset": str(s.get("asset", "")),
+                    "horizon": str(s.get("horizon", "")),
+                    "reason": str(s.get("reason", ""))[:200],
+                    "confidence": str(s.get("confidence", "medium")).lower(),
+                }
+                for s in (data.get("trade_suggestions") or [])[:5]
+            ],
+            "risk_warnings": [str(x)[:200] for x in (data.get("risk_warnings") or [])][:5],
+            "watchlist": [str(x)[:30] for x in (data.get("watchlist") or [])][:8],
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
     """机会清单兜底：赛道领涨 × 链上信号 交叉筛选。
 
@@ -6292,18 +6804,49 @@ def _build_daily_diff_brief(today: dict, highlights: list,
     return result
 
 
-def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
+def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
-    早报结构化骨架（设计文档第七节）。消费 overview 已有字段，不改 API 层。
-    返回 {M0~M6, DIFF}；首跑 yesterday=None → DIFF=None 不报错。
+    早报结构化骨架 V2（重新设计版）。
+    6 大模块 + AI 定调 + 链上深度数据。
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     cycle = today.get("btc_cycle") or {}
     diff = diff_overview(yesterday, today) if yesterday else None
-    stab = fetch_stablecoin_supply_trend()
     opps = (today.get("opportunity_list") or {}).get("opportunities") or []
     divs = (today.get("divergence_signals") or {}).get("signals") or []
-    sector_flow = fetch_sector_flow_with_leaders()
-    kol_onchain = fetch_kol_onchain_signals()
+
+    # ── 并行拉取所有独立数据 ──
+    def _fetch_parallel():
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futures = {
+                "stablecoin": pool.submit(fetch_stablecoin_supply_trend),
+                "sector_flow": pool.submit(fetch_sector_flow_with_leaders),
+                "kol_onchain": pool.submit(fetch_kol_onchain_signals),
+                "etf_flow": pool.submit(fetch_etf_flow_trend, 7),
+                "whale_moves": pool.submit(fetch_onchain_whale_moves, 24, 10),
+                "holder_concentration": pool.submit(fetch_holder_concentration_summary, 10),
+                "exchange_flow": pool.submit(fetch_exchange_net_flow_summary, 7),
+                "upcoming_unlocks": pool.submit(fetch_upcoming_unlocks, 14),
+            }
+            results = {}
+            for k, fut in futures.items():
+                try:
+                    results[k] = fut.result(timeout=20)
+                except Exception as e:
+                    print(f"[morning_brief] {k} fetch failed: {e}")
+                    results[k] = {"status": "error", "error": str(e)}
+            return results
+
+    p = _fetch_parallel()
+    stab = p["stablecoin"]
+    sector_flow = p["sector_flow"]
+    kol_onchain = p["kol_onchain"]
+    etf_flow = p["etf_flow"]
+    whale_moves = p["whale_moves"]
+    holder_concentration = p["holder_concentration"]
+    exchange_flow = p["exchange_flow"]
+    upcoming_unlocks = p["upcoming_unlocks"]
 
     # 从 overview 取叙事榜 + 链净流入（首页同一套数据源）
     d5data = (today.get("dimensions") or {}).get("5板块") or {}
@@ -6335,7 +6878,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         if fallback:
             opps = fallback
 
-    # ── 高亮信号 + 高危信号（BRIEF-OPT-001：直接复用大盘分析同一套） ──
+    # ── 高亮信号 + 高危信号（直接复用大盘分析同一套） ──
     opp_list = today.get("opportunity_list") or {}
     highlights = opp_list.get("highlight_signals") or []
     risk_signals = opp_list.get("risk_signals") or []
@@ -6345,19 +6888,26 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
     if not risk_signals and opps:
         risk_signals = select_risk_signals(opps, max_total=6)
 
-    # ── 每日变化榜精简版（BRIEF-OPT-003） ──
+    # ── 每日变化榜精简版 ──
     daily_diff_brief = _build_daily_diff_brief(today, highlights, risk_signals)
 
-    return {
+    # 组装基础 brief
+    brief = {
         "M0_tldr": _build_tldr(today, opps, highlights, risk_signals),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),
         "M2_institutional": today.get("institutional_mvrv") or {},
         "M2_sector_flow": sector_flow,
+        "M2_etf_flow": etf_flow,
+        "M2_whale_moves": whale_moves,
+        "M2_exchange_flow": exchange_flow,
+        "M2_holder_concentration": holder_concentration,
+        "M2_stablecoin": stab,
         "M3_highlights": highlights,
         "M4_risks": risk_signals,
         "M5_daily_diff": daily_diff_brief,
         "M6_catalyst": today.get("event_calendar") or {},
+        "M6_upcoming_unlocks": upcoming_unlocks,
         "M7_divergence": [
             d for d in divs
             if d.get("label") in ("DANGEROUS", "DIVERGENT")
@@ -6378,6 +6928,17 @@ def generate_morning_brief(today: dict, yesterday: dict | None) -> dict:
         "kol_onchain": kol_onchain,
         "DIFF": diff,
     }
+
+    # ── AI 今日定调 + 交易建议（可选） ──
+    if use_ai:
+        try:
+            ai_summary = generate_morning_brief_ai_summary(brief)
+            brief["M0_ai_summary"] = ai_summary
+        except Exception as e:
+            print(f"[morning_brief] AI summary failed: {e}")
+            brief["M0_ai_summary"] = {"status": "error", "error": str(e)}
+
+    return brief
 
 
 def fetch_event_calendar() -> dict:

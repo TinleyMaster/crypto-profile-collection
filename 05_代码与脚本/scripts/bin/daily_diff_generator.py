@@ -490,13 +490,14 @@ def _compute_sector_strength(cur, d: date) -> list[dict]:
     cur.execute(SECTOR_ROTATION_SQL, (str(d), str(d)))
     rows = cur.fetchall()
     result = []
+    # SQL 字段顺序: sector, up_count, avg_change, vol_count, strength_score
     for i, row in enumerate(rows):
         result.append({
-            "sector": row["sector"],
-            "up_count": row["up_count"],
-            "avg_change": float(row["avg_change"] or 0),
-            "vol_count": row["vol_count"],
-            "strength_score": float(row["strength_score"] or 0),
+            "sector": row[0],
+            "up_count": row[1],
+            "avg_change": float(row[2] or 0),
+            "vol_count": row[3],
+            "strength_score": float(row[4] or 0),
             "rank": i + 1,
         })
     return result
@@ -572,7 +573,19 @@ def _generate_sector_rotation(cur, d: date, lookback_days: int = 3, top_n_sector
             continue
 
         # 取前 2 个龙头
-        for i, leader in enumerate(leaders[:2]):
+        # SQL 字段顺序: asset_id, composite_score, change_24h, volume_pct_rank,
+        #               market_cap, canonical_symbol, canonical_name, market_cap_rank
+        for i, leader_row in enumerate(leaders[:2]):
+            leader = {
+                "asset_id": leader_row[0],
+                "composite_score": leader_row[1],
+                "change_24h": leader_row[2],
+                "volume_pct_rank": leader_row[3],
+                "market_cap": leader_row[4],
+                "canonical_symbol": leader_row[5],
+                "canonical_name": leader_row[6],
+                "market_cap_rank": leader_row[7],
+            }
             comp_score = float(leader["composite_score"] or 0)
             # 综合得分 = 赛道连续天数 * 10 + 个股量价齐升分 + 排名趋势奖励
             total_score = round(
@@ -671,7 +684,6 @@ def main() -> int:
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
-        conn.row_factory = psycopg.rows.dict_row
         with conn.cursor() as cur:
             # 确保表存在
             cur.execute(CREATE_TABLE_SQL)

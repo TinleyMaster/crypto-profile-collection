@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS biz.onchain_exchange_wallet (
     address        TEXT   NOT NULL,          -- 钱包地址
     exchange_name  TEXT   NOT NULL,          -- 交易所名称（Binance/Coinbase/OKX/...）
     chain          TEXT   NOT NULL,          -- 所属链
+    display_name   TEXT,                     -- 展示昵称（如 "Binance ETH 热钱包 1"）
     label          TEXT   DEFAULT 'exchange',-- 标签类型
     confidence     TEXT   DEFAULT 'high',    -- 可信度：high/medium/low
     source         TEXT   DEFAULT 'manual',  -- 数据来源
@@ -135,3 +136,8 @@ COMMENT ON TABLE biz.onchain_exchange_wallet IS
 
 CREATE INDEX IF NOT EXISTS idx_exchange_wallet_address
     ON biz.onchain_exchange_wallet (address, chain);
+
+-- 2026-09-08: 新增 display_name 展示昵称字段
+ALTER TABLE biz.onchain_exchange_wallet
+    ADD COLUMN IF NOT EXISTS display_name TEXT;
+COMMENT ON COLUMN biz.onchain_exchange_wallet.display_name IS '展示昵称，如 "Binance ETH 热钱包 1"，验证通过时自动生成，可手动修改';

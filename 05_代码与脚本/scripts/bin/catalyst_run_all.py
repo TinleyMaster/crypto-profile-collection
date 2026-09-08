@@ -16,6 +16,7 @@ BIN_DIR = Path(__file__).resolve().parent
 STAGES = [
     ("全源增量摄入", "catalyst_ingest_all.py", []),
     ("AI 预处理", "process_catalyst_ai.py", ["--batch-size", "200"]),
+    ("impact 因子化", "build_catalyst_impact.py", ["--incremental"]),
     ("thesis 重生(游标模式)", "catalyst_thesis_regen.py", ["--max-assets", "100"]),
 ]
 

@@ -793,7 +793,7 @@ def api_exchange_wallets_pending():
                 total = cur.fetchone()["cnt"]
                 # 列表：按链 + 交易所排序，优先头部交易所
                 cur.execute(f"""
-                    SELECT wallet_id, address, exchange_name, chain, confidence, source, added_at
+                    SELECT wallet_id, address, exchange_name, chain, confidence, source, added_at, display_name
                     FROM biz.onchain_exchange_wallet
                     {where}
                     ORDER BY
@@ -834,6 +834,7 @@ def api_exchange_wallets_pending():
                 "chain": r["chain"],
                 "confidence": r["confidence"],
                 "source": r["source"],
+                "display_name": r["display_name"],
                 "added_at": r["added_at"].isoformat() if r["added_at"] else None,
             })
 
@@ -893,11 +894,24 @@ def api_exchange_wallets_verify():
         with get_db() as conn:
             with conn.cursor() as cur:
                 if action == "approve":
+                    # 验证通过：置为 high + 自动生成昵称（{交易所名} {链大写} 钱包 {序号}）
+                    # 序号 = 该交易所+该链下已验证(high)的数量 + 1
                     cur.execute("""
-                        UPDATE biz.onchain_exchange_wallet
+                        UPDATE biz.onchain_exchange_wallet w
                         SET confidence = 'high',
-                            source = COALESCE(source, '') || ';manual_verified'
-                        WHERE wallet_id = %s AND confidence = 'medium'
+                            source = COALESCE(source, '') || ';manual_verified',
+                            display_name = COALESCE(
+                                NULLIF(w.display_name, ''),
+                                w.exchange_name || ' ' || UPPER(w.chain) || ' 钱包 ' || (
+                                    SELECT COALESCE(COUNT(*), 0) + 1
+                                    FROM biz.onchain_exchange_wallet w2
+                                    WHERE w2.exchange_name = w.exchange_name
+                                      AND w2.chain = w.chain
+                                      AND w2.confidence = 'high'
+                                      AND w2.wallet_id <> w.wallet_id
+                                )::text
+                            )
+                        WHERE w.wallet_id = %s AND w.confidence = 'medium'
                     """, (wallet_id,))
                 else:  # reject: 非交易所地址，直接删除（不管 confidence）
                     cur.execute("""
@@ -905,8 +919,28 @@ def api_exchange_wallets_verify():
                         WHERE wallet_id = %s
                     """, (wallet_id,))
                 changed = cur.rowcount > 0
+                # 如果是 approve 且成功了，返回更新后的钱包信息（含昵称）
+                wallet_info = None
+                if changed and action == "approve":
+                    cur.execute("""
+                        SELECT wallet_id, address, exchange_name, chain,
+                               confidence, display_name, source
+                        FROM biz.onchain_exchange_wallet
+                        WHERE wallet_id = %s
+                    """, (wallet_id,))
+                    wr = cur.fetchone()
+                    if wr:
+                        wallet_info = {
+                            "wallet_id": wr[0],
+                            "address": wr[1],
+                            "exchange_name": wr[2],
+                            "chain": wr[3],
+                            "confidence": wr[4],
+                            "display_name": wr[5],
+                            "source": wr[6],
+                        }
             conn.commit()
-        return jsonify({"ok": True, "changed": changed})
+        return jsonify({"ok": True, "changed": changed, "wallet": wallet_info})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

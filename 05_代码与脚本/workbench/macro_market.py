@@ -959,8 +959,67 @@ def fetch_btc_netflow_7d() -> float | None:
 
 
 def fetch_binance_etf_flows() -> dict:
-    """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。"""
+    """获取 cryptoetf ETF 资金流数据。返回 {net_flow_usd_m, ...}。
+
+    优先从数据库 biz.etf_flow_daily 读取（更快、可离线）；
+    数据库无数据或数据过旧时，回退到 API 拉取并回写数据库。
+    """
     api_key = os.environ.get("CRYPTOETF_KEY", "")
+
+    # ── 1. 先查数据库 ──────────────────────────────────────
+    try:
+        import psycopg.rows
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            conn.row_factory = psycopg.rows.dict_row
+            with conn.cursor() as cur:
+                # 每个币种取最近一个净流入非 0 的交易日（跳过休市日）
+                cur.execute("""
+                    SELECT DISTINCT ON (symbol)
+                           symbol, flow_date, net_flow_usd_m, net_flow_usd, aum_usd
+                    FROM biz.etf_flow_daily
+                    WHERE source_code = 'cryptoetf'
+                      AND net_flow_usd_m IS NOT NULL
+                      AND net_flow_usd_m != 0
+                    ORDER BY symbol, flow_date DESC
+                """)
+                rows = cur.fetchall()
+                if rows:
+                    total = 0.0
+                    btc_flow = None
+                    assets_detail = []
+                    # 取有数据的币种中最新的那个日期作为 as_of_date
+                    latest_date = max(r["flow_date"] for r in rows)
+                    for r in rows:
+                        v = float(r["net_flow_usd_m"]) if r["net_flow_usd_m"] is not None else None
+                        if v is not None:
+                            total += v
+                        sym = r["symbol"]
+                        if sym == "BTC":
+                            btc_flow = v
+                        assets_detail.append({
+                            "symbol": sym,
+                            "asset": sym.lower(),
+                            "net_flow_usd_m": v,
+                            "date": str(r["flow_date"]),
+                        })
+                    # 按净流入绝对值降序排列，与 API 返回顺序一致
+                    assets_detail.sort(key=lambda x: abs(x.get("net_flow_usd_m") or 0), reverse=True)
+                    return {
+                        "net_flow_usd_m": round(total, 2),
+                        "btc_net_flow_usd_m": btc_flow,
+                        "as_of_date": str(latest_date),
+                        "assets_detail": assets_detail,
+                        "status": "ok",
+                        "source": "db",
+                    }
+    except Exception:
+        # 数据库不可用或表不存在，静默回退到 API
+        pass
+
+    # ── 2. 回退到 API 拉取 ─────────────────────────────────
     if not api_key:
         return {"status": "skipped", "error": "CRYPTOETF_KEY 未设置"}
     try:
@@ -992,13 +1051,60 @@ def fetch_binance_etf_flows() -> dict:
             })
         # 按净流入绝对值降序排列，方便展示
         assets_detail.sort(key=lambda x: abs(x.get("net_flow_usd_m") or 0), reverse=True)
-        return {
+        result = {
             "net_flow_usd_m": round(total, 2),
             "btc_net_flow_usd_m": btc_flow,
             "as_of_date": assets[0].get("date"),
             "assets_detail": assets_detail,
             "status": "ok",
+            "source": "api",
         }
+
+        # ── 3. 回写数据库 ──────────────────────────────────
+        try:
+            import psycopg.rows
+            from crypto_research.config import get_settings
+            from crypto_research.db.conn import get_connection
+            settings = get_settings(require_database=True)
+            with get_connection(settings.database_url) as conn:
+                with conn.cursor() as cur:
+                    # 确保表存在
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS biz.etf_flow_daily (
+                            symbol            TEXT        NOT NULL,
+                            flow_date         DATE        NOT NULL,
+                            net_flow_usd      NUMERIC(20,2),
+                            net_flow_usd_m    NUMERIC(12,2),
+                            aum_usd           NUMERIC(20,2),
+                            total_inflow_usd  NUMERIC(20,2),
+                            total_outflow_usd NUMERIC(20,2),
+                            source_code       TEXT        NOT NULL DEFAULT 'cryptoetf',
+                            fetched_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            PRIMARY KEY (symbol, flow_date, source_code)
+                        )
+                    """)
+                    # 回写每条数据
+                    for a in assets_detail:
+                        if not a["date"] or not a["symbol"]:
+                            continue
+                        net_usd = round(a["net_flow_usd_m"] * 1_000_000, 2) if a["net_flow_usd_m"] is not None else None
+                        cur.execute("""
+                            INSERT INTO biz.etf_flow_daily
+                                (symbol, flow_date, net_flow_usd, net_flow_usd_m,
+                                 source_code, fetched_at, updated_at)
+                            VALUES (%s, %s, %s, %s, 'cryptoetf', NOW(), NOW())
+                            ON CONFLICT (symbol, flow_date, source_code) DO UPDATE SET
+                                net_flow_usd = EXCLUDED.net_flow_usd,
+                                net_flow_usd_m = EXCLUDED.net_flow_usd_m,
+                                updated_at = NOW()
+                        """, (a["symbol"], a["date"], net_usd, a["net_flow_usd_m"]))
+                conn.commit()
+        except Exception:
+            # 回写失败不影响主流程
+            pass
+
+        return result
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response else None
         return {"status": "error", "error": f"HTTP {code}"}

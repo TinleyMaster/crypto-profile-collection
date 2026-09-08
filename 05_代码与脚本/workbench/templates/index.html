@@ -5554,6 +5554,536 @@
             border-color: rgba(248, 113, 113, .15);
         }
 
+        /* ── FEAT-AI-HIGHLIGHT: AI 推荐理由 ── */
+        .signal-item-clickable {
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+
+        .signal-item-clickable:hover {
+            transform: translateX(2px);
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .signal-ai-reason {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.1));
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            border-radius: 8px;
+            padding: 8px 12px;
+            margin-top: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .signal-ai-reason:hover {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(59, 130, 246, 0.18));
+        }
+
+        .ai-reason-icon {
+            font-size: 14px;
+        }
+
+        .ai-reason-label {
+            font-weight: 600;
+            color: #a78bfa;
+            white-space: nowrap;
+        }
+
+        .ai-reason-conf {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+
+        .ai-conf-high {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+
+        .ai-conf-med {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+        }
+
+        .ai-conf-low {
+            background: rgba(107, 114, 128, 0.2);
+            color: #6b7280;
+        }
+
+        .ai-reason-text {
+            flex: 1;
+            color: #d1d5db;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .ai-reason-more {
+            color: #a78bfa;
+            white-space: nowrap;
+            font-weight: 500;
+        }
+
+        /* ── FEAT-AI-HIGHLIGHT: 信号详情弹窗 ── */
+        .signal-detail-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .signal-detail-modal.show {
+            display: flex;
+        }
+
+        .signal-detail-container {
+            background: #1a1d23;
+            border: 1px solid #374151;
+            border-radius: 12px;
+            width: 100%;
+            max-width: 800px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .signal-detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid #374151;
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), transparent);
+        }
+
+        .sd-header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .sd-symbol {
+            font-size: 24px;
+            font-weight: 700;
+            color: #f3f4f6;
+        }
+
+        .sd-name {
+            font-size: 16px;
+            color: #9ca3af;
+        }
+
+        .sd-sector {
+            font-size: 12px;
+            padding: 4px 10px;
+            background: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+
+        .sd-header-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sd-refresh-btn {
+            background: rgba(139, 92, 246, 0.2);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            color: #a78bfa;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.15s;
+        }
+
+        .sd-refresh-btn:hover {
+            background: rgba(139, 92, 246, 0.35);
+        }
+
+        .sd-close-btn {
+            background: transparent;
+            border: 1px solid #4b5563;
+            color: #9ca3af;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+
+        .sd-close-btn:hover {
+            background: #374151;
+            color: #f3f4f6;
+        }
+
+        .signal-detail-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .sd-loading {
+            text-align: center;
+            color: #6b7280;
+            padding: 40px;
+        }
+
+        .sd-section {
+            margin-bottom: 20px;
+        }
+
+        .sd-section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #e5e7eb;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sd-section-title::before {
+            content: '';
+            width: 3px;
+            height: 14px;
+            background: #8b5cf6;
+            border-radius: 2px;
+        }
+
+        /* 基础信息卡片 */
+        .sd-basic-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }
+
+        .sd-basic-item {
+            background: #262b33;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .sd-basic-label {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+
+        .sd-basic-value {
+            font-size: 15px;
+            font-weight: 600;
+            color: #f3f4f6;
+        }
+
+        .sd-basic-value.up {
+            color: #22c55e;
+        }
+
+        .sd-basic-value.down {
+            color: #ef4444;
+        }
+
+        /* AI 分析区块 */
+        .sd-ai-box {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.12), rgba(59, 130, 246, 0.08));
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            border-radius: 10px;
+            padding: 16px;
+        }
+
+        .sd-ai-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .sd-ai-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            color: #a78bfa;
+        }
+
+        .sd-ai-score {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sd-ai-score-num {
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa, #60a5fa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .sd-ai-score-label {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+
+        .sd-ai-direction {
+            font-size: 13px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 6px;
+        }
+
+        .sd-ai-direction.long {
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+        }
+
+        .sd-ai-direction.short {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .sd-ai-direction.neutral {
+            background: rgba(107, 114, 128, 0.2);
+            color: #9ca3af;
+        }
+
+        .sd-ai-reason-detail {
+            font-size: 13px;
+            line-height: 1.7;
+            color: #d1d5db;
+            white-space: pre-wrap;
+            margin-bottom: 12px;
+        }
+
+        .sd-ai-factors {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .sd-ai-factor {
+            font-size: 12px;
+            padding: 4px 10px;
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border-radius: 12px;
+        }
+
+        .sd-ai-factor.risk {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+        }
+
+        .sd-ai-horizon {
+            font-size: 12px;
+            color: #9ca3af;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .sd-ai-horizon-tag {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 500;
+            font-size: 11px;
+        }
+
+        .hz-short {
+            background: rgba(249, 115, 22, 0.2);
+            color: #fb923c;
+        }
+
+        .hz-medium {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+
+        .hz-long {
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+        }
+
+        /* 信号列表 */
+        .sd-signal-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .sd-signal-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: #262b33;
+            border-radius: 8px;
+            border-left: 3px solid #374151;
+        }
+
+        .sd-signal-item.long {
+            border-left-color: #22c55e;
+        }
+
+        .sd-signal-item.short {
+            border-left-color: #ef4444;
+        }
+
+        .sd-signal-item.neutral {
+            border-left-color: #6b7280;
+        }
+
+        .sd-signal-type {
+            font-size: 11px;
+            padding: 3px 8px;
+            background: #374151;
+            color: #d1d5db;
+            border-radius: 10px;
+            white-space: nowrap;
+        }
+
+        .sd-signal-title {
+            flex: 1;
+            font-size: 13px;
+            color: #e5e7eb;
+        }
+
+        .sd-signal-score {
+            font-size: 12px;
+            font-weight: 600;
+            color: #f59e0b;
+        }
+
+        /* 催化剂列表 */
+        .sd-catalyst-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .sd-catalyst-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: #262b33;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .sd-cat-date {
+            font-size: 11px;
+            color: #6b7280;
+            white-space: nowrap;
+        }
+
+        .sd-cat-title {
+            flex: 1;
+            color: #d1d5db;
+        }
+
+        .sd-cat-strength {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+
+        .sd-cat-strength.high {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+
+        .sd-cat-strength.medium {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
+        }
+
+        .sd-cat-strength.low {
+            background: rgba(107, 114, 128, 0.2);
+            color: #9ca3af;
+        }
+
+        /* KOL 链上 */
+        .sd-kol-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .sd-kol-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: #262b33;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .sd-kol-name {
+            font-weight: 500;
+            color: #fbbf24;
+            white-space: nowrap;
+        }
+
+        .sd-kol-subtype {
+            color: #9ca3af;
+            flex: 1;
+        }
+
+        .sd-kol-value {
+            font-weight: 600;
+            color: #22c55e;
+            white-space: nowrap;
+        }
+
+        .sd-kol-value.outflow {
+            color: #ef4444;
+        }
+
+        .sd-empty {
+            color: #4b5563;
+            font-size: 12px;
+            text-align: center;
+            padding: 12px;
+        }
+
+        .sd-error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #f87171;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+
         .signal-empty .signal-empty-sub {
             font-size: 12px;
             color: #4b5563;
@@ -11311,7 +11841,29 @@
                     '</div>';
             }
 
-            return '<div class="signal-item ' + cls + '">' +
+            // FEAT-AI-HIGHLIGHT: AI 推荐理由摘要
+            var aiReasonHtml = '';
+            if (o.ai_analysis && !o.ai_analysis.error) {
+                var aiScore = o.ai_analysis.ai_score || 0;
+                var aiConf = o.ai_analysis.confidence || 'MED';
+                var aiConfCls = aiConf === 'HIGH' ? 'ai-conf-high' : aiConf === 'LOW' ? 'ai-conf-low' : 'ai-conf-med';
+                var reason = o.ai_analysis.reason_summary || '';
+                aiReasonHtml = '<div class="signal-ai-reason" onclick="event.stopPropagation();openSignalDetail(' + (o.asset_id || 0) + ')">' +
+                    '<span class="ai-reason-icon">🤖</span>' +
+                    '<span class="ai-reason-label">AI推荐</span>' +
+                    '<span class="ai-reason-conf ' + aiConfCls + '">' + aiConf + '</span>' +
+                    '<span class="ai-reason-text">' + escapeHtml(reason) + '</span>' +
+                    '<span class="ai-reason-more">查看详情 →</span>' +
+                    '</div>';
+            }
+
+            // 点击打开详情（仅当有 asset_id 时可点击）
+            var itemClickable = o.asset_id ? ' signal-item-clickable' : '';
+            var itemOnclick = o.asset_id
+                ? ' onclick="openSignalDetail(' + o.asset_id + ')"'
+                : '';
+
+            return '<div class="signal-item ' + cls + itemClickable + '"' + itemOnclick + '>' +
                 '<div class="signal-bar"></div>' +
                 '<div class="signal-body">' +
                 '<div class="signal-top">' +
@@ -11330,6 +11882,7 @@
                 decayBar +
                 strengthLine +
                 valFilterNote +
+                aiReasonHtml +
                 (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
                 multiSignalHtml +
                 catalystHtml +
@@ -11339,6 +11892,256 @@
                 '</div>' +
                 '</div>';
         }
+
+        // ── FEAT-AI-HIGHLIGHT: 信号详情弹窗 ──
+        var _currentDetailAssetId = null;
+
+        function openSignalDetail (assetId) {
+            if (!assetId) return;
+            _currentDetailAssetId = assetId;
+            var modal = document.getElementById('signal-detail-modal');
+            var body = document.getElementById('signal-detail-body');
+            modal.classList.add('show');
+            body.innerHTML = '<div class="sd-loading">加载中...</div>';
+            _loadSignalDetail(assetId, false);
+        }
+
+        function closeSignalDetail () {
+            var modal = document.getElementById('signal-detail-modal');
+            modal.classList.remove('show');
+            _currentDetailAssetId = null;
+        }
+
+        function refreshSignalDetailAi () {
+            if (!_currentDetailAssetId) return;
+            var body = document.getElementById('signal-detail-body');
+            body.innerHTML = '<div class="sd-loading">AI 重新分析中，请稍候...</div>';
+            _loadSignalDetail(_currentDetailAssetId, true);
+        }
+
+        function _loadSignalDetail (assetId, forceAi) {
+            var url = '/api/assets/' + assetId + '/signal-detail';
+            if (forceAi) url += '?force_ai=1';
+            fetch(url)
+                .then(function (r) { return r.json(); })
+                .then(function (resp) {
+                    if (!resp || !resp.ok) {
+                        _renderDetailError((resp && resp.error) || '加载失败');
+                        return;
+                    }
+                    _renderSignalDetail(resp.data);
+                })
+                .catch(function (e) {
+                    _renderDetailError('加载失败：' + e.message);
+                });
+        }
+
+        function _renderDetailError (msg) {
+            var body = document.getElementById('signal-detail-body');
+            body.innerHTML = '<div class="sd-error">❌ ' + escapeHtml(msg) + '</div>';
+        }
+
+        function _renderSignalDetail (data) {
+            var basic = data.basic || {};
+            var signals = data.signals || [];
+            var ai = data.ai_analysis || null;
+            var holders = data.holders || {};
+            var unlocks = data.unlocks_summary || {};
+            var catalysts = data.catalysts || [];
+            var kolList = data.kol_onchain || [];
+            var social = data.social || null;
+
+            // 头部
+            document.getElementById('sd-symbol').textContent = basic.symbol || '—';
+            document.getElementById('sd-name').textContent = basic.name || '';
+            document.getElementById('sd-sector').textContent = basic.sector || '未分类';
+
+            var body = document.getElementById('signal-detail-body');
+            var html = '';
+
+            // 基础信息
+            var chg24 = basic.change_24h;
+            var chg7d = basic.change_7d;
+            var chg24Cls = chg24 > 0 ? 'up' : chg24 < 0 ? 'down' : '';
+            var chg7Cls = chg7d > 0 ? 'up' : chg7d < 0 ? 'down' : '';
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">基础信息</div>' +
+                '<div class="sd-basic-grid">' +
+                _sdBasicItem('现价', basic.price != null ? '$' + basic.price.toLocaleString() : '—') +
+                _sdBasicItem('市值', basic.market_cap != null ? '$' + _fmtNum(basic.market_cap) : '—') +
+                _sdBasicItem('FDV', basic.fdv != null ? '$' + _fmtNum(basic.fdv) : '—') +
+                _sdBasicItem('24h成交额', basic.volume_24h != null ? '$' + _fmtNum(basic.volume_24h) : '—') +
+                _sdBasicItem('24h涨跌', (chg24 != null ? (chg24 > 0 ? '+' : '') + chg24.toFixed(2) + '%' : '—'), chg24Cls) +
+                _sdBasicItem('7d涨跌', (chg7d != null ? (chg7d > 0 ? '+' : '') + chg7d.toFixed(2) + '%' : '—'), chg7Cls) +
+                '</div>' +
+                '</div>';
+
+            // AI 分析
+            html += '<div class="sd-section">';
+            if (ai && !ai.error) {
+                var confCls = ai.confidence === 'HIGH' ? 'ai-conf-high' : ai.confidence === 'LOW' ? 'ai-conf-low' : 'ai-conf-med';
+                var dirCls = ai.direction || 'neutral';
+                var dirLabel = dirCls === 'long' ? '看多' : dirCls === 'short' ? '看空' : '中性';
+                var hzCls = ai.suggested_horizon === 'short' ? 'hz-short' : ai.suggested_horizon === 'long' ? 'hz-long' : 'hz-medium';
+                var hzLabel = ai.suggested_horizon === 'short' ? '短期' : ai.suggested_horizon === 'long' ? '长期' : '中期';
+
+                var factors = (ai.key_factors || []).map(function (f) {
+                    return '<span class="sd-ai-factor">✓ ' + escapeHtml(f) + '</span>';
+                }).join('');
+                var risks = (ai.risk_warnings || []).map(function (r) {
+                    return '<span class="sd-ai-factor risk">⚠ ' + escapeHtml(r) + '</span>';
+                }).join('');
+
+                html += '<div class="sd-section-title">AI 综合分析</div>' +
+                    '<div class="sd-ai-box">' +
+                    '<div class="sd-ai-header">' +
+                    '<div class="sd-ai-title"><span>🤖</span> AI 推荐理由</div>' +
+                    '<div class="sd-ai-score">' +
+                    '<span class="sd-ai-direction ' + dirCls + '">' + dirLabel + '</span>' +
+                    '<span class="sd-ai-score-num">' + (ai.ai_score || 0) + '</span>' +
+                    '<span class="ai-reason-conf ' + confCls + '">' + (ai.confidence || 'MED') + '</span>' +
+                    '</div>' +
+                    '</div>' +
+                    '<div class="sd-ai-reason-detail">' + escapeHtml(ai.reason_detail || ai.reason_summary || '') + '</div>' +
+                    (factors ? '<div class="sd-ai-factors">' + factors + '</div>' : '') +
+                    (risks ? '<div class="sd-ai-factors">' + risks + '</div>' : '') +
+                    '<div class="sd-ai-horizon">建议周期：<span class="sd-ai-horizon-tag ' + hzCls + '">' + hzLabel + '</span></div>' +
+                    '</div>';
+            } else if (ai && ai.error) {
+                html += '<div class="sd-section-title">AI 综合分析</div>' +
+                    '<div class="sd-error">🤖 AI 分析暂不可用：' + escapeHtml(ai.error) + '</div>';
+            } else {
+                html += '<div class="sd-section-title">AI 综合分析</div>' +
+                    '<div class="sd-empty">暂无 AI 分析结果</div>';
+            }
+            html += '</div>';
+
+            // 信号列表
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">触发信号（' + signals.length + '）</div>';
+            if (signals.length === 0) {
+                html += '<div class="sd-empty">暂无信号</div>';
+            } else {
+                html += '<div class="sd-signal-list">';
+                signals.forEach(function (s) {
+                    var typeLabel = SIGNAL_TYPE_LABEL[s.signal_type]
+                        ? SIGNAL_TYPE_LABEL[s.signal_type].label
+                        : (s.signal_type || '信号');
+                    var score = s.conviction_score != null ? s.conviction_score : '—';
+                    html += '<div class="sd-signal-item ' + (s.direction || 'neutral') + '">' +
+                        '<span class="sd-signal-type">' + escapeHtml(typeLabel) + '</span>' +
+                        '<span class="sd-signal-title">' + escapeHtml(s.trigger_logic || s.title || '') + '</span>' +
+                        '<span class="sd-signal-score">' + score + ' 分</span>' +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // 链上持仓
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">链上持仓</div>' +
+                '<div class="sd-basic-grid">' +
+                _sdBasicItem('持仓地址数', holders.holder_count != null ? holders.holder_count.toLocaleString() : '—') +
+                _sdBasicItem('前5持仓占比', holders.top_5_pct != null ? holders.top_5_pct.toFixed(2) + '%' : '—') +
+                _sdBasicItem('前10持仓占比', holders.top_10_pct != null ? holders.top_10_pct.toFixed(2) + '%' : '—') +
+                _sdBasicItem('前25持仓占比', holders.top_25_pct != null ? holders.top_25_pct.toFixed(2) + '%' : '—') +
+                '</div>' +
+                '</div>';
+
+            // 解锁数据
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">解锁数据</div>';
+            if (unlocks.total_upcoming || unlocks.next_unlock) {
+                html += '<div class="sd-basic-grid">' +
+                    _sdBasicItem('即将解锁总数', unlocks.total_upcoming != null ? _fmtNum(unlocks.total_upcoming) + ' 枚' : '—') +
+                    _sdBasicItem('占总供应量', unlocks.pct_of_supply != null ? unlocks.pct_of_supply.toFixed(2) + '%' : '—') +
+                    _sdBasicItem('下次解锁时间', unlocks.next_unlock_date || '—') +
+                    _sdBasicItem('下次解锁量', unlocks.next_unlock_amount != null ? _fmtNum(unlocks.next_unlock_amount) + ' 枚' : '—') +
+                    '</div>';
+            } else {
+                html += '<div class="sd-empty">近期无解锁数据</div>';
+            }
+            html += '</div>';
+
+            // 催化剂
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">近期催化剂（' + catalysts.length + '）</div>';
+            if (catalysts.length === 0) {
+                html += '<div class="sd-empty">近期无催化剂事件</div>';
+            } else {
+                html += '<div class="sd-catalyst-list">';
+                catalysts.slice(0, 10).forEach(function (c) {
+                    var stCls = c.strength || 'low';
+                    var stLabel = stCls === 'high' ? '强' : stCls === 'medium' ? '中' : '弱';
+                    var title = c.title || '';
+                    html += '<div class="sd-catalyst-item">' +
+                        '<span class="sd-cat-date">' + (c.event_date || '') + '</span>' +
+                        '<span class="sd-cat-title">' + escapeHtml(title.length > 80 ? title.substring(0, 80) + '...' : title) + '</span>' +
+                        '<span class="sd-cat-strength ' + stCls + '">' + stLabel + '</span>' +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // KOL 链上异动
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">KOL 链上异动（' + kolList.length + '）</div>';
+            if (kolList.length === 0) {
+                html += '<div class="sd-empty">近期无 KOL 链上异动</div>';
+            } else {
+                html += '<div class="sd-kol-list">';
+                kolList.slice(0, 10).forEach(function (k) {
+                    var isOut = k.sub_type && k.sub_type.indexOf('卖出') >= 0;
+                    html += '<div class="sd-kol-item">' +
+                        '<span class="sd-kol-name">' + escapeHtml(k.kol_name || 'KOL') + '</span>' +
+                        '<span class="sd-kol-subtype">' + escapeHtml(k.sub_type || '') + '</span>' +
+                        '<span class="sd-kol-value ' + (isOut ? 'outflow' : '') + '">' + escapeHtml(k.value_change || '') + '</span>' +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // 社交热度
+            html += '<div class="sd-section">' +
+                '<div class="sd-section-title">社交热度</div>';
+            if (social) {
+                html += '<div class="sd-basic-grid">' +
+                    _sdBasicItem('社交热度指数', social.heat_score != null ? social.heat_score.toFixed(1) : '—') +
+                    _sdBasicItem('24h讨论量', social.discussion_24h != null ? social.discussion_24h.toLocaleString() : '—') +
+                    _sdBasicItem('热度变化', social.heat_change_24h != null ? (social.heat_change_24h > 0 ? '+' : '') + social.heat_change_24h.toFixed(2) + '%' : '—',
+                        social.heat_change_24h > 0 ? 'up' : social.heat_change_24h < 0 ? 'down' : '') +
+                    _sdBasicItem('情绪倾向', social.sentiment || '—') +
+                    '</div>';
+            } else {
+                html += '<div class="sd-empty">暂无社交热度数据</div>';
+            }
+            html += '</div>';
+
+            body.innerHTML = html;
+        }
+
+        function _sdBasicItem (label, value, valueCls) {
+            return '<div class="sd-basic-item">' +
+                '<div class="sd-basic-label">' + label + '</div>' +
+                '<div class="sd-basic-value ' + (valueCls || '') + '">' + value + '</div>' +
+                '</div>';
+        }
+
+        function _fmtNum (n) {
+            if (n == null) return '—';
+            if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+            return Number(n).toFixed(2);
+        }
+
+        // ESC 关闭弹窗
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') closeSignalDetail();
+        });
 
         // ── 催化剂事件板块渲染 ──
         const CAT_VISIBLE = 10;  // 默认显示前 10 条
@@ -12531,6 +13334,26 @@
                 <button class="pdf-viewer-close" onclick="closePdfViewer()">✕</button>
             </div>
             <iframe id="pdf-viewer-iframe" class="pdf-viewer-iframe"></iframe>
+        </div>
+    </div>
+
+    <!-- FEAT-AI-HIGHLIGHT: 信号详情弹窗 -->
+    <div class="signal-detail-modal" id="signal-detail-modal" onclick="if(event.target===this)closeSignalDetail()">
+        <div class="signal-detail-container">
+            <div class="signal-detail-header">
+                <div class="sd-header-left">
+                    <span class="sd-symbol" id="sd-symbol">BTC</span>
+                    <span class="sd-name" id="sd-name">Bitcoin</span>
+                    <span class="sd-sector" id="sd-sector">赛道</span>
+                </div>
+                <div class="sd-header-right">
+                    <button class="sd-refresh-btn" onclick="refreshSignalDetailAi()" title="重新分析">🔄 AI 刷新</button>
+                    <button class="sd-close-btn" onclick="closeSignalDetail()">✕</button>
+                </div>
+            </div>
+            <div class="signal-detail-body" id="signal-detail-body">
+                <div class="sd-loading">加载中...</div>
+            </div>
         </div>
     </div>
 </body>

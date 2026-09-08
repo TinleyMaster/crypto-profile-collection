@@ -1131,6 +1131,308 @@ def api_scheduler_feed():
 # ── 代币搜索与资料查询 ──
 
 
+@app.route("/api/assets/<int:asset_id>/signal-detail")
+def api_asset_signal_detail(asset_id: int):
+    """FEAT-AI-HIGHLIGHT: 获取代币信号详情（全维度数据 + AI分析）。
+
+    返回该代币的：
+    - 基础信息（价格、市值、赛道等）
+    - 各维度信号列表
+    - 链上数据摘要
+    - 解锁数据摘要
+    - 近期催化剂
+    - AI 综合分析与推荐理由
+    """
+    force_ai = request.args.get("force_ai") == "1"
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 基础信息
+                cur.execute("""
+                    SELECT a.asset_id, a.canonical_symbol as symbol,
+                           a.canonical_name as name, a.primary_sector as sector,
+                           cb.price_usd as price, cb.market_cap_usd as market_cap,
+                           cb.fully_diluted_valuation as fdv,
+                           cb.price_change_percentage_24h as change_24h,
+                           cb.price_change_percentage_7d as change_7d,
+                           cb.volume_24h
+                    FROM core.asset a
+                    LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
+                    WHERE a.asset_id = %s
+                """, (asset_id,))
+                basic = cur.fetchone()
+                if not basic:
+                    return jsonify({"ok": False, "error": "资产不存在"}), 404
+
+                # 链上持仓数据
+                cur.execute("""
+                    SELECT holder_count, top_10_pct, top_25_pct, top_5_pct
+                    FROM biz.asset_token_holders
+                    WHERE asset_id = %s
+                    ORDER BY snapshot_date DESC
+                    LIMIT 1
+                """, (asset_id,))
+                holders = cur.fetchone()
+
+                # 解锁数据
+                cur.execute("""
+                    SELECT unlock_events_json, data_source, confidence
+                    FROM biz.asset_token_unlocks
+                    WHERE asset_id = %s
+                    LIMIT 1
+                """, (asset_id,))
+                unlocks = cur.fetchone()
+
+                # 近期催化剂
+                cur.execute("""
+                    SELECT ac.catalyst_id, ac.title, ac.event_date,
+                           ac.event_type as category, ac.direction, ac.strength, ac.summary
+                    FROM biz.asset_catalyst ac
+                    WHERE ac.asset_id = %s
+                      AND ac.event_date >= NOW() - INTERVAL '30 days'
+                    ORDER BY ac.event_date DESC
+                    LIMIT 10
+                """, (asset_id,))
+                catalysts = [dict(r) for r in cur.fetchall()]
+
+                # KOL 链上信号
+                cur.execute("""
+                    SELECT k.signal_id, k.signal_subtype, k.event_direction,
+                           k.event_usd_value, k.address_label, k.event_exchange,
+                           k.event_time, k.confidence, p.nickname as kol_name
+                    FROM biz.kol_signal k
+                    JOIN biz.kol_profile p ON p.profile_id = k.profile_id
+                    WHERE k.asset_id = %s
+                      AND k.signal_category = 'onchain'
+                      AND k.created_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY k.event_usd_value DESC NULLS LAST
+                    LIMIT 10
+                """, (asset_id,))
+                kol_onchain = [dict(r) for r in cur.fetchall()]
+
+                # 社交热度
+                cur.execute("""
+                    SELECT sh.social_volume_24h, sh.sentiment_score,
+                           sh.twitter_followers, sh.telegram_members
+                    FROM biz.asset_social_heat sh
+                    WHERE sh.asset_id = %s
+                    ORDER BY sh.snapshot_date DESC
+                    LIMIT 1
+                """, (asset_id,))
+                social = cur.fetchone()
+
+        # 组装 asset_basic
+        asset_basic = {
+            "asset_id": basic["asset_id"],
+            "symbol": str(basic["symbol"] or "?"),
+            "name": str(basic["name"] or ""),
+            "sector": str(basic["sector"] or "未知"),
+            "price": float(basic["price"]) if basic.get("price") is not None else None,
+            "market_cap": float(basic["market_cap"]) if basic.get("market_cap") is not None else None,
+            "fdv": float(basic["fdv"]) if basic.get("fdv") is not None else None,
+            "change_24h": float(basic["change_24h"]) if basic.get("change_24h") is not None else None,
+            "change_7d": float(basic["change_7d"]) if basic.get("change_7d") is not None else None,
+            "volume_24h": float(basic["volume_24h"]) if basic.get("volume_24h") is not None else None,
+        }
+
+        # 组装 extra data
+        asset_extra = {
+            "onchain": {},
+            "unlocks": {},
+            "social": {},
+            "catalysts": [
+                {
+                    "title": c.get("title", ""),
+                    "event_date": str(c.get("event_date", "")),
+                    "strength": c.get("strength", ""),
+                    "category": c.get("category", ""),
+                    "direction": c.get("direction", ""),
+                }
+                for c in catalysts
+            ],
+        }
+        if holders:
+            if holders.get("top_10_pct") is not None:
+                asset_extra["onchain"]["holder_concentration_top10"] = float(holders["top_10_pct"])
+        if kol_onchain:
+            total_inflow = sum(
+                float(k["event_usd_value"] or 0)
+                for k in kol_onchain
+                if k.get("event_direction") and "in" in str(k["event_direction"]).lower()
+            )
+            total_outflow = sum(
+                float(k["event_usd_value"] or 0)
+                for k in kol_onchain
+                if k.get("event_direction") and "out" in str(k["event_direction"]).lower()
+            )
+            net = total_inflow - total_outflow
+            if abs(net) > 0:
+                asset_extra["onchain"]["whale_flow_7d"] = f"{'流入' if net > 0 else '流出'} ${abs(net)/1e6:.1f}M"
+        if unlocks and unlocks.get("unlock_events_json"):
+            # 解析最近一次解锁
+            events = unlocks["unlock_events_json"] if isinstance(unlocks["unlock_events_json"], list) else []
+            if events:
+                next_event = events[0]
+                asset_extra["unlocks"]["next_unlock_date"] = str(next_event.get("date", ""))
+                if next_event.get("unlock_percentage") is not None:
+                    asset_extra["unlocks"]["next_unlock_pct"] = float(next_event["unlock_percentage"])
+            asset_extra["unlocks"]["data_source"] = unlocks.get("data_source", "")
+            asset_extra["unlocks"]["confidence"] = unlocks.get("confidence", "")
+        if social:
+            if social.get("twitter_followers"):
+                asset_extra["social"]["twitter_followers"] = str(social["twitter_followers"])
+            if social.get("social_volume_24h"):
+                asset_extra["social"]["social_volume_24h"] = str(social["social_volume_24h"])
+            if social.get("sentiment_score") is not None:
+                asset_extra["social"]["sentiment"] = f"{float(social['sentiment_score']):.2f}"
+
+        # 从各数据中提取信号列表
+        asset_signals = _build_signals_from_detail_data(
+            basic=asset_basic,
+            holders=holders,
+            unlocks=unlocks,
+            catalysts=catalysts,
+            kol_onchain=kol_onchain,
+            social=social,
+        )
+
+        # 调用 AI 分析
+        ai_analysis = None
+        try:
+            from ai_signal_analyzer import analyze_asset_signals
+            ai_analysis = analyze_asset_signals(
+                asset_basic, asset_signals, asset_extra,
+                force_refresh=force_ai,
+            )
+        except Exception as e:
+            ai_analysis = {"error": str(e)}
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "basic": asset_basic,
+                "signals": asset_signals,
+                "holders": dict(holders) if holders else None,
+                "unlocks_summary": {
+                    "data_source": unlocks.get("data_source") if unlocks else None,
+                    "confidence": unlocks.get("confidence") if unlocks else None,
+                    "events_count": len(unlocks["unlock_events_json"]) if unlocks and unlocks.get("unlock_events_json") and isinstance(unlocks["unlock_events_json"], list) else 0,
+                } if unlocks else None,
+                "catalysts": catalysts,
+                "kol_onchain": kol_onchain,
+                "social": dict(social) if social else None,
+                "ai_analysis": ai_analysis,
+            },
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _build_signals_from_detail_data(basic: dict, holders, unlocks, catalysts,
+                                     kol_onchain: list, social) -> list[dict]:
+    """从详情数据中构建信号列表（用于 AI 分析的输入）。"""
+    signals = []
+
+    # KOL 链上信号
+    for k in kol_onchain[:8]:
+        direction = ""
+        ev_dir = str(k.get("event_direction", "")).lower()
+        if "in" in ev_dir or "accum" in ev_dir:
+            direction = "long"
+        elif "out" in ev_dir or "distrib" in ev_dir:
+            direction = "short"
+        usd_val = float(k.get("event_usd_value") or 0)
+        score = min(95, 40 + usd_val / 500000)  # 50万起步，上限95
+        tier = "HIGH" if score >= 70 else "MED" if score >= 50 else "LOW"
+        signals.append({
+            "signal_type": "kol_onchain",
+            "direction": direction,
+            "conviction_score": score,
+            "conviction_tier": tier,
+            "title": f"{k.get('kol_name', 'KOL')}: {k.get('signal_subtype', '')}",
+            "trigger_logic": f"{k.get('address_label', '')} {k.get('event_direction', '')} ${usd_val/1e6:.2f}M",
+            "usd_value": usd_val,
+            "address_label": k.get("address_label", ""),
+        })
+
+    # 解锁信号
+    if unlocks and unlocks.get("unlock_events_json"):
+        events = unlocks["unlock_events_json"] if isinstance(unlocks["unlock_events_json"], list) else []
+        if events:
+            next_evt = events[0]
+            pct = float(next_evt.get("unlock_percentage") or 0)
+            if pct >= 1:
+                score = min(95, 50 + pct * 5)
+                signals.append({
+                    "signal_type": "token_unlock",
+                    "direction": "short",
+                    "conviction_score": score,
+                    "conviction_tier": "HIGH" if pct >= 5 else "MED",
+                    "title": f"代币解锁 {pct:.2f}%",
+                    "trigger_logic": f"{next_evt.get('date', '未知时间')} 解锁 {pct:.2f}%",
+                    "unlock_pct": pct,
+                    "unlock_date": str(next_evt.get("date", "")),
+                })
+
+    # 催化剂信号
+    for c in catalysts[:5]:
+        direction = "long" if c.get("direction") == "bullish" else "short" if c.get("direction") == "bearish" else "neutral"
+        strength = c.get("strength") or "low"
+        score = 60 if strength == "high" else 45 if strength == "medium" else 30
+        signals.append({
+            "signal_type": "catalyst",
+            "direction": direction,
+            "conviction_score": score,
+            "conviction_tier": "MED" if score >= 50 else "LOW",
+            "title": c.get("title", ""),
+            "trigger_logic": f"{c.get('event_date', '')} [{c.get('category', '')}]",
+            "event_date": str(c.get("event_date", "")),
+            "strength": strength,
+        })
+
+    # 价格异动信号（从基础数据推导）
+    chg24h = basic.get("change_24h")
+    if chg24h is not None:
+        if chg24h >= 10:
+            signals.append({
+                "signal_type": "price_surge",
+                "direction": "long",
+                "conviction_score": min(80, 50 + chg24h),
+                "conviction_tier": "HIGH" if chg24h >= 20 else "MED",
+                "title": f"24h 暴涨 {chg24h:.1f}%",
+                "trigger_logic": f"24小时涨幅 {chg24h:.1f}%",
+            })
+        elif chg24h <= -10:
+            signals.append({
+                "signal_type": "price_crash",
+                "direction": "short",
+                "conviction_score": min(80, 50 + abs(chg24h)),
+                "conviction_tier": "HIGH" if chg24h <= -20 else "MED",
+                "title": f"24h 暴跌 {chg24h:.1f}%",
+                "trigger_logic": f"24小时跌幅 {abs(chg24h):.1f}%",
+            })
+
+    # 持仓集中度信号
+    if holders and holders.get("top_10_pct") is not None:
+        top10 = float(holders["top_10_pct"])
+        if top10 >= 70:
+            signals.append({
+                "signal_type": "holder_concentration",
+                "direction": "short",
+                "conviction_score": min(85, 40 + top10 * 0.5),
+                "conviction_tier": "HIGH" if top10 >= 85 else "MED",
+                "title": f"前10持仓 {top10:.1f}%",
+                "trigger_logic": f"持仓高度集中，前10地址占 {top10:.1f}%",
+            })
+
+    return signals
+
+
 @app.route("/api/assets/search")
 def api_search_assets():
     q = (request.args.get("q", "") or "").strip()

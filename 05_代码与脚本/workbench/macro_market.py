@@ -5201,6 +5201,29 @@ def score_opportunities(overview: dict) -> dict:
         if asset_id is not None:
             o["asset_id"] = asset_id
 
+    # FEAT-AI-HIGHLIGHT: AI 增强精选（在 asset_id 解析之后，确保信号有 asset_id）
+    ai_enabled = str(t.get("ai_highlight_enabled", "1")) == "1"
+    if ai_enabled and highlights:
+        try:
+            from ai_signal_analyzer import ai_enrich_highlight_signals
+            ai_max = int(t.get("ai_highlight_max", 10))
+            highlights = ai_enrich_highlight_signals(highlights, max_ai_analyze=ai_max)
+        except Exception:
+            pass  # AI 增强失败不影响主流程
+    if ai_enabled and risk_signals:
+        try:
+            from ai_signal_analyzer import ai_enrich_risk_signals
+            ai_max_risk = int(t.get("ai_risk_max", 8))
+            risk_signals = ai_enrich_risk_signals(risk_signals, max_ai_analyze=ai_max_risk)
+        except Exception:
+            pass  # AI 增强失败不影响主流程
+
+    # 为 highlights 和 risk_signals 也补上 asset_id（AI 增强后可能有新信号或丢失的情况）
+    for sig_list in [highlights, risk_signals]:
+        for o in sig_list:
+            if not o.get("asset_id") and o.get("target"):
+                o["asset_id"] = symbol_to_asset.get(str(o["target"]).upper().strip())
+
     status = "ok"
     if not opportunities:
         # 0 机会但上游数据齐全（平静日）= empty，非故障

@@ -2014,8 +2014,53 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     # 工单6: KOL onchain 情报
     "kol_window_days": 7,                    # KOL 信号回看窗口（天）
     "kol_top_n": 5,
-    # FEAT-HIGHLIGHT-001: 高亮信号精选
-    "highlight_max_total": 10,               # 高亮信号总数上限
+    # FEAT-HORIZON-001: 信号周期 & 有效期配置
+    # horizon: short(1-7天) / medium(1-3月) / long(6月+)
+    # expire_days: 信号有效期（线性衰减到 0 的天数）
+    # weight_override: 可选，替代默认 conviction 权重（None=用默认）
+    "signal_horizon_map": {
+        # ── 估值类（长期，慢变量，作为过滤器）──
+        "mvrv_deep_under":      {"horizon": "long",    "expire_days": 90,  "is_valuation": True},
+        "mvrv_under_watch":     {"horizon": "long",    "expire_days": 60,  "is_valuation": True},
+        "mvrv_deep_over":       {"horizon": "long",    "expire_days": 90,  "is_valuation": True},
+        "mvrv_over_watch":      {"horizon": "long",    "expire_days": 60,  "is_valuation": True},
+        # ── 价格/量能类（短期，战术信号）──
+        "price_surge":          {"horizon": "short",   "expire_days": 5},
+        "price_crash":          {"horizon": "short",   "expire_days": 5},
+        "price_volume_surge":   {"horizon": "short",   "expire_days": 7},
+        "volume_surge":         {"horizon": "short",   "expire_days": 5},
+        # ── 赛道/板块类（中期，趋势信号）──
+        "sector_inflow":        {"horizon": "medium",  "expire_days": 14},
+        "sector_outflow":       {"horizon": "medium",  "expire_days": 14},
+        "narrative_surge":      {"horizon": "medium",  "expire_days": 21},
+        "chain_inflow":         {"horizon": "medium",  "expire_days": 14},
+        # ── 资金流类（中期，核心趋势）──
+        "stablecoin_inflow":    {"horizon": "medium",  "expire_days": 21},
+        "stablecoin_outflow":   {"horizon": "medium",  "expire_days": 21},
+        "etf_flow":             {"horizon": "short",   "expire_days": 5},
+        "btc_left_accum":       {"horizon": "medium",  "expire_days": 14},
+        "cm_adoption_divergence": {"horizon": "medium","expire_days": 21},
+        # ── 链上/情绪类（短期，战术信号）──
+        "leverage_extreme":     {"horizon": "short",   "expire_days": 3},
+        "fng_extreme":          {"horizon": "short",   "expire_days": 5},
+        "whale_flow":           {"horizon": "short",   "expire_days": 5},
+        "funding":              {"horizon": "short",   "expire_days": 3},
+        # ── KOL/事件类（短期，脉冲信号）──
+        "kol_onchain":          {"horizon": "short",   "expire_days": 7},
+        "catalyst":             {"horizon": "short",   "expire_days": 10},
+        # ── 基本面类（长期）──
+        "github_activity":      {"horizon": "long",    "expire_days": 60},
+        "funding_raise":        {"horizon": "long",    "expire_days": 45},
+        "token_unlock":         {"horizon": "short",   "expire_days": 14},
+    },
+    # FEAT-HORIZON-001: 估值过滤器阈值
+    "valuation_filter_high_pct": 85,   # MVRV ≥ 此值 → 多头信号打折扣
+    "valuation_filter_low_pct": 15,    # MVRV ≤ 此值 → 空头信号打折扣
+    "valuation_filter_mult": 0.5,      # 过滤区信号强度乘数（音量旋钮）
+    # FEAT-HORIZON-001: 周期权重（加权总分用）
+    "horizon_weight_short": 0.25,
+    "horizon_weight_medium": 0.50,
+    "horizon_weight_long": 0.25,
 }
 
 
@@ -2655,6 +2700,118 @@ def _finalize_conviction(raw_strength: float, cycle_phase: str, n_confirm: int, 
     bonus = min(cap, max(0, int(n_confirm) - 1) * step)
     score = max(0, min(100, round(raw_strength * regime_mult + bonus)))
     return score, {"raw_strength": raw_strength, "regime_mult": regime_mult, "resonance_bonus": bonus}
+
+
+# ══════════════════════════════════════════════════════════════
+# FEAT-HORIZON-001: 信号周期 & 时间衰减 & 估值过滤器
+# ══════════════════════════════════════════════════════════════
+
+def _signal_horizon_info(signal_type: str, t: dict) -> dict:
+    """根据 signal_type 返回周期配置，默认 medium / 14 天。"""
+    hmap = t.get("signal_horizon_map", {}) or {}
+    info = hmap.get(signal_type) or {}
+    return {
+        "horizon": info.get("horizon", "medium"),
+        "expire_days": int(info.get("expire_days", 14)),
+        "is_valuation": bool(info.get("is_valuation", False)),
+    }
+
+
+def _decay_strength(strength: float, days_old: float, expire_days: int) -> float:
+    """信号强度随时间线性衰减，超过有效期后为 0。"""
+    if days_old <= 0:
+        return strength
+    if days_old >= expire_days:
+        return 0.0
+    decay = 1.0 - (days_old / expire_days)
+    return max(0.0, strength * decay)
+
+
+def _apply_valuation_filter(
+    score: float,
+    direction: str,
+    mvrv_pct: float | None,
+    t: dict,
+) -> tuple[float, str]:
+    """FEAT-HORIZON-001：估值过滤器（音量旋钮）。
+
+    - MVRV 极度高估（≥high_pct）：多头信号打 valuation_filter_mult 折
+    - MVRV 极度低估（≤low_pct）：空头信号打 valuation_filter_mult 折
+    - 中间区间：不影响
+
+    返回 (调整后分数, 过滤说明)
+    """
+    if mvrv_pct is None:
+        return score, ""
+    high_pct = float(t.get("valuation_filter_high_pct", 85))
+    low_pct = float(t.get("valuation_filter_low_pct", 15))
+    mult = float(t.get("valuation_filter_mult", 0.5))
+
+    if mvrv_pct >= high_pct and direction == "long":
+        return round(score * mult, 1), f"估值过热，多头信号衰减 ×{mult}"
+    if mvrv_pct <= low_pct and direction == "short":
+        return round(score * mult, 1), f"估值过冷，空头信号衰减 ×{mult}"
+    return score, ""
+
+
+def _annotate_horizon(opp: dict, t: dict, signal_date: str | None = None) -> dict:
+    """为单个机会/信号标注周期信息。
+
+    新增字段：horizon, expire_days, is_valuation, signal_date,
+             decayed_score, days_old, valuation_filter_note
+    直接修改原 dict 并返回。
+    """
+    from datetime import date, datetime
+
+    stype = opp.get("signal_type", "")
+    info = _signal_horizon_info(stype, t)
+
+    opp["horizon"] = info["horizon"]
+    opp["expire_days"] = info["expire_days"]
+    opp["is_valuation"] = info["is_valuation"]
+
+    # 信号日期（默认今天）
+    if signal_date:
+        opp["signal_date"] = signal_date
+    else:
+        opp["signal_date"] = date.today().isoformat()
+
+    # 计算衰减后分数
+    try:
+        sd = datetime.strptime(opp["signal_date"], "%Y-%m-%d").date()
+        days_old = (date.today() - sd).days
+    except Exception:
+        days_old = 0
+    opp["days_old"] = days_old
+
+    base_score = float(opp.get("conviction_score", 0) or 0)
+    decayed = _decay_strength(base_score, days_old, info["expire_days"])
+    opp["decayed_score"] = round(decayed, 1)
+
+    # 估值过滤器（用 BTC 的 MVRV 作为大盘估值参考）
+    opp["valuation_filter_note"] = ""
+
+    return opp
+
+
+def apply_horizon_to_opportunities(
+    opportunities: list[dict],
+    t: dict,
+    btc_mvrv_pct: float | None = None,
+) -> list[dict]:
+    """为一组机会批量标注周期 + 应用估值过滤器。"""
+    for opp in opportunities:
+        _annotate_horizon(opp, t)
+
+        # 应用估值过滤器（仅对非估值类信号）
+        if not opp.get("is_valuation") and btc_mvrv_pct is not None:
+            direction = opp.get("direction", "long") or "long"
+            score = float(opp.get("decayed_score", opp.get("conviction_score", 0)) or 0)
+            filtered, note = _apply_valuation_filter(score, direction, btc_mvrv_pct, t)
+            opp["decayed_score"] = round(filtered, 1)
+            opp["valuation_filter_note"] = note
+
+    return opportunities
 
 
 def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, float]]:
@@ -3404,7 +3561,10 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # ── 2. 全量按排序取候选池 ──
     def _sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
-        score = o.get("conviction_score", 0) or 0
+        # FEAT-HORIZON-001: 优先用衰减后分数（含估值过滤器），否则用原始分
+        score = o.get("decayed_score")
+        if score is None:
+            score = o.get("conviction_score", 0) or 0
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
         return (is_high, is_new, resonance, score)
@@ -3537,7 +3697,10 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
     # ── 2. 按风险强度排序 ──
     def _risk_sort_key(o):
         is_high = 1 if o.get("conviction_tier") == "HIGH" else 0
-        score = o.get("conviction_score", 0) or 0
+        # FEAT-HORIZON-001: 优先用衰减后分数（含估值过滤器）
+        score = o.get("decayed_score")
+        if score is None:
+            score = o.get("conviction_score", 0) or 0
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
         # 解锁优先（确定性高）
@@ -4621,6 +4784,17 @@ def score_opportunities(overview: dict) -> dict:
                 opportunities, excluded, t,
                 cycle_phase=cycle_phase, n_confirm=2,
             )
+
+    # FEAT-HORIZON-001: 为所有信号标注周期 + 时间衰减 + 估值过滤器
+    # 获取 BTC MVRV 百分位作为大盘估值参考
+    btc_mvrv_pct = None
+    btc_info = mvrv_map.get("btc") or mvrv_map.get("BTC")
+    if btc_info:
+        btc_mvrv_pct = btc_info.get("pct_full")
+    apply_horizon_to_opportunities(opportunities, t, btc_mvrv_pct=btc_mvrv_pct)
+    # 同步给 excluded 也标上（前端可能展示）
+    for o in excluded:
+        _annotate_horizon(o, t)
 
     # 精选高亮信号（FEAT-HIGHLIGHT-001）：与完整机会池分离
     highlight_max_total = int(t.get("highlight_max_total", 10))

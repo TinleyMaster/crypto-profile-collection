@@ -5314,11 +5314,21 @@ def score_opportunities(overview: dict) -> dict:
 
     # 精选高亮信号（FEAT-HIGHLIGHT-001）：与完整机会池分离
     highlight_max_total = int(t.get("highlight_max_total", 10))
-    highlights = select_highlight_signals(opportunities, max_total=highlight_max_total)
+    # V2 模式下降级初筛共振门槛（1种即可入池），把质量判断权交给 AI
+    ai_v2_enabled_for_init = str(t.get("ai_v2_enabled", "1")) == "1"
+    hl_min_resonance = 1 if ai_v2_enabled_for_init else 2
+    highlights = select_highlight_signals(
+        opportunities, max_total=highlight_max_total,
+        min_resonance=hl_min_resonance,
+    )
 
     # 精选高危信号（FEAT-RISK-001）：对称于高亮信号，聚焦看空/风险
     risk_max_total = int(t.get("risk_max_total", 8))
-    risk_signals = select_risk_signals(opportunities, max_total=risk_max_total)
+    risk_min_resonance = 1 if ai_v2_enabled_for_init else 1
+    risk_signals = select_risk_signals(
+        opportunities, max_total=risk_max_total,
+        min_resonance=risk_min_resonance,
+    )
 
     # P1：为所有机会/excluded 解析 asset_id，供前端跳转 /research/<asset_id>
     all_symbols: set[str] = set()

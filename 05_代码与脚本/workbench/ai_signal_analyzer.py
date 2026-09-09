@@ -2620,15 +2620,23 @@ def ai_enrich_signals_v2(
         max_ai_review = rules["max_review_per_run"]
 
     # 第一步：过滤哪些该送 AI
+    import re
+    _symbol_re = re.compile(r'^[A-Z0-9]{2,10}$')
     to_analyze = []
     skipped = []
     for sig in signals_by_asset:
         all_signals = sig.get("all_signals") or [sig]
         should_send, reason = should_send_to_ai(all_signals, rules)
         sig["_ai_filter_reason"] = reason
-        if should_send:
+        # 聚合/宏观类信号（无 asset_id 且非单一币种）不送全量画像分析，
+        # 避免 LLM 因数据不足误判降级，保持其原始排名
+        target = (sig.get("target") or "").strip()
+        has_valid_asset = bool(sig.get("asset_id")) or bool(_symbol_re.match(target.upper()))
+        if should_send and has_valid_asset:
             to_analyze.append(sig)
         else:
+            if not has_valid_asset:
+                sig["_ai_filter_reason"] = "聚合/宏观信号，跳过全量画像"
             skipped.append(sig)
 
     # 成本控制：只取前 N 个（按原规则信念分排序）
@@ -2651,23 +2659,27 @@ def ai_enrich_signals_v2(
 
         enriched.append(sig)
 
-    # 第三步：按 AI 综合评分排序（机会按高分排前，风险按低分排前）
+    # 第三步：全量统一排序（AI认可的排前，被降级的和未送AI的按基础分混排）
     def _sort_key(s):
         ai_score = s.get("ai_analysis_v2", {}).get("overall_score", 0) or 0
         base_score = s.get("conviction_score", 0) or 0
+        has_v2 = bool(s.get("ai_analysis_v2") and not s.get("ai_analysis_v2", {}).get("error"))
         downgraded = 1 if s.get("_ai_downgraded") else 0
 
         if direction == "long":
-            # 高分在前；被降级的压后
-            mixed = ai_score * 0.5 + base_score * 0.5
-            return (-downgraded, mixed, ai_score)
+            # 排序优先级：AI认可且不降级 > 基础分 > AI分
+            # - 第1层：AI认可（有V2分析且没被降级）的排最前
+            # - 第2层：按混合分排序（有V2的用混合分，没V2的用基础分）
+            ai_approved = 1 if (has_v2 and not downgraded) else 0
+            mixed = ai_score * 0.5 + base_score * 0.5 if has_v2 else base_score
+            return (ai_approved, mixed, ai_score)
         else:
-            # 低分在前（风险高）
+            # 风险信号对称
+            ai_approved = 1 if (has_v2 and not downgraded) else 0
             risk_score = 100 - ai_score if ai_score > 0 else 0
-            mixed = risk_score * 0.5 + base_score * 0.5
-            return (-downgraded, mixed, base_score)
+            mixed = risk_score * 0.5 + base_score * 0.5 if has_v2 else base_score
+            return (ai_approved, mixed, base_score)
 
-    enriched.sort(key=_sort_key, reverse=True)
-
-    # 未送 AI 的跟在后面（保持原顺序）
-    return enriched + skipped
+    all_signals = enriched + skipped
+    all_signals.sort(key=_sort_key, reverse=True)
+    return all_signals

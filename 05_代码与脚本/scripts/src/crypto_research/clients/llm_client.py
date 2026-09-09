@@ -408,12 +408,15 @@ class LLMClient:
              temperature: float = 0.1, max_tokens: int = 2048,
              timeout_retries: int = 3,
              response_format: dict | None = None,
-             use_cache: bool = True) -> str:
+             use_cache: bool = True,
+             enable_thinking: bool = False) -> str:
         """统一的聊天接口，自动选择底层 API 格式；主 provider 失败时切换兜底重试一次。
 
         timeout_retries: ReadTimeoutError 重试次数（指数退避），默认 3。
         response_format: 可选，如 {"type": "json_object"}，强制模型输出 JSON。
         use_cache: 是否使用 prompt 缓存（相同输入直接返回缓存结果）。
+        enable_thinking: 是否开启模型思考模式（DeepSeek 等支持 thinking 的模型）。
+                         开启后思考内容可通过 get_last_thinking() 获取。
         """
         self._last_diag = {
             "provider": self.provider,
@@ -440,15 +443,16 @@ class LLMClient:
         last_exc = None
         for attempt in range(timeout_retries):
             try:
-                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens,
+                                        response_format, enable_thinking)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
                 completion_tokens = estimate_tokens(result)
                 self._total_completion_tokens += completion_tokens
                 self._last_diag["completion_tokens_est"] = completion_tokens
 
-                # 写缓存（仅确定性调用）
-                if use_cache and temperature <= 0.1:
+                # 写缓存（仅确定性调用；开启 thinking 时不缓存，因思维链有随机性）
+                if use_cache and temperature <= 0.1 and not enable_thinking:
                     self._cache_set(key, result)
                 return result
             except ReadTimeoutError as e:
@@ -483,13 +487,14 @@ class LLMClient:
                 "fallback_from": str(exc),
             }
             try:
-                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens, response_format)
+                result = self._dispatch(system_prompt, user_prompt, temperature, max_tokens,
+                                        response_format, enable_thinking)
                 self._last_raw_response = result
                 self._last_diag["result_len"] = len(result)
                 completion_tokens = estimate_tokens(result)
                 self._total_completion_tokens += completion_tokens
                 self._last_diag["completion_tokens_est"] = completion_tokens
-                if use_cache and temperature <= 0.1:
+                if use_cache and temperature <= 0.1 and not enable_thinking:
                     self._cache_set(key, result)
                 return result
             except Exception as exc2:
@@ -500,15 +505,19 @@ class LLMClient:
 
     def _dispatch(self, system_prompt: str, user_prompt: str,
                   temperature: float, max_tokens: int,
-                  response_format: dict | None = None) -> str:
+                  response_format: dict | None = None,
+                  enable_thinking: bool = False) -> str:
         if self.api_type == "responses":
-            return self._call_responses(system_prompt, user_prompt, temperature, max_tokens, response_format)
-        return self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens, response_format)
+            return self._call_responses(system_prompt, user_prompt, temperature, max_tokens,
+                                       response_format, enable_thinking)
+        return self._call_chat_completions(system_prompt, user_prompt, temperature, max_tokens,
+                                            response_format, enable_thinking)
 
     def _call_chat_completions(
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
         response_format: dict | None = None,
+        enable_thinking: bool = False,
     ) -> str:
         """OpenAI 兼容的 /chat/completions 接口（流式）。"""
         if not self.is_available():
@@ -531,10 +540,14 @@ class LLMClient:
             "stream": True,
         }
 
-        # DeepSeek V4 默认启用思考模式，噪声判断不需要深度推理，显式禁用
-        # 避免 max_tokens 被思维链吃掉导致 content 为空
+        # DeepSeek V4 默认启用思考模式
+        # - 默认禁用（避免 max_tokens 被思维链吃掉导致 content 为空）
+        # - enable_thinking=True 时显式开启
         if "deepseek" in (self.model or "").lower():
-            payload["thinking"] = {"type": "disabled"}
+            if enable_thinking:
+                payload["thinking"] = {"type": "enabled"}
+            else:
+                payload["thinking"] = {"type": "disabled"}
         else:
             payload["temperature"] = temperature
 
@@ -550,6 +563,7 @@ class LLMClient:
         resp.raise_for_status()
 
         content = ""
+        thinking_content = ""
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -558,18 +572,28 @@ class LLMClient:
                 break
             try:
                 data = json.loads(chunk)
-                delta = data["choices"][0]["delta"].get("content") or ""
-                content += delta
+                delta = data["choices"][0]["delta"]
+                content += delta.get("content") or ""
+                # 收集思考内容（DeepSeek 用 thinking_reasoning_content / reasoning_content）
+                thinking_content += (
+                    delta.get("thinking_reasoning_content")
+                    or delta.get("reasoning_content")
+                    or ""
+                )
             except Exception:
                 continue
 
-        self._last_full_response = {"streamed_content_length": len(content)}
+        self._last_full_response = {
+            "streamed_content_length": len(content),
+            "thinking_content": thinking_content or None,
+        }
         return content
 
     def _call_responses(
         self, system_prompt: str, user_prompt: str,
         temperature: float, max_tokens: int,
         response_format: dict | None = None,
+        enable_thinking: bool = False,
     ) -> str:
         """火山方舟 /api/v3/responses 接口（DeepSeek 系列模型，流式）。"""
         if not self.is_available():
@@ -591,10 +615,14 @@ class LLMClient:
             ],
         }
 
-        # DeepSeek V4 默认启用思考模式，显式禁用（对齐 chat 路径）
-        # 避免 max_tokens 被思维链吃掉导致 content 为空
+        # DeepSeek V4 思考模式控制
+        # - 默认禁用（避免 max_tokens 被思维链吃掉导致 content 为空）
+        # - enable_thinking=True 时显式开启
         if "deepseek" in (self.model or "").lower():
-            payload["thinking"] = {"type": "disabled"}
+            if enable_thinking:
+                payload["thinking"] = {"type": "enabled"}
+            else:
+                payload["thinking"] = {"type": "disabled"}
         else:
             payload["temperature"] = temperature
 
@@ -611,6 +639,7 @@ class LLMClient:
 
         # 消费 SSE，按 Responses API 格式重建 content
         content = ""
+        thinking_content = ""
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -619,20 +648,43 @@ class LLMClient:
                 break
             try:
                 data = json.loads(chunk)
-                # 格式1: output_message item，delta.content 为 text
+                # 格式1: output_message item，content 为各类 output
                 if data.get("type") == "output_message":
                     for c in data.get("content", []):
-                        if isinstance(c, dict) and c.get("type") == "output_text":
-                            content += c.get("text", "")
-                # 格式2: choices delta（部分 provider 用此格式）
+                        if isinstance(c, dict):
+                            if c.get("type") == "output_text":
+                                content += c.get("text", "")
+                            elif c.get("type") in ("thinking", "reasoning"):
+                                thinking_content += c.get("text", "") or c.get("delta", "") or ""
+                # 格式2: response.output_text.delta（部分实现）
+                elif data.get("type") == "response.output_text.delta":
+                    content += data.get("delta", "")
+                # 格式3: thinking.delta
+                elif data.get("type") in ("thinking.delta", "reasoning.delta"):
+                    thinking_content += data.get("delta", "")
+                # 格式4: choices delta（部分 provider 用此格式）
                 elif "choices" in data:
                     delta = data["choices"][0].get("delta", {})
                     content += delta.get("content") or ""
+                    thinking_content += (
+                        delta.get("thinking_reasoning_content")
+                        or delta.get("reasoning_content")
+                        or ""
+                    )
             except Exception:
                 continue
 
-        self._last_full_response = {"streamed_content_length": len(content)}
+        self._last_full_response = {
+            "streamed_content_length": len(content),
+            "thinking_content": thinking_content or None,
+        }
         return content
+
+    def get_last_thinking(self) -> str | None:
+        """获取最近一次 LLM 调用的思考内容（如果有）。"""
+        if self._last_full_response and isinstance(self._last_full_response, dict):
+            return self._last_full_response.get("thinking_content")
+        return None
 
     def batch_check_crypto_relevance(
         self,

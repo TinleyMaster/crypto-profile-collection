@@ -2238,7 +2238,7 @@ def _call_llm_analysis_v2(
     from crypto_research.clients.llm_client import LLMClient, extract_json_from_llm_response
 
     settings = get_settings(require_database=False)
-    llm = LLMClient(settings, rpm=30, timeout=60)
+    llm = LLMClient(settings, rpm=30, timeout=90)
 
     if not llm.is_available():
         raise RuntimeError("LLM 不可用（未配置 API Key）")
@@ -2246,12 +2246,28 @@ def _call_llm_analysis_v2(
     system_prompt = _build_system_prompt_v2()
     user_prompt = _build_user_prompt_v2(profile, asset_signals)
 
+    # V2 高亮信号分析：开启思考模式，让 AI 有更充分的推理
     raw = llm.chat(
         system_prompt, user_prompt,
         temperature=0.3,
-        max_tokens=4096,
+        max_tokens=8192,
         response_format={"type": "json_object"},
         use_cache=True,
+        enable_thinking=True,
+    )
+
+    # 追溯日志：保存完整请求/响应/思考过程
+    _write_ai_trace(
+        tag="signal_v2",
+        asset_id=profile.get("asset_id"),
+        symbol=profile.get("symbol"),
+        signal_types=sorted(set(s.get("signal_type", "") for s in asset_signals if s.get("signal_type"))),
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        raw_response=raw,
+        thinking_content=llm.get_last_thinking(),
+        provider=getattr(llm, "provider", ""),
+        model=getattr(llm, "model", ""),
     )
 
     data = extract_json_from_llm_response(raw)
@@ -2281,6 +2297,51 @@ def _call_llm_analysis_v2(
         "investment_logic": str(data.get("investment_logic", ""))[:500],
         "error": None,
     }
+
+
+def _write_ai_trace(
+    tag: str,
+    asset_id: int | None,
+    symbol: str | None,
+    signal_types: list[str],
+    system_prompt: str,
+    user_prompt: str,
+    raw_response: str,
+    thinking_content: str | None,
+    provider: str = "",
+    model: str = "",
+) -> None:
+    """写入 AI 追溯日志（JSONL 格式，按日期分文件）。
+
+    日志内容：完整的 system_prompt、user_prompt、原始响应、思考过程。
+    保存位置：workbench/output/ai_trace/{tag}_{YYYY-MM-DD}.jsonl
+    """
+    import json
+    import datetime
+    try:
+        trace_dir = Path(__file__).parent / "output" / "ai_trace"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        trace_file = trace_dir / f"{tag}_{date_str}.jsonl"
+
+        entry = {
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "tag": tag,
+            "asset_id": asset_id,
+            "symbol": symbol,
+            "signal_types": signal_types,
+            "provider": provider,
+            "model": model,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_response": raw_response,
+            "thinking_content": thinking_content,
+        }
+        with open(trace_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        # 日志写入失败不影响主流程
+        pass
 
 
 def _build_system_prompt_v2() -> str:

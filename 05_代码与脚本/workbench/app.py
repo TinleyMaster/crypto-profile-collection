@@ -1342,14 +1342,24 @@ def api_asset_signal_detail(asset_id: int):
             social=social,
         )
 
-        # 调用 AI 分析
+        # 调用 AI 分析（V1 + V2 并行，V2 优先展示）
         ai_analysis = None
+        ai_analysis_v2 = None
         try:
-            from ai_signal_analyzer import analyze_asset_signals
+            from ai_signal_analyzer import analyze_asset_signals, analyze_asset_v2
+            # V1（保留作 fallback）
             ai_analysis = analyze_asset_signals(
                 asset_basic, asset_signals, asset_extra,
                 force_refresh=force_ai,
             )
+            # V2：全量画像 + 六维评分卡
+            try:
+                ai_analysis_v2 = analyze_asset_v2(
+                    asset_id, asset_signals,
+                    force_refresh=force_ai,
+                )
+            except Exception as e2:
+                ai_analysis_v2 = {"error": str(e2)}
         except Exception as e:
             ai_analysis = {"error": str(e)}
 
@@ -1368,6 +1378,7 @@ def api_asset_signal_detail(asset_id: int):
                 "kol_onchain": kol_onchain,
                 "social": dict(social) if social else None,
                 "ai_analysis": ai_analysis,
+                "ai_analysis_v2": ai_analysis_v2,
             },
         })
     except Exception as e:

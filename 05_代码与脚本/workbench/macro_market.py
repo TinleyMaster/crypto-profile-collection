@@ -3943,18 +3943,17 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
             return False
         return bool(_symbol_re.match(t))
 
+    # V2：配额适度放宽（给 AI 更多候选，最终排序由 AI 评分决定）
+    # 旧配额已废弃，新配额约为原来的 1.5 倍
     quotas = {
-        "mvrv_deep_under": 2, "mvrv_under_watch": 1,
-        "catalyst": 2, "whale_flow": 2, "github_activity": 1,
-        "funding": 1, "token_unlock": 1, "kol_onchain": 1,
-        # 第二刀新增
-        "fng_extreme": 1, "leverage_extreme": 1, "stablecoin_inflow": 1,
-        # 第三刀新增
-        "etf_flow": 1,
-        # FEAT-SIGNAL-SRC 新增
-        "price_surge": 2, "price_volume_surge": 2, "volume_surge": 1,
-        "sector_inflow": 1,
-        "__default__": 1,
+        "mvrv_deep_under": 3, "mvrv_under_watch": 2,
+        "catalyst": 3, "whale_flow": 3, "github_activity": 2,
+        "funding": 2, "token_unlock": 2, "kol_onchain": 2,
+        "fng_extreme": 2, "leverage_extreme": 2, "stablecoin_inflow": 2,
+        "etf_flow": 2,
+        "price_surge": 3, "price_volume_surge": 3, "volume_surge": 2,
+        "sector_inflow": 2,
+        "__default__": 2,
     }
 
     # ── 1. 筛选多头方向信号（高亮信号 = 机会/看多） ──
@@ -4074,19 +4073,19 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
         return bool(_symbol_re.match(t))
 
     # 风险信号类型配额（合并后的卡片数）
+    # V2：配额适度放宽（给 AI 更多候选，最终排序由 AI 评分决定）
     quotas = {
-        "token_unlock": 2,
-        "whale_flow": 2,
-        "mvrv_deep_over": 2,
-        "mvrv_over_watch": 1,
-        "fng_extreme": 1,
-        "leverage_extreme": 1,
-        "github_activity": 1,
-        "catalyst": 1,
-        # FEAT-SIGNAL-SRC 新增
-        "price_crash": 2,
-        "sector_outflow": 1,
-        "__default__": 1,
+        "token_unlock": 3,
+        "whale_flow": 3,
+        "mvrv_deep_over": 3,
+        "mvrv_over_watch": 2,
+        "fng_extreme": 2,
+        "leverage_extreme": 2,
+        "github_activity": 2,
+        "catalyst": 2,
+        "price_crash": 3,
+        "sector_outflow": 2,
+        "__default__": 2,
     }
 
     # ── 1. 筛选风险类信号 ──
@@ -4177,6 +4176,41 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
             break
 
     return result
+
+
+def _enrich_highlights_with_ai_v2(signals: list[dict], all_opps: list[dict],
+                                  direction: str = "long", max_ai: int = 6) -> list[dict]:
+    """
+    给高亮/风险信号列表补上 asset_id 并做 V2 AI 增强。
+    与 score_opportunities 中的 AI 增强逻辑保持一致。
+    失败静默，返回原列表。
+    """
+    if not signals:
+        return signals
+
+    try:
+        from ai_signal_analyzer import ai_enrich_signals_v2
+
+        # 1. 先补 asset_id（从 opps 里带 asset_id 的信号里找）
+        symbol_to_asset: dict[str, int] = {}
+        for o in all_opps:
+            aid = o.get("asset_id")
+            tgt = (o.get("target") or "").upper().strip()
+            if aid and tgt:
+                symbol_to_asset[tgt] = int(aid)
+
+        for sig in signals:
+            if not sig.get("asset_id") and sig.get("target"):
+                sym = str(sig["target"]).upper().strip()
+                if sym in symbol_to_asset:
+                    sig["asset_id"] = symbol_to_asset[sym]
+
+        # 2. V2 AI 增强
+        signals = ai_enrich_signals_v2(signals, direction=direction, max_ai_review=max_ai)
+    except Exception:
+        pass  # AI 增强失败不影响主流程
+
+    return signals
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -5309,18 +5343,33 @@ def score_opportunities(overview: dict) -> dict:
 
     # FEAT-AI-HIGHLIGHT: AI 增强精选（在 asset_id 解析之后，确保信号有 asset_id）
     ai_enabled = str(t.get("ai_highlight_enabled", "1")) == "1"
+    ai_v2_enabled = str(t.get("ai_v2_enabled", "1")) == "1"  # V2 开关：全量画像+信号分类过滤
     if ai_enabled and highlights:
         try:
-            from ai_signal_analyzer import ai_enrich_highlight_signals
-            ai_max = int(t.get("ai_highlight_max", 10))
-            highlights = ai_enrich_highlight_signals(highlights, max_ai_analyze=ai_max)
+            if ai_v2_enabled:
+                # V2：信号分类过滤 + 全量画像 + 六维评分卡
+                from ai_signal_analyzer import ai_enrich_signals_v2
+                ai_max = int(t.get("ai_highlight_max", 15))
+                highlights = ai_enrich_signals_v2(highlights, direction="long", max_ai_review=ai_max)
+            else:
+                # V1（旧版保留作 fallback）
+                from ai_signal_analyzer import ai_enrich_highlight_signals
+                ai_max = int(t.get("ai_highlight_max", 10))
+                highlights = ai_enrich_highlight_signals(highlights, max_ai_analyze=ai_max)
         except Exception:
             pass  # AI 增强失败不影响主流程
     if ai_enabled and risk_signals:
         try:
-            from ai_signal_analyzer import ai_enrich_risk_signals
-            ai_max_risk = int(t.get("ai_risk_max", 8))
-            risk_signals = ai_enrich_risk_signals(risk_signals, max_ai_analyze=ai_max_risk)
+            if ai_v2_enabled:
+                # V2：高危信号对称改造
+                from ai_signal_analyzer import ai_enrich_signals_v2
+                ai_max_risk = int(t.get("ai_risk_max", 12))
+                risk_signals = ai_enrich_signals_v2(risk_signals, direction="short", max_ai_review=ai_max_risk)
+            else:
+                # V1（旧版保留作 fallback）
+                from ai_signal_analyzer import ai_enrich_risk_signals
+                ai_max_risk = int(t.get("ai_risk_max", 8))
+                risk_signals = ai_enrich_risk_signals(risk_signals, max_ai_analyze=ai_max_risk)
         except Exception:
             pass  # AI 增强失败不影响主流程
 
@@ -6882,11 +6931,16 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     opp_list = today.get("opportunity_list") or {}
     highlights = opp_list.get("highlight_signals") or []
     risk_signals = opp_list.get("risk_signals") or []
-    # 兜底：如果 overview 里没有精选信号（降级场景），手动生成
+    # 兜底：如果 overview 里没有精选信号（降级场景），手动生成 + V2 AI 增强
     if not highlights and opps:
         highlights = select_highlight_signals(opps, max_total=6)
+        # 与 score_opportunities 对齐：补上 asset_id + V2 AI 增强
+        if highlights:
+            _enrich_highlights_with_ai_v2(highlights, opps, direction="long", max_ai=6)
     if not risk_signals and opps:
         risk_signals = select_risk_signals(opps, max_total=6)
+        if risk_signals:
+            _enrich_highlights_with_ai_v2(risk_signals, opps, direction="short", max_ai=6)
 
     # ── 每日变化榜精简版 ──
     daily_diff_brief = _build_daily_diff_brief(today, highlights, risk_signals)

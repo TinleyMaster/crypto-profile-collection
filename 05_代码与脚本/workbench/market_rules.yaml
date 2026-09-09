@@ -121,6 +121,34 @@ opportunity_rules:
   kol_top_n: 5
   # FEAT-HIGHLIGHT-001: 高亮信号精选
   highlight_max_total: 10              # 高亮信号总数上限
+  # ── AI 评审信号分类（FEAT-AI-HIGHLIGHT-V2）──
+  # 事件驱动类：单条出现就送 AI 分析（信息密度高、有明确时间点、可操作）
+  ai_event_driven_signals:
+    - token_unlock          # 代币解锁（硬事件，有明确日期金额）
+    - funding               # 融资落地（基本面变化）
+    - catalyst              # 催化剂事件（事件驱动）
+    - kol_onchain           # KOL 链上情报（短线参考）
+    - whale_flow            # 巨鲸大额转账
+    - etf_flow              # ETF 资金流（机构动向）
+    - leverage_extreme      # 杠杆极值（短期博弈）
+    - fng_extreme           # 恐贪极值（大盘拐点）
+    - stablecoin_inflow     # 稳定币净流入（场外弹药）
+    - price_volume_surge    # 量价齐升（资金入场）
+    - price_surge           # 价格暴涨
+    - price_crash           # 价格暴跌
+    - volume_surge          # 成交量异动
+  # 慢变量背景类：单独出现不送 AI，需要共振（是背景不是触发器）
+  ai_slow_variable_signals:
+    - mvrv_deep_under       # MVRV 极度低估
+    - mvrv_deep_over        # MVRV 极度高估
+    - mvrv_under_watch      # MVRV 偏低观察
+    - mvrv_over_watch       # MVRV 偏高观察
+    - github_activity       # GitHub 开发活跃变化
+    - sector_inflow         # 赛道资金流入
+    - sector_outflow        # 赛道资金流出
+  # AI 评审成本控制
+  ai_max_review_per_run: 15            # 单次最多评审多少个代币（成本上限）
+  ai_slow_min_resonance: 2             # 慢变量类最少需要多少种信号共振才送 AI
 
 # ── 评分微调参数（scoring tuning） ──
 scoring_tuning:

@@ -725,6 +725,70 @@ def api_dashboard():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/ai-trace")
+def api_ai_trace():
+    """AI 追溯日志列表（V2 信号分析）。
+
+    Query params:
+        tag: 日志标签，默认 signal_v2
+        date: YYYY-MM-DD，默认今天
+        limit: 最多返回条数，默认 50
+    """
+    try:
+        tag = request.args.get("tag", "signal_v2")
+        date_str = request.args.get("date")
+        limit = min(int(request.args.get("limit", 50)), 200)
+
+        if not date_str:
+            import datetime
+            date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+        trace_dir = Path(__file__).parent / "output" / "ai_trace"
+        trace_file = trace_dir / f"{tag}_{date_str}.jsonl"
+
+        if not trace_file.exists():
+            return jsonify({"ok": True, "data": [], "total": 0, "date": date_str})
+
+        entries = []
+        with open(trace_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    # 列表只返回摘要，不返回完整 prompt/response（太大）
+                    summary = {
+                        "ts": entry.get("ts"),
+                        "tag": entry.get("tag"),
+                        "asset_id": entry.get("asset_id"),
+                        "symbol": entry.get("symbol"),
+                        "signal_types": entry.get("signal_types", []),
+                        "provider": entry.get("provider"),
+                        "model": entry.get("model"),
+                        "has_thinking": bool(entry.get("thinking_content")),
+                        "thinking_len": len(entry.get("thinking_content") or ""),
+                        "response_len": len(entry.get("raw_response") or ""),
+                        # 详情（完整内容）按需返回
+                        "system_prompt": entry.get("system_prompt", ""),
+                        "user_prompt": entry.get("user_prompt", ""),
+                        "raw_response": entry.get("raw_response", ""),
+                        "thinking_content": entry.get("thinking_content", ""),
+                    }
+                    entries.append(summary)
+                except json.JSONDecodeError:
+                    continue
+
+        # 按时间倒序，取最新 N 条
+        entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
+        total = len(entries)
+        entries = entries[:limit]
+
+        return jsonify({"ok": True, "data": entries, "total": total, "date": date_str})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/coverage-by-tier")
 def api_coverage_by_tier():
     """按市值分层统计各维度数据覆盖率。"""

@@ -1401,6 +1401,243 @@
             font-weight: 600;
         }
 
+        /* ── AI 追溯日志模态框 ── */
+        .ai-trace-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 2000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+
+        .ai-trace-modal-overlay.visible {
+            display: flex;
+        }
+
+        .ai-trace-modal {
+            background: #161a22;
+            border: 1px solid #2a3040;
+            border-radius: 10px;
+            width: 90vw;
+            max-width: 1200px;
+            height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+        }
+
+        .ai-trace-modal-head {
+            padding: 14px 20px;
+            border-bottom: 1px solid #2a3040;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .ai-trace-modal-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #e6e8eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ai-trace-modal-title .meta {
+            font-size: 12px;
+            font-weight: 400;
+            color: #6b7280;
+        }
+
+        .ai-trace-modal-close {
+            font-size: 20px;
+            color: #6b7280;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0 4px;
+        }
+
+        .ai-trace-modal-close:hover {
+            color: #e6e8eb;
+        }
+
+        .ai-trace-modal-body {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .ai-trace-list {
+            width: 300px;
+            border-right: 1px solid #2a3040;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .ai-trace-list-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid #1e222a;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .ai-trace-list-item:hover {
+            background: #1e222a;
+        }
+
+        .ai-trace-list-item.active {
+            background: #252d3d;
+            border-left: 3px solid #3b82f6;
+            padding-left: 11px;
+        }
+
+        .ai-trace-item-symbol {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e6e8eb;
+            margin-bottom: 4px;
+        }
+
+        .ai-trace-item-signals {
+            font-size: 11px;
+            color: #6b7280;
+            margin-bottom: 4px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+
+        .ai-trace-item-signals span {
+            background: #252d3d;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            color: #9ca3af;
+        }
+
+        .ai-trace-item-ts {
+            font-size: 11px;
+            color: #4b5563;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .ai-trace-item-thinking {
+            font-size: 10px;
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.1);
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+
+        .ai-trace-detail {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+        }
+
+        .ai-trace-detail-empty {
+            color: #4b5563;
+            font-size: 13px;
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .ai-trace-section {
+            margin-bottom: 18px;
+        }
+
+        .ai-trace-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #d1d5db;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #2a3040;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .ai-trace-section-title .toggle-btn {
+            font-size: 11px;
+            color: #6b7280;
+            cursor: pointer;
+            background: none;
+            border: 1px solid #2a3040;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .ai-trace-section-title .toggle-btn:hover {
+            color: #e6e8eb;
+            border-color: #4a5568;
+        }
+
+        .ai-trace-section-content {
+            font-size: 12px;
+            line-height: 1.6;
+            color: #9ca3af;
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: #0e1116;
+            border: 1px solid #1e222a;
+            border-radius: 6px;
+            padding: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+
+        .ai-trace-section-content.collapsed {
+            max-height: 60px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .ai-trace-section-content.collapsed::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 30px;
+            background: linear-gradient(transparent, #0e1116);
+        }
+
+        .ai-trace-meta-row {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .ai-trace-meta-item {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .ai-trace-meta-item strong {
+            color: #d1d5db;
+            font-weight: 500;
+        }
+
+        .ai-trace-list-empty {
+            padding: 30px 14px;
+            text-align: center;
+            color: #4b5563;
+            font-size: 12px;
+        }
+
         .diff-item .name {
             flex: 1;
             color: #8a92a0;
@@ -4565,6 +4802,23 @@
             border-radius: 12px;
         }
 
+        .ai-trace-btn {
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            border: 1px solid #2d3748;
+            background: #1e222a;
+            color: #a0aec0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .ai-trace-btn:hover {
+            background: #2d3748;
+            color: #e2e8f0;
+            border-color: #4a5568;
+        }
+
         .signal-list {
             display: flex;
             flex-direction: column;
@@ -6770,7 +7024,11 @@
                     <div class="signal-highlight-section" id="signal-highlight-section">
                         <div class="signal-header">
                             <h2>⚡ 高亮信号</h2>
-                            <span class="signal-count" id="signal-count">-</span>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span class="signal-count" id="signal-count">-</span>
+                                <button class="ai-trace-btn" onclick="openAiTraceModal()" title="查看 AI 分析追溯日志">🔍
+                                    追溯</button>
+                            </div>
                         </div>
                         <div id="signal-highlight-content">
                             <div class="signal-empty">
@@ -13948,6 +14206,214 @@
         } else {
             initSchedulerFeed();
             initWalletSidebar();
+        }
+
+        // ── AI 追溯日志模态框 ──
+        var __aiTraceData = [];
+        var __aiTraceSelected = null;
+
+        function openAiTraceModal () {
+            var overlay = document.getElementById('ai-trace-modal-overlay');
+            if (!overlay) {
+                _buildAiTraceModal();
+                overlay = document.getElementById('ai-trace-modal-overlay');
+            }
+            overlay.classList.add('visible');
+            loadAiTraceList();
+        }
+
+        function closeAiTraceModal () {
+            var overlay = document.getElementById('ai-trace-modal-overlay');
+            if (overlay) overlay.classList.remove('visible');
+        }
+
+        function _buildAiTraceModal () {
+            var html =
+                '<div class="ai-trace-modal-overlay" id="ai-trace-modal-overlay" onclick="if(event.target===this)closeAiTraceModal()">' +
+                '<div class="ai-trace-modal">' +
+                '<div class="ai-trace-modal-head">' +
+                '<div class="ai-trace-modal-title">' +
+                '🔍 AI 信号分析追溯日志' +
+                '<span class="meta" id="ai-trace-meta"></span>' +
+                '</div>' +
+                '<button class="ai-trace-modal-close" onclick="closeAiTraceModal()">×</button>' +
+                '</div>' +
+                '<div class="ai-trace-modal-body">' +
+                '<div class="ai-trace-list" id="ai-trace-list">' +
+                '<div class="ai-trace-list-empty">加载中...</div>' +
+                '</div>' +
+                '<div class="ai-trace-detail" id="ai-trace-detail">' +
+                '<div class="ai-trace-detail-empty">选择左侧日志查看详情</div>' +
+                '</div>' +
+                '</div>' +
+                '</div>' +
+                '</div>';
+            document.body.insertAdjacentHTML('beforeend', html);
+        }
+
+        async function loadAiTraceList () {
+            var listEl = document.getElementById('ai-trace-list');
+            var metaEl = document.getElementById('ai-trace-meta');
+            listEl.innerHTML = '<div class="ai-trace-list-empty">加载中...</div>';
+
+            try {
+                var res = await fetch('/api/ai-trace?tag=signal_v2&limit=50');
+                var data = await res.json();
+                if (!data.ok) throw new Error(data.error || '加载失败');
+
+                __aiTraceData = data.data || [];
+                metaEl.textContent = ' · ' + data.date + ' · 共 ' + data.total + ' 条';
+
+                if (__aiTraceData.length === 0) {
+                    listEl.innerHTML = '<div class="ai-trace-list-empty">暂无追溯日志<br><span style="font-size:11px;">AI 信号分析运行后会在此展示</span></div>';
+                    document.getElementById('ai-trace-detail').innerHTML =
+                        '<div class="ai-trace-detail-empty">暂无日志</div>';
+                    return;
+                }
+
+                var html = '';
+                for (var i = 0; i < __aiTraceData.length; i++) {
+                    var item = __aiTraceData[i];
+                    var symbol = item.symbol || (item.asset_id ? ('#' + item.asset_id) : '聚合信号');
+                    var signalTags = (item.signal_types || []).map(function (s) {
+                        return '<span>' + _signalLabel(s) + '</span>';
+                    }).join('');
+                    var timeStr = item.ts ? item.ts.split('T')[1] || item.ts : '';
+                    var thinkingBadge = item.has_thinking ? '<span class="ai-trace-item-thinking">🧠 思考</span>' : '';
+
+                    html +=
+                        '<div class="ai-trace-list-item' + (i === 0 ? ' active' : '') + '" ' +
+                        'onclick="selectAiTrace(' + i + ')" data-idx="' + i + '">' +
+                        '<div class="ai-trace-item-symbol">' + symbol + '</div>' +
+                        '<div class="ai-trace-item-signals">' + signalTags + '</div>' +
+                        '<div class="ai-trace-item-ts">' +
+                        '<span>' + timeStr + '</span>' +
+                        thinkingBadge +
+                        '</div>' +
+                        '</div>';
+                }
+                listEl.innerHTML = html;
+
+                // 默认选中第一条
+                __aiTraceSelected = 0;
+                renderAiTraceDetail(0);
+            } catch (e) {
+                listEl.innerHTML = '<div class="ai-trace-list-empty">加载失败：' + e.message + '</div>';
+            }
+        }
+
+        function selectAiTrace (idx) {
+            // 更新选中状态
+            var items = document.querySelectorAll('.ai-trace-list-item');
+            items.forEach(function (el, i) {
+                el.classList.toggle('active', i === idx);
+            });
+            __aiTraceSelected = idx;
+            renderAiTraceDetail(idx);
+        }
+
+        function renderAiTraceDetail (idx) {
+            var detailEl = document.getElementById('ai-trace-detail');
+            var item = __aiTraceData[idx];
+            if (!item) {
+                detailEl.innerHTML = '<div class="ai-trace-detail-empty">无数据</div>';
+                return;
+            }
+
+            var symbol = item.symbol || (item.asset_id ? ('#' + item.asset_id) : '聚合信号');
+            var signalLabels = (item.signal_types || []).map(function (s) { return _signalLabel(s); }).join('、');
+
+            var html =
+                '<div class="ai-trace-meta-row">' +
+                '<div class="ai-trace-meta-item"><strong>币种：</strong>' + symbol + '</div>' +
+                '<div class="ai-trace-meta-item"><strong>信号：</strong>' + signalLabels + '</div>' +
+                '<div class="ai-trace-meta-item"><strong>时间：</strong>' + (item.ts || '-') + '</div>' +
+                '<div class="ai-trace-meta-item"><strong>模型：</strong>' + (item.model || '-') + '</div>' +
+                '<div class="ai-trace-meta-item"><strong>响应长度：</strong>' + (item.response_len || 0) + ' 字</div>' +
+                (item.has_thinking ? '<div class="ai-trace-meta-item"><strong>思考长度：</strong>' + (item.thinking_len || 0) + ' 字</div>' : '') +
+                '</div>';
+
+            // AI 响应（格式化 JSON）
+            var responseText = item.raw_response || '';
+            try {
+                var respObj = JSON.parse(responseText);
+                responseText = JSON.stringify(respObj, null, 2);
+            } catch (e) { /* 不是 JSON 就原样显示 */ }
+
+            html +=
+                '<div class="ai-trace-section">' +
+                '<div class="ai-trace-section-title">' +
+                '📤 AI 响应' +
+                '<button class="toggle-btn" onclick="this.textContent = this.nextElementSibling.classList.toggle(\'collapsed\') ? \'展开\' : \'收起\';this.nextElementSibling.classList.toggle(\'collapsed\')">收起</button>' +
+                '</div>' +
+                '<div class="ai-trace-section-content">' + _escapeHtml(responseText) + '</div>' +
+                '</div>';
+
+            // 思考过程
+            if (item.thinking_content) {
+                html +=
+                    '<div class="ai-trace-section">' +
+                    '<div class="ai-trace-section-title">' +
+                    '🧠 思考过程' +
+                    '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">收起</button>' +
+                    '</div>' +
+                    '<div class="ai-trace-section-content" style="color:#6ee7b7;">' + _escapeHtml(item.thinking_content) + '</div>' +
+                    '</div>';
+            }
+
+            // 用户输入（prompt）
+            html +=
+                '<div class="ai-trace-section">' +
+                '<div class="ai-trace-section-title">' +
+                '📥 用户输入 (User Prompt)' +
+                '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">收起</button>' +
+                '</div>' +
+                '<div class="ai-trace-section-content collapsed">' + _escapeHtml(item.user_prompt || '') + '</div>' +
+                '</div>';
+
+            // 系统提示词
+            html +=
+                '<div class="ai-trace-section">' +
+                '<div class="ai-trace-section-title">' +
+                '⚙️ 系统提示词 (System Prompt)' +
+                '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">展开</button>' +
+                '</div>' +
+                '<div class="ai-trace-section-content collapsed">' + _escapeHtml(item.system_prompt || '') + '</div>' +
+                '</div>';
+
+            detailEl.innerHTML = html;
+        }
+
+        function _escapeHtml (str) {
+            var div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function _signalLabel (type) {
+            var map = {
+                mvrv_deep_under: 'MVRV深度低估',
+                mvrv_deep_over: 'MVRV深度高估',
+                mvrv_under_watch: 'MVRV低估观察',
+                mvrv_over_watch: 'MVRV高估观察',
+                catalyst: '催化剂驱动',
+                token_unlock: '解锁抛压',
+                funding: '融资落地',
+                whale_flow: '链上巨鲸',
+                kol_onchain: 'KOL链上',
+                github_activity: '开发活跃',
+                etf_flow: 'ETF资金流',
+                price_surge: '价格暴涨',
+                price_crash: '价格暴跌',
+                price_volume_surge: '量价齐升',
+                volume_surge: '成交量异动',
+                sector_inflow: '赛道资金流入',
+                sector_outflow: '赛道资金流出',
+                fng_extreme: '恐贪极端',
+                leverage_extreme: '杠杆极端',
+                stablecoin_inflow: '稳定币流入',
+            };
+            return map[type] || type;
         }
     </script>
 

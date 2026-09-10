@@ -8278,70 +8278,66 @@
             currentResearchAssetId = assetId;
             document.getElementById('research-section').style.display = 'block';
 
-            // 加载 tokenomics
-            try {
-                const res = await fetch(`/api/assets/${assetId}/tokenomics`);
-                const data = await res.json();
-                if (data.ok && data.data) {
-                    renderTokenomics(data.data);
-                } else {
-                    setTokenomicsMissing();
-                }
-            } catch (e) {
-                setTokenomicsMissing();
-            }
+            // 5 个接口并行加载，总耗时 = 最慢的那个
+            const urls = {
+                tokenomics: `/api/assets/${assetId}/tokenomics`,
+                whitepaper: `/api/assets/${assetId}/whitepaper-summary`,
+                unlocks: `/api/unlocks/${assetId}`,
+                onchain: `/api/onchain/holder/${assetId}`,
+                social: `/api/social/${assetId}`,
+            };
 
-            // 加载白皮书摘要
-            try {
-                const wpRes = await fetch(`/api/assets/${assetId}/whitepaper-summary`);
-                const wpData = await wpRes.json();
-                if (wpData.ok && wpData.data && wpData.data.length > 0) {
-                    renderWhitepaperSummary(wpData.data);
-                } else {
-                    setWhitepaperMissing();
-                }
-            } catch (e) {
-                setWhitepaperMissing();
-            }
+            const promises = Object.entries(urls).map(function ([key, url]) {
+                return fetchJSON(url, { timeout: 10000 })
+                    .then(function (data) { return { key: key, ok: true, data: data }; })
+                    .catch(function (e) { return { key: key, ok: false, error: e }; });
+            });
 
-            // 加载解锁数据缓存
-            try {
-                const res = await fetch(`/api/unlocks/${assetId}`);
-                const data = await res.json();
-                if (data.ok && data.has_unlock_data && data.data) {
-                    renderUnlocks(data.data);
-                } else {
-                    setUnlocksMissing(data && data.message ? data.message : '');
-                }
-            } catch (e) {
-                setUnlocksMissing();
-            }
+            // 谁先回来谁先渲染，不用等全部完成
+            promises.forEach(function (p) {
+                p.then(function (res) {
+                    // 切币了就不渲染旧数据
+                    if (currentResearchAssetId !== assetId) return;
 
-            // 链上数据：加载缓存快照（切币时实时刷新，避免停留在上一代币的数据）
-            try {
-                const res = await fetch(`/api/onchain/holder/${assetId}`);
-                const data = await res.json();
-                if (data.ok && data.by_chain && Object.keys(data.by_chain || {}).length > 0) {
-                    renderOnchainSnapshot(data);
-                } else {
-                    setOnchainMissing();
-                }
-            } catch (e) {
-                setOnchainMissing();
-            }
-
-            // 社交热度：加载缓存
-            try {
-                const res = await fetch(`/api/social/${assetId}`);
-                const data = await res.json();
-                if (data.ok && data.data) {
-                    renderSocial(data.data);
-                } else {
-                    setSocialMissing();
-                }
-            } catch (e) {
-                setSocialMissing();
-            }
+                    switch (res.key) {
+                        case 'tokenomics':
+                            if (res.ok && res.data.ok && res.data.data) {
+                                renderTokenomics(res.data.data);
+                            } else {
+                                setTokenomicsMissing();
+                            }
+                            break;
+                        case 'whitepaper':
+                            if (res.ok && res.data.ok && res.data.data && res.data.data.length > 0) {
+                                renderWhitepaperSummary(res.data.data);
+                            } else {
+                                setWhitepaperMissing();
+                            }
+                            break;
+                        case 'unlocks':
+                            if (res.ok && res.data.ok && res.data.has_unlock_data && res.data.data) {
+                                renderUnlocks(res.data.data);
+                            } else {
+                                setUnlocksMissing(res.data && res.data.message ? res.data.message : '');
+                            }
+                            break;
+                        case 'onchain':
+                            if (res.ok && res.data.ok && res.data.by_chain && Object.keys(res.data.by_chain || {}).length > 0) {
+                                renderOnchainSnapshot(res.data);
+                            } else {
+                                setOnchainMissing();
+                            }
+                            break;
+                        case 'social':
+                            if (res.ok && res.data.ok && res.data.data) {
+                                renderSocial(res.data.data);
+                            } else {
+                                setSocialMissing();
+                            }
+                            break;
+                    }
+                });
+            });
         }
 
         function setTokenomicsMissing () {
@@ -10585,7 +10581,7 @@
                 const qs = params.toString();
                 const data = await fetchJSON('/api/daily-diff' + (qs ? '?' + qs : ''));
                 if (!data.ok) {
-                    content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
+                    content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">加载失败：' + escapeHtml(data.error || '未知错误') + '<br><button onclick=\"loadDailyDiff(true)\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
                     return;
                 }
                 if (!data.diff_date || !data.categories || Object.keys(data.categories).length === 0) {
@@ -10728,7 +10724,7 @@
                 html += '</div>';
                 content.innerHTML = html;
             } catch (e) {
-                content.innerHTML = '<div class="sector-heatmap-error">网络错误: ' + e.message + '</div>';
+                content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">网络错误：' + escapeHtml(e.message) + '<br><button onclick=\"loadDailyDiff(true)\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
             } finally {
                 if (refreshBtn) {
                     refreshBtn.disabled = false;
@@ -11212,7 +11208,7 @@
             try {
                 const data = await fetchJSON('/api/market/sector-heatmap?limit=12');
                 if (!data.ok) {
-                    content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
+                    content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">加载失败：' + escapeHtml(data.error || '未知错误') + '<br><button onclick=\"loadSectorHeatmap()\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
                     return;
                 }
 
@@ -11266,7 +11262,7 @@
                     updated.textContent = '更新于 ' + now.toLocaleTimeString('zh-CN') + ' · 共 ' + data.total_sectors + ' 赛道 / ' + data.total_tokens + ' 币';
                 }
             } catch (e) {
-                content.innerHTML = '<div class="sector-heatmap-error">网络错误: ' + e.message + '</div>';
+                content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">网络错误：' + escapeHtml(e.message) + '<br><button onclick=\"loadSectorHeatmap()\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
             }
         }
 
@@ -11302,7 +11298,7 @@
 
                 renderBacktest(data);
             } catch (e) {
-                container.innerHTML = '<div class="bt-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
+                container.innerHTML = '<div class="bt-empty">网络错误：' + escapeHtml(e.message) + '<br><button onclick=\"loadBacktest()\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
             }
         }
 
@@ -11455,7 +11451,7 @@
                 });
                 highlightAssetIdSet = newSet;
             } catch (e) {
-                grid.innerHTML = '<div class="dim-card" style="grid-column:1/-1;color:#ff5b5b">加载失败：' + e.message + '</div>';
+                grid.innerHTML = '<div class="dim-card" style="grid-column:1/-1;color:#ff5b5b;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><span>加载失败：' + escapeHtml(e.message) + '</span><button onclick="loadMarketOverview(true)" style="padding:6px 14px;background:#ff5b5b;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px">重试</button></div>';
             }
         }
 
@@ -13660,7 +13656,7 @@
             try {
                 const data = await fetchJSON(url);
                 if (!data.ok) {
-                    content.innerHTML = '<div class="hot-tokens-error">' + (data.error || '加载失败') + '</div>';
+                    content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">加载失败：' + escapeHtml(data.error || '未知错误') + '<br><button onclick=\"loadHotTokens()\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
                     return;
                 }
 
@@ -13677,7 +13673,7 @@
                 const now = new Date();
                 updated.textContent = '更新于 ' + now.toLocaleTimeString('zh-CN');
             } catch (e) {
-                content.innerHTML = '<div class="hot-tokens-error">网络错误: ' + e.message + '</div>';
+                content.innerHTML = '<div style="text-align:center;padding:20px;color:#ef5350;font-size:13px">网络错误：' + escapeHtml(e.message) + '<br><button onclick=\"loadHotTokens()\" style=\"margin-top:8px;padding:6px 14px;background:#ef5350;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px\">重试</button></div>';
             } finally {
                 btn.classList.remove('loading');
                 btn.textContent = '刷新';

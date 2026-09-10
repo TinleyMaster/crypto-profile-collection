@@ -53,6 +53,87 @@ def _fmt_pct(v, decimals=1, signed=True):
     return f"{sign}{f:.{decimals}f}%", color
 
 
+def _classify_degraded(items: list[str]) -> dict:
+    """降级项分类：critical(核心)/warning(辅助)/info(增强)。
+    核心降级：影响主决策的关键数据缺失（BTC价格、总市值、恐贪等）
+    辅助降级：不影响主结论但缺了就不完整（稳定币、KOL、巨鲸、解锁等）
+    增强降级：锦上添花的功能（AI摘要、叙事榜等）
+    """
+    critical_keywords = ("btc", "eth", "总市值", "market_cap", "fear_greed", "恐贪",
+                         "1体量", "2盘面", "3情绪", "overview")
+    info_keywords = ("ai_", "ai_summary", "narrative", "叙事", "meme", "chimney",
+                     "smart_money", "resonance", "背离")
+
+    critical, warning, info = [], [], []
+    for item in items:
+        low = str(item).lower()
+        if any(k in low for k in critical_keywords):
+            critical.append(item)
+        elif any(k in low for k in info_keywords):
+            info.append(item)
+        else:
+            warning.append(item)
+    return {"critical": critical, "warning": warning, "info": info}
+
+
+def _render_degraded_badge(brief: dict) -> str:
+    """渲染降级项徽标：核心红色/辅助黄色/增强隐藏（仅核心才显示红色告警）。"""
+    # 收集所有降级来源：brief.degraded + M9_degraded
+    all_degraded = list(brief.get("degraded", []) or [])
+    m9 = brief.get("M9_degraded", []) or []
+    all_degraded.extend(m9)
+
+    if not all_degraded:
+        return ""
+
+    tiers = _classify_degraded(all_degraded)
+    parts = []
+
+    # 核心降级：醒目红色
+    if tiers["critical"]:
+        parts.append(
+            f'<div style="margin-top:8px;padding:8px 12px;background:#fef2f2;'
+            f'border:1px solid #fecaca;border-radius:6px;color:#991b1b;font-size:12px">'
+            f'🚨 <b>核心数据降级</b>：{", ".join(tiers["critical"])}</div>'
+        )
+
+    # 辅助降级：黄色，收起来
+    if tiers["warning"]:
+        parts.append(
+            f'<div style="margin-top:6px;padding:6px 10px;background:#fef9c3;'
+            f'border-radius:4px;color:#92400e;font-size:11px">'
+            f'⚠️ 辅助数据缺失：{", ".join(tiers["warning"])}</div>'
+        )
+
+    # 增强降级：不显示（避免噪音，只在debug时看）
+
+    return "".join(parts)
+
+
+def _resolve_addr_label(raw_label, labels_arr, names_arr, addr):
+    """地址标签解析：从数组列优先取，再回退单值字段，最后回退地址截断。
+    标签优先级：label_names[0]（具体名称） > labels[0]（类型） > raw_label（单值） > 地址前8位。
+    """
+    # 1. 优先用 label_names 数组（具体名称，如 "Binance 14", "Gemini"）
+    if names_arr and isinstance(names_arr, list) and names_arr:
+        first = names_arr[0]
+        if first and str(first).strip().lower() not in ("unknown", "", "none", "null"):
+            return str(first).strip()
+    # 2. 其次用 labels 数组（类型，如 "exchange", "smart_money"）
+    if labels_arr and isinstance(labels_arr, list) and labels_arr:
+        first = labels_arr[0]
+        if first and str(first).strip().lower() not in ("unknown", "", "none", "null"):
+            return str(first).strip()
+    # 3. 回退到单值字段
+    if raw_label and str(raw_label).strip().lower() not in ("unknown", "", "none", "null"):
+        return str(raw_label).strip()
+    # 4. 最后回退到地址截断
+    addr = addr or ""
+    if addr and len(addr) >= 8:
+        return addr[:8] + "..."
+    return "未知地址"
+
+
 def _fmt_mcap(v):
     """市值/金额缩写：B / M / K。"""
     if v is None:
@@ -573,25 +654,13 @@ def render_brief_html(brief: dict) -> str:
                 sym = t.get("symbol", "?")
                 amount_usd = t.get("value_usd") or t.get("amount_usd")
                 amt_str = _fmt_mcap(amount_usd) if amount_usd else "—"
-                from_raw = t.get("from_label")
-                from_label = ""
-                if from_raw and str(from_raw).strip().lower() not in ("unknown", "", "none", "null"):
-                    from_label = str(from_raw).strip()
-                else:
-                    addr = t.get("from_address", "") or ""
-                    from_label = addr[:8] + "..." if addr and len(addr) >= 8 else "未知地址"
-                if not from_label or from_label == "...":
-                    from_label = "未知地址"
 
-                to_raw = t.get("to_label")
-                to_label = ""
-                if to_raw and str(to_raw).strip().lower() not in ("unknown", "", "none", "null"):
-                    to_label = str(to_raw).strip()
-                else:
-                    addr = t.get("to_address", "") or ""
-                    to_label = addr[:8] + "..." if addr and len(addr) >= 8 else "未知地址"
-                if not to_label or to_label == "...":
-                    to_label = "未知地址"
+                from_label = _resolve_addr_label(
+                    t.get("from_label"), t.get("from_labels"),
+                    t.get("from_label_names"), t.get("from_address"))
+                to_label = _resolve_addr_label(
+                    t.get("to_label"), t.get("to_labels"),
+                    t.get("to_label_names"), t.get("to_address"))
                 direction = t.get("direction") or ""
 
                 # 判断方向：从交易所转出 = 看多；转入交易所 = 看空
@@ -968,10 +1037,10 @@ def render_brief_html(brief: dict) -> str:
             """)
         html_parts.append("</div>")
 
-    # 降级标注
-    degraded = brief.get("degraded", [])
-    if degraded:
-        html_parts.append(f'<div style="margin-top:8px;padding:6px 10px;background:#fef9c3;border-radius:4px;color:#92400e;font-size:11px">⚠️ 降级项: {", ".join(degraded)}</div>')
+    # 降级标注（分层：核心红/辅助黄/增强隐藏）
+    degraded_badge = _render_degraded_badge(brief)
+    if degraded_badge:
+        html_parts.append(degraded_badge)
 
     # 页脚
     html_parts.append("""

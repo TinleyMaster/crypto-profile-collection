@@ -6183,6 +6183,7 @@ def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
                 cur.execute("""
                     SELECT t.log_id, t.asset_id, t.chain, t.value_usd,
                            t.from_address, t.to_address, t.from_label, t.to_label,
+                           t.from_labels, t.to_labels, t.from_label_names, t.to_label_names,
                            t.from_exchange, t.to_exchange, t.tx_hash,
                            t.block_timestamp,
                            a.canonical_symbol AS symbol, a.canonical_name AS name

@@ -59,6 +59,8 @@ def _fmt_mcap(v):
         return "N/A"
     try:
         f = float(v)
+        if f != f or f == float("inf") or f == float("-inf"):  # NaN or Inf
+            return "—"
     except Exception:
         return str(v)
     if f >= 1e9:
@@ -318,6 +320,10 @@ def render_brief_html(brief: dict) -> str:
 
             chg_str, chg_color = _fmt_pct(mcap7d)
             tvl_str, tvl_color = _fmt_pct(tvl7d) if tvl7d is not None else ("—", "#94a3b8")
+            # 无 TVL 数据时隐藏 TVL 标签，避免误导
+            tvl_html = ""
+            if tvl7d is not None:
+                tvl_html = f'<span style="font-size:10px;color:{tvl_color}">TVL {tvl_str}</span>'
             bar_pct = max(3, min(100, (score / max_score) * 100))
 
             # 趋势标签
@@ -349,7 +355,7 @@ def render_brief_html(brief: dict) -> str:
                     {trend_badge}
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;margin-left:6px;flex-shrink:0">
-                    <span style="font-size:10px;color:#94a3b8">TVL {tvl_str}</span>
+                    {tvl_html}
                     <span style="font-size:12px;color:{chg_color};font-weight:700">{chg_str}</span>
                   </div>
                 </div>
@@ -432,11 +438,15 @@ def render_brief_html(brief: dict) -> str:
 
     # 稳定币供应
     if isinstance(stab, dict) and stab.get("status") == "ok":
-        supply_change = stab.get("total_supply_change_7d")
+        total_usd = stab.get("total_usd")
+        change_7d_pct = stab.get("change_7d_pct")
+        change_1d_pct = stab.get("change_1d_pct")
+
+        # 7日供应变化金额（近似：总供应量 * 7日变化率）
         supply_change_str = ""
-        if supply_change is not None:
+        if change_7d_pct is not None and total_usd is not None:
             try:
-                sc = float(supply_change)
+                sc = float(total_usd) * float(change_7d_pct) / 100.0
                 sign = "+" if sc >= 0 else ""
                 color = "#dc2626" if sc > 0 else "#16a34a" if sc < 0 else "#64748b"
                 if abs(sc) >= 1e9:
@@ -445,14 +455,29 @@ def render_brief_html(brief: dict) -> str:
                     supply_change_str = f'<span style="color:{color};font-weight:700">{sign}${sc/1e6:.0f}M</span>'
             except Exception:
                 supply_change_str = "—"
+        elif change_7d_pct is not None:
+            chg_str, chg_color = _fmt_pct(change_7d_pct)
+            supply_change_str = f'<span style="color:{chg_color};font-weight:700">{chg_str}</span>'
 
+        # 顶部3稳定币变化（如果有 top_3）
         top_3 = stab.get("top_3") or []
         stable_html = ""
-        for s in top_3[:3]:
-            sym = s.get("symbol", "?")
-            chg = s.get("change_7d")
-            chg_str, chg_color = _fmt_pct(chg)
-            stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">{sym} <span style="color:{chg_color};font-weight:600">{chg_str}</span></span>'
+        if top_3:
+            for s in top_3[:3]:
+                sym = s.get("symbol", "?")
+                chg = s.get("change_7d")
+                chg_str, chg_color = _fmt_pct(chg)
+                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">{sym} <span style="color:{chg_color};font-weight:600">{chg_str}</span></span>'
+        else:
+            # 兜底：显示1日和7日变化率
+            if change_1d_pct is not None:
+                c1_str, c1_color = _fmt_pct(change_1d_pct)
+                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">1日 <span style="color:{c1_color};font-weight:600">{c1_str}</span></span>'
+            if change_7d_pct is not None:
+                c7_str, c7_color = _fmt_pct(change_7d_pct)
+                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">7日 <span style="color:{c7_color};font-weight:600">{c7_str}</span></span>'
+            if total_usd is not None:
+                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">总供应 <span style="color:#166534;font-weight:600">${total_usd/1e9:.0f}B</span></span>'
 
         html_parts.append(f"""
           <!-- 稳定币子模块 -->
@@ -545,10 +570,27 @@ def render_brief_html(brief: dict) -> str:
             """)
             for t in transfers[:6]:
                 sym = t.get("symbol", "?")
-                amount_usd = t.get("amount_usd")
+                amount_usd = t.get("value_usd") or t.get("amount_usd")
                 amt_str = _fmt_mcap(amount_usd) if amount_usd else "—"
-                from_label = t.get("from_label") or t.get("from_address", "")[:8] + "..."
-                to_label = t.get("to_label") or t.get("to_address", "")[:8] + "..."
+                from_raw = t.get("from_label")
+                from_label = ""
+                if from_raw and str(from_raw).strip().lower() not in ("unknown", "", "none", "null"):
+                    from_label = str(from_raw).strip()
+                else:
+                    addr = t.get("from_address", "") or ""
+                    from_label = addr[:8] + "..." if addr and len(addr) >= 8 else "未知地址"
+                if not from_label or from_label == "...":
+                    from_label = "未知地址"
+
+                to_raw = t.get("to_label")
+                to_label = ""
+                if to_raw and str(to_raw).strip().lower() not in ("unknown", "", "none", "null"):
+                    to_label = str(to_raw).strip()
+                else:
+                    addr = t.get("to_address", "") or ""
+                    to_label = addr[:8] + "..." if addr and len(addr) >= 8 else "未知地址"
+                if not to_label or to_label == "...":
+                    to_label = "未知地址"
                 direction = t.get("direction") or ""
 
                 # 判断方向：从交易所转出 = 看多；转入交易所 = 看空
@@ -585,7 +627,7 @@ def render_brief_html(brief: dict) -> str:
 
         for item in whales_buying[:5]:
             sym = item.get("symbol", "?")
-            chg = item.get("whale_change_pct")
+            chg = item.get("whale_balance_change_7d_pct") or item.get("whale_change_pct")
             chg_str, _ = _fmt_pct(chg)
             html_parts.append(f"""
               <div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10.5px">
@@ -602,7 +644,7 @@ def render_brief_html(brief: dict) -> str:
 
         for item in whales_selling[:5]:
             sym = item.get("symbol", "?")
-            chg = item.get("whale_change_pct")
+            chg = item.get("whale_balance_change_7d_pct") or item.get("whale_change_pct")
             chg_str, _ = _fmt_pct(chg)
             html_parts.append(f"""
               <div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10.5px">
@@ -621,6 +663,24 @@ def render_brief_html(brief: dict) -> str:
     # KOL 链上信号（兜底）
     signals = kol_onchain.get("signals") or []
     if signals and kol_onchain.get("status") == "ok":
+        # 过滤掉 symbol 明显无效的信号（长度>12、含非字母数字、常见误判词）
+        INVALID_SYMBOLS = {"LAPTOP", "PHONE", "TABLET", "DESKTOP", "COMPUTER", "MOBILE"}
+        def _is_valid_sym(s):
+            if not s:
+                return False
+            s = str(s).strip().upper()
+            if not s or len(s) > 12 or len(s) < 2:
+                return False
+            if s in INVALID_SYMBOLS:
+                return False
+            if not s.replace(".", "").replace("-", "").isalnum():
+                return False
+            return True
+
+        valid_signals = [s for s in signals if _is_valid_sym(s.get("symbol") or s.get("event_token"))]
+        if not valid_signals:
+            valid_signals = signals  # 全部过滤掉时兜底，避免空列表
+
         kol_count = len(kol_onchain.get("kols") or [])
         html_parts.append(f"""
           <div style="margin-top:8px">
@@ -631,10 +691,14 @@ def render_brief_html(brief: dict) -> str:
             "accumulation": "大额吸筹", "whale_move": "巨鲸转账",
             "distribution": "大额派发", "liquidation": "爆仓清算",
         }
-        for sig in signals[:4]:
+        for sig in valid_signals[:4]:
             subtype = sig.get("signal_subtype") or ""
             subtype_cn = SUBTYPE_CN.get(subtype, subtype)
-            sym = sig.get("symbol") or sig.get("event_token") or "?"
+            sym = (sig.get("event_token")
+                   or sig.get("symbol")
+                   or "?")
+            if isinstance(sym, str):
+                sym = sym.strip().upper()
             kol = sig.get("kol_name") or ""
             is_bullish = "in" in str(sig.get("event_direction", "")).lower() or "accum" in subtype.lower()
             dot = "#dc2626" if is_bullish else "#16a34a"
@@ -674,7 +738,23 @@ def render_brief_html(brief: dict) -> str:
             unlock_date = u.get("unlock_date") or u.get("date") or ""
             amount = u.get("amount") or u.get("unlock_amount") or ""
             value_usd = u.get("value_usd") or u.get("unlock_value_usd")
-            pct = u.get("pct_of_supply") or u.get("unlock_pct") or u.get("unlock_ratio_circulating")
+            pct = (u.get("unlock_ratio_circulating")
+                   or u.get("unlock_ratio_total")
+                   or u.get("unlock_ratio_mcap")
+                   or u.get("pct_of_supply")
+                   or u.get("unlock_pct"))
+            # 判断比值类型，用于提示标签
+            pct_type = "流通"
+            if pct is None:
+                pct_label = "—"
+            elif u.get("unlock_ratio_circulating") is not None and pct == u.get("unlock_ratio_circulating"):
+                pct_label = f"占流通 {float(pct):.2f}%"
+            elif u.get("unlock_ratio_total") is not None and pct == u.get("unlock_ratio_total"):
+                pct_label = f"占总供给 {float(pct):.2f}%"
+            elif u.get("unlock_ratio_mcap") is not None and pct == u.get("unlock_ratio_mcap"):
+                pct_label = f"占市值 {float(pct):.2f}%"
+            else:
+                pct_label = f"{float(pct):.2f}%"
             try:
                 days_until = (date.fromisoformat(str(unlock_date)[:10]) - date.today()).days
                 days_str = f"{days_until}天后" if days_until > 0 else "今天" if days_until == 0 else "已过"
@@ -684,7 +764,6 @@ def render_brief_html(brief: dict) -> str:
                 days_color = "#64748b"
 
             value_str = _fmt_mcap(value_usd) if value_usd else "—"
-            pct_str = f"{pct:.2f}%" if pct is not None else "—"
 
             html_parts.append(f"""
               <div style="padding:5px 8px;margin-bottom:3px;border-radius:5px;background:#fef2f2;border-left:2px solid #dc2626;font-size:11px">
@@ -693,7 +772,7 @@ def render_brief_html(brief: dict) -> str:
                   <span style="font-size:10px;color:{days_color};font-weight:600">{days_str}</span>
                 </div>
                 <div style="font-size:10px;color:#64748b;margin-top:1px">
-                  解锁 {value_str} · 占流通 {pct_str}
+                  解锁 {value_str} · {pct_label}
                 </div>
               </div>
             """)

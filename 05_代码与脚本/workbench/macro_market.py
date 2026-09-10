@@ -583,11 +583,28 @@ def fetch_binance_btc_klines() -> dict:
         ma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
         ma50 = round(sum(closes[-50:]) / 50, 2) if len(closes) >= 50 else None
 
+        # 涨跌幅
+        change_24h = round((latest - closes[-2]) / closes[-2] * 100, 2) if len(closes) >= 2 and closes[-2] else None
+        change_7d = round((latest - closes[-8]) / closes[-8] * 100, 2) if len(closes) >= 8 and closes[-8] else None
+        volatility_7d = None
+        if len(closes) >= 8:
+            # 7日历史波动率（日收益率标准差 * sqrt(7)）
+            import math
+            rets = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(-7, 0) if closes[i-1]]
+            if len(rets) >= 3:
+                avg_ret = sum(rets) / len(rets)
+                var = sum((r - avg_ret)**2 for r in rets) / len(rets)
+                volatility_7d = round(math.sqrt(var) * math.sqrt(7) * 100, 2)  # 百分比
+
         return {
             "price": latest,
             "rsi": rsi,
             "ma20": ma20,
             "ma50": ma50,
+            "change_24h": change_24h,
+            "change_24h_pct": change_24h,
+            "change_7d": change_7d,
+            "volatility_7d": volatility_7d,
             "high_24h": _safe_float(data[-1][2]),
             "low_24h": _safe_float(data[-1][3]),
             "closes": closes,
@@ -636,10 +653,27 @@ def fetch_binance_eth_klines() -> dict:
 
         ma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
 
+        # 涨跌幅
+        change_24h = round((latest - closes[-2]) / closes[-2] * 100, 2) if len(closes) >= 2 and closes[-2] else None
+        change_7d = round((latest - closes[-8]) / closes[-8] * 100, 2) if len(closes) >= 8 and closes[-8] else None
+        volatility_7d = None
+        if len(closes) >= 8:
+            import math
+            rets = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(-7, 0) if closes[i-1]]
+            if len(rets) >= 3:
+                avg_ret = sum(rets) / len(rets)
+                var = sum((r - avg_ret)**2 for r in rets) / len(rets)
+                volatility_7d = round(math.sqrt(var) * math.sqrt(7) * 100, 2)
+
         return {
             "price": latest,
             "rsi": rsi,
             "ma20": ma20,
+            "change_24h": change_24h,
+            "change_24h_pct": change_24h,
+            "change_7d": change_7d,
+            "volatility_7d": volatility_7d,
+            "closes": closes,
             "status": "ok",
         }
     except Exception as e:
@@ -5808,11 +5842,23 @@ def _build_tldr(today: dict, opps: list, highlights: list | None = None,
     """
     dims = today.get("dimensions") or {}
     btc_data = ((dims.get("2盘面") or {}).get("data") or {}).get("btc") or {}
+    eth_data = ((dims.get("2盘面") or {}).get("data") or {}).get("eth") or {}
     fg_data = ((dims.get("3情绪") or {}).get("data") or {}).get("fear_greed") or {}
     mvrv_dim = (dims.get("mvrv_universe") or {}).get("data") or {}
     mvrv_coins = mvrv_dim.get("coins") or []
     btc_mvrv = next((c for c in mvrv_coins if c.get("symbol") == "BTC"), {})
     cycle = today.get("btc_cycle") or {}
+
+    # BTC 7日波动率：优先用 kline 计算的真实波动率，兜底用 7日涨跌幅近似
+    btc_volatility_7d = btc_data.get("volatility_7d")
+    if btc_volatility_7d is None:
+        btc_change_7d = btc_data.get("change_7d")
+        if btc_change_7d is not None:
+            try:
+                # 简化近似：7日涨跌幅的绝对值 * 0.6（粗略从幅度转波动率）
+                btc_volatility_7d = round(abs(float(btc_change_7d)) * 0.6, 1)
+            except Exception:
+                pass
 
     highlights = highlights or []
     risk_signals = risk_signals or []
@@ -5855,6 +5901,11 @@ def _build_tldr(today: dict, opps: list, highlights: list | None = None,
     return {
         "btc_price": btc_data.get("price"),
         "btc_change_24h": btc_data.get("change_24h"),
+        "btc_change_24h_pct": btc_data.get("change_24h_pct") or btc_data.get("change_24h"),
+        "btc_volatility_7d": btc_volatility_7d,
+        "eth_price": eth_data.get("price"),
+        "eth_change_24h": eth_data.get("change_24h"),
+        "eth_change_24h_pct": eth_data.get("change_24h_pct") or eth_data.get("change_24h"),
         "fear_greed": fg_val,
         "fear_greed_label": fg_data.get("value_classification"),
         "btc_cycle_phase": cycle.get("phase_label") or cycle.get("phase"),

@@ -7605,10 +7605,26 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # 情况 3：强制刷新 / 无缓存 / 缓存太旧 → 同步刷新（以下为原有逻辑）
 
-    # ── 并行获取所有数据（第一批：实时/快照数据）──
+    # ── 全量并行获取所有数据（24 个数据源全部并行，总耗时 = 最慢的那个）──
     def _fetch_all():
-        with ThreadPoolExecutor(max_workers=10) as pool:
+        # 内部函数：第三批的几个独立数据拉取
+        def _fetch_divergence():
+            try:
+                return build_divergence_signals()
+            except Exception as e:
+                return {"status": "error", "error": str(e), "signals": []}
+
+        def _fetch_btc_cycle():
+            try:
+                from db_stats import get_btc_cycle_position
+                return get_btc_cycle_position()
+            except Exception:
+                return {"status": "error", "phase": "unknown",
+                        "phase_label": "数据不可用", "signals": []}
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
             futures = {
+                # 第一批：实时/快照数据（14 个）
                 "global_metrics": pool.submit(fetch_cmc_global_metrics),
                 "fear_greed": pool.submit(fetch_cmc_fear_greed),
                 "altcoin_season": pool.submit(fetch_cmc_altcoin_season),
@@ -7622,6 +7638,20 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                 "onchain": pool.submit(fetch_onchain_anomaly_signals),
                 "btc_onchain": pool.submit(fetch_btc_onchain_signals),
                 "cm_activity": pool.submit(fetch_cm_activity_signals),
+                # 第二批：历史分位数据（5 个）
+                "fear_greed_hist": pool.submit(fetch_fear_greed_history, 90),
+                "mvrv_hist": pool.submit(fetch_mvrv_history, "btc"),
+                "stablecoin_flow_hist": pool.submit(fetch_stablecoin_netflow_history, 30),
+                "cefi_hist": pool.submit(fetch_cefi_history, 30),
+                "btc_dom_hist": pool.submit(fetch_btc_dominance_history, 30),
+                # 第三批：板块/链/背离/BTC周期（5 个）
+                "cat_flow": pool.submit(fetch_category_flow),
+                "tvl_flow": pool.submit(fetch_category_tvl_flow),
+                "chain_flow": pool.submit(fetch_chain_flow),
+                "divergence": pool.submit(_fetch_divergence),
+                "btc_cycle": pool.submit(_fetch_btc_cycle),
+                # 其他：MVRV 多币极值（DB 查询）
+                "mvrv_universe": pool.submit(_build_mvrv_universe),
             }
             results = {}
             for k, fut in futures.items():
@@ -7646,6 +7676,17 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     onchain = r["onchain"]
     btc_onchain = r["btc_onchain"]
     cm_activity = r["cm_activity"]
+    fear_greed_hist = r["fear_greed_hist"]
+    mvrv_hist = r["mvrv_hist"]
+    stablecoin_flow_hist = r["stablecoin_flow_hist"]
+    cefi_hist = r["cefi_hist"]
+    btc_dom_hist = r["btc_dom_hist"]
+    cat_flow = r["cat_flow"]
+    tvl_flow = r["tvl_flow"]
+    chain_flow = r["chain_flow"]
+    divergence = r["divergence"]
+    btc_cycle = r["btc_cycle"]
+    mvrv_data = r["mvrv_universe"]
 
     # 若链上 CEX 净流量可用，用其归一化分值覆盖 cryptoetf cefi（优先级更高）
     if onchain.get("status") == "ok" and onchain.get("cefi_score") is not None:
@@ -7654,39 +7695,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             "status": "ok",
             "source": "onchain_cex_netflow",
         }
-
-    # ── P2-1 历史分位：并行拉取历史序列 ──
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        fg_fut = pool.submit(fetch_fear_greed_history, 90)
-        mvrv_fut = pool.submit(fetch_mvrv_history, "btc")
-        sc_fut = pool.submit(fetch_stablecoin_netflow_history, 30)
-        cefi_hist_fut = pool.submit(fetch_cefi_history, 30)
-        btc_dom_fut = pool.submit(fetch_btc_dominance_history, 30)
-        try:
-            fear_greed_hist = fg_fut.result(timeout=10)
-        except Exception as e:
-            print(f"[overview] fear_greed_hist failed: {e}")
-            fear_greed_hist = {"status": "error"}
-        try:
-            mvrv_hist = mvrv_fut.result(timeout=10)
-        except Exception as e:
-            print(f"[overview] mvrv_hist failed: {e}")
-            mvrv_hist = {"status": "error"}
-        try:
-            stablecoin_flow_hist = sc_fut.result(timeout=10)
-        except Exception as e:
-            print(f"[overview] stablecoin_flow_hist failed: {e}")
-            stablecoin_flow_hist = {"status": "error"}
-        try:
-            cefi_hist = cefi_hist_fut.result(timeout=10)
-        except Exception as e:
-            print(f"[overview] cefi_hist failed: {e}")
-            cefi_hist = {"status": "error"}
-        try:
-            btc_dom_hist = btc_dom_fut.result(timeout=10)
-        except Exception as e:
-            print(f"[overview] btc_dom_hist failed: {e}")
-            btc_dom_hist = {"status": "error"}
 
     # ── P2-1: 计算各核心指标的百分位和极端标记 ──
     fg_value = fear_greed.get("value")
@@ -7719,32 +7727,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     btc_dom_percentile = percentile_of(btc_dom_value, btc_dom_hist.get("series") or []) if btc_dom_hist.get("status") == "ok" else None
     btc_dom_extreme = flag_extreme(btc_dom_percentile)
 
-    # ── P1-1 板块/链资金净流入 + P1-2 背离 + BTC周期（并行） ──
-    def _fetch_sector_and_more():
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            fut_cat = pool.submit(fetch_category_flow)
-            fut_tvl = pool.submit(fetch_category_tvl_flow)
-            fut_chain = pool.submit(fetch_chain_flow)
-            fut_div = pool.submit(build_divergence_signals)
-
-            def _btc_cycle():
-                try:
-                    from db_stats import get_btc_cycle_position
-                    return get_btc_cycle_position()
-                except Exception:
-                    return {"status": "error", "phase": "unknown",
-                            "phase_label": "数据不可用", "signals": []}
-
-            fut_cycle = pool.submit(_btc_cycle)
-
-            cat_flow = fut_cat.result(timeout=20)
-            tvl_flow = fut_tvl.result(timeout=20)
-            chain_flow = fut_chain.result(timeout=20)
-            divergence = fut_div.result(timeout=20)
-            btc_cycle = fut_cycle.result(timeout=20)
-        return cat_flow, tvl_flow, chain_flow, divergence, btc_cycle
-
-    cat_flow, tvl_flow, chain_flow, divergence, btc_cycle = _fetch_sector_and_more()
     narrative_flow = build_narrative_flow_ranking(cat_flow, tvl_flow)
 
     # ── 计算子分 ──
@@ -7770,9 +7752,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         btc_dominance_percentile=btc_dom_percentile,
         btc_dominance_extreme=btc_dom_extreme,
     )
-
-    # ── B3: 多币 MVRV 极值（提前计算，避免重复调用） ──
-    mvrv_data = _build_mvrv_universe()
 
     # ── 组装结果 ──
     result = {

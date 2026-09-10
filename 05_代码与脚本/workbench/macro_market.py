@@ -3056,8 +3056,7 @@ def _fetch_catalyst_events(asset_id: int, window_days: int = 14, limit: int = 3)
 def get_market_catalysts(window_days: int = 14, limit: int = 50) -> dict:
     """获取大盘级催化剂事件列表（按事件聚合，关联多个代币）。
 
-    排序逻辑：AI 影响权重优先（strength × direction_sign × asset_count），
-    其次按时间倒序。strong 且影响多资产的事件排在最前面。
+    排序逻辑：按事件时间倒序（最新的排最上面），同分再按影响分绝对值排序。
 
     返回:
         {
@@ -3158,10 +3157,10 @@ def get_market_catalysts(window_days: int = 14, limit: int = 50) -> dict:
                         raw_score
                     FROM event_stats
                     ORDER BY
-                        -- 核心排序：影响分绝对值越大越靠前（事件越重要）
-                        ABS(raw_score) DESC,
-                        -- 同分：时间越新越靠前
-                        published_at DESC
+                        -- 主排序：时间倒序，最新的事件排最上面
+                        published_at DESC,
+                        -- 同分：影响分绝对值越大越靠前（事件越重要）
+                        ABS(raw_score) DESC
                     LIMIT %s
                 """, (window_days, limit))
                 rows = cur.fetchall()

@@ -59,18 +59,86 @@ from crypto_research.db.conn import get_connection
 #   plain       每行 "address exchange_name"（空格/逗号分隔）；或仅 address（用 file_exchange 兜底）
 COMMUNITY_SOURCES: list[dict[str, Any]] = [
     {
-        "name": "tradezon/cex-list",
+        "name": "tradezon/cex-list-eth",
         "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/ethereum-mainnet.json",
         "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
         "tar_path": "cex-list-main/data/ethereum-mainnet.json",
         "chain": "eth",
         "fmt": "json_map",
         "missing_ok": False,
-        "note": "社区维护的 CEX 地址清单（JSON map），仅 ETH；已实测可用（2026-08-27）。",
+        "note": "社区维护的 CEX 地址清单（JSON map），仅 ETH；已实测可用。",
     },
     {
-        # 工单默认首选仓库 cloudac7/cex-wallet-addresses —— 已实测 404 不存在（2026-08-27）。
-        # 保留为配置项，拉到即 ⚠️ 缺失标注；若日后恢复可用可去掉 missing_ok。
+        "name": "tradezon/cex-list-bsc",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/bsc.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/bsc.json",
+        "chain": "bsc",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 BSC 链（若存在），零成本补充。",
+    },
+    {
+        "name": "tradezon/cex-list-arbitrum",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/arbitrum-one.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/arbitrum-one.json",
+        "chain": "arbitrum",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Arbitrum 链（若存在）。",
+    },
+    {
+        "name": "tradezon/cex-list-base",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/base.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/base.json",
+        "chain": "base",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Base 链（若存在）。",
+    },
+    {
+        "name": "tradezon/cex-list-optimism",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/optimism.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/optimism.json",
+        "chain": "optimism",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Optimism 链（若存在）。",
+    },
+    {
+        "name": "tradezon/cex-list-polygon",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/polygon-pos.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/polygon-pos.json",
+        "chain": "polygon",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Polygon 链（若存在）。",
+    },
+    {
+        "name": "tradezon/cex-list-solana",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/solana-mainnet.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/solana-mainnet.json",
+        "chain": "solana",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Solana 链（若存在）。",
+    },
+    {
+        "name": "tradezon/cex-list-avalanche",
+        "url": "https://raw.githubusercontent.com/tradezon/cex-list/main/data/avalanche-c.json",
+        "tar_url": "https://codeload.github.com/tradezon/cex-list/tar.gz/refs/heads/main",
+        "tar_path": "cex-list-main/data/avalanche-c.json",
+        "chain": "avalanche",
+        "fmt": "json_map",
+        "missing_ok": True,
+        "note": "tradezon 同仓库 Avalanche 链（若存在）。",
+    },
+    {
         "name": "cloudac7/cex-wallet-addresses",
         "url": "https://raw.githubusercontent.com/cloudac7/cex-wallet-addresses/main/README.md",
         "chain": "eth",
@@ -171,7 +239,7 @@ RE_TRON = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 
 # Path B 数据源标识
 SOURCE_COMMUNITY = "auto_community"
-SOURCE_ETHPLORER = "auto_ethplorer"
+SOURCE_SNAPSHOT_LABEL = "auto_snapshot_label"
 SOURCE_DUNE = "auto_dune_graph"
 
 DEFAULT_HTTP_TIMEOUT = 30
@@ -428,7 +496,7 @@ def collect_from_snapshot_labels(conn, chains: set[str]) -> list[dict]:
     """
     print("\n  [快照标签反查] 扫描 biz.onchain_holder_snapshot.top_holders_json ...")
     candidates: list[dict] = []
-    src_key = SOURCE_ETHPLORER
+    src_key = SOURCE_SNAPSHOT_LABEL
 
     # SQL 侧过滤：只返回带非空 label 的 holder，避免全量回传大 JSON
     chain_sql = ",".join(["%s"] * len(chains))
@@ -624,16 +692,22 @@ def _conf_level(c: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="CEX 地址自动收集（路径A社区源 + 路径B快照标签反查）")
     p.add_argument("--apply", action="store_true", help="写入数据库（默认 dry-run 只输出 diff）")
-    p.add_argument("--chains", type=str, default="eth,bsc",
-                   help="目标链，逗号分隔（默认 eth,bsc；非 EVM 二期）")
-    p.add_argument("--sources", type=str, default="community,ethplorer",
-                   help="采集路径，逗号分隔：community / ethplorer（dune 二期预留）")
+    p.add_argument("--chains", type=str, default="eth,bsc,solana,base,arbitrum,optimism,polygon",
+                   help="目标链，逗号分隔（默认覆盖主流链）")
+    p.add_argument("--sources", type=str, default="community,snapshot",
+                   help="采集路径，逗号分隔：community / snapshot（dune 二期预留）")
     p.add_argument("--proxy", type=str, default=None,
                    help="HTTP 代理，如 http://127.0.0.1:7890（缺省读环境变量）")
     p.add_argument("--verify-high", type=str, default=None,
                    help="仅打印指定链的 high 地址集合（供净流计算验证），不采集")
     p.add_argument("--audit-out", type=str, default=None,
                    help="low 候选审计输出文件（JSON），默认仅打印")
+    p.add_argument("--pending-review", type=str, default=None,
+                   help="导出 medium 待人工验证清单到指定文件（CSV），含地址/链/交易所/来源/标签原文")
+    p.add_argument("--export-medium", type=str, default=None,
+                   help="从库里导出所有 medium 置信度地址到指定 CSV 文件（供人工验证后批量升 high）")
+    p.add_argument("--promote-high", type=str, default=None,
+                   help="从 CSV 文件读取已验证通过的地址，批量升为 high 置信度（CSV 需含'地址'和'链'列）")
     return p
 
 
@@ -651,6 +725,79 @@ def main() -> int:
         }, ensure_ascii=False, default=str))
         return 0
 
+    # export-medium 模式：从库里导出所有 medium 地址供人工验证
+    if args.export_medium:
+        settings = get_settings(require_database=True)
+        import csv
+        Path(args.export_medium).parent.mkdir(parents=True, exist_ok=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT address, exchange_name, chain, confidence, source, added_at
+                    FROM biz.onchain_exchange_wallet
+                    WHERE confidence = 'medium'
+                    ORDER BY chain, exchange_name, address
+                """)
+                rows = cur.fetchall()
+        with open(args.export_medium, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "链", "地址", "交易所", "置信度", "来源", "入库时间",
+                "Nansen验证", "Arkham验证", "验证结论", "备注"
+            ])
+            for r in rows:
+                writer.writerow([
+                    r["chain"], r["address"], r["exchange_name"],
+                    r["confidence"], r["source"], r["added_at"],
+                    "", "", "", ""
+                ])
+        print(json.dumps({
+            "status": "ok", "action": "export_medium",
+            "file": args.export_medium, "count": len(rows),
+        }, ensure_ascii=False, default=str))
+        return 0
+
+    # promote-high 模式：从 CSV 读取已验证地址，批量升 high
+    if args.promote_high:
+        settings = get_settings(require_database=True)
+        import csv
+        promoted = 0
+        skipped = 0
+        with open(args.promote_high, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                for r in rows:
+                    addr = (r.get("地址") or r.get("address") or "").strip()
+                    chain = (r.get("链") or r.get("chain") or "").strip()
+                    # 支持"验证结论"列：pass / 通过 / yes / true / 1 才升
+                    verdict = (r.get("验证结论") or r.get("verdict") or r.get("Nansen验证") or "").strip().lower()
+                    if verdict and verdict not in ("pass", "通过", "yes", "true", "1", "y", "是", "确认", "correct", "正确"):
+                        skipped += 1
+                        continue
+                    if not addr or not chain:
+                        skipped += 1
+                        continue
+                    chain_norm = _norm_chain(chain)
+                    addr_norm = _norm_address(chain_norm, addr)
+                    cur.execute("""
+                        UPDATE biz.onchain_exchange_wallet
+                        SET confidence = 'high',
+                            source = source || ';manual_verified'
+                        WHERE address = %s AND chain = %s AND confidence = 'medium'
+                    """, (addr_norm, chain_norm))
+                    if cur.rowcount:
+                        promoted += 1
+                    else:
+                        skipped += 1
+            conn.commit()
+        print(json.dumps({
+            "status": "ok", "action": "promote_high",
+            "promoted": promoted, "skipped": skipped, "total": len(rows),
+        }, ensure_ascii=False, default=str))
+        return 0
+
     chains = {_norm_chain(c.strip()) for c in args.chains.split(",") if c.strip()}
     sources = {s.strip().lower() for s in args.sources.split(",") if s.strip()}
 
@@ -662,7 +809,7 @@ def main() -> int:
     if "community" in sources:
         source_flags.append("A(社区源)")
         candidates.extend(collect_community(proxy, chains))
-    if "ethplorer" in sources:
+    if "snapshot" in sources or "ethplorer" in sources:
         source_flags.append("B(快照标签反查)")
         with get_connection(settings.database_url) as conn:
             candidates.extend(collect_from_snapshot_labels(conn, chains))
@@ -709,6 +856,38 @@ def main() -> int:
                     print("  [INFO] low 候选（仅记录）:")
                     for c in low_cands:
                         print(json.dumps(c, ensure_ascii=False, default=str))
+
+            # 待人工验证清单导出（medium + high 都列出来，供去 Nansen/Arkham 验证后一键升 high）
+            review_cands = [c for c in new if c["confidence"] in ("medium", "high")]
+            review_path = args.pending_review
+            if review_cands and review_path:
+                import csv
+                Path(review_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(review_path, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        "链", "地址", "推测交易所", "置信度",
+                        "来源数", "来源详情", "命中原因/标签原文",
+                        "Nansen验证结果", "Arkham验证结果", "备注"
+                    ])
+                    # 按置信度降序、链、交易所排序，方便人工批量验证
+                    review_cands_sorted = sorted(
+                        review_cands,
+                        key=lambda c: (_conf_level(c["confidence"]), c["chain"], c["exchange_name"])
+                    )
+                    for c in review_cands_sorted:
+                        writer.writerow([
+                            c["chain"],
+                            c["address"],
+                            c["exchange_name"],
+                            c["confidence"],
+                            len(c.get("sources", [])),
+                            " | ".join(c.get("sources", [])),
+                            c.get("hit_reason", ""),
+                            "", "", "",  # 三列留空给人工填写
+                        ])
+                print(f"  待人工验证清单已导出到 {review_path}（{len(review_cands)} 条）")
+                print(f"    → 用 Nansen/Arkham 验证后，填好结果列，可批量升 high")
 
             print(json.dumps({
                 "status": "ok", "dry_run": True, "candidate_total": len(merged),

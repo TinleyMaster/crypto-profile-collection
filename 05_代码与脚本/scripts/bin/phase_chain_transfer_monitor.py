@@ -29,6 +29,15 @@ from crypto_research.clients.tron_client import get_tron_client
 from crypto_research.clients.ton_client import get_ton_client
 from crypto_research.clients.sui_client import get_sui_client
 from crypto_research.clients.aptos_client import get_aptos_client
+from crypto_research.clients.address_label_resolver import AddressLabelResolver
+from crypto_research.clients.explorer_label_fetcher import ExplorerLabelFetcher
+from crypto_research.clients.label_enricher import LabelEnricher
+
+# 支持 HTML 标签爬取的链（Etherscan 系列，服务端渲染，纯 HTTP 可达）
+# 注意：bsc / arbitrum 被 Cloudflare 拦截，纯 requests 无法获取，暂不支持
+ENRICH_SUPPORTED_CHAINS = frozenset({"eth", "base", "polygon"})
+# 每处理多少个资产触发一次 enrich flush
+ENRICH_FLUSH_EVERY_N_ASSETS = 10
 
 
 # 大额转账阈值（美元）
@@ -274,8 +283,8 @@ def _resolve_timestamp(client, client_type: str, block_number: int, raw_ts: int)
 def save_transfers(conn, transfers: list[dict]) -> int:
     """批量保存转账记录。
 
-    ON CONFLICT 时更新交易所标签列（is_to_exchange/to_exchange/from_exchange/to_label/from_label），
-    使 P1-3 补全交易所地址库后重跑能回填旧行的砸盘信号。
+    ON CONFLICT 时更新交易所标签列 + 新标签数组列，
+    使补全地址标签库后重跑能回填旧行的标签。
     """
     written = 0
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -287,13 +296,15 @@ def save_transfers(conn, transfers: list[dict]) -> int:
                         from_address, to_address, value, value_usd,
                         from_label, to_label, from_exchange, to_exchange,
                         block_number, block_timestamp, is_to_exchange,
-                        is_suspect, threshold_used
+                        is_suspect, threshold_used,
+                        from_labels, to_labels, from_label_names, to_label_names
                     ) VALUES (
                         %(asset_id)s, %(chain)s, %(contract_address)s, %(tx_hash)s,
                         %(from_address)s, %(to_address)s, %(value)s, %(value_usd)s,
                         %(from_label)s, %(to_label)s, %(from_exchange)s, %(to_exchange)s,
                         %(block_number)s, %(block_timestamp)s, %(is_to_exchange)s,
-                        %(is_suspect)s, %(threshold_used)s
+                        %(is_suspect)s, %(threshold_used)s,
+                        %(from_labels)s, %(to_labels)s, %(from_label_names)s, %(to_label_names)s
                     )
                     ON CONFLICT (chain, tx_hash, contract_address, from_address, to_address) DO UPDATE SET
                         value = EXCLUDED.value,
@@ -306,7 +317,11 @@ def save_transfers(conn, transfers: list[dict]) -> int:
                         block_number = EXCLUDED.block_number,
                         block_timestamp = EXCLUDED.block_timestamp,
                         is_suspect = EXCLUDED.is_suspect,
-                        threshold_used = EXCLUDED.threshold_used
+                        threshold_used = EXCLUDED.threshold_used,
+                        from_labels = EXCLUDED.from_labels,
+                        to_labels = EXCLUDED.to_labels,
+                        from_label_names = EXCLUDED.from_label_names,
+                        to_label_names = EXCLUDED.to_label_names
                 """, t)
                 if cur.rowcount:
                     written += 1
@@ -350,13 +365,20 @@ def collect_transfers(
     client_type: str = "explorer",
     price_usd: float | None = None,
     market_cap: float | None = None,
+    label_resolver=None,
+    label_enricher=None,
 ) -> dict:
     """采集单个资产的大额转账。
 
     alarm_only=True: 存储双向大额转账（保证 netflow 计算完整），
     但仅对转入交易所的记录标记告警关注。
     client_type: 'explorer' / 'etherscan' / 'rpc'，影响时间戳等字段处理。
-    三者均通过 client.get_token_transfers(...) 拉取，返回字段归一化一致。"""
+    三者均通过 client.get_token_transfers(...) 拉取，返回字段归一化一致。
+    label_resolver: AddressLabelResolver 实例（可选）。传入后会批量解析地址标签，
+    填充 from_labels / to_labels / from_label_names / to_label_names 数组列。
+    label_enricher: LabelEnricher 实例（可选）。传入后会收集无标签的陌生地址，
+    供后续批量去区块浏览器查询并沉淀到地址标签库。
+    """
     asset_id = asset["asset_id"]
     symbol = asset["canonical_symbol"]
     chain = asset["chain"]
@@ -493,6 +515,42 @@ def collect_transfers(
         if len(transfers) < 100:
             break
 
+    # ── 批量解析地址标签（数组列） ──
+    if label_resolver is not None and all_transfers:
+        # 收集所有出现过的地址，批量查询
+        all_addrs = set()
+        for t in all_transfers:
+            all_addrs.add(t["from_address"])
+            all_addrs.add(t["to_address"])
+        label_resolver.resolve_batch(list(all_addrs))
+
+        # 回填每条记录的标签数组
+        for t in all_transfers:
+            from_info = label_resolver.resolve(t["from_address"])
+            to_info = label_resolver.resolve(t["to_address"])
+            t["from_labels"] = from_info["types"] or None
+            t["to_labels"] = to_info["types"] or None
+            t["from_label_names"] = from_info["names"] or None
+            t["to_label_names"] = to_info["names"] or None
+    else:
+        # 无 resolver：数组列留空（老行为）
+        for t in all_transfers:
+            t["from_labels"] = None
+            t["to_labels"] = None
+            t["from_label_names"] = None
+            t["to_label_names"] = None
+
+    # ── 收集无标签地址，供旁路 enrich（不阻塞主流程） ──
+    if label_enricher is not None and all_transfers:
+        unlabeled_addrs = set()
+        for t in all_transfers:
+            if not t.get("from_labels"):
+                unlabeled_addrs.add(t["from_address"])
+            if not t.get("to_labels"):
+                unlabeled_addrs.add(t["to_address"])
+        if unlabeled_addrs:
+            label_enricher.collect(list(unlabeled_addrs))
+
     if dry_run:
         large_count = len(all_transfers)
         to_exchange_count = sum(1 for t in all_transfers if t["is_to_exchange"])
@@ -601,6 +659,11 @@ def main():
                         choices=["auto", "explorer", "etherscan", "rpc"],
                         help="转账数据源：explorer=免Key免费源(默认)；etherscan=需付费Key；"
                              "rpc=公共RPC兜底；auto=explorer→etherscan→rpc 自动降级")
+    parser.add_argument("--enrich", action="store_true",
+                        help="开启地址标签旁路富化：遇到无标签地址时自动去区块浏览器查询并沉淀到地址标签库"
+                             "（仅支持 eth/bsc/arbitrum/base/polygon，需注意爬取频率）")
+    parser.add_argument("--enrich-delay", type=float, default=2.0,
+                        help="富化爬取的请求间隔秒数（默认 2 秒，礼貌限速）")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -630,6 +693,9 @@ def main():
         chain_sources = _build_chain_sources(args.source)
         chain_clients = {}     # chain -> (client, client_type)，首个成功返回数据的源
         chain_exchanges = {}
+        chain_resolvers = {}   # chain -> AddressLabelResolver
+        chain_enrichers = {}   # chain -> LabelEnricher（仅 --enrich 且支持的链）
+        total_enriched = {"fetched": 0, "inserted": 0, "backfilled": 0}
 
         total_processed = 0
         total_written = 0
@@ -650,6 +716,8 @@ def main():
             )
             if chain not in chain_clients:
                 exchanges = None
+                resolver = None
+                enricher = None
                 # 非 EVM 链用自己的源列表，EVM 链用通用 chain_sources
                 sources = _build_chain_sources(args.source, chain)
                 for stype in sources:
@@ -658,6 +726,20 @@ def main():
                         continue
                     if exchanges is None:
                         exchanges = get_exchange_map(conn, chain)
+                        resolver = AddressLabelResolver(conn, chain)
+                        # 初始化 enricher（仅 --enrich 且支持的链）
+                        if args.enrich and chain in ENRICH_SUPPORTED_CHAINS:
+                            try:
+                                proxy = getattr(settings, 'https_proxy', None) or getattr(settings, 'http_proxy', None)
+                                fetcher = ExplorerLabelFetcher(
+                                    chain=chain, proxy=proxy, delay=args.enrich_delay)
+                                enricher = LabelEnricher(
+                                    conn, chain, fetcher=fetcher, resolver=resolver,
+                                    dry_run=args.dry_run)
+                                print(f"  [{chain}] ✨ 已开启地址标签旁路富化")
+                            except Exception as e:
+                                print(f"  [{chain}] ⚠️  富化初始化失败，跳过: {e}")
+                                enricher = None
                     result = collect_transfers(
                         conn, client, asset, exchanges,
                         dry_run=args.dry_run,
@@ -665,10 +747,15 @@ def main():
                         client_type=stype,
                         price_usd=price_usd,
                         market_cap=asset.get("market_cap"),
+                        label_resolver=resolver,
+                        label_enricher=enricher,
                     )
                     if result.get("processed", 0) > 0:
                         chain_clients[chain] = (client, stype)
                         chain_exchanges[chain] = exchanges
+                        chain_resolvers[chain] = resolver
+                        if enricher:
+                            chain_enrichers[chain] = enricher
                         _print_source_banner(chain, stype)
                         lock_result = result
                         break
@@ -680,6 +767,8 @@ def main():
 
             client, client_type = chain_clients[chain]
             exchanges = chain_exchanges[chain]
+            resolver = chain_resolvers.get(chain)
+            enricher = chain_enrichers.get(chain)
 
             if lock_result is not None:
                 # 锁定数据源时已经为该资产采集过，直接复用
@@ -692,16 +781,45 @@ def main():
                     client_type=client_type,
                     price_usd=price_usd,
                     market_cap=asset.get("market_cap"),
+                    label_resolver=resolver,
+                    label_enricher=enricher,
                 )
 
             total_processed += result.get("processed", 0)
             total_written += result.get("written", 0)
             total_large += result.get("large", 0)
 
+            # ── 每 N 个资产触发一次 enrich flush（避免堆积太多） ──
+            if args.enrich and i % ENRICH_FLUSH_EVERY_N_ASSETS == 0 and chain_enrichers:
+                for en_chain, en in chain_enrichers.items():
+                    stats = en.flush()
+                    if stats["fetched"] > 0:
+                        total_enriched["fetched"] += stats["fetched"]
+                        total_enriched["inserted"] += stats["inserted"]
+                        total_enriched["backfilled"] += stats["backfilled"]
+                        print(f"  ✨ [{en_chain}] enrich: 新增标签 {stats['fetched']} 条, "
+                              f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条")
+
+        # ── 最终 flush：把剩余待富化地址处理完 ──
+        if args.enrich and chain_enrichers:
+            print("\n── 最终地址标签富化 ──")
+            for en_chain, en in chain_enrichers.items():
+                stats = en.flush()
+                if stats["fetched"] > 0 or stats["collected"] > 0:
+                    total_enriched["fetched"] += stats["fetched"]
+                    total_enriched["inserted"] += stats["inserted"]
+                    total_enriched["backfilled"] += stats["backfilled"]
+                    print(f"  [{en_chain}] 本次收集 {stats['collected']} 个陌生地址, "
+                          f"查到标签 {stats['fetched']} 条, "
+                          f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条")
+
         elapsed = time.time() - t0
         label = "告警" if args.alarm_only else "大额"
         written_note = "" if args.dry_run else f", 写入 {total_written} 条"
-        print(f"\n完成: 处理 {total_processed} 条转账, {label} {total_large} 条{written_note}, 耗时 {elapsed:.1f}s")
+        enrich_note = ""
+        if args.enrich and total_enriched["fetched"] > 0:
+            enrich_note = f", 富化新增标签 {total_enriched['fetched']} 条"
+        print(f"\n完成: 处理 {total_processed} 条转账, {label} {total_large} 条{written_note}{enrich_note}, 耗时 {elapsed:.1f}s")
 
 
 if __name__ == "__main__":

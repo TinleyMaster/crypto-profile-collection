@@ -1,0 +1,405 @@
+{
+  "basic": {
+    "asset_id": 1978,
+    "symbol": "UNI",
+    "name": "Uniswap",
+    "asset_type": "token",
+    "main_chain": "ethereum",
+    "primary_contract": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+    "website": "https://uniswap.org/",
+    "primary_sector": "defi"
+  },
+  "market": {
+    "price_cm": 6.87209259634566,
+    "roi_30d_pct": 71.76,
+    "roi_1yr_pct": -27.0,
+    "market_cap_usd": 6872092596.34566,
+    "current_supply": 1000000000.0
+  },
+  "onchain": {
+    "cm_metrics": {
+      "active_addresses_24h": 2789,
+      "balance_addresses": 382044,
+      "transfer_count_24h": 19142,
+      "tx_count_24h": 12289,
+      "mvrv_ratio": 1.049
+    }
+  },
+  "valuation": {
+    "active_addr_percentile": 86.5,
+    "active_addr_percentile_365d": 86.5,
+    "mvrv_percentile": 73.2,
+    "mvrv_percentile_365d": 73.2,
+    "roi_1yr_percentile": 50.8,
+    "roi_1yr_percentile_365d": 50.8,
+    "roi_30d_percentile": 94.9,
+    "roi_30d_percentile_365d": 94.9,
+    "tx_transfer_percentile": 98.6,
+    "tx_transfer_percentile_365d": 98.6,
+    "mvrv_zone": "高估"
+  },
+  "onchain_holders": {
+    "snapshot_date": "2026-09-08",
+    "top10_pct": 50.96,
+    "top50_pct": 69.32,
+    "top100_pct": 73.64,
+    "total_holders": 108049,
+    "holder_change_7d": 254,
+    "whale_change_7d_pct": 1.75
+  },
+  "onchain_transfers_7d": {
+    "tx_count_7d": 43,
+    "total_value_usd_7d": 5186080.82,
+    "to_exchange_usd_7d": 937317.75,
+    "to_non_exchange_usd_7d": 4248763.07,
+    "max_single_tx_usd": 347949.74,
+    "net_flow_direction": "吸筹（转出交易所）",
+    "net_flow_usd_7d": 3311445.3200000003,
+    "top_5_transfers": [
+      {
+        "time": "2026-09-08 17:25:18",
+        "from": "unknown",
+        "to": "unknown",
+        "value_usd": 347949.74,
+        "is_to_exchange": false
+      },
+      {
+        "time": "2026-09-08 17:32:58",
+        "from": "unknown",
+        "to": "unknown",
+        "value_usd": 347949.74,
+        "is_to_exchange": false
+      },
+      {
+        "time": "2026-09-08 07:01:23",
+        "from": "unknown",
+        "to": "unknown",
+        "value_usd": 294083.38,
+        "is_to_exchange": false
+      },
+      {
+        "time": "2026-09-03 09:30:11",
+        "from": "unknown",
+        "to": "exchange",
+        "value_usd": 291832.52,
+        "is_to_exchange": true
+      },
+      {
+        "time": "2026-09-07 10:16:11",
+        "from": "unknown",
+        "to": "unknown",
+        "value_usd": 266489.75,
+        "is_to_exchange": false
+      }
+    ]
+  },
+  "unlocks": {
+    "data_source": "tokenomics.com",
+    "source_url": "https://app.tokenomics.com/tokenomics/uniswap",
+    "status": "ok",
+    "released_pct": 100.0,
+    "last_updated": "2026-08-28 08:32:15",
+    "upcoming_events": [
+      {
+        "pct": 0.7,
+        "date": "Sep 16, 2024",
+        "status": "2 years ago",
+        "value_str": "",
+        "value_usd": 0.0,
+        "amount_str": "",
+        "ratio_mcap": true,
+        "allocations": 3,
+        "is_upcoming": false
+      },
+      {
+        "pct": 0.7,
+        "date": "Aug 16, 2024",
+        "status": "2 years ago",
+        "value_str": "",
+        "value_usd": 0.0,
+        "amount_str": "",
+        "ratio_mcap": true,
+        "allocations": 3,
+        "is_upcoming": false
+      },
+      {
+        "pct": 0.7,
+        "date": "Jul 16, 2024",
+        "status": "2 years ago",
+        "value_str": "",
+        "value_usd": 0.0,
+        "amount_str": "",
+        "ratio_mcap": true,
+        "allocations": 3,
+        "is_upcoming": false
+      },
+      {
+        "pct": 0.7,
+        "date": "Jun 16, 2024",
+        "status": "2 years ago",
+        "value_str": "",
+        "value_usd": 0.0,
+        "amount_str": "",
+        "ratio_mcap": true,
+        "allocations": 3,
+        "is_upcoming": false
+      },
+      {
+        "pct": 0.7,
+        "date": "May 16, 2024",
+        "status": "2 years ago",
+        "value_str": "",
+        "value_usd": 0.0,
+        "amount_str": "",
+        "ratio_mcap": true,
+        "allocations": 3,
+        "is_upcoming": false
+      }
+    ]
+  },
+  "tokenomics": {
+    "total_supply": 1000000000.0,
+    "max_supply": 1000000000.0,
+    "circulating_supply": 634000000.0,
+    "circulating_ratio_pct": 63.4,
+    "allocation": [
+      {
+        "pct": 43.0,
+        "category": "Community Treasury"
+      },
+      {
+        "pct": 21.27,
+        "category": "Team"
+      },
+      {
+        "pct": 18.04,
+        "category": "Investors"
+      },
+      {
+        "pct": 15.0,
+        "category": "Community Token Distribution"
+      },
+      {
+        "pct": 2.0,
+        "category": "Liquidity Mining"
+      },
+      {
+        "pct": 0.69,
+        "category": "Advisors"
+      }
+    ],
+    "emission_schedule": "UNI uses variable cliffs and vesting schedules that change depending on the allocation:Community Treasury: 1 Month Cliff then 4-year continuous vesting front-loaded 40% / 30% / 20% / 10% per yearTeam: 1 Month Cliff then 4-year continuous vesting front-loaded 40% / 30% / 20% / 10% per yearInvestors: ",
+    "utility_info": "Uniswap has 2 primary token utilities:Standard 1:1: UNI uses a one-token-one-vote system without vote escrow mechanisms. Proposals require 1% of supply delegated to submit, 4% quorum to pass, and simp",
+    "data_confidence": 1.0
+  },
+  "derivatives": {
+    "funding_rate_pct": 0.0095,
+    "funding_rate_7d_avg": 3.761e-05,
+    "funding_rate_30d_avg": 7.023e-05,
+    "total_oi_usd": 156517747.56,
+    "oi_change_24h_pct": -3.89,
+    "cvd_24h_usd": -23223.41,
+    "cvd_ratio_24h": -0.08,
+    "exchanges": [
+      "bitget",
+      "binance",
+      "okx",
+      "bybit",
+      "gate"
+    ],
+    "fetched_at": "2026-09-08 22:30:40"
+  },
+  "protocol_tvl": {
+    "tvl_usd": 1590251705.52,
+    "tvl_change_1d_pct": 6.53,
+    "tvl_change_7d_pct": 10.45,
+    "metric_date": "2026-09-08",
+    "source": "dl",
+    "tvl_to_market_cap_ratio": 0.231
+  },
+  "price_technical": {
+    "latest_price": 6.763117,
+    "latest_date": "2026-09-08",
+    "data_points": 123,
+    "volatility_30d_pct": 6.58,
+    "volatility_90d_pct": 5.67,
+    "rsi_14": 76.23,
+    "rsi_signal": "超买",
+    "high_30d": 7.195697,
+    "low_30d": 4.265051,
+    "price_position_30d_pct": 85.2,
+    "high_90d": 7.195697,
+    "low_90d": 2.776662,
+    "price_position_90d_pct": 90.2,
+    "change_7d_pct": 15.72,
+    "change_30d_pct": 46.22,
+    "change_90d_pct": 131.54
+  },
+  "social": {
+    "heat_score": 38.4,
+    "data_confidence": "low",
+    "trend": {
+      "recent_news_count": 15,
+      "recent_news": [
+        "Uniswap (UNI) Price Surges 100%, and One Chain Playing ‘Robin Hood' Explains Why - Yahoo Finance",
+        "UNI Token Surges 9.2% on Robinhood Chain and PONS Deal - CoinMarketCap",
+        "Uniswap Labs buys PONS as Robinhood Chain launchpad fees surge - Crypto News"
+      ]
+    },
+    "market_heat": {
+      "volume_usd": 145.7,
+      "price_change_7d_pct": 39.96446
+    },
+    "score_breakdown": {
+      "trend": 50.0,
+      "market": 24.0
+    },
+    "last_updated": "2026-09-05 01:05:03"
+  },
+  "catalysts_near": {
+    "events": [
+      {
+        "title": "Uniswap founder Hayden Adams said the protocol has been setting near-daily all-t...",
+        "published_at": "2026-09-02 07:13:52",
+        "source": "binance_square_news",
+        "category": "Binance News",
+        "ai_event_type": "market_update",
+        "ai_sentiment": "neutral",
+        "ai_summary": "Uniswap创始人表示协议近期几乎每日创历史新高，全链交易频率约82 TPS，此前单日交易量突破700万笔，创下历史最高纪录。",
+        "impact_direction": "neutral",
+        "impact_strength": "weak",
+        "horizon_days": 0,
+        "share_count": 0,
+        "source_url": "https://app.binance.com/uni-qr/cart/362258557117181?r=WR9N7RI0&l=en"
+      }
+    ],
+    "sentiment_counts": {
+      "positive": 0,
+      "negative": 0,
+      "neutral": 1,
+      "unknown": 0
+    }
+  },
+  "kol_signals_7d": {
+    "total_signals_7d": 7,
+    "long_count": 0,
+    "short_count": 0,
+    "neutral_count": 2,
+    "signals": [
+      {
+        "kol": "Ai 姨",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": null,
+        "confidence": 0.95,
+        "time": "2026-09-07 02:18",
+        "content": "老黑 Arthur Hayes 再次增持 $UNI ，昨天起已建仓超 200 万美元🦄\n\n过去 1 小时其地址 0x6cd…47e21 从 FalconX 收到 3.9 万枚 UNI（28.2 万美元），使得其 UNI 持仓增长至 284101 枚，总价值 200.7 万美元，平均提出价格 $7.06\n\n这是他时隔九个月再次大额交易 UNI，现已成为链上第三大持仓资产；钱包地址 0x6cd66DbdFe289ab83d7311B668ADA83A12447e21",
+        "category": "onchain",
+        "subtype": "smart_money",
+        "post_url": "https://app.binance.com/uni-qr/cpos/363954332725990?r=PK4VK94C&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "余烬Ember",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": null,
+        "confidence": 0.95,
+        "time": "2026-09-06 00:08",
+        "content": "半小时前，Arthur Hayes 通过 Flowdesk OTC 买入 24.4 万枚 UNI ($173 万)，价格 $7.06。\n\n地址：0x6cd66DbdFe289ab83d7311B668ADA83A12447e21",
+        "category": "onchain",
+        "subtype": "smart_money",
+        "post_url": "https://app.binance.com/uni-qr/cpos/363568047212597?r=YKBL3JNY&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "Ai 姨",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": "neutral",
+        "confidence": 0.95,
+        "time": "2026-09-04 08:50",
+        "content": "又一个看好 $UNI  的新地址🦄\n\n地址 0x9a3…9513c 半小时前从 #Flowdesk 提出 327,872 UNI，价值 204.5 万美元，提出均价 $6.24；该地址和 Haskey 关联地址的提出来源不同，尚不能确定是否为同一实体\n\n钱包地址 0x9a32979575D4a5078b917AaAb27e20035589513c",
+        "category": "onchain",
+        "subtype": "exchange_flow",
+        "post_url": "https://app.binance.com/uni-qr/cpos/362986927654660?r=PK4VK94C&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "Ai 姨",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": null,
+        "confidence": 0.95,
+        "time": "2026-09-04 05:27",
+        "content": "原来是 Hashkey 关联实体在囤 $UNI  啊😌\n\n不过这位朋友 1 小时前又将 100 万枚 UNI 全部充值进了币安，约 640 万美元，Arkhan 显示充值地址与 Hashkey Capital 存在关联\n\n从时间看倒不一定是卖出，更像是换地址避免被追踪 / 单纯的资金整理（个人猜测哈）\n\n钱包地址 0xc8686f611D59DeEe9c549bc844E4AD314e0F4972",
+        "category": "onchain",
+        "subtype": "exchange_flow",
+        "post_url": "https://app.binance.com/uni-qr/cpos/362930700155738?r=PK4VK94C&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "Ai 姨",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": "neutral",
+        "confidence": 0.95,
+        "time": "2026-09-04 05:27",
+        "content": "补充：该地址 8 分钟前再次加仓 323,125 UNI，价值 208 万美元\n\n今日已累计建仓 100 万枚 $UNI，总价值 635.5 万美元，均价约 $6.35\n\n钱包地址 0xc8686f611D59DeEe9c549bc844E4AD314e0F4972",
+        "category": "onchain",
+        "subtype": "accumulation",
+        "post_url": "https://app.binance.com/uni-qr/cpos/362905455876553?r=PK4VK94C&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "余烬Ember",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": null,
+        "confidence": 0.95,
+        "time": "2026-09-04 05:27",
+        "content": "在 UNI 来到今年新高后，一个地址在最近 3 个小时里从 Binance 提取了 100 万枚 UNI ($636 万) 到链上。\n\n地址：0xc8686f611D59DeEe9c549bc844E4AD314e0F4972",
+        "category": "onchain",
+        "subtype": "exchange_flow",
+        "post_url": "https://app.binance.com/uni-qr/cpos/362904716507118?r=YKBL3JNY&l=en",
+        "has_image": true
+      },
+      {
+        "kol": "Ai 姨",
+        "platform": "binance_square",
+        "type": "analysis",
+        "direction": null,
+        "confidence": 0.95,
+        "time": "2026-09-04 05:27",
+        "content": "UNI 本月自底部反弹 98%，被 Robinhood 一路带飞🚀\n\n新地址 0xc86…F4972 2 小时前追涨建仓，从 #Binance 提出 676,874 $UNI，价值 427.7 万美元，均价 $6.32\n\n钱包地址 0xc8686f611D59DeEe9c549bc844E4AD314e0F4972",
+        "entry_price": 6.32,
+        "category": "onchain",
+        "subtype": "exchange_flow",
+        "post_url": "https://app.binance.com/uni-qr/cpos/362886482701950?r=PK4VK94C&l=en",
+        "has_image": true
+      }
+    ],
+    "sentiment": "无明确多空方向"
+  },
+  "risk_summary": {
+    "top10_concentration_pct": 50.96,
+    "concentration_risk": "中高",
+    "funding_rate_pct": 0.0095,
+    "funding_rate_risk": "低",
+    "oi_to_mcap_pct": 2.28,
+    "oi_risk": "低",
+    "volatility_30d_pct": 6.58,
+    "volatility_risk": "中",
+    "catalyst_negative_ratio": 0.0,
+    "news_risk": "低",
+    "btc_correlation_30d": 0.16,
+    "btc_correlation_level": "低（相对独立行情）",
+    "data_gaps": [
+      "宏观流动性（美元指数/流动性指标）",
+      "监管合规风险（DeFi 监管状态）",
+      "协议安全审计报告",
+      "订单簿深度（现货买卖盘挂单）",
+      "地址标签智能分类（Smart Money/做市商/团队）"
+    ]
+  }
+}

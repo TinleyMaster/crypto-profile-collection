@@ -7660,6 +7660,34 @@
             }
         }
 
+        // ── 通用工具：fetch 超时封装 ──
+        // 所有 API 请求统一走这里，避免慢请求卡死页面
+        const FETCH_TIMEOUT_MS = 15000; // 默认 15 秒超时
+
+        async function fetchJSON (url, options) {
+            const timeout = (options && options.timeout) || FETCH_TIMEOUT_MS;
+            const controller = new AbortController();
+            const timer = setTimeout(function () { controller.abort(); }, timeout);
+
+            try {
+                const fetchOpts = options || {};
+                fetchOpts.signal = controller.signal;
+                const res = await fetch(url, fetchOpts);
+                clearTimeout(timer);
+
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
+                return await res.json();
+            } catch (e) {
+                clearTimeout(timer);
+                if (e.name === 'AbortError') {
+                    throw new Error('请求超时（' + (timeout / 1000) + '秒），请稍后重试');
+                }
+                throw e;
+            }
+        }
+
         // ── 顶部催化剂事件 ──
         const CAT_CN = {
             regulation: '政策监管',
@@ -7690,8 +7718,7 @@
                 }
 
                 const url = '/api/catalysts?limit=12&window_days=14' + (force ? '&_t=' + now : '');
-                const res = await fetch(url);
-                const data = await res.json();
+                const data = await fetchJSON(url);
                 if (!data.ok) throw new Error(data.error);
 
                 _topCatCache = data.data;
@@ -10556,8 +10583,7 @@
                 if (diffWatchlistOnly) params.set('watchlist_only', 1);
                 if (diffFilterNoise) params.set('filter_noise', 1);
                 const qs = params.toString();
-                const r = await fetch('/api/daily-diff' + (qs ? '?' + qs : ''));
-                const data = await r.json();
+                const data = await fetchJSON('/api/daily-diff' + (qs ? '?' + qs : ''));
                 if (!data.ok) {
                     content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
                     return;
@@ -11184,8 +11210,7 @@
             content.innerHTML = '<div class="sector-heatmap-loading">加载中...</div>';
 
             try {
-                const r = await fetch('/api/market/sector-heatmap?limit=12');
-                const data = await r.json();
+                const data = await fetchJSON('/api/market/sector-heatmap?limit=12');
                 if (!data.ok) {
                     content.innerHTML = '<div class="sector-heatmap-error">' + (data.error || '加载失败') + '</div>';
                     return;
@@ -11262,8 +11287,7 @@
             try {
                 const days = document.getElementById('bt-days').value;
                 const topN = document.getElementById('bt-topn').value;
-                const r = await fetch('/api/market/backtest?days=' + days + '&top_n=' + topN);
-                const data = await r.json();
+                const data = await fetchJSON('/api/market/backtest?days=' + days + '&top_n=' + topN);
                 if (!data.ok) {
                     container.innerHTML = '<div class="bt-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
                     return;
@@ -11392,14 +11416,34 @@
         async function loadMarketOverview (force) {
             const grid = document.getElementById('overview-grid');
             const updated = document.getElementById('overview-updated');
+            if (!grid) return;
+
             grid.innerHTML = DIM_META.map(() => '<div class="dim-card loading">加载中…</div>').join('');
             try {
                 const url = '/api/market/overview' + (force ? '?force_refresh=1' : '');
-                const res = await fetch(url);
-                const data = await res.json();
+                const data = await fetchJSON(url, { timeout: 20000 }); // 大盘接口给 20 秒
                 if (!data.ok) throw new Error(data.error || '加载失败');
                 await renderOverview(data);
-                updated.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+
+                // stale 数据：显示更新中提示，3 秒后自动拉取最新数据
+                if (data.stale) {
+                    const ageMin = Math.round((data.stale_age_sec || 0) / 60);
+                    updated.innerHTML = '更新于 ' + new Date().toLocaleTimeString('zh-CN') +
+                        ' · <span style="color:#f59e0b">后台更新中…</span>' +
+                        (ageMin ? '（' + ageMin + '分钟前数据）' : '');
+                    // 3 秒后自动刷新（仅当非强制刷新时，避免循环）
+                    if (!force) {
+                        setTimeout(function () {
+                            // 只在 overview 可见时才刷新
+                            const el = document.getElementById('overview');
+                            if (el && el.getBoundingClientRect().top < window.innerHeight) {
+                                loadMarketOverview(false);
+                            }
+                        }, 3000);
+                    }
+                } else {
+                    updated.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+                }
 
                 // 更新高亮信号 asset_id 集合（用于变化榜标注）
                 const oppList = data.opportunity_list || {};
@@ -13547,8 +13591,7 @@
             if (!grid || !section) return;
 
             try {
-                const res = await fetch('/api/market/onchain-thermometer?limit=10');
-                const data = await res.json();
+                const data = await fetchJSON('/api/market/onchain-thermometer?limit=10');
                 if (!data.ok) {
                     section.style.display = 'none';
                     return;
@@ -13615,8 +13658,7 @@
             else url = '/api/market/hot?limit=30' + tierParam;
 
             try {
-                const r = await fetch(url);
-                const data = await r.json();
+                const data = await fetchJSON(url);
                 if (!data.ok) {
                     content.innerHTML = '<div class="hot-tokens-error">' + (data.error || '加载失败') + '</div>';
                     return;

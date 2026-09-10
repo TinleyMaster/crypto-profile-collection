@@ -35,5 +35,8 @@ def list_sources() -> list[str]:
 
 
 # 导入各源以触发注册
-from . import binance_square_news  # noqa: E402,F401
 from . import binance_cms          # noqa: E402,F401
+
+# ⚠️ DEPRECATED: binance_square_news 已整合进 KOL 管道（kol_type = 'catalyst'）
+# 不再自动注册，避免重复抓取。旧代码保留供参考/手动调用。
+# from . import binance_square_news  # noqa: E402,F401

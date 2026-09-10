@@ -62,13 +62,22 @@ def get_conn() -> Iterator[psycopg.Connection]:
 # 博主档案 (kol_profile)
 # ============================================================
 
-def list_active_profiles(platform_code: str | None = None) -> list[dict]:
-    """列出所有启用监控的博主。"""
+def list_active_profiles(platform_code: str | None = None,
+                         kol_type: str | None = None) -> list[dict]:
+    """列出所有启用监控的博主。
+
+    Args:
+        platform_code: 只返回指定平台的博主，None = 全部平台
+        kol_type: 只返回指定类型的博主（kol/catalyst/news_media），None = 全部类型
+    """
     sql = "SELECT * FROM biz.kol_profile WHERE is_active = TRUE"
     params: list = []
     if platform_code:
         sql += " AND platform_code = %s"
         params.append(platform_code)
+    if kol_type:
+        sql += " AND kol_type = %s"
+        params.append(kol_type)
     sql += " ORDER BY profile_id"
     with get_conn() as conn:
         return conn.execute(sql, params).fetchall()
@@ -98,6 +107,7 @@ def upsert_profile(
     avatar_url: str | None = None,
     follower_count: int | None = None,
     is_active: bool = True,
+    kol_type: str | None = None,
     notes: str | None = None,
     extra_json: dict | None = None,
 ) -> dict:
@@ -118,6 +128,9 @@ def upsert_profile(
             if follower_count is not None:
                 sets.append("follower_count = %s")
                 params.append(follower_count)
+            if kol_type is not None:
+                sets.append("kol_type = %s")
+                params.append(kol_type)
             if notes is not None:
                 sets.append("notes = %s")
                 params.append(notes)
@@ -135,10 +148,10 @@ def upsert_profile(
             row = conn.execute(
                 "INSERT INTO biz.kol_profile "
                 "(platform_code, platform_user_id, nickname, avatar_url, "
-                " follower_count, is_active, notes, extra_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " follower_count, is_active, kol_type, notes, extra_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (platform_code, platform_user_id, nickname, avatar_url,
-                 follower_count, is_active, notes, extra_json),
+                 follower_count, is_active, kol_type or 'kol', notes, extra_json),
             ).fetchone()
             return row
 
@@ -195,6 +208,9 @@ def insert_post(
     post_url: str | None,
     posted_at: str,  # ISO 格式字符串
     raw_json: dict | None = None,
+    related_coins: list[dict] | None = None,
+    related_pairs: list[str] | None = None,
+    share_count: int | None = None,
 ) -> dict | None:
     """插入一条新帖子。已存在则返回 None（去重）。"""
     with get_conn() as conn:
@@ -202,12 +218,15 @@ def insert_post(
             row = conn.execute(
                 "INSERT INTO biz.kol_post "
                 "(profile_id, platform_code, platform_post_id, content_text, "
-                " image_urls, post_url, posted_at, raw_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                " image_urls, post_url, posted_at, raw_json, "
+                " related_coins, related_pairs) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "RETURNING *",
                 (profile_id, platform_code, platform_post_id, content_text,
                  image_urls, post_url, posted_at,
-                 psycopg.types.json.Json(raw_json) if raw_json is not None else None),
+                 psycopg.types.json.Json(raw_json) if raw_json is not None else None,
+                 psycopg.types.json.Json(related_coins) if related_coins else None,
+                 related_pairs or []),
             ).fetchone()
             return row
         except psycopg.errors.UniqueViolation:
@@ -238,13 +257,14 @@ def list_posts(
 
 
 def list_posts_pending_ai(limit: int = 20) -> list[dict]:
-    """列出待 AI 分析的帖子（ai_failed 也包含，靠 retry_count 控制）。"""
+    """列出待 AI 分析的帖子（仅普通 KOL 类型，ai_failed 也包含，靠 retry_count 控制）。"""
     with get_conn() as conn:
         return conn.execute(
             "SELECT p.*, pr.platform_code, pr.nickname as profile_nickname "
             "FROM biz.kol_post p JOIN biz.kol_profile pr ON p.profile_id = pr.profile_id "
             "WHERE p.post_id NOT IN (SELECT post_id FROM biz.kol_signal) "
             "  AND p.ai_retry_count < 3 "
+            "  AND pr.kol_type = 'kol' "
             "ORDER BY p.posted_at ASC LIMIT %s",
             (limit,),
         ).fetchall()

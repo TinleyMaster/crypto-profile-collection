@@ -27,6 +27,13 @@ class ScrapedPost:
     raw_json: dict = field(default_factory=dict)
     # 币安广场特有：关联交易对（tradingPairsV2[].symbol），催化剂场景用
     trading_pairs: list[str] = field(default_factory=list)
+    # 关联代币详情（从 tradingPairsV2 提取的丰富信息）
+    # 每项: {symbol, base_symbol, price, price_change, logo_url, contract_address, market, bridge}
+    related_coins: list[dict] = field(default_factory=list)
+    # 帖子互动数据（分享数、点赞数、浏览数等，催化剂场景可用于热度评估）
+    share_count: int = 0
+    like_count: int = 0
+    view_count: int = 0
 
 
 @dataclass
@@ -283,8 +290,10 @@ class BinanceSquareScraper(BaseScraper):
 
         self._uid_cache[username] = uid
 
-        # 缓存粉丝数（优先取 followersCount，兼容不同字段名）
-        follower_count = user_data.get("followersCount") or user_data.get("followerCount")
+        # 缓存粉丝数（兼容不同字段名）
+        follower_count = (user_data.get("totalFollowerCount")
+                          or user_data.get("followersCount")
+                          or user_data.get("followerCount"))
         if follower_count is not None:
             try:
                 self._follower_cache[username] = int(follower_count)
@@ -363,8 +372,9 @@ class BinanceSquareScraper(BaseScraper):
         else:
             post_url = f"https://www.binance.com/zh-CN/square/post/{post_id}"
 
-        # 关联交易对（tradingPairsV2[].symbol），催化剂场景用
+        # 关联交易对 + 代币详情（tradingPairsV2），催化剂/信号场景用
         trading_pairs: list[str] = []
+        related_coins: list[dict] = []
         tp_list = item.get("tradingPairsV2") or []
         if isinstance(tp_list, list):
             for tp in tp_list:
@@ -372,8 +382,28 @@ class BinanceSquareScraper(BaseScraper):
                     sym = tp.get("symbol") or tp.get("pair") or ""
                     if sym:
                         trading_pairs.append(str(sym).upper())
+                    # 提取丰富的代币信息
+                    coin_info = {
+                        "symbol": str(sym).upper() if sym else "",
+                        "base_symbol": str(tp.get("code") or "").upper(),
+                        "price": tp.get("price") or tp.get("priceRaw"),
+                        "price_change": tp.get("priceChange"),
+                        "logo_url": tp.get("logoUrl"),
+                        "contract_address": tp.get("contractAddress"),
+                        "market": tp.get("market"),
+                        "bridge": tp.get("bridge"),
+                        "chain_id": tp.get("chainId"),
+                        "chain_name": tp.get("chainName"),
+                    }
+                    if coin_info["base_symbol"] or coin_info["symbol"]:
+                        related_coins.append(coin_info)
                 elif isinstance(tp, str):
                     trading_pairs.append(tp.upper())
+
+        # 互动数据
+        share_count = int(item.get("shareCount") or 0)
+        like_count = int(item.get("likeCount") or 0)
+        view_count = int(item.get("viewCount") or 0)
 
         return ScrapedPost(
             platform_post_id=post_id,
@@ -383,6 +413,10 @@ class BinanceSquareScraper(BaseScraper):
             posted_at=posted_at,
             raw_json=item,
             trading_pairs=trading_pairs,
+            related_coins=related_coins,
+            share_count=share_count,
+            like_count=like_count,
+            view_count=view_count,
         )
 
     def discover_creators(
@@ -430,7 +464,9 @@ class BinanceSquareScraper(BaseScraper):
                     nickname = creator.get("nickName") or creator.get("nickname") or ""
                     avatar = creator.get("avatarUrl") or creator.get("avatar") or ""
                     square_uid = creator.get("squareUid") or ""
-                    followers = creator.get("followersCount") or creator.get("followerCount") or 0
+                    followers = (creator.get("totalFollowerCount")
+                                 or creator.get("followersCount")
+                                 or creator.get("followerCount") or 0)
 
                     if not username:
                         continue

@@ -32,6 +32,16 @@ from .scraper import get_scraper_class  # noqa: E402
 from .classifier import batch_classify  # noqa: E402
 from .asset_match import match_asset  # noqa: E402
 from .notifier import send_signal_alert  # noqa: E402
+from .catalyst_pipeline import process_catalyst_posts  # noqa: E402
+
+
+# KOL 类型常量
+KOL_TYPE_KOL = "kol"              # 普通交易型 KOL（走 AI 信号分析）
+KOL_TYPE_CATALYST = "catalyst"    # 催化剂账号（写入催化剂表）
+KOL_TYPE_NEWS_MEDIA = "news_media"  # 新闻媒体（同 catalyst 流程）
+
+# 需要走催化剂管线的类型
+_CATALYST_TYPES = {KOL_TYPE_CATALYST, KOL_TYPE_NEWS_MEDIA}
 
 
 def run_crawl_once(platform_code: str | None = None,
@@ -39,6 +49,10 @@ def run_crawl_once(platform_code: str | None = None,
                    headless: bool = True) -> dict:
     """
     执行一轮抓取。
+
+    按 kol_type 分流：
+      - kol:         帖子存档 → AI 分类 → 信号 → 告警
+      - catalyst / news_media: 帖子存档 → 写入催化剂表（不走 AI 信号）
 
     Args:
         platform_code: 只抓取指定平台，None = 全部平台
@@ -59,6 +73,11 @@ def run_crawl_once(platform_code: str | None = None,
         "signals_created": 0,
         "alerts_sent": 0,
         "alerts_failed": 0,
+        # 催化剂类 KOL 统计
+        "catalyst_profiles": 0,
+        "catalyst_inserted": 0,
+        "catalyst_merged": 0,
+        "catalyst_skipped": 0,
         "errors": [],
     }
 
@@ -74,6 +93,10 @@ def run_crawl_once(platform_code: str | None = None,
         return stats
 
     stats["profiles_total"] = len(profiles)
+
+    # 统计各类型数量
+    catalyst_count = sum(1 for p in profiles if p.get("kol_type", "kol") in _CATALYST_TYPES)
+    stats["catalyst_profiles"] = catalyst_count
 
     # 按平台分组
     by_platform: dict[str, list[dict]] = {}
@@ -114,29 +137,37 @@ def run_crawl_once(platform_code: str | None = None,
             stats["errors"].append(msg)
             stats["profiles_failed"] += len(plat_profiles)
 
-    # 处理待 AI 分类的帖子
+    # 处理普通 KOL 的待 AI 分类帖子（仅 kol 类型走信号流程）
     _process_pending_ai(stats)
 
-    # 处理待发送邮件的信号
+    # 处理普通 KOL 待发送邮件的信号
     _process_pending_alerts(stats)
 
     print(f"[KOL][runner] 本轮完成: "
           f"博主 {stats['profiles_success']}成功/{stats['profiles_empty']}空/{stats['profiles_failed']}失败 / "
           f"新帖 {stats['posts_new']} / "
           f"信号 {stats['signals_created']} / "
+          f"催化剂 {stats['catalyst_inserted']}新增/{stats['catalyst_merged']}合并 / "
           f"告警 {stats['alerts_sent']}")
 
     return stats
 
 
 def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
-    """抓取单个博主的新帖子并存入数据库。"""
+    """抓取单个博主的新帖子并存入数据库。
+
+    按 kol_type 分流：
+      - kol:         存档后等待批量 AI 分类处理
+      - catalyst / news_media: 存档后立即写入催化剂表
+    """
     profile_id = profile["profile_id"]
     nickname = profile["nickname"]
     user_id = profile["platform_user_id"]
     last_post_id = profile.get("last_post_id")
+    kol_type = profile.get("kol_type", "kol")
 
-    print(f"[KOL][runner] 抓取博主: {nickname} (last_post_id={last_post_id})")
+    type_label = f"[{kol_type}]" if kol_type != "kol" else ""
+    print(f"[KOL][runner] 抓取博主: {nickname} {type_label} (last_post_id={last_post_id})")
 
     result = scraper.fetch_posts(
         platform_user_id=user_id,
@@ -177,6 +208,7 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
     # 按时间从旧到新插入（确保 last_post_id 是最新的）
     posts_sorted = sorted(posts, key=lambda p: p.posted_at)
     latest_post_id = None
+    new_posts: list = []  # 记录本轮新增的帖子（用于催化剂管线）
 
     for post in posts_sorted:
         # 处理 posted_at 格式
@@ -193,17 +225,35 @@ def _crawl_one_profile(scraper, profile: dict, stats: dict) -> None:
             post_url=post.post_url,
             posted_at=posted_at,
             raw_json=post.raw_json,
+            related_coins=post.related_coins if post.related_coins else None,
+            related_pairs=post.trading_pairs if post.trading_pairs else None,
         )
 
         if result_db:
             stats["posts_new"] += 1
             latest_post_id = post.platform_post_id
+            new_posts.append(post)
         else:
             stats["posts_duplicate"] += 1
 
     # 更新 last_post_id
     if latest_post_id:
         db.update_profile_last_post(profile_id, latest_post_id)
+
+    # 催化剂类 KOL：新帖直接写入催化剂表
+    if kol_type in _CATALYST_TYPES and new_posts:
+        try:
+            cat_stats = process_catalyst_posts(new_posts, profile)
+            stats["catalyst_inserted"] += cat_stats["inserted"]
+            stats["catalyst_merged"] += cat_stats["merged"]
+            stats["catalyst_skipped"] += cat_stats["skipped"]
+            if cat_stats["errors"]:
+                stats["errors"].extend(cat_stats["errors"])
+            print(f"[KOL][runner]   催化剂写入: {cat_stats['inserted']}新增 / {cat_stats['merged']}合并 / {cat_stats['skipped']}跳过")
+        except Exception as e:
+            print(f"[KOL][runner]   ⚠️ 催化剂写入异常: {e}")
+            traceback.print_exc()
+            stats["errors"].append(f"催化剂写入失败 {nickname}: {e}")
 
 
 def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:

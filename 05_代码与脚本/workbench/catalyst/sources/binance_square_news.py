@@ -1,6 +1,12 @@
 """
 Binance Square News 催化剂源。
 
+⚠️ DEPRECATED (2026-09-10):
+   此源已废弃，Binance News 现已整合进 KOL 管道（kol_type = 'catalyst'），
+   由 workbench/kol/daemon.py 统一 15 分钟轮询抓取。
+   新数据的 source_code 格式为：kol_catalyst_binance_square_{profile_id}
+   历史数据（1078 条）已从 binance_square_news 迁移到新格式。
+
 来源：币安广场「Binance News」官方账号帖子
 特点：免登录、bodyTextOnly 干净文本、tradingPairsV2 结构化交易对
 复用：workbench.kol.scraper.BinanceSquareScraper（8/20 已逆向跑通）
@@ -18,7 +24,6 @@ from datetime import datetime
 
 from ..base import BaseCatalystSource
 from ..models import CatalystItem
-from . import register_source
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +39,9 @@ from scraper import BinanceSquareScraper, ScrapedPost  # noqa: E402
 BINANCE_NEWS_USERNAME = "Binance_News"
 
 
-@register_source
+# ⚠️ 已废弃：不再自动注册到 SOURCE_REGISTRY
+# 如需手动运行旧源调试，可直接实例化 BinanceSquareNewsSource 使用
+# @register_source  # DEPRECATED
 class BinanceSquareNewsSource(BaseCatalystSource):
     """币安广场 Binance News 账号催化剂源。
 

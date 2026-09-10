@@ -2194,12 +2194,18 @@ def analyze_asset_v2(
         # 1. 构建全量画像
         profile = build_asset_profile(asset_id, conn=conn)
 
-        # 2. 调用 LLM
+        # 2. Web 搜索补全缺失维度（如果 Firecrawl 已配置）
+        from crypto_research.config import get_settings
+        settings = get_settings(require_database=False)
+        if settings.firecrawl_api_key:
+            _enrich_profile_with_web_search(profile, settings)
+
+        # 3. 调用 LLM
         result = _call_llm_analysis_v2(profile, asset_signals)
         result["from_cache"] = False
         result["analysis_ts"] = time.time()
 
-        # 3. 写缓存
+        # 4. 写缓存
         _ai_v2_cache[cache_key] = {"result": result, "ts": time.time()}
         # 限制缓存大小
         if len(_ai_v2_cache) > 100:
@@ -2227,6 +2233,186 @@ def analyze_asset_v2(
         }
         _ai_v2_cache[cache_key] = {"result": error_result, "ts": time.time()}
         return error_result
+
+
+def _detect_missing_dimensions(profile: dict) -> list[str]:
+    """
+    检测 profile 中哪些核心维度数据缺失，返回维度 key 列表。
+
+    返回的维度 key 同时也是 web_search_enrichment 的 key。
+    """
+    missing = []
+
+    # 估值状态
+    val = profile.get("valuation", {})
+    if not val or len(val) < 2:
+        missing.append("valuation")
+
+    # 链上数据（CoinMetrics）
+    onchain = profile.get("onchain", {})
+    cm = onchain.get("cm_metrics", {}) if isinstance(onchain, dict) else {}
+    if not cm:
+        missing.append("onchain")
+
+    # 近7日大额转账
+    transfers = profile.get("onchain_transfers_7d", {})
+    if not transfers or transfers.get("total_transfers", 0) == 0:
+        missing.append("onchain_transfers_7d")
+
+    # 社交热度
+    social = profile.get("social", {})
+    if not social or all(v is None for k, v in social.items() if k != "asset_id"):
+        missing.append("social")
+
+    # KOL 信号
+    kol = profile.get("kol_signals_7d", {})
+    if not kol or kol.get("signal_count", 0) == 0:
+        missing.append("kol_signals_7d")
+
+    # 开发活跃度（这里也检查一下 github 字段，防止数据质量低）
+    github = profile.get("github", {})
+    if not github or (github.get("stars", 0) == 0 and github.get("commits_52w", 0) == 0
+                      and github.get("contributors_52w", 0) == 0):
+        # GitHub 数据质量太差，也算缺失（但不强制搜索，按需）
+        missing.append("github_low_quality")
+
+    return missing
+
+
+def _build_search_queries(profile: dict, dimension: str) -> list[str]:
+    """为某个缺失维度生成搜索 query 列表。"""
+    basic = profile.get("basic", {})
+    symbol = basic.get("symbol") or basic.get("coin_symbol") or ""
+    name = basic.get("name") or basic.get("coin_name") or ""
+
+    # 代币全名（带符号），用于提高搜索精度
+    asset_query = f"{symbol} {name}" if name else symbol
+
+    query_map = {
+        "valuation": [
+            f"{asset_query} MVRV ratio market cap FDV valuation 2024 2025",
+            f"{symbol} crypto price prediction valuation analysis",
+        ],
+        "onchain": [
+            f"{asset_query} on-chain metrics active addresses exchange flow",
+            f"{symbol} crypto whale transactions on chain analysis",
+        ],
+        "onchain_transfers_7d": [
+            f"{asset_query} large transactions whale transfers last 7 days",
+            f"{symbol} crypto on-chain transfer volume this week",
+        ],
+        "social": [
+            f"{asset_query} social media sentiment X twitter activity",
+            f"{symbol} crypto social dominance mentions trending",
+        ],
+        "kol_signals_7d": [
+            f"{asset_query} crypto influencer KOL opinion analysis",
+            f"{symbol} crypto what influencers are saying",
+        ],
+        "github_low_quality": [
+            f"{name} crypto github repository development activity",
+            f"{symbol} crypto developer activity github commits",
+        ],
+    }
+
+    return query_map.get(dimension, [])
+
+
+def _enrich_profile_with_web_search(
+    profile: dict,
+    settings,
+    max_dimensions: int = 4,
+    results_per_query: int = 3,
+) -> dict:
+    """
+    用 Firecrawl Web Search 补全 profile 中缺失的数据维度。
+
+    修改 profile 原地，在 profile["web_search_enrichment"] 中写入补全数据，格式：
+    {
+      "valuation": {
+        "summary_text": "...（可直接拼进 prompt 的文本，带来源）",
+        "sources": [url1, url2, ...],
+        "query": "实际使用的搜索词",
+      },
+      ...
+    }
+
+    Args:
+        profile: 代币全量画像（会被原地修改）
+        settings: Settings 配置对象
+        max_dimensions: 最多补全多少个维度（控制成本）
+        results_per_query: 每个维度取多少条搜索结果
+
+    Returns:
+        修改后的 profile（同一个对象）
+    """
+    from crypto_research.clients.firecrawl_search_client import FirecrawlSearchClient
+
+    client = FirecrawlSearchClient(settings)
+    if not client.is_available():
+        return profile
+
+    missing = _detect_missing_dimensions(profile)
+    if not missing:
+        return profile
+
+    # 优先级排序：估值 > 链上 > 社交 > KOL > 转账 > 开发
+    priority = ["valuation", "onchain", "social", "kol_signals_7d",
+                "onchain_transfers_7d", "github_low_quality"]
+    missing.sort(key=lambda d: priority.index(d) if d in priority else 99)
+
+    # 限制最多补全的维度数
+    target_dims = missing[:max_dimensions]
+    if not target_dims:
+        return profile
+
+    enrichment = {}
+
+    for dim in target_dims:
+        queries = _build_search_queries(profile, dim)
+        if not queries:
+            continue
+
+        # 只用第一个 query 就够了（控制成本）
+        query = queries[0]
+        try:
+            results = client.search(query, limit=results_per_query)
+        except Exception as e:
+            # 搜索失败不影响主流程，跳过
+            print(f"[web_search] 搜索失败 dim={dim}: {e}")
+            continue
+
+        if not results:
+            continue
+
+        # 构造 summary_text（带来源标注）
+        lines = []
+        sources = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "") or ""
+            desc = r.get("description", "") or ""
+            url = r.get("url", "") or ""
+            sources.append(url)
+            # 每条结果控制在 200 字以内
+            snippet = f"{title}: {desc}"
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"{i}. {snippet}")
+            if url:
+                lines.append(f"   来源: {url}")
+
+        summary_text = "\n".join(lines)
+
+        enrichment[dim] = {
+            "summary_text": summary_text,
+            "sources": sources,
+            "query": query,
+        }
+
+    if enrichment:
+        profile["web_search_enrichment"] = enrichment
+
+    return profile
 
 
 def _call_llm_analysis_v2(
@@ -2714,13 +2900,40 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
         parts.extend(lines)
         parts.append("")
 
-    # ── 缺失的章节（明确标记 ❌，只放一行声明）──
+    # ── 缺失的章节（明确标记 ❌，如有搜索补全数据则显示）──
     if missing:
-        parts.append("═══ 数据缺失的维度 ═══")
+        # 章节标题 → web_search_enrichment 维度 key 的映射
+        title_to_dim = {
+            "估值状态": "valuation",
+            "链上数据（CoinMetrics）": "onchain",
+            "近7日大额转账": "onchain_transfers_7d",
+            "社交热度": "social",
+            "开发活跃度": "github_low_quality",
+        }
+        # KOL 信号标题是动态的（带条数），单独处理
+        kol_title_prefix = "近7日 KOL 信号"
+
+        enrichment = profile.get("web_search_enrichment", {}) or {}
+
+        parts.append("═══ 数据缺失的维度（已尝试 Web 搜索补全）═══")
         parts.append("")
         for title, _ in missing:
             parts.append(f"=== ❌ {title} ===")
-            parts.append("- 数据暂未覆盖，评分时按中性处理。")
+
+            # 查找对应的搜索补全数据
+            dim_key = None
+            if title in title_to_dim:
+                dim_key = title_to_dim[title]
+            elif title.startswith(kol_title_prefix):
+                dim_key = "kol_signals_7d"
+
+            if dim_key and dim_key in enrichment:
+                data = enrichment[dim_key]
+                parts.append("- 数据库无数据，以下为 Web 搜索补全内容（仅供参考，可信度低于数据库数据）：")
+                parts.append("")
+                parts.append(data["summary_text"])
+            else:
+                parts.append("- 数据暂未覆盖，评分时按中性处理。")
             parts.append("")
 
     # ── 当前触发的信号 ──

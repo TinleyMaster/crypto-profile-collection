@@ -36,6 +36,9 @@ class Settings:
     # CryptoETF (cryptoetf.today) ETF 资金流 API
     cryptoetf_api_key: str | None = None
     cryptoetf_base_url: str = "https://api.cryptoetf.today/api/v1"
+    # Firecrawl Web Search（用于 AI 信号分析时补全缺失数据维度）
+    firecrawl_api_key: str | None = None
+    firecrawl_base_url: str = "https://api.firecrawl.dev"
     # 邮件通知（解锁追踪提醒）
     smtp_host: str | None = None
     smtp_port: int = 465
@@ -108,6 +111,8 @@ def get_settings(require_database: bool = True) -> Settings:
         ark_model=os.getenv("ARK_MODEL", "").strip() or None,
         cryptoetf_api_key=os.getenv("CRYPTOETF_KEY", "").strip() or None,
         cryptoetf_base_url=os.getenv("CRYPTOETF_BASE", "https://api.cryptoetf.today/api/v1").strip(),
+        firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", "").strip() or None,
+        firecrawl_base_url=os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev").strip(),
         smtp_host=os.getenv("SMTP_HOST", "").strip() or None,
         smtp_port=int(os.getenv("SMTP_PORT", "465") or 465),
         smtp_user=os.getenv("SMTP_USER", "").strip() or None,

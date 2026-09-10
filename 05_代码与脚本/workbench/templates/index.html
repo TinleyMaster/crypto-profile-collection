@@ -14361,14 +14361,14 @@
                     '</div>';
             }
 
-            // 用户输入（prompt）
+            // 用户输入（prompt）- 默认展开，方便排查
             html +=
                 '<div class="ai-trace-section">' +
                 '<div class="ai-trace-section-title">' +
                 '📥 用户输入 (User Prompt)' +
                 '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">收起</button>' +
                 '</div>' +
-                '<div class="ai-trace-section-content collapsed">' + _escapeHtml(item.user_prompt || '') + '</div>' +
+                '<div class="ai-trace-section-content">' + _escapeHtml(item.user_prompt || '') + '</div>' +
                 '</div>';
 
             // 系统提示词

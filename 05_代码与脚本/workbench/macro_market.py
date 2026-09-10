@@ -7626,7 +7626,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             results = {}
             for k, fut in futures.items():
                 try:
-                    results[k] = fut.result(timeout=30)
+                    results[k] = fut.result(timeout=12)
                 except Exception as e:
                     print(f"[overview] {k} fetch failed: {e}")
                     results[k] = {"status": "error", "error": str(e)}
@@ -7663,27 +7663,27 @@ def get_market_overview(force_refresh: str = "0") -> dict:
         cefi_hist_fut = pool.submit(fetch_cefi_history, 30)
         btc_dom_fut = pool.submit(fetch_btc_dominance_history, 30)
         try:
-            fear_greed_hist = fg_fut.result(timeout=20)
+            fear_greed_hist = fg_fut.result(timeout=10)
         except Exception as e:
             print(f"[overview] fear_greed_hist failed: {e}")
             fear_greed_hist = {"status": "error"}
         try:
-            mvrv_hist = mvrv_fut.result(timeout=20)
+            mvrv_hist = mvrv_fut.result(timeout=10)
         except Exception as e:
             print(f"[overview] mvrv_hist failed: {e}")
             mvrv_hist = {"status": "error"}
         try:
-            stablecoin_flow_hist = sc_fut.result(timeout=20)
+            stablecoin_flow_hist = sc_fut.result(timeout=10)
         except Exception as e:
             print(f"[overview] stablecoin_flow_hist failed: {e}")
             stablecoin_flow_hist = {"status": "error"}
         try:
-            cefi_hist = cefi_hist_fut.result(timeout=20)
+            cefi_hist = cefi_hist_fut.result(timeout=10)
         except Exception as e:
             print(f"[overview] cefi_hist failed: {e}")
             cefi_hist = {"status": "error"}
         try:
-            btc_dom_hist = btc_dom_fut.result(timeout=20)
+            btc_dom_hist = btc_dom_fut.result(timeout=10)
         except Exception as e:
             print(f"[overview] btc_dom_hist failed: {e}")
             btc_dom_hist = {"status": "error"}

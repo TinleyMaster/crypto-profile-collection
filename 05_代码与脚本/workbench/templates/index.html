@@ -11417,7 +11417,7 @@
             grid.innerHTML = DIM_META.map(() => '<div class="dim-card loading">加载中…</div>').join('');
             try {
                 const url = '/api/market/overview' + (force ? '?force_refresh=1' : '');
-                const data = await fetchJSON(url, { timeout: 20000 }); // 大盘接口给 20 秒
+                const data = await fetchJSON(url, { timeout: 30000 }); // 大盘接口给 30 秒
                 if (!data.ok) throw new Error(data.error || '加载失败');
                 await renderOverview(data);
 

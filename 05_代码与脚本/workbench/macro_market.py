@@ -6365,6 +6365,8 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
     """即将解锁事件（用于早报催化剂板块）。
 
     从 biz.asset_unlock_event 读取未来 N 天解锁事件，按解锁金额排序。
+    优化：当 unlock_ratio_circulating / unlock_ratio_total 为 NULL 时，
+    用 core.asset 的 circulating_supply / total_supply 实时计算兜底值。
     """
     try:
         from crypto_research.config import get_settings
@@ -6376,11 +6378,40 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT e.asset_id, e.unlock_date, e.unlock_type, e.unlock_amount,
-                           e.unlock_ratio_total, e.unlock_ratio_circulating,
+                           -- 流通占比：优先用源数据，否则用 circulating_supply 实时计算
+                           CASE
+                               WHEN e.unlock_ratio_circulating IS NOT NULL
+                                   THEN e.unlock_ratio_circulating
+                               WHEN a.circulating_supply IS NOT NULL
+                                    AND a.circulating_supply > 0
+                                    AND e.unlock_amount IS NOT NULL
+                                   THEN ROUND(
+                                       e.unlock_amount::NUMERIC / a.circulating_supply * 100, 4)
+                               ELSE NULL
+                           END AS unlock_ratio_circulating,
+                           -- 标记流通占比是否是计算出来的（便于渲染端标注）
+                           CASE
+                               WHEN e.unlock_ratio_circulating IS NOT NULL THEN 'source'
+                               WHEN a.circulating_supply IS NOT NULL
+                                    AND a.circulating_supply > 0
+                                    AND e.unlock_amount IS NOT NULL THEN 'computed'
+                               ELSE NULL
+                           END AS unlock_ratio_circulating_src,
+                           -- 总供给占比：优先源数据，否则用 total_supply 兜底
+                           CASE
+                               WHEN e.unlock_ratio_total IS NOT NULL
+                                   THEN e.unlock_ratio_total
+                               WHEN a.total_supply IS NOT NULL
+                                    AND a.total_supply > 0
+                                    AND e.unlock_amount IS NOT NULL
+                                   THEN ROUND(
+                                       e.unlock_amount::NUMERIC / a.total_supply * 100, 4)
+                               ELSE NULL
+                           END AS unlock_ratio_total,
                            e.unlock_ratio_mcap, e.unlock_value_usd, e.risk_level,
                            e.beneficiary_type, e.source_code,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
-                           a.market_cap_rank
+                           a.market_cap_rank, a.circulating_supply, a.total_supply
                     FROM biz.asset_unlock_event e
                     JOIN core.asset a ON a.asset_id = e.asset_id
                     WHERE e.unlock_date >= CURRENT_DATE

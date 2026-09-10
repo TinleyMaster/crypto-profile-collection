@@ -814,11 +814,13 @@ def render_brief_html(brief: dict) -> str:
                    or u.get("pct_of_supply")
                    or u.get("unlock_pct"))
             # 判断比值类型，用于提示标签
+            circ_src = u.get("unlock_ratio_circulating_src")  # 'source' / 'computed' / None
+            approx_prefix = "~" if circ_src == "computed" else ""
             pct_type = "流通"
             if pct is None:
                 pct_label = "—"
             elif u.get("unlock_ratio_circulating") is not None and pct == u.get("unlock_ratio_circulating"):
-                pct_label = f"占流通 {float(pct):.2f}%"
+                pct_label = f"占流通 {approx_prefix}{float(pct):.2f}%"
             elif u.get("unlock_ratio_total") is not None and pct == u.get("unlock_ratio_total"):
                 pct_label = f"占总供给 {float(pct):.2f}%"
             elif u.get("unlock_ratio_mcap") is not None and pct == u.get("unlock_ratio_mcap"):

@@ -239,6 +239,7 @@ def render_brief_html(brief: dict) -> str:
 
     # 波动率
     btc_vol = m0.get("btc_volatility_7d") or m2.get("btc_volatility_7d")
+    btc_vol_str = f"{btc_vol}%" if btc_vol is not None else "—"
 
     html_parts.append(f"""
       <!-- 模块1：大盘脉搏 -->
@@ -288,7 +289,7 @@ def render_brief_html(brief: dict) -> str:
           </div>
           <div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">
             <div style="font-size:9.5px;color:#94a3b8">BTC 7日波动率</div>
-            <div style="font-size:13px;font-weight:700;color:#334155">{btc_vol if btc_vol else '—'}</div>
+            <div style="font-size:13px;font-weight:700;color:#334155">{btc_vol_str}</div>
           </div>
         </div>
       </div>
@@ -1013,22 +1014,6 @@ def main():
     except Exception as e:
         print(f"[ERROR] 生成 brief 失败: {e}")
         return 1
-
-    # 1.5 AI 叙事（独立 try/except，绝不阻断邮件发送）
-    try:
-        from crypto_research.config import get_settings as _get_settings
-        from crypto_research.brief_ai import generate_ai_narrative
-        _settings = _get_settings(require_database=False)
-        ai_text = generate_ai_narrative(_settings, brief)
-        if ai_text:
-            brief["ai_narrative"] = ai_text
-            print(f"[OK] AI 叙事已生成（{len(ai_text)} 字符）")
-        else:
-            brief.setdefault("degraded", []).append("ai_narrative")
-            print("[INFO] AI 叙事未生成（LLM 不可用或返回空），已降级")
-    except Exception as e:
-        brief.setdefault("degraded", []).append("ai_narrative")
-        print(f"[WARN] AI 叙事生成异常（已降级）: {e}")
 
     # 2. 渲染 HTML
     try:

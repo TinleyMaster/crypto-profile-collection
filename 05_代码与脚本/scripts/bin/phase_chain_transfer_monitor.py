@@ -450,6 +450,14 @@ def collect_transfers(
                 # 估算美元价值（P1-1: 价格缺失 → value_usd=None → 直接不入库）
                 value_usd = round(value * price_usd, 2) if price_usd and price_usd > 0 else None
 
+                # P1-2: INF/NaN 脏数据过滤（价格为 inf/nan 或 value 异常时会产生）
+                if value_usd is not None:
+                    import math
+                    if math.isinf(value_usd) or math.isnan(value_usd):
+                        print(f"[dirty-value] {symbol}/{chain} tx={tx.get('hash', '')[:12]} "
+                              f"value_usd={value_usd} → 跳过", file=sys.stderr)
+                        continue
+
                 # 动态阈值：小市值资产用更低下限（Plan A）
                 threshold = LARGE_TRANSFER_THRESHOLD_USD
                 if market_cap and market_cap > 0 and market_cap < SMALL_MEME_MCAP_FLOOR:

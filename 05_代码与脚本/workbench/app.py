@@ -750,7 +750,6 @@ def api_catalysts():
                         ac.catalyst_id,
                         ac.title,
                         ac.published_at,
-                        ac.event_date,
                         COALESCE(ac.ai_event_type, ac.event_category, 'other') AS category,
                         ac.source_code AS source,
                         ac.source_url,
@@ -823,8 +822,6 @@ def api_catalysts():
                         # 格式化日期
                         if e.get("published_at"):
                             e["published_at"] = str(e["published_at"])
-                        if e.get("event_date"):
-                            e["event_date"] = str(e["event_date"])
 
                 # 总数
                 cur.execute("""

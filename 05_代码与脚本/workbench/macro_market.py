@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -81,7 +82,9 @@ SCORING_TUNING_DEFAULT = {
 # ── 缓存 ──
 _cache: dict[str, Any] = {}
 _cache_ts: float = 0
-CACHE_TTL = 180  # 3 分钟缓存
+CACHE_TTL = 180  # 3 分钟新鲜缓存
+STALE_TTL = 7200  # 2 小时陈旧缓存（SWR：快速返回 + 后台刷新）
+_refresh_lock = False  # 防止并发后台刷新
 
 # ── P1-1 资金净流入：叙事榜配置 ──
 # 关注的 CMC 叙事分类（无 TVL 赛道（Meme/L1 等）仅用市值变化，有 TVL 赛道与 DeFiLlama 加权合成）
@@ -7563,12 +7566,44 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     """
     大盘宏观分析总览。
     返回 {summary: {emotion_subscore, structure_subscore}, dimensions: {...}, event_calendar: {...}}。
+
+    缓存策略（SWR: Stale-While-Revalidate）：
+      - 0 ~ CACHE_TTL（3 分钟）：新鲜缓存，直接返回
+      - CACHE_TTL ~ STALE_TTL（2 小时）：陈旧缓存，立即返回旧数据 + 后台异步刷新
+        - 返回结果带 stale: true 标记，前端可据此决定是否轮询最新数据
+      - > STALE_TTL 或无缓存：同步刷新（首次加载场景）
     """
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _refresh_lock
 
     now = time.time()
-    if force_refresh != "1" and _cache and (now - _cache_ts) < CACHE_TTL:
+    cache_age = now - _cache_ts if _cache else float('inf')
+
+    # 情况 1：新鲜缓存 → 直接返回
+    if force_refresh != "1" and _cache and cache_age < CACHE_TTL:
         return _cache
+
+    # 情况 2：陈旧但在 STALE_TTL 内 → 立即返回旧数据，后台异步刷新
+    if force_refresh != "1" and _cache and cache_age < STALE_TTL:
+        # 触发后台刷新（防并发）
+        if not _refresh_lock:
+            _refresh_lock = True
+            def _bg_refresh():
+                global _refresh_lock
+                try:
+                    get_market_overview(force_refresh="1")
+                except Exception as e:
+                    print(f"[overview] bg refresh failed: {e}")
+                finally:
+                    _refresh_lock = False
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+
+        # 返回陈旧数据，加 stale 标记
+        stale_result = dict(_cache)
+        stale_result["stale"] = True
+        stale_result["stale_age_sec"] = int(cache_age)
+        return stale_result
+
+    # 情况 3：强制刷新 / 无缓存 / 缓存太旧 → 同步刷新（以下为原有逻辑）
 
     # ── 并行获取所有数据（第一批：实时/快照数据）──
     def _fetch_all():

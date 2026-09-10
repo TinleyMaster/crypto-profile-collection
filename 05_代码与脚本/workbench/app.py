@@ -725,6 +725,129 @@ def api_dashboard():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/catalysts")
+def api_catalysts():
+    """最新催化剂事件列表（轻量版，首屏快速加载）。
+
+    Query params:
+        limit: 返回条数，默认 8
+        window_days: 时间窗口（天），默认 14
+    """
+    try:
+        limit = min(int(request.args.get("limit", 8)), 50)
+        window_days = min(int(request.args.get("window_days", 14)), 90)
+
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 先取最新的事件（按发布时间倒序）
+                cur.execute("""
+                    SELECT
+                        ac.catalyst_id,
+                        ac.title,
+                        ac.published_at,
+                        ac.event_date,
+                        COALESCE(ac.ai_event_type, ac.event_category, 'other') AS category,
+                        ac.source_code AS source,
+                        ac.source_url,
+                        COALESCE(ac.ai_summary, '') AS summary,
+                        -- 主方向
+                        (
+                            SELECT ci2.impact_direction
+                            FROM biz.catalyst_impact ci2
+                            WHERE ci2.catalyst_id = ac.catalyst_id
+                            GROUP BY ci2.impact_direction
+                            ORDER BY COUNT(*) DESC
+                            LIMIT 1
+                        ) AS direction,
+                        -- 主强度
+                        (
+                            SELECT ci2.impact_strength
+                            FROM biz.catalyst_impact ci2
+                            WHERE ci2.catalyst_id = ac.catalyst_id
+                            ORDER BY
+                                CASE ci2.impact_strength
+                                    WHEN 'strong' THEN 3
+                                    WHEN 'medium' THEN 2
+                                    ELSE 1
+                                END DESC
+                            LIMIT 1
+                        ) AS strength,
+                        -- 关联资产数
+                        (SELECT COUNT(*) FROM biz.catalyst_impact ci WHERE ci.catalyst_id = ac.catalyst_id) AS n_assets
+                    FROM biz.asset_catalyst ac
+                    WHERE ac.published_at >= NOW() - INTERVAL '1 day' * %s
+                      AND ac.title IS NOT NULL
+                      AND ac.title <> ''
+                    ORDER BY ac.published_at DESC
+                    LIMIT %s
+                """, (window_days, limit))
+                events = [dict(r) for r in cur.fetchall()]
+
+                # 批量查每个事件的关联资产
+                if events:
+                    cat_ids = [e["catalyst_id"] for e in events]
+                    cur.execute("""
+                        SELECT
+                            ci.catalyst_id,
+                            ci.asset_id,
+                            a.canonical_symbol AS symbol,
+                            ci.impact_strength,
+                            ci.impact_direction
+                        FROM biz.catalyst_impact ci
+                        JOIN core.asset a ON a.asset_id = ci.asset_id
+                        WHERE ci.catalyst_id = ANY(%s)
+                        ORDER BY ci.catalyst_id,
+                                 CASE ci.impact_strength
+                                     WHEN 'strong' THEN 3
+                                     WHEN 'medium' THEN 2
+                                     ELSE 1
+                                 END DESC
+                    """, (cat_ids,))
+                    assets_by_cat = {}
+                    for row in cur.fetchall():
+                        cid = row["catalyst_id"]
+                        assets_by_cat.setdefault(cid, []).append({
+                            "symbol": row["symbol"],
+                            "asset_id": row["asset_id"],
+                            "impact_strength": row["impact_strength"],
+                            "impact_direction": row["impact_direction"],
+                        })
+
+                    for e in events:
+                        e["related_assets"] = assets_by_cat.get(e["catalyst_id"], [])
+                        # 格式化日期
+                        if e.get("published_at"):
+                            e["published_at"] = str(e["published_at"])
+                        if e.get("event_date"):
+                            e["event_date"] = str(e["event_date"])
+
+                # 总数
+                cur.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM biz.asset_catalyst ac
+                    WHERE ac.published_at >= NOW() - INTERVAL '1 day' * %s
+                      AND ac.title IS NOT NULL
+                      AND ac.title <> ''
+                """, (window_days,))
+                total = cur.fetchone()["cnt"]
+
+        return jsonify({
+            "ok": True,
+            "data": {
+                "events": events,
+                "total": total,
+                "window_days": window_days,
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/ai-trace")
 def api_ai_trace():
     """AI 追溯日志列表（V2 信号分析）。

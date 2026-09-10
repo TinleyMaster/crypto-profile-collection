@@ -1086,7 +1086,21 @@ def main():
         print(f"[ERROR] 生成 brief 失败: {e}")
         return 1
 
-    # 2. 渲染 HTML
+    # 2. 数据契约标准化 + 健康检查
+    try:
+        from brief_data_model import normalize_brief, check_brief_health
+        brief = normalize_brief(brief)
+        health = check_brief_health(brief)
+        print(f"[INFO] 数据健康度: {health['score']}/100")
+        if health["critical"]:
+            print(f"[WARN] 核心数据缺失: {health['critical']}")
+        if health["warning"]:
+            print(f"[INFO] 辅助数据缺失: {health['warning']}")
+    except Exception as e:
+        print(f"[WARN] 数据标准化/健康检查失败，跳过: {e}")
+        health = {"score": 0, "critical": [], "warning": []}
+
+    # 3. 渲染 HTML
     try:
         html = render_brief_html(brief)
     except Exception as e:
@@ -1097,7 +1111,7 @@ def main():
         print(html)
         return 0
 
-    # 3. 发送邮件
+    # 4. 发送邮件
     try:
         from crypto_research.config import get_settings
         from crypto_research.clients.notifier import EmailNotifier

@@ -672,7 +672,7 @@ def render_brief_html(brief: dict) -> str:
                   <div style="padding:5px 8px;margin-bottom:3px;border-radius:5px;background:#fafafa;border-left:2px solid {dot_color};font-size:11px">
                     <div style="display:flex;justify-content:space-between;align-items:center">
                       <span style="font-weight:700;color:#0f172a">{sym}</span>
-                      <span style="color:#475569;font-weight:600">${amt_str}</span>
+                      <span style="color:#475569;font-weight:600">{amt_str}</span>
                     </div>
                     <div style="font-size:10px;color:#64748b;margin-top:1px">
                       {from_label} → {to_label}

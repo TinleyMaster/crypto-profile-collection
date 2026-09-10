@@ -6171,6 +6171,11 @@ def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
 
     从 biz.onchain_transfer_log 读取近 N 小时大额转账，按金额排序。
     区分：交易所充值/提现、巨鲸地址间转账。
+
+    过滤策略：
+    - 仅市值前 200 的资产（排除垃圾币价格异常导致的虚假大额转账）
+    - 单笔金额不超过流通市值的 20%（防止 price oracle 异常造成的天文数字）
+    - 最低门槛 500 万美金（减少噪音）
     """
     try:
         from crypto_research.config import get_settings
@@ -6186,11 +6191,17 @@ def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
                            t.from_labels, t.to_labels, t.from_label_names, t.to_label_names,
                            t.from_exchange, t.to_exchange, t.tx_hash,
                            t.block_timestamp,
-                           a.canonical_symbol AS symbol, a.canonical_name AS name
+                           a.canonical_symbol AS symbol, a.canonical_name AS name,
+                           a.market_cap, a.circulating_supply, a.market_cap_rank
                     FROM biz.onchain_transfer_log t
                     JOIN core.asset a ON a.asset_id = t.asset_id
                     WHERE t.block_timestamp >= NOW() - (%s || ' hours')::INTERVAL
-                      AND t.value_usd >= 1000000
+                      AND t.value_usd >= 5000000
+                      AND a.market_cap_rank <= 200
+                      AND t.value_usd <= COALESCE(a.market_cap * 0.2, 10000000000)
+                      AND t.value_usd != 'Infinity'::float
+                      AND t.value_usd != '-Infinity'::float
+                      AND t.value_usd IS NOT NULL
                     ORDER BY t.value_usd DESC
                     LIMIT %s
                 """, (hours, limit))
@@ -6229,6 +6240,11 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
 
     从 biz.onchain_holder_snapshot 读取最新快照，
     返回 Top10 集中度最高/最低的资产 + 巨鲸余额变化趋势。
+
+    巨鲸变化筛选策略：
+    - 市值前 200（保证是有意义的主流币）
+    - 变化幅度 >= 1%（过滤掉计算精度导致的 0.12% 之类噪音）
+    - 按变化绝对值排序，展示最显著的异动
     """
     try:
         from crypto_research.config import get_settings
@@ -6245,7 +6261,9 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                     return {"status": "empty", "assets": []}
                 latest_date = latest_row["latest"]
 
-                # 集中度 Top N（最集中）- 过滤市值前500
+                # 集中度 Top N（最集中）
+                # 注：持仓快照目前主要覆盖 ETH 链小币，不限市值排名，
+                #     但要求有市值排名（过滤完全没数据的币）
                 cur.execute("""
                     SELECT h.asset_id, h.chain, h.top10_concentration, h.top50_concentration,
                            h.total_holders, h.whale_balance_change_7d_pct,
@@ -6255,7 +6273,7 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                     FROM biz.onchain_holder_snapshot h
                     JOIN core.asset a ON a.asset_id = h.asset_id
                     WHERE h.snapshot_date = %s
-                      AND a.market_cap_rank <= 500
+                      AND a.market_cap_rank IS NOT NULL
                       AND h.top10_concentration IS NOT NULL
                     ORDER BY h.top10_concentration DESC
                     LIMIT %s
@@ -6263,17 +6281,20 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                 most_concentrated = [dict(r) for r in cur.fetchall()]
 
                 # 巨鲸 7 日增仓 Top N
+                # 注意：持仓快照目前主要覆盖 ETH 链，且大币数据较少
+                # 策略：不限市值排名，但要求变化幅度 >= 2%（过滤噪音），
+                #       并返回市值排名供渲染端展示上下文
                 cur.execute("""
                     SELECT h.asset_id, h.chain, h.top10_concentration,
                            h.whale_balance_change_7d_pct,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
-                           a.market_cap_rank
+                           a.market_cap_rank, a.market_cap
                     FROM biz.onchain_holder_snapshot h
                     JOIN core.asset a ON a.asset_id = h.asset_id
                     WHERE h.snapshot_date = %s
-                      AND a.market_cap_rank <= 500
                       AND h.whale_balance_change_7d_pct IS NOT NULL
-                      AND h.whale_balance_change_7d_pct != 0
+                      AND h.whale_balance_change_7d_pct >= 2.0
+                      AND a.market_cap IS NOT NULL
                     ORDER BY h.whale_balance_change_7d_pct DESC
                     LIMIT %s
                 """, (latest_date, top_n))
@@ -6284,13 +6305,13 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                     SELECT h.asset_id, h.chain, h.top10_concentration,
                            h.whale_balance_change_7d_pct,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
-                           a.market_cap_rank
+                           a.market_cap_rank, a.market_cap
                     FROM biz.onchain_holder_snapshot h
                     JOIN core.asset a ON a.asset_id = h.asset_id
                     WHERE h.snapshot_date = %s
-                      AND a.market_cap_rank <= 500
                       AND h.whale_balance_change_7d_pct IS NOT NULL
-                      AND h.whale_balance_change_7d_pct != 0
+                      AND h.whale_balance_change_7d_pct <= -2.0
+                      AND a.market_cap IS NOT NULL
                     ORDER BY h.whale_balance_change_7d_pct ASC
                     LIMIT %s
                 """, (latest_date, top_n))

@@ -2414,228 +2414,316 @@ def _build_system_prompt_v2() -> str:
 
 
 def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
-    """V2 版 user prompt：输入全量画像 + 触发信号。"""
-    parts = []
+    """
+    V2 版 user prompt：输入全量画像 + 触发信号。
+    
+    优化点（方案 A + C）：
+    1. 开头加数据覆盖摘要，让 AI 一开始就知道哪些维度有数据
+    2. 每个章节标题带 ✅/❌ 标记，明确区分"有数据"和"数据缺失"
+    3. 有数据的章节放前面，缺失的放后面，避免 LLM"开头偏见"
+    4. 即使数据缺失的章节也保留标题（标记 ❌），避免 AI 混淆"章节不存在"和"数据缺失"
+    """
+    # ── 辅助：构建单个章节 ──
+    # 返回 (title, has_data, lines) —— lines 是该章节下的所有行（不含标题行）
+    def _section(title, has_data, lines):
+        return (title, has_data, lines)
 
-    # ── 1. 代币基础信息 ──
+    sections = []  # [(title, has_data, [lines...]), ...]
+
+    # ══════════════════════════════════════════════
+    # 第 1 组：核心基础（总是展示，不参与排序）
+    # ══════════════════════════════════════════════
+
+    # 1. 代币基础信息
     basic = profile.get("basic", {})
-    parts.append("=== 代币基础信息 ===")
+    basic_lines = []
     name = basic.get("name") or basic.get("coin_name") or "?"
     symbol = basic.get("symbol") or basic.get("coin_symbol") or "?"
     sector = basic.get("sector") or basic.get("primary_sector") or "未知"
     rank = basic.get("market_cap_rank")
-    parts.append(f"- 代币: {symbol} ({name})")
-    parts.append(f"- 赛道: {sector}")
+    basic_lines.append(f"- 代币: {symbol} ({name})")
+    basic_lines.append(f"- 赛道: {sector}")
     if rank:
-        parts.append(f"- 市值排名: #{rank}")
-
+        basic_lines.append(f"- 市值排名: #{rank}")
     market = profile.get("market", {})
     if market.get("price_cm"):
-        parts.append(f"- 当前价格: ${market['price_cm']}")
+        basic_lines.append(f"- 当前价格: ${market['price_cm']}")
     if market.get("market_cap_usd"):
         mcap = float(market["market_cap_usd"])
         if mcap >= 1e9:
-            parts.append(f"- 市值: ${mcap/1e9:.2f}B")
+            basic_lines.append(f"- 市值: ${mcap/1e9:.2f}B")
         elif mcap >= 1e6:
-            parts.append(f"- 市值: ${mcap/1e6:.1f}M")
+            basic_lines.append(f"- 市值: ${mcap/1e6:.1f}M")
+    sections.append(_section("代币基础信息", True, basic_lines))
 
-    # ── 2. 价格技术面 ──
+    # ══════════════════════════════════════════════
+    # 第 2 组：六维度核心数据（参与排序，有数据的放前）
+    # ══════════════════════════════════════════════
+
+    # 2. 价格技术面
     tech = profile.get("price_technical", {})
-    if tech:
-        parts.append("")
-        parts.append("=== 价格技术面 ===")
-        if tech.get("rsi_14") is not None:
-            parts.append(f"- RSI(14): {tech['rsi_14']} ({tech.get('rsi_signal', '')})")
-        if tech.get("volatility_30d_pct") is not None:
-            parts.append(f"- 30日波动率: {tech['volatility_30d_pct']}%")
-        if tech.get("price_position_30d_pct") is not None:
-            parts.append(f"- 30日价格位置: {tech['price_position_30d_pct']}%")
-        if tech.get("price_position_90d_pct") is not None:
-            parts.append(f"- 90日价格位置: {tech['price_position_90d_pct']}%")
-        if tech.get("change_7d_pct") is not None:
-            parts.append(f"- 7日涨跌幅: {tech['change_7d_pct']:+.2f}%")
-        if tech.get("change_30d_pct") is not None:
-            parts.append(f"- 30日涨跌幅: {tech['change_30d_pct']:+.2f}%")
+    tech_lines = []
+    if tech.get("rsi_14") is not None:
+        tech_lines.append(f"- RSI(14): {tech['rsi_14']} ({tech.get('rsi_signal', '')})")
+    if tech.get("volatility_30d_pct") is not None:
+        tech_lines.append(f"- 30日波动率: {tech['volatility_30d_pct']}%")
+    if tech.get("price_position_30d_pct") is not None:
+        tech_lines.append(f"- 30日价格位置: {tech['price_position_30d_pct']}%")
+    if tech.get("price_position_90d_pct") is not None:
+        tech_lines.append(f"- 90日价格位置: {tech['price_position_90d_pct']}%")
+    if tech.get("change_7d_pct") is not None:
+        tech_lines.append(f"- 7日涨跌幅: {tech['change_7d_pct']:+.2f}%")
+    if tech.get("change_30d_pct") is not None:
+        tech_lines.append(f"- 30日涨跌幅: {tech['change_30d_pct']:+.2f}%")
+    sections.append(_section("价格技术面", len(tech_lines) > 0, tech_lines))
 
-    # ── 3. 估值状态 ──
+    # 3. 估值状态
     val = profile.get("valuation", {})
-    if val:
-        parts.append("")
-        parts.append("=== 估值状态 ===")
-        if val.get("mvrv_zone"):
-            parts.append(f"- MVRV区间: {val['mvrv_zone']}")
-        if val.get("mvrv_percentile") is not None:
-            parts.append(f"- MVRV百分位: {val['mvrv_percentile']}%")
-        if val.get("roi_30d_percentile") is not None:
-            parts.append(f"- 30日ROI百分位: {val['roi_30d_percentile']}%")
-        if val.get("active_addr_percentile") is not None:
-            parts.append(f"- 活跃地址百分位: {val['active_addr_percentile']}%")
-        if val.get("exchange_inflow_percentile") is not None:
-            parts.append(f"- 交易所流入百分位: {val['exchange_inflow_percentile']}%")
-        if val.get("exchange_outflow_percentile") is not None:
-            parts.append(f"- 交易所流出百分位: {val['exchange_outflow_percentile']}%")
+    val_lines = []
+    if val.get("mvrv_zone"):
+        val_lines.append(f"- MVRV区间: {val['mvrv_zone']}")
+    if val.get("mvrv_percentile") is not None:
+        val_lines.append(f"- MVRV百分位: {val['mvrv_percentile']}%")
+    if val.get("roi_30d_percentile") is not None:
+        val_lines.append(f"- 30日ROI百分位: {val['roi_30d_percentile']}%")
+    if val.get("active_addr_percentile") is not None:
+        val_lines.append(f"- 活跃地址百分位: {val['active_addr_percentile']}%")
+    if val.get("exchange_inflow_percentile") is not None:
+        val_lines.append(f"- 交易所流入百分位: {val['exchange_inflow_percentile']}%")
+    if val.get("exchange_outflow_percentile") is not None:
+        val_lines.append(f"- 交易所流出百分位: {val['exchange_outflow_percentile']}%")
+    sections.append(_section("估值状态", len(val_lines) > 0, val_lines))
 
-    # ── 4. 链上数据 ──
+    # 4. 链上数据（CoinMetrics）
     onchain = profile.get("onchain", {})
     cm = onchain.get("cm_metrics", {}) if isinstance(onchain, dict) else {}
-    if cm:
-        parts.append("")
-        parts.append("=== 链上数据（CoinMetrics） ===")
-        if cm.get("active_addresses_24h"):
-            parts.append(f"- 24h活跃地址: {cm['active_addresses_24h']:,}")
-        if cm.get("balance_addresses"):
-            parts.append(f"- 持币地址数: {cm['balance_addresses']:,}")
-        if cm.get("exchange_net_flow_usd_24h") is not None:
-            nf = cm["exchange_net_flow_usd_24h"]
-            direction = "净流入" if nf > 0 else "净流出"
-            parts.append(f"- 24h交易所{direction}: ${abs(nf)/1e6:.2f}M")
-        if cm.get("mvrv_ratio") is not None:
-            parts.append(f"- MVRV比率: {cm['mvrv_ratio']}")
+    cm_lines = []
+    if cm.get("active_addresses_24h"):
+        cm_lines.append(f"- 24h活跃地址: {cm['active_addresses_24h']:,}")
+    if cm.get("balance_addresses"):
+        cm_lines.append(f"- 持币地址数: {cm['balance_addresses']:,}")
+    if cm.get("exchange_net_flow_usd_24h") is not None:
+        nf = cm["exchange_net_flow_usd_24h"]
+        direction = "净流入" if nf > 0 else "净流出"
+        cm_lines.append(f"- 24h交易所{direction}: ${abs(nf)/1e6:.2f}M")
+    if cm.get("mvrv_ratio") is not None:
+        cm_lines.append(f"- MVRV比率: {cm['mvrv_ratio']}")
+    sections.append(_section("链上数据（CoinMetrics）", len(cm_lines) > 0, cm_lines))
 
-    # ── 5. 持仓结构 ──
+    # 5. 持仓结构
     holders = profile.get("onchain_holders", {})
-    if holders:
-        parts.append("")
-        parts.append("=== 持仓结构 ===")
-        if holders.get("top10_pct") is not None:
-            parts.append(f"- Top10集中度: {holders['top10_pct']}%")
-        if holders.get("total_holders"):
-            parts.append(f"- 总持币地址: {holders['total_holders']:,}")
-        if holders.get("holder_change_7d") is not None:
-            hc = holders["holder_change_7d"]
-            parts.append(f"- 7日地址变化: {hc:+d}")
-        if holders.get("whale_change_7d_pct") is not None:
-            parts.append(f"- 巨鲸7日持仓变化: {holders['whale_change_7d_pct']:+.2f}%")
-        # 地址分类（如果有）
-        for label in ["exchange_pct", "vc_pct", "smart_money_pct", "retail_pct"]:
-            if holders.get(label) is not None:
-                label_zh = {"exchange_pct": "交易所", "vc_pct": "VC",
-                           "smart_money_pct": "Smart Money", "retail_pct": "散户"}[label]
-                parts.append(f"- {label_zh}持仓占比: {holders[label]}%")
+    holder_lines = []
+    if holders.get("top10_pct") is not None:
+        holder_lines.append(f"- Top10集中度: {holders['top10_pct']}%")
+    if holders.get("total_holders"):
+        holder_lines.append(f"- 总持币地址: {holders['total_holders']:,}")
+    if holders.get("holder_change_7d") is not None:
+        hc = holders["holder_change_7d"]
+        holder_lines.append(f"- 7日地址变化: {hc:+d}")
+    if holders.get("whale_change_7d_pct") is not None:
+        holder_lines.append(f"- 巨鲸7日持仓变化: {holders['whale_change_7d_pct']:+.2f}%")
+    for label in ["exchange_pct", "vc_pct", "smart_money_pct", "retail_pct"]:
+        if holders.get(label) is not None:
+            label_zh = {"exchange_pct": "交易所", "vc_pct": "VC",
+                       "smart_money_pct": "Smart Money", "retail_pct": "散户"}[label]
+            holder_lines.append(f"- {label_zh}持仓占比: {holders[label]}%")
+    sections.append(_section("持仓结构", len(holder_lines) > 0, holder_lines))
 
-    # ── 6. 大额转账（7日）──
+    # 6. 近7日大额转账
     transfers = profile.get("onchain_transfers_7d", {})
+    transfer_lines = []
     if transfers and transfers.get("total_transfers", 0) > 0:
-        parts.append("")
-        parts.append("=== 近7日大额转账 ===")
-        parts.append(f"- 转账笔数: {transfers.get('total_transfers', 0)}")
-        parts.append(f"- 总金额: ${transfers.get('total_value_usd', 0)/1e6:.2f}M")
+        transfer_lines.append(f"- 转账笔数: {transfers.get('total_transfers', 0)}")
+        transfer_lines.append(f"- 总金额: ${transfers.get('total_value_usd', 0)/1e6:.2f}M")
         if transfers.get("net_flow_direction"):
-            parts.append(f"- 净额方向: {transfers['net_flow_direction']}")
+            transfer_lines.append(f"- 净额方向: {transfers['net_flow_direction']}")
         if transfers.get("to_exchange_count") is not None:
-            parts.append(f"- 转入交易所: {transfers['to_exchange_count']}笔")
+            transfer_lines.append(f"- 转入交易所: {transfers['to_exchange_count']}笔")
         if transfers.get("from_exchange_count") is not None:
-            parts.append(f"- 转出交易所: {transfers['from_exchange_count']}笔")
+            transfer_lines.append(f"- 转出交易所: {transfers['from_exchange_count']}笔")
+    sections.append(_section("近7日大额转账", len(transfer_lines) > 0, transfer_lines))
 
-    # ── 7. 解锁 & 代币经济 ──
+    # 7. 解锁数据
     unlocks = profile.get("unlocks", {})
-    if unlocks:
-        parts.append("")
-        parts.append("=== 解锁数据 ===")
-        if unlocks.get("next_unlock_date"):
-            parts.append(f"- 下次解锁: {unlocks['next_unlock_date']}")
-        if unlocks.get("next_unlock_pct") is not None:
-            parts.append(f"- 下次解锁占比: {unlocks['next_unlock_pct']}%")
-        if unlocks.get("next_30d_unlock_pct_of_supply") is not None:
-            parts.append(f"- 30天内解锁占比: {unlocks['next_30d_unlock_pct_of_supply']}%")
+    unlock_lines = []
+    if unlocks.get("next_unlock_date"):
+        unlock_lines.append(f"- 下次解锁: {unlocks['next_unlock_date']}")
+    if unlocks.get("next_unlock_pct") is not None:
+        unlock_lines.append(f"- 下次解锁占比: {unlocks['next_unlock_pct']}%")
+    if unlocks.get("next_30d_unlock_pct_of_supply") is not None:
+        unlock_lines.append(f"- 30天内解锁占比: {unlocks['next_30d_unlock_pct_of_supply']}%")
+    sections.append(_section("解锁数据", len(unlock_lines) > 0, unlock_lines))
 
+    # 8. 代币经济学
     tokenomics = profile.get("tokenomics", {})
-    if tokenomics:
-        parts.append("")
-        parts.append("=== 代币经济学 ===")
-        for k, v in tokenomics.items():
-            if k != "asset_id":
-                parts.append(f"- {k}: {v}")
+    tomo_lines = []
+    for k, v in tokenomics.items():
+        if k != "asset_id" and v is not None:
+            tomo_lines.append(f"- {k}: {v}")
+    sections.append(_section("代币经济学", len(tomo_lines) > 0, tomo_lines))
 
-    # ── 8. 衍生品 ──
+    # 9. 衍生品数据
     der = profile.get("derivatives", {})
-    if der:
-        parts.append("")
-        parts.append("=== 衍生品数据 ===")
-        if der.get("funding_rate_pct") is not None:
-            parts.append(f"- 资金费率: {der['funding_rate_pct']}%")
-        if der.get("total_oi_usd"):
-            parts.append(f"- 未平仓合约: ${der['total_oi_usd']/1e6:.2f}M")
-        if der.get("oi_change_24h_pct") is not None:
-            parts.append(f"- OI 24h变化: {der['oi_change_24h_pct']:+.2f}%")
-        if der.get("cvd_24h_usd") is not None:
-            parts.append(f"- 24h CVD: ${der['cvd_24h_usd']/1e6:.2f}M")
+    der_lines = []
+    if der.get("funding_rate_pct") is not None:
+        der_lines.append(f"- 资金费率: {der['funding_rate_pct']}%")
+    if der.get("total_oi_usd"):
+        der_lines.append(f"- 未平仓合约: ${der['total_oi_usd']/1e6:.2f}M")
+    if der.get("oi_change_24h_pct") is not None:
+        der_lines.append(f"- OI 24h变化: {der['oi_change_24h_pct']:+.2f}%")
+    if der.get("cvd_24h_usd") is not None:
+        der_lines.append(f"- 24h CVD: ${der['cvd_24h_usd']/1e6:.2f}M")
+    sections.append(_section("衍生品数据", len(der_lines) > 0, der_lines))
 
-    # ── 9. 协议 TVL（DeFi）──
+    # 10. 协议 TVL
     tvl = profile.get("protocol_tvl", {})
-    if tvl:
-        parts.append("")
-        parts.append("=== 协议 TVL ===")
-        if tvl.get("tvl_usd"):
-            parts.append(f"- TVL: ${tvl['tvl_usd']/1e6:.2f}M")
-        if tvl.get("tvl_change_7d_pct") is not None:
-            parts.append(f"- 7日TVL变化: {tvl['tvl_change_7d_pct']:+.2f}%")
-        if tvl.get("tvl_to_market_cap_ratio") is not None:
-            parts.append(f"- TVL/市值比: {tvl['tvl_to_market_cap_ratio']}")
+    tvl_lines = []
+    if tvl.get("tvl_usd"):
+        tvl_lines.append(f"- TVL: ${tvl['tvl_usd']/1e6:.2f}M")
+    if tvl.get("tvl_change_7d_pct") is not None:
+        tvl_lines.append(f"- 7日TVL变化: {tvl['tvl_change_7d_pct']:+.2f}%")
+    if tvl.get("tvl_to_market_cap_ratio") is not None:
+        tvl_lines.append(f"- TVL/市值比: {tvl['tvl_to_market_cap_ratio']}")
+    sections.append(_section("协议 TVL", len(tvl_lines) > 0, tvl_lines))
 
-    # ── 10. 社交热度 & KOL 信号 ──
+    # 11. 社交热度
     social = profile.get("social", {})
-    if social:
-        parts.append("")
-        parts.append("=== 社交热度 ===")
-        for k, v in social.items():
-            if k != "asset_id" and v is not None:
-                parts.append(f"- {k}: {v}")
+    social_lines = []
+    for k, v in social.items():
+        if k != "asset_id" and v is not None:
+            social_lines.append(f"- {k}: {v}")
+    sections.append(_section("社交热度", len(social_lines) > 0, social_lines))
 
-    kol = profile.get("kol_signals_7d", {})
-    if kol and kol.get("signal_count", 0) > 0:
-        parts.append("")
-        parts.append(f"=== 近7日 KOL 信号（{kol.get('signal_count', 0)}条） ===")
-        if kol.get("sentiment"):
-            parts.append(f"- 情绪倾向: {kol['sentiment']}")
-        if kol.get("bull_count") is not None and kol.get("bear_count") is not None:
-            parts.append(f"- 多空比: {kol['bull_count']}多 / {kol['bear_count']}空")
-        # 列几条有代表性的
-        if kol.get("sample_signals"):
-            for i, s in enumerate(kol["sample_signals"][:5], 1):
-                content = (s.get("content") or s.get("title") or "")[:80]
-                sent = s.get("sentiment") or s.get("direction") or ""
-                parts.append(f"  {i}. [{sent}] {content}")
+    # 12. 开发活跃度
+    github = profile.get("github", {})
+    gh_lines = []
+    if github and (github.get("stars") is not None or github.get("commits_52w") is not None
+                   or github.get("repo") is not None):
+        if github.get("repo"):
+            gh_lines.append(f"- 仓库: {github['repo']}")
+        if github.get("stars") is not None:
+            gh_lines.append(f"- Star总数: {github['stars']}")
+        if github.get("forks") is not None:
+            gh_lines.append(f"- Fork数: {github['forks']}")
+        if github.get("commits_52w") is not None:
+            gh_lines.append(f"- 52周提交数: {github['commits_52w']}")
+        if github.get("contributors_52w") is not None:
+            gh_lines.append(f"- 52周贡献者: {github['contributors_52w']}人")
+        if github.get("last_pushed_at"):
+            gh_lines.append(f"- 最后更新: {github['last_pushed_at']}")
+    sections.append(_section("开发活跃度", len(gh_lines) > 0, gh_lines))
 
-    # ── 11. 开发活跃度 ──
-    github = profile.get("github_activity", {})
-    if github and github.get("repo_count", 0) > 0:
-        parts.append("")
-        parts.append("=== 开发活跃度 ===")
-        if github.get("total_stars"):
-            parts.append(f"- Star总数: {github['total_stars']}")
-        if github.get("total_commits_30d") is not None:
-            parts.append(f"- 30日提交数: {github['total_commits_30d']}")
-        if github.get("active_devs_30d") is not None:
-            parts.append(f"- 30日活跃开发者: {github['active_devs_30d']}人")
-
-    # ── 12. 催化剂事件 ──
+    # 13. 近期催化剂
     cat = profile.get("catalysts_near", {})
     cat_events = cat.get("events", []) if isinstance(cat, dict) else cat
+    cat_lines = []
     if cat_events:
-        parts.append("")
-        parts.append(f"=== 近期催化剂（{len(cat_events)}条） ===")
         for i, c in enumerate(cat_events[:8], 1):
             date = c.get("published_at", "")[:10]
             senti = c.get("ai_sentiment", "")
             title = (c.get("title") or c.get("ai_summary") or "")[:80]
-            parts.append(f"  {i}. {date} [{senti}] {title}")
+            cat_lines.append(f"  {i}. {date} [{senti}] {title}")
+    sections.append(_section(f"近期催化剂（{len(cat_events)}条）", len(cat_lines) > 0, cat_lines))
 
-    # ── 13. 风险汇总 ──
+    # 14. 近7日 KOL 信号
+    kol = profile.get("kol_signals_7d", {})
+    kol_lines = []
+    kol_count = kol.get("signal_count", 0) if isinstance(kol, dict) else 0
+    if kol and kol_count > 0:
+        if kol.get("sentiment"):
+            kol_lines.append(f"- 情绪倾向: {kol['sentiment']}")
+        if kol.get("bull_count") is not None and kol.get("bear_count") is not None:
+            kol_lines.append(f"- 多空比: {kol['bull_count']}多 / {kol['bear_count']}空")
+        if kol.get("sample_signals"):
+            for i, s in enumerate(kol["sample_signals"][:5], 1):
+                content = (s.get("content") or s.get("title") or "")[:80]
+                sent = s.get("sentiment") or s.get("direction") or ""
+                kol_lines.append(f"  {i}. [{sent}] {content}")
+    sections.append(_section(f"近7日 KOL 信号（{kol_count}条）", len(kol_lines) > 0, kol_lines))
+
+    # 15. 风险提示
     risk = profile.get("risk_summary", {})
+    risk_lines = []
     if risk:
-        parts.append("")
-        parts.append("=== 风险提示 ===")
         for k, v in risk.items():
             if k == "data_gaps":
                 continue
             if isinstance(v, (int, float, str)):
-                parts.append(f"- {k}: {v}")
+                risk_lines.append(f"- {k}: {v}")
         if risk.get("data_gaps"):
-            parts.append(f"- 数据缺口: {', '.join(risk['data_gaps'][:3])}")
+            risk_lines.append(f"- 数据缺口: {', '.join(risk['data_gaps'][:3])}")
+    sections.append(_section("风险提示", len(risk_lines) > 0, risk_lines))
 
-    # ── 14. 当前触发的信号 ──
+    # ══════════════════════════════════════════════
+    # 组装：基础信息 → 有数据的章节 → 缺失的章节 → 触发信号
+    # ══════════════════════════════════════════════
+
+    # 基础信息是第一个，拿出来
+    base_section = sections[0]
+    data_sections = sections[1:]
+
+    # 分成有数据和无数据两组
+    available = [(title, lines) for title, has_data, lines in data_sections if has_data]
+    missing = [(title, lines) for title, has_data, lines in data_sections if not has_data]
+
+    parts = []
+
+    # ── 开头：数据覆盖摘要 ──
+    total_dims = len(data_sections)
+    parts.append(f"【数据覆盖摘要】共 {total_dims} 个数据维度，"
+                 f"其中 {len(available)} 个有数据，{len(missing)} 个数据缺失。")
+    if available:
+        parts.append(f"有数据的维度：{', '.join(t for t, _ in available)}")
+    if missing:
+        parts.append(f"数据缺失的维度：{', '.join(t for t, _ in missing)}")
     parts.append("")
+    parts.append("【重要规则】你必须逐一检查下面所有章节。"
+                 "带 ✅ 的章节有具体数据，评分时必须体现；"
+                 "带 ❌ 的章节数据缺失，按中性处理但不得编造数据。")
+    parts.append("")
+
+    # ── 基础信息 ──
+    parts.append(f"=== ✅ {base_section[0]} ===")
+    parts.extend(base_section[2])
+    parts.append("")
+
+    # ── 有数据的章节（按重要性/影响力排序：价格技术 > 催化剂 > 链上持仓 > 衍生品 > 基本面类）──
+    # 定义优先级（数字越小越靠前）
+    priority = {
+        "价格技术面": 1,
+        "衍生品数据": 2,
+        "持仓结构": 3,
+        "近7日大额转账": 4,
+        "近期催化剂": 5,
+        f"近7日 KOL 信号（{kol_count}条）": 6,
+        "风险提示": 7,
+        "估值状态": 8,
+        "链上数据（CoinMetrics）": 9,
+        "协议 TVL": 10,
+        "解锁数据": 11,
+        "代币经济学": 12,
+        "社交热度": 13,
+        "开发活跃度": 14,
+    }
+    available.sort(key=lambda x: priority.get(x[0], 99))
+
+    parts.append("═══ 有数据的维度 ═══")
+    parts.append("")
+    for title, lines in available:
+        parts.append(f"=== ✅ {title} ===")
+        parts.extend(lines)
+        parts.append("")
+
+    # ── 缺失的章节（明确标记 ❌，只放一行声明）──
+    if missing:
+        parts.append("═══ 数据缺失的维度 ═══")
+        parts.append("")
+        for title, _ in missing:
+            parts.append(f"=== ❌ {title} ===")
+            parts.append("- 数据暂未覆盖，评分时按中性处理。")
+            parts.append("")
+
+    # ── 当前触发的信号 ──
     parts.append(f"=== 当前触发的信号（共 {len(asset_signals)} 条） ===")
     for i, s in enumerate(asset_signals[:20], 1):
         stype = s.get("signal_type") or s.get("type") or "unknown"
@@ -2649,7 +2737,8 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
         parts.append(f"  ... 还有 {len(asset_signals) - 20} 条信号")
 
     parts.append("")
-    parts.append("请基于以上全量画像和触发信号，输出你的六维度评分卡和综合判断。")
+    parts.append("请基于以上全量画像和触发信号，输出你的六维度评分卡和综合判断。"
+                 "注意：带 ✅ 的维度必须有评分依据，带 ❌ 的维度按中性处理。")
 
     return "\n".join(parts)
 

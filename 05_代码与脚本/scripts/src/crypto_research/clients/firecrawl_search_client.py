@@ -19,6 +19,24 @@ import requests
 
 from crypto_research.config import Settings
 
+# 进程级共享客户端缓存（按 api_key 缓存，避免每次新建实例绕过限流）
+_shared_clients: dict[str, "FirecrawlSearchClient"] = {}
+
+
+def get_shared_client(settings: Settings, timeout: int = 30) -> FirecrawlSearchClient | None:
+    """获取进程级共享的 Firecrawl 客户端实例（按 api_key 缓存）。
+
+    未配置 API Key 时返回 None。
+    使用共享实例可确保多调用点之间共享限流计数器，避免绕过限流导致 429。
+    """
+    api_key = settings.firecrawl_api_key
+    if not api_key:
+        return None
+    key = f"{api_key}:{settings.firecrawl_base_url}:{timeout}"
+    if key not in _shared_clients:
+        _shared_clients[key] = FirecrawlSearchClient(settings, timeout=timeout)
+    return _shared_clients[key]
+
 
 class FirecrawlSearchClient:
     """Firecrawl Search API 轻量封装。"""
@@ -28,9 +46,12 @@ class FirecrawlSearchClient:
         self.base_url = settings.firecrawl_base_url.rstrip("/")
         self.timeout = timeout
         self._session = requests.Session()
-        # 简易限流：默认 Firecrawl 免费档 100 req/min，这里保守 30 req/min
+        # 简易限流：默认 Firecrawl 免费档 100 req/min，这里保守 30 req/min（2s 间隔）
         self._min_interval = 2.0  # 秒
         self._last_call = 0.0
+        # 429 退避参数
+        self._max_retries = 3
+        self._base_backoff = 5.0  # 首次退避秒数，后续指数增长
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -58,11 +79,11 @@ class FirecrawlSearchClient:
             - description: str
             - markdown: str（仅当 scrape=True 时有内容）
             - published_date: str | None
+
+        遇到 429 时自动指数退避重试（最多 _max_retries 次）。
         """
         if not self.is_available():
             raise RuntimeError("Firecrawl API Key 未配置")
-
-        self._wait_rate_limit()
 
         url = f"{self.base_url}/v1/search"
         payload: dict[str, Any] = {
@@ -82,8 +103,34 @@ class FirecrawlSearchClient:
             "Content-Type": "application/json",
         }
 
-        resp = self._session.post(url, json=payload, headers=headers, timeout=self.timeout)
-        resp.raise_for_status()
+        # 带 429 退避的重试循环
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            self._wait_rate_limit()
+            try:
+                resp = self._session.post(url, json=payload, headers=headers, timeout=self.timeout)
+                if resp.status_code == 429:
+                    # 限流：指数退避
+                    retry_after = float(resp.headers.get("Retry-After", 0) or 0)
+                    backoff = max(retry_after, self._base_backoff * (2 ** attempt))
+                    if attempt < self._max_retries:
+                        print(f"[firecrawl] 429 限流，{backoff:.1f}s 后重试（第 {attempt+1}/{self._max_retries} 次）")
+                        time.sleep(backoff)
+                        continue
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                break
+            except requests.HTTPError as e:
+                last_exc = e
+                # 非 429 的 HTTP 错误直接抛出
+                if e.response is None or e.response.status_code != 429:
+                    raise
+                # 429 但已用完重试
+                if attempt >= self._max_retries:
+                    raise
+            except requests.RequestException:
+                raise
+
         data = resp.json()
 
         # Firecrawl v1 search 返回结构：{ success: true, data: [...] }

@@ -2346,10 +2346,10 @@ def _enrich_profile_with_web_search(
     Returns:
         修改后的 profile（同一个对象）
     """
-    from crypto_research.clients.firecrawl_search_client import FirecrawlSearchClient
+    from crypto_research.clients.firecrawl_search_client import get_shared_client
 
-    client = FirecrawlSearchClient(settings)
-    if not client.is_available():
+    client = get_shared_client(settings)
+    if not client or not client.is_available():
         return profile
 
     missing = _detect_missing_dimensions(profile)
@@ -2511,14 +2511,7 @@ def _write_ai_trace(
         import psycopg
 
         settings = get_settings()
-        db_conf = settings.database
-        with psycopg.connect(
-            host=db_conf.host,
-            port=db_conf.port,
-            dbname=db_conf.database,
-            user=db_conf.user,
-            password=db_conf.password,
-        ) as conn:
+        with psycopg.connect(settings.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -2578,14 +2571,7 @@ def _ensure_ai_trace_table() -> None:
         import psycopg
 
         settings = get_settings()
-        db_conf = settings.database
-        with psycopg.connect(
-            host=db_conf.host,
-            port=db_conf.port,
-            dbname=db_conf.database,
-            user=db_conf.user,
-            password=db_conf.password,
-        ) as conn:
+        with psycopg.connect(settings.database_url) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS sys.ai_trace (

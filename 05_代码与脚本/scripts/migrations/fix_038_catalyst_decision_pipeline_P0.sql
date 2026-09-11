@@ -225,6 +225,8 @@ COMMENT ON COLUMN biz.catalyst_signal.composite_score IS '★ 加权综合分 0-
 COMMENT ON COLUMN biz.catalyst_signal.tier IS '信号等级：A≥80 / B≥60 / C≥40，由 composite_score 唯一决定';
 COMMENT ON COLUMN biz.catalyst_signal.expires_at IS '信号自动过期时间，慢通道巡检置为 expired';
 COMMENT ON COLUMN biz.catalyst_signal.status IS '信号状态：open(有效) / invalid(失效) / expired(过期) / done(已了结)';
+COMMENT ON COLUMN biz.catalyst_signal.notified_at IS '【预留】正式信号邮件发送时间；当前去重走 biz.catalyst_notification_log 表';
+COMMENT ON COLUMN biz.catalyst_signal.pre_alert_sent_at IS '【预留】快提醒发送时间；当前去重走 biz.catalyst_notification_log 表';
 
 CREATE INDEX IF NOT EXISTS idx_catalyst_signal_open
     ON biz.catalyst_signal (status, tier, created_at DESC) WHERE status = 'open';
@@ -234,6 +236,27 @@ CREATE INDEX IF NOT EXISTS idx_catalyst_signal_asset
     ON biz.catalyst_signal (asset_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_catalyst_signal_tier
     ON biz.catalyst_signal (tier, created_at DESC) WHERE tier IN ('A','B');
+
+-- =====================================================================
+-- P1-5 通知日志表（快提醒 + 慢汇总去重）
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS biz.catalyst_notification_log (
+    log_id              BIGSERIAL PRIMARY KEY,
+    signal_id           BIGINT NOT NULL,         -- 快提醒=真实signal_id，慢汇总=-1（哨兵值，保证UNIQUE生效）
+    notification_type   VARCHAR(32) NOT NULL,    -- fast_alert / slow_digest
+    tier                VARCHAR(4),
+    sent_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    subject             VARCHAR(256),
+    status              VARCHAR(16) NOT NULL DEFAULT 'sent',  -- sent / failed / skipped
+    error_msg           TEXT,
+    UNIQUE (signal_id, notification_type)
+);
+
+COMMENT ON TABLE biz.catalyst_notification_log IS '催化剂邮件通知日志 + 24h 去重（signal_id + notification_type 唯一）';
+COMMENT ON COLUMN biz.catalyst_notification_log.signal_id IS '信号ID；慢汇总用 -1 哨兵值（NULL 不触发 UNIQUE 约束）';
+
+CREATE INDEX IF NOT EXISTS idx_cat_notif_type_time
+    ON biz.catalyst_notification_log (notification_type, sent_at DESC);
 
 -- =====================================================================
 -- 迁移说明

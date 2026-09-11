@@ -22,8 +22,15 @@ class EmailNotifier:
         s = self.settings
         return bool(s.smtp_host and s.smtp_user and s.smtp_pass and s.smtp_to)
 
-    def send(self, subject: str, body_html: str) -> tuple[bool, str]:
-        """发送邮件，返回 (是否成功, 说明)。未配置时返回 False。"""
+    def send(self, subject: str, body_html: str,
+             from_name: str = "解锁追踪提醒") -> tuple[bool, str]:
+        """发送邮件，返回 (是否成功, 说明)。未配置时返回 False。
+
+        Args:
+            subject: 邮件主题
+            body_html: HTML 正文
+            from_name: 发件人显示名，默认"解锁追踪提醒"
+        """
         s = self.settings
         if not self.configured:
             return False, "SMTP 未配置（缺少 SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_TO）"
@@ -35,7 +42,7 @@ class EmailNotifier:
         from_addr = s.smtp_from or s.smtp_user
         msg = MIMEText(body_html, "html", "utf-8")
         msg["Subject"] = Header(subject, "utf-8")
-        msg["From"] = formataddr((str(Header("解锁追踪提醒", "utf-8")), from_addr))
+        msg["From"] = formataddr((str(Header(from_name, "utf-8")), from_addr))
         msg["To"] = ", ".join(to_addrs)
 
         try:

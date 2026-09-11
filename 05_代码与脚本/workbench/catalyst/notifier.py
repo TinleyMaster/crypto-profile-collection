@@ -32,6 +32,9 @@ NTYPE_SLOW_DIGEST = "slow_digest"     # 慢通道汇总邮件
 # 去重窗口：同一信号同一类型 24h 内不重复发
 DEDUP_WINDOW_HOURS = 24
 
+# slow_digest 的 signal_id 哨兵值（NULL 不触发 UNIQUE 约束，用 -1 占位保证去重生效）
+SENTINEL_SLOW_DIGEST_SIGNAL_ID = -1
+
 
 # =====================================================================
 # 去重表 DDL（首次使用自动建表）
@@ -41,15 +44,15 @@ def ensure_notification_table(conn) -> None:
     """确保 notification_log 表存在。"""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS biz.catalyst_notification_log (
-            log_id          BIGSERIAL PRIMARY KEY,
-            signal_id       BIGINT,
-            notification_type   VARCHAR(32) NOT NULL,   -- fast_alert / slow_digest
-            tier            VARCHAR(4),
-            sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            subject         VARCHAR(256),
-            status          VARCHAR(16) NOT NULL DEFAULT 'sent',  -- sent / failed / skipped
-            error_msg       TEXT,
-            UNIQUE(signal_id, notification_type)
+            log_id              BIGSERIAL PRIMARY KEY,
+            signal_id           BIGINT NOT NULL,       -- 快提醒=真实ID，慢汇总=-1（哨兵值，保证UNIQUE生效）
+            notification_type   VARCHAR(32) NOT NULL,  -- fast_alert / slow_digest
+            tier                VARCHAR(4),
+            sent_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            subject             VARCHAR(256),
+            status              VARCHAR(16) NOT NULL DEFAULT 'sent',
+            error_msg           TEXT,
+            UNIQUE (signal_id, notification_type)
         );
     """)
     # 索引
@@ -116,7 +119,7 @@ def _send_email(subject: str, body_html: str) -> tuple[bool, str]:
     if notifier is None:
         return False, "SMTP 未配置或不可用"
     try:
-        ok, msg = notifier.send(subject, body_html)
+        ok, msg = notifier.send(subject, body_html, from_name="催化剂信号")
         return ok, msg
     except Exception as e:
         return False, str(e)
@@ -287,10 +290,14 @@ def send_slow_digest(conn, stats: dict) -> dict:
     subject = f"📊 催化剂日报 · {new_count} 条新信号 · A级 {_count_by_tier(rows, 'A')} / B级 {_count_by_tier(rows, 'B')}"
     body = _build_slow_digest_html(rows, stats, new_count)
 
+    # 24h 去重检查（慢通道 4h 跑一次，但汇总邮件一天一封足够）
+    if _is_sent(conn, SENTINEL_SLOW_DIGEST_SIGNAL_ID, NTYPE_SLOW_DIGEST):
+        return {"sent": 0, "skipped": 1, "reason": "24h 内已发送过汇总邮件，跳过"}
+
     ok, msg = _send_email(subject, body)
 
-    # 记录（慢通道汇总无 signal_id，记 NULL）
-    _mark_sent(conn, None, NTYPE_SLOW_DIGEST, None, subject,
+    # 记录（用哨兵值代替 NULL，保证 UNIQUE 约束生效）
+    _mark_sent(conn, SENTINEL_SLOW_DIGEST_SIGNAL_ID, NTYPE_SLOW_DIGEST, None, subject,
                status="sent" if ok else "failed", error_msg=msg if not ok else None)
 
     return {

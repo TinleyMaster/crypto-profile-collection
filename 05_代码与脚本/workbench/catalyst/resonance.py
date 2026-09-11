@@ -79,6 +79,11 @@ class ResonanceScorer:
         Returns:
             ResonanceResult（用 24h 窗口作为主打分依据，其他窗口仅作参考存表）
         """
+        # 数据库可能返回 Decimal，统一转 float 避免与 float 阈值混算崩溃
+        asset_ret_pct = float(asset_ret_pct or 0.0)
+        btc_ret_pct = float(btc_ret_pct or 0.0)
+        vol_zscore = float(vol_zscore) if vol_zscore is not None else 0.0
+        peer_median_ret = float(peer_median_ret) if peer_median_ret is not None else None
         excess = asset_ret_pct - btc_ret_pct
 
         # 方向一致性

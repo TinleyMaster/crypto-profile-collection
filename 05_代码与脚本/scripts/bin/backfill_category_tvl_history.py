@@ -77,10 +77,14 @@ def fetch_all_protocols() -> list[dict]:
     r = requests.get(f"{LLAMA_BASE}/protocols", timeout=TIMEOUT)
     r.raise_for_status()
     protocols = r.json()
-    # 过滤掉没有 category 或 tvl 的
-    valid = [p for p in protocols if p.get("category") and p.get("tvl", 0) > 0]
-    valid.sort(key=lambda x: x.get("tvl", 0), reverse=True)
-    total_tvl = sum(p.get("tvl", 0) for p in valid)
+    # 过滤掉没有 category 或 tvl 的（tvl 可能是 None，用 or 兜底）
+    def _safe_tvl(p):
+        v = p.get("tvl")
+        return float(v) if v is not None else 0.0
+
+    valid = [p for p in protocols if p.get("category") and _safe_tvl(p) > 0]
+    valid.sort(key=lambda x: _safe_tvl(x), reverse=True)
+    total_tvl = sum(_safe_tvl(p) for p in valid)
     print(f"[category_tvl] 共 {len(protocols)} 个协议, "
           f"有效 {len(valid)} 个, 总TVL ${total_tvl/1e9:.2f}B")
     return valid

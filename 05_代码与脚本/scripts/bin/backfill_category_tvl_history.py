@@ -45,6 +45,12 @@ SOURCE_CODE = "defillama"
 REQUEST_INTERVAL = 1.2  # 秒
 
 
+def safe_tvl(p: dict) -> float:
+    """安全获取协议 TVL，None 兜底为 0。"""
+    v = p.get("tvl")
+    return float(v) if v is not None else 0.0
+
+
 def ensure_table(conn) -> None:
     """建表（跟 ingest_category_tvl.py 保持一致）。"""
     with conn.cursor() as cur:
@@ -77,14 +83,10 @@ def fetch_all_protocols() -> list[dict]:
     r = requests.get(f"{LLAMA_BASE}/protocols", timeout=TIMEOUT)
     r.raise_for_status()
     protocols = r.json()
-    # 过滤掉没有 category 或 tvl 的（tvl 可能是 None，用 or 兜底）
-    def _safe_tvl(p):
-        v = p.get("tvl")
-        return float(v) if v is not None else 0.0
-
-    valid = [p for p in protocols if p.get("category") and _safe_tvl(p) > 0]
-    valid.sort(key=lambda x: _safe_tvl(x), reverse=True)
-    total_tvl = sum(_safe_tvl(p) for p in valid)
+    # 过滤掉没有 category 或 tvl 的（tvl 可能是 None，用 safe_tvl 兜底）
+    valid = [p for p in protocols if p.get("category") and safe_tvl(p) > 0]
+    valid.sort(key=lambda x: safe_tvl(x), reverse=True)
+    total_tvl = sum(safe_tvl(p) for p in valid)
     print(f"[category_tvl] 共 {len(protocols)} 个协议, "
           f"有效 {len(valid)} 个, 总TVL ${total_tvl/1e9:.2f}B")
     return valid
@@ -146,9 +148,9 @@ def aggregate_category_tvl(
     # 取头部 N 个（并跳过 start_index 之前的）
     top_protocols = protocols[start_index:start_index + top_n]
     # 计算 TVL 覆盖（全量算）
-    all_valid = [p for p in protocols if _safe_tvl(p) > 0]
-    total_tvl = sum(_safe_tvl(p) for p in all_valid)
-    top_tvl = sum(_safe_tvl(p) for p in protocols[:top_n])
+    all_valid = [p for p in protocols if safe_tvl(p) > 0]
+    total_tvl = sum(safe_tvl(p) for p in all_valid)
+    top_tvl = sum(safe_tvl(p) for p in protocols[:top_n])
     coverage = top_tvl / total_tvl * 100 if total_tvl > 0 else 0
     print(f"[category_tvl] 头部 {top_n} 协议覆盖 TVL: ${top_tvl/1e9:.2f}B ({coverage:.1f}%)")
     if batch_commit_conn:

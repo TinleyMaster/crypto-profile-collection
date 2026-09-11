@@ -125,21 +125,24 @@ def _parse_fear_greed_items(data: list[dict]) -> list[tuple[date, int, str | Non
             val_int = int(float(val))
         except (ValueError, TypeError):
             continue
-        # timestamp 可能是字符串或 unix 秒
+        # timestamp 可能是 int/float unix 秒，也可能是数字字符串
         if isinstance(ts, (int, float)):
             dt = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
         else:
-            # 字符串格式，取前 10 位日期
-            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%b %d, %Y"):
-                try:
-                    dt = datetime.strptime(str(ts)[:10] if fmt == "%Y-%m-%d" else str(ts), fmt).date()
-                    break
-                except ValueError:
-                    continue
-            else:
-                try:
-                    dt = datetime.strptime(str(ts)[:10], "%Y-%m-%d").date()
-                except ValueError:
+            ts_str = str(ts).strip()
+            # 先尝试数字字符串（unix 秒）
+            try:
+                ts_int = int(ts_str)
+                dt = datetime.fromtimestamp(ts_int, tz=timezone.utc).date()
+            except (ValueError, TypeError, OSError, OverflowError):
+                # 再尝试日期字符串格式
+                for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%b %d, %Y"):
+                    try:
+                        dt = datetime.strptime(ts_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                else:
                     continue
         vclass = item.get("value_classification") or item.get("classification")
         result.append((dt, val_int, vclass))

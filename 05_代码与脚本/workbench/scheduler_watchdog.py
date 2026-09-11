@@ -183,6 +183,7 @@ def check_market_daily_integrity() -> tuple[bool, str]:
     """校验 market_daily 产出完整性：
     - 今日 biz.category_tvl_daily 赛道数 >= 50
     - 今日 biz.market_snapshot_daily 有记录
+    - 今日 biz.btc_oi_daily 有记录
     返回 (是否健康, 详情文本)
     """
     import json
@@ -220,39 +221,18 @@ def check_market_daily_integrity() -> tuple[bool, str]:
                 # 3. BTC OI 今日数据
                 cur.execute(
                     """
-                    SELECT COUNT(*) FROM src_cmc.btc_open_interest
-                    WHERE DATE(fetched_at) = %s
+                    SELECT COUNT(*) FROM biz.btc_oi_daily
+                    WHERE metric_date = %s
                     """,
                     (today,),
                 )
                 row = cur.fetchone()
                 oi_cnt = row[0] if row else 0
                 if oi_cnt == 0:
-                    # 换个表名试试（可能叫别的）
-                    cur.execute(
-                        """
-                        SELECT COUNT(*) FROM information_schema.tables
-                        WHERE table_schema = 'src_cmc'
-                          AND table_name LIKE '%oi%'
-                        """
-                    )
-                    tables = [r[0] for r in cur.fetchall()]
-                    if tables:
-                        # 找一个有数据的
-                        for t in tables:
-                            cur.execute(
-                                f'SELECT COUNT(*) FROM src_cmc.{t} WHERE DATE(fetched_at) = %s',
-                                (today,),
-                            )
-                            cnt = cur.fetchone()[0]
-                            if cnt > 0:
-                                break
-                        else:
-                            problems.append("今日BTC OI数据为空")
-                    # 没找到 OI 表就算了（可能还没建）
+                    problems.append("今日BTC OI数据为空")
 
         if not problems:
-            return True, f"赛道 {cat_cnt} 个 · 快照 {snap_cnt} 条 · 数据完整"
+            return True, f"赛道 {cat_cnt} 个 · 快照 {snap_cnt} 条 · BTC OI {oi_cnt} 条 · 数据完整"
         return False, "；".join(problems)
 
     except Exception as e:

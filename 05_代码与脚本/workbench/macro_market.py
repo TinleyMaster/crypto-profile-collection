@@ -1652,7 +1652,43 @@ def fetch_category_tvl_flow() -> dict:
     DeFiLlama /protocols 按 category 聚合 7d TVL 变化%（叙事榜 TVL 腿）。
     /categories 已 402 付费墙，改聚合免费 /protocols（每条含 category/tvl/change_7d）。
     返回 {status, categories: {cat: {tvl, tvl_change_7d_pct, protocols}}}。
+
+    优先从数据库 biz.category_tvl_daily 读取最新快照（快），
+    数据库为空/数据太旧时 fallback 到 DeFi Llama API（慢）。
     """
+    # 尝试从 DB 读最新快照
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        from datetime import datetime, timezone
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT category, tvl_usd, tvl_change_7d_pct, protocol_count
+                    FROM biz.category_tvl_daily
+                    WHERE snapshot_date = (
+                        SELECT MAX(snapshot_date) FROM biz.category_tvl_daily
+                    )
+                    AND source_code = 'defillama'
+                """)
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= 5:
+                categories: dict[str, dict] = {}
+                for cat, tvl, ch7, n in rows:
+                    categories[cat] = {
+                        "tvl": float(tvl),
+                        "tvl_change_7d_pct": round(float(ch7), 2) if ch7 is not None else 0.0,
+                        "protocols": int(n),
+                    }
+                if categories:
+                    return {"status": "ok", "categories": categories}
+    except Exception:
+        pass
+
+    # Fallback: DeFi Llama API
     try:
         r = requests.get(f"{DL_BASE}/protocols", timeout=TIMEOUT)
         r.raise_for_status()

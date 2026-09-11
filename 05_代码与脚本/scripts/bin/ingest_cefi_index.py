@@ -24,7 +24,7 @@ PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
-sys.stdout.reconfigure(line_buffering=True)
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402

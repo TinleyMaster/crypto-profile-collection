@@ -27,7 +27,7 @@ for p in (str(PROJECT_SRC), str(WORKBENCH_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-sys.stdout.reconfigure(line_buffering=True)
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 
 def ensure_table(conn) -> None:

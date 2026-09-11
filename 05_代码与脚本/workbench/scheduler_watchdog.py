@@ -40,6 +40,10 @@ if str(_SCRIPTS_SRC) not in sys.path:
 
 from task_manager import _get_db, _insert_task, _append_log, LOG_DIR, STATE_FILE  # noqa: E402
 
+# Windows 管道默认 GBK，显式指定 UTF-8 避免 ✅/❌ 等符号抛 UnicodeEncodeError
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
 # ── 配置（可用环境变量覆盖） ──
 POLL_SECONDS = int(os.getenv("WATCHDOG_POLL_SECONDS", "1800"))     # 默认每 30 分钟
 

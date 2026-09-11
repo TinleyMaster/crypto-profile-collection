@@ -22,6 +22,8 @@ BINANCE_FAPI = "https://fapi.binance.com"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
+CROSS_ASSET_TIMEOUT = 5      # 美股/黄金 cross-asset 兜底气
+CATEGORY_DETAIL_TIMEOUT = 5  # CMC category detail 超时（避免 overview 被拖死）
 
 # ── P0-3 权重默认值（P2-4 外置 market_rules.yaml，启动时优先读 yaml） ──
 EMOTION_WEIGHTS_DEFAULT = {
@@ -1532,7 +1534,7 @@ def _cmc_category_multi_window(category_id: str) -> dict:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/category",
             params={"id": category_id},
-            timeout=TIMEOUT,
+            timeout=CATEGORY_DETAIL_TIMEOUT,
         )
         r.raise_for_status()
         data = r.json().get("data", {})
@@ -2775,36 +2777,32 @@ def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
 
 
 def _yf_closes(symbol: str, days: int = 90) -> list[float] | None:
-    """yfinance 拉日频收盘序列（主源，Zeabur 美区直连稳定）。失败返回 None。"""
+    """yfinance 拉日频收盘序列（兜底气，短超时）。失败返回 None。"""
     try:
         import yfinance as yf
 
-        for attempt in range(3):
-            try:
-                df = yf.download(
-                    symbol,
-                    period=f"{days}d",
-                    interval="1d",
-                    progress=False,
-                    auto_adjust=True,
-                    threads=False,
-                )
-                if df is not None and not df.empty:
-                    closes = [float(v) for v in df["Close"].dropna().tolist()]
-                    if len(closes) >= 2:
-                        return closes
-            except Exception:
-                pass
-            time.sleep(1.5)
+        df = yf.download(
+            symbol,
+            period=f"{days}d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+            timeout=CROSS_ASSET_TIMEOUT,
+        )
+        if df is not None and not df.empty:
+            closes = [float(v) for v in df["Close"].dropna().tolist()]
+            if len(closes) >= 2:
+                return closes
         return None
     except Exception:
         return None
 
 
-def _stooq_closes(symbol: str) -> list[float] | None:
+def _stooq_closes(symbol: str, timeout: int = TIMEOUT) -> list[float] | None:
     """stooq 日频 CSV 兜底（yfinance 限流时使用）。失败返回 None。"""
     try:
-        r = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=TIMEOUT)
+        r = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=timeout)
         r.raise_for_status()
         lines = r.text.strip().splitlines()
         if len(lines) < 2:
@@ -2822,7 +2820,7 @@ def _stooq_closes(symbol: str) -> list[float] | None:
         return None
 
 
-def _yahoo_chart_closes(symbol: str, rng: str = "3mo") -> list[float] | None:
+def _yahoo_chart_closes(symbol: str, rng: str = "3mo", timeout: int = TIMEOUT) -> list[float] | None:
     """直接调 Yahoo Finance chart API（免 crumb，比 yfinance 更稳），失败返回 None。"""
     sym = symbol.replace("^", "%5E")
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
@@ -2830,7 +2828,7 @@ def _yahoo_chart_closes(symbol: str, rng: str = "3mo") -> list[float] | None:
             r = requests.get(
                 f"https://{host}/v8/finance/chart/{sym}",
                 params={"range": rng, "interval": "1d"},
-                timeout=TIMEOUT,
+                timeout=timeout,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             r.raise_for_status()
@@ -2849,9 +2847,17 @@ def _yahoo_chart_closes(symbol: str, rng: str = "3mo") -> list[float] | None:
 
 
 def _fetch_nasdaq_gold() -> dict:
-    """纳指 + 黄金日频序列。返回 {status, nasdaq, gold}。yfinance 主源，Yahoo chart API 兜底。"""
-    nasdaq = _yf_closes("^IXIC") or _yahoo_chart_closes("^IXIC") or _stooq_closes("^ndx")
-    gold = _yf_closes("GC=F") or _yahoo_chart_closes("GC=F") or _stooq_closes("gc.f")
+    """纳指 + 黄金日频序列。返回 {status, nasdaq, gold}。Yahoo chart API 主源（快），yfinance/stooq 兜底。"""
+    nasdaq = (
+        _yahoo_chart_closes("^IXIC", timeout=CROSS_ASSET_TIMEOUT)
+        or _yf_closes("^IXIC")
+        or _stooq_closes("^ndx", timeout=CROSS_ASSET_TIMEOUT)
+    )
+    gold = (
+        _yahoo_chart_closes("GC=F", timeout=CROSS_ASSET_TIMEOUT)
+        or _yf_closes("GC=F")
+        or _stooq_closes("gc.f", timeout=CROSS_ASSET_TIMEOUT)
+    )
     if not nasdaq and not gold:
         return {"status": "error", "error": "no cross-asset data", "nasdaq": [], "gold": []}
     status = "ok" if nasdaq and gold else "partial"
@@ -7543,6 +7549,7 @@ def fetch_event_calendar() -> dict:
     token_events: list[dict] = []
     try:
         import logging
+        import psycopg
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
 
@@ -7567,7 +7574,7 @@ def fetch_event_calendar() -> dict:
                     event_date = r["unlock_date"]
                     ratio_mcap = r.get("unlock_ratio_mcap")
                     token_events.append({
-                        "date": str(event_date.date()) if event_date else None,
+                        "date": str(event_date.date() if hasattr(event_date, "date") else event_date) if event_date else None,
                         "event": f"{r['symbol']} 解锁"
                                  + (f" {ratio_mcap:.2f}%" if ratio_mcap else ""),
                         "type": r.get("event_type") or "unlock",
@@ -7595,7 +7602,7 @@ def fetch_event_calendar() -> dict:
                     for r in cur.fetchall():
                         pub_at = r["published_at"]
                         token_events.append({
-                            "date": str(pub_at.date()) if pub_at else None,
+                            "date": str(pub_at.date() if hasattr(pub_at, "date") else pub_at) if pub_at else None,
                             "event": r["title"] or f"{r.get('event_category')} 事件",
                             "type": r.get("event_category") or "catalyst",
                             "source": r.get("source_code") or "asset_catalyst",

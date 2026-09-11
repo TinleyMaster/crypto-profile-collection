@@ -22,6 +22,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+# Windows 管道默认 GBK，显式指定 UTF-8 避免 ✓/✗ 等符号抛 UnicodeEncodeError
+sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
 # 任务定义：(key, 脚本名, 描述, 默认参数列表)
 TASKS = [
     ("fear_greed", "ingest_fear_greed.py", "恐贪指数日频采集", []),

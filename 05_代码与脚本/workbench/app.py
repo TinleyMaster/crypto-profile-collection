@@ -236,6 +236,13 @@ TASK_DEFS = {
         "category": "数据源采集",
         "hidden": True,
     },
+    "stablecoin_supply": {
+        "name": "稳定币总供给数据采集",
+        "description": "从 DeFi Llama 拉取稳定币总供给历史，写入 biz.stablecoin_supply_daily（用于大盘净流入计算，加速大盘接口）",
+        "script": "ingest_stablecoin_supply.py",
+        "default_args": [],
+        "category": "数据源采集",
+    },
 
     # ═══ B1: 文档入口补充 ═══
     "cg_refresh_docs": {

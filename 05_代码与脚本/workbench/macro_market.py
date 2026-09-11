@@ -387,11 +387,74 @@ def fetch_mvrv_history(asset: str = "btc") -> dict:
 def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
     """稳定币净流入历史序列（日频）。返回 {status, series, rolling_7d, dates, total_supply, anomaly}。
 
-    series/rolling_7d：日净流入 / 7d 滚动累计净流入。
-    dates：对应日期（YYYY-MM-DD）。
-    total_supply：总供给序列（用于画分位折线）。
-    anomaly：异动信号 {type, strength, message}。
+    优先从数据库 biz.stablecoin_supply_daily 读取（快），
+    数据库为空/数据不足时 fallback 到 DeFi Llama API（慢，实时拉）。
     """
+    # 尝试从 DB 读
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                # 多取一天，方便 7d 滚动计算
+                cur.execute("""
+                    SELECT metric_date, total_supply_usd, net_flow_usd
+                    FROM biz.stablecoin_supply_daily
+                    WHERE source_code = 'defillama'
+                    ORDER BY metric_date DESC
+                    LIMIT %s
+                """, (days + 10,))
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= 2:
+                # 转成升序
+                rows_asc = list(reversed(rows))
+                all_dates = [str(r[0]) for r in rows_asc]
+                all_supplies = [float(r[1] or 0) for r in rows_asc]
+
+                # 优先用库里的 net_flow，没有就现算
+                has_netflow = rows_asc[0][2] is not None
+                if has_netflow:
+                    netflows = [float(r[2] or 0) for r in rows_asc]
+                    # net_flow 从第 2 天开始有意义（第一天没有前日数据）
+                    # 跳过第一个（为 None 的话在 LAG 里就不会更新）
+                    netflows = netflows[1:]
+                    flow_dates = all_dates[1:]
+                    flow_supplies = all_supplies[1:]
+                else:
+                    netflows = [all_supplies[i] - all_supplies[i - 1]
+                                for i in range(1, len(all_supplies))]
+                    flow_dates = all_dates[1:]
+                    flow_supplies = all_supplies[1:]
+
+                if len(netflows) < 2:
+                    return {"status": "error", "error": "insufficient_db_data",
+                            "series": [], "rolling_7d": [], "dates": [],
+                            "total_supply": [], "supply_dates": [], "anomaly": None,
+                            "source": "db"}
+
+                # 7d 滚动累计
+                rolling_7d = [sum(netflows[max(0, i - 6):i + 1])
+                              for i in range(len(netflows))]
+                anomaly = _detect_stablecoin_anomaly(netflows, rolling_7d, flow_supplies)
+
+                return {
+                    "status": "ok",
+                    "series": netflows[-days:],
+                    "rolling_7d": rolling_7d[-days:],
+                    "dates": flow_dates[-days:],
+                    "total_supply": flow_supplies[-days:],
+                    "supply_dates": flow_dates[-days:],
+                    "anomaly": anomaly,
+                    "source": "db",
+                }
+    except Exception:
+        # DB 失败直接 fallback 到 API
+        pass
+
+    # Fallback: 直接调 API（兼容旧逻辑）
     try:
         r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
         r.raise_for_status()
@@ -403,19 +466,15 @@ def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
             ts = row.get("date")
             if usd is not None and ts is not None:
                 supplies.append(_safe_float(usd))
-                # ts 是 unix timestamp（秒）
                 from datetime import datetime, timezone
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 dates.append(dt.strftime("%Y-%m-%d"))
         if len(supplies) < 2:
             return {"status": "error", "error": "insufficient", "series": [], "rolling_7d": [],
-                    "dates": [], "total_supply": [], "anomaly": None}
-        # 计算日净流入
+                    "dates": [], "total_supply": [], "anomaly": None, "source": "api"}
         netflows = [supplies[i] - supplies[i - 1] for i in range(1, len(supplies))]
-        flow_dates = dates[1:]  # 净流对应后一天
-        # 7d 滚动累计，与前端 7d 视角对齐
+        flow_dates = dates[1:]
         rolling_7d = [sum(netflows[max(0, i - 6):i + 1]) for i in range(len(netflows))]
-        # 异动检测
         anomaly = _detect_stablecoin_anomaly(netflows, rolling_7d, supplies)
         return {
             "status": "ok",
@@ -425,10 +484,11 @@ def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
             "total_supply": supplies[-days:],
             "supply_dates": dates[-days:],
             "anomaly": anomaly,
+            "source": "api",
         }
     except Exception as e:
         return {"status": "error", "error": str(e), "series": [], "rolling_7d": [],
-                "dates": [], "total_supply": [], "anomaly": None}
+                "dates": [], "total_supply": [], "anomaly": None, "source": "api"}
 
 
 def _detect_stablecoin_anomaly(netflows: list[float], rolling_7d: list[float],

@@ -509,10 +509,13 @@ def _scrape_variant(slug: str, variant: dict, is_fallback: bool, context,
                 # 取日期最早的 upcoming 事件（最近的一次解锁）
                 from datetime import datetime as _dt
                 def _pd(s):
-                    try:
-                        return _dt.strptime(s, "%b %d, %Y")
-                    except Exception:
-                        return _dt(2000, 1, 1)
+                    s = (s or "").replace("Next", "").strip()
+                    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+                        try:
+                            return _dt.strptime(s, fmt)
+                        except Exception:
+                            continue
+                    return _dt(2000, 1, 1)
                 target = min(upcoming, key=lambda e: _pd(e["date"]))
                 if next_val and not target.get("value_str"):
                     target["value_str"] = next_val
@@ -1001,7 +1004,7 @@ def _extract_unlock_events(page) -> list[dict]:
     if rows_data:
         seen = set()
         for row in rows_data:
-            date_str = row["date"]
+            date_str = (row["date"] or "").replace("Next", "").strip()
             pct_str = row["pct"]
             status_str = row.get("status", "")
             recipients_str = row.get("recipients", "")
@@ -1083,7 +1086,7 @@ def _extract_unlock_events_text(page) -> list[dict]:
         pm = pct_re.search(line)
         if not dm or not pm:
             continue
-        date_str = dm.group(1)
+        date_str = dm.group(1).replace("Next", "").strip()
         pct = float(pm.group(1))
         rm = recipients_re.search(line)
         recipients = int(rm.group(1)) if rm else 1
@@ -1241,7 +1244,7 @@ def _extract_unlock_events_legacy(page) -> list[dict]:
     if rows_data is not None:
         seen_dates = set()
         for row in rows_data:
-            date_str = row["date"]
+            date_str = (row["date"] or "").replace("Next", "").strip()
             if date_str in seen_dates:
                 continue
             seen_dates.add(date_str)
@@ -1317,7 +1320,7 @@ def _extract_unlock_events_text_legacy(page) -> list[dict]:
 
     i = data_start
     while i + 4 < len(content_lines):
-        date_str = content_lines[i]
+        date_str = content_lines[i].replace("Next", "").strip()
         value_str = content_lines[i + 1]
         if date_re.match(date_str) and value_re.match(value_str):
             if date_str not in seen_dates:
@@ -1432,10 +1435,13 @@ def _compute_unlock_ratio_mcap(data: dict) -> float | None:
             pass
     from datetime import datetime as _dt
     def _pd(s):
-        try:
-            return _dt.strptime(s, "%b %d, %Y")
-        except Exception:
-            return _dt(2000, 1, 1)
+        s = (s or "").replace("Next", "").strip()
+        for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+            try:
+                return _dt.strptime(s, fmt)
+            except Exception:
+                continue
+        return _dt(2000, 1, 1)
     upcoming = [
         e for e in (data.get("unlock_events") or [])
         if e.get("is_upcoming") and e.get("ratio_mcap")

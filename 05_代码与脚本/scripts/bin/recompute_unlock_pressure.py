@@ -49,6 +49,7 @@ def main() -> int:
     print(f"候选资产: {result['total']}")
     print(f"重算成功: {result['computed']}")
     print(f"重算失败: {result['failed']}")
+    print(f"清理旧行: {result.get('stale_deleted', 0)}")
     if result["failed_ids"]:
         print(f"失败资产: {result['failed_ids']}")
     print("=" * 60)

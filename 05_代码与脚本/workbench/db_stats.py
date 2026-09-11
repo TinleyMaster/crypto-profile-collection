@@ -7528,12 +7528,14 @@ def _pressure_float(v):
 
 
 def _parse_unlock_event_date(date_str: str):
-    """解析解锁事件日期（如 'Feb 15, 2026'），失败返回 None。"""
+    """解析解锁事件日期（如 'Feb 15, 2026' / '25 Dec 2026'），失败返回 None。"""
     if not date_str:
         return None
-    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
+    s = str(date_str).replace("Next", "").replace("TGE", "").strip()
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d",
+                "%d %b %Y", "%d %B %Y"):
         try:
-            return datetime.strptime(str(date_str).strip(), fmt).date()
+            return datetime.strptime(s, fmt).date()
         except (ValueError, TypeError):
             continue
     return None
@@ -7791,13 +7793,35 @@ def recompute_unlock_pressure_batch(limit: int = 0, force: bool = True,
             failed_ids.append(asset_id)
             _emit(f"[pressure] asset_id={asset_id} 重算失败: {e}")
 
-    _emit(f"[pressure] 完成：computed={computed} failed={failed} "
-          f"failed_ids={failed_ids[:20]}")
+    # 刀2：清理非候选旧行（候选集外的历史残留资产，不再有未来解锁事件）
+    stale_deleted = 0
+    if candidates:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM biz.asset_unlock_pressure
+                        WHERE NOT (asset_id = ANY(%s))
+                        """,
+                        (candidates,),
+                    )
+                    stale_deleted = cur.rowcount
+            if stale_deleted > 0:
+                _emit(f"[pressure] 清理陈旧行: {stale_deleted} 条（非候选资产）")
+        except Exception as e:
+            _emit(f"[pressure] 清理陈旧行失败（不影响重算结果）: {e}")
+
+    _emit(f"[pressure] 完成：候选 {len(candidates)} / 成功 {computed} / 失败 {failed}"
+          f" / 清理旧行 {stale_deleted}")
+    if failed_ids:
+        _emit(f"[pressure] 失败资产: {failed_ids[:20]}")
     return {
         "total": len(candidates),
         "computed": computed,
         "failed": failed,
         "failed_ids": failed_ids[:50],
+        "stale_deleted": stale_deleted,
     }
 
 
@@ -8535,7 +8559,8 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
                 if asset_row:
                     symbol = asset_row["canonical_symbol"]
     except Exception as e:
-        return {"price_usd": f"DB查询失败: {e}", "market_cap_usd": f"DB查询失败: {e}", "fdv_usd": f"DB查询失败: {e}"}
+        return {"price_usd": None, "market_cap_usd": None, "fdv_usd": None,
+                "_error": f"DB查询失败: {e}"}
 
     # 3. 无直接映射 → 按 symbol 搜索 CG（无 key 优先，限流/失败时回退 key）
     if not coin_id and symbol:
@@ -8564,7 +8589,8 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
                 continue
 
     if not coin_id:
-        return {"price_usd": "无CG映射", "market_cap_usd": "无CG映射", "fdv_usd": "无CG映射"}
+        return {"price_usd": None, "market_cap_usd": None, "fdv_usd": None,
+                "_error": "无CG映射"}
 
     # 4. 获取价格（无 key 优先，限流/失败时回退 key；带重试）
     url = f"{settings.coingecko_base_url}/simple/price"

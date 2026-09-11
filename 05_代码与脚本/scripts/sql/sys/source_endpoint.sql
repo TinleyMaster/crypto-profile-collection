@@ -33,7 +33,7 @@ INSERT INTO sys.source_endpoint (endpoint_code, platform_code, http_method, endp
 -- CoinMarketCap
 ('cmc_map',           'cmc',       'GET', '/v1/cryptocurrency/map',        'asset',          'full_sync',     'CMC 全市场币种目录'),
 ('cmc_info',          'cmc',       'GET', '/v2/cryptocurrency/info',       'asset',          'batch_refresh', 'CMC 币种详情'),
-('cmc_listings_latest','cmc',      'GET', '/v1/cryptocurrency/listings/latest', 'asset_market', 'intraday',   'CMC 全市场行情列表（按市值排名分页）'),
+('cmc_listings_latest','cmc',      'GET', '/v3/cryptocurrency/listings/latest', 'asset_market', 'intraday',   'CMC 全市场行情列表（按市值排名分页，v3）'),
 ('cmc_quotes_latest', 'cmc',       'GET', '/v3/cryptocurrency/quotes/latest', 'asset_market', 'intraday',    'CMC 最新行情'),
 ('cmc_market_pairs',  'cmc',       'GET', '/v2/cryptocurrency/market-pairs/latest', 'asset_market', 'intraday', 'CMC 交易对快照'),
 ('cmc_categories',    'cmc',       'GET', '/v1/cryptocurrency/categories', 'category',       'daily',         'CMC 类别列表'),
@@ -44,6 +44,21 @@ INSERT INTO sys.source_endpoint (endpoint_code, platform_code, http_method, endp
 ('cmc_dex_token_pools',   'cmc',   'GET', '/v1/dex/token/pools',           'dex_pool',        'intraday',     'CMC DEX Token 池子'),
 ('cmc_dex_token_price',   'cmc',   'GET', '/v1/dex/token/price',           'dex_token_market','intraday',     'CMC DEX Token 价格'),
 ('cmc_dex_security',      'cmc',   'GET', '/v1/dex/security/detail',       'dex_security',    'intraday',     'CMC DEX Token 风险'),
+
+-- CMC 宏观 / 趋势 / 空投 / OHLCV / 表现
+('cmc_macro_daily',      'cmc',   'GET', '/v1/global-metrics/quotes/latest', 'macro_global',  'daily',       'CMC 宏观日频（全球市值+恐贪+山寨季 组合流程）'),
+('cmc_global_metrics',    'cmc',   'GET', '/v1/global-metrics/quotes/latest', 'macro_global',  'daily',       'CMC 全球市场指标'),
+('cmc_fear_greed',        'cmc',   'GET', '/v3/fear-and-greed',              'macro_sentiment','daily',       'CMC 恐贪指数'),
+('cmc_altcoin_season',    'cmc',   'GET', '/v1/altcoin-season-index',        'macro_season',   'daily',       'CMC 山寨季指数'),
+('cmc_trending_daily',    'cmc',   'GET', '/v1/cryptocurrency/trending/latest', 'trending',   'intraday',     'CMC 趋势榜组合流程'),
+('cmc_trending_latest',   'cmc',   'GET', '/v1/cryptocurrency/trending/latest', 'trending',   'intraday',     'CMC 搜索热度趋势榜'),
+('cmc_trending_gainers',  'cmc',   'GET', '/v1/cryptocurrency/trending/gainers-losers', 'trending', 'intraday', 'CMC 涨幅榜'),
+('cmc_trending_losers',   'cmc',   'GET', '/v1/cryptocurrency/trending/gainers-losers', 'trending', 'intraday', 'CMC 跌幅榜'),
+('cmc_trending_most_visited', 'cmc','GET', '/v1/cryptocurrency/trending/most-visited', 'trending', 'intraday', 'CMC 访问量趋势榜'),
+('cmc_listings_new',      'cmc',   'GET', '/v1/cryptocurrency/listings/new','asset',          'intraday',     'CMC 新上市币种'),
+('cmc_airdrops',          'cmc',   'GET', '/v1/cryptocurrency/airdrops',     'airdrop',        'daily',        'CMC 空投活动'),
+('cmc_ohlcv_historical',  'cmc',   'GET', '/v2/cryptocurrency/ohlcv/historical', 'asset_market', 'intraday', 'CMC 历史 OHLCV'),
+('cmc_price_performance', 'cmc',   'GET', '/v2/cryptocurrency/price-performance-stats/latest', 'asset_market', 'intraday', 'CMC 价格表现统计'),
 
 -- DefiLlama
 ('llama_chains',     'defillama', 'GET', '/v2/chains',                     'chain',           'daily',         'DefiLlama 链列表'),

@@ -1,5 +1,5 @@
 """
-CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 6 个步骤。
+CMC 一键流水线：按正确依赖顺序自动执行 CMC 的多个步骤。
 
 顺序：
   ① CMC 拉取全量币种列表   ingest_cmc_map.py                     → src_cmc.cmc_asset_map
@@ -14,6 +14,9 @@ CMC 一键流水线：按正确依赖顺序自动执行 CMC 的 6 个步骤。
   ⑩ supply 对齐           sync_core_supply_from_cmc.py --sync      → core.asset
   ⑪ 资产去重              dedup_assets.py --apply                  → core.asset
   ⑫ 赛道日频快照          etl_sector_flow_daily.py                 → biz.sector_flow_daily（市值部分）
+  ⑬ 宏观指标落库          ingest_cmc_macro.py                     → biz.global_metric_daily / fear_greed / altcoin_season
+  ⑭ 趋势榜落库            ingest_cmc_trending.py                  → biz.asset_trending（含新上市）
+  ⑮ 空投落库              ingest_cmc_airdrops.py                  → biz.airdrop_event
 
 任一步失败即停止，方便排查。每个子任务的 stdout/stderr 都实时流式输出。
 """
@@ -148,6 +151,21 @@ def main() -> int:
 
     # ⑫ 赛道日频快照（依赖⑧赛道刷新，生成 biz.sector_flow_daily 的市值部分）
     code, _ = _run(_python("etl_sector_flow_daily.py"), "⑫ 赛道快照")
+    if code != 0:
+        return code
+
+    # ⑬ 宏观指标落库（全球市值 / 恐贪 / 山寨季，P0 免费接口）
+    code, _ = _run(_python("ingest_cmc_macro.py"), "⑬ 宏观指标")
+    if code != 0:
+        return code
+
+    # ⑭ 趋势榜落库（涨幅/跌幅/搜索热度/访问量/新上市）
+    code, _ = _run(_python("ingest_cmc_trending.py"), "⑭ 趋势榜")
+    if code != 0:
+        return code
+
+    # ⑮ 空投落库（ONGOING 空投事件）
+    code, _ = _run(_python("ingest_cmc_airdrops.py"), "⑮ 空投")
     if code != 0:
         return code
 

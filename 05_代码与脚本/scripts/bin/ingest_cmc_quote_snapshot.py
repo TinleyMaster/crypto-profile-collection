@@ -151,7 +151,7 @@ def main() -> int:
                     },
                     ensure_ascii=False,
                 ),
-                f"{settings.cmc_base_url}/v1/cryptocurrency/listings/latest",
+                f"{settings.cmc_base_url}/v3/cryptocurrency/listings/latest",
             ),
         )
         run_id = run_row["run_id"]

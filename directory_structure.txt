@@ -1,0 +1,507 @@
+加密货币研究报告/
+├── 01_API参考资料/
+├── 02_数据库设计/
+├── 04_架构与代码方案/
+├── 05_代码与脚本/
+├── 07_测试与验收/
+├── .gitignore
+├── Dockerfile
+├── README.md
+└── gen_tree.py
+│   ├── CoinMarketCap_API_Documentation_20260729101836.md
+│   ├── DefiLlama免费接口_按n8n工作流阶段可用清单.md
+│   ├── binance-skills-api-reference.md
+│   ├── crypto-finance-all-apis.md
+│   ├── crypto-master-api-reference.md
+│   └── https___coinmarketcap.com_api_documentation_pro-api-reference_.2026-07-29T01_33_06.665Z.md
+│   ├── coin_basic.sql
+│   ├── github_repo_activity_init.sql
+│   ├── zeabur_postgres_init.sql
+│   ├── 投研工作流底层数据库重构初始化_2026-07-29.sql
+│   ├── 投研工作流底层数据库重构方案_2026-07-29.md
+│   └── 解锁规则表设计与自动推算方案.md
+│   ├── n8n与代码职责拆分清单_2026-07-29.md
+│   ├── scripts目录结构方案_2026-07-29.md
+│   ├── 后期增量更新方案_2026-07-30.md
+│   ├── 当前项目单页流程图版_2026-07-30.md
+│   ├── 当前项目逻辑与流程总览_2026-07-29.md
+│   └── 项目完整逻辑与当前状态_2026-07-31.md
+│   ├── data/
+│   ├── output/
+│   ├── scripts/
+│   ├── workbench/
+│   ├── _archive
+│   ├── backfill_transfer_labels.py
+│   ├── fix_and_import_labels.py
+│   └── fix_label_import_issues.py
+│   │   ├── _archive/
+│   │   ├── bin/
+│   │   ├── migrations/
+│   │   ├── sql/
+│   │   ├── src/
+│   │   ├── .env
+│   │   ├── .env.example
+│   │   ├── requirements.txt
+│   │   └── run_migration.py
+│   │   │   ├── sql_remediation/
+│   │   │   ├── _add_cg_endpoints.py
+│   │   │   ├── _add_cg_platform.py
+│   │   │   ├── _check_cg.py
+│   │   │   ├── _check_downloads.py
+│   │   │   ├── _check_endpoint.py
+│   │   │   ├── _check_orphans.py
+│   │   │   ├── _check_paths.py
+│   │   │   ├── _check_platform.py
+│   │   │   ├── _clean_orphans.py
+│   │   │   ├── _counts.py
+│   │   │   ├── _counts2.py
+│   │   │   ├── _counts_output.txt
+│   │   │   ├── _init_dl.py
+│   │   │   ├── _probe_b2_results.py
+│   │   │   ├── _probe_doc_assets.py
+│   │   │   ├── _reset_storage.py
+│   │   │   ├── _test_cg_sql.py
+│   │   │   ├── backfill_kol_signals.py
+│   │   │   ├── check_spa_full.py
+│   │   │   ├── cleanup_spa_misclassified.py
+│   │   │   ├── cleanup_spa_misclassified.sql
+│   │   │   ├── dump_kol_posts.py
+│   │   │   ├── fix_api_response_constraint.py
+│   │   │   ├── migrate_storage_path_to_relative.py
+│   │   │   ├── migrate_storage_path_to_relative.sql
+│   │   │   ├── quick_check.py
+│   │   │   ├── test_classifier.py
+│   │   │   ├── verify_catalyst_data.py
+│   │   │   └── verify_db_status.py
+│   │   │       ├── cleanup_onchain_test_data.sql
+│   │   │       ├── cleanup_polluted_tokenomics.sql
+│   │   │       ├── cleanup_tokenomics_raw_text.sql
+│   │   │       ├── fix_btc_materials_pollution.sql
+│   │   │       ├── fix_cg_cross_asset_pollution.sql
+│   │   │       ├── fix_coin_cg_map_pollution.sql
+│   │   │       ├── fix_coin_cg_primary_mismatch.sql
+│   │   │       ├── fix_global_batcat_residue.sql
+│   │   │       ├── fix_native_coin_pollution.sql
+│   │   │       └── fix_primary_website_pollution.sql
+│   │   │   ├── _check_apr2.py
+│   │   │   ├── _check_tables.py
+│   │   │   ├── _clean_b2_noise.py
+│   │   │   ├── _cleanup_tokenomics.py
+│   │   │   ├── _diag_tokenomics.py
+│   │   │   ├── _diag_tokenomics_detail.py
+│   │   │   ├── _probe_b2_pending.py
+│   │   │   ├── _replace_render.py
+│   │   │   ├── _run_fix_primary_sql.py
+│   │   │   ├── _test_smart_opps.py
+│   │   │   ├── _verify_p0_fix.py
+│   │   │   ├── backfill_ai_classify_links.py
+│   │   │   ├── backfill_catalyst_links.py
+│   │   │   ├── backfill_classify_links.py
+│   │   │   ├── backfill_cm_onchain.py
+│   │   │   ├── backfill_cmc_info.py
+│   │   │   ├── backfill_core_assets_from_cmc.py
+│   │   │   ├── backfill_core_assets_from_cmc_auto.py
+│   │   │   ├── backfill_daily_gap.py
+│   │   │   ├── backfill_doc_assets_from_entries.py
+│   │   │   ├── backfill_doc_source_entries_from_cmc.py
+│   │   │   ├── backfill_download_whitepapers.py
+│   │   │   ├── backfill_entry_type_from_url.py
+│   │   │   ├── backfill_explorer_social_types.py
+│   │   │   ├── binance_bapi_healthcheck.py
+│   │   │   ├── bootstrap_cg_assets_batch.py
+│   │   │   ├── bootstrap_cg_assets_from_list.py
+│   │   │   ├── bootstrap_dl_assets_batch.py
+│   │   │   ├── build_catalyst_impact.py
+│   │   │   ├── build_daily_brief.py
+│   │   │   ├── catalyst_ingest_all.py
+│   │   │   ├── catalyst_run_all.py
+│   │   │   ├── catalyst_thesis_regen.py
+│   │   │   ├── check_cmc_snapshot_gap.py
+│   │   │   ├── cleanup_fake_addresses.py
+│   │   │   ├── cleanup_research_thesis_duplicates.py
+│   │   │   ├── cm_cleanup_onchain.py
+│   │   │   ├── cm_range_consolidate.py
+│   │   │   ├── collect_asset_materials.py
+│   │   │   ├── collect_assets_batch.py
+│   │   │   ├── collect_exchange_wallets.py
+│   │   │   ├── collect_github_activity.py
+│   │   │   ├── crawl_explorer_labels.py
+│   │   │   ├── crossfill_cg_docs_from_cmc.py
+│   │   │   ├── curate_notebooklm.py
+│   │   │   ├── daily_diff_generator.py
+│   │   │   ├── dedup_assets.py
+│   │   │   ├── dexscreener_liquidity_client.py
+│   │   │   ├── diag_cleanup_pollution.py
+│   │   │   ├── diag_daily_gap.py
+│   │   │   ├── diag_data_pipeline.py
+│   │   │   ├── diag_high_entry_assets.py
+│   │   │   ├── diag_noise_report.py
+│   │   │   ├── discover_doc_assets_from_entries.py
+│   │   │   ├── download_obm_data.py
+│   │   │   ├── etl_asset_market_daily_from_cmc.py
+│   │   │   ├── etl_sector_flow_daily.py
+│   │   │   ├── etl_sector_narrative_assets.py
+│   │   │   ├── extract_whitepaper_summary.py
+│   │   │   ├── filter_cm_major_coins.py
+│   │   │   ├── fix_bsc_dup_addresses.py
+│   │   │   ├── fix_catalyst_body_text.py
+│   │   │   ├── fix_core_asset_supply_from_cmc.py
+│   │   │   ├── fix_primary_website_pollution.py
+│   │   │   ├── geckoterminal_liquidity_client.py
+│   │   │   ├── import_bscscan_labels.py
+│   │   │   ├── import_explorer_label_csv.py
+│   │   │   ├── ingest_binance_news.py
+│   │   │   ├── ingest_cg_coin_info.py
+│   │   │   ├── ingest_cg_coin_info_auto.py
+│   │   │   ├── ingest_cg_coin_list.py
+│   │   │   ├── ingest_cm_onchain_daily.py
+│   │   │   ├── ingest_cmc_category.py
+│   │   │   ├── ingest_cmc_historical_quotes.py
+│   │   │   ├── ingest_cmc_info.py
+│   │   │   ├── ingest_cmc_map.py
+│   │   │   ├── ingest_cmc_quote_snapshot.py
+│   │   │   ├── ingest_cryptoetf_flow.py
+│   │   │   ├── ingest_dl_protocols.py
+│   │   │   ├── ingest_dl_tvl_daily.py
+│   │   │   ├── ingest_llama_chain_tvl.py
+│   │   │   ├── ingest_obm_btc_daily.py
+│   │   │   ├── ingest_stablecoin_supply.py
+│   │   │   ├── init_binance_news_catalyst_kol.py
+│   │   │   ├── kol_backtest_batch.py
+│   │   │   ├── phase_a_build_core.py
+│   │   │   ├── phase_a_coin_basic.py
+│   │   │   ├── phase_a_dedup.py
+│   │   │   ├── phase_b2_ai_noise_clean.py
+│   │   │   ├── phase_b2_ai_noise_clean_auto.py
+│   │   │   ├── phase_b2_ai_noise_clean_by_asset.py
+│   │   │   ├── phase_b2_ai_noise_clean_by_asset_auto.py
+│   │   │   ├── phase_b2_auto_loop.py
+│   │   │   ├── phase_b2_deep_doc_discovery.py
+│   │   │   ├── phase_b2_rescue_ownsite_topics.py
+│   │   │   ├── phase_b2_retro_scan_spa.py
+│   │   │   ├── phase_b2_retro_scan_spa_auto.py
+│   │   │   ├── phase_b2_sitemap_deep_crawl.py
+│   │   │   ├── phase_b2_spa_browser_crawl.py
+│   │   │   ├── phase_b2_spa_browser_crawl_auto.py
+│   │   │   ├── phase_b2_third_party.py
+│   │   │   ├── phase_b2_third_party_auto.py
+│   │   │   ├── phase_b2_third_party_hacks.py
+│   │   │   ├── phase_b2_third_party_raises.py
+│   │   │   ├── phase_b2_third_party_raises_auto.py
+│   │   │   ├── phase_b_deep_doc_discovery.py
+│   │   │   ├── phase_build_chain_coverage.py
+│   │   │   ├── phase_c_extract_tokenomics.py
+│   │   │   ├── phase_c_extract_tokenomics_auto.py
+│   │   │   ├── phase_c_social_heat.py
+│   │   │   ├── phase_c_social_heat_batch.py
+│   │   │   ├── phase_chain_contract_backfill.py
+│   │   │   ├── phase_chain_contract_security.py
+│   │   │   ├── phase_chain_holder_batch.py
+│   │   │   ├── phase_chain_holder_scrape.py
+│   │   │   ├── phase_chain_holder_snapshot_auto.py
+│   │   │   ├── phase_chain_insider_clusters.py
+│   │   │   ├── phase_chain_liquidity.py
+│   │   │   ├── phase_chain_onchain_query.py
+│   │   │   ├── phase_chain_token_unlocks.py
+│   │   │   ├── phase_chain_token_unlocks_batch.py
+│   │   │   ├── phase_chain_transfer_monitor.py
+│   │   │   ├── phase_chain_transfer_monitor_auto.py
+│   │   │   ├── phase_derivatives_batch.py
+│   │   │   ├── phase_dex_trending_heat.py
+│   │   │   ├── phase_long_tail_screen.py
+│   │   │   ├── phase_meme_holder_qualitative.py
+│   │   │   ├── phase_meme_lifecycle.py
+│   │   │   ├── phase_meme_risk_labels.py
+│   │   │   ├── phase_watchlist_monitor.py
+│   │   │   ├── populate_contracts_from_dexscreener.py
+│   │   │   ├── probe_no_content_links.py
+│   │   │   ├── process_catalyst_ai.py
+│   │   │   ├── refresh_asset_sectors.py
+│   │   │   ├── refresh_core_assets_from_cg.py
+│   │   │   ├── refresh_core_assets_from_cmc.py
+│   │   │   ├── refresh_core_assets_from_dl.py
+│   │   │   ├── refresh_dl_docs_batch.py
+│   │   │   ├── refresh_doc_source_entries_from_cg.py
+│   │   │   ├── refresh_doc_source_entries_from_cg_auto.py
+│   │   │   ├── refresh_doc_source_entries_from_cmc.py
+│   │   │   ├── refresh_doc_source_entries_from_cmc_auto.py
+│   │   │   ├── refresh_doc_source_entries_from_dl.py
+│   │   │   ├── refresh_doc_source_entries_from_dl_auto.py
+│   │   │   ├── remediate_price_spikes.py
+│   │   │   ├── rescan_low_conf_no_content.py
+│   │   │   ├── reset_high_entry_assets.py
+│   │   │   ├── run_cg_pipeline.py
+│   │   │   ├── run_cmc_pipeline.py
+│   │   │   ├── run_data_sync_daily.py
+│   │   │   ├── run_dl_pipeline.py
+│   │   │   ├── run_refresh_primary_website.py
+│   │   │   ├── run_refresh_sectors.py
+│   │   │   ├── send_daily_brief.py
+│   │   │   ├── supplement_doc_entries_dual.py
+│   │   │   ├── supplement_doc_entries_dual_auto.py
+│   │   │   ├── supplement_doc_entries_from_binance.py
+│   │   │   ├── supplement_doc_entries_from_binance_auto.py
+│   │   │   ├── supplement_doc_entries_from_dexscreener.py
+│   │   │   ├── supplement_doc_entries_from_dexscreener_auto.py
+│   │   │   ├── sync_core_supply_from_cmc.py
+│   │   │   ├── sync_unlock_events_from_json.py
+│   │   │   ├── test_catalyst_import.py
+│   │   │   ├── validate_cm_onchain.py
+│   │   │   └── validate_obm_onchain.py
+│   │   │   ├── create_long_tail_screen_P2.sql
+│   │   │   ├── create_opportunity_watchlist_P1.sql
+│   │   │   ├── fix_003_005_008.sql
+│   │   │   ├── fix_009_needs_browser_index.sql
+│   │   │   ├── fix_010_source_map_dup_primary.sql
+│   │   │   ├── fix_011_core_asset_supply_pollution.sql
+│   │   │   ├── fix_012_github_asset_link.sql
+│   │   │   ├── fix_013_catalyst_content_hash_multi_asset.sql
+│   │   │   ├── fix_014_catalyst_research_integration.sql
+│   │   │   ├── fix_015_catalyst_regen_cursor.sql
+│   │   │   ├── fix_016_token_unlock_crawl_status.sql
+│   │   │   ├── fix_017_token_unlock_batch_audit_fixes.sql
+│   │   │   ├── fix_018_api_response_constraint.sql
+│   │   │   ├── fix_020_cm_extend_metrics.sql
+│   │   │   ├── fix_020_price_spike_anomaly_column.sql
+│   │   │   ├── fix_021_doge_mapping_fix.sql
+│   │   │   ├── fix_022_kol_onchain_signal_category.sql
+│   │   │   ├── fix_023_holder_snapshot_change_rates.sql
+│   │   │   ├── fix_023_kol_type_and_related_coins.sql
+│   │   │   ├── fix_023_task_category_slot_isolation.sql
+│   │   │   ├── fix_024_asset_contract_security.sql
+│   │   │   ├── fix_025_asset_liquidity_composite_pk.sql
+│   │   │   ├── fix_026_asset_risk_labels.sql
+│   │   │   ├── fix_027_asset_lifecycle.sql
+│   │   │   ├── fix_028_asset_holder_qualitative.sql
+│   │   │   ├── fix_029_asset_insider_clusters.sql
+│   │   │   ├── fix_030_sector_narrative_asset.sql
+│   │   │   ├── fix_030_widen_insider_numeric.sql
+│   │   │   ├── fix_031_add_dex_trending_cols.sql
+│   │   │   ├── fix_031_sector_flow_daily.sql
+│   │   │   ├── fix_032_create_chain_coverage.sql
+│   │   │   ├── fix_033_create_address_label_table.sql
+│   │   │   ├── fix_034_upgrade_explorer_label_confidence.sql
+│   │   │   ├── fix_035_rollup_wrong_eth_chain_data.sql
+│   │   │   ├── fix_036_add_transfer_label_arrays.sql
+│   │   │   ├── fix_audit_0824.sql
+│   │   │   └── seed_exchange_wallets_P0-2.sql
+│   │   │   ├── biz/
+│   │   │   ├── core/
+│   │   │   ├── raw/
+│   │   │   ├── src_binance/
+│   │   │   ├── src_cg/
+│   │   │   ├── src_cmc/
+│   │   │   ├── src_dexscreener/
+│   │   │   ├── src_dl/
+│   │   │   ├── sys/
+│   │   │   └── check_task_progress.sql
+│   │   │   │   ├── add_spa_crawled_at.sql
+│   │   │   │   ├── add_stablecoin_sector.sql
+│   │   │   │   ├── alter_add_ai_noise_checked_at.sql
+│   │   │   │   ├── alter_add_classify_status.sql
+│   │   │   │   ├── alter_add_content_topics.sql
+│   │   │   │   ├── alter_add_doc_source_entry_asset_url_idx.sql
+│   │   │   │   ├── alter_add_entry_types.sql
+│   │   │   │   ├── alter_add_explorer_social_types.sql
+│   │   │   │   ├── alter_add_notebooklm.sql
+│   │   │   │   ├── alter_add_onchain_monitor.sql
+│   │   │   │   ├── alter_add_published_at.sql
+│   │   │   │   ├── alter_onchain_holder_snapshot_add_json_cols.sql
+│   │   │   │   ├── asset_liquidity.sql
+│   │   │   │   ├── backfill_onchain_transfer_log_suspect.sql
+│   │   │   │   ├── backtest_tables.sql
+│   │   │   │   ├── catalyst_impact.sql
+│   │   │   │   ├── cm_asset_onchain_daily.sql
+│   │   │   │   ├── cm_onchain_percentile.sql
+│   │   │   │   ├── create_asset_catalyst.sql
+│   │   │   │   ├── create_asset_github_repo.sql
+│   │   │   │   ├── create_asset_hacks.sql
+│   │   │   │   ├── create_asset_raises.sql
+│   │   │   │   ├── create_asset_sector.sql
+│   │   │   │   ├── create_asset_tokenomics.sql
+│   │   │   │   ├── create_dl_protocol_checked.sql
+│   │   │   │   ├── create_doc_whitepaper_summary.sql
+│   │   │   │   ├── create_unlock_watchlist.sql
+│   │   │   │   ├── derivatives_table.sql
+│   │   │   │   ├── etf_flow_daily.sql
+│   │   │   │   ├── kol_module_init.sql
+│   │   │   │   ├── kol_signal_add_noise_and_levels.sql
+│   │   │   │   ├── obm_btc_daily.sql
+│   │   │   │   ├── obm_percentile.sql
+│   │   │   │   ├── refresh_primary_website.sql
+│   │   │   │   ├── refresh_sectors_multi_source.sql
+│   │   │   │   ├── reset_exchange_wallet_verify.sql
+│   │   │   │   ├── select_doc_source_entries_for_discovery.sql
+│   │   │   │   ├── select_missing_material_distribution.sql
+│   │   │   │   ├── select_notebooklm_candidates.sql
+│   │   │   │   ├── select_ownsite_rescue_targets.sql
+│   │   │   │   ├── select_target_assets.sql
+│   │   │   │   ├── stablecoin_supply_daily.sql
+│   │   │   │   ├── upsert_asset_github_repo.sql
+│   │   │   │   ├── upsert_asset_hacks.sql
+│   │   │   │   ├── upsert_asset_raises.sql
+│   │   │   │   ├── upsert_catalyst_impact.sql
+│   │   │   │   ├── upsert_doc_asset.sql
+│   │   │   │   ├── upsert_doc_source_entry.sql
+│   │   │   │   ├── upsert_doc_source_entry_noop.sql
+│   │   │   │   └── upsert_github_repo_activity.sql
+│   │   │   │   ├── add_search_indexes.sql
+│   │   │   │   ├── create_asset_contract_map_view.sql
+│   │   │   │   ├── fix_asset_name_pollution_detect.sql
+│   │   │   │   ├── fix_asset_name_pollution_fix.sql
+│   │   │   │   ├── insert_asset.sql
+│   │   │   │   ├── seed_chains.sql
+│   │   │   │   ├── update_asset_from_cmc.sql
+│   │   │   │   └── upsert_asset_source_map.sql
+│   │   │   │   └── insert_api_response.sql
+│   │   │   │   └── select_binance_candidates.sql
+│   │   │   │   ├── schema.sql
+│   │   │   │   ├── select_cg_assets_for_core_bootstrap.sql
+│   │   │   │   ├── select_cg_assets_from_coin_list.sql
+│   │   │   │   ├── select_cg_doc_source_candidates.sql
+│   │   │   │   ├── select_missing_coin_info_ids.sql
+│   │   │   │   ├── upsert_coin_info.sql
+│   │   │   │   └── upsert_coin_list.sql
+│   │   │   │   ├── select_cmc_assets_for_core_bootstrap.sql
+│   │   │   │   ├── select_cmc_doc_source_candidates.sql
+│   │   │   │   ├── select_missing_cmc_info_ids.sql
+│   │   │   │   ├── upsert_cmc_asset_info.sql
+│   │   │   │   ├── upsert_cmc_asset_map.sql
+│   │   │   │   ├── upsert_cmc_category.sql
+│   │   │   │   ├── upsert_cmc_category_member.sql
+│   │   │   │   └── upsert_cmc_quote_snapshot.sql
+│   │   │   │   └── select_dexscreener_candidates.sql
+│   │   │   │   ├── chain_tvl_snapshot.sql
+│   │   │   │   ├── schema.sql
+│   │   │   │   ├── select_dl_assets_for_core_bootstrap.sql
+│   │   │   │   ├── select_dl_doc_source_candidates.sql
+│   │   │   │   ├── select_dl_third_party_candidates.sql
+│   │   │   │   ├── upsert_chain_tvl_snapshot.sql
+│   │   │   │   └── upsert_protocol_list.sql
+│   │   │       ├── alter_ingest_run_status_partial.sql
+│   │   │       ├── create_task_tables.sql
+│   │   │       ├── finish_ingest_run.sql
+│   │   │       ├── insert_ingest_run.sql
+│   │   │       ├── seed_defillama_ingest.sql
+│   │   │       ├── seed_ingest_run_sources.sql
+│   │   │       └── source_endpoint.sql
+│   │       └── crypto_research/
+│   │           ├── clients/
+│   │           ├── db/
+│   │           ├── mapping/
+│   │           ├── parsers/
+│   │           ├── utils/
+│   │           ├── __init__.py
+│   │           ├── brief_ai.py
+│   │           └── config.py
+│   │           │   ├── __init__.py
+│   │           │   ├── address_label_resolver.py
+│   │           │   ├── aptos_client.py
+│   │           │   ├── cmc_client.py
+│   │           │   ├── coingecko_client.py
+│   │           │   ├── contract_security_client.py
+│   │           │   ├── cryptoetf_client.py
+│   │           │   ├── defillama_client.py
+│   │           │   ├── etherscan_client.py
+│   │           │   ├── ethplorer_client.py
+│   │           │   ├── explorer_label_fetcher.py
+│   │           │   ├── firecrawl_search_client.py
+│   │           │   ├── http_client.py
+│   │           │   ├── insider_cluster_client.py
+│   │           │   ├── label_enricher.py
+│   │           │   ├── llm_client.py
+│   │           │   ├── notifier.py
+│   │           │   ├── rpc_client.py
+│   │           │   ├── solana_client.py
+│   │           │   ├── sui_client.py
+│   │           │   ├── ton_client.py
+│   │           │   └── tron_client.py
+│   │           │   ├── __init__.py
+│   │           │   ├── conn.py
+│   │           │   ├── sector.py
+│   │           │   └── upsert.py
+│   │           │   ├── __init__.py
+│   │           │   ├── cg_doc_source_entries.py
+│   │           │   ├── classify_link.py
+│   │           │   ├── cmc_asset_bootstrap.py
+│   │           │   ├── doc_asset_discovery.py
+│   │           │   ├── doc_source_entries.py
+│   │           │   ├── sector.py
+│   │           │   └── taxonomy.py
+│   │           │   ├── __init__.py
+│   │           │   ├── cg_coin_info.py
+│   │           │   ├── cg_coin_list.py
+│   │           │   ├── cmc_info.py
+│   │           │   ├── cmc_map.py
+│   │           │   ├── cmc_quote_snapshot.py
+│   │           │   └── dl_protocol.py
+│   │               ├── __init__.py
+│   │               ├── hash_utils.py
+│   │               └── json_utils.py
+│       ├── catalyst/
+│       ├── kol/
+│       ├── output/
+│       ├── task_state/
+│       ├── templates/
+│       ├── ai_signal_analyzer.py
+│       ├── ai_v2_preview.html
+│       ├── app.py
+│       ├── backtest_opportunities.py
+│       ├── binance_bapi_healthcheck.py
+│       ├── binance_market.py
+│       ├── brief_data_model.py
+│       ├── cmc_market.py
+│       ├── cross_market.py
+│       ├── db_stats.py
+│       ├── derivatives_client.py
+│       ├── diag_high_entry_analysis.py
+│       ├── ethbtc_market.py
+│       ├── gunicorn_config.py
+│       ├── kol_daemon.py
+│       ├── macro_market.py
+│       ├── market_rules.yaml
+│       ├── meme_lifecycle.py
+│       ├── meme_risk.py
+│       ├── requirements.txt
+│       ├── scheduler.py
+│       ├── scheduler_watchdog.py
+│       ├── supervisord.conf
+│       ├── task_manager.py
+│       ├── test_brief_data_model.py
+│       └── uni_profile_sample_v2.json
+│       │   ├── sources/
+│       │   ├── __init__.py
+│       │   ├── base.py
+│       │   ├── binance_news.py
+│       │   ├── db.py
+│       │   ├── linker.py
+│       │   ├── models.py
+│       │   ├── pipeline.py
+│       │   ├── run_catalyst.py
+│       │   └── runner.py
+│       │       ├── __init__.py
+│       │       ├── binance_cms.py
+│       │       └── binance_square_news.py
+│       │   ├── __init__.py
+│       │   ├── asset_match.py
+│       │   ├── catalyst_pipeline.py
+│       │   ├── classifier.py
+│       │   ├── db.py
+│       │   ├── discover.py
+│       │   ├── notifier.py
+│       │   ├── routes.py
+│       │   ├── runner.py
+│       │   └── scraper.py
+│       │   └── ai_trace/
+│       │       ├── signal_v2_2026-09-09.jsonl
+│       │       └── signal_v2_2026-09-10.jsonl
+│       │   ├── logs/
+│       │   ├── scheduler/
+│       │   ├── tasks.json
+│       │   └── tasks.lock
+│       │   │   ├── 320305ac8882.log
+│       │   │   └── fd21804fa734.log
+│           ├── index.html
+│           ├── kol.html
+│           └── research.html
+    └── 审计_uni_profile_sample_v2.json.md

@@ -320,11 +320,14 @@ def fetch_cryptoetf_cefi() -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_fear_greed_history(days: int = 90) -> dict:
-    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...]}。
+    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...], pct_full, latest_value}。
 
     优先从数据库 biz.fear_greed_daily 读取（快），
     数据库为空/数据不足时 fallback 到 CMC API（慢，实时拉）。
     series 按时间倒序（最新的在前），与 CMC API 返回一致。
+
+    pct_full: 全历史分位（0-100），仅 DB 模式可用；API 模式为 None
+    latest_value: 最新值，DB 模式可用
     """
     # 尝试从 DB 读
     try:
@@ -334,6 +337,7 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
+                # 取最近 days 天的序列（用于展示/滚动计算）
                 cur.execute("""
                     SELECT value
                     FROM biz.fear_greed_daily
@@ -342,9 +346,40 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
                 """, (days,))
                 rows = cur.fetchall()
 
+                # 取全量用于百分位计算
+                cur.execute("""
+                    SELECT COUNT(*),
+                           SUM(CASE WHEN value <= (
+                               SELECT value FROM biz.fear_greed_daily
+                               ORDER BY metric_date DESC LIMIT 1
+                           ) THEN 1 ELSE 0 END)
+                    FROM biz.fear_greed_daily
+                """)
+                total_row = cur.fetchone()
+                total_count = total_row[0] if total_row else 0
+                below_count = total_row[1] if total_row and total_row[1] is not None else 0
+                pct_full = (below_count / total_count * 100) if total_count > 0 else None
+
+                # 最新值
+                cur.execute("""
+                    SELECT value, value_class
+                    FROM biz.fear_greed_daily
+                    ORDER BY metric_date DESC
+                    LIMIT 1
+                """)
+                latest_row = cur.fetchone()
+                latest_value = float(latest_row[0]) if latest_row else None
+                latest_class = latest_row[1] if latest_row else None
+
             if rows and len(rows) >= max(2, days // 2):
                 series = [float(r[0]) for r in rows]
-                return {"status": "ok", "series": series}
+                return {
+                    "status": "ok",
+                    "series": series,
+                    "pct_full": round(pct_full, 2) if pct_full is not None else None,
+                    "latest_value": latest_value,
+                    "latest_class": latest_class,
+                }
     except Exception:
         pass
 
@@ -360,7 +395,7 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
         series = [_safe_float(item.get("value")) for item in data if item.get("value") is not None]
         if not series:
             return {"status": "error", "error": "empty", "series": []}
-        return {"status": "ok", "series": series}
+        return {"status": "ok", "series": series, "pct_full": None, "latest_value": series[0]}
     except Exception as e:
         return {"status": "error", "error": str(e), "series": []}
 
@@ -608,11 +643,14 @@ def _detect_stablecoin_anomaly(netflows: list[float], rolling_7d: list[float],
 
 
 def fetch_cefi_history(days: int = 30) -> dict:
-    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...]}。
+    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...], pct_full, latest_value}。
 
     优先从数据库 biz.cefi_index_daily 读取（快），
     数据库为空/数据不足时 fallback 到 cryptoETF API（慢）。
     series 按时间倒序（最新的在前），与原 API 行为一致。
+
+    pct_full: 全历史分位（0-100），仅 DB 模式可用；API 模式为 None
+    latest_value: 最新值，DB 模式可用
     """
     # 尝试从 DB 读
     try:
@@ -622,6 +660,7 @@ def fetch_cefi_history(days: int = 30) -> dict:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
+                # 取最近 days 天的序列
                 cur.execute("""
                     SELECT value
                     FROM biz.cefi_index_daily
@@ -630,9 +669,36 @@ def fetch_cefi_history(days: int = 30) -> dict:
                 """, (days,))
                 rows = cur.fetchall()
 
+                # 全历史百分位
+                cur.execute("""
+                    SELECT COUNT(*),
+                           SUM(CASE WHEN value <= (
+                               SELECT value FROM biz.cefi_index_daily
+                               ORDER BY metric_date DESC LIMIT 1
+                           ) THEN 1 ELSE 0 END)
+                    FROM biz.cefi_index_daily
+                """)
+                total_row = cur.fetchone()
+                total_count = total_row[0] if total_row else 0
+                below_count = total_row[1] if total_row and total_row[1] is not None else 0
+                pct_full = (below_count / total_count * 100) if total_count > 0 else None
+
+                # 最新值
+                cur.execute("""
+                    SELECT value FROM biz.cefi_index_daily
+                    ORDER BY metric_date DESC LIMIT 1
+                """)
+                latest_row = cur.fetchone()
+                latest_value = float(latest_row[0]) if latest_row else None
+
             if rows and len(rows) >= max(2, days // 2):
                 series = [float(r[0]) for r in rows]
-                return {"status": "ok", "series": series}
+                return {
+                    "status": "ok",
+                    "series": series,
+                    "pct_full": round(pct_full, 2) if pct_full is not None else None,
+                    "latest_value": latest_value,
+                }
     except Exception:
         pass
 
@@ -652,7 +718,7 @@ def fetch_cefi_history(days: int = 30) -> dict:
         series = [_safe_float(item.get("value")) for item in data if item.get("value") is not None]
         if not series:
             return {"status": "error", "error": "empty", "series": []}
-        return {"status": "ok", "series": series}
+        return {"status": "ok", "series": series, "pct_full": None, "latest_value": series[0]}
     except Exception as e:
         return {"status": "error", "error": str(e), "series": []}
 
@@ -7781,8 +7847,222 @@ def _build_mvrv_universe(top_n: int = 100) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+# 大盘周期热力图
+# ══════════════════════════════════════════════════════════════
+
+def build_market_cycle_dashboard(overview: dict) -> dict:
+    """大盘周期热力图：整合 5 个维度的周期位置，输出综合周期阶段。
+
+    5 个维度（每项 0-100，越高越接近顶部）：
+      1. 估值周期：BTC MVRV 全历史分位（权重 0.25）
+      2. 情绪周期：恐贪全历史分位 + 山寨季指数（权重 0.20）
+      3. 资金周期：稳定币净流分位 + CEFI 资金流分位（权重 0.20）
+      4. 衍生品周期：BTC OI 分位 + 资金费率热度（权重 0.15）
+      5. 链上周期：BTC liveliness 全历史分位（权重 0.20）
+
+    综合周期热度 = 加权平均
+    阶段划分（六档）：
+      < 20: 熊市底部（极度恐慌）
+      20-40: 熊市后期 / 复苏早期
+      40-60: 牛市早期 / 中段
+      60-80: 牛市中期 / 升温
+      80-90: 牛市后期 / 过热
+      ≥ 90: 泡沫顶部（极度贪婪）
+    """
+    from collections import Counter
+
+    dims = {}
+
+    # ── 1. 估值周期 ──
+    mvrv_pct = None
+    mvrv_hist = overview.get("mvrv_hist", {})
+    if mvrv_hist.get("status") == "ok":
+        mvrv_pct = mvrv_hist.get("pct_full")
+    if mvrv_pct is None:
+        btc_cycle = overview.get("btc_cycle", {})
+        if btc_cycle.get("status") == "ok":
+            mvrv_pct = btc_cycle.get("mvrv_pct_full")
+    dims["valuation"] = {
+        "label": "估值周期",
+        "score": round(mvrv_pct, 1) if mvrv_pct is not None else None,
+        "indicator": "BTC MVRV 全历史分位",
+        "mvrv_value": mvrv_hist.get("value") if mvrv_hist.get("status") == "ok" else None,
+    }
+
+    # ── 2. 情绪周期 ──
+    fg_pct = None
+    fg_hist = overview.get("fear_greed_hist", {})
+    if fg_hist.get("status") == "ok":
+        fg_pct = fg_hist.get("pct_full")
+    if fg_pct is None and fg_hist.get("status") == "ok":
+        fg_val = overview.get("fear_greed", {}).get("value")
+        series = fg_hist.get("series") or []
+        if fg_val is not None and series:
+            fg_pct = percentile_of(fg_val, series)
+
+    alt_season = None
+    alt_data = overview.get("altcoin_season", {})
+    if alt_data.get("status") == "ok":
+        alt_season = alt_data.get("value")
+
+    emotion_vals = [s for s in [fg_pct, alt_season] if s is not None]
+    emotion_score = round(sum(emotion_vals) / len(emotion_vals), 1) if emotion_vals else None
+    dims["sentiment"] = {
+        "label": "情绪周期",
+        "score": emotion_score,
+        "indicator": "恐贪分位 + 山寨季指数",
+        "fear_greed_pct": round(fg_pct, 1) if fg_pct is not None else None,
+        "altcoin_season": alt_season,
+    }
+
+    # ── 3. 资金周期 ──
+    # 稳定币净流：净流入高 → 资金进场 → 周期升温
+    sc_pct = None
+    sc_hist = overview.get("stablecoin_flow_hist", {})
+    if sc_hist.get("status") == "ok":
+        sc_rolling = sc_hist.get("rolling_7d") or []
+        sc_series = sc_hist.get("series") or []
+        sc_val = sc_rolling[-1] if sc_rolling else (sc_series[-1] if sc_series else None)
+        sc_ref = sc_rolling if len(sc_rolling) >= 2 else sc_series
+        if sc_val is not None and sc_ref:
+            sc_pct = percentile_of(sc_val, sc_ref)
+
+    # CEFI 资金流分位（正=净流入=资金进场）
+    cefi_pct = None
+    cefi_hist = overview.get("cefi_hist", {})
+    if cefi_hist.get("status") == "ok":
+        cefi_pct = cefi_hist.get("pct_full")
+    if cefi_pct is None and cefi_hist.get("status") == "ok":
+        cefi_val = overview.get("cefi", {}).get("value")
+        cefi_series = cefi_hist.get("series") or []
+        if cefi_val is not None and cefi_series:
+            cefi_pct = percentile_of(cefi_val, cefi_series)
+
+    capital_vals = [s for s in [sc_pct, cefi_pct] if s is not None]
+    capital_score = round(sum(capital_vals) / len(capital_vals), 1) if capital_vals else None
+    dims["capital_flow"] = {
+        "label": "资金周期",
+        "score": capital_score,
+        "indicator": "稳定币净流分位 + CEFI 资金流分位",
+        "stablecoin_pct": round(sc_pct, 1) if sc_pct is not None else None,
+        "cefi_pct": round(cefi_pct, 1) if cefi_pct is not None else None,
+    }
+
+    # ── 4. 衍生品周期 ──
+    # BTC OI 全历史分位（目前没有 hist 接口，留空，后续接入）
+    oi_pct = None
+    deriv = overview.get("derivatives", {})
+    oi_value = deriv.get("btc_open_interest")
+
+    # 资金费率热度：正资金费率高 → 多头拥挤 → 过热
+    funding_rate = deriv.get("btc_funding_rate")
+    funding_heat = None
+    if funding_rate is not None:
+        fr_pct = funding_rate * 100  # 转百分比
+        if fr_pct <= -0.05:
+            funding_heat = 0.0
+        elif fr_pct >= 0.05:
+            funding_heat = 100.0
+        else:
+            funding_heat = round((fr_pct + 0.05) / 0.10 * 100, 1)
+
+    deriv_vals = [s for s in [oi_pct, funding_heat] if s is not None]
+    deriv_score = round(sum(deriv_vals) / len(deriv_vals), 1) if deriv_vals else None
+    dims["derivatives"] = {
+        "label": "衍生品周期",
+        "score": deriv_score if deriv_vals else None,
+        "indicator": "OI 分位 + 资金费率热度",
+        "btc_oi_usd": oi_value,
+        "btc_funding_rate": funding_rate,
+        "funding_heat": funding_heat,
+    }
+
+    # ── 5. 链上周期 ──
+    chain_pct = None
+    btc_cycle = overview.get("btc_cycle", {})
+    if btc_cycle.get("status") == "ok":
+        chain_pct = btc_cycle.get("liveliness_pct_full")
+    dims["onchain"] = {
+        "label": "链上周期",
+        "score": round(chain_pct, 1) if chain_pct is not None else None,
+        "indicator": "BTC Liveliness 全历史分位",
+        "liveliness": btc_cycle.get("liveliness"),
+    }
+
+    # ── 综合周期热度（加权平均） ──
+    weights = {
+        "valuation": 0.25,
+        "sentiment": 0.20,
+        "capital_flow": 0.20,
+        "derivatives": 0.15,
+        "onchain": 0.20,
+    }
+
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for key, w in weights.items():
+        s = dims[key].get("score")
+        if s is not None:
+            weighted_sum += s * w
+            total_weight += w
+
+    overall_heat = round(weighted_sum / total_weight, 1) if total_weight > 0 else None
+
+    # ── 阶段判断 ──
+    phase = None
+    phase_label = None
+    if overall_heat is not None:
+        if overall_heat < 20:
+            phase, phase_label = "bear_floor", "熊市底部（极度恐慌）"
+        elif overall_heat < 40:
+            phase, phase_label = "late_bear", "熊市后期 / 复苏早期"
+        elif overall_heat < 60:
+            phase, phase_label = "early_bull", "牛市早期 / 中段"
+        elif overall_heat < 80:
+            phase, phase_label = "mid_bull", "牛市中期 / 升温"
+        elif overall_heat < 90:
+            phase, phase_label = "late_bull", "牛市后期 / 过热"
+        else:
+            phase, phase_label = "bubble_top", "泡沫顶部（极度贪婪）"
+
+    # ── 一致性判断：各维度阶段是否一致 ──
+    def _phase_bucket(score):
+        if score < 20: return "bear_floor"
+        if score < 40: return "late_bear"
+        if score < 60: return "early_bull"
+        if score < 80: return "mid_bull"
+        return "late_bull"
+
+    valid_buckets = []
+    for key in dims:
+        s = dims[key].get("score")
+        if s is not None:
+            valid_buckets.append(_phase_bucket(s))
+
+    consistency = None
+    if valid_buckets:
+        cnt = Counter(valid_buckets)
+        _, top_count = cnt.most_common(1)[0]
+        consistency = round(top_count / len(valid_buckets) * 100, 1)
+
+    return {
+        "status": "ok" if overall_heat is not None else "partial",
+        "overall_heat": overall_heat,
+        "phase": phase,
+        "phase_label": phase_label,
+        "consistency_pct": consistency,
+        "dimensions": dims,
+        "description": (
+            f"大盘综合周期热度 {overall_heat:.1f}/100 — {phase_label}"
+            if overall_heat else "数据不足，无法判断周期位置"
+        ),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # 主入口函数
 # ══════════════════════════════════════════════════════════════
+
 
 def get_market_overview(force_refresh: str = "0") -> dict:
     """
@@ -7920,7 +8200,11 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P2-1: 计算各核心指标的百分位和极端标记 ──
     fg_value = fear_greed.get("value")
-    fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
+    # 恐贪：优先用 DB 全历史分位（pct_full），兜底用近 90 天序列计算
+    if fear_greed_hist.get("status") == "ok" and fear_greed_hist.get("pct_full") is not None:
+        fg_percentile = fear_greed_hist["pct_full"]
+    else:
+        fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
     fg_extreme = flag_extreme(fg_percentile)
 
     # MVRV：优先用库内全历史分位（cm_onchain_percentile_full），兜底用 percentile_of
@@ -7941,6 +8225,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     # onchain 覆盖时用自身 30d 序列算 percentile（避免跨源量纲混合）
     if cefi.get("source") == "onchain_cex_netflow" and onchain.get("daily_netflows_30d"):
         cefi_percentile = percentile_of(cefi_value, onchain["daily_netflows_30d"])
+    elif cefi_hist.get("status") == "ok" and cefi_hist.get("pct_full") is not None:
+        # CEFI：优先用 DB 全历史分位
+        cefi_percentile = cefi_hist["pct_full"]
     else:
         cefi_percentile = percentile_of(cefi_value, cefi_hist.get("series") or []) if cefi_hist.get("status") == "ok" else None
     cefi_extreme = flag_extreme(cefi_percentile)
@@ -8064,6 +8351,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     result["chimney_signals"] = build_chimney_signals(result)
     result["institutional_mvrv"] = build_institutional_mvrv_summary(result)
     result["smart_money_divergence"] = build_smart_money_divergence(result)
+    result["cycle_dashboard"] = build_market_cycle_dashboard(result)
 
     _cache = result
     _cache_ts = now

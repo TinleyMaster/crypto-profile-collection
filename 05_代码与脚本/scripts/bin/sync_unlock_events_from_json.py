@@ -186,13 +186,15 @@ def main() -> int:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             if args.asset_id:
                 cur.execute(
-                    "SELECT asset_id, unlock_events_json, source_name "
+                    "SELECT asset_id, unlock_events_json, source_name, "
+                    "       unlock_ratio_mcap, input_snapshot_json "
                     "FROM biz.asset_token_unlocks WHERE asset_id = %s",
                     (args.asset_id,),
                 )
             else:
                 cur.execute(
-                    "SELECT asset_id, unlock_events_json, source_name "
+                    "SELECT asset_id, unlock_events_json, source_name, "
+                    "       unlock_ratio_mcap, input_snapshot_json "
                     "FROM biz.asset_token_unlocks "
                     "WHERE unlock_events_json IS NOT NULL "
                     "  AND jsonb_array_length(unlock_events_json) > 0"
@@ -216,6 +218,16 @@ def main() -> int:
                 asset_id = row["asset_id"]
                 events = row.get("unlock_events_json") or []
                 source = row.get("source_name") or "unknown"
+
+                # P0-1: 母表已有市值基准时，为缺 ratio_mcap 的事件补算 unlock_value_usd / market_cap
+                snapshot = row.get("input_snapshot_json") or {}
+                snap_overview = snapshot.get("overview") or {} if isinstance(snapshot, dict) else {}
+                mcap_fallback = None
+                _mc = snap_overview.get("market_cap") or snap_overview.get("market_cap_usd")
+                try:
+                    mcap_fallback = float(_mc) if _mc not in (None, "") else None
+                except (TypeError, ValueError):
+                    mcap_fallback = None
 
                 for ev in events:
                     if not isinstance(ev, dict):
@@ -244,6 +256,9 @@ def main() -> int:
                     ratio_total = None if ev.get("ratio_mcap") else pct
                     unlock_ratio_circulating = _to_float(ev.get("pct_of_circulating"))
                     unlock_value_usd = _to_float(ev.get("value_usd"))
+                    # P0-1: pct 缺失但事件有解锁市值时，用 value_usd / market_cap 补 ratio_mcap
+                    if ratio_mcap is None and unlock_value_usd and mcap_fallback and mcap_fallback > 0:
+                        ratio_mcap = round(unlock_value_usd / mcap_fallback * 100.0, 4)
                     risk_level = str(ev.get("risk_level") or "")[:20] or None
 
                     try:

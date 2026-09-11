@@ -1416,19 +1416,56 @@ def ensure_table(conn) -> None:
     conn.commit()
 
 
+def _compute_unlock_ratio_mcap(data: dict) -> float | None:
+    """计算 asset_token_unlocks.unlock_ratio_mcap（最近一次未来解锁占市值百分比，%）。
+
+    优先取 overview 的 next_unlock_pct_mcap（tokenomics.com 直接给出的 % of MCAP）；
+    否则取日期最早的一个 upcoming 事件的 pct（新版数据源 pct 语义即 % of MCAP，
+    事件行标记了 ratio_mcap=True）。取不到则返回 None，由下游自行降级。
+    """
+    overview = data.get("overview") or {}
+    v = overview.get("next_unlock_pct_mcap")
+    if v is not None:
+        try:
+            return round(float(v), 4)
+        except (ValueError, TypeError):
+            pass
+    from datetime import datetime as _dt
+    def _pd(s):
+        try:
+            return _dt.strptime(s, "%b %d, %Y")
+        except Exception:
+            return _dt(2000, 1, 1)
+    upcoming = [
+        e for e in (data.get("unlock_events") or [])
+        if e.get("is_upcoming") and e.get("ratio_mcap")
+    ]
+    if upcoming:
+        nxt = min(upcoming, key=lambda e: _pd(e.get("date")))
+        try:
+            return round(float(nxt.get("pct") or 0.0), 4)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def save_to_db(conn, asset_id: int, data: dict) -> None:
     """写入或更新 biz.asset_token_unlocks。"""
     import json as json_mod
+
+    unlock_ratio_mcap = _compute_unlock_ratio_mcap(data)
 
     sql = """
         INSERT INTO biz.asset_token_unlocks (
             asset_id, source_url, source_name, slug,
             overview_json, unlock_events_json, revenue_json, valuation_json,
+            unlock_ratio_mcap,
             scraped_at, updated_at, crawl_status, last_attempt_at
         ) VALUES (
             %(asset_id)s, %(source_url)s, %(source_name)s, %(slug)s,
             %(overview_json)s, %(unlock_events_json)s,
             %(revenue_json)s, %(valuation_json)s,
+            %(unlock_ratio_mcap)s,
             NOW(), NOW(), %(crawl_status)s, NOW()
         )
         ON CONFLICT (asset_id) DO UPDATE SET
@@ -1439,6 +1476,7 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             unlock_events_json = EXCLUDED.unlock_events_json,
             revenue_json = EXCLUDED.revenue_json,
             valuation_json = EXCLUDED.valuation_json,
+            unlock_ratio_mcap = EXCLUDED.unlock_ratio_mcap,
             crawl_status = EXCLUDED.crawl_status,
             last_attempt_at = NOW(),
             updated_at = NOW()
@@ -1453,10 +1491,12 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             "unlock_events_json": json_mod.dumps(data.get("unlock_events", []), ensure_ascii=False),
             "revenue_json": json_mod.dumps(data.get("revenue", {}), ensure_ascii=False),
             "valuation_json": json_mod.dumps(data.get("valuation", {}), ensure_ascii=False),
+            "unlock_ratio_mcap": unlock_ratio_mcap,
             "crawl_status": data.get("crawl_status", "ok"),
         })
     conn.commit()
-    _log(f"  已写入数据库 (asset_id={asset_id}, crawl_status={data.get('crawl_status', 'ok')})")
+    _log(f"  已写入数据库 (asset_id={asset_id}, crawl_status={data.get('crawl_status', 'ok')}, "
+         f"unlock_ratio_mcap={unlock_ratio_mcap})")
 
 
 def _mark_not_found(conn, asset_id: int, data: dict | None = None) -> None:

@@ -27,7 +27,12 @@ def parse_cmc_quote_snapshot_payload(
         if cmc_id is None:
             continue
 
-        quote_usd = (coin.get("quote") or {}).get("USD") or {}
+        # v1: quote 为 { "USD": {...} } 对象；v3: quote 为 [ {...} ] 数组（默认计价币在首位）
+        quote = coin.get("quote") or {}
+        if isinstance(quote, list):
+            quote_usd = quote[0] if quote else {}
+        else:
+            quote_usd = quote.get("USD") or {}
 
         rows.append(
             {

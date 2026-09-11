@@ -7704,6 +7704,101 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     }
 
 
+def recompute_unlock_pressure_batch(limit: int = 0, force: bool = True,
+                                    log=None) -> dict:
+    """批量重算解锁抛压评分，覆盖所有「有未来解锁事件」的资产。
+
+    P0-3：原 asset_unlock_pressure 仅 54 资产、且依赖单资产按需触发才回填，
+    覆盖度极低导致解锁抛压榜选不出标的。本函数把覆盖范围扩展到
+    biz.asset_token_unlocks 中所有存在未过期解锁事件（unlock_events_json 内
+    有 is_upcoming=True 且日期 >= 今天）的资产。
+
+    对每个资产调用 compute_unlock_pressure(asset_id, force=True) 重算并写缓存。
+
+    参数：
+        limit: 最多处理的资产数（0 = 不限）
+        force: 是否强制重算（绕过 6h TTL 缓存）
+        log:  可选日志回调，形如 def log(msg: str) -> None
+
+    返回：{"total", "computed", "failed", "skipped", "failed_ids"}
+    """
+    def _emit(msg: str) -> None:
+        if log:
+            log(msg)
+        else:
+            print(msg)
+
+    settings = get_settings(require_database=True)
+
+    # 候选：有未来解锁事件的资产
+    today = datetime.now(timezone.utc).date()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.asset_id
+                FROM biz.asset_token_unlocks u
+                WHERE u.crawl_status = 'ok'
+                  AND u.unlock_events_json IS NOT NULL
+                  AND u.unlock_events_json != '[]'::jsonb
+                ORDER BY u.asset_id ASC
+                """
+            )
+            all_ids = [r[0] for r in cur.fetchall()]
+
+    candidates = []
+    for asset_id in all_ids:
+        # 快速过滤：仅保留存在未过期 upcoming 事件的资产
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT unlock_events_json FROM biz.asset_token_unlocks WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+        events = row[0] if row else None
+        if not isinstance(events, list):
+            continue
+        has_future = False
+        for e in events:
+            if isinstance(e, dict) and e.get("is_upcoming"):
+                d = _parse_unlock_event_date(e.get("date"))
+                if d is not None and d >= today:
+                    has_future = True
+                    break
+        if has_future:
+            candidates.append(asset_id)
+
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    _emit(f"[pressure] 候选资产（有未来解锁事件）: {len(candidates)} 个")
+
+    computed = 0
+    failed = 0
+    failed_ids = []
+    for i, asset_id in enumerate(candidates, 1):
+        try:
+            res = compute_unlock_pressure(asset_id, force=force)
+            if res is not None:
+                computed += 1
+            if i % 25 == 0 or i == len(candidates):
+                _emit(f"[pressure] 进度 {i}/{len(candidates)} 完成 {computed} 失败 {failed}")
+        except Exception as e:
+            failed += 1
+            failed_ids.append(asset_id)
+            _emit(f"[pressure] asset_id={asset_id} 重算失败: {e}")
+
+    _emit(f"[pressure] 完成：computed={computed} failed={failed} "
+          f"failed_ids={failed_ids[:20]}")
+    return {
+        "total": len(candidates),
+        "computed": computed,
+        "failed": failed,
+        "failed_ids": failed_ids[:50],
+    }
+
+
 def analyze_unlock_event_impact(
     asset_id: int,
     window_days: int = 14,
@@ -8515,7 +8610,12 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else None
                 last_error = f"HTTP错误: {status}"
-                # 401/403 = key 无效，429 = 配额超限 → 换无 key 公共接口重试
+                # 401/403 = key 无效，429 = 配额超限/限流，5xx = 服务端临时故障
+                # → 指数退避重试后再换下一个 header（无 key 公共接口/其他 key）
+                if status in (429, 500, 502, 503, 504) and attempt < 2:
+                    time_mod.sleep(1.5 * (attempt + 1))
+                    continue
+                # 其他 HTTP 错误（400/401/403 等）无重试意义，换 header 或直接失败
                 break
             except Exception as e:
                 last_error = f"未知错误: {e}"
@@ -8574,8 +8674,8 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
     except Exception:
         pass  # 降级失败就返回原始错误
 
-    return {"price_usd": error_msg, "market_cap_usd": error_msg, "fdv_usd": error_msg,
-            "volume_24h_usd": error_msg}
+    return {"price_usd": None, "market_cap_usd": None, "fdv_usd": None,
+            "volume_24h_usd": None, "_error": error_msg}
 
 
 def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict:

@@ -156,7 +156,7 @@ def _fmt_mcap(v):
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
-    模块顺序：AI定调 → 大盘脉搏 → 赛道轮动 → 机构资金 → 链上异动 → 催化剂 → 机会清单
+    模块顺序：AI定调 → AI精选高亮 → 大盘脉搏 → 赛道轮动 → 机构资金 → 链上异动 → 催化剂 → 机会清单
     """
     today = date.today().isoformat()
     m0 = brief.get("M0_tldr", {})
@@ -296,6 +296,104 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;color:#e2e8f0;line-height:1.5">{tldr_text or '今日大盘数据更新中...'}</div>
           </div>
         """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.5：🎯 AI 精选高亮信号（V2 六维评分 + Web 搜索补全）
+    # ════════════════════════════════════════════════════════
+    highlights = brief.get("M3_highlights") or []
+    risk_signals = brief.get("M4_risks") or []
+    # 只展示经过 AI V2 分析的高亮信号
+    ai_highlights = [h for h in highlights if h.get("ai_analysis_v2") and not h["ai_analysis_v2"].get("error")]
+
+    if ai_highlights:
+        display_highlights = ai_highlights[:3]  # 最多 3 个
+
+        html_parts.append(f"""
+          <!-- 模块：AI精选高亮信号 -->
+          <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div style="font-size:13px;font-weight:700;color:#0f172a">🎯 AI 精选高亮信号</div>
+              <div style="font-size:10px;color:#94a3b8">六维评分 · 自动搜索补全</div>
+            </div>
+        """)
+
+        for h in display_highlights:
+            target = h.get("target") or "?"
+            base_score = h.get("conviction_score") or 0
+            ai = h.get("ai_analysis_v2") or {}
+            overall_score = ai.get("overall_score") or base_score
+            direction = ai.get("direction") or h.get("direction") or "long"
+            confidence = ai.get("confidence") or "MED"
+            reason = ai.get("reason_summary") or h.get("trigger_logic") or ""
+            key_drivers = ai.get("key_drivers") or []
+            score_card = ai.get("score_card") or {}
+
+            # 方向
+            dir_icon = "▲" if direction == "long" else "▼"
+            dir_color = "#dc2626" if direction == "long" else "#16a34a"
+            dir_cn = "看多" if direction == "long" else "看空"
+
+            # 置信度颜色
+            conf_color = {"HIGH": "#dc2626", "MED": "#f59e0b", "LOW": "#94a3b8"}.get(confidence, "#f59e0b")
+
+            # 六维评分小条（取 3 个关键维度）
+            mini_dims = []
+            for dim_key, dim_name in [("technical", "技术"), ("fundamental", "基本面"), ("sentiment", "情绪")]:
+                dim = score_card.get(dim_key) or {}
+                s = dim.get("score")
+                if isinstance(s, (int, float)):
+                    bar_color = "#dc2626" if s >= 70 else "#f59e0b" if s >= 50 else "#94a3b8"
+                    bar_width = max(8, min(60, s * 0.6))
+                    mini_dims.append(
+                        f'<div style="font-size:9px;color:#64748b;margin-bottom:2px">{dim_name} {s}分</div>'
+                        f'<div style="height:3px;background:#f1f5f9;border-radius:2px;margin-bottom:4px">'
+                        f'<div style="width:{bar_width}px;height:100%;background:{bar_color};border-radius:2px"></div>'
+                        f'</div>'
+                    )
+            mini_dims_html = '<div style="flex:1;min-width:0">' + "".join(mini_dims) + '</div>' if mini_dims else ""
+
+            # 驱动因子（取前 2 个）
+            drivers_html = ""
+            if key_drivers:
+                driver_items = " · ".join(str(d)[:30] for d in key_drivers[:2])
+                drivers_html = f'<div style="font-size:10px;color:#0369a1;margin-top:4px">💡 {driver_items}</div>'
+
+            html_parts.append(f"""
+            <div style="padding:10px 12px;margin:6px 0;border-radius:8px;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecaca;border-left:3px solid #dc2626">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:15px;font-weight:800;color:#0f172a">{target}</span>
+                  <span style="font-size:11px;color:{dir_color};font-weight:700">{dir_icon} {dir_cn}</span>
+                  <span style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">{confidence}</span>
+                </div>
+                <div style="text-align:right;flex-shrink:0">
+                  <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
+                  <div style="font-size:9px;color:#94a3b8">综合评分</div>
+                </div>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center">
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:11px;color:#475569;line-height:1.5">{reason[:120]}</div>
+                  {drivers_html}
+                </div>
+                {mini_dims_html}
+              </div>
+            </div>
+            """)
+
+        # 高危信号（如果有，加一个小警示条）
+        ai_risks = [r for r in risk_signals if r.get("ai_analysis_v2") and not r["ai_analysis_v2"].get("error")]
+        if ai_risks:
+            risk_preview = "、".join(r.get("target", "?") for r in ai_risks[:3])
+            risk_count = len(ai_risks)
+            html_parts.append(f"""
+            <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
+              ⚠️ 今日高危信号 <b>{risk_count}</b> 个：{risk_preview}
+              <span style="float:right;color:#dc2626;font-weight:600;cursor:pointer">查看详情 ↓</span>
+            </div>
+            """)
+
+        html_parts.append("</div>")
 
     # ════════════════════════════════════════════════════════
     # 模块 1：📊 大盘脉搏

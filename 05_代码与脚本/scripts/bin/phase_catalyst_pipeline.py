@@ -104,11 +104,29 @@ from catalyst.notifier import send_fast_alerts_for_new_signals, send_slow_digest
 
 
 def load_config() -> dict:
-    """加载 catalyst_rules.yaml 配置，兼容本地与容器路径。"""
+    """加载 catalyst_rules.yaml 配置，兼容本地与容器路径。
+
+    优先从 catalyst 包内读取（随包分发，Docker 自动包含），
+    失败则回退到常见位置探测。
+    """
+    # 1. 从 catalyst 包内读（最可靠，随包分发）
+    try:
+        import catalyst
+        pkg_dir = Path(catalyst.__file__).resolve().parent
+        pkg_config = pkg_dir / "catalyst_rules.yaml"
+        if pkg_config.exists():
+            with open(pkg_config, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+    except Exception:
+        pass
+
+    # 2. 多路径探测兜底
     candidates = [
         BASE_DIR / "catalyst_rules.yaml",
+        BASE_DIR / "catalyst" / "catalyst_rules.yaml",
         Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst_rules.yaml",
         Path("/app/catalyst_rules.yaml"),
+        Path("/app/catalyst/catalyst_rules.yaml"),
     ]
     for p in candidates:
         if p.exists():

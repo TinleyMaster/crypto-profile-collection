@@ -94,14 +94,19 @@ def _get_email_notifier():
     """获取 EmailNotifier 实例。失败返回 None（静默降级）。"""
     try:
         from crypto_research.clients.notifier import EmailNotifier
-        from crypto_research.config import Settings
-        settings = Settings()
+        from crypto_research.config import get_settings
+        # 通知器不碰 DB，避免 prod 缺 DATABASE_URL 时把邮件一起拖死
+        # （与 kol/notifier.py 保持一致的写法）
+        settings = get_settings(require_database=False)
         notifier = EmailNotifier(settings)
         if not notifier.configured:
+            logger.warning(
+                "SMTP 未配置：SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_TO 存在空值"
+            )
             return None
         return notifier
     except Exception as e:
-        logger.debug("邮件通知不可用: %s", e)
+        logger.warning("构建邮件通知器失败: %s", e, exc_info=True)
         return None
 
 

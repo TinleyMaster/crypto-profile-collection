@@ -18,6 +18,8 @@ STAGES = [
     ("AI 预处理", "process_catalyst_ai.py", ["--batch-size", "200"]),
     ("impact 因子化", "build_catalyst_impact.py", ["--incremental"]),
     ("thesis 重生(游标模式)", "catalyst_thesis_regen.py", ["--max-assets", "100"]),
+    ("决策管道快通道", "phase_catalyst_pipeline.py", ["--fast"]),
+    ("决策管道慢通道", "phase_catalyst_pipeline.py", ["--slow"]),
 ]
 
 

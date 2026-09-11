@@ -46,9 +46,28 @@ def _get_db_url() -> str:
 
 
 @contextmanager
-def get_conn():
-    """获取数据库连接上下文管理器（自动提交/回滚/关闭）"""
-    conn = psycopg.connect(_get_db_url(), row_factory=dict_row, connect_timeout=30)
+def get_conn(max_retries: int = 5, retry_delay: float = 3.0):
+    """获取数据库连接上下文管理器（自动提交/回滚/关闭）
+
+    Args:
+        max_retries: 连接失败重试次数
+        retry_delay: 重试间隔（秒）
+    """
+    conn = None
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = psycopg.connect(_get_db_url(), row_factory=dict_row, connect_timeout=30)
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                import time
+                time.sleep(retry_delay)
+            continue
+    if conn is None:
+        raise last_error  # type: ignore[misc]
+
     try:
         yield conn
         conn.commit()

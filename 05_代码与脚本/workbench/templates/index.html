@@ -4732,6 +4732,295 @@
             gap: 12px;
         }
 
+        /* ── 催化剂模块 ── */
+        .cat-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .cat-stat-card {
+            background: linear-gradient(135deg, rgba(124, 58, 237, 0.08), rgba(59, 130, 246, 0.06));
+            border: 1px solid #1f2937;
+            border-radius: 10px;
+            padding: 14px 16px;
+        }
+
+        .cat-stat-label {
+            font-size: 11px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        .cat-stat-value {
+            font-size: 26px;
+            font-weight: 700;
+            color: #f3f4f6;
+            line-height: 1.2;
+        }
+
+        .cat-stat-sub {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-top: 4px;
+        }
+
+        .cat-filter-bar {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .cat-filter-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .cat-filter-label {
+            font-size: 11px;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 2px;
+        }
+
+        .cat-filter-btn {
+            background: #171a21;
+            color: #9ca3af;
+            border: 1px solid #1e222a;
+            padding: 5px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.15s;
+        }
+
+        .cat-filter-btn:hover {
+            border-color: #374151;
+            color: #e6e8eb;
+        }
+
+        .cat-filter-btn.active {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: #3b82f6;
+            color: #60a5fa;
+        }
+
+        .cat-sort-group select {
+            background: #171a21;
+            color: #e6e8eb;
+            border: 1px solid #1e222a;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .cat-signal-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .cat-signal-card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 14px 16px;
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+            transition: all 0.15s;
+            cursor: pointer;
+        }
+
+        .cat-signal-card:hover {
+            border-color: #374151;
+            background: #1c2129;
+        }
+
+        .cat-tier-badge {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 16px;
+            color: #fff;
+            flex-shrink: 0;
+        }
+
+        .cat-tier-badge.A {
+            background: linear-gradient(135deg, #7c3aed, #a855f7);
+        }
+
+        .cat-tier-badge.B {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+        }
+
+        .cat-tier-badge.C {
+            background: linear-gradient(135deg, #4b5563, #6b7280);
+        }
+
+        .cat-signal-main {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .cat-signal-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+
+        .cat-signal-symbol {
+            font-size: 15px;
+            font-weight: 700;
+            color: #f3f4f6;
+        }
+
+        .cat-signal-name {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .cat-signal-event {
+            font-size: 13px;
+            color: #e6e8eb;
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+
+        .cat-signal-meta {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .cat-signal-meta .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .cat-signal-score {
+            flex-shrink: 0;
+            text-align: right;
+        }
+
+        .cat-score-num {
+            font-size: 22px;
+            font-weight: 700;
+            color: #f3f4f6;
+            line-height: 1;
+        }
+
+        .cat-score-label {
+            font-size: 10px;
+            color: #6b7280;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .cat-signal-tags {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .cat-tag {
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 4px;
+            background: #1f2937;
+            color: #9ca3af;
+        }
+
+        .cat-tag.kind-structural {
+            background: rgba(16, 185, 129, 0.12);
+            color: #10b981;
+        }
+
+        .cat-tag.kind-event {
+            background: rgba(245, 158, 11, 0.12);
+            color: #f59e0b;
+        }
+
+        .cat-tag.kind-cyclical {
+            background: rgba(139, 92, 246, 0.12);
+            color: #8b5cf6;
+        }
+
+        .cat-tag.tech-bullish {
+            background: rgba(16, 185, 129, 0.12);
+            color: #10b981;
+        }
+
+        .cat-tag.tech-bearish {
+            background: rgba(239, 68, 68, 0.12);
+            color: #ef4444;
+        }
+
+        .cat-tag.tech-neutral {
+            background: rgba(107, 114, 128, 0.15);
+            color: #9ca3af;
+        }
+
+        .cat-tag.status-open {
+            background: rgba(59, 130, 246, 0.12);
+            color: #60a5fa;
+        }
+
+        .cat-tag.status-expired {
+            background: rgba(107, 114, 128, 0.15);
+            color: #6b7280;
+        }
+
+        .cat-paginator {
+            display: flex;
+        }
+
+        .cat-page-btn {
+            background: #171a21;
+            color: #9ca3af;
+            border: 1px solid #1e222a;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .cat-page-btn:hover:not(:disabled) {
+            border-color: #374151;
+            color: #e6e8eb;
+        }
+
+        .cat-page-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .cat-page-info {
+            font-size: 12px;
+            color: #6b7280;
+            padding: 6px 4px;
+        }
+
         .research-item {
             background: #111827;
             border: 1px solid #1f2937;
@@ -6995,6 +7284,7 @@
             <a class="nav-tab" href="#market" data-section="market">行情</a>
             <a class="nav-tab" href="#unlock" data-section="unlock">解锁</a>
             <a class="nav-tab" href="#backtest" data-section="backtest">回测</a>
+            <a class="nav-tab" href="#catalyst" data-section="catalyst">催化剂</a>
             <a class="nav-tab" href="#research" data-section="research">投研</a>
             <a class="nav-tab" href="#tasks" data-section="tasks">任务</a>
             <a class="nav-tab" href="/kol">KOL</a>
@@ -7465,6 +7755,84 @@
                     <div id="backtest-container">
                         <div class="bt-empty">加载中...</div>
                     </div>
+                </div>
+            </section>
+
+            <!-- #catalyst 催化剂决策管道 -->
+            <section id="catalyst" class="module-card">
+                <div class="module-header">
+                    <h2>🚀 催化剂决策管道</h2>
+                    <p class="module-desc">事件驱动的多维度信号评分 · 快通道实时监控 · 慢通道深度分析</p>
+                </div>
+
+                <!-- 统计卡片 -->
+                <div class="cat-stats-grid" id="cat-stats-grid">
+                    <div class="cat-stat-card">
+                        <div class="cat-stat-label">24h 新增信号</div>
+                        <div class="cat-stat-value" id="cat-stat-new">--</div>
+                        <div class="cat-stat-sub">今日 A 级 <span id="cat-stat-new-a">--</span></div>
+                    </div>
+                    <div class="cat-stat-card">
+                        <div class="cat-stat-label">活跃信号</div>
+                        <div class="cat-stat-value" id="cat-stat-active">--</div>
+                        <div class="cat-stat-sub">A <span id="cat-stat-a">--</span> · B <span id="cat-stat-b">--</span>
+                            · C <span id="cat-stat-c">--</span></div>
+                    </div>
+                    <div class="cat-stat-card">
+                        <div class="cat-stat-label">平均评分</div>
+                        <div class="cat-stat-value" id="cat-stat-avg">--</div>
+                        <div class="cat-stat-sub">全部 open 信号</div>
+                    </div>
+                    <div class="cat-stat-card">
+                        <div class="cat-stat-label">催化剂源</div>
+                        <div class="cat-stat-value" id="cat-stat-sources">--</div>
+                        <div class="cat-stat-sub">G3-G5 覆盖率 <span id="cat-stat-g5cov">--</span></div>
+                    </div>
+                </div>
+
+                <!-- 筛选栏 -->
+                <div class="cat-filter-bar">
+                    <div class="cat-filter-group">
+                        <span class="cat-filter-label">级别</span>
+                        <button class="cat-filter-btn active" data-tier="">全部</button>
+                        <button class="cat-filter-btn" data-tier="A">A 级</button>
+                        <button class="cat-filter-btn" data-tier="B">B 级</button>
+                        <button class="cat-filter-btn" data-tier="C">C 级</button>
+                    </div>
+                    <div class="cat-filter-group">
+                        <span class="cat-filter-label">状态</span>
+                        <button class="cat-filter-btn active" data-status="open">活跃</button>
+                        <button class="cat-filter-btn" data-status="expired">已过期</button>
+                        <button class="cat-filter-btn" data-status="">全部</button>
+                    </div>
+                    <div class="cat-filter-group">
+                        <span class="cat-filter-label">类型</span>
+                        <button class="cat-filter-btn active" data-kind="">全部</button>
+                        <button class="cat-filter-btn" data-kind="structural">结构性</button>
+                        <button class="cat-filter-btn" data-kind="event">事件型</button>
+                        <button class="cat-filter-btn" data-kind="cyclical">周期性</button>
+                    </div>
+                    <div class="cat-filter-group cat-sort-group">
+                        <span class="cat-filter-label">排序</span>
+                        <select id="cat-sort" onchange="loadCatalystSignals()">
+                            <option value="score_desc">评分 ↓</option>
+                            <option value="created_desc">最新</option>
+                            <option value="expiry_asc">即将过期</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 信号列表 -->
+                <div class="cat-signal-list" id="cat-signal-list">
+                    <div style="color:#6b7280;text-align:center;padding:40px 0">加载中...</div>
+                </div>
+
+                <!-- 分页 -->
+                <div class="cat-paginator" id="cat-paginator"
+                    style="display:none;justify-content:center;gap:8px;margin-top:16px">
+                    <button class="cat-page-btn" onclick="catalystPage(-1)">上一页</button>
+                    <span class="cat-page-info" id="cat-page-info"></span>
+                    <button class="cat-page-btn" onclick="catalystPage(1)">下一页</button>
                 </div>
             </section>
 
@@ -12774,6 +13142,7 @@
             btc_left_accum: { label: 'BTC左侧积累', cls: 'st-btc' },
             cm_adoption_divergence: { label: 'CM采用背离', cls: 'st-cm' },
             catalyst: { label: '催化剂驱动', cls: 'st-catalyst' },
+            conflict_game: { label: '多空博弈', cls: 'st-other' },
             whale_flow: { label: '链上巨鲸', cls: 'st-whale' },
             github_activity: { label: '开发活跃', cls: 'st-dev' },
             token_unlock: { label: '解锁抛压', cls: 'st-unlock' },
@@ -12869,7 +13238,7 @@
             if (bd) {
                 var top = null, topC = -1;
                 for (var k in bd) { if (bd[k].contribution > topC) { topC = bd[k].contribution; top = k; } }
-                var labelMap = { mvrv: 'MVRV低估', cycle: '周期相位', funding: '资金费率', netflow: '链上净流', stable: '稳定币流', roi: 'ROI动量' };
+                var labelMap = { mvrv: 'MVRV估值', funding: '资金费率', netflow: '链上净流', stable: '稳定币流', roi: 'ROI动量', catalyst: '催化情绪' };
                 if (top) mainReason = '主因：' + (labelMap[top] || top);
             }
 
@@ -13987,6 +14356,184 @@
             }, 300);
         }
 
+        // ── 催化剂决策管道模块 ──
+        var _catalystState = {
+            page: 1,
+            pageSize: 15,
+            tier: '',
+            status: 'open',
+            kind: '',
+            sort: 'score_desc',
+            total: 0,
+            items: [],
+            statsLoaded: false,
+            listLoaded: false
+        };
+
+        function loadCatalystStats () {
+            if (_catalystState.statsLoaded) return;
+            fetch('/api/catalyst/stats').then(r => r.json()).then(data => {
+                if (!data.ok) return;
+                _catalystState.statsLoaded = true;
+                const s = data.stats || {};
+                document.getElementById('cat-stat-new').textContent = s.new_24h || 0;
+                document.getElementById('cat-stat-new-a').textContent = s.new_24h_tier_A || 0;
+                document.getElementById('cat-stat-active').textContent = s.total_open || 0;
+                document.getElementById('cat-stat-a').textContent = (s.tier_distribution && s.tier_distribution.A) || 0;
+                document.getElementById('cat-stat-b').textContent = (s.tier_distribution && s.tier_distribution.B) || 0;
+                document.getElementById('cat-stat-c').textContent = (s.tier_distribution && s.tier_distribution.C) || 0;
+                document.getElementById('cat-stat-avg').textContent = s.avg_score ? s.avg_score.toFixed(0) : '—';
+                document.getElementById('cat-stat-sources').textContent = s.source_count || '—';
+                document.getElementById('cat-stat-g5cov').textContent =
+                    (s.g5_coverage_pct !== undefined && s.g5_coverage_pct !== null) ? s.g5_coverage_pct.toFixed(0) + '%' : '—';
+            }).catch(e => console.warn('catalyst stats error:', e));
+        }
+
+        function loadCatalystSignals () {
+            const listEl = document.getElementById('cat-signal-list');
+            listEl.innerHTML = '<div style="color:#6b7280;text-align:center;padding:40px 0">加载中...</div>';
+
+            const offset = (_catalystState.page - 1) * _catalystState.pageSize;
+            let url = '/api/catalyst/signals?limit=' + _catalystState.pageSize
+                + '&offset=' + offset;
+            if (_catalystState.tier) url += '&tier=' + _catalystState.tier;
+            if (_catalystState.status) url += '&status=' + _catalystState.status;
+            if (_catalystState.kind) url += '&kind=' + _catalystState.kind;
+            if (_catalystState.sort) url += '&sort=' + _catalystState.sort;
+
+            fetch(url).then(r => r.json()).then(data => {
+                if (!data.ok) {
+                    listEl.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px 0">加载失败：' + escapeHtml(data.error || 'unknown') + '</div>';
+                    return;
+                }
+                _catalystState.listLoaded = true;
+                _catalystState.total = data.total || 0;
+                _catalystState.items = data.data || [];
+                renderCatalystSignals();
+            }).catch(e => {
+                listEl.innerHTML = '<div style="color:#f87171;text-align:center;padding:40px 0">网络错误：' + escapeHtml(e.message) + '</div>';
+            });
+        }
+
+        function renderCatalystSignals () {
+            const listEl = document.getElementById('cat-signal-list');
+            const paginator = document.getElementById('cat-paginator');
+            const items = _catalystState.items;
+
+            if (items.length === 0) {
+                listEl.innerHTML = '<div style="color:#6b7280;text-align:center;padding:40px 0">暂无符合条件的信号</div>';
+                paginator.style.display = 'none';
+                return;
+            }
+
+            listEl.innerHTML = items.map(function (s) {
+                const tier = s.tier || 'C';
+                const kindClass = 'kind-' + (s.kind || 'event');
+                const tech = s.technical_state || 'unknown';
+                const techClass = 'tech-' + (tech === 'bullish' ? 'bullish' : tech === 'bearish' ? 'bearish' : 'neutral');
+                const status = s.status || 'open';
+                const statusClass = 'status-' + status;
+                const score = Math.round(s.composite_score || 0);
+                const symbol = s.symbol || '?';
+                const name = s.asset_name || '';
+                const event = s.catalyst_title || s.kind || '—';
+                const kindText = { structural: '结构性', event: '事件型', cyclical: '周期性' }[s.kind] || (s.kind || '—');
+                const created = s.created_at ? s.created_at.substring(0, 10) : '';
+                const expiry = s.expires_at ? s.expires_at.substring(0, 10) : '—';
+                const src = s.source || '';
+
+                return `
+                    <div class="cat-signal-card" onclick="openSignalDetail(${s.signal_id})">
+                        <div class="cat-tier-badge ${tier}">${tier}</div>
+                        <div class="cat-signal-main">
+                            <div class="cat-signal-head">
+                                <span class="cat-signal-symbol">${escapeHtml(symbol)}</span>
+                                <span class="cat-signal-name">${escapeHtml(name)}</span>
+                                ${src ? `<span style="font-size:10px;color:#6b7280;margin-left:auto">${escapeHtml(src)}</span>` : ''}
+                            </div>
+                            <div class="cat-signal-event">${escapeHtml(event)}</div>
+                            <div class="cat-signal-tags">
+                                <span class="cat-tag ${kindClass}">${kindText}</span>
+                                <span class="cat-tag ${techClass}">${tech === 'bullish' ? '技术面偏多' : tech === 'bearish' ? '技术面偏空' : '技术面中性'}</span>
+                                <span class="cat-tag ${statusClass}">${status === 'open' ? '活跃' : '已过期'}</span>
+                                ${s.is_second_order ? '<span class="cat-tag" style="background:rgba(168,85,247,.12);color:#a855f7">二阶受益</span>' : ''}
+                            </div>
+                            <div class="cat-signal-meta" style="margin-top:8px">
+                                <span class="meta-item">📅 创建：${created}</span>
+                                <span class="meta-item">⏰ 到期：${expiry}</span>
+                                ${s.persistence ? `<span class="meta-item">🔄 ${s.persistence}</span>` : ''}
+                                ${s.resonance_state ? `<span class="meta-item">📈 共振：${s.resonance_state}</span>` : ''}
+                            </div>
+                        </div>
+                        <div class="cat-signal-score">
+                            <div class="cat-score-num">${score}</div>
+                            <div class="cat-score-label">评分</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // 分页
+            const totalPages = Math.ceil(_catalystState.total / _catalystState.pageSize) || 1;
+            if (totalPages > 1) {
+                paginator.style.display = 'flex';
+                document.getElementById('cat-page-info').textContent =
+                    _catalystState.page + ' / ' + totalPages + ' （共 ' + _catalystState.total + ' 条）';
+                const btns = paginator.querySelectorAll('.cat-page-btn');
+                btns[0].disabled = _catalystState.page <= 1;
+                btns[1].disabled = _catalystState.page >= totalPages;
+            } else {
+                paginator.style.display = 'none';
+            }
+        }
+
+        function catalystPage (delta) {
+            const totalPages = Math.ceil(_catalystState.total / _catalystState.pageSize) || 1;
+            const newPage = _catalystState.page + delta;
+            if (newPage < 1 || newPage > totalPages) return;
+            _catalystState.page = newPage;
+            loadCatalystSignals();
+        }
+
+        function openSignalDetail (signalId) {
+            // 简单方式：打开一个新 tab 显示详情，或用弹窗
+            window.open('/api/catalyst/signals/' + signalId, '_blank');
+        }
+
+        // 筛选按钮绑定
+        document.addEventListener('DOMContentLoaded', function () {
+            // tier 筛选
+            document.querySelectorAll('.cat-filter-btn[data-tier]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    document.querySelectorAll('.cat-filter-btn[data-tier]').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    _catalystState.tier = btn.getAttribute('data-tier') || '';
+                    _catalystState.page = 1;
+                    loadCatalystSignals();
+                });
+            });
+            // status 筛选
+            document.querySelectorAll('.cat-filter-btn[data-status]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    document.querySelectorAll('.cat-filter-btn[data-status]').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    _catalystState.status = btn.getAttribute('data-status') || '';
+                    _catalystState.page = 1;
+                    loadCatalystSignals();
+                });
+            });
+            // kind 筛选
+            document.querySelectorAll('.cat-filter-btn[data-kind]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    document.querySelectorAll('.cat-filter-btn[data-kind]').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    _catalystState.kind = btn.getAttribute('data-kind') || '';
+                    _catalystState.page = 1;
+                    loadCatalystSignals();
+                });
+            });
+        });
+
         // ── 模块懒加载 + 智能定时刷新 ──
         // 首屏只加载催化剂和变化榜，其余模块滚动到视口内才加载
         // 模块不可见时暂停定时刷新，节省服务器资源和带宽
@@ -14129,7 +14676,7 @@
 
         // ── 导航滚动高亮（IntersectionObserver） ──
         (function () {
-            var sections = ['assets', 'overview', 'market', 'unlock', 'backtest', 'research', 'tasks'];
+            var sections = ['assets', 'overview', 'market', 'unlock', 'backtest', 'catalyst', 'research', 'tasks'];
             var tabs = document.querySelectorAll('.top-nav .nav-tab[data-section]');
             if (!('IntersectionObserver' in window) || tabs.length === 0) return;
 
@@ -14150,6 +14697,10 @@
                             loadOnchainThermometer();
                         },
                         backtest: loadBacktest,
+                        catalyst: function () {
+                            loadCatalystStats();
+                            loadCatalystSignals();
+                        },
                         tasks: function () {
                             loadTaskDefs();
                             loadTasks();
@@ -14187,6 +14738,11 @@
                         // 滚动到投研模块时触发加载
                         if (id === 'research') {
                             loadResearchList(false);
+                        }
+                        // 滚动到催化剂模块时触发加载
+                        if (id === 'catalyst') {
+                            loadCatalystStats();
+                            loadCatalystSignals();
                         }
                     }
                 });

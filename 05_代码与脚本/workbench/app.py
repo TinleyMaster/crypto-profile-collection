@@ -52,6 +52,15 @@ except Exception as _e:
     _kol_loaded = False
     print(f"[WARN] KOL 模块加载失败，功能将不可用: {_e}")
 
+# 催化剂决策管道模块（可选，导入失败不影响主服务）
+try:
+    from catalyst.routes import catalyst_bp  # noqa: E402
+    app.register_blueprint(catalyst_bp)
+    _catalyst_loaded = True
+except Exception as _e:
+    _catalyst_loaded = False
+    print(f"[WARN] 催化剂模块加载失败，功能将不可用: {_e}")
+
 # 解锁数据异步拉取状态（已迁移到 task_manager 的 TaskManager，走 sys.task 表）。
 # 以下为遗留死代码，仅作注释保留供参考。
 # 原 key 格式: f"{asset_id}:{force}"

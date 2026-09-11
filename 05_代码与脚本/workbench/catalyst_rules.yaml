@@ -1,0 +1,194 @@
+# =====================================================================
+# 催化剂决策管道配置（P0 版本）
+# 位置：workbench/catalyst_rules.yaml
+# 所有阈值/权重/关键词都外置在这里，代码只做读取，不硬编码
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 规则兜底分类（classify.py 用，快通道零 LLM）
+# 匹配优先级按列表顺序，命中即止
+# ---------------------------------------------------------------------
+rule_event_keywords:
+  - event_type: "listing"
+    keywords: ["上市", "上线", "上币", "新增", "发行", "launch", "list", "上架", "opens trading", "trading pair", "to list"]
+    # 必须同时含有 token/交易对特征（避免"上线新功能"误命中）
+    require_token_hint: true
+
+  - event_type: "delisting"
+    keywords: ["下架", "下市", "退市", "移除", "delist", "remove", "will be removed", "de-listing"]
+    require_token_hint: true
+
+  - event_type: "burn"
+    keywords: ["销毁", "burn", "通缩", "burned", "token burn", "quarterly burn", "monthly burn"]
+    require_token_hint: false
+
+  - event_type: "regulation"
+    keywords: ["监管", "合规", "牌照", "SEC", "CFTC", "MiCA", "监管批准", "合规审批", "approval", "sanction", "lawsuit"]
+    require_token_hint: false
+
+  - event_type: "airdrop"
+    keywords: ["空投", "airdrop", "claim", "领取", "奖励分发", "token distribution"]
+    require_token_hint: true
+
+  - event_type: "funding"
+    keywords: ["融资", "投资", "募资", "funding", "investment", "领投", "跟投", "估值", "raised", "series a", "series b", "seed round"]
+    require_token_hint: false
+
+  - event_type: "partnership"
+    keywords: ["合作", "伙伴", "集成", "整合", "partnership", "collaborate", "战略合作", "integrate", "integrates"]
+    require_token_hint: false
+
+  - event_type: "tech_upgrade"
+    keywords: ["升级", "主网", "迭代", "硬分叉", "硬分岔", "upgrade", "mainnet", "fork", "V2", "V3", "release", "launchpad", "testnet"]
+    require_token_hint: false
+
+  - event_type: "market_update"
+    keywords: ["行情", "市场回顾", "周报", "月报", "展望", "market update", "weekly", "monthly", "market recap", "outlook"]
+    require_token_hint: false
+
+  - event_type: "other"
+    keywords: []
+    require_token_hint: false
+
+# token 提示词正则（用于 require_token_hint 判断）
+token_hint_pattern: "(?:[A-Z]{3,8}/?USDT|\\$[A-Za-z0-9]{2,10}|\\b[A-Z]{3,8}\\b(?:/USDT|/USDC|/BTC|/ETH))"
+
+# ---------------------------------------------------------------------
+# G1 分级权重（grade.py 用）
+# base_strength = authority * w_authority + event_weight * w_event + scope_score * w_scope
+# ---------------------------------------------------------------------
+grade_weights:
+  authority: 0.4
+  event: 0.4
+  scope: 0.2
+
+# 事件类型权重分（0-100）
+event_type_weights:
+  listing: 95
+  delisting: 90
+  burn: 80
+  regulation: 75
+  airdrop: 70
+  funding: 65
+  partnership: 60
+  tech_upgrade: 55
+  market_update: 25
+  other: 15
+
+# 来源权威度分（0-100）
+authority_scores:
+  binance_listing: 100
+  binance_news: 100
+  binance_square_official: 85   # 币安广场官方号
+  binance_square_kol: 70        # 币安广场非官方
+  default: 40
+
+# 影响聚焦度（scope_score）
+scope_score_rules:
+  single_pair: 90      # 1 个交易对
+  few_pairs: 65        # 2-3 个交易对
+  many_pairs: 45       # >3 个交易对
+  sector: 60           # 板块级（无具体 pair 但有板块关键词）
+  broad: 30            # 泛市场
+
+# catalyst_kind 判定阈值
+kind_thresholds:
+  structural_min_strength: 70   # strength ≥ 此值 + structural 类事件 → structural
+  event_min_strength: 50        # 50 ≤ strength < 70 → event
+  # < 50 且有标的 → sentiment
+  # 无标的 + other → noise
+
+# structural 类事件类型（满足其一且 strength ≥ structural_min_strength → structural）
+structural_event_types: ["listing", "delisting", "burn", "regulation", "tech_upgrade"]
+# sentiment 类事件类型
+sentiment_event_types: ["market_update"]
+
+# ---------------------------------------------------------------------
+# G0 市场环境（market_regime_daily 用）
+# ---------------------------------------------------------------------
+regime_rules:
+  # BTC 7日涨跌幅阈值
+  btc_7d_risk_on: 5.0     # ≥ 5% → risk_on
+  btc_7d_risk_off: -5.0   # ≤ -5% → risk_off
+  # 中间 → neutral
+  # 全市场市值 7 日辅助
+  total_mcap_7d_risk_on: 8.0
+  total_mcap_7d_risk_off: -8.0
+  # 判定方式：btc 为主，total_mcap 辅助验证
+  #   btc 明确 + mcap 同向 → 确认
+  #   btc 中性 → neutral
+
+# ---------------------------------------------------------------------
+# G2 共振打分（resonance.py 用）
+# ---------------------------------------------------------------------
+resonance_thresholds:
+  # excess_ret 阈值（%）
+  excess_confirmed: 5.0     # ≥ 5% → confirmed 级超额
+  excess_weak: 1.0          # ≥ 1% → weak
+  # < 1% → 计入 pending / 弱
+
+  # 量能 z-score 阈值
+  vol_confirmed: 1.5        # ≥ 1.5 → 量能确认
+  vol_weak: 1.0             # ≥ 1.0 → 量能弱确认
+
+  # 共振状态判定（全部满足才是 confirmed）
+  confirmed_excess: 5.0
+  confirmed_vol_z: 1.5
+  confirmed_require_direction: true
+
+  # peer 加成（超额 > peer 中位数时额外加的分数）
+  peer_bonus_points: 5
+
+  # 背离扣分（direction_match=false 时扣的分）
+  divergent_penalty: 20
+
+# 共振分权重：excess + vol + direction
+resonance_weights:
+  excess_ret: 0.5
+  vol_zscore: 0.3
+  direction_match: 0.2
+
+# ---------------------------------------------------------------------
+# G6 信号综合分 + tier
+# composite_score 是 tier 的唯一来源（口径单点真源）
+# ---------------------------------------------------------------------
+composite_score_weights:
+  kind_strength: 0.25      # G1 base_strength
+  resonance: 0.30          # G2 resonance_score
+  persistence: 0.15        # G3 persistence 映射分
+  fundamental: 0.15        # G4 fundamental_pass 映射分
+  technical: 0.15          # G5 technical_state 映射分
+
+# 各维度得分映射（→ 0-100）
+persistence_scores:
+  structural: 90
+  one_off: 60
+  decaying: 30
+
+fundamental_scores:
+  pass: 85
+  fail: 20
+  unknown: 50              # P0 占位，G4 未算时给中性分
+
+technical_scores:
+  up: 85
+  range: 55
+  down: 25
+  unknown: 50              # P0 占位
+
+# tier 阈值
+tier_thresholds:
+  A: 80
+  B: 60
+  C: 40
+  # < 40 不入信号表（仅 grade/resonance 留底供回测）
+
+# 信号过期天数（按 kind）
+signal_expiry_days:
+  structural: 7
+  event: 3
+  sentiment: 1
+  noise: 1
+
+# R:R 最低要求
+min_rr_ratio: 2.0

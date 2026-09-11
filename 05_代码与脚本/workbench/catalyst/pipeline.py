@@ -30,18 +30,33 @@ def upsert_catalyst_item(
     item: CatalystItem,
     conn,
     link_source: str = "trading_pairs",
+    classifier: object | None = None,
 ) -> dict | None:
-    """upsert 一条催化剂（带跨源去重 + 多资产关联）。
+    """upsert 一条催化剂（带跨源去重 + 多资产关联 + 可选规则分类）。
 
     Args:
         item: 催化剂条目
         conn: 数据库连接
         link_source: 关联来源标记（trading_pairs / cashtag / manual）
+        classifier: RuleEventClassifier 实例，传了就同步写 rule_event_type（快通道）
 
     Returns:
         落库后的 catalyst 行 dict
     """
     content_hash = item.content_hash
+
+    # 预计算 rule_event_type（如果传了 classifier）
+    rule_event_type = None
+    if classifier is not None:
+        try:
+            rule_event_type = classifier.classify(
+                item.title or "",
+                item.body_text or "",
+                item.related_pairs or [],
+            )
+        except Exception:
+            logger.warning("规则分类失败，跳过 rule_event_type 写入", exc_info=True)
+            rule_event_type = None
 
     # 1. 查是否已有同 hash 记录
     existing = conn.execute(
@@ -51,10 +66,10 @@ def upsert_catalyst_item(
 
     if existing:
         # 2. 合并模式：已有同内容，追加来源 + 补空字段
-        return _merge_catalyst(existing, item, conn, link_source)
+        return _merge_catalyst(existing, item, conn, link_source, rule_event_type)
     else:
         # 3. 新增模式
-        return _insert_catalyst(item, content_hash, conn, link_source)
+        return _insert_catalyst(item, content_hash, conn, link_source, rule_event_type)
 
 
 def _insert_catalyst(
@@ -62,6 +77,7 @@ def _insert_catalyst(
     content_hash: str,
     conn,
     link_source: str,
+    rule_event_type: str | None = None,
 ) -> dict:
     """新增一条催化剂记录 + 多资产关联。"""
     # 主资产 = 第一个关联到的资产（兼容旧查询）
@@ -75,13 +91,13 @@ def _insert_catalyst(
             asset_id, title, body_text, body_html,
             published_at, event_category, event_subcategory,
             related_pairs, source_url, seo_keywords, share_count,
-            raw_json, content_hash, source_codes
+            raw_json, content_hash, source_codes, rule_event_type
         ) VALUES (
             %(source_code)s, %(source_item_id)s, %(source_item_code)s,
             %(asset_id)s, %(title)s, %(body_text)s, %(body_html)s,
             %(published_at)s, %(event_category)s, %(event_subcategory)s,
             %(related_pairs)s, %(source_url)s, %(seo_keywords)s, %(share_count)s,
-            %(raw_json)s, %(content_hash)s, %(source_codes)s
+            %(raw_json)s, %(content_hash)s, %(source_codes)s, %(rule_event_type)s
         )
         ON CONFLICT (content_hash) DO UPDATE SET
             updated_at = NOW()
@@ -105,6 +121,7 @@ def _insert_catalyst(
             "raw_json": json.dumps(item.raw_json) if item.raw_json else None,
             "content_hash": content_hash,
             "source_codes": [item.source_code],
+            "rule_event_type": rule_event_type,
         },
     ).fetchone()
 
@@ -118,6 +135,7 @@ def _merge_catalyst(
     item: CatalystItem,
     conn,
     link_source: str,
+    rule_event_type: str | None = None,
 ) -> dict:
     """合并到已有记录：追加来源 + 补空字段 + 合并资产关联。"""
     catalyst_id = existing["catalyst_id"]
@@ -138,6 +156,10 @@ def _merge_catalyst(
     for field in ("title", "body_text", "body_html", "event_category", "event_subcategory", "source_url"):
         if not existing.get(field) and getattr(item, field, ""):
             updates[field] = getattr(item, field)
+
+    # rule_event_type 补空（快通道兜底分类）
+    if rule_event_type and not existing.get("rule_event_type"):
+        updates["rule_event_type"] = rule_event_type
 
     # share_count 取大
     new_share = max(existing.get("share_count") or 0, item.share_count or 0)

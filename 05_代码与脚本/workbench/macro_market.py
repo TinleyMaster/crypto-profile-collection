@@ -4394,7 +4394,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # 旧配额已废弃，新配额约为原来的 1.5 倍
     quotas = {
         "mvrv_deep_under": 3, "mvrv_under_watch": 2,
-        "catalyst": 3, "whale_flow": 3, "github_activity": 2,
+        "catalyst": 3, "conflict_game": 1, "whale_flow": 3, "github_activity": 2,
         "funding": 2, "token_unlock": 2, "kol_onchain": 2,
         "fng_extreme": 2, "leverage_extreme": 2, "stablecoin_inflow": 2,
         "etf_flow": 2,
@@ -4407,7 +4407,8 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # FEAT-HIGHLIGHT-FIX: 严格过滤 direction，避免空头信号混进机会区
     long_opps = [
         o for o in opportunities
-        if o.get("direction") in ("long", None, "", "bullish")
+        if (o.get("signal_type") == "conflict_game"
+            or o.get("direction") in ("long", None, "", "bullish"))
         and o.get("signal_type") not in ("mvrv_deep_over", "mvrv_over_watch")
     ]
 
@@ -5081,14 +5082,16 @@ def score_opportunities(overview: dict) -> dict:
         for act_coin in (cm_act.get("coins") or []):
             sig = act_coin.get("signal")
             if sig == "accumulation":
-                conviction = _compute_conviction_score(
+                _conv_bd = _conviction_breakdown(
                     mvrv_pct=_mvrv_pct_for(act_coin.get("symbol"), mvrv_map),
                     funding=funding_latest, exchange_netflow=ex_netflow,
                     stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
                 )
+                conviction = _conv_bd["raw_strength"]
                 _push_opportunity(
                     {"target": act_coin["symbol"], "direction": "long", "confidence": "medium",
                      "conviction_score": conviction,
+                     "conviction_breakdown": _conv_bd,
                      "signal_type": "cm_adoption_divergence",
                      "key_metric": f"活跃 {act_coin.get('adr_pct', '?')}%分位",
                      "trigger_logic": (
@@ -5176,14 +5179,16 @@ def score_opportunities(overview: dict) -> dict:
             direction = "long"
             action = "吸筹观察，左侧关注"
             invalid = "若 T+3 内出现同额反手转出，信号失效"
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "signal_type": "whale_flow",
              "key_metric": f"巨鲸 ${usd_total / 1e6:.1f}M",
              "asset_id": aid,
@@ -5214,14 +5219,16 @@ def score_opportunities(overview: dict) -> dict:
         else:
             direction, action, invalid = "watch", "开发停滞风险，配合解锁抛压=双杀", "若后续 4 周恢复活跃，信号失效"
             label = "dev 活跃骤降"
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "signal_type": "github_activity",
              "key_metric": f"Dev {ratio:.1f}x",
              "asset_id": aid,
@@ -5245,14 +5252,16 @@ def score_opportunities(overview: dict) -> dict:
         amount_str = f"${amount_m:.0f}M" if amount_m else "N/A"
         lead_str = lead or "未披露"
         target = symbol if symbol not in ("", "-") else (proto or "?")
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": target, "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "signal_type": "funding",
              "key_metric": f"融资 {amount_str}",
              "asset_id": aid,
@@ -5274,14 +5283,16 @@ def score_opportunities(overview: dict) -> dict:
     for ut in _unlock_targets:
         # ut: (asset_id, symbol, unlock_value_usd, unlock_date, ratio_mcap)
         aid, symbol, uval, udate, ratio_mcap = ut
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": "short", "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "signal_type": "token_unlock",
              "key_metric": f"解锁 ${uval / 1e6:.1f}M ({ratio_mcap:.1f}%)",
              "asset_id": aid,
@@ -5372,11 +5383,12 @@ def score_opportunities(overview: dict) -> dict:
         if kol_name:
             trigger_parts.append(f"by {kol_name}")
 
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
 
         action_hint_map = {
             "long": "链上资金流出 + 大资金异动，关注后续上行动力",
@@ -5388,6 +5400,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": sig_direction,
              "confidence": confidence,
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "signal_type": "kol_onchain",
              "key_metric": f"{type_cn} {usd_str}" if usd_val > 0 else type_cn,
              "asset_id": ks["asset_id"],
@@ -5410,15 +5423,17 @@ def score_opportunities(overview: dict) -> dict:
         risk_metrics.append(f"funding {fm.get('funding_latest', 0) * 100:.3f}%/期")
     if risk_sources:
         conf, direction = _resolve_confidence(risk_sources, t)
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         trigger = f"{' / '.join(risk_metrics) if risk_metrics else '杠杆信号'} → 杠杆过热，防回撤"
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "trigger_logic": trigger, "related_dims": ["P1-2 价格vs OI", "P1-2 价格vs funding"]},
             opportunities, excluded, t,
         )
@@ -5441,14 +5456,16 @@ def score_opportunities(overview: dict) -> dict:
             conf, direction = "medium", "long"
             related = ["P1-1 叙事榜（市值）"]
             trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(row.get("narrative"), mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
         )
@@ -5462,14 +5479,16 @@ def score_opportunities(overview: dict) -> dict:
             continue
         if flow < t.get("chain_min_flow_usd", 200_000_000) or flow_pct < t.get("chain_min_flow_pct", 3.0):
             continue
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for(f"{row.get('chain')} 链", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "trigger_logic": f"{row.get('chain')} 链 7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）→ 资金净流入",
              "related_dims": ["P1-1 链净流入榜"]},
             opportunities, excluded, t,
@@ -5479,14 +5498,16 @@ def score_opportunities(overview: dict) -> dict:
     ndx_sig = by_sig.get("btc_nasdaq") or {}
     if ndx_sig.get("status") == "ok" and ndx_sig.get("label") == "DIVERGENT":
         interp = ndx_sig.get("interpretation", "宏观脱钩")
-        conviction = _compute_conviction_score(
+        _conv_bd = _conviction_breakdown(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": "BTC", "direction": "neutral", "confidence": "medium",
              "conviction_score": conviction,
+             "conviction_breakdown": _conv_bd,
              "trigger_logic": interp, "related_dims": ["P1-2 BTC vs 纳指"]},
             opportunities, excluded, t,
         )
@@ -5498,14 +5519,16 @@ def score_opportunities(overview: dict) -> dict:
         for p in protos[:p_top]:
             if not isinstance(p, dict):
                 continue
-            conviction = _compute_conviction_score(
+            _conv_bd = _conviction_breakdown(
                 mvrv_pct=_mvrv_pct_for(p.get("name"), mvrv_map),
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
+            conviction = _conv_bd["raw_strength"]
             _push_opportunity(
                 {"target": p.get("name") or "新协议", "direction": "long", "confidence": "medium",
                  "conviction_score": conviction,
+                 "conviction_breakdown": _conv_bd,
                  "trigger_logic": f"{p.get('name')} 7d TVL {p.get('change_7d_pct') if p.get('change_7d_pct') is not None else '?'}% 异动增长",
                  "related_dims": ["P1-3 新协议 TVL"]},
                 opportunities, excluded, t,
@@ -5738,7 +5761,7 @@ def score_opportunities(overview: dict) -> dict:
                 {"target": sym, "direction": "watch",
                  "confidence": "medium",
                  "conviction_score": max_score,
-                 "signal_type": "catalyst",
+                 "signal_type": "conflict_game",
                  "key_metric": "多空博弈",
                  "trigger_logic": f"多空信号交织：{' / '.join(trigger_parts[:3])}",
                  "action_hint": "观望，等待多空博弈明朗",
@@ -7602,7 +7625,7 @@ def fetch_event_calendar() -> dict:
                     for r in cur.fetchall():
                         pub_at = r["published_at"]
                         token_events.append({
-                            "date": str(pub_at.date() if hasattr(pub_at, "date") else pub_at) if pub_at else None,
+                            "date": str(pub_at.date()) if pub_at else None,
                             "event": r["title"] or f"{r.get('event_category')} 事件",
                             "type": r.get("event_category") or "catalyst",
                             "source": r.get("source_code") or "asset_catalyst",

@@ -320,7 +320,35 @@ def fetch_cryptoetf_cefi() -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_fear_greed_history(days: int = 90) -> dict:
-    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...]}。"""
+    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...]}。
+
+    优先从数据库 biz.fear_greed_daily 读取（快），
+    数据库为空/数据不足时 fallback 到 CMC API（慢，实时拉）。
+    series 按时间倒序（最新的在前），与 CMC API 返回一致。
+    """
+    # 尝试从 DB 读
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT value
+                    FROM biz.fear_greed_daily
+                    ORDER BY metric_date DESC
+                    LIMIT %s
+                """, (days,))
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= max(2, days // 2):
+                series = [float(r[0]) for r in rows]
+                return {"status": "ok", "series": series}
+    except Exception:
+        pass
+
+    # Fallback: CMC API
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v3/fear-and-greed",
@@ -580,7 +608,35 @@ def _detect_stablecoin_anomaly(netflows: list[float], rolling_7d: list[float],
 
 
 def fetch_cefi_history(days: int = 30) -> dict:
-    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...]}。"""
+    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...]}。
+
+    优先从数据库 biz.cefi_index_daily 读取（快），
+    数据库为空/数据不足时 fallback 到 cryptoETF API（慢）。
+    series 按时间倒序（最新的在前），与原 API 行为一致。
+    """
+    # 尝试从 DB 读
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT value
+                    FROM biz.cefi_index_daily
+                    ORDER BY metric_date DESC
+                    LIMIT %s
+                """, (days,))
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= max(2, days // 2):
+                series = [float(r[0]) for r in rows]
+                return {"status": "ok", "series": series}
+    except Exception:
+        pass
+
+    # Fallback: cryptoETF API
     api_key = os.environ.get("CRYPTOETF_KEY", "")
     if not api_key:
         return {"status": "skipped", "error": "CRYPTOETF_KEY 未设置", "series": []}
@@ -2363,7 +2419,41 @@ def _daily_returns(closes: list[float]) -> list[float]:
 
 
 def _fetch_binance_oi_history(days: int = 30) -> dict:
-    """Binance fapi 日频未平仓合约历史。返回 {status, series: [{date, oi}]}。"""
+    """Binance fapi 日频未平仓合约历史。返回 {status, series: [{date, oi}]}。
+
+    优先从数据库 biz.btc_oi_daily 读取（快），
+    数据库为空/数据不足时 fallback 到 Binance API（慢）。
+    series 按 date 升序（最早的在前），与原 API 行为一致。
+    """
+    # 尝试从 DB 读
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT metric_date, open_interest
+                    FROM biz.btc_oi_daily
+                    ORDER BY metric_date DESC
+                    LIMIT %s
+                """, (days,))
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= max(2, days // 2):
+                # DB 查出来是倒序，要按升序返回（与原函数一致）
+                rows_asc = list(reversed(rows))
+                from datetime import datetime as _dt
+                series = [
+                    {"date": int(_dt.combine(d, _dt.min.time()).timestamp()), "oi": float(oi)}
+                    for d, oi in rows_asc
+                ]
+                return {"status": "ok", "series": series}
+    except Exception:
+        pass
+
+    # Fallback: Binance API
     last_err: Exception | None = None
     for attempt in range(3):
         try:
@@ -2414,7 +2504,40 @@ def _fetch_binance_funding_history(limit: int = 100) -> dict:
 
 
 def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
-    """DeFiLlama 稳定币总流通量日频序列。返回 {status, series: [{date, supply}]}。"""
+    """DeFiLlama 稳定币总流通量日频序列。返回 {status, series: [{date, supply}]}。
+
+    优先从数据库 biz.stablecoin_supply_daily 读取（快），
+    数据库为空/数据不足时 fallback 到 DeFi Llama API（慢，实时拉）。
+    """
+    # 尝试从 DB 读
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT metric_date, total_supply_usd
+                    FROM biz.stablecoin_supply_daily
+                    WHERE source_code = 'defillama'
+                    ORDER BY metric_date DESC
+                    LIMIT %s
+                """, (days,))
+                rows = cur.fetchall()
+
+            if rows and len(rows) >= max(2, days // 2):
+                # 转成升序，date 转 epoch 秒（兼容原格式）
+                series = [
+                    {"date": int(r[0].timestamp()), "supply": float(r[1] or 0)}
+                    for r in reversed(rows)
+                ]
+                return {"status": "ok", "series": series}
+    except Exception:
+        # DB 不可用或数据不足，fallback 到 API
+        pass
+
+    # Fallback: DeFi Llama API
     try:
         r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
         r.raise_for_status()

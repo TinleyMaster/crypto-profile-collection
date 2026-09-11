@@ -2497,13 +2497,48 @@ def _write_ai_trace(
     provider: str = "",
     model: str = "",
 ) -> None:
-    """写入 AI 追溯日志（JSONL 格式，按日期分文件）。
+    """写入 AI 追溯日志（数据库持久化，保留 JSONL 文件作为兜底）。
 
-    日志内容：完整的 system_prompt、user_prompt、原始响应、思考过程。
-    保存位置：workbench/output/ai_trace/{tag}_{YYYY-MM-DD}.jsonl
+    主存储：sys.ai_trace 表（支持检索、统计、跨进程共享）
+    兜底存储：workbench/output/ai_trace/{tag}_{YYYY-MM-DD}.jsonl
     """
-    import json
     import datetime
+    import json
+    # 主存储：写入数据库
+    try:
+        _ensure_ai_trace_table()
+        from crypto_research.config import get_settings
+        import psycopg
+
+        settings = get_settings()
+        db_conf = settings.database
+        with psycopg.connect(
+            host=db_conf.host,
+            port=db_conf.port,
+            dbname=db_conf.database,
+            user=db_conf.user,
+            password=db_conf.password,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sys.ai_trace
+                        (tag, asset_id, symbol, signal_types, provider, model,
+                         system_prompt, user_prompt, raw_response, thinking_content)
+                    VALUES (%s, %s, %s, %s::text[], %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        tag, asset_id, symbol, signal_types,
+                        provider, model,
+                        system_prompt, user_prompt, raw_response, thinking_content,
+                    ),
+                )
+            conn.commit()
+    except Exception as e:
+        # 数据库写入失败不影响主流程，打印告警
+        print(f"[WARN] _write_ai_trace db write failed: {e}", file=sys.stderr)
+
+    # 兜底存储：继续写 JSONL 文件（数据库挂了还能回溯）
     try:
         trace_dir = Path(__file__).parent / "output" / "ai_trace"
         trace_dir.mkdir(parents=True, exist_ok=True)
@@ -2528,6 +2563,67 @@ def _write_ai_trace(
     except Exception:
         # 日志写入失败不影响主流程
         pass
+
+
+_AI_TRACE_TABLE_CREATED = False
+
+
+def _ensure_ai_trace_table() -> None:
+    """确保 sys.ai_trace 表存在（幂等，首次调用时创建）。"""
+    global _AI_TRACE_TABLE_CREATED
+    if _AI_TRACE_TABLE_CREATED:
+        return
+    try:
+        from crypto_research.config import get_settings
+        import psycopg
+
+        settings = get_settings()
+        db_conf = settings.database
+        with psycopg.connect(
+            host=db_conf.host,
+            port=db_conf.port,
+            dbname=db_conf.database,
+            user=db_conf.user,
+            password=db_conf.password,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS sys.ai_trace (
+                        id              BIGSERIAL PRIMARY KEY,
+                        ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        tag             VARCHAR(50) NOT NULL,
+                        asset_id        INT,
+                        symbol          VARCHAR(50),
+                        signal_types    TEXT[] NOT NULL DEFAULT '{}',
+                        provider        VARCHAR(50),
+                        model           VARCHAR(100),
+                        system_prompt   TEXT NOT NULL DEFAULT '',
+                        user_prompt     TEXT NOT NULL DEFAULT '',
+                        raw_response    TEXT NOT NULL DEFAULT '',
+                        thinking_content TEXT,
+                        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_trace_tag_ts
+                    ON sys.ai_trace(tag, ts DESC)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_trace_asset_id
+                    ON sys.ai_trace(asset_id)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_trace_symbol
+                    ON sys.ai_trace(symbol)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_trace_signal_types
+                    ON sys.ai_trace USING GIN(signal_types)
+                """)
+            conn.commit()
+        _AI_TRACE_TABLE_CREATED = True
+    except Exception as e:
+        print(f"[WARN] _ensure_ai_trace_table failed: {e}", file=sys.stderr)
 
 
 def _build_system_prompt_v2() -> str:

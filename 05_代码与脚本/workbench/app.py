@@ -820,56 +820,80 @@ def api_ai_trace():
         tag: 日志标签，默认 signal_v2
         date: YYYY-MM-DD，默认今天
         limit: 最多返回条数，默认 50
+        asset_id: 按资产 ID 过滤（可选）
+        symbol: 按代币符号过滤（可选，模糊匹配）
     """
     try:
         tag = request.args.get("tag", "signal_v2")
         date_str = request.args.get("date")
         limit = min(int(request.args.get("limit", 50)), 200)
+        asset_id = request.args.get("asset_id", type=int)
+        symbol_q = request.args.get("symbol")
 
         if not date_str:
             import datetime
             date_str = datetime.datetime.now().strftime("%Y-%m-%d")
 
-        trace_dir = Path(__file__).parent / "output" / "ai_trace"
-        trace_file = trace_dir / f"{tag}_{date_str}.jsonl"
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 构建 WHERE 条件
+                where_clauses = ["tag = %s", "ts::date = %s::date"]
+                params: list = [tag, date_str]
 
-        if not trace_file.exists():
-            return jsonify({"ok": True, "data": [], "total": 0, "date": date_str})
+                if asset_id is not None:
+                    where_clauses.append("asset_id = %s")
+                    params.append(asset_id)
+                if symbol_q:
+                    where_clauses.append("symbol ILIKE %s")
+                    params.append(f"%{symbol_q}%")
+
+                where_sql = " AND ".join(where_clauses)
+
+                # 查总数
+                cur.execute(
+                    f"SELECT COUNT(*) AS cnt FROM sys.ai_trace WHERE {where_sql}",
+                    params,
+                )
+                total = cur.fetchone()["cnt"]
+
+                # 查数据（按时间倒序，返回完整字段，列表也带详情方便前端点开展示）
+                cur.execute(
+                    f"""
+                    SELECT id, ts, tag, asset_id, symbol, signal_types,
+                           provider, model,
+                           system_prompt, user_prompt, raw_response, thinking_content,
+                           created_at
+                    FROM sys.ai_trace
+                    WHERE {where_sql}
+                    ORDER BY ts DESC
+                    LIMIT %s
+                    """,
+                    params + [limit],
+                )
+                rows = cur.fetchall()
 
         entries = []
-        with open(trace_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    # 列表只返回摘要，不返回完整 prompt/response（太大）
-                    summary = {
-                        "ts": entry.get("ts"),
-                        "tag": entry.get("tag"),
-                        "asset_id": entry.get("asset_id"),
-                        "symbol": entry.get("symbol"),
-                        "signal_types": entry.get("signal_types", []),
-                        "provider": entry.get("provider"),
-                        "model": entry.get("model"),
-                        "has_thinking": bool(entry.get("thinking_content")),
-                        "thinking_len": len(entry.get("thinking_content") or ""),
-                        "response_len": len(entry.get("raw_response") or ""),
-                        # 详情（完整内容）按需返回
-                        "system_prompt": entry.get("system_prompt", ""),
-                        "user_prompt": entry.get("user_prompt", ""),
-                        "raw_response": entry.get("raw_response", ""),
-                        "thinking_content": entry.get("thinking_content", ""),
-                    }
-                    entries.append(summary)
-                except json.JSONDecodeError:
-                    continue
-
-        # 按时间倒序，取最新 N 条
-        entries.sort(key=lambda x: x.get("ts", ""), reverse=True)
-        total = len(entries)
-        entries = entries[:limit]
+        for row in rows:
+            thinking = row.get("thinking_content") or ""
+            raw_resp = row.get("raw_response") or ""
+            entry = {
+                "id": row["id"],
+                "ts": row["ts"].isoformat() if row.get("ts") else None,
+                "tag": row["tag"],
+                "asset_id": row.get("asset_id"),
+                "symbol": row.get("symbol"),
+                "signal_types": list(row.get("signal_types") or []),
+                "provider": row.get("provider") or "",
+                "model": row.get("model") or "",
+                "has_thinking": bool(thinking),
+                "thinking_len": len(thinking),
+                "response_len": len(raw_resp),
+                "system_prompt": row.get("system_prompt") or "",
+                "user_prompt": row.get("user_prompt") or "",
+                "raw_response": raw_resp,
+                "thinking_content": thinking,
+            }
+            entries.append(entry)
 
         return jsonify({"ok": True, "data": entries, "total": total, "date": date_str})
     except Exception as e:

@@ -95,7 +95,9 @@ NARRATIVE_WATCHLIST = [
     "Privacy", "Oracles", "File Storage", "Zero Knowledge", "SocialFi",
 ]
 # CMC 叙事分类名 → DeFiLlama category（有 TVL 腿才合成）
-NARRATIVE_TVL_MAP = {
+# 值可以是 str（单 category）或 list[str]（多 category 聚合，TVL 相加，变化率按 TVL 加权）
+NARRATIVE_TVL_MAP: dict[str, str | list[str]] = {
+    # ── 单 category 直接映射 ──
     "Lending": "Lending",
     "Dexes": "Dexs",
     "DEX": "Dexs",
@@ -111,6 +113,20 @@ NARRATIVE_TVL_MAP = {
     "Staking": "Staking Pool",
     "CDP": "CDP",
     "Yield Aggregator": "Yield Aggregator",
+    "Privacy": "Privacy",
+
+    # ── 多 category 聚合（按 TVL 加权平均变化率） ──
+    # DeFi 大盘：所有主流 DeFi 功能类 TVL 总和
+    "DeFi": [
+        "Lending", "Dexs", "Derivatives", "Liquid Staking",
+        "Yield", "CDP", "Restaking", "Staking Pool",
+        "Yield Aggregator", "RWA", "Bridge",
+    ],
+    # AI 赛道：AI Agents + Decentralized AI
+    "AI & Big Data": ["AI Agents", "Decentralized AI"],
+    "AI": ["AI Agents", "Decentralized AI"],
+    # LSD 扩展：Liquid Staking + Liquid Restaking
+    "Liquid Staking Derivatives": ["Liquid Staking", "Liquid Restaking"],
 }
 # P1-1 叙事/链榜配置（启动时从 yaml 加载，见 _load_market_rules）
 
@@ -1787,6 +1803,50 @@ def fetch_category_tvl_flow() -> dict:
     return {"status": "ok", "categories": categories}
 
 
+def _resolve_tvl_info(narrative: str, tvl_cats: dict[str, dict]) -> dict | None:
+    """
+    根据 NARRATIVE_TVL_MAP 解析叙事赛道对应的 TVL 信息。
+    支持单 category 映射和多 category 聚合（TVL 相加，变化率按 TVL 加权）。
+    返回 {tvl, tvl_change_7d_pct, protocols}，无数据返回 None。
+    """
+    mapping = NARRATIVE_TVL_MAP.get(narrative)
+    if mapping is None:
+        return None
+
+    # 单 category
+    if isinstance(mapping, str):
+        info = tvl_cats.get(mapping)
+        return info if info and info.get("tvl", 0) > 0 else None
+
+    # 多 category 聚合
+    if isinstance(mapping, list):
+        total_tvl = 0.0
+        weighted_sum = 0.0
+        total_protocols = 0
+        matched = 0
+        for cat in mapping:
+            info = tvl_cats.get(cat)
+            if not info:
+                continue
+            tvl = info.get("tvl", 0) or 0
+            chg = info.get("tvl_change_7d_pct", 0) or 0
+            if tvl <= 0:
+                continue
+            total_tvl += tvl
+            weighted_sum += chg * tvl
+            total_protocols += info.get("protocols", 0) or 0
+            matched += 1
+        if matched == 0 or total_tvl <= 0:
+            return None
+        avg_change = weighted_sum / total_tvl if total_tvl > 0 else 0.0
+        return {
+            "tvl": round(total_tvl, 2),
+            "tvl_change_7d_pct": round(avg_change, 2),
+            "protocols": total_protocols,
+        }
+    return None
+
+
 def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
     """
     合成叙事榜：三窗动量评分（市值腿）+ TVL 变化（TVL 腿）。
@@ -1805,8 +1865,7 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
         score = momentum if momentum is not None else mcap7
         if score is None:
             continue
-        dl_cat = NARRATIVE_TVL_MAP.get(item["narrative"])
-        tvl_info = tvl_cats.get(dl_cat) if dl_cat else None
+        tvl_info = _resolve_tvl_info(item["narrative"], tvl_cats)
         if tvl_info and tvl_info.get("tvl", 0) >= TVL_LEG_MIN:
             composite = mc_w * score + tvl_w * tvl_info["tvl_change_7d_pct"]
             mode = "blended"
@@ -2064,12 +2123,11 @@ def _fetch_chain_flow_from_db() -> dict | None:
     """
     MIN_CHAINS = 5
     try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
         import psycopg.rows
 
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
+        from db_stats import get_db
+
+        with get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT chain_key, chain_name, tvl_usd,

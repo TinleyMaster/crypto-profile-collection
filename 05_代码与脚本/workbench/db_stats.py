@@ -7722,13 +7722,15 @@ def recompute_unlock_pressure_batch(limit: int = 0, force: bool = True,
 
     返回：{"total", "computed", "failed", "skipped", "failed_ids"}
     """
+    from crypto_research.config import get_settings as _get_settings
+
     def _emit(msg: str) -> None:
         if log:
             log(msg)
         else:
             print(msg)
 
-    settings = get_settings(require_database=True)
+    settings = _get_settings(require_database=True)
 
     # 候选：有未来解锁事件的资产
     today = datetime.now(timezone.utc).date()

@@ -153,6 +153,20 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 早报快照 ═══
     ("daily_brief_snapshot", "30 8 * * *", "build_daily_brief.py", [], "每日早报快照落库+趋势diff（Asia/Shanghai 08:30）", "core"),
+
+    # ═══ CMC 宏观/趋势/空投持久化（P0 免费档，无需付费 key）═══
+    # 宏观三指标（全球市值/恐贪/山寨季）每日 03:15（早于 04:00 行情快照，保证当日有值）
+    ("cmc_macro_daily", "15 3 * * *", "ingest_cmc_macro.py", [], "CMC 宏观三指标落库（全球市值/恐贪/山寨季）", "core"),
+    # 趋势榜（涨跌/搜索/访问/新上市）每日 03:20
+    ("cmc_trending_daily", "20 3 * * *", "ingest_cmc_trending.py", [], "CMC 趋势榜落库（涨幅/跌幅/搜索/访问/新上市）", "core"),
+    # 空投事件（每日 ONGOING + UPCOMING，合并调度见脚本 --status）
+    ("cmc_airdrops_daily", "25 3 * * *", "ingest_cmc_airdrops.py", ["--status", "ONGOING"], "CMC 空投事件落库（每日）", "core"),
+
+    # ═══ CMC 付费档持久化（需 Startup/Professional 套餐，403 时自动跳过）═══
+    # OHLCV K线回填（每周一次，避免频繁消耗付费额度；配合解锁/回测分析）
+    ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天）", "core"),
+    # 价格表现统计 ATH/ATL（每周一次）
+    ("cmc_price_perf_weekly", "40 3 * * 1", "ingest_cmc_price_performance.py", ["--top", "1000"], "CMC 价格表现统计 ATH/ATL（每周一，top1000）", "core"),
 ]
 
 

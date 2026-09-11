@@ -80,9 +80,41 @@ def fetch_fear_greed_history(settings, days: int = 365 * 3) -> list[tuple[date, 
         url = f"{CMC_BASE}/trial-pro-api/v3/fear-and-greed"
 
     print(f"[fear_greed] fetching {url} (days={days}) ...")
-    r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
-    r.raise_for_status()
-    data = r.json().get("data", [])
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if data:
+            return _parse_fear_greed_items(data)
+        # data 为空（CMC 500 忙）时继续走 alternative.me fallback
+    except Exception as e:
+        print(f"[fear_greed] CMC 拉取失败（{e}），尝试 alternative.me ...")
+
+    # Fallback：alternative.me（同源数据，免费无 key）
+    import time as _time
+    for attempt in range(3):
+        try:
+            print(f"[fear_greed] fetching alternative.me/fng (limit={min(days, 365)}) ...")
+            r = requests.get(
+                "https://api.alternative.me/fng/",
+                params={"limit": min(days, 365)},
+                timeout=TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if not data:
+                print("[fear_greed] alternative.me 返回空，重试...")
+                continue
+            return _parse_fear_greed_items(data)
+        except Exception as e:
+            print(f"[fear_greed] alternative.me 第{attempt + 1}次失败: {e}")
+            if attempt < 2:
+                _time.sleep(3 * (attempt + 1))
+    return []
+
+
+def _parse_fear_greed_items(data: list[dict]) -> list[tuple[date, int, str | None]]:
+    """解析恐贪历史条目列表，返回 [(date, value, value_class), ...] 按日期升序。"""
     result = []
     for item in data:
         val = item.get("value")
@@ -112,8 +144,11 @@ def fetch_fear_greed_history(settings, days: int = 365 * 3) -> list[tuple[date, 
         vclass = item.get("value_classification") or item.get("classification")
         result.append((dt, val_int, vclass))
     result.sort(key=lambda x: x[0])
-    print(f"[fear_greed] got {len(result)} days, "
-          f"range: {result[0][0]} ~ {result[-1][0]}")
+    if result:
+        print(f"[fear_greed] got {len(result)} days, "
+              f"range: {result[0][0]} ~ {result[-1][0]}")
+    else:
+        print("[fear_greed] got 0 days")
     return result
 
 
@@ -134,14 +169,15 @@ def upsert_data(conn, data: list[tuple[date, int, str | None]], dry_run: bool = 
         for dt, value, vclass in data:
             cur.execute("""
                 INSERT INTO biz.fear_greed_daily
-                    (metric_date, value, value_class, source_code, fetched_at, updated_at)
-                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                    (metric_date, value, value_class, value_classification, source_code, fetched_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (metric_date) DO UPDATE
                 SET value = EXCLUDED.value,
                     value_class = EXCLUDED.value_class,
+                    value_classification = EXCLUDED.value_classification,
                     source_code = EXCLUDED.source_code,
                     updated_at = NOW()
-            """, (dt, value, vclass, SOURCE_CODE))
+            """, (dt, value, vclass, vclass, SOURCE_CODE))
             rows_inserted += 1
     if not dry_run:
         conn.commit()
@@ -181,7 +217,7 @@ def main() -> None:
             return
 
         upsert_data(conn, new_data, dry_run=False)
-        print("[fear_greed] done ✓")
+        print("[fear_greed] done")
 
 
 if __name__ == "__main__":

@@ -1442,6 +1442,18 @@ def api_asset_signal_detail(asset_id: int):
                 """, (asset_id,))
                 social = cur.fetchone()
 
+                # ATH/ATL 表现（CMC price-performance 汇总，按日快照）
+                cur.execute("""
+                    SELECT ath_price, ath_timestamp, atl_price, atl_timestamp,
+                           drawdown_from_ath
+                    FROM biz.asset_perf_daily
+                    WHERE asset_id = %s
+                      AND source_code = 'cmc'
+                    ORDER BY perf_date DESC
+                    LIMIT 1
+                """, (asset_id,))
+                perf = cur.fetchone()
+
         # 组装 asset_basic
         asset_basic = {
             "asset_id": basic["asset_id"],
@@ -1454,6 +1466,11 @@ def api_asset_signal_detail(asset_id: int):
             "change_24h": float(basic["change_24h"]) if basic.get("change_24h") is not None else None,
             "change_7d": float(basic["change_7d"]) if basic.get("change_7d") is not None else None,
             "volume_24h": float(basic["volume_24h"]) if basic.get("volume_24h") is not None else None,
+            "ath_price": float(perf["ath_price"]) if perf and perf.get("ath_price") is not None else None,
+            "ath_timestamp": str(perf["ath_timestamp"]) if perf and perf.get("ath_timestamp") else None,
+            "atl_price": float(perf["atl_price"]) if perf and perf.get("atl_price") is not None else None,
+            "atl_timestamp": str(perf["atl_timestamp"]) if perf and perf.get("atl_timestamp") else None,
+            "drawdown_from_ath": float(perf["drawdown_from_ath"]) if perf and perf.get("drawdown_from_ath") is not None else None,
         }
 
         # 组装 extra data

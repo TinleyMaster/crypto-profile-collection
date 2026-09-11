@@ -187,8 +187,40 @@ def flag_extreme(percentile: float | None) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_cmc_global_metrics() -> dict:
-    """获取全球市值数据。优先 CMC，失败时降级 CoinGecko。返回 {total_market_cap, volume_24h, btc_dominance, ...}。"""
-    # 1. 尝试 CMC
+    """获取全球市值数据。优先读库 biz.global_metric_daily（快），库空/缺当日时实时拉 CMC，失败降级 CoinGecko。
+    返回 {total_market_cap, volume_24h, btc_dominance, ...}。"""
+    # 1. 优先从 DB 读当日数据（快，且已持久化）
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT total_market_cap, total_volume_24h, btc_dominance,
+                           eth_dominance, stablecoin_market_cap, total_cryptocurrencies,
+                           active_cryptocurrencies
+                    FROM biz.global_metric_daily
+                    ORDER BY metric_date DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+        if row and row[0]:
+            return {
+                "total_market_cap": _safe_float(row[0]),
+                "total_volume_24h": _safe_float(row[1]),
+                "btc_dominance": _safe_float(row[2]),
+                "eth_dominance": _safe_float(row[3]),
+                "stablecoin_market_cap": _safe_float(row[4]),
+                "total_cryptocurrencies": _safe_int(row[5]),
+                "status": "ok",
+                "source": "db",
+            }
+    except Exception:
+        pass
+
+    # 2. 实时 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/global-metrics/quotes/latest",
@@ -207,11 +239,12 @@ def fetch_cmc_global_metrics() -> dict:
                 "stablecoin_market_cap": _safe_float(data.get("stablecoin_market_cap")),
                 "total_cryptocurrencies": _safe_int(data.get("total_cryptocurrencies")),
                 "status": "ok",
+                "source": "api",
             }
     except Exception:
         pass
     
-    # 2. 降级 CoinGecko
+    # 3. 降级 CoinGecko
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/global",
@@ -228,6 +261,7 @@ def fetch_cmc_global_metrics() -> dict:
             "stablecoin_market_cap": 0,
             "total_cryptocurrencies": _safe_int(data.get("active_cryptocurrencies")),
             "status": "ok",
+            "source": "coingecko",
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -271,8 +305,31 @@ def fetch_cmc_fear_greed() -> dict:
 
 
 def fetch_cmc_altcoin_season() -> dict:
-    """获取山寨季指数。优先 CMC，失败时降级 blockchaincenter.net。返回 {value, status}。"""
-    # 1. 尝试 CMC
+    """获取山寨季指数。优先读库 biz.altcoin_season_daily，库空时实时拉 CMC，失败降级 blockchaincenter.net。
+    返回 {value, status}。"""
+    # 1. 优先从 DB 读当日数据
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT value FROM biz.altcoin_season_daily
+                    ORDER BY metric_date DESC LIMIT 1
+                """)
+                row = cur.fetchone()
+        if row and row[0]:
+            return {
+                "value": _safe_float(row[0]),
+                "status": "ok",
+                "source": "db",
+            }
+    except Exception:
+        pass
+
+    # 2. 实时 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/altcoin-season-index",
@@ -285,11 +342,12 @@ def fetch_cmc_altcoin_season() -> dict:
             return {
                 "value": value,
                 "status": "ok",
+                "source": "api",
             }
     except Exception:
         pass
     
-    # 2. 降级 blockchaincenter.net（提取页面中的指数值）
+    # 3. 降级 blockchaincenter.net（提取页面中的指数值）
     try:
         r = requests.get(
             "https://www.blockchaincenter.net/altcoin-season-index/",
@@ -303,6 +361,7 @@ def fetch_cmc_altcoin_season() -> dict:
             return {
                 "value": _safe_float(match.group(1)),
                 "status": "ok",
+                "source": "blockchaincenter",
             }
     except Exception:
         pass

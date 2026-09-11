@@ -4591,6 +4591,58 @@ def get_asset_market_history(
     for item in merged.values():
         del item["_priority"]
 
+    # ── OHLCV 兜底补全（src_cmc.cmc_asset_ohlcv，日级 K线）──
+    # 当 biz.asset_market_daily 覆盖不足（缺口/新币历史短）时，
+    # 用 CMC OHLCV 日线补全缺失日期，提升解锁前后价格分析 / KOL 回测的数据完整性。
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT cmc_id FROM core.asset_source_map
+                    WHERE asset_id = %s AND source_code = 'cmc' AND source_asset_key ~ '^[0-9]+$'
+                    LIMIT 1
+                    """,
+                    (asset_id,),
+                )
+                cmc_map = cur.fetchone()
+        if cmc_map and len(merged) < days * 0.7:
+            cmc_id = int(cmc_map["cmc_id"])
+            with get_db() as conn:
+                with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(
+                        """
+                        SELECT time_open, close, market_cap, volume
+                        FROM src_cmc.cmc_asset_ohlcv
+                        WHERE cmc_id = %s
+                          AND time_period = 'daily'
+                          AND time_open >= CURRENT_DATE - %s * INTERVAL '1 day'
+                        ORDER BY time_open ASC
+                        """,
+                        (cmc_id, days),
+                    )
+                    ohlcv_rows = cur.fetchall()
+            for r in ohlcv_rows:
+                date_str = str(r["time_open"].date())
+                if date_str in merged:
+                    continue  # 已有更优数据源
+                if r["close"] is None:
+                    continue
+                merged[date_str] = {
+                    "date": date_str,
+                    "price_usd": float(r["close"]),
+                    "market_cap": float(r["market_cap"]) if r["market_cap"] is not None else None,
+                    "fdv": None,
+                    "volume_24h": float(r["volume"]) if r["volume"] is not None else None,
+                    "change_24h": None,
+                    "change_7d": None,
+                    "circulating_supply": None,
+                    "total_supply": None,
+                }
+    except Exception as _ohlcv_err:
+        # OHLCV 兜底失败不影响主路径
+        pass
+
     # 按日期排序
     series = [merged[d] for d in sorted(merged.keys())]
 
@@ -7651,6 +7703,23 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
 
     score, risk = _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h)
 
+    # 2.5 ATH/ATL 回撤上下文（biz.asset_perf_daily，CMC price-performance 汇总）
+    drawdown_from_ath = None
+    ath_price = None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ath_price, drawdown_from_ath
+                   FROM biz.asset_perf_daily
+                   WHERE asset_id = %s AND source_code = 'cmc'
+                   ORDER BY perf_date DESC LIMIT 1""",
+                (asset_id,),
+            )
+            prow = cur.fetchone()
+    if prow:
+        ath_price = _pressure_float(prow[0])
+        drawdown_from_ath = _pressure_float(prow[1])
+
     detail = {
         "unlock_score": round(min(60.0, unlock_pct_30d * 6.0), 2),
         "concentration_score": round(((top10_concentration or 0.0) / 100.0) * 25.0, 2),
@@ -7658,6 +7727,8 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         "price_usd": price_info.get("price_usd"),
         "market_cap_usd": price_info.get("market_cap_usd"),
         "volume_24h_usd": price_info.get("volume_24h_usd"),
+        "ath_price": ath_price,
+        "drawdown_from_ath": drawdown_from_ath,
         "upcoming_events_count": sum(1 for e in events if e.get("is_upcoming")),
     }
 

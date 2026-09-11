@@ -101,6 +101,7 @@ def main() -> int:
                         today,
                         parsed["value"],
                         parsed["value_classification"],
+                        parsed["value_classification"],
                         json.dumps({"fear_greed": parsed}, ensure_ascii=False),
                     )
                 ],

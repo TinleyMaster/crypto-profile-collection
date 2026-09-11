@@ -10,6 +10,8 @@
 - unlock_7d           7 天解锁抛压 TOP
 - social_surge        社交热度日环比增幅 TOP（需有历史数据）
 - tvl_surge_24h       24h TVL 增幅 TOP（DeFi 资金流入）
+- cmc_gainers_24h     CMC 官方涨幅榜（biz.asset_trending，覆盖全市场含新币）
+- cmc_losers_24h      CMC 官方跌幅榜（biz.asset_trending，覆盖全市场含新币）
 
 设计原则：纯 diff，不做 AI 评分。
 
@@ -485,6 +487,83 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
 
+CMC_GAINERS_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+SELECT
+    %s::DATE,
+    'cmc_gainers_24h',
+    asm.asset_id,
+    t.percent_change_24h,
+    'CMC 官方涨幅榜',
+    t.rank_num,
+    'up',
+    jsonb_build_object(
+        'cmc_id', t.cmc_id,
+        'symbol', t.symbol,
+        'name', t.name,
+        'price_usd', t.price_usd,
+        'market_cap', t.market_cap,
+        'volume_24h', t.volume_24h,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'other'
+        END
+    )
+FROM biz.asset_trending t
+JOIN core.asset_source_map asm
+    ON asm.source_code = 'cmc' AND asm.source_asset_key = t.cmc_id::text
+JOIN core.asset a ON a.asset_id = asm.asset_id
+WHERE t.snapshot_date = %s::DATE
+  AND t.trend_type = 'gainers'
+  AND t.time_period = '24h'
+  AND t.percent_change_24h IS NOT NULL
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+CMC_LOSERS_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+SELECT
+    %s::DATE,
+    'cmc_losers_24h',
+    asm.asset_id,
+    t.percent_change_24h,
+    'CMC 官方跌幅榜',
+    t.rank_num,
+    'down',
+    jsonb_build_object(
+        'cmc_id', t.cmc_id,
+        'symbol', t.symbol,
+        'name', t.name,
+        'price_usd', t.price_usd,
+        'market_cap', t.market_cap,
+        'volume_24h', t.volume_24h,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'other'
+        END
+    )
+FROM biz.asset_trending t
+JOIN core.asset_source_map asm
+    ON asm.source_code = 'cmc' AND asm.source_asset_key = t.cmc_id::text
+JOIN core.asset a ON a.asset_id = asm.asset_id
+WHERE t.snapshot_date = %s::DATE
+  AND t.trend_type = 'losers'
+  AND t.time_period = '24h'
+  AND t.percent_change_24h IS NOT NULL
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+
 def _compute_sector_strength(cur, d: date) -> list[dict]:
     """计算指定日期各赛道的强度分，返回 [{sector, strength_score, rank, ...}]"""
     cur.execute(SECTOR_ROTATION_SQL, (str(d), str(d)))
@@ -645,6 +724,12 @@ def generate_for_date(cur, d: date) -> dict:
 
     cur.execute(MARKET_CAP_MOVER_SQL, (date_str, date_str))
     result["market_cap_mover"] = cur.rowcount
+
+    # CMC 官方涨/跌幅榜（biz.asset_trending，覆盖全市场含新币）
+    cur.execute(CMC_GAINERS_SQL, (date_str, date_str))
+    result["cmc_gainers_24h"] = cur.rowcount
+    cur.execute(CMC_LOSERS_SQL, (date_str, date_str))
+    result["cmc_losers_24h"] = cur.rowcount
 
     cur.execute("SELECT count(*) FROM biz.asset_unlock_event")
     if cur.fetchone()[0] > 0:

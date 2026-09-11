@@ -68,7 +68,20 @@ def fetch_supply_history() -> list[tuple[date, float]]:
         ts = row.get("date")
         if usd is None or ts is None:
             continue
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+        # date 可能是 int（unix timestamp）或 str（如 "2023-01-01"）
+        if isinstance(ts, str):
+            # 尝试多种字符串格式
+            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.strptime(ts[:10], fmt[:10]).date()
+                    break
+                except ValueError:
+                    continue
+            else:
+                # 字符串解析失败，跳过
+                continue
+        else:
+            dt = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
         result.append((dt, float(usd)))
     result.sort(key=lambda x: x[0])
     print(f"[stablecoin] got {len(result)} days of data, "

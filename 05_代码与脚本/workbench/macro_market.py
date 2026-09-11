@@ -467,8 +467,11 @@ def fetch_stablecoin_netflow_history(days: int = 30) -> dict:
             if usd is not None and ts is not None:
                 supplies.append(_safe_float(usd))
                 from datetime import datetime, timezone
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                dates.append(dt.strftime("%Y-%m-%d"))
+                if isinstance(ts, str):
+                    dates.append(ts[:10])
+                else:
+                    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    dates.append(dt.strftime("%Y-%m-%d"))
         if len(supplies) < 2:
             return {"status": "error", "error": "insufficient", "series": [], "rolling_7d": [],
                     "dates": [], "total_supply": [], "anomaly": None, "source": "api"}

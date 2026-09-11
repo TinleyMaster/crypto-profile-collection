@@ -29,14 +29,49 @@ from pathlib import Path
 from psycopg import sql as psql
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-WORKBENCH_DIR = PROJECT_ROOT / "workbench"
 
-if str(WORKBENCH_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKBENCH_DIR))
-SRC_DIR = PROJECT_ROOT / "scripts" / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+
+def _find_dir_with(target_marker: str, candidates: list[Path]) -> Path | None:
+    """在候选目录中找到包含 target_marker 的目录。"""
+    for d in candidates:
+        if (d / target_marker).exists():
+            return d
+    return None
+
+
+def _setup_paths() -> Path:
+    """
+    探测并设置 sys.path，兼容两种部署结构：
+      - 本地开发：  project/workbench/catalyst/  project/scripts/src/
+      - 容器部署：  /app/catalyst/               /app/scripts/src/
+    """
+    project_root = SCRIPT_DIR.parent.parent
+
+    base_candidates = [
+        project_root / "workbench",
+        project_root,
+        Path("/app"),
+    ]
+    base_dir = _find_dir_with("catalyst/__init__.py", base_candidates)
+    if base_dir is None:
+        raise RuntimeError(
+            f"找不到 catalyst 包，已探测: {[str(p) for p in base_candidates]}"
+        )
+
+    if str(base_dir) not in sys.path:
+        sys.path.insert(0, str(base_dir))
+
+    src_candidates = [project_root, Path("/app")]
+    src_dir = _find_dir_with("scripts/src", src_candidates)
+    if src_dir:
+        scripts_src = src_dir / "scripts" / "src"
+        if scripts_src.exists() and str(scripts_src) not in sys.path:
+            sys.path.insert(0, str(scripts_src))
+
+    return base_dir
+
+
+BASE_DIR = _setup_paths()
 
 from catalyst.db import get_conn
 from catalyst.classify import RuleEventClassifier
@@ -61,7 +96,7 @@ STEPS = [
 
 
 def load_config() -> dict:
-    config_path = WORKBENCH_DIR / "catalyst_rules.yaml"
+    config_path = BASE_DIR / "catalyst_rules.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

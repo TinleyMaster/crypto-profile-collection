@@ -27,17 +27,64 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-WORKBENCH_DIR = PROJECT_ROOT / "workbench"
 
-# 确保 workbench 在路径中
-if str(WORKBENCH_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKBENCH_DIR))
 
-# 确保 scripts/src 在路径中（crypto_research.config 等）
-SRC_DIR = PROJECT_ROOT / "scripts" / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+def _find_dir_with(target_marker: str, candidates: list[Path]) -> Path | None:
+    """在候选目录中找到包含 target_marker 的目录。"""
+    for d in candidates:
+        if (d / target_marker).exists():
+            return d
+    return None
+
+
+def _setup_paths() -> tuple[Path, Path]:
+    """
+    探测并设置 sys.path，兼容两种部署结构：
+      - 本地开发：  project/workbench/catalyst/  project/scripts/src/
+      - 容器部署：  /app/catalyst/               /app/scripts/src/
+
+    返回 (base_dir, src_dir)：
+      base_dir: 含 catalyst 包的目录（即 workbench 或 /app）
+      src_dir:  含 scripts/src 的父目录
+    """
+    project_root = SCRIPT_DIR.parent.parent
+
+    # 候选的 base_dir（含 catalyst 包的目录）
+    base_candidates = [
+        project_root / "workbench",   # 本地结构
+        project_root,                  # 容器结构（catalyst 直接在 /app 下）
+        Path("/app"),                  # 兜底
+    ]
+    base_dir = _find_dir_with("catalyst/__init__.py", base_candidates)
+    if base_dir is None:
+        raise RuntimeError(
+            f"找不到 catalyst 包，已探测: {[str(p) for p in base_candidates]}"
+        )
+
+    # 候选的 src_dir（含 scripts/src 的父目录）
+    src_candidates = [
+        project_root,                  # 本地 + 容器，scripts 都在 project 根
+        Path("/app"),                  # 兜底
+    ]
+    # scripts/src 的标记文件：找一个确定存在的
+    src_dir = _find_dir_with("scripts/src", src_candidates)
+    if src_dir is None:
+        # 退一步，scripts 直接在 base_dir 同级
+        src_dir = base_dir.parent if (base_dir.parent / "scripts" / "src").exists() else base_dir
+
+    # 将 base_dir 加入 sys.path（使 catalyst 包可导入）
+    if str(base_dir) not in sys.path:
+        sys.path.insert(0, str(base_dir))
+
+    # 将 scripts/src 的父目录加入 sys.path
+    scripts_src = src_dir / "scripts" / "src"
+    if scripts_src.exists() and str(scripts_src) not in sys.path:
+        sys.path.insert(0, str(scripts_src))
+
+    return base_dir, src_dir
+
+
+BASE_DIR, _SRC_ROOT = _setup_paths()
 
 from catalyst.db import get_conn
 from catalyst.classify import RuleEventClassifier
@@ -58,7 +105,7 @@ from catalyst.notifier import send_fast_alerts_for_new_signals, send_slow_digest
 
 def load_config() -> dict:
     """加载 catalyst_rules.yaml 配置。"""
-    config_path = WORKBENCH_DIR / "catalyst_rules.yaml"
+    config_path = BASE_DIR / "catalyst_rules.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

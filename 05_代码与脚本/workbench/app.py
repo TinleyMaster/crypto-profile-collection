@@ -2672,6 +2672,42 @@ def api_market_overview():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/market/snapshot")
+def api_market_snapshot():
+    """大盘每日快照：最新或指定日期的核心指标。
+
+    Query params:
+        date: YYYY-MM-DD，默认最新
+    """
+    try:
+        from macro_market import fetch_market_snapshot
+        date = request.args.get("date")
+        result = fetch_market_snapshot(snapshot_date=date)
+        return jsonify({"ok": result.get("status") == "ok", **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/market/snapshot/history")
+def api_market_snapshot_history():
+    """大盘快照历史序列（用于趋势图）。
+
+    Query params:
+        days: 天数，默认 30
+        fields: 逗号分隔的字段名，默认返回所有字段
+    """
+    try:
+        from macro_market import fetch_market_snapshot_history
+        days = request.args.get("days", "30", type=int)
+        days = max(1, min(365, days))
+        fields_str = request.args.get("fields")
+        fields = [f.strip() for f in fields_str.split(",")] if fields_str else None
+        result = fetch_market_snapshot_history(days=days, fields=fields)
+        return jsonify({"ok": result.get("status") == "ok", **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/market/onchain-thermometer")
 def api_onchain_thermometer():
     """主流币链上估值温度计：MVRV + ROI + 活跃地址 + 交易数 综合百分位。"""

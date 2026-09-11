@@ -7964,6 +7964,140 @@ def _build_mvrv_universe(top_n: int = 100) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+# 大盘每日快照读取
+# ══════════════════════════════════════════════════════════════
+
+def fetch_market_snapshot(snapshot_date: str | None = None) -> dict:
+    """
+    从 biz.market_snapshot_daily 读取快照。
+
+    Args:
+        snapshot_date: YYYY-MM-DD，None 表示最新一天
+
+    Returns:
+        {status, snapshot_date, data, raw_payload?}
+        data 为抽平的核心指标 dict；raw_payload 只有在表中存在且非空时返回
+    """
+    try:
+        import psycopg.rows
+        from db_stats import get_db
+
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                if snapshot_date:
+                    cur.execute("""
+                        SELECT * FROM biz.market_snapshot_daily
+                        WHERE snapshot_date = %s
+                    """, (snapshot_date,))
+                else:
+                    cur.execute("""
+                        SELECT * FROM biz.market_snapshot_daily
+                        ORDER BY snapshot_date DESC
+                        LIMIT 1
+                    """)
+                row = cur.fetchone()
+                if not row:
+                    return {"status": "empty", "snapshot_date": snapshot_date, "data": None}
+
+                data = dict(row)
+                raw = data.pop("raw_payload", None)
+                fetched_at = data.pop("fetched_at", None)
+                updated_at = data.pop("updated_at", None)
+
+                result = {
+                    "status": "ok",
+                    "snapshot_date": str(data.pop("snapshot_date")),
+                    "data": data,
+                    "fetched_at": str(fetched_at) if fetched_at else None,
+                    "updated_at": str(updated_at) if updated_at else None,
+                }
+                if raw is not None:
+                    result["raw_payload"] = raw
+                return result
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+def fetch_market_snapshot_history(
+    days: int = 30,
+    fields: list[str] | None = None,
+) -> dict:
+    """
+    读取大盘快照历史序列（用于趋势图）。
+
+    Args:
+        days: 最近 N 天
+        fields: 只返回指定字段（如 btc_price, fear_greed_value, cycle_overall_heat），
+                None 表示返回所有数值字段
+
+    Returns:
+        {status, series: [{snapshot_date, field1, field2, ...}]}
+    """
+    try:
+        import psycopg.rows
+        from db_stats import get_db
+
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 先检查表是否存在
+                cur.execute("""
+                    SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema = 'biz' AND table_name = 'market_snapshot_daily'
+                """)
+                if cur.fetchone()["count"] == 0:
+                    return {"status": "empty", "series": []}
+
+                if fields:
+                    # 白名单过滤，防注入
+                    allowed = _SNAPSHOT_NUMERIC_FIELDS
+                    safe_fields = [f for f in fields if f in allowed]
+                    if not safe_fields:
+                        return {"status": "error", "error": "no valid fields requested", "series": []}
+                    col_sql = ", ".join(safe_fields)
+                else:
+                    col_sql = "*"
+
+                cur.execute(f"""
+                    SELECT snapshot_date, {col_sql}
+                    FROM biz.market_snapshot_daily
+                    WHERE snapshot_date >= CURRENT_DATE - INTERVAL '{days} days'
+                    ORDER BY snapshot_date ASC
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+                # 转成可序列化的类型
+                for row in rows:
+                    row["snapshot_date"] = str(row["snapshot_date"])
+                    for k, v in list(row.items()):
+                        if hasattr(v, "__float__") and k != "snapshot_date":
+                            row[k] = float(v)
+                return {"status": "ok", "series": rows, "count": len(rows)}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "series": []}
+
+
+# 快照表数值字段白名单（用于 history 接口的字段过滤）
+_SNAPSHOT_NUMERIC_FIELDS = {
+    "btc_price", "btc_market_cap", "btc_dominance_pct",
+    "eth_price", "eth_market_cap",
+    "total_crypto_market_cap", "total_volume_24h",
+    "fear_greed_value", "fear_greed_pct_full",
+    "btc_oi_usd", "btc_oi_pct_full",
+    "cefi_flow_7d_usd", "cefi_pct_full",
+    "stablecoin_total_supply", "stablecoin_netflow_7d_usd",
+    "mvrv_value", "mvrv_pct_full",
+    "liveliness_value", "liveliness_pct_full",
+    "funding_rate_avg",
+    "altcoin_season_score",
+    "overall_score",
+    "cycle_overall_heat", "cycle_consistency_pct",
+    "nasdaq_change_7d_pct", "gold_change_7d_pct",
+    "dxy_change_7d_pct",
+    "btc_etf_flow_7d_usd",
+    "defi_total_tvl",
+}
+
+
+# ══════════════════════════════════════════════════════════════
 # 大盘周期热力图
 # ══════════════════════════════════════════════════════════════
 

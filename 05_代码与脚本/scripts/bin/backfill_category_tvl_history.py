@@ -90,70 +90,101 @@ def fetch_all_protocols() -> list[dict]:
     return valid
 
 
-def fetch_protocol_history(slug: str) -> list[tuple[date, float]]:
-    """拉单个协议历史 TVL，返回 [(date, tvl_usd), ...] 按日期升序。"""
-    try:
-        r = requests.get(f"{LLAMA_BASE}/protocol/{slug}", timeout=TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        tvl_list = data.get("tvl", []) or []
-        result = []
-        for item in tvl_list:
-            ts = item.get("date")
-            tvl = item.get("totalLiquidityUSD")
-            if ts is None or tvl is None:
-                continue
-            try:
-                dt = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
-                result.append((dt, float(tvl)))
-            except (ValueError, TypeError, OSError):
-                continue
-        result.sort(key=lambda x: x[0])
-        return result
-    except Exception as e:
-        print(f"  ⚠️  {slug} 拉取失败: {e}", file=sys.stderr)
-        return []
+def fetch_protocol_history(slug: str, retries: int = 3) -> list[tuple[date, float]]:
+    """拉单个协议历史 TVL，返回 [(date, tvl_usd), ...] 按日期升序。
+    带重试机制，避免临时网络波动导致失败。
+    """
+    for attempt in range(retries):
+        try:
+            r = requests.get(f"{LLAMA_BASE}/protocol/{slug}", timeout=TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            tvl_list = data.get("tvl", []) or []
+            result = []
+            for item in tvl_list:
+                ts = item.get("date")
+                tvl = item.get("totalLiquidityUSD")
+                if ts is None or tvl is None:
+                    continue
+                try:
+                    dt = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
+                    result.append((dt, float(tvl)))
+                except (ValueError, TypeError, OSError):
+                    continue
+            result.sort(key=lambda x: x[0])
+            return result
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = 2 ** (attempt + 1)
+                print(f"  ⚠️  {slug} 第{attempt+1}次失败: {e}，{wait}s后重试...",
+                      file=sys.stderr)
+                time.sleep(wait)
+            else:
+                print(f"  ❌ {slug} 拉取失败 ({retries}次重试后): {e}",
+                      file=sys.stderr)
+    return []
 
 
 def aggregate_category_tvl(
     protocols: list[dict],
     days: int,
     top_n: int,
+    start_index: int = 0,
     dry_run: bool = False,
+    batch_commit_conn=None,
 ) -> dict[tuple[date, str], tuple[float, int]]:
-    """聚合赛道 TVL：返回 {(date, category): (total_tvl, protocol_count)}。"""
+    """聚合赛道 TVL：返回 {(date, category): (total_tvl, protocol_count)}。
+
+    支持断点续跑：start_index 指定从第几个协议开始。
+    支持分批落库：batch_commit_conn 提供时，每 50 个协议提交一次（防中断白跑）。
+    """
     cutoff = date.today() - timedelta(days=days)
     print(f"[category_tvl] 回填天数: {days} (截止 {cutoff})")
-    print(f"[category_tvl] 头部协议数: {top_n}")
+    print(f"[category_tvl] 头部协议数: {top_n}"
+          + (f", 从第 {start_index} 个开始" if start_index > 0 else ""))
 
-    # 取头部 N 个
-    top_protocols = protocols[:top_n]
-    top_tvl = sum(p.get("tvl", 0) for p in top_protocols)
-    total_tvl = sum(p.get("tvl", 0) for p in protocols if p.get("tvl", 0) > 0)
+    # 取头部 N 个（并跳过 start_index 之前的）
+    top_protocols = protocols[start_index:start_index + top_n]
+    # 计算 TVL 覆盖（全量算）
+    all_valid = [p for p in protocols if _safe_tvl(p) > 0]
+    total_tvl = sum(_safe_tvl(p) for p in all_valid)
+    top_tvl = sum(_safe_tvl(p) for p in protocols[:top_n])
     coverage = top_tvl / total_tvl * 100 if total_tvl > 0 else 0
     print(f"[category_tvl] 头部 {top_n} 协议覆盖 TVL: ${top_tvl/1e9:.2f}B ({coverage:.1f}%)")
+    if batch_commit_conn:
+        print(f"[category_tvl] 分批落库模式：每 50 个协议提交一次")
 
     # 聚合
     # {(date, category): [total_tvl, count]}
     agg: dict[tuple[date, str], list[float, int]] = {}
     success = 0
-    skipped = 0
+    failed = 0
+    total_to_fetch = len(top_protocols)
+    start_time = time.time()
 
     for i, proto in enumerate(top_protocols):
+        global_idx = start_index + i
         slug = proto.get("slug", "")
         category = proto.get("category", "Unknown")
         name = proto.get("name", slug)
 
         if not slug:
-            skipped += 1
+            failed += 1
             continue
 
-        if (i + 1) % 50 == 0 or i == 0:
-            print(f"  进度: {i+1}/{top_n}  {name} ({category})")
+        # 每 10 个打印一次进度（更频繁，方便监控）
+        if (i + 1) % 10 == 0 or i == 0:
+            elapsed = time.time() - start_time
+            rate = (i + 1) / elapsed if elapsed > 0 else 0
+            eta = (total_to_fetch - i - 1) / rate / 60 if rate > 0 else 0
+            print(f"  进度: {global_idx+1}/{start_index+total_to_fetch} "
+                  f"({(i+1)/total_to_fetch*100:.1f}%) "
+                  f"{name} ({category}) "
+                  f"[{rate:.1f} req/min, ETA {eta:.0f}min]")
 
         history = fetch_protocol_history(slug)
         if not history:
-            skipped += 1
+            failed += 1
             time.sleep(REQUEST_INTERVAL)
             continue
 
@@ -169,7 +200,22 @@ def aggregate_category_tvl(
 
         time.sleep(REQUEST_INTERVAL)
 
-    print(f"[category_tvl] 拉取完成: 成功 {success}, 跳过/失败 {skipped}")
+        # 每 50 个协议批量落库一次（如果提供了 conn）
+        if batch_commit_conn and (i + 1) % 50 == 0:
+            batch_count = upsert_data(
+                batch_commit_conn,
+                {k: (v[0], v[1]) for k, v in agg.items()},
+                dry_run=dry_run,
+            )
+            print(f"  📦 分批落库: 已处理 {i+1}/{total_to_fetch} 协议, "
+                  f"写入 {batch_count} 条快照")
+            # 落库后清空内存中的 agg（避免重复），改用"追加"模式
+            # 注意：因为是 upsert，重复写入不会有问题，不清空也可以
+            # 但为了内存效率，每 50 个提交一次然后保留 agg 继续累加
+
+    elapsed = time.time() - start_time
+    print(f"[category_tvl] 拉取完成: 成功 {success}, 失败 {failed}, "
+          f"用时 {elapsed/60:.1f}min")
     print(f"[category_tvl] 聚合结果: {len(agg)} 条 (日期×赛道)")
 
     # 转成 tuple 形式返回
@@ -222,6 +268,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="赛道 TVL 历史回填（DeFi Llama 免费版）")
     parser.add_argument("--days", type=int, default=90, help="回填天数（默认 90）")
     parser.add_argument("--top", type=int, default=500, help="头部协议数（默认 500）")
+    parser.add_argument("--start", type=int, default=0, help="从第几个协议开始（断点续跑，默认 0）")
+    parser.add_argument("--no-batch", action="store_true", help="不分批落库，全部跑完再写（默认每50个写一次）")
     parser.add_argument("--dry-run", action="store_true", help="预览，不写入数据库")
     args = parser.parse_args()
 
@@ -240,19 +288,22 @@ def main() -> None:
             print("[category_tvl] ❌ 协议列表为空，退出")
             sys.exit(1)
 
-        # 2. 拉历史 + 聚合
+        # 2. 拉历史 + 聚合（支持分批落库）
+        batch_conn = None if (args.dry_run or args.no_batch) else conn
         agg_data = aggregate_category_tvl(
             protocols,
             days=args.days,
             top_n=args.top,
+            start_index=args.start,
             dry_run=args.dry_run,
+            batch_commit_conn=batch_conn,
         )
 
         if not agg_data:
             print("[category_tvl] ⚠️  没有聚合到任何数据")
             return
 
-        # 3. 写入
+        # 3. 最终写入（分批模式下已经写过了，但最后再跑一次确保完整）
         upsert_data(conn, agg_data, dry_run=args.dry_run)
 
         # 4. 验证
@@ -264,10 +315,10 @@ def main() -> None:
                     WHERE snapshot_date >= CURRENT_DATE - %s
                     GROUP BY snapshot_date
                     ORDER BY snapshot_date DESC
-                    LIMIT 5
+                    LIMIT 10
                 """, (args.days,))
                 rows = cur.fetchall()
-                print(f"\n[category_tvl] ✅ 验证（最近 5 天）:")
+                print(f"\n[category_tvl] ✅ 验证（最近 10 天）:")
                 for r in rows:
                     print(f"  {r[0]}: {r[1]} 个赛道, 总TVL ${float(r[2])/1e9:.2f}B")
 

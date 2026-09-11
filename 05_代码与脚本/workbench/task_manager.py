@@ -280,10 +280,15 @@ def _save_state(state: dict) -> None:
 
 
 # ── 类别并发配置 ──────────────────────────────────────────────
-# chain: 链上重任务（易卡死/耗时数小时），限1槽防垄断
+# chain: 链上重任务（易卡死/耗时数小时），默认 2 槽；链上任务多为网络 IO 等待，
+#        限制过高易触发 RPC 限流，可用环境变量 CATEGORY_MAX_CHAIN 调低
 # core:  核心业务（催化剂/早报/采集），保底可用
 # monitor: 监控类（低优先级，仅空闲时跑）
-CATEGORY_MAX = {"chain": 1, "core": 2, "monitor": 1}
+CATEGORY_MAX = {
+    "chain": int(os.getenv("CATEGORY_MAX_CHAIN", "2")),
+    "core": int(os.getenv("CATEGORY_MAX_CORE", "2")),
+    "monitor": int(os.getenv("CATEGORY_MAX_MONITOR", "1")),
+}
 
 
 # ── TaskManager ─────────────────────────────────────────────
@@ -516,6 +521,9 @@ class TaskManager:
         """收割僵尸任务，两个条件满足其一即触发：
         1. 运行时长超过 MAX_RUNTIME_HOURS（硬超时）
         2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟）
+
+        P1 修复：先 SELECT 出符合条件的 task_id 并终止真实子进程，再标记 DB 状态，
+        避免"槽位已释放但进程仍在后台跑"导致的任务重叠和资源泄漏。
         """
         try:
             with _get_db() as conn:
@@ -523,27 +531,18 @@ class TaskManager:
                     # 条件1：超 12h 硬超时
                     cur.execute(
                         """
-                        UPDATE sys.task
-                        SET status = 'failed',
-                            ended_at = NOW(),
-                            error = %s,
-                            updated_at = NOW()
+                        SELECT task_id FROM sys.task
                         WHERE status = 'running'
                           AND started_at < NOW() - (%s || ' hours')::interval
                         """,
-                        (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
-                         str(MAX_RUNTIME_HOURS)),
+                        (str(MAX_RUNTIME_HOURS),),
                     )
-                    count_timeout = cur.rowcount
+                    timeout_ids = [r[0] for r in cur.fetchall()]
 
-                    # 条件2：30min 无新日志 + 已运行至少 10min（卡死）
+                    # 条件2：LOG_STUCK_MINUTES 分钟无新日志 + 已运行至少 10min（卡死）
                     cur.execute(
                         """
-                        UPDATE sys.task t
-                        SET status = 'failed',
-                            ended_at = NOW(),
-                            error = %s,
-                            updated_at = NOW()
+                        SELECT t.task_id FROM sys.task t
                         WHERE t.status = 'running'
                           AND t.started_at < NOW() - '10 minutes'::interval
                           AND (
@@ -552,16 +551,54 @@ class TaskManager:
                               WHERE l.task_id = t.task_id
                           ) < NOW() - (%s || ' minutes')::interval
                         """,
-                        (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
-                         str(LOG_STUCK_MINUTES)),
+                        (str(LOG_STUCK_MINUTES),),
                     )
-                    count_stuck = cur.rowcount
+                    stuck_ids = [r[0] for r in cur.fetchall()]
 
-                    total = count_timeout + count_stuck
-                    if total > 0:
-                        print(f"[TaskManager] 收割 {total} 个僵尸任务 "
-                              f"(超时={count_timeout}, 卡死={count_stuck})",
-                              file=sys.stderr)
+            # 先终止真实子进程，释放底层资源
+            for tid in set(timeout_ids) | set(stuck_ids):
+                proc = self._local_procs.get(tid)
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+
+            # 再统一标记 DB 状态（分别保留超时/卡死两种错误文案）
+            with _get_db() as conn:
+                with conn.cursor() as cur:
+                    if timeout_ids:
+                        cur.execute(
+                            """
+                            UPDATE sys.task
+                            SET status = 'failed',
+                                ended_at = NOW(),
+                                error = %s,
+                                updated_at = NOW()
+                            WHERE task_id = ANY(%s)
+                            """,
+                            (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
+                             timeout_ids),
+                        )
+                    if stuck_ids:
+                        cur.execute(
+                            """
+                            UPDATE sys.task
+                            SET status = 'failed',
+                                ended_at = NOW(),
+                                error = %s,
+                                updated_at = NOW()
+                            WHERE task_id = ANY(%s)
+                            """,
+                            (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
+                             stuck_ids),
+                        )
+
+            total = len(timeout_ids) + len(stuck_ids)
+            if total > 0:
+                print(f"[TaskManager] 收割 {total} 个僵尸任务 "
+                      f"(超时={len(timeout_ids)}, 卡死={len(stuck_ids)}，已终止进程)",
+                      file=sys.stderr)
         except Exception as e:
             print(f"[TaskManager] reap_zombie error: {e}", file=sys.stderr)
 
@@ -607,6 +644,10 @@ class TaskManager:
             if not task:
                 return
             if task["status"] == "stopped":
+                return
+            # 已被收割（reaper 置为 failed）时不覆盖状态和错误文案，
+            # 否则 terminate 返回码 -15 会顶掉 "timeout/stuck" 提示
+            if task["status"] == "failed":
                 return
             _update_task(
                 task_id,

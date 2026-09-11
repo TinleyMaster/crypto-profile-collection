@@ -70,11 +70,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）", "core"),
 
     # ═══ 链上快照（隔日运行，持仓分布属周级缓慢变化）═══
-    # P2-1: 隔日运行以减少 RPC 调用
-    ("chain_holder_snapshot_bsc", "30 5 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五）", "chain"),
-    ("chain_holder_snapshot_eth", "0 6 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六）", "chain"),
-    ("chain_holder_snapshot_base_arb", "30 6 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五）", "chain"),
-    ("chain_holder_snapshot_solana", "0 7 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六）", "chain"),
+    # P2-1: 从早高峰(05:30-07:00)挪到午后(14:00-15:00)削峰；持仓数据慢变，午后跑不影响
+    #       早间 long_tail/meme_risk/lifecycle 消费"最新快照"；隔日运行以减少 RPC 调用
+    ("chain_holder_snapshot_bsc", "0 14 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五 午后）", "chain"),
+    ("chain_holder_snapshot_eth", "0 14 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六 午后）", "chain"),
+    ("chain_holder_snapshot_base_arb", "30 14 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五 午后）", "chain"),
+    ("chain_holder_snapshot_solana", "0 15 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六 午后）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),
     ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "100"], "Meme 四阶段生命周期（每日 09:00）", "core"),
@@ -115,7 +116,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("b2_ai_noise_clean_by_asset_auto", "0 10 * * *", "phase_b2_ai_noise_clean_by_asset_auto.py", [], "B4 AI 噪声清理（按资产）", "core"),
 
     # ═══ 监控告警 ═══
-    ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
+    # chain_transfer_monitor_auto 已迁移为常驻守护进程（supervisord），
+    # 不再占用 chain 并发槽位，scheduler 不再调度，避免每天 5 小时级任务饿死其他 chain 任务
+    # ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
     ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
     ("binance_bapi_health", "0 9,21 * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每日2次）", "monitor"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代

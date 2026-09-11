@@ -8,6 +8,7 @@ P1 修复（2026-08-27）：改为按链独立循环，每链从 offset=0 递增
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sys
@@ -124,7 +125,8 @@ def run_chain_loop(chain: str) -> tuple[int, int]:
     return total_processed, total_alerts
 
 
-def main():
+def run_full_scan() -> tuple[int, int]:
+    """整轮全链扫描，返回 (处理条数, 告警条数)。"""
     total_processed = 0
     total_alerts = 0
 
@@ -142,6 +144,41 @@ def main():
         time.sleep(2)
 
     print(f"\nAll chains complete.  累计: 处理={total_processed}  告警={total_alerts}")
+    return total_processed, total_alerts
+
+
+def main():
+    parser = argparse.ArgumentParser(description="大额转账监控（自动循环/常驻守护）")
+    parser.add_argument("--daemon", action="store_true",
+                        help="常驻守护模式：整轮扫描完成后休眠 interval 秒再继续（独立于 scheduler 运行）")
+    parser.add_argument("--interval", type=int, default=None,
+                        help="守护模式轮询间隔秒数（默认读取环境变量 TRANSFER_MONITOR_INTERVAL，默认 300）")
+    args = parser.parse_args()
+
+    if args.interval is None:
+        args.interval = int(os.getenv("TRANSFER_MONITOR_INTERVAL", "300"))
+
+    if not args.daemon:
+        run_full_scan()
+        return
+
+    print(f"[transfer_monitor][daemon] 启动守护模式，轮询间隔 {args.interval}s")
+    round_count = 0
+    while True:
+        round_count += 1
+        start = time.time()
+        print(f"[transfer_monitor][daemon] === 第 {round_count} 轮整链扫描开始 ===")
+        try:
+            processed, alerts = run_full_scan()
+            elapsed = time.time() - start
+            print(f"[transfer_monitor][daemon] 第 {round_count} 轮完成，"
+                  f"耗时 {elapsed / 60:.1f} 分钟，处理 {processed}，告警 {alerts}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[transfer_monitor][daemon] 第 {round_count} 轮异常: {e}")
+
+        sleep_time = max(1, args.interval - (time.time() - start))
+        print(f"[transfer_monitor][daemon] 休眠 {sleep_time:.0f}s...")
+        time.sleep(sleep_time)
 
 
 if __name__ == "__main__":

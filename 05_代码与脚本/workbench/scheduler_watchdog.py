@@ -85,6 +85,10 @@ DAILY_REPORT_HOUR = int(os.getenv("WATCHDOG_REPORT_HOUR", "9"))
 # 告警静默期：同 key 距上次告警至少间隔（避免轰炸）
 ALERT_COOLDOWN_SECONDS = int(os.getenv("WATCHDOG_COOLDOWN", "21600"))  # 默认 6h
 
+# 队列积压告警阈值
+QUEUE_WARN_WAIT_MIN = int(os.getenv("WATCHDOG_QUEUE_WAIT_MIN", "120"))  # 单任务等待超过 2h 视为饥饿
+QUEUE_WARN_DEPTH = int(os.getenv("WATCHDOG_QUEUE_DEPTH", "6"))  # 单类别 pending 超过 6 个视为积压
+
 # 告警状态：每 key 记录上次告警时间，避免重复轰炸
 _last_alerted: dict[str, float] = {}
 _last_fail_alerted: dict[str, float] = {}
@@ -391,6 +395,66 @@ def _check_integrity(key: str, check_func_name: str | None, check_only: bool) ->
     }
 
 
+def _check_queue_depth(check_only: bool) -> dict:
+    """检查 pending 队列积压：单类别排队数量过多、或单个任务等待过久（饥饿信号）。
+
+    配合 P0/P2 的并发调整，若未来又出现"早上排长队"，此处会直接邮件告警。
+    """
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT category, COUNT(*) AS n,
+                           ROUND(EXTRACT(EPOCH FROM (NOW() - MIN(started_at)))/60) AS max_wait_min
+                    FROM sys.task
+                    WHERE status = 'pending'
+                    GROUP BY category
+                    ORDER BY max_wait_min DESC NULLS LAST
+                    """
+                )
+                rows = cur.fetchall()
+    except Exception as e:
+        return {"key": "queue", "ok": True, "queue": "error",
+                "reason": f"队列查询异常: {e}"}
+
+    if not rows:
+        return {"key": "queue", "ok": True, "queue": "empty"}
+
+    over_wait = any((r[2] or 0) > QUEUE_WARN_WAIT_MIN for r in rows)
+    over_depth = any(r[1] > QUEUE_WARN_DEPTH for r in rows)
+    if not over_wait and not over_depth:
+        return {"key": "queue", "ok": True, "queue": "ok",
+                "detail": " | ".join(f"{r[0]}:{r[1]}个(最长{str(r[2])}min)" for r in rows)}
+
+    # 静默期
+    now = time.time()
+    last_alert = _last_alerted.get("queue", 0)
+    if now - last_alert < ALERT_COOLDOWN_SECONDS:
+        return {"key": "queue", "ok": False, "alerted": False,
+                "reason": "队列积压（静默期内）"}
+
+    mail_ok = False
+    if not check_only:
+        _last_alerted["queue"] = now
+        lines = []
+        for cat, n, wait in rows:
+            bad = (wait or 0) > QUEUE_WARN_WAIT_MIN or n > QUEUE_WARN_DEPTH
+            mark = "⚠️" if bad else "  "
+            lines.append(f"  {mark} {str(cat):<10} 排队 {n:>3} 个  最长等待 {wait} 分钟")
+        total_pending = sum(r[1] for r in rows)
+        subject = f"⏳ [看护] 任务队列积压告警（{total_pending} 个 pending）"
+        body = (
+            f"检测到任务队列积压（阈值：等待 >{QUEUE_WARN_WAIT_MIN}min 或 单类 >{QUEUE_WARN_DEPTH} 个）：\n\n"
+            + "\n".join(lines)
+            + "\n\n请检查执行器并发配置（CATEGORY_MAX_* / TASK_MAX_CONCURRENT）或异常任务。"
+        )
+        mail_ok = _send_alert_email(subject, body)
+
+    return {"key": "queue", "ok": False, "alerted": mail_ok, "mail_ok": mail_ok,
+            "reason": "队列积压" + ("，已告警" if mail_ok else "")}
+
+
 def _send_daily_report() -> None:
     """每日健康总览邮件（09:00 左右发一次）。"""
     global _last_daily_report_date
@@ -433,6 +497,15 @@ def _send_daily_report() -> None:
             last_time = last["ended_at"].strftime("%m-%d %H:%M")
 
         lines.append(f"  {status_str}  {key:25s}  {last_time:>14s}  {desc}")
+
+    # 队列积压一行（不告警，仅展示）
+    r_queue = _check_queue_depth(check_only=True)
+    if r_queue.get("queue") == "ok":
+        lines.append(f"  ✅  {'queue_depth':25s}  {'—':>14s}  {r_queue.get('detail', '队列正常')}")
+    elif r_queue.get("queue") == "empty":
+        lines.append(f"  ✅  {'queue_depth':25s}  {'—':>14s}  无 pending 任务")
+    else:
+        lines.append(f"  ⚠️  {'queue_depth':25s}  {'—':>14s}  {r_queue.get('reason', '队列积压')}")
 
     subject = f"📋 [看护日报] {today_str} 调度健康总览（{healthy_count}✅ {problem_count}❌）"
     body = (
@@ -486,6 +559,14 @@ def run_once(check_only: bool = False) -> int:
         print(f"  {status_str} {key:25s}  {detail}")
         results.append({"key": key, "ok": ok, "desc": desc,
                         "stale": r_stale, "fail": r_fail, "integrity": r_integ})
+
+    # 4. 队列积压检查（全类别汇总，不逐任务）
+    r_queue = _check_queue_depth(check_only)
+    q_status = "✅" if r_queue["ok"] else "❌"
+    q_detail = r_queue.get("detail") or r_queue.get("reason", "正常")
+    print(f"  {q_status} {'queue_depth':25s}  {q_detail}")
+    results.append({"key": "queue", "ok": r_queue["ok"], "desc": "任务队列积压",
+                    "queue": r_queue})
 
     # 心跳
     _write_heartbeat()

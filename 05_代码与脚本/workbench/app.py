@@ -41,7 +41,7 @@ app = Flask(__name__)
 from task_manager import TaskManager, _get_db, AsyncTaskState  # noqa: E402
 import psycopg.rows  # noqa: E402
 
-task_mgr = TaskManager(max_concurrent=3)
+task_mgr = TaskManager(max_concurrent=int(os.getenv("TASK_MAX_CONCURRENT", "5")))
 
 # KOL 监控模块（可选，导入失败不影响主服务）
 try:

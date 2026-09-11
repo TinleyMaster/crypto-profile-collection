@@ -38,7 +38,7 @@ if str(SCRIPTS_SRC) not in sys.path:
 
 app = Flask(__name__)
 
-from task_manager import TaskManager, _get_db  # noqa: E402
+from task_manager import TaskManager, _get_db, AsyncTaskState  # noqa: E402
 import psycopg.rows  # noqa: E402
 
 task_mgr = TaskManager(max_concurrent=3)
@@ -52,31 +52,29 @@ except Exception as _e:
     _kol_loaded = False
     print(f"[WARN] KOL 模块加载失败，功能将不可用: {_e}")
 
-# 解锁数据异步拉取状态（key: f"{asset_id}:{force}"）。
-# 注意：gunicorn 多 worker 部署下内存 dict 不共享，需文件持久化（见下方 UNLOCK_STATE_FILE），
-# 否则 POST 落在 A worker、status 轮询落在 B worker 时状态会丢失（表现为“拉取超时”）。
+# 解锁数据异步拉取状态（已迁移到 task_manager 的 TaskManager，走 sys.task 表）。
+# 以下为遗留死代码，仅作注释保留供参考。
+# 原 key 格式: f"{asset_id}:{force}"
+# 原文件: task_state/unlock_state.json
+# 迁移时间: 2026-09-11
+
+# 重新爬取异步任务状态
+# 迁移到 sys.async_task_state 表（AsyncTaskState 统一管理），替代文件+fcntl方案。
+# task_type = "recrawl", entity_key = str(asset_id)
+# 迁移时间: 2026-09-11
 
 
-def _unlock_async_key(asset_id: int, force: bool) -> str:
-    return f"{asset_id}:{1 if force else 0}"
-
-
-# 重新爬取异步任务状态（key: str(asset_id)）
-# 注意：gunicorn 多 worker 部署下内存 dict 不共享，需文件持久化，
-# 否则 POST 落在 A worker、status 轮询落在 B worker 时状态会丢失（表现为“爬取失败”）。
-RECRAWL_STATE_DIR = (
+# /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
+# 文件持久化，兼容 gunicorn 多 worker
+# 注：这是个简单的限流计数器，收益低暂不迁移到数据库
+_FEED_STATE_DIR = (
     Path("/app/task_state")
     if os.path.exists("/app/scripts/bin")
     else Path(__file__).resolve().parent / "task_state"
 )
-RECRAWL_STATE_DIR.mkdir(parents=True, exist_ok=True)
-RECRAWL_STATE_FILE = RECRAWL_STATE_DIR / "recrawl_state.json"
-RECRAWL_LOCK_FILE = RECRAWL_STATE_DIR / "recrawl_state.lock"
-
-# /api/scheduler/feed 全量查询限流（每 5 秒最多 1 次全量查询）
-# 文件持久化，兼容 gunicorn 多 worker
-_FEED_FULL_TS_FILE = RECRAWL_STATE_DIR / "feed_full_ts.json"
-_FEED_FULL_TS_LOCK = RECRAWL_STATE_DIR / "feed_full_ts.lock"
+_FEED_STATE_DIR.mkdir(parents=True, exist_ok=True)
+_FEED_FULL_TS_FILE = _FEED_STATE_DIR / "feed_full_ts.json"
+_FEED_FULL_TS_LOCK = _FEED_STATE_DIR / "feed_full_ts.lock"
 
 
 def _load_feed_full_ts() -> float:
@@ -96,8 +94,8 @@ def _save_feed_full_ts(ts: float) -> None:
     os.replace(tmp, _FEED_FULL_TS_FILE)
 
 
-class _RecrawlFileLock:
-    """基于 fcntl 的跨进程文件锁（与 task_manager 一致）。"""
+class _FileLock:
+    """基于 fcntl 的跨进程文件锁（仅 feed 限流等边缘场景使用；核心状态已走 DB）。"""
 
     def __init__(self, path: Path):
         self.path = path
@@ -113,44 +111,6 @@ class _RecrawlFileLock:
             fcntl.flock(self._fd, fcntl.LOCK_UN)
             os.close(self._fd)
             self._fd = None
-
-
-def _load_recrawl_state() -> dict:
-    if not RECRAWL_STATE_FILE.exists():
-        return {}
-    try:
-        with open(RECRAWL_STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError, OSError):
-        return {}
-
-
-def _save_recrawl_state(state: dict) -> None:
-    tmp = RECRAWL_STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
-    os.replace(tmp, RECRAWL_STATE_FILE)
-
-# 解锁数据异步状态文件（与 recrawl 同理，gunicorn 多 worker 下跨进程共享）
-UNLOCK_STATE_FILE = RECRAWL_STATE_DIR / "unlock_state.json"
-UNLOCK_LOCK_FILE = RECRAWL_STATE_DIR / "unlock_state.lock"
-
-
-def _load_unlock_state() -> dict:
-    if not UNLOCK_STATE_FILE.exists():
-        return {}
-    try:
-        with open(UNLOCK_STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError, OSError):
-        return {}
-
-
-def _save_unlock_state(state: dict) -> None:
-    tmp = UNLOCK_STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
-    os.replace(tmp, UNLOCK_STATE_FILE)
 
 # db_stats 延迟导入（启动时不立即连数据库，避免启动即崩溃）
 _db_stats_module = None
@@ -1288,7 +1248,7 @@ def api_scheduler_feed():
     # 全量查询（无 since_ts）限流：每 5 秒最多 1 次，文件锁跨 worker 共享
     if since_ts_val is None:
         now = time.time()
-        with _RecrawlFileLock(_FEED_FULL_TS_LOCK):
+        with _FileLock(_FEED_FULL_TS_LOCK):
             last_ts = _load_feed_full_ts()
             if now - last_ts < 5.0:
                 return jsonify({
@@ -1934,24 +1894,19 @@ def api_re_crawl_full(asset_id: int):
 
     启动后前端应轮询 /api/assets/<asset_id>/re-crawl-full/status 获取结果。
     """
-    key = str(asset_id)
-    with _RecrawlFileLock(RECRAWL_LOCK_FILE):
-        state = _load_recrawl_state()
-        existing = state.get(key)
-        if existing and existing.get("status") == "running":
-            return jsonify({"ok": True, "pending": True})
-        state[key] = {"status": "running", "result": None}
-        _save_recrawl_state(state)
+    state = AsyncTaskState("recrawl", str(asset_id))
+    # 原子尝试启动：已在 running 则返回 pending（幂等去重）
+    if not state.try_start({"result": None}):
+        return jsonify({"ok": True, "pending": True})
 
     def _worker():
         try:
             result = _run_re_crawl_full(asset_id)
         except Exception as e:
             result = {"ok": False, "error": str(e) or e.__class__.__name__}
-        with _RecrawlFileLock(RECRAWL_LOCK_FILE):
-            st = _load_recrawl_state()
-            st[key] = {"status": "done", "result": result}
-            _save_recrawl_state(st)
+            state.set_failed(str(e) or e.__class__.__name__, {"result": result})
+            return
+        state.set_done({"result": result})
 
     threading.Thread(target=_worker, daemon=True).start()
     return jsonify({"ok": True, "pending": True})
@@ -1960,15 +1915,16 @@ def api_re_crawl_full(asset_id: int):
 @app.route("/api/assets/<int:asset_id>/re-crawl-full/status")
 def api_re_crawl_full_status(asset_id: int):
     """查询重新爬取异步任务状态。"""
-    key = str(asset_id)
-    with _RecrawlFileLock(RECRAWL_LOCK_FILE):
-        state = _load_recrawl_state()
-        item = state.get(key)
-    if not item:
+    state = AsyncTaskState("recrawl", str(asset_id))
+    item = state.get()
+    status = item.get("status", "idle")
+    if status == "idle":
         return jsonify({"ok": True, "pending": False, "not_started": True})
-    if item.get("status") == "running":
+    if status == "running":
         return jsonify({"ok": True, "pending": True})
-    return jsonify({"ok": True, "pending": False, "result": item.get("result")})
+    # done / failed 都返回结果
+    payload = item.get("payload") or {}
+    return jsonify({"ok": True, "pending": False, "result": payload.get("result")})
 
 
 @app.route("/api/assets/<int:asset_id>/add_entry", methods=["POST"])

@@ -16,7 +16,6 @@ KOL 监控 Web 面板 — Flask 路由。
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import threading
@@ -26,12 +25,10 @@ from flask import Blueprint, jsonify, request
 # 路径兼容
 if os.path.exists("/app/scripts/src"):
     SCRIPTS_SRC = Path("/app/scripts/src")
-    STATE_DIR = Path("/app/task_state")
 else:
     WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
     CODE_ROOT = WORKSPACE_ROOT.parent
     SCRIPTS_SRC = CODE_ROOT / "scripts" / "src"
-    STATE_DIR = WORKSPACE_ROOT / "task_state"
 
 if str(SCRIPTS_SRC) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_SRC))
@@ -40,52 +37,24 @@ from . import db  # noqa: E402
 
 kol_bp = Blueprint("kol", __name__, url_prefix="/api/kol")
 
-# 手动抓取任务状态（文件持久化，跨 gunicorn worker 共享）
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-_CRAWL_STATE_FILE = STATE_DIR / "kol_crawl_state.json"
-_CRAWL_LOCK_FILE = STATE_DIR / "kol_crawl_state.lock"
+# 手动抓取任务状态（迁移到 sys.async_task_state 表，替代文件+fcntl方案）
+# task_type = "kol_crawl", entity_key = str(profile_id)
+# 迁移时间: 2026-09-11
 
-
-def _get_file_lock():
-    """跨进程文件锁（fcntl，Linux 可用；Windows 降级为线程锁）。"""
-    try:
-        import fcntl
-        fd = os.open(str(_CRAWL_LOCK_FILE), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        return fd
-    except (ImportError, OSError):
-        # Windows 或不支持时降级
-        return None
-
-
-def _release_file_lock(fd):
-    if fd is None:
-        return
-    try:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-    except (ImportError, OSError):
-        pass
-
-
-def _load_crawl_state() -> dict:
-    if not _CRAWL_STATE_FILE.exists():
-        return {}
-    try:
-        with open(_CRAWL_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # JSON key 是字符串，转回 int
-        return {int(k): v for k, v in data.items()}
-    except (json.JSONDecodeError, IOError, OSError):
-        return {}
-
-
-def _save_crawl_state(state: dict) -> None:
-    tmp = _CRAWL_STATE_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
-    os.replace(tmp, _CRAWL_STATE_FILE)
+# 从 task_manager 导入 AsyncTaskState（注意路径兼容）
+if os.path.exists("/app/workbench"):
+    import sys as _sys
+    if "/app/workbench" not in _sys.path:
+        _sys.path.insert(0, "/app/workbench")
+try:
+    from task_manager import AsyncTaskState  # noqa: E402
+except ImportError:
+    # 本地开发环境：从上级目录导入
+    import sys as _sys
+    _parent = str(Path(__file__).resolve().parent.parent)
+    if _parent not in _sys.path:
+        _sys.path.insert(0, _parent)
+    from task_manager import AsyncTaskState  # noqa: E402
 
 
 @kol_bp.route("/stats")
@@ -221,44 +190,23 @@ def crawl_profile(profile_id: int):
     if not profile:
         return jsonify({"error": "博主不存在"}), 404
 
-    lock_fd = _get_file_lock()
-    try:
-        state = _load_crawl_state()
-        if profile_id in state and state[profile_id].get("status") == "running":
-            return jsonify({"error": "抓取正在进行中"}), 409
-
-        state[profile_id] = {"status": "running", "started_at": _now_iso()}
-        _save_crawl_state(state)
-    finally:
-        _release_file_lock(lock_fd)
+    state = AsyncTaskState("kol_crawl", str(profile_id))
+    if not state.try_start({"started_at": _now_iso()}):
+        return jsonify({"error": "抓取正在进行中"}), 409
 
     def _run():
         try:
             from .runner import run_crawl_once
             stats = run_crawl_once(profile_id=profile_id)
-            lock_fd = _get_file_lock()
-            try:
-                state = _load_crawl_state()
-                state[profile_id] = {
-                    "status": "done",
-                    "finished_at": _now_iso(),
-                    "stats": stats,
-                }
-                _save_crawl_state(state)
-            finally:
-                _release_file_lock(lock_fd)
+            state.set_done({
+                "finished_at": _now_iso(),
+                "stats": stats,
+            })
         except Exception as e:
-            lock_fd = _get_file_lock()
-            try:
-                state = _load_crawl_state()
-                state[profile_id] = {
-                    "status": "failed",
-                    "finished_at": _now_iso(),
-                    "error": str(e),
-                }
-                _save_crawl_state(state)
-            finally:
-                _release_file_lock(lock_fd)
+            state.set_failed(str(e), {
+                "finished_at": _now_iso(),
+                "error": str(e),
+            })
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -269,9 +217,18 @@ def crawl_profile(profile_id: int):
 @kol_bp.route("/profiles/<int:profile_id>/crawl-status")
 def crawl_status(profile_id: int):
     """查询手动抓取状态。"""
-    state = _load_crawl_state()
-    status = state.get(profile_id, {"status": "idle"})
-    return jsonify(status)
+    state = AsyncTaskState("kol_crawl", str(profile_id))
+    item = state.get()
+    status = item.get("status", "idle")
+    if status == "idle":
+        return jsonify({"status": "idle"})
+    # 合并 payload 字段 + status，兼容原返回格式
+    payload = item.get("payload") or {}
+    result = {"status": status}
+    result.update(payload)
+    if status == "failed" and "error" not in result and item.get("error"):
+        result["error"] = item["error"]
+    return jsonify(result)
 
 
 @kol_bp.route("/signals")
@@ -435,46 +392,24 @@ def add_discovered_kol():
 
     # 如果是新增且开启自动抓取，异步触发首次抓取
     if is_new and auto_crawl:
-        lock_fd = _get_file_lock()
-        try:
-            state = _load_crawl_state()
-            if profile_id not in state or state[profile_id].get("status") != "running":
-                state[profile_id] = {"status": "running", "started_at": _now_iso()}
-                _save_crawl_state(state)
-                crawl_started = True
-        finally:
-            _release_file_lock(lock_fd)
+        state = AsyncTaskState("kol_crawl", str(profile_id))
+        crawl_started = state.try_start({"started_at": _now_iso()})
 
         if crawl_started:
             def _run():
                 try:
                     from .runner import run_crawl_once
                     stats = run_crawl_once(profile_id=profile_id)
-                    lock_fd = _get_file_lock()
-                    try:
-                        state = _load_crawl_state()
-                        state[profile_id] = {
-                            "status": "done",
-                            "finished_at": _now_iso(),
-                            "stats": stats,
-                        }
-                        _save_crawl_state(state)
-                    finally:
-                        _release_file_lock(lock_fd)
+                    state.set_done({
+                        "finished_at": _now_iso(),
+                        "stats": stats,
+                    })
                 except Exception as e:
-                    lock_fd = _get_file_lock()
-                    try:
-                        state = _load_crawl_state()
-                        state[profile_id] = {
-                            "status": "failed",
-                            "finished_at": _now_iso(),
-                            "error": str(e),
-                        }
-                        _save_crawl_state(state)
-                    finally:
-                        _release_file_lock(lock_fd)
+                    state.set_failed(str(e), {
+                        "finished_at": _now_iso(),
+                        "error": str(e),
+                    })
 
-            import threading
             t = threading.Thread(target=_run, daemon=True)
             t.start()
 

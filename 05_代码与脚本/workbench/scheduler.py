@@ -146,16 +146,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("cm_incremental", "30 6 * * *", "backfill_cm_onchain.py", ["--incremental"], "CM 链上指标 T-1 增量拉取（每日 06:30）", "core"),
     ("cm_validate_onchain", "0 7 * * *", "validate_cm_onchain.py", [], "CM 链上指标入库验证（每日 07:00）", "core"),
 
-    # ═══ 大盘数据源日频采集 ═══
-    # 恐贪指数（CMC trial API，日频）、BTC OI（Binance）、CEFI 指数（cryptoETF）、赛道 TVL（DeFi Llama）
-    # 供大盘 overview 接口读 DB 提速
-    ("fear_greed_daily", "30 3 * * *", "ingest_fear_greed.py", [], "恐贪指数日频采集（CMC，每日 03:30 UTC）", "core"),
-    ("btc_oi_daily", "45 3 * * *", "ingest_btc_oi.py", [], "BTC 未平仓合约日频采集（Binance，每日 03:45 UTC）", "core"),
-    ("cefi_index_daily", "0 4 * * *", "ingest_cefi_index.py", [], "CEFI 指数日频采集（cryptoETF，每日 04:00 UTC）", "core"),
-    ("category_tvl_daily", "15 4 * * *", "ingest_category_tvl.py", [], "赛道 TVL 日频快照（DeFi Llama，每日 04:15 UTC）", "core"),
+    # ═══ 大盘数据日频总控（采集 + 快照） ═══
+    # 串行执行：恐贪 → BTC OI → CEFI → 赛道 TVL → 大盘快照
+    # 替代原 5 个独立调度，保证依赖顺序，单点监控
+    ("market_daily", "0 3 * * *", "run_market_daily.py", [], "大盘数据日频总控（4个数据源采集 + 快照生成，串行）", "core"),
 
-    # ═══ 大盘每日快照 + 早报 ═══
-    ("market_snapshot_daily", "0 8 * * *", "build_market_snapshot.py", [], "大盘每日快照落库（每日 08:00 UTC，在数据源采集之后）", "core"),
+    # ═══ 早报快照 ═══
     ("daily_brief_snapshot", "30 8 * * *", "build_daily_brief.py", [], "每日早报快照落库+趋势diff（Asia/Shanghai 08:30）", "core"),
 ]
 

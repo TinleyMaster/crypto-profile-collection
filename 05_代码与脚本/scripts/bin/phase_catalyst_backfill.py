@@ -96,9 +96,19 @@ STEPS = [
 
 
 def load_config() -> dict:
-    config_path = BASE_DIR / "catalyst_rules.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """加载 catalyst_rules.yaml 配置，兼容本地与容器路径。"""
+    candidates = [
+        BASE_DIR / "catalyst_rules.yaml",
+        Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst_rules.yaml",
+        Path("/app/catalyst_rules.yaml"),
+    ]
+    for p in candidates:
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+    raise FileNotFoundError(
+        f"找不到 catalyst_rules.yaml，已探测: {[str(p) for p in candidates]}"
+    )
 
 
 # =====================================================================

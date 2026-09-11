@@ -129,9 +129,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底", "core"),
 
-    # ═══ 催化剂模块（全链路合并任务）═══
-    # P1-2: 催化剂降频为每12h（DeepSeek 额度有限）
+    # ═══ 催化剂模块 ═══
+    # P1-2/P1-6: 摄入+AI+thesis 每12h（DeepSeek 额度有限），决策管道慢通道每4h
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
+    # P1-6: 决策管道慢通道独立调度（4h 一次，仅跑二阶展开+G3G5+巡检，不消耗 LLM 额度）
+    ("catalyst_slow_pipeline", "30 */4 * * *", "phase_catalyst_pipeline.py", ["--slow"], "催化剂决策管道慢通道（每 4 小时）", "core"),
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),
@@ -167,9 +169,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ CMC 付费档持久化（需 Startup/Professional 套餐，403 时自动跳过）═══
     # OHLCV K线回填（每周一次，避免频繁消耗付费额度；配合解锁/回测分析）
-    ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天）", "core"),
-    # 价格表现统计 ATH/ATL（每周一次）
-    ("cmc_price_perf_weekly", "40 3 * * 1", "ingest_cmc_price_performance.py", ["--top", "1000"], "CMC 价格表现统计 ATH/ATL（每周一，top1000）", "core"),
+    ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天，需付费套餐，403 自动跳过）", "core"),
+
+    # ═══ ATH/ATL 免费回填（biz.asset_market_daily 自算，无需 CMC 付费套餐）═══
+    # 每日增量：只处理当日未算过的资产，用免费行情自算 all_time ATH/ATL/距高点回撤
+    ("perf_from_market_daily", "50 3 * * *", "backfill_perf_from_market_daily.py", ["--min-days", "15"], "ATH/ATL 免费自算回填（每日增量，asset_market_daily 源）", "core"),
 ]
 
 

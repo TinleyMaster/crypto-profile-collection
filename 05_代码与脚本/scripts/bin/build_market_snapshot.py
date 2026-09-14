@@ -15,17 +15,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_SRC = SCRIPT_DIR.parent / "src"
-WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
 
-for p in (str(PROJECT_SRC), str(WORKBENCH_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+# prod: /app/scripts/bin → /app（macro_market.py 在 /app）
+# local: scripts/bin → 05_代码与脚本（macro_market.py 在 05_代码与脚本/workbench）
+_code_root = os.path.dirname(os.path.dirname(str(SCRIPT_DIR)))
+for _cand in (
+    os.path.join(_code_root, "workbench"),
+    "/app",
+    _code_root,
+):
+    if _cand and os.path.isdir(_cand) and _cand not in sys.path:
+        sys.path.insert(0, _cand)
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 

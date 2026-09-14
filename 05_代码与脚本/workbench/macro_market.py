@@ -1193,6 +1193,7 @@ def fetch_binance_etf_flows() -> dict:
                     for a in assets_detail:
                         if not a["date"] or not a["symbol"]:
                             continue
+                        norm_sym = _normalize_etf_symbol(a["symbol"])
                         net_usd = round(a["net_flow_usd_m"] * 1_000_000, 2) if a["net_flow_usd_m"] is not None else None
                         cur.execute("""
                             INSERT INTO biz.etf_flow_daily
@@ -1203,7 +1204,7 @@ def fetch_binance_etf_flows() -> dict:
                                 net_flow_usd = EXCLUDED.net_flow_usd,
                                 net_flow_usd_m = EXCLUDED.net_flow_usd_m,
                                 updated_at = NOW()
-                        """, (a["symbol"], a["date"], net_usd, a["net_flow_usd_m"]))
+                        """, (norm_sym, a["date"], net_usd, a["net_flow_usd_m"]))
                 conn.commit()
         except Exception:
             # 回写失败不影响主流程

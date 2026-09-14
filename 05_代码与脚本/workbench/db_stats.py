@@ -3122,6 +3122,10 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
         # 保证 research 页面「研究结论」卡片不为空，用户至少能看到关键指标和数据概览
         thesis = _build_fallback_thesis(snapshot, structured_metrics, asset_id)
 
+    # ── 催化剂决策 + 影响（P1-4 收口：投研页消费已存在的 catalyst_signal / catalyst_impact）──
+    catalyst_signals = _load_catalyst_signals(asset_id)
+    catalyst_impacts = _load_catalyst_impacts(asset_id)
+
     return {
         "ok": True,
         "data": {
@@ -3137,10 +3141,77 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             "counts": snapshot["counts"],
             "messages": messages,
             "thesis": thesis,
+            "catalyst_signals": catalyst_signals,
+            "catalyst_impacts": catalyst_impacts,
             "created_at": str(notebook["created_at"]),
             "updated_at": str(notebook["updated_at"]),
         },
     }
+
+
+def _load_catalyst_signals(asset_id: int, limit: int = 20) -> list:
+    """投研页决策卡：取该资产 open+confirmed 的精决策信号（P1-4 收口 / B 路径）。
+
+    表已存在（fix_038 + fix_040），此函数仅作投研页前端消费，不建表。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT signal_id, catalyst_id, asset_id, tier, composite_score,
+                           entry_price, stop_loss, take_profit, rr_ratio,
+                           resonance_state, persistence, technical_state,
+                           expires_at, ai_reason, investment_cycle,
+                           a.title,
+                           a.canonical_symbol
+                    FROM biz.catalyst_signal cs
+                    JOIN core.asset a ON a.asset_id = cs.asset_id
+                    LEFT JOIN biz.asset_catalyst ac ON ac.catalyst_id = cs.catalyst_id
+                    WHERE cs.asset_id = %s
+                      AND cs.status = 'open'
+                      AND cs.resonance_state = 'confirmed'
+                      AND cs.tier IN ('A', 'B', 'C')
+                    ORDER BY (CASE cs.tier WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END),
+                             cs.composite_score DESC
+                    LIMIT %s
+                    """,
+                    (asset_id, limit),
+                )
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
+
+
+def _load_catalyst_impacts(asset_id: int, window_days: int = 90) -> list:
+    """投研页催化剂影响卡：取该资产近 N 天事件×资产的定向影响推导（P1-4 收口 / A 路径）。
+
+    消费 catalyst_impact（规则推导，零 LLM）。失败静默降级为空。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ci.impact_direction, ci.impact_strength, ci.horizon_days,
+                           ac.catalyst_id, ac.title, ac.published_at,
+                           ac.source_url, ac.event_category, ac.ai_summary
+                    FROM biz.catalyst_impact ci
+                    JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+                    WHERE ci.asset_id = %s
+                      AND ac.published_at >= NOW() - make_interval(days => %s)
+                    ORDER BY ac.published_at DESC
+                    LIMIT 30
+                    """,
+                    (asset_id, window_days),
+                )
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                return [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        return []
 
 
 def _build_fallback_thesis(snapshot: dict, structured_metrics: dict, asset_id: int) -> dict:

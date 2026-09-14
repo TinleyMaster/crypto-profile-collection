@@ -306,6 +306,216 @@
             border-radius: 10px;
         }
 
+        /* ══ P1-4 收口：催化剂决策 / 影响 / 早报融合 ══ */
+        .r-catalyst {
+            flex-shrink: 0;
+            margin: 16px 20px 0;
+            padding: 14px 16px;
+            background: #14181f;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+        }
+
+        .r-catalyst .c-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+
+        .r-catalyst .c-head h3 {
+            margin: 0;
+            font-size: 14px;
+            color: #e6e6e6;
+        }
+
+        .c-sig-card {
+            padding: 10px 12px;
+            margin-bottom: 10px;
+            border: 1px solid #23272f;
+            border-left: 3px solid #8a94a6;
+            border-radius: 8px;
+            background: #0f1319;
+        }
+
+        .c-sig-card.t-a {
+            border-left-color: #e5484d;
+        }
+
+        .c-sig-card.t-b {
+            border-left-color: #f59e0b;
+        }
+
+        .c-sig-card.t-c {
+            border-left-color: #8a94a6;
+        }
+
+        .c-sig-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: #e6e6e6;
+            font-weight: 600;
+        }
+
+        .c-tier {
+            display: inline-block;
+            min-width: 18px;
+            height: 18px;
+            line-height: 18px;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 700;
+            color: #fff;
+            border-radius: 4px;
+            padding: 0 4px;
+        }
+
+        .t-a .c-tier {
+            background: #e5484d;
+        }
+
+        .t-b .c-tier {
+            background: #f59e0b;
+        }
+
+        .t-c .c-tier {
+            background: #6b7280;
+        }
+
+        .c-score {
+            margin-left: auto;
+            color: #10b981;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .c-reason {
+            margin: 8px 0;
+            font-size: 12px;
+            color: #c8cdd6;
+            line-height: 1.6;
+        }
+
+        .c-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+        }
+
+        .c-cell {
+            font-size: 11px;
+            color: #8a94a6;
+        }
+
+        .c-cell span {
+            display: block;
+        }
+
+        .c-cell b {
+            color: #e6e6e6;
+            font-weight: 600;
+        }
+
+        .c-cell b.sl {
+            color: #fca5a5;
+        }
+
+        .c-cell b.tp {
+            color: #a7f3d0;
+        }
+
+        .c-expire {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #9aa4b2;
+        }
+
+        .c-imp {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .c-imp:last-child {
+            border-bottom: none;
+        }
+
+        .c-imp-dir {
+            flex-shrink: 0;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .cat-bullish .c-imp-dir {
+            color: #a7f3d0;
+            background: #14532d33;
+        }
+
+        .cat-bearish .c-imp-dir {
+            color: #fca5a5;
+            background: #7f1d1d33;
+        }
+
+        .cat-neutral .c-imp-dir {
+            color: #c8cdd6;
+            background: #1e222a;
+        }
+
+        .c-imp-t {
+            flex: 1;
+            font-size: 12px;
+            color: #7aa2f7;
+            text-decoration: none;
+        }
+
+        .c-imp-t:hover {
+            text-decoration: underline;
+        }
+
+        .c-imp-d {
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .c-brief {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0;
+            border-bottom: 1px solid #1e222a;
+        }
+
+        .c-brief:last-child {
+            border-bottom: none;
+        }
+
+        .c-brief-k {
+            flex-shrink: 0;
+            font-size: 11px;
+            font-weight: 600;
+            color: #f59e0b;
+        }
+
+        .c-brief-c {
+            flex-shrink: 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: #e6e6e6;
+        }
+
+        .c-brief-t {
+            flex: 1;
+            font-size: 12px;
+            color: #9aa4b2;
+        }
+
         /* 一页结论 */
         .r-onepage {
             flex-shrink: 0;
@@ -2054,6 +2264,30 @@
                 </div>
             </div>
             <div class="r-thesis" id="r-thesis" style="display:none"></div>
+            <div class="r-catalyst" id="catalyst-signals-section" style="display:none">
+                <div class="c-head">
+                    <h3>⚡ 催化剂决策</h3><span style="font-size:11px;color:#6b7280">open + confirmed · A/B/C</span>
+                </div>
+                <div id="catalyst-signals-content">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-catalyst" id="catalyst-impacts-section" style="display:none">
+                <div class="c-head">
+                    <h3>🧭 催化剂影响</h3><span style="font-size:11px;color:#6b7280">近 90 天事件影响</span>
+                </div>
+                <div id="catalyst-impacts-content">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+            <div class="r-catalyst" id="catalyst-brief-section" style="display:none">
+                <div class="c-head">
+                    <h3>📰 今日大盘高亮 · 本品相关</h3><span style="font-size:11px;color:#6b7280">来自早报聚合</span>
+                </div>
+                <div id="catalyst-brief-content">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
             <div class="r-competitors" id="r-competitors" style="display:none">
                 <div class="c-head">
                     <h3>🏆 同赛道竞品对比</h3>
@@ -2437,6 +2671,99 @@
             loadTokenomics();
             loadMarketHistory();
             loadSignals();
+            renderCatalyst(d);          // P1-4 收口：催化剂决策卡 + 影响卡
+            loadDailyBriefHighlight();  // P1-4 收口：融合当日早报高亮
+        }
+
+        // ── P1-4 收口：催化剂决策卡 + 影响卡 + 早报融合 ──
+        function renderCatalyst (d) {
+            const sigs = d.catalyst_signals || [];
+            const imps = d.catalyst_impacts || [];
+            // 决策卡（B 路径：catalyst_signal 精决策信号）
+            var sigEl = document.getElementById('catalyst-signals-content');
+            if (sigEl) {
+                if (!sigs.length) {
+                    sigEl.innerHTML = '<div class="suggestion">当前无 open+confirmed 的催化剂决策信号</div>';
+                } else {
+                    var tierMap = { A: ['A', 't-a'], B: ['B', 't-b'], C: ['C', 't-c'] };
+                    var techMap = { up: '日线看涨', range: '日线震荡', down: '日线看跌' };
+                    var cycleMap = { short_term: '短期', mid_term: '中期', long_term: '长期' };
+                    var html = '';
+                    sigs.forEach(function (s) {
+                        var tr = tierMap[s.tier] || [s.tier || 'C', 't-c'];
+                        var num = function (v, d) { return (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d || 2); };
+                        var thead = escapeHtml(s.title || s.canonical_symbol || ('信号#' + s.signal_id));
+                        var reason = escapeHtml(s.ai_reason || '');
+                        html += '<div class="c-sig-card t-' + (s.tier || 'c').toLowerCase() + '">'
+                            + '<div class="c-sig-head"><span class="c-tier">' + escapeHtml(tr[0]) + '</span>' + thead
+                            + ' <span class="c-score">' + s.composite_score + '分</span></div>';
+                        if (reason) html += '<div class="c-reason">💡 ' + reason + '</div>';
+                        html += '<div class="c-grid">'
+                            + '<div class="c-cell"><span>周期</span><b>' + escapeHtml(cycleMap[s.investment_cycle] || s.investment_cycle || '—') + '</b></div>'
+                            + '<div class="c-cell"><span>入场</span><b>' + num(s.entry_price) + '</b></div>'
+                            + '<div class="c-cell"><span>止损</span><b class="sl">' + num(s.stop_loss) + '</b></div>'
+                            + '<div class="c-cell"><span>止盈</span><b class="tp">' + num(s.take_profit) + '</b></div>'
+                            + '<div class="c-cell"><span>盈亏比</span><b>' + num(s.rr_ratio) + '</b></div>'
+                            + '<div class="c-cell"><span>技术面</span><b>' + escapeHtml(techMap[s.technical_state] || s.technical_state || '—') + '</b></div>'
+                            + '</div>';
+                        var ed = s.expires_at ? new Date(s.expires_at) : null;
+                        if (ed && !isNaN(ed)) html += '<div class="c-expire">⏳ 有效期至 ' + escapeHtml(ed.toLocaleString('zh-CN')) + '</div>';
+                        html += '</div>';
+                    });
+                    sigEl.innerHTML = html;
+                }
+                document.getElementById('catalyst-signals-section').style.display = 'block';
+            }
+            // 影响卡（A 路径：catalyst_impact 定向影响）
+            var impEl = document.getElementById('catalyst-impacts-content');
+            if (impEl) {
+                if (!imps.length) {
+                    impEl.innerHTML = '<div class="suggestion">近 90 天无催化剂影响数据</div>';
+                } else {
+                    var dirMap = { bullish: '看多', bearish: '看空', neutral: '中性' };
+                    var stgMap = { strong: '强', medium: '中', weak: '弱' };
+                    var h = '';
+                    imps.forEach(function (c) {
+                        var dir = c.impact_direction || 'neutral';
+                        h += '<div class="c-imp cat-' + escapeHtml(dir) + '">'
+                            + '<span class="c-imp-dir">' + escapeHtml(dirMap[dir] || dir) + ' · ' + escapeHtml(stgMap[c.impact_strength] || c.impact_strength || '') + '</span>'
+                            + '<a class="c-imp-t" href="' + attrEscape(c.source_url || '#') + '" target="_blank" rel="noopener">' + escapeHtml(c.title || '') + '</a>'
+                            + '<span class="c-imp-d">' + (c.published_at ? escapeHtml(String(c.published_at).slice(0, 10)) : '') + '</span>'
+                            + '</div>';
+                    });
+                    impEl.innerHTML = h;
+                }
+                document.getElementById('catalyst-impacts-section').style.display = 'block';
+            }
+        }
+
+        async function loadDailyBriefHighlight () {
+            // 融合当日早报高亮（与本品相关）：静默降级，缺失不影响主卡
+            try {
+                const res = await fetch('/api/market/overview');
+                const d = await res.json();
+                const hl = (d.overview && d.overview.highlight_signals) || (d.overview && d.overview.highlights) || [];
+                const myId = Number(window.RESEARCH_DATA && window.RESEARCH_DATA.asset_id);
+                const matched = hl.filter(function (h) {
+                    return (h.asset_id !== undefined && Number(h.asset_id) === myId)
+                        || (h.symbol && String(h.symbol).toUpperCase() === String(window.RESEARCH_DATA && window.RESEARCH_DATA.title || '').toUpperCase());
+                });
+                var el = document.getElementById('catalyst-brief-content');
+                if (el) {
+                    if (!matched.length) {
+                        el.innerHTML = '<div class="suggestion">今日大盘高亮无本品相关信号</div>';
+                    } else {
+                        var html = '';
+                        matched.forEach(function (m) {
+                            html += '<div class="c-brief"><span class="c-brief-k">' + escapeHtml(m.key_metric || '') + '</span>'
+                                + '<span class="c-brief-t">' + escapeHtml(m.trigger_logic || '') + '</span>'
+                                + '<span class="c-brief-c">' + escapeHtml(m.target || '') + '</span></div>';
+                        });
+                        el.innerHTML = html;
+                    }
+                    document.getElementById('catalyst-brief-section').style.display = 'block';
+                }
+            } catch (e) { /* 静默降级 */ }
         }
 
         function renderThesis (d) {

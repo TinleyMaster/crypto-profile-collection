@@ -159,8 +159,9 @@ def extract_snapshot(overview: dict) -> dict:
 
     # 衍生品
     der = _get(overview, "dimensions", "3衍生品", "data") or {}
-    btc_oi = _to_float(der.get("btc_open_interest"))
-    btc_funding = _to_float(der.get("btc_funding_rate"))
+    # 字段名兼容：fetch_binance_derivatives 返回 open_interest/funding_rate（无 btc_ 前缀）
+    btc_oi = _to_float(der.get("open_interest") if der.get("open_interest") is not None else der.get("btc_open_interest"))
+    btc_funding = _to_float(der.get("funding_rate") if der.get("funding_rate") is not None else der.get("btc_funding_rate"))
     btc_oi_change_7d = _to_float(der.get("btc_oi_change_7d_pct"))
 
     # 链上

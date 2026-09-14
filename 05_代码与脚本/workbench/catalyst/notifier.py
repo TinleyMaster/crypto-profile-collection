@@ -148,7 +148,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     ensure_notification_table(conn)
 
     # 找出 A 级 open 信号
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT s.signal_id, s.tier, s.composite_score, s.kind,
                s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
                c.title AS catalyst_title, c.source_code,

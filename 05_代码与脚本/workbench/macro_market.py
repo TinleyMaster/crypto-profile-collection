@@ -7297,6 +7297,8 @@ def fetch_event_calendar() -> dict:
     token_events: list[dict] = []
     try:
         import logging
+        import psycopg  # noqa: F401  (psycopg.rows.dict_row 需要)
+        import psycopg.rows
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
 
@@ -7321,7 +7323,7 @@ def fetch_event_calendar() -> dict:
                     event_date = r["unlock_date"]
                     ratio_mcap = r.get("unlock_ratio_mcap")
                     token_events.append({
-                        "date": str(event_date.date()) if event_date else None,
+                        "date": event_date.isoformat() if event_date else None,
                         "event": f"{r['symbol']} 解锁"
                                  + (f" {ratio_mcap:.2f}%" if ratio_mcap else ""),
                         "type": r.get("event_type") or "unlock",

@@ -862,7 +862,7 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             allocation_json, burn_info, emission_schedule,
             inflation_info, governance_info, utility_info,
             raw_text, extracted_by, confidence, extraction_notes,
-            chart_images
+            chart_images, extract_status, next_retry_at
         ) VALUES (
             %(asset_id)s, %(source_urls)s,
             %(total_supply)s, %(max_supply)s, %(circulating_supply)s,
@@ -871,7 +871,7 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             %(allocation_json)s, %(burn_info)s, %(emission_schedule)s,
             %(inflation_info)s, %(governance_info)s, %(utility_info)s,
             %(raw_text)s, %(extracted_by)s, %(confidence)s, %(extraction_notes)s,
-            %(chart_images)s
+            %(chart_images)s, 'ok', NULL
         )
         ON CONFLICT (asset_id) DO UPDATE SET
             source_urls = EXCLUDED.source_urls,
@@ -895,6 +895,8 @@ def save_tokenomics(conn, asset_id: int, source_urls: list[str],
             confidence = EXCLUDED.confidence,
             extraction_notes = EXCLUDED.extraction_notes,
             chart_images = EXCLUDED.chart_images,
+            extract_status = 'ok',
+            next_retry_at = NULL,
             updated_at = NOW()
     """
     params = {
@@ -939,7 +941,7 @@ def main() -> None:
     settings = get_settings(require_database=True)
 
     with get_connection(settings.database_url) as conn:
-        # 0. 确保 chart_images 列存在
+        # 0. 确保扩展列存在（chart_images / extract_status / next_retry_at）
         with conn.cursor() as cur:
             cur.execute("""
                 DO $$
@@ -950,6 +952,20 @@ def main() -> None:
                         AND column_name = 'chart_images'
                     ) THEN
                         ALTER TABLE biz.asset_tokenomics ADD COLUMN chart_images JSONB;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'biz' AND table_name = 'asset_tokenomics'
+                        AND column_name = 'extract_status'
+                    ) THEN
+                        ALTER TABLE biz.asset_tokenomics ADD COLUMN extract_status VARCHAR(32) DEFAULT 'ok';
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'biz' AND table_name = 'asset_tokenomics'
+                        AND column_name = 'next_retry_at'
+                    ) THEN
+                        ALTER TABLE biz.asset_tokenomics ADD COLUMN next_retry_at TIMESTAMPTZ;
                     END IF;
                 END $$;
             """)

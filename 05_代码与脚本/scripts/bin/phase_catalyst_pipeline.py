@@ -963,6 +963,123 @@ def run_slow_g3g5(conn, config: dict,
 
 
 # =====================================================================
+# G7: AI 决策增强（慢通道）
+# =====================================================================
+
+def run_ai_decision(conn, config: dict, limit: int | None = None) -> dict:
+    """为 A/B 级 open 信号补全 AI 推荐原因 + 投资周期（G7）。
+
+    - 处理对象：status='open' AND tier IN ('A','B') AND ai_reason IS NULL
+    - 用 LLM 逐条生成 reasoning + investment_cycle，
+      target_price/stop_loss 为对规则值的评审，AI 有建议则覆盖
+    - LLM 不可用或失败：静默跳过，不影响慢通道其他步骤
+
+    Returns:
+        dict: {"enhanced": n, "failed": n, "skipped": n}
+    """
+    from crypto_research.config import get_settings
+    try:
+        from crypto_research.clients.llm_client import LLMClient
+    except Exception:  # noqa: BLE001
+        return {"enhanced": 0, "failed": 0, "skipped": 0}
+
+    from catalyst.decision import AIDecisionGenerator
+
+    settings = get_settings(require_database=False)
+    llm = LLMClient(settings, rpm=10, timeout=90)
+    if not llm.is_available():
+        return {"enhanced": 0, "failed": 0, "skipped": 0}
+
+    ai_gen = AIDecisionGenerator(llm)
+
+    # 待补全信号（含催化剂标题、摘要、评分、技术面、盈亏）
+    query = """
+        SELECT s.signal_id,
+               a.canonical_symbol AS symbol,
+               a.canonical_name,
+               s.kind, s.composite_score, s.tier,
+               s.technical_state, s.persistence,
+               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+               s.regime,
+               ac.title AS catalyst_title,
+               ac.ai_summary
+        FROM biz.catalyst_signal s
+        JOIN core.asset a ON s.asset_id = a.asset_id
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.status = 'open'
+          AND s.tier IN ('A', 'B')
+          AND s.ai_reason IS NULL
+        ORDER BY s.composite_score DESC
+    """
+    params: list = []
+    if limit:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        return {"enhanced": 0, "failed": 0, "skipped": 0}
+
+    enhanced = 0
+    failed = 0
+    for r in rows:
+        try:
+            dec = ai_gen.generate(
+                symbol=r["symbol"],
+                asset_name=r["canonical_name"],
+                kind=r["kind"],
+                catalyst_title=r["catalyst_title"],
+                catalyst_summary=r.get("ai_summary"),
+                regime=r["regime"],
+                composite_score=int(r["composite_score"] or 0),
+                tier=r["tier"],
+                technical_state=r["technical_state"],
+                persistence=r["persistence"],
+                take_profit=_to_num(r.get("take_profit")),
+                stop_loss=_to_num(r.get("stop_loss")),
+                entry_price=_to_num(r.get("entry_price")),
+                rr_ratio=_to_num(r.get("rr_ratio")),
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"    ⚠️  signal {r['signal_id']} AI 决策异常: {e}")
+            failed += 1
+            continue
+
+        if dec is None or (not dec.get("reasoning") and not dec.get("investment_cycle")):
+            failed += 1
+            continue
+
+        # 组合目标价/止损（AI 有建议则覆盖，否则保留规则值）
+        new_tp = dec.get("target_price") if dec.get("target_price") is not None else _to_num(r.get("take_profit"))
+        new_sl = dec.get("stop_loss") if dec.get("stop_loss") is not None else _to_num(r.get("stop_loss"))
+
+        conn.execute(
+            """
+            UPDATE biz.catalyst_signal
+            SET ai_reason = %s,
+                investment_cycle = %s,
+                take_profit = %s,
+                stop_loss = %s,
+                updated_at = NOW()
+            WHERE signal_id = %s
+            """,
+            (dec.get("reasoning"), dec.get("investment_cycle"), new_tp, new_sl, r["signal_id"]),
+        )
+        enhanced += 1
+
+    return {"enhanced": enhanced, "failed": failed, "skipped": len(rows) - enhanced - failed}
+
+
+def _to_num(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# =====================================================================
 # 健康检查
 # =====================================================================
 
@@ -1244,6 +1361,15 @@ def main() -> int:
             # 3. 过期巡检
             n_expired = expire_signals(conn)
             print(f"  过期巡检: {n_expired} 条信号置为 expired")
+
+            # 3.5 G7 AI 决策增强（补全推荐原因 + 投资周期；LLM 不可用时跳过）
+            ai_result = run_ai_decision(conn, config, limit=args.limit)
+            n_ai = ai_result.get("enhanced", 0)
+            n_ai_fail = ai_result.get("failed", 0)
+            if n_ai or n_ai_fail:
+                print(f"  G7 AI 决策: 补全 {n_ai} 条, 失败 {n_ai_fail} 条")
+            else:
+                print(f"   G7 AI 决策: 无可补全信号（ai_reason 已填充）")
 
             # 4. 慢通道汇总邮件
             digest_stats = {

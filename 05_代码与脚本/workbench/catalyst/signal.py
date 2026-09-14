@@ -59,6 +59,10 @@ class CatalystSignalResult:
     take_profit: Optional[float] = None
     rr_ratio: Optional[float] = None
 
+    # G7 AI 决策（慢通道 LLM 增强）
+    ai_reason: Optional[str] = None
+    investment_cycle: Optional[str] = None
+
 
 class CatalystSignalBuilder:
     """G6 信号构建器。
@@ -116,6 +120,8 @@ class CatalystSignalBuilder:
               entry_price: Optional[float] = None,
               stop_loss: Optional[float] = None,
               take_profit: Optional[float] = None,
+              ai_reason: Optional[str] = None,
+              investment_cycle: Optional[str] = None,
               ) -> CatalystSignalResult:
         """构建一条信号。
 
@@ -179,6 +185,8 @@ class CatalystSignalBuilder:
             stop_loss=stop_loss,
             take_profit=take_profit,
             rr_ratio=rr_ratio,
+            ai_reason=ai_reason,
+            investment_cycle=investment_cycle,
             composite_score=composite_score,
             tier=tier,
             confidence=confidence,
@@ -210,6 +218,7 @@ class CatalystSignalBuilder:
                 entry_price, stop_loss, take_profit, rr_ratio,
                 composite_score, tier, confidence,
                 regime, invalidation,
+                ai_reason, investment_cycle,
                 expires_at, status
             ) VALUES (
                 %(catalyst_id)s, %(asset_id)s,
@@ -221,6 +230,7 @@ class CatalystSignalBuilder:
                 %(entry_price)s, %(stop_loss)s, %(take_profit)s, %(rr_ratio)s,
                 %(composite_score)s, %(tier)s, %(confidence)s,
                 %(regime)s, %(invalidation)s,
+                %(ai_reason)s, %(investment_cycle)s,
                 %(expires_at)s, %(status)s
             )
             ON CONFLICT (catalyst_id, asset_id) DO UPDATE SET
@@ -241,6 +251,9 @@ class CatalystSignalBuilder:
                 confidence = EXCLUDED.confidence,
                 regime = COALESCE(EXCLUDED.regime, biz.catalyst_signal.regime),
                 invalidation = COALESCE(EXCLUDED.invalidation, biz.catalyst_signal.invalidation),
+                ai_reason = COALESCE(EXCLUDED.ai_reason, biz.catalyst_signal.ai_reason),
+                investment_cycle = COALESCE(
+                    EXCLUDED.investment_cycle, biz.catalyst_signal.investment_cycle),
                 expires_at = EXCLUDED.expires_at,
                 status = CASE
                     WHEN biz.catalyst_signal.status = 'open' THEN EXCLUDED.status
@@ -269,6 +282,8 @@ class CatalystSignalBuilder:
                 "confidence": signal.confidence,
                 "regime": signal.regime,
                 "invalidation": signal.invalidation,
+                "ai_reason": signal.ai_reason,
+                "investment_cycle": signal.investment_cycle,
                 "expires_at": signal.expires_at,
                 "status": signal.status,
             },

@@ -151,7 +151,9 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     rows = conn.execute("""
         SELECT s.signal_id, s.tier, s.composite_score, s.kind,
                s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
-               c.title AS catalyst_title, c.source_code
+               c.title AS catalyst_title, c.source_code,
+               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+               s.investment_cycle, s.ai_reason
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
@@ -203,6 +205,43 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 def _build_fast_alert_html(row) -> str:
     """构建 A 级快提醒邮件 HTML。"""
     score = row["composite_score"] or 0
+    cycle = row.get("investment_cycle")
+    reason = row.get("ai_reason")
+    tp = row.get("take_profit")
+    sl = row.get("stop_loss")
+    rr = row.get("rr_ratio")
+
+    cycle_html = f'<div style="font-size:18px;font-weight:600;margin-top:8px">{cycle}</div>' if cycle else \
+        '<div style="font-size:12px;color:#9ca3af;margin-top:8px">慢通道 G7 补全中</div>'
+
+    price_rows = ""
+    if tp is not None or sl is not None:
+        price_rows = f"""
+        <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap">
+          <div style="flex:1;min-width:120px;padding:10px;background:#f0fdf4;border-radius:8px;text-align:center">
+            <div style="font-size:11px;color:#059669;text-transform:uppercase">目标价</div>
+            <div style="font-size:16px;font-weight:700;color:#059669;margin-top:4px">{_fmt_price(tp)}</div>
+          </div>
+          <div style="flex:1;min-width:120px;padding:10px;background:#fef2f2;border-radius:8px;text-align:center">
+            <div style="font-size:11px;color:#dc2626;text-transform:uppercase">止损价</div>
+            <div style="font-size:16px;font-weight:700;color:#dc2626;margin-top:4px">{_fmt_price(sl)}</div>
+          </div>
+          <div style="flex:1;min-width:120px;padding:10px;background:#eff6ff;border-radius:8px;text-align:center">
+            <div style="font-size:11px;color:#2563eb;text-transform:uppercase">盈亏比</div>
+            <div style="font-size:16px;font-weight:700;color:#2563eb;margin-top:4px">{f"{rr:.1f}" if rr is not None else "—"}</div>
+          </div>
+        </div>
+        """
+
+    reason_html = ""
+    if reason:
+        reason_html = f"""
+        <div style="border-top:1px solid #f3f4f6;padding-top:14px;margin-top:14px">
+          <div style="font-size:12px;color:#6b7280;margin-bottom:6px">🤖 AI 推荐原因</div>
+          <div style="font-size:13px;line-height:1.6;color:#111827">{reason}</div>
+        </div>
+        """
+
     return f"""
     <div style="font-family:sans-serif;max-width:640px;margin:auto;padding:20px">
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:20px;border-radius:12px 12px 0 0">
@@ -221,12 +260,15 @@ def _build_fast_alert_html(row) -> str:
             <div style="font-size:11px;color:#6b7280;text-transform:uppercase">信息源</div>
             <div style="font-size:18px;font-weight:600;margin-top:8px">{row['source_code']}</div>
           </div>
+          <div style="flex:1">
+            <div style="font-size:11px;color:#6b7280;text-transform:uppercase">投资周期</div>
+            {cycle_html}
+          </div>
         </div>
 
-        <div style="border-top:1px solid #f3f4f6;padding-top:14px">
-          <div style="font-size:12px;color:#6b7280;margin-bottom:6px">催化剂标题</div>
-          <div style="font-size:14px;line-height:1.6;color:#111827">{row['catalyst_title'] or '—'}</div>
-        </div>
+        {price_rows}
+
+        {reason_html}
 
         <div style="margin-top:20px;padding:12px;background:#f5f3ff;border-radius:8px">
           <div style="font-size:12px;color:#7c3aed;font-weight:500">⚡ 快通道信号 · 请关注慢通道深度分析</div>
@@ -310,6 +352,8 @@ def _recent_new_signals(conn, tier: str, hours: int = 24) -> list[dict]:
         SELECT DISTINCT ON (a.asset_id)
                s.signal_id, s.tier, s.composite_score, s.kind,
                s.technical_state, s.persistence,
+               s.investment_cycle, s.ai_reason,
+               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                a.canonical_name, a.canonical_symbol AS symbol,
                ac.title AS catalyst_title
         FROM biz.catalyst_signal s
@@ -371,31 +415,68 @@ def _truncate(text: str, length: int = 40) -> str:
 
 
 def _build_signal_table(rows, tier: str) -> str:
-    """构建单级别信号表格（不重复渲染级别列，标题缩略 + 事件类型显示 kind）。"""
+    """构建单级别信号决策卡片：代币 + 周期 + AI推荐原因 + 目标价/止损/盈亏比。"""
     tier_color = {"A": "#7c3aed", "B": "#3b82f6"}.get(tier, "#6b7280")
-    rows_html = ""
+    blocks = ""
     for r in rows[:15]:  # 每级别最多 15 条
         tech = _tech_cn(r.get("technical_state"))
         persist = _persist_cn(r.get("persistence"))
-        kind = _kind_cn(r.get("kind"))
-        title = _truncate(r.get("catalyst_title") or "", 40)
-        rows_html += f"""
-        <tr>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">
-            <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:4px;background:{tier_color};color:#fff;font-size:11px;font-weight:700">{tier}</span>
-          </td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-weight:600">{r["symbol"]}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:13px">{r["canonical_name"]}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{kind}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151">{title}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:600">{(r["composite_score"] or 0):.0f}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">
-            <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3">{tech}</span>
-          </td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{persist}</td>
-        </tr>
+        cycle = r.get("investment_cycle") or "—"
+        reason = r.get("ai_reason") or r.get("catalyst_title") or "暂无 AI 推荐原因（慢通道 G7 补全中）"
+        reason = _truncate(reason, 160)
+
+        # 价格区间（目标/止损/盈亏比）
+        tp = r.get("take_profit")
+        sl = r.get("stop_loss")
+        rr = r.get("rr_ratio")
+        price_html = "<span style='color:#9ca3af'>待补</span>"
+        if tp is not None or sl is not None:
+            tp_txt = _fmt_price(tp)
+            sl_txt = _fmt_price(sl)
+            rr_txt = f"{rr:.1f}" if rr is not None else "—"
+            price_html = (
+                f"目标 <b style='color:#059669'>{tp_txt}</b> &nbsp;·&nbsp; "
+                f"止损 <b style='color:#dc2626'>{sl_txt}</b> &nbsp;·&nbsp; 盈亏比 {rr_txt}"
+            )
+
+        badge = (f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:{tier_color};'
+                 f'color:#fff;font-size:11px;font-weight:700">{tier}</span>')
+        cycle_badge = (f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;'
+                       f'background:#eef2ff;color:#4338ca;font-size:11px;font-weight:600">{cycle}</span>')
+
+        blocks += f"""
+        <div style="border:1px solid #e5e7eb;border-left:4px solid {tier_color};border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            {badge}
+            <span style="font-weight:700;font-size:14px">{r["symbol"]}</span>
+            <span style="color:#6b7280;font-size:12px">{r["canonical_name"]}</span>
+            {cycle_badge}
+            <span style="margin-left:auto;font-weight:600;font-size:13px;color:#374151">评分 {(r["composite_score"] or 0):.0f}</span>
+          </div>
+          <div style="margin-top:8px;font-size:13px;color:#111827;line-height:1.5">{reason}</div>
+          <div style="margin-top:8px;font-size:12px">{price_html}</div>
+          <div style="margin-top:6px;font-size:11px;color:#6b7280">
+            技术面 {tech} · 持续性 {persist}
+          </div>
+        </div>
         """
-    return rows_html or f'<tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">过去 24h 无 {tier} 级新信号</td></tr>'
+    if not blocks:
+        return f'<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;border-radius:8px">过去 24h 无 {tier} 级新信号</div>'
+    return blocks
+
+
+def _fmt_price(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        f = float(v)
+        if f >= 1000:
+            return f"{f:,.1f}"
+        if f >= 1:
+            return f"{f:,.4f}"
+        return f"{f:.8f}"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
@@ -410,8 +491,6 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
     so_count = stats.get("second_order_count", 0)
     expired = stats.get("expired_count", 0)
 
-    header = "".join(f"""<th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">{_col}</th>""" for _col in (
-        "级别", "代币", "名称", "事件类型", "事件摘要", "评分", "技术面", "持续性"))
     a_table = _build_signal_table(a_rows, "A")
     b_table = _build_signal_table(b_rows, "B")
 
@@ -425,25 +504,15 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
         <!-- A 级 -->
-        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增）</h3>
-        <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <thead><tr style="background:#f9fafb">{header}</tr></thead>
-            <tbody>{a_table}</tbody>
-          </table>
-        </div>
+        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增，含 AI 推荐 Reasons 与价位）</h3>
+        {a_table}
 
         <!-- B 级 -->
-        <h3 style="font-size:15px;margin:20px 0 10px;color:#111827">🔵 B 级信号（过去 24h 新增）</h3>
-        <div style="overflow-x:auto">
-          <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <thead><tr style="background:#f9fafb">{header}</tr></thead>
-            <tbody>{b_table}</tbody>
-          </table>
-        </div>
+        <h3 style="font-size:15px;margin:20px 0 10px;color:#111827">🔵 B 级信号（过去 24h 新增，含 AI 推荐 Reasons 与价位）</h3>
+        {b_table}
 
         <div style="margin-top:20px;padding:12px;background:#f0f9ff;border-radius:8px;font-size:12px;color:#0369a1">
-          💡 慢通道每 4 小时运行一次，补全二阶受益、持续性预判、基本面、技术面分析
+          💡 AI 推荐原因与投资周期由慢通道 G7 生成；目标价位/止损价位为 AI 在规则值基础上的评审。慢通道每 4 小时运行一次。
         </div>
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">

@@ -25,10 +25,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # prod: /app/scripts/bin → /app（macro_market.py 在 /app）
 # local: scripts/bin → 05_代码与脚本（macro_market.py 在 05_代码与脚本/workbench）
 _code_root = os.path.dirname(os.path.dirname(str(SCRIPT_DIR)))
+# crypto_research 包在 scripts/src（本地与容器结构一致）
+_src_dir = os.path.join(_code_root, "scripts", "src")
 for _cand in (
     os.path.join(_code_root, "workbench"),
     "/app",
     _code_root,
+    _src_dir,
 ):
     if _cand and os.path.isdir(_cand) and _cand not in sys.path:
         sys.path.insert(0, _cand)

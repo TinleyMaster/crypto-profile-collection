@@ -72,7 +72,10 @@ def fetch_cefi_history(api_key: str, days: int = 365) -> list[tuple[date, float]
         timeout=TIMEOUT,
     )
     r.raise_for_status()
-    data = r.json().get("data", [])
+    payload = r.json()
+    # API 结构：{"index":"CEFI-Composite","current":32,"date":"...","windowDays":30,"history":[{date,value},...]}
+    # 历史序列在 history 字段；兼容旧版 data 字段
+    data = payload.get("history") or payload.get("data") or []
     result = []
     for item in data:
         val = item.get("value")

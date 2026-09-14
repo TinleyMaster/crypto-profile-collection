@@ -516,6 +516,7 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             score_detail_json = EXCLUDED.score_detail_json,
             methodology_json = EXCLUDED.methodology_json,
             input_snapshot_json = EXCLUDED.input_snapshot_json,
+            fetched_at = NOW(),
             updated_at = NOW()
     """
     with conn.cursor() as cur:

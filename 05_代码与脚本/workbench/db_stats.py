@@ -2885,6 +2885,9 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
 
     # ── 社交热度 ──
     if isinstance(social, dict):
+        # 透传数据抓取时间，供前端标注社交数据时效（避免展示陈旧评分）
+        if social.get("fetched_at"):
+            result["social"]["fetched_at"] = str(social["fetched_at"])
         score = _to_float(social.get("score"))
         if score is not None:
             result["social"]["social_score"] = score
@@ -4762,6 +4765,7 @@ def detect_asset_signals(asset_id: int) -> dict:
     """
     signals: list[dict] = []
     data_status = {}  # 记录各维度数据可用性，用于输出"无信号原因"
+    as_of_date = None  # 行情最新数据日期（用于前端标注"数据截至"）
 
     # ── 1. 价格 & 成交量信号（来自行情历史） ──
     try:
@@ -4770,6 +4774,7 @@ def detect_asset_signals(asset_id: int) -> dict:
         data_status["market_days"] = len(series)
         if len(series) >= 1:
             latest = series[-1]
+            as_of_date = latest.get("date")
 
             # 价格异动（24h 涨跌幅）—— 只要有 change_24h 字段就能检测
             change_24h = latest.get("change_24h")
@@ -4914,6 +4919,7 @@ def detect_asset_signals(asset_id: int) -> dict:
         "signals": signals,
         "signal_count": len(signals),
         "data_status": data_status,
+        "as_of": as_of_date,
     }
 
 

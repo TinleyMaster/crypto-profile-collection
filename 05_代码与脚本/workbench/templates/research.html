@@ -2850,7 +2850,8 @@
                     html += '<div><strong>Top10持仓集中度</strong>: ' + fmtPct(sm.onchain.top10_concentration_pct) + '</div>';
                 }
                 if (sm.social.social_score !== null && sm.social.social_score !== undefined) {
-                    html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) + '</div>';
+                    html += '<div><strong>社交热度分</strong>: ' + fmtScore(sm.social.social_score) +
+                        (sm.social.fetched_at ? ' ' + dataTimeBadge(sm.social.fetched_at, '社交数据') : '') + '</div>';
                 }
                 // 衍生品指标
                 if (sm.derivatives && Object.keys(sm.derivatives).length > 0) {
@@ -3081,6 +3082,28 @@
             if (diff < 86400) return Math.round(diff / 3600) + ' 小时前';
             if (diff < 86400 * 7) return Math.round(diff / 86400) + ' 天前';
             return d.toISOString().slice(0, 10);
+        }
+        // 数据时效徽标：展示数据快照时间，>24h 标黄"滞后"，>7d 标红"数据陈旧"
+        // 用途：各数据卡片标注"数据截至 xx"，避免用户把昨日/旧行情当实时
+        function dataTimeBadge (t, label) {
+            if (!t) return '';
+            let d;
+            // 支持 "YYYY-MM-DD"（无时分）与完整 ISO 时间
+            if (typeof t === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t)) {
+                d = new Date(t + 'T00:00:00Z');
+            } else {
+                d = new Date(t);
+            }
+            if (isNaN(d.getTime())) return '';
+            const ageH = (Date.now() - d.getTime()) / 3600000;
+            let color, txt;
+            if (ageH > 7 * 24) { color = '#ef4444'; txt = '数据陈旧'; }
+            else if (ageH > 24) { color = '#f59e0b'; txt = '滞后'; }
+            else { color = '#22c55e'; txt = '新鲜'; }
+            const full = d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+            return '<span style="display:inline-block;font-size:10px;line-height:1.4;padding:1px 6px;border-radius:3px;background:' + color + '22;color:' + color + ';border:1px solid ' + color + '55;margin:2px 0 0 0;">' +
+                escapeHtml(label || '数据') + '截至 ' + escapeHtml(formatTimeAgo(t)) + ' · ' + txt +
+                '<span style="display:block;color:#8a92a0;font-size:9px;">' + full + '</span></span>';
         }
         function fmtNumber (v) {
             if (v === null || v === undefined || v === '') return NA_HTML;
@@ -3647,10 +3670,12 @@
             });
             html += '</div></div>';
 
-            // 缓存提示
-            if (data.cached && data.fetched_at) {
-                html += '<div style="font-size:10px;color:#4b5563;text-align:right;margin-top:8px;">' +
-                    '缓存于 ' + new Date(data.fetched_at).toLocaleString('zh-CN') + '（15分钟有效）</div>';
+            // 数据时效标注：衍生品实时抓取，标注抓取时间
+            if (data.fetched_at) {
+                html += '<div style="text-align:right;margin-top:8px;">' +
+                    dataTimeBadge(data.fetched_at, '衍生品数据') +
+                    (data.cached ? '<div style="font-size:9px;color:#4b5563;margin-top:2px;">缓存结果（15分钟有效）</div>' : '') +
+                    '</div>';
             }
 
             container.innerHTML = html;
@@ -3775,6 +3800,13 @@
                     html += '<span class="' + cls + '">' + sign + formatUsdBig(net) + '</span>';
                     html += '</div>';
                 });
+            } else if (data.netflow_24h_usd || data.netflow_7d_usd) {
+                // 总额有数但分所明细缺失：标注不可用原因（CM 免费层仅 BTC/ETH 等）
+                const cm = data.cm_benchmark || {};
+                const reason = (cm.status === 'ok' || cm.status === 'unavailable') && cm.note
+                    ? cm.note
+                    : '分所明细依赖交易所钱包地址库覆盖';
+                html += '<div style="font-size:10px;color:#6b7280;margin-top:6px;">按交易所分布: 不可用（' + escapeHtml(reason) + '）</div>';
             }
 
             container.innerHTML = html;
@@ -3813,6 +3845,10 @@
             }
 
             let html = '';
+            // 数据时效标注：持仓快照为日频 T+1，标注快照日期
+            if (holding.snapshot_date) {
+                html += '<div style="margin-bottom:6px;">' + dataTimeBadge(holding.snapshot_date, '持仓快照') + '</div>';
+            }
 
             // 信号条
             const stance = signal.stance || 'unknown';
@@ -4014,6 +4050,8 @@
             }
 
             let html = '';
+            // 数据时效标注：行情快照日期（T+1 日频，需明确标注避免被当实时价）
+            html += '<div style="margin-bottom:6px;">' + dataTimeBadge(latest.date, '行情数据') + '</div>';
             const price = latest.price_usd;
             const ch24 = latest.change_24h;
             const chCls = ch24 > 0 ? 'positive' : (ch24 < 0 ? 'negative' : '');
@@ -4069,7 +4107,11 @@
             const signals = data.signals || [];
 
             if (signals.length === 0) {
-                container.innerHTML = '<div class="sg-empty">当前未检测到显著异动信号</div>';
+                let emptyHtml = '<div class="sg-empty">当前未检测到显著异动信号</div>';
+                if (data.as_of) {
+                    emptyHtml += '<div style="margin:4px 0 0 8px;">' + dataTimeBadge(data.as_of, '信号检测') + '</div>';
+                }
+                container.innerHTML = emptyHtml;
                 return;
             }
 
@@ -4090,6 +4132,10 @@
             };
 
             let html = '';
+            // 数据时效标注：信号基于行情历史快照，需标注数据时点避免被当实时
+            if (data.as_of) {
+                html += '<div style="margin-bottom:6px;">' + dataTimeBadge(data.as_of, '信号数据') + '</div>';
+            }
             signals.forEach(function (s) {
                 const sev = s.severity || 'info';
                 const title = typeMap[s.type] || s.type;

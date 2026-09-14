@@ -22,8 +22,6 @@ BINANCE_FAPI = "https://fapi.binance.com"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
-CROSS_ASSET_TIMEOUT = 5      # 美股/黄金 cross-asset 兜底气
-CATEGORY_DETAIL_TIMEOUT = 5  # CMC category detail 超时（避免 overview 被拖死）
 
 # ── P0-3 权重默认值（P2-4 外置 market_rules.yaml，启动时优先读 yaml） ──
 EMOTION_WEIGHTS_DEFAULT = {
@@ -97,9 +95,7 @@ NARRATIVE_WATCHLIST = [
     "Privacy", "Oracles", "File Storage", "Zero Knowledge", "SocialFi",
 ]
 # CMC 叙事分类名 → DeFiLlama category（有 TVL 腿才合成）
-# 值可以是 str（单 category）或 list[str]（多 category 聚合，TVL 相加，变化率按 TVL 加权）
-NARRATIVE_TVL_MAP: dict[str, str | list[str]] = {
-    # ── 单 category 直接映射 ──
+NARRATIVE_TVL_MAP = {
     "Lending": "Lending",
     "Dexes": "Dexs",
     "DEX": "Dexs",
@@ -115,20 +111,6 @@ NARRATIVE_TVL_MAP: dict[str, str | list[str]] = {
     "Staking": "Staking Pool",
     "CDP": "CDP",
     "Yield Aggregator": "Yield Aggregator",
-    "Privacy": "Privacy",
-
-    # ── 多 category 聚合（按 TVL 加权平均变化率） ──
-    # DeFi 大盘：所有主流 DeFi 功能类 TVL 总和
-    "DeFi": [
-        "Lending", "Dexs", "Derivatives", "Liquid Staking",
-        "Yield", "CDP", "Restaking", "Staking Pool",
-        "Yield Aggregator", "RWA", "Bridge",
-    ],
-    # AI 赛道：AI Agents + Decentralized AI
-    "AI & Big Data": ["AI Agents", "Decentralized AI"],
-    "AI": ["AI Agents", "Decentralized AI"],
-    # LSD 扩展：Liquid Staking + Liquid Restaking
-    "Liquid Staking Derivatives": ["Liquid Staking", "Liquid Restaking"],
 }
 # P1-1 叙事/链榜配置（启动时从 yaml 加载，见 _load_market_rules）
 
@@ -189,40 +171,8 @@ def flag_extreme(percentile: float | None) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_cmc_global_metrics() -> dict:
-    """获取全球市值数据。优先读库 biz.global_metric_daily（快），库空/缺当日时实时拉 CMC，失败降级 CoinGecko。
-    返回 {total_market_cap, volume_24h, btc_dominance, ...}。"""
-    # 1. 优先从 DB 读当日数据（快，且已持久化）
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT total_market_cap, total_volume_24h, btc_dominance,
-                           eth_dominance, stablecoin_market_cap, total_cryptocurrencies,
-                           active_cryptocurrencies
-                    FROM biz.global_metric_daily
-                    ORDER BY metric_date DESC
-                    LIMIT 1
-                """)
-                row = cur.fetchone()
-        if row and row[0]:
-            return {
-                "total_market_cap": _safe_float(row[0]),
-                "total_volume_24h": _safe_float(row[1]),
-                "btc_dominance": _safe_float(row[2]),
-                "eth_dominance": _safe_float(row[3]),
-                "stablecoin_market_cap": _safe_float(row[4]),
-                "total_cryptocurrencies": _safe_int(row[5]),
-                "status": "ok",
-                "source": "db",
-            }
-    except Exception:
-        pass
-
-    # 2. 实时 CMC
+    """获取全球市值数据。优先 CMC，失败时降级 CoinGecko。返回 {total_market_cap, volume_24h, btc_dominance, ...}。"""
+    # 1. 尝试 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/global-metrics/quotes/latest",
@@ -241,12 +191,11 @@ def fetch_cmc_global_metrics() -> dict:
                 "stablecoin_market_cap": _safe_float(data.get("stablecoin_market_cap")),
                 "total_cryptocurrencies": _safe_int(data.get("total_cryptocurrencies")),
                 "status": "ok",
-                "source": "api",
             }
     except Exception:
         pass
     
-    # 3. 降级 CoinGecko
+    # 2. 降级 CoinGecko
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/global",
@@ -263,7 +212,6 @@ def fetch_cmc_global_metrics() -> dict:
             "stablecoin_market_cap": 0,
             "total_cryptocurrencies": _safe_int(data.get("active_cryptocurrencies")),
             "status": "ok",
-            "source": "coingecko",
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -307,31 +255,8 @@ def fetch_cmc_fear_greed() -> dict:
 
 
 def fetch_cmc_altcoin_season() -> dict:
-    """获取山寨季指数。优先读库 biz.altcoin_season_daily，库空时实时拉 CMC，失败降级 blockchaincenter.net。
-    返回 {value, status}。"""
-    # 1. 优先从 DB 读当日数据
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT value FROM biz.altcoin_season_daily
-                    ORDER BY metric_date DESC LIMIT 1
-                """)
-                row = cur.fetchone()
-        if row and row[0]:
-            return {
-                "value": _safe_float(row[0]),
-                "status": "ok",
-                "source": "db",
-            }
-    except Exception:
-        pass
-
-    # 2. 实时 CMC
+    """获取山寨季指数。优先 CMC，失败时降级 blockchaincenter.net。返回 {value, status}。"""
+    # 1. 尝试 CMC
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/altcoin-season-index",
@@ -344,12 +269,11 @@ def fetch_cmc_altcoin_season() -> dict:
             return {
                 "value": value,
                 "status": "ok",
-                "source": "api",
             }
     except Exception:
         pass
     
-    # 3. 降级 blockchaincenter.net（提取页面中的指数值）
+    # 2. 降级 blockchaincenter.net（提取页面中的指数值）
     try:
         r = requests.get(
             "https://www.blockchaincenter.net/altcoin-season-index/",
@@ -363,7 +287,6 @@ def fetch_cmc_altcoin_season() -> dict:
             return {
                 "value": _safe_float(match.group(1)),
                 "status": "ok",
-                "source": "blockchaincenter",
             }
     except Exception:
         pass
@@ -397,70 +320,7 @@ def fetch_cryptoetf_cefi() -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_fear_greed_history(days: int = 90) -> dict:
-    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...], pct_full, latest_value}。
-
-    优先从数据库 biz.fear_greed_daily 读取（快），
-    数据库为空/数据不足时 fallback 到 CMC API（慢，实时拉）。
-    series 按时间倒序（最新的在前），与 CMC API 返回一致。
-
-    pct_full: 全历史分位（0-100），仅 DB 模式可用；API 模式为 None
-    latest_value: 最新值，DB 模式可用
-    """
-    # 尝试从 DB 读
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                # 取最近 days 天的序列（用于展示/滚动计算）
-                cur.execute("""
-                    SELECT value
-                    FROM biz.fear_greed_daily
-                    ORDER BY metric_date DESC
-                    LIMIT %s
-                """, (days,))
-                rows = cur.fetchall()
-
-                # 取全量用于百分位计算
-                cur.execute("""
-                    SELECT COUNT(*),
-                           SUM(CASE WHEN value <= (
-                               SELECT value FROM biz.fear_greed_daily
-                               ORDER BY metric_date DESC LIMIT 1
-                           ) THEN 1 ELSE 0 END)
-                    FROM biz.fear_greed_daily
-                """)
-                total_row = cur.fetchone()
-                total_count = total_row[0] if total_row else 0
-                below_count = total_row[1] if total_row and total_row[1] is not None else 0
-                pct_full = (below_count / total_count * 100) if total_count > 0 else None
-
-                # 最新值
-                cur.execute("""
-                    SELECT value, value_class
-                    FROM biz.fear_greed_daily
-                    ORDER BY metric_date DESC
-                    LIMIT 1
-                """)
-                latest_row = cur.fetchone()
-                latest_value = float(latest_row[0]) if latest_row else None
-                latest_class = latest_row[1] if latest_row else None
-
-            if rows and len(rows) >= max(2, days // 2):
-                series = [float(r[0]) for r in rows]
-                return {
-                    "status": "ok",
-                    "series": series,
-                    "pct_full": round(pct_full, 2) if pct_full is not None else None,
-                    "latest_value": latest_value,
-                    "latest_class": latest_class,
-                }
-    except Exception:
-        pass
-
-    # Fallback: CMC API
+    """CMC 恐贪指数历史序列（日频）。返回 {status, series: [value, ...]}。"""
     try:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v3/fear-and-greed",
@@ -472,7 +332,7 @@ def fetch_fear_greed_history(days: int = 90) -> dict:
         series = [_safe_float(item.get("value")) for item in data if item.get("value") is not None]
         if not series:
             return {"status": "error", "error": "empty", "series": []}
-        return {"status": "ok", "series": series, "pct_full": None, "latest_value": series[0]}
+        return {"status": "ok", "series": series}
     except Exception as e:
         return {"status": "error", "error": str(e), "series": []}
 
@@ -720,66 +580,7 @@ def _detect_stablecoin_anomaly(netflows: list[float], rolling_7d: list[float],
 
 
 def fetch_cefi_history(days: int = 30) -> dict:
-    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...], pct_full, latest_value}。
-
-    优先从数据库 biz.cefi_index_daily 读取（快），
-    数据库为空/数据不足时 fallback 到 cryptoETF API（慢）。
-    series 按时间倒序（最新的在前），与原 API 行为一致。
-
-    pct_full: 全历史分位（0-100），仅 DB 模式可用；API 模式为 None
-    latest_value: 最新值，DB 模式可用
-    """
-    # 尝试从 DB 读
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                # 取最近 days 天的序列
-                cur.execute("""
-                    SELECT value
-                    FROM biz.cefi_index_daily
-                    ORDER BY metric_date DESC
-                    LIMIT %s
-                """, (days,))
-                rows = cur.fetchall()
-
-                # 全历史百分位
-                cur.execute("""
-                    SELECT COUNT(*),
-                           SUM(CASE WHEN value <= (
-                               SELECT value FROM biz.cefi_index_daily
-                               ORDER BY metric_date DESC LIMIT 1
-                           ) THEN 1 ELSE 0 END)
-                    FROM biz.cefi_index_daily
-                """)
-                total_row = cur.fetchone()
-                total_count = total_row[0] if total_row else 0
-                below_count = total_row[1] if total_row and total_row[1] is not None else 0
-                pct_full = (below_count / total_count * 100) if total_count > 0 else None
-
-                # 最新值
-                cur.execute("""
-                    SELECT value FROM biz.cefi_index_daily
-                    ORDER BY metric_date DESC LIMIT 1
-                """)
-                latest_row = cur.fetchone()
-                latest_value = float(latest_row[0]) if latest_row else None
-
-            if rows and len(rows) >= max(2, days // 2):
-                series = [float(r[0]) for r in rows]
-                return {
-                    "status": "ok",
-                    "series": series,
-                    "pct_full": round(pct_full, 2) if pct_full is not None else None,
-                    "latest_value": latest_value,
-                }
-    except Exception:
-        pass
-
-    # Fallback: cryptoETF API
+    """CEFI 指数历史序列（日频）。返回 {status, series: [value, ...]}。"""
     api_key = os.environ.get("CRYPTOETF_KEY", "")
     if not api_key:
         return {"status": "skipped", "error": "CRYPTOETF_KEY 未设置", "series": []}
@@ -795,7 +596,7 @@ def fetch_cefi_history(days: int = 30) -> dict:
         series = [_safe_float(item.get("value")) for item in data if item.get("value") is not None]
         if not series:
             return {"status": "error", "error": "empty", "series": []}
-        return {"status": "ok", "series": series, "pct_full": None, "latest_value": series[0]}
+        return {"status": "ok", "series": series}
     except Exception as e:
         return {"status": "error", "error": str(e), "series": []}
 
@@ -1534,7 +1335,7 @@ def _cmc_category_multi_window(category_id: str) -> dict:
         r = requests.get(
             f"{CMC_BASE}/trial-pro-api/v1/cryptocurrency/category",
             params={"id": category_id},
-            timeout=CATEGORY_DETAIL_TIMEOUT,
+            timeout=TIMEOUT,
         )
         r.raise_for_status()
         data = r.json().get("data", {})
@@ -1795,43 +1596,7 @@ def fetch_category_tvl_flow() -> dict:
     DeFiLlama /protocols 按 category 聚合 7d TVL 变化%（叙事榜 TVL 腿）。
     /categories 已 402 付费墙，改聚合免费 /protocols（每条含 category/tvl/change_7d）。
     返回 {status, categories: {cat: {tvl, tvl_change_7d_pct, protocols}}}。
-
-    优先从数据库 biz.category_tvl_daily 读取最新快照（快），
-    数据库为空/数据太旧时 fallback 到 DeFi Llama API（慢）。
     """
-    # 尝试从 DB 读最新快照
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-        from datetime import datetime, timezone
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT category, tvl_usd, tvl_change_7d_pct, protocol_count
-                    FROM biz.category_tvl_daily
-                    WHERE snapshot_date = (
-                        SELECT MAX(snapshot_date) FROM biz.category_tvl_daily
-                    )
-                    AND source_code = 'defillama'
-                """)
-                rows = cur.fetchall()
-
-            if rows and len(rows) >= 5:
-                categories: dict[str, dict] = {}
-                for cat, tvl, ch7, n in rows:
-                    categories[cat] = {
-                        "tvl": float(tvl),
-                        "tvl_change_7d_pct": round(float(ch7), 2) if ch7 is not None else 0.0,
-                        "protocols": int(n),
-                    }
-                if categories:
-                    return {"status": "ok", "categories": categories}
-    except Exception:
-        pass
-
-    # Fallback: DeFi Llama API
     try:
         r = requests.get(f"{DL_BASE}/protocols", timeout=TIMEOUT)
         r.raise_for_status()
@@ -1864,50 +1629,6 @@ def fetch_category_tvl_flow() -> dict:
     return {"status": "ok", "categories": categories}
 
 
-def _resolve_tvl_info(narrative: str, tvl_cats: dict[str, dict]) -> dict | None:
-    """
-    根据 NARRATIVE_TVL_MAP 解析叙事赛道对应的 TVL 信息。
-    支持单 category 映射和多 category 聚合（TVL 相加，变化率按 TVL 加权）。
-    返回 {tvl, tvl_change_7d_pct, protocols}，无数据返回 None。
-    """
-    mapping = NARRATIVE_TVL_MAP.get(narrative)
-    if mapping is None:
-        return None
-
-    # 单 category
-    if isinstance(mapping, str):
-        info = tvl_cats.get(mapping)
-        return info if info and info.get("tvl", 0) > 0 else None
-
-    # 多 category 聚合
-    if isinstance(mapping, list):
-        total_tvl = 0.0
-        weighted_sum = 0.0
-        total_protocols = 0
-        matched = 0
-        for cat in mapping:
-            info = tvl_cats.get(cat)
-            if not info:
-                continue
-            tvl = info.get("tvl", 0) or 0
-            chg = info.get("tvl_change_7d_pct", 0) or 0
-            if tvl <= 0:
-                continue
-            total_tvl += tvl
-            weighted_sum += chg * tvl
-            total_protocols += info.get("protocols", 0) or 0
-            matched += 1
-        if matched == 0 or total_tvl <= 0:
-            return None
-        avg_change = weighted_sum / total_tvl if total_tvl > 0 else 0.0
-        return {
-            "tvl": round(total_tvl, 2),
-            "tvl_change_7d_pct": round(avg_change, 2),
-            "protocols": total_protocols,
-        }
-    return None
-
-
 def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
     """
     合成叙事榜：三窗动量评分（市值腿）+ TVL 变化（TVL 腿）。
@@ -1926,7 +1647,8 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
         score = momentum if momentum is not None else mcap7
         if score is None:
             continue
-        tvl_info = _resolve_tvl_info(item["narrative"], tvl_cats)
+        dl_cat = NARRATIVE_TVL_MAP.get(item["narrative"])
+        tvl_info = tvl_cats.get(dl_cat) if dl_cat else None
         if tvl_info and tvl_info.get("tvl", 0) >= TVL_LEG_MIN:
             composite = mc_w * score + tvl_w * tvl_info["tvl_change_7d_pct"]
             mode = "blended"
@@ -2184,11 +1906,12 @@ def _fetch_chain_flow_from_db() -> dict | None:
     """
     MIN_CHAINS = 5
     try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
         import psycopg.rows
 
-        from db_stats import get_db
-
-        with get_db() as conn:
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT chain_key, chain_name, tvl_usd,
@@ -2640,41 +2363,7 @@ def _daily_returns(closes: list[float]) -> list[float]:
 
 
 def _fetch_binance_oi_history(days: int = 30) -> dict:
-    """Binance fapi 日频未平仓合约历史。返回 {status, series: [{date, oi}]}。
-
-    优先从数据库 biz.btc_oi_daily 读取（快），
-    数据库为空/数据不足时 fallback 到 Binance API（慢）。
-    series 按 date 升序（最早的在前），与原 API 行为一致。
-    """
-    # 尝试从 DB 读
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT metric_date, open_interest
-                    FROM biz.btc_oi_daily
-                    ORDER BY metric_date DESC
-                    LIMIT %s
-                """, (days,))
-                rows = cur.fetchall()
-
-            if rows and len(rows) >= max(2, days // 2):
-                # DB 查出来是倒序，要按升序返回（与原函数一致）
-                rows_asc = list(reversed(rows))
-                from datetime import datetime as _dt
-                series = [
-                    {"date": int(_dt.combine(d, _dt.min.time()).timestamp()), "oi": float(oi)}
-                    for d, oi in rows_asc
-                ]
-                return {"status": "ok", "series": series}
-    except Exception:
-        pass
-
-    # Fallback: Binance API
+    """Binance fapi 日频未平仓合约历史。返回 {status, series: [{date, oi}]}。"""
     last_err: Exception | None = None
     for attempt in range(3):
         try:
@@ -2725,40 +2414,7 @@ def _fetch_binance_funding_history(limit: int = 100) -> dict:
 
 
 def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
-    """DeFiLlama 稳定币总流通量日频序列。返回 {status, series: [{date, supply}]}。
-
-    优先从数据库 biz.stablecoin_supply_daily 读取（快），
-    数据库为空/数据不足时 fallback 到 DeFi Llama API（慢，实时拉）。
-    """
-    # 尝试从 DB 读
-    try:
-        from crypto_research.config import get_settings
-        from crypto_research.db.conn import get_connection
-
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT metric_date, total_supply_usd
-                    FROM biz.stablecoin_supply_daily
-                    WHERE source_code = 'defillama'
-                    ORDER BY metric_date DESC
-                    LIMIT %s
-                """, (days,))
-                rows = cur.fetchall()
-
-            if rows and len(rows) >= max(2, days // 2):
-                # 转成升序，date 转 epoch 秒（兼容原格式）
-                series = [
-                    {"date": int(r[0].timestamp()), "supply": float(r[1] or 0)}
-                    for r in reversed(rows)
-                ]
-                return {"status": "ok", "series": series}
-    except Exception:
-        # DB 不可用或数据不足，fallback 到 API
-        pass
-
-    # Fallback: DeFi Llama API
+    """DeFiLlama 稳定币总流通量日频序列。返回 {status, series: [{date, supply}]}。"""
     try:
         r = requests.get("https://stablecoins.llama.fi/stablecoincharts/All", timeout=TIMEOUT)
         r.raise_for_status()
@@ -2777,32 +2433,36 @@ def _fetch_stablecoin_supply_history(days: int = 35) -> dict:
 
 
 def _yf_closes(symbol: str, days: int = 90) -> list[float] | None:
-    """yfinance 拉日频收盘序列（兜底气，短超时）。失败返回 None。"""
+    """yfinance 拉日频收盘序列（主源，Zeabur 美区直连稳定）。失败返回 None。"""
     try:
         import yfinance as yf
 
-        df = yf.download(
-            symbol,
-            period=f"{days}d",
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            threads=False,
-            timeout=CROSS_ASSET_TIMEOUT,
-        )
-        if df is not None and not df.empty:
-            closes = [float(v) for v in df["Close"].dropna().tolist()]
-            if len(closes) >= 2:
-                return closes
+        for attempt in range(3):
+            try:
+                df = yf.download(
+                    symbol,
+                    period=f"{days}d",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+                if df is not None and not df.empty:
+                    closes = [float(v) for v in df["Close"].dropna().tolist()]
+                    if len(closes) >= 2:
+                        return closes
+            except Exception:
+                pass
+            time.sleep(1.5)
         return None
     except Exception:
         return None
 
 
-def _stooq_closes(symbol: str, timeout: int = TIMEOUT) -> list[float] | None:
+def _stooq_closes(symbol: str) -> list[float] | None:
     """stooq 日频 CSV 兜底（yfinance 限流时使用）。失败返回 None。"""
     try:
-        r = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=timeout)
+        r = requests.get(f"https://stooq.com/q/d/l/?s={symbol}&i=d", timeout=TIMEOUT)
         r.raise_for_status()
         lines = r.text.strip().splitlines()
         if len(lines) < 2:
@@ -2820,7 +2480,7 @@ def _stooq_closes(symbol: str, timeout: int = TIMEOUT) -> list[float] | None:
         return None
 
 
-def _yahoo_chart_closes(symbol: str, rng: str = "3mo", timeout: int = TIMEOUT) -> list[float] | None:
+def _yahoo_chart_closes(symbol: str, rng: str = "3mo") -> list[float] | None:
     """直接调 Yahoo Finance chart API（免 crumb，比 yfinance 更稳），失败返回 None。"""
     sym = symbol.replace("^", "%5E")
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
@@ -2828,7 +2488,7 @@ def _yahoo_chart_closes(symbol: str, rng: str = "3mo", timeout: int = TIMEOUT) -
             r = requests.get(
                 f"https://{host}/v8/finance/chart/{sym}",
                 params={"range": rng, "interval": "1d"},
-                timeout=timeout,
+                timeout=TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             r.raise_for_status()
@@ -2847,17 +2507,9 @@ def _yahoo_chart_closes(symbol: str, rng: str = "3mo", timeout: int = TIMEOUT) -
 
 
 def _fetch_nasdaq_gold() -> dict:
-    """纳指 + 黄金日频序列。返回 {status, nasdaq, gold}。Yahoo chart API 主源（快），yfinance/stooq 兜底。"""
-    nasdaq = (
-        _yahoo_chart_closes("^IXIC", timeout=CROSS_ASSET_TIMEOUT)
-        or _yf_closes("^IXIC")
-        or _stooq_closes("^ndx", timeout=CROSS_ASSET_TIMEOUT)
-    )
-    gold = (
-        _yahoo_chart_closes("GC=F", timeout=CROSS_ASSET_TIMEOUT)
-        or _yf_closes("GC=F")
-        or _stooq_closes("gc.f", timeout=CROSS_ASSET_TIMEOUT)
-    )
+    """纳指 + 黄金日频序列。返回 {status, nasdaq, gold}。yfinance 主源，Yahoo chart API 兜底。"""
+    nasdaq = _yf_closes("^IXIC") or _yahoo_chart_closes("^IXIC") or _stooq_closes("^ndx")
+    gold = _yf_closes("GC=F") or _yahoo_chart_closes("GC=F") or _stooq_closes("gc.f")
     if not nasdaq and not gold:
         return {"status": "error", "error": "no cross-asset data", "nasdaq": [], "gold": []}
     status = "ok" if nasdaq and gold else "partial"
@@ -3429,6 +3081,49 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                     clipped = max(-100.0, min(100.0, raw_f * 10))
                     score = (clipped + 100.0) / 2.0
                     results.append((aid, symbol or "", round(score, 1)))
+                return results
+    except Exception:
+        return []
+
+
+def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, str, float, str, str]]:
+    """从 catalyst_signal 取 open+confirmed 决策信号（审计 F2，工单 §12.3 并存接）。
+
+    与旧 catalyst_impact feed 并存：本函数读决策信号表，供高亮精 feed，
+    旧 `_recent_catalyst_targets` 保留作 legacy fallback（catalyst_feed_source 开关）。
+
+    返回 [(asset_id, symbol, composite_score, entry_price_txt, invalidation), ...]
+    - 仅 status='open' AND resonance_state='confirmed' AND tier IN ('A','B','C')
+    - 只取需入场决策的信号：entry_price IS NOT NULL AND invalidation IS NOT NULL
+    - 用 composite_score 作展示分（取代旧 catalyst_impact 净情绪分）
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT s.asset_id,
+                           a.canonical_symbol,
+                           s.composite_score,
+                           s.entry_price,
+                           COALESCE(s.invalidation, '')
+                    FROM biz.catalyst_signal s
+                    JOIN core.asset a ON a.asset_id = s.asset_id
+                    WHERE s.status = 'open'
+                      AND s.resonance_state = 'confirmed'
+                      AND s.tier IN ('A', 'B', 'C')
+                      AND s.entry_price IS NOT NULL
+                    ORDER BY s.composite_score DESC
+                    LIMIT 25
+                """)
+                rows = cur.fetchall()
+                results = []
+                for aid, sym, score, entry, invalid in rows:
+                    entry_txt = f"{float(entry):g}" if entry is not None else ""
+                    results.append((aid, sym or "", float(score or 0), entry_txt, invalid or ""))
                 return results
     except Exception:
         return []
@@ -4394,7 +4089,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # 旧配额已废弃，新配额约为原来的 1.5 倍
     quotas = {
         "mvrv_deep_under": 3, "mvrv_under_watch": 2,
-        "catalyst": 3, "conflict_game": 1, "whale_flow": 3, "github_activity": 2,
+        "catalyst": 3, "whale_flow": 3, "github_activity": 2,
         "funding": 2, "token_unlock": 2, "kol_onchain": 2,
         "fng_extreme": 2, "leverage_extreme": 2, "stablecoin_inflow": 2,
         "etf_flow": 2,
@@ -4407,8 +4102,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # FEAT-HIGHLIGHT-FIX: 严格过滤 direction，避免空头信号混进机会区
     long_opps = [
         o for o in opportunities
-        if (o.get("signal_type") == "conflict_game"
-            or o.get("direction") in ("long", None, "", "bullish"))
+        if o.get("direction") in ("long", None, "", "bullish")
         and o.get("signal_type") not in ("mvrv_deep_over", "mvrv_over_watch")
     ]
 
@@ -5082,16 +4776,14 @@ def score_opportunities(overview: dict) -> dict:
         for act_coin in (cm_act.get("coins") or []):
             sig = act_coin.get("signal")
             if sig == "accumulation":
-                _conv_bd = _conviction_breakdown(
+                conviction = _compute_conviction_score(
                     mvrv_pct=_mvrv_pct_for(act_coin.get("symbol"), mvrv_map),
                     funding=funding_latest, exchange_netflow=ex_netflow,
                     stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
                 )
-                conviction = _conv_bd["raw_strength"]
                 _push_opportunity(
                     {"target": act_coin["symbol"], "direction": "long", "confidence": "medium",
                      "conviction_score": conviction,
-                     "conviction_breakdown": _conv_bd,
                      "signal_type": "cm_adoption_divergence",
                      "key_metric": f"活跃 {act_coin.get('adr_pct', '?')}%分位",
                      "trigger_logic": (
@@ -5123,6 +4815,53 @@ def score_opportunities(overview: dict) -> dict:
     cat_targets = _recent_catalyst_targets(cat_window)
     _cat_seen: set[str] = set()
     _cat_pushed = 0
+    feed_source = t.get("catalyst_feed_source", "decision")
+    if feed_source == "decision":
+        # 审计 F2 / 工单 §12.3：优先读决策信号表（open+confirmed+entry）。
+        # decision: (asset_id, symbol, composite_score, entry_price_txt, invalidation)
+        decision_rows = _recent_catalyst_decision_targets(cat_window)
+        for aid, symbol, cscore, entry_txt, invalid in decision_rows:
+            if cscore < cat_min_score:
+                continue
+            if any(kw in symbol.upper() for kw in _CATALYST_NOISE_KEYWORDS):
+                continue
+            if symbol in _cat_seen:
+                continue
+            if _cat_pushed >= cat_top_n:
+                break
+            _cat_seen.add(symbol)
+            _cat_pushed += 1
+            breakdown = _conviction_breakdown(
+                mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
+                funding=funding_latest, exchange_netflow=ex_netflow,
+                stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr,
+                catalyst_score=cscore, t=t,
+            )
+            strength = breakdown["raw_strength"]
+            cat_events = _fetch_catalyst_events(aid, cat_window, limit=3)
+            trigger = (f"决策信号 {cscore:.0f} 分，入场价 {entry_txt}"
+                       if entry_txt
+                       else f"决策信号 {cscore:.0f} 分（事件驱动）")
+            _push_opportunity(
+                {"target": symbol, "direction": "long",
+                 "confidence": "high" if cscore >= 70 else "medium",
+                 "conviction_score": strength,
+                 "conviction_breakdown": breakdown,
+                 "signal_type": "catalyst",
+                 "key_metric": f"催化剂 {cscore:.0f}分",
+                 "trigger_logic": trigger + (f" · {invalid}" if invalid else ""),
+                 "catalyst_events": cat_events,
+                 "catalyst_event_count": len(cat_events),
+                 "action_hint": "事件驱动，窗口内跟进",
+                 "invalidation": invalid or "催化剂事件兑现/热度消退后信号失效",
+                 "related_dims": ["catalyst_events", "P0-B 催化剂驱动"]},
+                opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=1,
+            )
+        if feed_source and len(decision_rows) == 0:
+            cat_targets = _recent_catalyst_targets(cat_window)
+        else:
+            cat_targets = []
     for aid, symbol, cscore in cat_targets:
         if cscore < cat_min_score:
             continue
@@ -5179,16 +4918,14 @@ def score_opportunities(overview: dict) -> dict:
             direction = "long"
             action = "吸筹观察，左侧关注"
             invalid = "若 T+3 内出现同额反手转出，信号失效"
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "signal_type": "whale_flow",
              "key_metric": f"巨鲸 ${usd_total / 1e6:.1f}M",
              "asset_id": aid,
@@ -5219,16 +4956,14 @@ def score_opportunities(overview: dict) -> dict:
         else:
             direction, action, invalid = "watch", "开发停滞风险，配合解锁抛压=双杀", "若后续 4 周恢复活跃，信号失效"
             label = "dev 活跃骤降"
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "signal_type": "github_activity",
              "key_metric": f"Dev {ratio:.1f}x",
              "asset_id": aid,
@@ -5252,16 +4987,14 @@ def score_opportunities(overview: dict) -> dict:
         amount_str = f"${amount_m:.0f}M" if amount_m else "N/A"
         lead_str = lead or "未披露"
         target = symbol if symbol not in ("", "-") else (proto or "?")
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": target, "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "signal_type": "funding",
              "key_metric": f"融资 {amount_str}",
              "asset_id": aid,
@@ -5283,16 +5016,14 @@ def score_opportunities(overview: dict) -> dict:
     for ut in _unlock_targets:
         # ut: (asset_id, symbol, unlock_value_usd, unlock_date, ratio_mcap)
         aid, symbol, uval, udate, ratio_mcap = ut
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": symbol, "direction": "short", "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "signal_type": "token_unlock",
              "key_metric": f"解锁 ${uval / 1e6:.1f}M ({ratio_mcap:.1f}%)",
              "asset_id": aid,
@@ -5383,12 +5114,11 @@ def score_opportunities(overview: dict) -> dict:
         if kol_name:
             trigger_parts.append(f"by {kol_name}")
 
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
 
         action_hint_map = {
             "long": "链上资金流出 + 大资金异动，关注后续上行动力",
@@ -5400,7 +5130,6 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": sig_direction,
              "confidence": confidence,
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "signal_type": "kol_onchain",
              "key_metric": f"{type_cn} {usd_str}" if usd_val > 0 else type_cn,
              "asset_id": ks["asset_id"],
@@ -5423,17 +5152,15 @@ def score_opportunities(overview: dict) -> dict:
         risk_metrics.append(f"funding {fm.get('funding_latest', 0) * 100:.3f}%/期")
     if risk_sources:
         conf, direction = _resolve_confidence(risk_sources, t)
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         trigger = f"{' / '.join(risk_metrics) if risk_metrics else '杠杆信号'} → 杠杆过热，防回撤"
         _push_opportunity(
             {"target": "BTC", "direction": direction, "confidence": conf,
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "trigger_logic": trigger, "related_dims": ["P1-2 价格vs OI", "P1-2 价格vs funding"]},
             opportunities, excluded, t,
         )
@@ -5456,16 +5183,14 @@ def score_opportunities(overview: dict) -> dict:
             conf, direction = "medium", "long"
             related = ["P1-1 叙事榜（市值）"]
             trigger = f"{row.get('narrative')} 7d 市值 {row.get('mcap_change_7d_pct', 0):+.1f}% → 资金净流入"
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(row.get("narrative"), mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "trigger_logic": trigger, "related_dims": related},
             opportunities, excluded, t,
         )
@@ -5479,16 +5204,14 @@ def score_opportunities(overview: dict) -> dict:
             continue
         if flow < t.get("chain_min_flow_usd", 200_000_000) or flow_pct < t.get("chain_min_flow_pct", 3.0):
             continue
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(f"{row.get('chain')} 链", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "trigger_logic": f"{row.get('chain')} 链 7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）→ 资金净流入",
              "related_dims": ["P1-1 链净流入榜"]},
             opportunities, excluded, t,
@@ -5498,16 +5221,14 @@ def score_opportunities(overview: dict) -> dict:
     ndx_sig = by_sig.get("btc_nasdaq") or {}
     if ndx_sig.get("status") == "ok" and ndx_sig.get("label") == "DIVERGENT":
         interp = ndx_sig.get("interpretation", "宏观脱钩")
-        _conv_bd = _conviction_breakdown(
+        conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for("BTC", mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        conviction = _conv_bd["raw_strength"]
         _push_opportunity(
             {"target": "BTC", "direction": "neutral", "confidence": "medium",
              "conviction_score": conviction,
-             "conviction_breakdown": _conv_bd,
              "trigger_logic": interp, "related_dims": ["P1-2 BTC vs 纳指"]},
             opportunities, excluded, t,
         )
@@ -5519,16 +5240,14 @@ def score_opportunities(overview: dict) -> dict:
         for p in protos[:p_top]:
             if not isinstance(p, dict):
                 continue
-            _conv_bd = _conviction_breakdown(
+            conviction = _compute_conviction_score(
                 mvrv_pct=_mvrv_pct_for(p.get("name"), mvrv_map),
                 funding=funding_latest, exchange_netflow=ex_netflow,
                 stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
             )
-            conviction = _conv_bd["raw_strength"]
             _push_opportunity(
                 {"target": p.get("name") or "新协议", "direction": "long", "confidence": "medium",
                  "conviction_score": conviction,
-                 "conviction_breakdown": _conv_bd,
                  "trigger_logic": f"{p.get('name')} 7d TVL {p.get('change_7d_pct') if p.get('change_7d_pct') is not None else '?'}% 异动增长",
                  "related_dims": ["P1-3 新协议 TVL"]},
                 opportunities, excluded, t,
@@ -5761,7 +5480,7 @@ def score_opportunities(overview: dict) -> dict:
                 {"target": sym, "direction": "watch",
                  "confidence": "medium",
                  "conviction_score": max_score,
-                 "signal_type": "conflict_game",
+                 "signal_type": "catalyst",
                  "key_metric": "多空博弈",
                  "trigger_logic": f"多空信号交织：{' / '.join(trigger_parts[:3])}",
                  "action_hint": "观望，等待多空博弈明朗",
@@ -7572,7 +7291,6 @@ def fetch_event_calendar() -> dict:
     token_events: list[dict] = []
     try:
         import logging
-        import psycopg
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
 
@@ -7597,7 +7315,7 @@ def fetch_event_calendar() -> dict:
                     event_date = r["unlock_date"]
                     ratio_mcap = r.get("unlock_ratio_mcap")
                     token_events.append({
-                        "date": str(event_date.date() if hasattr(event_date, "date") else event_date) if event_date else None,
+                        "date": str(event_date.date()) if event_date else None,
                         "event": f"{r['symbol']} 解锁"
                                  + (f" {ratio_mcap:.2f}%" if ratio_mcap else ""),
                         "type": r.get("event_type") or "unlock",
@@ -7994,356 +7712,8 @@ def _build_mvrv_universe(top_n: int = 100) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
-# 大盘每日快照读取
-# ══════════════════════════════════════════════════════════════
-
-def fetch_market_snapshot(snapshot_date: str | None = None) -> dict:
-    """
-    从 biz.market_snapshot_daily 读取快照。
-
-    Args:
-        snapshot_date: YYYY-MM-DD，None 表示最新一天
-
-    Returns:
-        {status, snapshot_date, data, raw_payload?}
-        data 为抽平的核心指标 dict；raw_payload 只有在表中存在且非空时返回
-    """
-    try:
-        import psycopg.rows
-        from db_stats import get_db
-
-        with get_db() as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                if snapshot_date:
-                    cur.execute("""
-                        SELECT * FROM biz.market_snapshot_daily
-                        WHERE snapshot_date = %s
-                    """, (snapshot_date,))
-                else:
-                    cur.execute("""
-                        SELECT * FROM biz.market_snapshot_daily
-                        ORDER BY snapshot_date DESC
-                        LIMIT 1
-                    """)
-                row = cur.fetchone()
-                if not row:
-                    return {"status": "empty", "snapshot_date": snapshot_date, "data": None}
-
-                data = dict(row)
-                raw = data.pop("raw_payload", None)
-                fetched_at = data.pop("fetched_at", None)
-                updated_at = data.pop("updated_at", None)
-
-                result = {
-                    "status": "ok",
-                    "snapshot_date": str(data.pop("snapshot_date")),
-                    "data": data,
-                    "fetched_at": str(fetched_at) if fetched_at else None,
-                    "updated_at": str(updated_at) if updated_at else None,
-                }
-                if raw is not None:
-                    result["raw_payload"] = raw
-                return result
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-def fetch_market_snapshot_history(
-    days: int = 30,
-    fields: list[str] | None = None,
-) -> dict:
-    """
-    读取大盘快照历史序列（用于趋势图）。
-
-    Args:
-        days: 最近 N 天
-        fields: 只返回指定字段（如 btc_price, fear_greed_value, cycle_overall_heat），
-                None 表示返回所有数值字段
-
-    Returns:
-        {status, series: [{snapshot_date, field1, field2, ...}]}
-    """
-    try:
-        import psycopg.rows
-        from db_stats import get_db
-
-        with get_db() as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                # 先检查表是否存在
-                cur.execute("""
-                    SELECT COUNT(*) FROM information_schema.tables
-                    WHERE table_schema = 'biz' AND table_name = 'market_snapshot_daily'
-                """)
-                if cur.fetchone()["count"] == 0:
-                    return {"status": "empty", "series": []}
-
-                if fields:
-                    # 白名单过滤，防注入
-                    allowed = _SNAPSHOT_NUMERIC_FIELDS
-                    safe_fields = [f for f in fields if f in allowed]
-                    if not safe_fields:
-                        return {"status": "error", "error": "no valid fields requested", "series": []}
-                    col_sql = ", ".join(safe_fields)
-                else:
-                    col_sql = "*"
-
-                cur.execute(f"""
-                    SELECT snapshot_date, {col_sql}
-                    FROM biz.market_snapshot_daily
-                    WHERE snapshot_date >= CURRENT_DATE - INTERVAL '{days} days'
-                    ORDER BY snapshot_date ASC
-                """)
-                rows = [dict(r) for r in cur.fetchall()]
-                # 转成可序列化的类型
-                for row in rows:
-                    row["snapshot_date"] = str(row["snapshot_date"])
-                    for k, v in list(row.items()):
-                        if hasattr(v, "__float__") and k != "snapshot_date":
-                            row[k] = float(v)
-                return {"status": "ok", "series": rows, "count": len(rows)}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "series": []}
-
-
-# 快照表数值字段白名单（用于 history 接口的字段过滤）
-_SNAPSHOT_NUMERIC_FIELDS = {
-    "btc_price", "btc_market_cap", "btc_dominance_pct",
-    "eth_price", "eth_market_cap",
-    "total_crypto_market_cap", "total_volume_24h",
-    "fear_greed_value", "fear_greed_pct_full",
-    "btc_oi_usd", "btc_oi_pct_full",
-    "cefi_flow_7d_usd", "cefi_pct_full",
-    "stablecoin_total_supply", "stablecoin_netflow_7d_usd",
-    "mvrv_value", "mvrv_pct_full",
-    "liveliness_value", "liveliness_pct_full",
-    "funding_rate_avg",
-    "altcoin_season_score",
-    "overall_score",
-    "cycle_overall_heat", "cycle_consistency_pct",
-    "nasdaq_change_7d_pct", "gold_change_7d_pct",
-    "dxy_change_7d_pct",
-    "btc_etf_flow_7d_usd",
-    "defi_total_tvl",
-}
-
-
-# ══════════════════════════════════════════════════════════════
-# 大盘周期热力图
-# ══════════════════════════════════════════════════════════════
-
-def build_market_cycle_dashboard(overview: dict) -> dict:
-    """大盘周期热力图：整合 5 个维度的周期位置，输出综合周期阶段。
-
-    5 个维度（每项 0-100，越高越接近顶部）：
-      1. 估值周期：BTC MVRV 全历史分位（权重 0.25）
-      2. 情绪周期：恐贪全历史分位 + 山寨季指数（权重 0.20）
-      3. 资金周期：稳定币净流分位 + CEFI 资金流分位（权重 0.20）
-      4. 衍生品周期：BTC OI 分位 + 资金费率热度（权重 0.15）
-      5. 链上周期：BTC liveliness 全历史分位（权重 0.20）
-
-    综合周期热度 = 加权平均
-    阶段划分（六档）：
-      < 20: 熊市底部（极度恐慌）
-      20-40: 熊市后期 / 复苏早期
-      40-60: 牛市早期 / 中段
-      60-80: 牛市中期 / 升温
-      80-90: 牛市后期 / 过热
-      ≥ 90: 泡沫顶部（极度贪婪）
-    """
-    from collections import Counter
-
-    dims = {}
-
-    # ── 1. 估值周期 ──
-    mvrv_pct = None
-    mvrv_hist = overview.get("mvrv_hist", {})
-    if mvrv_hist.get("status") == "ok":
-        mvrv_pct = mvrv_hist.get("pct_full")
-    if mvrv_pct is None:
-        btc_cycle = overview.get("btc_cycle", {})
-        if btc_cycle.get("status") == "ok":
-            mvrv_pct = btc_cycle.get("mvrv_pct_full")
-    dims["valuation"] = {
-        "label": "估值周期",
-        "score": round(mvrv_pct, 1) if mvrv_pct is not None else None,
-        "indicator": "BTC MVRV 全历史分位",
-        "mvrv_value": mvrv_hist.get("value") if mvrv_hist.get("status") == "ok" else None,
-    }
-
-    # ── 2. 情绪周期 ──
-    fg_pct = None
-    fg_hist = overview.get("fear_greed_hist", {})
-    if fg_hist.get("status") == "ok":
-        fg_pct = fg_hist.get("pct_full")
-    if fg_pct is None and fg_hist.get("status") == "ok":
-        fg_val = overview.get("fear_greed", {}).get("value")
-        series = fg_hist.get("series") or []
-        if fg_val is not None and series:
-            fg_pct = percentile_of(fg_val, series)
-
-    alt_season = None
-    alt_data = overview.get("altcoin_season", {})
-    if alt_data.get("status") == "ok":
-        alt_season = alt_data.get("value")
-
-    emotion_vals = [s for s in [fg_pct, alt_season] if s is not None]
-    emotion_score = round(sum(emotion_vals) / len(emotion_vals), 1) if emotion_vals else None
-    dims["sentiment"] = {
-        "label": "情绪周期",
-        "score": emotion_score,
-        "indicator": "恐贪分位 + 山寨季指数",
-        "fear_greed_pct": round(fg_pct, 1) if fg_pct is not None else None,
-        "altcoin_season": alt_season,
-    }
-
-    # ── 3. 资金周期 ──
-    # 稳定币净流：净流入高 → 资金进场 → 周期升温
-    sc_pct = None
-    sc_hist = overview.get("stablecoin_flow_hist", {})
-    if sc_hist.get("status") == "ok":
-        sc_rolling = sc_hist.get("rolling_7d") or []
-        sc_series = sc_hist.get("series") or []
-        sc_val = sc_rolling[-1] if sc_rolling else (sc_series[-1] if sc_series else None)
-        sc_ref = sc_rolling if len(sc_rolling) >= 2 else sc_series
-        if sc_val is not None and sc_ref:
-            sc_pct = percentile_of(sc_val, sc_ref)
-
-    # CEFI 资金流分位（正=净流入=资金进场）
-    cefi_pct = None
-    cefi_hist = overview.get("cefi_hist", {})
-    if cefi_hist.get("status") == "ok":
-        cefi_pct = cefi_hist.get("pct_full")
-    if cefi_pct is None and cefi_hist.get("status") == "ok":
-        cefi_val = overview.get("cefi", {}).get("value")
-        cefi_series = cefi_hist.get("series") or []
-        if cefi_val is not None and cefi_series:
-            cefi_pct = percentile_of(cefi_val, cefi_series)
-
-    capital_vals = [s for s in [sc_pct, cefi_pct] if s is not None]
-    capital_score = round(sum(capital_vals) / len(capital_vals), 1) if capital_vals else None
-    dims["capital_flow"] = {
-        "label": "资金周期",
-        "score": capital_score,
-        "indicator": "稳定币净流分位 + CEFI 资金流分位",
-        "stablecoin_pct": round(sc_pct, 1) if sc_pct is not None else None,
-        "cefi_pct": round(cefi_pct, 1) if cefi_pct is not None else None,
-    }
-
-    # ── 4. 衍生品周期 ──
-    # BTC OI 全历史分位（目前没有 hist 接口，留空，后续接入）
-    oi_pct = None
-    deriv = overview.get("derivatives", {})
-    oi_value = deriv.get("btc_open_interest")
-
-    # 资金费率热度：正资金费率高 → 多头拥挤 → 过热
-    funding_rate = deriv.get("btc_funding_rate")
-    funding_heat = None
-    if funding_rate is not None:
-        fr_pct = funding_rate * 100  # 转百分比
-        if fr_pct <= -0.05:
-            funding_heat = 0.0
-        elif fr_pct >= 0.05:
-            funding_heat = 100.0
-        else:
-            funding_heat = round((fr_pct + 0.05) / 0.10 * 100, 1)
-
-    deriv_vals = [s for s in [oi_pct, funding_heat] if s is not None]
-    deriv_score = round(sum(deriv_vals) / len(deriv_vals), 1) if deriv_vals else None
-    dims["derivatives"] = {
-        "label": "衍生品周期",
-        "score": deriv_score if deriv_vals else None,
-        "indicator": "OI 分位 + 资金费率热度",
-        "btc_oi_usd": oi_value,
-        "btc_funding_rate": funding_rate,
-        "funding_heat": funding_heat,
-    }
-
-    # ── 5. 链上周期 ──
-    chain_pct = None
-    btc_cycle = overview.get("btc_cycle", {})
-    if btc_cycle.get("status") == "ok":
-        chain_pct = btc_cycle.get("liveliness_pct_full")
-    dims["onchain"] = {
-        "label": "链上周期",
-        "score": round(chain_pct, 1) if chain_pct is not None else None,
-        "indicator": "BTC Liveliness 全历史分位",
-        "liveliness": btc_cycle.get("liveliness"),
-    }
-
-    # ── 综合周期热度（加权平均） ──
-    weights = {
-        "valuation": 0.25,
-        "sentiment": 0.20,
-        "capital_flow": 0.20,
-        "derivatives": 0.15,
-        "onchain": 0.20,
-    }
-
-    total_weight = 0.0
-    weighted_sum = 0.0
-    for key, w in weights.items():
-        s = dims[key].get("score")
-        if s is not None:
-            weighted_sum += s * w
-            total_weight += w
-
-    overall_heat = round(weighted_sum / total_weight, 1) if total_weight > 0 else None
-
-    # ── 阶段判断 ──
-    phase = None
-    phase_label = None
-    if overall_heat is not None:
-        if overall_heat < 20:
-            phase, phase_label = "bear_floor", "熊市底部（极度恐慌）"
-        elif overall_heat < 40:
-            phase, phase_label = "late_bear", "熊市后期 / 复苏早期"
-        elif overall_heat < 60:
-            phase, phase_label = "early_bull", "牛市早期 / 中段"
-        elif overall_heat < 80:
-            phase, phase_label = "mid_bull", "牛市中期 / 升温"
-        elif overall_heat < 90:
-            phase, phase_label = "late_bull", "牛市后期 / 过热"
-        else:
-            phase, phase_label = "bubble_top", "泡沫顶部（极度贪婪）"
-
-    # ── 一致性判断：各维度阶段是否一致 ──
-    def _phase_bucket(score):
-        if score < 20: return "bear_floor"
-        if score < 40: return "late_bear"
-        if score < 60: return "early_bull"
-        if score < 80: return "mid_bull"
-        return "late_bull"
-
-    valid_buckets = []
-    for key in dims:
-        s = dims[key].get("score")
-        if s is not None:
-            valid_buckets.append(_phase_bucket(s))
-
-    consistency = None
-    if valid_buckets:
-        cnt = Counter(valid_buckets)
-        _, top_count = cnt.most_common(1)[0]
-        consistency = round(top_count / len(valid_buckets) * 100, 1)
-
-    return {
-        "status": "ok" if overall_heat is not None else "partial",
-        "overall_heat": overall_heat,
-        "phase": phase,
-        "phase_label": phase_label,
-        "consistency_pct": consistency,
-        "dimensions": dims,
-        "description": (
-            f"大盘综合周期热度 {overall_heat:.1f}/100 — {phase_label}"
-            if overall_heat else "数据不足，无法判断周期位置"
-        ),
-    }
-
-
-# ══════════════════════════════════════════════════════════════
 # 主入口函数
 # ══════════════════════════════════════════════════════════════
-
 
 def get_market_overview(force_refresh: str = "0") -> dict:
     """
@@ -8481,11 +7851,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # ── P2-1: 计算各核心指标的百分位和极端标记 ──
     fg_value = fear_greed.get("value")
-    # 恐贪：优先用 DB 全历史分位（pct_full），兜底用近 90 天序列计算
-    if fear_greed_hist.get("status") == "ok" and fear_greed_hist.get("pct_full") is not None:
-        fg_percentile = fear_greed_hist["pct_full"]
-    else:
-        fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
+    fg_percentile = percentile_of(fg_value, fear_greed_hist.get("series") or []) if fear_greed_hist.get("status") == "ok" else None
     fg_extreme = flag_extreme(fg_percentile)
 
     # MVRV：优先用库内全历史分位（cm_onchain_percentile_full），兜底用 percentile_of
@@ -8506,9 +7872,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     # onchain 覆盖时用自身 30d 序列算 percentile（避免跨源量纲混合）
     if cefi.get("source") == "onchain_cex_netflow" and onchain.get("daily_netflows_30d"):
         cefi_percentile = percentile_of(cefi_value, onchain["daily_netflows_30d"])
-    elif cefi_hist.get("status") == "ok" and cefi_hist.get("pct_full") is not None:
-        # CEFI：优先用 DB 全历史分位
-        cefi_percentile = cefi_hist["pct_full"]
     else:
         cefi_percentile = percentile_of(cefi_value, cefi_hist.get("series") or []) if cefi_hist.get("status") == "ok" else None
     cefi_extreme = flag_extreme(cefi_percentile)
@@ -8632,7 +7995,6 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     result["chimney_signals"] = build_chimney_signals(result)
     result["institutional_mvrv"] = build_institutional_mvrv_summary(result)
     result["smart_money_divergence"] = build_smart_money_divergence(result)
-    result["cycle_dashboard"] = build_market_cycle_dashboard(result)
 
     _cache = result
     _cache_ts = now

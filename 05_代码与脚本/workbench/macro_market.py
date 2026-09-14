@@ -1064,6 +1064,11 @@ def fetch_binance_etf_flows() -> dict:
     优先从数据库 biz.etf_flow_daily 读取（更快、可离线）；
     数据库无数据或数据过旧时，回退到 API 拉取并回写数据库。
     """
+    # cryptoetf.today API ticker → 标准 symbol（HYP API 返回 "HYP"，需统一为 "HYPE"）
+    _ETF_SYMBOL_MAP = {"HYP": "HYPE"}
+
+    def _normalize_etf_symbol(sym: str) -> str:
+        return _ETF_SYMBOL_MAP.get(sym, sym)
     api_key = os.environ.get("CRYPTOETF_KEY", "")
 
     # ── 1. 先查数据库 ──────────────────────────────────────
@@ -1096,7 +1101,7 @@ def fetch_binance_etf_flows() -> dict:
                         v = float(r["net_flow_usd_m"]) if r["net_flow_usd_m"] is not None else None
                         if v is not None:
                             total += v
-                        sym = r["symbol"]
+                        sym = _normalize_etf_symbol(r["symbol"])
                         if sym == "BTC":
                             btc_flow = v
                         assets_detail.append({
@@ -1140,7 +1145,7 @@ def fetch_binance_etf_flows() -> dict:
             v = _safe_float(a.get("netFlowUsdM"))
             if v is not None:
                 total += v
-            sym = a.get("symbol", "")
+            sym = _normalize_etf_symbol(a.get("symbol", ""))
             if sym == "BTC":
                 btc_flow = v
             assets_detail.append({

@@ -1,59 +1,80 @@
-"""催化剂资产过滤：排除非加密资产（美股 tokenized stock / 商品期货）。
+"""催化剂资产分类：把资产分为「加密货币」与「美股/商品（tokenized stock & 期货）」。
 
 背景：
     core.asset 有 asset_type 字段，但取值范围（stablecoin/meme/token/coin）
     无法可靠区分「美股 tokenized stock」和「商品期货」——这些资产常被
-    标成 token/coin。因此用「名称特征黑名单」做过滤，最稳健。
+    标成 token/coin。因此用「名称特征」做分类，最稳健。
 
-适用范围：
-    - 慢汇总/快提醒邮件查询（JOIN core.asset 后按 canonical_name 过滤）
-    - 如需彻底杜绝入库，应在摄入层 `map_pairs_to_asset_ids` 同样套用
+用途：
+    - 邮件提醒分两类：加密货币一封、美股/商品一封（各自独立去重）
+    - 慢汇总/快提醒查询：crypto 节用 CRYPTO_FILTER_SQL，美股节用 IS_STOCK_SQL
 """
 
 from __future__ import annotations
 
-# 名称特征黑名单（正则，对 canonical_name 做不区分大小写匹配）
-# 命中即视为「非加密资产」，从信号/邮件中剔除。
-_NAME_BLOCK_PATTERNS: tuple[str, ...] = (
-    # 美股 tokenized stock（PreStocks / bStocks 等币安股票代币）
+# 美股 tokenized stock / 商品期货 的名称特征（命中即视为「非加密」）
+# 正则按大小写不敏感匹配 canonical_name。
+_STOCK_PATTERNS: tuple[str, ...] = (
+    # 美股 tokenized stock（bStocks / PreStocks 等币安股票代币）
     r"tokeniz\w*",        # Tokenized / Tokenised / Tokenization
     r"b?stocks",          # bStocks / PreStocks
-    r"(^|\W)pre\s*stocks\b",
-    # 商品/大宗期货（仅匹配明确的衍生品形态，避免误杀同名 crypto 项目）
+    r"pre\s*stocks\b",
+    # 商品/大宗期货（仅匹配明确的衍生品形态，避免误杀同名 crypto）
     r"\bfutures?\b",      # Futures
     r"\bderivativ\w*\b",  # Derivatives
     r"(crude|brent)\s+oil",
-    r"\b([cg]old|silver|brent|crude)\s*\(?\s*(futures|derivativ|oil)?\)?\b",
+    r"\bgold\s*(futures|derivativ)\b",
+    r"\bsilver\s*(futures|derivativ)\b",
     r"(crude|brent|heating|natural)\s+gas\b",
 )
 
-# 明确的允许豁免（即使名称命中上面某个弱模式，也不过滤）
-# 目前互补性豁免，后续若误伤可在此加
-_ALLOW_SYMBOLS: set[str] = set()
+# 明确的豁免（即使名称命中上面某个弱模式，仍视为「加密货币」）
+_CRYPTO_ALLOW_SYMBOLS: set[str] = set()
+_CRYPTO_ALLOW_NAMES: tuple[str, ...] = ()
+
+
+def is_stock(asset_name: str, asset_symbol: str | None = None) -> bool:
+    """判断资产是否为「美股/商品」（非加密货币）。
+
+    攻击同名 crypto 项目误伤：
+    - `$Copper`、`$Gold`、`$Silver` 这类 meme 币不会命中（需带 futures/derivativ 限定）
+    - 可通过白名单豁免
+    """
+    if not asset_name:
+        return False
+    name = asset_name.lower()
+    if asset_symbol and asset_symbol.upper() in _CRYPTO_ALLOW_SYMBOLS:
+        return False
+    if name in _CRYPTO_ALLOW_NAMES:
+        return False
+    import re
+    return any(re.search(p, name) for p in _STOCK_PATTERNS)
+
+
+def is_crypto(asset_name: str, asset_symbol: str | None = None) -> bool:
+    """判断资产是否为加密货币（= 非美股/商品）。"""
+    return not is_stock(asset_name, asset_symbol)
 
 
 def is_non_crypto(asset_name: str, asset_symbol: str | None = None) -> bool:
-    """判断资产是否非加密资产（应被过滤）。
-
-    Args:
-        asset_name: canonical_name（如 "OpenAI Tokenized Stock"）
-        asset_symbol: canonical_symbol（如 "OPENAI"），用于豁免判断
-
-    Returns:
-        True = 非加密资产，应从信号/邮件中排除
-    """
-    if asset_symbol and asset_symbol.upper() in _ALLOW_SYMBOLS:
-        return False
-    if not asset_name:
-        return False
-    import re
-    name = asset_name.lower()
-    return any(re.search(p, name) for p in _NAME_BLOCK_PATTERNS)
+    """兼容旧名：True = 非加密资产（美股/商品）。等价于 is_stock。"""
+    return is_stock(asset_name, asset_symbol)
 
 
-# 可直接拼进 SQL 的过滤条件（psycopg 可用，只需 a.canonical_name 列存在）
-# 用法：AND {ASSET_NAME_FILTER_SQL}  （JOIN core.asset a 之后）
-# PostgreSQL !~ 走 PG ARE 正则：不认 \s/\b 简写，用 [[:space:]] 和词边界写法。
-ASSET_NAME_FILTER_SQL = """
-LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent|[[:<:]](gold|silver)[[:>:]][[:space:]]*\(?[[:space:]]*(futures|derivativ|oil)?[[:space:]]*\)?'
+# ---------------------------------------------------------------------
+# SQL 片段（JOIN core.asset a 之后使用）。
+# PostgreSQL ARE 正则：不认 \\s/\\b 简写，用 [[:space:]] 与词边界写法。
+# ---------------------------------------------------------------------
+
+# 命中即「美股/商品」（非加密）
+IS_STOCK_SQL = """
+LOWER(COALESCE(a.canonical_name, '')) ~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent|heating[[:space:]]+gas|natural[[:space:]]+gas'
 """
+
+# 命中即「非美股/商品 = 加密货币」（crypto 邮件用）
+CRYPTO_FILTER_SQL = f"""
+LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
+"""
+
+# 兼容旧名（= crypto 过滤，等价 CRYPTO_FILTER_SQL）
+ASSET_NAME_FILTER_SQL = CRYPTO_FILTER_SQL

@@ -21,7 +21,7 @@ import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .asset_filter import ASSET_NAME_FILTER_SQL, is_non_crypto
+from .asset_filter import ASSET_NAME_FILTER_SQL, IS_STOCK_SQL, is_non_crypto, is_stock
 
 if TYPE_CHECKING:
     import psycopg
@@ -30,13 +30,15 @@ logger = logging.getLogger(__name__)
 
 # 通知类型常量
 NTYPE_FAST_ALERT = "fast_alert"       # 快通道 A 级即时提醒
-NTYPE_SLOW_DIGEST = "slow_digest"     # 慢通道汇总邮件
+NTYPE_SLOW_DIGEST = "slow_digest"     # 慢通道汇总邮件（加密货币）
+NTYPE_SLOW_DIGEST_STOCK = "slow_digest_stock"  # 慢通道汇总邮件（美股/商品）
 
 # 去重窗口：同一信号同一类型 24h 内不重复发
 DEDUP_WINDOW_HOURS = 24
 
-# slow_digest 的 signal_id 哨兵值（NULL 不触发 UNIQUE 约束，用 -1 占位保证去重生效）
-SENTINEL_SLOW_DIGEST_SIGNAL_ID = -1
+# slow_digest 的 signal_id 哨兵值（NULL 不触发 UNIQUE 约束，用负数占位保证去重生效）
+SENTINEL_SLOW_DIGEST_SIGNAL_ID = -1      # 加密货币汇总
+SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID = -2  # 美股/商品汇总
 
 
 # =====================================================================
@@ -148,7 +150,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     ensure_notification_table(conn)
 
     # 找出 A 级 open 信号
-    rows = conn.execute(f"""
+    rows = conn.execute("""
         SELECT s.signal_id, s.tier, s.composite_score, s.kind,
                s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
                c.title AS catalyst_title, c.source_code,
@@ -160,7 +162,6 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
         WHERE s.signal_id = ANY(%s)
           AND s.tier = 'A'
           AND s.status = 'open'
-          AND {ASSET_NAME_FILTER_SQL}
         ORDER BY s.composite_score DESC
     """, (new_signal_ids,)).fetchall()
 
@@ -177,8 +178,9 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
             skipped += 1
             continue
 
-        # 构建邮件
-        subject = f"🚀 A级催化剂信号: {row['symbol']} - {row['catalyst_title']}"
+        # 构建邮件（美股/商品加标记，便于在收件箱区分）
+        cls_tag = "[美股·商品]" if is_stock(row["canonical_name"], row["symbol"]) else "[加密]"
+        subject = f"🚀 {cls_tag} A级催化剂信号: {row['symbol']} - {row['catalyst_title']}"
         body = _build_fast_alert_html(row)
 
         ok, msg = _send_email(subject, body)
@@ -302,26 +304,48 @@ def send_slow_digest(conn, stats: dict) -> dict:
     """
     ensure_notification_table(conn)
 
-    new_count = _count_new_ab_signals(conn, hours=24)
-    expired = stats.get("expired_count", 0)
-    if new_count == 0 and expired == 0:
-        return {"sent": 0, "skipped": 1, "reason": "24h 内无 A/B 级新信号且无过期，跳过汇总"}
+    # 加密货币汇总邮件
+    crypto_result = _send_slow_digest_class(conn, stats, asset_class="crypto")
+    # 美股/商品汇总邮件
+    stock_result = _send_slow_digest_class(conn, stats, asset_class="stock")
 
-    # 邮件里展示的 A/B 明细：仅取 24h 内的新信号（不是全量活跃）
-    a_rows = _recent_new_signals(conn, tier="A", hours=24)
-    b_rows = _recent_new_signals(conn, tier="B", hours=24)
+    return {
+        "sent": int(bool(crypto_result["sent"])) + int(bool(stock_result["sent"])),
+        "skipped": crypto_result["skipped"] + stock_result["skipped"],
+        "failed": crypto_result["failed"] + stock_result["failed"],
+        "reason": "; ".join(
+            [r for r in (crypto_result.get("reason"), stock_result.get("reason")) if r]
+        ) or None,
+        "crypto": crypto_result,
+        "stock": stock_result,
+    }
 
-    subject = f"📊 催化剂日报 · 24h新增 {new_count} 条 · A级 {len(a_rows)} · B级 {len(b_rows)}"
-    body = _build_slow_digest_html(a_rows, b_rows, new_count, stats)
 
-    # 24h 去重检查（慢通道 4h 跑一次，但汇总邮件一天一封足够）
-    if _is_sent(conn, SENTINEL_SLOW_DIGEST_SIGNAL_ID, NTYPE_SLOW_DIGEST):
-        return {"sent": 0, "skipped": 1, "reason": "24h 内已发送过汇总邮件，跳过"}
+def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
+    """发送某个资产类别的慢通道汇总邮件（加密货币 / 美股·商品）。
+
+    各自独立去重（select sentinel + ntype），互不影响。
+    """
+    is_crypto = asset_class == "crypto"
+    label = "加密货币" if is_crypto else "美股·商品"
+    ntype = NTYPE_SLOW_DIGEST if is_crypto else NTYPE_SLOW_DIGEST_STOCK
+    sentinel = SENTINEL_SLOW_DIGEST_SIGNAL_ID if is_crypto else SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID
+
+    new_count = _count_new_ab_signals(conn, hours=24, asset_class=asset_class)
+    if new_count == 0:
+        return {"sent": 0, "skipped": 1, "failed": 0, "reason": f"{label} 24h 内无 A/B 级新信号，跳过"}
+
+    a_rows = _recent_new_signals(conn, tier="A", hours=24, asset_class=asset_class)
+    b_rows = _recent_new_signals(conn, tier="B", hours=24, asset_class=asset_class)
+
+    subject = f"📊 催化剂日报·{label} · 24h新增 {new_count} 条 · A级 {len(a_rows)} · B级 {len(b_rows)}"
+    body = _build_slow_digest_html(a_rows, b_rows, new_count, stats, class_label=label)
+
+    if _is_sent(conn, sentinel, ntype):
+        return {"sent": 0, "skipped": 1, "failed": 0, "reason": f"{label} 24h 内已发送过汇总，跳过"}
 
     ok, msg = _send_email(subject, body)
-
-    # 记录（用哨兵值代替 NULL，保证 UNIQUE 约束生效）
-    _mark_sent(conn, SENTINEL_SLOW_DIGEST_SIGNAL_ID, NTYPE_SLOW_DIGEST, None, subject,
+    _mark_sent(conn, sentinel, ntype, None, subject,
                status="sent" if ok else "failed", error_msg=msg if not ok else None)
 
     return {
@@ -333,21 +357,23 @@ def send_slow_digest(conn, stats: dict) -> dict:
     }
 
 
-def _count_new_ab_signals(conn, hours: int = 24) -> int:
-    """统计过去 N 小时内新增的 A/B 级信号数量（排除非加密资产、按资产去重）。"""
+def _count_new_ab_signals(conn, hours: int = 24, asset_class: str = "crypto") -> int:
+    """统计过去 N 小时内新增的 A/B 级信号数量（按资产类别，按资产去重）。"""
+    filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
     row = conn.execute(f"""
         SELECT COUNT(DISTINCT a.asset_id) AS cnt
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         WHERE s.created_at > NOW() - INTERVAL '%s hours'
           AND s.tier IN ('A', 'B')
-          AND {ASSET_NAME_FILTER_SQL}
+          AND {filter_sql}
     """, (hours,)).fetchone()
     return row["cnt"] if row else 0
 
 
-def _recent_new_signals(conn, tier: str, hours: int = 24) -> list[dict]:
-    """过去 N 小时内某级别的去重新信号（排除非加密资产，按资产去重留最高分）。"""
+def _recent_new_signals(conn, tier: str, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
+    """过去 N 小时内某级别的去重新信号（按资产类别，按资产去重留最高分）。"""
+    filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
     return conn.execute(f"""
         SELECT DISTINCT ON (a.asset_id)
                s.signal_id, s.tier, s.composite_score, s.kind,
@@ -362,7 +388,7 @@ def _recent_new_signals(conn, tier: str, hours: int = 24) -> list[dict]:
         WHERE s.status = 'open'
           AND s.created_at > NOW() - INTERVAL '%s hours'
           AND s.tier = %s
-          AND {ASSET_NAME_FILTER_SQL}
+          AND {filter_sql}
         ORDER BY a.asset_id, s.composite_score DESC
     """, (hours, tier)).fetchall()
 
@@ -479,7 +505,8 @@ def _fmt_price(v) -> str:
         return "—"
 
 
-def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
+def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict,
+                            class_label: str = "加密货币") -> str:
     """构建慢通道汇总邮件 HTML。
 
     Args:
@@ -487,6 +514,7 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
         b_rows: 24h 内 B 级去重新信号
         new_count: 24h 内新增 A/B 信号总数（去重）
         stats: 慢通道统计（second_order_count / expired_count）
+        class_label: 资产类别中文标签（加密货币 / 美股·商品）
     """
     so_count = stats.get("second_order_count", 0)
     expired = stats.get("expired_count", 0)
@@ -497,8 +525,8 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
     return f"""
     <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
       <div style="background:linear-gradient(135deg,#0f172a,#1e293b);color:#fff;padding:24px;border-radius:12px">
-        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · 慢通道汇总</div>
-        <div style="font-size:24px;font-weight:700;margin-top:8px">24h 新增 {new_count} 条信号</div>
+        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · 慢通道汇总</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} 24h 新增 {new_count} 条信号</div>
         <div style="margin-top:4px;font-size:13px;opacity:.8">A级 {len(a_rows)} · B级 {len(b_rows)} · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
       </div>
 
@@ -516,7 +544,7 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
         </div>
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
-          由催化剂决策管道自动生成 · 已排除非加密资产（美股代币/商品期货）
+          由催化剂决策管道自动生成 · {class_label} 独立汇总
         </div>
       </div>
     </div>

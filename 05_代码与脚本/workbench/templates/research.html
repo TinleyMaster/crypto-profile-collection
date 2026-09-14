@@ -2472,7 +2472,24 @@
 
             // 关键指标（优先用结构化指标，不用 LLM 生成的）
             const sm = structuredMetrics || {};
-            const hasStructuredMetrics = sm.market && Object.keys(sm.market).length > 0;
+            // 任一维度非空即展示，不再被 market 单一 gate 限制
+            function _hasAnySm (s) {
+                if (!s || typeof s !== 'object') return false;
+                for (var k in s) {
+                    if (Object.prototype.hasOwnProperty.call(s, k)) {
+                        var v = s[k];
+                        if (v !== null && v !== undefined && v !== '' &&
+                            !(typeof v === 'object' && Object.keys(v).length === 0)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            var hasStructuredMetrics =
+                _hasAnySm(sm.market) || _hasAnySm(sm.tokenomics) || _hasAnySm(sm.unlock) ||
+                _hasAnySm(sm.onchain) || _hasAnySm(sm.social) || _hasAnySm(sm.derivatives) ||
+                _hasAnySm(sm.pressure);
             if (hasStructuredMetrics) {
                 let snapshotLabel = '';
                 if (sm.market.snapshot_time) {
@@ -2862,8 +2879,11 @@
                     if (!avail.sentiment) missing.push('情绪');
                     if (!avail.price) missing.push('价格');
                     if (!avail.onchain) missing.push('链上');
-                    if (missing.length > 0) {
+                    const hasAny = avail.price || avail.onchain || avail.sentiment || avail.exchange_flow;
+                    if (missing.length > 0 && !hasAny) {
                         html = '<div class="d-empty">数据不足，无法检测（缺少: ' + missing.join('、') + '）</div>';
+                    } else if (missing.length > 0) {
+                        html = '<div class="d-empty">当前未检测到明显背离信号<span style="display:block;font-size:11px;margin-top:4px;opacity:0.6;">（部分维度数据缺失：' + missing.join('、') + '，仅基于可用维度检测）</span></div>';
                     } else {
                         html = '<div class="d-empty">当前未检测到明显背离信号</div>';
                     }
@@ -2871,10 +2891,12 @@
                     signals.forEach(function (s) {
                         const cls = s.type === 'bearish_divergence' ? 'bearish' : 'bullish';
                         const sevLabel = s.severity === 'high' ? '强信号' : '中信号';
+                        const simplifiedTag = s.simplified ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.15);margin-left:6px;">简化检测</span>' : '';
                         html += '<div class="d-signal ' + cls + '">';
                         html += '<div class="d-title">';
                         html += (s.type === 'bearish_divergence' ? '⚠️ ' : '💎 ') + escapeHtml(s.label);
                         html += '<span class="d-severity ' + s.severity + '">' + sevLabel + ' · ' + Math.round(s.confidence) + '%</span>';
+                        html += simplifiedTag;
                         html += '</div>';
                         html += '<div class="d-desc">' + escapeHtml(s.description || '') + '</div>';
                         html += '<div class="d-conds">';

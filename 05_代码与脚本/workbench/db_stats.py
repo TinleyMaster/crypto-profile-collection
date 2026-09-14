@@ -5930,14 +5930,18 @@ def get_divergence_signals(asset_id: int) -> dict:
         top_conds.append(("exchange_inflow", ex_pct > 0.1, f"24h 转入交易所 {ex_pct:.4f}%（>0.1% 抛压）"))
 
     top_matched = [c for c in top_conds if c[1]]
-    if len(top_matched) >= 3:
+    # 当可用条件不足 5 个时（如 sentiment 缺失），降低匹配阈值，支持简化版两路/三路背离
+    available_conds = len(top_conds)
+    top_threshold = 3 if available_conds >= 5 else 2
+    if len(top_matched) >= top_threshold and available_conds >= 2:
         signals.append({
             "type": "bearish_divergence",
             "label": "顶部背离",
-            "severity": "high" if len(top_matched) >= 4 else "medium",
+            "severity": "high" if len(top_matched) >= min(4, available_conds) else "medium",
             "confidence": round(len(top_matched) / len(top_conds) * 100, 0) if top_conds else 0,
             "description": "社交情绪高涨但价格滞涨、链上资金流出，散户 FOMO 而聪明钱出货",
             "conditions": [{"key": k, "matched": m, "detail": d} for k, m, d in top_conds],
+            "simplified": available_conds < 5,
         })
 
     # 底部背离条件
@@ -5954,14 +5958,18 @@ def get_divergence_signals(asset_id: int) -> dict:
         bot_conds.append(("holder_growth", h_7d_pct > 5, f"持有者 7d 增长 {h_7d_pct:+.2f}%（>+5% 扩散）"))
 
     bot_matched = [c for c in bot_conds if c[1]]
-    if len(bot_matched) >= 3:
+    # 当可用条件不足 5 个时（如 sentiment 缺失），降低匹配阈值，支持简化版两路/三路背离
+    available_bot_conds = len(bot_conds)
+    bot_threshold = 3 if available_bot_conds >= 5 else 2
+    if len(bot_matched) >= bot_threshold and available_bot_conds >= 2:
         signals.append({
             "type": "bullish_divergence",
             "label": "底部背离",
-            "severity": "high" if len(bot_matched) >= 4 else "medium",
+            "severity": "high" if len(bot_matched) >= min(4, available_bot_conds) else "medium",
             "confidence": round(len(bot_matched) / len(bot_conds) * 100, 0) if bot_conds else 0,
             "description": "社交情绪低迷但价格抗跌、链上资金流入，散户绝望而聪明钱吸筹",
             "conditions": [{"key": k, "matched": m, "detail": d} for k, m, d in bot_conds],
+            "simplified": available_bot_conds < 5,
         })
 
     # 原始指标（用于前端展示）
@@ -6122,10 +6130,10 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             try:
                 cur.execute("""
                     SELECT asset_id, price_usd, market_cap, fdv,
-                           circulating_supply, total_supply
+                           circulating_supply, total_supply, change_24h
                     FROM (
                         SELECT asset_id, price_usd, market_cap, fdv,
-                               circulating_supply, total_supply,
+                               circulating_supply, total_supply, change_24h,
                                ROW_NUMBER() OVER (
                                    PARTITION BY asset_id
                                    ORDER BY CASE source_code
@@ -6149,7 +6157,8 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 cur.execute("""
                     SELECT DISTINCT ON (cb.asset_id)
                            cb.asset_id, q.price_usd, q.market_cap, q.fdv,
-                           q.circulating_supply, q.total_supply, q.max_supply
+                           q.circulating_supply, q.total_supply, q.max_supply,
+                           q.percent_change_24h AS change_24h
                     FROM biz.coin_basic cb
                     JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                     WHERE cb.asset_id = ANY(%s)
@@ -6159,16 +6168,20 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
             except psycopg.errors.UndefinedTable:
                 cmc_quote_map = {}
 
-            # 3h. 市值/价格（多源 fallback：日级行情 > unlock > social_heat > cmc_snapshot > tokenomics推算）
-            def _get_mcap_price(aid):
+            # 3h. 市值/价格/涨跌幅（多源 fallback：日级行情 > unlock > social_heat > cmc_snapshot > tokenomics推算）
+            def _get_mcap_price_change(aid):
+                """返回 (mcap, price, fdv, change_24h)，多源 fallback。"""
+                change_24h = None
                 # 1. 从日级行情表取（与 market-history 同源，最可靠）
                 m = market_daily_map.get(aid)
                 if m:
                     mcap = m.get("market_cap")
                     price = m.get("price_usd")
                     fdv = m.get("fdv")
+                    if m.get("change_24h") is not None:
+                        change_24h = m["change_24h"]
                     if mcap or price or fdv:
-                        return (mcap, price, fdv)
+                        return (mcap, price, fdv, change_24h)
                 # 2. 从 unlock input_snapshot 取
                 row = unlock_map.get(aid)
                 if row:
@@ -6176,8 +6189,10 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     mcap = snap.get("market_cap") or snap.get("market_cap_usd")
                     price = snap.get("price") or snap.get("price_usd")
                     fdv = snap.get("fdv") or snap.get("fdv_usd")
+                    if snap.get("change_24h") is not None:
+                        change_24h = snap["change_24h"]
                     if mcap or price:
-                        return (mcap, price, fdv)
+                        return (mcap, price, fdv, change_24h)
                 # 3. 从 social_heat market_json 取
                 s = social_map.get(aid)
                 if s:
@@ -6185,16 +6200,20 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     mcap = mj.get("market_cap") or mj.get("market_cap_usd")
                     price = mj.get("price") or mj.get("price_usd")
                     fdv = mj.get("fdv") or mj.get("fully_diluted_valuation")
+                    if mj.get("change_24h") is not None:
+                        change_24h = mj["change_24h"]
                     if mcap or price:
-                        return (mcap, price, fdv)
-                # 3. 从 CMC 报价快照取（最可靠的 fallback）
+                        return (mcap, price, fdv, change_24h)
+                # 3.5 从 CMC 报价快照取（最可靠的 fallback）
                 q = cmc_quote_map.get(aid)
                 if q:
                     mcap = q.get("market_cap")
                     price = q.get("price_usd")
                     fdv = q.get("fdv")
+                    if q.get("change_24h") is not None:
+                        change_24h = q["change_24h"]
                     if mcap or price:
-                        return (mcap, price, fdv)
+                        return (mcap, price, fdv, change_24h)
                 # 4. 从 tokenomics 推算（价格 * 流通量）
                 t = tokenomics_map.get(aid) or {}
                 price = t.get("price_usd")
@@ -6212,11 +6231,11 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                         fdv = float(price) * float(total)
                     except (ValueError, TypeError):
                         pass
-                return (mcap, price, fdv)
+                return (mcap, price, fdv, change_24h)
 
             # 4. 组装竞品列表
             def _build_coin(aid, symbol, name, atype):
-                mcap, price, fdv = _get_mcap_price(aid)
+                mcap, price, fdv, change_24h = _get_mcap_price_change(aid)
                 t = tokenomics_map.get(aid) or {}
                 o = onchain_map.get(aid) or {}
                 s = social_map.get(aid) or {}
@@ -6302,6 +6321,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                     "market_cap": mcap,
                     "fdv": fdv,
                     "price": price,
+                    "change_24h": float(change_24h) if change_24h is not None else None,
                     "total_supply": total_supply,
                     "circulating_supply": circ_supply,
                     "unlocked_pct": unlocked_pct,
@@ -6348,6 +6368,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 {"key": "market_cap", "label": "市值", "format": "usd_big"},
                 {"key": "fdv", "label": "FDV", "format": "usd_big"},
                 {"key": "price", "label": "价格", "format": "usd_price"},
+                {"key": "change_24h", "label": "24h涨跌", "format": "pct"},
                 {"key": "total_supply", "label": "总供应量", "format": "number_big"},
                 {"key": "circulating_supply", "label": "流通量", "format": "number_big"},
                 {"key": "unlocked_pct", "label": "未流通占比", "format": "pct"},

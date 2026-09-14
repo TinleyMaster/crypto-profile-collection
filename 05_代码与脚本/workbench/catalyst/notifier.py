@@ -17,8 +17,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+from .asset_filter import ASSET_NAME_FILTER_SQL, is_non_crypto
 
 if TYPE_CHECKING:
     import psycopg
@@ -155,6 +158,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
         WHERE s.signal_id = ANY(%s)
           AND s.tier = 'A'
           AND s.status = 'open'
+          AND {ASSET_NAME_FILTER_SQL}
         ORDER BY s.composite_score DESC
     """, (new_signal_ids,)).fetchall()
 
@@ -249,46 +253,24 @@ def send_slow_digest(conn, stats: dict) -> dict:
         stats: 慢通道统计信息，包括：
             - second_order_count: 二阶映射数
             - g3g5_processed: G3-G5 处理数
-            - tier_distribution: tier 分布
             - expired_count: 过期信号数
-            - new_signal_ids: 本轮新信号 ID 列表（用于去重）
 
     Returns:
         dict: {sent, skipped, reason}
     """
     ensure_notification_table(conn)
 
-    # 获取当前 A/B 级 open 信号
-    rows = conn.execute("""
-        SELECT s.signal_id, s.tier, s.composite_score, s.kind,
-               s.technical_state, s.persistence,
-               a.canonical_name, a.canonical_symbol AS symbol,
-               ac.title AS catalyst_title
-        FROM biz.catalyst_signal s
-        JOIN core.asset a ON s.asset_id = a.asset_id
-        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-        WHERE s.status = 'open'
-          AND s.tier IN ('A', 'B')
-        ORDER BY
-            CASE s.tier WHEN 'A' THEN 1 WHEN 'B' THEN 2 END,
-            s.composite_score DESC
-        LIMIT 30
-    """).fetchall()
-
-    # 只发当日有新信号时才发，避免噪音
-    today_new = conn.execute("""
-        SELECT COUNT(*) AS cnt
-        FROM biz.catalyst_signal
-        WHERE created_at > NOW() - INTERVAL '24 hours'
-          AND tier IN ('A', 'B')
-    """).fetchone()
-
-    new_count = today_new["cnt"] if today_new else 0
-    if new_count == 0 and stats.get("expired_count", 0) == 0:
+    new_count = _count_new_ab_signals(conn, hours=24)
+    expired = stats.get("expired_count", 0)
+    if new_count == 0 and expired == 0:
         return {"sent": 0, "skipped": 1, "reason": "24h 内无 A/B 级新信号且无过期，跳过汇总"}
 
-    subject = f"📊 催化剂日报 · {new_count} 条新信号 · A级 {_count_by_tier(rows, 'A')} / B级 {_count_by_tier(rows, 'B')}"
-    body = _build_slow_digest_html(rows, stats, new_count)
+    # 邮件里展示的 A/B 明细：仅取 24h 内的新信号（不是全量活跃）
+    a_rows = _recent_new_signals(conn, tier="A", hours=24)
+    b_rows = _recent_new_signals(conn, tier="B", hours=24)
+
+    subject = f"📊 催化剂日报 · 24h新增 {new_count} 条 · A级 {len(a_rows)} · B级 {len(b_rows)}"
+    body = _build_slow_digest_html(a_rows, b_rows, new_count, stats)
 
     # 24h 去重检查（慢通道 4h 跑一次，但汇总邮件一天一封足够）
     if _is_sent(conn, SENTINEL_SLOW_DIGEST_SIGNAL_ID, NTYPE_SLOW_DIGEST):
@@ -309,82 +291,154 @@ def send_slow_digest(conn, stats: dict) -> dict:
     }
 
 
-def _count_by_tier(rows, tier: str) -> int:
-    return sum(1 for r in rows if r["tier"] == tier)
+def _count_new_ab_signals(conn, hours: int = 24) -> int:
+    """统计过去 N 小时内新增的 A/B 级信号数量（排除非加密资产、按资产去重）。"""
+    row = conn.execute(f"""
+        SELECT COUNT(DISTINCT a.asset_id) AS cnt
+        FROM biz.catalyst_signal s
+        JOIN core.asset a ON s.asset_id = a.asset_id
+        WHERE s.created_at > NOW() - INTERVAL '%s hours'
+          AND s.tier IN ('A', 'B')
+          AND {ASSET_NAME_FILTER_SQL}
+    """, (hours,)).fetchone()
+    return row["cnt"] if row else 0
 
 
-def _build_slow_digest_html(rows, stats: dict, new_count: int) -> str:
-    """构建慢通道汇总邮件 HTML。"""
-    tier_dist = stats.get("tier_distribution", {})
+def _recent_new_signals(conn, tier: str, hours: int = 24) -> list[dict]:
+    """过去 N 小时内某级别的去重新信号（排除非加密资产，按资产去重留最高分）。"""
+    return conn.execute(f"""
+        SELECT DISTINCT ON (a.asset_id)
+               s.signal_id, s.tier, s.composite_score, s.kind,
+               s.technical_state, s.persistence,
+               a.canonical_name, a.canonical_symbol AS symbol,
+               ac.title AS catalyst_title
+        FROM biz.catalyst_signal s
+        JOIN core.asset a ON s.asset_id = a.asset_id
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.status = 'open'
+          AND s.created_at > NOW() - INTERVAL '%s hours'
+          AND s.tier = %s
+          AND {ASSET_NAME_FILTER_SQL}
+        ORDER BY a.asset_id, s.composite_score DESC
+    """, (hours, tier)).fetchall()
 
-    # 信号表格行
-    signal_rows = ""
-    for r in rows[:20]:  # 最多 20 条
-        tier_color = {"A": "#7c3aed", "B": "#3b82f6", "C": "#6b7280"}.get(r["tier"], "#6b7280")
-        tech_badge = f'<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3">{r["technical_state"] or "—"}</span>' if r.get("technical_state") else "—"
-        horizon = r.get("persistence") or "—"
-        signal_rows += f"""
+
+# ---- 中文化映射 ----
+
+_TECH_STATE_CN = {
+    "up": "看涨",
+    "range": "震荡",
+    "down": "看跌",
+    "strong": "强势",
+    "weak": "弱势",
+    "neutral": "中性",
+}
+
+_PERSISTENCE_CN = {
+    "structural": "结构性",
+    "one_off": "事件驱动",
+    "decaying": "衰减性",
+    "cyclical": "周期性",
+    "contagion": "传导性",
+}
+
+_KIND_CN = {
+    "structural": "结构性",
+    "event": "事件",
+    "sentiment": "情绪",
+    "noise": "噪音",
+}
+
+
+def _tech_cn(v) -> str:
+    return _TECH_STATE_CN.get(v, v or "—")
+
+
+def _persist_cn(v) -> str:
+    return _PERSISTENCE_CN.get(v, v or "—")
+
+
+def _kind_cn(v) -> str:
+    return _KIND_CN.get(v, "—")
+
+
+def _truncate(text: str, length: int = 40) -> str:
+    """截断过长标题。"""
+    if not text:
+        return "—"
+    text = str(text).strip()
+    return text if len(text) <= length else text[: length - 1] + "…"
+
+
+def _build_signal_table(rows, tier: str) -> str:
+    """构建单级别信号表格（不重复渲染级别列，标题缩略 + 事件类型显示 kind）。"""
+    tier_color = {"A": "#7c3aed", "B": "#3b82f6"}.get(tier, "#6b7280")
+    rows_html = ""
+    for r in rows[:15]:  # 每级别最多 15 条
+        tech = _tech_cn(r.get("technical_state"))
+        persist = _persist_cn(r.get("persistence"))
+        kind = _kind_cn(r.get("kind"))
+        title = _truncate(r.get("catalyst_title") or "", 40)
+        rows_html += f"""
         <tr>
           <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">
-            <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:4px;background:{tier_color};color:#fff;font-size:11px;font-weight:700">{r["tier"]}</span>
+            <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:4px;background:{tier_color};color:#fff;font-size:11px;font-weight:700">{tier}</span>
           </td>
           <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-weight:600">{r["symbol"]}</td>
           <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:13px">{r["canonical_name"]}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:13px">{r["catalyst_title"] or r["kind"] or "—"}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{kind}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#374151">{title}</td>
           <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:600">{(r["composite_score"] or 0):.0f}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">{tech_badge}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{horizon}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">
+            <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:#e0e7ff;color:#3730a3">{tech}</span>
+          </td>
+          <td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{persist}</td>
         </tr>
         """
+    return rows_html or f'<tr><td colspan="8" style="padding:16px;text-align:center;color:#9ca3af">过去 24h 无 {tier} 级新信号</td></tr>'
 
-    # 统计卡片
-    dist_items = ""
-    for tier, cnt in sorted(tier_dist.items()):
-        tier_color = {"A": "#7c3aed", "B": "#3b82f6", "C": "#6b7280"}.get(tier, "#6b7280")
-        dist_items += f"""
-        <div style="flex:1;text-align:center;padding:10px;background:#f9fafb;border-radius:6px">
-          <div style="font-size:20px;font-weight:700;color:{tier_color}">{cnt}</div>
-          <div style="font-size:11px;color:#6b7280;margin-top:2px">{tier} 级</div>
-        </div>
-        """
 
+def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict) -> str:
+    """构建慢通道汇总邮件 HTML。
+
+    Args:
+        a_rows: 24h 内 A 级去重新信号
+        b_rows: 24h 内 B 级去重新信号
+        new_count: 24h 内新增 A/B 信号总数（去重）
+        stats: 慢通道统计（second_order_count / expired_count）
+    """
     so_count = stats.get("second_order_count", 0)
     expired = stats.get("expired_count", 0)
+
+    header = "".join(f"""<th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">{_col}</th>""" for _col in (
+        "级别", "代币", "名称", "事件类型", "事件摘要", "评分", "技术面", "持续性"))
+    a_table = _build_signal_table(a_rows, "A")
+    b_table = _build_signal_table(b_rows, "B")
 
     return f"""
     <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
       <div style="background:linear-gradient(135deg,#0f172a,#1e293b);color:#fff;padding:24px;border-radius:12px">
         <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · 慢通道汇总</div>
-        <div style="font-size:24px;font-weight:700;margin-top:8px">今日 {new_count} 条新信号</div>
-        <div style="margin-top:4px;font-size:13px;opacity:.8">二阶受益 {so_count} 条 · 过期 {expired} 条</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">24h 新增 {new_count} 条信号</div>
+        <div style="margin-top:4px;font-size:13px;opacity:.8">A级 {len(a_rows)} · B级 {len(b_rows)} · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
       </div>
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <!-- 统计概览 -->
-        <div style="display:flex;gap:10px;margin-bottom:20px">
-          {dist_items or '<div style="color:#6b7280;font-size:13px">暂无分级数据</div>'}
-        </div>
-
-        <!-- 信号列表 -->
-        <div style="margin-bottom:12px">
-          <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🔥 当前活跃信号（Top 20）</h3>
-        </div>
+        <!-- A 级 -->
+        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增）</h3>
         <div style="overflow-x:auto">
           <table style="width:100%;border-collapse:collapse;font-size:13px">
-            <thead>
-              <tr style="background:#f9fafb">
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">级别</th>
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">代币</th>
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">名称</th>
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">事件类型</th>
-                <th style="padding:8px 10px;text-align:center;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">评分</th>
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">技术面</th>
-                <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">持续性</th>
-              </tr>
-            </thead>
-            <tbody>
-              {signal_rows or '<tr><td colspan="7" style="padding:20px;text-align:center;color:#9ca3af">暂无活跃信号</td></tr>'}
-            </tbody>
+            <thead><tr style="background:#f9fafb">{header}</tr></thead>
+            <tbody>{a_table}</tbody>
+          </table>
+        </div>
+
+        <!-- B 级 -->
+        <h3 style="font-size:15px;margin:20px 0 10px;color:#111827">🔵 B 级信号（过去 24h 新增）</h3>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:#f9fafb">{header}</tr></thead>
+            <tbody>{b_table}</tbody>
           </table>
         </div>
 
@@ -393,7 +447,7 @@ def _build_slow_digest_html(rows, stats: dict, new_count: int) -> str:
         </div>
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
-          由催化剂决策管道自动生成
+          由催化剂决策管道自动生成 · 已排除非加密资产（美股代币/商品期货）
         </div>
       </div>
     </div>

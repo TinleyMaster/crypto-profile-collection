@@ -46,6 +46,8 @@ class Settings:
     smtp_pass: str | None = None
     smtp_to: str | None = None
     smtp_from: str | None = None
+    # 系统维护告警专用收件人（仅发管理员）
+    admin_email: str | None = None
 
     def get_coingecko_keys(self) -> list[str]:
         """返回所有可用的 CoinGecko API key（单个或多个），无 key 返回空列表。"""
@@ -119,4 +121,5 @@ def get_settings(require_database: bool = True) -> Settings:
         smtp_pass=os.getenv("SMTP_PASS", "").strip() or None,
         smtp_to=os.getenv("SMTP_TO", "").strip() or None,
         smtp_from=os.getenv("SMTP_FROM", "").strip() or None,
+        admin_email=os.getenv("ADMIN_EMAIL", "").strip() or None,
     )

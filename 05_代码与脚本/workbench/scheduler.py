@@ -242,11 +242,11 @@ def submit_scheduled_task(key: str, script: str, args: list[str], desc: str, cat
 
 
 def _send_alert_email(subject: str, body_text: str) -> bool:
-    """失败告警邮件（自包含 smtplib）。"""
+    """失败告警邮件（自包含 smtplib）。仅发管理员（ADMIN_EMAIL），未配置时回退 SMTP_TO。"""
     host = os.getenv("SMTP_HOST", "").strip()
     user = os.getenv("SMTP_USER", "").strip()
     pwd = os.getenv("SMTP_PASS", "")
-    to = os.getenv("SMTP_TO", "").strip()
+    to = os.getenv("ADMIN_EMAIL", "").strip() or os.getenv("SMTP_TO", "").strip()
     if not (host and user and pwd and to):
         return False
 

@@ -66,7 +66,7 @@ def fetch_cefi_history(api_key: str, days: int = 365) -> list[tuple[date, float]
     """从 cryptoETF API 拉取 CEFI 指数历史，返回 [(date, value), ...] 按日期升序。"""
     print(f"[cefi_index] fetching CEFI history (days={days}) ...")
     r = requests.get(
-        f"{CRYPTOETF_BASE}/v1/index/cefi/history",
+        f"{CRYPTOETF_BASE}/v1/index/cefi",
         headers={"Authorization": f"Bearer {api_key}"},
         params={"days": days},
         timeout=TIMEOUT,

@@ -156,12 +156,11 @@ class CatalystSignalBuilder:
         if entry_price and stop_loss and take_profit and entry_price != stop_loss:
             rr_ratio = round(abs((take_profit - entry_price) / (entry_price - stop_loss)), 2)
 
-        # R:R 不够的降级（降一档 tier）
-        if rr_ratio is not None and rr_ratio < self.min_rr and tier and tier != 'C':
-            if tier == 'A':
-                tier = 'B'
-            elif tier == 'B':
-                tier = 'C'
+        # R:R 不达标 → 不入库（tier=None，upsert_to_db 会跳过）
+        # 依据工单 §5 G6 / §10：composite_score 是 tier 唯一来源（单点真源）。
+        # 不做"只降 tier 不改分"的二次判定，避免产生 composite_score/tier 不一致行。
+        if rr_ratio is not None and rr_ratio < self.min_rr:
+            tier = None
 
         # 过期时间
         expiry_days = self.expiry_days.get(kind, 3)

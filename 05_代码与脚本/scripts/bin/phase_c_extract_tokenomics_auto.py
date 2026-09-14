@@ -50,10 +50,13 @@ MAX_ROUNDS = 100
 MAX_CONSECUTIVE_FAILURES = 5
 # 墓碑冷却期：跳过/失败后 N 天内不再重试该资产，避免同一批内反复处理
 TOMBSTONE_COOLDOWN_DAYS = 7
+# 墓碑最大尝试次数：达到后转 n/a 永久停捞，切断「7 天一轮永久重试」循环（深挖 2026-09-14 / P1）
+MAX_EXTRACT_ATTEMPTS = 3
+# 永久排除状态值：达到重试上限后写入，get_candidates 显式排除
+ST_NA = "n/a"
 # 墓碑状态值
 ST_OK = "ok"
 ST_PREFILTER_MISS = "prefilter_miss"
-ST_NO_DOCS = "no_docs"
 ST_NO_CONTENT = "no_content"
 
 # tokenomics 相关关键词（URL / doc_type 命中即视为候选，不命中直接跳过，不调用 LLM）
@@ -120,6 +123,13 @@ def _ensure_tombstone_columns(conn) -> None:
                 ) THEN
                     ALTER TABLE biz.asset_tokenomics ADD COLUMN next_retry_at TIMESTAMPTZ;
                 END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'biz' AND table_name = 'asset_tokenomics'
+                    AND column_name = 'extract_attempts'
+                ) THEN
+                    ALTER TABLE biz.asset_tokenomics ADD COLUMN extract_attempts INT DEFAULT 0;
+                END IF;
             END $$;
         """)
     conn.commit()
@@ -131,17 +141,44 @@ def write_tombstone(conn, asset_id: int, status: str, cooldown_days: int = TOMBS
 
     墓碑行拥有 extract_status != 'ok' + next_retry_at（冷却期），
     get_candidates 会在冷却期过后重新纳入候选。
+
+    深挖 2026-09-14 / P1：累计 extract_attempts，达到 MAX_EXTRACT_ATTEMPTS 后
+    改写 extract_status='n/a' + next_retry_at=NULL 永久停捞，切断「7 天一轮永久重试」循环。
     """
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO biz.asset_tokenomics (asset_id, extract_status, next_retry_at, extraction_notes, source_urls)
-            VALUES (%s, %s, NOW() + %s * INTERVAL '1 day', %s, '{}')
-            ON CONFLICT (asset_id) DO UPDATE SET
-                extract_status = EXCLUDED.extract_status,
-                next_retry_at = EXCLUDED.next_retry_at,
-                extraction_notes = EXCLUDED.extraction_notes,
-                updated_at = NOW()
-        """, (asset_id, status, cooldown_days, note or f"tombstone: {status}"))
+        # 读当前尝试次数（无记录视为 0）
+        cur.execute(
+            "SELECT extract_attempts FROM biz.asset_tokenomics WHERE asset_id = %s",
+            (asset_id,),
+        )
+        row = cur.fetchone()
+        attempts = (row[0] if row and row[0] is not None else 0) + 1
+
+        if attempts >= MAX_EXTRACT_ATTEMPTS:
+            # 达到上限：转 n/a 永久排除（next_retry_at=NULL 需配合 get_candidates 显式排除 n/a）
+            cur.execute("""
+                INSERT INTO biz.asset_tokenomics
+                    (asset_id, extract_status, next_retry_at, extraction_notes, source_urls, extract_attempts)
+                VALUES (%s, %s, NULL, %s, '{}', %s)
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    extract_status = EXCLUDED.extract_status,
+                    next_retry_at = NULL,
+                    extraction_notes = EXCLUDED.extraction_notes,
+                    extract_attempts = EXCLUDED.extract_attempts,
+                    updated_at = NOW()
+            """, (asset_id, ST_NA, "max attempts reached", attempts))
+        else:
+            cur.execute("""
+                INSERT INTO biz.asset_tokenomics
+                    (asset_id, extract_status, next_retry_at, extraction_notes, source_urls, extract_attempts)
+                VALUES (%s, %s, NOW() + %s * INTERVAL '1 day', %s, '{}', %s)
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    extract_status = EXCLUDED.extract_status,
+                    next_retry_at = EXCLUDED.next_retry_at,
+                    extraction_notes = EXCLUDED.extraction_notes,
+                    extract_attempts = EXCLUDED.extract_attempts,
+                    updated_at = NOW()
+            """, (asset_id, status, cooldown_days, note or f"tombstone: {status}", attempts))
     conn.commit()
 
 
@@ -165,6 +202,7 @@ def get_candidates(conn, batch_size: int, force: bool) -> list[int]:
         if force
         else "tok.asset_id IS NULL "
              "OR (tok.extract_status IS DISTINCT FROM 'ok' "
+             "    AND tok.extract_status IS DISTINCT FROM 'n/a' "
              "    AND (tok.next_retry_at IS NULL OR tok.next_retry_at <= NOW()))"
     )
 
@@ -240,11 +278,9 @@ def process_one(conn, llm: LLMClient, asset_id: int, force: bool) -> str:
             print(f"  tokenomics.com 入库失败，回退到文档+LLM路径: {e}")
 
     # 收集所有文档链接
+    # （get_candidates 的 EXISTS 已保证候选资产必有 doc_source_entry 入口，
+    #   故 ST_NO_DOCS 死分支已随深挖 2026-09-14 / P3 一并移除）
     all_links = collect_all_links(conn, asset_id)
-    if not all_links:
-        print(f"  SKIP: 无可用文档链接")
-        write_tombstone(conn, asset_id, ST_NO_DOCS, note="无可用文档链接")
-        return "skipped"
 
     print(f"  收集到 {len(all_links)} 个文档链接")
 

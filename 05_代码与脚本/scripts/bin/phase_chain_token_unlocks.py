@@ -110,12 +110,14 @@ def guess_slugs(asset: dict) -> list[str]:
     if symbol_slug and symbol_slug not in slugs:
         slugs.append(symbol_slug)
 
-    # 3. 数据库 CG ID 作为参考（asset_source_map 可能不准，放最后）
-    cg_id = asset.get("coingecko_id")
-    if cg_id:
-        cg_slug = cg_id.strip().lower()
-        if cg_slug not in slugs:
-            slugs.append(cg_slug)
+    # 3. 数据库 CG ID 仅作兜底：仅当 symbol 未命中 slug_map 时使用
+    #    （脏 coingecko_id 如 'wade' 不再干扰已可靠解析的 symbol，深挖 2026-09-14 / P2）
+    if symbol not in slug_map:
+        cg_id = asset.get("coingecko_id")
+        if cg_id:
+            cg_slug = cg_id.strip().lower()
+            if cg_slug not in slugs:
+                slugs.append(cg_slug)
 
     return slugs
 

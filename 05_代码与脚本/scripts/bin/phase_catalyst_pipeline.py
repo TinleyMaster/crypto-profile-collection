@@ -141,7 +141,7 @@ def load_config() -> dict:
     )
 
 
-def _exec_with_retry(conn, sql, params, *, max_retries: int = 5,
+def _exec_with_retry(conn, sql, params, *, max_retries: int = 3,
                      base_delay: float = 1.0, label: str = "write"):
     """执行一条 SQL，遇到 LockNotAvailable 退避重试。
 
@@ -168,7 +168,7 @@ def _exec_with_retry(conn, sql, params, *, max_retries: int = 5,
     return None
 
 
-def _call_with_retry(fn, *, max_retries: int = 5, base_delay: float = 1.0,
+def _call_with_retry(fn, *, max_retries: int = 3, base_delay: float = 1.0,
                      label: str = "write"):
     """调用任意函数，遇到 LockNotAvailable 退避重试。
 
@@ -240,6 +240,13 @@ def run_classify(conn, classifier: RuleEventClassifier,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         count += 1
+        # 每条立即提交：释放 asset_catalyst 行级锁（FOR NO KEY UPDATE），
+        # 避免整个 pipeline 长事务持锁 → 与摄入进程的 UPDATE 行级锁冲突
+        #（catalyst_grade/catalyst_resonance 的 FK 检查需要 FOR KEY SHARE，2026-09-15 P0）
+        try:
+            conn.commit()
+        except Exception:
+            pass
         trace_step("L1_classify", catalyst_id=row["catalyst_id"],
                    title=row["title"] or "",
                    passed=True, metrics={"event_type": event_type})
@@ -324,6 +331,12 @@ def run_grade(conn, grader: CatalystGrader,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         count += 1
+        # 每条立即提交：释放 catalyst_grade 行锁（INSERT 的 FK 检查 FOR KEY SHARE）
+        # 及 asset_catalyst 父行锁，避免长事务与摄入进程互相阻塞（2026-09-15 P0）
+        try:
+            conn.commit()
+        except Exception:
+            pass
 
         is_noise = result.catalyst_kind == "noise"
         trace_step(
@@ -441,6 +454,11 @@ def run_resonance(conn, scorer: ResonanceScorer,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         count += 1
+        # 每条立即提交：释放 catalyst_resonance 行锁及 FK 检查的父行锁（2026-09-15 P0）
+        try:
+            conn.commit()
+        except Exception:
+            pass
 
         is_pending = result.resonance_state == "pending"
         trace_step(
@@ -525,15 +543,20 @@ def run_signal(conn, builder: CatalystSignalBuilder,
         processed += 1
         sig_id = _call_with_retry(
             lambda: builder.upsert_to_db(conn, signal),
-            label=f"G6_signal(cid={result.catalyst_id})",
+            label=f"G6_signal(cid={signal.catalyst_id})",
         )
         if sig_id is None:
-            trace_step("G6_signal", catalyst_id=result.catalyst_id,
+            trace_step("G6_signal", catalyst_id=signal.catalyst_id,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         if sig_id:
             inserted += 1
             new_signal_ids.append(sig_id)
+        # 每条立即提交：释放 catalyst_signal 行锁及 FK 检查的父行锁（2026-09-15 P0）
+        try:
+            conn.commit()
+        except Exception:
+            pass
 
         # 追溯：G6 被拦原因（tier=None），区分「分不够」与「RR 不达标」
         dropped = signal.tier is None

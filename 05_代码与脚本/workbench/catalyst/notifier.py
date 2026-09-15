@@ -331,12 +331,14 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     ntype = NTYPE_SLOW_DIGEST if is_crypto else NTYPE_SLOW_DIGEST_STOCK
     sentinel = SENTINEL_SLOW_DIGEST_SIGNAL_ID if is_crypto else SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID
 
-    new_count = _count_new_ab_signals(conn, hours=24, asset_class=asset_class)
-    if new_count == 0:
+    rows = _recent_new_ab_signals(conn, hours=24, asset_class=asset_class)
+    if not rows:
         return {"sent": 0, "skipped": 1, "failed": 0, "reason": f"{label} 24h 内无 A/B 级新信号，跳过"}
 
-    a_rows = _recent_new_signals(conn, tier="A", hours=24, asset_class=asset_class)
-    b_rows = _recent_new_signals(conn, tier="B", hours=24, asset_class=asset_class)
+    # 每资产去重留最高分（一次查询完成），A/B 互斥分组 → 主题/正文/卡片三处数字统一
+    a_rows = [r for r in rows if r["tier"] == "A"]
+    b_rows = [r for r in rows if r["tier"] != "A"]
+    new_count = len(rows)
 
     subject = f"📊 催化剂日报·{label} · 24h新增 {new_count} 条 · A级 {len(a_rows)} · B级 {len(b_rows)}"
     body = _build_slow_digest_html(a_rows, b_rows, new_count, stats, class_label=label)
@@ -357,22 +359,13 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     }
 
 
-def _count_new_ab_signals(conn, hours: int = 24, asset_class: str = "crypto") -> int:
-    """统计过去 N 小时内新增的 A/B 级信号数量（按资产类别，按资产去重）。"""
-    filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
-    row = conn.execute(f"""
-        SELECT COUNT(DISTINCT a.asset_id) AS cnt
-        FROM biz.catalyst_signal s
-        JOIN core.asset a ON s.asset_id = a.asset_id
-        WHERE s.created_at > NOW() - INTERVAL '%s hours'
-          AND s.tier IN ('A', 'B')
-          AND {filter_sql}
-    """, (hours,)).fetchone()
-    return row["cnt"] if row else 0
+def _recent_new_ab_signals(conn, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
+    """过去 N 小时内 A/B 级新信号（按资产类别，按资产去重留最高分）。
 
-
-def _recent_new_signals(conn, tier: str, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
-    """过去 N 小时内某级别的去重新信号（按资产类别，按资产去重留最高分）。"""
+    一次查询完成 A/B 全量 + DISTINCT ON(asset_id) 留最高分，
+    避免「同一资产在 A 级和 B 级各出现一次」导致主题/卡片数字矛盾
+    （邮件审计 2026-09-15）。
+    """
     filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
     return conn.execute(f"""
         SELECT DISTINCT ON (a.asset_id)
@@ -387,10 +380,10 @@ def _recent_new_signals(conn, tier: str, hours: int = 24, asset_class: str = "cr
         JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
         WHERE s.status = 'open'
           AND s.created_at > NOW() - INTERVAL '%s hours'
-          AND s.tier = %s
+          AND s.tier IN ('A', 'B')
           AND {filter_sql}
         ORDER BY a.asset_id, s.composite_score DESC
-    """, (hours, tier)).fetchall()
+    """, (hours,)).fetchall()
 
 
 # ---- 中文化映射 ----

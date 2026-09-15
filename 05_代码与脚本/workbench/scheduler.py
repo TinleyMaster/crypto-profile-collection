@@ -99,14 +99,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）", "core"),
     # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）
     # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily", "core"),
-    ("social_heat_batch", "0 9 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 500 币，跳过稳定币）", "core"),
+    ("social_heat_batch", "0 8 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 08:00，早报快照前就绪）", "core"),
     ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）", "core"),
     # ETF 资金流日频入库（每日 06:00，早于早报快照 08:30；cryptoetf.today 为 T+1 更新）
     # 此前该 ingest 未注册调度，导致 biz.etf_flow_daily 停留在旧日期（早报 ETF 数据滞后）
     ("ingest_cryptoetf_flow", "0 6 * * *", "ingest_cryptoetf_flow.py", [], "CryptoETF 日频资金流入库（每日，全资产增量）", "core"),
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）", "core"),
     ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）", "core"),
-    ("token_unlocks_batch", "0 10 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "1", "--timeout", "60"], "代币解锁数据采集（每日 100 币）", "core"),
+    ("token_unlocks_batch", "0 7 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "0.2", "--timeout", "40"], "代币解锁数据采集（每日 07:00，早报快照前；提速+失败率阈值）", "core"),
     ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）", "core"),
 
     # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══

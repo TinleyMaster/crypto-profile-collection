@@ -5,6 +5,9 @@
 用法:
     python phase_chain_token_unlocks_batch.py --limit 100
     python phase_chain_token_unlocks_batch.py --limit 0  # 全量
+
+2026-09-15 优化：浏览器搜索频率 i%50→i%200、失败率阈值 30%（原 fail>0 即 exit 1）、
+调度提前至每日 07:00（早报快照前），确保早报"即将解锁"板块用当日数据。
 """
 from __future__ import annotations
 
@@ -243,8 +246,10 @@ def main():
         print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
               end="", flush=True)
 
-        # P2-6: 每 50 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）
-        allow_browser = (i % 50 == 0)
+        # P2-6: 每 200 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）。
+        # 浏览器搜索走 Playwright chromium，耗时高且易挂死；从 i%50 降到 i%200 提速
+        #（解锁早报依赖，需在 08:30 快照前跑完，且 09-14 曾因浏览器卡死 stuck 90 分钟）。
+        allow_browser = (i % 200 == 0)
         status, info = run_single(asset_id, timeout=args.timeout,
                                    allow_browser_search=allow_browser)
         if status == "ok":
@@ -284,8 +289,10 @@ def main():
     print(f"平均速度: {len(assets)/elapsed*60:.1f} 币/小时" if elapsed > 0 else "")
     print("=" * 60)
 
-    # P2-5: fail > 0 返回 1，让调度器能感知失败率
-    return 1 if fail > 0 else 0
+    # P2-5: 失败率过高才返回 1（原逻辑 fail>0 即返回 1，导致任意单个币失败
+    # 整个任务被标记 failed，连续多日制造调度噪音）。小比例失败属正常（反爬/超时）。
+    fail_ratio = fail / max(len(assets), 1)
+    return 1 if fail_ratio > 0.3 else 0
 
 
 if __name__ == "__main__":

@@ -252,14 +252,22 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
         if row:
             return row["asset_id"]
         # 退一步：asset 表的 canonical_symbol
+        # （同 symbol 多行时避免取到脏行：排除 tokenized/合成/商品衍生标记，
+        #   并按「名称含 symbol 语义 > 贵金属商品类 > asset_id」排序，邮件审计 2026-09-15）
         row = c.execute(
             """
             SELECT asset_id
             FROM core.asset
             WHERE UPPER(canonical_symbol) = %s
+              AND LOWER(COALESCE(canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
+            ORDER BY
+                CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%' || LOWER(%s) || '%' THEN 0
+                     WHEN LOWER(COALESCE(canonical_name, '')) ~ 'gold|silver|oil|gas' THEN 2
+                     ELSE 1 END,
+                asset_id
             LIMIT 1
             """,
-            (base_symbol,),
+            (base_symbol, base_symbol),
         ).fetchone()
         return row["asset_id"] if row else None
 

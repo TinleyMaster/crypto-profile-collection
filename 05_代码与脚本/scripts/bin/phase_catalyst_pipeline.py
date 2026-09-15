@@ -846,17 +846,10 @@ def run_slow_g3g5(conn, config: dict,
             impact_direction=impact_direction,
         )
 
-        # 止损止盈（简化：用 regime + 技术面调整 ATR 比例）
+        # 止损止盈（基于技术分析的支撑阻力位，RR 动态而非固定 2.2）
         entry_price = tech_result.entry_trigger_price
-        stop_loss = None
-        take_profit = None
-        if entry_price and entry_price > 0:
-            regime = row["regime"] or "neutral"
-            atr_pct = 0.08 if regime == "risk_off" else (0.12 if regime == "risk_on" else 0.10)
-            if tech_result.technical_state == "down":
-                atr_pct *= 0.7
-            stop_loss = round(entry_price * (1 - atr_pct), 6)
-            take_profit = round(entry_price * (1 + 2.2 * atr_pct), 6)
+        stop_loss = tech_result.stop_loss_price
+        take_profit = tech_result.take_profit_price
 
         # 重算信号
         signal = builder.build(

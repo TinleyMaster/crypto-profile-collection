@@ -13,6 +13,9 @@
 - entry_trigger_price: 触发价
 - support_price: 关键支撑位（MA20 / 前低）
 - resistance_price: 关键阻力位（前高 / MA60）
+- stop_loss_price: 建议止损价
+- take_profit_price: 建议止盈价
+- rr_ratio: 预估风险收益比
 """
 from __future__ import annotations
 
@@ -34,6 +37,9 @@ class TechnicalResult:
     price_30d_high: Optional[float] = None
     price_30d_low: Optional[float] = None
     atr_30d: Optional[float] = None    # 30 日波动率（近似 ATR，用日涨跌幅 std 估算）
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    rr_ratio: Optional[float] = None
     detail: dict = None
 
 
@@ -152,6 +158,9 @@ class TechnicalAnalyzer:
                 result.entry_trigger = f"突破区间中轨 ${mid:.4g}"
                 result.entry_trigger_price = mid
 
+        # 止盈止损计算（基于支撑阻力位，RR 动态而非固定 2.2）
+        self._calc_risk_reward(result, last_price, direction)
+
         # detail
         result.detail = {
             "last_price": last_price,
@@ -163,9 +172,86 @@ class TechnicalAnalyzer:
             "atr_30d": result.atr_30d,
             "state": result.technical_state,
             "impact_direction": impact_direction,
+            "stop_loss": result.stop_loss_price,
+            "take_profit": result.take_profit_price,
+            "rr_ratio": result.rr_ratio,
         }
 
         return result
+
+    def _calc_risk_reward(self, result: TechnicalResult, last_price: float,
+                          direction: str) -> None:
+        """基于支撑阻力位计算止盈止损，RR 因资产技术位而异。
+
+        原则：
+        - 多头：止损在支撑位，止盈在阻力位
+        - 空头：止损在阻力位，止盈在支撑位
+        - 如果阻力/支撑空间不足导致 RR < 2.0，用 ATR 扩展目标位
+        - 最小止损距离 = 1x ATR（防止止损太近被洗）
+        """
+        entry = result.entry_trigger_price or last_price
+        support = result.support_price
+        resistance = result.resistance_price
+        atr = result.atr_30d or (entry * 0.05)  # 兜底 5%
+        min_stop_dist = atr  # 最小止损 = 1x ATR
+        min_rr = 2.0
+
+        if direction == "bullish":
+            # 多头：止损 = max(支撑位, entry - 1x ATR)
+            raw_stop = support if support and support < entry else entry - min_stop_dist
+            stop = min(raw_stop, entry - min_stop_dist)
+            risk = entry - stop
+            if risk <= 0:
+                risk = min_stop_dist
+                stop = entry - risk
+
+            # 止盈优先用阻力位
+            if resistance and resistance > entry:
+                reward_res = resistance - entry
+                rr_res = reward_res / risk if risk > 0 else 0
+                if rr_res >= min_rr:
+                    # 阻力位空间足够，直接用
+                    take_profit = resistance
+                else:
+                    # 阻力位太近，用 min_rr 倍数扩展
+                    take_profit = entry + risk * max(2.5, min_rr)
+            else:
+                # 无阻力位，用 ATR 目标
+                take_profit = entry + risk * 2.5
+
+            rr = round((take_profit - entry) / risk, 2) if risk > 0 else None
+
+        elif direction == "bearish":
+            # 空头：止损 = min(阻力位, entry + 1x ATR)
+            raw_stop = resistance if resistance and resistance > entry else entry + min_stop_dist
+            stop = max(raw_stop, entry + min_stop_dist)
+            risk = stop - entry
+            if risk <= 0:
+                risk = min_stop_dist
+                stop = entry + risk
+
+            # 止盈优先用支撑位
+            if support and support < entry:
+                reward_sup = entry - support
+                rr_sup = reward_sup / risk if risk > 0 else 0
+                if rr_sup >= min_rr:
+                    take_profit = support
+                else:
+                    take_profit = entry - risk * max(2.5, min_rr)
+            else:
+                take_profit = entry - risk * 2.5
+
+            rr = round((entry - take_profit) / risk, 2) if risk > 0 else None
+
+        else:
+            # 中性：默认对称 1:2.5 ATR
+            stop = entry - atr
+            take_profit = entry + atr * 2.5
+            rr = 2.5
+
+        result.stop_loss_price = round(stop, 6) if stop and stop > 0 else None
+        result.take_profit_price = round(take_profit, 6) if take_profit and take_profit > 0 else None
+        result.rr_ratio = rr if rr and rr > 0 else None
 
     # ---- 内部方法 ----
 

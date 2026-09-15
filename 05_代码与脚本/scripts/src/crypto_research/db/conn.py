@@ -24,7 +24,9 @@ def _get_pool(database_url: str) -> psycopg_pool.ConnectionPool:
             max_size=2,
             open=True,
             timeout=30,
-            kwargs={"connect_timeout": 30},
+            # lock_timeout=30s：被其他事务持锁时快速失败并留痕，
+            # 避免 UPDATE 无限等锁导致任务"90 分钟无日志"被看护误杀（2026-09-15 P0）
+            kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
         )
     return _pool
 

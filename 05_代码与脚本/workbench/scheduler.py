@@ -107,6 +107,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("tokenomics_extract_batch", "30 9 * * *", "phase_c_extract_tokenomics_auto.py", ["--batch-size", "20", "--max-rounds", "50"], "代币经济学批量提取（每日）", "core"),
     ("whitepaper_summary_extract", "0 10 * * *", "extract_whitepaper_summary.py", ["--all", "--limit", "20"], "白皮书结构化摘要提取（每日 20 份，需 LLM）", "core"),
     ("token_unlocks_batch", "0 7 * * *", "phase_chain_token_unlocks_batch.py", ["--limit", "100", "--delay", "0.2", "--timeout", "40"], "代币解锁数据采集（每日 07:00，早报快照前；提速+失败率阈值）", "core"),
+    # 稳定币总供给（DeFiLlama stablecoins.llama.fi 免费源）——此前未注册调度，表恒空（2026-09-15 P1）
+    ("stablecoin_supply_daily", "45 5 * * *", "ingest_stablecoin_supply.py", [], "稳定币总供给日频采集（DeFiLlama 免费源，补齐缺失日期）", "core"),
     ("github_activity", "0 11 * * *", "collect_github_activity.py", ["--limit", "50"], "GitHub 仓库活跃度采集（每日 50 个仓库）", "core"),
 
     # ═══ NotebookLM 精选（默认不启用，需消耗 LLM 配额，手动打开）═══
@@ -175,6 +177,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ CMC 付费档持久化（需 Startup/Professional 套餐，403 时自动跳过）═══
     # OHLCV K线回填（每周一次，避免频繁消耗付费额度；配合解锁/回测分析）
     ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天，需付费套餐，403 自动跳过）", "core"),
+    # CMC 分类刷新（列表每日 + 成员按 7 天窗口续传）——此前未注册调度，last_updated 冻结（2026-09-15 P2）
+    ("cmc_category_refresh", "30 2 * * *", "ingest_cmc_category.py", [], "CMC 分类刷新（列表每日，成员按 7 天窗口续传省配额）", "core"),
 
     # ═══ ATH/ATL 免费回填（biz.asset_market_daily 自算，无需 CMC 付费套餐）═══
     # 每日增量：只处理当日未算过的资产，用免费行情自算 all_time ATH/ATL/距高点回撤

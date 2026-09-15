@@ -57,7 +57,9 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
             timeout=30,
             max_idle=300,  # 空闲 5 分钟后回收，避免 SSL 连接被中间设备掐断
             check=psycopg_pool.ConnectionPool.check_connection,  # 取连接时健康检查，自动重连
-            kwargs={"connect_timeout": 30},
+            # lock_timeout=30s：thesis/信号写入被锁时快速失败留痕，
+            # 避免无限等锁 → 90 分钟无日志被看护误杀（2026-09-15 P0）
+            kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
         )
     return _pool
 

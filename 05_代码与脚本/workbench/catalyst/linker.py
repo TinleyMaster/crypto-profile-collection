@@ -188,7 +188,7 @@ def map_pairs_to_asset_ids(
               AND LOWER(COALESCE(canonical_name, '')) !~ 'bridged|wrapped|intents|trophy|tomato|second[[:space:]]+chance|base[[:space:]]+coin'
             ORDER BY
                 market_cap_rank ASC NULLS LAST,
-                CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%' || LOWER(%s) || '%' THEN 0
+                CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%%' || LOWER(%s) || '%%' THEN 0
                      WHEN LOWER(COALESCE(canonical_name, '')) ~ 'gold|silver|oil|gas' THEN 2
                      ELSE 1 END,
                 asset_id

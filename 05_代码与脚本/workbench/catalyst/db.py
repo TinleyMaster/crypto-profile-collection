@@ -57,7 +57,14 @@ def get_conn(max_retries: int = 5, retry_delay: float = 3.0):
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            conn = psycopg.connect(_get_db_url(), row_factory=dict_row, connect_timeout=30)
+            conn = psycopg.connect(
+                _get_db_url(),
+                row_factory=dict_row,
+                connect_timeout=30,
+                # lock_timeout=30s：被其他事务持锁时快速失败并留痕，
+                # 避免 catalyst 管道 UPDATE 无限等锁 → 90 分钟无日志被看护误杀（2026-09-15 P0）
+                options="-c lock_timeout=30000",
+            )
             break
         except Exception as e:
             last_error = e
@@ -304,7 +311,7 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
               AND LOWER(COALESCE(canonical_name, '')) !~ 'bridged|wrapped|intents|trophy|tomato|second[[:space:]]+chance|base[[:space:]]+coin'
             ORDER BY
                 market_cap_rank ASC NULLS LAST,
-                CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%' || LOWER(%s) || '%' THEN 0
+                CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%%' || LOWER(%s) || '%%' THEN 0
                      WHEN LOWER(COALESCE(canonical_name, '')) ~ 'gold|silver|oil|gas' THEN 2
                      ELSE 1 END,
                 asset_id

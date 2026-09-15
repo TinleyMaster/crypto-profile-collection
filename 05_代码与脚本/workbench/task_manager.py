@@ -53,7 +53,9 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
             max_size=2,
             open=True,
             timeout=30,
-            kwargs={"connect_timeout": 30},
+            # lock_timeout=30s：sys.task / task_log 写入被锁时快速失败，
+            # 避免任务状态/日志写入无限阻塞（2026-09-15 P0 看护误杀同源）
+            kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
         )
         # 确保 sys  schema 和核心表存在（幂等）
         _ensure_schema_and_tables()

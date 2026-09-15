@@ -45,19 +45,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]:
-    """从 doc_source_entry 提取去重的 owner/repo 列表，按市值排序优先主项目仓库。
+    """从 doc_source_entry 提取去重的 owner/repo 列表，轮询刷新。
+
+    修复（2026-09-15 Amber 根因）：旧逻辑用 NOT EXISTS 一次性排除已采集仓库，
+    导致每个仓库只采集一次，初始扫完后每日 0 候选 → fetched_at 冻结、静默空跑。
+    现改为：从未采集的仓库优先，之后按 last_fetched 最旧优先（轮询刷新），
+    保证每日 50 仓真正在刷，全部覆盖后自动轮转到最旧的一批。
 
     Returns list of dicts with keys: owner_login, repo_name, sample_url, entry_count, market_cap_rank
     """
-    # 外部用 NOT EXISTS 过滤已采集的仓库
-    not_exists_clause = ""
+    # force=True 时忽略刷新顺序，按市值排序取前 N（原行为）
+    lateral_clause = ""
+    order_clause = "ORDER BY repo.market_cap_rank ASC"
     if not force:
-        not_exists_clause = (
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM biz.github_repo_activity gra "
-            "  WHERE gra.owner_login = repo.owner_login "
-            "    AND gra.repo_name = repo.repo_name"
-            ")"
+        lateral_clause = """
+            LEFT JOIN (
+                SELECT owner_login, repo_name, MAX(fetched_at) AS last_fetched
+                FROM biz.github_repo_activity
+                GROUP BY owner_login, repo_name
+            ) act
+              ON act.owner_login = repo.owner_login
+             AND act.repo_name = repo.repo_name
+        """
+        order_clause = (
+            "ORDER BY (act.last_fetched IS NULL) DESC, "
+            "act.last_fetched ASC NULLS FIRST, "
+            "repo.market_cap_rank ASC"
         )
 
     sql = (
@@ -96,13 +109,15 @@ def _extract_github_repos(conn, limit: int, force: bool) -> list[dict[str, str]]
               AND d.entry_url NOT LIKE '%%/whitepapers%%'
             GROUP BY 1, 2
         ) repo
+        """
+        + lateral_clause
+        + """
         WHERE repo.owner_login != ''
           AND repo.repo_name != ''
           AND repo.market_cap_rank IS NOT NULL
         """
-        + not_exists_clause
+        + order_clause
         + """
-        ORDER BY repo.market_cap_rank ASC
         LIMIT %s
         """
     )

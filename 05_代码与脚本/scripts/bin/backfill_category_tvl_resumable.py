@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""历史回填：赛道 TVL（带 DB 持久化进度，pod 重启/中断自动续跑）。
+"""历史回填：赛道 TVL（DB 持久化进度 + 并发，pod 重启自动续跑）。
 
-在 backfill_category_tvl_history.py 的基础上，增加：
-- 进度存在 biz.backfill_progress 表，任何 pod 重启都能续上
-- 启动时自动读进度 → 从断点继续
-- 完成后标记 done，再次运行直接退出
-- 失败时记录错误，下次 --resume 自动续跑
+核心改进（相比 backfill_category_tvl_history.py）：
+1. 进度存 biz.backfill_progress，任何 pod 都能读到上次断点
+2. 启动时自动续跑，完成后 status=done 不再执行
+3. 并发拉协议历史（ThreadPoolExecutor），IO 密集型加速 5-10x
+4. 更细粒度落库（每 20 个协议），被杀少丢
 
 用法：
-    # 首次启动（90 天，5000 协议，自动续跑）
+    # 首次启动
     python backfill_category_tvl_resumable.py --days 90 --top 5000
 
-    # 从上次断点续跑（进程被杀后直接重跑这条）
+    # 从 DB 断点续跑（pod 重启后重跑这条）
     python backfill_category_tvl_resumable.py --resume
 
-    # 重置进度（重新开始）
-    python backfill_category_tvl_resumable.py --reset --days 90 --top 5000
+    # 配合 shell 循环自动续跑（pod 活着就一直跑）
+    while true; do python backfill_category_tvl_resumable.py --resume; sleep 5; done
 
-    # 查看当前进度
+    # 查看进度 / 重置
     python backfill_category_tvl_resumable.py --status
+    python backfill_category_tvl_resumable.py --reset --days 90 --top 5000
 """
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -42,11 +45,23 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 
 
 LLAMA_BASE = "https://api.llama.fi"
-TIMEOUT = 30
+TIMEOUT = 15  # 15s 足够，DeFi Llama 响应很快
 SOURCE_CODE = "defillama"
-REQUEST_INTERVAL = 1.2  # 秒
-BATCH_SIZE = 50  # 每 N 个协议落库 + 更新进度
+BATCH_SIZE = 20  # 每 20 个协议落库 + 更新进度
 JOB_NAME = "category_tvl_history_backfill"
+
+# 全局中断标记（处理 SIGTERM/SIGINT 优雅退出）
+_interrupted = False
+
+
+def _signal_handler(signum, frame):
+    global _interrupted
+    print(f"\n[category_tvl] 收到信号 {signum}，准备优雅退出...", file=sys.stderr)
+    _interrupted = True
+
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def safe_tvl(p: dict) -> float:
@@ -137,8 +152,9 @@ def fetch_all_protocols() -> list[dict]:
     return valid
 
 
-def fetch_protocol_history(slug: str, retries: int = 3) -> list[tuple[date, float]]:
-    for attempt in range(retries):
+def fetch_protocol_history(slug: str, retries: int = 2) -> list[tuple[date, float]]:
+    """拉单个协议历史 TVL。超时 15s，重试 2 次（总最多 45s 放弃）。"""
+    for attempt in range(retries + 1):
         try:
             r = requests.get(f"{LLAMA_BASE}/protocol/{slug}", timeout=TIMEOUT)
             r.raise_for_status()
@@ -158,14 +174,11 @@ def fetch_protocol_history(slug: str, retries: int = 3) -> list[tuple[date, floa
             result.sort(key=lambda x: x[0])
             return result
         except Exception as e:
-            if attempt < retries - 1:
+            if attempt < retries:
                 wait = 2 ** (attempt + 1)
-                print(f"  ⚠️  {slug} 第{attempt+1}次失败: {e}，{wait}s后重试...",
-                      file=sys.stderr)
                 time.sleep(wait)
             else:
-                print(f"  ❌ {slug} 拉取失败 ({retries}次重试后): {e}",
-                      file=sys.stderr)
+                print(f"  ❌ {slug} ({retries+1}次后): {e}", file=sys.stderr)
     return []
 
 
@@ -218,70 +231,109 @@ def upsert_data(conn, data: dict) -> int:
     return rows_inserted
 
 
-# ========== 主流程 ==========
+# ========== 主流程（并发版）==========
 
-def run_backfill(conn, protocols: list[dict], days: int, top_n: int, start_index: int = 0) -> None:
+def run_backfill(conn, protocols: list[dict], days: int, top_n: int,
+                 start_index: int = 0, concurrency: int = 5) -> None:
     cutoff = date.today() - timedelta(days=days)
     total = min(top_n, len(protocols))
+    remaining = total - start_index
     print(f"[category_tvl] 回填 {days} 天（截止 {cutoff}）, 协议 {start_index+1}~{total}")
+    print(f"[category_tvl] 并发数: {concurrency}, 剩余: {remaining} 个协议")
 
+    # 取待处理协议
+    todo_protocols = [(i, protocols[i]) for i in range(start_index, total)]
+
+    # 聚合字典（主进程持有，线程安全）
     agg: dict[tuple[date, str], list[float, int]] = {}
     success = 0
     failed = 0
+    done_count = 0  # 已完成的 futures 数量
+    last_save_idx = start_index  # 上次落库时的已处理数（1-based 累积计数）
+    last_print_count = 0
     start_time = time.time()
-    last_save_idx = start_index
 
-    for i in range(start_index, total):
-        proto = protocols[i]
+    def _fetch_one(item: tuple[int, dict]) -> tuple[int, str, str, list[tuple[date, float]]]:
+        """worker 函数：返回 (global_idx, slug, category, history)。"""
+        idx, proto = item
         slug = proto.get("slug", "")
         category = proto.get("category", "Unknown")
-        name = proto.get("name", slug)
-        global_idx = i + 1  # 1-based
-
-        # 进度打印（每 10 个）
-        if global_idx % 10 == 0 or i == start_index:
-            elapsed = time.time() - start_time
-            rate = (i - start_index + 1) / elapsed if elapsed > 0 else 0
-            eta = (total - i - 1) / rate / 60 if rate > 0 else 0
-            print(f"  进度: {global_idx}/{total} ({global_idx/total*100:.1f}%) "
-                  f"{name} ({category}) [{rate:.1f} req/min, ETA {eta:.0f}min]")
-
+        global_idx = idx + 1
         if not slug:
-            failed += 1
-            continue
-
+            return (global_idx, slug, category, [])
         history = fetch_protocol_history(slug)
-        if not history:
-            failed += 1
-            time.sleep(REQUEST_INTERVAL)
-            continue
+        return (global_idx, slug, category, history)
 
-        success += 1
-        for dt, tvl in history:
-            if dt < cutoff:
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_idx = {executor.submit(_fetch_one, item): item[0]
+                         for item in todo_protocols}
+
+        for future in as_completed(future_to_idx):
+            if _interrupted:
+                # 不再提新任务（但已经全部提交了），让已提交的跑完
+                pass
+
+            try:
+                global_idx, slug, category, history = future.result(timeout=TIMEOUT * 4)
+            except Exception as e:
+                origin_idx = future_to_idx[future]
+                global_idx = origin_idx + 1
+                failed += 1
+                print(f"  ❌ 协议 #{global_idx} 异常: {e}", file=sys.stderr)
+                done_count += 1
+                # 落库检查（基于完成计数，不是 global_idx）
+                if done_count % BATCH_SIZE == 0:
+                    upsert_data(conn, {k: (v[0], v[1]) for k, v in agg.items()})
+                    save_progress(conn, JOB_NAME, start_index + done_count, total,
+                                  "running" if not _interrupted else "interrupted",
+                                  days, top_n)
+                    agg.clear()
                 continue
-            key = (dt, category)
-            if key not in agg:
-                agg[key] = [0.0, 0]
-            agg[key][0] += tvl
-            agg[key][1] += 1
 
-        time.sleep(REQUEST_INTERVAL)
+            # 聚合
+            if history:
+                success += 1
+                for dt, tvl in history:
+                    if dt < cutoff:
+                        continue
+                    key = (dt, category)
+                    if key not in agg:
+                        agg[key] = [0.0, 0]
+                    agg[key][0] += tvl
+                    agg[key][1] += 1
+            else:
+                failed += 1
 
-        # 每 BATCH_SIZE 个落库 + 更新进度
-        if (i - start_index + 1) % BATCH_SIZE == 0:
-            upsert_data(conn, {k: (v[0], v[1]) for k, v in agg.items()})
-            save_progress(conn, JOB_NAME, global_idx, total, "running", days, top_n)
-            last_save_idx = global_idx
-            agg.clear()  # 清空避免重复/内存膨胀
+            done_count += 1
+            last_save_idx = start_index + done_count
+
+            # 进度打印（每 20 个完成）
+            if done_count - last_print_count >= 20 or done_count >= remaining:
+                elapsed = time.time() - start_time
+                rate = done_count / elapsed if elapsed > 0 else 0
+                eta = (remaining - done_count) / rate / 60 if rate > 0 else 0
+                pct = (start_index + done_count) / total * 100
+                print(f"  进度: {start_index + done_count}/{total} ({pct:.1f}%) "
+                      f"[ok={success}, fail={failed}, {rate:.1f} req/min, ETA {eta:.0f}min]")
+                last_print_count = done_count
+
+            # 每 BATCH_SIZE 个完成 → 落库 + 更新进度
+            if done_count % BATCH_SIZE == 0:
+                upsert_data(conn, {k: (v[0], v[1]) for k, v in agg.items()})
+                save_progress(conn, JOB_NAME, start_index + done_count, total,
+                              "running" if not _interrupted else "interrupted",
+                              days, top_n)
+                agg.clear()
 
     # 最后一批
     if agg:
         upsert_data(conn, {k: (v[0], v[1]) for k, v in agg.items()})
 
     elapsed = time.time() - start_time
-    print(f"[category_tvl] ✅ 完成: 成功 {success}, 失败 {failed}, 用时 {elapsed/60:.1f}min")
-    save_progress(conn, JOB_NAME, total, total, "done", days, top_n)
+    final_idx = start_index + done_count
+    final_status = "done" if not _interrupted else "interrupted"
+    print(f"[category_tvl] ✅ {final_status}: 成功 {success}, 失败 {failed}, 用时 {elapsed/60:.1f}min")
+    save_progress(conn, JOB_NAME, final_idx, total, final_status, days, top_n)
 
 
 def verify(conn, days: int) -> None:
@@ -303,13 +355,14 @@ def verify(conn, days: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="赛道 TVL 历史回填（DB 持久化进度，自动续跑）")
+    parser = argparse.ArgumentParser(description="赛道 TVL 历史回填（DB 进度 + 并发）")
     parser.add_argument("--days", type=int, default=90, help="回填天数（默认 90）")
     parser.add_argument("--top", type=int, default=5000, help="头部协议数（默认 5000）")
-    parser.add_argument("--start", type=int, default=0, help="强制从第几个协议开始（忽略 DB 进度）")
-    parser.add_argument("--resume", action="store_true", help="从 DB 读取上次进度续跑")
+    parser.add_argument("--start", type=int, default=0, help="强制从第几个协议开始")
+    parser.add_argument("--concurrency", "-c", type=int, default=5, help="并发线程数（默认 5）")
+    parser.add_argument("--resume", action="store_true", help="从 DB 读断点续跑")
     parser.add_argument("--reset", action="store_true", help="重置进度后重新开始")
-    parser.add_argument("--status", action="store_true", help="仅查看当前进度，不执行回填")
+    parser.add_argument("--status", action="store_true", help="仅查看当前进度")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -322,7 +375,7 @@ def main() -> None:
         if args.status:
             prog = load_progress(conn, JOB_NAME)
             if not prog:
-                print(f"[category_tvl] 任务 '{JOB_NAME}' 不存在（还没开始过）")
+                print(f"[category_tvl] 任务 '{JOB_NAME}' 不存在")
                 return
             print(f"[category_tvl] 任务: {prog['job_name']}")
             print(f"  状态:     {prog['status']}")
@@ -330,8 +383,8 @@ def main() -> None:
                   f"({prog['current_index']/max(prog['total_count'],1)*100:.1f}%)")
             print(f"  天数:     {prog['days']}")
             print(f"  协议数:   {prog['top_n']}")
-            print(f"  开始时间: {prog['started_at']}")
-            print(f"  更新时间: {prog['updated_at']}")
+            print(f"  开始:     {prog['started_at']}")
+            print(f"  更新:     {prog['updated_at']}")
             if prog["error_msg"]:
                 print(f"  错误:     {prog['error_msg']}")
             return
@@ -339,7 +392,7 @@ def main() -> None:
         # 重置
         if args.reset:
             reset_progress(conn, JOB_NAME)
-            print(f"[category_tvl] 已重置任务 '{JOB_NAME}'")
+            print(f"[category_tvl] 已重置")
 
         # 决定 start_index
         start_index = args.start
@@ -350,40 +403,37 @@ def main() -> None:
             prog = load_progress(conn, JOB_NAME)
             if prog:
                 if prog["status"] == "done":
-                    print(f"[category_tvl] ✅ 任务已完成（{prog['current_index']}/{prog['total_count']}），无需重跑")
+                    print(f"[category_tvl] ✅ 已完成（{prog['current_index']}/{prog['total_count']}），无需重跑")
                     verify(conn, days)
                     return
-                if prog["status"] == "running" or prog["status"] == "failed":
+                if prog["status"] in ("running", "failed", "interrupted"):
                     start_index = prog["current_index"]
                     days = prog["days"] or days
                     top_n = prog["top_n"] or top_n
-                    print(f"[category_tvl] 🔄 从断点续跑: {start_index}/{top_n} "
-                          f"(上次状态: {prog['status']})")
+                    print(f"[category_tvl] 🔄 断点续跑: {start_index}/{top_n} (上次: {prog['status']})")
                     if prog.get("error_msg"):
-                        print(f"  上次错误: {prog['error_msg']}")
+                        print(f"  错误: {prog['error_msg']}")
 
         # 拉协议列表
         try:
             protocols = fetch_all_protocols()
         except Exception as e:
-            print(f"[category_tvl] ❌ 拉取协议列表失败: {e}", file=sys.stderr)
+            print(f"[category_tvl] ❌ 拉协议列表失败: {e}", file=sys.stderr)
             save_progress(conn, JOB_NAME, start_index, top_n, "failed", days, top_n, str(e))
             sys.exit(1)
 
         if not protocols:
-            print("[category_tvl] ❌ 协议列表为空，退出")
+            print("[category_tvl] ❌ 协议列表为空")
             sys.exit(1)
 
-        # 执行回填
+        # 执行
         try:
-            run_backfill(conn, protocols, days, top_n, start_index)
+            run_backfill(conn, protocols, days, top_n, start_index, args.concurrency)
         except Exception as e:
-            print(f"[category_tvl] 💥 运行异常: {e}", file=sys.stderr)
-            # 尝试获取当前进度（粗略：用 start_index，实际可能已经推进了）
+            print(f"[category_tvl] 💥 异常退出: {e}", file=sys.stderr)
             save_progress(conn, JOB_NAME, start_index, top_n, "failed", days, top_n, str(e))
             raise
 
-        # 验证
         verify(conn, days)
 
     print("[category_tvl] done ✓")

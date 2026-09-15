@@ -328,7 +328,7 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
 
     定位（OPT-CATALYST-ALERT-001 P0-1）：从「24h B/C 汇总」转型为「高置信度 A 级 Alert」。
     - 仅 tier='A' 且共振 confirmed + 有完整交易档位（entry/stop/tp）的信号入选，按分取前 2
-    - 无 A 级信号 → 静默跳过，不发邮件（女王拍板：无信号不打扰，不发空窗 note）
+    - 无 A 级信号 → 发极简「空窗 note」（决策①：女王接受空窗，写明原因，避免通道静默死掉）
     - 各自独立去重（sentinel + ntype），互不影响
     """
     is_crypto = asset_class == "crypto"
@@ -336,19 +336,20 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     ntype = NTYPE_SLOW_DIGEST if is_crypto else NTYPE_SLOW_DIGEST_STOCK
     sentinel = SENTINEL_SLOW_DIGEST_SIGNAL_ID if is_crypto else SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID
 
-    rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class)
-    if not rows:
-        # 无 A 级：静默跳过。不标记 sentinel，24h 内后续出现 A 级仍可正常发送。
-        return {"sent": 0, "skipped": 1, "failed": 0,
-                "reason": f"{label} 24h 内无 A 级新信号，静默跳过"}
-
-    new_count = len(rows)
-    subject = f"🎯 催化剂 Alert·{label}·A级 {new_count} 条"
-    body = _build_slow_digest_html(rows, stats, class_label=label)
-
     if _is_sent(conn, sentinel, ntype):
         return {"sent": 0, "skipped": 1, "failed": 0,
                 "reason": f"{label} 24h 内已发送过 Alert，跳过"}
+
+    rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class)
+    new_count = len(rows)
+
+    if not rows:
+        # 空窗 note：无 A 级 → 发极简说明（决策①），避免通道静默；占 24h 去重位防刷屏
+        subject = f"🎯 催化剂 Alert·{label}·今日无高置信度信号"
+        body = _build_empty_digest_html(class_label=label)
+    else:
+        subject = f"🎯 催化剂 Alert·{label}·A级 {new_count} 条"
+        body = _build_slow_digest_html(rows, stats, class_label=label)
 
     ok, msg = _send_email(subject, body)
     _mark_sent(conn, sentinel, ntype, None, subject,
@@ -545,6 +546,27 @@ def _build_slow_digest_html(a_rows, stats: dict,
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
           由催化剂决策管道自动生成 · 24h 去重 · {class_label} 独立发送
+        </div>
+      </div>
+    </div>
+    """
+
+
+def _build_empty_digest_html(class_label: str = "加密货币") -> str:
+    """A 级空窗 note（决策①：无 A 级时邮件可空窗，写明原因，避免通道静默死掉）。"""
+    return f"""
+    <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
+      <div style="background:linear-gradient(135deg,#334155,#475569);color:#fff;padding:24px;border-radius:12px">
+        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · A 级 Alert</div>
+        <div style="font-size:22px;font-weight:700;margin-top:8px">今日无高置信度信号</div>
+      </div>
+      <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
+        <div style="font-size:14px;line-height:1.8;color:#334155">
+          过去 24h 无 A 级催化剂信号（价格共振 confirmed 且具备完整交易档位）。
+          系统保持静默观察，B/C 级热点请见每日早报「📡 催化剂热点」。
+        </div>
+        <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
+          由催化剂决策管道自动生成 · 24h 去重
         </div>
       </div>
     </div>

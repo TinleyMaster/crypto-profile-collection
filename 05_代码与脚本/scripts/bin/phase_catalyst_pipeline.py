@@ -101,6 +101,7 @@ from catalyst.fundamental import FundamentalChecker
 from catalyst.technical import TechnicalAnalyzer
 from catalyst.signal import CatalystSignalBuilder, expire_signals
 from catalyst.notifier import send_fast_alerts_for_new_signals, send_slow_digest
+from catalyst.catalyst_trace import trace_step, reset as trace_reset, summary as trace_summary, set_verbose as trace_set_verbose
 
 
 def load_config() -> dict:
@@ -181,6 +182,9 @@ def run_classify(conn, classifier: RuleEventClassifier,
             (event_type, row["catalyst_id"]),
         )
         count += 1
+        trace_step("L1_classify", catalyst_id=row["catalyst_id"],
+                   title=row["title"] or "",
+                   passed=True, metrics={"event_type": event_type})
 
     return count
 
@@ -248,6 +252,23 @@ def run_grade(conn, grader: CatalystGrader,
         grader.upsert_to_db(conn, result)
         count += 1
 
+        is_noise = result.catalyst_kind == "noise"
+        trace_step(
+            "G1_grade",
+            catalyst_id=result.catalyst_id,
+            title=(row.get("title") or "") if hasattr(row, "get") else None,
+            passed=not is_noise,
+            reason=("noise：无关联资产/弱事件，G2 前置过滤" if is_noise else None),
+            metrics={
+                "kind": result.catalyst_kind,
+                "base_strength": result.base_strength,
+                "authority": result.authority_score,
+                "event_weight": result.event_weight,
+                "scope": result.scope_score,
+                "tradable": result.tradable,
+            },
+        )
+
     return count
 
 
@@ -308,6 +329,8 @@ def run_resonance(conn, scorer: ResonanceScorer,
         vol_24h = asset_snap.get("volume_24h")
 
         if asset_24h is None:
+            trace_step("G2_resonance", catalyst_id=catalyst_id_val, asset_id=asset_id,
+                       passed=False, reason="无行情数据(percent_change_24h=None)，跳过")
             continue  # 无行情数据跳过
 
         # 量能 z-score
@@ -338,6 +361,22 @@ def run_resonance(conn, scorer: ResonanceScorer,
 
         scorer.upsert_to_db(conn, result)
         count += 1
+
+        is_pending = result.resonance_state == "pending"
+        trace_step(
+            "G2_resonance",
+            catalyst_id=catalyst_id_val,
+            asset_id=asset_id,
+            passed=not is_pending,
+            reason=("共振pending（低于 weak 阈值），G6 不会入选" if is_pending else None),
+            metrics={
+                "resonance_score": result.resonance_score,
+                "resonance_state": result.resonance_state,
+                "excess_24h": result.excess_ret_24h,
+                "vol_z": result.vol_zscore_24h,
+                "direction": result.direction_match,
+            },
+        )
 
     return count
 
@@ -408,6 +447,23 @@ def run_signal(conn, builder: CatalystSignalBuilder,
         if sig_id:
             inserted += 1
             new_signal_ids.append(sig_id)
+
+        # 追溯：G6 被拦原因（tier=None），区分「分不够」与「RR 不达标」
+        dropped = signal.tier is None
+        reason = None
+        if dropped:
+            if signal.composite_score < builder.tier_c:
+                reason = f"composite={signal.composite_score} < C阈值{builder.tier_c}"
+            elif signal.rr_ratio is not None and signal.rr_ratio < builder.min_rr:
+                reason = f"rr={signal.rr_ratio} < min_rr={builder.min_rr}"
+            else:
+                reason = "tier=None（分数不足或RR不达标）"
+        trace_step("G6_signal", catalyst_id=row["catalyst_id"], asset_id=row["asset_id"],
+                   passed=not dropped, reason=reason,
+                   metrics={"tier": signal.tier, "composite": signal.composite_score,
+                            "rr": signal.rr_ratio, "kind": signal.kind,
+                            "res_state": signal.resonance_state,
+                            "base_strength": signal.base_strength})
 
     return processed, inserted, new_signal_ids
 
@@ -514,13 +570,19 @@ def run_slow_second_order(conn, config: dict,
         base_strength = int(cat_row["base_strength"])
 
         if not mapper.should_do_second_order(kind, base_strength):
+            trace_step("SO_second_order", catalyst_id=catalyst_id,
+                       passed=False,
+                       reason=f"should_do_second_order=False（kind={kind}, base={base_strength}）")
             continue
 
         direct_assets = [l["asset_id"] for l in cat_links.get(catalyst_id, [])]
         direct_sectors = list(cat_sectors.get(catalyst_id, set()))
         if not direct_sectors:
+            trace_step("SO_second_order", catalyst_id=catalyst_id,
+                       passed=False, reason="无直连板块(primary_sector)可展开")
             continue
 
+        cat_count = 0
         for sector in direct_sectors:
             pool = sector_pool.get(sector, [])
             direct_set = set(direct_assets)
@@ -544,6 +606,11 @@ def run_slow_second_order(conn, config: dict,
                 count += 1
                 if count >= mapper.max_second_order:
                     break
+            cat_count += count
+
+        trace_step("SO_second_order", catalyst_id=catalyst_id, passed=True,
+                   metrics={"kind": kind, "base_strength": base_strength,
+                            "mappings": cat_count})
 
     if not all_so_results:
         return {"second_order_count": 0, "new_signals": 0}
@@ -870,6 +937,25 @@ def run_slow_g3g5(conn, config: dict,
         )
 
         tier_dist[signal.tier or "none"] += 1
+
+        # 追溯：G3-G5 补全后的信号重算结果（tier=None → 会被置为 invalid）
+        trace_step(
+            "G3G5_recalc",
+            catalyst_id=catalyst_id,
+            asset_id=asset_id,
+            passed=signal.tier is not None,
+            reason=(f"重算后 tier=None → 置 invalid（composite={signal.composite_score}）"
+                    if signal.tier is None else None),
+            metrics={
+                "tier": signal.tier,
+                "composite": signal.composite_score,
+                "rr": signal.rr_ratio,
+                "persistence": persistence,
+                "fundamental": fund_result.pass_,
+                "technical": tech_result.technical_state,
+            },
+        )
+
         updates.append({
             "catalyst_id": catalyst_id,
             "asset_id": asset_id,
@@ -1274,6 +1360,10 @@ def main() -> int:
 
     config = load_config()
 
+    # 逐步追溯：开启 verbose 时 stdout 也打印通过行；统计每轮清零
+    trace_set_verbose(args.verbose)
+    trace_reset()
+
     with get_conn() as conn:
         # ---- 健康检查 ----
         if args.health:
@@ -1336,6 +1426,7 @@ def main() -> int:
 
             print()
             print("快通道完成 ✓")
+            trace_summary()
 
         # ---- 慢通道 ----
         if args.slow:
@@ -1391,6 +1482,7 @@ def main() -> int:
 
             print()
             print("慢通道完成 ✓")
+            trace_summary()
 
         conn.commit()
 

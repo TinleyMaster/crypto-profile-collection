@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>催化剂追溯 - 投研工作台</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: #0f1115;
+            color: #e6e8eb;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px 24px 60px;
+        }
+
+        header {
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #1e222a;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        header h1 {
+            font-size: 22px;
+            font-weight: 600;
+        }
+
+        header p {
+            color: #8a92a0;
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        .back-link {
+            color: #3b82f6;
+            text-decoration: none;
+            font-size: 13px;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+
+        /* 筛选栏 */
+        .filters {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 18px;
+            align-items: center;
+        }
+
+        .filters input,
+        .filters select {
+            background: #171a21;
+            border: 1px solid #2a2f3a;
+            color: #e6e8eb;
+            border-radius: 6px;
+            padding: 7px 10px;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .filters input:focus,
+        .filters select:focus {
+            border-color: #3b82f6;
+        }
+
+        .filters .btn {
+            background: #1d4ed8;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .filters .btn:hover {
+            background: #2563eb;
+        }
+
+        .filters label {
+            font-size: 12px;
+            color: #8a92a0;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+        }
+
+        .meta {
+            font-size: 12px;
+            color: #6b7280;
+            margin-bottom: 16px;
+        }
+
+        /* 分步统计卡片 */
+        .grid {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-radius: 10px;
+            padding: 14px 16px;
+        }
+
+        .card .stage-name {
+            font-size: 12px;
+            color: #8a92a0;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .card .nums {
+            display: flex;
+            gap: 18px;
+        }
+
+        .card .nums .num {
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        .card .nums .lbl {
+            font-size: 11px;
+            color: #6b7280;
+        }
+
+        .card .nums .num.pass {
+            color: #22c55e;
+        }
+
+        .card .nums .num.drop {
+            color: #ef4444;
+        }
+
+        /* 日志列表 */
+        .log-row {
+            background: #171a21;
+            border: 1px solid #1e222a;
+            border-left: 3px solid #4b5563;
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 8px;
+        }
+
+        .log-row.passed {
+            border-left-color: #22c55e;
+        }
+
+        .log-row.dropped {
+            border-left-color: #ef4444;
+        }
+
+        .log-row .top {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .badge.stage {
+            background: #1e3a5f;
+            color: #93c5fd;
+        }
+
+        .badge.pass {
+            background: #052e16;
+            color: #4ade80;
+        }
+
+        .badge.drop {
+            background: #450a0a;
+            color: #f87171;
+        }
+
+        .id-chip {
+            font-size: 12px;
+            color: #93c5fd;
+            cursor: pointer;
+            background: #111827;
+            border: 1px solid #1e3a5f;
+            border-radius: 4px;
+            padding: 1px 6px;
+        }
+
+        .id-chip:hover {
+            background: #1e3a5f;
+        }
+
+        .time {
+            margin-left: auto;
+            font-size: 11px;
+            color: #6b7280;
+            flex-shrink: 0;
+        }
+
+        .title {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #d1d5db;
+        }
+
+        .reason {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #fca5a5;
+            background: #1f1115;
+            border-radius: 5px;
+            padding: 5px 8px;
+        }
+
+        .metrics {
+            margin-top: 8px;
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .metric {
+            font-size: 11px;
+            color: #9ca3af;
+            background: #111827;
+            border: 1px solid #232a36;
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .empty {
+            text-align: center;
+            color: #6b7280;
+            padding: 40px 0;
+            font-size: 13px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>📡 催化剂逐步追溯</h1>
+                <p>每个 catalyst 在每一步筛选（L1 分类 → G1 分级 → G2 共振 → G6 信号 → 二阶/G3-G5）的 通过/被拦 + 原因 + 关键数值</p>
+            </div>
+            <a class="back-link" href="/">← 返回工作台</a>
+        </header>
+
+        <div class="filters">
+            <input type="date" id="f-date" title="日期">
+            <select id="f-stage">
+                <option value="">全部步骤</option>
+                <option value="L1_classify">L1 分类</option>
+                <option value="G1_grade">G1 分级</option>
+                <option value="G2_resonance">G2 共振</option>
+                <option value="G6_signal">G6 信号</option>
+                <option value="SO_second_order">二阶展开</option>
+                <option value="G3G5_recalc">G3-G5 重算</option>
+            </select>
+            <select id="f-passed">
+                <option value="">通过+被拦</option>
+                <option value="1">仅通过</option>
+                <option value="0">仅被拦</option>
+            </select>
+            <input type="text" id="f-cat" placeholder="催化剂 ID…" style="width:110px">
+            <input type="text" id="f-q" placeholder="标题关键词…">
+            <button class="btn" onclick="load()">查询</button>
+            <label><input type="checkbox" id="f-autorefresh" onchange="toggleAuto()"> 自动刷新(30s)</label>
+        </div>
+
+        <div class="meta" id="meta">加载中…</div>
+
+        <div class="grid" id="summary"></div>
+
+        <div id="entries">
+            <div class="empty">加载中…</div>
+        </div>
+    </div>
+
+    <script>
+        const STAGE_CN = {
+            "L1_classify": "L1 分类",
+            "G1_grade": "G1 分级",
+            "G2_resonance": "G2 共振",
+            "G6_signal": "G6 信号",
+            "SO_second_order": "二阶展开",
+            "G3G5_recalc": "G3-G5 重算",
+        };
+
+        let autoTimer = null;
+
+        function toggleAuto () {
+            if (document.getElementById('f-autorefresh').checked) {
+                autoTimer = setInterval(load, 30000);
+            } else if (autoTimer) {
+                clearInterval(autoTimer);
+                autoTimer = null;
+            }
+        }
+
+        function esc (s) {
+            return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[c]);
+        }
+
+        function fmtMetric (v) {
+            if (v == null) return "null";
+            if (typeof v === 'number') return (Number.isInteger(v) ? v : v.toFixed(4));
+            return v;
+        }
+
+        async function load () {
+            const params = new URLSearchParams();
+            const d = document.getElementById('f-date').value;
+            const stage = document.getElementById('f-stage').value;
+            const passed = document.getElementById('f-passed').value;
+            const cat = document.getElementById('f-cat').value.trim();
+            const q = document.getElementById('f-q').value.trim();
+            if (d) params.set('date', d);
+            if (stage) params.set('stage', stage);
+            if (passed) params.set('passed', passed);
+            if (cat) params.set('catalyst_id', cat);
+            if (q) params.set('q', q);
+            params.set('limit', 300);
+
+            try {
+                const resp = await fetch('/api/catalyst/trace?' + params.toString());
+                const json = await resp.json();
+                if (!json.ok) throw new Error(json.error || '请求失败');
+                render(json);
+            } catch (e) {
+                document.getElementById('entries').innerHTML = '<div class="empty">加载失败: ' + esc(e.message) + '</div>';
+            }
+        }
+
+        function render (json) {
+            document.getElementById('meta').textContent =
+                `日期 ${json.date} · 共 ${json.total} 条 · 当前显示前 ${json.entries.length} 条` +
+                (json.dates.length ? `（可用日志日期：${json.dates.slice(0, 10).join(', ')}${json.dates.length > 10 ? '…' : ''}）` : '');
+
+            // 分步统计
+            const sg = document.getElementById('summary');
+            if (!json.summary.length) {
+                sg.innerHTML = '<div class="card" style="grid-column:1/-1;color:#6b7280">当日无 trace 数据，请先运行管道（phase_catalyst_pipeline.py --fast --slow）生成逐步追溯日志</div>';
+            } else {
+                sg.innerHTML = json.summary.map(s => `
+                    <div class="card">
+                        <div class="stage-name">${esc(STAGE_CN[s.stage] || s.stage)}</div>
+                        <div class="nums">
+                            <div><div class="num pass">${s.passed}</div><div class="lbl">通过</div></div>
+                            <div><div class="num drop">${s.dropped}</div><div class="lbl">被拦</div></div>
+                        </div>
+                    </div>`).join('');
+            }
+
+            // 日志列表
+            const el = document.getElementById('entries');
+            if (!json.entries.length) {
+                el.innerHTML = '<div class="empty">该筛选条件下无日志</div>';
+                return;
+            }
+            el.innerHTML = json.entries.map(r => {
+                const stageName = STAGE_CN[r.stage] || r.stage || '?';
+                const pass = !!r.passed;
+                const catChip = r.catalyst_id != null ?
+                    `<span class="id-chip" title="点击过滤该催化剂" onclick="filterCat(${r.catalyst_id})">cat ${r.catalyst_id}</span>` : '';
+                const assetChip = r.asset_id != null ?
+                    `<span class="id-chip" title="点击过滤该资产" onclick="filterAsset(${r.asset_id})">asset ${r.asset_id}</span>` : '';
+                const titleHtml = r.title ? `<div class="title">${esc(r.title)}</div>` : '';
+                const reasonHtml = r.reason ? `<div class="reason">⚠ ${esc(r.reason)}</div>` : '';
+                const metricsHtml = Object.entries(r.metrics || {}).length ?
+                    `<div class="metrics">${Object.entries(r.metrics).map(([k, v]) =>
+                        `<span class="metric">${esc(k)}=${esc(fmtMetric(v))}</span>`).join('')}</div>` : '';
+                return `
+                <div class="log-row ${pass ? 'passed' : 'dropped'}">
+                    <div class="top">
+                        <span class="badge stage">${esc(stageName)}</span>
+                        <span class="badge ${pass ? 'pass' : 'drop'}">${pass ? '✓ 通过' : '✗ 被拦'}</span>
+                        ${catChip}${assetChip}
+                        <span class="time">${esc(r.ts || '')}</span>
+                    </div>
+                    ${titleHtml}
+                    ${reasonHtml}
+                    ${metricsHtml}
+                </div>`;
+            }).join('');
+        }
+
+        function filterCat (id) {
+            document.getElementById('f-cat').value = id;
+            load();
+        }
+
+        function filterAsset (id) {
+            window.open('/research/' + id, '_blank');
+        }
+
+        // 初始化：默认选最新日期
+        load();
+    </script>
+</body>
+
+</html>

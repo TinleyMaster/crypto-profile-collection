@@ -680,6 +680,120 @@ def kol_monitor():
     return render_template("kol.html")
 
 
+# ── 催化剂逐步追溯（子页面） ──
+# trace 日志目录与 catalyst.catalyst_trace 模块保持一致（支持 CATALYST_TRACE_DIR 覆盖）
+TRACE_DIR = Path(os.environ.get(
+    "CATALYST_TRACE_DIR",
+    str(Path(__file__).resolve().parent / "output" / "catalyst_trace"),
+))
+
+
+@app.route("/catalyst")
+def catalyst_trace_page():
+    """催化剂逐步追溯子页面：每条催化剂在每步筛选（通过/被拦 + 原因 + 数值）的日志。"""
+    return render_template("catalyst.html")
+
+
+@app.route("/api/catalyst/trace")
+def api_catalyst_trace():
+    """催化剂管道逐步追溯日志（读 trace JSONL，按天分文件）。
+
+    Query params:
+        date:        YYYY-MM-DD，默认最新有数据的日期
+        stage:       步骤过滤（L1_classify / G1_grade / G2_resonance / G6_signal / SO_second_order / G3G5_recalc）
+        catalyst_id: 催化剂 ID 过滤
+        asset_id:    资产 ID 过滤
+        passed:      '1'=仅通过 / '0'=仅被拦
+        q:           标题模糊搜索
+        limit:       最多返回条数，默认 200，最大 1000
+    """
+    try:
+        from collections import defaultdict
+
+        date_str = request.args.get("date") or ""
+        stage = request.args.get("stage") or ""
+        catalyst_id = request.args.get("catalyst_id", type=int)
+        asset_id = request.args.get("asset_id", type=int)
+        passed_arg = request.args.get("passed")
+        q = (request.args.get("q") or "").strip()
+        try:
+            limit = max(1, min(int(request.args.get("limit", 200)), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+
+        # 可用日志文件（按日期倒序）
+        files = sorted(TRACE_DIR.glob("*.jsonl"), reverse=True) if TRACE_DIR.is_dir() else []
+        dates = [f.stem for f in files]
+
+        # 选择要读取的文件：指定日期 → 该日期；否则最新有数据的
+        selected = []
+        if date_str:
+            target = TRACE_DIR / f"{date_str}.jsonl"
+            if target.exists():
+                selected = [target]
+        elif files:
+            selected = [files[0]]
+            date_str = files[0].stem
+
+        # 读取 + 过滤
+        entries = []
+        for f in selected:
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if stage and rec.get("stage") != stage:
+                            continue
+                        if catalyst_id is not None and rec.get("catalyst_id") != catalyst_id:
+                            continue
+                        if asset_id is not None and rec.get("asset_id") != asset_id:
+                            continue
+                        if passed_arg in ("1", "0"):
+                            if bool(rec.get("passed")) != (passed_arg == "1"):
+                                continue
+                        if q and q not in str(rec.get("title") or ""):
+                            continue
+                        entries.append(rec)
+            except OSError:
+                continue
+
+        # 分步统计（基于全量过滤结果，不受 limit 截断影响）
+        stage_stats = defaultdict(lambda: {"passed": 0, "dropped": 0})
+        for r in entries:
+            s = stage_stats.get(r.get("stage") or "?")
+            if s is None:
+                stage_stats[r.get("stage") or "?"] = s = {"passed": 0, "dropped": 0}
+            if r.get("passed"):
+                s["passed"] += 1
+            else:
+                s["dropped"] += 1
+
+        total = len(entries)
+        # 时间倒序 + 截断
+        entries.sort(key=lambda r: r.get("ts", ""), reverse=True)
+        entries = entries[:limit]
+
+        return jsonify({
+            "ok": True,
+            "date": date_str,
+            "dates": dates,
+            "total": total,
+            "entries": entries,
+            "summary": [
+                {"stage": k, "passed": v["passed"], "dropped": v["dropped"]}
+                for k, v in sorted(stage_stats.items())
+            ],
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── API 路由 ──
 
 

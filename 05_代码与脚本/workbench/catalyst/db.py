@@ -238,7 +238,7 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
 
     def _query(c):
         # 优先：asset_source_map binance 来源的 source_asset_key
-        # （同 key 多条时按市值降序选最大的，防止脏映射）
+        # （同 key 多条时按 CMC 排名升序选最靠前的，防止脏映射）
         row = c.execute(
             """
             SELECT a.asset_id
@@ -246,7 +246,7 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
             JOIN core.asset_source_map m ON a.asset_id = m.asset_id
             WHERE m.source_code = 'binance'
               AND UPPER(m.source_asset_key) = %s
-            ORDER BY COALESCE(a.market_cap, 0) DESC NULLS LAST, a.asset_id
+            ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
             LIMIT 1
             """,
             (base_symbol,),
@@ -255,22 +255,23 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
             return row["asset_id"]
         # 退一步：asset 表的 canonical_symbol
         # （同 symbol 多行时避免取到脏行：
-        #   1. 排除 tokenized/合成/商品衍生/AI 仿盘/Inu 仿盘 等脏标记
-        #   2. 按「名称含 symbol 语义优先」排序
-        #   3. 按市值降序，确保同名时选主流真币
-        #   线上审计 2026-09-15：BTC→Bitcoin Base/XRP→XRP AI/BNB→BNBTiger Inu）
+        #   1. 排除 tokenized/合成/商品衍生/AI 仿盘/桥接/包装 等脏标记
+        #   2. 按 CMC 排名升序（rank 越小越主流），兜底用 asset_id
+        #   3. 语义排序仅作次级参考（名称含 symbol > 普通 > 贵金属商品）
+        # 线上审计 2026-09-15：BTC→Bitcoin Base/XRP→XRP AI/BNB→BNBTiger Inu
+        # 部署复验 2026-09-15：SOL→Sol The Trophy Tomato / ETH→NEAR Intents Bridged ETH
         row = c.execute(
             """
             SELECT asset_id
             FROM core.asset
             WHERE UPPER(canonical_symbol) = %s
               AND LOWER(COALESCE(canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
-              AND LOWER(COALESCE(canonical_name, '')) !~ '\bai\b|second[[:space:]]+chance|tiger[[:space:]]+inu|\binu\b|base[[:space:]]+coin|gold[[:space:]]+ai'
+              AND LOWER(COALESCE(canonical_name, '')) !~ '\bai\b|second[[:space:]]+chance|tiger[[:space:]]+inu|\binu\b|base[[:space:]]+coin|gold[[:space:]]+ai|bridged|wrapped|intents|trophy|tomato|meme|doge|shib|pepe|floki|babydoge'
             ORDER BY
+                market_cap_rank ASC NULLS LAST,
                 CASE WHEN LOWER(COALESCE(canonical_name, '')) LIKE '%' || LOWER(%s) || '%' THEN 0
                      WHEN LOWER(COALESCE(canonical_name, '')) ~ 'gold|silver|oil|gas' THEN 2
                      ELSE 1 END,
-                COALESCE(market_cap, 0) DESC NULLS LAST,
                 asset_id
             LIMIT 1
             """,

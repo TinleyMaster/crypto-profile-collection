@@ -62,10 +62,10 @@ def _resolve_symbol_to_asset_id(cur, symbol: str) -> int | None:
     # FIX-R2: 排除 Bridged/Wrapped/Peg/allSOL 后缀，优先取主币
     cur.execute(
         "SELECT asset_id FROM core.asset WHERE UPPER(canonical_symbol) = %s "
-        "AND canonical_name NOT LIKE '%Bridged%' "
-        "AND canonical_name NOT LIKE '%Wrapped%' "
-        "AND canonical_name NOT LIKE '%Peg %' "
-        "AND canonical_name NOT LIKE '%allSOL%' "
+        "AND canonical_name NOT LIKE '%%Bridged%%' "
+        "AND canonical_name NOT LIKE '%%Wrapped%%' "
+        "AND canonical_name NOT LIKE '%%Peg %%' "
+        "AND canonical_name NOT LIKE '%%allSOL%%' "
         "ORDER BY asset_id LIMIT 1",
         (symbol.upper().strip(),),
     )

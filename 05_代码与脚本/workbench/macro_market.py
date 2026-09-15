@@ -11,7 +11,6 @@ import re
 import time
 import threading
 import requests
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 # ── 数据源配置 ──
@@ -22,6 +21,9 @@ BINANCE_FAPI = "https://fapi.binance.com"
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 DL_BASE = "https://api.llama.fi"
 TIMEOUT = 15
+# overview 全量拉取的总体硬上限（秒）：正常 ~10-25s，超过即标记超时继续，
+# 防止个别卡死的数据源把整个大盘快照/早报拖死
+OVERVIEW_FETCH_TIMEOUT = 30
 
 # ── P0-3 权重默认值（P2-4 外置 market_rules.yaml，启动时优先读 yaml） ──
 EMOTION_WEIGHTS_DEFAULT = {
@@ -164,6 +166,45 @@ def flag_extreme(percentile: float | None) -> str:
     if percentile < EXTREME_ZONE["low_pct"]:
         return "LOW"
     return "NONE"
+
+
+def _parallel_map_bounded(fn, items, timeout: float = 15.0, workers: int = 8) -> dict[int, Any]:
+    """
+    并行执行 fn(item) 且限制总时长，防止单个拉取卡死拖垮整个流程。
+
+    背景：Python 3.11 的 ThreadPoolExecutor 工作线程是非 daemon 的，
+    如果某个网络/DB 调用无限期卡住（如 DNS 解析、锁等待），
+    既会阻塞 ThreadPoolExecutor 的 shutdown(wait=True)，也会阻塞进程退出。
+
+    这里改用 daemon 线程 + 信号量限流 + 全局 deadline：
+      - 最多 workers 个任务同时执行（保留原并发上限，避免打爆 API）；
+      - 超过 timeout 后不再等待未完成任务；
+      - daemon 线程不参与解释器退出 join，卡死的线程随进程退出被回收。
+
+    返回 {item_index: fn(item) 结果}，仅包含已完成的任务。
+    """
+    box: dict[int, Any] = {}
+    sem = threading.Semaphore(workers)
+    threads: list[tuple[int, threading.Thread]] = []
+
+    def _run(idx: int, item: Any) -> None:
+        with sem:
+            box[idx] = fn(item)
+
+    for idx, item in enumerate(items):
+        t = threading.Thread(
+            target=_run, args=(idx, item), daemon=True, name=f"par-{idx}"
+        )
+        t.start()
+        threads.append((idx, t))
+
+    deadline = time.time() + timeout
+    for idx, t in threads:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        t.join(remaining)
+    return box
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1589,8 +1630,9 @@ def fetch_category_flow() -> dict:
             "from_db": from_db,
         }
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        ranked = list(ex.map(work, selected))
+    # 用 daemon 线程并行拉取并整体限时：个别分类详情卡死不阻塞整个叙事榜
+    box = _parallel_map_bounded(work, selected, timeout=60, workers=6)
+    ranked = [box[i] for i in range(len(selected)) if i in box]
 
     degraded = [item["narrative"] for item in ranked if item["mcap_period"] != "7d"]
 
@@ -2108,8 +2150,9 @@ def fetch_chain_flow() -> dict:
             "protocols": top_protos,
         }
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = [x for x in ex.map(work, top) if x]
+    # 用 daemon 线程并行拉取并整体限时：个别链的 TVL 历史卡死不阻塞整个链榜
+    box = _parallel_map_bounded(work, top, timeout=90, workers=8)
+    results = [box[i] for i in range(len(top)) if i in box and box[i] is not None]
 
     valid = [x for x in results if x.get("flow_7d") is not None]
     valid.sort(key=lambda x: -x["flow_7d"])
@@ -3060,6 +3103,14 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                     JOIN core.asset a ON a.asset_id = ci.asset_id
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
                     WHERE ac.published_at >= NOW() - make_interval(days => %s)
+                      -- 过滤股票代币化 / 桥接包装币 / 抢注符号的假币
+                      AND a.canonical_name NOT ILIKE '%%tokenized%%'
+                      AND a.canonical_name NOT ILIKE '%%prestocks%%'
+                      AND a.canonical_name NOT ILIKE '%%derivatives%%'
+                      AND a.canonical_name NOT ILIKE '%%bridged%%'
+                      AND a.canonical_name NOT ILIKE '%%wrapped%%'
+                      AND a.market_cap_rank IS NOT NULL
+                      AND a.market_cap_rank <= 1000
                     GROUP BY ci.asset_id, a.canonical_symbol
                     HAVING SUM(
                                CASE ci.impact_direction
@@ -3122,6 +3173,16 @@ def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, 
                       AND s.resonance_state = 'confirmed'
                       AND s.tier IN ('A', 'B', 'C')
                       AND s.entry_price IS NOT NULL
+                      AND s.entry_price > 0
+                      -- 过滤股票代币化 / 衍生品 / 桥接包装币（避免 OPENAI、preBTC 等混入）
+                      AND a.canonical_name NOT ILIKE '%%tokenized%%'
+                      AND a.canonical_name NOT ILIKE '%%prestocks%%'
+                      AND a.canonical_name NOT ILIKE '%%derivatives%%'
+                      AND a.canonical_name NOT ILIKE '%%bridged%%'
+                      AND a.canonical_name NOT ILIKE '%%wrapped%%'
+                      -- 过滤抢注主流符号的假币（如 Bitcoin Base / The Ticker Is ETH）
+                      AND a.market_cap_rank IS NOT NULL
+                      AND a.market_cap_rank <= 1000
                     ORDER BY s.composite_score DESC
                     LIMIT 25
                 """)
@@ -5655,6 +5716,7 @@ def _resolve_symbols_to_asset_ids(symbols: set[str]) -> dict[str, int]:
     if not symbols:
         return {}
     try:
+        import psycopg.rows  # noqa: F401  (psycopg.rows.dict_row 需要)
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
 
@@ -5668,9 +5730,9 @@ def _resolve_symbols_to_asset_ids(symbols: set[str]) -> dict[str, int]:
                            asset_id
                     FROM core.asset
                     WHERE UPPER(canonical_symbol) IN ({placeholders})
-                      AND canonical_name NOT LIKE '%Bridged%'
-                      AND canonical_name NOT LIKE '%Wrapped%'
-                      AND canonical_name NOT LIKE '%Peg %'
+                      AND canonical_name NOT LIKE '%%Bridged%%'
+                      AND canonical_name NOT LIKE '%%Wrapped%%'
+                      AND canonical_name NOT LIKE '%%Peg %%'
                     ORDER BY UPPER(canonical_symbol), asset_id
                 """, tuple(s.upper().strip() for s in symbols))
                 rows = cur.fetchall()
@@ -6211,7 +6273,8 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
         with get_connection(settings.database_url) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
-                    SELECT s.signal_id, s.created_at, s.signal_category, s.signal_subtype,
+                    SELECT DISTINCT ON (UPPER(s.symbol))
+                           s.signal_id, s.created_at, s.signal_category, s.signal_subtype,
                            s.symbol, s.event_direction, s.event_amount, s.event_token,
                            s.event_usd_value, s.tx_hash, s.address_label, s.event_exchange,
                            s.event_time, s.confidence, s.address_label as reason,
@@ -6220,7 +6283,7 @@ def fetch_kol_onchain_signals(hours: int = 24, limit: int = 10) -> dict:
                     JOIN biz.kol_profile p ON s.profile_id = p.profile_id
                     WHERE s.signal_category = 'onchain'
                       AND s.created_at >= NOW() - (%s || ' hours')::INTERVAL
-                    ORDER BY s.created_at DESC
+                    ORDER BY UPPER(s.symbol), s.created_at DESC
                     LIMIT %s
                 """, (hours, limit))
                 signals = [dict(r) for r in cur.fetchall()]
@@ -6328,6 +6391,75 @@ def fetch_etf_flow_trend(days: int = 7) -> dict:
         return {"status": "error", "assets": [], "error": str(e)}
 
 
+def _dedup_whale_transfers(transfers: list[dict]) -> list[dict]:
+    """去重链上大额转账中的"往返"（A→B 与 B→A）与"多跳"（A→B→C）事件。
+
+    判定条件：symbol 相同 + 金额相近（±2%）+ 地址首尾相接或互反。
+    每条链路只保留金额最大的一条，避免 Top N 注水。
+    无地址信息的记录不做合并（保守保留）。
+    """
+    if not transfers or len(transfers) < 2:
+        return transfers
+    from collections import defaultdict
+
+    def _fval(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _addr(t, k):
+        a = t.get(k)
+        return str(a).strip().lower() if a else ""
+
+    def _near(a, b):
+        va, vb = _fval(a), _fval(b)
+        if va == 0 and vb == 0:
+            return True
+        return abs(va - vb) / max(abs(va), abs(vb)) < 0.02
+
+    by_sym: dict[str, list] = defaultdict(list)
+    for t in transfers:
+        by_sym.setdefault(str(t.get("symbol") or ""), []).append(t)
+
+    deduped: list[dict] = []
+    for sym, group in by_sym.items():
+        if len(group) <= 1:
+            deduped.extend(group)
+            continue
+        # 按时间升序，贪心合并链路
+        group = sorted(group, key=lambda x: str(x.get("block_timestamp") or ""))
+        used = [False] * len(group)
+        for i, cur in enumerate(group):
+            if used[i]:
+                continue
+            chain = [cur]
+            used[i] = True
+            tail = _addr(cur, "to_address")
+            changed = True
+            while changed:
+                changed = False
+                for j, cand in enumerate(group):
+                    if used[j]:
+                        continue
+                    cfrom, cto = _addr(cand, "from_address"), _addr(cand, "to_address")
+                    if not (cfrom and cto):
+                        continue
+                    # 与链尾相接（cand.from == tail）即视为同一条多跳/往返链路
+                    if tail and cfrom == tail:
+                        if _near(cur.get("value_usd"), cand.get("value_usd")):
+                            chain.append(cand)
+                            used[j] = True
+                            if cto:
+                                tail = cto
+                            changed = True
+                            break
+            deduped.append(max(chain, key=lambda x: _fval(x.get("value_usd"))))
+    # 还原金额降序（与原展示顺序一致）
+    deduped.sort(key=lambda x: _fval(x.get("value_usd")), reverse=True)
+    return deduped
+
+
 def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
     """链上大额转账异动（用于早报链上异动板块）。
 
@@ -6368,6 +6500,10 @@ def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
                     LIMIT %s
                 """, (hours, limit))
                 transfers = [dict(r) for r in cur.fetchall()]
+
+                # 去重：同一标的的往返转账（A→B 与 B→A）与多跳中转（A→B→C）
+                # 只保留链路中金额最大的一条，避免 Top N 注水
+                transfers = _dedup_whale_transfers(transfers)
 
                 # 按类型分类
                 exchange_in = [t for t in transfers if t.get("to_exchange")]
@@ -7006,9 +7142,9 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                               ON ac.asset_id = a.asset_id
                              AND ac.is_primary = TRUE
                             WHERE UPPER(a.canonical_symbol) IN ({placeholders})
-                              AND a.canonical_name NOT LIKE '%Bridged%'
-                              AND a.canonical_name NOT LIKE '%Wrapped%'
-                              AND a.canonical_name NOT LIKE '%Peg %'
+                              AND a.canonical_name NOT LIKE '%%Bridged%%'
+                              AND a.canonical_name NOT LIKE '%%Wrapped%%'
+                              AND a.canonical_name NOT LIKE '%%Peg %%'
                             ORDER BY UPPER(a.canonical_symbol),
                                      CASE WHEN ac.contract_address IS NOT NULL THEN 0 ELSE 1 END,
                                      ac.is_primary DESC, a.asset_id
@@ -7033,8 +7169,8 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
                                 FROM core.asset a
                                 JOIN core.asset_contract ac ON ac.asset_id = a.asset_id
                                 WHERE UPPER(a.canonical_symbol) IN ({placeholders2})
-                                  AND a.canonical_name NOT LIKE '%Bridged%'
-                                  AND a.canonical_name NOT LIKE '%Wrapped%'
+                                  AND a.canonical_name NOT LIKE '%%Bridged%%'
+                                  AND a.canonical_name NOT LIKE '%%Wrapped%%'
                                 ORDER BY UPPER(a.canonical_symbol), ac.is_primary DESC
                             """, tuple(missing))
                             for r in cur2.fetchall():
@@ -7133,34 +7269,39 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     早报结构化骨架 V2（重新设计版）。
     6 大模块 + AI 定调 + 链上深度数据。
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     cycle = today.get("btc_cycle") or {}
     diff = diff_overview(yesterday, today) if yesterday else None
     opps = (today.get("opportunity_list") or {}).get("opportunities") or []
     divs = (today.get("divergence_signals") or {}).get("signals") or []
 
-    # ── 并行拉取所有独立数据 ──
+    # ── 并行拉取所有独立数据（daemon 线程 + 整体限时，防卡死拖垮早报）──
     def _fetch_parallel():
-        with ThreadPoolExecutor(max_workers=12) as pool:
-            futures = {
-                "stablecoin": pool.submit(fetch_stablecoin_supply_trend),
-                "sector_flow": pool.submit(fetch_sector_flow_with_leaders),
-                "kol_onchain": pool.submit(fetch_kol_onchain_signals),
-                "etf_flow": pool.submit(fetch_etf_flow_trend, 7),
-                "whale_moves": pool.submit(fetch_onchain_whale_moves, 24, 10),
-                "holder_concentration": pool.submit(fetch_holder_concentration_summary, 10),
-                "exchange_flow": pool.submit(fetch_exchange_net_flow_summary, 7),
-                "upcoming_unlocks": pool.submit(fetch_upcoming_unlocks, 14),
-            }
-            results = {}
-            for k, fut in futures.items():
-                try:
-                    results[k] = fut.result(timeout=20)
-                except Exception as e:
-                    print(f"[morning_brief] {k} fetch failed: {e}")
-                    results[k] = {"status": "error", "error": str(e)}
-            return results
+        fetchers = [
+            ("stablecoin", fetch_stablecoin_supply_trend, ()),
+            ("sector_flow", fetch_sector_flow_with_leaders, ()),
+            ("kol_onchain", fetch_kol_onchain_signals, ()),
+            ("etf_flow", fetch_etf_flow_trend, (7,)),
+            ("whale_moves", fetch_onchain_whale_moves, (24, 10)),
+            ("holder_concentration", fetch_holder_concentration_summary, (10,)),
+            ("exchange_flow", fetch_exchange_net_flow_summary, (7,)),
+            ("upcoming_unlocks", fetch_upcoming_unlocks, (14,)),
+        ]
+        results: dict = {}
+
+        def _run(payload: tuple) -> None:
+            key, fn, args = payload
+            try:
+                results[key] = fn(*args)
+            except Exception as e:
+                print(f"[morning_brief] {key} fetch failed: {e}")
+                results[key] = {"status": "error", "error": str(e)}
+
+        _parallel_map_bounded(
+            _run, fetchers, timeout=OVERVIEW_FETCH_TIMEOUT, workers=12
+        )
+        for key, fn, args in fetchers:
+            results.setdefault(key, {"status": "error", "error": "morning_brief fetch timeout"})
+        return results
 
     p = _fetch_parallel()
     stab = p["stablecoin"]
@@ -7766,7 +7907,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
 
     # 情况 3：强制刷新 / 无缓存 / 缓存太旧 → 同步刷新（以下为原有逻辑）
 
-    # ── 全量并行获取所有数据（24 个数据源全部并行，总耗时 = 最慢的那个）──
+    # ── 全量并行获取所有数据（24 个数据源并行，总耗时 = 最慢的 + 整体硬上限）──
     def _fetch_all():
         # 内部函数：第三批的几个独立数据拉取
         def _fetch_divergence():
@@ -7783,44 +7924,55 @@ def get_market_overview(force_refresh: str = "0") -> dict:
                 return {"status": "error", "phase": "unknown",
                         "phase_label": "数据不可用", "signals": []}
 
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            futures = {
-                # 第一批：实时/快照数据（14 个）
-                "global_metrics": pool.submit(fetch_cmc_global_metrics),
-                "fear_greed": pool.submit(fetch_cmc_fear_greed),
-                "altcoin_season": pool.submit(fetch_cmc_altcoin_season),
-                "cefi": pool.submit(fetch_cryptoetf_cefi),
-                "btc_klines": pool.submit(fetch_binance_btc_klines),
-                "eth_klines": pool.submit(fetch_binance_eth_klines),
-                "derivatives": pool.submit(fetch_binance_derivatives),
-                "etf_flows": pool.submit(fetch_binance_etf_flows),
-                "categories": pool.submit(fetch_cmc_categories),
-                "event_calendar": pool.submit(fetch_event_calendar),
-                "onchain": pool.submit(fetch_onchain_anomaly_signals),
-                "btc_onchain": pool.submit(fetch_btc_onchain_signals),
-                "cm_activity": pool.submit(fetch_cm_activity_signals),
-                # 第二批：历史分位数据（5 个）
-                "fear_greed_hist": pool.submit(fetch_fear_greed_history, 90),
-                "mvrv_hist": pool.submit(fetch_mvrv_history, "btc"),
-                "stablecoin_flow_hist": pool.submit(fetch_stablecoin_netflow_history, 30),
-                "cefi_hist": pool.submit(fetch_cefi_history, 30),
-                "btc_dom_hist": pool.submit(fetch_btc_dominance_history, 30),
-                # 第三批：板块/链/背离/BTC周期（5 个）
-                "cat_flow": pool.submit(fetch_category_flow),
-                "tvl_flow": pool.submit(fetch_category_tvl_flow),
-                "chain_flow": pool.submit(fetch_chain_flow),
-                "divergence": pool.submit(_fetch_divergence),
-                "btc_cycle": pool.submit(_fetch_btc_cycle),
-                # 其他：MVRV 多币极值（DB 查询）
-                "mvrv_universe": pool.submit(_build_mvrv_universe),
-            }
-            results = {}
-            for k, fut in futures.items():
-                try:
-                    results[k] = fut.result(timeout=12)
-                except Exception as e:
-                    print(f"[overview] {k} fetch failed: {e}")
-                    results[k] = {"status": "error", "error": str(e)}
+        # (键, 函数, 参数)。全部用 daemon 线程并行执行并整体限时：
+        # 即使某个拉取（网络/DNS/DB）无限期卡住，也不会阻塞这里返回，
+        # 更不会阻塞进程退出（见 _parallel_map_bounded）。
+        fetchers = [
+            # 第一批：实时/快照数据（14 个）
+            ("global_metrics", fetch_cmc_global_metrics, ()),
+            ("fear_greed", fetch_cmc_fear_greed, ()),
+            ("altcoin_season", fetch_cmc_altcoin_season, ()),
+            ("cefi", fetch_cryptoetf_cefi, ()),
+            ("btc_klines", fetch_binance_btc_klines, ()),
+            ("eth_klines", fetch_binance_eth_klines, ()),
+            ("derivatives", fetch_binance_derivatives, ()),
+            ("etf_flows", fetch_binance_etf_flows, ()),
+            ("categories", fetch_cmc_categories, ()),
+            ("event_calendar", fetch_event_calendar, ()),
+            ("onchain", fetch_onchain_anomaly_signals, ()),
+            ("btc_onchain", fetch_btc_onchain_signals, ()),
+            ("cm_activity", fetch_cm_activity_signals, ()),
+            # 第二批：历史分位数据（5 个）
+            ("fear_greed_hist", fetch_fear_greed_history, (90,)),
+            ("mvrv_hist", fetch_mvrv_history, ("btc",)),
+            ("stablecoin_flow_hist", fetch_stablecoin_netflow_history, (30,)),
+            ("cefi_hist", fetch_cefi_history, (30,)),
+            ("btc_dom_hist", fetch_btc_dominance_history, (30,)),
+            # 第三批：板块/链/背离/BTC周期（5 个）
+            ("cat_flow", fetch_category_flow, ()),
+            ("tvl_flow", fetch_category_tvl_flow, ()),
+            ("chain_flow", fetch_chain_flow, ()),
+            ("divergence", _fetch_divergence, ()),
+            ("btc_cycle", _fetch_btc_cycle, ()),
+            # 其他：MVRV 多币极值（DB 查询）
+            ("mvrv_universe", _build_mvrv_universe, ()),
+        ]
+        results: dict = {}
+
+        def _run(payload: tuple) -> None:
+            key, fn, args = payload
+            try:
+                results[key] = fn(*args)
+            except Exception as e:
+                print(f"[overview] {key} fetch failed: {e}")
+                results[key] = {"status": "error", "error": str(e)}
+
+        _parallel_map_bounded(
+            _run, fetchers, timeout=OVERVIEW_FETCH_TIMEOUT, workers=20
+        )
+        # 未在限时内完成的拉取记为超时，保证下游永远能拿到每个键
+        for key, fn, args in fetchers:
+            results.setdefault(key, {"status": "error", "error": "overview fetch timeout"})
         return results
 
     r = _fetch_all()

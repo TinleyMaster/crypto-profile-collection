@@ -280,15 +280,10 @@ def _save_state(state: dict) -> None:
 
 
 # ── 类别并发配置 ──────────────────────────────────────────────
-# chain: 链上重任务（易卡死/耗时数小时），默认 2 槽；链上任务多为网络 IO 等待，
-#        限制过高易触发 RPC 限流，可用环境变量 CATEGORY_MAX_CHAIN 调低
+# chain: 链上重任务（易卡死/耗时数小时），限1槽防垄断
 # core:  核心业务（催化剂/早报/采集），保底可用
 # monitor: 监控类（低优先级，仅空闲时跑）
-CATEGORY_MAX = {
-    "chain": int(os.getenv("CATEGORY_MAX_CHAIN", "2")),
-    "core": int(os.getenv("CATEGORY_MAX_CORE", "2")),
-    "monitor": int(os.getenv("CATEGORY_MAX_MONITOR", "1")),
-}
+CATEGORY_MAX = {"chain": 1, "core": 2, "monitor": 1}
 
 
 # ── TaskManager ─────────────────────────────────────────────
@@ -488,7 +483,7 @@ class TaskManager:
                                 SELECT task_id, category FROM sys.task
                                 WHERE status = 'pending'
                                 ORDER BY
-                                    (CASE WHEN name ILIKE '%monitor%' THEN 1 ELSE 0 END),
+                                    (CASE WHEN name ILIKE '%%monitor%%' THEN 1 ELSE 0 END),
                                     started_at ASC
                                 LIMIT 5
                                 FOR UPDATE SKIP LOCKED
@@ -521,28 +516,37 @@ class TaskManager:
         """收割僵尸任务，两个条件满足其一即触发：
         1. 运行时长超过 MAX_RUNTIME_HOURS（硬超时）
         2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟）
-
-        P1 修复：先 SELECT 出符合条件的 task_id 并终止真实子进程，再标记 DB 状态，
-        避免"槽位已释放但进程仍在后台跑"导致的任务重叠和资源泄漏。
         """
+        reaped: list[str] = []
         try:
             with _get_db() as conn:
                 with conn.cursor() as cur:
                     # 条件1：超 12h 硬超时
                     cur.execute(
                         """
-                        SELECT task_id FROM sys.task
+                        UPDATE sys.task
+                        SET status = 'failed',
+                            ended_at = NOW(),
+                            error = %s,
+                            updated_at = NOW()
                         WHERE status = 'running'
                           AND started_at < NOW() - (%s || ' hours')::interval
+                        RETURNING task_id
                         """,
-                        (str(MAX_RUNTIME_HOURS),),
+                        (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
+                         str(MAX_RUNTIME_HOURS)),
                     )
-                    timeout_ids = [r[0] for r in cur.fetchall()]
+                    count_timeout = cur.rowcount
+                    reaped.extend(row[0] for row in cur.fetchall())
 
-                    # 条件2：LOG_STUCK_MINUTES 分钟无新日志 + 已运行至少 10min（卡死）
+                    # 条件2：LOG_STUCK_MINUTES 无新日志 + 已运行至少 10min（卡死）
                     cur.execute(
                         """
-                        SELECT t.task_id FROM sys.task t
+                        UPDATE sys.task t
+                        SET status = 'failed',
+                            ended_at = NOW(),
+                            error = %s,
+                            updated_at = NOW()
                         WHERE t.status = 'running'
                           AND t.started_at < NOW() - '10 minutes'::interval
                           AND (
@@ -550,57 +554,32 @@ class TaskManager:
                               FROM sys.task_log l
                               WHERE l.task_id = t.task_id
                           ) < NOW() - (%s || ' minutes')::interval
+                        RETURNING t.task_id
                         """,
-                        (str(LOG_STUCK_MINUTES),),
+                        (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
+                         str(LOG_STUCK_MINUTES)),
                     )
-                    stuck_ids = [r[0] for r in cur.fetchall()]
+                    count_stuck = cur.rowcount
+                    reaped.extend(row[0] for row in cur.fetchall())
 
-            # 先终止真实子进程，释放底层资源
-            for tid in set(timeout_ids) | set(stuck_ids):
-                proc = self._local_procs.get(tid)
-                if proc and proc.poll() is None:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-
-            # 再统一标记 DB 状态（分别保留超时/卡死两种错误文案）
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    if timeout_ids:
-                        cur.execute(
-                            """
-                            UPDATE sys.task
-                            SET status = 'failed',
-                                ended_at = NOW(),
-                                error = %s,
-                                updated_at = NOW()
-                            WHERE task_id = ANY(%s)
-                            """,
-                            (f"timeout: 运行超过 {MAX_RUNTIME_HOURS}h 自动终止",
-                             timeout_ids),
-                        )
-                    if stuck_ids:
-                        cur.execute(
-                            """
-                            UPDATE sys.task
-                            SET status = 'failed',
-                                ended_at = NOW(),
-                                error = %s,
-                                updated_at = NOW()
-                            WHERE task_id = ANY(%s)
-                            """,
-                            (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
-                             stuck_ids),
-                        )
-
-            total = len(timeout_ids) + len(stuck_ids)
-            if total > 0:
-                print(f"[TaskManager] 收割 {total} 个僵尸任务 "
-                      f"(超时={len(timeout_ids)}, 卡死={len(stuck_ids)}，已终止进程)",
-                      file=sys.stderr)
+                    total = count_timeout + count_stuck
+                    if total > 0:
+                        print(f"[TaskManager] 收割 {total} 个僵尸任务 "
+                              f"(超时={count_timeout}, 卡死={count_stuck})",
+                              file=sys.stderr)
         except Exception as e:
             print(f"[TaskManager] reap_zombie error: {e}", file=sys.stderr)
+            return
+
+        # 收割后必须真正杀掉底层进程：否则僵尸子进程继续运行，
+        # 会一直占用 DB 连接、持续打外部 API（此前只改了 DB 状态没杀进程）
+        for tid in reaped:
+            proc = self._local_procs.get(tid)
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     def _run_task(self, task_id: str):
         task = _load_task(task_id)
@@ -639,15 +618,13 @@ class TaskManager:
             returncode = proc.returncode
             self._local_procs.pop(task_id, None)
 
-            # 重新读取确认状态（可能被 stop 改过）
+            # 重新读取确认状态（可能被 stop 收割器改过）
             task = _load_task(task_id)
             if not task:
                 return
-            if task["status"] == "stopped":
-                return
-            # 已被收割（reaper 置为 failed）时不覆盖状态和错误文案，
-            # 否则 terminate 返回码 -15 会顶掉 "timeout/stuck" 提示
-            if task["status"] == "failed":
+            # 已被收割（超时/卡死）或手动停止的任务不再覆盖状态与错误信息，
+            # 否则会把 "stuck: 90分钟无新日志" 覆盖成 "exit code -9"
+            if task["status"] in ("stopped", "failed", "done"):
                 return
             _update_task(
                 task_id,
@@ -709,262 +686,3 @@ class TaskManager:
                 cur_stats = task.get("stats") or {}
                 cur_stats.update(stats)
                 _update_task(task_id, stats=cur_stats)
-
-
-# ═══════════════════════════════════════════════════════════════
-# AsyncTaskState — 轻量级异步任务状态持久化
-# ═══════════════════════════════════════════════════════════════
-# 替代原来的 task_state/*.json + fcntl 文件锁方案。
-# 统一用 sys.async_task_state 表，按 (task_type, entity_key) 唯一标识。
-#
-# 用法：
-#   from task_manager import AsyncTaskState
-#   state = AsyncTaskState("recrawl", str(asset_id))
-#   if state.is_running(): return "already running"
-#   state.set_running()
-#   # ... 后台执行 ...
-#   state.set_done(result={"ok": True, ...})
-#
-# 并发安全：SELECT ... FOR UPDATE 行级锁，多 worker 安全。
-
-class AsyncTaskState:
-    """轻量级异步任务状态管理器（数据库持久化）。
-
-    替代 JSON 文件 + fcntl 文件锁方案，支持 gunicorn 多 worker 跨进程共享。
-    """
-
-    def __init__(self, task_type: str, entity_key: str):
-        """
-        Args:
-            task_type: 任务类型，如 'recrawl', 'kol_crawl'
-            entity_key: 实体标识，如 asset_id 或 profile_id 的字符串
-        """
-        self.task_type = task_type
-        self.entity_key = str(entity_key)
-        self._ensure_table()
-
-    # ── 建表（首次使用时自动执行，幂等）──────────────────────
-
-    @staticmethod
-    def _ensure_table():
-        """确保 sys.async_task_state 表存在。首次调用时建表，后续跳过。"""
-        if getattr(AsyncTaskState, "_table_ensured", False):
-            return
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS sys.async_task_state (
-                            task_type       VARCHAR(50) NOT NULL,
-                            entity_key      VARCHAR(200) NOT NULL,
-                            status          VARCHAR(20) NOT NULL DEFAULT 'idle',
-                            payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            started_at      TIMESTAMPTZ,
-                            finished_at     TIMESTAMPTZ,
-                            error           TEXT,
-                            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            PRIMARY KEY (task_type, entity_key)
-                        )
-                    """)
-                    cur.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_async_task_state_status
-                        ON sys.async_task_state(status)
-                    """)
-                    cur.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_async_task_state_task_type
-                        ON sys.async_task_state(task_type)
-                    """)
-                conn.commit()
-            AsyncTaskState._table_ensured = True
-        except Exception as e:
-            # 建表失败不致命（可能是并发建表），打印警告后继续
-            print(f"[AsyncTaskState] ensure_table warning: {e}", file=sys.stderr)
-
-    # ── 读操作 ──────────────────────────────────────────────
-
-    def get(self) -> dict:
-        """读取当前状态。返回 dict，至少含 status 字段。"""
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT status, payload, started_at, finished_at, error
-                        FROM sys.async_task_state
-                        WHERE task_type = %s AND entity_key = %s
-                        """,
-                        (self.task_type, self.entity_key),
-                    )
-                    row = cur.fetchone()
-            if not row:
-                return {"status": "idle"}
-            result = dict(row)
-            # payload 可能是 dict 或 json 字符串，统一转 dict
-            if isinstance(result.get("payload"), str):
-                try:
-                    result["payload"] = json.loads(result["payload"])
-                except Exception:
-                    result["payload"] = {}
-            return result
-        except Exception as e:
-            print(f"[AsyncTaskState] get error: {e}", file=sys.stderr)
-            return {"status": "idle"}
-
-    def is_running(self) -> bool:
-        """是否处于 running 状态。"""
-        return self.get().get("status") == "running"
-
-    def get_result(self):
-        """获取完成后的结果（payload）。"""
-        state = self.get()
-        if state.get("status") not in ("done", "failed"):
-            return None
-        return state.get("payload") or {}
-
-    # ── 写操作（原子）────────────────────────────────────────
-
-    def set_running(self, payload: dict | None = None) -> bool:
-        """标记为 running。返回 True 表示成功抢到执行权（之前不是 running）。"""
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    # UPSERT：不存在则插入 running，存在则更新为 running
-                    cur.execute(
-                        """
-                        INSERT INTO sys.async_task_state (task_type, entity_key, status, payload, started_at, updated_at)
-                        VALUES (%s, %s, 'running', %s::jsonb, NOW(), NOW())
-                        ON CONFLICT (task_type, entity_key) DO UPDATE
-                        SET status = 'running',
-                            payload = %s::jsonb,
-                            started_at = NOW(),
-                            finished_at = NULL,
-                            error = NULL,
-                            updated_at = NOW()
-                        RETURNING status
-                        """,
-                        (
-                            self.task_type, self.entity_key,
-                            json.dumps(payload or {}),
-                            json.dumps(payload or {}),
-                        ),
-                    )
-                conn.commit()
-            return True
-        except Exception as e:
-            print(f"[AsyncTaskState] set_running error: {e}", file=sys.stderr)
-            return False
-
-    def try_start(self, payload: dict | None = None) -> bool:
-        """尝试启动：仅当当前不是 running 时才标记为 running 并返回 True。
-        已在 running 则返回 False（幂等去重）。
-        """
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    # 先尝试行级锁（FOR UPDATE SKIP LOCKED 不支持的话用子查询兜底）
-                    # 用 INSERT ... ON CONFLICT DO NOTHING + UPDATE 条件更新模拟
-                    cur.execute(
-                        """
-                        INSERT INTO sys.async_task_state (task_type, entity_key, status, payload, started_at, updated_at)
-                        VALUES (%s, %s, 'running', %s::jsonb, NOW(), NOW())
-                        ON CONFLICT (task_type, entity_key) DO UPDATE
-                        SET status = 'running',
-                            payload = %s::jsonb,
-                            started_at = NOW(),
-                            finished_at = NULL,
-                            error = NULL,
-                            updated_at = NOW()
-                        WHERE sys.async_task_state.status != 'running'
-                        RETURNING (xmax = 0) AS inserted
-                        """,
-                        (
-                            self.task_type, self.entity_key,
-                            json.dumps(payload or {}),
-                            json.dumps(payload or {}),
-                        ),
-                    )
-                    row = cur.fetchone()
-                conn.commit()
-            # row 存在说明执行了 INSERT 或 UPDATE（即成功启动）
-            # 不存在说明 status 已经是 running，DO UPDATE 的 WHERE 不匹配
-            return row is not None
-        except Exception as e:
-            print(f"[AsyncTaskState] try_start error: {e}", file=sys.stderr)
-            # 出错时保守返回 False，避免重复启动
-            return False
-
-    def set_done(self, payload: dict | None = None) -> None:
-        """标记为 done，附带结果 payload。"""
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO sys.async_task_state (task_type, entity_key, status, payload, finished_at, updated_at)
-                        VALUES (%s, %s, 'done', %s::jsonb, NOW(), NOW())
-                        ON CONFLICT (task_type, entity_key) DO UPDATE
-                        SET status = 'done',
-                            payload = %s::jsonb,
-                            finished_at = NOW(),
-                            error = NULL,
-                            updated_at = NOW()
-                        """,
-                        (
-                            self.task_type, self.entity_key,
-                            json.dumps(payload or {}),
-                            json.dumps(payload or {}),
-                        ),
-                    )
-                conn.commit()
-        except Exception as e:
-            print(f"[AsyncTaskState] set_done error: {e}", file=sys.stderr)
-
-    def set_failed(self, error: str, payload: dict | None = None) -> None:
-        """标记为 failed，附带错误信息。"""
-        try:
-            with _get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO sys.async_task_state (task_type, entity_key, status, payload, error, finished_at, updated_at)
-                        VALUES (%s, %s, 'failed', %s::jsonb, %s, NOW(), NOW())
-                        ON CONFLICT (task_type, entity_key) DO UPDATE
-                        SET status = 'failed',
-                            payload = %s::jsonb,
-                            error = %s,
-                            finished_at = NOW(),
-                            updated_at = NOW()
-                        """,
-                        (
-                            self.task_type, self.entity_key,
-                            json.dumps(payload or {}),
-                            error,
-                            json.dumps(payload or {}),
-                            error,
-                        ),
-                    )
-                conn.commit()
-        except Exception as e:
-            print(f"[AsyncTaskState] set_failed error: {e}", file=sys.stderr)
-
-    # ── 上下文管理器（with 语法糖）───────────────────────────
-
-    @contextmanager
-    def lock_and_run(self, payload: dict | None = None):
-        """with 语法：自动 try_start，执行后自动 set_done/set_failed。
-        若已在 running 则抛出 RuntimeError。
-
-        用法：
-            state = AsyncTaskState("recrawl", asset_id)
-            with state.lock_and_run():
-                result = do_work()
-                state.set_done(result)
-        """
-        if not self.try_start(payload):
-            raise RuntimeError(f"Task {self.task_type}/{self.entity_key} already running")
-        try:
-            yield self
-        except Exception as e:
-            self.set_failed(str(e))
-            raise

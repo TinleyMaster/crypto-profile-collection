@@ -2069,8 +2069,9 @@ _ai_v2_cache: dict[str, dict] = {}
 AI_V2_CACHE_TTL = 3600  # 1 小时
 
 
-def _get_v2_cache_key(asset_id: int, signal_types: list[str]) -> str:
-    return f"v2:{asset_id}:{','.join(sorted(signal_types))}"
+def _get_v2_cache_key(asset_id: int, signal_types: list[str], symbol: str = "") -> str:
+    # symbol 参与缓存 key：防止 asset_id=0 等解析失败场景下不同标的串号
+    return f"v2:{asset_id}:{str(symbol).upper()}:{','.join(sorted(signal_types))}"
 
 
 def load_ai_signal_rules(config_path: str | None = None) -> dict:
@@ -2182,7 +2183,13 @@ def analyze_asset_v2(
         }
     """
     signal_types = sorted(set(s.get("signal_type", "") for s in asset_signals if s.get("signal_type")))
-    cache_key = _get_v2_cache_key(asset_id, signal_types)
+    # symbol 参与缓存 key，防止不同标的在 asset_id 异常时缓存串号
+    _sym = ""
+    for s in asset_signals:
+        _sym = s.get("target") or s.get("symbol") or s.get("event_token") or _sym
+        if _sym:
+            break
+    cache_key = _get_v2_cache_key(asset_id, signal_types, _sym)
 
     # 缓存命中
     if not force_refresh and cache_key in _ai_v2_cache:
@@ -3093,6 +3100,12 @@ def ai_enrich_signals_v2(
     for sig in to_analyze:
         asset_id = sig.get("asset_id", 0)
         all_signals = sig.get("all_signals") or [sig]
+        # asset_id 无效时不送 AI：避免 v2:0:... 缓存串号、避免画像全缺导致 AI 误判
+        if not asset_id:
+            sig["_ai_skipped_no_asset"] = True
+            sig["_ai_filter_reason"] = "asset_id 解析失败，跳过全量画像"
+            skipped.append(sig)
+            continue
         ai_result = analyze_asset_v2(asset_id, all_signals)
         sig = {**sig, "ai_analysis_v2": ai_result}
 

@@ -322,16 +322,20 @@ def render_brief_html(brief: dict) -> str:
             base_score = h.get("conviction_score") or 0
             ai = h.get("ai_analysis_v2") or {}
             overall_score = ai.get("overall_score") or base_score
-            direction = ai.get("direction") or h.get("direction") or "long"
             confidence = ai.get("confidence") or "MED"
             reason = ai.get("reason_summary") or h.get("trigger_logic") or ""
             key_drivers = ai.get("key_drivers") or []
             score_card = ai.get("score_card") or {}
 
-            # 方向
-            dir_icon = "▲" if direction == "long" else "▼"
-            dir_color = "#dc2626" if direction == "long" else "#16a34a"
-            dir_cn = "看多" if direction == "long" else "看空"
+            # 方向：以基础信号方向为准（本板块=看多机会）。
+            # AI 判定与基础方向相反时不反向展示，而是标注"AI 存疑"，
+            # 避免同一标的在高亮/机会两个板块出现相反方向的矛盾。
+            direction = h.get("direction") or "long"
+            ai_direction = ai.get("direction") or ""
+            ai_doubt = bool(ai_direction and ai_direction not in ("long", "neutral"))
+            dir_icon = "▲" if direction == "long" else "◆" if direction in ("watch", "neutral") else "▼"
+            dir_color = "#dc2626" if direction == "long" else "#94a3b8" if direction in ("watch", "neutral") else "#16a34a"
+            dir_cn = "看多" if direction == "long" else "观望" if direction in ("watch", "neutral") else "看空"
 
             # 置信度颜色
             conf_color = {"HIGH": "#dc2626", "MED": "#f59e0b", "LOW": "#94a3b8"}.get(confidence, "#f59e0b")
@@ -358,6 +362,11 @@ def render_brief_html(brief: dict) -> str:
                 driver_items = " · ".join(str(d)[:30] for d in key_drivers[:2])
                 drivers_html = f'<div style="font-size:10px;color:#0369a1;margin-top:4px">💡 {driver_items}</div>'
 
+            # AI 存疑标注（AI 判反或降级时）
+            doubt_html = ""
+            if ai_doubt or h.get("_ai_downgraded"):
+                doubt_html = '<span style="font-size:9px;background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">AI存疑</span>'
+
             html_parts.append(f"""
             <div style="padding:10px 12px;margin:6px 0;border-radius:8px;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecaca;border-left:3px solid #dc2626">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
@@ -365,6 +374,7 @@ def render_brief_html(brief: dict) -> str:
                   <span style="font-size:15px;font-weight:800;color:#0f172a">{target}</span>
                   <span style="font-size:11px;color:{dir_color};font-weight:700">{dir_icon} {dir_cn}</span>
                   <span style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">{confidence}</span>
+                  {doubt_html}
                 </div>
                 <div style="text-align:right;flex-shrink:0">
                   <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
@@ -384,7 +394,8 @@ def render_brief_html(brief: dict) -> str:
         # 高危信号（如果有，加一个小警示条）
         ai_risks = [r for r in risk_signals if r.get("ai_analysis_v2") and not r["ai_analysis_v2"].get("error")]
         if ai_risks:
-            risk_preview = "、".join(r.get("target", "?") for r in ai_risks[:3])
+            # 展示全部高危信号名称（不只前 3 个），避免数量与名称不符
+            risk_preview = "、".join(r.get("target", "?") for r in ai_risks)
             risk_count = len(ai_risks)
             html_parts.append(f"""
             <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
@@ -410,7 +421,8 @@ def render_brief_html(brief: dict) -> str:
 
     m2 = brief.get("M2_flow") or {}
     total_mcap = m2.get("total_market_cap") or m0.get("total_market_cap")
-    total_mcap_chg = diff.get("total_market_cap_pct") if diff else None
+    # diff_overview 返回键为 total_mcap_pct（非 total_market_cap_pct）
+    total_mcap_chg = diff.get("total_mcap_pct") if diff else None
     mcap_chg_str, mcap_chg_color = _fmt_pct(total_mcap_chg)
 
     total_vol = sector_flow.get("total_volume_24h")
@@ -475,56 +487,54 @@ def render_brief_html(brief: dict) -> str:
     """)
 
     # ════════════════════════════════════════════════════════
-    # 模块 2：🏭 赛道轮动（叙事榜 + 领涨币）
+    # 模块 2：🏭 赛道轮动（功能分类 12 赛道 + 领涨币）
+    # 数据源：M2_sector_flow（与 AI 定调一致，避免摘要/榜单数据矛盾）
     # ════════════════════════════════════════════════════════
-    narratives = brief.get("narrative_flow", {}).get("ranked") or []
+    narratives = (brief.get("M2_sector_flow") or {}).get("sectors") or []
+    sector_date = (brief.get("M2_sector_flow") or {}).get("metric_date") or ""
 
     html_parts.append(f"""
       <!-- 模块2：赛道轮动 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
         <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px;display:flex;align-items:center">
           <span style="margin-right:6px">🏭</span>赛道轮动
-          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">7日市值变化 · 综合评分</span>
+          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">7日市值变化 · 功能分类{sector_date}</span>
         </div>
     """)
 
     if narratives:
         max_score = max((float(n.get("composite_score") or 0)) for n in narratives) or 1
-        for idx, n in enumerate(narratives[:8]):
-            name = n.get("narrative", "?")
+        for idx, n in enumerate(narratives):
+            name = n.get("sector_label") or n.get("sector_key", "?")
             score = float(n.get("composite_score") or 0)
             mcap7d = n.get("mcap_change_7d_pct")
-            tvl7d = n.get("tvl_change_7d_pct")
-            trend = n.get("trend_label", "")
-            top_coins = n.get("top_coins") or []
+            leaders = n.get("leaders") or []
 
             chg_str, chg_color = _fmt_pct(mcap7d)
-            tvl_str, tvl_color = _fmt_pct(tvl7d) if tvl7d is not None else ("—", "#94a3b8")
-            # 无 TVL 数据时隐藏 TVL 标签，避免误导
-            tvl_html = ""
-            if tvl7d is not None:
-                tvl_html = f'<span style="font-size:10px;color:{tvl_color}">TVL {tvl_str}</span>'
             bar_pct = max(3, min(100, (score / max_score) * 100))
 
-            # 趋势标签
+            # 趋势标签（按 7d 涨幅简化为加速/走强/横盘/回调）
             trend_badge = ""
-            if trend == "加速上涨":
-                trend_badge = '<span style="background:#dcfce7;color:#166534;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">加速↑</span>'
-            elif trend == "反弹":
-                trend_badge = '<span style="background:#dbeafe;color:#1e40af;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">反弹</span>'
-            elif trend == "横盘":
-                trend_badge = '<span style="background:#f1f5f9;color:#64748b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">横盘</span>'
-            elif trend == "回调":
-                trend_badge = '<span style="background:#fee2e2;color:#991b1b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">回调↓</span>'
+            if mcap7d is not None:
+                f7 = float(mcap7d)
+                if f7 >= 3:
+                    trend_badge = '<span style="background:#dcfce7;color:#166534;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">加速↑</span>'
+                elif f7 > 0:
+                    trend_badge = '<span style="background:#dbeafe;color:#1e40af;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">走强</span>'
+                elif f7 < -3:
+                    trend_badge = '<span style="background:#fee2e2;color:#991b1b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">回调↓</span>'
+                else:
+                    trend_badge = '<span style="background:#f1f5f9;color:#64748b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">横盘</span>'
 
-            # 领涨币
+            # 领涨币（赛道内 7d 涨幅前列；赛道整体下跌时标注"相对强势"避免歧义）
             coins_html = ""
-            if top_coins:
+            if leaders:
                 coin_parts = []
-                for c in top_coins[:3]:
+                for c in leaders[:3]:
                     sym = c if isinstance(c, str) else c.get("symbol", "?")
                     coin_parts.append(f'<span style="font-size:10px;color:#64748b">{sym}</span>')
-                coins_html = f'<div style="font-size:10px;color:#94a3b8;margin-top:3px">领涨：{" · ".join(coin_parts)}</div>'
+                leader_label = "相对强势" if (mcap7d is not None and float(mcap7d) < 0) else "领涨币"
+                coins_html = f'<div style="font-size:10px;color:#94a3b8;margin-top:3px">{leader_label}：{" · ".join(coin_parts)}</div>'
 
             html_parts.append(f"""
               <div style="padding:7px 8px;margin-bottom:4px;border-radius:6px;background:#fafafa">
@@ -535,7 +545,6 @@ def render_brief_html(brief: dict) -> str:
                     {trend_badge}
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;margin-left:6px;flex-shrink:0">
-                    {tvl_html}
                     <span style="font-size:12px;color:{chg_color};font-weight:700">{chg_str}</span>
                   </div>
                 </div>
@@ -588,6 +597,8 @@ def render_brief_html(brief: dict) -> str:
                 return f"{sign}${v/1e9:.2f}B", color
             elif abs(v) >= 1e6:
                 return f"{sign}${v/1e6:.0f}M", color
+            elif abs(v) >= 1e3:
+                return f"{sign}${v/1e3:.0f}K", color
             else:
                 return f"{sign}${v:.0f}", color
 
@@ -598,7 +609,7 @@ def render_brief_html(brief: dict) -> str:
         html_parts.append(f"""
           <!-- ETF 子模块 -->
           <div style="background:linear-gradient(135deg,#f0f9ff,#e0f2fe);border-radius:8px;padding:10px 12px;margin-bottom:8px">
-            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（7日累计）</div>
+            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（7日累计 · 数据截至 {etf_flow.get('latest_date') or '—'}）</div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
               <div style="text-align:center">
                 <div style="font-size:10px;color:#64748b">BTC ETF</div>
@@ -649,15 +660,17 @@ def render_brief_html(brief: dict) -> str:
                 chg_str, chg_color = _fmt_pct(chg)
                 stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">{sym} <span style="color:{chg_color};font-weight:600">{chg_str}</span></span>'
         else:
-            # 兜底：显示1日和7日变化率
+            # 兜底：显示1日/7日/总供应，分行展示避免拥挤
+            rows = []
             if change_1d_pct is not None:
                 c1_str, c1_color = _fmt_pct(change_1d_pct)
-                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">1日 <span style="color:{c1_color};font-weight:600">{c1_str}</span></span>'
+                rows.append(f'<div style="font-size:10.5px;color:#334155;margin:2px 0">1日变化：<span style="color:{c1_color};font-weight:600">{c1_str}</span></div>')
             if change_7d_pct is not None:
                 c7_str, c7_color = _fmt_pct(change_7d_pct)
-                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">7日 <span style="color:{c7_color};font-weight:600">{c7_str}</span></span>'
+                rows.append(f'<div style="font-size:10.5px;color:#334155;margin:2px 0">7日变化：<span style="color:{c7_color};font-weight:600">{c7_str}</span></div>')
             if total_usd is not None:
-                stable_html += f'<span style="font-size:10.5px;background:#fff;padding:2px 8px;border-radius:4px;color:#334155;margin-right:4px">总供应 <span style="color:#166534;font-weight:600">${total_usd/1e9:.0f}B</span></span>'
+                rows.append(f'<div style="font-size:10.5px;color:#334155;margin:2px 0">总供应：<span style="color:#166534;font-weight:600">${total_usd/1e9:.0f}B</span></div>')
+            stable_html = "".join(rows)
 
         html_parts.append(f"""
           <!-- 稳定币子模块 -->
@@ -796,11 +809,11 @@ def render_brief_html(brief: dict) -> str:
         for item in whales_buying[:5]:
             sym = item.get("symbol", "?")
             chg = item.get("whale_balance_change_7d_pct") or item.get("whale_change_pct")
-            chg_str, _ = _fmt_pct(chg)
+            chg_str, chg_color = _fmt_pct(chg)
             html_parts.append(f"""
               <div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10.5px">
                 <span style="color:#334155">{sym}</span>
-                <span style="color:#dc2626;font-weight:600">+{chg_str}</span>
+                <span style="color:#dc2626;font-weight:600">{chg_str}</span>
               </div>
             """)
 
@@ -1223,7 +1236,7 @@ def main():
 
         m0 = brief.get("M0_tldr", {})
         subject = f"📊 加密大盘早报 {m0.get('date', date.today().isoformat())}"
-        ok, msg = notifier.send(subject=subject, body_html=html)
+        ok, msg = notifier.send(subject=subject, body_html=html, from_name="加密大盘早报")
         if ok:
             print(f"[OK] 早报邮件已发送: {msg}")
         else:

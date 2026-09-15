@@ -110,11 +110,11 @@ def run():
         "SELECT SUBSTRING(entry_url FROM 'https?://([^/]+)') AS domain, COUNT(*) AS cnt "
         "FROM biz.doc_source_entry "
         "WHERE discovered_from LIKE 'deep_crawl:%%' AND deep_crawled_at >= CURRENT_DATE "
-        "AND entry_url NOT LIKE '%paperdigest.org%' "
-        "AND entry_url NOT LIKE '%arxiv.org%' "
-        "AND entry_url NOT LIKE '%papers.nips.cc%' "
-        "AND entry_url NOT LIKE '%link.springer.com%' "
-        "AND entry_url NOT LIKE '%researchgate.net%' "
+        "AND entry_url NOT LIKE '%%paperdigest.org%%' "
+        "AND entry_url NOT LIKE '%%arxiv.org%%' "
+        "AND entry_url NOT LIKE '%%papers.nips.cc%%' "
+        "AND entry_url NOT LIKE '%%link.springer.com%%' "
+        "AND entry_url NOT LIKE '%%researchgate.net%%' "
         "GROUP BY domain ORDER BY cnt DESC LIMIT 15"
     )
     for domain, cnt in cur.fetchall():

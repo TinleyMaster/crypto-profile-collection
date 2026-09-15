@@ -17,6 +17,9 @@
 
 BEGIN;
 
+-- 兼容重复执行：如果之前跑过旧版脚本，先删临时表
+DROP TABLE IF EXISTS wrong_assets;
+
 -- ---- Step 1: 识别所有"同 symbol 中非 CMC 排名最小"的错连资产
 -- （rank 越小越主流，这些是 linker 旧逻辑可能错选的资产）
 CREATE TEMP TABLE wrong_assets AS

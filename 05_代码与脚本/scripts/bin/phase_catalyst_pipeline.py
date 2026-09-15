@@ -350,7 +350,10 @@ def run_signal(conn, builder: CatalystSignalBuilder,
                regime: str,
                catalyst_id: int | None = None,
                limit: int | None = None) -> tuple[int, int, list[int]]:
-    """对有 grade + resonance 的资产构建信号。
+    """对有 grade + resonance 的资产构建/更新信号。
+
+    每次全量重算（快通道增量刷新），确保评分、tier、updated_at 随市场变化更新。
+    快提醒有 notification 去重表，不会重复推送。
 
     Returns:
         (处理数, 入信号表数, 新/更新信号 ID 列表)
@@ -364,10 +367,6 @@ def run_signal(conn, builder: CatalystSignalBuilder,
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind != 'noise'
           AND cr.resonance_state != 'pending'
-          AND NOT EXISTS (
-              SELECT 1 FROM biz.catalyst_signal cs
-              WHERE cs.catalyst_id = cr.catalyst_id AND cs.asset_id = cr.asset_id
-          )
     """
     params = []
     if catalyst_id is not None:

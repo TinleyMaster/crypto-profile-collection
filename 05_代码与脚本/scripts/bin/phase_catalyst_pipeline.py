@@ -141,13 +141,25 @@ def load_config() -> dict:
     )
 
 
+class _LockRetryExhausted(Exception):
+    """锁冲突重试耗尽（区别于 upsert 正常返回 None）。"""
+
+
+def _rollback_quietly(conn) -> None:
+    """psycopg 中语句失败后事务进入 aborted 状态，后续命令全部被拒
+    （InFailedSqlTransaction），必须 rollback 才能继续。"""
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+
 def _exec_with_retry(conn, sql, params, *, max_retries: int = 3,
                      base_delay: float = 1.0, label: str = "write"):
     """执行一条 SQL，遇到 LockNotAvailable 退避重试。
 
-    场景：整个 pipeline 在一个长事务里，和并发 catalyst 任务或
-    僵尸连接持锁冲突，lock_timeout=30s 后直接抛 LockNotAvailable。
-    这里重试几次等锁释放，避免单条锁冲突导致整个 pipeline 崩溃。
+    psycopg 中 LockNotAvailable 会把当前事务标记为 aborted，
+    重试前必须 rollback，否则下一次命令直接抛 InFailedSqlTransaction。
 
     Returns:
         如果是 RETURNING/SELECT 语句返回 fetched row；否则返回 True 表示执行成功；
@@ -161,20 +173,25 @@ def _exec_with_retry(conn, sql, params, *, max_retries: int = 3,
             except psycopg.ProgrammingError:
                 return True  # UPDATE / INSERT without RETURNING: 执行成功但无行
         except psycopg.errors.LockNotAvailable:
-            delay = base_delay * (2 ** (attempt - 1))  # 指数退避：1s, 2s, 4s, 8s, 16s
+            delay = base_delay * (2 ** (attempt - 1))  # 指数退避：1s, 2s, 4s
             print(f"  [{label}] 锁冲突（第 {attempt}/{max_retries} 次），{delay:.0f}s 后重试...")
+            _rollback_quietly(conn)  # 恢复 aborted 事务，否则重试必报 InFailedSqlTransaction
             time.sleep(delay)
     print(f"  [{label}] 锁冲突重试 {max_retries} 次仍失败，跳过这条")
     return None
 
 
-def _call_with_retry(fn, *, max_retries: int = 3, base_delay: float = 1.0,
+def _call_with_retry(conn, fn, *, max_retries: int = 3, base_delay: float = 1.0,
                      label: str = "write"):
     """调用任意函数，遇到 LockNotAvailable 退避重试。
 
-    用于包裹 upsert_to_db 等封装好的方法调用。
+    注意：upsert_to_db 等函数成功时可能返回 None，因此不能靠返回值
+    判断是否成功；重试耗尽时抛 _LockRetryExhausted 由调用方捕获。
+
     Returns:
-        fn() 的返回值；重试耗尽返回 None
+        fn() 的返回值（成功时，可能是 None）
+    Raises:
+        _LockRetryExhausted: 锁冲突重试耗尽
     """
     for attempt in range(1, max_retries + 1):
         try:
@@ -182,9 +199,10 @@ def _call_with_retry(fn, *, max_retries: int = 3, base_delay: float = 1.0,
         except psycopg.errors.LockNotAvailable:
             delay = base_delay * (2 ** (attempt - 1))
             print(f"  [{label}] 锁冲突（第 {attempt}/{max_retries} 次），{delay:.0f}s 后重试...")
+            _rollback_quietly(conn)  # 恢复 aborted 事务
             time.sleep(delay)
     print(f"  [{label}] 锁冲突重试 {max_retries} 次仍失败，跳过这条")
-    return None
+    raise _LockRetryExhausted(label)
 
 
 # =====================================================================
@@ -272,10 +290,15 @@ def run_regime(conn, regime_calc: MarketRegime) -> str:
 
     # P0 简化：total_mcap_7d 暂时用 0（后续可以补全市场总市值）
     result = regime_calc.determine(btc_7d=btc_7d, total_mcap_7d=0.0)
-    _call_with_retry(
-        lambda: regime_calc.upsert_to_db(conn, result),
-        label="G0_regime",
-    )
+    try:
+        _call_with_retry(
+            conn,
+            lambda: regime_calc.upsert_to_db(conn, result),
+            label="G0_regime",
+        )
+        conn.commit()
+    except _LockRetryExhausted:
+        print("  [G0_regime] 锁冲突重试耗尽，跳过市场环境落库")
     return result.regime
 
 
@@ -320,11 +343,13 @@ def run_grade(conn, grader: CatalystGrader,
     for row in rows:
         linked = [{"asset_id": aid} for aid in (row["linked_asset_ids"] or [])]
         result = grader.grade(dict(row), linked_assets=linked if linked else None)
-        ok = _call_with_retry(
-            lambda: grader.upsert_to_db(conn, result),
-            label=f"G1_grade(cid={result.catalyst_id})",
-        )
-        if ok is None:
+        try:
+            _call_with_retry(
+                conn,
+                lambda: grader.upsert_to_db(conn, result),
+                label=f"G1_grade(cid={result.catalyst_id})",
+            )
+        except _LockRetryExhausted:
             skipped += 1
             trace_step("G1_grade", catalyst_id=result.catalyst_id,
                        title=(row.get("title") or "") if hasattr(row, "get") else None,
@@ -445,11 +470,13 @@ def run_resonance(conn, scorer: ResonanceScorer,
             btc_7d = btc_snap.get("percent_change_7d", 0) or 0
             result.excess_ret_72h = round(asset_snap["percent_change_7d"] - btc_7d, 4)
 
-        ok = _call_with_retry(
-            lambda: scorer.upsert_to_db(conn, result),
-            label=f"G2_resonance(cid={catalyst_id_val},aid={asset_id})",
-        )
-        if ok is None:
+        try:
+            _call_with_retry(
+                conn,
+                lambda: scorer.upsert_to_db(conn, result),
+                label=f"G2_resonance(cid={catalyst_id_val},aid={asset_id})",
+            )
+        except _LockRetryExhausted:
             trace_step("G2_resonance", catalyst_id=catalyst_id_val, asset_id=asset_id,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
@@ -541,14 +568,17 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             regime=regime,
         )
         processed += 1
-        sig_id = _call_with_retry(
-            lambda: builder.upsert_to_db(conn, signal),
-            label=f"G6_signal(cid={signal.catalyst_id})",
-        )
-        if sig_id is None:
+        try:
+            sig_id = _call_with_retry(
+                conn,
+                lambda: builder.upsert_to_db(conn, signal),
+                label=f"G6_signal(cid={signal.catalyst_id})",
+            )
+        except _LockRetryExhausted:
             trace_step("G6_signal", catalyst_id=signal.catalyst_id,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
+        # sig_id 为 None 是正常情况（tier 太低不写入），不是锁冲突
         if sig_id:
             inserted += 1
             new_signal_ids.append(sig_id)

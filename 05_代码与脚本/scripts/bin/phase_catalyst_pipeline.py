@@ -150,12 +150,16 @@ def _exec_with_retry(conn, sql, params, *, max_retries: int = 5,
     这里重试几次等锁释放，避免单条锁冲突导致整个 pipeline 崩溃。
 
     Returns:
-        cursor.fetchone() 的结果（如果有），否则 None
+        如果是 RETURNING/SELECT 语句返回 fetched row；否则返回 True 表示执行成功；
+        重试耗尽返回 None 表示跳过
     """
     for attempt in range(1, max_retries + 1):
         try:
             cur = conn.execute(sql, params)
-            return cur.fetchone()
+            try:
+                return cur.fetchone()  # SELECT / RETURNING
+            except psycopg.ProgrammingError:
+                return True  # UPDATE / INSERT without RETURNING: 执行成功但无行
         except psycopg.errors.LockNotAvailable:
             delay = base_delay * (2 ** (attempt - 1))  # 指数退避：1s, 2s, 4s, 8s, 16s
             print(f"  [{label}] 锁冲突（第 {attempt}/{max_retries} 次），{delay:.0f}s 后重试...")

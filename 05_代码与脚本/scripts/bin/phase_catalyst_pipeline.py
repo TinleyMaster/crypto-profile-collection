@@ -63,7 +63,7 @@ def _setup_paths() -> tuple[Path, Path]:
 
     # 候选的 src_dir（含 scripts/src 的父目录）
     src_candidates = [
-        project_root,                  # 本地 + 容器，scripts 都在 project 根
+        project_root,                  # 本地+ 容器，scripts 都在 project 根
         Path("/app"),                  # 兜底
     ]
     # scripts/src 的标记文件：找一个确定存在的
@@ -445,7 +445,7 @@ def run_slow_second_order(conn, config: dict,
         FROM biz.catalyst_grade cg
         JOIN biz.asset_catalyst ac ON cg.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind IN ('structural', 'event')
-          AND cg.base_strength >= 30
+          AND cg.base_strength >= 50
           AND cg.created_at >= NOW() - INTERVAL '%s hours'
           AND NOT EXISTS (
             SELECT 1 FROM biz.catalyst_second_order cso
@@ -614,6 +614,11 @@ def run_slow_second_order(conn, config: dict,
         )
         if not sig.tier:
             continue
+
+        # 二阶传导信号 tier 上限设为 C —— 弱传导不占 A/B 邮件位
+        # 二阶受益属间接关联，置信度天然低于直连资产，不应进入高级别推送
+        if sig.tier in ("A", "B"):
+            sig.tier = "C"
 
         signals.append({
             "catalyst_id": cat_id,

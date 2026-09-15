@@ -58,9 +58,8 @@ class SecondOrderMapper:
         """判断是否值得做二阶受益展开。"""
         if kind not in self.kind_allow_order2:
             return False
-        # structural 无条件展开；event 需要 strength >= 50
-        if kind == "structural":
-            return True
+        # structural 和 event 都需要 base_strength >= 50 才展开二阶
+        # 弱强度催化剂不做行业传导，避免二阶膨胀与弱关联噪音
         return base_strength >= 50
 
     def build_order2_from_sector(self,

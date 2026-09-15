@@ -113,8 +113,9 @@ def map_pairs_to_asset_ids(
 
         # 查库：优先 source_hint 来源的 source_asset_key
         # （同 key 多条时按 CMC 排名升序选最靠前的，防止脏映射）
-        # 注意：第一路也必须排除 tokenized/合成/衍生品/仿盘，
-        #       否则 AAPLB (Apple Tokenized bStocks) 这类股票代币会混进加密货币信号
+        # 注意：第一路是精确 key 匹配，不过滤资产类型，
+        #       因为 tokenized stocks / 商品衍生品也是合法资产（走美股·商品通道）
+        #       资产分类由 asset_filter.py 在发送层处理
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
@@ -123,8 +124,6 @@ def map_pairs_to_asset_ids(
                 JOIN core.asset_source_map m ON a.asset_id = m.asset_id
                 WHERE m.source_code = %s
                   AND UPPER(m.source_asset_key) = %s
-                  AND LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
-                  AND LOWER(COALESCE(a.canonical_name, '')) !~ '\bai\b|second[[:space:]]+chance|tiger[[:space:]]+inu|\binu\b|base[[:space:]]+coin|gold[[:space:]]+ai|bridged|wrapped|intents|trophy|tomato|meme|doge|shib|pepe|floki|babydoge'
                 ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
                 LIMIT 1
                 """,

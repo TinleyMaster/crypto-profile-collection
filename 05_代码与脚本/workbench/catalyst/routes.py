@@ -94,9 +94,9 @@ def get_health():
 
             # 2. G1 分级分布
             grade_rows = conn.execute("""
-                SELECT kind, COUNT(*) AS cnt
+                SELECT catalyst_kind AS kind, COUNT(*) AS cnt
                 FROM biz.catalyst_grade
-                GROUP BY kind
+                GROUP BY catalyst_kind
                 ORDER BY cnt DESC
             """).fetchall()
             grade_distribution = {r["kind"]: r["cnt"] for r in grade_rows}

@@ -316,35 +316,39 @@ def send_slow_digest(conn, stats: dict) -> dict:
         "reason": "; ".join(
             [r for r in (crypto_result.get("reason"), stock_result.get("reason")) if r]
         ) or None,
+        "new_signals_24h": int(crypto_result.get("new_signals_24h", 0))
+                           + int(stock_result.get("new_signals_24h", 0)),
         "crypto": crypto_result,
         "stock": stock_result,
     }
 
 
 def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
-    """发送某个资产类别的慢通道汇总邮件（加密货币 / 美股·商品）。
+    """发送某个资产类别的 A 级 Alert 邮件（加密货币 / 美股·商品）。
 
-    各自独立去重（select sentinel + ntype），互不影响。
+    定位（OPT-CATALYST-ALERT-001 P0-1）：从「24h B/C 汇总」转型为「高置信度 A 级 Alert」。
+    - 仅 tier='A' 且共振 confirmed + 有完整交易档位（entry/stop/tp）的信号入选，按分取前 2
+    - 无 A 级信号 → 静默跳过，不发邮件（女王拍板：无信号不打扰，不发空窗 note）
+    - 各自独立去重（sentinel + ntype），互不影响
     """
     is_crypto = asset_class == "crypto"
     label = "加密货币" if is_crypto else "美股·商品"
     ntype = NTYPE_SLOW_DIGEST if is_crypto else NTYPE_SLOW_DIGEST_STOCK
     sentinel = SENTINEL_SLOW_DIGEST_SIGNAL_ID if is_crypto else SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID
 
-    rows = _recent_new_ab_signals(conn, hours=24, asset_class=asset_class)
+    rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class)
     if not rows:
-        return {"sent": 0, "skipped": 1, "failed": 0, "reason": f"{label} 24h 内无 A/B 级新信号，跳过"}
+        # 无 A 级：静默跳过。不标记 sentinel，24h 内后续出现 A 级仍可正常发送。
+        return {"sent": 0, "skipped": 1, "failed": 0,
+                "reason": f"{label} 24h 内无 A 级新信号，静默跳过"}
 
-    # 每资产去重留最高分（一次查询完成），A/B 互斥分组 → 主题/正文/卡片三处数字统一
-    a_rows = [r for r in rows if r["tier"] == "A"]
-    b_rows = [r for r in rows if r["tier"] != "A"]
     new_count = len(rows)
-
-    subject = f"📊 催化剂日报·{label} · 24h新增 {new_count} 条 · A级 {len(a_rows)} · B级 {len(b_rows)}"
-    body = _build_slow_digest_html(a_rows, b_rows, new_count, stats, class_label=label)
+    subject = f"🎯 催化剂 Alert·{label}·A级 {new_count} 条"
+    body = _build_slow_digest_html(rows, stats, class_label=label)
 
     if _is_sent(conn, sentinel, ntype):
-        return {"sent": 0, "skipped": 1, "failed": 0, "reason": f"{label} 24h 内已发送过汇总，跳过"}
+        return {"sent": 0, "skipped": 1, "failed": 0,
+                "reason": f"{label} 24h 内已发送过 Alert，跳过"}
 
     ok, msg = _send_email(subject, body)
     _mark_sent(conn, sentinel, ntype, None, subject,
@@ -359,30 +363,41 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     }
 
 
-def _recent_new_ab_signals(conn, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
-    """过去 N 小时内 A/B 级新信号（按资产类别，按资产去重留最高分）。
+def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
+    """过去 N 小时内 A 级新信号（按资产类别，按资产去重留最高分，取前 2）。
 
-    一次查询完成 A/B 全量 + DISTINCT ON(asset_id) 留最高分，
-    避免「同一资产在 A 级和 B 级各出现一次」导致主题/卡片数字矛盾
-    （邮件审计 2026-09-15）。
+    入选条件（OPT-CATALYST-ALERT-001 P0-1/P0-2 邮件层语义闸门）：
+    - tier = 'A'（composite_score → tier 单点真源不变，DB tier 不改）
+    - resonance_state = 'confirmed'（价格真共振，否则视为 B 级观察）
+    - entry/stop/tp 齐全（可交易性）
+    composite_score DESC 取前 2 条（每日 1~2 idea）。
     """
     filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
     return conn.execute(f"""
-        SELECT DISTINCT ON (a.asset_id)
-               s.signal_id, s.tier, s.composite_score, s.kind,
-               s.technical_state, s.persistence,
-               s.investment_cycle, s.ai_reason,
-               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
-               a.canonical_name, a.canonical_symbol AS symbol,
-               ac.title AS catalyst_title
-        FROM biz.catalyst_signal s
-        JOIN core.asset a ON s.asset_id = a.asset_id
-        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-        WHERE s.status = 'open'
-          AND s.created_at > NOW() - INTERVAL '%s hours'
-          AND s.tier IN ('A', 'B')
-          AND {filter_sql}
-        ORDER BY a.asset_id, s.composite_score DESC
+        SELECT * FROM (
+            SELECT DISTINCT ON (a.asset_id)
+                   s.signal_id, s.tier, s.composite_score, s.kind,
+                   s.technical_state, s.persistence,
+                   s.investment_cycle, s.ai_reason,
+                   s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+                   s.resonance_state,
+                   a.canonical_name, a.canonical_symbol AS symbol,
+                   ac.title AS catalyst_title
+            FROM biz.catalyst_signal s
+            JOIN core.asset a ON s.asset_id = a.asset_id
+            JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+            WHERE s.status = 'open'
+              AND s.created_at > NOW() - INTERVAL '%s hours'
+              AND s.tier = 'A'
+              AND s.resonance_state = 'confirmed'
+              AND s.entry_price IS NOT NULL
+              AND s.stop_loss IS NOT NULL
+              AND s.take_profit IS NOT NULL
+              AND {filter_sql}
+            ORDER BY a.asset_id, s.composite_score DESC
+        ) t
+        ORDER BY t.composite_score DESC
+        LIMIT 2
     """, (hours,)).fetchall()
 
 
@@ -498,14 +513,12 @@ def _fmt_price(v) -> str:
         return "—"
 
 
-def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict,
+def _build_slow_digest_html(a_rows, stats: dict,
                             class_label: str = "加密货币") -> str:
-    """构建慢通道汇总邮件 HTML。
+    """构建 A 级 Alert 邮件 HTML（OPT-CATALYST-ALERT-001 P0-1）。
 
     Args:
-        a_rows: 24h 内 A 级去重新信号
-        b_rows: 24h 内 B 级去重新信号
-        new_count: 24h 内新增 A/B 信号总数（去重）
+        a_rows: 24h 内 A 级去重新信号（最多 2 条，共振 confirmed + 完整交易档位）
         stats: 慢通道统计（second_order_count / expired_count）
         class_label: 资产类别中文标签（加密货币 / 美股·商品）
     """
@@ -513,32 +526,29 @@ def _build_slow_digest_html(a_rows, b_rows, new_count: int, stats: dict,
     expired = stats.get("expired_count", 0)
 
     a_table = _build_signal_table(a_rows, "A")
-    b_table = _build_signal_table(b_rows, "B")
 
     return f"""
     <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
-      <div style="background:linear-gradient(135deg,#0f172a,#1e293b);color:#fff;padding:24px;border-radius:12px">
-        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · 慢通道汇总</div>
-        <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} 24h 新增 {new_count} 条信号</div>
-        <div style="margin-top:4px;font-size:13px;opacity:.8">A级 {len(a_rows)} · B级 {len(b_rows)} · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
+      <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:24px;border-radius:12px">
+        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · A 级 Alert</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} A级 新增 {len(a_rows)} 条可交易信号</div>
+        <div style="margin-top:4px;font-size:13px;opacity:.8">24h 窗口 · 共振 confirmed · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
       </div>
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <!-- A 级 -->
-        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增，含 AI 推荐 Reasons 与价位）</h3>
+        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增，价格真共振 + 完整交易档位）</h3>
         {a_table}
 
-        <!-- B 级 -->
-        <h3 style="font-size:15px;margin:20px 0 10px;color:#111827">🔵 B 级信号（过去 24h 新增，含 AI 推荐 Reasons 与价位）</h3>
-        {b_table}
-
         <div style="margin-top:20px;padding:12px;background:#f0f9ff;border-radius:8px;font-size:12px;color:#0369a1">
-          💡 AI 推荐原因与投资周期由慢通道 G7 生成；目标价位/止损价位为 AI 在规则值基础上的评审。慢通道每 4 小时运行一次。
+          💡 B/C 级热点已下沉至每日早报「📡 催化剂热点」观察区；本邮件仅保留高置信度 A 级 idea。
         </div>
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
-          由催化剂决策管道自动生成 · {class_label} 独立汇总
+          由催化剂决策管道自动生成 · 24h 去重 · {class_label} 独立发送
         </div>
       </div>
     </div>
     """
+
+
+

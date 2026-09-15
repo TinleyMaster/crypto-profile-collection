@@ -7280,6 +7280,43 @@ def _build_daily_diff_brief(today: dict, highlights: list,
     return result
 
 
+def _collect_catalyst_hotspots() -> list[dict]:
+    """市场热点（非可交易，供早报观察）。crypto 类 B/C 级信号。
+
+    OPT-CATALYST-ALERT-001 P0-3：A 级走邮件 Alert，B/C/divergent 下沉到早报观察区。
+    不含 entry/stop/tp（避免与邮件 Alert 混淆，强调「仅观察」）。
+    自带 DB 连接 + 异常兜底（与 fetch_upcoming_unlocks 同模式），失败返回空列表。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+        from catalyst.asset_filter import CRYPTO_FILTER_SQL
+        import psycopg.rows
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(f"""
+                    SELECT DISTINCT ON (s.asset_id)
+                           s.catalyst_id, s.tier, s.composite_score, s.kind,
+                           s.resonance_state, s.ai_reason, s.investment_cycle,
+                           a.canonical_name, a.canonical_symbol AS symbol,
+                           ac.title AS catalyst_title, ac.source_code
+                    FROM biz.catalyst_signal s
+                    JOIN core.asset a ON s.asset_id = a.asset_id
+                    JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+                    WHERE s.status = 'open'
+                      AND s.created_at > NOW() - INTERVAL '24 hours'
+                      AND s.tier IN ('B', 'C')
+                      AND {CRYPTO_FILTER_SQL}
+                    ORDER BY s.asset_id, s.composite_score DESC
+                """)
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[morning_brief] catalyst hotspots fetch failed: {e}")
+        return []
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
     早报结构化骨架 V2（重新设计版）。
@@ -7301,6 +7338,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
             ("holder_concentration", fetch_holder_concentration_summary, (10,)),
             ("exchange_flow", fetch_exchange_net_flow_summary, (7,)),
             ("upcoming_unlocks", fetch_upcoming_unlocks, (14,)),
+            ("catalyst_hotspots", _collect_catalyst_hotspots, ()),
         ]
         results: dict = {}
 
@@ -7328,6 +7366,10 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     holder_concentration = p["holder_concentration"]
     exchange_flow = p["exchange_flow"]
     upcoming_unlocks = p["upcoming_unlocks"]
+
+    catalyst_hotspots = p["catalyst_hotspots"]
+    if not isinstance(catalyst_hotspots, list):
+        catalyst_hotspots = []
 
     # 从 overview 取叙事榜 + 链净流入（首页同一套数据源）
     d5data = (today.get("dimensions") or {}).get("5板块") or {}
@@ -7394,6 +7436,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "M5_daily_diff": daily_diff_brief,
         "M6_catalyst": today.get("event_calendar") or {},
         "M6_upcoming_unlocks": upcoming_unlocks,
+        "CATALYST_HOTSPOTS": catalyst_hotspots,
         "M7_divergence": [
             d for d in divs
             if d.get("label") in ("DANGEROUS", "DIVERGENT")

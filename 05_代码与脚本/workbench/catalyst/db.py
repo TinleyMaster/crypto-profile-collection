@@ -239,6 +239,8 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
     def _query(c):
         # 优先：asset_source_map binance 来源的 source_asset_key
         # （同 key 多条时按 CMC 排名升序选最靠前的，防止脏映射）
+        # 注意：第一路也必须排除 tokenized/合成/衍生品/仿盘，
+        #       否则 AAPLB (Apple Tokenized bStocks) 这类股票代币会混进加密货币信号
         row = c.execute(
             """
             SELECT a.asset_id
@@ -246,6 +248,8 @@ def map_pairs_to_asset_id(pairs: list[str], conn=None) -> int | None:
             JOIN core.asset_source_map m ON a.asset_id = m.asset_id
             WHERE m.source_code = 'binance'
               AND UPPER(m.source_asset_key) = %s
+              AND LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
+              AND LOWER(COALESCE(a.canonical_name, '')) !~ '\bai\b|second[[:space:]]+chance|tiger[[:space:]]+inu|\binu\b|base[[:space:]]+coin|gold[[:space:]]+ai|bridged|wrapped|intents|trophy|tomato|meme|doge|shib|pepe|floki|babydoge'
             ORDER BY a.market_cap_rank ASC NULLS LAST, a.asset_id
             LIMIT 1
             """,

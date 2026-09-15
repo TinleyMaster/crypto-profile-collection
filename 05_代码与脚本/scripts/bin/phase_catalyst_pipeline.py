@@ -1264,6 +1264,7 @@ def main() -> int:
     parser.add_argument("--catalyst-id", type=int, help="单条 catalyst 重算")
     parser.add_argument("--limit", type=int, help="限制处理数量（用于调试）")
     parser.add_argument("--health", action="store_true", help="输出健康状态")
+    parser.add_argument("--no-alert", action="store_true", help="跳过所有邮件/推送通知（全量重跑时用）")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细输出")
     args = parser.parse_args()
 
@@ -1324,12 +1325,14 @@ def main() -> int:
             print(f"  G6 信号: 处理 {n_processed} 条, 入库 {n_inserted} 条")
 
             # 快提醒：A 级信号即时推送
-            if new_sig_ids:
+            if new_sig_ids and not args.no_alert:
                 alert_result = send_fast_alerts_for_new_signals(conn, new_sig_ids)
                 if alert_result["sent"] > 0:
                     print(f"  ⚡ 快提醒: 发送 {alert_result['sent']} 条 A 级信号提醒")
                 if alert_result["failed"] > 0:
                     print(f"  ⚠️  快提醒失败: {alert_result['failed']} 条")
+            elif new_sig_ids and args.no_alert:
+                print(f"  ⚡ 快提醒: 跳过（--no-alert），共 {len(new_sig_ids)} 条新信号")
 
             print()
             print("快通道完成 ✓")
@@ -1369,19 +1372,22 @@ def main() -> int:
                 print(f"   G7 AI 决策: 无可补全信号（ai_reason 已填充）")
 
             # 4. 慢通道汇总邮件
-            digest_stats = {
-                "second_order_count": n_so,
-                "g3g5_processed": n_g3g5,
-                "tier_distribution": tier_dist,
-                "expired_count": n_expired,
-            }
-            digest_result = send_slow_digest(conn, digest_stats)
-            if digest_result["sent"] > 0:
-                print(f"  📧 汇总邮件: 已发送（24h 新信号 {digest_result.get('new_signals_24h', 0)} 条）")
-            elif digest_result.get("skipped"):
-                print(f"  📧 汇总邮件: 跳过（{digest_result.get('reason', '无新信号')}）")
+            if args.no_alert:
+                print(f"  📧  汇总邮件: 跳过（--no-alert）")
             else:
-                print(f"  ⚠️  汇总邮件失败: {digest_result.get('reason', 'unknown')}")
+                digest_stats = {
+                    "second_order_count": n_so,
+                    "g3g5_processed": n_g3g5,
+                    "tier_distribution": tier_dist,
+                    "expired_count": n_expired,
+                }
+                digest_result = send_slow_digest(conn, digest_stats)
+                if digest_result["sent"] > 0:
+                    print(f"  📧  汇总邮件: 已发送（24h 新信号 {digest_result.get('new_signals_24h', 0)} 条）")
+                elif digest_result.get("skipped"):
+                    print(f"  📧  汇总邮件: 跳过（{digest_result.get('reason', '无新信号')}）")
+                else:
+                    print(f"  ⚠️  汇总邮件失败: {digest_result.get('reason', 'unknown')}")
 
             print()
             print("慢通道完成 ✓")

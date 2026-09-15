@@ -170,6 +170,7 @@ def render_brief_html(brief: dict) -> str:
     stab = brief.get("M2_stablecoin") or {}
     upcoming_unlocks = brief.get("M6_upcoming_unlocks") or {}
     kol_onchain = brief.get("kol_onchain") or {}
+    cat_hotspots = brief.get("CATALYST_HOTSPOTS") or []
 
     # 全部机会按评分排序
     all_opps = sorted(
@@ -1005,6 +1006,48 @@ def render_brief_html(brief: dict) -> str:
     html_parts.append("</div>")
 
     # ════════════════════════════════════════════════════════
+    # 模块 5.5：📡 催化剂热点（B/C 观察，非交易，来自催化剂管道）
+    # ════════════════════════════════════════════════════════
+    if cat_hotspots:
+        html_parts.append("""
+          <!-- 模块5.5：催化剂热点（观察） -->
+          <div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:10px;padding:12px 14px;margin-bottom:10px">
+            <div style="font-size:13px;font-weight:700;color:#475569;margin-bottom:2px">📡 催化剂热点（仅观察）</div>
+            <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">B/C 级信号 · 非交易建议 · 高置信度 A 级见邮件 Alert</div>
+        """)
+        _tier_cfg = {
+            "B": ("B", "#2563eb", "#dbeafe"),
+            "C": ("C", "#64748b", "#e2e8f0"),
+        }
+        for h in cat_hotspots[:6]:
+            sym = h.get("symbol") or "?"
+            name = h.get("canonical_name") or ""
+            title = h.get("catalyst_title") or "?"
+            tier = h.get("tier") or "?"
+            res = h.get("resonance_state") or ""
+            reason = (h.get("ai_reason") or "").strip()
+            if len(reason) > 90:
+                reason = reason[:89] + "…"
+            tlabel, tcolor, tbg = _tier_cfg.get(tier, (tier, "#64748b", "#e2e8f0"))
+            res_cn = {"confirmed": "共振", "weak": "弱共振", "divergent": "背离",
+                      "pending": "待确认"}.get(res, res or "—")
+            reason_html = (f'<div style="font-size:10.5px;color:#64748b;margin-top:2px">{reason}</div>'
+                           if reason else "")
+            html_parts.append(f"""
+              <div style="padding:6px 8px;margin-bottom:5px;border-radius:6px;background:#fff;border-left:3px solid {tcolor};font-size:11px">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span style="background:{tbg};color:{tcolor};font-size:9px;padding:0 4px;border-radius:2px;font-weight:700">{tlabel}</span>
+                  <span style="font-weight:700;color:#0f172a">{sym}</span>
+                  <span style="color:#94a3b8;font-size:10px">{name}</span>
+                  <span style="margin-left:auto;color:#64748b;font-size:10px">{res_cn}</span>
+                </div>
+                <div style="color:#334155;margin-top:3px">{title}</div>
+                {reason_html}
+              </div>
+            """)
+        html_parts.append("</div>")
+
+    # ════════════════════════════════════════════════════════
     # 模块 6：🎯 机会清单
     # ════════════════════════════════════════════════════════
     is_fallback = bool(all_opps and all_opps[0].get("is_fallback"))
@@ -1189,10 +1232,20 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="仅打印 HTML，不发送")
     args = parser.parse_args()
 
-    # 1. 生成 brief
+    # 1. 生成 brief：优先复用今日 08:30 快照落库的 overview。
+    #    不重复 force_refresh 拉取全量数据（发信前重拉易卡顿/被收割为 stuck），
+    #    且保证邮件与快照数据一致、均为已就绪的最新数据；快照缺失时兜底实时拉取。
     try:
-        from build_daily_brief import main as build_brief
-        brief = build_brief()
+        from datetime import timedelta as _td
+        from macro_market import generate_morning_brief, get_market_overview, load_snapshot
+
+        today = load_snapshot(date.today().isoformat())
+        if not today:
+            print("[INFO] 今日快照缺失，实时拉取 overview（兜底）")
+            today = get_market_overview(force_refresh="1")
+        y_date = (date.today() - _td(days=1)).isoformat()
+        yesterday = load_snapshot(y_date)
+        brief = generate_morning_brief(today, yesterday)
     except Exception as e:
         print(f"[ERROR] 生成 brief 失败: {e}")
         return 1

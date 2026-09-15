@@ -55,7 +55,45 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
             timeout=30,
             kwargs={"connect_timeout": 30},
         )
+        # 确保 sys  schema 和核心表存在（幂等）
+        _ensure_schema_and_tables()
     return _pool
+
+
+def _ensure_schema_and_tables() -> None:
+    """启动时确保 sys schema 及相关表存在，避免部署遗漏导致 ImportError/运行时崩溃。"""
+    try:
+        with _pool.connection() as conn:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS sys")
+            # async_task_state 表（轻量异步任务状态）
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sys.async_task_state (
+                    task_type       VARCHAR(50) NOT NULL,
+                    entity_key      VARCHAR(200) NOT NULL,
+                    status          VARCHAR(20) NOT NULL DEFAULT 'idle',
+                    payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    started_at      TIMESTAMPTZ,
+                    finished_at     TIMESTAMPTZ,
+                    error           TEXT,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (task_type, entity_key)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_async_task_state_status "
+                "ON sys.async_task_state(status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_async_task_state_task_type "
+                "ON sys.async_task_state(task_type)"
+            )
+            conn.commit()
+    except Exception:
+        # 建表失败不致命（可能是权限问题或已存在），运行时再报错
+        pass
 
 
 @contextmanager
@@ -283,7 +321,8 @@ def _save_state(state: dict) -> None:
 # chain: 链上重任务（易卡死/耗时数小时），限1槽防垄断
 # core:  核心业务（催化剂/早报/采集），保底可用
 # monitor: 监控类（低优先级，仅空闲时跑）
-CATEGORY_MAX = {"chain": 1, "core": 2, "monitor": 1}
+# 2026-09-15: core 从 2 → 4（配合全局 max_concurrent=4），让采集类任务可真正并行
+CATEGORY_MAX = {"chain": 1, "core": 4, "monitor": 1}
 
 
 # ── TaskManager ─────────────────────────────────────────────
@@ -686,3 +725,119 @@ class TaskManager:
                 cur_stats = task.get("stats") or {}
                 cur_stats.update(stats)
                 _update_task(task_id, stats=cur_stats)
+
+
+# ═══════════════════════════════════════════════════════════
+#  AsyncTaskState：轻量级异步任务状态持久化
+#  基于 sys.async_task_state 表，替代原 task_state/*.json 方案
+# ═══════════════════════════════════════════════════════════
+
+class AsyncTaskState:
+    """按 (task_type, entity_key) 唯一标识的异步任务状态管理器。
+
+    特性：
+    - 原子 try_start（行级锁 + INSERT ON CONFLICT），幂等去重
+    - payload 为 JSONB，存任意结果/进度数据
+    - 状态：idle / running / done / failed
+    """
+
+    def __init__(self, task_type: str, entity_key: str):
+        self.task_type = task_type
+        self.entity_key = str(entity_key)
+
+    # ── 读写 ────────────────────────────────────────────────
+
+    def get(self) -> dict:
+        """读取当前状态行，不存在则返回默认 idle。"""
+        with _get_db() as conn:
+            row = conn.execute(
+                "SELECT status, payload, started_at, finished_at, error "
+                "FROM sys.async_task_state "
+                "WHERE task_type = %s AND entity_key = %s",
+                (self.task_type, self.entity_key),
+            ).fetchone()
+        if row is None:
+            return {"status": "idle", "payload": {}, "started_at": None,
+                    "finished_at": None, "error": None}
+        return {
+            "status": row["status"],
+            "payload": row["payload"] if row["payload"] is not None else {},
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "error": row["error"],
+        }
+
+    def try_start(self, payload: dict | None = None) -> bool:
+        """原子尝试启动任务。
+
+        - idle 或不存在 → 设为 running，返回 True
+        - 已 running → 返回 False（避免重复启动）
+        - done/failed → 也允许重新启动（覆盖历史结果）
+        """
+        payload = payload or {}
+        with _get_db() as conn:
+            # 用 INSERT ... ON CONFLICT 保证原子性
+            result = conn.execute(
+                """
+                INSERT INTO sys.async_task_state (task_type, entity_key, status, payload, started_at)
+                VALUES (%s, %s, 'running', %s::jsonb, NOW())
+                ON CONFLICT (task_type, entity_key) DO UPDATE
+                  SET status = 'running',
+                      payload = EXCLUDED.payload,
+                      started_at = NOW(),
+                      finished_at = NULL,
+                      error = NULL,
+                      updated_at = NOW()
+                  WHERE sys.async_task_state.status NOT IN ('running')
+                RETURNING status
+                """,
+                (self.task_type, self.entity_key, json.dumps(payload)),
+            ).fetchone()
+        # 如果返回了行，说明成功置为 running；否则已经是 running
+        return result is not None
+
+    def set_done(self, payload: dict | None = None) -> None:
+        """标记任务完成。"""
+        payload = payload or {}
+        with _get_db() as conn:
+            conn.execute(
+                """
+                UPDATE sys.async_task_state
+                SET status = 'done',
+                    payload = %s::jsonb,
+                    finished_at = NOW(),
+                    updated_at = NOW()
+                WHERE task_type = %s AND entity_key = %s
+                """,
+                (json.dumps(payload), self.task_type, self.entity_key),
+            )
+
+    def set_failed(self, error: str, payload: dict | None = None) -> None:
+        """标记任务失败。"""
+        payload = payload or {}
+        with _get_db() as conn:
+            conn.execute(
+                """
+                UPDATE sys.async_task_state
+                SET status = 'failed',
+                    payload = %s::jsonb,
+                    error = %s,
+                    finished_at = NOW(),
+                    updated_at = NOW()
+                WHERE task_type = %s AND entity_key = %s
+                """,
+                (json.dumps(payload), error, self.task_type, self.entity_key),
+            )
+
+    def update_payload(self, **fields) -> None:
+        """增量更新 payload 字段（仅 running 状态下有效）。"""
+        with _get_db() as conn:
+            conn.execute(
+                """
+                UPDATE sys.async_task_state
+                SET payload = payload || %s::jsonb,
+                    updated_at = NOW()
+                WHERE task_type = %s AND entity_key = %s
+                """,
+                (json.dumps(fields), self.task_type, self.entity_key),
+            )

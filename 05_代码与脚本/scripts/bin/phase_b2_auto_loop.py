@@ -5,7 +5,8 @@ B2 自动循环脚本：持续运行 phase_b2_deep_doc_discovery 直到 docs 类
 import subprocess
 import sys
 import os
-import signal
+import threading
+import time
 from pathlib import Path
 
 # 行缓冲：确保 print 实时输出（stdout 是 pipe 时默认全缓冲）
@@ -29,48 +30,66 @@ for round_num in range(1, MAX_ROUNDS + 1):
     print(f"  Round {round_num} / max {MAX_ROUNDS}")
     print(f"{'=' * 60}")
 
-    # 运行 B2
+    # 运行 B2（Popen + 心跳：子进程卡住无输出时定期打印心跳，
+    # 避免 90 分钟无日志被 TaskManager 误判为 stuck 收割）
+    b2_cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
+        "--limit",
+        str(BATCH_LIMIT),
+        "--min-asset-id",
+        str(MIN_ASSET_ID),
+        "--workers",
+        "4",
+        "--timeout",
+        "8",
+    ]
     try:
         proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
-                "--limit",
-                str(BATCH_LIMIT),
-                "--min-asset-id",
-                str(MIN_ASSET_ID),
-                "--workers",
-                "4",
-                "--timeout",
-                "8",
-            ],
+            b2_cmd,
             cwd=str(SCRIPT_DIR),
             env=env,
-            start_new_session=True,  # 独立进程组，超时可连孙进程一起强杀
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-        try:
-            rc = proc.wait(timeout=900)  # 单轮最长 15 分钟
-        except subprocess.TimeoutExpired:
-            # 连进程组一起强杀，防止浏览器/爬虫 worker（孙进程）泄漏导致 watchdog 误判卡死
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                pass
-            print("B2 脚本本轮超时（15分钟），已强杀进程组，继续下一轮。")
-            continue
     except Exception as e:
-        print(f"B2 启动失败: {e}，继续下一轮。")
+        print(f"B2 启动失败: {e}")
+        break
+
+    def _pump() -> None:
+        for line in iter(proc.stdout.readline, ""):
+            line = line.rstrip("\n")
+            if line:
+                print(f"  [B2] {line}", flush=True)
+
+    threading.Thread(target=_pump, daemon=True).start()
+
+    # 轮询：每 60s 打心跳，超过 30 分钟无结束则 kill（原超时语义）
+    round_start = time.time()
+    last_beat = time.time()
+    rc = None
+    while time.time() - round_start < 1800:
+        if proc.poll() is not None:
+            rc = proc.returncode
+            break
+        if time.time() - last_beat >= 60:
+            print(f"  [B2] 运行中 {int(time.time() - round_start)}s ...（心跳）", flush=True)
+            last_beat = time.time()
+        time.sleep(5)
+
+    if rc is None:
+        proc.kill()
+        proc.wait()
+        print("B2 脚本本轮超时（30分钟），跳过继续下一轮。")
         continue
 
-    if rc != 0:
-        print(f"Script exited with code {rc}, stopping.")
+    result = proc
+    if result.returncode != 0:
+        print(f"Script exited with code {result.returncode}, stopping.")
         break
 
     print("B2 本轮完成，查询 pending 数量...")

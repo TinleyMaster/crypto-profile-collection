@@ -106,6 +106,8 @@ def main() -> int:
     # ═══ 分批拉取 + 解析 ═══
     all_rows: list[dict] = []
     batch_size = min(args.batch_size, 100)
+    batch_403 = 0
+    n_batches = (len(all_ids) + batch_size - 1) // batch_size
     for batch_start in range(0, len(all_ids), batch_size):
         batch = all_ids[batch_start: batch_start + batch_size]
         batch_ids = [cid for cid, _ in batch]
@@ -118,12 +120,25 @@ def main() -> int:
                 interval=args.interval,
             )
         except Exception as e:
+            if "403" in str(e):
+                batch_403 += 1
             print(f"[ohlcv] 批次 {batch_start} 失败: {e}", file=sys.stderr)
             continue
         parsed = parse_ohlcv_historical_payload(payload, time_period=args.interval)
         all_rows.extend(parsed)
-        print(f"[ohlcv] 批次 {batch_start + 1}/{len(all_ids) // batch_size + 1} 解析 {len(parsed)} 行", file=sys.stderr)
+        print(f"[ohlcv] 批次 {batch_start + 1}/{n_batches} 解析 {len(parsed)} 行", file=sys.stderr)
         time.sleep(0.3)
+
+    # 全部批次 403：当前 CMC 套餐无 OHLCV historical 权限（付费接口）。
+    # 按 SKIP 处理并 exit 0，避免每周产生 failed 噪音（调度注释"403 自动跳过"）。
+    if not all_rows and batch_403 >= n_batches:
+        print(
+            json.dumps(
+                {"status": "skip", "reason": "CMC API 403：当前套餐无 OHLCV historical 权限"},
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     if args.dry_run:
         print(
@@ -274,14 +289,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        _code = main()
-    except Exception as _e:
-        # CMC 付费套餐不足（403）属预期跳过：返回 0，不污染调度失败状态
-        _msg = str(_e)
-        if "403" in _msg or "Forbidden" in _msg or "paid" in _msg.lower() or "permission" in _msg.lower():
-            print(f"[ohlcv] CMC 付费套餐不足，自动跳过: {_e}", file=sys.stderr)
-            _code = 0
-        else:
-            raise
-    raise SystemExit(_code)
+    raise SystemExit(main())

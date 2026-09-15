@@ -41,11 +41,28 @@ def _load_sql(relative: str) -> str:
     return (sql_dir / relative).read_text(encoding="utf-8")
 
 
-def build_for_catalyst(cur, catalyst_id: int, event_type: str) -> int:
-    """为单条 catalyst 推导 impact 并 upsert，返回写入行数。"""
+def build_for_catalyst(cur, catalyst_id: int, event_type: str,
+                       ai_sentiment: str | None = None) -> int:
+    """为单条 catalyst 推导 impact 并 upsert，返回写入行数。
+
+    方向推导优先级：
+    1. ai_sentiment（AI 已分析过情绪，最准确）
+    2. RULE[event_type]（事件类型规则，作为兜底）
+    3. DEFAULT_RULE（neutral/weak/0）
+
+    强度与时间窗口继续沿用 event_type 规则（情绪只决定多空方向，
+    强度/周期由事件性质决定更合理）。
+    """
     import re as _re
 
-    direction, strength, horizon = RULE.get(event_type, DEFAULT_RULE)
+    # 方向：优先用 ai_sentiment
+    if ai_sentiment and ai_sentiment.lower() in ("bullish", "bearish", "neutral"):
+        direction = ai_sentiment.lower()
+    else:
+        direction = RULE.get(event_type, DEFAULT_RULE)[0]
+
+    # 强度 & 周期：沿用 event_type 规则
+    _, strength, horizon = RULE.get(event_type, DEFAULT_RULE)
 
     # 1) 优先：catalyst_asset_link（已建立的链接关系）
     cur.execute(
@@ -126,10 +143,9 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str) -> int:
 def backfill_all(cur) -> int:
     """回填所有已 AI 处理但未推导的 catalyst。"""
     cur.execute("""
-        SELECT ac.catalyst_id, ac.ai_event_type
+        SELECT ac.catalyst_id, ac.ai_event_type, ac.ai_sentiment
         FROM biz.asset_catalyst ac
         WHERE ac.ai_processed = true
-          AND ac.ai_event_type IS NOT NULL
           AND NOT EXISTS (
               SELECT 1 FROM biz.catalyst_impact ci
               WHERE ci.catalyst_id = ac.catalyst_id
@@ -137,8 +153,8 @@ def backfill_all(cur) -> int:
     """)
     rows = cur.fetchall()
     total = 0
-    for cat_id, event_type in rows:
-        total += build_for_catalyst(cur, cat_id, event_type)
+    for cat_id, event_type, ai_sentiment in rows:
+        total += build_for_catalyst(cur, cat_id, event_type or "other", ai_sentiment)
     return total
 
 
@@ -163,16 +179,18 @@ def main() -> int:
         with conn.cursor() as cur:
             if args.catalyst_id:
                 cur.execute(
-                    "SELECT ai_event_type FROM biz.asset_catalyst WHERE catalyst_id = %s",
+                    "SELECT ai_event_type, ai_sentiment FROM biz.asset_catalyst WHERE catalyst_id = %s",
                     (args.catalyst_id,),
                 )
                 row = cur.fetchone()
-                if not row or not row[0]:
-                    print(f"catalyst {args.catalyst_id}: not found or no event_type")
+                if not row:
+                    print(f"catalyst {args.catalyst_id}: not found")
                     return 1
-                n = build_for_catalyst(cur, args.catalyst_id, row[0])
+                event_type = row[0] or "other"
+                ai_sentiment = row[1]
+                n = build_for_catalyst(cur, args.catalyst_id, event_type, ai_sentiment)
                 conn.commit()
-                print(f"catalyst {args.catalyst_id} ({row[0]}): {n} impacts upserted")
+                print(f"catalyst {args.catalyst_id} ({event_type}, sentiment={ai_sentiment}): {n} impacts upserted")
                 return 0
 
             if args.backfill:

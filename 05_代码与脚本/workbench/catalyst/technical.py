@@ -122,7 +122,16 @@ class TechnicalAnalyzer:
         result.resistance_price = result.price_30d_high
 
         # 入场触发（根据影响方向）
-        direction = (impact_direction or "bullish").lower()
+        # impact_direction 缺失时，用技术面趋势状态推断方向（避免一律默认 bullish）
+        if impact_direction:
+            direction = impact_direction.lower()
+        else:
+            if result.technical_state == "up":
+                direction = "bullish"
+            elif result.technical_state == "down":
+                direction = "bearish"
+            else:
+                direction = "neutral"
 
         if direction == "bullish":
             # 多头：回踩 MA20 企稳 或 突破 30d 前高
@@ -252,6 +261,28 @@ class TechnicalAnalyzer:
         result.stop_loss_price = round(stop, 6) if stop and stop > 0 else None
         result.take_profit_price = round(take_profit, 6) if take_profit and take_profit > 0 else None
         result.rr_ratio = rr if rr and rr > 0 else None
+
+        # ── 防御性校验：确保止盈止损价格与方向一致 ──
+        # 任何上游 bug 导致方向错位，这里兜底纠正
+        entry_val = result.entry_trigger_price or last_price
+        sl_val = result.stop_loss_price
+        tp_val = result.take_profit_price
+
+        if entry_val and sl_val and tp_val and sl_val > 0 and tp_val > 0:
+            if direction == "bullish" and not (sl_val < entry_val < tp_val):
+                # 看多但价格不对，交换止盈止损并重新算 RR
+                result.stop_loss_price, result.take_profit_price = min(sl_val, tp_val), max(sl_val, tp_val)
+                risk = entry_val - result.stop_loss_price
+                reward = result.take_profit_price - entry_val
+                if risk > 0:
+                    result.rr_ratio = round(reward / risk, 2)
+            elif direction == "bearish" and not (tp_val < entry_val < sl_val):
+                # 看空但价格不对，交换止盈止损并重新算 RR
+                result.stop_loss_price, result.take_profit_price = max(sl_val, tp_val), min(sl_val, tp_val)
+                risk = result.stop_loss_price - entry_val
+                reward = entry_val - result.take_profit_price
+                if risk > 0:
+                    result.rr_ratio = round(reward / risk, 2)
 
     # ---- 内部方法 ----
 

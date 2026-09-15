@@ -56,6 +56,27 @@ def ensure_table(conn) -> None:
     conn.commit()
 
 
+def _parse_dt(ts) -> date | None:
+    """解析 date 字段：unix 秒时间戳（int 或数字字符串）或 ISO 日期字符串。"""
+    if ts is None:
+        return None
+    # 纯数字字符串（如 "1511913600"）按 unix 秒时间戳处理
+    if isinstance(ts, str) and ts.strip().isdigit():
+        ts = int(ts.strip())
+    if isinstance(ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
+        except (ValueError, TypeError, OSError):
+            return None
+    if isinstance(ts, str):
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(ts, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
 def fetch_supply_history() -> list[tuple[date, float]]:
     """从 DeFi Llama 拉取稳定币总供给历史，返回 [(date, supply_usd), ...] 按日期升序。"""
     print(f"[stablecoin] fetching {API_URL} ...")
@@ -64,24 +85,14 @@ def fetch_supply_history() -> list[tuple[date, float]]:
     rows = r.json()
     result = []
     for row in rows:
-        usd = (row.get("totalCirculating") or {}).get("peggedUSD")
+        # totalCirculatingUSD.peggedUSD 为 USD 计值；totalCirculating.peggedUSD 为代币数量
+        usd = (row.get("totalCirculatingUSD") or {}).get("peggedUSD")
+        if usd is None:
+            usd = (row.get("totalCirculating") or {}).get("peggedUSD")
         ts = row.get("date")
-        if usd is None or ts is None:
+        dt = _parse_dt(ts)
+        if usd is None or dt is None:
             continue
-        # date 可能是 int（unix timestamp）或 str（如 "2023-01-01"）
-        if isinstance(ts, str):
-            # 尝试多种字符串格式
-            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-                try:
-                    dt = datetime.strptime(ts[:10], fmt[:10]).date()
-                    break
-                except ValueError:
-                    continue
-            else:
-                # 字符串解析失败，跳过
-                continue
-        else:
-            dt = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
         result.append((dt, float(usd)))
     result.sort(key=lambda x: x[0])
     print(f"[stablecoin] got {len(result)} days of data, "
@@ -114,16 +125,16 @@ def upsert_data(conn, data: list[tuple[date, float]], dry_run: bool = False) -> 
 
     rows_inserted = 0
     with conn.cursor() as cur:
-        for dt, supply in data_sorted:
-            cur.execute("""
-                INSERT INTO biz.stablecoin_supply_daily
-                    (metric_date, total_supply_usd, source_code, fetched_at, updated_at)
-                VALUES (%s, %s, %s, NOW(), NOW())
-                ON CONFLICT (metric_date, source_code) DO UPDATE
-                SET total_supply_usd = EXCLUDED.total_supply_usd,
-                    updated_at = NOW()
-            """, (dt, supply, SOURCE_CODE))
-            rows_inserted += 1
+        # executemany 批量 upsert，避免跨地域逐行网络往返过慢（3213 行逐行会卡几分钟）
+        cur.executemany("""
+            INSERT INTO biz.stablecoin_supply_daily
+                (metric_date, total_supply_usd, source_code, fetched_at, updated_at)
+            VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (metric_date, source_code) DO UPDATE
+            SET total_supply_usd = EXCLUDED.total_supply_usd,
+                updated_at = NOW()
+        """, [(dt, supply, SOURCE_CODE) for dt, supply in data_sorted])
+        rows_inserted = len(data_sorted)
 
     if not dry_run:
         conn.commit()

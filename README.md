@@ -285,8 +285,12 @@ B2 深度爬取发现的新链接不是一步到位精确分类，而是「规�
 | 层级 | 功能 | 触发方式 | 数据表 | 状态 |
 |------|------|---------|--------|------|
 | 快照层 | 持仓集中度 / Holder 数 | 每日单次全量 | `biz.onchain_holder_snapshot` | 运行中 |
-| 告警层 | 大额转入交易所 | 后台自动循环 | `biz.onchain_transfer_log` | 已隐藏（大部分链无 API Key） |
+| 告警层 | 多链大额转账监控 + 地址标签富化 | 后台自动循环 | `biz.onchain_transfer_log`（标签数组列）+ `biz.onchain_address_label` | 运行中 |
 | 明细层 | 持仓 + 大额转账明细 | 投研按需查询 | `biz.onchain_holder_snapshot` / `onchain_transfer_log` | 可用 |
+
+**多链支持（`phase_chain_transfer_monitor.py` 的 `SUPPORTED_CHAINS`，共 12 链）：** `eth` / `bsc` / `solana` / `polygon` / `arbitrum` / `base` / `optimism` / `avalanche` / `tron` / `ton` / `sui` / `aptos`。快照 / 持仓 / 转账客户端按链分流（RPC 公共节点覆盖 EVM 系，Solana/Tron/Aptos/Sui/Ton 各有专用客户端），详见「Web 工作台 → 项目结构」。
+
+**地址标签体系（富化大额转账）：** `AddressLabelResolver`（单链内存缓存，主查 `biz.onchain_address_label`，兜底 `biz.onchain_exchange_wallet`）+ `LabelEnricher`（陌生地址→`ExplorerLabelFetcher` 抓取→写 `onchain_address_label`→回填 `onchain_transfer_log.from_labels/to_labels/from_label_names/to_label_names`）。标签富化仅在 `ENRICH_SUPPORTED_CHAINS={eth,base,polygon}` 开启；标签来源 `explorer_html`，类型白名单 `ALLOWED_LABEL_TYPES`。标签库由 `crawl_explorer_labels.py` / `import_explorer_label_csv.py` / `backfill_transfer_labels.py` 维护。
 
 **持仓分布数据来源：** 优先使用区块浏览器 HTML 解析（BSCScan/Etherscan 等 BeautifulSoup 抓取），Base 链优先 Blockscout 免费 REST API；不依赖 Etherscan API（BSCScan 已无免费 API）。
 
@@ -350,6 +354,8 @@ B2 深度爬取发现的新链接不是一步到位精确分类，而是「规�
 
 针对 Meme 赛道的专项投研工具链，基于多源链上+社交数据做纯规则判定（零 LLM、零 API 成本）。
 
+> **规则引擎核心位置**：纯规则计算核心位于 `workbench/meme_risk.py`（`compute_meme_risk`）与 `workbench/meme_lifecycle.py`（`compute_lifecycle`），`scripts/bin/phase_meme_risk_labels.py` / `phase_meme_lifecycle.py` 是遍历资产 + UPSERT 入库的**包装器**（引擎核心在 workbench，入库在 bin，非独立实现）。
+
 #### 五维风险标签（`phase_meme_risk_labels.py`）
 
 **五轴评分模型**（每轴 0-100 分 + red/yellow/green/unknown 四档标签，加权合成总风险）：
@@ -360,7 +366,8 @@ B2 深度爬取发现的新链接不是一步到位精确分类，而是「规�
 | `liquidity` 流动性 | `biz.asset_liquidity` | 总流动性 USD + 池数 + Top 池占比（流动性越低风险越高） |
 | `holder` 筹码集中度 | `biz.onchain_holder_snapshot` / `asset_holder_qualitative` | 鲸鱼持仓变化率 + 持有者数变化（精确快照优先，无则定性兜底） |
 | `lifecycle` 生命周期 | `biz.asset_lifecycle` | 上线年龄分桶（越早期风险越高） |
-| `social` 社交热度 | `biz.kol_signal` + `biz.asset_github_repo` | 死盘/零社交=高风险；高关注度=低分 |
+| `social` 社交热度 | `biz.kol_signal` + `biz.asset_github_repo` + DEX 热搜 | 死盘/零社交=高风险；高关注度=低分 |
+| `dex_trending` DEX 热搜 | `biz.asset_social_heat.dex_trending_json`（GeckoTerminal + DexScreener 热搜，`phase_dex_trending_heat.py`，MEME-09） | DEX 热搜榜上有名=高关注信号，`dex_boost_score` 加权 |
 
 **输出：** `biz.asset_risk_labels`——`axes_computed`（计算到的轴数）、`total_score`（加权总分）、`risk_label`（综合评级：block/high/medium/low/unknown）、`flags`（红旗列表）、`detail`（各轴明细 JSON）。
 
@@ -454,6 +461,14 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 - **API**：`GET /api/research/<asset_id>/market-history?days=30`
 - **用途**：解锁事件研究、相关性矩阵、信号层异动检测、趋势分析等所有时间序列功能的地基
 
+### 价格尖刺修复（数据质量）
+
+`remediate_price_spikes.py` + `fix_020_price_spike_anomaly_column.sql`：保障 conviction / MVRV 等引擎的行情数据源质量。
+
+- **异常标记**：`fix_020` 给 `src_cmc.cmc_asset_quote_snapshot` 与 `biz.asset_market_daily` 加 `is_anomaly` 列。
+- **修复逻辑**：扫描 `price_usd` 偏离 90 日 10 分位锚 >10× 的异常日，用 `ingest_cmc_historical_quotes` 历史数据覆盖或置 `NULL`（避免单日异常尖刺污染涨跌幅/相关性计算）。
+- 属被动修复，由诊断脚本触发，非日常调度主链路。
+
 ### 信号层（异动检测 diff）
 
 `detect_asset_signals()` + `GET /api/research/<asset_id>/signals`：机器擅长发现 diff，不擅长判断重要性——只做异动检测 + 严重程度分级，不做投资建议。
@@ -467,6 +482,14 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 | 解锁临近 | 30 天解锁 ≥5% / ≥20% |
 
 按 severity（critical > warning）排序，输出信号列表 + 各维度原始值。
+
+### 长期尾部资产筛选（Long-tail Screen）
+
+`phase_long_tail_screen.py` + `create_long_tail_screen_P2.sql`：对全市场 7000+ 长尾资产做三轴低保真评分（holder / social / momentum），落 `biz.long_tail_screen`。
+
+- **定位**：比 conviction 引擎（仅 HIGH/MED）更宽的长尾候选层，用于从土狗/新币中快速筛出「有异动苗头」的候选，再喂入精准投研。
+- **三轴**：holder 活跃度、social 热度、momentum 短期动量；纯规则、低成本、批量跑。
+- 与 Meme 专项无关，是全市场通用的长尾发现层。
 
 ### 研究结论生成（四维模板化）
 
@@ -514,6 +537,14 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 - **CM BTC 链上积累**：CM 原生交易所净流（替代死链路 CoinGlass）
 - 机会按 conviction_score 降序排列，HIGH 红色置顶 / MED 黄色 / LOW 折叠观察池
 
+### 机会观察列表（Opportunity Watchlist）
+
+`biz.opportunity_watchlist`（`create_opportunity_watchlist_P1.sql`，按 `asset_id` 唯一）是机会发现引擎「LOW 折叠观察池 → 升级告警」的持久化外延：
+
+- **加入观察**：用户从机会卡「加入观察」后记录资产，`trigger_rule` 默认 `conviction_upgrade`。
+- **升级告警**：监控 conviction_score 从 LOW 升级到 MED/HIGH 时触发提醒（写 `last_alerted_at` + `alert_count` 去重）。
+- 与「解锁追踪列表」（`biz.unlock_watchlist`）是两套独立的 watchlist，前者看机会评分变化、后者看解锁/空头趋势。
+
 ### 大盘早报邮件
 
 `send_daily_brief.py` → `render_brief_html` → `EmailNotifier`（复用已有 SMTP 封装）：
@@ -553,14 +584,91 @@ biz.cm_asset_onchain_daily (18+ 列: flow_in/out_ex_usd / sply_ex_usd /
 
 ---
 
-## 催化剂事件因子化
+## 催化剂事件全链路（Catalyst Pipeline）
 
-`build_catalyst_impact.py`：规则推导 event_type → 定向市场影响（零 LLM）。
+催化剂管道覆盖「事件摄入 → AI 预处理 → 规则因子化 → 研究结论重生 → 决策信号」全链路，数据源以币安公告（Binance CMS）+ 币安广场新闻为主（币安广场喊单类已并入 KOL 信号管道，见下章）。产出 `biz.catalyst_*` 系列结构化表与 `/api/catalyst` 决策接口。
 
-- **title 兜底**：从标题提取 token（3-6 位大写 + 混合大小写），匹配 core.asset（DISTINCT ON symbol 取市值最大 1 个，防扩散）
-- **规则表**：listing→bullish/strong/7d，delisting→bearish/strong/0d，tech_upgrade→bullish/medium/14d 等
-- **误配词库**：HIP/API/USD/COIN/BTC/ETH/SOL/BNB 已排除
-- **delisting 专用**：混合大小写匹配覆盖 HyENA/Lakala 等非全大写币名
+### 完整管道流程
+
+```
+摄入 catalyst_ingest_all.py
+  ├─ sources/binance_cms.py（注册 binance_news / binance_listing / binance_api 三类 catalog）
+  ├─ pipeline.upsert_catalyst_item()：content_hash 跨源去重 + (source_code,source_article_id) 同源去重
+  ├─ linker.map_pairs_to_asset_ids()：交易对 / 现金标签 → 多资产关联，写 biz.catalyst_asset_link
+        │
+        ▼
+AI 预处理 process_catalyst_ai.py
+  ├─ 调 LLM 写 ai_event_type / ai_sentiment / ai_summary / ai_keywords（规则前置省 token）
+  └─ 写 ai_processed / ai_processed_at
+        │
+        ▼
+规则因子化 build_catalyst_impact.py（零 LLM）
+  ├─ RULE 字典：event_type → (direction, strength, horizon_days)
+  ├─ 例：listing→bullish/strong/7d，delisting→bearish/strong/0d，tech_upgrade→bullish/medium/14d
+  ├─ title 兜底：标题提取 token（3-6 位大写+混合大小写）匹配 core.asset（DISTINCT ON symbol 取市值最大 1 个，防扩散）
+  ├─ 误配词库：HIP/API/USD/COIN/BTC/ETH/SOL/BNB 已排除
+  └─ delisting 专用：混合大小写匹配覆盖 HyENA/Lakala 等非全大写币名 → 写 biz.catalyst_impact
+        │
+        ▼
+研究结论重生 catalyst_thesis_regen.py
+  ├─ 读 biz.catalyst_regen_cursor 复合游标 (last_ts, last_asset_id) 增量
+  ├─ 调 generate_research_thesis 生成 biz.research_thesis
+  └─ 失败入 biz.catalyst_regen_failed，下次重试
+        │
+        ▼
+决策管道 phase_catalyst_pipeline.py（写 biz.catalyst_signal 等）
+  ├─ 快通道 --fast（15min，零 LLM）：L1 规则分类 → G0 市场环境 → G1 分级 → G2 共振 → G6 信号
+  └─ 慢通道 --slow（4h）：G3 二阶受益 → G4 基本面 → G5 技术面 → G6 重算 → 过期巡检 → G7 AI 决策增强
+```
+
+### 决策层模块（G0–G7）
+
+| 层 | 模块 | 职责 |
+|----|------|------|
+| G0 | `catalyst.grade` / `MarketRegime` | 市场环境判定（牛市 / 熊市 / 震荡） |
+| G1 | `catalyst.grade` | 催化剂分级（`catalyst_kind` / `base_strength`） |
+| G2 | `catalyst.resonance` | 共振检测（`resonance_score` / `state` / `excess_ret`） |
+| G3 | `catalyst.second_order` | 二阶受益展开（`order_level` / `sector_name`） |
+| G4 | `catalyst.fundamental` | 基本面校验（`fundamental_pass`） |
+| G5 | `catalyst.technical` | 技术面状态（`technical_state`） |
+| G6 | `catalyst.signal` | 信号合成（tier A/B/C、`persistence`、`rr_ratio`、`composite_score`、`confidence`） |
+| G7 | `catalyst.decision` + `catalyst.notifier` | AI 决策增强 + 告警（`entry`/`stop`/`take_profit`、`expires_at`、`invalidation`） |
+
+辅助模块：`catalyst_trace`（信号追踪）、`asset_filter`（资产过滤）、`classify`（RuleEventClassifier）。
+
+### 关键数据库表
+
+| 表 | 用途 | 关键字段 |
+|----|------|---------|
+| `biz.asset_catalyst` | 核心事件表 | `content_hash`（跨源去重）、`source_codes`（多源合并）、`related_pairs`、`rule_event_type`、`ai_event_type`/`ai_sentiment`/`ai_summary`、`asset_id` |
+| `biz.catalyst_asset_link` | 事件-资产多对多 | `(catalyst_id,asset_id)` PK、`link_source`（trading_pairs/cashtag/manual）、`confidence` |
+| `biz.catalyst_impact` | 规则因子化结果 | `impact_direction`（bullish/bearish/neutral）、`impact_strength`（strong/medium/weak）、`horizon_days` |
+| `biz.catalyst_grade` | G1 分级 | `catalyst_kind`、`base_strength` |
+| `biz.catalyst_resonance` | G2 共振 | `resonance_score`、`state`、`excess_ret` |
+| `biz.catalyst_second_order` | G3 二阶受益 | `order_level`、`sector_name` |
+| `biz.catalyst_signal` | G6 决策信号 | `tier`（A/B/C）、`status`（open/expired/invalid/done）、`kind`、`persistence`、`fundamental_pass`、`technical_state`、`entry_price`/`stop_loss`/`take_profit`、`rr_ratio`、`composite_score`、`confidence`、`regime`、`ai_reason`、`investment_cycle`、`expires_at`、`invalidation` |
+| `biz.catalyst_regen_cursor` / `biz.catalyst_regen_failed` | thesis 重生游标 / 失败重试 | — |
+
+视图 `v_asset_catalyst_recent` + 函数 `get_asset_catalysts(asset_id, days)` 供前端查询。
+
+### API 路由
+
+`catalyst.routes.py` 注册 `catalyst_bp` 到 `/api/catalyst`：
+
+- `GET /api/catalyst/health`：健康检查
+- `GET /api/catalyst/signals`：信号列表（支持 tier/status/kind/technical_state/order/hours/sort 过滤）
+- `GET /api/catalyst/signals/<id>`：单信号详情
+- `GET /api/catalyst/stats`：信号统计
+
+### 调度配置（scheduler.py）
+
+| 调度 key | 频率 | 脚本 |
+|----------|------|------|
+| `catalyst_run_all` | 每 12h | `catalyst_run_all.py`（摄入→AI→因子化→thesis 全链路编排） |
+| `catalyst_fast_pipeline` | 每 15min | `phase_catalyst_pipeline.py --fast` |
+| `catalyst_slow_pipeline` | 每 4h | `phase_catalyst_pipeline.py --slow` |
+
+> 注：原 `sources/binance_square_news.py` 已废弃，币安广场喊单类事件并入 KOL 信号管道（`kol_daemon`，`kol_type='catalyst'`）。规则配置依赖 `catalyst_rules.yaml`（`rule_event_keywords` / `token_hint_pattern`）。
 
 监控币安广场等平台的交易类 KOL 发帖，通过 AI 自动区分「实时喊单」与「事后晒单」，只对有跟单价值的实时信号发邮件提醒，同时全量存档用于后续回测博主胜率。
 
@@ -937,21 +1045,36 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │   │   ├── phase_derivatives_batch.py # 衍生品资金面批量采集
 │   │   │   ├── phase_watchlist_monitor.py # 解锁追踪监控 + 告警
 │   │   │   ├── etl_*.py        # ETL 脚本（行情历史日级聚合等）
+│   │   │   ├── *_liquidity_client.py # DEX 流动性客户端（dexscreener/geckoterminal，位于 bin/ 非 clients/）
 │   │   │   ├── diag_*.py       # 诊断脚本
 │   │   │   ├── curate_*.py     # NotebookLM 精选
 │   │   │   ├── collect_*.py    # GitHub 活跃度采集 + 批量补齐编排
 │   │   │   ├── kol_*.py        # KOL 监控调度 + 批量回测
 │   │   │   └── run_*_pipeline.py # 一键流水线（CMC/CG/DL）
-│   │   ├── migrations/         # 数据库迁移脚本（fix_*.sql）
+│   │   ├── migrations/         # 数据库迁移脚本（fix_*.sql，已至 fix_036）+ 新建表 SQL（create_opportunity_watchlist_P1 / create_long_tail_screen_P2 等）
 │   │   ├── src/crypto_research/ # 可复用模块
-│   │   │   ├── clients/        # API 客户端
+│   │   │   ├── clients/        # API 客户端（22 个）
 │   │   │   │   ├── cmc_client.py         # CoinMarketCap
 │   │   │   │   ├── coingecko_client.py   # CoinGecko
 │   │   │   │   ├── defillama_client.py   # DeFiLlama
 │   │   │   │   ├── ethplorer_client.py   # Ethplorer（持仓快照）
 │   │   │   │   ├── etherscan_client.py   # Etherscan / BSCScan
 │   │   │   │   ├── http_client.py        # 通用 HTTP
-│   │   │   │   └── llm_client.py         # LLM（DeepSeek）
+│   │   │   │   ├── llm_client.py         # LLM（DeepSeek）
+│   │   │   │   ├── contract_security_client.py # RugCheck 合约安全
+│   │   │   │   ├── insider_cluster_client.py   # RugCheck 内幕网络聚类
+│   │   │   │   ├── cryptoetf_client.py   # CRYPTOETF API（ETF 净流）
+│   │   │   │   ├── notifier.py           # SMTP 邮件封装
+│   │   │   │   ├── rpc_client.py         # EVM 系公共 RPC（eth/bsc/polygon/arbitrum/base/optimism/avalanche 转账）
+│   │   │   │   ├── solana_client.py      # Solana（Helius）
+│   │   │   │   ├── tron_client.py        # Tron（TronGrid）
+│   │   │   │   ├── aptos_client.py       # Aptos（Indexer GraphQL）
+│   │   │   │   ├── sui_client.py         # Sui（publicnode RPC）
+│   │   │   │   ├── ton_client.py         # TON（TON Center v3）
+│   │   │   │   ├── firecrawl_search_client.py # Firecrawl 搜索
+│   │   │   │   ├── address_label_resolver.py  # 单链地址标签解析（onchain_address_label / onchain_exchange_wallet）
+│   │   │   │   ├── label_enricher.py     # 陌生地址标签富化（写 onchain_address_label + 回填 transfer_log）
+│   │   │   │   └── explorer_label_fetcher.py   # 区块浏览器标签抓取（eth/bsc/arbitrum/base/polygon）
 │   │   │   ├── parsers/        # 响应解析器
 │   │   │   ├── mapping/        # 映射逻辑 + 链接分类（taxonomy / classify_link）+ 代币赛道（sector）
 │   │   │   ├── db/             # 数据库工具
@@ -965,7 +1088,7 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │   │       └── sys/            # 系统表（ingest_run）
 │   │
 │   └── workbench/              # Flask Web 工作台 + 调度器 + 部署配置（单容器）
-│       ├── supervisord.conf    # 单容器多进程编排：gunicorn + scheduler + kol_daemon
+│       ├── supervisord.conf    # 单容器多进程编排：gunicorn + scheduler + kol_daemon + watchdog
 │       ├── gunicorn_config.py  # gunicorn 启动配置（读取 PORT 环境变量）
 │       ├── app.py              # 主应用 + API 路由
 │       ├── task_manager.py     # 后台任务管理器（Popen 实时流式输出）
@@ -975,7 +1098,14 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │       ├── cross_market.py     # 多源交叉验证（按合约地址匹配）+ 每日推荐存档 + 赛道热力图
 │       ├── derivatives_client.py # 5 家交易所衍生品客户端（资金费率/OI/成交）
 │       ├── scheduler.py        # 定时调度器（APScheduler，替代 n8n 调度）
+│       ├── scheduler_watchdog.py # 调度看门狗（30min 轮询关键 cron，超 18h 未 done 邮件告警+补跑）
 │       ├── kol_daemon.py       # KOL 信号监控守护进程（30s 轮询）
+│       ├── backtest_opportunities.py # 机会级回测（OBI-OPT-BACKTEST-001，基于 market_overview_snapshot）
+│       ├── meme_risk.py        # Meme 风险标签规则引擎核心（compute_meme_risk）
+│       ├── meme_lifecycle.py   # Meme 生命周期规则引擎核心（compute_lifecycle）
+│       ├── ai_signal_analyzer.py # KOL 信号 AI 分析（链上子类型 enrich）
+│       ├── brief_data_model.py # 早报数据模型
+│       ├── ethbtc_market.py    # ETH/BTC 盘面技术面
 │       ├── kol/                # KOL 信号监控模块
 │       │   ├── db.py           # 数据库操作（博主/帖子/信号 CRUD）
 │       │   ├── scraper.py      # 多平台抓取器（币安广场 Playwright）
@@ -983,7 +1113,28 @@ B2 深度爬取 → B3 SPA 爬取 → B2 再爬 → B3 再爬 → ...（最多 6
 │       │   ├── notifier.py     # 信号邮件提醒（含交叉验证数据）
 │       │   ├── asset_match.py  # 币种匹配（关联 core.asset）
 │       │   ├── routes.py       # Flask 蓝图（API 路由）
-│       │   └── runner.py       # 主流程编排（抓取→AI→匹配→告警）
+│       │   ├── runner.py       # 主流程编排（抓取→AI→匹配→告警）
+│       │   └── sources/        # KOL 数据源（binance_cms / binance_square_news scraper）
+│       ├── catalyst/           # 催化剂决策管道模块
+│       │   ├── models.py       # CatalystItem / content_hash
+│       │   ├── base.py         # BaseCatalystSource
+│       │   ├── db.py           # 催化剂 DB 操作
+│       │   ├── pipeline.py     # 摄入 upsert + 跨源/同源去重编排
+│       │   ├── runner.py       # 管道编排
+│       │   ├── linker.py       # 交易对/现金标签 → 资产关联（含 _CANONICAL_TOP_SYMBOLS 白名单）
+│       │   ├── classify.py     # RuleEventClassifier
+│       │   ├── grade.py        # G0 市场环境 / G1 分级
+│       │   ├── resonance.py    # G2 共振
+│       │   ├── second_order.py # G3 二阶受益
+│       │   ├── fundamental.py  # G4 基本面
+│       │   ├── technical.py    # G5 技术面
+│       │   ├── signal.py       # G6 信号合成
+│       │   ├── decision.py     # G7 AI 决策增强
+│       │   ├── notifier.py     # 决策告警
+│       │   ├── catalyst_trace.py # 信号追踪
+│       │   ├── asset_filter.py # 资产过滤
+│       │   ├── routes.py       # /api/catalyst 蓝图
+│       │   └── sources/        # 催化剂数据源（binance_cms / binance_square_news 等）
 │       └── templates/          # 前端页面
 │           ├── index.html      # 仪表盘 + 币种查询 + 任务面板 + 投研分析 + 回测/赛道热力图
 │           ├── research.html   # 一键投研笔记本页
@@ -1136,9 +1287,25 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 
 调度器每 6 小时踢一次 B2 自动循环，每次启动后自己跑到 pending < 500 或跑满 200 轮就退出，不会 24 小时不停爬。
 
+### 调度看门狗（scheduler_watchdog.py）
+
+`scheduler_watchdog.py` 是**独立于 scheduler.py 的常驻看门狗进程**（由 supervisord 托管），职责是兜底 scheduler 自身的异常（scheduler 卡死/崩溃导致关键任务不跑时，看门狗仍能告警+补跑）。
+
+- **轮询**：每 30min 检查 `sys.task` 中关键 cron 白名单任务。
+- **阈值**：任务超 **18h** 未完成（`done`）→ SMTP 邮件告警 + 自动补跑一次。
+- **与 scheduler 区别**：scheduler 负责「到点踢脚本」，watchdog 负责「盯 scheduler 有没有正常踢」，二者职责互补，不是同一物。
+
+### 机会回测（backtest_opportunities.py）
+
+`backtest_opportunities.py`（工单 OBI-OPT-BACKTEST-001）：基于 `market_overview_snapshot` 中的 `opportunity_list`，回测各 `signal_type`（MVRV 回归 / 周期调制 / 复合 conviction 等）的命中率与 alpha，用于校准机会发现引擎权重。
+
+- **与 KOL 回测区别**：`kol_backtest_batch.py` 回测的是 KOL 喊单信号（`kol_signal.backtest_*`），本脚本回测的是**机会级信号**（大盘引擎产出），二者对象不同。
+
 ---
 
-## 数据覆盖与基础设施（09-01 复验）
+## 数据覆盖与基础设施（09-01 复验，2026-09-15 同步更新）
+
+> **2026-09-15 同步说明**：本次更新补入的代码现状与 README 偏差——催化剂决策管道全链路（G0–G7 + `/api/catalyst`）、多链（12 链）链上监控与地址标签体系、机会观察列表 / 长期尾部筛选 / 价格尖刺修复 / 赛道叙事资金流 ETL / DEX 趋势热度、调度看门狗（scheduler_watchdog，18h 阈值）与机会级回测（backtest_opportunities）。相关章节已同步，项目结构树已修正（catalyst/、kol/sources/、clients 多链客户端、迁移 SQL 至 fix_036）。
 
 ### 已接入前端的数据烟囱
 
@@ -1149,7 +1316,11 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 | 黑客/安全事件 | DefiLlama /hacks | biz.asset_hacks | /api/hack/feed | ✅ 已接入 |
 | 融资轮次 | DefiLlama /raises | biz.asset_raises | /api/funding/rounds | ✅ 已接入（含数据截止日期） |
 
-### CEX 地址覆盖
+### CEX 地址覆盖与链上标签库
+
+CEX 钱包种子库 `biz.onchain_exchange_wallet`（人工核验）+ 自动采集的地址标签库 `biz.onchain_address_label`（区块浏览器爬取 / CSV 导入）共同支撑 CEX 净流入计算。
+
+**CEX 钱包种子（人工核验，`onchain_exchange_wallet`）**
 
 | 链 | 地址数 | 主要交易所 | 备注 |
 |----|--------|-----------|------|
@@ -1157,10 +1328,17 @@ python scheduler.py --run-once cmc_pipeline   # 立即执行某个任务一次�
 | BSC | 7 | Binance(3), Coinbase(2), OKX(2), KuCoin(1) | 09-01 补充 |
 | TRON | 9 | Binance(5), OKX(2), Huobi(2) | 09-01 新增 |
 
+**自动地址标签库（`onchain_address_label`，多标签 + confidence 排序）**
+
+- 覆盖链：`eth` / `bsc` / `polygon` / `base` / `arbitrum` / `optimism` / `avalanche` / `solana` 等（随 `crawl_explorer_labels.py` / `import_explorer_label_csv.py` 持续扩充）。
+- 标签类型：`exchange` / `smart_money` / `whale` / `mev_bot` / `market_maker` / `dex` / `bridge` / `project_team`。
+- 唯一约束：`UNIQUE(address, chain, label_type, label_name)`；大小写敏感链 `{solana,tron,ton,sui,aptos}`。
+
 ### 待观察项
 
 - **孤儿表**：`token_discovery_*` 等表在代码库中未发现（可能已清理），无需处置。
-- **CEX 净流准确性**：BSC/TRON 地址补充后需重算净流验证量级合理性。
+- **CEX 净流准确性**：BSC/TRON 地址补充后需重算净流验证量级合理性；`onchain_address_label` 自动标签库置信度 medium，需抽样核验后再提升为 high（见 `fix_and_import_labels.py`）。
+- **标签富化覆盖**：`ENRICH_SUPPORTED_CHAINS={eth,base,polygon}` 仅 3 链开启运行时富化，其余链转账记录暂不自动补标签。
 
 ---
 

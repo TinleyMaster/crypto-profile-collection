@@ -50,8 +50,14 @@ CREATE TABLE IF NOT EXISTS biz.etf_flow_daily (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (symbol, flow_date, source_code)
 );
+"""
+
+CREATE_INDEX_1_SQL = """
 CREATE INDEX IF NOT EXISTS ix_etf_flow_daily_date
     ON biz.etf_flow_daily (flow_date DESC);
+"""
+
+CREATE_INDEX_2_SQL = """
 CREATE INDEX IF NOT EXISTS ix_etf_flow_daily_symbol_date
     ON biz.etf_flow_daily (symbol, flow_date DESC);
 """
@@ -272,9 +278,11 @@ def main() -> int:
     print(f"=" * 60)
 
     with get_connection(settings.database_url) as conn:
-        # 确保表存在
+        # 确保表存在（psycopg 不支持单 execute 多条 SQL，需分开执行）
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLE_SQL)
+            cur.execute(CREATE_INDEX_1_SQL)
+            cur.execute(CREATE_INDEX_2_SQL)
         conn.commit()
 
         total_inserted = 0

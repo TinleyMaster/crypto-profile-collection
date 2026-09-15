@@ -64,6 +64,12 @@ def get_conn(max_retries: int = 5, retry_delay: float = 3.0):
                 # lock_timeout=30s：被其他事务持锁时快速失败并留痕，
                 # 避免 catalyst 管道 UPDATE 无限等锁 → 90 分钟无日志被看护误杀（2026-09-15 P0）
                 options="-c lock_timeout=30000",
+                # TCP keepalive：pipeline 进程被 kill 后，PostgreSQL 能在 ~30s 内
+                # 检测到连接断开并释放锁，避免僵尸连接持锁几小时（2026-09-15 P0）
+                keepalives=1,
+                keepalives_idle=15,
+                keepalives_interval=5,
+                keepalives_count=3,
             )
             break
         except Exception as e:

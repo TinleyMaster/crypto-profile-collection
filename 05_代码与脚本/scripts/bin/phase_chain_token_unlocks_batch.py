@@ -45,12 +45,20 @@ _PENDING_EXCLUDE = """
                            AND u.last_attempt_at > NOW() - INTERVAL '7 day')))
 """
 
+# 候选池市值门槛（美元）：主流币解锁数据早已抓完（not_found 墓碑 30 天），
+# 剩余候选全是 <15M 的长尾小币，tokenomics.com 命中率仅 ~10%（89/100 not_found），
+# 每币 33s 纯浪费 + 累计超时被误判 stuck（09-11~15 连续 failed 根因）。
+# 只处理市值 >= 该门槛的资产；门槛可用环境变量 MIN_UNLOCK_MCAP 覆盖，默认 2000 万美元。
+MIN_UNLOCK_MCAP = float(os.environ.get("MIN_UNLOCK_MCAP", "20000000"))
+
 
 def get_pending_assets(conn, limit: int) -> list[dict]:
     """获取有 CG 映射但尚无解锁数据的资产列表。
 
     优先处理高市值、非稳定币、非 meme 的资产，跳过已停用资产，
     提升 tokenomics.com 命中率和批量成功率。
+    市值门槛：只处理 >= MIN_UNLOCK_MCAP 的资产（2026-09-15 起），
+    长尾小币不收录于 tokenomics.com，抓取纯属浪费（曾 89% not_found）。
 
     P1-1: not_found 墓碑 30 天冷却；parse_empty 视为待重试（不阻塞）。
     隐患1: fail_timeout 墓碑 7 天冷却，避免主流币反复超时浪费配额。
@@ -71,11 +79,12 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
               AND asm.source_asset_key IS NOT NULL
               AND a.asset_type != 'stablecoin'
               AND a.primary_sector != 'meme'
+              AND COALESCE(a.market_cap, 0) >= %s
               {_PENDING_EXCLUDE}
             ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
             LIMIT %s
             """,
-            (limit,),
+            (MIN_UNLOCK_MCAP, limit),
         )
         return cur.fetchall()
 
@@ -96,8 +105,10 @@ def get_total_pending(conn) -> int:
               AND asm.source_asset_key IS NOT NULL
               AND a.asset_type != 'stablecoin'
               AND a.primary_sector != 'meme'
+              AND COALESCE(a.market_cap, 0) >= %s
               {_PENDING_EXCLUDE}
-            """
+            """,
+            (MIN_UNLOCK_MCAP,),
         )
         return cur.fetchone()[0]
 

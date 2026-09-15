@@ -19,6 +19,12 @@ _STOCK_PATTERNS: tuple[str, ...] = (
     r"tokeniz\w*",        # Tokenized / Tokenised / Tokenization
     r"b?stocks",          # bStocks / PreStocks
     r"pre\s*stocks\b",
+    # tokenized stock 发行方（线上审计 2026-09-15：NVIDIA • Robinhood Token /
+    # SpaceX (Backpack Securities) / Boyd Gaming (Dinari Tokenized Stock) 等）
+    r"robinhood\s+token",
+    r"backpack\s+securities",
+    r"\bdinari\b",
+    r"\bxstock\b",
     # 商品/大宗期货（仅匹配明确的衍生品形态，避免误杀同名 crypto）
     r"\bfutures?\b",      # Futures
     r"\bderivativ\w*\b",  # Derivatives
@@ -68,12 +74,12 @@ def is_non_crypto(asset_name: str, asset_symbol: str | None = None) -> bool:
 
 # 命中即「美股/商品」（非加密）
 IS_STOCK_SQL = """
-LOWER(COALESCE(a.canonical_name, '')) ~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent|heating[[:space:]]+gas|natural[[:space:]]+gas'
+LOWER(COALESCE(a.canonical_name, '')) ~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent|heating[[:space:]]+gas|natural[[:space:]]+gas|robinhood[[:space:]]+token|backpack[[:space:]]+securities|\\mdinari\\M|\\mxstock\\M'
 """
 
 # 命中即「非美股/商品 = 加密货币」（crypto 邮件用）
 CRYPTO_FILTER_SQL = f"""
-LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent'
+LOWER(COALESCE(a.canonical_name, '')) !~ 'tokeniz|b[[:space:]]*stocks|pre[[:space:]]*stocks|futures|derivativ|crude[[:space:]]+oil|brent|robinhood[[:space:]]+token|backpack[[:space:]]+securities|\\mdinari\\M|\\mxstock\\M'
 """
 
 # 兼容旧名（= crypto 过滤，等价 CRYPTO_FILTER_SQL）

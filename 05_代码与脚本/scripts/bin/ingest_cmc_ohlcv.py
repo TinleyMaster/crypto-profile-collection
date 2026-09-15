@@ -274,4 +274,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        _code = main()
+    except Exception as _e:
+        # CMC 付费套餐不足（403）属预期跳过：返回 0，不污染调度失败状态
+        _msg = str(_e)
+        if "403" in _msg or "Forbidden" in _msg or "paid" in _msg.lower() or "permission" in _msg.lower():
+            print(f"[ohlcv] CMC 付费套餐不足，自动跳过: {_e}", file=sys.stderr)
+            _code = 0
+        else:
+            raise
+    raise SystemExit(_code)

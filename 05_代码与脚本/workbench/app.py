@@ -41,7 +41,7 @@ app = Flask(__name__)
 from task_manager import TaskManager, _get_db, AsyncTaskState  # noqa: E402
 import psycopg.rows  # noqa: E402
 
-task_mgr = TaskManager(max_concurrent=int(os.getenv("TASK_MAX_CONCURRENT", "5")))
+task_mgr = TaskManager(max_concurrent=int(os.environ.get("TASK_MAX_CONCURRENT", "4")))
 
 # KOL 监控模块（可选，导入失败不影响主服务）
 try:
@@ -51,15 +51,6 @@ try:
 except Exception as _e:
     _kol_loaded = False
     print(f"[WARN] KOL 模块加载失败，功能将不可用: {_e}")
-
-# 催化剂决策管道模块（可选，导入失败不影响主服务）
-try:
-    from catalyst.routes import catalyst_bp  # noqa: E402
-    app.register_blueprint(catalyst_bp)
-    _catalyst_loaded = True
-except Exception as _e:
-    _catalyst_loaded = False
-    print(f"[WARN] 催化剂模块加载失败，功能将不可用: {_e}")
 
 # 解锁数据异步拉取状态（已迁移到 task_manager 的 TaskManager，走 sys.task 表）。
 # 以下为遗留死代码，仅作注释保留供参考。
@@ -2677,42 +2668,6 @@ def api_market_overview():
             result["dimensions"]["2盘面"].setdefault("data", {})["ethbtc"] = ethbtc
 
         return jsonify({"ok": True, **result})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/market/snapshot")
-def api_market_snapshot():
-    """大盘每日快照：最新或指定日期的核心指标。
-
-    Query params:
-        date: YYYY-MM-DD，默认最新
-    """
-    try:
-        from macro_market import fetch_market_snapshot
-        date = request.args.get("date")
-        result = fetch_market_snapshot(snapshot_date=date)
-        return jsonify({"ok": result.get("status") == "ok", **result})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/market/snapshot/history")
-def api_market_snapshot_history():
-    """大盘快照历史序列（用于趋势图）。
-
-    Query params:
-        days: 天数，默认 30
-        fields: 逗号分隔的字段名，默认返回所有字段
-    """
-    try:
-        from macro_market import fetch_market_snapshot_history
-        days = request.args.get("days", "30", type=int)
-        days = max(1, min(365, days))
-        fields_str = request.args.get("fields")
-        fields = [f.strip() for f in fields_str.split(",")] if fields_str else None
-        result = fetch_market_snapshot_history(days=days, fields=fields)
-        return jsonify({"ok": result.get("status") == "ok", **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

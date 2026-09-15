@@ -15,8 +15,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -36,38 +39,79 @@ TASKS = [
 ]
 
 
-def run_task(script_name: str, extra_args: list[str]) -> tuple[bool, float, str]:
-    """执行一个子脚本，返回 (成功, 耗时秒, 输出摘要)。"""
+def run_task(script_name: str, extra_args: list[str],
+             timeout: int = 1200, retries: int = 1) -> tuple[bool, float, str]:
+    """执行一个子脚本，返回 (成功, 耗时秒, 输出摘要)。
+
+    健壮性改进：
+    - Popen + 读线程实时转发 stdout（卡死时父进程仍持续输出，watchdog 不误判 stuck）
+    - 单任务超时 1200s（原 600s 偏短，market_snapshot 本地即需 ~5 分钟）
+    - start_new_session + killpg：超时连子进程组一起强杀，防孙进程泄漏
+    - 失败自动重试 1 次（网络类 API 偶发失败）
+    """
     script_path = SCRIPT_DIR / script_name
     cmd = [sys.executable, "-u", str(script_path)] + extra_args
+    last_err = "unknown"
+    total_start = time.time()
 
-    start = time.time()
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 单任务 10 分钟超时
-            cwd=str(SCRIPT_DIR.parent.parent),  # workbench 目录，与其他脚本一致
-            env=None,  # 继承当前环境
-        )
-        elapsed = time.time() - start
+    for attempt in range(retries + 1):
+        start = time.time()
+        tail: list[str] = []
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=str(SCRIPT_DIR.parent.parent),
+                start_new_session=True,
+            )
 
-        if proc.returncode == 0:
-            tail = proc.stdout.strip().splitlines()[-5:] if proc.stdout.strip() else []
-            summary = "OK | " + (" | ".join(tail[-2:]) if tail else "no output")
-            return True, elapsed, summary
-        else:
-            err_tail = (proc.stderr or proc.stdout).strip().splitlines()[-5:]
-            summary = f"FAIL (exit {proc.returncode}) | " + " | ".join(err_tail[-2:])
-            return False, elapsed, summary
+            def _pump():
+                for raw in proc.stdout:
+                    line = raw.rstrip()
+                    if line.strip():
+                        print(f"  [{script_name}] {line}", flush=True)
+                        tail.append(line)
+                        if len(tail) > 8:
+                            tail.pop(0)
 
-    except subprocess.TimeoutExpired:
-        elapsed = time.time() - start
-        return False, elapsed, "TIMEOUT (600s)"
-    except Exception as e:
-        elapsed = time.time() - start
-        return False, elapsed, f"ERROR: {e}"
+            reader = threading.Thread(target=_pump, daemon=True)
+            reader.start()
+            rc = proc.wait(timeout=timeout)
+            reader.join(timeout=5)
+            elapsed = time.time() - start
+
+            if rc == 0:
+                summary = "OK | " + (" | ".join(tail[-2:]) if tail else "no output")
+                return True, elapsed, summary
+            last_err = f"FAIL (exit {rc}) | " + (" | ".join(tail[-2:]) if tail else "")
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - start
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+            last_err = f"TIMEOUT ({timeout}s)"
+        except Exception as e:
+            elapsed = time.time() - start
+            last_err = f"ERROR: {e}"
+
+        print(f"  [{script_name}] 第 {attempt + 1}/{retries + 1} 次失败: {last_err}", flush=True)
+        if attempt < retries:
+            time.sleep(10)
+
+    return False, time.time() - total_start, last_err
 
 
 def main() -> None:

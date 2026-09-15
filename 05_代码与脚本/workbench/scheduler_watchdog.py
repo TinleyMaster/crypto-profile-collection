@@ -51,6 +51,7 @@ KEY_JOBS = [
     ("sync_core_supply", "主表 supply/市值对齐（每 6h）"),
     ("cm_incremental", "CM 链上指标 T-1 增量（每日）"),
     ("ingest_cryptoetf_flow", "CryptoETF 日频资金流入库（每日）"),
+    ("market_daily", "大盘数据日频总控（恐贪/OI/CEFI/TVL/快照，每日）"),
 ]
 
 # 告警状态：每 key 记录上次告警时间，避免重复轰炸

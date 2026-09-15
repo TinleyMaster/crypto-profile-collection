@@ -5,6 +5,7 @@ B2 自动循环脚本：持续运行 phase_b2_deep_doc_discovery 直到 docs 类
 import subprocess
 import sys
 import os
+import signal
 from pathlib import Path
 
 # 行缓冲：确保 print 实时输出（stdout 是 pipe 时默认全缓冲）
@@ -30,7 +31,7 @@ for round_num in range(1, MAX_ROUNDS + 1):
 
     # 运行 B2
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [
                 sys.executable,
                 str(SCRIPT_DIR / "phase_b2_deep_doc_discovery.py"),
@@ -45,15 +46,31 @@ for round_num in range(1, MAX_ROUNDS + 1):
             ],
             cwd=str(SCRIPT_DIR),
             env=env,
-            capture_output=False,
-            timeout=1800,  # 单轮最长 30 分钟，防止卡死
+            start_new_session=True,  # 独立进程组，超时可连孙进程一起强杀
         )
-    except subprocess.TimeoutExpired:
-        print("B2 脚本本轮超时（30分钟），跳过继续下一轮。")
+        try:
+            rc = proc.wait(timeout=900)  # 单轮最长 15 分钟
+        except subprocess.TimeoutExpired:
+            # 连进程组一起强杀，防止浏览器/爬虫 worker（孙进程）泄漏导致 watchdog 误判卡死
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
+            print("B2 脚本本轮超时（15分钟），已强杀进程组，继续下一轮。")
+            continue
+    except Exception as e:
+        print(f"B2 启动失败: {e}，继续下一轮。")
         continue
 
-    if result.returncode != 0:
-        print(f"Script exited with code {result.returncode}, stopping.")
+    if rc != 0:
+        print(f"Script exited with code {rc}, stopping.")
         break
 
     print("B2 本轮完成，查询 pending 数量...")

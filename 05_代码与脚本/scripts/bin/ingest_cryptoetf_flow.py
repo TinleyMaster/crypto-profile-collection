@@ -148,7 +148,8 @@ def get_latest_date(conn, symbol: str) -> date | None:
     with conn.cursor() as cur:
         cur.execute(LATEST_DATE_SQL, (symbol.upper(),))
         row = cur.fetchone()
-        return row["latest"] if row and row["latest"] else None
+        # cursor 默认返回 tuple（非 dict_row），用下标取值
+        return row[0] if row and row[0] else None
 
 
 def fetch_and_ingest(

@@ -1112,26 +1112,42 @@ def fetch_binance_etf_flows() -> dict:
         return _ETF_SYMBOL_MAP.get(sym, sym)
     api_key = os.environ.get("CRYPTOETF_KEY", "")
 
-    # ── 1. 先查数据库 ──────────────────────────────────────
+    # ── 1. 先查数据库（带新鲜度校验：库中最新日期过旧时回退 API 刷新）──
     try:
         import psycopg.rows
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
+        from datetime import date, timedelta
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             conn.row_factory = psycopg.rows.dict_row
             with conn.cursor() as cur:
-                # 每个币种取最近一个净流入非 0 的交易日（跳过休市日）
+                # 新鲜度基准：整个表的最新日期（不排除净流入为 0 的休市日）
                 cur.execute("""
-                    SELECT DISTINCT ON (symbol)
-                           symbol, flow_date, net_flow_usd_m, net_flow_usd, aum_usd
+                    SELECT MAX(flow_date) AS latest
                     FROM biz.etf_flow_daily
                     WHERE source_code = 'cryptoetf'
-                      AND net_flow_usd_m IS NOT NULL
-                      AND net_flow_usd_m != 0
-                    ORDER BY symbol, flow_date DESC
                 """)
-                rows = cur.fetchall()
+                row0 = cur.fetchone()
+                db_latest = row0["latest"] if row0 else None
+                # ETF 数据 T+1 更新 + 周末休市：最新日期 >= 今天-2 视为新鲜；
+                # 否则说明 ingest 未跟上，回退 API 刷新（防止早报用陈旧 ETF 数据）
+                stale_cutoff = date.today() - timedelta(days=2)
+                db_is_fresh = (db_latest is not None and db_latest >= stale_cutoff)
+
+                # 每个币种取最近一个净流入非 0 的交易日（跳过休市日）
+                rows = []
+                if db_is_fresh:
+                    cur.execute("""
+                        SELECT DISTINCT ON (symbol)
+                               symbol, flow_date, net_flow_usd_m, net_flow_usd, aum_usd
+                        FROM biz.etf_flow_daily
+                        WHERE source_code = 'cryptoetf'
+                          AND net_flow_usd_m IS NOT NULL
+                          AND net_flow_usd_m != 0
+                        ORDER BY symbol, flow_date DESC
+                    """)
+                    rows = cur.fetchall()
                 if rows:
                     total = 0.0
                     btc_flow = None

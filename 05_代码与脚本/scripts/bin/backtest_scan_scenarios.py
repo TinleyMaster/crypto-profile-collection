@@ -211,7 +211,9 @@ def main() -> int:
 
         if not args.out:
             args.out = str(SCRIPT_DIR.parent / "data" / "backtest_scan_results.csv")
-        with open(args.out, "w", newline="", encoding="utf-8") as f:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["scenario"])
             w.writeheader()
             w.writerows(rows)

@@ -48,6 +48,34 @@ class Settings:
     smtp_from: str | None = None
     # 系统维护告警专用收件人（仅发管理员）
     admin_email: str | None = None
+    # ── KOL 信号自动交易（币胜操盘手日记 → 币安子账户）──
+    # IMAP 收信（默认复用 SMTP_USER / SMTP_PASS，QQ 授权码通用）
+    imap_host: str = "imap.qq.com"
+    imap_port: int = 993
+    imap_user: str | None = None
+    imap_pass: str | None = None
+    # 币安子账户合约 API（只开「合约交易」权限，不开提现）
+    binance_api_key: str | None = None
+    binance_api_secret: str | None = None
+    binance_fapi_base_url: str = "https://fapi.binance.com"
+    # 风控参数
+    signal_trade_enabled: bool = False          # 总开关，=1 才真正下单
+    signal_max_notional_usdt: float = 300.0     # 单笔最大名义价值（USDT）
+    signal_leverage: int = 5                    # 开仓杠杆
+    signal_order_type: str = "limit"            # limit=挂单进场价 / market=市价
+    signal_max_price_deviation_pct: float = 1.5 # 现价偏离进场价超过该比例则跳过（%）
+    signal_cooldown_minutes: int = 30           # 同一币种两次开单最小间隔（分钟）
+    signal_stop_loss_pct: float = 0.0           # 固定止损比例（0=不设；AI 关闭时生效）
+    signal_take_profit_pct: float = 0.0         # 固定止盈比例（0=不设；AI 关闭时生效）
+    # AI 止损止盈（AI 建议 + 2% 总资金硬顶 + 兜底）
+    signal_ai_sltp_enabled: bool = True         # 是否启用 AI 止损止盈（需已配 LLM Key）
+    signal_max_loss_pct_of_equity: float = 2.0  # 单笔最大亏损占总权益的百分比（硬顶）
+    signal_fallback_stop_loss_pct: float = 1.5  # AI 失败时的兜底止损距离（%）
+    signal_atr_multiplier: float = 2.0          # 止损机械底线 = ATR 倍数 × ATR%（防噪音扫损）
+    # DB 驱动（读 biz.kol_signal，等 AI 分类确认为实时喊单 post_type='prediction' 再开单）
+    signal_kol_whitelist: list[str] = None      # 允许自动开单的 KOL 昵称白名单（空=全部 kol 类博主）
+    signal_min_confidence: float = 0.8          # 信号最低置信度（AI 分类）
+    signal_max_age_hours: float = 6.0           # 只处理发帖后 N 小时内的信号（防陈旧单）
 
     def get_coingecko_keys(self) -> list[str]:
         """返回所有可用的 CoinGecko API key（单个或多个），无 key 返回空列表。"""
@@ -122,4 +150,26 @@ def get_settings(require_database: bool = True) -> Settings:
         smtp_to=os.getenv("SMTP_TO", "").strip() or None,
         smtp_from=os.getenv("SMTP_FROM", "").strip() or None,
         admin_email=os.getenv("ADMIN_EMAIL", "").strip() or None,
+        imap_host=os.getenv("IMAP_HOST", "imap.qq.com").strip() or "imap.qq.com",
+        imap_port=int(os.getenv("IMAP_PORT", "993") or 993),
+        imap_user=os.getenv("IMAP_USER", "").strip() or None,
+        imap_pass=os.getenv("IMAP_PASS", "").strip() or None,
+        binance_api_key=os.getenv("BINANCE_API_KEY", "").strip() or None,
+        binance_api_secret=os.getenv("BINANCE_API_SECRET", "").strip() or None,
+        binance_fapi_base_url=os.getenv("BINANCE_FAPI_BASE_URL", "https://fapi.binance.com").strip(),
+        signal_trade_enabled=os.getenv("SIGNAL_TRADE_ENABLED", "0").strip() in ("1", "true", "True"),
+        signal_max_notional_usdt=float(os.getenv("SIGNAL_MAX_NOTIONAL_USDT", "300") or 300),
+        signal_leverage=int(os.getenv("SIGNAL_LEVERAGE", "5") or 5),
+        signal_order_type=os.getenv("SIGNAL_ORDER_TYPE", "limit").strip().lower() or "limit",
+        signal_max_price_deviation_pct=float(os.getenv("SIGNAL_MAX_PRICE_DEVIATION_PCT", "1.5") or 1.5),
+        signal_cooldown_minutes=int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "30") or 30),
+        signal_stop_loss_pct=float(os.getenv("SIGNAL_STOP_LOSS_PCT", "0") or 0),
+        signal_take_profit_pct=float(os.getenv("SIGNAL_TAKE_PROFIT_PCT", "0") or 0),
+        signal_ai_sltp_enabled=os.getenv("SIGNAL_AI_SLTP_ENABLED", "1").strip() in ("1", "true", "True"),
+        signal_max_loss_pct_of_equity=float(os.getenv("SIGNAL_MAX_LOSS_PCT_OF_EQUITY", "2") or 2),
+        signal_fallback_stop_loss_pct=float(os.getenv("SIGNAL_FALLBACK_STOP_LOSS_PCT", "1.5") or 1.5),
+        signal_atr_multiplier=float(os.getenv("SIGNAL_ATR_MULTIPLIER", "2") or 2),
+        signal_kol_whitelist=[n.strip() for n in os.getenv("SIGNAL_KOL_WHITELIST", "").split(",") if n.strip()] or None,
+        signal_min_confidence=float(os.getenv("SIGNAL_MIN_CONFIDENCE", "0.8") or 0.8),
+        signal_max_age_hours=float(os.getenv("SIGNAL_MAX_AGE_HOURS", "6") or 6),
     )

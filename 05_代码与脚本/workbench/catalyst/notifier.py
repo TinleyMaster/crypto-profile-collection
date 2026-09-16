@@ -344,9 +344,10 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     new_count = len(rows)
 
     if not rows:
-        # 空窗 note：无 A 级 → 发极简说明（决策①），避免通道静默；占 24h 去重位防刷屏
-        subject = f"🎯 催化剂 Alert·{label}·今日无高置信度信号"
-        body = _build_empty_digest_html(class_label=label)
+        # 无 A 级信号 → 静默跳过，不发空窗邮件
+        return {"sent": 0, "skipped": 1, "failed": 0,
+                "reason": f"{label} 24h 内无 A 级高置信度信号，静默跳过",
+                "new_signals_24h": 0}
     else:
         subject = f"🎯 催化剂 Alert·{label}·A级 {new_count} 条"
         body = _build_slow_digest_html(rows, stats, class_label=label)

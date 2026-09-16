@@ -837,6 +837,7 @@ def api_catalysts():
                     SELECT
                         ac.catalyst_id,
                         ac.title,
+                        ac.title_cn,
                         ac.published_at,
                         COALESCE(ac.ai_event_type, ac.event_category, 'other') AS category,
                         ac.source_code AS source,

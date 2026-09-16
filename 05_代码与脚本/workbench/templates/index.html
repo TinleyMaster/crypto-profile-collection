@@ -8149,10 +8149,11 @@
                 }).join('');
                 const moreAssets = assets.length > 5 ? '<span class="top-cat-asset">+' + (assets.length - 5) + '</span>' : '';
 
-                // 标题（带链接）
+                // 标题（优先中文，兜底英文；带链接）
+                const displayTitle = ev.title_cn || ev.title || '';
                 const titleHtml = ev.source_url
-                    ? '<a class="top-cat-title" href="' + escapeHtml(ev.source_url) + '" target="_blank" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + ' ↗</a>'
-                    : '<span class="top-cat-title" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + '</span>';
+                    ? '<a class="top-cat-title" href="' + escapeHtml(ev.source_url) + '" target="_blank" title="' + escapeHtml(ev.title) + '">' + escapeHtml(displayTitle) + ' ↗</a>'
+                    : '<span class="top-cat-title" title="' + escapeHtml(ev.title) + '">' + escapeHtml(displayTitle) + '</span>';
 
                 return `
                     <div class="top-cat-card ${strengthCls}">
@@ -11231,7 +11232,7 @@
                 if (data.catalysts && data.catalysts.length > 0) {
                     data.catalysts.forEach(function (c) {
                         html += '<div class="attr-item">';
-                        html += '<div class="attr-item-title">' + escapeHtml(c.title || '无标题') + '</div>';
+                        html += '<div class="attr-item-title">' + escapeHtml(c.title_cn || c.title || '无标题') + '</div>';
                         html += '<div class="attr-item-meta">';
                         if (c.category) html += '<span style="margin-right:8px">' + escapeHtml(c.category) + '</span>';
                         if (c.published_at) {
@@ -13279,7 +13280,7 @@
                     catSignal.catalyst_events.map(function (ev) {
                         var dirIcon = ev.direction === 'bullish' ? '🟢' : (ev.direction === 'bearish' ? '🔴' : '⚪');
                         var strengthLabel = ev.strength === 'strong' ? '强' : (ev.strength === 'medium' ? '中' : '弱');
-                        var fullTitle = ev.title || '';
+                        var fullTitle = ev.title_cn || ev.title || '';
                         var title = fullTitle.length > 70 ? fullTitle.substring(0, 70) + '...' : fullTitle;
                         var sourceTag = ev.source ? '<span class="signal-cat-source">' + escapeHtml(ev.source) + '</span>' : '';
                         var titleHtml = ev.source_url
@@ -13688,7 +13689,7 @@
                 catalysts.slice(0, 10).forEach(function (c) {
                     var stCls = c.strength || 'low';
                     var stLabel = stCls === 'high' ? '强' : stCls === 'medium' ? '中' : '弱';
-                    var title = c.title || '';
+                    var title = c.title_cn || c.title || '';
                     html += '<div class="sd-catalyst-item">' +
                         '<span class="sd-cat-date">' + (c.event_date || '') + '</span>' +
                         '<span class="sd-cat-title">' + escapeHtml(title.length > 80 ? title.substring(0, 80) + '...' : title) + '</span>' +
@@ -13825,10 +13826,11 @@
                 }).join('');
                 const moreAssets = assets.length > 8 ? '<span class="cat-asset-more">+' + (assets.length - 8) + '</span>' : '';
 
-                // 标题（带链接）
+                // 标题（优先中文，兜底英文；带链接）
+                const displayTitle = ev.title_cn || ev.title || '';
                 const titleHtml = ev.source_url
-                    ? '<a class="cat-title" href="' + escapeHtml(ev.source_url) + '" target="_blank" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + ' ↗</a>'
-                    : '<span class="cat-title" title="' + escapeHtml(ev.title) + '">' + escapeHtml(ev.title) + '</span>';
+                    ? '<a class="cat-title" href="' + escapeHtml(ev.source_url) + '" target="_blank" title="' + escapeHtml(ev.title) + '">' + escapeHtml(displayTitle) + ' ↗</a>'
+                    : '<span class="cat-title" title="' + escapeHtml(ev.title) + '">' + escapeHtml(displayTitle) + '</span>';
 
                 // 摘要（AI 生成）
                 const summaryHtml = ev.summary
@@ -14437,7 +14439,7 @@
                 const score = Math.round(s.composite_score || 0);
                 const symbol = s.symbol || '?';
                 const name = s.asset_name || '';
-                const event = s.catalyst_title || s.kind || '—';
+                const event = s.catalyst_title_cn || s.catalyst_title || s.kind || '—';
                 const kindText = { structural: '结构性', event: '事件型', cyclical: '周期性' }[s.kind] || (s.kind || '—');
                 const created = s.created_at ? s.created_at.substring(0, 10) : '';
                 const expiry = s.expires_at ? s.expires_at.substring(0, 10) : '—';

@@ -190,13 +190,41 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 
     ensure_notification_table(conn)
 
-    # 找出 A 级 open 信号
+    # 找出 A 级 open 信号（带完整代币详情）
     rows = conn.execute("""
         SELECT s.signal_id, s.tier, s.composite_score, s.kind,
                s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
+               a.asset_type, a.primary_sector, a.categories,
+               a.market_cap, a.market_cap_rank,
+               a.circulating_supply, a.total_supply,
+               a.ath_usd, a.launch_date, a.description_short,
                c.title AS catalyst_title, c.source_code,
+               c.summary AS catalyst_summary,
                s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
-               s.investment_cycle, s.ai_reason
+               s.investment_cycle, s.ai_reason,
+               s.technical_state, s.resonance_state,
+               s.invalidation, s.persistence,
+               s.base_strength, s.resonance_score,
+               s.confidence, s.regime,
+               -- 风险标签
+               (SELECT json_agg(json_build_object('level', rl.risk_level, 'label', rl.risk_label))
+                  FROM biz.asset_risk_labels rl
+                 WHERE rl.asset_id = s.asset_id
+                   AND rl.status = 'active') AS risk_labels,
+               -- 最新日行情（收盘价 + 24h 涨跌幅）
+               (SELECT pd.close_price
+                  FROM biz.asset_perf_daily pd
+                 WHERE pd.asset_id = s.asset_id
+                 ORDER BY pd.date DESC LIMIT 1) AS current_price,
+               (SELECT pd.change_24h_pct
+                  FROM biz.asset_perf_daily pd
+                 WHERE pd.asset_id = s.asset_id
+                 ORDER BY pd.date DESC LIMIT 1) AS change_24h_pct,
+               -- 流动性（主要交易所）
+               (SELECT liq.liquidity_score
+                  FROM biz.asset_liquidity liq
+                 WHERE liq.asset_id = s.asset_id
+                 ORDER BY liq.updated_at DESC LIMIT 1) AS liquidity_score
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
@@ -252,79 +280,333 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 
 
 def _build_fast_alert_html(row) -> str:
-    """构建 A 级快提醒邮件 HTML。"""
-    score = row["composite_score"] or 0
+    """构建 A 级快提醒邮件 HTML（增强版：含代币详情，辅助交易决策）。"""
+    import html as _html
+
+    score = row.get("composite_score") or 0
     cycle = row.get("investment_cycle")
     reason = row.get("ai_reason")
     tp = row.get("take_profit")
     sl = row.get("stop_loss")
+    entry = row.get("entry_price")
     rr = row.get("rr_ratio")
+    symbol = row.get("symbol", "?")
+    name = row.get("canonical_name", "")
+    catalyst_title = row.get("catalyst_title", "")
+    catalyst_summary = row.get("catalyst_summary")
+    source_code = row.get("source_code", "")
+    asset_type = row.get("asset_type", "")
+    primary_sector = row.get("primary_sector", "")
+    categories = row.get("categories") or []
+    market_cap = row.get("market_cap")
+    market_cap_rank = row.get("market_cap_rank")
+    circulating_supply = row.get("circulating_supply")
+    total_supply = row.get("total_supply")
+    ath_usd = row.get("ath_usd")
+    launch_date = row.get("launch_date")
+    description_short = row.get("description_short")
+    current_price = row.get("current_price")
+    change_24h_pct = row.get("change_24h_pct")
+    technical_state = row.get("technical_state")
+    resonance_state = row.get("resonance_state")
+    invalidation = row.get("invalidation")
+    persistence = row.get("persistence")
+    risk_labels = row.get("risk_labels") or []
+    liquidity_score = row.get("liquidity_score")
+    confidence = row.get("confidence")
+    regime = row.get("regime")
 
-    cycle_html = f'<div style="font-size:18px;font-weight:600;margin-top:8px">{cycle}</div>' if cycle else \
-        '<div style="font-size:12px;color:#9ca3af;margin-top:8px">慢通道 G7 补全中</div>'
+    # ---------- 辅助函数 ----------
+    def _fmt_mcap(val):
+        if val is None:
+            return "—"
+        v = float(val)
+        if v >= 1e12:
+            return f"${v/1e12:.2f}T"
+        if v >= 1e9:
+            return f"${v/1e9:.2f}B"
+        if v >= 1e6:
+            return f"${v/1e6:.2f}M"
+        if v >= 1e3:
+            return f"${v/1e3:.1f}K"
+        return f"${v:.2f}"
 
-    price_rows = ""
-    if tp is not None or sl is not None:
-        price_rows = f"""
-        <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap">
-          <div style="flex:1;min-width:120px;padding:10px;background:#f0fdf4;border-radius:8px;text-align:center">
-            <div style="font-size:11px;color:#059669;text-transform:uppercase">目标价</div>
-            <div style="font-size:16px;font-weight:700;color:#059669;margin-top:4px">{_fmt_price(tp)}</div>
+    def _fmt_supply(val):
+        if val is None:
+            return "—"
+        v = float(val)
+        if v >= 1e12:
+            return f"{v/1e12:.2f}T"
+        if v >= 1e9:
+            return f"{v/1e9:.2f}B"
+        if v >= 1e6:
+            return f"{v/1e6:.2f}M"
+        return f"{v:,.0f}"
+
+    def _fmt_pct(val):
+        if val is None:
+            return "—"
+        sign = "+" if val > 0 else ""
+        return f"{sign}{val:.2f}%"
+
+    def _pct_color(val):
+        if val is None:
+            return "#6b7280"
+        if val > 0:
+            return "#059669"
+        if val < 0:
+            return "#dc2626"
+        return "#6b7280"
+
+    # ---------- 各区块构建 ----------
+
+    # 1. 交易档位
+    trade_section = ""
+    if tp is not None or sl is not None or entry is not None:
+        # 判断方向
+        direction = "—"
+        if entry is not None and tp is not None and sl is not None:
+            if tp > sl:  # 做多
+                direction = "📈 做多"
+            else:
+                direction = "📉 做空"
+
+        trade_section = f"""
+        <div style="background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:12px">📊 交易计划</div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:110px;text-align:center">
+              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">方向</div>
+              <div style="font-size:15px;font-weight:600;color:#111827;margin-top:4px">{direction}</div>
+            </div>
+            <div style="flex:1;min-width:110px;text-align:center">
+              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">入场价</div>
+              <div style="font-size:15px;font-weight:600;color:#111827;margin-top:4px">{_fmt_price(entry)}</div>
+            </div>
+            <div style="flex:1;min-width:110px;text-align:center;background:#f0fdf4;border-radius:6px;padding:8px 4px">
+              <div style="font-size:11px;color:#059669;text-transform:uppercase">目标价</div>
+              <div style="font-size:15px;font-weight:700;color:#059669;margin-top:4px">{_fmt_price(tp)}</div>
+            </div>
+            <div style="flex:1;min-width:110px;text-align:center;background:#fef2f2;border-radius:6px;padding:8px 4px">
+              <div style="font-size:11px;color:#dc2626;text-transform:uppercase">止损价</div>
+              <div style="font-size:15px;font-weight:700;color:#dc2626;margin-top:4px">{_fmt_price(sl)}</div>
+            </div>
+            <div style="flex:1;min-width:110px;text-align:center">
+              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">盈亏比</div>
+              <div style="font-size:15px;font-weight:600;color:#2563eb;margin-top:4px">{f"{rr:.1f}" if rr is not None else "—"}</div>
+            </div>
           </div>
-          <div style="flex:1;min-width:120px;padding:10px;background:#fef2f2;border-radius:8px;text-align:center">
-            <div style="font-size:11px;color:#dc2626;text-transform:uppercase">止损价</div>
-            <div style="font-size:16px;font-weight:700;color:#dc2626;margin-top:4px">{_fmt_price(sl)}</div>
-          </div>
-          <div style="flex:1;min-width:120px;padding:10px;background:#eff6ff;border-radius:8px;text-align:center">
-            <div style="font-size:11px;color:#2563eb;text-transform:uppercase">盈亏比</div>
-            <div style="font-size:16px;font-weight:700;color:#2563eb;margin-top:4px">{f"{rr:.1f}" if rr is not None else "—"}</div>
+          {f'<div style="font-size:12px;color:#6b7280;margin-top:10px;line-height:1.5"><span style="font-weight:500">失效条件：</span>{_html.escape(invalidation)}</div>' if invalidation else ''}
+        </div>
+        """
+
+    # 2. 代币基本面
+    sector_tags = ""
+    if categories:
+        tag_html = " ".join(
+            f'<span style="display:inline-block;padding:2px 8px;background:#f3f4f6;color:#4b5563;border-radius:12px;font-size:11px;margin:2px">{_html.escape(c)}</span>'
+            for c in categories[:5]
+        )
+        sector_tags = f'<div style="margin-top:6px">{tag_html}</div>'
+
+    circ_ratio = ""
+    if circulating_supply and total_supply and float(total_supply) > 0:
+        ratio = float(circulating_supply) / float(total_supply) * 100
+        circ_ratio = f" ({ratio:.1f}%流通)"
+
+    fundamentals_section = f"""
+    <div style="margin-top:16px">
+      <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:10px">🪙 代币基本面</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px">
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">市值 / 排名</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_mcap(market_cap)} / #{market_cap_rank if market_cap_rank else '—'}</div>
+        </div>
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">当前价格 / 24h</div>
+          <div style="font-weight:600;margin-top:2px;color:{_pct_color(change_24h_pct)}">{_fmt_price(current_price)} / {_fmt_pct(change_24h_pct)}</div>
+        </div>
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">ATH / 距离</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_price(ath_usd)} / {
+              f"{((float(current_price)/float(ath_usd)-1)*100):.1f}%"
+              if current_price and ath_usd and float(ath_usd) > 0 else "—"
+          }</div>
+        </div>
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">总供应量{circ_ratio}</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_supply(total_supply)}</div>
+        </div>
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">上线时间 / 赛道</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{str(launch_date) if launch_date else '—'} / {primary_sector or asset_type or '—'}</div>
+        </div>
+      </div>
+      {sector_tags}
+      {f'<div style="font-size:12px;color:#6b7280;margin-top:8px;line-height:1.5">{_html.escape(description_short[:200])}{"..." if description_short and len(description_short) > 200 else ""}</div>' if description_short else ''}
+    </div>
+    """
+
+    # 3. 信号评分明细
+    base_strength = row.get("base_strength")
+    resonance_score = row.get("resonance_score")
+    score_breakdown = ""
+    if base_strength is not None or resonance_score is not None:
+        score_breakdown = f"""
+        <div style="font-size:11px;color:#6b7280;margin-top:4px">
+          基本面 {base_strength or 0:.0f} · 共振 {resonance_score or 0:.0f} · 信心 {confidence or 0:.0f}%
+        </div>
+        """
+
+    # 4. 技术面状态
+    tech_section = ""
+    if technical_state or resonance_state or regime:
+        tech_items = []
+        if technical_state:
+            tech_items.append(f"技术形态：<b>{_html.escape(str(technical_state))}</b>")
+        if resonance_state:
+            tech_items.append(f"共振状态：<b>{_html.escape(str(resonance_state))}</b>")
+        if regime:
+            tech_items.append(f"市场环境：<b>{_html.escape(str(regime))}</b>")
+        if persistence:
+            tech_items.append(f"催化持续性：<b>{_html.escape(str(persistence))}</b>")
+        if liquidity_score is not None:
+            tech_items.append(f"流动性评分：<b>{liquidity_score}</b>")
+        tech_section = f"""
+        <div style="margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📈 技术面与市场环境</div>
+          <div style="font-size:12px;color:#374151;line-height:1.8">
+            {' · '.join(tech_items)}
           </div>
         </div>
         """
 
-    reason_html = ""
+    # 5. 风险标签
+    risk_section = ""
+    if risk_labels:
+        risk_items = []
+        for rl in risk_labels:
+            level = rl.get("level", "medium")
+            label = rl.get("label", "")
+            color_map = {
+                "critical": "#dc2626",
+                "high": "#ea580c",
+                "medium": "#d97706",
+                "low": "#059669",
+            }
+            bg_map = {
+                "critical": "#fef2f2",
+                "high": "#fff7ed",
+                "medium": "#fefce8",
+                "low": "#f0fdf4",
+            }
+            c = color_map.get(level, "#6b7280")
+            bg = bg_map.get(level, "#f3f4f6")
+            risk_items.append(
+                f'<span style="display:inline-block;padding:3px 10px;background:{bg};color:{c};border-radius:12px;font-size:11px;font-weight:500;margin:2px">⚠ {_html.escape(label)}</span>'
+            )
+        risk_section = f"""
+        <div style="margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">⚠️ 风险提示</div>
+          <div>{''.join(risk_items)}</div>
+        </div>
+        """
+
+    # 6. AI 原因（移到催化剂下面）
+    reason_section = ""
     if reason:
-        reason_html = f"""
-        <div style="border-top:1px solid #f3f4f6;padding-top:14px;margin-top:14px">
-          <div style="font-size:12px;color:#6b7280;margin-bottom:6px">🤖 AI 推荐原因</div>
-          <div style="font-size:13px;line-height:1.6;color:#111827">{reason}</div>
+        reason_section = f"""
+        <div style="margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">🤖 AI 信号解读</div>
+          <div style="font-size:12px;line-height:1.7;color:#374151;background:#f9fafb;border-left:3px solid #7c3aed;padding:10px 12px;border-radius:0 6px 6px 0">
+            {_html.escape(reason)}
+          </div>
         </div>
         """
+
+    # 7. 催化剂详情摘要
+    catalyst_detail_section = ""
+    if catalyst_summary:
+        catalyst_detail_section = f"""
+        <div style="margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📰 催化剂详情</div>
+          <div style="font-size:12px;line-height:1.7;color:#374151">
+            {_html.escape(catalyst_summary[:400])}{"..." if catalyst_summary and len(catalyst_summary) > 400 else ""}
+          </div>
+        </div>
+        """
+
+    cycle_html = f'<div style="font-size:16px;font-weight:600;margin-top:8px">{cycle}</div>' if cycle else \
+        '<div style="font-size:12px;color:#9ca3af;margin-top:10px">慢通道补全中</div>'
 
     return f"""
-    <div style="font-family:sans-serif;max-width:640px;margin:auto;padding:20px">
-      <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:20px;border-radius:12px 12px 0 0">
-        <div style="font-size:12px;opacity:.8;text-transform:uppercase;letter-spacing:1px">A级催化剂信号</div>
-        <div style="font-size:28px;font-weight:700;margin-top:6px">{row['symbol']} / {row['canonical_name']}</div>
-        <div style="margin-top:8px;font-size:14px;opacity:.9">{row['catalyst_title']}</div>
+    <div style="font-family:sans-serif;max-width:680px;margin:auto;padding:16px;background:#f9fafb">
+      <!-- 顶部卡片 -->
+      <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:20px 22px;border-radius:12px 12px 0 0">
+        <div style="font-size:11px;opacity:.75;text-transform:uppercase;letter-spacing:1.5px">A级催化剂信号 · 快通道</div>
+        <div style="font-size:26px;font-weight:700;margin-top:8px">{symbol} / {_html.escape(name)}</div>
+        <div style="margin-top:6px;font-size:13px;opacity:.92;line-height:1.4">{_html.escape(catalyst_title)}</div>
       </div>
 
-      <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <div style="display:flex;gap:20px;margin-bottom:16px">
-          <div style="flex:1">
-            <div style="font-size:11px;color:#6b7280;text-transform:uppercase">综合评分</div>
-            <div style="font-size:32px;font-weight:700;color:#7c3aed">{score:.0f}</div>
+      <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:18px 20px;border-radius:0 0 12px 12px">
+
+        <!-- 评分行 -->
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <div style="flex:0 0 100px;text-align:center;background:#faf5ff;border-radius:10px;padding:12px">
+            <div style="font-size:10px;color:#7c3aed;text-transform:uppercase;letter-spacing:1px">综合评分</div>
+            <div style="font-size:36px;font-weight:800;color:#7c3aed;line-height:1">{score:.0f}</div>
+            {score_breakdown}
           </div>
           <div style="flex:1">
-            <div style="font-size:11px;color:#6b7280;text-transform:uppercase">信息源</div>
-            <div style="font-size:18px;font-weight:600;margin-top:8px">{row['source_code']}</div>
-          </div>
-          <div style="flex:1">
-            <div style="font-size:11px;color:#6b7280;text-transform:uppercase">投资周期</div>
-            {cycle_html}
+            <div style="display:flex;gap:16px;flex-wrap:wrap">
+              <div style="flex:1;min-width:100px">
+                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">信息源</div>
+                <div style="font-size:14px;font-weight:600;color:#111827;margin-top:4px">{_html.escape(source_code)}</div>
+              </div>
+              <div style="flex:1;min-width:100px">
+                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">投资周期</div>
+                {cycle_html}
+              </div>
+              <div style="flex:1;min-width:100px">
+                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">资产类型</div>
+                <div style="font-size:14px;font-weight:600;color:#111827;margin-top:4px">{_html.escape(primary_sector or asset_type or '—')}</div>
+              </div>
+            </div>
           </div>
         </div>
 
-        {price_rows}
+        <!-- 交易计划 -->
+        {trade_section}
 
-        {reason_html}
+        <!-- 代币基本面 -->
+        {fundamentals_section}
 
-        <div style="margin-top:20px;padding:12px;background:#f5f3ff;border-radius:8px">
-          <div style="font-size:12px;color:#7c3aed;font-weight:500">⚡ 快通道信号 · 请关注慢通道深度分析</div>
-          <div style="font-size:11px;color:#6b7280;margin-top:4px">慢通道将补全 G3-G5 二阶受益、持续性、基本面、技术面分析</div>
+        <!-- 技术面 -->
+        {tech_section}
+
+        <!-- 催化剂详情 -->
+        {catalyst_detail_section}
+
+        <!-- AI 解读 -->
+        {reason_section}
+
+        <!-- 风险提示 -->
+        {risk_section}
+
+        <!-- 底部提示 -->
+        <div style="margin-top:18px;padding:12px 14px;background:#fffbeb;border-radius:8px;border:1px solid #fde68a">
+          <div style="font-size:12px;color:#92400e;font-weight:500">⚠️ 免责声明</div>
+          <div style="font-size:11px;color:#78350f;margin-top:4px;line-height:1.5">
+            本邮件由 AI 自动生成，仅供研究参考，不构成投资建议。加密货币市场波动极大，请务必做好仓位管理与风险控制，切勿重仓单一标的。
+          </div>
         </div>
 
-        <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
+        <div style="margin-top:14px;padding:10px 14px;background:#f5f3ff;border-radius:8px">
+          <div style="font-size:12px;color:#7c3aed;font-weight:500">⚡ 快通道信号 · 慢通道将补充深度分析</div>
+          <div style="font-size:11px;color:#6b7280;margin-top:4px">慢通道将补全 G3-G5 二阶受益、持续性、基本面验证、技术面量化分析</div>
+        </div>
+
+        <div style="margin-top:16px;font-size:11px;color:#9ca3af;text-align:center">
           由催化剂决策管道自动生成 · 24h 内去重
         </div>
       </div>

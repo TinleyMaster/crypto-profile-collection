@@ -211,19 +211,19 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
                -- 最新日行情（收盘价 + 24h 涨跌幅）
-               (SELECT pd.close_price
-                  FROM biz.asset_perf_daily pd
-                 WHERE pd.asset_id = s.asset_id
-                 ORDER BY pd.date DESC LIMIT 1) AS current_price,
-               (SELECT pd.change_24h_pct
-                  FROM biz.asset_perf_daily pd
-                 WHERE pd.asset_id = s.asset_id
-                 ORDER BY pd.date DESC LIMIT 1) AS change_24h_pct,
-               -- 流动性（主要交易所）
-               (SELECT liq.liquidity_score
-                  FROM biz.asset_liquidity liq
-                 WHERE liq.asset_id = s.asset_id
-                 ORDER BY liq.updated_at DESC LIMIT 1) AS liquidity_score
+               (SELECT md.price_usd
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS current_price,
+               (SELECT md.change_24h
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
+               -- 流动性（总流动性，单位 USD）
+               (SELECT al.total_liquidity_usd
+                  FROM biz.asset_liquidity al
+                 WHERE al.asset_id = s.asset_id
+                 LIMIT 1) AS liquidity_score
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
@@ -1159,18 +1159,18 @@ def _fetch_signal_row(conn, signal_id: int):
                (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
-               (SELECT pd.close_price
-                  FROM biz.asset_perf_daily pd
-                 WHERE pd.asset_id = s.asset_id
-                 ORDER BY pd.date DESC LIMIT 1) AS current_price,
-               (SELECT pd.change_24h_pct
-                  FROM biz.asset_perf_daily pd
-                 WHERE pd.asset_id = s.asset_id
-                 ORDER BY pd.date DESC LIMIT 1) AS change_24h_pct,
-               (SELECT liq.liquidity_score
-                  FROM biz.asset_liquidity liq
-                 WHERE liq.asset_id = s.asset_id
-                 ORDER BY liq.updated_at DESC LIMIT 1) AS liquidity_score
+               (SELECT md.price_usd
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS current_price,
+               (SELECT md.change_24h
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
+               (SELECT al.total_liquidity_usd
+                  FROM biz.asset_liquidity al
+                 WHERE al.asset_id = s.asset_id
+                 LIMIT 1) AS liquidity_score
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id

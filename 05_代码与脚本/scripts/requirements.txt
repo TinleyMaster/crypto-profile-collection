@@ -3,4 +3,5 @@ requests>=2.32
 playwright>=1.52
 PyPDF2>=3.0
 beautifulsoup4>=4.12
+websocket-client>=1.8
 

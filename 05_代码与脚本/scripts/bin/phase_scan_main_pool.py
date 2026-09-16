@@ -266,15 +266,17 @@ def main() -> int:
             if not l2:
                 continue
 
-            # 置信度：S1/S3 + 环境顺风 → high；S1/S3 逆风 → low；其余 medium
-            base_high = l2["scenario"] in ("S1", "S3")
-            fav = regime["long_fav"] if l1["dir"] == "up" else regime["short_fav"]
-            if base_high and fav:
-                confidence = "high"
-            elif base_high:
-                confidence = "low"
-            else:
+            # 置信度（2026-09-16 P1 首轮标定后修订，见设计方案 §4.3）：多头优先、空头降级
+            direction = l1["dir"]
+            if direction == "up" and l2["oi_dir"] == "up":
+                # P↑OI↑（S1/S2 基础）：唯一稳定正期望组合（24h 净 +5.24%）
+                confidence = "high" if regime["long_fav"] else "medium"
+            elif direction == "up":
+                # P↑OI↓（S5/S6 基础）：24h 才转正
                 confidence = "medium"
+            else:
+                # 空头侧（S3/S4/S7/S8）：样本期内全部负期望，仅空头 regime 采信
+                confidence = "medium" if regime["short_fav"] else "low"
 
             row = (now, sym, l2["scenario"], l1["timeframe"], l1["dir"],
                    round(l1["chg"], 2), "up" if l1["vol_ratio"] >= VOL_RATIO_THR else "down",

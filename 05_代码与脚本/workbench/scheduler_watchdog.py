@@ -41,17 +41,18 @@ from task_manager import _get_db, _insert_task, _append_log, LOG_DIR, STATE_FILE
 POLL_SECONDS = int(os.getenv("WATCHDOG_POLL_SECONDS", "1800"))     # 默认每 30 分钟
 STALE_THRESHOLD_SECONDS = int(os.getenv("WATCHDOG_STALE_SECONDS", "64800"))  # 默认 18h
 
-# 关键 cron 白名单：(调度 key, 说明)。超过阈值未 done 则告警+补跑。
-# 覆盖系统性 cron：catalyst 每 12h、data_sync 每日、cmc 每日、etl/sync 每 6h。
+# 关键 cron 白名单：(调度 key, 说明, 停滞阈值小时)。
+# 阈值必须大于任务周期，否则 24h 周期任务会在调度完成后 18h（距下次调度
+# 还有 6h）被误报 + 误补跑（2026-09-15 误报根因：data_sync_daily 等每日任务）。
 KEY_JOBS = [
-    ("catalyst_run_all", "催化剂全链路（每 12h）"),
-    ("cmc_quote_snapshot", "CMC 行情快照（每日）"),
-    ("data_sync_daily", "每日数据同步总调度"),
-    ("etl_asset_market_daily", "行情快照→日级 ETL（每 6h）"),
-    ("sync_core_supply", "主表 supply/市值对齐（每 6h）"),
-    ("cm_incremental", "CM 链上指标 T-1 增量（每日）"),
-    ("ingest_cryptoetf_flow", "CryptoETF 日频资金流入库（每日）"),
-    ("market_daily", "大盘数据日频总控（恐贪/OI/CEFI/TVL/快照，每日）"),
+    ("catalyst_run_all", "催化剂全链路（每 12h）", 18),
+    ("cmc_quote_snapshot", "CMC 行情快照（每日）", 30),
+    ("data_sync_daily", "每日数据同步总调度", 30),
+    ("etl_asset_market_daily", "行情快照→日级 ETL（每 6h）", 12),
+    ("sync_core_supply", "主表 supply/市值对齐（每 6h）", 12),
+    ("cm_incremental", "CM 链上指标 T-1 增量（每日）", 30),
+    ("ingest_cryptoetf_flow", "CryptoETF 日频资金流入库（每日）", 30),
+    ("market_daily", "大盘数据日频总控（恐贪/OI/CEFI/TVL/快照，每日）", 30),
 ]
 
 # 告警状态：每 key 记录上次告警时间，避免重复轰炸
@@ -119,8 +120,14 @@ def _dt(ts: float):
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
-def _check_key(key: str, desc: str, check_only: bool) -> dict:
-    """检查单个关键 cron：超阈值未 done → 告警 + 补跑。返回结果 dict。"""
+def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> dict:
+    """检查单个关键 cron：超阈值未 done → 告警 + 补跑。返回结果 dict。
+
+    Args:
+        threshold_hours: 该任务专属停滞阈值（小时），必须 > 任务周期，
+            否则日频任务会在调度完成后 18h 被误报（2026-09-15 根因）。
+    """
+    threshold = threshold_hours * 3600
     last = _last_done_ts(key)
     now = time.time()
     if last is None:
@@ -129,14 +136,14 @@ def _check_key(key: str, desc: str, check_only: bool) -> dict:
         stale = True
     else:
         stale_for = now - last
-        stale = stale_for > STALE_THRESHOLD_SECONDS
+        stale = stale_for > threshold
 
     if not stale:
         return {"key": key, "ok": True, "last_done": last, "stale_for": None}
 
     # 静默期抑制重复告警：同 key 距上次告警 < 阈值才再次发
     last_alert = _last_alerted.get(key, 0)
-    if now - last_alert < STALE_THRESHOLD_SECONDS:
+    if now - last_alert < threshold:
         return {"key": key, "ok": False, "stale": True, "alerted": False, "reason": "静默期内已告警"}
 
     _last_alerted[key] = now
@@ -147,7 +154,7 @@ def _check_key(key: str, desc: str, check_only: bool) -> dict:
     body = (
         f"关键 cron「{key}」({desc}) 已 {hours} 小时无成功执行。\n"
         f"最近一次 done: {last or '从未成功'}\n"
-        f"阈值: {STALE_THRESHOLD_SECONDS // 3600}h\n\n"
+        f"阈值: {threshold_hours}h\n\n"
         f"如 scheduler 进程失活，将自动补跑 {key}。"
     )
     mail_ok = _send_alert_email(subject, body)
@@ -169,8 +176,8 @@ def _check_key(key: str, desc: str, check_only: bool) -> dict:
 
 def run_once(check_only: bool = False) -> int:
     results = []
-    for key, desc in KEY_JOBS:
-        r = _check_key(key, desc, check_only)
+    for key, desc, threshold_hours in KEY_JOBS:
+        r = _check_key(key, desc, threshold_hours, check_only)
         results.append(r)
         if not r["ok"]:
             print(

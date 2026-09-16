@@ -195,6 +195,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面扫描·主池（L0环境过滤 + L1共振粗筛 + L2八场景，纯读库）", "core"),
     ("scan_accumulation_pool", "*/30 * * * *", "phase_scan_accumulation_pool.py", [],
      "盘面扫描·蓄势池（ACC蓄势判定 + BRK突破转主池，纯读库）", "core"),
+    ("scan_oi_backfill", "0 1 * * 0", "phase_backfill_oi_history.py", [],
+     "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
 ]
 
 

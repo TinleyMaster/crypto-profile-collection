@@ -195,12 +195,14 @@ class CatalystSignalBuilder:
             status="open",
         )
 
-    def upsert_to_db(self, conn, signal: CatalystSignalResult) -> Optional[int]:
+    def upsert_to_db(self, conn, signal: CatalystSignalResult) -> Optional[tuple[int, bool]]:
         """写入 catalyst_signal 表。
         如果 tier 为 None（分数太低），不写入（返回 None）。
 
         Returns:
-            int: 写入/更新的 signal_id，失败返回 None
+            tuple[int, bool] | None: (signal_id, is_new_insert)
+                is_new_insert=True 表示本次是新插入，False 表示是更新已有记录
+                失败返回 None
         """
         if signal.tier is None:
             return None
@@ -259,7 +261,7 @@ class CatalystSignalBuilder:
                     ELSE biz.catalyst_signal.status
                 END,
                 updated_at = NOW()
-            RETURNING signal_id
+            RETURNING signal_id, (xmax = 0) AS is_new_insert
             """,
             {
                 "catalyst_id": signal.catalyst_id,
@@ -287,7 +289,9 @@ class CatalystSignalBuilder:
                 "status": signal.status,
             },
         ).fetchone()
-        return row["signal_id"] if row else None
+        if not row:
+            return None
+        return row["signal_id"], bool(row["is_new_insert"])
 
     # ---- 内部方法 ----
 

@@ -68,7 +68,10 @@ def ensure_notification_table(conn) -> None:
 
 
 def _is_sent(conn, signal_id: int, ntype: str) -> bool:
-    """检查某信号是否已在去重窗口内发送过指定类型通知。"""
+    """只读检查：某信号是否已在去重窗口内发送过指定类型通知。
+
+    用于预检（慢通道），不修改数据，不占锁。快通道请用 _try_acquire_send_lock。
+    """
     row = conn.execute("""
         SELECT 1 FROM biz.catalyst_notification_log
         WHERE signal_id = %s AND notification_type = %s
@@ -78,9 +81,45 @@ def _is_sent(conn, signal_id: int, ntype: str) -> bool:
     return row is not None
 
 
+def _try_acquire_send_lock(conn, signal_id: int, ntype: str,
+                           tier: str | None, subject: str | None) -> bool:
+    """原子性获取发送锁（防重发核心机制）。
+
+    利用 UNIQUE(signal_id, notification_type) 约束的 INSERT ON CONFLICT 实现：
+    - 无记录 → 插入 pending 记录，获得发送权 → 返回 True
+    - 有记录但已超过去重窗口 → 更新 sent_at 重置，获得发送权 → 返回 True
+    - 有记录且在去重窗口内 → 不更新，未获得发送权 → 返回 False
+
+    线程/进程安全：PostgreSQL 的 INSERT ON CONFLICT 是原子操作，
+    并发情况下只有一个事务能成功插入/更新，其余会等锁后发现冲突。
+    """
+    try:
+        row = conn.execute("""
+            INSERT INTO biz.catalyst_notification_log
+                (signal_id, notification_type, tier, subject, status)
+            VALUES (%s, %s, %s, %s, 'sending')
+            ON CONFLICT (signal_id, notification_type)
+            DO UPDATE
+               SET sent_at = NOW(), status = 'sending',
+                   subject = COALESCE(EXCLUDED.subject, biz.catalyst_notification_log.subject),
+                   tier = COALESCE(EXCLUDED.tier, biz.catalyst_notification_log.tier),
+                   error_msg = NULL
+             WHERE biz.catalyst_notification_log.sent_at
+                   < NOW() - INTERVAL '%s hours'
+            RETURNING log_id
+        """, (signal_id, ntype, tier, subject, DEDUP_WINDOW_HOURS)).fetchone()
+        return row is not None
+    except Exception as e:
+        logger.warning("获取发送锁失败 sig=%s type=%s: %s", signal_id, ntype, e)
+        return False
+
+
 def _mark_sent(conn, signal_id: int | None, ntype: str, tier: str | None,
                subject: str, status: str = "sent", error_msg: str | None = None) -> None:
-    """记录发送日志。"""
+    """记录发送日志（INSERT ON CONFLICT 幂等）。
+
+    既可用于首次记录，也可用于更新已有记录的状态。
+    """
     try:
         conn.execute("""
             INSERT INTO biz.catalyst_notification_log
@@ -88,7 +127,9 @@ def _mark_sent(conn, signal_id: int | None, ntype: str, tier: str | None,
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (signal_id, notification_type) DO UPDATE
                 SET sent_at = NOW(), status = EXCLUDED.status,
-                    error_msg = EXCLUDED.error_msg, subject = EXCLUDED.subject
+                    error_msg = EXCLUDED.error_msg,
+                    subject = COALESCE(EXCLUDED.subject, biz.catalyst_notification_log.subject),
+                    tier = COALESCE(EXCLUDED.tier, biz.catalyst_notification_log.tier)
         """, (signal_id, ntype, tier, subject, status, error_msg))
     except Exception as e:
         logger.warning("记录通知日志失败: %s", e)
@@ -174,7 +215,12 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     alert_signals = []
 
     for row in rows:
-        if _is_sent(conn, row["signal_id"], NTYPE_FAST_ALERT):
+        # 原子获取发送锁（防并发重复）；同时检查 24h 去重窗口
+        acquired = _try_acquire_send_lock(
+            conn, row["signal_id"], NTYPE_FAST_ALERT,
+            tier="A", subject=None,
+        )
+        if not acquired:
             skipped += 1
             continue
 
@@ -187,7 +233,8 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 
         if ok:
             sent += 1
-            _mark_sent(conn, row["signal_id"], NTYPE_FAST_ALERT, "A", subject)
+            _mark_sent(conn, row["signal_id"], NTYPE_FAST_ALERT, "A", subject,
+                       status="sent")
             alert_signals.append({"signal_id": row["signal_id"], "symbol": row["symbol"]})
         else:
             failed += 1
@@ -336,9 +383,11 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     ntype = NTYPE_SLOW_DIGEST if is_crypto else NTYPE_SLOW_DIGEST_STOCK
     sentinel = SENTINEL_SLOW_DIGEST_SIGNAL_ID if is_crypto else SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID
 
+    # 只读预检：24h 内已发过则跳过（慢通道并发风险低，用只读即可）
     if _is_sent(conn, sentinel, ntype):
         return {"sent": 0, "skipped": 1, "failed": 0,
-                "reason": f"{label} 24h 内已发送过 Alert，跳过"}
+                "reason": f"{label} 24h 内已发送过 Alert，跳过",
+                "new_signals_24h": 0}
 
     rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class)
     new_count = len(rows)

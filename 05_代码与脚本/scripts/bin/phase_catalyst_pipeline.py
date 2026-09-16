@@ -569,7 +569,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
         )
         processed += 1
         try:
-            sig_id = _call_with_retry(
+            sig_result = _call_with_retry(
                 conn,
                 lambda: builder.upsert_to_db(conn, signal),
                 label=f"G6_signal(cid={signal.catalyst_id})",
@@ -578,10 +578,13 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             trace_step("G6_signal", catalyst_id=signal.catalyst_id,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
-        # sig_id 为 None 是正常情况（tier 太低不写入），不是锁冲突
-        if sig_id:
-            inserted += 1
-            new_signal_ids.append(sig_id)
+        # sig_result 为 None 是正常情况（tier 太低不写入），不是锁冲突
+        # sig_result 是 (signal_id, is_new_insert) 元组
+        if sig_result:
+            sig_id, is_new = sig_result
+            if is_new:
+                inserted += 1
+                new_signal_ids.append(sig_id)
         # 每条立即提交：释放 catalyst_signal 行锁及 FK 检查的父行锁（2026-09-15 P0）
         try:
             conn.commit()

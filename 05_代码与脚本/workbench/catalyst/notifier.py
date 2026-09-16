@@ -198,10 +198,10 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                a.market_cap, a.market_cap_rank,
                a.circulating_supply, a.total_supply,
                a.ath_usd, a.launch_date, a.description_short,
-               c.title AS catalyst_title, c.source_code,
-               c.summary AS catalyst_summary,
+               c.title AS catalyst_title, c.title_cn, c.source_code,
+               c.summary AS catalyst_summary, c.ai_summary,
                s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
-               s.investment_cycle, s.ai_reason,
+               s.investment_cycle, s.ai_reason, s.ai_deep_review,
                s.technical_state, s.resonance_state,
                s.invalidation, s.persistence,
                s.base_strength, s.resonance_score,
@@ -237,6 +237,114 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     if not rows:
         return {"sent": 0, "skipped": len(new_signal_ids), "failed": 0, "signals": []}
 
+    # ==============================================================
+    # 快通道 AI 增强：翻译 + A级深度评审（发邮件前做）
+    # 失败静默降级，不影响邮件发送
+    # ==============================================================
+    translator = None
+    reviewer = None
+    try:
+        from .ai_enhance import CatalystTranslator, AISignalDeepReviewer
+        translator = CatalystTranslator.from_settings()
+        reviewer = AISignalDeepReviewer.from_settings()
+    except Exception as e:
+        logger.warning("AI增强模块加载失败，跳过翻译和深度评审: %s", e)
+
+    ai_enhanced = 0
+    ai_translated = 0
+    if translator or reviewer:
+        for row in rows:
+            # --- 翻译催化剂（title_cn + ai_summary）---
+            if translator and not row.get("title_cn"):
+                try:
+                    result = translator.translate(
+                        row.get("catalyst_title") or "",
+                        row.get("catalyst_summary") or "",
+                    )
+                    if result and result.get("title_cn"):
+                        # 写入数据库
+                        conn.execute(
+                            "UPDATE biz.asset_catalyst "
+                            "SET title_cn = %s, ai_summary = COALESCE(%s, ai_summary), "
+                            "    ai_processed = true, ai_processed_at = NOW() "
+                            "WHERE catalyst_id = %s",
+                            (
+                                result["title_cn"],
+                                result.get("summary_cn"),
+                                row["catalyst_id"],
+                            ),
+                        )
+                        # 同时更新 row 里的值，便于邮件渲染
+                        row = dict(row) if hasattr(row, 'keys') else row
+                        # psycopg3 的 Row 对象是 dict-like 但不可变，重新查询
+                        ai_translated += 1
+                except Exception as e:
+                    logger.warning("催化剂翻译失败 [%s]: %s", row.get("symbol"), e)
+
+            # --- A 级信号深度评审 ---
+            if reviewer and row.get("tier") == "A" and not row.get("ai_deep_review"):
+                try:
+                    # 重新查一次完整行（确保有翻译后的中文字段）
+                    full_row = _fetch_signal_row(conn, row["signal_id"])
+                    if full_row:
+                        review_data = _signal_row_to_deep_review_input(full_row)
+                        deep = reviewer.review(review_data)
+                        if deep:
+                            import json
+                            conn.execute(
+                                "UPDATE biz.catalyst_signal "
+                                "SET ai_deep_review = %s::jsonb, ai_reason = %s "
+                                "WHERE signal_id = %s",
+                                (json.dumps(deep, ensure_ascii=False),
+                                 deep.get("overall_review")[:500],
+                                 row["signal_id"]),
+                            )
+                            ai_enhanced += 1
+                except Exception as e:
+                    logger.warning("AI深度评审失败 [%s]: %s", row.get("symbol"), e)
+
+    # 重新查询一次（拿最新的翻译 + 深度评审结果）
+    if ai_translated > 0 or ai_enhanced > 0:
+        rows = conn.execute("""
+            SELECT s.signal_id, s.tier, s.composite_score, s.kind,
+                   s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
+                   a.asset_type, a.primary_sector, a.categories,
+                   a.market_cap, a.market_cap_rank,
+                   a.circulating_supply, a.total_supply,
+                   a.ath_usd, a.launch_date, a.description_short,
+                   c.title AS catalyst_title, c.title_cn, c.source_code,
+                   c.summary AS catalyst_summary, c.ai_summary,
+                   s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+                   s.investment_cycle, s.ai_reason, s.ai_deep_review,
+                   s.technical_state, s.resonance_state,
+                   s.invalidation, s.persistence,
+                   s.base_strength, s.resonance_score,
+                   s.confidence, s.regime,
+                   (SELECT json_agg(json_build_object('level', rl.risk_level, 'label', rl.risk_label))
+                      FROM biz.asset_risk_labels rl
+                     WHERE rl.asset_id = s.asset_id
+                       AND rl.status = 'active') AS risk_labels,
+                   (SELECT pd.close_price
+                      FROM biz.asset_perf_daily pd
+                     WHERE pd.asset_id = s.asset_id
+                     ORDER BY pd.date DESC LIMIT 1) AS current_price,
+                   (SELECT pd.change_24h_pct
+                      FROM biz.asset_perf_daily pd
+                     WHERE pd.asset_id = s.asset_id
+                     ORDER BY pd.date DESC LIMIT 1) AS change_24h_pct,
+                   (SELECT liq.liquidity_score
+                      FROM biz.asset_liquidity liq
+                     WHERE liq.asset_id = s.asset_id
+                     ORDER BY liq.updated_at DESC LIMIT 1) AS liquidity_score
+            FROM biz.catalyst_signal s
+            JOIN core.asset a ON s.asset_id = a.asset_id
+            JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
+            WHERE s.signal_id = ANY(%s)
+              AND s.tier = 'A'
+              AND s.status = 'open'
+            ORDER BY s.composite_score DESC
+        """, (new_signal_ids,)).fetchall()
+
     sent = 0
     skipped = 0
     failed = 0
@@ -252,9 +360,11 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
             skipped += 1
             continue
 
+        # 优先用中文标题，兜底用原文
+        display_title = row.get("title_cn") or row.get("catalyst_title") or ""
         # 构建邮件（美股/商品加标记，便于在收件箱区分）
         cls_tag = "[美股·商品]" if is_stock(row["canonical_name"], row["symbol"]) else "[加密]"
-        subject = f"🚀 {cls_tag} A级催化剂信号: {row['symbol']} - {row['catalyst_title']}"
+        subject = f"🚀 {cls_tag} A级催化剂信号: {row['symbol']} - {display_title}"
         body = _build_fast_alert_html(row)
 
         ok, msg = _send_email(subject, body)
@@ -280,20 +390,22 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 
 
 def _build_fast_alert_html(row) -> str:
-    """构建 A 级快提醒邮件 HTML（增强版：含代币详情，辅助交易决策）。"""
+    """构建 A 级快提醒邮件 HTML（全面中文化 + AI 深度评审版）。"""
     import html as _html
 
     score = row.get("composite_score") or 0
     cycle = row.get("investment_cycle")
     reason = row.get("ai_reason")
+    ai_deep = row.get("ai_deep_review")
     tp = row.get("take_profit")
     sl = row.get("stop_loss")
     entry = row.get("entry_price")
     rr = row.get("rr_ratio")
     symbol = row.get("symbol", "?")
     name = row.get("canonical_name", "")
-    catalyst_title = row.get("catalyst_title", "")
-    catalyst_summary = row.get("catalyst_summary")
+    # 优先展示中文标题/摘要
+    catalyst_title = row.get("title_cn") or row.get("catalyst_title") or ""
+    catalyst_summary = row.get("ai_summary") or row.get("catalyst_summary") or ""
     source_code = row.get("source_code", "")
     asset_type = row.get("asset_type", "")
     primary_sector = row.get("primary_sector", "")
@@ -315,6 +427,21 @@ def _build_fast_alert_html(row) -> str:
     liquidity_score = row.get("liquidity_score")
     confidence = row.get("confidence")
     regime = row.get("regime")
+    kind = row.get("kind")
+
+    # ---------- 枚举翻译字典 ----------
+    KIND_MAP = {"structural": "结构性催化", "event": "事件型催化", "sentiment": "情绪型催化", "noise": "噪声"}
+    TECH_MAP = {"up": "上升趋势", "range": "震荡整理", "down": "下降趋势", "unknown": "未知"}
+    RESONANCE_MAP = {"confirmed": "强共振", "weak": "弱共振", "divergent": "背离", "pending": "待确认"}
+    REGIME_MAP = {"risk_on": "风险偏好（Risk On）", "neutral": "中性（Neutral）", "risk_off": "风险规避（Risk Off）"}
+    PERSIST_MAP = {"structural": "持续性（结构性，7天+）", "one_off": "一次性催化（3天内）", "decaying": "衰减型（1天内）"}
+    RISK_MAP = {"critical": "严重", "high": "高", "medium": "中", "low": "低"}
+    ASSET_TYPE_MAP = {"coin": "公链币", "token": "代币", "stablecoin": "稳定币", "stock": "股票", "commodity": "商品", "index": "指数"}
+
+    def _cn(val, mapping, default=None):
+        if not val:
+            return default or "—"
+        return mapping.get(str(val).lower(), str(val))
 
     # ---------- 辅助函数 ----------
     def _fmt_mcap(val):
@@ -358,6 +485,18 @@ def _build_fast_alert_html(row) -> str:
             return "#dc2626"
         return "#6b7280"
 
+    def _fmt_price(val):
+        if val is None:
+            return "—"
+        v = float(val)
+        if v >= 1000:
+            return f"${v:,.2f}"
+        if v >= 1:
+            return f"${v:.2f}"
+        if v >= 0.01:
+            return f"${v:.4f}"
+        return f"${v:.6f}"
+
     # ---------- 各区块构建 ----------
 
     # 1. 交易档位
@@ -376,23 +515,23 @@ def _build_fast_alert_html(row) -> str:
           <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:12px">📊 交易计划</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap">
             <div style="flex:1;min-width:110px;text-align:center">
-              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">方向</div>
+              <div style="font-size:11px;color:#6b7280">方向</div>
               <div style="font-size:15px;font-weight:600;color:#111827;margin-top:4px">{direction}</div>
             </div>
             <div style="flex:1;min-width:110px;text-align:center">
-              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">入场价</div>
+              <div style="font-size:11px;color:#6b7280">入场价</div>
               <div style="font-size:15px;font-weight:600;color:#111827;margin-top:4px">{_fmt_price(entry)}</div>
             </div>
             <div style="flex:1;min-width:110px;text-align:center;background:#f0fdf4;border-radius:6px;padding:8px 4px">
-              <div style="font-size:11px;color:#059669;text-transform:uppercase">目标价</div>
+              <div style="font-size:11px;color:#059669">目标价</div>
               <div style="font-size:15px;font-weight:700;color:#059669;margin-top:4px">{_fmt_price(tp)}</div>
             </div>
             <div style="flex:1;min-width:110px;text-align:center;background:#fef2f2;border-radius:6px;padding:8px 4px">
-              <div style="font-size:11px;color:#dc2626;text-transform:uppercase">止损价</div>
+              <div style="font-size:11px;color:#dc2626">止损价</div>
               <div style="font-size:15px;font-weight:700;color:#dc2626;margin-top:4px">{_fmt_price(sl)}</div>
             </div>
             <div style="flex:1;min-width:110px;text-align:center">
-              <div style="font-size:11px;color:#6b7280;text-transform:uppercase">盈亏比</div>
+              <div style="font-size:11px;color:#6b7280">盈亏比</div>
               <div style="font-size:15px;font-weight:600;color:#2563eb;margin-top:4px">{f"{rr:.1f}" if rr is not None else "—"}</div>
             </div>
           </div>
@@ -412,7 +551,7 @@ def _build_fast_alert_html(row) -> str:
     circ_ratio = ""
     if circulating_supply and total_supply and float(total_supply) > 0:
         ratio = float(circulating_supply) / float(total_supply) * 100
-        circ_ratio = f" ({ratio:.1f}%流通)"
+        circ_ratio = f"（{ratio:.1f}%流通）"
 
     fundamentals_section = f"""
     <div style="margin-top:16px">
@@ -423,11 +562,11 @@ def _build_fast_alert_html(row) -> str:
           <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_mcap(market_cap)} / #{market_cap_rank if market_cap_rank else '—'}</div>
         </div>
         <div style="flex:1;min-width:140px">
-          <div style="color:#6b7280">当前价格 / 24h</div>
+          <div style="color:#6b7280">当前价格 / 24h涨跌</div>
           <div style="font-weight:600;margin-top:2px;color:{_pct_color(change_24h_pct)}">{_fmt_price(current_price)} / {_fmt_pct(change_24h_pct)}</div>
         </div>
         <div style="flex:1;min-width:140px">
-          <div style="color:#6b7280">ATH / 距离</div>
+          <div style="color:#6b7280">历史高点 / 距离</div>
           <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_price(ath_usd)} / {
               f"{((float(current_price)/float(ath_usd)-1)*100):.1f}%"
               if current_price and ath_usd and float(ath_usd) > 0 else "—"
@@ -438,8 +577,8 @@ def _build_fast_alert_html(row) -> str:
           <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_supply(total_supply)}</div>
         </div>
         <div style="flex:1;min-width:140px">
-          <div style="color:#6b7280">上线时间 / 赛道</div>
-          <div style="font-weight:600;color:#111827;margin-top:2px">{str(launch_date) if launch_date else '—'} / {primary_sector or asset_type or '—'}</div>
+          <div style="color:#6b7280">上线时间 / 主赛道</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{str(launch_date) if launch_date else '—'} / {primary_sector or _cn(asset_type, ASSET_TYPE_MAP)}</div>
         </div>
       </div>
       {sector_tags}
@@ -454,27 +593,29 @@ def _build_fast_alert_html(row) -> str:
     if base_strength is not None or resonance_score is not None:
         score_breakdown = f"""
         <div style="font-size:11px;color:#6b7280;margin-top:4px">
-          基本面 {base_strength or 0:.0f} · 共振 {resonance_score or 0:.0f} · 信心 {confidence or 0:.0f}%
+          催化强度 {base_strength or 0:.0f} · 共振分 {resonance_score or 0:.0f} · 置信度 {(confidence or 0)*100:.0f}%
         </div>
         """
 
-    # 4. 技术面状态
+    # 4. 技术面状态（中文枚举）
     tech_section = ""
     if technical_state or resonance_state or regime:
         tech_items = []
+        if kind:
+            tech_items.append(f"催化类型：<b>{_cn(kind, KIND_MAP)}</b>")
         if technical_state:
-            tech_items.append(f"技术形态：<b>{_html.escape(str(technical_state))}</b>")
+            tech_items.append(f"技术形态：<b>{_cn(technical_state, TECH_MAP)}</b>")
         if resonance_state:
-            tech_items.append(f"共振状态：<b>{_html.escape(str(resonance_state))}</b>")
+            tech_items.append(f"共振状态：<b>{_cn(resonance_state, RESONANCE_MAP)}</b>")
         if regime:
-            tech_items.append(f"市场环境：<b>{_html.escape(str(regime))}</b>")
+            tech_items.append(f"市场环境：<b>{_cn(regime, REGIME_MAP)}</b>")
         if persistence:
-            tech_items.append(f"催化持续性：<b>{_html.escape(str(persistence))}</b>")
+            tech_items.append(f"催化持续性：<b>{_cn(persistence, PERSIST_MAP)}</b>")
         if liquidity_score is not None:
             tech_items.append(f"流动性评分：<b>{liquidity_score}</b>")
         tech_section = f"""
         <div style="margin-top:16px">
-          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📈 技术面与市场环境</div>
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📈 信号维度</div>
           <div style="font-size:12px;color:#374151;line-height:1.8">
             {' · '.join(tech_items)}
           </div>
@@ -507,31 +648,108 @@ def _build_fast_alert_html(row) -> str:
             )
         risk_section = f"""
         <div style="margin-top:16px">
-          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">⚠️ 风险提示</div>
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">⚠️ 风险标签</div>
           <div>{''.join(risk_items)}</div>
         </div>
         """
 
-    # 6. AI 原因（移到催化剂下面）
+    # 6. AI 深度评审（新增：A 级信号快通道专属）
+    ai_deep_section = ""
+    if ai_deep and isinstance(ai_deep, dict) and ai_deep.get("verdict"):
+        verdict = ai_deep.get("verdict", "")
+        conf = ai_deep.get("confidence_level", "")
+        pos = ai_deep.get("position_suggestion", "")
+        core_logic = ai_deep.get("core_logic", "")
+        key_risks = ai_deep.get("key_risks") or []
+        catalyst_stage = ai_deep.get("catalyst_stage", "")
+        timing_advice = ai_deep.get("timing_advice", "")
+        stop_loss_advice = ai_deep.get("stop_loss_advice", "")
+        take_profit_advice = ai_deep.get("take_profit_advice", "")
+        overall_review = ai_deep.get("overall_review", "")
+
+        # verdict 配色
+        verdict_color = "#059669" if "强烈" in verdict or "建议" in verdict and "不" not in verdict else (
+            "#dc2626" if "不建议" in verdict else "#d97706"
+        )
+
+        risk_list_html = ""
+        if key_risks:
+            risk_list_html = "".join(
+                f'<li style="margin-bottom:4px;color:#374151;line-height:1.6">{_html.escape(r)}</li>'
+                for r in key_risks
+            )
+            risk_list_html = f'<ul style="margin:6px 0 0 0;padding-left:20px;font-size:12px">{risk_list_html}</ul>'
+
+        ai_deep_section = f"""
+        <div style="margin-top:20px;background:linear-gradient(135deg,#f0fdf4,#ecfeff);border:1px solid #a7f3d0;border-radius:10px;padding:16px">
+          <div style="font-size:14px;font-weight:700;color:#065f46;margin-bottom:10px">
+            🤖 AI 深度评审 · A级信号
+            <span style="font-size:12px;font-weight:500;color:#10b981;margin-left:8px">信心度：{_html.escape(conf)}</span>
+          </div>
+
+          <div style="background:#fff;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:12px;color:#6b7280">交易结论</div>
+            <div style="font-size:17px;font-weight:700;color:{verdict_color};margin-top:4px">{_html.escape(verdict)}</div>
+            {f'<div style="font-size:12px;color:#4b5563;margin-top:4px">建议仓位：<b>{_html.escape(pos)}</b></div>' if pos else ''}
+          </div>
+
+          <div style="font-size:12px;color:#374151;line-height:1.7;margin-bottom:8px">
+            <span style="font-weight:600;color:#065f46">核心逻辑：</span>{_html.escape(core_logic)}
+          </div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:8px">
+            <div style="flex:1;min-width:130px;background:#fff;border-radius:6px;padding:8px">
+              <div style="color:#6b7280;font-size:11px">催化剂阶段</div>
+              <div style="font-weight:600;color:#111827;margin-top:2px">{_html.escape(catalyst_stage)}</div>
+            </div>
+            <div style="flex:1;min-width:130px;background:#fff;border-radius:6px;padding:8px">
+              <div style="color:#6b7280;font-size:11px">进场时机</div>
+              <div style="font-weight:600;color:#111827;margin-top:2px">{_html.escape(timing_advice)}</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:8px">
+            <div style="flex:1;min-width:130px;background:#fff;border-radius:6px;padding:8px">
+              <div style="color:#6b7280;font-size:11px">止损建议</div>
+              <div style="font-weight:500;color:#dc2626;margin-top:2px;font-size:11.5px;line-height:1.5">{_html.escape(stop_loss_advice)}</div>
+            </div>
+            <div style="flex:1;min-width:130px;background:#fff;border-radius:6px;padding:8px">
+              <div style="color:#6b7280;font-size:11px">止盈建议</div>
+              <div style="font-weight:500;color:#059669;margin-top:2px;font-size:11.5px;line-height:1.5">{_html.escape(take_profit_advice)}</div>
+            </div>
+          </div>
+
+          {f'<div style="font-size:12px;color:#374151;margin-bottom:6px"><span style="font-weight:600;color:#b91c1c">关键风险：</span>{risk_list_html}</div>' if risk_list_html else ''}
+
+          <div style="background:#f0fdfa;border-radius:6px;padding:10px 12px;margin-top:8px">
+            <div style="font-size:11.5px;color:#0f766e;font-weight:500;margin-bottom:4px">📝 综合评审</div>
+            <div style="font-size:12px;color:#115e59;line-height:1.7">{_html.escape(overall_review)}</div>
+          </div>
+        </div>
+        """
+
+    # 7. 催化剂详情摘要（优先中文）
+    catalyst_detail_section = ""
+    if catalyst_summary:
+        # 标注是否 AI 翻译版
+        label = "🤖 AI 中文摘要" if row.get("ai_summary") else "原文摘要"
+        catalyst_detail_section = f"""
+        <div style="margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📰 催化剂详情 <span style="font-size:11px;font-weight:400;color:#7c3aed">{label}</span></div>
+          <div style="font-size:12px;line-height:1.7;color:#374151">
+            {_html.escape(catalyst_summary[:500])}{"..." if catalyst_summary and len(catalyst_summary) > 500 else ""}
+          </div>
+        </div>
+        """
+
+    # 8. AI 信号解读（如果没有深度评审，展示普通 ai_reason）
     reason_section = ""
-    if reason:
+    if reason and not (ai_deep and ai_deep.get("overall_review")):
         reason_section = f"""
         <div style="margin-top:16px">
           <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">🤖 AI 信号解读</div>
           <div style="font-size:12px;line-height:1.7;color:#374151;background:#f9fafb;border-left:3px solid #7c3aed;padding:10px 12px;border-radius:0 6px 6px 0">
             {_html.escape(reason)}
-          </div>
-        </div>
-        """
-
-    # 7. 催化剂详情摘要
-    catalyst_detail_section = ""
-    if catalyst_summary:
-        catalyst_detail_section = f"""
-        <div style="margin-top:16px">
-          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📰 催化剂详情</div>
-          <div style="font-size:12px;line-height:1.7;color:#374151">
-            {_html.escape(catalyst_summary[:400])}{"..." if catalyst_summary and len(catalyst_summary) > 400 else ""}
           </div>
         </div>
         """
@@ -543,7 +761,7 @@ def _build_fast_alert_html(row) -> str:
     <div style="font-family:sans-serif;max-width:680px;margin:auto;padding:16px;background:#f9fafb">
       <!-- 顶部卡片 -->
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:20px 22px;border-radius:12px 12px 0 0">
-        <div style="font-size:11px;opacity:.75;text-transform:uppercase;letter-spacing:1.5px">A级催化剂信号 · 快通道</div>
+        <div style="font-size:11px;opacity:.75;letter-spacing:1.5px">A级催化剂信号 · 快通道</div>
         <div style="font-size:26px;font-weight:700;margin-top:8px">{symbol} / {_html.escape(name)}</div>
         <div style="margin-top:6px;font-size:13px;opacity:.92;line-height:1.4">{_html.escape(catalyst_title)}</div>
       </div>
@@ -553,27 +771,30 @@ def _build_fast_alert_html(row) -> str:
         <!-- 评分行 -->
         <div style="display:flex;gap:16px;align-items:flex-start">
           <div style="flex:0 0 100px;text-align:center;background:#faf5ff;border-radius:10px;padding:12px">
-            <div style="font-size:10px;color:#7c3aed;text-transform:uppercase;letter-spacing:1px">综合评分</div>
+            <div style="font-size:10px;color:#7c3aed;letter-spacing:1px">综合评分</div>
             <div style="font-size:36px;font-weight:800;color:#7c3aed;line-height:1">{score:.0f}</div>
             {score_breakdown}
           </div>
           <div style="flex:1">
             <div style="display:flex;gap:16px;flex-wrap:wrap">
               <div style="flex:1;min-width:100px">
-                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">信息源</div>
+                <div style="font-size:10px;color:#6b7280;letter-spacing:.5px">信息源</div>
                 <div style="font-size:14px;font-weight:600;color:#111827;margin-top:4px">{_html.escape(source_code)}</div>
               </div>
               <div style="flex:1;min-width:100px">
-                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">投资周期</div>
+                <div style="font-size:10px;color:#6b7280;letter-spacing:.5px">投资周期</div>
                 {cycle_html}
               </div>
               <div style="flex:1;min-width:100px">
-                <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">资产类型</div>
-                <div style="font-size:14px;font-weight:600;color:#111827;margin-top:4px">{_html.escape(primary_sector or asset_type or '—')}</div>
+                <div style="font-size:10px;color:#6b7280;letter-spacing:.5px">主赛道</div>
+                <div style="font-size:14px;font-weight:600;color:#111827;margin-top:4px">{_html.escape(primary_sector or _cn(asset_type, ASSET_TYPE_MAP))}</div>
               </div>
             </div>
           </div>
         </div>
+
+        <!-- AI 深度评审（最前面展示，A 级核心价值） -->
+        {ai_deep_section}
 
         <!-- 交易计划 -->
         {trade_section}
@@ -581,16 +802,16 @@ def _build_fast_alert_html(row) -> str:
         <!-- 代币基本面 -->
         {fundamentals_section}
 
-        <!-- 技术面 -->
+        <!-- 信号维度 -->
         {tech_section}
 
         <!-- 催化剂详情 -->
         {catalyst_detail_section}
 
-        <!-- AI 解读 -->
+        <!-- AI 解读（无深度评审时展示） -->
         {reason_section}
 
-        <!-- 风险提示 -->
+        <!-- 风险标签 -->
         {risk_section}
 
         <!-- 底部提示 -->
@@ -602,8 +823,8 @@ def _build_fast_alert_html(row) -> str:
         </div>
 
         <div style="margin-top:14px;padding:10px 14px;background:#f5f3ff;border-radius:8px">
-          <div style="font-size:12px;color:#7c3aed;font-weight:500">⚡ 快通道信号 · 慢通道将补充深度分析</div>
-          <div style="font-size:11px;color:#6b7280;margin-top:4px">慢通道将补全 G3-G5 二阶受益、持续性、基本面验证、技术面量化分析</div>
+          <div style="font-size:12px;color:#7c3aed;font-weight:500">⚡ 快通道信号 · 慢通道将补充更多维度</div>
+          <div style="font-size:11px;color:#6b7280;margin-top:4px">慢通道将补全 G3-G5 二阶受益展开、持续性验证、基本面验证、技术面量化分析</div>
         </div>
 
         <div style="margin-top:16px;font-size:11px;color:#9ca3af;text-align:center">
@@ -715,7 +936,8 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
                    s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                    s.resonance_state,
                    a.canonical_name, a.canonical_symbol AS symbol,
-                   ac.title AS catalyst_title
+                   ac.title AS catalyst_title, ac.title_cn,
+                   ac.ai_summary
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
             JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
@@ -789,7 +1011,14 @@ def _build_signal_table(rows, tier: str) -> str:
         tech = _tech_cn(r.get("technical_state"))
         persist = _persist_cn(r.get("persistence"))
         cycle = r.get("investment_cycle") or "—"
-        reason = r.get("ai_reason") or r.get("catalyst_title") or "暂无 AI 推荐原因（慢通道 G7 补全中）"
+        # 优先用中文内容：ai_summary > ai_reason > title_cn > catalyst_title
+        reason = (
+            r.get("ai_summary")
+            or r.get("ai_reason")
+            or r.get("title_cn")
+            or r.get("catalyst_title")
+            or "暂无推荐原因（慢通道 G7 补全中）"
+        )
         reason = _truncate(reason, 160)
 
         # 价格区间（目标/止损/盈亏比）
@@ -903,6 +1132,67 @@ def _build_empty_digest_html(class_label: str = "加密货币") -> str:
       </div>
     </div>
     """
+
+
+# =====================================================================
+# 辅助：单条信号详情查询 + 深度评审输入构建
+# =====================================================================
+
+def _fetch_signal_row(conn, signal_id: int):
+    """查询单条信号的完整详情（用于 AI 深度评审输入）。"""
+    row = conn.execute("""
+        SELECT s.signal_id, s.tier, s.composite_score, s.kind,
+               s.asset_id, a.canonical_name, a.canonical_symbol AS symbol,
+               a.asset_type, a.primary_sector, a.categories,
+               a.market_cap, a.market_cap_rank,
+               a.circulating_supply, a.total_supply,
+               a.ath_usd, a.launch_date, a.description_short,
+               c.catalyst_id, c.title AS catalyst_title, c.title_cn,
+               c.source_code, c.summary AS catalyst_summary, c.ai_summary,
+               c.ai_event_type, c.event_type,
+               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+               s.investment_cycle, s.ai_reason, s.ai_deep_review,
+               s.technical_state, s.resonance_state,
+               s.invalidation, s.persistence,
+               s.base_strength, s.resonance_score,
+               s.confidence, s.regime,
+               c.published_at,
+               (SELECT json_agg(json_build_object('level', rl.risk_level, 'label', rl.risk_label))
+                  FROM biz.asset_risk_labels rl
+                 WHERE rl.asset_id = s.asset_id
+                   AND rl.status = 'active') AS risk_labels,
+               (SELECT pd.close_price
+                  FROM biz.asset_perf_daily pd
+                 WHERE pd.asset_id = s.asset_id
+                 ORDER BY pd.date DESC LIMIT 1) AS current_price,
+               (SELECT pd.change_24h_pct
+                  FROM biz.asset_perf_daily pd
+                 WHERE pd.asset_id = s.asset_id
+                 ORDER BY pd.date DESC LIMIT 1) AS change_24h_pct,
+               (SELECT liq.liquidity_score
+                  FROM biz.asset_liquidity liq
+                 WHERE liq.asset_id = s.asset_id
+                 ORDER BY liq.updated_at DESC LIMIT 1) AS liquidity_score
+        FROM biz.catalyst_signal s
+        JOIN core.asset a ON s.asset_id = a.asset_id
+        JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
+        WHERE s.signal_id = %s
+    """, (signal_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _signal_row_to_deep_review_input(row: dict) -> dict:
+    """将数据库行转换为 AI 深度评审模块需要的输入格式。
+
+    ai_enhance.py 里的 AISignalDeepReviewer 接收一个 dict，里面的字段名
+    和数据库行基本一致，这里做必要的兼容映射。
+    """
+    d = dict(row) if not isinstance(row, dict) else row
+    # 兼容字段名
+    d.setdefault("symbol", d.get("symbol") or d.get("canonical_symbol"))
+    d.setdefault("asset_name", d.get("canonical_name"))
+    d.setdefault("event_type", d.get("ai_event_type") or d.get("event_type") or "other")
+    return d
 
 
 

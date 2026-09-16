@@ -199,7 +199,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                a.circulating_supply, a.total_supply,
                a.ath_usd, a.launch_date, a.description_short,
                c.title AS catalyst_title, c.title_cn, c.source_code,
-               c.summary AS catalyst_summary, c.ai_summary,
+               c.body_text AS catalyst_summary, c.ai_summary,
                s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                s.investment_cycle, s.ai_reason, s.ai_deep_review,
                s.technical_state, s.resonance_state,
@@ -207,10 +207,9 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                s.base_strength, s.resonance_score,
                s.confidence, s.regime,
                -- 风险标签
-               (SELECT json_agg(json_build_object('level', rl.risk_level, 'label', rl.risk_label))
-                  FROM biz.asset_risk_labels rl
-                 WHERE rl.asset_id = s.asset_id
-                   AND rl.status = 'active') AS risk_labels,
+               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
+                  FROM biz.asset_risk_labels arl
+                 WHERE arl.asset_id = s.asset_id) AS risk_labels,
                -- 最新日行情（收盘价 + 24h 涨跌幅）
                (SELECT pd.close_price
                   FROM biz.asset_perf_daily pd
@@ -313,7 +312,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                    a.circulating_supply, a.total_supply,
                    a.ath_usd, a.launch_date, a.description_short,
                    c.title AS catalyst_title, c.title_cn, c.source_code,
-                   c.summary AS catalyst_summary, c.ai_summary,
+                   c.body_text AS catalyst_summary, c.ai_summary,
                    s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                    s.investment_cycle, s.ai_reason, s.ai_deep_review,
                    s.technical_state, s.resonance_state,
@@ -1148,8 +1147,8 @@ def _fetch_signal_row(conn, signal_id: int):
                a.circulating_supply, a.total_supply,
                a.ath_usd, a.launch_date, a.description_short,
                c.catalyst_id, c.title AS catalyst_title, c.title_cn,
-               c.source_code, c.summary AS catalyst_summary, c.ai_summary,
-               c.ai_event_type, c.event_type,
+               c.source_code, c.body_text AS catalyst_summary, c.ai_summary,
+               c.ai_event_type, c.event_category,
                s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                s.investment_cycle, s.ai_reason, s.ai_deep_review,
                s.technical_state, s.resonance_state,
@@ -1157,10 +1156,9 @@ def _fetch_signal_row(conn, signal_id: int):
                s.base_strength, s.resonance_score,
                s.confidence, s.regime,
                c.published_at,
-               (SELECT json_agg(json_build_object('level', rl.risk_level, 'label', rl.risk_label))
-                  FROM biz.asset_risk_labels rl
-                 WHERE rl.asset_id = s.asset_id
-                   AND rl.status = 'active') AS risk_labels,
+               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
+                  FROM biz.asset_risk_labels arl
+                 WHERE arl.asset_id = s.asset_id) AS risk_labels,
                (SELECT pd.close_price
                   FROM biz.asset_perf_daily pd
                  WHERE pd.asset_id = s.asset_id
@@ -1191,7 +1189,7 @@ def _signal_row_to_deep_review_input(row: dict) -> dict:
     # 兼容字段名
     d.setdefault("symbol", d.get("symbol") or d.get("canonical_symbol"))
     d.setdefault("asset_name", d.get("canonical_name"))
-    d.setdefault("event_type", d.get("ai_event_type") or d.get("event_type") or "other")
+    d.setdefault("event_type", d.get("ai_event_type") or d.get("event_category") or d.get("event_type") or "other")
     return d
 
 

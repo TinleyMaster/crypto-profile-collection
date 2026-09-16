@@ -9,3 +9,4 @@ PyPDF2>=3.0
 APScheduler>=3.10,<4.0
 yfinance>=0.2.40
 PyYAML>=6.0
+websocket-client>=1.8

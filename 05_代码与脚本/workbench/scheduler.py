@@ -183,6 +183,18 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ ATH/ATL 免费回填（biz.asset_market_daily 自算，无需 CMC 付费套餐）═══
     # 每日增量：只处理当日未算过的资产，用免费行情自算 all_time ATH/ATL/距高点回撤
     ("perf_from_market_daily", "50 3 * * *", "backfill_perf_from_market_daily.py", ["--min-days", "15"], "ATH/ATL 免费自算回填（每日增量，asset_market_daily 源）", "core"),
+
+    # ═══ 盘面异动扫描系统（P0-P3，2026-09-16）═══
+    # 部署约束：本机出口为共享 IP（FDCservers 新加坡段），会被同 IP 邻居连坐限频封禁；
+    # 采集任务必须运行在独占出口（云端美国节点）。短任务走 scheduler，清算为常驻进程走 supervisord。
+    ("scan_klines", "*/5 * * * *", "phase_scan_klines.py", ["--min-vol-usd", "5000000"],
+     "盘面扫描·K线增量（每5分钟，USDT永续 × 5m/15m/1h，全局限频3.3req/s）", "core"),
+    ("scan_oi_cvd", "2-59/5 * * * *", "phase_oi_cvd_sampler.py", ["--min-vol-usd", "5000000"],
+     "盘面扫描·OI/CVD 5m采样（错峰+2min，游标增量CVD + 1h回填）", "core"),
+    ("scan_main_pool", "*/15 * * * *", "phase_scan_main_pool.py", [],
+     "盘面扫描·主池（L0环境过滤 + L1共振粗筛 + L2八场景，纯读库）", "core"),
+    ("scan_accumulation_pool", "*/30 * * * *", "phase_scan_accumulation_pool.py", [],
+     "盘面扫描·蓄势池（ACC蓄势判定 + BRK突破转主池，纯读库）", "core"),
 ]
 
 

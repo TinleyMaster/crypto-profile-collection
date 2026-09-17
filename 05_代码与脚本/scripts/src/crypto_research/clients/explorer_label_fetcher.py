@@ -329,16 +329,38 @@ class ExplorerLabelFetcher:
         try:
             page = self._pw_context.new_page()
             try:
-                # 等待页面加载 + Cloudflare 挑战通过
+                # 先到页面，等 domcontentloaded 就行，后面再等具体元素
                 page.goto(url, timeout=self.timeout * 1000,
                           wait_until="domcontentloaded")
-                # 额外等待：如果有 Cloudflare 挑战，等它过去
-                for _ in range(20):  # 最多等 10 秒
-                    content = page.content()
-                    if 'Just a moment...' in content and 'Cloudflare' in content:
-                        time.sleep(0.5)
-                        continue
-                    break
+
+                # 等待 Cloudflare 挑战通过（最多等 15 秒）
+                try:
+                    page.wait_for_function(
+                        """() => {
+                            const txt = document.body ? document.body.innerText : '';
+                            return !txt.includes('Just a moment...') || 
+                                   !txt.includes('Cloudflare');
+                        }""",
+                        timeout=15000,
+                    )
+                except Exception:
+                    # 超时就继续，可能不是 Cloudflare 页
+                    pass
+
+                # 等 name tag 相关元素出现（最多 8 秒）
+                # etherscan 系站点的 name tag 通常是 span.hash-tag.text-truncate
+                try:
+                    page.wait_for_selector(
+                        "span.hash-tag.text-truncate, [data-original-title], #nameTag",
+                        timeout=8000,
+                    )
+                except Exception:
+                    # 没有也正常（地址可能确实没标签），继续往下走
+                    pass
+
+                # 再多等 1 秒，确保动态内容渲染完
+                time.sleep(1)
+
                 return page.content()
             finally:
                 page.close()

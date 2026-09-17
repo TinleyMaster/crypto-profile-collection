@@ -423,8 +423,8 @@ def main():
     parser.add_argument("--catalyst-id", type=int, help="只处理指定 catalyst_id")
     parser.add_argument("--force", action="store_true", help="忽略 ai_processed 状态强制重跑")
     parser.add_argument("--sleep", type=float, default=0.5, help="每条之间的间隔秒数")
-    parser.add_argument("--pack-size", type=int, default=0,
-                        help="批量打包大小（0=逐条处理，>0=每 pack_size 条一次 LLM 请求）")
+    parser.add_argument("--pack-size", type=int, default=20,
+                        help="批量打包大小（0=逐条处理，>0=每 pack_size 条一次 LLM 请求，默认 20）")
     args = parser.parse_args()
 
     settings = get_settings()

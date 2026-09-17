@@ -1235,6 +1235,9 @@ def _add_protocol_tvl(conn, asset_id: int, profile: dict):
         """, (asset_id,))
         row = cur.fetchone()
         if not row or row["tvl"] is None:
+            # 回退：DeFi Llama 已收录该协议但无锁仓 TVL（Oracle/服务类，如 Chainlink）
+            # 标注为"数据源无 TVL"，避免被当作缺失维度导致 AI 推断假数据
+            _add_protocol_tvl_zero_fallback(cur, asset_id, profile)
             return
 
         tvl_data = {}
@@ -1256,6 +1259,39 @@ def _add_protocol_tvl(conn, asset_id: int, profile: dict):
             tvl_data["tvl_to_market_cap_ratio"] = round(tvl_data["tvl_usd"] / mcap, 3)
 
         profile["protocol_tvl"] = tvl_data
+
+
+def _add_protocol_tvl_zero_fallback(cur, asset_id: int, profile: dict):
+    """DeFi Llama 已收录（有 asset_source_map dl 映射）但 TVL 为 0/NULL 的协议：
+    标记为"数据源无锁仓 TVL"（Oracle/服务类协议），防止被当成缺失维度。
+    """
+    try:
+        cur.execute("""
+            SELECT pl.name, pl.category, pl.tvl, MAX(pl.fetched_at) AS fetched_at
+            FROM src_dl.protocol_list pl
+            JOIN core.asset_source_map m
+                ON m.source_code = 'dl' AND m.source_asset_key = pl.protocol_id
+            WHERE m.asset_id = %s
+            GROUP BY pl.name, pl.category, pl.tvl
+            ORDER BY pl.tvl DESC NULLS LAST
+            LIMIT 1
+        """, (asset_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+        # 有收录记录（无论 tvl 是否为 0/NULL）→ 属于"数据源收录但无 TVL"
+        profile["protocol_tvl"] = {
+            "tvl_usd": 0,
+            "source": "dl",
+            "category": row["category"] or "未知",
+            "protocol_name": row["name"],
+            "note": "DeFi Llama 已收录但无锁仓 TVL（Oracle/服务类协议，TVL 统计为 0）",
+        }
+        if row["fetched_at"]:
+            profile["protocol_tvl"]["metric_date"] = str(row["fetched_at"].date())
+    except Exception:
+        # 回退失败不影响主流程（该维度仍按缺失处理）
+        return
 
 
 def _add_price_technical(conn, asset_id: int, profile: dict):
@@ -2874,6 +2910,10 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
         tvl_lines.append(f"- 7日TVL变化: {tvl['tvl_change_7d_pct']:+.2f}%")
     if tvl.get("tvl_to_market_cap_ratio") is not None:
         tvl_lines.append(f"- TVL/市值比: {tvl['tvl_to_market_cap_ratio']}")
+    if tvl.get("note"):
+        tvl_lines.append(f"- {tvl['note']}")
+        if tvl.get("protocol_name"):
+            tvl_lines.append(f"- 协议: {tvl['protocol_name']}（{tvl.get('category', '')}）")
     sections.append(_section("协议 TVL", len(tvl_lines) > 0, tvl_lines))
 
     # 11. 社交热度

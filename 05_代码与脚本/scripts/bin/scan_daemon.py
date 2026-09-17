@@ -46,17 +46,14 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 import psycopg_pool  # noqa: E402
-import requests  # noqa: E402
 
+from crypto_research.clients.binance_http import fapi_get, set_min_request_gap  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 
 # ── 全局共享资源 ────────────────────────────────────────────────
 
 _SETTINGS = None
 _DB_POOL: psycopg_pool.ConnectionPool | None = None
-_HTTP_SESSION: requests.Session | None = None
-_HTTP_LOCK = threading.Lock()
-_LAST_HTTP_TS = 0.0
 _MIN_HTTP_GAP = 0.0  # 全局 Binance API 请求最小间隔（秒），0=不限速，默认关闭（适配美国独立IP节点）
 
 FAPI_BASE = "https://fapi.binance.com"
@@ -68,8 +65,8 @@ BUCKET_SECONDS = 300  # 5m OI/CVD 桶
 
 
 def _init():
-    """惰性初始化全局资源（DB 连接池 + HTTP session）。"""
-    global _SETTINGS, _DB_POOL, _HTTP_SESSION
+    """惰性初始化全局资源（DB 连接池）。HTTP 请求统一走 binance_http.fapi_get。"""
+    global _SETTINGS, _DB_POOL
     if _SETTINGS is None:
         _SETTINGS = get_settings(require_database=True)
     if _DB_POOL is None:
@@ -81,9 +78,7 @@ def _init():
             timeout=30,
             kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
         )
-    if _HTTP_SESSION is None:
-        _HTTP_SESSION = requests.Session()
-    return _SETTINGS, _DB_POOL, _HTTP_SESSION
+    return _SETTINGS, _DB_POOL
 
 
 def _db():
@@ -94,28 +89,8 @@ def _db():
 
 
 def _http_get(url: str, params: dict | None = None, timeout: int = 20) -> dict | list:
-    """带全局限频的 HTTP GET（Binance API 防封）。
-    
-    _MIN_HTTP_GAP > 0 时启用全局限速（共享 IP 场景），否则并发直连。
-    """
-    global _LAST_HTTP_TS
-    if _HTTP_SESSION is None:
-        _init()
-
-    if _MIN_HTTP_GAP > 0:
-        with _HTTP_LOCK:
-            now = time.time()
-            wait = _MIN_HTTP_GAP - (now - _LAST_HTTP_TS)
-            if wait > 0:
-                time.sleep(wait)
-            _LAST_HTTP_TS = time.time()
-            resp = _HTTP_SESSION.get(url, params=params, timeout=timeout)  # type: ignore
-            resp.raise_for_status()
-            return resp.json()
-    else:
-        resp = _HTTP_SESSION.get(url, params=params, timeout=timeout)  # type: ignore
-        resp.raise_for_status()
-        return resp.json()
+    """Binance API GET：委托 binance_http.fapi_get（全局限频 + 429/418 指数退避 + 全局封禁闸门）。"""
+    return fapi_get(url, params, timeout=timeout)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -962,12 +937,13 @@ def main() -> int:
                              "共享 IP 环境建议设 0.2-0.5）")
     args = parser.parse_args()
 
-    # 全局限速配置
+    # 全局限速配置（转发到 binance_http 公共模块）
     global _MIN_HTTP_GAP
     _MIN_HTTP_GAP = args.rate_limit
+    set_min_request_gap(args.rate_limit)
 
     # 初始化共享资源
-    settings, db_pool, http_session = _init()
+    settings, db_pool = _init()
     print(f"[scan_daemon] 初始化完成，DB 池大小={db_pool.max_size}，"
           f"min_vol_usd={args.min_vol_usd:,}，"
           f"rate_limit={args.rate_limit or 'unlimited'}")

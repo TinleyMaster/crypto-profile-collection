@@ -16,13 +16,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -33,56 +30,20 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 
+from crypto_research.clients.binance_http import fapi_get  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 FAPI_BASE = "https://fapi.binance.com"
-TIMEOUT = 20
-MAX_RETRIES = 3
-MIN_REQUEST_GAP = 0.3          # ≈3.3 req/s，保守防限频
 PAGE_LIMIT = 500               # openInterestHist 单请求上限
 MIN_KLINES_BARS = 1000         # 只回填有足够 1h K 线历史的符号
 COVERED_DAYS = 25              # 已有 >=25 天 OI 历史则跳过
-
-_SESSION = requests.Session()
-_REQUEST_LOCK = threading.Lock()
-_LAST_REQUEST_TS = 0.0
 
 UPSERT_SQL = """
     INSERT INTO biz.oi_cvd_snapshot (symbol, ts, exchange, oi_usd, cvd_5m_usd, cvd_1h_usd, vol_5m_usd)
     VALUES (%s,%s,'binance',%s,NULL,NULL,NULL)
     ON CONFLICT (symbol, exchange, ts) DO UPDATE SET oi_usd=EXCLUDED.oi_usd
 """
-
-
-def _get(url: str, params: dict) -> list:
-    global _LAST_REQUEST_TS
-    last_err: Exception | None = None
-    for attempt in range(MAX_RETRIES + 2):
-        try:
-            with _REQUEST_LOCK:
-                gap = MIN_REQUEST_GAP - (time.time() - _LAST_REQUEST_TS)
-                if gap > 0:
-                    time.sleep(gap)
-                r = _SESSION.get(url, params=params, timeout=TIMEOUT)
-                _LAST_REQUEST_TS = time.time()
-            if r.status_code == 429:
-                wait = min(5 * (2 ** attempt), 60)
-                print(f"[throttle] 429 限频，等待 {wait}s", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            if r.status_code == 418:
-                wait = 60 * (attempt + 1)
-                print(f"[throttle] 418 IP 封禁，等待 {wait}s", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if attempt < MAX_RETRIES + 1:
-                time.sleep(0.5 * (attempt + 1))
-    raise last_err
 
 
 def get_universe(conn) -> list[str]:
@@ -118,13 +79,13 @@ def fetch_oi(symbol: str) -> list[tuple]:
     cursor = start_ms
     while cursor < end_ms and len(rows) < PAGE_LIMIT * 2:
         try:
-            data = _get(f"{FAPI_BASE}/futures/data/openInterestHist", {
+            data = fapi_get(f"{FAPI_BASE}/futures/data/openInterestHist", {
                 "symbol": symbol, "period": "1h", "startTime": cursor,
                 "endTime": end_ms, "limit": PAGE_LIMIT,
             })
         except Exception:  # noqa: BLE001
-            data = _get(f"{FAPI_BASE}/futures/data/openInterestHist",
-                        {"symbol": symbol, "period": "1h", "limit": PAGE_LIMIT})
+            data = fapi_get(f"{FAPI_BASE}/futures/data/openInterestHist",
+                            {"symbol": symbol, "period": "1h", "limit": PAGE_LIMIT})
         if not data:
             break
         for d in data:

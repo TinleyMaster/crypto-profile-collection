@@ -13,13 +13,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-
-import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -30,20 +27,14 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 
+from crypto_research.clients.binance_http import fapi_get  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 FAPI_BASE = "https://fapi.binance.com"
-TIMEOUT = 20
-MAX_RETRIES = 3
-MIN_REQUEST_GAP = 0.3          # ≈3.3 req/s，保守防限频
 FUNDING_LIMIT = 1000           # fundingRate 单请求上限
 MIN_KLINES_BARS = 1000         # 只回填有足够 1h 历史的符号（回测宇宙）
 COVERED_COUNT = 900            # 已有 >=900 条结算记录则视为已覆盖
-
-_SESSION = requests.Session()
-_REQUEST_LOCK = threading.Lock()
-_LAST_REQUEST_TS = 0.0
 
 UPSERT_SQL = """
     INSERT INTO biz.funding_rate_hist (symbol, funding_time, rate, source_code, fetched_at)
@@ -51,32 +42,6 @@ UPSERT_SQL = """
     ON CONFLICT (symbol, funding_time) DO UPDATE SET
         rate=EXCLUDED.rate, fetched_at=NOW()
 """
-
-
-def _get(url: str, params: dict) -> list:
-    global _LAST_REQUEST_TS
-    last_err: Exception | None = None
-    for attempt in range(MAX_RETRIES + 2):
-        try:
-            with _REQUEST_LOCK:
-                gap = MIN_REQUEST_GAP - (time.time() - _LAST_REQUEST_TS)
-                if gap > 0:
-                    time.sleep(gap)
-                r = _SESSION.get(url, params=params, timeout=TIMEOUT)
-                _LAST_REQUEST_TS = time.time()
-            if r.status_code == 429:
-                time.sleep(min(5 * (2 ** attempt), 60))
-                continue
-            if r.status_code == 418:
-                time.sleep(60 * (attempt + 1))
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if attempt < MAX_RETRIES + 1:
-                time.sleep(0.5 * (attempt + 1))
-    raise last_err
 
 
 def get_universe(conn) -> list[str]:
@@ -112,7 +77,7 @@ def fetch_funding(symbol: str, incremental: bool, last_time: datetime | None) ->
     params: dict = {"symbol": symbol, "limit": FUNDING_LIMIT}
     if incremental and last_time is not None:
         params["startTime"] = int(last_time.timestamp() * 1000) + 1
-    data = _get(f"{FAPI_BASE}/fapi/v1/fundingRate", params)
+    data = fapi_get(f"{FAPI_BASE}/fapi/v1/fundingRate", params)
     return [(datetime.fromtimestamp(d["fundingTime"] / 1000.0, tz=timezone.utc),
              float(d["fundingRate"])) for d in data]
 

@@ -25,8 +25,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
@@ -36,57 +34,28 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import websocket  # noqa: E402
 
+from crypto_research.clients.binance_http import fapi_get  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 FAPI_BASE = "https://fapi.binance.com"
 WS_BASE = "wss://fstream.binance.com/stream?streams="
-TIMEOUT = 20
-MAX_RETRIES = 3
-MIN_REQUEST_GAP = 0.3
 BATCH_SIZE = 60                # 每连接合约数（防 URL 超长）
 BUCKET_SECONDS = 300           # 5 分钟桶
 FLUSH_EVERY_S = 5              # 落库批量间隔
 HEARTBEAT_S = 60               # 周期快照 + 心跳间隔（幂等 upsert，兼看护保活）
 MAX_RECONNECT_DELAY = 60
 
-_SESSION = requests.Session()
-_REQUEST_LOCK = threading.Lock()
-_LAST_REQUEST_TS = 0.0
-
-
-def _get(url: str, params: dict) -> list:
-    global _LAST_REQUEST_TS
-    last_err: Exception | None = None
-    for attempt in range(MAX_RETRIES + 2):
-        try:
-            with _REQUEST_LOCK:
-                gap = MIN_REQUEST_GAP - (time.time() - _LAST_REQUEST_TS)
-                if gap > 0:
-                    time.sleep(gap)
-                r = _SESSION.get(url, params=params, timeout=TIMEOUT)
-                _LAST_REQUEST_TS = time.time()
-            if r.status_code in (429, 418):
-                time.sleep(min(60, 60 * (attempt + 1)))
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if attempt < MAX_RETRIES + 1:
-                time.sleep(0.5 * (attempt + 1))
-    raise last_err
-
 
 def get_symbols(min_vol_usd: float, limit: int) -> list[str]:
-    data = _get(f"{FAPI_BASE}/fapi/v1/exchangeInfo", {})
+    data = fapi_get(f"{FAPI_BASE}/fapi/v1/exchangeInfo")
     syms = sorted(
         s["symbol"] for s in data.get("symbols", [])
         if s.get("quoteAsset") == "USDT" and s.get("contractType") == "PERPETUAL"
         and s.get("status") == "TRADING"
     )
     if min_vol_usd:
-        vol = _get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", {})
+        vol = fapi_get(f"{FAPI_BASE}/fapi/v1/ticker/24hr")
         vol_map = {r["symbol"]: float(r.get("quoteVolume") or 0) for r in vol}
         syms = [s for s in syms if vol_map.get(s, 0) >= min_vol_usd]
     if limit:

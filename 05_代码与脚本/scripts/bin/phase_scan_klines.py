@@ -16,13 +16,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
@@ -33,22 +30,16 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 
+from crypto_research.clients.binance_http import fapi_get  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 from crypto_research.db.upsert import execute_many  # noqa: E402
 
 FAPI_BASE = "https://fapi.binance.com"
-TIMEOUT = 20
-MAX_RETRIES = 3                # 网络抖动重试
-MIN_REQUEST_GAP = 0.3         # 全局请求最小间隔（秒），≈3.3 req/s，保守防 Binance 限频封禁
 DEFAULT_INTERVALS = ("5m", "15m", "1h")
 INCREMENTAL_LIMIT = 10          # 增量模式：每币每周期拉最近 N 根
 BACKFILL_PAGE_LIMIT = 1500      # 回填模式：单请求最大 K 线数
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
-
-_SESSION = requests.Session()   # 连接复用，降低被服务器断连概率
-_REQUEST_LOCK = threading.Lock()
-_LAST_REQUEST_TS = 0.0
 
 UPSERT_SQL = """
     INSERT INTO biz.asset_klines
@@ -61,40 +52,6 @@ UPSERT_SQL = """
         quote_vol=EXCLUDED.quote_vol, trade_count=EXCLUDED.trade_count,
         fetched_at=NOW()
 """
-
-
-def _get(url: str, params: dict) -> list:
-    """带全局限频 + 429 指数退避 + 网络重试的 GET。"""
-    global _LAST_REQUEST_TS
-    last_err: Exception | None = None
-    for attempt in range(MAX_RETRIES + 2):
-        try:
-            with _REQUEST_LOCK:
-                gap = MIN_REQUEST_GAP - (time.time() - _LAST_REQUEST_TS)
-                if gap > 0:
-                    time.sleep(gap)
-                r = _SESSION.get(url, params=params, timeout=TIMEOUT)
-                _LAST_REQUEST_TS = time.time()
-            if r.status_code == 429:
-                wait = min(5 * (2 ** attempt), 60)
-                print(f"[throttle] 429 限频，等待 {wait}s 后重试", file=sys.stderr)
-                time.sleep(wait)
-                last_err = RuntimeError(f"429 rate limited (attempt {attempt})")
-                continue
-            if r.status_code == 418:
-                # 418 = IP 被封禁（超限惩罚），需等更久
-                wait = 60 * (attempt + 1)
-                print(f"[throttle] 418 IP 封禁，等待 {wait}s 后重试", file=sys.stderr)
-                time.sleep(wait)
-                last_err = RuntimeError(f"418 ip banned (attempt {attempt})")
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if attempt < MAX_RETRIES + 1:
-                time.sleep(0.5 * (attempt + 1))
-    raise last_err
 
 
 def get_covered(conn, interval: str, end_ms: int) -> set[str]:
@@ -112,7 +69,7 @@ def get_covered(conn, interval: str, end_ms: int) -> set[str]:
 
 def get_usdt_perpetuals() -> list[str]:
     """返回 Binance 全部 TRADING 状态的 USDT 永续合约符号。"""
-    data = _get(f"{FAPI_BASE}/fapi/v1/exchangeInfo", {})
+    data = fapi_get(f"{FAPI_BASE}/fapi/v1/exchangeInfo")
     syms = [
         s["symbol"]
         for s in data.get("symbols", [])
@@ -125,7 +82,7 @@ def get_usdt_perpetuals() -> list[str]:
 
 def get_24h_quote_volume() -> dict[str, float]:
     """返回 {symbol: 24h 成交额(USDT)}。"""
-    data = _get(f"{FAPI_BASE}/fapi/v1/ticker/24hr", {})
+    data = fapi_get(f"{FAPI_BASE}/fapi/v1/ticker/24hr")
     return {row["symbol"]: float(row.get("quoteVolume") or 0) for row in data}
 
 
@@ -158,8 +115,8 @@ def parse_klines_rows(symbol: str, interval: str, raw: list) -> list[tuple]:
 
 
 def fetch_incremental(symbol: str, interval: str) -> list[tuple]:
-    raw = _get(f"{FAPI_BASE}/fapi/v1/klines",
-               {"symbol": symbol, "interval": interval, "limit": INCREMENTAL_LIMIT})
+    raw = fapi_get(f"{FAPI_BASE}/fapi/v1/klines",
+                   {"symbol": symbol, "interval": interval, "limit": INCREMENTAL_LIMIT})
     return parse_klines_rows(symbol, interval, raw)
 
 
@@ -167,7 +124,7 @@ def fetch_backfill(symbol: str, interval: str, start_ms: int, end_ms: int) -> li
     rows: list[tuple] = []
     cursor = start_ms
     while cursor < end_ms:
-        raw = _get(f"{FAPI_BASE}/fapi/v1/klines", {
+        raw = fapi_get(f"{FAPI_BASE}/fapi/v1/klines", {
             "symbol": symbol, "interval": interval,
             "startTime": cursor, "endTime": end_ms, "limit": BACKFILL_PAGE_LIMIT,
         })

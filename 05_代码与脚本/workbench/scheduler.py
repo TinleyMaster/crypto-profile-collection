@@ -124,7 +124,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # chain_transfer_monitor_auto 已迁移为常驻守护进程（supervisord），
     # 不再占用 chain 并发槽位，scheduler 不再调度，避免每天 5 小时级任务饿死其他 chain 任务
     # ("chain_transfer_monitor_auto", "*/30 * * * *", "phase_chain_transfer_monitor_auto.py", [], "大额转账监控（跑到完）", "chain"),
-    ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
+    # watchlist_monitor 已迁移到 scan_daemon 常驻进程（30min 轮询），scheduler 不再调度
+    # ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
     ("binance_bapi_health", "0 9,21 * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每日2次）", "monitor"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
@@ -136,9 +137,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 催化剂模块 ═══
     # P1-2/P1-6: 摄入+AI+thesis 每12h（DeepSeek 额度有限），决策管道慢通道每4h
+    # 快通道（原每15分钟）已迁移为独立常驻进程 catalyst_fast_daemon（supervisord 管理）
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
-    # P1-1: 快通道（15min 一次，仅跑摄入+评级，A 级立即邮件提醒；与 kol_daemon 错峰）
-    ("catalyst_fast_pipeline", "2,17,32,47 * * * *", "phase_catalyst_pipeline.py", ["--fast"], "催化剂快通道（每 15 分钟，A 级即时提醒）", "core"),
     # P1-6: 决策管道慢通道独立调度（4h 一次，仅跑二阶展开+G3G5+巡检，不消耗 LLM 额度）
     ("catalyst_slow_pipeline", "30 */4 * * *", "phase_catalyst_pipeline.py", ["--slow"], "催化剂决策管道慢通道（每 4 小时）", "core"),
 
@@ -184,23 +184,25 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 每日增量：只处理当日未算过的资产，用免费行情自算 all_time ATH/ATL/距高点回撤
     ("perf_from_market_daily", "50 3 * * *", "backfill_perf_from_market_daily.py", ["--min-days", "15"], "ATH/ATL 免费自算回填（每日增量，asset_market_daily 源）", "core"),
 
-    # ═══ 盘面异动扫描系统（P0-P3，2026-09-16）═══
-    # 部署约束：本机出口为共享 IP（FDCservers 新加坡段），会被同 IP 邻居连坐限频封禁；
-    # 采集任务必须运行在独占出口（云端美国节点）。短任务走 scheduler，清算为常驻进程走 supervisord。
-    ("scan_klines", "*/5 * * * *", "phase_scan_klines.py", ["--min-vol-usd", "5000000"],
-     "盘面扫描·K线增量（每5分钟，USDT永续 × 5m/15m/1h，全局限频3.3req/s）", "core"),
-    ("scan_oi_cvd", "2-59/5 * * * *", "phase_oi_cvd_sampler.py", ["--min-vol-usd", "5000000"],
-     "盘面扫描·OI/CVD 5m采样（错峰+2min，游标增量CVD + 1h回填）", "core"),
-    ("scan_main_pool", "*/15 * * * *", "phase_scan_main_pool.py", [],
-     "盘面扫描·主池（L0环境过滤 + L1共振粗筛 + L2八场景，纯读库）", "core"),
-    ("scan_accumulation_pool", "*/30 * * * *", "phase_scan_accumulation_pool.py", [],
-     "盘面扫描·蓄势池（ACC蓄势判定 + BRK突破转主池，纯读库）", "core"),
+    # ═══ 盘面异动扫描系统（已全部迁移为常驻进程 scan_daemon.py，scheduler 不再调度）═══
+    # 迁移原因：5/15/30 分钟级高频任务走调度器有以下问题：
+    #   1. 每次 subprocess 冷启动开销大（2-5s）
+    #   2. 与 core 并发槽位的长任务竞争，容易错过时间窗口
+    #   3. 无法共享 DB 连接池、币对列表、HTTP session 等缓存
+    # 迁移列表：
+    #   - scan_klines           (5min)   → scan_daemon
+    #   - scan_oi_cvd           (5min)   → scan_daemon
+    #   - scan_main_pool        (15min)  → scan_daemon
+    #   - scan_accumulation_pool(30min)  → scan_daemon
+    #   - scan_alert_monitor    (5min)   → scan_daemon
+    #   - watchlist_monitor     (30min)  → scan_daemon
+    #   - catalyst_fast_pipeline(15min)  → catalyst_fast_daemon
+    #
+    # 仍由 scheduler 调度（≥4h 或低频维护任务）：
     ("scan_oi_backfill", "0 1 * * 0", "phase_backfill_oi_history.py", [],
      "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
     ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
      "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
-    ("scan_alert_monitor", "*/5 * * * *", "scan_alert_monitor.py", [],
-     "盘面扫描·盘面触发层（高置信异动+共振核查→实时邮件告警，每 5 分钟）", "monitor"),
 ]
 
 

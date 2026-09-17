@@ -687,6 +687,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "盘面扫描",
     },
+    "scan_execute_signal": {
+        "name": "盘面扫描·P4 执行层（dry-run）",
+        "description": "主池 high 置信 P↑OI↑ 多头信号 → 风控（ATR 底线+AI 止损+2% 硬顶）→ dry-run 打印意图 + 审计落库（--live 需 SIGNAL_TRADE_ENABLED=1）",
+        "script": "phase_execute_scan_signal.py",
+        "default_args": [],
+        "category": "盘面扫描",
+    },
 }
 
 

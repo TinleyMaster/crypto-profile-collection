@@ -196,7 +196,7 @@ def in_cooldown(conn, symbol: str, hours: float) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM biz.scan_signal WHERE symbol=%s AND status='active' "
-            "AND created_at > NOW() - make_interval(hours => %s) LIMIT 1",
+            "AND created_at > NOW() - make_interval(hours => (%s)::int) LIMIT 1",
             (symbol, hours),
         )
         return cur.fetchone() is not None

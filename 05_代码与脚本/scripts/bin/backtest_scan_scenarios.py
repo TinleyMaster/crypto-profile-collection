@@ -38,7 +38,7 @@ import psycopg.rows  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-PRICE_THR_1H = 3.0            # 1h 单根涨跌幅阈值（%）
+PRICE_THR_1H = 4.0            # 1h 单根涨跌幅阈值（%），2026-09-17 阈值敏感性标定：高确定性定位 3.0→4.0
 VOL_RATIO_THR = 2.0           # 量 ≥ N × 近 20 根均值
 LOOKBACK = 20
 HORIZONS = (1, 4, 24)         # 持有小时数

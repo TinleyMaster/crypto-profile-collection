@@ -35,8 +35,8 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 INTERVALS = ("5m", "15m", "1h")
-# 周期 → 单根涨跌幅阈值（%），回测标定前为占位默认值
-PRICE_THR = {"5m": 1.5, "15m": 2.0, "1h": 3.0}
+# 周期 → 单根涨跌幅阈值（%），1h 档由阈值敏感性回测标定（2026-09-17，高确定性定位，3.0→4.0）
+PRICE_THR = {"5m": 1.5, "15m": 2.0, "1h": 4.0}
 VOL_RATIO_THR = 2.0            # 量 ≥ N × 近 20 周期均值
 LOOKBACK_BARS = 20             # 量能均值窗口
 OI_RISE_BARS = 2               # OI 方向取最近 2 桶对比

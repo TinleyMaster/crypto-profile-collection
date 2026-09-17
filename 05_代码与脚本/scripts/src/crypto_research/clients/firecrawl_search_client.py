@@ -4,6 +4,9 @@ Firecrawl Search 客户端封装。
 用于 AI 信号分析时补全数据库中缺失的数据维度（估值、链上、社交热度等）。
 只做搜索 + 结果摘要，不做深度爬取，控制成本和耗时。
 
+2026-09-17 修复：402（配额用尽）全局熔断——配额耗尽后本进程内直接跳过搜索，
+避免早报等关键链路被反复 402/429 重试拖死。
+
 用法：
     client = FirecrawlSearchClient(settings)
     results = client.search("Hyperliquid HYPE MVRV ratio 2024", limit=3)
@@ -52,6 +55,9 @@ class FirecrawlSearchClient:
         # 429 退避参数
         self._max_retries = 3
         self._base_backoff = 5.0  # 首次退避秒数，后续指数增长
+        # 402 配额熔断：Payment Required = 配额用尽，重试无意义；
+        # 置位后本进程内后续所有搜索直接跳过，避免拖慢早报等关键链路
+        self._quota_exhausted = False
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -84,6 +90,10 @@ class FirecrawlSearchClient:
         """
         if not self.is_available():
             raise RuntimeError("Firecrawl API Key 未配置")
+
+        # 402 配额熔断：已确认配额用尽，直接跳过，不再发起请求（避免拖慢关键链路）
+        if self._quota_exhausted:
+            return []
 
         url = f"{self.base_url}/v1/search"
         payload: dict[str, Any] = {
@@ -122,8 +132,15 @@ class FirecrawlSearchClient:
                 break
             except requests.HTTPError as e:
                 last_exc = e
+                if e.response is None:
+                    raise
+                # 402 = 配额用尽：全局熔断，本进程内不再尝试搜索（重试无意义）
+                if e.response.status_code == 402:
+                    self._quota_exhausted = True
+                    print("[firecrawl] 402 配额用尽，本次运行内跳过后续 Web 搜索补全")
+                    return []
                 # 非 429 的 HTTP 错误直接抛出
-                if e.response is None or e.response.status_code != 429:
+                if e.response.status_code != 429:
                     raise
                 # 429 但已用完重试
                 if attempt >= self._max_retries:

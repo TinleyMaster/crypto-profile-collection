@@ -2650,7 +2650,20 @@ def _build_system_prompt_v2() -> str:
 - **估值锚定**：再好的故事，估值极度高估也要谨慎；再差的消息，极度低估也不必恐慌
 - **事件驱动权重**：重大催化剂（融资/上线/监管）权重高于慢变量
 - **风险收益比**：不仅看方向，更看盈亏比和时间窗口
-- **数据诚实**：画像中缺少的数据维度不要瞎编，在点评中说明"数据不足"
+
+## 数据时效与来源规范（重要，必须遵守）
+
+下方画像中带 ✅ 的章节是**数据库实时数据**，带 ❌ 的章节是**数据缺失**。
+
+1. **缺失维度允许合理推断**：数据缺失时，可基于你的知识对方向/逻辑做合理推断（不是编造精确数字），
+   但必须在 score_card 点评或 reason_detail 中明确标注「模型推断（知识截至你的训练截止日期）」。
+2. **时效要求**：引用任何市场数据（价格/市值/解锁/ETF/链上等）时，必须标注数据时间或"截至某日"；
+   若你推断/引用的信息可能已过时（如超过 90 天），明确标注「可能已过时」。
+3. **来源标注**：区分三类信息来源并在输出中体现——
+   - ✅ 章节数据 = 数据库实时（来源：CMC/CoinMetrics/链上/官方等，随数据给出）
+   - "当前触发的信号" = 系统实时信号（触发逻辑自带日期/金额）
+   - 你的补充推断 = 模型知识（无实时来源，标注「模型推断」）
+4. **禁止**：不得把模型推断伪装成实时数据库数据；不得编造精确到小数的价格/占比冒充实测值。
 
 ## 高亮/高危判定
 
@@ -2945,6 +2958,10 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
 
     parts = []
 
+    # ── 开头：分析基准时间（供 AI 判断数据时效）──
+    parts.append(f"【分析基准时间】{time.strftime('%Y-%m-%d')}（当前日期，请据此判断下方各数据的新鲜度）")
+    parts.append("")
+
     # ── 开头：数据覆盖摘要 ──
     total_dims = len(data_sections)
     parts.append(f"【数据覆盖摘要】共 {total_dims} 个数据维度，"
@@ -2956,7 +2973,8 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
     parts.append("")
     parts.append("【重要规则】你必须逐一检查下面所有章节。"
                  "带 ✅ 的章节有具体数据，评分时必须体现；"
-                 "带 ❌ 的章节数据缺失，按中性处理但不得编造数据。")
+                 "带 ❌ 的章节数据缺失：可基于你的知识合理推断方向与逻辑（标注「模型推断」），"
+                 "但不得编造精确数字冒充实时数据；引用任何数据请标注时间与来源（见系统规范）。")
     parts.append("")
 
     # ── 基础信息 ──
@@ -3006,12 +3024,12 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
 
         enrichment = profile.get("web_search_enrichment", {}) or {}
 
-        parts.append("═══ 数据缺失的维度（已尝试 Web 搜索补全）═══")
+        parts.append("═══ 数据缺失的维度（可基于你的知识合理推断，需标注来源与时效）═══")
         parts.append("")
         for title, _ in missing:
             parts.append(f"=== ❌ {title} ===")
 
-            # 查找对应的搜索补全数据
+            # 查找对应的搜索补全数据（Firecrawl 默认关闭，通常为空）
             dim_key = None
             if title in title_to_dim:
                 dim_key = title_to_dim[title]
@@ -3024,7 +3042,9 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
                 parts.append("")
                 parts.append(data["summary_text"])
             else:
-                parts.append("- 数据暂未覆盖，评分时按中性处理。")
+                parts.append("- 数据暂未覆盖：可基于你的知识对方向/逻辑合理推断（不得编造精确数字），"
+                             "标注「模型推断（知识截至你的训练截止日期）」；"
+                             "引用可能过时的信息请标注「可能已过时」。")
             parts.append("")
 
     # ── 当前触发的信号 ──
@@ -3042,7 +3062,8 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
 
     parts.append("")
     parts.append("请基于以上全量画像和触发信号，输出你的六维度评分卡和综合判断。"
-                 "注意：带 ✅ 的维度必须有评分依据，带 ❌ 的维度按中性处理。")
+                 "注意：带 ✅ 的维度必须有评分依据；带 ❌ 的维度可基于你的知识合理推断，"
+                 "但需在点评中标注「模型推断」并注意时效与来源（见系统规范第 2/3 条）。")
 
     return "\n".join(parts)
 

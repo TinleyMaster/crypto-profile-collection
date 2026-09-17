@@ -42,15 +42,28 @@ class LabelEnricher:
                → 回填 onchain_transfer_log 的 label 数组列
     """
 
-    def __init__(self, conn, chain: str, fetcher, resolver=None,
+    def __init__(self, conn, chain: str, fetcher=None, resolver=None,
                  max_batch_size: int = MAX_BATCH_SIZE,
-                 dry_run: bool = False):
+                 dry_run: bool = False,
+                 scrape: bool = True):
+        """
+        Args:
+            conn: DB 连接
+            chain: 链名
+            fetcher: ExplorerLabelFetcher 实例（scrape=True 时必须提供）
+            resolver: AddressLabelResolver 实例（可选，用于比对）
+            max_batch_size: 单次 enrich 最大地址数
+            dry_run: 只打印不写库
+            scrape: 是否启用区块浏览器爬取。False 时只收集无标签地址做统计，不实际爬取。
+                    （服务器 IP 被 Cloudflare 拦截时，建议设为 False，由本地脚本批量补充）
+        """
         self.conn = conn
         self.chain = chain
         self.fetcher = fetcher
         self.resolver = resolver  # AddressLabelResolver 实例（可选，用于比对）
         self.max_batch_size = max_batch_size
         self.dry_run = dry_run
+        self.scrape = scrape
         self._case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
         # 待富化的地址集合（去重）
@@ -115,7 +128,21 @@ class LabelEnricher:
         pending_list = list(self._pending)[: self.max_batch_size]
         self._pending = set(self._pending) - set(pending_list)
 
+        # scrape=False 时：只统计，不爬取
+        if not self.scrape:
+            self._tried.update(pending_list)
+            stats["skipped"] = len(pending_list)
+            stats["no_label"] = len(pending_list)  # 视为"未查到标签"
+            return stats
+
         # 1. 批量查询区块浏览器（带状态统计）
+        if self.fetcher is None:
+            logger.warning(f"[{self.chain}] LabelEnricher scrape=True 但未提供 fetcher，跳过")
+            self._tried.update(pending_list)
+            stats["fetch_failed"] = len(pending_list)
+            stats["skipped"] = len(pending_list)
+            return stats
+
         try:
             if hasattr(self.fetcher, 'fetch_batch_with_stats'):
                 label_map, fetch_stats = self.fetcher.fetch_batch_with_stats(pending_list)

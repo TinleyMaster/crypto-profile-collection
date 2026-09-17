@@ -679,8 +679,10 @@ def main():
                         help="转账数据源：explorer=免Key免费源(默认)；etherscan=需付费Key；"
                              "rpc=公共RPC兜底；auto=explorer→etherscan→rpc 自动降级")
     parser.add_argument("--enrich", action="store_true",
-                        help="开启地址标签旁路富化：遇到无标签地址时自动去区块浏览器查询并沉淀到地址标签库"
-                             "（仅支持 eth/bsc/arbitrum/base/polygon，需注意爬取频率）")
+                        help="开启地址标签富化：收集无标签的陌生地址（默认仅统计，不爬取区块浏览器）")
+    parser.add_argument("--enrich-scrape", action="store_true",
+                        help="配合 --enrich 使用：实际去区块浏览器爬取标签并沉淀到地址标签库"
+                             "（仅支持 eth/base/polygon，服务器 IP 可能被 Cloudflare 拦截，建议本地执行）")
     parser.add_argument("--enrich-delay", type=float, default=2.0,
                         help="富化爬取的请求间隔秒数（默认 2 秒，礼貌限速）")
     args = parser.parse_args()
@@ -749,13 +751,17 @@ def main():
                         # 初始化 enricher（仅 --enrich 且支持的链）
                         if args.enrich and chain in ENRICH_SUPPORTED_CHAINS:
                             try:
-                                proxy = getattr(settings, 'https_proxy', None) or getattr(settings, 'http_proxy', None)
-                                fetcher = ExplorerLabelFetcher(
-                                    chain=chain, proxy=proxy, delay=args.enrich_delay)
+                                if args.enrich_scrape:
+                                    proxy = getattr(settings, 'https_proxy', None) or getattr(settings, 'http_proxy', None)
+                                    fetcher = ExplorerLabelFetcher(
+                                        chain=chain, proxy=proxy, delay=args.enrich_delay)
+                                else:
+                                    fetcher = None
                                 enricher = LabelEnricher(
                                     conn, chain, fetcher=fetcher, resolver=resolver,
-                                    dry_run=args.dry_run)
-                                print(f"  [{chain}] ✨ 已开启地址标签旁路富化")
+                                    dry_run=args.dry_run, scrape=args.enrich_scrape)
+                                scrape_note = "（爬取模式）" if args.enrich_scrape else "（统计模式，不爬取）"
+                                print(f"  [{chain}] ✨ 已开启地址标签富化 {scrape_note}")
                             except Exception as e:
                                 print(f"  [{chain}] ⚠️  富化初始化失败，跳过: {e}")
                                 enricher = None

@@ -516,6 +516,100 @@ def _build_fast_alert_html(row) -> str:
             return "#dc2626"
         return "#6b7280"
 
+    def _build_anomaly_quick_card(row, kind: str) -> str:
+        """构建盘面异动速览小卡片（OI/CVD/资金费率/量比）。"""
+        if kind == "oi":
+            oi_chg = row.get("oi_change_24h_pct")
+            oi_1h = row.get("oi_1h_chg_pct")
+            if oi_chg is None:
+                return ""
+            oi_val = float(oi_chg) if oi_chg is not None else 0
+            color = _pct_color(oi_val)
+            arrow = "↑" if oi_val > 0 else ("↓" if oi_val < 0 else "→")
+            sub = f"1h {_fmt_pct(oi_1h)}" if oi_1h is not None else ""
+            return f"""
+            <div style="flex:1;min-width:100px;background:#fff;border-radius:6px;padding:6px 8px">
+              <div style="color:#6b7280;font-size:10.5px">📊 OI (24h)</div>
+              <div style="font-weight:600;color:{color};margin-top:2px;font-size:13px">{arrow} {_fmt_pct(oi_chg)}</div>
+              {f'<div style="color:#6b7280;font-size:10px">{sub}</div>' if sub else ''}
+            </div>
+            """
+
+        elif kind == "cvd":
+            cvd_r = row.get("cvd_ratio_24h")
+            cvd_1h = row.get("cvd_1h_total")
+            if cvd_r is None and cvd_1h is None:
+                return ""
+            try:
+                cvd_val = float(cvd_r) if cvd_r is not None else 0
+            except (TypeError, ValueError):
+                cvd_val = 0
+            color = _pct_color(cvd_val)
+            arrow = "↑" if cvd_val > 0 else ("↓" if cvd_val < 0 else "→")
+            sub = f"1h ${float(cvd_1h)/1e3:.1f}K" if cvd_1h is not None else ""
+            return f"""
+            <div style="flex:1;min-width:100px;background:#fff;border-radius:6px;padding:6px 8px">
+              <div style="color:#6b7280;font-size:10.5px">💧 CVD (24h)</div>
+              <div style="font-weight:600;color:{color};margin-top:2px;font-size:13px">{arrow} {cvd_val:+.2f}</div>
+              {f'<div style="color:#6b7280;font-size:10px">{sub}</div>' if sub else ''}
+            </div>
+            """
+
+        elif kind == "funding":
+            fr = row.get("funding_rate_pct")
+            if fr is None:
+                return ""
+            try:
+                fr_val = float(fr)
+            except (TypeError, ValueError):
+                fr_val = 0
+            # 正费率=多头拥挤（偏空警报），负费率=空头拥挤（偏多警报）
+            if fr_val > 0.05:
+                color = "#dc2626"  # 多头拥挤，红色警告
+            elif fr_val < -0.05:
+                color = "#059669"  # 空头拥挤，绿色机会
+            else:
+                color = "#6b7280"
+            label = "多头拥挤" if fr_val > 0.01 else ("空头拥挤" if fr_val < -0.01 else "多空均衡")
+            return f"""
+            <div style="flex:1;min-width:100px;background:#fff;border-radius:6px;padding:6px 8px">
+              <div style="color:#6b7280;font-size:10.5px">💰 资金费率</div>
+              <div style="font-weight:600;color:{color};margin-top:2px;font-size:13px">{fr_val:.4f}%</div>
+              <div style="color:#6b7280;font-size:10px">{label}</div>
+            </div>
+            """
+
+        elif kind == "volume":
+            vr = row.get("volume_ratio_7d")
+            v24 = row.get("volume_24h_usd")
+            if vr is None and v24 is None:
+                return ""
+            try:
+                vr_val = float(vr) if vr is not None else 0
+            except (TypeError, ValueError):
+                vr_val = 0
+            if vr_val >= 2.0:
+                color = "#dc2626"  # 大幅放量，警戒
+                label = "大幅放量"
+            elif vr_val >= 1.5:
+                color = "#d97706"  # 温和放量
+                label = "温和放量"
+            elif vr_val <= 0.5:
+                color = "#6b7280"
+                label = "极度缩量"
+            else:
+                color = "#6b7280"
+                label = "量能正常"
+            return f"""
+            <div style="flex:1;min-width:100px;background:#fff;border-radius:6px;padding:6px 8px">
+              <div style="color:#6b7280;font-size:10.5px">📈 量比 (24h/7d)</div>
+              <div style="font-weight:600;color:{color};margin-top:2px;font-size:13px">{vr_val:.2f}x</div>
+              <div style="color:#6b7280;font-size:10px">{label}</div>
+            </div>
+            """
+
+        return ""
+
     def _fmt_price(val):
         if val is None:
             return "—"
@@ -753,6 +847,14 @@ def _build_fast_alert_html(row) -> str:
             <div style="font-size:12px;color:#6b7280">交易结论</div>
             <div style="font-size:17px;font-weight:700;color:{verdict_color};margin-top:4px">{_html.escape(verdict)}</div>
             {f'<div style="font-size:12px;color:#4b5563;margin-top:4px">建议仓位：<b>{_html.escape(pos)}</b></div>' if pos else ''}
+          </div>
+
+          <!-- 盘面异动速览 -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11.5px;margin-bottom:10px">
+            {_build_anomaly_quick_card(row, 'oi')}
+            {_build_anomaly_quick_card(row, 'cvd')}
+            {_build_anomaly_quick_card(row, 'funding')}
+            {_build_anomaly_quick_card(row, 'volume')}
           </div>
 
           <div style="font-size:12px;color:#374151;line-height:1.7;margin-bottom:8px">
@@ -1249,7 +1351,40 @@ def _fetch_signal_row(conn, signal_id: int):
                (SELECT al.total_liquidity_usd
                   FROM biz.asset_liquidity al
                  WHERE al.asset_id = s.asset_id
-                 LIMIT 1) AS liquidity_score
+                 LIMIT 1) AS liquidity_score,
+               -- 衍生品 24h 聚合（OI / 资金费率 / CVD）
+               ad.total_oi_usd AS oi_total_24h,
+               ad.oi_change_24h_pct,
+               ad.funding_rate_pct,
+               ad.funding_rate_7d_avg,
+               ad.cvd_24h_usd,
+               ad.cvd_ratio_24h,
+               ad.available_exchanges AS derivative_exchanges,
+               -- OI/CVD 时序（1h / 4h 变化率，从 oi_cvd_snapshot 计算）
+               oi_snap.oi_1h_chg_pct,
+               oi_snap.oi_4h_chg_pct,
+               oi_snap.cvd_1h_usd AS cvd_1h_total,
+               oi_snap.vol_1h_usd,
+               -- 最近 24h 扫描信号
+               (SELECT json_agg(json_build_object(
+                   'signal_ts', ss.signal_ts,
+                   'pool', ss.pool,
+                   'scenario', ss.scenario,
+                   'timeframe', ss.timeframe,
+                   'confidence', ss.confidence,
+                   'p_dir', ss.p_dir,
+                   'price_chg_pct', ss.price_chg_pct,
+                   'vol_state', ss.vol_state,
+                   'vol_ratio', ss.vol_ratio,
+                   'oi_dir', ss.oi_dir,
+                   'oi_chg_pct', ss.oi_chg_pct,
+                   'cvd_dir', ss.cvd_dir
+                 ) ORDER BY ss.signal_ts DESC)
+                  FROM biz.scan_signal ss
+                 WHERE ss.symbol = (a.canonical_symbol || 'USDT')
+                   AND ss.signal_ts >= NOW() - INTERVAL '24 hours'
+                   AND ss.status != 'stale'
+                 LIMIT 10) AS recent_scan_signals
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
@@ -1277,6 +1412,62 @@ def _fetch_signal_row(conn, signal_id: int):
                  LIMIT 7
               ) md2
         ) md_avg ON true
+        -- 衍生品 24h 快照
+        LEFT JOIN biz.asset_derivatives ad ON ad.asset_id = s.asset_id
+        -- OI/CVD 时序（从 oi_cvd_snapshot 计算 1h/4h 变化）
+        LEFT JOIN LATERAL (
+            WITH latest AS (
+                SELECT oi_usd, cvd_1h_usd, vol_5m_usd, ts
+                  FROM biz.oi_cvd_snapshot
+                 WHERE symbol = (a.canonical_symbol || 'USDT')
+                   AND exchange = 'binance'
+                 ORDER BY ts DESC
+                 LIMIT 1
+            ),
+            one_hour_ago AS (
+                SELECT oi_usd
+                  FROM biz.oi_cvd_snapshot
+                 WHERE symbol = (a.canonical_symbol || 'USDT')
+                   AND exchange = 'binance'
+                   AND ts <= (SELECT ts FROM latest) - INTERVAL '1 hour'
+                 ORDER BY ts DESC
+                 LIMIT 1
+            ),
+            four_hour_ago AS (
+                SELECT oi_usd
+                  FROM biz.oi_cvd_snapshot
+                 WHERE symbol = (a.canonical_symbol || 'USDT')
+                   AND exchange = 'binance'
+                   AND ts <= (SELECT ts FROM latest) - INTERVAL '4 hours'
+                 ORDER BY ts DESC
+                 LIMIT 1
+            ),
+            vol_1h AS (
+                SELECT SUM(vol_5m_usd) AS vol_1h_usd
+                  FROM biz.oi_cvd_snapshot
+                 WHERE symbol = (a.canonical_symbol || 'USDT')
+                   AND exchange = 'binance'
+                   AND ts > (SELECT ts FROM latest) - INTERVAL '1 hour'
+            )
+            SELECT
+                (SELECT oi_usd FROM latest) AS oi_latest,
+                CASE
+                    WHEN (SELECT oi_usd FROM one_hour_ago) > 0
+                         AND (SELECT oi_usd FROM latest) > 0
+                    THEN ROUND(((SELECT oi_usd FROM latest) - (SELECT oi_usd FROM one_hour_ago))
+                              / (SELECT oi_usd FROM one_hour_ago) * 100, 2)
+                    ELSE NULL
+                END AS oi_1h_chg_pct,
+                CASE
+                    WHEN (SELECT oi_usd FROM four_hour_ago) > 0
+                         AND (SELECT oi_usd FROM latest) > 0
+                    THEN ROUND(((SELECT oi_usd FROM latest) - (SELECT oi_usd FROM four_hour_ago))
+                              / (SELECT oi_usd FROM four_hour_ago) * 100, 2)
+                    ELSE NULL
+                END AS oi_4h_chg_pct,
+                (SELECT cvd_1h_usd FROM latest) AS cvd_1h_usd,
+                (SELECT vol_1h_usd FROM vol_1h) AS vol_1h_usd
+        ) oi_snap ON true
         WHERE s.signal_id = %s
     """, (signal_id,)).fetchone()
     return dict(row) if row else None

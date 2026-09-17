@@ -70,10 +70,21 @@ _DEEP_REVIEW_SYSTEM_PROMPT = (
     "   如果代币名称/描述/赛道与催化剂中的项目明显不符（如同名不同币、ticker冲突），\n"
     "   必须将 asset_match_confidence 设为 low，并在 overall_review 中明确指出，\n"
     "   同时 verdict 应降级为「不建议参与」或「建议观望」。\n"
-    "7. 盘面异动：结合 24h 成交量与过去 7 日均量的比值、24h/7d 涨跌幅判断市场是否已提前反应。\n"
-    "   - 若量比 >= 2 且伴随大幅涨跌，说明资金已在异动，需警惕追高/接盘风险；\n"
-    "   - 若量比 < 1 且价格平稳，说明市场尚未充分关注，可能存在预期差；\n"
-    "   - 需将盘面异动情况纳入开仓时机与仓位决策的重要参考。\n\n"
+    "7. 盘面异动分析原则：结合价量、持仓量(OI)、资金费率、CVD等多维度判断市场是否已提前反应：\n"
+    "   ① 价量维度：量比(24h/7d均量)与涨跌幅配合，量比≥2+大幅涨跌=资金已异动，警惕追高；\n"
+    "     量比<1+价格平稳=市场未充分关注，可能有预期差。\n"
+    "   ② OI维度：P↑OI↑=多头主动建仓(趋势延续)；P↑OI↓=空头回补/多头平仓(反弹尾声)；\n"
+    "     P↓OI↑=空头主动建仓；P↓OI↓=空头止盈(跌势衰竭)。\n"
+    "     OI是领先指标，OI变化方向比绝对量重要；关注1h/4h/24h多周期一致性。\n"
+    "   ③ CVD维度：正CVD=主动买盘占优，负CVD=主动卖盘占优；\n"
+    "     CVD与价格方向一致=趋势健康，背离=警惕反转。\n"
+    "   ④ 资金费率：正费率=多头拥挤需付息(多头风险)，负费率=空头拥挤(逼空潜力)；\n"
+    "     极端费率(|费率|>0.1%/8h)=过热信号，不作为触发条件但提示拥挤风险。\n"
+    "   ⑤ 场景映射：结合 P×OI×CVD×VOL 四维度对照8场景(S1~S8)判断异动性质；\n"
+    "     仅VOL↑场景采信为交易信号，VOL↓一律降级为观察。\n"
+    "   ⑥ 扫描信号共振：若最近24h扫描系统已命中同向高置信信号，\n"
+    "     说明盘面已启动，需评估是顺势跟进还是已过最佳入场点。\n"
+    "   盘面异动分析必须纳入开仓时机、仓位决策和止损设置的核心参考。\n\n"
     "只输出 JSON，不要其他内容。"
 )
 
@@ -122,12 +133,40 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 - 流动性（24h 总流动性）：{liquidity_score}
 - 风险等级：{risk_level}
 
-## 六、盘面异动
+## 六、盘面异动分析（P × OI × CVD × VOL 四维）
+
+### 6.1 价量（Price × Volume）
+- 当前价格：{current_price}
+- 24h 涨跌幅：{change_24h}%
+- 7d 涨跌幅：{change_7d}%
 - 24h 成交量：{volume_24h_usd} 美元
 - 7 日均量：{avg_volume_7d} 美元
-- 量比（24h / 7日均量）：{volume_ratio_7d}
-- 7 日涨跌幅：{change_7d}%
-- 异动判定：{anomaly_summary}
+- 量比（24h / 7d均量）：{volume_ratio_7d}
+- 价量异动判定：{anomaly_summary}
+
+### 6.2 持仓量 OI（Open Interest）
+- 总持仓价值（24h）：{oi_total_usd}
+- 24h OI 变化：{oi_chg_24h}%
+- 1h OI 变化：{oi_chg_1h}%
+- 4h OI 变化：{oi_chg_4h}%
+- OI 方向判定：{oi_direction_summary}
+
+### 6.3 资金费率（Funding Rate）
+- 当前资金费率（8h）：{funding_rate}
+- 7 日平均费率：{funding_rate_7d}
+- 费率含义：{funding_interpretation}
+
+### 6.4 成交量差 CVD（Cumulative Volume Delta）
+- 24h CVD：{cvd_24h_usd} 美元
+- 24h CVD 比率：{cvd_ratio_24h}
+- 1h CVD：{cvd_1h_usd} 美元
+- CVD 方向判定：{cvd_direction_summary}
+
+### 6.5 近期扫描信号（最近 24h）
+{recent_scan_signals_text}
+
+### 6.6 综合异动场景判定
+{scenario_mapping_text}
 
 ## 七、输出 JSON 格式
 {{
@@ -491,6 +530,224 @@ def _build_deep_review_prompt(d: dict) -> str:
 
     anomaly_summary = "；".join(anomaly_parts) if anomaly_parts else "数据不足，无法判定"
 
+    # ---- OI 持仓量分析 ----
+    oi_total = d.get("oi_total_24h")
+    oi_chg_24h = d.get("oi_change_24h_pct")
+    oi_chg_1h = d.get("oi_1h_chg_pct")
+    oi_chg_4h = d.get("oi_4h_chg_pct")
+
+    oi_total_text = _fmt_mcap(oi_total) if oi_total is not None and oi_total != "" else "未知"
+    oi_chg_24h_text = _pct(oi_chg_24h) if oi_chg_24h is not None else "N/A"
+    oi_chg_1h_text = _pct(oi_chg_1h) if oi_chg_1h is not None else "N/A"
+    oi_chg_4h_text = _pct(oi_chg_4h) if oi_chg_4h is not None else "N/A"
+
+    # OI 方向判定
+    oi_parts = []
+    try:
+        oi_24 = float(oi_chg_24h) if oi_chg_24h is not None and oi_chg_24h != "" else None
+        oi_1 = float(oi_chg_1h) if oi_chg_1h is not None and oi_chg_1h != "" else None
+        oi_4 = float(oi_chg_4h) if oi_chg_4h is not None and oi_chg_4h != "" else None
+
+        # 多周期一致性判断
+        signs = []
+        if oi_1 is not None:
+            signs.append(oi_1)
+        if oi_4 is not None:
+            signs.append(oi_4)
+        if oi_24 is not None:
+            signs.append(oi_24)
+
+        if signs:
+            all_up = all(s > 0 for s in signs)
+            all_down = all(s < 0 for s in signs)
+            if all_up:
+                oi_parts.append("多周期一致抬升（多头/空头主动建仓）")
+            elif all_down:
+                oi_parts.append("多周期一致下降（仓位平仓/离场）")
+            else:
+                oi_parts.append("多周期方向分化（短期与中期不一致）")
+
+        # 幅度判断（24h 为主）
+        if oi_24 is not None:
+            if oi_24 >= 10:
+                oi_parts.append(f"24h 大幅抬升 +{oi_24:.1f}%")
+            elif oi_24 >= 5:
+                oi_parts.append(f"24h 明显抬升 +{oi_24:.1f}%")
+            elif oi_24 <= -10:
+                oi_parts.append(f"24h 大幅下降 {oi_24:.1f}%")
+            elif oi_24 <= -5:
+                oi_parts.append(f"24h 明显下降 {oi_24:.1f}%")
+    except (TypeError, ValueError):
+        pass
+
+    oi_direction_summary = "；".join(oi_parts) if oi_parts else "数据不足，无法判定"
+
+    # ---- 资金费率 ----
+    fr = d.get("funding_rate_pct")
+    fr_7d = d.get("funding_rate_7d_avg")
+
+    if fr is not None and fr != "":
+        try:
+            fr_val = float(fr)
+            funding_rate_text = f"{fr_val:.4f}%"
+        except (TypeError, ValueError):
+            fr_val = None
+            funding_rate_text = str(fr)
+    else:
+        fr_val = None
+        funding_rate_text = "未知"
+
+    if fr_7d is not None and fr_7d != "":
+        try:
+            funding_rate_7d_text = f"{float(fr_7d):.4f}%"
+        except (TypeError, ValueError):
+            funding_rate_7d_text = str(fr_7d)
+    else:
+        funding_rate_7d_text = "N/A"
+
+    # 费率含义
+    if fr_val is not None:
+        if fr_val > 0.1:
+            funding_interp = "多头极度拥挤（正费率 > 0.1%/8h），多头持续支付高额利息，警惕多头踩踏/回调风险"
+        elif fr_val > 0.05:
+            funding_interp = "多头偏拥挤（正费率 0.05%~0.1%），多头占优但需关注回调风险"
+        elif fr_val > 0.01:
+            funding_interp = "多头微占优（正费率 < 0.05%），市场情绪偏多但不极端"
+        elif fr_val > -0.01:
+            funding_interp = "多空均衡（费率接近 0），市场方向不明确"
+        elif fr_val > -0.05:
+            funding_interp = "空头微占优（负费率 > -0.05%），市场偏空但不极端"
+        elif fr_val > -0.1:
+            funding_interp = "空头偏拥挤（负费率 -0.1%~-0.05%），空头占优，存在逼空反弹潜力"
+        else:
+            funding_interp = "空头极度拥挤（负费率 < -0.1%/8h），空头持续支付高额利息，逼空反弹概率高"
+    else:
+        funding_interp = "数据不足"
+
+    # ---- CVD 成交量差 ----
+    cvd_24h = d.get("cvd_24h_usd")
+    cvd_ratio_24 = d.get("cvd_ratio_24h")
+    cvd_1h = d.get("cvd_1h_total")
+
+    cvd_24h_text = _fmt_mcap(cvd_24h) if cvd_24h is not None and cvd_24h != "" else "未知"
+    cvd_1h_text = _fmt_mcap(cvd_1h) if cvd_1h is not None and cvd_1h != "" else "未知"
+    if cvd_ratio_24 is not None and cvd_ratio_24 != "":
+        try:
+            cvd_ratio_text = f"{float(cvd_ratio_24):+.2f}"
+        except (TypeError, ValueError):
+            cvd_ratio_text = str(cvd_ratio_24)
+    else:
+        cvd_ratio_text = "N/A"
+
+    cvd_parts = []
+    try:
+        cv1 = float(cvd_1h) if cvd_1h is not None and cvd_1h != "" else None
+        cv24 = float(cvd_24h) if cvd_24h is not None and cvd_24h != "" else None
+
+        if cv24 is not None:
+            if cv24 > 0:
+                cvd_parts.append(f"24h 主动买盘占优（CVD +{cv24/1e6:.2f}M）")
+            elif cv24 < 0:
+                cvd_parts.append(f"24h 主动卖盘占优（CVD {cv24/1e6:.2f}M）")
+
+        if cv1 is not None:
+            if cv1 > 0:
+                cvd_parts.append(f"1h 买盘主导（+{cv1/1e3:.1f}K）")
+            elif cv1 < 0:
+                cvd_parts.append(f"1h 卖盘主导（{cv1/1e3:.1f}K）")
+    except (TypeError, ValueError):
+        pass
+
+    cvd_direction_summary = "；".join(cvd_parts) if cvd_parts else "数据不足，无法判定"
+
+    # ---- 近期扫描信号 ----
+    scan_signals = d.get("recent_scan_signals")
+    if scan_signals and isinstance(scan_signals, list) and len(scan_signals) > 0:
+        sig_lines = []
+        for sig in scan_signals[:5]:
+            pool_name = "主池" if sig.get("pool") == "main" else ("蓄势池" if sig.get("pool") == "accumulation" else sig.get("pool", "?"))
+            sc = sig.get("scenario", "?")
+            tf = sig.get("timeframe", "?")
+            conf = sig.get("confidence", "?")
+            conf_cn = {"high": "高", "medium": "中", "low": "低"}.get(conf, conf)
+            p_dir = sig.get("p_dir", "?")
+            p_chg = sig.get("price_chg_pct", "?")
+            p_disp = f"{p_dir}{p_chg}%" if p_chg is not None else p_dir
+            oi_dir = sig.get("oi_dir", "?")
+            cvd_dir = sig.get("cvd_dir", "?")
+            vol_s = sig.get("vol_state", "?")
+            ts = sig.get("signal_ts", "")
+            ts_str = str(ts)[5:16] if ts else ""
+            sig_lines.append(
+                f"  - [{ts_str}] {pool_name} {sc} ({tf}, {conf_cn}置信) "
+                f"P={p_disp} OI={oi_dir} CVD={cvd_dir} VOL={vol_s}"
+            )
+        recent_scan_signals_text = "\n".join(sig_lines) + f"\n  （共 {len(scan_signals)} 条，显示最近 5 条）"
+    else:
+        recent_scan_signals_text = "  最近 24h 无扫描信号命中"
+
+    # ---- 综合异动场景映射（S1~S8） ----
+    try:
+        # 根据 P(24h) × OI(24h) × CVD(24h) × VOL(量比) 粗判场景
+        c24_val = float(change_24h_val) if change_24h_val is not None and change_24h_val != "" else None
+        vr_val = float(vol_ratio) if vol_ratio is not None and vol_ratio != "" else None
+        oi24_val = float(oi_chg_24h) if oi_chg_24h is not None and oi_chg_24h != "" else None
+        cv24_val = float(cvd_24h) if cvd_24h is not None and cvd_24h != "" else None
+
+        p_up = c24_val is not None and c24_val > 0
+        oi_up = oi24_val is not None and oi24_val > 0
+        cvd_up = cv24_val is not None and cv24_val > 0
+        vol_up = vr_val is not None and vr_val >= 1.5  # 量比 >= 1.5 视为放量
+
+        scenario = None
+        scenario_desc = ""
+        if c24_val is not None and oi24_val is not None and cv24_val is not None:
+            if p_up and oi_up and cvd_up and vol_up:
+                scenario = "S1"
+                scenario_desc = "S1：价格↑ + OI↑ + CVD↑ + VOL↑ = 现货买盘强 + 合约新开多仓，真实多头进攻，多头趋势延续"
+            elif p_up and oi_up and not cvd_up and vol_up:
+                scenario = "S2"
+                scenario_desc = "S2：价格↑ + OI↑ + CVD↓ + VOL↑ = 现货主动卖，上涨靠合约杠杆推动，警惕诱多回调"
+            elif not p_up and oi_up and not cvd_up and vol_up:
+                scenario = "S3"
+                scenario_desc = "S3：价格↓ + OI↑ + CVD↓ + VOL↑ = 现货砸盘 + 合约新开空单，真实空头，空头趋势延续"
+            elif not p_up and oi_up and cvd_up and vol_up:
+                scenario = "S4"
+                scenario_desc = "S4：价格↓ + OI↑ + CVD↑ + VOL↑ = 现货承接，下跌由合约空头砸出，存在反弹潜力（诱空）"
+            elif p_up and not oi_up and cvd_up and vol_up:
+                scenario = "S5"
+                scenario_desc = "S5：价格↑ + OI↓ + CVD↑ + VOL↑ = 合约平仓 + 现货买入，获利了结，反弹近尾声"
+            elif p_up and not oi_up and not cvd_up and vol_up:
+                scenario = "S6"
+                scenario_desc = "S6：价格↑ + OI↓ + CVD↓ + VOL↑ = 空头回补，非新多进场，修复反弹"
+            elif not p_up and not oi_up and not cvd_up and vol_up:
+                scenario = "S7"
+                scenario_desc = "S7：价格↓ + OI↓ + CVD↓ + VOL↑ = 空头止盈平仓，跌势衰竭信号"
+            elif not p_up and not oi_up and cvd_up and vol_up:
+                scenario = "S8"
+                scenario_desc = "S8：价格↓ + OI↓ + CVD↑ + VOL↑ = 现货承接 + 空头离场，抛压释放，见底反弹"
+
+        if scenario:
+            # 置信度说明
+            vol_note = ""
+            if not vol_up and vr_val is not None:
+                vol_note = f"\n  ⚠️ 注意：量比仅 {vr_val:.2f}x，未达到放量阈值(1.5x)，按设计方案 VOL↓ 场景应降级为观察"
+            scenario_mapping_text = f"  {scenario_desc}{vol_note}"
+        else:
+            missing = []
+            if c24_val is None:
+                missing.append("24h涨跌")
+            if oi24_val is None:
+                missing.append("24h OI变化")
+            if cv24_val is None:
+                missing.append("24h CVD")
+            if missing:
+                scenario_mapping_text = f"  数据不足（缺：{'、'.join(missing)}），无法判定 8 场景映射"
+            else:
+                scenario_mapping_text = f"  未完全匹配典型场景（P={c24_val:+.2f}%, OI={oi24_val:+.2f}%, CVD={cv24_val/1e3:+.1f}K, 量比={vr_val:.2f}x）"
+    except (TypeError, ValueError):
+        scenario_mapping_text = "  数据异常，无法计算场景映射"
+
     return _DEEP_REVIEW_USER_TEMPLATE.format(
         symbol=d.get("symbol", "?"),
         asset_name=d.get("canonical_name", d.get("asset_name", "?")),
@@ -533,12 +790,30 @@ def _build_deep_review_prompt(d: dict) -> str:
         invalidation=d.get("invalidation") or "未设置",
         liquidity_score=liquidity_text,
         risk_level=risk_level,
-        # 盘面异动
+        # 盘面异动 - 价量
         volume_24h_usd=volume_24h_text,
         avg_volume_7d=avg_volume_7d_text,
         volume_ratio_7d=vol_ratio_text,
         change_7d=change_7d_text,
         anomaly_summary=anomaly_summary,
+        # 盘面异动 - OI
+        oi_total_usd=oi_total_text,
+        oi_chg_24h=oi_chg_24h_text,
+        oi_chg_1h=oi_chg_1h_text,
+        oi_chg_4h=oi_chg_4h_text,
+        oi_direction_summary=oi_direction_summary,
+        # 盘面异动 - 资金费率
+        funding_rate=funding_rate_text,
+        funding_rate_7d=funding_rate_7d_text,
+        funding_interpretation=funding_interp,
+        # 盘面异动 - CVD
+        cvd_24h_usd=cvd_24h_text,
+        cvd_ratio_24h=cvd_ratio_text,
+        cvd_1h_usd=cvd_1h_text,
+        cvd_direction_summary=cvd_direction_summary,
+        # 盘面异动 - 扫描信号 & 场景映射
+        recent_scan_signals_text=recent_scan_signals_text,
+        scenario_mapping_text=scenario_mapping_text,
     )
 
 

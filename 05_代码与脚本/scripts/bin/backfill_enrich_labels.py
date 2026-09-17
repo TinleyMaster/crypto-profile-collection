@@ -8,13 +8,17 @@
 
 支持增量：只查 onchain_transfer_log 中出现过、但 onchain_address_label 中没有的地址。
 幂等：已有标签的地址跳过，可重复执行。
+支持并发：ThreadPoolExecutor 多线程并发爬取，默认 5 线程。
 
 用法：
     # 预览（不爬取、不写入，只看有多少陌生地址）
     python backfill_enrich_labels.py --dry-run --chain eth
 
-    # 实际执行（默认 eth 链，每次最多 100 个地址）
+    # 实际执行（默认 eth 链，5 并发，每次最多 100 个地址）
     python backfill_enrich_labels.py --chain eth --limit 100
+
+    # 高并发跑全量（10 线程，注意别太猛被封）
+    python backfill_enrich_labels.py --chain eth --limit 0 --concurrency 10
 
     # 多条链一起跑
     python backfill_enrich_labels.py --chain eth,base,polygon --limit 200
@@ -25,7 +29,9 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SRC_DIR = SCRIPT_DIR.parent / "src"
@@ -155,10 +161,12 @@ def main():
                         help=f"链名，多个用逗号分隔（支持: {', '.join(sorted(ENRICH_SUPPORTED_CHAINS))}）")
     parser.add_argument("--limit", type=int, default=100,
                         help="每条链最多爬多少个地址（默认 100，优先爬高频地址）")
-    parser.add_argument("--batch-size", type=int, default=20,
-                        help="每批爬多少个地址后写库（默认 20）")
-    parser.add_argument("--delay", type=float, default=1.5,
-                        help="每个请求的间隔秒数（默认 1.5 秒，礼貌限速）")
+    parser.add_argument("--batch-size", type=int, default=50,
+                        help="每多少个地址写库一次（默认 50，并发模式下建议等于或大于 concurrency）")
+    parser.add_argument("--delay", type=float, default=0.5,
+                        help="每个请求的最小间隔秒数（默认 0.5 秒，并发模式下为每线程延迟）")
+    parser.add_argument("--concurrency", type=int, default=5,
+                        help="并发爬取线程数（默认 5，建议不超过 10 避免触发反爬）")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：只统计，不爬取、不写库")
     parser.add_argument("--db-url", type=str, default=None,
@@ -184,7 +192,7 @@ def main():
 
 
 def _run_for_chains(conn, chains: list[str], args) -> None:
-    """对多条链依次执行富化。"""
+    """对多条链依次执行富化（并发爬取 + 批量写库）。"""
     for chain in chains:
         print(f"\n{'=' * 60}")
         print(f"链: {chain}")
@@ -193,7 +201,9 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
         # 先预览总量
         total_unlabeled = count_total_unlabeled(conn, chain)
         print(f"  无标签地址总数（估算）: {total_unlabeled}")
-        print(f"  本次计划爬取: {min(args.limit, total_unlabeled)} 个")
+        effective_limit = args.limit if args.limit > 0 else total_unlabeled
+        print(f"  本次计划爬取: {min(effective_limit, total_unlabeled)} 个")
+        print(f"  并发数: {args.concurrency}")
 
         if args.dry_run:
             print("  [dry-run] 跳过实际爬取")
@@ -204,7 +214,7 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
             continue
 
         # 捞出待爬地址
-        addresses = get_unlabeled_addresses(conn, chain, args.limit)
+        addresses = get_unlabeled_addresses(conn, chain, effective_limit)
         if not addresses:
             print("  没有找到待富化地址")
             continue
@@ -212,69 +222,230 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
         print(f"  捞出 {len(addresses)} 个待爬地址（按频次排序）")
         print(f"  前 5 个: {addresses[:5]}")
 
-        # 初始化 fetcher + enricher
+        # 初始化 resolver（DB 查询用，单线程安全）
         resolver = AddressLabelResolver(conn, chain)
-        fetcher = ExplorerLabelFetcher(chain=chain, delay=args.delay)
-        enricher = LabelEnricher(
-            conn, chain,
-            fetcher=fetcher,
-            resolver=resolver,
-            max_batch_size=args.batch_size,
-            dry_run=args.dry_run,
-            scrape=True,
-        )
 
-        total_fetched = 0
-        total_inserted = 0
-        total_backfilled = 0
-        total_no_label = 0
-        total_failed = 0
+        # 统计变量（多线程共享，用锁保护）
+        stats_lock = Lock()
+        result_map: dict[str, dict] = {}  # addr -> label_info
+        stat_counts = {
+            "ok": 0, "no_label": 0,
+            "http_403": 0, "http_429": 0, "http_other": 0, "network_error": 0,
+        }
+        inserted_total = 0
+        backfilled_total = 0
+        done_count = 0
         t0 = time.time()
 
-        # 分批爬取 + 写库
-        for i in range(0, len(addresses), args.batch_size):
-            batch = addresses[i:i + args.batch_size]
-            enricher.collect(batch)
-            stats = enricher.flush()
+        # 并发爬取函数：每个线程一个 fetcher（requests 非线程安全）
+        def _fetch_one(addr: str, fetcher: ExplorerLabelFetcher):
+            info, status = fetcher.fetch_with_status(addr)
+            return addr, info, status
 
-            total_fetched += stats.get("fetched", 0)
-            total_inserted += stats.get("inserted", 0)
-            total_backfilled += stats.get("backfilled", 0)
-            total_no_label += stats.get("no_label", 0)
-            total_failed += stats.get("fetch_failed", 0)
+        # 用线程局部变量存每个线程的 fetcher
+        thread_local = {}
 
-            progress = min(i + args.batch_size, len(addresses))
-            pct = progress / len(addresses) * 100
+        def _worker(addr: str):
+            # 每个线程创建自己的 fetcher
+            thread_id = _thread_id()
+            if thread_id not in thread_local:
+                thread_local[thread_id] = ExplorerLabelFetcher(
+                    chain=chain, delay=args.delay)
+            fetcher = thread_local[thread_id]
+            return _fetch_one(addr, fetcher)
 
-            fail_detail = ""
-            if stats.get("fetch_failed", 0) > 0:
-                fd = stats.get("fetch_detail", {})
-                parts = []
-                if fd.get("http_403", 0):
-                    parts.append(f"403×{fd['http_403']}")
-                if fd.get("http_429", 0):
-                    parts.append(f"429×{fd['http_429']}")
-                if fd.get("network_error", 0):
-                    parts.append(f"网络×{fd['network_error']}")
-                if parts:
-                    fail_detail = f"（失败: {', '.join(parts)}）"
+        # 分批提交 + 每批写完库再下一批（内存可控 + 避免连接池打爆）
+        batch_size = args.batch_size
+        for batch_start in range(0, len(addresses), batch_size):
+            batch = addresses[batch_start:batch_start + batch_size]
+            batch_results: dict[str, dict] = {}
+            batch_stats = {k: 0 for k in stat_counts}
 
-            print(f"  [{progress}/{len(addresses)}] {pct:.0f}% | "
-                  f"本批查到标签 {stats.get('fetched', 0)} 个, "
-                  f"入库 {stats.get('inserted', 0)} 条, "
-                  f"回填 {stats.get('backfilled', 0)} 条{fail_detail}")
+            # 并发爬取本批
+            with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                futures = {pool.submit(_worker, addr): addr for addr in batch}
+                for future in as_completed(futures):
+                    addr, info, status = future.result()
+                    with stats_lock:
+                        done_count += 1
+                        if info:
+                            batch_results[addr.lower()] = info
+                            batch_stats["ok"] += 1
+                        elif status in batch_stats:
+                            batch_stats[status] += 1
+                        else:
+                            batch_stats["no_label"] += 1
 
-        enricher.close()
+                    # 进度输出（每 10 个打一次）
+                    if done_count % max(10, args.concurrency * 2) == 0 or done_count == len(addresses):
+                        pct = done_count / len(addresses) * 100
+                        elapsed = time.time() - t0
+                        rate = done_count / elapsed if elapsed > 0 else 0
+                        eta = (len(addresses) - done_count) / rate if rate > 0 else 0
+                        print(f"  进度: {done_count}/{len(addresses)} ({pct:.0f}%) | "
+                              f"已查到标签 {stat_counts['ok'] + batch_stats['ok']} 个 | "
+                              f"速度 {rate:.1f}/s | 预计剩余 {eta/60:.1f} 分钟")
+
+            # 本批写库（单线程，串行安全）
+            if batch_results:
+                try:
+                    # 构造 label_map 格式给 enricher 用
+                    label_map = batch_results
+                    # 直接用 enricher 的写库逻辑
+                    from crypto_research.clients.label_enricher import (
+                        ENRICH_CONFIDENCE, ENRICH_SOURCE, ALLOWED_LABEL_TYPES,
+                    )
+                    import json
+
+                    filtered = {
+                        a: info for a, info in label_map.items()
+                        if info.get("label_type") in ALLOWED_LABEL_TYPES
+                    }
+
+                    if filtered:
+                        inserted = 0
+                        with conn.cursor() as cur:
+                            for addr_l, info in filtered.items():
+                                raw_meta = json.dumps({
+                                    "label_text": info["label_text"],
+                                    "fetched_from": "address_page",
+                                }, ensure_ascii=False)
+                                cur.execute("""
+                                    INSERT INTO biz.onchain_address_label
+                                        (address, chain, label_type, label_name, display_name,
+                                         confidence, source, raw_meta)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (address, chain, label_type, label_name) DO NOTHING
+                                """, (
+                                    addr_l, chain, info["label_type"],
+                                    info["display_name"], info["display_name"],
+                                    ENRICH_CONFIDENCE, ENRICH_SOURCE, raw_meta,
+                                ))
+                                if cur.rowcount:
+                                    inserted += 1
+
+                            # 也写 exchange_wallet
+                            for addr_l, info in filtered.items():
+                                if not info["is_exchange"]:
+                                    continue
+                                cur.execute("""
+                                    INSERT INTO biz.onchain_exchange_wallet
+                                        (address, exchange_name, chain, label, confidence, source)
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (address, chain) DO NOTHING
+                                """, (
+                                    addr_l, info["display_name"], chain,
+                                    info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,
+                                ))
+
+                        conn.commit()
+                        inserted_total += inserted
+
+                        # 回填转账记录
+                        from crypto_research.clients.label_enricher import CASE_SENSITIVE_CHAINS as CS_CHAINS
+                        case_sensitive = chain in CS_CHAINS
+
+                        with conn.cursor() as cur:
+                            # 刷新 resolver 缓存
+                            resolver._no_label -= set(filtered.keys())
+                            addr_list = list(filtered.keys())
+                            resolver.resolve_batch(addr_list)
+
+                            # 临时表方式回填
+                            cur.execute("""
+                                CREATE TEMP TABLE tmp_enrich_backfill (
+                                    address TEXT PRIMARY KEY,
+                                    label_types TEXT[],
+                                    label_names TEXT[]
+                                ) ON COMMIT DROP
+                            """)
+                            rows = []
+                            for a in addr_list:
+                                info = resolver.resolve(a)
+                                if info["types"]:
+                                    rows.append((a, info["types"], info["names"]))
+                            if rows:
+                                cur.executemany("""
+                                    INSERT INTO tmp_enrich_backfill (address, label_types, label_names)
+                                    VALUES (%s, %s, %s)
+                                """, rows)
+
+                            # 更新发件方
+                            if case_sensitive:
+                                from_cond = "t.from_address = e.address"
+                                to_cond = "t.to_address = e.address"
+                            else:
+                                from_cond = "LOWER(t.from_address) = LOWER(e.address)"
+                                to_cond = "LOWER(t.to_address) = LOWER(e.address)"
+
+                            cur.execute(f"""
+                                UPDATE biz.onchain_transfer_log t
+                                SET from_labels = e.label_types,
+                                    from_label_names = e.label_names
+                                FROM tmp_enrich_backfill e
+                                WHERE t.chain = %s
+                                  AND {from_cond}
+                                  AND (t.from_labels IS NULL OR t.from_labels = ARRAY['unknown']::TEXT[])
+                            """, (chain,))
+                            from_up = cur.rowcount
+
+                            cur.execute(f"""
+                                UPDATE biz.onchain_transfer_log t
+                                SET to_labels = e.label_types,
+                                    to_label_names = e.label_names
+                                FROM tmp_enrich_backfill e
+                                WHERE t.chain = %s
+                                  AND {to_cond}
+                                  AND (t.to_labels IS NULL OR t.to_labels = ARRAY['unknown']::TEXT[])
+                            """, (chain,))
+                            to_up = cur.rowcount
+
+                        conn.commit()
+                        backfilled_total += from_up + to_up
+
+                except Exception as e:
+                    print(f"  ⚠️  本批写库失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # 累加到全局统计
+            for k in batch_stats:
+                stat_counts[k] += batch_stats[k]
+
+            batch_end = min(batch_start + batch_size, len(addresses))
+            pct = batch_end / len(addresses) * 100
+            fail_parts = []
+            if batch_stats["http_403"]:
+                fail_parts.append(f"403×{batch_stats['http_403']}")
+            if batch_stats["http_429"]:
+                fail_parts.append(f"429×{batch_stats['http_429']}")
+            if batch_stats["network_error"]:
+                fail_parts.append(f"网络×{batch_stats['network_error']}")
+            fail_str = f"，失败: {', '.join(fail_parts)}" if fail_parts else ""
+            print(f"  ── 批次完成 {batch_end}/{len(addresses)} ({pct:.0f}%) ── "
+                  f"本批查到标签 {batch_stats['ok']} 个, "
+                  f"入库 {inserted_total - (inserted_total - len([1 for _ in range(1)]))} 条, "
+                  f"回填 {backfilled_total} 条{fail_str}")
+
+        # 清理所有线程的 fetcher
+        for f in thread_local.values():
+            f.close()
 
         elapsed = time.time() - t0
         print(f"\n  ── {chain} 完成 ──")
-        print(f"    总耗时: {elapsed:.1f}s")
+        print(f"    总耗时: {elapsed:.1f}s ({elapsed/60:.1f} 分钟)")
         print(f"    爬取地址: {len(addresses)} 个")
-        print(f"    查到标签: {total_fetched} 个")
-        print(f"    无标签: {total_no_label} 个")
-        print(f"    爬取失败: {total_failed} 个")
-        print(f"    入库新标签: {total_inserted} 条")
-        print(f"    回填转账记录: {total_backfilled} 条")
+        print(f"    查到标签: {stat_counts['ok']} 个")
+        print(f"    无标签: {stat_counts['no_label']} 个")
+        print(f"    爬取失败: {sum(stat_counts[k] for k in ['http_403','http_429','http_other','network_error'])} 个")
+        print(f"    入库新标签: {inserted_total} 条")
+        print(f"    回填转账记录: {backfilled_total} 条")
+        print(f"    平均速度: {len(addresses)/elapsed:.1f} 地址/秒")
+
+
+def _thread_id() -> int:
+    import threading
+    return threading.get_ident()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -156,7 +157,12 @@ def main() -> int:
         if not all_rows:
             return 0
         params = [(r["asset_id"], r["symbol"], r["event_type"], r["event_date"],
-                   r["event_pct"], r["detail"], r["source_ref"]) for r in all_rows]
+                   r["event_pct"], r["detail"],
+                   # source_ref 是 JSONB 列，dict 需序列化为 JSON 字符串，
+                   # 否则 psycopg AUTO 格式无法适配（cannot adapt type 'dict'）
+                   json.dumps(r["source_ref"], ensure_ascii=False)
+                   if r["source_ref"] is not None else None)
+                  for r in all_rows]
         with conn.cursor() as cur:
             cur.executemany(UPSERT_SQL, params)
         print(f"[db] upsert {len(params)} 条事件预置")

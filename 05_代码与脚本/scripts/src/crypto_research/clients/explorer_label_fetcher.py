@@ -96,7 +96,8 @@ class ExplorerLabelFetcher:
     """
 
     def __init__(self, chain: str, proxy: str | None = None,
-                 delay: float = DEFAULT_DELAY, timeout: int = DEFAULT_TIMEOUT):
+                 delay: float = DEFAULT_DELAY, timeout: int = DEFAULT_TIMEOUT,
+                 use_playwright_fallback: bool = True):
         if requests is None:
             raise ImportError("需要 requests：pip install requests")
         if BeautifulSoup is None:
@@ -110,6 +111,7 @@ class ExplorerLabelFetcher:
         self.proxy = proxy
         self.delay = delay
         self.timeout = timeout
+        self.use_playwright_fallback = use_playwright_fallback
         self._last_request_at = 0.0
 
         # 会话复用
@@ -125,6 +127,12 @@ class ExplorerLabelFetcher:
         })
         if proxy:
             self._session.proxies = {"http": proxy, "https": proxy}
+
+        # Playwright 懒加载（遇到 403 时才启动）
+        self._pw = None          # sync_playwright 实例
+        self._pw_browser = None  # Browser 实例
+        self._pw_context = None  # BrowserContext 实例
+        self._pw_available = None  # None=未检测, True=可用, False=不可用
 
     # ── 公共 API ────────────────────────────────────────────
 
@@ -235,6 +243,9 @@ class ExplorerLabelFetcher:
     def _fetch_page_with_status(self, address: str) -> tuple[str | None, str]:
         """拉取地址详情页 HTML，返回 (html, status)。
 
+        优先走 requests；遇到 403/Cloudflare 时，若启用了 fallback，
+        自动切换到 Playwright 无头浏览器重试。
+
         status: 'ok', 'http_403', 'http_429', 'http_other', 'network_error'
         """
         self._rate_limit()
@@ -242,17 +253,132 @@ class ExplorerLabelFetcher:
         try:
             resp = self._session.get(url, timeout=self.timeout, allow_redirects=True)
             if resp.status_code == 403:
-                return None, "http_403"
+                return self._try_playwright_fallback(url, "http_403")
             if resp.status_code == 429:
-                return None, "http_429"
+                return self._try_playwright_fallback(url, "http_429")
             if resp.status_code >= 400:
-                return None, "http_other"
+                return self._try_playwright_fallback(url, "http_other")
             # 如果页面包含 Cloudflare 挑战，也视为 403 类拦截
             if 'Just a moment...' in resp.text and 'Cloudflare' in resp.text:
-                return None, "http_403"
+                return self._try_playwright_fallback(url, "http_403")
             return resp.text, "ok"
         except Exception:
-            return None, "network_error"
+            return self._try_playwright_fallback(url, "network_error")
+
+    def _try_playwright_fallback(
+        self, url: str, original_status: str
+    ) -> tuple[str | None, str]:
+        """尝试用 Playwright 绕过 Cloudflare。失败返回原始状态。"""
+        if not self.use_playwright_fallback:
+            return None, original_status
+        if self._pw_available is False:
+            # 已知 Playwright 不可用，直接跳过
+            return None, original_status
+
+        html = self._fetch_page_playwright(url)
+        if html:
+            return html, "ok"
+        # Playwright 也失败了，标记为不可用避免后续反复尝试
+        return None, original_status
+
+    def _ensure_playwright(self) -> bool:
+        """确保 Playwright 浏览器已启动。成功返回 True。"""
+        if self._pw_browser is not None:
+            return True
+        if self._pw_available is False:
+            return False
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self._pw_available = False
+            return False
+
+        try:
+            self._pw = sync_playwright().start()
+            launch_kwargs = {
+                "headless": True,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            }
+            if self.proxy:
+                launch_kwargs["proxy"] = {"server": self.proxy}
+            self._pw_browser = self._pw.chromium.launch(**launch_kwargs)
+            self._pw_context = self._pw_browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            self._pw_available = True
+            return True
+        except Exception:
+            self._pw_available = False
+            self._cleanup_playwright()
+            return False
+
+    def _fetch_page_playwright(self, url: str) -> str | None:
+        """用 Playwright 抓取页面 HTML。失败返回 None。"""
+        if not self._ensure_playwright():
+            return None
+
+        try:
+            page = self._pw_context.new_page()
+            try:
+                # 等待页面加载 + Cloudflare 挑战通过
+                page.goto(url, timeout=self.timeout * 1000,
+                          wait_until="domcontentloaded")
+                # 额外等待：如果有 Cloudflare 挑战，等它过去
+                for _ in range(20):  # 最多等 10 秒
+                    content = page.content()
+                    if 'Just a moment...' in content and 'Cloudflare' in content:
+                        time.sleep(0.5)
+                        continue
+                    break
+                return page.content()
+            finally:
+                page.close()
+        except Exception:
+            return None
+
+    def _cleanup_playwright(self) -> None:
+        """关闭 Playwright 资源。"""
+        if self._pw_context:
+            try:
+                self._pw_context.close()
+            except Exception:
+                pass
+            self._pw_context = None
+        if self._pw_browser:
+            try:
+                self._pw_browser.close()
+            except Exception:
+                pass
+            self._pw_browser = None
+        if self._pw:
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+
+    def close(self) -> None:
+        """释放所有资源（requests session + Playwright）。"""
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        self._cleanup_playwright()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
     # ── 内部：HTML 解析 ─────────────────────────────────────
 

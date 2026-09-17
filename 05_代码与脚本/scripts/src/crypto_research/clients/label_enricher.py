@@ -314,3 +314,11 @@ class LabelEnricher:
 
         self.conn.commit()
         return from_updated + to_updated
+
+    def close(self) -> None:
+        """释放 fetcher 资源（如 Playwright 浏览器）。"""
+        if hasattr(self.fetcher, 'close'):
+            try:
+                self.fetcher.close()
+            except Exception:
+                pass

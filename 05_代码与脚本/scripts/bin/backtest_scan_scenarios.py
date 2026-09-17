@@ -8,6 +8,8 @@
   - 横截面去相关：按入场日聚类，报告独立天数 + 日级 t 统计（保守 CI）
   - CVD 无历史源 → 8 场景中 CVD 维暂不可回测（评审 §5.1），本框架输出 P×OI 四象限，
     CVD 维待 WebSocket 流式数据积累后按同框架扩展
+  - funding 消融（历史已回填 biz.funding_rate_hist）：每个 P×OI 场景再按结算点资金费率
+    正/负/近零拆分 → 验证"高费率做多更差"假设，评估拥挤度过滤是否值得加进 L2 校验
 
 用法：
     python backtest_scan_scenarios.py                      # 全量回测
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import csv
+import bisect
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +46,7 @@ COST = 0.001                  # 双边 taker 手续费（0.05%×2=0.1%）
 MIN_N = 20                    # 桶最少样本数
 MIN_DAYS = 5                  # 最少独立天数
 MIN_KLINES_BARS = 1000        # 只测有足够 1h 历史的符号
+FUND_POS_THR = 0.0001         # 资金费率正负判定阈值（±1bp/8h）
 
 SCENARIOS = ("Pup_OIup", "Pup_OIdown", "Pdown_OIup", "Pdown_OIdown")
 
@@ -81,13 +85,47 @@ def load_oi_hourly(conn, symbols: list[str]) -> dict[str, dict[datetime, float]]
     return dict(out)
 
 
+def load_funding(conn, symbols: list[str]) -> dict[str, tuple[list, list[float]]]:
+    """资金费率历史（8h 结算点）→ {symbol: (sorted_fts, rates)}，供 bisect 近邻查找。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT symbol, funding_time, rate FROM biz.funding_rate_hist "
+            "WHERE symbol = ANY(%s) ORDER BY symbol, funding_time",
+            (symbols,),
+        )
+        rows = cur.fetchall()
+    out: dict[str, tuple[list, list[float]]] = defaultdict(lambda: ([], []))
+    for r in rows:
+        if r["rate"] is not None:
+            out[r["symbol"]][0].append(r["funding_time"])
+            out[r["symbol"]][1].append(float(r["rate"]))
+    return {k: v for k, v in out.items() if v[0]}
+
+
+def funding_tag(funding: tuple[list, list[float]] | None, h: datetime) -> str | None:
+    """取 <= h 的最近结算点费率，映射为 '+'（正）/ '-'（负）/ '0'（近零）；无数据返回 None。"""
+    if not funding:
+        return None
+    fts, rates = funding
+    i = bisect.bisect_right(fts, h) - 1
+    if i < 0:
+        return None
+    rate = rates[i]
+    if rate > FUND_POS_THR:
+        return "+"
+    if rate < -FUND_POS_THR:
+        return "-"
+    return "0"
+
+
 def hour_key(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
 def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
+                funding: tuple[list, list[float]] | None,
                 trades: dict[str, list], cost: float) -> None:
-    """扫描单符号，产出 (scenario, horizon, day, net_ret) 记录。"""
+    """扫描单符号，产出 (scenario, horizon, day, net_ret, fund_tag) 记录。"""
     n = len(bars)
     max_h = max(HORIZONS)
     for t in range(LOOKBACK + 1, n - max_h - 1):
@@ -112,6 +150,7 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
             scenario = f"P{direction}_OI{oi_dir}"
         else:
             scenario = "BASELINE_ONLY"
+        ftag = funding_tag(funding, h) or "NA"
 
         entry = bars[t + 1]["open"]
         if not entry:
@@ -123,7 +162,7 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 continue
             ret_long = (exit_close - entry) / entry
             ret = ret_long if direction == "up" else -ret_long
-            trades[scenario].append((hz, day, ret - cost))
+            trades[scenario].append((hz, day, ret - cost, ftag))
 
 
 def summarize(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
@@ -159,6 +198,40 @@ def summarize(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
     return rows
 
 
+def summarize_funding(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
+    """funding 消融：每个 (scenario, horizon, fund_tag) 分桶统计。"""
+    rows: list[dict] = []
+    for scenario, recs in trades.items():
+        tags = {r[3] for r in recs}
+        for ftag in sorted(tags):
+            for hz in HORIZONS:
+                sub = [r for r in recs if r[0] == hz and r[3] == ftag]
+                if len(sub) < min_n:
+                    continue
+                nets = [r[2] for r in sub]
+                days = {r[1] for r in sub}
+                if len(days) < min_days:
+                    continue
+                wins = sum(1 for x in nets if x > 0)
+                gross_win = sum(x for x in nets if x > 0)
+                gross_loss = abs(sum(x for x in nets if x < 0))
+                day_means: dict = defaultdict(list)
+                for r in sub:
+                    day_means[r[1]].append(r[2])
+                dm = [sum(v) / len(v) for v in day_means.values()]
+                day_mean = sum(dm) / len(dm)
+                day_std = (sum((x - day_mean) ** 2 for x in dm) / (len(dm) - 1)) ** 0.5 if len(dm) > 1 else 0.0
+                t_stat = day_mean / (day_std / (len(dm) ** 0.5)) if day_std > 0 else 0.0
+                rows.append({
+                    "scenario": scenario, "fund_tag": ftag, "horizon_h": hz, "n": len(sub),
+                    "days": len(dm), "win_rate": wins / len(sub),
+                    "avg_ret_net": sum(nets) / len(nets), "expectancy": sum(nets) / len(sub),
+                    "profit_factor": gross_win / gross_loss if gross_loss else float("inf"),
+                    "day_t_stat": t_stat, "day_avg": day_mean,
+                })
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="8 场景回测（1h 取价 + 成本 + 消融 + 日级聚类）")
     parser.add_argument("--symbols", type=int, default=0, help="只测前 N 个符号")
@@ -182,12 +255,15 @@ def main() -> int:
 
         klines = load_klines(conn, universe)
         oi_hourly = load_oi_hourly(conn, universe)
+        funding = load_funding(conn, universe)
         print(f"[backtest] K线 {sum(len(v) for v in klines.values())} 根；"
-              f"OI 小时序列 {sum(len(v) for v in oi_hourly.values())} 点")
+              f"OI 小时序列 {sum(len(v) for v in oi_hourly.values())} 点；"
+              f"funding 序列 {sum(len(v[0]) for v in funding.values())} 点")
 
         trades: dict[str, list] = defaultdict(list)
         for sym in universe:
-            scan_symbol(klines.get(sym, []), oi_hourly.get(sym, {}), trades, args.cost)
+            scan_symbol(klines.get(sym, []), oi_hourly.get(sym, {}),
+                        funding.get(sym), trades, args.cost)
 
         rows = summarize(trades, args.min_n, MIN_DAYS)
         print(f"\n{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
@@ -209,6 +285,18 @@ def main() -> int:
                 print(f"  {r['scenario']:<16} n={r['n']:<6} 净均={r['avg_ret_net'] * 100:>7.3f}%  "
                       f"Δvs基线={delta:>+7.3f}%")
 
+        # funding 消融：按资金费率正/负/近零拆开
+        frows = summarize_funding(trades, args.min_n, MIN_DAYS)
+        if frows:
+            print(f"\n=== funding 消融（资金费率: + 正 / - 负 / 0 近零 / NA 无数据）===")
+            print(f"{'场景':<16}{'费率':>5}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
+            print("-" * 84)
+            for r in sorted(frows, key=lambda x: (x["scenario"], x["horizon_h"], x["fund_tag"])):
+                print(f"{r['scenario']:<16}{r['fund_tag']:>5}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
+                      f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
+                      f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
+                      f"{r['day_t_stat']:>8.2f}")
+
         if not args.out:
             args.out = str(SCRIPT_DIR.parent / "data" / "backtest_scan_results.csv")
         out_path = Path(args.out)
@@ -218,6 +306,14 @@ def main() -> int:
             w.writeheader()
             w.writerows(rows)
         print(f"\n[backtest] 结果已存 {args.out}")
+
+        if frows:
+            fout = out_path.with_name("backtest_funding_ablation.csv")
+            with open(fout, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(frows[0].keys()))
+                w.writeheader()
+                w.writerows(frows)
+            print(f"[backtest] funding 消融已存 {fout}")
     return 0
 
 

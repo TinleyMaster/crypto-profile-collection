@@ -872,6 +872,10 @@ def main():
                           f"查到标签 {stats['fetched']} 条{no_label_part}{fail_part}, "
                           f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条")
 
+            # 释放 enricher 资源（Playwright 浏览器等）
+            for en in chain_enrichers.values():
+                en.close()
+
         elapsed = time.time() - t0
         label = "告警" if args.alarm_only else "大额"
         written_note = "" if args.dry_run else f", 写入 {total_written} 条"

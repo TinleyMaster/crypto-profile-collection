@@ -433,9 +433,14 @@ def main() -> int:
 
     # 退出码规则：
     # - 0 个资产 → 0（空跑不算失败）
+    # - 小批次容错：<5 个资产失败 ≤1 个 → 0（失败已进重试队列兜底，
+    #   游标模式批次通常很小，1/2=50% 不能算"大面积失败"，否则每次
+    #   都会误报拖垮 catalyst_run_all，2026-09-17）
     # - 成功率 >= 80% → 0（失败的会进重试队列，不阻塞整体）
     # - 成功率 < 80% → 1（大面积失败才告警）
     if total == 0:
+        return 0
+    if total < 5 and failed <= 1:
         return 0
     success_rate = success / total
     if success_rate >= 0.8:

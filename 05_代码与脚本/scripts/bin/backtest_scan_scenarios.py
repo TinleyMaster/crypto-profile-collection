@@ -51,13 +51,22 @@ FUND_POS_THR = 0.0001         # 资金费率正负判定阈值（±1bp/8h）
 SCENARIOS = ("Pup_OIup", "Pup_OIdown", "Pdown_OIup", "Pdown_OIdown")
 
 
-def load_klines(conn, symbols: list[str]) -> dict[str, list[dict]]:
+def load_klines(conn, symbols: list[str], lookback_days: int = 0) -> dict[str, list[dict]]:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            "SELECT symbol, open_time, open_px, close_px, quote_vol FROM biz.asset_klines "
-            "WHERE interval='1h' AND symbol = ANY(%s) ORDER BY symbol, open_time",
-            (symbols,),
-        )
+        if lookback_days > 0:
+            cur.execute(
+                "SELECT symbol, open_time, open_px, close_px, quote_vol FROM biz.asset_klines "
+                "WHERE interval='1h' AND symbol = ANY(%s) "
+                "AND open_time >= NOW() - make_interval(days => %s) "
+                "ORDER BY symbol, open_time",
+                (symbols, lookback_days),
+            )
+        else:
+            cur.execute(
+                "SELECT symbol, open_time, open_px, close_px, quote_vol FROM biz.asset_klines "
+                "WHERE interval='1h' AND symbol = ANY(%s) ORDER BY symbol, open_time",
+                (symbols,),
+            )
         rows = cur.fetchall()
     out: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
@@ -124,7 +133,9 @@ def hour_key(dt: datetime) -> datetime:
 
 def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 funding: tuple[list, list[float]] | None,
-                trades: dict[str, list], cost: float) -> None:
+                trades: dict[str, list], cost: float,
+                price_thr: float = PRICE_THR_1H,
+                vol_thr: float = VOL_RATIO_THR) -> None:
     """扫描单符号，产出 (scenario, horizon, day, net_ret, fund_tag) 记录。"""
     n = len(bars)
     max_h = max(HORIZONS)
@@ -137,7 +148,7 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
         vols = [b["vol"] for b in bars[t - LOOKBACK:t]]
         vol_mean = sum(vols) / LOOKBACK if vols else 0
         vol_ratio = bar["vol"] / vol_mean if vol_mean else 0.0
-        if abs(chg) < PRICE_THR_1H or vol_ratio < VOL_RATIO_THR:
+        if abs(chg) < price_thr or vol_ratio < vol_thr:
             continue
         direction = "up" if chg >= 0 else "down"
 
@@ -163,6 +174,32 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
             ret_long = (exit_close - entry) / entry
             ret = ret_long if direction == "up" else -ret_long
             trades[scenario].append((hz, day, ret - cost, ftag))
+
+
+def sweep_all(klines: dict[str, list], oi_hourly: dict[str, dict[datetime, float]],
+              funding: dict[str, tuple[list, list[float]]], cost: float,
+              price_thrs: list[float], vol_thrs: list[float],
+              min_n: int, min_days: int) -> list[dict]:
+    """阈值敏感性扫描：对每组 (price_thr, vol_thr) 跑全宇宙，聚焦 P↑OI↑ 场景。
+
+    返回行：{price_thr, vol_thr, scenario, horizon, n, days, win_rate,
+             avg_ret_net, profit_factor, day_t_stat}。
+    """
+    rows: list[dict] = []
+    for pt in price_thrs:
+        for vt in vol_thrs:
+            trades: dict[str, list] = defaultdict(list)
+            for sym in klines:
+                scan_symbol(klines[sym], oi_hourly.get(sym, {}),
+                            funding.get(sym), trades, cost, price_thr=pt, vol_thr=vt)
+            for r in summarize(trades, min_n, min_days):
+                if r["scenario"] not in ("Pup_OIup", "Pup_OIdown"):
+                    continue
+                r = dict(r)
+                r["price_thr"] = pt
+                r["vol_thr"] = vt
+                rows.append(r)
+    return rows
 
 
 def summarize(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
@@ -233,11 +270,19 @@ def summarize_funding(trades: dict[str, list], min_n: int, min_days: int) -> lis
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="8 场景回测（1h 取价 + 成本 + 消融 + 日级聚类）")
+    parser = argparse.ArgumentParser(description="8 场景回测（1h 取价 + 成本 + 消融 + 日级聚类 + 阈值敏感性扫描）")
     parser.add_argument("--symbols", type=int, default=0, help="只测前 N 个符号")
     parser.add_argument("--cost", type=float, default=COST, help="双边手续费（默认 0.001）")
     parser.add_argument("--min-n", type=int, default=MIN_N)
     parser.add_argument("--out", type=str, default="", help="CSV 输出路径（默认 scripts/data/backtest_scan_results.csv）")
+    parser.add_argument("--sweep", action="store_true",
+                        help="阈值敏感性扫描模式：对价格/量比阈值网格跑 P↑OI↑，输出矩阵 CSV")
+    parser.add_argument("--price-thrs", type=str, default="2.0,2.5,3.0,3.5,4.5,6.0",
+                        help="扫描的价格阈值列表（逗号分隔，默认 2.0,2.5,3.0,3.5,4.5,6.0）")
+    parser.add_argument("--vol-thrs", type=str, default="1.5,2.0,3.0,4.0",
+                        help="扫描的量比阈值列表（逗号分隔，默认 1.5,2.0,3.0,4.0）")
+    parser.add_argument("--lookback-days", type=int, default=0,
+                        help="只加载最近 N 天 1h K 线（0=全量；回测建议 45：覆盖 30 天 OI + 缓冲）")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -253,12 +298,40 @@ def main() -> int:
             universe = universe[: args.symbols]
         print(f"[backtest] 符号宇宙 {len(universe)}，1h 窗口 {HORIZONS}h，成本 {args.cost:.3f}")
 
-        klines = load_klines(conn, universe)
+        klines = load_klines(conn, universe, args.lookback_days)
         oi_hourly = load_oi_hourly(conn, universe)
         funding = load_funding(conn, universe)
         print(f"[backtest] K线 {sum(len(v) for v in klines.values())} 根；"
               f"OI 小时序列 {sum(len(v) for v in oi_hourly.values())} 点；"
               f"funding 序列 {sum(len(v[0]) for v in funding.values())} 点")
+
+        if args.sweep:
+            pt_list = [float(x) for x in args.price_thrs.split(",") if x.strip()]
+            vt_list = [float(x) for x in args.vol_thrs.split(",") if x.strip()]
+            print(f"[sweep] 阈值网格 {len(pt_list)}×{len(vt_list)}={len(pt_list) * len(vt_list)} 组，"
+                  f"聚焦 P↑OI↑ / P↑OI↓")
+            srows = sweep_all(klines, oi_hourly, funding, args.cost,
+                              pt_list, vt_list, args.min_n, MIN_DAYS)
+            print(f"\n{'价格阈值':>6}{'量比阈值':>6}{'场景':<10}{'窗口h':>5}{'n':>6}"
+                  f"{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
+            print("-" * 76)
+            for r in sorted(srows, key=lambda x: (x["price_thr"], x["vol_thr"],
+                                                  x["scenario"], x["horizon_h"])):
+                print(f"{r['price_thr']:>6.1f}{r['vol_thr']:>6.1f}{r['scenario']:<10}"
+                      f"{r['horizon_h']:>5}{r['n']:>6}{r['win_rate']:>8.1%}"
+                      f"{r['avg_ret_net'] * 100:>10.3f}"
+                      f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
+                      f"{r['day_t_stat']:>8.2f}")
+            if srows:
+                out_path = Path(args.out) if args.out else \
+                    SCRIPT_DIR.parent / "data" / "backtest_threshold_sweep.csv"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "w", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=list(srows[0].keys()))
+                    w.writeheader()
+                    w.writerows(srows)
+                print(f"\n[sweep] 矩阵已存 {out_path}")
+            return 0
 
         trades: dict[str, list] = defaultdict(list)
         for sym in universe:

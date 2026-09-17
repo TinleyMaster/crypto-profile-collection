@@ -549,6 +549,9 @@ def build_asset_profile(asset_id: int, conn=None) -> dict[str, Any]:
     # ── 8b. 协议 TVL（DeFi 协议）──
     _add_protocol_tvl(conn, asset_id, profile)
 
+    # ── 8b2. 交易所托管资金（CEX 关联指标：BNB/OKB/GT 等交易所币）──
+    _add_cex_exchange_flows(conn, asset_id, profile)
+
     # ── 8c. 价格技术指标（从日价计算波动率/RSI/高低点）──
     _add_price_technical(conn, asset_id, profile)
 
@@ -1291,6 +1294,52 @@ def _add_protocol_tvl_zero_fallback(cur, asset_id: int, profile: dict):
             profile["protocol_tvl"]["metric_date"] = str(row["fetched_at"].date())
     except Exception:
         # 回退失败不影响主流程（该维度仍按缺失处理）
+        return
+
+
+def _add_cex_exchange_flows(conn, asset_id: int, profile: dict):
+    """交易所托管资金（CEX 关联指标）。
+
+    对交易所原生币（BNB/OKB/GT/MX/BP 等）展示对应交易所的托管资产总额及 1d/7d 变化，
+    作为资金流入/流出信号供 AI 参考。注意：这是交易所用户托管资产，**不是**协议锁仓 TVL，
+    故作为独立维度展示，不并入 protocol_tvl。
+    """
+    import psycopg.rows
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT canonical_symbol FROM core.asset WHERE asset_id = %s", (asset_id,))
+            row = cur.fetchone()
+            if not row or not row["canonical_symbol"]:
+                return
+            sym = row["canonical_symbol"]
+
+            cur.execute("""
+                SELECT name, tvl, change_1d, change_7d, fetched_at
+                FROM src_dl.protocol_list
+                WHERE category = 'CEX'
+                  AND UPPER(symbol) = UPPER(%s)
+                  AND tvl IS NOT NULL AND tvl > 0
+                ORDER BY tvl DESC
+                LIMIT 1
+            """, (sym,))
+            r = cur.fetchone()
+            if not r:
+                return
+
+            flows = {
+                "exchange": r["name"],
+                "total_usd": float(r["tvl"]),
+                "source_note": f"{r['name']} 用户托管资产（非协议锁仓 TVL）",
+            }
+            if r["change_1d"] is not None:
+                flows["change_1d_pct"] = round(float(r["change_1d"]), 2)
+            if r["change_7d"] is not None:
+                flows["change_7d_pct"] = round(float(r["change_7d"]), 2)
+            if r["fetched_at"]:
+                flows["metric_date"] = str(r["fetched_at"].date())
+            profile["cex_exchange_flows"] = flows
+    except Exception:
+        # 失败静默跳过，不影响主流程
         return
 
 
@@ -2915,6 +2964,19 @@ def _build_user_prompt_v2(profile: dict, asset_signals: list[dict]) -> str:
         if tvl.get("protocol_name"):
             tvl_lines.append(f"- 协议: {tvl['protocol_name']}（{tvl.get('category', '')}）")
     sections.append(_section("协议 TVL", len(tvl_lines) > 0, tvl_lines))
+
+    # 10b. 交易所托管资金（CEX 关联指标，独立于协议 TVL）
+    cex = profile.get("cex_exchange_flows", {})
+    cex_lines = []
+    if cex.get("total_usd"):
+        cex_lines.append(f"- 托管资金: ${cex['total_usd']/1e9:.2f}B（{cex.get('exchange', '')}）")
+    if cex.get("change_1d_pct") is not None:
+        cex_lines.append(f"- 1日变化: {cex['change_1d_pct']:+.2f}%（资金{'流入' if cex['change_1d_pct'] > 0 else '流出'}）")
+    if cex.get("change_7d_pct") is not None:
+        cex_lines.append(f"- 7日变化: {cex['change_7d_pct']:+.2f}%")
+    if cex.get("source_note"):
+        cex_lines.append(f"- 说明: {cex['source_note']}（数据截至 {cex.get('metric_date', '-')}）")
+    sections.append(_section("交易所托管资金", len(cex_lines) > 0, cex_lines))
 
     # 11. 社交热度
     social = profile.get("social", {})

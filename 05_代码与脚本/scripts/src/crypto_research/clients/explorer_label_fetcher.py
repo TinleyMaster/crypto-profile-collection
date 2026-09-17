@@ -51,7 +51,10 @@ EXCHANGE_NAME_MAP = {
     "binance": "Binance", "binance us": "Binance US", "binanceus": "Binance US",
     "coinbase": "Coinbase", "coinbase prime": "Coinbase Prime",
     "okx": "OKX", "okex": "OKX", "kraken": "Kraken", "bybit": "Bybit",
-    "kucoin": "KuCoin", "gate": "Gate.io", "gate.io": "Gate.io", "gateio": "Gate.io",
+    "kucoin": "KuCoin",
+    "gate.io": "Gate.io", "gateio": "Gate.io",
+    # "gate" 单独太容易误匹配（如 Gateway），只在明确是交易所标签时才命中
+    # 下面在 _classify_label 里做特殊处理
     "huobi": "Huobi", "htx": "HTX", "bitfinex": "Bitfinex", "bitget": "Bitget",
     "mexc": "MEXC", "crypto.com": "Crypto.com", "cryptocom": "Crypto.com",
     "upbit": "Upbit", "bithumb": "Bithumb", "gemini": "Gemini", "bitstamp": "Bitstamp",
@@ -59,6 +62,12 @@ EXCHANGE_NAME_MAP = {
     "xt.com": "XT.COM", "xtcom": "XT.COM", "bittrex": "Bittrex", "bitmex": "BitMEX",
     "korbit": "Korbit", "coinone": "Coinone", "ftx": "FTX", "hotbit": "Hotbit",
 }
+
+# 单独处理的交易所关键词（需要额外条件避免误匹配）
+EXCHANGE_SPECIAL = [
+    # "gate" 只有在 "deposit" / "withdraw" / "wallet" / "fund" 等上下文时才算交易所
+    ("gate", "Gate.io", ["dep", "deposit", "withdraw", "wallet", "fund", "cold", "hot", "fee", "address"]),
+]
 
 # 非交易所标签关键词 → 标签类型映射
 # 只保留高价值标签：exchange / smart_money / whale / mev_bot / market_maker / dex
@@ -586,15 +595,30 @@ class ExplorerLabelFetcher:
         """
         low = label_text.lower().strip()
 
-        # 1. 交易所匹配
-        for kw, normalized in EXCHANGE_NAME_MAP.items():
+        # 1. 交易所匹配（精确关键词优先，长词优先）
+        for kw, normalized in sorted(EXCHANGE_NAME_MAP.items(), key=lambda x: -len(x[0])):
             if kw in low:
                 return {
                     "label_text": label_text,
                     "label_type": "exchange",
-                    "display_name": normalized,
+                    "display_name": label_text,   # 保留页面原始完整标签
+                    "normalized_name": normalized,
                     "is_exchange": True,
                 }
+
+        # 1b. 易误匹配关键词（需要上下文佐证）
+        for kw, normalized, context_words in EXCHANGE_SPECIAL:
+            if kw in low:
+                # 检查是否有上下文词支持
+                has_context = any(cw in low for cw in context_words)
+                if has_context:
+                    return {
+                        "label_text": label_text,
+                        "label_type": "exchange",
+                        "display_name": label_text,
+                        "normalized_name": normalized,
+                        "is_exchange": True,
+                    }
 
         # 2. 非交易所高价值标签匹配
         for kw, label_type in NON_EXCHANGE_LABEL_TYPES:

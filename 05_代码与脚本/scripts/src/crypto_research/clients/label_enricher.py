@@ -25,8 +25,8 @@ CASE_SENSITIVE_CHAINS = {"solana", "tron", "ton", "sui", "aptos"}
 
 # 单次 enrichment 的最大地址数（防一次爬太多）
 MAX_BATCH_SIZE = 50
-# 置信度：区块浏览器 HTML 爬取 = medium（单源，且可能有解析误差）
-ENRICH_CONFIDENCE = "medium"
+# 置信度：区块浏览器 HTML 爬取 = high（etherscan 官方标签，可信度高）
+ENRICH_CONFIDENCE = "high"
 # 来源标识
 ENRICH_SOURCE = "explorer_html"
 # 只存高价值标签类型（避免噪声）

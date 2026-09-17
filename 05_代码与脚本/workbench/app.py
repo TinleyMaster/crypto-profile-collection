@@ -1266,8 +1266,28 @@ def api_exchange_wallets_verify():
                             "source": wr[6],
                             "label": wr[7],
                         }
+            # EVM 跨链传播：approve 成功后，自动传播到其他 EVM 链（medium 级别）
+            propagate_stats = None
+            if changed and action == "approve":
+                try:
+                    # 动态导入避免循环依赖
+                    sys.path.insert(0, str(SCRIPTS_SRC))
+                    from crypto_research.clients.evm_propagate import EVMAddressPropagator
+                    prop = EVMAddressPropagator(conn)
+                    ps = prop.propagate_wallet(wallet_id=wallet_id)
+                    propagate_stats = {
+                        "wallets_inserted": ps.wallets_inserted,
+                        "labels_inserted": ps.labels_inserted,
+                        "skipped_existing_wallet": ps.skipped_existing_wallet,
+                        "skipped_existing_label": ps.skipped_existing_label,
+                        "target_chains": ps.target_chains,
+                    }
+                except Exception as pe:
+                    logger.warning("EVM propagate failed for wallet_id=%s: %s",
+                                   wallet_id, pe)
             conn.commit()
-        return jsonify({"ok": True, "changed": changed, "wallet": wallet_info})
+        return jsonify({"ok": True, "changed": changed, "wallet": wallet_info,
+                        "propagate_stats": propagate_stats})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

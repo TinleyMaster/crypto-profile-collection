@@ -77,6 +77,10 @@ debug-zeabur-pg-connect.md
 *_progress.jsonl
 *_failures.jsonl
 
+# 数据修复临时备份（含真实地址数据，不入库）
+_solana_fix_backup/
+_p1_fix_backup/
+
 # 旧版本 B 阶段脚本
 05_代码与脚本/scripts/bin/phase_b_deep_doc_discovery.py
 前情提要_投研系统.md

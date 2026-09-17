@@ -550,8 +550,24 @@ def main():
             if len(pending) < args.batch_size:
                 break
 
-    print(f"\n完成：成功 {processed} 条，失败 {failed} 条")
-    return 0 if failed == 0 else 1
+    total = processed + failed
+    print(f"\n完成：成功 {processed} 条，失败 {failed} 条，共 {total} 条")
+
+    # 退出码规则：
+    # - 全部成功 → 0
+    # - 有失败但成功率 >= 90%（LLM 偶发网络/超时正常）→ 0（下轮会重试失败的）
+    # - 失败率 > 10%（说明可能有严重问题）→ 1
+    # - 0 条处理 → 0（空跑不算失败）
+    if total == 0:
+        print("（无待处理数据，正常退出）")
+        return 0
+    success_rate = processed / total
+    if success_rate >= 0.9:
+        print(f"成功率 {success_rate*100:.1f}% ≥ 90%，视为成功（失败的下轮重试）")
+        return 0
+    else:
+        print(f"成功率 {success_rate*100:.1f}% < 90%，退出码=1")
+        return 1
 
 
 if __name__ == "__main__":

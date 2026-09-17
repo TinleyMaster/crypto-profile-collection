@@ -427,10 +427,20 @@ def main() -> int:
 
     print()
     print("=" * 60)
+    total = success + failed
     print(f"完成: 成功 {success} / 失败 {failed} / 共 {len(asset_ids)}")
     print("=" * 60)
 
-    return 1 if failed > 0 else 0
+    # 退出码规则：
+    # - 0 个资产 → 0（空跑不算失败）
+    # - 成功率 >= 80% → 0（失败的会进重试队列，不阻塞整体）
+    # - 成功率 < 80% → 1（大面积失败才告警）
+    if total == 0:
+        return 0
+    success_rate = success / total
+    if success_rate >= 0.8:
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

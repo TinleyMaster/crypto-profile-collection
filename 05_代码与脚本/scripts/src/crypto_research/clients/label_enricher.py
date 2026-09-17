@@ -82,14 +82,28 @@ class LabelEnricher:
             {
                 "collected": int,     # 本次收集的地址数
                 "fetched": int,       # 成功查到标签的地址数
+                "no_label": int,      # 页面正常但无标签
+                "fetch_failed": int,  # 请求失败（403/429/网络错误等）
+                "fetch_detail": {     # 失败详情
+                    "http_403": int,
+                    "http_429": int,
+                    "http_other": int,
+                    "network_error": int,
+                },
                 "inserted": int,      # 新写入标签库的数量
                 "backfilled": int,    # 回填了多少条转账记录
-                "skipped": int,       # 跳过（无标签/失败）的地址数
+                "skipped": int,       # 跳过（无标签+失败）的地址数（向后兼容）
             }
         """
         stats = {
             "collected": len(self._pending),
             "fetched": 0,
+            "no_label": 0,
+            "fetch_failed": 0,
+            "fetch_detail": {
+                "http_403": 0, "http_429": 0,
+                "http_other": 0, "network_error": 0,
+            },
             "inserted": 0,
             "backfilled": 0,
             "skipped": 0,
@@ -101,16 +115,28 @@ class LabelEnricher:
         pending_list = list(self._pending)[: self.max_batch_size]
         self._pending = set(self._pending) - set(pending_list)
 
-        # 1. 批量查询区块浏览器
+        # 1. 批量查询区块浏览器（带状态统计）
         try:
-            label_map = self.fetcher.fetch_batch(pending_list)
+            if hasattr(self.fetcher, 'fetch_batch_with_stats'):
+                label_map, fetch_stats = self.fetcher.fetch_batch_with_stats(pending_list)
+                stats["fetched"] = fetch_stats.get("ok", 0)
+                stats["no_label"] = fetch_stats.get("no_label", 0)
+                for k in stats["fetch_detail"]:
+                    stats["fetch_detail"][k] = fetch_stats.get(k, 0)
+                stats["fetch_failed"] = sum(stats["fetch_detail"].values())
+            else:
+                # 向后兼容：旧 fetcher 没有 with_stats 方法
+                label_map = self.fetcher.fetch_batch(pending_list)
+                stats["fetched"] = len(label_map)
+                stats["no_label"] = len(pending_list) - len(label_map)
         except Exception as e:
             logger.warning(f"[{self.chain}] LabelEnricher 批量查询失败: {e}")
             self._tried.update(pending_list)
+            stats["fetch_failed"] = len(pending_list)
+            stats["skipped"] = len(pending_list)
             return stats
 
-        stats["fetched"] = len(label_map)
-        stats["skipped"] = len(pending_list) - len(label_map)
+        stats["skipped"] = stats["no_label"] + stats["fetch_failed"]
         self._tried.update(pending_list)
 
         if not label_map:

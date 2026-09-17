@@ -162,6 +162,62 @@ class ExplorerLabelFetcher:
                 results[addr.lower()] = info
         return results
 
+    def fetch_batch_with_stats(
+        self, addresses: list[str]
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+        """批量抓取，返回 (results, stats)。
+
+        stats 包含:
+          - ok: 成功查到标签的数量
+          - no_label: 页面正常但无标签
+          - http_403: 被反爬拦截
+          - http_429: 被限流
+          - http_other: 其他 HTTP 错误
+          - network_error: 网络/超时错误
+          - total: 总处理数
+        """
+        results: dict[str, dict[str, Any]] = {}
+        stats = {
+            "ok": 0, "no_label": 0,
+            "http_403": 0, "http_429": 0, "http_other": 0,
+            "network_error": 0, "total": len(addresses),
+        }
+        for addr in addresses:
+            info, status = self.fetch_with_status(addr)
+            if info:
+                results[addr.lower()] = info
+                stats["ok"] += 1
+            elif status in stats:
+                stats[status] += 1
+            else:
+                stats["no_label"] += 1
+        return results, stats
+
+    def fetch_with_status(
+        self, address: str
+    ) -> tuple[dict[str, Any] | None, str]:
+        """带状态码的抓取，返回 (label_info, status)。
+
+        status: 'ok', 'no_label', 'http_403', 'http_429', 'http_other',
+                'network_error', 'invalid_address'
+        """
+        if not RE_EVM_ADDR.match(address or ""):
+            return None, "invalid_address"
+
+        html, status = self._fetch_page_with_status(address)
+        if not html:
+            return None, status
+
+        label_text = self._extract_name_tag(html)
+        if not label_text:
+            return None, "no_label"
+
+        info = self._classify_label(label_text)
+        if not info:
+            return None, "no_label"
+
+        return info, "ok"
+
     # ── 内部：HTTP ──────────────────────────────────────────
 
     def _rate_limit(self) -> None:
@@ -172,19 +228,31 @@ class ExplorerLabelFetcher:
         self._last_request_at = time.time()
 
     def _fetch_page(self, address: str) -> str | None:
-        """拉取地址详情页 HTML。"""
+        """拉取地址详情页 HTML。失败返回 None（向后兼容接口）。"""
+        html, _ = self._fetch_page_with_status(address)
+        return html
+
+    def _fetch_page_with_status(self, address: str) -> tuple[str | None, str]:
+        """拉取地址详情页 HTML，返回 (html, status)。
+
+        status: 'ok', 'http_403', 'http_429', 'http_other', 'network_error'
+        """
         self._rate_limit()
         url = f"{self.host}/address/{address}"
         try:
             resp = self._session.get(url, timeout=self.timeout, allow_redirects=True)
             if resp.status_code == 403:
-                return None  # 反爬
+                return None, "http_403"
             if resp.status_code == 429:
-                return None  # 限流
-            resp.raise_for_status()
-            return resp.text
+                return None, "http_429"
+            if resp.status_code >= 400:
+                return None, "http_other"
+            # 如果页面包含 Cloudflare 挑战，也视为 403 类拦截
+            if 'Just a moment...' in resp.text and 'Cloudflare' in resp.text:
+                return None, "http_403"
+            return resp.text, "ok"
         except Exception:
-            return None
+            return None, "network_error"
 
     # ── 内部：HTML 解析 ─────────────────────────────────────
 

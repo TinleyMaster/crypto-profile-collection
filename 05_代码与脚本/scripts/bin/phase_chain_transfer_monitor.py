@@ -812,12 +812,30 @@ def main():
             if args.enrich and i % ENRICH_FLUSH_EVERY_N_ASSETS == 0 and chain_enrichers:
                 for en_chain, en in chain_enrichers.items():
                     stats = en.flush()
-                    if stats["fetched"] > 0:
+                    if stats["fetched"] > 0 or stats.get("fetch_failed", 0) > 0:
                         total_enriched["fetched"] += stats["fetched"]
                         total_enriched["inserted"] += stats["inserted"]
                         total_enriched["backfilled"] += stats["backfilled"]
+                        total_enriched["fetch_failed"] = total_enriched.get(
+                            "fetch_failed", 0) + stats.get("fetch_failed", 0)
+                        total_enriched["collected"] = total_enriched.get(
+                            "collected", 0) + stats["collected"]
+                        fail_part = ""
+                        if stats.get("fetch_failed", 0) > 0:
+                            fd = stats.get("fetch_detail", {})
+                            fail_reasons = []
+                            if fd.get("http_403", 0):
+                                fail_reasons.append(f"403×{fd['http_403']}")
+                            if fd.get("http_429", 0):
+                                fail_reasons.append(f"429×{fd['http_429']}")
+                            if fd.get("network_error", 0):
+                                fail_reasons.append(f"网络×{fd['network_error']}")
+                            if fd.get("http_other", 0):
+                                fail_reasons.append(f"其他×{fd['http_other']}")
+                            fail_part = f", 失败 {stats['fetch_failed']} 条 ({', '.join(fail_reasons)})"
                         print(f"  ✨ [{en_chain}] enrich: 新增标签 {stats['fetched']} 条, "
-                              f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条")
+                              f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条"
+                              f"{fail_part}")
 
         # ── 最终 flush：把剩余待富化地址处理完 ──
         if args.enrich and chain_enrichers:
@@ -828,8 +846,30 @@ def main():
                     total_enriched["fetched"] += stats["fetched"]
                     total_enriched["inserted"] += stats["inserted"]
                     total_enriched["backfilled"] += stats["backfilled"]
+                    total_enriched["fetch_failed"] = total_enriched.get(
+                        "fetch_failed", 0) + stats.get("fetch_failed", 0)
+                    total_enriched["no_label"] = total_enriched.get(
+                        "no_label", 0) + stats.get("no_label", 0)
+                    total_enriched["collected"] = total_enriched.get(
+                        "collected", 0) + stats["collected"]
+                    fail_part = ""
+                    if stats.get("fetch_failed", 0) > 0:
+                        fd = stats.get("fetch_detail", {})
+                        fail_reasons = []
+                        if fd.get("http_403", 0):
+                            fail_reasons.append(f"403×{fd['http_403']}")
+                        if fd.get("http_429", 0):
+                            fail_reasons.append(f"429×{fd['http_429']}")
+                        if fd.get("network_error", 0):
+                            fail_reasons.append(f"网络×{fd['network_error']}")
+                        if fd.get("http_other", 0):
+                            fail_reasons.append(f"其他×{fd['http_other']}")
+                        fail_part = f"，失败 {stats['fetch_failed']} ({', '.join(fail_reasons)})"
+                    no_label_part = ""
+                    if stats.get("no_label", 0) > 0:
+                        no_label_part = f"，无标签 {stats['no_label']}"
                     print(f"  [{en_chain}] 本次收集 {stats['collected']} 个陌生地址, "
-                          f"查到标签 {stats['fetched']} 条, "
+                          f"查到标签 {stats['fetched']} 条{no_label_part}{fail_part}, "
                           f"入库 {stats['inserted']} 条, 回填转账 {stats['backfilled']} 条")
 
         elapsed = time.time() - t0

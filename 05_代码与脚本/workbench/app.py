@@ -664,6 +664,29 @@ TASK_DEFS = {
         "default_args": [],
         "category": "OBM 链上指标",
     },
+
+    # ═══ 盘面异动扫描：数据回填 / 流式采集（P1/P0 补全）═══
+    "scan_oi_backfill": {
+        "name": "盘面扫描·OI 历史回填",
+        "description": "Binance openInterestHist 免费回填最近 ~30 天 1h OI 到 oi_cvd_snapshot（断点续跑，跳过已覆盖；回测前置数据）",
+        "script": "phase_backfill_oi_history.py",
+        "default_args": [],
+        "category": "盘面扫描",
+    },
+    "scan_funding_backfill": {
+        "name": "盘面扫描·funding 历史回填",
+        "description": "Binance fundingRate 免费回填 ~333 天 8h 资金费率到 funding_rate_hist（回测 funding 消融 + 拥挤度标签历史序列）",
+        "script": "phase_backfill_funding_history.py",
+        "default_args": ["--full"],
+        "category": "盘面扫描",
+    },
+    "scan_cvd_ws_collector": {
+        "name": "盘面扫描·CVD 流式采集（常驻）",
+        "description": "WebSocket aggTrade 全市场精确 CVD 流式采集 → oi_cvd_snapshot 5m 桶（评审 §5.1 官方路径；常驻进程，可在任务列表停止）",
+        "script": "phase_cvd_ws_collector.py",
+        "default_args": [],
+        "category": "盘面扫描",
+    },
 }
 
 

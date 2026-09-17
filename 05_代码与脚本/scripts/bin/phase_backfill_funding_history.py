@@ -119,6 +119,7 @@ def fetch_funding(symbol: str, incremental: bool, last_time: datetime | None) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="funding 历史回填/增量 → biz.funding_rate_hist")
+    parser.add_argument("--full", action="store_true", help="全量回填（默认行为，兼容参数）")
     parser.add_argument("--incremental", action="store_true", help="增量模式（默认全量回填）")
     parser.add_argument("--limit-symbols", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")

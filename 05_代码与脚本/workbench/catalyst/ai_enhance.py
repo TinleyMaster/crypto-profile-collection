@@ -65,7 +65,11 @@ _DEEP_REVIEW_SYSTEM_PROMPT = (
     "2. 客观中立：既说机会也说风险，不偏不倚\n"
     "3. 可操作性：给出明确的操作建议（开/不开/观察）和仓位建议\n"
     "4. 风险优先：先评估下行风险，再看上行空间\n"
-    "5. 时效性：考虑催化剂阶段（预期阶段/落地阶段/兑现后）和剩余有效期\n\n"
+    "5. 时效性：考虑催化剂阶段（预期阶段/落地阶段/兑现后）和剩余有效期\n"
+    "6. 资产校验：第一步必须校验代币信息与催化剂内容是否匹配。\n"
+    "   如果代币名称/描述/赛道与催化剂中的项目明显不符（如同名不同币、ticker冲突），\n"
+    "   必须将 asset_match_confidence 设为 low，并在 overall_review 中明确指出，\n"
+    "   同时 verdict 应降级为「不建议参与」或「建议观望」。\n\n"
     "只输出 JSON，不要其他内容。"
 )
 
@@ -82,14 +86,15 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 - ATH：{ath_usd} 美元（距ATH {ath_distance}%）
 - 流通量：{circulating_supply} / 总量 {total_supply}（流通率 {circulating_ratio}%）
 - 上线时间：{launch_date}
+- 代币简介：{asset_description}
 
 ## 二、催化剂信息
-- 催化剂标题（中文）：{catalyst_title_cn}
+- 催化剂标题（{title_language}）：{catalyst_title_cn}
 - 催化剂类型：{catalyst_kind}
 - 事件类型：{event_type}
 - 信息来源：{source_code}
 - 发布时间：{published_at}
-- 催化剂摘要（中文）：
+- 催化剂摘要（{summary_language}）：
 {catalyst_summary_cn}
 
 ## 三、信号评分
@@ -110,12 +115,12 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 - 失效条件：{invalidation}
 
 ## 五、风险与流动性
-- 流动性评分：{liquidity_score}
-- 风险标签：
-{risk_labels}
+- 流动性（24h 总流动性）：{liquidity_score}
+- 风险等级：{risk_level}
 
 ## 六、输出 JSON 格式
 {{
+  "asset_match_confidence": "high / medium / low（代币与催化剂的匹配置信度，ticker同名但项目不同为 low）",
   "verdict": "强烈推荐开仓 / 建议轻仓参与 / 建议观望 / 不建议参与",
   "confidence_level": "极高 / 高 / 中 / 低",
   "position_suggestion": "建议仓位比例，如 30% 仓位或 半仓",
@@ -130,7 +135,7 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
   "stop_loss_advice": "止损建议（是否认同规则止损价，或给出调整建议）",
   "take_profit_advice": "止盈建议（是否认同规则目标价，建议分批止盈点位）",
   "alternative_scenarios": "替代情景（如果催化剂不达预期/超预期，如何应对）",
-  "overall_review": "综合评审总结（5-8句话，涵盖机会与风险的完整判断）"
+  "overall_review": "综合评审总结（5-8句话，涵盖机会与风险的完整判断；如果资产不匹配必须明确指出）"
 }}
 """
 
@@ -256,6 +261,7 @@ class AISignalDeepReviewer:
 
             # 标准化输出
             result = {
+                "asset_match_confidence": str(data.get("asset_match_confidence") or "medium")[:16],
                 "verdict": str(data.get("verdict") or "")[:64],
                 "confidence_level": str(data.get("confidence_level") or "")[:16],
                 "position_suggestion": str(data.get("position_suggestion") or "")[:128],
@@ -349,15 +355,45 @@ def _build_deep_review_prompt(d: dict) -> str:
     if circ and total and total > 0:
         circulating_ratio = f"{circ / total * 100:.1f}"
 
-    # 风险标签格式化
-    risk_labels = d.get("risk_labels") or []
-    if isinstance(risk_labels, list):
-        risk_text = "\n".join(
-            f"  - [{_risk_level_cn(rl.get('level',''))}] {rl.get('label','')}"
-            for rl in risk_labels
-        ) or "  暂无风险标签"
+    # 风险等级（asset_risk_labels.risk_label 存的就是 high/medium/low）
+    raw_risk = d.get("risk_level") or d.get("risk_label")
+    # 如果是 risk_labels 数组格式，从里面提取
+    if not raw_risk:
+        rlabels = d.get("risk_labels")
+        if isinstance(rlabels, list) and rlabels:
+            rl = rlabels[0]
+            if isinstance(rl, dict):
+                raw_risk = rl.get("level") or rl.get("label")
+    risk_level = _risk_level_cn(raw_risk) if raw_risk else "未知"
+
+    # 流动性格式化（total_liquidity_usd 是美元金额）
+    liq = d.get("liquidity_score") or d.get("total_liquidity_usd")
+    if liq is None or liq == "":
+        liquidity_text = "未知"
     else:
-        risk_text = "  暂无风险标签"
+        try:
+            liquidity_text = _fmt_mcap(float(liq))
+        except (TypeError, ValueError):
+            liquidity_text = str(liq)
+
+    # 代币简介
+    desc = d.get("description_short") or d.get("description") or d.get("asset_description")
+    if not desc:
+        desc = "暂无简介"
+    else:
+        desc = str(desc)[:300]
+
+    # 判断标题/摘要语言
+    title_val = d.get("title_cn") or ""
+    title_lang = "中文" if title_val.strip() else "英文"
+    summary_val = d.get("catalyst_summary") or d.get("ai_summary") or ""
+    # 简单判断：如果含有中文字符就是中文，否则英文
+    def _has_cn(text):
+        import re
+        return bool(re.search(r'[\u4e00-\u9fff]', text or ''))
+    summary_lang = "中文" if _has_cn(str(summary_val)) else "英文"
+    if not summary_val:
+        summary_lang = "无"
 
     # 赛道 / 分类
     categories = d.get("categories")
@@ -384,12 +420,15 @@ def _build_deep_review_prompt(d: dict) -> str:
         total_supply=_fmt_supply(d.get("total_supply")),
         circulating_ratio=circulating_ratio or "N/A",
         launch_date=str(d.get("launch_date") or "未知"),
-        catalyst_title_cn=d.get("title_cn") or d.get("catalyst_title") or "(无标题)",
+        asset_description=desc,
+        title_language=title_lang,
+        summary_language=summary_lang,
+        catalyst_title_cn=title_val or d.get("catalyst_title") or "(无标题)",
         catalyst_kind=_kind_cn(d.get("kind")),
         event_type=_event_type_cn(d.get("event_type") or d.get("ai_event_type") or "other"),
         source_code=d.get("source_code", "未知"),
         published_at=str(d.get("published_at") or "未知"),
-        catalyst_summary_cn=(d.get("catalyst_summary") or d.get("ai_summary") or "无摘要")[:800],
+        catalyst_summary_cn=(str(summary_val) or "无摘要")[:800],
         composite_score=d.get("composite_score", 0),
         tier=d.get("tier", "?"),
         base_strength=d.get("base_strength", 0),
@@ -405,8 +444,8 @@ def _build_deep_review_prompt(d: dict) -> str:
         stop_loss=_n(d.get("stop_loss")),
         rr_ratio=d.get("rr_ratio") or "未知",
         invalidation=d.get("invalidation") or "未设置",
-        liquidity_score=d.get("liquidity_score") or "未知",
-        risk_labels=risk_text,
+        liquidity_score=liquidity_text,
+        risk_level=risk_level,
     )
 
 

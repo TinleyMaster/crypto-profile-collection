@@ -206,8 +206,15 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                s.invalidation, s.persistence,
                s.base_strength, s.resonance_score,
                s.confidence, s.regime,
-               -- 风险标签
-               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
+               -- 风险标签（risk_label 存的是 high/medium/low）
+               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label',
+                     CASE arl.risk_label
+                       WHEN 'high' THEN '高风险'
+                       WHEN 'medium' THEN '中风险'
+                       WHEN 'low' THEN '低风险'
+                       WHEN 'critical' THEN '极高风险'
+                       ELSE '风险等级未知'
+                     END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
                -- 最新日行情（收盘价 + 24h 涨跌幅）
@@ -319,8 +326,15 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                    s.invalidation, s.persistence,
                    s.base_strength, s.resonance_score,
                    s.confidence, s.regime,
-                   -- 风险标签
-                   (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
+                   -- 风险标签（risk_label 存的是 high/medium/low）
+                   (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label',
+                         CASE arl.risk_label
+                           WHEN 'high' THEN '高风险'
+                           WHEN 'medium' THEN '中风险'
+                           WHEN 'low' THEN '低风险'
+                           WHEN 'critical' THEN '极高风险'
+                           ELSE '风险等级未知'
+                         END))
                       FROM biz.asset_risk_labels arl
                      WHERE arl.asset_id = s.asset_id) AS risk_labels,
                    -- 最新日行情（收盘价 + 24h 涨跌幅）
@@ -613,7 +627,7 @@ def _build_fast_alert_html(row) -> str:
         if persistence:
             tech_items.append(f"催化持续性：<b>{_cn(persistence, PERSIST_MAP)}</b>")
         if liquidity_score is not None:
-            tech_items.append(f"流动性评分：<b>{liquidity_score}</b>")
+            tech_items.append(f"流动性（24h）：<b>{_fmt_mcap(liquidity_score)}</b>")
         tech_section = f"""
         <div style="margin-top:16px">
           <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📈 信号维度</div>
@@ -667,11 +681,32 @@ def _build_fast_alert_html(row) -> str:
         stop_loss_advice = ai_deep.get("stop_loss_advice", "")
         take_profit_advice = ai_deep.get("take_profit_advice", "")
         overall_review = ai_deep.get("overall_review", "")
+        asset_match = ai_deep.get("asset_match_confidence", "high")
+
+        # 资产匹配置信度（low 时用红色警告）
+        match_warning = ""
+        if asset_match == "low":
+            match_warning = """
+          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:12px;font-weight:700;color:#dc2626">⚠️ 资产匹配警告：代币与催化剂可能不匹配</div>
+            <div style="font-size:11px;color:#991b1b;margin-top:2px">系统检测到该代币与催化剂描述的项目可能不一致（ticker同名但不同项目），请谨慎核实后再做决策。</div>
+          </div>
+            """
 
         # verdict 配色
         verdict_color = "#059669" if "强烈" in verdict or "建议" in verdict and "不" not in verdict else (
             "#dc2626" if "不建议" in verdict else "#d97706"
         )
+
+        # AI 深度评审区块边框色：资产不匹配时用红色系
+        if asset_match == "low":
+            border_color = "#fca5a5"
+            bg_gradient = "linear-gradient(135deg,#fef2f2,#fff1f2)"
+            header_color = "#991b1b"
+        else:
+            border_color = "#a7f3d0"
+            bg_gradient = "linear-gradient(135deg,#f0fdf4,#ecfeff)"
+            header_color = "#065f46"
 
         risk_list_html = ""
         if key_risks:
@@ -682,11 +717,13 @@ def _build_fast_alert_html(row) -> str:
             risk_list_html = f'<ul style="margin:6px 0 0 0;padding-left:20px;font-size:12px">{risk_list_html}</ul>'
 
         ai_deep_section = f"""
-        <div style="margin-top:20px;background:linear-gradient(135deg,#f0fdf4,#ecfeff);border:1px solid #a7f3d0;border-radius:10px;padding:16px">
-          <div style="font-size:14px;font-weight:700;color:#065f46;margin-bottom:10px">
+        <div style="margin-top:20px;background:{bg_gradient};border:1px solid {border_color};border-radius:10px;padding:16px">
+          <div style="font-size:14px;font-weight:700;color:{header_color};margin-bottom:10px">
             🤖 AI 深度评审 · A级信号
             <span style="font-size:12px;font-weight:500;color:#10b981;margin-left:8px">信心度：{_html.escape(conf)}</span>
           </div>
+
+          {match_warning}
 
           <div style="background:#fff;border-radius:8px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:12px;color:#6b7280">交易结论</div>
@@ -1158,7 +1195,15 @@ def _fetch_signal_row(conn, signal_id: int):
                s.base_strength, s.resonance_score,
                s.confidence, s.regime,
                c.published_at,
-               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label', '综合风险'))
+               -- 风险标签（risk_label 存的是 high/medium/low）
+               (SELECT json_build_array(json_build_object('level', arl.risk_label, 'label',
+                     CASE arl.risk_label
+                       WHEN 'high' THEN '高风险'
+                       WHEN 'medium' THEN '中风险'
+                       WHEN 'low' THEN '低风险'
+                       WHEN 'critical' THEN '极高风险'
+                       ELSE '风险等级未知'
+                     END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
                (SELECT md.price_usd

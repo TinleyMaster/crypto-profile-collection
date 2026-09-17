@@ -296,13 +296,24 @@ class ExplorerLabelFetcher:
 
         try:
             self._pw = sync_playwright().start()
+            # 用 "new" 无头模式 + 反检测参数，降低 Cloudflare 识别概率
             launch_kwargs = {
-                "headless": True,
+                "headless": True,  # 兼容旧版 Playwright
                 "args": [
                     "--no-sandbox",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-gpu",
+                    "--window-size=1280,800",
                 ],
             }
+            # 尝试用 "new" 无头模式（更接近真实浏览器指纹）
+            try:
+                launch_kwargs["headless"] = "new"  # type: ignore[assignment]
+            except Exception:
+                launch_kwargs["headless"] = True
             if self.proxy:
                 launch_kwargs["proxy"] = {"server": self.proxy}
             self._pw_browser = self._pw.chromium.launch(**launch_kwargs)
@@ -310,10 +321,39 @@ class ExplorerLabelFetcher:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0.0.0 Safari/537.36"
+                    "Chrome/131.0.0.0 Safari/537.36"
                 ),
                 viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                },
             )
+            # 注入反检测脚本，覆盖 navigator.webdriver 等指纹
+            self._pw_context.add_init_script("""
+                // 覆盖 navigator.webdriver
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                // 覆盖 navigator.plugins 和 mimeTypes（无头模式下为空）
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5],
+                });
+                Object.defineProperty(navigator, 'mimeTypes', {
+                    get: () => [1, 2, 3, 4, 5],
+                });
+                // 覆盖 chrome 对象
+                window.chrome = { runtime: {} };
+                // 覆盖 permissions
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters)
+                );
+            """)
             self._pw_available = True
             return True
         except Exception:
@@ -329,29 +369,57 @@ class ExplorerLabelFetcher:
         try:
             page = self._pw_context.new_page()
             try:
-                # 先到页面，等 domcontentloaded 就行，后面再等具体元素
+                # 先到页面，等 domcontentloaded
                 page.goto(url, timeout=self.timeout * 1000,
                           wait_until="domcontentloaded")
 
-                # 等待 Cloudflare 挑战通过（最多等 15 秒）
+                # 等待 Cloudflare 挑战通过（最多等 30 秒）
+                # 关键：用 && 而不是 ||，确保两个特征都消失才算通过
+                cloudflare_passed = False
                 try:
                     page.wait_for_function(
                         """() => {
                             const txt = document.body ? document.body.innerText : '';
-                            return !txt.includes('Just a moment...') || 
-                                   !txt.includes('Cloudflare');
+                            return !txt.includes('Just a moment...') && 
+                                   !txt.includes('Please wait');
                         }""",
-                        timeout=15000,
+                        timeout=30000,
                     )
+                    cloudflare_passed = True
                 except Exception:
-                    # 超时就继续，可能不是 Cloudflare 页
+                    # 超时可能是因为页面本身就不是 Cloudflare 挑战页
+                    # 检查一下当前页面是不是真的被拦截了
+                    try:
+                        body_text = page.evaluate("document.body.innerText") or ""
+                        if "Just a moment" in body_text or "Please wait" in body_text:
+                            # 确实还在 Cloudflare 页，放弃
+                            return None
+                        cloudflare_passed = True
+                    except Exception:
+                        pass
+
+                if not cloudflare_passed:
+                    return None
+
+                # 等网络空闲，确保 AJAX 内容加载完
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    # 网络可能一直不 idle，不阻塞
                     pass
 
                 # 等 name tag 相关元素出现（最多 8 秒）
-                # etherscan 系站点的 name tag 通常是 span.hash-tag.text-truncate
+                # etherscan 系站点的 name tag 通常在这些选择器中
+                tag_selectors = [
+                    "span.hash-tag.text-truncate",
+                    ".hash-tag",
+                    "#nameTag",
+                    "[data-original-title]",
+                    "a[href*='/accounts/label/']",
+                ]
                 try:
                     page.wait_for_selector(
-                        "span.hash-tag.text-truncate, [data-original-title], #nameTag",
+                        ", ".join(tag_selectors),
                         timeout=8000,
                     )
                 except Exception:
@@ -408,7 +476,8 @@ class ExplorerLabelFetcher:
         """从地址详情页提取 name tag 文本。
 
         Etherscan 系列浏览器的地址详情页，name tag 通常在：
-        - <span class="hash-tag text-truncate"> 内
+        - <span class="hash-tag text-truncate"> 内的文本
+        - 元素的 data-original-title / title / data-bs-title 属性
         - 或者 #ContentPlaceHolder1_divSummary 附近的标签
         - 老版本在 .address-tag / #nameTag 等位置
 
@@ -426,13 +495,29 @@ class ExplorerLabelFetcher:
             "div[data-title='Name Tag']",
         ]
 
+        # 可能包含标签文本的属性
+        label_attrs = [
+            "data-original-title",
+            "data-bs-title",
+            "title",
+            "data-label",
+        ]
+
         for sel in selectors:
             el = soup.select_one(sel)
             if not el:
                 continue
+
+            # 1. 先看元素文本
             text = el.get_text(strip=True)
             if self._looks_like_label(text):
                 return text
+
+            # 2. 再看属性（tooltip 风格）
+            for attr in label_attrs:
+                attr_val = el.get(attr, "").strip()
+                if self._looks_like_label(attr_val):
+                    return attr_val
 
         # 兜底：找页面上标题附近带 "Name Tag" 的行
         for th in soup.find_all("th"):
@@ -442,6 +527,24 @@ class ExplorerLabelFetcher:
                     text = td.get_text(strip=True)
                     if self._looks_like_label(text):
                         return text
+                    # 也检查 td 里元素的属性
+                    for child in td.find_all(True):
+                        for attr in label_attrs:
+                            attr_val = child.get(attr, "").strip()
+                            if self._looks_like_label(attr_val):
+                                return attr_val
+
+        # 最后兜底：找所有带 hash-tag 类的元素，检查所有可能的文本和属性
+        for el in soup.select(".hash-tag"):
+            # 检查子元素的文本和属性
+            for child in el.find_all(True):
+                text = child.get_text(strip=True)
+                if self._looks_like_label(text):
+                    return text
+                for attr in label_attrs:
+                    attr_val = child.get(attr, "").strip()
+                    if self._looks_like_label(attr_val):
+                        return attr_val
 
         return None
 

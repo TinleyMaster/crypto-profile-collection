@@ -15,6 +15,7 @@ AI 信号综合分析模块（FEAT-AI-HIGHLIGHT）。
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -2201,10 +2202,11 @@ def analyze_asset_v2(
         # 1. 构建全量画像
         profile = build_asset_profile(asset_id, conn=conn)
 
-        # 2. Web 搜索补全缺失维度（如果 Firecrawl 已配置）
+        # 2. Web 搜索补全缺失维度（Firecrawl 成本较高，默认关闭）。
+        #    配额 402/429 曾拖慢早报链路；需要时设 FIRECRAWL_ENABLED=1 且 .env 配 key。
         from crypto_research.config import get_settings
         settings = get_settings(require_database=False)
-        if settings.firecrawl_api_key:
+        if os.getenv("FIRECRAWL_ENABLED", "0") == "1" and settings.firecrawl_api_key:
             _enrich_profile_with_web_search(profile, settings)
 
         # 3. 调用 LLM

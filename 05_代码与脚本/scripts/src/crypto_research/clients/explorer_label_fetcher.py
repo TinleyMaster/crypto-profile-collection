@@ -296,27 +296,35 @@ class ExplorerLabelFetcher:
 
         try:
             self._pw = sync_playwright().start()
-            # 用 "new" 无头模式 + 反检测参数，降低 Cloudflare 识别概率
-            launch_kwargs = {
-                "headless": True,  # 兼容旧版 Playwright
-                "args": [
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-gpu",
-                    "--window-size=1280,800",
-                ],
-            }
-            # 尝试用 "new" 无头模式（更接近真实浏览器指纹）
-            try:
-                launch_kwargs["headless"] = "new"  # type: ignore[assignment]
-            except Exception:
-                launch_kwargs["headless"] = True
-            if self.proxy:
-                launch_kwargs["proxy"] = {"server": self.proxy}
-            self._pw_browser = self._pw.chromium.launch(**launch_kwargs)
+            launch_args = [
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-gpu",
+                "--window-size=1280,800",
+            ]
+            # 先试 headless="new"（新版 Playwright 支持，指纹更接近真实浏览器）
+            # 失败则回退到 headless=True（老版本兼容）
+            browser = None
+            for headless_val in ("new", True):
+                try:
+                    launch_kwargs: dict[str, Any] = {
+                        "headless": headless_val,
+                        "args": launch_args,
+                    }
+                    if self.proxy:
+                        launch_kwargs["proxy"] = {"server": self.proxy}
+                    browser = self._pw.chromium.launch(**launch_kwargs)
+                    break
+                except Exception:
+                    # 老版本 Playwright 不支持 headless="new"，回退
+                    continue
+            if browser is None:
+                # 两次都失败，抛异常走外层 except
+                raise RuntimeError("Playwright chromium launch failed (both headless modes)")
+            self._pw_browser = browser
             self._pw_context = self._pw_browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

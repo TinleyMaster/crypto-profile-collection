@@ -217,7 +217,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                      END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
-               -- 最新日行情（收盘价 + 24h 涨跌幅）
+               -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
                (SELECT md.price_usd
                   FROM biz.asset_market_daily md
                  WHERE md.asset_id = s.asset_id
@@ -226,6 +226,14 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                   FROM biz.asset_market_daily md
                  WHERE md.asset_id = s.asset_id
                  ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
+               (SELECT md.change_7d
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
+               (SELECT md.volume_24h
+                  FROM biz.asset_market_daily md
+                 WHERE md.asset_id = s.asset_id
+                 ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
                -- 流动性（总流动性，单位 USD）
                (SELECT al.total_liquidity_usd
                   FROM biz.asset_liquidity al
@@ -337,7 +345,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                          END))
                       FROM biz.asset_risk_labels arl
                      WHERE arl.asset_id = s.asset_id) AS risk_labels,
-                   -- 最新日行情（收盘价 + 24h 涨跌幅）
+                   -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
                    (SELECT md.price_usd
                       FROM biz.asset_market_daily md
                      WHERE md.asset_id = s.asset_id
@@ -346,6 +354,14 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                       FROM biz.asset_market_daily md
                      WHERE md.asset_id = s.asset_id
                      ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
+                   (SELECT md.change_7d
+                      FROM biz.asset_market_daily md
+                     WHERE md.asset_id = s.asset_id
+                     ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
+                   (SELECT md.volume_24h
+                      FROM biz.asset_market_daily md
+                     WHERE md.asset_id = s.asset_id
+                     ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
                    -- 流动性（总流动性，单位 USD）
                    (SELECT al.total_liquidity_usd
                       FROM biz.asset_liquidity al
@@ -577,8 +593,12 @@ def _build_fast_alert_html(row) -> str:
           <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_mcap(market_cap)} / #{market_cap_rank if market_cap_rank else '—'}</div>
         </div>
         <div style="flex:1;min-width:140px">
-          <div style="color:#6b7280">当前价格 / 24h涨跌</div>
-          <div style="font-weight:600;margin-top:2px;color:{_pct_color(change_24h_pct)}">{_fmt_price(current_price)} / {_fmt_pct(change_24h_pct)}</div>
+          <div style="color:#6b7280">当前价格 / 24h / 7d</div>
+          <div style="font-weight:600;margin-top:2px">
+            <span style="color:#111827">{_fmt_price(current_price)}</span>
+            <span style="color:{_pct_color(change_24h_pct)};font-size:11.5px"> {_fmt_pct(change_24h_pct)}</span>
+            {f'<span style="color:{_pct_color(row.get("change_7d_pct"))};font-size:11.5px"> / 7d {_fmt_pct(row.get("change_7d_pct"))}</span>' if row.get("change_7d_pct") is not None else ''}
+          </div>
         </div>
         <div style="flex:1;min-width:140px">
           <div style="color:#6b7280">历史高点 / 距离</div>
@@ -590,6 +610,10 @@ def _build_fast_alert_html(row) -> str:
         <div style="flex:1;min-width:140px">
           <div style="color:#6b7280">总供应量{circ_ratio}</div>
           <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_supply(total_supply)}</div>
+        </div>
+        <div style="flex:1;min-width:140px">
+          <div style="color:#6b7280">24h 成交量</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{_fmt_mcap(row.get("volume_24h_usd")) if row.get("volume_24h_usd") is not None else '—'}</div>
         </div>
         <div style="flex:1;min-width:140px">
           <div style="color:#6b7280">上线时间 / 主赛道</div>
@@ -1206,14 +1230,22 @@ def _fetch_signal_row(conn, signal_id: int):
                      END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
-               (SELECT md.price_usd
-                  FROM biz.asset_market_daily md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS current_price,
-               (SELECT md.change_24h
-                  FROM biz.asset_market_daily md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
+               -- 最新日行情 + 7 天均量 + 异动判断
+               md_latest.price_usd AS current_price,
+               md_latest.change_24h AS change_24h_pct,
+               md_latest.change_7d AS change_7d_pct,
+               md_latest.volume_24h AS volume_24h_usd,
+               md_avg.avg_volume_7d,
+               CASE
+                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
+                        AND md_latest.volume_24h / md_avg.avg_volume_7d >= 2.0
+                   THEN true ELSE false
+               END AS is_volume_spike,
+               CASE
+                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
+                   THEN ROUND((md_latest.volume_24h / md_avg.avg_volume_7d)::numeric, 2)
+                   ELSE NULL
+               END AS volume_ratio_7d,
                (SELECT al.total_liquidity_usd
                   FROM biz.asset_liquidity al
                  WHERE al.asset_id = s.asset_id
@@ -1221,6 +1253,30 @@ def _fetch_signal_row(conn, signal_id: int):
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
+        -- 最新日行情
+        LEFT JOIN LATERAL (
+            SELECT md.price_usd, md.change_24h, md.change_7d, md.volume_24h
+              FROM biz.asset_market_daily md
+             WHERE md.asset_id = s.asset_id
+             ORDER BY md.market_date DESC
+             LIMIT 1
+        ) md_latest ON true
+        -- 过去 7 天平均成交量（不含最新一天，用来对比）
+        LEFT JOIN LATERAL (
+            SELECT AVG(md2.volume_24h) AS avg_volume_7d
+              FROM (
+                SELECT md2.volume_24h
+                  FROM biz.asset_market_daily md2
+                 WHERE md2.asset_id = s.asset_id
+                       AND md2.market_date < (
+                           SELECT MAX(md3.market_date)
+                             FROM biz.asset_market_daily md3
+                            WHERE md3.asset_id = s.asset_id
+                       )
+                 ORDER BY md2.market_date DESC
+                 LIMIT 7
+              ) md2
+        ) md_avg ON true
         WHERE s.signal_id = %s
     """, (signal_id,)).fetchone()
     return dict(row) if row else None

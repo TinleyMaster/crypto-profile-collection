@@ -69,7 +69,11 @@ _DEEP_REVIEW_SYSTEM_PROMPT = (
     "6. 资产校验：第一步必须校验代币信息与催化剂内容是否匹配。\n"
     "   如果代币名称/描述/赛道与催化剂中的项目明显不符（如同名不同币、ticker冲突），\n"
     "   必须将 asset_match_confidence 设为 low，并在 overall_review 中明确指出，\n"
-    "   同时 verdict 应降级为「不建议参与」或「建议观望」。\n\n"
+    "   同时 verdict 应降级为「不建议参与」或「建议观望」。\n"
+    "7. 盘面异动：结合 24h 成交量与过去 7 日均量的比值、24h/7d 涨跌幅判断市场是否已提前反应。\n"
+    "   - 若量比 >= 2 且伴随大幅涨跌，说明资金已在异动，需警惕追高/接盘风险；\n"
+    "   - 若量比 < 1 且价格平稳，说明市场尚未充分关注，可能存在预期差；\n"
+    "   - 需将盘面异动情况纳入开仓时机与仓位决策的重要参考。\n\n"
     "只输出 JSON，不要其他内容。"
 )
 
@@ -118,7 +122,14 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 - 流动性（24h 总流动性）：{liquidity_score}
 - 风险等级：{risk_level}
 
-## 六、输出 JSON 格式
+## 六、盘面异动
+- 24h 成交量：{volume_24h_usd} 美元
+- 7 日均量：{avg_volume_7d} 美元
+- 量比（24h / 7日均量）：{volume_ratio_7d}
+- 7 日涨跌幅：{change_7d}%
+- 异动判定：{anomaly_summary}
+
+## 七、输出 JSON 格式
 {{
   "asset_match_confidence": "high / medium / low（代币与催化剂的匹配置信度，ticker同名但项目不同为 low）",
   "verdict": "强烈推荐开仓 / 建议轻仓参与 / 建议观望 / 不建议参与",
@@ -404,6 +415,82 @@ def _build_deep_review_prompt(d: dict) -> str:
     else:
         cat_text = "未知"
 
+    # ---- 盘面异动 ----
+    vol_24h = d.get("volume_24h_usd")
+    avg_vol_7d = d.get("avg_volume_7d")
+    vol_ratio = d.get("volume_ratio_7d")
+    change_7d_val = d.get("change_7d_pct")
+    change_24h_val = d.get("change_24h_pct")
+
+    # 24h 成交量格式化
+    if vol_24h is None or vol_24h == "":
+        volume_24h_text = "未知"
+    else:
+        try:
+            volume_24h_text = _fmt_mcap(float(vol_24h))
+        except (TypeError, ValueError):
+            volume_24h_text = str(vol_24h)
+
+    # 7 日均量格式化
+    if avg_vol_7d is None or avg_vol_7d == "":
+        avg_volume_7d_text = "未知"
+    else:
+        try:
+            avg_volume_7d_text = _fmt_mcap(float(avg_vol_7d))
+        except (TypeError, ValueError):
+            avg_volume_7d_text = str(avg_vol_7d)
+
+    # 量比
+    if vol_ratio is None or vol_ratio == "":
+        vol_ratio_text = "未知"
+    else:
+        try:
+            vol_ratio_text = f"{float(vol_ratio):.2f}x"
+        except (TypeError, ValueError):
+            vol_ratio_text = str(vol_ratio)
+
+    # 7 日涨跌幅
+    change_7d_text = _pct(change_7d_val)
+
+    # 异动判定（综合量价）
+    anomaly_parts = []
+    try:
+        vr = float(vol_ratio) if vol_ratio is not None and vol_ratio != "" else None
+        c24 = float(change_24h_val) if change_24h_val is not None and change_24h_val != "" else None
+        c7 = float(change_7d_val) if change_7d_val is not None and change_7d_val != "" else None
+
+        if vr is not None:
+            if vr >= 3.0:
+                anomaly_parts.append(f"显著放量（量比 {vr:.1f}x，远超近期均值）")
+            elif vr >= 2.0:
+                anomaly_parts.append(f"放量（量比 {vr:.1f}x，高于近期均值）")
+            elif vr >= 1.5:
+                anomaly_parts.append(f"温和放量（量比 {vr:.1f}x）")
+            elif vr <= 0.5:
+                anomaly_parts.append(f"极度缩量（量比 {vr:.1f}x，远低于均值）")
+            elif vr <= 0.7:
+                anomaly_parts.append(f"缩量（量比 {vr:.1f}x）")
+            else:
+                anomaly_parts.append(f"量能正常（量比 {vr:.1f}x）")
+
+        if c24 is not None:
+            if abs(c24) >= 20:
+                anomaly_parts.append(f"24h 剧烈波动（{c24:+.1f}%）")
+            elif abs(c24) >= 10:
+                anomaly_parts.append(f"24h 大幅{'上涨' if c24 > 0 else '下跌'}（{c24:+.1f}%）")
+            elif abs(c24) >= 5:
+                anomaly_parts.append(f"24h 明显{'上涨' if c24 > 0 else '下跌'}（{c24:+.1f}%）")
+
+        if c7 is not None:
+            if abs(c7) >= 30:
+                anomaly_parts.append(f"7d 剧烈{'上涨' if c7 > 0 else '下跌'}（{c7:+.1f}%）")
+            elif abs(c7) >= 15:
+                anomaly_parts.append(f"7d 大幅{'上涨' if c7 > 0 else '下跌'}（{c7:+.1f}%）")
+    except (TypeError, ValueError):
+        pass
+
+    anomaly_summary = "；".join(anomaly_parts) if anomaly_parts else "数据不足，无法判定"
+
     return _DEEP_REVIEW_USER_TEMPLATE.format(
         symbol=d.get("symbol", "?"),
         asset_name=d.get("canonical_name", d.get("asset_name", "?")),
@@ -446,6 +533,12 @@ def _build_deep_review_prompt(d: dict) -> str:
         invalidation=d.get("invalidation") or "未设置",
         liquidity_score=liquidity_text,
         risk_level=risk_level,
+        # 盘面异动
+        volume_24h_usd=volume_24h_text,
+        avg_volume_7d=avg_volume_7d_text,
+        volume_ratio_7d=vol_ratio_text,
+        change_7d=change_7d_text,
+        anomaly_summary=anomaly_summary,
     )
 
 

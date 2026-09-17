@@ -141,6 +141,12 @@ def main() -> int:
             else:
                 unmatched.append(entry)
 
+        # 无有效 symbol 的协议不创建新资产：无法可靠标识，避免 symbol='-' 撞车/垃圾资产
+        unmatched = [
+            e for e in unmatched
+            if e["symbol"] and e["symbol"].strip() != "" and e["symbol"] != "-"
+        ]
+
         new_count = len(unmatched)
         matched_count = len(matched)
 

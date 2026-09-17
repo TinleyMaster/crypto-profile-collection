@@ -33,8 +33,18 @@ WITH ranked AS (
         ON asm_cmc.source_code = 'cmc'
         AND asm_cmc.source_asset_key = p.cmc_id
     LEFT JOIN core.asset a_cmc ON a_cmc.asset_id = asm_cmc.asset_id
+    -- 仅当协议有有效 symbol 时才做 symbol 匹配，避免 '-'/NULL 撞车到同一兜底资产
     LEFT JOIN core.asset a_sym ON UPPER(a_sym.canonical_symbol) = UPPER(p.symbol)
+        AND NULLIF(TRIM(p.symbol), '') IS NOT NULL
+        AND p.symbol <> '-'
     WHERE asm.asset_id IS NULL  -- not yet mapped to core
+      -- 排除实体类协议（交易所/链/钱包等非代币协议，避免 TVL 串到代币资产）
+      AND COALESCE(p.category, '') NOT IN ('CEX', 'Chain', 'Wallets', 'Exchange', 'Launchpad')
+      -- 无有效 symbol 且无 cmc_id 的协议不进池（无符号无法可靠匹配，避免创建垃圾资产）
+      AND (
+          (NULLIF(TRIM(p.symbol), '') IS NOT NULL AND p.symbol <> '-')
+          OR p.cmc_id IS NOT NULL
+      )
 ),
 dedup AS (
     SELECT * FROM ranked WHERE rn = 1

@@ -694,6 +694,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "盘面扫描",
     },
+    "scan_cvd_ready_check": {
+        "name": "盘面扫描·CVD 数据就绪检查",
+        "description": "检查精确 CVD 积累天数，达到 14 天阈值后自动发邮件提醒跑维度回测（拆 S1/S2、S7/S8）",
+        "script": "phase_check_cvd_ready.py",
+        "default_args": [],
+        "category": "盘面扫描",
+    },
 }
 
 

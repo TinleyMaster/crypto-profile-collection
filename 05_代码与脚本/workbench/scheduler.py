@@ -203,6 +203,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
     ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
      "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
+    ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],
+     "盘面扫描·CVD 数据就绪检查（每天，精确 CVD 积累≥14 天自动邮件提醒复校）", "core"),
 ]
 
 

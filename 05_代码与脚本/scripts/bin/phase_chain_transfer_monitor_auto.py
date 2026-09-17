@@ -47,7 +47,10 @@ def run_chain_loop(chain: str) -> tuple[int, int]:
             result = subprocess.run(
                 [sys.executable, "-u", script,
                  "--chain", chain,
-                 "--limit", str(BATCH_SIZE), "--offset", str(offset), "--alarm-only"],
+                 "--limit", str(BATCH_SIZE), "--offset", str(offset), "--alarm-only",
+                 # P1-4: 常驻轮询默认开启地址标签旁路富化（enrich 内部按 ENRICH_SUPPORTED_CHAINS 白名单
+                 # 自动跳过 bsc/arbitrum 等 Cloudflare 拦截链，仅 eth/base/polygon 真正爬取）
+                 "--enrich"],
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT,

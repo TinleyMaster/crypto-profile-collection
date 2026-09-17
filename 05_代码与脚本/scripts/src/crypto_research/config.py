@@ -33,6 +33,9 @@ class Settings:
     ark_base_url: str | None = None
     ark_model: str | None = None
     request_timeout_seconds: int = 30
+    # 网络代理（enrich 爬取区块浏览器标签等外部 HTTP 时使用；requests 也读 HTTPS_PROXY 环境变量）
+    https_proxy: str | None = None
+    http_proxy: str | None = None
     # CryptoETF (cryptoetf.today) ETF 资金流 API
     cryptoetf_api_key: str | None = None
     cryptoetf_base_url: str = "https://api.cryptoetf.today/api/v1"
@@ -139,6 +142,8 @@ def get_settings(require_database: bool = True) -> Settings:
         ark_api_key=os.getenv("ARK_API_KEY", "").strip() or None,
         ark_base_url=os.getenv("ARK_BASE_URL", "").strip() or None,
         ark_model=os.getenv("ARK_MODEL", "").strip() or None,
+        https_proxy=os.getenv("HTTPS_PROXY", "").strip() or os.getenv("https_proxy", "").strip() or None,
+        http_proxy=os.getenv("HTTP_PROXY", "").strip() or os.getenv("http_proxy", "").strip() or None,
         cryptoetf_api_key=os.getenv("CRYPTOETF_KEY", "").strip() or None,
         cryptoetf_base_url=os.getenv("CRYPTOETF_BASE", "https://api.cryptoetf.today/api/v1").strip(),
         firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", "").strip() or None,

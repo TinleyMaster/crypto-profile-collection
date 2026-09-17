@@ -176,14 +176,25 @@ def get_asset_price(conn, asset_id: int, symbol: str) -> float:
 
 
 def get_exchange_map(conn, chain: str) -> dict[str, str]:
-    """获取指定链的交易所钱包地址 -> 交易所名称映射（仅 high 置信度参与净流标签）。"""
+    """获取指定链的交易所钱包地址 -> 交易所名称映射（仅 high 置信度参与净流标签）。
+
+    注意：solana 等大小写敏感链地址不得 LOWER（否则与链上真实地址对不上，打标全失效）。
+    """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute("""
-            SELECT LOWER(address) AS address, exchange_name
-            FROM biz.onchain_exchange_wallet
-            WHERE chain = %s
-              AND confidence = 'high'
-        """, (chain,))
+        if chain in CASE_SENSITIVE_CHAINS:
+            cur.execute("""
+                SELECT address AS address, exchange_name
+                FROM biz.onchain_exchange_wallet
+                WHERE chain = %s
+                  AND confidence = 'high'
+            """, (chain,))
+        else:
+            cur.execute("""
+                SELECT LOWER(address) AS address, exchange_name
+                FROM biz.onchain_exchange_wallet
+                WHERE chain = %s
+                  AND confidence = 'high'
+            """, (chain,))
         return {r["address"]: r["exchange_name"] for r in cur.fetchall()}
 
 

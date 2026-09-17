@@ -197,6 +197,10 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面扫描·蓄势池（ACC蓄势判定 + BRK突破转主池，纯读库）", "core"),
     ("scan_oi_backfill", "0 1 * * 0", "phase_backfill_oi_history.py", [],
      "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
+    ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
+     "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
+    ("scan_alert_monitor", "*/5 * * * *", "scan_alert_monitor.py", [],
+     "盘面扫描·盘面触发层（高置信异动+共振核查→实时邮件告警，每 5 分钟）", "monitor"),
 ]
 
 

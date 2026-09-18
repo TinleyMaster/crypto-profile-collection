@@ -118,8 +118,13 @@ class SecondOrderMapper:
         return results
 
     @staticmethod
-    def batch_upsert(conn, results: list["SecondOrderResult"]) -> int:
+    def batch_upsert(conn, results: list["SecondOrderResult"],
+                     chunk_size: int = 500) -> int:
         """批量写入二阶受益映射（幂等）。
+
+        分块写入：单条 INSERT 的持锁范围与行数线性相关，慢通道/回填并发
+        写同一唯一键时，超大事务很容易撞上连接级 lock_timeout（30s）而
+        整体失败。按 chunk_size 切块可显著缩短持锁窗口、降低冲突概率。
 
         Returns:
             写入数量
@@ -127,8 +132,10 @@ class SecondOrderMapper:
         if not results:
             return 0
 
+        # 复用同一临时表：IF NOT EXISTS 兼容同一事务内多次调用，
+        # TRUNCATE 清空上一批残留（ON COMMIT DROP 仅在提交时清理）。
         conn.execute("""
-            CREATE TEMP TABLE tmp_second_order (
+            CREATE TEMP TABLE IF NOT EXISTS tmp_second_order (
                 catalyst_id BIGINT,
                 asset_id BIGINT,
                 order_level SMALLINT,
@@ -138,39 +145,45 @@ class SecondOrderMapper:
             ) ON COMMIT DROP
         """)
 
-        with conn.cursor() as cur:
-            cur.executemany("""
-                INSERT INTO tmp_second_order VALUES (
-                    %(catalyst_id)s, %(asset_id)s, %(order_level)s,
-                    %(confidence)s, %(sector_name)s, %(link_basis)s
+        written = 0
+        for start in range(0, len(results), chunk_size):
+            batch = results[start:start + chunk_size]
+            conn.execute("TRUNCATE tmp_second_order")
+
+            with conn.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO tmp_second_order VALUES (
+                        %(catalyst_id)s, %(asset_id)s, %(order_level)s,
+                        %(confidence)s, %(sector_name)s, %(link_basis)s
+                    )
+                """, [
+                    {
+                        "catalyst_id": r.catalyst_id,
+                        "asset_id": r.asset_id,
+                        "order_level": r.order_level,
+                        "confidence": r.confidence,
+                        "sector_name": r.sector_name,
+                        "link_basis": r.link_basis,
+                    }
+                    for r in batch
+                ])
+
+            conn.execute("""
+                INSERT INTO biz.catalyst_second_order (
+                    catalyst_id, asset_id, order_level,
+                    confidence, sector_name, derived_from
                 )
-            """, [
-                {
-                    "catalyst_id": r.catalyst_id,
-                    "asset_id": r.asset_id,
-                    "order_level": r.order_level,
-                    "confidence": r.confidence,
-                    "sector_name": r.sector_name,
-                    "link_basis": r.link_basis,
-                }
-                for r in results
-            ])
+                SELECT t.catalyst_id, t.asset_id, t.order_level,
+                       t.confidence, t.sector_name, t.link_basis
+                FROM tmp_second_order t
+                ON CONFLICT (catalyst_id, asset_id, order_level) DO UPDATE SET
+                    confidence = EXCLUDED.confidence,
+                    sector_name = COALESCE(EXCLUDED.sector_name, biz.catalyst_second_order.sector_name),
+                    derived_from = COALESCE(EXCLUDED.derived_from, biz.catalyst_second_order.derived_from)
+            """)
+            written += len(batch)
 
-        conn.execute("""
-            INSERT INTO biz.catalyst_second_order (
-                catalyst_id, asset_id, order_level,
-                confidence, sector_name, derived_from
-            )
-            SELECT t.catalyst_id, t.asset_id, t.order_level,
-                   t.confidence, t.sector_name, t.link_basis
-            FROM tmp_second_order t
-            ON CONFLICT (catalyst_id, asset_id, order_level) DO UPDATE SET
-                confidence = EXCLUDED.confidence,
-                sector_name = COALESCE(EXCLUDED.sector_name, biz.catalyst_second_order.sector_name),
-                derived_from = COALESCE(EXCLUDED.derived_from, biz.catalyst_second_order.derived_from)
-        """)
-
-        return len(results)
+        return written
 
 
 # =====================================================================

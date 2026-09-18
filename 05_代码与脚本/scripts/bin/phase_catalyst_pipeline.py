@@ -645,6 +645,67 @@ def run_signal(conn, builder: CatalystSignalBuilder,
 # 慢通道：二阶受益增量展开
 # =====================================================================
 
+def _write_second_order_signals(conn, signals: list[dict]) -> None:
+    """写入二阶受益信号骨架（一次完整重放）。
+
+    整体封装为幂等函数：锁冲突重试时事务会 rollback，temp 表随之消失，
+    因此必须由本函数从头重建 temp 表再写，不能拆成两个独立语句重试。
+    """
+    conn.execute("""
+        CREATE TEMP TABLE IF NOT EXISTS tmp_slow_so_signals (
+            catalyst_id BIGINT, asset_id BIGINT, kind TEXT,
+            base_strength SMALLINT, resonance_score SMALLINT,
+            resonance_state TEXT, persistence TEXT,
+            persistence_verified BOOLEAN, fundamental_pass BOOLEAN,
+            fundamental_detail JSONB, technical_state TEXT,
+            entry_trigger TEXT, entry_trigger_price NUMERIC,
+            entry_price NUMERIC, stop_loss NUMERIC,
+            take_profit NUMERIC, rr_ratio NUMERIC(6,2),
+            composite_score SMALLINT, tier TEXT,
+            confidence NUMERIC(4,3), regime TEXT,
+            invalidation TEXT, expires_at TIMESTAMPTZ, status TEXT
+        ) ON COMMIT DROP
+    """)
+    conn.execute("TRUNCATE tmp_slow_so_signals")
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT INTO tmp_slow_so_signals VALUES (
+                %(catalyst_id)s, %(asset_id)s, %(kind)s,
+                %(base_strength)s, %(resonance_score)s,
+                %(resonance_state)s, %(persistence)s,
+                %(persistence_verified)s, %(fundamental_pass)s,
+                NULL::jsonb, %(technical_state)s,
+                %(entry_trigger)s, %(entry_trigger_price)s,
+                %(entry_price)s, %(stop_loss)s,
+                %(take_profit)s, %(rr_ratio)s,
+                %(composite_score)s, %(tier)s,
+                %(confidence)s, %(regime)s,
+                %(invalidation)s, %(expires_at)s, %(status)s
+            )
+        """, signals)
+
+    conn.execute("""
+        INSERT INTO biz.catalyst_signal (
+            catalyst_id, asset_id, kind, base_strength,
+            resonance_score, resonance_state, persistence,
+            persistence_verified, fundamental_pass, fundamental_detail,
+            technical_state, entry_trigger, entry_trigger_price,
+            entry_price, stop_loss, take_profit, rr_ratio,
+            composite_score, tier, confidence, regime,
+            invalidation, expires_at, status
+        )
+        SELECT t.catalyst_id, t.asset_id, t.kind, t.base_strength,
+               t.resonance_score, t.resonance_state, t.persistence,
+               t.persistence_verified, t.fundamental_pass, t.fundamental_detail,
+               t.technical_state, t.entry_trigger, t.entry_trigger_price,
+               t.entry_price, t.stop_loss, t.take_profit, t.rr_ratio,
+               t.composite_score, t.tier, t.confidence, t.regime,
+               t.invalidation, t.expires_at, t.status
+        FROM tmp_slow_so_signals t
+        ON CONFLICT (catalyst_id, asset_id) DO NOTHING
+    """)
+
+
 def run_slow_second_order(conn, config: dict,
                           lookback_hours: int = 24,
                           limit: int | None = None) -> dict:
@@ -789,7 +850,21 @@ def run_slow_second_order(conn, config: dict,
         return {"second_order_count": 0, "new_signals": 0}
 
     # 5. 写入二阶映射 + 生成信号骨架
-    SecondOrderMapper.batch_upsert(conn, all_so_results)
+    # 锁冲突重试：慢通道与回填/定时双跑并发写同一 (catalyst_id, asset_id, order_level)
+    # 唯一键时会撞 lock_timeout，重试耗尽则本轮跳过（增量查询 NOT EXISTS 保证下次重跑）
+    try:
+        _call_with_retry(
+            conn,
+            lambda: SecondOrderMapper.batch_upsert(conn, all_so_results),
+            label="SO_second_order_upsert",
+        )
+    except _LockRetryExhausted:
+        print(f"  [SO_second_order] 二阶映射写入锁冲突重试耗尽，本轮跳过 "
+              f"{len(all_so_results)} 条（下次增量重跑）")
+        trace_step("SO_second_order", passed=False,
+                   reason=f"batch_upsert 锁冲突重试耗尽，跳过 {len(all_so_results)} 条映射")
+        return {"second_order_count": 0, "new_signals": 0,
+                "catalyst_count": len(cat_rows), "lock_skipped": True}
 
     cat_info = {}
     for r in cat_rows:
@@ -886,58 +961,15 @@ def run_slow_second_order(conn, config: dict,
         })
 
     if signals:
-        conn.execute("""
-            CREATE TEMP TABLE tmp_slow_so_signals (
-                catalyst_id BIGINT, asset_id BIGINT, kind TEXT,
-                base_strength SMALLINT, resonance_score SMALLINT,
-                resonance_state TEXT, persistence TEXT,
-                persistence_verified BOOLEAN, fundamental_pass BOOLEAN,
-                fundamental_detail JSONB, technical_state TEXT,
-                entry_trigger TEXT, entry_trigger_price NUMERIC,
-                entry_price NUMERIC, stop_loss NUMERIC,
-                take_profit NUMERIC, rr_ratio NUMERIC(6,2),
-                composite_score SMALLINT, tier TEXT,
-                confidence NUMERIC(4,3), regime TEXT,
-                invalidation TEXT, expires_at TIMESTAMPTZ, status TEXT
-            ) ON COMMIT DROP
-        """)
-        with conn.cursor() as cur:
-            cur.executemany("""
-                INSERT INTO tmp_slow_so_signals VALUES (
-                    %(catalyst_id)s, %(asset_id)s, %(kind)s,
-                    %(base_strength)s, %(resonance_score)s,
-                    %(resonance_state)s, %(persistence)s,
-                    %(persistence_verified)s, %(fundamental_pass)s,
-                    NULL::jsonb, %(technical_state)s,
-                    %(entry_trigger)s, %(entry_trigger_price)s,
-                    %(entry_price)s, %(stop_loss)s,
-                    %(take_profit)s, %(rr_ratio)s,
-                    %(composite_score)s, %(tier)s,
-                    %(confidence)s, %(regime)s,
-                    %(invalidation)s, %(expires_at)s, %(status)s
-                )
-            """, signals)
-
-        conn.execute("""
-            INSERT INTO biz.catalyst_signal (
-                catalyst_id, asset_id, kind, base_strength,
-                resonance_score, resonance_state, persistence,
-                persistence_verified, fundamental_pass, fundamental_detail,
-                technical_state, entry_trigger, entry_trigger_price,
-                entry_price, stop_loss, take_profit, rr_ratio,
-                composite_score, tier, confidence, regime,
-                invalidation, expires_at, status
+        try:
+            _call_with_retry(
+                conn,
+                lambda: _write_second_order_signals(conn, signals),
+                label="SO_second_order_signal",
             )
-            SELECT t.catalyst_id, t.asset_id, t.kind, t.base_strength,
-                   t.resonance_score, t.resonance_state, t.persistence,
-                   t.persistence_verified, t.fundamental_pass, t.fundamental_detail,
-                   t.technical_state, t.entry_trigger, t.entry_trigger_price,
-                   t.entry_price, t.stop_loss, t.take_profit, t.rr_ratio,
-                   t.composite_score, t.tier, t.confidence, t.regime,
-                   t.invalidation, t.expires_at, t.status
-            FROM tmp_slow_so_signals t
-            ON CONFLICT (catalyst_id, asset_id) DO NOTHING
-        """)
+        except _LockRetryExhausted:
+            print(f"  [SO_second_order] 二阶信号写入锁冲突重试耗尽，本轮跳过 "
+                  f"{len(signals)} 条（下次增量重跑）")
 
     return {
         "second_order_count": len(all_so_results),

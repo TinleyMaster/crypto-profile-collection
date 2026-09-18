@@ -92,7 +92,7 @@ def _get_price_from_db(cur, asset_id: int, target_date: date) -> float | None:
     """从 asset_market_daily 取日价（FIX-1: 表名对齐 + FIX-2: 异常兜底 + FIX-5: source_code 去歧义）。"""
     try:
         cur.execute(
-            "SELECT price_usd FROM biz.asset_market_daily "
+            "SELECT price_usd FROM biz.v_asset_market_daily_primary "
             "WHERE asset_id = %s AND market_date = %s AND price_usd > 0 "
             "ORDER BY market_date DESC LIMIT 1",
             (asset_id, target_date),

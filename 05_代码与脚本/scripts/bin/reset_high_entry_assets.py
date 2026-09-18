@@ -43,7 +43,11 @@ def _connect_with_retry():
     last_err = None
     for i in range(CONNECT_RETRIES):
         try:
-            return psycopg.connect(settings.database_url, connect_timeout=20)
+            return psycopg.connect(
+                settings.database_url,
+                connect_timeout=20,
+                options="-c lock_timeout=30000",
+            )
         except Exception as e:  # noqa: BLE001
             last_err = e
             print(f"  [WARN] 连接失败({i + 1}/{CONNECT_RETRIES}): {str(e)[:80]}")

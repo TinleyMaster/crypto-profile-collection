@@ -1070,7 +1070,7 @@ def run_slow_g3g5(conn, config: dict,
     # 3. 批量查日线（60 天）
     daily_rows = conn.execute("""
         SELECT asset_id, market_date, price_usd, volume_24h
-        FROM biz.asset_market_daily
+        FROM biz.v_asset_market_daily_primary
         WHERE asset_id = ANY(%s::INT[])
           AND market_date >= NOW() - INTERVAL '60 days'
         ORDER BY asset_id, market_date ASC

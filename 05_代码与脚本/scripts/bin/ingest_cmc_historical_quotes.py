@@ -34,6 +34,7 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 from crypto_research.db.upsert import load_sql, execute_many  # noqa: E402
 from crypto_research.clients.cmc_client import CMCClient  # noqa: E402
+from crypto_research.parsers.cmc_quote_snapshot import normalize_zero_as_null  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -204,7 +205,7 @@ def parse_historical_quotes(
             market_date_str = market_date.isoformat()
 
             # ── 原有 daily 行（不变）──
-            daily_rows.append({
+            daily_rows.append(normalize_zero_as_null({
                 "asset_id": asset_id,
                 "market_date": market_date,
                 "source_code": "cmc_historical",
@@ -216,11 +217,11 @@ def parse_historical_quotes(
                 "volume_24h": quote_usd.get("volume_24h"),
                 "change_24h": quote_usd.get("percent_change_24h"),
                 "change_7d": quote_usd.get("percent_change_7d"),
-            })
+            }))
 
             # ── A 补：快照行（仅缺口日）──
             if snapshot_dates is not None and market_date_str in snapshot_dates:
-                snapshot_rows.append({
+                snapshot_rows.append(normalize_zero_as_null({
                     "cmc_id": cmc_id,
                     "quote_time": quote_time,  # 用历史快照精确 timestamp（00:00Z 量级）
                     "price_usd": quote_usd.get("price"),
@@ -235,7 +236,7 @@ def parse_historical_quotes(
                     "percent_change_7d": quote_usd.get("percent_change_7d"),
                     "percent_change_30d": quote_usd.get("percent_change_30d"),
                     "market_cap_dominance": quote_usd.get("market_cap_dominance"),
-                })
+                }))
 
     return daily_rows, snapshot_rows
 

@@ -122,7 +122,7 @@ def main() -> int:
                             cur2.execute(
                                 """
                                 SELECT asset_id, market_date, price_usd
-                                FROM biz.asset_market_daily
+                                FROM biz.v_asset_market_daily_primary
                                 WHERE source_code IN ('cmc', 'cmc_historical')
                                   AND price_usd > 0
                                   AND asset_id = ANY(%s)

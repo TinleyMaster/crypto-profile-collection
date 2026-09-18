@@ -5682,7 +5682,7 @@ def _get_recommendation_backtest_inner(days: int, top_n: int) -> dict:
                                 PARTITION BY a.canonical_symbol 
                                 ORDER BY amd.market_date DESC
                             ) AS rn
-                        FROM biz.asset_market_daily amd
+                        FROM biz.v_asset_market_daily_primary amd
                         JOIN core.asset a ON a.asset_id = amd.asset_id
                         WHERE UPPER(a.canonical_symbol) IN ({placeholders})
                           AND amd.price_usd IS NOT NULL

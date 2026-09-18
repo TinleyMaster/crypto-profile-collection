@@ -119,12 +119,12 @@ def ensure_table(conn) -> None:
 # ========== 源数据加载 ==========
 
 def load_asset_market_daily(conn, asset_id: int) -> dict[date, dict]:
-    """asset_market_daily：按日期加载 price/change，cmc 优先于 cmc_historical。"""
+    """asset_market_daily：按日期加载 price/change（单源视图，cmc > cmc_historical）。"""
     out: dict[date, dict] = {}
     with conn.cursor() as cur:
         cur.execute("""
             SELECT market_date, price_usd, change_24h
-            FROM biz.asset_market_daily
+            FROM biz.v_asset_market_daily_primary
             WHERE asset_id = %s
               AND price_usd IS NOT NULL
             ORDER BY market_date ASC

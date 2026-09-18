@@ -41,7 +41,19 @@ def _get_db_url() -> str:
 @contextmanager
 def get_conn() -> Iterator[psycopg.Connection]:
     """获取数据库连接（上下文管理器，自动提交/回滚）。"""
-    conn = psycopg.connect(_get_db_url(), connect_timeout=30, row_factory=dict_row)
+    # lock_timeout=30s：被其他事务持锁时快速失败并留痕，避免 KOL 任务
+    # 无限等锁 → 90 分钟无日志被看护误杀（审计 P0-3，2026-09-18）；
+    # keepalive 让进程被 kill 后 PostgreSQL ~30s 内感知断连并释放锁。
+    conn = psycopg.connect(
+        _get_db_url(),
+        connect_timeout=30,
+        row_factory=dict_row,
+        options="-c lock_timeout=30000",
+        keepalives=1,
+        keepalives_idle=15,
+        keepalives_interval=5,
+        keepalives_count=3,
+    )
     try:
         yield conn
         conn.commit()

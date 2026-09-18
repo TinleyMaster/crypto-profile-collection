@@ -371,7 +371,7 @@ def backfill_via_binance_klines(
             FROM core.asset a
             LEFT JOIN LATERAL (
                 SELECT amd.market_cap
-                FROM biz.asset_market_daily amd
+                FROM biz.v_asset_market_daily_primary amd
                 WHERE amd.asset_id = a.asset_id
                   AND amd.market_cap IS NOT NULL
                 ORDER BY amd.market_date DESC
@@ -580,9 +580,14 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False,
                     SELECT
                         asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
-                        q.price_usd, q.market_cap, q.fdv,
+                        q.price_usd,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.market_cap, 0) END AS market_cap,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.fdv, 0) END AS fdv,
                         q.circulating_supply, q.total_supply,
-                        q.volume_24h,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.volume_24h, 0) END AS volume_24h,
                         q.percent_change_24h AS change_24h,
                         q.percent_change_7d AS change_7d,
                         ROW_NUMBER() OVER (

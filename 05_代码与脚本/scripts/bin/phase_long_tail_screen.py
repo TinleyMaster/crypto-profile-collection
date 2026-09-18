@@ -138,10 +138,10 @@ def screen_all(dry_run: bool = False, limit: int | None = None) -> dict:
             # momentum 数据（最新日 change_24h）
             cur.execute(f"""
                 SELECT asset_id, change_24h
-                FROM biz.asset_market_daily
+                FROM biz.v_asset_market_daily_primary
                 WHERE asset_id IN ({placeholders})
                   AND market_date = (
-                      SELECT MAX(market_date) FROM biz.asset_market_daily
+                      SELECT MAX(market_date) FROM biz.v_asset_market_daily_primary
                       WHERE asset_id IN ({placeholders})
                   )
             """, tuple(asset_ids) + tuple(asset_ids))

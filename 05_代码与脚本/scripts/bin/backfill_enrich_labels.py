@@ -257,7 +257,15 @@ def _ensure_conn(conn, db_url: str):
             conn.close()
         except Exception:
             pass
-        new_conn = psycopg.connect(db_url)
+        new_conn = psycopg.connect(
+            db_url,
+            connect_timeout=30,
+            options="-c lock_timeout=30000",
+            keepalives=1,
+            keepalives_idle=15,
+            keepalives_interval=5,
+            keepalives_count=3,
+        )
         new_conn.autocommit = False
         print("  ✅  已重连")
         return new_conn
@@ -442,7 +450,15 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
                     conn.close()
                 except Exception:
                     pass
-                conn = psycopg.connect(db_url)
+                conn = psycopg.connect(
+                    db_url,
+                    connect_timeout=30,
+                    options="-c lock_timeout=30000",
+                    keepalives=1,
+                    keepalives_idle=15,
+                    keepalives_interval=5,
+                    keepalives_count=3,
+                )
                 conn.autocommit = False
                 print(f"     ✅ 已重连")
             else:

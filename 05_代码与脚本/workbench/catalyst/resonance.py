@@ -362,7 +362,7 @@ def get_market_daily_ret(conn, asset_id: int, start_date, end_date) -> float | N
     rows = conn.execute(
         """
         SELECT market_date, price_usd
-        FROM biz.asset_market_daily
+        FROM biz.v_asset_market_daily_primary
         WHERE asset_id = %s AND market_date BETWEEN %s AND %s
         ORDER BY market_date ASC
         """,
@@ -394,7 +394,7 @@ def calc_vol_zscore(conn, asset_id: int, current_volume_24h: float, lookback_day
         SELECT AVG(volume_24h) as avg_vol
         FROM (
             SELECT volume_24h
-            FROM biz.asset_market_daily
+            FROM biz.v_asset_market_daily_primary
             WHERE asset_id = %s AND volume_24h > 0
             ORDER BY market_date DESC
             LIMIT %s

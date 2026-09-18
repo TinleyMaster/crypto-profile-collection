@@ -1352,7 +1352,7 @@ def _add_price_technical(conn, asset_id: int, profile: dict):
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("""
             SELECT market_date, price_usd, volume_24h, change_24h
-            FROM biz.asset_market_daily
+            FROM biz.v_asset_market_daily_primary
             WHERE asset_id = %s
             ORDER BY market_date ASC
         """, (asset_id,))
@@ -1960,7 +1960,7 @@ def _add_risk_summary(conn, asset_id: int, profile: dict):
             # 检查两个资产都有多少天数据
             cur.execute("""
                 SELECT market_date, price_usd
-                FROM biz.asset_market_daily
+                FROM biz.v_asset_market_daily_primary
                 WHERE asset_id = %s
                   AND market_date >= NOW() - INTERVAL '90 days'
                 ORDER BY market_date ASC
@@ -1968,7 +1968,7 @@ def _add_risk_summary(conn, asset_id: int, profile: dict):
             asset_rows = cur.fetchall()
             cur.execute("""
                 SELECT market_date, price_usd
-                FROM biz.asset_market_daily
+                FROM biz.v_asset_market_daily_primary
                 WHERE asset_id = %s
                   AND market_date >= NOW() - INTERVAL '90 days'
                 ORDER BY market_date ASC
@@ -2607,7 +2607,11 @@ def _write_ai_trace(
         import psycopg
 
         settings = get_settings()
-        with psycopg.connect(settings.database_url) as conn:
+        with psycopg.connect(
+            settings.database_url,
+            connect_timeout=30,
+            options="-c lock_timeout=30000",
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -2667,7 +2671,11 @@ def _ensure_ai_trace_table() -> None:
         import psycopg
 
         settings = get_settings()
-        with psycopg.connect(settings.database_url) as conn:
+        with psycopg.connect(
+            settings.database_url,
+            connect_timeout=30,
+            options="-c lock_timeout=30000",
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS sys.ai_trace (

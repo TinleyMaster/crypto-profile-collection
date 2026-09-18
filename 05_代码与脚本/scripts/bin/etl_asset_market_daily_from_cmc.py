@@ -100,11 +100,14 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                         asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
                         q.price_usd,
-                        q.market_cap,
-                        q.fdv,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.market_cap, 0) END AS market_cap,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.fdv, 0) END AS fdv,
                         q.circulating_supply,
                         q.total_supply,
-                        q.volume_24h,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE NULLIF(q.volume_24h, 0) END AS volume_24h,
                         q.percent_change_24h AS change_24h,
                         q.percent_change_7d AS change_7d,
                         q.is_anomaly,

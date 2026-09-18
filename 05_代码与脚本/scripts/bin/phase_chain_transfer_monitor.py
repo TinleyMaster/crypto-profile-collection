@@ -9,7 +9,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import psycopg.rows
@@ -140,10 +140,10 @@ def get_asset_price(conn, asset_id: int, symbol: str) -> float:
     4. FALLBACK_PRICES 硬编码（兜底）
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        # 1. 日级行情表
+        # 1. 日级行情表（单源视图，避免三源同日取值不确定）
         cur.execute("""
-            SELECT price_usd FROM biz.asset_market_daily
-            WHERE asset_id = %s AND price_usd IS NOT NULL
+            SELECT price_usd FROM biz.v_asset_market_daily_primary
+            WHERE asset_id = %s AND price_usd IS NOT NULL AND price_usd > 0
             ORDER BY market_date DESC LIMIT 1
         """, (asset_id,))
         row = cur.fetchone()
@@ -238,6 +238,25 @@ def get_asset_supply_decimals(conn, asset_id: int, chain: str, contract_address:
     return out
 
 
+def _normalize_unix_ts(ts: int) -> int:
+    """把可能的纳秒/微秒/毫秒时间戳统一归一化为秒。
+
+    Tron/Aptos/Sui 等客户端返回毫秒，此前被当作秒处理 → 溢出被判脏丢弃
+    （审计 P1-4，2026-09-18）。按量级判断，普通秒级时间戳（~1.7e9）不受影响。
+    """
+    try:
+        a = abs(int(ts))
+    except (TypeError, ValueError):
+        return 0
+    if a >= 1_000_000_000_000_000_00:   # 纳秒
+        return int(ts) // 1_000_000_000
+    if a >= 1_000_000_000_000_000:      # 微秒
+        return int(ts) // 1_000_000
+    if a >= 100_000_000_000:            # 毫秒
+        return int(ts) // 1_000
+    return int(ts)
+
+
 def _resolve_block_timestamp(client, client_type: str, block_number: int) -> int | None:
     """按区块号反查真实区块时间戳（Unix 秒）。失败返回 None。"""
     if not block_number or block_number <= 0:
@@ -245,7 +264,7 @@ def _resolve_block_timestamp(client, client_type: str, block_number: int) -> int
     try:
         # EVM RPC 客户端：eth_getBlockByNumber
         if client_type in ("rpc", "explorer") and hasattr(client, "get_block_timestamp"):
-            return client.get_block_timestamp(block_number)
+            return _normalize_unix_ts(client.get_block_timestamp(block_number))
         # 其他客户端（etherscan 等）暂不支持按区块号反查时间
     except Exception:
         return None
@@ -255,19 +274,24 @@ def _resolve_block_timestamp(client, client_type: str, block_number: int) -> int
 def _resolve_timestamp(client, client_type: str, block_number: int, raw_ts: int) -> datetime | None:
     """解析转账时间戳（P0-2）。
 
-    - raw_ts>0 且年份 >= 2015 → 直接使用（返回时间）
-    - raw_ts 无效或年份 < 2015（脏时间）→ 尝试按 block_number 反查真实区块时间
-    - 无 raw_ts（RPC 模式）→ 按 12s/block 估算，年份 < 2015 视为脏，尝试反查
+    - raw_ts>0 且年份在合理区间 → 直接使用（返回时间）
+    - raw_ts 无效或年份异常（脏时间）→ 尝试按 block_number 反查真实区块时间
+    - 无 raw_ts（RPC 模式）→ 按 12s/block 估算，年份异常视为脏，尝试反查
     - 反查失败且无合理估算 → 返回 None（调用方跳过，脏时间不进表）
     """
+    _min_dt = datetime(2015, 1, 1, tzinfo=timezone.utc)
+    _max_dt = datetime.now(timezone.utc) + timedelta(days=1)
+
     def _safe_from_ts(ts: int) -> datetime | None:
+        ts = _normalize_unix_ts(ts)
         if not ts or ts <= 0:
             return None
         try:
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dt if dt.year >= 2015 else None
         except (OverflowError, OSError, ValueError):
             return None
+        # 上下界双重校验：拒绝 2015 前与未来时间（审计 P1-4）
+        return dt if _min_dt <= dt <= _max_dt else None
 
     dt = _safe_from_ts(raw_ts)
     if dt:
@@ -283,10 +307,13 @@ def _resolve_timestamp(client, client_type: str, block_number: int, raw_ts: int)
 
     # 无时间戳且无法反查：用 12s/block 估算兜底（仅接受合理年份）
     if raw_ts <= 0 and block_number and block_number > 0:
-        estimated_ts = int(time.time()) - max(0, _get_latest_block_approx(client, client_type) - block_number) * 12
-        dt = _safe_from_ts(estimated_ts)
-        if dt:
-            return dt
+        latest = _get_latest_block_approx(client, client_type)
+        # 区块号比最新区块还大 → 说明 latest 估算来自其他链，放弃估算（避免跨链污染）
+        if latest and block_number <= latest:
+            estimated_ts = int(time.time()) - (latest - block_number) * 12
+            dt = _safe_from_ts(estimated_ts)
+            if dt:
+                return dt
 
     return None
 
@@ -346,8 +373,14 @@ _latest_block_cache: dict[str, tuple[float, int]] = {}
 
 
 def _get_latest_block_approx(client, client_type: str) -> int:
-    """获取最新区块号（带缓存，避免每次都查）。"""
-    cache_key = client_type
+    """获取最新区块号（带缓存，避免每次都查）。
+
+    缓存键必须带链维度：此前只用 client_type，所有 EVM 链共用 "rpc" 键，
+    导致 A 链的最新区块高度被用来估算 B 链时间 → 写出 1856/1872 年脏时间
+    （审计 P1-4，2026-09-18）。
+    """
+    chain = getattr(client, "chain", "") or getattr(client, "network", "")
+    cache_key = f"{client_type}:{chain}"
     cached = _latest_block_cache.get(cache_key)
     if cached and time.time() - cached[0] < 60:  # 缓存 60 秒
         return cached[1]

@@ -135,6 +135,30 @@ def _mark_sent(conn, signal_id: int | None, ntype: str, tier: str | None,
         logger.warning("记录通知日志失败: %s", e)
 
 
+def _mark_signal_notified(conn, signal_ids: list[int], column: str) -> None:
+    """回写信号的发送时间戳（审计 P1-2）。
+
+    去重仍以 biz.catalyst_notification_log 为准，这里只做审计留痕：
+    - 快提醒（fast_alert）→ pre_alert_sent_at
+    - 汇总/正式通知（slow_digest）→ notified_at
+
+    仅在字段仍为 NULL 时写入，避免覆盖首次发送时间；失败不阻断主流程。
+    """
+    if column not in ("notified_at", "pre_alert_sent_at"):
+        return
+    ids = [sid for sid in signal_ids if sid is not None and sid > 0]
+    if not ids:
+        return
+    try:
+        conn.execute(
+            f"UPDATE biz.catalyst_signal SET {column} = NOW(), updated_at = NOW() "
+            f"WHERE signal_id = ANY(%s::BIGINT[]) AND {column} IS NULL",
+            (ids,),
+        )
+    except Exception as e:
+        logger.warning("回写 catalyst_signal.%s 失败: %s", column, e)
+
+
 # =====================================================================
 # 邮件发送（复用 crypto_research.clients.notifier）
 # =====================================================================
@@ -219,19 +243,19 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
                -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
                (SELECT md.price_usd
-                  FROM biz.asset_market_daily md
+                  FROM biz.v_asset_market_daily_primary md
                  WHERE md.asset_id = s.asset_id
                  ORDER BY md.market_date DESC LIMIT 1) AS current_price,
                (SELECT md.change_24h
-                  FROM biz.asset_market_daily md
+                  FROM biz.v_asset_market_daily_primary md
                  WHERE md.asset_id = s.asset_id
                  ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
                (SELECT md.change_7d
-                  FROM biz.asset_market_daily md
+                  FROM biz.v_asset_market_daily_primary md
                  WHERE md.asset_id = s.asset_id
                  ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
                (SELECT md.volume_24h
-                  FROM biz.asset_market_daily md
+                  FROM biz.v_asset_market_daily_primary md
                  WHERE md.asset_id = s.asset_id
                  ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
                -- 流动性（总流动性，单位 USD）
@@ -347,19 +371,19 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                      WHERE arl.asset_id = s.asset_id) AS risk_labels,
                    -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
                    (SELECT md.price_usd
-                      FROM biz.asset_market_daily md
+                      FROM biz.v_asset_market_daily_primary md
                      WHERE md.asset_id = s.asset_id
                      ORDER BY md.market_date DESC LIMIT 1) AS current_price,
                    (SELECT md.change_24h
-                      FROM biz.asset_market_daily md
+                      FROM biz.v_asset_market_daily_primary md
                      WHERE md.asset_id = s.asset_id
                      ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
                    (SELECT md.change_7d
-                      FROM biz.asset_market_daily md
+                      FROM biz.v_asset_market_daily_primary md
                      WHERE md.asset_id = s.asset_id
                      ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
                    (SELECT md.volume_24h
-                      FROM biz.asset_market_daily md
+                      FROM biz.v_asset_market_daily_primary md
                      WHERE md.asset_id = s.asset_id
                      ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
                    -- 流动性（总流动性，单位 USD）
@@ -404,6 +428,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
             sent += 1
             _mark_sent(conn, row["signal_id"], NTYPE_FAST_ALERT, "A", subject,
                        status="sent")
+            _mark_signal_notified(conn, [row["signal_id"]], "pre_alert_sent_at")
             alert_signals.append({"signal_id": row["signal_id"], "symbol": row["symbol"]})
         else:
             failed += 1
@@ -1071,6 +1096,8 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     ok, msg = _send_email(subject, body)
     _mark_sent(conn, sentinel, ntype, None, subject,
                status="sent" if ok else "failed", error_msg=msg if not ok else None)
+    if ok:
+        _mark_signal_notified(conn, [r["signal_id"] for r in rows], "notified_at")
 
     return {
         "sent": 1 if ok else 0,
@@ -1391,7 +1418,7 @@ def _fetch_signal_row(conn, signal_id: int):
         -- 最新日行情
         LEFT JOIN LATERAL (
             SELECT md.price_usd, md.change_24h, md.change_7d, md.volume_24h
-              FROM biz.asset_market_daily md
+              FROM biz.v_asset_market_daily_primary md
              WHERE md.asset_id = s.asset_id
              ORDER BY md.market_date DESC
              LIMIT 1
@@ -1401,11 +1428,11 @@ def _fetch_signal_row(conn, signal_id: int):
             SELECT AVG(md2.volume_24h) AS avg_volume_7d
               FROM (
                 SELECT md2.volume_24h
-                  FROM biz.asset_market_daily md2
+                  FROM biz.v_asset_market_daily_primary md2
                  WHERE md2.asset_id = s.asset_id
                        AND md2.market_date < (
                            SELECT MAX(md3.market_date)
-                             FROM biz.asset_market_daily md3
+                             FROM biz.v_asset_market_daily_primary md3
                             WHERE md3.asset_id = s.asset_id
                        )
                  ORDER BY md2.market_date DESC

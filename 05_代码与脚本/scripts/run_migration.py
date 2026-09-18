@@ -10,7 +10,7 @@ print(f"执行 SQL 迁移: {sql_path.name}")
 print(f"SQL 长度: {len(sql)} 字符")
 print("连接数据库...")
 
-conn = psycopg.connect(DB_URL, connect_timeout=30)
+conn = psycopg.connect(DB_URL, connect_timeout=30, options="-c lock_timeout=30000")
 print("已连接，执行中...")
 
 try:

@@ -41,7 +41,11 @@ def main() -> int:
     sql = candidate.read_text(encoding="utf-8")
     print(f"执行迁移: {candidate.name}（{len(sql)} 字符）")
 
-    with psycopg.connect(settings.database_url, connect_timeout=30) as conn:
+    with psycopg.connect(
+        settings.database_url,
+        connect_timeout=30,
+        options="-c lock_timeout=30000",
+    ) as conn:
         conn.execute(sql)
         conn.commit()
     print("执行成功")

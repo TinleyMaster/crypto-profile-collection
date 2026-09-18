@@ -420,7 +420,7 @@ def step3_resonance(conn, config: dict, dry_run: bool = False) -> dict:
         FROM (
             SELECT asset_id, volume_24h,
                    ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY market_date DESC) as rn
-            FROM biz.asset_market_daily
+            FROM biz.v_asset_market_daily_primary
             WHERE asset_id = ANY(%s::INT[])
               AND volume_24h > 0
         ) sub
@@ -882,7 +882,7 @@ def step6_g3_g4_g5(conn, config: dict, dry_run: bool = False) -> dict:
     print("  [7/8] 批量查日线（60天）...", end=" ", flush=True)
     daily_rows = conn.execute("""
         SELECT asset_id, market_date, price_usd, volume_24h
-        FROM biz.asset_market_daily
+        FROM biz.v_asset_market_daily_primary
         WHERE asset_id = ANY(%s::INT[])
           AND market_date >= NOW() - INTERVAL '60 days'
         ORDER BY asset_id, market_date ASC

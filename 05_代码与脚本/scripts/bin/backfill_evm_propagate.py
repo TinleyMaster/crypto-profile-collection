@@ -112,7 +112,15 @@ def main():
             sys.exit(1)
 
     db_url = get_db_url()
-    conn = psycopg.connect(db_url)
+    conn = psycopg.connect(
+        db_url,
+        connect_timeout=30,
+        options="-c lock_timeout=30000",
+        keepalives=1,
+        keepalives_idle=15,
+        keepalives_interval=5,
+        keepalives_count=3,
+    )
 
     try:
         # 预览

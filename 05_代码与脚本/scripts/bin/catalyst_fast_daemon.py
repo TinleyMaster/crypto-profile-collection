@@ -62,6 +62,31 @@ def load_config() -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _load_calibration(conn) -> dict:
+    """加载最新一期实测校准权重（P1）。
+
+    取 catalyst_calibration 最新 window_end 且 weight_mode='calibrated' 的记录，
+    组织为 {dim: {value: calibrated_score}} 供 CatalystGrader 注入。
+    无校准记录时返回空 dict（完全走先验 yaml）。
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT dim, dim_value, calibrated_score
+            FROM biz.catalyst_calibration
+            WHERE weight_mode = 'calibrated'
+              AND window_end = (SELECT MAX(window_end) FROM biz.catalyst_calibration)
+            """
+        ).fetchall()
+        calib: dict = {}
+        for r in rows:
+            calib.setdefault(r["dim"], {})[r["dim_value"]] = r["calibrated_score"]
+        return calib
+    except Exception as e:
+        print(f"  [warn] 加载校准权重失败，回退先验: {e}")
+        return {}
+
+
 def run_fast_once(verbose: bool = False) -> dict:
     """执行一次快通道。返回统计 dict。"""
     config = load_config()
@@ -83,8 +108,14 @@ def run_fast_once(verbose: bool = False) -> dict:
         regime = run_regime_wrapper(conn, regime_calc)
         stats["regime"] = regime
 
-        # G1: 分级
-        grader = CatalystGrader(config)
+        # G1: 分级（注入实测校准权重，无校准则走先验）
+        calibration = _load_calibration(conn)
+        if calibration:
+            print(f"  [G1] 使用实测校准权重: "
+                  f"event_type {len(calibration.get('event_type', {}))} 项, "
+                  f"source {len(calibration.get('source', {}))} 项, "
+                  f"scope {len(calibration.get('scope', {}))} 项")
+        grader = CatalystGrader(config, calibration=calibration)
         n_grade = run_grade_wrapper(conn, grader)
         stats["grade"] = n_grade
 

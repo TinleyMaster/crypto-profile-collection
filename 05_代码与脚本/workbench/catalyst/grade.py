@@ -302,9 +302,10 @@ class CatalystGrader:
         if source_code in self.authority_scores:
             return self.authority_scores[source_code]
 
-        # 模糊匹配：binance_square_* 分官方/非官方
-        if source_code.startswith("kol_catalyst_binance_square"):
-            # 暂时统一给 85，后续可以从 kol_profile.kol_type 区分
+        # 模糊匹配：binance_square 账号统一按官方权威度
+        # catalyst（官方催化剂账号）与 news_media（新闻媒体）都是高质量源
+        if source_code.startswith("kol_catalyst_binance_square") \
+                or source_code.startswith("kol_news_media_binance_square"):
             return self.authority_scores.get("binance_square_official", 85)
 
         # 默认

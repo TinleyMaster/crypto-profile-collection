@@ -7,7 +7,8 @@
     目标：15 分钟级，零 LLM
 
 慢通道（--slow）：
-    G3-1 二阶受益展开 + G3 持续性预判 + G4 基本面 + G5 技术面 + G6 信号重算 + 过期巡检
+    G3-1 二阶受益展开 + G3 持续性预判 + G4 基本面 + G5 技术面 + G6 信号重算
+    + 二阶共振刷新（既有二阶信号跟随 peer-median 重算）+ 过期巡检
     目标：小时级，补全快通道占位字段，扩展二阶机会
 
 用法：
@@ -727,6 +728,29 @@ def run_signal(conn, builder: CatalystSignalBuilder,
 # 慢通道：二阶受益增量展开
 # =====================================================================
 
+def _peer_median_by_catalyst(conn, catalyst_ids: list[int]) -> dict[int, int]:
+    """计算各 catalyst 的直连资产共振（peer）中位数。
+
+    口径：取 `biz.catalyst_resonance` 该 catalyst 的全部 resonance_score，
+    升序后取下标 len//2（偶数个取偏上中位），与二阶展开创建时的口径一致。
+    仅返回「有共振行」的 catalyst——无数据的键不在返回值中，由调用方决定
+    兜底策略（创建时按 0，刷新时跳过不降级）。
+    """
+    from collections import defaultdict
+
+    if not catalyst_ids:
+        return {}
+    rows = conn.execute("""
+        SELECT cr.catalyst_id, cr.resonance_score
+        FROM biz.catalyst_resonance cr
+        WHERE cr.catalyst_id = ANY(%s::BIGINT[])
+    """, (catalyst_ids,)).fetchall()
+    scores: dict[int, list[int]] = defaultdict(list)
+    for r in rows:
+        scores[r["catalyst_id"]].append(int(r["resonance_score"] or 0))
+    return {cid: sorted(v)[len(v) // 2] for cid, v in scores.items()}
+
+
 def _write_second_order_signals(conn, signals: list[dict]) -> None:
     """写入二阶受益信号骨架（一次完整重放）。
 
@@ -957,20 +981,9 @@ def run_slow_second_order(conn, config: dict,
             "published_at": r["published_at"],
         }
 
-    # 查每个 catalyst 的直连资产 resonance 中位数
-    res_rows = conn.execute("""
-        SELECT cr.catalyst_id, cr.resonance_score
-        FROM biz.catalyst_resonance cr
-        WHERE cr.catalyst_id = ANY(%s::BIGINT[])
-    """, (catalyst_ids,)).fetchall()
-    cat_res = defaultdict(list)
-    for r in res_rows:
-        cat_res[r["catalyst_id"]].append(int(r["resonance_score"] or 0))
-
-    cat_peer_median = {}
-    for cat_id in catalyst_ids:
-        scores = cat_res.get(cat_id, [])
-        cat_peer_median[cat_id] = sorted(scores)[len(scores) // 2] if scores else 0
+    # 各 catalyst 的直连资产共振中位数（口径见 _peer_median_by_catalyst）；
+    # 创建路径沿用「无共振数据按 0」的兜底，与历史行为一致
+    cat_peer_median = _peer_median_by_catalyst(conn, catalyst_ids)
 
     signals = []
     for so in all_so_results:
@@ -1057,6 +1070,203 @@ def run_slow_second_order(conn, config: dict,
         "second_order_count": len(all_so_results),
         "new_signals": len(signals),
         "catalyst_count": len(cat_rows),
+    }
+
+
+def _write_so_resonance_refresh(conn, updates: list[dict]) -> None:
+    """回写二阶共振刷新结果（整体幂等：锁冲突重试时重建 temp 表再写）。"""
+    conn.execute("""
+        CREATE TEMP TABLE IF NOT EXISTS tmp_so_res_refresh (
+            catalyst_id BIGINT,
+            asset_id BIGINT,
+            resonance_score SMALLINT,
+            resonance_state TEXT,
+            composite_score SMALLINT,
+            tier TEXT,
+            confidence NUMERIC(4,3),
+            invalidation TEXT,
+            status TEXT
+        ) ON COMMIT DROP
+    """)
+    conn.execute("TRUNCATE tmp_so_res_refresh")
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT INTO tmp_so_res_refresh VALUES (
+                %(catalyst_id)s, %(asset_id)s,
+                %(resonance_score)s, %(resonance_state)s,
+                %(composite_score)s, %(tier)s,
+                %(confidence)s, %(invalidation)s, %(status)s
+            )
+        """, updates)
+
+    conn.execute("""
+        UPDATE biz.catalyst_signal cs
+        SET resonance_score = t.resonance_score,
+            resonance_state = t.resonance_state,
+            composite_score = t.composite_score,
+            tier = t.tier,
+            confidence = t.confidence,
+            invalidation = t.invalidation,
+            status = t.status,
+            updated_at = NOW()
+        FROM tmp_so_res_refresh t
+        WHERE cs.catalyst_id = t.catalyst_id
+          AND cs.asset_id = t.asset_id
+          -- 选中后可能被过期巡检置为终态，终态冻结不覆盖
+          AND cs.status IN ('open', 'watch', 'invalid')
+    """)
+
+
+def refresh_second_order_resonance(conn, config: dict,
+                                   limit: int | None = None) -> dict:
+    """二阶信号共振刷新：既有二阶信号每轮跟随当前 peer-median 共振重算。
+
+    为什么需要：run_slow_second_order 的候选集是 one-shot（NOT EXISTS second_order）
+    且写入用 ON CONFLICT DO NOTHING，二阶信号的 resonance（composite 权重 0.30，
+    最大项）只在创建时算一次。实测 3,670 条二阶信号中 2,352 条 resonance_score
+    与当前 peer-median 期望值不符（521 条连 resonance_state 都已失真）。
+
+    刷新口径（与创建时一致，口径单点真源）：
+        peer_median     = 该 catalyst 直连资产 resonance_score 升序取 len//2
+        resonance_score = max(0, int(peer_median * 0.7))
+        resonance_state = confirmed(>=70) / weak(>=35) / pending
+        composite/tier  = G6 公式（CatalystSignalBuilder，勿在他处复算）
+        status          = d3 动作闸门（confirmed/pending→watch、weak→open、
+                          divergent→invalid；tier=None → invalid）
+    不覆盖：entry/stop_loss/take_profit/rr_ratio（G5）、persistence/
+        fundamental_detail/technical_state（G3-G4）、ai_reason/investment_cycle
+        （G7）、expires_at（过期语义）。
+    无 peer 共振数据的 catalyst 跳过（不拿缺失数据反向降级），单独计数；
+    值无变化的行不写（updated_at 被「信号滞后」口径引用，避免无谓抖动）。
+
+    Returns:
+        dict with scanned / refreshed / skipped_no_peer / status_promoted / status_demoted
+    """
+    from catalyst.signal import CatalystSignalBuilder
+
+    builder = CatalystSignalBuilder(config)
+
+    query = """
+        SELECT cs.catalyst_id, cs.asset_id, cs.status,
+               cs.kind, cs.base_strength,
+               cs.resonance_score, cs.resonance_state,
+               cs.composite_score, cs.tier,
+               cs.persistence, cs.fundamental_pass, cs.technical_state,
+               cs.regime, cs.entry_price, cs.stop_loss, cs.take_profit,
+               ac.published_at
+        FROM biz.catalyst_signal cs
+        JOIN biz.catalyst_second_order cso
+          ON cso.catalyst_id = cs.catalyst_id AND cso.asset_id = cs.asset_id
+        JOIN biz.asset_catalyst ac ON ac.catalyst_id = cs.catalyst_id
+        WHERE cs.status IN ('open', 'watch', 'invalid')
+        ORDER BY cs.catalyst_id DESC
+    """
+    params: list = []
+    if limit:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        return {"scanned": 0, "refreshed": 0, "skipped_no_peer": 0,
+                "status_promoted": 0, "status_demoted": 0}
+
+    catalyst_ids = sorted({r["catalyst_id"] for r in rows})
+    peer_median = _peer_median_by_catalyst(conn, catalyst_ids)
+
+    updates: list[dict] = []
+    transitions: list[tuple] = []
+    skipped_no_peer = 0
+    promoted = 0
+    demoted = 0
+
+    for row in rows:
+        median = peer_median.get(row["catalyst_id"])
+        if median is None:
+            skipped_no_peer += 1
+            continue
+
+        res_score = max(0, int(median * 0.7))
+        res_state = ("confirmed" if res_score >= 70
+                     else "weak" if res_score >= 35 else "pending")
+
+        signal = builder.build(
+            catalyst_id=row["catalyst_id"],
+            asset_id=row["asset_id"],
+            kind=row["kind"] or "event",
+            base_strength=int(row["base_strength"] or 0),
+            resonance_score=res_score,
+            resonance_state=res_state,
+            published_at=row["published_at"],
+            persistence=row["persistence"],
+            fundamental_pass=row["fundamental_pass"],
+            technical_state=row["technical_state"],
+            regime=row["regime"],
+            entry_price=_to_num(row["entry_price"]),
+            stop_loss=_to_num(row["stop_loss"]),
+            take_profit=_to_num(row["take_profit"]),
+        )
+        new_status = signal.status if signal.tier is not None else "invalid"
+
+        if (res_score == int(row["resonance_score"] or 0)
+                and res_state == (row["resonance_state"] or "")
+                and signal.composite_score == int(row["composite_score"] or 0)
+                and signal.tier == row["tier"]
+                and new_status == row["status"]):
+            continue  # 无变化：不写，避免 updated_at 抖动
+
+        if new_status != row["status"]:
+            transitions.append((row["catalyst_id"], row["asset_id"],
+                                row["status"], new_status, signal.composite_score))
+            if new_status == "open":
+                promoted += 1
+            elif row["status"] == "open":
+                demoted += 1
+
+        updates.append({
+            "catalyst_id": row["catalyst_id"],
+            "asset_id": row["asset_id"],
+            "resonance_score": res_score,
+            "resonance_state": res_state,
+            "composite_score": signal.composite_score,
+            "tier": signal.tier,
+            "confidence": signal.confidence,
+            "invalidation": signal.invalidation,
+            "status": new_status,
+        })
+
+    if updates:
+        try:
+            _call_with_retry(
+                conn,
+                lambda: _write_so_resonance_refresh(conn, updates),
+                label="SO_resonance_refresh",
+            )
+        except _LockRetryExhausted:
+            print(f"  [SO_resonance_refresh] 回写锁冲突重试耗尽，本轮跳过 "
+                  f"{len(updates)} 条（下轮重算）")
+            trace_step("SO_resonance_refresh", passed=False,
+                       reason=f"回写锁冲突重试耗尽，跳过 {len(updates)} 条")
+            return {"scanned": len(rows), "refreshed": 0,
+                    "skipped_no_peer": skipped_no_peer,
+                    "status_promoted": 0, "status_demoted": 0,
+                    "lock_skipped": True}
+
+    # 只追溯状态迁移（每轮量级小，且是下游「可动作集合」的真实变化），
+    # 纯分数修正不逐条追溯，避免每轮数百行噪声
+    for cat_id, asset_id, prev_status, new_status, composite in transitions:
+        trace_step("SO_resonance_refresh", catalyst_id=cat_id, asset_id=asset_id,
+                   passed=True,
+                   reason=f"status {prev_status} → {new_status}",
+                   metrics={"prev_status": prev_status, "status": new_status,
+                            "composite": composite})
+
+    return {
+        "scanned": len(rows),
+        "refreshed": len(updates),
+        "skipped_no_peer": skipped_no_peer,
+        "status_promoted": promoted,
+        "status_demoted": demoted,
     }
 
 
@@ -1227,6 +1437,11 @@ def run_slow_g3g5(conn, config: dict,
 
         tier_dist[signal.tier or "none"] += 1
 
+        # d3 动作闸门：status 由本轮 resonance_state 推出（tier=None → invalid），
+        # 不能硬编码 'open'，否则已定价(confirmed)/未反应(pending)的信号会被
+        # 误放进可动作集合（破坏「open 全 weak」不变量）。
+        new_status = signal.status if signal.tier is not None else "invalid"
+
         # 追溯：G3-G5 补全后的信号重算结果（tier=None → 会被置为 invalid）
         trace_step(
             "G3G5_recalc",
@@ -1242,6 +1457,7 @@ def run_slow_g3g5(conn, config: dict,
                 "persistence": persistence,
                 "fundamental": fund_result.pass_,
                 "technical": tech_result.technical_state,
+                "status": new_status,
             },
         )
 
@@ -1263,6 +1479,7 @@ def run_slow_g3g5(conn, config: dict,
             "tier": signal.tier,
             "confidence": signal.confidence,
             "invalidation": signal.invalidation,
+            "status": new_status,
         })
 
     if updates:
@@ -1285,7 +1502,8 @@ def run_slow_g3g5(conn, config: dict,
                 composite_score SMALLINT,
                 tier TEXT,
                 confidence NUMERIC(4,3),
-                invalidation TEXT
+                invalidation TEXT,
+                status TEXT
             ) ON COMMIT DROP
         """)
         with conn.cursor() as cur:
@@ -1297,7 +1515,7 @@ def run_slow_g3g5(conn, config: dict,
                     %(entry_trigger)s, %(entry_trigger_price)s,
                     %(entry_price)s, %(stop_loss)s, %(take_profit)s,
                     %(rr_ratio)s, %(composite_score)s, %(tier)s,
-                    %(confidence)s, %(invalidation)s
+                    %(confidence)s, %(invalidation)s, %(status)s
                 )
             """, updates)
 
@@ -1318,14 +1536,15 @@ def run_slow_g3g5(conn, config: dict,
                 tier = t.tier,
                 confidence = t.confidence,
                 invalidation = t.invalidation,
-                status = CASE
-                    WHEN t.tier IS NULL THEN 'invalid'
-                    ELSE 'open'
-                END,
+                -- d3 分层：status 跟随本轮 resonance_state 推出的动作闸门，
+                -- 不硬编码 'open'（口径见 CatalystSignalBuilder._initial_status）
+                status = t.status,
                 updated_at = NOW()
             FROM tmp_slow_g3g5 t
             WHERE cs.catalyst_id = t.catalyst_id
               AND cs.asset_id = t.asset_id
+              -- 选中后可能被过期巡检置为终态，终态冻结不覆盖
+              AND cs.status IN ('open', 'watch')
         """)
 
     return {
@@ -1751,6 +1970,16 @@ def main() -> int:
             if tier_dist:
                 for tier, cnt in sorted(tier_dist.items()):
                     print(f"    tier {tier}: {cnt}")
+
+            # 2.5 二阶共振刷新：既有二阶信号跟随当前 peer-median 重算
+            #     （创建路径是 one-shot + ON CONFLICT DO NOTHING，不刷新则
+            #       resonance（权重 0.30）永久冻结在创建时值）
+            so_refresh = refresh_second_order_resonance(conn, config, limit=args.limit)
+            print(f"  二阶共振刷新: 扫描 {so_refresh.get('scanned', 0)} 条, "
+                  f"回写 {so_refresh.get('refreshed', 0)} 条"
+                  f"（转 open {so_refresh.get('status_promoted', 0)} / "
+                  f"退出 open {so_refresh.get('status_demoted', 0)} / "
+                  f"无 peer 数据跳过 {so_refresh.get('skipped_no_peer', 0)}）")
 
             # 3. 过期巡检
             n_expired = expire_signals(conn)

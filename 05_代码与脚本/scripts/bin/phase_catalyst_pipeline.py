@@ -24,6 +24,7 @@ import os
 import sys
 import time
 import yaml
+from bisect import bisect_right
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -331,6 +332,55 @@ def run_regime(conn, regime_calc: MarketRegime) -> str:
 # G1: 催化剂分级
 # =====================================================================
 
+def _load_prelaunch_klines(conn, symbols: list[str]) -> dict[str, list[tuple[float, float]]]:
+    """预加载 1h K 线 → {symbol: [(open_time_epoch, close_px), ...]}，按 open_time 升序。
+
+    用于计算「发布前 24h 启动程度」惩罚因子（prelaunch_ret_24h）。
+    """
+    if not symbols:
+        return {}
+    klines: dict[str, list[tuple[float, float]]] = {}
+    rows = conn.execute(
+        """
+        SELECT symbol, open_time, close_px
+        FROM biz.asset_klines
+        WHERE interval = '1h' AND symbol = ANY(%s)
+        ORDER BY symbol, open_time ASC
+        """,
+        (symbols,),
+    ).fetchall()
+    for r in rows:
+        close_px = r["close_px"]
+        if close_px is None:
+            continue
+        ts = r["open_time"].timestamp()
+        klines.setdefault(r["symbol"], []).append((ts, float(close_px)))
+    return klines
+
+
+def _compute_prelaunch_ret(klines: list[tuple[float, float]], base_ts: float) -> float | None:
+    """发布前 24h 价格变化 % = (base - base_24h_before) / base_24h_before * 100。
+
+    base_price 取 open_time <= base_ts 的最近一根 close；基准取 base_ts - 86400 的最近一根。
+    K 线不足（新资产 / 数据未覆盖）返回 None，由 grade 走 fallback 不惩罚。
+    """
+    if not klines:
+        return None
+    times = [k[0] for k in klines]
+    closes = [k[1] for k in klines]
+    i0 = bisect_right(times, base_ts) - 1
+    if i0 < 0:
+        return None
+    i24 = bisect_right(times, base_ts - 86400) - 1
+    if i24 < 0:
+        return None
+    p0 = closes[i0]
+    p24 = closes[i24]
+    if not p24:
+        return None
+    return (p0 - p24) / p24 * 100.0
+
+
 def run_grade(conn, grader: CatalystGrader,
               catalyst_id: int | None = None,
               limit: int | None = None) -> int:
@@ -345,7 +395,14 @@ def run_grade(conn, grader: CatalystGrader,
                (SELECT MIN(a.market_cap)
                 FROM biz.catalyst_asset_link cal2
                 JOIN core.asset a ON a.asset_id = cal2.asset_id
-                WHERE cal2.catalyst_id = ac.catalyst_id AND a.market_cap IS NOT NULL) AS min_mcap
+                WHERE cal2.catalyst_id = ac.catalyst_id AND a.market_cap IS NOT NULL) AS min_mcap,
+               (SELECT a2.canonical_symbol
+                FROM biz.catalyst_asset_link cal3
+                JOIN core.asset a2 ON a2.asset_id = cal3.asset_id
+                WHERE cal3.catalyst_id = ac.catalyst_id
+                  AND a2.canonical_symbol IS NOT NULL
+                ORDER BY (a2.market_cap IS NULL), a2.market_cap ASC
+                LIMIT 1) AS anchor_symbol
         FROM biz.asset_catalyst ac
         LEFT JOIN biz.catalyst_asset_link cal ON ac.catalyst_id = cal.catalyst_id
         WHERE ac.rule_event_type IS NOT NULL
@@ -367,12 +424,31 @@ def run_grade(conn, grader: CatalystGrader,
     if not rows:
         return 0
 
+    # 预加载发布前 K 线：计算「发布前 24h 启动程度」惩罚因子（prelaunch_ret_24h）
+    anchor_symbols = sorted({
+        (row.get("anchor_symbol") + "USDT")
+        for row in rows
+        if row.get("anchor_symbol")
+    })
+    prelaunch_klines = _load_prelaunch_klines(conn, anchor_symbols)
+
     count = 0
     skipped = 0
     for row in rows:
         linked = [{"asset_id": aid, "market_cap": row.get("min_mcap")}
                   for aid in (row["linked_asset_ids"] or [])]
-        result = grader.grade(dict(row), linked_assets=linked if linked else None)
+
+        catalyst_row = dict(row)
+        anchor_sym = row.get("anchor_symbol")
+        published_at = row.get("published_at")
+        if anchor_sym and published_at is not None:
+            klines = prelaunch_klines.get(anchor_sym + "USDT")
+            if klines:
+                catalyst_row["prelaunch_ret_24h"] = _compute_prelaunch_ret(
+                    klines, published_at.timestamp()
+                )
+
+        result = grader.grade(catalyst_row, linked_assets=linked if linked else None)
         try:
             _call_with_retry(
                 conn,

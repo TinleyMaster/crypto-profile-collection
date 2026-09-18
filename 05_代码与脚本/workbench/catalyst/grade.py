@@ -136,6 +136,8 @@ class CatalystGradeResult:
     event_weight: int
     scope_score: int
     mcap_score: int = 50          # 市值因子（关联资产最小市值档）
+    prelaunch_ret_24h: float | None = None  # 发布前24h价格变化%（锚定资产）
+    prelaunch_penalty: int = 0    # 追高惩罚分（>10% 扣分）
     tradable: bool = False
     catalyst_kind: str = "sentiment"  # structural / event / sentiment / noise
     base_strength: int = 0        # 0-100
@@ -170,6 +172,13 @@ class CatalystGrader:
         self.mcap_scores = config.get("mcap_scores", {
             "lt_100m": 90, "lt_1b": 80, "lt_5b": 60, "ge_5b": 40, "unknown": 50,
         })
+
+        # 发布前启动程度惩罚（实测：>10% 追高风险显著，作扣分项）
+        pl = config.get("prelaunch_penalty", {})
+        self.prelaunch_enabled = pl.get("enabled", False)
+        self.prelaunch_gt10 = float(pl.get("gt_10pct", 8))
+        self.prelaunch_threshold = 10.0
+        self.prelaunch_fallback = float(pl.get("fallback", 0))
 
         # 实测校准权重（P1）：{dim: {value: calibrated_score}}
         # dim ∈ event_type / source / scope；仅 weight_mode='calibrated' 生效
@@ -219,16 +228,22 @@ class CatalystGrader:
         # 6) 是否有可交易标的
         tradable = bool(linked_assets) if linked_assets is not None else self._has_asset_link(catalyst)
 
-        # 7) 加权计算 base_strength（authority + event + scope + mcap 四维）
+        # 7) 发布前启动程度惩罚（追高扣分，不参与四维加权）
+        #    实测：发布前24h已涨>10%的催化剂 72h 超额显著为负（信息已被定价）
+        prelaunch_ret = catalyst.get("prelaunch_ret_24h")
+        prelaunch_penalty = self._prelaunch_penalty(prelaunch_ret)
+
+        # 8) 加权计算 base_strength（authority + event + scope + mcap 四维），再扣追高惩罚
         base_strength = round(
             authority * self.w_authority
             + event_weight * self.w_event
             + scope * self.w_scope
             + mcap * self.w_mcap
+            - prelaunch_penalty
         )
         base_strength = max(0, min(100, base_strength))  # 钳位 0-100
 
-        # 8) 判定 kind
+        # 9) 判定 kind
         kind = self._determine_kind(event_type, base_strength, tradable)
 
         return CatalystGradeResult(
@@ -237,6 +252,8 @@ class CatalystGrader:
             event_weight=event_weight,
             scope_score=scope,
             mcap_score=mcap,
+            prelaunch_ret_24h=prelaunch_ret,
+            prelaunch_penalty=prelaunch_penalty,
             tradable=tradable,
             catalyst_kind=kind,
             base_strength=base_strength,
@@ -249,9 +266,11 @@ class CatalystGrader:
             """
             INSERT INTO biz.catalyst_grade (
                 catalyst_id, authority_score, event_weight, scope_score, mcap_score,
+                prelaunch_ret_24h, prelaunch_penalty,
                 tradable, catalyst_kind, base_strength, event_type_src, graded_by
             ) VALUES (
                 %(catalyst_id)s, %(authority_score)s, %(event_weight)s, %(scope_score)s, %(mcap_score)s,
+                %(prelaunch_ret_24h)s, %(prelaunch_penalty)s,
                 %(tradable)s, %(catalyst_kind)s, %(base_strength)s, %(event_type_src)s, %(graded_by)s
             )
             ON CONFLICT (catalyst_id) DO UPDATE SET
@@ -259,6 +278,8 @@ class CatalystGrader:
                 event_weight = EXCLUDED.event_weight,
                 scope_score = EXCLUDED.scope_score,
                 mcap_score = EXCLUDED.mcap_score,
+                prelaunch_ret_24h = EXCLUDED.prelaunch_ret_24h,
+                prelaunch_penalty = EXCLUDED.prelaunch_penalty,
                 tradable = EXCLUDED.tradable,
                 catalyst_kind = EXCLUDED.catalyst_kind,
                 base_strength = EXCLUDED.base_strength,
@@ -272,6 +293,8 @@ class CatalystGrader:
                 "event_weight": result.event_weight,
                 "scope_score": result.scope_score,
                 "mcap_score": result.mcap_score,
+                "prelaunch_ret_24h": result.prelaunch_ret_24h,
+                "prelaunch_penalty": result.prelaunch_penalty,
                 "tradable": result.tradable,
                 "catalyst_kind": result.catalyst_kind,
                 "base_strength": result.base_strength,
@@ -279,6 +302,24 @@ class CatalystGrader:
                 "graded_by": result.graded_by,
             },
         )
+
+    def _prelaunch_penalty(self, prelaunch_ret: float | None) -> int:
+        """发布前启动程度惩罚分。
+
+        实测（2026-09-18，741 个 L1 样本）：发布前 24h 已涨 >10% 的催化剂，
+        72h 超额收益显著为负（10~20% 组中位 -16.4%、≥5% 占比 0%）——
+        信息已被定价，追高风险大。因此对 >10% 的追高状态扣分。
+
+        仅作惩罚项不参与加权：整体预测力弱（Spearman 0.076），
+        85% 样本集中在 -10%~+5% 无区分度；超跌组样本过少不做加分。
+        """
+        if not self.prelaunch_enabled:
+            return 0
+        if prelaunch_ret is None:
+            return int(self.prelaunch_fallback)
+        if float(prelaunch_ret) > self.prelaunch_threshold:
+            return int(self.prelaunch_gt10)
+        return int(self.prelaunch_fallback)
 
     # ---- 内部方法 ----
 

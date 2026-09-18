@@ -171,6 +171,8 @@ def main():
                         help="预览模式：只统计，不爬取、不写库")
     parser.add_argument("--db-url", type=str, default=None,
                         help="数据库连接串（默认从 settings 或 DATABASE_URL 环境变量读）")
+    parser.add_argument("--proxy", type=str, default=None,
+                        help="HTTP 代理地址（如 http://127.0.0.1:7890，配合 Clash 使用）")
     args = parser.parse_args()
 
     chains = [c.strip() for c in args.chain.split(",") if c.strip()]
@@ -414,7 +416,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             thread_id = _thread_id()
             if thread_id not in thread_local:
                 thread_local[thread_id] = ExplorerLabelFetcher(
-                    chain=chain, delay=args.delay)
+                    chain=chain, delay=args.delay, proxy=args.proxy)
             fetcher = thread_local[thread_id]
             return _fetch_one(addr, fetcher)
 

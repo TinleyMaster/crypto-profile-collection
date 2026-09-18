@@ -135,18 +135,20 @@ class CatalystGradeResult:
     authority_score: int
     event_weight: int
     scope_score: int
-    tradable: bool
-    catalyst_kind: str     # structural / event / sentiment / noise
-    base_strength: int     # 0-100
-    event_type_src: str    # rule / ai / hybrid
+    mcap_score: int = 50          # 市值因子（关联资产最小市值档）
+    tradable: bool = False
+    catalyst_kind: str = "sentiment"  # structural / event / sentiment / noise
+    base_strength: int = 0        # 0-100
+    event_type_src: str = "rule"  # rule / ai / hybrid
     graded_by: str = "rule"
 
 
 class CatalystGrader:
     """催化剂 G1 分级器。
 
-    三维加权：
-        base_strength = authority * w_authority + event_weight * w_event + scope * w_scope
+    四维加权：
+        base_strength = authority * w_authority + event_weight * w_event
+                      + scope * w_scope + mcap * w_mcap
 
     kind 判定：
         structural: 事件在 structural_event_types 中 + strength ≥ structural_min
@@ -160,10 +162,14 @@ class CatalystGrader:
         self.w_authority = gw.get("authority", 0.4)
         self.w_event = gw.get("event", 0.4)
         self.w_scope = gw.get("scope", 0.2)
+        self.w_mcap = gw.get("mcap", 0.0)
 
         self.event_type_weights = config.get("event_type_weights", {})
         self.authority_scores = config.get("authority_scores", {})
         self.scope_rules = config.get("scope_score_rules", {})
+        self.mcap_scores = config.get("mcap_scores", {
+            "lt_100m": 90, "lt_1b": 80, "lt_5b": 60, "ge_5b": 40, "unknown": 50,
+        })
 
         # 实测校准权重（P1）：{dim: {value: calibrated_score}}
         # dim ∈ event_type / source / scope；仅 weight_mode='calibrated' 生效
@@ -207,18 +213,22 @@ class CatalystGrader:
         pairs = catalyst.get("related_pairs") or []
         scope = self._scope_score(pairs)
 
-        # 5) 是否有可交易标的
+        # 5) 市值因子（关联资产取最小市值；2026-09-18 实测：小市值是影响首要因子）
+        mcap = self._mcap_score(linked_assets)
+
+        # 6) 是否有可交易标的
         tradable = bool(linked_assets) if linked_assets is not None else self._has_asset_link(catalyst)
 
-        # 6) 加权计算 base_strength
+        # 7) 加权计算 base_strength（authority + event + scope + mcap 四维）
         base_strength = round(
             authority * self.w_authority
             + event_weight * self.w_event
             + scope * self.w_scope
+            + mcap * self.w_mcap
         )
         base_strength = max(0, min(100, base_strength))  # 钳位 0-100
 
-        # 7) 判定 kind
+        # 8) 判定 kind
         kind = self._determine_kind(event_type, base_strength, tradable)
 
         return CatalystGradeResult(
@@ -226,6 +236,7 @@ class CatalystGrader:
             authority_score=authority,
             event_weight=event_weight,
             scope_score=scope,
+            mcap_score=mcap,
             tradable=tradable,
             catalyst_kind=kind,
             base_strength=base_strength,
@@ -237,16 +248,17 @@ class CatalystGrader:
         conn.execute(
             """
             INSERT INTO biz.catalyst_grade (
-                catalyst_id, authority_score, event_weight, scope_score,
+                catalyst_id, authority_score, event_weight, scope_score, mcap_score,
                 tradable, catalyst_kind, base_strength, event_type_src, graded_by
             ) VALUES (
-                %(catalyst_id)s, %(authority_score)s, %(event_weight)s, %(scope_score)s,
+                %(catalyst_id)s, %(authority_score)s, %(event_weight)s, %(scope_score)s, %(mcap_score)s,
                 %(tradable)s, %(catalyst_kind)s, %(base_strength)s, %(event_type_src)s, %(graded_by)s
             )
             ON CONFLICT (catalyst_id) DO UPDATE SET
                 authority_score = EXCLUDED.authority_score,
                 event_weight = EXCLUDED.event_weight,
                 scope_score = EXCLUDED.scope_score,
+                mcap_score = EXCLUDED.mcap_score,
                 tradable = EXCLUDED.tradable,
                 catalyst_kind = EXCLUDED.catalyst_kind,
                 base_strength = EXCLUDED.base_strength,
@@ -259,6 +271,7 @@ class CatalystGrader:
                 "authority_score": result.authority_score,
                 "event_weight": result.event_weight,
                 "scope_score": result.scope_score,
+                "mcap_score": result.mcap_score,
                 "tradable": result.tradable,
                 "catalyst_kind": result.catalyst_kind,
                 "base_strength": result.base_strength,
@@ -312,6 +325,31 @@ class CatalystGrader:
         if calib is not None:
             return calib
         return self.scope_rules.get(bucket, 30)
+
+    def _mcap_score(self, linked_assets: list[dict] | None) -> int:
+        """市值因子：关联资产中最小市值的分档分。
+
+        实测（2026-09-18）：小市值(<10亿)催化剂强影响占比 30-50%，
+        大市值(>50亿)仅 3%——市值是催化剂影响的首要因子。
+
+        linked_assets 元素需含 market_cap（由 run_grade 查询带出）。
+        """
+        mcaps = []
+        if linked_assets:
+            for la in linked_assets:
+                mc = la.get("market_cap") if isinstance(la, dict) else None
+                if mc is not None and mc > 0:
+                    mcaps.append(float(mc))
+        if not mcaps:
+            return self.mcap_scores.get("unknown", 50)
+        min_mcap = min(mcaps)
+        if min_mcap < 1e8:
+            return self.mcap_scores.get("lt_100m", 90)
+        if min_mcap < 1e9:
+            return self.mcap_scores.get("lt_1b", 80)
+        if min_mcap < 5e9:
+            return self.mcap_scores.get("lt_5b", 60)
+        return self.mcap_scores.get("ge_5b", 40)
 
     def _has_asset_link(self, catalyst: dict) -> bool:
         """简单判断：asset_id 非空 或 related_pairs 非空。

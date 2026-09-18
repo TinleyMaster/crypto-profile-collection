@@ -341,7 +341,11 @@ def run_grade(conn, grader: CatalystGrader,
     """
     query = """
         SELECT ac.*,
-               ARRAY_AGG(cal.asset_id) FILTER (WHERE cal.asset_id IS NOT NULL) AS linked_asset_ids
+               ARRAY_AGG(cal.asset_id) FILTER (WHERE cal.asset_id IS NOT NULL) AS linked_asset_ids,
+               (SELECT MIN(a.market_cap)
+                FROM biz.catalyst_asset_link cal2
+                JOIN core.asset a ON a.asset_id = cal2.asset_id
+                WHERE cal2.catalyst_id = ac.catalyst_id AND a.market_cap IS NOT NULL) AS min_mcap
         FROM biz.asset_catalyst ac
         LEFT JOIN biz.catalyst_asset_link cal ON ac.catalyst_id = cal.catalyst_id
         WHERE ac.rule_event_type IS NOT NULL
@@ -366,7 +370,8 @@ def run_grade(conn, grader: CatalystGrader,
     count = 0
     skipped = 0
     for row in rows:
-        linked = [{"asset_id": aid} for aid in (row["linked_asset_ids"] or [])]
+        linked = [{"asset_id": aid, "market_cap": row.get("min_mcap")}
+                  for aid in (row["linked_asset_ids"] or [])]
         result = grader.grade(dict(row), linked_assets=linked if linked else None)
         try:
             _call_with_retry(

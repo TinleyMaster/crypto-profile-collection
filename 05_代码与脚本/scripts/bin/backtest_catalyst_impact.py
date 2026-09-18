@@ -14,6 +14,12 @@
   - 已结算（outcome_state='resolved'）的不重复处理
   - signal_id 置 NULL 区分回测行；ret_source 标记 'backtest'
   - 复用 collect 的预加载/计算逻辑（K线/CMC/market_daily 全内存）
+  - **只回放 14d 窗口已走完的历史 catalyst**（2026-09-18 修复）：
+    本脚本不加 now 闸门，kline_close_at(ts) 在 ts 超出 K 线末尾时会取「最后一根 K 线」，
+    等于把「base 到最新」的收益冒充成 72h 收益——实测产生 60 行伪造窗口
+    （ret_4h = ret_24h = ret_72h，或直接 0.0000），且这批行 base_time 用 published_at，
+    与 collect 的 created_at 基线混在同一张表里造成口径混杂。
+    近 14 天由 collect_catalyst_outcome.py 前向追踪接管（它自带窗口到期闸门）。
 
 用法：
     python backtest_catalyst_impact.py              # 回测 06-18 后所有未回测组合
@@ -63,7 +69,7 @@ from collect_catalyst_outcome import (
 def fetch_backtest_rows(conn, limit: int | None) -> list[dict]:
     """取未回测的 catalyst×asset 组合（published_at 基线）。
 
-    只取：06-18 后发布（K线覆盖） + 尚无 outcome 记录 + 有关联资产。
+    只取：行情覆盖期后发布 + 14d 窗口已走完 + 尚无 outcome 记录 + 有关联资产。
     """
     sql = """
         SELECT ac.catalyst_id, cal.asset_id, ac.published_at AS base_time,
@@ -76,6 +82,7 @@ def fetch_backtest_rows(conn, limit: int | None) -> list[dict]:
         LEFT JOIN biz.catalyst_outcome co
                ON co.catalyst_id = ac.catalyst_id AND co.asset_id = cal.asset_id
         WHERE ac.published_at >= '2026-05-27'  -- market_daily 起点，历史可回测最早时间
+          AND ac.published_at <= NOW() - INTERVAL '336 hours'  -- 仅回放 14d 窗口已走完的，防伪造窗口
           AND co.outcome_id IS NULL
         ORDER BY ac.published_at ASC
     """
@@ -151,7 +158,7 @@ def upsert_backtest_outcome(conn, row: dict, computed: dict, direction, directio
 
 def compute_one(row: dict, kline_symbols, klines, cmc_pct, daily,
                 btc_asset_id, asset_symbols) -> tuple | None:
-    """对单条回测组合做全窗口计算（历史数据全量可用，不依赖 now）。
+    """对单条回测组合做全窗口计算（候选集已限定 14d 窗口走完，历史数据全量可用）。
 
     返回 (computed, data_tier, direction, direction_src, base_price) 或 None。
     """

@@ -259,7 +259,7 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
                     if cur.rowcount:
                         inserted += 1
 
-                # 也写 exchange_wallet
+                # 也写 exchange_wallet（已存在且为 medium 的自动升级为 high）
                 for addr_l, info in filtered.items():
                     if not info["is_exchange"]:
                         continue
@@ -269,7 +269,18 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
                         INSERT INTO biz.onchain_exchange_wallet
                             (address, exchange_name, chain, label, confidence, source)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (address, chain) DO NOTHING
+                        ON CONFLICT (address, chain) DO UPDATE
+                        SET confidence = 'high',
+                            exchange_name = EXCLUDED.exchange_name,
+                            label = CASE
+                                WHEN biz.onchain_exchange_wallet.label IS NULL
+                                     OR biz.onchain_exchange_wallet.label = ''
+                                THEN EXCLUDED.label
+                                ELSE biz.onchain_exchange_wallet.label
+                            END,
+                            source = COALESCE(NULLIF(biz.onchain_exchange_wallet.source, ''), '')
+                                       || ';explorer_html'
+                        WHERE biz.onchain_exchange_wallet.confidence != 'high'
                     """, (
                         addr_l, ex_name, chain,
                         info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,

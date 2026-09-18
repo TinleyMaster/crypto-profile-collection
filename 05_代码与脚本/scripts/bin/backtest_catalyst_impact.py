@@ -75,7 +75,7 @@ def fetch_backtest_rows(conn, limit: int | None) -> list[dict]:
                ON ci.catalyst_id = ac.catalyst_id AND ci.asset_id = cal.asset_id
         LEFT JOIN biz.catalyst_outcome co
                ON co.catalyst_id = ac.catalyst_id AND co.asset_id = cal.asset_id
-        WHERE ac.published_at >= '2026-06-18'
+        WHERE ac.published_at >= '2026-05-27'  -- market_daily 起点，历史可回测最早时间
           AND co.outcome_id IS NULL
         ORDER BY ac.published_at ASC
     """

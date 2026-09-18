@@ -77,6 +77,10 @@ debug-zeabur-pg-connect.md
 *_progress.jsonl
 *_failures.jsonl
 
+# 脚本运行时数据产物（校准 CSV / 评估周报 / 日志等，不入库）
+05_代码与脚本/scripts/bin/data/
+05_代码与脚本/scripts/data/
+
 # 数据修复临时备份（含真实地址数据，不入库）
 _solana_fix_backup/
 _p1_fix_backup/

@@ -207,6 +207,154 @@ def _ensure_conn(conn, db_url: str):
         return new_conn
 
 
+def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
+                 inserted_total: int, backfilled_total: int) -> tuple:
+    """写一批数据到 DB，带连接错误自动重连重试（最多 3 次）。
+    返回 (conn, batch_inserted, batch_backfilled, inserted_total, backfilled_total)
+    """
+    import json
+    from crypto_research.clients.label_enricher import (
+        ENRICH_CONFIDENCE, ENRICH_SOURCE, ALLOWED_LABEL_TYPES,
+        CASE_SENSITIVE_CHAINS as CS_CHAINS,
+    )
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # 确保连接存活
+            conn = _ensure_conn(conn, db_url)
+
+            filtered = {
+                a: info for a, info in batch_results.items()
+                if info.get("label_type") in ALLOWED_LABEL_TYPES
+            }
+
+            batch_inserted = 0
+            batch_backfilled = 0
+
+            if not filtered:
+                return conn, 0, 0, inserted_total, backfilled_total
+
+            # 1. 写 address_label
+            inserted = 0
+            with conn.cursor() as cur:
+                for addr_l, info in filtered.items():
+                    raw_meta = json.dumps({
+                        "label_text": info["label_text"],
+                        "fetched_from": "address_page",
+                    }, ensure_ascii=False)
+                    cur.execute("""
+                        INSERT INTO biz.onchain_address_label
+                            (address, chain, label_type, label_name, display_name,
+                             confidence, source, raw_meta)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (address, chain, label_type, label_name) DO NOTHING
+                    """, (
+                        addr_l, chain, info["label_type"],
+                        info["display_name"], info["display_name"],
+                        ENRICH_CONFIDENCE, ENRICH_SOURCE, raw_meta,
+                    ))
+                    if cur.rowcount:
+                        inserted += 1
+
+                # 也写 exchange_wallet
+                for addr_l, info in filtered.items():
+                    if not info["is_exchange"]:
+                        continue
+                    cur.execute("""
+                        INSERT INTO biz.onchain_exchange_wallet
+                            (address, exchange_name, chain, label, confidence, source)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (address, chain) DO NOTHING
+                    """, (
+                        addr_l, info["display_name"], chain,
+                        info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,
+                    ))
+
+            conn.commit()
+            inserted_total += inserted
+            batch_inserted = inserted
+
+            # 2. 回填转账记录
+            case_sensitive = chain in CS_CHAINS
+            with conn.cursor() as cur:
+                # 刷新 resolver 缓存
+                resolver._no_label -= set(filtered.keys())
+                addr_list = list(filtered.keys())
+                resolver.resolve_batch(addr_list)
+
+                # 临时表方式回填
+                cur.execute("""
+                    CREATE TEMP TABLE tmp_enrich_backfill (
+                        address TEXT PRIMARY KEY,
+                        label_types TEXT[],
+                        label_names TEXT[]
+                    ) ON COMMIT DROP
+                """)
+                rows = []
+                for a in addr_list:
+                    info = resolver.resolve(a)
+                    if info["types"]:
+                        rows.append((a, info["types"], info["names"]))
+                if rows:
+                    cur.executemany("""
+                        INSERT INTO tmp_enrich_backfill (address, label_types, label_names)
+                        VALUES (%s, %s, %s)
+                    """, rows)
+
+                # 更新发件方
+                if case_sensitive:
+                    from_cond = "t.from_address = e.address"
+                    to_cond = "t.to_address = e.address"
+                else:
+                    from_cond = "LOWER(t.from_address) = LOWER(e.address)"
+                    to_cond = "LOWER(t.to_address) = LOWER(e.address)"
+
+                cur.execute(f"""
+                    UPDATE biz.onchain_transfer_log t
+                    SET from_labels = e.label_types,
+                        from_label_names = e.label_names
+                    FROM tmp_enrich_backfill e
+                    WHERE t.chain = %s
+                      AND {from_cond}
+                      AND (t.from_labels IS NULL OR t.from_labels = ARRAY['unknown']::TEXT[])
+                """, (chain,))
+                from_up = cur.rowcount
+
+                cur.execute(f"""
+                    UPDATE biz.onchain_transfer_log t
+                    SET to_labels = e.label_types,
+                        to_label_names = e.label_names
+                    FROM tmp_enrich_backfill e
+                    WHERE t.chain = %s
+                      AND {to_cond}
+                      AND (t.to_labels IS NULL OR t.to_labels = ARRAY['unknown']::TEXT[])
+                """, (chain,))
+                to_up = cur.rowcount
+
+            conn.commit()
+            backfilled_total += from_up + to_up
+            batch_backfilled = from_up + to_up
+
+            return conn, batch_inserted, batch_backfilled, inserted_total, backfilled_total
+
+        except psycopg.OperationalError as e:
+            # 连接错误：重连后重试
+            print(f"  ⚠️  DB 连接错误（第 {attempt+1} 次）: {e}")
+            if attempt < max_retries - 1:
+                print(f"     等待 {2 ** attempt}s 后重连重试...")
+                time.sleep(2 ** attempt)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = psycopg.connect(db_url)
+                conn.autocommit = False
+                print(f"     ✅ 已重连")
+            else:
+                raise
+
+
 def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
     """对多条链依次执行富化（并发爬取 + 批量写库）。"""
     for chain in chains:
@@ -302,134 +450,16 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                               f"已查到标签 {stat_counts['ok'] + batch_stats['ok']} 个 | "
                               f"速度 {rate:.1f}/s | 预计剩余 {eta/60:.1f} 分钟")
 
-            # 确保 DB 连接存活（长连接可能被服务端断开）
-            conn = _ensure_conn(conn, db_url)
-
-            # 本批写库统计
+            # 本批写库（带连接断开自动重连重试）
             batch_inserted = 0
             batch_backfilled = 0
-
-            # 本批写库（单线程，串行安全）
             if batch_results:
                 try:
-                    # 构造 label_map 格式给 enricher 用
-                    label_map = batch_results
-                    # 直接用 enricher 的写库逻辑
-                    from crypto_research.clients.label_enricher import (
-                        ENRICH_CONFIDENCE, ENRICH_SOURCE, ALLOWED_LABEL_TYPES,
-                    )
-                    import json
-
-                    filtered = {
-                        a: info for a, info in label_map.items()
-                        if info.get("label_type") in ALLOWED_LABEL_TYPES
-                    }
-
-                    if filtered:
-                        inserted = 0
-                        with conn.cursor() as cur:
-                            for addr_l, info in filtered.items():
-                                raw_meta = json.dumps({
-                                    "label_text": info["label_text"],
-                                    "fetched_from": "address_page",
-                                }, ensure_ascii=False)
-                                cur.execute("""
-                                    INSERT INTO biz.onchain_address_label
-                                        (address, chain, label_type, label_name, display_name,
-                                         confidence, source, raw_meta)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                                    ON CONFLICT (address, chain, label_type, label_name) DO NOTHING
-                                """, (
-                                    addr_l, chain, info["label_type"],
-                                    info["display_name"], info["display_name"],
-                                    ENRICH_CONFIDENCE, ENRICH_SOURCE, raw_meta,
-                                ))
-                                if cur.rowcount:
-                                    inserted += 1
-
-                            # 也写 exchange_wallet
-                            for addr_l, info in filtered.items():
-                                if not info["is_exchange"]:
-                                    continue
-                                cur.execute("""
-                                    INSERT INTO biz.onchain_exchange_wallet
-                                        (address, exchange_name, chain, label, confidence, source)
-                                    VALUES (%s, %s, %s, %s, %s, %s)
-                                    ON CONFLICT (address, chain) DO NOTHING
-                                """, (
-                                    addr_l, info["display_name"], chain,
-                                    info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,
-                                ))
-
-                        conn.commit()
-                        inserted_total += inserted
-                        batch_inserted = inserted
-
-                        # 回填转账记录
-                        from crypto_research.clients.label_enricher import CASE_SENSITIVE_CHAINS as CS_CHAINS
-                        case_sensitive = chain in CS_CHAINS
-
-                        with conn.cursor() as cur:
-                            # 刷新 resolver 缓存
-                            resolver._no_label -= set(filtered.keys())
-                            addr_list = list(filtered.keys())
-                            resolver.resolve_batch(addr_list)
-
-                            # 临时表方式回填
-                            cur.execute("""
-                                CREATE TEMP TABLE tmp_enrich_backfill (
-                                    address TEXT PRIMARY KEY,
-                                    label_types TEXT[],
-                                    label_names TEXT[]
-                                ) ON COMMIT DROP
-                            """)
-                            rows = []
-                            for a in addr_list:
-                                info = resolver.resolve(a)
-                                if info["types"]:
-                                    rows.append((a, info["types"], info["names"]))
-                            if rows:
-                                cur.executemany("""
-                                    INSERT INTO tmp_enrich_backfill (address, label_types, label_names)
-                                    VALUES (%s, %s, %s)
-                                """, rows)
-
-                            # 更新发件方
-                            if case_sensitive:
-                                from_cond = "t.from_address = e.address"
-                                to_cond = "t.to_address = e.address"
-                            else:
-                                from_cond = "LOWER(t.from_address) = LOWER(e.address)"
-                                to_cond = "LOWER(t.to_address) = LOWER(e.address)"
-
-                            cur.execute(f"""
-                                UPDATE biz.onchain_transfer_log t
-                                SET from_labels = e.label_types,
-                                    from_label_names = e.label_names
-                                FROM tmp_enrich_backfill e
-                                WHERE t.chain = %s
-                                  AND {from_cond}
-                                  AND (t.from_labels IS NULL OR t.from_labels = ARRAY['unknown']::TEXT[])
-                            """, (chain,))
-                            from_up = cur.rowcount
-
-                            cur.execute(f"""
-                                UPDATE biz.onchain_transfer_log t
-                                SET to_labels = e.label_types,
-                                    to_label_names = e.label_names
-                                FROM tmp_enrich_backfill e
-                                WHERE t.chain = %s
-                                  AND {to_cond}
-                                  AND (t.to_labels IS NULL OR t.to_labels = ARRAY['unknown']::TEXT[])
-                            """, (chain,))
-                            to_up = cur.rowcount
-
-                        conn.commit()
-                        backfilled_total += from_up + to_up
-                        batch_backfilled = from_up + to_up
-
+                    conn, batch_inserted, batch_backfilled, inserted_total, backfilled_total = \
+                        _write_batch(conn, db_url, chain, batch_results, resolver,
+                                     inserted_total, backfilled_total)
                 except Exception as e:
-                    print(f"  ⚠️  本批写库失败: {e}")
+                    print(f"  ⚠️  本批写库失败（重试后仍失败）: {e}")
                     import traceback
                     traceback.print_exc()
 

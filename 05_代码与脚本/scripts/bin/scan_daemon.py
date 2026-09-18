@@ -195,10 +195,15 @@ def _load_cursors(conn) -> dict[str, int]:
 
 
 def _sample_symbol(symbol: str, last_trade_id: int) -> dict:
-    """采样单个币：OI + 增量 CVD。"""
-    # OI
+    """采样单个币：OI（张数×标记价，USD）+ 增量 CVD。"""
+    # OI 价值 = openInterest qty × markPrice（与 phase_oi_cvd_sampler 口径一致，
+    # 不可直接用张数当 USD——历史曾因此写入量级错误数据）
     oi_data = _http_get(f"{FAPI_BASE}/fapi/v1/openInterest", {"symbol": symbol})
-    oi_usd = float(oi_data["openInterest"])  # 张数，近似值
+    try:
+        mark = _http_get(f"{FAPI_BASE}/fapi/v1/premiumIndex", {"symbol": symbol})
+        oi_usd = float(oi_data["openInterest"]) * float(mark["markPrice"])
+    except (KeyError, TypeError, ValueError):
+        oi_usd = None  # 标记价拉取失败 → OI 缺失（宁缺毋错，不写张数当美元）
 
     # aggTrades（增量 CVD）
     params = {"symbol": symbol, "limit": 1000}

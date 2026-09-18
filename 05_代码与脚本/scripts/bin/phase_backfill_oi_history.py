@@ -102,16 +102,20 @@ def main() -> int:
     parser.add_argument("--limit-symbols", type=int, default=0, help="只处理前 N 个符号")
     parser.add_argument("--dry-run", action="store_true", help="只拉取打印，不落库")
     parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--force", action="store_true",
+                        help="忽略已覆盖标记，强制全量重填（用于修复污染数据）")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
         symbols = get_universe(conn)
-        covered = get_covered(conn)
-        todo = [s for s in symbols if s not in covered]
-        if args.limit_symbols:
-            todo = todo[: args.limit_symbols]
-        print(f"[oi-backfill] 宇宙 {len(symbols)} 符号，已覆盖 {len(covered)}，待回填 {len(todo)}")
+        if args.force:
+            todo = symbols
+            print(f"[oi-backfill] 强制全量重填 {len(todo)} 符号")
+        else:
+            covered = get_covered(conn)
+            todo = [s for s in symbols if s not in covered]
+            print(f"[oi-backfill] 宇宙 {len(symbols)} 符号，已覆盖 {len(covered)}，待回填 {len(todo)}")
 
         results: dict[str, list[tuple]] = {}
         errors = 0

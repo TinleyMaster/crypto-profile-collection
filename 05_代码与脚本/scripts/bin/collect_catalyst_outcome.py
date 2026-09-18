@@ -49,14 +49,24 @@ DAILY_WINDOWS = [168, 336]  # 7d / 14d
 RESOLVED_WINDOW = 336
 
 # event_type → 默认方向（catalyst_impact 缺失时兜底）
+#
+# 2026-09-18 实测校正（verify_event_direction.py，72h 扣 BTC 超额收益）：
+#   判定规则：标注与 median 反号 且 |median|≥0.5 且涨占比在标注错误一侧 = 方向被证伪；
+#             证伪且样本≥30 → 翻转为反向；证伪且样本<30 → 降级 neutral（防小样本过拟合）。
+#   partnership (n=130, 中位 +1.25%, 涨占比 0.56) → bullish 成立
+#   listing     (n=192, 中位 +0.70%, 涨占比 0.53) → bullish 弱成立，保留
+#   tech_upgrade(n=47,  中位 -0.55%, 涨占比 0.40) → 原 bullish 证伪，翻转 bearish（利好出尽）
+#   funding     (n=28,  中位 -0.78%, 涨占比 0.32) → 原 bullish 证伪，样本不足降 neutral
+#   burn        (n=14,  中位 -0.77%, 涨占比 0.43) → 原 bullish 证伪，样本不足降 neutral
+#   delisting / regulation / market_update → 实测无矛盾，维持原判
 EVENT_TYPE_DIRECTION = {
     "listing": "bullish",
     "delisting": "bearish",
-    "burn": "bullish",
+    "burn": "neutral",
     "airdrop": "bullish",
-    "funding": "bullish",
+    "funding": "neutral",
     "partnership": "bullish",
-    "tech_upgrade": "bullish",
+    "tech_upgrade": "bearish",
     "regulation": "neutral",
     "market_update": "neutral",
     "other": None,

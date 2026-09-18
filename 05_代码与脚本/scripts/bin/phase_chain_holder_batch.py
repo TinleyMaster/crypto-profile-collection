@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -146,12 +147,7 @@ def get_total_pending(conn, chain_short: str) -> int:
 
 
 def _kill_process_tree(proc: "subprocess.Popen") -> None:
-    """连同子进程一起杀掉（Playwright 等会 spawn 后代进程）。
-
-    审计 P0-3：Solana 走 Playwright 时会派生浏览器子进程，若只杀直接子进程，
-    后代仍持有 stdout/stderr 管道 → communicate() 永久阻塞 → 任务 90 分钟无日志
-    被看护误杀。用独立进程组 + killpg 彻底回收。
-    """
+    """连同子进程一起杀掉（Playwright 等会 spawn 后代进程）。"""
     try:
         if os.name == "posix":
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -164,21 +160,38 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
             pass
 
 
+def _tail(path: str, n: int = 200) -> str:
+    """读取文件末尾 n 个字符，用于失败原因诊断。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()[-n:]
+    except Exception:
+        return ""
+
+
 def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]:
-    """运行单币持仓快照采集，返回 (是否成功, 失败原因)。"""
+    """运行单币持仓快照采集，返回 (是否成功, 失败原因)。
+
+    审计 P0-3 真根因：子进程用 PIPE 捕获输出时，若采集脚本（含 Playwright）
+    派生的后代进程在超时后仍持有写端 fd，父进程 acquire 管道 EOF 会永久阻塞
+    → 90 分钟无日志被看护误杀。此处改为重定向到临时文件（父进程从不读管道），
+    配合独立进程组 + killpg，彻底消除悬挂；失败时读临时文件尾部作为诊断。
+    """
     script = SCRIPT_DIR / "phase_chain_holder_scrape.py"
-    popen_kwargs: dict = dict(
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=str(SCRIPT_DIR),
-    )
-    # 独立进程组：超时时可连同 Playwright 后代进程一起回收，避免管道悬挂
+    popen_kwargs: dict = dict(cwd=str(SCRIPT_DIR))
+    # 独立进程组：超时时可连同后代进程一起回收
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
 
     proc = None
+    out_path = err_path = None
     try:
+        out_f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".out", delete=False, encoding="utf-8")
+        err_f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".err", delete=False, encoding="utf-8")
+        out_path, err_path = out_f.name, err_f.name
+
         proc = subprocess.Popen(
             [
                 sys.executable, "-u", str(script),
@@ -186,27 +199,38 @@ def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]
                 "--chain", chain,
                 "--save",
             ],
+            stdout=out_f,
+            stderr=err_f,
             **popen_kwargs,
         )
+        out_f.close()
+        err_f.close()
+
         try:
-            out, err = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
             try:
-                proc.communicate(timeout=10)
+                proc.wait(timeout=10)
             except Exception:
                 pass
             return False, f"timeout {timeout}s"
 
         if proc.returncode == 0:
             return True, ""
-        # 取 stderr 最后 200 字符作为失败原因
-        msg = (err or out or "").strip()[-200:]
+        msg = _tail(err_path) or _tail(out_path)
         return False, f"exit={proc.returncode} {msg}"
     except Exception as e:
         if proc is not None:
             _kill_process_tree(proc)
         return False, f"exception: {str(e)[:100]}"
+    finally:
+        for p in (out_path, err_path):
+            if p:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
 
 def main():

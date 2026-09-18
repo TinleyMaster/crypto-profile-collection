@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -34,6 +35,39 @@ MAX_RUNTIME_HOURS = 12  # 超过此时长的 running 任务视为僵尸，自动
 # b2_ai_noise_clean_by_asset_auto 等按资产循环的长任务，单轮之间可能数十分钟无日志，
 # 但仍正常推进。放宽到 90 分钟，避免误杀大循环任务。
 LOG_STUCK_MINUTES = 90  # running 任务超过该时长无新日志，视为卡死，提前收割
+
+# 链上批量快照/回填等长任务单轮可达数小时（ETH 全量实测约 4h），且日志间隙可能
+# 远超 90min；统一用 90min 会每轮误杀，形成「永远跑不完」的活锁（2026-09-18 审计）。
+# 按任务名/命令匹配长任务，放宽到 240min；12h 硬超时兜底不变。
+LONG_TASK_STUCK_MINUTES = 240
+LONG_TASK_PATTERNS = (
+    "chain_holder", "phase_chain_holder", "backfill", "tokenomics",
+    "spa_browser", "b2_ai_noise", "catalyst", "long_tail",
+)
+_LONG_TASK_REGEX = "(" + "|".join(LONG_TASK_PATTERNS) + ")"
+
+
+def _kill_proc_tree(proc: subprocess.Popen) -> None:
+    """杀掉任务进程及其整个进程组（采集脚本会派生 Playwright 等后代进程）。
+
+    只 kill 直接子进程会留下占用 DB 连接/外部 API 的后代，导致下一轮继续拥塞。
+    """
+    try:
+        if os.name == "posix":
+            pgid = os.getpgid(proc.pid)
+            # 仅当子进程自成一个进程组时才 killpg，绝不误杀本进程（调度器）所在进程组
+            if pgid != os.getpgrp():
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 
 # ── 数据库连接池 ────────────────────────────────────────────
 
@@ -580,13 +614,15 @@ class TaskManager:
                     count_timeout = cur.rowcount
                     reaped.extend(row[0] for row in cur.fetchall())
 
-                    # 条件2：LOG_STUCK_MINUTES 无新日志 + 已运行至少 10min（卡死）
+                    # 条件2：无新日志超过阈值（长任务 240min / 普通 90min）且已运行至少 10min（卡死）
                     cur.execute(
                         """
                         UPDATE sys.task t
                         SET status = 'failed',
                             ended_at = NOW(),
-                            error = %s,
+                            error = 'stuck: ' || (CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
+                                                       THEN %s ELSE %s END)
+                                    || '分钟无新日志，疑似卡死',
                             updated_at = NOW()
                         WHERE t.status = 'running'
                           AND t.started_at < NOW() - '10 minutes'::interval
@@ -594,11 +630,16 @@ class TaskManager:
                               SELECT MAX(l.created_at)
                               FROM sys.task_log l
                               WHERE l.task_id = t.task_id
-                          ) < NOW() - (%s || ' minutes')::interval
+                          ) < NOW() - (
+                              CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
+                                   THEN %s ELSE %s END || ' minutes'
+                          )::interval
                         RETURNING t.task_id
                         """,
-                        (f"stuck: {LOG_STUCK_MINUTES}分钟无新日志，疑似卡死",
-                         str(LOG_STUCK_MINUTES)),
+                        (_LONG_TASK_REGEX, _LONG_TASK_REGEX,
+                         str(LONG_TASK_STUCK_MINUTES), str(LOG_STUCK_MINUTES),
+                         _LONG_TASK_REGEX, _LONG_TASK_REGEX,
+                         str(LONG_TASK_STUCK_MINUTES), str(LOG_STUCK_MINUTES)),
                     )
                     count_stuck = cur.rowcount
                     reaped.extend(row[0] for row in cur.fetchall())
@@ -618,7 +659,7 @@ class TaskManager:
             proc = self._local_procs.get(tid)
             if proc:
                 try:
-                    proc.kill()
+                    _kill_proc_tree(proc)
                 except Exception:
                     pass
 
@@ -644,6 +685,8 @@ class TaskManager:
                 text=False,
                 env=env,
                 bufsize=0,
+                # 独立进程组：收割僵尸任务时可连同后代进程一起 killpg，避免残留
+                **(dict(start_new_session=True) if os.name == "posix" else {}),
             )
             self._local_procs[task_id] = proc
 

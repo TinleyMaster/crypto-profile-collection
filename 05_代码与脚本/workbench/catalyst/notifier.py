@@ -150,13 +150,15 @@ def _mark_signal_notified(conn, signal_ids: list[int], column: str) -> None:
     if not ids:
         return
     try:
-        conn.execute(
+        cur = conn.execute(
             f"UPDATE biz.catalyst_signal SET {column} = NOW(), updated_at = NOW() "
             f"WHERE signal_id = ANY(%s::BIGINT[]) AND {column} IS NULL",
             (ids,),
         )
+        logger.info("回写 catalyst_signal.%s: %s/%s 条", column,
+                    getattr(cur, "rowcount", -1), len(ids))
     except Exception as e:
-        logger.warning("回写 catalyst_signal.%s 失败: %s", column, e)
+        logger.warning("回写 catalyst_signal.%s 失败（%s 条）: %s", column, len(ids), e)
 
 
 # =====================================================================

@@ -248,11 +248,11 @@ def _normalize_unix_ts(ts: int) -> int:
         a = abs(int(ts))
     except (TypeError, ValueError):
         return 0
-    if a >= 1_000_000_000_000_000_00:   # 纳秒
+    if a >= 1_000_000_000_000_000_000:  # 纳秒（1e18）
         return int(ts) // 1_000_000_000
-    if a >= 1_000_000_000_000_000:      # 微秒
+    if a >= 1_000_000_000_000_000:      # 微秒（1e15）
         return int(ts) // 1_000_000
-    if a >= 100_000_000_000:            # 毫秒
+    if a >= 100_000_000_000:            # 毫秒（1e11）
         return int(ts) // 1_000
     return int(ts)
 

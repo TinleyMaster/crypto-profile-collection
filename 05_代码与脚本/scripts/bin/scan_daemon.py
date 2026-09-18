@@ -122,7 +122,7 @@ def _get_24h_quote_volume() -> dict[str, float]:
 
 
 def _fetch_klines_incremental(symbol: str, interval: str) -> list[tuple]:
-    """拉取单个币单个周期的最近 N 根 K 线。"""
+    """拉取单个币单个周期的最近 N 根 K 线，并校验数据新鲜度。"""
     raw = _http_get(
         f"{FAPI_BASE}/fapi/v1/klines",
         {"symbol": symbol, "interval": interval, "limit": INCREMENTAL_LIMIT},
@@ -135,6 +135,13 @@ def _fetch_klines_incremental(symbol: str, interval: str) -> list[tuple]:
             float(k[1]), float(k[2]), float(k[3]), float(k[4]),
             float(k[5]), float(k[7]), int(k[8]),
         ))
+    # 新鲜度校验：最新一根 K 线不应早于「2×周期 + 5 分钟」（防写陈旧/异常数据，
+    # 如交易所返回旧缓存或该币已停牌）。不新鲜则整批跳过，宁缺毋错。
+    if rows:
+        latest_ot = rows[-1][2]
+        max_age_sec = INTERVAL_SECONDS[interval] * 2 + 300
+        if (datetime.now(timezone.utc) - latest_ot).total_seconds() > max_age_sec:
+            return []
     return rows
 
 
@@ -320,6 +327,18 @@ LOOKBACK_BARS_MAIN = 20
 OI_RISE_BARS = 2
 LEVEL_RANK = {"5m": 1, "15m": 2, "1h": 3}
 
+# ── 数据新鲜度护栏 ──────────────────────────────────────────────
+# 各周期最新 K 线 open_time 距今最大分钟数（采集每 5min、扫描每 15min，留足余量；
+# 超过即视为数据陈旧，跳过该币，避免采集停摆时用旧数据出假信号——见 2026-09-18 USELESS 事件）
+MAX_KLINE_AGE_MIN = {"5m": 15, "15m": 35, "1h": 80}
+# 最新 OI 桶 ts 距今最大分钟数（采样每 5min、错峰 +2min）
+MAX_OI_BUCKET_AGE_MIN = 20
+# 蓄势池：按小时聚合的 OI 桶允许的最大年龄（分钟）
+MAX_OI_ACC_AGE_MIN = 90
+# 采集停摆告警：数据年龄超过该分钟数即视为停摆；同一告警最短重发间隔（小时）
+STALL_ALERT_AGE_MIN = 30
+STALL_ALERT_MIN_INTERVAL_H = 6
+
 
 def _build_regime(conn) -> dict:
     """L0 市场环境。返回 {tags: [...], long_fav: bool, short_fav: bool}。"""
@@ -384,14 +403,20 @@ def _build_regime(conn) -> dict:
     return {"tags": tags, "long_fav": long_fav, "short_fav": short_fav}
 
 
-def _l1_screen(klines_by_iv: dict[str, list[dict]]) -> dict | None:
-    """L1 粗筛：单周期异动 + 多周期共振升级。"""
+def _l1_screen(klines_by_iv: dict[str, list[dict]], now: datetime) -> dict | None:
+    """L1 粗筛：单周期异动 + 多周期共振升级。
+
+    新鲜度护栏：最新 K 线 open_time 距今超过 MAX_KLINE_AGE_MIN[iv] 则跳过该周期，
+    避免采集停摆时用陈旧数据出假信号。
+    """
     best = None
     best_level = 0
     for iv in ("1h", "15m", "5m"):
         rows = klines_by_iv.get(iv, [])
         if len(rows) < LOOKBACK_BARS_MAIN + 1:
             continue
+        if (now - rows[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN[iv]:
+            continue  # 该周期数据陈旧，不参与判定
         closes = [float(r["close_px"]) for r in rows]
         vols = [float(r["quote_vol"]) for r in rows]
         chg = (closes[-1] - closes[-2]) / closes[-2] * 100
@@ -412,10 +437,15 @@ def _l1_screen(klines_by_iv: dict[str, list[dict]]) -> dict | None:
 
 
 def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
-                direction: str) -> dict | None:
-    """L2 校验：OI 方向 + 资金费率拥挤度 → 场景判定。"""
+                direction: str, now: datetime) -> dict | None:
+    """L2 校验：OI 方向 + 资金费率拥挤度 → 场景判定。
+
+    新鲜度护栏：最新 OI 桶 ts 距今超过 MAX_OI_BUCKET_AGE_MIN 则返回 None（数据陈旧）。
+    """
     if len(oi_rows) < OI_RISE_BARS + 1:
         return None
+    if (now - oi_rows[-1]["ts"]).total_seconds() / 60 > MAX_OI_BUCKET_AGE_MIN:
+        return None  # OI 数据陈旧，不参与判定
     ois = [float(r["oi_usd"]) for r in oi_rows if r.get("oi_usd")]
     if len(ois) < OI_RISE_BARS + 1:
         return None
@@ -435,6 +465,21 @@ def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
         "funding_rate": fr,
         "scenario": scenario,
     }
+
+
+def _symbol_fresh(sym: str, klines_by_iv: dict[str, list[dict]],
+                  oi_rows: list[dict], now: datetime) -> bool:
+    """该币数据新鲜度总检：任一周期最新 K 线或最新 OI 桶陈旧即视为不新鲜。
+
+    供主池扫描做陈旧统计与提前跳过（L1/L2 内还有各自的兜底护栏）。
+    """
+    for iv, max_age in MAX_KLINE_AGE_MIN.items():
+        rows = klines_by_iv.get(iv, [])
+        if rows and (now - rows[-1]["open_time"]).total_seconds() / 60 > max_age:
+            return False
+    if oi_rows and (now - oi_rows[-1]["ts"]).total_seconds() / 60 > MAX_OI_BUCKET_AGE_MIN:
+        return False
+    return True
 
 
 def _in_cooldown_main(conn, symbol: str, cooldown_h: float) -> bool:
@@ -484,13 +529,18 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
 
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
+        stale_symbols = 0
         for sym in sorted(by_sym_k):
-            l1 = _l1_screen(by_sym_k[sym])
+            # 新鲜度护栏：数据陈旧直接跳过（防采集停摆时用旧数据出假信号）
+            if not _symbol_fresh(sym, by_sym_k[sym], by_sym_oi.get(sym, []), now):
+                stale_symbols += 1
+                continue
+            l1 = _l1_screen(by_sym_k[sym], now)
             if not l1 or l1["level"] < 2:
                 continue
             if cooldown_h > 0 and _in_cooldown_main(conn, sym, cooldown_h):
                 continue
-            l2 = _compute_l2(sym, by_sym_oi.get(sym, []), funding_map, l1["dir"])
+            l2 = _compute_l2(sym, by_sym_oi.get(sym, []), funding_map, l1["dir"], now)
             if not l2:
                 continue
 
@@ -522,8 +572,13 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 cur.executemany(insert_sql, signals)
         conn.commit()
 
-    return {"regime_tags": regime["tags"], "symbols_checked": len(by_sym_k),
-            "signals": len(signals)}
+    total = len(by_sym_k)
+    if total and stale_symbols / total > 0.2:
+        print(f"[scan_daemon][main_pool] ⚠️ {stale_symbols}/{total} 币数据陈旧，"
+              f"疑似采集停摆，本轮信号不完整", file=sys.stderr)
+
+    return {"regime_tags": regime["tags"], "symbols_checked": total,
+            "stale_skipped": stale_symbols, "signals": len(signals)}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -540,8 +595,13 @@ LOOKBACK_BARS_ACC = 20
 
 
 def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
-                funding_map: dict[str, float]) -> dict | None:
+                funding_map: dict[str, float], now: datetime) -> dict | None:
     if len(oi_hourly) < OI_HOURS:
+        return None
+    # 新鲜度护栏：1h K 线或小时聚合 OI 陈旧则跳过
+    if k1h and (now - k1h[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN["1h"]:
+        return None
+    if oi_hourly and (now - oi_hourly[-1]["h"]).total_seconds() / 60 > MAX_OI_ACC_AGE_MIN:
         return None
     if len(k1h) >= 2:
         chg1h = (k1h[-1]["close_px"] - k1h[-2]["close_px"]) / k1h[-2]["close_px"] * 100
@@ -581,9 +641,11 @@ def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
             "oi_rise_ratio": rising * 100, "oi_cum_chg": cum_chg, "fund_label": fund_label}
 
 
-def _detect_brk(k1h: list[dict], acc_range: tuple[float, float]) -> dict | None:
+def _detect_brk(k1h: list[dict], acc_range: tuple[float, float], now: datetime) -> dict | None:
     if len(k1h) < LOOKBACK_BARS_ACC + 1:
         return None
+    if (now - k1h[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN["1h"]:
+        return None  # 数据陈旧，不参与突破判定
     vols = [float(k["quote_vol"] or 0) for k in k1h]
     vol_mean = sum(vols[-(LOOKBACK_BARS_ACC + 1):-1]) / LOOKBACK_BARS_ACC
     if not vol_mean:
@@ -640,7 +702,7 @@ def task_scan_accumulation() -> dict:
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
         for sym in sorted(by_sym_oi):
-            acc = _detect_acc(sym, by_sym_oi[sym], by_sym_k.get(sym, []), funding_map)
+            acc = _detect_acc(sym, by_sym_oi[sym], by_sym_k.get(sym, []), funding_map, now)
             if not acc:
                 continue
             tags = [f"oi_rise={acc['oi_rise_ratio']:.0f}%", f"oi_cum={acc['oi_cum_chg']:.1f}%",
@@ -655,7 +717,7 @@ def task_scan_accumulation() -> dict:
                 continue
             lo = min(float(k["close_px"]) for k in k1h[-(OI_HOURS + 1):])
             hi = max(float(k["close_px"]) for k in k1h[-(OI_HOURS + 1):])
-            brk = _detect_brk(k1h, (lo, hi))
+            brk = _detect_brk(k1h, (lo, hi), now)
             if not brk:
                 continue
             tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}"]
@@ -806,9 +868,77 @@ def _render_alert_email(items: list[dict]) -> str:
             f"{body}{footnote}</body></html>")
 
 
+def _check_and_alert_stall(conn) -> bool:
+    """采集停摆检测：15m K 线 / OI 采样数据年龄超过阈值 → 发告警邮件。
+
+    去重：同一告警 STALL_ALERT_MIN_INTERVAL_H 小时内不重发（biz.scan_stall_alert）。
+    返回 True 表示当前处于（或刚触发）停摆状态。
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT MAX(open_time) AS mx FROM biz.asset_klines WHERE interval='15m'")
+            mx_k = cur.fetchone()["mx"]
+            cur.execute(
+                "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot WHERE exchange='binance'")
+            mx_oi = cur.fetchone()["mx"]
+            cur.execute(
+                "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task='stall_alert'")
+            row = cur.fetchone()
+
+        parts = []
+        for label, mx in (("15m K线", mx_k), ("OI 采样", mx_oi)):
+            if mx is None:
+                continue
+            age_min = (now - mx).total_seconds() / 60
+            if age_min > STALL_ALERT_AGE_MIN:
+                parts.append(f"{label} 停在 {mx.strftime('%m-%d %H:%M')} UTC（约 {age_min:.0f} 分钟前）")
+        if not parts:
+            return False
+
+        last = row["last_email_ts"] if row else None
+        if last and (now - last).total_seconds() < STALL_ALERT_MIN_INTERVAL_H * 3600:
+            return True  # 仍处于停摆，但刚告警过（去重）
+
+        settings = _SETTINGS or get_settings(require_database=True)
+        from crypto_research.clients.notifier import EmailNotifier
+        notifier = EmailNotifier(settings)
+        if not notifier.configured:
+            print("[WARN] SMTP 未配置，跳过采集停摆告警邮件")
+            return True
+
+        body = (
+            "<h2 style='margin:0'>⚠️ 盘面扫描数据采集停摆告警</h2>"
+            f"<p>采集数据已超过 <b>{STALL_ALERT_AGE_MIN} 分钟</b>未更新，"
+            f"主池/蓄势池扫描已暂停出信号（防止陈旧数据假信号）。</p>"
+            f"<p>{'<br>'.join(parts)}</p>"
+            "<p style='color:#999'>请检查 scan_daemon 进程 / Binance IP 限频状态，"
+            "采集恢复后自动解除。</p>"
+        )
+        ok, msg = notifier.send(
+            "⚠️ 盘面扫描数据采集停摆告警", body, from_name="盘面信号扫描")
+        if ok:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO biz.scan_stall_alert (task, last_email_ts, updated_at) "
+                    "VALUES ('stall_alert', NOW(), NOW()) "
+                    "ON CONFLICT (task) DO UPDATE SET "
+                    "last_email_ts=EXCLUDED.last_email_ts, updated_at=EXCLUDED.updated_at")
+            conn.commit()
+            print("[scan_daemon][stall] 已发送采集停摆告警邮件")
+        else:
+            print(f"[scan_daemon][stall] 停摆告警邮件发送失败: {msg}", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"[scan_daemon][stall] 停摆检测异常: {e}", file=sys.stderr)
+        return False
+
+
 def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
     """告警监控（单轮）。"""
     with _db() as conn:
+        _check_and_alert_stall(conn)
         candidates = _load_alert_candidates(conn, window_min)
         seen: set[str] = set()
         to_alert: list[dict] = []

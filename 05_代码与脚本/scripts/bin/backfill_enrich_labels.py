@@ -263,13 +263,15 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
                 for addr_l, info in filtered.items():
                     if not info["is_exchange"]:
                         continue
+                    # exchange_name 用标准化名（如 "Binance"），label 存完整原始标签
+                    ex_name = info.get("normalized_name") or info["display_name"]
                     cur.execute("""
                         INSERT INTO biz.onchain_exchange_wallet
                             (address, exchange_name, chain, label, confidence, source)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (address, chain) DO NOTHING
                     """, (
-                        addr_l, info["display_name"], chain,
+                        addr_l, ex_name, chain,
                         info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,
                     ))
 

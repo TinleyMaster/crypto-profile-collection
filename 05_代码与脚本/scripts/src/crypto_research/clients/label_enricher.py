@@ -190,7 +190,7 @@ class LabelEnricher:
                     "types": [info["label_type"]],
                     "names": [info["display_name"]],
                     "is_exchange": info["is_exchange"],
-                    "exchange_name": info["display_name"] if info["is_exchange"] else None,
+                    "exchange_name": (info.get("normalized_name") or info["display_name"]) if info["is_exchange"] else None,
                 }
                 self.resolver._no_label.discard(addr)
 
@@ -249,7 +249,7 @@ class LabelEnricher:
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (address, chain) DO NOTHING
                 """, (
-                    addr, info["display_name"], self.chain,
+                    addr, info.get("normalized_name") or info["display_name"], self.chain,
                     info["label_text"], ENRICH_CONFIDENCE, ENRICH_SOURCE,
                 ))
 

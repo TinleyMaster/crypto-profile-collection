@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -143,30 +145,67 @@ def get_total_pending(conn, chain_short: str) -> int:
         return cur.fetchone()[0]
 
 
+def _kill_process_tree(proc: "subprocess.Popen") -> None:
+    """连同子进程一起杀掉（Playwright 等会 spawn 后代进程）。
+
+    审计 P0-3：Solana 走 Playwright 时会派生浏览器子进程，若只杀直接子进程，
+    后代仍持有 stdout/stderr 管道 → communicate() 永久阻塞 → 任务 90 分钟无日志
+    被看护误杀。用独立进程组 + killpg 彻底回收。
+    """
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]:
     """运行单币持仓快照采集，返回 (是否成功, 失败原因)。"""
     script = SCRIPT_DIR / "phase_chain_holder_scrape.py"
+    popen_kwargs: dict = dict(
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(SCRIPT_DIR),
+    )
+    # 独立进程组：超时时可连同 Playwright 后代进程一起回收，避免管道悬挂
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+
+    proc = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [
                 sys.executable, "-u", str(script),
                 "--asset-id", str(asset_id),
                 "--chain", chain,
                 "--save",
             ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(SCRIPT_DIR),
+            **popen_kwargs,
         )
-        if result.returncode == 0:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=10)
+            except Exception:
+                pass
+            return False, f"timeout {timeout}s"
+
+        if proc.returncode == 0:
             return True, ""
         # 取 stderr 最后 200 字符作为失败原因
-        err = (result.stderr or result.stdout or "").strip()[-200:]
-        return False, f"exit={result.returncode} {err}"
-    except subprocess.TimeoutExpired:
-        return False, f"timeout {timeout}s"
+        msg = (err or out or "").strip()[-200:]
+        return False, f"exit={proc.returncode} {msg}"
     except Exception as e:
+        if proc is not None:
+            _kill_process_tree(proc)
         return False, f"exception: {str(e)[:100]}"
 
 

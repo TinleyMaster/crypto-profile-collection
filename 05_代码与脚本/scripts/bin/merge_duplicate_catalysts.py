@@ -5,15 +5,17 @@
 - 将其他重复条的 source_code 追加到主记录 source_codes 数组
 - 删除重复条（先删除 catalyst_asset_link 关联，再删 catalyst）
 
-⚠️ 默认只处理新媒体源（kol_news_media_binance_square_*）：
-   这些是我们新增的、格式一致的全文转载媒体，title 判定可靠。
-   历史 kol_catalyst_binance_square_7（金十/Wallstreetcn）多为
-   「标题相同但正文不同」的快讯，title-only 判定会误删，仅报告不删除。
+重复判定分两类：
+1. 新媒体源（kol_news_media_binance_square_*）：
+   全文转载媒体，title 判定可靠 → 默认处理
+2. 历史 kol 源（金十/Wallstreetcn 等快讯）：
+   title 相同但正文不同 =「快讯更新序列」（保留，仅报告）
+   title + 正文均高度一致 = 真重复（--all-sources 时处理）
 
 用法：
-    python merge_duplicate_catalysts.py --dry-run         # 预览（全部源）
-    python merge_duplicate_catalysts.py                   # 执行（仅新媒体源）
-    python merge_duplicate_catalysts.py --all-sources     # 执行（全部源，谨慎）
+    python merge_duplicate_catalysts.py --dry-run         # 预览（新媒体）
+    python merge_duplicate_catalysts.py                   # 执行（新媒体）
+    python merge_duplicate_catalysts.py --all-sources     # 执行（含历史 kol 真重复）
 """
 import sys
 import argparse
@@ -23,11 +25,23 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "workbench"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from catalyst.models import CatalystItem  # noqa: E402
+from catalyst.models import CatalystItem, _normalize_text  # noqa: E402
 from kol.db import get_conn  # noqa: E402
+from difflib import SequenceMatcher  # noqa: E402
 
 # 默认只处理新媒体源（全文转载，title 判定可靠）
 NEWS_MEDIA_PREFIX = "kol_news_media_binance_square_"
+# 历史 kol 源正文相似度阈值（标题相同且正文也高度一致才算真重复）
+BODY_SIM_THRESHOLD = 0.85
+
+
+def _body_similarity(a_body: str, b_body: str) -> float:
+    """计算两条归一化后正文的相似度（0~1）。空正文返回 0。"""
+    na = _normalize_text(a_body or "")
+    nb = _normalize_text(b_body or "")
+    if not na or not nb:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
 
 def main() -> int:
@@ -57,33 +71,50 @@ def main() -> int:
         # 区分：新媒体组 vs 历史 kol 组
         media_dups = {}
         kol_dups = {}
+        kol_update_series = {}
         for h, v in dup_groups.items():
             if all(r["source_code"].startswith(NEWS_MEDIA_PREFIX) for r in v):
                 media_dups[h] = v
             else:
-                kol_dups[h] = v
+                # 历史 kol 源：正文也高度一致才算真重复；否则是「快讯更新序列」
+                v_sorted = sorted(v, key=lambda r: r["published_at"])
+                keep = v_sorted[0]
+                truedup = []
+                series = []
+                for d in v_sorted[1:]:
+                    sim = _body_similarity(keep["body_text"], d["body_text"])
+                    if sim >= BODY_SIM_THRESHOLD:
+                        truedup.append(d)
+                    else:
+                        series.append(d)
+                if truedup:
+                    kol_dups[h] = [keep] + truedup
+                if series:
+                    kol_update_series[h] = [keep] + series
 
         print(f"全量催化剂: {len(rows)} 条，重复组 {len(dup_groups)}（共涉及 "
               f"{sum(len(v) for v in dup_groups.values())} 条）")
-        print(f"  新媒体组（可安全合并）: {len(media_dups)} 组，涉及 "
+        print(f"  新媒体组（全文转载，可安全合并）: {len(media_dups)} 组，涉及 "
               f"{sum(len(v) for v in media_dups.values())} 条")
-        print(f"  历史kol组（仅报告不删）: {len(kol_dups)} 组，涉及 "
+        print(f"  历史kol真重复（标题+正文均一致）: {len(kol_dups)} 组，涉及 "
               f"{sum(len(v) for v in kol_dups.values())} 条")
+        print(f"  历史kol更新序列（标题同正文异，保留）: {len(kol_update_series)} 组，涉及 "
+              f"{sum(len(v) for v in kol_update_series.values())} 条")
 
-        # 报告历史 kol 重复（不删）
-        if kol_dups:
-            print("\n── 历史 kol 源重复（仅报告，未删除）──")
-            for h, v in list(kol_dups.items())[:8]:
-                print(f"  [{h[:10]}] {len(v)} 条: {str(v[0]['title'])[:55]}")
+        # 报告历史 kol 更新序列（不删）
+        if kol_update_series:
+            print("\n── 历史 kol 更新序列（标题相同正文不同，保留不删）──")
+            for h, v in list(kol_update_series.items())[:5]:
+                print(f"  [{h[:10]}] {len(v)} 条: {str(v[0]['title'])[:50]}")
                 for r in v:
                     print(f"      id={r['catalyst_id']} {r['source_code']} {str(r['published_at'])[:16]}")
-            if len(kol_dups) > 8:
-                print(f"  ... 其余 {len(kol_dups)-8} 组省略")
 
-        # 处理新媒体重复
-        targets = media_dups if not args.all_sources else dup_groups
+        # 处理重复：默认新媒体；--all-sources 时含历史 kol 真重复
+        targets = dict(media_dups)
+        if args.all_sources:
+            targets.update(kol_dups)
         if not targets:
-            print("\n无新媒体重复，退出")
+            print("\n无待处理重复，退出")
             return 0
 
         print(f"\n── 处理 {'全部' if args.all_sources else '新媒体'} 重复 ──")

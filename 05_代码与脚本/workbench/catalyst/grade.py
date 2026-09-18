@@ -155,7 +155,7 @@ class CatalystGrader:
         noise:      other 类事件 且 无关联资产
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, calibration: dict | None = None):
         gw = config.get("grade_weights", {})
         self.w_authority = gw.get("authority", 0.4)
         self.w_event = gw.get("event", 0.4)
@@ -164,6 +164,10 @@ class CatalystGrader:
         self.event_type_weights = config.get("event_type_weights", {})
         self.authority_scores = config.get("authority_scores", {})
         self.scope_rules = config.get("scope_score_rules", {})
+
+        # 实测校准权重（P1）：{dim: {value: calibrated_score}}
+        # dim ∈ event_type / source / scope；仅 weight_mode='calibrated' 生效
+        self.calibration = calibration or {}
 
         kt = config.get("kind_thresholds", {})
         self.structural_min = kt.get("structural_min_strength", 70)
@@ -193,13 +197,13 @@ class CatalystGrader:
         event_type = catalyst.get("ai_event_type") or catalyst.get("rule_event_type") or "other"
         event_type_src = "ai" if catalyst.get("ai_event_type") else "rule"
 
-        # 2) 权威度
+        # 2) 权威度（实测校准优先，样本不足回退先验）
         authority = self._authority_score(source_code)
 
-        # 3) 事件权重
-        event_weight = self.event_type_weights.get(event_type, 15)
+        # 3) 事件权重（实测校准优先）
+        event_weight = self._event_weight(event_type)
 
-        # 4) 影响聚焦度
+        # 4) 影响聚焦度（实测校准优先）
         pairs = catalyst.get("related_pairs") or []
         scope = self._scope_score(pairs)
 
@@ -265,8 +269,22 @@ class CatalystGrader:
 
     # ---- 内部方法 ----
 
+    def _calibrated(self, dim: str, value: str) -> int | None:
+        """查实测校准权重（仅 calibrated 模式生效）。"""
+        return self.calibration.get(dim, {}).get(value)
+
+    def _event_weight(self, event_type: str) -> int:
+        """事件权重：实测校准优先，回退先验 yaml。"""
+        calib = self._calibrated("event_type", event_type)
+        if calib is not None:
+            return calib
+        return self.event_type_weights.get(event_type, 15)
+
     def _authority_score(self, source_code: str) -> int:
-        """来源权威度评分。"""
+        """来源权威度评分（实测校准优先）。"""
+        calib = self._calibrated("source", source_code)
+        if calib is not None:
+            return calib
         # 精确匹配
         if source_code in self.authority_scores:
             return self.authority_scores[source_code]
@@ -280,16 +298,20 @@ class CatalystGrader:
         return self.authority_scores.get("default", 40)
 
     def _scope_score(self, pairs: list[str]) -> int:
-        """影响聚焦度评分。"""
+        """影响聚焦度评分（实测校准优先）。"""
         n = len(pairs) if pairs else 0
         if n == 0:
-            # 无具体交易对 → 泛市场/板块，暂时给 broad
-            return self.scope_rules.get("broad", 30)
-        if n == 1:
-            return self.scope_rules.get("single_pair", 90)
-        if n <= 3:
-            return self.scope_rules.get("few_pairs", 65)
-        return self.scope_rules.get("many_pairs", 45)
+            bucket = "broad"
+        elif n == 1:
+            bucket = "single_pair"
+        elif n <= 3:
+            bucket = "few_pairs"
+        else:
+            bucket = "many_pairs"
+        calib = self._calibrated("scope", bucket)
+        if calib is not None:
+            return calib
+        return self.scope_rules.get(bucket, 30)
 
     def _has_asset_link(self, catalyst: dict) -> bool:
         """简单判断：asset_id 非空 或 related_pairs 非空。

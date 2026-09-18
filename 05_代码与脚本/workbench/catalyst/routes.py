@@ -187,10 +187,10 @@ def get_health():
             """).fetchall()
             persistence_distribution = {r["persistence"]: r["cnt"] for r in pers_rows}
 
-            # 8. 过期漏检
+            # 8. 过期漏检（d3：观察池同样由巡检过期，漏检口径含 watch）
             expired_but_open = conn.execute("""
                 SELECT COUNT(*) AS cnt FROM biz.catalyst_signal
-                WHERE status = 'open' AND expires_at < NOW()
+                WHERE status IN ('open','watch') AND expires_at < NOW()
             """).fetchone()["cnt"]
 
             # 9. 二阶受益统计
@@ -294,7 +294,8 @@ def list_signals():
 
     Query params:
         tier:     A/B/C，可逗号分隔多选，默认全部
-        status:   open/expired/invalid/done，默认 open
+        status:   open/watch/expired/invalid/done，默认 open
+                  （open=可动作，价格未充分定价；watch=观察池，价格已定价或待确认）
         kind:     structural/event/sentiment/noise，可逗号分隔
         technical_state: up/range/down，可逗号分隔
         order:    2（仅二阶）/ direct（仅直连），默认全部

@@ -16,9 +16,19 @@
 tier 阈值：A≥80 / B≥60 / C≥40
 <40 不写入 signal 表（仅 grade/resonance 留底供回测）
 
-信号生命周期：
+信号生命周期（d3 分层，2026-09-18）：
+    status = 价格定价程度（由 resonance_state 映射，见 signal_actionability 配置）
+        confirmed（价格已同向反应≥5% 且放量）→ watch  观察池，不推送
+        weak     （价格温和/未充分反应）      → open   可动作
+        divergent（价格方向与催化剂背离）      → invalid 剔除
+        pending  （未反应）                   → watch  观察
+    实测依据（biz.catalyst_outcome，收益自信号生成时刻起算）：
+        confirmed 72h 超额 -2.16%（n=47）远弱于 weak +1.58%（n=231）
+        —— 事件一旦被价格确认即已定价，此时开单等于追高为负期望。
+    状态迁移：expired/done 为终态冻结；其余行每轮重算跟随当前 resonance_state
+        （watch→open 晋升 = 价格行为确认；open→watch 回退 = 已定价不再可动作）
     expires_at = published_at + expiry_days（按 kind 差异化）
-    慢通道巡检：expires_at < NOW() AND status='open' → status='expired'
+    慢通道巡检：expires_at < NOW() AND status IN ('open','watch') → status='expired'
 """
 from __future__ import annotations
 
@@ -103,6 +113,14 @@ class CatalystSignalBuilder:
 
         self.min_rr = config.get("min_rr_ratio", 2.0)
 
+        # 动作闸门：resonance_state → 生命周期状态（d3 信号分层，依据见模块 docstring）
+        self.actionability = config.get("signal_actionability", {
+            "confirmed": "watch",
+            "weak": "open",
+            "divergent": "invalid",
+            "pending": "watch",
+        })
+
     # ---- 公开入口 ----
 
     def build(self,
@@ -169,6 +187,9 @@ class CatalystSignalBuilder:
         # 失效条件描述（P0 简单生成）
         invalidation = self._build_invalidation(resonance_state, kind, stop_loss)
 
+        # 生命周期状态：由价格定价程度决定（d3 分层），而非一律 open
+        status = self._initial_status(resonance_state)
+
         return CatalystSignalResult(
             catalyst_id=catalyst_id,
             asset_id=asset_id,
@@ -192,20 +213,37 @@ class CatalystSignalBuilder:
             regime=regime,
             invalidation=invalidation,
             expires_at=expires_at,
-            status="open",
+            status=status,
         )
 
-    def upsert_to_db(self, conn, signal: CatalystSignalResult) -> Optional[tuple[int, bool]]:
+    def upsert_to_db(self, conn, signal: CatalystSignalResult) -> Optional[tuple[int, bool, bool]]:
         """写入 catalyst_signal 表。
         如果 tier 为 None（分数太低），不写入（返回 None）。
 
+        状态迁移（d3 分层）：
+            expired / done 为终态，冻结不改；
+            其余行一律跟随本轮由 resonance_state 推出的 status，
+            因此 watch→open（价格行为确认）可自动晋升，open→watch（已定价）可自动回退。
+
         Returns:
-            tuple[int, bool] | None: (signal_id, is_new_insert)
+            tuple[int, bool, bool] | None: (signal_id, is_new_insert, became_open)
                 is_new_insert=True 表示本次是新插入，False 表示是更新已有记录
+                became_open=True 表示本轮该信号的 status 由非 open 变为 open
+                （新插入即 open，或 watch→open 晋升），是本轮唯一需要推送/告警的集合
                 失败返回 None
         """
         if signal.tier is None:
             return None
+
+        # 先取旧状态：状态迁移基线（读不加锁，唯一键 (catalyst_id, asset_id) 命中索引）
+        prev = conn.execute(
+            """
+            SELECT status FROM biz.catalyst_signal
+            WHERE catalyst_id = %s AND asset_id = %s
+            """,
+            (signal.catalyst_id, signal.asset_id),
+        ).fetchone()
+        prev_status = prev["status"] if prev else None
 
         row = conn.execute(
             """
@@ -256,12 +294,16 @@ class CatalystSignalBuilder:
                 investment_cycle = COALESCE(
                     EXCLUDED.investment_cycle, biz.catalyst_signal.investment_cycle),
                 expires_at = EXCLUDED.expires_at,
+                -- d3：expired/done 终态冻结，其余行跟随本轮的定价闸门
+                -- （这样才能 watch↔open 双向迁移；旧规则 open 单向锁定会让
+                --   「已定价」信号永远滞留在可动作集合里）
                 status = CASE
-                    WHEN biz.catalyst_signal.status = 'open' THEN EXCLUDED.status
-                    ELSE biz.catalyst_signal.status
+                    WHEN biz.catalyst_signal.status IN ('expired', 'done')
+                        THEN biz.catalyst_signal.status
+                    ELSE EXCLUDED.status
                 END,
                 updated_at = NOW()
-            RETURNING signal_id, (xmax = 0) AS is_new_insert
+            RETURNING signal_id, status, (xmax = 0) AS is_new_insert
             """,
             {
                 "catalyst_id": signal.catalyst_id,
@@ -291,7 +333,9 @@ class CatalystSignalBuilder:
         ).fetchone()
         if not row:
             return None
-        return row["signal_id"], bool(row["is_new_insert"])
+        new_status = row["status"]
+        became_open = new_status == "open" and prev_status != "open"
+        return row["signal_id"], bool(row["is_new_insert"]), became_open
 
     # ---- 内部方法 ----
 
@@ -304,6 +348,14 @@ class CatalystSignalBuilder:
         if score >= self.tier_c:
             return 'C'
         return None
+
+    def _initial_status(self, resonance_state: str) -> str:
+        """价格定价程度 → 初始生命周期状态（d3 分层）。
+
+        口径：只在「价格尚未充分定价」时才可动作。
+        未配置的 resonance_state 保守归入观察池，避免误推送。
+        """
+        return self.actionability.get(resonance_state, "watch")
 
     def _persistence_score(self, persistence: str) -> int:
         return self.persistence_scores.get(persistence, 50)
@@ -340,7 +392,9 @@ class CatalystSignalBuilder:
 # =====================================================================
 
 def expire_signals(conn) -> int:
-    """巡检过期信号：expires_at < NOW() 且 status='open' → 'expired'。
+    """巡检过期信号：expires_at < NOW() 且未终结 → 'expired'。
+
+    观察池（watch）同样需要过期，否则未晋升的观察信号会永久滞留。
 
     Returns:
         int: 过期处理数量
@@ -349,7 +403,7 @@ def expire_signals(conn) -> int:
         """
         UPDATE biz.catalyst_signal
         SET status = 'expired', updated_at = NOW()
-        WHERE status = 'open' AND expires_at < NOW()
+        WHERE status IN ('open', 'watch') AND expires_at < NOW()
         """
     )
     return cur.rowcount

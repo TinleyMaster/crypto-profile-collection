@@ -3160,13 +3160,16 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
 
 
 def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, str, float, str, str]]:
-    """从 catalyst_signal 取 open+confirmed 决策信号（审计 F2，工单 §12.3 并存接）。
+    """从 catalyst_signal 取 open 决策信号（审计 F2，工单 §12.3 并存接）。
 
     与旧 catalyst_impact feed 并存：本函数读决策信号表，供高亮精 feed，
     旧 `_recent_catalyst_targets` 保留作 legacy fallback（catalyst_feed_source 开关）。
 
     返回 [(asset_id, symbol, composite_score, entry_price_txt, invalidation), ...]
-    - 仅 status='open' AND resonance_state='confirmed' AND tier IN ('A','B','C')
+    - 仅 status='open' AND tier IN ('A','B','C')
+      注（d3 修订）：原先额外要求 resonance_state='confirmed'，实测该桶 72h 前瞻超额为
+      -2.16%（n=47），弱于 weak 的 +1.58%（n=231）；confirmed 现已归入观察池
+      status='watch'，可动作集合就是 status='open'，无需再叠加共振条件。
     - 只取需入场决策的信号：entry_price IS NOT NULL AND invalidation IS NOT NULL
     - 用 composite_score 作展示分（取代旧 catalyst_impact 净情绪分）
     """
@@ -3186,7 +3189,6 @@ def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, 
                     FROM biz.catalyst_signal s
                     JOIN core.asset a ON a.asset_id = s.asset_id
                     WHERE s.status = 'open'
-                      AND s.resonance_state = 'confirmed'
                       AND s.tier IN ('A', 'B', 'C')
                       AND s.entry_price IS NOT NULL
                       AND s.entry_price > 0
@@ -7333,6 +7335,8 @@ def _collect_catalyst_hotspots() -> list[dict]:
     """市场热点（非可交易，供早报观察）。crypto 类 B/C 级信号。
 
     OPT-CATALYST-ALERT-001 P0-3：A 级走邮件 Alert，B/C/divergent 下沉到早报观察区。
+    d3：这里就是观察区的落点，故取 status IN ('open','watch') —— watch 是「价格已定价
+    /待确认」的观察池，正是本区块要展示的对象，不能漏。
     不含 entry/stop/tp（避免与邮件 Alert 混淆，强调「仅观察」）。
     自带 DB 连接 + 异常兜底（与 fetch_upcoming_unlocks 同模式），失败返回空列表。
     """
@@ -7354,7 +7358,7 @@ def _collect_catalyst_hotspots() -> list[dict]:
                     FROM biz.catalyst_signal s
                     JOIN core.asset a ON s.asset_id = a.asset_id
                     JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-                    WHERE s.status = 'open'
+                    WHERE s.status IN ('open', 'watch')
                       AND s.created_at > NOW() - INTERVAL '24 hours'
                       AND s.tier IN ('B', 'C')
                       AND {CRYPTO_FILTER_SQL}

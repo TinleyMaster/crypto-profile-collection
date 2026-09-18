@@ -717,9 +717,11 @@ def step4_signal(conn, config: dict, dry_run: bool = False) -> dict:
                     regime = COALESCE(EXCLUDED.regime, biz.catalyst_signal.regime),
                     invalidation = COALESCE(EXCLUDED.invalidation, biz.catalyst_signal.invalidation),
                     expires_at = EXCLUDED.expires_at,
+                    -- d3：expired/done 终态冻结，其余行跟随本轮定价闸门（watch↔open 双向）
                     status = CASE
-                        WHEN biz.catalyst_signal.status = 'open' THEN EXCLUDED.status
-                        ELSE biz.catalyst_signal.status
+                        WHEN biz.catalyst_signal.status IN ('expired', 'done')
+                            THEN biz.catalyst_signal.status
+                        ELSE EXCLUDED.status
                     END,
                     updated_at = NOW()
             """).format(

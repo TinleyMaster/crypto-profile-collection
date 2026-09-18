@@ -217,3 +217,17 @@ signal_expiry_days:
 
 # R:R 最低要求
 min_rr_ratio: 2.0
+
+# ---------------------------------------------------------------------
+# G6 信号分层（d3）：resonance_state → 生命周期状态
+# 实测依据（2026-09-18，biz.catalyst_outcome，收益自信号生成时刻起算）：
+#   confirmed 72h 前瞻超额 -2.16%（n=47，方向命中 19.1%）
+#   weak      72h 前瞻超额 +1.58%（n=231）
+# → 「等价格确认再开单」实为追高，故 confirmed 归入观察池，weak 才是可动作信号。
+# 状态迁移：expired/done 终态冻结；其余行每轮重算跟随 resonance_state（watch↔open 双向）。
+# ---------------------------------------------------------------------
+signal_actionability:
+  confirmed: watch    # 价格已同向反应≥5% 且放量 → 已定价，观察池（不推送）
+  weak: open          # 价格温和/未充分反应 → 可动作
+  divergent: invalid  # 价格方向与催化剂背离 → 剔除
+  pending: watch      # 未反应 → 观察

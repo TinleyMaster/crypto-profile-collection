@@ -626,7 +626,9 @@ def run_signal(conn, builder: CatalystSignalBuilder,
     快提醒有 notification 去重表，不会重复推送。
 
     Returns:
-        (处理数, 入信号表数, 新/更新信号 ID 列表)
+        (处理数, 新插入数, 本轮转为可动作(open)的信号 ID 列表)
+            第三个元素用于快提醒：d3 分层后，price 已定价(confirmed) 的信号入观察池
+            watch 不推送；只有 status 变 open（新插入，或 watch→open 晋升）才推送。
     """
     query = """
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
@@ -685,11 +687,14 @@ def run_signal(conn, builder: CatalystSignalBuilder,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         # sig_result 为 None 是正常情况（tier 太低不写入），不是锁冲突
-        # sig_result 是 (signal_id, is_new_insert) 元组
+        # sig_result 是 (signal_id, is_new_insert, became_open) 元组
         if sig_result:
-            sig_id, is_new = sig_result
+            sig_id, is_new, became_open = sig_result
             if is_new:
                 inserted += 1
+            # d3：只有「本轮由非 open 变为 open」的信号才进推送集合
+            # （新插入即 open，或 watch→open 晋升）；已定价的 watch 不推送
+            if became_open:
                 new_signal_ids.append(sig_id)
         # 每条立即提交：释放 catalyst_signal 行锁及 FK 检查的父行锁（2026-09-15 P0）
         try:
@@ -712,6 +717,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
                    metrics={"tier": signal.tier, "composite": signal.composite_score,
                             "rr": signal.rr_ratio, "kind": signal.kind,
                             "res_state": signal.resonance_state,
+                            "status": signal.status,
                             "base_strength": signal.base_strength})
 
     return processed, inserted, new_signal_ids
@@ -1033,7 +1039,7 @@ def run_slow_second_order(conn, config: dict,
             "regime": sig.regime,
             "invalidation": sig.invalidation,
             "expires_at": expires_at,
-            "status": "open",
+            "status": sig.status,
         })
 
     if signals:
@@ -1090,7 +1096,9 @@ def run_slow_g3g5(conn, config: dict,
         JOIN core.asset a ON cs.asset_id = a.asset_id
         LEFT JOIN biz.catalyst_impact ci
           ON cs.catalyst_id = ci.catalyst_id AND cs.asset_id = ci.asset_id
-        WHERE cs.status = 'open'
+        -- d3：观察池(watch)同样要补全 G3-G5。否则晋升为 open 后仍无 entry/stop/tp，
+        -- 慢通道 Alert 的「交易档位齐全」闸门永远过不了，只能空转。
+        WHERE cs.status IN ('open', 'watch')
           AND (cs.persistence IS NULL
                OR cs.technical_state IS NULL
                OR cs.fundamental_pass IS NULL)
@@ -1331,9 +1339,10 @@ def run_slow_g3g5(conn, config: dict,
 # =====================================================================
 
 def run_ai_decision(conn, config: dict, limit: int | None = None) -> dict:
-    """为 A/B 级 open 信号补全 AI 推荐原因 + 投资周期（G7）。
+    """为 A/B 级活跃信号(open+watch)补全 AI 推荐原因 + 投资周期（G7）。
 
-    - 处理对象：status='open' AND tier IN ('A','B') AND ai_reason IS NULL
+    - 处理对象：status IN ('open','watch') AND tier IN ('A','B') AND ai_reason IS NULL
+      （d3：观察池同样需要 ai_reason 供早报观察区展示）
     - 用 LLM 逐条生成 reasoning + investment_cycle，
       target_price/stop_loss 为对规则值的评审，AI 有建议则覆盖
     - LLM 不可用或失败：静默跳过，不影响慢通道其他步骤
@@ -1370,7 +1379,7 @@ def run_ai_decision(conn, config: dict, limit: int | None = None) -> dict:
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-        WHERE s.status = 'open'
+        WHERE s.status IN ('open', 'watch')
           AND s.tier IN ('A', 'B')
           AND s.ai_reason IS NULL
         ORDER BY s.composite_score DESC
@@ -1513,58 +1522,65 @@ def run_health(conn) -> dict:
     """).fetchall()
     stats["signals_by_tier"] = [dict(r) for r in rows]
 
-    # open 信号各维度覆盖率（G3/G4/G5）
+    # 活跃信号(open+watch)各维度覆盖率（G3/G4/G5）
+    # d3：覆盖率的分母必须含观察池，否则 watch 未补全会污染指标并触发误告警
     g3_row = conn.execute("""
         SELECT COUNT(*) as cnt FROM biz.catalyst_signal
-        WHERE status = 'open' AND persistence IS NOT NULL
+        WHERE status IN ('open','watch') AND persistence IS NOT NULL
     """).fetchone()
     g4_row = conn.execute("""
         SELECT COUNT(*) as cnt FROM biz.catalyst_signal
-        WHERE status = 'open' AND fundamental_pass IS NOT NULL
+        WHERE status IN ('open','watch') AND fundamental_pass IS NOT NULL
     """).fetchone()
     g5_row = conn.execute("""
         SELECT COUNT(*) as cnt FROM biz.catalyst_signal
-        WHERE status = 'open' AND technical_state IS NOT NULL
+        WHERE status IN ('open','watch') AND technical_state IS NOT NULL
     """).fetchone()
-    open_row = conn.execute("""
-        SELECT COUNT(*) as cnt FROM biz.catalyst_signal WHERE status = 'open'
+    live_row = conn.execute("""
+        SELECT COUNT(*) FILTER (WHERE status = 'open')  AS open_cnt,
+               COUNT(*) FILTER (WHERE status = 'watch') AS watch_cnt
+        FROM biz.catalyst_signal
+        WHERE status IN ('open','watch')
     """).fetchone()
-    open_cnt = open_row["cnt"] if open_row else 0
+    open_cnt = live_row["open_cnt"] if live_row else 0
+    watch_cnt = live_row["watch_cnt"] if live_row else 0
+    live_cnt = open_cnt + watch_cnt
     stats["open_signals"] = open_cnt
+    stats["watch_signals"] = watch_cnt
     stats["g3_coverage"] = round(
-        (g3_row["cnt"] if g3_row else 0) / open_cnt * 100, 2
-    ) if open_cnt else 0.0
+        (g3_row["cnt"] if g3_row else 0) / live_cnt * 100, 2
+    ) if live_cnt else 0.0
     stats["g4_coverage"] = round(
-        (g4_row["cnt"] if g4_row else 0) / open_cnt * 100, 2
-    ) if open_cnt else 0.0
+        (g4_row["cnt"] if g4_row else 0) / live_cnt * 100, 2
+    ) if live_cnt else 0.0
     stats["g5_coverage"] = round(
-        (g5_row["cnt"] if g5_row else 0) / open_cnt * 100, 2
-    ) if open_cnt else 0.0
+        (g5_row["cnt"] if g5_row else 0) / live_cnt * 100, 2
+    ) if live_cnt else 0.0
 
-    # 技术面分布（open 信号）
+    # 技术面分布（活跃信号）
     rows = conn.execute("""
         SELECT technical_state, COUNT(*) as cnt
         FROM biz.catalyst_signal
-        WHERE status = 'open' AND technical_state IS NOT NULL
+        WHERE status IN ('open','watch') AND technical_state IS NOT NULL
         GROUP BY technical_state
         ORDER BY cnt DESC
     """).fetchall()
     stats["technical_distribution"] = {r["technical_state"]: r["cnt"] for r in rows}
 
-    # 持续性分布（open 信号）
+    # 持续性分布（活跃信号）
     rows = conn.execute("""
         SELECT persistence, COUNT(*) as cnt
         FROM biz.catalyst_signal
-        WHERE status = 'open' AND persistence IS NOT NULL
+        WHERE status IN ('open','watch') AND persistence IS NOT NULL
         GROUP BY persistence
         ORDER BY cnt DESC
     """).fetchall()
     stats["persistence_distribution"] = {r["persistence"]: r["cnt"] for r in rows}
 
-    # open 信号中过期的（巡检应该为 0）
+    # 活跃信号中过期的（巡检应该为 0）
     row = conn.execute("""
         SELECT COUNT(*) as cnt FROM biz.catalyst_signal
-        WHERE status = 'open' AND expires_at < NOW()
+        WHERE status IN ('open','watch') AND expires_at < NOW()
     """).fetchone()
     stats["expired_but_open"] = row["cnt"] if row else 0
 

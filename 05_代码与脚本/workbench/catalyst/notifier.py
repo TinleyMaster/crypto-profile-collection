@@ -200,11 +200,15 @@ def _send_email(subject: str, body_html: str) -> tuple[bool, str]:
 # =====================================================================
 
 def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
-    """对新入库的 A 级信号发送快提醒。
+    """对「本轮转为可动作」的 A 级信号发送快提醒。
+
+    d3 分层：入参只包含 status 由非 open 变为 open 的信号（新插入，或 watch→open 晋升）。
+    已定价（resonance_state='confirmed'）的信号在库中为 status='watch'，会被下方查询过滤，
+    因此不会再出现「价格已涨完才推送」的追高提醒。
 
     Args:
         conn: 数据库连接
-        new_signal_ids: 本次新生成的信号 ID 列表
+        new_signal_ids: 本轮转为 open 的信号 ID 列表
 
     Returns:
         dict: {sent, skipped, failed, signals: [...]}
@@ -1066,7 +1070,8 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     """发送某个资产类别的 A 级 Alert 邮件（加密货币 / 美股·商品）。
 
     定位（OPT-CATALYST-ALERT-001 P0-1）：从「24h B/C 汇总」转型为「高置信度 A 级 Alert」。
-    - 仅 tier='A' 且共振 confirmed + 有完整交易档位（entry/stop/tp）的信号入选，按分取前 2
+    - 仅 tier='A' 且 status='open'（d3：未充分定价的可动作信号）+ 有完整交易档位
+      （entry/stop/tp）的信号入选，按分取前 2
     - 无 A 级信号 → 发极简「空窗 note」（决策①：女王接受空窗，写明原因，避免通道静默死掉）
     - 各自独立去重（sentinel + ntype），互不影响
     """
@@ -1111,9 +1116,12 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
 def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
     """过去 N 小时内 A 级新信号（按资产类别，按资产去重留最高分，取前 2）。
 
-    入选条件（OPT-CATALYST-ALERT-001 P0-1/P0-2 邮件层语义闸门）：
+    入选条件（OPT-CATALYST-ALERT-001 P0-1/P0-2 语义闸门，d3 修订）：
     - tier = 'A'（composite_score → tier 单点真源不变，DB tier 不改）
-    - resonance_state = 'confirmed'（价格真共振，否则视为 B 级观察）
+    - status = 'open'（d3：open 已表示「价格未充分定价」，即真正的可动作集合。
+      原先额外要求 resonance_state='confirmed' 是反向的——实测 confirmed 的
+      72h 前瞻超额 -2.16%（n=47）远弱于 weak +1.58%（n=231），
+      即「等价格确认再开单」等于追高；confirmed 现已归入观察池 status='watch'）
     - entry/stop/tp 齐全（可交易性）
     composite_score DESC 取前 2 条（每日 1~2 idea）。
     """
@@ -1135,7 +1143,6 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
             WHERE s.status = 'open'
               AND s.created_at > NOW() - INTERVAL '%s hours'
               AND s.tier = 'A'
-              AND s.resonance_state = 'confirmed'
               AND s.entry_price IS NOT NULL
               AND s.stop_loss IS NOT NULL
               AND s.take_profit IS NOT NULL

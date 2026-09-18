@@ -8,7 +8,7 @@ from __future__ import annotations
 import smtplib
 from email.header import Header
 from email.mime.text import MIMEText
-from email.utils import formataddr
+from email.utils import formataddr, formatdate, make_msgid
 
 from crypto_research.config import Settings
 
@@ -44,6 +44,9 @@ class EmailNotifier:
         msg["Subject"] = Header(subject, "utf-8")
         msg["From"] = formataddr((str(Header(from_name, "utf-8")), from_addr))
         msg["To"] = ", ".join(to_addrs)
+        # 补齐 RFC 5322 必需头：Date / Message-ID（此前缺失导致客户端排序异常）
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid()
 
         try:
             if s.smtp_port == 465:

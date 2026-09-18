@@ -20,6 +20,15 @@ for cand in (os.path.join(_code_root, "workbench"), "/app", _code_root):
     if cand and os.path.isdir(cand) and cand not in sys.path:
         sys.path.insert(0, cand)
 
+# scripts/src 加入 path（crypto_research 包）。
+# 快照生成会调用 macro_market._build_mvrv_universe / fetch_*，它们内部
+# `from crypto_research.config import get_settings`；缺此路径会以
+# "No module named 'crypto_research'" 失败，导致 mvrv_universe 落库为 error
+#（2026-09-16/17/18 连续出现，早报 MVRV 维度持续缺失）。
+_scripts_src = os.path.join(_code_root, "scripts", "src")
+if os.path.isdir(_scripts_src) and _scripts_src not in sys.path:
+    sys.path.insert(0, _scripts_src)
+
 from macro_market import (  # noqa: E402
     generate_morning_brief,
     get_market_overview,

@@ -6557,8 +6557,12 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
 
     巨鲸变化筛选策略：
     - 市值前 200（保证是有意义的主流币）
-    - 变化幅度 >= 1%（过滤掉计算精度导致的 0.12% 之类噪音）
+    - 变化幅度 >= 2%（过滤掉计算精度导致的 0.12% 之类噪音）
     - 按变化绝对值排序，展示最显著的异动
+    - 跨链去重：同一资产在多个链各有一行（如 USDT base/bsc），
+      取主链（持有者最多的链），禁止跨链混取极端值（2026-09-18 P1）
+    - 排除稳定币（USDT/USDC/DAI/RLUSD 等，asset_type='stablecoin'）：
+      稳定币无"避险减持"叙事，出现在巨鲸增持/减持榜是误导信号
     """
     try:
         from crypto_research.config import get_settings
@@ -6578,17 +6582,26 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                 # 集中度 Top N（最集中）
                 # 注：持仓快照目前主要覆盖 ETH 链小币，不限市值排名，
                 #     但要求有市值排名（过滤完全没数据的币）
+                # 跨链去重：同一资产在多个链各有一行（onchain_holder_snapshot 主键为 snapshot_id，
+                # 无 (asset_id, chain, snapshot_date) 唯一约束），必须按 asset 取主链（持有者最多的链），
+                # 否则会取到不同链的重复行、污染榜单（2026-09-18 P1）。
                 cur.execute("""
                     SELECT h.asset_id, h.chain, h.top10_concentration, h.top50_concentration,
                            h.total_holders, h.whale_balance_change_7d_pct,
                            h.exchange_wallet_pct, h.smart_money_pct,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
                            a.market_cap_rank
-                    FROM biz.onchain_holder_snapshot h
+                    FROM (
+                        SELECT DISTINCT ON (asset_id) asset_id, chain, top10_concentration,
+                               top50_concentration, total_holders, whale_balance_change_7d_pct,
+                               exchange_wallet_pct, smart_money_pct
+                        FROM biz.onchain_holder_snapshot
+                        WHERE snapshot_date = %s
+                          AND top10_concentration IS NOT NULL
+                        ORDER BY asset_id, (total_holders IS NULL), total_holders DESC NULLS LAST
+                    ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
-                    WHERE h.snapshot_date = %s
-                      AND a.market_cap_rank IS NOT NULL
-                      AND h.top10_concentration IS NOT NULL
+                    WHERE a.market_cap_rank IS NOT NULL
                     ORDER BY h.top10_concentration DESC
                     LIMIT %s
                 """, (latest_date, top_n))
@@ -6598,17 +6611,24 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                 # 注意：持仓快照目前主要覆盖 ETH 链，且大币数据较少
                 # 策略：不限市值排名，但要求变化幅度 >= 2%（过滤噪音），
                 #       并返回市值排名供渲染端展示上下文
+                # 跨链去重取主链（持有者最多的链），并排除稳定币（无"避险减持"叙事）。
                 cur.execute("""
                     SELECT h.asset_id, h.chain, h.top10_concentration,
-                           h.whale_balance_change_7d_pct,
+                           h.whale_balance_change_7d_pct, h.total_holders,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
                            a.market_cap_rank, a.market_cap
-                    FROM biz.onchain_holder_snapshot h
+                    FROM (
+                        SELECT DISTINCT ON (asset_id) asset_id, chain, top10_concentration,
+                               whale_balance_change_7d_pct, total_holders
+                        FROM biz.onchain_holder_snapshot
+                        WHERE snapshot_date = %s
+                          AND whale_balance_change_7d_pct IS NOT NULL
+                        ORDER BY asset_id, (total_holders IS NULL), total_holders DESC NULLS LAST
+                    ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
-                    WHERE h.snapshot_date = %s
-                      AND h.whale_balance_change_7d_pct IS NOT NULL
-                      AND h.whale_balance_change_7d_pct >= 2.0
+                    WHERE h.whale_balance_change_7d_pct >= 2.0
                       AND a.market_cap IS NOT NULL
+                      AND COALESCE(a.asset_type, '') <> 'stablecoin'
                     ORDER BY h.whale_balance_change_7d_pct DESC
                     LIMIT %s
                 """, (latest_date, top_n))
@@ -6617,15 +6637,21 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                 # 巨鲸 7 日减仓 Top N
                 cur.execute("""
                     SELECT h.asset_id, h.chain, h.top10_concentration,
-                           h.whale_balance_change_7d_pct,
+                           h.whale_balance_change_7d_pct, h.total_holders,
                            a.canonical_symbol AS symbol, a.canonical_name AS name,
                            a.market_cap_rank, a.market_cap
-                    FROM biz.onchain_holder_snapshot h
+                    FROM (
+                        SELECT DISTINCT ON (asset_id) asset_id, chain, top10_concentration,
+                               whale_balance_change_7d_pct, total_holders
+                        FROM biz.onchain_holder_snapshot
+                        WHERE snapshot_date = %s
+                          AND whale_balance_change_7d_pct IS NOT NULL
+                        ORDER BY asset_id, (total_holders IS NULL), total_holders DESC NULLS LAST
+                    ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
-                    WHERE h.snapshot_date = %s
-                      AND h.whale_balance_change_7d_pct IS NOT NULL
-                      AND h.whale_balance_change_7d_pct <= -2.0
+                    WHERE h.whale_balance_change_7d_pct <= -2.0
                       AND a.market_cap IS NOT NULL
+                      AND COALESCE(a.asset_type, '') <> 'stablecoin'
                     ORDER BY h.whale_balance_change_7d_pct ASC
                     LIMIT %s
                 """, (latest_date, top_n))
@@ -7366,6 +7392,17 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     holder_concentration = p["holder_concentration"]
     exchange_flow = p["exchange_flow"]
     upcoming_unlocks = p["upcoming_unlocks"]
+
+    # 统一 24h 成交量口径：优先用 overview 大盘的 CMC 全局 24h 成交量。
+    # sector_flow.total_volume_24h 是对 src_cmc 快照逐币 SUM 的聚合值（含多链/小币重复计数，
+    # 实测 $153.4B vs CMC 全局 $72.4B，差 2.1 倍），会导致早报读者误判市场活跃度。
+    gm = ((today.get("dimensions") or {}).get("1体量") or {}).get("data") or {}
+    gm_vol = gm.get("total_volume_24h")
+    if isinstance(sector_flow, dict) and gm_vol is not None:
+        try:
+            sector_flow["total_volume_24h"] = float(gm_vol)
+        except (TypeError, ValueError):
+            pass
 
     catalyst_hotspots = p["catalyst_hotspots"]
     if not isinstance(catalyst_hotspots, list):

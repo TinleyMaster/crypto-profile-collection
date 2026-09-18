@@ -24,7 +24,7 @@ for cand in (os.path.join(_code_root, "workbench"), "/app", _code_root):
         sys.path.insert(0, cand)
 
 # scripts/src 加入 path（crypto_research 包）
-_scripts_src = os.path.join(_code_root, "src")
+_scripts_src = os.path.join(_code_root, "scripts", "src")
 if os.path.isdir(_scripts_src) and _scripts_src not in sys.path:
     sys.path.insert(0, _scripts_src)
 

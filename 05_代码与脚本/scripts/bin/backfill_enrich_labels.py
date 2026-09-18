@@ -51,12 +51,36 @@ from crypto_research.clients.address_label_resolver import AddressLabelResolver
 ENRICH_SUPPORTED_CHAINS = {"eth", "base", "polygon"}
 # 大小写敏感链
 CASE_SENSITIVE_CHAINS = {"solana", "tron", "ton", "sui", "aptos"}
+# 爬取尝试表名
+FETCH_ATTEMPT_TABLE = "biz.onchain_label_fetch_attempt"
 
 
-def get_unlabeled_addresses(conn, chain: str, limit: int) -> list[str]:
+def ensure_attempt_table(conn) -> None:
+    """确保爬取尝试记录表存在。"""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {FETCH_ATTEMPT_TABLE} (
+                address TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'explorer_html',
+                status TEXT NOT NULL,
+                attempt_count INT NOT NULL DEFAULT 1,
+                last_attempt_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (address, chain, source)
+            )
+        """)
+        cur.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_label_attempt_chain_status
+            ON {FETCH_ATTEMPT_TABLE} (chain, status)
+        """)
+    conn.commit()
+
+
+def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool = True) -> list[str]:
     """从转账记录中捞出没有地址标签的地址（按出现频次倒序，优先爬高频地址）。
 
     只查 from_address / to_address 中出现过、但 onchain_address_label 中没有的地址。
+    skip_attempted=True 时，跳过已经爬过（无论成功失败）的地址。
     """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -69,6 +93,22 @@ def get_unlabeled_addresses(conn, chain: str, limit: int) -> list[str]:
             addr_col_from = "LOWER(from_address)"
             addr_col_to = "LOWER(to_address)"
             compare = "="
+
+        # 已尝试过的地址（无标签/失败的都算）
+        attempt_clause = ""
+        params = [chain, chain, chain, chain]
+        if skip_attempted:
+            attempt_clause = f"""
+                AND NOT EXISTS (
+                    SELECT 1 FROM {FETCH_ATTEMPT_TABLE} fa
+                    WHERE {'LOWER(fa.address)' if not case_sensitive else 'fa.address'} {compare}
+                          {'LOWER(ac.addr)' if not case_sensitive else 'ac.addr'}
+                      AND fa.chain = %s
+                )
+            """
+            params.append(chain)
+
+        params.append(limit)
 
         cur.execute(f"""
             WITH all_addrs AS (
@@ -103,16 +143,17 @@ def get_unlabeled_addresses(conn, chain: str, limit: int) -> list[str]:
               ON {'LOWER(ac.addr)' if not case_sensitive else 'ac.addr'} {compare}
                  {'LOWER(l.addr)' if not case_sensitive else 'l.addr'}
             WHERE l.addr IS NULL
+              {attempt_clause}
             ORDER BY ac.cnt DESC
             LIMIT %s
-        """, (chain, chain, chain, chain, limit))
+        """, tuple(params))
 
         rows = cur.fetchall()
 
     return [r["addr"] for r in rows]
 
 
-def count_total_unlabeled(conn, chain: str) -> int:
+def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True) -> int:
     """估算总共有多少个无标签地址（用于预览）。"""
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -125,6 +166,18 @@ def count_total_unlabeled(conn, chain: str) -> int:
             addr_col_from = "LOWER(from_address)"
             addr_col_to = "LOWER(to_address)"
             compare = "="
+
+        attempt_clause = ""
+        params = [chain, chain, chain, chain]
+        if skip_attempted:
+            attempt_clause = f"""
+                AND NOT EXISTS (
+                    SELECT 1 FROM {FETCH_ATTEMPT_TABLE} fa
+                    WHERE LOWER(fa.address) = LOWER(ac.addr)
+                      AND fa.chain = %s
+                )
+            """
+            params.append(chain)
 
         cur.execute(f"""
             WITH all_addrs AS (
@@ -149,7 +202,8 @@ def count_total_unlabeled(conn, chain: str) -> int:
             FROM all_addrs ac
             LEFT JOIN labeled l ON LOWER(ac.addr) = LOWER(l.addr)
             WHERE l.addr IS NULL AND ac.addr IS NOT NULL AND ac.addr <> ''
-        """, (chain, chain, chain, chain))
+              {attempt_clause}
+        """, tuple(params))
 
         row = cur.fetchone()
     return row["cnt"] if row else 0
@@ -207,6 +261,31 @@ def _ensure_conn(conn, db_url: str):
         new_conn.autocommit = False
         print("  ✅  已重连")
         return new_conn
+
+
+def _record_attempts(conn, chain: str, ok_addrs: list[str], no_label_addrs: list[str],
+                     source: str = "explorer_html") -> int:
+    """批量写入爬取尝试记录，返回写入条数。
+
+    ok: 成功查到标签
+    no_label: 页面正常但无标签
+    失败的（403/429/网络错误）不记，留给下次重试。
+    """
+    all_addrs = [(a, "ok") for a in ok_addrs] + [(a, "no_label") for a in no_label_addrs]
+    if not all_addrs:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.executemany(f"""
+            INSERT INTO {FETCH_ATTEMPT_TABLE} (address, chain, source, status)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (address, chain, source) DO UPDATE
+            SET attempt_count = {FETCH_ATTEMPT_TABLE}.attempt_count + 1,
+                last_attempt_at = NOW(),
+                status = EXCLUDED.status
+        """, [(addr, chain, source, status) for addr, status in all_addrs])
+    conn.commit()
+    return len(all_addrs)
 
 
 def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
@@ -404,6 +483,9 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         # 初始化 resolver（DB 查询用，单线程安全）
         resolver = AddressLabelResolver(conn, chain)
 
+        # 确保爬取尝试记录表存在
+        ensure_attempt_table(conn)
+
         # 统计变量（多线程共享，用锁保护）
         stats_lock = Lock()
         result_map: dict[str, dict] = {}  # addr -> label_info
@@ -413,6 +495,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         }
         inserted_total = 0
         backfilled_total = 0
+        attempt_recorded = 0
         done_count = 0
         t0 = time.time()
 
@@ -438,6 +521,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         for batch_start in range(0, len(addresses), batch_size):
             batch = addresses[batch_start:batch_start + batch_size]
             batch_results: dict[str, dict] = {}
+            batch_no_label: list[str] = []
             batch_stats = {k: 0 for k in stat_counts}
 
             # 并发爬取本批
@@ -453,6 +537,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                         elif status in batch_stats:
                             batch_stats[status] += 1
                         else:
+                            batch_no_label.append(addr.lower())
                             batch_stats["no_label"] += 1
 
                     # 进度输出（每 10 个打一次）
@@ -477,6 +562,14 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                     print(f"  ⚠️  本批写库失败（重试后仍失败）: {e}")
                     import traceback
                     traceback.print_exc()
+
+            # 记录爬取尝试（ok + no_label），避免下次重复爬
+            try:
+                ok_list = list(batch_results.keys())
+                n = _record_attempts(conn, chain, ok_list, batch_no_label)
+                attempt_recorded += n
+            except Exception as e:
+                print(f"  ⚠️  记录爬取尝试失败: {e}")
 
             # 累加到全局统计
             for k in batch_stats:
@@ -510,6 +603,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         print(f"    爬取失败: {sum(stat_counts[k] for k in ['http_403','http_429','http_other','network_error'])} 个")
         print(f"    入库新标签: {inserted_total} 条")
         print(f"    回填转账记录: {backfilled_total} 条")
+        print(f"    记录尝试: {attempt_recorded} 条（下次自动跳过）")
         print(f"    平均速度: {len(addresses)/elapsed:.1f} 地址/秒")
 
 

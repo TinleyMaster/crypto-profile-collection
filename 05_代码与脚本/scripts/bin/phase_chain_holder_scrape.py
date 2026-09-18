@@ -953,6 +953,10 @@ def _scrape_holders_helius(chain: str, contract_address: str, max_holders: int =
         return None
     try:
         settings = get_settings(require_database=False)
+        if not settings.helius_api_key:
+            print("  [WARN] 未配置 HELIUS_API_KEY：Solana 将走公共 RPC，"
+                  "getTokenLargestAccounts 极易 429 → 快照持续失败。"
+                  "请在环境变量中配置该 Key。")
         client = SolanaClient(api_key=settings.helius_api_key)
         result = client.get_token_holders(_norm_addr(chain, contract_address), limit=max_holders)
         if not result["top_holders_json"]:

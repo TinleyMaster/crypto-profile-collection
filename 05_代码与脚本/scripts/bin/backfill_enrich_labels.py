@@ -180,18 +180,34 @@ def main():
         sys.exit(1)
 
     # 连接 DB 并执行
-    if args.db_url:
-        with psycopg.connect(args.db_url) as conn:
-            _run_for_chains(conn, chains, args)
-    else:
-        settings = get_settings(require_database=True)
-        with get_connection(settings.database_url) as conn:
-            _run_for_chains(conn, chains, args)
+    settings = get_settings(require_database=True)
+    db_url = args.db_url or settings.database_url
+    with get_connection(db_url) as conn:
+        _run_for_chains(conn, chains, args, db_url)
 
     print("\n全部完成。")
 
 
-def _run_for_chains(conn, chains: list[str], args) -> None:
+def _ensure_conn(conn, db_url: str):
+    """确保数据库连接存活，断了就重连（返回连接对象，可能是新的）。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except Exception:
+        print("  🔄 数据库连接断开，正在重连...")
+        # 关闭旧连接
+        try:
+            conn.close()
+        except Exception:
+            pass
+        new_conn = psycopg.connect(db_url)
+        new_conn.autocommit = False
+        print("  ✅  已重连")
+        return new_conn
+
+
+def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
     """对多条链依次执行富化（并发爬取 + 批量写库）。"""
     for chain in chains:
         print(f"\n{'=' * 60}")
@@ -285,6 +301,9 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
                         print(f"  进度: {done_count}/{len(addresses)} ({pct:.0f}%) | "
                               f"已查到标签 {stat_counts['ok'] + batch_stats['ok']} 个 | "
                               f"速度 {rate:.1f}/s | 预计剩余 {eta/60:.1f} 分钟")
+
+            # 确保 DB 连接存活（长连接可能被服务端断开）
+            conn = _ensure_conn(conn, db_url)
 
             # 本批写库统计
             batch_inserted = 0

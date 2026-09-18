@@ -46,6 +46,25 @@ TECHNICAL_SCORES = {"up": 85, "range": 55, "down": 25}
 SCOPE_BUCKETS = {90: "single_pair", 65: "few_pairs", 45: "many_pairs",
                  60: "sector", 30: "broad"}
 MIN_IC_SAMPLES = 10  # IC 最少样本
+YAML_PATH = Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml"
+
+
+def load_grade_weights() -> dict:
+    """读取 G1 四维权重（与 grade.py 同源，避免评估口径漂移）。"""
+    try:
+        import yaml
+        gw = (yaml.safe_load(YAML_PATH.read_text(encoding="utf-8")) or {}).get("grade_weights", {})
+        return {"authority": gw.get("authority", 0.30), "event": gw.get("event", 0.35),
+                "scope": gw.get("scope", 0.15), "mcap": gw.get("mcap", 0.20)}
+    except Exception as e:
+        print(f"  [warn] 读取 grade_weights 失败，用默认值: {e}")
+        return {"authority": 0.30, "event": 0.35, "scope": 0.15, "mcap": 0.20}
+
+
+def direction_sign(direction) -> float:
+    """方向 → 符号：bullish=+1 / bearish=-1 / 其他=0（不参与方向对齐统计）。"""
+    d = (direction or "").strip().lower()
+    return 1.0 if d == "bullish" else (-1.0 if d == "bearish" else 0.0)
 
 
 def get_conn():
@@ -105,12 +124,13 @@ def fetch_eval_samples(conn) -> list[dict]:
     return conn.execute(
         """
         SELECT
-            co.catalyst_id, co.asset_id, co.excess_72h,
+            co.catalyst_id, co.asset_id, co.excess_72h, co.impact_direction,
             cs.composite_score AS score_prior,
             cs.base_strength AS bs_prior,
             cs.resonance_score, cs.persistence,
             cs.fundamental_pass, cs.technical_state,
             cg.authority_score, cg.event_weight, cg.scope_score,
+            cg.mcap_score, cg.prelaunch_penalty,
             COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS event_type,
             ac.source_code
         FROM biz.catalyst_outcome co
@@ -137,19 +157,23 @@ def composite_from(bs: int, s: dict) -> float:
     return round(max(0, min(100, raw)))
 
 
-def recalc_bs_calib(s: dict, calib: dict) -> int:
+def recalc_bs_calib(s: dict, calib: dict, gw: dict) -> int:
     """用校准权重重算 G1 base_strength。
 
-    三因子：
+    四因子（口径与 grade.py 一致，权重从 catalyst_rules.yaml 读取）：
     - authority：校准 source 优先，回退先验 cg.authority_score
     - event_weight：校准 event_type 优先，回退先验 cg.event_weight
     - scope：校准 scope bucket 优先，回退先验 cg.scope_score
+    - mcap：无校准维度，直接用 cg.mcap_score（并扣 prelaunch 惩罚）
     """
     auth = calib.get("source", {}).get(s["source_code"]) or s["authority_score"] or 0
     ev = calib.get("event_type", {}).get(s["event_type"]) or s["event_weight"] or 0
     bucket = SCOPE_BUCKETS.get(s["scope_score"]) if s["scope_score"] is not None else "broad"
     sc = calib.get("scope", {}).get(bucket) or s["scope_score"] or 0
-    bs = round(auth * 0.4 + ev * 0.4 + sc * 0.2)
+    mcap = s["mcap_score"] if s["mcap_score"] is not None else 50
+    penalty = s["prelaunch_penalty"] or 0
+    bs = round(auth * gw["authority"] + ev * gw["event"]
+               + sc * gw["scope"] + mcap * gw["mcap"] - penalty)
     return max(0, min(100, bs))
 
 
@@ -161,6 +185,7 @@ def main() -> int:
     conn = get_conn()
     try:
         calib = load_calibration(conn)
+        gw = load_grade_weights()
         samples = fetch_eval_samples(conn)
         print(f"评估样本: {len(samples)} 条（L1 + 72h超额 + 有signal）")
         if not samples:
@@ -169,7 +194,7 @@ def main() -> int:
 
         # 重算校准后评分
         for s in samples:
-            s["bs_calib"] = recalc_bs_calib(s, calib)
+            s["bs_calib"] = recalc_bs_calib(s, calib, gw)
             s["score_calib"] = composite_from(s["bs_calib"], s)
         # 重算先验评分（用 signal 里存的 G1 分项重算，保证同口径）
         for s in samples:
@@ -185,6 +210,20 @@ def main() -> int:
         ic_prior_rec = spearman_ic(scores_prior_rec, outcomes)
         ic_calib = spearman_ic(scores_calib, outcomes)
 
+        # 方向对齐 IC：score × 方向符号 vs 有符号超额。
+        # composite_score 本身无方向（technical_state 来自均线结构），因此原始 IC
+        # 只衡量「强度」，必须用方向对齐口径才能检验整条链路（方向+幅度）的预测力。
+        al_prior, al_calib, al_out = [], [], []
+        for s in samples:
+            sign = direction_sign(s["impact_direction"])
+            if sign == 0 or s["excess_72h"] is None:
+                continue
+            al_prior.append(s["score_prior"] * sign)
+            al_calib.append(s["score_calib"] * sign)
+            al_out.append(s["excess_72h"])
+        ic_al_prior = spearman_ic(al_prior, al_out)
+        ic_al_calib = spearman_ic(al_calib, al_out)
+
         print("\n" + "=" * 60)
         print("IC 对比（composite_score vs 72h 超额收益）")
         print("=" * 60)
@@ -196,6 +235,12 @@ def main() -> int:
             verdict = "✅ 校准提升预测力" if delta > 0.01 else (
                 "⚠️ 校准基本持平" if abs(delta) <= 0.01 else "❌ 校准反而下降")
             print(f"  变化: {delta:+.4f}  {verdict}")
+        print(f"\n  方向对齐 IC（score×方向符号，样本 {len(al_out)}）")
+        print(f"    先验: {ic_al_prior}   校准: {ic_al_calib}")
+        if ic_al_prior is not None and ic_al_calib is not None:
+            d_al = ic_al_calib - ic_al_prior
+            print(f"    变化: {d_al:+.4f}  "
+                  f"{'✅ 提升' if d_al > 0.01 else ('⚠️ 持平' if abs(d_al) <= 0.01 else '❌ 下降')}")
 
         # ---- 高估/低估周报 ----
         print("\n" + "=" * 60)
@@ -212,7 +257,9 @@ def main() -> int:
         ).fetchall()
         md_lines = ["# 催化剂校准周报", "",
                     f"> 窗口: {date.today()} ｜ 样本: {len(samples)} 条（L1+72h）",
-                    f"> IC: 先验 {ic_prior} → 校准 {ic_calib}（{'提升' if (ic_calib or 0) > (ic_prior or 0) else '持平/下降'}）", ""]
+                    f"> IC(强度): 先验 {ic_prior} → 校准 {ic_calib}"
+                    f"（{'提升' if (ic_calib or 0) > (ic_prior or 0) else '持平/下降'}）",
+                    f"> IC(方向对齐): 先验 {ic_al_prior} → 校准 {ic_al_calib}", ""]
         for r in rows:
             diff = (r["prior_score"] or 0) - (r["calibrated_score"] or 0)
             tag = "🔴 高估" if diff > 10 else ("🟢 低估" if diff < -10 else "⚪ 持平")

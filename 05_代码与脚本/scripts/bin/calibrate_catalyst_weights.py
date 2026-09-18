@@ -14,15 +14,25 @@
   - scope          （→ G1 scope_score，用 catalyst_grade.scope_score 分桶）
   - resonance_band （→ 验证 resonance 是否预测 72h 超额，P2 参考）
 
-指标：hit_rate(72h) / avg_excess_24h / avg_excess_72h / median_excess_72h / ic_24h
+指标：
+  - 幅度（定权用）：aligned_excess_72h = mean(excess_72h × 方向符号)
+        即「市场在预测方向上的平均反应幅度」——看空事件跌得越准，值越大
+  - 方向可靠性（仅记录，不参与定权）：hit_rate(72h)
+  - 其他观测：avg_excess_24h / avg_excess_72h / median_excess_72h / ic_24h
 
-校准分：
-  calibrated_score = 50
-                   + (hit_rate - 0.5) * 60 * 2     # 命中率每高于 50% 的 10pct → +6分
-                   + clamp(avg_excess_72h, -10,10) / 10 * 40   # 超额贡献（±10% 饱和）
-                   - volatility_penalty            # avg max_drawdown_24h < -15% 扣 5
+校准分（2026-09-18 修正：强度=幅度，与方向可靠性解耦）：
+  rel    = aligned_excess_72h / 1.0 - 1            # 1% 对齐超额 = 基准强度
+  adj    = clamp(rel, -1, +1) * 0.30               # 相对先验最大 ±30% 调整
+  shrink = n / (n + 30)                            # 小样本向先验收缩
+  calibrated_score = prior * (1 + shrink * adj)
 
-样本门槛：<10 prior；10~30 prior+trend；≥30 calibrated（实测权重生效）。
+  说明：hit_rate 不再进入权重。此前 hit_rate 贡献 ±30 主导，导致 bearish 事件
+        （如 tech_upgrade：命中率 0.79、对齐超额仅 +0.1%）被当成「强事件」把
+        base_strength 抬高。权重只表达「事件能造成多大价格波动」；方向由
+        catalyst_impact.impact_direction 单独决定（technical.py 生成 tp/sl）。
+        采用相对调整（乘在 prior 上）以保持先验排序，避免把强弱顺序抹平。
+
+样本门槛：<10 prior；10~30 prior（观察趋势）；≥30 calibrated（实测权重生效）。
 
 用法：
     python calibrate_catalyst_weights.py                 # 本周校准
@@ -51,6 +61,9 @@ from crypto_research.config import get_settings  # noqa: E402
 
 MIN_CALIBRATED = 30   # 样本 ≥30 → 实测权重生效
 MIN_TREND = 10        # 样本 ≥10 → 记录 trend 观察
+ALIGNED_REF = 1.0     # 方向对齐超额基准（%）：1% 视为「基准强度」
+MAX_REL_ADJ = 0.30    # 权重相对先验的最大调整幅度（±30%）
+DIRECTION_SIGN = {"bullish": 1.0, "bearish": -1.0}
 YAML_PATH = Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml"
 
 # scope_score 分桶（对应 catalyst_grade.scope_score 的值）
@@ -117,19 +130,31 @@ def calc_ic(composite_scores: list, excesses: list) -> float | None:
     return round(cov / (varx ** 0.5 * vary ** 0.5), 4)
 
 
-def calibrated_score_for(hit_rate, avg_excess_72h, avg_dd_24h) -> int:
-    """校准分计算（0-100，与先验分同量纲）。"""
-    # 数据库 Decimal 统一转 float
-    hit_rate = float(hit_rate or 0.0)
-    avg_excess_72h = float(avg_excess_72h) if avg_excess_72h is not None else 0.0
-    avg_dd_24h = float(avg_dd_24h) if avg_dd_24h is not None else None
-    # 命中率贡献：基准 50%，每高 10pct → +6 分（权重 60 满量程，clamp ±30）
-    hit_contrib = max(-30, min(30, (hit_rate - 0.5) * 120))
-    # 超额贡献：72h 平均超额，±10% 饱和，权重 40
-    excess_contrib = max(-40, min(40, avg_excess_72h / 10 * 40))
-    # 波动惩罚：24h 平均最大回撤 < -15% 扣 5
-    penalty = 5 if (avg_dd_24h is not None and avg_dd_24h < -15) else 0
-    score = 50 + hit_contrib + excess_contrib - penalty
+def calibrated_score_for(n: int, prior: int, aligned_excess: float | None) -> int:
+    """校准分计算（0-100，与先验分同量纲）。
+
+    语义：本分表示「事件强度 = 市场在预测方向上的反应幅度」，不含命中率。
+    方向可靠性（hit_rate）单独记录、不参与定权——此前命中率贡献 ±30 主导，
+    导致 bearish 事件（tech_upgrade 命中率 0.79、对齐超额仅 +0.1%）被当成
+    「强事件」把 base_strength 抬高。
+
+    公式（相对调整，保持先验强弱排序）：
+        rel    = aligned_excess / ALIGNED_REF - 1     # 相对基准强度
+        adj    = clamp(rel, -1, +1) * MAX_REL_ADJ     # 最大 ±30% 相对调整
+        shrink = n / (n + 30)                         # 小样本向先验收缩
+        score  = prior * (1 + shrink * adj)
+
+    Args:
+        n: 有效方向样本数
+        prior: 先验权重
+        aligned_excess: mean(excess_72h × 方向符号)；None 表示无可用样本
+    """
+    if aligned_excess is None:
+        return prior
+    rel = float(aligned_excess) / ALIGNED_REF - 1.0
+    rel = max(-1.0, min(1.0, rel))
+    shrink = n / (n + 30)
+    score = prior * (1 + shrink * rel * MAX_REL_ADJ)
     return max(0, min(100, round(score)))
 
 
@@ -141,7 +166,7 @@ def fetch_samples(conn) -> list[dict]:
             SELECT
                 co.catalyst_id, co.asset_id, co.signal_id,
                 co.excess_24h, co.excess_72h,
-                co.hit_72h, co.max_drawdown_24h,
+                co.hit_72h,
                 co.impact_direction, co.direction_src,
                 COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS event_type,
                 ac.source_code,
@@ -172,7 +197,7 @@ def build_dim_stats(samples: list[dict]) -> dict:
             return
         d = dims[dim].setdefault(str(value), {"excess_24h": [], "excess_72h": [],
                                               "hits": 0, "hit_total": 0,
-                                              "dd_24h": [], "composite": [],
+                                              "aligned_72h": [], "composite": [],
                                               "excess_72h_for_ic": []})
         if s["excess_24h"] is not None:
             d["excess_24h"].append(s["excess_24h"])
@@ -182,8 +207,10 @@ def build_dim_stats(samples: list[dict]) -> dict:
             d["hit_total"] += 1
             if s["hit_72h"]:
                 d["hits"] += 1
-        if s["max_drawdown_24h"] is not None:
-            d["dd_24h"].append(s["max_drawdown_24h"])
+        # 方向对齐超额：看空事件以 -excess 计，衡量「按预测方向的反应幅度」
+        sign = DIRECTION_SIGN.get((s["impact_direction"] or "").strip().lower())
+        if sign is not None and s["excess_72h"] is not None:
+            d["aligned_72h"].append(float(s["excess_72h"]) * sign)
         if s["composite_score"] is not None and s["excess_72h"] is not None:
             d["composite"].append(s["composite_score"])
             d["excess_72h_for_ic"].append(s["excess_72h"])
@@ -213,16 +240,20 @@ def make_stats(d: dict) -> dict:
     avg24 = round(sum(d["excess_24h"]) / len(d["excess_24h"]), 4) if d["excess_24h"] else None
     avg72 = round(sum(d["excess_72h"]) / n, 4) if n else None
     med72 = round(statistics.median(d["excess_72h"]), 4) if n else None
-    avg_dd = round(sum(d["dd_24h"]) / len(d["dd_24h"]), 4) if d["dd_24h"] else None
+    # 幅度（定权基准）：median(|excess_72h|)
+    med_abs72 = round(statistics.median(abs(float(x)) for x in d["excess_72h"]), 4) if n else None
+    # 方向对齐幅度（定权用）：mean(excess × 方向符号)
+    aligned = round(sum(d["aligned_72h"]) / len(d["aligned_72h"]), 4) if d["aligned_72h"] else None
     ic = calc_ic(d["composite"], d["excess_72h_for_ic"])
     return {
         "sample_count": hit_total,     # 校准门槛：有效方向样本数
         "excess_samples": n,           # 有 72h 超额的样本数（超额统计口径）
-        "hit_rate": hit_rate,
+        "hit_rate": hit_rate,          # 方向可靠性（仅记录，不参与定权）
         "avg_excess_24h": avg24,
         "avg_excess_72h": avg72,
         "median_excess_72h": med72,
-        "avg_dd_24h": avg_dd,
+        "median_abs_excess_72h": med_abs72,
+        "aligned_excess_72h": aligned,  # 定权依据：方向对齐的反应幅度
         "ic_24h": ic,
     }
 
@@ -232,8 +263,7 @@ def upsert_calibration(conn, dim, value, stats, prior, window_end) -> int:
     n = stats["sample_count"]
     if n >= MIN_CALIBRATED:
         mode = "calibrated"
-        score = calibrated_score_for(
-            stats["hit_rate"] or 0, stats["avg_excess_72h"], stats["avg_dd_24h"])
+        score = calibrated_score_for(n, prior, stats["aligned_excess_72h"])
     elif n >= MIN_TREND:
         mode = "prior"  # 样本不足但可观察趋势
         score = prior
@@ -310,7 +340,7 @@ def main() -> int:
         for dim in ["event_type", "source", "scope", "resonance_band"]:
             print(f"\n{'=' * 70}\n维度: {dim}\n{'=' * 70}")
             header = (f"  {'值':<24} {'方向样本':>6} {'命中率':>7} {'24h超额':>9} "
-                      f"{'72h超额':>9} {'中位72h':>9} {'先验':>5} {'校准分':>6} {'模式':<11}")
+                      f"{'72h超额':>9} {'中位72h':>9} {'对齐72h':>9} {'先验':>5} {'校准分':>6} {'模式':<11}")
             print(header)
             for value, d in sorted(dims[dim].items(),
                                    key=lambda kv: -kv[1]["hit_total"]):
@@ -326,15 +356,16 @@ def main() -> int:
                     p = 50  # resonance_band 无先验，仅观测
                 score = upsert_calibration(conn, dim, value, stats, p, window_end) \
                     if not args.dry_run else (
-                        calibrated_score_for(stats["hit_rate"] or 0, stats["avg_excess_72h"],
-                                             stats["avg_dd_24h"])
+                        calibrated_score_for(stats["sample_count"], p,
+                                             stats["aligned_excess_72h"])
                         if stats["sample_count"] >= MIN_CALIBRATED else p)
                 mode = "calibrated" if stats["sample_count"] >= MIN_CALIBRATED else "prior"
                 hr = f"{stats['hit_rate']:.2f}" if stats["hit_rate"] is not None else "  -  "
                 a24 = f"{stats['avg_excess_24h']:+.1f}" if stats["avg_excess_24h"] is not None else "  -  "
                 a72 = f"{stats['avg_excess_72h']:+.1f}" if stats["avg_excess_72h"] is not None else "  -  "
                 m72 = f"{stats['median_excess_72h']:+.1f}" if stats["median_excess_72h"] is not None else "  -  "
-                print(f"  {value:<24} {stats['sample_count']:>6} {hr:>7} {a24:>9} {a72:>9} {m72:>9} "
+                al = f"{stats['aligned_excess_72h']:+.1f}" if stats["aligned_excess_72h"] is not None else "  -  "
+                print(f"  {value:<24} {stats['sample_count']:>6} {hr:>7} {a24:>9} {a72:>9} {m72:>9} {al:>9} "
                       f"{p:>5} {score:>6} {mode:<11}")
                 report_lines.append((dim, value, stats, p, score, mode))
         if not args.dry_run:
@@ -351,12 +382,13 @@ def main() -> int:
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(["dim", "value", "samples", "hit_rate", "avg_excess_24h",
-                            "avg_excess_72h", "median_excess_72h", "ic_24h",
-                            "prior", "calibrated", "mode"])
+                            "avg_excess_72h", "median_excess_72h", "aligned_excess_72h",
+                            "ic_24h", "prior", "calibrated", "mode"])
                 for dim, value, st, p, score, mode in report_lines:
                     w.writerow([dim, value, st["sample_count"], st["hit_rate"],
                                 st["avg_excess_24h"], st["avg_excess_72h"],
-                                st["median_excess_72h"], st["ic_24h"], p, score, mode])
+                                st["median_excess_72h"], st["aligned_excess_72h"],
+                                st["ic_24h"], p, score, mode])
             print(f"报告已导出: {csv_path}")
         except Exception as e:
             print(f"  [warn] CSV 导出失败: {e}")

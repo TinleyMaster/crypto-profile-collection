@@ -3761,7 +3761,8 @@ def _kol_onchain_signals(
                            k.signal_subtype, k.event_usd_value, k.event_exchange,
                            k.profile_id, p.nickname,
                            k.direction, k.address_label, k.event_direction,
-                           COALESCE(post.content_text, ''), COALESCE(post.post_url, '')
+                           COALESCE(post.content_text, ''), COALESCE(post.post_url, ''),
+                           k.event_token
                     FROM biz.kol_signal k
                     LEFT JOIN biz.kol_profile p ON p.profile_id = k.profile_id
                     LEFT JOIN biz.kol_post post ON post.post_id = k.post_id
@@ -3791,6 +3792,9 @@ def _kol_onchain_signals(
                 "event_direction": r[9] or "",
                 "content_text": r[10] or "",
                 "post_url": r[11] or "",
+                # P0-1（2026-09-18 审计）：事件标的币。卡片文案必须带事件标的，
+                # 避免"聪明钱 $85.1M"无币名（实为 ETH 事件挂 ZEC 卡）。
+                "event_token": r[12] or "",
             })
         return results
     except Exception:
@@ -4240,6 +4244,20 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         ))
         merged["resonance_count"] = len(sig_types)
         merged["signal_types"] = sig_types
+
+    # P0-1（2026-09-18 审计）：同标的多信号混合（distributing/accumulating 并存）时
+    # 算净方向，禁止挑单条主卡方向掩盖整体（如 ZEC 三连 distributing 被一条错配 outflow 顶成"多"）。
+    for k, merged in merged_map.items():
+        sigs = merged.get("all_signals") or []
+        dirs = [s.get("direction") for s in sigs if s.get("direction") in ("long", "short")]
+        longs = dirs.count("long")
+        shorts = dirs.count("short")
+        if longs != shorts and (longs + shorts) >= 2:
+            merged["direction"] = "long" if longs > shorts else "short"
+            # 同步关键文案，避免卡片"多"与子信号"派发"打架
+            merged["action_hint"] = (
+                "多信号方向不一致，按净方向以多数为准（部分子信号反向，注意分化）"
+            )
 
     # ── 3. 共振筛选：币种级 target 需满足 min_resonance ──
     after_resonance: list[dict] = []
@@ -5135,6 +5153,7 @@ def score_opportunities(overview: dict) -> dict:
         addr_label = ks["address_label"]
         kol_name = ks["kol_name"]
         evt_dir = (ks["event_direction"] or ks["direction"] or "").lower()
+        event_token = ks.get("event_token") or ""
 
         # ── 方向判定 ──
         # 流出/吸筹 → 看多（抛压减小/大资金抄底）
@@ -5190,6 +5209,9 @@ def score_opportunities(overview: dict) -> dict:
         trigger_parts = [f"KOL链上异动：{type_cn}"]
         if usd_val > 0:
             trigger_parts.append(usd_str)
+        # P0-1（2026-09-18 审计）：事件标的币必须显式带出，禁止"聪明钱 $85.1M"无币名
+        if event_token and event_token.upper() != str(symbol).upper():
+            trigger_parts.append(event_token.upper())
         if exchange:
             trigger_parts.append(f"@{exchange}")
         if addr_label:
@@ -5214,7 +5236,8 @@ def score_opportunities(overview: dict) -> dict:
              "confidence": confidence,
              "conviction_score": conviction,
              "signal_type": "kol_onchain",
-             "key_metric": f"{type_cn} {usd_str}" if usd_val > 0 else type_cn,
+             "key_metric": (f"{type_cn} {event_token.upper() if event_token and event_token.upper() != str(symbol).upper() else symbol} {usd_str}"
+                            if usd_val > 0 else type_cn),
              "asset_id": ks["asset_id"],
              "trigger_logic": " ".join(trigger_parts),
              "action_hint": action_hint_map.get(sig_direction, "情报参考"),

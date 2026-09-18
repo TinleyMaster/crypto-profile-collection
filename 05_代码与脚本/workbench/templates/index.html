@@ -6320,6 +6320,29 @@
             font-weight: 800;
         }
 
+        /* P1-2（2026-09-18 审计）：事件驱动直通徽章 */
+        .signal-bypass {
+            margin-left: 4px;
+            background: rgba(245, 158, 11, .18);
+            color: #fbbf24;
+            padding: 1px 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: help;
+            border: 1px solid rgba(245, 158, 11, .35);
+        }
+
+        /* P1-1（2026-09-18 审计）：AI 分析时刻 */
+        .ai-reason-ts {
+            margin-left: 6px;
+            color: #64748b;
+            font-size: 10px;
+            background: rgba(71, 85, 105, .25);
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
+
         /* ── FEAT-HIGHLIGHT-004: HIGH 视觉增强 ── */
         .signal-item-high {
             border-left: 3px solid #f87171;
@@ -13232,7 +13255,14 @@
                 : '';
 
             // FEAT-HIGHLIGHT-004: HIGH 角标
-            var fireBadge = level === 'high' ? '<span class="signal-fire">🔥 HIGH</span>' : '';
+            // P1-2（2026-09-18 审计）：AI 已降级（should_highlight=false）的卡片不挂 🔥HIGH，
+            // 避免"AI 中性谨慎 + 系统 HIGH 看多"同屏打架。
+            var fireBadge = level === 'high' && !o._ai_downgraded ? '<span class="signal-fire">🔥 HIGH</span>' : '';
+
+            // P1-2：事件驱动直通徽章（AI 不认可但规则保留）
+            var bypassBadge = (o._ai_downgraded || o._ai_filter_bypassed)
+                ? '<span class="signal-bypass" title="' + escapeHtml(o._ai_filter_reason || '事件驱动信号，按规则直通保留，AI 未背书') + '">⚡ 事件驱动直通</span>'
+                : '';
 
             // 主因轴：从 breakdown 取贡献最高（方案 A）
             var mainReason = '';
@@ -13344,6 +13374,8 @@
                         '<span style="color:#60a5fa;font-weight:700;margin-left:4px">' + v2Score + '分</span>' +
                         '<span style="color:#9ca3af;margin-left:6px">|</span>' +
                         '<span class="ai-reason-text">' + escapeHtml(v2Reason) + '</span>' +
+                        // P1-1（2026-09-18 审计）：展示 AI 分析时刻，可追溯
+                        (aiV2.analysis_ts ? '<span class="ai-reason-ts">' + new Date(aiV2.analysis_ts * 1000).toLocaleString('zh-CN', { hour12: false }) + '</span>' : '') +
                         '<span class="ai-reason-more">查看详情 →</span>' +
                         '</div>' +
                         '<div class="ai-scorecard-mini" onclick="event.stopPropagation();openSignalDetail(' + (o.asset_id || 0) + ')">' +
@@ -13393,6 +13425,7 @@
                 km +
                 '<span class="signal-score">conv ' + score + '</span>' +
                 fireBadge +
+                bypassBadge +
                 resonanceBadge +
                 '</div>' +
                 (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +

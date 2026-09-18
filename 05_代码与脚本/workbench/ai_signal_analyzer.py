@@ -2575,6 +2575,8 @@ def _call_llm_analysis_v2(
         "risk_warnings": [str(x)[:100] for x in (data.get("risk_warnings") or [])][:5],
         "suggested_horizon": str(data.get("suggested_horizon", "medium")).lower() or "medium",
         "investment_logic": str(data.get("investment_logic", ""))[:500],
+        # P1-1（2026-09-18 审计）：记录本次分析时刻，卡片展示可追溯，重算不再原地覆盖
+        "analysis_ts": int(time.time()),
         "error": None,
     }
 
@@ -2749,6 +2751,13 @@ def _build_system_prompt_v2() -> str:
    - "当前触发的信号" = 系统实时信号（触发逻辑自带日期/金额）
    - 你的补充推断 = 模型知识（无实时来源，标注「模型推断」）
 4. **禁止**：不得把模型推断伪装成实时数据库数据；不得编造精确到小数的价格/占比冒充实测值。
+5. **链上方向硬约束（onchain 轴，必须遵守）**：
+   - 链上方向的唯一依据是触发信号的 `event_direction` 枚举：inflow / outflow / liquidated_long /
+     liquidated_short / accumulating / distributing。点评中描述方向时只能引用这些枚举值，**禁止自行推断"做多/做空"**。
+   - **金额 ≠ 价格**：`event_usd_value`/`event_amount` 是链上事件金额，`entry_price` 是入场价。
+     二者是不同字段，**严禁把价格当金额或把金额当价格**（例："8/20 @$630 开多"里 $630 是价格，不是 $630M 事件金额）。
+6. **KOL 情绪约束**：KOL 信号的方向标签（direction）是系统自动标注、可能与正文观点不一致；
+   引用 KOL 观点时以 `content` 正文为准，不得臆造博主的多空倾向。
 
 ## 高亮/高危判定
 
@@ -3234,11 +3243,17 @@ def ai_enrich_signals_v2(
         ai_result = analyze_asset_v2(asset_id, all_signals)
         sig = {**sig, "ai_analysis_v2": ai_result}
 
-        # 方向校验：如果 AI 不认可该方向，标记降级
+        # 方向校验：如果 AI 不认可该方向，标记降级。
+        # P1-2（2026-09-18 审计）：AI 说"不进高亮池"但规则按事件驱动直通保留 → 显式标注，
+        # 前端显示"事件驱动直通"徽章并抑制 🔥HIGH，避免"AI 中性谨慎 + 系统 HIGH 看多"同屏打架。
         if direction == "long" and not ai_result.get("should_highlight") and not ai_result.get("error"):
             sig["_ai_downgraded"] = True
+            sig["_ai_filter_bypassed"] = True
+            sig["_ai_filter_reason"] = sig.get("_ai_filter_reason") or "事件驱动信号触发，按规则直通保留"
         elif direction == "short" and not ai_result.get("should_risk") and not ai_result.get("error"):
             sig["_ai_downgraded"] = True
+            sig["_ai_filter_bypassed"] = True
+            sig["_ai_filter_reason"] = sig.get("_ai_filter_reason") or "事件驱动信号触发，按规则直通保留"
 
         enriched.append(sig)
 

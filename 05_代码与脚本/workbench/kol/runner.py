@@ -280,7 +280,21 @@ def _process_pending_ai(stats: dict, batch_size: int = 20) -> None:
             if result.get("_rule_based"):
                 stats["posts_rule_based"] = stats.get("posts_rule_based", 0) + 1
 
-            # 币种匹配
+            # 币种匹配：onchain 类信号以 event_token（事件标的币）优先定资产，
+            # 帖子提及币（symbol）仅作 fallback（2026-09-18 审计 P0-1）。
+            # 修复：ZEC 帖里的「3.5万枚 ETH 提币」曾被按帖子主币归因到 ZEC 卡，
+            # 显示成"聪明钱 $85.1M @Binance"挂在 ZEC 上，方向还反了。
+            # 排除稳定币/计价币等噪声 token（USDT 转账等归因到稳定币卡无意义）。
+            _NOISE_TOKENS = {
+                "USDT", "USDC", "DAI", "USDE", "FDUSD", "TUSD", "BUSD", "PYUSD",
+                "GUSD", "USD", "RLUSD", "FRAX", "USDD", "USD1", "USD0", "EUSD",
+                "sUSD", "LUSD", "MIM", "DAI", "EURC", "USDP",
+            }
+            if (str(result.get("signal_category") or "").lower() == "onchain"
+                    and result.get("event_token")
+                    and str(result["event_token"]).upper().strip() not in _NOISE_TOKENS):
+                if result.get("symbol"):
+                    result["symbol"] = str(result["event_token"]).upper()
             asset_id = match_asset(result.get("symbol"))
 
             # 组装信号数据

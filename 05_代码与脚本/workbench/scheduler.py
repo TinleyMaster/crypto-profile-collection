@@ -82,6 +82,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("insider_cluster_weekly", "30 4 * * 1", "phase_chain_insider_clusters.py", ["--limit", "9999"],
      "Meme insider 钱包聚类 - Solana（每周一 04:30，RugCheck /report）", "chain"),
 
+    # ═══ MEME 调度补齐（2026-09-11，方案 A）═══
+    ("chain_coverage_daily", "30 7 * * *", "phase_build_chain_coverage.py", [],
+     "链覆盖状态声明（每日 07:30，须在 holder snapshot 07:00 后）", "core"),
+    ("meme_dex_trending_daily", "30 9 * * *", "phase_dex_trending_heat.py", ["--limit", "200"],
+     "Meme DEX 热搜/趋势补全（每日 09:30，GeckoTerminal+DexScreener）", "core"),
+    ("meme_holder_qualitative_daily", "0 10 * * *", "phase_meme_holder_qualitative.py", ["--limit", "100"],
+     "Meme 降级定性持仓活跃度（每日 10:00，可选）", "core"),
+
     # ═══ 每日数据同步/矫正总调度（串起所有同步/对齐/去重/兜底任务，按依赖顺序执行）═══
     ("data_sync_daily", "30 6 * * *", "run_data_sync_daily.py", [],
      "每日数据同步/矫正总调度（赛道→去重→文档入口→第三方→supply对齐→diff→链接重标→解锁→KOL回测）", "core"),

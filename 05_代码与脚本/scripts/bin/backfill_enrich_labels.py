@@ -286,6 +286,10 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
                               f"已查到标签 {stat_counts['ok'] + batch_stats['ok']} 个 | "
                               f"速度 {rate:.1f}/s | 预计剩余 {eta/60:.1f} 分钟")
 
+            # 本批写库统计
+            batch_inserted = 0
+            batch_backfilled = 0
+
             # 本批写库（单线程，串行安全）
             if batch_results:
                 try:
@@ -340,6 +344,7 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
 
                         conn.commit()
                         inserted_total += inserted
+                        batch_inserted = inserted
 
                         # 回填转账记录
                         from crypto_research.clients.label_enricher import CASE_SENSITIVE_CHAINS as CS_CHAINS
@@ -402,6 +407,7 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
 
                         conn.commit()
                         backfilled_total += from_up + to_up
+                        batch_backfilled = from_up + to_up
 
                 except Exception as e:
                     print(f"  ⚠️  本批写库失败: {e}")
@@ -424,8 +430,8 @@ def _run_for_chains(conn, chains: list[str], args) -> None:
             fail_str = f"，失败: {', '.join(fail_parts)}" if fail_parts else ""
             print(f"  ── 批次完成 {batch_end}/{len(addresses)} ({pct:.0f}%) ── "
                   f"本批查到标签 {batch_stats['ok']} 个, "
-                  f"入库 {inserted_total - (inserted_total - len([1 for _ in range(1)]))} 条, "
-                  f"回填 {backfilled_total} 条{fail_str}")
+                  f"入库 {batch_inserted} 条, "
+                  f"回填 {batch_backfilled} 条{fail_str}")
 
         # 清理所有线程的 fetcher
         for f in thread_local.values():

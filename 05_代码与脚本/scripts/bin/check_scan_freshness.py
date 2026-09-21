@@ -51,11 +51,15 @@ OI_MAX_AGE_MIN = 30
 SIGNAL_MAX_AGE_MIN = 60
 REALERT_INTERVAL_H = 6
 # 任务心跳：3× 任务周期（scan_klines/oi/alert 300s→15min，main_pool 900s→45min，
-# accumulation 1800s→90min）。心跳覆盖「数据还在被回填、但扫描线程已死」这类故障。
+# accumulation 1800s→90min），与 scan_daemon.STALL_HEARTBEAT_GRACE 同口径。
+# 心跳覆盖「数据还在被回填、但扫描线程已死」这类故障。
 HEARTBEAT_MAX_AGE_MIN = {
     "scan_klines": 15, "scan_oi_cvd": 15, "scan_alert": 15,
     "scan_main_pool": 45, "scan_accumulation": 90,
 }
+# scan_daemon 启动时写的进程标记（last_run_at = 进程启动时刻）。据此区分
+# 「本实例刚重启、某线程首轮还没跑完」（宽限，不报）与「线程从未启动」（真故障）。
+DAEMON_START_TASK = "__daemon__"
 
 
 def _fmt_utc(dt: datetime | None) -> str:
@@ -97,11 +101,19 @@ def _collect_items(conn) -> list[dict]:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
             hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
+        daemon_start = hb.get(DAEMON_START_TASK)
         for task, threshold in HEARTBEAT_MAX_AGE_MIN.items():
             last = hb.get(task)
-            if last is None:
-                items.append({"name": f"任务{task}", "mx": None, "age_min": None,
-                              "threshold": threshold, "stale": True})
+            # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 以进程启动时刻
+            # 起算宽限：超过阈值才判停摆，避免每次部署后立刻误报。
+            if last is None or (daemon_start is not None and last < daemon_start):
+                if daemon_start is None:
+                    items.append({"name": f"任务{task}", "mx": None, "age_min": None,
+                                  "threshold": threshold, "stale": True})
+                    continue
+                age = (now - daemon_start).total_seconds() / 60
+                items.append({"name": f"任务{task}首轮", "mx": daemon_start, "age_min": age,
+                              "threshold": threshold, "stale": age > threshold})
                 continue
             age = (now - last).total_seconds() / 60
             items.append({"name": f"任务{task}", "mx": last, "age_min": age,

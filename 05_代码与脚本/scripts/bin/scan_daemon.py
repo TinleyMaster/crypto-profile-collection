@@ -399,11 +399,16 @@ MAX_OI_ACC_AGE_MIN = 90
 # 采集停摆告警：数据年龄超过该分钟数即视为停摆；同一告警最短重发间隔（小时）
 STALL_ALERT_AGE_MIN = 30
 STALL_ALERT_MIN_INTERVAL_H = 6
-# 任务心跳停摆：心跳年龄 > max(N × 任务周期, STALL_ALERT_AGE_MIN) 即视为该任务停产
+# 任务心跳停摆：心跳年龄 > N × 任务周期 即视为该任务停产（与外部看门狗
+# check_scan_freshness.py 的 HEARTBEAT_MAX_AGE_MIN 保持同一口径：3× 周期）
 STALL_HEARTBEAT_GRACE = 3
 # 参与心跳检查的任务（采集 + 出信号的两个池 + 告警）
 STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_main_pool",
                          "scan_accumulation", "scan_alert")
+# 进程启动标记：main() 取得单实例锁后写一条 last_run_at=进程启动时刻的心跳，
+# 供停摆检测区分「线程从未启动」与「本实例刚重启、首轮还没跑完」——
+# 后者若按普通心跳判据会在每次部署后误报一次停摆告警。
+DAEMON_START_TASK = "__daemon__"
 
 # 本进程实际调度的任务名（main() 启动时填充，停摆检测只检查这些任务）
 _SCHEDULED_TASKS: set[str] = set()
@@ -1021,14 +1026,24 @@ def _stall_parts(conn, now: datetime) -> list[str]:
             cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
             hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
         scheduled = _SCHEDULED_TASKS or {t[0] for t in TASK_DEFS}
+        daemon_start = hb.get(DAEMON_START_TASK)
         for name in STALL_HEARTBEAT_TASKS:
             if name not in scheduled:
                 continue
             iv = next((t[1] for t in TASK_DEFS if t[0] == name), 0)
-            limit_min = max(iv * STALL_HEARTBEAT_GRACE / 60.0, float(STALL_ALERT_AGE_MIN))
+            limit_min = iv * STALL_HEARTBEAT_GRACE / 60.0
             last = hb.get(name)
-            if last is None:
-                parts.append(f"任务 {name} 无心跳记录（该线程可能从未启动）")
+            # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 给整个
+            # limit_min 宽限，避免每次部署后立刻误报「线程从未启动」。
+            if last is None or (daemon_start is not None and last < daemon_start):
+                if daemon_start is None:
+                    parts.append(f"任务 {name} 无心跳记录（该线程可能从未启动）")
+                else:
+                    gap_min = (now - daemon_start).total_seconds() / 60
+                    if gap_min > limit_min:
+                        parts.append(
+                            f"任务 {name} 本实例已启动 {gap_min:.0f} 分钟仍无首轮心跳"
+                            f"（阈值 {limit_min:.0f} 分钟）")
                 continue
             age_min = (now - last).total_seconds() / 60
             if age_min > limit_min:
@@ -1851,6 +1866,11 @@ def main() -> int:
         return 1
 
     _SCHEDULED_TASKS.update(t[0] for t in tasks_to_run)
+
+    # 进程启动标记（须在各任务线程启动前写）：停摆检测据此判断「某任务在本实例
+    # 里是首轮还没跑完（宽限）」还是「从未启动（真故障）」，否则每次部署后
+    # 都会因首轮未完成而误报一次停摆告警（2026-09-21 实测触发）。
+    _write_heartbeat(DAEMON_START_TASK, True)
 
     print(f"[scan_daemon] 启动 {len(tasks_to_run)} 个任务: {', '.join(t[0] for t in tasks_to_run)}")
 

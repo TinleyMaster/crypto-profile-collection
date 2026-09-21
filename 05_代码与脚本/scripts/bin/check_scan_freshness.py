@@ -50,22 +50,55 @@ KLINE_MAX_AGE_MIN = 30
 OI_MAX_AGE_MIN = 30
 SIGNAL_MAX_AGE_MIN = 60
 REALERT_INTERVAL_H = 6
-# 任务心跳：3× 任务周期（scan_klines/oi/alert 300s→15min，main_pool 900s→45min，
-# accumulation 1800s→90min），与 scan_daemon.STALL_HEARTBEAT_GRACE 同口径。
-# 心跳覆盖「数据还在被回填、但扫描线程已死」这类故障。
+# 任务心跳：3× 任务周期（scan_klines/oi/liquidation/alert/squeeze 300s→15min，
+# main_pool 900s→45min，accumulation/watchlist 1800s→90min，prune 24h→72h），
+# 与 scan_daemon.STALL_HEARTBEAT_GRACE 同口径，且必须与 TASK_DEFS 全覆盖
+# （审计 P0-B：原先漏了 squeeze/liquidation/watchlist，而 2026-09-21 停摆里
+# 唯一留下物证的任务恰恰是盲区中的 scan_squeeze）。
+# 判据读 last_ok_at（最近一次成功）而非 last_run_at —— 见 _collect_items 注释。
 HEARTBEAT_MAX_AGE_MIN = {
-    "scan_klines": 15, "scan_oi_cvd": 15, "scan_alert": 15,
-    "scan_main_pool": 45, "scan_accumulation": 90,
+    "scan_klines": 15, "scan_oi_cvd": 15, "scan_liquidation": 15,
+    "scan_alert": 15, "scan_squeeze": 15,
+    "scan_main_pool": 45, "scan_accumulation": 90, "watchlist_monitor": 90,
+    "prune_scan_data": 4320,
 }
 # scan_daemon 启动时写的进程标记（last_run_at = 进程启动时刻）。据此区分
 # 「本实例刚重启、某线程首轮还没跑完」（宽限，不报）与「线程从未启动」（真故障）。
 DAEMON_START_TASK = "__daemon__"
+# 交叉判据映射（审计 P2-7）：数据项 → 产出该数据的采集任务。
+# 「数据停摆 + 对应任务心跳正常」= 进程健康而数据不落库 ⇒ 疑似静默失败
+# （2026-09-21 实况：stdout 断开后每轮 print 抛 ValueError、func() 从未执行，
+# 而 last_run_at 照常推进）。
+DATA_SOURCE_TASKS = {
+    "15m K线": ("scan_klines",),
+    "OI 实时采样": ("scan_oi_cvd",),
+    "扫描信号": ("scan_alert", "scan_main_pool"),
+}
 
 
 def _fmt_utc(dt: datetime | None) -> str:
     if dt is None:
         return "无数据"
     return dt.astimezone(timezone.utc).strftime("%m-%d %H:%M UTC")
+
+
+def _detect_silent_failure(items: list[dict]) -> list[str]:
+    """交叉判据：数据停摆，但其采集任务按 last_ok_at 判为正常 → 疑似静默失败。"""
+    hits: list[str] = []
+    for data_name, tasks in DATA_SOURCE_TASKS.items():
+        data_item = next((it for it in items if it["name"] == data_name), None)
+        if data_item is None or not data_item["stale"]:
+            continue
+        for task in tasks:
+            task_item = next(
+                (it for it in items if it.get("task") == task), None)
+            if task_item is None or task_item["stale"]:
+                continue
+            hits.append(
+                f"{data_name}已停更（{_fmt_utc(data_item['mx'])}），但任务 {task} "
+                f"最近一次成功在 {_fmt_utc(task_item['mx'])}（判为正常）")
+            break
+    return hits
 
 
 def _collect_items(conn) -> list[dict]:
@@ -99,25 +132,47 @@ def _collect_items(conn) -> list[dict]:
     # 任务心跳（表不存在时跳过，兼容迁移未执行的部署）
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
-            hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
-        daemon_start = hb.get(DAEMON_START_TASK)
+            cur.execute(
+                "SELECT task, last_run_at, last_ok_at, last_error FROM biz.scan_heartbeat")
+            hb = {r["task"]: r for r in cur.fetchall()}
+        start_row = hb.get(DAEMON_START_TASK)
+        daemon_start = start_row["last_run_at"] if start_row else None
         for task, threshold in HEARTBEAT_MAX_AGE_MIN.items():
-            last = hb.get(task)
+            row = hb.get(task)
+            last_run = row["last_run_at"] if row else None
             # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 以进程启动时刻
             # 起算宽限：超过阈值才判停摆，避免每次部署后立刻误报。
-            if last is None or (daemon_start is not None and last < daemon_start):
+            if row is None or (daemon_start is not None and last_run < daemon_start):
                 if daemon_start is None:
-                    items.append({"name": f"任务{task}", "mx": None, "age_min": None,
-                                  "threshold": threshold, "stale": True})
+                    items.append({"name": f"任务{task}", "task": task, "mx": None,
+                                  "age_min": None,
+                                  "threshold": threshold, "stale": True,
+                                  "note": "该线程可能从未启动"})
                     continue
                 age = (now - daemon_start).total_seconds() / 60
-                items.append({"name": f"任务{task}首轮", "mx": daemon_start, "age_min": age,
-                              "threshold": threshold, "stale": age > threshold})
+                items.append({"name": f"任务{task}首轮", "task": task, "mx": daemon_start,
+                              "age_min": age,
+                              "threshold": threshold, "stale": age > threshold,
+                              "note": "本实例尚未跑完首轮"})
                 continue
-            age = (now - last).total_seconds() / 60
-            items.append({"name": f"任务{task}", "mx": last, "age_min": age,
-                          "threshold": threshold, "stale": age > threshold})
+            # 判据用 last_ok_at（最近一次**成功**）而非 last_run_at：stdout/日志
+            # 设施故障时每轮都在 print 处抛 ValueError，func() 从未执行，而
+            # last_run_at 照常推进 —— 只看 last_run_at 会把「数据停摆 50 分钟、
+            # 任务行却全绿」判成正常（审计 P0-B，2026-09-21 实物证据）。
+            # 未成功过（last_ok_at IS NULL）→ 以进程启动时刻起算宽限。
+            base = row["last_ok_at"] or daemon_start
+            if base is None:
+                items.append({"name": f"任务{task}", "task": task, "mx": None,
+                              "age_min": None,
+                              "threshold": threshold, "stale": True,
+                              "note": "从未成功执行"})
+                continue
+            age = (now - base).total_seconds() / 60
+            err = row["last_error"]
+            items.append({"name": f"任务{task}", "task": task, "mx": base, "age_min": age,
+                          "threshold": threshold, "stale": age > threshold,
+                          "note": (f"线程在跑但连续失败：{err}" if err else
+                                   ("最近一次成功" if age > threshold else ""))})
     except Exception as e:  # noqa: BLE001
         print(f"[看门狗] 心跳检查跳过（{e}）", file=sys.stderr)
     return items
@@ -150,17 +205,22 @@ def _render_items_html(items: list[dict]) -> str:
         else:
             detail = f"最新 {_fmt_utc(it['mx'])}（距今 {it['age_min']:.0f} 分钟）"
         mark = "🔴 停摆" if it["stale"] else "🟢 正常"
+        # note（心跳语义：线程在跑但连续失败 / 从未启动 / 首轮宽限）必须渲染出来，
+        # 否则「数据停摆、任务全绿」的自相矛盾会原样复现（审计 P0-B / P2-5）。
+        note = it.get("note") or ""
         rows.append(
             f"<tr><td style='padding:4px 10px;border:1px solid #ddd'>{it['name']}</td>"
             f"<td style='padding:4px 10px;border:1px solid #ddd'>{mark}</td>"
             f"<td style='padding:4px 10px;border:1px solid #ddd'>{detail}</td>"
-            f"<td style='padding:4px 10px;border:1px solid #ddd'>阈值 {it['threshold']} 分钟</td></tr>"
+            f"<td style='padding:4px 10px;border:1px solid #ddd'>阈值 {it['threshold']} 分钟</td>"
+            f"<td style='padding:4px 10px;border:1px solid #ddd;color:#888'>{note}</td></tr>"
         )
     return ("<table style='border-collapse:collapse;font-size:13px'>"
             "<tr><th style='padding:4px 10px;border:1px solid #ddd'>数据</th>"
             "<th style='padding:4px 10px;border:1px solid #ddd'>状态</th>"
             "<th style='padding:4px 10px;border:1px solid #ddd'>最新时间</th>"
-            "<th style='padding:4px 10px;border:1px solid #ddd'>—</th></tr>"
+            "<th style='padding:4px 10px;border:1px solid #ddd'>阈值</th>"
+            "<th style='padding:4px 10px;border:1px solid #ddd'>说明</th></tr>"
             + "".join(rows) + "</table>")
 
 
@@ -222,9 +282,38 @@ def main() -> int:
         ages = ", ".join(
             f"{it['name']}停在{_fmt_utc(it['mx'])}" if it["mx"] is not None
             else f"{it['name']}表为空" for it in stale_items)
+        silent = _detect_silent_failure(items)
         print(f"[看门狗] 停摆项: {names}" + ("（dry-run 不发送）" if args.dry_run else " → 发告警邮件"))
+        if silent:
+            print("[看门狗] 疑似静默失败（数据停摆但采集任务心跳判为正常）：")
+            for s in silent:
+                print(f"  - {s}")
         if args.dry_run:
             return 0
+
+        # 交叉判据分节（审计 P2-7）：数据停摆 + 对应任务心跳正常 ⇒ 进程健康但
+        # 数据不落库，属静默失败，成因与「进程没起来」完全不同，必须单独说清。
+        silent_html = ""
+        if silent:
+            silent_html = (
+                "<h3 style='margin:18px 0 6px'>🔍 疑似静默失败（进程健康、数据不落库）</h3>"
+                "<p>下列数据的采集任务按 <code>last_ok_at</code> 判定为<b>正常</b>，"
+                "但数据本身已停更 —— 说明守护进程在跑、任务函数却没有真正执行：</p>"
+                "<ul>" + "".join(f"<li>{s}</li>" for s in silent) + "</ul>"
+                "<p>最常见成因：容器日志设施断开后 <code>print()</code> 抛 "
+                "<code>ValueError: I/O operation on closed file.</code>，异常被吞成"
+                "「单轮失败」，业务函数从未执行，而心跳照常推进。"
+                "新版 scan_daemon 已加固日志流（写失败即丢弃）并在连续 3 "
+                "轮失败后主动退出交 supervisord 重启；若本邮件仍出现该分节，"
+                "请在容器内执行 <code>supervisorctl restart scan_daemon</code>。</p>")
+        cause_html = (
+            "<p><b>两类成因怎么区分</b>：<br>"
+            "① 任务行说明列写「线程在跑但连续失败：…」⇒ <b>线程在跑、每轮都失败</b>"
+            "（静默失败，见上节）；<br>"
+            "② 任务项写「无心跳 / 从未启动」或整个表都没有任务行 ⇒ "
+            "<b>进程或线程确实没起来</b>（进程崩溃、Zeabur 部署被移除、容器未运行）。<br>"
+            "两类也都可能叠加 Binance IP 限频（418）。另注意："
+            "<b>文件更新 ≠ 进程重启</b>，改了代码不重启容器不生效。</p>")
 
         ok, msg = _send_mail(
             settings,
@@ -232,7 +321,9 @@ def main() -> int:
             "<h2 style='margin:0'>🔴 盘面扫描数据停摆告警（外部看门狗）</h2>"
             f"<p>以下数据超过阈值未更新，主池/蓄势池扫描已无法产出有效信号：</p>"
             + _render_items_html(items)
-            + "<p><b>可能原因</b>：scan_daemon 进程崩溃/未启动、Binance IP 限频、"
+            + silent_html
+            + cause_html
+            + "<p><b>其他可能原因</b>：scan_daemon 进程崩溃/未启动、Binance IP 限频、"
               "Zeabur 部署被移除或容器未运行。</p>"
             "<p style='color:#999;font-size:12px'>"
             "本邮件由 scheduler 独立调度（每小时），不依赖 scan_daemon 存活；"

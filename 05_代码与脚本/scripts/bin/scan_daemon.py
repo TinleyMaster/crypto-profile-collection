@@ -56,6 +56,63 @@ from crypto_research.clients.binance_http import fapi_get, set_min_request_gap  
 from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 
+# ── 日志流韧性（审计 P0-A 根因修复） ────────────────────────────
+
+
+class _ResilientStream:
+    """stdout/stderr 代理：底层流被关闭/断开时吞掉写入错误。
+
+    容器日志设施（Zeabur 日志管道）断开会把子进程的 stdout 变成「已关闭文件」，
+    此后任何 ``print`` 都抛 ``ValueError: I/O operation on closed file.``。
+    原实现把每轮第一行 print 放在 ``try`` 内、``func()`` 之前，于是「打印失败」
+    被 ``except`` 吞成「单轮失败」，``func()`` 从未执行 → K线/OI/信号全线静默停产，
+    而心跳（只走 DB）照常推进（2026-09-21 停摆 48 分钟，审计 P0-A）。
+
+    此代理让日志故障与业务彻底解耦：写失败静默丢弃，绝不向上抛异常。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, s):
+        try:
+            return self._inner.write(s)
+        except Exception:  # noqa: BLE001
+            return len(s)
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+    @property
+    def closed(self) -> bool:
+        # 恒为 False：底层流即便被关闭，本代理仍可安全 write（写入被丢弃）
+        return False
+
+    def __getattr__(self, name):
+        # fileno / reconfigure / encoding / errors 等一律转发给底层流
+        return getattr(self._inner, name)
+
+
+def _harden_streams() -> None:
+    """把 stdout/stderr 换成韧性代理（幂等，重复调用无副作用）。"""
+    if not isinstance(sys.stdout, _ResilientStream):
+        sys.stdout = _ResilientStream(sys.stdout)
+    if not isinstance(sys.stderr, _ResilientStream):
+        sys.stderr = _ResilientStream(sys.stderr)
+
+
 # ── 全局共享资源 ────────────────────────────────────────────────
 
 _SETTINGS = None
@@ -427,9 +484,18 @@ STALL_ALERT_MIN_INTERVAL_H = 6
 # 任务心跳停摆：心跳年龄 > N × 任务周期 即视为该任务停产（与外部看门狗
 # check_scan_freshness.py 的 HEARTBEAT_MAX_AGE_MIN 保持同一口径：3× 周期）
 STALL_HEARTBEAT_GRACE = 3
-# 参与心跳检查的任务（采集 + 出信号的两个池 + 告警）
-STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_main_pool",
-                         "scan_accumulation", "scan_alert")
+# 参与心跳检查的任务（审计 P0-B：原先漏了 squeeze/liquidation/watchlist，
+# 而 2026-09-21 停摆中唯一留下物证的恰恰是盲区里的 scan_squeeze）。必须与
+# TASK_DEFS 全覆盖（阈值由各自周期 ×STALL_HEARTBEAT_GRACE 自动推导）。
+STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_liquidation", "scan_alert",
+                         "scan_squeeze", "scan_main_pool", "scan_accumulation",
+                         "watchlist_monitor", "prune_scan_data")
+# 连续失败自杀：同一任务连续 N 轮 ok=False 即退出进程，交 supervisord 拉起
+# （审计 P1-4）。半死进程（stdout 关闭/线程卡死）会一直占着单实例锁，新实例
+# 永远起不来 —— 这是 2026-09-18 63h、2026-09-21 48min 两次停摆的共同放大器。
+MAX_CONSEC_FAILURES = 3
+# 僵尸实例判定：锁被占用但心跳已停止推进超过该分钟数
+SINGLETON_ZOMBIE_GRACE_MIN = 10
 # 进程启动标记：main() 取得单实例锁后写一条 last_run_at=进程启动时刻的心跳，
 # 供停摆检测区分「线程从未启动」与「本实例刚重启、首轮还没跑完」——
 # 后者若按普通心跳判据会在每次部署后误报一次停摆告警。
@@ -1063,19 +1129,22 @@ def _stall_parts(conn, now: datetime) -> list[str]:
     # 任务心跳（表不存在时跳过，兼容迁移未执行的部署）
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
-            hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
+            cur.execute(
+                "SELECT task, last_run_at, last_ok_at, last_error FROM biz.scan_heartbeat")
+            hb = {r["task"]: r for r in cur.fetchall()}
         scheduled = _SCHEDULED_TASKS or {t[0] for t in TASK_DEFS}
-        daemon_start = hb.get(DAEMON_START_TASK)
+        start_row = hb.get(DAEMON_START_TASK)
+        daemon_start = start_row["last_run_at"] if start_row else None
         for name in STALL_HEARTBEAT_TASKS:
             if name not in scheduled:
                 continue
             iv = next((t[1] for t in TASK_DEFS if t[0] == name), 0)
             limit_min = iv * STALL_HEARTBEAT_GRACE / 60.0
-            last = hb.get(name)
+            row = hb.get(name)
+            last_run = row["last_run_at"] if row else None
             # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 给整个
             # limit_min 宽限，避免每次部署后立刻误报「线程从未启动」。
-            if last is None or (daemon_start is not None and last < daemon_start):
+            if row is None or (daemon_start is not None and last_run < daemon_start):
                 if daemon_start is None:
                     parts.append(f"任务 {name} 无心跳记录（该线程可能从未启动）")
                 else:
@@ -1085,11 +1154,22 @@ def _stall_parts(conn, now: datetime) -> list[str]:
                             f"任务 {name} 本实例已启动 {gap_min:.0f} 分钟仍无首轮心跳"
                             f"（阈值 {limit_min:.0f} 分钟）")
                 continue
-            age_min = (now - last).total_seconds() / 60
+            # 判据用 last_ok_at（最近一次**成功**）而非 last_run_at：stdout/日志
+            # 设施故障时每轮都在 print 处抛异常，func() 从未执行，而 last_run_at
+            # 照常推进 —— 只看 last_run_at 会把这类「静默失败」判为正常
+            # （审计 P0-B，2026-09-21 数据停摆 50 分钟而任务行全绿）。
+            # 未成功过（last_ok_at IS NULL）→ 以进程启动时刻起算宽限。
+            base = row["last_ok_at"] or daemon_start
+            if base is None:
+                parts.append(f"任务 {name} 从未成功执行（无成功记录）")
+                continue
+            age_min = (now - base).total_seconds() / 60
             if age_min > limit_min:
+                err = row["last_error"]
+                detail = f"，最近一轮报错 {err}" if err else ""
                 parts.append(
-                    f"任务 {name} 心跳停在 {last.strftime('%m-%d %H:%M')} UTC"
-                    f"（约 {age_min:.0f} 分钟前，阈值 {limit_min:.0f} 分钟）")
+                    f"任务 {name} 最近一次成功停在 {base.strftime('%m-%d %H:%M')} UTC"
+                    f"（约 {age_min:.0f} 分钟前，阈值 {limit_min:.0f} 分钟）{detail}")
     except Exception as e:  # noqa: BLE001
         print(f"[scan_daemon][stall] 心跳检查跳过（{e}）", file=sys.stderr)
     return parts
@@ -1128,8 +1208,14 @@ def _check_and_alert_stall(conn) -> bool:
             "<h2 style='margin:0'>⚠️ 盘面扫描停摆告警</h2>"
             f"<p>以下数据/任务已超过阈值未更新，主池/蓄势池扫描可能已停止产出：</p>"
             f"<p>{'<br>'.join(parts)}</p>"
-            "<p style='color:#999'>请检查 scan_daemon 进程/线程状态、Binance IP 限频、"
-            "以及部署是否被移除（文件更新 ≠ 进程重启）；恢复后自动解除。</p>"
+            "<p><b>两类成因怎么区分</b>（审计 P2-5/P2-7）：<br>"
+            "① 任务项写「最近一次成功停在 …」⇒ <b>线程在跑但每轮都失败</b>（静默失败），"
+            "最常见是容器日志设施断开后 print 抛 <code>ValueError: I/O operation on "
+            "closed file.</code>，任务函数从未执行，而心跳照常推进；<br>"
+            "② 任务项写「无心跳 / 从未启动」⇒ 进程或线程确实没起来。<br>"
+            "两者也可能是 Binance IP 限频、部署被移除（<b>文件更新 ≠ 进程重启</b>）。</p>"
+            f"<p style='color:#999'>任务连续失败 ≥{MAX_CONSEC_FAILURES} 轮时 scan_daemon 会"
+            "自行退出，交 supervisord 拉起（自愈）；数据恢复后本告警自动解除。</p>"
         )
         ok, msg = notifier.send(
             "⚠️ 盘面扫描停摆告警", body, from_name="盘面信号扫描")
@@ -1255,10 +1341,14 @@ def _perp_alias_map(symbols: list[str]) -> dict[str, str]:
 def task_scan_liquidation() -> dict:
     """刷 CoinGlass coin-list 滚动爆仓窗口 → biz.liquidation_snapshot（单轮）。
 
-    HOBBYIST 套餐爆仓最小粒度 4h，拿不到细粒度历史序列，只能靠滚动窗口高频轮询差分：
-    相邻两次快照的 `*_liq_usd_1h` 之差 ≈ 该间隔内新增的（多/空）爆仓额
-    （误差 = 同长度窗口滚出的旧爆仓，间隔取 5min 时误差可接受）。
-    实测 coin-list 刷新约 20~40s 一次，故 5min 轮询不会漏采。
+    HOBBYIST 套餐爆仓最小粒度 4h，拿不到细粒度历史序列，只能高频轮询落库。
+    ⚠️ 口径（2026-09-21 审计 P1-1 更正）：`*_liq_usd_1h` 是 CoinGlass 的
+    **滚动 1 小时窗口快照**，不是「某个整点的累计」。因此**相邻两次快照相减
+    不等于该间隔内新增的爆仓额**——数学上是「新滚入窗口的量 − 滚出窗口的量」，
+    在爆仓平稳时近似 0、在回落时恒为负（再被 max(…,0) 截断就是假 0）。
+    消费侧必须直接使用该字段的**绝对值**（= 最近 1 小时爆仓额），严禁跨桶差分
+    （见 `task_scan_squeeze` / `_latest_liq_snapshot`）。
+    实测 coin-list 刷新约 20~40s 一次，5min 轮询不会漏采。
     """
     client = _coinglass()
     rows = client.liquidation_coin_list()
@@ -1740,24 +1830,83 @@ SCAN_SINGLETON_LOCK_KEY = 0x5CA9DAE1   # scan_daemon 单实例 advisory lock（�
 _SINGLETON_CONN = None                 # 持有该锁的连接，进程存活期间不归还连接池
 
 
+def _try_advisory_lock(conn) -> bool:
+    """申请会话级单实例锁，返回是否拿到。
+
+    必须提交：会话级 advisory lock 本身不需要事务，但 psycopg3 默认
+    autocommit=False，不提交会让这条常驻连接以「idle in transaction」
+    状态挂住整个进程生命周期，长期阻挡 autovacuum 回收死元组
+    （对一个高频写库的常驻连接是真实副作用，审计 P2-N5）。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (SCAN_SINGLETON_LOCK_KEY,))
+        got = bool(cur.fetchone()[0])
+    conn.commit()
+    return got
+
+
+def _heartbeat_stalled() -> bool:
+    """全局心跳是否已停止推进（僵尸实例判定用）。查询异常时保守返回 False。"""
+    try:
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(last_run_at) FROM biz.scan_heartbeat")
+                mx = cur.fetchone()[0]
+        if mx is None:
+            return False
+        age_min = (datetime.now(timezone.utc) - mx).total_seconds() / 60
+        return age_min > SINGLETON_ZOMBIE_GRACE_MIN
+    except Exception as e:  # noqa: BLE001
+        print(f"[scan_daemon] 僵尸实例判定跳过（{e}）", file=sys.stderr)
+        return False
+
+
+def _evict_zombie_lock_holder(conn) -> int | None:
+    """锁被占用且心跳已停滞 → 判持有者为僵尸实例并终止其连接，返回被终止的 pid。
+
+    半死实例（平台关掉了它的 stdout、线程卡死等）会一直占着单实例锁，让新实例
+    永远起不来 —— 2026-09-18 63h、2026-09-21 48min 两次停摆都由这条链路放大
+    （审计 P0-A）。终止的对象是**空闲的会话连接**，不涉及任何数据写操作；僵尸
+    进程下次写库会自行发现连接断开，新实例随即接管。
+    """
+    key = SCAN_SINGLETON_LOCK_KEY
+    hi, lo = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pid FROM pg_locks WHERE locktype='advisory' AND objsubid=1 "
+            "AND classid::bigint = %s AND objid::bigint = %s "
+            "AND pid <> pg_backend_pid()",
+            (hi, lo))
+        row = cur.fetchone()
+        if not row:
+            return None
+        pid = row[0]
+        cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        conn.commit()
+    return pid
+
+
 def _acquire_singleton_lock(db_pool) -> bool:
     """申请单实例锁（审计 P0-3），成功则独占该连接直到进程退出。
 
     锁必须在**独立且常驻**的连接上持有：连接池连接被回收/重置时会话级锁随之释放。
     申请本身异常时**放行**（fail-open）——宁可冒双实例风险，也不能让守护进程起不来，
     因为「守护进程完全没运行」正是 2026-09-18 那次 63h 静默停摆的根因。
+
+    锁被占用时若心跳已停滞（>SINGLETON_ZOMBIE_GRACE_MIN 分钟无推进），说明持有者
+    是僵尸实例（进程活着、业务已死），先驱逐再重试一次 —— 否则新实例永远起不来，
+    形成无限停摆（审计 P0-A）。
     """
     global _SINGLETON_CONN
     try:
         conn = db_pool.getconn()
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (SCAN_SINGLETON_LOCK_KEY,))
-            got = bool(cur.fetchone()[0])
-        # 必须提交：会话级 advisory lock 本身不需要事务，但 psycopg3 默认
-        # autocommit=False，不提交会让这条常驻连接以「idle in transaction」
-        # 状态挂住整个进程生命周期，长期阻挡 autovacuum 回收死元组
-        # （对一个高频写库的常驻连接是真实副作用，审计 P2-N5）。
-        conn.commit()
+        got = _try_advisory_lock(conn)
+        if not got and _heartbeat_stalled():
+            pid = _evict_zombie_lock_holder(conn)
+            if pid:
+                print(f"[scan_daemon] 单实例锁持有者(pid={pid})心跳已停滞超过 "
+                      f"{SINGLETON_ZOMBIE_GRACE_MIN} 分钟，判定为僵尸实例并终止其连接，重试取锁")
+                got = _try_advisory_lock(conn)
         if not got:
             db_pool.putconn(conn)
             return False
@@ -1808,6 +1957,7 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
 
     running = False
     round_count = 0
+    fail_streak = 0
     while True:
         round_count += 1
         start_ts = time.time()
@@ -1817,11 +1967,15 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
             time.sleep(interval_sec)
             continue
 
+        # 日志放在 try 之外、func() 之前（审计 P0-A 修复）：原实现把这条 print
+        # 放在 try 内，stdout 失效时「打印失败」被 except 吞成「单轮失败」，
+        # func() 从未执行。_harden_streams() 已让 print 不再抛异常，此处再加一层。
+        print(f"[scan_daemon][{name}] 第 {round_count} 轮开始")
+
         running = True
         ok = False
         err: str | None = None
         try:
-            print(f"[scan_daemon][{name}] 第 {round_count} 轮开始")
             result = func(**func_kwargs)
             elapsed = time.time() - start_ts
             print(f"[scan_daemon][{name}] 第 {round_count} 轮完成，耗时 {elapsed:.1f}s，结果: {result}")
@@ -1835,6 +1989,15 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
         finally:
             running = False
             _write_heartbeat(name, ok, err)
+
+        # 连续失败 → 退出进程交 supervisord 拉起（审计 P1-4）。半死实例（stdout
+        # 失效、线程卡死）会一直占着单实例锁让新实例永远起不来，「进程级重启」
+        # 是唯一能自愈的路径（2026-09-18 63h / 2026-09-21 48min 两次停摆的共同放大器）。
+        fail_streak = 0 if ok else fail_streak + 1
+        if fail_streak >= MAX_CONSEC_FAILURES:
+            print(f"[scan_daemon][{name}] 连续 {fail_streak} 轮失败（最近: {err}），"
+                  f"主动退出交 supervisord 重启", file=sys.stderr)
+            os._exit(1)
 
         # 计算下一轮等待时间（扣除本轮耗时，保持固定节奏）
         elapsed = time.time() - start_ts
@@ -1857,6 +2020,11 @@ TASK_DEFS = [
 
 
 def main() -> int:
+    # 立即加固 stdout/stderr：容器日志设施断开后任何 print 都会抛
+    # ValueError 并（在旧实现里）被吞成「单轮失败」，导致业务函数永不执行
+    # （审计 P0-A）。此后所有日志（含 binance_http 的内部日志）写失败即丢弃。
+    _harden_streams()
+
     parser = argparse.ArgumentParser(description="盘面异动扫描守护进程（多任务单进程）")
     parser.add_argument("--run-once", metavar="TASK", help="只跑一次指定任务（调试）")
     parser.add_argument("--only", default="",

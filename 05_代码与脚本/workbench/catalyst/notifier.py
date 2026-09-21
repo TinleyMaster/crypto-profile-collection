@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from .asset_filter import ASSET_NAME_FILTER_SQL, IS_STOCK_SQL, is_non_crypto, is_stock
@@ -75,7 +75,7 @@ def _is_sent(conn, signal_id: int, ntype: str) -> bool:
     row = conn.execute("""
         SELECT 1 FROM biz.catalyst_notification_log
         WHERE signal_id = %s AND notification_type = %s
-          AND sent_at > NOW() - INTERVAL '%s hours'
+          AND sent_at > NOW() - (%s::int * INTERVAL '1 hour')
         LIMIT 1
     """, (signal_id, ntype, DEDUP_WINDOW_HOURS)).fetchone()
     return row is not None
@@ -105,7 +105,7 @@ def _try_acquire_send_lock(conn, signal_id: int, ntype: str,
                    tier = COALESCE(EXCLUDED.tier, biz.catalyst_notification_log.tier),
                    error_msg = NULL
              WHERE biz.catalyst_notification_log.sent_at
-                   < NOW() - INTERVAL '%s hours'
+                   < NOW() - (%s::int * INTERVAL '1 hour')
             RETURNING log_id
         """, (signal_id, ntype, tier, subject, DEDUP_WINDOW_HOURS)).fetchone()
         return row is not None
@@ -1126,24 +1126,80 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
       即「等价格确认再开单」等于追高；confirmed 现已归入观察池 status='watch'）
     - entry/stop/tp 齐全（可交易性）
     composite_score DESC 取前 2 条（每日 1~2 idea）。
+
+    返回字段覆盖「决策链 G0-G7 + 代币快照」全量：signal 全维度 + catalyst 原文
+    + grade/impact/resonance 分项 + core.asset 基本面 + 最新日线 + 在池信号计数，
+    供 _build_a_alert_card 一次渲染，邮件不依赖外链网页。
     """
     filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
     return conn.execute(f"""
         SELECT * FROM (
             SELECT DISTINCT ON (a.asset_id)
-                   s.signal_id, s.tier, s.composite_score, s.kind,
-                   s.technical_state, s.persistence,
-                   s.investment_cycle, s.ai_reason,
+                   -- 信号本体（G3-G7 结果 + 档位）
+                   s.signal_id, s.catalyst_id, s.asset_id,
+                   s.tier, s.composite_score, s.kind, s.base_strength,
+                   s.resonance_score, s.resonance_state,
+                   s.persistence, s.persistence_verified,
+                   s.fundamental_pass, s.fundamental_detail,
+                   s.technical_state, s.technical_detail,
+                   s.entry_trigger, s.entry_trigger_price,
                    s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
-                   s.resonance_state,
+                   s.confidence, s.invalidation, s.regime,
+                   s.ai_reason, s.investment_cycle,
+                   s.expires_at, s.created_at,
+                   -- 代币基础信息
                    a.canonical_name, a.canonical_symbol AS symbol,
+                   a.asset_type, a.primary_sector, a.categories,
+                   a.market_cap AS asset_market_cap, a.market_cap_rank,
+                   a.circulating_supply, a.total_supply,
+                   a.ath_usd, a.launch_date,
+                   -- 催化剂原文（G0）
                    ac.title AS catalyst_title, ac.title_cn,
-                   ac.ai_summary
+                   ac.ai_summary, ac.ai_event_type, ac.ai_sentiment,
+                   ac.rule_event_type, ac.source_code, ac.source_url,
+                   ac.published_at, ac.body_text AS catalyst_body,
+                   ac.event_category,
+                   -- G1 分级分项
+                   cg.authority_score, cg.event_weight, cg.scope_score,
+                   cg.mcap_score, cg.prelaunch_ret_24h, cg.prelaunch_penalty,
+                   cg.catalyst_kind, cg.event_type_src, cg.tradable,
+                   -- G2 影响 + 共振分项
+                   ci.impact_direction, ci.impact_strength, ci.horizon_days,
+                   ci.derived_from AS impact_derived_from,
+                   cr.excess_ret_1h, cr.excess_ret_4h,
+                   cr.excess_ret_24h, cr.excess_ret_72h,
+                   cr.vol_zscore_24h, cr.peer_median_ret_24h,
+                   cr.direction_match, cr.ret_source, cr.computed_at AS resonance_computed_at,
+                   -- 代币快照：最新日线
+                   md.price_usd AS current_price, md.change_24h, md.change_7d,
+                   md.volume_24h, md.market_cap AS md_market_cap,
+                   md.market_date AS md_date,
+                   -- 代币快照：在池信号计数
+                   pool.open_cnt, pool.watch_cnt
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
             JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+            LEFT JOIN biz.catalyst_grade cg ON cg.catalyst_id = s.catalyst_id
+            LEFT JOIN biz.catalyst_impact ci
+              ON ci.catalyst_id = s.catalyst_id AND ci.asset_id = s.asset_id
+            LEFT JOIN biz.catalyst_resonance cr
+              ON cr.catalyst_id = s.catalyst_id AND cr.asset_id = s.asset_id
+            LEFT JOIN LATERAL (
+                SELECT m.price_usd, m.change_24h, m.change_7d,
+                       m.volume_24h, m.market_cap, m.market_date
+                FROM biz.asset_market_daily m
+                WHERE m.asset_id = s.asset_id
+                ORDER BY m.market_date DESC
+                LIMIT 1
+            ) md ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) FILTER (WHERE x.status = 'open')  AS open_cnt,
+                       COUNT(*) FILTER (WHERE x.status = 'watch') AS watch_cnt
+                FROM biz.catalyst_signal x
+                WHERE x.asset_id = s.asset_id
+            ) pool ON TRUE
             WHERE s.status = 'open'
-              AND s.created_at > NOW() - INTERVAL '%s hours'
+              AND s.created_at > NOW() - (%s::int * INTERVAL '1 hour')
               AND s.tier = 'A'
               AND s.entry_price IS NOT NULL
               AND s.stop_loss IS NOT NULL
@@ -1158,10 +1214,12 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
 
 # ---- 中文化映射 ----
 
+# 趋势状态必须与「交易方向」区分（审计 P0-1：technical_state='up' 曾让做空信号
+# 被渲染成「技术面 看涨」）。这里只描述均线结构，不下方向结论。
 _TECH_STATE_CN = {
-    "up": "看涨",
-    "range": "震荡",
-    "down": "看跌",
+    "up": "上升趋势（up）",
+    "range": "震荡整理（range）",
+    "down": "下降趋势（down）",
     "strong": "强势",
     "weak": "弱势",
     "neutral": "中性",
@@ -1182,6 +1240,33 @@ _KIND_CN = {
     "noise": "噪音",
 }
 
+# 催化影响方向（与「交易方向」并列展示，两者可能相反：如上升趋势中的利空做空）
+_DIRECTION_CN = {
+    "bullish": "利好",
+    "bearish": "利空",
+    "neutral": "中性",
+}
+
+_IMPACT_STRENGTH_CN = {
+    "strong": "强",
+    "medium": "中",
+    "weak": "弱",
+}
+
+# d3 动作闸门语义（fix_053）：resonance_state → status
+_RESONANCE_CN = {
+    "confirmed": "已定价（confirmed → watch 观察池）",
+    "weak": "未充分定价（weak → open 可动作）",
+    "divergent": "方向背离（divergent → invalid 剔除）",
+    "pending": "未反应（pending → watch 观察池）",
+}
+
+_REGIME_CN = {
+    "risk_on": "风险偏好（Risk On）",
+    "neutral": "中性（Neutral）",
+    "risk_off": "风险规避（Risk Off）",
+}
+
 
 def _tech_cn(v) -> str:
     return _TECH_STATE_CN.get(v, v or "—")
@@ -1195,70 +1280,439 @@ def _kind_cn(v) -> str:
     return _KIND_CN.get(v, "—")
 
 
-def _truncate(text: str, length: int = 40) -> str:
-    """截断过长标题。"""
-    if not text:
-        return "—"
-    text = str(text).strip()
-    return text if len(text) <= length else text[: length - 1] + "…"
+def _build_a_alert_card(r: dict) -> str:
+    """构建 A 级 Alert 单条完整卡片（邮件内自包含，不依赖外链网页）。
 
+    四段结构（OPT-CATALYST-ALERT-001 改版）：
+      ① 交易计划：方向（做多/做空/中性）+ 触发条件 + 档位 + 失效条件
+      ② 催化剂原文：标题 / 正文全文 / AI 摘要 / 来源链接（不截断）
+      ③ 决策链 G0-G7：分级分项、影响与共振、持续性、基本面 checks、
+         技术面 MA/ATR、合成评分、AI 结论（ai_reason 全文）
+      ④ 代币快照：现价与涨跌、成交量、市值排名、供应、ATH、板块、在池信号
 
-def _build_signal_table(rows, tier: str) -> str:
-    """构建单级别信号决策卡片：代币 + 周期 + AI推荐原因 + 目标价/止损/盈亏比。"""
-    tier_color = {"A": "#7c3aed", "B": "#3b82f6"}.get(tier, "#6b7280")
-    blocks = ""
-    for r in rows[:15]:  # 每级别最多 15 条
-        tech = _tech_cn(r.get("technical_state"))
-        persist = _persist_cn(r.get("persistence"))
-        cycle = r.get("investment_cycle") or "—"
-        # 优先用中文内容：ai_summary > ai_reason > title_cn > catalyst_title
-        reason = (
-            r.get("ai_summary")
-            or r.get("ai_reason")
-            or r.get("title_cn")
-            or r.get("catalyst_title")
-            or "暂无推荐原因（慢通道 G7 补全中）"
+    方向语义：signal 表无 direction 列，只能从档位结构推导——
+      止损 > 入场 > 止盈 → 做空；止损 < 入场 < 止盈 → 做多；其余视为区间/中性。
+    同时并列展示「催化方向」（impact_direction），避免把趋势状态误读为交易方向
+    （审计 P0-1：做空信号曾因 technical_state='up' 被渲染成「技术面 看涨」）。
+    """
+    import html as _html
+
+    entry = _to_float(r.get("entry_price"))
+    sl = _to_float(r.get("stop_loss"))
+    tp = _to_float(r.get("take_profit"))
+    rr = _to_float(r.get("rr_ratio"))
+    score = float(r.get("composite_score") or 0)
+    td = r.get("technical_detail") or {}
+    fd = r.get("fundamental_detail") or {}
+
+    dir_cn, dir_color = _trade_direction(entry, sl, tp)
+    cycle = r.get("investment_cycle") or "待补（G7 生成中）"
+
+    # ---------- 通用渲染小件 ----------
+    def _kv(label: str, value) -> str:
+        return (
+            '<div style="display:flex;gap:8px;align-items:baseline;margin:2px 0">'
+            f'<div style="flex:0 0 104px;color:#6b7280;font-size:11.5px">{label}</div>'
+            f'<div style="flex:1;color:#111827;font-size:12px;line-height:1.6">{value}</div>'
+            "</div>"
         )
-        reason = _truncate(reason, 160)
 
-        # 价格区间（目标/止损/盈亏比）
-        tp = r.get("take_profit")
-        sl = r.get("stop_loss")
-        rr = r.get("rr_ratio")
-        price_html = "<span style='color:#9ca3af'>待补</span>"
-        if tp is not None or sl is not None:
-            tp_txt = _fmt_price(tp)
-            sl_txt = _fmt_price(sl)
-            rr_txt = f"{rr:.1f}" if rr is not None else "—"
-            price_html = (
-                f"目标 <b style='color:#059669'>{tp_txt}</b> &nbsp;·&nbsp; "
-                f"止损 <b style='color:#dc2626'>{sl_txt}</b> &nbsp;·&nbsp; 盈亏比 {rr_txt}"
+    def _g(tag: str, title: str, inner: str) -> str:
+        return (
+            '<div style="border:1px solid #eef2f7;border-left:3px solid #a78bfa;'
+            'border-radius:6px;padding:9px 11px;margin-bottom:7px;background:#fcfcff">'
+            f'<div style="font-size:12px;font-weight:700;color:#5b21b6;margin-bottom:5px">{tag} · {title}</div>'
+            f"{inner}</div>"
+        )
+
+    def _badge(text: str, bg: str, color: str = "#fff") -> str:
+        return (f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:{bg};'
+                f'color:{color};font-size:11px;font-weight:700">{text}</span>')
+
+    # ---------- ① 交易计划 ----------
+    plan = (
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">'
+        + _plan_cell("方向", dir_cn, dir_color)
+        + _plan_cell("入场", _fmt_price(entry)
+                     + (f'<div style="font-size:10px;color:#6b7280;font-weight:400">'
+                        f'触发：{_html.escape(str(r.get("entry_trigger") or "—"))}</div>' if r.get("entry_trigger") else ""),
+                     "#111827")
+        + _plan_cell("止损", _fmt_price(sl), "#dc2626")
+        + _plan_cell("止盈", _fmt_price(tp), "#059669")
+        + _plan_cell("盈亏比", f"{rr:.2f}" if rr else "—", "#111827")
+        + _plan_cell("置信度", f"{_to_float(r.get('confidence')):.3f}" if r.get("confidence") is not None else "—", "#111827")
+        + "</div>"
+    )
+    plan += _kv("失效条件", _html.escape(str(r.get("invalidation") or "—")))
+    plan += _kv("有效期至", _fmt_ts(r.get("expires_at")))
+    # 技术面基准价：入场/止损/止盈由 G5 的技术面窗口推导（区间中轨 / ATR / 30d 高低点），
+    # 该窗口末端即最新日线，与「代币快照」同源。必须标明基准，否则用户会拿入场价与
+    # 快照现价直接比较而误判（ZEC 实测 档位 1134.7 / 快照 1513.6，差异来自行情继续上行）。
+    if td and td.get("last_price") is not None:
+        plan += _kv("技术面基准",
+                    f'<span style="font-weight:600">{_fmt_price(td.get("last_price"))}</span>'
+                    f'<span style="color:#6b7280;font-size:11px">'
+                    f'（G5 技术面窗口末端收盘，入场/止损/止盈由该窗口推导；'
+                    f'与下方「代币快照」同源）</span>')
+
+    # ---------- ② 催化剂原文 ----------
+    title = _full_title(r)
+    body = r.get("catalyst_body") or ""
+    body_html = ""
+    if body:
+        # 全文展示（用户口径：邮件内完整展开，不依赖外链网页）
+        body_html = (
+            '<div style="font-size:12px;line-height:1.75;color:#374151;white-space:pre-wrap;'
+            'background:#f9fafb;border-radius:6px;padding:9px 11px;margin-top:6px">'
+            + _html.escape(body)
+            + "</div>"
+            f'<div style="font-size:10.5px;color:#9ca3af;margin-top:3px">'
+            f'正文全文 {len(body)} 字</div>'
+        )
+    summary = _complete_text(r.get("ai_summary") or "", body)
+    summary_html = ""
+    # ai_summary 被采集层截断时补齐后可能与标题同句，此时不再重复渲染
+    if summary and summary != "—" and summary != title:
+        summary_html = (
+            '<div style="margin-top:6px">'
+            '<div style="font-size:11px;color:#7c3aed;font-weight:600">🤖 AI 摘要</div>'
+            '<div style="font-size:12px;line-height:1.7;color:#374151;margin-top:3px">'
+            + _html.escape(summary)
+            + "</div></div>"
+        )
+    url = r.get("source_url") or ""
+    url_html = (_html.escape(url)) if url else "—"
+    source_section = (
+        _g("G0", "事件来源与原文",
+           _kv("发布时间", _fmt_ts(r.get("published_at")))
+           + _kv("信息源", _html.escape(str(r.get("source_code") or "—")))
+           + _kv("事件分类", _html.escape(str(r.get("event_category") or "—")))
+           + _kv("原文链接", url_html)
+           + '<div style="font-size:12.5px;font-weight:600;color:#111827;margin-top:8px;line-height:1.5">'
+           + _html.escape(str(title)) + "</div>"
+           + body_html + summary_html)
+    )
+
+    # ---------- ③ 决策链 G1-G7 ----------
+    def _num(v, fmt="{:.4g}"):
+        f = _to_float(v)
+        return "—" if f is None else fmt.format(f)
+
+    g1 = _g("G1", "事件分级",
+            _kv("事件类型", f'{_html.escape(str(r.get("rule_event_type") or "—"))}'
+                           f'（AI 判定：{_html.escape(str(r.get("ai_event_type") or "—"))}，'
+                           f'来源 {_html.escape(str(r.get("event_type_src") or "—"))}）')
+            + _kv("催化性质", _kind_cn(r.get("catalyst_kind")))
+            + _kv("分项得分", f'权威度 {r.get("authority_score") if r.get("authority_score") is not None else "—"}'
+                             f' · 事件权重 {r.get("event_weight") if r.get("event_weight") is not None else "—"}'
+                             f' · 覆盖范围 {r.get("scope_score") if r.get("scope_score") is not None else "—"}'
+                             f' · 市值适配 {r.get("mcap_score") if r.get("mcap_score") is not None else "—"}')
+            + _kv("基础强度", f'{r.get("base_strength") if r.get("base_strength") is not None else "—"} / 100'
+                             f' · 可交易 {"是" if r.get("tradable") else "否"}')
+            + _kv("发布前启动", f'{_pct(r.get("prelaunch_ret_24h"))}（24h）'
+                               f' · 追高扣分 {r.get("prelaunch_penalty") if r.get("prelaunch_penalty") is not None else 0}')
             )
 
-        badge = (f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:{tier_color};'
-                 f'color:#fff;font-size:11px;font-weight:700">{tier}</span>')
-        cycle_badge = (f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;'
-                       f'background:#eef2ff;color:#4338ca;font-size:11px;font-weight:600">{cycle}</span>')
+    g2 = _g("G2", "影响判定与价格共振",
+            _kv("催化方向", f'{_DIRECTION_CN.get(r.get("impact_direction"), r.get("impact_direction") or "—")}'
+                           f' · 强度 {_IMPACT_STRENGTH_CN.get(r.get("impact_strength"), r.get("impact_strength") or "—")}'
+                           f' · 有效期 {r.get("horizon_days") if r.get("horizon_days") is not None else "—"} 天'
+                           f'（判定来源 {_html.escape(str(r.get("impact_derived_from") or "—"))}）')
+            + _kv("共振状态", f'<span style="color:#5b21b6;font-weight:600">'
+                             f'{_RESONANCE_CN.get(r.get("resonance_state"), r.get("resonance_state") or "—")}</span>'
+                             f' · 共振分 {r.get("resonance_score") if r.get("resonance_score") is not None else "—"}')
+            + _kv("超额收益", f'1h {_pct(r.get("excess_ret_1h"))}'
+                             f' · 4h {_pct(r.get("excess_ret_4h"))}'
+                             f' · 24h {_pct(r.get("excess_ret_24h"))}'
+                             f' · 72h {_pct(r.get("excess_ret_72h"))}')
+            + _kv("量能 / 板块", f'量能 Z {_num(r.get("vol_zscore_24h"), "{:.2f}")}'
+                               f' · 板块中位收益 {_pct(r.get("peer_median_ret_24h"))}')
+            + _kv("方向一致性", f'{"一致" if r.get("direction_match") else "背离"}'
+                               f' · 数据源 {_html.escape(str(r.get("ret_source") or "—"))}'
+                               f' · 计算于 {_fmt_ts(r.get("resonance_computed_at"))}')
+            )
 
-        blocks += f"""
-        <div style="border:1px solid #e5e7eb;border-left:4px solid {tier_color};border-radius:8px;padding:12px 14px;margin-bottom:10px">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            {badge}
-            <span style="font-weight:700;font-size:14px">{r["symbol"]}</span>
-            <span style="color:#6b7280;font-size:12px">{r["canonical_name"]}</span>
-            {cycle_badge}
-            <span style="margin-left:auto;font-weight:600;font-size:13px;color:#374151">评分 {(r["composite_score"] or 0):.0f}</span>
-          </div>
-          <div style="margin-top:8px;font-size:13px;color:#111827;line-height:1.5">{reason}</div>
-          <div style="margin-top:8px;font-size:12px">{price_html}</div>
-          <div style="margin-top:6px;font-size:11px;color:#6b7280">
-            技术面 {tech} · 持续性 {persist}
-          </div>
-        </div>
-        """
-    if not blocks:
-        return f'<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;border-radius:8px">过去 24h 无 {tier} 级新信号</div>'
-    return blocks
+    g3 = _g("G3", "持续性预判",
+            _kv("持续性", _persist_cn(r.get("persistence")))
+            + _kv("是否已验证", "已验证" if r.get("persistence_verified") else "未验证（预判值）")
+            )
+
+    checks = (fd.get("checks") or []) if isinstance(fd, dict) else []
+    checks_html = "".join(
+        f'<div style="font-size:11.5px;color:#374151;line-height:1.7">· {_html.escape(str(c))}</div>'
+        for c in checks
+    ) or '<div style="font-size:11.5px;color:#9ca3af">无明细</div>'
+    g4 = _g("G4", "基本面检查",
+            _kv("结论", ('<span style="color:#059669;font-weight:600">通过</span>'
+                        if r.get("fundamental_pass") else '<span style="color:#dc2626;font-weight:600">未通过</span>')
+                       + f'（得分 {fd.get("score", "—")} / 阈值 {fd.get("threshold", "—")}）')
+            + _kv("六项明细", "<div>" + checks_html + "</div>")
+            )
+
+    if td:
+        trend_txt = (
+            f'<span style="font-weight:600">{_tech_cn(td.get("state"))}</span>'
+            f'（价格 {_fmt_price(td.get("last_price"))} vs 20MA {_fmt_price(td.get("ma20"))}）'
+        )
+        g5 = _g("G5", "技术面结构（趋势描述，非交易方向）",
+                _kv("趋势状态", trend_txt)
+                + _kv("均线", f'MA5 {_fmt_price(td.get("ma5"))}'
+                             f' · MA20 {_fmt_price(td.get("ma20"))}'
+                             f' · MA60 {_fmt_price(td.get("ma60"))}')
+                + _kv("30d 区间", f'高 {_fmt_price(td.get("high_30d"))}'
+                                 f' · 低 {_fmt_price(td.get("low_30d"))}')
+                + _kv("波动", f'ATR(30d) {_fmt_price(td.get("atr_30d"))}'
+                             f' · 明细方向 {_DIRECTION_CN.get(td.get("impact_direction"), td.get("impact_direction") or "—")}')
+                + _kv("档位推导", f'触发 {_html.escape(str(r.get("entry_trigger") or "—"))}'
+                                 f' → 入场 {_fmt_price(entry)}'
+                                 f' / 止损 {_fmt_price(sl)}'
+                                 f' / 止盈 {_fmt_price(tp)}')
+                )
+    else:
+        g5 = _g("G5", "技术面结构", '<div style="font-size:11.5px;color:#9ca3af">技术明细待补（本信号由旧版本写入）</div>')
+
+    g6 = _g("G6", "合成评分与闸门",
+            _kv("综合评分", f'<b style="font-size:14px;color:#7c3aed">{score:.0f}</b> → 档级 '
+                           f'<b>{_html.escape(str(r.get("tier") or "—"))}</b>'
+                           f'<span style="font-size:11px;color:#6b7280">'
+                           f'（权重：事件 0.25 + 共振 0.30 + 持续性 0.15 + 基本面 0.15 + 技术 0.15）</span>')
+            + _kv("动作状态", '<span style="color:#059669;font-weight:600">open</span>'
+                             '（未充分定价，可动作；已定价→watch 观察池，方向背离→invalid 剔除）')
+            + _kv("市场环境", _REGIME_CN.get(r.get("regime"), r.get("regime") or "—"))
+            )
+
+    reason = r.get("ai_reason") or "待补（G7 生成中）"
+    g7 = _g("G7", "AI 决策结论",
+            _kv("投资周期", _html.escape(str(cycle)))
+            + _kv("推理全文", '<div style="line-height:1.8">' + _html.escape(str(reason)) + "</div>")
+            )
+
+    # ---------- ④ 代币快照 ----------
+    snap = _build_token_snapshot(r)
+
+    # ---------- 头部 ----------
+    header = (
+        '<div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;'
+        'padding:16px 18px;border-radius:10px 10px 0 0">'
+        '<div style="font-size:11px;opacity:.8;letter-spacing:1px">A 级催化剂信号 · 慢通道完整决策</div>'
+        '<div style="margin-top:6px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">'
+        f'<span style="font-size:22px;font-weight:800">{_html.escape(str(r.get("symbol") or "?"))}</span>'
+        f'<span style="font-size:13px;opacity:.9">{_html.escape(str(r.get("canonical_name") or ""))}</span>'
+        f'<span style="margin-left:auto;font-size:13px;font-weight:700">评分 {score:.0f} · {_html.escape(str(r.get("tier") or ""))} 级</span>'
+        "</div>"
+        '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+        + _badge(f"交易方向 {dir_cn}", dir_color)
+        + _badge(f"周期 {_html.escape(str(cycle))}", "#1d4ed8")
+        + _badge(_DIRECTION_CN.get(r.get("impact_direction"), "—") + "催化", "#0f766e")
+        + f'<span style="font-size:11.5px;opacity:.85">信号 #{r.get("signal_id")} · 创建 {_fmt_ts(r.get("created_at"))}</span>'
+        "</div>"
+        '<div style="margin-top:8px;font-size:12.5px;line-height:1.6;opacity:.95">'
+        + _html.escape(str(title))
+        + "</div></div>"
+    )
+
+    return (
+        '<div style="border:1px solid #e5e7eb;border-radius:10px;margin-bottom:16px;background:#fff">'
+        + header
+        + '<div style="padding:14px 16px">'
+        + '<div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:8px">📐 交易计划</div>'
+        + plan
+        + source_section
+        + '<div style="font-size:13px;font-weight:700;color:#111827;margin:14px 0 8px">🔗 决策链 G0-G7</div>'
+        + g1 + g2 + g3 + g4 + g5 + g6 + g7
+        + snap
+        + "</div></div>"
+    )
+
+
+def _plan_cell(label: str, value_html: str, color: str) -> str:
+    return (
+        '<div style="flex:1;min-width:88px;background:#f9fafb;border-radius:6px;padding:7px 9px">'
+        f'<div style="font-size:10.5px;color:#6b7280">{label}</div>'
+        f'<div style="font-size:14px;font-weight:700;color:{color};margin-top:2px">{value_html}</div>'
+        "</div>"
+    )
+
+
+def _build_token_snapshot(r: dict) -> str:
+    """构建「当前代币所有信息」快照区块。"""
+    import html as _html
+
+    def _row(label: str, value: str) -> str:
+        return (
+            '<div style="flex:1;min-width:150px;padding:5px 0">'
+            f'<div style="font-size:10.5px;color:#6b7280">{label}</div>'
+            f'<div style="font-size:12.5px;font-weight:600;color:#111827;margin-top:2px">{value}</div>'
+            "</div>"
+        )
+
+    price = _to_float(r.get("current_price"))
+    ch24 = _to_float(r.get("change_24h"))
+    ch7 = _to_float(r.get("change_7d"))
+    vol = _to_float(r.get("volume_24h"))
+    mcap = _to_float(r.get("md_market_cap")) or _to_float(r.get("asset_market_cap"))
+    circ = _to_float(r.get("circulating_supply"))
+    total = _to_float(r.get("total_supply"))
+    ath = _to_float(r.get("ath_usd"))
+    mc_rank = r.get("market_cap_rank")
+
+    circ_pct = f"（流通率 {circ / total * 100:.1f}%）" if circ and total else ""
+    ath_html = "—"
+    if ath:
+        ath_txt = f"{_fmt_price(ath)}"
+        if price:
+            gap = price / ath * 100 - 100
+            ath_html = (f'{ath_txt} · 距 ATH <span style="color:{_pct_color(gap)}">'
+                        f'{gap:+.1f}%</span>')
+            # core.asset.ath_usd 由离线同步任务维护，未及时刷新时会出现「现价高于 ATH」
+            # 的悖论（ZEC 实测 ATH 737.88 / 现价 1513.6 → 距 ATH +105%）。如实标注，
+            # 不要把陈旧基准当成真实回撤幅度。
+            if gap > 0:
+                ath_html += ('<span style="color:#b45309;font-size:10.5px">'
+                             '（现价已高于库内 ATH，快照未及时更新）</span>')
+        else:
+            ath_html = ath_txt
+
+    cats = r.get("categories") or []
+    cats_html = " · ".join(_html.escape(str(c)) for c in cats[:8]) if cats else "—"
+
+    pool_open = r.get("open_cnt") or 0
+    pool_watch = r.get("watch_cnt") or 0
+
+    return (
+        '<div style="margin-top:14px;border:1px solid #eef2f7;border-left:3px solid #38bdf8;'
+        'border-radius:6px;padding:10px 12px;background:#f8fdff">'
+        '<div style="font-size:13px;font-weight:700;color:#0369a1;margin-bottom:6px">🪙 代币快照'
+        f'<span style="font-size:10.5px;font-weight:400;color:#6b7280;margin-left:6px">'
+        f'行情日期 {r.get("md_date") or "—"}</span></div>'
+        '<div style="display:flex;flex-wrap:wrap;gap:4px 16px">'
+        + _row("现价", _fmt_price(price))
+        + _row("24h", f'<span style="color:{_pct_color(ch24)}">{_pct(ch24)}</span>')
+        + _row("7d", f'<span style="color:{_pct_color(ch7)}">{_pct(ch7)}</span>')
+        + _row("24h 成交量", _fmt_big(vol))
+        + _row("市值 / 排名", f'{_fmt_big(mcap)} · #{mc_rank if mc_rank is not None else "—"}')
+        + _row("流通 / 总量", f'{_fmt_big(circ)} / {_fmt_big(total)}{circ_pct}')
+        + _row("历史最高", ath_html)
+        + _row("上市日期", str(r.get("launch_date") or "—"))
+        + _row("资产类型", _html.escape(str(r.get("asset_type") or "—")))
+        + _row("主赛道", _html.escape(str(r.get("primary_sector") or "—")))
+        + _row("在池信号", f'可动作 {pool_open} 条 · 观察 {pool_watch} 条')
+        + "</div>"
+        f'<div style="font-size:11.5px;color:#374151;line-height:1.7;margin-top:4px">'
+        f'<span style="color:#6b7280">板块标签：</span>{cats_html}</div>'
+        "</div>"
+    )
+
+
+def _to_float(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _full_title(r: dict) -> str:
+    """取完整标题（修复「内容显示不全」）。"""
+    return _complete_text(r.get("title_cn") or r.get("catalyst_title") or "",
+                          r.get("catalyst_body") or "")
+
+
+def _complete_text(value: str, body: str) -> str:
+    """补齐被采集层截断的文本（修复「内容显示不全」）。
+
+    采集层把 title / ai_summary 硬截断到 83 字并补 '...'
+    （如 'Zcash rose nearly 6% ... Wednesday, t...'、'...Supersta...'），
+    而正文 body_text 从同一句完整起头。此处若判定被截断，则从正文取第一个完整句子替代，
+    避免邮件在词中间断掉。未截断的原样返回。
+    """
+    value = (value or "").strip()
+    body = (body or "").strip()
+    if not value:
+        return "—"
+    if not value.endswith(("...", "…")):
+        return value
+    if not body:
+        return value
+
+    # 截断标记前的词干应与正文同一起头，才敢用正文替换
+    probe = value.rstrip(".…").strip()[:20]
+    if probe and not body.startswith(probe):
+        return value
+
+    head = body[:400]
+    # 取「第一个完整句子」：在所有句末标记中选最短且长度合理的候选
+    # （避免正文开头出现短行/换行时切出过短标题）
+    best = None
+    for sep in ("。", "！", "？", ". ", "! ", "? ", "\n"):
+        idx = head.find(sep)
+        if idx <= 0:
+            continue
+        cand = head[: idx + len(sep)].strip()
+        if len(cand) < 12:
+            continue
+        if best is None or len(cand) < len(best):
+            best = cand
+    return best or head.strip() or value
+
+
+def _trade_direction(entry, sl, tp) -> tuple[str, str]:
+    """从档位结构推导交易方向（signal 表无 direction 列）。
+
+    空头：止损 > 入场 > 止盈；多头：止损 < 入场 < 止盈；其余视为区间/中性。
+    """
+    if entry is None or sl is None or tp is None:
+        return "—", "#6b7280"
+    if sl > entry > tp:
+        return "做空", "#dc2626"
+    if sl < entry < tp:
+        return "做多", "#059669"
+    return "区间/中性", "#6b7280"
+
+
+def _pct(v, digits: int = 2) -> str:
+    """百分比格式化（输入即百分数，如 7.3857 → +7.39%）。"""
+    f = _to_float(v)
+    if f is None:
+        return "—"
+    return f"{'+' if f > 0 else ''}{f:.{digits}f}%"
+
+
+def _pct_color(v) -> str:
+    f = _to_float(v)
+    if f is None:
+        return "#6b7280"
+    return "#059669" if f > 0 else ("#dc2626" if f < 0 else "#6b7280")
+
+
+def _fmt_big(v) -> str:
+    """大数格式化（市值/供应量/成交量）。"""
+    f = _to_float(v)
+    if f is None:
+        return "—"
+    if f >= 1e12:
+        return f"${f / 1e12:.2f}T" if f >= 1e9 else f"{f / 1e12:.2f}T"
+    if f >= 1e9:
+        return f"${f / 1e9:.2f}B"
+    if f >= 1e6:
+        return f"${f / 1e6:.2f}M"
+    if f >= 1e3:
+        return f"{f / 1e3:.1f}K"
+    return f"{f:,.0f}"
+
+
+def _fmt_ts(v, beijing: bool = True) -> str:
+    """时间戳格式化（默认换算北京时间）。"""
+    if not v:
+        return "—"
+    try:
+        if beijing and getattr(v, "tzinfo", None) is not None:
+            v = v.astimezone(timezone(timedelta(hours=8)))
+            return v.strftime("%Y-%m-%d %H:%M") + "（北京）"
+        return v.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(v)
 
 
 def _fmt_price(v) -> str:
@@ -1277,29 +1731,35 @@ def _fmt_price(v) -> str:
 
 def _build_slow_digest_html(a_rows, stats: dict,
                             class_label: str = "加密货币") -> str:
-    """构建 A 级 Alert 邮件 HTML（OPT-CATALYST-ALERT-001 P0-1）。
+    """构建 A 级 Alert 邮件 HTML（OPT-CATALYST-ALERT-001 改版）。
 
     Args:
-        a_rows: 24h 内 A 级去重新信号（最多 2 条，共振 confirmed + 完整交易档位）
+        a_rows: 24h 内 A 级去重新信号（最多 2 条，未充分定价 + 完整交易档位）
         stats: 慢通道统计（second_order_count / expired_count）
         class_label: 资产类别中文标签（加密货币 / 美股·商品）
+
+    每条卡片在邮件内完整展开「交易计划 + 催化剂原文 + 决策链 G0-G7 + 代币快照」，
+    不依赖外链网页（用户口径：拿到邮件即看到整个决策过程与代币全部信息）。
     """
     so_count = stats.get("second_order_count", 0)
     expired = stats.get("expired_count", 0)
 
-    a_table = _build_signal_table(a_rows, "A")
+    cards = "".join(_build_a_alert_card(r) for r in a_rows)
+    if not cards:
+        cards = ('<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;'
+                 'border-radius:8px">过去 24h 无 A 级新信号</div>')
 
     return f"""
-    <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
+    <div style="font-family:sans-serif;max-width:760px;margin:auto;padding:16px;background:#f3f4f6">
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:24px;border-radius:12px">
         <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · A 级 Alert</div>
         <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} A级 新增 {len(a_rows)} 条可交易信号</div>
-        <div style="margin-top:4px;font-size:13px;opacity:.8">24h 窗口 · 共振 confirmed · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
+        <div style="margin-top:4px;font-size:13px;opacity:.8">24h 窗口 · 未充分定价(weak)可动作池 · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
       </div>
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">🟣 A 级信号（过去 24h 新增，价格真共振 + 完整交易档位）</h3>
-        {a_table}
+        <h3 style="font-size:15px;margin:0 0 12px;color:#111827">🟣 A 级信号（过去 24h 新增 · 未充分定价可动作 + 完整交易档位）</h3>
+        {cards}
 
         <div style="margin-top:20px;padding:12px;background:#f0f9ff;border-radius:8px;font-size:12px;color:#0369a1">
           💡 B/C 级热点已下沉至每日早报「📡 催化剂热点」观察区；本邮件仅保留高置信度 A 级 idea。
@@ -1307,27 +1767,6 @@ def _build_slow_digest_html(a_rows, stats: dict,
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
           由催化剂决策管道自动生成 · 24h 去重 · {class_label} 独立发送
-        </div>
-      </div>
-    </div>
-    """
-
-
-def _build_empty_digest_html(class_label: str = "加密货币") -> str:
-    """A 级空窗 note（决策①：无 A 级时邮件可空窗，写明原因，避免通道静默死掉）。"""
-    return f"""
-    <div style="font-family:sans-serif;max-width:720px;margin:auto;padding:16px">
-      <div style="background:linear-gradient(135deg,#334155,#475569);color:#fff;padding:24px;border-radius:12px">
-        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · A 级 Alert</div>
-        <div style="font-size:22px;font-weight:700;margin-top:8px">今日无高置信度信号</div>
-      </div>
-      <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <div style="font-size:14px;line-height:1.8;color:#334155">
-          过去 24h 无 A 级催化剂信号（价格共振 confirmed 且具备完整交易档位）。
-          系统保持静默观察，B/C 级热点请见每日早报「📡 催化剂热点」。
-        </div>
-        <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
-          由催化剂决策管道自动生成 · 24h 去重
         </div>
       </div>
     </div>

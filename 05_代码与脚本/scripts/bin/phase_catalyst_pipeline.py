@@ -841,7 +841,7 @@ def run_slow_second_order(conn, config: dict,
         JOIN biz.asset_catalyst ac ON cg.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind IN ('structural', 'event')
           AND cg.base_strength >= 50
-          AND cg.created_at >= NOW() - INTERVAL '%s hours'
+          AND cg.created_at >= NOW() - (%s::int * INTERVAL '1 hour')
           AND NOT EXISTS (
             SELECT 1 FROM biz.catalyst_second_order cso
             WHERE cso.catalyst_id = cg.catalyst_id
@@ -1308,6 +1308,9 @@ def run_slow_g3g5(conn, config: dict,
           ON cs.catalyst_id = ci.catalyst_id AND cs.asset_id = ci.asset_id
         -- d3：观察池(watch)同样要补全 G3-G5。否则晋升为 open 后仍无 entry/stop/tp，
         -- 慢通道 Alert 的「交易档位齐全」闸门永远过不了，只能空转。
+        -- 注：technical_detail（fix_054）不在此条件内。它由 backfill_technical_detail()
+        --    单独追加式回填，避免把「明细缺失」当成「G3-G5 缺失」而触发全量重算
+        --    （会一次性改写全部 open/watch 信号的档位/档级，属非预期副作用）。
         WHERE cs.status IN ('open', 'watch')
           AND (cs.persistence IS NULL
                OR cs.technical_state IS NULL
@@ -1469,6 +1472,7 @@ def run_slow_g3g5(conn, config: dict,
             "fundamental_pass": fund_result.pass_,
             "fundamental_detail": json.dumps(fund_result.detail, ensure_ascii=False),
             "technical_state": tech_result.technical_state,
+            "technical_detail": json.dumps(tech_result.detail, ensure_ascii=False),
             "entry_trigger": tech_result.entry_trigger,
             "entry_trigger_price": tech_result.entry_trigger_price,
             "entry_price": entry_price,
@@ -1493,6 +1497,7 @@ def run_slow_g3g5(conn, config: dict,
                 fundamental_pass BOOLEAN,
                 fundamental_detail JSONB,
                 technical_state TEXT,
+                technical_detail JSONB,
                 entry_trigger TEXT,
                 entry_trigger_price NUMERIC,
                 entry_price NUMERIC,
@@ -1512,7 +1517,7 @@ def run_slow_g3g5(conn, config: dict,
                     %(catalyst_id)s, %(asset_id)s, %(persistence)s,
                     %(persistence_verified)s, %(fundamental_pass)s,
                     %(fundamental_detail)s::jsonb, %(technical_state)s,
-                    %(entry_trigger)s, %(entry_trigger_price)s,
+                    %(technical_detail)s::jsonb, %(entry_trigger)s, %(entry_trigger_price)s,
                     %(entry_price)s, %(stop_loss)s, %(take_profit)s,
                     %(rr_ratio)s, %(composite_score)s, %(tier)s,
                     %(confidence)s, %(invalidation)s, %(status)s
@@ -1526,6 +1531,7 @@ def run_slow_g3g5(conn, config: dict,
                 fundamental_pass = t.fundamental_pass,
                 fundamental_detail = t.fundamental_detail,
                 technical_state = t.technical_state,
+                technical_detail = t.technical_detail,
                 entry_trigger = t.entry_trigger,
                 entry_trigger_price = t.entry_trigger_price,
                 entry_price = t.entry_price,
@@ -1551,6 +1557,96 @@ def run_slow_g3g5(conn, config: dict,
         "processed": len(updates),
         "tier_distribution": dict(tier_dist),
     }
+
+
+def backfill_technical_detail(conn, config: dict,
+                              limit: int | None = None) -> dict:
+    """追加式回填 G5 技术面明细（fix_054），只写 technical_detail 一列。
+
+    与 run_slow_g3g5 的区别：本函数不重算 persistence/fundamental/档位/tier/status，
+    因此不会因为「明细缺失」而改写历史决策结果。用途是让 A 级 Alert 邮件能展开
+    「MA/ATR/30d 高低点 → 档位」的推导过程。
+
+    处理对象：status IN ('open','watch') AND technical_detail IS NULL
+      - expired/done 终态不回填（避免用当前技术位冒充决策时点数据）
+    幂等：已填充的行不再入选；无 NULL 行时只做一次查询即返回。
+    """
+    import json
+    from collections import defaultdict
+
+    tech_analyzer = TechnicalAnalyzer(config)
+
+    query = """
+        SELECT cs.signal_id, cs.asset_id, ci.impact_direction
+        FROM biz.catalyst_signal cs
+        LEFT JOIN biz.catalyst_impact ci
+          ON cs.catalyst_id = ci.catalyst_id AND cs.asset_id = ci.asset_id
+        WHERE cs.status IN ('open', 'watch')
+          AND cs.technical_detail IS NULL
+        ORDER BY cs.asset_id
+    """
+    params = []
+    if limit:
+        query += " LIMIT %s"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        return {"scanned": 0, "backfilled": 0}
+
+    asset_ids = list({r["asset_id"] for r in rows})
+    daily_rows = conn.execute("""
+        SELECT asset_id, market_date, price_usd, volume_24h
+        FROM biz.v_asset_market_daily_primary
+        WHERE asset_id = ANY(%s::INT[])
+          AND market_date >= NOW() - INTERVAL '60 days'
+        ORDER BY asset_id, market_date ASC
+    """, (asset_ids,)).fetchall()
+    daily_map = defaultdict(list)
+    for r in daily_rows:
+        daily_map[r["asset_id"]].append({
+            "market_date": r["market_date"],
+            "price_usd": float(r["price_usd"]) if r.get("price_usd") is not None else None,
+            "volume_24h": float(r["volume_24h"]) if r.get("volume_24h") is not None else None,
+        })
+
+    updates = []
+    for row in rows:
+        asset_id = row["asset_id"]
+        tech_result = tech_analyzer.analyze(
+            asset_id=asset_id,
+            daily_data=daily_map.get(asset_id, []),
+            impact_direction=row["impact_direction"],
+        )
+        if not tech_result.detail:
+            continue
+        updates.append({
+            "signal_id": row["signal_id"],
+            "technical_detail": json.dumps(tech_result.detail, ensure_ascii=False),
+        })
+
+    if updates:
+        conn.execute("""
+            CREATE TEMP TABLE tmp_backfill_td (
+                signal_id BIGINT,
+                technical_detail JSONB
+            ) ON COMMIT DROP
+        """)
+        with conn.cursor() as cur:
+            cur.executemany("""
+                INSERT INTO tmp_backfill_td VALUES (
+                    %(signal_id)s, %(technical_detail)s::jsonb
+                )
+            """, updates)
+        conn.execute("""
+            UPDATE biz.catalyst_signal cs
+            SET technical_detail = t.technical_detail
+            FROM tmp_backfill_td t
+            WHERE cs.signal_id = t.signal_id
+              AND cs.technical_detail IS NULL
+        """)
+
+    return {"scanned": len(rows), "backfilled": len(updates)}
 
 
 # =====================================================================
@@ -1867,10 +1963,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, help="限制处理数量（用于调试）")
     parser.add_argument("--health", action="store_true", help="输出健康状态")
     parser.add_argument("--no-alert", action="store_true", help="跳过所有邮件/推送通知（全量重跑时用）")
+    parser.add_argument("--backfill-technical-detail", action="store_true",
+                        help="一次性回填 G5 技术面明细 technical_detail（fix_054，只写该列，幂等）")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细输出")
     args = parser.parse_args()
 
-    if not args.fast and not args.slow and not args.health:
+    if (not args.fast and not args.slow and not args.health
+            and not args.backfill_technical_detail):
         parser.print_help()
         return 1
 
@@ -1887,6 +1986,15 @@ def main() -> int:
             import json
             print(json.dumps(stats, indent=2, ensure_ascii=False, default=str))
             return 0
+
+        # ---- G5 技术面明细回填（fix_054；只写 technical_detail，不重算档位/档级）----
+        if args.backfill_technical_detail:
+            print("=" * 60)
+            print("G5 技术面明细回填（technical_detail）")
+            print("=" * 60)
+            td_result = backfill_technical_detail(conn, config, limit=args.limit)
+            print(f"  扫描 {td_result['scanned']} 条（open/watch 且明细为空），"
+                  f"回填 {td_result['backfilled']} 条")
 
         # ---- 快通道 ----
         if args.fast:

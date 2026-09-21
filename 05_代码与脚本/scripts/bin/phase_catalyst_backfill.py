@@ -944,6 +944,7 @@ def step6_g3_g4_g5(conn, config: dict, dry_run: bool = False) -> dict:
             "fundamental_pass": fund_result.pass_,
             "fundamental_detail": json.dumps(fund_result.detail, ensure_ascii=False),
             "technical_state": tech_result.technical_state,
+            "technical_detail": json.dumps(tech_result.detail, ensure_ascii=False),
             "entry_trigger": tech_result.entry_trigger,
             "entry_trigger_price": tech_result.entry_trigger_price,
             "entry_price": tech_result.entry_trigger_price,
@@ -960,6 +961,7 @@ def step6_g3_g4_g5(conn, config: dict, dry_run: bool = False) -> dict:
                 fundamental_pass BOOLEAN,
                 fundamental_detail JSONB,
                 technical_state TEXT,
+                technical_detail JSONB,
                 entry_trigger TEXT,
                 entry_trigger_price NUMERIC(24,10),
                 entry_price NUMERIC(24,10)
@@ -971,7 +973,8 @@ def step6_g3_g4_g5(conn, config: dict, dry_run: bool = False) -> dict:
                 INSERT INTO tmp_g3g4g5 VALUES (
                     %(catalyst_id)s, %(asset_id)s, %(persistence)s,
                     %(fundamental_pass)s, %(fundamental_detail)s::jsonb,
-                    %(technical_state)s, %(entry_trigger)s,
+                    %(technical_state)s, %(technical_detail)s::jsonb,
+                    %(entry_trigger)s,
                     %(entry_trigger_price)s, %(entry_price)s
                 )
             """, updates)
@@ -982,6 +985,7 @@ def step6_g3_g4_g5(conn, config: dict, dry_run: bool = False) -> dict:
                 fundamental_pass = t.fundamental_pass,
                 fundamental_detail = t.fundamental_detail,
                 technical_state = t.technical_state,
+                technical_detail = t.technical_detail,
                 entry_trigger = t.entry_trigger,
                 entry_trigger_price = t.entry_trigger_price,
                 entry_price = t.entry_price,

@@ -8,7 +8,9 @@
 包含任务（按调度周期）：
   - [5min]   scan_klines       — Binance USDT 永续 K 线增量（5m/15m/1h）
   - [5min]   scan_oi_cvd       — OI/CVD 5 分钟采样（错峰 +2min）
+  - [5min]   scan_liquidation  — CoinGlass 爆仓滚动窗口快照（错峰 +4min）
   - [5min]   scan_alert        — 高置信信号告警（错峰 +3min）
+  - [5min]   scan_squeeze      — 轧空 扫描/跟踪/判定（错峰 +7min，仅告警不下单）
   - [15min]  scan_main_pool    — 主池扫描 L0+L1+L2
   - [30min]  scan_accumulation — 蓄势池 ACC/BRK
   - [30min]  watchlist_monitor — 解锁/空头/大户监控
@@ -29,12 +31,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -47,7 +50,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 import psycopg.rows  # noqa: E402
 import psycopg_pool  # noqa: E402
 
+from crypto_research.analysis import squeeze as sqz  # noqa: E402
 from crypto_research.clients.binance_http import fapi_get, set_min_request_gap  # noqa: E402
+from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 
 # ── 全局共享资源 ────────────────────────────────────────────────
@@ -1029,6 +1034,496 @@ def task_watchlist_monitor() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  任务 7：爆仓快照采集（5 分钟，CoinGlass coin-list）
+# ═══════════════════════════════════════════════════════════════
+
+CG_MIN_GAP = 0.3          # CoinGlass 请求最小间隔（实测 1.3 req/s 无 429，保守取 0.3）
+_CG_CLIENT = None
+
+
+def _coinglass():
+    """惰性初始化 CoinGlass 客户端（单例，避免每轮新建 session）。"""
+    global _CG_CLIENT
+    if _CG_CLIENT is None:
+        settings = _SETTINGS or get_settings(require_database=True)
+        if not settings.coinglass_api_key:
+            raise RuntimeError("COINGLASS_API_KEY 未配置，跳过爆仓采集")
+        _CG_CLIENT = CoinGlassClient(
+            settings.coinglass_api_key,
+            base_url=settings.coinglass_base_url,
+            min_request_gap=CG_MIN_GAP,
+        )
+    return _CG_CLIENT
+
+
+def _perp_alias_map(symbols: list[str]) -> dict[str, str]:
+    """CoinGlass 币种码 → 本库合约符号。
+
+    精确码优先：CoinGlass 同时存在 PEPE 与 1000PEPE，不要让 1000PEPEUSDT 抢到 PEPE。
+    """
+    alias: dict[str, str] = {}
+    for sym in symbols:
+        for a in sqz.alias_bases(sym):
+            alias.setdefault(a.upper(), sym)
+    return alias
+
+
+def task_scan_liquidation() -> dict:
+    """刷 CoinGlass coin-list 滚动爆仓窗口 → biz.liquidation_snapshot（单轮）。
+
+    HOBBYIST 套餐爆仓最小粒度 4h，拿不到细粒度历史序列，只能靠滚动窗口高频轮询差分：
+    相邻两次快照的 `*_liq_usd_1h` 之差 ≈ 该间隔内新增的（多/空）爆仓额
+    （误差 = 同长度窗口滚出的旧爆仓，间隔取 5min 时误差可接受）。
+    实测 coin-list 刷新约 20~40s 一次，故 5min 轮询不会漏采。
+    """
+    client = _coinglass()
+    rows = client.liquidation_coin_list()
+    if not rows:
+        return {"coin_list": 0, "mapped": 0}
+
+    symbols = _get_usdt_perpetuals()
+    alias = _perp_alias_map(symbols)
+    ts = _bucket_5m(datetime.now(timezone.utc))
+
+    payload = []
+    for r in rows:
+        sym = alias.get(str(r.get("symbol") or "").upper())
+        if not sym:
+            continue
+        payload.append((
+            sym, ts, "coinglass",
+            r.get("liquidation_usd_1h"), r.get("liquidation_usd_4h"),
+            r.get("liquidation_usd_12h"), r.get("liquidation_usd_24h"),
+            r.get("long_liquidation_usd_1h"), r.get("short_liquidation_usd_1h"),
+            r.get("long_liquidation_usd_4h"), r.get("short_liquidation_usd_4h"),
+        ))
+
+    if payload:
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO biz.liquidation_snapshot
+                        (symbol, ts, source, liq_usd_1h, liq_usd_4h, liq_usd_12h, liq_usd_24h,
+                         long_liq_usd_1h, short_liq_usd_1h, long_liq_usd_4h, short_liq_usd_4h,
+                         fetched_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (symbol, ts) DO UPDATE SET
+                        liq_usd_1h=EXCLUDED.liq_usd_1h, liq_usd_4h=EXCLUDED.liq_usd_4h,
+                        liq_usd_12h=EXCLUDED.liq_usd_12h, liq_usd_24h=EXCLUDED.liq_usd_24h,
+                        long_liq_usd_1h=EXCLUDED.long_liq_usd_1h,
+                        short_liq_usd_1h=EXCLUDED.short_liq_usd_1h,
+                        long_liq_usd_4h=EXCLUDED.long_liq_usd_4h,
+                        short_liq_usd_4h=EXCLUDED.short_liq_usd_4h,
+                        fetched_at=NOW()
+                    """,
+                    payload,
+                )
+            conn.commit()
+    return {"coin_list": len(rows), "mapped": len(payload),
+            "universe": len(symbols), "bucket": ts.isoformat()}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  任务 8：轧空 扫描 / 跟踪 / 判定（5 分钟）
+# ═══════════════════════════════════════════════════════════════
+
+LSR_ENDPOINTS = {
+    "top_position_ratio": "/futures/data/topLongShortPositionRatio",
+    "top_account_ratio": "/futures/data/topLongShortAccountRatio",
+    "global_ratio": "/futures/data/globalLongShortAccountRatio",
+    "taker_ratio": "/futures/data/takerlongshortRatio",
+}
+
+
+def _fetch_long_short_ratio(symbol: str, period: str = "5m", limit: int = 20) -> dict:
+    """拉单币多空比：4 个免费端点合并为 {ts: {key: value}}，单端点失败不影响其余。"""
+    merged: dict = {}
+    for key, path in LSR_ENDPOINTS.items():
+        try:
+            data = _http_get(f"{FAPI_BASE}{path}",
+                             {"symbol": symbol, "period": period, "limit": limit})
+        except Exception as e:
+            print(f"[scan_daemon][squeeze] {symbol} {key} 拉取失败: {type(e).__name__}",
+                  file=sys.stderr)
+            continue
+        for row in data or []:
+            try:
+                ts = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc)
+            except (KeyError, TypeError, ValueError):
+                continue
+            val = row.get("buySellRatio") if key == "taker_ratio" else row.get("longShortRatio")
+            if val is None:
+                continue
+            merged.setdefault(ts, {})[key] = float(val)
+    return merged
+
+
+def _live_price(symbol: str) -> float | None:
+    """最新标记价（跟踪期峰值以实时价为准，避免 5min K 线粒度掩盖瞬时高点）。"""
+    try:
+        d = _http_get(f"{FAPI_BASE}/fapi/v1/ticker/price", {"symbol": symbol})
+        return float(d["price"])
+    except Exception:
+        return None
+
+
+def _chg_pct(rows: list[dict], back: int = 1) -> float | None:
+    """最近一根收盘价相对 back 根之前的涨跌幅（%）。"""
+    if len(rows) < back + 1:
+        return None
+    closes = [float(r["close_px"]) for r in rows]
+    if not closes[-1 - back]:
+        return None
+    return (closes[-1] - closes[-1 - back]) / closes[-1 - back] * 100
+
+
+def _vol_ratio(rows: list[dict], lookback: int = 20) -> float | None:
+    """最新一根成交额 / 前 lookback 根均量。"""
+    if len(rows) < lookback + 1:
+        return None
+    vols = [float(r["quote_vol"] or 0) for r in rows]
+    mean = sum(vols[-(lookback + 1):-1]) / lookback
+    return vols[-1] / mean if mean else None
+
+
+def _last_at_or_before(rows: list[dict], when: datetime) -> dict | None:
+    """取 ts ≤ when 的最后一条（rows 按 ts 升序）。"""
+    hit = None
+    for r in rows:
+        if r["ts"] <= when:
+            hit = r
+        else:
+            break
+    return hit
+
+
+def _fmt(v, digits: int = 2, suffix: str = "") -> str:
+    if v is None:
+        return "—"
+    return f"{float(v):+.{digits}f}{suffix}"
+
+
+def _render_squeeze_alert(items: list[dict]) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    colors = {sqz.LONG_WIN: "#22c55e", sqz.SHORT_WIN: "#ef4444",
+              sqz.PROFIT_TAKE: "#f59e0b", sqz.CHURN: "#6b7280"}
+    parts = []
+    for it in items:
+        v, m, t = it["verdict"], it["metrics"], it["track"]
+        color = colors.get(v["conclusion"], "#6b7280")
+        parts.append(
+            f"<div style='margin:8px 0;padding:10px;border-left:4px solid {color};background:#f9fafb'>"
+            f"<b>{t['symbol']}</b> "
+            f"<span style='color:{color};font-weight:bold'>{sqz.CONCLUSION_LABEL[v['conclusion']]}</span>"
+            f" <small>（置信度 {v['confidence']}）</small><br>"
+            f"<small>拉升 {_fmt(m['surge_pct'], 2, '%')} · 峰值 {m['peak_px']} → 现价 {m['last_px']}"
+            f"（回撤 {m['retrace_pct']:.2f}%）</small><br>"
+            f"<small>ΔOI {_fmt(m['d_oi_pct'], 2, '%')} | "
+            f"CVD占比 {_fmt((m['cvd_ratio'] or 0) * 100, 1, '%')} | "
+            f"多单爆仓/成交额 {_fmt((m['long_liq_ratio'] or 0) * 100, 3, '%')} | "
+            f"空单爆仓/成交额 {_fmt((m.get('short_liq_ratio') or 0) * 100, 3, '%')} | "
+            f"大户持仓多空比Δ {_fmt(m['top_ratio_chg'], 3)} | "
+            f"主动买卖比 {_fmt(m['taker_ratio'], 2)}</small><br>"
+            f"<small style='color:#444'>判定依据：{v['reason']}</small>"
+            f"</div>")
+    return (f"<html><body style='font-family:Arial,\"Microsoft YaHei\",sans-serif'>"
+            f"<h2 style='margin:0'>🎯 轧空行情胜负判定</h2>"
+            f"<p style='margin:0 0 8px;color:#666;font-size:13px'>生成于 {now} · "
+            f"共 {len(items)} 个币（冲高回撤后判定，仅数据监控）</p>"
+            f"{''.join(parts)}"
+            f"<p style='color:#999;font-size:12px'>本邮件为合约盘面数据分析参考，不构成投资建议。</p>"
+            f"</body></html>")
+
+
+def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
+    """轧空扫描（单轮）：① 拉升初筛+轧空确认入队 ② 队列跟踪峰值 ③ 回撤后判定胜负。
+
+    数据口径：
+      - 价格/涨幅/放量：biz.asset_klines 5m/15m（scan_klines 采集）
+      - OI / CVD：biz.oi_cvd_snapshot 5m（scan_oi_cvd 采集）
+      - 爆仓：biz.liquidation_snapshot（CoinGlass coin-list 差分，见任务 7）
+      - 多空比：biz.long_short_ratio（Binance /futures/data/*，仅对跟踪中币按需拉取）
+    判定口径修正与阈值定义见 crypto_research.analysis.squeeze 模块文档。
+    **只输出信号与告警，不做任何下单。**
+    """
+    now = datetime.now(timezone.utc)
+    vol24 = _get_24h_quote_volume()
+    symbols = [s for s in _get_usdt_perpetuals() if vol24.get(s, 0) >= min_vol_usd]
+    stats = {"universe": len(symbols), "scanned": 0, "surge": 0, "enqueued": 0,
+             "tracked": 0, "judged": 0, "expired": 0, "skipped": 0, "alerts": 0}
+    if not symbols:
+        return stats
+
+    with _db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT symbol, interval, open_time, close_px, quote_vol "
+                "FROM biz.asset_klines WHERE interval IN ('5m','15m') "
+                "AND open_time >= NOW() - INTERVAL '3 hours' "
+                "ORDER BY symbol, interval, open_time")
+            k_rows = cur.fetchall()
+            cur.execute(
+                "SELECT symbol, ts, oi_usd, cvd_5m_usd, vol_5m_usd "
+                "FROM biz.oi_cvd_snapshot WHERE ts >= NOW() - INTERVAL '4 hours' "
+                "ORDER BY symbol, ts")
+            oi_rows = cur.fetchall()
+            cur.execute(
+                "SELECT symbol, ts, long_liq_usd_1h, short_liq_usd_1h "
+                "FROM biz.liquidation_snapshot WHERE ts >= NOW() - INTERVAL '4 hours' "
+                "ORDER BY symbol, ts")
+            liq_rows = cur.fetchall()
+            cur.execute("SELECT * FROM biz.squeeze_track WHERE status='tracking'")
+            tracks = cur.fetchall()
+            cur.execute(
+                "SELECT DISTINCT symbol FROM biz.squeeze_track "
+                "WHERE status IN ('judged','expired') "
+                "AND updated_at > NOW() - make_interval(hours => %s)",
+                (sqz.SQUEEZE_COOLDOWN_H,))
+            cooldown = {r["symbol"] for r in cur.fetchall()}
+        conn.commit()
+
+        by_k: dict[str, dict[str, list[dict]]] = {}
+        for r in k_rows:
+            by_k.setdefault(r["symbol"], {}).setdefault(r["interval"], []).append(r)
+        by_oi: dict[str, list[dict]] = {}
+        for r in oi_rows:
+            by_oi.setdefault(r["symbol"], []).append(r)
+        by_liq: dict[str, list[dict]] = {}
+        for r in liq_rows:
+            by_liq.setdefault(r["symbol"], []).append(r)
+
+        tracking = {t["symbol"] for t in tracks}
+        stats["tracked"] = len(tracking)
+
+        # ── 阶段 1：拉升初筛 + 轧空确认 → 入队 ────────────────────
+        new_tracks: list[tuple] = []
+        for sym in symbols:
+            if sym in tracking or sym in cooldown:
+                continue
+            kk = by_k.get(sym) or {}
+            k5, k15 = kk.get("5m", []), kk.get("15m", [])
+            if not k5:
+                continue
+            if (now - k5[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN["5m"]:
+                continue  # K 线陈旧，不用旧数据出假信号
+            stats["scanned"] += 1
+
+            sur = sqz.screen_surge(_chg_pct(k5), _chg_pct(k15), _vol_ratio(k5))
+            if not sur:
+                continue
+            stats["surge"] += 1
+
+            oi = by_oi.get(sym, [])
+            oi_chg = None
+            if len(oi) >= 3 and oi[-3]["oi_usd"]:
+                oi_chg = ((float(oi[-1]["oi_usd"]) - float(oi[-3]["oi_usd"]))
+                          / float(oi[-3]["oi_usd"]) * 100)
+            lq = by_liq.get(sym, [])
+            short_liq_ratio = None
+            if len(lq) >= 3 and vol24.get(sym):
+                d = float(lq[-1]["short_liq_usd_1h"] or 0) - float(lq[-3]["short_liq_usd_1h"] or 0)
+                short_liq_ratio = max(d, 0.0) / vol24[sym]
+            cvd_ratio = None
+            if len(oi) >= 2:
+                v = sum(float(r["vol_5m_usd"] or 0) for r in oi[-2:])
+                cvd_ratio = sum(float(r["cvd_5m_usd"] or 0) for r in oi[-2:]) / v if v else None
+
+            ok, why = sqz.confirm_squeeze(oi_chg, short_liq_ratio, cvd_ratio)
+            if not ok:
+                continue
+            if len(tracking) + len(new_tracks) >= sqz.TRACK_QUEUE_MAX:
+                stats["skipped"] += 1
+                continue
+            entry_metrics = {
+                "confirm": why, "timeframe": sur["timeframe"],
+                "oi_chg_pct": None if oi_chg is None else round(oi_chg, 3),
+                "short_liq_ratio": None if short_liq_ratio is None else round(short_liq_ratio, 6),
+                "cvd_ratio": None if cvd_ratio is None else round(cvd_ratio, 4),
+            }
+            new_tracks.append((
+                sym, now, k5[-1]["open_time"], float(k5[-2]["close_px"]),
+                round(sur["chg_pct"], 2), float(k5[-1]["close_px"]), now,
+                float(k5[-1]["close_px"]), now, 0.0,
+                now + timedelta(minutes=sqz.TRACK_EXPIRE_MIN),
+                json.dumps(entry_metrics, ensure_ascii=False),
+            ))
+
+        # ── 阶段 2/3：跟踪峰值 → 回撤判定 ──────────────────────────
+        ratio_upserts: list[tuple] = []
+        track_updates: list[tuple] = []
+        judged_items: list[dict] = []
+        for t in tracks:
+            sym = t["symbol"]
+            px = _live_price(sym)
+            if px is None:
+                continue
+            peak_px = float(t["peak_px"] or px)
+            peak_ts = t["peak_ts"] or t["started_at"]
+            if px > peak_px:
+                peak_px, peak_ts = px, now
+            retrace = (peak_px - px) / peak_px * 100 if peak_px else 0.0
+
+            if sqz.is_expired(t["started_at"], now):
+                track_updates.append((
+                    "expired", peak_px, peak_ts, px, now, round(retrace, 2), None,
+                    f"跟踪 {sqz.TRACK_EXPIRE_MIN} 分钟未触发回撤判定", None, None, t["id"]))
+                stats["expired"] += 1
+                continue
+
+            fire, why = sqz.should_judge(retrace, peak_ts, now)
+            if not fire:
+                track_updates.append((
+                    "tracking", peak_px, peak_ts, px, now, round(retrace, 2), None,
+                    None, None, None, t["id"]))
+                continue
+
+            # 回撤窗口 [peak_ts, now] 指标
+            oi_sym = by_oi.get(sym, [])
+            win_oi = [r for r in oi_sym if r["ts"] >= peak_ts]
+            # 基准取「峰值时刻或之前最近一条」；峰值早于所有可用桶时退化为窗口首条
+            base_oi = _last_at_or_before(oi_sym, peak_ts) or (win_oi[0] if win_oi else None)
+            d_oi = None
+            if win_oi and base_oi and base_oi["oi_usd"] and win_oi[-1]["oi_usd"]:
+                d_oi = ((float(win_oi[-1]["oi_usd"]) - float(base_oi["oi_usd"]))
+                        / float(base_oi["oi_usd"]) * 100)
+            cvd_ratio = None
+            if win_oi:
+                v = sum(float(r["vol_5m_usd"] or 0) for r in win_oi)
+                cvd_ratio = (sum(float(r["cvd_5m_usd"] or 0) for r in win_oi) / v) if v else None
+
+            lq_sym = by_liq.get(sym, [])
+            lq_win = [r for r in lq_sym if r["ts"] >= peak_ts]
+            lq_base = _last_at_or_before(lq_sym, peak_ts) or (lq_win[0] if lq_win else None)
+            long_liq_ratio = short_liq_ratio = None
+            if lq_win and lq_base and vol24.get(sym):
+                long_liq_ratio = max(
+                    float(lq_win[-1]["long_liq_usd_1h"] or 0)
+                    - float(lq_base["long_liq_usd_1h"] or 0), 0.0) / vol24[sym]
+                short_liq_ratio = max(
+                    float(lq_win[-1]["short_liq_usd_1h"] or 0)
+                    - float(lq_base["short_liq_usd_1h"] or 0), 0.0) / vol24[sym]
+
+            merged = _fetch_long_short_ratio(sym)
+            for r_ts, vals in merged.items():
+                ratio_upserts.append((
+                    sym, "5m", r_ts, vals.get("top_position_ratio"),
+                    vals.get("top_account_ratio"), vals.get("global_ratio"),
+                    vals.get("taker_ratio")))
+            top_chg = taker_now = None
+            if merged:
+                taker_now = sqz.latest_ratio(merged, "taker_ratio")
+                base_top = sqz.latest_ratio(merged, "top_position_ratio", peak_ts)
+                now_top = sqz.latest_ratio(merged, "top_position_ratio")
+                if base_top and now_top:
+                    top_chg = now_top - base_top
+
+            verdict = sqz.evaluate_battle(
+                d_oi_pct=d_oi, cvd_ratio=cvd_ratio, long_liq_ratio=long_liq_ratio,
+                top_ratio_chg=top_chg, taker_ratio=taker_now)
+            metrics = dict(verdict["metrics"])
+            metrics.update({
+                "peak_px": peak_px, "peak_ts": peak_ts.isoformat(),
+                "last_px": px, "retrace_pct": round(retrace, 2),
+                "surge_pct": float(t["surge_pct"] or 0),
+                "short_liq_ratio": None if short_liq_ratio is None else round(short_liq_ratio, 6),
+                "trigger": why,
+            })
+            track_updates.append((
+                "judged", peak_px, peak_ts, px, now, round(retrace, 2),
+                verdict["conclusion"], verdict["reason"],
+                json.dumps(metrics, ensure_ascii=False), now, t["id"]))
+            judged_items.append({"track": t, "verdict": verdict, "metrics": metrics})
+            stats["judged"] += 1
+
+        # ── 落库 ────────────────────────────────────────────────
+        signal_ids: list[int] = []
+        with conn.cursor() as cur:
+            if new_tracks:
+                cur.executemany(
+                    """
+                    INSERT INTO biz.squeeze_track
+                        (symbol, status, started_at, surge_start_ts, surge_start_px,
+                         surge_pct, peak_px, peak_ts, last_px, last_ts, retrace_pct,
+                         expires_at, metrics, updated_at)
+                    VALUES (%s,'tracking',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+                    ON CONFLICT (symbol) WHERE status='tracking' DO NOTHING
+                    """,
+                    new_tracks)
+                stats["enqueued"] = len(new_tracks)
+            if track_updates:
+                cur.executemany(
+                    """
+                    UPDATE biz.squeeze_track SET
+                        status=%s, peak_px=%s, peak_ts=%s, last_px=%s, last_ts=%s,
+                        retrace_pct=%s, conclusion=%s, reason=%s, metrics=%s::jsonb,
+                        judged_at=%s, updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    track_updates)
+            if ratio_upserts:
+                cur.executemany(
+                    """
+                    INSERT INTO biz.long_short_ratio
+                        (symbol, period, ts, top_position_ratio, top_account_ratio,
+                         global_ratio, taker_ratio, fetched_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (symbol, period, ts) DO UPDATE SET
+                        top_position_ratio=EXCLUDED.top_position_ratio,
+                        top_account_ratio=EXCLUDED.top_account_ratio,
+                        global_ratio=EXCLUDED.global_ratio,
+                        taker_ratio=EXCLUDED.taker_ratio,
+                        fetched_at=NOW()
+                    """,
+                    ratio_upserts)
+            for it in judged_items:
+                v, m, t = it["verdict"], it["metrics"], it["track"]
+                p_dir = {sqz.LONG_WIN: "up", sqz.SHORT_WIN: "down",
+                         sqz.PROFIT_TAKE: "down"}.get(v["conclusion"])
+                cur.execute(
+                    """
+                    INSERT INTO biz.scan_signal
+                        (signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
+                         oi_chg_pct, cvd_dir, confidence, context_tags, trigger_price,
+                         detail, status)
+                    VALUES (%s,%s,'squeeze',%s,'5m',%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'confirmed')
+                    RETURNING id
+                    """,
+                    (now, t["symbol"], f"SQZ_{v['conclusion'].upper()}", p_dir,
+                     round(float(t["surge_pct"] or 0), 2), m["d_oi_pct"],
+                     "down" if (m["cvd_ratio"] or 0) < 0 else "up", v["confidence"],
+                     [sqz.CONCLUSION_LABEL[v["conclusion"]],
+                      f"retrace={m['retrace_pct']}%", m["trigger"]],
+                     m["peak_px"], json.dumps(m, ensure_ascii=False)))
+                signal_ids.append(cur.fetchone()[0])
+            conn.commit()
+
+    # ── 判定成功 → 发告警（只发一次，不做 12h 冷却）──────────────
+    if judged_items:
+        settings = _SETTINGS or get_settings(require_database=True)
+        from crypto_research.clients.notifier import EmailNotifier
+        notifier = EmailNotifier(settings)
+        if not notifier.configured:
+            print("[WARN] SMTP 未配置，跳过轧空判定告警")
+        else:
+            ok, msg = notifier.send(
+                f"🎯 轧空胜负判定：{len(judged_items)} 币",
+                _render_squeeze_alert(judged_items), from_name="轧空扫描")
+            if ok:
+                with _db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE biz.scan_signal SET alerted_at=NOW() WHERE id = ANY(%s)",
+                            (signal_ids,))
+                    conn.commit()
+                stats["alerts"] = len(signal_ids)
+            else:
+                print(f"[scan_daemon][squeeze] 告警发送失败: {msg}", file=sys.stderr)
+
+    return stats
+
+
+# ═══════════════════════════════════════════════════════════════
 #  守护进程调度框架
 # ═══════════════════════════════════════════════════════════════
 
@@ -1079,9 +1574,11 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
 TASK_DEFS = [
     ("scan_klines",       300,  0,  task_scan_klines,       {"min_vol_usd": 5_000_000}),
     ("scan_oi_cvd",       300,  120, task_scan_oi_cvd,      {"min_vol_usd": 5_000_000}),
+    ("scan_liquidation",  300,  240, task_scan_liquidation,  {}),
     ("scan_alert",        300,  180, task_scan_alert,       {}),
     ("scan_main_pool",    900,  60,  task_scan_main_pool,    {}),
     ("scan_accumulation", 1800, 0,  task_scan_accumulation, {}),
+    ("scan_squeeze",      300,  420, task_scan_squeeze,     {"min_vol_usd": 5_000_000}),
     ("watchlist_monitor", 1800, 300, task_watchlist_monitor, {}),
 ]
 
@@ -1111,7 +1608,7 @@ def main() -> int:
 
     # 更新采集类任务的过滤参数
     for _name, _iv, _off, _func, kwargs in TASK_DEFS:
-        if _name in ("scan_klines", "scan_oi_cvd") and "min_vol_usd" in kwargs:
+        if _name in ("scan_klines", "scan_oi_cvd", "scan_squeeze") and "min_vol_usd" in kwargs:
             kwargs["min_vol_usd"] = args.min_vol_usd
 
     # 单跑模式

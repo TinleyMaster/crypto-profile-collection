@@ -11,6 +11,7 @@ L1 粗筛与回测的数据源。增量模式每次拉每币每周期最近 10 �
     python phase_scan_klines.py --intervals 5m,1h        # 指定周期
     python phase_scan_klines.py --limit-symbols 5 --dry-run   # 冒烟：只拉 5 个币、不落库
     python phase_scan_klines.py --backfill-days 90 --intervals 1h   # 回填 90 天 1h
+    python phase_scan_klines.py --backfill-days 3 --force           # 采集停摆后补缺口（忽略续跑跳过）
 """
 from __future__ import annotations
 
@@ -164,6 +165,9 @@ def main() -> int:
                         help="只处理前 N 个符号（冒烟测试用）")
     parser.add_argument("--backfill-days", type=int, default=0,
                         help="回填最近 N 天历史 K 线（>0 时进入回填模式）")
+    parser.add_argument("--force", action="store_true",
+                        help="回填模式忽略续跑跳过（用于采集停摆后的缺口补填：续跑只看最新 K 线"
+                             "是否新鲜，缺口在中间时会被误判为已覆盖）")
     parser.add_argument("--dry-run", action="store_true", help="只拉取打印，不写库")
     parser.add_argument("--workers", type=int, default=8, help="并发数（默认 8）")
     args = parser.parse_args()
@@ -181,7 +185,7 @@ def main() -> int:
                 end_ms = int(time.time() * 1000)
                 start_ms = end_ms - args.backfill_days * 86400 * 1000
                 for iv in intervals:
-                    covered = get_covered(conn, iv, end_ms)
+                    covered = set() if args.force else get_covered(conn, iv, end_ms)
                     n_skip = sum(1 for s in symbols if s in covered)
                     for sym in symbols:
                         if sym in covered:

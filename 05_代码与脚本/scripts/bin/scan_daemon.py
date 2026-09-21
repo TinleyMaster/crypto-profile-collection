@@ -973,6 +973,10 @@ NEW_WINDOW_MIN = 20
 COOLDOWN_H = 12
 CATALYST_DAYS = 7
 KOL_DAYS = 7
+# 「丢信号」检测回溯上限（小时）。**必须有界**：库里存在历史遗留的
+# `alerted_at IS NULL` 的 high 行（如 09-16 那次停摆的 8 条），无界查询会让
+# 停摆告警被这批陈年行永久钉住 —— 每 6h 去重期一过就再发一封，而当时并没有停摆。
+LOST_SIGNAL_LOOKBACK_H = 6
 
 
 def _load_alert_candidates(conn, window_min: int) -> list[dict]:
@@ -1301,18 +1305,31 @@ def _stall_parts(conn, now: datetime) -> list[str]:
     # 丢信号检测（审计 P0-1）：alert 任务停摆 > 窗口(20min)+宽限(10min) 时，窗口内
     # 未告警的 high 信号会被 `signal_ts > NOW()-20min` 永久滤掉、`alerted_at` 恒 NULL，
     # 且与「超窗作废」在库里不可区分。这里把它显式并入停摆告警。
+    #
+    # 两个边界（否则本检测自身就会变成永久误报源）：
+    #   ① 回溯**有界**（LOST_SIGNAL_LOOKBACK_H）—— 否则 09-16 那批陈年行会让告警
+    #      每 6h 去重期一过就重发一次；
+    #   ② 排除**冷却跳过**的行 —— 同币 12h 内已告警时 `task_scan_alert` 是**刻意**
+    #      跳过且不写 `alerted_at` 的，那属于设计行为，不是丢失。
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM biz.scan_signal "
-                "WHERE confidence='high' AND alerted_at IS NULL "
-                "AND (pool='main' OR (pool='accumulation' AND scenario='BRK')) "
-                "AND signal_ts < NOW() - INTERVAL '30 minutes'")
+                "SELECT count(*) FROM biz.scan_signal s "
+                "WHERE s.confidence = 'high' AND s.alerted_at IS NULL "
+                "AND (s.pool = 'main' OR (s.pool = 'accumulation' AND s.scenario = 'BRK')) "
+                "AND s.signal_ts < NOW() - INTERVAL '30 minutes' "
+                "AND s.signal_ts > NOW() - make_interval(hours => %s) "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM biz.scan_signal a "
+                "   WHERE a.symbol = s.symbol AND a.alerted_at IS NOT NULL "
+                "     AND a.alerted_at > s.signal_ts - make_interval(hours => %s) "
+                "     AND a.alerted_at < s.signal_ts + INTERVAL '10 minutes')",
+                (LOST_SIGNAL_LOOKBACK_H, COOLDOWN_H))
             lost = int(cur.fetchone()[0] or 0)
         if lost:
             parts.append(
-                f"未告警即超窗的 high 信号 {lost} 条（alert 任务疑似停摆 >30 分钟，"
-                f"这批信号已永久作废、不会补发）")
+                f"近 {LOST_SIGNAL_LOOKBACK_H}h 内未告警即超窗的 high 信号 {lost} 条"
+                f"（alert 任务疑似停摆 >30 分钟，这批信号已永久作废、不会补发）")
     except Exception as e:  # noqa: BLE001
         print(f"[scan_daemon][stall] 丢信号检查跳过（{e}）", file=sys.stderr)
     return parts

@@ -2,6 +2,7 @@
 
 ## 常驻工作流约定（用户指令，必须遵守）
 
+- **【铁律】改完代码 → 清理临时文件 → 自动推送**：每次完成代码修改后**无需用户再提醒**，必须自动执行：① 清理本次会话产生的临时文件；② `git add` → `git commit`（中文、`fix:` 前缀）→ `git push origin main`。
 - **继续处理 bug**：审计报告会以 `审计_*.md` 形式提供（位于 `E:\瞎搞乱搞\workbuddy\crypto-profile-collection\`），按其中发现的 P0/P1/P2 缺陷逐项修复。
 - **改完代码后**：
   1. 清理本次会话产生的临时文件（`Temp/opencode` 下的探测脚本、工作区内的调试/临时产物）；
@@ -173,6 +174,9 @@
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_盘面异动告警邮件_2026-09-21.md`（对象 = 主池「🚨 盘面异动告警」邮件，非 squeeze）。渲染层前轮已修干净，本轮打数据层/信号层。
 
 - **P0-1（A，已修）告警静默丢失**：`_load_alert_candidates` 的 20min 窗口在 alert 任务停摆时会把 high 信号永久滤掉（`alerted_at` 恒 NULL，与「超窗作废」不可区分）。在 `scan_daemon._stall_parts()` 增只读检测：`confidence='high' AND alerted_at IS NULL AND signal_ts < NOW()-30min`（main / accumulation BRK）→ >0 即以「未告警即超窗的 high 信号 N 条」并入既有停摆告警邮件（零新通道）。**未做 B（补发）**——需定义「补发有效性」边界，属待拍板。
+  - **⚠️ 检测必须有界（否则它自己就是永久误报源）**：首版漏了回溯上限，而库里至今留着 09-16 那次停摆的 **8 条陈年 `alerted_at IS NULL` 行** ⇒ 停摆告警会被这批行永久钉住，6h 去重期一过就再发一封（实测：无界 =8 条 / 有界 6h =0 条）。现加 `LOST_SIGNAL_LOOKBACK_H = 6`（`signal_ts > NOW()-6h`）。
+  - **同时排除「冷却跳过」行**：同币 12h 内已告警时 `task_scan_alert` 是**刻意**跳过且不写 `alerted_at`，属设计行为而非丢失 ⇒ SQL 加 `NOT EXISTS(同 symbol 且 alerted_at ∈ [signal_ts-12h, signal_ts+10min])`。
+  - 教训（与 P0-N1 冷启动误报同类）：**任何并入告警邮件的"计数 > 0"判据都必须同时给出上界与豁免条件**，否则告警通道会被陈年数据拖成噪声源。
 - **P0-2（已修）共振计数不可信**：
   - `_get_resonance` 催化剂段改为「归一标题去重 + 方向构成」：新增 `_norm_title()`（去 `火星财经：/ChainCatcher 消息，/PANews 9月18日消息，` 等源前缀，取最早分隔符且前缀 ≤16 字符，保留字母数字汉字，取前 40 字）后去重；返回 `catalyst_dir{bullish,bearish,neutral}` 与 `catalyst_raw`。
   - 邮件渲染 `催化剂 N（X多/Y空/Z中）`，当「做多但空>多」或「做空但多>空」时追加红色 `⚠️ 共振方向与结论相悖，请复核`。
@@ -186,7 +190,7 @@
   - **P1-5 跨池重复告警**（同币 main+squeeze 40min 内两封口径相反）：需两侧互斥 + 保留信号落库，改动面较大，另立。
   - **P2-3 覆盖率披露 / P2-4 主池入场价（生产者从未算）/ P2-5 历史先验**：另立。
 - **无迁移**：本轮全在 `scan_daemon.py` 代码层。
-- **自测**：渲染/去重临时用例全绿（环境行只出现 1 次、方向构成、双向相悖警示、图例、charset、显式 color、HIGH 徽章、去重后标题计数）；只读探针复核 XMR/APT/NEAR 的去重与方向构成；`workbench/test_squeeze_battle.py` 41/41 不回归。
+- **自测**：渲染/去重临时用例全绿（环境行只出现 1 次、方向构成、双向相悖警示、图例、charset、显式 color、HIGH 徽章、去重后标题计数）；只读探针复核 XMR/APT/NEAR 的去重与方向构成；**P0-1 有界化后 21/21 通过**（含只读 SQL 复算：无界 8 条 → 有界 6h 0 条）；`workbench/test_squeeze_battle.py` 41/41 不回归。
 
 ### 待办（需设计变更，勿盲目改）
 

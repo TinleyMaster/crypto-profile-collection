@@ -26,9 +26,26 @@ import traceback
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# 让 catalyst 包可导入（在 workbench 目录下）
-project_root = SCRIPT_DIR.parent.parent
-workbench_dir = project_root / "workbench"
+
+# 让 catalyst 包可导入，兼容两种部署结构（与 phase_catalyst_pipeline._setup_paths 同口径）：
+#   本地开发： 05_代码与脚本/workbench/catalyst/
+#   容器部署： /app/catalyst/   ← Dockerfile 把 workbench/catalyst 拷到 /app/catalyst
+# 容器内 SCRIPT_DIR=/app/scripts/bin，project_root=/app，硬编码 project_root/"workbench"
+# 会指向不存在的 /app/workbench → ModuleNotFoundError: No module named 'catalyst'
+# → supervisord 反复 "Exited too quickly" 直至 FATAL（快通道长期未运行，2026-09-21 定位）。
+_project_root = SCRIPT_DIR.parent.parent
+workbench_dir = next(
+    (
+        d
+        for d in (_project_root / "workbench", _project_root, Path("/app"))
+        if (d / "catalyst" / "__init__.py").exists()
+    ),
+    None,
+)
+if workbench_dir is None:
+    raise RuntimeError(
+        "找不到 catalyst 包，请检查部署结构（期望 workbench/catalyst 或 /app/catalyst）"
+    )
 if str(workbench_dir) not in sys.path:
     sys.path.insert(0, str(workbench_dir))
 

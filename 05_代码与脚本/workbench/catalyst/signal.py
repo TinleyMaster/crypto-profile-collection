@@ -33,9 +33,15 @@ tier 阈值：A≥80 / B≥60 / C≥40
 方向闸门（d6，2026-09-21）：
     本系统档位是「做多」口径，催化方向直接决定可否作为做多机会：
         bearish → status='invalid'（利空不产做多机会；tier/composite 保留供回测）
-        neutral → tier 封顶 C（中性方向不占 A/B 推送位；信号与档位保留）
+        其余（neutral / 方向缺失 / 未知值）→ tier 封顶 C
+    即「只有显式 bullish 才保留 A/B」——方向未知时同样不占 A/B 推送位。
     口径依据：近 14 天实测 bearish 有 9 条 A / 101 条 B、neutral 有 41 条 A /
         412 条 B 被公式合成进入 A 级 Alert——方向未参与档位判定。
+    方向缺失一并封顶的依据：实测非终态 45 条无方向行中 8 条进 B，样本集中在
+        regulation / other /「24h 涨幅播报」等实测负 alpha 类别；这类行方向永缺
+        （catalyst_impact 与 ai_sentiment 均为 NULL），不会被后续 AI 结果修正。
+        注：「创建时无方向、AI 方向后到」的路径已由 run_slow_g3g5 覆盖——它的
+        候选集是「G3-G5 缺失」，快通道产出的信号必然被重算一次并带入当时的方向。
 """
 from __future__ import annotations
 
@@ -200,13 +206,14 @@ class CatalystSignalBuilder:
 
         # 方向闸门（d6）：本系统为「做多」口径，方向决定可否作为做多机会
         #   bearish → invalid（利空不产做多机会；tier/composite 保留供回测）
-        #   neutral → tier 封顶 C（中性方向不占 A/B 推送位）
+        #   其余（neutral / 方向缺失 / 未知值）→ tier 封顶 C
+        # 只有显式 bullish 保留 A/B；方向未知时不占 A/B 推送位。
         # 与 RR 闸门同属「只降级不改分」的显式例外，口径见模块 docstring。
         direction = (impact_direction or "").strip().lower()
-        if direction == "neutral" and tier in ("A", "B"):
-            tier = "C"
-        elif direction == "bearish":
+        if direction == "bearish":
             status = "invalid"
+        elif direction != "bullish" and tier in ("A", "B"):
+            tier = "C"
 
         return CatalystSignalResult(
             catalyst_id=catalyst_id,

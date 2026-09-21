@@ -3,10 +3,17 @@
 
 参考《催化剂实测评分与反馈校准方案_2026-09-17.md》v1.1 §4.2/§5。
 
-数据源：catalyst_outcome 中
+数据源：catalyst_outcome 中（只取前向口径，勿混 backtest）
   - data_tier='L1'（有 K 线，小时级精确）
   - excess_72h IS NOT NULL（72h 窗口已结算，这是校准主窗口）
+  - ret_source='klines+market_daily'（base_time = signal.created_at 的前向追踪样本）
+  - base_time + 72h <= NOW()（窗口已走完，剔除「未到期却已结算」行）
   - direction_src IN ('impact','event_type')（有方向判定；neutral/null 不计命中率）
+
+  注：不筛 ret_source 会混入 backtest 行（base_time = published_at 的历史回放口径），
+  两套 base_time 基线不可混用做校准取样（见 AGENTS.md）。本脚本产出会写入
+  biz.catalyst_calibration 并被快通道 _load_calibration() 注入实时打分，
+  混口径样本会直接污染线上权重。
 
 校准维度：
   - event_type     （→ G1 event_weight）
@@ -182,6 +189,8 @@ def fetch_samples(conn) -> list[dict]:
                    ON cs.catalyst_id = co.catalyst_id AND cs.asset_id = co.asset_id
             WHERE co.data_tier = 'L1'
               AND co.excess_72h IS NOT NULL
+              AND co.ret_source = 'klines+market_daily'
+              AND co.base_time + INTERVAL '72 hours' <= NOW()
               AND co.direction_src IN ('impact', 'event_type')
             """
         )

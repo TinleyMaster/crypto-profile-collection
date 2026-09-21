@@ -612,10 +612,13 @@ def step4_signal(conn, config: dict, dry_run: bool = False) -> dict:
     rows = conn.execute("""
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
                cg.catalyst_kind, cg.base_strength,
-               ac.published_at
+               ac.published_at,
+               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction
         FROM biz.catalyst_resonance cr
         JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
+        LEFT JOIN biz.catalyst_impact ci
+          ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
         WHERE cg.catalyst_kind != 'noise'
           AND cr.resonance_state != 'pending'
           AND NOT EXISTS (
@@ -652,6 +655,7 @@ def step4_signal(conn, config: dict, dry_run: bool = False) -> dict:
             fundamental_pass=None,
             technical_state=None,
             regime=regime,
+            impact_direction=row["impact_direction"],
         )
         processed += 1
         if signal.tier is not None:
@@ -1043,13 +1047,13 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
     cat_rows = conn.execute("""
         SELECT cg.catalyst_id, cg.catalyst_kind,
                cg.base_strength,
-               ac.rule_event_type, ac.published_at
+               ac.rule_event_type, ac.published_at, ac.ai_sentiment
         FROM biz.catalyst_grade cg
         JOIN biz.asset_catalyst ac ON cg.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind IN ('structural', 'event')
           AND cg.base_strength >= 30
         GROUP BY cg.catalyst_id, cg.catalyst_kind, cg.base_strength,
-                 ac.rule_event_type, ac.published_at
+                 ac.rule_event_type, ac.published_at, ac.ai_sentiment
         ORDER BY cg.base_strength DESC
     """).fetchall()
     print(f"done ({len(cat_rows)} 条)")
@@ -1197,6 +1201,7 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
                 "base_strength": int(r["base_strength"]),
                 "rule_event_type": r["rule_event_type"] or "other",
                 "published_at": r["published_at"],
+                "ai_sentiment": r["ai_sentiment"],
             }
 
         # 批量生成信号（用 CatalystSignalBuilder）
@@ -1243,6 +1248,7 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
                 entry_price=None,
                 stop_loss=None,
                 take_profit=None,
+                impact_direction=info["ai_sentiment"],
             )
 
             if not sig.tier:
@@ -1383,9 +1389,12 @@ def step7_recalc_signals(conn, config: dict, dry_run: bool = False) -> dict:
                cs.resonance_score, cs.resonance_state,
                cs.persistence, cs.fundamental_pass, cs.technical_state,
                cs.entry_trigger_price, cs.regime,
-               ac.published_at
+               ac.published_at,
+               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction
         FROM biz.catalyst_signal cs
         JOIN biz.asset_catalyst ac ON cs.catalyst_id = ac.catalyst_id
+        LEFT JOIN biz.catalyst_impact ci
+          ON cs.catalyst_id = ci.catalyst_id AND cs.asset_id = ci.asset_id
         ORDER BY cs.catalyst_id
     """).fetchall()
     print(f"done ({len(rows)} 条)")
@@ -1435,6 +1444,7 @@ def step7_recalc_signals(conn, config: dict, dry_run: bool = False) -> dict:
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            impact_direction=row["impact_direction"],
         )
 
         tier_dist[signal.tier or "none"] = tier_dist.get(signal.tier or "none", 0) + 1

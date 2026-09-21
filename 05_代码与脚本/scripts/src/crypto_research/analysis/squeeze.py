@@ -25,6 +25,19 @@
 
 另一处口径澄清：拉升阶段 CVD 上涨来自空头止损被动买入，**不能**用来判多空胜负；
 胜负只看冲高后的回撤窗口指标（原稿核心约束，本实现严格遵守）。
+
+────────────────────────────────────────────────────────────────
+缺失数据的口径（2026-09-21 审计 P1-3）
+────────────────────────────────────────────────────────────────
+「缺失」**绝不等于「为 0」**。三个关键输入（`d_oi_pct` / `cvd_ratio` /
+`long_liq_ratio`）任一为 `None` 时：
+
+  - 不得静默补 0 后照常判定（补 0 会让「无爆仓数据」无条件满足
+    `not big_long_liq`，从而把缺数据误判成 `profit_take` / `long_win`）；
+  - 依赖该维度的分支一律不成立（`long_liq_ratio is None` 时禁止
+    `profit_take` / `long_win`，因为这两条的前提是「**确知**无多单踩踏」）；
+  - 缺失维度写进 `metrics['data_missing']` 并在文案中显式标注，降级为
+    `churn`（无方向）而非给出高置信度方向。
 """
 from __future__ import annotations
 
@@ -54,6 +67,7 @@ CVD_SELL_STRONG = -0.15       # 窗口净主动卖占比 ≤ 该值 → 主动�
 CVD_SELL_MILD = -0.08         # 温和卖压线（多单踩踏 vs 正常回踩的分界）
 CVD_BUY_MILD = 0.02           # 窗口净主动买占比 ≥ 该值 → 确有主动买承接（多头胜的必要条件）
 LONG_LIQ_RATIO_THR = 0.00008  # 窗口多单爆仓 / 24h 成交额 ≥ 该值 → 多头被强平
+MIN_WINDOW_COVERAGE = 0.6     # 判定窗口 5m OI 桶覆盖率下限（低于此值放弃判定，见审计 P1-2）
 
 # 结论枚举
 LONG_WIN = "long_win"        # 多头胜：持仓维持/再增，主动买未崩，无多单踩踏
@@ -122,6 +136,27 @@ def confirm_squeeze(oi_chg_pct: float | None, short_liq_ratio: float | None,
     return True, " + ".join(reasons)
 
 
+_DIM_LABELS = {
+    "d_oi_pct": "OI变化",
+    "cvd_ratio": "净主动成交占比",
+    "long_liq_ratio": "多单爆仓额",
+}
+
+
+def _pct_str(v: float | None, digits: int = 1) -> str:
+    """比例值（0.1234）→ '+12.34%'；None → '缺失'（禁止把缺失写成 0）。"""
+    if v is None:
+        return "缺失"
+    return f"{v * 100:+.{digits}f}%"
+
+
+def _raw_pct_str(v: float | None, digits: int = 2) -> str:
+    """已是百分数的值（-2.786）→ '-2.79%'；None → '缺失'。"""
+    if v is None:
+        return "缺失"
+    return f"{v:+.{digits}f}%"
+
+
 def evaluate_battle(*, d_oi_pct: float | None, cvd_ratio: float | None,
                     long_liq_ratio: float | None, top_ratio_chg: float | None,
                     taker_ratio: float | None) -> dict:
@@ -130,7 +165,7 @@ def evaluate_battle(*, d_oi_pct: float | None, cvd_ratio: float | None,
     Args:
         d_oi_pct: 窗口内 OI 变化率（%，负=持仓离场）
         cvd_ratio: 窗口净主动成交 / 窗口成交额（∈[-1,1]）
-        long_liq_ratio: 窗口多单爆仓额 / 24h 成交额
+        long_liq_ratio: 最近 1h 多单爆仓额 / 24h 成交额
         top_ratio_chg: 大户持仓多空比相对高点变化（倍数差，正=多头增仓）
         taker_ratio: 最新主动买卖量比（>1 主动买占优），仅作辅助 corroboration
 
@@ -140,12 +175,10 @@ def evaluate_battle(*, d_oi_pct: float | None, cvd_ratio: float | None,
         3. long_win    —— OI 未快速离场 + 确有主动买承接（cvd ≥ CVD_BUY_MILD）
                           + 无多单踩踏（+ 大户持仓多空比未降）
         4. churn       —— 其余
-    """
-    cvd = cvd_ratio if cvd_ratio is not None else 0.0
-    oi = d_oi_pct if d_oi_pct is not None else 0.0
-    lliq = long_liq_ratio if long_liq_ratio is not None else 0.0
-    big_long_liq = lliq >= LONG_LIQ_RATIO_THR
 
+    缺失数据策略（审计 P1-3）：任一关键维度为 `None` 时，依赖该维度的分支一律
+    不成立，并降级为 `churn`（无方向）+ 在 `data_missing` / 文案中显式标注。
+    """
     signals = {
         "d_oi_pct": None if d_oi_pct is None else round(d_oi_pct, 3),
         "cvd_ratio": None if cvd_ratio is None else round(cvd_ratio, 4),
@@ -153,51 +186,69 @@ def evaluate_battle(*, d_oi_pct: float | None, cvd_ratio: float | None,
         "top_ratio_chg": None if top_ratio_chg is None else round(top_ratio_chg, 4),
         "taker_ratio": None if taker_ratio is None else round(taker_ratio, 4),
     }
+    missing = [name for name, val in (
+        ("d_oi_pct", d_oi_pct), ("cvd_ratio", cvd_ratio),
+        ("long_liq_ratio", long_liq_ratio)) if val is None]
+    signals["data_missing"] = missing
 
-    # 1) 空头胜：主动卖主导 + 多单爆仓放大
-    if cvd <= CVD_SELL_STRONG and big_long_liq:
+    oi_ok = d_oi_pct is not None
+    cvd_ok = cvd_ratio is not None
+    liq_ok = long_liq_ratio is not None
+    # 缺失 ≠ 无踩踏：只有确知爆仓额时才允许判定「大额多单爆仓」
+    big_long_liq = liq_ok and long_liq_ratio >= LONG_LIQ_RATIO_THR
+    lliq_txt = _pct_str(long_liq_ratio, 3)
+
+    # 1) 空头胜：主动卖主导 + 多单爆仓放大（两个维度都必须已知）
+    if cvd_ok and liq_ok and cvd_ratio <= CVD_SELL_STRONG and big_long_liq:
         extra = "，大户持仓多空比下降" if (top_ratio_chg is not None and top_ratio_chg < 0) else ""
         taker = f"，主动买卖比 {taker_ratio:.2f}" if taker_ratio else ""
         return {"conclusion": SHORT_WIN,
-                "reason": (f"回撤窗口净主动卖占比 {cvd * 100:.1f}%，"
-                           f"多单爆仓占24h成交额 {lliq * 100:.3f}%，"
+                "reason": (f"回撤窗口净主动卖占比 {_pct_str(cvd_ratio)}，"
+                           f"最近1h多单爆仓占24h成交额 {lliq_txt}，"
                            f"高位空单反击/多头踩踏{extra}{taker}"),
                 "metrics": signals, "confidence": "high"}
 
-    # 2) 多头止盈离场（趋势衰竭）：OI 快速下降且无多单踩踏
-    if oi <= OI_EXIT_PCT and not big_long_liq:
+    # 2) 多头止盈离场（趋势衰竭）：OI 快速下降且**确知**无多单踩踏
+    if oi_ok and liq_ok and d_oi_pct <= OI_EXIT_PCT and not big_long_liq:
         return {"conclusion": PROFIT_TAKE,
-                "reason": (f"冲高后持仓快速下降 {oi:+.2f}%（非爆仓去化，多单爆仓仅占"
-                           f"24h成交额 {lliq * 100:.3f}%），多头止盈离场、无新资金进场"),
+                "reason": (f"冲高后持仓快速下降 {_raw_pct_str(d_oi_pct)}（非爆仓去化，"
+                           f"最近1h多单爆仓仅占24h成交额 {lliq_txt}），"
+                           f"多头止盈离场、无新资金进场"),
                 "metrics": signals, "confidence": "medium"}
 
-    # 3) 多头胜：OI 未快速离场 + 确有主动买承接 + 无多单踩踏
-    if oi > OI_EXIT_PCT and cvd >= CVD_BUY_MILD and not big_long_liq:
+    # 3) 多头胜：OI 未快速离场 + 确有主动买承接 + 无多单踩踏（三维度都需已知）
+    if (oi_ok and cvd_ok and liq_ok and d_oi_pct > OI_EXIT_PCT
+            and cvd_ratio >= CVD_BUY_MILD and not big_long_liq):
         if top_ratio_chg is None or top_ratio_chg >= 0:
             extra = "，大户持仓多空比未降" if top_ratio_chg is not None else ""
             return {"conclusion": LONG_WIN,
-                    "reason": (f"回踩阶段持仓维持 {oi:+.2f}%，净主动成交占比 {cvd * 100:+.1f}%"
+                    "reason": (f"回踩阶段持仓维持 {_raw_pct_str(d_oi_pct)}，"
+                               f"净主动成交占比 {_pct_str(cvd_ratio)}"
                                f"（仍有主动买承接），无大规模多单爆仓{extra}，新多头承接"),
                     "metrics": signals, "confidence": "high"}
         # 大户在减仓则视为换手，回落到 churn
         return {"conclusion": CHURN,
-                "reason": (f"持仓维持 {oi:+.2f}%、净主动买 {cvd * 100:+.1f}%，但大户持仓多空比下降 "
-                           f"{top_ratio_chg:+.3f}，疑似换手而非新多承接"),
+                "reason": (f"持仓维持 {_raw_pct_str(d_oi_pct)}、净主动买 {_pct_str(cvd_ratio)}，"
+                           f"但大户持仓多空比下降 {top_ratio_chg:+.3f}，疑似换手而非新多承接"),
                 "metrics": signals, "confidence": "low"}
 
+    lack = (f"（数据不足：{'、'.join(_DIM_LABELS[m] for m in missing)}缺失）"
+            if missing else "")
     return {"conclusion": CHURN,
-            "reason": (f"OI {oi:+.2f}%、净主动成交占比 {cvd * 100:+.1f}%、"
-                       f"多单爆仓占24h成交额 {lliq * 100:.3f}%，"
-                       f"多空换手博弈，无明确胜负信号"),
+            "reason": (f"OI {_raw_pct_str(d_oi_pct)}、净主动成交占比 {_pct_str(cvd_ratio)}、"
+                       f"最近1h多单爆仓占24h成交额 {lliq_txt}，"
+                       f"多空换手博弈，无明确胜负信号{lack}"),
             "metrics": signals, "confidence": "low"}
 
 
-def latest_ratio(merged: dict, key: str, at: datetime | None = None):
-    """取多空比序列中某个 key 的最近值。
+def latest_ratio_ts(merged: dict, key: str,
+                    at: datetime | None = None) -> tuple[datetime | None, float | None]:
+    """取多空比序列中某个 key 的最近 (ts, value)。
 
     各端点时间戳互不相同（takerlongshortRatio 通常比 top/global 晚/早一个周期），
     因此必须逐 key 独立取「最近值」，不能先按 timestamp 对齐再取整条记录。
     `at` 非空时只取 ≤ at 的值（用于取「高点时刻」的基准）。
+    返回 `(None, None)` 表示该 key 无任何可用值。
     """
     best_ts = None
     best_val = None
@@ -208,7 +259,12 @@ def latest_ratio(merged: dict, key: str, at: datetime | None = None):
             continue
         if best_ts is None or ts > best_ts:
             best_ts, best_val = ts, vals[key]
-    return best_val
+    return best_ts, best_val
+
+
+def latest_ratio(merged: dict, key: str, at: datetime | None = None):
+    """取多空比序列中某个 key 的最近值（无值返回 None）。"""
+    return latest_ratio_ts(merged, key, at)[1]
 
 
 def should_judge(retrace_pct: float | None, peak_ts: datetime | None,
@@ -233,5 +289,6 @@ def is_expired(started_at: datetime, now: datetime,
 __all__ = [
     "base_symbol", "alias_bases", "screen_surge", "confirm_squeeze",
     "evaluate_battle", "should_judge", "is_expired", "latest_ratio",
+    "latest_ratio_ts",
     "CONCLUSION_LABEL", "LONG_WIN", "SHORT_WIN", "PROFIT_TAKE", "CHURN",
 ]

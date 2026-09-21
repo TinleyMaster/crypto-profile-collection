@@ -11,8 +11,10 @@
 -- ============================================================
 
 -- 1. 爆仓滚动窗口快照（CoinGlass liquidation/coin-list，全币种一次拉取）
---    注意：各列是「滚动窗口累计值」（近 1h/4h/12h/24h 爆仓额），
---    细粒度增量 = 相邻两次快照之差（近似：忽略了同长度窗口滚出的部分）。
+--    注意：各列是「滚动窗口累计值」（近 1h/4h/12h/24h 爆仓额）。
+--    ⚠️ 消费侧必须取**绝对值**（＝最近 1h 爆仓额），严禁跨桶差分：相邻两次
+--    滚动快照相减得到的是「新滚入 − 滚出」，平稳时≈0、回落时常为负，
+--    再 max(…,0) 截断即假 0（2026-09-21 审计 P1-1）。
 CREATE TABLE IF NOT EXISTS biz.liquidation_snapshot (
     symbol            TEXT         NOT NULL,        -- 合约符号（与本库资产口径一致，如 BTCUSDT）
     ts                TIMESTAMPTZ  NOT NULL,        -- 采样时间（对齐采样边界）
@@ -32,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_liq_snapshot_ts ON biz.liquidation_snapshot (ts D
 CREATE INDEX IF NOT EXISTS idx_liq_snapshot_sym_ts ON biz.liquidation_snapshot (symbol, ts DESC);
 
 COMMENT ON TABLE biz.liquidation_snapshot IS
-    'CoinGlass coin-list 滚动爆仓窗口快照（多空分列）；轧空扫描靠相邻快照差分出细粒度爆仓增量';
+    'CoinGlass coin-list 滚动爆仓窗口快照（多空分列）；轧空扫描取绝对值（最近 1h 爆仓额），不跨桶差分';
 
 -- 2. 多空比（Binance 免费 /futures/data/*，仅对入队/候选币按需采集）
 CREATE TABLE IF NOT EXISTS biz.long_short_ratio (

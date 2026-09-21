@@ -601,6 +601,11 @@ def search_assets(query: str, limit: int = 20, tier: str | None = None) -> list[
 
 def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -> list[dict]:
     with get_db() as conn:
+        # P2（2026-09-21 审计）：搜索端点加 statement_timeout，慢查询 5s 即放弃，
+        # 避免单字符全表扫描长期占满 worker。SET LOCAL 只对本事务生效（get_db 退出即提交/回滚）。
+        # 注：SQL 本身 ~20ms，网络 RTT 主导延迟，5s 足以覆盖 RTT 波动又不至于误杀正常搜索。
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -615,7 +620,8 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                        cb.cmc_id, a.primary_sector,
                        ci.market_cap_rank,
                        cam.rank_num AS cmc_rank,
-                       COALESCE(cqs.market_cap, a.market_cap) AS market_cap
+                       COALESCE(cqs.market_cap, a.market_cap) AS market_cap,
+                       c.chain, c.contract_address
                 FROM core.asset a
                 LEFT JOIN biz.coin_basic cb ON cb.asset_id = a.asset_id
                 LEFT JOIN src_cmc.cmc_asset_map cam ON cam.cmc_id = cb.cmc_id
@@ -623,6 +629,15 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                     AND asm.source_code = 'cg' AND asm.is_primary = TRUE
                 LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
                 LEFT JOIN latest_cmc cqs ON cqs.cmc_id = cb.cmc_id
+                -- P1-3（2026-09-21 审计）：合约信息并入主查询（LEFT JOIN LATERAL），
+                -- 每次搜索省一次 DB 往返（搜索端点单请求原为 2 次查询，网络 RTT 主导延迟）
+                LEFT JOIN LATERAL (
+                    SELECT chain, contract_address
+                    FROM core.asset_contract ac
+                    WHERE ac.asset_id = a.asset_id
+                    ORDER BY ac.is_primary DESC, ac.contract_id
+                    LIMIT 1
+                ) c ON TRUE
                 WHERE (
                     a.canonical_symbol ILIKE %s
                     OR a.canonical_name ILIKE %s
@@ -690,22 +705,7 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                 canonical_ids.add(members[0][2])
 
             if rows:
-                # 补充链/合约信息（每资产优先 primary 合约），用于区分同名币
-                asset_ids = [row[0] for row in rows]
-                cur.execute(
-                    """
-                    SELECT asset_id, chain, contract_address
-                    FROM core.asset_contract
-                    WHERE asset_id = ANY(%s)
-                    ORDER BY asset_id, is_primary DESC, contract_id
-                    """,
-                    (asset_ids,),
-                )
-                contract_map = {}
-                for aid, chain, addr in cur.fetchall():
-                    if aid not in contract_map:
-                        contract_map[aid] = (chain, addr)
-
+                # 合约信息已由 LEFT JOIN LATERAL 并入主查询（单次往返，P1-3）
                 return [
                     {
                         "asset_id": row[0],
@@ -715,8 +715,8 @@ def _search_assets_inner(query: str, limit: int = 20, tier: str | None = None) -
                         "cmc_id": row[4],
                         "sector": row[5] or "other",
                         "sector_label": SECTOR_LABELS.get(row[5] or "other", row[5] or "other"),
-                        "chain": contract_map.get(row[0], (None, None))[0],
-                        "contract": contract_map.get(row[0], (None, None))[1],
+                        "chain": row[9],
+                        "contract": row[10],
                         "cmc_rank": row[7],
                         "market_cap": float(row[8]) if row[8] else None,
                         "market_tier": get_market_tier(row[7], row[6]),

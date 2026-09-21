@@ -464,6 +464,11 @@ def task_scan_oi_cvd(min_vol_usd: float = 0, workers: int = 8) -> dict:
 #  任务 3：主池扫描（15 分钟）
 # ═══════════════════════════════════════════════════════════════
 
+# 三周期各自独立成通道（_l1_screen 取 level 最高者，level < 2 才被丢弃）。
+# ⚠️ 1h 的 3.0 是**线上口径，刻意不改**（2026-09-21 决策，见设计文档 §4.2 / §12.1-14）：
+#   回测 backtest_scan_scenarios.py 的 PRICE_THR_1H=4.0 是「单周期 1h 单根」口径（无 5m/15m 通道），
+#   与这里「三周期并列、15m 2.0% 也能独立入池」不是同一个量。把本值改成 4.0 属伪对齐——
+#   回测里被 4.0 滤掉的「1h 涨 3~4%」样本，在线上多数已被 15m 通道先捕获，改了并不削减那批样本。
 PRICE_THR = {"5m": 1.5, "15m": 2.0, "1h": 3.0}
 VOL_RATIO_THR = 2.0
 LOOKBACK_BARS_MAIN = 20
@@ -1594,6 +1599,8 @@ def _render_squeeze_alert(items: list[dict]) -> str:
             cover_txt = f" · 数据覆盖 {cover['have']}/{cover['expect']} 桶"
         if m.get("data_missing"):
             cover_txt += f" · 缺失维度 {', '.join(m['data_missing'])}"
+        if m.get("oi_lag_sec") is not None:
+            cover_txt += f" · OI滞后 {int(m['oi_lag_sec'])}s"
         if m.get("top_ratio_base") is not None and m.get("top_ratio_now") is not None:
             top_txt = (f"{float(m['top_ratio_base']):.4f} → {float(m['top_ratio_now']):.4f}"
                        f"（Δ{_fmt(m.get('top_ratio_chg'), 3)}）")
@@ -1800,14 +1807,24 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             last_bucket = int(now.timestamp()) // BUCKET_SECONDS
             expect_buckets = max(1, last_bucket - first_bucket + 1)
             coverage = len(win_oi) / expect_buckets
-            if coverage < sqz.MIN_WINDOW_COVERAGE:
+            # 尾部连续性（SQZ-03）：覆盖率只看「数量」，前段齐、尾部断照样骗过闸门。
+            # 实测 OI 与 squeeze 同相位（offset 差 = 整周期），正常数据年龄 ≈170s；
+            # >2×BUCKET(600s) 说明最近桶迟迟没落库，窗口右端已失真。
+            oi_ts_max = oi_sym[-1]["ts"] if oi_sym else None
+            oi_lag_sec = None if oi_ts_max is None else (now - oi_ts_max).total_seconds()
+            tail_gap = oi_lag_sec is not None and oi_lag_sec > 2 * BUCKET_SECONDS
+            if coverage < sqz.MIN_WINDOW_COVERAGE or tail_gap:
                 stats["insufficient_coverage"] += 1
-                print(f"[scan_daemon][squeeze] {sym} 判定窗口数据覆盖不足 "
-                      f"{len(win_oi)}/{expect_buckets} 桶，跳过判定", file=sys.stderr)
+                if coverage < sqz.MIN_WINDOW_COVERAGE:
+                    reason = (f"判定窗口数据覆盖不足 {len(win_oi)}/{expect_buckets} 桶，暂不判定")
+                else:
+                    reason = "判定窗口尾部 OI 桶缺失，暂不判定"
+                if oi_lag_sec is not None:
+                    reason += f"（OI 最新桶滞后 {oi_lag_sec:.0f}s）"
+                print(f"[scan_daemon][squeeze] {sym} {reason}", file=sys.stderr)
                 track_updates.append((
                     "tracking", peak_px, peak_ts, px, now, round(retrace, 2), None,
-                    f"判定窗口数据覆盖不足 {len(win_oi)}/{expect_buckets} 桶，暂不判定",
-                    None, None, t["id"]))
+                    reason, None, None, t["id"]))
                 continue
             # 基准取「峰值时刻或之前最近一条」；峰值早于所有可用桶时退化为窗口首条
             base_oi = _last_at_or_before(oi_sym, peak_ts) or (win_oi[0] if win_oi else None)
@@ -1859,6 +1876,7 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 "top_ratio_base": top_base, "top_ratio_now": top_now,
                 "taker_ts": taker_ts.isoformat() if taker_ts else None,
                 "oi_cover": {"have": len(win_oi), "expect": expect_buckets},
+                "oi_lag_sec": None if oi_lag_sec is None else round(oi_lag_sec),
                 "trigger": why,
             })
             track_updates.append((
@@ -1869,6 +1887,8 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             stats["judged"] += 1
 
         # ── 落库 ────────────────────────────────────────────────
+        # 至此才开启**写事务**：读阶段已 commit、HTTP 已在进块前取完、中间为纯内存
+        # 计算（不 execute），故本事务不含网络 I/O（审计 P2-2 / 工单 SQZ-05）。
         signal_ids: list[int] = []
         with conn.cursor() as cur:
             if new_tracks:

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,6 +46,9 @@ import psycopg.rows  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 
 WATCHDOG_TASK_KEY = "scan_stall"
+# 健康提示独立去重键（SQZ-01/06）：不复用 scan_stall，避免「健康提示」与真正的
+# 「数据停摆」互相抑制 6h（两者成因与解除条件都不同）。
+HEALTH_TASK_KEY = "squeeze_health"
 KLINE_MAX_AGE_MIN = 30
 OI_MAX_AGE_MIN = 30
 SIGNAL_MAX_AGE_MIN = 60
@@ -178,15 +181,25 @@ def _collect_items(conn) -> list[dict]:
     return items
 
 
-def _get_alert_state(conn) -> datetime | None:
-    """读 watchdog 的上次告警时间（None=无记录或从未告警）。"""
+def _get_alert_state(conn, key: str = WATCHDOG_TASK_KEY) -> datetime | None:
+    """读指定去重键的上次告警时间（None=无记录或从未告警）。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task=%s",
-            (WATCHDOG_TASK_KEY,),
+            (key,),
         )
         row = cur.fetchone()
     return row["last_email_ts"] if row else None
+
+
+def _get_all_alert_states(conn) -> dict[str, datetime]:
+    """读所有告警去重键的非空时间（恢复时需清空全部）。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT task, last_email_ts FROM biz.scan_stall_alert "
+            "WHERE task = ANY(%s) AND last_email_ts IS NOT NULL",
+            ([WATCHDOG_TASK_KEY, HEALTH_TASK_KEY],))
+        return {r["task"]: r["last_email_ts"] for r in cur.fetchall()}
 
 
 def _send_mail(settings, subject: str, body: str) -> tuple[bool, str]:
@@ -224,6 +237,79 @@ def _render_items_html(items: list[dict]) -> str:
             + "".join(rows) + "</table>")
 
 
+# 轧空池/采样健康（工单 SQZ-01/06）：只读观测，越线才渲染，避免告警噪音。
+SQUEEZE_TRACKING_WARN = 9        # 队列占用 ≥ 9/12（75%）
+SQUEEZE_ENQ24H_WARN = 20         # 近 24h 入队 ≥ 20 条
+SQUEEZE_REJECT_WARN = 3          # 近 7 天覆盖率/尾部拒判 ≥ 3 次
+RESTART_GAP_WINDOW_H = 2         # 重启丢桶观察窗（小时）
+OI_BUCKET_DEFICIT_RATIO = 0.9    # 近 2h OI 桶数 < 期望 ×0.9 → 判为缺口
+SQUEEZE_QUEUE_MAX = 12           # 与 squeeze.TRACK_QUEUE_MAX 同口径（展示用）
+
+
+def _collect_squeeze_health(conn) -> list[str]:
+    """轧空池健康 + 重启丢桶（SQZ-01/06）：返回越线提示；未越线返回 []。
+
+    - 队列占用 / 24h 入队 / 覆盖率拒判：只读 `biz.squeeze_track`（reason 由
+      `scan_daemon` 拒判分支显式写入，无需改表）。
+    - 重启丢桶：`__daemon__` 近 `RESTART_GAP_WINDOW_H` 小时内启动过，但该窗口
+      `oi_cvd_snapshot` 的 5m 桶数不足期望 → 快照不可回补，会抬高覆盖率拒判率
+      （工单 SQZ-06，与本文件既有 OI 新鲜度检查互补：后者只看 MAX(ts)，看不到
+      中段/尾部缺桶）。
+    """
+    notes: list[str] = []
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT count(*) FILTER (WHERE status='tracking') AS tracking, "
+                "       count(*) FILTER (WHERE status='judged')   AS judged, "
+                "       count(*) FILTER (WHERE status='expired')  AS expired, "
+                "       count(*) FILTER (WHERE started_at > NOW() - INTERVAL '24 hours') "
+                "                                               AS enq_24h, "
+                "       count(*) FILTER (WHERE status='tracking' "
+                "                          AND reason LIKE '判定窗口%') AS reject "
+                "FROM biz.squeeze_track")
+            row = cur.fetchone()
+        if row["tracking"] >= SQUEEZE_TRACKING_WARN:
+            notes.append(f"轧空队列占用 {row['tracking']}/{SQUEEZE_QUEUE_MAX}"
+                         f"（≥{SQUEEZE_TRACKING_WARN}，接近上限）")
+        if row["enq_24h"] >= SQUEEZE_ENQ24H_WARN:
+            notes.append(f"轧空池近 24h 入队 {row['enq_24h']} 条（≥{SQUEEZE_ENQ24H_WARN}）")
+        if row["reject"] >= SQUEEZE_REJECT_WARN:
+            notes.append(f"覆盖率/尾部闸门拒判 {row['reject']} 次（≥{SQUEEZE_REJECT_WARN}）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[看门狗] 轧空池健康检查跳过（{e}）", file=sys.stderr)
+
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT last_run_at FROM biz.scan_heartbeat WHERE task=%s",
+                        (DAEMON_START_TASK,))
+            r = cur.fetchone()
+            daemon_start = r["last_run_at"] if r else None
+            now = datetime.now(timezone.utc)
+            if daemon_start is not None \
+                    and (now - daemon_start).total_seconds() <= RESTART_GAP_WINDOW_H * 3600:
+                cur.execute(
+                    "SELECT count(DISTINCT ts) AS n FROM biz.oi_cvd_snapshot "
+                    "WHERE exchange='binance' AND source='realtime' "
+                    "AND ts >= %s AND ts <= %s",
+                    (now - timedelta(hours=RESTART_GAP_WINDOW_H), now))
+                have = cur.fetchone()["n"] or 0
+                expect = int(RESTART_GAP_WINDOW_H * 60 / 5)   # 5m 桶数
+                if have < expect * OI_BUCKET_DEFICIT_RATIO:
+                    notes.append(
+                        f"daemon 近 {RESTART_GAP_WINDOW_H}h 内重启过"
+                        f"（{_fmt_utc(daemon_start)}），该窗口 OI 桶仅 {have}/{expect}"
+                        f"（快照不可回补，会抬高覆盖率拒判）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[看门狗] 重启丢桶检查跳过（{e}）", file=sys.stderr)
+    return notes
+
+
+def _render_health_html(notes: list[str]) -> str:
+    return ("<h3 style='margin:18px 0 6px'>🩺 轧空池 / 采样健康（只读观测）</h3>"
+            "<ul>" + "".join(f"<li>{n}</li>" for n in notes) + "</ul>")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="盘面扫描外部看门狗（数据新鲜度）")
     parser.add_argument("--dry-run", action="store_true", help="只打印判断，不发送邮件不写状态")
@@ -233,7 +319,7 @@ def main() -> int:
     with psycopg.connect(settings.database_url, connect_timeout=15) as conn:
         items = _collect_items(conn)
         stale_items = [it for it in items if it["stale"]]
-        last_alert = _get_alert_state(conn)
+        health_notes = _collect_squeeze_health(conn)
         now = datetime.now(timezone.utc)
 
         print(f"[看门狗] {now:%m-%d %H:%M} UTC 检查：")
@@ -241,14 +327,21 @@ def main() -> int:
             age = f"{it['age_min']:.0f} 分钟" if it["age_min"] is not None else "无数据"
             mark = "STALE" if it["stale"] else "ok"
             print(f"  {it['name']:<8} {age:>10}  [{mark}] (阈值 {it['threshold']}m)")
+        if health_notes:
+            print("[看门狗] 轧空池/采样健康提示：")
+            for n in health_notes:
+                print(f"  - {n}")
 
-        if not stale_items:
-            # 全部新鲜 → 若有历史告警则发恢复邮件并清空状态
-            if last_alert is None:
+        has_issue = bool(stale_items) or bool(health_notes)
+        if not has_issue:
+            # 全部正常 → 若任一去重键有历史告警则发恢复邮件并清空
+            alerts = _get_all_alert_states(conn)
+            if not alerts:
                 print("[看门狗] 数据正常，无历史告警，结束")
                 return 0
-            gap_h = (now - last_alert).total_seconds() / 3600
-            print(f"[看门狗] 数据已恢复（上次告警 {gap_h:.1f}h 前）→ 发恢复邮件")
+            last_any = min(alerts.values())
+            gap_h = (now - last_any).total_seconds() / 3600
+            print(f"[看门狗] 已恢复正常（上次告警 {gap_h:.1f}h 前）→ 发恢复邮件")
             if args.dry_run:
                 print("[看门狗] dry-run：跳过恢复邮件发送")
                 return 0
@@ -256,7 +349,7 @@ def main() -> int:
                 settings,
                 "✅ 盘面扫描数据已恢复",
                 "<h2 style='margin:0'>✅ 盘面扫描数据已恢复</h2>"
-                f"<p>停摆告警（{_fmt_utc(last_alert)} 发出）后，采集已恢复正常：</p>"
+                f"<p>告警（{_fmt_utc(last_any)} 发出）后已恢复正常：</p>"
                 + _render_items_html(items)
                 + "<p style='color:#999;font-size:12px'>盘面信号外部看门狗 · 自动邮件</p>",
             )
@@ -264,26 +357,40 @@ def main() -> int:
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE biz.scan_stall_alert SET last_email_ts=NULL, updated_at=NOW() "
-                        "WHERE task=%s", (WATCHDOG_TASK_KEY,))
+                        "WHERE task = ANY(%s)",
+                        ([WATCHDOG_TASK_KEY, HEALTH_TASK_KEY],))
                 conn.commit()
                 print("[看门狗] 恢复邮件已发送，告警状态已清空")
             else:
                 print(f"[看门狗] 恢复邮件发送失败: {msg}", file=sys.stderr)
             return 0
 
-        # 有停摆项 → 6h 去重后发汇总告警
+        # 有停摆项走 scan_stall 键；仅健康越线走 squeeze_health 键（互不抑制）
+        alert_key = WATCHDOG_TASK_KEY if stale_items else HEALTH_TASK_KEY
+        last_alert = _get_alert_state(conn, alert_key)
         if last_alert is not None:
             gap_h = (now - last_alert).total_seconds() / 3600
             if gap_h < REALERT_INTERVAL_H:
-                print(f"[看门狗] 停摆持续中，距上次告警仅 {gap_h:.1f}h（<{REALERT_INTERVAL_H}h），去重跳过")
+                print(f"[看门狗] 告警持续中，距上次邮件仅 {gap_h:.1f}h"
+                      f"（<{REALERT_INTERVAL_H}h），去重跳过")
                 return 0
 
-        names = "、".join(it["name"] for it in stale_items)
-        ages = ", ".join(
-            f"{it['name']}停在{_fmt_utc(it['mx'])}" if it["mx"] is not None
-            else f"{it['name']}表为空" for it in stale_items)
-        silent = _detect_silent_failure(items)
-        print(f"[看门狗] 停摆项: {names}" + ("（dry-run 不发送）" if args.dry_run else " → 发告警邮件"))
+        health_html = _render_health_html(health_notes) if health_notes else ""
+        silent = _detect_silent_failure(items) if stale_items else []
+        if stale_items:
+            names = "、".join(it["name"] for it in stale_items)
+            print(f"[看门狗] 停摆项: {names}"
+                  + ("（dry-run 不发送）" if args.dry_run else " → 发告警邮件"))
+            subject = f"🔴 盘面扫描数据停摆：{names} 已停更"
+            title = "🔴 盘面扫描数据停摆告警（外部看门狗）"
+            intro = "<p>以下数据超过阈值未更新，主池/蓄势池扫描已无法产出有效信号：</p>"
+        else:
+            print(f"[看门狗] 健康提示 {len(health_notes)} 项"
+                  + ("（dry-run 不发送）" if args.dry_run else " → 发提示邮件"))
+            subject = "⚠️ 盘面扫描健康提示（轧空池/采样缺口）"
+            title = "⚠️ 盘面扫描健康提示（外部看门狗）"
+            intro = ("<p>数据本身仍新鲜，但轧空池/采样出现以下情况："
+                     "重启丢桶不可回补，会让覆盖率闸门更频繁拒判，需观察。</p>")
         if silent:
             print("[看门狗] 疑似静默失败（数据停摆但采集任务心跳判为正常）：")
             for s in silent:
@@ -307,28 +414,31 @@ def main() -> int:
                 "心跳都写不进 DB」（进程级故障）时才主动退出交 supervisord 重启；"
                 "外部依赖抖动只记 last_error、不重启进程。若本邮件仍出现该分节，"
                 "请在容器内执行 <code>supervisorctl restart scan_daemon</code>。</p>")
-        cause_html = (
-            "<p><b>两类成因怎么区分</b>：<br>"
-            "① 任务行说明列写「线程在跑但连续失败：…」⇒ <b>线程在跑、每轮都失败</b>"
-            "（静默失败，见上节）；<br>"
-            "② 任务项写「无心跳 / 从未启动」或整个表都没有任务行 ⇒ "
-            "<b>进程或线程确实没起来</b>（进程崩溃、Zeabur 部署被移除、容器未运行）。<br>"
-            "两类也都可能叠加 Binance IP 限频（418）。另注意："
-            "<b>文件更新 ≠ 进程重启</b>，改了代码不重启容器不生效。</p>")
+        cause_html = ""
+        if stale_items:
+            cause_html = (
+                "<p><b>两类成因怎么区分</b>：<br>"
+                "① 任务行说明列写「线程在跑但连续失败：…」⇒ <b>线程在跑、每轮都失败</b>"
+                "（静默失败，见上节）；<br>"
+                "② 任务项写「无心跳 / 从未启动」或整个表都没有任务行 ⇒ "
+                "<b>进程或线程确实没起来</b>（进程崩溃、Zeabur 部署被移除、容器未运行）。<br>"
+                "两类也都可能叠加 Binance IP 限频（418）。另注意："
+                "<b>文件更新 ≠ 进程重启</b>，改了代码不重启容器不生效。</p>")
 
         ok, msg = _send_mail(
             settings,
-            f"🔴 盘面扫描数据停摆：{names} 已停更",
-            "<h2 style='margin:0'>🔴 盘面扫描数据停摆告警（外部看门狗）</h2>"
-            f"<p>以下数据超过阈值未更新，主池/蓄势池扫描已无法产出有效信号：</p>"
+            subject,
+            f"<h2 style='margin:0'>{title}</h2>"
+            + intro
             + _render_items_html(items)
+            + health_html
             + silent_html
             + cause_html
             + "<p><b>其他可能原因</b>：scan_daemon 进程崩溃/未启动、Binance IP 限频、"
               "Zeabur 部署被移除或容器未运行。</p>"
             "<p style='color:#999;font-size:12px'>"
             "本邮件由 scheduler 独立调度（每小时），不依赖 scan_daemon 存活；"
-            f"停摆期间每 {REALERT_INTERVAL_H} 小时重发一次，恢复后自动发送解除通知。</p>",
+            f"告警期间每 {REALERT_INTERVAL_H} 小时重发一次，恢复后自动发送解除通知。</p>",
         )
         if ok:
             with conn.cursor() as cur:
@@ -337,12 +447,12 @@ def main() -> int:
                     "VALUES (%s, NOW(), NOW()) "
                     "ON CONFLICT (task) DO UPDATE SET "
                     "last_email_ts=EXCLUDED.last_email_ts, updated_at=EXCLUDED.updated_at",
-                    (WATCHDOG_TASK_KEY,),
+                    (alert_key,),
                 )
             conn.commit()
-            print("[看门狗] 停摆告警邮件已发送")
+            print(f"[看门狗] 告警邮件已发送（去重键 {alert_key}）")
         else:
-            print(f"[看门狗] 停摆告警邮件发送失败: {msg}", file=sys.stderr)
+            print(f"[看门狗] 告警邮件发送失败: {msg}", file=sys.stderr)
         return 0
 
 

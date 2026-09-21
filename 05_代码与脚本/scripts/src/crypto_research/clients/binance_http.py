@@ -45,6 +45,15 @@ _ban_lock = threading.Lock()
 _log: Callable[[str], None] = print
 
 
+class PermanentHttpError(RuntimeError):
+    """4xx 客户端错误（非 408/418/429）：重试无意义，直接抛出。
+
+    典型场景：aggTrades 的 fromId 游标过期 → Binance 返回 400。此前该错误会被
+    通用重试逻辑重试 5 次（约 8s/币），一轮 500 个币全部失败时整轮耗时 11 分钟，
+    且异常被上层吞掉计数，导致 2026-09-18 OI 采样停摆两天无人察觉。
+    """
+
+
 def configure_logger(logger: Callable[[str], None]) -> None:
     """注入日志回调（默认 print）。"""
     global _log
@@ -139,8 +148,14 @@ def fapi_get(url: str, params: dict | None = None,
                 time.sleep(wait)
                 last_err = RuntimeError(f"429 rate limited (consecutive={_consecutive_ban})")
                 continue
+            if 400 <= r.status_code < 500 and r.status_code not in (408, 418, 429):
+                # 客户端错误（参数非法/游标过期）重试不会变好，立即抛出交由调用方处理
+                raise PermanentHttpError(
+                    f"HTTP {r.status_code} {url} params={params} body={r.text[:200]}")
             r.raise_for_status()
             return r.json()
+        except PermanentHttpError:
+            raise
         except Exception as e:  # noqa: BLE001
             last_err = e
             if attempt < MAX_RETRIES + 1:

@@ -42,6 +42,9 @@ class Settings:
     # Firecrawl Web Search（用于 AI 信号分析时补全缺失数据维度）
     firecrawl_api_key: str | None = None
     firecrawl_base_url: str = "https://api.firecrawl.dev"
+    # CoinGlass（合约衍生品爆仓数据；轧空扫描补数据源。多空比走 Binance 免费端点）
+    coinglass_api_key: str | None = None
+    coinglass_base_url: str = "https://open-api-v4.coinglass.com"
     # 邮件通知（解锁追踪提醒）
     smtp_host: str | None = None
     smtp_port: int = 465
@@ -148,6 +151,8 @@ def get_settings(require_database: bool = True) -> Settings:
         cryptoetf_base_url=os.getenv("CRYPTOETF_BASE", "https://api.cryptoetf.today/api/v1").strip(),
         firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", "").strip() or None,
         firecrawl_base_url=os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev").strip(),
+        coinglass_api_key=os.getenv("COINGLASS_API_KEY", "").strip() or None,
+        coinglass_base_url=os.getenv("COINGLASS_BASE_URL", "https://open-api-v4.coinglass.com").strip(),
         smtp_host=os.getenv("SMTP_HOST", "").strip() or None,
         smtp_port=int(os.getenv("SMTP_PORT", "465") or 465),
         smtp_user=os.getenv("SMTP_USER", "").strip() or None,

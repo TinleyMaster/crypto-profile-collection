@@ -201,6 +201,25 @@ def _load_cursors(conn) -> dict[str, int]:
     return {row[0]: int(row[1] or 0) for row in cur.fetchall()}
 
 
+def _fetch_agg_trades(symbol: str, last_trade_id: int) -> list:
+    """拉取增量 aggTrades；游标失效时回退为「最新 1000 笔」重同步。
+
+    Binance aggTrades 只保留近期成交，采样中断超过保留窗口后，用过期 fromId 请求
+    会返回 400（参数非法）。此时不带 fromId 拉最新 1000 笔，让游标跳到当前值，
+    下一轮起恢复增量。注意：该次重同步桶的 cvd_5m_usd / vol_5m_usd 只覆盖部分
+    窗口（偏小），属一次性重同步产物。
+    """
+    params = {"symbol": symbol, "limit": 1000}
+    if last_trade_id:
+        try:
+            return _http_get(f"{FAPI_BASE}/fapi/v1/aggTrades",
+                             {**params, "fromId": last_trade_id + 1})
+        except Exception as e:
+            print(f"[scan_daemon][oi_cvd] {symbol} aggTrades 游标 {last_trade_id} 失效"
+                  f"（{type(e).__name__}），回退最新成交重同步", file=sys.stderr)
+    return _http_get(f"{FAPI_BASE}/fapi/v1/aggTrades", params)
+
+
 def _sample_symbol(symbol: str, last_trade_id: int) -> dict:
     """采样单个币：OI（张数×标记价，USD）+ 增量 CVD。"""
     # OI 价值 = openInterest qty × markPrice（与 phase_oi_cvd_sampler 口径一致，
@@ -213,10 +232,7 @@ def _sample_symbol(symbol: str, last_trade_id: int) -> dict:
         oi_usd = None  # 标记价拉取失败 → OI 缺失（宁缺毋错，不写张数当美元）
 
     # aggTrades（增量 CVD）
-    params = {"symbol": symbol, "limit": 1000}
-    if last_trade_id:
-        params["fromId"] = last_trade_id + 1
-    trades = _http_get(f"{FAPI_BASE}/fapi/v1/aggTrades", params)
+    trades = _fetch_agg_trades(symbol, last_trade_id)
 
     cvd = 0.0
     vol = 0.0
@@ -261,13 +277,16 @@ def task_scan_oi_cvd(min_vol_usd: float = 0, workers: int = 8) -> dict:
     ts = _bucket_5m(datetime.now(timezone.utc))
     results: list[dict] = []
     errors = 0
+    err_samples: list[str] = []  # 保留前几条错误原文，避免异常被静默吞掉无法定位
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_sample_symbol, s, cursors.get(s, 0)): s for s in symbols}
         for fut in as_completed(futures):
             try:
                 results.append(fut.result())
-            except Exception:
+            except Exception as e:
                 errors += 1
+                if len(err_samples) < 5:
+                    err_samples.append(f"{futures[fut]}: {type(e).__name__}: {str(e)[:160]}")
 
     if results:
         rows = [(r["symbol"], ts, "binance", r["oi_usd"], r["cvd_5m"], None, r["vol_5m"])
@@ -314,7 +333,12 @@ def task_scan_oi_cvd(min_vol_usd: float = 0, workers: int = 8) -> dict:
                 )
             conn.commit()
 
-    return {"symbols": len(symbols), "results": len(results), "errors": errors, "bucket": ts.isoformat()}
+    if err_samples:
+        print(f"[scan_daemon][oi_cvd] {errors}/{len(symbols)} 个币采样失败，样例："
+              + " | ".join(err_samples), file=sys.stderr)
+
+    return {"symbols": len(symbols), "results": len(results), "errors": errors,
+            "bucket": ts.isoformat(), "error_samples": err_samples}
 
 
 # ═══════════════════════════════════════════════════════════════

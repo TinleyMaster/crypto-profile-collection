@@ -2788,7 +2788,7 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
 
     # 1. unlock input_snapshot
     if isinstance(unlocks, dict):
-        snap = unlocks.get("input_snapshot_json") or {}
+        snap = unlocks.get("input_snapshot") or unlocks.get("input_snapshot_json") or {}
         p, m, f, t = _extract_market(snap)
         if p is not None or m is not None or f is not None:
             market_price, market_mcap, market_fdv, market_snapshot_time = p, m, f, t
@@ -2810,7 +2810,8 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                         FROM biz.coin_basic cb
                         JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                         WHERE cb.asset_id = %s
-                          AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                        ORDER BY q.quote_time DESC
+                        LIMIT 1
                     """, (asset_id,))
                     row = cur.fetchone()
                     if row:
@@ -2858,6 +2859,9 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
         events = unlocks.get("events") or unlocks.get("unlock_events") or unlocks.get("unlock_events_json") or []
         upcoming = [e for e in events if e.get("is_upcoming")]
         result["unlock"]["upcoming_events_count"] = len(upcoming)
+        _unlock_input = unlocks.get("input_snapshot") or unlocks.get("input_snapshot_json") or {}
+        # 区分「真无解锁」与「数据未采集」（审计 F4）
+        result["unlock"]["data_available"] = bool(events or _unlock_input)
         if upcoming:
             next_ev = upcoming[0]
             if next_ev.get("date"):
@@ -2953,10 +2957,14 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                         result["derivatives"]["total_oi_usd"] = float(row["total_oi_usd"])
                     if row["oi_change_24h_pct"] is not None:
                         result["derivatives"]["oi_change_24h_pct"] = float(row["oi_change_24h_pct"])
+                    if row["cvd_24h_usd"] is not None:
+                        result["derivatives"]["cvd_24h_usd"] = float(row["cvd_24h_usd"])
                     if row["cvd_ratio_24h"] is not None:
                         result["derivatives"]["cvd_ratio_24h"] = float(row["cvd_ratio_24h"])
                     if row["available_exchanges"]:
                         result["derivatives"]["available_exchanges"] = row["available_exchanges"]
+                    if row.get("fetched_at"):
+                        result["derivatives"]["fetched_at"] = str(row["fetched_at"])
     except (psycopg.errors.UndefinedTable, Exception):
         pass
 
@@ -2990,6 +2998,35 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
             )
     except Exception:
         pass
+
+    # ── 数据时效（审计 F7）：notebook 侧也暴露 data_freshness，前端/结论均可标注滞后 ──
+    _freshness: dict = {}
+    _mkt_fresh = _data_freshness(result["market"].get("snapshot_time"))
+    if _mkt_fresh:
+        _freshness["market"] = _mkt_fresh
+    _soc_fresh = _data_freshness(result["social"].get("fetched_at"))
+    if _soc_fresh:
+        _freshness["social"] = _soc_fresh
+    _dv_fresh = _data_freshness(result["derivatives"].get("fetched_at"))
+    if _dv_fresh:
+        _freshness["derivatives"] = _dv_fresh
+    if isinstance(unlocks, dict) and unlocks.get("updated_at"):
+        _ul_fresh = _data_freshness(unlocks.get("updated_at"))
+        if _ul_fresh:
+            _freshness["unlock"] = _ul_fresh
+    if isinstance(onchain, dict):
+        _oc_dates = [
+            items[-1].get("snapshot_date")
+            for items in (onchain.get("by_chain") or {}).values()
+            if isinstance(items, list) and items and isinstance(items[-1], dict)
+        ]
+        _oc_dates = [d for d in _oc_dates if d]
+        if _oc_dates:
+            _oc_fresh = _data_freshness(max(_oc_dates))
+            if _oc_fresh:
+                _freshness["onchain"] = _oc_fresh
+    if _freshness:
+        result["data_freshness"] = _freshness
 
     return result
 

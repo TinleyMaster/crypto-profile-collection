@@ -8399,6 +8399,7 @@
         let searchTimer = null;
         let searchActiveIdx = -1;
         let searchResults = [];
+        let searchSeq = 0;          // 请求序号守卫：丢弃过期响应，避免中间态覆盖末次结果
         let selectedAssetId = null;
 
         const searchInput = document.getElementById('search-input');
@@ -8406,11 +8407,20 @@
         const searchClear = document.getElementById('search-clear');
         const materialsPanel = document.getElementById('materials-panel');
 
+        const SEARCH_MIN_CHARS = 3;   // pg_trgm 对 <3 字符无法生成 trigram → 必然全表扫描，故不发起查询
         searchInput.addEventListener('input', () => {
             const q = searchInput.value.trim();
             searchClear.classList.toggle('visible', q.length > 0);
             if (q.length < 1) {
                 closeDropdown();
+                return;
+            }
+            if (q.length < SEARCH_MIN_CHARS) {
+                clearTimeout(searchTimer);
+                searchResults = [];
+                searchActiveIdx = -1;
+                searchDropdown.classList.add('open');
+                searchDropdown.innerHTML = '<div class="empty">请至少输入 ' + SEARCH_MIN_CHARS + ' 个字符</div>';
                 return;
             }
             clearTimeout(searchTimer);
@@ -8444,16 +8454,22 @@
         });
 
         async function doSearch (q) {
+            const seq = ++searchSeq;
             searchDropdown.classList.add('open');
-            searchDropdown.innerHTML = '<div class="loading">搜索中...</div>';
+            // 有旧结果时不闪空白：避免逐字输入期间下拉长时间空白（复现报告 P0-2）
+            if (searchResults.length === 0) {
+                searchDropdown.innerHTML = '<div class="loading">搜索中...</div>';
+            }
             try {
                 const res = await fetch(`/api/assets/search?q=${encodeURIComponent(q)}`);
                 const data = await res.json();
+                if (seq !== searchSeq) return;   // 过期响应直接丢弃
                 if (!data.ok) throw new Error(data.error);
                 searchResults = data.assets;
                 searchActiveIdx = -1;
                 renderDropdown();
             } catch (e) {
+                if (seq !== searchSeq) return;
                 searchDropdown.innerHTML = '<div class="empty">搜索失败</div>';
                 searchResults = [];
             }
@@ -10608,7 +10624,7 @@
         loadTaskProgress();
         loadWatchlist();
 
-        // 只在选中运行中任务时刷新日志
+        // 只在选中运行中任务时刷新日志（5s：降低 worker 占用，避免与搜索等 API 争抢，复现报告 P1-4）
         setInterval(() => {
             if (selectedTaskId) {
                 fetch(`/api/tasks/${selectedTaskId}`).then(r => r.json()).then(d => {
@@ -10634,7 +10650,7 @@
                     }
                 });
             }
-        }, 3000);
+        }, 5000);
 
         setInterval(loadTopCatalysts, 5 * 60 * 1000);  // 催化剂 5 分钟刷新一次
         setInterval(loadTaskProgress, 30000);

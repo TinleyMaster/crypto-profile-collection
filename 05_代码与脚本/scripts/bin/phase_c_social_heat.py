@@ -90,15 +90,34 @@ def build_parser() -> argparse.ArgumentParser:
 
 # ── 资产与 CoinGecko ID 解析 ──────────────────────────────
 
+# CG 映射择优：同一资产可能有多个 cg 映射（同名币/桥接币/已改名旧 id），且多数没有
+# is_primary 标记。旧的 fetchone() 会取到任意一行（审计 F2：AVA(1506) 取到 meme 币
+# 'ansem-vs-alon'，社交分/市值全失真）。按「主映射 > 名称完全一致 > 符号一致 >
+# 市值排名最接近」的确定性顺序择优，避免同名币错配。
+_CG_BEST_MATCH_SQL = """
+    (
+        SELECT asm.source_asset_key
+        FROM core.asset_source_map asm
+        LEFT JOIN src_cg.coin_info ci ON ci.coin_id = asm.source_asset_key
+        WHERE asm.asset_id = a.asset_id AND asm.source_code = 'cg'
+        ORDER BY
+            asm.is_primary DESC,
+            (lower(ci.name) IS NOT DISTINCT FROM lower(a.canonical_name)) DESC,
+            COALESCE(upper(ci.symbol) = upper(a.canonical_symbol), false) DESC,
+            COALESCE(abs(ci.market_cap_rank - a.market_cap_rank), 999999),
+            asm.source_asset_key
+        LIMIT 1
+    )
+"""
+
+
 def resolve_asset(conn, asset_id: int | None, symbol: str | None) -> dict | None:
-    """根据 asset_id 或 symbol 查找资产信息（含 CG coin_id）。"""
-    query = """
+    """根据 asset_id 或 symbol 查找资产信息（含 CG coin_id，按确定性规则择优）。"""
+    query = f"""
         SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
-               asm_cg.source_asset_key AS coingecko_id
+               {_CG_BEST_MATCH_SQL} AS coingecko_id
         FROM core.asset a
-        LEFT JOIN core.asset_source_map asm_cg
-            ON asm_cg.asset_id = a.asset_id AND asm_cg.source_code = 'cg'
-        WHERE {}
+        WHERE {{}}
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         if asset_id:
@@ -143,16 +162,15 @@ def _cg_get(settings, path: str, params: dict | None = None, timeout: int = 15) 
 
 
 def resolve_coin_id(conn, asset_id: int, symbol: str, name: str, settings) -> str | None:
-    """优先用 asset_source_map 的 CG 映射，无则按 symbol 搜索。"""
+    """优先用 asset_source_map 的 CG 映射（确定性择优），无则按 symbol 搜索。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            "SELECT source_asset_key FROM core.asset_source_map "
-            "WHERE asset_id = %s AND source_code = 'cg'",
+            f"SELECT {_CG_BEST_MATCH_SQL} AS coin_id FROM core.asset a WHERE a.asset_id = %s",
             (asset_id,),
         )
         row = cur.fetchone()
-    if row and row.get("source_asset_key"):
-        return row["source_asset_key"]
+    if row and row.get("coin_id"):
+        return row["coin_id"]
 
     if not symbol:
         return None

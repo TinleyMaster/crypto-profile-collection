@@ -484,6 +484,19 @@ MAX_KLINE_AGE_MIN = {"5m": 15, "15m": 35, "1h": 80}
 MAX_OI_BUCKET_AGE_MIN = 20
 # 蓄势池：按小时聚合的 OI 桶允许的最大年龄（分钟）
 MAX_OI_ACC_AGE_MIN = 90
+# ── L0 市场环境阈值（审计 P1-2 标定）─────────────────────────────
+# 原值 `btc_1h ±1.0` / `fgi 25·75` / `cap_trend ±1.0` 里两个近乎死条件。用近 7 天
+# 「up + OI↑」触发子集（context_tags 回放，n=98）复算：原阈值下唯一真正降级的维度
+# 是 `cap_trend`，`btc_1h` 从未越过 ±1.0、`fgi` 从未越过 75 ⇒ `confidence='high'`
+# 的实际含义退化成「涨 + OI 涨」，regime 只当摆设。按「与触发条件同构的尺度」收紧：
+# 单币触发阈值是 1.5%~3%（PRICE_THR），BTC 1h 取 0.5% 作方向性门槛。
+# ⚠️ 收紧后同一份回放里 high 条数不变（60/98）——该子集的 btc_1h 全在 ±0.5% 内、
+# fgi 最低 63，故无回归风险；改动的作用是让下一次真实回调/贪婪时能提前否决。
+REGIME_BTC_1H_THR = 0.5
+REGIME_FGI_GREED = 72
+REGIME_FGI_FEAR = 28
+REGIME_CAP_TREND_THR = 0.5
+
 # 采集停摆告警：数据年龄超过该分钟数即视为停摆；同一告警最短重发间隔（小时）
 STALL_ALERT_AGE_MIN = 30
 STALL_ALERT_MIN_INTERVAL_H = 6
@@ -531,9 +544,16 @@ _SCHEDULED_TASKS: set[str] = set()
 
 
 def _build_regime(conn) -> dict:
-    """L0 市场环境。返回 {tags: [...], long_fav: bool, short_fav: bool}。"""
+    """L0 市场环境。返回 {tags: [...], long_fav: bool, short_fav: bool}。
+
+    阈值见 REGIME_* 常量。被否决时把**原因**写进 tags（审计 P1-2）：否则
+    `confidence='high'` 无从解释 —— 邮件里三个 regime 标签看不出是谁在否决、
+    甚至看不出发生过否决。
+    """
     tags: list[str] = []
     long_fav = short_fav = True
+    long_block: list[str] = []
+    short_block: list[str] = []
 
     # BTC 1h 方向
     try:
@@ -547,10 +567,12 @@ def _build_regime(conn) -> dict:
         if len(closes) >= 2:
             btc_1h = (closes[0] - closes[1]) / closes[1] * 100
             tags.append(f"btc_1h={'up' if btc_1h >= 0 else 'down'}({btc_1h:+.2f}%)")
-            if btc_1h < -1.0:
+            if btc_1h < -REGIME_BTC_1H_THR:
                 long_fav = False
-            elif btc_1h > 1.0:
+                long_block.append(f"BTC1h{btc_1h:+.2f}%")
+            elif btc_1h > REGIME_BTC_1H_THR:
                 short_fav = False
+                short_block.append(f"BTC1h{btc_1h:+.2f}%")
     except Exception:
         pass
 
@@ -565,10 +587,12 @@ def _build_regime(conn) -> dict:
         if row:
             fgi = float(row["value"])
             tags.append(f"fgi={fgi:.0f}({row['value_classification'] or '?'})")
-            if fgi < 25:
+            if fgi < REGIME_FGI_FEAR:
                 long_fav = False
-            elif fgi > 75:
+                long_block.append(f"FGI{fgi:.0f}")
+            elif fgi > REGIME_FGI_GREED:
                 short_fav = False
+                short_block.append(f"FGI{fgi:.0f}")
     except Exception:
         pass
 
@@ -583,13 +607,19 @@ def _build_regime(conn) -> dict:
         if len(rows) >= 2 and rows[0]["total_market_cap"] and rows[1]["total_market_cap"]:
             trend = (float(rows[0]["total_market_cap"]) - float(rows[1]["total_market_cap"])) / float(rows[1]["total_market_cap"]) * 100
             tags.append(f"cap_trend={trend:+.2f}%")
-            if trend < -1.0:
+            if trend < -REGIME_CAP_TREND_THR:
                 long_fav = False
-            elif trend > 1.0:
+                long_block.append(f"市值{trend:+.2f}%")
+            elif trend > REGIME_CAP_TREND_THR:
                 short_fav = False
+                short_block.append(f"市值{trend:+.2f}%")
     except Exception:
         pass
 
+    if not long_fav:
+        tags.append(f"多头环境受限（{'/'.join(long_block) or '原因未知'}）")
+    if not short_fav:
+        tags.append(f"空头环境受限（{'/'.join(short_block) or '原因未知'}）")
     return {"tags": tags, "long_fav": long_fav, "short_fav": short_fav}
 
 
@@ -646,12 +676,19 @@ def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
 
     # CVD：无数据时写 NULL（未知），**不得** fallback 成某个方向（审计 P1-2：
     # 09-19/09-20 cvd 全为 NULL 时被误判成 'down'，把「无数据」当成了「空头方向」）
-    cvds = [float(r["cvd_5m_usd"]) for r in oi_rows if r.get("cvd_5m_usd") is not None]
-    if not cvds:
+    # 审计 P1-3：原实现只把和的**符号**落库（`cvd_dir`），金额从未入库 ⇒ 渲染层
+    # 不可能显示幅度，也无法区分「杠杆推涨（OI↑+价↑+现货主动卖）」。
+    # 现同时落 `cvd_usd`（净额）与 `cvd_ratio`（净额 / 同窗口成交额）。
+    win = oi_rows[-OI_RISE_BARS:] if len(oi_rows) >= OI_RISE_BARS else oi_rows
+    cvd_vals = [float(r["cvd_5m_usd"]) for r in win if r.get("cvd_5m_usd") is not None]
+    vol_vals = [float(r["vol_5m_usd"]) for r in win if r.get("vol_5m_usd") is not None]
+    cvd_sum = sum(cvd_vals) if cvd_vals else None
+    if cvd_sum is None:
         cvd_dir = None
     else:
-        cvd_sum = sum(cvds[-OI_RISE_BARS:]) if len(cvds) >= OI_RISE_BARS else sum(cvds)
         cvd_dir = "up" if cvd_sum > 0 else "down" if cvd_sum < 0 else None
+    vol_sum = sum(vol_vals) if vol_vals else None
+    cvd_ratio = (cvd_sum / vol_sum) if (cvd_sum is not None and vol_sum) else None
 
     fr = _lookup_funding(funding_map, symbol)
     scenario = f"S{1 if oi_dir=='up' and direction=='up' else 2 if oi_dir=='up' and direction=='down' else 3 if oi_dir=='down' and direction=='up' else 4}"
@@ -659,6 +696,8 @@ def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
         "oi_dir": oi_dir,
         "oi_chg_pct": oi_chg,
         "cvd_dir": cvd_dir,
+        "cvd_usd": cvd_sum,
+        "cvd_ratio": cvd_ratio,
         "funding_rate": fr,
         "scenario": scenario,
     }
@@ -697,7 +736,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         # 最近 1 天 K 线
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT symbol, interval, open_time, close_px, quote_vol "
+                "SELECT symbol, interval, open_time, high_px, low_px, close_px, quote_vol "
                 "FROM biz.asset_klines WHERE open_time >= NOW() - INTERVAL '1 day' "
                 "ORDER BY symbol, interval, open_time"
             )
@@ -710,7 +749,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         # OI/CVD 近 3h（只取实时 5m 采样：1h 历史回填行会污染「近 2 桶 OI 变化」的计算）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT symbol, ts, oi_usd, cvd_5m_usd FROM biz.oi_cvd_snapshot "
+                "SELECT symbol, ts, oi_usd, cvd_5m_usd, vol_5m_usd FROM biz.oi_cvd_snapshot "
                 "WHERE source='realtime' AND ts >= NOW() - INTERVAL '3 hours' "
                 "ORDER BY symbol, ts"
             )
@@ -752,11 +791,31 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 confidence = "medium" if regime["short_fav"] else "low"
 
             ctx_tags = regime["tags"] + [f"lv{l1['level']}_{l1['iv']}"]
+            # 入场/失效位（审计 P2-4：表里有 trigger_price / stop_loss_pct，但主池
+            # 52 条告警 100% 为空 —— 属**生产者从未计算**，不是渲染层漏显示）。
+            # 入场 = 触发周期最新收盘价；失效 = 该周期近 LOOKBACK_BARS_MAIN+1 根的
+            # 反向极值（多头取最低价、空头取最高价）。触发条自身的 low ≤ close、
+            # high ≥ close，故 ref 与 trig 的大小关系天然成立，pct 恒 ≥ 0。
+            trig_px = stop_pct = None
+            bars = by_sym_k[sym].get(l1["iv"]) or []
+            if bars:
+                trig_px = float(bars[-1]["close_px"])
+                look = bars[-(LOOKBACK_BARS_MAIN + 1):]
+                if direction == "up":
+                    ref = min(float(b["low_px"]) for b in look)
+                    stop_pct = (trig_px - ref) / trig_px * 100
+                else:
+                    ref = max(float(b["high_px"]) for b in look)
+                    stop_pct = (ref - trig_px) / trig_px * 100
             signals.append((
                 now, sym, l2["scenario"], l1["iv"], direction, round(l1["chg_pct"], 2),
                 "up" if l1["vol_ratio"] >= VOL_RATIO_THR else "flat",
                 round(l1["vol_ratio"], 2), l2["oi_dir"], round(l2["oi_chg_pct"], 2),
                 l2["cvd_dir"], l2["funding_rate"], confidence, ctx_tags,
+                None if l2["cvd_usd"] is None else round(l2["cvd_usd"], 2),
+                None if l2["cvd_ratio"] is None else round(l2["cvd_ratio"], 6),
+                None if trig_px is None else round(trig_px, 8),
+                None if stop_pct is None else round(stop_pct, 3),
             ))
 
         if signals:
@@ -764,8 +823,9 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 INSERT INTO biz.scan_signal
                     (signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                      vol_state, vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate,
-                     confidence, context_tags, status)
-                VALUES (%s,%s,'main',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
+                     confidence, context_tags, cvd_usd, cvd_ratio, trigger_price,
+                     stop_loss_pct, status)
+                VALUES (%s,%s,'main',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
             """
             with conn.cursor() as cur:
                 cur.executemany(insert_sql, signals)
@@ -846,10 +906,14 @@ def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
             "oi_rise_ratio": rising * 100, "oi_cum_chg": cum_chg, "fund_label": fund_label}
 
 
-def _detect_brk(k1h: list[dict], acc_range: tuple[float, float], now: datetime) -> dict | None:
+def _detect_brk(k1h: list[dict], acc_range: tuple[float, float], now: datetime,
+                max_age_min: float | None = None) -> dict | None:
     if len(k1h) < LOOKBACK_BARS_ACC + 1:
         return None
-    if (now - k1h[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN["1h"]:
+    # 传进来的必须是**已收盘**的 1h 条（见 task_scan_accumulation），其年龄天然比
+    # 未收盘条多 0~60 分钟 ⇒ 阈值放宽一个周期，否则每小时前 40 分钟会误判「陈旧」。
+    age_limit = MAX_KLINE_AGE_MIN["1h"] if max_age_min is None else max_age_min
+    if (now - k1h[-1]["open_time"]).total_seconds() / 60 > age_limit:
         return None  # 数据陈旧，不参与突破判定
     vols = [float(k["quote_vol"] or 0) for k in k1h]
     vol_mean = sum(vols[-(LOOKBACK_BARS_ACC + 1):-1]) / LOOKBACK_BARS_ACC
@@ -930,30 +994,43 @@ def task_scan_accumulation() -> dict:
                     acc["fund_label"]]
             signals.append((now, sym, "accumulation", "ACC", "1h", "flat",
                             acc["chg1h"] or 0, "flat", acc["vol_ratio"] or 0.0,
-                            "up", acc["oi_cum_chg"], _lookup_funding(funding_map, sym), "medium", tags))
+                            "up", acc["oi_cum_chg"], _lookup_funding(funding_map, sym), "medium",
+                            tags, None))
 
         for sym in sorted(acc_symbols):
             k1h = by_sym_k.get(sym, [])
-            if len(k1h) < OI_HOURS + 1:
+            # 审计 P1-4：BRK 通道从未产出（全表 `scenario='BRK'` 0 行）源于两处**不可达**：
+            #   ① 区间极值原先把触发条本身也算进去（`k1h[-(OI_HOURS+1):]`），于是
+            #      `close > hi` / `close < lo` 数学上恒假 —— close 正是取极值的同一集合成员；
+            #   ② 库里的最后一根 1h 是**未收盘**的当前小时（实测 08:09 时 open_time=08:00），
+            #      其 quote_vol 只有整小时均量的 0.1~0.9 倍（实测 125 币最高 0.93）
+            #      ⇒ `BRK_VOL_RATIO=3.0` 永不可达。
+            # 故：只用**已收盘**条，且区间取触发条**之前**的 OI_HOURS 根。
+            closed = [k for k in k1h
+                      if (now - k["open_time"]).total_seconds() >= INTERVAL_SECONDS["1h"]]
+            if len(closed) < OI_HOURS + 1:
                 continue
-            lo = min(float(k["close_px"]) for k in k1h[-(OI_HOURS + 1):])
-            hi = max(float(k["close_px"]) for k in k1h[-(OI_HOURS + 1):])
-            brk = _detect_brk(k1h, (lo, hi), now)
+            win = closed[-(OI_HOURS + 1):-1]
+            lo = min(float(k["close_px"]) for k in win)
+            hi = max(float(k["close_px"]) for k in win)
+            brk = _detect_brk(closed, (lo, hi), now,
+                              max_age_min=MAX_KLINE_AGE_MIN["1h"] + INTERVAL_SECONDS["1h"] / 60)
             if not brk:
                 continue
             tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}"]
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
                             None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
-                            _lookup_funding(funding_map, sym), "high", tags))
+                            _lookup_funding(funding_map, sym), "high", tags,
+                            round(brk["break_px"], 8)))
 
         if signals:
             insert_sql = """
                 INSERT INTO biz.scan_signal
                     (signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                      vol_state, vol_ratio, oi_dir, oi_chg_pct, funding_rate, confidence,
-                     context_tags, status)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
+                     context_tags, trigger_price, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
             """
             with conn.cursor() as cur:
                 cur.executemany(insert_sql, signals)
@@ -977,6 +1054,16 @@ KOL_DAYS = 7
 # `alerted_at IS NULL` 的 high 行（如 09-16 那次停摆的 8 条），无界查询会让
 # 停摆告警被这批陈年行永久钉住 —— 每 6h 去重期一过就再发一封，而当时并没有停摆。
 LOST_SIGNAL_LOOKBACK_H = 6
+# 跨池互斥窗口（分钟，审计 P1-5）：同币在 main 与 squeeze 两个通道各发一封、口径相反
+# （实测 XMR 39min / 龙虾 41min，间隔都 < 60min）。窗口内只发**先到**的那封，后者标
+# `alert_suppressed_at` 留痕（**不能**只跳过 —— 主池候选集按 `alerted_at IS NULL` 取，
+# 不留下标记的话它会在 20 分钟窗口内反复重试、随后又被「丢信号检测」当异常计数）。
+CROSS_POOL_MUTE_MIN = 60
+# 历史先验（审计 P2-5）：同场景已告警信号的方向对齐后验。用**中位数 + 胜率 + 样本量**
+# 呈现（均值会被 AKEUSDT +147.99% 这类离群值绑架，实测 +24h 均值 +8.79% vs 中位 +3.60%）。
+PRIOR_HORIZON_H = 12
+PRIOR_LOOKBACK_DAYS = 30
+PRIOR_MIN_N = 10
 
 
 def _load_alert_candidates(conn, window_min: int) -> list[dict]:
@@ -984,7 +1071,8 @@ def _load_alert_candidates(conn, window_min: int) -> list[dict]:
         cur.execute(
             """
             SELECT id, signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
-                   vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate, context_tags
+                   vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate, context_tags,
+                   cvd_usd, cvd_ratio, trigger_price, stop_loss_pct
             FROM biz.scan_signal
             WHERE confidence = 'high'
               AND (pool = 'main' OR (pool = 'accumulation' AND scenario = 'BRK'))
@@ -1007,6 +1095,91 @@ def _in_cooldown_alert(conn, symbol: str) -> bool:
             (symbol, COOLDOWN_H),
         )
         return cur.fetchone() is not None
+
+
+def _cross_pool_recent(conn, symbols: list[str], pools: tuple[str, ...]) -> set[str]:
+    """指定池在跨池互斥窗口内**已告警**的符号集合（审计 P1-5）。
+
+    两个通道的告警都落在 `biz.scan_signal.alerted_at`（squeeze 池判定成功后同样回写），
+    故互斥判据单点可查、无需新表。
+    """
+    if not symbols:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT symbol FROM biz.scan_signal "
+            "WHERE symbol = ANY(%s) AND pool = ANY(%s) AND alerted_at IS NOT NULL "
+            "AND alerted_at > NOW() - make_interval(mins => %s)",
+            (symbols, list(pools), CROSS_POOL_MUTE_MIN))
+        return {r[0] for r in cur.fetchall()}
+
+
+def _mark_alert_suppressed(conn, ids: list[int], reason: str) -> None:
+    """跨池互斥的**留痕**（不能只跳过）：标 `alert_suppressed_at` 后，
+    「丢信号检测」不会再把这批行算成异常（见 `_stall_parts`）。"""
+    if not ids:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.scan_signal SET alert_suppressed_at = NOW(), "
+            "alert_suppressed_reason = %s WHERE id = ANY(%s)", (reason, ids))
+    conn.commit()
+
+
+def _scenario_priors(conn, scenarios: list[str]) -> dict[str, dict]:
+    """同场景「已告警」信号的方向对齐后验（审计 P2-5）。
+
+    口径：
+      - 样本 = 近 `PRIOR_LOOKBACK_DAYS` 天、`alerted_at IS NOT NULL`、非 invalid 的
+        主池信号，且 `signal_ts + 12h` 已过（**不混入未到期行**，同 catalyst_outcome 的教训）；
+      - 基线 = `signal_ts` 当时最后一根 1h 收盘价，终点 = `signal_ts+12h` 当时最后一根；
+      - 方向对齐收益 = `+pct`（做多）/ `-pct`（做空），胜率 = 对齐收益 > 0 的占比。
+    用中位数不用均值：+24h 均值被单点 +147.99% 拉高到 +8.79%，而中位仅 +3.60%。
+    """
+    if not scenarios:
+        return {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            WITH s AS (
+                SELECT sg.scenario, sg.p_dir,
+                       (SELECT k.close_px FROM biz.asset_klines k
+                         WHERE k.symbol = sg.symbol AND k.interval = '1h'
+                           AND k.open_time <= sg.signal_ts
+                         ORDER BY k.open_time DESC LIMIT 1) AS px0,
+                       (SELECT k.close_px FROM biz.asset_klines k
+                         WHERE k.symbol = sg.symbol AND k.interval = '1h'
+                           AND k.open_time <= sg.signal_ts + make_interval(hours => %s)
+                         ORDER BY k.open_time DESC LIMIT 1) AS px1
+                FROM biz.scan_signal sg
+                WHERE sg.pool = 'main' AND sg.alerted_at IS NOT NULL
+                  AND sg.status <> 'invalid' AND sg.p_dir IS NOT NULL
+                  AND sg.scenario = ANY(%s)
+                  AND sg.signal_ts > NOW() - make_interval(days => %s)
+                  AND sg.signal_ts < NOW() - make_interval(hours => %s)
+            )
+            SELECT scenario, p_dir, px0, px1 FROM s
+            WHERE px0 IS NOT NULL AND px1 IS NOT NULL AND px0 <> 0
+            """,
+            (PRIOR_HORIZON_H, scenarios, PRIOR_LOOKBACK_DAYS, PRIOR_HORIZON_H))
+        rows = cur.fetchall()
+
+    buckets: dict[str, list[float]] = {}
+    for r in rows:
+        raw = (float(r["px1"]) - float(r["px0"])) / float(r["px0"]) * 100
+        aligned = raw if r["p_dir"] == "up" else -raw
+        buckets.setdefault(r["scenario"], []).append(aligned)
+
+    out: dict[str, dict] = {}
+    for sc, vals in buckets.items():
+        if len(vals) < PRIOR_MIN_N:
+            continue
+        vals.sort()
+        n = len(vals)
+        median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+        win = sum(1 for v in vals if v > 0) / n * 100
+        out[sc] = {"n": n, "median": median, "win": win, "horizon": PRIOR_HORIZON_H}
+    return out
 
 
 def _get_asset_id(conn, symbol: str) -> int | None:
@@ -1144,6 +1317,16 @@ def _fmt_num(v, digits: int = 2, suffix: str = "", signed: bool = False) -> str:
     return f"{f:+.{digits}f}{suffix}" if signed else f"{f:.{digits}f}{suffix}"
 
 
+def _fmt_usd(v: float) -> str:
+    """美元金额缩写：-1.2M / +340K（审计 P1-3 的 CVD 幅度渲染）。"""
+    a = abs(v)
+    if a >= 1e6:
+        return f"{v / 1e6:+.2f}M"
+    if a >= 1e3:
+        return f"{v / 1e3:+.1f}K"
+    return f"{v:+.0f}"
+
+
 def _alert_title(items: list[dict]) -> str:
     """邮件标题按**实际**共振条数生成（审计 P1-1：原为硬编码「含共振」，与内容相反）。"""
     n_res = sum(len(it["resonance"]["event"]) + len(it["resonance"]["catalyst"])
@@ -1223,13 +1406,22 @@ def _render_alert_email(items: list[dict]) -> str:
                 lv_txt = f"{str(t).split('_')[-1]} 级异动"
                 break
         fund = sig.get("funding_rate")
-        # 资金费率原值存的是小数比例（0.00005 = 0.005%），无数据一律显示 '-' 而非 0；
+        # 资金费率原值存的是小数比例（0.00005 = 0.005%），且**不兜底 0**；
         # 补年化（币安 U 本位 8h 结算 ⇒ ×3×365），单看当期费率无可读性（审计 §三.4）
+        # 费率：无数据时区分「未覆盖」与「0」（审计 P2-3：实测告警币只有 40/53 在
+        # 费率源内，绝大多数 `-` 的含义是「我们没这个数据」而非「费率为 0」）。
         if fund is None:
-            fund_str = "-"
+            fund_str = "n/a（未覆盖）"
         else:
             f_pct = float(fund) * 100
             fund_str = f"{f_pct:+.4f}%（年化 {f_pct * 3 * 365:+.1f}%）"
+        # CVD 幅度（审计 P1-3：`cvd_usd` / `cvd_ratio` 已随生产者落库）
+        cvd_usd, cvd_ratio = sig.get("cvd_usd"), sig.get("cvd_ratio")
+        cvd_amt = ""
+        if cvd_usd is not None:
+            cvd_amt = f" {_fmt_usd(float(cvd_usd))}"
+            if cvd_ratio is not None:
+                cvd_amt += f"（占比 {float(cvd_ratio) * 100:+.1f}%）"
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
@@ -1262,6 +1454,23 @@ def _render_alert_email(items: list[dict]) -> str:
                  f"{str(sig.get('confidence') or '').upper()}</span>")
         bar = _strength_bar(_alert_strength(it), top, arrow_color) if top > 0 else ""
         rank = _CIRCLED[idx] if idx < len(_CIRCLED) else f"{idx + 1}."
+        # 失效位（审计 P2-4）：生产者已落 trigger_price / stop_loss_pct ⇒ 渲染价格与幅度
+        trig_px, stop_pct = sig.get("trigger_price"), sig.get("stop_loss_pct")
+        invalid_txt = ""
+        if trig_px is not None and stop_pct is not None:
+            barrier = (float(trig_px) * (1 - float(stop_pct) / 100) if up
+                       else float(trig_px) * (1 + float(stop_pct) / 100))
+            invalid_txt = (f"<br><small style='color:#6b7280'>失效位 "
+                           f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
+                           f"（-{float(stop_pct):.2f}%，入场 "
+                           f"{_fmt_num(trig_px, 6)}）</small>")
+        # 历史先验（审计 P2-5）：中位/胜率/样本量，**不用均值**（会被离群值绑架）
+        prior = it.get("prior")
+        prior_txt = ""
+        if prior:
+            prior_txt = (f"<br><small style='color:#6b7280'>历史同场景 {prior['horizon']}h "
+                         f"方向对齐 中位 {prior['median']:+.2f}% / 胜率 {prior['win']:.0f}%"
+                         f"（n={prior['n']}）</small>")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
@@ -1274,20 +1483,25 @@ def _render_alert_email(items: list[dict]) -> str:
             f"</div>"
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
-            f"CVD {cvd or '未知'} | 费率 {fund_str}</small>"
+            f"CVD {cvd or '未知'}{cvd_amt} | 费率 {fund_str}</small>"
             f"{cvd_flag}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
+            f"{invalid_txt}{prior_txt}"
             f"</div>"
         )
     body = "".join(body_parts)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
-              "CVD up/down = 主动买/卖占比方向；费率年化 = 当期 ×3×365（8h 结算）；"
+              "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
+              "费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 触发周期近 21 根反向极值；"
+              "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，共振/CVD 与结论"
               "相悖则扣系数），非胜率。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
-                "共振各段 n/a = 本库未关联该资产、该维度无从查询（≠ 该币无事件）；"
-                "催化剂为「归一标题去重后」的条数与方向构成，已合并多源转载。<br>"
+                "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
+                "共振各段 n/a = 本库未关联该资产；催化剂为「归一标题去重后」的条数与"
+                "方向构成，已合并多源转载。<br>"
+                "同一币在 60 分钟内若已在另一通道（轧空/主池）告警过，本通道只留痕不发信。<br>"
                 "本邮件为盘面数据分析参考，不构成投资建议。</p>")
     # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，
     # 防深色模式客户端下浅底 + 继承浅色字导致不可读。
@@ -1378,16 +1592,19 @@ def _stall_parts(conn, now: datetime) -> list[str]:
     # 未告警的 high 信号会被 `signal_ts > NOW()-20min` 永久滤掉、`alerted_at` 恒 NULL，
     # 且与「超窗作废」在库里不可区分。这里把它显式并入停摆告警。
     #
-    # 两个边界（否则本检测自身就会变成永久误报源）：
+    # 三个边界（否则本检测自身就会变成永久误报源）：
     #   ① 回溯**有界**（LOST_SIGNAL_LOOKBACK_H）—— 否则 09-16 那批陈年行会让告警
     #      每 6h 去重期一过就重发一次；
     #   ② 排除**冷却跳过**的行 —— 同币 12h 内已告警时 `task_scan_alert` 是**刻意**
-    #      跳过且不写 `alerted_at` 的，那属于设计行为，不是丢失。
+    #      跳过且不写 `alerted_at` 的，那属于设计行为，不是丢失；
+    #   ③ 排除**跨池互斥留痕**的行（`alert_suppressed_at`）—— 同币另一池已在窗口内
+    #      告警过，属 P1-5 的刻意抑制。
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM biz.scan_signal s "
                 "WHERE s.confidence = 'high' AND s.alerted_at IS NULL "
+                "AND s.alert_suppressed_at IS NULL "
                 "AND (s.pool = 'main' OR (s.pool = 'accumulation' AND s.scenario = 'BRK')) "
                 "AND s.signal_ts < NOW() - INTERVAL '30 minutes' "
                 "AND s.signal_ts > NOW() - make_interval(hours => %s) "
@@ -1475,19 +1692,36 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
     with _db() as conn:
         _check_and_alert_stall(conn)
         candidates = _load_alert_candidates(conn, window_min)
+        # 跨池互斥（审计 P1-5）：先取 squeeze 池在互斥窗口内已告警的符号（一次查询），
+        # 命中的主池候选只留痕、不进本封邮件。
+        muted = _cross_pool_recent(conn, sorted({c["symbol"] for c in candidates}),
+                                   ("squeeze",))
         seen: set[str] = set()
         to_alert: list[dict] = []
+        suppressed = 0
         for c in candidates:
             if c["symbol"] in seen or _in_cooldown_alert(conn, c["symbol"]):
                 continue
             seen.add(c["symbol"])
+            if c["symbol"] in muted:
+                _mark_alert_suppressed(
+                    conn, [c["id"]],
+                    f"跨池互斥：squeeze 池已在 {CROSS_POOL_MUTE_MIN} 分钟内告警")
+                suppressed += 1
+                continue
             to_alert.append({
                 "signal": c,
                 "resonance": _get_resonance(conn, c["symbol"], _get_asset_id(conn, c["symbol"])),
             })
 
         if not to_alert:
-            return {"candidates": len(candidates), "alerts": 0}
+            return {"candidates": len(candidates), "alerts": 0,
+                    "suppressed_cross_pool": suppressed}
+
+        # 历史先验（审计 P2-5）：只对本封出现的场景取一次
+        priors = _scenario_priors(conn, sorted({it["signal"]["scenario"] for it in to_alert}))
+        for it in to_alert:
+            it["prior"] = priors.get(it["signal"]["scenario"])
 
         html = _render_alert_email(to_alert)
         from crypto_research.clients.notifier import EmailNotifier
@@ -1510,7 +1744,8 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
                     (ids,),
                 )
             conn.commit()
-            return {"candidates": len(candidates), "alerts": len(ids)}
+            return {"candidates": len(candidates), "alerts": len(ids),
+                    "suppressed_cross_pool": suppressed}
         else:
             print(f"[alert] 发送失败: {msg}")
             return {"candidates": len(candidates), "alerts": 0, "error": msg}
@@ -2075,7 +2310,7 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
         # ── 落库 ────────────────────────────────────────────────
         # 至此才开启**写事务**：读阶段已 commit、HTTP 已在进块前取完、中间为纯内存
         # 计算（不 execute），故本事务不含网络 I/O（审计 P2-2 / 工单 SQZ-05）。
-        signal_ids: list[int] = []
+        id_by_symbol: dict[str, int] = {}
         with conn.cursor() as cur:
             if new_tracks:
                 cur.executemany(
@@ -2136,11 +2371,26 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                      [sqz.CONCLUSION_LABEL[v["conclusion"]],
                       f"retrace={m['retrace_pct']}%", m["trigger"]],
                      m["peak_px"], json.dumps(m, ensure_ascii=False)))
-                signal_ids.append(cur.fetchone()[0])
+                sid = cur.fetchone()[0]
+                id_by_symbol[t["symbol"]] = sid
             conn.commit()
 
-    # ── 判定成功 → 发告警（只发一次，不做 12h 冷却）──────────────
+    # ── 跨池互斥（审计 P1-5）────────────────────────────────────
+    # 同币若在互斥窗口内已被主池告警过（实测 XMR 39min / 龙虾 41min），本封只留痕不发信：
+    # 两侧口径相反的告警（主池「多头进攻做多」vs 轧空「多空平局 churn」）会直接互相打架。
+    muted: set[str] = set()
     if judged_items:
+        with _db() as conn:
+            muted = _cross_pool_recent(
+                conn, sorted({it["track"]["symbol"] for it in judged_items}), ("main",))
+            _mark_alert_suppressed(
+                conn, [id_by_symbol[s] for s in muted if s in id_by_symbol],
+                f"跨池互斥：主池已在 {CROSS_POOL_MUTE_MIN} 分钟内告警")
+    send_items = [it for it in judged_items if it["track"]["symbol"] not in muted]
+    stats["suppressed_cross_pool"] = len(judged_items) - len(send_items)
+
+    # ── 判定成功 → 发告警（只发一次，不做 12h 冷却）──────────────
+    if send_items:
         settings = _SETTINGS or get_settings(require_database=True)
         from crypto_research.clients.notifier import EmailNotifier
         notifier = EmailNotifier(settings)
@@ -2148,16 +2398,17 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             print("[WARN] SMTP 未配置，跳过轧空判定告警")
         else:
             ok, msg = notifier.send(
-                f"🎯 轧空胜负判定：{len(judged_items)} 币",
-                _render_squeeze_alert(judged_items), from_name="轧空扫描")
+                f"🎯 轧空胜负判定：{len(send_items)} 币",
+                _render_squeeze_alert(send_items), from_name="轧空扫描")
             if ok:
+                send_ids = [id_by_symbol[it["track"]["symbol"]] for it in send_items]
                 with _db() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             "UPDATE biz.scan_signal SET alerted_at=NOW() WHERE id = ANY(%s)",
-                            (signal_ids,))
+                            (send_ids,))
                     conn.commit()
-                stats["alerts"] = len(signal_ids)
+                stats["alerts"] = len(send_ids)
             else:
                 print(f"[scan_daemon][squeeze] 告警发送失败: {msg}", file=sys.stderr)
 

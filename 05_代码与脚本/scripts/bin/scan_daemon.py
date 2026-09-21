@@ -14,6 +14,7 @@
   - [15min]  scan_main_pool    — 主池扫描 L0+L1+L2
   - [30min]  scan_accumulation — 蓄势池 ACC/BRK
   - [30min]  watchlist_monitor — 解锁/空头/大户监控
+  - [24h]    prune_scan_data   — 采集数据保留期清理（保留 30 天）
 
 设计原则：
   - 单进程，多线程调度（每个任务独立线程，内部循环）
@@ -1524,6 +1525,30 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  任务 9：采集数据保留期清理（每日，保留 30 天）
+# ═══════════════════════════════════════════════════════════════
+
+LIQ_RETENTION_DAYS = 30   # biz.liquidation_snapshot 保留天数（约 15 万行/天）
+
+
+def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
+    """清理超出保留期的高频采集数据（每日一次）。
+
+    仅清理体量最大的时序表；biz.squeeze_track 终态行 / biz.scan_signal 体量小且有
+    回溯价值，不在此处清理。保留 30 天后 liquidation_snapshot 稳态约 450 万行。
+    """
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM biz.liquidation_snapshot "
+                "WHERE ts < NOW() - make_interval(days => %s)",
+                (int(retention_days),))
+            liq = cur.rowcount
+        conn.commit()
+    return {"retention_days": int(retention_days), "liquidation_snapshot": liq}
+
+
+# ═══════════════════════════════════════════════════════════════
 #  守护进程调度框架
 # ═══════════════════════════════════════════════════════════════
 
@@ -1580,6 +1605,7 @@ TASK_DEFS = [
     ("scan_accumulation", 1800, 0,  task_scan_accumulation, {}),
     ("scan_squeeze",      300,  420, task_scan_squeeze,     {"min_vol_usd": 5_000_000}),
     ("watchlist_monitor", 1800, 300, task_watchlist_monitor, {}),
+    ("prune_scan_data",   86400, 600, task_prune_scan_data, {}),
 ]
 
 

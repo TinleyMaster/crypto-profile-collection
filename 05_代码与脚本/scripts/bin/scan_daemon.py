@@ -871,7 +871,9 @@ def _render_alert_email(items: list[dict]) -> str:
 def _check_and_alert_stall(conn) -> bool:
     """采集停摆检测：15m K 线 / OI 采样数据年龄超过阈值 → 发告警邮件。
 
-    去重：同一告警 STALL_ALERT_MIN_INTERVAL_H 小时内不重发（biz.scan_stall_alert）。
+    去重：同一告警 STALL_ALERT_MIN_INTERVAL_H 小时内不重发（biz.scan_stall_alert，
+    与外部看门狗 check_scan_freshness.py 共用 task='scan_stall' 这一去重键，
+    避免同一停摆事件被两条路径各发一封邮件）。
     返回 True 表示当前处于（或刚触发）停摆状态。
     """
     try:
@@ -884,7 +886,7 @@ def _check_and_alert_stall(conn) -> bool:
                 "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot WHERE exchange='binance'")
             mx_oi = cur.fetchone()["mx"]
             cur.execute(
-                "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task='stall_alert'")
+                "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task='scan_stall'")
             row = cur.fetchone()
 
         parts = []
@@ -922,7 +924,7 @@ def _check_and_alert_stall(conn) -> bool:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO biz.scan_stall_alert (task, last_email_ts, updated_at) "
-                    "VALUES ('stall_alert', NOW(), NOW()) "
+                    "VALUES ('scan_stall', NOW(), NOW()) "
                     "ON CONFLICT (task) DO UPDATE SET "
                     "last_email_ts=EXCLUDED.last_email_ts, updated_at=EXCLUDED.updated_at")
             conn.commit()

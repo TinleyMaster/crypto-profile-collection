@@ -13,7 +13,9 @@
   - OI 采样   MAX(ts)         > 30 分钟（exchange='binance'）
   - 扫描信号  MAX(signal_ts)  > 60 分钟（主池 15min / 蓄势池 30min，护栏跳过陈旧币时放宽）
 
-去重：biz.scan_stall_alert（task='watchdog_scan'），停摆持续期间每 6 小时重发一封汇总邮件。
+去重：biz.scan_stall_alert（task='scan_stall'）——与 scan_daemon 内置停摆告警
+（_check_and_alert_stall）共用同一去重键与 6h 静默期，同一停摆事件只发一封邮件。
+停摆持续期间每 6 小时重发一封汇总邮件。
 恢复：数据全部恢复新鲜时，若存在历史告警 → 发「已恢复」邮件并清空告警时间戳（下次停摆立即可告警）。
 
 用法：
@@ -39,7 +41,7 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 
-WATCHDOG_TASK_KEY = "watchdog_scan"
+WATCHDOG_TASK_KEY = "scan_stall"
 KLINE_MAX_AGE_MIN = 30
 OI_MAX_AGE_MIN = 30
 SIGNAL_MAX_AGE_MIN = 60

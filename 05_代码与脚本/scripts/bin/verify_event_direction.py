@@ -9,6 +9,12 @@
 
 判断口径与 hit 判定一致（excess>0 视为涨），主看中位数 + 涨占比，样本 >=10 才下结论。
 
+取样口径（只取前向样本）：
+  - ret_source = 'klines+market_daily'（base_time = signal.created_at，交易决策起点）
+  - base_time + 72h <= NOW()（窗口已走完，排除「未到期却已结算」行）
+  不这样筛会混入 backtest 行（base_time = published_at，历史回放口径）——
+  两套 base_time 基线不可混用做校准取样（见 AGENTS.md）。
+
 用法：
     python verify_event_direction.py
 """
@@ -52,6 +58,8 @@ def main():
         FROM biz.catalyst_outcome co
         JOIN biz.asset_catalyst ac ON ac.catalyst_id = co.catalyst_id
         WHERE co.excess_72h IS NOT NULL
+          AND co.ret_source = 'klines+market_daily'
+          AND co.base_time + INTERVAL '72 hours' <= NOW()
         GROUP BY 1
         ORDER BY n DESC
         """

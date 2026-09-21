@@ -96,23 +96,43 @@ def _db():
 
 # ── 跨表符号归一（唯一入口，禁止各查各的） ──────────────────────
 
-def _base_symbol(symbol: str) -> str:
-    """Binance 永续合约符号 → 本库裸符号（core.asset.canonical_symbol 口径）。
+def _symbol_candidates(symbol: str) -> list[str]:
+    """Binance 永续合约符号 → 本库可能使用的符号候选（由最贴切到最宽松）。
 
-    扫描侧一律用合约符号（'B2USDT'），而 DB 侧关联表一律存裸符号（'B2'）：
+    扫描侧一律用合约符号（'B2USDT'），而 DB 侧关联表一律存裸符号：
     core.asset / biz.event_watchlist / biz.asset_derivatives 全部如此。
     不做归一化会让事件/催化剂/KOL/资金费率四条关联链**恒空**（2026-09-21 审计 P0-1）。
 
-    只剥离 USDT 结算后缀；1000PEPE / 1000000SHIB 的前缀属币种名本体，保留。
+    两类后缀/前缀必须处理：
+      - 结算后缀 'USDT'：'B2USDT' → 'B2'；
+      - Binance 的 1000X / 1000000X 合约代表裸币 X（'1000FLOKIUSDT' → 'FLOKI'），
+        本库关联表存的是裸 X（实测 asset_derivatives / event_watchlist 里
+        一个 1000 前缀符号都没有），而 core.asset 对 1000FLOKI/1000PEPE
+        根本没有对应行 → 只剥 USDT 时这两条链依然全断（审计 P1-N2）。
     """
     s = (symbol or "").upper()
-    return s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+    base = s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+    out = [s, base]                          # 原样 → 去结算后缀
+    for pre in ("1000000", "1000"):          # 倍数前缀只从裸形态剥离
+        if base.startswith(pre) and len(base) > len(pre):
+            out.append(base[len(pre):])
+            break
+    return list(dict.fromkeys(out))
+
+
+def _lookup_funding(funding_map: dict[str, float], symbol: str) -> float | None:
+    """按候选序列在资金费率表里取值（未命中返回 None，不写 0）。"""
+    for cand in _symbol_candidates(symbol):
+        if cand in funding_map:
+            return funding_map[cand]
+    return None
 
 
 def _load_funding_map(conn) -> dict[str, float]:
     """资金费率表：裸符号 → 费率。
 
     - biz.asset_derivatives.symbol 存裸符号（'B2'），故 key 归一为裸符号；
+      同时把候选别名一并注册（'BTCUSDT' 行也注册 'BTC'），使查询侧只需遍历候选；
     - 同符号存在多行历史快照（BTC 12 行），无 ORDER BY 时取到哪条不确定，
       故用 DISTINCT ON 取 fetched_at 最新的一条（审计 P2-4）。
     """
@@ -122,7 +142,12 @@ def _load_funding_map(conn) -> dict[str, float]:
             "FROM biz.asset_derivatives WHERE funding_rate IS NOT NULL "
             "ORDER BY symbol, fetched_at DESC"
         )
-        return {_base_symbol(r["symbol"]): float(r["funding_rate"]) for r in cur.fetchall()}
+        out: dict[str, float] = {}
+        for r in cur.fetchall():
+            rate = float(r["funding_rate"])
+            for cand in _symbol_candidates(r["symbol"]):
+                out[cand] = rate
+        return out
 
 
 def _http_get(url: str, params: dict | None = None, timeout: int = 20) -> dict | list:
@@ -537,7 +562,7 @@ def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
         cvd_sum = sum(cvds[-OI_RISE_BARS:]) if len(cvds) >= OI_RISE_BARS else sum(cvds)
         cvd_dir = "up" if cvd_sum > 0 else "down" if cvd_sum < 0 else None
 
-    fr = funding_map.get(_base_symbol(symbol))
+    fr = _lookup_funding(funding_map, symbol)
     scenario = f"S{1 if oi_dir=='up' and direction=='up' else 2 if oi_dir=='up' and direction=='down' else 3 if oi_dir=='down' and direction=='up' else 4}"
     return {
         "oi_dir": oi_dir,
@@ -705,7 +730,7 @@ def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
     if rising < OI_RISE_RATIO or cum_chg <= OI_CUM_CHG_PCT:
         return None
 
-    fr = funding_map.get(_base_symbol(symbol))
+    fr = _lookup_funding(funding_map, symbol)
     if fr is not None:
         if fr <= 0.0001:
             fund_label = "OI↑+费率偏低/负：偏逼空潜力"
@@ -744,6 +769,10 @@ def task_scan_accumulation() -> dict:
     """蓄势池 ACC/BRK 扫描（单轮）。"""
     with _db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # 此处**刻意不过滤 source**（与新鲜度判断、主池 OI 变化不同）：
+            # 蓄势池 ACC 需要「连续 ≥12 个小时桶」，而实时 5m 采样在停摆/部署窗口
+            # 会断行，1h 回填行正好补上这些小时桶（同一小时两者 OI 值相近，
+            # AVG 混合误差可接受）。过滤掉 backfill 会让停摆后 ACC 长时间凑不满桶。
             cur.execute(
                 "SELECT symbol, date_trunc('hour', ts) AS h, AVG(oi_usd) AS oi "
                 "FROM biz.oi_cvd_snapshot WHERE ts >= NOW() - INTERVAL '13 hours' "
@@ -784,7 +813,7 @@ def task_scan_accumulation() -> dict:
                     acc["fund_label"]]
             signals.append((now, sym, "accumulation", "ACC", "1h", "flat",
                             acc["chg1h"] or 0, "flat", acc["vol_ratio"] or 0.0,
-                            "up", acc["oi_cum_chg"], funding_map.get(_base_symbol(sym)), "medium", tags))
+                            "up", acc["oi_cum_chg"], _lookup_funding(funding_map, sym), "medium", tags))
 
         for sym in sorted(acc_symbols):
             k1h = by_sym_k.get(sym, [])
@@ -799,7 +828,7 @@ def task_scan_accumulation() -> dict:
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
                             None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
-                            funding_map.get(_base_symbol(sym)), "high", tags))
+                            _lookup_funding(funding_map, sym), "high", tags))
 
         if signals:
             insert_sql = """
@@ -858,14 +887,25 @@ def _in_cooldown_alert(conn, symbol: str) -> bool:
 
 
 def _get_asset_id(conn, symbol: str) -> int | None:
-    """合约符号 → asset_id。先按原样查，miss 再按去 USDT 后缀的裸符号查。
+    """合约符号 → asset_id。按候选序列逐个查（原样 → 去 USDT → 去倍数前缀）。
 
-    core.asset.canonical_symbol 存裸符号（'B2'），而扫描侧传的是 'B2USDT' ——
-    不归一化会返回 None，使催化剂/KOL 两段共振被短路（审计 P0-1）。
+    core.asset.canonical_symbol 存裸符号（'B2'/'FLOKI'），而扫描侧传的是
+    'B2USDT'/'1000FLOKIUSDT' —— 不归一化会返回 None，使催化剂/KOL 两段
+    共振被短路（审计 P0-1 / P1-N2）。
+
+    ⚠️ canonical_symbol **不唯一**（1,866 个符号有重复，单符号最多 18 行，
+    PEPE/BTC/ETH 等热门币全在列），不加定序的 fetchone() 可能取到**别的币**
+    → 催化剂/KOL 共振张冠李戴（审计 P1-N3），比"无共振"更危险。
+    故按 market_cap_rank 升序取主流那条（实测 PEPE→3978 / BTC→2 / FLOKI→2553）。
+    注意候选序列是「原样优先」：'1000SHIBUSDT' 会先命中 core.asset 里的 1000SHIB
+    孤条目（12559），而非裸币 SHIB(1886) —— 该条 1000SHIB 行在关联表里无数据，
+    会退回"无共振"，不会串到裸币 SHIB 的共振上，属可接受行为。
     """
     with conn.cursor() as cur:
-        for cand in dict.fromkeys([symbol, _base_symbol(symbol)]):
-            cur.execute("SELECT asset_id FROM core.asset WHERE canonical_symbol = %s", (cand,))
+        for cand in _symbol_candidates(symbol):
+            cur.execute(
+                "SELECT asset_id FROM core.asset WHERE canonical_symbol = %s "
+                "ORDER BY market_cap_rank NULLS LAST, asset_id LIMIT 1", (cand,))
             r = cur.fetchone()
             if r:
                 return r[0]
@@ -875,7 +915,7 @@ def _get_asset_id(conn, symbol: str) -> int | None:
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     """返回 {event: [...], catalyst: [...], kol: [...]} 三段共振信息。
 
-    biz.event_watchlist.symbol 同样存裸符号，故事件段也必须用归一化符号查询
+    biz.event_watchlist.symbol 同样存裸符号，故事件段也必须用候选序列查询
     （原样查询在本库「数学上恒 0」）。
     """
     out: dict = {"event": [], "catalyst": [], "kol": []}
@@ -883,7 +923,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT event_type, event_date, event_pct, detail FROM biz.event_watchlist "
-            "WHERE symbol = %s", (_base_symbol(symbol),))
+            "WHERE symbol = ANY(%s)", (_symbol_candidates(symbol),))
         for r in cur.fetchall():
             out["event"].append(
                 f"{'🔓解锁' if r['event_type'] == 'unlock' else '🔄链上转账'}: {r['detail']}")
@@ -1713,6 +1753,11 @@ def _acquire_singleton_lock(db_pool) -> bool:
         with conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(%s)", (SCAN_SINGLETON_LOCK_KEY,))
             got = bool(cur.fetchone()[0])
+        # 必须提交：会话级 advisory lock 本身不需要事务，但 psycopg3 默认
+        # autocommit=False，不提交会让这条常驻连接以「idle in transaction」
+        # 状态挂住整个进程生命周期，长期阻挡 autovacuum 回收死元组
+        # （对一个高频写库的常驻连接是真实副作用，审计 P2-N5）。
+        conn.commit()
         if not got:
             db_pool.putconn(conn)
             return False

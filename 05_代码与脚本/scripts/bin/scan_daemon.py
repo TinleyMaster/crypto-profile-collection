@@ -770,6 +770,12 @@ OI_RISE_RATIO = 0.7
 OI_CUM_CHG_PCT = 5.0
 BRK_VOL_RATIO = 3.0
 LOOKBACK_BARS_ACC = 20
+# ACC 冷却小时：同币已有 active ACC 信号且在冷却期内则不再重复入池。
+# 审计 §12.1-5：原先每轮无条件 INSERT，实测 807 行只有 123 个不同币（6.6× 重复，
+# JUPUSDT×26 / BNBUSDT×20），既稀释统计又让「蓄势中」的币被反复推送。
+ACC_COOLDOWN_H = 24
+# BRK 候选窗口：近 N 天内 active 的 ACC 信号才有资格升级突破
+ACC_BRK_CANDIDATE_DAYS = 7
 
 
 def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
@@ -872,15 +878,30 @@ def task_scan_accumulation() -> dict:
         funding_map = _load_funding_map(conn)
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            # BRK 候选：近 ACC_BRK_CANDIDATE_DAYS 天内 active 的 ACC 信号
             cur.execute(
                 "SELECT symbol FROM biz.scan_signal WHERE pool='accumulation' "
-                "AND scenario='ACC' AND status='active' AND created_at > NOW() - INTERVAL '7 days'"
+                "AND scenario='ACC' AND status='active' "
+                "AND created_at > NOW() - make_interval(days => (%s)::int)",
+                (ACC_BRK_CANDIDATE_DAYS,),
             )
             acc_symbols = {r["symbol"] for r in cur.fetchall()}
+            # ACC 冷却：冷却期内已有 active ACC 的币不再重复入池（审计 §12.1-5）
+            cur.execute(
+                "SELECT DISTINCT symbol FROM biz.scan_signal WHERE pool='accumulation' "
+                "AND scenario='ACC' AND status='active' "
+                "AND created_at > NOW() - make_interval(hours => (%s)::int)",
+                (ACC_COOLDOWN_H,),
+            )
+            acc_cooldown = {r["symbol"] for r in cur.fetchall()}
 
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
+        acc_skipped_cooldown = 0
         for sym in sorted(by_sym_oi):
+            if sym in acc_cooldown:
+                acc_skipped_cooldown += 1
+                continue
             acc = _detect_acc(sym, by_sym_oi[sym], by_sym_k.get(sym, []), funding_map, now)
             if not acc:
                 continue
@@ -919,7 +940,8 @@ def task_scan_accumulation() -> dict:
 
     acc_count = sum(1 for s in signals if s[2] == 'accumulation' and s[3] == 'ACC')
     brk_count = sum(1 for s in signals if s[2] == 'accumulation' and s[3] == 'BRK')
-    return {"oi_symbols": len(by_sym_oi), "ACC": acc_count, "BRK": brk_count}
+    return {"oi_symbols": len(by_sym_oi), "ACC": acc_count, "BRK": brk_count,
+            "acc_skipped_cooldown": acc_skipped_cooldown}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1927,27 +1949,58 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  任务 9：采集数据保留期清理（每日，保留 30 天）
+#  任务 9：采集数据保留期清理（每日，按表分档）
 # ═══════════════════════════════════════════════════════════════
 
 LIQ_RETENTION_DAYS = 30   # biz.liquidation_snapshot 保留天数（约 15 万行/天）
+# 审计 §12.1-1：原先只清 liquidation_snapshot，oi_cvd_snapshot / asset_klines 只增不减。
+# oi_cvd_snapshot 约 15 万行/天（288 桶 × 528 币），90 天 ≈ 1350 万行。
+OI_CVD_RETENTION_DAYS = 90
+# asset_klines 按周期分档：5m 量最大、只留够回测的窗口；1h 便宜且是最长参考周期，留 2 年。
+KLINE_RETENTION_DAYS = {"5m": 90, "15m": 180, "1h": 730}
 
 
 def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
     """清理超出保留期的高频采集数据（每日一次）。
 
-    仅清理体量最大的时序表；biz.squeeze_track 终态行 / biz.scan_signal 体量小且有
-    回溯价值，不在此处清理。保留 30 天后 liquidation_snapshot 稳态约 450 万行。
+    覆盖三张高频时序表（审计 §12.1-1：原先只清 liquidation_snapshot）：
+
+      - `biz.liquidation_snapshot`：`LIQ_RETENTION_DAYS`（30 天，稳态约 450 万行）
+      - `biz.oi_cvd_snapshot`：`OI_CVD_RETENTION_DAYS`（90 天）
+      - `biz.asset_klines`：按周期分档 `KLINE_RETENTION_DAYS`（5m/15m/1h）
+
+    两条 DELETE 都命中现有索引（`idx_oi_cvd_snapshot_ts`、
+    `idx_asset_klines_interval_ot`），不会退化成全表扫描。
+    `biz.squeeze_track` 终态行与 `biz.scan_signal` 体量小且有回溯价值，刻意不清理。
     """
     with _db() as conn:
+        stats: dict[str, int] = {}
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM biz.liquidation_snapshot "
                 "WHERE ts < NOW() - make_interval(days => %s)",
                 (int(retention_days),))
-            liq = cur.rowcount
+            stats["liquidation_snapshot"] = cur.rowcount
+
+            cur.execute(
+                "DELETE FROM biz.oi_cvd_snapshot "
+                "WHERE ts < NOW() - make_interval(days => (%s)::int)",
+                (int(OI_CVD_RETENTION_DAYS),))
+            stats["oi_cvd_snapshot"] = cur.rowcount
+
+            kline_deleted = 0
+            for iv, days in KLINE_RETENTION_DAYS.items():
+                cur.execute(
+                    "DELETE FROM biz.asset_klines "
+                    "WHERE interval = %s AND open_time < NOW() - make_interval(days => (%s)::int)",
+                    (iv, int(days)))
+                kline_deleted += cur.rowcount
+            stats["asset_klines"] = kline_deleted
         conn.commit()
-    return {"retention_days": int(retention_days), "liquidation_snapshot": liq}
+    return {"retention_days": int(retention_days),
+            "oi_cvd_retention_days": int(OI_CVD_RETENTION_DAYS),
+            "kline_retention_days": dict(KLINE_RETENTION_DAYS),
+            **stats}
 
 
 # ═══════════════════════════════════════════════════════════════

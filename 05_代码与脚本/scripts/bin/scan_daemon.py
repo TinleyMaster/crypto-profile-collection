@@ -94,6 +94,37 @@ def _db():
     return _DB_POOL.connection()  # type: ignore
 
 
+# ── 跨表符号归一（唯一入口，禁止各查各的） ──────────────────────
+
+def _base_symbol(symbol: str) -> str:
+    """Binance 永续合约符号 → 本库裸符号（core.asset.canonical_symbol 口径）。
+
+    扫描侧一律用合约符号（'B2USDT'），而 DB 侧关联表一律存裸符号（'B2'）：
+    core.asset / biz.event_watchlist / biz.asset_derivatives 全部如此。
+    不做归一化会让事件/催化剂/KOL/资金费率四条关联链**恒空**（2026-09-21 审计 P0-1）。
+
+    只剥离 USDT 结算后缀；1000PEPE / 1000000SHIB 的前缀属币种名本体，保留。
+    """
+    s = (symbol or "").upper()
+    return s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+
+
+def _load_funding_map(conn) -> dict[str, float]:
+    """资金费率表：裸符号 → 费率。
+
+    - biz.asset_derivatives.symbol 存裸符号（'B2'），故 key 归一为裸符号；
+    - 同符号存在多行历史快照（BTC 12 行），无 ORDER BY 时取到哪条不确定，
+      故用 DISTINCT ON 取 fetched_at 最新的一条（审计 P2-4）。
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (symbol) symbol, funding_rate "
+            "FROM biz.asset_derivatives WHERE funding_rate IS NOT NULL "
+            "ORDER BY symbol, fetched_at DESC"
+        )
+        return {_base_symbol(r["symbol"]): float(r["funding_rate"]) for r in cur.fetchall()}
+
+
 def _http_get(url: str, params: dict | None = None, timeout: int = 20) -> dict | list:
     """Binance API GET：委托 binance_http.fapi_get（全局限频 + 429/418 指数退避 + 全局封禁闸门）。"""
     return fapi_get(url, params, timeout=timeout)
@@ -368,6 +399,14 @@ MAX_OI_ACC_AGE_MIN = 90
 # 采集停摆告警：数据年龄超过该分钟数即视为停摆；同一告警最短重发间隔（小时）
 STALL_ALERT_AGE_MIN = 30
 STALL_ALERT_MIN_INTERVAL_H = 6
+# 任务心跳停摆：心跳年龄 > max(N × 任务周期, STALL_ALERT_AGE_MIN) 即视为该任务停产
+STALL_HEARTBEAT_GRACE = 3
+# 参与心跳检查的任务（采集 + 出信号的两个池 + 告警）
+STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_main_pool",
+                         "scan_accumulation", "scan_alert")
+
+# 本进程实际调度的任务名（main() 启动时填充，停摆检测只检查这些任务）
+_SCHEDULED_TASKS: set[str] = set()
 
 
 def _build_regime(conn) -> dict:
@@ -480,13 +519,20 @@ def _compute_l2(symbol: str, oi_rows: list[dict], funding_map: dict[str, float],
     if len(ois) < OI_RISE_BARS + 1:
         return None
     oi_chg = (ois[-1] - ois[-1 - OI_RISE_BARS]) / ois[-1 - OI_RISE_BARS] * 100
+    # 方向保持二值（与 backtest_scan_scenarios.py 的 oi_dir 口径一致，2026-09-21 已核对），
+    # 不引入幅度阈值——否则线上与「P↑OI↑ 唯一稳定正期望」的回测分组口径不一致。
     oi_dir = "up" if oi_chg > 0 else "down"
 
+    # CVD：无数据时写 NULL（未知），**不得** fallback 成某个方向（审计 P1-2：
+    # 09-19/09-20 cvd 全为 NULL 时被误判成 'down'，把「无数据」当成了「空头方向」）
     cvds = [float(r["cvd_5m_usd"]) for r in oi_rows if r.get("cvd_5m_usd") is not None]
-    cvd_sum = sum(cvds[-OI_RISE_BARS:]) if len(cvds) >= OI_RISE_BARS else (sum(cvds) if cvds else 0)
-    cvd_dir = "up" if cvd_sum > 0 else "down"
+    if not cvds:
+        cvd_dir = None
+    else:
+        cvd_sum = sum(cvds[-OI_RISE_BARS:]) if len(cvds) >= OI_RISE_BARS else sum(cvds)
+        cvd_dir = "up" if cvd_sum > 0 else "down" if cvd_sum < 0 else None
 
-    fr = funding_map.get(symbol)
+    fr = funding_map.get(_base_symbol(symbol))
     scenario = f"S{1 if oi_dir=='up' and direction=='up' else 2 if oi_dir=='up' and direction=='down' else 3 if oi_dir=='down' and direction=='up' else 4}"
     return {
         "oi_dir": oi_dir,
@@ -540,22 +586,19 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         for r in k_rows:
             by_sym_k.setdefault(r["symbol"], {}).setdefault(r["interval"], []).append(r)
 
-        # OI/CVD 近 3h
+        # OI/CVD 近 3h（只取实时 5m 采样：1h 历史回填行会污染「近 2 桶 OI 变化」的计算）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 "SELECT symbol, ts, oi_usd, cvd_5m_usd FROM biz.oi_cvd_snapshot "
-                "WHERE ts >= NOW() - INTERVAL '3 hours' ORDER BY symbol, ts"
+                "WHERE source='realtime' AND ts >= NOW() - INTERVAL '3 hours' "
+                "ORDER BY symbol, ts"
             )
             oi_rows = cur.fetchall()
         by_sym_oi: dict[str, list[dict]] = {}
         for r in oi_rows:
             by_sym_oi.setdefault(r["symbol"], []).append(r)
 
-        # funding
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT symbol, funding_rate FROM biz.asset_derivatives")
-            funding_map = {r["symbol"]: float(r["funding_rate"]) for r in cur.fetchall()
-                           if r["funding_rate"] is not None}
+        funding_map = _load_funding_map(conn)
 
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
@@ -587,7 +630,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 now, sym, l2["scenario"], l1["iv"], direction, round(l1["chg_pct"], 2),
                 "up" if l1["vol_ratio"] >= VOL_RATIO_THR else "flat",
                 round(l1["vol_ratio"], 2), l2["oi_dir"], round(l2["oi_chg_pct"], 2),
-                l2["cvd_dir"], l2["funding_rate"] or 0, confidence, ctx_tags,
+                l2["cvd_dir"], l2["funding_rate"], confidence, ctx_tags,
             ))
 
         if signals:
@@ -657,7 +700,7 @@ def _detect_acc(symbol: str, oi_hourly: list[dict], k1h: list[dict],
     if rising < OI_RISE_RATIO or cum_chg <= OI_CUM_CHG_PCT:
         return None
 
-    fr = funding_map.get(symbol)
+    fr = funding_map.get(_base_symbol(symbol))
     if fr is not None:
         if fr <= 0.0001:
             fund_label = "OI↑+费率偏低/负：偏逼空潜力"
@@ -717,10 +760,7 @@ def task_scan_accumulation() -> dict:
         for r in k_rows:
             by_sym_k.setdefault(r["symbol"], []).append(r)
 
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT symbol, funding_rate FROM biz.asset_derivatives")
-            funding_map = {r["symbol"]: float(r["funding_rate"]) for r in cur.fetchall()
-                           if r["funding_rate"] is not None}
+        funding_map = _load_funding_map(conn)
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -739,7 +779,7 @@ def task_scan_accumulation() -> dict:
                     acc["fund_label"]]
             signals.append((now, sym, "accumulation", "ACC", "1h", "flat",
                             acc["chg1h"] or 0, "flat", acc["vol_ratio"] or 0.0,
-                            "up", acc["oi_cum_chg"], funding_map.get(sym), "medium", tags))
+                            "up", acc["oi_cum_chg"], funding_map.get(_base_symbol(sym)), "medium", tags))
 
         for sym in sorted(acc_symbols):
             k1h = by_sym_k.get(sym, [])
@@ -754,7 +794,7 @@ def task_scan_accumulation() -> dict:
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
                             None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
-                            funding_map.get(sym), "high", tags))
+                            funding_map.get(_base_symbol(sym)), "high", tags))
 
         if signals:
             insert_sql = """
@@ -813,20 +853,32 @@ def _in_cooldown_alert(conn, symbol: str) -> bool:
 
 
 def _get_asset_id(conn, symbol: str) -> int | None:
+    """合约符号 → asset_id。先按原样查，miss 再按去 USDT 后缀的裸符号查。
+
+    core.asset.canonical_symbol 存裸符号（'B2'），而扫描侧传的是 'B2USDT' ——
+    不归一化会返回 None，使催化剂/KOL 两段共振被短路（审计 P0-1）。
+    """
     with conn.cursor() as cur:
-        cur.execute("SELECT asset_id FROM core.asset WHERE canonical_symbol = %s", (symbol,))
-        r = cur.fetchone()
-        return r[0] if r else None
+        for cand in dict.fromkeys([symbol, _base_symbol(symbol)]):
+            cur.execute("SELECT asset_id FROM core.asset WHERE canonical_symbol = %s", (cand,))
+            r = cur.fetchone()
+            if r:
+                return r[0]
+    return None
 
 
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
-    """返回 {event: [...], catalyst: [...], kol: [...]} 三段共振信息。"""
+    """返回 {event: [...], catalyst: [...], kol: [...]} 三段共振信息。
+
+    biz.event_watchlist.symbol 同样存裸符号，故事件段也必须用归一化符号查询
+    （原样查询在本库「数学上恒 0」）。
+    """
     out: dict = {"event": [], "catalyst": [], "kol": []}
     # 1) 事件预置（领先型）
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT event_type, event_date, event_pct, detail FROM biz.event_watchlist "
-            "WHERE symbol = %s", (symbol,))
+            "WHERE symbol = %s", (_base_symbol(symbol),))
         for r in cur.fetchall():
             out["event"].append(
                 f"{'🔓解锁' if r['event_type'] == 'unlock' else '🔄链上转账'}: {r['detail']}")
@@ -867,26 +919,66 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     return out
 
 
+SCENARIO_DESC = {
+    "S1": "多头进攻", "S2": "诱多", "S3": "空头扎实", "S4": "诱空",
+    "S5": "多头兑现", "S6": "修复反弹", "S7": "跌势衰竭", "S8": "见底反弹",
+    "ACC": "蓄势(吸筹?)", "BRK": "蓄势突破",
+}
+
+
+def _fmt_num(v, digits: int = 2, suffix: str = "", signed: bool = False) -> str:
+    """容错数值格式化：None / 非数值 → '-'。
+
+    审计 P2-2：原实现直接 `{v:+.2f}` 且 `dict.get(k, 0)`（键存在但值为 None 时
+    不返回默认值），遇 NULL 会抛 TypeError 让**整封邮件**渲染失败。
+    """
+    if v is None:
+        return "-"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    return f"{f:+.{digits}f}{suffix}" if signed else f"{f:.{digits}f}{suffix}"
+
+
+def _alert_title(items: list[dict]) -> str:
+    """邮件标题按**实际**共振条数生成（审计 P1-1：原为硬编码「含共振」，与内容相反）。"""
+    n_res = sum(len(it["resonance"]["event"]) + len(it["resonance"]["catalyst"])
+                + len(it["resonance"]["kol"]) for it in items)
+    suffix = f"含共振 {n_res} 条" if n_res else "纯盘面信号，无共振"
+    return f"🚨 盘面异动告警：{len(items)} 币高置信信号（{suffix}）"
+
+
 def _render_alert_email(items: list[dict]) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     body_parts = []
     for it in items:
         sig = it["signal"]
         res = it["resonance"]
         pool_label = "蓄势池BRK" if sig["pool"] == "accumulation" else "主池"
         dir_label = "↑ 做多" if sig["p_dir"] == "up" else "↓ 做空"
+        sc = sig.get("scenario") or "-"
+        desc = SCENARIO_DESC.get(sc, "")
         tags = sig.get("context_tags") or []
         if isinstance(tags, list):
             tag_str = " ".join(str(t) for t in tags[:5])
         else:
             tag_str = str(tags)[:50]
+        fund = sig.get("funding_rate")
+        # 资金费率原值存的是小数比例（0.00005 = 0.005%），无数据一律显示 '-' 而非 0
+        fund_str = "-" if fund is None else f"{float(fund) * 100:+.4f}%"
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px;border-left:4px solid "
             f"{'#22c55e' if sig['p_dir']=='up' else '#ef4444'};background:#f9fafb'>"
-            f"<b>{sig['symbol']}</b> {pool_label} {sig['scenario']} {dir_label} "
-            f"({sig['timeframe']}, {sig['price_chg_pct']:+.2f}%)<br>"
-            f"<small>OI: {sig.get('oi_dir','?')} {sig.get('oi_chg_pct',0):+.1f}% | "
-            f"共振: 事件{len(res['event'])} 催化剂{len(res['catalyst'])} KOL{len(res['kol'])}</small><br>"
+            f"<b>{sig['symbol']}</b> {pool_label} <b>{sc}</b> {desc} {dir_label} "
+            f"({sig.get('timeframe') or '-'}, "
+            f"{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)})<br>"
+            f"<small>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
+            f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
+            f"CVD {sig.get('cvd_dir') or '未知'} | 费率 {fund_str}</small><br>"
+            f"<small>共振: 事件{len(res['event'])} 催化剂{len(res['catalyst'])} "
+            f"KOL{len(res['kol'])}</small><br>"
             f"<small style='color:#666'>{tag_str}</small>"
             f"</div>"
         )
@@ -898,8 +990,58 @@ def _render_alert_email(items: list[dict]) -> str:
             f"{body}{footnote}</body></html>")
 
 
+def _stall_parts(conn, now: datetime) -> list[str]:
+    """收集停摆项描述（空列表 = 一切正常）。
+
+    判据（2026-09-21 审计 P0-2 修订）：
+      1) 15m K 线 / OI **实时**采样 MAX(ts) 年龄 —— OI 只看 source='realtime'，
+         否则历史回填写入的 1h 行会冒充心跳把停摆「骗过去」；
+      2) 任务心跳（biz.scan_heartbeat）—— 覆盖「采集正常但扫描线程卡死」这一整类
+         此前完全无感的故障（原实现只看数据 MAX(ts)，不看任务是否真的在跑）。
+    """
+    parts: list[str] = []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("SELECT MAX(open_time) AS mx FROM biz.asset_klines WHERE interval='15m'")
+        mx_k = cur.fetchone()["mx"]
+        cur.execute(
+            "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot "
+            "WHERE exchange='binance' AND source='realtime'")
+        mx_oi = cur.fetchone()["mx"]
+
+    for label, mx in (("15m K线", mx_k), ("OI 实时采样", mx_oi)):
+        if mx is None:
+            continue
+        age_min = (now - mx).total_seconds() / 60
+        if age_min > STALL_ALERT_AGE_MIN:
+            parts.append(f"{label} 停在 {mx.strftime('%m-%d %H:%M')} UTC（约 {age_min:.0f} 分钟前）")
+
+    # 任务心跳（表不存在时跳过，兼容迁移未执行的部署）
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
+            hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
+        scheduled = _SCHEDULED_TASKS or {t[0] for t in TASK_DEFS}
+        for name in STALL_HEARTBEAT_TASKS:
+            if name not in scheduled:
+                continue
+            iv = next((t[1] for t in TASK_DEFS if t[0] == name), 0)
+            limit_min = max(iv * STALL_HEARTBEAT_GRACE / 60.0, float(STALL_ALERT_AGE_MIN))
+            last = hb.get(name)
+            if last is None:
+                parts.append(f"任务 {name} 无心跳记录（该线程可能从未启动）")
+                continue
+            age_min = (now - last).total_seconds() / 60
+            if age_min > limit_min:
+                parts.append(
+                    f"任务 {name} 心跳停在 {last.strftime('%m-%d %H:%M')} UTC"
+                    f"（约 {age_min:.0f} 分钟前，阈值 {limit_min:.0f} 分钟）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[scan_daemon][stall] 心跳检查跳过（{e}）", file=sys.stderr)
+    return parts
+
+
 def _check_and_alert_stall(conn) -> bool:
-    """采集停摆检测：15m K 线 / OI 采样数据年龄超过阈值 → 发告警邮件。
+    """采集/扫描停摆检测：数据年龄或任务心跳超阈值 → 发告警邮件。
 
     去重：同一告警 STALL_ALERT_MIN_INTERVAL_H 小时内不重发（biz.scan_stall_alert，
     与外部看门狗 check_scan_freshness.py 共用 task='scan_stall' 这一去重键，
@@ -908,27 +1050,14 @@ def _check_and_alert_stall(conn) -> bool:
     """
     try:
         now = datetime.now(timezone.utc)
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                "SELECT MAX(open_time) AS mx FROM biz.asset_klines WHERE interval='15m'")
-            mx_k = cur.fetchone()["mx"]
-            cur.execute(
-                "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot WHERE exchange='binance'")
-            mx_oi = cur.fetchone()["mx"]
-            cur.execute(
-                "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task='scan_stall'")
-            row = cur.fetchone()
-
-        parts = []
-        for label, mx in (("15m K线", mx_k), ("OI 采样", mx_oi)):
-            if mx is None:
-                continue
-            age_min = (now - mx).total_seconds() / 60
-            if age_min > STALL_ALERT_AGE_MIN:
-                parts.append(f"{label} 停在 {mx.strftime('%m-%d %H:%M')} UTC（约 {age_min:.0f} 分钟前）")
+        parts = _stall_parts(conn, now)
         if not parts:
             return False
 
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT last_email_ts FROM biz.scan_stall_alert WHERE task='scan_stall'")
+            row = cur.fetchone()
         last = row["last_email_ts"] if row else None
         if last and (now - last).total_seconds() < STALL_ALERT_MIN_INTERVAL_H * 3600:
             return True  # 仍处于停摆，但刚告警过（去重）
@@ -941,15 +1070,14 @@ def _check_and_alert_stall(conn) -> bool:
             return True
 
         body = (
-            "<h2 style='margin:0'>⚠️ 盘面扫描数据采集停摆告警</h2>"
-            f"<p>采集数据已超过 <b>{STALL_ALERT_AGE_MIN} 分钟</b>未更新，"
-            f"主池/蓄势池扫描已暂停出信号（防止陈旧数据假信号）。</p>"
+            "<h2 style='margin:0'>⚠️ 盘面扫描停摆告警</h2>"
+            f"<p>以下数据/任务已超过阈值未更新，主池/蓄势池扫描可能已停止产出：</p>"
             f"<p>{'<br>'.join(parts)}</p>"
-            "<p style='color:#999'>请检查 scan_daemon 进程 / Binance IP 限频状态，"
-            "采集恢复后自动解除。</p>"
+            "<p style='color:#999'>请检查 scan_daemon 进程/线程状态、Binance IP 限频、"
+            "以及部署是否被移除（文件更新 ≠ 进程重启）；恢复后自动解除。</p>"
         )
         ok, msg = notifier.send(
-            "⚠️ 盘面扫描数据采集停摆告警", body, from_name="盘面信号扫描")
+            "⚠️ 盘面扫描停摆告警", body, from_name="盘面信号扫描")
         if ok:
             with conn.cursor() as cur:
                 cur.execute(
@@ -995,7 +1123,7 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
             return {"candidates": len(candidates), "alerts": 0, "note": "smtp_not_configured"}
 
         ok, msg = notifier.send(
-            f"🚨 盘面异动告警：{len(to_alert)} 币高置信信号（含共振）",
+            _alert_title(to_alert),
             html,
             from_name="盘面信号扫描",
         )
@@ -1266,7 +1394,8 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             k_rows = cur.fetchall()
             cur.execute(
                 "SELECT symbol, ts, oi_usd, cvd_5m_usd, vol_5m_usd "
-                "FROM biz.oi_cvd_snapshot WHERE ts >= NOW() - INTERVAL '4 hours' "
+                "FROM biz.oi_cvd_snapshot WHERE source='realtime' "
+                "AND ts >= NOW() - INTERVAL '4 hours' "
                 "ORDER BY symbol, ts")
             oi_rows = cur.fetchall()
             cur.execute(
@@ -1552,6 +1681,58 @@ def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
 #  守护进程调度框架
 # ═══════════════════════════════════════════════════════════════
 
+SCAN_SINGLETON_LOCK_KEY = 0x5CA9DAE1   # scan_daemon 单实例 advisory lock（固定 key）
+_SINGLETON_CONN = None                 # 持有该锁的连接，进程存活期间不归还连接池
+
+
+def _acquire_singleton_lock(db_pool) -> bool:
+    """申请单实例锁（审计 P0-3），成功则独占该连接直到进程退出。
+
+    锁必须在**独立且常驻**的连接上持有：连接池连接被回收/重置时会话级锁随之释放。
+    申请本身异常时**放行**（fail-open）——宁可冒双实例风险，也不能让守护进程起不来，
+    因为「守护进程完全没运行」正是 2026-09-18 那次 63h 静默停摆的根因。
+    """
+    global _SINGLETON_CONN
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (SCAN_SINGLETON_LOCK_KEY,))
+            got = bool(cur.fetchone()[0])
+        if not got:
+            db_pool.putconn(conn)
+            return False
+        _SINGLETON_CONN = conn
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[scan_daemon] 单实例锁申请异常（按放行处理）: {e}", file=sys.stderr)
+        return True
+
+
+def _write_heartbeat(name: str, ok: bool, err: str | None = None) -> None:
+    """写任务心跳（每轮都写，与是否产出信号无关）。
+
+    biz.scan_heartbeat 让停摆检测能区分「采集正常但扫描线程卡死」——
+    只看数据 MAX(ts) 无法发现这一类故障（2026-09-21 审计 P0-2）。
+    心跳写失败只告警，不影响任务本身。
+    """
+    try:
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO biz.scan_heartbeat "
+                    "(task, last_run_at, last_ok_at, last_error, round_count, updated_at) "
+                    "VALUES (%s, NOW(), CASE WHEN %s THEN NOW() ELSE NULL END, %s, 1, NOW()) "
+                    "ON CONFLICT (task) DO UPDATE SET "
+                    "last_run_at=NOW(), "
+                    "last_ok_at=CASE WHEN %s THEN NOW() "
+                    "                ELSE biz.scan_heartbeat.last_ok_at END, "
+                    "last_error=%s, round_count=biz.scan_heartbeat.round_count+1, updated_at=NOW()",
+                    (name, ok, err, ok, err))
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[scan_daemon][{name}] 心跳写入失败: {e}", file=sys.stderr)
+
+
 def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
                    func_kwargs: dict | None = None):
     """单个任务的常驻循环。
@@ -1560,6 +1741,7 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
     - 每 interval_sec 执行一次
     - SkipIfRunning：上一轮未结束则跳过
     - 单轮异常不影响下一轮
+    - 每轮写一次心跳（供停摆检测使用）
     """
     func_kwargs = func_kwargs or {}
     time.sleep(offset_sec)  # 初始错峰
@@ -1576,18 +1758,23 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
             continue
 
         running = True
+        ok = False
+        err: str | None = None
         try:
             print(f"[scan_daemon][{name}] 第 {round_count} 轮开始")
             result = func(**func_kwargs)
             elapsed = time.time() - start_ts
             print(f"[scan_daemon][{name}] 第 {round_count} 轮完成，耗时 {elapsed:.1f}s，结果: {result}")
+            ok = True
         except Exception as e:
             elapsed = time.time() - start_ts
+            err = f"{type(e).__name__}: {e}"[:500]
             print(f"[scan_daemon][{name}] 第 {round_count} 轮异常 ({elapsed:.1f}s): {e}",
                   file=sys.stderr)
             traceback.print_exc()
         finally:
             running = False
+            _write_heartbeat(name, ok, err)
 
         # 计算下一轮等待时间（扣除本轮耗时，保持固定节奏）
         elapsed = time.time() - start_ts
@@ -1654,6 +1841,16 @@ def main() -> int:
     if not tasks_to_run:
         print("没有可运行的任务")
         return 1
+
+    # 单实例闸门（审计 P0-3）：旧码实例与新码实例并行会重复采集、
+    # 重复告警去重键并存，并抬高 Binance 出口 IP 被封概率。
+    # 用会话级 advisory lock 保证同一时刻只有一个本进程在跑，并持有到进程退出。
+    if not _acquire_singleton_lock(db_pool):
+        print("[scan_daemon] ⚠️ 已有 scan_daemon 实例在运行（advisory lock 被占用），本次退出",
+              file=sys.stderr)
+        return 1
+
+    _SCHEDULED_TASKS.update(t[0] for t in tasks_to_run)
 
     print(f"[scan_daemon] 启动 {len(tasks_to_run)} 个任务: {', '.join(t[0] for t in tasks_to_run)}")
 

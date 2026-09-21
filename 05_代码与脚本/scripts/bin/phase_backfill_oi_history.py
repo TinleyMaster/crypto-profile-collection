@@ -40,10 +40,13 @@ MIN_KLINES_BARS = 1000         # 只回填有足够 1h K 线历史的符号
 COVERED_DAYS = 25              # 已有 >=25 天 OI 历史则跳过
 
 UPSERT_SQL = """
-    INSERT INTO biz.oi_cvd_snapshot (symbol, ts, exchange, oi_usd, cvd_5m_usd, cvd_1h_usd, vol_5m_usd)
-    VALUES (%s,%s,'binance',%s,NULL,NULL,NULL)
+    INSERT INTO biz.oi_cvd_snapshot (symbol, ts, exchange, source, oi_usd, cvd_5m_usd, cvd_1h_usd, vol_5m_usd)
+    VALUES (%s,%s,'binance','backfill',%s,NULL,NULL,NULL)
     ON CONFLICT (symbol, exchange, ts) DO UPDATE SET oi_usd=EXCLUDED.oi_usd
 """
+# source='backfill'：回填的是 1h 粒度历史，与 5m 实时采样同表。
+# 不标来源会让基于 MAX(ts) 的新鲜度判断被「回填的近期小时行」误导，
+# 也会让主池「近 2 桶 OI 变化」把 1h 行当成 5m 桶（2026-09-21 审计 P0-2）。
 
 
 def get_universe(conn) -> list[str]:

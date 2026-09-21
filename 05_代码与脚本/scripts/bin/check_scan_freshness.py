@@ -50,6 +50,12 @@ KLINE_MAX_AGE_MIN = 30
 OI_MAX_AGE_MIN = 30
 SIGNAL_MAX_AGE_MIN = 60
 REALERT_INTERVAL_H = 6
+# 任务心跳：3× 任务周期（scan_klines/oi/alert 300s→15min，main_pool 900s→45min，
+# accumulation 1800s→90min）。心跳覆盖「数据还在被回填、但扫描线程已死」这类故障。
+HEARTBEAT_MAX_AGE_MIN = {
+    "scan_klines": 15, "scan_oi_cvd": 15, "scan_alert": 15,
+    "scan_main_pool": 45, "scan_accumulation": 90,
+}
 
 
 def _fmt_utc(dt: datetime | None) -> str:
@@ -59,11 +65,14 @@ def _fmt_utc(dt: datetime | None) -> str:
 
 
 def _collect_items(conn) -> list[dict]:
-    """查三项数据的最新时间戳，返回检查项列表。"""
+    """查数据最新时间戳与任务心跳，返回检查项列表。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("SELECT MAX(open_time) AS mx FROM biz.asset_klines WHERE interval='15m'")
         mx_k = cur.fetchone()["mx"]
-        cur.execute("SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot WHERE exchange='binance'")
+        # OI 只看实时 5m 采样：历史回填写入的 1h 行会让 MAX(ts) 假新鲜（审计 P0-2）
+        cur.execute(
+            "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot "
+            "WHERE exchange='binance' AND source='realtime'")
         mx_oi = cur.fetchone()["mx"]
         cur.execute("SELECT MAX(signal_ts) AS mx FROM biz.scan_signal")
         mx_sig = cur.fetchone()["mx"]
@@ -72,7 +81,7 @@ def _collect_items(conn) -> list[dict]:
     items = []
     for name, mx, threshold in (
         ("15m K线", mx_k, KLINE_MAX_AGE_MIN),
-        ("OI 采样", mx_oi, OI_MAX_AGE_MIN),
+        ("OI 实时采样", mx_oi, OI_MAX_AGE_MIN),
         ("扫描信号", mx_sig, SIGNAL_MAX_AGE_MIN),
     ):
         if mx is None:
@@ -82,6 +91,23 @@ def _collect_items(conn) -> list[dict]:
         age = (now - mx).total_seconds() / 60
         items.append({"name": name, "mx": mx, "age_min": age,
                       "threshold": threshold, "stale": age > threshold})
+
+    # 任务心跳（表不存在时跳过，兼容迁移未执行的部署）
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT task, last_run_at FROM biz.scan_heartbeat")
+            hb = {r["task"]: r["last_run_at"] for r in cur.fetchall()}
+        for task, threshold in HEARTBEAT_MAX_AGE_MIN.items():
+            last = hb.get(task)
+            if last is None:
+                items.append({"name": f"任务{task}", "mx": None, "age_min": None,
+                              "threshold": threshold, "stale": True})
+                continue
+            age = (now - last).total_seconds() / 60
+            items.append({"name": f"任务{task}", "mx": last, "age_min": age,
+                          "threshold": threshold, "stale": age > threshold})
+    except Exception as e:  # noqa: BLE001
+        print(f"[看门狗] 心跳检查跳过（{e}）", file=sys.stderr)
     return items
 
 

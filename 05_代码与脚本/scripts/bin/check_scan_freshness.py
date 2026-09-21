@@ -63,7 +63,7 @@ HEARTBEAT_MAX_AGE_MIN = {
     "scan_klines": 15, "scan_oi_cvd": 15, "scan_liquidation": 15,
     "scan_alert": 15, "scan_squeeze": 15,
     "scan_main_pool": 45, "scan_accumulation": 90, "watchlist_monitor": 90,
-    "prune_scan_data": 4320,
+    "expire_signals": 90, "prune_scan_data": 4320,
 }
 # scan_daemon 启动时写的进程标记（last_run_at = 进程启动时刻）。据此区分
 # 「本实例刚重启、某线程首轮还没跑完」（宽限，不报）与「线程从未启动」（真故障）。

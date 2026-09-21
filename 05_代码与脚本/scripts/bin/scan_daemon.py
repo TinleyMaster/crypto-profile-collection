@@ -14,6 +14,7 @@
   - [15min]  scan_main_pool    — 主池扫描 L0+L1+L2
   - [30min]  scan_accumulation — 蓄势池 ACC/BRK
   - [30min]  watchlist_monitor — 解锁/空头/大户监控
+  - [30min]  expire_signals    — 信号生命周期巡检（active → expired）
   - [24h]    prune_scan_data   — 采集数据保留期清理（保留 30 天）
 
 设计原则：
@@ -494,7 +495,7 @@ STALL_HEARTBEAT_GRACE = 3
 # TASK_DEFS 全覆盖（阈值由各自周期 ×STALL_HEARTBEAT_GRACE 自动推导）。
 STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_liquidation", "scan_alert",
                          "scan_squeeze", "scan_main_pool", "scan_accumulation",
-                         "watchlist_monitor", "prune_scan_data")
+                         "watchlist_monitor", "expire_signals", "prune_scan_data")
 # 连续失败自杀：同一任务连续 N 轮**连心跳都写不进 DB** 即退出进程，交 supervisord
 # 拉起（审计 P1-4）。半死进程（stdout 关闭/线程卡死）会一直占着单实例锁，新实例
 # 永远起不来 —— 这是 2026-09-18 63h、2026-09-21 48min 两次停摆的共同放大器。
@@ -978,6 +979,7 @@ def _load_alert_candidates(conn, window_min: int) -> list[dict]:
             FROM biz.scan_signal
             WHERE confidence = 'high'
               AND (pool = 'main' OR (pool = 'accumulation' AND scenario = 'BRK'))
+              AND status = 'active'
               AND alerted_at IS NULL
               AND signal_ts > NOW() - make_interval(mins => %s)
             ORDER BY signal_ts DESC
@@ -2034,6 +2036,68 @@ def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  任务 10：信号生命周期巡检（30 分钟）
+# ═══════════════════════════════════════════════════════════════
+
+# 信号有效期（设计文档 §6.3 / §12.1-4）。各池语义不同，取值依据：
+#   - 主池 / 蓄势池 BRK：24h —— §8 结论 3「1h 窗口全档位期望 <0.6%（成本吃光），
+#     24h 为主窗口 → 警报语义为『24h 持有观察』」，超过 24h 的信号不再具参考性。
+#   - 蓄势池 ACC：7 天 —— 与 ACC_BRK_CANDIDATE_DAYS 对齐：BRK 升级候选集要求
+#     「近 7 天内 active 的 ACC 信号」，ACC 若提前过期，这批币就永远等不到突破判定。
+SIGNAL_TTL_MAIN_H = 24
+SIGNAL_TTL_ACC_DAYS = 7
+
+
+def task_expire_signals() -> dict:
+    """信号生命周期巡检：把超期的 active 信号置 expired 并写 expired_at（每 30 分钟）。
+
+    实现设计文档 §6.3 的「超时退出」一段（§12.1-4 缺口）。原状：`biz.scan_signal`
+    只有写入没有退出，`status` 恒为 active、`expired_at` 无人写 —— 观察名单没有
+    退出机制，告警冷却、执行层冷却（查 created_at 窗口）与后续统计都会越来越脏。
+
+    有效期语义见 SIGNAL_TTL_* 常量（主池/BRK 24h、ACC 7 天）。
+
+    两个实现选择：
+      - `expired_at` 写**确定性截止时刻**（`signal_ts + TTL`）而非 `NOW()`：本任务
+        每 30 分钟才跑一轮，写 NOW() 会让实际有效期随巡检相位漂移最多 30 分钟。
+        这一列同时被 `phase_execute_scan_signal.load_candidates` 用作在窗前筛。
+      - 只更新 `status='active'` 的行 ⇒ 幂等，可重复执行；轧空池写入的 `confirmed`
+        行不参与（它记录的是「已判定事件」，有自己的 `biz.squeeze_track` 状态机，
+        不属于观察名单）。
+    """
+    with _db() as conn:
+        stats: dict[str, int] = {}
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE biz.scan_signal
+                   SET status = 'expired',
+                       expired_at = signal_ts + make_interval(hours => (%s)::int)
+                 WHERE status = 'active'
+                   AND ((pool = 'main')
+                        OR (pool = 'accumulation' AND scenario = 'BRK'))
+                   AND signal_ts < NOW() - make_interval(hours => (%s)::int)
+                """,
+                (SIGNAL_TTL_MAIN_H, SIGNAL_TTL_MAIN_H))
+            stats["main_brk"] = cur.rowcount
+
+            cur.execute(
+                """
+                UPDATE biz.scan_signal
+                   SET status = 'expired',
+                       expired_at = signal_ts + make_interval(days => (%s)::int)
+                 WHERE status = 'active'
+                   AND pool = 'accumulation' AND scenario = 'ACC'
+                   AND signal_ts < NOW() - make_interval(days => (%s)::int)
+                """,
+                (SIGNAL_TTL_ACC_DAYS, SIGNAL_TTL_ACC_DAYS))
+            stats["acc"] = cur.rowcount
+        conn.commit()
+    return {"signal_ttl_main_h": SIGNAL_TTL_MAIN_H,
+            "signal_ttl_acc_days": SIGNAL_TTL_ACC_DAYS, **stats}
+
+
+# ═══════════════════════════════════════════════════════════════
 #  守护进程调度框架
 # ═══════════════════════════════════════════════════════════════
 
@@ -2273,6 +2337,7 @@ TASK_DEFS = [
     ("scan_accumulation", 1800, 0,  task_scan_accumulation, {}),
     ("scan_squeeze",      300,  420, task_scan_squeeze,     {"min_vol_usd": 5_000_000}),
     ("watchlist_monitor", 1800, 300, task_watchlist_monitor, {}),
+    ("expire_signals",    1800, 900, task_expire_signals,    {}),
     ("prune_scan_data",   86400, 600, task_prune_scan_data, {}),
 ]
 

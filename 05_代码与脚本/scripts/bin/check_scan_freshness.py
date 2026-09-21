@@ -18,6 +18,10 @@
 停摆持续期间每 6 小时重发一封汇总邮件。
 恢复：数据全部恢复新鲜时，若存在历史告警 → 发「已恢复」邮件并清空告警时间戳（下次停摆立即可告警）。
 
+退出码：0 = 检查本身执行成功（无论是否发现停摆；停摆用邮件+日志表达），
+非 0 仅代表脚本自身异常（DB 连不上等）。scheduler 把非 0 视为「任务失败」并发
+管理员失败邮件，故停摆判断不能借退出码表达，否则每次检查都会误报任务失败。
+
 用法：
     python check_scan_freshness.py             # 检查 + 告警（cron 用）
     python check_scan_freshness.py --dry-run   # 只打印判断结果，不发送不写状态
@@ -174,7 +178,7 @@ def main() -> int:
             gap_h = (now - last_alert).total_seconds() / 3600
             if gap_h < REALERT_INTERVAL_H:
                 print(f"[看门狗] 停摆持续中，距上次告警仅 {gap_h:.1f}h（<{REALERT_INTERVAL_H}h），去重跳过")
-                return 1
+                return 0
 
         names = "、".join(it["name"] for it in stale_items)
         ages = ", ".join(
@@ -182,7 +186,7 @@ def main() -> int:
             else f"{it['name']}表为空" for it in stale_items)
         print(f"[看门狗] 停摆项: {names}" + ("（dry-run 不发送）" if args.dry_run else " → 发告警邮件"))
         if args.dry_run:
-            return 1
+            return 0
 
         ok, msg = _send_mail(
             settings,
@@ -207,9 +211,9 @@ def main() -> int:
                 )
             conn.commit()
             print("[看门狗] 停摆告警邮件已发送")
-            return 1
-        print(f"[看门狗] 停摆告警邮件发送失败: {msg}", file=sys.stderr)
-        return 1
+        else:
+            print(f"[看门狗] 停摆告警邮件发送失败: {msg}", file=sys.stderr)
+        return 0
 
 
 if __name__ == "__main__":

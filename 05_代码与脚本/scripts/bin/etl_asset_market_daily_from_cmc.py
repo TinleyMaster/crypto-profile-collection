@@ -99,7 +99,8 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                     SELECT
                         asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
-                        q.price_usd,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE q.price_usd END AS price_usd,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
                              THEN NULL ELSE NULLIF(q.market_cap, 0) END AS market_cap,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0

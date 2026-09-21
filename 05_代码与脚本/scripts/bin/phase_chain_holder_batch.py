@@ -169,6 +169,31 @@ def _tail(path: str, n: int = 200) -> str:
         return ""
 
 
+def _sweep_stale_temp_files(max_age_hours: int = 24) -> None:
+    """清理本任务遗留的临时输出文件（审计 B8）。
+
+    ``run_single`` 的 finally 清理在父进程被 SIGKILL 时不会执行，
+    长期运行会在系统 temp 目录累积 ``chain_holder_*.out/.err``。
+    仅清理本任务专属前缀且超过 max_age_hours 未修改的文件，避免误删在跑的兄弟任务。
+    """
+    cutoff = time.time() - max_age_hours * 3600
+    tmp_dir = tempfile.gettempdir()
+    try:
+        entries = os.listdir(tmp_dir)
+    except OSError:
+        return
+    for name in entries:
+        if not (name.startswith("chain_holder_")
+                and (name.endswith(".out") or name.endswith(".err"))):
+            continue
+        path = os.path.join(tmp_dir, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]:
     """运行单币持仓快照采集，返回 (是否成功, 失败原因)。
 
@@ -187,9 +212,9 @@ def run_single(asset_id: int, chain: str, timeout: int = 30) -> tuple[bool, str]
     out_path = err_path = None
     try:
         out_f = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".out", delete=False, encoding="utf-8")
+            mode="w", prefix="chain_holder_", suffix=".out", delete=False, encoding="utf-8")
         err_f = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".err", delete=False, encoding="utf-8")
+            mode="w", prefix="chain_holder_", suffix=".err", delete=False, encoding="utf-8")
         out_path, err_path = out_f.name, err_f.name
 
         proc = subprocess.Popen(
@@ -246,6 +271,8 @@ def main():
     parser.add_argument("--delay", type=float, default=0.5,
                         help="每币之间延迟（秒，避免触发限流）")
     args = parser.parse_args()
+
+    _sweep_stale_temp_files()
 
     settings = get_settings(require_database=True)
 

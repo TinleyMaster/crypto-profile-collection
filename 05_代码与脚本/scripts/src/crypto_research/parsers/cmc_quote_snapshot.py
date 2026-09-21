@@ -1,40 +1,71 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 
 # 上游 CMC 对低流动性/未上所/已下架资产把「无数据」编码成 0，与真值 0 不可分辨。
 # 按项目铁律（0 与缺失不可分辨时一律按无数据）统一归一化为 NULL，
 # 避免伪 0 污染市值/成交量统计（审计 P0-2，2026-09-18）。
-_ZERO_AS_NULL_FIELDS = ("market_cap", "fdv", "volume_24h")
+#
+# 2026-09-21 复验补丁（D+3 新-1 / F1+F2）：判零必须按「落库列精度」而非 Python 原值。
+# 例：CMC 原始 market_cap=0.0031 在 Python 侧 float(x)==0 为 False 被放过，
+# 但列 numeric(38,2) 落库舍入为 0.00 → 伪 0 漏网。故统一量化到列 scale 后再判零；
+# 同时把 price_usd 纳入归一化范围（此前完全未覆盖，导致 price 伪 0 入库）。
+_FIELD_SCALE = {
+    "price_usd": 18,   # numeric(38,18)
+    "market_cap": 2,   # numeric(38,2)
+    "fdv": 2,          # numeric(38,2)
+    "volume_24h": 2,   # numeric(38,2)
+}
+# 无可信价格时，基于价格的市值/成交量字段一并置 NULL
+_PRICE_DEPENDENT_FIELDS = ("market_cap", "fdv", "volume_24h")
+
+
+def _rounds_to_zero(value: Any, scale: int) -> bool:
+    """按列精度（scale 位小数）量化后是否为 0（无法解析视为缺失，同样返回 True）。
+
+    只做判零，不改写原值，避免改变下游依赖的数值类型。
+    """
+    if value is None:
+        return False
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return True
+    if not dec.is_finite():
+        return True
+    try:
+        return dec.quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP) == 0
+    except InvalidOperation:
+        # 超出该列可量化范围（如 1e40），不当作缺失，交下游 range guard / DB 处理
+        return False
 
 
 def normalize_zero_as_null(row: dict[str, Any]) -> dict[str, Any]:
     """把 CMC 返回的占位 0 归一化为 NULL（原地修改并返回）。
 
-    - ``market_cap`` / ``fdv`` / ``volume_24h`` == 0 → NULL
-    - ``price_usd`` 缺失或 <= 0 时，上述市值/成交量字段同样置 NULL
+    - ``price_usd`` / ``market_cap`` / ``fdv`` / ``volume_24h``
+      按各自列精度量化后 == 0 → NULL
+    - ``price_usd`` 缺失/为 0 时，市值/成交量字段同样置 NULL
       （没有可信价格时，基于价格的市值/成交量无意义）
     """
-    price = row.get("price_usd")
-    try:
-        price_missing = price is None or float(price) <= 0
-    except (TypeError, ValueError):
-        price_missing = True
-
-    for field in _ZERO_AS_NULL_FIELDS:
-        value = row.get(field)
-        if value is None:
-            continue
-        try:
-            if float(value) == 0:
-                row[field] = None
-        except (TypeError, ValueError):
+    for field, scale in _FIELD_SCALE.items():
+        if field in row and _rounds_to_zero(row.get(field), scale):
             row[field] = None
 
+    price = row.get("price_usd")
+    price_missing = True
+    if price is not None:
+        try:
+            price_missing = Decimal(str(price)) <= 0
+        except (InvalidOperation, ValueError, TypeError):
+            price_missing = True
+
     if price_missing:
-        for field in _ZERO_AS_NULL_FIELDS:
+        row["price_usd"] = None
+        for field in _PRICE_DEPENDENT_FIELDS:
             row[field] = None
 
     return row

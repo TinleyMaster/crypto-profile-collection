@@ -580,7 +580,8 @@ def re_etl_from_snapshots(conn, target_dates: list[date], dry_run: bool = False,
                     SELECT
                         asm.asset_id,
                         DATE(q.quote_time AT TIME ZONE 'UTC') AS market_date,
-                        q.price_usd,
+                        CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
+                             THEN NULL ELSE q.price_usd END AS price_usd,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
                              THEN NULL ELSE NULLIF(q.market_cap, 0) END AS market_cap,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0

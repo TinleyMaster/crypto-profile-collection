@@ -2601,26 +2601,35 @@
             // 衍生品情绪
             const dvEl = document.getElementById('op-derivatives');
             const dvSub = document.getElementById('op-derivatives-sub');
-            if (d.derivatives && d.derivatives.funding_rate_pct !== null && d.derivatives.funding_rate_pct !== undefined) {
-                const fr = Number(d.derivatives.funding_rate_pct);
+            const dv = d.derivatives || {};
+            const fr = (dv.funding_rate_pct !== null && dv.funding_rate_pct !== undefined) ? Number(dv.funding_rate_pct) : null;
+            const oi = (dv.oi_change_24h_pct !== null && dv.oi_change_24h_pct !== undefined) ? Number(dv.oi_change_24h_pct) : null;
+            const cvd = (dv.cvd_ratio_24h !== null && dv.cvd_ratio_24h !== undefined) ? Number(dv.cvd_ratio_24h) : null;
+            if (fr !== null || oi !== null || cvd !== null) {
+                // 综合方向分：CVD(主动买卖，权重最高) + 费率(拥挤度) + OI(杠杆变化，按流向定号)
+                // 仅凭费率符号会把「正费率 + 强净卖」误判成偏多（审计 PONS 11114）
+                const clamp = (v) => Math.max(-1, Math.min(1, v));
+                const flowSign = (cvd !== null && Math.abs(cvd) > 1e-9) ? Math.sign(cvd) : (fr !== null ? Math.sign(fr) : 0);
+                let score = 0, wsum = 0;
+                if (cvd !== null) { score += 0.6 * clamp(cvd); wsum += 0.6; }
+                if (fr !== null) { score += 0.25 * clamp(fr / 0.05); wsum += 0.25; }
+                if (oi !== null) { score += 0.15 * clamp(oi / 20) * flowSign; wsum += 0.15; }
+                score = wsum > 0 ? score / wsum : 0;
                 let label = '中性情绪', cls = '';
-                if (fr > 0.05) { label = '多头亢奋'; cls = 'positive'; }
-                else if (fr > 0.01) { label = '偏多'; cls = 'positive'; }
-                else if (fr < -0.05) { label = '空头拥挤'; cls = 'negative'; }
-                else if (fr < -0.01) { label = '偏空'; cls = 'negative'; }
-                dvEl.textContent = label + ' · 费率 ' + (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%';
+                if (score >= 0.3) { label = '多头亢奋'; cls = 'positive'; }
+                else if (score >= 0.1) { label = '偏多'; cls = 'positive'; }
+                else if (score <= -0.3) { label = '空头拥挤'; cls = 'negative'; }
+                else if (score <= -0.1) { label = '偏空'; cls = 'negative'; }
+                const head = [];
+                if (fr !== null) { head.push('费率 ' + (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%'); }
+                if (oi !== null) { head.push('OI 24h ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%'); }
+                if (cvd !== null) { head.push('CVD ' + (cvd >= 0 ? '+' : '') + (cvd * 100).toFixed(2) + '%'); }
+                dvEl.textContent = label + ' · ' + head.join(' · ');
                 dvEl.className = 'op-value ' + cls;
-                const subs = [];
-                if (d.derivatives.oi_change_24h_pct !== null && d.derivatives.oi_change_24h_pct !== undefined) {
-                    const oi = Number(d.derivatives.oi_change_24h_pct);
-                    subs.push('OI 24h ' + (oi >= 0 ? '+' : '') + oi.toFixed(2) + '%');
-                }
-                if (d.derivatives.cvd_ratio_24h !== null && d.derivatives.cvd_ratio_24h !== undefined) {
-                    const cvd = Number(d.derivatives.cvd_ratio_24h);
-                    subs.push('CVD ' + (cvd >= 0 ? '+' : '') + (cvd * 100).toFixed(2) + '%');
-                }
-                dvSub.textContent = subs.join(' · ');
-            } else if (d.derivatives && d.derivatives.available_exchanges && d.derivatives.available_exchanges.length === 0) {
+                dvSub.textContent = cvd !== null && Math.abs(cvd) >= 0.3
+                    ? '主动买卖显著' + (cvd < 0 ? '净卖出' : '净买入') + '（CVD 权重最高）'
+                    : '';
+            } else if (dv.available_exchanges && dv.available_exchanges.length === 0) {
                 dvEl.textContent = '无合约数据';
                 dvEl.className = 'op-value';
                 dvSub.textContent = '该代币可能无永续合约';

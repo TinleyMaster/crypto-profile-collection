@@ -7016,7 +7016,9 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "   - total_oi_usd：全市场未平仓合约价值（OI高=市场热度高，杠杆多）\n"
         "   - oi_change_24h_pct：OI 24h变化（OI上升=新资金入场，OI下降=资金离场）\n"
         "   - cvd_24h_usd：24h累计主动买卖净流入（正=主动买入多，看涨；负=主动卖出多，看跌）\n"
-        "   - cvd_ratio_24h：CVD占总成交额比例（绝对值高=方向性强）\n"
+        "   - cvd_ratio_24h：CVD占总成交额比例（小数口径，如 -0.395 即 -39.5%；绝对值高=方向性强）。"
+        "注意：CVD/OI 为实际资金流向，方向权重高于资金费率符号——"
+        "不得仅凭费率为正就判「偏多」，须综合 CVD 与 OI 变化（如正费率 + CVD 强净卖 + OI 下降 = 偏空/派发）。\n"
         "4. catalyst（催化）：回答「风险在哪（外部催化）」——解锁事件、上所、融资、监管、项目动态\n\n"
         "只输出 JSON，不要输出其他内容。JSON 格式：\n"
         '{"stance": "bullish|bearish|neutral", '

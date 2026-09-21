@@ -8,6 +8,8 @@
 - 关键词表外置 catalyst_rules.yaml，不改代码
 - 匹配优先级按列表顺序，命中即止
 - 分类不准没关系——只是排序用的粗筛，最终决策有 G2/G5/G6 兜底
+- listing/delisting 等「公告型」事件可配 title_only：只在标题匹配，
+  避免行情综述/播客/涨跌播报的长正文里顺带提到「上线/发行/上市」而被误判（P0-2）
 
 用法：
     from catalyst.classify import RuleEventClassifier
@@ -31,7 +33,8 @@ class RuleEventClassifier:
     token_hint_pattern: str = r"(?:[A-Z]{3,8}/?USDT|\$[A-Za-z0-9]{2,10}|\b[A-Z]{3,8}\b(?:/USDT|/USDC|/BTC|/ETH))"
 
     _compiled: bool = False
-    _compiled_rules: list[tuple[str, re.Pattern, bool]] = None  # (event_type, pattern, require_token)
+    # (event_type, pattern, require_token, title_only)
+    _compiled_rules: list[tuple[str, re.Pattern, bool, bool]] = None
     _token_hint_re: re.Pattern = None
 
     def __post_init__(self):
@@ -44,17 +47,18 @@ class RuleEventClassifier:
             event_type = rule["event_type"]
             keywords = rule.get("keywords", [])
             require_token = rule.get("require_token_hint", False)
+            title_only = rule.get("title_only", False)
 
             if not keywords:
                 # 兜底 other，无关键词
-                compiled.append((event_type, None, require_token))
+                compiled.append((event_type, None, require_token, title_only))
                 continue
 
             # 构建正则：任意一个关键词命中即可
             # 关键词中的特殊字符转义
             escaped = [re.escape(kw) for kw in keywords]
             pattern = re.compile("|".join(escaped), re.IGNORECASE)
-            compiled.append((event_type, pattern, require_token))
+            compiled.append((event_type, pattern, require_token, title_only))
 
         self._compiled_rules = compiled
         self._token_hint_re = re.compile(self.token_hint_pattern)
@@ -75,13 +79,15 @@ class RuleEventClassifier:
         if not self._compiled:
             self._compile()
 
-        text = (title or "") + " " + (body_text or "")
         has_pairs = bool(related_pairs)
 
-        for event_type, pattern, require_token in self._compiled_rules:
+        for event_type, pattern, require_token, title_only in self._compiled_rules:
             # other 兜底（无 pattern）
             if pattern is None:
                 return event_type
+
+            # title_only：公告型事件只在标题匹配，避免长正文误命中
+            text = (title or "") if title_only else (title or "") + " " + (body_text or "")
 
             if pattern.search(text):
                 # 需要 token 提示的事件，检查是否有 pair 或文本中有 token 迹象

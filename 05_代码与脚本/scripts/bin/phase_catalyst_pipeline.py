@@ -634,10 +634,13 @@ def run_signal(conn, builder: CatalystSignalBuilder,
     query = """
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
                cg.catalyst_kind, cg.base_strength,
-               ac.published_at
+               ac.published_at,
+               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction
         FROM biz.catalyst_resonance cr
         JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
+        LEFT JOIN biz.catalyst_impact ci
+          ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
         WHERE cg.catalyst_kind != 'noise'
           AND cr.resonance_state != 'pending'
     """
@@ -675,6 +678,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             fundamental_pass=None,     # P0 占位
             technical_state=None,      # P0 占位
             regime=regime,
+            impact_direction=row["impact_direction"],
         )
         processed += 1
         try:
@@ -836,7 +840,7 @@ def run_slow_second_order(conn, config: dict,
     query = """
         SELECT DISTINCT ON (cg.catalyst_id)
                cg.catalyst_id, cg.catalyst_kind, cg.base_strength,
-               ac.rule_event_type, ac.published_at
+               ac.rule_event_type, ac.ai_sentiment, ac.published_at
         FROM biz.catalyst_grade cg
         JOIN biz.asset_catalyst ac ON cg.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind IN ('structural', 'event')
@@ -978,6 +982,7 @@ def run_slow_second_order(conn, config: dict,
             "kind": r["catalyst_kind"],
             "base_strength": int(r["base_strength"]),
             "rule_event_type": r["rule_event_type"] or "other",
+            "ai_sentiment": r["ai_sentiment"],
             "published_at": r["published_at"],
         }
 
@@ -1020,6 +1025,7 @@ def run_slow_second_order(conn, config: dict,
             entry_price=None,
             stop_loss=None,
             take_profit=None,
+            impact_direction=info["ai_sentiment"],
         )
         if not sig.tier:
             continue
@@ -1153,7 +1159,7 @@ def refresh_second_order_resonance(conn, config: dict,
                cs.composite_score, cs.tier,
                cs.persistence, cs.fundamental_pass, cs.technical_state,
                cs.regime, cs.entry_price, cs.stop_loss, cs.take_profit,
-               ac.published_at
+               ac.ai_sentiment, ac.published_at
         FROM biz.catalyst_signal cs
         JOIN biz.catalyst_second_order cso
           ON cso.catalyst_id = cs.catalyst_id AND cso.asset_id = cs.asset_id
@@ -1205,7 +1211,15 @@ def refresh_second_order_resonance(conn, config: dict,
             entry_price=_to_num(row["entry_price"]),
             stop_loss=_to_num(row["stop_loss"]),
             take_profit=_to_num(row["take_profit"]),
+            impact_direction=row["ai_sentiment"],
         )
+
+        # 二阶传导信号 tier 上限 C（P2-2 对齐创建路径 run_slow_second_order）：
+        # 二阶受益属间接关联，弱传导不占 A/B 推送位。此前 refresh 路径漏了这一步，
+        # 导致 2,558 条二阶信号滞留 B 级。
+        if signal.tier in ("A", "B"):
+            signal.tier = "C"
+
         new_status = signal.status if signal.tier is not None else "invalid"
 
         if (res_score == int(row["resonance_score"] or 0)
@@ -1298,14 +1312,17 @@ def run_slow_g3g5(conn, config: dict,
                cs.kind, cs.base_strength,
                cs.resonance_score, cs.resonance_state,
                cs.regime, cs.expires_at,
-               ac.rule_event_type, ac.published_at,
+               ac.rule_event_type, ac.ai_sentiment, ac.published_at,
                a.asset_type, a.primary_sector,
-               ci.impact_direction
+               ci.impact_direction,
+               (cso.catalyst_id IS NOT NULL) AS is_second_order
         FROM biz.catalyst_signal cs
         JOIN biz.asset_catalyst ac ON cs.catalyst_id = ac.catalyst_id
         JOIN core.asset a ON cs.asset_id = a.asset_id
         LEFT JOIN biz.catalyst_impact ci
           ON cs.catalyst_id = ci.catalyst_id AND cs.asset_id = ci.asset_id
+        LEFT JOIN biz.catalyst_second_order cso
+          ON cs.catalyst_id = cso.catalyst_id AND cs.asset_id = cso.asset_id
         -- d3：观察池(watch)同样要补全 G3-G5。否则晋升为 open 后仍无 entry/stop/tp，
         -- 慢通道 Alert 的「交易档位齐全」闸门永远过不了，只能空转。
         -- 注：technical_detail（fix_054）不在此条件内。它由 backfill_technical_detail()
@@ -1391,7 +1408,8 @@ def run_slow_g3g5(conn, config: dict,
         event_type = row["rule_event_type"] or "other"
         asset_type = row["asset_type"]
         sector = row["primary_sector"]
-        impact_direction = row["impact_direction"]
+        # 方向：优先 (催化剂,资产) 级 impact，二阶资产无 impact 行时回退催化剂级 ai_sentiment
+        impact_direction = row["impact_direction"] or row["ai_sentiment"]
 
         # G3 持续性预判
         persistence = pers_scorer.predict(event_type, kind, base_strength)
@@ -1436,7 +1454,13 @@ def run_slow_g3g5(conn, config: dict,
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            impact_direction=impact_direction,
         )
+
+        # 二阶传导信号 tier 上限 C（P2-2 对齐创建路径 run_slow_second_order）：
+        # 重算 G3-G5 时同样不能把二阶信号抬回 A/B。
+        if row["is_second_order"] and signal.tier in ("A", "B"):
+            signal.tier = "C"
 
         tier_dist[signal.tier or "none"] += 1
 

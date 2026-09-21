@@ -29,6 +29,13 @@ tier 阈值：A≥80 / B≥60 / C≥40
         （watch→open 晋升 = 价格行为确认；open→watch 回退 = 已定价不再可动作）
     expires_at = published_at + expiry_days（按 kind 差异化）
     慢通道巡检：expires_at < NOW() AND status IN ('open','watch') → status='expired'
+
+方向闸门（d6，2026-09-21）：
+    本系统档位是「做多」口径，催化方向直接决定可否作为做多机会：
+        bearish → status='invalid'（利空不产做多机会；tier/composite 保留供回测）
+        neutral → tier 封顶 C（中性方向不占 A/B 推送位；信号与档位保留）
+    口径依据：近 14 天实测 bearish 有 9 条 A / 101 条 B、neutral 有 41 条 A /
+        412 条 B 被公式合成进入 A 级 Alert——方向未参与档位判定。
 """
 from __future__ import annotations
 
@@ -140,6 +147,7 @@ class CatalystSignalBuilder:
               take_profit: Optional[float] = None,
               ai_reason: Optional[str] = None,
               investment_cycle: Optional[str] = None,
+              impact_direction: Optional[str] = None,
               ) -> CatalystSignalResult:
         """构建一条信号。
 
@@ -189,6 +197,16 @@ class CatalystSignalBuilder:
 
         # 生命周期状态：由价格定价程度决定（d3 分层），而非一律 open
         status = self._initial_status(resonance_state)
+
+        # 方向闸门（d6）：本系统为「做多」口径，方向决定可否作为做多机会
+        #   bearish → invalid（利空不产做多机会；tier/composite 保留供回测）
+        #   neutral → tier 封顶 C（中性方向不占 A/B 推送位）
+        # 与 RR 闸门同属「只降级不改分」的显式例外，口径见模块 docstring。
+        direction = (impact_direction or "").strip().lower()
+        if direction == "neutral" and tier in ("A", "B"):
+            tier = "C"
+        elif direction == "bearish":
+            status = "invalid"
 
         return CatalystSignalResult(
             catalyst_id=catalyst_id,

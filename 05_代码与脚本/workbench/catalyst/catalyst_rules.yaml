@@ -9,13 +9,21 @@
 # 匹配优先级按列表顺序，命中即止
 # ---------------------------------------------------------------------
 rule_event_keywords:
+  # listing（P0-2 收紧，2026-09-21）：只在标题匹配 + 只保留「公告型」短语。
+  # 旧表用 新增/发行/上市/list/launch 在长正文里做子串匹配，把行情综述/播客
+  # 里的「Arc Chain上线」「代币发行平台」「股价自上市以来」「relistings」误判成
+  # 上线公告（实测 ZEC/Bankless 综述被判 listing，事件权重 95 直接冲 A 级）。
   - event_type: "listing"
-    keywords: ["上市", "上线", "上币", "新增", "发行", "launch", "list", "上架", "opens trading", "trading pair", "to list"]
+    keywords: ["上线", "上币", "上架", "新增交易对", "新增现货", "现货上线", "合约上线",
+               "首发上线", "上线交易", "opens trading", "trading pair",
+               "to list", "will list", "listed on", "listing on", "launch on"]
+    title_only: true
     # 必须同时含有 token/交易对特征（避免"上线新功能"误命中）
     require_token_hint: true
 
   - event_type: "delisting"
     keywords: ["下架", "下市", "退市", "移除", "delist", "remove", "will be removed", "de-listing"]
+    title_only: true
     require_token_hint: true
 
   - event_type: "burn"

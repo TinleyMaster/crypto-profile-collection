@@ -1248,6 +1248,11 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
             if not sig.tier:
                 continue  # <40 分不入信号表
 
+            # 二阶传导信号 tier 上限 C（P2-2，对齐 run_slow_second_order）：
+            # 弱传导不占 A/B 推送位
+            if sig.tier in ("A", "B"):
+                sig.tier = "C"
+
             signals.append({
                 "catalyst_id": cat_id,
                 "asset_id": so.asset_id,

@@ -303,8 +303,9 @@ def main() -> int:
                 "<p>最常见成因：容器日志设施断开后 <code>print()</code> 抛 "
                 "<code>ValueError: I/O operation on closed file.</code>，异常被吞成"
                 "「单轮失败」，业务函数从未执行，而心跳照常推进。"
-                "新版 scan_daemon 已加固日志流（写失败即丢弃）并在连续 3 "
-                "轮失败后主动退出交 supervisord 重启；若本邮件仍出现该分节，"
+                "新版 scan_daemon 已加固日志流（写失败即丢弃），且仅在「连续 3 轮连"
+                "心跳都写不进 DB」（进程级故障）时才主动退出交 supervisord 重启；"
+                "外部依赖抖动只记 last_error、不重启进程。若本邮件仍出现该分节，"
                 "请在容器内执行 <code>supervisorctl restart scan_daemon</code>。</p>")
         cause_html = (
             "<p><b>两类成因怎么区分</b>：<br>"

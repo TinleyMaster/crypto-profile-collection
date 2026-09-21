@@ -490,10 +490,19 @@ STALL_HEARTBEAT_GRACE = 3
 STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_liquidation", "scan_alert",
                          "scan_squeeze", "scan_main_pool", "scan_accumulation",
                          "watchlist_monitor", "prune_scan_data")
-# 连续失败自杀：同一任务连续 N 轮 ok=False 即退出进程，交 supervisord 拉起
-# （审计 P1-4）。半死进程（stdout 关闭/线程卡死）会一直占着单实例锁，新实例
+# 连续失败自杀：同一任务连续 N 轮**连心跳都写不进 DB** 即退出进程，交 supervisord
+# 拉起（审计 P1-4）。半死进程（stdout 关闭/线程卡死）会一直占着单实例锁，新实例
 # 永远起不来 —— 这是 2026-09-18 63h、2026-09-21 48min 两次停摆的共同放大器。
+# ⚠️ 判据是「进程级故障」而不是「任务失败」（审计复验 P1-1）：外部依赖抖动
+# （Binance/CoinGlass 限频、超时）只记 last_error，绝不重启进程，否则会把一次
+# API 抖动放大成全局停产（见 _run_task_loop 注释）。
 MAX_CONSEC_FAILURES = 3
+# 单实例锁取锁重试（审计复验 P1-3）：os._exit(1) 后 supervisord 立即拉起新实例，
+# 旧实例的锁连接 TCP 释放通常 <1s，但撞上窗口就取不到锁 → main() 返回 1 且耗时
+# < startsecs=10 → supervisord 计为「启动失败」，连续 3 次即 FATAL 且不再拉起
+# （autorestart 对 FATAL 无效）。故取锁失败先等一会儿重试。
+LOCK_ACQUIRE_RETRIES = 3
+LOCK_ACQUIRE_RETRY_WAIT_SEC = 2.0
 # 僵尸实例判定：锁被占用但心跳已停止推进超过该分钟数
 SINGLETON_ZOMBIE_GRACE_MIN = 10
 # 进程启动标记：main() 取得单实例锁后写一条 last_run_at=进程启动时刻的心跳，
@@ -1214,8 +1223,10 @@ def _check_and_alert_stall(conn) -> bool:
             "closed file.</code>，任务函数从未执行，而心跳照常推进；<br>"
             "② 任务项写「无心跳 / 从未启动」⇒ 进程或线程确实没起来。<br>"
             "两者也可能是 Binance IP 限频、部署被移除（<b>文件更新 ≠ 进程重启</b>）。</p>"
-            f"<p style='color:#999'>任务连续失败 ≥{MAX_CONSEC_FAILURES} 轮时 scan_daemon 会"
-            "自行退出，交 supervisord 拉起（自愈）；数据恢复后本告警自动解除。</p>"
+            f"<p style='color:#999'>任务连续 ≥{MAX_CONSEC_FAILURES} 轮连心跳都写不进 DB"
+            "（进程级故障）时 scan_daemon 会自行退出，交 supervisord 拉起（自愈）；"
+            "业务层失败（Binance/CoinGlass 限频等）只记 last_error、不重启进程。"
+            "数据恢复后本告警自动解除。</p>"
         )
         ok, msg = notifier.send(
             "⚠️ 盘面扫描停摆告警", body, from_name="盘面信号扫描")
@@ -1985,6 +1996,9 @@ def _evict_zombie_lock_holder(conn) -> int | None:
     永远起不来 —— 2026-09-18 63h、2026-09-21 48min 两次停摆都由这条链路放大
     （审计 P0-A）。终止的对象是**空闲的会话连接**，不涉及任何数据写操作；僵尸
     进程下次写库会自行发现连接断开，新实例随即接管。
+
+    ⚠️ 必须限定当前库（审计复验 P1-2）：pg_locks 是**集群级视图**，不是当前库
+    视图。不加 database 条件时，同集群其它库若有进程持有同一 key，会被跨库误杀。
     """
     key = SCAN_SINGLETON_LOCK_KEY
     hi, lo = (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF
@@ -1992,6 +2006,8 @@ def _evict_zombie_lock_holder(conn) -> int | None:
         cur.execute(
             "SELECT pid FROM pg_locks WHERE locktype='advisory' AND objsubid=1 "
             "AND classid::bigint = %s AND objid::bigint = %s "
+            "AND database = (SELECT oid FROM pg_database "
+            "                WHERE datname = current_database()) "
             "AND pid <> pg_backend_pid()",
             (hi, lo))
         row = cur.fetchone()
@@ -2011,19 +2027,35 @@ def _acquire_singleton_lock(db_pool) -> bool:
     因为「守护进程完全没运行」正是 2026-09-18 那次 63h 静默停摆的根因。
 
     锁被占用时若心跳已停滞（>SINGLETON_ZOMBIE_GRACE_MIN 分钟无推进），说明持有者
-    是僵尸实例（进程活着、业务已死），先驱逐再重试一次 —— 否则新实例永远起不来，
+    是僵尸实例（进程活着、业务已死），先驱逐再重试 —— 否则新实例永远起不来，
     形成无限停摆（审计 P0-A）。
+
+    取锁失败不立即放弃，而是按 LOCK_ACQUIRE_RETRIES 重试（审计复验 P1-3）：
+    os._exit(1) 后 supervisord 会在旧实例锁连接尚未完全释放时就拉起新实例，
+    若因此返回 1 且耗时 < startsecs，会被计为「启动失败」并可能耗尽 startretries
+    进入 FATAL（autorestart 对 FATAL 无效，需人工 restart）。
     """
     global _SINGLETON_CONN
     try:
         conn = db_pool.getconn()
-        got = _try_advisory_lock(conn)
-        if not got and _heartbeat_stalled():
-            pid = _evict_zombie_lock_holder(conn)
-            if pid:
-                print(f"[scan_daemon] 单实例锁持有者(pid={pid})心跳已停滞超过 "
-                      f"{SINGLETON_ZOMBIE_GRACE_MIN} 分钟，判定为僵尸实例并终止其连接，重试取锁")
-                got = _try_advisory_lock(conn)
+        got = False
+        for attempt in range(1, LOCK_ACQUIRE_RETRIES + 1):
+            if _try_advisory_lock(conn):
+                got = True
+                break
+            # 锁被占用：若持有者心跳已停滞，判为僵尸实例并驱逐，再立刻重试一次
+            if _heartbeat_stalled():
+                pid = _evict_zombie_lock_holder(conn)
+                if pid:
+                    print(f"[scan_daemon] 单实例锁持有者(pid={pid})心跳已停滞超过 "
+                          f"{SINGLETON_ZOMBIE_GRACE_MIN} 分钟，判定为僵尸实例并终止其连接，重试取锁")
+                    if _try_advisory_lock(conn):
+                        got = True
+                        break
+            if attempt < LOCK_ACQUIRE_RETRIES:
+                print(f"[scan_daemon] 单实例锁被占用，{LOCK_ACQUIRE_RETRY_WAIT_SEC:.0f}s 后重试"
+                      f"（{attempt}/{LOCK_ACQUIRE_RETRIES}）", file=sys.stderr)
+                time.sleep(LOCK_ACQUIRE_RETRY_WAIT_SEC)
         if not got:
             db_pool.putconn(conn)
             return False
@@ -2034,12 +2066,15 @@ def _acquire_singleton_lock(db_pool) -> bool:
         return True
 
 
-def _write_heartbeat(name: str, ok: bool, err: str | None = None) -> None:
+def _write_heartbeat(name: str, ok: bool, err: str | None = None) -> bool:
     """写任务心跳（每轮都写，与是否产出信号无关）。
 
     biz.scan_heartbeat 让停摆检测能区分「采集正常但扫描线程卡死」——
     只看数据 MAX(ts) 无法发现这一类故障（2026-09-21 审计 P0-2）。
     心跳写失败只告警，不影响任务本身。
+
+    返回是否写入成功：调用方据此判定「进程自身已不可用」并决定是否自杀重启
+    （审计复验 P1-1 —— 只有连心跳都写不进去才说明是进程级故障）。
     """
     try:
         with _db() as conn:
@@ -2055,8 +2090,10 @@ def _write_heartbeat(name: str, ok: bool, err: str | None = None) -> None:
                     "last_error=%s, round_count=biz.scan_heartbeat.round_count+1, updated_at=NOW()",
                     (name, ok, err, ok, err))
             conn.commit()
+        return True
     except Exception as e:  # noqa: BLE001
         print(f"[scan_daemon][{name}] 心跳写入失败: {e}", file=sys.stderr)
+        return False
 
 
 def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
@@ -2092,6 +2129,7 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
         running = True
         ok = False
         err: str | None = None
+        hb_ok = True
         try:
             result = func(**func_kwargs)
             elapsed = time.time() - start_ts
@@ -2105,15 +2143,23 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
             traceback.print_exc()
         finally:
             running = False
-            _write_heartbeat(name, ok, err)
+            hb_ok = _write_heartbeat(name, ok, err)
 
-        # 连续失败 → 退出进程交 supervisord 拉起（审计 P1-4）。半死实例（stdout
-        # 失效、线程卡死）会一直占着单实例锁让新实例永远起不来，「进程级重启」
-        # 是唯一能自愈的路径（2026-09-18 63h / 2026-09-21 48min 两次停摆的共同放大器）。
-        fail_streak = 0 if ok else fail_streak + 1
+        # 连续失败自杀（审计 P1-4），但判据收紧为**进程级故障**（审计复验 P1-1）：
+        # 只有「连心跳都写不进 DB」才说明本进程自身已不可用（DB/连接池/日志设施坏），
+        # 此时进程级重启才有意义。外部依赖抖动（Binance/CoinGlass 限频、超时、解析
+        # 失败）只记 last_error、绝不自杀 —— 本机出口 IP 已被 Binance 判 418，一次
+        # API 抖动若升级成进程重启，会连带打断全部 9 个任务、重置所有错峰 offset，
+        # 还会打出 OI 采样桶缺口（复验 P2-1），把局部故障放大成全局停产。外部依赖
+        # 故障由数据新鲜度 + last_ok_at 告警负责暴露，不需要重启。
+        if hb_ok:
+            fail_streak = 0
+        else:
+            fail_streak += 1
         if fail_streak >= MAX_CONSEC_FAILURES:
-            print(f"[scan_daemon][{name}] 连续 {fail_streak} 轮失败（最近: {err}），"
-                  f"主动退出交 supervisord 重启", file=sys.stderr)
+            print(f"[scan_daemon][{name}] 连续 {fail_streak} 轮连心跳都写不进 DB"
+                  f"（最近: {err}），判定进程级故障，主动退出交 supervisord 重启",
+                  file=sys.stderr)
             os._exit(1)
 
         # 计算下一轮等待时间（扣除本轮耗时，保持固定节奏）

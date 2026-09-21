@@ -2703,6 +2703,30 @@ def _to_float(v) -> float | None:
         return None
 
 
+def _data_freshness(as_of) -> dict | None:
+    """把数据时间点转成 {as_of, age_hours, stale}，用于提示 LLM 数据滞后（审计 F7）。
+
+    支持 ISO 时间戳与纯日期（YYYY-MM-DD，按 UTC 零点计）。无法解析返回 None。
+    """
+    if not as_of:
+        return None
+    s = str(as_of).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            d = datetime.strptime(s[:10], "%Y-%m-%d").date()
+            dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_hours = round((datetime.now(timezone.utc) - dt).total_seconds() / 3600.0, 1)
+    return {"as_of": s, "age_hours": age_hours, "stale": age_hours > 24}
+
+
 def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> dict:
     """从 snapshot.structured 实时拼装结构化指标，与 competitors 接口同源。
 
@@ -4829,7 +4853,9 @@ def detect_asset_signals(asset_id: int) -> dict:
     try:
         deriv = get_asset_derivatives(asset_id)
         if deriv and deriv.get("ok"):
-            d = deriv.get("data") or {}
+            # get_asset_derivatives 返回扁平 dict（字段在顶层，无 "data" 包裹），
+            # 兼容可能的 data 包裹写法（审计 F1）
+            d = deriv.get("data") or deriv
             data_status["has_derivatives"] = True
 
             # OI 变化
@@ -6718,16 +6744,35 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     if pressure and pressure.get("unlock_pct_30d") is not None:
         unlock_pct_30d = pressure["unlock_pct_30d"]
     metrics_structured["unlock"]["unlock_pct_30d"] = unlock_pct_30d
+    # get_asset_unlocks 的键名是 unlock_events（审计 F4：旧代码读 events/unlock_events_json 恒为空，
+    # 导致解锁事件从未进入结构化指标，upcoming_events_count 永远 0 → 被误判为「无解锁抛压」）
+    _unlock_events = []
+    _unlock_input = {}
     if isinstance(unlocks, dict):
-        events = unlocks.get("events") or unlocks.get("unlock_events_json") or []
-        upcoming = [e for e in events if e.get("is_upcoming")]
+        _unlock_events = (
+            unlocks.get("unlock_events")
+            or unlocks.get("events")
+            or unlocks.get("unlock_events_json")
+            or []
+        )
+        _unlock_input = unlocks.get("input_snapshot") or {}
+        if not isinstance(_unlock_events, list):
+            _unlock_events = []
+        upcoming = [e for e in _unlock_events if isinstance(e, dict) and e.get("is_upcoming")]
         metrics_structured["unlock"]["upcoming_events_count"] = len(upcoming)
         if upcoming:
             next_event = upcoming[0]
             metrics_structured["unlock"]["next_unlock_date"] = next_event.get("date")
             metrics_structured["unlock"]["next_unlock_pct"] = next_event.get("pct")
             metrics_structured["unlock"]["next_unlock_value_usd"] = next_event.get("value_usd") or next_event.get("amount_usd")
-        metrics_structured["unlock"]["total_events"] = len(events)
+        metrics_structured["unlock"]["total_events"] = len(_unlock_events)
+    # 数据可用性：解锁事件或 input_snapshot 非空才算「真无解锁」，否则是「未采集」（审计 F4）
+    _pressure_upcoming = 0
+    if isinstance(pressure, dict):
+        _pressure_upcoming = (pressure.get("detail") or {}).get("upcoming_events_count") or 0
+    metrics_structured["unlock"]["data_available"] = bool(
+        _unlock_events or _unlock_input or _pressure_upcoming
+    )
 
     # 链上持仓
     if onchain and onchain.get("by_chain"):
@@ -6769,10 +6814,13 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
 
     # 衍生品资金面（情绪维度核心数据）
     _emit("采集衍生品资金面数据...")
+    deriv = None
     try:
         deriv = get_asset_derivatives(asset_id)
         if deriv and deriv.get("ok"):
-            d = deriv.get("data") or {}
+            # get_asset_derivatives 返回扁平 dict（字段在顶层，无 "data" 包裹），
+            # 旧写法 deriv.get("data") or {} 恒为空 → 衍生品永远注入不进 thesis（审计 F1）
+            d = deriv.get("data") or deriv
             if d.get("funding_rate") is not None:
                 metrics_structured["derivatives"]["funding_rate"] = d["funding_rate"]
             if d.get("funding_rate_pct") is not None:
@@ -6793,6 +6841,37 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                 metrics_structured["derivatives"]["exchange_count"] = len(d["available_exchanges"])
     except Exception as e:
         _emit(f"衍生品数据采集失败（不影响结论生成）: {e}")
+
+    # 数据时效（审计 F7）：标注各数据源滞后小时数，供 LLM 在结论中显式提示
+    _freshness: dict = {}
+    _mkt_fresh = _data_freshness(metrics_structured["market"].get("snapshot_time"))
+    if _mkt_fresh:
+        _freshness["market"] = _mkt_fresh
+    if isinstance(social, dict):
+        _soc_fresh = _data_freshness(social.get("fetched_at"))
+        if _soc_fresh:
+            _freshness["social"] = _soc_fresh
+    if isinstance(onchain, dict):
+        _oc_dates = [
+            items[0].get("snapshot_date")
+            for items in (onchain.get("by_chain") or {}).values()
+            if isinstance(items, list) and items
+        ]
+        _oc_dates = [d for d in _oc_dates if d]
+        if _oc_dates:
+            _oc_fresh = _data_freshness(max(_oc_dates))
+            if _oc_fresh:
+                _freshness["onchain"] = _oc_fresh
+    if isinstance(unlocks, dict) and unlocks.get("updated_at"):
+        _ul_fresh = _data_freshness(unlocks.get("updated_at"))
+        if _ul_fresh:
+            _freshness["unlock"] = _ul_fresh
+    if isinstance(deriv, dict) and deriv.get("ok") and deriv.get("fetched_at"):
+        _dv_fresh = _data_freshness(deriv.get("fetched_at"))
+        if _dv_fresh:
+            _freshness["derivatives"] = _dv_fresh
+    if _freshness:
+        metrics_structured["data_freshness"] = _freshness
 
     # ── 催化剂数据（从 asset_catalyst 取，建立 ID 级关联）──
     catalysts_list = []
@@ -6856,8 +6935,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "3. 供应量相关数字（total_supply / circulating_supply / max_supply / 总供应量 / 流通量 / 最大供应量）"
         "必须严格以「结构化指标」中的 tokenomics 字段为准，绝对禁止使用资料库正文中出现的 supply 数字"
         "（文档原文可能存在单位错误或过时数据，一律以结构化指标为准）。\n"
-        "4. 解锁风险描述必须严格使用 unlock_pct_30d 和 upcoming_events_count："
-        "   - 若 unlock_pct_30d = 0 或 null，且 upcoming_events_count = 0，则必须写「未来30天无代币解锁」，禁止写存在解锁。\n"
+        "4. 解锁风险描述必须严格使用 unlock.data_available / unlock_pct_30d / upcoming_events_count：\n"
+        "   - 若 unlock.data_available = false（解锁数据源缺失/未采集），禁止断言「无解锁抛压」或"
+        "「未来30天无代币解锁」，必须写「解锁数据缺失，无法排除抛压」。\n"
+        "   - 若 unlock.data_available = true 且 unlock_pct_30d = 0 或 null，且 upcoming_events_count = 0，"
+        "则必须写「未来30天无代币解锁」，禁止写存在解锁。\n"
         "   - 若有解锁，只能引用 next_unlock_date / next_unlock_pct / next_unlock_value_usd 的具体值。\n"
         "5. 抛压风险等级必须严格使用 pressure.risk_level，不能自行判断高低。\n"
         "6. 营收/收入趋势描述必须基于实际序列判断，禁止用「持续下滑」等绝对化表述描述非单调序列："
@@ -6877,7 +6959,16 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "      每条都要带上对应的 catalyst_id（从 items 中取），禁止凭空编造催化剂事件。\n"
         "    - catalysts 数组的每项必须包含 catalyst_id（数字）、catalyst（描述）、timing（时间）、\n"
         "      source_code（来源）、event_type（事件类型）、sentiment（情感）。\n"
-        "    - 如果 catalysts.items 为空，可以基于 unlock 等其他结构化指标推导催化剂，但不能编造具体新闻事件。\n\n"
+        "    - 如果 catalysts.items 为空，可以基于 unlock 等其他结构化指标推导催化剂，但不能编造具体新闻事件。\n"
+        "    - 若 catalysts.items 中存在 sentiment=bearish 的事件（如黑客、下架、监管、监控标签等），"
+        "catalyst 维度与 risks 必须引用，不得只呈现利好而弱化下行风险（审计 F6）。\n"
+        "11. 估值数据规则：valuation 维度的价格/市值/FDV 只能引用 market.price_usd / market.market_cap_usd / market.fdv_usd。\n"
+        "    - 若 market 为空或对应字段不存在，valuation 必须写「估值数据缺失，无法给出估值判断」，"
+        "禁止从资料库正文或其他来源取价格/市值充当估值锚点（审计 F3）。\n"
+        "12. 数据时效规则：结构化指标 data_freshness 列出各数据源的 as_of / age_hours / stale。\n"
+        "    - 引用某维度数据时，若该源 stale=true（滞后超过 24 小时），必须在该维度结论中显式标注"
+        "「该数据滞后约 X 天/小时，结论可能失真」，不得把陈旧数据当作实时数据（审计 F7）。\n"
+        "    - 行情/衍生品为实时源；社交、链上持仓等慢变量若滞后，涉及相应维度的判断需降低置信度。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
         "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"

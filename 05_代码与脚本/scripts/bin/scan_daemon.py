@@ -503,6 +503,16 @@ MAX_CONSEC_FAILURES = 3
 # （autorestart 对 FATAL 无效）。故取锁失败先等一会儿重试。
 LOCK_ACQUIRE_RETRIES = 3
 LOCK_ACQUIRE_RETRY_WAIT_SEC = 2.0
+# 取锁失败后，进程必须至少运行到 STARTUP_MIN_SEC 秒才退出（审计复验 FIX-061）。
+# 仅靠「重试次数 × 间隔」不足以保证越过 startsecs ——
+# 当前 3×2s 实测退出耗时 4.00s（端到端 6.66s）< supervisord 的 startsecs=10，
+# 仍会被计为「启动失败」，耗尽 startretries 后进入 FATAL（autorestart 无效）。
+# ⚠️ 本值必须 **严格大于** workbench/supervisord.conf 中
+#    [program:scan_daemon].startsecs（当前 10s）；改任一值须同步核对另一个。
+STARTUP_MIN_SEC = 12.0
+# 与 supervisord.conf 的 startsecs 耦合，改一个必须改另一个（见上）。
+# 若配置被调大而未同步本值，这里会立刻暴露而不是在部署窗口静默 FATAL。
+assert STARTUP_MIN_SEC > 10, "STARTUP_MIN_SEC 必须 > supervisord startsecs"
 # 僵尸实例判定：锁被占用但心跳已停止推进超过该分钟数
 SINGLETON_ZOMBIE_GRACE_MIN = 10
 # 进程启动标记：main() 取得单实例锁后写一条 last_run_at=进程启动时刻的心跳，
@@ -2089,6 +2099,8 @@ def _acquire_singleton_lock(db_pool) -> bool:
     进入 FATAL（autorestart 对 FATAL 无效，需人工 restart）。
     """
     global _SINGLETON_CONN
+    # 记录进入时刻：退出前需保证总耗时 > STARTUP_MIN_SEC（见常量注释）
+    _t0 = time.monotonic()
     try:
         conn = db_pool.getconn()
         got = False
@@ -2111,6 +2123,16 @@ def _acquire_singleton_lock(db_pool) -> bool:
                 time.sleep(LOCK_ACQUIRE_RETRY_WAIT_SEC)
         if not got:
             db_pool.putconn(conn)
+            # 审计复验 FIX-061：退出耗时必须越过 startsecs，否则 supervisord 记
+            # 「Exited too quickly」→ 消耗 startretries（3 次）→ FATAL 且不再拉起。
+            # 该 sleep 只在【取锁失败】分支执行，正常启动路径零影响。
+            _elapsed = time.monotonic() - _t0
+            if _elapsed < STARTUP_MIN_SEC:
+                print(f"[scan_daemon] 单实例锁取锁失败，为使 supervisord 计为"
+                      f"『已启动后正常退出』而非『启动失败』，等待 "
+                      f"{STARTUP_MIN_SEC - _elapsed:.1f}s 后退出（审计 FIX-061）",
+                      file=sys.stderr)
+                time.sleep(STARTUP_MIN_SEC - _elapsed)
             return False
         _SINGLETON_CONN = conn
         return True

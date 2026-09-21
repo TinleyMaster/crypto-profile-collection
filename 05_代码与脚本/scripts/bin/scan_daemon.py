@@ -26,7 +26,7 @@
 
 用法：
     python scan_daemon.py                    # 启动全部任务
-    python scan_daemon.py --run-once klines  # 只跑一次指定任务（调试）
+    python scan_daemon.py --run-once expire_signals  # 只跑一次指定任务（调试；需先停常驻实例，同样取单实例锁）
     python scan_daemon.py --only klines,oi   # 只启动指定任务
     python scan_daemon.py --min-vol-usd 5000000  # 过滤低流动性合约
 """
@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import threading
 import time
@@ -1208,19 +1210,54 @@ def _get_asset_id(conn, symbol: str) -> int | None:
     return None
 
 
+# 源名白名单与元数据前缀（复验 P1-N1 附注：原实现只看「分隔符前 ≤16 字符」就剥离，
+# **不看内容**，会把「BTC 上涨 5%，原因如下」这类正文当源前缀剥掉）。
+# 实测近 30 天 1907 条带前缀标题的片段分布：1431 条以「消息」结尾、16「快讯」、
+# 16「讯」、4「报道」、1「日报」，其余为源名（火星财经/ChainCatcher/BlockBeats/
+# PANews/动察 Beating）与元数据前缀（作者/撰文/原文标题/On Sep 18）。
+# 实测旧口径在近 30 天有 108 个片段属**正文**却被剥掉（如「A whale address，」
+# 「Strategy，」），新判据一律不剥。
+_SRC_NAMES_LOW = ("火星财经", "chaincatcher", "blockbeats", "panews", "金色财经", "动察",
+                  "beating", "吴说", "odaily", "律动", "jin10", "wallstreetcn",
+                  "华尔街见闻", "binance", "币安", "coindesk", "cointelegraph",
+                  "theblock", "blockworks", "decrypt", "cryptoslate", "foresight")
+_SRC_MARKERS = ("消息", "快讯", "讯", "报道", "日报", "公告", "news", "report")
+_META_HEADS = ("作者", "撰文", "原文标题", "原标题", "来源", "编译")
+_EN_DATE_RE = re.compile(r"^on\s+[a-z]{3,9}\.?\s+\d{1,2}", re.IGNORECASE)
+
+
+def _is_source_prefix(seg: str) -> bool:
+    """分隔符前的片段是「源前缀」（可剥）还是「正文」（不可剥）。"""
+    low = seg.lower().strip()
+    if not low:
+        return False
+    if seg.startswith(_META_HEADS) or _EN_DATE_RE.match(seg):
+        return True          # 「作者」「原文标题」「On Sep 18」
+    if low in _SRC_NAMES_LOW:
+        return True          # 片段本身就是源名（「BlockBeats」）
+    has_marker = any(m in low for m in _SRC_MARKERS)
+    has_name = any(n in low for n in _SRC_NAMES_LOW)
+    # 有源名 + 消息类标记（「火星财经消息 9月18日」「PANews 9月18日消息」
+    # 「动察 Beating AI 快讯」）；无源名但极短（「快讯」「消息」）同样视为前缀。
+    return (has_marker and (has_name or len(seg) <= 6))
+
+
 def _norm_title(title) -> str:
     """标题归一（共振去重用）：去「来源：」前缀 + 仅留字母/数字/汉字。
 
     审计 P0-2：同一条新闻常被多源转载（原文 / 火星财经 / ChainCatcher），标题仅
     源前缀不同 ⇒ 精确字符串去重会漏。归一到「内容骨架」再比（近似事件聚类；
     仍无法处理真正的同形异义误标，那需在 classify 侧消歧）。
+
+    复验 P1-N1：剥离判据由「纯长度启发式」改为 `_is_source_prefix()` 内容判据，
+    避免把正文当源前缀剥掉。
     """
     s = (title or "").strip()
     # 源前缀结尾可能是全/半角冒号或逗号（「火星财经消息，」「ChainCatcher 消息，」
-    # 「PANews 9月18日消息，」）→ 取最早出现的分隔符，且前缀 ≤16 字符时剥离。
+    # 「PANews 9月18日消息，」）→ 取最早出现的分隔符。
     idx = [i for i in (s.find("："), s.find(":"), s.find("，"), s.find(","))
            if 0 < i <= 16]
-    if idx:
+    if idx and _is_source_prefix(s[:min(idx)]):
         s = s[min(idx) + 1:].strip()
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
@@ -1266,7 +1303,14 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     out["catalyst_raw"] = len(rows)
     seen: set[str] = set()
     for r in rows:
-        key = _norm_title(r["title"])[:40]
+        # 去重键长度 40 → 80（复验 P1-N1）：英文新闻大量以固定模板开头
+        # （"According to the announcement from Binance, the …"），前 40 个字母数字
+        # 字符全是模板，真正内容在第 40 之后 ⇒ 截断会**把不同公告并成一条**。
+        # 近 30 天实测（`catalyst_impact ⋈ asset_catalyst`，4,394 行）：旧口径
+        # 误合并 208 组 / 吞掉 249 条独立新闻、77/642=12.0% 资产的条数被低估，
+        # 并让「利空为主」的红色警示漏报；改为 80 后误合并 1 组（唯一 key 2856，
+        # 完整归一 2857，几乎无损）。
+        key = _norm_title(r["title"])[:80]
         if not key or key in seen:
             continue
         seen.add(key)
@@ -1327,12 +1371,38 @@ def _fmt_usd(v: float) -> str:
     return f"{v:+.0f}"
 
 
+def _catalyst_total(cd: dict) -> int:
+    """催化剂「归一标题去重后」的全量条数 = 方向构成三项之和（≤20）。
+
+    复验 P1-N2：卡片里的 `N` 原取明细列表长度（只留前 4 条），与括注方向合计
+    （≤20）不是同一集合 —— 实测会渲染出「催化剂 4（9多/1空/9中）」这种自相矛盾的
+    结果（全库 282 币中 35 个、12.4% 命中）。两处统一用本函数。
+    """
+    return sum(int(cd.get(k, 0)) for k in ("bullish", "bearish", "neutral"))
+
+
 def _alert_title(items: list[dict]) -> str:
-    """邮件标题按**实际**共振条数生成（审计 P1-1：原为硬编码「含共振」，与内容相反）。"""
-    n_res = sum(len(it["resonance"]["event"]) + len(it["resonance"]["catalyst"])
-                + len(it["resonance"]["kol"]) for it in items)
-    suffix = f"含共振 {n_res} 条" if n_res else "纯盘面信号，无共振"
-    return f"🚨 盘面异动告警：{len(items)} 币高置信信号（{suffix}）"
+    """邮件标题按**实际**共振条数生成，并给出催化剂方向构成。
+
+    审计 P1-1：原为硬编码「含共振」，与内容相反。
+    复验 P2-N6：只报总数会把利空也算成「多重共振支持」——实测「含共振 8 条」里
+    6 条是利空/中性，故补方向构成。
+    复验 P1-N2：条数必须取**去重后的全量**（`catalyst_dir` 合计；明细列表只留前 4 条，
+    直接 `len()` 会与括注合计口径不同源）。
+    """
+    n_res = 0
+    bull = bear = neut = 0
+    for it in items:
+        res = it["resonance"]
+        cd = res.get("catalyst_dir") or {}
+        bull += int(cd.get("bullish", 0))
+        bear += int(cd.get("bearish", 0))
+        neut += int(cd.get("neutral", 0))
+        n_res += len(res["event"]) + _catalyst_total(cd) + len(res["kol"])
+    if not n_res:
+        return f"🚨 盘面异动告警：{len(items)} 币高置信信号（纯盘面信号，无共振）"
+    dir_txt = f"，催化剂 {bull}多/{bear}空/{neut}中" if (bull or bear or neut) else ""
+    return f"🚨 盘面异动告警：{len(items)} 币高置信信号（含共振 {n_res} 条{dir_txt}）"
 
 
 # ── 卡片相对强度（仅用于排序与强度条，审计 §三.6） ────────────────
@@ -1365,11 +1435,20 @@ def _alert_strength(it: dict) -> float:
 
 
 def _strength_bar(score: float, top: float, color: str) -> str:
-    """五格强度条（▉ 实 / ░ 虚），按本封邮件最高分归一。"""
-    n = max(1, min(STRENGTH_BAR_CELLS, round(score / top * STRENGTH_BAR_CELLS)))
+    """五格强度条（▉ 实 / ░ 虚）+ 原始分数，按本封邮件最高分**对数**归一。
+
+    复验 P2-N5：线性归一时第 2/3 名常被压成同一格（实测 EPIC 7.26 与 APT 8.81
+    同为 1 格，相对强弱被抹平）；对数域下二者分列为 2 / 3 格。条后附原始分数，
+    保证量化信息零丢失（口径仍是本封邮件内相对值，见图例，非胜率）。
+    """
+    if top <= 0 or score <= 0:
+        return ""
+    n = max(1, min(STRENGTH_BAR_CELLS,
+                   int(round(math.log1p(score) / math.log1p(top) * STRENGTH_BAR_CELLS))))
     return (f"<span style='color:{color};letter-spacing:1px'>{'▉' * n}</span>"
             f"<span style='color:#d1d5db;letter-spacing:1px'>"
-            f"{'░' * (STRENGTH_BAR_CELLS - n)}</span>")
+            f"{'░' * (STRENGTH_BAR_CELLS - n)}</span>"
+            f"<span style='color:#6b7280;font-size:11px'> {score:.1f}</span>")
 
 
 def _render_alert_email(items: list[dict]) -> str:
@@ -1426,7 +1505,9 @@ def _render_alert_email(items: list[dict]) -> str:
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
         linked = res.get("asset_linked", True)
-        cat_n = len(res.get("catalyst", []))
+        # 复验 P1-N2：条数与括注方向合计必须同源 —— 原 N 取明细长度（≤4）、括注取
+        # 去重全量（≤20），会渲染出「催化剂 4（9多/1空/9中）」这种自相矛盾的结果。
+        cat_n = _catalyst_total(cd)
         cat_dir_txt = f"{bull}多/{bear}空/{int(cd.get('neutral', 0))}中" if cat_n else ""
         res_txt = (f"事件{len(res['event'])} · 催化剂{cat_n if linked else 'n/a'}"
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
@@ -1439,12 +1520,21 @@ def _render_alert_email(items: list[dict]) -> str:
             conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
                         "⚠️ 共振方向以利多为主，与做空结论相悖，请复核</span>")
         # CVD 机制标签（审计 P1-3 的可做部分：金额列缺失 ⇒ 不做幅度，只做机制判读）
+        # 复验 P2-N3：「价涨 + 现货主动卖」有两种**相反**机制，原文案一律断言「OI 增」
+        # ⇒ 空头回补（OI 降）场景说反。改为按 oi_dir 分两支，方向未知时不作机制断言。
         cvd = sig.get("cvd_dir")
         cvd_flag = ""
         if cvd and cvd != sig.get("p_dir"):
             if up:
-                cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
-                            "杠杆驱动（OI 增而现货主动卖），无现货承接</span>")
+                if sig.get("oi_dir") == "down":
+                    cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
+                                "空头回补/多头离场推涨（OI 降），持续性存疑</span>")
+                elif sig.get("oi_dir") == "up":
+                    cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
+                                "杠杆驱动（OI 增而现货主动卖），无现货承接</span>")
+                else:
+                    cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
+                                "现货主动卖且无现货承接，但 OI 方向未知，机制待判</span>")
             else:
                 cvd_flag = (f"<br><span style='color:#0369a1'>ℹ️ CVD {cvd} 与做空结论相反 → "
                             "跌势中有现货承接，防反抽</span>")
@@ -1496,11 +1586,11 @@ def _render_alert_email(items: list[dict]) -> str:
               "费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 触发周期近 21 根反向极值；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，共振/CVD 与结论"
-              "相悖则扣系数），非胜率。</p>")
+              "相悖则扣系数），按最高分对数归一，条后数字为原始分数，非胜率。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
-                "共振各段 n/a = 本库未关联该资产；催化剂为「归一标题去重后」的条数与"
-                "方向构成，已合并多源转载。<br>"
+                "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"
+                "（=「归一标题去重后」的全量条数，已合并多源转载）。<br>"
                 "同一币在 60 分钟内若已在另一通道（轧空/主池）告警过，本通道只留痕不发信。<br>"
                 "本邮件为盘面数据分析参考，不构成投资建议。</p>")
     # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，
@@ -2784,7 +2874,8 @@ def main() -> int:
     _harden_streams()
 
     parser = argparse.ArgumentParser(description="盘面异动扫描守护进程（多任务单进程）")
-    parser.add_argument("--run-once", metavar="TASK", help="只跑一次指定任务（调试）")
+    parser.add_argument("--run-once", metavar="TASK",
+                        help="只跑一次指定任务（调试；需常驻实例已停，同样取单实例锁）")
     parser.add_argument("--only", default="",
                         help="只启动指定任务（逗号分隔，如 klines,oi）")
     parser.add_argument("--min-vol-usd", type=float, default=5_000_000,
@@ -2810,17 +2901,6 @@ def main() -> int:
         if _name in ("scan_klines", "scan_oi_cvd", "scan_squeeze") and "min_vol_usd" in kwargs:
             kwargs["min_vol_usd"] = args.min_vol_usd
 
-    # 单跑模式
-    if args.run_once:
-        for name, _iv, _off, func, kwargs in TASK_DEFS:
-            if name == args.run_once:
-                start = time.time()
-                result = func(**kwargs)
-                print(f"[scan_daemon][{name}] 单次运行完成，耗时 {time.time()-start:.1f}s，结果: {result}")
-                return 0
-        print(f"未知任务: {args.run_once}（可用: {', '.join(t[0] for t in TASK_DEFS)}）")
-        return 1
-
     # 过滤任务
     only = [x.strip() for x in args.only.split(",") if x.strip()]
     tasks_to_run = [t for t in TASK_DEFS if not only or t[0] in only]
@@ -2834,6 +2914,23 @@ def main() -> int:
     if not _acquire_singleton_lock(db_pool):
         print("[scan_daemon] ⚠️ 已有 scan_daemon 实例在运行（advisory lock 被占用），本次退出",
               file=sys.stderr)
+        return 1
+
+    # 单跑模式（复验 P2-N4）。原实现把它放在**取锁之前**并直接 `func()`，两个后果：
+    #   ① 绕锁 —— 手工 `--run-once` 可与常驻实例并行跑同一任务，对 scan_alert
+    #      （发信 + 回写 alerted_at）会造成**重复发信**；
+    #   ② 不留痕 —— 不走 `_run_task_loop` 故不写心跳，「部署/采集是否跑过」与
+    #      `biz.scan_heartbeat` 脱节（复验即因此拿到过「未部署」的假信号）。
+    # 现移到取锁之后，并在成功后补写一条任务心跳。
+    if args.run_once:
+        for name, _iv, _off, func, kwargs in TASK_DEFS:
+            if name == args.run_once:
+                start = time.time()
+                result = func(**kwargs)
+                _write_heartbeat(name, True)
+                print(f"[scan_daemon][{name}] 单次运行完成，耗时 {time.time()-start:.1f}s，结果: {result}")
+                return 0
+        print(f"未知任务: {args.run_once}（可用: {', '.join(t[0] for t in TASK_DEFS)}）")
         return 1
 
     _SCHEDULED_TASKS.update(t[0] for t in tasks_to_run)

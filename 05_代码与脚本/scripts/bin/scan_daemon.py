@@ -1062,7 +1062,10 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     """
     out: dict = {"event": [], "catalyst": [], "kol": [],
                  "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
-                 "catalyst_raw": 0}
+                 "catalyst_raw": 0,
+                 # 是否关联到 core.asset。未关联 ⇒ 催化剂/KOL 两段**无从查询**，
+                 # 渲染时必须是 n/a 而不是 0（审计 P2-3：0 与「没这个数据」不可辨）。
+                 "asset_linked": bool(asset_id)}
     # 1) 事件预置（领先型）
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -1149,9 +1152,50 @@ def _alert_title(items: list[dict]) -> str:
     return f"🚨 盘面异动告警：{len(items)} 币高置信信号（{suffix}）"
 
 
+# ── 卡片相对强度（仅用于排序与强度条，审计 §三.6） ────────────────
+# 原实现按 signal_ts 平铺、同色卡片：量比 8.55x / OI +7.97% 的币与 2.69x / +2.67%
+# 的在视觉上完全等价。这里给一个**可解释**的相对量：
+#   基量 = 量比 × |OI 增速|
+#   共振方向与结论一致 ×1.15，相悖 ×0.75，无方向数据不加不扣
+#   CVD 与结论同向 ×1.05
+# 只做本封邮件内的相对强弱（绝对阈值无基准；审计 P2-5 亦警示均值会被离群值绑架），
+# 故图例明确写「非胜率」，不对外宣称命中率。
+STRENGTH_BONUS_ALIGNED = 1.15
+STRENGTH_PENALTY_CONFLICT = 0.75
+STRENGTH_BONUS_CVD = 1.05
+STRENGTH_BAR_CELLS = 5
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+
+
+def _alert_strength(it: dict) -> float:
+    sig, res = it["signal"], it["resonance"]
+    base = abs(float(sig.get("vol_ratio") or 0) * float(sig.get("oi_chg_pct") or 0))
+    up = sig.get("p_dir") == "up"
+    cd = res.get("catalyst_dir") or {}
+    bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
+    if bull != bear:
+        aligned = (up and bull > bear) or (not up and bear > bull)
+        base *= STRENGTH_BONUS_ALIGNED if aligned else STRENGTH_PENALTY_CONFLICT
+    if sig.get("cvd_dir") and sig.get("cvd_dir") == sig.get("p_dir"):
+        base *= STRENGTH_BONUS_CVD
+    return base
+
+
+def _strength_bar(score: float, top: float, color: str) -> str:
+    """五格强度条（▉ 实 / ░ 虚），按本封邮件最高分归一。"""
+    n = max(1, min(STRENGTH_BAR_CELLS, round(score / top * STRENGTH_BAR_CELLS)))
+    return (f"<span style='color:{color};letter-spacing:1px'>{'▉' * n}</span>"
+            f"<span style='color:#d1d5db;letter-spacing:1px'>"
+            f"{'░' * (STRENGTH_BAR_CELLS - n)}</span>")
+
+
 def _render_alert_email(items: list[dict]) -> str:
     # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # 卡片按相对强度降序（审计 §三.6：原按 signal_ts 平铺同色，量比 8.55x 与 2.69x
+    # 视觉权重完全相同）。排序在渲染层单点完成，保证标题计数与正文一致。
+    items = sorted(items, key=_alert_strength, reverse=True)
+    top = _alert_strength(items[0]) if items else 0.0
     # 市场环境是同一时刻的全局常量 → 提到头部只渲染一次（审计 P2-1）
     regime_tags: list[str] = []
     if items:
@@ -1163,11 +1207,12 @@ def _render_alert_email(items: list[dict]) -> str:
         env_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
                     "市场环境 " + " | ".join(regime_tags) + "</p>")
     body_parts = []
-    for it in items:
+    for idx, it in enumerate(items):
         sig = it["signal"]
         res = it["resonance"]
         pool_label = "蓄势池BRK" if sig["pool"] == "accumulation" else "主池"
         up = sig["p_dir"] == "up"
+        arrow_color = "#ef4444" if up else "#22c55e"   # 中文惯例：多头=红 / 空头=绿
         dir_label = "↑ 做多" if up else "↓ 做空"
         sc = sig.get("scenario") or "-"
         desc = SCENARIO_DESC.get(sc, "")
@@ -1178,44 +1223,71 @@ def _render_alert_email(items: list[dict]) -> str:
                 lv_txt = f"{str(t).split('_')[-1]} 级异动"
                 break
         fund = sig.get("funding_rate")
-        # 资金费率原值存的是小数比例（0.00005 = 0.005%），无数据一律显示 '-' 而非 0
-        fund_str = "-" if fund is None else f"{float(fund) * 100:+.4f}%"
+        # 资金费率原值存的是小数比例（0.00005 = 0.005%），无数据一律显示 '-' 而非 0；
+        # 补年化（币安 U 本位 8h 结算 ⇒ ×3×365），单看当期费率无可读性（审计 §三.4）
+        if fund is None:
+            fund_str = "-"
+        else:
+            f_pct = float(fund) * 100
+            fund_str = f"{f_pct:+.4f}%（年化 {f_pct * 3 * 365:+.1f}%）"
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
+        bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
+        linked = res.get("asset_linked", True)
         cat_n = len(res.get("catalyst", []))
-        cat_dir_txt = (f"{cd.get('bullish', 0)}多/{cd.get('bearish', 0)}空/"
-                       f"{cd.get('neutral', 0)}中") if cat_n else ""
-        res_txt = (f"事件{len(res['event'])} 催化剂{cat_n}"
+        cat_dir_txt = f"{bull}多/{bear}空/{int(cd.get('neutral', 0))}中" if cat_n else ""
+        res_txt = (f"事件{len(res['event'])} · 催化剂{cat_n if linked else 'n/a'}"
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
-                   + f" KOL{len(res['kol'])}")
+                   + f" · KOL {len(res['kol']) if linked else 'n/a'}")
         conflict = ""
-        if up and cd.get("bearish", 0) > cd.get("bullish", 0):
+        if up and bear > bull:
             conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
                         "⚠️ 共振方向以利空为主，与做多结论相悖，请复核</span>")
-        elif (not up) and cd.get("bullish", 0) > cd.get("bearish", 0):
+        elif (not up) and bull > bear:
             conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
                         "⚠️ 共振方向以利多为主，与做空结论相悖，请复核</span>")
+        # CVD 机制标签（审计 P1-3 的可做部分：金额列缺失 ⇒ 不做幅度，只做机制判读）
+        cvd = sig.get("cvd_dir")
+        cvd_flag = ""
+        if cvd and cvd != sig.get("p_dir"):
+            if up:
+                cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
+                            "杠杆驱动（OI 增而现货主动卖），无现货承接</span>")
+            else:
+                cvd_flag = (f"<br><span style='color:#0369a1'>ℹ️ CVD {cvd} 与做空结论相反 → "
+                            "跌势中有现货承接，防反抽</span>")
         badge = (f"<span style='background:{'#fee2e2' if up else '#dcfce7'};"
                  f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
                  f"border-radius:3px;font-size:11px'>"
-                 f"{str(sig.get('confidence') or '').upper()}</span> ")
+                 f"{str(sig.get('confidence') or '').upper()}</span>")
+        bar = _strength_bar(_alert_strength(it), top, arrow_color) if top > 0 else ""
+        rank = _CIRCLED[idx] if idx < len(_CIRCLED) else f"{idx + 1}."
         body_parts.append(
-            f"<div style='margin:8px 0;padding:10px;border-left:4px solid "
-            f"{'#22c55e' if up else '#ef4444'};background:#f9fafb;color:#111'>"
-            f"{badge}<b>{sig['symbol']}</b> {pool_label} <b>{sc}</b> {desc} {dir_label} "
-            f"({lv_txt or (sig.get('timeframe') or '-')}, "
-            f"{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)})<br>"
+            f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
+            f"{arrow_color};background:#f9fafb;color:#111'>"
+            f"<div style='font-size:15px'>{rank} <b>{sig['symbol']}</b> {badge} {bar} "
+            f"<span style='color:#6b7280;font-size:12px'>{pool_label} · "
+            f"{lv_txt or (sig.get('timeframe') or '-')}</span></div>"
+            f"<div style='margin:2px 0 4px'><b>{sc}</b> {desc} "
+            f"<b style='color:{arrow_color}'>{dir_label}</b> "
+            f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
+            f"</div>"
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
-            f"CVD {sig.get('cvd_dir') or '未知'} | 费率 {fund_str}</small><br>"
-            f"<small style='color:#111'>共振: {res_txt}{conflict}</small>"
+            f"CVD {cvd or '未知'} | 费率 {fund_str}</small>"
+            f"{cvd_flag}"
+            f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
             f"</div>"
         )
     body = "".join(body_parts)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
-              "CVD up/down = 主动买/卖占比方向；共振方向构成＝去重后的事件方向计数。</p>")
+              "CVD up/down = 主动买/卖占比方向；费率年化 = 当期 ×3×365（8h 结算）；"
+              "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，共振/CVD 与结论"
+              "相悖则扣系数），非胜率。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
+                "共振各段 n/a = 本库未关联该资产、该维度无从查询（≠ 该币无事件）；"
+                "催化剂为「归一标题去重后」的条数与方向构成，已合并多源转载。<br>"
                 "本邮件为盘面数据分析参考，不构成投资建议。</p>")
     # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，
     # 防深色模式客户端下浅底 + 继承浅色字导致不可读。

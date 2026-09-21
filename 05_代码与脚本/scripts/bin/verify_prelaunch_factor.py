@@ -10,7 +10,17 @@ import math
 from pathlib import Path
 from collections import defaultdict
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "workbench"))
+# kol / catalyst 包所在目录，兼容两种部署结构：
+#   本地开发：<project>/workbench/  容器部署：/app/（Dockerfile 扁平拷贝）
+# 容器内原写法 parent.parent.parent/"workbench" 指向不存在的 /app/workbench。
+_SCRIPT_PATH = Path(__file__).resolve()
+_WB_CANDIDATE = _SCRIPT_PATH.parent.parent.parent / "workbench"
+WORKBENCH_DIR = (
+    _WB_CANDIDATE
+    if (_WB_CANDIDATE / "catalyst" / "__init__.py").exists()
+    else _SCRIPT_PATH.parent.parent.parent
+)
+sys.path.insert(0, str(WORKBENCH_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from kol.db import get_conn
 

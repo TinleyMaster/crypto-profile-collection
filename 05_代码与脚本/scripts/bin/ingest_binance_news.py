@@ -20,8 +20,21 @@ import logging
 # 路径设置
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.dirname(SCRIPT_DIR)
+_CODE_ROOT = os.path.dirname(WORKSPACE)
 sys.path.insert(0, os.path.join(WORKSPACE, "src"))
-sys.path.insert(0, os.path.join(WORKSPACE, "..", "workbench", "catalyst"))
+# binance_news 模块所在目录（catalyst 包内），兼容两种部署结构：
+#   本地开发：<project>/workbench/catalyst/
+#   容器部署：/app/catalyst/  ← Dockerfile 把 workbench/catalyst 扁平拷到 /app/catalyst
+# 容器内 _CODE_ROOT=/app，故第二个候选即 /app/catalyst；
+# 原写法 WORKSPACE/../workbench/catalyst = /app/workbench/catalyst 不存在
+# → from binance_news import ... 直接 ModuleNotFoundError（2026-09-21 修复）。
+for _cand in (
+    os.path.join(_CODE_ROOT, "workbench", "catalyst"),
+    os.path.join(_CODE_ROOT, "catalyst"),
+    _CODE_ROOT,
+):
+    if os.path.isdir(_cand) and _cand not in sys.path:
+        sys.path.insert(0, _cand)
 
 logging.basicConfig(
     level=logging.INFO,

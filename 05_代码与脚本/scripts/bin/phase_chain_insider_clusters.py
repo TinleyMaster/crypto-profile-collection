@@ -80,7 +80,18 @@ UPSERT_KEYS = {
 def _load_yaml() -> dict:
     try:
         import yaml
-        rules_path = Path(__file__).resolve().parents[2] / "workbench" / "market_rules.yaml"
+        # market_rules.yaml 定位，兼容两种部署结构：
+        #   本地开发：<project>/workbench/market_rules.yaml
+        #   容器部署：/app/market_rules.yaml  ← Dockerfile 把 workbench/market_rules.yaml 拷到 /app/
+        # 容器内原写法 parents[2]/"workbench"/... = /app/workbench/... 不存在
+        # → 被下面 exists() 与 except 静默吞掉，分类规则走默认值（2026-09-21 修复）。
+        _root = Path(__file__).resolve().parents[2]
+        _candidates = (
+            _root / "workbench" / "market_rules.yaml",
+            _root / "market_rules.yaml",
+            Path("/app/market_rules.yaml"),
+        )
+        rules_path = next((p for p in _candidates if p.exists()), _candidates[0])
         if rules_path.exists():
             with open(rules_path, encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}

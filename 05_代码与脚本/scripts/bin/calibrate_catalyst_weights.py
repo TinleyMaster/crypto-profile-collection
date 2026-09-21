@@ -71,7 +71,17 @@ MIN_TREND = 10        # 样本 ≥10 → 记录 trend 观察
 ALIGNED_REF = 1.0     # 方向对齐超额基准（%）：1% 视为「基准强度」
 MAX_REL_ADJ = 0.30    # 权重相对先验的最大调整幅度（±30%）
 DIRECTION_SIGN = {"bullish": 1.0, "bearish": -1.0}
-YAML_PATH = Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml"
+# catalyst_rules.yaml 定位：兼容两种部署结构（与 phase_catalyst_pipeline 同口径）
+#   本地开发：<project>/workbench/catalyst/catalyst_rules.yaml
+#   容器部署：/app/catalyst/catalyst_rules.yaml  ← Dockerfile 把 workbench/catalyst 扁平拷到 /app/catalyst
+# 容器内 SCRIPT_DIR=/app/scripts/bin，原写法 parent.parent.parent/"workbench" 指向不存在的
+# /app/workbench → 读不到 yaml → 先验权重静默为空（2026-09-21 修复）。
+_YAML_CANDIDATES = [
+    SCRIPT_DIR.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml",
+    SCRIPT_DIR.parent.parent / "catalyst" / "catalyst_rules.yaml",
+    Path("/app/catalyst/catalyst_rules.yaml"),
+]
+YAML_PATH = next((p for p in _YAML_CANDIDATES if p.exists()), _YAML_CANDIDATES[0])
 
 # scope_score 分桶（对应 catalyst_grade.scope_score 的值）
 SCOPE_BUCKETS = {

@@ -46,7 +46,16 @@ TECHNICAL_SCORES = {"up": 85, "range": 55, "down": 25}
 SCOPE_BUCKETS = {90: "single_pair", 65: "few_pairs", 45: "many_pairs",
                  60: "sector", 30: "broad"}
 MIN_IC_SAMPLES = 10  # IC 最少样本
-YAML_PATH = Path(__file__).resolve().parent.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml"
+# catalyst_rules.yaml 定位：兼容两种部署结构（与 phase_catalyst_pipeline 同口径）
+#   本地开发：<project>/workbench/catalyst/catalyst_rules.yaml
+#   容器部署：/app/catalyst/catalyst_rules.yaml  ← Dockerfile 把 workbench/catalyst 扁平拷到 /app/catalyst
+# 容器内 SCRIPT_DIR=/app/scripts/bin，原写法 parent.parent.parent/"workbench" 指向不存在的 /app/workbench。
+_YAML_CANDIDATES = [
+    SCRIPT_DIR.parent.parent / "workbench" / "catalyst" / "catalyst_rules.yaml",
+    SCRIPT_DIR.parent.parent / "catalyst" / "catalyst_rules.yaml",
+    Path("/app/catalyst/catalyst_rules.yaml"),
+]
+YAML_PATH = next((p for p in _YAML_CANDIDATES if p.exists()), _YAML_CANDIDATES[0])
 
 
 def load_grade_weights() -> dict:

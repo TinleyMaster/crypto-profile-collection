@@ -17,7 +17,16 @@ news_media 与 catalyst 同走 KOL runner 催化剂管线（_CATALYST_TYPES）�
 import sys
 from pathlib import Path
 
-WORKBENCH = Path(__file__).resolve().parent.parent.parent / "workbench"
+# catalyst / kol 包所在目录，兼容两种部署结构：
+#   本地开发：<project>/workbench/catalyst/  容器部署：/app/catalyst/（Dockerfile 扁平拷贝）
+# 容器内原写法 parent.parent.parent/"workbench" 指向不存在的 /app/workbench。
+_SCRIPT_PATH = Path(__file__).resolve()
+_WB_CANDIDATE = _SCRIPT_PATH.parent.parent.parent / "workbench"
+WORKBENCH = (
+    _WB_CANDIDATE
+    if (_WB_CANDIDATE / "catalyst" / "__init__.py").exists()
+    else _SCRIPT_PATH.parent.parent.parent
+)
 sys.path.insert(0, str(WORKBENCH))
 SCRIPTS_SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SCRIPTS_SRC))

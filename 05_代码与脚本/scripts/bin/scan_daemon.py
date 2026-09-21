@@ -739,10 +739,15 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 continue
 
             direction = l1["dir"]
+            # 多空**对称**通道（审计 P1-1）：原实现 down 最高只能到 medium，而
+            # `_load_alert_candidates` 只要 high ⇒ 做空通道数学上不可达、下跌行情
+            # 一封邮件都收不到。S3（价跌 + OI 增 = 空头扎实）与 S1 同构，同样可达 high。
             if direction == "up" and l2["oi_dir"] == "up":
                 confidence = "high" if regime["long_fav"] else "medium"
             elif direction == "up":
                 confidence = "medium"
+            elif l2["oi_dir"] == "up":
+                confidence = "high" if regime["short_fav"] else "medium"
             else:
                 confidence = "medium" if regime["short_fav"] else "low"
 
@@ -1026,13 +1031,34 @@ def _get_asset_id(conn, symbol: str) -> int | None:
     return None
 
 
+def _norm_title(title) -> str:
+    """标题归一（共振去重用）：去「来源：」前缀 + 仅留字母/数字/汉字。
+
+    审计 P0-2：同一条新闻常被多源转载（原文 / 火星财经 / ChainCatcher），标题仅
+    源前缀不同 ⇒ 精确字符串去重会漏。归一到「内容骨架」再比（近似事件聚类；
+    仍无法处理真正的同形异义误标，那需在 classify 侧消歧）。
+    """
+    s = (title or "").strip()
+    # 源前缀结尾可能是全/半角冒号或逗号（「火星财经消息，」「ChainCatcher 消息，」
+    # 「PANews 9月18日消息，」）→ 取最早出现的分隔符，且前缀 ≤16 字符时剥离。
+    idx = [i for i in (s.find("："), s.find(":"), s.find("，"), s.find(","))
+           if 0 < i <= 16]
+    if idx:
+        s = s[min(idx) + 1:].strip()
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
-    """返回 {event: [...], catalyst: [...], kol: [...]} 三段共振信息。
+    """返回 {event: [...], catalyst: [...], catalyst_dir: {...}, kol: [...]} 三段共振。
 
     biz.event_watchlist.symbol 同样存裸符号，故事件段也必须用候选序列查询
     （原样查询在本库「数学上恒 0」）。
+    催化剂**去重后**计数，并给出方向构成（审计 P0-2：原实现只 `len()`、不看
+    `impact_direction` 也不去重，把转载与利空都算成「共振」）。
     """
-    out: dict = {"event": [], "catalyst": [], "kol": []}
+    out: dict = {"event": [], "catalyst": [], "kol": [],
+                 "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
+                 "catalyst_raw": 0}
     # 1) 事件预置（领先型）
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -1044,7 +1070,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
 
     if not asset_id:
         return out
-    # 2) 催化剂（已发布，确认型）
+    # 2) 催化剂（已发布，确认型）：多取候选以便「归一标题」去重后仍有 4 条可展示
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
@@ -1052,12 +1078,23 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
             FROM biz.catalyst_impact ci
             JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
             WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
-            ORDER BY ac.published_at DESC LIMIT 4
+            ORDER BY ac.published_at DESC LIMIT 20
             """,
             (asset_id, CATALYST_DAYS),
         )
-        for r in cur.fetchall():
-            tag = f"{r['impact_direction']}/{r['impact_strength']}"
+        rows = cur.fetchall()
+    out["catalyst_raw"] = len(rows)
+    seen: set[str] = set()
+    for r in rows:
+        key = _norm_title(r["title"])[:40]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        d = str(r["impact_direction"] or "neutral").lower()
+        d = d if d in out["catalyst_dir"] else "neutral"
+        out["catalyst_dir"][d] += 1
+        if len(out["catalyst"]) < 4:
+            tag = f"{r['impact_direction'] or 'neutral'}/{r['impact_strength'] or '-'}"
             out["catalyst"].append(
                 f"{r['title'][:60]}（{tag}，{str(r['published_at'])[:10]}）")
     # 3) KOL 预测（滞后确认型）
@@ -1111,42 +1148,82 @@ def _alert_title(items: list[dict]) -> str:
 def _render_alert_email(items: list[dict]) -> str:
     # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # 市场环境是同一时刻的全局常量 → 提到头部只渲染一次（审计 P2-1）
+    regime_tags: list[str] = []
+    if items:
+        for t in (items[0]["signal"].get("context_tags") or []):
+            if not str(t).startswith("lv"):
+                regime_tags.append(str(t))
+    env_line = ""
+    if regime_tags:
+        env_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
+                    "市场环境 " + " | ".join(regime_tags) + "</p>")
     body_parts = []
     for it in items:
         sig = it["signal"]
         res = it["resonance"]
         pool_label = "蓄势池BRK" if sig["pool"] == "accumulation" else "主池"
-        dir_label = "↑ 做多" if sig["p_dir"] == "up" else "↓ 做空"
+        up = sig["p_dir"] == "up"
+        dir_label = "↑ 做多" if up else "↓ 做空"
         sc = sig.get("scenario") or "-"
         desc = SCENARIO_DESC.get(sc, "")
-        tags = sig.get("context_tags") or []
-        if isinstance(tags, list):
-            tag_str = " ".join(str(t) for t in tags[:5])
-        else:
-            tag_str = str(tags)[:50]
+        # lv 代号 → 可读级别（审计 P2-2：原样渲染 lv3_1h 对收件人不可自解释）
+        lv_txt = ""
+        for t in (sig.get("context_tags") or []):
+            if str(t).startswith("lv") and "_" in str(t):
+                lv_txt = f"{str(t).split('_')[-1]} 级异动"
+                break
         fund = sig.get("funding_rate")
         # 资金费率原值存的是小数比例（0.00005 = 0.005%），无数据一律显示 '-' 而非 0
         fund_str = "-" if fund is None else f"{float(fund) * 100:+.4f}%"
+        # 共振方向构成 + 与结论相悖警示（审计 P0-2）
+        cd = res.get("catalyst_dir") or {}
+        cat_n = len(res.get("catalyst", []))
+        cat_dir_txt = (f"{cd.get('bullish', 0)}多/{cd.get('bearish', 0)}空/"
+                       f"{cd.get('neutral', 0)}中") if cat_n else ""
+        res_txt = (f"事件{len(res['event'])} 催化剂{cat_n}"
+                   + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
+                   + f" KOL{len(res['kol'])}")
+        conflict = ""
+        if up and cd.get("bearish", 0) > cd.get("bullish", 0):
+            conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
+                        "⚠️ 共振方向以利空为主，与做多结论相悖，请复核</span>")
+        elif (not up) and cd.get("bullish", 0) > cd.get("bearish", 0):
+            conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
+                        "⚠️ 共振方向以利多为主，与做空结论相悖，请复核</span>")
+        badge = (f"<span style='background:{'#fee2e2' if up else '#dcfce7'};"
+                 f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
+                 f"border-radius:3px;font-size:11px'>"
+                 f"{str(sig.get('confidence') or '').upper()}</span> ")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px;border-left:4px solid "
-            f"{'#22c55e' if sig['p_dir']=='up' else '#ef4444'};background:#f9fafb'>"
-            f"<b>{sig['symbol']}</b> {pool_label} <b>{sc}</b> {desc} {dir_label} "
-            f"({sig.get('timeframe') or '-'}, "
+            f"{'#22c55e' if up else '#ef4444'};background:#f9fafb;color:#111'>"
+            f"{badge}<b>{sig['symbol']}</b> {pool_label} <b>{sc}</b> {desc} {dir_label} "
+            f"({lv_txt or (sig.get('timeframe') or '-')}, "
             f"{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)})<br>"
-            f"<small>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
+            f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
             f"CVD {sig.get('cvd_dir') or '未知'} | 费率 {fund_str}</small><br>"
-            f"<small>共振: 事件{len(res['event'])} 催化剂{len(res['catalyst'])} "
-            f"KOL{len(res['kol'])}</small><br>"
-            f"<small style='color:#666'>{tag_str}</small>"
+            f"<small style='color:#111'>共振: {res_txt}{conflict}</small>"
             f"</div>"
         )
     body = "".join(body_parts)
-    footnote = "<p style='color:#999;font-size:12px'>本邮件为盘面数据分析参考，不构成投资建议。</p>"
-    return (f"<html><body style='font-family:Arial,\"Microsoft YaHei\",sans-serif'>"
-            f"<h2 style='margin:0'>🚨 盘面异动告警</h2>"
-            f"<p style='margin:0 0 8px;color:#666;font-size:13px'>生成于 {now} · 共 {len(items)} 个币</p>"
-            f"{body}{footnote}</body></html>")
+    legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
+              "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
+              "CVD up/down = 主动买/卖占比方向；共振方向构成＝去重后的事件方向计数。</p>")
+    footnote = ("<p style='color:#999;font-size:12px'>"
+                "本邮件为盘面数据分析参考，不构成投资建议。</p>")
+    # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，
+    # 防深色模式客户端下浅底 + 继承浅色字导致不可读。
+    return ("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
+            "<meta name='color-scheme' content='light'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
+            "<body style='font-family:Arial,\"Microsoft YaHei\",sans-serif;"
+            "-webkit-text-size-adjust:100%;color:#111;background:#ffffff'>"
+            f"<h2 style='margin:0 0 6px;color:#111'>🚨 盘面异动告警</h2>"
+            f"<p style='margin:0 0 6px;color:#374151;font-size:13px'>"
+            f"生成于 {now} · 共 {len(items)} 个币</p>"
+            f"{env_line}{body}{legend}{footnote}</body></html>")
 
 
 def _stall_parts(conn, now: datetime) -> list[str]:
@@ -1220,6 +1297,24 @@ def _stall_parts(conn, now: datetime) -> list[str]:
                     f"（约 {age_min:.0f} 分钟前，阈值 {limit_min:.0f} 分钟）{detail}")
     except Exception as e:  # noqa: BLE001
         print(f"[scan_daemon][stall] 心跳检查跳过（{e}）", file=sys.stderr)
+
+    # 丢信号检测（审计 P0-1）：alert 任务停摆 > 窗口(20min)+宽限(10min) 时，窗口内
+    # 未告警的 high 信号会被 `signal_ts > NOW()-20min` 永久滤掉、`alerted_at` 恒 NULL，
+    # 且与「超窗作废」在库里不可区分。这里把它显式并入停摆告警。
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM biz.scan_signal "
+                "WHERE confidence='high' AND alerted_at IS NULL "
+                "AND (pool='main' OR (pool='accumulation' AND scenario='BRK')) "
+                "AND signal_ts < NOW() - INTERVAL '30 minutes'")
+            lost = int(cur.fetchone()[0] or 0)
+        if lost:
+            parts.append(
+                f"未告警即超窗的 high 信号 {lost} 条（alert 任务疑似停摆 >30 分钟，"
+                f"这批信号已永久作废、不会补发）")
+    except Exception as e:  # noqa: BLE001
+        print(f"[scan_daemon][stall] 丢信号检查跳过（{e}）", file=sys.stderr)
     return parts
 
 

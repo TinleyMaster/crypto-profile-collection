@@ -168,6 +168,26 @@
 - **未采纳/未做**：❌ 改调度 offset（工单证明 `offset` 与 `oi_cvd` 同相位，ε 越大读到越旧，消费侧对齐才稳）；❌ 采样侧首轮补采（另立）；❌ 新建 `tests/` 目录（循 `workbench/test_*.py` 惯例）；❌ 迁移（`fix_060` 未占用）。
 - **待部署**：`scan_daemon.py` / `check_scan_freshness.py` 改动需重启相应进程（容器 `scan_daemon` + scheduler）后生效。
 
+### 盘面异动告警邮件修复（审计_盘面异动告警邮件_2026-09-21，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_盘面异动告警邮件_2026-09-21.md`（对象 = 主池「🚨 盘面异动告警」邮件，非 squeeze）。渲染层前轮已修干净，本轮打数据层/信号层。
+
+- **P0-1（A，已修）告警静默丢失**：`_load_alert_candidates` 的 20min 窗口在 alert 任务停摆时会把 high 信号永久滤掉（`alerted_at` 恒 NULL，与「超窗作废」不可区分）。在 `scan_daemon._stall_parts()` 增只读检测：`confidence='high' AND alerted_at IS NULL AND signal_ts < NOW()-30min`（main / accumulation BRK）→ >0 即以「未告警即超窗的 high 信号 N 条」并入既有停摆告警邮件（零新通道）。**未做 B（补发）**——需定义「补发有效性」边界，属待拍板。
+- **P0-2（已修）共振计数不可信**：
+  - `_get_resonance` 催化剂段改为「归一标题去重 + 方向构成」：新增 `_norm_title()`（去 `火星财经：/ChainCatcher 消息，/PANews 9月18日消息，` 等源前缀，取最早分隔符且前缀 ≤16 字符，保留字母数字汉字，取前 40 字）后去重；返回 `catalyst_dir{bullish,bearish,neutral}` 与 `catalyst_raw`。
+  - 邮件渲染 `催化剂 N（X多/Y空/Z中）`，当「做多但空>多」或「做空但多>空」时追加红色 `⚠️ 共振方向与结论相悖，请复核`。
+  - 实测：XMR `raw=4 dedup=4 全 bearish` → 邮件会出现利空警示；APT `raw=7 dedup=4（1多/2空/2中）`。⚠️ 仅解决**同语言多源转载**（中↔英译文、`APT=高级持续性威胁` 同形异义误标仍未解决，需 classify 侧消歧）。
+- **P1-1（已修）做空信号永不告警**：`direction=down` 原最高只能 medium，而候选只要 high ⇒ 做空通道数学不可达。改为对称：`down + oi_dir=up`（S3 空头扎实）时 `high if short_fav else medium`；其余 down 仍 `medium/low`。**注意这**会首次让下跌行情出邮件（`regime.short_fav` 为闸门）。
+- **P2-1/P2-2/P2-6/P2-7（已修）渲染**：市场环境（`btc_1h/fgi/cap_trend`）由「每卡重复」提为标题下单行；`lv3_1h` → 「1h 级异动」并加图例；补 `<!DOCTYPE html>`/`lang=zh-CN`/`<meta charset>`/`color-scheme:light`，所有文本节点显式 `color:#111`（防深色模式浅底不可读），`h2 margin:0 0 6px`；卡片加 `HIGH` 徽章。
+- **未改（待拍板/需 schema）**：
+  - **P1-2 regime 阈值**：`btc_1h ±1.0` / `fgi 25/75` / `cap_trend ±1.0` 中两个近乎死条件（`fgi=73` 距 `>75` 仅差 2）；收紧属标定决策，勿用全样本分位，待拍板。
+  - **P1-3 CVD 幅度**：`scan_signal` 只有 `cvd_dir`、无金额列 ⇒ 需迁移 + 生产者落库（另立）。
+  - **P1-4 BRK 通道**：代码**可达**（`task_scan_accumulation` L939 写 BRK），只是从未触发（DB 0 行）⇒ **保留分支**，靠任务 stats 的 `BRK` 计数观测。
+  - **P1-5 跨池重复告警**（同币 main+squeeze 40min 内两封口径相反）：需两侧互斥 + 保留信号落库，改动面较大，另立。
+  - **P2-3 覆盖率披露 / P2-4 主池入场价（生产者从未算）/ P2-5 历史先验**：另立。
+- **无迁移**：本轮全在 `scan_daemon.py` 代码层。
+- **自测**：渲染/去重临时用例全绿（环境行只出现 1 次、方向构成、双向相悖警示、图例、charset、显式 color、HIGH 徽章、去重后标题计数）；只读探针复核 XMR/APT/NEAR 的去重与方向构成；`workbench/test_squeeze_battle.py` 41/41 不回归。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。

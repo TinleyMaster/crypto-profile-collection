@@ -215,6 +215,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
     ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],
      "盘面扫描·CVD 数据就绪检查（每天，精确 CVD 积累≥14 天自动邮件提醒复校）", "core"),
+    # 外部看门狗（2026-09-21）：scan_daemon 内置停摆告警随进程死亡而失效（Zeabur 部署被移除
+    # 后采集静默停摆 63h 无人知晓）。此任务独立于 scan_daemon 存活，只查数据是否停更，
+    # 停摆>30min 告警（6h 去重），恢复后自动发解除邮件。
+    ("scan_freshness_watchdog", "20 * * * *", "check_scan_freshness.py", [],
+     "盘面扫描·外部看门狗（每小时，独立于 scan_daemon 存活，数据停摆>30min 告警邮件）", "monitor"),
 ]
 
 

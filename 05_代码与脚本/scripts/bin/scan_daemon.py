@@ -1230,6 +1230,11 @@ def task_scan_accumulation() -> dict:
 NEW_WINDOW_MIN = 20
 COOLDOWN_H = 12
 CATALYST_DAYS = 7
+# 催化剂「陈旧」阈值（天，审计 N1）：7 天窗口会把已过期/上周的催化剂也计入共振，
+# 稀释新鲜度（实测 BTWUSDT 5 条中 1 条为 09-16、且已 expired）。渲染层对超过本
+# 阈值的条数显式标注「含 N 条 >X 天」，让收件人自行打折；**不改窗口本身**
+# （窗口语义与 catalyst_signal 对齐，缩短会改变共振口径）。
+CATALYST_STALE_DAYS = 3
 KOL_DAYS = 7
 # 「丢信号」检测回溯上限（小时）。**必须有界**：库里存在历史遗留的
 # `alerted_at IS NULL` 的 high 行（如 09-16 那次停摆的 8 条），无界查询会让
@@ -1460,6 +1465,12 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     out: dict = {"event": [], "catalyst": [], "kol": [],
                  "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
                  "catalyst_raw": 0,
+                 # 审计 N1：最新一条催化剂的 published_at 与「>CATALYST_STALE_DAYS 天」的
+                 # 条数，供渲染层披露新鲜度（7 天窗口会把上周/已过期催化剂也算进共振）。
+                 "catalyst_latest": None, "catalyst_stale": 0,
+                 # 审计 O6：全量（去重后）结构化明细，仅供告警落 `detail` 快照回放用，
+                 # **不参与渲染** —— 渲染只需方向构成计数（见下 `catalyst` 明细列表）。
+                 "catalyst_all": [],
                  # 是否关联到 core.asset。未关联 ⇒ 催化剂/KOL 两段**无从查询**，
                  # 渲染时必须是 n/a 而不是 0（审计 P2-3：0 与「没这个数据」不可辨）。
                  "asset_linked": bool(asset_id)}
@@ -1489,6 +1500,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         rows = cur.fetchall()
     out["catalyst_raw"] = len(rows)
     seen: set[str] = set()
+    fresh_cut = datetime.now(timezone.utc) - timedelta(days=CATALYST_STALE_DAYS)
     for r in rows:
         # 去重键长度 40 → 80（复验 P1-N1）：英文新闻大量以固定模板开头
         # （"According to the announcement from Binance, the …"），前 40 个字母数字
@@ -1504,6 +1516,18 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         d = str(r["impact_direction"] or "neutral").lower()
         d = d if d in out["catalyst_dir"] else "neutral"
         out["catalyst_dir"][d] += 1
+        pub = r["published_at"]
+        if pub is not None:
+            if out["catalyst_latest"] is None or pub > out["catalyst_latest"]:
+                out["catalyst_latest"] = pub
+            if pub < fresh_cut:
+                out["catalyst_stale"] += 1
+        # O6 回放用全量结构化明细（渲染层不读此键）
+        out["catalyst_all"].append({
+            "title": r["title"], "dir": d,
+            "strength": r["impact_strength"],
+            "published_at": pub,
+        })
         if len(out["catalyst"]) < 4:
             tag = f"{r['impact_direction'] or 'neutral'}/{r['impact_strength'] or '-'}"
             out["catalyst"].append(
@@ -1588,7 +1612,13 @@ def _alert_title(items: list[dict]) -> str:
         n_res += len(res["event"]) + _catalyst_total(cd) + len(res["kol"])
     if not n_res:
         return f"🚨 盘面异动告警：{len(items)} 币高置信信号（纯盘面信号，无共振）"
-    dir_txt = f"，催化剂 {bull}多/{bear}空/{neut}中" if (bull or bear or neut) else ""
+    dir_txt = ""
+    if bull or bear or neut:
+        dir_txt = f"，催化剂 {bull}多/{bear}空/{neut}中"
+        # 审计 O2：中性条不计入方向。只报「多/空/中」时，扫读者会把「4多/0空/2中」
+        # 读成强多；补「净多 = 多−空」，让中性不增强方向 conviction。
+        if bull != bear:
+            dir_txt += f"，净{'多' if bull > bear else '空'}{abs(bull - bear)}"
     return f"🚨 盘面异动告警：{len(items)} 币高置信信号（含共振 {n_res} 条{dir_txt}）"
 
 
@@ -1705,7 +1735,19 @@ def _render_alert_email(items: list[dict]) -> str:
         # 复验 P1-N2：条数与括注方向合计必须同源 —— 原 N 取明细长度（≤4）、括注取
         # 去重全量（≤20），会渲染出「催化剂 4（9多/1空/9中）」这种自相矛盾的结果。
         cat_n = _catalyst_total(cd)
-        cat_dir_txt = f"{bull}多/{bear}空/{int(cd.get('neutral', 0))}中" if cat_n else ""
+        neut = int(cd.get("neutral", 0))
+        cat_dir_txt = f"{bull}多/{bear}空/{neut}中" if cat_n else ""
+        # 审计 O2：中性不计方向 —— 补「净多/净空 = 多−空」，避免「4多/0空/2中」被扫读为强多。
+        if cat_n and bull != bear:
+            cat_dir_txt += f"，净{'多' if bull > bear else '空'}{abs(bull - bear)}"
+        # 审计 N1：披露催化剂新鲜度（7 天窗口会把上周/已过期催化剂也计入共振）。
+        if cat_n:
+            latest = res.get("catalyst_latest")
+            if latest is not None:
+                cat_dir_txt += f"，最新 {str(latest)[:10]}"
+            stale_n = int(res.get("catalyst_stale") or 0)
+            if stale_n:
+                cat_dir_txt += f"，含 {stale_n} 条 >{CATALYST_STALE_DAYS} 天"
         res_txt = (f"事件{len(res['event'])} · 催化剂{cat_n if linked else 'n/a'}"
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
                    + f" · KOL {len(res['kol']) if linked else 'n/a'}")
@@ -1735,6 +1777,13 @@ def _render_alert_email(items: list[dict]) -> str:
             else:
                 cvd_flag = (f"<br><span style='color:#0369a1'>ℹ️ CVD {cvd} 与做空结论相反 → "
                             "跌势中有现货承接，防反抽</span>")
+        # 审计 O4：高置信池内质量离散（EPIC 零催化 + 费率未覆盖 + CVD 反向，却与 BTW
+        # 同列 HIGH）。对「纯技术面」信号显式淡提示，避免与基本面强的信号视觉等价。
+        # 仅当**资产已关联且催化剂确为 0**时判「无催化」——未关联是「无从查询」而非 0。
+        tech_note = ""
+        if linked and cat_n == 0 and fund is None:
+            tech_note = ("<br><span style='color:#6b7280'>ℹ️ 纯技术面信号"
+                         "（无催化剂、费率未覆盖），缺基本面确认</span>")
         badge = (f"<span style='background:{'#fee2e2' if up else '#dcfce7'};"
                  f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
                  f"border-radius:3px;font-size:11px'>"
@@ -1752,12 +1801,20 @@ def _render_alert_email(items: list[dict]) -> str:
         trig_px, stop_pct = sig.get("trigger_price"), sig.get("stop_loss_pct")
         invalid_txt = ""
         if trig_px is not None and stop_pct is not None:
-            barrier = (float(trig_px) * (1 - float(stop_pct) / 100) if up
-                       else float(trig_px) * (1 + float(stop_pct) / 100))
+            sp = float(stop_pct)
+            barrier = (float(trig_px) * (1 - sp / 100) if up
+                       else float(trig_px) * (1 + sp / 100))
+            # 审计 O3：stop 触夹带上下限时（实测 57% 的 S1 信号落 8% 下限），前缀仍写
+            # 「2×ATR(14)」会让风控读者误判波动幅度 —— 触限时显式标注真实 2×ATR 的方向。
+            if sp <= STOP_PCT_MIN + 1e-9:
+                atr_note = f"已触下限 {STOP_PCT_MIN:.0f}%（真实 2×ATR 更窄）"
+            elif sp >= STOP_PCT_MAX - 1e-9:
+                atr_note = f"已触上限 {STOP_PCT_MAX:.0f}%（真实 2×ATR 更宽）"
+            else:
+                atr_note = f"2×ATR({STOP_ATR_PERIOD}) 夹 [{STOP_BAND_TXT}]"
             invalid_txt = (f"<br><small style='color:#6b7280'>失效位 "
                            f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
-                           f"（-{float(stop_pct):.2f}%，2×ATR({STOP_ATR_PERIOD}) 夹 "
-                           f"[{STOP_BAND_TXT}]，入场 "
+                           f"（-{sp:.2f}%，{atr_note}，入场 "
                            f"{_fmt_num(trig_px, 6)}）</small>")
         # 历史先验（审计 P2-5）：中位/胜率/样本量，**不用均值**（会被离群值绑架）
         # 工单 P2-6：样本限定 `alerted_at IS NOT NULL`（近 30 天、且已到期）⇒ 只覆盖
@@ -1783,7 +1840,7 @@ def _render_alert_email(items: list[dict]) -> str:
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
             f"CVD {cvd or '未知'}{cvd_amt} | 费率 {fund_str}</small>"
-            f"{cvd_flag}"
+            f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
             f"{invalid_txt}{prior_txt}"
             f"</div>"
@@ -1796,6 +1853,12 @@ def _render_alert_email(items: list[dict]) -> str:
               f"幅度夹在 [{STOP_BAND_TXT}] "
               "带内（工单 P2-4：原 21 根反向极值实测幅度不可用，-11.97% 配 +4.69% 涨幅 "
               "⇒ 风险回报倒挂）；"
+              f"「已触下限/上限」= 失效位被夹到 [{STOP_BAND_TXT}] 边界，真实 2×ATR 在"
+              "该边界之外（更窄/更宽），非「2×ATR 恰等于该值」；"
+              "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
+              "「最新/含 N 条 >X 天」= 催化剂新鲜度（7 天窗口含陈旧条目）；"
+              "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
+              "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，BRK 无 OI 增速时取 "
@@ -2053,10 +2116,26 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
         )
         if ok:
             ids = [it["signal"]["id"] for it in to_alert]
+            # 审计 O6（沿用 PROC-1 精神）：共振是渲染时实时查三张动态表算的，发信后
+            # 因催化剂 7 天窗口漂移而**不可字节级回放**。把三段明细连同方向构成落
+            # `detail`（jsonb，主池此前恒 NULL）作为快照，使历史邮件可独立复核。
+            captured = datetime.now(timezone.utc).isoformat()
+            snapshots = [
+                (json.dumps({"resonance_snapshot": it["resonance"],
+                             "captured_at": captured},
+                            ensure_ascii=False, default=str),
+                 it["signal"]["id"])
+                for it in to_alert
+            ]
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE biz.scan_signal SET alerted_at = NOW() WHERE id = ANY(%s)",
                     (ids,),
+                )
+                cur.executemany(
+                    "UPDATE biz.scan_signal SET detail = COALESCE(detail, '{}'::jsonb) "
+                    "|| %s::jsonb WHERE id = %s",
+                    snapshots,
                 )
             conn.commit()
             return {"candidates": len(candidates), "alerts": len(ids),

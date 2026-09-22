@@ -1756,23 +1756,35 @@ def _strength_bar(score: float, top: float, color: str) -> str:
 OI_FLAT_PCT = 0.5
 
 
-def _render_alert_email(items: list[dict]) -> str:
+def _render_alert_email(items: list[dict],
+                        regime_tags: list[str] | None = None) -> str:
     # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     # 卡片按相对强度降序（审计 §三.6：原按 signal_ts 平铺同色，量比 8.55x 与 2.69x
     # 视觉权重完全相同）。排序在渲染层单点完成，保证标题计数与正文一致。
     items = sorted(items, key=_alert_strength, reverse=True)
     top = _alert_strength(items[0]) if items else 0.0
-    # 市场环境是同一时刻的全局常量 → 提到头部只渲染一次（审计 P2-1）
-    regime_tags: list[str] = []
-    if items:
-        for t in (items[0]["signal"].get("context_tags") or []):
-            if not str(t).startswith("lv"):
-                regime_tags.append(str(t))
+    # 市场环境 = **批次级全局 L0 regime**（审计 B1）。**不得**取 items[0] 的
+    # context_tags：排序后 items[0] 可能是蓄势池 BRK 信号，其 context_tags 是
+    # ["brk_down","vol_x=29.9","bar=2026-09-22T06"] 原始调试 token ⇒ 头部会泄漏
+    # `市场环境 brk_down | vol_x=29.9 | bar=…`，而真正的 L0 regime（btc_1h/fgi/
+    # cap_trend）整段丢失，与图例「市场环境 = 全局 regime」自相矛盾（用户「不知所云」）。
+    # 现由调用方传入 `_build_regime(conn)["tags"]`；未传时只从 items 抽 L0 形态标签兜底。
+    if regime_tags is None:
+        regime_tags = []
+        for t in ((items[0]["signal"].get("context_tags") or []) if items else []):
+            s = str(t)
+            if s.startswith(("btc_1h=", "fgi=", "cap_trend=")) or "环境受限" in s:
+                regime_tags.append(s)
     env_line = ""
     if regime_tags:
         env_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
                     "市场环境 " + " | ".join(regime_tags) + "</p>")
+    # BRK 状态人文化后**并列**展示（不替换 regime）：批次级只报条数，明细见卡片。
+    brk_n = sum(1 for it in items if it["signal"].get("scenario") == "BRK")
+    if brk_n:
+        env_line += ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
+                     f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
     body_parts = []
     for idx, it in enumerate(items):
         sig = it["signal"]
@@ -1789,6 +1801,15 @@ def _render_alert_email(items: list[dict]) -> str:
             if str(t).startswith("lv") and "_" in str(t):
                 lv_txt = f"{str(t).split('_')[-1]} 级异动"
                 break
+        # 蓄势池 BRK：`bar=` 标签原仅用于同根去重（P2-7），审计 B1 要求人文化展示
+        # 触发根（此前该 token 只会泄漏进头部）。`bar=2026-09-22T06` → 「触发根 09/22 06:00」。
+        brk_bar = ""
+        if sc == "BRK":
+            for t in (sig.get("context_tags") or []):
+                s = str(t)
+                if s.startswith("bar=") and len(s) >= 17:
+                    brk_bar = f" · 触发根 {s[9:11]}/{s[12:14]} {s[15:17]}:00"
+                    break
         fund = sig.get("funding_rate")
         # 资金费率原值存的是小数比例（0.00005 = 0.005%），且**不兜底 0**；
         # 补年化（币安 U 本位 8h 结算 ⇒ ×3×365），单看当期费率无可读性（审计 §三.4）
@@ -1818,6 +1839,12 @@ def _render_alert_email(items: list[dict]) -> str:
         else:
             oi_txt = (f"OI {sig.get('oi_dir') or '-'} "
                       f"{_fmt_num(_oi_chg, 1, '%', signed=True)}")
+        # 审计 B3：强度条基量 = 量比 × |OI 增速|（OI 是乘性因子）⇒ OI 持平时分数必然
+        # 贴地，却与标题「高置信」同框，读者困惑「为何高置信只有 0.6 分」。此处明示。
+        flat_note = ""
+        if _oi_chg is not None and abs(float(_oi_chg)) < OI_FLAT_PCT:
+            flat_note = ("<span style='color:#6b7280;font-size:11px'>"
+                         "（OI 持平，强度条偏低）</span>")
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
@@ -1943,14 +1970,14 @@ def _render_alert_email(items: list[dict]) -> str:
             f"{arrow_color};background:#f9fafb;color:#111'>"
             f"<div style='font-size:15px'>{rank} <b>{sig['symbol']}</b> {badge} {bar} "
             f"<span style='color:#6b7280;font-size:12px'>{pool_label} · "
-            f"{lv_txt or (sig.get('timeframe') or '-')}</span></div>"
+            f"{lv_txt or (sig.get('timeframe') or '-')}{brk_bar}</span> {flat_note}</div>"
             f"<div style='margin:2px 0 4px'><b>{sc}</b> {desc} "
             f"<b style='color:{arrow_color}'>{dir_label}</b> "
             f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
             f"</div>"
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"{oi_txt} | "
-            f"CVD {cvd or '未知'}{cvd_amt} | 费率 {fund_str}</small>"
+            f"CVD {cvd or 'n/a'}{cvd_amt} | 费率 {fund_str}</small>"
             f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
             f"{invalid_txt}{prior_txt}"
@@ -1965,6 +1992,8 @@ def _render_alert_email(items: list[dict]) -> str:
               f"{REGIME_FGI_GREED:g} / 市值 ±{REGIME_CAP_TREND_THR:g}%）即标注"
               "「多头/空头环境受限」= 该方向信号在当轮被降级（high→medium），"
               "而告警只取 high ⇒ 该方向本轮不发信（非否决该方向本身）；"
+              "「本批含蓄势池突破（BRK）N 条」= 本封含蓄势池突破信号数，"
+              "其卡片另标「触发根」= 该突破判定的已收盘 1h 根；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
               f"费率年化 = 当期 ×3×365（8h 结算），正 = 多头付空头（多头拥挤）、"
               "负 = 空头付多头（对做多顺风）；"
@@ -2224,7 +2253,10 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
         for it in to_alert:
             it["prior"] = priors.get(it["signal"]["scenario"])
 
-        html = _render_alert_email(to_alert)
+        # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
+        # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。
+        regime_tags = _build_regime(conn)["tags"]
+        html = _render_alert_email(to_alert, regime_tags)
         from crypto_research.clients.notifier import EmailNotifier
         settings = _SETTINGS or get_settings(require_database=True)
         notifier = EmailNotifier(settings)

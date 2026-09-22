@@ -515,3 +515,16 @@
 - **离线端到端复验（HEAD 代码 + 真实库）**：主题 `6 条 / 3多2空1中` → **`4 条 / 2多1空1中`**（净多 1 不变）；FLOCKUSDT 强度 9.7 / 催化剂 2（1多/0空/1中）**未变、无误伤**；AVAUSDT `OI up +0.2%` → **`OI 持平 +0.2%`**、催化剂 4（2多/2空/0中）→ **2（1多/1空/0中）**、强度仍 0.5；图例 8 个新片段全部命中。
 - **自测**：[test_scan_alert_audit_deepdive.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_audit_deepdive.py) 扩至 **75/75 通过**（新增 P2-N11a 内嵌源名 3 条 + P2-N11b 截断转载 6 条（含英文模板误合并回归护栏）+ P2-N11c OI 持平 4 条 + P2-N11d 图例 8 条 + P2-N12 5 条）；`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16 无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效；当前容器跑 `ec1c1c2`，未含 `af63632` / `827f6a4` 与本提交。
+
+### 盘面异动告警邮件「纯盘面无共振」审计处置（审计_盘面异动告警邮件_纯盘面无共振_2026-09-22，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_盘面异动告警邮件_纯盘面无共振_2026-09-22.md`（用户原话「审计一下最新的告警邮件，表示不知所云」）。审计结论：三信号字段与库 100% 吻合、共振=0 真实；「不知所云」主因是渲染层。本轮处置 **B1（P1）/ B3（P2）/ B4（P3）**，全部落在 `scan_daemon.py` 渲染层，**零 DDL、零迁移、无阈值变更**。
+
+- **🔴 B1（P1，核心）头部「市场环境」泄漏 BRK 原始调试 token**：邮件 2 头部渲染成 `市场环境 brk_down | vol_x=29.9 | bar=2026-09-22T06`，而图例承诺「市场环境 = 全局 regime（btc_1h/fgi/cap_trend）」，**自相矛盾**。根因：头部取 `items[0]["signal"]["context_tags"]`（按强度排序后第一条），当第一条是蓄势池 BRK 时其 `context_tags` 是 `["brk_down","vol_x=…","bar=…"]`，且 L0 regime（`regime_tags`）**整段丢失**。
+  - **修复**：`_render_alert_email(items, regime_tags=None)` 新增入参；`task_scan_alert` 批次级调用一次 `_build_regime(conn)["tags"]` 并传入 ⇒ 头部与逐信号 `context_tags` **解耦**。未传时只从 items 抽 **L0 形态**标签兜底（`btc_1h=`/`fgi=`/`cap_trend=`/含「环境受限」），**任何情况下都不再泄漏 `brk_*`/`vol_x=`/`bar=`**。
+  - **BRK 状态人文化后并列展示**（不替换 regime）：头部加一行「本批含蓄势池突破（BRK）N 条」；BRK 卡片把原 `bar=` 标签解析为「触发根 09/22 06:00」。图例补两条对应说明。
+- **🟠 B3（P2，已修）强度 0.6 却标「高置信」**：强度条基量 = 量比 × |OI 增速|（OI 为乘性因子）⇒ OI 持平时分数必然贴地，与标题「高置信」同框致读者困惑。现 `|oi_chg| < OI_FLAT_PCT` 时卡片在强度条后明示「（OI 持平，强度条偏低）」。
+- **🟠 B4（P3，已修）CVD 缺值用图例未定义的「未知」**：`CVD {cvd or '未知'}` → `'n/a'`，与图例「n/a = 该维度无从查询」口径统一（BRK 无 CVD 即渲染 `CVD n/a`）。
+- **未改（观察项）**：SOPHUSDT 费率 `-0.9616%/8h`（年化 -1053%）数学正确、DB 两行一致，属**数据 sanity 待查**（非渲染 bug），未动数据源。
+- **部署观察**：审计指出 07:01~07:19 UTC 两封邮件由不同 `scan_daemon` 版本生成（重部署时间差），B1 在 `5979d36` 与 origin/main **两版均存在**；本轮修复需再次重启 `scan_daemon` 才生效。
+- **自测**：新增 [test_scan_alert_header_regime.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_header_regime.py)（**18/18 通过**：B1 头部含全局 regime 且无 token 泄漏 + 兜底不泄漏 + BRK 条数/触发根 + B3 + B4 + `**` 护栏 + AST）；既有 `test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 128/128 无回归；`py_compile` 通过。

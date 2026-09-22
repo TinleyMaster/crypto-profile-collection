@@ -558,7 +558,8 @@ STALL_HEARTBEAT_GRACE = 3
 # 的任务会得到 90 / 4320 分钟，远大于容器重启周期（实测约 15 分钟）⇒ 每次重启都刷新
 # 宽限，「线程从未启动」被无限期掩盖（工单 P0-1 根因②：4 次查询、跨 2 个实例，
 # expire_signals 始终无心跳行而两条监控同时静默）。
-# ⚠️ 必须 > TASK_DEFS 中最大 offset（当前 900s = 15min）+ 首轮函数自身耗时；
+# ⚠️ 必须 > TASK_DEFS 中最大 offset（现为 `prune_scan_data` 的 600s；改 offset 时同步复核）
+#    + 首轮函数自身耗时；
 #    且必须与 check_scan_freshness.FIRST_ROUND_GRACE_MAX_MIN 同值。
 FIRST_ROUND_GRACE_MAX_MIN = 30.0
 # 参与心跳检查的任务（审计 P0-B：原先漏了 squeeze/liquidation/watchlist，
@@ -581,7 +582,7 @@ MAX_CONSEC_FAILURES = 3
 # supervisord 因「进程未退出」永不重启 ⇒ 无限期停摆，只有人工干预才能恢复。
 # 判据取「全进程最近一次『有任务跑完一轮』距今的分钟数」：最频繁的任务周期 300s，
 # 故 30 分钟 ≈ 6 个周期都没跑完一轮，此时进程已确定无产出，退出交 supervisord 重启。
-# ⚠️ 必须远大于最大 offset（900s）+ 单轮耗时，否则会把正常的慢轮误判成卡死。
+# ⚠️ 必须远大于最大 offset（现为 `prune_scan_data` 的 600s）+ 单轮耗时，否则会把正常的慢轮误判成卡死。
 HANG_EXIT_MIN = 30.0
 # 主线程看护的检查周期（秒）。取 60s：相对 30 分钟阈值足够密（最多晚 1 分钟发现），
 # 又不会让主线程成为负担。
@@ -2562,9 +2563,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 elif tail_gap:
                     reason = "判定窗口尾部 OI 桶缺失，暂不判定"
                 else:
-                    reason = (f"判定窗口内连续缺桶 {max(head_gap, mid_gap)} 个"
-                              f"（左端起 {head_gap} 个 / 中段 {mid_gap} 个，"
-                              f"{len(win_oi)}/{expect_buckets} 桶），暂不判定")
+                    # 文案由 squeeze.gap_reason() 统一产出（复验 D6）——前缀「判定窗口」是
+                    # check_scan_freshness `reason LIKE '判定窗口%'` 的耦合点，勿就地拼接。
+                    reason = sqz.gap_reason(head_gap, mid_gap, len(win_oi), expect_buckets)
                 if oi_lag_sec is not None:
                     reason += f"（OI 最新桶滞后 {oi_lag_sec:.0f}s）"
                 print(f"[scan_daemon][squeeze] {sym} {reason}", file=sys.stderr)
@@ -2625,6 +2626,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 "oi_lag_sec": None if oi_lag_sec is None else round(oi_lag_sec),
                 # 窗口内连续缺桶（复验 P2-d / P3）：仅作观测，不参与判定（判定已在闸门处完成）；
                 # `head_gap_buckets` 单列——左端缺桶会让 base_oi 落到窗口之外，语义更重。
+                # `gap_metric_ver`（复验 D5）：v1 的 `mid_gap_buckets` 含左端起，v2 不含 ⇒
+                # 跨版本回看该字段必须先看版本位，否则误读历史行。
+                "gap_metric_ver": sqz.GAP_METRIC_VER,
                 "head_gap_buckets": head_gap,
                 "mid_gap_buckets": mid_gap,
                 "trigger": why,

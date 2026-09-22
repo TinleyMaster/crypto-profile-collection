@@ -5,9 +5,10 @@
 
 覆盖：
   1) 判定纯函数 `evaluate_battle` 的 7 个注入用例（含缺失数据口径 P1-3）；
-  2) 17 个阈值常量断言（断言当前值，含 SQZ-02 重标定后的 LONG_LIQ_RATIO_THR）；
+  2) 18 个阈值常量断言（断言当前值，含 SQZ-02 重标定后的 LONG_LIQ_RATIO_THR）；
   3) 渲染层 `_render_squeeze_alert` 段内不得残留 `or 0`（None 与 0 必须可区分）；
-  4) 判定窗口连续性闸门 `window_gate` 的 C1~C10 用例（复验 P2-d/P3，搬自复验报告 §3）。
+  4) 判定窗口连续性闸门 `window_gate` 的 C1~C10 用例（复验 P2-d/P3，搬自复验报告 §3），
+    外加 max_gap 夹取（D7）与拒判文案 `gap_reason` 前缀守卫（D6）。
 
 ⚠️ case1/case5 结论随 SQZ-02 由 `churn` 变为 `profit_take`：旧阈值 8e-5 会把
    `long_liq=1.66e-4` 判成「大额多单踩踏」从而屏蔽 profit_take；重标定到
@@ -53,6 +54,7 @@ CONSTS = {
     "OI_EXIT_PCT": -1.0, "CVD_SELL_STRONG": -0.15, "CVD_SELL_MILD": -0.08,
     "CVD_BUY_MILD": 0.02, "MIN_WINDOW_COVERAGE": 0.6,
     "MAX_MID_GAP_BUCKETS": 2,
+    "GAP_METRIC_VER": 2,   # 复验 D5：metrics 版本位（v2 = 左端单列 head_gap）
 }
 for name, want in CONSTS.items():
     check(getattr(sqz, name, None) == want, f"{name} == {want}",
@@ -218,6 +220,30 @@ check(sqz.window_gate(_minus(_FULL, 1000), 1000, 1012)[1] == 1,
 check(sqz.window_gate(_minus(_FULL, 1001), 1000, 1012)[2] == 1,
       "左端起第 2 桶才缺 → 计 mid_gap（head_gap 必须为 0）",
       str(sqz.window_gate(_minus(_FULL, 1001), 1000, 1012)))
+
+# 复验 D7：max_gap 必须 ≥1 —— 判据是 `max(...) < max_gap`，传 0 会「任何窗口都拒判」
+# 从而静默停摆整条判定；实现对 0/负数显式夹到 1（缺 1 桶即拒判 = 最严可用档）。
+check(sqz.window_gate(_minus(_FULL, 1005), 1000, 1012, max_gap=0) == (False, 0, 1),
+      "max_gap=0 被夹到 1（缺 1 桶即拒判，而非全量拒判）",
+      str(sqz.window_gate(_minus(_FULL, 1005), 1000, 1012, max_gap=0)))
+check(sqz.window_gate(_FULL, 1000, 1012, max_gap=0)[0] is True,
+      "max_gap=0 下完整窗口仍通过（证明未退化为「全量拒判」）")
+check(sqz.window_gate(_minus(_FULL, 1005), 1000, 1012, max_gap=-3) == (False, 0, 1),
+      "负 max_gap 同样被夹到 1")
+
+# 复验 D6：拒判文案抽成 squeeze.gap_reason() 纯函数 —— 前缀「判定窗口」是
+# check_scan_freshness 的 `reason LIKE '判定窗口%'` 耦合点，必须由测试守住。
+_r = sqz.gap_reason(2, 0, 11, 13)
+check(_r.startswith("判定窗口"),
+      "gap_reason 必须以「判定窗口」开头（否则看门狗拒判计数静默失联）", _r)
+check("连续缺桶 2 个" in _r and "左端起 2 个" in _r and "中段 0 个" in _r
+      and "11/13 桶" in _r,
+      "gap_reason 含最大游程/左右端拆分/桶数", _r)
+check(sqz.gap_reason(0, 3, 10, 13).startswith("判定窗口")
+      and "连续缺桶 3 个" in sqz.gap_reason(0, 3, 10, 13),
+      "gap_reason 中段游程口径正确", sqz.gap_reason(0, 3, 10, 13))
+check(sqz.gap_reason(1, 2, 10, 13).startswith("判定窗口内连续缺桶 2 个"),
+      "gap_reason 取 max(head, mid) 作为「连续缺桶 N 个」", sqz.gap_reason(1, 2, 10, 13))
 
 # 闸门等价性：新实现与「旧实现（含左端游程 + 阈值 2）」逐例一致
 def _old_gate(present, first=_FIRST, last=_LAST, thr=sqz.MAX_MID_GAP_BUCKETS):

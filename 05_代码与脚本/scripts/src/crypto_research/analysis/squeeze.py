@@ -88,6 +88,11 @@ MIN_WINDOW_COVERAGE = 0.6     # 判定窗口 5m OI 桶覆盖率下限（低于�
 # **中间某桶**且快照不可回补 ⇒ 窗口指标被悄悄污染。判定区间 `[first_bucket, last_bucket)`，
 # 右端正在采集的桶不计（由尾部判据负责）。
 MAX_MID_GAP_BUCKETS = 2
+# metrics 版本位（复验 D5）：v1 = `mid_gap_buckets` **含左端起**；
+# v2 = 左端游程单列 `head_gap_buckets`、`mid_gap_buckets` 不含左端。
+# 判据行为等价（`max(head, mid)` ≡ v1 的 `mid`），但**字段语义变了** ⇒ 跨版本回看
+# `biz.squeeze_track.metrics->'mid_gap_buckets'` 必须先看这个版本位，否则会误读历史行。
+GAP_METRIC_VER = 2
 
 # 结论枚举
 LONG_WIN = "long_win"        # 多头胜：持仓维持/再增，主动买未崩，无多单踩踏
@@ -317,7 +322,10 @@ def window_gate(present_buckets, first_bucket: int, last_bucket: int,
       回撤窗口的 ΔOI 基准直接失真，故单列口径（复验 P3）。
     - `mid_gap`：去掉左端游程后的最长连续缺桶数（右端贴近 `last_bucket` 的缺桶也算）。
     - 判据：`max(head_gap, mid_gap) >= max_gap` → `ok=False`（拒判）。
+    - ⚠️ `max_gap` 必须 ≥ 1（复验 D7）：判据是 `max(...) < max_gap`，传 0 会让
+      **任何窗口都拒判**，静默停摆整条轧空判定；此处显式夹到 ≥1 兜底。
     """
+    max_gap = max(1, int(max_gap))
     head_gap = mid_gap = run = 0
     n = max(0, last_bucket - first_bucket)
     for i in range(n):
@@ -338,9 +346,20 @@ def window_gate(present_buckets, first_bucket: int, last_bucket: int,
     return max(head_gap, mid_gap) < max_gap, head_gap, mid_gap
 
 
+def gap_reason(head_gap: int, mid_gap: int, have: int, expect: int) -> str:
+    """窗口缺桶拒判的统一文案（复验 D6：抽成纯函数以便单测守卫）。
+
+    ⚠️ **必须以「判定窗口」开头**——`check_scan_freshness.py` 用
+    `reason LIKE '判定窗口%'` 统计「拒判中 N 条 track（同一 track 多轮被拒只计 1）」，
+    改前缀会让该观测**静默失联**（`test_squeeze_battle.py` 已加断言守卫）。
+    """
+    return (f"判定窗口内连续缺桶 {max(head_gap, mid_gap)} 个"
+            f"（左端起 {head_gap} 个 / 中段 {mid_gap} 个，{have}/{expect} 桶），暂不判定")
+
+
 __all__ = [
     "base_symbol", "alias_bases", "screen_surge", "confirm_squeeze",
     "evaluate_battle", "should_judge", "is_expired", "latest_ratio",
-    "latest_ratio_ts", "window_gate",
+    "latest_ratio_ts", "window_gate", "gap_reason",
     "CONCLUSION_LABEL", "LONG_WIN", "SHORT_WIN", "PROFIT_TAKE", "CHURN",
 ]

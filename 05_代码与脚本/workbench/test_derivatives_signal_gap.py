@@ -94,8 +94,10 @@ gap_src = ast.unparse(gap_fn) if gap_fn else ""
 check(gap_fn is not None, "找到 get_signal_gap_assets()")
 check("pool = 'main' OR scenario = 'BRK'" in gap_src,
       "作用域限定主池/BRK（funding 的消费方；squeeze 池不用 funding）")
-check("NOT EXISTS" in gap_src and "asset_derivatives" in gap_src,
-      "只纳入「从无 asset_derivatives 行」的资产（稳态增量有限）")
+check("asset_derivatives" in gap_src and "funding_rate IS NOT NULL" in gap_src,
+      "按**符号级**覆盖判定：任一 asset_derivatives 行有费率即视为已覆盖")
+check("DISTINCT ON" in gap_src,
+      "按 canonical_symbol 去重（规避 core.asset 符号重复导致的缺口虚高）")
 check("scan_signal" in gap_src, "数据源为 biz.scan_signal")
 
 # ═══════════════════════════════════════════════════════════════
@@ -148,8 +150,55 @@ check(len(m5) == 250, "limit=0（全量）→ 不截断（缺口 50 + ranked 200
 check("merge_pending" in main_src, "main 调用 merge_pending（拓扑单点）")
 
 # ═══════════════════════════════════════════════════════════════
-#  4. 只读 prod：缺口确实无衍生品行（连不上则跳过）
+#  3c. _aggregate_funding：OI 缺失时退化为等权平均（O1 连带修复）
 # ═══════════════════════════════════════════════════════════════
+
+print("\n【3c】_aggregate_funding（费率聚合不再被 OI 缺失吞掉）")
+
+
+def _approx(a, b, eps=1e-12):
+    return a is not None and b is not None and abs(a - b) < eps
+
+
+f1 = pdb._aggregate_funding(["a", "b"], {
+    "a": {"funding_rate": 0.0001, "open_interest_value": 100.0},
+    "b": {"funding_rate": 0.0002, "open_interest_value": 300.0},
+})
+check(_approx(f1["avg_funding"], (0.0001 * 100 + 0.0002 * 300) / 400),
+      "有 OI 价值 → 按 OI 加权（原口径不变）", f"got={f1['avg_funding']}")
+
+f2 = pdb._aggregate_funding(["a", "b", "c"], {
+    "a": {"funding_rate": 0.0001, "open_interest_value": None},
+    "b": {"funding_rate": 0.0003, "open_interest_value": 0},
+    "c": {"funding_rate": None, "open_interest_value": 500.0},
+})
+check(_approx(f2["avg_funding"], 0.0002),
+      "无 OI 价值 → 等权简单平均（0.0001+0.0003)/2），不再丢费率",
+      f"got={f2['avg_funding']}")
+check(f2["total_oi_value"] is None, "无 OI 价值 → total_oi_value=None")
+
+f3 = pdb._aggregate_funding(["a"], {"a": {"funding_rate": None}})
+check(f3["avg_funding"] is None, "既无 OI 也无费率 → None（不兜底 0）")
+
+f4 = pdb._aggregate_funding(["a", "b"], {
+    "a": {"funding_rate": 0.0001, "open_interest_value": None,
+          "funding_rate_7d_avg": 0.0002},
+    "b": {"funding_rate": 0.0001, "open_interest_value": None,
+          "funding_rate_7d_avg": 0.0004},
+})
+check(_approx(f4["avg_funding_7d"], 0.0003), "7d 平均同样支持无 OI 退化",
+      f"got={f4['avg_funding_7d']}")
+
+ts = 100, 200
+f5 = pdb._aggregate_funding(["a", "b"], {
+    "a": {"funding_rate": 0.0001, "next_funding_time": 200},
+    "b": {"funding_rate": 0.0001, "next_funding_time": 100},
+})
+check(f5["next_funding_ts"] == 100, "next_funding_ts 取最早结算时间")
+
+_fetch_src = ast.unparse(_func("fetch_one_asset"))
+check("_aggregate_funding" in _fetch_src, "fetch_one_asset 使用 _aggregate_funding")
+
 
 print("\n【4】只读 prod：缺口集合不变量")
 try:
@@ -163,7 +212,8 @@ try:
         if ids:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT COUNT(*) FROM biz.asset_derivatives WHERE asset_id = ANY(%s)",
+                    "SELECT COUNT(*) FROM biz.asset_derivatives "
+                    "WHERE asset_id = ANY(%s) AND funding_rate IS NOT NULL",
                     (ids,),
                 )
                 leaked = cur.fetchone()[0]
@@ -177,13 +227,16 @@ if gaps is not None:
     print(f"    （近 7 天主池/BRK 信号缺口：{len(gaps)} 个，样例："
           f"{[g['symbol'] for g in gaps[:6]]}）")
     check(leaked == 0,
-          "缺口集合与 asset_derivatives 零交集（函数语义自洽）",
-          f"{leaked} 个缺口资产竟已有衍生品行")
+          "缺口资产无任何**带费率**的衍生品行（符号级覆盖自洽）",
+          f"{leaked} 个缺口资产竟已有带费率的行")
+    syms_up = [str(g["symbol"]).upper() for g in gaps]
+    check(len(syms_up) == len(set(syms_up)),
+          "缺口按符号去重（每个 canonical_symbol 只出现一次）",
+          f"重复：{[s for s in set(syms_up) if syms_up.count(s) > 1][:8]}")
     ranks = [g["market_cap_rank"] for g in gaps if g["market_cap_rank"] is not None]
-    check(all(g["market_cap_rank"] is None or g["market_cap_rank"] > 100
-              for g in gaps) or not gaps,
-          "缺口多为 rank>100 或 rank 缺失（正是原 top-100 采集漏掉的）",
-          f"ranks={sorted(ranks)[:10]}")
+    hi = sum(1 for r in ranks if r > 100)
+    print(f"    \u2139 rank 分布：{len(ranks)} 个有排名，其中 rank>100 的 {hi} 个"
+          f"（其余 {len(gaps) - len(ranks)} 个无排名）")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败 / {skipped} 跳过")
 sys.exit(1 if failed else 0)

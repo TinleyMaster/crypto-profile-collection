@@ -186,12 +186,17 @@ def _signal_symbol_candidates(symbol: str) -> list[str]:
 
 
 def get_signal_gap_assets(conn, days: int) -> list[dict]:
-    """O1 缺口资产：近期出现在主池/BRK 信号、且 `biz.asset_derivatives` **从无行**的资产。
+    """O1 缺口资产：近期出现在主池/BRK 信号、且**符号级**尚无资金费率的资产。
 
     - 作用域 = `pool='main' OR scenario='BRK'`（资金费率的**消费方**；squeeze 池不用 funding）；
-    - 只纳入「从无行」者（一旦采到即不再重复占位 ⇒ 稳态增量仅限新出现的信号 symbol）；
-    - 归一化后经 `core.asset` 反查 asset_id（无 `core.asset` 行的 symbol，如 BROCCOLI714，
-      属主数据治理缺口，本函数无法覆盖，COUNT 上会自然缺失）。
+    - **按符号级判定覆盖**：`_load_funding_map` 是按**裸符号**注册候选的 ⇒ 只要
+      `biz.asset_derivatives` 里该符号的**任一行**（任一 asset_id）有 `funding_rate`，
+      信号即可解析出费率 ⇒ 该符号不算缺口；
+    - **按符号去重**：`core.asset.canonical_symbol` 不唯一（实测 9.9% 重复、单符号最多 18 行），
+      逐行取会导致 DOGE/BTC/SOL 等被算成十几个「缺口」并重复入库 ⇒ 用
+      `DISTINCT ON (upper(canonical_symbol))` + 按 `market_cap_rank NULLS LAST, asset_id`
+      只取**最优那条**（与 `scan_daemon._get_asset_id` 的选择一致）；
+    - 无 `core.asset` 行的 symbol（如 BROCCOLI714）本函数无法覆盖（属主数据治理缺口）。
     """
     if days <= 0:
         return []
@@ -202,26 +207,43 @@ def get_signal_gap_assets(conn, days: int) -> list[dict]:
             "AND (pool = 'main' OR scenario = 'BRK')",
             (days,),
         )
-        syms = [r["symbol"] for r in cur.fetchall()]
-    cands: set[str] = set()
-    for s in syms:
-        cands.update(_signal_symbol_candidates(s))
-    if not cands:
+        sig_syms = [r["symbol"] for r in cur.fetchall()]
+        if not sig_syms:
+            return []
+        # 已覆盖符号 = 已有资金费率的 asset_derivatives.symbol 及其全部候选别名
+        cur.execute(
+            "SELECT DISTINCT symbol FROM biz.asset_derivatives "
+            "WHERE funding_rate IS NOT NULL"
+        )
+        covered: set[str] = set()
+        for r in cur.fetchall():
+            s = r["symbol"] or ""
+            covered.add(s)
+            covered.add(s.upper())
+            covered.update(_signal_symbol_candidates(s))
+
+    # 未覆盖的候选符号（任一别名已覆盖 ⇒ 该信号非缺口）
+    uncovered: set[str] = set()
+    for s in sig_syms:
+        cands = _signal_symbol_candidates(s)
+        if not any(c in covered for c in cands):
+            uncovered.update(cands)
+    if not uncovered:
         return []
+
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT a.asset_id, a.canonical_symbol AS symbol,
+            SELECT DISTINCT ON (upper(a.canonical_symbol))
+                   a.asset_id, a.canonical_symbol AS symbol,
                    a.canonical_name AS name, a.market_cap_rank
             FROM core.asset a
             WHERE a.canonical_symbol IS NOT NULL
               AND upper(a.canonical_symbol) = ANY(%s)
-              AND NOT EXISTS (
-                  SELECT 1 FROM biz.asset_derivatives d WHERE d.asset_id = a.asset_id
-              )
-            ORDER BY a.market_cap_rank NULLS LAST, a.asset_id
+            ORDER BY upper(a.canonical_symbol),
+                     a.market_cap_rank NULLS LAST, a.asset_id
             """,
-            (sorted(cands),),
+            (sorted(uncovered),),
         )
         return cur.fetchall()
 
@@ -238,6 +260,54 @@ def merge_pending(ranked: list[dict], gap_assets: list[dict], limit: int) -> lis
     if limit > 0:
         merged = merged[:max(limit, len(gap_assets))]
     return merged
+
+
+def _aggregate_funding(available: list[str], details: dict) -> dict:
+    """跨交易所聚合资金费率（纯函数，便于离线单测）。
+
+    有 OI 价值 ⇒ 按 OI 价值加权（原口径不变）；无 OI 价值 ⇒ 等权简单平均
+    （**O1 连带修复**：原实现把费率累加嵌在 `if oi_val` 内，OI 缺失时费率被整体
+    丢弃 ⇒ 小市值/meme 永远补不上 funding）。两者都无 → None。
+    """
+    total_oi_value = 0.0
+    weighted = {1: 0.0, 7: 0.0, 30: 0.0}
+    simple = {1: 0.0, 7: 0.0, 30: 0.0}
+    cnt = {1: 0, 7: 0, 30: 0}
+    next_funding_ts = None
+
+    for ex in available:
+        d = details.get(ex, {})
+        oi_val = d.get("open_interest_value") or 0
+        fr = d.get("funding_rate")
+        if fr is not None:
+            simple[1] += fr
+            cnt[1] += 1
+            if oi_val:
+                total_oi_value += oi_val
+                weighted[1] += fr * oi_val
+            for key, fkey in ((7, "funding_rate_7d_avg"), (30, "funding_rate_30d_avg")):
+                v = d.get(fkey)
+                if v is not None:
+                    simple[key] += v
+                    cnt[key] += 1
+                    if oi_val:
+                        weighted[key] += v * oi_val
+        if d.get("next_funding_time"):
+            if next_funding_ts is None or d["next_funding_time"] < next_funding_ts:
+                next_funding_ts = d["next_funding_time"]
+
+    def _avg(key: int) -> float | None:
+        if total_oi_value > 0:
+            return weighted[key] / total_oi_value
+        return (simple[key] / cnt[key]) if cnt[key] > 0 else None
+
+    return {
+        "avg_funding": _avg(1),
+        "avg_funding_7d": _avg(7),
+        "avg_funding_30d": _avg(30),
+        "next_funding_ts": next_funding_ts,
+        "total_oi_value": total_oi_value if total_oi_value > 0 else None,
+    }
 
 
 def fetch_one_asset(symbol: str) -> dict:
@@ -334,31 +404,18 @@ def fetch_one_asset(symbol: str) -> dict:
             except Exception:
                 exchanges_detail[ex_name] = {"exchange": ex_name, "available": False}
 
-    # ── 聚合计算（按 OI 价值加权）──
-    total_oi_value = 0.0
-    weighted_funding = 0.0
-    weighted_funding_7d = 0.0
-    weighted_funding_30d = 0.0
-    next_funding_ts = None
-
-    for ex in available:
-        d = exchanges_detail[ex]
-        oi_val = d.get("open_interest_value") or 0
-        fr = d.get("funding_rate")
-        if oi_val and fr is not None:
-            total_oi_value += oi_val
-            weighted_funding += fr * oi_val
-            if d.get("funding_rate_7d_avg") is not None:
-                weighted_funding_7d += d["funding_rate_7d_avg"] * oi_val
-            if d.get("funding_rate_30d_avg") is not None:
-                weighted_funding_30d += d["funding_rate_30d_avg"] * oi_val
-        if d.get("next_funding_time"):
-            if next_funding_ts is None or d["next_funding_time"] < next_funding_ts:
-                next_funding_ts = d["next_funding_time"]
-
-    avg_funding = weighted_funding / total_oi_value if total_oi_value > 0 else None
-    avg_funding_7d = weighted_funding_7d / total_oi_value if total_oi_value > 0 else None
-    avg_funding_30d = weighted_funding_30d / total_oi_value if total_oi_value > 0 else None
+    # ── 聚合计算（资金费率优先按 OI 价值加权）──
+    # ⚠️ O1 连带修复（2026-09-22）：原实现把资金费率累加**嵌在 `if oi_val` 内** ⇒ 当
+    # 交易所未返回 OI 价值（小市值/meme 常见）时，**即便费率可取也被整体丢弃**、
+    # `avg_funding=None` ⇒ 该类符号永远补不上 funding（实测 MAGMA/UNI/XEC/MIRA/VTHO
+    # 补采后仍 NULL）。聚合逻辑见 `_aggregate_funding`：有 OI 价值仍按 OI 加权
+    # （口径不变），无 OI 价值退化为**等权简单平均**（有费率即可）。
+    _fund = _aggregate_funding(available, exchanges_detail)
+    avg_funding = _fund["avg_funding"]
+    avg_funding_7d = _fund["avg_funding_7d"]
+    avg_funding_30d = _fund["avg_funding_30d"]
+    next_funding_ts = _fund["next_funding_ts"]
+    total_oi_value = _fund["total_oi_value"] or 0.0
 
     # OI 24h 变化
     total_oi_change_weighted = 0.0

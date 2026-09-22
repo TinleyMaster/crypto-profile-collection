@@ -121,6 +121,9 @@ _PROBES = {
 
 _FAIL: dict[str, int] = {}   # 连续失败计数（429 不累计）
 _NOTIFIER = None
+# 本通道是运维告警（bapi 不可用 / 恢复），只发系统管理员（ADMIN_EMAIL），
+# 未配置时回退 SMTP_TO 全量收件人 —— 与盘面扫描停摆告警同口径（见 _get_notifier）。
+_ADMIN_TO: str | None = None
 STATE_PATH = Path(os.getenv("HEALTH_STATE_DIR", "/tmp")) / "binance_bapi_health.json"
 
 
@@ -148,14 +151,19 @@ def _save_state() -> None:
 
 
 def _get_notifier():
-    """惰性构造 EmailNotifier；SMTP 未配/异常返回 None（不崩溃）。"""
-    global _NOTIFIER
+    """惰性构造 EmailNotifier；SMTP 未配/异常返回 None（不崩溃）。
+
+    同时把收件人（只发 ADMIN_EMAIL，未配置回退 SMTP_TO）缓存进 _ADMIN_TO，
+    供各告警调用点传给 notifier.send(to=...)。
+    """
+    global _NOTIFIER, _ADMIN_TO
     if _NOTIFIER is None:
         try:
             from crypto_research.clients.notifier import EmailNotifier
             from crypto_research.config import get_settings
 
             s = get_settings(require_database=False)
+            _ADMIN_TO = s.admin_email or s.smtp_to
             _NOTIFIER = EmailNotifier(s) if s.smtp_host else None
         except Exception:
             _NOTIFIER = False
@@ -200,7 +208,8 @@ def run_healthcheck() -> dict:
         if ok:
             if _FAIL.get(name, 0) >= 2 and notifier:
                 try:
-                    notifier.send(f"【恢复通知】Binance bapi 恢复 - {cn}", _recover_html(cn))
+                    notifier.send(f"【恢复通知】Binance bapi 恢复 - {cn}", _recover_html(cn),
+                                  to=_ADMIN_TO)
                     logger.info("恢复通知已发送: %s", cn)
                 except Exception as e:
                     logger.error("恢复通知发送失败 %s: %s", cn, e)
@@ -212,7 +221,8 @@ def run_healthcheck() -> dict:
         # P1 锁存：仅在 1→2 穿越阈值瞬间发一次告警，持续失败不再每轮重发（防告警风暴）
         if prev == 1 and _FAIL[name] >= 2 and notifier:
             try:
-                notifier.send(f"【数据告警】Binance bapi 不可用 - {cn}", _alert_html(cn, url, diag))
+                notifier.send(f"【数据告警】Binance bapi 不可用 - {cn}",
+                              _alert_html(cn, url, diag), to=_ADMIN_TO)
                 logger.info("告警邮件已发送: %s", cn)
             except Exception as e:
                 logger.error("告警邮件发送失败 %s: %s", cn, e)

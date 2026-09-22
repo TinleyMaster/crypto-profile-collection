@@ -211,11 +211,17 @@ def _get_all_alert_states(conn) -> dict[str, datetime]:
 
 
 def _send_mail(settings, subject: str, body: str) -> tuple[bool, str]:
+    """发看门狗邮件（停摆告警 / 恢复通知 / 轧空池健康提示）。
+
+    ⚠️ 只发**系统管理员**（ADMIN_EMAIL），未配置时回退 SMTP_TO：本通道是运维告警，
+    与业务邮件（早报/催化剂/盘面异动告警）不同，不该推给全部订阅者。
+    """
     from crypto_research.clients.notifier import EmailNotifier
     notifier = EmailNotifier(settings)
     if not notifier.configured:
         return False, "SMTP 未配置（缺少 SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_TO）"
-    return notifier.send(subject, body, from_name="盘面信号看门狗")
+    return notifier.send(subject, body, from_name="盘面信号看门狗",
+                         to=settings.admin_email or settings.smtp_to)
 
 
 def _render_items_html(items: list[dict]) -> str:

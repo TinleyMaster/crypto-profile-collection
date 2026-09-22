@@ -1939,7 +1939,10 @@ def _check_and_alert_stall(conn) -> bool:
             "数据恢复后本告警自动解除。</p>"
         )
         ok, msg = notifier.send(
-            "⚠️ 盘面扫描停摆告警", body, from_name="盘面信号扫描")
+            "⚠️ 盘面扫描停摆告警", body, from_name="盘面信号扫描",
+            # 只发系统管理员（ADMIN_EMAIL），未配置时回退 SMTP_TO：运维告警不该
+            # 推给全部订阅者（与外部看门狗 check_scan_freshness._send_mail 同口径）。
+            to=settings.admin_email or settings.smtp_to)
         if ok:
             with conn.cursor() as cur:
                 cur.execute(

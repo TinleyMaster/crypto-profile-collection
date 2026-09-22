@@ -23,21 +23,25 @@ class EmailNotifier:
         return bool(s.smtp_host and s.smtp_user and s.smtp_pass and s.smtp_to)
 
     def send(self, subject: str, body_html: str,
-             from_name: str = "解锁追踪提醒") -> tuple[bool, str]:
+             from_name: str = "解锁追踪提醒", to: str | None = None) -> tuple[bool, str]:
         """发送邮件，返回 (是否成功, 说明)。未配置时返回 False。
 
         Args:
             subject: 邮件主题
             body_html: HTML 正文
             from_name: 发件人显示名，默认"解锁追踪提醒"
+            to: 收件人（逗号分隔）。**系统/运维告警专用**：留空则用 SMTP_TO 全量收件人；
+                停摆告警、看门狗、恢复通知等只该发给管理员，传
+                `settings.admin_email or settings.smtp_to`（见各调用方）。
         """
         s = self.settings
         if not self.configured:
             return False, "SMTP 未配置（缺少 SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_TO）"
 
-        to_addrs = [a.strip() for a in s.smtp_to.split(",") if a.strip()]
+        # to 为空白串时同样回退 SMTP_TO（`to or s.smtp_to` 会把 "   " 当有效值）
+        to_addrs = [a.strip() for a in ((to or "").strip() or s.smtp_to).split(",") if a.strip()]
         if not to_addrs:
-            return False, "收件人 SMTP_TO 为空"
+            return False, "收件人为空（ADMIN_EMAIL / SMTP_TO 均未配置）"
 
         from_addr = s.smtp_from or s.smtp_user
         msg = MIMEText(body_html, "html", "utf-8")

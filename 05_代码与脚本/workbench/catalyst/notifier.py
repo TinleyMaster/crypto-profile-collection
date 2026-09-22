@@ -1382,6 +1382,10 @@ def _build_a_alert_card(r: dict) -> str:
         )
     url = r.get("source_url") or ""
     url_html = (_html.escape(url)) if url else "—"
+    # 审计 2026-09-22 P3：Binance Square 帖子转成 uni-qr 二维码落地页，桌面端打不开
+    if url and "uni-qr" in url:
+        url_html += (' <span style="color:#b45309;font-size:10.5px">'
+                     '（Binance Square 二维码落地页，桌面端可能无法直接打开）</span>')
     source_section = (
         _g("G0", "事件来源与原文",
            _kv("发布时间", _fmt_ts(r.get("published_at")))
@@ -1398,10 +1402,15 @@ def _build_a_alert_card(r: dict) -> str:
         f = _to_float(v)
         return "—" if f is None else fmt.format(f)
 
+    _rule_et = r.get("rule_event_type")
+    _ai_et = r.get("ai_event_type")
+    _et_note = ("（⚠️ 规则与 AI 分类分歧，展示以规则为准）"
+                if (_rule_et and _ai_et and str(_rule_et) != str(_ai_et)) else "")
     g1 = _g("G1", "事件分级",
-            _kv("事件类型", f'{_html.escape(str(r.get("rule_event_type") or "—"))}'
-                           f'（AI 判定：{_html.escape(str(r.get("ai_event_type") or "—"))}，'
-                           f'来源 {_html.escape(str(r.get("event_type_src") or "—"))}）')
+            _kv("事件类型", f'{_html.escape(str(_rule_et or "—"))}'
+                           f'（AI 判定：{_html.escape(str(_ai_et or "—"))}，'
+                           f'来源 {_html.escape(str(r.get("event_type_src") or "—"))}）'
+                           f'{_et_note}')
             + _kv("催化性质", _kind_cn(r.get("catalyst_kind")))
             + _kv("分项得分", f'权威度 {r.get("authority_score") if r.get("authority_score") is not None else "—"}'
                              f' · 事件权重 {r.get("event_weight") if r.get("event_weight") is not None else "—"}'
@@ -1413,10 +1422,13 @@ def _build_a_alert_card(r: dict) -> str:
                                f' · 追高扣分 {r.get("prelaunch_penalty") if r.get("prelaunch_penalty") is not None else 0}')
             )
 
+    _hz = r.get("horizon_days")
+    # 审计 2026-09-22 P2：rule 判定常给 0 天，与信号级有效期（如 7 天）矛盾 → 显示「—」
+    _hz_txt = f"{_hz} 天" if _hz not in (None, 0) else "—"
     g2 = _g("G2", "影响判定与价格共振",
             _kv("催化方向", f'{_DIRECTION_CN.get(r.get("impact_direction"), r.get("impact_direction") or "—")}'
                            f' · 强度 {_IMPACT_STRENGTH_CN.get(r.get("impact_strength"), r.get("impact_strength") or "—")}'
-                           f' · 有效期 {r.get("horizon_days") if r.get("horizon_days") is not None else "—"} 天'
+                           f' · 有效期 {_hz_txt}'
                            f'（判定来源 {_html.escape(str(r.get("impact_derived_from") or "—"))}）')
             + _kv("共振状态", f'<span style="color:#5b21b6;font-weight:600">'
                              f'{_RESONANCE_CN.get(r.get("resonance_state"), r.get("resonance_state") or "—")}</span>'
@@ -1591,7 +1603,7 @@ def _build_token_snapshot(r: dict) -> str:
         + _row("7d", f'<span style="color:{_pct_color(ch7)}">{_pct(ch7)}</span>')
         + _row("24h 成交量", _fmt_big(vol))
         + _row("市值 / 排名", f'{_fmt_big(mcap)} · #{mc_rank if mc_rank is not None else "—"}')
-        + _row("流通 / 总量", f'{_fmt_big(circ)} / {_fmt_big(total)}{circ_pct}')
+        + _row("流通 / 总量", f'{_fmt_big(circ, currency=False)} / {_fmt_big(total, currency=False)}{circ_pct}')
         + _row("历史最高", ath_html)
         + _row("上市日期", str(r.get("launch_date") or "—"))
         + _row("资产类型", _html.escape(str(r.get("asset_type") or "—")))
@@ -1686,17 +1698,22 @@ def _pct_color(v) -> str:
     return "#059669" if f > 0 else ("#dc2626" if f < 0 else "#6b7280")
 
 
-def _fmt_big(v) -> str:
-    """大数格式化（市值/供应量/成交量）。"""
+def _fmt_big(v, currency: bool = True) -> str:
+    """大数格式化（市值/成交量=货币；供应量=纯数量，须 currency=False）。
+
+    审计 2026-09-22 P1：供应量（流通/总量）是**代币枚数**而非美元，模板误用带 `$`
+    的格式化（ETH 显示 `$120.68M`、COPPER 显示 `$100000.00T`），易被读成市值。
+    """
     f = _to_float(v)
     if f is None:
         return "—"
+    sign = "$" if currency else ""
     if f >= 1e12:
-        return f"${f / 1e12:.2f}T" if f >= 1e9 else f"{f / 1e12:.2f}T"
+        return f"{sign}{f / 1e12:.2f}T"
     if f >= 1e9:
-        return f"${f / 1e9:.2f}B"
+        return f"{sign}{f / 1e9:.2f}B"
     if f >= 1e6:
-        return f"${f / 1e6:.2f}M"
+        return f"{sign}{f / 1e6:.2f}M"
     if f >= 1e3:
         return f"{f / 1e3:.1f}K"
     return f"{f:,.0f}"

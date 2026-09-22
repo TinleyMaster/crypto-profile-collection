@@ -254,6 +254,20 @@
 - **仍需部署**：容器要重新部署才能带上 `a9466db`（阶段超时 90min）+ 本次 `llm_client` 总时限；在此之前旧代码仍会挂到 12h/240min 被收割。
 - **自测**：模拟「持续有 chunk、永不 [DONE]」的滴流响应 → 总时限内抛 ReadTimeout、`resp.close()` 被调用；chat/responses 两条路径均验证。
 
+### 催化剂 Alert 邮件数据质量修复（审计_催化剂邮件_A级2条_2026-09-22，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\_audit\审计_催化剂邮件_A级2条_2026-09-22.md`（对象 = 「🎯 催化剂 Alert·A级」邮件）。新闻本身真实，问题全在**管道数据质量与评级闸门**。
+
+- **P0（已修）价格缺失仍评 A 级「可交易」**：COPPER 现价/入场/止损/止盈**全 0**，却以 86 分进 A 级（AI 推理自己都写「规则目标价与止损价均为0」）。
+  - `signal.py::build()` 新增 `_prices_valid(entry, stop, tp)` 闸门：三者任一 `None`/`0`/负/非数值 ⇒ **tier 封顶 C、动作降 watch**（与 RR/方向闸门同属「只降级不改分」的显式例外）。根因：原 `if entry_price and ...` 对 0 短路 → rr=None → RR 闸门不触发。
+  - `technical.py::analyze()` 新增 `last_price <= 0` 守卫：源价缺失落成 0 时直接 `detail.error='non_positive_price'`，不产出任何 MA/ATR/档位（防 G5 展示一排 0）。
+- **P1（已修）代币快照「流通/总量」误加 `$`**：`_fmt_big` 是货币格式化器，供应量是**代币枚数**（ETH 显示 `$120.68M`、COPPER `$100000.00T`）。新增 `currency=False` 参数，供应量两格改为纯数量（顺带修掉 `f>=1e12` 分支恒真的冗余写法）。
+- **P1（已修）G4 缺失字段给中性 50 恰好过线**：`_score_liquidity(None)`/`_score_tvl(None)` 由 50 → **0**（「无数据不放行」），check 文案的 `$0` 改为「未知」。实测 COPPER 式全 unknown 组合：综合分 50 → **35（fail）**。
+- **P2/P3（已修展示层）**：G2「有效期 0 天」→「—」（与信号级 7 天有效期矛盾）；G1 rule/AI 事件类型分歧加 `⚠️ 规则与 AI 分类分歧` 注；`uni-qr` 原文链接加「桌面端可能无法打开」注。
+- **未做（另立）**：COPPER `total_supply=1e17` 数据源异常（需查 supply 抓取）；**商品铜新闻 → `$COPPER` meme 同名误匹配**（需 `classify.py`/`asset_filter.py` 侧消歧，属分类治理）。
+- **无迁移**：全在 `workbench/catalyst/*.py`。
+- **自测**：价格闸门 11 例（正/0/None/负/做空优先 invalid）+ `_fmt_big` 货币/数量 4 例 + G4 缺失判 0/COPPER 式 fail 6 例 + A 卡片渲染 smoke（supply 去$/G1 分歧/G2 破折号/QR 注）全绿；`technical` 非正价守卫实测 `entry/sl/tp=None`。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。

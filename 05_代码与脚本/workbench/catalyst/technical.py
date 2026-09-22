@@ -89,6 +89,11 @@ class TechnicalAnalyzer:
 
         # 最新价
         last_price = prices[-1]
+        # 审计 2026-09-22 P0：源数据价格缺失常落成 0（COPPER），此时 MA/ATR/档位全是 0，
+        # 却仍被下游当成有效档位 → 直接判无效，不产出任何交易位。
+        if last_price <= 0:
+            result.detail = {"error": "non_positive_price", "last_price": last_price}
+            return result
 
         # 计算 MA
         ma5 = self._ma(prices, self.ma_short) if len(prices) >= self.ma_short else None

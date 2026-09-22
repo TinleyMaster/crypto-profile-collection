@@ -101,7 +101,7 @@ class FundamentalChecker:
         # 3. 流动性
         liq_score = self._score_liquidity(liquidity_usd)
         scores["liquidity"] = liq_score
-        checks.append(f"流动性:${liquidity_usd or 0:,.0f}={liq_score}")
+        checks.append(f"流动性:{'未知' if liquidity_usd is None else f'${liquidity_usd:,.0f}'}={liq_score}")
 
         # 4. 解锁压力
         unlock_score = self._score_unlock(unlock_pressure)
@@ -116,7 +116,7 @@ class FundamentalChecker:
         # 6. TVL（defi 类权重加倍，其他类权重减半）
         tvl_score = self._score_tvl(tvl_usd, asset_type)
         scores["tvl"] = tvl_score
-        checks.append(f"TVL:${tvl_usd or 0:,.0f}={tvl_score}")
+        checks.append(f"TVL:{'未知' if tvl_usd is None else f'${tvl_usd:,.0f}'}={tvl_score}")
 
         # 加权综合分
         raw = (
@@ -180,9 +180,13 @@ class FundamentalChecker:
         return 50
 
     def _score_liquidity(self, liq_usd: Optional[float]) -> int:
-        """流动性评分。越高越好。"""
+        """流动性评分。越高越好。
+
+        审计 2026-09-22 P1：**缺失**（None）不再给中性 50 —— 那会让「无流动性数据」
+        与「有数据但平庸」等同，配合阈值 50 恰好放行（COPPER 实测）。缺失判 0。
+        """
         if liq_usd is None:
-            return 50
+            return 0
         if liq_usd >= self.liq_good:
             return 90
         if liq_usd >= self.liq_ok:
@@ -205,9 +209,12 @@ class FundamentalChecker:
         return 50
 
     def _score_tvl(self, tvl_usd: Optional[float], asset_type: Optional[str]) -> int:
-        """TVL 评分。"""
+        """TVL 评分。
+
+        审计 2026-09-22 P1：缺失（None）或 ≤0 不再给中性 50（「无数据放行」漏洞），判 0。
+        """
         if tvl_usd is None or tvl_usd <= 0:
-            return 50
+            return 0
         if tvl_usd >= 1_000_000_000:  # 1B+
             return 90
         if tvl_usd >= 100_000_000:   # 100M+

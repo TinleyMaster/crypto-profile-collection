@@ -50,6 +50,21 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 
+def _prices_valid(entry, stop, tp) -> bool:
+    """entry/stop/tp 三者是否均为**正数**（None / 0 / 负数 / 非数值都视为无效）。
+
+    审计 2026-09-22 P0：COPPER 三个档位全 0，rr 无法计算（`if entry and ...` 对 0 短路），
+    RR 闸门因此不触发，信号仍以 86 分进 A 级「可交易」。价格缺失必须硬拦截。
+    """
+    for v in (entry, stop, tp):
+        try:
+            if v is None or float(v) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 @dataclass
 class CatalystSignalResult:
     catalyst_id: int
@@ -214,6 +229,15 @@ class CatalystSignalBuilder:
             status = "invalid"
         elif direction != "bullish" and tier in ("A", "B"):
             tier = "C"
+
+        # 价格/档位完整性闸门（审计 2026-09-22 P0）：entry/stop/tp 缺失或非正 ⇒
+        # 无有效交易档位，**不得**作为 A/B 可交易信号（COPPER 三档全 0 仍评 A 的根因）。
+        # 与 RR / 方向闸门同属「只降级不改分」的显式例外：tier 封顶 C、动作降为观察。
+        if not _prices_valid(entry_price, stop_loss, take_profit):
+            if tier in ("A", "B"):
+                tier = "C"
+            if status == "open":
+                status = "watch"
 
         return CatalystSignalResult(
             catalyst_id=catalyst_id,

@@ -126,6 +126,55 @@ check("（-16.35%" not in h_short,
       "做空不得渲染「升破 …（-16.35%）」——方向词与符号自相矛盾（实物 id=1292 龙虾USDT）")
 
 # ═══════════════════════════════════════════════════════════════
+#  P2-N8 —— 占位符标题（title='null'）不得计为催化剂
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【P2-N8】催化剂占位符标题（prod 实测 177 条 title='null'）被丢弃")
+for t, exp in [("null", True), ("NULL", True), (" none ", True), ("n/a", True),
+               ("undefined", True), ("-", True), ("--", True), ("", True),
+               (None, True), ("Arthur Hayes 看涨 ENA 至 0.5 美元", False),
+               ("null 值不是标题的一部分", False)]:
+    check(sd._is_placeholder_title(t) is exp,
+          f"_is_placeholder_title({t!r}) == {exp}", f"got={sd._is_placeholder_title(t)}")
+_res_fn = next((n for n in ast.parse(open(sd.__file__, encoding="utf-8").read()).body
+                if isinstance(n, ast.FunctionDef) and n.name == "_get_resonance"), None)
+check(_res_fn is not None and "_is_placeholder_title(" in ast.unparse(_res_fn),
+      "_get_resonance 去重循环内调用该判据（源码 AST）",
+      "未调用 ⇒ title='null' 仍会占一个方向名额")
+
+# ═══════════════════════════════════════════════════════════════
+#  P2-N9 —— CVD 机制断言需 OI 物性支撑（oi_dir 由 oi_chg>0 二值化）
+# ═══════════════════════════════════════════════════════════════
+
+print(f"\n【P2-N9】CVD 机制断言需 |OI 增速| ≥ {sd.CVD_MECH_OI_MIN_PCT:g}%")
+h_flat = _body(sd._render_alert_email([_item(sig=_sig(p_dir="up", cvd_dir="down",
+                                                     oi_dir="up", oi_chg_pct=0.04))]))
+check("杠杆驱动" not in h_flat, "OI +0.04%（噪声级微增）不得断言「杠杆驱动」",
+      "实物 id=1286 ENAUSDT 即此情形")
+check("未见同步扩张" in h_flat, "改述「OI 未见同步扩张」，只描述现货侧")
+h_expand = _body(sd._render_alert_email([_item(sig=_sig(p_dir="up", cvd_dir="down",
+                                                       oi_dir="up", oi_chg_pct=5.0))]))
+check("杠杆驱动" in h_expand, "OI +5.0% → 仍判「杠杆驱动」（不误伤真实扩张）")
+h_cover = _body(sd._render_alert_email([_item(sig=_sig(p_dir="up", cvd_dir="down",
+                                                      oi_dir="down", oi_chg_pct=-3.0))]))
+check("空头回补" in h_cover, "OI −3.0% → 「空头回补/多头离场推涨」（原分支不回归）")
+h_unk = _body(sd._render_alert_email([_item(sig=_sig(p_dir="up", cvd_dir="down",
+                                                     oi_dir=None, oi_chg_pct=None))]))
+check("未见同步扩张" in h_unk, "OI 方向未知 → 同样不下机制结论")
+
+# ═══════════════════════════════════════════════════════════════
+#  P2-N10 —— OI 两列皆空渲染 `OI n/a`（原为 `OI - -`）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【P2-N10】OI 无从查询时渲染 `OI n/a`（与图例口径一致）")
+h_brk = _body(sd._render_alert_email([_item(sig=_sig(pool="accumulation", scenario="BRK",
+                                                     oi_dir=None, oi_chg_pct=None))]))
+check("OI n/a" in h_brk, "BRK（oi_dir/oi_chg_pct 皆 NULL）→ `OI n/a`")
+check("OI - -" not in h_brk, "不再渲染占位符残留 `OI - -`（实物 id=1292 龙虾USDT）")
+h_oi = _body(sd._render_alert_email([_item(sig=_sig(oi_dir="up", oi_chg_pct=5.38))]))
+check("OI up +5.4%" in h_oi, "有 OI 时仍渲染 `OI up +5.4%`（不误伤）")
+
+# ═══════════════════════════════════════════════════════════════
 #  O4 —— 纯技术面淡提示
 # ═══════════════════════════════════════════════════════════════
 

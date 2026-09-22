@@ -1454,6 +1454,20 @@ def _norm_title(title) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
 
+# 复验 P2-N8：上游把「标题缺失」落成字面量占位符（prod `biz.asset_catalyst` 实测
+# 177 条 `title = 'null'`），这些条目**无任何可用信息**却带着 bullish/bearish 方向
+# 参与计数 ⇒ 把方向构成抬高一格（实物：ENAUSDT 快照「10多」里有 1 条 title='null'），
+# 且一旦落进明细前 4 条会直接渲染出「null（bullish/weak，2026-09-20）」。
+# 无标题 = 无可用信息，按「不知道就别说」丢弃（不改判 neutral：那会把噪声计进总数）。
+_TITLE_PLACEHOLDERS = {"null", "none", "nan", "undefined", "n/a", "na", "-", "--"}
+
+
+def _is_placeholder_title(title) -> bool:
+    """标题为缺失占位符（`null`/`none`/`n/a`… 或纯空白）⇒ 该催化剂无可用信息。"""
+    s = str(title or "").strip().lower()
+    return (not s) or s in _TITLE_PLACEHOLDERS
+
+
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     """返回 {event: [...], catalyst: [...], catalyst_dir: {...}, kol: [...]} 三段共振。
 
@@ -1502,6 +1516,10 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     seen: set[str] = set()
     fresh_cut = datetime.now(timezone.utc) - timedelta(days=CATALYST_STALE_DAYS)
     for r in rows:
+        # 复验 P2-N8：占位符标题（title='null' 等）无可用信息，丢弃后再去重
+        # —— 否则它会占掉一个方向名额、并可能与真实标题争同一去重键。
+        if _is_placeholder_title(r["title"]):
+            continue
         # 去重键长度 40 → 80（复验 P1-N1）：英文新闻大量以固定模板开头
         # （"According to the announcement from Binance, the …"），前 40 个字母数字
         # 字符全是模板，真正内容在第 40 之后 ⇒ 截断会**把不同公告并成一条**。
@@ -1678,6 +1696,13 @@ def _strength_bar(score: float, top: float, color: str) -> str:
             f"<span style='color:#6b7280;font-size:11px'> {score:.1f}</span>")
 
 
+# 复验 P2-N9：CVD 机制断言（「杠杆驱动」/「空头回补」）的 **OI 物性阈值**（%）。
+# `oi_dir` 由 `oi_chg > 0` 二值化 ⇒ OI 只动 +0.04% 也判 `up`，若不加阈值，机制标签
+# 会把「OI 持平 + 现货主动卖」误述成「杠杆驱动（OI 增）」。取 0.5%：低于该幅度时
+# 只描述现货侧、不下机制结论（`oi_dir` 本身仍用于 S1~S4 场景分类，不受影响）。
+CVD_MECH_OI_MIN_PCT = 0.5
+
+
 def _render_alert_email(items: list[dict]) -> str:
     # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1728,6 +1753,12 @@ def _render_alert_email(items: list[dict]) -> str:
             cvd_amt = f" {_fmt_usd(float(cvd_usd))}"
             if cvd_ratio is not None:
                 cvd_amt += f"（占比 {float(cvd_ratio) * 100:+.1f}%）"
+        # OI 段（复验 P2-N10）：BRK 生产者刻意不落 OI（`oi_dir`/`oi_chg_pct` 皆 NULL），
+        # 原实现渲染成 `OI - -` —— 与图例「n/a = 该维度无从查询」口径不一致，且两个
+        # 连字符看起来像占位符残留。两者皆空时显式渲染 `OI n/a`（同费率段写法）。
+        oi_txt = ("OI n/a" if sig.get("oi_dir") is None and sig.get("oi_chg_pct") is None
+                  else f"OI {sig.get('oi_dir') or '-'} "
+                       f"{_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)}")
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
@@ -1761,19 +1792,28 @@ def _render_alert_email(items: list[dict]) -> str:
         # CVD 机制标签（审计 P1-3 的可做部分：金额列缺失 ⇒ 不做幅度，只做机制判读）
         # 复验 P2-N3：「价涨 + 现货主动卖」有两种**相反**机制，原文案一律断言「OI 增」
         # ⇒ 空头回补（OI 降）场景说反。改为按 oi_dir 分两支，方向未知时不作机制断言。
+        # 复验 P2-N9：`oi_dir` 由 `oi_chg > 0` **二值化**（见 L790），噪声级微增也判 up
+        # ⇒ OI 仅 +0.04%（渲染成 `OI up +0.0%`）时仍断言「杠杆驱动（OI 增）」，机制
+        # 结论无物性支撑（实物 id=1286 ENAUSDT）。加物性阈值：扩张不到该幅度就归
+        # 「未同步扩张」，只描述现货侧、不下机制结论。
         cvd = sig.get("cvd_dir")
+        oi_dir_v = sig.get("oi_dir")
+        oi_chg_v = sig.get("oi_chg_pct")
+        oi_expanding = (oi_chg_v is not None
+                        and abs(float(oi_chg_v)) >= CVD_MECH_OI_MIN_PCT)
         cvd_flag = ""
         if cvd and cvd != sig.get("p_dir"):
             if up:
-                if sig.get("oi_dir") == "down":
+                if oi_dir_v == "down" and oi_expanding:
                     cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
                                 "空头回补/多头离场推涨（OI 降），持续性存疑</span>")
-                elif sig.get("oi_dir") == "up":
+                elif oi_dir_v == "up" and oi_expanding:
                     cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
                                 "杠杆驱动（OI 增而现货主动卖），无现货承接</span>")
                 else:
                     cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
-                                "现货主动卖且无现货承接，但 OI 方向未知，机制待判</span>")
+                                f"现货主动卖且无现货承接，但 OI 未见同步扩张"
+                                f"（不足 ±{CVD_MECH_OI_MIN_PCT:g}%），机制待判</span>")
             else:
                 cvd_flag = (f"<br><span style='color:#0369a1'>ℹ️ CVD {cvd} 与做空结论相反 → "
                             "跌势中有现货承接，防反抽</span>")
@@ -1844,7 +1884,7 @@ def _render_alert_email(items: list[dict]) -> str:
             f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
             f"</div>"
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
-            f"OI {sig.get('oi_dir') or '-'} {_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)} | "
+            f"{oi_txt} | "
             f"CVD {cvd or '未知'}{cvd_amt} | 费率 {fund_str}</small>"
             f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"

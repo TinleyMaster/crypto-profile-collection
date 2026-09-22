@@ -224,7 +224,13 @@ def exit_code(pass_: bool, sample_ok: bool, decisive: bool, measurable: bool = T
 # 复验 G1：`judge.conclusion` 与退出码的**唯一映射表**（由 `exit_code()` 派生，
 # 不再各自独立计算）。旧码的 `conclusion` 由 `pass`/`decisive` 另算一遍、完全不读
 # `sample_ok` ⇒ 实跑 `--days 7` 出现 `sample_ok=false` + `conclusion="FAIL"`（rc=3）。
+# 复验 I1/I3：**所有**结论类字段一律走映射表 —— 同一缺陷类已五度复发（D1 `pass` →
+# F2 `decisive` → G1 `conclusion` → H1 `reliable` → 本轮 `decisive`/`ci_decisive`），
+# 每次都是「改好一个、兄弟字段仍是各自派生」。映射表对码表扩展会 **KeyError 炸响**
+# （fail-loud），而 `rc != 3` / `rc in (0,2)` 这类写法会**静默误报** ⇒ 统一用表。
 CONCLUSION_BY_CODE = {0: "PASS", 2: "FAIL", 3: "SAMPLE_UNUSABLE", 4: "INCONCLUSIVE"}
+RELIABLE_BY_CODE = {0: True, 2: True, 3: False, 4: True}      # judge.reliable
+DECISIVE_BY_CODE = {0: True, 2: True, 3: False, 4: False}     # judge.decisive（具判别力）
 
 
 def ci_margin_pp(ci: tuple[float, float] | None, line: float) -> float | None:
@@ -306,6 +312,11 @@ def molecule_coverage(cur, days: int) -> dict:
     又高度时间聚集（正是复验 E2 统计判别力不足的一半成因）。
 
     只统计**已走完的整点**（不含当前正在累积的小时），故分母恰为 `days×24`。
+
+    复验 I5：`hours_present_ratio` 的分母**必须用 `expect_hours`**（= 本 docstring 的口径），
+    曾用 `len(hist)`（`generate_series` 的实际项数）—— 二者当前恒等（死耦合），但 H3 起
+    `missing_hours`（`expect_hours - hours_present`）与展示的 `ratio` 被**同一条折叠判据**绑定，
+    一旦网格定义变更（如改为含当前小时）就会印出「分母不一致的一对数字」⇒ 统一同源取值。
     """
     expect_hours = max(1, days * 24)
     cur.execute(
@@ -324,7 +335,7 @@ def molecule_coverage(cur, days: int) -> dict:
         hole = max(hole, run)
     return {"expect_hours": expect_hours, "grid_hours": len(hist),
             "hours_present": present,
-            "hours_present_ratio": round(present / len(hist), 4) if hist else 0.0,
+            "hours_present_ratio": round(present / expect_hours, 4),
             "max_hole_hours": hole, "hourly_rows": hist}
 
 
@@ -615,7 +626,17 @@ def main() -> int:
         "ci_distance_pp": ci_margin_pp(ci, JUDGE_UPPER_BOUND_PCT),
         # 复验 E1：pass 必须与 sample_ok 同向——分母/分子不合格时算出的上界是纯噪音，
         # 否则 `--json` 会输出「pass=true」而进程 rc=3，下游读 JSON 必然误判。
-        "decisive": decisive, "ci_decisive": ci_decisive, "segment_straddle": seg_straddle,
+        # 复验 I1：`decisive` 也曾由 `ci`+`seg` 各自计算、**完全不读 `sample_ok`** ⇒ prod
+        # `--days 7 --json` 打出 `sample_ok=false` + `reliable=false` + `decisive=true`
+        # （强判定词与「样本不可用」并列，下游读 JSON 会把样本不可用上的 CI 读数当成
+        # 「已有有判别力的判断」）。⇒ 收口到 `DECISIVE_BY_CODE[rc]`；原始诊断另存 `*_raw`。
+        "decisive": DECISIVE_BY_CODE[rc],
+        # 复验 I1（保留原始诊断，避免为「收口」而丢信息）：这两个是 CI / 分段的**原始性质**
+        # **不读 `sample_ok`** ⇒ 只可用于解释 rc=3/4 的成因，**判据一律读 conclusion / reliable /
+        # exit_code / decisive**（字段名带 `_raw` 即为此警示）。
+        "ci_decisive_raw": ci_decisive, "segment_straddle_raw": seg_straddle,
+        "raw_note": "`*_raw` 为 CI/分段的原始性质（未与 sample_ok 联动），仅供诊断；"
+                    "判据请读 conclusion / reliable / decisive / exit_code。",
         "pass": judge_pass,
         # 复验 E2：三态结论。旧码只输出 PASS/FAIL 两极，而「判据不可判」时把它印成
         # FAIL 与报告结论自相矛盾（该样本量下 PASS 与 FAIL 等权）⇒ 不可判必须单列，
@@ -623,12 +644,11 @@ def main() -> int:
         # 复验 G1：改由 `exit_code()` 派生（四态，含「样本不可用」），与 rc 恒一致。
         "exit_code": rc,
         "conclusion": CONCLUSION_BY_CODE[rc],
-        # 复验 H1：`reliable` 也曾是**独立派生**（`sample_ok`）—— G1 把 `conclusion` 绑到
-        # `exit_code()` 后，该函数入参多了 `measurable`，而 `reliable` 没跟上 ⇒ 出现
-        # `conclusion="SAMPLE_UNUSABLE"` 却 `reliable=true` 的矛盾。同类第四次复发
-        # （D1 `pass` → F2 `decisive` → G1 `conclusion` → 本轮 `reliable`）⇒ 直接从 rc 派生
-        # （`rc != 3` ⟺ `sample_ok and measurable`），此处收口。
-        "reliable": rc != 3,
+        # 复验 H1 + I3：`reliable` 曾独立派生（`sample_ok`），G1 之后 `exit_code()` 入参多了
+        # `measurable` 而它没跟上 ⇒ `conclusion="SAMPLE_UNUSABLE"` 却 `reliable=true`。
+        # I3：`rc != 3` 虽是单源却是「非 3」式写法 —— 第 5 码出现时会**静默误报**，
+        # 而隔壁 `CONCLUSION_BY_CODE[rc]` 会炸（两处鲁棒性不对称）⇒ 一律改用同构映射表。
+        "reliable": RELIABLE_BY_CODE[rc],
     }
 
     if args.json:
@@ -723,12 +743,14 @@ def main() -> int:
     # 说成「**CI 含**判据线」，借用了 `ci_decisive=False` 的既有措辞 ⇒ 单列该状态、跳过 CI 与
     # 裕度行（此时两者都无意义）。
     if j["upper_bound_pct"] is None:
+        # 复验 I6：码位由 `{rc}` 动态引用（旧码在此 prose 里写死「退出码 3」，
+        # 与紧邻判据行的 `j['exit_code']` 动态取值不对称 ⇒ 码表变动时 prose 静默漂移）。
         print("  无任何变体命中（n 全为 0）⇒ 上界**不可算**（measurable=False）"
-              "⇒ 判据无输入 ⇒ 退出码 3（样本不可比；与 rc=4「样本可用但判据不可判」不同源）")
+              f"⇒ 判据无输入 ⇒ 退出码 {rc}（样本不可比；与 rc=4「样本可用但判据不可判」不同源）")
     else:
         print(f"  上界由 `{j['upper_bound_variant']}` 决定，n={j['upper_bound_n']}"
               f"  95% CI(Wilson) = {ci_txt}（含 {JUDGE_UPPER_BOUND_PCT:.0f}%？"
-              f"{'YES ⇒ 无法区分 PASS/FAIL' if not j['ci_decisive'] else 'no'}）")
+              f"{'YES ⇒ 无法区分 PASS/FAIL' if not j['ci_decisive_raw'] else 'no'}）")
         # 复验 G4 + H4：布尔化的 ci_decisive 会把「只差 0.01pp」和「差 10pp」印成同一句话，
         # 且绝对值裕度会把 PASS 侧/FAIL 侧抹平 ⇒ 印**带符号**裕度并写明所在侧。
         if j["ci_distance_pp"] is not None:
@@ -743,7 +765,7 @@ def main() -> int:
         print(f"  各 {sg['segment_hours']}h 段上界（n≥{MIN_SEGMENT_N}，共 {sg['n_segments']} 段"
               f"，跳过 {sg['skipped']} 段）：{sg['min_pct']:.2f}% ~ "
               f"{sg['median_pct']:.2f}% ~ {sg['max_pct']:.2f}%"
-              f"  ⇒ {'跨判据线（窗口里装哪几段决定结论）' if j['segment_straddle'] else '同向'}")
+              f"  ⇒ {'跨判据线（窗口里装哪几段决定结论）' if j['segment_straddle_raw'] else '同向'}")
         for x in sg["segments"]:
             print(f"    {x['start_ts'][:16]}  rows={x['rows']:<6} 上界 {x['upper_bound_pct']:.2f}%")
     else:

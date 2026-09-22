@@ -458,8 +458,24 @@
 - **🟠 H2（P3，已修）文本分支对 `SAMPLE_UNUSABLE` 误印「判据不通过且具备判别力」**：该 `elif not j["pass"]:` 本是为 rc=2 写的，`conclusion` 新增第四态后 rc=3 的另一来源也落进来 ⇒ 双重误述（该 case `decisive=False` 根本谈不上判别力；实际原因也非「判据不通过」）。⇒ 改为按 `conclusion` 精确分派（`INCONCLUSIVE`/`FAIL`/`SAMPLE_UNUSABLE` 三分支）。
 - **🟠 H4（P3，已修）`ci_margin_pp` 取绝对值 ⇒ 丢失方向**：`[10,15]` 与 `[25,30]` 对线 20 都返回 `5.0`，**裕度同值但结论相反**（PASS 侧 vs FAIL 侧），而判据是**有向**的（上界须 `<20%`）。⇒ 改**带符号**：正 = CI 整段在判据线下方（PASS 侧）、负 = 上方（FAIL 侧）、`0.0` = 已跨线；文本区并写明所在侧。**实测**：`+5.00pp ⇒ PASS 侧` / `-5.00pp ⇒ FAIL 侧`。
 - **🟠 H5（P3，已修）`ub_sub=None` 时文本仍印「上界由 `None` 决定」+「CI 含 20%？YES」**：把「**没有**上界可算」说成「**CI 含**判据线」，借用了 `ci_decisive=False` 的既有措辞。⇒ 单列该状态（「无任何变体命中 ⇒ 上界**不可算**（measurable=False）⇒ 退出码 3」）并**跳过** CI 与裕度行。
-- **📌 补测（待拍板 #7）**：新增 12 条断言 ⇒ **128/128**，含 H3 反例（prod 真值 139/153）、H4 两侧 + 跨线、以及 **G1/H1/G3/H2/H5 的源码级守卫**（同类已四次复发，不再只靠人工复核 —— 沿用「测试3」扫源码的既有先例）。
+- **📌 补测（待拍板 #7）**：12 行 `check` 变更（**净增 9 条**断言）⇒ 119→**128/128**，含 H3 反例（prod 真值 139/153）、H4 两侧 + 跨线、以及 **G1/H1/G3/H2/H5 的源码级守卫**（同类已四次复发，不再只靠人工复核 —— 沿用「测试3」扫源码的既有先例）。⚠️ 原句「新增 12 条断言 ⇒ 128/128」不自洽（119+12=131≠128），由复验 **I2** 指出并更正（12 是新增**行数**，含 3 行对既有断言的改写）。
 - **📌 阈值仍一律不动**：prod 样本 rc 恒为 3（分母 0.565 / 分子 8.9% 双不合格）⇒ 依旧无标定依据。**数据面根因仍是最大杠杆**：`liquidation_snapshot` 29h 内缺 153h、`asset_klines` 7 天覆盖仅 0.565。
+
+### 轧空池 H1~H5 处置复验 I1~I6（复验_轧空池H1-H5处置_5597ed3_2026-09-22，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池H1-H5处置_5597ed3_2026-09-22.md`。复验确认 **H1~H5 代码面 5/5 落地**（`py_compile` 2/2、单测 128/128、四码注入矩阵全走到、H3 折叠判据**全枚举穷尽性不一致点数 0**、`squeeze.py` 逐字节未改、calib 顶层常量 18→18 零变化）、prod 四模式实跑文本与自述**逐字一致**；另开 **I1~I6**，并给出方法论修正 **M1**。**本轮无 DDL、无阈值变更**。
+
+- **🔴 I1（P2，已修）`judge.decisive` / `ci_decisive` 仍未与 `sample_ok` 联动 —— 同一缺陷类第五次复发，且 prod 已实际印出**：prod `--days 7 --json` 实测 `sample_ok=false` + `exit_code=3` + `conclusion="SAMPLE_UNUSABLE"` + `reliable=false` + **`decisive=true`** 并列 —— 正是 G1 的定义式措辞「样本不合格时仍能打出强判定词」，下游读 JSON 会把「样本不可用上的 CI 读数」当成「已有有判别力的判断」。谱系：D1 `pass` ↔ rc → F2 `decisive` ↔ rc=2 → G1 `conclusion` ↔ rc → H1 `reliable` ↔ rc → **本轮 `decisive`/`ci_decisive`**（技能 `#60`「修好一个『判据字段各自为政』后必须收割所有兄弟字段」的未收割残余）。⇒ 取报告建议 **B（保留原始诊断，不为「收口」丢信息）**：`decisive` 收口到 `DECISIVE_BY_CODE[rc]`；CI/分段的原始性质改名 `ci_decisive_raw` / `segment_straddle_raw` 并加 `raw_note` 注明「未与 `sample_ok` 联动，仅供诊断；判据请读 conclusion / reliable / decisive / exit_code」。
+- **🟡 I3（P3，已修）`"reliable": rc != 3` 是「非 3」式写法，与 `CONCLUSION_BY_CODE[rc]` 鲁棒性不对称**：同一份 `judge` 里 `conclusion` 走映射表 ⇒ 码表扩展**KeyError 炸响**（fail-loud，好）；而 `reliable` 写 `!= 3` ⇒ 第 5 码出现时**静默判「可靠」**（fail-silent，差）。⇒ 改 `RELIABLE_BY_CODE = {0:True, 2:True, 3:False, 4:True}`，与 `DECISIVE_BY_CODE = {0:True, 2:True, 3:False, 4:False}` 同构；并加守卫断言**三表键集必须一致**（新增码位时三处**同时**炸响）。
+- **🟡 I2（P3，已修）自述/文档的断言计数不成立**：「12 条新断言 ⇒ 128/128」中 119+12=131≠128 —— 12 是**新增行数**，其中 3 行是对既有断言的**改写**（`ci_margin_pp` 两例 + `_f1`/`_f2` 折叠语义）⇒ **净增 9 条**（`check(` 53→62、套件 119→128）。已同步更正上方 H 段该句措辞。
+- **🟡 I4（P3，已修）源码级守卫耦合注释措辞**：`check('elif not j["pass"]:' not in _calib_src …)` **仅因** calib 注释里写的是无冒号版本才通过 —— 一旦有人在注释/文档里写出带冒号的同名字面量就会**误报失败**（假阳性）。⇒ 新增 `_code_only()`（按 `ln.split("#",1)[0]` 剥行内注释；已核 calib 无字符串内含 `#`）并全部改用 `_calib_code` 匹配；注释不是代码，守卫不该耦合注释措辞。
+- **🟡 I5（P3，已修）`hours_present_ratio` 的分母与折叠判据不同源**：ratio 原写 `present / len(hist)`（**网格实际长度**），而折叠判据用的 `missing_hours = expect_hours - hours_present`（**期望整点数**）⇒ 二者当前恒等（**死耦合**），一旦网格定义变更（如含当前小时）就会印出「分母不一致的一对数字」。⇒ 分母统一为 `expect_hours`；`grid_hours` 仍保留 `len(hist)` 供对照。
+- **🟡 I6（P3，已修）H5 文案硬编码「退出码 3」**：紧邻判据行用 `j['exit_code']` 动态取值，而 H5 那行 prose 写死 `3` ⇒ 码表变动时 prose **静默漂移**。⇒ 改用 `{rc}` 动态引用。
+- **📌 M1（方法论修正，复验 §5.3）部署判定取证：`git log -S <literal>` 必须路径限定**：本轮核查「`decisive` 由谁引入」时若无路径限定，命中 4 个提交**全部是噪音** —— 噪音全部来自本文件（`AGENTS.md`）里的审计叙述（散文把字面量写进了文档）⇒ 取证一律 `git log -S <literal> -- <代码路径>`。
+- **📌 补测**：`check(` 62 → **69**（+7：I1/I3 映射表值 + 键集一致 + `sample_ok=False ⇒ decisive/reliable=False` 共 4 条，源码守卫由 5 条扩到 8 条 +3）⇒ 单测 **135/135**。
+- **📌 部署判定 = 不涉及**（离线标定工具 + 单测 + 文档，无 daemon/scheduler 入口；同 `e719a87`/`5597ed3`）。复验另**独立复核**了本文件对 `ec1c1c2` 部署态的翻盘断言 → 数字全部吻合（§5）。
+- **📌 本轮验证**：`py_compile` 2/2；单测 **135/135**；prod `--days 7 --json` / `--days 1 --json` 均 `sample_ok=false` + **`decisive=false`（I1 实测收口）** + `reliable=false` + `conclusion="SAMPLE_UNUSABLE"` + `exit_code=3`；`--days 7` 文本拒判**2 条**（含「另有散点缺失」）、`--days 1` 文本拒判**1 条**（折叠）；文本出口另用**伪连接注入探针**驱动（prod 因 `sample_ok=False` 提前 return、覆盖不到【统计判别力】的分段行）⇒ 探针 rc=4，`segment_straddle_raw` 引用不炸、分段行正常打印「同向」。
+- **📌 阈值仍一律不动**：prod 样本 rc 恒为 3（`--days 1` 分母 0.993 合格 / 分子 10/24=41.7% + 14h 空洞；`--days 7` 分母 0.568 / 分子 16/168=9.5% + 138h 空洞）⇒ 依旧无标定依据。**数据面根因仍是最大杠杆**：`liquidation_snapshot` 29h 内缺 152h、`asset_klines` 7 天覆盖仅 0.568。
 
 ### 盘面异动告警邮件「深层补刀」O2~O6 处置（审计_盘面异动告警邮件_3币1币_2026-09-22，2026-09-22）
 

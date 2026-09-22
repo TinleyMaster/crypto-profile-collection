@@ -338,9 +338,13 @@ class _FakeCur:
 
 
 _mol = calib.molecule_coverage(_FakeCur([3, 0, 0, 5]), 1)
-check(_mol["hours_present"] == 2 and _mol["hours_present_ratio"] == 0.5
-      and _mol["max_hole_hours"] == 2,
-      "molecule_coverage：整点覆盖与最长连续空洞（分母 = 网格长度）", str(_mol))
+# 复验 I5：分母必须是 `expect_hours`（=24）而非网格实际长度（=4）—— 伪游标故意给出
+# 「网格长度 ≠ expect_hours」的不一致网格，正是为了钉住「二者同源」这条不变量
+# （旧码写 `present / len(hist)` ⇒ 此处会得 0.5，与折叠判据用的 `missing_hours` 不同源）。
+check(_mol["hours_present"] == 2 and _mol["hours_present_ratio"] == round(2 / 24, 4)
+      and _mol["grid_hours"] == 4 and _mol["max_hole_hours"] == 2,
+      "molecule_coverage/I5：ratio 分母 = expect_hours(24) 而非网格长度(4)；空洞 2",
+      str(_mol))
 check(calib.molecule_coverage(_FakeCur([]), 1)["max_hole_hours"] == 0,
       "molecule_coverage：空网格不崩、空洞 0")
 
@@ -407,23 +411,56 @@ check(len(_f4) == 2, "H3：hole=139h 但 missing=153h ⇒ 不折叠，报 2 条�
 check(any("另有散点缺失" in x for x in _f4),
       "H3：覆盖那条须点明「空洞仅占 139h ⇒ 另有散点缺失」", str(_f4))
 
-# ── 复验 H1/H2/H5：源码级守卫（同一缺陷类已四次复发 ⇒ 不再只靠人工复核）──
+# ── 复验 I1/I3：**所有**结论类字段一律走映射表，且三表键集一致 ──
+check(calib.RELIABLE_BY_CODE == {0: True, 2: True, 3: False, 4: True}
+      and calib.DECISIVE_BY_CODE == {0: True, 2: True, 3: False, 4: False},
+      "I1/I3：`reliable`/`decisive` 亦由码位映射表派生（不再 `rc != 3` 式「非 3」写法）",
+      f"{calib.RELIABLE_BY_CODE} / {calib.DECISIVE_BY_CODE}")
+check(set(calib.CONCLUSION_BY_CODE) == set(calib.RELIABLE_BY_CODE)
+      == set(calib.DECISIVE_BY_CODE),
+      "I1/I3：三张映射表**键集一致** —— 新增码位时三处同时 KeyError 炸响（fail-loud），"
+      "不再出现「conclusion 炸了而 reliable/decisive 静默放行」的鲁棒性不对称",
+      str(sorted(calib.CONCLUSION_BY_CODE)))
+check(calib.DECISIVE_BY_CODE[calib.exit_code(False, False, True)] is False,
+      "I1：sample_ok=False ⇒ decisive=False（prod `--days 7 --json` 曾印 decisive=true，"
+      "与 rc=3/reliable=false 并列 ⇒ 同类第 5 次复发）",
+      str(calib.DECISIVE_BY_CODE[calib.exit_code(False, False, True)]))
+check(calib.RELIABLE_BY_CODE[calib.exit_code(False, False, True)] is False,
+      "I1/I3：sample_ok=False ⇒ reliable=False（同源，不再各算各的）")
+
+# ── 复验 H1/H2/H5 + I1/I3/I4/I6：源码级守卫（同一缺陷类已**五次**复发 ⇒ 不再只靠人工复核）──
+def _code_only(src: str) -> str:
+    """剥离行内注释后再匹配（复验 I4：旧守卫直接扫全文 ⇒ 仅因 calib 注释里写的是
+    `elif not j["pass"]`（无冒号）才通过；一旦有人在注释/文档里写出带冒号的同名字面量
+    就会**误报失败**。注释不是代码，守卫不该耦合注释措辞）。"""
+    return "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+
+
 with open(os.path.join(_HERE, "calib_squeeze_liq_thr.py"), encoding="utf-8") as _fh:
     _calib_src = _fh.read()
-_j = _calib_src.find('out["judge"] = {')
-_jseg = _calib_src[_j:_calib_src.find("\n    }", _j)] if _j >= 0 else ""
+_calib_code = _code_only(_calib_src)
+_j = _calib_code.find('out["judge"] = {')
+_jseg = _calib_code[_j:_calib_code.find("\n    }", _j)] if _j >= 0 else ""
 check('"conclusion": CONCLUSION_BY_CODE[rc]' in _jseg,
       "G1 守卫：`conclusion` 由 rc 派生", _jseg[:80])
-check('"reliable": rc != 3' in _jseg,
-      "H1 守卫：`reliable` 由 rc 派生（不再单独写 sample_ok —— 同类第四次复发）")
+check('"reliable": RELIABLE_BY_CODE[rc]' in _jseg,
+      "H1/I3 守卫：`reliable` 走映射表（不再 `rc != 3` 式「非 3」写法 —— 同类第 4 次复发）")
+check('"decisive": DECISIVE_BY_CODE[rc]' in _jseg,
+      "I1 守卫：`decisive` 收口到映射表（不再由 ci+seg 各自算、不读 sample_ok "
+      "—— 同类第 5 次复发）")
+check('"ci_decisive_raw": ci_decisive' in _jseg
+      and '"segment_straddle_raw": seg_straddle' in _jseg,
+      "I1 守卫：CI/分段的原始性质改名 `*_raw` 保留（避免与三个已收口字段并列时被误读为结论）")
 check('"exit_code": rc' in _jseg, "G3 守卫：`exit_code` 与 conclusion 同源（均为 rc）")
-check('elif not j["pass"]:' not in _calib_src
-      and 'elif j["conclusion"] == "FAIL"' in _calib_src,
-      "H2 守卫：判定解读按 `conclusion` 精确分派（不再用粗粒度 pass 兜 ⇒ "
-      "SAMPLE_UNUSABLE 不再误印「具备判别力」）")
-check('if j["upper_bound_pct"] is None:' in _calib_src
-      and "上界**不可算**" in _calib_src,
+check('elif not j["pass"]:' not in _calib_code
+      and 'elif j["conclusion"] == "FAIL"' in _calib_code,
+      "H2 守卫：判定解读按 `conclusion` 精确分派（I4：已在剥离注释后的代码面上匹配 ⇒ "
+      "不耦合注释措辞）")
+check('if j["upper_bound_pct"] is None:' in _calib_code
+      and "上界**不可算**" in _calib_code,
       "H5 守卫：`ub_sub=None` 单列文案（不再印「上界由 None 决定」/「CI 含 20%？」）")
+check("退出码 3（样本不可比" not in _calib_code,
+      "I6 守卫：H5 文案不再写死「退出码 3」（改用 `{rc}` 动态引用 ⇒ 码表变动时不静默漂移）")
 
 # ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")

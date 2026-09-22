@@ -2569,9 +2569,20 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 if oi_lag_sec is not None:
                     reason += f"（OI 最新桶滞后 {oi_lag_sec:.0f}s）"
                 print(f"[scan_daemon][squeeze] {sym} {reason}", file=sys.stderr)
+                # 复验 E4：拒判路径**同样要写 metrics**。旧码此处传 None ⇒ SQL 的
+                # `COALESCE(%s::jsonb, metrics)` 保留旧值，`head_gap_buckets`/
+                # `mid_gap_buckets`/`gap_metric_ver` 只在 judged 路径写；而 judged 必经
+                # 闸门 ⇒ 落库值恒 0/1，**真正要观测的病例（拒判）反而落不了库**。
+                # `judged_at` 仍保持 None（本条未判定）。
                 track_updates.append((
                     "tracking", peak_px, peak_ts, px, now, round(retrace, 2), None,
-                    reason, None, None, t["id"]))
+                    reason, json.dumps({
+                        "gap_metric_ver": sqz.GAP_METRIC_VER,
+                        "head_gap_buckets": head_gap,
+                        "mid_gap_buckets": mid_gap,
+                        "oi_cover": {"have": len(win_oi), "expect": expect_buckets},
+                        "oi_lag_sec": None if oi_lag_sec is None else round(oi_lag_sec),
+                    }, ensure_ascii=False), None, t["id"]))
                 continue
             # 基准取「峰值时刻或之前最近一条」；峰值早于所有可用桶时退化为窗口首条
             base_oi = _last_at_or_before(oi_sym, peak_ts) or (win_oi[0] if win_oi else None)

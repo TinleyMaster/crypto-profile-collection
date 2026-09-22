@@ -232,6 +232,17 @@
 - **⚠️ 重踩同一坑（已修）**：P2-N5 图例文案又写了 markdown 强调符 `按最高分**对数**归一` ⇒ 会原样渲染出 `**`（与上轮 `**相对**` 同类）。已去除；并加 AST 护栏脚本（提取 4 个渲染函数的字符串字面量、排除 docstring，断言无 `**`）。**教训固化：邮件 HTML 只准用 `<b>`/`<span style>`，不得用 markdown 强调符，改渲染文案后跑一次护栏。**
 - **`expire_signals` 常驻首轮：复验时未验，现判「非缺陷」**：08:20~08:26 UTC 探测 `biz.scan_heartbeat` 仍 10 行（9 任务 + `__daemon__`），因当日**第 15 次重启**（08:22:47）把 offset 900s 重置 ⇒ 首轮应在 08:37:47，尚未到点（`expire_signals` 已在 `TASK_DEFS`，产物 `expired_at` 132 行、Δ 精确 24h 已证语义正确）。
 
+### catalyst_run_all 停滞 34.8h 修复（2026-09-22，本次提交）
+
+来源：看护邮件「关键 cron `catalyst_run_all` 已 34.8 小时无成功执行（最近 done 1789921874.387732 / 阈值 18h）」。
+
+- **根因（物证级）**：`sys.task` 里 09-20 16:31 后连续三次失败——`3656e212e7fa`（09-21 04:00）`stuck: 240分钟无新日志`、`dd30d3a70dc0`（09-21 10:53）`timeout: 运行超过 12h`、`c27dc9c10a43`（09-22 00:20）`manually stopped: 00:28:05 后无日志`。`sys.task_log` 末尾显示 **DeepSeek `402 Client Error: Payment Required`（账户欠费）**：AI 预处理/ thesis 阶段对 402 逐条降级仍拿不到结果，长时间无日志被收割。
+- **放大器（本轮的代码 bug）**：`catalyst_run_all.py` 的 `subprocess.run(cmd)` **无超时** ⇒ 任一阶段挂起会把整条管道拖到 task_manager 的 12h 硬超时，占满并发槽位；且看护 `scheduler_watchdog` 只在 `timeout:/stuck:` 时拦补跑，**`manually stopped:` 等错误不拦** ⇒ 任务自身失败时每 18h 被补跑一次，形成「补跑→再卡→再补跑」。
+- **修复 1（`catalyst_run_all.py`）**：每阶段加 `CATALYST_STAGE_TIMEOUT_SEC`（默认 **5400s=90min**），超时用 `os.killpg` 杀掉**整个进程组**并继续后续阶段；6 阶段最坏 9h < 12h 硬超时。
+- **修复 2（`scheduler_watchdog.py`）**：新增 `_recent_submission(key, threshold)`——**只有「近阈值内一次提交都没有」才补跑**（scheduler 真失活）；若近期已有提交（scheduler 存活、任务自身失败/卡住）则**只告警不补跑**，邮件附「最近错误」。彻底消除补跑恶性循环（实测 `recent_submission(18h)=True`、`(1h)=False`，与 02:29 那次提交吻合）。
+- **仍需人工/部署**：① **DeepSeek 账户欠费需充值**（代码层已熔断/快速失败，但没额度就产不出结果）；② 容器需重新部署以带上 `llm_client` 的 402 熔断与 `process_catalyst_ai` 的「整批 0 成功即中止」护栏（两者在 repo 已有，但 09-22 00:20 那次仍逐条 402，疑似部署滞后）。
+- **自测**：`_run_stage` 超时返回 124 且 1s 内杀进程、正常命令返回 0；看护 `_check_key` 四例（失活→补跑 / timeout→拦 / 近阈值有提交→拦且文案指向任务自身 / 未超阈值→ok）全绿；`_recent_submission` 只读 prod 复核通过。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。
@@ -257,7 +268,8 @@
 - **P2-5（P2，已改未提交）BRK 强度分恒 0**：BRK 的 `oi_chg_pct` 为 `None`（突破判定只用价+量）⇒ `_alert_strength` 基量 `|vol_ratio × 0| = 0` ⇒ **强度条整体不渲染、混排永远垫底**，哪怕 `vol_ratio = 4.05x`。修法：新增 `BRK_STRENGTH_OI_EQUIV = 3.0` 作**临时等当量**（BRK 门槛即 `BRK_VOL_RATIO=3.0`），仅当 `scenario='BRK'` 且 `oi_chg_pct IS NULL` 时启用；**待 BRK 样本积累后按实际分布标定，勿据单样本调参**。
 - **P2-6（P2，已改未提交）历史先验选择偏置**：`_scenario_priors` 样本限 `alerted_at IS NOT NULL` ⇒ 只覆盖**告警期**，而告警本身依赖 regime 顺风（实测覆盖 S1 31/67、S2 2/15、S3~S8 0/50）⇒ 正期望是该口径的**必然**结果，不是信号质量证据。本轮采「**显式披露**」方案（渲染与图例均标注「仅含已告警样本，非无偏基准」），未做 regime 分层（需更长样本）。
 - **DOC-1（文档）BRK 论证更正**：原文「125 个 active ACC 币模拟最高 vr=0.93 ⇒ `BRK_VOL_RATIO=3.0` 永不可达」是 **08:09（整点后 9 分钟）的单次快照**，该值随采样分钟漂移（min 0.194 / 中位 0.789 / **max 8.263**，既有 < 1 也有 > 3）⇒ **论证不成立**，正确理由是「同一根未收盘条在不同时刻判定结果不同、**不可复现**」。已同步更正 `scan_daemon.py` 内注释与 `AGENTS.md` 的 P1-4 条目（见上）。
-- **PROC-1（流程）验证脚本未入库**：工单点名的 `_verify_remaining.py`（`dd8379d` 的 28/28 脚本）**已不在磁盘**（全仓搜索无果），无法原样入库；本轮改为「只读 prod 探针 + 设计决策留档」替代，**如实记录该脚本已丢失**这一事实。
+- **PROC-1（流程）验证脚本未入库**：工单点名的 `_verify_remaining.py`（`dd8379d` 的 28/28 脚本）**已不在磁盘**（全仓搜索无果），无法原样入库；本轮改为「只读 prod 探针 + 设计决策留档」替代，**如实记录该脚本已丢失**这一事实。⇒ **`ef47b77` 已补 `workbench/test_scan_alert_remaining.py`（16/16 通过，源码 AST + 只读库不变量，以 `bar=` 标签为修复后产物自证标记），PROC-1 闭环**；原脚本虽丢失，但新探针覆盖其判据且可独立复现。
+- **🔄 审计误判纠正（2026-09-22 后续核验）**：`审计_盘面异动告警邮件_2026-09-22.md` 初版将 P2-2/P2-7/P2-9 列为「残留」，经独立核验为**误判**——P2-2 在 `f816a34` 中已由 `8ca1258`（其祖先）修复（初版误引旧工单 `L2562/L2583`，f816a34 实码 L3291 取锁→L3302 run_once→L3307 写心跳）；P2-7/P2-9 已在 `44b407f` 修复并部署（只读库实证最新 BRK `id=1220/1221` 带 `bar=` 标签且 `stop_loss_pct` 落 [8%,20%]，33 条 NULL 为修复前历史）；仅 PROC-1 为真实缺口（已 `ef47b77` 补探针）。**方法教训：声明「残留」前必须 `git fetch` 最新 main 并确认缺陷在最新提交仍未修，且不得照搬旧工单行号（已固化进 `deploy-state-verification` #52）。**
 
 **交接（给并发进程 / 下一次会话）**：
 1. ~~prod 尚无 `breakout_px` 列~~ —— **已过时**：`fix_061` 已执行（09-22 复探确认列存在），代码与迁移已一致，无部署阻塞。
@@ -363,5 +375,18 @@
 - **🟡 S1（已修）`TASK_DEFS` offset 注释滞后于代码**：注释仍写「最大 offset（当前 900s = 15min）」，实际 `expire_signals` 已改 **90**、`confirm_signals` 新增 **480** ⇒ **真实最大 = 600s（`prune_scan_data`）**。两处注释已更正（`FIRST_ROUND_GRACE_MAX_MIN=30` 的 assert 仍成立）。
 - **ℹ️ S2 / S3（无需改码）**：`TASK_DEFS` 现为 **11 项**（新增 `confirm_signals 1800/480`）；「桶完整度常态评估」在当前环境**近乎等效旧行为**（daemon 重启周期 ≈14min ≪ `OI_BUCKET_WINDOW_H`=2h ⇒ `restarted` 几乎恒真）——其价值在**不再重启**的场景（正是它要防的死法），属**未来保险**而非当下行为变更。
 - **🔴 S4（既有开放项，本轮未做）OI 采样侧补齐仍是最强杠杆**：新看门狗同一时刻实测 `have=14 / expect=24`（14 < 21.6 命中）⇒ **正常期 OI 栅格仍缺约 42%**（上一轮记 26%，同向且更严重）。另立项。
-- **待部署 / 待复验（复验 §7#8）**：`head_gap_buckets` / `mid_gap_buckets` / 新拒判文案在生产侧**全库 0 行**（`squeeze_track` 仅 12 行、最后 `judged_at` 在 16h 前、唯一活跃行走的是通过闸门那一支）⇒ `f816a34` 的**部署状态 = 不可判定（判据未打开）**，只能确定「push 后进程重启过」。待首个 `judged` 产出或首个缺桶拒判落库后按复验 §5⑥ 重跑探针。
-- **本轮验收实跑（⚠️ 当次记录，**勿引用**——爆仓表滚动 24h 全跨度 + 5m 分母逐时补齐，每次样本都换一批；同一天两次 `--days 1` 实跑上界即 20.28% → 20.45%）**：`--days 1` 覆盖 ≈1.0、低于门槛 0/248、P10 ≈1.0，条件子集跨口径上界 **>20% ⇒ rc=2 FAIL**（复验报告同一时刻为 19.21% PASS——**这正是「文档不留数字」的直接佐证**，也顺带实测了 P2-1 那条**从未被走到的 FAIL 负路径**）；`--days 7` 覆盖 ≈0.55、低于门槛 298/298 = 100% ⇒ **rc=3** 且**打出两条拒绝理由、不打印分布**；`--days 7 --json` ⇒ `denominator_ok=False` + `judge.pass=False` + `reliable=False`（**D1 修复验证通过**）。单测 **91/91**（原 83 + D5/D6/D7 新增 8 条）。
+- **✅ 已部署并生效（复验_轧空池D1-D7落地_21fad2d 于 2026-09-22 02:3x UTC 判定）**：`head_gap_buckets` / `mid_gap_buckets` / `gap_metric_ver` 首次落库 —— `biz.squeeze_track.metrics->'gap_metric_ver' = "2"`（该常量是 `21fad2d` **新增**的，故这是**代码级**证据：`id=15 KERNELUSDT` @ 02:46:02，`status=judged`）；过程证据亦自洽（提交 02:16:40 → `__daemon__` 02:24:02 进程重建 → 02:46:02 首行带新键）。**仍待走到**：`reason LIKE '判定窗口%'` 全库 0 行 ⇒ D6 拒判文案与 `window_gate` 的 `head_gap/mid_gap` 分支在生产侧**尚未被触发**，仅由单测守护。
+- **本轮验收实跑（⚠️ 当次记录，**勿引用具体数字**）**：口径与结论方向固定，数值一律以 `calib_squeeze_liq_thr.py` 当次输出为准（爆仓表滚动 24h 全跨度 + 5m 分母逐时补齐，每次样本都换一批）。① `--days 1`：分母自证通过，条件子集跨口径上界**在判据线上下来回摆动** ⇒ 顺带实测了 P2-1 那条**从未被走到的 FAIL 负路径**（rc=2）；② `--days 7`：分母覆盖不达标 ⇒ **rc=3**，打出拒绝理由、**不打印分布**（名副其实）；③ `--days 7 --json` ⇒ `denominator_ok=false` + `judge.pass=false` + `reliable=false`（**D1 修复验证通过**）。单测 **91/91**（原 83 + D5/D6/D7 新增 8 条）。
+
+### 轧空池 D1-D7 落地复验处置（复验_轧空池D1-D7落地_21fad2d_2026-09-22，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池D1-D7落地_21fad2d_2026-09-22.md`。复验确认 D1~D7 + S1 **代码面 8/8 全部落地**、单测 91/91 独立复现、`py_compile` 5/5、阈值未动（23 常量逐一相同），并给出**部署判定 = 已部署并生效**；另开 **E1~E9**。**本轮仍无 DDL、无阈值变更**（复验 §7：**在补齐分子连续性之前不要再据这条判据动阈值**）。
+
+- **🔴 E1（P1，已修）`--json` 退出码仍未与 `judge.pass` 联动**：D1 只修了 `pass` 字段本身，**JSON 分支的 `return` 仍是 `0 if denom_ok else 3`** ⇒ `judge.pass=False`（判据不通过）时进程仍返回 0，**退出码与结论相反**。已统一为：`pass → 0`；样本可用但不通过 → **2**；样本不可用 → **3**（文本分支原有的 `return 0 if j["pass"] else 2` 不变）。
+- **🔴 E2（P1，本轮核心）判据「上界 < 20%」在统计上没有判别力**：同一提交在判据线两侧抖动（本次实测：两次 FAIL ↔ 三次 PASS），B 变体 n≈1.6k 时二项 **SE ≈ 1pp、95% CI 覆盖 20%**，Bootstrap 2000 次得 `P(上界 ≥ 20%) ≈ 38.5%`，**只需 +5 行数据（占样本 0.03%）即翻盘**；且同一 24h 窗口内各 4h 段上界能摆 **≈9pp**（单段必然 FAIL ↔ 另一段轻松 PASS）。⇒ 这是**统计问题、不是阈值问题**。已落地：`wilson_ci()`（Wilson 95% CI）+ `segment_upper_bounds()`（按 `SEGMENT_HOURS=4` 分桶、`MIN_SEGMENT_N=30` 以下跳过）+ `judge` 增 `upper_bound_ci95_pct` / `upper_bound_variant` / `upper_bound_n` / `decisive` / `ci_decisive` / `segment_straddle`，**`pass` 需 `decisive`**；文本区新增【统计判别力】节（CI、各段上界区间、不可判时显式告警）。**结论留档：撤回「20.50% 翻盘」是对的，但撤回之后不能顺势得出「当前 PASS」——PASS 与 FAIL 在此样本量下等权。**
+- **🔴 E2/P2 E3（已修）「自证」只做了分母、没做分子**：`denominator_coverage()` 只验 `asset_klines`（分母），而爆仓表（分子）的时间连续性**从未被验过**——本轮实测其 24h 窗口内**只有 11 个整点有数据、最长连续空洞 14 小时**，而 `table_bound.span_hours = max(ts)-min(ts)` **照样显示「24h 连续」**（正是 E2 判别力不足的一半成因，也是上一轮「分母缺 14h ⇒ 越阈率放大 1.66×」的**镜像缺口**）。已落地 `molecule_coverage()`（逐小时直方图 + 整点覆盖 + 最长连续零行小时数）+ 常量 `MIN_MOLECULE_HOUR_COVERAGE=0.8` / `MAX_MOLECULE_HOLE_H=3`；**分母与分子都要自证通过，样本才可用**（`sample_ok = denom_ok and molecule_ok`），`--json` 增 `molecule` / `molecule_ok` / `sample_ok`。⇒ 这条落地后，本期数据 `--days 1` 会**直接 rc=3**——**那才是对的**：在只有 11 小时活跃的样本上算「/24h」越阈率没有意义。
+- **🟠 E4（P2，已修）观测字段落库路径错位**：`scan_daemon.py` 拒判分支的 `track_updates` 第 9 个元素（metrics）原为 `None`，而 SQL 是 `metrics=COALESCE(%s::jsonb, metrics)` ⇒ **拒判路径永不写** `head_gap_buckets`/`mid_gap_buckets`/`gap_metric_ver`；judged 路径必经闸门 ⇒ 落库值**数学上恒 0/1**（生产实证 `id=15 KERNELUSDT`：`head_gap=0`/`mid_gap=0`/`ver=2`）⇒ **真正要观测的病例（拒判）反而落不了库**。已改为拒判分支也组装 metrics（含 `gap_metric_ver`/`head_gap_buckets`/`mid_gap_buckets`/`oi_cover`/`oi_lag_sec`），`judged_at` 仍保持 `None`。
+- **🟡 E5/E6（P3，已修）分母闸门粒度**：`bars_ratio_p10` 原**只打印、不参与闸门**，而 `symbols_below` 只判「`< 0.9`」（覆盖 0.89 与 0.10 同等对待 ⇒ `5% × 248 = 12 币`可在 10% 覆盖下放行、分母被少算 10×）⇒ 已新增 `MIN_DENOM_P10 = 0.5` 并把**每币覆盖率 P10 纳入闸门**（对长尾币比「低于门槛币占比」更敏感）。
+- **🟡 E9（P3，已修）`--days 7` 拒绝理由语义重叠**：整体覆盖不达标时「低于门槛币占比」「P10」**在同一数据下必然同真**（共线）⇒ 旧码一次给出三条互相重复的理由。已改为：整体覆盖不达标时**只报它**（P10 与低于门槛币数仍照常打印在【分母自证】节，属观察信息）。
+- **🟡 E8（P3，已修）文档记录段自相矛盾**：本文件同一节既写「数字不在文档留档」，又在「本轮验收实跑」段写具体上界（`20.28% → 20.45%`、`19.21%`）⇒ 规则与实践冲突。已把该段改为**只留口径与摆动幅度**（「在判据线上下来回摆动」「rc 语义」「单测数」），具体数字指向脚本输出。
+- **🔴 S4 / E7（既有开放项，本轮仍不做）OI 采样侧补齐是最强杠杆**：新实测 OI 近 2h **20/24 桶（缺 16.7%）**、缺失呈**周期性**（间隔 ~35-40min，比上一轮 26~42% 有好转但仍非满格）；叠上 E7（生产实证 `KERNELUSDT` 的 `oi_cover = {have: 2, expect: 3}` ⇒ **判定窗口实际只有 2~3 桶**）⇒ `MAX_MID_GAP_BUCKETS=2` 在 3 桶窗口上 = 「缺 2/3 即拒判」，与它在 12 桶窗口上的「缺 2/12」**完全不是一回事**（常量语义随窗口长度漂移）。**丢 1 桶 = 窗口覆盖率掉 33~50%**。另立项。

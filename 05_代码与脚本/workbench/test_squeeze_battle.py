@@ -344,6 +344,54 @@ check(_mol["hours_present"] == 2 and _mol["hours_present_ratio"] == 0.5
 check(calib.molecule_coverage(_FakeCur([]), 1)["max_hole_hours"] == 0,
       "molecule_coverage：空网格不崩、空洞 0")
 
+# ── 复验 G1/G3：`conclusion` 必须由 `exit_code()` 单一真源派生 ──
+check(calib.CONCLUSION_BY_CODE
+      == {0: "PASS", 2: "FAIL", 3: "SAMPLE_UNUSABLE", 4: "INCONCLUSIVE"},
+      "G1：码位↔结论映射表覆盖 0/2/3/4（无遗漏、无别名）", str(calib.CONCLUSION_BY_CODE))
+# 实测复现：`--days 7` 曾打出 sample_ok=false + conclusion="FAIL"（与 rc=3 打架，第三次复发）
+check(calib.CONCLUSION_BY_CODE[calib.exit_code(False, False, True)] == "SAMPLE_UNUSABLE",
+      "G1：sample_ok=False ⇒ 结论不再是强判定词 FAIL",
+      str(calib.CONCLUSION_BY_CODE[calib.exit_code(False, False, True)]))
+check(all(calib.CONCLUSION_BY_CODE[calib.exit_code(p_, s_, d_, m_)] != "FAIL"
+          for p_, s_, d_, m_ in [(False, False, True, True), (False, True, False, False),
+                                 (True, False, True, True)]),
+      "G1：样本不可用/上界不可算的任何组合都不映射到 FAIL")
+# G3：`measurable=False`（无任何变体命中 ⇒ 上界根本算不出来）旧码落到 rc=4
+# （其文档语义是「样本可用、只是判据不具判别力」）⇒ 并入 3。
+check(calib.exit_code(False, True, True, False) == 3,
+      "G3：measurable=False 并入 3，而非语义不符的 4",
+      str(calib.exit_code(False, True, True, False)))
+check(calib.exit_code(True, True, True, False) == 3 and calib.exit_code(True, True, True) == 0,
+      "G3：可算性优先于结论（pass=True 但不可算仍 3；可算才 0）")
+
+# ── 复验 G4：CI 裕度（布尔化的 ci_decisive 掩盖贴线）──────────
+check(calib.ci_margin_pp((20.01, 23.54), 20.0) == 0.01,
+      "G4：CI=[20.01,23.54] 对线 20% 只差 0.01pp ⇒ 贴线被显式暴露",
+      str(calib.ci_margin_pp((20.01, 23.54), 20.0)))
+check(calib.ci_margin_pp((10.0, 15.0), 20.0) == 5.0,
+      "G4：CI 整段在线下方 ⇒ 裕度 = 较近界距线 = 5.0pp",
+      str(calib.ci_margin_pp((10.0, 15.0), 20.0)))
+check(calib.ci_margin_pp(None, 20.0) is None, "G4：ci=None → None（不崩）")
+
+# ── 复验 G5：分子组理由同源折叠（E9 原则补到分子组）────────────
+def _mol_fakes(cov, hole, expect=24):
+    present = round(cov * expect)
+    return {"expect_hours": expect, "hours_present": present,
+            "hours_present_ratio": cov, "max_hole_hours": hole}
+
+
+_f1 = calib.molecule_fail_reasons(_mol_fakes(0.4167, 14))
+check(len(_f1) == 1 and "最长连续空洞 14h" in _f1[0] and "整点覆盖" in _f1[0],
+      "G5：14h 空洞 + 41.7% 覆盖 ⇒ 折叠为 1 条（空洞为主因，覆盖作后果并入）", str(_f1))
+_f2 = calib.molecule_fail_reasons(_mol_fakes(0.4167, 2))
+check(len(_f2) == 1 and "整点覆盖" in _f2[0] and "空洞" not in _f2[0],
+      "G5：2h 空洞（未超限）+ 41.7% 覆盖 ⇒ 只报覆盖（散点缺失，两者不同源）", str(_f2))
+_f3 = calib.molecule_fail_reasons(_mol_fakes(0.9167, 5))
+check(len(_f3) == 1 and "最长连续空洞 5h" in _f3[0] and "整点覆盖" not in _f3[0],
+      "G5：5h 空洞但覆盖 91.7% 合格 ⇒ 只报空洞", str(_f3))
+check(calib.molecule_fail_reasons(_mol_fakes(1.0, 0)) == [],
+      "G5：全覆盖无空洞 ⇒ 无理由")
+
 # ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

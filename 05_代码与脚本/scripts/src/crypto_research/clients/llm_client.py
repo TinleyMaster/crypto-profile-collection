@@ -25,6 +25,11 @@ from crypto_research.config import Settings
 from crypto_research.mapping.taxonomy import CONTENT_TOPICS
 
 
+# 流式响应总时限下限（秒）：per-read 超时会被 SSE chunk 反复重置，需总时限兜底。
+# 取 600s（≥10min，远大于正常 20~60s 的响应）以捕获「滴流/半开连接」型挂死。
+STREAM_TOTAL_TIMEOUT_SEC = 600
+
+
 class QuotaExhaustedError(RuntimeError):
     """LLM 配额/鉴权永久失败（HTTP 402 欠费、401 key 无效）。
 
@@ -487,7 +492,7 @@ class LLMClient:
                 if use_cache and temperature <= 0.1 and not enable_thinking:
                     self._cache_set(key, result)
                 return result
-            except ReadTimeoutError as e:
+            except (ReadTimeoutError, requests.exceptions.ReadTimeout) as e:
                 last_exc = e
                 if attempt < timeout_retries - 1:
                     wait = 2 ** attempt * 5  # 5s, 10s, 20s
@@ -590,7 +595,12 @@ class LLMClient:
         if response_format:
             payload["response_format"] = response_format
 
-        # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
+        # 流式：connect=10s, read=60s（字节间隔）。⚠️ 单靠 per-read 超时**挡不住**
+        # 「服务端持续滴流/半开连接」：任一 SSE chunk 到达就把 read 超时重置，循环可能
+        # 永不返回（2026-09-22 实况：thesis 重生在 asset_id=3757 卡 2h45m 无日志，直到被
+        # task_manager 按 stuck 收割）。故再加**总时限** self._timeout，超时即中止并关闭
+        # 连接、抛 ReadTimeout 交上层重试/兜底，而不是无限挂起。
+        deadline = time.monotonic() + max(int(self._timeout or 0), STREAM_TOTAL_TIMEOUT_SEC)
         resp = self.session.post(
             url, headers=headers, json=payload,
             timeout=(10, 60), stream=True,
@@ -599,24 +609,37 @@ class LLMClient:
 
         content = ""
         thinking_content = ""
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            chunk = line[len("data:"):].strip()
-            if chunk == "[DONE]":
-                break
+        timed_out = False
+        try:
+            for line in resp.iter_lines(decode_unicode=True):
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk = line[len("data:"):].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                    delta = data["choices"][0]["delta"]
+                    content += delta.get("content") or ""
+                    # 收集思考内容（DeepSeek 用 thinking_reasoning_content / reasoning_content）
+                    thinking_content += (
+                        delta.get("thinking_reasoning_content")
+                        or delta.get("reasoning_content")
+                        or ""
+                    )
+                except Exception:
+                    continue
+        finally:
             try:
-                data = json.loads(chunk)
-                delta = data["choices"][0]["delta"]
-                content += delta.get("content") or ""
-                # 收集思考内容（DeepSeek 用 thinking_reasoning_content / reasoning_content）
-                thinking_content += (
-                    delta.get("thinking_reasoning_content")
-                    or delta.get("reasoning_content")
-                    or ""
-                )
+                resp.close()
             except Exception:
-                continue
+                pass
+        if timed_out:
+            raise requests.exceptions.ReadTimeout(
+                f"LLM 流式响应超过总时限 {max(int(self._timeout or 0), STREAM_TOTAL_TIMEOUT_SEC)}s，已中止（防挂死）")
 
         self._last_full_response = {
             "streamed_content_length": len(content),
@@ -665,7 +688,9 @@ class LLMClient:
         if response_format:
             payload["response_format"] = response_format
 
-        # 流式：connect=10s, read=60s（字节间隔）；流式下持续有 SSE chunk → 不触发 read timeout
+        # 流式：connect=10s, read=60s（字节间隔）；另加**总时限**（同 chat/completions，
+        # 防「服务端滴流导致 read 超时被反复重置、循环永不返回」）。
+        deadline = time.monotonic() + max(int(self._timeout or 0), STREAM_TOTAL_TIMEOUT_SEC)
         resp = self.session.post(
             url, headers=headers, json=payload,
             timeout=(10, 60), stream=True,
@@ -675,39 +700,52 @@ class LLMClient:
         # 消费 SSE，按 Responses API 格式重建 content
         content = ""
         thinking_content = ""
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            chunk = line[len("data:"):].strip()
-            if chunk == "[DONE]":
-                break
+        timed_out = False
+        try:
+            for line in resp.iter_lines(decode_unicode=True):
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                if not line or not line.startswith("data:"):
+                    continue
+                chunk = line[len("data:"):].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                    # 格式1: output_message item，content 为各类 output
+                    if data.get("type") == "output_message":
+                        for c in data.get("content", []):
+                            if isinstance(c, dict):
+                                if c.get("type") == "output_text":
+                                    content += c.get("text", "")
+                                elif c.get("type") in ("thinking", "reasoning"):
+                                    thinking_content += c.get("text", "") or c.get("delta", "") or ""
+                    # 格式2: response.output_text.delta（部分实现）
+                    elif data.get("type") == "response.output_text.delta":
+                        content += data.get("delta", "")
+                    # 格式3: thinking.delta
+                    elif data.get("type") in ("thinking.delta", "reasoning.delta"):
+                        thinking_content += data.get("delta", "")
+                    # 格式4: choices delta（部分 provider 用此格式）
+                    elif "choices" in data:
+                        delta = data["choices"][0].get("delta", {})
+                        content += delta.get("content") or ""
+                        thinking_content += (
+                            delta.get("thinking_reasoning_content")
+                            or delta.get("reasoning_content")
+                            or ""
+                        )
+                except Exception:
+                    continue
+        finally:
             try:
-                data = json.loads(chunk)
-                # 格式1: output_message item，content 为各类 output
-                if data.get("type") == "output_message":
-                    for c in data.get("content", []):
-                        if isinstance(c, dict):
-                            if c.get("type") == "output_text":
-                                content += c.get("text", "")
-                            elif c.get("type") in ("thinking", "reasoning"):
-                                thinking_content += c.get("text", "") or c.get("delta", "") or ""
-                # 格式2: response.output_text.delta（部分实现）
-                elif data.get("type") == "response.output_text.delta":
-                    content += data.get("delta", "")
-                # 格式3: thinking.delta
-                elif data.get("type") in ("thinking.delta", "reasoning.delta"):
-                    thinking_content += data.get("delta", "")
-                # 格式4: choices delta（部分 provider 用此格式）
-                elif "choices" in data:
-                    delta = data["choices"][0].get("delta", {})
-                    content += delta.get("content") or ""
-                    thinking_content += (
-                        delta.get("thinking_reasoning_content")
-                        or delta.get("reasoning_content")
-                        or ""
-                    )
+                resp.close()
             except Exception:
-                continue
+                pass
+        if timed_out:
+            raise requests.exceptions.ReadTimeout(
+                f"LLM 流式响应超过总时限 {max(int(self._timeout or 0), STREAM_TOTAL_TIMEOUT_SEC)}s，已中止（防挂死）")
 
         self._last_full_response = {
             "streamed_content_length": len(content),

@@ -119,11 +119,66 @@ def run(limit: int) -> dict:
             """)
             no_primary = cur.fetchone()[0]
 
+            # 3) is_primary 错标（工单 W5）：当前 primary 名称 ≠ 资产名，且存在名称一致的非 primary 候选
+            cur.execute("""
+                WITH prim AS (
+                    SELECT a.asset_id, a.canonical_name,
+                           asm.source_asset_key AS pid, ci.name AS pname
+                    FROM core.asset a
+                    JOIN core.asset_source_map asm
+                      ON asm.asset_id=a.asset_id AND asm.source_code='cg' AND asm.is_primary=TRUE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id=asm.source_asset_key
+                ),
+                cand AS (
+                    SELECT DISTINCT a.asset_id
+                    FROM core.asset a
+                    JOIN core.asset_source_map asm
+                      ON asm.asset_id=a.asset_id AND asm.source_code='cg' AND asm.is_primary=FALSE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id=asm.source_asset_key
+                    WHERE lower(ci.name) IS NOT DISTINCT FROM lower(a.canonical_name)
+                )
+                SELECT count(*) FROM prim p JOIN cand c ON c.asset_id=p.asset_id
+                WHERE lower(p.pname) IS DISTINCT FROM lower(p.canonical_name)
+            """)
+            primary_mismatch = cur.fetchone()[0]
+
+            # 3b) 疑似：primary 是包装/桥接变体、候选名称与资产一致（需人工确认是否本体币）
+            cur.execute("""
+                WITH prim AS (
+                    SELECT a.asset_id, a.canonical_symbol, a.canonical_name,
+                           asm.source_asset_key AS pid, ci.name AS pname
+                    FROM core.asset a
+                    JOIN core.asset_source_map asm
+                      ON asm.asset_id=a.asset_id AND asm.source_code='cg' AND asm.is_primary=TRUE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id=asm.source_asset_key
+                ),
+                cand AS (
+                    SELECT a.asset_id, asm.source_asset_key AS aid, ci.name AS aname
+                    FROM core.asset a
+                    JOIN core.asset_source_map asm
+                      ON asm.asset_id=a.asset_id AND asm.source_code='cg' AND asm.is_primary=FALSE
+                    LEFT JOIN src_cg.coin_info ci ON ci.coin_id=asm.source_asset_key
+                    WHERE lower(ci.name) IS NOT DISTINCT FROM lower(a.canonical_name)
+                      AND ci.name NOT ILIKE '%bridged%' AND ci.name NOT ILIKE '%wrapped%'
+                )
+                SELECT p.asset_id, p.canonical_symbol, p.pname, p.pid, c.aid, c.aname
+                FROM prim p JOIN cand c ON c.asset_id=p.asset_id
+                WHERE (p.pname ILIKE '%bridged%' OR p.pname ILIKE '%wrapped%')
+                ORDER BY p.canonical_symbol
+            """)
+            wrapper_candidates = [
+                {"asset_id": r[0], "symbol": r[1], "primary_name": r[2],
+                 "wrong_primary": r[3], "correct_cg_id": r[4], "correct_name": r[5]}
+                for r in cur.fetchall()
+            ]
+
     return {
         "total_with_cg": total,
         "no_symbol_match": no_symbol_match,
         "ambiguous_multi_mapping": ambiguous,
         "no_primary": no_primary,
+        "primary_name_mismatch": primary_mismatch,
+        "primary_wrapper_candidates": wrapper_candidates,
         "mismatch_samples": mismatches,
     }
 
@@ -148,11 +203,17 @@ def main() -> int:
         print(f"择优后 symbol 仍不匹配   : {result['no_symbol_match']}")
         print(f"多条 cg 映射（需择优兜底）: {result['ambiguous_multi_mapping']}")
         print(f"无 is_primary 标记       : {result['no_primary']}")
+        print(f"primary 名称≠资产名      : {result['primary_name_mismatch']}（W5 待治理，需人工 review）")
         if result["mismatch_samples"]:
             print("\n异常样本（按市值排名）：")
             for m in result["mismatch_samples"]:
                 print(f"  asset_id={m['asset_id']} {m['symbol']} ({m['name']}) "
                       f"-> cg_id={m['cg_id']} (symbol={m['cg_symbol']}, name={m['cg_name']})")
+        if result["primary_wrapper_candidates"]:
+            print("\n⚠️ 疑似（primary 为包装/桥接变体、候选名称与资产一致，需人工确认是否本体币；"
+                  "部分资产本身即桥接币，勿盲目翻转）：")
+            for m in result["primary_wrapper_candidates"]:
+                print(f"  {m['symbol']}: {m['wrong_primary']} ({m['primary_name']}) -> {m['correct_cg_id']} ({m['correct_name']})")
 
     return 1 if result["no_symbol_match"] > 0 else 0
 

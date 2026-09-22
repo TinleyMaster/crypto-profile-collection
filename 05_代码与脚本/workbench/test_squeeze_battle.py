@@ -5,8 +5,9 @@
 
 覆盖：
   1) 判定纯函数 `evaluate_battle` 的 7 个注入用例（含缺失数据口径 P1-3）；
-  2) 16 个阈值常量断言（断言当前值，含 SQZ-02 重标定后的 LONG_LIQ_RATIO_THR）；
-  3) 渲染层 `_render_squeeze_alert` 段内不得残留 `or 0`（None 与 0 必须可区分）。
+  2) 17 个阈值常量断言（断言当前值，含 SQZ-02 重标定后的 LONG_LIQ_RATIO_THR）；
+  3) 渲染层 `_render_squeeze_alert` 段内不得残留 `or 0`（None 与 0 必须可区分）；
+  4) 判定窗口连续性闸门 `window_gate` 的 C1~C10 用例（复验 P2-d/P3，搬自复验报告 §3）。
 
 ⚠️ case1/case5 结论随 SQZ-02 由 `churn` 变为 `profit_take`：旧阈值 8e-5 会把
    `long_liq=1.66e-4` 判成「大额多单踩踏」从而屏蔽 profit_take；重标定到
@@ -51,6 +52,7 @@ CONSTS = {
     "TRACK_QUEUE_MAX": 12, "SQUEEZE_COOLDOWN_H": 6,
     "OI_EXIT_PCT": -1.0, "CVD_SELL_STRONG": -0.15, "CVD_SELL_MILD": -0.08,
     "CVD_BUY_MILD": 0.02, "MIN_WINDOW_COVERAGE": 0.6,
+    "MAX_MID_GAP_BUCKETS": 2,
 }
 for name, want in CONSTS.items():
     check(getattr(sqz, name, None) == want, f"{name} == {want}",
@@ -152,6 +154,87 @@ try:
     check("最近1h空单爆仓/成交额 \u2014" in _html, "缺失爆仓渲染为 '—'")
 except Exception as e:  # noqa: BLE001
     check(False, "渲染层测试可执行", f"{type(e).__name__}: {e}")
+
+
+# ════════════════════════════════════════════════════════════
+# 5. 判定窗口连续性闸门 window_gate（复验 P2-d / P3，用例搬自复验报告 §3）
+# ════════════════════════════════════════════════════════════
+print("\n【测试5】window_gate 连续性闸门 C1~C10")
+_FIRST, _LAST = 1000, 1012           # 判定窗口 [first, last) = 12 桶，期望 13 桶
+_FULL = set(range(_FIRST, _LAST))    # 右端正在采集的桶本就不在区间内
+
+
+def _daemon_verdict(present, tail_gap, first=_FIRST, last=_LAST):
+    """复刻 scan_daemon 三段闸门的判定与**归因优先级**（覆盖率 > 尾部 > 中段）。"""
+    coverage = len(present) / (last - first + 1)
+    ok, head, mid = sqz.window_gate(set(present), first, last)
+    if coverage < sqz.MIN_WINDOW_COVERAGE:
+        return True, "覆盖率", head, mid
+    if tail_gap:
+        return True, "尾部", head, mid
+    if not ok:
+        return True, "中段", head, mid
+    return False, "", head, mid
+
+
+def _minus(s, *drop):
+    return s - set(drop)
+
+
+# (用例, present 桶, tail_gap, 期望拒判, 期望 head_gap, 期望 mid_gap, 期望归因)
+_GATE_CASES = [
+    ("C1 正常（仅缺正在采集的尾桶）", _FULL, False, False, 0, 0, ""),
+    ("C2 中段缺 2 连续桶", _minus(_FULL, 1005, 1006), False, True, 0, 2, "中段"),
+    ("C3 中段缺 1 桶", _minus(_FULL, 1005), False, False, 0, 1, ""),
+    ("C4 中段缺 3 连续", _minus(_FULL, 1005, 1006, 1007), False, True, 0, 3, "中段"),
+    ("C5 左端缺 2 连续", _minus(_FULL, 1000, 1001), False, True, 2, 0, "中段"),
+    ("C6 完全无 OI 数据", set(), False, True, 12, 0, "覆盖率"),
+    ("C7 尾部断 4 桶（窗口自身完整）", _FULL, True, True, 0, 0, "尾部"),
+    ("C8 中段缺 2 + 尾部断 4", _minus(_FULL, 1005, 1006), True, True, 0, 2, "尾部"),
+    ("C9 覆盖率<0.6 + 中段缺 2",
+     {1000, 1001, 1004, 1005, 1008, 1009, 1011}, False, True, 0, 2, "覆盖率"),
+    ("C10 两处各缺 1（非连续）", _minus(_FULL, 1005, 1010), False, False, 0, 1, ""),
+]
+for title, present, tail_gap, want_rej, want_head, want_mid, want_why in _GATE_CASES:
+    rej, why, head, mid = _daemon_verdict(present, tail_gap)
+    check(rej == want_rej, f"{title} → {'拒判' if want_rej else '通过'}",
+          f"实际 {'拒判' if rej else '通过'}")
+    check((head, mid) == (want_head, want_mid),
+          f"{title} 缺口计数 head={want_head}/mid={want_mid}",
+          f"实际 head={head}/mid={mid}")
+    if want_why or why:
+        check(why == want_why, f"{title} 归因 → {want_why or '不拒判'}",
+              f"实际 {why or '不拒判'}")
+
+# 边界：空区间（peak==now）与 max_gap 可调
+check(sqz.window_gate(set(), 1000, 1000) == (True, 0, 0),
+      "空区间（last==first）不拒判，且无缺口计数",
+      str(sqz.window_gate(set(), 1000, 1000)))
+check(sqz.window_gate(set(), 1000, 1001, max_gap=1)[0] is False,
+      "max_gap 可注入（缺 1 桶在 max_gap=1 时拒判）")
+check(sqz.window_gate(_minus(_FULL, 1000), 1000, 1012)[1] == 1,
+      "左端缺 1 桶计入 head_gap（而非 mid_gap）",
+      str(sqz.window_gate(_minus(_FULL, 1000), 1000, 1012)))
+check(sqz.window_gate(_minus(_FULL, 1001), 1000, 1012)[2] == 1,
+      "左端起第 2 桶才缺 → 计 mid_gap（head_gap 必须为 0）",
+      str(sqz.window_gate(_minus(_FULL, 1001), 1000, 1012)))
+
+# 闸门等价性：新实现与「旧实现（含左端游程 + 阈值 2）」逐例一致
+def _old_gate(present, first=_FIRST, last=_LAST, thr=sqz.MAX_MID_GAP_BUCKETS):
+    worst = run = 0
+    for b in range(first, last):
+        if b in present:
+            run = 0
+        else:
+            run += 1
+            worst = max(worst, run)
+    return worst < thr
+
+
+for title, present, *_ in _GATE_CASES:
+    new_ok = sqz.window_gate(set(present), _FIRST, _LAST)[0]
+    check(new_ok == _old_gate(set(present)),
+          f"{title} 与旧实现判定一致", f"新={new_ok} 旧={_old_gate(set(present))}")
 
 
 # ════════════════════════════════════════════════════════════

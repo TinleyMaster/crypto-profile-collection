@@ -141,12 +141,9 @@ FAPI_BASE = "https://fapi.binance.com"
 DEFAULT_INTERVALS = ("5m", "15m", "1h")
 INCREMENTAL_LIMIT = 10
 BUCKET_SECONDS = 300  # 5m OI/CVD 桶
-# 判定窗口中段最大连续缺桶数（复验 P2-d）：覆盖率只看「数量」、tail_gap 只看「右端」
-# ⇒ 「前段齐、中段缺 1~2 桶、尾部齐」两项都不拦（13 桶窗口缺 2 个中间桶 →
-# coverage=11/13=0.846 通过）。而重启 / `os._exit(1)` 杀掉飞行中一轮时，缺的恰恰是
-# **中间某桶**且快照不可回补 ⇒ 窗口指标被悄悄污染。故独立判据：连续缺 ≥ 该值即拒判。
-# 统计区间为 `[first_bucket, last_bucket-1]`，右端正在采集的桶不计（由 tail_gap 负责）。
-MAX_MID_GAP_BUCKETS = 2
+# 判定窗口连续性闸门的阈值与实现统一收在 `squeeze.MAX_MID_GAP_BUCKETS` /
+# `squeeze.window_gate()`（纯函数，可离线注入单测，见 workbench/test_squeeze_battle.py）。
+# 此处只保留引用，避免两处实现漂移。
 
 # ── 初始化 ──────────────────────────────────────────────────────
 
@@ -2551,28 +2548,23 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             oi_ts_max = oi_sym[-1]["ts"] if oi_sym else None
             oi_lag_sec = None if oi_ts_max is None else (now - oi_ts_max).total_seconds()
             tail_gap = oi_lag_sec is not None and oi_lag_sec > 2 * BUCKET_SECONDS
-            # 中段连续性（复验 P2-d）：覆盖率与 tail_gap 都不拦「前段齐、中段缺桶、
-            # 尾部齐」，而重启丢的恰是中间桶（快照不可回补）⇒ 窗口指标被悄悄污染。
-            # 右端 last_bucket 是正在采集的桶，不计（基线本就落后 ~1 桶，见 tail_gap）。
+            # 中段/左端连续性（复验 P2-d / P3）：覆盖率与 tail_gap 都不拦「前段齐、
+            # 中段缺桶、尾部齐」，而重启丢的恰是中间桶（快照不可回补）⇒ 窗口指标被
+            # 悄悄污染。判定区间 `[first_bucket, last_bucket)`（右端正在采集的桶归
+            # tail_gap 管）；左端缺桶单列（head_gap）——`base_oi` 会落到窗口之外。
             present = {int(r["ts"].timestamp()) // BUCKET_SECONDS for r in win_oi}
-            mid_gap = 0
-            run = 0
-            for b in range(first_bucket, last_bucket):
-                if b in present:
-                    run = 0
-                else:
-                    run += 1
-                    mid_gap = max(mid_gap, run)
-            mid_gap_hit = mid_gap >= MAX_MID_GAP_BUCKETS
-            if coverage < sqz.MIN_WINDOW_COVERAGE or tail_gap or mid_gap_hit:
+            gap_ok, head_gap, mid_gap = sqz.window_gate(
+                present, first_bucket, last_bucket)
+            if coverage < sqz.MIN_WINDOW_COVERAGE or tail_gap or not gap_ok:
                 stats["insufficient_coverage"] += 1
                 if coverage < sqz.MIN_WINDOW_COVERAGE:
                     reason = (f"判定窗口数据覆盖不足 {len(win_oi)}/{expect_buckets} 桶，暂不判定")
                 elif tail_gap:
                     reason = "判定窗口尾部 OI 桶缺失，暂不判定"
                 else:
-                    reason = (f"判定窗口中段连续缺桶 {mid_gap} 个"
-                              f"（{len(win_oi)}/{expect_buckets} 桶），暂不判定")
+                    reason = (f"判定窗口内连续缺桶 {max(head_gap, mid_gap)} 个"
+                              f"（左端起 {head_gap} 个 / 中段 {mid_gap} 个，"
+                              f"{len(win_oi)}/{expect_buckets} 桶），暂不判定")
                 if oi_lag_sec is not None:
                     reason += f"（OI 最新桶滞后 {oi_lag_sec:.0f}s）"
                 print(f"[scan_daemon][squeeze] {sym} {reason}", file=sys.stderr)
@@ -2631,7 +2623,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 "taker_ts": taker_ts.isoformat() if taker_ts else None,
                 "oi_cover": {"have": len(win_oi), "expect": expect_buckets},
                 "oi_lag_sec": None if oi_lag_sec is None else round(oi_lag_sec),
-                # 中段最大连续缺桶（复验 P2-d）：仅作观测，不参与判定（判定已在闸门处完成）
+                # 窗口内连续缺桶（复验 P2-d / P3）：仅作观测，不参与判定（判定已在闸门处完成）；
+                # `head_gap_buckets` 单列——左端缺桶会让 base_oi 落到窗口之外，语义更重。
+                "head_gap_buckets": head_gap,
                 "mid_gap_buckets": mid_gap,
                 "trigger": why,
             })

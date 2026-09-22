@@ -255,20 +255,22 @@ def _render_items_html(items: list[dict]) -> str:
 SQUEEZE_TRACKING_WARN = 9        # 队列占用 ≥ 9/12（75%）
 SQUEEZE_ENQ24H_WARN = 20         # 近 24h 入队 ≥ 20 条
 SQUEEZE_REJECT_WARN = 3          # 当前仍处「覆盖率/尾部拒判」状态的 track 行数（非次数）
-RESTART_GAP_WINDOW_H = 2         # 重启丢桶观察窗（小时）
-OI_BUCKET_DEFICIT_RATIO = 0.9    # 近 2h OI 桶数 < 期望 ×0.9 → 判为缺口
+OI_BUCKET_WINDOW_H = 2           # OI 桶完整度观察窗（小时）
+OI_BUCKET_DEFICIT_RATIO = 0.9    # 该窗口 OI 桶数 < 期望 ×0.9 → 判为缺口
 SQUEEZE_QUEUE_MAX = 12           # 与 squeeze.TRACK_QUEUE_MAX 同口径（展示用）
 
 
 def _collect_squeeze_health(conn) -> list[str]:
-    """轧空池健康 + 重启丢桶（SQZ-01/06）：返回越线提示；未越线返回 []。
+    """轧空池健康 + OI 桶完整度（SQZ-01/06）：返回越线提示；未越线返回 []。
 
     - 队列占用 / 24h 入队 / 覆盖率拒判：只读 `biz.squeeze_track`（reason 由
       `scan_daemon` 拒判分支显式写入，无需改表）。
-    - 重启丢桶：`__daemon__` 近 `RESTART_GAP_WINDOW_H` 小时内启动过，但该窗口
-      `oi_cvd_snapshot` 的 5m 桶数不足期望 → 快照不可回补，会抬高覆盖率拒判率
-      （工单 SQZ-06，与本文件既有 OI 新鲜度检查互补：后者只看 MAX(ts)，看不到
-      中段/尾部缺桶）。
+    - OI 桶完整度：近 `OI_BUCKET_WINDOW_H` 小时 `oi_cvd_snapshot` 的 5m 桶数不足期望
+      → 快照不可回补，会抬高覆盖率拒判率（工单 SQZ-06，与本文件既有 OI 新鲜度检查
+      互补：后者只看 MAX(ts)，看不到中段/尾部缺桶）。
+      ⚠️ **常态评估**（复验 P2-3）：桶完整度**不再**要求「`__daemon__` 近 2h 启动过」
+      才观测——线程慢死 / 任务卡住 / 采样跳过属非重启型丢桶，实测正常期 OI 栅格就缺
+      24~26%，正是这种形态。重启与否**只影响文案**（用于区分归因）。
     """
     notes: list[str] = []
     try:
@@ -295,28 +297,30 @@ def _collect_squeeze_health(conn) -> list[str]:
         print(f"[看门狗] 轧空池健康检查跳过（{e}）", file=sys.stderr)
 
     try:
+        now = datetime.now(timezone.utc)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT last_run_at FROM biz.scan_heartbeat WHERE task=%s",
                         (DAEMON_START_TASK,))
             r = cur.fetchone()
             daemon_start = r["last_run_at"] if r else None
-            now = datetime.now(timezone.utc)
-            if daemon_start is not None \
-                    and (now - daemon_start).total_seconds() <= RESTART_GAP_WINDOW_H * 3600:
-                cur.execute(
-                    "SELECT count(DISTINCT ts) AS n FROM biz.oi_cvd_snapshot "
-                    "WHERE exchange='binance' AND source='realtime' "
-                    "AND ts >= %s AND ts <= %s",
-                    (now - timedelta(hours=RESTART_GAP_WINDOW_H), now))
-                have = cur.fetchone()["n"] or 0
-                expect = int(RESTART_GAP_WINDOW_H * 60 / 5)   # 5m 桶数
-                if have < expect * OI_BUCKET_DEFICIT_RATIO:
-                    notes.append(
-                        f"daemon 近 {RESTART_GAP_WINDOW_H}h 内重启过"
-                        f"（{_fmt_utc(daemon_start)}），该窗口 OI 桶仅 {have}/{expect}"
-                        f"（快照不可回补，会抬高覆盖率拒判）")
+            restarted = (daemon_start is not None and
+                         (now - daemon_start).total_seconds() <= OI_BUCKET_WINDOW_H * 3600)
+            cur.execute(
+                "SELECT count(DISTINCT ts) AS n FROM biz.oi_cvd_snapshot "
+                "WHERE exchange='binance' AND source='realtime' "
+                "AND ts >= %s AND ts <= %s",
+                (now - timedelta(hours=OI_BUCKET_WINDOW_H), now))
+            have = cur.fetchone()["n"] or 0
+            expect = int(OI_BUCKET_WINDOW_H * 60 / 5)   # 5m 桶数
+            if have < expect * OI_BUCKET_DEFICIT_RATIO:
+                cause = (f"daemon 近 {OI_BUCKET_WINDOW_H}h 内重启过"
+                         f"（{_fmt_utc(daemon_start)}）" if restarted
+                         else f"daemon 近 {OI_BUCKET_WINDOW_H}h 未重启")
+                notes.append(
+                    f"{cause}，而该窗口 OI 桶仅 {have}/{expect}"
+                    f"（快照不可回补，会抬高覆盖率拒判；非重启型丢桶请查采样线程）")
     except Exception as e:  # noqa: BLE001
-        print(f"[看门狗] 重启丢桶检查跳过（{e}）", file=sys.stderr)
+        print(f"[看门狗] OI 桶完整度检查跳过（{e}）", file=sys.stderr)
     return notes
 
 

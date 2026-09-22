@@ -82,6 +82,12 @@ CVD_BUY_MILD = 0.02           # 窗口净主动买占比 ≥ 该值 → 确有�
 #   样本时间代表性弱 ⇒ 该阈值为**临时值**，待判定样本积累后按判定窗口直接标定定稿。
 LONG_LIQ_RATIO_THR = 0.00040709
 MIN_WINDOW_COVERAGE = 0.6     # 判定窗口 5m OI 桶覆盖率下限（低于此值放弃判定，见审计 P1-2）
+# 判定窗口内最长连续缺桶（含左端起）≥ 该值 → 拒判（复验 P2-d）。覆盖率只看「数量」、
+# 尾部判据只看「右端」⇒「前段齐、中段缺 1~2 桶、尾部齐」两项都不拦（13 桶窗口缺 2 个
+# 中间桶 → 11/13=0.846 仍通过）；而重启 / `os._exit(1)` 杀掉飞行中一轮时，缺的恰恰是
+# **中间某桶**且快照不可回补 ⇒ 窗口指标被悄悄污染。判定区间 `[first_bucket, last_bucket)`，
+# 右端正在采集的桶不计（由尾部判据负责）。
+MAX_MID_GAP_BUCKETS = 2
 
 # 结论枚举
 LONG_WIN = "long_win"        # 多头胜：持仓维持/再增，主动买未崩，无多单踩踏
@@ -300,9 +306,41 @@ def is_expired(started_at: datetime, now: datetime,
     return (now - started_at) > timedelta(minutes=expire_min)
 
 
+def window_gate(present_buckets, first_bucket: int, last_bucket: int,
+                max_gap: int = MAX_MID_GAP_BUCKETS) -> tuple[bool, int, int]:
+    """判定窗口连续性闸门（复验 P2-d / P3）：返回 `(ok, head_gap, mid_gap)`。
+
+    - 统计区间 `[first_bucket, last_bucket)`：右端 `last_bucket` 是**正在采集**的桶，
+      基线本就落后约 1 桶，由尾部判据（`oi_lag_sec > 2×桶`）负责，故不计入。
+    - `head_gap`：**自 `first_bucket` 起**的连续缺桶数。左端缺桶语义更重——
+      `base_oi = _last_at_or_before(oi_sym, peak_ts)` 会落到**窗口之外**，
+      回撤窗口的 ΔOI 基准直接失真，故单列口径（复验 P3）。
+    - `mid_gap`：去掉左端游程后的最长连续缺桶数（右端贴近 `last_bucket` 的缺桶也算）。
+    - 判据：`max(head_gap, mid_gap) >= max_gap` → `ok=False`（拒判）。
+    """
+    head_gap = mid_gap = run = 0
+    n = max(0, last_bucket - first_bucket)
+    for i in range(n):
+        if (first_bucket + i) in present_buckets:
+            if run:
+                if i - run == 0:
+                    head_gap = run
+                else:
+                    mid_gap = max(mid_gap, run)
+                run = 0
+        else:
+            run += 1
+    if run:   # 收尾：游程一直延续到 last_bucket-1
+        if n - run == 0:
+            head_gap = run
+        else:
+            mid_gap = max(mid_gap, run)
+    return max(head_gap, mid_gap) < max_gap, head_gap, mid_gap
+
+
 __all__ = [
     "base_symbol", "alias_bases", "screen_surge", "confirm_squeeze",
     "evaluate_battle", "should_judge", "is_expired", "latest_ratio",
-    "latest_ratio_ts",
+    "latest_ratio_ts", "window_gate",
     "CONCLUSION_LABEL", "LONG_WIN", "SHORT_WIN", "PROFIT_TAKE", "CHURN",
 ]

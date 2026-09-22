@@ -10,16 +10,28 @@
     ⇒ 「8018 行」是瞬时值，不是稳定样本。
   - 判据本身也偏弱：单一实现的「点越阈率 < 20%」在另一口径下就能翻盘。
 
-本脚本把三件事写死：
+本脚本把四件事写死：
   1. **口径定义**（窗口 / 基准 / 回撤 / 振幅）写进 `variant_*` 函数，可被逐行核对；
   2. **时间边界**：每次运行都打印 min(ts)/max(ts)/实际跨度/行数，避免再拿瞬时值当样本量；
-  3. **跨口径上界**：至少跑 3 个变体，取越阈率 max 作为判据输入（P2-c）。
+  3. **跨口径上界**：至少跑 3 个变体，取越阈率 max 作为判据输入（P2-c）；
+  4. **分母自证**（复验 P1-1a）：打印每币在分母窗口内的 5m 根数 / 期望
+     （`bars / (days×288)`）与实际覆盖小时数；**整体覆盖 < 0.9 时拒绝出结论**
+     （exit 3）。原因：阈值语义是「爆仓额 / 24h 成交额」，若 `asset_klines`
+     在该窗口缺小时，分母被系统性少算 ⇒ 同一份爆仓数据算出的越阈率被放大
+     1.66×（实测：完整分母 24.58% ↔ 缺 14h 分母 40.21%，复验 §2）。
+
+口径澄清（复验 P1-1b/c）：
+  - 窗口参数默认 **1 天**——与「/24h 成交额」语义一致；旧默认 7 天会得 3× 偏差
+    （实测同一数据 24.76% ↔ 8.32%）；
+  - `asset_klines` 的成交额别名改叫 `vol_win`（不再叫 `vol24`，避免被误当严格 24h）；
+  - 窗口高低点/收盘取 `open_time < l.ts`——旧写 `<= l.ts` 会取到**覆盖
+    `[l.ts, l.ts+5m)` 的桶**，即判定时刻**之后** 5 分钟的量价（未来函数）。
 
 只读：不写任何表。
 
 用法：
-    python calib_squeeze_liq_thr.py                  # 默认 7 天窗口 / vol24 ≥ 5e6
-    python calib_squeeze_liq_thr.py --days 1 --json  # 缩短窗口 / 输出机器可读
+    python calib_squeeze_liq_thr.py                  # 默认 1 天窗口 / vol_win ≥ 5e6
+    python calib_squeeze_liq_thr.py --days 7 --json  # 拉长窗口 / 输出机器可读
 """
 from __future__ import annotations
 
@@ -47,10 +59,12 @@ JUDGE_UPPER_BOUND_PCT = 20.0   # 判据：条件子集越阈率**跨口径上界
 WINDOW_MIN = 60                # 条件子集的观察窗（分钟）
 SURGE_MIN_PCT = 2.0            # 窗口内拉升幅度下限（%）
 RETRACE_MIN_PCT = 2.0          # 距窗口高点回撤幅度下限（%）
+BUCKETS_PER_DAY = 288          # 5m 桶 / 天（分母窗口完成度的期望值基准）
+MIN_DENOM_COVERAGE = 0.9       # 分母窗口整体覆盖下限，低于此值拒绝出结论（exit 3）
 
 SQL_SAMPLE = """
 WITH v AS (
-    SELECT symbol, SUM(quote_vol) AS vol24
+    SELECT symbol, SUM(quote_vol) AS vol_win
     FROM biz.asset_klines
     WHERE interval = '5m' AND open_time >= NOW() - make_interval(days => %(days)s)
     GROUP BY symbol
@@ -60,7 +74,7 @@ SELECT l.symbol,
        l.ts,
        l.long_liq_usd_1h::float8  AS long_liq,
        l.short_liq_usd_1h::float8 AS short_liq,
-       v.vol24::float8            AS vol24,
+       v.vol_win::float8          AS vol_win,
        w.peak_hi::float8  AS peak_hi,
        w.trough_lo::float8 AS trough_lo,
        w.peak_c::float8   AS peak_c,
@@ -74,19 +88,19 @@ JOIN LATERAL (
     FROM biz.asset_klines k
     WHERE k.symbol = l.symbol AND k.interval = '5m'
       AND k.open_time > l.ts - make_interval(mins => %(win)s)
-      AND k.open_time <= l.ts
+      AND k.open_time < l.ts
 ) w ON TRUE
 JOIN LATERAL (
     SELECT k2.close_px AS close_now
     FROM biz.asset_klines k2
     WHERE k2.symbol = l.symbol AND k2.interval = '5m'
       AND k2.open_time > l.ts - make_interval(mins => %(win)s)
-      AND k2.open_time <= l.ts
+      AND k2.open_time < l.ts
     ORDER BY k2.open_time DESC LIMIT 1
 ) cn ON TRUE
 WHERE l.ts >= NOW() - make_interval(days => %(days)s)
   AND l.long_liq_usd_1h IS NOT NULL AND l.long_liq_usd_1h > 0
-  AND v.vol24 > 0
+  AND v.vol_win > 0
 """
 
 
@@ -109,6 +123,50 @@ def rate(vals: list[float], thr: float) -> float | None:
     if not vals:
         return None
     return sum(1 for x in vals if x >= thr) / len(vals) * 100
+
+
+def _f(v, spec: str = ".3e", dash: str = "n/a") -> str:
+    """None 安全的数值格式化（分位在空样本上是 None，不能直接 f-string）。"""
+    return dash if v is None else format(v, spec)
+
+
+def denominator_coverage(cur, syms: list[str], days: int) -> dict:
+    """分母窗口自证（复验 P1-1a）：每币 5m 根数 / 期望 + 实际覆盖小时数。
+
+    `vol_win` = `SUM(quote_vol)` over `days` 天，其可用性完全取决于 `asset_klines`
+    在该窗口内的完成度：表缺小时 ⇒ 分母被少算 ⇒ 越阈率整体被放大
+    （实测同一份爆仓数据：完整分母 24.58% ↔ 缺 14h 分母 40.21%，差 1.66×）。
+    只评估「本次入样币集合」——被少算的正是这些币，越阈率被放大的也是它们。
+    """
+    expect_bars = max(1, days * BUCKETS_PER_DAY)
+    expect_hours = max(1, days * 24)
+    out = {"days": days, "symbols": len(syms), "expect_bars_per_symbol": expect_bars,
+           "expect_hours": expect_hours, "bars_min": None, "bars_median": None,
+           "bars_max": None, "hours_median": None, "coverage": None,
+           "symbols_below": 0, "worst": [], "per_symbol": []}
+    if not syms:
+        return out
+    cur.execute(
+        "SELECT symbol, count(*) AS bars, "
+        "       count(DISTINCT date_trunc('hour', open_time)) AS hours "
+        "FROM biz.asset_klines "
+        "WHERE interval = '5m' "
+        "  AND open_time >= NOW() - make_interval(days => %(days)s) "
+        "  AND symbol = ANY(%(syms)s) "
+        "GROUP BY symbol", {"days": days, "syms": syms})
+    cnt = {r["symbol"]: (int(r["bars"]), int(r["hours"])) for r in cur.fetchall()}
+    per = [{"symbol": s, "bars": cnt.get(s, (0, 0))[0], "hours": cnt.get(s, (0, 0))[1],
+            "bars_ratio": round(cnt.get(s, (0, 0))[0] / expect_bars, 3)} for s in syms]
+    bars = sorted(d["bars"] for d in per)
+    hours = sorted(d["hours"] for d in per)
+    out["per_symbol"] = per
+    out["bars_min"], out["bars_max"] = bars[0], bars[-1]
+    out["bars_median"] = bars[len(bars) // 2]
+    out["hours_median"] = hours[len(hours) // 2]
+    out["coverage"] = sum(bars) / (len(syms) * expect_bars)
+    out["symbols_below"] = sum(1 for b in bars if b < expect_bars * MIN_DENOM_COVERAGE)
+    out["worst"] = sorted(per, key=lambda d: d["bars_ratio"])[:5]
+    return out
 
 
 def variant_a(r) -> bool:
@@ -144,8 +202,10 @@ VARIANTS = {"A 振幅(hi/lo)+回撤": variant_a,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="轧空池爆仓阈值标定（只读）")
-    ap.add_argument("--days", type=int, default=7, help="样本窗口天数（表里没这么多就是全表）")
-    ap.add_argument("--vol24-min", type=float, default=5e6, help="vol24 下限（USDT）")
+    ap.add_argument("--days", type=int, default=1,
+                    help="样本窗口天数（默认 1，与「/24h 成交额」语义一致；旧默认 7 会得 3× 偏差）")
+    ap.add_argument("--vol-win-min", "--vol24-min", dest="vol_win_min", type=float,
+                    default=5e6, help="vol_win 下限（USDT，别名 --vol24-min）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
@@ -158,22 +218,28 @@ def main() -> int:
                 "       count(DISTINCT symbol) AS syms "
                 "FROM biz.liquidation_snapshot")
             bound = cur.fetchone()
-            cur.execute(SQL_SAMPLE, {"days": args.days, "vol_min": args.vol24_min,
+            cur.execute(SQL_SAMPLE, {"days": args.days, "vol_min": args.vol_win_min,
                                      "win": WINDOW_MIN})
             rows = cur.fetchall()
+            # 分母自证（复验 P1-1a）：入样币集合上的 5m 根数 / 覆盖小时
+            denom = denominator_coverage(cur, sorted({r["symbol"] for r in rows}), args.days)
 
     span_h = ((bound["mx"] - bound["mn"]).total_seconds() / 3600) if bound["mn"] else 0.0
-    ratios = [r["long_liq"] / r["vol24"] for r in rows]
-    short_ratios = [r["short_liq"] / r["vol24"] for r in rows
-                    if r["short_liq"] is not None]
+    ratios = [r["long_liq"] / r["vol_win"] for r in rows]
+    short_all = [r["short_liq"] / r["vol_win"] for r in rows
+                 if r["short_liq"] is not None]
+    short_gt0 = [r["short_liq"] / r["vol_win"] for r in rows
+                 if r["short_liq"] is not None and r["short_liq"] > 0]
 
     p50, p75, p90, p95 = (pct(ratios, q) for q in (0.50, 0.75, 0.90, 0.95))
     new_thr = sqz.LONG_LIQ_RATIO_THR
 
     subset: dict[str, list[float]] = {}
     for name, fn in VARIANTS.items():
-        subset[name] = [r["long_liq"] / r["vol24"] for r in rows if fn(r)]
+        subset[name] = [r["long_liq"] / r["vol_win"] for r in rows if fn(r)]
 
+    cov = denom["coverage"] or 0.0
+    denom_ok = cov >= MIN_DENOM_COVERAGE
     out = {
         "table_bound": {
             "min_ts": bound["mn"].isoformat() if bound["mn"] else None,
@@ -181,8 +247,10 @@ def main() -> int:
             "span_hours": round(span_h, 2),
             "rows": bound["n"], "symbols": bound["syms"],
         },
+        "denominator": denom,
+        "denominator_ok": denom_ok,
         "sample": {"rows": len(rows), "symbols": len({r["symbol"] for r in rows}),
-                   "window_days_arg": args.days, "vol24_min": args.vol24_min},
+                   "window_days_arg": args.days, "vol_win_min": args.vol_win_min},
         "unconditional": {
             "p50": p50, "p75": p75, "p90": p90, "p95": p95,
             "old_thr": OLD_LONG_LIQ_RATIO, "new_thr": new_thr,
@@ -190,8 +258,10 @@ def main() -> int:
             "rate_new_pct": rate(ratios, new_thr),
         },
         "short_side": {
-            "p90": pct(short_ratios, 0.90),
-            "rate_min_pct": rate(short_ratios, sqz.SQZ_SHORT_LIQ_RATIO_MIN),
+            "p90_gt0": pct(short_gt0, 0.90),
+            "n_incl0": len(short_all), "n_gt0": len(short_gt0),
+            "rate_incl0_pct": rate(short_all, sqz.SQZ_SHORT_LIQ_RATIO_MIN),
+            "rate_gt0_pct": rate(short_gt0, sqz.SQZ_SHORT_LIQ_RATIO_MIN),
             "threshold": sqz.SQZ_SHORT_LIQ_RATIO_MIN,
         },
         "subsets": {
@@ -208,27 +278,50 @@ def main() -> int:
         "criterion": f"条件子集越阈率跨口径上界 < {JUDGE_UPPER_BOUND_PCT}%",
         "upper_bound_pct": max(new_rates) if new_rates else None,
         "pass": bool(new_rates) and max(new_rates) < JUDGE_UPPER_BOUND_PCT,
+        "reliable": denom_ok,
     }
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
-        return 0
+        return 0 if denom_ok else 3
 
     b = out["table_bound"]
     print("【样本时间边界】← 每次标定必须先看这里（复验 P1-a：别再把瞬时值当「7 天样本」）")
     print(f"  liquidation_snapshot: {b['min_ts']} ~ {b['max_ts']}")
     print(f"  实际跨度 {b['span_hours']} 小时 / 全表 {b['rows']} 行 / {b['symbols']} 币")
     print(f"  本次入样本：{out['sample']['rows']} 行 / {out['sample']['symbols']} 币"
-          f"（窗口参数 {args.days} 天，vol24 ≥ {args.vol24_min:g}）")
-    print("\n【无条件分布】long_liq / vol24")
+          f"（窗口参数 {args.days} 天，vol_win ≥ {args.vol_win_min:g}）")
+
+    d = denom
+    print("\n【分母自证】← 复验 P1-1a：分母窗口不完整会把越阈率整体放大（实测 1.66×）")
+    print(f"  asset_klines(5m) 窗口 {d['days']} 天：期望每币 {d['expect_bars_per_symbol']} 根"
+          f" = 288×{d['days']}（{d['expect_hours']} 小时）")
+    print(f"  实测每币根数 min={_f(d['bars_min'], 'd')} 中位={_f(d['bars_median'], 'd')}"
+          f" max={_f(d['bars_max'], 'd')}"
+          f"  | 覆盖小时中位 {_f(d['hours_median'], 'd')}/{d['expect_hours']}")
+    print(f"  整体覆盖 = {cov:.3f}（Σ根数 / 期望总数，门槛 {MIN_DENOM_COVERAGE}）"
+          f"；低于门槛的币 {d['symbols_below']}/{d['symbols']}")
+    if d["worst"]:
+        print("  最差 5 币：" + " ".join(
+            f"{w['symbol']}={w['bars']}({w['bars_ratio']:.2f}×288×{d['days']})"
+            for w in d["worst"]))
+    if not denom_ok:
+        print(f"\n🛑 拒绝出结论：分母覆盖 {cov:.3f} < {MIN_DENOM_COVERAGE}"
+              f" ⇒ `vol_win` 被系统性少算，任何越阈率都不可比。")
+        print("   先补齐 biz.asset_klines(5m)，或改用落在有数据时段的 --days，再重跑。")
+        return 3
+
+    print("\n【无条件分布】long_liq / vol_win")
     print(f"  P50={p50:.3e} P75={p75:.3e} P90={p90:.3e} P95={p95:.3e}")
     print(f"  旧值 {OLD_LONG_LIQ_RATIO:.0e} 越阈率 {out['unconditional']['rate_old_pct']:.2f}%"
           f"  |  新值 {new_thr:.8f} 越阈率 "
           f"{out['unconditional']['rate_new_pct']:.2f}%")
     s = out["short_side"]
-    print(f"\n【入队侧对照】short_liq / vol24：P90={s['p90']:.3e}，"
-          f"阈值 {s['threshold']:.0e} 越阈率 {s['rate_min_pct']:.2f}%"
-          f"（设计目标 ≈10%，即落在 P90；显著偏离说明样本期间市场状态不同）")
+    print(f"\n【入队侧对照】short_liq / vol_win：阈值 {s['threshold']:.0e}"
+          f"（复验完整分母实测落约 P85，不再是 P90）")
+    print(f"  含 0 ：n={s['n_incl0']:<6} 越阈率 {_f(s['rate_incl0_pct'], '.2f')}%")
+    print(f"  >0   ：n={s['n_gt0']:<6} 越阈率 {_f(s['rate_gt0_pct'], '.2f')}%"
+          f"（P90={_f(s['p90_gt0'])}）")
     print(f"\n【条件子集（窗口 {WINDOW_MIN}min，拉升 ≥{SURGE_MIN_PCT}% / 回撤 ≥{RETRACE_MIN_PCT}%）】")
     for name, v in out["subsets"].items():
         r_new = f"{v['rate_new_pct']:.2f}%" if v["rate_new_pct"] is not None else "n/a"
@@ -238,10 +331,10 @@ def main() -> int:
     ub = f"{j['upper_bound_pct']:.2f}%" if j["upper_bound_pct"] is not None else "n/a"
     print(f"\n【判定】{j['criterion']}")
     print(f"  跨口径上界 = {ub}  →  {'PASS' if j['pass'] else 'FAIL'}"
-          f"（{'' if j['pass'] else '需回退到 P90 或放宽判据'}）")
+          f"（{'' if j['pass'] else '先核对分母覆盖与未来函数，再谈调阈值'}）")
     print("\n⚠️ 样本时间代表性弱（表历史见上）⇒ 结论仅供临时定稿，"
           "待 squeeze_track 判定样本积累后改用判定窗口直接标定。")
-    return 0
+    return 0 if j["pass"] else 2
 
 
 if __name__ == "__main__":

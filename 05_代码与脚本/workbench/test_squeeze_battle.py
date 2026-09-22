@@ -364,16 +364,22 @@ check(calib.exit_code(False, True, True, False) == 3,
 check(calib.exit_code(True, True, True, False) == 3 and calib.exit_code(True, True, True) == 0,
       "G3：可算性优先于结论（pass=True 但不可算仍 3；可算才 0）")
 
-# ── 复验 G4：CI 裕度（布尔化的 ci_decisive 掩盖贴线）──────────
-check(calib.ci_margin_pp((20.01, 23.54), 20.0) == 0.01,
-      "G4：CI=[20.01,23.54] 对线 20% 只差 0.01pp ⇒ 贴线被显式暴露",
+# ── 复验 G4 + H4：CI **带符号**裕度（绝对值会把 PASS 侧/FAIL 侧抹平）──
+check(calib.ci_margin_pp((20.01, 23.54), 20.0) == -0.01,
+      "G4/H4：CI=[20.01,23.54] 整段在线上方（FAIL 侧）⇒ 裕度 -0.01pp（贴线被暴露）",
       str(calib.ci_margin_pp((20.01, 23.54), 20.0)))
 check(calib.ci_margin_pp((10.0, 15.0), 20.0) == 5.0,
-      "G4：CI 整段在线下方 ⇒ 裕度 = 较近界距线 = 5.0pp",
+      "G4/H4：CI 整段在线下方（PASS 侧）⇒ 裕度 +5.0pp",
       str(calib.ci_margin_pp((10.0, 15.0), 20.0)))
+check(calib.ci_margin_pp((25.0, 30.0), 20.0) == -5.0,
+      "H4：CI 整段在线上方（FAIL 侧）⇒ 裕度 -5.0pp（旧码与 PASS 侧同为 +5.0，方向被抹平）",
+      str(calib.ci_margin_pp((25.0, 30.0), 20.0)))
+check(calib.ci_margin_pp((15.0, 25.0), 20.0) == 0.0,
+      "H4：CI 跨判据线 ⇒ 裕度 0.0（谈不上裕度，不是「较小的那个距离」）",
+      str(calib.ci_margin_pp((15.0, 25.0), 20.0)))
 check(calib.ci_margin_pp(None, 20.0) is None, "G4：ci=None → None（不崩）")
 
-# ── 复验 G5：分子组理由同源折叠（E9 原则补到分子组）────────────
+# ── 复验 G5 + H3：分子组理由折叠（同源才折叠，判据用**观测相对**）──
 def _mol_fakes(cov, hole, expect=24):
     present = round(cov * expect)
     return {"expect_hours": expect, "hours_present": present,
@@ -381,16 +387,43 @@ def _mol_fakes(cov, hole, expect=24):
 
 
 _f1 = calib.molecule_fail_reasons(_mol_fakes(0.4167, 14))
-check(len(_f1) == 1 and "最长连续空洞 14h" in _f1[0] and "整点覆盖" in _f1[0],
-      "G5：14h 空洞 + 41.7% 覆盖 ⇒ 折叠为 1 条（空洞为主因，覆盖作后果并入）", str(_f1))
+check(len(_f1) == 1 and "全部缺失" in _f1[0] and "整点覆盖" in _f1[0],
+      "G5：hole=14h 恰为全部缺失（24-10）⇒ 折叠为 1 条（真同源）", str(_f1))
 _f2 = calib.molecule_fail_reasons(_mol_fakes(0.4167, 2))
-check(len(_f2) == 1 and "整点覆盖" in _f2[0] and "空洞" not in _f2[0],
-      "G5：2h 空洞（未超限）+ 41.7% 覆盖 ⇒ 只报覆盖（散点缺失，两者不同源）", str(_f2))
+check(len(_f2) == 1 and "整点覆盖" in _f2[0] and "分散形态" in _f2[0],
+      "G5：2h 空洞（未超限）+ 41.7% 覆盖 ⇒ 只报覆盖、并注明「分散形态」", str(_f2))
 _f3 = calib.molecule_fail_reasons(_mol_fakes(0.9167, 5))
 check(len(_f3) == 1 and "最长连续空洞 5h" in _f3[0] and "整点覆盖" not in _f3[0],
       "G5：5h 空洞但覆盖 91.7% 合格 ⇒ 只报空洞", str(_f3))
 check(calib.molecule_fail_reasons(_mol_fakes(1.0, 0)) == [],
       "G5：全覆盖无空洞 ⇒ 无理由")
+# H3 反例（prod --days 7 真值）：hole=139 < missing=153 ⇒ 另有 14h 散点缺失 ⇒ 两个独立缺陷。
+# 旧码用「门槛相对」（139 > 168×0.2 = 33.6）判同源 ⇒ 既印出**事实错误的因果**（声称压到实测
+# 8.9%），又吞掉「散点缺失」这一独立缺陷。
+_f4 = calib.molecule_fail_reasons({"expect_hours": 168, "hours_present": 15,
+                                   "hours_present_ratio": 0.0893, "max_hole_hours": 139})
+check(len(_f4) == 2, "H3：hole=139h 但 missing=153h ⇒ 不折叠，报 2 条（散点+长洞是两个缺陷）",
+      str(_f4))
+check(any("另有散点缺失" in x for x in _f4),
+      "H3：覆盖那条须点明「空洞仅占 139h ⇒ 另有散点缺失」", str(_f4))
+
+# ── 复验 H1/H2/H5：源码级守卫（同一缺陷类已四次复发 ⇒ 不再只靠人工复核）──
+with open(os.path.join(_HERE, "calib_squeeze_liq_thr.py"), encoding="utf-8") as _fh:
+    _calib_src = _fh.read()
+_j = _calib_src.find('out["judge"] = {')
+_jseg = _calib_src[_j:_calib_src.find("\n    }", _j)] if _j >= 0 else ""
+check('"conclusion": CONCLUSION_BY_CODE[rc]' in _jseg,
+      "G1 守卫：`conclusion` 由 rc 派生", _jseg[:80])
+check('"reliable": rc != 3' in _jseg,
+      "H1 守卫：`reliable` 由 rc 派生（不再单独写 sample_ok —— 同类第四次复发）")
+check('"exit_code": rc' in _jseg, "G3 守卫：`exit_code` 与 conclusion 同源（均为 rc）")
+check('elif not j["pass"]:' not in _calib_src
+      and 'elif j["conclusion"] == "FAIL"' in _calib_src,
+      "H2 守卫：判定解读按 `conclusion` 精确分派（不再用粗粒度 pass 兜 ⇒ "
+      "SAMPLE_UNUSABLE 不再误印「具备判别力」）")
+check('if j["upper_bound_pct"] is None:' in _calib_src
+      and "上界**不可算**" in _calib_src,
+      "H5 守卫：`ub_sub=None` 单列文案（不再印「上界由 None 决定」/「CI 含 20%？」）")
 
 # ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")

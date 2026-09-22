@@ -228,16 +228,25 @@ CONCLUSION_BY_CODE = {0: "PASS", 2: "FAIL", 3: "SAMPLE_UNUSABLE", 4: "INCONCLUSI
 
 
 def ci_margin_pp(ci: tuple[float, float] | None, line: float) -> float | None:
-    """CI 两界距判据线的**较小**裕度（百分点，复验 G4）。
+    """CI 两界距判据线的**带符号**裕度（百分点，复验 G4 + H4）。
 
     为什么需要：`ci_decisive` 是布尔化判定，贴线时的边界性被完全掩盖 —— 实测
-    `--days 1` 的 CI = [20.01, 23.54] 对判据线 20.00% 只差 **0.01pp** 即判「有判别力」，
+    `--days 7` 的 CI = [20.01, 23.54] 对判据线 20.00% 只差 **0.01pp** 即判「有判别力」，
     而 0.01pp 远在任何统计误差之内 ⇒ 该 `ci_decisive=true` 实质是掷硬币。
-    给出裕度让人一眼看出「这条结论离翻盘有多远」。
+
+    为什么必须**带符号**（复验 H4）：判据本身是有向的（上界须 `< 20%`），而旧版取绝对值
+    ⇒ `[10,15]` 与 `[25,30]` 对线 20 都返回 `5.0`，**裕度同值但结论相反**（前者在 PASS 侧、
+    后者在 FAIL 侧）。故定为：**正 = CI 整段在判据线下方（PASS 侧）**、**负 = 整段在上方
+    （FAIL 侧）**、**0.0 = 已跨线（两侧皆有，谈不上裕度）**。
     """
     if not ci:
         return None
-    return round(min(abs(ci[0] - line), abs(ci[1] - line)), 2)
+    lo, hi = ci
+    if hi < line:
+        return round(line - hi, 2)      # 整段在线下方 ⇒ PASS 侧 ⇒ 正（越大越稳）
+    if lo > line:
+        return round(line - lo, 2)      # 整段在线上方 ⇒ FAIL 侧 ⇒ 负（越负越差）
+    return 0.0                          # 跨线 ⇒ 裕度为零
 
 
 def denominator_coverage(cur, syms: list[str], days: int) -> dict:
@@ -320,31 +329,39 @@ def molecule_coverage(cur, days: int) -> dict:
 
 
 def molecule_fail_reasons(mol: dict) -> list[str]:
-    """分子自证的不合格理由（整点覆盖 / 最长连续空洞），**同源折叠为一条**（复验 E9 + G5）。
+    """分子自证的不合格理由（整点覆盖 / 最长连续空洞），**同源折叠为一条**（复验 E9 + G5 + H3）。
 
     为什么折叠：单段长空洞会**同时**压低整点覆盖率 ⇒ 旧码一次给出两条理由（① 覆盖 ② 空洞），
     读者会读成「两个问题」而实际只有一个 —— 正是 E9 想消除的「同一份数据多条重复理由」，
     只是分母组当时收敛了、分子组没有。
 
-    折叠判据：该空洞自身长度已足以造成覆盖不达标（`hole > expect × (1 - 覆盖门槛)`）
-    ⇒ 空洞是主因、覆盖只是后果，合并成一条；否则两者是**彼此独立的缺陷**（散点缺失 vs 局部
-    长洞），照报两条 —— 无条件折叠会丢掉「缺失形态」这一独立信息。
+    折叠判据（复验 H3 更正）：必须用**观测相对**而非**门槛相对** ——
+    「空洞自身**足以使**覆盖不达标」（`hole > expect × (1 - 门槛)`）只是**充分条件**，
+    它**不等于**「空洞自身**解释了实测**覆盖率」。prod `--days 7` 的反例：
+    `hole=139h`、`missing=168-15=153h` ⇒ 空洞最多只能把覆盖压到 `1-139/168 = 17.3%`，
+    而实测 8.9% —— 另有 14h 散点缺失，**是两个独立缺陷**；门槛相对判据却判「同源」，
+    既在文案里印出**事实错误的因果**，又把「散点缺失」吞掉（G5 的反向错误：实际两个问题
+    被读成一个）。⇒ 判据收紧为「该空洞**即窗口内的全部缺失**」（`hole ≥ missing`）：
+    此时折叠才是真的同源；否则散点缺失与局部长洞是彼此独立的缺陷，照报两条。
     """
     fails: list[str] = []
     ratio = mol["hours_present_ratio"] or 0.0
+    missing_hours = max(0, mol["expect_hours"] - mol["hours_present"])
     cov_fail = ratio < MIN_MOLECULE_HOUR_COVERAGE
     hole_fail = mol["max_hole_hours"] > MAX_MOLECULE_HOLE_H
-    hole_dominates = (mol["max_hole_hours"]
-                      > mol["expect_hours"] * (1 - MIN_MOLECULE_HOUR_COVERAGE))
-    if cov_fail and hole_fail and hole_dominates:
+    hole_is_all_missing = mol["max_hole_hours"] >= missing_hours
+    if cov_fail and hole_fail and hole_is_all_missing:
         fails.append(
             f"分子最长连续空洞 {mol['max_hole_hours']}h > {MAX_MOLECULE_HOLE_H}h，"
-            f"该空洞自身已足以把整点覆盖压到 {ratio:.1%} < {MIN_MOLECULE_HOUR_COVERAGE:.0%}"
-            "（同源 ⇒ 折叠为一条）")
+            f"且它**即窗口内的全部缺失**（{missing_hours}h）⇒ 整点覆盖 {ratio:.1%} < "
+            f"{MIN_MOLECULE_HOUR_COVERAGE:.0%} 只是它的后果（同源 ⇒ 折叠为一条）")
     else:
         if cov_fail:
             fails.append(f"分子整点覆盖 {mol['hours_present']}/{mol['expect_hours']}"
-                         f" = {ratio:.1%} < {MIN_MOLECULE_HOUR_COVERAGE:.0%}")
+                         f" = {ratio:.1%} < {MIN_MOLECULE_HOUR_COVERAGE:.0%}"
+                         f"（缺失 {missing_hours}h"
+                         + (f"，其中空洞仅占 {mol['max_hole_hours']}h ⇒ 另有散点缺失"
+                            if hole_fail else "，无超限长空洞 ⇒ 呈分散形态") + "）")
         if hole_fail:
             fails.append(f"分子最长连续空洞 {mol['max_hole_hours']}h > {MAX_MOLECULE_HOLE_H}h")
     return fails
@@ -592,8 +609,9 @@ def main() -> int:
         "upper_bound_variant": ub_name,
         "upper_bound_n": ub_sub["n"] if ub_sub else None,
         "upper_bound_ci95_pct": [round(ci[0], 2), round(ci[1], 2)] if ci else None,
-        # 复验 G4：布尔化的 `ci_decisive` 会掩盖贴线的边界性（实测只差 0.01pp 即判「有判别力」）
-        # ⇒ 同时给出 CI 距判据线的较小裕度，让人一眼看出这条结论离翻盘多远。
+        # 复验 G4 + H4：布尔化的 `ci_decisive` 会掩盖贴线的边界性（实测只差 0.01pp 即判
+        # 「有判别力」）⇒ 给出**带符号**裕度（正 = CI 在判据线下方即 PASS 侧，负 = 上方
+        # 即 FAIL 侧，0 = 已跨线），既暴露贴线又保住方向。
         "ci_distance_pp": ci_margin_pp(ci, JUDGE_UPPER_BOUND_PCT),
         # 复验 E1：pass 必须与 sample_ok 同向——分母/分子不合格时算出的上界是纯噪音，
         # 否则 `--json` 会输出「pass=true」而进程 rc=3，下游读 JSON 必然误判。
@@ -605,7 +623,12 @@ def main() -> int:
         # 复验 G1：改由 `exit_code()` 派生（四态，含「样本不可用」），与 rc 恒一致。
         "exit_code": rc,
         "conclusion": CONCLUSION_BY_CODE[rc],
-        "reliable": sample_ok,
+        # 复验 H1：`reliable` 也曾是**独立派生**（`sample_ok`）—— G1 把 `conclusion` 绑到
+        # `exit_code()` 后，该函数入参多了 `measurable`，而 `reliable` 没跟上 ⇒ 出现
+        # `conclusion="SAMPLE_UNUSABLE"` 却 `reliable=true` 的矛盾。同类第四次复发
+        # （D1 `pass` → F2 `decisive` → G1 `conclusion` → 本轮 `reliable`）⇒ 直接从 rc 派生
+        # （`rc != 3` ⟺ `sample_ok and measurable`），此处收口。
+        "reliable": rc != 3,
     }
 
     if args.json:
@@ -695,13 +718,26 @@ def main() -> int:
     ci_txt = (f"[{j['upper_bound_ci95_pct'][0]:.2f}%, {j['upper_bound_ci95_pct'][1]:.2f}%]"
               if j["upper_bound_ci95_pct"] else "n/a")
     print("\n【统计判别力】← 复验 E2：判据线附近单次点估计的 PASS/FAIL 等权，不能作阈值决策依据")
-    print(f"  上界由 `{j['upper_bound_variant']}` 决定，n={j['upper_bound_n']}"
-          f"  95% CI(Wilson) = {ci_txt}（含 {JUDGE_UPPER_BOUND_PCT:.0f}%？"
-          f"{'YES ⇒ 无法区分 PASS/FAIL' if not j['ci_decisive'] else 'no'}）")
-    # 复验 G4：布尔化的 ci_decisive 会把「只差 0.01pp」和「差 10pp」印成同一句话 ⇒ 必须给裕度。
-    if j["ci_distance_pp"] is not None:
-        print(f"  ↳ CI 距判据线（{JUDGE_UPPER_BOUND_PCT:.0f}%）裕度 = {j['ci_distance_pp']:.2f}pp"
-              "（布尔化只看是否跨线，看不出这条结论离翻盘有多远）")
+    # 复验 H5：`ub_sub is None`（无任何变体命中 ⇒ 上界根本算不出来）旧码照样印
+    # 「上界由 `None` 决定」+「CI 含 20%？YES ⇒ 无法区分 PASS/FAIL」—— 把「**没有**上界可算」
+    # 说成「**CI 含**判据线」，借用了 `ci_decisive=False` 的既有措辞 ⇒ 单列该状态、跳过 CI 与
+    # 裕度行（此时两者都无意义）。
+    if j["upper_bound_pct"] is None:
+        print("  无任何变体命中（n 全为 0）⇒ 上界**不可算**（measurable=False）"
+              "⇒ 判据无输入 ⇒ 退出码 3（样本不可比；与 rc=4「样本可用但判据不可判」不同源）")
+    else:
+        print(f"  上界由 `{j['upper_bound_variant']}` 决定，n={j['upper_bound_n']}"
+              f"  95% CI(Wilson) = {ci_txt}（含 {JUDGE_UPPER_BOUND_PCT:.0f}%？"
+              f"{'YES ⇒ 无法区分 PASS/FAIL' if not j['ci_decisive'] else 'no'}）")
+        # 复验 G4 + H4：布尔化的 ci_decisive 会把「只差 0.01pp」和「差 10pp」印成同一句话，
+        # 且绝对值裕度会把 PASS 侧/FAIL 侧抹平 ⇒ 印**带符号**裕度并写明所在侧。
+        if j["ci_distance_pp"] is not None:
+            _margin = j["ci_distance_pp"]
+            _side = ("PASS 侧（CI 整段在判据线下方）" if _margin > 0
+                     else "FAIL 侧（CI 整段在判据线上方）" if _margin < 0
+                     else "已跨判据线（两侧皆有，裕度为零）")
+            print(f"  ↳ CI 距判据线（{JUDGE_UPPER_BOUND_PCT:.0f}%）带符号裕度 = {_margin:+.2f}pp"
+                  f" ⇒ {_side}")
     sg = out["segments"]
     if sg["min_pct"] is not None:
         print(f"  各 {sg['segment_hours']}h 段上界（n≥{MIN_SEGMENT_N}，共 {sg['n_segments']} 段"
@@ -723,8 +759,16 @@ def main() -> int:
               "只是抽样噪声，**不构成阈值决策依据**（勿据此调阈值）。")
         print("     替代读法：看上方 CI 与各时段区间；报告建议改用「多次运行取区间 / "
               "多时段中位数」作为判据输入。")
-    elif not j["pass"]:
+    elif j["conclusion"] == "FAIL":
         print("     判据不通过且具备判别力 ⇒ 先核对分母/分子自证与未来函数口径，再谈调阈值。")
+    elif j["conclusion"] == "SAMPLE_UNUSABLE":
+        # 复验 H2：该分支原为 `elif not j["pass"]`（本是为 rc=2 有判别力 FAIL 写的），
+        # `conclusion` 新增第四态后 `SAMPLE_UNUSABLE` 也落进来 ⇒ 同时误述两件事：
+        # ① 此 case `decisive=False`（CI 为空）根本谈不上「具备判别力」；
+        # ② 实际原因既非「判据不通过」也非「分母/分子不合格」（是无可判输入）。
+        # ⇒ 按 `conclusion` 精确分派，不再用 `pass` 这种粗粒度布尔兜。
+        print("     无任何变体命中 ⇒ 上界不可算、无判据输入 ⇒ 这不构成「判据不通过」"
+              "（也谈不上判别力）⇒ 先让变体过滤条件能命中样本，再谈阈值。")
     print("\n⚠️ 样本时间代表性弱（表历史见上）⇒ 结论仅供临时定稿，"
           "待 squeeze_track 判定样本积累后改用判定窗口直接标定。")
     return rc

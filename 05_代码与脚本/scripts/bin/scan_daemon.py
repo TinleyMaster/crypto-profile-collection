@@ -14,7 +14,8 @@
   - [15min]  scan_main_pool    — 主池扫描 L0+L1+L2
   - [30min]  scan_accumulation — 蓄势池 ACC/BRK
   - [30min]  watchlist_monitor — 解锁/空头/大户监控
-  - [30min]  expire_signals    — 信号生命周期巡检（active → expired）
+  - [30min]  expire_signals    — 信号生命周期巡检（active/confirmed → expired）
+  - [30min]  confirm_signals   — 延续确认巡检（active → confirmed，越过 breakout_px）
   - [24h]    prune_scan_data   — 采集数据保留期清理（保留 30 天）
 
 设计原则：
@@ -91,6 +92,20 @@ class _ResilientStream:
 
     def isatty(self) -> bool:
         return False
+
+    def reconfigure(self, **kwargs):
+        """就地重配置底层流；失败即忽略。
+
+        `__getattr__` 会把 `reconfigure` 转发给底层流，而底层流若已被关闭，
+        该调用抛 `ValueError: I/O operation on closed file.` —— 这正是 2026-09-21
+        停摆的引信之一（`_wait_until_ban_expires()` 里的 `_log` 走 print 抛错，
+        使 `_get_usdt_perpetuals()` 这类**不在 try 内**的调用直接判整轮失败）。
+        显式定义并吞掉异常，代理才真正「写失败即丢弃」。
+        """
+        try:
+            return self._inner.reconfigure(**kwargs)
+        except Exception:  # noqa: BLE001
+            return None
 
     def writable(self) -> bool:
         return True
@@ -477,6 +492,15 @@ VOL_RATIO_THR = 2.0
 LOOKBACK_BARS_MAIN = 20
 OI_RISE_BARS = 2
 LEVEL_RANK = {"5m": 1, "15m": 2, "1h": 3}
+# 失效位幅度（工单 P2-4）：原用「触发周期近 21 根反向极值」，实测幅度**不可用** ——
+# XMR -11.97% / EPIC -8.02% / 1000BONK -8.13% / APT -6.90%，一个自身涨幅仅 +4.69%
+# 的多头信号配 -11.97% 止损 ⇒ 风险回报倒挂；而窄幅盘整时 21 根极值可能只 0.3%
+# ⇒ 被噪音打掉。改用 2×ATR(14) 并夹在 [STOP_PCT_MIN, STOP_PCT_MAX] 带内：与波动率
+# 挂钩（自适应），且两端有界（幅度可用）。主池与 BRK 共用（P2-9）。
+STOP_ATR_MULT = 2.0
+STOP_ATR_PERIOD = 14
+STOP_PCT_MIN = 3.0
+STOP_PCT_MAX = 12.0
 
 # ── 数据新鲜度护栏 ──────────────────────────────────────────────
 # 各周期最新 K 线 open_time 距今最大分钟数（采集每 5min、扫描每 15min，留足余量；
@@ -505,12 +529,21 @@ STALL_ALERT_MIN_INTERVAL_H = 6
 # 任务心跳停摆：心跳年龄 > N × 任务周期 即视为该任务停产（与外部看门狗
 # check_scan_freshness.py 的 HEARTBEAT_MAX_AGE_MIN 保持同一口径：3× 周期）
 STALL_HEARTBEAT_GRACE = 3
+# 「某任务在本实例内尚未跑完首轮」这一状态的宽限上限（分钟）。该状态的等待时间应由
+# **该任务的 offset** 决定（首轮最早可能的时刻），而不是 3×周期：周期 1800s / 86400s
+# 的任务会得到 90 / 4320 分钟，远大于容器重启周期（实测约 15 分钟）⇒ 每次重启都刷新
+# 宽限，「线程从未启动」被无限期掩盖（工单 P0-1 根因②：4 次查询、跨 2 个实例，
+# expire_signals 始终无心跳行而两条监控同时静默）。
+# ⚠️ 必须 > TASK_DEFS 中最大 offset（当前 900s = 15min）+ 首轮函数自身耗时；
+#    且必须与 check_scan_freshness.FIRST_ROUND_GRACE_MAX_MIN 同值。
+FIRST_ROUND_GRACE_MAX_MIN = 30.0
 # 参与心跳检查的任务（审计 P0-B：原先漏了 squeeze/liquidation/watchlist，
 # 而 2026-09-21 停摆中唯一留下物证的恰恰是盲区里的 scan_squeeze）。必须与
 # TASK_DEFS 全覆盖（阈值由各自周期 ×STALL_HEARTBEAT_GRACE 自动推导）。
 STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_liquidation", "scan_alert",
                          "scan_squeeze", "scan_main_pool", "scan_accumulation",
-                         "watchlist_monitor", "expire_signals", "prune_scan_data")
+                         "watchlist_monitor", "expire_signals", "confirm_signals",
+                         "prune_scan_data")
 # 连续失败自杀：同一任务连续 N 轮**连心跳都写不进 DB** 即退出进程，交 supervisord
 # 拉起（审计 P1-4）。半死进程（stdout 关闭/线程卡死）会一直占着单实例锁，新实例
 # 永远起不来 —— 这是 2026-09-18 63h、2026-09-21 48min 两次停摆的共同放大器。
@@ -518,6 +551,19 @@ STALL_HEARTBEAT_TASKS = ("scan_klines", "scan_oi_cvd", "scan_liquidation", "scan
 # （Binance/CoinGlass 限频、超时）只记 last_error，绝不重启进程，否则会把一次
 # API 抖动放大成全局停产（见 _run_task_loop 注释）。
 MAX_CONSEC_FAILURES = 3
+# 进程级「无产出」看护（2026-09-21 停摆 14h+ 的直接补救）。
+# 背景：任务线程可能**静默死亡**（异常发生在 try 之外的每轮首行 print）或**永久卡住**
+# （外部 API 无界退避），而主线程只是 sleep ⇒ 进程活着、持着单实例锁、
+# supervisord 因「进程未退出」永不重启 ⇒ 无限期停摆，只有人工干预才能恢复。
+# 判据取「全进程最近一次『有任务跑完一轮』距今的分钟数」：最频繁的任务周期 300s，
+# 故 30 分钟 ≈ 6 个周期都没跑完一轮，此时进程已确定无产出，退出交 supervisord 重启。
+# ⚠️ 必须远大于最大 offset（900s）+ 单轮耗时，否则会把正常的慢轮误判成卡死。
+HANG_EXIT_MIN = 30.0
+# 主线程看护的检查周期（秒）。取 60s：相对 30 分钟阈值足够密（最多晚 1 分钟发现），
+# 又不会让主线程成为负担。
+WATCHDOG_TICK_SEC = 60.0
+# 全进程最近一次「有任务完成一轮（无论成败）」的单调时钟时刻（_run_task_loop 维护）
+_LAST_ANY_ROUND_TS = 0.0
 # 单实例锁取锁重试（审计复验 P1-3）：os._exit(1) 后 supervisord 立即拉起新实例，
 # 旧实例的锁连接 TCP 释放通常 <1s，但撞上窗口就取不到锁 → main() 返回 1 且耗时
 # < startsecs=10 → supervisord 计为「启动失败」，连续 3 次即 FATAL 且不再拉起
@@ -730,6 +776,25 @@ def _in_cooldown_main(conn, symbol: str, cooldown_h: float) -> bool:
         return cur.fetchone() is not None
 
 
+def _atr_stop_pct(bars: list[dict], ref_px: float) -> float | None:
+    """失效位幅度（%）：`STOP_ATR_MULT × ATR(STOP_ATR_PERIOD)` / 参考价，夹在带内。
+
+    `bars` 需含 `high_px` / `low_px` / `close_px`（按时间升序，最后一根为触发条）。
+    数据不足 `STOP_ATR_PERIOD + 1` 根时返回 None —— **不落库也不兜底**，渲染层
+    按「无失效位」显示（与费率/共振的 n/a 口径一致：不知道就别说）。
+    """
+    if ref_px <= 0 or len(bars) < STOP_ATR_PERIOD + 1:
+        return None
+    win = bars[-(STOP_ATR_PERIOD + 1):]
+    trs = []
+    for prev, cur in zip(win, win[1:]):
+        h, l, pc = float(cur["high_px"]), float(cur["low_px"]), float(prev["close_px"])
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    atr = sum(trs) / len(trs)
+    pct = STOP_ATR_MULT * atr / ref_px * 100
+    return max(STOP_PCT_MIN, min(STOP_PCT_MAX, pct))
+
+
 def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
     """主池扫描（单轮）。"""
     with _db() as conn:
@@ -794,21 +859,21 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
 
             ctx_tags = regime["tags"] + [f"lv{l1['level']}_{l1['iv']}"]
             # 入场/失效位（审计 P2-4：表里有 trigger_price / stop_loss_pct，但主池
-            # 52 条告警 100% 为空 —— 属**生产者从未计算**，不是渲染层漏显示）。
-            # 入场 = 触发周期最新收盘价；失效 = 该周期近 LOOKBACK_BARS_MAIN+1 根的
-            # 反向极值（多头取最低价、空头取最高价）。触发条自身的 low ≤ close、
-            # high ≥ close，故 ref 与 trig 的大小关系天然成立，pct 恒 ≥ 0。
-            trig_px = stop_pct = None
+            # 52 条告警 100% 为空 —— 属**生产者从未计算**）。
+            # 入场 = 触发周期最新收盘价；失效 = 2×ATR(14) 夹在 [3%,12%] 带内
+            # （工单 P2-4：原「近 21 根反向极值」幅度不可用，实测 -11.97% 配 +4.69%
+            #  涨幅 ⇒ 风险回报倒挂；窄幅盘整时又会紧到 0.3% 被噪音打掉）。
+            trig_px = brk_px = stop_pct = None
             bars = by_sym_k[sym].get(l1["iv"]) or []
             if bars:
                 trig_px = float(bars[-1]["close_px"])
-                look = bars[-(LOOKBACK_BARS_MAIN + 1):]
-                if direction == "up":
-                    ref = min(float(b["low_px"]) for b in look)
-                    stop_pct = (trig_px - ref) / trig_px * 100
-                else:
-                    ref = max(float(b["high_px"]) for b in look)
-                    stop_pct = (ref - trig_px) / trig_px * 100
+                stop_pct = _atr_stop_pct(bars, trig_px)
+                # 延续确认位（迁移 fix_061）：触发根的**方向侧极值**，与 trigger_price
+                # 取同一根。该根多为未收盘条 ⇒ 极值是「截至信号时刻」的运行极值，
+                # 无未来信息；又因 high ≥ close ≥ low，该位恒在入场价的正确一侧
+                # （做多在价上、做空在价下）⇒ 不会出现「一建仓就已确认」。
+                brk_px = float(bars[-1]["high_px"] if direction == "up"
+                               else bars[-1]["low_px"])
             signals.append((
                 now, sym, l2["scenario"], l1["iv"], direction, round(l1["chg_pct"], 2),
                 "up" if l1["vol_ratio"] >= VOL_RATIO_THR else "flat",
@@ -818,6 +883,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 None if l2["cvd_ratio"] is None else round(l2["cvd_ratio"], 6),
                 None if trig_px is None else round(trig_px, 8),
                 None if stop_pct is None else round(stop_pct, 3),
+                None if brk_px is None else round(brk_px, 8),
             ))
 
         if signals:
@@ -826,8 +892,8 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                     (signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                      vol_state, vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate,
                      confidence, context_tags, cvd_usd, cvd_ratio, trigger_price,
-                     stop_loss_pct, status)
-                VALUES (%s,%s,'main',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
+                     stop_loss_pct, breakout_px, status)
+                VALUES (%s,%s,'main',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
             """
             with conn.cursor() as cur:
                 cur.executemany(insert_sql, signals)
@@ -953,7 +1019,8 @@ def task_scan_accumulation() -> dict:
 
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
-                "SELECT symbol, open_time, close_px, quote_vol FROM biz.asset_klines "
+                "SELECT symbol, open_time, high_px, low_px, close_px, quote_vol "
+                "FROM biz.asset_klines "
                 "WHERE interval='1h' AND open_time >= NOW() - INTERVAL '1 day' "
                 "ORDER BY symbol, open_time"
             )
@@ -981,10 +1048,26 @@ def task_scan_accumulation() -> dict:
                 (ACC_COOLDOWN_H,),
             )
             acc_cooldown = {r["symbol"] for r in cur.fetchall()}
+            # BRK 已判决过的（symbol, 触发条 open_time）（工单 P2-7）：周期 1800s 而
+            # 「已收盘条」从收盘到不再是 closed[-1] 的窗口是 3600s ⇒ 同一根条会被
+            # 连续两轮判定（09:00 轮与 09:30 轮都以 08:00 根为 closed[-1]），
+            # biz.scan_signal 对 BRK 无唯一约束 ⇒ 同一突破插 2 行（告警层 12h 冷却
+            # 兜底不会重复发信，但库与统计重复）。用 context_tags 里的
+            # `bar=<open_time>` 标签做**精确**去重（不按时间窗近似）。
+            cur.execute(
+                "SELECT symbol, tag FROM biz.scan_signal s, "
+                "LATERAL unnest(s.context_tags) AS tag "
+                "WHERE s.scenario='BRK' AND s.signal_ts > NOW() - INTERVAL '3 hours' "
+                "AND left(tag, 4) = 'bar='"
+            )
+            brk_done: dict[str, set[str]] = {}
+            for r in cur.fetchall():
+                brk_done.setdefault(r["symbol"], set()).add(r["tag"])
 
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
         acc_skipped_cooldown = 0
+        brk_dup_skipped = 0
         for sym in sorted(by_sym_oi):
             if sym in acc_cooldown:
                 acc_skipped_cooldown += 1
@@ -994,19 +1077,27 @@ def task_scan_accumulation() -> dict:
                 continue
             tags = [f"oi_rise={acc['oi_rise_ratio']:.0f}%", f"oi_cum={acc['oi_cum_chg']:.1f}%",
                     acc["fund_label"]]
+            # ⚠️ 占位符数量必须与下面 accumulation 的 INSERT 严格一致（AST 已核对）：
+            # 末三位依次是 trigger_price / stop_loss_pct / breakout_px，ACC 三者皆 None
+            # —— ACC 是「区间内蓄势、无方向」，既无入场位也无延续确认位（不进
+            # confirm_signals 的样本集）。此前 tuple 少一个元素（15 vs 16），
+            # 只要有一轮同时出现 ACC 候选，executemany 就会抛「占位符不匹配」而整批失败。
             signals.append((now, sym, "accumulation", "ACC", "1h", "flat",
                             acc["chg1h"] or 0, "flat", acc["vol_ratio"] or 0.0,
                             "up", acc["oi_cum_chg"], _lookup_funding(funding_map, sym), "medium",
-                            tags, None))
+                            tags, None, None, None, "active"))
 
         for sym in sorted(acc_symbols):
             k1h = by_sym_k.get(sym, [])
             # 审计 P1-4：BRK 通道从未产出（全表 `scenario='BRK'` 0 行）源于两处**不可达**：
             #   ① 区间极值原先把触发条本身也算进去（`k1h[-(OI_HOURS+1):]`），于是
             #      `close > hi` / `close < lo` 数学上恒假 —— close 正是取极值的同一集合成员；
-            #   ② 库里的最后一根 1h 是**未收盘**的当前小时（实测 08:09 时 open_time=08:00），
-            #      其 quote_vol 只有整小时均量的 0.1~0.9 倍（实测 125 币最高 0.93）
-            #      ⇒ `BRK_VOL_RATIO=3.0` 永不可达。
+            #   ② 库里的最后一根 1h 是**未收盘的当前小时**（实测 08:09 时 open_time=08:00）。
+            #      其 quote_vol 只累积了该小时的一部分 ⇒ 同一根 K 线在不同时刻判定结果
+            #      不同、**不可复现**（实测未收盘条 vol_ratio 随采样分钟漂移：min 0.194 /
+            #      中位 0.789 / max 8.263，既有 < 1 也有 > 3）。工单 DOC-1 更正：此前
+            #      「125 币最高 0.93 ⇒ BRK_VOL_RATIO=3.0 永不可达」是在 08:09（整点后
+            #      9 分钟）采样的快照，值随分钟漂移，该论证不成立；正确理由是「不可复现」。
             # 故：只用**已收盘**条，且区间取触发条**之前**的 OI_HOURS 根。
             closed = [k for k in k1h
                       if (now - k["open_time"]).total_seconds() >= INTERVAL_SECONDS["1h"]]
@@ -1019,20 +1110,36 @@ def task_scan_accumulation() -> dict:
                               max_age_min=MAX_KLINE_AGE_MIN["1h"] + INTERVAL_SECONDS["1h"] / 60)
             if not brk:
                 continue
-            tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}"]
+            brk_stop = _atr_stop_pct(closed, float(brk["break_px"]))
+            # P2-7：同一根已收盘条（= closed[-1]）只判决一次
+            bar_tag = f"bar={closed[-1]['open_time']:%Y-%m-%dT%H}"
+            if bar_tag in brk_done.get(sym, set()):
+                brk_dup_skipped += 1
+                continue
+            tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}", bar_tag]
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
                             None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
                             _lookup_funding(funding_map, sym), "high", tags,
-                            round(brk["break_px"], 8)))
+                            round(brk["break_px"], 8),
+                            # P2-9：BRK 原先只落 trigger_price、不落 stop_loss_pct
+                            # ⇒ 卡片有入场价、无失效位。与主池同口径（2×ATR 夹带）。
+                            None if brk_stop is None else round(brk_stop, 3),
+                            # 延续确认（fix_061）：BRK **本身就是突破事件** —— 它要求
+                            # 一根**已收盘** 1h 条的收盘价对前 OI_HOURS 根区间极值
+                            # 越位、且量比 ≥ BRK_VOL_RATIO。故不写 active 等确认，
+                            # 直接落 confirmed（= 延续已被市场跟随），breakout_px 记
+                            # 突破位。若走 confirm_signals，需等**下一根** 1h 收盘越过
+                            # 本根突破价，语义上多了 1h 无谓滞后。
+                            round(brk["break_px"], 8), "confirmed"))
 
         if signals:
             insert_sql = """
                 INSERT INTO biz.scan_signal
                     (signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                      vol_state, vol_ratio, oi_dir, oi_chg_pct, funding_rate, confidence,
-                     context_tags, trigger_price, status)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active')
+                     context_tags, trigger_price, stop_loss_pct, breakout_px, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """
             with conn.cursor() as cur:
                 cur.executemany(insert_sql, signals)
@@ -1041,7 +1148,8 @@ def task_scan_accumulation() -> dict:
     acc_count = sum(1 for s in signals if s[2] == 'accumulation' and s[3] == 'ACC')
     brk_count = sum(1 for s in signals if s[2] == 'accumulation' and s[3] == 'BRK')
     return {"oi_symbols": len(by_sym_oi), "ACC": acc_count, "BRK": brk_count,
-            "acc_skipped_cooldown": acc_skipped_cooldown}
+            "acc_skipped_cooldown": acc_skipped_cooldown,
+            "brk_dup_skipped": brk_dup_skipped}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1074,11 +1182,14 @@ def _load_alert_candidates(conn, window_min: int) -> list[dict]:
             """
             SELECT id, signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                    vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate, context_tags,
-                   cvd_usd, cvd_ratio, trigger_price, stop_loss_pct
+                   cvd_usd, cvd_ratio, trigger_price, stop_loss_pct, breakout_px, status
             FROM biz.scan_signal
             WHERE confidence = 'high'
               AND (pool = 'main' OR (pool = 'accumulation' AND scenario = 'BRK'))
-              AND status = 'active'
+              -- ⚠️ 必须含 confirmed（fix_061）：主池/BRK 的 confirmed 是**升格**
+              -- （延续已被市场跟随），仍属可动作集合。若这里只筛 active，确认一落地
+              -- 这些信号就静默掉出告警 —— 与「突破=质量升格」的语义正好相反。
+              AND status IN ('active', 'confirmed')
               AND alerted_at IS NULL
               AND signal_ts > NOW() - make_interval(mins => %s)
             ORDER BY signal_ts DESC
@@ -1137,6 +1248,11 @@ def _scenario_priors(conn, scenarios: list[str]) -> dict[str, dict]:
       - 基线 = `signal_ts` 当时最后一根 1h 收盘价，终点 = `signal_ts+12h` 当时最后一根；
       - 方向对齐收益 = `+pct`（做多）/ `-pct`（做空），胜率 = 对齐收益 > 0 的占比。
     用中位数不用均值：+24h 均值被单点 +147.99% 拉高到 +8.79%，而中位仅 +3.60%。
+
+    ⚠️ 选择偏置（工单 P2-6）：样本限 `alerted_at IS NOT NULL` ⇒ 只覆盖**告警期**，
+    而告警本身依赖 regime 顺风（实测覆盖 S1 31/67、S2 2/15、S3~S8 0/50；S1 正是
+    「价↑+OI↑」的顺风场景）⇒ 正期望是该口径的**必然**结果。故渲染层必须显式标注
+    「仅含已告警样本，非无偏基准」，不得当作信号质量证据。
     """
     if not scenarios:
         return {}
@@ -1417,12 +1533,22 @@ STRENGTH_BONUS_ALIGNED = 1.15
 STRENGTH_PENALTY_CONFLICT = 0.75
 STRENGTH_BONUS_CVD = 1.05
 STRENGTH_BAR_CELLS = 5
+# BRK 的 oi_chg_pct 为 None（突破判定只用价+量，生产者刻意不落 OI 增速）
+# ⇒ 基量 |vol_ratio × 0| = 0 ⇒ 强度条整体不渲染、混排时**永远垫底**，哪怕
+# vol_ratio = 4.05x（工单 P2-5，实物复现 id=1159 LAUSDT）。
+# 缺 OI 增速时以「等当量」代替单因子，使 BRK 与主池强度可比。
+# ⚠️ 3.0 是**临时等当量**（BRK 门槛即 BRK_VOL_RATIO=3.0），待 BRK 样本积累后按
+#    实际分布标定；勿据单样本调整。
+BRK_STRENGTH_OI_EQUIV = 3.0
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 
 
 def _alert_strength(it: dict) -> float:
     sig, res = it["signal"], it["resonance"]
-    base = abs(float(sig.get("vol_ratio") or 0) * float(sig.get("oi_chg_pct") or 0))
+    oi_chg = sig.get("oi_chg_pct")
+    if oi_chg is None and sig.get("scenario") == "BRK":
+        oi_chg = BRK_STRENGTH_OI_EQUIV  # 见常量注释（P2-5）
+    base = abs(float(sig.get("vol_ratio") or 0) * float(oi_chg or 0))
     up = sig.get("p_dir") == "up"
     cd = res.get("catalyst_dir") or {}
     bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
@@ -1542,6 +1668,13 @@ def _render_alert_email(items: list[dict]) -> str:
                  f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
                  f"border-radius:3px;font-size:11px'>"
                  f"{str(sig.get('confidence') or '').upper()}</span>")
+        # 延续确认徽章（fix_061）：主池信号在 signal_ts 后 6h 内越过 breakout_px
+        # ⇒ status='confirmed'。它表示「延续已被市场跟随」，是**质量升格**而非
+        # 入场门槛（回放：等确认再入场会把期望做低），故只作信息展示。
+        # ⚠️ 只对主池渲染 —— 轧空池的 confirmed 是「已判定事件」，同值不同源。
+        if sig.get("status") == "confirmed" and sig.get("pool") == "main":
+            badge += (f" <span style='background:#dbeafe;color:#1d4ed8;padding:1px 5px;"
+                      f"border-radius:3px;font-size:11px'>已确认</span>")
         bar = _strength_bar(_alert_strength(it), top, arrow_color) if top > 0 else ""
         rank = _CIRCLED[idx] if idx < len(_CIRCLED) else f"{idx + 1}."
         # 失效位（审计 P2-4）：生产者已落 trigger_price / stop_loss_pct ⇒ 渲染价格与幅度
@@ -1552,15 +1685,19 @@ def _render_alert_email(items: list[dict]) -> str:
                        else float(trig_px) * (1 + float(stop_pct) / 100))
             invalid_txt = (f"<br><small style='color:#6b7280'>失效位 "
                            f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
-                           f"（-{float(stop_pct):.2f}%，入场 "
+                           f"（-{float(stop_pct):.2f}%，2×ATR 夹 [3%,12%]，入场 "
                            f"{_fmt_num(trig_px, 6)}）</small>")
         # 历史先验（审计 P2-5）：中位/胜率/样本量，**不用均值**（会被离群值绑架）
+        # 工单 P2-6：样本限定 `alerted_at IS NOT NULL`（近 30 天、且已到期）⇒ 只覆盖
+        # 「告警期」，而告警本身依赖 regime 顺风（S1 = 价↑+OI↑ 正是顺风场景）⇒
+        # 正期望是该口径**必然**结果，不是信号质量证据。此处显式披露偏置来源，
+        # 不把它包装成无偏基准（分层基准需更长样本，见 AGENTS.md 待办）。
         prior = it.get("prior")
         prior_txt = ""
         if prior:
             prior_txt = (f"<br><small style='color:#6b7280'>历史同场景 {prior['horizon']}h "
                          f"方向对齐 中位 {prior['median']:+.2f}% / 胜率 {prior['win']:.0f}%"
-                         f"（n={prior['n']}）</small>")
+                         f"（n={prior['n']}，仅含已告警样本，非无偏基准）</small>")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
@@ -1583,10 +1720,17 @@ def _render_alert_email(items: list[dict]) -> str:
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
-              "费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 触发周期近 21 根反向极值；"
-              "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量）；"
-              "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，共振/CVD 与结论"
-              "相悖则扣系数），按最高分对数归一，条后数字为原始分数，非胜率。</p>")
+              "费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 2×ATR(14) 幅度夹在 [3%,12%] "
+              "带内（工单 P2-4：原 21 根反向极值实测幅度不可用，-11.97% 配 +4.69% 涨幅 "
+              "⇒ 风险回报倒挂）；"
+              "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
+              "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
+              "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，BRK 无 OI 增速时取 "
+              "3.0 等当量；共振/CVD 与结论"
+              "相悖则扣系数），按最高分对数归一，条后数字为原始分数，非胜率；"
+              "「已确认」徽章 = 信号发出后 6 小时内出现一根已收盘 1h K 线的收盘价越过"
+              "「触发根极值」⇒ 延续已被市场跟随（质量升格，非入场门槛：实测等确认再"
+              "入场会把入场价抬高，故不改变执行口径）。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
                 "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"
@@ -1647,17 +1791,22 @@ def _stall_parts(conn, now: datetime) -> list[str]:
             limit_min = iv * STALL_HEARTBEAT_GRACE / 60.0
             row = hb.get(name)
             last_run = row["last_run_at"] if row else None
-            # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 给整个
-            # limit_min 宽限，避免每次部署后立刻误报「线程从未启动」。
+            # 本实例尚未跑完首轮（无心跳，或心跳来自上一次进程）→ 给一段宽限，
+            # 避免每次部署后立刻误报「线程从未启动」（宽限上限见下）。
             if row is None or (daemon_start is not None and last_run < daemon_start):
                 if daemon_start is None:
                     parts.append(f"任务 {name} 无心跳记录（该线程可能从未启动）")
                 else:
                     gap_min = (now - daemon_start).total_seconds() / 60
-                    if gap_min > limit_min:
+                    # 首轮宽限取 min(3×周期, FIRST_ROUND_GRACE_MAX_MIN)：3×周期对
+                    # 长周期任务（1800s/86400s）会得到 90/4320 分钟，而容器重启周期
+                    # 约 15 分钟 ⇒ 每次重启都把宽限重置，「线程从未启动」永远判不出来
+                    # （工单 P0-1 根因②，与 check_scan_freshness 同口径）。
+                    first_limit_min = min(limit_min, FIRST_ROUND_GRACE_MAX_MIN)
+                    if gap_min > first_limit_min:
                         parts.append(
                             f"任务 {name} 本实例已启动 {gap_min:.0f} 分钟仍无首轮心跳"
-                            f"（阈值 {limit_min:.0f} 分钟）")
+                            f"（阈值 {first_limit_min:.0f} 分钟）")
                 continue
             # 判据用 last_ok_at（最近一次**成功**）而非 last_run_at：stdout/日志
             # 设施故障时每轮都在 print 处抛异常，func() 从未执行，而 last_run_at
@@ -2574,7 +2723,7 @@ SIGNAL_TTL_ACC_DAYS = 7
 
 
 def task_expire_signals() -> dict:
-    """信号生命周期巡检：把超期的 active 信号置 expired 并写 expired_at（每 30 分钟）。
+    """信号生命周期巡检：把超期的 active/confirmed 信号置 expired 并写 expired_at（每 30 分钟）。
 
     实现设计文档 §6.3 的「超时退出」一段（§12.1-4 缺口）。原状：`biz.scan_signal`
     只有写入没有退出，`status` 恒为 active、`expired_at` 无人写 —— 观察名单没有
@@ -2586,9 +2735,11 @@ def task_expire_signals() -> dict:
       - `expired_at` 写**确定性截止时刻**（`signal_ts + TTL`）而非 `NOW()`：本任务
         每 30 分钟才跑一轮，写 NOW() 会让实际有效期随巡检相位漂移最多 30 分钟。
         这一列同时被 `phase_execute_scan_signal.load_candidates` 用作在窗前筛。
-      - 只更新 `status='active'` 的行 ⇒ 幂等，可重复执行；轧空池写入的 `confirmed`
-        行不参与（它记录的是「已判定事件」，有自己的 `biz.squeeze_track` 状态机，
-        不属于观察名单）。
+      - 只更新 `status IN ('active','confirmed')` 的行 ⇒ 幂等，可重复执行。
+        **confirmed 必须覆盖**（fix_061）：主池的 confirmed 是「延续已被市场跟随」
+        的**升格**（仍是观察名单成员），若只收 active，一旦升格就永不失效。
+        轧空池写入的 confirmed **同值不同源**（那里是「已判定事件」，有自己的
+        `biz.squeeze_track` 状态机）⇒ 靠 `pool` 条件天然排除，不受本处影响。
     """
     with _db() as conn:
         stats: dict[str, int] = {}
@@ -2598,7 +2749,7 @@ def task_expire_signals() -> dict:
                 UPDATE biz.scan_signal
                    SET status = 'expired',
                        expired_at = signal_ts + make_interval(hours => (%s)::int)
-                 WHERE status = 'active'
+                 WHERE status IN ('active', 'confirmed')
                    AND ((pool = 'main')
                         OR (pool = 'accumulation' AND scenario = 'BRK'))
                    AND signal_ts < NOW() - make_interval(hours => (%s)::int)
@@ -2611,7 +2762,7 @@ def task_expire_signals() -> dict:
                 UPDATE biz.scan_signal
                    SET status = 'expired',
                        expired_at = signal_ts + make_interval(days => (%s)::int)
-                 WHERE status = 'active'
+                 WHERE status IN ('active', 'confirmed')
                    AND pool = 'accumulation' AND scenario = 'ACC'
                    AND signal_ts < NOW() - make_interval(days => (%s)::int)
                 """,
@@ -2620,6 +2771,83 @@ def task_expire_signals() -> dict:
         conn.commit()
     return {"signal_ttl_main_h": SIGNAL_TTL_MAIN_H,
             "signal_ttl_acc_days": SIGNAL_TTL_ACC_DAYS, **stats}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  任务 11：延续确认（30 分钟）
+# ═══════════════════════════════════════════════════════════════
+# 确认窗口（小时）：signal_ts 后多久之内出现「越位」才算延续已被跟随。
+#
+# 标定依据（2026-09-22 离线回放：90 条前向可结算多头主池信号、1h K 线；
+# 入场价固定为 signal_ts 收盘价、离场固定 signal_ts+24h、方向对齐）：
+#   W=2h → 越位 n=24 均 +10.95% 胜 83.3%  | 未越位 n=66 均 +2.72% 胜 63.6%
+#   W=4h → 越位 n=30 均 +10.00% 胜 83.3%  | 未越位 n=60 均 +2.38% 胜 61.7%
+#   W=6h → 越位 n=40 均  +9.04% 胜 85.0%  | 未越位 n=50 均 +1.62% 胜 56.0%
+#   W=8h → 越位 n=49 均  +8.56% 胜 81.6%  | 未越位 n=41 均 +0.57% 胜 53.7%
+# 取 6h：区分度与 4h 相当而保留率高近一倍（44% vs 33%），保住样本量。
+#
+# ⚠️ 区分器 ≠ 门槛 —— 实测「等越位再入场」会把期望**做低**：越位位离入场价
+# 中位 2.31%、p75 4.01%，以越位根收盘价入场时 24h 期望 +1.36% < 基线 +1.56%
+# （这与催化层 d3 的教训同源：等价格确认 = 追高）。故本任务只**升格状态**，
+# 绝不改入场时点 —— 消费侧仍按 signal_ts 价格口径执行。
+# ⚠️ 未越位**不提前作废**：W=6h 未越位组 24h 仍 +1.62% 正期望（只有「24h 全程
+# 未越位」的 21 条才是 -4.41%），提前 expired 会主动丢掉一半正期望样本。
+# ⚠️ 样本仅 90 条 / 3 个交易日 / 单边上涨 regime ⇒ 统计力有限，待积累复校。
+BREAKOUT_WINDOW_H = 6
+# 追补余量（小时）：巡检 30min 一轮，而容器重启周期实测约 15min ⇒ 确认窗口
+# 边缘错过一次就永久丢失（K 线已落库、可追补）。故扫描回溯放宽到
+# BREAKOUT_WINDOW_H + BREAKOUT_CATCHUP_H；**越位判据仍严格限定 6h 窗口内**的
+# K 线（见 SQL 的 k.open_time <= signal_ts + 6h）。
+BREAKOUT_CATCHUP_H = 2
+
+
+def task_confirm_signals() -> dict:
+    """延续确认巡检：把「突破位已被越过」的 active 主池信号升格为 confirmed（每 30 分钟）。
+
+    落地设计文档 §6.3 的 `active → confirmed（突破触发价）` 一段（§12.1-4 原先
+    记的是「卡在语义分歧」）。**语义澄清（v0.6）**：
+      - `trigger_price` 保持「入场位 = 触发根收盘价」不变（执行层与渲染层都在消费）；
+      - 「待突破价位」**独立成列** `breakout_px`（迁移 fix_061）= 触发根方向侧极值；
+      - `confirmed` = 该位已被市场跟随，属**质量升格**而非入场门槛（依据见上方常量注释）。
+
+    判据：`signal_ts` 后 `BREAKOUT_WINDOW_H` 小时内，存在一根**已收盘**的 1h K 线，
+    其收盘价越过 `breakout_px`（up→高于 / down→低于）。
+
+    三个实现选择：
+      - **只用已收盘条**（`open_time + 1h <= NOW()`）：未收盘条的 close 是滚动现价，
+        同一根在不同时刻判定结果不同、不可复现（工单 P1-4 的教训）。
+      - 只处理 `status='active'` ⇒ 幂等可重复执行；`expired` 不被复活。
+      - `breakout_px IS NULL`（存量行 / 生产者无 K 线）跳过 —— 不猜、不兜底。
+
+    注：轧空池的 `confirmed` 与本列同值但**不同源**（它记「已判定事件」，有独立的
+    `biz.squeeze_track` 状态机），本任务按 `pool='main'` 严格限定，不会互相污染。
+    """
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE biz.scan_signal s
+                   SET status = 'confirmed'
+                 WHERE s.pool = 'main'
+                   AND s.status = 'active'
+                   AND s.breakout_px IS NOT NULL
+                   AND s.signal_ts > NOW() - make_interval(hours => (%s)::int)
+                   AND EXISTS (
+                       SELECT 1 FROM biz.asset_klines k
+                        WHERE k.symbol = s.symbol
+                          AND k.interval = '1h'
+                          AND k.open_time > s.signal_ts
+                          AND k.open_time <= s.signal_ts
+                              + make_interval(hours => (%s)::int)
+                          AND k.open_time + INTERVAL '1 hour' <= NOW()
+                          AND ((s.p_dir = 'up'   AND k.close_px > s.breakout_px)
+                            OR (s.p_dir = 'down' AND k.close_px < s.breakout_px))
+                   )
+                """,
+                (BREAKOUT_WINDOW_H + BREAKOUT_CATCHUP_H, BREAKOUT_WINDOW_H))
+            confirmed = cur.rowcount
+        conn.commit()
+    return {"breakout_window_h": BREAKOUT_WINDOW_H, "confirmed": confirmed}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2791,6 +3019,7 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
     - 每轮写一次心跳（供停摆检测使用）
     """
     func_kwargs = func_kwargs or {}
+    global _LAST_ANY_ROUND_TS
     time.sleep(offset_sec)  # 初始错峰
 
     running = False
@@ -2799,6 +3028,14 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
     while True:
         round_count += 1
         start_ts = time.time()
+
+        # 每轮重新加固日志流（幂等、零成本）：被本进程 exec/import 的第三方模块
+        # 可能把 `sys.stdout` 换成**非代理**对象（如 `phase_watchlist_monitor.py`
+        # 原来的 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`），一旦换掉，
+        # `_harden_streams` 的保护就被静默摘除，此后底层流一断，下面这条 print 抛
+        # `ValueError` 而它在 try 之外 ⇒ **整个任务线程静默死亡、心跳不再更新**，
+        # 而主线程仍在 sleep ⇒ 进程活着持锁、supervisord 永不重启（2026-09-21 停摆 14h+）。
+        _harden_streams()
 
         if running:
             print(f"[scan_daemon][{name}] 跳过第 {round_count} 轮（上一轮仍在运行）")
@@ -2828,6 +3065,9 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
         finally:
             running = False
             hb_ok = _write_heartbeat(name, ok, err)
+            # 供 main() 的「无产出看护」判断进程是否还有产出（成败都算产出：
+            # 失败会写 last_error 并触发数据新鲜度告警，不会静默）。
+            _LAST_ANY_ROUND_TS = time.monotonic()
 
         # 连续失败自杀（审计 P1-4），但判据收紧为**进程级故障**（审计复验 P1-1）：
         # 只有「连心跳都写不进 DB」才说明本进程自身已不可用（DB/连接池/日志设施坏），
@@ -2862,9 +3102,56 @@ TASK_DEFS = [
     ("scan_accumulation", 1800, 0,  task_scan_accumulation, {}),
     ("scan_squeeze",      300,  420, task_scan_squeeze,     {"min_vol_usd": 5_000_000}),
     ("watchlist_monitor", 1800, 300, task_watchlist_monitor, {}),
-    ("expire_signals",    1800, 900, task_expire_signals,    {}),
+    # expire_signals 的 offset 由 900 改 90（工单 P0-1）：offset 是 `_run_task_loop`
+    # 启动时的初始错峰 sleep，而容器重启周期实测约 15 分钟（493/593/719/911 秒），
+    # offset=900s 与进程存活时长**同量级** ⇒ 常驻模式下首轮几乎永不触发，信号生命
+    # 周期「超时退出」实际停摆（`status='active'` 一度积到 845 行），库里 132 行
+    # `expired` 全部来自手工 `--run-once`。90s 保证每次重启后都能跑完首轮。
+    ("expire_signals",    1800,   90, task_expire_signals,    {}),
+    # 延续确认巡检（fix_061）：offset 480 与 expire_signals(90) 拉开，避免两者同轮
+    # 抢同一批行（确认写 confirmed、失效写 expired，同一行不该在同一时刻被两处写）。
+    # 按 signal_ts 降序语义上「先确认后失效」更自然：确认窗口 6h ≪ TTL 24h，故
+    # offset 大小不影响正确性，仅取 480s 做错峰。
+    ("confirm_signals",   1800,  480, task_confirm_signals,   {}),
     ("prune_scan_data",   86400, 600, task_prune_scan_data, {}),
 ]
+# 耦合校验（工单 P0-1）：首轮宽限上限必须大于最大 offset + 首轮余量，否则「本实例
+# 尚未跑完首轮」的宽限会把正常的慢启动误报成「线程从未启动」。改 TASK_DEFS 的
+# offset 时必须同步复核 FIRST_ROUND_GRACE_MAX_MIN。
+assert FIRST_ROUND_GRACE_MAX_MIN > max(t[2] for t in TASK_DEFS) / 60.0 + 5, \
+    "FIRST_ROUND_GRACE_MAX_MIN 必须 > 最大 offset + 5 分钟"
+
+
+def _watchdog_reason(threads: list) -> str | None:
+    """主线程「无产出看护」的判据：返回退出原因，正常则返回 None。
+
+    两个判据（对应 2026-09-21 停摆 14h+ 的两种成因）：
+
+    1. **任务线程已退出**：线程是 daemon 线程，异常逃出 `_run_task_loop` 后它
+       就永久消失，心跳不再更新，而进程仍在持锁 ⇒ supervisord 不重启。
+       本进程里真实发生过：`phase_watchlist_monitor.py` 每轮换掉 `sys.stdout`
+       关掉底层流后，各线程在「每轮首行 print」（在 try 之外）抛 ValueError
+       逐个死亡。线程名（`scan_<task>`）直接带出来便于定位。
+    2. **全进程无产出**：线程都活着但都没跑完一轮（卡在外部 API 的无界等待、
+       或卡在锁/DB 上）⇒ 数据零写入、心跳不推进，同样是静默停摆。
+
+    ⚠️ 判据必须只看「有没有产出」，不能看「有没有失败」：失败会写 last_error
+    并触发数据新鲜度告警，属可见状态，重启只会放大故障（见 MAX_CONSEC_FAILURES
+    与 binance_http.BAN_WAIT_MAX_S 的注释）。
+    """
+    dead = [t.name for t in threads if not t.is_alive()]
+    if dead:
+        return (f"任务线程已退出: {', '.join(dead)}"
+                f"（心跳不再更新、进程仍在持单实例锁）")
+    if _LAST_ANY_ROUND_TS <= 0:
+        # main() 启动时即置位，理论上不会走到；兜底为「不判卡死」。
+        return None
+    idle_min = (time.monotonic() - _LAST_ANY_ROUND_TS) / 60.0
+    if idle_min >= HANG_EXIT_MIN:
+        return (f"全进程已 {idle_min:.0f} 分钟无任何任务跑完一轮"
+                f"（≥{HANG_EXIT_MIN:.0f} 分钟阈值，最频繁任务周期仅 "
+                f"{min(t[1] for t in TASK_DEFS)}s），判定进程无产出")
+    return None
 
 
 def main() -> int:
@@ -2955,10 +3242,19 @@ def main() -> int:
         threads.append(t)
         print(f"[scan_daemon] 启动任务 {name}（间隔 {interval}s，错峰 {offset}s）")
 
-    # 主线程等待（Ctrl+C 退出）
+    # 主线程：等待 + 进程级「无产出」看护（HANG_EXIT_MIN 常量处有完整背景）。
+    # 原实现只 sleep，故「线程全死 / 全卡住而进程活着」这一类故障无人收口：
+    # supervisord 只在进程**退出**时重启，进程活着 ⇒ 永不重启 ⇒ 无限期停摆。
+    global _LAST_ANY_ROUND_TS
+    _LAST_ANY_ROUND_TS = time.monotonic()
     try:
         while True:
-            time.sleep(60)
+            time.sleep(WATCHDOG_TICK_SEC)
+            reason = _watchdog_reason(threads)
+            if reason:
+                print(f"[scan_daemon] ⚠️ {reason}，主动退出交 supervisord 重启",
+                      file=sys.stderr)
+                os._exit(1)
     except KeyboardInterrupt:
         print("\n[scan_daemon] 收到退出信号，正在停止...")
         return 0

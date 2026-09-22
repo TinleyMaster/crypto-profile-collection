@@ -20,6 +20,7 @@
     python phase_execute_scan_signal.py                      # dry-run 扫待执行信号
     python phase_execute_scan_signal.py --window-hours 6     # 只看最近 6h 内信号
     python phase_execute_scan_signal.py --live               # 真正下单（需总开关）
+    python phase_execute_scan_signal.py --require-confirmed  # 只执行已越过 breakout_px 的 confirmed 信号
     python phase_execute_scan_signal.py --test-connection    # 自检币安连通性
 """
 from __future__ import annotations
@@ -73,14 +74,24 @@ def setup_logging() -> None:
 
 
 # ───────────────────────── 候选信号 ─────────────────────────
-def load_candidates(conn, window_hours: int) -> list[dict]:
-    """拉取待执行信号：已告警 + 主池 high + P↑OI↑ 多头 + 未执行 + 未过期。"""
+def load_candidates(conn, window_hours: int, require_confirmed: bool = False) -> list[dict]:
+    """拉取待执行信号：已告警 + 主池 high + P↑OI↑ 多头 + 未执行 + 未过期。
+
+    status 口径（fix_061）：`active`（等突破）与 `confirmed`（延续已被市场跟随）
+    **都属可动作集合**。confirmed 是**质量升格**而非入场门槛 —— 离线回放（90 条
+    前向可结算多头主池信号）显示：若以越位根收盘价入场、24h 离场，均益 +1.36%
+    低于按信号价入场的 +1.56%（越位位离入场价中位 2.31%），即「等确认再入场」
+    等于把入场价抬上去 —— 与催化层 d3「等价格确认=追高」同源。
+    故默认两种状态都收，另提供 `--require-confirmed`（默认关）供后续按实盘样本
+    再决定是否收紧。
+    """
+    status_clause = "status = 'confirmed'" if require_confirmed else "status IN ('active', 'confirmed')"
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            """
+            f"""
             SELECT id, signal_ts, symbol, scenario, p_dir, price_chg_pct,
                    vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate,
-                   confidence, context_tags, status, expired_at
+                   confidence, context_tags, status, expired_at, breakout_px
             FROM biz.scan_signal
             WHERE pool = 'main'
               AND confidence = 'high'
@@ -88,7 +99,7 @@ def load_candidates(conn, window_hours: int) -> list[dict]:
               AND scenario IN ('S1', 'S2')
               AND alerted_at IS NOT NULL
               AND exec_state IS NULL
-              AND status = 'active'
+              AND {status_clause}
               AND (expired_at IS NULL OR expired_at > NOW())
               AND signal_ts > NOW() - make_interval(hours => %s)
             ORDER BY signal_ts DESC
@@ -333,15 +344,18 @@ def trade_signal(settings, signal: dict[str, Any], live: bool) -> dict[str, Any]
 
 
 # ───────────────────────── 主流程 ─────────────────────────
-def run_once(settings, window_hours: int, live: bool) -> int:
+def run_once(settings, window_hours: int, live: bool, require_confirmed: bool = False) -> int:
     from crypto_research.db.conn import get_connection
     with get_connection(settings.database_url) as conn:
-        candidates = load_candidates(conn, window_hours)
+        candidates = load_candidates(conn, window_hours, require_confirmed=require_confirmed)
         to_do = [c for c in candidates if not in_cooldown(conn, c["symbol"])]
-        print(f"[exec] 候选 {len(candidates)} 条 → 冷却后 {len(to_do)} 条（仅主池 high P↑OI↑ 多头）")
+        scope = "仅已确认(confirmed)" if require_confirmed else "active+confirmed"
+        print(f"[exec] 候选 {len(candidates)} 条 → 冷却后 {len(to_do)} 条"
+              f"（仅主池 high P↑OI↑ 多头，status={scope}）")
         for c in to_do:
             print(f"  #{c['id']} {c['symbol']} {c['scenario']} P={c['p_dir']}{c['price_chg_pct']}% "
-                  f"OI={c['oi_dir']}({c['oi_chg_pct']}%) CVD={c['cvd_dir']} conf={c['confidence']}")
+                  f"OI={c['oi_dir']}({c['oi_chg_pct']}%) CVD={c['cvd_dir']} conf={c['confidence']} "
+                  f"status={c['status']}")
 
         processed = 0
         for c in to_do:
@@ -372,6 +386,9 @@ def main() -> None:
     parser.add_argument("--window-hours", type=int, default=DEFAULT_WINDOW_HOURS,
                         help=f"只处理最近 N 小时内信号（默认 {DEFAULT_WINDOW_HOURS}）")
     parser.add_argument("--live", action="store_true", help="真正下单（需 SIGNAL_TRADE_ENABLED=1）")
+    parser.add_argument("--require-confirmed", action="store_true",
+                        help="只执行已越过 breakout_px 的 confirmed 信号（默认关：active+confirmed 都收。"
+                             "回放显示等确认再入场会把期望做低，故默认关，待实盘样本再定）")
     parser.add_argument("--test-connection", action="store_true", help="自检币安连通性")
     args = parser.parse_args()
 
@@ -394,7 +411,8 @@ def main() -> None:
         logger.info("常驻轮询开始，间隔 %ss（Ctrl+C 停止）", args.interval)
         while True:
             try:
-                run_once(settings, args.window_hours, live=live)
+                run_once(settings, args.window_hours, live=live,
+                         require_confirmed=args.require_confirmed)
             except KeyboardInterrupt:
                 logger.info("收到退出信号，停止")
                 break
@@ -402,7 +420,8 @@ def main() -> None:
                 logger.error("轮询异常（稍后重试）: %s", e)
             time.sleep(args.interval)
     else:
-        run_once(settings, args.window_hours, live=live)
+        run_once(settings, args.window_hours, live=live,
+                 require_confirmed=args.require_confirmed)
 
 
 if __name__ == "__main__":

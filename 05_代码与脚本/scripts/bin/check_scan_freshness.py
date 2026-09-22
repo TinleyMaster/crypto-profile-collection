@@ -63,8 +63,14 @@ HEARTBEAT_MAX_AGE_MIN = {
     "scan_klines": 15, "scan_oi_cvd": 15, "scan_liquidation": 15,
     "scan_alert": 15, "scan_squeeze": 15,
     "scan_main_pool": 45, "scan_accumulation": 90, "watchlist_monitor": 90,
-    "expire_signals": 90, "prune_scan_data": 4320,
+    "expire_signals": 90, "confirm_signals": 90, "prune_scan_data": 4320,
 }
+# 「本实例尚未跑完首轮」的宽限上限（分钟）：该状态的等待时间应由该任务 offset 决定，
+# 而上面阈值是 3×周期 —— 对 1800s/86400s 周期任务给到 90/4320 分钟，远大于容器重启
+# 周期（约 15 分钟）⇒ 每次重启都刷新宽限，「线程从未启动」被无限期掩盖（工单 P0-1
+# 根因②：expire_signals 跨 2 个实例始终无心跳行，两条监控同时静默）。
+# ⚠️ 必须与 scan_daemon.FIRST_ROUND_GRACE_MAX_MIN 同值。
+FIRST_ROUND_GRACE_MAX_MIN = 30.0
 # scan_daemon 启动时写的进程标记（last_run_at = 进程启动时刻）。据此区分
 # 「本实例刚重启、某线程首轮还没跑完」（宽限，不报）与「线程从未启动」（真故障）。
 DAEMON_START_TASK = "__daemon__"
@@ -153,9 +159,11 @@ def _collect_items(conn) -> list[dict]:
                                   "note": "该线程可能从未启动"})
                     continue
                 age = (now - daemon_start).total_seconds() / 60
+                # 首轮宽限上限（见常量注释）：否则长周期任务被无限期掩盖。
+                first_th = min(threshold, FIRST_ROUND_GRACE_MAX_MIN)
                 items.append({"name": f"任务{task}首轮", "task": task, "mx": daemon_start,
                               "age_min": age,
-                              "threshold": threshold, "stale": age > threshold,
+                              "threshold": first_th, "stale": age > first_th,
                               "note": "本实例尚未跑完首轮"})
                 continue
             # 判据用 last_ok_at（最近一次**成功**）而非 last_run_at：stdout/日志

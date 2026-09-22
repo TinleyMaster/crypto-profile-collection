@@ -375,7 +375,8 @@
 - **🟡 S1（已修）`TASK_DEFS` offset 注释滞后于代码**：注释仍写「最大 offset（当前 900s = 15min）」，实际 `expire_signals` 已改 **90**、`confirm_signals` 新增 **480** ⇒ **真实最大 = 600s（`prune_scan_data`）**。两处注释已更正（`FIRST_ROUND_GRACE_MAX_MIN=30` 的 assert 仍成立）。
 - **ℹ️ S2 / S3（无需改码）**：`TASK_DEFS` 现为 **11 项**（新增 `confirm_signals 1800/480`）；「桶完整度常态评估」在当前环境**近乎等效旧行为**（daemon 重启周期 ≈14min ≪ `OI_BUCKET_WINDOW_H`=2h ⇒ `restarted` 几乎恒真）——其价值在**不再重启**的场景（正是它要防的死法），属**未来保险**而非当下行为变更。
 - **🔴 S4（既有开放项，本轮未做）OI 采样侧补齐仍是最强杠杆**：新看门狗同一时刻实测 `have=14 / expect=24`（14 < 21.6 命中）⇒ **正常期 OI 栅格仍缺约 42%**（上一轮记 26%，同向且更严重）。另立项。
-- **✅ 已部署并生效（复验_轧空池D1-D7落地_21fad2d 于 2026-09-22 02:3x UTC 判定）**：`head_gap_buckets` / `mid_gap_buckets` / `gap_metric_ver` 首次落库 —— `biz.squeeze_track.metrics->'gap_metric_ver' = "2"`（该常量是 `21fad2d` **新增**的，故这是**代码级**证据：`id=15 KERNELUSDT` @ 02:46:02，`status=judged`）；过程证据亦自洽（提交 02:16:40 → `__daemon__` 02:24:02 进程重建 → 02:46:02 首行带新键）。**仍待走到**：`reason LIKE '判定窗口%'` 全库 0 行 ⇒ D6 拒判文案与 `window_gate` 的 `head_gap/mid_gap` 分支在生产侧**尚未被触发**，仅由单测守护。
+- **部署判定（按「本提交独有锚点」重写，复验 F1 更正）**：`21fad2d` = **已部署并生效**（判据：`metrics->'gap_metric_ver' = "2"` 首落库 `id=15 KERNELUSDT` @ 02:46:02 —— 该常量是 `21fad2d` **新增**的 ⇒ 属**本提交独有锚点**；时间线自洽：提交 02:16:40 → `__daemon__` 02:24:02 进程重建 → 02:46:02 首行带新键）。**`ef5f077` 的 daemon 改动 = 不可判定（判据未打开）** —— 它只改**拒判分支**，而 `reason LIKE '判定窗口%'` 全库 0 行、带 `head_gap_buckets` 的行**全为 `judged`**（属 `21fad2d` 产物）⇒ **本提交无任何 DB 可观测差异**（本轮新增的 `gate_ok` 位也只在两条路径里写，须事件触发）。
+  ⇒ **规则（写死）：部署判定必须以「本提交独有」的字面量/字段/列/键为锚；不得引用祖先提交的判据；无锚点就写「不可判定」，并说明「需 X 事件发生后方可判」。** 待触发条件：首个 `reason LIKE '判定窗口%'` 的 `tracking` 行出现时，检查其 `metrics` 是否含 `gap_metric_ver=2` **且仍保留** `confirm`/`short_liq_ratio`（后者用于验 F5 是否修）。
 - **本轮验收实跑（⚠️ 当次记录，**勿引用具体数字**）**：口径与结论方向固定，数值一律以 `calib_squeeze_liq_thr.py` 当次输出为准（爆仓表滚动 24h 全跨度 + 5m 分母逐时补齐，每次样本都换一批）。① `--days 1`：分母自证通过，条件子集跨口径上界**在判据线上下来回摆动** ⇒ 顺带实测了 P2-1 那条**从未被走到的 FAIL 负路径**（rc=2）；② `--days 7`：分母覆盖不达标 ⇒ **rc=3**，打出拒绝理由、**不打印分布**（名副其实）；③ `--days 7 --json` ⇒ `denominator_ok=false` + `judge.pass=false` + `reliable=false`（**D1 修复验证通过**）。单测 **91/91**（原 83 + D5/D6/D7 新增 8 条）。
 
 ### 轧空池 D1-D7 落地复验处置（复验_轧空池D1-D7落地_21fad2d_2026-09-22，2026-09-22）
@@ -409,3 +410,16 @@
 - **O1（数据覆盖，未修，仍开放）**：近 24h S1 信号 47% 缺 `funding_rate`，根因是 `biz.asset_derivatives` 对 BTW/PHA/SEI/EPIC 全空（641 行内无这些 symbol），属下游采集白名单/覆盖问题，**需另立工单**排查 `phase_derivatives_batch` 的覆盖范围；邮件 `n/a` 渲染本身正确。
 - **自测**：新增 [test_scan_alert_audit_deepdive.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_audit_deepdive.py)（**24/24 通过**，纯离线：O2 净方向 + O3 触限/带内 + O4 四例（含「未关联≠无催化」）+ O5 图例 + N1 三例 + O6 源码 AST + `**` 护栏）；既有 `test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 91/91 无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效。
+
+### O1 费率覆盖缺口修复（工单 `待修复工单_O1_费率覆盖缺口_2026-09-22.md`，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\待修复工单_O1_费率覆盖缺口_2026-09-22.md`（`de75b8c` 复验随附）。**采方案 A（推荐）**，无 DDL、无阈值变更、不动信号侧。
+
+- **根因（工单已坐实）**：衍生品摄取 universe = `core.asset` 里「`market_cap_rank` 非空 + 按排名取前 `--limit`（默认 100）」；而信号 universe = 全部 Binance USDT 永续（含 meme/小市值 rank 222~6777）。两者结构性错位 ⇒ 近 24h S1 信号 14/33（42%）无 `funding_rate`，邮件只能渲染 `n/a`。`_load_funding_map` 只读 `biz.asset_derivatives`、信号创建时不实时拉 Binance，故缺口完全传导到告警。
+- **修复（`phase_derivatives_batch.py`）**：新增 `--signal-days`（默认 **7**，0=关闭）+ `_signal_symbol_candidates()`（与 `scan_daemon._symbol_candidates` 同口径：原样→去 USDT→去 `1000/1000000` 前缀）+ `get_signal_gap_assets()`——取近 N 天 `pool='main' OR scenario='BRK'`（funding 的**消费方**，squeeze 池不用）出现过、且 `biz.asset_derivatives` **从无行**的资产，经 `core.asset` 反查 asset_id。
+  - `main()` 拓扑：**缺口资产置顶 + 不受 `--limit` 截断**（`cap = max(limit, len(gap_assets))`）——否则它们（rank>100）永远排不到，bug 复现；其余按市值补齐去重。稳态增量有限（采到即有行 → 离开缺口集）。
+  - `ingest_run` 的 scope/params 同步带上 `signal_days`。
+- **未覆盖**：无 `core.asset` 行的 symbol（如 BROCCOLI714）属主数据治理缺口，本函数无法覆盖（`COUNT` 自然缺失）；工单 §六.4 的 `canonical_symbol` 重复/rank 冲突（JOE/EPIC/STAR/AGT）建议并入 W5 治理工单，本轮不扩 scope。
+- **待拍板（仍开放，未动）**：① 容器调度实际 `--limit`（仓库内无显式覆盖，推断默认 100）需在 supervisor/scheduler 确认——若为 100，则缺口 50 个会挤掉当轮 50 个 top-N 刷新（一次性，缺口清空后恢复）；② 方案 B（信号侧实时拉取）**不采纳**（本机出口已被 Binance 判 418，生产同风险，且不解决 OI/CVD 缺口）。
+- **自测**：新增 [test_derivatives_signal_gap.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_derivatives_signal_gap.py)（**18/18 通过**：归一化 6 例 + 源码 AST + `--signal-days 0` 恒空 + 只读 prod 缺口不变量）。prod 只读实测近 7d 缺口 **50 个**（样例 S/龙虾/UAI/MINA/BERA/CROSS），与 `asset_derivatives` **零交集**、rank 全 >100 或缺失，正是原 top-100 采集漏掉的。
+- **验收命令**（三段式，部署/跑批后）：`python bin/phase_derivatives_batch.py --limit 100`，日志应显示「信号 universe 缺口 N」；随后库里原缺口 symbol 出现 `funding_rate` 非 NULL 行，新发主池信号 funding NULL 率下降。

@@ -8,6 +8,11 @@
     python phase_derivatives_batch.py --limit 0            # 全量（所有有 symbol 的资产）
     python phase_derivatives_batch.py --limit 50 --force   # 强制刷新，跳过 15 分钟缓存
     python phase_derivatives_batch.py --limit 50 --delay 0.2  # 每币间隔 0.2s
+
+O1（2026-09-22 工单）：摄取 universe 原为「有市值排名 top-N」，而信号 universe 是全部
+Binance USDT 永续（含 meme/小市值）⇒ 近 47% 高置信主池信号无 `funding_rate`。默认把
+**近 `--signal-days`(7) 天出现在主池/BRK 信号里、且尚无 `asset_derivatives` 行**的
+资产优先纳入采集（`--signal-days 0` 可关闭），从源头对齐两个 universe。
 """
 from __future__ import annotations
 
@@ -161,6 +166,64 @@ def get_total_pending(conn, force: bool = False) -> int:
                 (CACHE_TTL,),
             )
         return cur.fetchone()[0]
+
+
+def _signal_symbol_candidates(symbol: str) -> list[str]:
+    """合约符号 → 本库可能使用的裸符号候选（原样 → 去 USDT → 去倍数前缀）。
+
+    与 `scan_daemon._symbol_candidates` 同口径：`scan_signal.symbol` 存合约符号
+    （'B2USDT' / '1000FLOKIUSDT'），而 `core.asset.canonical_symbol` 存裸符号
+    （'B2' / 'FLOKI'）；不归一会让 O1 缺口查询恒空。
+    """
+    s = (symbol or "").upper()
+    base = s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+    out = [s, base]
+    for pre in ("1000000", "1000"):
+        if base.startswith(pre) and len(base) > len(pre):
+            out.append(base[len(pre):])
+            break
+    return list(dict.fromkeys(out))
+
+
+def get_signal_gap_assets(conn, days: int) -> list[dict]:
+    """O1 缺口资产：近期出现在主池/BRK 信号、且 `biz.asset_derivatives` **从无行**的资产。
+
+    - 作用域 = `pool='main' OR scenario='BRK'`（资金费率的**消费方**；squeeze 池不用 funding）；
+    - 只纳入「从无行」者（一旦采到即不再重复占位 ⇒ 稳态增量仅限新出现的信号 symbol）；
+    - 归一化后经 `core.asset` 反查 asset_id（无 `core.asset` 行的 symbol，如 BROCCOLI714，
+      属主数据治理缺口，本函数无法覆盖，COUNT 上会自然缺失）。
+    """
+    if days <= 0:
+        return []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT DISTINCT symbol FROM biz.scan_signal "
+            "WHERE signal_ts > NOW() - make_interval(days => %s) "
+            "AND (pool = 'main' OR scenario = 'BRK')",
+            (days,),
+        )
+        syms = [r["symbol"] for r in cur.fetchall()]
+    cands: set[str] = set()
+    for s in syms:
+        cands.update(_signal_symbol_candidates(s))
+    if not cands:
+        return []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT a.asset_id, a.canonical_symbol AS symbol,
+                   a.canonical_name AS name, a.market_cap_rank
+            FROM core.asset a
+            WHERE a.canonical_symbol IS NOT NULL
+              AND upper(a.canonical_symbol) = ANY(%s)
+              AND NOT EXISTS (
+                  SELECT 1 FROM biz.asset_derivatives d WHERE d.asset_id = a.asset_id
+              )
+            ORDER BY a.market_cap_rank NULLS LAST, a.asset_id
+            """,
+            (sorted(cands),),
+        )
+        return cur.fetchall()
 
 
 def fetch_one_asset(symbol: str) -> dict:
@@ -390,6 +453,9 @@ def main() -> int:
                         help="每币之间间隔秒数，默认 0.2s")
     parser.add_argument("--timeout", type=int, default=30,
                         help="单币采集超时秒数（预留）")
+    parser.add_argument("--signal-days", type=int, default=7,
+                        help="把近 N 天出现在主池/BRK 信号、且尚无衍生品行的 symbol "
+                             "优先纳入采集（O1 缺口对齐），0=关闭，默认 7")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -415,7 +481,8 @@ def main() -> int:
                     "batch_collect",
                     workflow_name,
                     json.dumps(
-                        {"limit": args.limit, "force": args.force, "delay": args.delay},
+                        {"limit": args.limit, "force": args.force,
+                         "delay": args.delay, "signal_days": args.signal_days},
                         ensure_ascii=False,
                     ),
                     f"top{args.limit}" if args.limit > 0 else "all",
@@ -429,18 +496,26 @@ def main() -> int:
         ensure_table(conn)
 
         total_pending = get_total_pending(conn, force=args.force)
-        limit = args.limit if args.limit > 0 else total_pending
-        if limit == 0:
-            print("待采集: 0（全部已有缓存且未 --force），退出")
-            _finish_ingest(settings, run_id, "success", 0, 0, 0, "无待采集资产")
-            return 0
+        # O1：信号 universe 缺口（近 N 天主池/BRK 出现过、且从无衍生品行）优先纳入。
+        gap_assets = get_signal_gap_assets(conn, args.signal_days)
 
-        print(f"待采集总数: {total_pending}，本次处理: {limit}")
+        # 市值 top-N 待采（--limit 0 = 全量待采）
+        ranked_limit = args.limit if args.limit > 0 else total_pending
+        ranked = (get_pending_assets(conn, ranked_limit, force=args.force)
+                  if ranked_limit > 0 else [])
+
+        # 缺口资产置顶且**不受 --limit 截断**（它们正是 O1 的根因，必须当轮采到）；
+        # 其余按市值顺序补齐并去重。--limit 0（全量）时不截断。
+        gap_ids = {a["asset_id"] for a in gap_assets}
+        assets = gap_assets + [a for a in ranked if a["asset_id"] not in gap_ids]
+        if args.limit > 0:
+            assets = assets[:max(args.limit, len(gap_assets))]
+
+        print(f"待采集总数: {total_pending}（市值 top-N）+ {len(gap_assets)}（信号 universe 缺口）"
+              f"，本次处理: {len(assets)}")
         print(f"交易所: {', '.join(EXCHANGE_CLIENTS.keys())}")
-
-        assets = get_pending_assets(conn, limit, force=args.force)
         if not assets:
-            print("无待采集资产")
+            print("无待采集资产（全部已有缓存且未 --force，且无信号缺口）")
             _finish_ingest(settings, run_id, "success", 0, 0, 0, "无待采集资产")
             return 0
 

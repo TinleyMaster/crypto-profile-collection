@@ -243,6 +243,17 @@
 - **仍需人工/部署**：① **DeepSeek 账户欠费需充值**（代码层已熔断/快速失败，但没额度就产不出结果）；② 容器需重新部署以带上 `llm_client` 的 402 熔断与 `process_catalyst_ai` 的「整批 0 成功即中止」护栏（两者在 repo 已有，但 09-22 00:20 那次仍逐条 402，疑似部署滞后）。
 - **自测**：`_run_stage` 超时返回 124 且 1s 内杀进程、正常命令返回 0；看护 `_check_key` 四例（失活→补跑 / timeout→拦 / 近阈值有提交→拦且文案指向任务自身 / 未超阈值→ok）全绿；`_recent_submission` 只读 prod 复核通过。
 
+### catalyst_run_all 充值后仍报错：thesis 重生 LLM 流式挂死（2026-09-22，本次提交）
+
+用户已充值 DeepSeek，但看护仍报 37.1h 无成功执行。复查 `sys.task` / `sys.task_log`：
+
+- **402 已解决**：09-22 02:29 那次（`58f441d35f07`）AI 预处理阶段已跑过（日志无 402），说明充值生效。
+- **新卡点 = thesis 重生**：该 run 日志停在 **02:55:05 `[57/88] 重生 asset_id=3757 ...`**，之后 **2h45m 无任何新日志**（将被 task_manager 按 `stuck: 240min` 收割）。即卡在 `catalyst_thesis_regen.py` → `db_stats.generate_research_thesis(3757)` 的 LLM 调用，**不是 402**。
+- **根因**：`llm_client._call_chat_completions` / `_call_responses` 的 `resp.iter_lines()` 流式循环**只有 per-read 超时（60s）**，而任一 SSE chunk 到达就把 read 超时重置 ⇒ 服务端「滴流/半开连接」时循环**永不返回**；且构造参数 `self._timeout`（thesis 传 120s）此前**根本没用于流式请求**（HTTP timeout 硬编码 `(10,60)`）。
+- **修复（`llm_client.py`）**：新增 `STREAM_TOTAL_TIMEOUT_SEC = 600`（总时限下限，≥10min，远大于正常 20~60s 响应）；两条流式路径都在循环内判 `time.monotonic() > deadline`，超时即 `resp.close()` 并抛 `requests.exceptions.ReadTimeout`；`chat()` 的 except 补上该类（原先只捕 urllib3 的 `ReadTimeoutError`，捕不到 requests 包装后的异常）⇒ 走重试/兜底 provider，而不再无限挂起。
+- **仍需部署**：容器要重新部署才能带上 `a9466db`（阶段超时 90min）+ 本次 `llm_client` 总时限；在此之前旧代码仍会挂到 12h/240min 被收割。
+- **自测**：模拟「持续有 chunk、永不 [DONE]」的滴流响应 → 总时限内抛 ReadTimeout、`resp.close()` 被调用；chat/responses 两条路径均验证。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。
@@ -397,6 +408,21 @@
   - **本轮不做修法的理由**：这是**数据采集侧的调度改动**（生产 daemon 核心循环），与阈值/判据无关，却直接影响所有 OI 下游；应独立立项、独立验收，不应搭在判据修复里顺手改。
   - **E7 连带留档（判据语义漂移）**：生产实证 `oi_cover = {have: 2, expect: 3}`（`KERNELUSDT`）与 `{have: 3, expect: 5}`（`ZETAUSDT`）⇒ **判定窗口实际只有 2~5 桶**，`MAX_MID_GAP_BUCKETS=2` 在 3 桶窗口上等于「缺 2/3 即拒判」，与它在 12 桶窗口上的「缺 2/12」**完全不是一回事**（常量语义随窗口长度漂移；**丢 1 桶 = 窗口覆盖率掉 33~50%**）。⇒ 与 S4 同源，须一并立项。
 
+### 轧空池 E1~E9 落地复验处置（复验_轧空池E1-E9落地_ef5f077_2026-09-22，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池E1-E9落地_ef5f077_2026-09-22.md`。复验确认 **E1~E9 代码面 9/9 落地**（`wilson_ci` 手工参考值 6 组全对、`segment_upper_bounds` 与独立实现同段同值、`molecule_coverage` 与自写 SQL 逐位一致）、阈值未动（24 常量 0 差异）、两套独立实现逐位吻合；另开 **F1~F6**。**本轮无 DDL、无阈值变更**。
+
+- **🔴 F1（P1，方法）部署判据复用**：我写的「✅ 已部署并生效」引用的 `gap_metric_ver=2 @02:46:02 id=15` 是 **`21fad2d` 的判据**（该常量由它新增），而 `ef5f077` 的 daemon 改动**只落在拒判分支**（`reason LIKE '判定窗口%'` 全库 0 行、带新键的行全为 `judged`）⇒ 本提交**无 DB 可观测差异 ⇒ 不可判定**。已按上方「部署判定规则」改正（规则同时写入上方 D1-D7 节末尾）。
+- **🔴 F2（P1，语义，已修）`rc=2` 吞掉了「不可判」与「有判别力 FAIL」**：E1 修好了「退出码与结论相反」，却把矛盾推进了一层 —— 注入矩阵里「50% 越阈的有判别力 FAIL」（S2）与「20% 越阈的不可判」（S3）**同为 `rc=2`**，而 E2 的全部论点正是这两者**等权** ⇒ 只看 rc 的下游（cron/CI/看板）仍会读成「判据明确不通过」并据此调阈值。已落地**四码**（`exit_code()` 纯函数，文本与 `--json` 同码）：**0 = PASS ｜ 2 = 有判别力 FAIL ｜ 3 = 样本不可用 ｜ 4 = 不可判**；`judge.conclusion` 三态与之一一对应，文本区在判据行后直接打印退出码含义。**（上一轮已把「不可判」从 FAIL 文案里拆出来，本轮补齐码位。）**
+- **🟠 F3（P2，已修）`MIN_DENOM_P10` 闸门逻辑不可达 + 对目标场景无感**：① `pct()` 是**线性插值**分位 —— 注入「300 币里 15 币覆盖率 0.49」时 `k=299×0.10=29.9` 落在好币区间 ⇒ **P10 仍输出 1.000**，恰好看不见要抓的 5% 尾部；② `P10 < 0.5` ⇒ 至少 10% 的币 < 0.5 < 0.9 ⇒ **必先触发** `MAX_DENOM_BELOW_PCT` ⇒ 被数学支配、永不单独触发（E9 想消除的「重复理由」又回来了）。⇒ 改为 `MIN_DENOM_HALF_COVERAGE=0.5` + `MAX_DENOM_BELOW_HALF_PCT=2.0`（「覆盖率低于半格的币占比」），与「低于门槛占比」**不共线**（占比落在 2%~5% 区间时可单独触发，正是目标场景）；P10 降级为**纯观察项**（打印时标注）。同时把 E9 的「只报最重一条」原则应用到该分支。
+- **🟠 F4（P2，已修）`MIN_SEGMENT_N` 判错分母**：守卫判的是**段内总行数**，而 `rate()` 的分母是**变体过滤后**子集 ⇒ 段内塞 1 行「仅某变体命中且越阈」即可把该变体 rate 拉到 100%，**1 行（占样本 0.3%）就能把「不跨线」翻成「跨线」** ⇒ `decisive` 被单条观测操纵（反向亦然：可掩盖真实跨线）。已改为**逐变体判 n**（不足者不进该段），并在 `segments[].n_by_variant` 暴露各变体 n 供人核对。
+- **🟠 F5（P2，已修）E4 引入「入场指标被覆盖」的数据丢失副作用**：落库 SQL 原是 `metrics = COALESCE(%s::jsonb, metrics)` —— **整对象替换**，而 `tracking` 行的 `metrics` 还承载**入场指标**（`confirm`/`oi_chg_pct`/`short_liq_ratio`/`cvd_ratio`）；拒判路径写整对象会把这些**永久覆盖掉**（该行仍是 tracking ⇔ 未判定，后续再也还原不了入场依据）⇒ **为改善可观测性反而毁掉另一类可观测性**。已改为**合并**语义：`metrics = COALESCE(metrics || COALESCE(%s::jsonb, '{}'::jsonb), metrics)`（`%s` 为 NULL 时原样不动，保住原语义；judged 路径一并受益——此前它同样覆盖，属既有行为）。
+- **🟡 F6b（已修）`wilson_ci(k > n)` 抛 `ValueError: math domain error`**：`p(1-p) < 0` 无入参守卫 ⇒ 已夹取 `k ∈ [0, n]`（脚本内恒 `k ≤ n`，但纯函数被复用/注入时不该崩）。
+- **🟡 F6c（已修）本轮改动零单测**：`test_squeeze_battle.py` 此前对 `wilson_ci`/`segment_upper_bounds`/`molecule_coverage`/退出码**断言数 0**，只报「单测 91/91」会误导（它只覆盖未改动的 `squeeze.py`）⇒ 新增 16 条断言（`wilson_ci` 5 例含报告参考值、`exit_code` 四态 6 例 + 码位互斥、`segment_upper_bounds` F4 守卫 2 例、`molecule_coverage` 边界 2 例 + 伪游标）⇒ **107/107**。
+- **🟡 F6f（已修）`judged` 路径的 gap 位恒 0/1**：judged 必经闸门 ⇒ `head/mid_gap` 数学上只能 0/1，E4 落地后 judged 行仍**不携带有效病例信息** ⇒ 两条路径统一补落 `gate_ok` 布尔位（拒判 `False` / 判定 `True`），可直接数出「通过 vs 拒绝」分布。
+- **🟡 F6e（已修）「不留数字」规则缺例外条款**：规则原写「数字不在文档留档」但全文件仍有大量数字（多在历史引用/根因陈述位，带时间与前提标注）⇒ 规则与实践并存的正是 E8 要消除的那类矛盾。规则改为：**判据位不得留数字；历史引用/根因陈述位可留，须带时间与前提标注**（并注明「以本次实跑为准」）。
+- **📌 F1 的部署侧待验（本条不可判定）**：首个 `reason LIKE '判定窗口%'` 的 `tracking` 行出现后，检查其 `metrics` 是否含 `gap_metric_ver=2`、`gate_ok=false`，**且仍保留** `confirm`/`short_liq_ratio`（验 F5）。
+
 ### 盘面异动告警邮件「深层补刀」O2~O6 处置（审计_盘面异动告警邮件_3币1币_2026-09-22，2026-09-22）
 
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_盘面异动告警邮件_3币1币_2026-09-22.md`。审计结论「数据 100% 与 prod 库吻合、渲染无缺陷」；本轮处置其 §八「深层补刀」的 4 项标注语义/信息架构问题 + §四的 O2。**全部落在 `scan_daemon.py` 渲染层 + 一处告警落库，零 DDL、零迁移、无阈值变更**。
@@ -417,9 +443,10 @@
 
 - **根因（工单已坐实）**：衍生品摄取 universe = `core.asset` 里「`market_cap_rank` 非空 + 按排名取前 `--limit`（默认 100）」；而信号 universe = 全部 Binance USDT 永续（含 meme/小市值 rank 222~6777）。两者结构性错位 ⇒ 近 24h S1 信号 14/33（42%）无 `funding_rate`，邮件只能渲染 `n/a`。`_load_funding_map` 只读 `biz.asset_derivatives`、信号创建时不实时拉 Binance，故缺口完全传导到告警。
 - **修复（`phase_derivatives_batch.py`）**：新增 `--signal-days`（默认 **7**，0=关闭）+ `_signal_symbol_candidates()`（与 `scan_daemon._symbol_candidates` 同口径：原样→去 USDT→去 `1000/1000000` 前缀）+ `get_signal_gap_assets()`——取近 N 天 `pool='main' OR scenario='BRK'`（funding 的**消费方**，squeeze 池不用）出现过、且 `biz.asset_derivatives` **从无行**的资产，经 `core.asset` 反查 asset_id。
-  - `main()` 拓扑：**缺口资产置顶 + 不受 `--limit` 截断**（`cap = max(limit, len(gap_assets))`）——否则它们（rank>100）永远排不到，bug 复现；其余按市值补齐去重。稳态增量有限（采到即有行 → 离开缺口集）。
+  - `main()` 拓扑：**缺口资产置顶 + 不受 `--limit` 截断**，抽为纯函数 `merge_pending(ranked, gap, limit)`（`cap = max(limit, len(gap))`，`limit<=0` 不截断，按 asset_id 去重）——否则缺口（rank>100）永远排不到，bug 复现；其余按市值补齐。稳态增量有限（采到即有行 → 离开缺口集）。
   - `ingest_run` 的 scope/params 同步带上 `signal_days`。
+- **调度实际 `--limit` 已确认（`scheduler.py:111`）**：`phase_derivatives_batch.py --limit 200 --delay 0.2`，每 6 小时一次（`30 */6 * * *`）。故缺口 50 个仅挤掉当轮 **50 个 top-N 刷新**（`cap=max(200,50)=200`），一次性、缺口清空后恢复——比原估「limit 100 挤掉一半」轻。**无需改调度**（`--signal-days` 默认 7 即生效）。
 - **未覆盖**：无 `core.asset` 行的 symbol（如 BROCCOLI714）属主数据治理缺口，本函数无法覆盖（`COUNT` 自然缺失）；工单 §六.4 的 `canonical_symbol` 重复/rank 冲突（JOE/EPIC/STAR/AGT）建议并入 W5 治理工单，本轮不扩 scope。
-- **待拍板（仍开放，未动）**：① 容器调度实际 `--limit`（仓库内无显式覆盖，推断默认 100）需在 supervisor/scheduler 确认——若为 100，则缺口 50 个会挤掉当轮 50 个 top-N 刷新（一次性，缺口清空后恢复）；② 方案 B（信号侧实时拉取）**不采纳**（本机出口已被 Binance 判 418，生产同风险，且不解决 OI/CVD 缺口）。
-- **自测**：新增 [test_derivatives_signal_gap.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_derivatives_signal_gap.py)（**18/18 通过**：归一化 6 例 + 源码 AST + `--signal-days 0` 恒空 + 只读 prod 缺口不变量）。prod 只读实测近 7d 缺口 **50 个**（样例 S/龙虾/UAI/MINA/BERA/CROSS），与 `asset_derivatives` **零交集**、rank 全 >100 或缺失，正是原 top-100 采集漏掉的。
-- **验收命令**（三段式，部署/跑批后）：`python bin/phase_derivatives_batch.py --limit 100`，日志应显示「信号 universe 缺口 N」；随后库里原缺口 symbol 出现 `funding_rate` 非 NULL 行，新发主池信号 funding NULL 率下降。
+- **方案 B（信号侧实时拉取）不采纳**：本机出口已被 Binance 判 418，生产同风险，且不解决 OI/CVD 缺口。
+- **自测**：新增 [test_derivatives_signal_gap.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_derivatives_signal_gap.py)（**27/27 通过**：归一化 6 例 + 源码 AST + `merge_pending` 8 例 + `--signal-days 0` 恒空 + 只读 prod 缺口不变量）。prod 只读实测近 7d 缺口 **50 个**（样例 S/龙虾/UAI/MINA/BERA/CROSS），与 `asset_derivatives` **零交集**、rank 全 >100 或缺失，正是原 top-200 采集漏掉的。
+- **验收命令**（三段式，部署/跑批后）：`python bin/phase_derivatives_batch.py --limit 200`（与调度一致），日志应显示「信号 universe 缺口 N」；随后库里原缺口 symbol 出现 `funding_rate` 非 NULL 行，新发主池信号 funding NULL 率下降。

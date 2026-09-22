@@ -226,6 +226,20 @@ def get_signal_gap_assets(conn, days: int) -> list[dict]:
         return cur.fetchall()
 
 
+def merge_pending(ranked: list[dict], gap_assets: list[dict], limit: int) -> list[dict]:
+    """合并「市值 top-N 待采」与「O1 信号缺口」，缺口置顶且不被 `limit` 截断。
+
+    - 缺口资产正是 O1 根因，必须当轮采到 ⇒ `cap = max(limit, len(gap))`；
+    - `limit <= 0`（全量）时不截断；
+    - 按 asset_id 去重，缺口优先。
+    """
+    gap_ids = {a["asset_id"] for a in gap_assets}
+    merged = list(gap_assets) + [a for a in ranked if a["asset_id"] not in gap_ids]
+    if limit > 0:
+        merged = merged[:max(limit, len(gap_assets))]
+    return merged
+
+
 def fetch_one_asset(symbol: str) -> dict:
     """采集单个资产的衍生品数据（5 家交易所并发），返回聚合结果 dict。
 
@@ -506,10 +520,7 @@ def main() -> int:
 
         # 缺口资产置顶且**不受 --limit 截断**（它们正是 O1 的根因，必须当轮采到）；
         # 其余按市值顺序补齐并去重。--limit 0（全量）时不截断。
-        gap_ids = {a["asset_id"] for a in gap_assets}
-        assets = gap_assets + [a for a in ranked if a["asset_id"] not in gap_ids]
-        if args.limit > 0:
-            assets = assets[:max(args.limit, len(gap_assets))]
+        assets = merge_pending(ranked, gap_assets, args.limit)
 
         print(f"待采集总数: {total_pending}（市值 top-N）+ {len(gap_assets)}（信号 universe 缺口）"
               f"，本次处理: {len(assets)}")

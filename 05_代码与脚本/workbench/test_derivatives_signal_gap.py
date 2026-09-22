@@ -82,10 +82,12 @@ main_src = ast.unparse(main_fn) if main_fn else ""
 check(main_fn is not None, "找到 phase_derivatives_batch.main()")
 check("--signal-days" in main_src, "main 定义/使用 --signal-days 参数")
 check("get_signal_gap_assets" in main_src, "main 调用 get_signal_gap_assets（O1 缺口对齐）")
-check("gap_assets" in main_src and "gap_ids" in main_src,
-      "缺口资产置顶去重（gap_assets + gap_ids）")
-check("max(args.limit, len(gap_assets))" in main_src,
-      "缺口不被 --limit 截断（cap = max(limit, 缺口数)）")
+check("gap_assets" in main_src and "merge_pending" in main_src,
+      "main 用 merge_pending 合并市值池与缺口池")
+merge_fn = _func("merge_pending")
+merge_src = ast.unparse(merge_fn) if merge_fn else ""
+check("max(limit, len(gap_assets))" in merge_src,
+      "merge_pending 内 cap = max(limit, 缺口数)（缺口不被 --limit 截断）")
 
 gap_fn = _func("get_signal_gap_assets")
 gap_src = ast.unparse(gap_fn) if gap_fn else ""
@@ -103,6 +105,47 @@ check("scan_signal" in gap_src, "数据源为 biz.scan_signal")
 print("\n【3】--signal-days 0 关闭 O1 对齐")
 check(pdb.get_signal_gap_assets(None, 0) == [],
       "days=0 → 直接返回 []（不触库、不改变原行为）")
+
+# ═══════════════════════════════════════════════════════════════
+#  3b. merge_pending：缺口置顶 + 不被 --limit 截断
+# ═══════════════════════════════════════════════════════════════
+
+
+def _a(i, rank=None):
+    return {"asset_id": i, "symbol": f"S{i}", "name": None, "market_cap_rank": rank}
+
+
+print("\n【3b】merge_pending 拓扑")
+# 模拟生产：scheduler 以 --limit 200 调用；近 7d 缺口 50
+gap = [_a(i) for i in range(50)]
+ranked = [_a(1000 + i, rank=i + 1) for i in range(200)]
+merged = pdb.merge_pending(ranked, gap, 200)
+check(len(merged) == 200, "limit=200 → 合并结果长度 200（cap=max(200,50)）", f"got={len(merged)}")
+check(all(a["asset_id"] in {g['asset_id'] for g in gap} for a in merged[:50]),
+      "前 50 位全部为缺口资产（置顶）")
+check(len(merged) == len({a['asset_id'] for a in merged}),
+      "结果无重复 asset_id")
+
+m2 = pdb.merge_pending(ranked[:100], [], 100)
+check(len(m2) == 100 and m2[0]["asset_id"] == 1000,
+      "无缺口时行为不变（原 top-N 前 100）")
+
+m3 = pdb.merge_pending(ranked, gap[:5], 3)
+check(len(m3) == 5 and all(a["asset_id"] < 1000 for a in m3),
+      "缺口数 > limit 时仍保留全部缺口（cap 兜底，不截断缺口）", f"got={len(m3)}")
+
+# 缺口与 ranked 重叠 → 去重且缺口优先
+overlap = [_a(1000, rank=1), _a(7)]
+m4 = pdb.merge_pending(ranked, overlap, 10)
+check(sum(1 for a in m4 if a["asset_id"] == 1000) == 1,
+      "缺口与 ranked 重叠时按 asset_id 去重（只出现一次）")
+check(m4[0]["asset_id"] in (1000, 7), "重叠项仍置顶")
+
+m5 = pdb.merge_pending(ranked, gap, 0)
+check(len(m5) == 250, "limit=0（全量）→ 不截断（缺口 50 + ranked 200）", f"got={len(m5)}")
+
+# 源码断言：merge_pending 被 main 使用
+check("merge_pending" in main_src, "main 调用 merge_pending（拓扑单点）")
 
 # ═══════════════════════════════════════════════════════════════
 #  4. 只读 prod：缺口确实无衍生品行（连不上则跳过）

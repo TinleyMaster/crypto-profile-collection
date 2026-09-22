@@ -248,7 +248,7 @@ def _render_items_html(items: list[dict]) -> str:
 # 轧空池/采样健康（工单 SQZ-01/06）：只读观测，越线才渲染，避免告警噪音。
 SQUEEZE_TRACKING_WARN = 9        # 队列占用 ≥ 9/12（75%）
 SQUEEZE_ENQ24H_WARN = 20         # 近 24h 入队 ≥ 20 条
-SQUEEZE_REJECT_WARN = 3          # 近 7 天覆盖率/尾部拒判 ≥ 3 次
+SQUEEZE_REJECT_WARN = 3          # 当前仍处「覆盖率/尾部拒判」状态的 track 行数（非次数）
 RESTART_GAP_WINDOW_H = 2         # 重启丢桶观察窗（小时）
 OI_BUCKET_DEFICIT_RATIO = 0.9    # 近 2h OI 桶数 < 期望 ×0.9 → 判为缺口
 SQUEEZE_QUEUE_MAX = 12           # 与 squeeze.TRACK_QUEUE_MAX 同口径（展示用）
@@ -283,7 +283,8 @@ def _collect_squeeze_health(conn) -> list[str]:
         if row["enq_24h"] >= SQUEEZE_ENQ24H_WARN:
             notes.append(f"轧空池近 24h 入队 {row['enq_24h']} 条（≥{SQUEEZE_ENQ24H_WARN}）")
         if row["reject"] >= SQUEEZE_REJECT_WARN:
-            notes.append(f"覆盖率/尾部闸门拒判 {row['reject']} 次（≥{SQUEEZE_REJECT_WARN}）")
+            notes.append(f"覆盖率/尾部/中段闸门拒判中 {row['reject']} 条 track"
+                         f"（≥{SQUEEZE_REJECT_WARN}；同一 track 多轮被拒只计 1）")
     except Exception as e:  # noqa: BLE001
         print(f"[看门狗] 轧空池健康检查跳过（{e}）", file=sys.stderr)
 

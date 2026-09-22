@@ -122,5 +122,72 @@ check("_build_regime(conn)" in _src, "task_scan_alert 调 _build_regime(conn)")
 check("_render_alert_email(to_alert, regime_tags)" in _src,
       "把 regime_tags 传入 _render_alert_email（与 context_tags 解耦）")
 
+# ═══════════════════════════════════════════════════════════════
+#  N-pure3-1：btc_1h 只用**已收盘** 1h 条（live 价不可复现 + 图例措辞）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【N-pure3-1】btc_1h 用已收盘 1h 条，非未收盘当前小时的 live 价")
+
+
+class _Cur:
+    def __init__(self, conn):
+        self.conn, self.mode = conn, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        s = sql.lower()
+        self.mode = ("btc" if "btcusdt" in s else
+                     "fgi" if "fear_greed_daily" in s else
+                     "cap" if "global_metric_daily" in s else None)
+
+    def fetchall(self):
+        return {"btc": self.conn["btc"], "cap": self.conn["cap"]}.get(self.mode, [])
+
+    def fetchone(self):
+        return self.conn["fgi"] if self.mode == "fgi" else None
+
+
+class _Conn:
+    def __init__(self, data):
+        self.data = data
+
+    def cursor(self, *a, **k):
+        return _Cur(self.data)
+
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_now = datetime.now(timezone.utc)
+# DESC（最新在前）：当前小时未收盘（live 105）、70min 前已收盘（100）、130min 前已收盘（80）
+_data = {
+    "btc": [
+        {"close_px": 105.0, "open_time": _now - timedelta(minutes=10)},
+        {"close_px": 100.0, "open_time": _now - timedelta(minutes=70)},
+        {"close_px": 80.0, "open_time": _now - timedelta(minutes=130)},
+    ],
+    "fgi": {"value": 50, "value_classification": "Neutral"},
+    "cap": [{"metric_date": "d1", "total_market_cap": 1000},
+            {"metric_date": "d0", "total_market_cap": 1000}],
+}
+reg = sd._build_regime(_Conn(_data))
+check("btc_1h=up(+25.00%)" in reg["tags"],
+      "已收盘两根：(100−80)/80=+25.00%",
+      f"tags={reg['tags']}")
+check("btc_1h=up(+5.00%)" not in reg["tags"],
+      "不再采用未收盘当前小时的 live 价（(105−100)/100=+5.00%）")
+
+# 全未收盘 → 无 btc_1h 标签（宁缺勿错）
+_data2 = dict(_data)
+_data2["btc"] = [{"close_px": 105.0, "open_time": _now - timedelta(minutes=5)},
+                 {"close_px": 104.0, "open_time": _now - timedelta(minutes=20)}]
+reg2 = sd._build_regime(_Conn(_data2))
+check(not any(str(t).startswith("btc_1h=") for t in reg2["tags"]),
+      "无已收盘条时不产出 btc_1h 标签（不拿 live 冒充收盘）")
+
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

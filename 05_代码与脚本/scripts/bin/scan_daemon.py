@@ -639,16 +639,25 @@ def _build_regime(conn) -> dict:
                 "WHERE symbol='BTCUSDT' AND interval='1h' "
                 "ORDER BY open_time DESC LIMIT 5"
             )
-            closes = [float(r["close_px"]) for r in cur.fetchall()]
-        if len(closes) >= 2:
-            btc_1h = (closes[0] - closes[1]) / closes[1] * 100
-            tags.append(f"btc_1h={'up' if btc_1h >= 0 else 'down'}({btc_1h:+.2f}%)")
-            if btc_1h < -REGIME_BTC_1H_THR:
-                long_fav = False
-                long_block.append(f"BTC1h{btc_1h:+.2f}%")
-            elif btc_1h > REGIME_BTC_1H_THR:
-                short_fav = False
-                short_block.append(f"BTC1h{btc_1h:+.2f}%")
+            rows = list(reversed(cur.fetchall()))  # 升序，供 _last_closed_idx 使用
+        # 只用**已收盘** 1h 条（与 BRK 同原则，见 `_last_closed_idx`）：库里最新一根
+        # 常是**未收盘**的当前小时（`scan_klines` 每 5min UPSERT 覆盖），其 `close_px`
+        # 是 live 价 ⇒ 同一时刻不同分钟读到不同值、**不可复现**，且与图例「btc_1h =
+        # BTC 最近两根 1h **收盘**涨跌」措辞不符（审计 N-pure3-1：live +0.16% vs 已
+        # 收盘棒 +0.09%）。改为取最近一根**已收盘**条与其前一根。
+        idx = _last_closed_idx(rows, "1h", datetime.now(timezone.utc))
+        if idx is not None and idx >= 1:
+            prev = float(rows[idx - 1]["close_px"])
+            last = float(rows[idx]["close_px"])
+            if prev:
+                btc_1h = (last - prev) / prev * 100
+                tags.append(f"btc_1h={'up' if btc_1h >= 0 else 'down'}({btc_1h:+.2f}%)")
+                if btc_1h < -REGIME_BTC_1H_THR:
+                    long_fav = False
+                    long_block.append(f"BTC1h{btc_1h:+.2f}%")
+                elif btc_1h > REGIME_BTC_1H_THR:
+                    short_fav = False
+                    short_block.append(f"BTC1h{btc_1h:+.2f}%")
     except Exception:
         pass
 
@@ -1986,7 +1995,7 @@ def _render_alert_email(items: list[dict],
     body = "".join(body_parts)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
-              f"「市场环境」= 全局 regime（btc_1h = BTC 最近两根 1h 收盘涨跌；"
+              f"「市场环境」= 全局 regime（btc_1h = BTC 最近两根已收盘 1h 的收盘涨跌；"
               f"fgi = 恐慌贪婪指数；cap_trend = 总市值日环比）；任一越过门槛"
               f"（BTC ±{REGIME_BTC_1H_THR:g}% / FGI {REGIME_FGI_FEAR:g}·"
               f"{REGIME_FGI_GREED:g} / 市值 ±{REGIME_CAP_TREND_THR:g}%）即标注"

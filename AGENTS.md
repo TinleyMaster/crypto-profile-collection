@@ -558,3 +558,12 @@
 - **未改（观察项）**：SOPHUSDT 费率 `-0.9616%/8h`（年化 -1053%）数学正确、DB 两行一致，属**数据 sanity 待查**（非渲染 bug），未动数据源。
 - **部署观察**：审计指出 07:01~07:19 UTC 两封邮件由不同 `scan_daemon` 版本生成（重部署时间差），B1 在 `5979d36` 与 origin/main **两版均存在**；本轮修复需再次重启 `scan_daemon` 才生效。
 - **自测**：新增 [test_scan_alert_header_regime.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_header_regime.py)（**18/18 通过**：B1 头部含全局 regime 且无 token 泄漏 + 兜底不泄漏 + BRK 条数/触发根 + B3 + B4 + `**` 护栏 + AST）；既有 `test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 128/128 无回归；`py_compile` 通过。
+
+### N-pure3-1：`btc_1h` 改用已收盘 1h 条（审计_盘面异动告警邮件_纯盘面无共振3_2026-09-22，2026-09-22）
+
+来源：`审计_盘面异动告警邮件_纯盘面无共振3_2026-09-22.md`（对象 = 08:20 UTC 那封「1 币·无共振」邮件）。审计确认**本封已可读、数据 100% 对齐、B3/B4 在场**，只留一项 N-pure3-1。
+
+- **N-pure3-1（已修）`_build_regime` 的 `btc_1h` 用了未收盘的当前小时**：`SELECT ... ORDER BY open_time DESC LIMIT 5` 取 `closes[0]`（最新一根）——而库里最新 1h 常是**未收盘的当前小时**（`scan_klines` 每 5min UPSERT 覆盖），其 `close_px` 是 live 价 ⇒ ① 同一时刻不同分钟读到不同值、**不可复现**；② 与图例「btc_1h = BTC 最近两根 1h **收盘**涨跌」措辞不符（实测 live +0.16% vs 已收盘棒 +0.09%，差 0.07pp）。**与已记档的 BRK「未收盘条不可复现」（P1-4）同类**，当时只修了 BRK、regime 未动。
+  - 修法：复用 `_last_closed_idx(rows, "1h", now)`，取最近一根**已收盘**条与其前一根；无已收盘条则**不产出** `btc_1h` 标签（宁缺勿错，不拿 live 冒充收盘）。图例措辞补「已收盘」二字（用纯文本，**不得**用 markdown `**`）。
+- **验证盲区（如实记录）**：该封仅 1 个干净 S1（牛来USDT）、**无 BRK 主导**，而 B1 只在「BRK 按强度居首」时触发 ⇒ **该封不能排他证明 B1 已部署**（旧代码对干净 S1 批次本来就输出人话头部）。终验需一封含 BRK 主导的批次邮件，或直连容器 `git rev-parse HEAD` 确认 ≥ `5dfbcd0`（我无容器访问权，未验）。
+- **自测**：`test_scan_alert_header_regime.py` 扩至 **21/21**（+3：已收盘两根 (100−80)/80=+25.00% 而非 live +5.00%；全未收盘 → 不产 `btc_1h` 标签）；既有 deepdive 75/75、remaining 16/16、L1 16/16、squeeze 135/135 无回归；`py_compile` 通过；零 DDL。

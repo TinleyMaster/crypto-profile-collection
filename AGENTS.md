@@ -149,7 +149,7 @@
 - **P2-3 口径不一致只做披露**（分子 CoinGlass 全交易所爆仓 / 分母 Binance 24h 成交额）：邮件脚注明示，字段加 `liq_scope=coinglass_rolling_1h`；未改数据源。
 - **P3 展示修正**：`or 0` 全删（`_fmt_ratio` 让 `None→'—'`、`0.0→'+0.000%'` 可区分）；标签改 `最近1h多空爆仓`；加「入队→峰值→判定」时间轴；大户多空比改 `base → now（Δ）`；主动买卖比带数据时点；配色按中文惯例（多头胜=红 `#ef4444`、空头胜=绿 `#22c55e`）。
 - **P2-4 阈值偏低（`SQZ_SHORT_LIQ_RATIO_MIN` / `LONG_LIQ_RATIO_THR` 同为 0.00008）暂不动**：两常量本已解耦，值相同但需 1-2 天样本再标定，勿用单样本调参。
-- **无迁移**：`squeeze_track.metrics` / `scan_signal.detail` 均为 JSONB，新增字段（`oi_cover`/`top_ratio_base`/`taker_ts`/`liq_scope`/`data_missing`）直接容纳；tracking 轮次的 metrics 改写为 `COALESCE(%s::jsonb, metrics)` 以免覆盖 entry metrics。
+- **无迁移**：`squeeze_track.metrics` / `scan_signal.detail` 均为 JSONB，新增字段（`oi_cover`/`top_ratio_base`/`taker_ts`/`liq_scope`/`data_missing`）直接容纳；tracking 轮次的 metrics 改写为 `COALESCE(%s::jsonb, metrics)` ~~以免覆盖 entry metrics~~ ⚠️ **该 rationale 已被证伪（复验 F5，见下文 `ec1c1c2` 段）**：`COALESCE(%s::jsonb, metrics)` 是**整对象替换**，正是「覆盖 entry metrics」的成因，不是防它的手段；现已改为合并语义 `metrics || COALESCE(%s::jsonb,'{}'::jsonb)`。此处保留原文仅为审计链，**勿据其行事**。
 - **自测**：判定缺失口径 6 例（`None` 各维度 → 不产方向、`data_missing` 标注）+ 正常四分支 + 渲染（`None→'—'`、`0→'+0.000%'`、UTC、时间轴、配色）全绿；未对 prod 执行写操作。
 
 ### 轧空池标定与观测补漏（工单 SQZ-2026-09-21，本次提交）
@@ -413,7 +413,7 @@
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池E1-E9落地_ef5f077_2026-09-22.md`。复验确认 **E1~E9 代码面 9/9 落地**（`wilson_ci` 手工参考值 6 组全对、`segment_upper_bounds` 与独立实现同段同值、`molecule_coverage` 与自写 SQL 逐位一致）、阈值未动（24 常量 0 差异）、两套独立实现逐位吻合；另开 **F1~F6**。**本轮无 DDL、无阈值变更**。
 
 - **🔴 F1（P1，方法）部署判据复用**：我写的「✅ 已部署并生效」引用的 `gap_metric_ver=2 @02:46:02 id=15` 是 **`21fad2d` 的判据**（该常量由它新增），而 `ef5f077` 的 daemon 改动**只落在拒判分支**（`reason LIKE '判定窗口%'` 全库 0 行、带新键的行全为 `judged`）⇒ 本提交**无 DB 可观测差异 ⇒ 不可判定**。已按上方「部署判定规则」改正（规则同时写入上方 D1-D7 节末尾）。
-- **🔴 F2（P1，语义，已修）`rc=2` 吞掉了「不可判」与「有判别力 FAIL」**：E1 修好了「退出码与结论相反」，却把矛盾推进了一层 —— 注入矩阵里「50% 越阈的有判别力 FAIL」（S2）与「20% 越阈的不可判」（S3）**同为 `rc=2`**，而 E2 的全部论点正是这两者**等权** ⇒ 只看 rc 的下游（cron/CI/看板）仍会读成「判据明确不通过」并据此调阈值。已落地**四码**（`exit_code()` 纯函数，文本与 `--json` 同码）：**0 = PASS ｜ 2 = 有判别力 FAIL ｜ 3 = 样本不可用 ｜ 4 = 不可判**；`judge.conclusion` 三态与之一一对应，文本区在判据行后直接打印退出码含义。**（上一轮已把「不可判」从 FAIL 文案里拆出来，本轮补齐码位。）**
+- **🔴 F2（P1，语义，已修）`rc=2` 吞掉了「不可判」与「有判别力 FAIL」**：E1 修好了「退出码与结论相反」，却把矛盾推进了一层 —— 注入矩阵里「50% 越阈的有判别力 FAIL」（S2）与「20% 越阈的不可判」（S3）**同为 `rc=2`**，而 E2 的全部论点正是这两者**等权** ⇒ 只看 rc 的下游（cron/CI/看板）仍会读成「判据明确不通过」并据此调阈值。已落地**四码**（`exit_code()` 纯函数，文本与 `--json` 同码）：**0 = PASS ｜ 2 = 有判别力 FAIL ｜ 3 = 样本不可用 ｜ 4 = 不可判**；`judge.conclusion` 由 `exit_code()` **单一真源派生**（四态：`PASS`/`FAIL`/`SAMPLE_UNUSABLE`/`INCONCLUSIVE`，与码位一一对应 —— `ec1c1c2` 时还是「三态、各自派生」，导致 `sample_ok=false` 竟印成 `FAIL`，见下文 G1），文本区在判据行后直接打印退出码含义。**（上一轮已把「不可判」从 FAIL 文案里拆出来，本轮补齐码位。）**
 - **🟠 F3（P2，已修）`MIN_DENOM_P10` 闸门逻辑不可达 + 对目标场景无感**：① `pct()` 是**线性插值**分位 —— 注入「300 币里 15 币覆盖率 0.49」时 `k=299×0.10=29.9` 落在好币区间 ⇒ **P10 仍输出 1.000**，恰好看不见要抓的 5% 尾部；② `P10 < 0.5` ⇒ 至少 10% 的币 < 0.5 < 0.9 ⇒ **必先触发** `MAX_DENOM_BELOW_PCT` ⇒ 被数学支配、永不单独触发（E9 想消除的「重复理由」又回来了）。⇒ 改为 `MIN_DENOM_HALF_COVERAGE=0.5` + `MAX_DENOM_BELOW_HALF_PCT=2.0`（「覆盖率低于半格的币占比」），与「低于门槛占比」**不共线**（占比落在 2%~5% 区间时可单独触发，正是目标场景）；P10 降级为**纯观察项**（打印时标注）。同时把 E9 的「只报最重一条」原则应用到该分支。
 - **🟠 F4（P2，已修）`MIN_SEGMENT_N` 判错分母**：守卫判的是**段内总行数**，而 `rate()` 的分母是**变体过滤后**子集 ⇒ 段内塞 1 行「仅某变体命中且越阈」即可把该变体 rate 拉到 100%，**1 行（占样本 0.3%）就能把「不跨线」翻成「跨线」** ⇒ `decisive` 被单条观测操纵（反向亦然：可掩盖真实跨线）。已改为**逐变体判 n**（不足者不进该段），并在 `segments[].n_by_variant` 暴露各变体 n 供人核对。
 - **🟠 F5（P2，已修）E4 引入「入场指标被覆盖」的数据丢失副作用**：落库 SQL 原是 `metrics = COALESCE(%s::jsonb, metrics)` —— **整对象替换**，而 `tracking` 行的 `metrics` 还承载**入场指标**（`confirm`/`oi_chg_pct`/`short_liq_ratio`/`cvd_ratio`）；拒判路径写整对象会把这些**永久覆盖掉**（该行仍是 tracking ⇔ 未判定，后续再也还原不了入场依据）⇒ **为改善可观测性反而毁掉另一类可观测性**。已改为**合并**语义：`metrics = COALESCE(metrics || COALESCE(%s::jsonb, '{}'::jsonb), metrics)`（`%s` 为 NULL 时原样不动，保住原语义；judged 路径一并受益——此前它同样覆盖，属既有行为）。
@@ -422,6 +422,18 @@
 - **🟡 F6f（已修）`judged` 路径的 gap 位恒 0/1**：judged 必经闸门 ⇒ `head/mid_gap` 数学上只能 0/1，E4 落地后 judged 行仍**不携带有效病例信息** ⇒ 两条路径统一补落 `gate_ok` 布尔位（拒判 `False` / 判定 `True`），可直接数出「通过 vs 拒绝」分布。
 - **🟡 F6e（已修）「不留数字」规则缺例外条款**：规则原写「数字不在文档留档」但全文件仍有大量数字（多在历史引用/根因陈述位，带时间与前提标注）⇒ 规则与实践并存的正是 E8 要消除的那类矛盾。规则改为：**判据位不得留数字；历史引用/根因陈述位可留，须带时间与前提标注**（并注明「以本次实跑为准」）。
 - **📌 F1 的部署侧待验（本条不可判定）**：首个 `reason LIKE '判定窗口%'` 的 `tracking` 行出现后，检查其 `metrics` 是否含 `gap_metric_ver=2`、`gate_ok=false`，**且仍保留** `confirm`/`short_liq_ratio`（验 F5）。
+- **📌 审计链更正**：本节（F 段）**并非由 `ec1c1c2`（`a41690f` 的父提交也不含）携带** —— 它被并发进程误扫进 **`c9478af`（「O1 费率覆盖缺口」）+ `a1f45e0`（「O1 收尾」）**；`a41690f` 的 numstat **只动 `llm_client.py`**。内容正确、已在 `origin/main`，仅「谁携带了这条规则」需以 `c9478af`/`a1f45e0` 为准。
+
+### 轧空池 F1~F6 落地复验处置（复验_轧空池F1-F6落地_ec1c1c2_2026-09-22，2026-09-22）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池F1-F6落地_ec1c1c2_2026-09-22.md`。复验确认 **F1~F6 代码面全部落地**（`py_compile` 5/5、单测 107/107、四码注入矩阵全走到、`squeeze.py` 逐字节未改、阈值 24 常量 0 差异）、工区↔blob 全 SAME、独立复算在**同一时点钉死**下与真码分类等价（19008 行全部逐位一致，仅数值表示层差异）；另开 **G1~G5**。**本轮无 DDL、无阈值变更**。
+
+- **🔴 G1（P2，已修）`judge.conclusion` 未与 `sample_ok` 联动 —— 同一缺陷类第三次复发**：真码实跑 `--days 7 --json` 打出 `sample_ok=false` + `conclusion="FAIL"` + `reliable=false` + `rc=3` —— **四处口径互相打架**。根因：`conclusion` 由 `pass`+`decisive`/`segment_straddle` **另算一遍**、计算路径**完全不读 `sample_ok`** ⇒ 样本不合格时仍能打出「FAIL」这种强判定词。谱系：D1 `pass` 与 rc 相反 → F2 `decisive` 与「有判别力 FAIL」共用 rc=2 → 本轮 `conclusion`。**`--days 1` 恰好因 `segment_straddle=true` 输出 `INCONCLUSIVE`，掩盖了该 bug**（只有 `--days 7` 这种「straddle=false 但 sample 不合格」的组合才暴露）。⇒ 改为 `CONCLUSION_BY_CODE = {0:PASS, 2:FAIL, 3:SAMPLE_UNUSABLE, 4:INCONCLUSIVE}`，由 `exit_code()` **单一真源映射**，`judge` 同时落 `exit_code` 字段；**杜绝再有第四个字段各自为政**。
+- **🟡 G3（P3，已修）`exit_code()` 未被所有出口复用 + 状态机未穷尽**：① 文本分支的 `return 3` 是**硬编码字面量**（另两处走 `exit_code()`，改码表时会分叉）⇒ 三处出口统一成同一个 `rc` 变量；② `ub_sub is None`（**无任何变体命中** ⇒ 上界根本算不出来）旧码落到 **rc=4**，而 4 的文档语义是「样本可用、只是判据不具判别力」，两者不同源 ⇒ 给 `exit_code()` 增 `measurable` 参数并**并入 3**（同属「任何比率都不成立」）。
+- **🟠 G4（P3，已修）`ci_decisive` 自身是刀锋判定**：实测 `--days 1` 的 CI = `[20.01, 23.54]`，下界对判据线 20.00% 只差 **0.01pp** 即判「有判别力」—— 布尔化把「差 0.01pp」与「差 10pp」印成同一句话（`ci_decisive=true`），而前者远在任何统计误差之内 ⇒ 实质掷硬币。⇒ 新增纯函数 `ci_margin_pp()`（CI 两界距判据线的**较小**裕度）并落 `judge.ci_distance_pp`，文本区在 CI 行下补印「裕度 = X pp」。
+- **🟠 G5（P3，已修）E9 去重只作用于分母组**：`--days 1` 分子组仍打出**2 条**理由（① 整点覆盖 41.7% ② 最长空洞 14h），而单段长空洞**必然**同时压低覆盖率 ⇒ 读者读成「两个问题」而实际只有一个。⇒ 抽出纯函数 `molecule_fail_reasons()`（同 `gap_reason` 的 D6 先例，便于单测）：**该空洞自身长度已足以造成覆盖不达标**（`hole > expect × (1-门槛)`）⇒ 折叠为一条（空洞为主因）；否则两者是彼此独立的缺陷（散点缺失 vs 局部长洞）⇒ 照报两条 —— **无条件折叠会丢掉「缺失形态」这一独立信息**。
+- **🟡 G2（P3，已修）文档残留与自述偏差**：① 本节上方（工单 `SQZ-2026-09-21`）原写 `COALESCE(%s::jsonb, metrics)`「以免覆盖 entry metrics」——**该 rationale 已被 F5 证伪**（它正是覆盖的成因），且无更正指针；已就地加删除线 + ⚠️ 证伪标注 + 「勿据其行事」。② F2 条原写「`conclusion` 三态与四码一一对应」不成立（3 态 vs 4 码，且 `sample_ok=False` 时可为 `FAIL`）⇒ 已改为「由 `exit_code()` 单一真源派生」。③ 我上一轮自述「AGENTS.md 已随 `a41690f` 推送」**不准确**，审计链更正见上方 F 段末条。
+- **📌 部署态 = 不可判定（判据未打开）**：本提交（`ec1c1c2`）daemon 侧唯一新增可观测物 = `metrics.gate_ok`，而 prod 探针 `metrics ? 'gate_ok'` **0 行**、`reason LIKE '判定窗口%'` **0 行**、最近 `judged` 早于提交时刻 ⇒ **运行态无任何 DB 可观测差异**。按「本提交独有锚点」规则**只能写不可判定**，不得引用 `gap_metric_ver=2`（属 `21fad2d`）。**未来指纹**：① 拒判 —— 首个 `reason LIKE '判定窗口%'` 的 tracking 行，其 `metrics` 含 `gate_ok=false` **且仍保留** `confirm`/`short_liq_ratio`；② 判定（F5 独有）—— 首个 `judged` 行 metrics 含 `confirm`/`timeframe`/`oi_chg_pct`（entry-only 键；verdict 只给 `d_oi_pct`/`cvd_ratio`/`long_liq_ratio`/`top_ratio_chg`/`taker_ratio`/`data_missing`）。
 
 ### 盘面异动告警邮件「深层补刀」O2~O6 处置（审计_盘面异动告警邮件_3币1币_2026-09-22，2026-09-22）
 
@@ -473,3 +485,21 @@
 - **自测**：[test_scan_alert_audit_deepdive.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_audit_deepdive.py) 扩至 **49/49 通过**（新增 P2-N7 5 条 + P2-N8 12 条 + P2-N9 5 条 + P2-N10 3 条）；`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16 无回归；`py_compile` 通过。
 - **离线端到端复验**：HEAD 代码 + 库内快照重渲染两封邮件，差异**仅**「生成时刻」+ 本轮 3 处修正（`-16.35%`→`+16.35%`、`OI - -`→`OI n/a`、CVD 机制文案）⇒ 修复精确、无副作用。（N8 不在回放中显形：快照是修复前冻结产物，已用**现行 `_get_resonance` 直查库**单独验证。）
 - **待部署**：需重启容器（`scan_daemon`）后生效；当前容器跑 `ec1c1c2`，未含 `af63632` 与本提交。
+
+### 盘面异动告警邮件 09-22 06:46 审计处置（FLOCKUSDT + AVAUSDT，2026-09-22）
+
+来源：用户收件 eml（`🚨_盘面异动告警：2_币高置信信号（含共振_6_条，催化剂_3多_2空_1中，净多1）.eml`，`Date: Tue, 22 Sep 2026 06:46:59 +0000`），用户反馈**「看不懂」**。方法：三段式（源码核验 → 库复算 → 端到端离线渲染复验）。库侧逐字段核验全部命中：`id=1304 FLOCKUSDT`（main/S1/15m/up/+2.75%/vr=2.05/OI up +3.90%/CVD up/费率 0.00005/high）、`id=1303 AVAUSDT`（main/S1/1h/up/+4.39%/vr=2.53/**OI up +0.19%**/CVD up/费率 -0.0008045/high）。**本轮全部落在 `scan_daemon.py` 渲染/查询层，零 DDL、零迁移、无阈值变更**（`oi_dir` 二值化逻辑、场景分类、regime 门槛均未动）。
+
+- **🔴 P2-N11（⚠️ 真 bug，已修）归一标题精确键判等漏合并两类转载** ⇒ 催化剂条数被转载**翻倍**，与图例「已合并多源转载」**相反**。实物：AVAUSDT 主题「催化剂 4 条」实为 **2 条新闻 × 2 来源**（实为 2多/1空/1中；主题原写「3多/2空/1中」，净多 1 不变）。两类漏合并：
+  - **①源库截断版**：同一条新闻被源库落成「完整版」与「`...` 收尾的截断版」，归一后**短键是长键的前缀**（实物 46 vs 52 字）⇒ 精确键判等漏判。新增 `_is_repost_of_truncated()`：两键互为前缀 **且** 短的一侧原文以 `...`/`…`/`..` 收尾（截断可证）才合并，并设 `MIN_TRUNC_DEDUP_LEN=24` 防短标题互并。
+  - **②正文内嵌源名**：`_norm_title()` 原只剥**标题首段**源前缀，够不着「火星财经消息，…，**据 HTX 行情数据**，…」这类**正文内**源名 ⇒ 差在 `HTX` 二字。现补：`_SRC_NAMES_LOW` 增补行情数据类源名（`htx`/`okx`/`火币` 等），并只删**紧跟在「据」之后**的源名（引用来源的固定句式）——**不全局删**，否则会吃掉「币安将上线…」这类正文源名、把无关新闻并掉。
+  - ⚠️ **主动收窄过一次**：曾考虑「短原文是长原文纯前缀」也合并，推演发现英文新闻模板（`According to the announcement from Binance, the following tokens will be listed on …` 前 69 字全同）会把**不同公告**并掉 —— 正是 **P1-N1 踩过的坑**（误合并 208 组 / 吞掉 249 条）。⇒ 只认**可证的截断标记**，并把这段权衡写进常量注释与测试护栏。
+  - **影响面量化（只读，近 7 天 2829 行）**：去重后 **2679 → 2397（多合并 282 条）**，受影响 **80/340 资产**；Top：BTC 672→599、ETH 407→352、ZEC 152→136、HYPE 114→98、USDC 77→67、UNI 53→45、SOL 81→74、TRUMP 16→12、DRAM 8→4、DLT 3→1、**AVA 4→2（目标用例）**。**抽检结论**：逐组打印 BTC/ETH/DRAM/DLT/AVA 的新增合并对，**全部为同一条新闻被 ChainCatcher / BlockBeats / 火星财经 / PANews 各记一条**的真转载（例：「ChainCatcher 消息，据 Lookonchain 监测，比特币上涨期间…」↔「火星财经消息，据 Lookonchain 监测…」）⇒ **无误合并**。
+- **🔴 P2-N12（⚠️ 真 bug，已修）`_load_alert_candidates` 漏选 `confidence` 列 ⇒ 每张卡片渲染空的红/绿药丸**：渲染层用 `sig.get('confidence').upper()` 出徽章，但查询未选该列 ⇒ `None` ⇒ 实物 eml 里每张卡片都有一个 `<span style='background:#fee2e2…'></span>`**无文本**，读者无从判断那是什么。已补选该列；渲染层另做兜底（`confidence` 缺失时**不渲染空壳**），因该函数被多个调用方共用，避免同类空壳再次静默上线。
+- **🟠 P2-N11c（显示，已修）OI 近乎持平时仍渲染 `OI up +0.2%`**：`oi_dir` 由 `oi_chg > 0` 二值化 ⇒ AVAUSDT OI 仅 **+0.19%** 也判 `up`，读者会以为 OI 明显扩张，**进而无法解释强度条为何只有 0.5 分**（强度 = 量比 × |OI 增速|，OI 持平则分数必然贴地）。常量 `CVD_MECH_OI_MIN_PCT` 更名 **`OI_FLAT_PCT = 0.5`**（同一阈值现同时驱动两处：① OI 段显示 ② CVD 机制断言），`|oi_chg| < OI_FLAT_PCT` 时渲染「**OI 持平 ±X%**」（正负皆然），`oi_dir` 本身仍用于场景分类与 regime，不受影响。
+- **🟠 图例 4 项补全（展示，已修）**：① 强度条只写「相悖扣系数」未写**加成**（手算 8.0 对不上 9.7）⇒ 补「共振方向一致 ×1.15 / CVD 同向 ×1.05」并注明**「不含涨幅」**、OI 为乘性因子；②「市场环境」整行（`btc_1h`/`fgi`/`cap_trend`/「空头环境受限」）**无图例** ⇒ 新增一段，写明三指标与门槛、以及「环境受限 = 该方向当轮降级 high→medium，而告警只取 high ⇒ **该方向本轮不发信**（非否决该方向本身）」；③「历史同场景」两币数值完全相同（中位 +0.62% / 胜率 57% / n=58）⇒ 注明口径是**按场景跨币种聚合**（同为 S1 即共用同一组数字，与具体币无关），并提示样本含顺风期选择偏置；④ 补「OI 持平 ±X%」与费率正负语义（正 = 多头付空头 = 多头拥挤；负 = 空头付多头 = 对做多顺风）。
+- **regime 复算（佐证「市场环境」行）**：FGI=72 **等于** `REGIME_FGI_GREED=72`（判据 `>` ⇒ 不触发）；`cap_trend = (2917342942198.4 − 2776581649862.35)/2776581649862.35 = +5.07%` > 0.5 ⇒ `short_fav=False` ⇒「空头环境受限（市值+5.07%）」；`btc_1h=+0.11%` 在 ±0.5% 内不触发。
+- **强度复算**：① FLOCKUSDT `2.05 × 3.90 = 7.995` ×1.15（共振对齐）×1.05（CVD 同向）= **9.65 → 9.7（5 格）**；② AVAUSDT `2.53 × 0.19 = 0.4807` ×1.05（多空共振条数相等 ⇒ 不加共振系数）= **0.50（1 格）**。
+- **离线端到端复验（HEAD 代码 + 真实库）**：主题 `6 条 / 3多2空1中` → **`4 条 / 2多1空1中`**（净多 1 不变）；FLOCKUSDT 强度 9.7 / 催化剂 2（1多/0空/1中）**未变、无误伤**；AVAUSDT `OI up +0.2%` → **`OI 持平 +0.2%`**、催化剂 4（2多/2空/0中）→ **2（1多/1空/0中）**、强度仍 0.5；图例 8 个新片段全部命中。
+- **自测**：[test_scan_alert_audit_deepdive.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_scan_alert_audit_deepdive.py) 扩至 **75/75 通过**（新增 P2-N11a 内嵌源名 3 条 + P2-N11b 截断转载 6 条（含英文模板误合并回归护栏）+ P2-N11c OI 持平 4 条 + P2-N11d 图例 8 条 + P2-N12 5 条）；`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16 无回归；`py_compile` 通过。
+- **待部署**：需重启容器（`scan_daemon`）后生效；当前容器跑 `ec1c1c2`，未含 `af63632` / `827f6a4` 与本提交。

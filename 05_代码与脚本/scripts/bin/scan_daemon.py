@@ -1258,7 +1258,12 @@ def _load_alert_candidates(conn, window_min: int) -> list[dict]:
             """
             SELECT id, signal_ts, symbol, pool, scenario, timeframe, p_dir, price_chg_pct,
                    vol_ratio, oi_dir, oi_chg_pct, cvd_dir, funding_rate, context_tags,
-                   cvd_usd, cvd_ratio, trigger_price, stop_loss_pct, breakout_px, status
+                   cvd_usd, cvd_ratio, trigger_price, stop_loss_pct, breakout_px, status,
+                   -- 复验 P2-N12：渲染层用 `sig.get('confidence').upper()` 出卡片徽章，
+                   -- 但本查询原先**没选该列** ⇒ `None` ⇒ 每张卡片渲染出一个**空的红/绿
+                   -- 药丸**（实物：09-22 06:46 那封，`<span style='background:#fee2e2…'>
+                   -- </span>` 无文本），读者无从判断那是什么。补上该列即恢复原设计文案。
+                   confidence
             FROM biz.scan_signal
             WHERE confidence = 'high'
               AND (pool = 'main' OR (pool = 'accumulation' AND scenario = 'BRK'))
@@ -1412,7 +1417,10 @@ def _get_asset_id(conn, symbol: str) -> int | None:
 _SRC_NAMES_LOW = ("火星财经", "chaincatcher", "blockbeats", "panews", "金色财经", "动察",
                   "beating", "吴说", "odaily", "律动", "jin10", "wallstreetcn",
                   "华尔街见闻", "binance", "币安", "coindesk", "cointelegraph",
-                  "theblock", "blockworks", "decrypt", "cryptoslate", "foresight")
+                  "theblock", "blockworks", "decrypt", "cryptoslate", "foresight",
+                  # 复验 P2-N11：行情数据类源名（「据 HTX 行情数据，…」）。原先只在
+                  # 标题**首段**起作用，现同时供「正文内嵌源名」剥离使用（见 _norm_title）。
+                  "htx", "okx", "火币")
 _SRC_MARKERS = ("消息", "快讯", "讯", "报道", "日报", "公告", "news", "report")
 _META_HEADS = ("作者", "撰文", "原文标题", "原标题", "来源", "编译")
 _EN_DATE_RE = re.compile(r"^on\s+[a-z]{3,9}\.?\s+\d{1,2}", re.IGNORECASE)
@@ -1443,6 +1451,12 @@ def _norm_title(title) -> str:
 
     复验 P1-N1：剥离判据由「纯长度启发式」改为 `_is_source_prefix()` 内容判据，
     避免把正文当源前缀剥掉。
+
+    复验 P2-N11：源名还可能出现在**正文里**（「9 月 18 日，据 HTX 行情数据，…」），
+    首段前缀剥离够不着 ⇒ 同一条新闻的「据 HTX 行情数据」版与「据 行情数据」版
+    归一后只差一个 `htx`，精确键判等漏合并（实物：AVAUSDT 利多那对，同一事件被
+    火星财经/BlockBeats 各记一条）。只删**紧跟在「据」之后**的源名（引用来源的固定
+    句式），不全局删 —— 全局删会吃掉「币安将上线…」这类正文里的源名，把无关新闻并掉。
     """
     s = (title or "").strip()
     # 源前缀结尾可能是全/半角冒号或逗号（「火星财经消息，」「ChainCatcher 消息，」
@@ -1451,7 +1465,10 @@ def _norm_title(title) -> str:
            if 0 < i <= 16]
     if idx and _is_source_prefix(s[:min(idx)]):
         s = s[min(idx) + 1:].strip()
-    return "".join(ch for ch in s.lower() if ch.isalnum())
+    s = "".join(ch for ch in s.lower() if ch.isalnum())
+    for n in _SRC_NAMES_LOW:
+        s = s.replace("据" + n, "据")
+    return s
 
 
 # 复验 P2-N8：上游把「标题缺失」落成字面量占位符（prod `biz.asset_catalyst` 实测
@@ -1466,6 +1483,35 @@ def _is_placeholder_title(title) -> bool:
     """标题为缺失占位符（`null`/`none`/`n/a`… 或纯空白）⇒ 该催化剂无可用信息。"""
     s = str(title or "").strip().lower()
     return (not s) or s in _TITLE_PLACEHOLDERS
+
+
+# 复验 P2-N11：源库对同一条新闻有时落**截断版**（原文以 `...`/`…` 收尾）⇒ 归一后的
+# 短键是长键的**前缀**而非相等，精确键判等漏合并（实物：AVAUSDT 利空那对，键长
+# 46 vs 52，短键正是长键前缀 —— 主题因此把 2 条新闻算成 4 条，与图例「已合并多源
+# 转载」相反）。
+# ⚠️ 只在短的一侧**带截断标记**时才合并：曾考虑「短原文是长原文的纯前缀」也合并，
+# 但英文新闻模板（"According to the announcement from Binance, the following
+# tokens will be listed on …" 前 69 字符全同）会因此把**不同公告**并掉 —— 正是
+# P1-N1 踩过的坑（误合并 208 组 / 吞掉 249 条）。截断标记是可证证据，纯前缀不是。
+_TRUNC_TAILS = ("...", "…", "..")
+MIN_TRUNC_DEDUP_LEN = 24
+
+
+def _is_repost_of_truncated(key: str, raw: str, seen_raw: list) -> bool:
+    """`key` 是否为已见条目的**截断转载**（同一条新闻被源库截短后重复入库）。
+
+    判据 = 两键互为前缀 **且** 短的一侧原文以 `...`/`…` 收尾（截断可证）。
+    """
+    for k, rt in seen_raw:
+        if len(k) < len(key):
+            if (len(k) >= MIN_TRUNC_DEDUP_LEN and key.startswith(k)
+                    and rt.endswith(_TRUNC_TAILS)):
+                return True
+        elif len(key) < len(k):
+            if (len(key) >= MIN_TRUNC_DEDUP_LEN and k.startswith(key)
+                    and raw.endswith(_TRUNC_TAILS)):
+                return True
+    return False
 
 
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
@@ -1514,6 +1560,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         rows = cur.fetchall()
     out["catalyst_raw"] = len(rows)
     seen: set[str] = set()
+    seen_raw: list[tuple[str, str]] = []   # (归一键, 原始标题) —— 截断转载判等用（P2-N11）
     fresh_cut = datetime.now(timezone.utc) - timedelta(days=CATALYST_STALE_DAYS)
     for r in rows:
         # 复验 P2-N8：占位符标题（title='null' 等）无可用信息，丢弃后再去重
@@ -1528,9 +1575,11 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         # 并让「利空为主」的红色警示漏报；改为 80 后误合并 1 组（唯一 key 2856，
         # 完整归一 2857，几乎无损）。
         key = _norm_title(r["title"])[:80]
-        if not key or key in seen:
+        raw = str(r["title"] or "").strip()
+        if not key or key in seen or _is_repost_of_truncated(key, raw, seen_raw):
             continue
         seen.add(key)
+        seen_raw.append((key, raw))
         d = str(r["impact_direction"] or "neutral").lower()
         d = d if d in out["catalyst_dir"] else "neutral"
         out["catalyst_dir"][d] += 1
@@ -1696,11 +1745,15 @@ def _strength_bar(score: float, top: float, color: str) -> str:
             f"<span style='color:#6b7280;font-size:11px'> {score:.1f}</span>")
 
 
-# 复验 P2-N9：CVD 机制断言（「杠杆驱动」/「空头回补」）的 **OI 物性阈值**（%）。
-# `oi_dir` 由 `oi_chg > 0` 二值化 ⇒ OI 只动 +0.04% 也判 `up`，若不加阈值，机制标签
-# 会把「OI 持平 + 现货主动卖」误述成「杠杆驱动（OI 增）」。取 0.5%：低于该幅度时
-# 只描述现货侧、不下机制结论（`oi_dir` 本身仍用于 S1~S4 场景分类，不受影响）。
-CVD_MECH_OI_MIN_PCT = 0.5
+# 复验 P2-N9 / P2-N11：**OI 物性阈值**（%）。`oi_dir` 由 `oi_chg > 0` 二值化 ⇒ OI 只动
+# +0.2% 也判 `up`。该阈值有两个消费方：
+#   ① 卡片 OI 段：`|oi_chg| < 阈值` 时渲染「OI 持平 ±X%」而非「OI up ±X%」——否则读者
+#      看到「OI up」会以为 OI 明显扩张，进而无法解释强度条为何只有 0.5 分（强度 =
+#      量比 × |OI 增速|，OI 持平则分数必然贴地。实物 id=1303 AVAUSDT）；
+#   ② CVD 机制断言（「杠杆驱动」/「空头回补」）：扩张不足该幅度时只描述现货侧、
+#      不下机制结论（实物 id=1286 ENAUSDT：OI +0.04% 却断言「杠杆驱动（OI 增）」）。
+# `oi_dir` 本身仍用于 S1~S4 场景分类与 regime 判定，不受影响。
+OI_FLAT_PCT = 0.5
 
 
 def _render_alert_email(items: list[dict]) -> str:
@@ -1753,12 +1806,18 @@ def _render_alert_email(items: list[dict]) -> str:
             cvd_amt = f" {_fmt_usd(float(cvd_usd))}"
             if cvd_ratio is not None:
                 cvd_amt += f"（占比 {float(cvd_ratio) * 100:+.1f}%）"
-        # OI 段（复验 P2-N10）：BRK 生产者刻意不落 OI（`oi_dir`/`oi_chg_pct` 皆 NULL），
-        # 原实现渲染成 `OI - -` —— 与图例「n/a = 该维度无从查询」口径不一致，且两个
-        # 连字符看起来像占位符残留。两者皆空时显式渲染 `OI n/a`（同费率段写法）。
-        oi_txt = ("OI n/a" if sig.get("oi_dir") is None and sig.get("oi_chg_pct") is None
-                  else f"OI {sig.get('oi_dir') or '-'} "
-                       f"{_fmt_num(sig.get('oi_chg_pct'), 1, '%', signed=True)}")
+        # OI 段（复验 P2-N10 / P2-N11）：BRK 生产者刻意不落 OI（`oi_dir`/`oi_chg_pct`
+        # 皆 NULL）⇒ 显式渲染 `OI n/a`（原 `OI - -`，与图例「n/a = 该维度无从查询」口径
+        # 一致）。`|oi_chg| < OI_FLAT_PCT` 时改渲染「OI 持平 ±X%」：`oi_dir` 由
+        # `oi_chg > 0` 二值化，+0.2% 也判 up，直译会误导读者以为 OI 明显扩张。
+        _oi_chg = sig.get("oi_chg_pct")
+        if sig.get("oi_dir") is None and _oi_chg is None:
+            oi_txt = "OI n/a"
+        elif _oi_chg is not None and abs(float(_oi_chg)) < OI_FLAT_PCT:
+            oi_txt = f"OI 持平 {_fmt_num(_oi_chg, 1, '%', signed=True)}"
+        else:
+            oi_txt = (f"OI {sig.get('oi_dir') or '-'} "
+                      f"{_fmt_num(_oi_chg, 1, '%', signed=True)}")
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
@@ -1800,7 +1859,7 @@ def _render_alert_email(items: list[dict]) -> str:
         oi_dir_v = sig.get("oi_dir")
         oi_chg_v = sig.get("oi_chg_pct")
         oi_expanding = (oi_chg_v is not None
-                        and abs(float(oi_chg_v)) >= CVD_MECH_OI_MIN_PCT)
+                        and abs(float(oi_chg_v)) >= OI_FLAT_PCT)
         cvd_flag = ""
         if cvd and cvd != sig.get("p_dir"):
             if up:
@@ -1813,7 +1872,7 @@ def _render_alert_email(items: list[dict]) -> str:
                 else:
                     cvd_flag = (f"<br><span style='color:#b45309'>⚠️ CVD {cvd} 与做多结论相反 → "
                                 f"现货主动卖且无现货承接，但 OI 未见同步扩张"
-                                f"（不足 ±{CVD_MECH_OI_MIN_PCT:g}%），机制待判</span>")
+                                f"（不足 ±{OI_FLAT_PCT:g}%），机制待判</span>")
             else:
                 cvd_flag = (f"<br><span style='color:#0369a1'>ℹ️ CVD {cvd} 与做空结论相反 → "
                             "跌势中有现货承接，防反抽</span>")
@@ -1824,10 +1883,16 @@ def _render_alert_email(items: list[dict]) -> str:
         if linked and cat_n == 0 and fund is None:
             tech_note = ("<br><span style='color:#6b7280'>ℹ️ 纯技术面信号"
                          "（无催化剂、费率未覆盖），缺基本面确认</span>")
-        badge = (f"<span style='background:{'#fee2e2' if up else '#dcfce7'};"
-                 f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
-                 f"border-radius:3px;font-size:11px'>"
-                 f"{str(sig.get('confidence') or '').upper()}</span>")
+        # 复验 P2-N12：`confidence` 缺失时**不渲染空药丸** —— 原实现无条件输出
+        # `<span style='background:#fee2e2…'></span>`，无文本、读者无从判断（根因是
+        # `_load_alert_candidates` 漏选该列，已同时修）。渲染层对多个调用方共用，
+        # 故这里也做一次兜底，避免同类空壳再次静默上线。
+        conf_txt = str(sig.get("confidence") or "").strip().upper()
+        badge = ""
+        if conf_txt:
+            badge = (f"<span style='background:{'#fee2e2' if up else '#dcfce7'};"
+                     f"color:{'#b91c1c' if up else '#15803d'};padding:1px 5px;"
+                     f"border-radius:3px;font-size:11px'>{conf_txt}</span>")
         # 延续确认徽章（fix_061）：主池信号在 signal_ts 后 6h 内越过 breakout_px
         # ⇒ status='confirmed'。它表示「延续已被市场跟随」，是**质量升格**而非
         # 入场门槛（回放：等确认再入场会把期望做低），故只作信息展示。
@@ -1894,8 +1959,16 @@ def _render_alert_email(items: list[dict]) -> str:
     body = "".join(body_parts)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
+              f"「市场环境」= 全局 regime（btc_1h = BTC 最近两根 1h 收盘涨跌；"
+              f"fgi = 恐慌贪婪指数；cap_trend = 总市值日环比）；任一越过门槛"
+              f"（BTC ±{REGIME_BTC_1H_THR:g}% / FGI {REGIME_FGI_FEAR:g}·"
+              f"{REGIME_FGI_GREED:g} / 市值 ±{REGIME_CAP_TREND_THR:g}%）即标注"
+              "「多头/空头环境受限」= 该方向信号在当轮被降级（high→medium），"
+              "而告警只取 high ⇒ 该方向本轮不发信（非否决该方向本身）；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
-              f"费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 2×ATR({STOP_ATR_PERIOD}) "
+              f"费率年化 = 当期 ×3×365（8h 结算），正 = 多头付空头（多头拥挤）、"
+              "负 = 空头付多头（对做多顺风）；"
+              f"「失效位」= 2×ATR({STOP_ATR_PERIOD}) "
               f"幅度夹在 [{STOP_BAND_TXT}] "
               "带内（工单 P2-4：原 21 根反向极值实测幅度不可用，-11.97% 配 +4.69% 涨幅 "
               "⇒ 风险回报倒挂）；"
@@ -1906,17 +1979,21 @@ def _render_alert_email(items: list[dict]) -> str:
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
+              "「按场景跨币种聚合」，同一场景的所有币共用同一组数字，与具体币无关；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
-              "强度条 = 本封邮件内「相对」强弱（量比 × OI 增速，BRK 无 OI 增速时取 "
-              "3.0 等当量；共振/CVD 与结论"
-              "相悖则扣系数），按最高分对数归一，条后数字为原始分数，非胜率；"
+              "强度条 = 本封邮件内「相对」强弱（量比 × |OI 增速|，BRK 无 OI 增速时取 "
+              "3.0 等当量；共振方向与结论一致 ×1.15 / 相悖 ×0.75，CVD 同向 ×1.05），"
+              "按最高分对数归一，条后数字为原始分数，非胜率；「不含涨幅」，且 OI 为"
+              "乘性因子 ⇒ OI 近乎持平时分数必然贴地（此时 OI 段会显示「OI 持平」）；"
               "「已确认」徽章 = 信号发出后 6 小时内出现一根已收盘 1h K 线的收盘价越过"
               "「触发根极值」⇒ 延续已被市场跟随（质量升格，非入场门槛：实测等确认再"
               "入场会把入场价抬高，故不改变执行口径）。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
                 "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"
-                "（=「归一标题去重后」的全量条数，已合并多源转载）。<br>"
+                f"（=「归一标题去重后」的全量条数，已合并多源转载，含源库截断版与"
+                f"「据 XX 行情数据」内嵌源名）；「OI 持平 ±X%」= |OI 增速| < "
+                f"{OI_FLAT_PCT:g}%（`oi_dir` 仍按符号二值化，但幅度属噪声级）。<br>"
                 "同一币在 60 分钟内若已在另一通道（轧空/主池）告警过，本通道只留痕不发信。<br>"
                 "本邮件为盘面数据分析参考，不构成投资建议。</p>")
     # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，

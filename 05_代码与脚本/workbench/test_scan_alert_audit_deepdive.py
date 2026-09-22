@@ -146,7 +146,7 @@ check(_res_fn is not None and "_is_placeholder_title(" in ast.unparse(_res_fn),
 #  P2-N9 —— CVD 机制断言需 OI 物性支撑（oi_dir 由 oi_chg>0 二值化）
 # ═══════════════════════════════════════════════════════════════
 
-print(f"\n【P2-N9】CVD 机制断言需 |OI 增速| ≥ {sd.CVD_MECH_OI_MIN_PCT:g}%")
+print(f"\n【P2-N9】CVD 机制断言需 |OI 增速| ≥ {sd.OI_FLAT_PCT:g}%")
 h_flat = _body(sd._render_alert_email([_item(sig=_sig(p_dir="up", cvd_dir="down",
                                                      oi_dir="up", oi_chg_pct=0.04))]))
 check("杠杆驱动" not in h_flat, "OI +0.04%（噪声级微增）不得断言「杠杆驱动」",
@@ -173,6 +173,92 @@ check("OI n/a" in h_brk, "BRK（oi_dir/oi_chg_pct 皆 NULL）→ `OI n/a`")
 check("OI - -" not in h_brk, "不再渲染占位符残留 `OI - -`（实物 id=1292 龙虾USDT）")
 h_oi = _body(sd._render_alert_email([_item(sig=_sig(oi_dir="up", oi_chg_pct=5.38))]))
 check("OI up +5.4%" in h_oi, "有 OI 时仍渲染 `OI up +5.4%`（不误伤）")
+
+# ═══════════════════════════════════════════════════════════════
+#  P2-N11 —— 转载去重漏合并（正文内嵌源名 + 源库截断版）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【P2-N11a】正文内嵌源名（「据 HTX 行情数据」）应归一为同一条")
+_T_PLAIN = ("火星财经消息，9 月 18 日，据 行情数据，随着美联储加息预期落地，加密市场"
+            "集体回暖，比特币回升至 77,000 美元上方，山寨币出现普涨行情")
+_T_HTX = ("BlockBeats 消息，9 月 18 日，据 HTX 行情数据，随着美联储加息预期落地，"
+          "加密市场集体回暖，比特币回升至 77,000 美元上方，山寨币出现普涨行情")
+check(sd._norm_title(_T_PLAIN) == sd._norm_title(_T_HTX),
+      "「据 HTX 行情数据」与「据 行情数据」归一后相同（实物 AVAUSDT 利多那对）",
+      f"{sd._norm_title(_T_PLAIN)!r}\n    vs {sd._norm_title(_T_HTX)!r}")
+check("据现货数据" in sd._norm_title("PANews 消息，据币安现货数据显示，市场出现大幅波动"),
+      "「据币安现货数据」→「据现货数据」")
+check("币安" in sd._norm_title("Odaily 消息，币安将上线 NEWTOKEN 合约"),
+      "正文（非「据…」句式）里的源名不得被删（防无关新闻误合并）")
+
+print("\n【P2-N11b】源库截断版转载（短键是长键前缀 + 带 ... 标记）应判同一条")
+_KEY_SHORT = sd._norm_title(
+    "ChainCatcher 消息，据币安现货数据显示，市场出现大幅波动。"
+    "LUNA 24 小时跌幅达 16.44%，AVA 跌幅 7.2%，LSK 跌幅 12.21...")
+_KEY_LONG = sd._norm_title(
+    "火星财经消息，据币安现货数据显示，市场出现大幅波动。"
+    "LUNA 24 小时跌幅达 16.44%，AVA 跌幅 7.2%，LSK 跌幅 12.21%。同时，MASK...")
+check(_KEY_LONG.startswith(_KEY_SHORT) and len(_KEY_SHORT) < len(_KEY_LONG),
+      f"前置：短键（{len(_KEY_SHORT)}）是长键（{len(_KEY_LONG)}）前缀",
+      f"short={_KEY_SHORT!r}\n    long ={_KEY_LONG!r}")
+check(sd._is_repost_of_truncated(_KEY_LONG, "火星财经…完整原文",
+                                 [(_KEY_SHORT, "…LSK 跌幅 12.21...")]),
+      "长键遇到「以 ... 收尾的短键」→ 判为截断转载（实物 AVAUSDT 利空那对）")
+check(sd._is_repost_of_truncated(_KEY_SHORT, "…LSK 跌幅 12.21...",
+                                 [(_KEY_LONG, "火星财经…完整原文")]),
+      "处理顺序反过来同样判为转载（不依赖入库次序）")
+_TMPL_A = "accordingtotheannouncementfrombinancethefollowingtokenswillbelistedon"
+_TMPL_B = _TMPL_A + "thenewspotmarketnextweek"
+check(sd._is_repost_of_truncated(
+        _TMPL_B,
+        "According to the announcement from Binance, the following tokens will be "
+        "listed on the new spot market next week",
+        [(_TMPL_A, "According to the announcement from Binance, the following "
+                   "tokens will be listed on")]) is False,
+      "英文模板共享 69 字前缀但无 ... 标记 ⇒ 不合并（P1-N1 回归护栏）")
+check(sd._is_repost_of_truncated("x" * 40, "x" * 40, [("y" * 40, "y" * 40)]) is False,
+      "非前缀关系不合并")
+check(sd._is_repost_of_truncated("ab" * 20, "ab" * 20 + "...",
+                                 [("ab" * 3, "ab" * 3 + "...")]) is False,
+      f"短键不足 MIN_TRUNC_DEDUP_LEN={sd.MIN_TRUNC_DEDUP_LEN} ⇒ 不合并（防短标题互并）")
+
+print("\n【P2-N11c】OI 近乎持平时渲染「OI 持平 ±X%」（原直译 `OI up +0.2%`）")
+h_flat_oi = _body(sd._render_alert_email([_item(sig=_sig(oi_dir="up", oi_chg_pct=0.19))]))
+check("OI 持平 +0.2%" in h_flat_oi,
+      "OI +0.19% → 「OI 持平 +0.2%」（实物 id=1303 AVAUSDT）", h_flat_oi)
+check("OI up +0.2%" not in h_flat_oi,
+      "不得再渲染 `OI up +0.2%`（读者会以为 OI 明显扩张、无法解释强度条 0.5 分）")
+h_neg_oi = _body(sd._render_alert_email([_item(sig=_sig(oi_dir="down", oi_chg_pct=-0.3))]))
+check("OI 持平 -0.3%" in h_neg_oi, "负向同样按持平渲染", h_neg_oi)
+h_big_oi = _body(sd._render_alert_email([_item(sig=_sig(oi_dir="up", oi_chg_pct=3.9))]))
+check("OI up +3.9%" in h_big_oi, "OI +3.9% 仍渲染方向（不误伤）")
+
+print("\n【P2-N11d】图例补齐四处「看不懂」的口径")
+_leg = sd._render_alert_email([_item()])
+for frag in ("「市场环境」= 全局 regime",
+             "「多头/空头环境受限」= 该方向信号在当轮被降级",
+             "共振方向与结论一致 ×1.15",
+             "CVD 同向 ×1.05",
+             "「不含涨幅」",
+             "「按场景跨币种聚合」",
+             "「OI 持平 ±X%」",
+             "负 = 空头付多头（对做多顺风）"):
+    check(frag in _leg, f"图例含「{frag}」")
+
+print("\n【P2-N12】confidence 徽章：查询须选该列，且缺失时不渲染空药丸")
+_cand_fn = next((n for n in ast.parse(open(sd.__file__, encoding="utf-8").read()).body
+                 if isinstance(n, ast.FunctionDef) and n.name == "_load_alert_candidates"), None)
+check(_cand_fn is not None, "找到 scan_daemon._load_alert_candidates()")
+_cand_sql = " ".join(ast.unparse(_cand_fn).split())
+check("confidence" in _cand_sql.split("FROM biz.scan_signal")[0],
+      "_load_alert_candidates 的 SELECT 含 confidence 列（原漏选 ⇒ 空药丸）")
+h_no_conf = _body(sd._render_alert_email([_item(sig=_sig(confidence=None))]))
+check("font-size:11px'></span>" not in h_no_conf,
+      "confidence 为 None 时不渲染空药丸（原 `…font-size:11px'></span>`）", h_no_conf)
+h_conf = _body(sd._render_alert_email([_item(sig=_sig(confidence="high"))]))
+check(">HIGH</span>" in h_conf, "confidence='high' → 渲染 `HIGH` 药丸（实物 id=1303/1304）")
+check(">HIGH</span>" in h_conf and h_conf.index(">HIGH</span>") < h_conf.index("量比"),
+      "药丸位置在卡片头（量比行之前）")
 
 # ═══════════════════════════════════════════════════════════════
 #  O4 —— 纯技术面淡提示

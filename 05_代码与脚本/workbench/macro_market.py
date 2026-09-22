@@ -666,10 +666,15 @@ def _fetch_binance_24hr_change(symbol: str) -> dict | None:
         )
         r.raise_for_status()
         d = r.json()
-        pct = _safe_float(d.get("priceChangePercent"))
+        # F1（复验 2026-09-22）：按「字段存在性」判回退，不能靠 _safe_float(缺省 0.0)——
+        # 否则 200 但缺 priceChangePercent 时会返回 {0.0, 0.0}，调用点误把真实涨幅改写成 0%。
+        raw_pct = d.get("priceChangePercent")
+        pct = _safe_float(raw_pct, None) if raw_pct is not None else None
         if pct is None:
             return None
-        return {"change_24h_pct": round(pct, 2), "last_price": _safe_float(d.get("lastPrice"))}
+        raw_px = d.get("lastPrice")
+        px = _safe_float(raw_px, None) if raw_px is not None else None
+        return {"change_24h_pct": round(pct, 2), "last_price": px}
     except Exception:
         return None
 

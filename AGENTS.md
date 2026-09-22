@@ -453,3 +453,10 @@
 - **方案 B（信号侧实时拉取）不采纳**：本机出口曾被 Binance 判 418，且不解决 OI/CVD 缺口。
 - **自测**：新增 [test_derivatives_signal_gap.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_derivatives_signal_gap.py)（**35/35 通过**：归一化 6 例 + 源码 AST + `merge_pending` 8 例 + `_aggregate_funding` 7 例（含无 OI 退化）+ `--signal-days 0` 恒空 + 只读 prod 缺口不变量）。prod 只读实测收口后缺口 **0**。
 - **验收命令**（三段式，部署/跑批后）：`python bin/phase_derivatives_batch.py --limit 200`（与调度一致），日志应显示「信号 universe 缺口 N」；随后库里原缺口 symbol 出现 `funding_rate` 非 NULL 行，新发主池信号 funding NULL 率下降。
+- **复验收口（工单 §六·补，`复验_费率覆盖缺口_O1_c9478af_2026-09-22.md`，2026-09-22）**：复验以三段式确认方案 A 已落地、`c9478af` 部署后 prod 缺口收敛（其口径按**逐行**计、含重复行，故报 153→1；本轮 `5979d36` 已改**符号级**、口径下缺口 = **0**）。对 #4「`canonical_symbol` 重复放大采集负担」**只读复核后判定：O1 侧已中和、无需再改码**——
+  - `core.asset` 实测 **21,828 行 / 18,854 distinct symbol / 2,024 个重复符号 / 2,974 行冗余**（复验报 1,911，仍在增长）；
+  - **排名路径未受污染**：`get_pending_assets(limit=200, force=True)` 实测 **200 行 = 200 distinct symbol**（重复行无有效排名、进不了 top-N）⇒ 调度按 asset_id 写不会重复写；
+  - **缺口路径已去重**：`get_signal_gap_assets` 的 `DISTINCT ON (upper(canonical_symbol))` 每符号只取最优一行 ⇒ 采集负担不随重复行放大；
+  - 存量污染仅限 `asset_derivatives` **78 个符号有多行**（历史逐行版本产物），对**符号级**消费方（scan/funding_map）无影响，只影响按 `asset_id` 查的面板——属 W5 治理面。
+  - ⇒ **不做破坏性去重**（AGENTS 铁律：破坏性数据操作需授权；且 W5 治理已有独立工作流 `fe459e1` 在处理），不扩 O1 scope。
+  - ⚠️ **部署必须带上 `5979d36`**（非仅 `c9478af`）：`c9478af` 的缺口查询是**逐行**版，容器在跑它时会每 6h 继续为重复 asset_id 写行、持续放大污染；`5979d36` 才含符号级去重 + `_aggregate_funding` 无 OI 退化。

@@ -461,6 +461,8 @@ def main() -> int:
     seg_straddle = (seg["min_pct"] is not None
                     and seg["min_pct"] < JUDGE_UPPER_BOUND_PCT <= seg["max_pct"])
     decisive = ci_decisive and not seg_straddle
+    judge_pass = bool(sample_ok and decisive and ub_sub is not None
+                      and ub_sub["rate_new_pct"] < JUDGE_UPPER_BOUND_PCT)
     out["judge"] = {
         "criterion": f"条件子集越阈率跨口径上界 < {JUDGE_UPPER_BOUND_PCT}%，"
                      "且该上界具备统计判别力（CI 与各时段均不跨判据线）",
@@ -471,8 +473,11 @@ def main() -> int:
         # 复验 E1：pass 必须与 sample_ok 同向——分母/分子不合格时算出的上界是纯噪音，
         # 否则 `--json` 会输出「pass=true」而进程 rc=3，下游读 JSON 必然误判。
         "decisive": decisive, "ci_decisive": ci_decisive, "segment_straddle": seg_straddle,
-        "pass": bool(sample_ok and decisive and ub_sub is not None
-                     and ub_sub["rate_new_pct"] < JUDGE_UPPER_BOUND_PCT),
+        "pass": judge_pass,
+        # 复验 E2：三态结论。旧码只输出 PASS/FAIL 两极，而「判据不可判」时把它印成
+        # FAIL 与报告结论自相矛盾（该样本量下 PASS 与 FAIL 等权）⇒ 不可判必须单列，
+        # 否则读者会把「抽样噪声」当成「判据不通过」并据此调阈值。
+        "conclusion": "PASS" if judge_pass else ("FAIL" if decisive else "INCONCLUSIVE"),
         "reliable": sample_ok,
     }
 
@@ -573,11 +578,16 @@ def main() -> int:
     else:
         print(f"  各 {sg['segment_hours']}h 段上界：无满足 n≥{MIN_SEGMENT_N} 的分段，跳过漂移评估")
     print(f"\n【判定】{j['criterion']}")
-    if not j["decisive"]:
-        print("  ⚠️ 判据在当前样本量下**不可判**（CI 或各时段跨判据线）⇒ "
-              f"上界 {ub} 的 PASS/FAIL 只是抽样噪声，不构成阈值决策依据。")
-    print(f"  跨口径上界 = {ub}  →  {'PASS' if j['pass'] else 'FAIL'}"
-          f"（{'' if j['pass'] else '先核对分母/分子自证与未来函数，再谈调阈值'}）")
+    # 复验 E2：三态输出。不可判时**不能**印 FAIL——该样本量下 PASS 与 FAIL 等权，
+    # 印成 FAIL 会被读成「判据不通过」并据此动阈值（与报告结论自相矛盾）。
+    print(f"  跨口径上界 = {ub}  →  {j['conclusion']}")
+    if j["conclusion"] == "INCONCLUSIVE":
+        print("     判据在当前样本量下不可判（CI 或各时段跨判据线）⇒ 此上界的 PASS/FAIL "
+              "只是抽样噪声，**不构成阈值决策依据**（勿据此调阈值）。")
+        print("     替代读法：看上方 CI 与各时段区间；报告建议改用「多次运行取区间 / "
+              "多时段中位数」作为判据输入。")
+    elif not j["pass"]:
+        print("     判据不通过且具备判别力 ⇒ 先核对分母/分子自证与未来函数口径，再谈调阈值。")
     print("\n⚠️ 样本时间代表性弱（表历史见上）⇒ 结论仅供临时定稿，"
           "待 squeeze_track 判定样本积累后改用判定窗口直接标定。")
     return 0 if j["pass"] else 2

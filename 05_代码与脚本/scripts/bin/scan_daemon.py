@@ -562,8 +562,11 @@ HANG_EXIT_MIN = 30.0
 # 主线程看护的检查周期（秒）。取 60s：相对 30 分钟阈值足够密（最多晚 1 分钟发现），
 # 又不会让主线程成为负担。
 WATCHDOG_TICK_SEC = 60.0
-# 全进程最近一次「有任务完成一轮（无论成败）」的单调时钟时刻（_run_task_loop 维护）
-_LAST_ANY_ROUND_TS = 0.0
+# 全进程最近一次「有任务完成一轮（无论成败）」的单调时钟时刻（_run_task_loop 维护）。
+# ⚠️ 哨兵用 None 而非 0.0：`time.monotonic()` 的起点是**系统/容器启动时刻**，在刚启动
+# 不久的机器上「当前时刻 − 30 分钟」是负数，用 0.0 当哨兵会与合法值混淆、把卡死判成
+# 正常（本机实测 uptime 21 分钟时 monotonic()=1276s，31 分钟前 = −584s）。
+_LAST_ANY_ROUND_TS: float | None = None
 # 单实例锁取锁重试（审计复验 P1-3）：os._exit(1) 后 supervisord 立即拉起新实例，
 # 旧实例的锁连接 TCP 释放通常 <1s，但撞上窗口就取不到锁 → main() 返回 1 且耗时
 # < startsecs=10 → supervisord 计为「启动失败」，连续 3 次即 FATAL 且不再拉起
@@ -3143,7 +3146,7 @@ def _watchdog_reason(threads: list) -> str | None:
     if dead:
         return (f"任务线程已退出: {', '.join(dead)}"
                 f"（心跳不再更新、进程仍在持单实例锁）")
-    if _LAST_ANY_ROUND_TS <= 0:
+    if _LAST_ANY_ROUND_TS is None:
         # main() 启动时即置位，理论上不会走到；兜底为「不判卡死」。
         return None
     idle_min = (time.monotonic() - _LAST_ANY_ROUND_TS) / 60.0

@@ -31,6 +31,17 @@ BAN_418_BASE_S = 60            # 418 首次退避（秒），随后按连续次�
 BAN_418_MAX_S = 600            # 418 退避上限（10 分钟，仍远小于 90min 看护阈值）
 RATE_LIMIT_429_MAX_S = 60      # 429 退避上限
 WEIGHT_WARN_THR = 1800         # x-mbx-used-weight-1m 软限频阈值（fapi 限额 2400/分钟）
+# 单次 fapi_get 在**全局封禁窗口**内允许等待的最长秒数，超过即快速失败（抛异常）。
+#
+# 背景（2026-09-21 实测停摆 14h+）：原实现让所有线程「协同等待」到解封，单次等待
+# 上限 BAN_418_MAX_S=600s，且每次 418 都会把窗口重新续期 ⇒ 一轮要发数百次请求
+# （scan_klines = 币数 × 3 个周期）时，单轮耗时可达数小时。而 scan_daemon 的
+# 「轮跑完才写心跳」使这种「慢」表现为**整进程静默停摆**（心跳不推进、数据零写入，
+# 进程却活着持锁，supervisord 永不重启）。
+# 现在：短封禁（≤本值，如首次 418 的 60s、429 的全部档位）行为不变；
+# 长封禁则让本轮**快速失败并写 last_error**，由数据新鲜度告警暴露 ——
+# 封禁计时器仍在走，解封后下一轮自然恢复，不会有人白等。
+BAN_WAIT_MAX_S = 60
 
 _SESSION = requests.Session()
 _LOCK = threading.Lock()
@@ -51,6 +62,16 @@ class PermanentHttpError(RuntimeError):
     典型场景：aggTrades 的 fromId 游标过期 → Binance 返回 400。此前该错误会被
     通用重试逻辑重试 5 次（约 8s/币），一轮 500 个币全部失败时整轮耗时 11 分钟，
     且异常被上层吞掉计数，导致 2026-09-18 OI 采样停摆两天无人察觉。
+    """
+
+
+class GlobalBanActive(RuntimeError):
+    """全局封禁（418/429）窗口剩余时间超过单次调用等待上限 BAN_WAIT_MAX_S。
+
+    快速失败而不是死等：等待只会让整轮耗时膨胀成小时级（见 BAN_WAIT_MAX_S 注释），
+    而封禁是**全局**的 —— 等与不等都拿不到数据，区别只是「静默停摆」还是
+    「可见失败」。上层（scan_daemon 的 per-symbol 循环）会把它计为一次错误并继续，
+    本轮得以正常收尾并写心跳/last_error。
     """
 
 
@@ -89,12 +110,20 @@ def _ban_backoff(status: int, attempt: int) -> float:
 
 
 def _wait_until_ban_expires() -> None:
-    """若在全局封禁窗口内，等待解封（供请求线程发请求前调用）。"""
+    """若在全局封禁窗口内，等待解封（供请求线程发请求前调用）。
+
+    剩余时间超过 BAN_WAIT_MAX_S 时**不再等待**，直接抛 GlobalBanActive ——
+    否则单轮里数百次请求各等数百秒，整轮耗时膨胀到小时级，表现为整进程静默停摆。
+    """
     while True:
         with _ban_lock:
             remaining = _ban_until - _now()
         if remaining <= 0:
             return
+        if remaining > BAN_WAIT_MAX_S:
+            raise GlobalBanActive(
+                f"全局封禁剩余 {remaining:.0f}s > 单次调用等待上限 {BAN_WAIT_MAX_S}s，"
+                f"本轮快速失败")
         _log(f"[binance] 全局封禁中，协同等待 {remaining:.0f}s 后重试")
         time.sleep(min(remaining, 30))
 
@@ -138,6 +167,11 @@ def fapi_get(url: str, params: dict | None = None,
                 _set_ban(wait)
                 _log(f"[binance] 418 IP 封禁（第 {_consecutive_ban} 次），"
                      f"全局退避 {wait:.0f}s")
+                if wait > BAN_WAIT_MAX_S:
+                    # 长封禁：窗口已置好，立即失败让本轮收尾（见 BAN_WAIT_MAX_S 注释）
+                    raise GlobalBanActive(
+                        f"418 IP 封禁，退避 {wait:.0f}s > 单次调用等待上限 "
+                        f"{BAN_WAIT_MAX_S}s，本轮快速失败")
                 time.sleep(min(wait, BAN_418_MAX_S))
                 last_err = RuntimeError(f"418 ip banned (consecutive={_consecutive_ban})")
                 continue
@@ -154,7 +188,7 @@ def fapi_get(url: str, params: dict | None = None,
                     f"HTTP {r.status_code} {url} params={params} body={r.text[:200]}")
             r.raise_for_status()
             return r.json()
-        except PermanentHttpError:
+        except (PermanentHttpError, GlobalBanActive):
             raise
         except Exception as e:  # noqa: BLE001
             last_err = e

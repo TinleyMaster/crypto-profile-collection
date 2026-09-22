@@ -17,14 +17,25 @@
 from __future__ import annotations
 
 import argparse
-import io
 import os
 import sys
 import time
 from datetime import date
 from pathlib import Path
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
+# 【必须用 reconfigure，禁止 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)】
+# 本模块被 scan_daemon.task_watchlist_monitor **每轮重新 exec_module**，而该写法会
+# 夺走底层 buffer 的所有权：下一轮再包一层时，上一轮的 TextIOWrapper 被 GC →
+# `close()` → **把进程真实的 stdout 关掉**，此后所有 print 抛
+# `ValueError: I/O operation on closed file.`。
+# 实测后果（2026-09-21）：第 1 轮 exec 后 scan_daemon 的 `_harden_streams` 保护被
+# 静默摘除，第 2 轮起 stdout 被关闭 → 各任务线程在「每轮首行 print」处抛异常退出
+# → 9 个线程全死而主线程仍在 sleep ⇒ 进程活着、持锁、supervisord 永不重启，
+# 停摆 14h+。reconfigure 就地改属性，不涉及所有权转移。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+except Exception:  # noqa: BLE001 —— stdout 已被关闭时保持原样，交给上层兜底
+    pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"

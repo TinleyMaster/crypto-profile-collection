@@ -136,7 +136,13 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 trades: dict[str, list], cost: float,
                 price_thr: float = PRICE_THR_1H,
                 vol_thr: float = VOL_RATIO_THR) -> None:
-    """扫描单符号，产出 (scenario, horizon, day, net_ret, fund_tag) 记录。"""
+    """扫描单符号，产出 (scenario, horizon, day, net_ret, fund_tag) 记录。
+
+    口径对齐（2026-09-22）：本回测只在**已收盘**历史条上迭代（`t` 上界 `n-max_h-1`
+    保证所判根早已收盘，且历史回填条不再被 UPSERT 覆盖）。线上 `_l1_screen` 已同步为
+    「优先最近一根已收盘条、不合格才回退未收盘条、入场/失效位锚定被判定的那一根」
+    ⇒ 两侧的触发根口径一致（入库后不再变），回测结论可直接映射到线上。
+    """
     n = len(bars)
     max_h = max(HORIZONS)
     for t in range(LOOKBACK + 1, n - max_h - 1):

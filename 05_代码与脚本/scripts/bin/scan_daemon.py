@@ -489,6 +489,8 @@ def task_scan_oi_cvd(min_vol_usd: float = 0, workers: int = 8) -> dict:
 # ═══════════════════════════════════════════════════════════════
 
 # 三周期各自独立成通道（_l1_screen 取 level 最高者，level < 2 才被丢弃）。
+# 每周期的触发根**优先取最近一根已收盘条**、不合格才回退未收盘条（2026-09-22 修 P1
+# 漏检，见 `_l1_screen` docstring）；入场/失效位锚定被判定的那一根。
 # ⚠️ 1h 的 3.0 是**线上口径，刻意不改**（2026-09-21 决策，见设计文档 §4.2 / §12.1-14）：
 #   回测 backtest_scan_scenarios.py 的 PRICE_THR_1H=4.0 是「单周期 1h 单根」口径（无 5m/15m 通道），
 #   与这里「三周期并列、15m 2.0% 也能独立入池」不是同一个量。把本值改成 4.0 属伪对齐——
@@ -699,11 +701,52 @@ def _build_regime(conn) -> dict:
     return {"tags": tags, "long_fav": long_fav, "short_fav": short_fav}
 
 
+def _last_closed_idx(rows: list[dict], iv: str, now: datetime) -> int | None:
+    """最近一根**已收盘**条的索引（`open_time + 周期时长 <= now`），全未收盘返回 None。"""
+    dur = INTERVAL_SECONDS[iv]
+    for i in range(len(rows) - 1, -1, -1):
+        if (now - rows[i]["open_time"]).total_seconds() >= dur:
+            return i
+    return None
+
+
+def _l1_eval(rows: list[dict], idx: int, iv: str) -> dict | None:
+    """对 `rows[idx]` 做单周期价量粗筛：达标返回 {dir, chg_pct, vol_ratio}，否则 None。
+
+    口径：`|chg| >= PRICE_THR[iv]`（收盘价 vs 前一根收盘价）且 `vol_ratio >= VOL_RATIO_THR`
+    （成交额 vs 前 `LOOKBACK_BARS_MAIN` 根均值）。与 `backtest_scan_scenarios.py`
+    的 `scan_symbol` 逐根判定同口径（该回测只在已收盘历史条上迭代）。
+    """
+    if idx < LOOKBACK_BARS_MAIN:
+        return None
+    closes = [float(r["close_px"]) for r in rows]
+    vols = [float(r["quote_vol"]) for r in rows]
+    prev_close = closes[idx - 1]
+    if not prev_close:
+        return None
+    chg = (closes[idx] - prev_close) / prev_close * 100
+    vol_mean = sum(vols[idx - LOOKBACK_BARS_MAIN:idx]) / LOOKBACK_BARS_MAIN
+    vol_ratio = vols[idx] / vol_mean if vol_mean else 0.0
+    if abs(chg) < PRICE_THR[iv] or vol_ratio < VOL_RATIO_THR:
+        return None
+    return {"dir": "up" if chg > 0 else "down", "chg_pct": chg, "vol_ratio": vol_ratio}
+
+
 def _l1_screen(klines_by_iv: dict[str, list[dict]], now: datetime) -> dict | None:
     """L1 粗筛：单周期异动 + 多周期共振升级。
 
     新鲜度护栏：最新 K 线 open_time 距今超过 MAX_KLINE_AGE_MIN[iv] 则跳过该周期，
     避免采集停摆时用陈旧数据出假信号。
+
+    **触发根选择（2026-09-22 修 P1 系统性漏检）**：优先最近一根**已收盘**条
+    （值稳定 ⇒ 判定可复现），不合格再回退最新（未收盘）条以保持及时性。
+    原实现只取 `closes[-1]`，而 `scan_klines` 每 5min 把未收盘条 UPSERT 覆盖
+    （同一行 `close_px`/`quote_vol` 随时间内变）⇒ 一根条的「终值可用且仍是最新根」
+    窗口仅约 2~5 分钟，而扫描每 15min 一轮、容器重启又不断打乱相位 ⇒ 能否看到
+    收盘终值取决于相位。离线量化（6 天 / 280 币）：真异动条 1719 根中 **53.5%
+    只有收盘才越阈**，故旧实现存在三到四成的漏检。
+
+    返回 dict 额外带 `bar_idx`（被判定那一根的索引），供调用侧锚定入场/失效位。
     """
     best = None
     best_level = 0
@@ -713,22 +756,20 @@ def _l1_screen(klines_by_iv: dict[str, list[dict]], now: datetime) -> dict | Non
             continue
         if (now - rows[-1]["open_time"]).total_seconds() / 60 > MAX_KLINE_AGE_MIN[iv]:
             continue  # 该周期数据陈旧，不参与判定
-        closes = [float(r["close_px"]) for r in rows]
-        vols = [float(r["quote_vol"]) for r in rows]
-        chg = (closes[-1] - closes[-2]) / closes[-2] * 100
-        vol_mean = sum(vols[-(LOOKBACK_BARS_MAIN + 1):-1]) / LOOKBACK_BARS_MAIN
-        vol_ratio = vols[-1] / vol_mean if vol_mean else 0.0
-        if abs(chg) >= PRICE_THR[iv] and vol_ratio >= VOL_RATIO_THR:
+        last_closed = _last_closed_idx(rows, iv, now)
+        # 候选顺序：已收盘条 → 未收盘条（后者仅在前者未越阈时兜底）
+        candidates = [i for i in (last_closed, len(rows) - 1) if i is not None]
+        if len(candidates) == 2 and candidates[0] == candidates[1]:
+            candidates = candidates[:1]
+        for idx in candidates:
+            hit = _l1_eval(rows, idx, iv)
+            if hit is None:
+                continue
             level = LEVEL_RANK[iv]
             if level > best_level:
                 best_level = level
-                best = {
-                    "iv": iv,
-                    "dir": "up" if chg > 0 else "down",
-                    "chg_pct": chg,
-                    "vol_ratio": vol_ratio,
-                    "level": level,
-                }
+                best = {**hit, "iv": iv, "level": level, "bar_idx": idx}
+            break
     return best
 
 
@@ -888,21 +929,24 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             ctx_tags = regime["tags"] + [f"lv{l1['level']}_{l1['iv']}"]
             # 入场/失效位（审计 P2-4：表里有 trigger_price / stop_loss_pct，但主池
             # 52 条告警 100% 为空 —— 属**生产者从未计算**）。
-            # 入场 = 触发周期最新收盘价；失效 = 2×ATR(STOP_ATR_PERIOD) 夹在
+            # 入场 = **被 L1 判定那一根**的收盘价（`l1["bar_idx"]`，多为已收盘条；
+            # 见 `_l1_screen` 的触发根选择注释）；失效 = 2×ATR(STOP_ATR_PERIOD) 夹在
             # [STOP_PCT_MIN, STOP_PCT_MAX] 带内（值见常量注释，文案用 STOP_BAND_TXT）
             # （工单 P2-4：原「近 21 根反向极值」幅度不可用，实测 -11.97% 配 +4.69%
             #  涨幅 ⇒ 风险回报倒挂；窄幅盘整时又会紧到 0.3% 被噪音打掉）。
+            # ⚠️ ATR 窗口必须截断到该根（`bars[:bar_idx+1]`），否则「判定的根」与
+            #    「算 ATR 的根」不一致（原实现两者都写死 `bars[-1]` 才侥幸自洽）。
             trig_px = brk_px = stop_pct = None
             bars = by_sym_k[sym].get(l1["iv"]) or []
-            if bars:
-                trig_px = float(bars[-1]["close_px"])
-                stop_pct = _atr_stop_pct(bars, trig_px)
+            if l1.get("bar_idx") is not None and l1["bar_idx"] < len(bars):
+                bar = bars[l1["bar_idx"]]
+                trig_px = float(bar["close_px"])
+                stop_pct = _atr_stop_pct(bars[:l1["bar_idx"] + 1], trig_px)
                 # 延续确认位（迁移 fix_061）：触发根的**方向侧极值**，与 trigger_price
-                # 取同一根。该根多为未收盘条 ⇒ 极值是「截至信号时刻」的运行极值，
-                # 无未来信息；又因 high ≥ close ≥ low，该位恒在入场价的正确一侧
-                # （做多在价上、做空在价下）⇒ 不会出现「一建仓就已确认」。
-                brk_px = float(bars[-1]["high_px"] if direction == "up"
-                               else bars[-1]["low_px"])
+                # 取同一根。该根可能是未收盘条（回退分支）⇒ 极值是「截至信号时刻」的
+                # 运行极值，无未来信息；又因 high ≥ close ≥ low，该位恒在入场价的正确
+                # 一侧（做多在价上、做空在价下）⇒ 不会出现「一建仓就已确认」。
+                brk_px = float(bar["high_px"] if direction == "up" else bar["low_px"])
             signals.append((
                 now, sym, l2["scenario"], l1["iv"], direction, round(l1["chg_pct"], 2),
                 "up" if l1["vol_ratio"] >= VOL_RATIO_THR else "flat",

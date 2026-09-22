@@ -2648,11 +2648,12 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 if oi_lag_sec is not None:
                     reason += f"（OI 最新桶滞后 {oi_lag_sec:.0f}s）"
                 print(f"[scan_daemon][squeeze] {sym} {reason}", file=sys.stderr)
-                # 复验 E4：拒判路径**同样要写 metrics**。旧码此处传 None ⇒ SQL 的
-                # `COALESCE(%s::jsonb, metrics)` 保留旧值，`head_gap_buckets`/
-                # `mid_gap_buckets`/`gap_metric_ver` 只在 judged 路径写；而 judged 必经
-                # 闸门 ⇒ 落库值恒 0/1，**真正要观测的病例（拒判）反而落不了库**。
-                # `judged_at` 仍保持 None（本条未判定）。
+                # 复验 F5：SQL 侧必须是**合并**语义（`metrics || %s`）而不是覆盖——
+                # `COALESCE(%s::jsonb, metrics)` 是整对象替换，而 tracking 行的 metrics
+                # 还承载**入场指标**（`confirm`/`oi_chg_pct`/`short_liq_ratio`/`cvd_ratio`）；
+                # 拒判路径写整对象会把入场依据永久覆盖掉（该行仍是 tracking ⇔ 未判定，
+                # 后续分析再也还原不了入场依据）⇒ 为改善可观测性反而毁掉另一类可观测性。
+                # `COALESCE(%s::jsonb,'{}')` 保住「%s 为 NULL 时不改动」的原语义。
                 track_updates.append((
                     "tracking", peak_px, peak_ts, px, now, round(retrace, 2), None,
                     reason, json.dumps({
@@ -2661,6 +2662,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                         "mid_gap_buckets": mid_gap,
                         "oi_cover": {"have": len(win_oi), "expect": expect_buckets},
                         "oi_lag_sec": None if oi_lag_sec is None else round(oi_lag_sec),
+                        # 复验 F6f：judged 必经闸门 ⇒ 其 head/mid_gap 数学上恒 0/1，看不出
+                        # 病例分布；补一个布尔位，两次路径都落，才能直接数通过/拒绝。
+                        "gate_ok": False,
                     }, ensure_ascii=False), None, t["id"]))
                 continue
             # 基准取「峰值时刻或之前最近一条」；峰值早于所有可用桶时退化为窗口首条
@@ -2721,6 +2725,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 "gap_metric_ver": sqz.GAP_METRIC_VER,
                 "head_gap_buckets": head_gap,
                 "mid_gap_buckets": mid_gap,
+                # 复验 F6f：与拒判路径同键的布尔位（此处恒 True）——judged 必经闸门 ⇒
+                # head/mid_gap 恒 0/1，只有这个位能直接数出「通过 vs 拒绝」的分布。
+                "gate_ok": True,
                 "trigger": why,
             })
             track_updates.append((
@@ -2753,7 +2760,7 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                     UPDATE biz.squeeze_track SET
                         status=%s, peak_px=%s, peak_ts=%s, last_px=%s, last_ts=%s,
                         retrace_pct=%s, conclusion=%s, reason=%s,
-                        metrics=COALESCE(%s::jsonb, metrics),
+                        metrics=COALESCE(metrics || COALESCE(%s::jsonb, '{}'::jsonb), metrics),
                         judged_at=%s, updated_at=NOW()
                     WHERE id=%s
                     """,

@@ -264,5 +264,86 @@ for title, present, *_ in _GATE_CASES:
 
 
 # ════════════════════════════════════════════════════════════
+# 复验 F6c：标定脚本（calib_squeeze_liq_thr.py）此前**零单测** —— 本轮新增的三个纯函数
+# （wilson_ci / segment_upper_bounds / molecule_coverage）与退出码四态全部无断言，
+# 若只报「单测 91/91」，覆盖的其实只是未改动的 squeeze.py。这里补齐。
+# ════════════════════════════════════════════════════════════
+print("\n【测试·标定脚本】复验 F2/F4/F6b 三部纯函数 + 退出码四态")
+sys.path.insert(0, _HERE)
+import datetime as _dt  # noqa: E402
+
+import calib_squeeze_liq_thr as calib  # noqa: E402
+
+# ── wilson_ci：与复验报告的独立参考值对照 ──────────────────────
+def _ci_close(got, want, tol=0.02):
+    return got is not None and abs(got[0] - want[0]) < tol and abs(got[1] - want[1]) < tol
+
+
+check(_ci_close(calib.wilson_ci(0, 100), (0.0, 3.6995)),
+      "wilson_ci(0,100) ≈ [0, 3.70]", str(calib.wilson_ci(0, 100)))
+check(_ci_close(calib.wilson_ci(350, 1745), (18.245, 22.001)),
+      "wilson_ci(350,1745) ≈ [18.25, 22.00]", str(calib.wilson_ci(350, 1745)))
+check(_ci_close(calib.wilson_ci(100, 100), (96.30, 100.0)),
+      "wilson_ci(100,100) 上界恰为 100", str(calib.wilson_ci(100, 100)))
+check(calib.wilson_ci(0, 0) is None and calib.wilson_ci(1, 0) is None,
+      "wilson_ci n≤0 → None（不除零）")
+check(_ci_close(calib.wilson_ci(120, 100), (96.30, 100.0)),
+      "F6b：k>n 被夹取到 n（旧码此处抛 ValueError: math domain error）",
+      str(calib.wilson_ci(120, 100)))
+
+# ── exit_code：四态码位互不重合（F2 的核心）────────────────────
+# 只列**语义自洽**的组合（pass=True 本身就蕴含 decisive=True）
+_CODES = {(True, True, True): 0, (False, True, True): 2, (False, True, False): 4,
+          (True, False, True): 3, (False, False, True): 3, (False, False, False): 3}
+for (p_, s_, d_), want in _CODES.items():
+    got = calib.exit_code(p_, s_, d_)
+    check(got == want, f"exit_code(pass={p_}, sample_ok={s_}, decisive={d_}) = {want}", f"得 {got}")
+check(len(set(_CODES.values())) == 4, "四态码位互不重合（0/2/3/4）")
+
+# ── segment_upper_bounds：F4 守卫必须按**变体过滤后**的 n ────────
+_T0 = _dt.datetime.now()
+
+
+def _row(days_ago_min, hit_c_only=False):
+    """构造一行：hit_c_only=True 时只满足变体 C（仅回撤）。"""
+    ts = _T0 - _dt.timedelta(minutes=days_ago_min)
+    if hit_c_only:
+        return {"ts": ts, "long_liq": 1.0, "vol_win": 1.0, "peak_hi": 100.0,
+                "close_now": 90.0, "trough_lo": None, "peak_c": None, "trough_c": None}
+    return {"ts": ts, "long_liq": 1.0, "vol_win": 100.0, "peak_hi": None,
+            "close_now": None, "trough_lo": None, "peak_c": None, "trough_c": None}
+
+
+_seg_rows = [_row(i) for i in range(39)] + [_row(39, hit_c_only=True)]
+_seg = calib.segment_upper_bounds(_seg_rows, 0.00008)
+check(_seg["n_segments"] == 0 and _seg["skipped"] == 1,
+      "F4：段内仅 1 行命中变体 C ⇒ 该变体不进本段、本段整体跳过（旧码会取到 100%）",
+      f"n_segments={_seg['n_segments']} skipped={_seg['skipped']} min={_seg['min_pct']}")
+_seg2 = calib.segment_upper_bounds([_row(i, hit_c_only=True) for i in range(40)], 0.00008)
+check(_seg2["n_segments"] == 1 and _seg2["min_pct"] == 100.0
+      and _seg2["segments"][0]["n_by_variant"] is not None,
+      "F4：n≥MIN_SEGMENT_N 的段照常给出上界并附 n_by_variant",
+      str(_seg2["segments"][0] if _seg2["segments"] else None))
+
+# ── molecule_coverage：整点覆盖 / 最长连续空洞（伪游标）─────────
+class _FakeCur:
+    def __init__(self, hist):
+        self._hist = hist
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchall(self):
+        return [{"n": n} for n in self._hist]
+
+
+_mol = calib.molecule_coverage(_FakeCur([3, 0, 0, 5]), 1)
+check(_mol["hours_present"] == 2 and _mol["hours_present_ratio"] == 0.5
+      and _mol["max_hole_hours"] == 2,
+      "molecule_coverage：整点覆盖与最长连续空洞（分母 = 网格长度）", str(_mol))
+check(calib.molecule_coverage(_FakeCur([]), 1)["max_hole_hours"] == 0,
+      "molecule_coverage：空网格不崩、空洞 0")
+
+# ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

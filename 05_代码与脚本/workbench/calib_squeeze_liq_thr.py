@@ -15,12 +15,12 @@
   2. **时间边界**：每次运行都打印 min(ts)/max(ts)/实际跨度/行数，避免再拿瞬时值当样本量；
      注意 `span_hours = max(ts)-min(ts)` **有整段空洞时照样显示「连续」**，故另有 ⑥；
   3. **跨口径上界**：至少跑 3 个变体，取越阈率 max 作为判据输入（P2-c）；
-  4. **分母自证**（复验 P1-1a / D2 / E5）：打印每币在分母窗口内的 5m 根数 / 期望
-     （`bars / (days×288)`）与实际覆盖小时数；**整体覆盖 < 0.9、或「低于门槛的币
-     占比 > 5%」、或「每币覆盖率 P10 < 0.5」时拒绝出结论**（exit 3）——只看均值会被
+  4. **分母自证**（复验 P1-1a / D2 / E5 / F3）：打印每币在分母窗口内的 5m 根数 / 期望
+     （`bars / (days×288)`）与实际覆盖小时数；**整体覆盖 < 0.9、或「低于门槛（0.9）的币
+     占比 > 5%」、或「覆盖率低于半格（0.5）的币占比 > 2%」时拒绝出结论**（exit 3）——只看均值会被
      少数劣质币蒙混过关（`symbols_below` 只判「< 0.9」，覆盖 0.89 与 0.10 同等对待，
-     长尾由 P10 兜住）。原因：阈值语义是「爆仓额 / 24h 成交额」，若 `asset_klines`
-     在该窗口缺小时，分母被系统性少算 ⇒ 同一份爆仓数据算出的越阈率被放大
+     更深的尾部由「低于半格占比」兜住）。原因：阈值语义是「爆仓额 / 24h 成交额」，若
+     `asset_klines` 在该窗口缺小时，分母被系统性少算 ⇒ 同一份爆仓数据算出的越阈率被放大
      **1.66×**（复验 §2；绝对数字随表滚动，一律以本次实跑为准）。
   5. **long 侧双口径**（复验 D3）：`long_liq > 0` 子集（判据所用）与**含 0** 口径
      并列输出——`long_liq = 0` 是「该 1h 无多头爆仓」的合法观测，排除它会系统性
@@ -45,6 +45,10 @@
 用法：
     python calib_squeeze_liq_thr.py                  # 默认 1 天窗口 / vol_win ≥ 5e6
     python calib_squeeze_liq_thr.py --days 7 --json  # 拉长窗口 / 输出机器可读
+
+退出码（复验 F2 四码，文本与 --json **同码**）：
+    0 = PASS ｜ 2 = 有判别力的 FAIL（据此调阈值才有依据）
+    3 = 样本不可用（分母/分子自证不过）｜ 4 = 不可判（CI 或各时段跨判据线 ⇒ PASS/FAIL 只是抽样噪声）
 """
 from __future__ import annotations
 
@@ -79,9 +83,17 @@ MIN_DENOM_COVERAGE = 0.9       # 分母窗口整体覆盖下限，低于此值�
 # ⇒ 同时卡「低于门槛的币占比」。
 MAX_DENOM_BELOW_PCT = 5.0      # 低于 MIN_DENOM_COVERAGE 的币占比上限（%），超过即拒绝出结论
 # 复验 E5/E6：`symbols_below` 只判「< MIN_DENOM_COVERAGE」，覆盖 0.89 与 0.10 同等对待
-# ⇒ 单靠它仍拦不住「少数币分母被少算 10×」（5% × 248 = 12 币可在 10% 覆盖下放行）。
-# 另卡每币覆盖率 P10（对长尾比「低于门槛的币占比」更敏感）。
-MIN_DENOM_P10 = 0.5            # 每币 5m 覆盖率 P10 下限，低于此值拒绝出结论
+# ⇒ 单靠它仍拦不住「少数币分母被少算 10×」（5% × 248 = 12 币可在 10% 覆盖下放行）
+# ⇒ 需另有一条更严的闸门（见下）。
+# 复验 F3：原「每币覆盖率 P10 < 0.5」闸门**逻辑上不可达且对目标场景无感**——
+#   ① `pct()` 是线性插值分位：「300 币里 15 币覆盖率 0.49」时 k=299×0.10=29.9 落在
+#      「好币」区间 ⇒ P10 仍输出 1.000，**恰好看不见 E5/E6 要抓的那个尾部**；
+#   ② `P10 < 0.5` ⇒ 至少 10% 的币 < 0.5 < 0.9 ⇒ 必先触发 `MAX_DENOM_BELOW_PCT`
+#      ⇒ 被数学支配、永不成为唯一触发理由（E9 想消除的「重复理由」又回来了）。
+# 改为直接卡「覆盖率低于半格」的币占比：与 below 同构（故可并列打印对照），但门槛
+# 更严 ⇒ 与 below **不共线**（占比落在 2%~5% 区间时可单独触发，正是目标场景）。
+MIN_DENOM_HALF_COVERAGE = 0.5      # 「低于半格」的单币 5m 覆盖率门槛
+MAX_DENOM_BELOW_HALF_PCT = 2.0     # 覆盖率 < 半格的币占比上限（%），超过即拒绝出结论
 # 复验 E3：分子（爆仓表）时间连续性自证。分母自证只验 asset_klines，而爆仓表在窗口内
 # 可有整段空洞（实测 24h 里只有 11 个整点有数据、最长连空 14h），`span_hours` 照样
 # 显示「连续」⇒ 样本既不代表 24h、又高度时间聚集。
@@ -180,6 +192,26 @@ def _f(v, spec: str = ".3e", dash: str = "n/a") -> str:
     return dash if v is None else format(v, spec)
 
 
+def exit_code(pass_: bool, sample_ok: bool, decisive: bool) -> int:
+    """四码退出码（复验 F2）：把「不可判」从「有判别力的 FAIL」里拆出来。
+
+    E1 修好了「退出码与结论相反」，但把矛盾推进了一层：旧码 `rc=2` **同时**表示
+    「有判别力的 FAIL」与「无判别力的不可判」，而 E2 的全部论点恰恰是这两者在当前样本量下
+    **等权**。只看 rc 的下游（cron / CI / 看板）仍会把「不可判」读成「判据明确不通过」，
+    进而得出「该调阈值」的错误推论 ⇒ 必须有独立码位：
+
+        0 = PASS（样本可用 + 有判别力 + 上界 < 判据线）
+        2 = 有判别力的 FAIL（据此调阈值才有依据）
+        3 = 样本不可用（分母/分子自证不过，任何比率都不可比）
+        4 = 不可判（样本可用但 CI 或各时段跨判据线 ⇒ PASS/FAIL 只是抽样噪声）
+    """
+    if not sample_ok:
+        return 3
+    if pass_:
+        return 0
+    return 2 if decisive else 4
+
+
 def denominator_coverage(cur, syms: list[str], days: int) -> dict:
     """分母窗口自证（复验 P1-1a）：每币 5m 根数 / 期望 + 实际覆盖小时数。
 
@@ -194,6 +226,7 @@ def denominator_coverage(cur, syms: list[str], days: int) -> dict:
            "expect_hours": expect_hours, "bars_min": None, "bars_median": None,
            "bars_max": None, "hours_median": None, "coverage": None,
            "bars_ratio_p10": None, "symbols_below": 0, "symbols_below_pct": 0.0,
+           "symbols_below_half": 0, "symbols_below_half_pct": 0.0,
            "worst": [], "per_symbol": []}
     if not syms:
         return out
@@ -217,6 +250,11 @@ def denominator_coverage(cur, syms: list[str], days: int) -> dict:
     out["coverage"] = sum(bars) / (len(syms) * expect_bars)
     out["symbols_below"] = sum(1 for b in bars if b < expect_bars * MIN_DENOM_COVERAGE)
     out["symbols_below_pct"] = round(out["symbols_below"] / len(syms) * 100, 2)
+    # 复验 F3：「低于半格」的币 —— 真正参与闸门的那条（P10 降级为纯观察项，见常量注释）。
+    out["symbols_below_half"] = sum(
+        1 for b in bars if b < expect_bars * MIN_DENOM_HALF_COVERAGE)
+    out["symbols_below_half_pct"] = round(
+        out["symbols_below_half"] / len(syms) * 100, 2)
     out["bars_ratio_p10"] = pct([b / expect_bars for b in bars], 0.10)
     out["worst"] = sorted(per, key=lambda d: d["bars_ratio"])[:5]
     return out
@@ -257,6 +295,9 @@ def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     """二项比例的 Wilson 95% 置信区间（%）。比正态近似在小 n / 极端比例下更稳。"""
     if n <= 0:
         return None
+    # 复验 F6b：`k > n` 时 `p(1-p) < 0` ⇒ `math.sqrt` 抛 ValueError，无入参守卫。
+    # 脚本内 `k ≤ n` 恒成立，但纯函数被复用/注入时不该崩 ⇒ 夹取到 [0, n]。
+    k = max(0, min(k, n))
     p = k / n
     d = 1 + z * z / n
     c = (p + z * z / (2 * n)) / d
@@ -282,14 +323,30 @@ def segment_upper_bounds(rows: list[dict], new_thr: float) -> dict:
     segs = []
     for idx in sorted(buckets, reverse=True):
         seg_rows = buckets[idx]
-        rates = [x for x in (
-            rate([r["long_liq"] / r["vol_win"] for r in seg_rows if fn(r)], new_thr)
-            for fn in VARIANTS.values()) if x is not None]
-        if len(seg_rows) < MIN_SEGMENT_N or not rates:
+        if len(seg_rows) < MIN_SEGMENT_N:
+            out["skipped"] += 1
+            continue
+        # 复验 F4：守卫必须判**变体过滤后**的样本量。`rate()` 的分母是
+        # `[r for r in seg_rows if fn(r)]`，可远小于 `len(seg_rows)`；旧码只判段内总行数
+        # ⇒ 段内塞 1 行「仅某变体命中且越阈」即可把该变体的 rate 拉到 100%，**1 行（占
+        # 样本 0.3%）就能把「不跨线」翻成「跨线」** ⇒ decisive 被单条观测操纵（反向也
+        # 成立：1 行不越阈可掩盖真实跨线）。⇒ 逐变体判 n，不足者不进该段，并把各变体
+        # 的 n 一并输出（`n_by_variant`），便于人核对 straddle 究竟由谁决定。
+        rates, n_by = [], {}
+        for vname, fn in VARIANTS.items():
+            sub = [r["long_liq"] / r["vol_win"] for r in seg_rows if fn(r)]
+            n_by[vname] = len(sub)
+            if len(sub) < MIN_SEGMENT_N:
+                continue
+            x = rate(sub, new_thr)
+            if x is not None:
+                rates.append(x)
+        if not rates:
             out["skipped"] += 1
             continue
         segs.append({"start_ts": min(r["ts"] for r in seg_rows).isoformat(),
-                     "rows": len(seg_rows), "upper_bound_pct": max(rates)})
+                     "rows": len(seg_rows), "n_by_variant": n_by,
+                     "upper_bound_pct": max(rates)})
     vals = sorted(s["upper_bound_pct"] for s in segs)
     out.update({"n_segments": len(segs), "segments": segs,
                 "min_pct": vals[0] if vals else None,
@@ -376,20 +433,26 @@ def main() -> int:
     # ── 样本可用性闸门（复验 P1-1a / D2 / E3 / E5 / E6）────────────────
     cov = denom["coverage"] or 0.0
     below_pct = denom["symbols_below_pct"] or 0.0
-    p10 = denom["bars_ratio_p10"] or 0.0
+    half_pct = denom["symbols_below_half_pct"] or 0.0
     mol_ratio = mol["hours_present_ratio"] or 0.0
     denom_fail: list[str] = []
     if cov < MIN_DENOM_COVERAGE:
         # 复验 E9：整体覆盖不达标时另两条必然同真（同一数据下共线）⇒ 只报它，避免同一份
-        # 数据给出三条互相重复的理由（P10 / 低于门槛币数仍打印在上方「分母自证」节）。
+        # 数据给出三条互相重复的理由（半格币数 / 低于门槛币数仍打印在上方「分母自证」节）。
         denom_fail.append(f"整体覆盖 {cov:.3f} < {MIN_DENOM_COVERAGE}")
     else:
-        if below_pct > MAX_DENOM_BELOW_PCT:
+        # 复验 F3：「低于门槛（0.9）」与「低于半格（0.5）」满足包含关系（<0.5 ⇒ <0.9），
+        # 但阈值不同 ⇒ **不共线**（占比落在 2%~5% 区间时半格可单独触发，正是 E5/E6 的
+        # 目标场景）；同时沿用 E9 的原则「同一份数据只报最重一条」——半格不合格时不再
+        # 重复打印门槛那条（两条理由指向同一批币）。
+        if half_pct > MAX_DENOM_BELOW_HALF_PCT:
+            denom_fail.append(
+                f"覆盖率低于半格的币 {denom['symbols_below_half']}/{denom['symbols']}"
+                f" = {half_pct:.1f}% > {MAX_DENOM_BELOW_HALF_PCT}%"
+                "（这些币分母被少算数倍 ⇒ 比率被放大且照样入样污染分布）")
+        elif below_pct > MAX_DENOM_BELOW_PCT:
             denom_fail.append(f"低于门槛的币 {denom['symbols_below']}/{denom['symbols']}"
                               f" = {below_pct:.1f}% > {MAX_DENOM_BELOW_PCT}%")
-        if p10 < MIN_DENOM_P10:
-            denom_fail.append(f"每币覆盖率 P10 {p10:.3f} < {MIN_DENOM_P10}"
-                              "（长尾币分母被少算 ⇒ 其比率被放大且照样入样污染分布）")
     molecule_fail: list[str] = []
     if mol_ratio < MIN_MOLECULE_HOUR_COVERAGE:
         molecule_fail.append(f"分子整点覆盖 {mol['hours_present']}/{mol['expect_hours']}"
@@ -483,10 +546,10 @@ def main() -> int:
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
-        # 复验 E1：JSON 模式的退出码也必须由 judge 结论决定。旧码只写
-        # `0 if denom_ok else 3` ⇒ `judge.pass=False`（判据不通过）时仍返回 0，
-        # **退出码与结论相反**。现统一为：pass→0；样本可用但不通过→2；样本不可用→3。
-        return 0 if out["judge"]["pass"] else (2 if sample_ok else 3)
+        # 复验 E1：JSON 模式的退出码由 judge 结论决定（旧码 `0 if denom_ok else 3` ⇒
+        # `judge.pass=False` 时仍返回 0，**退出码与结论相反**）。
+        # 复验 F2：改用 exit_code() 四码 —— 不可判（4）必须与有判别力的 FAIL（2）分开。
+        return exit_code(out["judge"]["pass"], sample_ok, out["judge"]["decisive"])
 
     b = out["table_bound"]
     print("【样本时间边界】← 每次标定必须先看这里（复验 P1-a：别再把瞬时值当「7 天样本」）")
@@ -502,11 +565,13 @@ def main() -> int:
     print(f"  实测每币根数 min={_f(d['bars_min'], 'd')} 中位={_f(d['bars_median'], 'd')}"
           f" max={_f(d['bars_max'], 'd')}"
           f"  | 覆盖小时中位 {_f(d['hours_median'], 'd')}/{d['expect_hours']}")
-    print(f"  整体覆盖 = {cov:.3f}（Σ根数 / 期望总数，门槛 {MIN_DENOM_COVERAGE}）"
-          f"；低于门槛的币 {d['symbols_below']}/{d['symbols']} = {below_pct:.1f}%"
-          f"（上限 {MAX_DENOM_BELOW_PCT}%）")
+    print(f"  整体覆盖 = {cov:.3f}（Σ根数 / 期望总数，门槛 {MIN_DENOM_COVERAGE}）")
+    print(f"  低于门槛的币 {d['symbols_below']}/{d['symbols']} = {below_pct:.2f}%"
+          f"（门槛 {MAX_DENOM_BELOW_PCT}%）"
+          f"  |  低于半格的币 {d['symbols_below_half']}/{d['symbols']}"
+          f" = {half_pct:.2f}%（门槛 {MAX_DENOM_BELOW_HALF_PCT}%；真正参与闸门的那条）")
     print(f"  每币覆盖率 P10 = {_f(d['bars_ratio_p10'], '.3f')}"
-          f"（门槛 {MIN_DENOM_P10}；均值会被少数劣质币蒙混，故另卡低于门槛的币占比）")
+          f"（**纯观察项**：线性插值分位看不见 5% 尾部，且被 above 门槛数学支配 —— 复验 F3）")
     if d["worst"]:
         print("  最差 5 币：" + " ".join(
             f"{w['symbol']}={w['bars']}({w['bars_ratio']:.2f}×288×{d['days']})"
@@ -580,7 +645,9 @@ def main() -> int:
     print(f"\n【判定】{j['criterion']}")
     # 复验 E2：三态输出。不可判时**不能**印 FAIL——该样本量下 PASS 与 FAIL 等权，
     # 印成 FAIL 会被读成「判据不通过」并据此动阈值（与报告结论自相矛盾）。
-    print(f"  跨口径上界 = {ub}  →  {j['conclusion']}")
+    print(f"  跨口径上界 = {ub}  →  {j['conclusion']}"
+          f"（退出码 {exit_code(j['pass'], sample_ok, j['decisive'])}："
+          "0=PASS / 2=有判别力 FAIL / 3=样本不可用 / 4=不可判）")
     if j["conclusion"] == "INCONCLUSIVE":
         print("     判据在当前样本量下不可判（CI 或各时段跨判据线）⇒ 此上界的 PASS/FAIL "
               "只是抽样噪声，**不构成阈值决策依据**（勿据此调阈值）。")
@@ -590,7 +657,7 @@ def main() -> int:
         print("     判据不通过且具备判别力 ⇒ 先核对分母/分子自证与未来函数口径，再谈调阈值。")
     print("\n⚠️ 样本时间代表性弱（表历史见上）⇒ 结论仅供临时定稿，"
           "待 squeeze_track 判定样本积累后改用判定窗口直接标定。")
-    return 0 if j["pass"] else 2
+    return exit_code(j["pass"], sample_ok, j["decisive"])
 
 
 if __name__ == "__main__":

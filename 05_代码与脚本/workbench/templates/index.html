@@ -1854,6 +1854,41 @@
             font-size: 12px;
         }
 
+        /* P1（2026-09-22 审计）：追溯日志筛选条 */
+        .ai-trace-filter {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            padding: 0 0 10px;
+        }
+
+        .ai-trace-filter .filter-label {
+            font-size: 11px;
+            color: #64748b;
+        }
+
+        .ai-trace-filter .filter-chip {
+            font-size: 11px;
+            color: #94a3b8;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 2px 10px;
+            cursor: pointer;
+        }
+
+        .ai-trace-filter .filter-chip:hover {
+            color: #e2e8f0;
+        }
+
+        .ai-trace-filter .filter-chip.active {
+            color: #fbbf24;
+            border-color: rgba(245, 158, 11, .5);
+            background: rgba(245, 158, 11, .12);
+            font-weight: 700;
+        }
+
         .diff-item .name {
             flex: 1;
             color: #8a92a0;
@@ -15428,6 +15463,59 @@
         // ── AI 追溯日志模态框 ──
         var __aiTraceData = [];
         var __aiTraceSelected = null;
+        var __aiTraceFilter = 'all';   // all | highlighted | high | conflict
+
+        // P0/P1（2026-09-22 审计）：解析 AI 响应 JSON 为结构化结论，供列表徽章/结论卡/维度条使用
+        function _parseTraceResp (item) {
+            try { return JSON.parse(item.raw_response || '{}'); } catch (e) { return null; }
+        }
+
+        // 信号类型 → 系统方向提示（供「AI 结论 vs 系统方向冲突」标记）
+        function _signalDirHint (signalTypes) {
+            var s = (signalTypes || []).map(function (x) { return String(x).toLowerCase(); });
+            var hint = '';
+            if (s.some(function (x) { return x === 'token_unlock' || x.indexOf('unlock') >= 0; })) hint = 'short';       // 解锁抛压 → 空
+            if (s.some(function (x) { return x.indexOf('distribut') >= 0; })) hint = 'short';
+            if (s.some(function (x) { return x === 'whale_flow' || x.indexOf('accumulat') >= 0 || x.indexOf('outflow') >= 0; })) hint = 'long';
+            if (s.some(function (x) { return x === 'etf_flow'; })) hint = 'long';
+            if (s.some(function (x) { return x === 'fng_extreme'; })) hint = 'long';
+            return hint;
+        }
+
+        function _isTraceConflict (item, resp) {
+            if (!resp || resp.error) return false;
+            var dir = (resp.direction || 'neutral').toLowerCase();
+            var hint = _signalDirHint(item.signal_types);
+            if (!hint) return false;
+            // 系统给方向提示但模型给中性 / 方向相反 → 冲突
+            if (dir === 'neutral' && hint) return true;
+            return dir !== hint;
+        }
+
+        function _dirChipHtml (dir) {
+            dir = (dir || '').toLowerCase();
+            if (dir === 'long') return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#f87171;background:rgba(220,38,38,.15)">▲ 多</span>';
+            if (dir === 'short') return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#4ade80;background:rgba(34,197,94,.12)">▼ 空</span>';
+            return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:#9ca3af;background:rgba(107,114,128,.18)">◆ 中性</span>';
+        }
+
+        function _confBadgeHtml (conf) {
+            conf = (conf || '').toUpperCase();
+            if (conf === 'HIGH') return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800;color:#f87171;background:rgba(220,38,38,.18)">HIGH</span>';
+            if (conf === 'LOW') return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;color:#94a3b8;background:rgba(100,116,139,.18)">LOW</span>';
+            return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fbbf24;background:rgba(245,158,11,.16)">MED</span>';
+        }
+
+        function _traceScoreChip (score) {
+            if (score == null) return '';
+            var color = score >= 70 ? '#f87171' : score >= 55 ? '#fbbf24' : '#9ca3af';
+            return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;color:' + color + ';background:rgba(100,116,139,.15)">' + score + '分</span>';
+        }
+
+        function _traceHighlightChip (resp) {
+            if (resp && resp.should_highlight) return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800;color:#f87171;background:rgba(220,38,38,.18)">🔥 入选高亮</span>';
+            return '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;color:#6b7280;background:rgba(75,85,99,.15)">未入选</span>';
+        }
 
         function openAiTraceModal () {
             var overlay = document.getElementById('ai-trace-modal-overlay');
@@ -15456,6 +15544,13 @@
                 '<button class="ai-trace-modal-close" onclick="closeAiTraceModal()">×</button>' +
                 '</div>' +
                 '<div class="ai-trace-modal-body">' +
+                '<div class="ai-trace-filter" id="ai-trace-filter">' +
+                '<span class="filter-label">筛选：</span>' +
+                '<button class="filter-chip active" data-f="all" onclick="setAiTraceFilter(\'all\')">全部</button>' +
+                '<button class="filter-chip" data-f="highlighted" onclick="setAiTraceFilter(\'highlighted\')">🔥 入选高亮</button>' +
+                '<button class="filter-chip" data-f="high" onclick="setAiTraceFilter(\'high\')">HIGH</button>' +
+                '<button class="filter-chip" data-f="conflict" onclick="setAiTraceFilter(\'conflict\')">方向冲突</button>' +
+                '</div>' +
                 '<div class="ai-trace-list" id="ai-trace-list">' +
                 '<div class="ai-trace-list-empty">加载中...</div>' +
                 '</div>' +
@@ -15487,46 +15582,125 @@
                         '<div class="ai-trace-detail-empty">暂无日志</div>';
                     return;
                 }
+                _renderAiTraceList();
 
-                var html = '';
-                for (var i = 0; i < __aiTraceData.length; i++) {
-                    var item = __aiTraceData[i];
-                    var symbol = item.symbol || (item.asset_id ? ('#' + item.asset_id) : '聚合信号');
-                    var signalTags = (item.signal_types || []).map(function (s) {
-                        return '<span>' + _signalLabel(s) + '</span>';
-                    }).join('');
-                    var timeStr = item.ts ? item.ts.split('T')[1] || item.ts : '';
-                    var thinkingBadge = item.has_thinking ? '<span class="ai-trace-item-thinking">🧠 思考</span>' : '';
-
-                    html +=
-                        '<div class="ai-trace-list-item' + (i === 0 ? ' active' : '') + '" ' +
-                        'onclick="selectAiTrace(' + i + ')" data-idx="' + i + '">' +
-                        '<div class="ai-trace-item-symbol">' + symbol + '</div>' +
-                        '<div class="ai-trace-item-signals">' + signalTags + '</div>' +
-                        '<div class="ai-trace-item-ts">' +
-                        '<span>' + timeStr + '</span>' +
-                        thinkingBadge +
-                        '</div>' +
-                        '</div>';
-                }
-                listEl.innerHTML = html;
-
-                // 默认选中第一条
-                __aiTraceSelected = 0;
-                renderAiTraceDetail(0);
             } catch (e) {
                 listEl.innerHTML = '<div class="ai-trace-list-empty">加载失败：' + e.message + '</div>';
             }
         }
 
+        function setAiTraceFilter (f) {
+            __aiTraceFilter = f;
+            var chips = document.querySelectorAll('#ai-trace-filter .filter-chip');
+            chips.forEach(function (c) {
+                c.classList.toggle('active', c.getAttribute('data-f') === f);
+            });
+            _renderAiTraceList();
+        }
+
+        function _renderAiTraceList () {
+            var listEl = document.getElementById('ai-trace-list');
+            if (!listEl) return;
+            var html = '';
+            var filtered = [];
+            for (var i = 0; i < __aiTraceData.length; i++) {
+                var it = __aiTraceData[i];
+                var r = _parseTraceResp(it);
+                if (__aiTraceFilter === 'highlighted' && !(r && r.should_highlight)) continue;
+                if (__aiTraceFilter === 'high' && !((r && (r.confidence || '').toUpperCase()) === 'HIGH')) continue;
+                if (__aiTraceFilter === 'conflict' && !_isTraceConflict(it, r)) continue;
+                filtered.push(i);
+            }
+
+            for (var fi = 0; fi < filtered.length; fi++) {
+                var i = filtered[fi];
+                var item = __aiTraceData[i];
+                var symbol = item.symbol || (item.asset_id ? ('#' + item.asset_id) : '聚合信号');
+                var signalTags = (item.signal_types || []).map(function (s) {
+                    return '<span>' + _signalLabel(s) + '</span>';
+                }).join('');
+                var timeStr = item.ts ? item.ts.split('T')[1] || item.ts : '';
+                var thinkingBadge = item.has_thinking ? '<span class="ai-trace-item-thinking">🧠 思考</span>' : '';
+
+                // P1（2026-09-22 审计）：列表项补方向/分数/置信度/入选高亮预览
+                var r = _parseTraceResp(item);
+                var dir = r ? r.direction : '';
+                var score = r && r.overall_score != null ? r.overall_score : null;
+                var conf = r ? r.confidence : '';
+                var conflict = _isTraceConflict(item, r);
+                var badgeRow =
+                    '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">' +
+                    _dirChipHtml(dir) +
+                    _confBadgeHtml(conf) +
+                    _traceScoreChip(score) +
+                    _traceHighlightChip(r) +
+                    (conflict ? '<span style="display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#e879f9;background:rgba(217,70,239,.15)">⚠️ 方向冲突</span>' : '') +
+                    '</div>';
+
+                html +=
+                    '<div class="ai-trace-list-item' + (fi === 0 ? ' active' : '') + '" ' +
+                    'onclick="selectAiTraceByIndex(' + i + ')" data-idx="' + i + '" data-fi="' + fi + '">' +
+                    '<div class="ai-trace-item-symbol">' + symbol + '</div>' +
+                    '<div class="ai-trace-item-signals">' + signalTags + '</div>' +
+                    badgeRow +
+                    '<div class="ai-trace-item-ts">' +
+                    '<span>' + timeStr + '</span>' +
+                    thinkingBadge +
+                    '</div>' +
+                    '</div>';
+            }
+            listEl.innerHTML = html;
+
+            // 默认选中第一条
+            if (filtered.length > 0) {
+                __aiTraceSelected = filtered[0];
+                renderAiTraceDetail(filtered[0]);
+            } else {
+                __aiTraceSelected = null;
+                document.getElementById('ai-trace-detail').innerHTML =
+                    '<div class="ai-trace-detail-empty">当前筛选下无日志</div>';
+            }
+        }
+
         function selectAiTrace (idx) {
-            // 更新选中状态
+            selectAiTraceByIndex(idx);
+        }
+
+        function selectAiTraceByIndex (idx) {
             var items = document.querySelectorAll('.ai-trace-list-item');
-            items.forEach(function (el, i) {
-                el.classList.toggle('active', i === idx);
+            items.forEach(function (el) {
+                el.classList.toggle('active', parseInt(el.getAttribute('data-idx'), 10) === idx);
             });
             __aiTraceSelected = idx;
             renderAiTraceDetail(idx);
+        }
+
+        // P1（2026-09-22 审计）：score_card 六维分数进度条
+        function _dimBarsHtml (scoreCard) {
+            if (!scoreCard) return '';
+            var dims = [
+                ['valuation', '估值'], ['technical', '技术'], ['onchain', '链上'],
+                ['fundamental', '基本面'], ['sentiment', '情绪'], ['catalyst', '催化']
+            ];
+            var out = '';
+            for (var i = 0; i < dims.length; i++) {
+                var d = scoreCard[dims[i][0]];
+                var s = d && typeof d.score === 'number' ? d.score : (d && d.score != null ? Number(d.score) : null);
+                if (s == null) continue;
+                var c = s >= 70 ? '#f87171' : s >= 55 ? '#fbbf24' : '#9ca3af';
+                var comment = d && d.comment ? _escapeHtml(String(d.comment)) : '';
+                out +=
+                    '<div style="margin-bottom:5px">' +
+                    '<div style="display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-bottom:2px">' +
+                    '<span>' + dims[i][1] + '</span><span style="color:' + c + ';font-weight:700">' + Math.round(s) + '</span>' +
+                    '</div>' +
+                    '<div style="height:5px;background:rgba(71,85,105,.25);border-radius:3px;overflow:hidden">' +
+                    '<div style="height:100%;width:' + Math.min(100, Math.max(0, s)) + '%;background:' + c + ';border-radius:3px"></div>' +
+                    '</div>' +
+                    (comment ? '<div style="font-size:10px;color:#64748b;margin-top:2px">' + comment + '</div>' : '') +
+                    '</div>';
+            }
+            return out;
         }
 
         function renderAiTraceDetail (idx) {
@@ -15540,7 +15714,42 @@
             var symbol = item.symbol || (item.asset_id ? ('#' + item.asset_id) : '聚合信号');
             var signalLabels = (item.signal_types || []).map(function (s) { return _signalLabel(s); }).join('、');
 
-            var html =
+            var html = '';
+            // P0（2026-09-22 审计）：结构化结论卡（方向/分数/置信度/入选高亮/方向冲突）
+            var resp = _parseTraceResp(item);
+            if (resp && !resp.error) {
+                var conflict = _isTraceConflict(item, resp);
+                var conflictTag = conflict
+                    ? '<span style="display:inline-block;margin-left:6px;padding:1px 8px;border-radius:4px;font-size:10px;font-weight:700;color:#e879f9;background:rgba(217,70,239,.15)">⚠️ AI 结论与系统方向冲突</span>'
+                    : '';
+                html +=
+                    '<div style="background:rgba(30,41,59,.7);border:1px solid #334155;border-radius:8px;padding:12px 14px;margin-bottom:10px">' +
+                    '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">' +
+                    '<span style="font-size:15px;font-weight:800;color:#e2e8f0">' + symbol + '</span>' +
+                    _dirChipHtml(resp.direction) +
+                    _confBadgeHtml(resp.confidence) +
+                    '<span style="font-size:20px;font-weight:800;color:#f87171">' + (resp.overall_score != null ? resp.overall_score : '?') + '</span>' +
+                    '<span style="font-size:10px;color:#64748b">综合评分</span>' +
+                    _traceHighlightChip(resp) +
+                    conflictTag +
+                    '</div>' +
+                    (resp.reason_summary ? '<div style="font-size:12px;color:#cbd5e1;line-height:1.6;margin-bottom:6px">' + _escapeHtml(resp.reason_summary) + '</div>' : '') +
+                    (resp.reason_detail ? '<div style="font-size:11px;color:#94a3b8;line-height:1.6">' + _escapeHtml(String(resp.reason_detail).slice(0, 400)) + (String(resp.reason_detail).length > 400 ? '…' : '') + '</div>' : '') +
+                    '</div>';
+
+                // P1：score_card 六维分数可视化
+                var dimsHtml = _dimBarsHtml(resp.score_card);
+                if (dimsHtml) {
+                    html +=
+                        '<div class="ai-trace-section">' +
+                        '<div class="ai-trace-section-title">📊 六维评分</div>' +
+                        '<div style="padding:10px 12px">' + dimsHtml + '</div>' +
+                        '</div>';
+                }
+            }
+
+            // 元信息
+            html +=
                 '<div class="ai-trace-meta-row">' +
                 '<div class="ai-trace-meta-item"><strong>币种：</strong>' + symbol + '</div>' +
                 '<div class="ai-trace-meta-item"><strong>信号：</strong>' + signalLabels + '</div>' +
@@ -15550,7 +15759,7 @@
                 (item.has_thinking ? '<div class="ai-trace-meta-item"><strong>思考长度：</strong>' + (item.thinking_len || 0) + ' 字</div>' : '') +
                 '</div>';
 
-            // AI 响应（格式化 JSON）
+            // AI 响应（原始 JSON）—— P0：默认折叠为二级入口
             var responseText = item.raw_response || '';
             try {
                 var respObj = JSON.parse(responseText);
@@ -15560,21 +15769,21 @@
             html +=
                 '<div class="ai-trace-section">' +
                 '<div class="ai-trace-section-title">' +
-                '📤 AI 响应' +
-                '<button class="toggle-btn" onclick="this.textContent = this.nextElementSibling.classList.toggle(\'collapsed\') ? \'展开\' : \'收起\';this.nextElementSibling.classList.toggle(\'collapsed\')">收起</button>' +
+                '📤 AI 原始响应' +
+                '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">展开</button>' +
                 '</div>' +
-                '<div class="ai-trace-section-content">' + _escapeHtml(responseText) + '</div>' +
+                '<div class="ai-trace-section-content collapsed">' + _escapeHtml(responseText) + '</div>' +
                 '</div>';
 
-            // 思考过程
+            // 思考过程—— P0（2026-09-22 审计）：默认折叠（60px 摘要 + 渐隐），展开看全文
             if (item.thinking_content) {
                 html +=
                     '<div class="ai-trace-section">' +
                     '<div class="ai-trace-section-title">' +
                     '🧠 思考过程' +
-                    '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开\' : \'收起\'">收起</button>' +
+                    '<button class="toggle-btn" onclick="this.nextElementSibling.classList.toggle(\'collapsed\');this.textContent = this.nextElementSibling.classList.contains(\'collapsed\') ? \'展开全文\' : \'收起\'">展开全文</button>' +
                     '</div>' +
-                    '<div class="ai-trace-section-content" style="color:#6ee7b7;">' + _escapeHtml(item.thinking_content) + '</div>' +
+                    '<div class="ai-trace-section-content collapsed" style="color:#6ee7b7;">' + _escapeHtml(item.thinking_content) + '</div>' +
                     '</div>';
             }
 

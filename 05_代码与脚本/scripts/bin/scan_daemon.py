@@ -1812,9 +1812,15 @@ def _render_alert_email(items: list[dict]) -> str:
                 atr_note = f"已触上限 {STOP_PCT_MAX:.0f}%（真实 2×ATR 更宽）"
             else:
                 atr_note = f"2×ATR({STOP_ATR_PERIOD}) 夹 [{STOP_BAND_TXT}]"
+            # 复验 P2-N7：幅度符号必须随方向 —— 做多「跌破」在入场下方（负），做空
+            # 「升破」在入场上方（正）。原实现硬编码 `-`，做空时渲染出「升破
+            # 0.215981（-16.35%）」这种方向词与符号**自相矛盾**的失效位（实物
+            # id=1292 龙虾USDT，全库首条「做空 + 带失效位」的已告警信号；BRK 做空
+            # 全库仅此 1 条，故此前从未显形）。风控读者按 -16.35% 会以为失效位在
+            # 下方，而真实止损在上方 16.35%。
             invalid_txt = (f"<br><small style='color:#6b7280'>失效位 "
                            f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
-                           f"（-{sp:.2f}%，{atr_note}，入场 "
+                           f"（{'-' if up else '+'}{sp:.2f}%，{atr_note}，入场 "
                            f"{_fmt_num(trig_px, 6)}）</small>")
         # 历史先验（审计 P2-5）：中位/胜率/样本量，**不用均值**（会被离群值绑架）
         # 工单 P2-6：样本限定 `alerted_at IS NOT NULL`（近 30 天、且已到期）⇒ 只覆盖

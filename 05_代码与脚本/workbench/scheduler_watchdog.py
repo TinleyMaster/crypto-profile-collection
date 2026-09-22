@@ -110,6 +110,29 @@ def _last_run_error(key: str) -> str | None:
         return None
 
 
+def _recent_submission(key: str, within_seconds: float) -> bool:
+    """该 key 在最近 within_seconds 内是否被**提交**过（pending/running/failed/done 都算）。
+
+    2026-09-22 修复「补跑恶性循环」：看护原先只要「超阈值未 done」就补跑（仅
+    timeout/stuck 两种错误才拦），于是当**任务自身**失败/卡住（scheduler 仍存活、
+    照常按 cron 提交）时，看护每 18h 再补跑一次，形成「补跑→再卡→再补跑」。
+    正解：近阈值内已有提交记录 ⇒ scheduler 活着、问题在任务自身 ⇒ 只告警不补跑；
+    只有「近阈值内一次提交都没有」才说明 scheduler 失活、需要看护兜底补跑。
+    """
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM sys.task WHERE name LIKE %s "
+                    "AND started_at > NOW() - make_interval(secs => %s) LIMIT 1",
+                    (f"[调度] {key}%", float(within_seconds)),
+                )
+                return cur.fetchone() is not None
+    except Exception as e:
+        print(f"[看护] _recent_submission 查询失败 {key}: {e}", file=sys.stderr)
+        return False
+
+
 def _write_heartbeat() -> None:
     """写心跳任务（name=[看护] scheduler_watchdog，status=running，极短存活）。"""
     try:
@@ -178,12 +201,18 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     # 补跑安全闸：上一轮被硬超时/卡死收割 ⇒ 任务自身跑不完，补跑只会再空转一轮
     last_err = _last_run_error(key) or ""
     blocked_by = last_err if last_err.startswith(("timeout:", "stuck:")) else None
+    # 近阈值内已有提交（scheduler 存活）⇒ 只告警不补跑，避免补跑恶性循环
+    recent = _recent_submission(key, threshold)
 
     # 告警邮件
     subject = f"⚠️ [看护] 调度任务 {key} 停滞 {hours}h"
     if blocked_by:
         rerun_line = (f"⚠️ 未自动补跑：上一轮判定为「{blocked_by[:100]}」，"
                       f"补跑大概率重蹈覆辙，请先排查根因（如 LLM 欠费 / 上游限频）。")
+    elif recent:
+        rerun_line = (f"⚠️ 未自动补跑：近 {threshold_hours}h 内已有提交记录（scheduler 存活），"
+                      f"问题在任务自身（失败/卡住），非调度失活。"
+                      f"最近错误：{(last_err or '无')[:160]}")
     else:
         rerun_line = f"如 scheduler 进程失活，将自动补跑 {key}。"
     body = (
@@ -194,9 +223,9 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     )
     mail_ok = _send_alert_email(subject, body)
 
-    # 补跑（check_only 时不补；上一轮 timeout/stuck 时也不补）
+    # 补跑（check_only 时不补；上一轮 timeout/stuck 或近阈值内已提交时也不补）
     task_id = None
-    if not check_only and not blocked_by:
+    if not check_only and not blocked_by and not recent:
         for _key, _cron, script, a, d, cat in __import__("scheduler").SCHEDULE:
             if _key == key:
                 task_id = submit_scheduled_task(key, script, a, d, category=cat)
@@ -205,10 +234,11 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     return {
         "key": key, "ok": False, "stale": True, "alerted": True,
         "stale_for": stale_for, "mail_ok": mail_ok, "rerun_task_id": task_id,
-        "rerun_blocked_by": blocked_by,
+        "rerun_blocked_by": blocked_by, "recent_submission": recent,
         "reason": "超阈值未成功，已告警" + (
             "（补跑已阻止：上轮 " + blocked_by.split(":")[0] + "）" if blocked_by
-            else ("并补跑" if task_id else "（补跑未触发）")),
+            else ("（补跑已阻止：近阈值内有提交，疑似任务自身问题）" if recent
+                  else ("并补跑" if task_id else "（补跑未触发）"))),
     }
 
 

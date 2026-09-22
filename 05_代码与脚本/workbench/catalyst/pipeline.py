@@ -195,7 +195,10 @@ def _merge_catalyst(
 
     # 合并资产关联（新 pairs 可能映射出新资产）
     all_pairs = list(set(existing_pairs + item.related_pairs))
-    asset_ids = map_pairs_to_asset_ids(all_pairs, conn)
+    ctx = " ".join(str(x) for x in (
+        item.title, item.body_text,
+        existing.get("title"), existing.get("body_text")) if x)
+    asset_ids = map_pairs_to_asset_ids(all_pairs, conn, context_text=ctx)
     _update_asset_links(catalyst_id, asset_ids, link_source, conn)
 
     # 返回最新行
@@ -222,7 +225,8 @@ def _resolve_asset_ids(
     if not pairs:
         return []
 
-    return map_pairs_to_asset_ids(pairs, conn)
+    ctx = (item.title or "") + " " + (item.body_text or "")
+    return map_pairs_to_asset_ids(pairs, conn, context_text=ctx)
 
 
 def _update_asset_links(

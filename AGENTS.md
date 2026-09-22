@@ -268,6 +268,16 @@
 - **无迁移**：全在 `workbench/catalyst/*.py`。
 - **自测**：价格闸门 11 例（正/0/None/负/做空优先 invalid）+ `_fmt_big` 货币/数量 4 例 + G4 缺失判 0/COPPER 式 fail 6 例 + A 卡片渲染 smoke（supply 去$/G1 分歧/G2 破折号/QR 注）全绿；`technical` 非正价守卫实测 `entry/sl/tp=None`。
 
+### 催化剂遗留两项处置：COPPER 极小价/供应量 + 商品同名误连（2026-09-22，本次提交）
+
+- **COPPER `total_supply=1e17` 核查（只读）**：`core.asset` 7949(`$COPPER`,meme,rank 4687) 的 `total_supply=1e17`、`circulating_supply=NULL`；`src_cmc.cmc_asset_quote_snapshot`（cmc_id 36847）同样报 `total_supply=1e17`、`circulating=0`。另一条 `$COPPER`(asset 14346) 亦 ~1e17 ⇒ **是 CMC 上报值、非解析 bug**（meme 供应量 1e15~1e18 常见）。真正的问题是**显示精度**：
+  - `notifier._fmt_price`（两处）对 `f<1e-4` 用固定 8 位小数 ⇒ `2.9e-12` 渲染成 `0.00000000`（「现价 0」「MA20 $1.632e-12」的假象）。改为 `f<1e-4` 用**科学计数**（`.4e`）。
+  - `technical._round_price()`：原 `round(stop,6)`/`round(atr,6)` 把 1e-12 级价格抹成 **0**（档位失效的根因之一）→ 改为按**有效数字**（8 位）取整。实测极小价 `sl=2.95e-12 / tp=6.275e-12 / atr=1.88e-13` 均非 0。
+- **商品同名误连消歧（P3，已修未来路径）**：`linker.py` 新增 `_COMMODITY_AMBIGUOUS_SYMBOLS`（COPPER/GOLD/SILVER/OIL/XAU/XAG…）+ `has_crypto_context()`；`map_pairs_to_asset_ids(..., context_text=)` 对**同名商品词 symbol** 要求正文含加密语境（cashtag `$COPPER`/`COPPERUSDT`/token/meme/链上/代币/上线…），否则跳过（Binance Square 常把 Bloomberg/LME 铜金新闻标成 `COPPERUSDT`）。`pipeline._resolve_asset_ids`/`_merge_catalyst` 与 `backfill_catalyst_links.link_catalyst` 已传 `context_text`；歧义符号**不进 symbol 缓存**（避免跨文污染）。实测宏观铜文案→`[]`、含 `$COPPER`/「代币/上线」→保留。
+  - **存量未清理（需授权）**：只读量化到**疑似误连 60 条**——`XAU`(XAU9999 Meme,8198) 41/84、`COPPER`($COPPER,7949) 19/27（正文无加密语境）。清理属 DELETE，按铁律**需用户授权后**再执行（可能还需联动 `catalyst_signal`）。
+- **无迁移**：全在 `workbench/catalyst/*.py` + `scripts/bin/backfill_catalyst_links.py`。
+- **自测**：同名消歧 6 例（宏观→drop、cashtag/代币→保留）+ `_fmt_price` 4 例 + `_round_price`/极小价档位 4 例全绿。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。

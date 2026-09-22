@@ -651,7 +651,9 @@ def _build_fast_alert_html(row) -> str:
             return f"${v:.2f}"
         if v >= 0.01:
             return f"${v:.4f}"
-        return f"${v:.6f}"
+        if v >= 1e-4:
+            return f"${v:.6f}"
+        return f"${v:.4e}"
 
     # ---------- 各区块构建 ----------
 
@@ -1741,7 +1743,11 @@ def _fmt_price(v) -> str:
             return f"{f:,.1f}"
         if f >= 1:
             return f"{f:,.4f}"
-        return f"{f:.8f}"
+        if f >= 1e-4:
+            return f"{f:.8f}"
+        # 极小价（meme 常见 1e-12）：固定 8 位小数会被截断成 0.00000000，
+        # 让「现价/MA20」看起来像 0（审计 2026-09-22 P0 的显示根因）→ 改科学计数。
+        return f"{f:.4e}"
     except (TypeError, ValueError):
         return "—"
 

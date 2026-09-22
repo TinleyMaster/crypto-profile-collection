@@ -268,12 +268,13 @@ def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int]]:
     related_pairs = cat.get("related_pairs") or []
     body_text = cat.get("body_text") or ""
     title = cat.get("title") or ""
+    ctx = title + "\n" + body_text
 
     # 第一路：related_pairs 官方标签（置信度高）
     pair_asset_ids = []
     if related_pairs:
         pair_asset_ids = map_pairs_to_asset_ids(
-            related_pairs, conn, source_hint="binance"
+            related_pairs, conn, source_hint="binance", context_text=ctx
         )
 
     # 第二路：正文 cashtag 兜底（置信度低）
@@ -281,7 +282,8 @@ def link_catalyst(cat: dict, conn) -> tuple[list[int], list[int]]:
     text_pairs = extract_pairs_from_text(title + "\n" + body_text)
     # 过滤掉已经通过 related_pairs 匹配到的
     if text_pairs:
-        all_ids = map_pairs_to_asset_ids(text_pairs, conn, source_hint="binance")
+        all_ids = map_pairs_to_asset_ids(text_pairs, conn, source_hint="binance",
+                                         context_text=ctx)
         pair_set = set(pair_asset_ids)
         cashtag_asset_ids = [aid for aid in all_ids if aid not in pair_set]
 

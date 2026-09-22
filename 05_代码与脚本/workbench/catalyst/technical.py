@@ -20,7 +20,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import floor, log10
 from typing import Optional
+
+
+def _round_price(x: float | None) -> float | None:
+    """按**有效数字**（8 位）取整，而非固定 6 位小数。
+
+    审计 2026-09-22 P0：固定 `round(x, 6)` 会把 1e-12 级的 meme 价格抹成 0，
+    导致止损/止盈/ATR 变 0、档位失效。极小价必须保留有效数字。
+    """
+    if x is None or x == 0:
+        return x
+    try:
+        digits = 8 - int(floor(log10(abs(x)))) - 1
+    except (ValueError, OverflowError):
+        return x
+    return round(x, max(0, min(digits, 18)))
 
 
 @dataclass
@@ -117,7 +133,7 @@ class TechnicalAnalyzer:
                     returns.append(abs(prices[i] / prices[i - 1] - 1))
             if returns:
                 avg_ret = sum(returns[-self.atr_days:]) / min(len(returns), self.atr_days)
-                result.atr_30d = round(last_price * avg_ret, 6)
+                result.atr_30d = _round_price(last_price * avg_ret)
 
         # 判定趋势状态
         result.technical_state = self._determine_state(last_price, ma5, ma20, ma60)
@@ -263,8 +279,8 @@ class TechnicalAnalyzer:
             take_profit = entry + atr * 2.5
             rr = 2.5
 
-        result.stop_loss_price = round(stop, 6) if stop and stop > 0 else None
-        result.take_profit_price = round(take_profit, 6) if take_profit and take_profit > 0 else None
+        result.stop_loss_price = _round_price(stop) if stop and stop > 0 else None
+        result.take_profit_price = _round_price(take_profit) if take_profit and take_profit > 0 else None
         result.rr_ratio = rr if rr and rr > 0 else None
 
         # ── 防御性校验：确保止盈止损价格与方向一致 ──

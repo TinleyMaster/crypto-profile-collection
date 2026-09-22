@@ -39,6 +39,33 @@ _CANONICAL_TOP_SYMBOLS = frozenset({
     "WIF", "BONK", "FLOKI", "ENA", "PENDLE", "JUP", "RENDER", "FET",
 })
 
+# 同名消歧（审计 2026-09-22 P3）：这些 symbol 与**商品/常用英文词**同名，Binance
+# Square 的 `pairs` 常把宏观商品新闻（Bloomberg/LME/COMEX 铜、金、银、油…）标成
+# `COPPERUSDT`/`XAUUSDT`，从而误连到同名 meme 币（实测 COPPER 连到 rank #4687 的
+# `$COPPER`）。规则：命中本集合的 symbol，正文/标题必须出现**加密语境**（cashtag
+# `$COPPER` / `COPPERUSDT` / token/meme/on-chain/代币/上线…）才认，否则跳过。
+_COMMODITY_AMBIGUOUS_SYMBOLS = frozenset({
+    "COPPER", "GOLD", "SILVER", "OIL", "GAS", "CRUDE", "BRENT", "IRON", "STEEL",
+    "COAL", "URANIUM", "LITHIUM", "PLATINUM", "PALLADIUM", "COFFEE", "SUGAR",
+    "WHEAT", "CORN", "WATER", "DIAMOND", "ALUMINUM", "ALUMINIUM", "NICKEL",
+    "ZINC", "LEAD", "TIN", "COBALT", "XAU", "XAG", "XPT", "XPD",
+})
+
+_CRYPTO_CONTEXT_RE = re.compile(
+    r"\$[A-Za-z0-9]{2,10}\b"                 # cashtag $COPPER
+    r"|\b[A-Z0-9]{2,15}USDT\b"               # COPPERUSDT
+    r"|\b(?:token|memecoin|meme|crypto|blockchain|on-?chain|defi|dex|cex|"
+    r"airdrop|staking|listing|solana|ethereum|binance|perpetual|spot)\b"
+    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安",
+    re.IGNORECASE,
+)
+
+
+def has_crypto_context(text: str | None) -> bool:
+    """正文/标题是否含加密语境（用于商品同名 symbol 消歧）。"""
+    return bool(text and _CRYPTO_CONTEXT_RE.search(text))
+
+
 
 def _resolve_canonical_top(conn, base: str) -> int | None:
     """白名单符号 → 真实主网资产（market_cap_rank 非空，取排名最小）。"""
@@ -118,6 +145,7 @@ def map_pairs_to_asset_ids(
     pairs: list[str],
     conn,
     source_hint: str = "binance",
+    context_text: str = "",
 ) -> list[int]:
     """将交易对列表映射为 asset_id 列表（多资产）。
 
@@ -125,6 +153,8 @@ def map_pairs_to_asset_ids(
         pairs: 交易对列表（如 ["BTCUSDT", "ETHUSDT"]）
         conn: 数据库连接
         source_hint: 优先查的数据源（默认 binance，因为交易对来自币安）
+        context_text: 标题+正文；用于「商品/常用词同名」消歧（见
+            `_COMMODITY_AMBIGUOUS_SYMBOLS`）。为空时不做消歧（向后兼容）。
 
     Returns:
         asset_id 列表（去重，顺序按 pairs 出现顺序）
@@ -140,8 +170,14 @@ def map_pairs_to_asset_ids(
         if not base:
             continue
 
-        # 查缓存
-        if base in _symbol_asset_cache:
+        # 同名消歧：商品/常用词 symbol 需正文含加密语境，否则视为宏观商品新闻误标
+        ambiguous = base in _COMMODITY_AMBIGUOUS_SYMBOLS
+        if ambiguous and context_text and not has_crypto_context(context_text):
+            logger.info("同名消歧：跳过商品/常用词 symbol %s（正文无加密语境）", base)
+            continue
+
+        # 查缓存（歧义符号不缓存，避免跨文污染）
+        if not ambiguous and base in _symbol_asset_cache:
             aid = _symbol_asset_cache[base]
             if aid is not None and aid not in seen:
                 seen.add(aid)

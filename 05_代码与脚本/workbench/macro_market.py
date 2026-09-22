@@ -3166,6 +3166,12 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                       AND a.canonical_name NOT ILIKE '%%wrapped%%'
                       AND a.market_cap_rank IS NOT NULL
                       AND a.market_cap_rank <= 1000
+                      -- D4（2026-09-22 审计）：过滤脏 symbol（ETL 把列名当兜底值写入、空值等），
+                      -- 防止卡片标题渲染成字面量 "canonical_symbol"
+                      AND a.canonical_symbol IS NOT NULL
+                      AND a.canonical_symbol <> ''
+                      AND a.canonical_symbol NOT IN ('canonical_symbol', 'symbol', 'TBD', 'unknown', 'UNKNOWN')
+                      AND length(a.canonical_symbol) <= 20
                     GROUP BY ci.asset_id, a.canonical_symbol
                     HAVING SUM(
                                CASE ci.impact_direction
@@ -3192,7 +3198,11 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                         raw_f = 0.0
                     clipped = max(-100.0, min(100.0, raw_f * 10))
                     score = (clipped + 100.0) / 2.0
-                    results.append((aid, symbol or "", round(score, 1)))
+                    # D4：Python 侧二次校验（防 SQL 过滤遗漏 / 后续调用方复用）
+                    sym = (symbol or "").strip()
+                    if not sym or len(sym) > 20 or sym in ("canonical_symbol", "symbol", "TBD", "unknown", "UNKNOWN"):
+                        continue
+                    results.append((aid, sym, round(score, 1)))
                 return results
     except Exception:
         return []
@@ -3240,6 +3250,11 @@ def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, 
                       -- 过滤抢注主流符号的假币（如 Bitcoin Base / The Ticker Is ETH）
                       AND a.market_cap_rank IS NOT NULL
                       AND a.market_cap_rank <= 1000
+                      -- D4（2026-09-22 审计）：过滤脏 symbol（ETL 列名兜底/空值）
+                      AND a.canonical_symbol IS NOT NULL
+                      AND a.canonical_symbol <> ''
+                      AND a.canonical_symbol NOT IN ('canonical_symbol', 'symbol', 'TBD', 'unknown', 'UNKNOWN')
+                      AND length(a.canonical_symbol) <= 20
                     ORDER BY s.composite_score DESC
                     LIMIT 25
                 """)
@@ -3247,7 +3262,11 @@ def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, 
                 results = []
                 for aid, sym, score, entry, invalid in rows:
                     entry_txt = f"{float(entry):g}" if entry is not None else ""
-                    results.append((aid, sym or "", float(score or 0), entry_txt, invalid or ""))
+                    # D4：Python 侧二次校验（防 SQL 过滤遗漏）
+                    _sym = (sym or "").strip()
+                    if not _sym or len(_sym) > 20 or _sym in ("canonical_symbol", "symbol", "TBD", "unknown", "UNKNOWN"):
+                        continue
+                    results.append((aid, _sym, float(score or 0), entry_txt, invalid or ""))
                 return results
     except Exception:
         return []
@@ -4223,6 +4242,9 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         "etf_flow": 2,
         "price_surge": 3, "price_volume_surge": 3, "volume_surge": 2,
         "sector_inflow": 2,
+        # D2（2026-09-22 审计）：叙事/链净流入信号补齐 signal_type 后的独立配额，
+        # 避免全部落入 __default__ 互相挤占（每类各 2 个展示位）
+        "narrative": 2, "chain_inflow": 2,
         "__default__": 2,
     }
 
@@ -5338,7 +5360,16 @@ def score_opportunities(overview: dict) -> dict:
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
              "conviction_score": conviction,
-             "trigger_logic": trigger, "related_dims": related},
+             # D2（2026-09-22 审计）：叙事信号缺 signal_type → 前端无分类徽章、配额落入 __default__。
+             # 补齐 signal_type + key_metric/action_hint/invalidation，避免"赛道清单当高亮"。
+             "signal_type": "narrative",
+             "key_metric": (
+                 f"市值 {row.get('mcap_change_7d_pct', 0):+.1f}%"
+                 + (f" · TVL {row.get('tvl_change_7d_pct', 0):+.1f}%" if mode == "blended" else "")
+             ),
+             "trigger_logic": trigger, "related_dims": related,
+             "action_hint": "板块资金净流入，关注赛道领涨币与头部标的",
+             "invalidation": "板块 7d 市值转跌或资金净流出后信号失效"},
             opportunities, excluded, t,
         )
 
@@ -5359,8 +5390,13 @@ def score_opportunities(overview: dict) -> dict:
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
+             # D2（2026-09-22 审计）：链净流入信号补 signal_type + 可执行字段
+             "signal_type": "chain_inflow",
+             "key_metric": f"7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）",
              "trigger_logic": f"{row.get('chain')} 链 7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）→ 资金净流入",
-             "related_dims": ["P1-1 链净流入榜"]},
+             "related_dims": ["P1-1 链净流入榜"],
+             "action_hint": "跨链资金流入，关注该链头部协议与生态代币",
+             "invalidation": "链 TVL 增速放缓或转净流出后信号失效"},
             opportunities, excluded, t,
         )
 

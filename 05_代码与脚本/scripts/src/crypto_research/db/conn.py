@@ -18,10 +18,15 @@ def _get_pool(database_url: str) -> psycopg_pool.ConnectionPool:
     """
     global _pool
     if _pool is None:
+        # D3（2026-09-22 审计）：max_size 2→5。大盘 overview 一次并行拉 25 个数据源，
+        # 其中 7+ 个走本池（onchain/cm_activity/mvrv_history/divergence/btc_cycle/mvrv_universe…），
+        # 2 连接在慢查询时会被占满，其余线程 checkout 等到 30s 超时 → 快照偶发
+        # mvrv_universe status=error（值 "3"，间歇性，09-20 ok / 09-19/21/22 error）。
+        # 5 连接对远程 PG 压力可忽略，显著降低快照期池争抢。
         _pool = psycopg_pool.ConnectionPool(
             database_url,
             min_size=0,
-            max_size=2,
+            max_size=5,
             open=True,
             timeout=30,
             # lock_timeout=30s：被其他事务持锁时快速失败并留痕，

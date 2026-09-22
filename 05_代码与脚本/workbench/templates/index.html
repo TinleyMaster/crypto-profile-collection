@@ -13196,6 +13196,9 @@
             volume_surge: { label: '成交量异动', cls: 'st-volume' },
             sector_inflow: { label: '赛道资金流入', cls: 'st-sector' },
             sector_outflow: { label: '赛道资金流出', cls: 'st-sector' },
+            // D2（2026-09-22 审计）：叙事/链净流入信号补齐 signal_type 后的前端标签
+            narrative: { label: '赛道流入', cls: 'st-sector' },
+            chain_inflow: { label: '链净流入', cls: 'st-sector' },
         };
 
         function renderSignalItem (o, level) {
@@ -15623,6 +15626,8 @@
                 volume_surge: '成交量异动',
                 sector_inflow: '赛道资金流入',
                 sector_outflow: '赛道资金流出',
+                narrative: '赛道流入',
+                chain_inflow: '链净流入',
                 fng_extreme: '恐贪极端',
                 leverage_extreme: '杠杆极端',
                 stablecoin_inflow: '稳定币流入',

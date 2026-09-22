@@ -577,3 +577,12 @@
   - 修法：复用 `_last_closed_idx(rows, "1h", now)`，取最近一根**已收盘**条与其前一根；无已收盘条则**不产出** `btc_1h` 标签（宁缺勿错，不拿 live 冒充收盘）。图例措辞补「已收盘」二字（用纯文本，**不得**用 markdown `**`）。
 - **验证盲区（如实记录）**：该封仅 1 个干净 S1（牛来USDT）、**无 BRK 主导**，而 B1 只在「BRK 按强度居首」时触发 ⇒ **该封不能排他证明 B1 已部署**（旧代码对干净 S1 批次本来就输出人话头部）。终验需一封含 BRK 主导的批次邮件，或直连容器 `git rev-parse HEAD` 确认 ≥ `5dfbcd0`（我无容器访问权，未验）。
 - **自测**：`test_scan_alert_header_regime.py` 扩至 **21/21**（+3：已收盘两根 (100−80)/80=+25.00% 而非 live +5.00%；全未收盘 → 不产 `btc_1h` 标签）；既有 deepdive 75/75、remaining 16/16、L1 16/16、squeeze 135/135 无回归；`py_compile` 通过；零 DDL。
+
+### G4 流动性字面 0 值漏判（工单 `待修复工单_G4_流动性0值漏判_2026-09-22.md`，2026-09-22）
+
+来源：复验 `1fc7a69`（催化剂邮件修复）副产物。定级 P2、非阻塞。
+
+- **缺陷**：`workbench/catalyst/fundamental.py::FundamentalChecker._score_liquidity` 的守卫只写 `if liq_usd is None: return 0`，**漏了字面 `0`**（上游未抓取成功但写入 0 而非 NULL）⇒ 落兜底 `return 20`（与「有数据但极差」混淆），且与 `_score_tvl`（`is None or tvl_usd <= 0`）口径不一致。安全性无影响（COPPER `liq=0` 综合分 39 仍 < pass_threshold 50，G4 依旧 fail），但属 P1 修复的遗漏分支。
+- **修复**：一行收敛为 `if liq_usd is None or liq_usd <= 0: return 0`（+ docstring 注明 0 与 None 同判）。**不引入新分支、不动权重/阈值**，与 `_score_tvl` 完全同构。
+- **Scope（未动，遵工单）**：`_score_unlock`（字符串型，`0` 不适用，保持 `if not pressure: return 50`）；`composite_score/tier` 内部不一致（P3 展示层，另立）；`$COPPER` 供应量 1e17 数据源与商品同名误连（classify/asset_filter，另立）；无 DDL。
+- **自测**：新增 [test_fundamental_liquidity.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_fundamental_liquidity.py)（**13/13 通过**：`liq=0/0.0/-1/None` → 0；真实阶梯 50K→20 / 200K→45 / 2M→70 / 6M→90 零误伤；与 `_score_tvl` 同构；源码守卫含 `is None or <= 0`；`_score_unlock` 未改）；`py_compile` 通过。

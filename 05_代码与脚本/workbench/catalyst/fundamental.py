@@ -184,8 +184,10 @@ class FundamentalChecker:
 
         审计 2026-09-22 P1：**缺失**（None）不再给中性 50 —— 那会让「无流动性数据」
         与「有数据但平庸」等同，配合阈值 50 恰好放行（COPPER 实测）。缺失判 0。
+        工单 G4-RESIDUAL-001：字面 `0`（未抓取成功但写入 0 而非 NULL）与 None 同判
+        （无有效流动性）—— 与 `_score_tvl` 的 `is None or <= 0` 口径对齐。
         """
-        if liq_usd is None:
+        if liq_usd is None or liq_usd <= 0:
             return 0
         if liq_usd >= self.liq_good:
             return 90

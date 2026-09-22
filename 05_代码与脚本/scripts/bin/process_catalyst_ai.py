@@ -462,6 +462,7 @@ def main():
                 break
 
             print(f"\n获取到 {len(pending)} 条待处理催化剂")
+            processed_before_batch = processed
 
             if use_pack:
                 # 批量打包模式：每 pack_size 条一次 LLM 请求
@@ -541,6 +542,15 @@ def main():
 
             if args.max_items and processed >= args.max_items:
                 break
+
+            # 整批 0 成功 ⇒ LLM 侧永久故障（402 欠费 / 401 鉴权 / 熔断）：
+            # 失败不写 ai_processed，fetch_pending 下一轮取回的是**同一批**，形成死循环。
+            # 2026-09-21 实测：DeepSeek 402 期间每 221 行重复「获取到 200 条」，
+            # 空转 12 小时直到被 task_manager 硬超时收割，刷了 37307 行 402。
+            if processed == processed_before_batch:
+                print(f"\n⚠️ 本批 {len(pending)} 条全部失败（成功 0 条），"
+                      f"疑似 LLM 配额/鉴权故障，提前中止避免死循环空转。", flush=True)
+                return 1
 
             # force 模式用 offset 推进；非 force 模式靠 ai_processed 状态推进
             if args.force:

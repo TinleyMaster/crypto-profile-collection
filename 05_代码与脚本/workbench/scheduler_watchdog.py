@@ -84,6 +84,32 @@ def _last_done_ts(key: str) -> float | None:
         return None
 
 
+def _last_run_error(key: str) -> str | None:
+    """取该调度任务最近一次运行（任意状态）的 error 文本。
+
+    用于补跑前的安全闸：上一轮若是被硬超时（`timeout:`）或卡死（`stuck:`）
+    收割的，说明任务自身跑不完，补跑大概率重蹈覆辙 —— 2026-09-21 实况：
+    catalyst_run_all 补跑后空转 12h 又被收割，看护再补跑，形成恶性循环。
+    """
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT error FROM sys.task
+                    WHERE name LIKE %s AND error IS NOT NULL
+                    ORDER BY started_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (f"[调度] {key}%",),
+                )
+                row = cur.fetchone()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        print(f"[看护] _last_run_error 查询失败 {key}: {e}", file=sys.stderr)
+        return None
+
+
 def _write_heartbeat() -> None:
     """写心跳任务（name=[看护] scheduler_watchdog，status=running，极短存活）。"""
     try:
@@ -149,19 +175,28 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     _last_alerted[key] = now
     hours = round(stale_for / 3600, 1) if stale_for else 0
 
+    # 补跑安全闸：上一轮被硬超时/卡死收割 ⇒ 任务自身跑不完，补跑只会再空转一轮
+    last_err = _last_run_error(key) or ""
+    blocked_by = last_err if last_err.startswith(("timeout:", "stuck:")) else None
+
     # 告警邮件
     subject = f"⚠️ [看护] 调度任务 {key} 停滞 {hours}h"
+    if blocked_by:
+        rerun_line = (f"⚠️ 未自动补跑：上一轮判定为「{blocked_by[:100]}」，"
+                      f"补跑大概率重蹈覆辙，请先排查根因（如 LLM 欠费 / 上游限频）。")
+    else:
+        rerun_line = f"如 scheduler 进程失活，将自动补跑 {key}。"
     body = (
         f"关键 cron「{key}」({desc}) 已 {hours} 小时无成功执行。\n"
         f"最近一次 done: {last or '从未成功'}\n"
         f"阈值: {threshold_hours}h\n\n"
-        f"如 scheduler 进程失活，将自动补跑 {key}。"
+        f"{rerun_line}"
     )
     mail_ok = _send_alert_email(subject, body)
 
-    # 补跑（check_only 时不补）
+    # 补跑（check_only 时不补；上一轮 timeout/stuck 时也不补）
     task_id = None
-    if not check_only:
+    if not check_only and not blocked_by:
         for _key, _cron, script, a, d, cat in __import__("scheduler").SCHEDULE:
             if _key == key:
                 task_id = submit_scheduled_task(key, script, a, d, category=cat)
@@ -170,7 +205,10 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     return {
         "key": key, "ok": False, "stale": True, "alerted": True,
         "stale_for": stale_for, "mail_ok": mail_ok, "rerun_task_id": task_id,
-        "reason": "超阈值未成功，已告警" + ("并补跑" if task_id else "（补跑未触发）"),
+        "rerun_blocked_by": blocked_by,
+        "reason": "超阈值未成功，已告警" + (
+            "（补跑已阻止：上轮 " + blocked_by.split(":")[0] + "）" if blocked_by
+            else ("并补跑" if task_id else "（补跑未触发）")),
     }
 
 

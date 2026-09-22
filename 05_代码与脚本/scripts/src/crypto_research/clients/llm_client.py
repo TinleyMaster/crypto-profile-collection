@@ -25,6 +25,16 @@ from crypto_research.config import Settings
 from crypto_research.mapping.taxonomy import CONTENT_TOPICS
 
 
+class QuotaExhaustedError(RuntimeError):
+    """LLM 配额/鉴权永久失败（HTTP 402 欠费、401 key 无效）。
+
+    重试无意义，故命中后本进程内熔断：后续 chat() 直接抛本异常、不再发请求。
+    不加熔断的代价（2026-09-21 实况）：catalyst_run_all 的 AI 阶段每批 200 条
+    全部 402，失败又不写 ai_processed → fetch_pending 反复返回同一批，空转
+    12 小时直到被硬超时收割，期间日志刷了 37307 行 402。
+    """
+
+
 def estimate_tokens(text: str) -> int:
     """粗略估算 token 数（中英混合场景）。
 
@@ -321,6 +331,8 @@ class LLMClient:
         self.model: str | None = None
         self.api_type: str = "chat"  # chat | responses
         self._fallback_provider: dict[str, Any] | None = None
+        # 配额/鉴权熔断原因（None=未熔断）。命中 402/401 后置位，本进程内不再发请求。
+        self._quota_exhausted: str | None = None
         if self._provider_list:
             self._apply_provider(self._provider_list[0])
             if len(self._provider_list) > 1:
@@ -352,6 +364,21 @@ class LLMClient:
         if elapsed < self._min_interval:
             time.sleep(self._min_interval - elapsed)
         self._last_call = time.monotonic()
+
+    def _note_quota_error(self, exc: Exception) -> None:
+        """识别 402/401 并置熔断标志（只记首个原因）。
+
+        ⚠️ 只在「最终失败」时调用：主 provider 402 但兜底 provider 成功时不能置位，
+        否则会把可用的兜底也一起熔断。
+        """
+        if self._quota_exhausted:
+            return
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if code in (401, 402):
+            hint = "账户欠费/额度用尽，请充值" if code == 402 else "API Key 无效，请更换"
+            self._quota_exhausted = (
+                f"LLM HTTP {code}（provider={self.provider}, model={self.model}）：{hint}；"
+                f"重试无意义，本进程已熔断")
 
     def is_available(self) -> bool:
         return self.provider != "none"
@@ -424,6 +451,11 @@ class LLMClient:
             "api_type": self.api_type,
             "base_url": self.base_url,
         }
+
+        # ── 配额/鉴权熔断短路：402/401 已确认，重试无意义，直接抛（不发请求）──
+        if self._quota_exhausted:
+            self._last_diag["quota_exhausted"] = self._quota_exhausted
+            raise QuotaExhaustedError(self._quota_exhausted)
 
         # ── 缓存命中短路 ──
         if use_cache and temperature <= 0.1:
@@ -499,8 +531,11 @@ class LLMClient:
                 return result
             except Exception as exc2:
                 self._apply_provider(self._provider_list[0])
+                # 兜底也失败 → 此时才是「最终失败」，402/401 才置熔断
+                self._note_quota_error(exc2)
                 raise exc2
         else:
+            self._note_quota_error(exc)
             raise exc
 
     def _dispatch(self, system_prompt: str, user_prompt: str,

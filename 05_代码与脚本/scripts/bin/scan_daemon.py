@@ -516,6 +516,10 @@ STOP_ATR_MULT = 2.0
 STOP_ATR_PERIOD = 14
 STOP_PCT_MIN = 8.0
 STOP_PCT_MAX = 20.0
+# 渲染/日志用的带内文案**由常量派生**：2026-09-22 重标定 [3%,12%]→[8%,20%] 时，
+# 邮件正文与图例里三处硬编码的 `[3%,12%]` 漏改，用户看到的仍是旧带 ⇒ 加此常量
+# 让文案随常量走，杜绝同类漂移（改带只需改上面两行）。
+STOP_BAND_TXT = f"{STOP_PCT_MIN:.0f}%~{STOP_PCT_MAX:.0f}%"
 
 # ── 数据新鲜度护栏 ──────────────────────────────────────────────
 # 各周期最新 K 线 open_time 距今最大分钟数（采集每 5min、扫描每 15min，留足余量；
@@ -878,7 +882,8 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             ctx_tags = regime["tags"] + [f"lv{l1['level']}_{l1['iv']}"]
             # 入场/失效位（审计 P2-4：表里有 trigger_price / stop_loss_pct，但主池
             # 52 条告警 100% 为空 —— 属**生产者从未计算**）。
-            # 入场 = 触发周期最新收盘价；失效 = 2×ATR(14) 夹在 [3%,12%] 带内
+            # 入场 = 触发周期最新收盘价；失效 = 2×ATR(STOP_ATR_PERIOD) 夹在
+            # [STOP_PCT_MIN, STOP_PCT_MAX] 带内（值见常量注释，文案用 STOP_BAND_TXT）
             # （工单 P2-4：原「近 21 根反向极值」幅度不可用，实测 -11.97% 配 +4.69%
             #  涨幅 ⇒ 风险回报倒挂；窄幅盘整时又会紧到 0.3% 被噪音打掉）。
             trig_px = brk_px = stop_pct = None
@@ -1703,7 +1708,8 @@ def _render_alert_email(items: list[dict]) -> str:
                        else float(trig_px) * (1 + float(stop_pct) / 100))
             invalid_txt = (f"<br><small style='color:#6b7280'>失效位 "
                            f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
-                           f"（-{float(stop_pct):.2f}%，2×ATR 夹 [3%,12%]，入场 "
+                           f"（-{float(stop_pct):.2f}%，2×ATR({STOP_ATR_PERIOD}) 夹 "
+                           f"[{STOP_BAND_TXT}]，入场 "
                            f"{_fmt_num(trig_px, 6)}）</small>")
         # 历史先验（审计 P2-5）：中位/胜率/样本量，**不用均值**（会被离群值绑架）
         # 工单 P2-6：样本限定 `alerted_at IS NOT NULL`（近 30 天、且已到期）⇒ 只覆盖
@@ -1738,7 +1744,8 @@ def _render_alert_email(items: list[dict]) -> str:
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
               "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
-              "费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 2×ATR(14) 幅度夹在 [3%,12%] "
+              f"费率年化 = 当期 ×3×365（8h 结算）；「失效位」= 2×ATR({STOP_ATR_PERIOD}) "
+              f"幅度夹在 [{STOP_BAND_TXT}] "
               "带内（工单 P2-4：原 21 根反向极值实测幅度不可用，-11.97% 配 +4.69% 涨幅 "
               "⇒ 风险回报倒挂）；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"

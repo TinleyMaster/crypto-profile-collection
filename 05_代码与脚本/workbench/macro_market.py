@@ -649,6 +649,31 @@ def fetch_btc_dominance_history(days: int = 30) -> dict:
     return {"status": "error", "error": "CMC trial API 无 dominance 历史端点", "series": []}
 
 
+def _fetch_binance_24hr_change(symbol: str) -> dict | None:
+    """Binance spot 24h ticker：返回真滚动 24h 涨跌幅 + 最新价（失败 None）。
+
+    P0-1 修复依据：`/api/v3/klines?interval=1d` 的最后一根是「未收盘」当日 K 线，
+    `(closes[-1]-closes[-2])` 在 UTC 零点后只等于「零点至今」的短窗移动（08:30 CST
+    快照 = 00:30 UTC 时仅 30 分钟），与总市值「日对日 diff」口径不一致 → 早报曾出现
+    「BTC/ETH -0.2% 却总市值 +4.5%」的方向性矛盾。ticker/24hr 的 priceChangePercent
+    才是真滚动 24h，且与 lastPrice 同源于一次响应（价格与涨跌幅同快照时点）。
+    """
+    try:
+        r = requests.get(
+            f"{BINANCE_BASE}/api/v3/ticker/24hr",
+            params={"symbol": symbol},
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        d = r.json()
+        pct = _safe_float(d.get("priceChangePercent"))
+        if pct is None:
+            return None
+        return {"change_24h_pct": round(pct, 2), "last_price": _safe_float(d.get("lastPrice"))}
+    except Exception:
+        return None
+
+
 def fetch_binance_btc_klines() -> dict:
     """获取 BTC 日线 K 线（90 天），计算技术指标。返回 {rsi, ma20, ma50, price, closes, ...}。"""
     try:
@@ -690,9 +715,16 @@ def fetch_binance_btc_klines() -> dict:
         ma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
         ma50 = round(sum(closes[-50:]) / 50, 2) if len(closes) >= 50 else None
 
-        # 涨跌幅
+        # 涨跌幅（change_24h 先用日线近似，随后被 ticker 真滚动 24h 覆盖）
         change_24h = round((latest - closes[-2]) / closes[-2] * 100, 2) if len(closes) >= 2 and closes[-2] else None
         change_7d = round((latest - closes[-8]) / closes[-8] * 100, 2) if len(closes) >= 8 and closes[-8] else None
+
+        # P0-1 修复：优先取真滚动 24h（ticker/24hr），价格同源；不可用时回退日线口径
+        _t24 = _fetch_binance_24hr_change("BTCUSDT")
+        if _t24 and _t24.get("change_24h_pct") is not None:
+            change_24h = _t24["change_24h_pct"]
+            if _t24.get("last_price"):
+                latest = _t24["last_price"]
         volatility_7d = None
         if len(closes) >= 8:
             # 7日历史波动率（日收益率标准差 * sqrt(7)）
@@ -760,9 +792,16 @@ def fetch_binance_eth_klines() -> dict:
 
         ma20 = round(sum(closes[-20:]) / 20, 2) if len(closes) >= 20 else None
 
-        # 涨跌幅
+        # 涨跌幅（change_24h 先用日线近似，随后被 ticker 真滚动 24h 覆盖）
         change_24h = round((latest - closes[-2]) / closes[-2] * 100, 2) if len(closes) >= 2 and closes[-2] else None
         change_7d = round((latest - closes[-8]) / closes[-8] * 100, 2) if len(closes) >= 8 and closes[-8] else None
+
+        # P0-1 修复：优先取真滚动 24h（ticker/24hr），价格同源；不可用时回退日线口径
+        _t24 = _fetch_binance_24hr_change("ETHUSDT")
+        if _t24 and _t24.get("change_24h_pct") is not None:
+            change_24h = _t24["change_24h_pct"]
+            if _t24.get("last_price"):
+                latest = _t24["last_price"]
         volatility_7d = None
         if len(closes) >= 8:
             import math
@@ -6096,6 +6135,33 @@ def fetch_stablecoin_supply_trend() -> dict:
         return {"total_usd": None, "change_1d_pct": None, "change_7d_pct": None, "status": "error", "error": str(e)}
 
 
+def _check_price_consistency(brief: dict) -> str | None:
+    """P0-1 一致性断言：BTC/ETH 24h 涨跌幅与总市值日变化背离过大 → 返回告警文案。
+
+    正常行情下两大权重币的 24h 方向应与总市值一致；背离 >3pp 说明行情/涨跌幅
+    口径不同源（历史 bug：BTC 用「未收盘日线」只测到 UTC 零点后 ~30 分钟）。
+    """
+    m0 = brief.get("M0_tldr") or {}
+    mcap = (brief.get("DIFF") or {}).get("total_mcap_pct")
+    if mcap is None:
+        return None
+    try:
+        mcap = float(mcap)
+    except (TypeError, ValueError):
+        return None
+    for name, key in (("BTC", "btc_change_24h_pct"), ("ETH", "eth_change_24h_pct")):
+        v = m0.get(key)
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if abs(fv - mcap) > 3.0:
+            return f"涨跌幅口径背离：{name} {fv:+.1f}% vs 总市值 {mcap:+.1f}%（请核查数据源）"
+    return None
+
+
 def _build_tldr(today: dict, opps: list, highlights: list | None = None,
                  risk_signals: list | None = None) -> dict:
     """M0 头部：从 overview 抽取关键指标 + 一句话摘要 + 多空倾向。
@@ -7522,6 +7588,12 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "DIFF": diff,
     }
 
+    # ── P0-1 一致性断言：BTC/ETH 24h 涨跌幅与总市值背离过大即降级告警 ──
+    _consistency = _check_price_consistency(brief)
+    if _consistency:
+        print(f"[morning_brief] WARN {_consistency}")
+        brief["M9_degraded"] = list(brief.get("M9_degraded") or []) + [_consistency]
+
     # ── AI 今日定调 + 交易建议（可选） ──
     if use_ai:
         try:
@@ -7534,6 +7606,35 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     return brief
 
 
+def _validate_macro_events(events: list[dict]) -> list[str]:
+    """宏观硬日程自检（P0-2）：返回需人工注意的告警列表。
+
+    硬编码日历无法自证真伪，但能挡住两类可判定的错误：
+    ① 日期不可解析；② 命中「今天」——必须人工对照官方日历确认，因为历史上正是
+    「把已发布的 8 月 CPI 错标成 9-22」制造了虚构的当日宏观催化。
+    """
+    from datetime import date as _date
+
+    warn: list[str] = []
+    today = _date.today()
+    seen: set[tuple[str, str]] = set()
+    for ev in events:
+        d = str(ev.get("date") or "")
+        name = str(ev.get("event") or "?")
+        try:
+            dd = _date.fromisoformat(d[:10])
+        except (ValueError, TypeError):
+            warn.append(f"日期不可解析: {name} ({d})")
+            continue
+        if dd == today:
+            warn.append(f"{name} 标注为「今天」，请对照官方日历确认（硬编码日历不可自证）")
+        key = (d[:10], name)
+        if key in seen:
+            warn.append(f"重复日程: {name} ({d[:10]})")
+        seen.add(key)
+    return warn
+
+
 def fetch_event_calendar() -> dict:
     """事件日历：宏观硬日程 + 代币级催化剂事件。仅展示，不参与子分。
 
@@ -7543,15 +7644,23 @@ def fetch_event_calendar() -> dict:
     的 published_at>=NOW() 兜底（极少数新闻有明确未来事件日期）。
     宏观日程为公开固定节奏，由 dev 按当年官方日程维护（每季度更新）。
     """
-    # ① 宏观硬日程（手动维护近 3 个月，来源 FRED/FOMC 官网公开日程；零依赖）
+    # ① 宏观硬日程（手动维护近 3 个月，来源 FRED/FOMC/BLS 官网公开日程；零依赖）
+    #    P0-2 修复（2026-09-22）：原把 8 月 CPI 误标为 2026-09-22（实为 2026-09-11 发布，
+    #    来源 BLS 官方 2026 日历），导致早报虚构「今日 CPI」催化。硬编码日期**必须**
+    #    逐条对照官方日历核验后再改；下方 _validate_macro_events 会在运行时自检。
     hardcoded_events = [
+        {"date": "2026-09-11", "event": "CPI 公布", "type": "macro", "source": "hardcoded"},
         {"date": "2026-09-16", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
-        {"date": "2026-09-22", "event": "CPI 公布", "type": "macro", "source": "hardcoded"},
         {"date": "2026-10-02", "event": "NFP 非农", "type": "macro", "source": "hardcoded"},
         {"date": "2026-10-28", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
         {"date": "2026-11-13", "event": "CPI 公布", "type": "macro", "source": "hardcoded"},
         {"date": "2026-12-09", "event": "FOMC 议息会议", "type": "macro", "source": "hardcoded"},
     ]
+    # P0-2 运行时自检：命中「今天」的硬编码宏观日程必须人工复核（防日期错标再生）
+    import logging as _logging
+    for _w in _validate_macro_events(hardcoded_events):
+        _logging.getLogger(__name__).warning("macro calendar: %s", _w)
+
     # ② 已知重大解锁峰（手动维护；TokenUnlocks 网页可查，本期不抓）
     unlock_events: list[dict] = [
         # {"date": "2026-10-XX", "event": "XXX 解锁峰", "type": "unlock", "source": "hardcoded"},

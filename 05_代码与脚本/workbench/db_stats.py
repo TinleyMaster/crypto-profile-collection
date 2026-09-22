@@ -8841,15 +8841,10 @@ def _fetch_cg_price(asset_id: int, settings) -> dict:
     try:
         with get_connection(settings.database_url) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                # 1. 先查 CG 直接映射
-                cur.execute(
-                    """SELECT source_asset_key FROM core.asset_source_map
-                       WHERE asset_id = %s AND source_code = 'cg'""",
-                    (asset_id,),
-                )
-                row = cur.fetchone()
-                if row:
-                    coin_id = row["source_asset_key"]
+                # 1. CG 映射：确定性择优（is_primary > 名称一致 > 符号一致 > 排名最接近）。
+                #    旧写法 fetchone() 任取多映射首行 → 1506 取到 meme 币（审计 F2 / 工单 W4）。
+                from crypto_research.db.cg_resolve import resolve_cg_coin_id
+                coin_id = resolve_cg_coin_id(cur, asset_id)
 
                 # 2. 同时查 symbol（供回退搜索用）
                 cur.execute(

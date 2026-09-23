@@ -19,6 +19,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import send_daily_brief as sdb  # noqa: E402
+import phase_chain_holder_scrape as phs  # noqa: E402
 
 passed = 0
 failed = 0
@@ -45,7 +46,15 @@ check(sdb._fmt_mcap(86500) == "$86K", "BTC $86,500→$86K", sdb._fmt_mcap(86500)
 check(sdb._fmt_mcap(556.4e6) == "$556.4M", "大额 M 口径不变", sdb._fmt_mcap(556.4e6))
 check(sdb._fmt_mcap(None) == "N/A", "None 安全")
 
-print("[P1-B] 域夹取 / 生产者守卫（源码）")
+print("[P1-B] _valid_conc 行为 + 生产者守卫")
+check(phs._valid_conc(85.19) == 85.19, "域内值保留")
+check(phs._valid_conc(100.0) == 100.0, "上边界 100 保留")
+check(phs._valid_conc(0.0) == 0.0, "下边界 0 保留")
+check(phs._valid_conc(933.71) is None, "越界 933.71（SHRUB prod 样本）→ None")
+check(phs._valid_conc(-5) is None, "负值 → None")
+check(phs._valid_conc(None) is None, "None → None")
+check(phs._valid_conc("abc") is None, "非数值 → None")
+
 _mm_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 check("BETWEEN 2.0 AND 100.0" in _mm_src, "读取侧增持域夹取 [2,100]")
 check("BETWEEN -100.0 AND -2.0" in _mm_src, "读取侧减持域夹取 [-100,-2]")
@@ -53,6 +62,7 @@ _prod_src = open(os.path.join(os.path.dirname(_HERE), "scripts", "bin",
                               "phase_chain_holder_scrape.py"), encoding="utf-8").read()
 check("def _conc_delta" in _prod_src, "生产者 _conc_delta 越界守卫")
 check("float(cur_top10) - float(prev7[1])" not in _prod_src, "旧的无界相减已移除")
+check('"top10_concentration": _valid_conc(' in _prod_src, "生产者集中度写入前经 _valid_conc 校验")
 
 print(f"\n{passed}/{passed + failed} 通过")
 sys.exit(1 if failed else 0)

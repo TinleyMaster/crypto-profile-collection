@@ -199,6 +199,24 @@ def _parse_token_amount(s: str) -> float | None:
     return val * mult.get((m.group(2) or "").upper(), 1.0)
 
 
+def _valid_conc(v) -> float | None:
+    """集中度合法域校验：[0, 100]，越界/非数值判无效（None）。
+
+    P1-B 根因收口（2026-09-23 审计）：部分链解析出的 Top10/Top50/Top100 集中度
+    会越界（prod 实测 2,416 行 max 938.74，如 SHRUB 933.71），写入后既污染集中度
+    榜单，又经 cur-prev 相减产出 -531% 这类荒谬"巨鲸变化"。此处统一判无效、不写。
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= f <= 100.0):
+        return None
+    return f
+
+
 def _fetch_html(url: str, timeout: int = 20, retries: int = 5) -> str | None:
     """带重试的页面抓取，返回 HTML 文本（失败返回 None）。
 
@@ -1161,7 +1179,7 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
         prev30 = cur.fetchone()
 
         cur_total = data.get("total_holders") or 0
-        cur_top10 = data.get("top_10_pct")
+        cur_top10 = _valid_conc(data.get("top_10_pct"))
 
         holder_change_7d = None
         holder_change_30d = None
@@ -1169,16 +1187,10 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
         whale_30d_pct = None
 
         # P1-B（2026-09-23 审计）：whale_balance_change_*_pct 实为「Top10 集中度百分点变化」，
-        # 合法域 [-100, 100]。原实现直接 cur - prev，若任一快照集中度为脏数据（>100）会产出
-        # -531% 这类荒谬值并展示到早报。此处按合法域校验，越界即判无效（None，不下发）。
+        # 合法域 [-100, 100]。两端集中度均须先经 _valid_conc 校验，越界即判无效（None，不下发）。
         def _conc_delta(cur_v, prev_v):
-            if cur_v is None or prev_v is None:
-                return None
-            try:
-                c, p = float(cur_v), float(prev_v)
-            except (TypeError, ValueError):
-                return None
-            if not (0.0 <= c <= 100.0 and 0.0 <= p <= 100.0):
+            c, p = _valid_conc(cur_v), _valid_conc(prev_v)
+            if c is None or p is None:
                 return None
             return round(c - p, 2)
 
@@ -1195,9 +1207,9 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
             "asset_id": asset_id,
             "chain": chain,
             "contract_address": _norm_addr(chain, contract_address),
-            "top10_concentration": data.get("top_10_pct"),
-            "top50_concentration": data.get("top_50_pct"),
-            "top100_concentration": data.get("top_100_pct"),
+            "top10_concentration": _valid_conc(data.get("top_10_pct")),
+            "top50_concentration": _valid_conc(data.get("top_50_pct")),
+            "top100_concentration": _valid_conc(data.get("top_100_pct")),
             "total_holders": cur_total,
             "top_holders_json": json.dumps(data.get("top_holders_json", []), ensure_ascii=False),
             "tier_distribution_json": json.dumps(data.get("tier_distribution_json", []), ensure_ascii=False),

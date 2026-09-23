@@ -7831,7 +7831,8 @@ def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h):
     liquidity_discount：换手率越高承接力越强，减免最多 15 分。
     """
     unlock_score = min(60.0, (unlock_pct_30d or 0.0) * 6.0)
-    concentration_score = ((top10_concentration or 0.0) / 100.0) * 25.0
+    _t10 = min(100.0, max(0.0, top10_concentration or 0.0))  # 越界脏值防御（2026-09-23）
+    concentration_score = (_t10 / 100.0) * 25.0
     liquidity_discount = min(15.0, (turnover_24h or 0.0) * 150.0)
     score = max(0.0, min(100.0, unlock_score + concentration_score - liquidity_discount))
     if score >= 60:
@@ -7922,6 +7923,10 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
             next_unlock_date = d
 
     top10_concentration = _pressure_float(hrow.get("top_10_pct")) if hrow else None
+    # P1-B 延展（2026-09-23）：集中度越界脏数据会把抛压分直接推满（933/100*25 → 截断 100），
+    # 读取侧统一夹取 [0,100]（物理清理已另行执行，此处为跨路径防御）。
+    if top10_concentration is not None:
+        top10_concentration = min(100.0, max(0.0, top10_concentration))
 
     # 2. 价格 / 市值 / 24h 交易量 → 换手率
     price_info = _fetch_cg_price(asset_id, settings)

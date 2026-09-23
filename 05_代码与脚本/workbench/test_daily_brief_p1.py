@@ -20,6 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import send_daily_brief as sdb  # noqa: E402
 import phase_chain_holder_scrape as phs  # noqa: E402
+import db_stats as ds  # noqa: E402
 
 passed = 0
 failed = 0
@@ -58,6 +59,12 @@ check(phs._valid_conc("abc") is None, "非数值 → None")
 _mm_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 check("BETWEEN 2.0 AND 100.0" in _mm_src, "读取侧增持域夹取 [2,100]")
 check("BETWEEN -100.0 AND -2.0" in _mm_src, "读取侧减持域夹取 [-100,-2]")
+check("AND h.top10_concentration BETWEEN 0 AND 100" in _mm_src, "most_concentrated 读取侧 [0,100]")
+
+check(ds._compute_pressure_score(0.0, 933.71, 0.0) == (25.0, "low"),
+      "越界集中度夹取后抛压分=25（未夹取会被截断成 100）")
+check(ds._compute_pressure_score(0.0, 50.0, 0.0) == (12.5, "low"),
+      "域内集中度 50 → 12.5（未误伤）")
 _prod_src = open(os.path.join(os.path.dirname(_HERE), "scripts", "bin",
                               "phase_chain_holder_scrape.py"), encoding="utf-8").read()
 check("def _conc_delta" in _prod_src, "生产者 _conc_delta 越界守卫")

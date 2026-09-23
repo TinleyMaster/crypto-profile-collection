@@ -6795,6 +6795,7 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                     ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
                     WHERE a.market_cap_rank IS NOT NULL
+                      AND h.top10_concentration BETWEEN 0 AND 100
                     ORDER BY h.top10_concentration DESC
                     LIMIT %s
                 """, (latest_date, top_n))

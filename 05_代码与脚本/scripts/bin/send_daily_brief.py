@@ -303,6 +303,41 @@ def render_brief_html(brief: dict) -> str:
         """)
 
     # ════════════════════════════════════════════════════════
+    # 模块 0.2：📉 告警质量（昨日盘面告警胜率/赔率 → 阈值-行情失配预警）
+    # 数据来自 macro_market._load_alert_quality（只读 biz.scan_edge_daily 最新一行）。
+    # 缺数据时整块跳过，不影响其他模块。
+    # ════════════════════════════════════════════════════════
+    aq = brief.get("M0_alert_quality") or {}
+    if aq.get("win_1h") is not None:
+        aq_color, aq_label = "#16a34a", "正常"
+        if aq.get("severity") == "watch":
+            aq_color, aq_label = "#d97706", "观察"
+        elif aq.get("severity") == "high":
+            aq_color, aq_label = "#dc2626", "失配"
+        aq_n = str(aq["alerts_n"]) if aq.get("alerts_n") is not None else "-"
+        aq_win = f"{aq['win_1h'] * 100:.1f}%"
+        aq_be = f"{aq['be_1h'] * 100:.1f}%" if aq.get("be_1h") is not None else "-"
+        aq_odds = f"{aq['odds_1h']:.2f}" if aq.get("odds_1h") is not None else "-"
+        aq_pf = f"{aq['pf_1h']:.2f}" if aq.get("pf_1h") is not None else "-"
+        # conclusion 由本系统生成，可能含 `<`（如 PF<1）；早报未引入 html.escape，这里做最小实体转义
+        aq_note = (aq.get("conclusion") or "").strip().replace("<", "&lt;").replace(">", "&gt;")
+        if len(aq_note) > 160:
+            aq_note = aq_note[:160] + "…"
+        html_parts.append(f"""
+          <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid {aq_color}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <div style="font-size:13px;font-weight:700;color:#0f172a">📉 告警质量（阈值-行情失配预警）</div>
+              <div style="font-size:11px;font-weight:700;color:{aq_color}">{aq_label}</div>
+            </div>
+            <div style="font-size:12px;color:#475569;line-height:1.6">
+              {aq.get('report_date') or '-'} 告警 {aq_n} 条 · T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
+              赔率 {aq_odds} · PF {aq_pf} · 环境 {aq.get('regime_label') or '-'}
+            </div>
+            {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
+          </div>
+        """)
+
+    # ════════════════════════════════════════════════════════
     # 模块 0.5：🎯 AI 精选高亮信号（V2 六维评分 + Web 搜索补全）
     # ════════════════════════════════════════════════════════
     highlights = brief.get("M3_highlights") or []

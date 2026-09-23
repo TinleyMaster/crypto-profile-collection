@@ -7560,6 +7560,55 @@ def _collect_catalyst_hotspots() -> list[dict]:
         return []
 
 
+def _load_alert_quality() -> dict:
+    """告警质量日报摘要（只读 `biz.scan_edge_daily` 最新一行）。
+
+    设计依据：04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §6.3。
+    供早报头部渲染一行「昨日告警胜率 / PF / 失配判定」；任何异常都返回空 dict，
+    渲染层跳过该行，不影响早报原有模块。数值统一转 float/int，保证快照 JSON 可序列化。
+    """
+    try:
+        import psycopg.rows
+
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT report_date, alerts_n, win_1h, be_1h, odds_1h, pf_1h,
+                           regime_label, severity, conclusion
+                      FROM biz.scan_edge_daily
+                     ORDER BY report_date DESC
+                     LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {}
+
+        def _f(key: str):
+            v = row.get(key)
+            return float(v) if v is not None else None
+
+        return {
+            "report_date": row["report_date"].isoformat() if row.get("report_date") else None,
+            "alerts_n": int(row["alerts_n"]) if row.get("alerts_n") is not None else None,
+            "win_1h": _f("win_1h"),
+            "be_1h": _f("be_1h"),
+            "odds_1h": _f("odds_1h"),
+            "pf_1h": _f("pf_1h"),
+            "regime_label": row.get("regime_label"),
+            "severity": row.get("severity"),
+            "conclusion": row.get("conclusion"),
+        }
+    except Exception as e:
+        print(f"[morning_brief] alert quality fetch failed: {e}")
+        return {}
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
     早报结构化骨架 V2（重新设计版）。
@@ -7676,6 +7725,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     # 组装基础 brief
     brief = {
         "M0_tldr": _build_tldr(today, opps, highlights, risk_signals),
+        "M0_alert_quality": _load_alert_quality(),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),
         "M2_institutional": today.get("institutional_mvrv") or {},

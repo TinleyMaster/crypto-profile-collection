@@ -354,10 +354,15 @@ check("单币批次省略" in _leg_new, "图例声明单币批次省略「（k/M
 check("未关联资产" in _leg_new, "图例声明「未关联资产」= 催化剂/KOL 栏为 n/a（≠ 0）")
 check("纯盘面信号" in _leg_new and "无新鲜共振" in _leg_new,
       "图例声明密封侧两种前缀（「纯盘面信号」/「无新鲜共振」）")
-check("另有币无催化剂/未关联资产" in _leg_new, "图例声明「另有币…」并列形态（含未关联）")
+check("另有币无催化剂/未关联资产" not in _leg_new,
+      "图例不再用「/」描述式句（N-0F7-3：无字面串可逐字比对）")
+for _lit in ("「另有币无催化剂」", "「另有币未关联资产」", "「另有币无催化剂、未关联资产」"):
+    check(_lit in _leg_new, f"图例声明并列字面串 {_lit}（N-0F7-3 顿号双形态）")
+check("催化剂新鲜 X多/…」标口径" in _leg_new and "可并列「另有币…」子句" in _leg_new,
+      "图例声明「催化剂新鲜 X多/…」段同样可并列「另有币…」（N-0F7-1 落点）")
 check("**" not in _leg_new, "新增图例文案无 markdown 强调符 `**`")
 
-print("\n【N-416-2 / N-90EC-2 / N-2B4D-2】`**` 护栏覆盖标题**全部**返回分支（表驱动，9 路径）")
+print("\n【N-416-2 / N-90EC-2 / N-2B4D-2】`**` 护栏覆盖标题**全部**返回分支（表驱动夹具）")
 _title_cases = {
     "密封-纯无共振": [{"signal": _main_sig(), "resonance": _res()}],
     "密封-纯陈旧": [{"signal": _main_sig(),
@@ -372,8 +377,73 @@ _title_cases = {
                        "resonance": _res(event=1, linked=False)}],
     "混合(非密封)": mixed2,
 }
+
+# ═══════════════════════════════════════════════════════════════
+#  N-0F7-2：判据由「夹具数 = 文案数」改为「**代码可达路径穷举**」
+#  —— 旧判据只对 9 条手工夹具断言 `**`，覆盖 33 条可达文案中的 9 条（27%）；
+#     未覆盖的分支其护栏**从未被验证**（复验实测 9 夹具仅覆盖 56% / 归一化口径）。
+#     现按「币形态」12 种（A 新鲜方向 4 变体 / B 仅陈旧 / C 已关联真 0 /
+#     D 未关联 / E 未关联+陈旧，各含密封与非密封）× 非空子集 = 4095 批穷举，
+#     由**全路径**驱动 `**` 护栏 + 文案集合快照 + 分支原子可达性。
+#     快照数变化 ⇒ 说明返回文案集合被改动，需复核后同步本数字。
+# ═══════════════════════════════════════════════════════════════
+import itertools  # noqa: E402
+import re as _re  # noqa: E402
+
+_REACH_FORMS = {
+    "A_netbull": _res(bull=2, fresh=(2, 0, 0)),
+    "A_netbear": _res(bear=2, fresh=(0, 2, 0)),
+    "A_tie": _res(bull=1, bear=1, fresh=(1, 1, 0)),
+    "A_neutonly": _res(neut=2, fresh=(0, 0, 2)),
+    "B_stale_sealed": _res(bull=3, stale=3, fresh=(0, 0, 0)),
+    "B_stale_open": _res(event=1, bull=3, stale=3, fresh=(0, 0, 0)),
+    "C_zero_sealed": _res(),
+    "C_zero_open": _res(event=1),
+    "D_unlinked_sealed": _res(linked=False),
+    "D_unlinked_open": _res(event=1, linked=False),
+    "E_ustale_sealed": _res(bull=3, stale=3, fresh=(0, 0, 0), linked=False),
+    "E_ustale_open": _res(event=1, bull=3, stale=3, fresh=(0, 0, 0), linked=False),
+}
+_RN = list(_REACH_FORMS)
+
+
+def _reachable_titles():
+    out = set()
+    for r in range(1, len(_RN) + 1):
+        for combo in itertools.combinations(_RN, r):
+            items = [{"signal": _main_sig(), "resonance": _REACH_FORMS[nm]}
+                     for nm in combo]
+            out.add(_re.sub(r"\d+", "#", sd._alert_title(items)))
+    return out
+
+
+_reach = _reachable_titles()
+print(f"\n【N-0F7-2】可达路径穷举（{len(_RN)} 形态 → "
+      f"{2 ** len(_RN) - 1} 批）→ {len(_reach)} 条唯一文案（归一化数字）")
+check(all("**" not in _t for _t in _reach),
+      f"全部 {len(_reach)} 条可达文案均无 markdown 强调符 `**`（旧判据仅覆盖 9 夹具）")
+check(len(_reach) == 33, "可达文案集合 = 33 条（快照；变化即须复核返回文案空间）",
+      f"实测 {len(_reach)} 条：\n" + "\n".join(f"      {_t}" for _t in sorted(_reach)))
+_ATOMS = ["催化剂全部 ># 天，不计方向", "（全部 ># 天，不计方向）", "（无催化剂条目）",
+          "纯盘面信号，无共振", "纯盘面信号；未关联资产，催化剂 n/a",
+          "（未关联资产，非 #）", "含仅陈旧条目", "另有币无催化剂",
+          "另有币未关联资产", "另有币无催化剂、未关联资产", "催化剂新鲜 #多/#空/#中"]
+for _a in _ATOMS:
+    check(any(_a in _t for _t in _reach), f"分支原子可达：{_a}")
+# N-0F7-1 回归护栏：「有新鲜方向」支原为**唯一**漏读 kinds 的返回路径
+check(any("催化剂新鲜" in _t and _t.endswith("，另有币无催化剂、未关联资产）")
+          for _t in _reach),
+      "「有新鲜方向」支并列披露零催化剂/未关联币（N-0F7-1：n/a 与真 0 不在标题层混同）")
+check(any(_t.endswith("，另有币无催化剂）") and "催化剂新鲜" in _t for _t in _reach),
+      "「有新鲜方向」支并列披露零催化剂币")
+check(any(_t.endswith("，另有币未关联资产）") and "催化剂新鲜" in _t for _t in _reach),
+      "「有新鲜方向」支并列披露未关联币（n/a 披露）")
+
 for _nm, _case in _title_cases.items():
-    check("**" not in sd._alert_title(_case), f"标题分支「{_nm}」无 `**`")
+    _t = sd._alert_title(_case)
+    check("**" not in _t, f"标题分支「{_nm}」无 `**`")
+    check(_re.sub(r"\d+", "#", _t) in _reach,
+          f"夹具「{_nm}」文案 ∈ 穷举集合（枚举 ⊇ 手工夹具）", _t)
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

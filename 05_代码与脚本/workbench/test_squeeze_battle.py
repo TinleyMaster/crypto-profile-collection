@@ -14,6 +14,7 @@
    `long_liq=1.66e-4` 判成「大额多单踩踏」从而屏蔽 profit_take；重标定到
    P95=4.07e-4 后该样本不再算踩踏，而它 OI 快速下降 ⇒ 归入 profit_take。
 """
+import ast
 import io
 import os
 import sys
@@ -490,6 +491,32 @@ check('if j["upper_bound_pct"] is None:' in _calib_code
       "H5 守卫：`ub_sub=None` 单列文案（不再印「上界由 None 决定」/「CI 含 20%？」）")
 check("退出码 3（样本不可比" not in _calib_code,
       "I6 守卫：H5 文案不再写死「退出码 3」（改用 `{rc}` 动态引用 ⇒ 码表变动时不静默漂移）")
+
+# ════════════════════════════════════════════════════════════
+# 影子模式：轧空实时告警降级（口径未过 holdout 验证，只落库不发信）
+# 判据：判定记录照常 INSERT；`alerted_at` 不写（它同时是主池跨池互斥的判据，
+# 影子期不发信就不该让主池因一封并不存在的邮件被静音）。
+# ════════════════════════════════════════════════════════════
+print("\n【影子模式】轧空实时告警降为影子（只落库不发信）")
+check(sd.SQUEEZE_ALERT_SHADOW is True,
+      "SQUEEZE_ALERT_SHADOW 已开启（口径未过 holdout 前不得对外发信）")
+with open(sd.__file__, encoding="utf-8") as _dfh:
+    _daemon_code = _code_only(_dfh.read())
+_sqz_fn = next((n for n in ast.parse(_daemon_code).body
+                if isinstance(n, ast.FunctionDef) and n.name == "task_scan_squeeze"), None)
+_sqz_src = ast.unparse(_sqz_fn) if _sqz_fn else ""
+check("SQUEEZE_ALERT_SHADOW" in _sqz_src,
+      "task_scan_squeeze 的发送分支受开关控制", _sqz_src[:80])
+check("notifier.send" in _sqz_src,
+      "非影子分支仍保留发送路径（口径验证通过后可恢复，不需重写）")
+check("stats['shadow'] = len(send_items)" in _sqz_src,
+      "影子期把判定条数计入 stats['shadow']（可观测，不静默吞掉）")
+check(_sqz_src.index("SQUEEZE_ALERT_SHADOW") < _sqz_src.index("notifier.send"),
+      "开关判断先于发送调用（影子期不得触达 notifier）")
+check('UPDATE biz.scan_signal SET alerted_at=NOW()' in _sqz_src
+      and _sqz_src.index("UPDATE biz.scan_signal SET alerted_at=NOW()")
+      > _sqz_src.index("SQUEEZE_ALERT_SHADOW"),
+      "`alerted_at` 回写只在非影子分支内（影子期不污染跨池互斥判据）")
 
 # ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")

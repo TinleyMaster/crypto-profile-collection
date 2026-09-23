@@ -31,12 +31,51 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 
 CONF_ORDER = {"high": 0, "medium": 1}
 CONF_COLOR = {"high": "#c0392b", "medium": "#e67e22"}
-SCENARIO_DESC = {
+# ── 场景编号口径（两套编码共用 S1..S8 编号空间，同编号语义相反）──
+# 生产扫描（scan_daemon._compute_l2）只用 (p_dir, oi_dir) 两维 → S1..S4；
+# 设计口径（phase_scan_main_pool.py，未被 daemon 调度）含 cvd_dir 三维 → S1..S8。
+# 生产行**也落 cvd_dir**，故判据是 PROD_SCENARIO_BY_DIMS 是否等于行内 scenario。
+PROD_SCENARIO_BY_DIMS = {
+    ("up", "up"): "S1", ("down", "up"): "S2",
+    ("up", "down"): "S3", ("down", "down"): "S4",
+}
+PROD_SCENARIO_DESC = {
+    "S1": "多头进攻", "S2": "空头扎实", "S3": "多头减仓", "S4": "空头兑现",
+}
+DESIGN_SCENARIO_BY_DIMS = {
+    ("up", "up", "up"): "S1", ("up", "up", "down"): "S2",
+    ("down", "up", "down"): "S3", ("down", "up", "up"): "S4",
+    ("up", "down", "up"): "S5", ("up", "down", "down"): "S6",
+    ("down", "down", "down"): "S7", ("down", "down", "up"): "S8",
+}
+DESIGN_SCENARIO_DESC = {
     "S1": "多头进攻", "S2": "诱多", "S3": "空头扎实", "S4": "诱空",
     "S5": "多头兑现", "S6": "修复反弹", "S7": "跌势衰竭", "S8": "见底反弹",
-    "ACC": "蓄势(吸筹?)", "BRK": "蓄势突破",
 }
+POOL_SCENARIO_DESC = {"ACC": "蓄势(吸筹?)", "BRK": "蓄势突破"}
 SHOW_CONF = ("high", "medium")
+
+
+def _scenario_label(r: dict) -> tuple[str, str]:
+    """按行自身维度重算「编号, 文案」，不信任列内 `scenario` 的编码来源。
+
+    直接用设计口径文案表渲染生产行，会把生产 S2（价↓+OI↑，真实空头）标成
+    「诱多」——语义相反。
+    """
+    sc = (r.get("scenario") or "").strip()
+    if sc in POOL_SCENARIO_DESC:
+        return sc, POOL_SCENARIO_DESC[sc]
+    if sc.startswith("SQZ"):
+        return sc, ""
+    p_dir, oi_dir = r.get("p_dir"), r.get("oi_dir")
+    if p_dir in ("up", "down") and oi_dir in ("up", "down"):
+        if sc == PROD_SCENARIO_BY_DIMS[(p_dir, oi_dir)]:
+            return sc, PROD_SCENARIO_DESC[sc]
+        cvd_dir = r.get("cvd_dir")
+        if cvd_dir in ("up", "down"):
+            sc8 = DESIGN_SCENARIO_BY_DIMS[(p_dir, oi_dir, cvd_dir)]
+            return sc8, DESIGN_SCENARIO_DESC[sc8]
+    return sc or "-", ""
 
 
 def _load_signals(conn, hours: int) -> list[dict]:
@@ -89,8 +128,7 @@ def render_html(signals: list[dict], hours: int, low_count: int) -> str:
     else:
         trs = []
         for r in signals:
-            sc = r["scenario"]
-            desc = SCENARIO_DESC.get(sc, sc)
+            sc, desc = _scenario_label(r)
             conf_color = CONF_COLOR.get(r["confidence"], "#888")
             pool = "蓄势" if r["pool"] == "accumulation" else "主池"
             tags = " ".join(r["context_tags"] or [])

@@ -53,6 +53,49 @@ def estimate_tokens(text: str) -> int:
     return int(cn / 1.5 + other / 4.0 + 0.5)
 
 
+def _sanitize_json_control_chars(s: str) -> str:
+    """把 JSON 字符串值内的字面控制字符（\\n \\r \\t 等）转义为 \\uXXXX。
+
+    2026-09-23 审计 P1：LLM 常把字符串值内的字面换行/控制字符原样输出，
+    导致 json.loads 失败（Invalid control character / Expecting ',' delimiter，
+    实测 7.1% 的 signal_v2 trace 因此解析失败）。
+    仅在字符串字面量内替换，不影响字符串外的合法 JSON 空白；已转义序列（如 \\\\n）保留。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    in_string = False
+    while i < n:
+        c = s[i]
+        if in_string:
+            if c == "\\":
+                out.append(c)
+                if i + 1 < n:
+                    out.append(s[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if c == '"':
+                in_string = False
+                out.append(c)
+                i += 1
+                continue
+            o = ord(c)
+            if o < 0x20:  # C0 控制字符：JSON 字符串内不允许
+                out.append("\\u%04x" % o)
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+        else:
+            if c == '"':
+                in_string = True
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def extract_json_from_llm_response(raw: str) -> Any:
     """从 LLM 返回内容中健壮地提取 JSON。
 
@@ -62,12 +105,16 @@ def extract_json_from_llm_response(raw: str) -> Any:
     - JSON 前后有说明文字（从第一个 { 到最后一个 } 提取）
     - 被截断的 JSON（max_tokens 不足导致末尾不完整）
     - 字符串中间截断（半截字符串）
+    - 字符串值内的字面控制字符（LLM 未转义换行等，2026-09-23 审计 P1）
     - 空内容
     """
     if not raw or not raw.strip():
         raise ValueError("LLM 返回空内容")
 
     text = raw.strip()
+    # P1（2026-09-23 审计）：LLM 把字符串值内的字面换行/控制符原样输出 → 预清洗，
+    # 字符串内控制符转义为 \\uXXXX，字符串外合法空白保持不变。
+    text = _sanitize_json_control_chars(text)
 
     # 策略1：去除 markdown 代码块后解析
     cleaned = text

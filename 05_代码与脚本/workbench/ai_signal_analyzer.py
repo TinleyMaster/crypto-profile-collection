@@ -2509,6 +2509,32 @@ def _enrich_profile_with_web_search(
     return profile
 
 
+def _normalize_ai_decision(data: dict) -> dict:
+    """P1（2026-09-23 审计）：AI 判定后处理，强制与 system prompt 阈值一致。
+
+    system prompt 规定：should_highlight 需 score>=65（且≥2 维>=70 或强催化/深低估），
+    should_risk 需 score<=35（且≥2 维<=30 或重大风险事件）。实测 LLM 常越界：
+    - score∈[36,64] 却 should_risk=true（59 条）
+    - score<65 却 should_highlight=true（7 条）
+    这里按 score 硬性校准；被强制降级的记录补 override 标记，便于追溯审计。
+    （若未来要支持"重大事件无分数限制"的高危直通，须显式带 risk_override_reason 字段。）
+    """
+    raw_score = data.get("overall_score")
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        score = None
+    if score is None:
+        return data
+    if score > 35 and data.get("should_risk"):
+        data["should_risk"] = False
+        data["_risk_forced_off"] = round(score, 1)
+    if score < 65 and data.get("should_highlight"):
+        data["should_highlight"] = False
+        data["_highlight_forced_off"] = round(score, 1)
+    return data
+
+
 def _call_llm_analysis_v2(
     profile: dict,
     asset_signals: list[dict],
@@ -2537,10 +2563,13 @@ def _call_llm_analysis_v2(
     )
 
     # 追溯日志：保存完整请求/响应/思考过程
+    # P0（2026-09-23 审计）：asset_id/symbol 存在 profile["basic"] 下，
+    # 顶层取不到导致 trace 表这两列 100% NULL（无法关联具体代币）。改从 basic 读。
+    _basic = profile.get("basic") or {}
     _write_ai_trace(
         tag="signal_v2",
-        asset_id=profile.get("asset_id"),
-        symbol=profile.get("symbol"),
+        asset_id=_basic.get("asset_id") or profile.get("asset_id"),
+        symbol=_basic.get("symbol") or profile.get("symbol"),
         signal_types=sorted(set(s.get("signal_type", "") for s in asset_signals if s.get("signal_type"))),
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -2551,6 +2580,11 @@ def _call_llm_analysis_v2(
     )
 
     data = extract_json_from_llm_response(raw)
+
+    # P1（2026-09-23 审计）：判定后处理——强制与 system prompt 阈值一致。
+    # 实测 59 条 overall_score∈[36,64] 却被标 should_risk=true（LLM 被"重大风险事件"口径带偏），
+    # 7 条 score<65 却标 should_highlight=true。此处强制校准，被降级的打 override 标记供审计。
+    data = _normalize_ai_decision(data)
 
     # 标准化输出
     score_card = data.get("score_card") or {}

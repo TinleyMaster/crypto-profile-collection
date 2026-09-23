@@ -1168,14 +1168,28 @@ def save_to_db(conn, asset_id: int, chain: str, contract_address: str,
         whale_7d_pct = None
         whale_30d_pct = None
 
+        # P1-B（2026-09-23 审计）：whale_balance_change_*_pct 实为「Top10 集中度百分点变化」，
+        # 合法域 [-100, 100]。原实现直接 cur - prev，若任一快照集中度为脏数据（>100）会产出
+        # -531% 这类荒谬值并展示到早报。此处按合法域校验，越界即判无效（None，不下发）。
+        def _conc_delta(cur_v, prev_v):
+            if cur_v is None or prev_v is None:
+                return None
+            try:
+                c, p = float(cur_v), float(prev_v)
+            except (TypeError, ValueError):
+                return None
+            if not (0.0 <= c <= 100.0 and 0.0 <= p <= 100.0):
+                return None
+            return round(c - p, 2)
+
         if prev7 and prev7[0] is not None:
             holder_change_7d = cur_total - prev7[0]
         if prev30 and prev30[0] is not None:
             holder_change_30d = cur_total - prev30[0]
-        if prev7 and prev7[1] is not None and cur_top10 is not None:
-            whale_7d_pct = round(float(cur_top10) - float(prev7[1]), 2)
-        if prev30 and prev30[1] is not None and cur_top10 is not None:
-            whale_30d_pct = round(float(cur_top10) - float(prev30[1]), 2)
+        if prev7:
+            whale_7d_pct = _conc_delta(cur_top10, prev7[1])
+        if prev30:
+            whale_30d_pct = _conc_delta(cur_top10, prev30[1])
 
         cur.execute(UPSERT_SQL, {
             "asset_id": asset_id,

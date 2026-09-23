@@ -6695,6 +6695,8 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
       取主链（持有者最多的链），禁止跨链混取极端值（2026-09-18 P1）
     - 排除稳定币（USDT/USDC/DAI/RLUSD 等，asset_type='stablecoin'）：
       稳定币无"避险减持"叙事，出现在巨鲸增持/减持榜是误导信号
+    - whale_balance_change_7d_pct 实为「Top10 集中度 7 日百分点变化」，合法域 [-100, 100]；
+      越界属上游脏数据（2026-09-23 审计曾现 -531%），读取侧按 2.0~100 区间过滤。
     """
     try:
         from crypto_research.config import get_settings
@@ -6758,7 +6760,7 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                         ORDER BY asset_id, (total_holders IS NULL), total_holders DESC NULLS LAST
                     ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
-                    WHERE h.whale_balance_change_7d_pct >= 2.0
+                    WHERE h.whale_balance_change_7d_pct BETWEEN 2.0 AND 100.0
                       AND a.market_cap IS NOT NULL
                       AND COALESCE(a.asset_type, '') <> 'stablecoin'
                     ORDER BY h.whale_balance_change_7d_pct DESC
@@ -6781,7 +6783,7 @@ def fetch_holder_concentration_summary(top_n: int = 20) -> dict:
                         ORDER BY asset_id, (total_holders IS NULL), total_holders DESC NULLS LAST
                     ) h
                     JOIN core.asset a ON a.asset_id = h.asset_id
-                    WHERE h.whale_balance_change_7d_pct <= -2.0
+                    WHERE h.whale_balance_change_7d_pct BETWEEN -100.0 AND -2.0
                       AND a.market_cap IS NOT NULL
                       AND COALESCE(a.asset_type, '') <> 'stablecoin'
                     ORDER BY h.whale_balance_change_7d_pct ASC

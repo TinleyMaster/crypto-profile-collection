@@ -148,8 +148,12 @@ def _fmt_mcap(v):
         return f"${f/1e9:.1f}B"
     if f >= 1e6:
         return f"${f/1e6:.1f}M"
-    if f >= 1e3:
+    if f >= 1e4:
         return f"${f/1e3:.0f}K"
+    if f >= 1e3:
+        # P1-A（2026-09-23 审计）：$1K~$10K 用整数 K 取整误差过大（ETH $2,750→$3K，偏 ~9%），
+        # 改用精确值；≥$10K 时整数 K 相对误差已可忽略，仍用紧凑表示。
+        return f"${f:,.0f}"
     return f"${f:.0f}"
 
 

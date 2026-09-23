@@ -224,6 +224,15 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 停摆>30min 告警（6h 去重），恢复后自动发解除邮件。
     ("scan_freshness_watchdog", "20 * * * *", "check_scan_freshness.py", [],
      "盘面扫描·外部看门狗（每小时，独立于 scan_daemon 存活，数据停摆>30min 告警邮件）", "monitor"),
+
+    # ═══ 告警胜率赔率日报（04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §7）═══
+    # 结算每小时增量推进未到期窗口；聚合与发信分离，08:20 发信与 09:00 早报解耦
+    ("scan_outcome_settle", "5 * * * *", "collect_scan_outcome.py", [],
+     "盘面告警·结局增量结算（每小时，T+1h/4h/12h/24h 方向对齐净收益 + BTC beta 对照）", "core"),
+    ("scan_edge_report", "10 8 * * *", "build_scan_edge_report.py", [],
+     "盘面告警·质量日报聚合（08:10，胜率/赔率/PF/平衡线 + 阈值-行情失配判定）", "core"),
+    ("scan_edge_email", "20 8 * * *", "send_scan_edge_report.py", [],
+     "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
 ]
 
 

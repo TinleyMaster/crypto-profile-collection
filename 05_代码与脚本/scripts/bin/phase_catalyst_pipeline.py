@@ -631,16 +631,26 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             第三个元素用于快提醒：d3 分层后，price 已定价(confirmed) 的信号入观察池
             watch 不推送；只有 status 变 open（新插入，或 watch→open 晋升）才推送。
     """
+    # 价格档位必须带入：build() 的「价格完整性闸门」（2026-09-22 P0，COPPER 全 0 档位
+    # 仍进 A 级）依赖 entry/stop/tp 判断可交易性。本函数是每轮全量重算的刷新入口，
+    # 若传 None，闸门会对**每一行**触发 → 所有 A/B 被封顶 C、所有 open 被降为 watch，
+    # 覆盖掉慢通道（run_slow_g3g5）刚算出的正确档位，导致 tier='A' AND status='open'
+    # 恒为 0 行、A 级 Alert 邮件被静默跳过。
+    # upsert_to_db 对三档用 COALESCE 保留库内旧值，故库内档位即该行有效档位，读回即可。
     query = """
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
                cg.catalyst_kind, cg.base_strength,
                ac.published_at,
-               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction
+               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction,
+               cs.entry_price, cs.stop_loss, cs.take_profit,
+               cs.technical_state, cs.fundamental_pass
         FROM biz.catalyst_resonance cr
         JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
         LEFT JOIN biz.catalyst_impact ci
           ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
+        LEFT JOIN biz.catalyst_signal cs
+          ON cs.catalyst_id = cr.catalyst_id AND cs.asset_id = cr.asset_id
         WHERE cg.catalyst_kind != 'noise'
           AND cr.resonance_state != 'pending'
     """
@@ -675,10 +685,17 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             resonance_state=row["resonance_state"],
             published_at=row["published_at"],
             persistence=persistence,
-            fundamental_pass=None,     # P0 占位
-            technical_state=None,      # P0 占位
+            # G4/G5 不在快通道计算范围（慢通道 run_slow_g3g5 负责），但必须读回库内
+            # 已落库的结果参与加权——传 None 会让 fundamental/technical 永久按占位分 50
+            # 计分，且 upsert 会把慢通道结果抹掉（见 signal.upsert_to_db 的 COALESCE）。
+            fundamental_pass=row["fundamental_pass"],
+            technical_state=row["technical_state"],
             regime=regime,
             impact_direction=row["impact_direction"],
+            # 读回库内档位参与「价格完整性闸门」判定（详见上方 query 注释）
+            entry_price=_to_num(row["entry_price"]),
+            stop_loss=_to_num(row["stop_loss"]),
+            take_profit=_to_num(row["take_profit"]),
         )
         processed += 1
         try:

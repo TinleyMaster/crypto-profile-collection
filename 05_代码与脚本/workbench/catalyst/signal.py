@@ -328,8 +328,14 @@ class CatalystSignalBuilder:
                 resonance_state = EXCLUDED.resonance_state,
                 persistence = EXCLUDED.persistence,
                 persistence_verified = EXCLUDED.persistence_verified,
-                fundamental_pass = EXCLUDED.fundamental_pass,
-                technical_state = EXCLUDED.technical_state,
+                -- G4/G5 由慢通道（run_slow_g3g5）计算并落库；快通道全量刷新时不带这两项
+                -- （传 None 占位）。必须 COALESCE 保留库内值，否则每轮快扫都会把
+                -- 慢通道刚算出的基本面/技术面结果抹成 NULL，composite_score 永久回落到
+                -- 占位分（fundamental/technical 各 50），G4/G5 全链路沦为死代码。
+                fundamental_pass = COALESCE(EXCLUDED.fundamental_pass,
+                                            biz.catalyst_signal.fundamental_pass),
+                technical_state = COALESCE(EXCLUDED.technical_state,
+                                           biz.catalyst_signal.technical_state),
                 entry_price = COALESCE(EXCLUDED.entry_price, biz.catalyst_signal.entry_price),
                 stop_loss = COALESCE(EXCLUDED.stop_loss, biz.catalyst_signal.stop_loss),
                 take_profit = COALESCE(EXCLUDED.take_profit, biz.catalyst_signal.take_profit),

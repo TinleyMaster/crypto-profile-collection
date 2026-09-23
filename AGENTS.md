@@ -278,6 +278,21 @@
 - **无迁移**：全在 `workbench/catalyst/*.py` + `scripts/bin/backfill_catalyst_links.py`。
 - **自测**：同名消歧 6 例（宏观→drop、cashtag/代币→保留）+ `_fmt_price` 4 例 + `_round_price`/极小价档位 4 例全绿。
 
+### 高亮信号确定性度量重构 A+B（工单 OPT-HL-DETERMINACY-001，2026-09-23，本次提交）
+
+来源：`待修复工单_高亮信号确定性度量_AB_2026-09-23.md`（派生自 `审计_高亮信号_确定性挖掘视角_2026-09-23.md`）。**工单修正了审计的一处误判**：whale/kol/chain/narrative **实际走六轴加权**（非固定档），真正根因是「单轴事件量被六轴中性（None→50）稀释 → 塌缩到 55-60、MED 内部零区分度」。
+
+- **A1（`macro_market.py`）事件强度连续主轴**：新增 `_event_strength_score(kind, value, t)`（usd 对数连续 $1M→50/$100M→74/$1B→86；flow_pct/mcap_pct 线性封顶）。五类软信号生成段融合：`conviction = round(0.6*conviction + 0.4*es)` 并把 `event_strength` 写入 opp：
+  - `whale_flow`（`usd_total`）、`narrative`（`mcap_change_7d_pct`）、`chain_inflow`（`flow_pct`）。
+  - `kol_onchain`：**单源（n_confirm<2）封顶 `es=min(es,45)`**（与工单 C 协同，只进观察池）。
+  - `etf_flow`（BTC long/short + 非 BTC 3 处）：阶梯档改连续 `strength=round(0.5*base_str + 0.5*es)`（金额单位百万→×1e6）。
+  - `_push_opportunity` 只追加 `conviction_*`、不清字段 ⇒ `event_strength` 自动透传。
+- **A2（`templates/index.html`）**：高亮卡片新增 `eventStrengthLine`（`事件强度 N · 共振×M`）+ `.signal-event-strength` 样式，插入在 `strengthLine` 后。
+- **B1（fng 阈值放宽）25→30 / 75→70**：⚠️ **关键坑**——`_load_market_rules()` 只覆盖「key 已存在于默认 dict」的 yaml 项，而 `fng_fear_max`/`fng_greed_min` **原不在 `OPPORTUNITY_THRESHOLDS_DEFAULT`**，故 yaml 里写了也**不生效**；已把两项登记进默认 dict（30/70）并同步 `market_rules.yaml`。`emotion_fear_max=50` 是另一维度（emotion_subscore），未动。
+- **B2 未做（前置 BLOCKER）**：`mvrv_universe.status=error` + 叙事榜缺失属**上游数据源真实故障**，需授权查 prod/接入代码（`db_stats`/CoinMetrics/叙事榜），不在本 PR。
+- **无迁移**：全在 `workbench/macro_market.py` / `market_rules.yaml` / `templates/index.html`。
+- **自测**：`_event_strength_score` 12 例（含 clamp/None/负值/区分度）+ 单源 KOL 封顶 + yaml fng 生效 + `select_highlight_signals` 合并保留 `event_strength`/`resonance_count` 全绿。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。

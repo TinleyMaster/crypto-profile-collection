@@ -69,8 +69,9 @@ opportunity_rules:
   conviction_med_min_low_coverage: 50   # 可用轴权重 < min_available_weight 时 MED 阈值
   min_available_weight: 0.5             # 可用轴权重和低于此值视为覆盖度不足
   # 第二刀新增阈值
-  fng_fear_max: 25                      # 恐贪 ≤25 → 极度恐惧 long 信号
-  fng_greed_min: 75                     # 恐贪 ≥75 → 极度贪婪 short 信号
+  # B1（OPT-HL-DETERMINACY-001）：放宽 fng 极值触发 25→30 / 75→70，让硬情绪信号更易产出
+  fng_fear_max: 30                      # 恐贪 ≤30 → 极度恐惧 long 信号
+  fng_greed_min: 70                     # 恐贪 ≥70 → 极度贪婪 short 信号
   stablecoin_inflow_min: 5000000000     # 稳定币 7d 净流 ≥50 亿刀 → 弹药积累
   protocol_top_n: 3                     # P1-3 新协议 TVL 异动取前 N
   exchange_netflow_min_usd: 100000000   # 交易所净流出触发 long 信号最小阈值（1 亿美元）

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import math
 import re
 import time
 import threading
@@ -2268,6 +2269,10 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "chain_top_n": 3,                        # 链机会最多取前 N
     "stablecoin_flow_min_usd": 5_000_000_000,  # 稳定币净流入显著阈值（50 亿美元）
     "emotion_fear_max": 50,                  # 恐贪 < 50 视为恐惧（左侧信号）
+    # B1（OPT-HL-DETERMINACY-001）：fng 极值触发阈值（与上方 emotion_fear_max 是不同维度）。
+    # 必须在此登记，否则 yaml 的 opportunity_rules 覆盖因「key 不在 target」而失效。
+    "fng_fear_max": 30,                      # 恐贪 ≤30 → 极度恐惧 long 信号
+    "fng_greed_min": 70,                     # 恐贪 ≥70 → 极度贪婪 short 信号
     "resonance_high_min_sources": 2,         # 高置信最少独立源类型数
     "resonance_min_source_count": 2,         # 共识动量最少独立数据源数
     "resonance_consensus_top_n": 50,         # 扫描共识榜前 N
@@ -2993,6 +2998,34 @@ def _conviction_breakdown(
             coverage_weight += wt
         breakdown[name] = {"score": sc, "weight": wt, "contribution": contrib, "available": available}
     return {"axes": breakdown, "raw_strength": max(0, min(100, round(total))), "coverage_weight": round(coverage_weight, 2)}
+
+
+# OPT-HL-DETERMINACY-001 / A1：事件强度主轴——把信号自带的「真实事件量」连续映射为
+# 确定性主轴，避免 etf/kol/chain/whale/narrative 这类**单轴**信号被六轴中性（None→50）
+# 稀释而全部塌缩到 55-60、内部零区分度（2026-09-23 审计：线上 4 条 MED 全 60）。
+# 系数可在 _MARKET_RULES 调参。
+def _event_strength_score(kind: str, value, t: dict) -> int:
+    """事件量 → 0-100 确定性主轴（连续）。
+
+    kind:
+      - "usd"       金额（美元），对数连续：$1M→50、$100M→74、$1B→86
+      - "flow_pct"  链/TVL 7d 变化率（%）：|x|*4，封顶 +40
+      - "mcap_pct"  叙事板块 7d 市值变化率（%）：|x|*3，封顶 +40
+    value 为 None / 非法 → 50（中性，不惩罚）。
+    """
+    if value is None:
+        return 50
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 50
+    if kind == "usd":
+        return int(max(40, min(90, 50 + 12 * math.log10(max(abs(v), 1) / 1e6))))
+    if kind == "flow_pct":
+        return int(max(40, min(90, 50 + min(40, abs(v) * 4))))
+    if kind == "mcap_pct":
+        return int(max(40, min(90, 50 + min(40, abs(v) * 3))))
+    return 50
 
 
 # ── FEAT-HIGHLIGHT-003：周期调制乘子 ──
@@ -5092,9 +5125,13 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        # A1：巨鲸信号自带「金额」这一真实事件量 → 与六轴 conviction 融合，拉开区分度
+        es = _event_strength_score("usd", usd_total, t)
+        conviction = round(0.6 * conviction + 0.4 * es)
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
+             "event_strength": es,
              "signal_type": "whale_flow",
              "key_metric": f"巨鲸 ${usd_total / 1e6:.1f}M",
              "asset_id": aid,
@@ -5293,6 +5330,11 @@ def score_opportunities(overview: dict) -> dict:
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
 
+        # A1 + C：KOL 链上信号为**单源**（n_confirm<2）→ event_strength 封顶 ≤45，
+        # 只进观察池、不占高亮 C 位；再与六轴 conviction 融合。
+        es = min(_event_strength_score("usd", usd_val, t), 45)
+        conviction = round(0.6 * conviction + 0.4 * es)
+
         action_hint_map = {
             "long": "链上资金流出 + 大资金异动，关注后续上行动力",
             "short": "链上资金流入 + 大资金异动，警惕短期抛压",
@@ -5303,6 +5345,7 @@ def score_opportunities(overview: dict) -> dict:
             {"target": symbol, "direction": sig_direction,
              "confidence": confidence,
              "conviction_score": conviction,
+             "event_strength": es,
              "signal_type": "kol_onchain",
              "key_metric": (f"{type_cn} {event_token.upper() if event_token and event_token.upper() != str(symbol).upper() else symbol} {usd_str}"
                             if usd_val > 0 else type_cn),
@@ -5362,9 +5405,13 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        # A1：叙事信号自带「板块 7d 市值变化率」
+        es = _event_strength_score("mcap_pct", row.get("mcap_change_7d_pct"), t)
+        conviction = round(0.6 * conviction + 0.4 * es)
         _push_opportunity(
             {"target": row.get("narrative"), "direction": direction, "confidence": conf,
              "conviction_score": conviction,
+             "event_strength": es,
              # D2（2026-09-22 审计）：叙事信号缺 signal_type → 前端无分类徽章、配额落入 __default__。
              # 补齐 signal_type + key_metric/action_hint/invalidation，避免"赛道清单当高亮"。
              "signal_type": "narrative",
@@ -5392,9 +5439,13 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        # A1：链净流入信号自带「TVL 7d 变化率」
+        es = _event_strength_score("flow_pct", flow_pct, t)
+        conviction = round(0.6 * conviction + 0.4 * es)
         _push_opportunity(
             {"target": f"{row.get('chain')} 链", "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
+             "event_strength": es,
              # D2（2026-09-22 审计）：链净流入信号补 signal_type + 可执行字段
              "signal_type": "chain_inflow",
              "key_metric": f"7d TVL {_fmt_billions(flow)}（{flow_pct:+.1f}%）",
@@ -5452,8 +5503,10 @@ def score_opportunities(overview: dict) -> dict:
 
     # ════════ 第二刀独立高亮维度（FEAT-HIGHLIGHT-002）══════
     # 事件驱动、间歇触发，高信息熵可执行信号，与"状态类"信号互补
-    _fear_max = t.get("fng_fear_max", 25)
-    _greed_min = t.get("fng_greed_min", 75)
+    # B1（OPT-HL-DETERMINACY-001）：放宽 fng 极值触发（25→30 / 75→70），让高确定性的
+    # 硬情绪信号更易产出；注意 2270 的 emotion_fear_max=50 是另一维度（emotion_subscore），勿动。
+    _fear_max = t.get("fng_fear_max", 30)
+    _greed_min = t.get("fng_greed_min", 70)
 
     # A. 恐贪极值
     _fg = (overview.get("dimensions") or {}).get("3情绪") or {}
@@ -5544,10 +5597,13 @@ def score_opportunities(overview: dict) -> dict:
                 direction = "long"
                 conf = "high" if etf_btc >= etf_flow_high * 2 else "medium"
                 base_str = 72 if etf_btc >= etf_flow_high * 2 else 60
-                strength = min(92, base_str + int(min(20, (etf_btc - etf_flow_high) / 50)))
+                # A1：ETF 阶梯档过粗 → 用「净流入额」连续主轴平滑（etf_btc 单位=百万美元）
+                es = _event_strength_score("usd", etf_btc * 1e6, t)
+                strength = round(0.5 * base_str + 0.5 * es)
                 _push_opportunity(
                     {"target": "BTC", "direction": direction, "confidence": conf,
                      "conviction_score": strength,
+                     "event_strength": es,
                      "signal_type": "etf_flow",
                      "key_metric": f"ETF 净流入 +${etf_btc:.0f}M",
                      "trigger_logic": f"BTC ETF 单日净流入 ${etf_btc:.0f}M（{etf_date}）→ 机构资金持续加仓",
@@ -5562,10 +5618,12 @@ def score_opportunities(overview: dict) -> dict:
                 direction = "short"
                 conf = "high" if etf_btc <= etf_flow_low * 2 else "medium"
                 base_str = 72 if etf_btc <= etf_flow_low * 2 else 60
-                strength = min(92, base_str + int(min(20, (etf_flow_low - etf_btc) / 50)))
+                es = _event_strength_score("usd", etf_btc * 1e6, t)
+                strength = round(0.5 * base_str + 0.5 * es)
                 _push_opportunity(
                     {"target": "BTC", "direction": direction, "confidence": conf,
                      "conviction_score": strength,
+                     "event_strength": es,
                      "signal_type": "etf_flow",
                      "key_metric": f"ETF 净流出 ${etf_btc:.0f}M",
                      "trigger_logic": f"BTC ETF 单日净流出 ${etf_btc:.0f}M（{etf_date}）→ 机构资金离场",
@@ -5599,7 +5657,6 @@ def score_opportunities(overview: dict) -> dict:
             if flow is None:
                 continue
             tier = _etf_tiers.get(sym, _etf_tiers["__default__"])
-            abs_flow = abs(flow)
             # 判断是否触发（至少 medium 阈值）
             if flow >= tier["medium"]:
                 direction = "long"
@@ -5612,8 +5669,9 @@ def score_opportunities(overview: dict) -> dict:
 
             conf = "high" if is_high else "medium"
             base_str = tier["base_str_high"] if is_high else tier["base_str_med"]
-            exceed = abs_flow - (tier["high"] if is_high else tier["medium"])
-            strength = min(90, base_str + int(min(18, exceed / tier["step"])))
+            # A1：非 BTC 币种 ETF 同样用「净流入额」连续主轴（flow 单位=百万美元）
+            es = _event_strength_score("usd", flow * 1e6, t)
+            strength = round(0.5 * base_str + 0.5 * es)
 
             flow_label = f"+${flow:.1f}M" if flow > 0 else f"${flow:.1f}M"
             action = "机构资金加仓，关注联动机会" if direction == "long" else "机构资金离场，短期规避"
@@ -5622,6 +5680,7 @@ def score_opportunities(overview: dict) -> dict:
             _push_opportunity(
                 {"target": sym, "direction": direction, "confidence": conf,
                  "conviction_score": strength,
+                 "event_strength": es,
                  "signal_type": "etf_flow",
                  "key_metric": f"ETF 净流入 {flow_label}",
                  "trigger_logic": f"{sym} ETF 单日净流入 {flow_label}（{item.get('date', etf_date)}）→ 机构资金{'加仓' if direction=='long' else '减仓'}",

@@ -5866,6 +5866,14 @@
             margin-left: 2px;
         }
 
+        /* OPT-HL-DETERMINACY-001 / A2：事件强度主轴展示 */
+        .signal-event-strength {
+            font-size: 11px;
+            color: #7dd3fc;
+            margin-top: 2px;
+            cursor: help;
+        }
+
         /* ── 催化剂事件板块 ── */
         .catalyst-section {
             background: rgba(15, 23, 42, .6);
@@ -13334,6 +13342,14 @@
                 '</div>'
                 : '';
 
+            // OPT-HL-DETERMINACY-001 / A2：事件强度主轴 + 共振数（让"确定性"可解释）
+            var eventStrengthLine = (o.event_strength != null)
+                ? '<div class="signal-event-strength" title="事件强度：信号自带真实事件量（金额/变化率）的连续度量，0-100；共振×N = 同标的不同信号类型数">' +
+                '事件强度 ' + o.event_strength +
+                (o.resonance_count ? ' · 共振×' + o.resonance_count : '') +
+                '</div>'
+                : '';
+
             // FEAT-HIGHLIGHT-004: HIGH 角标
             // P1-2（2026-09-18 审计）：AI 已降级（should_highlight=false）的卡片不挂 🔥HIGH，
             // 避免"AI 中性谨慎 + 系统 HIGH 看多"同屏打架。
@@ -13511,8 +13527,9 @@
                 (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
                 scoreBar +
                 decayBar +
-                strengthLine +
-                valFilterNote +
+            strengthLine +
+            eventStrengthLine +
+            valFilterNote +
                 aiReasonHtml +
                 (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
                 multiSignalHtml +

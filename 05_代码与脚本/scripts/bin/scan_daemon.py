@@ -1738,7 +1738,6 @@ def _alert_title(items: list[dict]) -> str:
     """
     n_res = 0        # 新鲜口径的共振条数（覆盖币数 / 密封边界用）
     n_res_all = 0    # 全量口径（标题「含共振 N 条」，与卡片「催化剂 N」一致）
-    res_coins = 0  # 审计 OPT-1：有共振的**币数**（共振常高度集中在个别币）
     all_coins = 0  # 审计 N-416-3：有全量共振的**币数**（与 `n_res_all` 同窗，作覆盖分母）
     has_stale = False  # 全量催化剂 >0 但新鲜为 0（N-786-2 密封边界）
     has_zero_cat = False  # 催化剂**真为 0 条**（N-786-4：不得误述「全部 >3 天」）
@@ -1759,8 +1758,6 @@ def _alert_title(items: list[dict]) -> str:
         coin_n_all = len(res["event"]) + ctot + len(res["kol"])
         n_res += coin_n
         n_res_all += coin_n_all
-        if coin_n:
-            res_coins += 1
         if coin_n_all:
             all_coins += 1
         if ctot > 0 and f_coin == 0:
@@ -1770,6 +1767,12 @@ def _alert_title(items: list[dict]) -> str:
     if not n_res:
         # N-786-2：密封边界——整批共振全为 0 时，若存在「有催化剂但全 >3 天」的币，
         # **不得**印「纯盘面信号，无共振」（那是事实错误：有催化剂，只是陈旧）⇒ 改口径披露。
+        # N-90EC-1：**密封边界同样必须三态化**——旧实现用单一 `has_stale` 布尔，判不出
+        # 「本批还同时含零催化剂币」；实测近 7 天 6 批真实触发（如 09-22 13:00 的 8 币批，
+        # 其中 7 币根本没有催化剂，标题却断言「催化剂**全部** >3 天」）⇒ 与非密封侧同族措辞。
+        if has_stale and has_zero_cat:
+            return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
+                    f"（无新鲜共振；催化剂仅陈旧条目，另有币无催化剂）")
         if has_stale:
             return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
                     f"（无新鲜共振；催化剂全部 >{CATALYST_STALE_DAYS} 天，不计方向）")
@@ -2152,7 +2155,9 @@ def _render_alert_email(items: list[dict],
               "含陈旧条目；「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高"
               "conviction；「无新鲜条目」= 全部 >X 天）；标题「含共振 N 条（k/M 币）」为全量口径"
               "（与卡片「催化剂 N」同一口径），其方向段以「催化剂新鲜 X多/…」标口径"
-              "（陈旧不计；避免无陈旧可剔时仍印「已剔除陈旧」的虚假暗示）；"
+              "（陈旧不计；避免无陈旧可剔时仍印「已剔除陈旧」的虚假暗示），"
+              "方向段「无催化剂条目」= 该仓位无任何催化剂（n_res 由事件/KOL 贡献）、"
+              "「全部 >X 天」= 催化剂全部陈旧、「含仅陈旧条目，另有币无催化剂」= 本批两者皆有；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"

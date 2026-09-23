@@ -294,6 +294,17 @@
 - **无迁移**：全在 `workbench/macro_market.py` / `market_rules.yaml` / `templates/index.html`。
 - **自测**：`_event_strength_score` 12 例（含 clamp/None/负值/区分度）+ 单源 KOL 封顶 + yaml fng 生效 + `select_highlight_signals` 合并保留 `event_strength`/`resonance_count` 全绿。
 
+### B2 上游故障根因修复：叙事榜 ETL 未调度（复验_高亮信号_c38e755，2026-09-23，本次提交）
+
+复验 `c38e755` 判定 A+B 全部生效，唯一未闭环 = **B2（叙事榜缺失）**。只读排查后定位为**调度缺口**（非数据源故障）：
+
+- **根因（物证级）**：`src_cmc.cmc_category_member` MAX(snapshot_date)=**2026-09-22**（新鲜，由每日 `cmc_category_refresh` 02:30 刷新），而 `biz.sector_narrative_asset` MAX(as_of_date)=**2026-08-29**（停更 25 天）——因为写入它的 `etl_sector_narrative_assets.py` **从未注册进 scheduler**。⇒ `macro_market.fetch_category_flow` 的 DB 兜底/成分币全失效 → `narrative_flow_ranking` 空 → 线上 `DEGRADED: ['P1-1 叙事榜缺失']`。
+- **修复 1（`scheduler.py`）**：新增 `("etl_sector_narrative", "35 2 * * *", "etl_sector_narrative_assets.py", [], ...)`，紧跟 `cmc_category_refresh` 后跑（纯 DB→DB）。`--dry-run` 实测可产出 **2026-09-20：20 叙事 / 6755 行 / 96.5% 匹配 asset_id**。
+- **修复 2（`macro_market.fetch_category_flow`）**：db-only 兜底从「仅 categories API 抛异常时」扩到「**API 成功但 watchlist 名称不匹配**时」也兜底（原实现直接返回空）；并给 db-only 条目补**成分币市值加权的 24h 动量**（否则 `build_narrative_flow_ranking` 因 momentum/mcap7 全 None 把它们全过滤 → 叙事榜仍空）。实测两条失败路径都返回 20 条、`narrative_flow_ranking` 非空。
+- **MVRV 部分（未发现代码 bug）**：`_build_mvrv_universe` 数据源为 `biz.cm_asset_onchain_daily`（`cm_incremental` 每日 06:30 跑、`done`），最新日 16 币/14 有 MVRV+市值，查询应返回 14 币（ok）。**复验的间歇 error 更可能是 DB 连接瞬时问题**，非可复现代码缺陷；`--` 未改。覆盖率偏小（CM onchain universe 仅 ~16 币）属数据源限制，另议。
+- **无迁移**：`scheduler.py` + `macro_market.py`。
+- **部署/落地**：容器 redeploy 后新调度生效；也可手工跑一次 `python bin/etl_sector_narrative_assets.py`（**会写 prod**，属幂等 ETL，按铁律需授权后再执行——本次未跑）。
+
 ### 待办（需设计变更，勿盲目改）
 
 - `run_signal` 候选集显式排除 `cr.resonance_state = 'pending'`，故 `signal_actionability` 的 `pending→watch` 映射实际只对二阶通路生效（直连通路 pending 行不会被重算）。
@@ -696,6 +707,22 @@
 - **⚠️ 基线说明**：该审计的「上轮 3 项未处置」是**它的基线快照**——`N-416-1/2/3` 实际已由 `90ec437` 处置（其对象是 `416b879`，早于 `90ec437`）。本轮在此基础上补 N-923-1 + 单币覆盖省略。
 - **自测**：`test_scan_alert_header_regime.py` 扩至 **51/51**（+2：N-923-1 全新鲜「催化剂新鲜」前缀/无陈旧不印；单币省略 `（1/1 币）`）；`test_scan_alert_audit_deepdive.py` 的 O2 断言同步为「催化剂新鲜 4多/0空/2中」⇒ 75/75；既有 16/16/143/13/35/48 无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效。
+
+### N-90EC-1/2/4/5 补刀（复验_告警邮件N-416系列_90ec437_2026-09-23，2026-09-23）
+
+来源：`复验_告警邮件N-416系列_90ec437_2026-09-23.md`。复验确认 N-416-1/3 真到位（夹具 A1/A5/B1 + 真函数）、B4 独立核验 122 行精确对上，另指出 6 项（含 2 项线上可达）。**该审计基线是 `90ec437`（早于我的 `62b07ce` N-923-1）**，故其中部分已被后续提交覆盖。本轮处置 **N-90EC-1/2/4/5**，**N-90EC-3 已由 `948d9db` 解决**，**N-90EC-6 为记档更正**。
+
+- **🔴 N-90EC-1（P2，线上高频，已修）密封边界未三态化 —— N-416-1 的第三侧**：非密封路径已三态化，但**更早的返回路径** `if not n_res:` 仍用单一 `has_stale` 布尔，判不出「本批还同时含零催化剂币」（`has_zero_cat` 在此分支已计算但从未读取）。**真实可达**：近 7 天 89 个 20min 窗中 **6 个**走到密封边界且混合（如 **09-22 13:00 的 8 币批，其中 7 币根本没有催化剂**，标题却断言「催化剂**全部** >3 天」）⇒ 与非密封侧同型。修法：密封分支**三态化**（`has_stale and has_zero_cat` → 「催化剂仅陈旧条目，另有币无催化剂」），与非密封侧同族措辞。
+- **🔴 N-90EC-2（P3，已修）`**` 护栏只覆盖 1/5 分支**：原护栏的夹具 `n_res>0` ⇒ 只走「新鲜方向段」一条返回路径（注入测试：R1/R2/R3a/R3b 4 分支全漏）。修法：测试改**表驱动**遍历 6 条返回路径（密封-纯无共振 / 密封-纯陈旧 / 密封-混合 / 新鲜方向段 / 仅零催化剂 / 非密封混合）。
+- **🟡 N-90EC-4（P3，已修）图例未声明 3 个新文案（三落点又漏一）**：标题新增的「无催化剂条目」「含仅陈旧条目，另有币无催化剂」「（已剔除陈旧）」均不在图例 ⇒ 读者无法理解。本轮图例补齐（且 N-923-1 已把「已剔除陈旧」后缀改为「催化剂新鲜」前缀，不再存在）。
+- **🟡 N-90EC-5（P4，已修）`res_coins` 沦为死变量**：N-416-3 改用 `all_coins` 后 `res_coins` 仅剩定义 + `+=1`、零读取 ⇒ 已删除。
+- **✅ N-90EC-3（P2，已由 `948d9db` 解决）只改 daemon 未同步日报脚本**：`send_scan_signal_brief.py` 的 `PROD_SCENARIO_DESC` + `_scenario_label` 已在 `948d9db` 落地（本机核验其表含「S2 空头扎实」）⇒ **部署水位取 ≥`948d9db`** 即两处口径一致。
+- **📌 N-90EC-6（P3，记档更正）**：`AGENTS.md` 在 `90ec437` 内写「`test_squeeze_battle.py` 扩至 143/143」，但该提交未改该测试（143 属 `948d9db`）——**归因更正**：`143` 的正确归属是 `948d9db`（+6 影子守卫）。
+- **📌 内容级夹带（结构性问题，非操作失误）**：复验指出 `90ec437` 的 `scan_daemon.py` 内含 ~150 行未自述改动（B4 场景口径 / `_scenario_priors` 象限分桶 / `SQUEEZE_ALERT_SHADOW`）——因并发进程与我改同一文件、`restore --staged` 只能按**文件**粒度回滚。**教训固化：同文件并发改动先 `git stash push -- <path>` 或分文件提交，并在 commit message 列全实际改动面**（B4 是 P0 却未提，考古易误判）。B4 本身经复验独立核验**正确**（122 = 17+34+71 精确对上）。
+- **自查纠错（复验记录，非我本轮）**：复验首版护栏注入探针 cwd 拼接错误被误读为「5/5 全抓到」，修正后真实为 **1 抓到 / 4 漏过**；复验首版可达性探针在 `biz.scan_signal` 上 `SELECT asset_id`（该表无此列）崩溃。**教训：工具 bug ≠ 结论，先自查探针**。
+- **未改（观察项）**：`SQUEEZE_ALERT_SHADOW` 行为级影响评估（停发轧空邮件的下游依赖，另立项）；`event_watchlist` 段无时间窗（实测无污染）。
+- **自测**：`test_scan_alert_header_regime.py` 扩至 **59/59**（+8：N-90EC-1 密封三态 3 例 + N-90EC-2 表驱动 6 分支护栏）；`test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 143/143、`test_fundamental_liquidity.py` 13/13、`test_derivatives_signal_gap.py` 35/35、`test_scan_scenario_label.py` 48/48 无回归；`py_compile` 通过。
+- **待部署**：需重启容器（`scan_daemon`）后生效；**部署水位取 ≥`948d9db`**（含日报同口径）。
 
 ### B4 场景编号口径错位（审计_盘面异动扫描系统设计方案_v0.8，2026-09-23，本次提交）
 

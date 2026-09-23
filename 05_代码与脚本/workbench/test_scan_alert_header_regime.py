@@ -313,11 +313,33 @@ check("含共振 6 条（2/2 币）" in t_mix2,
       "条数 6 与覆盖币数 2/2 同为全量窗（消除「6 条（1/2 币）」混搭）", t_mix2)
 check("1/2 币" not in t_mix2, "不再出现新鲜窗覆盖币数「1/2 币」")
 
-print("\n【N-416-2】`**` 护栏覆盖标题（Subject，不在 html 内）")
-_all_items = [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))},
-              {"signal": _brk_sig(), "resonance": _res()}]
-check("**" not in sd._alert_title(_all_items),
-      "标题无 markdown 强调符 `**`（护栏补覆盖 _alert_title）")
+print("\n【N-90EC-1】密封边界（n_res==0）也须三态化（近 7 天 6 批真实触发）")
+# 币A=全陈旧(3条,无 event)、币B=纯盘面无共振 ⇒ n_res==0 且 has_stale and has_zero_cat
+sealed_mix = [{"signal": _main_sig(),
+               "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))},
+              {"signal": dict(_main_sig(), id=7), "resonance": _res()}]
+t_sealed = sd._alert_title(sealed_mix)
+check("仅陈旧条目" in t_sealed and "另有币无催化剂" in t_sealed,
+      "密封边界混合 → 「催化剂仅陈旧条目，另有币无催化剂」（N-90EC-1 三态化）", t_sealed)
+check("全部 >3 天" not in t_sealed,
+      "密封边界不再断言「全部 >3 天」（对零催化剂币是事实错误）")
+# 密封边界纯陈旧（无零催化剂币）→ 保持「全部 >3 天」
+t_sealed_stale = sd._alert_title([{"signal": _main_sig(),
+                                   "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))}])
+check("全部 >3 天" in t_sealed_stale, "密封边界纯陈旧 → 保持「全部 >3 天」", t_sealed_stale)
+
+print("\n【N-416-2 / N-90EC-2】`**` 护栏覆盖标题**全部**返回分支（表驱动）")
+_title_cases = {
+    "密封-纯无共振": [{"signal": _main_sig(), "resonance": _res()}],
+    "密封-纯陈旧": [{"signal": _main_sig(),
+                     "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))}],
+    "密封-混合": sealed_mix,
+    "新鲜方向段": [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))}],
+    "仅零催化剂": [{"signal": _main_sig(), "resonance": _res(event=1)}],
+    "混合(非密封)": mixed2,
+}
+for _nm, _case in _title_cases.items():
+    check("**" not in sd._alert_title(_case), f"标题分支「{_nm}」无 `**`")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

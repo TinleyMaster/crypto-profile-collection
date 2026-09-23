@@ -114,12 +114,30 @@ card = _card(target="SOL", key_metric="$12.4M 巨鲸转账", trigger_logic="3 �
 html = sha.render_html([(card, sha.ALERT_NEW)], "2026-09-23", 8)
 for token in ["⚡ 高亮信号提醒", "🆕 新增", "SOL", "conv 60", "$12.4M 巨鲸转账",
               "3 笔 &gt;$1M 转入冷钱包", "回踩 EMA20 分批", "跌破 $138", "事件强度 88",
-              "共振×3", "共振维度：链上净流, ROI动量", "全部信号原由（2个）",
+              "共振×3", "来源维度：链上净流, ROI动量", "全部信号原由（2个）",
               "链上净流入", "AI 综合 71", "估值 72 · 链上 75", "链上吸筹 + 估值偏低"]:
     check(token in html, f"渲染含「{token}」")
 check("当日高亮池共 8 条" in html, "抬头含高亮池总量")
 check("新增 1 条 · 升级 0 条" in html, "抬头统计行口径正确")
 check(html.count("🆕 新增") == 1, "卡片徽章含「🆕 新增」")
+
+# 生产口径 related_dims（数据表名 / 管线编号）必须映射成人话，不得原样透出
+_src_dims = sha.render_html([(_card(related_dims=["机构ETF资金流（cryptoetf.today）", "P1 机构行为",
+                                                 "catalyst_events", "P0-B 催化剂驱动",
+                                                 "P1-1 叙事榜（市值）", "P1-1 链净流入榜",
+                                                 "asset_raises", "P1 融资落地",
+                                                 "onchain_transfer_log", "P1-3 链上巨鲸",
+                                                 "asset_unlock_event", "P1 解锁抛压",
+                                                 "mvrv_universe", "P0-1 估值回归",
+                                                 "P1-2 多空博弈"]), sha.ALERT_NEW)],
+                                        "2026-09-23", 1)
+for raw in ["cryptoetf.today", "catalyst_events", "asset_raises", "onchain_transfer_log",
+            "asset_unlock_event", "mvrv_universe", "P0-B", "P1-1", "P1-3"]:
+    check(raw not in _src_dims, f"内部来源「{raw}」未泄漏到展示层")
+check("来源维度：机构 ETF 资金流" in _src_dims, "生产来源映射为中文标签")
+check(_src_dims.count("机构 ETF 资金流") == 1 and "机构行为" in _src_dims, "同卡多来源逐个映射")
+_unmapped = sha.render_html([(_card(related_dims=["P1-9 未来新榜"]), sha.ALERT_NEW)], "2026-09-23", 1)
+check("P1-9" not in _unmapped and "未来新榜" in _unmapped, "未登记来源剥离管线编号前缀")
 
 xss = sha.render_html([(_card(target="<script>alert(1)</script>"), sha.ALERT_NEW)], "2026-09-23", 1)
 check("<script>" not in xss, "target 中的 HTML 被转义（无裸 <script>）")
@@ -128,8 +146,24 @@ check("&lt;script&gt;" in xss, "转义后为实体")
 empty = sha.render_html([], "2026-09-23", 3)
 check("无新增/升级高亮信号" in empty, "空列表有明确提示")
 
-downgraded = sha.render_html([(_card(_ai_downgraded=True, _ai_filter_reason="AI 未背书"), sha.ALERT_UPGRADE)], "2026-09-23", 1)
-check("AI 未背书" in downgraded and "⬆️ 升级" in downgraded, "AI 降级卡片披露原因且仍展示升级徽章")
+# AI 四态披露：认可 / 未背书 / 复核失败 / 未复核，任一态都不得静默
+downgraded = sha.render_html([(_card(_ai_downgraded=True,
+                                     _ai_filter_reason="事件驱动信号触发: funding",
+                                     ai_analysis_v2={"overall_score": 30}),
+                               sha.ALERT_UPGRADE)], "2026-09-23", 1)
+check("AI 未背书" in downgraded and "⬆️ 升级" in downgraded, "AI 降级卡片披露「AI 未背书」且仍展示升级徽章")
+check("funding" not in downgraded, "降级卡片不透传内部 signal_type token")
+check("AI 综合 30" in downgraded, "降级卡片带出 AI 综合分")
+_not_reviewed = sha.render_html([(_card(_ai_filter_reason="聚合/宏观信号，跳过全量画像"), sha.ALERT_NEW)],
+                                "2026-09-23", 1)
+check("AI 未复核" in _not_reviewed, "AI 未复核卡片显式披露（不静默）")
+check("跳过全量画像" not in _not_reviewed, "未复核原因改写成人话")
+_no_asset = sha.render_html([(_card(_ai_skipped_no_asset=True,
+                                    _ai_filter_reason="asset_id 解析失败，跳过全量画像"),
+                              sha.ALERT_NEW)], "2026-09-23", 1)
+check("AI 未复核" in _no_asset and "asset_id" not in _no_asset, "资产未匹配卡片披露且不出现内部字段名")
+_ai_err = sha.render_html([(_card(ai_analysis_v2={"error": "timeout"}), sha.ALERT_NEW)], "2026-09-23", 1)
+check("AI 复核失败" in _ai_err, "AI 复核失败卡片显式披露（不静默）")
 check(sha.render_html([(_card(), sha.ALERT_NEW)], "2026-09-23", 1).count("<script") == 0, "正常卡片无脚本注入")
 
 print("\n[H6] 源码守卫")

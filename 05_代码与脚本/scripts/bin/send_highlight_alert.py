@@ -76,6 +76,38 @@ DIM_LABEL = {
     "stable": "稳定币流", "roi": "ROI动量", "catalyst": "催化情绪",
 }
 
+# related_dims 里的「来源」标签：生产口径写入的是数据表名 / 管线编号，
+# 属内部标识，必须映射成人话后再进展示层（不得原样透出）。
+SOURCE_DIM_LABEL = {
+    # 估值类
+    "mvrv_universe": "全市场 MVRV", "P0-1 估值回归": "估值回归",
+    # 机构 / ETF
+    "机构ETF资金流（cryptoetf.today）": "机构 ETF 资金流",
+    "P1 机构行为": "机构行为",
+    # 催化剂
+    "catalyst_events": "催化剂事件", "P0-B 催化剂驱动": "催化剂驱动",
+    "P1-2 多空博弈": "多空博弈",
+    # 板块 / 链上资金
+    "P1-1 叙事榜（市值）": "叙事板块市值榜",
+    "P1-1 链净流入榜": "链上净流入榜",
+    # 巨鲸
+    "onchain_transfer_log": "链上大额转账", "P1-3 链上巨鲸": "链上巨鲸",
+    # 融资
+    "asset_raises": "融资事件", "P1 融资落地": "融资落地",
+    # 解锁
+    "asset_unlock_event": "代币解锁事件", "P1 解锁抛压": "解锁抛压",
+}
+
+# 未登记来源兜底：剥离 P0-1 / P1-1 / P0-B 这类管线编号前缀，避免内部编号外泄
+_PIPELINE_CODE_RE = re.compile(r"^P\d[0-9A-Za-z\-]*\s+")
+
+# AI 未复核的原因（生产口径写入 _ai_filter_reason / _ai_skipped_no_asset）
+AI_SKIP_LABEL = {
+    "聚合/宏观信号，跳过全量画像": "宏观/聚合类信号，未做全量画像",
+    "asset_id 解析失败，跳过全量画像": "资产未匹配，未做全量画像",
+}
+AI_SKIP_DEFAULT = "未进入 AI 复核"
+
 # AI 六维评分卡标签（analyze_asset_v2 dimensions）
 AI_DIM_LABEL = {
     "valuation": "估值", "technical": "技术面", "onchain": "链上",
@@ -188,6 +220,30 @@ def _fmt(v, decimals: int = 0) -> str:
         return str(v)
 
 
+def _dim_labels(values) -> list[str]:
+    """related_dims → 展示标签（内部表名/管线编号不原样透出）。"""
+    out: list[str] = []
+    for v in values or []:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        if s in DIM_LABEL:            # 六轴口径（历史数据）
+            out.append(DIM_LABEL[s])
+        elif s in SOURCE_DIM_LABEL:   # 生产来源口径
+            out.append(SOURCE_DIM_LABEL[s])
+        else:
+            out.append(_PIPELINE_CODE_RE.sub("", s) or "其他来源")
+    return out
+
+
+def _ai_skip_note(card: dict) -> str:
+    """AI 未复核的原因（人话，不出现 asset_id 等内部字段名）。"""
+    if card.get("_ai_skipped_no_asset"):
+        return AI_SKIP_LABEL["asset_id 解析失败，跳过全量画像"]
+    reason = str(card.get("_ai_filter_reason") or "").strip()
+    return AI_SKIP_LABEL.get(reason, AI_SKIP_DEFAULT)
+
+
 def _render_signal_types(card: dict) -> str:
     types = card.get("signal_types") or ([card.get("signal_type")] if card.get("signal_type") else [])
     if not types:
@@ -222,15 +278,29 @@ def _render_merged_signals(card: dict) -> str:
 
 
 def _render_ai_block(card: dict) -> str:
-    """AI V2 复核摘要；无 AI 结果或已降级时只给一行披露，不展开。"""
+    """AI V2 复核状态：认可 / 未背书 / 复核失败 / 未复核，四态都必须有明确披露。
+
+    未复核与复核失败此前静默，读者无法区分「AI 认可」与「AI 没跑」——必须显式写出。
+    """
     if card.get("_ai_downgraded"):
-        reason = card.get("_ai_filter_reason") or "AI 未背书，按事件驱动规则直通保留"
+        # 不透传 _ai_filter_reason：那是管线路径原因（如「事件驱动信号触发: funding」），
+        # 含内部 signal_type token，且不能表达「AI 未背书」这一语义。
+        ai = card.get("ai_analysis_v2") or {}
+        score = ai.get("overall_score")
+        score_txt = f"（AI 综合 {_fmt(score)}）" if score is not None else ""
         return (f'<div style="margin-top:6px;padding:4px 8px;background:#fef9c3;'
-                f'border-radius:3px;font-size:11px;color:#92400e">⚡ {_e(reason)}</div>')
+                f'border-radius:3px;font-size:11px;color:#92400e">'
+                f'⚡ AI 未背书{score_txt}：按事件驱动规则直通保留，未采纳 AI 结论</div>')
 
     ai = card.get("ai_analysis_v2") or {}
-    if not ai or ai.get("error"):
-        return ""
+    if ai.get("error"):
+        return (f'<div style="margin-top:6px;padding:4px 8px;background:#f1f5f9;'
+                f'border-radius:3px;font-size:11px;color:#475569">🤖 AI 复核失败，本轮按规则分展示</div>')
+    if not ai:
+        return (f'<div style="margin-top:6px;padding:4px 8px;background:#f1f5f9;'
+                f'border-radius:3px;font-size:11px;color:#475569">'
+                f'🤖 AI 未复核（{_e(_ai_skip_note(card))}）</div>')
+
     dims = ai.get("dimensions") or {}
     dim_txt = " · ".join(
         f'{AI_DIM_LABEL.get(k, k)} {_fmt((v or {}).get("score"))}'
@@ -274,8 +344,8 @@ def render_card(card: dict, kind: str) -> str:
     action = f'<div style="font-size:11px;color:#166534;margin-top:4px">🎯 {_e(card.get("action_hint"))}</div>' if card.get("action_hint") else ""
     invalid = f'<div style="font-size:11px;color:#991b1b;margin-top:2px">⚠️ 失效条件：{_e(card.get("invalidation"))}</div>' if card.get("invalidation") else ""
     val_note = f'<div style="font-size:11px;color:#92400e;margin-top:2px">🔊 {_e(card.get("valuation_filter_note"))}</div>' if card.get("valuation_filter_note") else ""
-    dims = [DIM_LABEL.get(d, d) for d in (card.get("related_dims") or [])]
-    dims_txt = f'<div style="font-size:11px;color:#64748b">共振维度：{_e(", ".join(dims))}</div>' if dims else ""
+    dims = _dim_labels(card.get("related_dims"))
+    dims_txt = f'<div style="font-size:11px;color:#64748b">来源维度：{_e(", ".join(dims))}</div>' if dims else ""
 
     return f"""
     <div style="margin:0 0 12px;padding:10px 12px;border:1px solid #e2e8f0;border-left:4px solid {tier_color};border-radius:5px;background:#fff">

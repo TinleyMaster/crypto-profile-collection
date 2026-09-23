@@ -5211,7 +5211,7 @@ def score_opportunities(overview: dict) -> dict:
     for rt in _raise_targets:
         # rt: (asset_id, symbol, round, amount_m, lead, raise_date, protocol_name)
         aid, symbol, rnd, amount_m, lead, rdate, proto = rt
-        amount_str = f"${amount_m:.0f}M" if amount_m else "N/A"
+        amount_str = f"${amount_m:.0f}M" if amount_m else "金额未披露"
         lead_str = lead or "未披露"
         target = symbol if symbol not in ("", "-") else (proto or "?")
         conviction = _compute_conviction_score(

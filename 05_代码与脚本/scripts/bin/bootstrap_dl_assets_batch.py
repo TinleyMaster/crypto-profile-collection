@@ -65,6 +65,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# 留痕口径：match_status / match_method / match_confidence 由「判据强度」决定。
+# 一手 id（cmc_id / gecko_id）精确命中 = 已被权威来源核验 → confirmed；
+# 仅 symbol 相等 = 未核验 → candidate（旧实现把二者都写成 confirmed/100，
+# 使「一手命中」与「symbol 撞车」在库里无法区分，见 2026-09-23 dl 映射精度诊断）。
+MATCH_POLICY = {
+    "cmc": ("confirmed", "bootstrap_dl_cmc", 95),
+    "gecko": ("confirmed", "bootstrap_dl_gecko", 90),
+    "symbol": ("candidate", "bootstrap_dl_symbol", 40),
+}
+# 无既有资产可复用 → 由协议自身新建资产，映射正确但不含一手核验
+NEW_ASSET_POLICY = ("candidate", "bootstrap_dl_new", 80)
+
+
+def _count_kinds(matched: list[dict]) -> dict[str, int]:
+    """按判据分桶统计（可观测性：确认一手命中占比，而非只看总数）。"""
+    counts = {"cmc": 0, "gecko": 0, "symbol": 0}
+    for e in matched:
+        counts[e["match_kind"] or "symbol"] += 1
+    return counts
+
+
 BATCH_INSERT_ASSETS = """
 INSERT INTO core.asset (canonical_symbol, canonical_name, asset_type, status, launch_date, description_short)
 VALUES {}
@@ -135,6 +156,7 @@ def main() -> int:
                 "category": row.get("category"),
                 "description_short": desc,
                 "existing_asset_id": row.get("existing_asset_id"),
+                "match_kind": row.get("match_kind"),
             }
             if entry["existing_asset_id"]:
                 matched.append(entry)
@@ -149,6 +171,23 @@ def main() -> int:
 
         new_count = len(unmatched)
         matched_count = len(matched)
+
+        # dry-run 必须是纯只读：本分支原先位于「新建资产 INSERT」之后，
+        # 而 get_connection 成功退出即 commit，导致 --dry-run 仍会落库新资产。
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "mode": "dry_run",
+                        "total": len(rows),
+                        "matched": matched_count,
+                        "new": new_count,
+                        "by_kind": _count_kinds(matched),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
 
         # Batch insert new assets
         symbol_to_asset_id: dict[str, int] = {}
@@ -179,16 +218,20 @@ def main() -> int:
         # Build source_map entries
         map_values = []
         map_params = []
+        kind_counts = _count_kinds(matched)
         for e in matched:
+            status, method, confidence = MATCH_POLICY.get(
+                e["match_kind"], MATCH_POLICY["symbol"]
+            )
             map_values.append("(%s, %s, %s, %s, %s, %s, %s, %s)")
             map_params.extend(
                 [
                     e["existing_asset_id"],
                     "dl",
                     e["protocol_id"],
-                    "confirmed",
-                    "bootstrap_dl",
-                    100,
+                    status,
+                    method,
+                    confidence,
                     False,
                     "agent",
                 ]
@@ -198,15 +241,17 @@ def main() -> int:
             if asset_id is None:
                 print(f"WARNING: no asset_id for {e['symbol']}", flush=True)
                 continue
+            status, method, confidence = NEW_ASSET_POLICY
+            kind_counts["new"] += 1
             map_values.append("(%s, %s, %s, %s, %s, %s, %s, %s)")
             map_params.extend(
                 [
                     asset_id,
                     "dl",
                     e["protocol_id"],
-                    "candidate",
-                    "bootstrap_dl",
-                    85,
+                    status,
+                    method,
+                    confidence,
                     False,
                     "agent",
                 ]
@@ -221,6 +266,7 @@ def main() -> int:
                         "matched": matched_count,
                         "new": new_count,
                         "map_entries": len(map_values),
+                        "by_kind": kind_counts,
                     },
                     ensure_ascii=False,
                 )
@@ -259,6 +305,7 @@ def main() -> int:
                     "new_assets": new_count,
                     "mapped": len(map_values),
                     "sector_hits": sector_hit_count,
+                    "by_kind": kind_counts,
                 },
                 ensure_ascii=False,
             )

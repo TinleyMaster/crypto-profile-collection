@@ -202,12 +202,44 @@ check(not any(str(t).startswith("btc_1h=") for t in reg2["tags"]),
 # ═══════════════════════════════════════════════════════════════
 
 print("\n【OPT-1】标题补覆盖币数（共振集中度）")
-two = [{"signal": _main_sig(), "resonance": _res(bull=3)},
+two = [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))},
        {"signal": _brk_sig(), "resonance": _res()}]
 t2 = sd._alert_title(two)
 check("（1/2 币）" in t2, "标题并列覆盖币数「1/2 币」（5币11条实为1币的误读）", t2)
-t1 = sd._alert_title([{"signal": _main_sig(), "resonance": _res(bull=1)}])
+t1 = sd._alert_title([{"signal": _main_sig(), "resonance": _res(bull=1, fresh=(1, 0, 0))}])
 check("（1/1 币）" in t1, "单币批次「1/1 币」", t1)
+
+print("\n【N-786-1】标题净多用**新鲜**口径（陈旧不推高 conviction）")
+# 全量净多10（11-1），新鲜净多4（5-1）——标题须报新鲜
+t_stale = sd._alert_title([{"signal": _main_sig(),
+                            "resonance": _res(bull=11, bear=1, neut=5,
+                                              stale=10, fresh=(5, 1, 0))}])
+check("净多4" in t_stale and "净多10" not in t_stale,
+      "标题报新鲜净多4（非全量净多10）", t_stale)
+check("已剔除陈旧" in t_stale, "标题方向段标「已剔除陈旧」", t_stale)
+
+print("\n【N-786-2】覆盖币数按新鲜计（只有陈旧催化剂的币不算有共振）")
+only_stale = [{"signal": _main_sig(),
+               "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))},
+              {"signal": _brk_sig(), "resonance": _res()}]
+t_onlystale = sd._alert_title(only_stale)
+check("无新鲜共振" in t_onlystale and "纯盘面信号" not in t_onlystale,
+      "全陈旧 → 标题「无新鲜共振…」而非「纯盘面信号，无共振」（事实错误）", t_onlystale)
+check("净多" not in t_onlystale, "全陈旧时不报净多（避免把陈旧当方向）")
+# 有新鲜共振的另一币共存时，方向段用新鲜口径并显式标「已剔除陈旧」
+mixed = [{"signal": _main_sig(), "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))},
+         {"signal": dict(_main_sig(), id=9),
+          "resonance": _res(bull=2, fresh=(2, 0, 0))}]
+t_mixed = sd._alert_title(mixed)
+check("已剔除陈旧" in t_mixed and "净多2" in t_mixed,
+      "混合批次：标题用新鲜口径并标「已剔除陈旧」", t_mixed)
+
+print("\n【N-786-3】卡片全陈旧 → 「无新鲜条目」（不说「多空持平」）")
+h_allstale = _body(sd._render_alert_email([{
+    "signal": _main_sig(),
+    "resonance": _res(bull=17, bear=0, neut=0, stale=17, fresh=(0, 0, 0))}]))
+check("剔除陈旧后无新鲜条目" in h_allstale, "全陈旧卡片「剔除陈旧后无新鲜条目」")
+check("多空持平" not in h_allstale, "不再误述「多空持平」（含义相反）")
 
 print("\n【OPT-2】陈旧催化剂不推高净多（并列剔除后净值）")
 h_stale = _body(sd._render_alert_email([{

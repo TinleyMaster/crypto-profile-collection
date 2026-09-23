@@ -42,11 +42,17 @@ def check(cond, name, detail=""):
 
 
 def _res(linked=True, bull=0, bear=0, neut=0, latest=None, stale=0,
-         event=0, kol=0):
+         event=0, kol=0, fresh=None):
+    # 复验 N-786-1/2（2026-09-23）：标题方向段与覆盖币数改用**新鲜**口径 ⇒ 默认
+    # `catalyst_dir_fresh` 与全量同值（stale=0 的常规 fixture 语义不变）；显式传
+    # `fresh=(b,be,n)` 可构造「全量含陈旧」用例。
     return {
         "event": [f"e{i}" for i in range(event)],
         "catalyst": [],
         "catalyst_dir": {"bullish": bull, "bearish": bear, "neutral": neut},
+        "catalyst_dir_fresh": ({"bullish": fresh[0], "bearish": fresh[1],
+                                "neutral": fresh[2]} if fresh else
+                               {"bullish": bull, "bearish": bear, "neutral": neut}),
         "catalyst_raw": bull + bear + neut,
         "catalyst_latest": latest,
         "catalyst_stale": stale,

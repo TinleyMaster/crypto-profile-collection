@@ -1681,32 +1681,55 @@ def _alert_title(items: list[dict]) -> str:
     6 条是利空/中性，故补方向构成。
     复验 P1-N2：条数必须取**去重后的全量**（`catalyst_dir` 合计；明细列表只留前 4 条，
     直接 `len()` 会与括注合计口径不同源）。
+    复验 N-786-1/N-786-2（2026-09-23）：标题是**列表页唯一可见**处，陈旧催化剂在此
+    同样必须剔除（原实现只在卡片剔除）——否则「净多11（新鲜净多2）」仍会推高
+    direction conviction。故标题方向段改用 `catalyst_dir_fresh`，覆盖币数亦按**新鲜**
+    催化剂计（与 OPT-2「陈旧不算数」口径统一）；`event`/`kol` 遵循各自窗口（随新鲜并存）。
     """
     n_res = 0
     res_coins = 0  # 审计 OPT-1：有共振的**币数**（共振常高度集中在个别币）
+    has_stale = False  # 是否有全量催化剂但全为陈旧的币（N-786-2：不能印「无共振」）
     bull = bear = neut = 0
+    fresh_bull = fresh_bear = fresh_neut = 0
     for it in items:
         res = it["resonance"]
         cd = res.get("catalyst_dir") or {}
-        bull += int(cd.get("bullish", 0))
-        bear += int(cd.get("bearish", 0))
-        neut += int(cd.get("neutral", 0))
-        coin_n = len(res["event"]) + _catalyst_total(cd) + len(res["kol"])
+        cdf = res.get("catalyst_dir_fresh") or {}
+        f_coin = (int(cdf.get("bullish", 0)) + int(cdf.get("bearish", 0))
+                  + int(cdf.get("neutral", 0)))
+        # N-786-1：标题方向段用**新鲜**口径（陈旧旧闻不推高 conviction）
+        fresh_bull += int(cdf.get("bullish", 0))
+        fresh_bear += int(cdf.get("bearish", 0))
+        fresh_neut += int(cdf.get("neutral", 0))
+        # N-786-2：覆盖币数按**新鲜**计（只有陈旧催化剂的币不算「有共振」）
+        coin_n = len(res["event"]) + f_coin + len(res["kol"])
         n_res += coin_n
         if coin_n:
             res_coins += 1
+        if _catalyst_total(cd) > 0 and f_coin == 0:
+            has_stale = True
     if not n_res:
+        # N-786-2：密封边界——整批共振全为 0 时，若存在「有催化剂但全 >3 天」的币，
+        # **不得**印「纯盘面信号，无共振」（那是事实错误：有催化剂，只是陈旧）⇒ 改口径披露。
+        if has_stale:
+            return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
+                    f"（无新鲜共振；催化剂全部 >{CATALYST_STALE_DAYS} 天，不计方向）")
         return f"🚨 盘面异动告警：{len(items)} 币高置信信号（纯盘面信号，无共振）"
     # 审计 OPT-1：原「含共振 N 条」为全批累加，多币批次易被误读为「整批都有共振」
     # （实测「5 币…11 条」实为 5 币里只有 1 币有）⇒ 并列覆盖币数「（k/N 币）」。
     cover_txt = f"（{res_coins}/{len(items)} 币）"
     dir_txt = ""
-    if bull or bear or neut:
-        dir_txt = f"，催化剂 {bull}多/{bear}空/{neut}中"
+    if fresh_bull or fresh_bear or fresh_neut:
+        dir_txt = (f"，催化剂 {fresh_bull}多/{fresh_bear}空/{fresh_neut}中"
+                   f"（已剔除陈旧）")
         # 审计 O2：中性条不计入方向。只报「多/空/中」时，扫读者会把「4多/0空/2中」
         # 读成强多；补「净多 = 多−空」，让中性不增强方向 conviction。
-        if bull != bear:
-            dir_txt += f"，净{'多' if bull > bear else '空'}{abs(bull - bear)}"
+        if fresh_bull != fresh_bear:
+            dir_txt += (f"，净{'多' if fresh_bull > fresh_bear else '空'}"
+                        f"{abs(fresh_bull - fresh_bear)}")
+    else:
+        # N-786-3：全陈旧 ⇒ 新鲜方向根本不存在，不得说成「多空持平」（含义相反）。
+        dir_txt = "，催化剂新鲜条目 0（全部 >3 天，不计方向）"
     return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
             f"（含共振 {n_res} 条{cover_txt}{dir_txt}）")
 
@@ -1892,10 +1915,16 @@ def _render_alert_email(items: list[dict],
                 if fresh:
                     fb = int(fresh.get("bullish", 0))
                     fbear = int(fresh.get("bearish", 0))
-                    fn = fb - fbear
-                    fn_txt = (f"净多{fn}" if fn > 0 else
-                              f"净空{-fn}" if fn < 0 else "多空持平")
-                    cat_dir_txt += f"（剔除陈旧后{fn_txt}）"
+                    fneut = int(fresh.get("neutral", 0))
+                    if fb == 0 and fbear == 0 and fneut == 0:
+                        # N-786-3：全陈旧 ⇒ 新鲜方向不存在，不得说成「多空持平」
+                        #（那读作「新鲜的多空均衡」，含义与「一条新的都没有」相反）。
+                        cat_dir_txt += "（剔除陈旧后无新鲜条目）"
+                    else:
+                        fn = fb - fbear
+                        fn_txt = (f"净多{fn}" if fn > 0 else
+                                  f"净空{-fn}" if fn < 0 else "多空持平")
+                        cat_dir_txt += f"（剔除陈旧后{fn_txt}）"
         res_txt = (f"事件{len(res['event'])} · 催化剂{cat_n if linked else 'n/a'}"
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
                    + f" · KOL {len(res['kol']) if linked else 'n/a'}")
@@ -2041,8 +2070,10 @@ def _render_alert_email(items: list[dict],
               f"「已触下限/上限」= 失效位被夹到 [{STOP_BAND_TXT}] 边界，真实 2×ATR 在"
               "该边界之外（更窄/更宽），非「2×ATR 恰等于该值」；"
               "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
-              "「最新/含 N 条 >X 天/剔除陈旧后净X」= 催化剂新鲜度（7 天窗口含陈旧条目；"
-              "「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高 conviction）；"
+              "「最新/含 N 条 >X 天/剔除陈旧后净X/无新鲜条目」= 催化剂新鲜度（7 天窗口"
+              "含陈旧条目；「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高"
+              "conviction；「无新鲜条目」= 全部 >X 天）；标题的催化剂方向段与覆盖币数"
+              "同用新鲜口径（陈旧不计）；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"

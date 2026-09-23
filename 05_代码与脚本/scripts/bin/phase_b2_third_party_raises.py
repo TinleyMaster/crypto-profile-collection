@@ -144,6 +144,20 @@ def ensure_tables(conn) -> None:
     conn.commit()
 
 
+def count_placeholder_mapped_protocols(conn, placeholder_predicate: str) -> int:
+    """统计仍映射到占位资产（无真实 canonical_symbol）的 dl 协议数。仅用于可观测性。"""
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM core.asset_source_map AS asm
+            INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id
+            WHERE asm.source_code = 'dl'
+              AND NOT ({placeholder_predicate})
+        """)
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
@@ -160,27 +174,37 @@ def main() -> int:
         "ON CONFLICT (protocol_id) DO UPDATE SET checked_at = NOW()"
     )
 
+    # P1-4 写入侧守卫：目标资产必须有真实 canonical_symbol。
+    # 占位资产（''/'-'/'?'）是「大量 DL 协议被批量映射到同一资产」的历史遗留，
+    # 一旦写入就会形成「甲协议标题 + 乙资产身份」的错配（biz.asset_raises 中
+    # 11125 Aztec Connect 曾挂 407 行 / 287 个不同协议），必须在候选层拦掉。
+    placeholder_predicate = "a.canonical_symbol IS NOT NULL AND TRIM(a.canonical_symbol) NOT IN ('', '-', '?')"
+
     if args.asset_id is not None:
-        candidate_sql = """
+        candidate_sql = f"""
             SELECT asm.asset_id, p.protocol_id, p.slug, p.name
             FROM core.asset_source_map AS asm
             INNER JOIN src_dl.protocol_list AS p ON p.protocol_id = asm.source_asset_key
+            INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id
             WHERE asm.source_code = 'dl'
               AND asm.asset_id = %s
               AND p.slug IS NOT NULL AND TRIM(p.slug) != ''
+              AND {placeholder_predicate}
             ORDER BY p.protocol_id
             LIMIT 1
         """
         candidate_params: tuple = (args.asset_id,)
     else:
-        candidate_sql = """
+        candidate_sql = f"""
             SELECT asm.asset_id, p.protocol_id, p.slug, p.name
             FROM src_dl.protocol_list AS p
             INNER JOIN core.asset_source_map AS asm
                 ON asm.source_code = 'dl'
                AND asm.source_asset_key = p.protocol_id
+            INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id
             WHERE p.slug IS NOT NULL
               AND TRIM(p.slug) != ''
+              AND {placeholder_predicate}
               AND NOT EXISTS (
                   SELECT 1 FROM biz.dl_protocol_checked c WHERE c.protocol_id = p.protocol_id
               )
@@ -191,15 +215,21 @@ def main() -> int:
 
     with get_connection(settings.database_url) as conn:
         ensure_tables(conn)
+        n_placeholder = count_placeholder_mapped_protocols(conn, placeholder_predicate)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(candidate_sql, candidate_params)
             candidates = [dict(row) for row in cur.fetchall()]
 
     if not candidates:
-        print(json.dumps({"status": "no_candidates"}, ensure_ascii=False))
+        print(json.dumps({
+            "status": "no_candidates",
+            "skipped_placeholder_mapped": n_placeholder,
+        }, ensure_ascii=False))
         return 0
 
     print(f"待处理协议: {len(candidates)}")
+    if n_placeholder:
+        print(f"已被守卫排除: {n_placeholder} 个协议仍映射到占位资产（需先修正 core.asset_source_map）")
 
     written = 0
     matched = 0

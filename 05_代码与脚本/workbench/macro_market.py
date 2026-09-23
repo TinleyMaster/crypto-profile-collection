@@ -3792,6 +3792,10 @@ def _recent_raises(
     """近期融资落地（asset_raises）。返回 [(asset_id, symbol, round, amount_m, lead, raise_date, protocol_name), ...]。
 
     amount 单位为百万美元（实测：Crypto.com 400 = $400M）；协议名用于 symbol 缺失兜底。
+
+    P1-4 护栏：占位资产（canonical_symbol 为 ''/'-'/'?'）上的 raises 行属历史错配
+    （DL 协议被批量映射到同一占位资产），直接排除，避免「甲协议标题 + 乙资产身份」
+    的嵌合卡片进入 AI 画像与前端跳转。
     """
     try:
         from crypto_research.config import get_settings
@@ -3806,6 +3810,8 @@ def _recent_raises(
                     FROM biz.asset_raises r
                     JOIN core.asset a ON a.asset_id = r.asset_id
                     WHERE r.raise_date >= NOW() - make_interval(days => %s)
+                      AND a.canonical_symbol IS NOT NULL
+                      AND TRIM(a.canonical_symbol) NOT IN ('', '-', '?')
                     ORDER BY r.raise_date DESC
                     LIMIT %s
                 """, (window_days, limit))
@@ -5213,7 +5219,9 @@ def score_opportunities(overview: dict) -> dict:
         aid, symbol, rnd, amount_m, lead, rdate, proto = rt
         amount_str = f"${amount_m:.0f}M" if amount_m else "金额未披露"
         lead_str = lead or "未披露"
-        target = symbol if symbol not in ("", "-") else (proto or "?")
+        # P1-4 护栏后 symbol 必为真实币种代码（占位资产已在 SQL 层排除），
+        # 保持 target 与 asset_id 同源，杜绝「协议名标题 + 他人 asset_id」错配
+        target = symbol or proto or "?"
         conviction = _compute_conviction_score(
             mvrv_pct=_mvrv_pct_for(symbol, mvrv_map),
             funding=funding_latest, exchange_netflow=ex_netflow,
@@ -5769,6 +5777,29 @@ def score_opportunities(overview: dict) -> dict:
     for o in excluded:
         _annotate_horizon(o, t)
 
+    # P1：为所有机会/excluded 解析 asset_id，供前端跳转 /research/<asset_id>。
+    # 必须在 select_highlight_signals / select_risk_signals **之前**完成：
+    # 二者用 dict(o) 浅拷贝生成合并卡，拷贝发生在补 id 之前就会丢失 asset_id，
+    # 导致高亮卡进 AI 门禁时无 asset_id 而被整批跳过（P1-1 时序缺陷）。
+    all_symbols: set[str] = set()
+    for o in opportunities + excluded:
+        all_symbols.update(_symbols_from_opportunity(o))
+    symbol_to_asset = _resolve_symbols_to_asset_ids(all_symbols)
+    for o in opportunities + excluded:
+        # 优先用 involved_symbols 中第一个能解析到的 asset_id
+        asset_id = None
+        involved = o.get("involved_symbols") or []
+        if isinstance(involved, list):
+            for s in involved:
+                if s and symbol_to_asset.get(str(s).upper().strip()):
+                    asset_id = symbol_to_asset[str(s).upper().strip()]
+                    break
+        # 否则用 target
+        if asset_id is None and o.get("target"):
+            asset_id = symbol_to_asset.get(str(o["target"]).upper().strip())
+        if asset_id is not None:
+            o["asset_id"] = asset_id
+
     # 精选高亮信号（FEAT-HIGHLIGHT-001）：与完整机会池分离
     highlight_max_total = int(t.get("highlight_max_total", 10))
     # V2 模式下降级初筛共振门槛（1种即可入池），把质量判断权交给 AI
@@ -5786,27 +5817,6 @@ def score_opportunities(overview: dict) -> dict:
         opportunities, max_total=risk_max_total,
         min_resonance=risk_min_resonance,
     )
-
-    # P1：为所有机会/excluded 解析 asset_id，供前端跳转 /research/<asset_id>
-    all_symbols: set[str] = set()
-    for o in opportunities + excluded:
-        all_symbols.update(_symbols_from_opportunity(o))
-    symbol_to_asset = _resolve_symbols_to_asset_ids(all_symbols)
-    for o in opportunities + excluded:
-        syms = _symbols_from_opportunity(o)
-        # 优先用 involved_symbols 中第一个能解析到的 asset_id
-        asset_id = None
-        involved = o.get("involved_symbols") or []
-        if isinstance(involved, list):
-            for s in involved:
-                if s and symbol_to_asset.get(str(s).upper().strip()):
-                    asset_id = symbol_to_asset[str(s).upper().strip()]
-                    break
-        # 否则用 target
-        if asset_id is None and o.get("target"):
-            asset_id = symbol_to_asset.get(str(o["target"]).upper().strip())
-        if asset_id is not None:
-            o["asset_id"] = asset_id
 
     # FEAT-AI-HIGHLIGHT: AI 增强精选（在 asset_id 解析之后，确保信号有 asset_id）
     ai_enabled = str(t.get("ai_highlight_enabled", "1")) == "1"
@@ -5839,12 +5849,6 @@ def score_opportunities(overview: dict) -> dict:
                 risk_signals = ai_enrich_risk_signals(risk_signals, max_ai_analyze=ai_max_risk)
         except Exception:
             pass  # AI 增强失败不影响主流程
-
-    # 为 highlights 和 risk_signals 也补上 asset_id（AI 增强后可能有新信号或丢失的情况）
-    for sig_list in [highlights, risk_signals]:
-        for o in sig_list:
-            if not o.get("asset_id") and o.get("target"):
-                o["asset_id"] = symbol_to_asset.get(str(o["target"]).upper().strip())
 
     status = "ok"
     if not opportunities:
@@ -5906,8 +5910,10 @@ def _symbols_from_opportunity(opp: dict) -> set[str]:
     target = opp.get("target")
     if isinstance(target, str):
         t = target.upper().strip()
-        # 单一代币代码（如 BTC / ETH / 1INCH），排除中文描述性 target
-        if re.match(r"^[A-Z0-9]{2,10}$", t):
+        # 单一代币代码（如 H / BTC / ETH / 1INCH），排除中文描述性 target
+        # 下限取 1：H、X 等单字符 symbol 在 core.asset 中真实存在，
+        # 收紧为 {2,10} 会让它们无法解析 asset_id，进而被误判为「聚合/宏观」跳过 AI
+        if re.match(r"^[A-Z0-9]{1,10}$", t):
             return {t}
     return set()
 

@@ -56,7 +56,7 @@ from catalyst.classify import RuleEventClassifier  # noqa: E402
 from catalyst.grade import CatalystGrader, MarketRegime  # noqa: E402
 from catalyst.resonance import ResonanceScorer  # noqa: E402
 from catalyst.signal import CatalystSignalBuilder  # noqa: E402
-from catalyst.notifier import send_fast_alerts_for_new_signals  # noqa: E402
+from catalyst.notifier import send_fast_alerts_for_new_signals, send_major_event_alerts  # noqa: E402
 from catalyst.catalyst_trace import (  # noqa: E402
     reset as trace_reset,
     set_verbose as trace_set_verbose,
@@ -155,6 +155,13 @@ def run_fast_once(verbose: bool = False) -> dict:
         else:
             stats["alert_sent"] = 0
             stats["alert_failed"] = 0
+
+        # 重大事件通道（重要性闸门，与上面的 A 级 Alert 独立去重/渲染）。
+        # 不依赖 new_sig_ids：重大事件的判据是「tier A/B + 市场已确认」，
+        # 与「本轮是否转为 open」无关，否则会漏掉本轮状态未变的老信号。
+        major_result = send_major_event_alerts(conn)
+        stats["major_event_sent"] = major_result.get("sent", 0)
+        stats["major_event_failed"] = major_result.get("failed", 0)
 
         conn.commit()
 
@@ -259,7 +266,8 @@ def main() -> int:
             print(f"[catalyst_fast_daemon]   分类:{stats.get('classify',0)} "
                   f"分级:{stats.get('grade',0)} 共振:{stats.get('resonance',0)} "
                   f"信号:{stats.get('signal_inserted',0)} "
-                  f"告警:{stats.get('alert_sent',0)}")
+                  f"告警:{stats.get('alert_sent',0)} "
+                  f"重大事件:{stats.get('major_event_sent',0)}")
         except Exception as e:
             elapsed = time.time() - start_ts
             print(f"[catalyst_fast_daemon] 第 {round_count} 轮异常 ({elapsed:.1f}s): {e}",

@@ -105,7 +105,11 @@ from catalyst.second_order import PersistenceScorer
 from catalyst.fundamental import FundamentalChecker
 from catalyst.technical import TechnicalAnalyzer
 from catalyst.signal import CatalystSignalBuilder, expire_signals
-from catalyst.notifier import send_fast_alerts_for_new_signals, send_slow_digest
+from catalyst.notifier import (
+    send_fast_alerts_for_new_signals,
+    send_major_event_alerts,
+    send_slow_digest,
+)
 from catalyst.catalyst_trace import trace_step, reset as trace_reset, summary as trace_summary, set_verbose as trace_set_verbose
 
 
@@ -2095,6 +2099,16 @@ def main() -> int:
             elif new_sig_ids and args.no_alert:
                 print(f"  ⚡ 快提醒: 跳过（--no-alert），共 {len(new_sig_ids)} 条新信号")
 
+            # 重大事件通道（重要性闸门，与 A 级快提醒独立去重/渲染）
+            if args.no_alert:
+                print("  📢 重大事件: 跳过（--no-alert）")
+            else:
+                major_result = send_major_event_alerts(conn)
+                if major_result["sent"] > 0:
+                    print(f"  📢 重大事件: 发送 {major_result['sent']} 条通报")
+                if major_result["failed"] > 0:
+                    print(f"  ⚠️  重大事件发送失败: {major_result['failed']} 条")
+
             print()
             print("快通道完成 ✓")
             trace_summary()
@@ -2160,6 +2174,17 @@ def main() -> int:
                     print(f"  📧  汇总邮件: 跳过（{digest_result.get('reason', '无新信号')}）")
                 else:
                     print(f"  ⚠️  汇总邮件失败: {digest_result.get('reason', 'unknown')}")
+
+            # 4.5 重大事件通道（重要性闸门；慢通道每 4h 兜底一次，
+            #     快通道常驻进程恢复后由它提供分钟级时延）
+            if args.no_alert:
+                print("  📢 重大事件: 跳过（--no-alert）")
+            else:
+                major_result = send_major_event_alerts(conn)
+                if major_result["sent"] > 0:
+                    print(f"  📢 重大事件: 发送 {major_result['sent']} 条通报")
+                if major_result["failed"] > 0:
+                    print(f"  ⚠️  重大事件发送失败: {major_result['failed']} 条")
 
             print()
             print("慢通道完成 ✓")

@@ -1214,6 +1214,252 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
     """, (hours,)).fetchall()
 
 
+# =====================================================================
+# 重大事件通道（重要性闸门，独立于 tier 的可交易性闸门）
+# =====================================================================
+#
+# 背景（2026-09-23 排查）：A 级 Alert 的入选口径是 `tier='A' AND status='open'`，
+# 而 tier 同时承担了「重要性」与「可交易性」两件事——价格档位不齐、RR 不足、
+# 方向不符都会把 A/B 封顶到 C。于是「CME 将于 10/19 上线 BCH 与 UNI 期货」这类
+# 重大利好因为给不出可交易档位而完全静默（实测 tier='A' AND status='open' 全表 0 行）。
+#
+# 本通道把「重要性」单独拎出来：判据只读 catalyst_grade 的原始字段 + 事件前的
+# 价格异动，不要求 entry/stop/tp，因此不会因为「给不出交易计划」而漏报。
+# 反向约束同样重要——该判据近 6 天实测命中 9 条（≈1.3 条/天），既捞得到 BCH 那条，
+# 也不会把「24h 涨幅播报」这类负 alpha 内容捞进来。
+#
+# 邮件刻意不出现任何交易档位，并显式标注「非交易建议」，避免被读成开单指令。
+
+NTYPE_MAJOR_EVENT = "major_event"     # 重大事件通道（与 A 级 Alert 分开渲染/去重）
+
+MAJOR_EVENT_MIN_PRELAUNCH_RET = 5.0   # 事件前 24h 已异动 ≥5%：市场已确认事件有效
+MAJOR_EVENT_COOLDOWN_HOURS = 24       # 同一资产 24h 内只发一次（事件级去重）
+MAJOR_EVENT_KINDS = ("structural", "event")
+MAJOR_EVENT_MAX_PER_RUN = 3           # 单轮上限，配合「日均 ≤3 条」目标
+
+
+def _recent_major_events(conn, hours: int = 24,
+                         limit: int = MAJOR_EVENT_MAX_PER_RUN) -> list[dict]:
+    """过去 N 小时发布的「重大事件」候选（每资产留最高分一条）。
+
+    入选条件（缺一不可）：
+    - `tier IN ('A','B')` 且 `status='open'`：合成分 ≥60，且未被方向闸门
+      /价格档位闸门压到 C（即方向为多头、未被判为已充分定价）
+    - `catalyst_kind IN ('structural','event')`：排除情绪稿与噪音
+    - `prelaunch_ret_24h >= 5` 且 `prelaunch_penalty = 0`：事件前 24h 市场已异动，
+      且该异动未被计入降权（避免通报已经涨完的事件）
+    - `ai_event_type <> 'market_update'`：排除纯行情播报（负 alpha 类别）
+    - 事件发布时间在 N 小时内：只通报新鲜事件，避免长期停摆后补发陈旧事件
+    - 同一资产 N 小时内已发过 major_event 则跳过：一条新闻常被多家媒体重复采集
+      （实测 BCH 那条来自 4 家媒体、5 条 catalyst），事件级去重后只发一封
+    """
+    return conn.execute(f"""
+        SELECT * FROM (
+            SELECT DISTINCT ON (s.asset_id)
+                   s.signal_id, s.catalyst_id, s.asset_id,
+                   s.tier, s.composite_score, s.resonance_state, s.resonance_score,
+                   s.kind, s.created_at,
+                   a.canonical_name, a.canonical_symbol AS symbol,
+                   a.primary_sector, a.market_cap AS asset_market_cap, a.market_cap_rank,
+                   ac.title AS catalyst_title, ac.title_cn,
+                   ac.ai_summary, ac.ai_event_type, ac.ai_sentiment,
+                   ac.rule_event_type, ac.source_code, ac.source_url,
+                   ac.published_at, ac.body_text AS catalyst_body,
+                   cg.authority_score, cg.event_weight, cg.scope_score,
+                   cg.prelaunch_ret_24h, cg.prelaunch_penalty,
+                   cg.catalyst_kind, cg.tradable,
+                   ci.impact_direction, ci.impact_strength,
+                   md.price_usd AS current_price, md.change_24h, md.change_7d,
+                   md.volume_24h
+            FROM biz.catalyst_signal s
+            JOIN core.asset a ON s.asset_id = a.asset_id
+            JOIN biz.asset_catalyst ac
+              ON ac.catalyst_id = s.catalyst_id AND ac.asset_id = s.asset_id
+            JOIN biz.catalyst_grade cg ON cg.catalyst_id = s.catalyst_id
+            LEFT JOIN biz.catalyst_impact ci
+              ON ci.catalyst_id = s.catalyst_id AND ci.asset_id = s.asset_id
+            LEFT JOIN LATERAL (
+                SELECT m.price_usd, m.change_24h, m.change_7d, m.volume_24h
+                FROM biz.asset_market_daily m
+                WHERE m.asset_id = s.asset_id
+                ORDER BY m.market_date DESC
+                LIMIT 1
+            ) md ON TRUE
+            WHERE s.tier IN ('A', 'B')
+              AND s.status = 'open'
+              AND cg.catalyst_kind = ANY(%s::TEXT[])
+              AND cg.prelaunch_ret_24h >= %s
+              AND cg.prelaunch_penalty = 0
+              AND COALESCE(ac.ai_event_type, '') <> 'market_update'
+              AND ac.published_at > NOW() - (%s::int * INTERVAL '1 hour')
+              AND {ASSET_NAME_FILTER_SQL}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM biz.catalyst_notification_log nl
+                  JOIN biz.catalyst_signal ns ON ns.signal_id = nl.signal_id
+                  WHERE ns.asset_id = s.asset_id
+                    AND nl.notification_type = %s
+                    AND nl.status = 'sent'
+                    AND nl.sent_at > NOW() - (%s::int * INTERVAL '1 hour')
+              )
+            ORDER BY s.asset_id, s.composite_score DESC
+        ) t
+        ORDER BY t.composite_score DESC
+        LIMIT %s
+    """, (list(MAJOR_EVENT_KINDS), MAJOR_EVENT_MIN_PRELAUNCH_RET, hours,
+          NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS, limit)).fetchall()
+
+
+def _major_event_subject(r: dict) -> str:
+    sym = r.get("symbol") or "?"
+    title = _full_title(r)
+    if len(title) > 60:
+        title = title[:60] + "…"
+    return f"📢 [重大事件] {sym} - {title}"
+
+
+def _build_major_event_html(r: dict) -> str:
+    """构建单条「重大事件」通报邮件（自包含，刻意不含交易档位）。"""
+    sym = r.get("symbol") or "—"
+    name = r.get("canonical_name") or ""
+    title = _full_title(r)
+    body = (r.get("catalyst_body") or "").strip()
+    summary = (r.get("ai_summary") or "").strip()
+
+    direction = _DIRECTION_CN.get(r.get("ai_sentiment"), r.get("ai_sentiment") or "—")
+    impact = _DIRECTION_CN.get(r.get("impact_direction"), r.get("impact_direction") or "—")
+    strength = _IMPACT_STRENGTH_CN.get(r.get("impact_strength"),
+                                       r.get("impact_strength") or "—")
+    res = _RESONANCE_CN.get(r.get("resonance_state"), r.get("resonance_state") or "—")
+    kind = _KIND_CN.get(r.get("catalyst_kind"), "—")
+
+    pre = _to_float(r.get("prelaunch_ret_24h"))
+    pre_txt = _pct(pre)
+    chg24 = _to_float(r.get("change_24h"))
+    price_txt = _fmt_price(r.get("current_price"))
+
+    def _kv(label, value, color="#111827"):
+        return (f'<tr>'
+                f'<td style="padding:6px 10px;color:#6b7280;font-size:13px;'
+                f'white-space:nowrap;vertical-align:top">{label}</td>'
+                f'<td style="padding:6px 10px;color:{color};font-size:13px;'
+                f'font-weight:600">{value}</td>'
+                f'</tr>')
+
+    score_line = (
+        f"权威 {r.get('authority_score', '—')} · 事件权重 {r.get('event_weight', '—')}"
+        f" · 影响范围 {r.get('scope_score', '—')}"
+    )
+    src = r.get("source_url") or ""
+    src_line = (f'<a href="{src}" style="color:#2563eb">原文链接</a>' if src else "—")
+
+    return f"""<html><body style="margin:0;padding:0;background:#f3f4f6">
+<div style="max-width:720px;margin:0 auto;padding:20px;font-family:-apple-system,
+  BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
+
+  <div style="background:#fff7ed;border:1px solid #fdba74;border-radius:8px;
+       padding:12px 16px;margin-bottom:16px">
+    <div style="font-size:15px;font-weight:700;color:#9a3412">📢 重大事件通报</div>
+    <div style="font-size:12px;color:#9a3412;margin-top:4px">
+      本条为「重要性」通道通报，不含交易档位，<b>非交易建议</b>；
+      系统未给出可交易计划（档位/RR 未达标），请自行判断。
+    </div>
+  </div>
+
+  <div style="background:#fff;border-radius:8px;padding:18px 20px;margin-bottom:14px">
+    <div style="font-size:18px;font-weight:700;color:#111827">
+      {sym} <span style="font-size:13px;font-weight:400;color:#6b7280">{name}</span>
+    </div>
+    <div style="font-size:15px;line-height:1.6;color:#111827;margin-top:10px">{title}</div>
+    <div style="font-size:12px;color:#6b7280;margin-top:8px">
+      发布：{_fmt_ts(r.get('published_at'))} · 来源 {r.get('source_code') or '—'}
+      · 事件类别 {r.get('ai_event_type') or r.get('rule_event_type') or '—'}
+    </div>
+  </div>
+
+  <div style="background:#fff;border-radius:8px;padding:6px 10px;margin-bottom:14px">
+    <table style="width:100%;border-collapse:collapse">
+      {_kv('重要性', f'{score_line}（{kind}）')}
+      {_kv('催化方向', f'{direction} · 影响强度 {strength}（{impact}）')}
+      {_kv('市场确认', f'事件前 24h 已异动 {pre_txt}（未被计入降权）',
+          _pct_color(pre))}
+      {_kv('共振状态', res)}
+      {_kv('当前价', f'{price_txt} · 24h {_pct(chg24)}', _pct_color(chg24))}
+      {_kv('信号分层', f"tier {r.get('tier') or '—'} · 合成分 "
+                       f"{r.get('composite_score') if r.get('composite_score') is not None else '—'}"
+                       f" · 共振分 {r.get('resonance_score') if r.get('resonance_score') is not None else '—'}")}
+      {_kv('原文', src_line)}
+    </table>
+  </div>
+
+  {f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">AI 摘要</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151">{summary}</div>
+  </div>''' if summary else ''}
+
+  {f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">催化剂原文</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151;white-space:pre-wrap">{body[:2000]}</div>
+  </div>''' if body else ''}
+
+  <div style="font-size:11px;color:#9ca3af;text-align:center;padding:8px">
+    由催化剂管道「重大事件」通道自动发送 · 判据与 A 级 Alert 独立
+  </div>
+</div></body></html>"""
+
+
+def send_major_event_alerts(conn, hours: int = 24) -> dict:
+    """重大事件通道：对「重要性高且市场已确认」的事件发送独立通报邮件。
+
+    与 A 级 Alert 完全分开：独立 notification_type（`major_event`）→ 独立去重、
+    独立渲染、独立邮件，互不影响。
+
+    Returns:
+        dict: {sent, skipped, failed, signals, reason}
+    """
+    try:
+        ensure_notification_table(conn)
+    except Exception as e:
+        logger.warning("确保通知表存在失败: %s", e)
+
+    try:
+        rows = _recent_major_events(conn, hours=hours)
+    except Exception as e:
+        logger.warning("查询重大事件候选失败: %s", e, exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 0, "signals": [], "reason": str(e)}
+
+    if not rows:
+        return {"sent": 0, "skipped": 0, "failed": 0, "signals": [], "reason": None}
+
+    sent_ids, failed_ids, skipped = [], [], 0
+    for r in rows:
+        sid = r["signal_id"]
+        subject = _major_event_subject(r)
+        # 原子占锁：同信号 24h 内只会有一个执行流拿到发送权
+        if not _try_acquire_send_lock(conn, sid, NTYPE_MAJOR_EVENT,
+                                      r.get("tier"), subject):
+            skipped += 1
+            continue
+        ok, msg = _send_email(subject, _build_major_event_html(r))
+        _mark_sent(conn, sid, NTYPE_MAJOR_EVENT, r.get("tier"), subject,
+                   status="sent" if ok else "failed",
+                   error_msg=None if ok else msg)
+        if ok:
+            sent_ids.append(sid)
+            logger.info("重大事件通报已发送 sig=%s %s", sid, subject)
+        else:
+            failed_ids.append(sid)
+            logger.warning("重大事件通报发送失败 sig=%s: %s", sid, msg)
+
+    return {
+        "sent": len(sent_ids),
+        "skipped": skipped,
+        "failed": len(failed_ids),
+        "signals": sent_ids + failed_ids,
+        "reason": None,
+    }
+
+
 # ---- 中文化映射 ----
 
 # 趋势状态必须与「交易方向」区分（审计 P0-1：technical_state='up' 曾让做空信号

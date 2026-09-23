@@ -1533,6 +1533,9 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     """
     out: dict = {"event": [], "catalyst": [], "kol": [],
                  "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
+                 # 审计 OPT-2：**新鲜**（published_at ≥ fresh_cut）方向构成 —— 陈旧
+                 # 旧闻不应推高方向 conviction（ARB 实测 17 条里 10 条 >3 天）。
+                 "catalyst_dir_fresh": {"bullish": 0, "bearish": 0, "neutral": 0},
                  "catalyst_raw": 0,
                  # 审计 N1：最新一条催化剂的 published_at 与「>CATALYST_STALE_DAYS 天」的
                  # 条数，供渲染层披露新鲜度（7 天窗口会把上周/已过期催化剂也算进共振）。
@@ -1598,6 +1601,8 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
                 out["catalyst_latest"] = pub
             if pub < fresh_cut:
                 out["catalyst_stale"] += 1
+            else:
+                out["catalyst_dir_fresh"][d] += 1  # OPT-2：新鲜方向构成
         # O6 回放用全量结构化明细（渲染层不读此键）
         out["catalyst_all"].append({
             "title": r["title"], "dir": d,
@@ -1678,6 +1683,7 @@ def _alert_title(items: list[dict]) -> str:
     直接 `len()` 会与括注合计口径不同源）。
     """
     n_res = 0
+    res_coins = 0  # 审计 OPT-1：有共振的**币数**（共振常高度集中在个别币）
     bull = bear = neut = 0
     for it in items:
         res = it["resonance"]
@@ -1685,9 +1691,15 @@ def _alert_title(items: list[dict]) -> str:
         bull += int(cd.get("bullish", 0))
         bear += int(cd.get("bearish", 0))
         neut += int(cd.get("neutral", 0))
-        n_res += len(res["event"]) + _catalyst_total(cd) + len(res["kol"])
+        coin_n = len(res["event"]) + _catalyst_total(cd) + len(res["kol"])
+        n_res += coin_n
+        if coin_n:
+            res_coins += 1
     if not n_res:
         return f"🚨 盘面异动告警：{len(items)} 币高置信信号（纯盘面信号，无共振）"
+    # 审计 OPT-1：原「含共振 N 条」为全批累加，多币批次易被误读为「整批都有共振」
+    # （实测「5 币…11 条」实为 5 币里只有 1 币有）⇒ 并列覆盖币数「（k/N 币）」。
+    cover_txt = f"（{res_coins}/{len(items)} 币）"
     dir_txt = ""
     if bull or bear or neut:
         dir_txt = f"，催化剂 {bull}多/{bear}空/{neut}中"
@@ -1695,7 +1707,8 @@ def _alert_title(items: list[dict]) -> str:
         # 读成强多；补「净多 = 多−空」，让中性不增强方向 conviction。
         if bull != bear:
             dir_txt += f"，净{'多' if bull > bear else '空'}{abs(bull - bear)}"
-    return f"🚨 盘面异动告警：{len(items)} 币高置信信号（含共振 {n_res} 条{dir_txt}）"
+    return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
+            f"（含共振 {n_res} 条{cover_txt}{dir_txt}）")
 
 
 # ── 卡片相对强度（仅用于排序与强度条，审计 §三.6） ────────────────
@@ -1874,6 +1887,15 @@ def _render_alert_email(items: list[dict],
             stale_n = int(res.get("catalyst_stale") or 0)
             if stale_n:
                 cat_dir_txt += f"，含 {stale_n} 条 >{CATALYST_STALE_DAYS} 天"
+                # 审计 OPT-2：陈旧旧闻不应推高「净多」conviction ⇒ 并列「剔除陈旧后净X」
+                fresh = res.get("catalyst_dir_fresh") or {}
+                if fresh:
+                    fb = int(fresh.get("bullish", 0))
+                    fbear = int(fresh.get("bearish", 0))
+                    fn = fb - fbear
+                    fn_txt = (f"净多{fn}" if fn > 0 else
+                              f"净空{-fn}" if fn < 0 else "多空持平")
+                    cat_dir_txt += f"（剔除陈旧后{fn_txt}）"
         res_txt = (f"事件{len(res['event'])} · 催化剂{cat_n if linked else 'n/a'}"
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
                    + f" · KOL {len(res['kol']) if linked else 'n/a'}")
@@ -1974,6 +1996,11 @@ def _render_alert_email(items: list[dict],
             prior_txt = (f"<br><small style='color:#6b7280'>历史同场景 {prior['horizon']}h "
                          f"方向对齐 中位 {prior['median']:+.2f}% / 胜率 {prior['win']:.0f}%"
                          f"（n={prior['n']}，仅含已告警样本，非无偏基准）</small>")
+        elif sc == "BRK":
+            # 审计 OPT-3：`_scenario_priors` 样本池只取主池 ⇒ BRK 恒无先验。原实现
+            # `if prior:` 静默省略该行，读者分不清「无样本」还是「漏渲染」⇒ 显式标注。
+            prior_txt = ("<br><small style='color:#6b7280'>历史同场景：BRK 暂无历史先验"
+                         "（先验样本池仅含主池信号）</small>")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
@@ -2003,6 +2030,7 @@ def _render_alert_email(items: list[dict],
               "而告警只取 high ⇒ 该方向本轮不发信（非否决该方向本身）；"
               "「本批含蓄势池突破（BRK）N 条」= 本封含蓄势池突破信号数，"
               "其卡片另标「触发根」= 该突破判定的已收盘 1h 根；"
+              "BRK 判定只用价+量，不落 OI/CVD ⇒ BRK 卡片 OI/CVD 恒为 n/a（设计，非缺失）；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
               f"费率年化 = 当期 ×3×365（8h 结算），正 = 多头付空头（多头拥挤）、"
               "负 = 空头付多头（对做多顺风）；"
@@ -2013,7 +2041,8 @@ def _render_alert_email(items: list[dict],
               f"「已触下限/上限」= 失效位被夹到 [{STOP_BAND_TXT}] 边界，真实 2×ATR 在"
               "该边界之外（更窄/更宽），非「2×ATR 恰等于该值」；"
               "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
-              "「最新/含 N 条 >X 天」= 催化剂新鲜度（7 天窗口含陈旧条目）；"
+              "「最新/含 N 条 >X 天/剔除陈旧后净X」= 催化剂新鲜度（7 天窗口含陈旧条目；"
+              "「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高 conviction）；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
@@ -2021,7 +2050,8 @@ def _render_alert_email(items: list[dict],
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × |OI 增速|，BRK 无 OI 增速时取 "
               "3.0 等当量；共振方向与结论一致 ×1.15 / 相悖 ×0.75，CVD 同向 ×1.05），"
-              "按最高分对数归一，条后数字为原始分数，非胜率；「不含涨幅」，且 OI 为"
+              "按最高分对数归一，条后数字为原始分数，非胜率；「不含涨幅」、也不含催化剂"
+              "强度（催化剂仅以方向 ×1.15/×0.75 修正，与体量无关），且 OI 为"
               "乘性因子 ⇒ OI 近乎持平时分数必然贴地（此时 OI 段会显示「OI 持平」）；"
               "「已确认」徽章 = 信号发出后 6 小时内出现一根已收盘 1h K 线的收盘价越过"
               "「触发根极值」⇒ 延续已被市场跟随（质量升格，非入场门槛：实测等确认再"

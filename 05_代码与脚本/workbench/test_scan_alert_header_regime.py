@@ -40,11 +40,19 @@ def check(cond, name, detail=""):
             print(f"    {detail}")
 
 
-def _res():
+def _res(bull=0, bear=0, neut=0, latest=None, stale=0, fresh=None, linked=True):
     return {"event": [], "catalyst": [], "kol": [],
-            "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
-            "catalyst_raw": 0, "catalyst_latest": None, "catalyst_stale": 0,
-            "catalyst_all": [], "asset_linked": True}
+            "catalyst_dir": {"bullish": bull, "bearish": bear, "neutral": neut},
+            "catalyst_dir_fresh": ({"bullish": fresh[0], "bearish": fresh[1],
+                                    "neutral": fresh[2]} if fresh else {}),
+            "catalyst_raw": bull + bear + neut, "catalyst_latest": latest,
+            "catalyst_stale": stale,
+            "catalyst_all": [], "asset_linked": linked}
+
+
+def _body(html: str) -> str:
+    """卡片/正文部分（去掉图例与页脚）——图例文本会干扰卡片级断言。"""
+    return html.split("图例：")[0]
 
 
 def _brk_sig():
@@ -188,6 +196,40 @@ _data2["btc"] = [{"close_px": 105.0, "open_time": _now - timedelta(minutes=5)},
 reg2 = sd._build_regime(_Conn(_data2))
 check(not any(str(t).startswith("btc_1h=") for t in reg2["tags"]),
       "无已收盘条时不产出 btc_1h 标签（不拿 live 冒充收盘）")
+
+# ═══════════════════════════════════════════════════════════════
+#  OPT-1~6（审计_盘面异动告警邮件_含共振3封_2026-09-23）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【OPT-1】标题补覆盖币数（共振集中度）")
+two = [{"signal": _main_sig(), "resonance": _res(bull=3)},
+       {"signal": _brk_sig(), "resonance": _res()}]
+t2 = sd._alert_title(two)
+check("（1/2 币）" in t2, "标题并列覆盖币数「1/2 币」（5币11条实为1币的误读）", t2)
+t1 = sd._alert_title([{"signal": _main_sig(), "resonance": _res(bull=1)}])
+check("（1/1 币）" in t1, "单币批次「1/1 币」", t1)
+
+print("\n【OPT-2】陈旧催化剂不推高净多（并列剔除后净值）")
+h_stale = _body(sd._render_alert_email([{
+    "signal": _main_sig(),
+    "resonance": _res(bull=11, bear=1, neut=5, latest="2026-09-22",
+                      stale=10, fresh=(4, 1, 2))}]))
+check("剔除陈旧后净多3" in h_stale, "含陈旧时并列「剔除陈旧后净多3」")
+h_nostale = _body(sd._render_alert_email([{
+    "signal": _main_sig(), "resonance": _res(bull=3, stale=0, fresh=(3, 0, 0))}]))
+check("剔除陈旧" not in h_nostale, "无陈旧条时不渲染「剔除陈旧」")
+
+print("\n【OPT-3】BRK 无先验时显式标注（不再静默省略）")
+h_brk = _body(sd._render_alert_email([{"signal": _brk_sig(), "resonance": _res()}]))
+check("BRK 暂无历史先验" in h_brk, "BRK 无 prior → 显式「BRK 暂无历史先验」")
+h_main = _body(sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}]))
+check("暂无历史先验" not in h_main, "主池无 prior 时不加 BRK 文案")
+
+print("\n【OPT-5/6】图例补 BRK 设计说明 + 强度条不含催化剂强度")
+_leg2 = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}], REGIME)
+check("BRK 判定只用价+量" in _leg2, "图例说明 BRK 不落 OI/CVD（n/a 是设计）")
+check("不含催化剂强度" in _leg2, "图例声明强度条不含催化剂强度")
+check("**" not in _leg2, "图例无 markdown 强调符 `**`")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

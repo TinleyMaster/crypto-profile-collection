@@ -25,6 +25,9 @@
 
 前置：写入侧守卫（phase_b2_third_party_raises.py）应先于本脚本上线，
 否则清理完存量后重跑仍会重新写入占位资产行。
+
+注意：输出中的 `placeholder_shell_assets` 是**信息性清单，不是待修项**——
+方案文档 §4.1 已证明这些 dl 映射指向协议自身，不应重指或删除。
 """
 from __future__ import annotations
 
@@ -115,8 +118,13 @@ def _count_same_name_candidates(cur, ids: list[int]) -> int:
     return int(cur.fetchone()["n"])
 
 
-def _list_placeholder_mappings(cur) -> list[dict]:
-    """仍需人工修正的占位资产 dl 映射（后续跟进项，本脚本不改）。"""
+def _list_placeholder_shell_assets(cur) -> list[dict]:
+    """列出「无 symbol 协议壳」资产及其 dl 映射数（**信息性输出，不是待修项**）。
+
+    这些映射指向的就是协议自身（名称逐一相同、DL 侧本就无 symbol），重指或删除
+    会破坏各自的 TVL 序列与文档关联。方案文档 §4.1 已以 5 项证据推翻「需修正映射
+    本身」的旧结论。此处仅作可观测性保留。
+    """
     cur.execute(f"""
         SELECT asm.asset_id, a.canonical_name, COUNT(*) AS n_protocols
         FROM core.asset_source_map AS asm
@@ -139,7 +147,7 @@ def main() -> int:
     with get_connection(settings.database_url) as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             polluted = _fetch_polluted(cur)
-            placeholder_maps = _list_placeholder_mappings(cur)
+            placeholder_maps = _list_placeholder_shell_assets(cur)
             cur.execute("SELECT COUNT(*) AS n FROM biz.asset_raises")
             total = cur.fetchone()["n"]
 
@@ -147,7 +155,7 @@ def main() -> int:
                 print(json.dumps({
                     "status": "clean",
                     "total_rows": total,
-                    "placeholder_mappings": placeholder_maps,
+                    "placeholder_shell_assets": placeholder_maps,
                 }, ensure_ascii=False, indent=2))
                 return 0
 
@@ -177,7 +185,7 @@ def main() -> int:
             "remap": len(to_remap),
             "delete": len(to_delete),
             "delete_with_same_name_candidate": delete_with_name_candidate,
-            "placeholder_mappings_pending_fix": placeholder_maps,
+            "placeholder_shell_assets": placeholder_maps,
         }
 
         if not args.apply:

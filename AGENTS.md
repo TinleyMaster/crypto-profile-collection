@@ -21,6 +21,7 @@
 - 早报 4 项缺陷（P1 巨鲸跨链混取 / P1 MVRV 缺失 / P2 Date 头 / P2 成交量口径）→ 已修 `85a7d52`
 - etf_flow_daily 零值污染（F1-F5：占位 0 拦截 / 增量回补 / 调度双跑 / --prune-zeros / 日志告警）→ 已修 `54847e8`
 - 高亮信号板块（P0-1 KOL 归因 event_token 优先 + trigger_logic 带事件标的 / P0-1 AI onchain 方向硬约束 / P1-1 analysis_ts / P1-2 事件驱动直通标注）→ 已修
+- AI 追溯日志数据质量（P0 asset_id/symbol 路径 / P1 坏 JSON 控制符修复 / P1 判定阈值后处理）→ 已修 `35ef6f0`；存量 `sys.ai_trace` 回填用 `backfill_ai_trace_identity.py --all`（从 user_prompt 提取 symbol + core.asset 解析 asset_id，占位符清 NULL）
 - 催化剂决策链路 d1~d6（按审计清单逐项落地）：
   - d1 G1 新增「发布前启动程度」惩罚项（追高扣分）→ `c946ed1`
   - d2 权重校准解耦「强度」与「方向可靠性」→ `621fb3d`

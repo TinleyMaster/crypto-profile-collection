@@ -1035,6 +1035,14 @@ def api_ai_trace():
         for row in rows:
             thinking = row.get("thinking_content") or ""
             raw_resp = row.get("raw_response") or ""
+            # 复验盲区 2（方案 B）：查看器展示用 sanitize+normalize 后的口径，
+            # 坏 JSON 能显示、判定与系统一致（override 标记可辨）；raw 保留 AI 原话。
+            parsed = None
+            try:
+                from ai_signal_analyzer import parse_and_normalize_trace
+                parsed = parse_and_normalize_trace(raw_resp)
+            except Exception:
+                parsed = None
             entry = {
                 "id": row["id"],
                 "ts": row["ts"].isoformat() if row.get("ts") else None,
@@ -1050,6 +1058,7 @@ def api_ai_trace():
                 "system_prompt": row.get("system_prompt") or "",
                 "user_prompt": row.get("user_prompt") or "",
                 "raw_response": raw_resp,
+                "parsed_response": parsed,
                 "thinking_content": thinking,
             }
             entries.append(entry)

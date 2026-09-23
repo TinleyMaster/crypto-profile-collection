@@ -2535,6 +2535,25 @@ def _normalize_ai_decision(data: dict) -> dict:
     return data
 
 
+def parse_and_normalize_trace(raw_response: str | None) -> dict | None:
+    """复验盲区 2（方案 B）：追溯日志查看器侧解析 + 判定后处理。
+
+    把 sanitize 后的坏 JSON 解析 + _normalize_ai_decision 归一，
+    供 /api/ai-trace 返回 parsed_response，查看器展示系统一致口径，
+    不写回 sys.ai_trace（保留 AI 原始输出为可追溯原话）。解析失败返回 None。
+    """
+    if not raw_response:
+        return None
+    from crypto_research.clients.llm_client import extract_json_from_llm_response
+    try:
+        data = extract_json_from_llm_response(raw_response)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _normalize_ai_decision(data)
+
+
 def _call_llm_analysis_v2(
     profile: dict,
     asset_signals: list[dict],

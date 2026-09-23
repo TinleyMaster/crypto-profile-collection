@@ -15509,8 +15509,11 @@
         var __aiTraceFilter = 'all';   // all | highlighted | high | conflict
 
         // P0/P1（2026-09-22 审计）：解析 AI 响应 JSON 为结构化结论，供列表徽章/结论卡/维度条使用
+        // 复验盲区 2：优先用后端 sanitize+normalize 后的 parsed_response（坏 JSON 也能显示、判定与系统一致），
+        // 缺失时才回退本地 JSON.parse raw（历史/离线场景）
         function _parseTraceResp (item) {
-            try { return JSON.parse(item.raw_response || '{}'); } catch (e) { return null; }
+            if (item && item.parsed_response) return item.parsed_response;
+            try { return JSON.parse(item && item.raw_response || '{}'); } catch (e) { return null; }
         }
 
         // 信号类型 → 系统方向提示（供「AI 结论 vs 系统方向冲突」标记）

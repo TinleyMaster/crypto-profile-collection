@@ -40,8 +40,10 @@ def check(cond, name, detail=""):
             print(f"    {detail}")
 
 
-def _res(bull=0, bear=0, neut=0, latest=None, stale=0, fresh=None, linked=True):
-    return {"event": [], "catalyst": [], "kol": [],
+def _res(bull=0, bear=0, neut=0, latest=None, stale=0, fresh=None, linked=True,
+         event=0, kol=0):
+    return {"event": [f"e{i}" for i in range(event)],
+            "catalyst": [], "kol": [f"k{i}" for i in range(kol)],
             "catalyst_dir": {"bullish": bull, "bearish": bear, "neutral": neut},
             "catalyst_dir_fresh": ({"bullish": fresh[0], "bearish": fresh[1],
                                     "neutral": fresh[2]} if fresh else {}),
@@ -262,6 +264,29 @@ _leg2 = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}], R
 check("BRK 判定只用价+量" in _leg2, "图例说明 BRK 不落 OI/CVD（n/a 是设计）")
 check("不含催化剂强度" in _leg2, "图例声明强度条不含催化剂强度")
 check("**" not in _leg2, "图例无 markdown 强调符 `**`")
+
+print("\n【N-786-5】标题「含共振 N 条」= 全量（与卡片同口径），方向段用新鲜")
+# ARB 式：全量 17（新鲜 6）⇒ 标题条数应为全量 17（非 6），方向段用新鲜
+t_mix = sd._alert_title([{"signal": _main_sig(),
+                          "resonance": _res(bull=11, bear=1, neut=5,
+                                            stale=11, fresh=(5, 1, 0))}])
+check("含共振 17 条" in t_mix, "标题条数为**全量** 17（与卡片「催化剂17」一致）", t_mix)
+check("含共振 6 条" not in t_mix, "标题不再用新鲜口径的 6 条（消除跨层数字打架）")
+check("净多4" in t_mix, "方向段仍用新鲜净多4")
+_leg5 = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res(bull=1)}], REGIME)
+check("含共振 N 条" in _leg5 and "全量" in _leg5,
+      "图例声明「含共振 N 条」为全量口径（N-786-5 口径变更须声明）")
+
+print("\n【N-786-4】n_res 由 event/KOL 贡献、催化剂真为 0 时不得说「全部 >3 天」")
+# 模拟 DOT/WLD：event=1、催化剂 0 条 ⇒ 标题方向段应写「无催化剂条目」
+t_zero = sd._alert_title([{"signal": _main_sig(),
+                           "resonance": _res(event=1, fresh=(0, 0, 0))}])
+check("无催化剂条目" in t_zero, "催化剂真为 0 → 「催化剂新鲜条目 0（无催化剂条目）」", t_zero)
+check("全部 >3 天" not in t_zero, "不误述「全部 >3 天」（卡片会显示催化剂0，自相矛盾）")
+# 对照：确有全陈旧催化剂时仍写「全部 >3 天」
+t_stl = sd._alert_title([{"signal": _main_sig(),
+                          "resonance": _res(event=1, bull=3, stale=3, fresh=(0, 0, 0))}])
+check("全部 >3 天" in t_stl, "确有全陈旧催化剂 → 仍写「全部 >3 天」", t_stl)
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

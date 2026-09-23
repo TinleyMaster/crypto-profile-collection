@@ -1686,15 +1686,17 @@ def _alert_title(items: list[dict]) -> str:
     direction conviction。故标题方向段改用 `catalyst_dir_fresh`，覆盖币数亦按**新鲜**
     催化剂计（与 OPT-2「陈旧不算数」口径统一）；`event`/`kol` 遵循各自窗口（随新鲜并存）。
     """
-    n_res = 0
+    n_res = 0        # 新鲜口径的共振条数（覆盖币数 / 密封边界用）
+    n_res_all = 0    # 全量口径（标题「含共振 N 条」，与卡片「催化剂 N」一致）
     res_coins = 0  # 审计 OPT-1：有共振的**币数**（共振常高度集中在个别币）
-    has_stale = False  # 是否有全量催化剂但全为陈旧的币（N-786-2：不能印「无共振」）
-    bull = bear = neut = 0
+    has_stale = False  # 全量催化剂 >0 但新鲜为 0（N-786-2 密封边界）
+    has_zero_cat = False  # 催化剂**真为 0 条**（N-786-4：不得误述「全部 >3 天」）
     fresh_bull = fresh_bear = fresh_neut = 0
     for it in items:
         res = it["resonance"]
         cd = res.get("catalyst_dir") or {}
         cdf = res.get("catalyst_dir_fresh") or {}
+        ctot = _catalyst_total(cd)
         f_coin = (int(cdf.get("bullish", 0)) + int(cdf.get("bearish", 0))
                   + int(cdf.get("neutral", 0)))
         # N-786-1：标题方向段用**新鲜**口径（陈旧旧闻不推高 conviction）
@@ -1704,10 +1706,13 @@ def _alert_title(items: list[dict]) -> str:
         # N-786-2：覆盖币数按**新鲜**计（只有陈旧催化剂的币不算「有共振」）
         coin_n = len(res["event"]) + f_coin + len(res["kol"])
         n_res += coin_n
+        n_res_all += len(res["event"]) + ctot + len(res["kol"])
         if coin_n:
             res_coins += 1
-        if _catalyst_total(cd) > 0 and f_coin == 0:
+        if ctot > 0 and f_coin == 0:
             has_stale = True
+        if ctot == 0:
+            has_zero_cat = True
     if not n_res:
         # N-786-2：密封边界——整批共振全为 0 时，若存在「有催化剂但全 >3 天」的币，
         # **不得**印「纯盘面信号，无共振」（那是事实错误：有催化剂，只是陈旧）⇒ 改口径披露。
@@ -1727,11 +1732,18 @@ def _alert_title(items: list[dict]) -> str:
         if fresh_bull != fresh_bear:
             dir_txt += (f"，净{'多' if fresh_bull > fresh_bear else '空'}"
                         f"{abs(fresh_bull - fresh_bear)}")
+    elif has_zero_cat:
+        # N-786-4：本批存在「催化剂真为 0 条」的币（n_res 由 event/KOL 贡献）——不得
+        # 断言「全部 >3 天」（卡片会显示「催化剂0」，同封邮件自相矛盾）。
+        dir_txt = "，催化剂新鲜条目 0（无催化剂条目）"
     else:
         # N-786-3：全陈旧 ⇒ 新鲜方向根本不存在，不得说成「多空持平」（含义相反）。
-        dir_txt = "，催化剂新鲜条目 0（全部 >3 天，不计方向）"
+        dir_txt = (f"，催化剂新鲜条目 0（全部 >{CATALYST_STALE_DAYS} 天，不计方向）")
+    # N-786-5：**报告口径**（「含共振 N 条」= 全量，与卡片主数字「催化剂 N」一致）；
+    # 方向段与覆盖币数才用新鲜口径。原实现把 N 也改成新鲜，导致标题「含共振 6 条」
+    # 与卡片「催化剂 17」两个数字打架、且图例未声明。
     return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
-            f"（含共振 {n_res} 条{cover_txt}{dir_txt}）")
+            f"（含共振 {n_res_all} 条{cover_txt}{dir_txt}）")
 
 
 # ── 卡片相对强度（仅用于排序与强度条，审计 §三.6） ────────────────
@@ -2072,8 +2084,8 @@ def _render_alert_email(items: list[dict],
               "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
               "「最新/含 N 条 >X 天/剔除陈旧后净X/无新鲜条目」= 催化剂新鲜度（7 天窗口"
               "含陈旧条目；「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高"
-              "conviction；「无新鲜条目」= 全部 >X 天）；标题的催化剂方向段与覆盖币数"
-              "同用新鲜口径（陈旧不计）；"
+              "conviction；「无新鲜条目」= 全部 >X 天）；标题「含共振 N 条」为全量口径"
+              "（与卡片「催化剂 N」同一口径），其催化剂方向段与覆盖币数才用新鲜口径（陈旧不计）；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"

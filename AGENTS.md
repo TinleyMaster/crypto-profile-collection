@@ -641,3 +641,15 @@
 - **本轮自引入并已修**：图例文案里写了 markdown 强调符 `**标题**`（HTML 邮件禁忌，护栏抓出）——**教训固化**：改渲染文案后必跑 `**` 护栏。
 - **自测**：`test_scan_alert_header_regime.py` 扩至 **37/37**（+7：N-786-1 标题新鲜口径 2 例 + N-786-2 全陈旧边界/混合批次 2 例 + N-786-3 2 例 + 护栏）；`test_scan_alert_audit_deepdive.py` 的 `_res()` 补 `catalyst_dir_fresh`（默认与全量同值，`stale=0` 常规 fixture 语义不变）⇒ **75/75**；既有 `test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 137/137、`test_fundamental_liquidity.py` 13/13、`test_derivatives_signal_gap.py` 35/35 无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效（一次重启即可同时闭环 B1 + N-pure3-1 + OPT-1/2/3/5/6 + N-786-1/2/3）。
+
+### N-786-4/5 补刀（复验_告警邮件N-786-1~3_0111ed2_2026-09-23，2026-09-23）
+
+来源：`复验_告警邮件N-786-1~3_0111ed2_2026-09-23.md`。复验以**真函数 + 真 prod DB** 确认 N-786-1/2/3 已修（ARB 标题净多 4 非全量 10；**USELESS 方向反转 净空2 非净多+1**），另指出**我这两轮自引入的 2 项新缺陷**（N-786-4/5）。本轮补刀，全在 `scan_daemon.py` 渲染层，**零 DDL、无阈值变更**。
+
+- **🔴 N-786-4（P2，已修）标题「全部 >3 天」对「无催化剂」是事实错误**：`else` 分支**无条件**打「催化剂新鲜条目 0（全部 >3 天，不计方向）」，而 `n_res>0` 可由 **event（解锁/链上转账预告）或 KOL** 贡献（`coin_n = len(event) + f_coin + len(kol)`；`_get_resonance` 的 event 段在 `if not asset_id: return` **之前**执行 ⇒ event 与 catalyst 可得性**相互独立**）。实测命中 **DOTUSDT/WLDUSDT/BILLUSDT/CAPUSDT**（event=1 + 7 天催化剂=0）——标题断言「有催化剂但全陈旧」，卡片却显示「催化剂0」，**同封自相矛盾**（BILL/CAP 连 30 天都是 0）。
+  - 修法：`else` 分支按 `has_zero_cat`（存在 `_catalyst_total(cd)==0` 的币）细分——真为 0 条 → 「催化剂新鲜条目 0（**无催化剂条目**）」；否则才「全部 >3 天」。
+  - **可达性（诚实定级）**：4 币当前均**不进告警**（DOT/WLD/BILL 是 `ACC`（`_load_alert_candidates` 只收 main 或 BRK）、CAP 是 `expired`）⇒ **潜在缺陷、当前不可达**；但 DOT/WLD 正在蓄势，**升格 BRK（量比≥3+突破价）即触发**，且是主流币 ⇒ 定 P2。
+- **🟠 N-786-5（P2/P3，已修）标题「含共振 N 条」静默改新鲜口径**：`n_res` 用了 `f_coin`（新鲜）⇒ 标题「含共振 6 条」与卡片「催化剂 17」两个数字打架，且图例未声明。⇒ 拆出 `n_res_all`（全量）用于「含共振 N 条」（与卡片同口径），方向段/覆盖币数/密封边界仍用新鲜 `n_res`；图例显式声明「含共振 N 条 = 全量口径」。
+- **⚠️ 本轮再次自引入并已修**：图例写「**全量**」（markdown 强调符）——`**` 护栏第二次抓出。**教训固化已升级为「改任何渲染文案后必跑 `**` 护栏」**（两轮三犯）。
+- **自测**：`test_scan_alert_header_regime.py` 扩至 **44/44**（+7：N-786-5 全量条数/图例 4 例 + N-786-4 无催化剂/全陈旧对照 3 例）；既有 `test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 137/137、`test_fundamental_liquidity.py` 13/13、`test_derivatives_signal_gap.py` 35/35 无回归；`py_compile` 通过。
+- **待部署**：需重启容器（`scan_daemon`）后生效（同批闭环）。

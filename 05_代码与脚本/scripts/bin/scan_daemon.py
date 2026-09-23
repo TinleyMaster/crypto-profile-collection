@@ -56,6 +56,7 @@ import psycopg.rows  # noqa: E402
 import psycopg_pool  # noqa: E402
 
 from crypto_research.analysis import squeeze as sqz  # noqa: E402
+from crypto_research.analysis import squeeze_fuel as sqz_fuel  # noqa: E402
 from crypto_research.clients.binance_http import fapi_get, set_min_request_gap  # noqa: E402
 from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
@@ -2580,8 +2581,14 @@ LSR_ENDPOINTS = {
 }
 
 
-def _fetch_long_short_ratio(symbol: str, period: str = "5m", limit: int = 20) -> dict:
-    """拉单币多空比：4 个免费端点合并为 {ts: {key: value}}，单端点失败不影响其余。"""
+def _fetch_long_short_ratio(symbol: str, period: str = "5m", limit: int = 100) -> dict:
+    """拉单币多空比：4 个免费端点合并为 {ts: {key: value}}，单端点失败不影响其余。
+
+    `limit=100`（5m × 100 ≈ 8h）而非原 20（≈100min）：拉升期结构分解（§10.10）的窗口是
+    `[surge_start_ts, now]`（跟踪期上限 180min），且首个 LSR 点的**基准桶**需要落到窗口
+    左端之外，20 个点会取错基准桶（§12.1 / §10.10.7-①）。占比不落库——
+    `longShare = r/(1+r)` 可由比值反推，故 `fix_056` 表结构无需变更。
+    """
     merged: dict = {}
     for key, path in LSR_ENDPOINTS.items():
         try:
@@ -2911,10 +2918,27 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 peak_px, peak_ts = px, now
             retrace = (peak_px - px) / peak_px * 100 if peak_px else 0.0
 
+            # ── 拉升期结构分解（§10.10，**影子模式**：只落 `metrics.fuel`，不发信）──
+            # 窗口 W = [surge_start_ts, now]（**与 §10.6 判定窗口 [peak_ts, now] 不同，
+            # 勿混用**）。每轮跟踪都算（时效性即价值：行情还在拉升/刚见顶就要能提示）；
+            # 判定阈值为未标定初值、dL/dS 与买平/卖平均为**代理口径**，故先只落库观察，
+            # 待样本积累后再决定开信与定阈值（§10.10.7-③ / §10.10.8）。
+            fuel = sqz_fuel.evaluate_fuel(
+                oi_rows=by_oi.get(sym, []),
+                lsr_points=[(ts, vals.get("top_position_ratio"))
+                            for ts, vals in (lsr_map.get(sym) or {}).items()],
+                liq_rows=by_liq.get(sym, []),
+                k_rows=(by_k.get(sym) or {}).get("5m", []),
+                vol24_usd=vol24.get(sym),
+                surge_start_ts=t["surge_start_ts"] or t["started_at"],
+                now=now)
+            fuel_json = json.dumps({"fuel": fuel}, ensure_ascii=False)
+
             if sqz.is_expired(t["started_at"], now):
                 track_updates.append((
                     "expired", peak_px, peak_ts, px, now, round(retrace, 2), None,
-                    f"跟踪 {sqz.TRACK_EXPIRE_MIN} 分钟未触发回撤判定", None, None, t["id"]))
+                    f"跟踪 {sqz.TRACK_EXPIRE_MIN} 分钟未触发回撤判定", fuel_json, None,
+                    t["id"]))
                 stats["expired"] += 1
                 continue
 
@@ -2922,7 +2946,7 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             if not fire:
                 track_updates.append((
                     "tracking", peak_px, peak_ts, px, now, round(retrace, 2), None,
-                    None, None, None, t["id"]))
+                    None, fuel_json, None, t["id"]))
                 continue
 
             # 回撤窗口 [peak_ts, now] 指标
@@ -2978,6 +3002,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                         # 复验 F6f：judged 必经闸门 ⇒ 其 head/mid_gap 数学上恒 0/1，看不出
                         # 病例分布；补一个布尔位，两次路径都落，才能直接数通过/拒绝。
                         "gate_ok": False,
+                        # 燃料评估与判定闸门**各自独立**（窗口不同、口径不同）：
+                        # 判定窗口残缺不阻碍燃料评估，反之亦然 ⇒ 两条路径都落 `fuel`。
+                        "fuel": fuel,
                     }, ensure_ascii=False), None, t["id"]))
                 continue
             # 基准取「峰值时刻或之前最近一条」；峰值早于所有可用桶时退化为窗口首条
@@ -3042,6 +3069,9 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 # head/mid_gap 恒 0/1，只有这个位能直接数出「通过 vs 拒绝」的分布。
                 "gate_ok": True,
                 "trigger": why,
+                # 拉升期结构分解（§10.10，影子模式）：与判定指标**同一行**并存，
+                # 键名分开（判定用顶层键，燃料在 `fuel` 下），便于回放时对照两个窗口。
+                "fuel": fuel,
             })
             track_updates.append((
                 "judged", peak_px, peak_ts, px, now, round(retrace, 2),

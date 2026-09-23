@@ -725,3 +725,24 @@
   - 待办：① 补 **regime 分层回测**（至少按 `btc_1h` 方向 / FGI 档 / 市值趋势分档），逐档报 n 与方向对齐中位；② 执行层恢复空头侧前，须有**非上涨 regime 子样本**的独立证据；③ 在方案 §9 与代码注释中把「只做多」显式标为「**样本期结论，非结构性结论**」（当前已加注，见 §12.1-A2）。
 - **A3（🟠 无 holdout）全流程无留出集**：参数在**全样本**上选优 ⇒ 数据窥探（data snooping）。待办：① 把已有数据切**时间留出**（如最后 20% 时段）并在留出集上复核全部阈值；② 之后新参数一律「训练集选参 → 留出集验证」；③ 留出集结果**入库留档**（新增校准结果表或复用 `biz.*_calibration` 加 `split` 列），避免再次出现「结论只存在于对话里」。
 - **关联**：设计方案 §12.1 A 类条目；本工单与 `待办（需设计变更，勿盲目改）` 同性质——**改前须先补样本，勿用当前 3~6 天样本调参**。
+
+### 拉升期结构分解与轧空衰竭判定落地（设计方案 §10.10，2026-09-23，本次提交）
+
+来源：设计方案 §10.10 此前标「设计稿 · 未落地」。本次按 §10.10.7 三步清单实现，**零 DDL、零阈值联动、不改 §10.6 判定口径**。
+
+- **新增纯函数模块 `scripts/src/crypto_research/analysis/squeeze_fuel.py`**：窗口 `W = [surge_start_ts, now]`（**与 §10.6 的 `[peak_ts, now]` 不同窗口，勿混用**）。
+  - 判定 `classify_fuel`：五 verdict `sqz_fuel_exhausting / sqz_fuel_active / long_pump / short_rebuild / mixed`，**优先级即书写顺序**（先判 OI 升的两类）⇒ 假信号「多头主动开仓拉盘」结构上不可能落进 `sqz_fuel_*`。
+  - 闸门 `fuel_gate`：复用 §10.5 口径（覆盖率 / 尾部 `oi_lag_sec ≤ 2×桶` / `window_gate` 连续缺桶）+ 本节新增两条（W 内 LSR 点数 ≥ `MIN_LSR_POINTS`、有效 5m 桶 ≥ `MIN_FUEL_BUCKETS`）。缺桶文案**不**复用 `squeeze.gap_reason()`（其「判定窗口」前缀是 `check_scan_freshness` 的 `LIKE '判定窗口%'` 耦合点，属判定口径统计）。
+  - 两个**代理口径**：`proxy_shares`（`longShare = r/(1+r)`，占比由已存比值反推，**无需改表**）、`quadrant`（`OI × CVD` 四象限反推买平/开仓）。
+  - 阈值常量**全为经验初值、未标定**（§10.10.4 / §10.10.8：`biz.long_short_ratio` 只对 tracking 币采集且历史极短，无样本可回测）。
+- **⚠️ 三条易错点已用单测钉住**：
+  1. **「衰减必须先有峰值」**（§10.10.5）：`liq_peak` 未越阈时 `liq_decay` 是无意义比值（分子分母都极小），一律不得判 `sqz_fuel_exhausting` —— 实际是「爆仓从未发生」。
+  2. **`cvd == 0` / `oi_delta == 0` 必须显式判掉**：写成 `cvd > 0 ... else ...` 会把「无方向」静默归入**卖压**侧（实现时即被单测抓到并修正）。
+  3. **缺失 ≠ 0**：结构量（`d_oi_pct`/`d_s_pct`/`d_l_pct`）缺失 ⇒ `mixed`；`liq` 缺失 ⇒ 既不判 `exhausting`、也不判 `active`（后者断言「爆仓仍在高位」）⇒ 同样 `mixed`；`cvd_divergence` 未知只挡 `exhausting`。
+- **接线（`scan_daemon.task_scan_squeeze` 阶段 2）**：
+  - `_fetch_long_short_ratio` 默认 `limit` 20 → **100**（≈8h）：W 上限 180min，且首个 LSR 点的**基准桶**需落到窗口左端之外（解基准桶取错）。
+  - 每轮跟踪调用 `evaluate_fuel`，结果落 `metrics['fuel']`（**`metrics || %s` 合并**语义，不覆盖入场指标）；判定闸门拒判路径与 judged 路径**都落**（两条闸门各自独立，窗口与口径不同）。
+  - **影子模式**：只落库、**不发信**（`task_scan_squeeze` 内仍只有 §10.6 判定那一处 `notifier.send`，AST 守卫）；拒判记 `verdict=None` + `gate_reason`（与 `mixed` 的「结构不明」区分）。
+- **自测**：新增 `workbench/test_squeeze_fuel.py` **99/99**（阈值 / 代理口径 / 序列纯函数 / 五 verdict + 优先级 + 缺失降级 / 五道闸门 / 端到端 / AST 接线守卫）；`test_squeeze_battle.py` **143/143**、`test_scan_scenario_label.py` **48/48** 无回归；`py_compile` 3/3 通过。
+- **待部署**：需重启容器（`scan_daemon`）后生效。
+- **仍待办（§10.10.8，不在本次范围）**：① 标定脚本 `calib_squeeze_fuel_thr.py`（口径同 `calib_squeeze_liq_thr.py`）；② `SQZ_FUEL_*` 与 §10.8 判定邮件的跨池互斥接线；③ 影子观察期长度与开信门槛。

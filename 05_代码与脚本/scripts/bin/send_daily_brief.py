@@ -157,6 +157,54 @@ def _fmt_mcap(v):
     return f"${f:.0f}"
 
 
+def _render_liquidation_row(liq: dict) -> str:
+    """渲染「24h 爆仓概况」一行（P0-D，只展示不进分）。
+
+    口径（数据层 macro_market.LIQ_OVERVIEW_SCOPE_NOTE 同步的一致口径）：
+      CoinGlass 全交易所 · 滚动 24h · 5min 快照 · **池内 N 个标的合计**
+      （**禁止**写成「全网爆仓」）。
+    1h/4h/12h/24h 属同族滚动窗口 ⇒ 可比较占比（「近 1h 占 24h 的 X%」合法）；
+    **禁止**与 biz.liquidation_history 的 4h 分段增量混算。
+    缺失（旧快照无该 key / 覆盖率不足 / 列 NULL）⇒ 返回空串，整行隐藏，**不显示 0**。
+    多空分列缺失 ⇒ 只显示合计，不显示方向。
+    """
+    if not isinstance(liq, dict):
+        return ""
+    total_24h = liq.get("liq_usd_24h")
+    if total_24h is None:
+        return ""  # 缺失≠0：整行隐藏
+
+    try:
+        total_f = float(total_24h)
+    except (TypeError, ValueError):
+        return ""
+
+    head = f"24h 爆仓 {_fmt_mcap(total_f)}"
+    long24, short24 = liq.get("long_24h"), liq.get("short_24h")
+    if long24 is not None and short24 is not None:
+        bias = "以多头为主" if float(long24) >= float(short24) else "以空头为主"
+        head += f"（多 {_fmt_mcap(long24)} / 空 {_fmt_mcap(short24)}，{bias}）"
+
+    liq_1h = liq.get("liq_usd_1h")
+    if liq_1h is not None and total_f > 0:
+        try:
+            head += f" · 近 1h 占 24h 的 {float(liq_1h) / total_f * 100:.1f}%"
+        except (TypeError, ValueError):
+            pass
+
+    covered = liq.get("symbols_covered")
+    scope_note = liq.get("scope_note") or "CoinGlass 全交易所 · 滚动 24h · 5min 快照"
+    cover_txt = f"池内 {covered} 个标的合计" if covered else "池内标的合计"
+
+    return (
+        '<div style="margin-top:6px;background:#f8fafc;border-radius:6px;padding:6px 8px;'
+        'font-size:10.5px;color:#334155">'
+        f'💥 {head}'
+        f'<div style="font-size:9px;color:#94a3b8;margin-top:2px">口径：{scope_note} · {cover_txt}</div>'
+        '</div>'
+    )
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -472,6 +520,10 @@ def render_brief_html(brief: dict) -> str:
     btc_vol = m0.get("btc_volatility_7d") or m2.get("btc_volatility_7d")
     btc_vol_str = f"{btc_vol}%" if btc_vol is not None else "—"
 
+    # P0-D：24h 爆仓概况（只读快照渲染，禁止在渲染期调 CoinGlass）
+    # 旧快照缺 M2_liquidation / 覆盖率不足 / 列 NULL ⇒ 整行隐藏（缺失≠0，不显示 0）
+    liq_row = _render_liquidation_row(brief.get("M2_liquidation"))
+
     html_parts.append(f"""
       <!-- 模块1：大盘脉搏 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
@@ -523,6 +575,9 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;font-weight:700;color:#334155">{btc_vol_str}</div>
           </div>
         </div>
+
+        <!-- P0-D：24h 爆仓概况（无数据时 liq_row 为空串，整行不出现） -->
+        {liq_row}
       </div>
     """)
 

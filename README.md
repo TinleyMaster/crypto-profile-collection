@@ -520,7 +520,7 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 | 1 体量 | CMC + CoinGecko | 总市值/总量/BTC主导率/ETH主导率/稳定币市值 |
 | 2 盘面 | Binance REST API | BTC/ETH/ETHBTC 价格+技术面 |
 | 3 情绪 | CMC 恐贪 + altcoin_season + CEFI（链上净流覆盖） | 情绪子分 |
-| 3 衍生品 | Binance/OKX/Bybit/Bitget/Gate | funding_rate / open_interest / 多空比 |
+| 3 衍生品 | Binance/OKX/Bybit/Bitget/Gate + CoinGlass | funding_rate / open_interest / 多空比 / 24h 爆仓概况（`biz.liquidation_snapshot` 滚动窗口，**只展示不进分**） |
 | 4 机构 | CRYPTOETF API | ETF 净流入 |
 | 5 板块 | CMC 分类 + DeFiLlama TVL | 叙事/链/稳定币净流入排名 |
 | mvrv_universe | biz.cm_asset_onchain_daily | 14 币 MVRV 百分位极值 |
@@ -553,6 +553,11 @@ CEX Netflow = 从交易所转出金额 − 转入交易所金额（正值=提币
 2. `brief_ai.py` 喂 LLM 生成 AI 叙事段落（Ark 优先，降级不崩溃）
 3. 渲染 HTML（HIGH 红/MED 黄卡片 + DIFF 趋势箭头 + AI 解读蓝框）
 4. 调度：每日 08:30 快照 → 09:00 邮件
+
+**24h 爆仓概况（3衍生品）**：数据来自 `biz.liquidation_snapshot`（CoinGlass `liquidation/coin-list`，08:30 取数时**只读 DB、零接口调用**）。
+口径为 **滚动 24h 窗口快照**，覆盖范围为**池内 N 个标的合计**（不得写成「全网爆仓」）；四档 `1h/4h/12h/24h` 属同族滚动窗口，可比较占比，**严禁跨桶差分**。
+多空分列（`long/short_liq_usd_24h`，`fix_068`）为后补列 ⇒ 旧行为 NULL，此时**只显示合计、不显示方向**（`status=partial`），不补 0。
+该模块**只展示、不进分**（不进入 `compute_emotion_subscore` 的可见范围）。
 
 ### 降级铁律
 

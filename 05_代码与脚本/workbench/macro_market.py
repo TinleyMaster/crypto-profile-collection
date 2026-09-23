@@ -864,6 +864,179 @@ def fetch_binance_derivatives() -> dict:
         return {"status": "error", "error": str(e)}
 
 
+# ════════════════════════════════════════════════════════════
+# P0-D：24h 爆仓概况（早报「3衍生品」维度 · 只读 DB · 只展示不进分）
+# ════════════════════════════════════════════════════════════
+# 设计依据：04_架构与代码方案/Coinglass套餐数据接入方案_2026-09-23.md §4.7
+# 口径（三处必须一致：列注释 / 本段 / 邮件脚注）
+#   · 数据源：CoinGlass 全交易所 · **滚动 24h** · 5min 快照（biz.liquidation_snapshot）
+#   · 覆盖范围：**池内标的合计**，不得写成「全网爆仓」
+#   · 档位 1h/4h/12h/24h 属同族滚动窗口 ⇒ 可比较占比（「近 1h 占 24h 的 X%」合法）；
+#     严禁跨桶差分，严禁与 biz.liquidation_history 的 4h 分段增量换算/相加
+# 缺失纪律（§3.3-1）：任一端（窗口合计 / 多空分列）为 NULL 一律 None，**绝不补 0**。
+LIQ_OVERVIEW_MIN_COVERAGE_RATIO = 0.6  # 临时值，待标定（阈值不入文档；标定后再定）
+LIQ_OVERVIEW_BATCH_WINDOW_MIN = 20     # 批次窗口：now 往前 20min（≈4 个 5min 桶，容忍单轮漏采）
+LIQ_OVERVIEW_SCOPE_NOTE = "CoinGlass 全交易所 · 滚动 24h · 5min 快照"
+
+# 四档滚动窗口列（同族，可比较占比）
+_LIQ_WINDOW_COLS = ("liq_usd_1h", "liq_usd_4h", "liq_usd_12h", "liq_usd_24h")
+
+
+def _liq_result_base(symbols_covered: int, universe_24h: int) -> dict:
+    """爆仓概况公共骨架：所有档位默认 None（缺失≠0，绝不补 0）。"""
+    return {
+        "liq_usd_1h": None,
+        "liq_usd_4h": None,
+        "liq_usd_12h": None,
+        "liq_usd_24h": None,
+        "long_24h": None,
+        "short_24h": None,
+        "symbols_covered": int(symbols_covered or 0),
+        "universe_24h": int(universe_24h or 0),
+        "coverage_ratio": None,
+        "ts": None,
+        "scope": "coinglass_rolling_all_exchanges",
+        "scope_note": LIQ_OVERVIEW_SCOPE_NOTE,
+    }
+
+
+def _latest_row_per_symbol(rows: list[dict]) -> list[dict]:
+    """批次对齐去重兜底：同一 symbol 出现多行时只保留 ts 最大的一行。
+
+    SQL 侧已用 `DISTINCT ON (symbol) ... ORDER BY symbol, ts DESC` 保证每币一行；
+    这里是防御层，保证「合计 = 各币该批次最新值之和」这一语义不依赖 SQL 端实现细节
+    （5min 桶会跨桶重复计数，直接 SUM 会加倍）。
+    """
+    latest: dict[str, dict] = {}
+    for r in rows or []:
+        sym = str(r.get("symbol") or "")
+        r_ts = r.get("ts")
+        prev = latest.get(sym)
+        if prev is None:
+            latest[sym] = r
+            continue
+        p_ts = prev.get("ts")
+        if r_ts is not None and (p_ts is None or r_ts > p_ts):
+            latest[sym] = r
+    return list(latest.values())
+
+
+def summarize_liquidation_snapshot(rows: list[dict], universe_24h: int,
+                                   min_coverage_ratio: float | None = None) -> dict:
+    """把爆仓快照行折算成早报可展示的「24h 爆仓概况」（纯函数，便于单测）。
+
+    - 去重：每 symbol 只取该批次最新一行（见 `_latest_row_per_symbol`）再求和。
+    - 覆盖率护栏（§4.7 坑 2）：命中 symbol 数 < 分母 × `LIQ_OVERVIEW_MIN_COVERAGE_RATIO`
+      ⇒ `status="insufficient"` 且**所有档位为 None**（绝不返回偏小的假合计）。
+    - 缺失≠0：某端只要有一币为 NULL，该端合计即 None（不把 NULL 当 0 累加）。
+    """
+    min_ratio = (LIQ_OVERVIEW_MIN_COVERAGE_RATIO if min_coverage_ratio is None
+                 else float(min_coverage_ratio))
+    latest = _latest_row_per_symbol(rows)
+    covered = len(latest)
+
+    if not latest:
+        return {**_liq_result_base(0, universe_24h), "status": "error",
+                "error": "no liquidation snapshot in current batch"}
+
+    base = _liq_result_base(covered, universe_24h)
+    if base["universe_24h"] <= 0:
+        return {**base, "status": "error", "error": "empty 24h denominator"}
+
+    base["coverage_ratio"] = round(covered / base["universe_24h"], 4)
+    ts_values = [r.get("ts") for r in latest if r.get("ts") is not None]
+    base["ts"] = max(ts_values).isoformat() if ts_values else None
+
+    if covered / base["universe_24h"] < min_ratio:
+        return {**base, "status": "insufficient",
+                "error": f"coverage {covered}/{base['universe_24h']} < min ratio {min_ratio}"}
+
+    def _sum_col(col: str) -> float | None:
+        vals = [r.get(col) for r in latest]
+        if any(v is None for v in vals):
+            return None  # 缺失≠0：不把 NULL 当 0 累加出偏小的假合计
+        return round(sum(float(v) for v in vals), 2)
+
+    out = {**base, "status": "ok"}
+    for col in _LIQ_WINDOW_COLS:
+        out[col] = _sum_col(col)
+    out["long_24h"] = _sum_col("long_liq_usd_24h")
+    out["short_24h"] = _sum_col("short_liq_usd_24h")
+    # 多空分列是补列（历史行 NULL）⇒ 缺失只降级为 partial，不影响合计展示
+    if any(out[c] is None for c in _LIQ_WINDOW_COLS) or out["long_24h"] is None \
+            or out["short_24h"] is None:
+        out["status"] = "partial"
+    return out
+
+
+def fetch_liquidation_overview() -> dict:
+    """24h 爆仓概况（P0-D）：**只读 DB、零接口调用**、只展示不进分。
+
+    ⚠️ 严禁在 `fetch_binance_derivatives()` 的返回值上原地注入本模块字段：该对象会作为
+    `derivatives=` 实参进入 `compute_emotion_subscore()`，原地注入会让新字段进入打分函数
+    的可见范围（§4.7「不进分」护栏）。本函数只读；合并只发生在组装层
+    （`build_derivatives_dimension()`）。
+    """
+    try:
+        rows, universe_24h = _read_liquidation_snapshot()
+        return summarize_liquidation_snapshot(rows, universe_24h)
+    except Exception as e:
+        return {**_liq_result_base(0, 0), "status": "error", "error": str(e)}
+
+
+def _read_liquidation_snapshot() -> tuple[list[dict], int]:
+    """读爆仓快照：返回 (每币最新一行, 覆盖率分母)。
+
+    批次对齐去重（§4.7 坑 1）：`liquidation_snapshot` 是 5min 桶、每币一行，直接按时间
+    范围 SUM 会跨桶重复计数 ⇒ `DISTINCT ON (symbol) ... ORDER BY symbol, ts DESC` 每币
+    只取**该批次最新一行**再求和。
+    批次窗口锚定 now（`LIQ_OVERVIEW_BATCH_WINDOW_MIN`）：既容忍单轮漏采，又在采集停摆时
+    天然取不到行（陈旧数据不展示，缺失≠0，不展示一个过期窗口冒充「最近 24h」）。
+
+    分母定义（覆盖率护栏用，与分子同表自洽）：过去 24h 该表出现过的
+    `count(DISTINCT symbol)` —— 即「近期有爆仓快照的池内标的数」；不使用外部币种池，
+    避免分子分母口径漂移。
+    """
+    from db_stats import get_db
+    import psycopg.rows
+
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (symbol)
+                       symbol, ts, liq_usd_1h, liq_usd_4h, liq_usd_12h, liq_usd_24h,
+                       long_liq_usd_24h, short_liq_usd_24h
+                FROM biz.liquidation_snapshot
+                WHERE ts >= NOW() - make_interval(mins => %s)
+                ORDER BY symbol, ts DESC
+                """,
+                (LIQ_OVERVIEW_BATCH_WINDOW_MIN,),
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT count(DISTINCT symbol) AS n
+                FROM biz.liquidation_snapshot
+                WHERE ts >= NOW() - INTERVAL '24 hours'
+                """
+            )
+            denom_row = cur.fetchone() or {}
+    return list(rows), int(denom_row.get("n") or 0)
+
+
+def build_derivatives_dimension(derivatives: dict, liquidation: dict | None) -> dict:
+    """组装「3衍生品」维度的 data：浅拷贝后挂 `liquidation_24h`（P0-D）。
+
+    ⚠️ 必须浅拷贝：`derivatives` 同一对象已作为 `derivatives=` 实参进入
+    `compute_emotion_subscore()`，原地注入新字段会污染打分函数的可见范围（§4.7）。
+    """
+    data = dict(derivatives or {})
+    if liquidation is not None:
+        data["liquidation_24h"] = liquidation
+    return data
+
+
 def fetch_onchain_anomaly_signals() -> dict:
     """链上异动信号：从 db_stats.get_global_cex_netflow 拉取全局 CEX 净流量。
 
@@ -7788,6 +7961,14 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "DIFF": diff,
     }
 
+    # ── P0-D：24h 爆仓概况（只展示不进分）──
+    # 取自组装层的 dimensions["3衍生品"]["data"]["liquidation_24h"]；旧快照缺该 key
+    # 或覆盖率不足时**不写该键**（缺失≠0，渲染层隐藏该行，绝不伪造 0）。
+    _d3 = ((today.get("dimensions") or {}).get("3衍生品") or {}).get("data") or {}
+    _liq_overview = _d3.get("liquidation_24h")
+    if isinstance(_liq_overview, dict):
+        brief["M2_liquidation"] = _liq_overview
+
     # ── P0-1 一致性断言：BTC/ETH 24h 涨跌幅与总市值背离过大即降级告警 ──
     _consistency = _check_price_consistency(brief)
     if _consistency:
@@ -8374,6 +8555,8 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             ("onchain", fetch_onchain_anomaly_signals, ()),
             ("btc_onchain", fetch_btc_onchain_signals, ()),
             ("cm_activity", fetch_cm_activity_signals, ()),
+            # P0-D：24h 爆仓概况（只读 biz.liquidation_snapshot，零接口调用）
+            ("liquidation", fetch_liquidation_overview, ()),
             # 第二批：历史分位数据（5 个）
             ("fear_greed_hist", fetch_fear_greed_history, (90,)),
             ("mvrv_hist", fetch_mvrv_history, ("btc",)),
@@ -8421,6 +8604,7 @@ def get_market_overview(force_refresh: str = "0") -> dict:
     onchain = r["onchain"]
     btc_onchain = r["btc_onchain"]
     cm_activity = r["cm_activity"]
+    liquidation = r["liquidation"]  # P0-D 24h 爆仓概况（只读 DB，展示不进分）
     fear_greed_hist = r["fear_greed_hist"]
     mvrv_hist = r["mvrv_hist"]
     stablecoin_flow_hist = r["stablecoin_flow_hist"]
@@ -8518,7 +8702,9 @@ def get_market_overview(force_refresh: str = "0") -> dict:
             },
             "3衍生品": {
                 "status": derivatives.get("status", "error"),
-                "data": derivatives,
+                # P0-D：24h 爆仓概况挂在组装层（浅拷贝），绝不原地改 derivatives
+                # —— 该对象已作为 derivatives= 实参进入 compute_emotion_subscore()。
+                "data": build_derivatives_dimension(derivatives, liquidation),
             },
             "3情绪": {
                 "status": "ok" if all(x.get("status") == "ok" for x in [fear_greed, altcoin_season, cefi]) else "partial",

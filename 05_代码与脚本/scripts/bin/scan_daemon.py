@@ -2569,6 +2569,8 @@ def task_scan_liquidation() -> dict:
     消费侧必须直接使用该字段的**绝对值**（= 最近 1 小时爆仓额），严禁跨桶差分
     （见 `task_scan_squeeze` / `_latest_liq_snapshot`）。
     实测 coin-list 刷新约 20~40s 一次，5min 轮询不会漏采。
+    24h 多空分列（`long/short_liq_usd_24h`，fix_068 补列）：同为**滚动窗口**，
+    口径 = CoinGlass 全交易所；旧行无法回补 ⇒ NULL 保持 NULL，消费侧不得补 0。
     """
     client = _coinglass()
     rows = client.liquidation_coin_list()
@@ -2590,6 +2592,10 @@ def task_scan_liquidation() -> dict:
             r.get("liquidation_usd_12h"), r.get("liquidation_usd_24h"),
             r.get("long_liquidation_usd_1h"), r.get("short_liquidation_usd_1h"),
             r.get("long_liquidation_usd_4h"), r.get("short_liquidation_usd_4h"),
+            # 24h 多空分列（fix_068 补列，早报 P0-D 方向行依赖）：
+            # 接口历史上已返回这两个键（coinglass_client.liquidation_coin_list 文档串示例），
+            # 只是写入端原先丢弃。键名不存在时 `.get` 返回 None ⇒ 落 NULL，**绝不填 0**（缺失≠0）。
+            r.get("long_liquidation_usd_24h"), r.get("short_liquidation_usd_24h"),
         ))
 
     if payload:
@@ -2600,8 +2606,9 @@ def task_scan_liquidation() -> dict:
                     INSERT INTO biz.liquidation_snapshot
                         (symbol, ts, source, liq_usd_1h, liq_usd_4h, liq_usd_12h, liq_usd_24h,
                          long_liq_usd_1h, short_liq_usd_1h, long_liq_usd_4h, short_liq_usd_4h,
+                         long_liq_usd_24h, short_liq_usd_24h,
                          fetched_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT (symbol, ts) DO UPDATE SET
                         liq_usd_1h=EXCLUDED.liq_usd_1h, liq_usd_4h=EXCLUDED.liq_usd_4h,
                         liq_usd_12h=EXCLUDED.liq_usd_12h, liq_usd_24h=EXCLUDED.liq_usd_24h,
@@ -2609,6 +2616,8 @@ def task_scan_liquidation() -> dict:
                         short_liq_usd_1h=EXCLUDED.short_liq_usd_1h,
                         long_liq_usd_4h=EXCLUDED.long_liq_usd_4h,
                         short_liq_usd_4h=EXCLUDED.short_liq_usd_4h,
+                        long_liq_usd_24h=EXCLUDED.long_liq_usd_24h,
+                        short_liq_usd_24h=EXCLUDED.short_liq_usd_24h,
                         fetched_at=NOW()
                     """,
                     payload,

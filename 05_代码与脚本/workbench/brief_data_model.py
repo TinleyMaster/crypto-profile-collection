@@ -492,6 +492,10 @@ _WARNING_FIELDS = {
     "M2_holder_concentration": ["most_concentrated"],
     "M2_sector_flow": ["sectors", "total_volume_24h"],
     "M2_etf_flow": ["assets"],
+    # P0-D：24h 爆仓概况（CoinGlass 全交易所 · 滚动 24h · 池内标的合计，只展示不进分）。
+    # 口径提示见 macro_market.LIQ_OVERVIEW_SCOPE_NOTE；缺失（旧快照无该键 / 覆盖率不足 /
+    # 列 NULL）时渲染层隐藏该行、不显示 0，此处仅作降级提示。
+    "M2_liquidation": ["liq_usd_24h"],
     "kol_onchain": ["signals"],
     "narrative_flow": ["ranked"],
 }

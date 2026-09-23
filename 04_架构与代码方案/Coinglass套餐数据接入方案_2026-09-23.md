@@ -240,10 +240,15 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 - 数据源必须挂在 `macro_market.get_market_overview()` 的 `fetchers` 注册表里（08:30 上游），**不能**放进 `render_brief_html()` 的渲染期。
 - 旧快照缺 `liquidation_24h` key 时渲染**隐藏该行**（缺失≠0），不显示 0。
 
-**取数设计（两个必须处理的坑）**
+**取数设计（三个必须处理的坑）**
 
 1. **批次对齐去重**：`liquidation_snapshot` 是 5min 桶、每币一行，直接按时间范围求和会**跨桶重复计数** ⇒ 必须 `DISTINCT ON (symbol) ... ORDER BY symbol, ts DESC` **每币只取该批次最新一行**再求和。
-2. **覆盖率护栏**（缺失≠0 的展示层体现）：若该批次命中的 symbol 数低于池内标的数的**约定比例**（阈值取值走标定，不在文档留数字），**降级为「本期数据不完整，暂不展示」**，绝不展示一个偏小的假合计。
+2. **批次窗口**（锚定 now，而非固定取「表里最后一行」）：窗口内无行 ⇒ `status="error"`、整行隐藏（陈旧数据不展示，**缺失≠0**）。
+   初版取 20min，**真机取证后判定过紧**：实测批间隔 p50=300s、p95=600s，但 7 天内出现过 3 次 >20min 的空洞（最大 14.4h）；且早报 08:30 取数时刻的最近一批曾陈旧 **30min** ⇒ 原值会让整行在真实运行中静默消失。已放宽到 **4h**（取值只留代码常量，不入文档），并以 `ts` 披露「数据截至」补偿时效。
+3. **覆盖率护栏**（缺失≠0 的展示层体现）：若该批次命中的 symbol 数低于池内标的数的**约定比例**（阈值只留代码常量，不在文档留数字），**降级为「本期数据不完整，暂不展示」**，绝不展示一个偏小的假合计。
+   标定证据：`liquidation_snapshot` 全表 425 个批次 / 近 30h 的 338 个批次，`coverage_ratio` **恒为 1.0000**（每批次都写满池内全部 symbol）⇒ 下限取「无假阳性风险、但对响应被截断更敏感」的较高值。
+
+> **已知局限（不掩盖）**：护栏分母 = **过去 24h 该表出现过的 `count(DISTINCT symbol)`**，与分子同源自洽（§4.7 决策），代价是**持续性的整体截断无法被检出**——若连续 24h 每批都只返回一半 symbol，分母会同步塌陷到该半数，`ratio` 仍≈1.0。该场景的兜底只能来自**跨天对比**（今日 `symbols_covered` 与昨日快照的偏离），属后续增量，不在 P0-D 范围。
 
 **展示口径披露（三处必须一致）**
 
@@ -251,6 +256,7 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 |---|---|
 | 数据源 | `CoinGlass 全交易所 · 滚动 24h · 5min 快照` |
 | 覆盖范围 | **池内 N 个标的合计**，**不得写成「全网爆仓」** |
+| 时效 | 批次窗口放宽到 4h 后，脚注必须带 **`数据截至 MM-DD HH:MM`**（`ts` 按北京时间渲染）；`ts` 缺失/不可解析则省略该段，不阻断整行 |
 | 档位 | `1h / 4h / 12h / 24h` 四档属**同族滚动窗口**，可比较占比（「近 1h 占 24h 的 X%」合法）；**禁止**与 4h 分段增量（`liquidation_history`）混算 |
 
 **多空方向行的前置依赖**
@@ -270,13 +276,13 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 |---|---|---|
 | 存储 | `scripts/migrations/fix_068_liquidation_snapshot_24h_split.sql` | 补 `long/short_liq_usd_24h` 两列（幂等） |
 | 写入 | `scripts/bin/scan_daemon.py` `task_scan_liquidation` | payload 取值 + INSERT 列 + `ON CONFLICT DO UPDATE` 各补两列 |
-| 取数 | `workbench/macro_market.py` `fetch_liquidation_overview()` / `_read_liquidation_snapshot()` / `summarize_liquidation_snapshot()` / `_latest_row_per_symbol()` | 只读 DB（`DISTINCT ON` + 批次窗口 20min + 覆盖率护栏），纯函数可单测 |
+| 取数 | `workbench/macro_market.py` `fetch_liquidation_overview()` / `_read_liquidation_snapshot()` / `summarize_liquidation_snapshot()` / `_latest_row_per_symbol()` | 只读 DB（`DISTINCT ON` + 批次窗口 + 覆盖率护栏），纯函数可单测 |
 | 组装 | 同上 `build_derivatives_dimension()` + `fetchers` 注册表新增 `("liquidation", fetch_liquidation_overview, ())` | 浅拷贝挂载，不进分 |
-| 邮件 | `scripts/bin/send_daily_brief.py` `_render_liquidation_row()` + `macro_market.generate_morning_brief()` 生成 `M2_liquidation` | 缺失整行隐藏；口径脚注三处一致 |
+| 邮件 | `scripts/bin/send_daily_brief.py` `_render_liquidation_row()` / `_fmt_liq_as_of()` + `macro_market.generate_morning_brief()` 生成 `M2_liquidation` | 缺失整行隐藏；口径 + 时效脚注 |
 | 契约 | `workbench/brief_data_model.py` `_WARNING_FIELDS` 登记 `M2_liquidation: [liq_usd_24h]` | 缺失仅作**一般降级**提示（与 `M2_etf_flow` 同属可选辅助模块） |
-| 单测 | `workbench/test_liq_overview_brief.py` | 41 条断言：去重不重复计数 / 覆盖率不足返回 None / 缺失≠0 / 不污染 `compute_emotion_subscore` / 渲染口径 |
+| 单测 | `workbench/test_liq_overview_brief.py` | 49 条断言：去重不重复计数 / 覆盖率不足返回 None / 缺失≠0 / 不污染 `compute_emotion_subscore` / 渲染口径 + 时效披露 |
 
-**两个占位参数（待标定，不入文档）**：`LIQ_OVERVIEW_MIN_COVERAGE_RATIO`（覆盖率下限）、`LIQ_OVERVIEW_BATCH_WINDOW_MIN`（批次窗口分钟数）—— 均写在代码常量里，取值走标定流程。
+**两个取值（标定依据见上「三个坑」，取值只留代码常量、不入文档）**：`LIQ_OVERVIEW_MIN_COVERAGE_RATIO`（覆盖率下限）、`LIQ_OVERVIEW_BATCH_WINDOW_MIN`（批次窗口分钟数）。
 
 **与 §4.5 候选的关系**：B（全市场杠杆三件套）/ C（OI 拆分）/ D（期权与机构情绪）**保留为候选**，触发条件见 §4.5；ETF 流入 / Fear&Greed / 山寨季 / 稳定币净流 / BTC 周期指标在早报**已有来源**，不重复接。
 
@@ -412,11 +418,11 @@ python -m py_compile 05_代码与脚本/workbench/macro_market.py \
 # 1) 迁移幂等：连跑两次，第二次应为 0 变更、无异常
 #    psql -f 05_代码与脚本/scripts/migrations/fix_068_liquidation_snapshot_24h_split.sql
 
-# 2) 新增护栏单测（期望 41 通过 / 0 失败）
+# 2) 新增护栏单测（期望 49 通过 / 0 失败）
 python 05_代码与脚本/workbench/test_liq_overview_brief.py
 # 断言：① 同批次每币只取一行（不跨桶重复计数）；② 覆盖率不足返回 None 而非 0；
 #       ③ 列缺失返回 None 而非 0；④ 新字段不出现在 compute_emotion_subscore 的可见范围；
-#       ⑤ 渲染行无「全网爆仓」字样、缺失整行隐藏
+#       ⑤ 渲染行无「全网爆仓」字样、缺失整行隐藏；⑥ 时效披露按北京时间渲染
 
 # 3) 早报数据契约回归（期望 20 通过 / 0 失败）
 python 05_代码与脚本/workbench/test_brief_data_model.py
@@ -436,11 +442,12 @@ python 05_代码与脚本/scripts/bin/send_daily_brief.py --dry-run
 **验收实测记录（2026-09-23）**
 
 - `py_compile` exit=0（4 个文件）。
-- `test_liq_overview_brief.py` → **41 通过 / 0 失败**。
+- `test_liq_overview_brief.py` → **49 通过 / 0 失败**。
 - `test_brief_data_model.py` → **20 通过 / 0 失败**。
 - `fix_068` 连跑两次 → 幂等，无异常。
-- 真机取数：`coverage_ratio=1.0`（527/527）、`liq_usd_24h=$232.2M`、`liq_usd_1h=$10.4M`；方向列因**容器未重启**为 `None` ⇒ `status="partial"`（预期降级，非缺陷）。
-- 真机渲染：`💥 24h 爆仓 $232.2M · 近 1h 占 24h 的 4.5%` + 脚注`口径：CoinGlass 全交易所 · 滚动 24h · 5min 快照 · 池内 527 个标的合计`（无「全网」字样）。
+- 标定取证（决定性）：`liquidation_snapshot` 全表 425 批次 / 近 30h 338 批次，`coverage_ratio` **恒为 1.0000**；批间隔 p50=300s / p95=600s，7 天内 3 次 >20min 空洞（最大 14.4h）；**早报 08:30 取数时刻最近一批曾陈旧 30min** ⇒ 原 20min 窗口会导致整行静默消失（已修正为 4h + 时效披露）。
+- 真机取数：`coverage_ratio=1.0`（527/527）、`liq_usd_24h=$232.3M`、`liq_usd_1h=$10.0M`；方向列因**容器未重启**为 `None` ⇒ `status="partial"`（预期降级，非缺陷）。
+- 真机渲染：`💥 24h 爆仓 $232.3M · 近 1h 占 24h 的 4.3%` + 脚注`口径：CoinGlass 全交易所 · 滚动 24h · 5min 快照 · 池内 527 个标的合计 · 数据截至 09-23 16:00`（无「全网」字样）。
 
 ---
 
@@ -491,6 +498,8 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 
 | 风险 | 说明 | 对策 |
 |---|---|---|
+| **采集停摆 ⇒ 早报展示陈旧值** | `liquidation_snapshot` 实测 7 天内出现过 3 次 >20min 空洞（最大 14.4h）；窗口过紧会静默丢行，过宽会展示陈旧值 | 窗口取 4h（只留代码常量）+ 脚注强制披露 **`数据截至 HH:MM`**；超窗则整行隐藏（不展示编造值） |
+| **覆盖率护栏的分母与分子同源塌陷** | 分母 = 过去 24h 该表出现过的 `count(DISTINCT symbol)`，与分子同源自洽；代价是**持续性整体截断无法检出** | 已披露为已知局限；兜底需**跨天对比 `symbols_covered`**（后续增量，不在 P0-D） |
 | **两套爆仓口径被混用**（最高风险） | 滚动窗口（snapshot）与分段增量（history）数值不可换算；混用即重演 P1-1 假 0 | 独立表 + PK 含 `interval`/`exchange_scope` + 表注释首行声明 + 单测不变量 1/2 |
 | **回填被误接进实时判定** | 4h 粒度无法支撑 5m 窗口判定 | N2 写入方案 + 单测不变量 1 |
 | **额度争抢** | 回填 24 req/min 与 daemon 共用同一 key | 留 6 req/min 余量；daemon 单次调用影响可忽略；若出现 429 优先降回填速度 |
@@ -523,7 +532,7 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 
 1. ~~P0-B 是否真的需要 12h/24h 多空分列~~ → **已定：只补 24h 两列**，随 `fix_068` 上线（P0-D 的方向行依赖它）；12h 分列当前无消费点，**不补**。
 2. **早报的覆盖范围**：现在只能给「池内 N 个标的合计」，是否要扩到**真·全市场**（那就得走 `liquidation/aggregated-history`，即 P1/P2 路线）？
-3. **覆盖率护栏的比例阈值**：取值走标定流程，**不在文档留数字**。
+3. ~~**覆盖率护栏的比例阈值**：取值走标定流程，**不在文档留数字**~~ → **已标定（2026-09-23）**：取证见 §4.7「三个坑」第 3 条与 §8.1 实测记录；取值只留代码常量，**仍不在文档留数字**。
 4. `--scope all` 的全交易所列表获取方式（`supported-exchanges` 动态拼 vs 官方是否接受 `Binance,OKX,...` 全量），需 `--probe` 实测。
 5. `coin-list` 失败时 `scan_squeeze` 整轮失败（§13 密钥单点）是否要降级为「跳过爆仓维、其余照跑」——**另立工单**。
 6. ~~**早报展示位版式**：现有 `research.html` 的衍生品指标网格是否足够承载「四档 + 多空方向」~~ → **已定**：邮件侧在「3衍生品」内新增**一行**（合计 + 多空方向 + `1h/24h` 占比 + 口径脚注），由 `_render_liquidation_row()` 渲染；`research.html` 网格版式**本轮不改**（网页侧随后续维扩再定）。

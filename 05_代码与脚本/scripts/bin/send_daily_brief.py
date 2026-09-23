@@ -195,14 +195,35 @@ def _render_liquidation_row(liq: dict) -> str:
     covered = liq.get("symbols_covered")
     scope_note = liq.get("scope_note") or "CoinGlass 全交易所 · 滚动 24h · 5min 快照"
     cover_txt = f"池内 {covered} 个标的合计" if covered else "池内标的合计"
+    # 时效披露：批次窗口放宽到 4h 后，必须让读者看到「这个 24h 数截至何时」，
+    # 否则停摆期间展示的陈旧值会被误读成实时。ts 缺失或不可解析则省略该段（不阻断整行）。
+    as_of_txt = _fmt_liq_as_of(liq.get("ts"))
+    foot = f"口径：{scope_note} · {cover_txt}"
+    if as_of_txt:
+        foot += f" · 数据截至 {as_of_txt}"
 
     return (
         '<div style="margin-top:6px;background:#f8fafc;border-radius:6px;padding:6px 8px;'
         'font-size:10.5px;color:#334155">'
         f'💥 {head}'
-        f'<div style="font-size:9px;color:#94a3b8;margin-top:2px">口径：{scope_note} · {cover_txt}</div>'
+        f'<div style="font-size:9px;color:#94a3b8;margin-top:2px">{foot}</div>'
         '</div>'
     )
+
+
+def _fmt_liq_as_of(ts) -> str:
+    """把快照批次时间（UTC ISO 串）转成北京时间 `MM-DD HH:MM` 供披露；不可解析则返回空串。"""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
+    except Exception:
+        return ""
 
 
 def render_brief_html(brief: dict) -> str:

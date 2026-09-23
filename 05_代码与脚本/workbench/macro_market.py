@@ -874,8 +874,16 @@ def fetch_binance_derivatives() -> dict:
 #   · 档位 1h/4h/12h/24h 属同族滚动窗口 ⇒ 可比较占比（「近 1h 占 24h 的 X%」合法）；
 #     严禁跨桶差分，严禁与 biz.liquidation_history 的 4h 分段增量换算/相加
 # 缺失纪律（§3.3-1）：任一端（窗口合计 / 多空分列）为 NULL 一律 None，**绝不补 0**。
-LIQ_OVERVIEW_MIN_COVERAGE_RATIO = 0.6  # 临时值，待标定（阈值不入文档；标定后再定）
-LIQ_OVERVIEW_BATCH_WINDOW_MIN = 20     # 批次窗口：now 往前 20min（≈4 个 5min 桶，容忍单轮漏采）
+# 以下两个常量的取值基于真机取证标定（2026-09-23，阈值不入文档，只留代码）：
+#   · 覆盖率：liquidation_snapshot 全表 425 个批次、近 30h 的 338 个批次，
+#     coverage_ratio 恒为 1.0000（每批次都写满池内全部 symbol）⇒ 取一个无假阳性风险、
+#     但对「响应被截断」更敏感的较高下限。
+#   · 批次窗口：实测批间隔 p50=300s、p95=600s，但 7 天内出现过 3 次 >20min 的空洞
+#     （最大 14.4h）。原 20min 窗口过紧——早报 08:30 取数时若最近一批已陈旧 30min 就会
+#     取不到行、整行静默消失。放宽到 4h 以容忍常规停摆；真陈旧时由 `ts` 披露「数据截至」，
+#     超过窗口则隐藏（仍然不展示编造值）。
+LIQ_OVERVIEW_MIN_COVERAGE_RATIO = 0.9
+LIQ_OVERVIEW_BATCH_WINDOW_MIN = 240
 LIQ_OVERVIEW_SCOPE_NOTE = "CoinGlass 全交易所 · 滚动 24h · 5min 快照"
 
 # 四档滚动窗口列（同族，可比较占比）

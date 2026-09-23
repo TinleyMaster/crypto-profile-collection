@@ -210,6 +210,28 @@ assert_eq(_render_liquidation_row({"liq_usd_24h": None, "status": "insufficient"
           "覆盖率不足 → 空串")
 assert_eq(_render_liquidation_row(out2), "", "summarize 的 insufficient 结果 → 空串")
 
+# 时效披露（批次窗口放宽到 4h 后必须让读者看到数据截止时刻）
+_liq_ts = dict(_liq_ok, ts="2026-09-23T00:30:00+00:00")
+row_ts = _render_liquidation_row(_liq_ts)
+assert_eq("数据截至 09-23 08:30" in row_ts, True, "UTC 批次时间按北京时间披露（00:30Z → 08:30）")
+assert_eq("数据截至" in _render_liquidation_row(_liq_ok), False, "ts 缺失则省略时效段，不阻断整行")
+assert_eq("24h 爆仓 $1.5B" in _render_liquidation_row(dict(_liq_ok, ts="not-a-time")), True,
+          "ts 不可解析仍正常出数（时效段省略，不抛错）")
+
+# 覆盖率下限标定后的边界：恰好在/低于下限
+_mid = [_row(s, 10, liq24=10.0, long24=4.0, short24=6.0)
+        for s in ("BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "TRX", "LINK", "AVAX", "DOT")]
+out9 = summarize_liquidation_snapshot(_mid, universe_24h=100)   # 10/100 = 0.10 → 不足
+assert_eq(out9["status"], "insufficient", "覆盖率 0.10 < 下限 → insufficient")
+assert_eq(out9["liq_usd_24h"], None, "覆盖率 0.10 → 合计 None（不是 100）")
+out10 = summarize_liquidation_snapshot(_mid, universe_24h=10)   # 10/10 = 1.0 → 达标
+assert_eq(out10["status"], "ok", "覆盖率 1.0 ≥ 下限 → ok")
+assert_eq(out10["liq_usd_24h"], 100.0, "覆盖率 1.0 → 合计 100")
+
+# 批次窗口放宽后仍必须「超窗即隐藏」：窗口内无行 ⇒ error，不返回陈旧合计
+assert_eq(summarize_liquidation_snapshot([], universe_24h=527)["status"], "error",
+          "批次窗口内无行 → error（陈旧数据不展示）")
+
 
 # ════════════════════════════════════════════════════════════
 # 总结

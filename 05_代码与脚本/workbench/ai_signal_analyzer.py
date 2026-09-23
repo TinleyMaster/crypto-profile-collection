@@ -2643,13 +2643,15 @@ def _to_storable_json(raw: str) -> str:
 
     分级策略（能少改就少改，且绝不丢数据）：
     1) 原文本身已是合法 JSON → 原样返回（保持 AI 原话格式，零改动）；
-    2) 仅字符串内字面控制符导致非法 → 返回转义后的文本（改动最小，可解析）；
-    3) 代码块包裹 / 前后夹说明文字 / 被截断 → 返回解析结果的规范 JSON；
+    2) 仅字符串内字面控制符 / 未转义直引号导致非法 → 返回补转义后的文本（无损、可解析）；
+    3) 代码块包裹 / 前后夹说明文字 / 被截断 → 返回解析结果的规范 JSON（此步可能截断，
+       故仅在第 1、2 步都失败时才用）；
     4) 仍无法解析 → 保留原文（该行依旧不可 JSON 查询，但不丢原话、不阻断写入）。
     """
     from crypto_research.clients.llm_client import (
         extract_json_from_llm_response,
         _sanitize_json_control_chars,
+        _sanitize_unescaped_quotes,
     )
 
     if not raw:
@@ -2660,7 +2662,7 @@ def _to_storable_json(raw: str) -> str:
     except Exception:
         pass
 
-    sanitized = _sanitize_json_control_chars(raw)
+    sanitized = _sanitize_unescaped_quotes(_sanitize_json_control_chars(raw))
     try:
         json.loads(sanitized)
         return sanitized

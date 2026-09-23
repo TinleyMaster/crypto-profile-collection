@@ -11,10 +11,11 @@
     python backfill_ai_trace_identity.py             # 回写
 
 存量坏 JSON 修复（2026-09-23 复验 P1 衍生）：
-    写入口已修（落库前清洗），但历史行的 raw_response 仍是脏原文（全表 49 条），
+    写入口已修（落库前补转义），但历史行的 raw_response 仍是脏原文，
     导致 `raw_response::json` 类库内校验失败、PG JSON 函数不可用。
-    --clean-raw 用与写入口同一套清洗逻辑（ai_signal_analyzer._to_storable_json）逐行修复，
-    只更新「清洗后确实变成合法 JSON」的行，改不动的行原样保留。
+    --clean-raw 只做**无损**修复（字符串内控制符 / 未转义直引号补转义），
+    要求整体可解析才回写；截断型坏 JSON 会被跳过（补齐会丢原文），
+    这类行靠查看器 parsed_response 兜底，库里原文保持不动。
     ⚠️ 会覆盖 raw_response 原文，属 prod 数据写操作，需用户授权后执行；先 --dry-run 看数。
     python backfill_ai_trace_identity.py --clean-raw --dry-run
     python backfill_ai_trace_identity.py --clean-raw
@@ -31,10 +32,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
-# 复用写入口的清洗逻辑（同一函数，避免两套口径漂移）
-WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
-if str(WORKBENCH_DIR) not in sys.path:
-    sys.path.insert(0, str(WORKBENCH_DIR))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
@@ -42,7 +39,6 @@ import psycopg  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
-from ai_signal_analyzer import _to_storable_json  # noqa: E402
 
 _SYM_RE = re.compile(r"- 代币:\s*(\S+?)\s*\(")
 _SYM_VALID = re.compile(r"^[A-Za-z0-9.]+$")
@@ -76,8 +72,31 @@ def _resolve_asset_ids(conn, symbols: list[str]) -> dict[str, int]:
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
+def _lossless_repair(raw: str) -> str | None:
+    """无损修复 raw_response：只补转义（控制符 / 字符串内未转义直引号），整体必须可解析。
+
+    刻意**不用** `extract_json_from_llm_response` 的截断补齐策略：实测 48 条坏 JSON 里
+    有 12 条属「输出被截断」，补齐会丢 170~1050 字原文，审计记录不该被悄悄截短 ——
+    这类行留给查看器 parsed_response 兜底展示，库里原文保持不动。
+    修复不了（返回 None）的行同样原样保留。
+    """
+    from crypto_research.clients.llm_client import (
+        _sanitize_json_control_chars,
+        _sanitize_unescaped_quotes,
+    )
+
+    fixed = _sanitize_unescaped_quotes(_sanitize_json_control_chars(raw))
+    if fixed == raw:
+        return None
+    try:
+        json.loads(fixed)
+    except Exception:
+        return None
+    return fixed
+
+
 def _clean_raw(conn, dry_run: bool, limit: int) -> int:
-    """把 raw_response 非法的行按写入口同一逻辑清洗为合法 JSON（只修能修的）。"""
+    """把 raw_response 非法的行按无损规则修复为合法 JSON（只修能修的）。"""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, raw_response FROM sys.ai_trace "
@@ -91,29 +110,26 @@ def _clean_raw(conn, dry_run: bool, limit: int) -> int:
         return 0
 
     to_fix: list[tuple[int, str]] = []
-    unrecoverable = 0
+    skipped = 0
     for rid, raw in rows:
         try:
             json.loads(raw)
             continue  # 已合法，跳过
         except Exception:
             pass
-        fixed = _to_storable_json(raw)
-        try:
-            json.loads(fixed)
-        except Exception:
-            unrecoverable += 1  # 清洗后仍非法，保留原文不动
+        fixed = _lossless_repair(raw)
+        if fixed is None:
+            skipped += 1  # 截断型等不可无损修复，保留原文
             continue
-        if fixed != raw:
-            to_fix.append((rid, fixed))
+        to_fix.append((rid, fixed))
 
-    print(f"扫描 {len(rows)} 行：坏 JSON 待修 {len(to_fix)} 行，"
-          f"清洗后仍不可解析（保留原文）{unrecoverable} 行")
+    print(f"扫描 {len(rows)} 行：可无损修复 {len(to_fix)} 行，"
+          f"不可无损修复（保留原文，靠 parsed_response 兜底）{skipped} 行")
 
     if dry_run:
         print(f"[dry-run] 将回写 {len(to_fix)} 行")
         for rid, fixed in to_fix[:3]:
-            print(f"  id={rid}: {fixed[:120]}...")
+            print(f"  id={rid}: {fixed[:100]}...")
         return 0
 
     if not to_fix:
@@ -128,7 +144,7 @@ def _clean_raw(conn, dry_run: bool, limit: int) -> int:
             ([r[0] for r in to_fix], [r[1] for r in to_fix]),
         )
     conn.commit()
-    print(f"已回写 {len(to_fix)} 行（raw_response 现为合法 JSON）")
+    print(f"已回写 {len(to_fix)} 行（raw_response 现为合法 JSON，内容无损）")
     return 0
 
 

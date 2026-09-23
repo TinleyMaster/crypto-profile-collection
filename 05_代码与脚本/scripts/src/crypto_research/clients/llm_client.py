@@ -96,6 +96,53 @@ def _sanitize_json_control_chars(s: str) -> str:
     return "".join(out)
 
 
+def _sanitize_unescaped_quotes(s: str) -> str:
+    """把 JSON 字符串值内未转义的字面双引号补转义为 \\"。
+
+    2026-09-23 复验 P1：LLM 用中文强调时直接写 ASCII 直引号（如 `属"强而透支"结构`），
+    字符串内未转义 → json.loads 报 `Expecting ',' delimiter`，实测占全表坏 JSON 的 75%
+    （48 条里 36 条）。补转义是**无损**的：解析回来仍是同一个 `"` 字符。
+
+    判定规则：字符串内遇到未转义的 `"`，向后跳过空白，若下一个非空白字符不是结构
+    分隔符（`,` `}` `]` `:`）则判为散落引号 → 转义；否则视为合法收尾。
+    对合法 JSON 恒为空操作（合法收尾引号后面只会是这些分隔符或文本结尾）。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    in_string = False
+    while i < n:
+        c = s[i]
+        if in_string:
+            if c == "\\":
+                out.append(c)
+                if i + 1 < n:
+                    out.append(s[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if c == '"':
+                j = i + 1
+                while j < n and s[j] in " \t\r\n":
+                    j += 1
+                if j >= n or s[j] in ",}]:":
+                    in_string = False
+                    out.append(c)
+                else:
+                    out.append('\\"')
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+        else:
+            if c == '"':
+                in_string = True
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def extract_json_from_llm_response(raw: str) -> Any:
     """从 LLM 返回内容中健壮地提取 JSON。
 
@@ -106,6 +153,7 @@ def extract_json_from_llm_response(raw: str) -> Any:
     - 被截断的 JSON（max_tokens 不足导致末尾不完整）
     - 字符串中间截断（半截字符串）
     - 字符串值内的字面控制字符（LLM 未转义换行等，2026-09-23 审计 P1）
+    - 字符串值内未转义的字面双引号（LLM 中文强调直引号，2026-09-23 复验 P1）
     - 空内容
     """
     if not raw or not raw.strip():
@@ -115,6 +163,9 @@ def extract_json_from_llm_response(raw: str) -> Any:
     # P1（2026-09-23 审计）：LLM 把字符串值内的字面换行/控制符原样输出 → 预清洗，
     # 字符串内控制符转义为 \\uXXXX，字符串外合法空白保持不变。
     text = _sanitize_json_control_chars(text)
+    # P1（2026-09-23 复验）：再补上「字符串内未转义直引号」→ \\"（无损），
+    # 覆盖 `Expecting ',' delimiter` 这一主因；对合法 JSON 是空操作。
+    text = _sanitize_unescaped_quotes(text)
 
     # 策略1：去除 markdown 代码块后解析
     cleaned = text

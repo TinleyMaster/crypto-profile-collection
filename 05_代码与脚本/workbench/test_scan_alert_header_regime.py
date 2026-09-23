@@ -207,9 +207,17 @@ print("\n【OPT-1】标题补覆盖币数（共振集中度）")
 two = [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))},
        {"signal": _brk_sig(), "resonance": _res()}]
 t2 = sd._alert_title(two)
-check("（1/2 币）" in t2, "标题并列覆盖币数「1/2 币」（5币11条实为1币的误读）", t2)
+check("（1/2 币）" in t2, "多币批次并列覆盖币数「1/2 币」（5币11条实为1币的误读）", t2)
 t1 = sd._alert_title([{"signal": _main_sig(), "resonance": _res(bull=1, fresh=(1, 0, 0))}])
-check("（1/1 币）" in t1, "单币批次「1/1 币」", t1)
+# N-923-1：单币时「（1/1 币）」与条数重复 ⇒ 省略
+check("1/1 币" not in t1, "单币批次省略「（1/1 币）」（N-923-1 冗余）", t1)
+
+print("\n【N-923-1】方向段以「新鲜」前缀标口径，不再无条件印「已剔除陈旧」")
+h_nostale_t = sd._alert_title([{"signal": _main_sig(),
+                                "resonance": _res(bull=1, fresh=(1, 0, 0))}])
+check("催化剂新鲜 1多/0空/0中" in h_nostale_t,
+      "全新鲜（stale=0）→ 「催化剂新鲜 1多/0空/0中」（不再虚假暗示剔除）", h_nostale_t)
+check("已剔除陈旧" not in h_nostale_t, "无陈旧可剔时不再印「已剔除陈旧」（46% 场景）")
 
 print("\n【N-786-1】标题净多用**新鲜**口径（陈旧不推高 conviction）")
 # 全量净多10（11-1），新鲜净多4（5-1）——标题须报新鲜
@@ -218,7 +226,7 @@ t_stale = sd._alert_title([{"signal": _main_sig(),
                                               stale=10, fresh=(5, 1, 0))}])
 check("净多4" in t_stale and "净多10" not in t_stale,
       "标题报新鲜净多4（非全量净多10）", t_stale)
-check("已剔除陈旧" in t_stale, "标题方向段标「已剔除陈旧」", t_stale)
+check("催化剂新鲜 5多/1空/0中" in t_stale, "标题方向段标「催化剂新鲜 …」口径", t_stale)
 
 print("\n【N-786-2】覆盖币数按新鲜计（只有陈旧催化剂的币不算有共振）")
 only_stale = [{"signal": _main_sig(),
@@ -228,13 +236,13 @@ t_onlystale = sd._alert_title(only_stale)
 check("无新鲜共振" in t_onlystale and "纯盘面信号" not in t_onlystale,
       "全陈旧 → 标题「无新鲜共振…」而非「纯盘面信号，无共振」（事实错误）", t_onlystale)
 check("净多" not in t_onlystale, "全陈旧时不报净多（避免把陈旧当方向）")
-# 有新鲜共振的另一币共存时，方向段用新鲜口径并显式标「已剔除陈旧」
+# 有新鲜共振的另一币共存时，方向段用新鲜口径
 mixed = [{"signal": _main_sig(), "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))},
          {"signal": dict(_main_sig(), id=9),
           "resonance": _res(bull=2, fresh=(2, 0, 0))}]
 t_mixed = sd._alert_title(mixed)
-check("已剔除陈旧" in t_mixed and "净多2" in t_mixed,
-      "混合批次：标题用新鲜口径并标「已剔除陈旧」", t_mixed)
+check("催化剂新鲜" in t_mixed and "净多2" in t_mixed,
+      "混合批次：标题用新鲜口径（「催化剂新鲜」前缀）", t_mixed)
 
 print("\n【N-786-3】卡片全陈旧 → 「无新鲜条目」（不说「多空持平」）")
 h_allstale = _body(sd._render_alert_email([{

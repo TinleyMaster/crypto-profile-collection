@@ -93,7 +93,8 @@ print("\n【O2】主题与卡片补「净多 = 多−空」")
 items = [_item(res=_res(bull=4, bear=0, neut=2))]
 title = sd._alert_title(items)
 check("净多4" in title, "_alert_title 含「净多4」（中性不计方向）", title)
-check("催化剂 4多/0空/2中" in title, "_alert_title 保留原始多/空/中构成", title)
+check("催化剂新鲜 4多/0空/2中" in title,
+      "_alert_title 保留原始多/空/中构成（N-923-1 后为「催化剂新鲜 …」前缀）", title)
 tie = sd._alert_title([_item(res=_res(bull=0, bear=0, neut=3))])
 check("净" not in tie, "全中性（多=空）不输出净方向（避免「净多0」误读）", tie)
 html_up = sd._render_alert_email([_item(res=_res(bull=3, bear=1, neut=2))])

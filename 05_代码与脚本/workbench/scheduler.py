@@ -154,6 +154,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),
+    # 高亮信号增量提醒：只读 08:30 落库的 overview 快照（不重算/不调 LLM），
+    # 仅「新增卡片」或「tier 升到 HIGH / 共振源数增加」时发信，24h 冷却去重。
+    ("highlight_alert", "5 * * * *", "send_highlight_alert.py", [], "高亮信号增量邮件提醒（每小时探测，仅新增/升级发信）", "core"),
 
     # ═══ DEX 流动性扫描（MEME-03）═══
     ("liquidity_scan", "10 8 * * *", "phase_chain_liquidity.py", ["--limit", "100"], "DEX 流动性扫描（DexScreener+GeckoTerminal，每日 08:10）", "chain"),

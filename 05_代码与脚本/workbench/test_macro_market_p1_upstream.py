@@ -20,6 +20,8 @@ B. select_highlight_signals —— 合并卡必须继承源机会的 asset_id（
 C. 时序结构 —— asset_id 解析必须早于高亮/风险精选，且不得回退到「事后补 id」
 D. _recent_raises —— SQL 必须排除占位资产（P1-4 消费侧护栏）
 E. phase_b2_third_party_raises —— 候选 SQL 必须含写入侧守卫
+F. _recent_hacks —— 占位资产上的 hack 行必须「保留事件、剥离身份」（P1-4 第三条路径）
+G. phase_b2_third_party_hacks —— 映射只认有真实 symbol 的资产
 """
 import os
 import re
@@ -38,6 +40,8 @@ import macro_market as mm  # noqa: E402
 _MACRO_SRC = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 _B2_SRC = open(os.path.join(os.path.dirname(_HERE), "scripts", "bin",
                             "phase_b2_third_party_raises.py"), encoding="utf-8").read()
+_B2_HACKS_SRC = open(os.path.join(os.path.dirname(_HERE), "scripts", "bin",
+                                  "phase_b2_third_party_hacks.py"), encoding="utf-8").read()
 
 PLACEHOLDER_FRAGMENT = "TRIM(a.canonical_symbol) NOT IN ('', '-', '?')"
 
@@ -168,6 +172,39 @@ check(len(_branches) == 2 and all("INNER JOIN core.asset AS a" in b for b in _br
       f"branches={len(_branches)}")
 check("def count_placeholder_mapped_protocols" in _B2_SRC,
       "E3 保留被守卫排除协议数的可观测性")
+
+# ── F. _recent_hacks 占位资产护栏（保留事件、剥离身份）──
+print("[F] _recent_hacks 消费侧护栏")
+_sql_sink.clear()
+_dbconn.get_connection = _fake_get_connection
+_cfg.get_settings = lambda **k: SimpleNamespace(database_url="dummy")
+try:
+    mm._recent_hacks(window_days=14, limit=5)
+finally:
+    _dbconn.get_connection = _orig_conn
+    _cfg.get_settings = _orig_settings
+
+_hack_sql = _sql_sink[-1] if _sql_sink else ""
+_norm_hack_sql = " ".join(_hack_sql.split())
+check(bool(_hack_sql), "F1 _recent_hacks 实际执行了查询")
+check(PLACEHOLDER_FRAGMENT in _hack_sql,
+      "F2 查询按占位资产剥离身份（CASE WHEN … THEN 置空，而非 WHERE 排除）")
+check(_hack_sql.count(PLACEHOLDER_FRAGMENT) == 2,
+      "F3 asset_id 与 symbol 两列都受同一守卫约束",
+      f"count={_hack_sql.count(PLACEHOLDER_FRAGMENT)}")
+check("h.name" in _hack_sql and -1 < _hack_sql.find(PLACEHOLDER_FRAGMENT)
+      < _hack_sql.find("FROM biz.asset_hacks"),
+      "F4 守卫位于 SELECT 列表内（保留事件行，只剥离身份）",
+      _norm_hack_sql[:160])
+
+# ── G. 写入侧守卫（hacks）──
+print("[G] phase_b2_third_party_hacks 写入侧守卫")
+check("placeholder_predicate" in _B2_HACKS_SRC and PLACEHOLDER_FRAGMENT in _B2_HACKS_SRC,
+      "G1 映射查询含占位资产守卫")
+check("INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id" in _B2_HACKS_SRC,
+      "G2 映射查询已加入 core.asset 连接")
+check("skipped_placeholder_mapped" in _B2_HACKS_SRC,
+      "G3 保留被守卫排除协议数的可观测性")
 
 # ── 汇总 ──
 print(f"\n{passed}/{passed + failed} 通过")

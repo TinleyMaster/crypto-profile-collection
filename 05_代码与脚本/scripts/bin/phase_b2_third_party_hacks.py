@@ -25,6 +25,13 @@ sys.stdout.reconfigure(line_buffering=True)
 
 DEFILLAMA_HACKS_URL = "https://api.llama.fi/hacks"
 
+# 占位资产判定（canonical_symbol 为 ''/'-'/'?'）：这类资产是 DL 协议壳，不是可交易
+# 标的。事件若挂到它的 asset_id 上，消费侧会渲染成「甲协议被黑 + 乙资产身份」。
+# 与 phase_b2_third_party_raises.py 的 placeholder_predicate 保持同一字面量口径。
+placeholder_predicate = (
+    "a.canonical_symbol IS NOT NULL AND TRIM(a.canonical_symbol) NOT IN ('', '-', '?')"
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="补齐链上异常事件（hacks）结构化数据。")
@@ -126,23 +133,35 @@ def main() -> int:
 
     print(f"/hacks 事件总数: {len(hacks)}")
 
-    # defillamaId -> asset_id 映射（仅已映射资产的协议）
+    # defillamaId -> asset_id 映射（仅映射到「有真实 symbol 的资产」的协议）
     id_to_asset: dict[str, int] = {}
+    n_placeholder_mapped = 0
     with get_connection(settings.database_url) as conn:
         ensure_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """
+            cur.execute(f"""
                 SELECT asm.asset_id, p.protocol_id
                 FROM src_dl.protocol_list AS p
                 INNER JOIN core.asset_source_map AS asm
                     ON asm.source_code = 'dl'
                    AND asm.source_asset_key = p.protocol_id
-                """
-            )
+                INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id
+                WHERE {placeholder_predicate}
+            """)
             for row in cur.fetchall():
                 if row["protocol_id"]:
                     id_to_asset[row["protocol_id"]] = row["asset_id"]
+
+            cur.execute(f"""
+                SELECT COUNT(*) AS n
+                FROM src_dl.protocol_list AS p
+                INNER JOIN core.asset_source_map AS asm
+                    ON asm.source_code = 'dl'
+                   AND asm.source_asset_key = p.protocol_id
+                INNER JOIN core.asset AS a ON a.asset_id = asm.asset_id
+                WHERE NOT ({placeholder_predicate})
+            """)
+            n_placeholder_mapped = cur.fetchone()["n"]
 
     written = 0
     matched = 0
@@ -185,6 +204,7 @@ def main() -> int:
             "matched": matched,
             "rows": len(preview_rows),
             "skipped": skipped,
+            "skipped_placeholder_mapped": n_placeholder_mapped,
             "first_row": preview_rows[0] if preview_rows else None,
         }
     else:
@@ -194,6 +214,7 @@ def main() -> int:
             "matched": matched,
             "written": written,
             "skipped": skipped,
+            "skipped_placeholder_mapped": n_placeholder_mapped,
         }
     print(json.dumps(result, ensure_ascii=False, default=str))
     return 0

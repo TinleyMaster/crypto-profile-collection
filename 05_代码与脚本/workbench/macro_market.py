@@ -3786,6 +3786,15 @@ def _github_activity_targets(
         return []
 
 
+# 「资产身份可用」判定：canonical_symbol 为 ''/'-'/'?' 的实体是 DefiLlama 协议壳
+# （协议名对、但 DL 本身不给符号），不是可交易标的。带上它们的 asset_id 会渲染出
+# 「甲事件标题 + 乙资产身份」的嵌合卡片。与 phase_b2_third_party_raises.py 的
+# placeholder_predicate 保持同一字面量口径。
+_ASSET_IDENTITY_OK = (
+    "a.canonical_symbol IS NOT NULL AND TRIM(a.canonical_symbol) NOT IN ('', '-', '?')"
+)
+
+
 def _recent_raises(
     window_days: int = 90, limit: int = 5,
 ) -> list[tuple]:
@@ -3793,9 +3802,8 @@ def _recent_raises(
 
     amount 单位为百万美元（实测：Crypto.com 400 = $400M）；协议名用于 symbol 缺失兜底。
 
-    P1-4 护栏：占位资产（canonical_symbol 为 ''/'-'/'?'）上的 raises 行属历史错配
-    （DL 协议被批量映射到同一占位资产），直接排除，避免「甲协议标题 + 乙资产身份」
-    的嵌合卡片进入 AI 画像与前端跳转。
+    P1-4 护栏：占位资产上的 raises 行属历史错配（DL 协议被批量映射到同一占位资产），
+    直接排除，避免「甲协议标题 + 乙资产身份」的嵌合卡片进入 AI 画像与前端跳转。
     """
     try:
         from crypto_research.config import get_settings
@@ -3804,14 +3812,13 @@ def _recent_raises(
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(f"""
                     SELECT r.asset_id, a.canonical_symbol,
                            r.round, r.amount, r.lead_investors, r.raise_date, r.protocol_name
                     FROM biz.asset_raises r
                     JOIN core.asset a ON a.asset_id = r.asset_id
                     WHERE r.raise_date >= NOW() - make_interval(days => %s)
-                      AND a.canonical_symbol IS NOT NULL
-                      AND TRIM(a.canonical_symbol) NOT IN ('', '-', '?')
+                      AND {_ASSET_IDENTITY_OK}
                     ORDER BY r.raise_date DESC
                     LIMIT %s
                 """, (window_days, limit))
@@ -3993,7 +4000,12 @@ def fetch_meme_risk_summary(limit_per_bucket: int = 5) -> dict:
 
 
 def _recent_hacks(window_days: int = 14, limit: int = 5) -> list[tuple]:
-    """P1-3：近期黑客/安全事件（biz.asset_hacks）。返回 [(asset_id, symbol, name, amount, hack_date, technique), ...]。"""
+    """P1-3：近期黑客/安全事件（biz.asset_hacks）。返回 [(asset_id, symbol, name, amount, hack_date, technique), ...]。
+
+    P1-4 护栏：占位资产的 hack 行**保留事件、剥离身份**——h.name 是真实协议名，
+    但 asset_id 是错的（实测 11125 Aztec Connect 一个占位资产上挂了 122 条不同协议
+    的黑客事件）。置空后卡片以事件自身名称呈现，不再挂错误的资产身份与研究页跳转。
+    """
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
@@ -4001,8 +4013,9 @@ def _recent_hacks(window_days: int = 14, limit: int = 5) -> list[tuple]:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT h.asset_id, a.canonical_symbol,
+                cur.execute(f"""
+                    SELECT CASE WHEN {_ASSET_IDENTITY_OK} THEN h.asset_id END,
+                           CASE WHEN {_ASSET_IDENTITY_OK} THEN a.canonical_symbol END,
                            h.name, h.amount, h.hack_date, h.technique
                     FROM biz.asset_hacks h
                     LEFT JOIN core.asset a ON a.asset_id = h.asset_id
@@ -5964,7 +5977,14 @@ def _resolve_symbols_to_asset_ids(symbols: set[str]) -> dict[str, int]:
                 if r.get("symbol") and r.get("asset_id") is not None:
                     mapping[r["symbol"]] = int(r["asset_id"])
         return mapping
-    except Exception:
+    except Exception as exc:
+        # 失败必须留痕：返回空表与「无符号可解析」不可区分，会让全部高亮卡同时
+        # 失去 asset_id 并静默零覆盖（P1-1 同类事故）。调用方在 macro_market.py:5787。
+        import logging
+        logging.getLogger(__name__).warning(
+            "resolve_symbols_to_asset_ids failed, %d 个 symbol 全部失配: %s: %s",
+            len(symbols), type(exc).__name__, exc,
+        )
         return {}
 
 

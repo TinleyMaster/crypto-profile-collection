@@ -317,6 +317,11 @@ def molecule_coverage(cur, days: int) -> dict:
     曾用 `len(hist)`（`generate_series` 的实际项数）—— 二者当前恒等（死耦合），但 H3 起
     `missing_hours`（`expect_hours - hours_present`）与展示的 `ratio` 被**同一条折叠判据**绑定，
     一旦网格定义变更（如改为含当前小时）就会印出「分母不一致的一对数字」⇒ 统一同源取值。
+
+    复验 J3：`present` 还可以 **> `expect_hours`**（网格成为 expect 的超集时）⇒ `ratio` 须
+    夹到 `1.0`，否则会印出「覆盖率 120.8% 而缺失 0h」的自相矛盾 —— 那正是 I5 要消除的
+    那类不一致的**镜像版**。prod 当前不可达（网格由 `generate_series(expect_hours)` 生成
+    ⇒ `grid ≡ expect`），但 I5 的动机场景（网格定义变更）本身就会命中。
     """
     expect_hours = max(1, days * 24)
     cur.execute(
@@ -335,7 +340,8 @@ def molecule_coverage(cur, days: int) -> dict:
         hole = max(hole, run)
     return {"expect_hours": expect_hours, "grid_hours": len(hist),
             "hours_present": present,
-            "hours_present_ratio": round(present / expect_hours, 4),
+            # 复验 J3：上夹到 1.0（超集网格下 `present` 可 > `expect_hours`）。
+            "hours_present_ratio": round(min(1.0, present / expect_hours), 4),
             "max_hole_hours": hole, "hourly_rows": hist}
 
 

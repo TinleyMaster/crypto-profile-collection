@@ -14,8 +14,10 @@
    `long_liq=1.66e-4` 判成「大额多单踩踏」从而屏蔽 profit_take；重标定到
    P95=4.07e-4 后该样本不再算踩踏，而它 OI 快速下降 ⇒ 归入 profit_take。
 """
+import io
 import os
 import sys
+import tokenize
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.join(os.path.dirname(_HERE), "scripts")
@@ -345,6 +347,13 @@ check(_mol["hours_present"] == 2 and _mol["hours_present_ratio"] == round(2 / 24
       and _mol["grid_hours"] == 4 and _mol["max_hole_hours"] == 2,
       "molecule_coverage/I5：ratio 分母 = expect_hours(24) 而非网格长度(4)；空洞 2",
       str(_mol))
+# 复验 J3：网格是 expect 的**超集**时（29 vs 24）ratio 必须夹到 1.0 —— 否则会印出
+# 「覆盖率 120.8% 而 missing_hours=0」的自相矛盾（I5 那类不一致的镜像版）。
+_mol_super = calib.molecule_coverage(_FakeCur([1] * 29), 1)
+check(_mol_super["expect_hours"] == 24 and _mol_super["grid_hours"] == 29
+      and _mol_super["hours_present_ratio"] == 1.0 and _mol_super["max_hole_hours"] == 0,
+      "J3：超集网格（29 vs expect 24）⇒ ratio 夹到 1.0，不再 >100% 与 missing=0 并列",
+      str(_mol_super))
 check(calib.molecule_coverage(_FakeCur([]), 1)["max_hole_hours"] == 0,
       "molecule_coverage：空网格不崩、空洞 0")
 
@@ -428,12 +437,32 @@ check(calib.DECISIVE_BY_CODE[calib.exit_code(False, False, True)] is False,
 check(calib.RELIABLE_BY_CODE[calib.exit_code(False, False, True)] is False,
       "I1/I3：sample_ok=False ⇒ reliable=False（同源，不再各算各的）")
 
-# ── 复验 H1/H2/H5 + I1/I3/I4/I6：源码级守卫（同一缺陷类已**五次**复发 ⇒ 不再只靠人工复核）──
+# ── 复验 H1/H2/H5 + I1/I3/I4/I6 + J2：源码级守卫（同一缺陷类已**五次**复发 ⇒ 不再只靠人工复核）──
 def _code_only(src: str) -> str:
-    """剥离行内注释后再匹配（复验 I4：旧守卫直接扫全文 ⇒ 仅因 calib 注释里写的是
-    `elif not j["pass"]`（无冒号）才通过；一旦有人在注释/文档里写出带冒号的同名字面量
-    就会**误报失败**。注释不是代码，守卫不该耦合注释措辞）。"""
-    return "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+    """只保留**非注释** token 后重建源码：守卫不该耦合非代码文本（复验 I4 + J2）。
+
+    初版按 `ln.split("#", 1)[0]` 剥注释 —— 那是**文本**剥离而非**词法**剥离：字符串/
+    docstring 里的 `#` 也会被当成注释起点截断（calib 模块 docstring 的用法示例里就有
+    `# 默认 1 天窗口`，tokenize 实测 1 处）。改用 `tokenize` **词法**剥离：只丢 COMMENT
+    token，字符串原样保留 ⇒ 文档/注释里写进守卫同形字面量也不会误伤。
+    """
+    spans: dict[int, list[tuple[int, int]]] = {}
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            spans.setdefault(tok.start[0], []).append((tok.start[1], tok.end[1]))
+    if not spans:
+        return src
+    out = []
+    for i, ln in enumerate(src.splitlines(keepends=True), start=1):
+        for a, b in sorted(spans.get(i, []), reverse=True):
+            ln = ln[:a] + ln[b:]
+        out.append(ln)
+    return "".join(out)
+
+
+check(_code_only('x = "# 不是注释"\n') == 'x = "# 不是注释"\n'
+      and _code_only("# y = 1\n") == "\n",
+      "J2 守卫：`_code_only` 是**词法**剥离 —— 字符串内的 `#` 不被截断、注释整行被删")
 
 
 with open(os.path.join(_HERE, "calib_squeeze_liq_thr.py"), encoding="utf-8") as _fh:

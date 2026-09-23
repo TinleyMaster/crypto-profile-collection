@@ -9,10 +9,20 @@
 用法：
     python backfill_ai_trace_identity.py --dry-run   # 预览
     python backfill_ai_trace_identity.py             # 回写
+
+存量坏 JSON 修复（2026-09-23 复验 P1 衍生）：
+    写入口已修（落库前清洗），但历史行的 raw_response 仍是脏原文（全表 49 条），
+    导致 `raw_response::json` 类库内校验失败、PG JSON 函数不可用。
+    --clean-raw 用与写入口同一套清洗逻辑（ai_signal_analyzer._to_storable_json）逐行修复，
+    只更新「清洗后确实变成合法 JSON」的行，改不动的行原样保留。
+    ⚠️ 会覆盖 raw_response 原文，属 prod 数据写操作，需用户授权后执行；先 --dry-run 看数。
+    python backfill_ai_trace_identity.py --clean-raw --dry-run
+    python backfill_ai_trace_identity.py --clean-raw
 """
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -21,6 +31,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
+# 复用写入口的清洗逻辑（同一函数，避免两套口径漂移）
+WORKBENCH_DIR = SCRIPT_DIR.parent.parent / "workbench"
+if str(WORKBENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(WORKBENCH_DIR))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
@@ -28,6 +42,7 @@ import psycopg  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+from ai_signal_analyzer import _to_storable_json  # noqa: E402
 
 _SYM_RE = re.compile(r"- 代币:\s*(\S+?)\s*\(")
 _SYM_VALID = re.compile(r"^[A-Za-z0-9.]+$")
@@ -61,16 +76,76 @@ def _resolve_asset_ids(conn, symbols: list[str]) -> dict[str, int]:
         return {r[0]: r[1] for r in cur.fetchall()}
 
 
+def _clean_raw(conn, dry_run: bool, limit: int) -> int:
+    """把 raw_response 非法的行按写入口同一逻辑清洗为合法 JSON（只修能修的）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, raw_response FROM sys.ai_trace "
+            "WHERE raw_response IS NOT NULL AND raw_response <> '' ORDER BY ts DESC LIMIT %s",
+            (limit,),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        print("无待扫描行")
+        return 0
+
+    to_fix: list[tuple[int, str]] = []
+    unrecoverable = 0
+    for rid, raw in rows:
+        try:
+            json.loads(raw)
+            continue  # 已合法，跳过
+        except Exception:
+            pass
+        fixed = _to_storable_json(raw)
+        try:
+            json.loads(fixed)
+        except Exception:
+            unrecoverable += 1  # 清洗后仍非法，保留原文不动
+            continue
+        if fixed != raw:
+            to_fix.append((rid, fixed))
+
+    print(f"扫描 {len(rows)} 行：坏 JSON 待修 {len(to_fix)} 行，"
+          f"清洗后仍不可解析（保留原文）{unrecoverable} 行")
+
+    if dry_run:
+        print(f"[dry-run] 将回写 {len(to_fix)} 行")
+        for rid, fixed in to_fix[:3]:
+            print(f"  id={rid}: {fixed[:120]}...")
+        return 0
+
+    if not to_fix:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE sys.ai_trace t SET raw_response = v.raw "
+            "FROM (SELECT unnest(%s::bigint[]) AS id, "
+            "             unnest(%s::text[]) AS raw) v "
+            "WHERE t.id = v.id",
+            ([r[0] for r in to_fix], [r[1] for r in to_fix]),
+        )
+    conn.commit()
+    print(f"已回写 {len(to_fix)} 行（raw_response 现为合法 JSON）")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="回填 sys.ai_trace symbol/asset_id")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写入")
     parser.add_argument("--limit", type=int, default=20000)
     parser.add_argument("--all", action="store_true",
                         help="处理全部 signal_v2 行并从 user_prompt 重导（含覆盖错误值/清占位符）")
+    parser.add_argument("--clean-raw", action="store_true",
+                        help="改为修复历史坏 JSON：按写入口同一清洗逻辑重写 raw_response")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
+        if args.clean_raw:
+            return _clean_raw(conn, args.dry_run, args.limit)
         with conn.cursor() as cur:
             where = "tag = 'signal_v2'" if args.all else (
                 "tag = 'signal_v2' AND (symbol IS NULL OR symbol = '' OR asset_id IS NULL)"

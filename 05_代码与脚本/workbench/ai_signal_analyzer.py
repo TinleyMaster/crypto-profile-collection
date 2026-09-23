@@ -2634,6 +2634,45 @@ def _call_llm_analysis_v2(
     }
 
 
+def _to_storable_json(raw: str) -> str:
+    """把 LLM 原始响应转成可安全落库的 JSON 文本（2026-09-23 复验 P1）。
+
+    背景：`_sanitize_json_control_chars` 与 `extract_json_from_llm_response` 原先只在
+    「解析/展示」路径生效，`sys.ai_trace.raw_response` 落的是 LLM 原样输出 —— 实测全表
+    49 条坏 JSON 且每日仍在新增，导致 `raw_response::json` 类库内校验永远失败。
+
+    分级策略（能少改就少改，且绝不丢数据）：
+    1) 原文本身已是合法 JSON → 原样返回（保持 AI 原话格式，零改动）；
+    2) 仅字符串内字面控制符导致非法 → 返回转义后的文本（改动最小，可解析）；
+    3) 代码块包裹 / 前后夹说明文字 / 被截断 → 返回解析结果的规范 JSON；
+    4) 仍无法解析 → 保留原文（该行依旧不可 JSON 查询，但不丢原话、不阻断写入）。
+    """
+    from crypto_research.clients.llm_client import (
+        extract_json_from_llm_response,
+        _sanitize_json_control_chars,
+    )
+
+    if not raw:
+        return raw
+    try:
+        json.loads(raw)
+        return raw
+    except Exception:
+        pass
+
+    sanitized = _sanitize_json_control_chars(raw)
+    try:
+        json.loads(sanitized)
+        return sanitized
+    except Exception:
+        pass
+
+    try:
+        return json.dumps(extract_json_from_llm_response(raw), ensure_ascii=False)
+    except Exception:
+        return raw
+
+
 def _write_ai_trace(
     tag: str,
     asset_id: int | None,
@@ -2650,9 +2689,15 @@ def _write_ai_trace(
 
     主存储：sys.ai_trace 表（支持检索、统计、跨进程共享）
     兜底存储：workbench/output/ai_trace/{tag}_{YYYY-MM-DD}.jsonl
+
+    2026-09-23 复验 P1：库内 `raw_response` 存的是清洗后的 JSON（保证列内可用
+    PG JSON 函数校验/查询）；JSONL 兜底文件仍写 LLM 原样输出（可追溯「AI 原话」）。
+    两者分工而非重复：可查询性归库，原话保真归文件。
     """
     import datetime
     import json
+    # P1（2026-09-23 复验）：DB 列存清洗后的 JSON，不再落脏原文
+    stored_raw = _to_storable_json(raw_response)
     # 主存储：写入数据库
     try:
         _ensure_ai_trace_table()
@@ -2676,7 +2721,7 @@ def _write_ai_trace(
                     (
                         tag, asset_id, symbol, signal_types,
                         provider, model,
-                        system_prompt, user_prompt, raw_response, thinking_content,
+                        system_prompt, user_prompt, stored_raw, thinking_content,
                     ),
                 )
             conn.commit()

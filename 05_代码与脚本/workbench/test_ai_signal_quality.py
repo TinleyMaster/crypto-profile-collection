@@ -5,6 +5,7 @@ AI 信号分析数据质量函数单测（2026-09-23 审计 P1 / 复验盲区 1�
 - _sanitize_json_control_chars：字符串内字面控制符转义、已转义序列保留、字符串外空白不动
 - extract_json_from_llm_response：坏 JSON（字面换行/tab）能解析，正常 JSON 不回归
 - _normalize_ai_decision：score 阈值强制 should_risk/should_highlight + override 标记
+- _to_storable_json：落库前清洗（复验 P1），保证 sys.ai_trace.raw_response 列内可 JSON 校验
 
 运行: python test_ai_signal_quality.py
 """
@@ -21,7 +22,7 @@ from crypto_research.clients.llm_client import (  # noqa: E402
     extract_json_from_llm_response,
     _sanitize_json_control_chars,
 )
-from ai_signal_analyzer import _normalize_ai_decision  # noqa: E402
+from ai_signal_analyzer import _normalize_ai_decision, _to_storable_json  # noqa: E402
 
 
 def _check(name, cond):
@@ -70,5 +71,26 @@ for i, (inp, expect) in enumerate(cases, 1):
     n = _normalize_ai_decision(dict(inp))
     for k, v in expect.items():
         _check(f"case{i} {k}", n.get(k) == v)
+
+print("== _to_storable_json（落库前清洗，复验 P1） ==")
+# 1) 字面控制符（Invalid control character）-> 转义后可解析，内容保真
+raw_nl = '{\n  "overall_score": 38,\n  "reason_summary": "稳定币\n无估值意义\t带tab"\n}'
+st1 = _to_storable_json(raw_nl)
+_check("字面换行/tab 清洗后可 JSON 校验", json.loads(st1)["overall_score"] == 38)
+_check("清洗后内容保真", json.loads(st1)["reason_summary"] == "稳定币\n无估值意义\t带tab")
+# 2) 本身合法（带缩进）-> 原样返回，不重排格式
+ok_pretty = '{\n  "should_highlight": true,\n  "overall_score": 71\n}'
+_check("合法 JSON 原样透传（零改动）", _to_storable_json(ok_pretty) == ok_pretty)
+# 3) markdown 代码块包裹 -> 解析后落规范 JSON
+fenced = '```json\n{"overall_score": 55, "should_risk": false}\n```'
+_check("代码块包裹可落库", json.loads(_to_storable_json(fenced))["overall_score"] == 55)
+# 4) JSON 后多尾巴（Extra data）-> 解析后落规范 JSON
+extra = '{"overall_score": 62}\n\n以上为分析结论，仅供参考。'
+_check("JSON 后多尾巴可落库", json.loads(_to_storable_json(extra))["overall_score"] == 62)
+# 5) 完全不可解析 -> 保留原文（不丢数据、不阻断写入）
+garbage = "<<<<<<< 这不是 JSON >>>>>>>"
+_check("不可解析时保原文", _to_storable_json(garbage) == garbage)
+# 6) 空串不炸
+_check("空串原样返回", _to_storable_json("") == "")
 
 print("\nALL PASS")

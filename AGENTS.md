@@ -22,6 +22,9 @@
 - etf_flow_daily 零值污染（F1-F5：占位 0 拦截 / 增量回补 / 调度双跑 / --prune-zeros / 日志告警）→ 已修 `54847e8`
 - 高亮信号板块（P0-1 KOL 归因 event_token 优先 + trigger_logic 带事件标的 / P0-1 AI onchain 方向硬约束 / P1-1 analysis_ts / P1-2 事件驱动直通标注）→ 已修
 - AI 追溯日志数据质量（P0 asset_id/symbol 路径 / P1 坏 JSON 控制符修复 / P1 判定阈值后处理）→ 已修 `35ef6f0`；存量 `sys.ai_trace` 回填用 `backfill_ai_trace_identity.py --all`（从 user_prompt 提取 symbol + core.asset 解析 asset_id，占位符清 NULL）
+  - **复验收口（`复验_prod回填与数据质量_f53ac96_2026-09-23.md`，本次修复）**：连 prod 只读复验确认历史回填真实有效（875/1366 带 identity、linkage 零错配、0 占位符），`both_null=491` 属「源无资产上下文」保持 NULL 正确（口径已对齐，非缺陷）；但暴露 **P1 衍生缺陷：`raw_response` 写入路径未清洗**（全表 49 条坏 JSON，9-23 当天仍新增 7 条）——`_sanitize_json_control_chars` 只作用在解析/展示层，`_write_ai_trace` 落的是 LLM 原样输出。**已修**：新增 `_to_storable_json()` 分级清洗（合法原样透传 → 控制符转义 → 解析后规范 JSON → 不可解析保原文），`_write_ai_trace` 库内列存清洗结果、JSONL 兜底文件仍存 AI 原话（可查询性归库、原话保真归文件）。
+  - **存量 49 条坏 JSON**：`backfill_ai_trace_identity.py --clean-raw --dry-run` 预览 / `--clean-raw` 回写（复用同一清洗函数，只更新清洗后确实合法的行，改不动的保留原文）——**属 prod 写操作，待授权后执行**。
+  - **待部署确认**：`adaa5cb`（查看器方案 B：`/api/ai-trace` 返回 `parsed_response`）是否已在 Zeabur 生效；未部署时存量 49 条在前端仍渲染失败（新数据已不受影响）。
 - 催化剂决策链路 d1~d6（按审计清单逐项落地）：
   - d1 G1 新增「发布前启动程度」惩罚项（追高扣分）→ `c946ed1`
   - d2 权重校准解耦「强度」与「方向可靠性」→ `621fb3d`

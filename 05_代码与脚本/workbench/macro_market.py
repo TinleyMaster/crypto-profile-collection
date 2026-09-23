@@ -1586,6 +1586,45 @@ def fetch_category_flow() -> dict:
     # 先从数据库取叙事成分币（全量 + asset_id）
     db_data, db_matched = _fetch_narratives_from_db()
 
+    def _db_only(note: str) -> dict:
+        """DB-only 兜底（CMC 不可用 / watchlist 名称不匹配时）：返回 db_data 叙事（24h 视角）。
+
+        B2 修复 2026-09-23：原实现仅在「categories API 抛异常」时兜底；API 成功但
+        watchlist 名称对不上时**直接返回空** → 线上叙事榜缺失。现两条失败路径都兜底。
+        """
+        ranked = []
+        for narr, info in db_data.items():
+            coins = info["top_coins_all"]
+            top5 = coins[:5] if coins else []
+            # 用成分币 24h 变化按市值加权近似叙事动量（CMC 不可用时的兜底评分来源，
+            # 否则 build_narrative_flow_ranking 因 momentum/mcap7 全 None 而把它们全过滤掉）
+            num = den = 0.0
+            for c in coins:
+                ch = c.get("percent_change_24h")
+                mc = _safe_float(c.get("market_cap"))
+                if ch is not None and mc > 0:
+                    num += _safe_float(ch) * mc
+                    den += mc
+            chg24 = round(num / den, 2) if den > 0 else None
+            ranked.append({
+                "narrative": narr,
+                "cmc_category": info["cmc_category"],
+                "market_cap": info["market_cap"],
+                "mcap_change_1d_pct": chg24,
+                "mcap_change_7d_pct": None,
+                "momentum_score": chg24,
+                "mcap_period": "db_only_24h",
+                "top_coins": top5,
+                "top_coins_all": coins,
+                "total_coins": len(coins),
+                "from_db": True,
+            })
+        ranked.sort(key=lambda x: -x["market_cap"])
+        if not ranked:
+            return {"status": "error", "error": note, "ranked": [], "degraded": []}
+        return {"status": "ok", "ranked": ranked,
+                "degraded": [x["narrative"] for x in ranked], "note": note}
+
     # 拉取 CMC 分类列表（用于 7d 变化计算 + 数据库没有的叙事兜底）
     try:
         r = requests.get(
@@ -1597,25 +1636,7 @@ def fetch_category_flow() -> dict:
         cats = r.json().get("data", [])
     except Exception as e:
         # API 失败但有数据库数据：降级返回 24h 视角
-        if db_data:
-            ranked = []
-            for narr, info in db_data.items():
-                coins = info["top_coins_all"]
-                top5 = coins[:5] if coins else []
-                ranked.append({
-                    "narrative": narr,
-                    "cmc_category": info["cmc_category"],
-                    "market_cap": info["market_cap"],
-                    "mcap_change_7d_pct": None,
-                    "mcap_period": "db_only_24h",
-                    "top_coins": top5,
-                    "top_coins_all": coins,
-                    "total_coins": len(coins),
-                    "from_db": True,
-                })
-            ranked.sort(key=lambda x: -x["market_cap"])
-            return {"status": "ok", "ranked": ranked, "degraded": [x["narrative"] for x in ranked], "note": "cmc api failed, db-only mode"}
-        return {"status": "error", "error": str(e), "ranked": [], "degraded": []}
+        return _db_only(f"cmc api failed ({e}), db-only mode")
 
     # 构建叙事 → CMC 分类映射
     cat_map: dict[str, dict] = {}  # narrative -> cmc category info
@@ -1642,7 +1663,7 @@ def fetch_category_flow() -> dict:
                     break
 
     if not cat_map:
-        return {"status": "ok", "ranked": [], "degraded": [], "note": "no watchlist category matched"}
+        return _db_only("no watchlist category matched, db-only fallback")
 
     # 按市值取 top N
     selected = sorted(cat_map.items(), key=lambda x: -_safe_float(x[1].get("market_cap")))[:NARRATIVE_TOP_N]

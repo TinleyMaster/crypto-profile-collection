@@ -189,6 +189,10 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天，需付费套餐，403 自动跳过）", "core"),
     # CMC 分类刷新（列表每日 + 成员按 7 天窗口续传）——此前未注册调度，last_updated 冻结（2026-09-15 P2）
     ("cmc_category_refresh", "30 2 * * *", "ingest_cmc_category.py", [], "CMC 分类刷新（列表每日，成员按 7 天窗口续传省配额）", "core"),
+    # 叙事板块→资产映射 ETL（B2 修复 2026-09-23）：此前**未注册调度**，biz.sector_narrative_asset
+    # 停更在 2026-08-29 → macro_market 叙事榜的 DB 兜底/成分币全失效（线上 DEGRADED: P1-1 叙事榜缺失）。
+    # 纯 DB→DB（src_cmc.cmc_category_member → biz.sector_narrative_asset），紧跟分类刷新后跑。
+    ("etl_sector_narrative", "35 2 * * *", "etl_sector_narrative_assets.py", [], "叙事板块→资产映射 ETL（每日，cmc_category_refresh 后）", "core"),
 
     # ═══ ATH/ATL 免费回填（biz.asset_market_daily 自算，无需 CMC 付费套餐）═══
     # 每日增量：只处理当日未算过的资产，用免费行情自算 all_time ATH/ATL/距高点回撤

@@ -1329,8 +1329,11 @@ def _mark_alert_suppressed(conn, ids: list[int], reason: str) -> None:
     conn.commit()
 
 
-def _scenario_priors(conn, scenarios: list[str]) -> dict[str, dict]:
-    """同场景「已告警」信号的方向对齐后验（审计 P2-5）。
+def _scenario_priors(conn, quadrants: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """同象限（价格方向 × OI 方向）「已告警」信号的方向对齐后验。
+
+    按 (p_dir, oi_dir) 分组而非按 `scenario` 编号：库内混有两套 `scenario` 编码
+    （见 `_scenario_label`），同一编号在两套里语义相反，按编号分组会把两类行混进同一桶。
 
     口径：
       - 样本 = 近 `PRIOR_LOOKBACK_DAYS` 天、`alerted_at IS NOT NULL`、非 invalid 的
@@ -1339,18 +1342,18 @@ def _scenario_priors(conn, scenarios: list[str]) -> dict[str, dict]:
       - 方向对齐收益 = `+pct`（做多）/ `-pct`（做空），胜率 = 对齐收益 > 0 的占比。
     用中位数不用均值：+24h 均值被单点 +147.99% 拉高到 +8.79%，而中位仅 +3.60%。
 
-    ⚠️ 选择偏置（工单 P2-6）：样本限 `alerted_at IS NOT NULL` ⇒ 只覆盖**告警期**，
-    而告警本身依赖 regime 顺风（实测覆盖 S1 31/67、S2 2/15、S3~S8 0/50；S1 正是
-    「价↑+OI↑」的顺风场景）⇒ 正期望是该口径的**必然**结果。故渲染层必须显式标注
-    「仅含已告警样本，非无偏基准」，不得当作信号质量证据。
+    ⚠️ 选择偏置：样本限 `alerted_at IS NOT NULL` ⇒ 只覆盖**告警期**，而告警本身依赖
+    regime 顺风（实测 P↑OI↑ 象限 31/67 被覆盖，其余象限 0/50）⇒ 正期望是该口径的
+    **必然**结果。故渲染层必须显式标注「仅含已告警样本，非无偏基准」，不得当作
+    信号质量证据。
     """
-    if not scenarios:
+    if not quadrants:
         return {}
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
             WITH s AS (
-                SELECT sg.scenario, sg.p_dir,
+                SELECT sg.p_dir, sg.oi_dir,
                        (SELECT k.close_px FROM biz.asset_klines k
                          WHERE k.symbol = sg.symbol AND k.interval = '1h'
                            AND k.open_time <= sg.signal_ts
@@ -1362,31 +1365,35 @@ def _scenario_priors(conn, scenarios: list[str]) -> dict[str, dict]:
                 FROM biz.scan_signal sg
                 WHERE sg.pool = 'main' AND sg.alerted_at IS NOT NULL
                   AND sg.status <> 'invalid' AND sg.p_dir IS NOT NULL
-                  AND sg.scenario = ANY(%s)
+                  AND sg.oi_dir IS NOT NULL
                   AND sg.signal_ts > NOW() - make_interval(days => %s)
                   AND sg.signal_ts < NOW() - make_interval(hours => %s)
             )
-            SELECT scenario, p_dir, px0, px1 FROM s
+            SELECT p_dir, oi_dir, px0, px1 FROM s
             WHERE px0 IS NOT NULL AND px1 IS NOT NULL AND px0 <> 0
             """,
-            (PRIOR_HORIZON_H, scenarios, PRIOR_LOOKBACK_DAYS, PRIOR_HORIZON_H))
+            (PRIOR_HORIZON_H, PRIOR_LOOKBACK_DAYS, PRIOR_HORIZON_H))
         rows = cur.fetchall()
 
-    buckets: dict[str, list[float]] = {}
+    wanted = set(quadrants)
+    buckets: dict[tuple[str, str], list[float]] = {}
     for r in rows:
+        key = (r["p_dir"], r["oi_dir"])
+        if key not in wanted:
+            continue
         raw = (float(r["px1"]) - float(r["px0"])) / float(r["px0"]) * 100
         aligned = raw if r["p_dir"] == "up" else -raw
-        buckets.setdefault(r["scenario"], []).append(aligned)
+        buckets.setdefault(key, []).append(aligned)
 
-    out: dict[str, dict] = {}
-    for sc, vals in buckets.items():
+    out: dict[tuple[str, str], dict] = {}
+    for key, vals in buckets.items():
         if len(vals) < PRIOR_MIN_N:
             continue
         vals.sort()
         n = len(vals)
         median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
         win = sum(1 for v in vals if v > 0) / n * 100
-        out[sc] = {"n": n, "median": median, "win": win, "horizon": PRIOR_HORIZON_H}
+        out[key] = {"n": n, "median": median, "win": win, "horizon": PRIOR_HORIZON_H}
     return out
 
 
@@ -1631,11 +1638,53 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     return out
 
 
-SCENARIO_DESC = {
+# ── 场景编号口径（两套编码共用 S1..S8 编号空间，同编号语义相反）──
+# 库内混有两种来源的 `scenario`：
+#   · 生产口径（本 daemon `_compute_l2`）：只用 (p_dir, oi_dir) 两维 → S1..S4
+#   · 设计口径（`phase_scan_main_pool.py`，未被 daemon 调度）：含 cvd_dir 三维 → S1..S8
+# 生产行**也落 `cvd_dir`**（供渲染），故不能靠「有无 CVD 维」判别来源；
+# 判据是 `PROD_SCENARIO_BY_DIMS[(p_dir, oi_dir)]` 是否等于行内 `scenario`。
+PROD_SCENARIO_BY_DIMS = {
+    ("up", "up"): "S1", ("down", "up"): "S2",
+    ("up", "down"): "S3", ("down", "down"): "S4",
+}
+PROD_SCENARIO_DESC = {
+    "S1": "多头进攻", "S2": "空头扎实", "S3": "多头减仓", "S4": "空头兑现",
+}
+DESIGN_SCENARIO_BY_DIMS = {
+    ("up", "up", "up"): "S1", ("up", "up", "down"): "S2",
+    ("down", "up", "down"): "S3", ("down", "up", "up"): "S4",
+    ("up", "down", "up"): "S5", ("up", "down", "down"): "S6",
+    ("down", "down", "down"): "S7", ("down", "down", "up"): "S8",
+}
+DESIGN_SCENARIO_DESC = {
     "S1": "多头进攻", "S2": "诱多", "S3": "空头扎实", "S4": "诱空",
     "S5": "多头兑现", "S6": "修复反弹", "S7": "跌势衰竭", "S8": "见底反弹",
-    "ACC": "蓄势(吸筹?)", "BRK": "蓄势突破",
 }
+POOL_SCENARIO_DESC = {"ACC": "蓄势(吸筹?)", "BRK": "蓄势突破"}
+
+
+def _scenario_label(sig: dict) -> str:
+    """按行自身维度重算「编号 + 文案」，不信任列内 `scenario` 的编码来源。
+
+    直接用设计口径文案表渲染生产行，会把生产 S2（价↓+OI↑，真实空头）标成
+    「诱多」——语义相反。故先按 (p_dir, oi_dir) 反查生产编号做来源比对，命中即
+    按生产文案表渲染，否则按设计口径的 (p_dir, oi_dir, cvd_dir) 重算编号。
+    """
+    sc = (sig.get("scenario") or "").strip()
+    if sc in POOL_SCENARIO_DESC:
+        return f"{sc} {POOL_SCENARIO_DESC[sc]}"
+    if sc.startswith("SQZ"):
+        return sc
+    p_dir, oi_dir = sig.get("p_dir"), sig.get("oi_dir")
+    if p_dir in ("up", "down") and oi_dir in ("up", "down"):
+        if sc == PROD_SCENARIO_BY_DIMS[(p_dir, oi_dir)]:
+            return f"{sc} {PROD_SCENARIO_DESC[sc]}"
+        cvd_dir = sig.get("cvd_dir")
+        if cvd_dir in ("up", "down"):
+            sc8 = DESIGN_SCENARIO_BY_DIMS[(p_dir, oi_dir, cvd_dir)]
+            return f"{sc8} {DESIGN_SCENARIO_DESC[sc8]}"
+    return sc or "-"
 
 
 def _fmt_num(v, digits: int = 2, suffix: str = "", signed: bool = False) -> str:
@@ -1689,6 +1738,7 @@ def _alert_title(items: list[dict]) -> str:
     n_res = 0        # 新鲜口径的共振条数（覆盖币数 / 密封边界用）
     n_res_all = 0    # 全量口径（标题「含共振 N 条」，与卡片「催化剂 N」一致）
     res_coins = 0  # 审计 OPT-1：有共振的**币数**（共振常高度集中在个别币）
+    all_coins = 0  # 审计 N-416-3：有全量共振的**币数**（与 `n_res_all` 同窗，作覆盖分母）
     has_stale = False  # 全量催化剂 >0 但新鲜为 0（N-786-2 密封边界）
     has_zero_cat = False  # 催化剂**真为 0 条**（N-786-4：不得误述「全部 >3 天」）
     fresh_bull = fresh_bear = fresh_neut = 0
@@ -1705,10 +1755,13 @@ def _alert_title(items: list[dict]) -> str:
         fresh_neut += int(cdf.get("neutral", 0))
         # N-786-2：覆盖币数按**新鲜**计（只有陈旧催化剂的币不算「有共振」）
         coin_n = len(res["event"]) + f_coin + len(res["kol"])
+        coin_n_all = len(res["event"]) + ctot + len(res["kol"])
         n_res += coin_n
-        n_res_all += len(res["event"]) + ctot + len(res["kol"])
+        n_res_all += coin_n_all
         if coin_n:
             res_coins += 1
+        if coin_n_all:
+            all_coins += 1
         if ctot > 0 and f_coin == 0:
             has_stale = True
         if ctot == 0:
@@ -1721,8 +1774,9 @@ def _alert_title(items: list[dict]) -> str:
                     f"（无新鲜共振；催化剂全部 >{CATALYST_STALE_DAYS} 天，不计方向）")
         return f"🚨 盘面异动告警：{len(items)} 币高置信信号（纯盘面信号，无共振）"
     # 审计 OPT-1：原「含共振 N 条」为全批累加，多币批次易被误读为「整批都有共振」
-    # （实测「5 币…11 条」实为 5 币里只有 1 币有）⇒ 并列覆盖币数「（k/N 币）」。
-    cover_txt = f"（{res_coins}/{len(items)} 币）"
+    # （实测「5 币…11 条」实为 5 币里只有 1 币有）⇒ 并列覆盖币数。
+    # 审计 N-416-3：条数（全量窗）与覆盖币数必须**同窗**；新鲜窗只在方向段出现，
+    # 单列于全量窗之外（`（已剔除陈旧）`），避免「6 条（1/2 币）」这类两窗混搭。
     dir_txt = ""
     if fresh_bull or fresh_bear or fresh_neut:
         dir_txt = (f"，催化剂 {fresh_bull}多/{fresh_bear}空/{fresh_neut}中"
@@ -1732,18 +1786,23 @@ def _alert_title(items: list[dict]) -> str:
         if fresh_bull != fresh_bear:
             dir_txt += (f"，净{'多' if fresh_bull > fresh_bear else '空'}"
                         f"{abs(fresh_bull - fresh_bear)}")
+    # N-416-1：非「有新鲜方向」时按**逐币事实**三分支——旧实现用全局布尔优先级，
+    # 混合批次（既有零催化剂币、又有全陈旧币）会二选一而把另一侧说错
+    #（`has_zero_cat` 抢先 ⇒ 全陈旧币被误述「无催化剂条目」，反之同理）。
+    elif has_stale and has_zero_cat:
+        dir_txt = "，催化剂新鲜条目 0（含仅陈旧条目，另有币无催化剂）"
+    elif has_stale:
+        # N-786-3：全陈旧 ⇒ 新鲜方向根本不存在，不得说成「多空持平」（含义相反）。
+        dir_txt = f"，催化剂新鲜条目 0（全部 >{CATALYST_STALE_DAYS} 天，不计方向）"
     elif has_zero_cat:
         # N-786-4：本批存在「催化剂真为 0 条」的币（n_res 由 event/KOL 贡献）——不得
         # 断言「全部 >3 天」（卡片会显示「催化剂0」，同封邮件自相矛盾）。
         dir_txt = "，催化剂新鲜条目 0（无催化剂条目）"
-    else:
-        # N-786-3：全陈旧 ⇒ 新鲜方向根本不存在，不得说成「多空持平」（含义相反）。
-        dir_txt = (f"，催化剂新鲜条目 0（全部 >{CATALYST_STALE_DAYS} 天，不计方向）")
     # N-786-5：**报告口径**（「含共振 N 条」= 全量，与卡片主数字「催化剂 N」一致）；
-    # 方向段与覆盖币数才用新鲜口径。原实现把 N 也改成新鲜，导致标题「含共振 6 条」
-    # 与卡片「催化剂 17」两个数字打架、且图例未声明。
+    # 方向段才用新鲜口径。原实现把 N 也改成新鲜，导致标题「含共振 6 条」与卡片
+    #「催化剂 17」两个数字打架、且图例未声明。
     return (f"🚨 盘面异动告警：{len(items)} 币高置信信号"
-            f"（含共振 {n_res_all} 条{cover_txt}{dir_txt}）")
+            f"（含共振 {n_res_all} 条（{all_coins}/{len(items)} 币）{dir_txt}）")
 
 
 # ── 卡片相对强度（仅用于排序与强度条，审计 §三.6） ────────────────
@@ -1851,7 +1910,8 @@ def _render_alert_email(items: list[dict],
         arrow_color = "#ef4444" if up else "#22c55e"   # 中文惯例：多头=红 / 空头=绿
         dir_label = "↑ 做多" if up else "↓ 做空"
         sc = sig.get("scenario") or "-"
-        desc = SCENARIO_DESC.get(sc, "")
+        # 编号 + 文案由行自身维度重算（两套 scenario 编码共用编号空间，见 _scenario_label）
+        sc_label = _scenario_label(sig)
         # lv 代号 → 可读级别（审计 P2-2：原样渲染 lv3_1h 对收件人不可自解释）
         lv_txt = ""
         for t in (sig.get("context_tags") or []):
@@ -2034,13 +2094,14 @@ def _render_alert_email(items: list[dict],
         prior = it.get("prior")
         prior_txt = ""
         if prior:
-            prior_txt = (f"<br><small style='color:#6b7280'>历史同场景 {prior['horizon']}h "
-                         f"方向对齐 中位 {prior['median']:+.2f}% / 胜率 {prior['win']:.0f}%"
-                         f"（n={prior['n']}，仅含已告警样本，非无偏基准）</small>")
+            prior_txt = (f"<br><small style='color:#6b7280'>历史同象限（价/OI 方向）"
+                         f"{prior['horizon']}h 方向对齐 中位 {prior['median']:+.2f}% / "
+                         f"胜率 {prior['win']:.0f}%（n={prior['n']}，仅含已告警样本，"
+                         f"非无偏基准）</small>")
         elif sc == "BRK":
             # 审计 OPT-3：`_scenario_priors` 样本池只取主池 ⇒ BRK 恒无先验。原实现
             # `if prior:` 静默省略该行，读者分不清「无样本」还是「漏渲染」⇒ 显式标注。
-            prior_txt = ("<br><small style='color:#6b7280'>历史同场景：BRK 暂无历史先验"
+            prior_txt = ("<br><small style='color:#6b7280'>历史同象限：BRK 暂无历史先验"
                          "（先验样本池仅含主池信号）</small>")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
@@ -2048,7 +2109,7 @@ def _render_alert_email(items: list[dict],
             f"<div style='font-size:15px'>{rank} <b>{sig['symbol']}</b> {badge} {bar} "
             f"<span style='color:#6b7280;font-size:12px'>{pool_label} · "
             f"{lv_txt or (sig.get('timeframe') or '-')}{brk_bar}</span> {flat_note}</div>"
-            f"<div style='margin:2px 0 4px'><b>{sc}</b> {desc} "
+            f"<div style='margin:2px 0 4px'><b>{sc_label}</b> "
             f"<b style='color:{arrow_color}'>{dir_label}</b> "
             f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
             f"</div>"
@@ -2061,8 +2122,10 @@ def _render_alert_email(items: list[dict],
             f"</div>"
         )
     body = "".join(body_parts)
-    legend = ("<p style='color:#6b7280;font-size:12px'>图例：S1 多头进攻 / S2 诱多 / "
-              "S3 空头扎实 / S4 诱空 / S5-8 兑现与反转；「N 级异动」= 触发周期；"
+    legend = ("<p style='color:#6b7280;font-size:12px'>图例：场景编号按行自身维度重算 —— "
+              "生产扫描只用「价方向 × OI 方向」两维（S1 多头进攻 / S2 空头扎实 / "
+              "S3 多头减仓 / S4 空头兑现），回测口径另含 CVD 维（S1..S8，其中 S5..S8 为"
+              "兑现与反转）；「N 级异动」= 触发周期；"
               f"「市场环境」= 全局 regime（btc_1h = BTC 最近两根已收盘 1h 的收盘涨跌；"
               f"fgi = 恐慌贪婪指数；cap_trend = 总市值日环比）；任一越过门槛"
               f"（BTC ±{REGIME_BTC_1H_THR:g}% / FGI {REGIME_FGI_FEAR:g}·"
@@ -2084,8 +2147,8 @@ def _render_alert_email(items: list[dict],
               "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
               "「最新/含 N 条 >X 天/剔除陈旧后净X/无新鲜条目」= 催化剂新鲜度（7 天窗口"
               "含陈旧条目；「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高"
-              "conviction；「无新鲜条目」= 全部 >X 天）；标题「含共振 N 条」为全量口径"
-              "（与卡片「催化剂 N」同一口径），其催化剂方向段与覆盖币数才用新鲜口径（陈旧不计）；"
+              "conviction；「无新鲜条目」= 全部 >X 天）；标题「含共振 N 条（k/M 币）」为全量口径"
+              "（与卡片「催化剂 N」同一口径），其催化剂方向段才用新鲜口径（陈旧不计）；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
@@ -2330,10 +2393,14 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
             return {"candidates": len(candidates), "alerts": 0,
                     "suppressed_cross_pool": suppressed}
 
-        # 历史先验（审计 P2-5）：只对本封出现的场景取一次
-        priors = _scenario_priors(conn, sorted({it["signal"]["scenario"] for it in to_alert}))
+        # 历史先验：只对本封出现的 (价方向, OI 方向) 象限取一次
+        quadrants = sorted({(it["signal"].get("p_dir"), it["signal"].get("oi_dir"))
+                            for it in to_alert
+                            if it["signal"].get("p_dir") and it["signal"].get("oi_dir")})
+        priors = _scenario_priors(conn, quadrants)
         for it in to_alert:
-            it["prior"] = priors.get(it["signal"]["scenario"])
+            sig = it["signal"]
+            it["prior"] = priors.get((sig.get("p_dir"), sig.get("oi_dir")))
 
         # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
         # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。
@@ -2689,6 +2756,12 @@ def _render_squeeze_alert(items: list[dict]) -> str:
             f"</body></html>")
 
 
+# 轧空池实时告警开关：`True` = 影子模式（照常判定落库，但不发邮件）。
+# 降为影子的原因：判定阈值标定在极小且单一 regime 的样本上，样本内选参、无 holdout
+# 验证（见设计方案 §12.1-A1/A2）。影子期继续积累判定记录供回放，口径通过验证后再恢复发送。
+SQUEEZE_ALERT_SHADOW = True
+
+
 def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
     """轧空扫描（单轮）：① 拉升初筛+轧空确认入队 ② 队列跟踪峰值 ③ 回撤后判定胜负。
 
@@ -2706,7 +2779,7 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
     symbols = [s for s in _get_usdt_perpetuals() if vol24.get(s, 0) >= min_vol_usd]
     stats = {"universe": len(symbols), "scanned": 0, "surge": 0, "enqueued": 0,
              "tracked": 0, "judged": 0, "expired": 0, "skipped": 0,
-             "insufficient_coverage": 0, "alerts": 0}
+             "insufficient_coverage": 0, "alerts": 0, "shadow": 0}
     if not symbols:
         return stats
 
@@ -3058,26 +3131,35 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
 
     # ── 判定成功 → 发告警（只发一次，不做 12h 冷却）──────────────
     if send_items:
-        settings = _SETTINGS or get_settings(require_database=True)
-        from crypto_research.clients.notifier import EmailNotifier
-        notifier = EmailNotifier(settings)
-        if not notifier.configured:
-            print("[WARN] SMTP 未配置，跳过轧空判定告警")
+        send_ids = [id_by_symbol[it["track"]["symbol"]] for it in send_items]
+        if SQUEEZE_ALERT_SHADOW:
+            # 影子模式：判定照常入队/跟踪/落库（上面已 INSERT status='confirmed'），
+            # 只是不发邮件，供回放取数与口径验证。
+            # 不写 `alerted_at` —— 它同时是主池「跨池互斥」的判据，影子期既然不发信，
+            # 就不该让主池因一封并不存在的邮件被静音。
+            print(f"[scan_daemon][squeeze][shadow] 判定 {len(send_items)} 币，影子模式不发信："
+                  f"{', '.join(it['track']['symbol'] for it in send_items)}")
+            stats["shadow"] = len(send_items)
         else:
-            ok, msg = notifier.send(
-                f"🎯 轧空胜负判定：{len(send_items)} 币",
-                _render_squeeze_alert(send_items), from_name="轧空扫描")
-            if ok:
-                send_ids = [id_by_symbol[it["track"]["symbol"]] for it in send_items]
-                with _db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE biz.scan_signal SET alerted_at=NOW() WHERE id = ANY(%s)",
-                            (send_ids,))
-                    conn.commit()
-                stats["alerts"] = len(send_ids)
+            settings = _SETTINGS or get_settings(require_database=True)
+            from crypto_research.clients.notifier import EmailNotifier
+            notifier = EmailNotifier(settings)
+            if not notifier.configured:
+                print("[WARN] SMTP 未配置，跳过轧空判定告警")
             else:
-                print(f"[scan_daemon][squeeze] 告警发送失败: {msg}", file=sys.stderr)
+                ok, msg = notifier.send(
+                    f"🎯 轧空胜负判定：{len(send_items)} 币",
+                    _render_squeeze_alert(send_items), from_name="轧空扫描")
+                if ok:
+                    with _db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE biz.scan_signal SET alerted_at=NOW() WHERE id = ANY(%s)",
+                                (send_ids,))
+                        conn.commit()
+                    stats["alerts"] = len(send_ids)
+                else:
+                    print(f"[scan_daemon][squeeze] 告警发送失败: {msg}", file=sys.stderr)
 
     return stats
 

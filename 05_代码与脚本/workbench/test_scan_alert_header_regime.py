@@ -288,5 +288,28 @@ t_stl = sd._alert_title([{"signal": _main_sig(),
                           "resonance": _res(event=1, bull=3, stale=3, fresh=(0, 0, 0))}])
 check("全部 >3 天" in t_stl, "确有全陈旧催化剂 → 仍写「全部 >3 天」", t_stl)
 
+print("\n【N-416-1】混合批次（零催化剂币 + 全陈旧币）三态化，不得二选一失真")
+# 币A=全陈旧(5条)、币B=event=1且催化剂0 → 旧实现 has_zero_cat 抢先 ⇒ 对币A误述「无催化剂条目」
+mixed2 = [{"signal": _main_sig(),
+           "resonance": _res(bull=5, stale=5, fresh=(0, 0, 0))},
+          {"signal": dict(_main_sig(), id=8), "resonance": _res(event=1)}]
+t_mix2 = sd._alert_title(mixed2)
+check("含仅陈旧条目" in t_mix2 and "另有币无催化剂" in t_mix2,
+      "混合批次 → 「含仅陈旧条目，另有币无催化剂」（三态化，不二选一失真）", t_mix2)
+check("无催化剂条目）" not in t_mix2,
+      "混合批次不对全陈旧币误述「无催化剂条目」（N-416-1 镜像失真）")
+
+print("\n【N-416-3】标题条数与覆盖币数同窗（全量），不再两窗混搭")
+# 币A=全陈旧(5条)、币B=event=1 → 全量条数 6、全量覆盖 2 币；旧实现覆盖用新鲜 → (1/2 币)
+check("含共振 6 条（2/2 币）" in t_mix2,
+      "条数 6 与覆盖币数 2/2 同为全量窗（消除「6 条（1/2 币）」混搭）", t_mix2)
+check("1/2 币" not in t_mix2, "不再出现新鲜窗覆盖币数「1/2 币」")
+
+print("\n【N-416-2】`**` 护栏覆盖标题（Subject，不在 html 内）")
+_all_items = [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))},
+              {"signal": _brk_sig(), "resonance": _res()}]
+check("**" not in sd._alert_title(_all_items),
+      "标题无 markdown 强调符 `**`（护栏补覆盖 _alert_title）")
+
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

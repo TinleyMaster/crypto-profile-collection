@@ -669,3 +669,32 @@
 - **⚠️ 本轮再次自引入并已修**：图例写「**全量**」（markdown 强调符）——`**` 护栏第二次抓出。**教训固化已升级为「改任何渲染文案后必跑 `**` 护栏」**（两轮三犯）。
 - **自测**：`test_scan_alert_header_regime.py` 扩至 **44/44**（+7：N-786-5 全量条数/图例 4 例 + N-786-4 无催化剂/全陈旧对照 3 例）；既有 `test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_squeeze_battle.py` 137/137、`test_fundamental_liquidity.py` 13/13、`test_derivatives_signal_gap.py` 35/35 无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效（同批闭环）。
+
+### B4 场景编号口径错位（审计_盘面异动扫描系统设计方案_v0.8，2026-09-23，本次提交）
+
+来源：对 `04_架构与代码方案/盘面异动扫描系统设计方案_2026-09-16.md` v0.8 的审计（A1/A2/A3 科学有效性 + B4 口径 bug + C6~C10）。本提交只处置 **B4（展示层语义反转）** 与 **轧空告警降影子**；A1/A2 见下节工单。**零 DDL、零阈值变更、不改 `_compute_l2` 输出**（避免改动 §9 执行层选中的信号集）。
+
+- **🔴 B4（P0，已修）`scenario` 两套编码共用编号空间、语义相反**：库内混有两种来源的 `scenario`——
+  - **生产口径**（`scan_daemon._compute_l2`，L818）：只用 `(p_dir, oi_dir)` 两维 ⇒ `S1=P↑OI↑ / S2=P↓OI↑ / S3=P↑OI↓ / S4=P↓OI↓`
+  - **设计口径**（`phase_scan_main_pool.py` 的 `compute_l2`，**未被 daemon 调度**）：含 `cvd_dir` 三维 ⇒ `S1..S8`
+  - ⇒ 生产 `S2`（价↓+OI↑，真实空头）与设计 `S2`（价↑+OI↑+CVD↓，诱多）**同编号、语义相反**。渲染层原先统一取设计口径文案表 ⇒ 生产 S2 被标成「**诱多**」，方向判读完全反了。
+  - **判别难点（勿再用错判据）**：生产行**也落 `cvd_dir`**（供渲染层显示幅度）⇒ **不能**靠「有无 CVD 维」区分来源。判据是 `PROD_SCENARIO_BY_DIMS[(p_dir, oi_dir)]` 是否等于行内 `scenario`——相等 ⇒ 生产行，不等 ⇒ 按三维重算设计编号。
+  - 修法：`scan_daemon.py` 新增 `PROD_SCENARIO_BY_DIMS` / `PROD_SCENARIO_DESC`（S1 多头进攻 / S2 空头扎实 / S3 多头减仓 / S4 空头兑现）、`DESIGN_SCENARIO_BY_DIMS` / `DESIGN_SCENARIO_DESC`、`POOL_SCENARIO_DESC`，以及 `_scenario_label(sig)`；渲染循环的 `<b>{sc}</b> {desc}` 改为 `_scenario_label(sig)` 结果；图例改为「编号按行自身维度重算」两套口径说明。`send_scan_signal_brief.py` 同口径改造（表逐字一致，探针断言防单侧漂移）。
+  - **先验分桶同因修正**：`_scenario_priors` 原按 `scenario` 分组（SQL `sg.scenario = ANY(%s)`）⇒ 两套编码的同编号行会串进同一桶。改为按 `(p_dir, oi_dir)` 象限分组（`quadrants` 入参、SQL 去 `scenario` 过滤、`sg.oi_dir IS NOT NULL`），文案改「历史同象限（价/OI 方向）」。
+  - 物证（只读 prod，近 30 天主池 377 行）：`122 行`原被标错文案；典型 `S2/down/up` 17 行原渲染「诱多」→ 现「空头扎实」；`S3/up/down` 34 行原「空头扎实」→ 现「多头减仓」；`S4/down/down` 71 行原「诱空」→ 现「空头兑现」。
+- **🟠 轧空实时告警降影子（`SQUEEZE_ALERT_SHADOW = True`）**：轧空判定阈值标定在极小且单一 regime 样本上、样本内选参、无 holdout（见下节工单）⇒ 影子期内照常入队/跟踪/判定并落库（`status='confirmed'`，供回放取数），**只不发邮件**；`stats` 增 `shadow` 计数（不静默吞掉）。
+  - ⚠️ **影子期刻意不写 `alerted_at`**：它同时是主池「跨池互斥」的判据（`_cross_pool_recent(..., ("squeeze",))`）——影子期既然不发信，就不该让主池因一封并不存在的邮件被静音。
+- **自测**：新增 `workbench/test_scan_scenario_label.py` **48/48**（生产/设计两套映射逐例 + 同编号判别有效性 + BRK/ACC/SQZ/None 兜底 + 卡片与图例接线 + AST 断言「渲染调 `_scenario_label`」「`_scenario_priors` 分桶键为 `(p_dir, oi_dir)`」「SQL 不再按 scenario 过滤」+ 日报同口径 + 只读库自洽不变量）；`test_squeeze_battle.py` 扩至 **143/143**（+6 影子模式守卫）；既有 `test_scan_alert_header_regime.py` 44/44、`test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16 无回归；`py_compile` 2/2 通过。
+- **待部署**：需重启容器（`scan_daemon`）后生效。
+- **文档同步**：设计方案 v0.8 已按「只保留当前逻辑」原则清理（删除版本史 changelog、所有「旧稿/原实现/已作废/✅已修」注记），未决项统一收敛为 §12.1（A 类科学有效性 / B 类口径标定 / C 类代理口径与覆盖）。
+
+### 待办工单：样本外验证与方向结论收口（A1/A2/A3，需设计变更，勿盲目改）
+
+来源：同上审计。**性质是「结论有效性」而非代码缺陷** ⇒ 不得靠改阈值「修」，须补样本与流程。
+
+- **A1（🔴 科学有效性）全系统参数标定在极小 + 单一 regime 样本上**：`confirm_signals` 90 条/3 日、止损带 131 条/6 天、OI 相关 21 天；关键分组的 t 值 **均 < 2**（`+5.239%` t=1.23、`+15.58%` t=0.38）。⇒ 当前所有「已标定」结论都只是**样本内拟合**，不构成显著性证据。
+  - 待办：① 建立**样本量与 t 值门槛**（建议 n ≥ 30 且 t ≥ 2 才允许称「标定结论」，否则一律标「观察值」）；② 在阈值/常量的注释与设计方案中强制标注样本区间与 t 值；③ 把 `calib_*.py` 的产物（`biz.*_calibration`）加**样本量列**，不足门槛的维度回退默认值（现有 `n≥30` 门槛只覆盖催化剂权重，需推广到扫描侧）。
+- **A2（🔴 科学有效性）「空头默认降级、只做多」由单边上涨样本反推**：执行层 `phase_execute_scan_signal.py` 取 `p_dir='up' AND scenario IN ('S1','S2')`（等价 P↑OI↑）的唯一依据是「回测中它唯一稳定正期望，空头侧全负」——而样本期是**单边上涨 regime**。⇒ 这是**逻辑越界**：在上涨 regime 里空头全负是必然，不能推出「空头无 edge」。
+  - 待办：① 补 **regime 分层回测**（至少按 `btc_1h` 方向 / FGI 档 / 市值趋势分档），逐档报 n 与方向对齐中位；② 执行层恢复空头侧前，须有**非上涨 regime 子样本**的独立证据；③ 在方案 §9 与代码注释中把「只做多」显式标为「**样本期结论，非结构性结论**」（当前已加注，见 §12.1-A2）。
+- **A3（🟠 无 holdout）全流程无留出集**：参数在**全样本**上选优 ⇒ 数据窥探（data snooping）。待办：① 把已有数据切**时间留出**（如最后 20% 时段）并在留出集上复核全部阈值；② 之后新参数一律「训练集选参 → 留出集验证」；③ 留出集结果**入库留档**（新增校准结果表或复用 `biz.*_calibration` 加 `split` 列），避免再次出现「结论只存在于对话里」。
+- **关联**：设计方案 §12.1 A 类条目；本工单与 `待办（需设计变更，勿盲目改）` 同性质——**改前须先补样本，勿用当前 3~6 天样本调参**。

@@ -13,6 +13,11 @@
   - OI 采样   MAX(ts)         > 30 分钟（exchange='binance'）
   - 扫描信号  MAX(signal_ts)  > 60 分钟（主池 15min / 蓄势池 30min，护栏跳过陈旧币时放宽）
 
+输出面观测（诊断_轧空邮件断流_2026-09-23 §6.2，P0）：以上三项只看「输入面」，无法发现
+「判定照常落库、邮件却没发出」的静默断流。轧空池另加一条：近 6h 判定成立却既未发信、
+也未被跨池互斥静音 ⇒ 报静默（用影子标记区分「主动静默」与「疑似故障」，见
+`_squeeze_silence_note`）。
+
 去重：biz.scan_stall_alert（task='scan_stall'）——与 scan_daemon 内置停摆告警
 （_check_and_alert_stall）共用同一去重键与 6h 静默期，同一停摆事件只发一封邮件。
 停摆持续期间每 6 小时重发一封汇总邮件。
@@ -259,6 +264,42 @@ OI_BUCKET_WINDOW_H = 2           # OI 桶完整度观察窗（小时）
 OI_BUCKET_DEFICIT_RATIO = 0.9    # 该窗口 OI 桶数 < 期望 ×0.9 → 判为缺口
 SQUEEZE_QUEUE_MAX = 12           # 与 squeeze.TRACK_QUEUE_MAX 同口径（展示用）
 
+# ── 轧空通道「输出面」观测（诊断_轧空邮件断流_2026-09-23 §6.2，P0）────────────
+# 既有健康检查只看「输入面」（数据新鲜度 / 队列 / 入队数 / 拒判数），**从不看邮件是否
+# 真的发出**。影子模式（scan_daemon.SQUEEZE_ALERT_SHADOW）把发信短路后判定照常落库 ⇒
+# 两层看门狗全部无感、静默断流可无限期持续（2026-09-23 实况：04:12 后 8 笔判定 0 发信）。
+# 判据：近 N 小时有判定（status='confirmed'），却既未发信（alerted_at IS NULL）、
+# 也未被跨池互斥静音（alert_suppressed_at IS NULL）。
+SQUEEZE_SILENCE_WINDOW_H = 6
+# 影子分支写的可观测标记（task 键，见 scan_daemon.SHADOW_MARKER_TASK）：
+# 存在且新鲜 ⇒ 静默是**有意**的（影子模式，非故障）；否则 ⇒ 疑似发信分支故障。
+# ⚠️ 必须与 scan_daemon.SHADOW_MARKER_TASK 同值（有单测守卫）。
+SHADOW_MARKER_TASK = "squeeze_shadow"
+
+
+def _squeeze_silence_note(silenced: int, shadow_ts: datetime | None,
+                          now: datetime) -> str | None:
+    """输出面判据（诊断 §6.2）：判定成立却既未发信、也未被静音 → 返回提示文案。
+
+    纯函数（便于注入单测）：`silenced` 为窗口内「已判定、未发信、未被跨池互斥静音」的
+    笔数；`shadow_ts` 为影子标记心跳的 `last_run_at`（无标记传 None）。
+      - `silenced <= 0` → None（无静默，不渲染）；
+      - 影子标记新鲜（≤ 窗口）→ **主动静默**文案（非故障，但需让运维知道通道是暗的）；
+      - 否则 → **疑似故障**文案（发信分支被短路或 notifier.send 失败）。
+    """
+    if silenced <= 0:
+        return None
+    shadow_fresh = (
+        shadow_ts is not None
+        and (now - shadow_ts).total_seconds() <= SQUEEZE_SILENCE_WINDOW_H * 3600)
+    if shadow_fresh:
+        return (f"轧空通道影子模式：近 {SQUEEZE_SILENCE_WINDOW_H}h 判定成立但主动静默 "
+                f"{silenced} 笔（非故障；恢复发信需将 scan_daemon.SQUEEZE_ALERT_SHADOW "
+                f"置 False 并重启）")
+    return (f"轧空通道静默 {silenced} 笔（近 {SQUEEZE_SILENCE_WINDOW_H}h）：判定已成立，"
+            f"但既未发信、亦未被跨池互斥静音 ⇒ 疑似发信分支被短路或发送失败，"
+            f"请立即检查 scan_daemon")
+
 
 def _collect_squeeze_health(conn) -> list[str]:
     """轧空池健康 + OI 桶完整度（SQZ-01/06）：返回越线提示；未越线返回 []。
@@ -295,6 +336,27 @@ def _collect_squeeze_health(conn) -> list[str]:
                          f"（≥{SQUEEZE_REJECT_WARN}；同一 track 多轮被拒只计 1）")
     except Exception as e:  # noqa: BLE001
         print(f"[看门狗] 轧空池健康检查跳过（{e}）", file=sys.stderr)
+
+    # 输出面：判定成立却未发信（诊断 §6.2，P0）—— 用影子标记区分「主动静默」与「故障静默」
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM biz.scan_signal "
+                "WHERE pool='squeeze' AND status='confirmed' "
+                "AND alerted_at IS NULL AND alert_suppressed_at IS NULL "
+                "AND signal_ts > NOW() - make_interval(hours => %s)",
+                (SQUEEZE_SILENCE_WINDOW_H,))
+            silenced = int(cur.fetchone()["n"] or 0)
+            cur.execute(
+                "SELECT last_run_at FROM biz.scan_heartbeat WHERE task=%s",
+                (SHADOW_MARKER_TASK,))
+            r = cur.fetchone()
+        note = _squeeze_silence_note(silenced, r["last_run_at"] if r else None,
+                                     datetime.now(timezone.utc))
+        if note:
+            notes.append(note)
+    except Exception as e:  # noqa: BLE001
+        print(f"[看门狗] 轧空通道静默检查跳过（{e}）", file=sys.stderr)
 
     try:
         now = datetime.now(timezone.utc)

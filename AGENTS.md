@@ -794,3 +794,17 @@
 - **自测**：新增 `workbench/test_squeeze_fuel.py` **99/99**（阈值 / 代理口径 / 序列纯函数 / 五 verdict + 优先级 + 缺失降级 / 五道闸门 / 端到端 / AST 接线守卫）；`test_squeeze_battle.py` **143/143**、`test_scan_scenario_label.py` **48/48** 无回归；`py_compile` 3/3 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效。
 - **仍待办（§10.10.8，不在本次范围）**：① 标定脚本 `calib_squeeze_fuel_thr.py`（口径同 `calib_squeeze_liq_thr.py`）；② `SQZ_FUEL_*` 与 §10.8 判定邮件的跨池互斥接线；③ 影子观察期长度与开信门槛。
+
+### 轧空邮件静默断流修复 + 输出面观测（诊断_轧空邮件断流_2026-09-23，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\诊断_轧空邮件断流_2026-09-23.md`（用户报「凌晨 4 点后再没收到轧空邮件」）。**零 DDL、零阈值变更、未改发信行为**。
+
+- **根因（物证级）**：`SQUEEZE_ALERT_SHADOW = True`（由 `90ec437` 夹带引入、commit message 未提）随 daemon 重启于 `∈(10:11,12:22] CST` 上线，把「轧空发信」短路。**04:12:28 CST 最后一封之后 8 笔判定 0 发信**（`id=1606 PHAUSDT` 起，全部 `alerted_at=NULL` 且无跨池互斥标记 ⇒ 非静音、是走了发信分支却没发）。上游 liq/oi_cvd/klines 全部新鲜、main/蓄势池同 notifier 发信正常 ⇒ 排除数据断档与 SMTP 故障。
+- **为什么没有一封告警（真问题）**：两层看门狗**都只观测输入面**（数据新鲜度 / 队列占用 / 24h 入队 / 拒判数），**从不观测输出面（邮件是否真的发出）**。影子模式下判定照常落库、`signal_ts` 持续推进 ⇒ `_collect_items` 永远 `[ok]`、`_collect_squeeze_health` 三项越线条件全与发信无关 ⇒ 静默断流可无限期持续。`_mark_alert_suppressed` docstring 声称的 `_stall_parts` 因果链对 **squeeze 行本就不适用**（丢信号检测候选集是 `main`/`BRK`，不含 squeeze 池）——已在 docstring 就地澄清。
+- **决策**：用户授权「按你的判断处理」⇒ **维持影子**（开关自陈的「阈值标定在极小单一 regime 样本 + 无 holdout」理由仍成立，prod 样本长期 `rc=3` ⇒ 恢复发信无依据），但**补输出面观测 + 影子可观测标记**。
+- **改动 1（`scan_daemon.py`）**：新增常量 `SHADOW_MARKER_TASK = "squeeze_shadow"`；影子分支在 `stats["shadow"]` 后写 `_write_heartbeat(SHADOW_MARKER_TASK, True)` —— 把「有意不发信」从**不可观测**变成**可观测量**（该 task 键不在 `STALL_HEARTBEAT_TASKS` / `HEARTBEAT_MAX_AGE_MIN` 内，不会被停摆检测误当任务）。
+- **改动 2（`check_scan_freshness.py`）**：新增 `SQUEEZE_SILENCE_WINDOW_H = 6` + `SHADOW_MARKER_TASK`；纯函数 `_squeeze_silence_note(silenced, shadow_ts, now)`（`silenced<=0`→None；影子标记新鲜≤窗口→**主动静默**文案；否则→**疑似发信分支故障**文案）；`_collect_squeeze_health` 接入判据 `pool='squeeze' AND status='confirmed' AND alerted_at IS NULL AND alert_suppressed_at IS NULL AND signal_ts > NOW()-6h`。
+- **部署后行为**：影子期每 6h 收到一封「轧空通道影子模式：…主动静默 N 笔（非故障）」健康提示（去重键 `squeeze_health`，与 `scan_stall` 互不抑制）——这正是防止下次「以为链路坏了」的机制；若**标记缺失/陈旧而仍有静默** ⇒ 报「疑似发信分支被短路或发送失败，请立即检查 scan_daemon」。
+- **自测**：新增 `workbench/test_squeeze_alert_silence.py` **18/18**（纯函数 6 例 + 边界 2 例 + 跨文件常量同值 + AST 接线守卫 + `**` 文案护栏）；既有 `test_squeeze_battle.py` 143/143、`test_squeeze_fuel.py` 99/99、`test_scan_alert_header_regime.py` 72/72、`test_scan_alert_audit_deepdive.py` 75/75、`test_scan_alert_remaining.py` 16/16、`test_scan_l1_closed_bar.py` 16/16、`test_scan_scenario_label.py` 48/48、`test_fundamental_liquidity.py` 13/13、`test_derivatives_signal_gap.py` 35/35 无回归；`py_compile` 2/2。
+- **prod 只读实测（部署前）**：`silenced_6h = 7`、`shadow_marker = None` ⇒ 判「疑似故障」（符合预期：旧构建无标记）。部署后影子分支首次吞批即写标记，文案转「主动静默」。
+- **待部署**：需重启容器（`scan_daemon` 写标记 + `scheduler` 跑看门狗）后生效。**未做**：恢复发信（维持影子，产品决策）；补发方案 B（需定义「补发有效性」边界，仍挂账）。

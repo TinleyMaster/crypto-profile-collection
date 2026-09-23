@@ -1319,8 +1319,15 @@ def _cross_pool_recent(conn, symbols: list[str], pools: tuple[str, ...]) -> set[
 
 
 def _mark_alert_suppressed(conn, ids: list[int], reason: str) -> None:
-    """跨池互斥的**留痕**（不能只跳过）：标 `alert_suppressed_at` 后，
-    「丢信号检测」不会再把这批行算成异常（见 `_stall_parts`）。"""
+    """跨池互斥的**留痕**（不能只跳过）。
+
+    `alert_suppressed_at` 有两个消费点，作用域不同：
+      - 「丢信号检测」（`_stall_parts`）用它排除**主池/BRK** 的 high 行；该检测的候选集
+        是 `pool='main' OR (pool='accumulation' AND scenario='BRK')`，**不含 squeeze 池**
+        ⇒ 对 squeeze 行本就不适用（诊断 §3.2 的口径澄清）。
+      - 输出面静默检测（`check_scan_freshness._collect_squeeze_health`）用它把「跨池互斥
+        刻意抑制」与「发信分支坏了」区分开 —— 这是它当前更关键的用途。
+    """
     if not ids:
         return
     with conn.cursor() as cur:
@@ -2828,6 +2835,13 @@ def _render_squeeze_alert(items: list[dict]) -> str:
 # 降为影子的原因：判定阈值标定在极小且单一 regime 的样本上，样本内选参、无 holdout
 # 验证（见设计方案 §12.1-A1/A2）。影子期继续积累判定记录供回放，口径通过验证后再恢复发送。
 SQUEEZE_ALERT_SHADOW = True
+# 影子模式可观测标记（诊断_轧空邮件断流_2026-09-23 §6.2，P0）：
+# 影子分支每吞掉一批判定就写一条心跳行（task=SHADOW_MARKER_TASK）。没有它时，
+# 「有意不发信」与「发信分支坏了」在库里都是 `alerted_at IS NULL`，不可区分 ——
+# 正是 2026-09-23 轧空邮件静默断流而两层看门狗全部无感的原因。
+# 外部看门狗据此区分两类静默（见 check_scan_freshness._squeeze_silence_note）。
+# ⚠️ 必须与 check_scan_freshness.SHADOW_MARKER_TASK 同值（有单测守卫）。
+SHADOW_MARKER_TASK = "squeeze_shadow"
 
 
 def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
@@ -3231,6 +3245,10 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
             print(f"[scan_daemon][squeeze][shadow] 判定 {len(send_items)} 币，影子模式不发信："
                   f"{', '.join(it['track']['symbol'] for it in send_items)}")
             stats["shadow"] = len(send_items)
+            # 可观测标记（诊断 §6.2）：让「有意不发信」从不可观测变成可观测量。
+            # 外部看门狗读到该行新鲜 ⇒ 把「判定成立却未发信」判为**主动静默（非故障）**；
+            # 读不到 ⇒ 判为**疑似故障静默**并告警。
+            _write_heartbeat(SHADOW_MARKER_TASK, True)
         else:
             settings = _SETTINGS or get_settings(require_database=True)
             from crypto_research.clients.notifier import EmailNotifier

@@ -320,7 +320,7 @@ sealed_mix = [{"signal": _main_sig(),
               {"signal": dict(_main_sig(), id=7), "resonance": _res()}]
 t_sealed = sd._alert_title(sealed_mix)
 check("仅陈旧条目" in t_sealed and "另有币无催化剂" in t_sealed,
-      "密封边界混合 → 「催化剂仅陈旧条目，另有币无催化剂」（N-90EC-1 三态化）", t_sealed)
+      "密封边界混合 → 「含仅陈旧条目，另有币无催化剂」（N-90EC-1 三态化）", t_sealed)
 check("全部 >3 天" not in t_sealed,
       "密封边界不再断言「全部 >3 天」（对零催化剂币是事实错误）")
 # 密封边界纯陈旧（无零催化剂币）→ 保持「全部 >3 天」
@@ -328,14 +328,48 @@ t_sealed_stale = sd._alert_title([{"signal": _main_sig(),
                                    "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))}])
 check("全部 >3 天" in t_sealed_stale, "密封边界纯陈旧 → 保持「全部 >3 天」", t_sealed_stale)
 
-print("\n【N-416-2 / N-90EC-2】`**` 护栏覆盖标题**全部**返回分支（表驱动）")
+print("\n【N-2B4D-1】密封侧新文案与图例/非密封侧**逐字**共用同一措辞核（复验第 4 次同型漏）")
+# 旧：密封侧写「催化剂仅陈旧条目，…」、图例写「含仅陈旧条目，…」⇒ 只与非密封侧逐字对齐
+check("含仅陈旧条目，另有币无催化剂" in t_sealed,
+      "密封混合（S3）用「含仅陈旧条目，另有币无催化剂」（与图例逐字一致）", t_sealed)
+check("含仅陈旧条目，另有币无催化剂" in t_mix2,
+      "非密封混合（N4）沿用同一措辞核（三落点一致）", t_mix2)
+
+print("\n【N-62B-1】资产未关联 ⇒ 催化剂/KOL 无从查询（n/a ≠ 0），标题不得断言「无共振/无催化剂」")
+# 弱形式（线上 4/123 批可达）：未关联且无事件/KOL ⇒ n_res==0，旧实现断言「纯盘面信号，无共振」
+t_unlinked = sd._alert_title([{"signal": _main_sig(), "resonance": _res(linked=False)}])
+check("未关联资产" in t_unlinked and "无共振" not in t_unlinked,
+      "密封边界未关联 → 披露「另有币未关联资产」，不再断言「无共振」", t_unlinked)
+# 强形式：未关联币的 n_res 由事件段供给 ⇒ 走非密封方向段，须报 n/a 而非「无催化剂条目」
+t_unlinked_ev = sd._alert_title([{"signal": _main_sig(),
+                                  "resonance": _res(event=1, linked=False)}])
+check("催化剂 n/a" in t_unlinked_ev and "无催化剂条目" not in t_unlinked_ev,
+      "非密封未关联 → 「催化剂 n/a（未关联资产，非 0）」，不落空档也不误报 0", t_unlinked_ev)
+# 对照：已关联且催化剂确为 0 条 → 仍报「无催化剂条目」（0 ≠ n/a 双向成立，勿一并收掉）
+check("无催化剂条目" in t_zero, "已关联零催化剂币仍报「无催化剂条目」（0 ≠ n/a 双向成立）")
+
+print("\n【N-2B4D-3 / N-62B-2】图例声明密封侧文案 + 单币批次省略「（k/M 币）」")
+_leg_new = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}], REGIME)
+check("单币批次省略" in _leg_new, "图例声明单币批次省略「（k/M 币）」（实测 61% 邮件为单币）")
+check("未关联资产" in _leg_new, "图例声明「未关联资产」= 催化剂/KOL 栏为 n/a（≠ 0）")
+check("纯盘面信号" in _leg_new and "无新鲜共振" in _leg_new,
+      "图例声明密封侧两种前缀（「纯盘面信号」/「无新鲜共振」）")
+check("另有币无催化剂/未关联资产" in _leg_new, "图例声明「另有币…」并列形态（含未关联）")
+check("**" not in _leg_new, "新增图例文案无 markdown 强调符 `**`")
+
+print("\n【N-416-2 / N-90EC-2 / N-2B4D-2】`**` 护栏覆盖标题**全部**返回分支（表驱动，9 路径）")
 _title_cases = {
     "密封-纯无共振": [{"signal": _main_sig(), "resonance": _res()}],
     "密封-纯陈旧": [{"signal": _main_sig(),
                      "resonance": _res(bull=3, stale=3, fresh=(0, 0, 0))}],
     "密封-混合": sealed_mix,
+    "密封-未关联": [{"signal": _main_sig(), "resonance": _res(linked=False)}],
     "新鲜方向段": [{"signal": _main_sig(), "resonance": _res(bull=3, fresh=(3, 0, 0))}],
     "仅零催化剂": [{"signal": _main_sig(), "resonance": _res(event=1)}],
+    "非密封-全陈旧": [{"signal": _main_sig(),
+                       "resonance": _res(event=1, bull=3, stale=3, fresh=(0, 0, 0))}],
+    "非密封-未关联": [{"signal": _main_sig(),
+                       "resonance": _res(event=1, linked=False)}],
     "混合(非密封)": mixed2,
 }
 for _nm, _case in _title_cases.items():

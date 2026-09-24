@@ -4,9 +4,9 @@
 等表生成每日变化榜，写入 biz.daily_diff_summary，供前端"每日信号"消费。
 
 榜单类型：
-- price_change_24h    24h 涨跌幅 TOP（仅 TOP1000 市值）
-- volume_surge_24h    24h 成交量异动 TOP（量/市值比）
-- market_cap_mover    24h 市值变动绝对值 TOP（大资金进出）
+- price_change_24h    24h 涨跌幅 TOP（仅 TOP1000 市值；涨/跌各自 rank 从 1 起）
+- volume_surge_24h    24h 成交量异动：放量榜（量/市值比）+ 缩量榜（成交量环比降幅）
+- market_cap_mover    24h 市值变动绝对值 TOP（大资金进出；涨/跌各自 rank 从 1 起）
 - unlock_7d           7 天解锁抛压 TOP
 - social_surge        社交热度日环比增幅 TOP（需有历史数据）
 - tvl_surge_24h       24h TVL 增幅 TOP（DeFi 资金流入）
@@ -68,7 +68,8 @@ SELECT
     d.asset_id,
     d.change_24h,
     '24h 涨跌幅',
-    ROW_NUMBER() OVER (ORDER BY d.change_24h DESC),
+    -- 涨/跌各自从 1 起排名（按变动幅度降序），跨方向可比
+    ROW_NUMBER() OVER (PARTITION BY (d.change_24h >= 0) ORDER BY ABS(d.change_24h) DESC),
     CASE WHEN d.change_24h >= 0 THEN 'up' ELSE 'down' END,
     jsonb_build_object(
         'price_usd', d.price_usd,
@@ -140,14 +141,15 @@ SELECT
     %s::DATE,
     'volume_surge_24h',
     d.asset_id,
-    CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap * 100 ELSE NULL END,
-    '24h 量/市值比 (%%)',
-    ROW_NUMBER() OVER (ORDER BY CASE WHEN d.market_cap > 0 THEN d.volume_24h / d.market_cap ELSE 0 END ASC),
+    ROUND((d.volume_24h - prev.volume_24h) / prev.volume_24h * 100, 2),
+    '24h 缩量：成交量环比 (%%)',
+    ROW_NUMBER() OVER (ORDER BY (d.volume_24h - prev.volume_24h) / prev.volume_24h ASC),
     'down',
     jsonb_build_object(
         'price_usd', d.price_usd,
         'market_cap', d.market_cap,
         'volume_24h', d.volume_24h,
+        'volume_prev', prev.volume_24h,
         'change_24h', d.change_24h,
         'primary_sector', a.primary_sector,
         'mcap_tier', CASE
@@ -159,13 +161,19 @@ SELECT
     )
 FROM biz.asset_market_daily d
 JOIN core.asset a ON a.asset_id = d.asset_id
+JOIN biz.asset_market_daily prev
+    ON prev.asset_id = d.asset_id
+    AND prev.source_code = d.source_code
+    AND prev.market_date = d.market_date - INTERVAL '1 day'
 WHERE d.source_code = 'cmc'
   AND d.market_date = %s::DATE
   AND a.market_cap_rank <= 1000
   AND d.volume_24h IS NOT NULL
+  AND prev.volume_24h IS NOT NULL
+  AND prev.volume_24h >= 500000
   AND d.market_cap > 0
   AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
-ORDER BY d.volume_24h / d.market_cap ASC
+ORDER BY (d.volume_24h - prev.volume_24h) / prev.volume_24h ASC
 LIMIT 40
 ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
@@ -284,7 +292,8 @@ SELECT
     d.asset_id,
     ROUND((d.market_cap - prev.market_cap) / prev.market_cap * 100, 2) AS market_cap_change_pct,
     '24h 市值变动率 (%%)',
-    ROW_NUMBER() OVER (ORDER BY ABS((d.market_cap - prev.market_cap) / prev.market_cap) DESC),
+    -- 涨/跌各自从 1 起排名（按变动幅度降序），跨方向可比
+    ROW_NUMBER() OVER (PARTITION BY (d.market_cap >= prev.market_cap) ORDER BY ABS((d.market_cap - prev.market_cap) / prev.market_cap) DESC),
     CASE WHEN d.market_cap >= prev.market_cap THEN 'up' ELSE 'down' END,
     jsonb_build_object(
         'market_cap', d.market_cap,

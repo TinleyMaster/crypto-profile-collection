@@ -10984,7 +10984,7 @@
         };
         const DIFF_CATEGORY_TIP = {
             'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
-            'volume_surge_24h': '按成交量较近期均值的异动倍数排序：左列为放量最显著，右列为缩量/异动最显著',
+            'volume_surge_24h': '放量榜：按 24h 量/市值比（换手率）排序，左列为放量最显著；缩量榜：按 24h 成交量环比前一日降幅排序，右列为缩量最显著',
             'price_volume_surge': '涨幅前 50% 且 放量前 50% 的交集，按量价共振综合分排序：真正有资金推动的异动',
             'sector_rotation': '连续 3 天赛道强度排名前 5 的板块，搭配量价齐升领涨龙头：高确定性的板块轮动机会',
             'fund_flow': '资金流向榜：上层为赛道级资金净流入/净流出，下层为币种级大资金进出（以市值变动近似）',
@@ -11230,8 +11230,8 @@
             const tierLabel = tier ? (MCAP_TIER_LABELS[tier] || tier) : '';
 
             let html = '';
-            html += '<div class="diff-item ' + direction + '" title="全市场排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
-            html += '<span class="rank" title="全市场排名（非榜单内序号）">' + rankLabel + item.rank + '</span>';
+            html += '<div class="diff-item ' + direction + '" title="榜单内排名第 ' + item.rank + '｜点击查看研报" onclick="window.open(\'/research/' + item.asset_id + '\', \'_blank\')">';
+            html += '<span class="rank" title="榜单内排名（涨/跌方向各自从 1 起）">' + rankLabel + item.rank + '</span>';
             html += '<span class="symbol">';
             if (highlightAssetIdSet.has(Number(item.asset_id))) {
                 html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';
@@ -11543,7 +11543,7 @@
 
             let html = '';
             html += '<div class="diff-item ' + direction + '" title="市值变动 $' + changeUsdStr + '｜点击查看研报" onclick="window.open(\'/research/' + c.asset_id + '\', \'_blank\')">';
-            html += '<span class="rank">Top ' + c.rank + '</span>';
+            html += '<span class="rank">' + (direction === 'up' ? 'Top ' : 'Bottom ') + c.rank + '</span>';
             html += '<span class="symbol">';
             if (highlightAssetIdSet.has(Number(c.asset_id))) {
                 html += '<span class="highlight-star" title="⭐ 高亮信号覆盖">⭐</span> ';

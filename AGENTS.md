@@ -899,7 +899,7 @@
 - **prod 只读实测**：审计原例 `signal=1085989 XRP score=86 status=open`，`ai_verdict='不建议参与'`、`ai_asset_match='low'` ⇒ **`_ai_review_blocks_alert` 判 VETOED=true**（闸门确实拦得住这封邮件）。近 3 天 A 级信号共 **10 条，仅 1 条**会被抑制 ⇒ 无误伤。`catalyst_notification_log` 现有 status 只有 `sent/failed` ⇒ `suppressed` 是新值，不与既有语义冲突（`_is_sent` 只按 `sent_at` 判窗口、`_recent_major_events` 只认 `status='sent'`，均不受影响）。
 - **顺带观测**：`major_event` 留痕已有 3 条（`log_id=72` 本地探针 BCH；`74/76` 于 2026-09-23 16:06:01 UTC 由线上进程实发 AAVE/LIT，同一微秒时间戳 ⇒ 同批次 2 封）⇒ **上一轮 `c000fec` 的代码确已在线上跑**，佐证本次修复同样**只需 redeploy 即可生效**。
 - **待部署**：需 Zeabur **显式 redeploy**（同 `81f281c` / `c000fec`）。
-- **本轮范围外（审计 P1/P2/P3 共 11 项，留档未动）**：量比缺失值默认 0 标「极度缩量」（与 `ai_enhance` 的「未知」口径不一）、`description_short` 内嵌 stale 价格、`total_liquidity_usd`（$2.02M）被当可交易量做「稀薄」叙事（疑脏数据，需 prod 复核）、共振分 90 与「弱共振」同屏、双置信度并列、警告文案硬编码「ticker同名但不同项目」、规则档位与 AI 风控不校准、源脆弱（结构性催化应以官方公告为锚）、赛道贴标、标题 `XRP / XRP` 冗余。
+- **本轮范围外（审计 P1/P2/P3 共 11 项）——已在下一节修复 9 项**：量比缺失值默认 0 标「极度缩量」（与 `ai_enhance` 的「未知」口径不一）、`description_short` 内嵌 stale 价格、`total_liquidity_usd`（$2.02M）被当可交易量做「稀薄」叙事（疑脏数据，需 prod 复核）、共振分 90 与「弱共振」同屏、双置信度并列、警告文案硬编码「ticker同名但不同项目」、规则档位与 AI 风控不校准、源脆弱（结构性催化应以官方公告为锚）、赛道贴标、标题 `XRP / XRP` 冗余。
 
 ### 邮件时区统一为东八区（2026-09-24，用户指令「所有邮件中信息的时区都改成东八区」，本次提交）
 
@@ -916,3 +916,50 @@
 - **验收**：`py_compile` 9 文件全过；`test_scan_alert_header_regime.py` **135/135**（触发根断言由 `09/22 06:00` 改 `09/22 14:00`，并新增「抬头标注北京时间」护栏）；`test_scan_alert_audit_deepdive` 75/75、`test_scan_alert_remaining` 16/16、`test_scan_scenario_label` 48/48、`test_scan_l1_closed_bar` 16/16、`test_squeeze_alert_silence` 18/18、`test_squeeze_battle` 143/143、`test_highlight_alert` 68/68、`test_daily_brief_p1` 22/22、`test_liq_overview_brief` 49/49 全无回归。
 - **真 DB 端到端**：告警邮件实测 `bar=2026-09-23T23` → `触发根 09/24 07:00`、抬头 `生成于 2026-09-24 08:59（北京时间）`；`send_scan_signal_brief --dry-run` 抬头与「时间」列均北京时间；`send_highlight_alert --dry-run` 抬头北京时间。
 - **待部署**：`scan_daemon` 需重启容器（渲染层在常驻进程内），其余为 scheduler 一次性脚本，下次调度即生效。
+
+### A 级快讯展示层审计剩余 11 项（审计_催化剂A级邮件_XRP_BCH_2026-09-24，本次提交）
+
+来源同「A 级快讯 AI 否决闸门」节。承接 `4307fb1`，本轮修掉审计剩余 **9 项**；**零 DDL、未改 tier 计算、未改 AI 评审规则**（只扩 prompt 与输出白名单）。D11（信息源脆弱 / 实体链接弱）属上游架构、D10 的**分类数据本身**属 CMC 数据治理，两者**未修**（见末条）。
+
+**根因订正（与审计猜测不同，均为 prod 只读探针物证）**
+
+- **P1-D4 真因不是「默认值」而是「SQL 没查」**：发送路径的两条 SQL（首查、AI 增强后重查）**根本没 SELECT `volume_ratio_7d`** ⇒ `row.get("volume_ratio_7d")` 恒为 `None` ⇒ 原 `float(vr) if vr is not None else 0` 得 `0` ⇒ 命中 `vr_val <= 0.5` 标「极度缩量」。更隐蔽的是 `_build_anomaly_quick_card` 的早退守卫 `if vr is None and v24 is None` 被**有值的** `volume_24h_usd` 绕过，于是渲染出「0.00x 极度缩量」。另：两通道 7 日均量窗口本就漂移——`_fetch_signal_row` 取「最近 7 个交易日」，发送路径取「MAX(market_date) 之前的**全部历史**（实测 119 天）」。
+- **P1-D5 真因是 `biz.asset_liquidity` 是按链分行的 DEX 池快照表**（实测 116 行 / 49 资产，每资产 1~21 行，chain ∈ ethereum(41)/solana(15)/polygon(10)/base(8)/bsc(7)…），原 SQL `LIMIT 1` **无 ORDER BY** ⇒ 取哪条不确定。XRP(1127) 只有 1 行：`chain='solana'`、`source='geckoterminal'`、`total_liquidity_usd=$1.91M`——是 Solana 上的 wXRP/USDC 池，与「24h 成交量 $7.80B」差约 **4000 倍**，不是资产不流动，而是链上池覆盖不足。
+- **P2-D6 是系统性现象**：近 14 天 A 级 open 信号的 `resonance_state` **全部为 weak**，`resonance_score` 区间 67~98 ⇒ 高分 + 弱共振是常态，属**两个独立口径**（共振分 = `excess*0.5 + vol_z*0.3 + direction*0.2` ± peer/divergent；共振状态由 `_determine_state(excess, vol_z, direction_match)` 阈值判定）。
+
+**改动 1（`workbench/catalyst/notifier.py`）——抽共享 SQL 片段，一处口径三处共用**
+
+- 新增模块级 `_MARKET_LATERAL_SQL`（三个 `LEFT JOIN LATERAL`：最新日行情 `md_latest`、**严格 7 日**均量 `md_avg`、链上池流动性 `liq` 且带 `ORDER BY total_liquidity_usd DESC NULLS LAST, chain` 消除非确定性）与 `_MARKET_COLS_SQL`（`current_price/change_24h_pct/change_7d_pct/volume_24h_usd/avg_volume_7d/volume_ratio_7d/is_volume_spike/liquidity_score/liquidity_chain/liquidity_source`）。
+- **首查、AI 增强后重查、`_fetch_signal_row` 三条 SQL 全部改为 `""" + _MARKET_COLS_SQL + """` / `""" + _MARKET_LATERAL_SQL + """` 拼接** ⇒ 根治 D4 的「恒为 None」与两通道窗口漂移。`_fetch_signal_row` 因后续还有衍生品列，续行**前置逗号**（`_MARKET_COLS_SQL` 末列无尾逗号）。
+- **D4 渲染层**：`vr is None` 时**不再伪造 0**，改渲染「—」+「7 日均量缺失，无法计算」，不落进「极度缩量」分支。
+- **D3**：新增 `_strip_stale_price_sentences()`（正则剔除 CMC 标准后缀句：`last known price` / `is up|down X over the last 24 hours` / `traded over the last 24 hours` / `active market(s)`），在 `_build_fast_alert_html` 渲染简介前、以及 `_signal_row_to_deep_review_input` 喂 LLM 前**各清一次** ⇒ 邮件内不再出现 stale 价 $1.087 与实时 $1.57 自相矛盾，且 AI 也不再被脏文本误导。
+- **D5**：新增 `_liquidity_label(row)` → 「链上池流动性（solana）」；原「流动性（24h）」误导性标签移除。**根因在 prompt**（见改动 2）。
+- **D12**：`header_name = symbol if not name or str(name) == str(symbol) else f"{symbol} / {name}"` ⇒ 消除「XRP / XRP」。
+- **D7**：`置信度 Z%` → **`模型方向置信 Z%`**，与 AI 的「信心度：低」区分口径。
+- **D6**：共振状态行补口径说明「（按涨跌幅/量能阈值判定，与上方共振分不同口径）」。
+- **D8**：警告文案改为**优先取 `ai_deep.get("asset_match_reason")`**（渲染为「AI 判定原因：…」），缺失时回退**不臆断成因**的通用文案「系统检测到该代币与催化剂所述项目可能不一致，请谨慎核实后再做决策。」⇒ 不再对每种 low 一律写死「ticker同名但不同项目」。
+- **D9**：交易计划块标题改「📊 交易计划（规则计算）」，并明写「档位由规则按价格结构派生，**未与 AI 风控建议校准**；两者不一致时请以下方「🤖 AI 深度评审」的进场/止损/止盈建议为准。」
+- **D10**：上线时间 `—` → **`未收录`**；赛道行补「赛道为 CMC 分类口径，仅作参考」。
+
+**改动 2（`workbench/catalyst/ai_enhance.py`）——D5/D8 的根因在 prompt 与白名单**
+
+- 「## 五、风险与流动性」加口径提示：该值只覆盖**某一条链上的 DEX 池**、不是全局流动性，必须与「24h 成交量」交叉对照，**不得**仅凭此值断言「流动性稀薄 / 易插针 / 大额进出造成滑点」——两者相差数个量级时说明是**链上池覆盖不足**，而非资产本身不流动。
+- `asset_match_confidence` 定义由「同名不同币」扩为**三种 low 情形**（① ticker 同名但不同项目；② 该代币只是新闻里的被动提及/顺带列举；③ 跨链同名资产被误绑），并**新增 `asset_match_reason`**（low 时必填、一句中文说明具体是哪种错配；非 low 留空）。
+- 标准化输出白名单加 `"asset_match_reason": str(data.get("asset_match_reason") or "")[:200]`。
+
+**改动 3（`workbench/test_fast_alert_audit_rest.py`，新增）——离线护栏**
+
+- **61/61 全绿**，11 组断言：D3 剥 stale 句 10 例 / D4 量比卡 7 例 / **D4 三 SQL 同源 7 例（源码级：`AS volume_ratio_7d` 恰出现 1 次、`_MARKET_COLS_SQL +` 与 `_MARKET_LATERAL_SQL +` 各 3 次）** / D5 9 例 / D6 2 例 / D7 3 例 / D8 8 例 / D9 6 例 / D10 3 例 / D12 3 例 / 返回契约 3 例。
+- 因 `_build_anomaly_quick_card` 是 `_build_fast_alert_html` 内的**嵌套函数**（非模块级），D4/D9 断言一律**经渲染 HTML 间接验证**；D9 必须用**非否决**的 AI 评审（`asset_match_confidence='high'`、`verdict='建议轻仓参与'`）构造夹具，否则交易计划块会被上一节的否决闸门整块替换为「已抑制」。
+
+**验收**
+
+- `py_compile` notifier.py + ai_enhance.py 通过；`test_fast_alert_audit_rest.py` **61/61**；workbench 全量 **22 个 `test_*.py` 全部 exit=0**（含 `test_fast_alert_ai_veto.py` 46/46、`test_major_event_alert.py` 30/30、`test_scan_edge_metrics.py` 71/71）。
+- **prod 只读探针**：三条 SQL（首查 / AI 增强后重查 / `_fetch_signal_row`）在真库**均可执行、字段齐备（缺失=无）**；用真行渲染审计原例（`signal=1085989 XRP score=86`）实测 `ratio=1.75`（与 AI 的 1.71x 吻合）、`liq=$1,913,193.87 chain=solana src=geckoterminal`，渲染结果含「链上池流动性（solana）」且**不含「0.00x」**；10/11 项展示核验通过（D9 因该例被否决闸门抑制属**预期**）。
+
+**未修（本轮范围外，非通知层可解）**
+
+- **P2-D11 信息源脆弱 + 实体链接弱**：属**上游架构**（源权重、实体链接/去重），通知层只能消费既有 `source_code`，无法修。
+- **P2-D10 赛道分类本身**（XRP 被 CMC 标 `primary_sector='l1'`，`categories` 含 `Smart Contract Platform`/`Layer 1 (L1)`/`FTX Holdings`/`a16z Portfolio`；`launch_date=None`）：属 **CMC 分类数据治理**，需维护 override 表，本轮只做「标注来源 + 未收录」的展示层兜底。
+
+**待部署**：需 Zeabur **显式 redeploy**（渲染层与 prompt 均在代码内，同 `4307fb1` / `81f281c` / `c000fec`）。

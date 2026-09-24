@@ -130,7 +130,11 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 - 失效条件：{invalidation}
 
 ## 五、风险与流动性
-- 流动性（24h 总流动性）：{liquidity_score}
+- 链上池流动性快照：{liquidity_score}
+  （口径提示：该值只覆盖**某一条链上的 DEX 池**，不是该资产的全局流动性；
+    评估流动性时必须与上方「24h 成交量」交叉对照，**不得**仅凭此值断言资产
+    「流动性稀薄 / 易插针 / 大额进出造成滑点」——两者相差数个量级时，
+    说明是链上池覆盖不足，而非资产本身不流动。）
 - 风险等级：{risk_level}
 
 ## 六、盘面异动分析（P × OI × CVD × VOL 四维）
@@ -170,7 +174,8 @@ _DEEP_REVIEW_USER_TEMPLATE = """请对以下 A 级催化剂信号进行深度投
 
 ## 七、输出 JSON 格式
 {{
-  "asset_match_confidence": "high / medium / low（代币与催化剂的匹配置信度，ticker同名但项目不同为 low）",
+  "asset_match_confidence": "high / medium / low（代币与催化剂所述项目的匹配置信度。以下任一情形都应判 low：① ticker 同名但不同项目；② 该代币只是新闻里的被动提及/顺带列举，事件主体并非它；③ 跨链同名资产被误绑）",
+  "asset_match_reason": "当 asset_match_confidence 为 low 时必填：用一句中文说明**具体是哪种错配**（如「事件主体是 BCH/UNI，本代币仅为同帖被动提及」/「ticker 与另一项目同名」）。非 low 时留空",
   "verdict": "强烈推荐开仓 / 建议轻仓参与 / 建议观望 / 不建议参与",
   "confidence_level": "极高 / 高 / 中 / 低",
   "position_suggestion": "建议仓位比例，如 30% 仓位或 半仓",
@@ -312,6 +317,9 @@ class AISignalDeepReviewer:
             # 标准化输出
             result = {
                 "asset_match_confidence": str(data.get("asset_match_confidence") or "medium")[:16],
+                # 审计 P2-D8：错配**成因**由 AI 给出，避免通知层硬编码「ticker同名」把
+                # 「被动提及」类错配也标成撞名。
+                "asset_match_reason": str(data.get("asset_match_reason") or "")[:200],
                 "verdict": str(data.get("verdict") or "")[:64],
                 "confidence_level": str(data.get("confidence_level") or "")[:16],
                 "position_suggestion": str(data.get("position_suggestion") or "")[:128],

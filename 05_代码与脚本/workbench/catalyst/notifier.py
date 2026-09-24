@@ -234,6 +234,113 @@ def _ai_review_blocks_alert(ai_deep) -> tuple[bool, str]:
     return False, ""
 
 
+# ---------------------------------------------------------------------
+# 行情 / 流动性列口径（审计_催化剂A级邮件_XRP_BCH_2026-09-24 P1-D3/D4/D5）
+#
+# 修前：发送路径的两条 SQL（首查 + AI 增强后重查）与 AI 评审输入 SQL（_fetch_signal_row）
+# 各自手写行情列，**三处口径互不一致**：
+#   - 只有 _fetch_signal_row 查了 volume_ratio_7d ⇒ 发送路径 row.get("volume_ratio_7d")
+#     恒为 None，渲染层按 0 处理并标「📈 量比 0.00x 极度缩量」，而同封邮件 AI 核心逻辑
+#     写的是「量比 1.71x 温和放量」——同源数据两条通道自打脸（审计 P1-D4）。
+#   - 7 日均量的窗口也不同：_fetch_signal_row 取「最近 7 个交易日」，发送路径取
+#     「MAX(market_date) 之前的全部历史」（实测 119 天）⇒ 同一字段两个值。
+# 现抽成常量供三处共用，口径统一为「最近 7 个交易日」，避免再次漂移。
+#
+# 流动性：biz.asset_liquidity 是**按链分行的 DEX 池快照**（实测每资产 1~21 行，
+# chain ∈ ethereum/solana/base/...），原 SQL 无 ORDER BY 直接 LIMIT 1 ⇒ 取哪条不确定。
+# XRP(1127) 命中的是 Solana 上的 wXRP 池（$1.91M），与「24h 成交量 $7.80B」并列展示为
+# 「流动性（24h）」，又被喂给 LLM 当「总流动性」⇒ 风险文案写成「极度稀薄」（审计 P1-D5）。
+# 现改为确定性取最大池，并把 chain/source 一并带出，供展示与 prompt 标注口径。
+_MARKET_LATERAL_SQL = """
+        LEFT JOIN LATERAL (
+            SELECT md.price_usd, md.change_24h, md.change_7d, md.volume_24h
+              FROM biz.v_asset_market_daily_primary md
+             WHERE md.asset_id = s.asset_id
+             ORDER BY md.market_date DESC
+             LIMIT 1
+        ) md_latest ON true
+        LEFT JOIN LATERAL (
+            SELECT AVG(md2.volume_24h) AS avg_volume_7d
+              FROM (
+                SELECT md2.volume_24h
+                  FROM biz.v_asset_market_daily_primary md2
+                 WHERE md2.asset_id = s.asset_id
+                       AND md2.market_date < (
+                           SELECT MAX(md3.market_date)
+                             FROM biz.v_asset_market_daily_primary md3
+                            WHERE md3.asset_id = s.asset_id
+                       )
+                 ORDER BY md2.market_date DESC
+                 LIMIT 7
+              ) md2
+        ) md_avg ON true
+        LEFT JOIN LATERAL (
+            SELECT al.total_liquidity_usd, al.chain, al.source
+              FROM biz.asset_liquidity al
+             WHERE al.asset_id = s.asset_id
+             ORDER BY al.total_liquidity_usd DESC NULLS LAST, al.chain
+             LIMIT 1
+        ) liq ON true
+"""
+
+_MARKET_COLS_SQL = """               md_latest.price_usd AS current_price,
+               md_latest.change_24h AS change_24h_pct,
+               md_latest.change_7d AS change_7d_pct,
+               md_latest.volume_24h AS volume_24h_usd,
+               md_avg.avg_volume_7d,
+               CASE
+                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
+                   THEN ROUND((md_latest.volume_24h / md_avg.avg_volume_7d)::numeric, 2)
+                   ELSE NULL
+               END AS volume_ratio_7d,
+               CASE
+                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
+                        AND md_latest.volume_24h / md_avg.avg_volume_7d >= 2.0
+                   THEN true ELSE false
+               END AS is_volume_spike,
+               liq.total_liquidity_usd AS liquidity_score,
+               liq.chain AS liquidity_chain,
+               liq.source AS liquidity_source
+"""
+
+# CMC 的 description_short 是静态文案，尾部固定拼接过期行情句（审计 P1-D3）。
+_STALE_PRICE_SENTENCE_RE = re.compile(
+    r"last known price\b"
+    r"|is (?:up|down) [\d.,]+\s*over the last 24 hours"
+    r"|traded over the last 24 hours"
+    r"|active market\(s\)",
+    re.I,
+)
+
+
+def _strip_stale_price_sentences(text) -> str:
+    """剥离资产简介里内嵌的**过期行情句**（审计 2026-09-24 P1-D3）。
+
+    `description_short` 尾部固定带「The last known price of XRP is 1.08727528 USD and is
+    up 3.13 over the last 24 hours.」这类句子，其中的价格/涨跌幅不随行情刷新。邮件正文
+    另有实时 `current_price` 区块，两者同屏出现约 30% 价差（审计原例 $1.57 vs $1.087）。
+
+    按句切分、丢弃命中过期行情特征的句子，只保留项目介绍本身；同时供渲染层与 AI 评审
+    输入共用，避免 LLM 把 stale 价格写进核心逻辑。
+    """
+    if not text:
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", str(text))
+    kept = [p for p in parts if not _STALE_PRICE_SENTENCE_RE.search(p)]
+    return " ".join(kept).strip()
+
+
+def _liquidity_label(row) -> str:
+    """链上池流动性标签（审计 2026-09-24 P1-D5）。
+
+    `total_liquidity_usd` 来自单条链的 DEX 池快照，**不等于**资产全局流动性。原标签
+    「流动性（24h）」与同屏「24h 成交量」并列，会被读成同一口径；这里把来源链写进标签，
+    让读者一眼看出这是「某条链上的池子」而非全网流动性。
+    """
+    chain = str(row.get("liquidity_chain") or "").strip()
+    return f"链上池流动性（{chain}）" if chain else "链上池流动性"
+
+
 def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     """对「本轮转为可动作」的 A 级信号发送快提醒。
 
@@ -284,31 +391,12 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                      END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
-               -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
-               (SELECT md.price_usd
-                  FROM biz.v_asset_market_daily_primary md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS current_price,
-               (SELECT md.change_24h
-                  FROM biz.v_asset_market_daily_primary md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
-               (SELECT md.change_7d
-                  FROM biz.v_asset_market_daily_primary md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
-               (SELECT md.volume_24h
-                  FROM biz.v_asset_market_daily_primary md
-                 WHERE md.asset_id = s.asset_id
-                 ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
-               -- 流动性（总流动性，单位 USD）
-               (SELECT al.total_liquidity_usd
-                  FROM biz.asset_liquidity al
-                 WHERE al.asset_id = s.asset_id
-                 LIMIT 1) AS liquidity_score
+               -- 最新日行情 + 7 日均量 + 量比 + 链上池流动性（口径见 _MARKET_COLS_SQL）
+""" + _MARKET_COLS_SQL + """
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
+""" + _MARKET_LATERAL_SQL + """
         WHERE s.signal_id = ANY(%s)
           AND s.tier = 'A'
           AND s.status = 'open'
@@ -316,7 +404,8 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     """, (new_signal_ids,)).fetchall()
 
     if not rows:
-        return {"sent": 0, "skipped": len(new_signal_ids), "failed": 0, "signals": []}
+        return {"sent": 0, "suppressed": 0, "skipped": len(new_signal_ids),
+                "failed": 0, "signals": []}
 
     # ==============================================================
     # 快通道 AI 增强：翻译 + A级深度评审（发邮件前做）
@@ -412,31 +501,12 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
                          END))
                       FROM biz.asset_risk_labels arl
                      WHERE arl.asset_id = s.asset_id) AS risk_labels,
-                   -- 最新日行情（收盘价 + 24h/7d 涨跌幅 + 24h 成交量）
-                   (SELECT md.price_usd
-                      FROM biz.v_asset_market_daily_primary md
-                     WHERE md.asset_id = s.asset_id
-                     ORDER BY md.market_date DESC LIMIT 1) AS current_price,
-                   (SELECT md.change_24h
-                      FROM biz.v_asset_market_daily_primary md
-                     WHERE md.asset_id = s.asset_id
-                     ORDER BY md.market_date DESC LIMIT 1) AS change_24h_pct,
-                   (SELECT md.change_7d
-                      FROM biz.v_asset_market_daily_primary md
-                     WHERE md.asset_id = s.asset_id
-                     ORDER BY md.market_date DESC LIMIT 1) AS change_7d_pct,
-                   (SELECT md.volume_24h
-                      FROM biz.v_asset_market_daily_primary md
-                     WHERE md.asset_id = s.asset_id
-                     ORDER BY md.market_date DESC LIMIT 1) AS volume_24h_usd,
-                   -- 流动性（总流动性，单位 USD）
-                   (SELECT al.total_liquidity_usd
-                      FROM biz.asset_liquidity al
-                     WHERE al.asset_id = s.asset_id
-                     LIMIT 1) AS liquidity_score
+                   -- 最新日行情 + 7 日均量 + 量比 + 链上池流动性（口径见 _MARKET_COLS_SQL）
+""" + _MARKET_COLS_SQL + """
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
             JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
+""" + _MARKET_LATERAL_SQL + """
             WHERE s.signal_id = ANY(%s)
               AND s.tier = 'A'
               AND s.status = 'open'
@@ -541,6 +611,11 @@ def _build_fast_alert_html(row) -> str:
     confidence = row.get("confidence")
     regime = row.get("regime")
     kind = row.get("kind")
+
+    # 审计 P1-D3：资产简介里 CMC 拼的过期行情句必须先剥掉，否则与实时价格区块同屏打架
+    desc_clean = _strip_stale_price_sentences(description_short)
+    # 审计 P3-D12：symbol 与 canonical_name 相同时（如 XRP / XRP）去重，避免标题冗余
+    header_name = symbol if not name or str(name) == str(symbol) else f"{symbol} / {name}"
 
     # ---------- 枚举翻译字典 ----------
     KIND_MAP = {"structural": "结构性催化", "event": "事件型催化", "sentiment": "情绪型催化", "noise": "噪声"}
@@ -666,10 +741,23 @@ def _build_fast_alert_html(row) -> str:
             v24 = row.get("volume_24h_usd")
             if vr is None and v24 is None:
                 return ""
-            try:
-                vr_val = float(vr) if vr is not None else 0
-            except (TypeError, ValueError):
-                vr_val = 0
+            # 审计 2026-09-24 P1-D4：缺失值**不得**默认成 0——0 会命中下方「≤0.5 极度缩量」，
+            # 让同一封邮件同时出现「量比 0.00x 极度缩量」与 AI 的「量比 1.71x 温和放量」。
+            # 量比算不出来时如实标「未知」（与 ai_enhance 对 None 的「未知」约定一致）。
+            vr_val = None
+            if vr is not None:
+                try:
+                    vr_val = float(vr)
+                except (TypeError, ValueError):
+                    vr_val = None
+            if vr_val is None:
+                return """
+            <div style="flex:1;min-width:100px;background:#fff;border-radius:6px;padding:6px 8px">
+              <div style="color:#6b7280;font-size:10.5px">📈 量比 (24h/7d)</div>
+              <div style="font-weight:600;color:#6b7280;margin-top:2px;font-size:13px">—</div>
+              <div style="color:#9ca3af;font-size:10px">7 日均量缺失，无法计算</div>
+            </div>
+            """
             if vr_val >= 2.0:
                 color = "#dc2626"  # 大幅放量，警戒
                 label = "大幅放量"
@@ -736,7 +824,11 @@ def _build_fast_alert_html(row) -> str:
 
         trade_section = f"""
         <div style="background:#fafafa;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-top:16px">
-          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:12px">📊 交易计划</div>
+          <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:4px">📊 交易计划（规则计算）</div>
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:12px;line-height:1.5">
+            档位由规则按价格结构派生，<b>未与 AI 风控建议校准</b>；两者不一致时请以下方
+            「🤖 AI 深度评审」的进场/止损/止盈建议为准。
+          </div>
           <div style="display:flex;gap:12px;flex-wrap:wrap">
             <div style="flex:1;min-width:110px;text-align:center">
               <div style="font-size:11px;color:#6b7280">方向</div>
@@ -810,11 +902,12 @@ def _build_fast_alert_html(row) -> str:
         </div>
         <div style="flex:1;min-width:140px">
           <div style="color:#6b7280">上线时间 / 主赛道</div>
-          <div style="font-weight:600;color:#111827;margin-top:2px">{str(launch_date) if launch_date else '—'} / {primary_sector or _cn(asset_type, ASSET_TYPE_MAP)}</div>
+          <div style="font-weight:600;color:#111827;margin-top:2px">{str(launch_date) if launch_date else '未收录'} / {primary_sector or _cn(asset_type, ASSET_TYPE_MAP)}</div>
+          <div style="color:#9ca3af;font-size:10px;margin-top:2px">赛道为 CMC 分类口径，仅作参考</div>
         </div>
       </div>
       {sector_tags}
-      {f'<div style="font-size:12px;color:#6b7280;margin-top:8px;line-height:1.5">{_html.escape(description_short[:200])}{"..." if description_short and len(description_short) > 200 else ""}</div>' if description_short else ''}
+      {f'<div style="font-size:12px;color:#6b7280;margin-top:8px;line-height:1.5">{_html.escape(desc_clean[:200])}{"..." if len(desc_clean) > 200 else ""}</div>' if desc_clean else ''}
     </div>
     """
 
@@ -823,9 +916,12 @@ def _build_fast_alert_html(row) -> str:
     resonance_score = row.get("resonance_score")
     score_breakdown = ""
     if base_strength is not None or resonance_score is not None:
+        # 审计 P2-D7：原标签「置信度 86%」与 AI 评审的「信心度：低」并列，会被读成
+        # 「系统 86% 确信」——两者口径不同（前者是 composite_score/100 的模型方向置信，
+        # 后者是 AI 对资产匹配与参与价值的信心），标签必须区分开。
         score_breakdown = f"""
         <div style="font-size:11px;color:#6b7280;margin-top:4px">
-          催化强度 {base_strength or 0:.0f} · 共振分 {resonance_score or 0:.0f} · 置信度 {(confidence or 0)*100:.0f}%
+          催化强度 {base_strength or 0:.0f} · 共振分 {resonance_score or 0:.0f} · 模型方向置信 {(confidence or 0)*100:.0f}%
         </div>
         """
 
@@ -838,13 +934,21 @@ def _build_fast_alert_html(row) -> str:
         if technical_state:
             tech_items.append(f"技术形态：<b>{_cn(technical_state, TECH_MAP)}</b>")
         if resonance_state:
-            tech_items.append(f"共振状态：<b>{_cn(resonance_state, RESONANCE_MAP)}</b>")
+            # 审计 P2-D6：共振分（加权分 0-100）与共振状态（涨跌幅/量能阈值判定）是两套
+            # 口径，高分 + 弱共振是常态（近 14 天 A 级实测状态全为 weak，分 67~98）。
+            # 并列展示而不说明，会被读成「90 分却弱共振」的自相矛盾。
+            tech_items.append(
+                f"共振状态：<b>{_cn(resonance_state, RESONANCE_MAP)}</b>"
+                "（按涨跌幅/量能阈值判定，与上方共振分不同口径）"
+            )
         if regime:
             tech_items.append(f"市场环境：<b>{_cn(regime, REGIME_MAP)}</b>")
         if persistence:
             tech_items.append(f"催化持续性：<b>{_cn(persistence, PERSIST_MAP)}</b>")
         if liquidity_score is not None:
-            tech_items.append(f"流动性（24h）：<b>{_fmt_mcap(liquidity_score)}</b>")
+            # 审计 P1-D5：该值来自单条链的 DEX 池快照，不是资产全局流动性，
+            # 标签必须写明口径，否则会与同屏「24h 成交量」被读成同一件事。
+            tech_items.append(f"{_liquidity_label(row)}：<b>{_fmt_mcap(liquidity_score)}</b>")
         tech_section = f"""
         <div style="margin-top:16px">
           <div style="font-size:13px;font-weight:600;color:#111827;margin-bottom:8px">📈 信号维度</div>
@@ -901,12 +1005,21 @@ def _build_fast_alert_html(row) -> str:
         asset_match = ai_deep.get("asset_match_confidence", "high")
 
         # 资产匹配置信度（low 时用红色警告）
+        # 审计 P2-D8：原文案对所有 low 一律写死「ticker同名但不同项目」——审计原例 XRP
+        # 是「BCH/UNI 新闻里的被动提及」，并非撞名，硬编码成因会误导。改为优先用 AI 给出的
+        # asset_match_reason，缺失时回退到不臆断成因的通用文案。
         match_warning = ""
         if asset_match == "low":
-            match_warning = """
+            match_reason = str(ai_deep.get("asset_match_reason") or "").strip()
+            match_detail = (
+                f"AI 判定原因：{_html.escape(match_reason)}"
+                if match_reason
+                else "系统检测到该代币与催化剂所述项目可能不一致，请谨慎核实后再做决策。"
+            )
+            match_warning = f"""
           <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:12px;font-weight:700;color:#dc2626">⚠️ 资产匹配警告：代币与催化剂可能不匹配</div>
-            <div style="font-size:11px;color:#991b1b;margin-top:2px">系统检测到该代币与催化剂描述的项目可能不一致（ticker同名但不同项目），请谨慎核实后再做决策。</div>
+            <div style="font-size:11px;color:#991b1b;margin-top:2px">{match_detail}</div>
           </div>
             """
 
@@ -1025,7 +1138,7 @@ def _build_fast_alert_html(row) -> str:
       <!-- 顶部卡片 -->
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:20px 22px;border-radius:12px 12px 0 0">
         <div style="font-size:11px;opacity:.75;letter-spacing:1.5px">A级催化剂信号 · 快通道</div>
-        <div style="font-size:26px;font-weight:700;margin-top:8px">{symbol} / {_html.escape(name)}</div>
+        <div style="font-size:26px;font-weight:700;margin-top:8px">{_html.escape(header_name)}</div>
         <div style="margin-top:6px;font-size:13px;opacity:.92;line-height:1.4">{_html.escape(catalyst_title)}</div>
       </div>
 
@@ -2142,27 +2255,9 @@ def _fetch_signal_row(conn, signal_id: int):
                      END))
                   FROM biz.asset_risk_labels arl
                  WHERE arl.asset_id = s.asset_id) AS risk_labels,
-               -- 最新日行情 + 7 天均量 + 异动判断
-               md_latest.price_usd AS current_price,
-               md_latest.change_24h AS change_24h_pct,
-               md_latest.change_7d AS change_7d_pct,
-               md_latest.volume_24h AS volume_24h_usd,
-               md_avg.avg_volume_7d,
-               CASE
-                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
-                        AND md_latest.volume_24h / md_avg.avg_volume_7d >= 2.0
-                   THEN true ELSE false
-               END AS is_volume_spike,
-               CASE
-                   WHEN md_latest.volume_24h > 0 AND md_avg.avg_volume_7d > 0
-                   THEN ROUND((md_latest.volume_24h / md_avg.avg_volume_7d)::numeric, 2)
-                   ELSE NULL
-               END AS volume_ratio_7d,
-               (SELECT al.total_liquidity_usd
-                  FROM biz.asset_liquidity al
-                 WHERE al.asset_id = s.asset_id
-                 LIMIT 1) AS liquidity_score,
-               -- 衍生品 24h 聚合（OI / 资金费率 / CVD）
+               -- 最新日行情 + 7 日均量 + 量比 + 链上池流动性（口径见 _MARKET_COLS_SQL）
+""" + _MARKET_COLS_SQL + """
+               , -- 衍生品 24h 聚合（OI / 资金费率 / CVD）
                ad.total_oi_usd AS oi_total_24h,
                ad.oi_change_24h_pct,
                ad.funding_rate_pct,
@@ -2198,30 +2293,7 @@ def _fetch_signal_row(conn, signal_id: int):
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst c ON s.catalyst_id = c.catalyst_id
-        -- 最新日行情
-        LEFT JOIN LATERAL (
-            SELECT md.price_usd, md.change_24h, md.change_7d, md.volume_24h
-              FROM biz.v_asset_market_daily_primary md
-             WHERE md.asset_id = s.asset_id
-             ORDER BY md.market_date DESC
-             LIMIT 1
-        ) md_latest ON true
-        -- 过去 7 天平均成交量（不含最新一天，用来对比）
-        LEFT JOIN LATERAL (
-            SELECT AVG(md2.volume_24h) AS avg_volume_7d
-              FROM (
-                SELECT md2.volume_24h
-                  FROM biz.v_asset_market_daily_primary md2
-                 WHERE md2.asset_id = s.asset_id
-                       AND md2.market_date < (
-                           SELECT MAX(md3.market_date)
-                             FROM biz.v_asset_market_daily_primary md3
-                            WHERE md3.asset_id = s.asset_id
-                       )
-                 ORDER BY md2.market_date DESC
-                 LIMIT 7
-              ) md2
-        ) md_avg ON true
+""" + _MARKET_LATERAL_SQL + """
         -- 衍生品 24h 快照
         LEFT JOIN biz.asset_derivatives ad ON ad.asset_id = s.asset_id
         -- OI/CVD 时序（从 oi_cvd_snapshot 计算 1h/4h 变化）
@@ -2294,6 +2366,10 @@ def _signal_row_to_deep_review_input(row: dict) -> dict:
     d.setdefault("symbol", d.get("symbol") or d.get("canonical_symbol"))
     d.setdefault("asset_name", d.get("canonical_name"))
     d.setdefault("event_type", d.get("ai_event_type") or d.get("event_category") or d.get("event_type") or "other")
+    # 审计 P1-D3：简介里的过期行情句同样不能进 prompt——否则 LLM 会把 stale 价格
+    # （XRP $1.087）写进核心逻辑，与实时价 $1.57 一起出现在同一封邮件里。
+    if d.get("description_short"):
+        d["description_short"] = _strip_stale_price_sentences(d["description_short"])
     return d
 
 

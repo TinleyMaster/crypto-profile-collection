@@ -3268,6 +3268,18 @@ def _whale_event_strength(usd_total, n_tx, t: dict) -> int:
     return min(es, _WHALE_SINGLE_TX_ES_CAP) if single else es
 
 
+# N1（复验_高亮信号类型标签与github事件强度_ce59f0a，2026-09-24）：ratio_x 双向对称
+# 会令「极端开发停滞（decline）」与「极端开发爆发（burst）」同拿 es=90、conv 并列，
+# 方向相反却同分（语义倒挂）。开发停滞属风险/watch，不该拿事件强度满分 ⇒ decline 封顶。
+_GITHUB_DECLINE_ES_CAP = 65
+
+
+def _github_event_strength(ratio, gdir, t: dict) -> int:
+    """GitHub 开发活跃事件强度：ratio_x 主轴；decline（开发停滞=风险）封顶 65（N1）。"""
+    es = _event_strength_score("ratio_x", ratio, t)
+    return min(es, _GITHUB_DECLINE_ES_CAP) if gdir == "decline" else es
+
+
 # ── FEAT-HIGHLIGHT-003：周期调制乘子 ──
 _CYCLE_REGIME_MULT = {
     "early_bottom": 1.15, "late_bottom": 1.10, "bottom": 1.12,
@@ -5566,14 +5578,18 @@ def score_opportunities(overview: dict) -> dict:
         # M7-2（2026-09-24 审计）：原 conviction 全由大盘轴决定（无 dev 轴），
         # 导致同日 GitHub 卡必然同分（实测 ASTER/WMETAX 均 67）。
         # 补事件强度主轴并按 A1 口径融合，让 Dev 倍数真正参与排序。
-        _gh_es = _event_strength_score("ratio_x", ratio, t)
+        # N1：decline 侧封顶（风险信号不拿满分）。
+        _gh_es = _github_event_strength(ratio, gdir, t)
         conviction = round(0.6 * conviction + 0.4 * _gh_es)
+        # M8（复验 ce59f0a）：decline 侧 ratio 常 <1，裸 `Dev 0.0x` 无法区分「爆发/停滞」
+        # ⇒ 方向词前置（burst 保持原样）。
+        _gh_metric = f"Dev {ratio:.1f}x" if gdir == "burst" else f"Dev 停滞 ↓{ratio:.1f}x"
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
              "event_strength": _gh_es,
              "signal_type": "github_activity",
-             "key_metric": f"Dev {ratio:.1f}x",
+             "key_metric": _gh_metric,
              "asset_id": aid,
              "trigger_logic": (
                  f"{symbol} {label}：近 4 周 {last4} commits vs 前 4 周 {prev4}（{ratio:.1f}x）"

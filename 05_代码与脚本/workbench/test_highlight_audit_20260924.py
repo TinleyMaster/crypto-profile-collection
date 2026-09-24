@@ -142,6 +142,26 @@ check(round(0.6 * 60 + 0.4 * mm._event_strength_score("ratio_x", 2.5, {}))
       "T8 同日 2.5x vs 1.5x 不再同分（消除 ASTER/WMETAX 同 67）")
 check('"event_strength": _gh_es,' in _MACRO_SRC, "GitHub 卡落 event_strength 字段")
 
+# ── N1：decline 侧封顶（极端停滞不得与极端爆发同分） ──
+print("[N1] decline 侧事件强度封顶")
+check(mm._GITHUB_DECLINE_ES_CAP == 65, "decline 封顶常量为 65")
+check(mm._github_event_strength(0.1, "decline", {}) == 65,
+      "极端 decline（0.1x）封顶 65（旧码 ratio_x 得 90）")
+check(mm._github_event_strength(3.0, "burst", {}) == 90,
+      "极端 burst（3.0x）仍 90（不误伤机会侧）")
+check(mm._github_event_strength(2.0, "decline", {}) == 65
+      and mm._github_event_strength(2.0, "burst", {}) == 70,
+      "同倍数 decline(65) < burst(70)")
+_dc = round(0.6 * 67 + 0.4 * mm._github_event_strength(0.1, "decline", {}))
+_bc = round(0.6 * 67 + 0.4 * mm._github_event_strength(3.0, "burst", {}))
+check(_dc < _bc, "语义倒挂消除：极端停滞 conv < 极端爆发 conv", f"decline={_dc} burst={_bc}")
+check("_github_event_strength(ratio, gdir, t)" in _MACRO_SRC,
+      "GitHub 循环调用 _github_event_strength")
+
+# ── M8：decline 卡 key_metric 方向词 ──
+check('else f"Dev 停滞 ↓{ratio:.1f}x"' in _MACRO_SRC,
+      "M8 decline 卡 key_metric 加「停滞 ↓」方向词（burst 保持原样）")
+
 # ── M7-1：博弈卡类型归位 ──
 print("[M7-1] conflict_game 类型归位")
 check('"signal_type": "conflict_game"' in _MACRO_SRC, "博弈卡 signal_type 改为 conflict_game")

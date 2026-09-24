@@ -858,6 +858,9 @@ def main() -> int:
         # 复验 F2（甲）：只印**逐段值**，不印 min/中位/max 摘要行 —— A 之后「中位数」同时是
         # 「判据输入」，摘要行会在前置门之前把它印出来（与 §6-C「不打印判据输入」冲突）。
         # 摘要统计改由【统计判别力】节在样本可用时给出。
+        # 复验 G4（选甲，已知残留）：逐段值仍可**手算**出中位数 ⇒ C「不打印判据输入」只是字面
+        # 成立。这是 C 与 §6-E（段上界必须输出为诊断入口）的固有冲突；取甲是因为 E 的诊断价值
+        # 高于「数不出中位」（乙 = rc=3 连逐段值也不印，会废掉聚合悖论的唯一诊断入口）。
         print(f"  共 {sg['n_segments']} 段（跳过 n<{MIN_SEGMENT_N} 的 {sg['skipped']} 段），逐段：")
         for x in sg["segments"]:
             print(f"    {x['start_ts'][:16]}  rows={x['rows']:<6} 上界 {x['upper_bound_pct']:.2f}%")
@@ -868,9 +871,14 @@ def main() -> int:
         fails = denom_fail + molecule_fail + span_suf["reasons"]
         print("\n🛑 拒绝出结论：" + "；".join(fails))
         # 复验 F4：三处并发失败时标出**唯一充分因**，避免被误读成「跨度门拦下」。
+        # 复验 G1：判据必须是**失败门数**（`_failed_gates`），**不能**用「理由条数」（`len(fails)`）——
+        # 单门可贡献多条理由（跨度门 = 跨度 + 极端段两条；分子门 = 覆盖 + 空洞两条）⇒ 旧写法会在
+        # 「只有跨度门不过」时印出「其余门亦不过」这一与事实相反的句子（prod `--vol-win-min 1e7`
+        # 必然命中：分母 1.74% / 半格 0.58% 均达标）。
         _pg = primary_gate(denom_ok, molecule_ok, span_ok)
-        if _pg and len(fails) > 1:
-            print(f"   归因以{_pg}为准（其余门亦不过，见上）。")
+        _failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)
+        if _pg and _failed_gates > 1:
+            print(f"   归因以{_pg}为准（另有 {_failed_gates - 1} 道门亦不过，见上）。")
         if not denom_ok:
             print("   分母不合格 ⇒ `vol_win` 被系统性少算，任何越阈率都不可比。"
                   "先补齐 biz.asset_klines(5m)，或改用落在有数据时段的 --days，再重跑。")

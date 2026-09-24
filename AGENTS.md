@@ -1014,6 +1014,12 @@
   - **🟡 F5（P3，已修）字段语义漂移未改名**：`upper_bound_n`→`upper_bound_n_segments`、`ci_distance_pp`→`merged_ci_distance_pp`（旧名保留一轮为别名，无消费方）。
   - **⚪ F6（P3，已修）死变量** `new_rates` 删除。
   - **自测**：`test_squeeze_span_judge.py` 25→**42/42**（+F1 `exit_code` 契约 5 例 + **F1 端到端注入**（样本可用+IQR 跨线 ⇒ rc=4，旧码会误判 0）+ F4 `primary_gate` + F2 数值断言 + F5/F6 源码守卫）；workbench 全量 `test_*.py` 零失败；prod 只读实测 rc=3（默认「归因以分母门为准」、1e7「归因以跨度门为准」），段清单不再印摘要、无判定比率。
+- **复验收口·二轮（`复验_轧空标定F1-F6处置_91d3162_2026-09-24.md`，本次提交）**：复验以**独立注入**（不复用我方单测）确认 F1 端到端封死（旧码 rc=0 / 新码 rc=4，同一输入）、F2/F3/F5/F6 如实落地、无需部署（`calib` 无调度引用），另开 G1~G4：
+  - **🔴 G1（P2，新引入，prod 可达，已修）归因行用「理由条数」当「失败门数」**：`len(fails) > 1` 在「只有跨度门不过」时也成立（跨度门自带 2 条理由：跨度 + 极端段）⇒ 印出「其余门亦不过」这一与事实相反的句子（prod `--vol-win-min 1e7` 必然命中：分母 1.74% / 半格 0.58% 均达标）。修法：改用 `_failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)`，文案「另有 N 道门亦不过」。实测：默认（分母+跨度）印「另有 1 道门」、1e7（仅跨度）**不印归因行**。
+  - **🟠 G2（P2，已修）测试7 选错样本，无回归保护力**：原用 FAIL 侧 bounds（段中位 45）⇒ 旧码 `judge_pass=(45<20)=False` ⇒ rc=4，新旧同值 ⇒ 假阳性通过。改用 **PASS 侧** `[5,5,5,5,19,45,45,45]`（段中位 12%<20、P25=5/P75=45 跨线、极端段 3）⇒ 旧码 rc=0 / 新码 rc=4，才构成有效断言。
+  - **🟡 G3（P3，已修）测试7 非 hermetic**：只桩了 `psycopg.connect`、未桩 `get_settings`（测试6 的 finally 已还原真函数）⇒ 无 env 机器上崩 `Missing required environment variable: CMC_API_KEY`。补桩后**无 env 下 45/45**。
+  - **🟡 G4（P3，选甲，已知残留）C 与 §6-E 的固有冲突**：去摘要行后逐段值仍可**手算**中位 ⇒ C「不打印判据输入」只字面成立。取**甲**（保 §6-E 诊断入口，接受可手算）；乙（rc=3 连逐段值也不印）会废掉聚合悖论的唯一诊断入口。
+  - **自测**：`test_squeeze_span_judge.py` 42→**45/45**（+G1 源码守卫 + G1 单门不印/多门印归因 + G2 换 PASS 侧样本 + G3 打桩 get_settings）；workbench 全量 `test_*.py` 零失败；prod 只读实测 G1 文案正确（默认「另有 1 道门」、1e7 不印）。
 
 ### 投研页 unlock_pct_30d 恒 0.0 修复（审计_投研页机会挖掘_8680_TAKE_2026-09-24.md，本次提交）
 

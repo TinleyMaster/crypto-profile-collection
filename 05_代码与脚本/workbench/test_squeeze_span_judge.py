@@ -161,6 +161,9 @@ check('"upper_bound_n_segments": sj["n_segments"]' in _src
       "F5：语义漂移字段改名（段数 / merged_ci_distance_pp）")
 check("_pg = primary_gate(denom_ok, molecule_ok, span_ok)" in _src,
       "F4：拒绝路径标注唯一充分因")
+check("_failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)" in _src
+      and "len(fails) > 1" not in _src,
+      "G1：归因判据用**失败门数**而非「理由条数」（单门多条理由不得印『其余门亦不过』）")
 check("new_rates" not in _src, "F6：删除死变量 new_rates")
 
 # ════════════════════════════════════════════════════════════
@@ -259,8 +262,8 @@ finally:
 _out = _buf.getvalue()
 check(_rc == 3, "C：跨度不足 ⇒ rc=3（样本不可用）", f"rc={_rc}")
 check("跨度不足" in _out, "C：给出跨度不足的理由")
-check("归因以跨度门为准" in _out,
-      "F4：分母/分子合格 ⇒ 唯一充分因标为跨度门")
+check("归因以" not in _out,
+      "G1：仅跨度门不过 ⇒ 不印归因行（旧码用理由条数会误印「其余门亦不过」）")
 check("【判定】" not in _out and "判据输入（段median）" not in _out,
       "C：**未打印**判定行/判据输入标签")
 # F2 数值断言：判据输入 = 段中位数 15.00%，不得出现在输出里（不是字面串检查）
@@ -282,17 +285,22 @@ def _fake_seg(bounds):
             "median_pct": vals[len(vals) // 2], "max_pct": vals[-1], "skipped": 0}
 
 
-# bounds=[5,5,45,45,45]：median 45（FAIL 侧）、P25=5 / P75=45 ⇒ IQR 跨线；
-# 极端段 3 个(≥40)、跨度 31 天 ⇒ 跨度门放行 ⇒ sample_ok=True、decisive=False
+# bounds=[5,5,5,5,19,45,45,45]：段中位 12%（**PASS 侧**，<20）、P25=5 / P75=45 ⇒ IQR 跨线；
+# 极端段 3 个(≥40)、跨度 31 天 ⇒ 跨度门放行 ⇒ sample_ok=True、decisive=False。
+# ⚠️ 必须用 **PASS 侧** 中位数（复验 G2）：旧码 `judge_pass` 不含 `decisive` ⇒ rc=0，新码 ⇒ rc=4；
+#    若用 FAIL 侧样本（中位 ≥20），新旧码同为 rc=4，**不能**回归保护 F1。
 _bound2 = {"mn": _now - dt.timedelta(days=31), "mx": _now, "n": 500, "syms": 1}
 _sample2 = [{"symbol": "AAAUSDT", "ts": _now - dt.timedelta(hours=1),
              "long_liq": 1.0, "short_liq": 1.0, "vol_win": 1e9,
              "peak_hi": 1.0, "trough_lo": 1.0, "peak_c": 1.0, "trough_c": 1.0,
              "close_now": 1.0}]
 _orig_seg = calib.segment_upper_bounds
-calib.segment_upper_bounds = lambda rows, thr: _fake_seg([5, 5, 45, 45, 45])
+calib.segment_upper_bounds = lambda rows, thr: _fake_seg([5, 5, 5, 5, 19, 45, 45, 45])
 calib.psycopg.connect = lambda *a, **k: _FakeConn(
     _FakeCursor(_bound2, _sample2, _denom, _mol, _incl0))
+# 复验 G3：必须**同时**打桩 `get_settings`（测试6 的 finally 已把真函数还原）——否则测试7
+# 非 hermetic，无 env 的机器上会崩在 `Missing required environment variable: CMC_API_KEY`。
+calib.get_settings = lambda **k: types.SimpleNamespace(database_url="postgres://x")
 _buf2 = io.StringIO()
 try:
     with contextlib.redirect_stdout(_buf2):
@@ -301,11 +309,32 @@ finally:
     calib.segment_upper_bounds = _orig_seg
     calib.psycopg.connect, calib.get_settings = _orig_connect, _orig_settings
 _out2 = _buf2.getvalue()
-check(_rc2 == 4, "F1：sample_ok + IQR 跨线 ⇒ rc=4（旧码会误判 rc=0 PASS）", f"rc={_rc2}")
+check(_rc2 == 4, "F1：PASS 侧中位 + IQR 跨线 ⇒ rc=4（旧码会误判 rc=0 PASS）", f"rc={_rc2}")
 check("段 IQR 跨判据线（无判别力）" in _out2,
       "F1：渲染如实印「段 IQR 跨判据线（无判别力）」（不再假报「不跨」）")
-check("INCONCLUSIVE" in _out2 and "PASS" not in _out2.split("【判定】")[-1][:40],
+check("INCONCLUSIVE" in _out2 and "→  PASS" not in _out2,
       "F1：结论 = INCONCLUSIVE（非 PASS）")
+
+# ════════════════════════════════════════════════════════════
+# 8. F4/G1：多门并发归因（分母门 + 跨度门）
+# ════════════════════════════════════════════════════════════
+print("\n【测试8】F4/G1 多门并发归因")
+_denom_bad = [{"symbol": "AAAUSDT", "bars": 100, "hours": 10}]   # 覆盖 100/288 < 0.9
+calib.segment_upper_bounds = lambda rows, thr: _fake_seg([10, 12, 14, 16, 18, 20])
+calib.psycopg.connect = lambda *a, **k: _FakeConn(
+    _FakeCursor(_bound, _sample2, _denom_bad, _mol, _incl0))
+calib.get_settings = lambda **k: types.SimpleNamespace(database_url="postgres://x")
+_buf3 = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_buf3):
+        _rc3 = calib.main()
+finally:
+    calib.segment_upper_bounds = _orig_seg
+    calib.psycopg.connect, calib.get_settings = _orig_connect, _orig_settings
+_out3 = _buf3.getvalue()
+check(_rc3 == 3, "F4：分母门 + 跨度门并发 ⇒ rc=3", f"rc={_rc3}")
+check("归因以分母门为准（另有 1 道门亦不过，见上）。" in _out3,
+      "F4/G1：多门并发印「另有 1 道门亦不过」（分母门 + 跨度门 = 2 门）")
 
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

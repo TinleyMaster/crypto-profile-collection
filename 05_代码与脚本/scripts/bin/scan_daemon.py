@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
 import os
@@ -1246,6 +1247,13 @@ CATALYST_DAYS = 7
 # （窗口语义与 catalyst_signal 对齐，缩短会改变共振口径）。
 CATALYST_STALE_DAYS = 3
 KOL_DAYS = 7
+# 共振消息明细（事件/催化剂/KOL）在卡片内展开的条数上限与单条字符上限。
+# 卡片主数字「催化剂N」是**去重后全量**（≤20），明细只留最新 N 条 ⇒ 超出时必须
+# 显式标注「共 M 条，仅列最新 N 条」，否则计数与明细不符会被读成漏渲染。
+RESONANCE_MSG_MAX = 4
+# 单条摘要截断长度：`ai_summary` 实测常有 100~200 字，全量渲染会让多币批次邮件
+# 过长（8 币批最多 32 行）。截断而非省略，保证每币都有可判读的实质内容。
+RESONANCE_MSG_CHARS = 90
 # 「丢信号」检测回溯上限（小时）。**必须有界**：库里存在历史遗留的
 # `alerted_at IS NULL` 的 high 行（如 09-16 那次停摆的 8 条），无界查询会让
 # 停摆告警被这批陈年行永久钉住 —— 每 6h 去重期一过就再发一封，而当时并没有停摆。
@@ -1547,6 +1555,10 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     `impact_direction` 也不去重，把转载与利空都算成「共振」）。
     """
     out: dict = {"event": [], "catalyst": [], "kol": [],
+                 # KOL 明细只留 `RESONANCE_MSG_MAX` 条，`kol_total` 是**截断前**总数
+                 # （`count(*) OVER ()`）—— 未关联币在第 3 段前就 return，故此处必须
+                 # 预置 0，否则渲染层读不到该键。
+                 "kol_total": 0,
                  "catalyst_dir": {"bullish": 0, "bearish": 0, "neutral": 0},
                  # 审计 OPT-2：**新鲜**（published_at ≥ fresh_cut）方向构成 —— 陈旧
                  # 旧闻不应推高方向 conviction（ARB 实测 17 条里 10 条 >3 天）。
@@ -1556,19 +1568,28 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
                  # 条数，供渲染层披露新鲜度（7 天窗口会把上周/已过期催化剂也算进共振）。
                  "catalyst_latest": None, "catalyst_stale": 0,
                  # 审计 O6：全量（去重后）结构化明细，仅供告警落 `detail` 快照回放用，
-                 # **不参与渲染** —— 渲染只需方向构成计数（见下 `catalyst` 明细列表）。
+                 # **不参与渲染** —— 渲染取 `catalyst`（≤RESONANCE_MSG_MAX 条，见下）
+                 # 与方向构成计数（`catalyst_dir`）。
                  "catalyst_all": [],
                  # 是否关联到 core.asset。未关联 ⇒ 催化剂/KOL 两段**无从查询**，
                  # 渲染时必须是 n/a 而不是 0（审计 P2-3：0 与「没这个数据」不可辨）。
                  "asset_linked": bool(asset_id)}
-    # 1) 事件预置（领先型）
+    # 1) 事件预置（领先型）。`ORDER BY` 让「仅列最新 N 条」的「最新」成立（此前无序，
+    # 展示顺序随物理行序漂移）；`event` 的**长度**即计数，与排序无关 ⇒ 口径不变。
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT event_type, event_date, event_pct, detail FROM biz.event_watchlist "
-            "WHERE symbol = ANY(%s)", (_symbol_candidates(symbol),))
+            "WHERE symbol = ANY(%s) ORDER BY event_date DESC NULLS LAST, id DESC",
+            (_symbol_candidates(symbol),))
         for r in cur.fetchall():
-            out["event"].append(
-                f"{'🔓解锁' if r['event_type'] == 'unlock' else '🔄链上转账'}: {r['detail']}")
+            is_unlock = r["event_type"] == "unlock"
+            out["event"].append({
+                # 解锁 = 新增流通（抛压）⇒ 利空；链上转账方向不明 ⇒ 中性，不臆断
+                "dir": "bearish" if is_unlock else "neutral",
+                "kind": "🔓 解锁" if is_unlock else "🔄 链上转账",
+                "text": str(r["detail"] or "").strip(),
+                "date": str(r["event_date"])[:10] if r["event_date"] else None,
+            })
 
     if not asset_id:
         return out
@@ -1576,7 +1597,8 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT ac.title, ac.published_at, ci.impact_direction, ci.impact_strength
+            SELECT ac.title, ac.ai_summary, ac.published_at,
+                   ci.impact_direction, ci.impact_strength
             FROM biz.catalyst_impact ci
             JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
             WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
@@ -1624,25 +1646,45 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
             "strength": r["impact_strength"],
             "published_at": pub,
         })
-        if len(out["catalyst"]) < 4:
-            tag = f"{r['impact_direction'] or 'neutral'}/{r['impact_strength'] or '-'}"
-            out["catalyst"].append(
-                f"{r['title'][:60]}（{tag}，{str(r['published_at'])[:10]}）")
-    # 3) KOL 预测（滞后确认型）
+        if len(out["catalyst"]) < RESONANCE_MSG_MAX:
+            # 展示文案优先取 `ai_summary`（实测近 7 天 3775/3775 填充且为中文），回退
+            # 原文标题（英文为主）。`title_cn` 实测 0/3775 填充 ⇒ 不可作为展示来源。
+            # 顺序 = published_at DESC ⇒ 前 N 条即「最新 N 条」，与括注方向合计同源。
+            out["catalyst"].append({
+                "dir": d, "strength": r["impact_strength"],
+                "text": (str(r["ai_summary"] or "").strip()
+                         or str(r["title"] or "").strip()),
+                "date": str(pub)[:10] if pub is not None else None,
+            })
+    # 3) KOL 预测（滞后确认型）。`count(*) OVER ()` 取**截断前**的总数（窗口函数在
+    # LIMIT 之前求值）—— 明细只留 `RESONANCE_MSG_MAX` 条，没有总数就无法披露
+    # 「共 M 条，仅列最新 N 条」，读者会把截断读成漏渲染。
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT direction, symbol, confidence, created_at
+            SELECT direction, symbol, confidence, created_at,
+                   count(*) OVER () AS total
             FROM biz.kol_signal
             WHERE asset_id = %s AND post_type = 'prediction'
               AND created_at > NOW() - make_interval(days => %s)
-            ORDER BY created_at DESC LIMIT 4
+            ORDER BY created_at DESC LIMIT %s
             """,
-            (asset_id, KOL_DAYS),
+            (asset_id, KOL_DAYS, RESONANCE_MSG_MAX),
         )
-        for r in cur.fetchall():
-            out["kol"].append(
-                f"KOL {r['direction']} {r['symbol']} (conf {float(r['confidence']):.2f}, {str(r['created_at'])[:10]})")
+        rows = cur.fetchall()
+    out["kol_total"] = int(rows[0]["total"]) if rows else 0
+    # `biz.kol_signal.direction` 的 CHECK 约束只允许 `long`/`short`/`neutral`（NULL），
+    # **不是** `up`/`down` —— 实测近 7 天 prediction 行 direction ∈ {long, neutral}。
+    # 按 up/down 判会把全部 KOL 误判成中性（徽章恒灰），故此处按 long/short 映射。
+    for r in rows:
+        d = str(r["direction"] or "").lower()
+        out["kol"].append({
+            "dir": {"long": "bullish", "short": "bearish"}.get(d, "neutral"),
+            # 摘要用中文方向词；徽章已表方向，此处补可读的「原话」以免整行只有徽章。
+            "text": f"KOL 看{'涨' if d == 'long' else '跌' if d == 'short' else '观望'}"
+                    f"（{r['symbol']}）",
+            "conf": r["confidence"], "date": str(r["created_at"])[:10],
+        })
     return out
 
 
@@ -1929,6 +1971,69 @@ def _strength_bar(score: float, top: float, color: str) -> str:
 OI_FLAT_PCT = 0.5
 
 
+# 共振消息明细的方向徽章配色：沿用文件内既有中文惯例（多头=红 / 空头=绿），
+# 与卡片左框、`↑做多` 用色同源，避免同一封邮件里两套方向配色。
+_DIR_CN = {"bullish": ("利多", "#ef4444", "#fee2e2"),
+           "bearish": ("利空", "#22c55e", "#dcfce7"),
+           "neutral": ("中性", "#6b7280", "#f1f5f9")}
+
+
+def _render_resonance_msgs(res: dict) -> str:
+    """卡片内「共振消息」明细块：事件预置 / 催化剂 / KOL 三段**逐条展开**。
+
+    此前三段只渲染 `len()`（「事件2 · 催化剂5（…） · KOL 1」），消息本体
+    （`res['event']/['catalyst']/['kol']`）全仓从未被渲染 —— 收件人看得到「有几条」
+    却看不到「是什么」，催化剂段真正可读的内容（`ai_summary` 中文摘要）完全不可见。
+
+    截断口径：每段最多 `RESONANCE_MSG_MAX` 条，超出时以「共 M 条，仅列最新 N 条」
+    显式披露 —— 卡片主数字「催化剂 N」是去重后**全量**（≤20），不披露会被读成漏渲染。
+    `total` 必须与主数字**同源**（催化剂取 `_catalyst_total`，KOL 取截断前的
+    `kol_total`），否则披露本身会变成新的口径不一致。
+
+    兼容：`_get_resonance` 现返回 dict 元素，但历史落库的 `resonance_snapshot` 里是
+    字符串（旧版 `f"{title}（{dir}/{strength}，{date}）"`）⇒ 非 dict 时按纯文本渲染。
+    """
+    groups = (
+        ("📅 事件预置", res.get("event") or [], len(res.get("event") or [])),
+        ("📰 催化剂", res.get("catalyst") or [],
+         _catalyst_total(res.get("catalyst_dir") or {})),
+        ("🗣 KOL 预测", res.get("kol") or [], int(res.get("kol_total") or 0)),
+    )
+    blocks = []
+    for label, msgs, total in groups:
+        if not msgs:
+            continue
+        rows = []
+        for m in msgs[:RESONANCE_MSG_MAX]:
+            if not isinstance(m, dict):
+                m = {"text": str(m)}
+            txt = str(m.get("text") or "").strip() or "（无摘要）"
+            if len(txt) > RESONANCE_MSG_CHARS:
+                txt = txt[:RESONANCE_MSG_CHARS - 1] + "…"
+            name, fg, bg = _DIR_CN.get(str(m.get("dir")), _DIR_CN["neutral"])
+            kind = (f"<span style='color:#6b7280'>{html.escape(str(m['kind']))}</span> "
+                    if m.get("kind") else "")
+            conf = (f" <span style='color:#9ca3af'>conf {float(m['conf']):.2f}</span>"
+                    if m.get("conf") is not None else "")
+            date = (f" <span style='color:#9ca3af'>{html.escape(str(m['date']))}</span>"
+                    if m.get("date") else "")
+            rows.append(
+                f"<div style='margin-top:3px'>"
+                f"<span style='background:{bg};color:{fg};font-size:10px;padding:0 4px;"
+                f"border-radius:2px;font-weight:700'>{name}</span> {kind}"
+                f"<span style='color:#111'>{html.escape(txt)}</span>{conf}{date}</div>")
+        tail = (f" <span style='color:#9ca3af'>（共 {total} 条，仅列最新 {len(rows)} 条）</span>"
+                if total > len(rows) else "")
+        blocks.append(f"<div style='margin-top:4px'>"
+                      f"<span style='color:#374151;font-weight:600'>{label}</span>"
+                      f"{tail}{''.join(rows)}</div>")
+    if not blocks:
+        return ""
+    return ("<div style='margin:4px 0 0;padding:6px 8px;background:#fff;"
+            "border:1px solid #e5e7eb;border-radius:4px;font-size:11.5px;line-height:1.5'>"
+            + "".join(blocks) + "</div>")
+
+
 def _render_alert_email(items: list[dict],
                         regime_tags: list[str] | None = None) -> str:
     # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
@@ -2176,6 +2281,7 @@ def _render_alert_email(items: list[dict],
             f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
             f"{invalid_txt}{prior_txt}"
+            f"{_render_resonance_msgs(res)}"
             f"</div>"
         )
     body = "".join(body_parts)
@@ -2218,6 +2324,15 @@ def _render_alert_email(items: list[dict],
               "三种字面串并列本批并存的形态（顿号 = 两者并存）；"
               "「共振」= 事件预置 + 催化剂 + KOL 三段聚合（渲染时实时查询），"
               "非 biz.catalyst_resonance 表的超额收益方向匹配评分；"
+              f"「共振」行下方的消息明细块 = 上述三段逐条展开"
+              f"（📅 事件预置 / 📰 催化剂 / 🗣 KOL 预测），每段最多 {RESONANCE_MSG_MAX} 条、"
+              f"单条摘要截断至 {RESONANCE_MSG_CHARS} 字；超出该上限时标"
+              f"「共 M 条，仅列最新 {RESONANCE_MSG_MAX} 条」（M 与「共振」行的计数同源，"
+              "非明细条数）；方向徽章按中文惯例（利多=红 / 利空=绿 / 中性=灰），"
+              "催化剂徽章取 impact_direction、摘要取 ai_summary（空则回退原文标题）、"
+              "解锁事件记利空（新增流通 = 抛压）、链上转账方向不明记中性（不臆断）、"
+              "KOL 取 direction 的 long/short；未关联资产的催化剂/KOL 两段不渲染明细"
+              "（无从查询 ≠ 0，与「共振」行的 n/a 一致）；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
               "「按场景跨币种聚合」，同一场景的所有币共用同一组数字，与具体币无关；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"

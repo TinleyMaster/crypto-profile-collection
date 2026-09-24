@@ -42,13 +42,23 @@ def check(cond, name, detail=""):
 
 
 def _res(linked=True, bull=0, bear=0, neut=0, latest=None, stale=0,
-         event=0, kol=0, fresh=None):
+         event=0, kol=0, fresh=None, cat=0, kol_total=None, evt_date=None,
+         cat_date="2026-09-21", kol_date="2026-09-21"):
     # 复验 N-786-1/2（2026-09-23）：标题方向段与覆盖币数改用**新鲜**口径 ⇒ 默认
     # `catalyst_dir_fresh` 与全量同值（stale=0 的常规 fixture 语义不变）；显式传
     # `fresh=(b,be,n)` 可构造「全量含陈旧」用例。
+    #
+    # 2026-09-24：三段消息本体由 `str` 改为 `dict`（渲染层现在真的渲染它们）——
+    # 事件/催化剂/KOL 的明细条数由 `event`/`cat`/`kol` 控制，`kol_total` 可单独指定
+    # **截断前**总数（默认等于 `kol`，即不触发「共 M 条」披露）。
     return {
-        "event": [f"e{i}" for i in range(event)],
-        "catalyst": [],
+        "event": [{"dir": "bearish" if i % 2 == 0 else "neutral",
+                   "kind": "🔓 解锁" if i % 2 == 0 else "🔄 链上转账",
+                   "text": f"事件摘要{i}", "date": evt_date}
+                  for i in range(event)],
+        "catalyst": [{"dir": "bullish" if i % 2 == 0 else "bearish",
+                      "strength": "strong", "text": f"催化剂摘要{i}",
+                      "date": cat_date} for i in range(cat)],
         "catalyst_dir": {"bullish": bull, "bearish": bear, "neutral": neut},
         "catalyst_dir_fresh": ({"bullish": fresh[0], "bearish": fresh[1],
                                 "neutral": fresh[2]} if fresh else
@@ -57,7 +67,10 @@ def _res(linked=True, bull=0, bear=0, neut=0, latest=None, stale=0,
         "catalyst_latest": latest,
         "catalyst_stale": stale,
         "catalyst_all": [],
-        "kol": [f"k{i}" for i in range(kol)],
+        "kol": [{"dir": "bullish" if i % 2 == 0 else "bearish",
+                 "text": f"KOL 看涨（T{i}USDT）", "conf": 0.8, "date": kol_date}
+                for i in range(kol)],
+        "kol_total": kol if kol_total is None else kol_total,
         "asset_linked": linked,
     }
 

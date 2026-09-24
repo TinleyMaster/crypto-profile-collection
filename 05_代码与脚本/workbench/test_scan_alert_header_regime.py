@@ -41,9 +41,20 @@ def check(cond, name, detail=""):
 
 
 def _res(bull=0, bear=0, neut=0, latest=None, stale=0, fresh=None, linked=True,
-         event=0, kol=0):
-    return {"event": [f"e{i}" for i in range(event)],
-            "catalyst": [], "kol": [f"k{i}" for i in range(kol)],
+         event=0, kol=0, cat=0, kol_total=None):
+    # 2026-09-24：三段消息本体由 `str` 改为 `dict`（渲染层现在真的渲染它们）。
+    return {"event": [{"dir": "bearish" if i % 2 == 0 else "neutral",
+                       "kind": "🔓 解锁" if i % 2 == 0 else "🔄 链上转账",
+                       "text": f"事件摘要{i}", "date": None}
+                      for i in range(event)],
+            "catalyst": [{"dir": "bullish" if i % 2 == 0 else "bearish",
+                          "strength": "strong",
+                          "text": f"催化剂摘要{i}", "date": "2026-09-21"}
+                         for i in range(cat)],
+            "kol": [{"dir": "bullish" if i % 2 == 0 else "bearish",
+                     "text": f"KOL 看涨（T{i}USDT）",
+                     "conf": 0.8, "date": "2026-09-21"} for i in range(kol)],
+            "kol_total": kol if kol_total is None else kol_total,
             "catalyst_dir": {"bullish": bull, "bearish": bear, "neutral": neut},
             "catalyst_dir_fresh": ({"bullish": fresh[0], "bearish": fresh[1],
                                     "neutral": fresh[2]} if fresh else {}),
@@ -444,6 +455,89 @@ for _nm, _case in _title_cases.items():
     check("**" not in _t, f"标题分支「{_nm}」无 `**`")
     check(_re.sub(r"\d+", "#", _t) in _reach,
           f"夹具「{_nm}」文案 ∈ 穷举集合（枚举 ⊇ 手工夹具）", _t)
+
+# ═══════════════════════════════════════════════════════════════
+#  共振消息明细块（2026-09-24：卡片内逐条展开事件/催化剂/KOL）
+#  此前三段只渲染 len()，消息本体全仓从未被渲染 ⇒ 收件人看不到「是什么」。
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【消息明细】三段逐条展开（此前只渲染条数）")
+
+
+def _msg_body(**kw):
+    return _body(sd._render_alert_email([{"signal": _main_sig(), "resonance": _res(**kw)}],
+                                        REGIME))
+
+
+_h3 = _msg_body(event=2, cat=2, kol=1)   # 三段皆非空，且覆盖利多/利空/中性三种徽章
+check("📅 事件预置" in _h3, "渲染事件预置段头")
+check("📰 催化剂" in _h3, "渲染催化剂段头")
+check("🗣 KOL 预测" in _h3, "渲染 KOL 段头")
+check("事件摘要0" in _h3, "事件消息本体（detail）出现在邮件里")
+check("催化剂摘要0" in _h3 and "催化剂摘要1" in _h3,
+      "催化剂消息本体（ai_summary）逐条出现")
+check("KOL 看涨（T0USDT）" in _h3, "KOL 消息本体出现")
+check("🔄 链上转账" in _h3, "事件类型标签（链上转账）出现")
+check("conf 0.80" in _h3, "KOL 置信度渲染为 conf 0.80")
+check("2026-09-21" in _h3, "消息日期渲染")
+
+print("\n【消息明细】上限与「共 M 条，仅列最新 N 条」披露")
+_h6 = _msg_body(cat=6, bull=4, bear=2)
+check("催化剂摘要3" in _h6 and "催化剂摘要4" not in _h6,
+      f"催化剂明细截断到 {sd.RESONANCE_MSG_MAX} 条（第 {sd.RESONANCE_MSG_MAX + 1} 条不渲染）")
+check(f"共 6 条，仅列最新 {sd.RESONANCE_MSG_MAX} 条" in _h6,
+      "超出上限时披露「共 6 条，仅列最新 4 条」（M 取截断前全量，与卡片主数字同源）")
+_h2 = _msg_body(cat=2, bull=2)
+check("仅列最新" not in _h2, "未超上限时不出现「仅列最新」（无虚假截断暗示）")
+_hk = _msg_body(kol=4, kol_total=9)
+check(f"共 9 条，仅列最新 {sd.RESONANCE_MSG_MAX} 条" in _hk,
+      "KOL 段按截断前总数（kol_total=9）披露，而非明细条数")
+_hev = _msg_body(event=6)
+check(f"共 6 条，仅列最新 {sd.RESONANCE_MSG_MAX} 条" in _hev, "事件段同样按全量披露")
+
+print("\n【消息明细】方向徽章配色（中文惯例：利多=红 / 利空=绿 / 中性=灰）")
+check("background:#fee2e2;color:#ef4444" in _h3 and ">利多<" in _h3,
+      "利多徽章红底红字（与卡片做多同色）")
+check("background:#dcfce7;color:#22c55e" in _h3 and ">利空<" in _h3,
+      "利空徽章绿底绿字（与卡片做空同色）")
+check("background:#f1f5f9;color:#6b7280" in _h3 and ">中性<" in _h3,
+      "中性徽章灰（链上转账方向不明，不臆断）")
+check("KOL 预测" not in _h3.replace("🗣 KOL 预测", ""),
+      "KOL 明细行不再重复段头文字（避免「KOL 预测 KOL 预测」）")
+
+print("\n【消息明细】未关联资产不渲染催化剂/KOL 明细（无从查询 ≠ 0）")
+_hu = _msg_body(linked=False, event=1)
+check("📅 事件预置" in _hu, "未关联币仍渲染事件段（事件不依赖 asset_id）")
+check("📰 催化剂" not in _hu and "🗣 KOL 预测" not in _hu,
+      "未关联币不渲染催化剂/KOL 明细段（与「共振」行的 n/a 口径一致）")
+check("📅 事件预置" not in _msg_body(), "三段皆空时不渲染空明细块（无空壳）")
+
+print("\n【消息明细】转义 / 截断 / 旧快照兼容")
+_x = _res(cat=1)
+_x["catalyst"][0]["text"] = "<script>alert(1)</script> & <b>x</b>"
+_hx = _body(sd._render_alert_email([{"signal": _main_sig(), "resonance": _x}], REGIME))
+check("<script>" not in _hx and "&lt;script&gt;" in _hx,
+      "消息文本经 html.escape（含 & 转义），不注入 HTML")
+_long = _res(cat=1)
+_long["catalyst"][0]["text"] = "长" * 200
+_hl = _body(sd._render_alert_email([{"signal": _main_sig(), "resonance": _long}], REGIME))
+check("长" * sd.RESONANCE_MSG_CHARS not in _hl
+      and "长" * (sd.RESONANCE_MSG_CHARS - 1) + "…" in _hl,
+      f"超长摘要截断到 {sd.RESONANCE_MSG_CHARS} 字并以 … 结尾")
+_old = _res()
+_old["event"] = ["🔓解锁: 旧快照字符串形态"]
+_ho = _body(sd._render_alert_email([{"signal": _main_sig(), "resonance": _old}], REGIME))
+check("旧快照字符串形态" in _ho, "兼容旧 resonance_snapshot 的纯字符串元素（不抛异常）")
+
+print("\n【消息明细】图例声明（三落点逐字对齐）")
+_leg_msg = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}], REGIME)
+_leg_msg = _leg_msg.split("图例：")[1]
+for _lit in ("「共振」行下方的消息明细块", "📅 事件预置", "📰 催化剂", "🗣 KOL 预测",
+             f"每段最多 {sd.RESONANCE_MSG_MAX} 条",
+             f"单条摘要截断至 {sd.RESONANCE_MSG_CHARS} 字",
+             f"「共 M 条，仅列最新 {sd.RESONANCE_MSG_MAX} 条」",
+             "利多=红 / 利空=绿 / 中性=灰", "解锁事件记利空"):
+    check(_lit in _leg_msg, f"图例声明 {_lit}")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

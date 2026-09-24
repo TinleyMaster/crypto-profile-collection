@@ -763,6 +763,23 @@
 - **自测（运行环境：工作区 HEAD 含本节未提交改动）**：`test_scan_alert_header_regime.py` 扩至 **101/101**（+29：N-0F7-2 穷举 16 断言 + N-0F7-3 图例 4 + 夹具 ∈ 穷举 9 + N-0F7-1 回归 3）；其余 14 套与上节数字一致、无回归；`py_compile` 通过。
 - **待部署**：需重启容器（`scan_daemon`）后生效；**水位 ≥ 本节提交**；范围与迁移约束见上一节「待部署」更正。
 
+### 告警邮件展开共振消息明细（2026-09-24）
+
+需求：「在告警邮件中加入对应的催化剂消息」。**零 DDL、零阈值变更、不改共振判定口径**（只把已在 `resonance` 里取到、却从未渲染的消息本体展开）。
+
+- **改动前状态**：卡片只渲染 `len()`（「事件2 · 催化剂5（4多/0空/1中） · KOL 1」），`res['event']/['catalyst']/['kol']` 三个消息列表**全仓从未被渲染**（grep 确认只被 `len()` 读）⇒ 收件人看得到「有几条」却看不到「是什么」。旧脚本 `scan_alert_monitor.py` 自带一份 `render_alert_email` 是**唯一**渲染消息本体的实现（旁证：原设计意图就是要渲染）。
+- **三项口径（用户确认）**：① 范围 = **催化剂 + 事件 + KOL 三段全部展开**；② 每条 = **方向徽章 + 中文摘要 + 日期**；③ 上限 = **每段最多 4 条 + 明示「共 M 条，仅列最新 4 条」**。
+- **`_get_resonance` 三段元素 `str` → `dict`**（`scan_daemon.py`）：事件段补 `ORDER BY event_date DESC NULLS LAST, id DESC`（让「最新 N 条」成立；长度即计数，口径不变）；催化剂 SQL 增选 `ac.ai_summary`，**展示文案优先 `ai_summary`、空则回退原文标题** —— 实测近 7 天 `ai_summary` **3775/3775 填充且为中文**，而 `title_cn` **0/3775 填充**（不可作展示来源）；KOL 段用 `count(*) OVER () AS total` 取**截断前**总数写入 `kol_total`（窗口函数在 `LIMIT` 之前求值），未关联币在第 3 段前 return ⇒ `out` 初始 dict 必须预置 `"kol_total": 0`。
+- **⚠️ KOL 方向取值陷阱（本轮自查发现）**：`biz.kol_signal.direction` 的 CHECK 约束是 **`long`/`short`/`neutral`**（`kol_module_init.sql`，**不是** `up`/`down`）—— 按 `up/down` 映射会把**全部 KOL 误判为中性**（徽章恒灰）。实测近 7 天 prediction 行 `direction ∈ {long, neutral}`。已按 `long/short` 映射，摘要文案 `KOL 看涨/看跌/观望（SYMBOL）`。
+- **新增渲染助手 `_render_resonance_msgs(res)` + 配色表 `_DIR_CN`**：徽章沿用文件内既有中文惯例（**利多=红 `#ef4444`/`#fee2e2`、利空=绿 `#22c55e`/`#dcfce7`、中性=灰 `#6b7280`/`#f1f5f9`**，与卡片左框、`↑做多` 同源）；文本经 `html.escape`；单条超 `RESONANCE_MSG_CHARS`(90) 截断加 `…`；三段皆空时**不渲染空壳**；挂载点为卡片 `共振：…` 行**之后**（保持风控行邻近计数行）。
+- **截断披露必须与主数字同源**：`total` 催化剂取 `_catalyst_total(catalyst_dir)`（去重后全量，≤20，与卡片「催化剂 N」同一函数）、KOL 取 `kol_total`、事件取 `len(event)` —— 若取明细条数则披露本身变成新的口径不一致。
+- **旧快照兼容**：历史落库的 `biz.scan_signal.detail.resonance_snapshot` 里元素是字符串（旧版 `f"{title}（{dir}/{strength}，{date}）"`）⇒ 渲染层非 dict 时按纯文本渲染，不抛异常。
+- **真 DB 覆盖实测（只读 prod）**：近 30 天已告警 **205 币** → 事件段命中 **18 币**（`1INCHUSDT`/`AAVEUSDT`/`ENAUSDT`/`LINKUSDT`/`ONDOUSDT`/`TAOUSDT` 等，经 `_symbol_candidates` 归一后与 `event_watchlist` 的**裸符号**匹配）、KOL 段命中 **1 币**（`BTCUSDT`，KOL prediction 近 7 天仅 5 条、近 30 天 11 条 ⇒ 该段实际极少出现）、催化剂段多数命中。实测渲染：`PENDLEUSDT` 催化剂 8 条（4多/4中）→ 明细 4 条 + 披露「共 8 条，仅列最新 4 条」；`CETUSUSDT` → 「OKX将于2026年9月23日在USDC交易区新增CETUS/USDC…」；`1INCH` 事件段 → 「近7天大额转账 5 笔 / 合计 $11.3M …」；全渲染无 `**`。
+- **⚠️ 事件段现状（据实披露，勿误读为漏渲染）**：`biz.event_watchlist` 当前**只有 `onchain_transfer`** 一种类型（91 行 / 91 币 / 每币 1 条，截断永不触发），且 **`event_date` 恒为 NULL**（91/91）⇒ 事件明细行**不显示日期**（诚实省略）；代码里的 `unlock`（🔓 解锁，记**利空** = 新增流通即抛压）分支**当前不可达**，链上转账方向不明一律记**中性**（不臆断）。
+- **自测（运行环境：工作区，含未提交改动）**：`test_scan_alert_header_regime.py` 由 101 → **134/134**（+33：三段渲染 9 + 上限/披露 5 + 徽章配色 4 + 未关联/空壳 3 + 转义/截断/旧快照 3 + 图例声明 9）；`test_scan_alert_audit_deepdive.py` **75/75**、`test_scan_scenario_label.py` **48/48**、`test_scan_alert_remaining.py` **16/16**、`test_scan_l1_closed_bar.py` **16/16**、`test_derivatives_signal_gap.py` **35/35**、`test_squeeze_*` 三套 exit 0 无回归；`py_compile` 通过。两套测试的 `_res()` 夹具已同步为 **dict 形态**（含 `dir`/`kind`/`text`/`date`/`conf`/`kol_total`）。
+  - ⚠️ **`test_scan_edge_metrics.py` = 68 通过 / 1 失败**（「已过 24h 且方向已知的行不得仍为 pending」结算滞后、「边缘桶不得含上限开口桶」），**与本次改动无关**：该文件在工作区已被**另一工作流**修改（`build_scan_edge_report.py`/`send_scan_edge_report.py`/`phase_check_cvd_ready.py` 同时处于未提交状态），失败项属其 WIP 范围。
+- **待部署**：需重启容器（`scan_daemon`）后生效；**水位 ≥ 本节提交**；零迁移、零调度变更。
+
 ### B4 场景编号口径错位（审计_盘面异动扫描系统设计方案_v0.8，2026-09-23，本次提交）
 
 来源：对 `04_架构与代码方案/盘面异动扫描系统设计方案_2026-09-16.md` v0.8 的审计（A1/A2/A3 科学有效性 + B4 口径 bug + C6~C10）。本提交只处置 **B4（展示层语义反转）** 与 **轧空告警降影子**；A1/A2 见下节工单。**零 DDL、零阈值变更、不改 `_compute_l2` 输出**（避免改动 §9 执行层选中的信号集）。

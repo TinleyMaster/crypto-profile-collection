@@ -59,7 +59,9 @@ CONSTS = {
     "SHORT_ADD_THR": 3.0, "SHORT_CUT_THR": 3.0,
     "LONG_ADD_THR": 3.0, "LONG_FLAT_THR": 1.0,
     "LIQ_DECAY_THR": 0.5, "MIN_LSR_POINTS": 6, "MIN_FUEL_BUCKETS": 3,
-    "FUEL_METRIC_VER": 1, "BUCKET_SECONDS": 300,
+    # v2（2026-09-24，P0-A §4.1）：metrics 新增 `liq_bg_*`（滚动 24h 规模背景值，只展示不判定）
+    # 与 `liq_bg_scope` ⇒ 结构变更，版本位必须递增；v1 历史行没有这 4 个键。
+    "FUEL_METRIC_VER": 2, "BUCKET_SECONDS": 300,
 }
 for name, want in CONSTS.items():
     check(getattr(sf, name, None) == want, f"{name} == {want}",

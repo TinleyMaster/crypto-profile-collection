@@ -19,11 +19,26 @@ HOBBYIST 套餐实测边界（2026-09-21 实测，勿重复探测）：
   - 不可用：多空比全系列（404）、爆仓热图（401 Upgrade plan）
   - 限频宽松：约 1.3 req/s 连续 30 次请求无 429
 
+2026-09-24 实测补充（P1 回填前先探，勿再重复探测）：
+  - `liquidation/history`：`exchange=Binance` + `symbol=<合约码>`（`BTCUSDT`/`1000PEPEUSDT` 均可）
+    ⇒ 返回 `[{time, long_liquidation_usd, short_liquidation_usd}]`（**字符串**数值，用前须 float）。
+  - `liquidation/aggregated-history`：**`exchange_list` 为必填**（缺失 ⇒ code=400
+    `Required String parameter 'exchange_list' is not present`），**无 `all` 快捷值**
+    ⇒ 需先取 `supported-exchanges`（实测 28 个）再逗号拼接。
+    `symbol` 取**币种基码**（`BTC` / `1000PEPE`）；传合约码（`BTCUSDT`）**不报错但返回 0 行**
+    （静默空集 ⇒ 消费侧必须把「0 行」当 not_found，不得当 0 爆仓额）。
+    返回 `[{time, aggregated_long_liquidation_usd, aggregated_short_liquidation_usd}]`（数值）。
+  - `limit` 上限 **4500**（超出 ⇒ code=400），但 @4h **服务端最多回 180 天**（=1080 点）
+    ⇒ 单请求即可覆盖全窗口，**无需分页**。
+  - ⚠️ `startTime` / `endTime` 参数**被忽略**（传了仍返回最新 N 点）⇒ 不能靠时间参数向后翻页，
+    要更长历史只能放大 `interval`（@6h/8h/12h=360 天，@1d=全历史）。
+
 用法：
     from crypto_research.clients.coinglass_client import CoinGlassClient
     client = CoinGlassClient(api_key=settings.coinglass_api_key)
     rows = client.liquidation_coin_list()          # 全币种滚动爆仓额（1h/4h/12h/24h）
     hist = client.liquidation_history("Binance", "BTCUSDT", interval="4h", limit=100)
+    agg  = client.liquidation_aggregated_history(["Binance", "OKX"], "BTC", interval="4h")
 """
 from __future__ import annotations
 
@@ -141,9 +156,36 @@ class CoinGlassClient:
 
     def liquidation_history(self, exchange: str, symbol: str,
                             interval: str = "4h", limit: int = 100) -> list[dict]:
-        """单交易所·单币种爆仓历史（多头/空头爆仓额），粒度 ≥4h。"""
+        """单交易所·单币种爆仓历史（多头/空头爆仓额），粒度 ≥4h。
+
+        `symbol` 为**交易对级合约码**（本库口径，如 `BTCUSDT` / `1000PEPEUSDT`）。
+        返回 `[{time(ms), long_liquidation_usd, short_liquidation_usd}]`，数值为**字符串**。
+        ⚠️ 分段增量（每个 interval 区间内新增的爆仓额），**不是**滚动窗口快照；
+        与 `liquidation_coin_list` 的 `*_liq_usd_1h` 口径不可换算、不可相加（见模块 docstring）。
+        """
         return self._as_list(self.get("/api/futures/liquidation/history", {
             "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def liquidation_aggregated_history(self, exchange_list: list[str] | str, symbol: str,
+                                       interval: str = "4h", limit: int = 1080) -> list[dict]:
+        """币种级·多所聚合爆仓历史，粒度 ≥4h。
+
+        `symbol` 取**币种基码**（`BTC` / `1000PEPE`）——传合约码不报错但**返回 0 行**（实测）。
+        `exchange_list` 为**必填**（无 `all` 快捷值，缺失 ⇒ code=400），
+        传 list 时按逗号拼接；全所口径用 `supported_exchanges()` 的返回值。
+        返回 `[{time(ms), aggregated_long_liquidation_usd, aggregated_short_liquidation_usd}]`（数值）。
+        ⚠️ 同为**分段增量**口径；`limit` 上限 4500，但 @4h 服务端最多回 180 天（1080 点）。
+        """
+        ex = exchange_list if isinstance(exchange_list, str) else ",".join(exchange_list)
+        return self._as_list(self.get("/api/futures/liquidation/aggregated-history", {
+            "exchange_list": ex, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def supported_exchanges(self) -> list[str]:
+        """当前套餐支持的交易所名列表（用于拼 `aggregated-history` 的 `exchange_list`）。"""
+        data = self.get("/api/futures/supported-exchanges")
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        return []
 
     def liquidation_exchange_list(self, range_: str = "24h") -> list[dict]:
         """各交易所爆仓额汇总（range: 1h/4h/12h/24h）。"""

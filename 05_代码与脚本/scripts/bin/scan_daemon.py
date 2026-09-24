@@ -1579,18 +1579,38 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     # 展示顺序随物理行序漂移）；`event` 的**长度**即计数，与排序无关 ⇒ 口径不变。
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
-            "SELECT event_type, event_date, event_pct, detail FROM biz.event_watchlist "
+            "SELECT event_type, event_date, event_pct, detail, source_ref "
+            "FROM biz.event_watchlist "
             "WHERE symbol = ANY(%s) ORDER BY event_date DESC NULLS LAST, id DESC",
             (_symbol_candidates(symbol),))
         for r in cur.fetchall():
             is_unlock = r["event_type"] == "unlock"
-            out["event"].append({
+            ev = {
                 # 解锁 = 新增流通（抛压）⇒ 利空；链上转账方向不明 ⇒ 中性，不臆断
                 "dir": "bearish" if is_unlock else "neutral",
                 "kind": "🔓 解锁" if is_unlock else "🔄 链上转账",
                 "text": str(r["detail"] or "").strip(),
                 "date": str(r["event_date"])[:10] if r["event_date"] else None,
-            })
+            }
+            # 审计 N-A56-1/地址显示：链上转账「最大一笔」的链/地址来自
+            # `source_ref.max_tx`（生产者用 LATERAL + ORDER BY value_usd DESC 取真实
+            # 最大笔，**非**三个独立 MAX() 的混搭元组）。此处置入 `addr` 键，
+            # 渲染层另起一行完整展示（豁免摘要 90 字截断）—— 只透传，不做取舍。
+            _src = r.get("source_ref")
+            if isinstance(_src, str):
+                try:
+                    _src = json.loads(_src)
+                except Exception:
+                    _src = None
+            _max_tx = (_src or {}).get("max_tx") if isinstance(_src, dict) else None
+            if isinstance(_max_tx, dict) and (
+                    _max_tx.get("from_address") or _max_tx.get("to_address")):
+                ev["addr"] = {
+                    "chain": _max_tx.get("chain"),
+                    "from": _max_tx.get("from_address"),
+                    "to": _max_tx.get("to_address"),
+                }
+            out["event"].append(ev)
 
     if not asset_id:
         return out
@@ -2018,11 +2038,26 @@ def _render_resonance_msgs(res: dict) -> str:
                     if m.get("conf") is not None else "")
             date = (f" <span style='color:#9ca3af'>{html.escape(str(m['date']))}</span>"
                     if m.get("date") else "")
+            # 地址明细（审计「大额转账显示地址」诉求）：完整地址**另起一行**，monospace
+            # + word-break:break-all（手机端不溢出），且**豁免**上方摘要的
+            # RESONANCE_MSG_CHARS 截断 —— 否则 42 字地址会被拦腰砍断成残缺串，
+            # 复制出来无法查标签（恰好废掉展示地址的用途）。
+            addr_html = ""
+            _a = m.get("addr")
+            if isinstance(_a, dict) and (_a.get("from") or _a.get("to")):
+                _chain = html.escape(str(_a.get("chain") or "?"))
+                _fr = html.escape(str(_a.get("from") or "?"))
+                _to = html.escape(str(_a.get("to") or "?"))
+                addr_html = (
+                    "<div style='font-family:ui-monospace,Consolas,Menlo,monospace;"
+                    "font-size:10px;word-break:break-all;color:#374151;margin-top:1px'>"
+                    f"最大一笔 · {_chain} · {_fr} → {_to}</div>")
             rows.append(
                 f"<div style='margin-top:3px'>"
                 f"<span style='background:{bg};color:{fg};font-size:10px;padding:0 4px;"
                 f"border-radius:2px;font-weight:700'>{name}</span> {kind}"
-                f"<span style='color:#111'>{html.escape(txt)}</span>{conf}{date}</div>")
+                f"<span style='color:#111'>{html.escape(txt)}</span>{conf}{date}</div>"
+                f"{addr_html}")
         tail = (f" <span style='color:#9ca3af'>（共 {total} 条，仅列最新 {len(rows)} 条）</span>"
                 if total > len(rows) else "")
         blocks.append(f"<div style='margin-top:4px'>"
@@ -2333,6 +2368,9 @@ def _render_alert_email(items: list[dict],
               "非明细条数）；方向徽章按中文惯例（利多=红 / 利空=绿 / 中性=灰），"
               "催化剂徽章取 impact_direction、摘要取 ai_summary（空则回退原文标题）、"
               "解锁事件记利空（新增流通 = 抛压）、链上转账方向不明记中性（不臆断）、"
+              "链上转账明细在摘要行下另起一行以 monospace 展示**最大一笔**的链与完整收发地址"
+              "（`最大一笔 · 链 · from → to`，豁免单条 90 字截断；摘要中的"
+              "「其中 N/M 笔流向交易所」= 流入交易所（潜在抛压）的笔数）、"
               "KOL 取 direction 的 long/short；未关联资产的催化剂/KOL 两段不渲染明细"
               "（无从查询 ≠ 0，与「共振」行的 n/a 一致）；"
               "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
@@ -2870,6 +2908,36 @@ def _fmt_ratio(v, digits: int = 1) -> str:
     return f"{float(v) * 100:+.{digits}f}%"
 
 
+def _fmt_usd_abs(v) -> str:
+    """**绝对**美元额 → '$1.23M' / '$345.6K'；None → '—'。
+
+    ⚠️ 不加正负号（金额不是变化量），且 `None` 必须与真值 `0` 可区分：爆仓维的
+    「没数据」与「确实没爆仓」是两件事（§3.3-1 缺失≠0）。
+    """
+    if v is None:
+        return "—"
+    x = float(v)
+    if abs(x) >= 1e9:
+        return f"${x / 1e9:.2f}B"
+    if abs(x) >= 1e6:
+        return f"${x / 1e6:.2f}M"
+    if abs(x) >= 1e3:
+        return f"${x / 1e3:.1f}K"
+    return f"${x:.0f}"
+
+
+def _liq_col(row, col: str):
+    """从爆仓行安全取列（P0-A §4.1 消费点①②）：行缺失 / 列 NULL ⇒ None。
+
+    ⚠️ **缺失 ≠ 0**：旧行没有 24h 分列、快照超龄时行本身为 None —— 两种情况都必须
+    输出 None（展示成「—」），**不得**补 0 冒充「该窗口无爆仓」。
+    """
+    if not row:
+        return None
+    v = row.get(col)
+    return None if v is None else float(v)
+
+
 def _hhmm_bj(v) -> str:
     """时间（datetime / ISO 字符串）→ 'HH:MM'（北京时间）；无效值 → '—'。"""
     bj = to_bj(v)
@@ -2919,6 +2987,18 @@ def _render_squeeze_alert(items: list[dict]) -> str:
         taker_txt = _fmt(m.get("taker_ratio"), 2)
         if m.get("taker_ts"):
             taker_txt += f"（{_hhmm_bj(m['taker_ts'])}）"
+        # ── P0-A §4.1 消费点①/②：24h 规模背景（**只展示，不进判定**）──────────────
+        # 值来自 `metrics.fuel.liq_bg_*`（`squeeze_fuel.liq_background()`，滚动 **24h**
+        # 窗口绝对值）。与上行的 `*_liq_usd_1h` **口径不同、窗口不同** ⇒ 只作规模参照，
+        # 严禁换算 / 相除 / 跨桶差分（脚注同步披露）。1h 快照断裂时此处**仍可能**有值，
+        # 正是「缺口存在性标注」的用途：区分「该币确实没爆仓」与「1h 快照断了」。
+        _bg = m.get("fuel") if isinstance(m.get("fuel"), dict) else {}
+        bg_long = _liq_col(_bg, "liq_bg_24h_long_usd")
+        bg_short = _liq_col(_bg, "liq_bg_24h_usd")
+        if bg_long is None and bg_short is None:
+            bg_txt = " · 24h 累计 多 — / 空 —（该窗口无数据，非 0）"
+        else:
+            bg_txt = f" · 24h 累计 多 {_fmt_usd_abs(bg_long)} / 空 {_fmt_usd_abs(bg_short)}"
         parts.append(
             f"<div style='margin:8px 0;padding:10px;border-left:4px solid {color};background:#f9fafb'>"
             f"<b>{t['symbol']}</b> "
@@ -2930,7 +3010,7 @@ def _render_squeeze_alert(items: list[dict]) -> str:
             f"<small>ΔOI {_fmt(m['d_oi_pct'], 2, '%')} | "
             f"CVD占比 {_fmt_ratio(m.get('cvd_ratio'), 1)} | "
             f"最近1h多单爆仓/成交额 {_fmt_ratio(m.get('long_liq_ratio'), 3)} | "
-            f"最近1h空单爆仓/成交额 {_fmt_ratio(m.get('short_liq_ratio'), 3)} | "
+            f"最近1h空单爆仓/成交额 {_fmt_ratio(m.get('short_liq_ratio'), 3)}{bg_txt} | "
             f"大户持仓多空比 {top_txt} | "
             f"主动买卖比 {taker_txt}</small><br>"
             f"<small style='color:#444'>判定依据：{v['reason']}</small>"
@@ -2942,6 +3022,10 @@ def _render_squeeze_alert(items: list[dict]) -> str:
             f"{''.join(parts)}"
             f"<p style='color:#999;font-size:12px'>口径：爆仓＝CoinGlass 全交易所滚动 1 小时"
             f"（多空分列），分母为币安 24h 成交额，两者非同一交易所口径，比例仅作横向比较；"
+            f"「24h 累计」＝同一来源的<b>滚动 24h 窗口绝对值</b>（口径标签 `liq_bg_scope="
+            f"{sqz_fuel.LIQ_BG_SCOPE}`），与上表 1h 比率<b>窗口不同、不可换算、不可相除</b>；"
+            f"两者均为滚动窗口累计额，<b>严禁跨桶差分</b>（相邻快照相减＝「新滚入−滚出」，"
+            f"平稳时≈0、回落时为负），也<b>严禁</b>用 `24h ÷ 24` 当 1h —— 故只并列展示、不合并成一个数；"
             f"「—」＝该维度数据缺失，非 0。</p>"
             f"<p style='color:#999;font-size:12px'>本邮件为合约盘面数据分析参考，不构成投资建议。</p>"
             f"</body></html>")
@@ -3009,7 +3093,11 @@ def task_scan_squeeze(min_vol_usd: float = 5_000_000) -> dict:
                 "ORDER BY symbol, ts")
             oi_rows = cur.fetchall()
             cur.execute(
-                "SELECT symbol, ts, long_liq_usd_1h, short_liq_usd_1h "
+                # P0-A §4.1 消费点①②：除判定侧的 `*_liq_usd_1h` 外，另取**滚动 24h 分列**
+                # （fix_068 补列）作**规模背景**。⚠️ 两列口径不同（1h vs 24h 滚动窗口）：
+                # 只作展示，严禁换算/相除/跨桶差分（见 `_render_squeeze_email` 脚注）。
+                "SELECT symbol, ts, long_liq_usd_1h, short_liq_usd_1h, "
+                "       long_liq_usd_24h, short_liq_usd_24h "
                 "FROM biz.liquidation_snapshot WHERE ts >= NOW() - INTERVAL '4 hours' "
                 "ORDER BY symbol, ts")
             liq_rows = cur.fetchall()

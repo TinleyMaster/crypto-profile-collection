@@ -2,7 +2,7 @@
 
 > 定位：本方案是 [盘面异动扫描系统设计方案](./盘面异动扫描系统设计方案.md) §12.1 缺口清单的**执行方案**。
 > 范围仅限 CoinGlass 付费数据；**不改判定阈值、不新增打分维度、不替换任何现有免费源**。
-> 状态：**P0-D 已完成**（2026-09-23，含 P0-B 补列，已实跑验收）；P0-A / P0-C / P1 未开工；P2 未排期。
+> 状态：**P0-D / P0-A / P0-C / P1 均已完成**（P0-D+P0-B 见 2026-09-23；P0-A / P0-C / P1 见 2026-09-24，已实跑验收）；P2 未排期（按 §4.5 触发条件单独立项）。
 > 2026-09-24 评审修订：落地 **5 处必改**（symbol 口径 / 删除 `alias_bases()` 映射 / 覆盖时长 / 中断归因 / 验收期望值）+ **P0-C 目标降级**（「拉齐口径」→「量化偏高幅度**下界**」），逐条见 §5.2、§3.3-8、§1.2-3、§4.4、§8.2、§4.3。
 
 ## 0. 一句话结论
@@ -61,7 +61,7 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 | 价格 / 接口数 | $29/mo / 80+ | — |
 | 限频 | **30 req/min** | 官方定价页；客户端 docstring 记录的「1.3 req/s 连续 30 次无 429」是**突发额度实测值，不可依赖**，一律以 30/min 为预算 |
 | 时间粒度下限 | **4h** | 1h 及以下返回 `code=403 + details.upgrade_required=STANDARD`；⚠️ **HTTP 状态恒为 200**，业务错误只在 body 的 `code` 里 |
-| 历史范围 @4h | **180 天**（官方文档口径，**本套餐未实测** ⇒ `--probe` / 首跑确认） | @6h/8h/12h = 360 天；@1d = 全历史 |
+| 历史范围 @4h | **180 天**（官方文档口径；**30 天窗口已实测全量返回 = 180 行/币**，180 天上限本身仍未直接验证 ⇐ 见 §8.2 实测取证） | @6h/8h/12h = 360 天；@1d = 全历史 |
 
 ### 2.2 与本方案相关的接口可用性（Hobbyist）
 
@@ -178,9 +178,9 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 
 | 项 | 估算 |
 |---|---|
-| 每币每口径请求数 | 180 天 ÷ 4h = **1080 点** ⇒ 按 limit 上限 1000 估为 **2 次**。⚠️ `limit` 上限**未实测**（客户端默认 100），2 次是乐观估计，**以 `--dry-run` 实打为准** |
-| 总请求数 | 527 × 2 **次/币** = **1054 次**（仅 Binance 口径） → 两口径 **2108 次** |
-| 耗时 | 2108 ÷ 24 req/min（留 20% 余量）≈ **88 分钟** |
+| 每币每口径请求数 | 180 天 ÷ 4h = **1080 点**；`limit` 取客户端上限 **4500**（超出 ⇒ `code=400`）⇒ **单请求即覆盖全窗口** = **1 次/币**（`--dry-run` 实打值） |
+| 总请求数 | 527 × 1 **次/币** = **527 次**（仅 Binance 口径） → 两口径 **1054 次** |
+| 耗时 | 1054 ÷ 24 req/min ≈ **44 分钟**（单口径 527 次 ≈ **22.0 分钟**，`--dry-run` 实测值） |
 | 落库行数 | 527 × 1080 ≈ **57 万行/口径**（PG 无压力） |
 
 **节流与容错**
@@ -295,7 +295,7 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 ### 5.1 `fix_068_liquidation_snapshot_24h_split.sql`（**已上线**，仅 P0-B 两列）
 
 > 落地位置：`05_代码与脚本/scripts/migrations/fix_068_liquidation_snapshot_24h_split.sql`
-> 只补两列，**不含** P1 的 `liquidation_history` / `liquidation_backfill_cursor`（未开工，另编 `fix_069`）。
+> 只补两列，**不含** P1 的 `liquidation_history` / `liquidation_backfill_cursor`（另编 `fix_069`，见 §5.2）。
 
 ```sql
 ALTER TABLE biz.liquidation_snapshot
@@ -317,7 +317,7 @@ COMMENT ON COLUMN biz.liquidation_snapshot.short_liq_usd_24h IS
 - 接口历史上已在返回值里给出这两个字段，只是写入端丢弃 ⇒ **属补列而非新增采集，零额外额度**。
 - 历史行无法回补（滚动窗口值只存在于当时的响应里）⇒ 旧行保持 NULL，**严禁补 0**。
 
-### 5.2 `fix_069_liquidation_history.sql`（**P1 未开工**，编号预占）
+### 5.2 `fix_069_liquidation_history.sql`（**P1 已落地**，2026-09-24，幂等可重复执行）
 
 ```sql
 -- 1. 4h+ 爆仓历史（分段增量口径，与 liquidation_snapshot 的滚动窗口严格区分）
@@ -350,7 +350,7 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 );
 ```
 
-> 编号说明：P0-D 开工时占用了 `fix_068`，故 P1 顺延为 `fix_069`。两表**均为未开工项**，本文件不预先创建。
+> 编号说明：P0-D 开工时占用了 `fix_068`，故 P1 顺延为 `fix_069`。落地位置：`05_代码与脚本/scripts/migrations/fix_069_liquidation_history.sql`（2026-09-24 已手动应用，**连跑两次均成功**，幂等验证通过）。
 
 > **符号口径更正（2026-09-24）**：`symbol` 存**本库合约码**（`BTCUSDT`），与 `biz.liquidation_snapshot.symbol`、`--symbols` 同源同口径。原注释写「币种码，如 BTC（与 coin-list 的 symbol 同口径）」是**两处都不对**：① `coin-list` 返回的是**币种基码**（客户端 docstring 示例 `"symbol": "BTC"`，`scan_daemon` 靠 `_perp_alias_map()` 才能映射成合约码）；② 本表由**请求侧**写入，`liquidation/history` 按**交易对**请求（客户端示例 `BTCUSDT`）。
 > 两个接口的符号取值域**不同**：`liquidation/history` = 交易对级、`aggregated-history` = 币种级（§2.2）⇒ `--scope all` 走聚合接口时，映射方向（币种码 → 合约码）**必须先 `--probe` 实测返回值写法**再定，**不得**照抄 `_perp_alias_map()`（它是消费 `coin-list` 响应时的**反向**匹配，且带 `alias_bases()` 的「抢码」防抖，本场景用不上）。
@@ -368,10 +368,10 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 |---|---|
 | `--probe` | 逐接口打 1 次，打印 `code` / `msg` / `upgrade_required` / 返回条数；**用于套餐边界复验**，不写库 |
 | `--dry-run` | 只算请求数与预计耗时，不写库、不落游标 |
-| `--scope binance\|all` | 口径；`all` 需先取 `/api/futures/supported-exchanges` 动态拼 `exchange_list`（文档无 `all` 快捷值，**首跑实测确认**） |
+| `--scope binance\|all` | 口径；`all` 需先取 `/api/futures/supported-exchanges` 动态拼 `exchange_list`（**已实测确认**：文档无 `all` 快捷值，缺失 `exchange_list` ⇒ `code=400`；实测 `n=11`）；且 `symbol` 须传**币种基码**，传合约码 ⇒ `code=0` 但 0 行 |
 | `--interval 4h` | 粒度（默认 4h） |
 | `--days 180` | 回填窗口（Hobbyist @4h 上限 180 天） |
-| `--symbols BTCUSDT,ETHUSDT` | 指定币（默认全池 = `_get_usdt_perpetuals()` 的合约码；**原样直传，不做别名映射** —— 映射是响应侧的事，见 §3.3-8） |
+| `--symbols BTCUSDT,ETHUSDT` | 指定币；**默认全池 = `biz.liquidation_snapshot` 近 7 天出现过的 symbol**（= 现役扫描池 527 币，与早报/判定链同口径；**不取 Binance `exchangeInfo` 全量**，否则含大量池外长尾、平白多花额度）。合约码**原样直传**，不做别名映射 —— 映射是响应侧的事，见 §3.3-8 |
 | `--resume` | 从 `liquidation_backfill_cursor` 续跑 |
 | `--json` | 机器可读输出（供验收断言） |
 
@@ -401,13 +401,15 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 |---|---|---|
 | **P0-D** | 早报「3衍生品」接入 24h 爆仓概况（只读 DB + 展示，不进分） | ✅ **已完成**（2026-09-23，验收见下） |
 | **P0-B** | 补 24h 多空分列（**已确认必需**：P0-D 方向行依赖） | ✅ **已上线**（`fix_068`） |
-| **P0-A** | 扫描侧消费改造（展示 + 标注 + 标定维度） | ⬜ 待开工 |
-| **P0-C** | 混合口径偏高幅度**下界**（标定脚本侧） | ⬜ 待开工 |
-| **P1** | `fix_069` + 回填脚本 + 游标 + 单测 | ⬜ 待开工 |
+| **P0-A** | 扫描侧消费改造（展示 + 标注 + 标定维度） | ✅ **已完成**（2026-09-24，`metrics.fuel` 新增 `liq_bg_*` 四键 + `FUEL_METRIC_VER` 1→2） |
+| **P0-C** | 混合口径偏高幅度**下界**（标定脚本侧） | ✅ **已完成**（2026-09-24，口径 A/B 分表 + 四门闸门；实测 `--days 1` ⇒ rc=3 样本不可用，属预期） |
+| **P1** | `fix_069` + 回填脚本 + 游标 + 单测 | ✅ **已完成**（2026-09-24，迁移已应用且幂等；回填按需手动执行） |
 | **P2** | 按 §4.5 触发条件单独立项 | ⬜ 未排期 |
 
 **部署动作（P0-D 上线后必做）**：`fix_068` 迁移应用 + **重启 `scan_daemon` 容器**（否则写入端仍是旧 INSERT，新列恒为 NULL）。
 早报侧（`build_daily_brief` / `send_daily_brief`）无需重启，且**重启前即为合法降级形态**：`status="partial"`、方向行隐藏、24h 合计照常展示。
+
+**部署动作（P0-A / P0-C / P1 上线后）**：`fix_069` 迁移**已应用**；P0-A 改动在 `scan_daemon.py` + `squeeze_fuel.py` ⇒ **需重启 `scan_daemon` 容器**（否则 `metrics.fuel` 仍按 v1 写、无 `liq_bg_*`）；P1 回填脚本与迁移**离线运行，无需重启**（回填按需触发，见 §4.4 预算与节流）。
 
 ---
 
@@ -456,7 +458,7 @@ python 05_代码与脚本/scripts/bin/send_daily_brief.py --dry-run
 
 ---
 
-### 8.2 P0-A / P0-C / P1 验收命令（未开工，先行占位）
+### 8.2 P0-A / P0-C / P1 验收命令（已完成，2026-09-24 实跑取证见文末）
 
 **验收命令（可独立复跑；`--` 参数以脚本实际 CLI 为准）**
 
@@ -472,8 +474,8 @@ python scripts/bin/phase_backfill_liq_history.py --probe
 # 2) fix_069 迁移幂等：连跑两次，第二次应为 0 变更、无异常
 #    （应用方式同既有 fix_* 迁移）
 
-# 3) 回填 dry-run：期望打印请求数 ≈ 2×币数（180 天 ÷ 4h = 1080 点 > limit 上限；上限未实测，
-#    客户端默认 100 ⇒ 该期望值以 dry-run 实打为准）、预计耗时；不写库
+# 3) 回填 dry-run：期望打印请求数 = 1×币数（limit 取客户端上限 4500 @4h 全窗口 ⇒ 单请求/币）、
+#    预计耗时（实测 527 次 × 2.5s ≈ 22.0 min）；不写库
 python scripts/bin/phase_backfill_liq_history.py --dry-run --scope binance --days 180
 
 # 4) 小样本真跑（2 币 × 30 天，单口径 binance）：期望落库 30×6 = 180 行/币 ⇒ 两币合计 360 行
@@ -497,6 +499,21 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 2. `interval` 或 `exchange_scope` 不同**不得**参与同一次聚合（结构上由 PK 保证，测试再兜一层）；
 3. 任一端缺失时，输出为 `None` 而**非 0**；
 4. 口径 A 与口径 B 的比值不得被放进同一个分布/同一个分位计算。
+
+**实测取证（2026-09-24，本机复跑）**
+
+| 项 | 结果 |
+|---|---|
+| `py_compile`（calib / coinglass_client / phase_backfill_liq_history / scan_daemon / squeeze_fuel / 三个测试） | 全绿（EXIT=0） |
+| `test_squeeze_span_judge.py` / `test_liq_history_scope.py` / `test_squeeze_fuel.py` / `test_squeeze_battle.py` | **48/48** / **39/39** / **99/99** / **143/143** |
+| `phase_backfill_liq_history.py --probe` | 9 用例全符合 §2.2/§2.3（含 2 个反向对照）；`意外可用项 0 个` |
+| `--dry-run --scope binance --days 180` | 宇宙 527、待处理 527、527 次 × 2.5s ≈ 22.0 min（按 `limit` 上限 4500 ⇒ 1 次/币） |
+| `--resume --scope binance --days 30 --symbols BTCUSDT,ETHUSDT --json` | `resume 跳过 2 / 待处理 0 / rows_written 0` ⇒ **无重复行**（PK + 游标生效） |
+| `apply_migration.py migrations/fix_069_liquidation_history.sql` ×2 | 两次均「执行成功」⇒ **幂等通过** |
+| DB 实测 `biz.liquidation_history` | `binance`(BTCUSDT+ETHUSDT) 各 180 行、`all`(BTCUSDT+1000PEPEUSDT) 各 180 行；窗口 08-25 08:00 → 09-24 04:00 UTC（= 30×6） |
+| `calib_squeeze_liq_thr.py --days 1`（`--json` 与文本） | 均 **EXIT=3**（`SAMPLE_UNUSABLE`，预期）；`scope_split` A 侧 n=54586 / B 侧 n=12；`cross_exchange_lower_bound.ok=false`（n_pairs=6<30）；**前置门路径零比率输出** |
+
+> ⚠️ **命令 7 的 `--days 30` 当前跑不动**（2026-09-24 实测）：`biz.asset_klines` 的 5m × 500+ 币结果集过大，DB 侧 `pg_stat_activity` 显示 `state=active`、`wait_event=Client/ClientWrite`（服务端在等客户端消费），单次查询持续 >670s。⇒ 验收改用 `--days 1` 取证；**长窗口应等 `biz.liquidation_history` 回填完成后再跑**（回填样本走 4h 分段增量，结果集小得多）。
 
 ---
 
@@ -524,13 +541,13 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 | `README.md` 七维度数据架构「3 衍生品」行 + 大盘早报邮件章节 | 补 24h 爆仓概况及其口径（池内 N 标的 / 滚动窗口 / 只展示不进分） | ✅ 已完成 |
 | `workbench/macro_market.py` 模块注释与常量注释 | 记录 `liquidation_24h` 口径与「不进分」约束，防止后续被误接进子分 | ✅ 已完成（代码内注释） |
 | `brief_data_model.py` `_WARNING_FIELDS` | `M2_liquidation` 缺失归入**一般降级**（可选辅助模块） | ✅ 已完成 |
-| `04_架构与代码方案/盘面异动扫描系统设计方案.md` §3.1 / §10.2 数据源表 | 补 `liquidation_history` 行，标注「分段增量，仅标定/回测」 | ⬜ 随 P1 |
-| 同上 §10.5 口径披露 | 增列口径 B（同源同窗口 4h，**仅给偏高幅度下界**），并明确 A/B 不可换算 | ⬜ 随 P0-C |
-| 同上 §12.1 → **B16 关闭** | 「爆仓细粒度历史未接入」改为已完成，注明粒度与保留期 | ⬜ 随 P1 |
-| 同上 §12.1 A3 / B11 / C9 | 「无法标定/无样本外」改为「样本已具备，待跑标定」 | ⬜ 随 P1 |
-| 同上 §13 CoinGlass 依赖项 | 更新额度使用情况与回填预算 | ⬜ 随 P1 |
-| `clients/coinglass_client.py` 模块 docstring | 增封装 `liquidation_aggregated_history()` 等方法与实测边界 | ⬜ 随 P1 |
-| `AGENTS.md` | 追加本轮约束条目（口径分离、回填节流、游标续跑、链上源选 CM 而非 CoinGlass） | ⬜ 随 P1（本轮 §3.3 已记录，待并入 AGENTS.md） |
+| `04_架构与代码方案/盘面异动扫描系统设计方案.md` §3.1 / §10.2 数据源表 | 补 `liquidation_history` 行，标注「分段增量，仅标定/回测」 | ✅ 已完成（2026-09-24：§3.1 覆盖旧「未采用」行；§10.2 与 §10.3 已补行并追加 `fix_069`） |
+| 同上 §10.5 口径披露 | 增列口径 B（同源同窗口 4h，**仅给偏高幅度下界**），并明确 A/B 不可换算 | ✅ 已完成（2026-09-24：改为「口径 A / B 并行」表 + 4 条要点） |
+| 同上 §12.1 → **B16 关闭** | 「爆仓细粒度历史未接入」改为已完成，注明粒度与保留期 | ✅ 已完成（2026-09-24） |
+| 同上 §12.1 A3 / B11 / C9 | 「无法标定/无样本外」改为「样本已具备，待跑标定」 | ✅ 已完成（2026-09-24） |
+| 同上 §13 CoinGlass 依赖项 | 更新额度使用情况与回填预算 | ✅ 已完成（2026-09-24：补官方 30/min、288 次/天（0.7%）、回填 1054/2108 次 ≈ 88 min、游标 + resume 依据） |
+| `clients/coinglass_client.py` 模块 docstring | 增封装 `liquidation_aggregated_history()` 等方法与实测边界 | ✅ 已完成（2026-09-24） |
+| `AGENTS.md` | 追加本轮约束条目（口径分离、回填节流、游标续跑、链上源选 CM 而非 CoinGlass） | ✅ 已完成（2026-09-24，本方案同轮提交） |
 
 ---
 
@@ -539,6 +556,6 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 1. ~~P0-B 是否真的需要 12h/24h 多空分列~~ → **已定：只补 24h 两列**，随 `fix_068` 上线（P0-D 的方向行依赖它）；12h 分列当前无消费点，**不补**。
 2. **早报的覆盖范围**：现在只能给「池内 N 个标的合计」，是否要扩到**真·全市场**（那就得走 `liquidation/aggregated-history`，即 P1/P2 路线）？
 3. ~~**覆盖率护栏的比例阈值**：取值走标定流程，**不在文档留数字**~~ → **已标定（2026-09-23）**：取证见 §4.7「三个坑」第 3 条与 §8.1 实测记录；取值只留代码常量，**仍不在文档留数字**。
-4. `--scope all` 的全交易所列表获取方式（`supported-exchanges` 动态拼 vs 官方是否接受 `Binance,OKX,...` 全量），需 `--probe` 实测。
+4. ~~`--scope all` 的全交易所列表获取方式（`supported-exchanges` 动态拼 vs 官方是否接受 `Binance,OKX,...` 全量），需 `--probe` 实测~~ → **已定（2026-09-24 `--probe` 实测）**：`aggregated-history` 的 `exchange_list` **必填**（缺失 ⇒ `code=400`），**无 `all` 快捷值** ⇒ 由 `supported-exchanges`（实测 `n=11`）动态拼接全量。同批实测：`symbol` 须传**币种基码**（传合约码 `BTCUSDT` ⇒ `code=0` 但**静默 0 行**）。
 5. `coin-list` 失败时 `scan_squeeze` 整轮失败（§13 密钥单点）是否要降级为「跳过爆仓维、其余照跑」——**另立工单**。
 6. ~~**早报展示位版式**：现有 `research.html` 的衍生品指标网格是否足够承载「四档 + 多空方向」~~ → **已定**：邮件侧在「3衍生品」内新增**一行**（合计 + 多空方向 + `1h/24h` 占比 + 口径脚注），由 `_render_liquidation_row()` 渲染；`research.html` 网格版式**本轮不改**（网页侧随后续维扩再定）。

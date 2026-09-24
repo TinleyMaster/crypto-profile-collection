@@ -38,7 +38,6 @@ import calib_squeeze_liq_thr as calib  # noqa: E402
 # 消除「守卫改了、自检没同步」的固有盲区（此前两者各自硬编码同一字面）。
 _RE_LEN_FAILS = re.compile(r"len\(\s*fails\s*\)\s*>\s*1")
 _RE_CONCL_PASS = re.compile(r"→\s*PASS")
-_RE_SUMMARY_MEDIAN = re.compile(r"中位\s*=\s*[\d.]+%")
 
 passed = 0
 failed = 0
@@ -171,7 +170,7 @@ check('"upper_bound_n_segments": sj["n_segments"]' in _src
 # 复验（并发进程 WIP 预判）：主判据的存在性守卫用**宽匹配**（允许后续新增第 4/5 道门），
 # 只钉「primary_gate 存在且被调用」「_failed_gates 由门布尔求和」—— 承重的是行为断言。
 check("def primary_gate(" in _src and "_pg = primary_gate(" in _src,
-      "F4：拒绝路径标注唯一充分因")
+      "F4：primary_gate 存在且被拒绝路径调用（「唯一充分因」由测试4 行为断言覆盖）")
 check("_failed_gates = sum(1 for ok in (" in _src
       # 复验 H2 + I2 + I7：用**共享正则常量**判「理由条数」写法已消失 —— 字面串对空白敏感；
       # 正则允许括号内/运算符两侧任意空白（`len( fails ) > 1` 等变体不再静默放行）。
@@ -188,11 +187,25 @@ check("new_rates" not in _src, "F6：删除死变量 new_rates")
 # ════════════════════════════════════════════════════════════
 print("\n【测试6】C 端到端注入（rc=3 且判据输入中位数不出现在输出）")
 
+# 口径 B（P0-C）夹具：1 条单所 4h 增量样本 + 30 对「全所 ≥ Binance」配对（恰 = MIN_CROSS_PAIRS，
+# 边界含等于）⇒ `b_gate.ok=True`，使本用例的失败门数**只剩**跨度门（工单原意）。
+_B_ROWS_SAMPLE = [{"symbol": "AAAUSDT", "ts": dt.datetime(2026, 9, 23, 8, 0, tzinfo=dt.timezone.utc),
+                   "interval": "4h", "exchange_scope": "binance",
+                   "long_liq": 1e6, "vol_win": 1e9}]
+_CROSS_SAMPLE = [{"symbol": f"S{i}USDT",
+                  "ts": dt.datetime(2026, 9, 23, 8, 0, tzinfo=dt.timezone.utc),
+                  "all_long": 3e6, "bin_long": 1e6} for i in range(calib.MIN_CROSS_PAIRS)]
+
 
 class _FakeCursor:
-    def __init__(self, bound, sample, denom, mol, incl0):
+    def __init__(self, bound, sample, denom, mol, incl0, b_rows=None, cross=None):
         self._bound, self._sample = bound, sample
         self._denom, self._mol, self._incl0 = denom, mol, incl0
+        # P0-C（2026-09-24）：口径 B / 跨所配对的夹具。默认给**能过 B 门**的最小合法样本，
+        # 使本用例的失败门数与原始意图一致（测试6 仅跨度门、测试8 分母+跨度两门）——
+        # 否则 B 门（第四道门）会额外失败，把「另有 N 道门」的断言改成与工单语义无关的数字。
+        self._b, self._cross = (b_rows if b_rows is not None else _B_ROWS_SAMPLE,
+                                cross if cross is not None else _CROSS_SAMPLE)
         self._mode = None
 
     def execute(self, sql, params=None):
@@ -206,6 +219,12 @@ class _FakeCursor:
             self._mode = "mol"
         elif "long_liq_usd_1h::float8 / v.vol_win" in sql:
             self._mode = "incl0"
+        elif "AS all_long" in sql:
+            # 跨所配对（SQL_CROSS_EXCHANGE）：两个 mode 都命中 `biz.liquidation_history`，
+            # 靠配对数特有的列别名区分，否则口径 B 会拿到配对结构 ⇒ KeyError。
+            self._mode = "cross"
+        elif "biz.liquidation_history" in sql:
+            self._mode = "b_rows"
         else:
             self._mode = None
 
@@ -214,7 +233,8 @@ class _FakeCursor:
 
     def fetchall(self):
         return {"sample": self._sample, "denom": self._denom,
-                "mol": self._mol, "incl0": self._incl0}[self._mode]
+                "mol": self._mol, "incl0": self._incl0,
+                "b_rows": self._b, "cross": self._cross}[self._mode]
 
     def __enter__(self):
         return self
@@ -283,14 +303,17 @@ check("归因以" not in _out,
       "G1：仅跨度门不过 ⇒ 不印归因行（旧码用理由条数会误印「其余门亦不过」）")
 check("【判定】" not in _out and "判据输入（段median）" not in _out,
       "C：**未打印**判定行/判据输入标签")
-# F2 数值断言：判据输入 = 段中位数 15.00%，不得出现在输出里（不是字面串检查）
-check("15.00%" not in _out,
-      "F2：判据输入中位数（15.00%）未出现在 rc=3 路径的输出里", _out[:0])
+# 复验 I6/I9(乙)：锚**数值**而非渲染标签 —— 真值由脚本自身的 segment_upper_bounds/
+# segment_judge 算出（不硬编码、不耦合 `中位=` 排版，也不会因常量退化而真空为真）。
+_med = calib.segment_judge(
+    calib.segment_upper_bounds(_mk_rows(), calib.sqz.LONG_LIQ_RATIO_THR)["segments"],
+    calib.JUDGE_UPPER_BOUND_PCT)["value_pct"]
+check(f"{_med:.2f}%" == "15.00%",
+      "I9：夹具段中位真值 = 15.00%（证明下方数值断言非空转）", str(_med))
+check(_med is not None and f"{_med:.2f}%" not in _out,
+      "F2/I9：判据输入中位数（真值从脚本结构取）未出现在 rc=3 路径的输出里", f"median={_med}")
 check("【各 4h 段上界】" in _out and "20.00%" in _out,
       "E：即使样本不可用，段上界仍**逐段**打印（诊断入口）")
-# 复验 I6：把「段清单不印摘要行」这一事实交给**行为断言**（端到端输出），不再只靠源码字面。
-check(not _RE_SUMMARY_MEDIAN.search(_out),
-      "I6：段清单摘要行（中位=X%）不出现在 rc=3 路径的输出（行为断言）")
 
 # ════════════════════════════════════════════════════════════
 # 7. F1 端到端注入：样本可用 + 段 IQR 跨线 ⇒ rc=4（不得 rc=0）

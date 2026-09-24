@@ -55,6 +55,16 @@
 
 只读：不写任何表。
 
+口径 A/B 并行（P0-C / §4.3，**必须分表读**）：
+  - A（现役，**混合**口径）= coin-list 全交易所**滚动 1h** 爆仓额 / Binance 滚动窗口成交额
+    （`vol_win`）——线上判定所用；
+  - B（新增，**单所同窗**口径）= `liquidation/history` **exchange=Binance** 的 **4h 分段增量** /
+    `asset_klines` 1h 在同一 **4h 墙钟区间**的成交额和——只用于给 A 的**偏高幅度下界**定值，
+    **非阈值基准**；
+  - ⚠️ 两者**不可换算、不可相加**，比值**严禁**放进同一分布/同一分位（不变量 4）；
+  - B 样本不足（`biz.liquidation_history` 无行，或跨所配对数 < `MIN_CROSS_PAIRS`）⇒ 直接 rc=3；
+    `--no-b-gate` **仅供诊断**（输出带 `b_gate.enforced=false` 标记，不得据此出结论）。
+
 用法：
     python calib_squeeze_liq_thr.py                  # 默认 1 天窗口 / vol_win ≥ 5e6
     python calib_squeeze_liq_thr.py --days 7 --json  # 拉长窗口 / 输出机器可读
@@ -152,6 +162,8 @@ SELECT l.symbol,
        l.ts,
        l.long_liq_usd_1h::float8  AS long_liq,
        l.short_liq_usd_1h::float8 AS short_liq,
+       l.liq_usd_4h::float8       AS liq_4h,
+       l.liq_usd_24h::float8      AS liq_24h,
        v.vol_win::float8          AS vol_win,
        w.peak_hi::float8  AS peak_hi,
        w.trough_lo::float8 AS trough_lo,
@@ -200,6 +212,144 @@ WHERE l.ts >= NOW() - make_interval(days => %(days)s)
   AND l.long_liq_usd_1h IS NOT NULL
   AND v.vol_win > 0
 """
+
+
+# ══ 口径 B（§4.3 P0-C）：Binance 单所 4h **分段增量** / 同一 4h 墙钟区间的成交额 ══
+# 目标降级（2026-09-24 评审）：不声称「把口径拉齐」——分子端可同源，分母端窗口无法对齐
+# ⇒ 口径 B 只回答一个问题：**混合口径的偏高幅度至少是多少**（下界）。
+# ⚠️ 口径 B 与口径 A（滚动 1h / 24h 成交额）数值**不可换算、不可相加**，任何比较必须在
+#    同一口径内做；两者的比值**不得**放进同一个分布/同一个分位计算（不变量 4）。
+B_INTERVAL_HOURS = {"4h": 4, "6h": 6, "8h": 8, "12h": 12, "1d": 24}
+# 跨所放大（全所 4h 增量 / Binance 同 ts 4h 增量）的配对数下限：低于此值不给下界（rc=3）。
+# 依据：分子端不等式 `全所 ≥ 单所` 是**逐点**可验的结构事实，但点数太少时中位数无法代表
+# 常规 regime ⇒ 与既有 `MIN_SEGMENT_N=30` 同量级取值，不另造新标准。
+MIN_CROSS_PAIRS = 30
+
+SQL_B_4H = """
+SELECT l.symbol,
+       l.ts,
+       -- `interval` / `exchange_scope` 必须取回：`assert_single_scope()` 靠它们证明 B 侧样本
+       -- 同属单一口径（不选则两列恒为 None ⇒ 不变量 4 的校验形同虚设）。
+       l.interval              AS interval,
+       l.exchange_scope        AS exchange_scope,
+       l.long_liq_usd::float8  AS long_liq,
+       l.short_liq_usd::float8 AS short_liq,
+       d.vol_win::float8       AS vol_win
+FROM biz.liquidation_history l
+JOIN LATERAL (
+    SELECT SUM(k.quote_vol) AS vol_win
+    FROM biz.asset_klines k
+    WHERE k.symbol = l.symbol AND k.interval = '1h'
+      AND k.open_time >= l.ts
+      AND k.open_time < l.ts + make_interval(hours => %(iv_hours)s)
+) d ON TRUE
+WHERE l.interval = %(interval)s
+  AND l.exchange_scope = %(scope)s
+  AND l.ts >= NOW() - make_interval(days => %(days)s)
+  AND l.long_liq_usd IS NOT NULL
+  AND d.vol_win > 0
+"""
+
+# 同一 (symbol, interval, ts) 上的**全所 vs Binance**配对（分子端严格不等式 `全所 ≥ 单所`）。
+SQL_CROSS_EXCHANGE = """
+SELECT a.symbol, a.ts,
+       a.long_liq_usd::float8  AS all_long,
+       b.long_liq_usd::float8  AS bin_long
+FROM biz.liquidation_history a
+JOIN biz.liquidation_history b
+  ON b.symbol = a.symbol AND b.interval = a.interval AND b.ts = a.ts
+ AND b.exchange_scope = 'binance'
+WHERE a.exchange_scope = 'all'
+  AND a.interval = %(interval)s
+  AND a.ts >= NOW() - make_interval(days => %(days)s)
+  AND a.long_liq_usd IS NOT NULL AND a.long_liq_usd > 0
+  AND b.long_liq_usd IS NOT NULL AND b.long_liq_usd > 0
+"""
+
+
+def assert_single_scope(rows: list[dict], label: str = "") -> tuple:
+    """不变量 4 的代码化：一个分布/分位只能来自**单一** (interval, exchange_scope)。
+
+    口径 A（滚动 1h 快照）与口径 B（4h 分段增量）的比值若混进同一个分布/分位，读数即无意义
+    （§4.3：两者不可换算、不可相加）⇒ 任何分布入口先过这道门：混入多组时**抛错**
+    （fail-loud），而不是静默合并成一锅。
+    """
+    seen = {(r.get("interval"), r.get("exchange_scope")) for r in rows}
+    if len(seen) > 1:
+        raise ValueError(
+            f"{label} 混入了多个分量口径 {sorted(seen)} ⇒ 口径 A/B 不得进同一分布（不变量 4）")
+    return next(iter(seen)) if seen else (None, None)
+
+
+def distribution(vals: list[float]) -> dict:
+    """单口径分布（p50/p75/p90/p95 + n）。入口前置：只接受**已按口径过滤**的样本。"""
+    return {"n": len(vals), "p50": pct(vals, 0.50), "p75": pct(vals, 0.75),
+            "p90": pct(vals, 0.90), "p95": pct(vals, 0.95)}
+
+
+def cross_exchange_lower_bound(pairs: list[dict]) -> dict:
+    """跨所放大下界（分子端）：`全所 4h 增量 / Binance 同 ts 4h 增量`。
+
+    为什么这是**下界**且方向严格（§4.3）：口径 A 的分子 = **全交易所**爆仓额 ⊇ 口径 B 的
+    分子 = **Binance 单所** ⇒ 逐点 `all ≥ binance`（本函数用 `share_ge_1` 显式校验）。
+    但**分母端**（Binance **24h** 成交额 vs 同一 **4h** 区间成交额）无法在同一窗口对齐
+    ⇒「跨所放大」与「分母窗口错配」两个来源**不可分离** ⇒ 本倍数**只能读作下界**，
+    **不得**据此直推「阈值应平移多少」。
+
+    `ok=False` 时（配对数不足 / 出现 `all < binance` 的反例）不给数字结论，调用侧据此 rc=3。
+    """
+    ratios = [p["all_long"] / p["bin_long"] for p in pairs if p["bin_long"]]
+    reasons: list[str] = []
+    if len(ratios) < MIN_CROSS_PAIRS:
+        reasons.append(f"跨所配对数 {len(ratios)} < {MIN_CROSS_PAIRS}"
+                       f"（口径 B 样本不足 ⇒ 无法给出偏高幅度下界）")
+    bad = [r for r in ratios if r < 1.0]
+    if bad:
+        # `all ≥ binance` 是结构必然（全所 ⊇ 单所）⇒ 反例说明取数/口径出问题，不能只当噪声
+        reasons.append(f"出现 {len(bad)} 个 `全所 < Binance` 的反例（结构性不可能）"
+                       f"⇒ 口径或取数有误，先排查，不得据此定阈值")
+    return {"ok": not reasons, "reasons": reasons, "n_pairs": len(ratios),
+            "min_pairs": MIN_CROSS_PAIRS,
+            "ratio_median": pct(ratios, 0.50), "ratio_p25": pct(ratios, 0.25),
+            "ratio_p75": pct(ratios, 0.75),
+            "share_ge_1": (sum(1 for r in ratios if r >= 1.0) / len(ratios)) if ratios else None,
+            "note": "下界：分子端同源可比（全所 ⊇ 单所），分母端窗口（24h vs 4h）错配不可分离"}
+
+
+def rolling_scale_groups(rows: list[dict], key: str, thr: float) -> dict:
+    """P0-A 只读分组维度：按已落库的**滚动窗口**列（`liq_usd_4h` / `liq_usd_24h`）分桶。
+
+    仅用于标定/诊断（§4.1「允许④」），**不得**作为 5m 窗口判定的输入（N2）。
+    分桶按**三分位**切（P33/P66），每桶给 n 与越阈率；缺失值单列一组（缺失≠0）。
+    """
+    vals_all = sorted(r[key] for r in rows if r.get(key) is not None)
+    if len(vals_all) < 3:
+        return {"key": key, "n": 0, "buckets": [], "threshold": thr}
+    q1, q2 = pct(vals_all, 1 / 3), pct(vals_all, 2 / 3)
+    buckets = [
+        {"label": f"< P33（< {q1:.4g}）", "n": 0, "rate_pct": None, "vals": []},
+        {"label": f"P33~P66（{q1:.4g}~{q2:.4g}）", "n": 0, "rate_pct": None, "vals": []},
+        {"label": f"> P66（> {q2:.4g}）", "n": 0, "rate_pct": None, "vals": []},
+        {"label": "缺失（NULL）", "n": 0, "rate_pct": None, "vals": []},
+    ]
+    for r in rows:
+        v = r.get(key)
+        if v is None:
+            idx = 3
+        elif v < q1:
+            idx = 0
+        elif v <= q2:
+            idx = 1
+        else:
+            idx = 2
+        buckets[idx]["n"] += 1
+        buckets[idx]["vals"].append(r["long_liq"] / r["vol_win"])
+    for b in buckets:
+        b["rate_pct"] = rate(b["vals"], thr)
+        b["p50_ratio"] = pct(b["vals"], 0.50)
+        del b["vals"]
+    return {"key": key, "n": len(rows), "buckets": buckets, "threshold": thr,
+            "note": "滚动窗口列仅作**分组维度**（跨币横截面可比）；不进 5m 判定、禁跨桶差分"}
 
 
 def pct(vals: list[float], q: float) -> float | None:
@@ -547,12 +697,17 @@ def span_sufficiency(span_hours: float, extreme_count: int) -> dict:
             "min_extreme_segments": MIN_EXTREME_SEGMENTS}
 
 
-def primary_gate(denom_ok: bool, molecule_ok: bool, span_ok: bool) -> str | None:
-    """拒绝出结论时的**唯一充分因**（优先级：分母 > 分子 > 跨度）。
+def primary_gate(denom_ok: bool, molecule_ok: bool, span_ok: bool,
+                 b_ok: bool = True) -> str | None:
+    """拒绝出结论时的**唯一充分因**（优先级：分母 > 分子 > 跨度 > 口径 B）。
 
     复验 F4：三道门并列进 `sample_ok`，输出只说「拒绝出结论」⇒ 默认参数下三处并发失败时，
     读者会误以为「是跨度门拦下的」（实测 `--days 1` 分母门亦不过）。按优先级标出归因，
     其余门只作附注。
+
+    P0-C（§4.3）：新增第四道门「口径 B 样本门」——口径 B（4h 分段增量）配对数不足时
+    「偏高幅度下界」根本算不出来 ⇒ 同样属「任何比率都不成立」，排在最末（它的样本来自
+    P1 回填，与 A 侧的自证互相独立）。
     """
     if not denom_ok:
         return "分母门"
@@ -560,6 +715,8 @@ def primary_gate(denom_ok: bool, molecule_ok: bool, span_ok: bool) -> str | None
         return "分子门"
     if not span_ok:
         return "跨度门"
+    if not b_ok:
+        return "口径B门"
     return None
 
 
@@ -601,6 +758,12 @@ def main() -> int:
     ap.add_argument("--vol-win-min", "--vol24-min", dest="vol_win_min", type=float,
                     default=5e6, help="vol_win 下限（USDT，别名 --vol24-min）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--b-interval", default="4h", choices=sorted(B_INTERVAL_HOURS),
+                    help="口径 B 的粒度（默认 4h，= P1 回填粒度）")
+    ap.add_argument("--b-scope", default="binance", choices=["binance", "all"],
+                    help="口径 B 的交易所口径（默认 binance=单所）")
+    ap.add_argument("--no-b-gate", action="store_true",
+                    help="诊断用：不因口径 B 样本不足而 rc=3（**不得**用于出结论）")
     args = ap.parse_args()
 
     settings = get_settings(require_database=True)
@@ -622,6 +785,15 @@ def main() -> int:
             # long 侧「含 0」口径（复验 D3）
             cur.execute(SQL_LONG_INCL0, {"days": args.days, "vol_min": args.vol_win_min})
             ratios_incl0 = [r["ratio"] for r in cur.fetchall()]
+            # ── 口径 B（P0-C）：Binance 单所 4h 分段增量 / 同一 4h 区间成交额 ──
+            # 独立查询、独立分布（§4.3）：与口径 A 的比值**不得**进同一分位（不变量 4）。
+            cur.execute(SQL_B_4H, {"days": args.days, "interval": args.b_interval,
+                                   "scope": args.b_scope,
+                                   "iv_hours": B_INTERVAL_HOURS[args.b_interval]})
+            b_rows = [dict(r) for r in cur.fetchall()]
+            # 跨所放大（分子端）：全所 vs Binance 同 ts 配对
+            cur.execute(SQL_CROSS_EXCHANGE, {"days": args.days, "interval": args.b_interval})
+            cross_pairs = [dict(r) for r in cur.fetchall()]
 
     span_h = ((bound["mx"] - bound["mn"]).total_seconds() / 3600) if bound["mn"] else 0.0
     ratios = [r["long_liq"] / r["vol_win"] for r in rows]
@@ -633,6 +805,26 @@ def main() -> int:
     p50, p75, p90, p95 = (pct(ratios, q) for q in (0.50, 0.75, 0.90, 0.95))
     new_thr = sqz.LONG_LIQ_RATIO_THR
     seg = segment_upper_bounds(rows, new_thr)
+
+    # ── 口径 B（P0-C，§4.3）：独立分布 + 跨所放大**下界** ───────────────────
+    # 不变量 4：B 侧样本必须同属单一 (interval, exchange_scope)（混入即抛错，不静默合并）。
+    b_scope_seen = assert_single_scope(b_rows, "口径 B")
+    b_ratios = [r["long_liq"] / r["vol_win"] for r in b_rows if r["vol_win"]]
+    b_dist = distribution(b_ratios)
+    cross = cross_exchange_lower_bound(cross_pairs)
+    b_reasons = list(cross["reasons"])
+    if not b_rows:
+        b_reasons.append(f"口径 B（{args.b_interval} / {args.b_scope}）无任何样本 "
+                         f"⇒ 偏高幅度下界不可算（先在 P1 回填 biz.liquidation_history）")
+    b_gate = {"ok": not b_reasons, "reasons": b_reasons}
+    # 诊断逃生门：--no-b-gate 只用于排查，**不得**据此出结论（输出中带 warned 标记）
+    b_gate_enforced = b_gate["ok"] or not args.no_b_gate
+
+    # ── P0-A：滚动窗口列的**只读分组维度**（交叉截面可比；不进 5m 判定）────────
+    rolling_groups = {
+        "liq_usd_4h": rolling_scale_groups(rows, "liq_4h", new_thr),
+        "liq_usd_24h": rolling_scale_groups(rows, "liq_24h", new_thr),
+    }
 
     subset: dict[str, list[float]] = {}
     for name, fn in VARIANTS.items():
@@ -673,7 +865,9 @@ def main() -> int:
     # 复验 E3：分母与分子**都要**自证通过，样本才可用（旧码只看分母，而爆仓表实测
     # 24h 里只有 11 个整点有数据、最长连空 14h ⇒ 分子不合格时算出的越阈率同样无意义）。
     # 工单 §6-C：再加「跨度充分性」——它才是判据的真正卡点（时间解释 98.7% 方差）。
-    sample_ok = denom_ok and molecule_ok and span_ok
+    # P0-C（§4.3）：再加「口径 B 样本门」——口径 B 无样本 / 跨所配对不足时「偏高幅度下界」
+    # 根本算不出来 ⇒ 同属「任何比率都不成立」。`--no-b-gate` 仅供诊断（见 `b_gate.enforced`）。
+    sample_ok = denom_ok and molecule_ok and span_ok and b_gate_enforced
     out = {
         "table_bound": {
             "min_ts": bound["mn"].isoformat() if bound["mn"] else None,
@@ -721,6 +915,35 @@ def main() -> int:
         "segments": seg,
         "segment_judge": sj,
         "span_sufficiency": span_suf,
+        # ── P0-C（§4.3）：口径 A / B **分表输出**（不变量 4：两者的比值**严禁**进同一分布/
+        #    同一分位）。B 侧只给「偏高幅度下界」，**不给**阈值基准，也**不得**与 A 换算/相加。
+        "scope_split": {
+            "a_mixed": {
+                "scope": "coinglass 全所滚动 1h / binance 滚动成交额(vol_win)",
+                "note": "现役混合口径 = 线上判定所用；分子分母**不同源不同窗**（§10.5 已披露）",
+                "n": len(ratios),
+                "dist": distribution(ratios),
+                "rate_new_pct": rate(ratios, new_thr),
+            },
+            "b_single_exchange": {
+                "scope": f"{args.b_scope} / {args.b_interval} 分段增量 ÷ 同 {args.b_interval} 墙钟区间",
+                "note": "单所同窗口径；仅用于给 A 的偏高幅度定**下界**，非阈值基准（§4.3 目标降级）",
+                "interval": args.b_interval,
+                "exchange_scope": args.b_scope,
+                "n": b_dist["n"],
+                "dist": {k: v for k, v in b_dist.items() if k != "n"},
+                "rate_new_pct": rate(b_ratios, new_thr),
+            },
+            "separate_scopes_seen": {"a": ["coinglass_rolling_1h", "binance_rolling_24h"],
+                                     "b": list(b_scope_seen)},
+            "ratio_note": "A/B 数值不可换算、不可相加 ⇒ 两行分布**不得**合并求分位（不变量 4）",
+        },
+        # 跨所放大（分子端）**下界**：全所 4h 增量 / Binance 同 ts 4h 增量。
+        "cross_exchange_lower_bound": cross,
+        "b_gate": {**b_gate, "enforced": b_gate_enforced, "no_b_gate_flag": args.no_b_gate},
+        # ── P0-A（§4.1「允许①②④」）：滚动窗口列的**只读分组维度**（跨币横截面可比；
+        #    不进 5m 判定、禁跨桶差分、禁与 1h 混算比值）。
+        "rolling_groups": rolling_groups,
     }
     # ── 判据（工单 SQUEEZE-SPAN-001 §6-A）：段层面稳健统计（中位数）──────────────
     # 合并样本上界 / CI / 分段跨线**降级为诊断**（旧判据；实证「聚合悖论」——段层面 9/15
@@ -850,6 +1073,28 @@ def main() -> int:
     if m["hourly_rows"]:
         print("  逐小时行数（旧→新）：" + " ".join(str(n) for n in m["hourly_rows"]))
 
+    # ── P0-C（§4.3）：口径 A / B **分表打印**（严禁合并分位）────────────────────
+    # 放在前置门之前：B 门是并列的独立门（样本来自 P1 回填），被拒时读者必须能看到它自己的读数。
+    # ⚠️ 此前置块**只印结构性信息**（口径定义 / 样本条数 / 配对对数）——比率与分位属
+    # 「结论性读数」，样本可用性未定时印出来会被误读成判据（同 §6-C 对判据输入的处置：
+    # 段清单可以印、中位摘要不可以印）。数值统一在【口径 A / B 读数】节（样本可用后）给出。
+    sp = out["scope_split"]
+    cb = out["cross_exchange_lower_bound"]
+    print("\n【口径 A / B 分表】← P0-C：两种爆仓口径**不可换算、不可相加**（§4.3）"
+          "⇒ 两行的比值**不得**合并求分位（不变量 4）")
+    print(f"  口径 A（现役，混合）：{sp['a_mixed']['scope']}"
+          f"  样本 {sp['a_mixed']['n']} 条")
+    print(f"  口径 B（新增，单所同窗）：{sp['b_single_exchange']['scope']}"
+          f"  样本 {sp['b_single_exchange']['n']} 条"
+          f"  |  跨所配对（下界口径）{cb['n_pairs']} 对（下限 {cb['min_pairs']}）")
+    print("   ⚠️ B = **4h 分段增量**、A = **滚动窗口** ⇒ 二者比值不可换算；"
+          "B 只回答「A 的偏高幅度**至少**是多少」，**不得**据此直推阈值平移量。")
+    if not cb["ok"]:
+        print("   ⚠️ " + "；".join(cb["reasons"]))
+    if out["b_gate"]["no_b_gate_flag"]:
+        print(f"   ⭐ --no-b-gate：口径 B 门 {'通过' if out['b_gate']['ok'] else '**未**并入闸门'}"
+              "（仅供诊断，**不得**据此出结论）")
+
     # 工单 SQUEEZE-SPAN-001 §6-E：段上界纳入**标准输出**（原先只在通过 sample_ok 后才打印，
     # 而它恰是诊断「聚合悖论」的唯一入口）⇒ 移到前置门之前，任何路径都能看到。
     sg = out["segments"]
@@ -868,15 +1113,15 @@ def main() -> int:
         print(f"  无满足 n≥{MIN_SEGMENT_N} 的分段")
 
     if not sample_ok:
-        fails = denom_fail + molecule_fail + span_suf["reasons"]
+        fails = denom_fail + molecule_fail + span_suf["reasons"] + b_gate["reasons"]
         print("\n🛑 拒绝出结论：" + "；".join(fails))
         # 复验 F4：三处并发失败时标出**唯一充分因**，避免被误读成「跨度门拦下」。
         # 复验 G1：判据必须是**失败门数**（`_failed_gates`），**不能**用「理由条数」（`len(fails)`）——
         # 单门可贡献多条理由（跨度门 = 跨度 + 极端段两条；分子门 = 覆盖 + 空洞两条）⇒ 旧写法会在
         # 「只有跨度门不过」时印出「其余门亦不过」这一与事实相反的句子（prod `--vol-win-min 1e7`
         # 必然命中：分母 1.74% / 半格 0.58% 均达标）。
-        _pg = primary_gate(denom_ok, molecule_ok, span_ok)
-        _failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)
+        _pg = primary_gate(denom_ok, molecule_ok, span_ok, b_gate["ok"])
+        _failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok, b_gate["ok"]) if not ok)
         if _pg and _failed_gates > 1:
             print(f"   归因以{_pg}为准（另有 {_failed_gates - 1} 道门亦不过，见上）。")
         if not denom_ok:
@@ -892,6 +1137,10 @@ def main() -> int:
             print("   跨度不足 ⇒ 判据需跨 regime 的时间跨度（量级估计 20~60 天，**非承诺**）："
                   "「等」只能稀释极端段、不能消除它（极端 regime 出现时判据结构性必然 FAIL）。"
                   "期间维持影子模式，并继续积累判定记录。")
+        if not b_gate["ok"]:
+            print("   口径 B 不合格 ⇒ 「混合口径偏高幅度**下界**」算不出来（P0-C / §4.3）"
+                  "：先在 P1 回填 `biz.liquidation_history`（`phase_backfill_liq_history.py`）"
+                  "再重跑。⚠️ A 侧线上判定链不受影响（B **不进**实时判定，N2）。")
         # 复验 G3：与其它出口共用同一真源（旧码此处是硬编码字面量 3，改码表时会与之分叉）。
         return rc
 
@@ -920,6 +1169,41 @@ def main() -> int:
         r_old = f"{v['rate_old_pct']:.2f}%" if v["rate_old_pct"] is not None else "n/a"
         print(f"  {name:<18} n={v['n']:<6} 越阈数 {v['n_over_new']:<5}"
               f"（{v['n_over_new']}/{v['n']} = {r_new}）  旧值越阈 {r_old:>8}")
+    # ── P0-C（§4.3）：口径 A / B **读数分表**（数字只在样本可用后给）──────────────
+    # 上游【口径 A / B 分表】只印结构性信息（定义 / 条数 / 配对数）——比率与分位属
+    # 「结论性读数」，样本可用性未定时印出来会被误读成判据（同 §6-C 对判据输入的处置）
+    # ⇒ 数值统一收在这道门之后。
+    a, b = sp["a_mixed"], sp["b_single_exchange"]
+    print("\n【口径 A / B 读数】← P0-C：**两行禁止合并求分位**（不变量 4；§4.3）")
+    print(f"  口径 A（现役混合）n={a['n']}  P50={_f(a['dist']['p50'])}"
+          f" P90={_f(a['dist']['p90'])}"
+          f"  越阈率（新值 {new_thr:.8f}）= {_f(a['rate_new_pct'], '.2f')}%")
+    print(f"  口径 B（{b['interval']} / {b['exchange_scope']}）n={b['n']}"
+          f"  P50={_f(b['dist']['p50'])} P90={_f(b['dist']['p90'])}"
+          f"  越阈率（同一新值）= {_f(b['rate_new_pct'], '.2f')}%"
+          "  ← 同一阈值下 B 明显更低 = A 的偏高幅度**至少**这么大")
+    print("   ⚠️ 两行**不可换算、不可相加**；B 只回答「A 的偏高幅度**至少**是多少」"
+          "⇒ 不得据 B 直推阈值平移量（分母端窗口 24h vs 4h 错配不可分离）。")
+    if cb["ok"] and cb["ratio_median"] is not None:
+        print(f"  跨所放大下界（分子端）：配对数 {cb['n_pairs']}"
+              f"  中位 {cb['ratio_median']:.3f}"
+              f"（P25~P75 {cb['ratio_p25']:.3f}~{cb['ratio_p75']:.3f}）")
+        print(f"  逐点「全所 ≥ Binance」占比 {cb['share_ge_1']:.2%}"
+              "（分子端结构必然 ⇒ 仅作口径自洽校验，不作成果）")
+    else:
+        print("  跨所放大下界（分子端）：**未给出**（配对数不足或出现反例）"
+              " ⇒ 本行不构成结论。")
+
+    # ── P0-A（§4.1「允许④」）：滚动窗口列的**只读分组维度** ─────────────────────
+    print("\n【滚动窗口列只读分组】← P0-A：仅作**分组维度**"
+          "（跨币横截面可比）；不进 5m 判定、禁跨桶差分、禁与 1h 混算比值")
+    for _key, _g in out["rolling_groups"].items():
+        print(f"  {_key}（按三分位切桶，共 {_g['n']} 条）")
+        for _bk in _g["buckets"]:
+            _r = f"{_bk['rate_pct']:.2f}%" if _bk["rate_pct"] is not None else "n/a"
+            print(f"    {_bk['label']:<26} n={_bk['n']:<6} 越阈率 {_r:>7}"
+                  f"  P50(ratio)={_f(_bk['p50_ratio'])}")
+
     j = out["judge"]
     ub = _pct_s(j["upper_bound_pct"])
     print("\n【统计判别力】← 工单 SQUEEZE-SPAN-001 §6-A：判据输入 = 段层面稳健统计"

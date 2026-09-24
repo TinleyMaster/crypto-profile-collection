@@ -70,7 +70,14 @@ MIN_LSR_POINTS = 6         # W 内 LSR 有效点数下限（≈30min），不足
 MIN_FUEL_BUCKETS = 3       # W 内有效 5m 桶数下限
 # metrics 版本位：`metrics['fuel']` 的结构变更时递增；跨版本回看历史行必须先看它
 # （同 §10.5 的 `gap_metric_ver` 纪律）。
-FUEL_METRIC_VER = 1
+# v2（2026-09-24，P0-A §4.1）：新增 `liq_bg_*`（滚动 24h **规模背景值**，只展示不参与判定）
+#   与 `liq_bg_scope`。v1 的历史行没有这 4 个键 ⇒ NULL 而非 0，勿当「无爆仓」读。
+FUEL_METRIC_VER = 2
+
+# P0-A（§4.1 消费点②）：滚动 24h 背景值的**口径标签**（与判定侧的 1h 口径并存，不得混读）。
+# ⚠️ 故意不叫 `liq_scope`：顶层 `metrics.liq_scope` 已被判定侧占用（`coinglass_rolling_1h`），
+#    同一 metrics 对象里出现两个不同口径却同名的键会造成「一词多义」误读。
+LIQ_BG_SCOPE = "coinglass_rolling_24h"
 
 # ── 结论枚举 ──────────────────────────────────────────────────
 FUEL_EXHAUSTING = "sqz_fuel_exhausting"   # 轧空弹药耗尽
@@ -259,6 +266,36 @@ def liq_extremes(liq_rows: list[dict], vol24_usd: float | None) -> dict:
     return out
 
 
+def liq_background(liq_rows: list[dict]) -> dict:
+    """**规模背景值**（P0-A §4.1 消费点②③）：滚动 24h 窗口的爆仓累计额，只作背景展示。
+
+    与 `liq_extremes()` 的分工（**不得混用**）：
+      - `liq_extremes()` 读 `*_liq_usd_1h`（判定侧口径，参与 `classify_fuel` 的衰减判据）；
+      - 本函数读 `*_liq_usd_24h`，**不参与任何判定**，只回答「该币 24h 内爆仓规模多大」。
+
+    ⚠️ 同为**滚动窗口**列（§3.3-2 / AGENTS.md P1-1）：只取**绝对值**——严禁跨桶差分、
+    严禁与 `*_liq_usd_1h` 混算比值（§4.1 禁止项①②）、严禁 `÷24` 当 1h（禁止项③）。
+    取**调用方传入的 `liq_rows` 中最新一条**（不按燃料窗口 `W` 过滤）：它是背景值、与窗口
+    长短无关，`W` 内无行时照样给得出。缺失保持 `None`（缺失≠0）——旧行无该列、接口未返回
+    时**不得补 0**（§4.2：`12h` 分列未补，`24h` 分列旧行为 NULL）。
+    """
+    out = {"liq_bg_24h_usd": None, "liq_bg_24h_long_usd": None,
+           "liq_bg_ts": None, "liq_bg_scope": LIQ_BG_SCOPE}
+    live = [r for r in liq_rows
+            if r.get("short_liq_usd_24h") is not None
+            or r.get("long_liq_usd_24h") is not None]
+    if not live:
+        return out
+    newest = max(live, key=lambda r: _ts_of(r) or datetime.min)
+    ts = _ts_of(newest)
+    out["liq_bg_24h_usd"] = (None if newest.get("short_liq_usd_24h") is None
+                             else float(newest["short_liq_usd_24h"]))
+    out["liq_bg_24h_long_usd"] = (None if newest.get("long_liq_usd_24h") is None
+                                  else float(newest["long_liq_usd_24h"]))
+    out["liq_bg_ts"] = ts.isoformat() if ts else None
+    return out
+
+
 def divergence_inputs(k_rows: list[dict], oi_rows: list[dict]) -> tuple[list[float], list[float]]:
     """构造背离判定用的「价格序列」与「累计 CVD 序列」（严格等长、按时间升序）。
 
@@ -420,6 +457,8 @@ def evaluate_fuel(*, oi_rows: list[dict], lsr_points: list[tuple],
     返回 `{'verdict','label','reason','confidence','gate_ok','gate_reason',
     'data_missing','metrics'}`；`verdict=None` 表示闸门未过（**拒判**，与 `mixed`
     的「结构不明」是两回事，用 `gate_ok` 区分）。
+    `metrics` 另含 `liq_bg_*`（滚动 24h **规模背景值** + `liq_bg_scope`，P0-A §4.1）——
+    **只展示、不参与判定**，且**闸门未过时同样存在**（缺口存在性标注）。
     """
     w_oi = [r for r in oi_rows if _in_win(r, surge_start_ts, now)]
     w_liq = [r for r in liq_rows if _in_win(r, surge_start_ts, now)]
@@ -430,6 +469,10 @@ def evaluate_fuel(*, oi_rows: list[dict], lsr_points: list[tuple],
 
     gate = fuel_gate(oi_rows=w_oi, lsr_points=w_lsr, surge_start_ts=surge_start_ts,
                      now=now, bucket_seconds=bucket_seconds)
+    # P0-A（§4.1 消费点②，**缺口存在性标注**）：24h 规模背景值取自**未过滤**的 `liq_rows`，
+    # 故闸门未过（含 1h 快照超龄 ⇒ 判定侧走 `missing`）时**照样落库** ⇒ 排查时能区分
+    # 「确实没有爆仓」与「1h 快照断了但 24h 背景还在」。判定行为不受其影响（不进 classify_fuel）。
+    bg = liq_background(liq_rows)
     metrics = {
         "fuel_metric_ver": FUEL_METRIC_VER,
         "window_start": surge_start_ts.isoformat(),
@@ -442,6 +485,7 @@ def evaluate_fuel(*, oi_rows: list[dict], lsr_points: list[tuple],
         "gap_metric_ver": gate["gap_metric_ver"],
         "head_gap_buckets": gate["head_gap_buckets"],
         "mid_gap_buckets": gate["mid_gap_buckets"],
+        **bg,
     }
     if not gate["gate_ok"]:
         return {"verdict": None, "label": "暂不评估（闸门未过）",
@@ -495,8 +539,8 @@ def evaluate_fuel(*, oi_rows: list[dict], lsr_points: list[tuple],
 
 __all__ = [
     "proxy_shares", "quadrant", "buy_to_close_share", "price_cvd_divergence",
-    "proxy_extremes", "liq_extremes", "divergence_inputs", "fuel_gate",
-    "classify_fuel", "evaluate_fuel", "VERDICT_LABEL",
+    "proxy_extremes", "liq_extremes", "liq_background", "divergence_inputs", "fuel_gate",
+    "classify_fuel", "evaluate_fuel", "VERDICT_LABEL", "LIQ_BG_SCOPE",
     "FUEL_EXHAUSTING", "FUEL_ACTIVE", "LONG_PUMP", "SHORT_REBUILD", "MIXED",
     "BUY_CLOSE", "SELL_CLOSE", "LONG_OPEN", "SHORT_OPEN",
 ]

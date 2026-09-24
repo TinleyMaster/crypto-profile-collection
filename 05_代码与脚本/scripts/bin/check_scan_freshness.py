@@ -49,6 +49,7 @@ import psycopg  # noqa: E402
 import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
 
 WATCHDOG_TASK_KEY = "scan_stall"
 # 健康提示独立去重键（SQZ-01/06）：不复用 scan_stall，避免「健康提示」与真正的
@@ -90,10 +91,11 @@ DATA_SOURCE_TASKS = {
 }
 
 
-def _fmt_utc(dt: datetime | None) -> str:
+def _fmt_bj(dt: datetime | None) -> str:
+    """邮件展示用：时间戳 → 北京时间（东八区）；None → 「无数据」。"""
     if dt is None:
         return "无数据"
-    return dt.astimezone(timezone.utc).strftime("%m-%d %H:%M UTC")
+    return fmt_bj(dt, "%m-%d %H:%M") + "（北京时间）"
 
 
 def _detect_silent_failure(items: list[dict]) -> list[str]:
@@ -109,8 +111,8 @@ def _detect_silent_failure(items: list[dict]) -> list[str]:
             if task_item is None or task_item["stale"]:
                 continue
             hits.append(
-                f"{data_name}已停更（{_fmt_utc(data_item['mx'])}），但任务 {task} "
-                f"最近一次成功在 {_fmt_utc(task_item['mx'])}（判为正常）")
+                f"{data_name}已停更 {_fmt_bj(data_item['mx'])}，但任务 {task} "
+                f"最近一次成功在 {_fmt_bj(task_item['mx'])}（判为正常）")
             break
     return hits
 
@@ -235,7 +237,7 @@ def _render_items_html(items: list[dict]) -> str:
         if it["mx"] is None:
             detail = "表为空"
         else:
-            detail = f"最新 {_fmt_utc(it['mx'])}（距今 {it['age_min']:.0f} 分钟）"
+            detail = f"最新 {_fmt_bj(it['mx'])}（距今 {it['age_min']:.0f} 分钟）"
         mark = "🔴 停摆" if it["stale"] else "🟢 正常"
         # note（心跳语义：线程在跑但连续失败 / 从未启动 / 首轮宽限）必须渲染出来，
         # 否则「数据停摆、任务全绿」的自相矛盾会原样复现（审计 P0-B / P2-5）。
@@ -376,7 +378,7 @@ def _collect_squeeze_health(conn) -> list[str]:
             expect = int(OI_BUCKET_WINDOW_H * 60 / 5)   # 5m 桶数
             if have < expect * OI_BUCKET_DEFICIT_RATIO:
                 cause = (f"daemon 近 {OI_BUCKET_WINDOW_H}h 内重启过"
-                         f"（{_fmt_utc(daemon_start)}）" if restarted
+                         f"，起于 {_fmt_bj(daemon_start)}" if restarted
                          else f"daemon 近 {OI_BUCKET_WINDOW_H}h 未重启")
                 notes.append(
                     f"{cause}，而该窗口 OI 桶仅 {have}/{expect}"
@@ -430,7 +432,7 @@ def main() -> int:
                 settings,
                 "✅ 盘面扫描数据已恢复",
                 "<h2 style='margin:0'>✅ 盘面扫描数据已恢复</h2>"
-                f"<p>告警（{_fmt_utc(last_any)} 发出）后已恢复正常：</p>"
+                f"<p>告警发出于 {_fmt_bj(last_any)}，其后数据已恢复正常：</p>"
                 + _render_items_html(items)
                 + "<p style='color:#999;font-size:12px'>盘面信号外部看门狗 · 自动邮件</p>",
             )

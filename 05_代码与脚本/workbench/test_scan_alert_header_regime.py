@@ -111,7 +111,10 @@ for bad in ("brk_down", "vol_x=", "bar="):
 
 print("\n【B1】BRK 状态人文化并列展示")
 check("本批含蓄势池突破（BRK）1 条" in html, "头部并列「本批含蓄势池突破（BRK）1 条」")
-check("触发根 09/22 06:00" in html, "BRK 卡片标「触发根 09/22 06:00」（来自 bar= 标签）")
+check("触发根 09/22 14:00" in html,
+      "BRK 卡片标「触发根 09/22 14:00」（bar= UTC 根 +8 转北京时间）")
+check("生成于" in html and "（北京时间）" in html,
+      "抬头生成时间标注北京时间（东八区）")
 
 print("\n【B1】未传 regime_tags 的兜底：仍不得泄漏 token")
 html_fb = sd._render_alert_email(items)  # items[0]=BRK，无 L0 标签可抽

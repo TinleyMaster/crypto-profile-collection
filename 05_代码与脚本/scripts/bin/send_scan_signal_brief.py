@@ -28,6 +28,7 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
 
 CONF_ORDER = {"high": 0, "medium": 1}
 CONF_COLOR = {"high": "#c0392b", "medium": "#e67e22"}
@@ -119,7 +120,7 @@ def _fmt_funding(v) -> str:
 
 
 def render_html(signals: list[dict], hours: int, low_count: int) -> str:
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     head = f"""
     <h2 style="margin:0 0 4px">盘面异动信号 · 日报</h2>
     <p style="margin:0 0 12px;color:#666;font-size:13px">近 {hours} 小时 · 生成于 {now} · high/medium 置信度 · 净收益口径见设计方案 §8</p>"""
@@ -135,7 +136,7 @@ def render_html(signals: list[dict], hours: int, low_count: int) -> str:
             n = f' <span style="color:#999">×{r["n_hits"]}</span>' if r["n_hits"] > 1 else ""
             trs.append(f"""
             <tr>
-              <td>{str(r['signal_ts'])[5:16]}</td>
+              <td>{fmt_bj(r['signal_ts'], '%m-%d %H:%M')}</td>
               <td><b>{r['symbol']}</b>{n}</td>
               <td>{pool}</td>
               <td><b style="color:{conf_color}">{sc}</b> {desc}</td>
@@ -150,7 +151,7 @@ def render_html(signals: list[dict], hours: int, low_count: int) -> str:
         body = f"""
         <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px;width:100%">
           <tr style="background:#f5f5f5">
-            <th>时间</th><th>币种</th><th>池</th><th>场景</th><th>周期</th>
+            <th>时间(北京时间)</th><th>币种</th><th>池</th><th>场景</th><th>周期</th>
             <th>价格</th><th>量比</th><th>OI</th><th>CVD</th><th>费率</th><th>环境</th>
           </tr>
           {''.join(trs)}

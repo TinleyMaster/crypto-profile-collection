@@ -30,6 +30,7 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
 
 STATE_FILE = SCRIPT_DIR.parent / "data" / "cvd_ready_state.json"
 DEFAULT_MIN_DAYS = 14   # 精确 CVD 需积累 N 天（WS 落地后 1-2 周）
@@ -120,7 +121,7 @@ def main() -> int:
 
     cmd = ("python backtest_scan_scenarios.py --min-n 15\n"
            "python backtest_scan_scenarios.py --sweep  # 可选：阈值复校")
-    ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    ts = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     body = BODY_TEMPLATE.format(
         ts=ts, days=status["days"], min_days=args.days,
         symbols=status["symbols"], buckets=status["buckets"], cmd=cmd,

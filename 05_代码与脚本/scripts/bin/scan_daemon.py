@@ -61,6 +61,7 @@ from crypto_research.analysis import squeeze_fuel as sqz_fuel  # noqa: E402
 from crypto_research.clients.binance_http import fapi_get, set_min_request_gap  # noqa: E402
 from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
+from crypto_research.utils.time_utils import fmt_bj, to_bj  # noqa: E402
 
 # ── 日志流韧性（审计 P0-A 根因修复） ────────────────────────────
 
@@ -2036,8 +2037,8 @@ def _render_resonance_msgs(res: dict) -> str:
 
 def _render_alert_email(items: list[dict],
                         regime_tags: list[str] | None = None) -> str:
-    # 统一标注 UTC（审计 P2-1：容器 TZ=UTC，原实现无时区标注，易被读成本地时间）
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # 统一标注北京时间（东八区）：数据存储与判定口径仍是 UTC，仅展示层转换。
+    now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     # 卡片按相对强度降序（审计 §三.6：原按 signal_ts 平铺同色，量比 8.55x 与 2.69x
     # 视觉权重完全相同）。排序在渲染层单点完成，保证标题计数与正文一致。
     items = sorted(items, key=_alert_strength, reverse=True)
@@ -2081,13 +2082,14 @@ def _render_alert_email(items: list[dict],
                 lv_txt = f"{str(t).split('_')[-1]} 级异动"
                 break
         # 蓄势池 BRK：`bar=` 标签原仅用于同根去重（P2-7），审计 B1 要求人文化展示
-        # 触发根（此前该 token 只会泄漏进头部）。`bar=2026-09-22T06` → 「触发根 09/22 06:00」。
+        # 触发根（此前该 token 只会泄漏进头部）。`bar=2026-09-22T06`（UTC 根）
+        # → 「触发根 09/22 14:00」（+8 转北京时间；`bar=` 本身仍是 UTC 去重键，不改）。
         brk_bar = ""
         if sc == "BRK":
             for t in (sig.get("context_tags") or []):
                 s = str(t)
                 if s.startswith("bar=") and len(s) >= 17:
-                    brk_bar = f" · 触发根 {s[9:11]}/{s[12:14]} {s[15:17]}:00"
+                    brk_bar = f" · 触发根 {fmt_bj(s[4:], '%m/%d %H:%M')}"
                     break
         fund = sig.get("funding_rate")
         # 资金费率原值存的是小数比例（0.00005 = 0.005%），且**不兜底 0**；
@@ -2388,7 +2390,7 @@ def _stall_parts(conn, now: datetime) -> list[str]:
             continue
         age_min = (now - mx).total_seconds() / 60
         if age_min > STALL_ALERT_AGE_MIN:
-            parts.append(f"{label} 停在 {mx.strftime('%m-%d %H:%M')} UTC（约 {age_min:.0f} 分钟前）")
+            parts.append(f"{label} 停在 {fmt_bj(mx)}（北京时间，约 {age_min:.0f} 分钟前）")
 
     # 任务心跳（表不存在时跳过，兼容迁移未执行的部署）
     try:
@@ -2437,7 +2439,7 @@ def _stall_parts(conn, now: datetime) -> list[str]:
                 err = row["last_error"]
                 detail = f"，最近一轮报错 {err}" if err else ""
                 parts.append(
-                    f"任务 {name} 最近一次成功停在 {base.strftime('%m-%d %H:%M')} UTC"
+                    f"任务 {name} 最近一次成功停在 {fmt_bj(base)}（北京时间）"
                     f"（约 {age_min:.0f} 分钟前，阈值 {limit_min:.0f} 分钟）{detail}")
     except Exception as e:  # noqa: BLE001
         print(f"[scan_daemon][stall] 心跳检查跳过（{e}）", file=sys.stderr)
@@ -2868,18 +2870,10 @@ def _fmt_ratio(v, digits: int = 1) -> str:
     return f"{float(v) * 100:+.{digits}f}%"
 
 
-def _hhmm_utc(v) -> str:
-    """时间（datetime / ISO 字符串）→ 'HH:MM'（UTC）；无效值 → '—'。"""
-    if not v:
-        return "—"
-    try:
-        d = v if isinstance(v, datetime) else datetime.fromisoformat(
-            str(v).replace("Z", "+00:00"))
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d.astimezone(timezone.utc).strftime("%H:%M")
-    except Exception:  # noqa: BLE001
-        return "—"
+def _hhmm_bj(v) -> str:
+    """时间（datetime / ISO 字符串）→ 'HH:MM'（北京时间）；无效值 → '—'。"""
+    bj = to_bj(v)
+    return bj.strftime("%H:%M") if bj is not None else "—"
 
 
 def _entry_timeframe(track: dict) -> str:
@@ -2897,7 +2891,7 @@ def _entry_timeframe(track: dict) -> str:
 
 def _render_squeeze_alert(items: list[dict]) -> str:
     now_dt = datetime.now(timezone.utc)
-    now = now_dt.strftime("%Y-%m-%d %H:%M") + " UTC"
+    now = fmt_bj(now_dt, "%Y-%m-%d %H:%M") + "（北京时间）"
     # 配色按中文用户惯例（红涨绿跌）：多头胜=红、空头胜=绿
     colors = {sqz.LONG_WIN: "#ef4444", sqz.SHORT_WIN: "#22c55e",
               sqz.PROFIT_TAKE: "#f59e0b", sqz.CHURN: "#6b7280"}
@@ -2906,8 +2900,8 @@ def _render_squeeze_alert(items: list[dict]) -> str:
         v, m, t = it["verdict"], it["metrics"], it["track"]
         color = colors.get(v["conclusion"], "#6b7280")
         tf = m.get("surge_timeframe") or _entry_timeframe(t)
-        timeline = (f"入队 {_hhmm_utc(t.get('started_at'))} → "
-                    f"峰值 {_hhmm_utc(m.get('peak_ts'))} → 判定 {now_dt.strftime('%H:%M')} UTC")
+        timeline = (f"入队 {_hhmm_bj(t.get('started_at'))} → "
+                    f"峰值 {_hhmm_bj(m.get('peak_ts'))} → 判定 {fmt_bj(now_dt, '%H:%M')}")
         cover = m.get("oi_cover")
         cover_txt = ""
         if isinstance(cover, dict) and cover.get("have") is not None \
@@ -2924,7 +2918,7 @@ def _render_squeeze_alert(items: list[dict]) -> str:
             top_txt = f"Δ {_fmt(m.get('top_ratio_chg'), 3)}"
         taker_txt = _fmt(m.get("taker_ratio"), 2)
         if m.get("taker_ts"):
-            taker_txt += f"（{_hhmm_utc(m['taker_ts'])}）"
+            taker_txt += f"（{_hhmm_bj(m['taker_ts'])}）"
         parts.append(
             f"<div style='margin:8px 0;padding:10px;border-left:4px solid {color};background:#f9fafb'>"
             f"<b>{t['symbol']}</b> "

@@ -32,6 +32,7 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
 
 NEW_WINDOW_MIN = 20      # 只告警最近 N 分钟内的新信号
 COOLDOWN_H = 12          # 同币告警冷却
@@ -121,7 +122,7 @@ def get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
 
 
 def render_alert_email(items: list[dict]) -> str:
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     blocks = []
     for it in items:
         sig = it["signal"]

@@ -200,7 +200,7 @@ def _render_liquidation_row(liq: dict) -> str:
     as_of_txt = _fmt_liq_as_of(liq.get("ts"))
     foot = f"口径：{scope_note} · {cover_txt}"
     if as_of_txt:
-        foot += f" · 数据截至 {as_of_txt}"
+        foot += f" · 数据截至 {as_of_txt}（北京时间）"
 
     return (
         '<div style="margin-top:6px;background:#f8fafc;border-radius:6px;padding:6px 8px;'
@@ -215,15 +215,8 @@ def _fmt_liq_as_of(ts) -> str:
     """把快照批次时间（UTC ISO 串）转成北京时间 `MM-DD HH:MM` 供披露；不可解析则返回空串。"""
     if not ts:
         return ""
-    try:
-        from datetime import datetime, timezone
-        from zoneinfo import ZoneInfo
-        dt = datetime.fromisoformat(str(ts))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
-    except Exception:
-        return ""
+    from crypto_research.utils.time_utils import fmt_bj
+    return fmt_bj(ts, "%m-%d %H:%M", fallback="")
 
 
 def render_brief_html(brief: dict) -> str:

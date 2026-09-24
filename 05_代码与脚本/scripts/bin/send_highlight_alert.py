@@ -39,6 +39,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 
+from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
+
 # =====================================================================
 # 常量
 # =====================================================================
@@ -373,7 +375,7 @@ def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights:
     n_new = sum(1 for _, k in items if k == ALERT_NEW)
     n_up = len(items) - n_new
     cards = [c for c, _ in items]
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     head = f"""
     <h2 style="margin:0 0 4px">⚡ 高亮信号提醒</h2>
     <p style="margin:0 0 12px;color:#666;font-size:13px">

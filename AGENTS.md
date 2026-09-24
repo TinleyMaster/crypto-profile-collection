@@ -150,7 +150,7 @@
   - 阶段 1 入队确认、阶段 3 判定、`task_scan_liquidation` 文档、`coinglass_client` 文档、`fix_056` 注释四处同步更正。
 - **P1-2 覆盖率闸门**：判定前算 `expect_buckets = floor(now/300) − ceil(peak/300) + 1`，`coverage = len(win_oi)/expect`；`< MIN_WINDOW_COVERAGE(0.6)` → **不判定**（track 留 tracking，不落 `scan_signal`、不发邮件），stats 加 `insufficient_coverage`。本例缺口 9/13 桶（0.15）会被拦下。邮件在覆盖 <100% 时披露 `数据覆盖 N/M 桶`。
 - **P1-3 `None → 0.0` 兜底（会让「缺数据」满足「多头胜」前置条件）**：`evaluate_battle` 重写——`big_long_liq` 仅在 `long_liq_ratio is not None` 时为真；`profit_take`/`long_win` 需 `d_oi`、`cvd`、`long_liq` **三维均已确知**；`short_win` 需 `cvd`+`long_liq` 已知。缺失维度写入 `metrics['data_missing']` 并在 reason 标注，降级 `churn`（无方向）。**未新增 `data_insufficient` 结论枚举**（避免扩 `SQZ_*` 取值域/前端），以 churn + 标注 + 覆盖率闸门达成「拒绝给方向」。
-- **P2-1** 邮件时间戳补 `UTC`（原 naive `datetime.now()`，容器 TZ=UTC 但未标注）。
+- **P2-1** 邮件时间戳**统一北京时间（东八区）**：原 naive `datetime.now()` 无标注 → 曾补 `UTC` → 2026-09-24 起全部改东八区并标注「（北京时间）」（见末节「邮件时区统一」）。
 - **P2-2 HTTP 移出 DB 块**：进主事务前先用一次短读取出 tracking 符号，预取 `_live_price` + `_fetch_long_short_ratio` 到 `px_map`/`lsr_map`，DB 块内不再发 HTTP。
 - **P2-3 口径不一致只做披露**（分子 CoinGlass 全交易所爆仓 / 分母 Binance 24h 成交额）：邮件脚注明示，字段加 `liq_scope=coinglass_rolling_1h`；未改数据源。
 - **P3 展示修正**：`or 0` 全删（`_fmt_ratio` 让 `None→'—'`、`0.0→'+0.000%'` 可区分）；标签改 `最近1h多空爆仓`；加「入队→峰值→判定」时间轴；大户多空比改 `base → now（Δ）`；主动买卖比带数据时点；配色按中文惯例（多头胜=红 `#ef4444`、空头胜=绿 `#22c55e`）。
@@ -622,7 +622,7 @@
 
 - **🔴 B1（P1，核心）头部「市场环境」泄漏 BRK 原始调试 token**：邮件 2 头部渲染成 `市场环境 brk_down | vol_x=29.9 | bar=2026-09-22T06`，而图例承诺「市场环境 = 全局 regime（btc_1h/fgi/cap_trend）」，**自相矛盾**。根因：头部取 `items[0]["signal"]["context_tags"]`（按强度排序后第一条），当第一条是蓄势池 BRK 时其 `context_tags` 是 `["brk_down","vol_x=…","bar=…"]`，且 L0 regime（`regime_tags`）**整段丢失**。
   - **修复**：`_render_alert_email(items, regime_tags=None)` 新增入参；`task_scan_alert` 批次级调用一次 `_build_regime(conn)["tags"]` 并传入 ⇒ 头部与逐信号 `context_tags` **解耦**。未传时只从 items 抽 **L0 形态**标签兜底（`btc_1h=`/`fgi=`/`cap_trend=`/含「环境受限」），**任何情况下都不再泄漏 `brk_*`/`vol_x=`/`bar=`**。
-  - **BRK 状态人文化后并列展示**（不替换 regime）：头部加一行「本批含蓄势池突破（BRK）N 条」；BRK 卡片把原 `bar=` 标签解析为「触发根 09/22 06:00」。图例补两条对应说明。
+  - **BRK 状态人文化后并列展示**（不替换 regime）：头部加一行「本批含蓄势池突破（BRK）N 条」；BRK 卡片把原 `bar=` 标签解析为「触发根 09/22 14:00」（`bar=` 是 UTC 根，+8 转北京时间；去重键本身不变）。图例补两条对应说明。
 - **🟠 B3（P2，已修）强度 0.6 却标「高置信」**：强度条基量 = 量比 × |OI 增速|（OI 为乘性因子）⇒ OI 持平时分数必然贴地，与标题「高置信」同框致读者困惑。现 `|oi_chg| < OI_FLAT_PCT` 时卡片在强度条后明示「（OI 持平，强度条偏低）」。
 - **🟠 B4（P3，已修）CVD 缺值用图例未定义的「未知」**：`CVD {cvd or '未知'}` → `'n/a'`，与图例「n/a = 该维度无从查询」口径统一（BRK 无 CVD 即渲染 `CVD n/a`）。
 - **未改（观察项）**：SOPHUSDT 费率 `-0.9616%/8h`（年化 -1053%）数学正确、DB 两行一致，属**数据 sanity 待查**（非渲染 bug），未动数据源。
@@ -882,3 +882,19 @@
 - **顺带观测**：`major_event` 留痕已有 3 条（`log_id=72` 本地探针 BCH；`74/76` 于 2026-09-23 16:06:01 UTC 由线上进程实发 AAVE/LIT，同一微秒时间戳 ⇒ 同批次 2 封）⇒ **上一轮 `c000fec` 的代码确已在线上跑**，佐证本次修复同样**只需 redeploy 即可生效**。
 - **待部署**：需 Zeabur **显式 redeploy**（同 `81f281c` / `c000fec`）。
 - **本轮范围外（审计 P1/P2/P3 共 11 项，留档未动）**：量比缺失值默认 0 标「极度缩量」（与 `ai_enhance` 的「未知」口径不一）、`description_short` 内嵌 stale 价格、`total_liquidity_usd`（$2.02M）被当可交易量做「稀薄」叙事（疑脏数据，需 prod 复核）、共振分 90 与「弱共振」同屏、双置信度并列、警告文案硬编码「ticker同名但不同项目」、规则档位与 AI 风控不校准、源脆弱（结构性催化应以官方公告为锚）、赛道贴标、标题 `XRP / XRP` 冗余。
+
+### 邮件时区统一为东八区（2026-09-24，用户指令「所有邮件中信息的时区都改成东八区」，本次提交）
+
+**范围**：只改**展示层**。DB 会话时区、数据存储、判定口径、`bar=` 去重键**一律不动**（`bar=` 仍是 UTC 根，改它会破坏 P2-7 同根去重与历史数据）。控制台 `print` 日志**不在范围内**（如 `check_scan_freshness.py` 的 `[看门狗] … UTC 检查：` 保留 UTC）。
+
+- **唯一定义**：新增 [time_utils.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/scripts/src/crypto_research/utils/time_utils.py) —— `BJ_TZ = timezone(timedelta(hours=8))`、`to_bj(dt)`（aware 直转 / naive 按 UTC 解释 / ISO 串与 `None` 容错，失败返 `None`）、`fmt_bj(dt, fmt, fallback)`。**禁止**再在别处重复定义 `timezone(timedelta(hours=8))`（原已有 4+ 处各自定义）。
+- **改造点（8 文件）**：
+  - `scan_daemon.py`（告警 / 停摆 / 轧空三封邮件）：抬头 `生成于`、停摆项 `停在 …`、任务心跳 `最近一次成功停在 …`、轧空 `入队→峰值→判定` 时间轴（`_hhmm_utc` → `_hhmm_bj`）；BRK 卡片 `触发根` 由 UTC `bar=` 串 +8（`2026-09-22T06` → `09/22 14:00`）。
+  - `check_scan_freshness.py`：`_fmt_utc` → `_fmt_bj`（含「（北京时间）」），覆盖检查项「最新时间」列、静默失败交叉判据、OI 桶缺口「起于 …」、恢复邮件「告警发出于 …」。
+  - `send_highlight_alert.py` / `send_scan_signal_brief.py` / `phase_check_cvd_ready.py` / `scan_alert_monitor.py`：抬头 `生成于`（原 `datetime.now(timezone.utc).astimezone()` 在容器 TZ=UTC 下实为 UTC 且无标注）。
+  - `send_scan_signal_brief.py` 表格「时间」列：原 `str(signal_ts)[5:16]`（UTC）→ `fmt_bj(...)`，表头改「时间(北京时间)」。
+  - `send_daily_brief.py`：`_fmt_liq_as_of` 改用共享 `fmt_bj`（去掉本地 `ZoneInfo("Asia/Shanghai")`），展示点补「（北京时间）」。
+- **本就合规、未动**：`send_scan_edge_report.py`（已用 `SH` 且标注「北京时间」）、`binance_bapi_healthcheck.py`、`workbench/catalyst/notifier.py::_fmt_ts`（aware → 北京 + 「（北京）」）、`workbench/kol/notifier.py`（「北京时间」）、`clients/notifier.py`（无时间展示）。
+- **验收**：`py_compile` 9 文件全过；`test_scan_alert_header_regime.py` **135/135**（触发根断言由 `09/22 06:00` 改 `09/22 14:00`，并新增「抬头标注北京时间」护栏）；`test_scan_alert_audit_deepdive` 75/75、`test_scan_alert_remaining` 16/16、`test_scan_scenario_label` 48/48、`test_scan_l1_closed_bar` 16/16、`test_squeeze_alert_silence` 18/18、`test_squeeze_battle` 143/143、`test_highlight_alert` 68/68、`test_daily_brief_p1` 22/22、`test_liq_overview_brief` 49/49 全无回归。
+- **真 DB 端到端**：告警邮件实测 `bar=2026-09-23T23` → `触发根 09/24 07:00`、抬头 `生成于 2026-09-24 08:59（北京时间）`；`send_scan_signal_brief --dry-run` 抬头与「时间」列均北京时间；`send_highlight_alert --dry-run` 抬头北京时间。
+- **待部署**：`scan_daemon` 需重启容器（渲染层在常驻进程内），其余为 scheduler 一次性脚本，下次调度即生效。

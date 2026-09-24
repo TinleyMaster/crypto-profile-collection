@@ -2870,15 +2870,17 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
             if pct is not None:
                 result["unlock"]["next_unlock_pct"] = pct
             # 30天解锁比例
+            # 复用同文件 _parse_unlock_event_date（多格式解析器），因其返回 date，
+            # 阈值同步取 date；此前用 datetime.fromisoformat 解析人类可读日期
+            # （如 "Sep 25, 2026"）恒失败且被静默吞掉，导致 unlock_pct_30d 恒 0.0。
             from datetime import datetime, timezone, timedelta
             try:
-                now = datetime.now(timezone.utc)
-                thirty_days = now + timedelta(days=30)
+                thirty_days = (datetime.now(timezone.utc) + timedelta(days=30)).date()
                 pct_30d = 0.0
                 for e in upcoming:
                     try:
-                        ed = datetime.fromisoformat(str(e["date"]).replace("Z", "+00:00"))
-                        if ed <= thirty_days:
+                        ed = _parse_unlock_event_date(e.get("date"))
+                        if ed and ed <= thirty_days:
                             pct_30d += _to_float(e.get("pct")) or 0
                     except (ValueError, TypeError, KeyError):
                         pass

@@ -1014,3 +1014,15 @@
   - **🟡 F5（P3，已修）字段语义漂移未改名**：`upper_bound_n`→`upper_bound_n_segments`、`ci_distance_pp`→`merged_ci_distance_pp`（旧名保留一轮为别名，无消费方）。
   - **⚪ F6（P3，已修）死变量** `new_rates` 删除。
   - **自测**：`test_squeeze_span_judge.py` 25→**42/42**（+F1 `exit_code` 契约 5 例 + **F1 端到端注入**（样本可用+IQR 跨线 ⇒ rc=4，旧码会误判 0）+ F4 `primary_gate` + F2 数值断言 + F5/F6 源码守卫）；workbench 全量 `test_*.py` 零失败；prod 只读实测 rc=3（默认「归因以分母门为准」、1e7「归因以跨度门为准」），段清单不再印摘要、无判定比率。
+
+### 投研页 unlock_pct_30d 恒 0.0 修复（审计_投研页机会挖掘_8680_TAKE_2026-09-24.md，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_投研页机会挖掘_8680_TAKE_2026-09-24.md` 的 **P1（系统性代码 bug）**。资产 8680=OVERTAKE(TAKE)，线上 `/api/research/8680/notebook` 的 `unlock.unlock_pct_30d` 恒显 **0.0**，而 prod `biz.asset_unlock_pressure` 真实值 = **5.60**（9/25 即解锁 5.6%）⇒ 直接误导「无解锁抛压」。**本次只修 P1**；P2（fallback 信号计数无溯源）/P3（cg 单映射 `is_primary=False`）按审计 §五 Scope 不扩，另立。
+
+- **根因（物证级）**：`_build_structured_metrics_inner`（[db_stats.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/db_stats.py#L2878-L2887) 原 L2880）用 `datetime.fromisoformat(str(e["date"]))` 解析**人类可读日期**（`"Sep 25, 2026"` / `"25 Dec 2026"` / `"Sep 12, 2026Next"`）⇒ 必然抛 `ValueError` 且被 `except` 静默吞掉 ⇒ `pct_30d` 恒 0.0。`next_unlock_date`/`next_unlock_pct` 直取 `e["date"]`/`e["pct"]`、不经过日期解析，故只有 `unlock_pct_30d` 塌成 0。同文件 [L7812 `_parse_unlock_event_date`](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/db_stats.py#L7812) 已是正确的多格式解析器（被 `compute_unlock_pressure` 正确调用，故 pressure 表才是真值 5.60）——L2880 属「重复实现且更弱」的反模式。
+- **修复（1 处 + 注释）**：L2880 改用 `_parse_unlock_event_date(e.get("date"))`；因该函数返回 `date`，阈值同步改 `(datetime.now(timezone.utc) + timedelta(days=30)).date()`（否则 `date <= datetime` 抛 TypeError）；`if ed and ed <= thirty_days`。
+- **影响面（审计只读量化）**：notebook `unlock_pct_30d` 恒显 0.0 的资产 **450 个**（有 upcoming 人类日期事件），其中 pressure 表实际 >0 的 **183 个**（两者矛盾可独立验证）。
+- **验收三通道**：① 真码 diff = 本次改 1 处；② **prod 只读端到端**（本次实测）：读 `biz.research_notebook`(8680) 的 `snapshot_json` 后调 `_build_structured_metrics_from_snapshot` ⇒ `{"upcoming_events_count":4, "next_unlock_date":"Sep 25, 2026", "next_unlock_pct":5.6, "unlock_pct_30d":5.6}`（**原 bug 恒 0.0**，与审计 §二.② 真值吻合）；③ 部署后 notebook 重算应显示 5.60。
+- **自测**：新增 [test_unlock_pct_30d.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_unlock_pct_30d.py) **16/16**（纯离线：多格式解析 7 例 + 30 天内累加/边界 4 例 + 人类日期原例 1 例 + 真无 30 天事件保 0.0 1 例 + AST 源码护栏 3 例）；`py_compile` 通过。
+- **待部署**：`db_stats.py` 在 web 应用进程内，需 redeploy 后 notebook 才生效（本地已修 + prod 只读已证修复有效）。
+- **未做（本工单不扩）**：P2 fallback thesis 去掉/渲染真实信号计数（产品决策）；P3 cg 单映射置 primary（并入 W5-plus）；onchain 33 天陈旧（上游采集调度，另立）。

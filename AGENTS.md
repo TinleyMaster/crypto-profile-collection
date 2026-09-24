@@ -1081,3 +1081,16 @@
 - **自测**：新增 [test_research_completeness_badge.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_research_completeness_badge.py) **14/14**（容器/样式、`render(d)` 接线、口径 `m.present`、**零配额护栏（函数体内无 `fetch(`/`XMLHttpRequest`）**、侧栏文案、后端 `missing` 返回体）；另用 node 对整段 `<script>`（Jinja 占位符替换后）做 `--check` **JS 语法通过**。
 - **待部署**：模板在 web 应用进程内，需 redeploy 后生效。
 - **未做（遵工单 §三待拍板）**：D1 未采用弹层方案（取头部徽章，最省代码）；D2「关键维度（derivatives/klines）更强提示」未做（这些维度不在 `missing`（资料清单）而在 `structured_metrics`，属另一数据源，另议）。
+
+### 高亮信号邮件审计处置 M1/M3/M4/M6（审计_高亮信号邮件_2026-09-24，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_高亮信号邮件_2026-09-24.md`。审计先确认标题自证 / 字段完整性 / D2·D4·A2·B2 防线**全部通过**，再列 M1~M6 + 产品洞察。本轮修 **M1/M3/M4/M6**（**零 DDL、零迁移、不改 tier 计算与 AI 评审规则**）；**M2（HIGH 泛滥 + 90% turnover）与 M5 另论**（见末条）。
+
+- **🔴 M1（P1）事件强度跨类型不可比（已修 `macro_market._event_strength_score`）**：`flow_pct`（链 TVL）用 ×4、`mcap_pct`（叙事市值）用 ×3 ⇒ 同一百分比数值在链信号上系统性偏高，且**排序倒置**（同快照 Base 链 +11.9%→90 排在 ZeroKnowledge +11.9%→85 之前；`conv = 0.6×六轴 + 0.4×es` 把 es 失真传染给统一排序）。修为**单一曲线**（常量 `_PCT_ES_SLOPE=3.0` / `_PCT_ES_CAP=40`，两 kind 共用），同值必同分；实测 +11.9% 两口径均 **85**、+11.6%<+11.9%（倒置消除）。
+- **🟠 M3（P2）catalyst 类缺 event_strength（已修）**：`c38e755` 的 A1 只覆盖 whale/kol/narrative/chain/etf，**漏了催化剂**——而本封邮件 5 币里 3 币是纯催化剂，其确定性只由 conv 单数字承载。`_event_strength_score` 新增 `"score"` kind（0-100 直接夹取），催化剂**两条路径**（决策/回退）均补 `event_strength=_event_strength_score("score", cscore, t)`。**不改 conviction**——催化情绪已按权重计入六轴，再融合会重复计权。
+- **🟠 M4（P2）AI 未背书仍以 HIGH 呈现（已修 `send_highlight_alert.render_card`）**：`_ai_downgraded=True` 的卡片前端早已不挂 🔥HIGH（`index.html` L13585），但**邮件渲染层不消费该标记** ⇒ 「AI 建议不参与 + 系统 HIGH」同封自相矛盾（实测 BURN：`dg=True` 却 tier=HIGH conv=70）。现 `render_card` 对 `_ai_downgraded` 的 HIGH 降级为 **MED** 展示（用 MED 配色），与前端口径一致；MED/LOW 不误伤。
+- **🟠 M6（P2）单笔巨鲸独占 HIGH（已修）**：`kol_onchain` 单源封顶 `es≤45`，而 whale 不封顶。抽纯函数 `_whale_event_strength(usd_total, n_tx, t)`：**单笔（n_tx<2）封顶 45**（常量 `_WHALE_SINGLE_TX_ES_CAP`），多笔聚合仍走金额对数主轴。实测近 24h 鲸鱼榜仅 BURN/USDtb/XAUt 为 n_tx=1（正是目标），聚合项（WLD n_tx=3 等）不受影响。
+- **⚪ M5（时区）非缺陷（已核实）**：审计基于 09:05 那封邮件（UTC），而「邮件时区统一为东八区」已在本日更早提交落地——`send_highlight_alert.py` 现用 `fmt_bj(...)+"（北京时间）"`，HEAD 已修复，无需改码（仅待部署）。
+- **⏸ M2（HIGH 泛滥 / turnover 90%）未做**：属**产品/统计层**（引入稳定性维度或按分位数定 tier），需主人定调，且需更长样本，**不搭在本轮代码修复里**。产品洞察（44% 卡片为板块/链聚合、无具体标的）同属功能增强，另议。
+- **自测**：新增 `workbench/test_highlight_audit_20260924.py` **33/33**（M1 同值同分/单调/封顶/负值/None/排序倒置回归；M3 score 主轴 + 两路径源码守卫；M6 单笔封顶/聚合不封顶/None 保守；M4 HIGH→MED 且不误伤）；既有 `test_highlight_alert.py` **68/68**、`test_macro_market_board_tier2.py` 28/28、`test_macro_market_p1_upstream.py` 24/24、`test_macro_market_p0.py` 16/16 无回归；`py_compile` 通过。
+- **待部署**：`macro_market.py` 在 overview 构建（build_daily_brief）内、`send_highlight_alert.py` 由 scheduler 子进程执行 ⇒ 均需容器 **redeploy** 后生效。

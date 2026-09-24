@@ -319,6 +319,11 @@ def _render_ai_block(card: dict) -> str:
 
 def render_card(card: dict, kind: str) -> str:
     tier = str(card.get("conviction_tier") or "").upper()
+    # M4（2026-09-24 审计）：AI 明确不背书（_ai_downgraded）的卡片不得以 HIGH 呈现，
+    # 与前端 index.html「AI 降级不挂 🔥HIGH」口径一致——否则出现
+    # 「AI 建议不参与 + 系统 HIGH 看多」同封自相矛盾。
+    if card.get("_ai_downgraded") and tier == "HIGH":
+        tier = "MED"
     tier_color = TIER_COLOR.get(tier, "#64748b")
     dir_cn = {"long": "做多", "short": "做空"}.get(card.get("direction"), "中性")
     horizon = HORIZON_LABEL.get(card.get("horizon"), "中期")

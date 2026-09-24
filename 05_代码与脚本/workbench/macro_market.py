@@ -3206,13 +3206,22 @@ def _conviction_breakdown(
 # 确定性主轴，避免 etf/kol/chain/whale/narrative 这类**单轴**信号被六轴中性（None→50）
 # 稀释而全部塌缩到 55-60、内部零区分度（2026-09-23 审计：线上 4 条 MED 全 60）。
 # 系数可在 _MARKET_RULES 调参。
+# M1（2026-09-24 审计）：flow_pct（链 TVL）与 mcap_pct（叙事市值）此前斜率不同
+# （×4 vs ×3）⇒ 同一百分比数值在链信号上得分系统性偏高，导致跨类型不可比、排序倒置
+# （同快照 Base 链 +11.9%→90 vs ZeroKnowledge +11.9%→85）。现统一为同一曲线
+# （斜率 ×3、封顶 +40），保证「同值必同分」。
+_PCT_ES_SLOPE = 3.0
+_PCT_ES_CAP = 40
+
+
 def _event_strength_score(kind: str, value, t: dict) -> int:
     """事件量 → 0-100 确定性主轴（连续）。
 
     kind:
       - "usd"       金额（美元），对数连续：$1M→50、$100M→74、$1B→86
-      - "flow_pct"  链/TVL 7d 变化率（%）：|x|*4，封顶 +40
+      - "flow_pct"  链/TVL 7d 变化率（%）：|x|*3，封顶 +40（与 mcap_pct 同曲线）
       - "mcap_pct"  叙事板块 7d 市值变化率（%）：|x|*3，封顶 +40
+      - "score"     0-100 的既有连续分（如催化剂分）：直接夹取
     value 为 None / 非法 → 50（中性，不惩罚）。
     """
     if value is None:
@@ -3223,11 +3232,26 @@ def _event_strength_score(kind: str, value, t: dict) -> int:
         return 50
     if kind == "usd":
         return int(max(40, min(90, 50 + 12 * math.log10(max(abs(v), 1) / 1e6))))
-    if kind == "flow_pct":
-        return int(max(40, min(90, 50 + min(40, abs(v) * 4))))
-    if kind == "mcap_pct":
-        return int(max(40, min(90, 50 + min(40, abs(v) * 3))))
+    if kind in ("flow_pct", "mcap_pct"):
+        return int(max(40, min(90, 50 + min(_PCT_ES_CAP, abs(v) * _PCT_ES_SLOPE))))
+    if kind == "score":
+        return int(max(0, min(100, v)))
     return 50
+
+
+# M6（2026-09-24 审计）：单笔转账（n_tx<2）证据强度弱于聚合资金流，封顶 45
+# 与 kol_onchain「单源封顶 es≤45」对齐，避免单笔巨鲸独占 HIGH 推送位。
+_WHALE_SINGLE_TX_ES_CAP = 45
+
+
+def _whale_event_strength(usd_total, n_tx, t: dict) -> int:
+    """巨鲸信号事件强度：金额对数主轴；单笔（n_tx<2）封顶 _WHALE_SINGLE_TX_ES_CAP。"""
+    es = _event_strength_score("usd", usd_total, t)
+    try:
+        single = int(n_tx) < 2
+    except (TypeError, ValueError):
+        single = True
+    return min(es, _WHALE_SINGLE_TX_ES_CAP) if single else es
 
 
 # ── FEAT-HIGHLIGHT-003：周期调制乘子 ──
@@ -5393,11 +5417,15 @@ def score_opportunities(overview: dict) -> dict:
             trigger = (f"决策信号 {cscore:.0f} 分，入场价 {entry_txt}"
                        if entry_txt
                        else f"决策信号 {cscore:.0f} 分（事件驱动）")
+            # M3（2026-09-24 审计）：催化剂是主力信号类型却缺事件强度 → A1 覆盖不全。
+            # 用催化剂分作连续主轴补 event_strength；不改 conviction（催化情绪已按权重
+            # 计入六轴，再融合会重复计权）。
             _push_opportunity(
                 {"target": symbol, "direction": "long",
                  "confidence": "high" if cscore >= 70 else "medium",
                  "conviction_score": strength,
                  "conviction_breakdown": breakdown,
+                 "event_strength": _event_strength_score("score", cscore, t),
                  "signal_type": "catalyst",
                  "key_metric": f"催化剂 {cscore:.0f}分",
                  "trigger_logic": trigger + (f" · {invalid}" if invalid else ""),
@@ -5435,11 +5463,13 @@ def score_opportunities(overview: dict) -> dict:
         strength = breakdown["raw_strength"]
         # 取具体催化剂事件列表（TOP 3），供前端展示
         cat_events = _fetch_catalyst_events(aid, cat_window, limit=3)
+        # M3（2026-09-24 审计）：同决策路径，补 event_strength（催化剂分作连续主轴）。
         _push_opportunity(
             {"target": symbol, "direction": "long",
              "confidence": "high" if cscore >= 70 else "medium",
              "conviction_score": strength,
              "conviction_breakdown": breakdown,
+             "event_strength": _event_strength_score("score", cscore, t),
              "signal_type": "catalyst",
              "key_metric": f"催化剂 {cscore:.0f}分",
              "trigger_logic": f"近{cat_window}d 催化剂净情绪 {cscore:.0f}（事件驱动）",
@@ -5474,8 +5504,9 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
-        # A1：巨鲸信号自带「金额」这一真实事件量 → 与六轴 conviction 融合，拉开区分度
-        es = _event_strength_score("usd", usd_total, t)
+        # A1：巨鲸信号自带「金额」这一真实事件量 → 与六轴 conviction 融合，拉开区分度。
+        # M6：单笔（n_tx<2）由 _whale_event_strength 封顶，与 KOL 单源一致。
+        es = _whale_event_strength(usd_total, n_tx, t)
         conviction = round(0.6 * conviction + 0.4 * es)
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",

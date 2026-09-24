@@ -11016,8 +11016,6 @@
         let diffDateOffset = 0;
         let diffWatchlistOnly = false;
         let diffFilterNoise = false;
-        // 昨日榜单缓存（用于连续上榜对比）
-        let yesterdayDiffData = null;
         // 高危信号币种集合（变化榜 ⚠️ 标记用）
         let riskSignalSymbols = new Set();
         // 高亮信号币种集合（变化榜 ⭐ 标记用）
@@ -11075,11 +11073,6 @@
                         diffDateOffset === 3 ? '　·　3天前' :
                             '　·　' + diffDateOffset + '天前';
                 dateEl.textContent = '数据日期: ' + data.diff_date + offsetLabel + '　·　更新于 ' + hh + ':' + mm;
-
-                // 如果是最新日期，顺便加载昨天的数据用于连续上榜对比
-                if (diffDateOffset === 0) {
-                    _loadYesterdayDiff(data.diff_date);
-                }
 
                 // 副标题动态反映实际可用的信号口径
                 const cats = Object.keys(data.categories);
@@ -11244,45 +11237,15 @@
             if (item.chain) html += '<span class="chain-badge">' + escapeHtml(item.chain) + '</span>';
             html += escapeHtml(item.name || '');
             if (sectorLabel) html += '<span class="sector-tag">' + sectorLabel + '</span>';
-            // 连续上榜标记（仅在最新日期视图下显示）
-            if (diffDateOffset === 0 && _isInYesterdayList(item.asset_id, category, direction)) {
-                html += '<span class="streak-badge" title="连续在榜（昨天也在榜单上）">🔥 连续</span>';
+            // 连续上榜标记（权威 N 日连板，由服务端 streak_days 提供；仅最新日期视图下显示）
+            if (diffDateOffset === 0 && item.streak_days && item.streak_days >= 2) {
+                html += '<span class="streak-badge" title="连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '）">🔥' + item.streak_days + '天</span>';
             }
             html += '</span>';
             html += '<span class="value">' + valSign + val + '</span>';
             html += '<span class="attr-btn" onclick="event.stopPropagation();showDiffAttribution(' + item.asset_id + ', \'' + category + '\', \'' + direction + '\')" title="查看异动归因">📋</span>';
             html += '</div>';
             return html;
-        }
-
-        // 异步加载昨天的榜单数据（用于连续上榜对比）
-        async function _loadYesterdayDiff (todayDate) {
-            try {
-                const params = new URLSearchParams();
-                if (selectedDiffSectors.length > 0) params.set('sectors', selectedDiffSectors.join(','));
-                if (selectedDiffTier !== 'all') params.set('mcap_tiers', selectedDiffTier);
-                if (diffWatchlistOnly) params.set('watchlist_only', 1);
-                if (diffFilterNoise) params.set('filter_noise', 1);
-                params.set('date_offset', 1);
-                const qs = params.toString();
-                const r = await fetch('/api/daily-diff' + (qs ? '?' + qs : ''));
-                const data = await r.json();
-                if (data.ok && data.categories) {
-                    yesterdayDiffData = data;
-                }
-            } catch (e) {
-                // 静默失败，不影响主流程
-            }
-        }
-
-        // 检查某个 asset_id 是否在昨天的某 category 的某 direction 榜单里
-        function _isInYesterdayList (assetId, category, direction) {
-            if (!yesterdayDiffData || !yesterdayDiffData.categories) return false;
-            const cat = yesterdayDiffData.categories[category];
-            if (!cat || !cat[direction]) return false;
-            return cat[direction].some(function (item) {
-                return Number(item.asset_id) === Number(assetId);
-            });
         }
 
         // 显示异动归因弹窗
@@ -11666,8 +11629,6 @@
         function toggleDiffWatchlist () {
             diffWatchlistOnly = !diffWatchlistOnly;
             document.getElementById('diff-toggle-watchlist').classList.toggle('active', diffWatchlistOnly);
-            // 切换时清空昨日缓存，保证对比口径一致
-            yesterdayDiffData = null;
             loadDailyDiff();
         }
 
@@ -11675,7 +11636,6 @@
         function toggleDiffNoise () {
             diffFilterNoise = !diffFilterNoise;
             document.getElementById('diff-toggle-noise').classList.toggle('active', diffFilterNoise);
-            yesterdayDiffData = null;
             loadDailyDiff();
         }
 

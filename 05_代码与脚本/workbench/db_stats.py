@@ -9496,6 +9496,62 @@ def remove_watchlist(watch_id: int) -> dict:
 # 每日 diff 变化榜
 # ═══════════════════════════════════════════════════════════════
 
+# 跨日连板（gaps-and-islands）：对 (asset_id, category, direction) 计算截至目标日的连续上榜天数。
+# 纯读取、不落库/不建表；方向隔离（涨/跌各自计连板）。
+STREAK_SQL = """
+WITH ranked AS (
+    SELECT
+        asset_id, category, direction, diff_date,
+        diff_date - (ROW_NUMBER() OVER (
+            PARTITION BY asset_id, category, direction
+            ORDER BY diff_date
+        ) || ' days')::interval AS grp
+    FROM biz.daily_diff_summary
+    WHERE diff_date <= %s::DATE
+),
+islands AS (
+    SELECT
+        asset_id, category, direction,
+        MAX(diff_date) AS last_date,
+        COUNT(*)       AS streak_days,
+        MIN(diff_date) AS first_date
+    FROM ranked
+    GROUP BY asset_id, category, direction, grp
+)
+SELECT asset_id, category, direction, streak_days, first_date
+FROM islands
+WHERE last_date = %s::DATE
+"""
+
+
+def _fetch_streak_map(cur, target_date: str) -> dict:
+    """在既有游标上执行连板查询，返回 {(asset_id, category, direction): {...}}。"""
+    cur.execute(STREAK_SQL, (target_date, target_date))
+    return {
+        (r["asset_id"], r["category"], r["direction"]): {
+            "streak_days": r["streak_days"],
+            "first_date": str(r["first_date"]),
+        }
+        for r in cur.fetchall()
+    }
+
+
+def get_daily_diff_streaks(diff_date: str | None = None) -> dict:
+    """权威 N 日连板数：截至 diff_date 每个 (asset_id, category, direction) 的连续上榜天数。
+
+    纯读取（gaps-and-islands），无需落库/建表。diff_date 为 None 时取最新一天。
+    """
+    with get_db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            if not diff_date:
+                cur.execute("SELECT max(diff_date) AS d FROM biz.daily_diff_summary")
+                row = cur.fetchone()
+                if not row or not row["d"]:
+                    return {}
+                diff_date = str(row["d"])
+            return _fetch_streak_map(cur, diff_date)
+
+
 def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] | None = None,
                             sectors: list[str] | None = None,
                             mcap_tiers: list[str] | None = None,
@@ -9624,6 +9680,9 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
             )
             rows = cur.fetchall()
 
+            # 跨日连板（读取侧派生，不落库）：截至 target_date 的连续上榜天数
+            streak_map = _fetch_streak_map(cur, target_date)
+
             # 收集当日可用的赛道和分层（不卡 category/sector/tier 过滤，取全量去重）
             avail_params: list = [target_date]
             avail_cat_filter = ""
@@ -9655,6 +9714,7 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 if cat not in result:
                     result[cat] = {"up": [], "down": []}
                 detail = r["detail_json"] or {}
+                streak = streak_map.get((r["asset_id"], cat, direction), {})
                 result[cat][direction].append({
                     "asset_id": r["asset_id"],
                     "symbol": r["canonical_symbol"],
@@ -9667,6 +9727,8 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                     "metric_value": float(r["metric_value"]) if r["metric_value"] is not None else None,
                     "metric_label": r["metric_label"],
                     "detail": detail,
+                    "streak_days": streak.get("streak_days", 1),
+                    "streak_first_date": streak.get("first_date"),
                 })
 
             return {

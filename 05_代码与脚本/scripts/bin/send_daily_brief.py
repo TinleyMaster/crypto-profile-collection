@@ -53,6 +53,16 @@ def _fmt_pct(v, decimals=1, signed=True):
     return f"{sign}{f:.{decimals}f}%", color
 
 
+def _clip(s, n: int) -> str:
+    """安全截断文本：超长时补省略号并去掉尾部空白。
+
+    审计 2026-09-24 P2-D：精选信号的 reason / 驱动因子此前用裸切片（[:120]/[:30]），
+    句子被硬切、无省略号，读起来像被吃掉半句（如「逼近 5% 供应」缺右括号）。
+    """
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
 def _classify_degraded(items: list[str]) -> dict:
     """降级项分类：critical(核心)/warning(辅助)/info(增强)。
     核心降级：影响主决策的关键数据缺失（BTC价格、总市值、恐贪等）
@@ -219,6 +229,26 @@ def _fmt_liq_as_of(ts) -> str:
     return fmt_bj(ts, "%m-%d %H:%M", fallback="")
 
 
+def _fmt_data_as_of(v) -> str:
+    """把 overview 快照的 `fetched_at`（Unix 秒 或 ISO 串）转成北京时间 `MM-DD HH:MM`。
+
+    审计 2026-09-24 P2-C：大盘脉搏此前只显示日期、无数据时点，读者无法判断新鲜度。
+    不可解析则返回空串（渲染层省略该段，不显示错误时间）。
+    """
+    if v is None or v == "":
+        return ""
+    from crypto_research.utils.time_utils import fmt_bj
+    # Unix 秒（int / float / 数字串）
+    try:
+        epoch = float(v)
+        from datetime import datetime, timezone
+        return fmt_bj(datetime.fromtimestamp(epoch, tz=timezone.utc), "%m-%d %H:%M", fallback="")
+    except (TypeError, ValueError):
+        pass
+    # ISO 串兜底
+    return fmt_bj(v, "%m-%d %H:%M", fallback="")
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -264,6 +294,24 @@ def render_brief_html(brief: dict) -> str:
     ai_risk_warnings = ai_summary.get("risk_warnings") or []
     ai_watchlist = ai_summary.get("watchlist") or []
 
+    # 审计 2026-09-24 P2-A：AI 定调方向（如「偏多」）与当日盘面（BTC/ETH/总市值全跌）并置时
+    # 易被读成「今日看涨」。当方向含「多」而当日权重币与总市值中至少两项明显回调（≤ -1%）时，
+    # 加一句依据说明，明确「结构性判断 ≠ 当日走势」。
+    _bias_caveat_html = ""
+    try:
+        _bc = float(m0.get("btc_change_24h_pct")) if m0.get("btc_change_24h_pct") is not None else None
+        _ec = float(m0.get("eth_change_24h_pct")) if m0.get("eth_change_24h_pct") is not None else None
+        _mc = (float(diff.get("total_mcap_pct"))
+               if isinstance(diff, dict) and diff.get("total_mcap_pct") is not None else None)
+        _down = [v for v in (_bc, _ec, _mc) if v is not None and v <= -1.0]
+        if ai_bias and "多" in str(ai_bias) and len(_down) >= 2:
+            _bias_caveat_html = (
+                '<div style="font-size:10.5px;color:#fcd34d;line-height:1.5;margin-bottom:10px">'
+                '⚠️ 方向偏多属结构性判断；当日 BTC/ETH/总市值同步回调，勿与当日走势混读。</div>'
+            )
+    except Exception:
+        _bias_caveat_html = ""
+
     if ai_summary.get("status") == "ok" and ai_headline:
         # 方向颜色
         bias_color = "#ef4444" if "多" in str(ai_bias) else "#22c55e" if "空" in str(ai_bias) else "#f59e0b"
@@ -289,6 +337,7 @@ def render_brief_html(brief: dict) -> str:
               <span style="font-size:10.5px;background:rgba(255,255,255,0.1);padding:2px 8px;border-radius:4px;color:#e2e8f0">市场：{ai_regime or '—'}</span>
               <span style="font-size:10.5px;background:{bias_color}22;padding:2px 8px;border-radius:4px;color:{bias_color}">方向：{ai_bias or '—'}</span>
             </div>
+            {_bias_caveat_html}
         """)
 
         # 核心驱动因素
@@ -381,6 +430,12 @@ def render_brief_html(brief: dict) -> str:
         aq_be = f"{aq['be_1h'] * 100:.1f}%" if aq.get("be_1h") is not None else "-"
         aq_odds = f"{aq['odds_1h']:.2f}" if aq.get("odds_1h") is not None else "-"
         aq_pf = f"{aq['pf_1h']:.2f}" if aq.get("pf_1h") is not None else "-"
+        # 审计 2026-09-24 P2-B：当日 win_1h 与「近3日滚动」roll3_win_1h 是两个不同窗口的
+        # 同一指标，并排显示时读者会读成「胜率到底高还是低」（实测 59.1% vs 44.5%）。
+        # 现将两个窗口显式分列标注，并说明失配判定以滚动口径为准。
+        aq_rwin = f"{aq['roll3_win_1h'] * 100:.1f}%" if aq.get("roll3_win_1h") is not None else "-"
+        aq_rbe = f"{aq['roll3_be_1h'] * 100:.1f}%" if aq.get("roll3_be_1h") is not None else "-"
+        aq_rpf = f"{aq['roll3_pf_1h']:.2f}" if aq.get("roll3_pf_1h") is not None else "-"
         # conclusion 由本系统生成，可能含 `<`（如 PF<1）；早报未引入 html.escape，这里做最小实体转义
         aq_note = (aq.get("conclusion") or "").strip().replace("<", "&lt;").replace(">", "&gt;")
         if len(aq_note) > 160:
@@ -392,8 +447,12 @@ def render_brief_html(brief: dict) -> str:
               <div style="font-size:11px;font-weight:700;color:{aq_color}">{aq_label}</div>
             </div>
             <div style="font-size:12px;color:#475569;line-height:1.6">
-              {aq.get('report_date') or '-'} 告警 {aq_n} 条 · T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
+              {aq.get('report_date') or '-'} 告警 {aq_n} 条 · 当日 T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
+              近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF {aq_rpf}）·
               赔率 {aq_odds} · PF {aq_pf} · 环境 {aq.get('regime_label') or '-'}
+            </div>
+            <div style="font-size:10.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
+              说明：「当日」与「近3日滚动」是两个不同窗口的同一指标，失配判定以滚动口径为准；单日胜率波动大，不宜据此判断阈值优劣。
             </div>
             {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
           </div>
@@ -461,7 +520,7 @@ def render_brief_html(brief: dict) -> str:
             # 驱动因子（取前 2 个）
             drivers_html = ""
             if key_drivers:
-                driver_items = " · ".join(str(d)[:30] for d in key_drivers[:2])
+                driver_items = " · ".join(_clip(d, 30) for d in key_drivers[:2])
                 drivers_html = f'<div style="font-size:10px;color:#0369a1;margin-top:4px">💡 {driver_items}</div>'
 
             # AI 存疑标注（AI 判反或降级时）
@@ -485,7 +544,7 @@ def render_brief_html(brief: dict) -> str:
               </div>
               <div style="display:flex;gap:10px;align-items:center">
                 <div style="flex:1;min-width:0">
-                  <div style="font-size:11px;color:#475569;line-height:1.5">{reason[:120]}</div>
+                  <div style="font-size:11px;color:#475569;line-height:1.5">{_clip(reason, 120)}</div>
                   {drivers_html}
                 </div>
                 {mini_dims_html}
@@ -501,7 +560,7 @@ def render_brief_html(brief: dict) -> str:
             risk_count = len(ai_risks)
             html_parts.append(f"""
             <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
-              ⚠️ 今日高危信号 <b>{risk_count}</b> 个：{risk_preview}
+              ⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个：{risk_preview}
               <span style="float:right;color:#dc2626;font-weight:600;cursor:pointer">查看详情 ↓</span>
             </div>
             """)
@@ -538,12 +597,16 @@ def render_brief_html(brief: dict) -> str:
     # 旧快照缺 M2_liquidation / 覆盖率不足 / 列 NULL ⇒ 整行隐藏（缺失≠0，不显示 0）
     liq_row = _render_liquidation_row(brief.get("M2_liquidation"))
 
+    # P2-C：大盘脉搏数据时点（此前只有日期，与爆仓/ETF/赛道/解锁的标注口径不一致）
+    _pulse_as_of = _fmt_data_as_of(m0.get("data_as_of"))
+    _pulse_as_of_html = f" · 数据截至 {_pulse_as_of}（北京时间）" if _pulse_as_of else ""
+
     html_parts.append(f"""
       <!-- 模块1：大盘脉搏 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div style="font-size:13px;font-weight:700;color:#0f172a">📊 大盘脉搏</div>
-          <div style="font-size:10px;color:#94a3b8">{today}</div>
+          <div style="font-size:10px;color:#94a3b8">{today}{_pulse_as_of_html}</div>
         </div>
 
         <!-- 两排指标 -->
@@ -680,17 +743,26 @@ def render_brief_html(brief: dict) -> str:
     # ETF 资金流
     etf_assets = etf_flow.get("assets") or []
     if etf_flow.get("status") == "ok" and etf_assets:
-        # 从 assets 里提取 BTC、ETH 和总净流入
+        # 从 assets 里提取 BTC、ETH 和总净流入。
+        # 审计 2026-09-24 P1-1：原先「合计净流入」把全部资产（含 SOL/XRP/…）加总，
+        # 而卡片只展示 BTC/ETH ⇒ 读者按可见两项相加（BTC+ETH）与合计对不上（486 vs 609）。
+        # 现把合计明确标注为「全部 ETF 合计」，并附分项拆解使算术自洽。
         btc_net = None
         eth_net = None
-        total_net = 0
+        total_net = 0.0
+        others = []  # [(symbol, flow_7d_usd), ...]
         for a in etf_assets:
             sym = (a.get("symbol") or "").upper()
-            flow_7d = a.get("flow_7d_usd") or 0
+            try:
+                flow_7d = float(a.get("flow_7d_usd") or 0)
+            except (TypeError, ValueError):
+                flow_7d = 0.0
             if sym == "BTC":
                 btc_net = flow_7d
             elif sym == "ETH":
                 eth_net = flow_7d
+            else:
+                others.append((sym, flow_7d))
             total_net += flow_7d
 
         def _fmt_flow(v):
@@ -700,20 +772,32 @@ def render_brief_html(brief: dict) -> str:
                 v = float(v)
             except Exception:
                 return "—", "#94a3b8"
-            sign = "+" if v >= 0 else ""
+            sign = "+" if v >= 0 else "-"
             color = "#dc2626" if v > 0 else "#16a34a" if v < 0 else "#64748b"
-            if abs(v) >= 1e9:
-                return f"{sign}${v/1e9:.2f}B", color
-            elif abs(v) >= 1e6:
-                return f"{sign}${v/1e6:.0f}M", color
-            elif abs(v) >= 1e3:
-                return f"{sign}${v/1e3:.0f}K", color
+            av = abs(v)
+            if av >= 1e9:
+                return f"{sign}${av/1e9:.2f}B", color
+            elif av >= 1e6:
+                return f"{sign}${av/1e6:.0f}M", color
+            elif av >= 1e3:
+                return f"{sign}${av/1e3:.0f}K", color
             else:
-                return f"{sign}${v:.0f}", color
+                return f"{sign}${av:.0f}", color
 
         btc_net_str, btc_net_color = _fmt_flow(btc_net)
         eth_net_str, eth_net_color = _fmt_flow(eth_net)
         total_net_str, total_net_color = _fmt_flow(total_net)
+
+        # 分项拆解（使「全部 ETF 合计」可核验）：BTC + ETH + 其他 = 合计。
+        # 其他按绝对额降序取前 3 个币种做明细，其余仅计金额。
+        others_net = sum(v for _, v in others)
+        others_net_str, _ = _fmt_flow(others_net)
+        others_sorted = sorted(others, key=lambda x: -abs(x[1]))
+        others_detail = " · ".join(
+            f"{s} {'+' if v >= 0 else ''}{v/1e6:.0f}M" for s, v in others_sorted[:3]
+        )
+        breakdown = (f"分项：BTC {btc_net_str} + ETH {eth_net_str} + 其他 {others_net_str}"
+                     + (f"（{others_detail}）" if others_detail else ""))
 
         html_parts.append(f"""
           <!-- ETF 子模块 -->
@@ -729,10 +813,11 @@ def render_brief_html(brief: dict) -> str:
                 <div style="font-size:14px;font-weight:700;color:{eth_net_color}">{eth_net_str}</div>
               </div>
               <div style="text-align:center">
-                <div style="font-size:10px;color:#64748b">合计净流入</div>
+                <div style="font-size:10px;color:#64748b">全部 ETF 合计</div>
                 <div style="font-size:14px;font-weight:700;color:{total_net_color}">{total_net_str}</div>
               </div>
             </div>
+            <div style="font-size:9.5px;color:#64748b;margin-top:6px;line-height:1.5">{breakdown}</div>
           </div>
         """)
 
@@ -1021,7 +1106,7 @@ def render_brief_html(brief: dict) -> str:
     # 解锁事件（更重要，放前面）
     if unlock_list:
         html_parts.append(f"""
-          <div style="font-size:11.5px;font-weight:700;color:#dc2626;margin-bottom:5px">🔓 即将解锁（未来14天）</div>
+          <div style="font-size:11.5px;font-weight:700;color:#dc2626;margin-bottom:5px">🔓 即将解锁（未来14天，含今日）</div>
         """)
         for u in unlock_list[:6]:
             sym = u.get("symbol") or u.get("token") or "?"
@@ -1282,7 +1367,7 @@ def render_brief_html(brief: dict) -> str:
         summary = meme.get("summary") or {}
         if summary:
             extra_blocks.append((
-                "🐸 Meme 风险",
+                "🐸 Meme 风险（Meme 专项）",
                 f"高危{summary.get('high',0)} · 中危{summary.get('medium',0)} · 低风险{summary.get('low',0)} · 排雷{summary.get('block',0)}"
             ))
 

@@ -963,3 +963,21 @@
 - **P2-D10 赛道分类本身**（XRP 被 CMC 标 `primary_sector='l1'`，`categories` 含 `Smart Contract Platform`/`Layer 1 (L1)`/`FTX Holdings`/`a16z Portfolio`；`launch_date=None`）：属 **CMC 分类数据治理**，需维护 override 表，本轮只做「标注来源 + 未收录」的展示层兜底。
 
 **待部署**：需 Zeabur **显式 redeploy**（渲染层与 prompt 均在代码内，同 `4307fb1` / `81f281c` / `c000fec`）。
+
+### 加密大盘早报 2026-09-24 审计处置（P1-1/P1-2 + P2-A~I，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_加密大盘早报_2026-09-24.md`。F3 运行态四核对全绿（P0/P1 系列已部署生效）；本轮修 **2 项确定性红线 + 7 项可读性**。**零 DDL、零迁移、不改判定口径**。
+
+- **🔴 P1-1（ETF 卡片算术不自洽，已修 `send_daily_brief.py`）**：卡片第三列原为「合计净流入」= **全部资产**加总（含 SOL/XRP/…），而只展示 BTC/ETH ⇒ 读者按可见两项相加得 486，与展示的 609 对不上（只读 prod 实测：BTC +582.4M / ETH −95.5M / 其他 +122.0M（SOL 93.1 + XRP 17.0 + LINK 4.6 + HYPE 3.6 + SUI 1.7 + AVAX 1.1 + DOGE 0.6 + HBAR 0.5 + LTC −0.2）= 合计 608.9M）。改法：第三列改标 **「全部 ETF 合计」** + 卡片脚注 **「分项：BTC +$582M + ETH -$96M + 其他 +$122M（SOL +93M · XRP +17M · LINK +5M）」**，使算术自洽可核验；`_fmt_flow` 负数由 `$-96M` 改为 `-$96M`（符号前置）。
+  - **BTC 分项偏差（582 vs 外部 712.62）不修**：只读 prod 逐日核对 `biz.etf_flow_daily`（BTC 09-22 单日 +714.7M，与审计引用的「9-22 单日 $715M」**精确吻合**）⇒ 我方日频数据正确；审计的「外部 7 日累计 712.62M」与**单日值**几乎相同，属**外部口径疑似单日/窗口错标**，非本系统可校准项（窗口 `latest_date - 7d` 含 8 个日历日但仅 6 个交易日，改窗口只会更偏离外部值）。
+- **🔴 P1-2（XPL「占流通」同封打架，已修 `macro_market.fetch_upcoming_unlocks`）**：卡片/顶部预警走「实时计算」（`unlock_amount / core.asset.circulating_supply` = 64.80%，因该资产 `circulating_supply` 滞后），而「宏观&代币事件」栏走源 `unlock_ratio_mcap`（63.20%，= CMC 权威）。二者**数学同源**（`unlock_value/mcap = unlock_amount/circulating`，价格约去）⇒ 回退链改为 **源流通占比 → 源市值占比 → 实时计算**，并标记 `source`（不加 `~`）。只读 prod 复算：XPL 63.2 / 2Z 46.4 / SOSO 50.6（55/58 行走源市值占比，3 行走实时计算）。
+- **🟠 P2-A（方向与盘面张力）**：AI 定调含「多」且当日 BTC/ETH/总市值中 **≥2 项 ≤ −1%** 时，方向行下加「⚠️ 方向偏多属结构性判断；当日 BTC/ETH/总市值同步回调，勿与当日走势混读」。
+- **🟠 P2-B（两胜率打架）**：`_load_alert_quality` 增取 `roll3_win_1h/roll3_be_1h/roll3_pf_1h`；渲染拆「**当日** T+1h 胜率 X（平衡线 Y）· **近3日滚动** R（平衡线 S，PF T）」并加口径说明「失配判定以滚动口径为准；单日波动大，不宜据此判断阈值优劣」。
+- **🟠 P2-C（脉搏无时点）**：`_build_tldr` 增 `data_as_of`（取 overview 快照 `fetched_at` Unix 秒）；渲染层新增 `_fmt_data_as_of()` 转北京时间，脉搏标题右侧显示「· 数据截至 MM-DD HH:MM（北京时间）」。
+- **🟠 P2-D（截断无省略号）**：新增 `_clip()`，精选信号 `reason`（120）与驱动因子（30）超长时补「…」并去尾空白。
+- **🟠 P2-E（高危口径不统一）**：综合高危标「今日高危信号（综合风险）」，Meme 专项标「Meme 风险（Meme 专项）」。
+- **🟡 P2-I（措辞小悖）**：「即将解锁（未来14天）」→「（未来14天，含今日）」。
+- **未修**：P2-F（`CRCLon` 命名，属数据源符号）、P2-G/P2-H（SOSO/2Z 占比、AI 赛道 +122.2% 待核，无外部源）。
+- **自测**：新增 `workbench/test_daily_brief_20260924.py` **29/29**（ETF 合计自洽 + 源口径源码守卫 + 两胜率分列 + 时点 + 截断 + 维度标注 + `_clip`/`_fmt_data_as_of` + 边界不误触发）；`test_daily_brief_p1.py` 22/22、`test_liq_overview_brief.py` 49/49、`test_brief_data_model.py` 20/20 无回归；`py_compile` 2/2。
+- **真快照端到端**：`load_snapshot(2026-09-24)` + `render_brief_html` 实测输出「全部 ETF 合计 +$609M」「分项：BTC +$582M + ETH -$96M + 其他 +$122M（SOL +93M · XRP +17M · LINK +5M）」「当日 T+1h 胜率 59.1% / 近3日滚动 44.5%」「数据截至 09-24 08:30（北京时间）」。
+- **待部署**：早报由 scheduler 一次性脚本发送，下次调度（每日 09:00 CST）即生效，无需常驻容器重启。

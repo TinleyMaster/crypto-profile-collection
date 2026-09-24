@@ -6562,6 +6562,9 @@ def _build_tldr(today: dict, opps: list, highlights: list | None = None,
         "btc_change_24h": btc_data.get("change_24h"),
         "btc_change_24h_pct": btc_data.get("change_24h_pct") or btc_data.get("change_24h"),
         "btc_volatility_7d": btc_volatility_7d,
+        # 数据时点（审计 2026-09-24 P2-C）：大盘脉搏是最关键的第一屏数据却无时点，
+        # 爆仓/ETF/赛道/解锁均已标注。取 overview 快照的 fetched_at（Unix 秒）供渲染层转北京时间。
+        "data_as_of": today.get("fetched_at"),
         "eth_price": eth_data.get("price"),
         "eth_change_24h": eth_data.get("change_24h"),
         "eth_change_24h_pct": eth_data.get("change_24h_pct") or eth_data.get("change_24h"),
@@ -7161,10 +7164,17 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT e.asset_id, e.unlock_date, e.unlock_type, e.unlock_amount,
-                           -- 流通占比：优先用源数据，否则用 circulating_supply 实时计算
+                           -- 流通占比：源流通占比 → 源市值占比 → circulating_supply 实时计算。
+                           -- 注：unlock_ratio_mcap（占市值）与 unlock_ratio_circulating（占流通）
+                           -- 数学同源——unlock_value/mcap = unlock_amount/circulating（价格约去）；
+                           -- 而 core.asset.circulating_supply 可能滞后（实测 XPL 源口径 63.2% vs
+                           -- 实时计算 64.8%），导致同一封早报「占流通」出现两个值（审计 2026-09-24
+                           -- P1-2）。故优先取源口径，与「宏观&代币事件」栏（用 unlock_ratio_mcap）对齐。
                            CASE
                                WHEN e.unlock_ratio_circulating IS NOT NULL
                                    THEN e.unlock_ratio_circulating
+                               WHEN e.unlock_ratio_mcap IS NOT NULL
+                                   THEN e.unlock_ratio_mcap
                                WHEN a.circulating_supply IS NOT NULL
                                     AND a.circulating_supply > 0
                                     AND e.unlock_amount IS NOT NULL
@@ -7175,6 +7185,7 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
                            -- 标记流通占比是否是计算出来的（便于渲染端标注）
                            CASE
                                WHEN e.unlock_ratio_circulating IS NOT NULL THEN 'source'
+                               WHEN e.unlock_ratio_mcap IS NOT NULL THEN 'source'
                                WHEN a.circulating_supply IS NOT NULL
                                     AND a.circulating_supply > 0
                                     AND e.unlock_amount IS NOT NULL THEN 'computed'
@@ -7786,6 +7797,7 @@ def _load_alert_quality() -> dict:
                 cur.execute(
                     """
                     SELECT report_date, alerts_n, win_1h, be_1h, odds_1h, pf_1h,
+                           roll3_win_1h, roll3_be_1h, roll3_pf_1h,
                            regime_label, severity, conclusion
                       FROM biz.scan_edge_daily
                      ORDER BY report_date DESC
@@ -7807,6 +7819,11 @@ def _load_alert_quality() -> dict:
             "be_1h": _f("be_1h"),
             "odds_1h": _f("odds_1h"),
             "pf_1h": _f("pf_1h"),
+            # 近 3 日滚动（失配判定的实际依据）——与当日 win_1h 口径不同，
+            # 审计 2026-09-24 P2-B：两者并排易被读成「同一指标两个值」，需分列标注。
+            "roll3_win_1h": _f("roll3_win_1h"),
+            "roll3_be_1h": _f("roll3_be_1h"),
+            "roll3_pf_1h": _f("roll3_pf_1h"),
             "regime_label": row.get("regime_label"),
             "severity": row.get("severity"),
             "conclusion": row.get("conclusion"),

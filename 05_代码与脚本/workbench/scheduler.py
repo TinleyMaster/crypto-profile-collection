@@ -236,6 +236,15 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面告警·质量日报聚合（08:10，胜率/赔率/PF/平衡线 + 阈值-行情失配判定）", "core"),
     ("scan_edge_email", "20 8 * * *", "send_scan_edge_report.py", [],
      "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
+
+    # ═══ 国庆后待办提醒（一次性）═══
+    # R3-1 决策项：volume_surge_24h 是否加回 Tier 2 连板白名单（macro_market._BOARD_DIRECTIONAL）。
+    # 当初排除它的理由（2026-09-08 扩档造成的结构性伪连板）已由口径屏障 740e31c 收口，
+    # 剩「沉淀够不够、会不会挤掉其他榜名额」需人工拍板，故设一次提醒。
+    # 脚本自身有日期守卫（非 2026-10-06 直接跳过），后续年份不会重复发信；
+    # 提醒完成后可从本表删除。
+    ("remind_tier2_volume_surge_revisit", "0 9 6 10 *", "remind_tier2_revisit.py", [],
+     "国庆后待办·评估 volume_surge_24h 加回 Tier 2 白名单（R3-1，一次性）", "core"),
 ]
 
 

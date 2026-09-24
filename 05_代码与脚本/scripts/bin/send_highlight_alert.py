@@ -69,6 +69,7 @@ SIGNAL_TYPE_LABEL = {
     "fng_extreme": "恐贪极值", "whale_flow": "巨鲸异动",
     "funding": "融资落地", "token_unlock": "代币解锁",
     "kol_onchain": "KOL链上情报", "catalyst": "催化剂",
+    "conflict_game": "多空博弈",
     "github_activity": "开发活跃", "funding_raise": "融资",
 }
 

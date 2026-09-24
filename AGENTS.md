@@ -1104,3 +1104,12 @@
 - **⏸ M2（HIGH 泛滥 / turnover 90%）未做**：属**产品/统计层**（引入稳定性维度或按分位数定 tier），需主人定调，且需更长样本，**不搭在本轮代码修复里**。产品洞察（44% 卡片为板块/链聚合、无具体标的）同属功能增强，另议。
 - **自测**：新增 `workbench/test_highlight_audit_20260924.py` **33/33**（M1 同值同分/单调/封顶/负值/None/排序倒置回归；M3 score 主轴 + 两路径源码守卫；M6 单笔封顶/聚合不封顶/None 保守；M4 HIGH→MED 且不误伤）；既有 `test_highlight_alert.py` **68/68**、`test_macro_market_board_tier2.py` 28/28、`test_macro_market_p1_upstream.py` 24/24、`test_macro_market_p0.py` 16/16 无回归；`py_compile` 通过。
 - **待部署**：`macro_market.py` 在 overview 构建（build_daily_brief）内、`send_highlight_alert.py` 由 scheduler 子进程执行 ⇒ 均需容器 **redeploy** 后生效。
+
+### 高亮信号类型标签 + GitHub 事件强度主轴 M7-1/M7-2（工单 OPT-HL-TYPING-002，2026-09-24，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\待修复工单_高亮信号类型标签与github事件强度_2026-09-24.md`（基线 `origin/main=a56ec6f`）。**零 DDL、零迁移**；Q1~Q4 均采工单建议（Q1 A 0.6/0.4、Q2 配额 1、Q3 去 `catalyst_events`、Q4 short/5）。
+
+- **🟠 M7-2（主收益）GitHub 卡同日必然同分（已修）**：`github_activity` 的 conviction 全由**大盘级六轴**（funding/netflow/stable/roi 皆常量）算出、**无 dev 轴** ⇒ 同批次除 `mvrv_pct` 外输入相同 ⇒ conv 与 `ratio`（Dev 倍数）完全脱钩（实测 ASTER/WMETAX 同为 67、`es=None`）。修法：`_event_strength_score` 新增 **`"ratio_x"`** 主轴（`r=max(ratio,1/ratio)`，1.0x→50、1.5x→60、2.0x→70、3.0x+→90，常量 `_RATIO_ES_SLOPE=20.0`，与 M1 的 `_PCT_ES_CAP` 共用封顶保持跨类型可比），GitHub 卡按 A1 口径融合 `conviction = 0.6×conv + 0.4×es` 并落 `event_strength`。
+- **🟠 M7-1（语义归位）多空博弈合并卡错用 `catalyst` 标签（已修）**：`signal_type: "catalyst"` → **`"conflict_game"`**，`related_dims` 去掉 `catalyst_events`（它是合成博弈卡、非催化剂事件，双重误导 + 占用 catalyst 配额）。同步补 4 处（缺一即引入新缺陷）：① V2 配额表 `"conflict_game": 1`（不挤 catalyst）；② horizon map `short/5`（否则落默认 medium/14 过长）；③ 邮件 `SIGNAL_TYPE_LABEL` 补 `"conflict_game": "多空博弈"`（否则徽章露原始 token；前端 `index.html:13491` 已有，零改动）。**对高亮邮件零影响**——博弈卡 `direction="watch"` 不进 `select_highlight_signals`（§1.3），仅机会清单/池层受益。**帮 M3 洗清嫌疑**：上轮复验「catalyst 仍 `es=None`」的表象是此标签误用，非 M3 漏项。
+- **自测**：`workbench/test_highlight_audit_20260924.py` 由 33 → **50/50**（新增 T1~T10：ratio_x 六例含 0.5x 对称与 None/0/负/非法、GitHub 融合算术 64、同日 2.5x≠1.5x 消除同分、conflict_game 标签/配额/horizon/邮件标签表、T10 独立配额不挤 catalyst）；既有 `test_highlight_alert.py` 68/68、`test_macro_market_board_tier2.py` **36/36**、`test_macro_market_p1_upstream.py` 24/24、`test_macro_market_p0.py` 16/16、`test_brief_data_model.py` 20/20、`test_daily_brief_p1.py` 22/22、`test_daily_brief_20260924.py` 29/29、`test_ai_signal_quality.py` ALL PASS 无回归；`py_compile` 通过。
+- **待部署**：需容器 **redeploy** 后生效。验收要点（§3②）：`signal_type=='conflict_game'` 条目出现（无样本则标注）、`github_activity` 的 `event_strength` 非 None、同日两条 GitHub 卡 conv 不再相同。

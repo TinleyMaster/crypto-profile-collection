@@ -9,6 +9,8 @@
   M3 catalyst 补 event_strength（score 主轴）
   M4 邮件对 _ai_downgraded 卡片降级展示 tier（不再 HIGH）
   M6 巨鲸单笔（n_tx<2）事件强度封顶 45（与 KOL 单源一致）
+  M7-2 开发活跃倍数主轴 ratio_x + GitHub 卡融合（消除同日同分）
+  M7-1 博弈卡类型归位 conflict_game（标签/配额/horizon/邮件标签表）
 """
 import os
 import sys
@@ -114,6 +116,56 @@ _med_dg = sha.render_card({"target": "X", "signal_type": "catalyst",
                            "conviction_tier": "MED", "conviction_score": 60,
                            "_ai_downgraded": True}, sha.ALERT_NEW)
 check(">MED</span>" in _med_dg, "本就 MED 的降级卡片不变（不误伤）")
+
+# ── M7-2：开发活跃倍数主轴（ratio_x） ──
+print("[M7-2] ratio_x 主轴 + GitHub 融合")
+check(mm._RATIO_ES_SLOPE == 20.0, "ratio_x 斜率常量为 20.0")
+check(mm._event_strength_score("ratio_x", 1.0, {}) == 50, "T1 1.0x → 50（基线）")
+check(mm._event_strength_score("ratio_x", 1.5, {}) == 60, "T2 1.5x（触阈）→ 60")
+check(mm._event_strength_score("ratio_x", 2.0, {}) == 70, "T3 2.0x → 70")
+check(mm._event_strength_score("ratio_x", 3.0, {}) == 90
+      and mm._event_strength_score("ratio_x", 5.0, {}) == 90,
+      "T4 3.0x/5.0x → 90（封顶）")
+check(mm._event_strength_score("ratio_x", 0.5, {}) == 70,
+      "T5 decline 0.5x 与 burst 2.0x 对称 → 70")
+check(all(mm._event_strength_score("ratio_x", v, {}) == 50
+          for v in (None, 0, -1, "abc")),
+      "T6 None/0/负/非法 → 50（不惩罚、不崩）")
+# 融合口径（与 A1 一致 0.6/0.4）：源码守卫 + 算术恒等
+check('_event_strength_score("ratio_x", ratio, t)' in _MACRO_SRC
+      and "round(0.6 * conviction + 0.4 * _gh_es)" in _MACRO_SRC,
+      "GitHub 卡融合 ratio_x（0.6×conv + 0.4×es）")
+check(round(0.6 * 60 + 0.4 * mm._event_strength_score("ratio_x", 2.0, {})) == 64,
+      "T7 conv=60 & ratio=2.0 → 64")
+check(round(0.6 * 60 + 0.4 * mm._event_strength_score("ratio_x", 2.5, {}))
+      != round(0.6 * 60 + 0.4 * mm._event_strength_score("ratio_x", 1.5, {})),
+      "T8 同日 2.5x vs 1.5x 不再同分（消除 ASTER/WMETAX 同 67）")
+check('"event_strength": _gh_es,' in _MACRO_SRC, "GitHub 卡落 event_strength 字段")
+
+# ── M7-1：博弈卡类型归位 ──
+print("[M7-1] conflict_game 类型归位")
+check('"signal_type": "conflict_game"' in _MACRO_SRC, "博弈卡 signal_type 改为 conflict_game")
+check('"catalyst_events", "P1-2 多空博弈"' not in _MACRO_SRC,
+      "博弈卡 related_dims 去掉 catalyst_events（消除双重误导）")
+check('"conflict_game": 1,' in _MACRO_SRC, "V2 配额表补 conflict_game:1（不占 catalyst）")
+check('"conflict_game":        {"horizon": "short",   "expire_days": 5}' in _MACRO_SRC,
+      "horizon map 补 conflict_game short/5")
+check(sha.SIGNAL_TYPE_LABEL.get("conflict_game") == "多空博弈",
+      "T9 邮件标签表含 conflict_game → 多空博弈（否则徽章露原始 token）")
+
+# T10：conflict_game 独立配额，不挤压 catalyst（构造 3 catalyst + 1 conflict_game）
+_hl_in = [
+    {"target": f"N{i}", "direction": "long", "signal_type": "catalyst",
+     "conviction_score": 70, "conviction_tier": "HIGH", "related_dims": ["catalyst"]}
+    for i in range(3)
+] + [{"target": "GAME", "direction": "long", "signal_type": "conflict_game",
+      "conviction_score": 65, "conviction_tier": "MED", "related_dims": ["P1-2 多空博弈"]}]
+_hl_out = mm.select_highlight_signals(_hl_in, max_total=10, min_resonance=1)
+_cats = [o for o in _hl_out if o.get("signal_type") == "catalyst"]
+_check = [o for o in _hl_out if o.get("signal_type") == "conflict_game"]
+check(len(_cats) == 3 and len(_check) == 1 and len(_hl_out) == 4,
+      "T10 conflict_game 独立配额，catalyst 仍可选满 3（不互挤）",
+      f"catalyst={len(_cats)} conflict_game={len(_check)} total={len(_hl_out)}")
 
 # ── 汇总 ──
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")

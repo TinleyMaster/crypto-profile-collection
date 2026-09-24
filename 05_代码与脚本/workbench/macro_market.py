@@ -2570,6 +2570,9 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
         # ── KOL/事件类（短期，脉冲信号）──
         "kol_onchain":          {"horizon": "short",   "expire_days": 7},
         "catalyst":             {"horizon": "short",   "expire_days": 10},
+        # M7-1（2026-09-24 审计）：多空博弈是「等明朗」的战术信号，5 天足够；
+        # 不补则落默认 medium/14 天（过长）。
+        "conflict_game":        {"horizon": "short",   "expire_days": 5},
         # ── 基本面类（长期）──
         "github_activity":      {"horizon": "long",    "expire_days": 60},
         "funding_raise":        {"horizon": "long",    "expire_days": 45},
@@ -3212,6 +3215,11 @@ def _conviction_breakdown(
 # （斜率 ×3、封顶 +40），保证「同值必同分」。
 _PCT_ES_SLOPE = 3.0
 _PCT_ES_CAP = 40
+# M7-2（2026-09-24 审计）：开发活跃倍数主轴。
+# ratio = last4/prev4（burst>1、decline<1）；取「偏离基线倍数」 r = max(ratio, 1/ratio)
+# 使 burst 2.0x 与 decline 0.5x 等价（同为偏离 2 倍）：
+#   1.0x→50、1.5x（触阈）→60、2.0x→70、3.0x+→90（封顶）
+_RATIO_ES_SLOPE = 20.0
 
 
 def _event_strength_score(kind: str, value, t: dict) -> int:
@@ -3221,6 +3229,7 @@ def _event_strength_score(kind: str, value, t: dict) -> int:
       - "usd"       金额（美元），对数连续：$1M→50、$100M→74、$1B→86
       - "flow_pct"  链/TVL 7d 变化率（%）：|x|*3，封顶 +40（与 mcap_pct 同曲线）
       - "mcap_pct"  叙事板块 7d 市值变化率（%）：|x|*3，封顶 +40
+      - "ratio_x"   开发活跃倍数（last4/prev4），双向取偏离倍数
       - "score"     0-100 的既有连续分（如催化剂分）：直接夹取
     value 为 None / 非法 → 50（中性，不惩罚）。
     """
@@ -3234,6 +3243,11 @@ def _event_strength_score(kind: str, value, t: dict) -> int:
         return int(max(40, min(90, 50 + 12 * math.log10(max(abs(v), 1) / 1e6))))
     if kind in ("flow_pct", "mcap_pct"):
         return int(max(40, min(90, 50 + min(_PCT_ES_CAP, abs(v) * _PCT_ES_SLOPE))))
+    if kind == "ratio_x":
+        if v <= 0:
+            return 50
+        r = max(v, 1.0 / v)
+        return int(max(40, min(90, 50 + min(_PCT_ES_CAP, (r - 1.0) * _RATIO_ES_SLOPE))))
     if kind == "score":
         return int(max(0, min(100, v)))
     return 50
@@ -4641,6 +4655,8 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         # D2（2026-09-22 审计）：叙事/链净流入信号补齐 signal_type 后的独立配额，
         # 避免全部落入 __default__ 互相挤占（每类各 2 个展示位）
         "narrative": 2, "chain_inflow": 2,
+        # M7-1（2026-09-24 审计）：多空博弈合并卡独立配额，避免占用 catalyst 名额
+        "conflict_game": 1,
         "__default__": 2,
     }
 
@@ -5547,9 +5563,15 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        # M7-2（2026-09-24 审计）：原 conviction 全由大盘轴决定（无 dev 轴），
+        # 导致同日 GitHub 卡必然同分（实测 ASTER/WMETAX 均 67）。
+        # 补事件强度主轴并按 A1 口径融合，让 Dev 倍数真正参与排序。
+        _gh_es = _event_strength_score("ratio_x", ratio, t)
+        conviction = round(0.6 * conviction + 0.4 * _gh_es)
         _push_opportunity(
             {"target": symbol, "direction": direction, "confidence": "medium",
              "conviction_score": conviction,
+             "event_strength": _gh_es,
              "signal_type": "github_activity",
              "key_metric": f"Dev {ratio:.1f}x",
              "asset_id": aid,
@@ -6109,12 +6131,14 @@ def score_opportunities(overview: dict) -> dict:
                 {"target": sym, "direction": "watch",
                  "confidence": "medium",
                  "conviction_score": max_score,
-                 "signal_type": "catalyst",
+                 # M7-1（2026-09-24 审计）：这是合成「多空博弈」卡，不是催化剂事件，
+                 # 错用 catalyst 标签会误导徽章/占用催化剂配额。改独立类型 conflict_game。
+                 "signal_type": "conflict_game",
                  "key_metric": "多空博弈",
                  "trigger_logic": f"多空信号交织：{' / '.join(trigger_parts[:3])}",
                  "action_hint": "观望，等待多空博弈明朗",
                  "invalidation": "单一方向信号消失后可追",
-                 "related_dims": ["catalyst_events", "P1-2 多空博弈"]},
+                 "related_dims": ["P1-2 多空博弈"]},
                 opportunities, excluded, t,
                 cycle_phase=cycle_phase, n_confirm=2,
             )

@@ -1026,3 +1026,10 @@
 - **自测**：新增 [test_unlock_pct_30d.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_unlock_pct_30d.py) **16/16**（纯离线：多格式解析 7 例 + 30 天内累加/边界 4 例 + 人类日期原例 1 例 + 真无 30 天事件保 0.0 1 例 + AST 源码护栏 3 例）；`py_compile` 通过。
 - **待部署**：`db_stats.py` 在 web 应用进程内，需 redeploy 后 notebook 才生效（本地已修 + prod 只读已证修复有效）。
 - **未做（本工单不扩）**：P2 fallback thesis 去掉/渲染真实信号计数（产品决策）；P3 cg 单映射置 primary（并入 W5-plus）；onchain 33 天陈旧（上游采集调度，另立）。
+
+**复验闭环 + 残留项处置（复验_投研页P1解锁抛压修复_048ccc9_2026-09-24.md，本次提交）**：复验三路全过（真码 diff `048ccc9` → raw main 已是修复版 → 线上 8680 `0.0→5.6`，另抽 6 资产 8781/8888/7760/7331/8863/9655 全 >0），P1 判定闭环。逐项复核残留项后结论：**三项均无「应改而未改」的代码 bug，本轮仅归档、零 DDL、零 DML**。
+
+- **🔵 P2 = 审计误判（false positive），非缺陷、无需改码**：审计据「notebook JSON 无 signals 明细 + `biz.scan_signal` 对 TAKE=0 行」判为「有断言、无证据」。实测 `detect_asset_signals(8680)` 真跑返回 **恰好 3 critical + 1 warning** —— `price_surge +61.47%`、`volume_surge 284.6x`、`oi_surge +72.56%`、`unlock_soon 5.6%`，与 fallback 文案「3 个高危信号；1 个警告信号」逐字吻合。且研究页有**独立「⚡ 异动信号」卡片**：[research.html](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/templates/research.html) L2367 容器 + L2682 `loadSignals()`（随 notebook 加载**无条件**调用）→ `GET /api/research/<id>/signals`（[app.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/app.py#L2473) L2473）→ `detect_asset_signals`，与 thesis 计数**同源同页可溯源**。根因是审计把 **`biz.scan_signal`（大盘扫描池，按 K线+OI 出信号）** 与 **`detect_asset_signals`（投研页实时 diff 检测器，吃 CMC/衍生品数据）** 混为一谈。
+- **🟠 P3 = 真实但低危的治理项，维持 W5-plus、本轮不动 prod**（只读量化）：`core.asset_source_map` 的 cg 映射分桶 —— 单映射无 primary **8042** / 多映射无 primary **1617** / 有 primary 8102（总 17761）；其中「单映射 + `match_status='confirmed'` + 无 primary」**4541**。`resolve_cg_coin_id`（[cg_resolve.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/scripts/src/crypto_research/db/cg_resolve.py)）已做确定性择优、单映射天然唯一 ⇒ **解析路径无污染**；但 `db_stats.py` 若干覆盖度查询直接用 `asm.source_code='cg' AND asm.is_primary=TRUE`（如 L248）⇒ 这些资产的 cg 维度显示缺失，**属真实下游影响**。**不做批量 UPDATE** 的理由：W5 治理正由并发进程推进（`fe459e1` fix_062 / `0551daf` fix_063，明确「全库 456 个灰色地带…需人工确认，**勿盲目翻转**」），8042/4541 的量级远超其「无歧义子集」，盲目置 primary 会把错标映射一并「洗白」，且与进行中的治理冲突。
+- **⚪ onchain 33 天陈旧**：上游采集调度问题，另立，未动。
+- **验收**：`py_compile` 无（本轮零改码）；结论均以 prod 只读探针物证支撑，探针脚本为临时产物、已清理。

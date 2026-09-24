@@ -427,6 +427,24 @@
 - L1 修法持续性：近 24h 主池 188 条信号，判定根**全部定位成功**，其中**已收盘 148（78.7%）/ 回退未收盘 40** —— 与部署当天 77% 一致，**修法稳定**。
 - **⚠️ 本轮两个自伤/踩坑（均已修正，勿复现）**：① **失效位触发率初算算出 0/188 是错的** —— `biz.scan_signal` 的 `expired_at` **只对 `status='expired'` 行写入**（`active`/`confirmed` 行为 NULL），所以窗口必须用 `signal_ts + TTL` 而不是 `o.expired_at or signal_ts`，否则 `active`/`confirmed` 的窗口塌成 0 长度、必然 0 命中；② 由此「`active` 且 `expired_at < NOW()`」的检查是**真空检查**（恒为 0），要验 TTL 请用「active 的 `signal_ts` 年龄 vs TTL」。
 
+**⑨ 2 天 soak 终期验收（第 2 天，2026-09-24 01:09 UTC，只读）—— 机制 5 项全过；收益层出现 regime 翻转**
+
+| # | 项 | 结果 |
+|---|---|---|
+| 1 | 无停摆 | 12 个**真任务** `stale` 全在 `3×周期` 内、`last_error` 全空；`asset_klines` 5m 近 48h **稀疏桶 0**、1h 近 36h **稀疏根 0**、`oi_cvd_snapshot.realtime` 仅 3 处 15min 缺口（5m 采样一轮抖动，非停摆）⇒ **无停摆** |
+| 2 | 无长缺口 | 主池 **46/49** 个钟点有信号；两个真空白 `09-23 19:00` / `09-23 23:00`，**同小时其他池有信号、K 线零稀疏** ⇒ 是「无币达标」而非停摆 |
+| 3 | 冷却去重 | 验收窗口（近 48h）**0 违例**；全表 8 条违例**全在 `09-16~09-17` 标定期**（gap 2:15~5:45h），非新增 |
+| 4 | TTL 收敛 | `main`×8 scenario 恒 **24.000h**、`accumulation.BRK` **24.000h**、`accumulation.ACC` **168.000h**(7d)；真 stale（`active` 超本池 TTL）**0 条** |
+| 5 | 转化率 | `breakout_px` 非空且 <24h：**confirmed 147 / 334 = 44.0%** —— 与第 1 天 45.2% 一致，修法后稳定 |
+
+- **⚠️ 上一轮把 `__daemon__` 的 `stale` 当「最长心跳间隔」读是误读**：它只在**启动时写一次**心跳（`_write_heartbeat(DAEMON_START_TASK)`，[L3963](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/scripts/bin/scan_daemon.py#L3963)），其 `last_run_at` = **进程启动时刻** ⇒ 该值 = **进程年龄**（实测 17.7min），**不是周期任务**。心跳检查只需看 `STALL_HEARTBEAT_TASKS` 那 11 项。
+- **🔴 `confirmed` 是临时态，转化率无法事后统计**：`task_expire_signals` 的 UPDATE 覆盖 `status IN ('active','confirmed')` ⇒ **24h 后 confirmed 被覆写为 expired**（**有意设计**，见其 docstring：confirmed 是「升格」但仍属观察名单、仍受 TTL 收口）。后果：`>=24h` 组只剩 **4 confirmed / 192 expired** 作证 ⇒ 统计转化率**只能用 <24h 窗口**，不得用「已走完 24h」做分母（第 1 天 45.2% 正是 <24h 窗口口径）。
+- **🔴 主池空头从未告警（regime 否决，设计使然）**：全量 down 372 条中 `alerted_at` 非空 **0 条**；up 334 条中 185 条告警。根因：所有 down 行的 `context_tags` 均带「**空头环境受限（FGI79/市值+0.71%）**」⇒ `confidence` 进不了 `high`（`_load_alert_candidates` 硬门槛 `confidence='high'`）。**在 Greed + 市值上行 regime 下系统对下跌完全沉默**（09-23 有 255 条 down 信号、0 条告警）—— 判定无误，但这是「只做多」的隐性后果，需在评估里显式承认。
+- **🔴 单小时爆发 = 1 个宏观事件，不是 N 个样本**：`09-23 14:00` 那小时主池 **192 条**（窗口 14:04~14:50、去重币数 192、**189 down / 187 S4**、均跌幅 −3.96%、均量比 5.15），`09-23 15:00` 蓄势池 **103 条** 同理 ⇒ 横截面**完全相关**（大盘同步下跌）。**任何按条数计的胜率/赔率都会把 1 个 bet 当上百样本**，统计前必须按突发事件聚类或做横截面中性化。
+- **🔴 收益读数出现 regime 翻转，上一轮的「24h 期望 +0.99%」未跨 regime**：`scan_edge_daily` 09-23（修法后第一个完整交易日、BTC **−2.79%**）= `win_24h 20.0%` / `avg_24h −5.75%` / `pf_24h 0.26` / `mismatch_flag=True severity=high`。结算表 24h 均收益按日：09-17 +0.91%、09-18 **+18.42%**（超额 +13.55%）、09-21 +1.96%、09-22 **−0.54%**、09-23 **−5.22%** ⇒ **日间方差主导，日级 edge 远小于单日 regime 收益**。
+- **本轮三个口径踩坑（勿复现）**：① 池名是 `accumulation` 不是 `acc`（写 `'acc'` 会让 CASE 落到 ELSE、把 7d TTL 的 ACC 全判成超期）；② `biz.scan_stall_alert` **无 `created_at`**（只有 `task/last_email_ts/updated_at`，且 `last_email_ts=NULL + updated_at` 表示**已自愈复位**，非从未告警）；③ `biz.asset_klines` 的周期列是 **`interval`** 不是 `timeframe`（`scan_signal` 里才叫 `timeframe`）。
+- **结论**：判定门与执行层**无缺陷**，机制稳定 ⇒ **但仍不能开总开关**（`SIGNAL_TRADE_ENABLED=0` 保持）。下一步：继续 dry-run 攒 confirmed 收益样本，且**先解决「横截面相关 ⇒ 有效样本数 ≪ 条数」的统计口径**，否则攒够 10 个日历日也不等于 10 个独立样本。
+
 ### 轧空池复验遗留 6 项处置（复验_轧空池复验遗留6项_2793be9_2026-09-22，2026-09-22）
 
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_轧空池复验遗留6项_2793be9_2026-09-22.md`。**本轮全是「让结论可比」的工具/口径修复，无 DDL、无阈值变更**（复验明确「不建议在分母未修前动阈值」）。

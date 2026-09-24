@@ -2094,6 +2094,8 @@ def main() -> int:
                 alert_result = send_fast_alerts_for_new_signals(conn, new_sig_ids)
                 if alert_result["sent"] > 0:
                     print(f"  ⚡ 快提醒: 发送 {alert_result['sent']} 条 A 级信号提醒")
+                if alert_result.get("suppressed", 0) > 0:
+                    print(f"  🚫 快提醒: AI 否决抑制 {alert_result['suppressed']} 条（不发快讯，已留痕）")
                 if alert_result["failed"] > 0:
                     print(f"  ⚠️  快提醒失败: {alert_result['failed']} 条")
             elif new_sig_ids and args.no_alert:

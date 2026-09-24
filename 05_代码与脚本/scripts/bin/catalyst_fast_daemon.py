@@ -151,9 +151,11 @@ def run_fast_once(verbose: bool = False) -> dict:
         if new_sig_ids:
             alert_result = send_fast_alerts_for_new_signals(conn, new_sig_ids)
             stats["alert_sent"] = alert_result.get("sent", 0)
+            stats["alert_suppressed"] = alert_result.get("suppressed", 0)
             stats["alert_failed"] = alert_result.get("failed", 0)
         else:
             stats["alert_sent"] = 0
+            stats["alert_suppressed"] = 0
             stats["alert_failed"] = 0
 
         # 重大事件通道（重要性闸门，与上面的 A 级 Alert 独立去重/渲染）。
@@ -267,6 +269,7 @@ def main() -> int:
                   f"分级:{stats.get('grade',0)} 共振:{stats.get('resonance',0)} "
                   f"信号:{stats.get('signal_inserted',0)} "
                   f"告警:{stats.get('alert_sent',0)} "
+                  f"抑制:{stats.get('alert_suppressed',0)} "
                   f"重大事件:{stats.get('major_event_sent',0)}")
         except Exception as e:
             elapsed = time.time() - start_ts

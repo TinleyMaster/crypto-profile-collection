@@ -844,3 +844,24 @@
 - **实发验证**：第 1 次 `send_major_event_alerts` → `{'sent':1,...,'signals':[650167]}`（`notification_log` 新增 `log_id=72 | signal_id=650167 | major_event | tier=B | status=sent | subject=📢 [重大事件] BCH - ...`）；第 2 次 → `sent=0`（24h 冷却挡住，幂等性通过）。
 - **待部署**：需 Zeabur **显式 redeploy**（否则 `81f281c` 的价格闸门修复与本轮新通道都不生效）。
 - **独立问题（未修）**：`catalyst_fast_daemon` 疑似长期零产出——近 24h 仅 5 个大批次写入（正常应约 96 批），与 AGENTS.md 早前「快通道零产出」记载一致 ⇒ 分钟级时延暂不可得，**当前新通道由慢通道每 4h 兜底**。恢复快通道需先解决其 FATAL（见「已知待办」）。
+
+### A 级快讯 AI 否决闸门（审计_催化剂A级邮件_XRP_BCH_2026-09-24，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\_audit\审计_催化剂A级邮件_XRP_BCH_2026-09-24.md`。**零 DDL、未改 tier 计算、未改 AI 评审规则**。
+
+- **现象（审计原例）**：XRP 信号 `composite_score=86 / tier=A / status=open`，邮件发「🚀 A级催化剂信号」并附「📈 做多 · 入场 $1.58 / 目标 $2.01 / 止损 $1.41 / 盈亏比 2.5」；而**同一封邮件**的 AI 深度评审写着「资产匹配 low · **不建议参与** · 0% 仓位」。自身前后矛盾，扫一眼档位的人会得到与警告相反的动作。
+- **根因 1（P0-D2）**：`_score_to_tier` 只看综合分（[signal.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/catalyst/signal.py#L397-L405)），方向闸门也只认 `bearish/bullish`，**均不消费 `asset_match_confidence` 与 AI 交易结论** ⇒ 资产错配、AI 判 low 的信号照样拿 A 级推送位。
+- **根因 2（P0-D1）**：交易档位区块（`_build_fast_alert_html`）原判据是 `if tp is not None or sl is not None or entry is not None`，**完全不消费 AI 结论** ⇒ 即便 AI 说不建议参与，档位照渲。
+- **为什么不能落在 `_score_to_tier`（审计选项 A 的原位）**：`ai_deep_review` 由 **G7（AI 增强）**产出，`tier` 由 **G6（`build()`）**计算——同一轮内算 tier 时 AI 结论**尚不存在**（首轮必然 NULL，评审在 `send_fast_alerts_for_new_signals` 内部才生成）。因此否决只能落在**通知层**，那是两者都在手上的唯一位置。改 `signal.py` 需读回上一轮评审，会让 tier 依赖跨轮状态且首轮仍漏，故不取。
+- **判据（新增纯函数 `_ai_review_blocks_alert`，两处调用共用，避免口径漂移）**：
+  - `asset_match_confidence == 'low'`（大小写/空白容错）
+  - `verdict` 含「不建议」（与渲染层配色判据同一约定）
+  - 评审缺失 / 非 dict / 字段为空 ⇒ **一律不否决**。本闸门**只做减法**，不因 AI 异常扩大拦截面。
+- **改动 1（P0-D2，`notifier.py` 发送侧）**：在 `send_fast_alerts_for_new_signals` 的发送循环内、**`_try_acquire_send_lock` 之后**加否决分支 ⇒ 命中则 `_mark_sent(status='suppressed', error_msg='AI 否决：…')` + `logger.info` + `continue`。**顺序有意如此**：放在加锁之后，已有 `sent` 记录的信号会先走 `skipped` 分支，不会被改写成 `suppressed` 而污染历史留痕。返回值新增 `suppressed` 计数。
+- **改动 2（P0-D1，`notifier.py` 渲染侧）**：`_build_fast_alert_html` 的档位区块改为「先判否决」——命中且确有档位时渲染「📊 交易计划：已抑制」+ 原因，**不出现方向/入场价/目标价/止损价/盈亏比任何一项**；无档位可抑制时不凭空造块。与发送侧共用同一判据。
+- **改动 3（可观测性）**：`catalyst_fast_daemon` 轮次日志加「抑制:N」并纳入 `stats`；`phase_catalyst_pipeline` 的 `--fast` 分支加「🚫 快提醒: AI 否决抑制 N 条」。**理由**：审计的投诉点正是「静默跳过」——若只丢不记，等于换个姿势重犯。
+- **自测**：新增 `workbench/test_fast_alert_ai_veto.py` **46/46**（判据纯函数 17 例含「建议参与/强烈建议参与」不被子串误伤 + 渲染护栏 11 例 + 反向不误伤 6 例 + 顺序护栏 3 例 + 可观测 6 例 + 返回契约 3 例）；`py_compile` 4/4。
+- **prod 只读实测**：审计原例 `signal=1085989 XRP score=86 status=open`，`ai_verdict='不建议参与'`、`ai_asset_match='low'` ⇒ **`_ai_review_blocks_alert` 判 VETOED=true**（闸门确实拦得住这封邮件）。近 3 天 A 级信号共 **10 条，仅 1 条**会被抑制 ⇒ 无误伤。`catalyst_notification_log` 现有 status 只有 `sent/failed` ⇒ `suppressed` 是新值，不与既有语义冲突（`_is_sent` 只按 `sent_at` 判窗口、`_recent_major_events` 只认 `status='sent'`，均不受影响）。
+- **顺带观测**：`major_event` 留痕已有 3 条（`log_id=72` 本地探针 BCH；`74/76` 于 2026-09-23 16:06:01 UTC 由线上进程实发 AAVE/LIT，同一微秒时间戳 ⇒ 同批次 2 封）⇒ **上一轮 `c000fec` 的代码确已在线上跑**，佐证本次修复同样**只需 redeploy 即可生效**。
+- **待部署**：需 Zeabur **显式 redeploy**（同 `81f281c` / `c000fec`）。
+- **本轮范围外（审计 P1/P2/P3 共 11 项，留档未动）**：量比缺失值默认 0 标「极度缩量」（与 `ai_enhance` 的「未知」口径不一）、`description_short` 内嵌 stale 价格、`total_liquidity_usd`（$2.02M）被当可交易量做「稀薄」叙事（疑脏数据，需 prod 复核）、共振分 90 与「弱共振」同屏、双置信度并列、警告文案硬编码「ticker同名但不同项目」、规则档位与 AI 风控不校准、源脆弱（结构性催化应以官方公告为锚）、赛道贴标、标题 `XRP / XRP` 冗余。

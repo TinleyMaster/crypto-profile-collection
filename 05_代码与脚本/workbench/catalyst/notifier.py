@@ -201,6 +201,39 @@ def _send_email(subject: str, body_html: str) -> tuple[bool, str]:
 # 快通道：A 级信号即时提醒
 # =====================================================================
 
+# AI 深度评审的否决判据（审计_催化剂A级邮件_XRP_BCH_2026-09-24 P0-D1/D2）。
+#
+# 问题：综合分 86 的信号拿了 A 级推送位并附「📈 做多 · 入场/目标/止损」档位，
+# 而同封邮件里 AI 评审写着「资产匹配 low · 不建议参与 · 0% 仓位」——自相矛盾。
+#
+# 为什么不在 signal.py 的 _score_to_tier 里封顶 tier：ai_deep_review 由 G7（AI 增强）
+# 产出，tier 由 G6（build）计算，同一轮内算 tier 时 AI 结论还不存在（首轮必然为 NULL）。
+# 因此否决只能落在通知层——这是两者都在手上的唯一位置。
+AI_VETO_ASSET_MATCH = "low"     # asset_match_confidence 取该值时否决
+AI_VETO_VERDICT_MARKER = "不建议"  # verdict 含该子串时否决（与下方配色判据同一约定）
+
+
+def _ai_review_blocks_alert(ai_deep) -> tuple[bool, str]:
+    """AI 深度评审是否否决 A 级快讯。返回 (是否否决, 原因文案)。
+
+    仅在审计列出的两条判据成立时否决：
+      - `asset_match_confidence == 'low'`（代币与催化剂可能不匹配）
+      - `verdict` 含「不建议」（AI 自身结论即不建议参与）
+
+    评审缺失 / 非 dict / 字段为空时一律**不否决**，保持既有行为不变——本闸门只做减法，
+    不因 AI 异常而扩大拦截面。
+    """
+    if not isinstance(ai_deep, dict):
+        return False, ""
+    match = str(ai_deep.get("asset_match_confidence") or "").strip().lower()
+    if match == AI_VETO_ASSET_MATCH:
+        return True, "资产匹配度 low（代币与催化剂可能不匹配）"
+    verdict = str(ai_deep.get("verdict") or "")
+    if AI_VETO_VERDICT_MARKER in verdict:
+        return True, f"AI 交易结论「{verdict}」"
+    return False, ""
+
+
 def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     """对「本轮转为可动作」的 A 级信号发送快提醒。
 
@@ -208,15 +241,19 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     已定价（resonance_state='confirmed'）的信号在库中为 status='watch'，会被下方查询过滤，
     因此不会再出现「价格已涨完才推送」的追高提醒。
 
+    AI 否决闸门（审计 2026-09-24 P0-D2）：AI 深度评审判「资产匹配 low」或「不建议参与」
+    的信号**不发出**，但会在 biz.catalyst_notification_log 落一条 status='suppressed'
+    记录（含原因），使「有意不发」可观测——原先的静默跳过正是本次审计的投诉点。
+
     Args:
         conn: 数据库连接
         new_signal_ids: 本轮转为 open 的信号 ID 列表
 
     Returns:
-        dict: {sent, skipped, failed, signals: [...]}
+        dict: {sent, suppressed, skipped, failed, total_a_grade, signals: [...]}
     """
     if not new_signal_ids:
-        return {"sent": 0, "skipped": 0, "failed": 0, "signals": []}
+        return {"sent": 0, "suppressed": 0, "skipped": 0, "failed": 0, "signals": []}
 
     ensure_notification_table(conn)
 
@@ -409,6 +446,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     sent = 0
     skipped = 0
     failed = 0
+    suppressed = 0
     alert_signals = []
 
     for row in rows:
@@ -419,6 +457,18 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
         )
         if not acquired:
             skipped += 1
+            continue
+
+        # AI 否决闸门（P0-D1/D2）：拿到发送权后再判「该不该发」。
+        # 顺序有意放在加锁之后——已有 sent 记录的信号会走上面的 skipped 分支，
+        # 不会在这里被改写成 suppressed 而污染历史留痕。
+        blocked, why = _ai_review_blocks_alert(row.get("ai_deep_review"))
+        if blocked:
+            suppressed += 1
+            _mark_sent(conn, row["signal_id"], NTYPE_FAST_ALERT, "A", None,
+                       status="suppressed", error_msg=f"AI 否决：{why}")
+            logger.info("A 级快讯已抑制 [%s] signal=%s：%s",
+                        row["symbol"], row["signal_id"], why)
             continue
 
         # 优先用中文标题，兜底用原文
@@ -444,6 +494,7 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
 
     return {
         "sent": sent,
+        "suppressed": suppressed,
         "skipped": skipped,
         "failed": failed,
         "total_a_grade": len(rows),
@@ -657,9 +708,24 @@ def _build_fast_alert_html(row) -> str:
 
     # ---------- 各区块构建 ----------
 
-    # 1. 交易档位
+    # 1. 交易档位（审计 2026-09-24 P0-D1）
+    # 原实现只看 entry/tp/sl 是否非空，完全不消费 AI 结论——于是「AI 说不建议参与」
+    # 的同封邮件里照样渲染「📈 做多 · 入场/目标/止损」，扫一眼档位的人会得到与警告
+    # 相反的动作。判据与发送侧共用 _ai_review_blocks_alert，避免两处口径漂移。
     trade_section = ""
-    if tp is not None or sl is not None or entry is not None:
+    has_levels = tp is not None or sl is not None or entry is not None
+    vetoed, veto_reason = _ai_review_blocks_alert(ai_deep)
+    if vetoed and has_levels:
+        trade_section = f"""
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:16px;margin-top:16px">
+          <div style="font-size:13px;font-weight:600;color:#991b1b;margin-bottom:6px">📊 交易计划：已抑制</div>
+          <div style="font-size:12px;color:#991b1b;line-height:1.6">
+            本条信号附带的入场/目标/止损档位<b>不予展示</b>——{_html.escape(veto_reason)}，
+            规则档位与 AI 结论方向相反，并列展示会误导。请以 AI 深度评审的结论与风控建议为准。
+          </div>
+        </div>
+        """
+    elif has_levels:
         # 判断方向
         direction = "—"
         if entry is not None and tp is not None and sl is not None:

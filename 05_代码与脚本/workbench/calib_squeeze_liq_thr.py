@@ -10,7 +10,7 @@
     ⇒ 「8018 行」是瞬时值，不是稳定样本。
   - 判据本身也偏弱：单一实现的「点越阈率 < 20%」在另一口径下就能翻盘。
 
-本脚本把七件事写死：
+本脚本把八件事写死（第 8 条为工单 SQUEEZE-SPAN-001 追加）：
   1. **口径定义**（窗口 / 基准 / 回撤 / 振幅）写进 `variant_*` 函数，可被逐行核对；
   2. **时间边界**：每次运行都打印 min(ts)/max(ts)/实际跨度/行数，避免再拿瞬时值当样本量；
      注意 `span_hours = max(ts)-min(ts)` **有整段空洞时照样显示「连续」**，故另有 ⑥；
@@ -32,6 +32,16 @@
      二项 SE ≈1pp、**95% CI 覆盖判据线 20%**，且同一 24h 窗口内各 4h 段的上界能摆
      9pp（单段 25% 必然 FAIL ↔ 单段 16% 轻松 PASS）⇒ 输出每变体 n/越阈数/SE/CI、
      跨时段上界区间，并在 CI 跨线或时段跨线时判 **decisive=False**（不可判）。
+  8. **判据聚合方式 + 跨度前置门**（工单 SQUEEZE-SPAN-001 §6-A/B/C，三个 P1 同落）：
+     - **A**：判据输入由「合并样本上界」改为**各 4h 段上界的中位数**（`SEGMENT_JUDGE_STAT`）——
+       实证**聚合悖论**：段层面 9/15 段 PASS（中位 17.58%）而合并上界 31.47% = FAIL，
+       合并让高活跃段获「样本量 × 越阈率」双重权重加成；`decisive` = 段 IQR 不跨判据线。
+     - **B**：极端段（上界 ≥ `EXTREME_SEG_PCT`）**显式列出**，不并入判据但不得静默丢弃
+       （单个 4h 段即可翻转合并结论）。
+     - **C**：**跨度充分性前置门**（`span_sufficiency`）——表跨度 < `MIN_SPAN_DAYS`、或极端段
+       观测 < `MIN_EXTREME_SEGMENTS` 次 ⇒ 直接判样本不可用（rc=3），**不给出**会被误读成
+       「判据不通过」的数字。⚠️ 判据的真正卡点是**时间跨度**（方差分解：时间解释 98.7% 方差、
+       抽样仅 1.3%），20~60 天是**量级估计、非承诺** —— 本脚本**不得**写「再等 N 天就能判」。
 
 口径澄清（复验 P1-1b/c）：
   - 窗口参数默认 **1 天**——与「/24h 成交额」语义一致；旧默认 7 天会得 3× 偏差
@@ -108,6 +118,24 @@ MAX_MOLECULE_HOLE_H = 3            # 最长连续零行小时数上限（小时�
 # 判据线 ⇒ 单次点估计的 PASS/FAIL 等权，不能作为阈值决策依据。
 SEGMENT_HOURS = 4                  # 跨时段分桶粒度（小时），用于给出上界的时段漂移区间
 MIN_SEGMENT_N = 30                 # 分桶样本量下限，低于此值不进漂移区间
+
+# ── 工单 SQUEEZE-SPAN-001（2026-09-24）：判据从「合并样本上界」改为「段层面稳健统计」，
+#    并加「跨度充分性」前置门。A/B/C 三个 P1 必须**同落**（A 单独上会把极端 regime 在语义上
+#    降级为噪声，见工单 §6 反面提醒）。阈值本身一律不动。
+# A（§6）：实证**聚合悖论**——段层面 9/15 段落在 PASS 侧（中位 17.58%），而合并样本上界
+#    31.47% = FAIL：合并让高活跃段获得「样本量 × 越阈率」双重权重加成。⇒ 判据输入改为
+#    各 4h 段上界的**中位数**（对单个极端段稳健）。
+SEGMENT_JUDGE_STAT = "median"      # 判据输入：段上界的稳健统计（median / p75）
+# B（§6）：极端段（段上界 ≥ 该值）**必须显式列出**，不并入判据但不得静默丢弃
+#    （实证：单个 4h 段即可把合并结论从 FAIL 翻成 PASS）。
+EXTREME_SEG_PCT = 40.0
+# C（§6）：跨度充分性前置门 —— 表跨度 < `MIN_SPAN_DAYS`、或极端段观测 < `MIN_EXTREME_SEGMENTS`
+#    次 ⇒ 直接判样本不可用（rc=3），**不给出**会被误读成「判据不通过」的数字（如 44%）。
+#    依据：判据卡点是**时间跨度**不是样本量（方差分解：时间解释 98.7% 方差、抽样仅 1.3%），
+#    且现有数据不足以外推（跨度扩到 48h 仍跨线，min 每 +12h 仅 +1pp）。
+#    ⚠️ 20~60 天是**量级估计**（两条独立路径：稀释 / 频率估计），非「再等 N 天就能判」的承诺。
+MIN_SPAN_DAYS = 30
+MIN_EXTREME_SEGMENTS = 3
 
 SQL_SAMPLE = """
 WITH v AS (
@@ -195,6 +223,11 @@ def rate(vals: list[float], thr: float) -> float | None:
 def _f(v, spec: str = ".3e", dash: str = "n/a") -> str:
     """None 安全的数值格式化（分位在空样本上是 None，不能直接 f-string）。"""
     return dash if v is None else format(v, spec)
+
+
+def _pct_s(v) -> str:
+    """百分比格式化（None 安全）。"""
+    return "n/a" if v is None else f"{v:.2f}%"
 
 
 def exit_code(pass_: bool, sample_ok: bool, decisive: bool, measurable: bool = True) -> int:
@@ -448,6 +481,65 @@ def segment_upper_bounds(rows: list[dict], new_thr: float) -> dict:
     return out
 
 
+def segment_judge(segs: list[dict], line: float) -> dict:
+    """段层面稳健统计（工单 SQUEEZE-SPAN-001 §6-A/B）。
+
+    为什么改（§6-A）：实证**聚合悖论**——段层面 9/15 段落在 PASS 侧（中位 17.58%），而合并
+    样本上界 31.47% = FAIL：合并让高活跃段获得「样本量 × 越阈率」双重权重加成，与段层面多数
+    结论相悖。⇒ 判据输入改为各段上界的**中位数**（对单个极端段稳健）。
+
+    B（§6）：极端段（段上界 ≥ `EXTREME_SEG_PCT`）**必须显式列出**，不并入判据但不得静默丢弃
+    （实证：单个 4h 段——占总时长 5.6%、占行数 9.6%——即可把合并结论从 FAIL 翻成 PASS）。
+
+    `decisive`：段 IQR 不跨判据线（P75 < 线 或 P25 > 线）才算「有判别力」——比旧的
+    「各段 min/max 跨线」对极端段稳健（旧判据被单个极端段直接判 INCONCLUSIVE）。
+    """
+    out = {"stat": SEGMENT_JUDGE_STAT, "n_segments": 0, "value_pct": None,
+           "min_pct": None, "p25_pct": None, "median_pct": None, "p75_pct": None,
+           "max_pct": None, "decisive": False,
+           "extreme_pct": EXTREME_SEG_PCT, "extreme_segments": [], "extreme_count": 0}
+    if not segs:
+        return out
+    bounds = [s["upper_bound_pct"] for s in segs]
+    s = sorted(bounds)
+    out["n_segments"] = len(s)
+    out["min_pct"], out["max_pct"] = s[0], s[-1]
+    out["p25_pct"] = pct(s, 0.25)
+    out["median_pct"] = pct(s, 0.5)
+    out["p75_pct"] = pct(s, 0.75)
+    out["value_pct"] = (out["median_pct"] if SEGMENT_JUDGE_STAT == "median"
+                        else out["p75_pct"])
+    out["extreme_segments"] = [
+        {"start_ts": x["start_ts"], "upper_bound_pct": x["upper_bound_pct"]}
+        for x in segs if x["upper_bound_pct"] >= EXTREME_SEG_PCT]
+    out["extreme_count"] = len(out["extreme_segments"])
+    out["decisive"] = bool(out["p75_pct"] < line or out["p25_pct"] > line)
+    return out
+
+
+def span_sufficiency(span_hours: float, extreme_count: int) -> dict:
+    """跨度充分性前置门（工单 SQUEEZE-SPAN-001 §6-C）。
+
+    为什么需要：判据卡点是**时间跨度**不是样本量（方差分解：时间解释 98.7% 方差、抽样仅
+    1.3%），且现有 71h 数据不足以外推（跨度扩到 48h 仍跨线，min 每 +12h 仅 +1pp）。
+    ⇒ 表跨度 < `MIN_SPAN_DAYS`、或极端段观测 < `MIN_EXTREME_SEGMENTS` 次时，**直接判样本
+    不可用（rc=3）**，不给出会被误读成「判据不通过」的数字（如 44%）。
+
+    ⚠️ 这是**量级估计**不是点估计：极端段在 71h 内只观测到 1 次，泊松 95% CI 是 0.025~5.57 倍；
+    20~60 天的量级来自两条独立路径（稀释 / 频率估计），**不构成「再等 N 天就能判」的承诺**。
+    """
+    reasons: list[str] = []
+    if span_hours < MIN_SPAN_DAYS * 24:
+        reasons.append(f"表跨度 {span_hours:.1f}h < {MIN_SPAN_DAYS} 天（判据需跨 regime，"
+                       f"当前仅覆盖单一「暴动→平复」周期）")
+    if extreme_count < MIN_EXTREME_SEGMENTS:
+        reasons.append(f"极端段（段上界 ≥{EXTREME_SEG_PCT:.0f}%）仅观测到 {extreme_count} 次 "
+                       f"< {MIN_EXTREME_SEGMENTS} 次（无法估计其出现频率）")
+    return {"ok": not reasons, "reasons": reasons, "span_hours": round(span_hours, 2),
+            "extreme_count": extreme_count, "min_span_days": MIN_SPAN_DAYS,
+            "min_extreme_segments": MIN_EXTREME_SEGMENTS}
+
+
 def variant_a(r) -> bool:
     """A：窗口内拉升（高低点振幅）≥2% 且 已回撤 ≥2%。"""
     if not (r["peak_hi"] and r["trough_lo"] and r["close_now"] and r["trough_lo"] > 0):
@@ -549,9 +641,16 @@ def main() -> int:
     molecule_fail: list[str] = molecule_fail_reasons(mol)
     denom_ok = not denom_fail
     molecule_ok = not molecule_fail
+    # 工单 SQUEEZE-SPAN-001 §6-A/B：判据输入 = 各 4h 段上界的**中位数**（对单个极端段稳健）；
+    # 极端段（≥ EXTREME_SEG_PCT）显式列出（不并入判据，但不得静默丢弃）。
+    sj = segment_judge(seg["segments"], JUDGE_UPPER_BOUND_PCT)
+    # §6-C：跨度充分性前置门（表跨度 / 极端段观测次数不足 ⇒ 样本不可用，不给判定数字）。
+    span_suf = span_sufficiency(span_h, sj["extreme_count"])
+    span_ok = span_suf["ok"]
     # 复验 E3：分母与分子**都要**自证通过，样本才可用（旧码只看分母，而爆仓表实测
     # 24h 里只有 11 个整点有数据、最长连空 14h ⇒ 分子不合格时算出的越阈率同样无意义）。
-    sample_ok = denom_ok and molecule_ok
+    # 工单 §6-C：再加「跨度充分性」——它才是判据的真正卡点（时间解释 98.7% 方差）。
+    sample_ok = denom_ok and molecule_ok and span_ok
     out = {
         "table_bound": {
             "min_ts": bound["mn"].isoformat() if bound["mn"] else None,
@@ -597,35 +696,48 @@ def main() -> int:
             for name, vals in subset.items()
         },
         "segments": seg,
+        "segment_judge": sj,
+        "span_sufficiency": span_suf,
     }
+    # ── 判据（工单 SQUEEZE-SPAN-001 §6-A）：段层面稳健统计（中位数）──────────────
+    # 合并样本上界 / CI / 分段跨线**降级为诊断**（旧判据；实证「聚合悖论」——段层面 9/15
+    # PASS、合并 31.47% FAIL ⇒ 合并让高活跃段获「样本量 × 越阈率」双重加成）。
     new_rates = [v["rate_new_pct"] for v in out["subsets"].values()
                  if v["rate_new_pct"] is not None]
-    # 复验 E2：判据必须带统计判别力，否则「上界 < 20%」在 n≈1.6k 上只是个抽样噪声读数。
     ub_name, ub_sub = max(
         ((n, v) for n, v in out["subsets"].items() if v["rate_new_pct"] is not None),
         key=lambda kv: kv[1]["rate_new_pct"], default=(None, None))
     ci = wilson_ci(ub_sub["n_over_new"], ub_sub["n"]) if ub_sub else None
-    # CI 必须整体落在判据线某一侧；跨线 ⇒ 无法区分 PASS/FAIL
+    # CI 必须整体落在判据线某一侧；跨线 ⇒ 无法区分 PASS/FAIL（仅诊断，见 `*_raw`）。
     ci_decisive = bool(ci) and (ci[1] < JUDGE_UPPER_BOUND_PCT or ci[0] > JUDGE_UPPER_BOUND_PCT)
-    # 各时段独立结论必须同向；跨线 ⇒ 「窗口里装了哪几段」决定结论
+    # 各时段 min/max 跨线（旧判据的「漂移」口径，仅诊断）。
     seg_straddle = (seg["min_pct"] is not None
                     and seg["min_pct"] < JUDGE_UPPER_BOUND_PCT <= seg["max_pct"])
-    decisive = ci_decisive and not seg_straddle
-    judge_pass = bool(sample_ok and decisive and ub_sub is not None
-                      and ub_sub["rate_new_pct"] < JUDGE_UPPER_BOUND_PCT)
+    # 新判据：判据输入 = 段中位数（`sj["value_pct"]`），`decisive` = 段 IQR 不跨线。
+    judge_val = sj["value_pct"]
+    measurable = judge_val is not None
+    decisive = sj["decisive"]
+    judge_pass = bool(sample_ok and measurable and judge_val < JUDGE_UPPER_BOUND_PCT)
     # 复验 G1：`conclusion` 必须与退出码**同源**——旧码由 `pass`/`decisive` 另算一遍、完全不读
     # `sample_ok` ⇒ 真码实跑 `--days 7` 打出 `sample_ok=false` + `conclusion="FAIL"`，与 rc=3、
     # `reliable=false` 三处口径互相打架。这是同一缺陷类的第三次复发（D1 `pass` → F2 `decisive`
     # → 本轮 `conclusion`）⇒ 改为由 `exit_code()` 单一真源映射，杜绝再有第四个字段各自为政。
-    # 复验 G3：`measurable`（无任何变体命中 ⇒ 上界算不出来）并入 3，不再落到语义不符的 4。
-    rc = exit_code(judge_pass, sample_ok, decisive, ub_sub is not None)
+    # 复验 G3：`measurable`（无任何分段可算 ⇒ 判据输入算不出来）并入 3，不再落到语义不符的 4。
+    rc = exit_code(judge_pass, sample_ok, decisive, measurable)
     out["judge"] = {
-        "criterion": f"条件子集越阈率跨口径上界 < {JUDGE_UPPER_BOUND_PCT}%，"
-                     "且该上界具备统计判别力（CI 与各时段均不跨判据线）",
-        "upper_bound_pct": ub_sub["rate_new_pct"] if ub_sub else None,
-        "upper_bound_variant": ub_name,
-        "upper_bound_n": ub_sub["n"] if ub_sub else None,
-        "upper_bound_ci95_pct": [round(ci[0], 2), round(ci[1], 2)] if ci else None,
+        "criterion": f"各 {SEGMENT_HOURS}h 段上界的{SEGMENT_JUDGE_STAT} < "
+                     f"{JUDGE_UPPER_BOUND_PCT}%，且段 IQR 不跨判据线（P75<线 或 P25>线）",
+        # 工单 §6-A：判据输入由「合并样本上界」改为**段层面稳健统计**（此处 = 段中位数）。
+        "upper_bound_pct": judge_val,
+        "upper_bound_variant": f"段{SEGMENT_JUDGE_STAT}({SEGMENT_HOURS}h)",
+        "upper_bound_n": sj["n_segments"],
+        # 合并上界 / CI：诊断字段（旧判据），不再参与判定。
+        "merged_upper_bound_pct": ub_sub["rate_new_pct"] if ub_sub else None,
+        "merged_variant": ub_name,
+        "merged_n": ub_sub["n"] if ub_sub else None,
+        "merged_ci95_pct": [round(ci[0], 2), round(ci[1], 2)] if ci else None,
+        "seg_p25_pct": sj["p25_pct"], "seg_p75_pct": sj["p75_pct"],
+        "seg_min_pct": sj["min_pct"], "seg_max_pct": sj["max_pct"],
         # 复验 G4 + H4：布尔化的 `ci_decisive` 会掩盖贴线的边界性（实测只差 0.01pp 即判
         # 「有判别力」）⇒ 给出**带符号**裕度（正 = CI 在判据线下方即 PASS 侧，负 = 上方
         # 即 FAIL 侧，0 = 已跨线），既暴露贴线又保住方向。
@@ -641,8 +753,9 @@ def main() -> int:
         # **不读 `sample_ok`** ⇒ 只可用于解释 rc=3/4 的成因，**判据一律读 conclusion / reliable /
         # exit_code / decisive**（字段名带 `_raw` 即为此警示）。
         "ci_decisive_raw": ci_decisive, "segment_straddle_raw": seg_straddle,
-        "raw_note": "`*_raw` 为 CI/分段的原始性质（未与 sample_ok 联动），仅供诊断；"
-                    "判据请读 conclusion / reliable / decisive / exit_code。",
+        "raw_note": "`*_raw` 为**合并上界** CI / 分段 min-max 跨线的原始性质（已降级为诊断、"
+                    "未与 sample_ok 联动），仅供诊断；判据请读 conclusion / reliable / "
+                    "decisive / exit_code。",
         "pass": judge_pass,
         # 复验 E2：三态结论。旧码只输出 PASS/FAIL 两极，而「判据不可判」时把它印成
         # FAIL 与报告结论自相矛盾（该样本量下 PASS 与 FAIL 等权）⇒ 不可判必须单列，
@@ -655,6 +768,9 @@ def main() -> int:
         # I3：`rc != 3` 虽是单源却是「非 3」式写法 —— 第 5 码出现时会**静默误报**，
         # 而隔壁 `CONCLUSION_BY_CODE[rc]` 会炸（两处鲁棒性不对称）⇒ 一律改用同构映射表。
         "reliable": RELIABLE_BY_CODE[rc],
+        # 工单 §6-B：极端段显式列出（不并入判据，但不得静默丢弃）。
+        "extreme_segments": sj["extreme_segments"],
+        "extreme_count": sj["extreme_count"],
     }
 
     if args.json:
@@ -701,8 +817,21 @@ def main() -> int:
     if m["hourly_rows"]:
         print("  逐小时行数（旧→新）：" + " ".join(str(n) for n in m["hourly_rows"]))
 
+    # 工单 SQUEEZE-SPAN-001 §6-E：段上界纳入**标准输出**（原先只在通过 sample_ok 后才打印，
+    # 而它恰是诊断「聚合悖论」的唯一入口）⇒ 移到前置门之前，任何路径都能看到。
+    sg = out["segments"]
+    print(f"\n【各 {sg['segment_hours']}h 段上界】← 工单 §6-E：段间漂移（合并判据的聚合悖论入口）")
+    if sg["min_pct"] is not None:
+        print(f"  共 {sg['n_segments']} 段（跳过 n<{MIN_SEGMENT_N} 的 {sg['skipped']} 段）："
+              f"min={sg['min_pct']:.2f}% / 中位={sg['median_pct']:.2f}% / "
+              f"max={sg['max_pct']:.2f}%  ⇒ 段间跨度 {sg['max_pct'] - sg['min_pct']:.2f}pp")
+        for x in sg["segments"]:
+            print(f"    {x['start_ts'][:16]}  rows={x['rows']:<6} 上界 {x['upper_bound_pct']:.2f}%")
+    else:
+        print(f"  无满足 n≥{MIN_SEGMENT_N} 的分段")
+
     if not sample_ok:
-        fails = denom_fail + molecule_fail
+        fails = denom_fail + molecule_fail + span_suf["reasons"]
         print("\n🛑 拒绝出结论：" + "；".join(fails))
         if not denom_ok:
             print("   分母不合格 ⇒ `vol_win` 被系统性少算，任何越阈率都不可比。"
@@ -711,6 +840,12 @@ def main() -> int:
             print("   分子不合格 ⇒ 样本既不代表整个窗口、又高度时间聚集（复验 E2 统计判别力"
                   "不足的一半成因）。先在只有这些小时活跃的样本上算「/24h」越阈率没有意义，"
                   "须先补齐爆仓采集或改用落在活跃时段的 --days。")
+        if not span_ok:
+            # 工单 §6-C：判据的真正卡点是**时间跨度**，不是样本量（方差分解：时间解释 98.7%
+            # 方差、抽样仅 1.3%）⇒ 加币/加数据量对判据几乎无益，且现有数据不足以外推。
+            print("   跨度不足 ⇒ 判据需跨 regime 的时间跨度（量级估计 20~60 天，**非承诺**）："
+                  "「等」只能稀释极端段、不能消除它（极端 regime 出现时判据结构性必然 FAIL）。"
+                  "期间维持影子模式，并继续积累判定记录。")
         # 复验 G3：与其它出口共用同一真源（旧码此处是硬编码字面量 3，改码表时会与之分叉）。
         return rc
 
@@ -740,63 +875,51 @@ def main() -> int:
         print(f"  {name:<18} n={v['n']:<6} 越阈数 {v['n_over_new']:<5}"
               f"（{v['n_over_new']}/{v['n']} = {r_new}）  旧值越阈 {r_old:>8}")
     j = out["judge"]
-    ub = f"{j['upper_bound_pct']:.2f}%" if j["upper_bound_pct"] is not None else "n/a"
-    ci_txt = (f"[{j['upper_bound_ci95_pct'][0]:.2f}%, {j['upper_bound_ci95_pct'][1]:.2f}%]"
-              if j["upper_bound_ci95_pct"] else "n/a")
-    print("\n【统计判别力】← 复验 E2：判据线附近单次点估计的 PASS/FAIL 等权，不能作阈值决策依据")
-    # 复验 H5：`ub_sub is None`（无任何变体命中 ⇒ 上界根本算不出来）旧码照样印
-    # 「上界由 `None` 决定」+「CI 含 20%？YES ⇒ 无法区分 PASS/FAIL」—— 把「**没有**上界可算」
-    # 说成「**CI 含**判据线」，借用了 `ci_decisive=False` 的既有措辞 ⇒ 单列该状态、跳过 CI 与
-    # 裕度行（此时两者都无意义）。
+    ub = _pct_s(j["upper_bound_pct"])
+    print("\n【统计判别力】← 工单 SQUEEZE-SPAN-001 §6-A：判据输入 = 段层面稳健统计"
+          "（对单个极端段稳健）")
+    # 复验 H5：无任何分段可算 ⇒ 判据输入根本算不出来 ⇒ 单列该状态（不再借用 CI 措辞）。
     if j["upper_bound_pct"] is None:
         # 复验 I6：码位由 `{rc}` 动态引用（旧码在此 prose 里写死「退出码 3」，
         # 与紧邻判据行的 `j['exit_code']` 动态取值不对称 ⇒ 码表变动时 prose 静默漂移）。
-        print("  无任何变体命中（n 全为 0）⇒ 上界**不可算**（measurable=False）"
+        print("  无任何满足 n≥MIN_SEGMENT_N 的分段 ⇒ 上界**不可算**（measurable=False）"
               f"⇒ 判据无输入 ⇒ 退出码 {rc}（样本不可比；与 rc=4「样本可用但判据不可判」不同源）")
     else:
-        print(f"  上界由 `{j['upper_bound_variant']}` 决定，n={j['upper_bound_n']}"
-              f"  95% CI(Wilson) = {ci_txt}（含 {JUDGE_UPPER_BOUND_PCT:.0f}%？"
-              f"{'YES ⇒ 无法区分 PASS/FAIL' if not j['ci_decisive_raw'] else 'no'}）")
-        # 复验 G4 + H4：布尔化的 ci_decisive 会把「只差 0.01pp」和「差 10pp」印成同一句话，
-        # 且绝对值裕度会把 PASS 侧/FAIL 侧抹平 ⇒ 印**带符号**裕度并写明所在侧。
-        if j["ci_distance_pp"] is not None:
-            _margin = j["ci_distance_pp"]
-            _side = ("PASS 侧（CI 整段在判据线下方）" if _margin > 0
-                     else "FAIL 侧（CI 整段在判据线上方）" if _margin < 0
-                     else "已跨判据线（两侧皆有，裕度为零）")
-            print(f"  ↳ CI 距判据线（{JUDGE_UPPER_BOUND_PCT:.0f}%）带符号裕度 = {_margin:+.2f}pp"
-                  f" ⇒ {_side}")
-    sg = out["segments"]
-    if sg["min_pct"] is not None:
-        print(f"  各 {sg['segment_hours']}h 段上界（n≥{MIN_SEGMENT_N}，共 {sg['n_segments']} 段"
-              f"，跳过 {sg['skipped']} 段）：{sg['min_pct']:.2f}% ~ "
-              f"{sg['median_pct']:.2f}% ~ {sg['max_pct']:.2f}%"
-              f"  ⇒ {'跨判据线（窗口里装哪几段决定结论）' if j['segment_straddle_raw'] else '同向'}")
-        for x in sg["segments"]:
-            print(f"    {x['start_ts'][:16]}  rows={x['rows']:<6} 上界 {x['upper_bound_pct']:.2f}%")
-    else:
-        print(f"  各 {sg['segment_hours']}h 段上界：无满足 n≥{MIN_SEGMENT_N} 的分段，跳过漂移评估")
+        print(f"  判据输入 = 各 {sg['segment_hours']}h 段上界的{SEGMENT_JUDGE_STAT}"
+              f"（共 {j['upper_bound_n']} 段）= {ub}"
+              f"  |  P25={_pct_s(j['seg_p25_pct'])} / P75={_pct_s(j['seg_p75_pct'])}"
+              f"  ⇒ 段 IQR {'不跨' if j['decisive'] else '跨'}判据线"
+              f"（{'有判别力' if j['decisive'] else '无判别力'}）")
+        # 合并上界 / CI：诊断字段（旧判据），不再参与判定。
+        _mci = j["merged_ci95_pct"]
+        _mci_txt = f"[{_mci[0]:.2f}%, {_mci[1]:.2f}%]" if _mci else "n/a"
+        _margin = j["ci_distance_pp"]
+        _margin_txt = "n/a" if _margin is None else f"{_margin:+.2f}pp"
+        print(f"  （诊断，不参与判定）合并样本上界 = {_pct_s(j['merged_upper_bound_pct'])}"
+              f"（变体 {j['merged_variant']}，n={j['merged_n']}）95% CI = {_mci_txt}"
+              f"；CI 距线带符号裕度 = {_margin_txt}")
+    if j["extreme_count"]:
+        print(f"  ⚠️ 极端段（上界 ≥{EXTREME_SEG_PCT:.0f}%）{j['extreme_count']} 个"
+              "（不并入判据，但不得静默丢弃 —— 工单 §6-B）：")
+        for x in j["extreme_segments"]:
+            print(f"    {x['start_ts'][:16]}  上界 {x['upper_bound_pct']:.2f}%")
     print(f"\n【判定】{j['criterion']}")
     # 复验 E2：三态输出。不可判时**不能**印 FAIL——该样本量下 PASS 与 FAIL 等权，
     # 印成 FAIL 会被读成「判据不通过」并据此动阈值（与报告结论自相矛盾）。
-    print(f"  跨口径上界 = {ub}  →  {j['conclusion']}"
+    print(f"  判据输入（段{SEGMENT_JUDGE_STAT}）= {ub}  →  {j['conclusion']}"
           f"（退出码 {j['exit_code']}："
           "0=PASS / 2=有判别力 FAIL / 3=样本不可用 / 4=不可判）")
     if j["conclusion"] == "INCONCLUSIVE":
-        print("     判据在当前样本量下不可判（CI 或各时段跨判据线）⇒ 此上界的 PASS/FAIL "
-              "只是抽样噪声，**不构成阈值决策依据**（勿据此调阈值）。")
-        print("     替代读法：看上方 CI 与各时段区间；报告建议改用「多次运行取区间 / "
-              "多时段中位数」作为判据输入。")
+        print("     段 IQR 跨判据线 ⇒ 此判据输入的 PASS/FAIL 只是抽样噪声，"
+              "**不构成阈值决策依据**（勿据此调阈值）。")
+        print("     替代读法：看上方 P25/P75 与段上界清单。")
     elif j["conclusion"] == "FAIL":
         print("     判据不通过且具备判别力 ⇒ 先核对分母/分子自证与未来函数口径，再谈调阈值。")
     elif j["conclusion"] == "SAMPLE_UNUSABLE":
-        # 复验 H2：该分支原为 `elif not j["pass"]`（本是为 rc=2 有判别力 FAIL 写的），
-        # `conclusion` 新增第四态后 `SAMPLE_UNUSABLE` 也落进来 ⇒ 同时误述两件事：
-        # ① 此 case `decisive=False`（CI 为空）根本谈不上「具备判别力」；
-        # ② 实际原因既非「判据不通过」也非「分母/分子不合格」（是无可判输入）。
-        # ⇒ 按 `conclusion` 精确分派，不再用 `pass` 这种粗粒度布尔兜。
-        print("     无任何变体命中 ⇒ 上界不可算、无判据输入 ⇒ 这不构成「判据不通过」"
-              "（也谈不上判别力）⇒ 先让变体过滤条件能命中样本，再谈阈值。")
+        # 复验 H2：按 `conclusion` 精确分派（不再用 `pass` 这种粗粒度布尔兜）——
+        # 该态可能是「分母/分子/跨度自证不过」或「判据输入不可算」，两者都谈不上判别力。
+        print("     样本不可用（分母/分子/跨度自证不过，或判据输入不可算）"
+              "⇒ 这不构成「判据不通过」（也谈不上判别力）⇒ 先满足样本可用性，再谈阈值。")
     print("\n⚠️ 样本时间代表性弱（表历史见上）⇒ 结论仅供临时定稿，"
           "待 squeeze_track 判定样本积累后改用判定窗口直接标定。")
     return rc

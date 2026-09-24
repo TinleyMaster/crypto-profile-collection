@@ -991,3 +991,18 @@
 - **自测**：新增 `workbench/test_daily_brief_20260924.py` **29/29**（ETF 合计自洽 + 源口径源码守卫 + 两胜率分列 + 时点 + 截断 + 维度标注 + `_clip`/`_fmt_data_as_of` + 边界不误触发）；`test_daily_brief_p1.py` 22/22、`test_liq_overview_brief.py` 49/49、`test_brief_data_model.py` 20/20 无回归；`py_compile` 2/2。
 - **真快照端到端**：`load_snapshot(2026-09-24)` + `render_brief_html` 实测输出「全部 ETF 合计 +$609M」「分项：BTC +$582M + ETH -$96M + 其他 +$122M（SOL +93M · XRP +17M · LINK +5M）」「当日 T+1h 胜率 59.1% / 近3日滚动 44.5%」「数据截至 09-24 08:30（北京时间）」。
 - **待部署**：早报由 scheduler 一次性脚本发送，下次调度（每日 09:00 CST）即生效，无需常驻容器重启。
+
+### 轧空标定判据「跨度需求 + 聚合方式」（工单 SQUEEZE-SPAN-001，2026-09-24，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\工单_轧空标定跨度需求与holdout_2026-09-24.md`。**只读标定工具改造，零 DDL、阈值一律不动**（`LONG_LIQ_RATIO_THR` / `SQZ_SHORT_LIQ_RATIO_MIN` 未触碰）。
+
+- **工单核心结论（实证）**：判据卡点是**时间跨度**不是样本量——方差分解 **时间解释 98.7% 方差、抽样仅 1.3%**；**聚合悖论**（段层面 9/15 段 PASS、中位 17.58%，合并上界 31.47% = FAIL）；**单段杠杆**（一个 4h 段即可把合并结论 FAIL→PASS）；**极端段不是少数币顶的**（HHI 0.0068、剔除 top20 仅 −2.27pp ⇒ 按币剔除治不了）。⇒ 「维持影子模式」是当前唯一诚实处置，但须补明确退出条件。
+- **改动（`calib_squeeze_liq_thr.py`，§6 A/B/C/D/E 全落）**：
+  - **A（P1）判据改段层面稳健统计**：`segment_judge(segs, line)` 以各 4h 段上界的**中位数**为判据输入（旧为合并上界），`decisive` = 段 IQR 不跨线（P75<线 或 P25>线）。合并上界/CI/分段 min-max 跨线**降级为 `*_raw` 诊断**。实测同一数据：判据输入 **19.91%**（PASS 侧）vs 合并 **47.27%**（FAIL 侧）——聚合悖论现形。
+  - **B（P1）极端段显式列出**：`EXTREME_SEG_PCT=40`，段上界 ≥ 该值者进 `judge.extreme_segments` + 文本渲染（不并入判据，但不得静默丢弃）。
+  - **C（P1）跨度充分性前置门**：`span_sufficiency(span_hours, extreme_count)`——表跨度 < `MIN_SPAN_DAYS=30` 或极端段 < `MIN_EXTREME_SEGMENTS=3` ⇒ 并入 `sample_ok` ⇒ rc=3，**不打印**判据输入比率（避免被误读成「判据不通过」）。
+  - **D（P2）**：模块 docstring 写明跨度量级是「**量级估计、非承诺**」（20~60 天来自稀释/频率两条独立路径，泊松 CI 极宽）。
+  - **E（P2）**：段上界输出**前移到前置门之前**（任何路径都能看到，它是聚合悖论的唯一诊断入口）。
+- **自测**：新增 `workbench/test_squeeze_span_judge.py` **25/25**（A 注入「5×10%+1×70%」→中位 10%、「全部 22%」→22%、IQR 跨线边界；B 极端段清单；C 四象限；D/E 源码守卫；**C 端到端桩接 DB**：分母/分子合格、跨度不足 ⇒ rc=3 且**未打印**判据输入比率、段上界仍打印）；既有 `test_squeeze_battle.py` 143/143（含全部 calib 源码守卫）、`test_squeeze_fuel.py` 99/99、`test_squeeze_alert_silence.py` 18/18 无回归；workbench 全量 `test_*.py` 零失败；`py_compile` 通过。
+- **prod 只读实测（`--days 1`）**：跨度 72.1h / 6 段（中位 19.89% / max 73.50%）/ 极端段 1 个 @ 09-23 14:15 ⇒ 跨度门拦下 rc=3，段上界照常打印、无判定比率。
+- **待拍板（未做，遵工单 §9）**：① holdout 现在不执行（跨度不足，记入待办，条件触发 span≥30 天）；② §4.2 四维 regime 分层未实测（仅给方案）；③ 「极端段是否混杂采集面变化」列为下一轮 P1；④ 影子模式维持。

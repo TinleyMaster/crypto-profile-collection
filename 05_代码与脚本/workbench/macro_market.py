@@ -10,9 +10,12 @@ import os
 import math
 import re
 import time
+import logging
 import threading
 import requests
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ── 数据源配置 ──
 CMC_BASE = "https://pro-api.coinmarketcap.com"
@@ -3230,7 +3233,7 @@ def _event_strength_score(kind: str, value, t: dict) -> int:
       - "flow_pct"  链/TVL 7d 变化率（%）：|x|*3，封顶 +40（与 mcap_pct 同曲线）
       - "mcap_pct"  叙事板块 7d 市值变化率（%）：|x|*3，封顶 +40
       - "ratio_x"   开发活跃倍数（last4/prev4），双向取偏离倍数
-      - "score"     0-100 的既有连续分（如催化剂分）：直接夹取
+      - "score"     0-100 的既有连续分（如催化剂分）：夹取 [40,90]
     value 为 None / 非法 → 50（中性，不惩罚）。
     """
     if value is None:
@@ -3249,7 +3252,9 @@ def _event_strength_score(kind: str, value, t: dict) -> int:
         r = max(v, 1.0 / v)
         return int(max(40, min(90, 50 + min(_PCT_ES_CAP, (r - 1.0) * _RATIO_ES_SLOPE))))
     if kind == "score":
-        return int(max(0, min(100, v)))
+        # N2-b（复验 423fb16）：与其余主轴统一夹 [40,90]。原 [0,100] 直通使 catalyst
+        # 天然可拿 es=100、其他类型封顶 90 ⇒ M1 刚统一的跨类型可比性复发。
+        return int(max(40, min(90, v)))
     return 50
 
 
@@ -3271,11 +3276,13 @@ def _whale_event_strength(usd_total, n_tx, t: dict) -> int:
 # N1（复验_高亮信号类型标签与github事件强度_ce59f0a，2026-09-24）：ratio_x 双向对称
 # 会令「极端开发停滞（decline）」与「极端开发爆发（burst）」同拿 es=90、conv 并列，
 # 方向相反却同分（语义倒挂）。开发停滞属风险/watch，不该拿事件强度满分 ⇒ decline 封顶。
-_GITHUB_DECLINE_ES_CAP = 65
+# N1 残留（复验 423fb16）：封顶 65 只在 r>1.75 生效，温和区（decline 0.5x=66 > burst
+# 1.5x=64）仍倒挂 ⇒ 降到 60（= burst 1.5x 水平），彻底消除温和区倒挂。
+_GITHUB_DECLINE_ES_CAP = 60
 
 
 def _github_event_strength(ratio, gdir, t: dict) -> int:
-    """GitHub 开发活跃事件强度：ratio_x 主轴；decline（开发停滞=风险）封顶 65（N1）。"""
+    """GitHub 开发活跃事件强度：ratio_x 主轴；decline（开发停滞=风险）封顶 60（N1）。"""
     es = _event_strength_score("ratio_x", ratio, t)
     return min(es, _GITHUB_DECLINE_ES_CAP) if gdir == "decline" else es
 
@@ -3486,15 +3493,22 @@ def _recent_catalyst_targets(window_days: int = 14) -> list[tuple[int, str, floa
                         raw_f = float(raw_score)
                     except (TypeError, ValueError):
                         raw_f = 0.0
-                    clipped = max(-100.0, min(100.0, raw_f * 10))
-                    score = (clipped + 100.0) / 2.0
+                    # N2-a（复验 423fb16）：原 raw*10 在 raw≥10 即撞顶 100（实测 ETH/SOL/
+                    # USDC 的 raw 37~120 全渲染「催化剂 100分」，而真实 composite_score
+                    # 仅 75~86）⇒ 展示失真。改为有界饱和映射：raw=0→50，随 raw 单调上升
+                    # 但永不到 100，保留区分度（raw=50→81，与决策口径 composite_score 量级对齐）。
+                    _raw_pos = max(0.0, raw_f)
+                    score = 50.0 + 50.0 * (_raw_pos / (_raw_pos + 30.0))
                     # D4：Python 侧二次校验（防 SQL 过滤遗漏 / 后续调用方复用）
                     sym = (symbol or "").strip()
                     if not sym or len(sym) > 20 or sym in ("canonical_symbol", "symbol", "TBD", "unknown", "UNKNOWN"):
                         continue
                     results.append((aid, sym, round(score, 1)))
                 return results
-    except Exception:
+    except Exception as e:
+        # N2-c（复验 423fb16）：原静默吞异常 ⇒ 无法区分「真无数据」与「查询失败」，
+        # 决策 feed 失败会静默降级到 legacy（展示分失真）而无人知晓。
+        logger.warning("_recent_catalyst_targets 查询失败（降级返回空）: %s", e)
         return []
 
 
@@ -3558,7 +3572,9 @@ def _recent_catalyst_decision_targets(window_days: int = 14) -> list[tuple[int, 
                         continue
                     results.append((aid, _sym, float(score or 0), entry_txt, invalid or ""))
                 return results
-    except Exception:
+    except Exception as e:
+        # N2-c：查询失败将导致上游静默回退 legacy feed（展示分口径不一致），必须留痕。
+        logger.warning("_recent_catalyst_decision_targets 查询失败（将回退 legacy feed）: %s", e)
         return []
 
 
@@ -5618,9 +5634,13 @@ def score_opportunities(overview: dict) -> dict:
             funding=funding_latest, exchange_netflow=ex_netflow,
             stablecoin_flow=stable_7d, roi_1yr=btc_roi_1yr, t=t,
         )
+        # N3（复验 423fb16）：融资落地有「金额」这一真实事件量 → 补 event_strength
+        # （金额未披露则留 None，展示层判空不渲染，不臆造 0）。
+        _raise_es = _event_strength_score("usd", amount_m * 1e6, t) if amount_m else None
         _push_opportunity(
             {"target": target, "direction": "long", "confidence": "medium",
              "conviction_score": conviction,
+             "event_strength": _raise_es,
              "signal_type": "funding",
              "key_metric": f"融资 {amount_str}",
              "asset_id": aid,
@@ -5940,6 +5960,8 @@ def score_opportunities(overview: dict) -> dict:
             _push_opportunity(
                 {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
                  "conviction_score": strength,
+                 # N3：事件强度 = 恐贪偏离中性的程度（|val-50|×2，越极端越强）。
+                 "event_strength": _event_strength_score("score", abs(_fg_val - 50) * 2, t),
                  "signal_type": "fng_extreme",
                  "key_metric": f"恐贪 {_fg_val:.0f}",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≤ {_fear_max}：市场极度恐惧，历史级积累区",
@@ -5953,6 +5975,8 @@ def score_opportunities(overview: dict) -> dict:
             _push_opportunity(
                 {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
                  "conviction_score": strength,
+                 # N3：同上，事件强度 = 恐贪偏离中性的程度。
+                 "event_strength": _event_strength_score("score", abs(_fg_val - 50) * 2, t),
                  "signal_type": "fng_extreme",
                  "key_metric": f"恐贪 {_fg_val:.0f}",
                  "trigger_logic": f"恐贪指数 {_fg_val:.0f} ≥ {_greed_min}：市场极度贪婪，防回撤",

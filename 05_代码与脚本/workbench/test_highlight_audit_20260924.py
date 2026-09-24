@@ -11,6 +11,9 @@
   M6 巨鲸单笔（n_tx<2）事件强度封顶 45（与 KOL 单源一致）
   M7-2 开发活跃倍数主轴 ratio_x + GitHub 卡融合（消除同日同分）
   M7-1 博弈卡类型归位 conflict_game（标签/配额/horizon/邮件标签表）
+  N1   GitHub decline 侧事件强度封顶 60（消除温和区/极端区方向语义倒挂）
+  N2   催化剂展示分去撞顶 + score 主轴夹 [40,90] + 静默降级留痕
+  N3   funding / fng_extreme 补 event_strength
 """
 import os
 import sys
@@ -76,10 +79,10 @@ check(mm._PCT_ES_SLOPE == 3.0 and "_PCT_ES_SLOPE" in _MACRO_SRC,
 
 # ── M3：catalyst 补 event_strength ──
 print("[M3] catalyst 事件强度")
-check(mm._event_strength_score("score", 86, {}) == 86, "score 主轴透传 86")
-check(mm._event_strength_score("score", 120, {}) == 100
-      and mm._event_strength_score("score", -5, {}) == 0,
-      "score 主轴夹取 0-100")
+check(mm._event_strength_score("score", 86, {}) == 86, "score 主轴透传 86（带内）")
+check(mm._event_strength_score("score", 120, {}) == 90
+      and mm._event_strength_score("score", -5, {}) == 40,
+      "score 主轴夹取 40-90（N2-b：与其余主轴对齐，消除 es=100 跨类型越界）")
 check(mm._event_strength_score("score", None, {}) == 50, "score None → 50")
 check(_MACRO_SRC.count('_event_strength_score("score", cscore, t)') == 2,
       "催化剂两条路径（决策/回退）均补 event_strength")
@@ -144,19 +147,52 @@ check('"event_strength": _gh_es,' in _MACRO_SRC, "GitHub 卡落 event_strength �
 
 # ── N1：decline 侧封顶（极端停滞不得与极端爆发同分） ──
 print("[N1] decline 侧事件强度封顶")
-check(mm._GITHUB_DECLINE_ES_CAP == 65, "decline 封顶常量为 65")
-check(mm._github_event_strength(0.1, "decline", {}) == 65,
-      "极端 decline（0.1x）封顶 65（旧码 ratio_x 得 90）")
+check(mm._GITHUB_DECLINE_ES_CAP == 60, "decline 封顶常量为 60（复验 423fb16：65→60 消除温和区倒挂）")
+check(mm._github_event_strength(0.1, "decline", {}) == 60,
+      "极端 decline（0.1x）封顶 60（旧码 ratio_x 得 90）")
 check(mm._github_event_strength(3.0, "burst", {}) == 90,
       "极端 burst（3.0x）仍 90（不误伤机会侧）")
-check(mm._github_event_strength(2.0, "decline", {}) == 65
+check(mm._github_event_strength(2.0, "decline", {}) == 60
       and mm._github_event_strength(2.0, "burst", {}) == 70,
-      "同倍数 decline(65) < burst(70)")
+      "同倍数 decline(60) < burst(70)")
 _dc = round(0.6 * 67 + 0.4 * mm._github_event_strength(0.1, "decline", {}))
 _bc = round(0.6 * 67 + 0.4 * mm._github_event_strength(3.0, "burst", {}))
 check(_dc < _bc, "语义倒挂消除：极端停滞 conv < 极端爆发 conv", f"decline={_dc} burst={_bc}")
+_dc_mild = round(0.6 * 67 + 0.4 * mm._github_event_strength(0.5, "decline", {}))
+_bc_mild = round(0.6 * 67 + 0.4 * mm._github_event_strength(1.5, "burst", {}))
+check(_dc_mild <= _bc_mild,
+      "温和区倒挂也消除：decline 0.5x ≤ burst 1.5x", f"decline={_dc_mild} burst={_bc_mild}")
 check("_github_event_strength(ratio, gdir, t)" in _MACRO_SRC,
       "GitHub 循环调用 _github_event_strength")
+
+# ── N2：催化剂展示分失真 / score 主轴越界 / 静默降级 ──
+print("[N2] 催化剂分口径 + 静默降级")
+check("raw_f * 10" not in _MACRO_SRC,
+      "N2-a 旧归一化（raw*10 撞顶）已移除")
+check("50.0 + 50.0 * (_raw_pos / (_raw_pos + 30.0))" in _MACRO_SRC,
+      "N2-a 改为有界饱和映射（raw=0→50，永不到 100）")
+# 映射单调性/不饱和（复算公式）
+def _legacy_map(raw):
+    p = max(0.0, float(raw))
+    return 50.0 + 50.0 * (p / (p + 30.0))
+check(_legacy_map(10) < _legacy_map(50) < _legacy_map(120) < 100.0,
+      "N2-a 映射单调且永不撞顶 100")
+check(round(_legacy_map(51), 1) == 81.5,
+      "N2-a ETH（raw=51）→ 81.5，与真实 composite_score 81 量级对齐")
+check('logger.warning("_recent_catalyst_decision_targets' in _MACRO_SRC,
+      "N2-c 决策查询失败不再静默（logger.warning）")
+check('logger.warning("_recent_catalyst_targets' in _MACRO_SRC,
+      "N2-c legacy 查询失败不再静默（logger.warning）")
+
+# ── N3：funding / fng_extreme 补事件强度 ──
+print("[N3] funding / fng_extreme 事件强度")
+check('"event_strength": _raise_es,' in _MACRO_SRC,
+      "融资落地卡补 event_strength（金额未披露 → None 不渲染）")
+check(_MACRO_SRC.count('"event_strength": _event_strength_score("score", abs(_fg_val - 50) * 2, t),') == 2,
+      "恐贪极值两分支（恐惧/贪婪）均补 event_strength")
+check(mm._event_strength_score("score", abs(20 - 50) * 2, {}) == 60
+      and mm._event_strength_score("score", abs(80 - 50) * 2, {}) == 60,
+      "恐贪极端度映射对称（20/80 → 60）")
 
 # ── M8：decline 卡 key_metric 方向词 ──
 check('else f"Dev 停滞 ↓{ratio:.1f}x"' in _MACRO_SRC,

@@ -1127,6 +1127,17 @@
 - **自测**：`test_highlight_audit_20260924.py` 50 → **57/57**（N1 封顶常量/极端 decline 封顶/burst 不误伤/同倍数大小关系/语义倒挂消除/源码守卫 + M8 文案守卫）；既有 `test_highlight_alert` 68/68、`board_tier2` 36/36、`p1_upstream` 24/24、`p0` 16/16、`brief_data_model` 20/20 无回归；`py_compile` 通过。
 - **P0 阻塞项（非代码）**：**Zeabur redeploy** 后第②路三项（conflict_game 出现 / es 非 None / 徽章翻新）才可终验。
 
+**复验处置 N1残留/N2/N3（`复验_高亮信号N1M8处置_423fb16_2026-09-24.md`，2026-09-24，本次提交）**：复验确认 N1/M8 代码闭环、**M7-1 借本次 redeploy 终验生效**（线上 `conflict_game` 2 条 + `related_dims` 已去 `catalyst_events`），另挖出 **N2（P1 新缺陷）** 与 N1 残留、N3，本轮按建议全部处置：
+
+- **🔴 N2（P1）催化剂展示分失真 + `es` 突破上限（已修）**：
+  - **N2-a**：legacy 归一化 `raw*10` 在 `raw≥10` 即撞顶 100（实测 ETH/SOL/USDC 的 raw 37~120 全渲染「催化剂 100分」，真实 `composite_score` 仅 75~86）⇒ 改**有界饱和映射** `50 + 50·raw/(raw+30)`（raw=0→50、单调、**永不到 100**；raw=51→81.5 与 composite_score 81 量级对齐）。实测 legacy 由 `{100,100,100,100,100}` → `{BTC90.0, USDC82.5, HYPE82.0, ETH81.5, SOL77.8}`。
+  - **N2-b**：`"score"` 主轴原 `[0,100]` 直通 ⇒ catalyst 天然可拿 es=100、其他主轴封顶 90，**M1 刚统一的跨类型可比性复发** ⇒ 统一夹 **`[40,90]`**。
+  - **N2-c**：`_recent_catalyst_targets` / `_recent_catalyst_decision_targets` 尾部 `except Exception: return []` **静默吞异常**（决策 feed 失败会静默降级 legacy 而无人知晓）⇒ 改 `logger.warning(...)` 留痕（新增模块级 `logger`）。
+- **🟠 N1 残留（P3，已修）温和区倒挂**：封顶 65 只在 `r>1.75` 生效 ⇒ `decline 0.5x(66) > burst 1.5x(64)` 仍倒挂 ⇒ `_GITHUB_DECLINE_ES_CAP` **65→60**（=burst 1.5x 水平），温和区与极端区倒挂**同时消除**。
+- **⚪ N3（观察，已修）`funding`/`fng_extreme` 补 es**：融资落地卡 `event_strength = _event_strength_score("usd", amount_m*1e6)`（金额未披露 → None 不渲染）；恐贪极值两分支 `event_strength = _event_strength_score("score", abs(_fg_val-50)*2)`（偏离中性程度，20/80 对称 → 60）。`conflict_game`（合成卡无独立事件量）保持 `es=None` 合理。
+- **自测**：`test_highlight_audit_20260924.py` 57 → **67/67**（N1 残留温和区消除 + N2-a 旧式移除/有界映射/单调不撞顶/ETH 81.5 + N2-b 夹取 40-90 + N2-c 两处 logger 守卫 + N3 两处 es 守卫/对称映射）；既有 `test_highlight_alert` 68/68、`board_tier2` 36/36、`p1_upstream` 24/24、`p0` 16/16、`brief_data_model` 20/20、`daily_brief_p1` 22/22、`ai_signal_quality` ALL PASS 无回归；`py_compile` 通过；prod 只读复跑 `_recent_catalyst_*` 无异常、legacy 不再撞顶。
+- **待部署**：需容器 **redeploy** 后生效。⚠️ 注意：本轮复验已确认线上跑旧码（N2 三项均待部署），redeploy 后第②路可终验（含 N2-a 展示分不再 100、`github_activity` es 非 None、`conflict_game` 出现）。
+
 ### CoinGlass 套餐数据接入 P0-A / P0-C / P1（方案 `Coinglass套餐数据接入方案_2026-09-23.md`，2026-09-24，本次提交）
 
 来源：`04_架构与代码方案/Coinglass套餐数据接入方案_2026-09-23.md`（P0-D / P0-B 此前已完成）。本轮做 **P0-A（已采未用列进消费）/ P0-C（混合口径偏高幅度下界，仅标定侧）/ P1（4h 爆仓历史回填）**；**不动任何判定阈值、不进 `scheduler.py`、不做 P2 扩维**。

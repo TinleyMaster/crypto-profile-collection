@@ -34,6 +34,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import calib_squeeze_liq_thr as calib  # noqa: E402
 
+# 复验 I7：守卫与自检**共用**同一 `re.compile` 常量 —— 常量被改坏时自检立刻变红，
+# 消除「守卫改了、自检没同步」的固有盲区（此前两者各自硬编码同一字面）。
+_RE_LEN_FAILS = re.compile(r"len\(\s*fails\s*\)\s*>\s*1")
+_RE_CONCL_PASS = re.compile(r"→\s*PASS")
+_RE_SUMMARY_MEDIAN = re.compile(r"中位\s*=\s*[\d.]+%")
+
 passed = 0
 failed = 0
 
@@ -162,16 +168,18 @@ check(not re.search(r"sg\[[\"']median_pct[\"']\]", _src)
 check('"upper_bound_n_segments": sj["n_segments"]' in _src
       and '"merged_ci_distance_pp": _ci_margin' in _src,
       "F5：语义漂移字段改名（段数 / merged_ci_distance_pp）")
-check("_pg = primary_gate(denom_ok, molecule_ok, span_ok)" in _src,
+# 复验（并发进程 WIP 预判）：主判据的存在性守卫用**宽匹配**（允许后续新增第 4/5 道门），
+# 只钉「primary_gate 存在且被调用」「_failed_gates 由门布尔求和」—— 承重的是行为断言。
+check("def primary_gate(" in _src and "_pg = primary_gate(" in _src,
       "F4：拒绝路径标注唯一充分因")
-check("_failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)" in _src
-      # 复验 H2 + I2：用**正则**判「理由条数」写法已消失 —— 字面串对空白敏感；正则允许
-      # 括号内/运算符两侧任意空白（`len( fails ) > 1` 等变体不再静默放行）。
-      and not re.search(r"len\(\s*fails\s*\)\s*>\s*1", _src),
+check("_failed_gates = sum(1 for ok in (" in _src
+      # 复验 H2 + I2 + I7：用**共享正则常量**判「理由条数」写法已消失 —— 字面串对空白敏感；
+      # 正则允许括号内/运算符两侧任意空白（`len( fails ) > 1` 等变体不再静默放行）。
+      and not _RE_LEN_FAILS.search(_src),
       "G1：归因判据用**失败门数**而非「理由条数」（单门多条理由不得印『其余门亦不过』）")
-# 复验 I4：与 H1 对称，补一条**非空转**自检（证明 H2 正则确实能命中目标写法）。
-check(bool(re.search(r"len\(\s*fails\s*\)\s*>\s*1", "if x and len(fails)>1:"))
-      and bool(re.search(r"len\(\s*fails\s*\)\s*>\s*1", "if x and len( fails ) > 1:")),
+# 复验 I4 + I7：与 H1 对称，补**非空转**自检（与守卫共用同一常量 ⇒ 常量坏则自检红）。
+check(bool(_RE_LEN_FAILS.search("if x and len(fails)>1:"))
+      and bool(_RE_LEN_FAILS.search("if x and len( fails ) > 1:")),
       "H2：守卫正则不空转（无空格 / 带内空白两种写法均命中）")
 check("new_rates" not in _src, "F6：删除死变量 new_rates")
 
@@ -280,6 +288,9 @@ check("15.00%" not in _out,
       "F2：判据输入中位数（15.00%）未出现在 rc=3 路径的输出里", _out[:0])
 check("【各 4h 段上界】" in _out and "20.00%" in _out,
       "E：即使样本不可用，段上界仍**逐段**打印（诊断入口）")
+# 复验 I6：把「段清单不印摘要行」这一事实交给**行为断言**（端到端输出），不再只靠源码字面。
+check(not _RE_SUMMARY_MEDIAN.search(_out),
+      "I6：段清单摘要行（中位=X%）不出现在 rc=3 路径的输出（行为断言）")
 
 # ════════════════════════════════════════════════════════════
 # 7. F1 端到端注入：样本可用 + 段 IQR 跨线 ⇒ rc=4（不得 rc=0）
@@ -323,11 +334,12 @@ check("段 IQR 跨判据线（无判别力）" in _out2,
       "F1：渲染如实印「段 IQR 跨判据线（无判别力）」（不再假报「不跨」）")
 # 复验 H1：用**正则**判结论，不耦合渲染格式的双空格（`…  →  {conclusion}`）——
 # 字面串 `"→  PASS"` 在格式改成单空格后会**静默恒真**、失去保护力。
-check("INCONCLUSIVE" in _out2 and not re.search(r"→\s*PASS", _out2),
+check("INCONCLUSIVE" in _out2 and not _RE_CONCL_PASS.search(_out2),
       "F1：结论 = INCONCLUSIVE（非 PASS）")
 # 复验 I3：自检样本改用**单空格**（H1 的真正失效模式），演示更有针对性。
-check(bool(re.search(r"→\s*PASS", "x → PASS（退出码 0"))
-      and not re.search(r"→\s*PASS", "x → INCONCLUSIVE"),
+# 复验 I7：与守卫共用同一 `_RE_CONCL_PASS` 常量。
+check(bool(_RE_CONCL_PASS.search("x → PASS（退出码 0"))
+      and not _RE_CONCL_PASS.search("x → INCONCLUSIVE"),
       "H1：结论正则不空转（命中单空格 PASS、不命中 INCONCLUSIVE）")
 
 # ════════════════════════════════════════════════════════════

@@ -3320,6 +3320,13 @@ def ai_enrich_signals_v2(
     skipped = []
     for sig in signals_by_asset:
         all_signals = sig.get("all_signals") or [sig]
+        # P4（FEAT-SIGNAL-SRC-003）：机械派生信号（如变化榜连板）跳过 LLM 增强省成本。
+        # 仅当合并卡内**全部**子信号都标 ai_skip 时才跳过——若同标的同时有
+        # AI/催化剂类信号并入，则仍按常规送 AI（此时连板起共振增强作用）。
+        if all_signals and all(s.get("ai_skip") for s in all_signals):
+            sig["_ai_filter_reason"] = "机械信号（变化榜连板），跳过 AI 增强"
+            skipped.append(sig)
+            continue
         should_send, reason = should_send_to_ai(all_signals, rules)
         sig["_ai_filter_reason"] = reason
         # 聚合/宏观类信号（无 asset_id 且非单一币种）不送全量画像分析，

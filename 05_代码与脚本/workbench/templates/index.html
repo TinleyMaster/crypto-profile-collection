@@ -1365,6 +1365,130 @@
             border-color: #2d5a3d;
         }
 
+        /* ── 变化榜强势面板（连板 / 板块龙头 / 量价齐升，纯前端派生） ── */
+        .diff-strong-panel {
+            border: 1px solid #2a2f3a;
+            border-radius: 8px;
+            background: #171b22;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+        }
+
+        .strong-panel-head {
+            font-size: 12.5px;
+            font-weight: 600;
+            color: #e6e8eb;
+            margin-bottom: 8px;
+        }
+
+        .strong-panel-sub {
+            font-size: 10.5px;
+            font-weight: 400;
+            color: #6b7280;
+            margin-left: 6px;
+        }
+
+        .strong-panel-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        @media (max-width: 768px) {
+            .strong-panel-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .strong-col {
+            min-width: 0;
+        }
+
+        .strong-col-head {
+            font-size: 11.5px;
+            font-weight: 600;
+            color: #c2c8d2;
+            margin-bottom: 6px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid #232834;
+        }
+
+        .strong-col-head span {
+            font-size: 10px;
+            font-weight: 400;
+            color: #6b7280;
+            margin-left: 4px;
+        }
+
+        .strong-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 4px;
+            border-radius: 4px;
+            font-size: 11.5px;
+            cursor: pointer;
+        }
+
+        .strong-row:hover {
+            background: #1e222a;
+        }
+
+        .strong-badge {
+            flex-shrink: 0;
+            font-size: 9px;
+            padding: 1px 5px;
+            background: linear-gradient(90deg, #ef4444, #f97316);
+            color: #fff;
+            border-radius: 8px;
+            font-weight: 600;
+            line-height: 1.4;
+        }
+
+        .strong-symbol {
+            flex-shrink: 0;
+            font-weight: 600;
+            color: #e6e8eb;
+        }
+
+        .strong-meta {
+            flex: 1;
+            min-width: 0;
+            color: #8a92a0;
+            font-size: 10.5px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .strong-val {
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #c2c8d2;
+        }
+
+        .strong-val.up {
+            color: #4ade80;
+        }
+
+        .strong-val.down {
+            color: #f87171;
+        }
+
+        #daily-diff.scheme-red-up .strong-val.up {
+            color: #f87171;
+        }
+
+        #daily-diff.scheme-red-up .strong-val.down {
+            color: #4ade80;
+        }
+
+        .strong-empty {
+            font-size: 11px;
+            color: #6b7280;
+            padding: 2px 4px;
+        }
+
         .daily-diff-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -11086,6 +11210,12 @@
 
                 let html = '';
 
+                // ── 强势面板（连板/板块龙头/量价齐升）：仅最新日期视图展示 ──
+                // streak_days 语义为「截至该日」，历史视图不展示以免与「当前强势」混淆
+                if (diffDateOffset === 0) {
+                    html += _renderStrongPanel(data);
+                }
+
                 // ── 市值分层 Tabs ──
                 const tiers = data.available_tiers || [];
                 if (tiers.length > 0) {
@@ -11245,6 +11375,143 @@
             html += '<span class="value">' + valSign + val + '</span>';
             html += '<span class="attr-btn" onclick="event.stopPropagation();showDiffAttribution(' + item.asset_id + ', \'' + category + '\', \'' + direction + '\')" title="查看异动归因">📋</span>';
             html += '</div>';
+            return html;
+        }
+
+        // ── 变化榜强势面板（Tier 1）：从已加载的榜单数据本地派生，零新接口 / 零 AI / 零落库 ──
+        const DIFF_STRONG_MIN_STREAK = 2;    // 连板榜入选门槛（天）
+        const DIFF_STRONG_TOP_STREAK = 8;    // 连板榜展示条数
+        const DIFF_STRONG_TOP_LEADER = 4;    // 板块龙头展示条数
+        const DIFF_STRONG_TOP_SURGE = 5;     // 量价齐升展示条数
+
+        // 格式化榜单数值（量价齐升为综合分，其余为百分比）
+        function _strongVal (item, category) {
+            if (item.metric_value === null || item.metric_value === undefined) return '-';
+            return category === 'price_volume_surge'
+                ? item.metric_value.toFixed(1) + ' 分'
+                : item.metric_value.toFixed(2) + '%';
+        }
+
+        // 连板榜：遍历全部类别/方向，取 streak_days>=门槛，按连板天数降序
+        function _collectDiffStreaks (categories) {
+            const rows = [];
+            Object.keys(categories).forEach(cat => {
+                ['up', 'down'].forEach(dir => {
+                    (categories[cat][dir] || []).forEach(item => {
+                        const sd = item.streak_days || 1;
+                        if (sd < DIFF_STRONG_MIN_STREAK) return;
+                        rows.push({ item, cat, dir, sd });
+                    });
+                });
+            });
+            rows.sort((a, b) => b.sd - a.sd
+                || (b.item.metric_value || 0) - (a.item.metric_value || 0));
+            return rows;
+        }
+
+        // 板块轮动龙头：每个赛道取综合分最高的龙头，按分数降序
+        function _collectRotationLeaders (categories) {
+            const up = (categories.sector_rotation && categories.sector_rotation.up) || [];
+            const best = {};
+            up.forEach(item => {
+                const sector = item.primary_sector
+                    || (item.detail && item.detail.primary_sector) || 'other';
+                if (!best[sector] || (item.metric_value || 0) > (best[sector].metric_value || 0)) {
+                    best[sector] = item;
+                }
+            });
+            return Object.keys(best).map(s => best[s])
+                .sort((a, b) => (b.metric_value || 0) - (a.metric_value || 0));
+        }
+
+        // 量价齐升：up 方向按综合分降序
+        function _collectSurgeTop (categories) {
+            const up = (categories.price_volume_surge && categories.price_volume_surge.up) || [];
+            return up.slice().sort((a, b) => (b.metric_value || 0) - (a.metric_value || 0));
+        }
+
+        function _renderStrongRow (assetId, symbol, metaHtml, valHtml, title) {
+            return '<div class="strong-row" title="' + escapeHtml(title) + '" '
+                + 'onclick="window.open(\'/research/' + assetId + '\', \'_blank\')">'
+                + symbol + '<span class="strong-meta">' + metaHtml + '</span>'
+                + valHtml + '</div>';
+        }
+
+        function _renderStrongPanel (data) {
+            const cats = data.categories || {};
+            const streaks = _collectDiffStreaks(cats);
+            const leaders = _collectRotationLeaders(cats);
+            const surges = _collectSurgeTop(cats);
+            if (streaks.length === 0 && leaders.length === 0 && surges.length === 0) return '';
+
+            let html = '<div class="diff-strong-panel">';
+            html += '<div class="strong-panel-head">🏆 强势面板'
+                + '<span class="strong-panel-sub">连板 / 板块龙头 / 量价齐升 · 由榜单数据本地派生</span></div>';
+            html += '<div class="strong-panel-grid">';
+
+            // ① 连板榜
+            html += '<div class="strong-col">';
+            html += '<div class="strong-col-head">🔥 连板榜<span>连续 ' + DIFF_STRONG_MIN_STREAK + '+ 天上榜</span></div>';
+            if (streaks.length === 0) {
+                html += '<div class="strong-empty">暂无连板标的</div>';
+            } else {
+                streaks.slice(0, DIFF_STRONG_TOP_STREAK).forEach(r => {
+                    const catLabel = DIFF_CATEGORY_LABELS[r.cat] || r.cat;
+                    const dirLabel = r.dir === 'up' ? '↑' : '↓';
+                    const symbolHtml = '<span class="strong-badge">🔥' + r.sd + '天</span> '
+                        + '<span class="strong-symbol">' + escapeHtml(r.item.symbol) + '</span>';
+                    const meta = escapeHtml(catLabel) + ' ' + dirLabel;
+                    const val = '<span class="strong-val ' + r.dir + '">'
+                        + _strongVal(r.item, r.cat) + '</span>';
+                    const title = (r.item.name || r.item.symbol) + ' · ' + catLabel
+                        + ' · 连续 ' + r.sd + ' 天（起始 ' + (r.item.streak_first_date || '') + '）';
+                    html += _renderStrongRow(r.item.asset_id, symbolHtml, meta, val, title);
+                });
+            }
+            html += '</div>';
+
+            // ② 板块轮动龙头
+            html += '<div class="strong-col">';
+            html += '<div class="strong-col-head">🌀 板块龙头<span>各赛道综合分第一</span></div>';
+            if (leaders.length === 0) {
+                html += '<div class="strong-empty">暂无板块轮动数据</div>';
+            } else {
+                leaders.slice(0, DIFF_STRONG_TOP_LEADER).forEach(item => {
+                    const sector = item.primary_sector
+                        || (item.detail && item.detail.primary_sector) || 'other';
+                    const sectorLabel = SECTOR_LABELS_SHORT[sector] || sector;
+                    const consec = (item.detail && item.detail.consecutive_days)
+                        || item.consecutive_days || 0;
+                    const meta = escapeHtml(sectorLabel) + (consec ? ' · ' + consec + '天' : '');
+                    const val = '<span class="strong-val up">' + _strongVal(item, 'sector_rotation') + '</span>';
+                    const title = (item.name || item.symbol) + ' · ' + sectorLabel + ' 龙头';
+                    html += _renderStrongRow(item.asset_id,
+                        '<span class="strong-symbol">' + escapeHtml(item.symbol) + '</span>',
+                        meta, val, title);
+                });
+            }
+            html += '</div>';
+
+            // ③ 量价齐升 TOP
+            html += '<div class="strong-col">';
+            html += '<div class="strong-col-head">🔥 量价齐升<span>涨幅 + 放量双确认</span></div>';
+            if (surges.length === 0) {
+                html += '<div class="strong-empty">暂无量价共振数据</div>';
+            } else {
+                surges.slice(0, DIFF_STRONG_TOP_SURGE).forEach(item => {
+                    const sector = item.primary_sector;
+                    const sectorLabel = sector ? (SECTOR_LABELS_SHORT[sector] || sector) : '';
+                    const meta = escapeHtml(sectorLabel || (item.name || ''));
+                    const val = '<span class="strong-val up">' + _strongVal(item, 'price_volume_surge') + '</span>';
+                    const title = (item.name || item.symbol) + ' · 量价共振综合分';
+                    html += _renderStrongRow(item.asset_id,
+                        '<span class="strong-symbol">' + escapeHtml(item.symbol) + '</span>',
+                        meta, val, title);
+                });
+            }
+            html += '</div>';
+
+            html += '</div></div>';
             return html;
         }
 

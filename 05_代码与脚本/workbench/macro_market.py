@@ -4469,6 +4469,116 @@ def build_smart_money_divergence(overview: dict, max_assets: int = 20) -> dict:
 # FEAT-HIGHLIGHT-002：高亮信号精选
 # ══════════════════════════════════════════════════════════════
 
+# Tier 2（FEAT-SIGNAL-SRC-003）：变化榜连板派生为机会池。
+# 连板天数 → conviction 基础分：门槛处 52 分，每多 1 天 +6 分，封顶 80 分。
+_BOARD_STREAK_BASE_SCORE = 52
+_BOARD_STREAK_STEP = 6
+_BOARD_STREAK_SCORE_CAP = 80
+
+# 连板信号 related_dims 用中文标签（避免透出内部 category 串）
+_BOARD_CAT_LABELS = {
+    "price_change_24h": "24h涨跌幅",
+    "volume_surge_24h": "成交量异动",
+    "price_volume_surge": "量价齐升",
+    "sector_rotation": "板块轮动",
+    "unlock_7d": "解锁抛压",
+    "fund_flow": "资金流向",
+}
+
+# 只派生「方向语义明确」的 (category, 榜单方向) → 多空。
+#
+# 两处刻意的排除（均为「不让错误数据变成信号」，非口味偏好）：
+# 1) unlock_7d：方向语义与价格/量能榜**相反**（up=抛压榜=看空、down=轻压榜=看多），
+#    按通用规则映射会把「持续大额解锁」当利多做多。
+# 2) volume_surge_24h：该榜 2026-09-08 由 top-20 扩到 top-40（实测 n 20→40、
+#    rank 上限 20→40），使 11 个资产同时出现「自 09-08 起连续 16 天在榜」——
+#    这是榜单口径变更留下的结构性伪连板（这些币此前一直排在 21-40 位、只是未被存库），
+#    不是真实动量。等新口径数据沉淀后再加回白名单即可。
+# price_volume_surge 的 down（低位盘整）与 sector_rotation 的 down 无明确空头含义，亦不派生。
+_BOARD_DIRECTIONAL = {
+    ("price_change_24h", "up"): "long",
+    ("price_change_24h", "down"): "short",
+    ("price_volume_surge", "up"): "long",
+    ("sector_rotation", "up"): "long",
+}
+
+
+def derive_board_opportunities(diff_cats: dict, streak_threshold: int = 3,
+                                max_per_direction: int = 8) -> list[dict]:
+    """变化榜连板 → 机会池（Tier 2 · FEAT-SIGNAL-SRC-003）。
+
+    数据源：daily_diff_summary.categories（含服务端注入的 streak_days）。
+    规则：连板天数 ≥ streak_threshold 的标的派生为独立机会——
+      up 方向 → direction=long（进高亮池）；down 方向 → direction=short（进高危池）。
+      仅处理 _BOARD_DIRECTIONAL 白名单内的 (category, 方向)。
+
+    设计要点：
+    - target 用单个 symbol，便于与同标的的 AI/催化剂机会在 select_*_signals
+      中合并 → 提升共振数，起「增强」而非「另起噪声」的作用。
+    - 机械信号标 ai_skip=True（P4），ai_enrich_signals_v2 会跳过 LLM 增强省成本。
+    - 纯函数：不查库、不写库；tiering/去重交给调用方 _push_opportunity。
+    """
+    if not diff_cats or streak_threshold <= 0:
+        return []
+
+    by_dir: dict[str, list[tuple[int, str, dict]]] = {"long": [], "short": []}
+    for cat, cat_data in (diff_cats or {}).items():
+        for dir_key in ("up", "down"):
+            direction = _BOARD_DIRECTIONAL.get((cat, dir_key))
+            if not direction:
+                continue
+            for it in ((cat_data or {}).get(dir_key) or []):
+                try:
+                    sd = int(it.get("streak_days") or 1)
+                except (TypeError, ValueError):
+                    sd = 1
+                if sd >= streak_threshold and it.get("symbol"):
+                    by_dir[direction].append((sd, cat, it))
+
+    out: list[dict] = []
+    for direction, rows in by_dir.items():
+        # 连板天数降序；同天数按榜单数值绝对值降序
+        rows.sort(key=lambda r: (r[0], abs(r[2].get("metric_value") or 0)), reverse=True)
+        is_up = direction == "long"
+        signal_type = "diff_streak_up" if is_up else "diff_streak_down"
+        for sd, cat, it in rows[:max_per_direction]:
+            sym = str(it.get("symbol") or "").strip()
+            if not sym:
+                continue
+            cat_label = _BOARD_CAT_LABELS.get(cat, cat)
+            score = min(
+                _BOARD_STREAK_SCORE_CAP,
+                _BOARD_STREAK_BASE_SCORE + (sd - streak_threshold) * _BOARD_STREAK_STEP,
+            )
+            metric = it.get("metric_value")
+            if isinstance(metric, (int, float)):
+                metric_txt = (f"{metric:.1f} 分" if cat == "price_volume_surge"
+                              else f"{metric:+.2f}%")
+            else:
+                metric_txt = "—"
+            out.append({
+                "target": sym,
+                "involved_symbols": [sym],
+                "direction": direction,
+                "confidence": "medium",
+                "conviction_score": score,
+                "signal_type": signal_type,
+                "key_metric": f"连续 {sd} 天在榜 · {cat_label}",
+                "trigger_logic": (
+                    f"{sym} 在「{cat_label}」连续 {sd} 天上榜（当前 {metric_txt}），"
+                    f"{'强势延续' if is_up else '持续走弱'}"
+                ),
+                "action_hint": ("连板强势，关注趋势延续性，追高需谨慎"
+                                if is_up else "连续走弱，警惕下行延续"),
+                "invalidation": ("跌出该榜单或连板中断" if is_up else "重回榜单正向或连板中断"),
+                "related_dims": [f"连板{sd}天", cat_label],
+                "is_new_today": sd <= 2,
+                "ai_skip": True,           # P4：机械信号，跳过 LLM 增强
+                "source": "daily_diff_board",
+            })
+    return out
+
+
 def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
                               min_resonance: int = 2) -> list[dict]:
     """从全部机会中精选高亮信号：HIGH 优先 + 共振筛选 + 类型配额（FEAT-HIGHLIGHT-002）。
@@ -4501,6 +4611,9 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         "etf_flow": 2,
         "price_surge": 3, "price_volume_surge": 3, "volume_surge": 2,
         "sector_inflow": 2,
+        # Tier 2（FEAT-SIGNAL-SRC-003）：变化榜连板派生信号独立配额，
+        # 避免挤压 AI/催化剂配额
+        "diff_streak_up": 3,
         # D2（2026-09-22 审计）：叙事/链净流入信号补齐 signal_type 后的独立配额，
         # 避免全部落入 __default__ 互相挤占（每类各 2 个展示位）
         "narrative": 2, "chain_inflow": 2,
@@ -4650,6 +4763,8 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
         "catalyst": 2,
         "price_crash": 3,
         "sector_outflow": 2,
+        # Tier 2（FEAT-SIGNAL-SRC-003）：变化榜连板（down 侧）派生信号独立配额
+        "diff_streak_down": 3,
         "__default__": 2,
     }
 
@@ -5085,6 +5200,19 @@ def score_opportunities(overview: dict) -> dict:
                  "related_dims": ["P1-3 成交量异动", "volume_surge"],
                  "involved_symbols": syms},
                 opportunities, excluded, t,
+                cycle_phase=cycle_phase, n_confirm=1,
+            )
+
+    # ── FEAT-SIGNAL-SRC-003（Tier 2）：变化榜连板 → 机会池 ──
+    # 连板 ≥ 门槛（默认 3 天）的标的派生为独立机会：up 侧 → long（进高亮）、
+    # down 侧 → short（进高危）。机械信号标 ai_skip（P4）跳过 LLM 增强。
+    # 必须在下方 asset_id 解析（_resolve_symbols_to_asset_ids）之前入池（P1-1 时序）。
+    if diff_cats:
+        streak_threshold = int(t.get("diff_streak_threshold", 3))
+        for _board_opp in derive_board_opportunities(
+                diff_cats, streak_threshold=streak_threshold):
+            _push_opportunity(
+                _board_opp, opportunities, excluded, t,
                 cycle_phase=cycle_phase, n_confirm=1,
             )
 

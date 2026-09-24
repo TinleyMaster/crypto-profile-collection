@@ -22,6 +22,7 @@ import contextlib
 import datetime as dt
 import io
 import os
+import re
 import sys
 import types
 
@@ -162,7 +163,9 @@ check('"upper_bound_n_segments": sj["n_segments"]' in _src
 check("_pg = primary_gate(denom_ok, molecule_ok, span_ok)" in _src,
       "F4：拒绝路径标注唯一充分因")
 check("_failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)" in _src
-      and "len(fails) > 1" not in _src,
+      # 复验 H2：用**正则**判「理由条数」写法已消失 —— 字面串 `"len(fails) > 1"` 对空白敏感，
+      # 若有人写回 `len(fails)>1`（无空格）会**静默放行**。
+      and not re.search(r"len\(fails\)\s*>\s*1", _src),
       "G1：归因判据用**失败门数**而非「理由条数」（单门多条理由不得印『其余门亦不过』）")
 check("new_rates" not in _src, "F6：删除死变量 new_rates")
 
@@ -312,8 +315,13 @@ _out2 = _buf2.getvalue()
 check(_rc2 == 4, "F1：PASS 侧中位 + IQR 跨线 ⇒ rc=4（旧码会误判 rc=0 PASS）", f"rc={_rc2}")
 check("段 IQR 跨判据线（无判别力）" in _out2,
       "F1：渲染如实印「段 IQR 跨判据线（无判别力）」（不再假报「不跨」）")
-check("INCONCLUSIVE" in _out2 and "→  PASS" not in _out2,
+# 复验 H1：用**正则**判结论，不耦合渲染格式的双空格（`…  →  {conclusion}`）——
+# 字面串 `"→  PASS"` 在格式改成单空格后会**静默恒真**、失去保护力。
+check("INCONCLUSIVE" in _out2 and not re.search(r"→\s*PASS", _out2),
       "F1：结论 = INCONCLUSIVE（非 PASS）")
+check(bool(re.search(r"→\s*PASS", "x  →  PASS（退出码 0"))
+      and not re.search(r"→\s*PASS", "x  →  INCONCLUSIVE"),
+      "H1：结论正则不空转（命中 PASS、不命中 INCONCLUSIVE）")
 
 # ════════════════════════════════════════════════════════════
 # 8. F4/G1：多门并发归因（分母门 + 跨度门）

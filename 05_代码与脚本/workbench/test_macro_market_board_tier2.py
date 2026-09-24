@@ -19,6 +19,8 @@ B. select_highlight_signals —— 配额、共振门、与同标的信号合并
 C. select_risk_signals —— down 侧进高危 + 独立配额
 D. ai_enrich_signals_v2 —— P4 跳过门（全 ai_skip 跳过；混合卡仍送 AI）
 E. 时序结构 —— 注入点必须在 _resolve_symbols_to_asset_ids 之前（P1-1）
+F. 口径屏障 —— 连板起点恰为榜单口径变更日时标记 streak_start_ambiguous，
+   展示层（强势面板 / 🔥N天 角标）据此不主张强度（FIX-DIFF-STREAK-SEGMENT）
 """
 import os
 import sys
@@ -31,9 +33,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import macro_market as mm  # noqa: E402
 import ai_signal_analyzer as asa  # noqa: E402
+import db_stats as ds  # noqa: E402
 
 _MACRO_SRC = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 _AI_SRC = open(os.path.join(_HERE, "ai_signal_analyzer.py"), encoding="utf-8").read()
+_DB_SRC = open(os.path.join(_HERE, "db_stats.py"), encoding="utf-8").read()
+_IDX_SRC = open(os.path.join(_HERE, "templates", "index.html"), encoding="utf-8").read()
 
 passed = 0
 failed = 0
@@ -227,6 +232,58 @@ check(_inject_pos != -1, "E1 存在 derive_board_opportunities 注入点")
 check(-1 < _inject_pos < _resolve_pos < _hl_pos,
       "E2 派生机会入池早于 asset_id 解析、更早于高亮精选（P1-1 时序）",
       f"inject@{_inject_pos} resolve@{_resolve_pos} highlights@{_hl_pos}")
+
+# ── F. 口径屏障（FIX-DIFF-STREAK-SEGMENT）──
+print("[F] 连板口径屏障")
+
+
+class _FakeCur:
+    """最小游标替身：只回放任给的连板行，避免测试连库。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, sql, params):
+        self._sql = sql
+
+    def fetchall(self):
+        return self._rows
+
+
+check(ds.DIFF_STREAK_CALIBER_BARRIERS.get("volume_surge_24h") == frozenset({"2026-09-08"})
+      and ds.DIFF_STREAK_CALIBER_BARRIERS.get("price_change_24h") == frozenset({"2026-09-08"}),
+      "F1 口径变更日常量：volume_surge_24h / price_change_24h 均为 2026-09-08（LIMIT 扩容生效日）",
+      str(ds.DIFF_STREAK_CALIBER_BARRIERS))
+
+_rows = [
+    # 起点恰为口径变更日 → 连板天数=口径年龄，标 ambiguous
+    {"asset_id": 7289, "category": "volume_surge_24h", "direction": "up",
+     "streak_days": 16, "first_date": "2026-09-08"},
+    # 起点晚于口径变更日 → 口径稳定期内的真实连板
+    {"asset_id": 100, "category": "volume_surge_24h", "direction": "up",
+     "streak_days": 4, "first_date": "2026-09-20"},
+    # 同样起点，但类别无口径变更记录 → 不误伤
+    {"asset_id": 200, "category": "unlock_7d", "direction": "down",
+     "streak_days": 8, "first_date": "2026-09-08"},
+]
+_sm = ds._fetch_streak_map(_FakeCur(_rows), "2026-09-23")
+check(_sm[(7289, "volume_surge_24h", "up")]["ambiguous_start"] is True,
+      "F2 起点恰为口径变更日 → ambiguous_start=True")
+check(_sm[(100, "volume_surge_24h", "up")]["ambiguous_start"] is False,
+      "F3 起点晚于变更日（口径稳定期）→ ambiguous_start=False")
+check(_sm[(200, "unlock_7d", "down")]["ambiguous_start"] is False,
+      "F4 无口径变更记录的类别不被误伤")
+check(_sm[(100, "volume_surge_24h", "up")]["streak_days"] == 4
+      and _sm[(7289, "volume_surge_24h", "up")]["streak_days"] == 16,
+      "F5 屏障只加标记、不改写原始连板天数（不销毁真实数据）")
+
+check('"streak_start_ambiguous": bool(streak.get("ambiguous_start"))' in _DB_SRC,
+      "F6 get_daily_diff_summary 向接口透出 streak_start_ambiguous")
+check("if (item.streak_start_ambiguous) return;" in _IDX_SRC,
+      "F7 强势面板「连板榜」排除 ambiguous（口径年龄不是强度，跨标的无区分度）")
+check("item.streak_start_ambiguous" in _IDX_SRC
+      and "该日为榜单口径变更日，起点之前无可比数据" in _IDX_SRC,
+      "F8 🔥N天 角标保留事实但在 tooltip 显式标注不可比")
 
 # ── 汇总 ──
 print(f"\n{passed}/{passed + failed} 通过")

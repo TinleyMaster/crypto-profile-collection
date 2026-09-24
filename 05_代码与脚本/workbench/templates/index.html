@@ -11369,7 +11369,12 @@
             if (sectorLabel) html += '<span class="sector-tag">' + sectorLabel + '</span>';
             // 连续上榜标记（权威 N 日连板，由服务端 streak_days 提供；仅最新日期视图下显示）
             if (diffDateOffset === 0 && item.streak_days && item.streak_days >= 2) {
-                html += '<span class="streak-badge" title="连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '）">🔥' + item.streak_days + '天</span>';
+                const sdTitle = item.streak_start_ambiguous
+                    ? '连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '，该日为榜单口径变更日，起点之前无可比数据）'
+                    : '连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '）';
+                html += '<span class="streak-badge" title="' + sdTitle + '">🔥' + item.streak_days + '天</span>';
+            // streak_start_ambiguous：起点恰为榜单口径变更日，天数=口径年龄而非标的强度，
+            // 事实仍成立（确实连续在榜 N 天）故保留角标，仅在 tooltip 显式说明不可比。
             }
             html += '</span>';
             html += '<span class="value">' + valSign + val + '</span>';
@@ -11395,11 +11400,15 @@
         // 连板榜：遍历全部类别/方向，取 streak_days>=门槛，按连板天数降序
         function _collectDiffStreaks (categories) {
             const rows = [];
+        // 排除 streak_start_ambiguous（连板起点恰为榜单口径变更日，如 volume_surge_24h
+        // 2026-09-08 由 top-20 扩到 top-40）：这类连板天数=口径年龄而非标的强度，
+        // 跨标的比较无区分度，放进「强势榜」会把榜单灌成同一数值。
             Object.keys(categories).forEach(cat => {
                 ['up', 'down'].forEach(dir => {
                     (categories[cat][dir] || []).forEach(item => {
                         const sd = item.streak_days || 1;
                         if (sd < DIFF_STRONG_MIN_STREAK) return;
+                        if (item.streak_start_ambiguous) return;
                         rows.push({ item, cat, dir, sd });
                     });
                 });

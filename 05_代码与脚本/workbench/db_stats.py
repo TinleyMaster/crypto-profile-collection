@@ -9496,6 +9496,19 @@ def remove_watchlist(watch_id: int) -> dict:
 # 每日 diff 变化榜
 # ═══════════════════════════════════════════════════════════════
 
+# 榜单口径变更日（单一口径来源，供所有连板消费方共用）：
+# 这些日期上 daily_diff_generator 的入选规模（LIMIT）发生了变更，因此该日**之前**
+# 「不在榜」不构成「未连板」的证据——标的有可能只是排在旧 cutoff 之外（未入库）。
+# 连板起点恰为这些日期的标的，其连板天数等于「口径变更以来的天数」，反映的是
+# 口径年龄而非标的自身强度，无法与跨越稳定口径的连板同台比较。
+# 来源：commit 8a22847（2026-09-07 提交，次日起生成的数据生效）——
+#   volume_surge_24h LIMIT 20→40；price_change_24h LIMIT 40→60。
+#   改口径时在此追加日期即可，下游无需改动。
+DIFF_STREAK_CALIBER_BARRIERS: dict[str, frozenset[str]] = {
+    "volume_surge_24h": frozenset({"2026-09-08"}),
+    "price_change_24h": frozenset({"2026-09-08"}),
+}
+
 # 跨日连板（gaps-and-islands）：对 (asset_id, category, direction) 计算截至目标日的连续上榜天数。
 # 纯读取、不落库/不建表；方向隔离（涨/跌各自计连板）。
 STREAK_SQL = """
@@ -9525,15 +9538,22 @@ WHERE last_date = %s::DATE
 
 
 def _fetch_streak_map(cur, target_date: str) -> dict:
-    """在既有游标上执行连板查询，返回 {(asset_id, category, direction): {...}}。"""
+    """在既有游标上执行连板查询，返回 {(asset_id, category, direction): {...}}。
+
+    `ambiguous_start` 标记连板起点恰为榜单口径变更日（见 DIFF_STREAK_CALIBER_BARRIERS）：
+    此时连板天数=口径年龄，不代表标的强度，跨标的比较无区分度。
+    """
     cur.execute(STREAK_SQL, (target_date, target_date))
-    return {
-        (r["asset_id"], r["category"], r["direction"]): {
+    out = {}
+    for r in cur.fetchall():
+        first_date = str(r["first_date"])
+        barriers = DIFF_STREAK_CALIBER_BARRIERS.get(r["category"]) or frozenset()
+        out[(r["asset_id"], r["category"], r["direction"])] = {
             "streak_days": r["streak_days"],
-            "first_date": str(r["first_date"]),
+            "first_date": first_date,
+            "ambiguous_start": first_date in barriers,
         }
-        for r in cur.fetchall()
-    }
+    return out
 
 
 def get_daily_diff_streaks(diff_date: str | None = None) -> dict:
@@ -9729,6 +9749,7 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                     "detail": detail,
                     "streak_days": streak.get("streak_days", 1),
                     "streak_first_date": streak.get("first_date"),
+                    "streak_start_ambiguous": bool(streak.get("ambiguous_start")),
                 })
 
             return {

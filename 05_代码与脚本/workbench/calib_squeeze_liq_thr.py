@@ -775,6 +775,23 @@ def main() -> int:
                 "       count(DISTINCT symbol) AS syms "
                 "FROM biz.liquidation_snapshot")
             bound = cur.fetchone()
+            # ── 预检（2026-09-24 实测追加）：请求窗口 vs 表内**实际**跨度 ────────────
+            # 为什么必须在 A 侧重查询**之前**印：`biz.liquidation_snapshot` 是自积累表，
+            # 实测全表仅 368k 行 / **3.25 天**（2026-09-21 02:00 → 09-24 07:55 UTC）。
+            # `--days 30` 时**采样窗口被表本身截断**到 3.25 天，而 `v.vol_win` 仍是
+            # 30 天成交额合计 ⇒ 比率被系统性**低估**约 `days/span` 倍，而该偏差**不会**
+            # 在任何下游读数里显形（`--days` 只出现在 SQL 参数、不进输出）。
+            # 同时 `span_sufficiency()` 本就因「表跨度 < MIN_SPAN_DAYS」判 rc=3 ⇒ 大的
+            # `--days` 只是白跑（实测 `--days 1` = 145s、`--days 30` = 604s）后给出**同一个**
+            # rc=3。⇒ 预检只**告警**、不改行为（口径语义不动：`--days` 仍是分母窗口）。
+            avail_days = ((bound["mx"] - bound["mn"]).total_seconds() / 86400.0
+                          if bound["mn"] else 0.0)
+            if args.days > avail_days + 1e-9:
+                print(f"⚠️ 请求窗口 --days {args.days} > 表内实际跨度 {avail_days:.2f} 天"
+                      f"（`biz.liquidation_snapshot` 的 max(ts)-min(ts)）⇒ 采样窗口被表截断，"
+                      f"分母却仍是 {args.days} 天成交额合计 ⇒ 比率被系统性低估约 "
+                      f"{args.days / max(avail_days, 1e-9):.1f}× ⇒ 本条口径**不构成任何结论**；"
+                      f"要复现线上「/24h 成交额」口径请用 --days 1。")
             cur.execute(SQL_SAMPLE, {"days": args.days, "vol_min": args.vol_win_min,
                                      "win": WINDOW_MIN})
             rows = cur.fetchall()

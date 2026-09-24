@@ -490,7 +490,9 @@ python workbench/test_squeeze_fuel.py          # 既有：燃料判定回归
 python workbench/test_squeeze_battle.py        # 既有：胜负判定回归
 
 # 7) 标定脚本只读复跑（P0-C 之后）：期望口径 A/B 分表输出（B 侧只输出偏高幅度下界），缺样本时 rc!=0
-python workbench/calib_squeeze_liq_thr.py --days 30 --json
+#    ⚠️ 必须用 --days 1：它同时是**采样窗口**和**分母窗口**，且线上「/24h 成交额」是同量级口径。
+#    大的 --days 在 `liquidation_snapshot` 尚不足 30 天时**只是白跑**（见下方 ⚠️ 段）。
+python workbench/calib_squeeze_liq_thr.py --days 1 --json
 ```
 
 **新增单测必须断言的不变量**（防口径漂移）
@@ -513,7 +515,13 @@ python workbench/calib_squeeze_liq_thr.py --days 30 --json
 | DB 实测 `biz.liquidation_history` | `binance`(BTCUSDT+ETHUSDT) 各 180 行、`all`(BTCUSDT+1000PEPEUSDT) 各 180 行；窗口 08-25 08:00 → 09-24 04:00 UTC（= 30×6） |
 | `calib_squeeze_liq_thr.py --days 1`（`--json` 与文本） | 均 **EXIT=3**（`SAMPLE_UNUSABLE`，预期）；`scope_split` A 侧 n=54586 / B 侧 n=12；`cross_exchange_lower_bound.ok=false`（n_pairs=6<30）；**前置门路径零比率输出** |
 
-> ⚠️ **命令 7 的 `--days 30` 当前跑不动**（2026-09-24 实测）：`biz.asset_klines` 的 5m × 500+ 币结果集过大，DB 侧 `pg_stat_activity` 显示 `state=active`、`wait_event=Client/ClientWrite`（服务端在等客户端消费），单次查询持续 >670s。⇒ 验收改用 `--days 1` 取证；**长窗口应等 `biz.liquidation_history` 回填完成后再跑**（回填样本走 4h 分段增量，结果集小得多）。
+> ⚠️ **命令 7 的窗口必须用 `--days 1`，`--days 30` 是用法错误而非性能缺陷**（2026-09-24 实测，**已证伪早前「`asset_klines` 5m 结果集过大」的归因**）：
+>
+> - **实测事实**：`biz.asset_klines` 5m × 30 天全表仅 **567,235 行**（1h 152,724 行）；`EXPLAIN (ANALYZE, BUFFERS)` 服务端执行 **7.15 s**，走 `Index Scan using idx_asset_klines_symbol_interval_ot`（每循环 0.049 ms）⇒ **索引与行数都正常**。
+> - **真正瓶颈是表自身的数据量**：`biz.liquidation_snapshot` 全表 **368,373 行 / 527 币**，跨度仅 **2026-09-21 02:00 → 09-24 07:55 UTC = 3.25 天**。⇒ `--days 30` / `--days 7` 取到的是**同一批约 145k 行**（实测 days=1 → 55,721 行 / 144.9 s；days=7 → 144,090 行 / 455.9 s；days=30 → 145,148 行 / 604.2 s），并**必然**被 `span_sufficiency()` 判 `rc=3`（跨度 < `MIN_SPAN_DAYS=30`）⇒ 大窗口只是白耗 145 s→604 s 后给出**同一个 rc=3**。
+> - **`--days` 的语义陷阱**：它**既是采样窗口也是分母窗口**。当请求窗口 > 表内实际跨度时，采样被表截断、`v.vol_win` 却仍是 30 天成交额合计 ⇒ 比率被系统性**低估约 `days/span ≈ 9.2×`**，且该偏差**不出现在任何输出字段里**（`--days` 只进 SQL 参数、不进输出）。⇒ calib 已追加**前置预检告警**，检测到该情形即在结果前打印提示（只告警、不改行为）。
+> - **正式标定闸门**：`liquidation_snapshot` 自 2026-09-21 起积累，要满足 `MIN_SPAN_DAYS=30` 需等到 **≈2026-10-21 之后**（与设计文档 B6/A1 指向的 10 月中下旬一致），或改用 P1 回填的 `biz.liquidation_history`（4h 分段增量、180 天，结果集远小）。
+> - **遗留疑点（诚实披露，未锁定）**：服务端 7.15 s vs 客户端 144.9–604.2 s 的 20–85× 差距根因**尚未确定**。已排除：索引缺失、结果集行数膨胀、单纯带宽（200k 窄行传输实测 3.6 s）。⇒ **不建议**在没有 30 天数据做验证的前提下重写为「服务端聚合」，那会改变统计口径。
 
 ---
 

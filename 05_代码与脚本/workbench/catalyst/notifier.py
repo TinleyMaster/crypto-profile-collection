@@ -161,6 +161,35 @@ def _mark_signal_notified(conn, signal_ids: list[int], column: str) -> None:
         logger.warning("回写 catalyst_signal.%s 失败（%s 条）: %s", column, len(ids), e)
 
 
+def _slow_digest_sent_recently(conn, signal_ids: list[int]) -> set[int]:
+    """近 DEDUP_WINDOW_HOURS 内已被慢通道 A 级 digest 覆盖的 signal_id 集合。
+
+    跨通道去重（诊断_催化剂A级邮件延迟链路_XRP_BCH_2026-09-24）：快讯与慢通道 digest
+    都发 A 级 Alert，但各用独立去重（快讯按 `(signal_id, fast_alert)`；digest 按类别
+    sentinel）⇒ 同一信号会收到两封 A 级邮件（实测 XRP signal=1085989：16:30 digest +
+    16:50 快讯）。`notified_at` 仅由 digest 在发送成功后写入，故可作为「已被 digest
+    覆盖」的判据；digest 侧则在 `_recent_new_a_signals` 排除近窗口内已发过快讯的行
+    （`pre_alert_sent_at`），双向合围后同一信号 24h 内只发一封。
+    查询失败按「未发送」处理（宁可多发一封，也不静默漏发）。
+    """
+    ids = [sid for sid in (signal_ids or []) if sid is not None and sid > 0]
+    if not ids:
+        return set()
+    try:
+        rows = conn.execute(
+            """
+            SELECT signal_id FROM biz.catalyst_signal
+             WHERE signal_id = ANY(%s::BIGINT[])
+               AND notified_at > NOW() - (%s::int * INTERVAL '1 hour')
+            """,
+            (ids, DEDUP_WINDOW_HOURS),
+        ).fetchall()
+        return {r["signal_id"] for r in rows}
+    except Exception as e:
+        logger.warning("跨通道去重查询失败（按未发送处理）: %s", e)
+        return set()
+
+
 # =====================================================================
 # 邮件发送（复用 crypto_research.clients.notifier）
 # =====================================================================
@@ -519,7 +548,16 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
     suppressed = 0
     alert_signals = []
 
+    # 跨通道去重：慢通道 digest 已发过的信号不再发快讯（避免同一信号两封 A 级邮件）。
+    # 放在取锁之前，避免为「注定跳过」的行留下 sending 残迹。
+    _slow_sent = _slow_digest_sent_recently(conn, [r["signal_id"] for r in rows])
+
     for row in rows:
+        # 慢通道 digest 近 24h 已覆盖 ⇒ 跳过（双向去重的快讯侧）
+        if row["signal_id"] in _slow_sent:
+            skipped += 1
+            continue
+
         # 原子获取发送锁（防并发重复）；同时检查 24h 去重窗口
         acquired = _try_acquire_send_lock(
             conn, row["signal_id"], NTYPE_FAST_ALERT,
@@ -1306,6 +1344,8 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
       72h 前瞻超额 -2.16%（n=47）远弱于 weak +1.58%（n=231），
       即「等价格确认再开单」等于追高；confirmed 现已归入观察池 status='watch'）
     - entry/stop/tp 齐全（可交易性）
+    - 近 DEDUP_WINDOW_HOURS 内**未被快讯发过**（pre_alert_sent_at 判据）——
+      跨通道去重，digest 仅作快讯的兜底（诊断_催化剂A级邮件延迟链路_XRP_BCH_2026-09-24）
     composite_score DESC 取前 2 条（每日 1~2 idea）。
 
     返回字段覆盖「决策链 G0-G7 + 代币快照」全量：signal 全维度 + catalyst 原文
@@ -1385,12 +1425,17 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
               AND s.entry_price IS NOT NULL
               AND s.stop_loss IS NOT NULL
               AND s.take_profit IS NOT NULL
+              -- 跨通道去重（诊断_催化剂A级邮件延迟链路_XRP_BCH_2026-09-24）：近 24h 已由
+              -- 快讯发过的信号不再进 digest（快讯侧在 send_fast_alerts_for_new_signals
+              -- 反向排除 notified_at 近窗口行）⇒ 同一信号 24h 内只发一封 A 级邮件。
+              AND (s.pre_alert_sent_at IS NULL
+                   OR s.pre_alert_sent_at < NOW() - (%s::int * INTERVAL '1 hour'))
               AND {filter_sql}
             ORDER BY a.asset_id, s.composite_score DESC
         ) t
         ORDER BY t.composite_score DESC
         LIMIT 2
-    """, (hours,)).fetchall()
+    """, (hours, DEDUP_WINDOW_HOURS)).fetchall()
 
 
 # =====================================================================

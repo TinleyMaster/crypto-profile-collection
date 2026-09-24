@@ -1039,3 +1039,16 @@
 - **🟠 P3 = 真实但低危的治理项，维持 W5-plus、本轮不动 prod**（只读量化）：`core.asset_source_map` 的 cg 映射分桶 —— 单映射无 primary **8042** / 多映射无 primary **1617** / 有 primary 8102（总 17761）；其中「单映射 + `match_status='confirmed'` + 无 primary」**4541**。`resolve_cg_coin_id`（[cg_resolve.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/scripts/src/crypto_research/db/cg_resolve.py)）已做确定性择优、单映射天然唯一 ⇒ **解析路径无污染**；但 `db_stats.py` 若干覆盖度查询直接用 `asm.source_code='cg' AND asm.is_primary=TRUE`（如 L248）⇒ 这些资产的 cg 维度显示缺失，**属真实下游影响**。**不做批量 UPDATE** 的理由：W5 治理正由并发进程推进（`fe459e1` fix_062 / `0551daf` fix_063，明确「全库 456 个灰色地带…需人工确认，**勿盲目翻转**」），8042/4541 的量级远超其「无歧义子集」，盲目置 primary 会把错标映射一并「洗白」，且与进行中的治理冲突。
 - **⚪ onchain 33 天陈旧**：上游采集调度问题，另立，未动。
 - **验收**：`py_compile` 无（本轮零改码）；结论均以 prod 只读探针物证支撑，探针脚本为临时产物、已清理。
+
+### 催化剂 A 级邮件延迟链路诊断处置（XRP/BCH，catalyst 12267，2026-09-24，本次提交）
+
+来源：`诊断_催化剂A级邮件延迟链路_XRP_BCH_2026-09-24.md`。诊断结论为**假说**（「2.5h = 回归恢复积压冲刷」）并留「待确认」。只读 prod 复核后：**假说被推翻/细化**，另发现一个可修的**跨通道重复通知**缺陷。**本轮零 DDL、不改 tier/方向判定口径**。
+
+- **延迟真因（物证级，非积压冲刷）**：A 级档位由 **d6 方向闸门**（`signal.py:230`，只有显式 bullish 保留 A/B）决定，方向取 `COALESCE(catalyst_impact.impact_direction, ai_sentiment)`；而 `catalyst_impact` **只由 `build_catalyst_impact.py` 生成，该步仅在 `catalyst_run_all`（每 12h）内**（`catalyst_run_all.py:31`）。fast daemon 的 `run_fast_once` 只跑 classify/regime/grade/resonance/signal，**不生成 impact**。catalyst 12267 实测链：新闻 14:17:50 → `ai_processed_at` 16:00:36 → `catalyst_impact` 16:05:15（bullish）→ A 邮件 16:30/16:50。⇒ **XRP 在创建时（14:20:45）并非 tier A**（方向缺失被 d6 封顶 C），诊断「tier='A' 于 22:20 就生成」的前提不成立；A 级邮件延迟的上界 = `catalyst_run_all` 的 12h 节拍。
+  - **按诊断自身判据（「信号诞生→发送 > 30min 且无回归背景才算缺陷」）**：A 信号诞生于 16:05（impact 落库），发送于 16:30/16:50，间隔 25~45min ⇒ 属边界；**不改方向生成路径**（把方向改成规则即时产出属设计变更，会改变所有新催化剂的方向来源，且 d4 校准样本仅 40 条，见 AGENTS「待办（需设计变更，勿盲目改）」）——本轮只记录。
+- **🔴 跨通道重复通知（本轮修复）**：快讯与慢通道 digest **都发 A 级 Alert，但各用独立去重**（快讯按 `(signal_id, fast_alert)`；digest 按类别 sentinel）⇒ 同一信号两封邮件。实测 XRP `1085989`：`log_id=4` slow_digest（16:30:01，主题「🎯 催化剂 Alert·加密货币·A级 2 条」，并回写 `notified_at`）+ `log_id=79` fast_alert（16:50:55，回写 `pre_alert_sent_at`）。
+  - **修法（`workbench/catalyst/notifier.py`）**：`notified_at` 仅由 digest 发送成功后写、`pre_alert_sent_at` 仅由快讯发送成功后写 ⇒ 二者互为「另一通道已覆盖」的判据，**双向合围**：① 快讯侧新增 `_slow_digest_sent_recently(conn, ids)`（查 `notified_at > NOW()-24h`），在**取锁之前**跳过；② digest 侧 `_recent_new_a_signals` 的 WHERE 增 `pre_alert_sent_at` 近窗口排除。同一信号 24h 内只发一封。查询失败按「未发送」处理（宁可多发一封也不静默漏发）。
+  - **为什么诊断没发现**：诊断把 `notified_at` 读作「信号被标记通知」，未意识到它是**另一封邮件**（digest）的发送留痕。
+- **D11（错链）现状（未改，已在通知层缓解）**：catalyst 12267 正文只提 BCH/UNI/BTC，**XRP 完全未出现**，却被 `link_source='trading_pairs'`（币安广场帖的 `tradingPairsV2` 标签，`kol/scraper.py:378`）链上并产出 A 信号。XRP 的 `ai_deep_review` 实测 `verdict='不建议参与'` + `asset_match_confidence='low'` ⇒ **AI 否决闸门（`4307fb1`）已能拦下这封**（该闸门 2026-09-24 08:33 才提交，晚于本封邮件 00:50）。采集层实体消歧 / 源权威性评分仍属**架构改动、另立工单**（诊断 §五已标「待拍板」）。
+- **自测**：新增 `workbench/test_catalyst_channel_dedup.py` **22/22**（`_slow_digest_sent_recently` 行为 8 例含异常兜底/空入参不查库 + `_recent_new_a_signals` SQL 与参数顺序 5 例 + 快讯侧结构位次 5 例 + 既有不变量不回归 4 例）；`test_fast_alert_ai_veto.py` 46/46、`test_major_event_alert.py` 30/30、`test_fast_alert_audit_rest.py` 61/61 无回归；`py_compile` 通过。
+- **待部署**：`notifier.py` 在 fast daemon 与慢通道脚本内，需重启相应进程（容器 `catalyst_fast_daemon` + scheduler 慢通道）后生效。

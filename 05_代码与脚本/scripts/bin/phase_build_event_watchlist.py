@@ -96,10 +96,15 @@ _UNKNOWN_LABELS = ("unknown", "", "none", "null")
 def _pick_label(names, labels, raw) -> str:
     """取地址标签展示值：names[0] → labels[0] → 标量 raw → '?'。
 
-    与 `scan_daemon._resolve_addr_label` 同口径：`*_label_names`（具体名称，如
-    "Binance"）信息量最大，优先；`*_labels`（类型，如 "exchange"）次之；标量
-    `*_label` 是最陈旧的一列（审计 N-A56-2：实测 1,029 行 names 非空但标量仍为
-    unknown ⇒ 明明地址已标 Binance 却渲染 unknown）。
+    与 **`send_daily_brief._resolve_addr_label`**（日报）的**步骤 1–3 同口径**：
+    `*_label_names`（具体名称，如 "Binance"）信息量最大，优先；`*_labels`（类型，
+    如 "exchange"）次之；标量 `*_label` 是最陈旧的一列（审计 N-A56-2：实测 1,029 行
+    names 非空但标量仍为 unknown ⇒ 明明地址已标 Binance 却渲染 unknown）。
+
+    **第 4 步（回退）有意不同**（复验 N-567-1）：日报在「全 unknown」时回退
+    `addr[:8]+"..."`，本处返回 `?` —— 事件预置的 detail/标题空间小，`?` 比地址截断
+    更短且不误导（且地址另有完整展示位）。另：函数在 `phase_build_event_watchlist`，
+    日报同名候选在 `send_daily_brief`（**不在** `scan_daemon`）。
     """
     def _ok(s) -> bool:
         return bool(s) and str(s).strip().lower() not in _UNKNOWN_LABELS

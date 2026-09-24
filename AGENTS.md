@@ -1163,3 +1163,14 @@
   - **⚠️ 踩坑（第 N 次）**：图例文案一度写 `**最大一笔**`（markdown 强调符）→ `test_scan_alert_audit_deepdive.py` 的 `**` 护栏当场抓到，改「最大一笔」。**固化：改任何渲染文案后必跑 `**` 护栏。**
   - **并发 WIP 处置**：`scan_daemon.py` 另有并发会话的未提交改动（P0-A 24h 爆仓背景，区域不同）⇒ 用 `git stash push -- <path>` 暂存 → 提交本单改动 → `git stash pop` 还原，未纳入本提交。
 - **待部署**：`scan_daemon`（常驻，需重启）+ `phase_build_event_watchlist`（scheduler 子进程，需容器 redeploy）后生效。
+
+**复验收口（`复验_链上转账N-A56_0c0c567_2026-09-24.md`，本次提交）**：独立三段式（真码子树 + 真 prod DB 只读 + 新旧两版 producer 同 conn 对比）确认 N-A56-1/2/3 与地址显示**代码全部到位**、测试 32/32 精确复现、`chain` 说错 2 行与自述一致。本轮处置其 4 项新发现 + 2 处口径/部署更正，**零 DDL、不改判定口径**。
+
+- **🟠 N-567-1（P3，已修）标签解析器口径分裂**：producer `_pick_label` 的 docstring 误写「与 `scan_daemon._resolve_addr_label` 同口径」——该函数**不在 scan_daemon**（在 `send_daily_brief.py:123`），且因签名少 `addr` 参数，**第 4 步永远不同**（本处 `?`、日报 `addr[:8]+"..."`）。**采复验建议②（改动面最小）**：docstring 改为「与**日报** `send_daily_brief._resolve_addr_label` 的**步骤 1–3** 同口径；**第 4 步有意不同**（事件 detail 空间小、`?` 更诚实，且完整地址另有展示位）」；测试该行断言补注释固化「有意不同」，避免未来统一口径时撞测试却不自知。
+- **🟠 N-567-2（P3，已修）SQL 仅有源码字符串守卫**：与技能 #114「源码文本守卫不承重」同型（改 `ORDER BY … DESC` 为 `ASC` 测试仍全绿）⇒ `test_scan_alert_onchain_addr.py` 补 **1 条真 DB 行为断言**：取 `build_transfers` 前 5 行，逐行与「直接 `ORDER BY value_usd DESC LIMIT 1`」的 `chain` 比对（无 DB 则跳过）。测试 **32 → 36/36**（带 DB 实测 5/5 命中）。
+- **🟠 N-567-3（P3，已修）`tx_hash` 被 daemon 丢弃**：`source_ref.max_tx` 存了 8 字段，`ev["addr"]` 只透传 3 个 ⇒ `tx_hash` 采集了却无法渲染（浏览器链接做不到）。现 `ev["addr"]` 增 `tx`；渲染层在地址行下**再列一行** `tx 0x…`（完整、monospace、`break-all`、豁免 90 字截断），无值不渲染；图例同步声明。**未做可点击链接**（复验 §八#3 提醒邮件客户端兼容性；纯文本最稳且可复制，故采纯文本）。
+- **🟡 N-567-4（P4，记档未改）**：`n_to_exchange` 仅在 `>0` 时披露 ⇒ 若上游未来改三态（NULL=未判定），`0` 与「未知」文案不可分。实测当前 `is_to_exchange IS NULL` = **0/8887** ⇒ 无风险，属前瞻记档。
+- **📌 口径归一（已采纳）**：复验指出「元组任一分量被真实纠正」应为 **23**（`from` 13 + `to` 16 − 双侧重叠 6），此前自述「13 行」只覆盖 `from` 侧。**统一按 23 口径**；并注意 **54/77（70%）仅从 `unknown` 变 `?`**（无实质信息增量），「WLD/BEAM/ENA/U/PEPE 变 Binance」**不可外推**为整体效果。
+- **🔴 部署判定更正（复验反转自述，**重要**）**：`0c0c567` **已自动部署**——容器**级重建**（`__daemon__` 与 `[看护] scheduler_watchdog` 两独立进程**同秒**启动）发生在 push 后 **5m33s~7m01s**（四次采样：15:01:23→15:07:11 / 16:09:36→16:16:11 / 16:33:16→16:40:17 / 16:40:50→16:46:23）。⇒ **「push → 约 6 分钟 → 线上生效」是稳定规律**，此前「需 Zeabur 显式 redeploy」的表述**不准确**（代码随容器自动重建上线）。唯一剩余动作 = **等 producer 调度**（`scan_event_watchlist = 17 */6 * * *`，18:17 CST）或手工补跑；验收锚点：`SELECT count(*) FILTER (WHERE source_ref ? 'max_tx') FROM biz.event_watchlist WHERE event_type='onchain_transfer'` 应 > 0（复验时为 0/93）。
+- **🟠 队列积压（复验附带，P3，另议）**：`sys.task` 显示任务**提交→执行**排队 45~75min（`created_at` 精确落在调度点，说明调度正确、是 runner 并发槽位不足；09-24 05:32:40–05:33:11 有 9 个任务连续启动 = 积压排空）。建议单开工单核查 runner 并发槽位。
+- **未验/未做（复验边界）**：`5a95b32` 的 coinglass 套餐、`fix_069` 表正确性、N-A56-4/5 均不在本轮。

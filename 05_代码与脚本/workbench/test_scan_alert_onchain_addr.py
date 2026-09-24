@@ -42,6 +42,7 @@ def check(cond, name, detail=""):
 
 FROM_A = "0x2658723bf70c7667de6b25f99fcce13a16d25d08"
 TO_A = "0xd2d7535e099f26ebfba26d96bd1a661d3531d0e9"
+TX_A = "0xa0b5412df0a8f8b0382af96c0514797df8d906d93849484174b40ab5baa4d120"
 
 # ════════════════════════════════════════════════════════════
 print("\n【N-A56-1/2】生产者标签优先级 _pick_label")
@@ -51,7 +52,9 @@ pl = pbw._pick_label
 check(pl(["Binance"], ["exchange"], "unknown") == "Binance", "names[0] 优先（Binance 胜过 unknown）")
 check(pl(None, ["exchange"], "unknown") == "exchange", "names 缺失 → labels[0]")
 check(pl([], [], "exchange") == "exchange", "数组皆空 → 标量")
-check(pl([], [], "unknown") == "?", "全 unknown → '?'")
+# 复验 N-567-1：第 4 步**有意**与日报 send_daily_brief._resolve_addr_label 不同 ——
+# 本处返回 '?'（事件 detail 空间小），日报回退 addr[:8]+"..."。此断言即固化该「有意不同」。
+check(pl([], [], "unknown") == "?", "全 unknown → '?'（有意不同于日报的地址截断，见 docstring）")
 check(pl(None, None, None) == "?", "None → '?'")
 check(pl(["unknown"], ["exchange"], "unknown") == "exchange", "names[0]=unknown → 退到 labels[0]")
 check(pl(["Binance", "Binance (propagated from BSC)"], None, None) == "Binance",
@@ -89,6 +92,13 @@ check("最大一笔 · eth · " in h, "地址行含「最大一笔 · 链 ·」�
 check("ui-monospace" in h, "地址行用等宽字体")
 check("word-break:break-all" in h, "地址行自动换行（防手机端溢出）")
 check("→" in h, "from → to 箭头")
+
+# 复验 N-567-3：tx_hash 生产者已采集、此前被 daemon 丢弃 ⇒ 现透传并完整渲染
+h_tx = sd._render_resonance_msgs(_res({"chain": "eth", "from": FROM_A, "to": TO_A, "tx": TX_A}))
+check(TX_A in h_tx, "tx_hash 完整渲染（可复制到区块浏览器）")
+check("tx 0x" in h_tx, "tx 行带 `tx ` 前缀")
+h_notx = sd._render_resonance_msgs(_res({"chain": "eth", "from": FROM_A, "to": TO_A}))
+check("tx 0x" not in h_notx, "最大笔无 tx_hash 时不渲染 tx 行")
 
 # 地址行不得走 90 字截断：文本超长 + 地址仍完整
 h_long = sd._render_resonance_msgs(_res(
@@ -128,6 +138,43 @@ _leg = _leg.split("图例：")[1] if "图例：" in _leg else _leg
 check("最大一笔" in _leg, "图例声明「最大一笔」")
 check("豁免单条 90 字截断" in _leg, "图例声明地址豁免截断")
 check("流向交易所" in _leg, "图例声明「其中 N/M 笔流向交易所」")
+
+# ════════════════════════════════════════════════════════════
+print("\n【N-567-2】真 DB 行为断言（防 SQL 被反向改动而不自知；无 DB 则跳过）")
+# ════════════════════════════════════════════════════════════
+try:
+    from datetime import date, timedelta
+
+    from crypto_research.config import get_settings
+    from crypto_research.db.conn import get_connection
+
+    _settings = get_settings(require_database=True)
+    with get_connection(_settings.database_url) as _conn:
+        _since = date.today() - timedelta(days=pbw.TRANSFER_LOOKBACK_DAYS)
+        _rows = pbw.build_transfers(_conn, _since)
+        _sample = _rows[:5]
+        if not _sample:
+            print("  （跳过：窗口内无转账预置）")
+        else:
+            _ok_cnt = 0
+            for _r in _sample:
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        "SELECT t.chain FROM biz.onchain_transfer_log t "
+                        "WHERE t.asset_id = %s AND t.block_timestamp >= %s "
+                        "  AND t.value_usd >= %s AND t.is_suspect IS NOT TRUE "
+                        "ORDER BY t.value_usd DESC LIMIT 1",
+                        (_r["asset_id"], _since.isoformat(), pbw.TRANSFER_MIN_USD))
+                    _exp = _cur.fetchone()
+                _got = (_r.get("source_ref") or {}).get("max_tx", {}).get("chain")
+                if _exp and _got == _exp[0]:
+                    _ok_cnt += 1
+            check(_ok_cnt == len(_sample),
+                  "max_tx.chain == 直接 ORDER BY value_usd DESC 的真实最大笔链"
+                  "（DESC→ASC 等反向改动会被抓出）",
+                  f"{_ok_cnt}/{len(_sample)}")
+except Exception as _e:
+    print(f"  （跳过：无 DB / 异常：{_e}）")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

@@ -1609,6 +1609,9 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
                     "chain": _max_tx.get("chain"),
                     "from": _max_tx.get("from_address"),
                     "to": _max_tx.get("to_address"),
+                    # 复验 N-567-3：tx_hash 生产者已采集但此前被丢弃 ⇒ 透传供
+                    # 渲染层展示（完整哈希，供复制到区块浏览器核对）。
+                    "tx": _max_tx.get("tx_hash"),
                 }
             out["event"].append(ev)
 
@@ -2048,10 +2051,17 @@ def _render_resonance_msgs(res: dict) -> str:
                 _chain = html.escape(str(_a.get("chain") or "?"))
                 _fr = html.escape(str(_a.get("from") or "?"))
                 _to = html.escape(str(_a.get("to") or "?"))
+                _tx = str(_a.get("tx") or "").strip()
+                # tx_hash 另起一行（完整、可复制到区块浏览器）；仅在有值时渲染。
+                _tx_html = (
+                    "<div style='font-family:ui-monospace,Consolas,Menlo,monospace;"
+                    "font-size:10px;word-break:break-all;color:#6b7280'>"
+                    f"tx {html.escape(_tx)}</div>") if _tx else ""
                 addr_html = (
                     "<div style='font-family:ui-monospace,Consolas,Menlo,monospace;"
                     "font-size:10px;word-break:break-all;color:#374151;margin-top:1px'>"
-                    f"最大一笔 · {_chain} · {_fr} → {_to}</div>")
+                    f"最大一笔 · {_chain} · {_fr} → {_to}</div>"
+                    f"{_tx_html}")
             rows.append(
                 f"<div style='margin-top:3px'>"
                 f"<span style='background:{bg};color:{fg};font-size:10px;padding:0 4px;"
@@ -2369,7 +2379,8 @@ def _render_alert_email(items: list[dict],
               "催化剂徽章取 impact_direction、摘要取 ai_summary（空则回退原文标题）、"
               "解锁事件记利空（新增流通 = 抛压）、链上转账方向不明记中性（不臆断）、"
               "链上转账明细在摘要行下另起一行以 monospace 展示「最大一笔」的链与完整收发地址"
-              "（`最大一笔 · 链 · from → to`，豁免单条 90 字截断；摘要中的"
+              "（`最大一笔 · 链 · from → to`，其下若最大笔带 tx_hash 则再列 `tx 0x…`"
+              "（完整、可复制到区块浏览器）——两行均豁免单条 90 字截断；摘要中的"
               "「其中 N/M 笔流向交易所」= 流入交易所（潜在抛压）的笔数）、"
               "KOL 取 direction 的 long/short；未关联资产的催化剂/KOL 两段不渲染明细"
               "（无从查询 ≠ 0，与「共振」行的 n/a 一致）；"

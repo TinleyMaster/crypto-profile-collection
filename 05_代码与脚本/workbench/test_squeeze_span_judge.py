@@ -3,15 +3,18 @@
 
 运行：python test_squeeze_span_judge.py
 
-覆盖工单 §6 的三条 P1（A 段层面稳健统计 / B 极端段显式列出 / C 跨度充分性前置门）
-与 §6-D/E，按 §7 验收的**注入法**：
+覆盖工单 §6 的 A/B/C/D/E + 复验 F1~F6（按 §7 验收的**注入法**）：
 
   1) `segment_judge`：A 的注入（「5 段 10% + 1 段 70%」→ 中位数 10%，而非合并均值 ~20%）、
      「全部 22%」→ 22%、`decisive` 的 IQR 跨线边界、B 的极端段清单；
   2) `span_sufficiency`：C 的四象限（跨度/极端段各自单独触发）；
-  3) 常量与源码接线守卫（判据输入改段中位数、sample_ok 纳入 span、段上界前移、无跨度承诺）；
-  4) **C 的端到端注入**：桩接 `psycopg.connect`/`get_settings`，构造「分母/分子合格、跨度不足」
-     的样本 ⇒ 断言 rc=3、**未打印**判据输入比率、且段上界仍打印（E）。
+  3) **F1**：`exit_code` 契约 —— PASS 必须含 `decisive`（`pass=True`+`decisive=False` ⇒ rc=4）；
+  4) **F4**：`primary_gate` 唯一充分因（优先级 分母 > 分子 > 跨度）；
+  5) 常量与源码接线守卫（判据输入改段中位数、sample_ok 纳入 span、段上界前移、无跨度承诺、
+     F1 统计字段 / F2 摘要行移除 / F5 字段改名 / F6 死变量）；
+  6) **C 的端到端注入**（桩接 DB）：构造「分母/分子合格、跨度不足」的 6 段样本 ⇒
+     断言 rc=3、**判据输入中位数（15.00%）未出现在输出**（数值断言，非字面串）、
+     且段上界逐段仍打印（E）。
 
 ⚠️ 阈值本身**一律不动**（本单测不触碰 `LONG_LIQ_RATIO_THR` / `SQZ_SHORT_LIQ_RATIO_MIN`）。
 """
@@ -99,9 +102,34 @@ check(calib.MIN_SPAN_DAYS == 30 and calib.MIN_EXTREME_SEGMENTS == 3,
       "常量：MIN_SPAN_DAYS=30 / MIN_EXTREME_SEGMENTS=3")
 
 # ════════════════════════════════════════════════════════════
-# 3. 源码接线守卫（§6-A/B/C/D/E）
+# 3. F1：exit_code 契约（PASS 必须含 decisive）
 # ════════════════════════════════════════════════════════════
-print("\n【测试3】源码接线守卫")
+print("\n【测试3】F1：exit_code 契约（pass 不得绕过 decisive）")
+check(calib.exit_code(True, True, False, True) == 4,
+      "F1：pass=True 但 decisive=False ⇒ rc=4（不可判），不得 rc=0",
+      str(calib.exit_code(True, True, False, True)))
+check(calib.exit_code(True, True, True, True) == 0, "F1：pass=True + decisive=True ⇒ rc=0")
+check(calib.exit_code(False, True, True, True) == 2,
+      "F1：pass=False + decisive=True ⇒ rc=2（有判别力 FAIL）")
+check(calib.exit_code(False, True, False, True) == 4,
+      "F1：pass=False + decisive=False ⇒ rc=4（不可判）")
+check(calib.exit_code(False, False, True, True) == 3,
+      "F1：sample_ok=False ⇒ rc=3（优先于 decisive）")
+
+# ════════════════════════════════════════════════════════════
+# 4. F4：primary_gate 唯一充分因
+# ════════════════════════════════════════════════════════════
+print("\n【测试4】F4：primary_gate 唯一充分因")
+check(calib.primary_gate(False, False, False) == "分母门"
+      and calib.primary_gate(True, False, False) == "分子门"
+      and calib.primary_gate(True, True, False) == "跨度门"
+      and calib.primary_gate(True, True, True) is None,
+      "F4：优先级 分母>分子>跨度，全过 ⇒ None")
+
+# ════════════════════════════════════════════════════════════
+# 5. 源码接线守卫（§6-A/B/C/D/E + F1/F2/F5/F6）
+# ════════════════════════════════════════════════════════════
+print("\n【测试5】源码接线守卫")
 with open(calib.__file__, encoding="utf-8") as fh:
     _src = fh.read()
 check('sj = segment_judge(seg["segments"], JUDGE_UPPER_BOUND_PCT)' in _src,
@@ -112,7 +140,7 @@ check('span_suf = span_sufficiency(span_h, sj["extreme_count"])' in _src
       and "sample_ok = denom_ok and molecule_ok and span_ok" in _src,
       "C：跨度门纳入 sample_ok（分母/分子/跨度三者同过才可用）")
 check("span_suf[\"reasons\"]" in _src and "跨度不足" in _src,
-      "C：拒绝出结论时打印跨度理由（不给会被误读的比率）")
+      "C：拒绝出结论时打印跨度理由")
 check("段上界】← 工单 §6-E" in _src
       and _src.index("段上界】← 工单 §6-E") < _src.index("if not sample_ok:"),
       "E：段上界输出前移到前置门之前（任何路径都能看到）")
@@ -120,12 +148,25 @@ check('"extreme_segments": sj["extreme_segments"]' in _src
       and "极端段（上界 ≥" in _src,
       "B：极端段显式列出（JSON 字段 + 文本渲染）")
 check("非承诺" in _src and "量级估计" in _src,
-      "D：文档写明跨度量级是「量级估计、非承诺」（不得写『再等 N 天就能判』）")
+      "D：文档写明跨度量级是「量级估计、非承诺」")
+check('judge_pass = bool(sample_ok and decisive and measurable' in _src,
+      "F1：judge_pass 恢复 `decisive` 合取项（PASS 必须含判别力）")
+check('"segment_iqr_straddle_raw": (not sj["decisive"])' in _src
+      and "j['segment_iqr_straddle_raw']" in _src,
+      "F1：段 IQR 跨线以独立**统计**字段落库且渲染层读它（不再借用码表派生的 decisive）")
+check("sg['median_pct']" not in _src and "中位={sg" not in _src,
+      "F2(甲)：段清单不再印 min/中位/max 摘要行（判据输入不在前置门之前出现）")
+check('"upper_bound_n_segments": sj["n_segments"]' in _src
+      and '"merged_ci_distance_pp": _ci_margin' in _src,
+      "F5：语义漂移字段改名（段数 / merged_ci_distance_pp）")
+check("_pg = primary_gate(denom_ok, molecule_ok, span_ok)" in _src,
+      "F4：拒绝路径标注唯一充分因")
+check("new_rates" not in _src, "F6：删除死变量 new_rates")
 
 # ════════════════════════════════════════════════════════════
-# 4. C 的端到端注入：桩接 DB，构造「分母/分子合格、跨度不足」样本
+# 6. C 的端到端注入：桩接 DB，6 段样本 + 跨度不足
 # ════════════════════════════════════════════════════════════
-print("\n【测试4】C 端到端注入（rc=3 且不打印判据输入比率）")
+print("\n【测试6】C 端到端注入（rc=3 且判据输入中位数不出现在输出）")
 
 
 class _FakeCursor:
@@ -178,23 +219,33 @@ class _FakeConn:
 
 
 _now = dt.datetime(2026, 9, 23, 12, 0, tzinfo=dt.timezone.utc)
-# 分母合格：每币 288 根（days=1）；分子合格：24/24 整点、无长洞；跨度仅 71h ⇒ 跨度门拦下
-_bound = {"mn": _now - dt.timedelta(hours=71), "mx": _now, "n": 1000, "syms": 2}
-_sample = [{"symbol": "AAAUSDT", "ts": _now - dt.timedelta(hours=1),
-            "long_liq": 1.0, "short_liq": 1.0, "vol_win": 1e9,
-            "peak_hi": 1.0, "trough_lo": 1.0, "peak_c": 1.0, "trough_c": 1.0,
-            "close_now": 1.0},
-           {"symbol": "BBBUSDT", "ts": _now - dt.timedelta(hours=1),
-            "long_liq": 1.0, "short_liq": 1.0, "vol_win": 1e9,
-            "peak_hi": 1.0, "trough_lo": 1.0, "peak_c": 1.0, "trough_c": 1.0,
-            "close_now": 1.0}]
-_denom = [{"symbol": "AAAUSDT", "bars": 288, "hours": 24},
-          {"symbol": "BBBUSDT", "bars": 288, "hours": 24}]
+
+
+def _mk_rows():
+    """6 个 4h 段 × 50 行；每段 k 行越阈 ⇒ 段上界 = k/50×100 = 10,12,14,16,18,20（中位 15.00%）。"""
+    base = _now - dt.timedelta(hours=24)
+    rows = []
+    for seg, k in enumerate([5, 6, 7, 8, 9, 10]):
+        for j in range(50):
+            rows.append({
+                "symbol": "AAAUSDT", "ts": base + dt.timedelta(hours=4 * seg, minutes=4 * j),
+                "long_liq": 1e6 if j < k else 1.0,
+                "short_liq": 1.0, "vol_win": 1e9,
+                "peak_hi": 1.0, "trough_lo": 0.5, "peak_c": 1.0, "trough_c": 0.5,
+                "close_now": 0.9,
+            })
+    return rows
+
+
+# 分母合格（288 根 / 币）；分子合格（24/24 整点）；跨度仅 72h ⇒ 跨度门拦下
+_bound = {"mn": _now - dt.timedelta(hours=72), "mx": _now, "n": 1000, "syms": 1}
+_denom = [{"symbol": "AAAUSDT", "bars": 288, "hours": 24}]
 _mol = [{"n": 5}] * 24
 _incl0 = [{"ratio": 0.0001}]
 
 _orig_connect, _orig_settings = calib.psycopg.connect, calib.get_settings
-calib.psycopg.connect = lambda *a, **k: _FakeConn(_FakeCursor(_bound, _sample, _denom, _mol, _incl0))
+calib.psycopg.connect = lambda *a, **k: _FakeConn(
+    _FakeCursor(_bound, _mk_rows(), _denom, _mol, _incl0))
 calib.get_settings = lambda **k: types.SimpleNamespace(database_url="postgres://x")
 _argv = sys.argv
 sys.argv = ["calib_squeeze_liq_thr.py"]
@@ -208,10 +259,53 @@ finally:
 _out = _buf.getvalue()
 check(_rc == 3, "C：跨度不足 ⇒ rc=3（样本不可用）", f"rc={_rc}")
 check("跨度不足" in _out, "C：给出跨度不足的理由")
+check("归因以跨度门为准" in _out,
+      "F4：分母/分子合格 ⇒ 唯一充分因标为跨度门")
 check("【判定】" not in _out and "判据输入（段median）" not in _out,
-      "C：**未打印**判据输入/判定比率（避免被误读成「判据不通过」）")
-check("【各 4h 段上界】" in _out,
-      "E：即使样本不可用，段上界仍打印（诊断入口）")
+      "C：**未打印**判定行/判据输入标签")
+# F2 数值断言：判据输入 = 段中位数 15.00%，不得出现在输出里（不是字面串检查）
+check("15.00%" not in _out,
+      "F2：判据输入中位数（15.00%）未出现在 rc=3 路径的输出里", _out[:0])
+check("【各 4h 段上界】" in _out and "20.00%" in _out,
+      "E：即使样本不可用，段上界仍**逐段**打印（诊断入口）")
+
+# ════════════════════════════════════════════════════════════
+# 7. F1 端到端注入：样本可用 + 段 IQR 跨线 ⇒ rc=4（不得 rc=0）
+# ════════════════════════════════════════════════════════════
+print("\n【测试7】F1 端到端注入（样本可用 + IQR 跨线 ⇒ rc=4，不得 rc=0）")
+
+
+def _fake_seg(bounds):
+    vals = sorted(bounds)
+    return {"segment_hours": calib.SEGMENT_HOURS, "n_segments": len(vals),
+            "segments": _segs(bounds), "min_pct": vals[0],
+            "median_pct": vals[len(vals) // 2], "max_pct": vals[-1], "skipped": 0}
+
+
+# bounds=[5,5,45,45,45]：median 45（FAIL 侧）、P25=5 / P75=45 ⇒ IQR 跨线；
+# 极端段 3 个(≥40)、跨度 31 天 ⇒ 跨度门放行 ⇒ sample_ok=True、decisive=False
+_bound2 = {"mn": _now - dt.timedelta(days=31), "mx": _now, "n": 500, "syms": 1}
+_sample2 = [{"symbol": "AAAUSDT", "ts": _now - dt.timedelta(hours=1),
+             "long_liq": 1.0, "short_liq": 1.0, "vol_win": 1e9,
+             "peak_hi": 1.0, "trough_lo": 1.0, "peak_c": 1.0, "trough_c": 1.0,
+             "close_now": 1.0}]
+_orig_seg = calib.segment_upper_bounds
+calib.segment_upper_bounds = lambda rows, thr: _fake_seg([5, 5, 45, 45, 45])
+calib.psycopg.connect = lambda *a, **k: _FakeConn(
+    _FakeCursor(_bound2, _sample2, _denom, _mol, _incl0))
+_buf2 = io.StringIO()
+try:
+    with contextlib.redirect_stdout(_buf2):
+        _rc2 = calib.main()
+finally:
+    calib.segment_upper_bounds = _orig_seg
+    calib.psycopg.connect, calib.get_settings = _orig_connect, _orig_settings
+_out2 = _buf2.getvalue()
+check(_rc2 == 4, "F1：sample_ok + IQR 跨线 ⇒ rc=4（旧码会误判 rc=0 PASS）", f"rc={_rc2}")
+check("段 IQR 跨判据线（无判别力）" in _out2,
+      "F1：渲染如实印「段 IQR 跨判据线（无判别力）」（不再假报「不跨」）")
+check("INCONCLUSIVE" in _out2 and "PASS" not in _out2.split("【判定】")[-1][:40],
+      "F1：结论 = INCONCLUSIVE（非 PASS）")
 
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

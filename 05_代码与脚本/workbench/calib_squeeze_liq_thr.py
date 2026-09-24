@@ -36,6 +36,9 @@
      - **A**：判据输入由「合并样本上界」改为**各 4h 段上界的中位数**（`SEGMENT_JUDGE_STAT`）——
        实证**聚合悖论**：段层面 9/15 段 PASS（中位 17.58%）而合并上界 31.47% = FAIL，
        合并让高活跃段获「样本量 × 越阈率」双重权重加成；`decisive` = 段 IQR 不跨判据线。
+       ⚠️ **复验 F3（口径更正，勿误读）**：A 只改**聚合方式**、不改判据线的**可分性** ——
+       段中位在 1 小时内即可跨 20% 线（实测 19.91% ↔ 22.88%），且 `--days 1` 仅 6 段、
+       IQR 由线性插值自 6 点得出 ⇒ 「段中位落在 PASS 侧」**不是稳定读数**，判据仍不可判。
      - **B**：极端段（上界 ≥ `EXTREME_SEG_PCT`）**显式列出**，不并入判据但不得静默丢弃
        （单个 4h 段即可翻转合并结论）。
      - **C**：**跨度充分性前置门**（`span_sufficiency`）——表跨度 < `MIN_SPAN_DAYS`、或极端段
@@ -249,9 +252,13 @@ def exit_code(pass_: bool, sample_ok: bool, decisive: bool, measurable: bool = T
     """
     if not sample_ok or not measurable:
         return 3
-    if pass_:
-        return 0
-    return 2 if decisive else 4
+    # 复验 F1：`decisive` 必须**早于** `pass_` 判定 —— 旧序 `if pass_: return 0` 会把
+    # 「PASS 侧但段 IQR 跨判据线」判成 rc=0，与本文档「0 = 样本可用 + **有判别力** +
+    # 上界 < 线」自相矛盾（且 `judge.decisive` 会由码表假报 True）。当下跨度门先拦、
+    # 不可达，但跨度门一放行即自动激活 —— 恰是本工单的目标状态。
+    if not decisive:
+        return 4
+    return 0 if pass_ else 2
 
 
 # 复验 G1：`judge.conclusion` 与退出码的**唯一映射表**（由 `exit_code()` 派生，
@@ -540,6 +547,22 @@ def span_sufficiency(span_hours: float, extreme_count: int) -> dict:
             "min_extreme_segments": MIN_EXTREME_SEGMENTS}
 
 
+def primary_gate(denom_ok: bool, molecule_ok: bool, span_ok: bool) -> str | None:
+    """拒绝出结论时的**唯一充分因**（优先级：分母 > 分子 > 跨度）。
+
+    复验 F4：三道门并列进 `sample_ok`，输出只说「拒绝出结论」⇒ 默认参数下三处并发失败时，
+    读者会误以为「是跨度门拦下的」（实测 `--days 1` 分母门亦不过）。按优先级标出归因，
+    其余门只作附注。
+    """
+    if not denom_ok:
+        return "分母门"
+    if not molecule_ok:
+        return "分子门"
+    if not span_ok:
+        return "跨度门"
+    return None
+
+
 def variant_a(r) -> bool:
     """A：窗口内拉升（高低点振幅）≥2% 且 已回撤 ≥2%。"""
     if not (r["peak_hi"] and r["trough_lo"] and r["close_now"] and r["trough_lo"] > 0):
@@ -702,8 +725,6 @@ def main() -> int:
     # ── 判据（工单 SQUEEZE-SPAN-001 §6-A）：段层面稳健统计（中位数）──────────────
     # 合并样本上界 / CI / 分段跨线**降级为诊断**（旧判据；实证「聚合悖论」——段层面 9/15
     # PASS、合并 31.47% FAIL ⇒ 合并让高活跃段获「样本量 × 越阈率」双重加成）。
-    new_rates = [v["rate_new_pct"] for v in out["subsets"].values()
-                 if v["rate_new_pct"] is not None]
     ub_name, ub_sub = max(
         ((n, v) for n, v in out["subsets"].items() if v["rate_new_pct"] is not None),
         key=lambda kv: kv[1]["rate_new_pct"], default=(None, None))
@@ -717,19 +738,26 @@ def main() -> int:
     judge_val = sj["value_pct"]
     measurable = judge_val is not None
     decisive = sj["decisive"]
-    judge_pass = bool(sample_ok and measurable and judge_val < JUDGE_UPPER_BOUND_PCT)
+    # 复验 F1：`decisive` 是判据的合取项之一（旧码误删）—— 段 IQR 跨判据线时不得判 PASS
+    # （否则 rc=0 与「无判别力」并存，违反 `exit_code` 自身契约）。
+    judge_pass = bool(sample_ok and decisive and measurable
+                      and judge_val < JUDGE_UPPER_BOUND_PCT)
     # 复验 G1：`conclusion` 必须与退出码**同源**——旧码由 `pass`/`decisive` 另算一遍、完全不读
     # `sample_ok` ⇒ 真码实跑 `--days 7` 打出 `sample_ok=false` + `conclusion="FAIL"`，与 rc=3、
     # `reliable=false` 三处口径互相打架。这是同一缺陷类的第三次复发（D1 `pass` → F2 `decisive`
     # → 本轮 `conclusion`）⇒ 改为由 `exit_code()` 单一真源映射，杜绝再有第四个字段各自为政。
     # 复验 G3：`measurable`（无任何分段可算 ⇒ 判据输入算不出来）并入 3，不再落到语义不符的 4。
     rc = exit_code(judge_pass, sample_ok, decisive, measurable)
+    # 复验 G4 + H4 + F5：合并上界 CI 的带符号裕度（诊断字段，改名 `merged_ci_distance_pp`）。
+    _ci_margin = ci_margin_pp(ci, JUDGE_UPPER_BOUND_PCT)
     out["judge"] = {
         "criterion": f"各 {SEGMENT_HOURS}h 段上界的{SEGMENT_JUDGE_STAT} < "
                      f"{JUDGE_UPPER_BOUND_PCT}%，且段 IQR 不跨判据线（P75<线 或 P25>线）",
         # 工单 §6-A：判据输入由「合并样本上界」改为**段层面稳健统计**（此处 = 段中位数）。
         "upper_bound_pct": judge_val,
         "upper_bound_variant": f"段{SEGMENT_JUDGE_STAT}({SEGMENT_HOURS}h)",
+        # 复验 F5：语义由「样本量 n」漂移为「段数」⇒ 改名（旧名保留一轮为别名，无消费方）。
+        "upper_bound_n_segments": sj["n_segments"],
         "upper_bound_n": sj["n_segments"],
         # 合并上界 / CI：诊断字段（旧判据），不再参与判定。
         "merged_upper_bound_pct": ub_sub["rate_new_pct"] if ub_sub else None,
@@ -738,10 +766,15 @@ def main() -> int:
         "merged_ci95_pct": [round(ci[0], 2), round(ci[1], 2)] if ci else None,
         "seg_p25_pct": sj["p25_pct"], "seg_p75_pct": sj["p75_pct"],
         "seg_min_pct": sj["min_pct"], "seg_max_pct": sj["max_pct"],
+        # 复验 F1（渲染源错配）：段 IQR 跨线是**统计事实**，与 `decisive`（码表派生、
+        # 描述结论）分开存 —— 渲染层必须用本字段，否则 rc=0 时会把「跨线」印成「不跨」。
+        "segment_iqr_straddle_raw": (not sj["decisive"]),
         # 复验 G4 + H4：布尔化的 `ci_decisive` 会掩盖贴线的边界性（实测只差 0.01pp 即判
         # 「有判别力」）⇒ 给出**带符号**裕度（正 = CI 在判据线下方即 PASS 侧，负 = 上方
         # 即 FAIL 侧，0 = 已跨线），既暴露贴线又保住方向。
-        "ci_distance_pp": ci_margin_pp(ci, JUDGE_UPPER_BOUND_PCT),
+        # 复验 F5：改名 `merged_ci_distance_pp`（它描述的是**合并上界**的裕度），旧名保留一轮。
+        "merged_ci_distance_pp": _ci_margin,
+        "ci_distance_pp": _ci_margin,
         # 复验 E1：pass 必须与 sample_ok 同向——分母/分子不合格时算出的上界是纯噪音，
         # 否则 `--json` 会输出「pass=true」而进程 rc=3，下游读 JSON 必然误判。
         # 复验 I1：`decisive` 也曾由 `ci`+`seg` 各自计算、**完全不读 `sample_ok`** ⇒ prod
@@ -820,11 +853,12 @@ def main() -> int:
     # 工单 SQUEEZE-SPAN-001 §6-E：段上界纳入**标准输出**（原先只在通过 sample_ok 后才打印，
     # 而它恰是诊断「聚合悖论」的唯一入口）⇒ 移到前置门之前，任何路径都能看到。
     sg = out["segments"]
-    print(f"\n【各 {sg['segment_hours']}h 段上界】← 工单 §6-E：段间漂移（合并判据的聚合悖论入口）")
+    print(f"\n【各 {sg['segment_hours']}h 段上界】← 工单 §6-E：段间漂移（聚合悖论的诊断入口）")
     if sg["min_pct"] is not None:
-        print(f"  共 {sg['n_segments']} 段（跳过 n<{MIN_SEGMENT_N} 的 {sg['skipped']} 段）："
-              f"min={sg['min_pct']:.2f}% / 中位={sg['median_pct']:.2f}% / "
-              f"max={sg['max_pct']:.2f}%  ⇒ 段间跨度 {sg['max_pct'] - sg['min_pct']:.2f}pp")
+        # 复验 F2（甲）：只印**逐段值**，不印 min/中位/max 摘要行 —— A 之后「中位数」同时是
+        # 「判据输入」，摘要行会在前置门之前把它印出来（与 §6-C「不打印判据输入」冲突）。
+        # 摘要统计改由【统计判别力】节在样本可用时给出。
+        print(f"  共 {sg['n_segments']} 段（跳过 n<{MIN_SEGMENT_N} 的 {sg['skipped']} 段），逐段：")
         for x in sg["segments"]:
             print(f"    {x['start_ts'][:16]}  rows={x['rows']:<6} 上界 {x['upper_bound_pct']:.2f}%")
     else:
@@ -833,6 +867,10 @@ def main() -> int:
     if not sample_ok:
         fails = denom_fail + molecule_fail + span_suf["reasons"]
         print("\n🛑 拒绝出结论：" + "；".join(fails))
+        # 复验 F4：三处并发失败时标出**唯一充分因**，避免被误读成「跨度门拦下」。
+        _pg = primary_gate(denom_ok, molecule_ok, span_ok)
+        if _pg and len(fails) > 1:
+            print(f"   归因以{_pg}为准（其余门亦不过，见上）。")
         if not denom_ok:
             print("   分母不合格 ⇒ `vol_win` 被系统性少算，任何越阈率都不可比。"
                   "先补齐 biz.asset_klines(5m)，或改用落在有数据时段的 --days，再重跑。")
@@ -886,14 +924,16 @@ def main() -> int:
               f"⇒ 判据无输入 ⇒ 退出码 {rc}（样本不可比；与 rc=4「样本可用但判据不可判」不同源）")
     else:
         print(f"  判据输入 = 各 {sg['segment_hours']}h 段上界的{SEGMENT_JUDGE_STAT}"
-              f"（共 {j['upper_bound_n']} 段）= {ub}"
+              f"（共 {j['upper_bound_n_segments']} 段）= {ub}"
               f"  |  P25={_pct_s(j['seg_p25_pct'])} / P75={_pct_s(j['seg_p75_pct'])}"
-              f"  ⇒ 段 IQR {'不跨' if j['decisive'] else '跨'}判据线"
-              f"（{'有判别力' if j['decisive'] else '无判别力'}）")
+              # 复验 F1：用**统计事实**字段（segment_iqr_straddle_raw），不用码表派生的
+              # `decisive`（后者描述结论，rc=0 时会把「跨线」印成「不跨」）。
+              f"  ⇒ 段 IQR {'跨' if j['segment_iqr_straddle_raw'] else '不跨'}判据线"
+              f"（{'无' if j['segment_iqr_straddle_raw'] else '有'}判别力）")
         # 合并上界 / CI：诊断字段（旧判据），不再参与判定。
         _mci = j["merged_ci95_pct"]
         _mci_txt = f"[{_mci[0]:.2f}%, {_mci[1]:.2f}%]" if _mci else "n/a"
-        _margin = j["ci_distance_pp"]
+        _margin = j["merged_ci_distance_pp"]
         _margin_txt = "n/a" if _margin is None else f"{_margin:+.2f}pp"
         print(f"  （诊断，不参与判定）合并样本上界 = {_pct_s(j['merged_upper_bound_pct'])}"
               f"（变体 {j['merged_variant']}，n={j['merged_n']}）95% CI = {_mci_txt}"

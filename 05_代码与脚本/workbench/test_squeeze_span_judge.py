@@ -155,18 +155,24 @@ check('judge_pass = bool(sample_ok and decisive and measurable' in _src,
 check('"segment_iqr_straddle_raw": (not sj["decisive"])' in _src
       and "j['segment_iqr_straddle_raw']" in _src,
       "F1：段 IQR 跨线以独立**统计**字段落库且渲染层读它（不再借用码表派生的 decisive）")
-check("sg['median_pct']" not in _src and "中位={sg" not in _src,
-      "F2(甲)：段清单不再印 min/中位/max 摘要行（判据输入不在前置门之前出现）")
+check(not re.search(r"sg\[[\"']median_pct[\"']\]", _src)
+      and not re.search(r"中位\s*=\s*\{sg", _src),
+      "F2(甲)：段清单不再印 min/中位/max 摘要行（判据输入不在前置门之前出现）"
+      "（复验 I2：单引号字面改**正则** ⇒ 双引号/改名变体不再静默放行）")
 check('"upper_bound_n_segments": sj["n_segments"]' in _src
       and '"merged_ci_distance_pp": _ci_margin' in _src,
       "F5：语义漂移字段改名（段数 / merged_ci_distance_pp）")
 check("_pg = primary_gate(denom_ok, molecule_ok, span_ok)" in _src,
       "F4：拒绝路径标注唯一充分因")
 check("_failed_gates = sum(1 for ok in (denom_ok, molecule_ok, span_ok) if not ok)" in _src
-      # 复验 H2：用**正则**判「理由条数」写法已消失 —— 字面串 `"len(fails) > 1"` 对空白敏感，
-      # 若有人写回 `len(fails)>1`（无空格）会**静默放行**。
-      and not re.search(r"len\(fails\)\s*>\s*1", _src),
+      # 复验 H2 + I2：用**正则**判「理由条数」写法已消失 —— 字面串对空白敏感；正则允许
+      # 括号内/运算符两侧任意空白（`len( fails ) > 1` 等变体不再静默放行）。
+      and not re.search(r"len\(\s*fails\s*\)\s*>\s*1", _src),
       "G1：归因判据用**失败门数**而非「理由条数」（单门多条理由不得印『其余门亦不过』）")
+# 复验 I4：与 H1 对称，补一条**非空转**自检（证明 H2 正则确实能命中目标写法）。
+check(bool(re.search(r"len\(\s*fails\s*\)\s*>\s*1", "if x and len(fails)>1:"))
+      and bool(re.search(r"len\(\s*fails\s*\)\s*>\s*1", "if x and len( fails ) > 1:")),
+      "H2：守卫正则不空转（无空格 / 带内空白两种写法均命中）")
 check("new_rates" not in _src, "F6：删除死变量 new_rates")
 
 # ════════════════════════════════════════════════════════════
@@ -319,9 +325,10 @@ check("段 IQR 跨判据线（无判别力）" in _out2,
 # 字面串 `"→  PASS"` 在格式改成单空格后会**静默恒真**、失去保护力。
 check("INCONCLUSIVE" in _out2 and not re.search(r"→\s*PASS", _out2),
       "F1：结论 = INCONCLUSIVE（非 PASS）")
-check(bool(re.search(r"→\s*PASS", "x  →  PASS（退出码 0"))
-      and not re.search(r"→\s*PASS", "x  →  INCONCLUSIVE"),
-      "H1：结论正则不空转（命中 PASS、不命中 INCONCLUSIVE）")
+# 复验 I3：自检样本改用**单空格**（H1 的真正失效模式），演示更有针对性。
+check(bool(re.search(r"→\s*PASS", "x → PASS（退出码 0"))
+      and not re.search(r"→\s*PASS", "x → INCONCLUSIVE"),
+      "H1：结论正则不空转（命中单空格 PASS、不命中 INCONCLUSIVE）")
 
 # ════════════════════════════════════════════════════════════
 # 8. F4/G1：多门并发归因（分母门 + 跨度门）

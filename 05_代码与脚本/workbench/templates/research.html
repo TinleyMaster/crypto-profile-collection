@@ -65,6 +65,17 @@
             background: #4b5563;
         }
 
+        .r-completeness {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            background: #1e222a;
+            border: 1px solid #2a2f3a;
+            cursor: pointer;
+            white-space: nowrap;
+            margin-right: 4px;
+        }
+
         .r-body {
             flex: 1;
             display: flex;
@@ -2221,6 +2232,7 @@
     <header class="r-header">
         <div class="r-title" id="r-title">🤖 一键投研</div>
         <div class="r-actions">
+            <span class="r-completeness" id="r-completeness" style="display:none"></span>
             <button id="r-fill-btn" onclick="fillMissing()">补齐缺失</button>
             <button onclick="showResearchLinks()">🔗 投研链接</button>
             <button onclick="location.href='/'">关闭</button>
@@ -2670,6 +2682,7 @@
             updateOnepage();
             renderThesis(d);
             renderSidebar(d);
+            renderCompleteness(d);
             renderMessages(d.messages || []);
             loadCompetitors();
             loadDivergence();
@@ -4175,6 +4188,31 @@
             return a.length > 12 ? a.slice(0, 6) + '...' + a.slice(-4) : a;
         }
 
+        // OPT-UI-001：数据完整度徽章（消费 notebook 的 missing 清单）
+        // 目的：把「该维度无数据」与「该维度值为零」区分开，管理用户预期。
+        // 纯展示，零外部请求。
+        function renderCompleteness (d) {
+            const el = document.getElementById('r-completeness');
+            if (!el) return;
+            const missing = d.missing || [];
+            if (missing.length === 0) { el.style.display = 'none'; return; }
+            const missItems = missing.filter(function (m) { return !m.present; });
+            const total = missing.length;
+            const ok = total - missItems.length;
+            const pct = total ? Math.round(ok / total * 100) : 100;
+            const color = missItems.length === 0 ? '#10b981' : (pct >= 60 ? '#fbbf24' : '#dc2626');
+            el.style.display = 'inline-flex';
+            el.style.color = color;
+            el.textContent = '数据完整度 ' + ok + '/' + total;
+            el.title = missItems.length
+                ? '暂无数据（' + missItems.length + ' 项）：' + missItems.map(function (m) { return m.label; }).join('、')
+                : '各维度数据均已采集';
+            el.onclick = function () {
+                const sb = document.getElementById('r-sidebar');
+                if (sb) sb.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            };
+        }
+
         function renderSidebar (d) {
             let side = '';
             const missing = d.missing || [];
@@ -4189,7 +4227,7 @@
                     const dot = m.present ? 'ok' : 'miss';
                     const links = m.links || [];
                     const count = (m.count !== undefined && m.count !== null) ? m.count : links.length;
-                    const status = m.present ? '已收集(' + count + '份)' : '缺失';
+                    const status = m.present ? '已收集(' + count + '份)' : '⚠ 暂无数据';
                     const color = m.present ? '#10b981' : '#dc2626';
                     const desc = m.description ? ' title="' + attrEscape(m.description) + '"' : '';
                     side += '<div class="r-group">' +

@@ -1063,3 +1063,14 @@
 - **D11（错链）现状（未改，已在通知层缓解）**：catalyst 12267 正文只提 BCH/UNI/BTC，**XRP 完全未出现**，却被 `link_source='trading_pairs'`（币安广场帖的 `tradingPairsV2` 标签，`kol/scraper.py:378`）链上并产出 A 信号。XRP 的 `ai_deep_review` 实测 `verdict='不建议参与'` + `asset_match_confidence='low'` ⇒ **AI 否决闸门（`4307fb1`）已能拦下这封**（该闸门 2026-09-24 08:33 才提交，晚于本封邮件 00:50）。采集层实体消歧 / 源权威性评分仍属**架构改动、另立工单**（诊断 §五已标「待拍板」）。
 - **自测**：新增 `workbench/test_catalyst_channel_dedup.py` **22/22**（`_slow_digest_sent_recently` 行为 8 例含异常兜底/空入参不查库 + `_recent_new_a_signals` SQL 与参数顺序 5 例 + 快讯侧结构位次 5 例 + 既有不变量不回归 4 例）；`test_fast_alert_ai_veto.py` 46/46、`test_major_event_alert.py` 30/30、`test_fast_alert_audit_rest.py` 61/61 无回归；`py_compile` 通过。
 - **待部署**：`notifier.py` 在 fast daemon 与慢通道脚本内，需重启相应进程（容器 `catalyst_fast_daemon` + scheduler 慢通道）后生效。
+
+### 投研页「数据完整度」徽章 OPT-UI-001（工单_投研页数据完整度徽章_OPT-UI-001_2026-09-24.md，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\待修复工单_投研页数据完整度徽章_OPT-UI-001_2026-09-24.md`。**纯前端、零 DDL、零后端改动、零外部请求**（用户约束：Coinglass 仅 Hobbyist、其余免费额度 ⇒ 展示层不得新增配额消耗）。
+
+- **工单前提修正（如实记录）**：工单称「页面没有把 `missing_json` 渲染出来」**不完全成立** —— `research.html::renderSidebar()` 早已把 `d.missing` 渲染为侧栏「投研资料完整性」列表（每项带绿/红点 + 已收集(N份)/缺失）。真正的缺口是**缺少顶层汇总徽章**与**缺失项措辞不够醒**（原文「缺失」易被读成「值为零」）。故本轮只补增量。
+- **改动（`templates/research.html`，+39 行）**：① 头部 `r-actions` 增 `<span id="r-completeness">` 容器 + `.r-completeness` 样式；② 新增 `renderCompleteness(d)`（纯计算，无 fetch/XHR）：读 `d.missing`，`present` 计数得 `数据完整度 X/Y`，缺失 >0 时颜色随完整率（≥60% 琥珀 / <60% 红），`title` 列「暂无数据（N 项）：…」并可点击滚动定位侧栏；③ `render(d)` 接线调用；④ 侧栏缺失项文案由「缺失」改为「**⚠ 暂无数据**」，与徽章口径统一。
+- **口径**：`missing` 即后端 `_compute_missing_materials` 产物（含 `social_heat`/`team_vc`/`roadmap`/`audit_report`/`tge_ido_info` 等 13 类），已按赛道过滤；`present:false` 显式区分「无数据」与「值为零」。**未改任何数据计算逻辑**，仅消费既有字段。
+- **自测**：新增 [test_research_completeness_badge.py](file:///e:/瞎搞乱搞/web3/加密货币研究报告/05_代码与脚本/workbench/test_research_completeness_badge.py) **14/14**（容器/样式、`render(d)` 接线、口径 `m.present`、**零配额护栏（函数体内无 `fetch(`/`XMLHttpRequest`）**、侧栏文案、后端 `missing` 返回体）；另用 node 对整段 `<script>`（Jinja 占位符替换后）做 `--check` **JS 语法通过**。
+- **待部署**：模板在 web 应用进程内，需 redeploy 后生效。
+- **未做（遵工单 §三待拍板）**：D1 未采用弹层方案（取头部徽章，最省代码）；D2「关键维度（derivatives/klines）更强提示」未做（这些维度不在 `missing`（资料清单）而在 `structured_metrics`，属另一数据源，另议）。

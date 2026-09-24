@@ -990,7 +990,11 @@
 - **未修**：P2-F（`CRCLon` 命名，属数据源符号）、P2-G/P2-H（SOSO/2Z 占比、AI 赛道 +122.2% 待核，无外部源）。
 - **自测**：新增 `workbench/test_daily_brief_20260924.py` **29/29**（ETF 合计自洽 + 源口径源码守卫 + 两胜率分列 + 时点 + 截断 + 维度标注 + `_clip`/`_fmt_data_as_of` + 边界不误触发）；`test_daily_brief_p1.py` 22/22、`test_liq_overview_brief.py` 49/49、`test_brief_data_model.py` 20/20 无回归；`py_compile` 2/2。
 - **真快照端到端**：`load_snapshot(2026-09-24)` + `render_brief_html` 实测输出「全部 ETF 合计 +$609M」「分项：BTC +$582M + ETH -$96M + 其他 +$122M（SOL +93M · XRP +17M · LINK +5M）」「当日 T+1h 胜率 59.1% / 近3日滚动 44.5%」「数据截至 09-24 08:30（北京时间）」。
-- **待部署**：早报由 scheduler 一次性脚本发送，下次调度（每日 09:00 CST）即生效，无需常驻容器重启。
+- **待部署**：早报由**容器内 scheduler 的子进程**执行（`scheduler.py` 用 `[sys.executable, "-u", script_path]` 跑脚本，脚本文件在镜像内）⇒ 代码改动**需容器 redeploy** 才生效。**更正**：此前本节误写「下次调度即生效、无需常驻容器重启」——`复验_早报0924审计修复_b4dac09_2026-09-24.md` 的 F3 活口指出该说法不成立（与项目「push ≠ 线上生效」的一贯口径一致）。
+- **复验收口（`复验_早报0924审计修复_b4dac09_2026-09-24.md`，本次提交）**：独立三段式（拉 origin/main 真码 + `py_compile` + 抽码离线实跑）确认 —— `b4dac09` 在 origin/main、P1-1/P1-2/P2-A~I 与说明逐字吻合、并发提交未触碰本轮函数区、新增 29/29 与既有 22/16/20/49 四套护栏零回归。**唯一活口 = F3 部署生效**（已按上条更正）。另核 `subprocess.run` 执行模型确认「需 redeploy」。
+  - **P2-F 非缺陷（已核实）**：`CRCLon` 是**真实代币符号** —— `core.asset` asset_id 8598 = `Circle Internet Group Tokenized Stock (Ondo)`（Ondo 代币化股票，`primary_sector='rwa'`，市值 $107.9M / rank 244）。审计「疑似渲染错误或缩写」的前提不成立，**不改**。
+  - **P2-G 已随 P1-2 消解（已核实）**：`biz.asset_unlock_event` 的 SOSO/2Z 亦走源 `unlock_ratio_mcap`（50.6 / 46.4），与 XPL 同源口径；审计列的「50.73% / 46.09%」是修复前「实时计算」口径的旧值，**无需再核外部**。
+  - **P2-H 非缓存 bug（已核实）**：`biz.sector_flow_daily`（sector_12）AI & Big Data 的 `mcap_change_7d_pct` **每日重算**（实测 09-18 8.07% → 09-19 9.36% → 09-21 25.04% → 09-22 54.02% → **09-23 122.22%**，逐日不同）。09-24 早报读到的是 **09-23 的 metric_date**（当日 ETL 尚未落库，MAX(metric_date)=09-23）⇒ 两封早报同值属 **ETL 时点**，且卡片已用「功能分类{metric_date}」披露数据日期。**不改**。
 
 ### 轧空标定判据「跨度需求 + 聚合方式」（工单 SQUEEZE-SPAN-001，2026-09-24，本次提交）
 

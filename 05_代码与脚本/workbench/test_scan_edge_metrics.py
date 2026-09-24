@@ -174,21 +174,28 @@ check(be.bucket_of("oi_chg", 0.5) == "<1", "OI 桶 <1（含 0 附近的小变动
 check(be.bucket_of("vol_ratio", None) is None, "缺值 → None（不进任何桶）")
 
 print("\n【P1】行情环境 `classify_regime`")
-check(be.classify_regime(6.49, 0.44) == "trend", "09-18 实测（振幅 6.49%/占比 44%）→ trend",
+check(be.classify_regime(6.49, 0.44) == "trend", "振幅 6.49%/占比 44% → trend（趋势分支）",
       f"got={be.classify_regime(6.49, 0.44)}")
 check(be.classify_regime(2.71, 0.16) == "range", "09-22 实测（振幅 2.71%/占比 16%）→ range",
       f"got={be.classify_regime(2.71, 0.16)}")
-check(be.classify_regime(1.01, 0.0) == "range", "09-23 实测（振幅 1.01%/占比 0%）→ range",
+check(be.classify_regime(1.01, 0.0) == "range", "低振幅且小时波动占比低 → range（range 分支）",
       f"got={be.classify_regime(1.01, 0.0)}")
-check(be.classify_regime(4.0, 0.20) == "mixed", "高振幅但小时波动占比低 → mixed（不硬判）",
+check(be.classify_regime(4.0966, 0.1667, -2.786) == "trend",
+      "09-23 实测（振幅 4.10%/占比 16.7%/BTC −2.79%）→ trend（单边涨跌分支，"
+      "旧判据两分支都不命中会落成 mixed）",
+      f"got={be.classify_regime(4.0966, 0.1667, -2.786)}")
+check(be.classify_regime(5.0, 0.10, 0.3) == "mixed",
+      "高振幅、占比低、且日涨跌 <2% → mixed（不因振幅单独硬判 trend）",
+      f"got={be.classify_regime(5.0, 0.10, 0.3)}")
+check(be.classify_regime(4.0, 0.20) == "mixed", "高振幅但日涨跌未知 → mixed（不硬判）",
       f"got={be.classify_regime(4.0, 0.20)}")
 check(be.classify_regime(None, None) == "mixed", "缺行情数据 → mixed")
 
 print("\n【P1】失配判定 `decide`（规则 A~E）")
 _base = dict(roll3_alerts_avg=50, prev7_alerts_avg=30, roll3_win_1h=0.40, roll3_be_1h=0.45,
              roll3_pf_1h=0.85, regime_label="mixed", alerts_n=50, edge_buckets=[],
-             tf15_prev_edge=False, btc_win_24h=0.60, win_24h=0.60,
-             excess_avg_24h=1.0, sample_ready=True)
+             tf15_bad=False, tf15_prev_bad=False, btc_win_24h=0.60, win_24h=0.60,
+             be_24h=0.45, n_24h=30, excess_avg_24h=1.0, sample_ready=True)
 flag, rules, sev = be.decide(**_base)
 check(flag and "A" in rules and sev == "high",
       "A：告警量 50 > 前 7 日均 30×1.5 且滚动胜率 < 平衡线 → HIGH",
@@ -202,44 +209,67 @@ check("B" in r3, "B：横盘 + 告警不减 + PF<1 → 触发", f"got={r3}")
 f4, r4, _ = be.decide(**{**_base, "roll3_alerts_avg": 30,
                          "edge_buckets": [{"dim": "vol_ratio", "bucket": "<2.5",
                                            "win_1h": 0.2, "share": 0.4}]})
-check("C" in r4 and "D" not in r4, "C：有边缘桶；15m 非边缘则不触发 D", f"got={r4}")
-f5, r5, _ = be.decide(**{**_base, "roll3_alerts_avg": 30, "tf15_prev_edge": True,
+check("C" in r4 and "D" not in r4, "C：有边缘桶；15m 非负期望则不触发 D", f"got={r4}")
+f5, r5, _ = be.decide(**{**_base, "roll3_alerts_avg": 30,
+                         "tf15_bad": True, "tf15_prev_bad": True,
                          "edge_buckets": [{"dim": "timeframe", "bucket": "15m",
-                                           "win_1h": 0.28, "share": 0.3}]})
-check("D" in r5, "D：15m 当日+前一日均为边缘桶 → 连续 2 日触发", f"got={r5}")
+                                           "win_1h": 0.28, "share": 0.19}]})
+check("D" in r5, "D：15m 当日+前一日均自身负期望 → 连续 2 日触发（占比 19%<20% 仍触发）",
+      f"got={r5}")
+f5b, r5b, _ = be.decide(**{**_base, "roll3_alerts_avg": 30,
+                           "tf15_bad": True, "tf15_prev_bad": False})
+check("D" not in r5b, "D：仅当日负期望、前一日不坏 → 不触发（要求连续 2 日）", f"got={r5b}")
 f6, r6, _ = be.decide(**{**_base, "roll3_alerts_avg": 30, "btc_win_24h": 0.62,
                          "win_24h": 0.60, "excess_avg_24h": 0.2})
 check("E" in r6 and _ == "watch", "E：T+24h 胜率≈BTC 且超额<0.5% ⇒ 纯 beta → WATCH",
       f"got={r6}")
+# 09-23 真值负向回归：胜率远低于平衡线、超额 −3.24pp、BTC 同向胜率 0 ⇒ 必须**不**触发 E
+# （旧判据只看 btc_win−win 与 |excess|，会输出「正期望来自 beta」，与事实相反）
+f6b, r6b, _ = be.decide(**{**_base, "roll3_alerts_avg": 30, "win_24h": 0.20, "be_24h": 0.4926,
+                           "btc_win_24h": 0.0, "excess_avg_24h": -3.24})
+check("E" not in r6b, "E：T+24h 负期望（胜率 20% < 平衡线 49.3%）→ 不得报「正期望来自 beta」",
+      f"got={r6b}")
+f6c, r6c, _ = be.decide(**{**_base, "roll3_alerts_avg": 30, "win_24h": 0.60, "be_24h": 0.45,
+                           "btc_win_24h": 0.62, "excess_avg_24h": 0.2, "n_24h": 4})
+check("E" not in r6c, "E：T+24h 成熟样本 n=4 < 10 → 不判定", f"got={r6c}")
 f7, r7, s7 = be.decide(**{**_base, "sample_ready": False})
 check(not f7 and r7 == [] and s7 == "ok",
       "样本未达门槛 → 只展示不判定（n<10 时不得报警）", f"got={r7}/{s7}")
 
 print("\n【P1】结论文案 `build_conclusion`")
 con = be.build_conclusion(severity="ok", rules=[], alerts_n=20, prev7_alerts_avg=25,
+                          prev7_days_n=7,
                           regime_label="trend", btc_amp_pct=6.0, gt05_ratio=0.5,
                           roll3_win_1h=0.55, roll3_be_1h=0.45, roll3_pf_1h=1.3,
                           edge_buckets=[])
 check("未见阈值-行情失配" in con, "无规则 → 明确输出「未见失配」（不空转）", f"got={con}")
 con2 = be.build_conclusion(severity="high", rules=["A", "B"], alerts_n=73,
-                           prev7_alerts_avg=30, regime_label="range", btc_amp_pct=2.71,
+                           prev7_alerts_avg=30, prev7_days_n=5, regime_label="range",
+                           btc_amp_pct=2.71,
                            gt05_ratio=0.167, roll3_win_1h=0.391, roll3_be_1h=0.43,
                            roll3_pf_1h=0.85,
                            edge_buckets=[{"dim": "vol_ratio", "bucket": "<2.5",
                                           "win_1h": 0.2, "share": 0.4}])
 check("规则 A/B" in con2 and "vol_ratio=<2.5" in con2 and "2.71" in con2,
       "有规则 → 列出规则号 + 行情 + 边缘桶坐标（可直接定位阈值）", f"got={con2}")
+check("最近 5 个有告警日均值" in con2,
+      "异动倍数口径写明「有告警日」分母（0 告警日不计入，避免倍数虚高）", f"got={con2}")
 
 print("\n【P1】邮件主题 `build_subject`")
 try:
     import send_scan_edge_report as se
 
     sub = se.build_subject({"report_date": date(2026, 9, 22), "severity": "high",
-                            "win_1h": 0.37, "pf_1h": 0.84})
-    check(sub == "【告警质量日报】09-22 T+1h 胜率 37.0% · PF 0.84 · HIGH",
-          "主题含日期/胜率/PF/判定等级（可被邮件客户端检索）", f"got={sub}")
+                            "roll3_win_1h": 0.37, "roll3_pf_1h": 0.84})
+    check(sub == "【告警质量日报】09-22 3日滚动 T+1h 胜率 37.0% · PF 0.84 · HIGH",
+          "主题用 3 日滚动口径（与 severity 同源），并含日期/PF/判定等级",
+          f"got={sub}")
+    check("3日滚动" in se.build_subject({"report_date": date(2026, 9, 23), "severity": "high",
+                                        "win_1h": 0.591, "pf_1h": 1.10,
+                                        "roll3_win_1h": 0.445, "roll3_pf_1h": 0.96}),
+          "09-23 场景：当日 59.1%/PF 1.10 不得顶替滚动值 44.5%/PF 0.96（否则主题误导）")
     check(se.build_subject({"report_date": date(2026, 9, 22), "severity": "ok",
-                            "win_1h": None, "pf_1h": None}).endswith("OK"),
+                            "roll3_win_1h": None, "roll3_pf_1h": None}).endswith("OK"),
           "指标缺失时主题不崩（渲染为 -）")
 except Exception as exc:  # noqa: BLE001
     check(False, "send_scan_edge_report 可导入且主题可渲染", f"{type(exc).__name__}: {exc}")
@@ -260,15 +290,18 @@ try:
             cur.execute("SELECT kline_iv, COUNT(*) AS n FROM biz.scan_signal_outcome "
                         "GROUP BY kline_iv ORDER BY n DESC")
             iv_rows = cur.fetchall()
+            # 留 90 分钟宽限：结算任务 `scan_outcome_settle` 是整点 5 分（`5 * * * *`）跑，
+            # 刚过 24h 的行在本批之前就已结算完，天然最多等 65 分钟。不留宽限会把
+            # 「还没轮到下一批」误判成「结算停摆」（实测 10 行全部在 8~23 分钟前才过 24h）。
             cur.execute("SELECT signal_id, alerted_at, outcome_state, last_window, p_dir "
                         "FROM biz.scan_signal_outcome "
-                        "WHERE alerted_at + INTERVAL '24 hours' <= NOW()")
+                        "WHERE alerted_at + INTERVAL '24 hours' <= NOW() - INTERVAL '90 minutes'")
             due = cur.fetchall()
             cur.execute("SELECT report_date, alerts_n, matured_n, pending_n, sample_ready, "
                         "       mismatch_flag, mismatch_rules, severity FROM biz.scan_edge_daily "
                         "ORDER BY report_date")
             dailies = cur.fetchall()
-            cur.execute("SELECT report_date, dim, bucket, n, win_1h, be_1h, share, edge "
+            cur.execute("SELECT report_date, dim, bucket, n, win_1h, be_1h, pf_1h, share, edge "
                         "FROM biz.scan_edge_bucket WHERE edge")
             edge_rows = cur.fetchall()
             cur.execute("""
@@ -294,7 +327,7 @@ if total is not None:
     bad_state = [(r["signal_id"], r["outcome_state"], r["last_window"]) for r in due
                  if r["p_dir"] in ("up", "down") and r["outcome_state"] == "pending"]
     check(not bad_state,
-          "已过 24h 且方向已知的行不得仍为 pending（结算不滞后）",
+          "已过 24h 超过 90 分钟且方向已知的行不得仍为 pending（结算未停摆）",
           f"滞后行：{bad_state[:5]}")
 
     bad_lw = [(r["signal_id"], r["last_window"]) for r in due
@@ -327,6 +360,21 @@ if total is not None:
                         and r["share"] is not None and float(r["share"]) >= 0.2)]
     check(not bad_edge, "边缘桶必须满足 n≥5 且 胜率<平衡线 且 占比≥20%",
           f"越界：{bad_edge[:5]}")
+    # 上限开口桶（">6" / ">8"）：收紧阈值裁不到低档以外的桶 ⇒ 不得出现在「可收紧」名单里
+    top_edge = [(r["report_date"], r["dim"], r["bucket"]) for r in edge_rows
+                if r["bucket"] in (">6", ">8")]
+    check(not top_edge, "边缘桶不得含上限开口桶（收紧阈值永远裁不到它们，建议不可操作）",
+          f"越界：{top_edge[:5]}")
+    # 同义桶去重：同一报告日不得有两个边缘桶来自同一批样本（n/胜率/PF 指纹完全相同）
+    seen: dict = {}
+    dups = []
+    for r in edge_rows:
+        sig = (r["report_date"], r["n"], r["win_1h"], r["pf_1h"], r["share"])
+        if sig in seen:
+            dups.append((r["report_date"], seen[sig], (r["dim"], r["bucket"])))
+        seen[sig] = (r["dim"], r["bucket"])
+    check(not dups, "同一批样本不得被两个维度重复报为边缘桶（同义桶已去重）",
+          f"重复：{dups[:5]}")
     print(f"    （日报 {len(dailies)} 天，边缘桶 {len(edge_rows)} 个）")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败 / {skipped} 跳过")

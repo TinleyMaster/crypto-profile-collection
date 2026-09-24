@@ -55,6 +55,17 @@ MIN_SAMPLE = 10            # sample_ready 门槛
 MIN_BUCKET_N = 5           # 桶最小样本
 EDGE_BUCKET_SHARE = 0.2    # 边缘桶最小占比
 ALERT_SURGE_X = 1.5        # 告警量异动倍数（规则 A）
+MIN_ALERT_DAYS = 3         # 规则 A/B 分母「有告警日」的最少天数（不足则不做该判定）
+# 上限开口桶（">6" / ">8"）：收紧阈值只会裁掉低档，永远裁不到它们 ⇒ 不列入「收紧阈值」建议
+OPEN_TOP_BUCKETS = {("vol_ratio", ">6"), ("price_chg", ">8"), ("oi_chg", ">6")}
+# 同一批样本被多维度重复报出时的保留优先级（越靠前越具体、越可操作）
+DIM_DEDUPE_ORDER = ("scenario", "pool", "timeframe", "vol_ratio", "price_chg", "oi_chg",
+                    "confidence", "regime")
+
+
+def _dim_rank(dim: str) -> int:
+    """维度去重优先级（见 DIM_DEDUPE_ORDER）。"""
+    return DIM_DEDUPE_ORDER.index(dim) if dim in DIM_DEDUPE_ORDER else len(DIM_DEDUPE_ORDER)
 
 # 分桶定义（与 scan_daemon 阈值常量对齐，便于直接读出「阈值该往哪挪」）
 BUCKETS: dict[str, list[tuple[float | None, str]]] = {
@@ -98,15 +109,24 @@ def bucket_of(dim: str, value) -> str | None:
     return BUCKETS[dim][-1][1]
 
 
-def classify_regime(btc_amp_pct: float | None, gt05_ratio: float | None) -> str:
+def classify_regime(btc_amp_pct: float | None, gt05_ratio: float | None,
+                    btc_chg_pct: float | None = None) -> str:
     """行情环境：trend（趋势）/ range（横盘低波动）/ mixed。
 
-    判据来自实测：09-18（振幅 6.49%、占比 44%）与 09-21（7.21%、59%）为趋势日；
-    09-22（2.71%、16%）、09-23（1.01%、0%）为横盘低波动日。
+    判据是「当日是否有方向性」，三个分支互斥且覆盖全部情形：
+
+    * `trend`：振幅 ≥4% 且（小时|涨跌|>0.5% 占比 ≥35% **或** |日涨跌| ≥2%）。
+      后一个分支覆盖**单边涨跌日**：分钟级持续单向、小时级回撤少 ⇒ 振幅够大但
+      「小时|涨跌|>0.5% 占比」偏低。2026-09-23（振幅 4.10%、占比 16.7%、BTC −2.79%）
+      即此类；旧判据两个分支都不命中，落成 mixed，使只在 range 生效的规则 B
+      永远拿不到这类行情。
+    * `range`：振幅 <3% 且占比 <20%；
+    * 其余 → `mixed`（含缺行情数据的兜底）。
     """
     if btc_amp_pct is None or gt05_ratio is None:
         return "mixed"
-    if btc_amp_pct >= 4.0 and gt05_ratio >= 0.35:
+    if btc_amp_pct >= 4.0 and (gt05_ratio >= 0.35
+                               or (btc_chg_pct is not None and abs(btc_chg_pct) >= 2.0)):
         return "trend"
     if btc_amp_pct < 3.0 and gt05_ratio < 0.20:
         return "range"
@@ -114,8 +134,8 @@ def classify_regime(btc_amp_pct: float | None, gt05_ratio: float | None) -> str:
 
 
 def decide(*, roll3_alerts_avg, prev7_alerts_avg, roll3_win_1h, roll3_be_1h, roll3_pf_1h,
-           regime_label, alerts_n, edge_buckets, tf15_prev_edge, btc_win_24h, win_24h,
-           excess_avg_24h, sample_ready: bool) -> tuple[bool, list[str], str]:
+           regime_label, alerts_n, edge_buckets, tf15_bad, tf15_prev_bad, btc_win_24h,
+           win_24h, be_24h, n_24h, excess_avg_24h, sample_ready: bool) -> tuple[bool, list[str], str]:
     """失配判定规则 A~E（§5.5）。样本不成熟时**只展示不报警**。"""
     if not sample_ready:
         return False, [], "ok"
@@ -134,22 +154,29 @@ def decide(*, roll3_alerts_avg, prev7_alerts_avg, roll3_win_1h, roll3_be_1h, rol
     # C：边缘桶（样本足、负期望、占比高）
     if edge_buckets:
         rules.append("C")
-    # D：15m 通道连续 2 日负期望
-    if any(b["dim"] == "timeframe" and b["bucket"] == "15m" for b in edge_buckets) \
-            and tf15_prev_edge:
+    # D：15m 通道连续 2 日负期望。
+    #    直接看 15m 桶**自身**是否负期望，不依赖「边缘桶」的占比门槛 ——
+    #    占比门槛回答的是「值不值得收紧阈值」，与「该通道是否连续失效」无关；
+    #    2026-09-23 的 15m 桶（胜率 20.0%、PF 0.34）占比 19.9%，仅差 0.1pp
+    #    未入选边缘桶，旧写法会让规则 D 整体漏报。
+    if tf15_bad and tf15_prev_bad:
         rules.append("D")
-    # E：中长窗口正期望主要来自 beta
-    if (btc_win_24h is not None and win_24h is not None
-            and btc_win_24h - win_24h < 0.10
-            and excess_avg_24h is not None and excess_avg_24h < 0.5):
+    # E：中长窗口**正期望**，但主要来自 beta（BTC 同向同样赚钱、超额接近 0）。
+    #    ⚠ 必须先确认 win_24h > be_24h：否则「信号远差于 BTC」（如 2026-09-23 的
+    #    win_24h 20.0% ≪ be_24h 49.3%、超额 −3.24pp）会被误读成「正期望来自 beta」，
+    #    结论与实际方向相反。n_24h < MIN_SAMPLE 时样本不足以判断，不触发。
+    if (n_24h is not None and n_24h >= MIN_SAMPLE
+            and win_24h is not None and be_24h is not None and win_24h > be_24h
+            and btc_win_24h is not None and btc_win_24h > 0.5
+            and excess_avg_24h is not None and abs(excess_avg_24h) < 0.5):
         rules.append("E")
     severity = "high" if ("A" in rules or "B" in rules) else ("watch" if rules else "ok")
     return bool(rules), rules, severity
 
 
-def build_conclusion(*, severity, rules, alerts_n, prev7_alerts_avg, regime_label,
-                     btc_amp_pct, gt05_ratio, roll3_win_1h, roll3_be_1h, roll3_pf_1h,
-                     edge_buckets) -> str:
+def build_conclusion(*, severity, rules, alerts_n, prev7_alerts_avg, prev7_days_n,
+                     regime_label, btc_amp_pct, gt05_ratio, roll3_win_1h, roll3_be_1h,
+                     roll3_pf_1h, edge_buckets) -> str:
     if severity == "ok" and not rules:
         return (f"未见阈值-行情失配：当日 {alerts_n} 条告警，3 日滚动 T+1h 胜率 "
                 f"{_pct(roll3_win_1h)} ≥ 盈亏平衡线 {_pct(roll3_be_1h)}。")
@@ -158,8 +185,8 @@ def build_conclusion(*, severity, rules, alerts_n, prev7_alerts_avg, regime_labe
         parts.append(f"行情横盘低波动（BTC 振幅 {btc_amp_pct:.2f}%、"
                      f"小时|涨跌|>0.5% 占比 {_pct(gt05_ratio)}）")
     if prev7_alerts_avg:
-        parts.append(f"告警 {alerts_n} 条 = 前 7 日均值 {prev7_alerts_avg:.1f} 的 "
-                     f"{alerts_n / prev7_alerts_avg:.1f} 倍")
+        parts.append(f"告警 {alerts_n} 条 = 最近 {prev7_days_n} 个有告警日均值 "
+                     f"{prev7_alerts_avg:.1f} 的 {alerts_n / prev7_alerts_avg:.1f} 倍")
     parts.append(f"3 日滚动 T+1h 胜率 {_pct(roll3_win_1h)} "
                  f"{'<' if (roll3_win_1h or 0) < (roll3_be_1h or 1) else '≥'} "
                  f"盈亏平衡线 {_pct(roll3_be_1h)}、PF {_fmt(roll3_pf_1h, 2)}")
@@ -262,8 +289,12 @@ def compute(conn, d: date) -> tuple[dict, list[dict]]:
     rows = load_samples(conn, d)
     env = btc_day_metrics(conn, d)
     env.update(macro_env(conn, d))
-    regime = classify_regime(env.get("btc_amp_pct"), env.get("btc_1h_gt05_ratio"))
+    regime = classify_regime(env.get("btc_amp_pct"), env.get("btc_1h_gt05_ratio"),
+                             env.get("btc_chg_pct"))
 
+    # matured_n / pending_n 是**T+1h 窗口**口径（最短窗口，用于 sample_ready 闸门与样本账）。
+    # 长窗口（T+12h/T+24h）到期数一定 ≤ 它，展示时必须逐窗口标注，否则读者会把
+    # 「成熟 176 / 未到期 0」误读成「四个窗口都有 176 条」。
     n_1h = sum(1 for r in rows if r["aligned_ret_1h"] is not None)
     matured_n = n_1h
     pending_n = len(rows) - n_1h
@@ -320,8 +351,30 @@ def compute(conn, d: date) -> tuple[dict, list[dict]]:
         if dim_counts[b["dim"]] < 2:
             b["edge"] = False
 
+    # 上限开口桶不是「可收紧的边」：收紧阈值只会裁掉低档，永远裁不到 ">6" / ">8" 这类桶，
+    # 把它们列进「收紧这些阈值的优先级最高」是给不出去的建议。
+    for b in buckets:
+        if (b["dim"], b["bucket"]) in OPEN_TOP_BUCKETS:
+            b["edge"] = False
+
     edge_buckets = [b for b in buckets if b["edge"]]
-    edge_buckets.sort(key=lambda b: -(b["share"] or 0))
+    edge_buckets.sort(key=lambda b: (-(b["share"] or 0), _dim_rank(b["dim"])))
+    # 同义桶去重：同一批样本被两个维度重复报出（如 scenario=S1 ⊂ pool=main，n/胜率/PF/占比
+    # 完全相同），把 1 个问题渲染成 2 个。按「维度优先级 + 四项统计量指纹」只保留一个，
+    # 并把被丢弃者回写为 edge=False，保证落库与邮件一致。
+    _seen_sig: set = set()
+    _uniq: list[dict] = []
+    for b in edge_buckets:
+        sig = (b["n"], b["win_1h"], b["pf_1h"], b["share"])
+        if sig in _seen_sig:
+            continue
+        _seen_sig.add(sig)
+        _uniq.append(b)
+    _kept = {id(b) for b in _uniq}
+    for b in buckets:
+        if b["edge"] and id(b) not in _kept:
+            b["edge"] = False
+    edge_buckets = _uniq
     top_share = next((b for b in edge_buckets
                       if b["dim"] in ("timeframe", "scenario", "vol_ratio")), None)
 
@@ -339,25 +392,38 @@ def compute(conn, d: date) -> tuple[dict, list[dict]]:
     day["edge_buckets"] = edge_buckets
     day["top_share_bucket"] = top_share
 
-    prev7 = [x["alerts_n"] for x in prev]
-    prev7_avg = statistics.fmean(prev7) if prev7 else None
-    # 规则 D：15m 通道是否**前一日**已是边缘桶（连续 2 日）
+    # 规则 A/B 的分母：最近 7 个**有告警**的日子。
+    # 0 告警日（daemon 无输出，如 09-19/09-20）不是「没机会」，计入会把均值压低、
+    # 把异动倍数放大（2026-09-23 实测：含 0 值日均值 23.7 ⇒ 7.4 倍；剔除后 35.5 ⇒ 5.0 倍）。
+    # 有效日不足 MIN_ALERT_DAYS 时返回 None ⇒ 规则 A/B 不做判定（宁可不报，不可虚报）。
+    prev7_raw = prev_daily(conn, d, 14)
+    prev7 = [x["alerts_n"] for x in prev7_raw if x["alerts_n"]][-7:]
+    prev7_avg = statistics.fmean(prev7) if len(prev7) >= MIN_ALERT_DAYS else None
+
+    # 规则 D：15m 通道当日 / 前一日是否**自身负期望**（不依赖「边缘桶」的占比门槛）
+    tf15 = next((b for b in buckets
+                 if b["dim"] == "timeframe" and b["bucket"] == "15m"), None)
+    tf15_bad = bool(tf15 and tf15["n"] >= MIN_BUCKET_N and tf15["win_1h"] is not None
+                    and tf15["be_1h"] is not None and tf15["win_1h"] < tf15["be_1h"])
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM biz.scan_edge_bucket WHERE report_date = %s "
-                    "AND dim='timeframe' AND bucket='15m' AND edge", (d - timedelta(days=1),))
-        tf15_prev_edge = cur.fetchone() is not None
+        cur.execute("SELECT n, win_1h, be_1h FROM biz.scan_edge_bucket WHERE report_date = %s "
+                    "AND dim='timeframe' AND bucket='15m'", (d - timedelta(days=1),))
+        r15 = cur.fetchone()
+    tf15_prev_bad = bool(r15 and r15[0] >= MIN_BUCKET_N and r15[1] is not None
+                         and r15[2] is not None and float(r15[1]) < float(r15[2]))
 
     flag, rules, severity = decide(
         roll3_alerts_avg=day["roll3_alerts_avg"], prev7_alerts_avg=prev7_avg,
         roll3_win_1h=day["roll3_win_1h"], roll3_be_1h=day["roll3_be_1h"],
         roll3_pf_1h=day["roll3_pf_1h"], regime_label=regime, alerts_n=len(rows),
-        edge_buckets=edge_buckets, tf15_prev_edge=tf15_prev_edge,
-        btc_win_24h=day["btc_win_24h"], win_24h=day["win_24h"],
-        excess_avg_24h=day["excess_avg_24h"], sample_ready=sample_ready)
+        edge_buckets=edge_buckets, tf15_bad=tf15_bad, tf15_prev_bad=tf15_prev_bad,
+        btc_win_24h=day["btc_win_24h"], win_24h=day["win_24h"], be_24h=day["be_24h"],
+        n_24h=day["_n_by_window"].get(24), excess_avg_24h=day["excess_avg_24h"],
+        sample_ready=sample_ready)
     day["mismatch_flag"], day["mismatch_rules"], day["severity"] = flag, rules, severity
     day["conclusion"] = build_conclusion(
         severity=severity, rules=rules, alerts_n=len(rows), prev7_alerts_avg=prev7_avg,
-        regime_label=regime, btc_amp_pct=env.get("btc_amp_pct"),
+        prev7_days_n=len(prev7), regime_label=regime, btc_amp_pct=env.get("btc_amp_pct"),
         gt05_ratio=env.get("btc_1h_gt05_ratio"), roll3_win_1h=day["roll3_win_1h"],
         roll3_be_1h=day["roll3_be_1h"], roll3_pf_1h=day["roll3_pf_1h"],
         edge_buckets=edge_buckets)
@@ -427,7 +493,7 @@ def save(conn, day: dict, buckets: list[dict]) -> None:
 def print_report(day: dict, buckets: list[dict]) -> None:
     d = day["report_date"]
     print(f"\n=== 告警质量日报 {d} · {day['severity'].upper()} · "
-          f"{day['alerts_n']} 条（成熟 {day['matured_n']} / 未到期 {day['pending_n']}）===")
+          f"{day['alerts_n']} 条（T+1h 成熟 {day['matured_n']} / 未到期 {day['pending_n']}）===")
     print(f"  regime={day['regime_label']}  BTC 涨跌 {_fmt(day['btc_chg_pct'])}%  "
           f"振幅 {_fmt(day['btc_amp_pct'])}%  >0.5%占比 {_pct(day['btc_1h_gt05_ratio'])}  "
           f"FGI {day['fgi']}")
@@ -440,7 +506,8 @@ def print_report(day: dict, buckets: list[dict]) -> None:
     print(f"  近 3 日滚动：告警均 {_fmt(day['roll3_alerts_avg'], 1)} 条 · "
           f"T+1h 胜率 {_pct(day['roll3_win_1h'])} / 平衡线 {_pct(day['roll3_be_1h'])} / "
           f"PF {_fmt(day['roll3_pf_1h'])}")
-    print(f"  beta 对照 T+24h：信号 {_pct(day['win_24h'])} / BTC 同向 {_pct(day['btc_win_24h'])} "
+    print(f"  beta 对照 T+24h(n={day['_n_by_window'].get(24, 0)})："
+          f"信号 {_pct(day['win_24h'])} / BTC 同向 {_pct(day['btc_win_24h'])} "
           f"· 超额 {_fmt(day['excess_avg_24h'])}%")
     if buckets:
         print(f"  ── 分桶（{len(buckets)} 个，边缘 {sum(1 for b in buckets if b['edge'])} 个）──")

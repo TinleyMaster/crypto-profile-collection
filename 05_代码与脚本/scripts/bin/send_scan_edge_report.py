@@ -40,6 +40,7 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 WINDOWS = (1, 4, 12, 24)
+SH = timezone(timedelta(hours=8))   # 报告口径与展示时间统一用北京时间（容器 TZ 为 UTC）
 SEVERITY_STYLE = {
     "ok":    ("#27ae60", "正常"),
     "watch": ("#e67e22", "观察"),
@@ -96,10 +97,18 @@ def _signed(v, nd=2, suffix="%") -> str:
 
 
 def build_subject(day: dict) -> str:
-    """主题：`【告警质量日报】MM-DD T+1h 胜率 xx% · PF x.xx · HIGH`。"""
+    """主题：`【告警质量日报】MM-DD 3日滚动 T+1h 胜率 xx% · PF x.xx · HIGH`。
+
+    用 **3 日滚动**口径而非当日值：判定的 severity 就来自滚动口径，两者同源才不自相矛盾。
+    当日值噪声极大且受样本构成影响（2026-09-23：当日混合口径 59.1% / PF 1.10，
+    但其中 112 条是 accumulation-BRK 空头、main 池仅 35.9%，滚动口径 44.5% / PF 0.96
+    ⇒ 曾经的主题写成「59.1% · PF 1.10 · HIGH」，收件人只看主题会以为系统健康）。
+    当日值仍有完整展示，见正文多窗口表与分层表。
+    """
     sev = (day.get("severity") or "ok").upper()
     return (f"【告警质量日报】{day['report_date']:%m-%d} "
-            f"T+1h 胜率 {_pct(day.get('win_1h'))} · PF {_num(day.get('pf_1h'))} · {sev}")
+            f"3日滚动 T+1h 胜率 {_pct(day.get('roll3_win_1h'))} · "
+            f"PF {_num(day.get('roll3_pf_1h'))} · {sev}")
 
 
 def render_html(day: dict, buckets: list[dict], win_n: dict, history: list[dict]) -> str:
@@ -127,8 +136,32 @@ def render_html(day: dict, buckets: list[dict], win_n: dict, history: list[dict]
     </table>
     <p style="margin:6px 0 0;color:#777;font-size:12px">
       红色 = 胜率低于盈亏平衡线（期望为负）。净收益已扣 0.1% 双边费；
-      「样本」为该窗口已到期条数，未到期窗口**不计入**（避免「还没跌」高估胜率）。
+      「样本」为<b>该窗口</b>已到期条数（各窗口不同，长窗口样本更少）；
+      未到期样本不计入该窗口，避免把未实现当成已实现。
     </p>"""
+
+    # ── 1.5 分层（池口径）：整体值是多策略混合，必须分开看 ──
+    pool_rows = [b for b in buckets if b["dim"] == "pool"]
+    pool_rows.sort(key=lambda b: -(b["share"] or 0))
+    pool_html = ""
+    if len(pool_rows) > 1:
+        ptrs = "".join(
+            f"<tr><td><b>{b['bucket']}</b></td><td>{b['n']}</td>"
+            f"<td>{_pct(b['win_1h'])}</td><td>{_pct(b['be_1h'])}</td>"
+            f"<td>{_num(b['pf_1h'])}</td><td>{_pct(b['share'])}</td></tr>"
+            for b in pool_rows)
+        pool_html = f"""
+        <p style="margin:14px 0 4px"><b>分层（池口径，T+1h）</b></p>
+        <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px">
+          <tr style="background:#f5f5f5"><th>池</th><th>样本</th><th>胜率</th>
+              <th>盈亏平衡线</th><th>PF</th><th>占比</th></tr>
+          {ptrs}
+        </table>
+        <p style="margin:6px 0 0;color:#777;font-size:12px">
+          多窗口表的「整体」= 各池加权平均，而池间期望可正负相反（如单边下跌日：main 做多亏损、
+          accumulation-BRK 做空盈利）⇒「整体为正」不代表各池都为正。
+          实际失配的是哪个池，以下方「边缘桶」表为准。
+        </p>"""
 
     # ── 2. 行情环境 ──
     regime = REGIME_TEXT.get(day.get("regime_label"), day.get("regime_label") or "-")
@@ -144,7 +177,8 @@ def render_html(day: dict, buckets: list[dict], win_n: dict, history: list[dict]
     roll = (f"告警均 {_num(day.get('roll3_alerts_avg'), 1)} 条 · "
             f"T+1h 胜率 {_pct(day.get('roll3_win_1h'))} / 平衡线 {_pct(day.get('roll3_be_1h'))} / "
             f"PF {_num(day.get('roll3_pf_1h'))}")
-    beta = (f"信号 T+24h 胜率 {_pct(day.get('win_24h'))} vs BTC 同方向 "
+    beta = (f"信号 T+24h 胜率 {_pct(day.get('win_24h'))}"
+            f"（n={win_n.get(24, 0)}）vs BTC 同方向 "
             f"{_pct(day.get('btc_win_24h'))} · 平均超额 {_signed(day.get('excess_avg_24h'))}")
     roll_tbl = f"""
     <p style="margin:14px 0 4px"><b>近 3 日滚动</b>（失配判定口径，抗单日小样本噪声）</p>
@@ -161,12 +195,18 @@ def render_html(day: dict, buckets: list[dict], win_n: dict, history: list[dict]
             f"<td>{_pct(b['be_1h'])}</td><td>{_num(b['pf_1h'])}</td>"
             f"<td>{_pct(b['share'])}</td></tr>" for b in edges)
         edge_html = f"""
-        <p style="margin:14px 0 4px"><b>⚠ 边缘桶</b>（样本≥5、负期望、占比≥20%：收紧这些阈值的优先级最高）</p>
+        <p style="margin:14px 0 4px"><b>⚠ 边缘桶</b>（样本≥5、负期望、占比≥20%）</p>
         <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px">
           <tr style="background:#fdf2f2"><th>维度</th><th>桶</th><th>样本</th><th>胜率</th>
-              <th>平衡线</th><th>PF</th><th>占比</th></tr>
+              <th>盈亏平衡线</th><th>PF</th><th>占比</th></tr>
           {etrs}
-        </table>"""
+        </table>
+        <p style="margin:6px 0 0;color:#777;font-size:12px">
+          胜率/平衡线/PF 均为 <b>T+1h</b> 口径。已剔除两类不可操作项：
+          上限开口桶（量比&gt;6、涨幅&gt;8% 等——收紧阈值只会裁掉低档，裁不到它们）与
+          同义桶（同一批样本被两个维度重复报出，如 scenario=S1 与 pool=main 完全共线）。
+          真正可收紧的是「低档边」桶（如 vol_ratio&lt;2.5），出现时会列在上表。
+        </p>"""
     else:
         edge_html = ('<p style="margin:14px 0 0;color:#777;font-size:13px">'
                      '无边缘桶（未发现占比≥20% 且负期望的阈值区间）。</p>')
@@ -203,15 +243,18 @@ def render_html(day: dict, buckets: list[dict], win_n: dict, history: list[dict]
     ready = day.get("sample_ready")
     warn = "" if ready else (
         f'<p style="margin:10px 0 0;color:#c0392b;font-size:12px">'
-        f'样本未达门槛（成熟 {day.get("matured_n")} 条 &lt; 10），本期只展示不判定。</p>')
+        f'样本未达门槛（T+1h 成熟 {day.get("matured_n")} 条 &lt; 10），本期只展示不判定。</p>')
 
-    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    # 生成时间固定北京时间：容器 TZ=UTC，用 astimezone() 会让同一字段在容器/本机
+    # 各自渲染成不同时刻（00:20 vs 11:45），且收件人无从判断时区。
+    now = datetime.now(SH).strftime("%Y-%m-%d %H:%M")
+    n_txt = " / ".join(f"T+{w}h {win_n.get(w, 0)}" for w in WINDOWS)
     return f"""<html><body style="font-family:Arial,'Microsoft YaHei',sans-serif;color:#222">
       <h2 style="margin:0 0 4px">告警质量日报 · {d}</h2>
       <p style="margin:0 0 12px;color:#666;font-size:13px">
-        当日告警 {day.get('alerts_n')} 条（成熟 {day.get('matured_n')} / 未到期 {day.get('pending_n')}）
-        · 生成于 {now}</p>
-      {warn}{windows_tbl}{env_tbl}{roll_tbl}{edge_html}{hist_html}{conclusion}
+        当日告警 {day.get('alerts_n')} 条 · 各窗口已到期样本 {n_txt}
+        · 生成于 {now}（北京时间）</p>
+      {warn}{windows_tbl}{pool_html}{env_tbl}{roll_tbl}{edge_html}{hist_html}{conclusion}
       <p style="margin:14px 0 0;color:#999;font-size:12px">
         口径见 04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §5。
         本邮件为盘面数据分析参考，不构成投资建议。</p>
@@ -263,9 +306,13 @@ def main() -> int:
 
     html = render_html(day, buckets, win_n, history)
     subject = build_subject(day)
+    # 日志同时打印当日与滚动口径：主题用的是滚动值，只打当日值会让运维误以为主题算错。
     print(f"[edge] {d} · {day.get('severity', 'ok').upper()} · 告警 {day.get('alerts_n')} 条 "
-          f"· T+1h 胜率 {_pct(day.get('win_1h'))} / 平衡线 {_pct(day.get('be_1h'))} "
-          f"· PF {_num(day.get('pf_1h'))} · 边缘桶 {sum(1 for b in buckets if b['edge'])} 个")
+          f"· 当日 T+1h 胜率 {_pct(day.get('win_1h'))} / 平衡线 {_pct(day.get('be_1h'))} "
+          f"· PF {_num(day.get('pf_1h'))}"
+          f" | 3 日滚动 T+1h 胜率 {_pct(day.get('roll3_win_1h'))} / 平衡线 "
+          f"{_pct(day.get('roll3_be_1h'))} · PF {_num(day.get('roll3_pf_1h'))}"
+          f" · 边缘桶 {sum(1 for b in buckets if b['edge'])} 个")
     if args.dry_run:
         print(subject)
         print(html)

@@ -590,7 +590,8 @@ class TaskManager:
     def _reap_zombie_tasks(self) -> None:
         """收割僵尸任务，两个条件满足其一即触发：
         1. 运行时长超过 MAX_RUNTIME_HOURS（硬超时）
-        2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟）
+        2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟；
+           零日志任务同样计入，视为「无新日志」）
         """
         reaped: list[str] = []
         try:
@@ -615,6 +616,10 @@ class TaskManager:
                     reaped.extend(row[0] for row in cur.fetchall())
 
                     # 条件2：无新日志超过阈值（长任务 240min / 普通 90min）且已运行至少 10min（卡死）
+                    # COALESCE 兜底（2026-09-26）：零日志任务的 MAX(created_at) 为 NULL，
+                    # 原式 NULL < interval 恒为 NULL ⇒ 永不成立，零日志僵尸只能干等 12h 硬超时
+                    # （实况：3 个 0 日志 running 任务把同名整点任务的提交堵死）。补成 epoch
+                    # 后，零日志任务在「已运行满 10min」时即被收割。
                     cur.execute(
                         """
                         UPDATE sys.task t
@@ -626,11 +631,12 @@ class TaskManager:
                             updated_at = NOW()
                         WHERE t.status = 'running'
                           AND t.started_at < NOW() - '10 minutes'::interval
-                          AND (
-                              SELECT MAX(l.created_at)
-                              FROM sys.task_log l
-                              WHERE l.task_id = t.task_id
-                          ) < NOW() - (
+                          AND COALESCE(
+                                  (SELECT MAX(l.created_at)
+                                   FROM sys.task_log l
+                                   WHERE l.task_id = t.task_id),
+                                  'epoch'::timestamptz
+                              ) < NOW() - (
                               CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
                                    THEN %s ELSE %s END || ' minutes'
                           )::interval

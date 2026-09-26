@@ -84,12 +84,18 @@ def _last_done_ts(key: str) -> float | None:
         return None
 
 
-def _last_run_error(key: str) -> str | None:
-    """取该调度任务最近一次运行（任意状态）的 error 文本。
+def _last_run_error(key: str, within_seconds: float) -> str | None:
+    """取该调度任务**最近 within_seconds 内**最近一次运行的 error 文本。
 
     用于补跑前的安全闸：上一轮若是被硬超时（`timeout:`）或卡死（`stuck:`）
     收割的，说明任务自身跑不完，补跑大概率重蹈覆辙 —— 2026-09-21 实况：
     catalyst_run_all 补跑后空转 12h 又被收割，看护再补跑，形成恶性循环。
+
+    ⚠️ 时间窗（2026-09-26 修复）：原先取「任意历史最近一条带 error 的行」，
+    一旦某天出现过 timeout/stuck，此后即使任务连续成功多日，该旧错误行仍
+    一直命中（success 不改判据），补跑被永久挡住 —— 实况：data_sync_daily
+    命中 18 天前的 stuck 行，导致 30.8h 停滞时未自动补跑。故只让「近阈值
+    内的错误」具备拦截效力，窗口外的陈旧错误一律忽略。
     """
     try:
         with _get_db() as conn:
@@ -98,10 +104,11 @@ def _last_run_error(key: str) -> str | None:
                     """
                     SELECT error FROM sys.task
                     WHERE name LIKE %s AND error IS NOT NULL
+                      AND started_at > NOW() - make_interval(secs => %s)
                     ORDER BY started_at DESC NULLS LAST
                     LIMIT 1
                     """,
-                    (f"[调度] {key}%",),
+                    (f"[调度] {key}%", float(within_seconds)),
                 )
                 row = cur.fetchone()
         return row[0] if row and row[0] else None
@@ -198,8 +205,9 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     _last_alerted[key] = now
     hours = round(stale_for / 3600, 1) if stale_for else 0
 
-    # 补跑安全闸：上一轮被硬超时/卡死收割 ⇒ 任务自身跑不完，补跑只会再空转一轮
-    last_err = _last_run_error(key) or ""
+    # 补跑安全闸：**近阈值内**上一轮被硬超时/卡死收割 ⇒ 任务自身跑不完，
+    # 补跑只会再空转一轮（窗口外陈旧错误不拦，否则一次 stuck 永久阻塞补跑）
+    last_err = _last_run_error(key, threshold) or ""
     blocked_by = last_err if last_err.startswith(("timeout:", "stuck:")) else None
     # 近阈值内已有提交（scheduler 存活）⇒ 只告警不补跑，避免补跑恶性循环
     recent = _recent_submission(key, threshold)

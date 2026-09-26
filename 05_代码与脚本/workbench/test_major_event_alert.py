@@ -14,6 +14,8 @@
   9. 传导逻辑模块（输出层优化）：含「影响传导/预期已消化/传导节奏」、直接度规则映射、
      二阶「板块联动」仅在数据存在时渲染；不再出现内部术语「未被计入降权」；
      直接度规则复验收口：ASCII 词边界（P2-1）、大小写不敏感（P3）、承载角色不误判（P2-2）
+ 10. 价格去尾零共享函数（复验 351d2ae）：整数部分零不被误吃、阈值边界、类型兜底、
+     科学计数分支不得被 trim（指数尾零陷阱）
 
 运行: python test_major_event_alert.py
 """
@@ -199,6 +201,38 @@ check("板块联动" not in _html, "无二阶数据时不渲染「板块联动�
 check(N._fmt_price(0.4283) == "0.4283", "价格尾零：0.42830000 → 0.4283")
 check(N._fmt_price(620.5) == "620.5" and "620.5000" not in _html, "价格尾零：620.5000 → 620.5")
 check(N._fmt_price(1e-5) == "1.0000e-05", "极小价仍走科学计数（不回归 2026-09-22 P0 显示修复）")
+
+print("== 10. 价格去尾零共享函数（复验 351d2ae） ==")
+# (a) _trim_trailing_zeros 纯度：`.` 阻断 rstrip，整数部分零不被误吃
+check(N._trim_trailing_zeros("10.0000") == "10"
+      and N._trim_trailing_zeros("100.0000") == "100"
+      and N._trim_trailing_zeros("1000.0000") == "1000",
+      "去尾零不吃整数部分零：10.0000→10 / 100.0000→100 / 1000.0000→1000")
+check(N._trim_trailing_zeros("1,234,500.0") == "1,234,500"
+      and N._trim_trailing_zeros("1,234,567.0") == "1,234,567",
+      "千分位整数同样安全：1,234,500.0→1,234,500")
+check(N._trim_trailing_zeros("0.00000000") == "0"
+      and N._trim_trailing_zeros("0.00010000") == "0.0001",
+      "全零小数→0；0.00010000→0.0001")
+check(N._trim_trailing_zeros("1.0108") == "1.0108"
+      and N._trim_trailing_zeros("100") == "100",
+      "无尾零/无小数点串原样返回")
+# (b) 模块级 _fmt_price：类型兜底 + 阈值边界
+check(N._fmt_price(None) == "—" and N._fmt_price("abc") == "—",
+      "None/非数值 → '—'（不抛异常）")
+check(N._fmt_price(0) == "0.0000e+00" and N._fmt_price(-5) == "-5.0000e+00",
+      "0/负数走科学计数分支")
+check(N._fmt_price(1) == "1" and N._fmt_price(1000) == "1,000",
+      "整数档去尾零：1→1 / 1000→1,000（阈值 1000 起用千分位）")
+check(N._fmt_price(999.9999) == "999.9999" and N._fmt_price(1.4995) == "1.4995",
+      "1~1000 档保留 4 位有效（去尾零不降精度）")
+check(N._fmt_price(1234.567) == "1,234.6" and N._fmt_price("620.5") == "620.5",
+      "≥1000 档一位小数；字符串数值同样格式化")
+# (c) 关键陷阱守卫：科学计数分支刻意不调 trim
+#     _trim_trailing_zeros("1.0000e-10") 会返回 "1.0000e-1"（指数尾零被当小数尾零吃掉），
+#     若将来给该分支加 trim，meme 极小价会静默退化成 1.0000e-1。
+check(N._fmt_price(1e-10) == "1.0000e-10",
+      "科学计数分支未被 trim（指数尾零陷阱守卫）")
 
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

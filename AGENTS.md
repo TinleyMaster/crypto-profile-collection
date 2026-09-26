@@ -1190,7 +1190,12 @@
 - **Postgres 服务端从未重启**：`pg_postmaster_start_time()` = 2026-09-17 11:23:48 CST（取证时 uptime **223.75h**）⇒ 排除「DB 进程崩溃/重启」。
 - **静默跨两个节点的两个容器同时发生；但「同停同起」定性已被后续复核证伪**：主容器探针 `biz.kol_post`（kol_daemon 每 30s）与**美区节点独立容器**探针 `biz.asset_klines.fetched_at`（scan_daemon 5min 任务）**同窗口静默**——US 侧末次写入 **09-25 14:13:41**、首次恢复 **09-26 13:25:43**（逐小时计数：09-25 14 之后整段为 0，直到 09-26 13 才 2162）；主容器探针同分钟恢复（13:23~13:24）。**但复核发现静默窗口内主容器仍在成功写 `sys.task`**：09-25 14:00:00 / 14:05:00 有 `[调度]` 提交行落库、09-25 20:09:49~20:46:29 有连续 `started_at`/`ended_at` 更新、09-26 10:21:22 有三条 `timeout: 运行超过 12h` 批量收割、10:35/10:52 又有新任务被取走 ⇒ **不是「容器被平台整体停掉」**。同容器的 `kol_daemon` 该窗口却零写入 ⇒ 更符合「**DB 间歇性可达 + 各常驻进程各自被这场故障打死/挂住**」（kol_daemon、scan_daemon 崩进 FATAL；scheduler/TaskManager 存活但任务积压 260min+）。
 - **窗口内并非全库零写入**：`[看护]` 心跳在 09-25 16:19 / 09-26 05:41 / 12:36 有**孤立成功写入** ⇒ 与「DB 间歇可达、恢复首轮写一条心跳」一致，而非恒定写不可达。
-- **未定项（DB 侧不可判）**：DB 服务端存活 ≠ 连接可达；「容器被停」与「连接被拒」在「写库即心跳」视角下签名一致。**最终定性需 Zeabur 控制台**（服务事件/重启记录、资源曲线、部署历史）——本机无 `zeabur` CLI，取不到。
+- **未定项（DB 侧不可判）**：DB 服务端存活 ≠ 连接可达；「容器被停」与「连接被拒」在「写库即心跳」视角下签名一致。**最终定性需 Zeabur 控制台**（服务事件/重启记录、资源曲线、部署历史）——本机原无 `zeabur` CLI，取不到。
+- **Zeabur 控制台侧收口（2026-09-26 补；结论：CLI 这条路走不通，不再重试）**：本机已装 CLI（`/opt/homebrew/bin/zeabur` 0.22.2，官方 Release `zeabur_0.22.2_darwin_arm64`，sha256 与官方 checksums 逐字符一致）并已登录（`tingting950802@gmail.com`；个人 workspace 下无 team 可切，项目 `n8n` 内含该服务）。取证结论：
+  - **不可达三项**：① 服务指标 API 硬限窗口 `< 12h2m`（超出即 `INVALID_ARGUMENT: time range must be less than 12 hours and 2 minutes`），且实测 `MEMORY`/`CPU` 均返 `no metric history found`；② `deployment log --type runtime` 只回 ~2 分钟（102 行）；③ `deployment list` **封顶 5 条且无分页**（实测 5 条全为当日 push）。
+  - **更根本的原因**：每次 push 都会**重建容器**，实时抹掉上一轮容器的运行时证据（重建后 `supervisorctl` 各进程 uptime 仅 `0:01:52`）⇒ 09-25 停滞窗在该服务上**已不可回溯**。
+  - **顺带确证**：服务 `crypto-profile-collection`（ID `6a702918fefeb46a88349f8c`，git trigger `main`）状态 `RUNNING`；supervisord 7 进程（catalyst_fast_daemon / chain_transfer_monitor / gunicorn / kol_daemon / scan_daemon / scheduler / scheduler_watchdog）全 `RUNNING`，**无独立 task_manager 进程** ⇒ 与「runner 驻在 gunicorn 内」一致；容器内 `grep` 确认 `task_manager.py` 的 `NOSTART_ERROR`（L53）与 `scheduler_watchdog.py` 的 `infra_died`（L219）**已上线**。
+  - **结论**：控制台侧佐证**不可得**（CLI 无历史，且证据被自身 push 抹除）⇒ 基础设施侧定性**维持**上文「DB 间歇可达 + 各常驻进程各自被打死/挂住」，**不再为此追查**。
 
 **线上闭环（本次未做任何 prod 写操作 —— 重启后新代码自动完成，手写反而重复）**：
 
@@ -1200,7 +1205,7 @@
 - **⚠️ 补跑增补口径**：从工作台 `/api/tasks/start` 手点同名任务，任务名为「每日数据同步/矫正总调度」**不带 `[调度]` 前缀** ⇒ 既不被看护 `_last_done_ts` / `_recent_submission` 认账，又会与看护补跑**双跑**。**补跑一律走看护/调度提交，勿在 Web 手点同名任务。**
 - **被堵死的整点任务已疏通**：三个曾长期无法自调度的整点任务全部复跑成功 —— `highlight_alert`、`scan_outcome_settle`（均 `5 * * * *`）**19:05** 提交并 `done`；`scan_freshness_watchdog`（`20 * * * *`）**19:20** 提交（`0fd34fbc2244`）并 `done`（零 error）。`catalyst_run_all` 亦于 18:47 由看护补跑（同批 stale），日志持续增长。
 
-**遗留**：① 基础设施侧定性已由「平台级事件」修正为「DB 间歇可达 + 各常驻进程各自被打死/挂住」，Zeabur 控制台侧（服务事件/资源曲线）仍可进一步佐证但非必需；② `sys.task` 排队积压（前节已挂账）本轮未动；③ 冗余 `stash@{0}` 已 drop（内容仅为本轮已上线的 `工作台_OBM_CM执行指南.md` 删除）。
+**遗留**：① 基础设施侧定性已由「平台级事件」修正为「DB 间歇可达 + 各常驻进程各自被打死/挂住」；Zeabur 控制台侧佐证**已实测不可得**（见上文「Zeabur 控制台侧收口」，CLI 无历史 + 证据被自身 push 重建抹除）⇒ **本条就此收口，不再追查**；② `sys.task` 排队积压（前节已挂账）本轮未动；③ 冗余 `stash@{0}` 已 drop（内容仅为本轮已上线的 `工作台_OBM_CM执行指南.md` 删除）。
 
 ### 调度停滞 follow-up：cmc_quote_snapshot 停滞 31.5h（告警_调度停滞_cmc_quote_snapshot，2026-09-26，本次提交）
 

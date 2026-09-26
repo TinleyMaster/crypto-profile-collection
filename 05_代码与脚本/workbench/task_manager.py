@@ -590,7 +590,8 @@ class TaskManager:
     def _reap_zombie_tasks(self) -> None:
         """收割僵尸任务，两个条件满足其一即触发：
         1. 运行时长超过 MAX_RUNTIME_HOURS（硬超时）
-        2. 最近 LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟；
+        2. 自任务**真正开始运行**（started_at，即 runner 取走时刻）起，最近
+           LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟；
            零日志任务同样计入，视为「无新日志」）
         """
         reaped: list[str] = []
@@ -615,11 +616,21 @@ class TaskManager:
                     count_timeout = cur.rowcount
                     reaped.extend(row[0] for row in cur.fetchall())
 
-                    # 条件2：无新日志超过阈值（长任务 240min / 普通 90min）且已运行至少 10min（卡死）
-                    # COALESCE 兜底（2026-09-26）：零日志任务的 MAX(created_at) 为 NULL，
-                    # 原式 NULL < interval 恒为 NULL ⇒ 永不成立，零日志僵尸只能干等 12h 硬超时
-                    # （实况：3 个 0 日志 running 任务把同名整点任务的提交堵死）。补成 epoch
-                    # 后，零日志任务在「已运行满 10min」时即被收割。
+                    # 条件2：自 started_at 起无新日志超过阈值（长任务 240min / 普通 90min）
+                    # 且已运行至少 10min（卡死）
+                    # ① COALESCE 兜底（2026-09-26）：零日志任务的 MAX(created_at) 为 NULL，
+                    #    原式 NULL < interval 恒为 NULL ⇒ 永不成立，零日志僵尸只能干等 12h
+                    #    硬超时（实况：3 个 0 日志 running 任务把同名整点任务的提交堵死）。
+                    #    补成 epoch 后，零日志任务在「已运行满 10min」时即被收割。
+                    # ② `l.created_at >= t.started_at`（2026-09-26 补修）：submit_scheduled_task
+                    #    会在**提交时**先写 2 条日志（[TASK] 调度触发 / [TASK] CMD），而 runner
+                    #    取走任务时会把 started_at 覆盖为取走时刻。若不与 started_at 对齐，
+                    #    就会拿「提交时日志」的年龄去度量「运行期是否卡死」，语义错位：
+                    #    任务排队很久后刚被取走，判据即因陈旧的提交时日志成立（申报的
+                    #    cmc_quote_snapshot 即排队 260min 后被取走，2 条日志停在 16:16）。
+                    #    对齐后只统计运行期日志：有 post-start 日志者的真卡死照常命中；
+                    #    无 post-start 日志者（线程静默死亡，如 _load_task 抛错）由
+                    #    COALESCE 兜底立即命中 —— 二者语义清晰（近 3 天 9 例属后者）。
                     cur.execute(
                         """
                         UPDATE sys.task t
@@ -634,7 +645,8 @@ class TaskManager:
                           AND COALESCE(
                                   (SELECT MAX(l.created_at)
                                    FROM sys.task_log l
-                                   WHERE l.task_id = t.task_id),
+                                   WHERE l.task_id = t.task_id
+                                     AND l.created_at >= t.started_at),
                                   'epoch'::timestamptz
                               ) < NOW() - (
                               CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
@@ -670,11 +682,6 @@ class TaskManager:
                     pass
 
     def _run_task(self, task_id: str):
-        task = _load_task(task_id)
-        if not task:
-            return
-        cmd = list(task["cmd"])
-
         env = {
             **os.environ,
             "PYTHONIOENCODING": "utf-8",
@@ -682,6 +689,18 @@ class TaskManager:
         }
 
         try:
+            # 任务加载与命令解析必须在 try 内（2026-09-26）：原先置于 try 之外，
+            # DB 瞬时不可达时 _load_task 抛错 ⇒ daemon 线程静默死亡，任务停留
+            # running 且只剩提交时那 2 条日志（无「[TASK] 开始执行」行），直到被
+            # 收割器判为 stuck:（近 3 天 9 例，含 cmc_quote_snapshot；并因看护
+            # blocked_by 命中该 stuck: 而拒绝补跑，导致 31.6h 停滞）。放进 try 后
+            # 失败会被记日志并立即置 failed，错误串不以 stuck:/timeout: 开头，
+            # 看护不再误拦补跑。
+            task = _load_task(task_id)
+            if not task:
+                return
+            cmd = list(task["cmd"])
+
             _append_log(task_id, f"[TASK] 开始执行，cwd={WORKER_SCRIPTS_DIR.parent}")
             proc = subprocess.Popen(
                 cmd,
@@ -725,13 +744,19 @@ class TaskManager:
 
         except Exception as e:
             self._local_procs.pop(task_id, None)
-            _append_log(task_id, f"[ERROR] {str(e)[:200]}")
-            _update_task(
-                task_id,
-                ended_at=time.time(),
-                status="failed",
-                error=str(e)[:200],
-            )
+            # 上报本身也必须兜底：若 DB 仍不可达，_append_log/_update_task 会再次
+            # 抛错，线程照样静默死亡、任务停留 running（回到旧 bug）。至少落 stderr。
+            try:
+                _append_log(task_id, f"[ERROR] {str(e)[:200]}")
+                _update_task(
+                    task_id,
+                    ended_at=time.time(),
+                    status="failed",
+                    error=str(e)[:200],
+                )
+            except Exception as e2:
+                print(f"[TaskManager] _run_task 失败上报失败 {task_id}: {e} / {e2}",
+                      file=sys.stderr)
 
     def _try_parse_stats(self, task_id: str, line: str):
         stripped = line.strip()

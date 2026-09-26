@@ -9371,19 +9371,40 @@
                 html += '</div>';
             }
 
-            if (ov.released_pct != null) {
+            // 审计 P0-3：流通比例只展示**裁决后的唯一口径**（CMC circulating / 总供应量），
+            // 并带快照时间；源站自报的 released_pct / float_pct 与之冲突时不再并列展示，
+            // 只在脚注里说明「弃用了哪些值、为什么」——原先三处数字打架且都无时间戳。
+            const adj = d.supply_adjudication;
+            if (adj && adj.circulating_pct != null) {
+                html += '<strong>流通比例:</strong> ' + adj.circulating_pct + '%';
+                if (adj.snapshot_time) {
+                    html += ' <span style="color:#8a92a0;font-size:11px">（快照 ' +
+                        escapeHtml(String(adj.snapshot_time).slice(0, 16)) + '）</span>';
+                }
+                html += '<br>';
+            } else if (ov.released_pct != null) {
                 html += '<strong>释放进度:</strong> ' + ov.released_pct + '%';
                 if (ov.released_amount_str) html += ' (' + ov.released_amount_str + ' / ' + ov.total_amount_str + ')';
                 html += '<br>';
             }
             if (ov.market_cap_str) html += '<strong>市值:</strong> ' + ov.market_cap_str + '<br>';
             if (ov.fdv_str) html += '<strong>FDV:</strong> ' + ov.fdv_str + '<br>';
-            if (ov.float_pct != null) html += '<strong>流通率:</strong> ' + ov.float_pct + '%<br>';
+            if (adj && adj.rejected_sources && adj.rejected_sources.length) {
+                html += '<span style="color:#8a92a0;font-size:11px">ⓘ 已弃用源站自报口径：' +
+                    escapeHtml(adj.rejected_sources.join('、')) + '（与「流通量 < 最大供应量」冲突）</span><br>';
+            }
 
             if (ov.next_unlock_date) {
                 html += '<strong>下一次解锁:</strong><br>';
                 html += '&nbsp;&nbsp;日期: ' + ov.next_unlock_date + '<br>';
-                if (ov.next_unlock_value_str) html += '&nbsp;&nbsp;价值: ' + ov.next_unlock_value_str + '<br>';
+                if (ov.next_unlock_value_str) {
+                    html += '&nbsp;&nbsp;价值: ' + escapeHtml(ov.next_unlock_value_str);
+                    // 审计 P0-2：源站 Value 列低估数百倍，此处已是重算值 —— 标明口径
+                    if (ov.next_unlock_value_basis) {
+                        html += ' <span style="color:#8a92a0;font-size:11px">（' + escapeHtml(ov.next_unlock_value_basis) + '）</span>';
+                    }
+                    html += '<br>';
+                }
                 if (ov.next_unlock_pct != null) html += '&nbsp;&nbsp;占比: ' + ov.next_unlock_pct + '%<br>';
                 if (ov.next_unlock_when) html += '&nbsp;&nbsp;时间: ' + ov.next_unlock_when + '<br>';
             }
@@ -9890,10 +9911,18 @@
                 if (p.top10_concentration != null) parts.push(`Top10集中 ${p.top10_concentration}%`);
                 if (parts.length) L.push('  ' + parts.join(' · '));
             }
-            if (ov.released_pct != null) L.push(`释放进度: ${ov.released_pct}%` + (ov.released_amount_str ? ` (${ov.released_amount_str} / ${ov.total_amount_str})` : ''));
+            // 审计 P0-3：与详情卡同口径 —— 只给裁决后的唯一流通比例（带快照时间）
+            const adj = d.supply_adjudication;
+            if (adj && adj.circulating_pct != null) {
+                L.push(`流通比例: ${adj.circulating_pct}%` + (adj.snapshot_time ? ` (快照 ${String(adj.snapshot_time).slice(0, 16)})` : ''));
+                if (adj.rejected_sources && adj.rejected_sources.length) {
+                    L.push('  已弃用源站自报口径: ' + adj.rejected_sources.join('、'));
+                }
+            } else if (ov.released_pct != null) {
+                L.push(`释放进度: ${ov.released_pct}%` + (ov.released_amount_str ? ` (${ov.released_amount_str} / ${ov.total_amount_str})` : ''));
+            }
             if (ov.market_cap_str) L.push('市值: ' + ov.market_cap_str);
             if (ov.fdv_str) L.push('FDV: ' + ov.fdv_str);
-            if (ov.float_pct != null) L.push('流通率: ' + ov.float_pct + '%');
             if (ov.next_unlock_date) {
                 L.push('下一次解锁:');
                 L.push('  日期: ' + ov.next_unlock_date);
@@ -13345,13 +13374,30 @@
         }
 
         // ── P2-3 高亮信号渲染 ──
+        // 刀3（2026-09-26 审计·P1-A）：层级判定单一真源 = conviction_tier。
+        // 此前写法 `(conviction_tier||confidence)==='HIGH' || confidence==='high'`
+        // 是双轨：tier 为 MED 而 confidence 硬编码为 'high' 时会进高置信区，
+        // 卡片同时显示"中置信"徽章与 HIGH 分组（自相矛盾）。后端 _push_opportunity
+        // 已把 confidence 由 tier 派生，这里 tier 缺失（旧数据/非规则来源）才回退 confidence。
+        function signalLevelOf (o) {
+            var tier = o && o.conviction_tier != null ? String(o.conviction_tier).toUpperCase() : '';
+            if (tier === 'HIGH') return 'high';
+            if (tier === 'MED') return 'medium';
+            if (tier === 'LOW') return 'low';
+            var conf = o && o.confidence != null ? String(o.confidence).toLowerCase() : '';
+            if (conf === 'high') return 'high';
+            if (conf === 'medium') return 'medium';
+            if (conf === 'low') return 'low';
+            return 'medium';
+        }
+
         function renderSignalHighlight (oppList, oppExcluded) {
             const container = document.getElementById('signal-highlight-content');
             const countEl = document.getElementById('signal-count');
             if (!container) return;
 
-            const highItems = oppList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high'; });
-            const medItems = oppList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'MED' || o.confidence === 'medium'; });
+            const highItems = oppList.filter(function (o) { return signalLevelOf(o) === 'high'; });
+            const medItems = oppList.filter(function (o) { return signalLevelOf(o) === 'medium'; });
             const total = highItems.length + medItems.length;
 
             countEl.textContent = total > 0 ? total + ' 条信号' : '0 条';
@@ -13384,7 +13430,7 @@
 
             let html = '<div class="signal-list">';
             renderList.forEach(function (o) {
-                var lvl = (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high' ? 'high' : 'medium';
+                var lvl = signalLevelOf(o) === 'high' ? 'high' : 'medium';
                 html += renderSignalItem(o, lvl);
             });
             html += '</div>';
@@ -13418,8 +13464,8 @@
             const countEl = document.getElementById('risk-signal-count');
             if (!container) return;
 
-            const highItems = riskList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high'; });
-            const medItems = riskList.filter(function (o) { return (o.conviction_tier || o.confidence) === 'MED' || o.confidence === 'medium'; });
+            const highItems = riskList.filter(function (o) { return signalLevelOf(o) === 'high'; });
+            const medItems = riskList.filter(function (o) { return signalLevelOf(o) === 'medium'; });
             const total = riskList.length;
 
             countEl.textContent = total > 0 ? total + ' 条风险' : '0 条';
@@ -13449,7 +13495,7 @@
 
             let html = '<div class="signal-list">';
             renderList.forEach(function (o) {
-                var lvl = (o.conviction_tier || o.confidence) === 'HIGH' || o.confidence === 'high' ? 'high' : 'medium';
+                var lvl = signalLevelOf(o) === 'high' ? 'high' : 'medium';
                 html += renderSignalItem(o, lvl);
             });
             html += '</div>';
@@ -13592,9 +13638,13 @@
             var fireBadge = level === 'high' && !o._ai_downgraded ? '<span class="signal-fire">🔥 HIGH</span>' : '';
 
             // P1-2：事件驱动直通徽章（AI 不认可但规则保留）
+            // 刀4（2026-09-26 审计·P1-B）：v1/v2 富化现在统一带 ai_endorsed 标记，
+            // 与 _ai_downgraded 互斥渲染（downgraded 已含"直通"语义，避免双徽章重复）。
             var bypassBadge = (o._ai_downgraded || o._ai_filter_bypassed)
                 ? '<span class="signal-bypass" title="' + escapeHtml(o._ai_filter_reason || '事件驱动信号，按规则直通保留，AI 未背书') + '">⚡ 事件驱动直通</span>'
-                : '';
+                : (o.ai_endorsed === false
+                    ? '<span class="signal-bypass" title="AI 已评审但未背书，档位已自动降一级">⚠ AI 未背书</span>'
+                    : '');
 
             // 主因轴：从 breakdown 取贡献最高（方案 A）
             var mainReason = '';

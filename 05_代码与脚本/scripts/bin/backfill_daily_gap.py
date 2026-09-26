@@ -28,9 +28,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
+
+# 回填会重新写入 fdv（含 CMC 退化的 fdv），故收尾必须复用同一套 FDV 口径修复（审计 P0-1）
+from etl_asset_market_daily_from_cmc import repair_degenerate_fdv
 
 
 # ── 缺口检测 ──
@@ -668,6 +673,7 @@ def create_task_card(conn, missing_dates: list[date], coverage: dict, result: di
         "cmc_result": result.get("cmc", {}),
         "etl_result": result.get("etl", {}),
         "binance_result": result.get("binance", {}),
+        "fdv_repaired": result.get("fdv_repaired", 0),
     }
 
     with conn.cursor() as cur:
@@ -760,6 +766,11 @@ def main() -> int:
                 except Exception as e:
                     print(f"[BACKFILL] Binance 兜底异常: {e}", file=sys.stderr)
                     result["binance"] = {"error": str(e)[:200]}
+
+            # FDV 口径修复：回填写入了 CMC 的（可能退化的）fdv，此处统一重建（审计 P0-1）
+            fdv_repaired = repair_degenerate_fdv(conn, args.lookback)
+            result["fdv_repaired"] = fdv_repaired
+            print(f"\n[FDV] 口径修复: {fdv_repaired:,} 行")
 
             # 3. 写入任务卡（verify 之前，确保即使失败也有记录）
             task_id = create_task_card(conn, missing_dates, coverage, result)

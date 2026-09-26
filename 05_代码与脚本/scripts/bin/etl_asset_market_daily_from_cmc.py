@@ -29,6 +29,93 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 
+# ── FDV 口径修复（审计 P0-1，2026-09-26）──────────────────────────────
+#
+# 背景：biz.asset_market_daily.fdv 直接照抄 src_cmc.cmc_asset_quote_snapshot.fdv
+# （即 CMC 的 fully_diluted_market_cap）。CMC 会在不通知的情况下**下调** max_supply，
+# 一旦下调到「等于流通量」，fully_diluted_market_cap 就退化成 == market_cap，
+# 稀释风险在估值维度整体隐身。实况（PONS / asset_id=11114）：2026-09-06 起
+# CMC 把 max_supply 由 1e9 改为 ≈7.02e8（== 流通量），fdv 随之变成 == 市值，
+# 页面估值从 6.18 亿掉到 4.23 亿；另有 08-30 / 08-31 / 09-03 三天 CMC 直接返回 fdv=NULL。
+#
+# 修复原则（不推翻 CMC，只在 CMC 自相矛盾时纠正）：
+#   1. 源 fdv 有效且**未退化**（与市值差异 >1%）→ 一律采用，不动；
+#   2. 源 fdv 缺失、或退化为 ≈ 市值 → 若存在**被 CMC 历史印证过**的最大供应量
+#      （tokenomist 的 max_supply，且 CMC 历史快照曾报过 ≥ 该值的 max_supply），
+#      且（源 fdv 为 NULL，或）该值明显大于流通量（>1.02x）→ 用 price × max_supply 重建 fdv；
+#      NULL 行不再要求「max_supply > 流通量」：此时填 price × max 只是补上 FDV 的定义，
+#      不会改写任何已有值（CMC 历史行情行的 circulating 常被写成 == max_supply）。
+#   3. 其余情况保持原值（含 NULL）。
+#
+# 「CMC 历史印证」（hist.cmc_hist_max >= tok.max_supply * 0.98）是关键守卫：
+# 若不加，会把大量代币化股票（MRVLon / CMGon 等）误伤——它们的 tokenomics
+# max_supply 由 LLM 从底层股票股本抽取，量级完全失真，而 CMC 从未报过该值。
+# 实测：无守卫时 09-01 起 2,569 个资产被改写；加守卫后 597 个，且其中 99%
+# 属于「补 NULL」（原本无值），仅 PONS 这类「CMC 自我下调」的才被纠偏。
+_FDV_REPAIR_CTE = """
+    WITH tok AS (
+        SELECT DISTINCT ON (asset_id) asset_id, max_supply
+        FROM biz.asset_tokenomics
+        WHERE max_supply IS NOT NULL AND max_supply > 0
+        ORDER BY asset_id, updated_at DESC NULLS LAST
+    ),
+    hist AS (
+        SELECT asm.asset_id, MAX(q.max_supply) AS cmc_hist_max
+        FROM src_cmc.cmc_asset_quote_snapshot q
+        JOIN core.asset_source_map asm
+          ON asm.source_code = 'cmc'
+         AND asm.source_asset_key = q.cmc_id::text
+        GROUP BY asm.asset_id
+    ),
+    cand AS (
+        SELECT m.asset_id, m.market_date, m.source_code, m.fdv AS old_fdv,
+               CASE
+                 WHEN m.price_usd IS NULL OR m.price_usd <= 0 THEN NULL
+                 WHEN m.fdv IS NOT NULL
+                      AND (m.market_cap IS NULL OR m.market_cap <= 0
+                           OR ABS(m.fdv - m.market_cap) > 0.01 * m.market_cap)
+                   THEN m.fdv
+                 WHEN t.max_supply IS NOT NULL
+                      AND (m.fdv IS NULL
+                           OR t.max_supply > COALESCE(m.circulating_supply, 0) * 1.02)
+                      AND h.cmc_hist_max IS NOT NULL
+                      AND h.cmc_hist_max >= t.max_supply * 0.98
+                   THEN ROUND(m.price_usd * t.max_supply, 2)
+                 ELSE m.fdv
+               END AS new_fdv
+        FROM biz.asset_market_daily m
+        LEFT JOIN tok t ON t.asset_id = m.asset_id
+        LEFT JOIN hist h ON h.asset_id = m.asset_id
+        {date_filter}
+    )
+    UPDATE biz.asset_market_daily m
+    SET fdv = c.new_fdv,
+        raw_ref = COALESCE(m.raw_ref, '{{}}'::jsonb)
+                  || '{{"fdv_basis": "price_x_corroborated_max_supply"}}'::jsonb,
+        updated_at = NOW()
+    FROM cand c
+    WHERE m.asset_id = c.asset_id
+      AND m.market_date = c.market_date
+      AND m.source_code = c.source_code
+      AND c.new_fdv IS DISTINCT FROM c.old_fdv
+"""
+
+
+def repair_degenerate_fdv(conn, days: int | None = None) -> int:
+    """重建退化/缺失的 FDV，返回被修正的行数（幂等）。"""
+    date_filter = ""
+    params: tuple = ()
+    if days is not None:
+        date_filter = "WHERE m.market_date >= %s"
+        params = ((datetime.now(timezone.utc) - timedelta(days=days)).date(),)
+    sql = _FDV_REPAIR_CTE.format(date_filter=date_filter)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="ETL CMC quote snapshots into biz.asset_market_daily (daily close)."
@@ -145,6 +232,10 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
             affected = cur.rowcount
             conn.commit()
 
+        # FDV 口径修复：必须在写入之后、同一时间窗口内执行（审计 P0-1）
+        fdv_repaired = repair_degenerate_fdv(conn, days)
+
+        with conn.cursor() as cur:
             # 验证
             cur.execute("""
                 SELECT count(*), min(market_date), max(market_date), count(DISTINCT asset_id)
@@ -154,6 +245,7 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
             row = cur.fetchone()
             return {
                 "affected": affected,
+                "fdv_repaired": fdv_repaired,
                 "total": row[0],
                 "date_from": str(row[1]) if row[1] else None,
                 "date_to": str(row[2]) if row[2] else None,
@@ -227,12 +319,24 @@ def main() -> int:
         action="store_true",
         help="仅执行昨日连续性自检（不执行主 ETL）",
     )
+    parser.add_argument(
+        "--repair-only",
+        action="store_true",
+        help="仅执行 FDV 口径修复（不重跑 ETL），配合 --days 限定窗口",
+    )
     args = parser.parse_args()
 
     if args.check_continuity:
         result = check_daily_continuity()
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0 if not result.get("has_gap") or result.get("retry_triggered") else 1
+
+    if args.repair_only:
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            n = repair_degenerate_fdv(conn, args.days)
+        print(f"[FDV] 修复退化/缺失 FDV: {n:,} 行")
+        return 0
 
     print(f"[ETL] asset_market_daily from CMC snapshots")
     if args.days:
@@ -248,6 +352,8 @@ def main() -> int:
             print(f"[DRY-RUN] Date range: {result['date_from']} ~ {result['date_to']}")
     else:
         print(f"[ETL] Affected: {result['affected']:,} rows")
+        if result.get("fdv_repaired"):
+            print(f"[ETL] FDV 修复: {result['fdv_repaired']:,} rows")
         print(f"[ETL] Total now: {result['total']:,} rows ({result['assets']:,} assets)")
         if result.get("date_from"):
             print(f"[ETL] Date range: {result['date_from']} ~ {result['date_to']}")

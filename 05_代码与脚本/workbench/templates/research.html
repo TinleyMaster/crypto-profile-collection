@@ -660,6 +660,34 @@
             font-weight: normal;
         }
 
+        /* 审计 P0-4：结论快照与实时指标背离时标「结论已过期」 */
+        .r-thesis .t-drift {
+            margin: 8px 0;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border-left: 3px solid #f59e0b;
+            background: #2a2416;
+            color: #fbbf24;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .r-thesis .t-drift b {
+            color: #fcd34d;
+        }
+        .r-thesis .t-drift .t-drift-btn {
+            margin-left: 6px;
+            background: #b45309;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .r-thesis .t-drift .t-drift-btn:hover {
+            background: #d97706;
+        }
+
         .r-thesis .t-point {
             font-size: 13px;
             line-height: 1.6;
@@ -2819,6 +2847,28 @@
                 '<span style="margin-left:auto"><button class="t-gen-btn" onclick="generateThesis()">重新生成</button></span>' +
                 '</div>';
 
+            // 审计 P0-4：结论—数据 drift 检测。thesis 的 key_metrics 是**生成时刻**快照，
+            // 与下方实时「关键指标」背离（价格差 >2% / OI·费率方向反转）时，必须显式标注
+            // 「结论已过期」并给重算入口 —— 不能让两段互相矛盾的数值并排展示。
+            const drift = t.drift;
+            if (drift && drift.stale && (drift.reasons || []).length) {
+                const metricLabel = {
+                    price: '价格', market_cap: '流通市值', fdv: 'FDV（完全稀释估值）',
+                    funding_rate: '资金费率', oi_change_24h: 'OI 24h 变化'
+                };
+                const reasonTxt = drift.reasons.map(function (r) {
+                    const name = metricLabel[r.metric] || r.metric;
+                    const o = fmtDriftNum(r.metric, r.thesis);
+                    const n = fmtDriftNum(r.metric, r.live);
+                    if (r.kind === 'direction_reversed') {
+                        return name + '方向反转（结论 ' + o + ' → 实时 ' + n + '）';
+                    }
+                    return name + '偏离 ' + r.rel_diff_pct + '%（结论 ' + o + ' → 实时 ' + n + '）';
+                }).join('；');
+                html += '<div class="t-drift">⚠️ <b>结论已过期</b>：' + escapeHtml(reasonTxt) +
+                    '<button class="t-drift-btn" onclick="generateThesis()">立即重算</button></div>';
+            }
+
             // 关键指标（优先用结构化指标，不用 LLM 生成的）
             const sm = structuredMetrics || {};
             // 任一维度非空即展示，不再被 market 单一 gate 限制
@@ -2859,6 +2909,18 @@
                 }
                 if (sm.tokenomics.circulating_supply) {
                     html += '<div><strong>流通量</strong>: ' + fmtNumberBig(sm.tokenomics.circulating_supply) + '</div>';
+                }
+                // 审计 P0-3：流通比例用**裁决后的唯一口径**（circulating / 最大供应量）并带快照时间，
+                // 避免页面同时出现 71.2% / 68.4% / 100% 三个互相打架的数字。
+                if (sm.tokenomics.circulating_pct_of_max !== null && sm.tokenomics.circulating_pct_of_max !== undefined) {
+                    const sa = sm.tokenomics.supply_adjudication || {};
+                    let pctTxt = '<div><strong>流通比例</strong>: ' +
+                        Number(sm.tokenomics.circulating_pct_of_max).toFixed(2) + '%';
+                    if (sa.circulating_snapshot_time) {
+                        pctTxt += ' <span class="t-snapshot">快照 ' + escapeHtml(String(sa.circulating_snapshot_time).slice(0, 16)) + '</span>';
+                    }
+                    pctTxt += '</div>';
+                    html += pctTxt;
                 }
                 if (sm.unlock.unlock_pct_30d !== null && sm.unlock.unlock_pct_30d !== undefined) {
                     html += '<div><strong>30天解锁比例</strong>: ' + fmtPct(sm.unlock.unlock_pct_30d) + '</div>';
@@ -3081,6 +3143,16 @@
             if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
             if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
             return Math.round(n).toLocaleString();
+        }
+        // 审计 P0-4：drift 徽章里回显数值 —— 金额类走 $ 口径，比例类带正负号 + %
+        function fmtDriftNum (metric, v) {
+            const n = Number(v);
+            if (v === null || v === undefined || isNaN(n)) return '—';
+            if (metric === 'price' || metric === 'market_cap' || metric === 'fdv') {
+                return fmtUsdBig(n);
+            }
+            const sign = n > 0 ? '+' : '';
+            return sign + n.toFixed(4) + '%';
         }
         function fmtPct (v) {
             if (v === null || v === undefined || v === '') return NA_HTML;

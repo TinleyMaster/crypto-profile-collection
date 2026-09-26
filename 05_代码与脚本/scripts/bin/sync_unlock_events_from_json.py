@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -94,6 +94,21 @@ def _to_float(val) -> float | None:
     return safe_float(val)
 
 
+# 审计 P0-2：页面 Value 列与「比例 × 供应量 × 现价」自洽公式的偏差超过该倍数时，
+# 才判定为源站口径错误并用重算值覆盖（PONS 2027-01-05 的 12% 解锁页面写 $123.46K、
+# 实约 7,417 万，偏差 601x）。5x 以内的正常偏差保留页面值，避免全量同步误改。
+_UNLOCK_OVERRIDE_RATIO = 5.0
+
+
+def _severe_divergence(a: float | None, b: float | None,
+                       ratio: float = _UNLOCK_OVERRIDE_RATIO) -> bool:
+    """两个正数相差超过 ratio 倍时返回 True（用于判定源站值与重算值是否严重背离）。"""
+    if not a or not b or a <= 0 or b <= 0:
+        return False
+    hi, lo = (a, b) if a >= b else (b, a)
+    return hi / lo > ratio
+
+
 # 锚定正则：必须以数字开头，"." / ".." / "abc" 等脏值直接不匹配
 _AMOUNT_RE = re.compile(r'^([0-9][0-9,]*(?:\.[0-9]+)?)\s*([KMBTkmbt])?$')
 _AMOUNT_MULT = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
@@ -118,6 +133,80 @@ def _parse_token_amount_str(s: str) -> float | None:
         return None
     mult = _AMOUNT_MULT.get((m.group(2) or "").upper(), 1)
     return num * mult
+
+
+# ── 解锁价值重算底座（审计 P0-2，2026-09-26）──────────────────────────
+#
+# 背景：unlock_value_usd 原先直接照抄 tokenomist 页面上的 Value 列，实测严重失真：
+# PONS（asset_id=11114）2027-01-05 的 12% 解锁被写成 $123.46K，而按
+# 「解锁比例 × 供应量 × 现价」应为 7,400 万量级（低估约 600 倍）；
+# 同时 unlock_amount 恒为 NULL，事件表无法自证。
+#
+# 修复：不再信任页面 Value 列，改为用**自洽公式**重建：
+#   unlock_amount    = ratio_total% × 供应量基数
+#   unlock_value_usd = unlock_amount × 现价
+# 供应量基数取「可信最大供应量」优先（max_supply 才是 total 口径的正确分母，
+# tokenomist 的 total_amount 实测常被写成已释放量）；现价取 CMC 日线最新点。
+#
+# tokenomist 表格的「Release %」按源站表头语义 = 占**总供应量**的比例，
+# 故 ratio_total 为首选口径；pct 与 value 会原样留在 raw_ref 里可追溯。
+_SUPPLY_PRICE_SQL = """
+    WITH tok AS (
+        SELECT DISTINCT ON (asset_id)
+               asset_id, max_supply, total_supply, circulating_supply, updated_at AS tok_at
+        FROM biz.asset_tokenomics
+        WHERE COALESCE(max_supply, total_supply) IS NOT NULL
+        ORDER BY asset_id, updated_at DESC NULLS LAST
+    ),
+    mkt AS (
+        SELECT DISTINCT ON (asset_id)
+               asset_id, market_date, price_usd, circulating_supply, total_supply, market_cap
+        FROM biz.asset_market_daily
+        WHERE source_code = 'cmc' AND price_usd IS NOT NULL AND price_usd > 0
+        ORDER BY asset_id, market_date DESC
+    )
+    SELECT t.asset_id,
+           COALESCE(NULLIF(t.max_supply, 0), NULLIF(t.total_supply, 0),
+                    NULLIF(m.total_supply, 0), NULLIF(m.circulating_supply, 0)) AS supply_basis,
+           m.price_usd,
+           m.market_cap,
+           m.market_date,
+           CASE WHEN NULLIF(t.max_supply, 0) IS NOT NULL THEN 'tokenomics.max_supply'
+                WHEN NULLIF(t.total_supply, 0) IS NOT NULL THEN 'tokenomics.total_supply'
+                WHEN NULLIF(m.total_supply, 0) IS NOT NULL THEN 'cmc.total_supply'
+                ELSE 'cmc.circulating_supply' END AS supply_source
+    FROM tok t
+    FULL OUTER JOIN mkt m ON m.asset_id = t.asset_id
+    WHERE COALESCE(t.asset_id, m.asset_id) = ANY(%s)
+"""
+
+
+def _db_num(v) -> float | None:
+    """库内 numeric 值（psycopg 返回 Decimal）→ float。"""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_supply_price_basis(conn, asset_ids: list[int]) -> dict[int, dict]:
+    """批量取「供应量基数 + 现价」，供解锁价值重算使用。"""
+    if not asset_ids:
+        return {}
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(_SUPPLY_PRICE_SQL, (asset_ids,))
+        return {
+            r["asset_id"]: {
+                "supply_basis": _db_num(r["supply_basis"]),
+                "price_usd": _db_num(r["price_usd"]),
+                "market_cap": _db_num(r["market_cap"]),
+                "price_date": str(r["market_date"]) if r["market_date"] else None,
+                "supply_source": r["supply_source"],
+            }
+            for r in cur.fetchall()
+        }
 
 
 def _infer_beneficiary_type(recipients: str) -> str | None:
@@ -182,6 +271,12 @@ def main() -> int:
             except Exception:
                 pass
 
+        # DDL 收尾即提交：ALTER TABLE 会取 ACCESS EXCLUSIVE 锁（即使 IF NOT EXISTS 也取），
+        # 若拖到全量同步结束后才 commit，整轮（数百资产 / 数千事件，实测 >15 分钟）都会
+        # 阻塞线上对 asset_unlock_event 的一切读（解锁榜、投研页解锁卡），曾实测导致
+        # 页面查询排队。此处先提交释放重锁，再做逐行 INSERT（RowExclusive 不与读冲突）。
+        conn.commit()
+
         # 读取需要同步的资产
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             if args.asset_id:
@@ -211,7 +306,10 @@ def main() -> int:
 
         inserted = 0
         skipped = 0
-        now = datetime.now(timezone.utc)
+
+        # 供应量基数 + 现价（审计 P0-2：解锁价值必须可自证）
+        basis_map = _load_supply_price_basis(conn, [r["asset_id"] for r in rows])
+        print(f"供应量/现价基准命中 {len(basis_map)}/{len(rows)} 个资产")
 
         with conn.cursor() as cur:
             for row in rows:
@@ -250,16 +348,77 @@ def main() -> int:
                     if amount is None:
                         amount = _parse_token_amount_str(ev.get("amount_str"))
 
-                    # P2-1: pct 语义 —— 主源(tokenomics.com)为 % of MCAP，写入 ratio_mcap
+                    # P2-1: pct 语义 —— 源站表头「Release %」= 占总供应量比例，写入 ratio_total；
+                    # 若事件显式标注 ratio_mcap 才走市值口径
                     pct = _to_float(ev.get("pct") or ev.get("unlock_pct"))
                     ratio_mcap = pct if ev.get("ratio_mcap") else None
                     ratio_total = None if ev.get("ratio_mcap") else pct
                     unlock_ratio_circulating = _to_float(ev.get("pct_of_circulating"))
-                    unlock_value_usd = _to_float(ev.get("value_usd"))
-                    # P0-1: pct 缺失但事件有解锁市值时，用 value_usd / market_cap 补 ratio_mcap
-                    if ratio_mcap is None and unlock_value_usd and mcap_fallback and mcap_fallback > 0:
-                        ratio_mcap = round(unlock_value_usd / mcap_fallback * 100.0, 4)
+                    scraped_value = _to_float(ev.get("value_usd"))
+
+                    # 审计 P0-2：不再照抄页面 Value 列，改用自洽公式重建
+                    #   amount = ratio_total% × 供应量基数；value = amount × 现价
+                    _b = basis_map.get(asset_id) or {}
+                    supply_basis = _b.get("supply_basis")
+                    price_usd = _b.get("price_usd")
+                    mcap_basis = _b.get("market_cap") or mcap_fallback
+                    # 比例越界（>100%）说明源站该列语义与「占总量比例」不符，
+                    # 不据此反推金额（否则会算出超过最大供应量的解锁量），仅在 raw_ref 标记
+                    ratio_implausible = ratio_total is not None and ratio_total > 100
+
+                    derived_amount = None
+                    derived_value = None
+                    if (not ratio_implausible and ratio_total is not None and ratio_total > 0
+                            and supply_basis and supply_basis > 0):
+                        derived_amount = ratio_total / 100.0 * supply_basis
+                        if price_usd and price_usd > 0:
+                            derived_value = derived_amount * price_usd
+                    elif (ratio_mcap is not None and 0 < ratio_mcap <= 100 and mcap_basis):
+                        # 源站给的是「占市值比例」时按市值折算
+                        derived_value = ratio_mcap / 100.0 * mcap_basis
+
+                    # 覆盖策略：只有「页面值与自洽公式严重背离（>5x）」才让重算值取代页面值；
+                    # 页面字段缺失（unlock_amount 实测普遍为 NULL）时直接落重算值。
+                    scraped_amount = amount
+                    amount_overridden = False
+                    if derived_amount is not None:
+                        if scraped_amount in (None, 0):
+                            amount = derived_amount
+                        elif _severe_divergence(scraped_amount, derived_amount):
+                            amount = derived_amount
+                            amount_overridden = True
+                        else:
+                            amount = scraped_amount
+                    value_overridden = False
+                    if derived_value is not None:
+                        if scraped_value in (None, 0):
+                            unlock_value_usd = derived_value
+                        elif _severe_divergence(scraped_value, derived_value):
+                            unlock_value_usd = derived_value
+                            value_overridden = True
+                        else:
+                            unlock_value_usd = scraped_value
+                    else:
+                        unlock_value_usd = scraped_value
+                    # ratio_mcap：有市值基准时统一补算（供解锁榜/压力分消费）
+                    if mcap_basis and unlock_value_usd and mcap_basis > 0:
+                        ratio_mcap = round(unlock_value_usd / mcap_basis * 100.0, 4)
                     risk_level = str(ev.get("risk_level") or "")[:20] or None
+
+                    raw_ref = dict(ev)
+                    raw_ref["_derived"] = {
+                        "scraped_value_usd": scraped_value,
+                        "derived_value_usd": derived_value,
+                        "value_overridden": value_overridden,
+                        "scraped_amount": scraped_amount,
+                        "derived_amount": derived_amount,
+                        "amount_overridden": amount_overridden,
+                        "supply_basis": supply_basis,
+                        "supply_source": _b.get("supply_source"),
+                        "price_usd": price_usd,
+                        "price_date": _b.get("price_date"),
+                        "ratio_implausible": ratio_implausible,
+                    }
 
                     try:
                         cur.execute("""
@@ -285,7 +444,7 @@ def main() -> int:
                             amount, ratio_total, unlock_ratio_circulating,
                             ratio_mcap, unlock_value_usd, beneficiary,
                             risk_level,
-                            psycopg.types.json.Jsonb(ev),
+                            psycopg.types.json.Jsonb(raw_ref),
                         ))
                         inserted += 1
                     except Exception as e:

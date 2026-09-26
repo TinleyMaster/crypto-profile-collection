@@ -10,6 +10,7 @@ import os
 import urllib.request
 import urllib.error
 import json
+import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2122,8 +2123,19 @@ def _augment_structured_links_inner(items: list[dict], structured: dict) -> None
     if it and it["present"] and not it["links"]:
         unlocks = structured.get("unlocks")
         if isinstance(unlocks, dict):
-            events = unlocks.get("events") or unlocks.get("unlock_events_json") or []
-            upcoming = [e for e in events if e.get("is_upcoming")]
+            # 审计 P0-2：键名与结构化写入侧（unlock_events）对齐。原式漏了 unlock_events，
+            # 恒取到空列表 → 明明有 upcoming_event 却给 note="no_upcoming_events"，
+            # 与同一页面的 upcoming_events_count=1 自相矛盾。
+            events = (unlocks.get("events") or unlocks.get("unlock_events")
+                      or unlocks.get("unlock_events_json") or [])
+            if isinstance(events, str):
+                try:
+                    events = json.loads(events)
+                except (ValueError, TypeError):
+                    events = []
+            if not isinstance(events, list):
+                events = []
+            upcoming = [e for e in events if isinstance(e, dict) and e.get("is_upcoming")]
             if upcoming:
                 next_ev = upcoming[0]
                 label = f"未来 30 天 {len(upcoming)} 次解锁 · 下一次: {next_ev.get('date', '?')}"
@@ -2844,15 +2856,77 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
         result["market"]["snapshot_time"] = market_snapshot_time
 
     # ── 代币经济学 ──
+    # 审计 P0-3：流通量优先取 CMC 权威快照（唯一带快照时间、由链上+市场推导的源）；
+    # tokenomist 自报 released_pct / float_pct 与 circulating<max_supply 直接冲突，不作事实源。
+    # 页面只展示裁决后的**唯一**流通比例并带快照时间（原先 71.2% / 68.4% / 100% 三处打架且无时间戳）。
+    _auth_supply: dict = {}
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT q.total_supply, q.circulating_supply, q.max_supply, q.quote_time
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                    ORDER BY q.quote_time DESC LIMIT 1
+                """, (asset_id,))
+                _arow = cur.fetchone()
+                if _arow:
+                    _auth_supply = {k: _arow[k] for k in
+                                    ("total_supply", "circulating_supply", "max_supply")
+                                    if _arow[k] is not None}
+                    if _arow.get("quote_time"):
+                        _auth_supply["_quote_time"] = str(_arow["quote_time"])
+    except (psycopg.errors.UndefinedTable, Exception):
+        pass
+
+    def _inner_auth_supply(tok_key: str, default_auth: bool = False):
+        """CMC 权威快照 vs tokenomics 抓取值的单一事实源裁决（口径与生成路径一致）。"""
+        tok_val = _to_float((tokenomics or {}).get(tok_key))
+        auth_val = _to_float(_auth_supply.get(tok_key))
+        if auth_val is None:
+            return tok_val
+        if tok_val is None:
+            return auth_val
+        try:
+            if auth_val > 0 and (tok_val / auth_val > 10 or tok_val / auth_val < 0.1):
+                return auth_val  # 量级偏差 ⇒ 单位疑似错误，用权威值
+            if default_auth and auth_val > 0:
+                return auth_val
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+        return tok_val
+
     if tokenomics:
         for key in ("total_supply", "circulating_supply", "max_supply"):
-            v = _to_float(tokenomics.get(key))
+            v = _inner_auth_supply(key, default_auth=(key == "circulating_supply"))
             if v is not None:
                 result["tokenomics"][key] = v
         for key in ("buy_tax_pct", "sell_tax_pct"):
             v = _to_float(tokenomics.get(key))
             if v is not None:
                 result["tokenomics"][key] = v
+        # 裁决留痕 + 唯一流通比例（带快照时间）
+        _cs_v = result["tokenomics"].get("circulating_supply")
+        _ms_v = result["tokenomics"].get("max_supply")
+        _pct_v = None
+        if _cs_v and _ms_v:
+            _pct_v = round(_cs_v / _ms_v * 100.0, 2)
+            result["tokenomics"]["circulating_pct_of_max"] = _pct_v
+        _rejected: list[str] = []
+        _ov = unlocks.get("overview") if isinstance(unlocks, dict) else None
+        if _pct_v is not None and isinstance(_ov, dict):
+            for _k, _lab in (("released_pct", "释放进度"), ("float_pct", "流通率")):
+                _vf = _to_float(_ov.get(_k))
+                if _vf is not None and abs(_vf - _pct_v) > 5:
+                    _rejected.append(f"tokenomist {_lab} {_vf}%（与 circulating<max_supply 冲突）")
+        result["tokenomics"]["supply_adjudication"] = {
+            "circulating_source": ("cmc_quote_snapshot"
+                                   if _auth_supply.get("circulating_supply") is not None
+                                   else "biz.asset_tokenomics"),
+            "circulating_snapshot_time": _auth_supply.get("_quote_time"),
+            "rejected_sources": _rejected,
+        }
 
     # ── 解锁 ──
     if isinstance(unlocks, dict):
@@ -2887,6 +2961,33 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                 result["unlock"]["unlock_pct_30d"] = round(pct_30d, 4)
             except Exception:
                 pass
+
+    # 审计 P0-2：下次解锁的金额/比例一律以 biz.asset_unlock_event 为准 —— 该表由
+    # sync_unlock_events_from_json.py 按「解锁比例 × 供应量 × 现价」重算落库，而 tokenomist
+    # 页面的 Value 列实测低估数百倍（PONS 2027-01-05 的 12% 被写成 $123.46K，实约 7,400 万）。
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT unlock_date, unlock_amount, unlock_ratio_total,
+                           unlock_ratio_mcap, unlock_value_usd
+                    FROM biz.asset_unlock_event
+                    WHERE asset_id = %s AND unlock_date >= CURRENT_DATE
+                    ORDER BY unlock_date ASC LIMIT 1
+                """, (asset_id,))
+                _ue = cur.fetchone()
+        if _ue:
+            if _ue.get("unlock_value_usd") is not None:
+                result["unlock"]["next_unlock_value_usd"] = _to_float(_ue["unlock_value_usd"])
+            if _ue.get("unlock_amount") is not None:
+                result["unlock"]["next_unlock_amount"] = _to_float(_ue["unlock_amount"])
+            if _ue.get("unlock_ratio_total") is not None:
+                result["unlock"]["next_unlock_pct"] = _to_float(_ue["unlock_ratio_total"])
+            if _ue.get("unlock_date"):
+                result["unlock"]["next_unlock_date"] = str(_ue["unlock_date"])
+            result["unlock"]["next_unlock_value_basis"] = "unlock_ratio_x_supply_x_price"
+    except (psycopg.errors.UndefinedTable, Exception):
+        pass
 
     # ── 链上持仓 ──
     if isinstance(onchain, dict):
@@ -3096,6 +3197,135 @@ def list_research_notebooks(limit: int = 50, offset: int = 0, q: str = "") -> di
     return {"total": total, "items": items, "limit": limit, "offset": offset}
 
 
+# ── 结论—数据 drift 检测（审计 P0-4，一键投研页）────────────────────────
+#
+# 背景：页面顶部并排展示两段数值 —— 「研究结论」携带的 key_metrics（**生成时刻**快照）
+# 与「关键指标」里的实时 structured_metrics。两者背离后页面仍把旧结论当现行结论展示，
+# 不阻断、不提示重算。审计实测（PONS）：结论写价格 0.6307 / OI 24h +0.94%，实时为
+# 0.6181 / −2.27% —— **OI 变化方向都反转了**，用户看到的是两组自相矛盾的数。
+#
+# 判据（审计 §4.2 第 4 项）：价格差 >2%，或 OI/资金费率**方向反转** ⇒ 标「结论已过期」。
+# 数值来源刻意从 thesis.key_metrics 的**中文键 + 自由文本**里抽取：LLM 落库的 key_metrics
+# 实测形如 {"价格": "0.630722163545 USD", "其他关键指标": "…OI 24h +0.94%；资金费率
+# 0.0206%…"}，并非结构化数字，必须容错解析；任一项解析不出即跳过该项（绝不因脏值误报）。
+_DRIFT_NUM_RE = re.compile(r"[+\-]?\d[\d,]*(?:\.\d+)?")
+_DRIFT_REL_TOL = 0.02   # 价格/市值/FDV 相对偏差阈值（审计：>2%）
+_DRIFT_DIR_METRICS = ("funding_rate", "oi_change_24h")
+_DRIFT_LABELS = {
+    "price": ("价格", "现价", "price", "Price"),
+    "market_cap": ("市值", "market_cap", "Market Cap"),
+    "fdv": ("FDV", "fdv", "完全稀释估值"),
+}
+_DRIFT_TEXT_LABELS = {
+    "funding_rate": ("资金费率", "funding_rate", "Funding Rate"),
+    "oi_change_24h": ("OI 24h", "OI24h", "oi_change_24h", "OI 变化", "持仓量 24h"),
+}
+
+
+def _drift_num(v) -> float | None:
+    """把 key_metrics 里的值转成数字（'431,441,804.52 USD' → 431441804.52）。"""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = _DRIFT_NUM_RE.search(str(v).replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _drift_text_num(text, *labels) -> float | None:
+    """从自由文本（'其他关键指标'）里抽「标签 → 其后的第一个数值」。"""
+    s = str(text or "")
+    for lab in labels:
+        m = re.search(re.escape(lab) + r"\s*[:：]?\s*([+\-]?\d[\d,]*(?:\.\d+)?)", s)
+        if not m:
+            continue
+        try:
+            return float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+    return None
+
+
+def _detect_thesis_drift(thesis: dict | None, structured_metrics: dict | None) -> dict | None:
+    """比对结论快照与实时指标，返回 drift 描述（无背离 / 无法比对时返回 None）。
+
+    返回：
+        {"stale": bool,
+         "reasons": [{"metric", "label", "thesis", "live", "kind"}...],
+         "checked": [metric...]}
+    其中 kind ∈ {"rel_diff", "direction_reversed"}。
+    """
+    km = (thesis or {}).get("key_metrics")
+    if not isinstance(km, dict) or not km:
+        return None
+    sm = structured_metrics or {}
+    market = sm.get("market") or {}
+    deriv = sm.get("derivatives") or {}
+
+    live = {
+        "price": _drift_num(market.get("price_usd")),
+        "market_cap": _drift_num(market.get("market_cap_usd")),
+        "fdv": _drift_num(market.get("fdv_usd")),
+    }
+    live["funding_rate"] = _drift_num(
+        deriv.get("funding_rate_pct") if deriv.get("funding_rate_pct") is not None
+        else deriv.get("funding_rate")
+    )
+    live["oi_change_24h"] = _drift_num(
+        deriv.get("oi_change_24h_pct") if deriv.get("oi_change_24h_pct") is not None
+        else deriv.get("oi_change_24h")
+    )
+
+    other_text = km.get("其他关键指标") or km.get("其他") or km.get("other") or ""
+    old: dict = {}
+    for metric, labels in _DRIFT_LABELS.items():
+        for lab in labels:
+            if lab in km:
+                old[metric] = _drift_num(km[lab])
+                break
+    old["funding_rate"] = _drift_text_num(other_text, *_DRIFT_TEXT_LABELS["funding_rate"])
+    old["oi_change_24h"] = _drift_text_num(other_text, *_DRIFT_TEXT_LABELS["oi_change_24h"])
+
+    reasons: list[dict] = []
+    checked: list[str] = []
+    for metric in ("price", "market_cap", "fdv"):
+        o, n = old.get(metric), live.get(metric)
+        if not o or not n:
+            continue
+        checked.append(metric)
+        rel = abs(o - n) / abs(n)
+        if rel > _DRIFT_REL_TOL:
+            reasons.append({
+                "metric": metric,
+                "kind": "rel_diff",
+                "thesis": o,
+                "live": n,
+                "rel_diff_pct": round(rel * 100, 2),
+            })
+    # 方向反转判据与单位无关（百分数/小数两种口径同号），故 funding 无需归一
+    for metric in _DRIFT_DIR_METRICS:
+        o, n = old.get(metric), live.get(metric)
+        if o is None or n is None:
+            continue
+        checked.append(metric)
+        if (o > 0 > n) or (o < 0 < n):
+            reasons.append({
+                "metric": metric,
+                "kind": "direction_reversed",
+                "thesis": o,
+                "live": n,
+            })
+
+    if not checked:
+        return None
+    return {"stale": bool(reasons), "reasons": reasons, "checked": checked}
+
+
 def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) -> dict:
     """打开（不存在则创建）一个代币对应的一键投研笔记本，返回资料快照 + 缺失清单 + 历史对话。
 
@@ -3182,6 +3412,8 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
     structured_metrics = _build_structured_metrics_from_snapshot(snapshot, asset_id)
     if thesis:
         thesis["structured_metrics"] = structured_metrics
+        # 审计 P0-4：结论快照 vs 实时指标背离即标「结论已过期」（价格差 >2% / OI·费率方向反转）
+        thesis["drift"] = _detect_thesis_drift(thesis, structured_metrics)
         # 读取时幂等校验引用：旧 thesis 是裸数字 citations，补全 title/url + is_inferred
         sources_list = snapshot.get("sources") or []
         _sanitize_thesis_citations(thesis, sources_list)
@@ -6734,7 +6966,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         with get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
-                    SELECT q.total_supply, q.circulating_supply, q.max_supply
+                    SELECT q.total_supply, q.circulating_supply, q.max_supply, q.quote_time
                     FROM biz.coin_basic cb
                     JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
                     WHERE cb.asset_id = %s
@@ -6744,10 +6976,24 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                 _row = cur.fetchone()
                 if _row:
                     _auth_supply = {k: _row[k] for k in ("total_supply", "circulating_supply", "max_supply") if _row[k] is not None}
+                    if _row.get("quote_time"):
+                        _auth_supply["_quote_time"] = _row["quote_time"]
     except (psycopg.errors.UndefinedTable, Exception):
         pass
 
-    def _prefer_auth_supply(tok_key: str):
+    def _prefer_auth_supply(tok_key: str, default_auth: bool = False):
+        """在「CMC 权威快照」与「tokenomics 抓取值」之间裁决单一事实源。
+
+        审计 P0-3（2026-09-26）：流通量原先默认信 tokenomics（09-04 快照 712,104,762），
+        而 CMC 最新快照已是 683,977,453（09-25），同一页面因此出现
+        71.2% / 68.4% / 100% 三个流通比例。裁决规则：
+          1. 明显量级偏差（>10x 或 <0.1x）→ 无论默认偏好，一律用 CMC 权威值（单位错误防护）；
+          2. default_auth=True（流通量）→ 优先 CMC：它是唯一带快照时间、由链上+市场推导的源，
+             tokenomist 的 released_pct=100% / float_pct=100% 与 circulating<max_supply 直接冲突，
+             判定为不可靠，不再作为流通量事实源；
+          3. 其余（total / max）→ 保留原行为优先 tokenomics（P0-1 已确认 max_supply 才是
+             真稀释基数，CMC 会自我下调至等于流通量）。
+        """
         tok_val = tokenomics.get(tok_key)
         auth_val = _auth_supply.get(tok_key)
         if auth_val is None:
@@ -6759,13 +7005,15 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             av = float(auth_val)
             if av > 0 and (tv / av > 10 or tv / av < 0.1):
                 return auth_val  # 单位疑似错误，用权威值覆盖
+            if default_auth and av > 0:
+                return auth_val
         except (ValueError, TypeError, ZeroDivisionError):
             pass
         return tok_val
 
     if tokenomics:
         _total_supply = _prefer_auth_supply("total_supply")
-        _circ_supply = _prefer_auth_supply("circulating_supply")
+        _circ_supply = _prefer_auth_supply("circulating_supply", default_auth=True)
         _max_supply = _prefer_auth_supply("max_supply")
         if _total_supply:
             metrics_structured["tokenomics"]["total_supply"] = _total_supply
@@ -6773,6 +7021,35 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             metrics_structured["tokenomics"]["circulating_supply"] = _circ_supply
         if _max_supply:
             metrics_structured["tokenomics"]["max_supply"] = _max_supply
+
+        # 裁决留痕：流通量的唯一事实源 + 快照时间（审计 P0-3 要求页面只出现一个流通比例）
+        _qtime = _auth_supply.get("_quote_time")
+        _pct_of_max = None
+        try:
+            _cs_f = float(_circ_supply or 0)
+            _ms_f = float(_max_supply or 0)
+            if _cs_f > 0 and _ms_f > 0:
+                _pct_of_max = round(_cs_f / _ms_f * 100.0, 2)
+                metrics_structured["tokenomics"]["circulating_pct_of_max"] = _pct_of_max
+        except (ValueError, TypeError):
+            pass
+        # 只有源站自报值**确实**与裁决口径冲突（>5pp）才列为弃用，避免无冲突时也挂告示
+        _ov = unlocks.get("overview") if isinstance(unlocks, dict) else None
+        _rejected = []
+        if _pct_of_max is not None and isinstance(_ov, dict):
+            for _k, _lab in (("released_pct", "释放进度"), ("float_pct", "流通率")):
+                try:
+                    _vf = float(_ov.get(_k))
+                except (TypeError, ValueError):
+                    continue
+                if abs(_vf - _pct_of_max) > 5:
+                    _rejected.append(f"tokenomist {_lab} {_vf}%（与 circulating<max_supply 冲突）")
+        metrics_structured["tokenomics"]["supply_adjudication"] = {
+            "circulating_source": ("cmc_quote_snapshot" if _auth_supply.get("circulating_supply") is not None
+                                   else "biz.asset_tokenomics"),
+            "circulating_snapshot_time": str(_qtime) if _qtime else None,
+            "rejected_sources": _rejected,
+        }
         if tokenomics.get("buy_tax_pct") is not None:
             metrics_structured["tokenomics"]["buy_tax_pct"] = tokenomics["buy_tax_pct"]
         if tokenomics.get("sell_tax_pct") is not None:
@@ -6805,6 +7082,31 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             metrics_structured["unlock"]["next_unlock_pct"] = next_event.get("pct")
             metrics_structured["unlock"]["next_unlock_value_usd"] = next_event.get("value_usd") or next_event.get("amount_usd")
         metrics_structured["unlock"]["total_events"] = len(_unlock_events)
+
+    # 审计 P0-2：下次解锁金额/比例一律以 biz.asset_unlock_event（由 unlock_ratio × 供应量 × 现价
+    # 重算而来）为准，覆盖 tokenomist 页面 Value 列（实测 PONS 低估约 600 倍：$123.46K → $7,417万）。
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """SELECT unlock_date, unlock_amount, unlock_ratio_total,
+                              unlock_ratio_mcap, unlock_value_usd
+                       FROM biz.asset_unlock_event
+                       WHERE asset_id = %s AND unlock_date >= CURRENT_DATE
+                       ORDER BY unlock_date ASC LIMIT 1""",
+                    (asset_id,),
+                )
+                _ue = cur.fetchone()
+        if _ue:
+            if _ue.get("unlock_value_usd") is not None:
+                metrics_structured["unlock"]["next_unlock_value_usd"] = _to_float(_ue["unlock_value_usd"])
+            if _ue.get("unlock_amount") is not None:
+                metrics_structured["unlock"]["next_unlock_amount"] = _to_float(_ue["unlock_amount"])
+            if _ue.get("unlock_ratio_total") is not None:
+                metrics_structured["unlock"]["next_unlock_pct"] = _to_float(_ue["unlock_ratio_total"])
+            metrics_structured["unlock"]["next_unlock_value_basis"] = "unlock_ratio_x_supply_x_price"
+    except Exception as e:
+        _emit(f"解锁事件表读取失败（沿用页面值）: {e}")
     # 数据可用性：解锁事件或 input_snapshot 非空才算「真无解锁」，否则是「未采集」（审计 F4）
     _pressure_upcoming = 0
     if isinstance(pressure, dict):
@@ -7740,6 +8042,98 @@ def _get_scripts_bin() -> Path:
     return Path(__file__).resolve().parents[2] / "05_代码与脚本" / "scripts" / "bin"
 
 
+def _get_supply_adjudication(asset_id: int) -> dict | None:
+    """流通比例的事实源裁决（审计 P0-3，一键投研页）。
+
+    同一页面曾同时出现三个流通比例（tokenomics 71.2% / market-history 68.4% /
+    tokenomist 自报 released_pct·float_pct 100%），且都**不带快照时间** —— 用户无法
+    判断该信哪个。此处给出**唯一口径**：CMC 权威快照的 circulating 作分子，分母优先取
+    「tokenomist max_supply」（当它明显大于流通量时才是正确的总供应量口径；CMC 会把
+    max_supply 静默下调到等于流通量，见 P0-1），并附快照时间。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT q.circulating_supply, q.max_supply, q.total_supply, q.quote_time
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                    ORDER BY q.quote_time DESC LIMIT 1
+                """, (asset_id,))
+                row = cur.fetchone()
+                tok_max = None
+                try:
+                    cur.execute("""
+                        SELECT max_supply FROM biz.asset_tokenomics
+                        WHERE asset_id = %s ORDER BY updated_at DESC NULLS LAST LIMIT 1
+                    """, (asset_id,))
+                    trow = cur.fetchone()
+                    tok_max = _to_float(trow.get("max_supply")) if trow else None
+                except Exception:
+                    tok_max = None
+    except Exception:
+        return None
+    if not row:
+        return None
+    cs = _to_float(row.get("circulating_supply"))
+    cmc_max = _to_float(row.get("max_supply")) or _to_float(row.get("total_supply"))
+    denom, denom_src = None, None
+    if tok_max and cs and tok_max > cs * 1.02:
+        denom, denom_src = tok_max, "tokenomics.max_supply"
+    elif cmc_max:
+        denom, denom_src = cmc_max, "cmc.max_supply"
+    if not (cs and denom):
+        return None
+    return {
+        "circulating_supply": cs,
+        "supply_basis": denom,
+        "supply_basis_source": denom_src,
+        "circulating_pct": round(cs / denom * 100.0, 2),
+        "snapshot_time": str(row["quote_time"]) if row.get("quote_time") else None,
+        "rejected_sources": [],
+    }
+
+
+def _fmt_usd_short(v) -> str | None:
+    """服务端侧美元简写（口径与前端 fmtUsdBig 一致）。"""
+    n = _to_float(v)
+    if n is None:
+        return None
+    for unit, div in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(n) >= div:
+            return f"${n / div:.2f}{unit}"
+    return f"${n:,.2f}"
+
+
+def _get_next_unlock_recomputed(asset_id: int) -> dict | None:
+    """取 biz.asset_unlock_event 中最近一次未来解锁（sync 脚本重算后的金额/价值）。
+
+    审计 P0-2：tokenomist 页面的 Value 列不能直接采信 —— PONS 2027-01-05 的 12% 解锁
+    页面写 $123.46K，按「解锁比例 × 总供应量 × 现价」应为 7,400 万量级（低估约 600 倍）。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT unlock_date, unlock_amount, unlock_ratio_total, unlock_value_usd
+                    FROM biz.asset_unlock_event
+                    WHERE asset_id = %s AND unlock_date >= CURRENT_DATE
+                    ORDER BY unlock_date ASC LIMIT 1
+                """, (asset_id,))
+                r = cur.fetchone()
+    except Exception:
+        return None
+    if not r or r.get("unlock_value_usd") is None:
+        return None
+    return {
+        "date": str(r["unlock_date"]) if r.get("unlock_date") else None,
+        "amount": _to_float(r.get("unlock_amount")),
+        "pct": _to_float(r.get("unlock_ratio_total")),
+        "value_usd": _to_float(r.get("unlock_value_usd")),
+    }
+
+
 def get_asset_unlocks(asset_id: int) -> dict | None:
     """读取已缓存的解锁数据（只读，不触发爬取）。"""
     with get_db() as conn:
@@ -7763,6 +8157,31 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
     note = ""
     if isinstance(overview, dict):
         note = overview.pop("_note", "") or ""
+    # 审计 P0-3：裁决出唯一流通比例，并把与它冲突的源站自报值列入 rejected_sources
+    adjudication = _get_supply_adjudication(asset_id)
+    if adjudication and isinstance(overview, dict):
+        rejected = []
+        for key, label in (("released_pct", "释放进度"), ("float_pct", "流通率")):
+            v = overview.get(key)
+            try:
+                vf = float(v)
+            except (TypeError, ValueError):
+                continue
+            if abs(vf - adjudication["circulating_pct"]) > 5:
+                rejected.append(f"tokenomist {label} {vf}%")
+        adjudication["rejected_sources"] = rejected
+    # 审计 P0-2：下次解锁以重算值覆盖源站自报值（源站 Value 列实测低估数百倍），
+    # 并留下口径说明，避免用户以为这是 tokenomist 的原始数字。
+    next_unlock = _get_next_unlock_recomputed(asset_id)
+    if next_unlock and isinstance(overview, dict):
+        _vstr = _fmt_usd_short(next_unlock["value_usd"])
+        if _vstr:
+            overview["next_unlock_value_str"] = _vstr
+        if next_unlock.get("pct") is not None:
+            overview["next_unlock_pct"] = next_unlock["pct"]
+        if next_unlock.get("date"):
+            overview["next_unlock_date"] = next_unlock["date"]
+        overview["next_unlock_value_basis"] = "重算口径：解锁比例 × 总供应量 × 现价"
     return {
         "source_name": row.get("source_name", "缓存"),
         "slug": row.get("slug"),
@@ -7773,6 +8192,7 @@ def get_asset_unlocks(asset_id: int) -> dict | None:
         "note": note,
         "methodology": methodology,
         "input_snapshot": input_snapshot,
+        "supply_adjudication": adjudication,
         "updated_at": str(row.get("updated_at", "")),
         "pressure": compute_unlock_pressure(asset_id),
     }

@@ -552,17 +552,33 @@ class TaskManager:
                         total_running = sum(running_by_cat.values())
 
                         if total_running < self._max_concurrent:
+                            # 候选必须限定在「有空闲槽位的 category」内（2026-09-26 修复）：
+                            # 原查询先按 (monitor 最后, started_at) 取 LIMIT 5，再在 Python 侧
+                            # 按 CATEGORY_MAX 逐个筛。当**非 monitor 的 pending ≥5 且其 category
+                            # 已满**时，候选窗口被同类任务占满 ⇒ monitor 任务根本不进入候选，
+                            # 即使它的槽位空闲也被**永久饿死**（实况：scan_freshness_watchdog
+                            # 09-24 core 满 4/4 期间干等 73min、09-26 干等 323min）。
+                            # 未知/NULL category 仍按默认上限 2 放行，与下方 Python 侧
+                            # CATEGORY_MAX.get(cat, 2) 语义保持一致（该判断继续作为安全网）。
+                            known_cats = list(CATEGORY_MAX)
+                            free_cats = [
+                                c for c in known_cats
+                                if running_by_cat.get(c, 0) < CATEGORY_MAX[c]
+                            ]
                             # 优先取非 monitor 任务（与旧行为兼容）
                             cur.execute(
                                 """
                                 SELECT task_id, category FROM sys.task
                                 WHERE status = 'pending'
+                                  AND (category = ANY(%s) OR category IS NULL
+                                       OR category <> ALL(%s))
                                 ORDER BY
                                     (CASE WHEN name ILIKE '%%monitor%%' THEN 1 ELSE 0 END),
                                     started_at ASC
                                 LIMIT 5
                                 FOR UPDATE SKIP LOCKED
-                                """
+                                """,
+                                (free_cats, known_cats),
                             )
                             candidates = cur.fetchall()
                             # 从候选中选一个 category 未满的

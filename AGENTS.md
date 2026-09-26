@@ -1248,7 +1248,11 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 **发现②（非缺陷，但放大积压）：核心槽位被长任务长期占满**。09-24 12:00–13:33 core 满 4/4（`tokenomics_extract_batch` 243min + `spa_browser_crawl_auto` 273min + `b2_ai_noise_clean_by_asset_auto` 257min 三个 09:00–10:00 启动的长任务 + `catalyst_run_all`）；09-25 20:09–09-26 10:21 则被 3 个 core 长任务占 3/4 达 13–14h（`highlight_alert` 852min / `catalyst_run_all` 836min / `catalyst_slow_pipeline` 821min），三者最终**全部由 12h 硬超时收割**。
 
-**建议（未实施）**：把候选查询改为**只取「有空闲槽位」的 category**（如 `AND category = ANY(<free_cats>)`），或在候选窗口内按 category 轮转（`ROW_NUMBER() OVER (PARTITION BY category ORDER BY started_at)`），以消除 `LIMIT 5` 饿死。**不建议**提高 `TASK_MAX_CONCURRENT` —— 利用率仅 42.6%，加槽位既不解饿死、也不解 DB 写不可达。
+**修复（已实施，本次提交）**：候选查询新增 `AND (category = ANY(<free_cats>) OR category IS NULL OR category <> ALL(<known_cats>))` —— 只取**有空闲槽位**的 category；未知/NULL category 仍按默认上限 2 放行（与下方 Python 侧 `CATEGORY_MAX.get(cat, 2)` 语义一致，该判断继续作为安全网）。
+
+- **只读现场回放（T = 09-24 13:00 CST，`running_by_cat = core=4`，`free_cats = chain,monitor`，pending = 9）**：**旧**查询候选 5 个全是 `core`，逐个过 Python 筛**全部 `accepted=False`** ⇒ `task_id=None`、monitor 永久饿死；**新**查询候选 `scan_freshness_watchdog`（monitor）⇒ 可被取走。**饿死已消除。**
+- **谓词边界单测**（`free=[chain,monitor]`, `known=[chain,core,monitor]`）：`core`→排除（已满）、`chain`/`monitor`→纳入、`NULL`→纳入、未知 `weird`→纳入，全部符合预期；psycopg 的 list→array 绑定（`= ANY(%s)` / `<> ALL(%s)`）实测可用。
+- **不建议**提高 `TASK_MAX_CONCURRENT` —— 利用率仅 42.6%，加槽位既不解饿死、也不解 DB 写不可达。
 
 ### 重大事件邮件「传导逻辑」可读性优化（audit_重大事件邮件_传导逻辑可读性优化_2026-09-26，2026-09-26，本次提交）
 

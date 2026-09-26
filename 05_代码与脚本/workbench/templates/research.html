@@ -688,6 +688,108 @@
             background: #d97706;
         }
 
+        /* 审计 §4.2 #14：确定性评分卡（0–100 + 三档 + 四维拆解） */
+        .r-thesis .t-det {
+            margin: 8px 0;
+            padding: 10px 12px;
+            border-radius: 6px;
+            border: 1px solid #2a2f3a;
+            background: #171b24;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .r-thesis .t-det-head {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .r-thesis .t-det-score {
+            font-size: 22px;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .r-thesis .t-det-tier {
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .r-thesis .t-det-why {
+            margin-left: auto;
+            color: #6b7280;
+            font-size: 11px;
+        }
+        .r-thesis .t-det-bars {
+            margin-top: 8px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 6px 14px;
+        }
+        .r-thesis .t-det-bar-label {
+            display: flex;
+            justify-content: space-between;
+            color: #9ca3af;
+            font-size: 11px;
+        }
+        .r-thesis .t-det-bar-track {
+            height: 4px;
+            border-radius: 2px;
+            background: #2a2f3a;
+            overflow: hidden;
+            margin-top: 2px;
+        }
+        .r-thesis .t-det-bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            background: #60a5fa;
+        }
+        .r-thesis .t-det-notes {
+            margin-top: 6px;
+            color: #6b7280;
+            font-size: 11px;
+        }
+        .r-thesis .t-det-locked {
+            margin-top: 6px;
+            color: #fbbf24;
+            font-size: 11px;
+        }
+
+        /* 审计 §4.2 #11：证伪条件区块 */
+        .r-thesis .t-falsify {
+            margin: 8px 0;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border-left: 3px solid #ef4444;
+            background: #241618;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .r-thesis .t-falsify-title {
+            color: #f87171;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+        .r-thesis .t-falsify li {
+            color: #d1d5db;
+            margin-left: 16px;
+        }
+
+        /* 审计 §4.2 #15：结论版本变更留痕 */
+        .r-thesis .t-verdiff {
+            margin: 8px 0;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border-left: 3px solid #6366f1;
+            background: #191b2a;
+            color: #a5b4fc;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .r-thesis .t-verdiff b {
+            color: #c7d2fe;
+        }
+
         .r-thesis .t-point {
             font-size: 13px;
             line-height: 1.6;
@@ -2819,7 +2921,9 @@
         function renderThesis (d) {
             const box = document.getElementById('r-thesis');
             const t = d.thesis;
-            const sources = d.sources || [];
+            // 审计 §4.2 #6：citation.index 是「生成时刻编号来源清单」的下标，
+            // 必须用同一份清单（citation_sources）解引用，否则 index 会指向错误的来源。
+            const sources = d.citation_sources || d.sources || [];
             const structuredMetrics = (t && t.structured_metrics) || d.structured_metrics || {};
             if (!t) {
                 box.style.display = 'block';
@@ -2873,6 +2977,74 @@
                     '<button class="t-drift-btn" onclick="generateThesis()">立即重算</button></div>';
             }
 
+            // 审计 §4.2 #14：确定性评分卡（0–100 + 三档 + 四维拆解）。
+            // 把「AI 自评置信度」升级为可计算的证据驱动分：证据覆盖率×0.35 +
+            // 数据新鲜度×0.25 + 信号一致性×0.25 + 样本充足度×0.15。
+            const analysis = t.analysis || {};
+            if (analysis && analysis.score !== undefined && analysis.score !== null) {
+                const tierColor = {
+                    actionable: { bg: '#0b3d2a', color: '#34d399' },
+                    watch: { bg: '#2a2416', color: '#fbbf24' },
+                    unusable: { bg: '#3d1616', color: '#f87171' }
+                };
+                const tc = tierColor[analysis.tier] || tierColor.watch;
+                const dimLabels = {
+                    coverage: '证据覆盖率', freshness: '数据新鲜度',
+                    consistency: '信号一致性', sample: '样本充足度'
+                };
+                html += '<div class="t-det">' +
+                    '<div class="t-det-head">' +
+                    '<span class="t-det-score" style="color:' + tc.color + '">' + analysis.score + '</span>' +
+                    '<span style="color:#6b7280;font-size:11px">/100 确定性</span>' +
+                    '<span class="t-det-tier" style="background:' + tc.bg + ';color:' + tc.color + '">' +
+                    escapeHtml(analysis.tier_label || '') + '</span>' +
+                    '<span class="t-det-why" title="可下注 ≥70 / 仅观察 40–69 / 不可用于决策 <40">分档口径 70 / 40</span>' +
+                    '</div>';
+                const bd = analysis.breakdown || {};
+                const wt = analysis.weights || {};
+                html += '<div class="t-det-bars">';
+                Object.keys(dimLabels).forEach(function (k) {
+                    const v = Number(bd[k]);
+                    if (isNaN(v)) return;
+                    const pct = Math.round(v * 100);
+                    const w = wt[k] ? Math.round(wt[k] * 100) : 0;
+                    html += '<div><div class="t-det-bar-label"><span>' + dimLabels[k] +
+                        ' <span style="opacity:0.6">×' + w + '%</span></span><span>' + pct + '%</span></div>' +
+                        '<div class="t-det-bar-track"><div class="t-det-bar-fill" style="width:' + pct + '%;background:' + tc.color + '"></div></div></div>';
+                });
+                html += '</div>';
+                if ((analysis.notes || []).length) {
+                    html += '<div class="t-det-notes">' + escapeHtml(analysis.notes.join('；')) + '</div>';
+                }
+                const ev = analysis.evidence || {};
+                if (ev.conviction_locked) {
+                    html += '<div class="t-det-locked">🔒 推断论点占比 ' +
+                        Math.round((ev.inferred_ratio || 0) * 100) + '%（>' + 50 +
+                        '%），置信度已强制锁定为「低置信」且不可上调</div>';
+                }
+                html += '</div>';
+            }
+
+            // 审计 §4.2 #11：证伪条件 —— 明确「什么情况下本结论作废」
+            const falsifiers = (analysis && analysis.falsifiers) || [];
+            if (falsifiers.length) {
+                html += '<div class="t-falsify"><div class="t-falsify-title">🚫 证伪条件（满足任一项则本结论作废）</div><ul>';
+                falsifiers.forEach(function (f) {
+                    html += '<li>' + escapeHtml(f.condition || '') + '</li>';
+                });
+                html += '</ul></div>';
+            }
+
+            // 审计 §4.2 #15：结论版本变更留痕（与上一版 diff）
+            const vdiff = t.version_diff;
+            if (vdiff && (vdiff.changes || []).length) {
+                html += '<div class="t-verdiff">📋 <b>较上一版变更</b>（' +
+                    escapeHtml(formatTimeAgo(vdiff.from_time)) + ' → ' + escapeHtml(formatTimeAgo(vdiff.to_time)) + '）：' +
+                    vdiff.changes.map(function (c) {
+                        return escapeHtml(c.field) + ' ' + escapeHtml(String(c.from)) + ' → ' + escapeHtml(String(c.to));
+                    }).join('；') + '</div>';
+            }
+
             // 关键指标（优先用结构化指标，不用 LLM 生成的）
             const sm = structuredMetrics || {};
             // 任一维度非空即展示，不再被 market 单一 gate 限制
@@ -2892,7 +3064,7 @@
             var hasStructuredMetrics =
                 _hasAnySm(sm.market) || _hasAnySm(sm.tokenomics) || _hasAnySm(sm.unlock) ||
                 _hasAnySm(sm.onchain) || _hasAnySm(sm.social) || _hasAnySm(sm.derivatives) ||
-                _hasAnySm(sm.pressure);
+                _hasAnySm(sm.pressure) || _hasAnySm(sm.fundamentals);
             if (hasStructuredMetrics) {
                 let snapshotLabel = '';
                 if (sm.market.snapshot_time) {
@@ -2955,6 +3127,34 @@
                     }
                     if (sm.derivatives.total_oi_usd !== null && sm.derivatives.total_oi_usd !== undefined) {
                         html += '<div><strong>未平仓合约</strong>: ' + fmtUsdBig(sm.derivatives.total_oi_usd) + '</div>';
+                    }
+                }
+                // 审计 §4.2 #10：基本面补充（LP 锁仓 / 合约弃权 / GitHub 活跃度 / DeFiLlama TVL）
+                const fund = sm.fundamentals;
+                if (fund && typeof fund === 'object') {
+                    if (fund.defillama_tvl && fund.defillama_tvl.tvl_usd != null) {
+                        const tvl = fund.defillama_tvl;
+                        const chg = (tvl.change_7d_pct != null) ? Number(tvl.change_7d_pct) : null;
+                        html += '<div><strong>协议 TVL</strong>: ' + fmtUsdBig(tvl.tvl_usd) +
+                            (chg != null ? ' <span style="color:' + (chg >= 0 ? '#34d399' : '#f87171') + '">' +
+                                (chg >= 0 ? '+' : '') + chg.toFixed(2) + '% (7d)</span>' : '') +
+                            (tvl.protocol ? ' <span style="opacity:0.6;font-size:11px">' + escapeHtml(tvl.protocol) + '</span>' : '') +
+                            '</div>';
+                    }
+                    if (fund.lp_locked !== null && fund.lp_locked !== undefined) {
+                        html += '<div><strong>LP 锁仓</strong>: ' + (fund.lp_locked ? '✅ 已锁' : '❌ 未锁') + '</div>';
+                    }
+                    if (fund.contract_renounced !== null && fund.contract_renounced !== undefined) {
+                        html += '<div><strong>合约弃权</strong>: ' + (fund.contract_renounced ? '✅ 已弃权' : '❌ 未弃权') + '</div>';
+                    }
+                    const repos = fund.github || [];
+                    if (repos.length) {
+                        const r0 = repos[0];
+                        html += '<div><strong>GitHub</strong>: ' + escapeHtml(r0.repo || '') +
+                            (r0.stars != null ? ' · ⭐' + fmtNumberBig(r0.stars) : '') +
+                            (r0.commits_52w != null ? ' · 52周提交 ' + fmtNumberBig(r0.commits_52w) : '') +
+                            (r0.archived ? ' <span style="color:#f87171">（已归档）</span>' : '') +
+                            '</div>';
                     }
                 }
                 html += '</div>';
@@ -3040,6 +3240,31 @@
                     const cite = (c.citations || []).map(function (ci) { return citeLabel(ci); }).join('');
                     html += '<div class="t-point">' + escapeHtml(c.catalyst || '') + timing + '<span class="t-cite">' + cite + '</span></div>';
                 });
+                html += '</div></div>';
+            }
+            // 审计 §4.2 #7：催化剂去重/过滤留痕——展示原始条数、去重后条数、被剔除项及原因
+            const catStats = (structuredMetrics && structuredMetrics.catalysts) || null;
+            if (catStats && catStats.total_count) {
+                const reasonLabel = {
+                    no_horizon: '无时间窗口（horizon_days=0，禁止进结论）',
+                    weak_relevance: '弱相关（非本币事件）',
+                    duplicate: '同一事件重复报道'
+                };
+                const excludedItems = catStats.excluded_items || [];
+                html += '<div class="t-collapsible"><div class="t-section" onclick="toggleThesisSection(this)">催化剂去重明细</div><div class="t-body">';
+                html += '<div style="font-size:12px;color:#9ca3af;line-height:1.7">原始 ' +
+                    catStats.total_count + ' 条 → 去重/过滤后 ' + (catStats.after_dedupe_count != null ? catStats.after_dedupe_count : (catStats.items || []).length) +
+                    ' 条（利好 ' + (catStats.bullish_count || 0) + ' / 利空 ' + (catStats.bearish_count || 0) +
+                    ' / 中性 ' + (catStats.neutral_count || 0) + '，来源 ' + (catStats.source_count || 0) + ' 家）</div>';
+                if (excludedItems.length) {
+                    html += '<div style="font-size:12px;color:#f87171;margin-top:4px">已剔除 ' + excludedItems.length + ' 条：</div>';
+                    excludedItems.forEach(function (c) {
+                        html += '<div class="t-point" style="color:#9ca3af">' + escapeHtml((c.title || '').slice(0, 60)) +
+                            ' <span style="color:#f87171">[' + escapeHtml(reasonLabel[c.excluded_reason] || c.excluded_reason) + ']</span>' +
+                            (c.duplicate_count > 1 ? ' <span style="opacity:0.6">（合并 ' + c.duplicate_count + ' 条同事件）</span>' : '') +
+                            '</div>';
+                    });
+                }
                 html += '</div></div>';
             }
 
@@ -4205,13 +4430,34 @@
             const signals = data.signals || [];
 
             if (signals.length === 0) {
-                let emptyHtml = '<div class="sg-empty">当前未检测到显著异动信号</div>';
+                // 审计 §4.2 #13：signal_count=0 必须区分「检测了但没触发」与「数据不足无法检测」，
+                // 不得用一句话暗示「中性」。
+                const gate = data.signal_gate || null;
+                let emptyHtml;
+                if (gate && gate.summary) {
+                    const isInsufficient = (gate.available_checks || 0) === 0;
+                    emptyHtml = '<div class="sg-empty">' + (isInsufficient ? '⛔ ' : '✅ ') +
+                        escapeHtml(gate.summary) + '</div>';
+                    const undetectable = (gate.checks || []).filter(function (c) { return !c.available; });
+                    if (undetectable.length) {
+                        emptyHtml += '<div style="margin:4px 0 0 8px;font-size:11px;opacity:0.65;">' +
+                            '无法检测项：' + undetectable.map(function (c) {
+                                return escapeHtml(c.label) + '（' + escapeHtml(c.note || '数据不足') + '）';
+                            }).join('；') + '</div>';
+                    }
+                } else {
+                    emptyHtml = '<div class="sg-empty">已检测但未触发任何异动信号（不含「中性」含义）</div>';
+                }
                 if (data.as_of) {
                     emptyHtml += '<div style="margin:4px 0 0 8px;">' + dataTimeBadge(data.as_of, '信号检测') + '</div>';
                 }
                 container.innerHTML = emptyHtml;
                 return;
             }
+            // 审计 §4.2 #13：即使有信号，也标注可检测覆盖率（哪几项无法检测）
+            const _gate = data.signal_gate || null;
+            const _undetectable = _gate && _gate.checks
+                ? _gate.checks.filter(function (c) { return !c.available; }) : [];
 
             const typeMap = {
                 price_surge: '价格暴涨',
@@ -4247,6 +4493,19 @@
                 html += '<div class="sg-meta">来源: ' + escapeHtml(s.source || '未知') + ' · 阈值 ' + (s.threshold != null ? fmtPct(s.threshold) : '—') + '</div>';
                 html += '</div></div>';
             });
+
+            // 审计 §4.2 #13：有信号时也要说明「哪几项因数据缺失而无法检测」，
+            // 避免把「检测不到」误读成「该维度正常」。
+            if (_undetectable.length) {
+                html += '<div style="margin-top:6px;font-size:11px;opacity:0.65;">' +
+                    '另有 ' + _undetectable.length + ' 项因数据不足未参与检测：' +
+                    _undetectable.map(function (c) {
+                        return escapeHtml(c.label) + '（' + escapeHtml(c.note || '数据不足') + '）';
+                    }).join('；') + '</div>';
+            } else if (_gate && _gate.summary) {
+                html += '<div style="margin-top:6px;font-size:11px;opacity:0.65;">' +
+                    escapeHtml(_gate.summary) + '</div>';
+            }
 
             container.innerHTML = html;
         }
@@ -4315,6 +4574,29 @@
                         '<span class="chev">▶</span>' +
                         '</div>' +
                         '<div class="r-group-body">';
+                    // 审计 §4.2 #12：空态卡片必须回答「缺什么 → 影响哪个结论维度 → 补上后确定性分能到多少」
+                    if (!m.present && (m.impact_dimension || m.determinism_gain)) {
+                        const dimLabel = {
+                            valuation: '估值', supply: '筹码', sentiment: '情绪',
+                            catalyst: '催化', risks: '风险'
+                        }[m.impact_dimension] || m.impact_dimension || '';
+                        // 当前确定性分（来自结论的确定性评分卡）
+                        const curScore = (d.thesis && d.thesis.analysis && d.thesis.analysis.score != null)
+                            ? Number(d.thesis.analysis.score) : null;
+                        const gain = Number(m.determinism_gain || 0);
+                        let gainTxt = '';
+                        if (gain > 0) {
+                            gainTxt = (curScore != null && !isNaN(curScore))
+                                ? '补全后确定性分 ' + curScore + ' → ' + Math.min(100, curScore + gain)
+                                : '补全后确定性分可 +' + gain;
+                        }
+                        side += '<div class="no-data" style="color:#fbbf24;text-align:left;line-height:1.6">' +
+                            '⛔ 缺失：' + escapeHtml(m.label) +
+                            (dimLabel ? '<br>影响维度：' + escapeHtml(dimLabel) +
+                                (m.impact_desc ? '（' + escapeHtml(m.impact_desc) + '）' : '') : '') +
+                            (gainTxt ? '<br>' + escapeHtml(gainTxt) : '') +
+                            '</div>';
+                    }
                     if (links.length === 0) {
                         side += '<div class="no-data">暂无链接</div>';
                     } else {

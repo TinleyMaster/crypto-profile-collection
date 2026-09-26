@@ -1696,6 +1696,37 @@ def _ensure_research_tables(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_research_thesis_asset
                 ON biz.research_thesis (asset_id, updated_at DESC)
         """)
+        # 审计 §4.2 #6/#15（2026-09-26）：
+        #   sources_json  —— 生成时刻「带编号的来源清单」快照。旧实现只存裸数字 citations，
+        #                    读取时却用另一份来源列表（snapshot["sources"]）解引用，导致
+        #                    citation.index 与 sources 数组错位（引用指向错误来源）。
+        #   analysis_json —— 生成时刻的证据分级 / 确定性拆解 / 证伪条件快照，供版本 diff。
+        cur.execute("""
+            ALTER TABLE biz.research_thesis
+                ADD COLUMN IF NOT EXISTS sources_json JSONB,
+                ADD COLUMN IF NOT EXISTS analysis_json JSONB
+        """)
+        # 审计 §4.2 #15：结论版本化留痕。主表按 (asset_id, notebook) 只保留最新一条，
+        # 历史版本落到 append-only 表，可 diff stance / conviction / 关键数值。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.research_thesis_version (
+                version_id        SERIAL PRIMARY KEY,
+                thesis_id         INTEGER,
+                asset_id          INTEGER NOT NULL,
+                stance            TEXT,
+                conviction        TEXT,
+                key_metrics_json  JSONB,
+                determinism_score NUMERIC(5,1),
+                determinism_tier  TEXT,
+                inferred_ratio    NUMERIC(5,4),
+                payload_json      JSONB,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_research_thesis_version_asset
+                ON biz.research_thesis_version (asset_id, created_at DESC)
+        """)
 
 
 def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls) -> list[dict]:
@@ -1934,6 +1965,23 @@ RESEARCH_MATERIAL_TYPES = [
     {"key": "third_party_rating", "label": "第三方评级资料", "description": "DefiLlama、Tokenomist等第三方页面链接"},
     {"key": "onchain_abnormal_event", "label": "链上异常事件记录", "description": "大额异常转账、攻击事件、链上风险事件资料"},
 ]
+
+# 审计 §4.2 #12（2026-09-26）：空态卡片必须回答「缺什么 → 影响哪个结论维度 →
+# 补上后确定性分能提升多少」。key → (影响维度, 影响说明, 确定性增益权重分)。
+_MATERIAL_IMPACT = {
+    "onchain_holder_data": ("supply", "筹码集中度、鲸鱼抛压", 8),
+    "token_unlock_data": ("supply", "解锁抛压与供给冲击", 7),
+    "social_heat": ("sentiment", "情绪热度与拥挤度", 6),
+    "audit_report": ("risks", "合约安全风险", 5),
+    "lp_liquidity_info": ("risks", "深度与撤池风险", 5),
+    "bug_bounty": ("risks", "安全披露与赏金覆盖", 4),
+    "dao_governance": ("catalyst", "治理去中心度", 3),
+    "github_repo": ("catalyst", "开发活跃度", 3),
+    "tokenomics": ("valuation", "供应量口径与估值锚", 5),
+    "third_party_rating": ("valuation", "TVL/收入等基本面锚", 6),
+    "whitepaper_docs": ("valuation", "项目基本面", 4),
+    "roadmap": ("catalyst", "里程碑兑现节奏", 3),
+}
 
 # 后 12 类资料类型 → content_topics 内容主题的精确映射（取代早期基于 URL/标题的关键词猜测）。
 _MATERIAL_TOPIC_MAP = {
@@ -2268,14 +2316,20 @@ def _compute_missing_materials_inner(snapshot: dict) -> list[dict]:
         key = spec["key"]
         links = material_links.get(key, [])
         count = structured_counts.get(key, len(links))
+        is_present = bool(present.get(key))
+        # 审计 §4.2 #12：缺失项标注影响维度 + 补全后的确定性增益
+        _dim, _desc, _gain = _MATERIAL_IMPACT.get(key, (None, spec["description"], 0))
         items.append({
             "key": key,
             "label": spec["label"],
             "description": spec["description"],
-            "present": bool(present.get(key)),
+            "present": is_present,
             "count": count,
             "note": "",
             "links": links,
+            "impact_dimension": _dim,
+            "impact_desc": _desc,
+            "determinism_gain": 0 if is_present else _gain,
         })
 
     # ── 结构化数据补充摘要链接 ──
@@ -3504,17 +3558,37 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
     # 实时拼装结构化指标（与 competitors 同源），覆盖 thesis 里的旧快照值
     # 确保页面顶部关键指标与竞品对比表的行情数字一致
     structured_metrics = _build_structured_metrics_from_snapshot(snapshot, asset_id)
+    # 审计 §4.2 #6：引用索引必须对齐「生成时刻」的编号来源清单，而非读取时重建的文档列表
+    # （旧实现用 snapshot["sources"] 解引用 thesis 里的裸数字 citations → 指向错误来源）。
+    # 旧行无 sources_json，回退到 snapshot["sources"]，保持旧行为不劣化。
+    citation_sources: list = []
     if thesis:
+        citation_sources = thesis.get("sources") or (snapshot.get("sources") or [])
         thesis["structured_metrics"] = structured_metrics
         # 审计 P0-4：结论快照 vs 实时指标背离即标「结论已过期」（价格差 >2% / OI·费率方向反转）
         thesis["drift"] = _detect_thesis_drift(thesis, structured_metrics)
         # 读取时幂等校验引用：旧 thesis 是裸数字 citations，补全 title/url + is_inferred
-        sources_list = snapshot.get("sources") or []
-        _sanitize_thesis_citations(thesis, sources_list)
+        _sanitize_thesis_citations(thesis, citation_sources)
+        # 审计 §4.2 #5/#11/#14：按当前实时数据计算证据分级 / 确定性评分卡 / 证伪条件
+        analysis = _compute_determinism(thesis, structured_metrics, missing)
+        analysis["falsifiers"] = _build_falsifiers(thesis, structured_metrics)
+        # 审计 §4.2 #5：推断点占比 >50% → conviction 强制锁 low 且不可上调
+        if analysis["evidence"].get("conviction_locked"):
+            thesis["conviction_raw"] = thesis.get("conviction")
+            thesis["conviction"] = "low"
+        thesis["analysis"] = analysis
+        # 审计 §4.2 #15：结论版本化留痕 + 最近两版 diff
+        versions = _load_thesis_versions(asset_id)
+        thesis["versions"] = versions
+        thesis["version_diff"] = _diff_thesis_versions(versions)
     else:
         # 降级结论：无 LLM 生成的 stance 时，基于已有数据生成机器可读结论
         # 保证 research 页面「研究结论」卡片不为空，用户至少能看到关键指标和数据概览
         thesis = _build_fallback_thesis(snapshot, structured_metrics, asset_id)
+        thesis["analysis"] = _compute_determinism(thesis, structured_metrics, missing)
+        thesis["analysis"]["falsifiers"] = _build_falsifiers(thesis, structured_metrics)
+        thesis["versions"] = _load_thesis_versions(asset_id)
+        thesis["version_diff"] = _diff_thesis_versions(thesis["versions"])
 
     # ── 催化剂决策 + 影响（P1-4 收口：投研页消费已存在的 catalyst_signal / catalyst_impact）──
     catalyst_signals = _load_catalyst_signals(asset_id)
@@ -3530,6 +3604,8 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
             "sector_label": SECTOR_LABELS.get(sector, sector),
             "missing": missing,
             "sources": snapshot["sources"],
+            # 审计 §4.2 #6：带编号的引用来源清单（前端参考文献按 citation.index 解引用此表）
+            "citation_sources": citation_sources,
             "structured": snapshot["structured"],
             "structured_metrics": structured_metrics,
             "counts": snapshot["counts"],
@@ -3579,19 +3655,126 @@ def _load_catalyst_signals(asset_id: int, limit: int = 20) -> list:
         return []
 
 
+# 报道噪声前缀（媒体名 / 日期 / 「消息」等）。真实重复的主因是同一稿件被不同媒体
+# 加前缀转载，前缀不同会让同一条新闻被判成不同事件（审计 §4.2 #7 实测：Bonk Guy 事件
+# 4 条标题分别以 ChainCatcher / 火星财经 / PANews 开头）。
+_CATALYST_TITLE_NOISE_RE = re.compile(
+    r"^(?:"
+    r"(?:panews|blockbeats|chaincatcher|foresight\s*news|odaily|the\s*block|coindesk|"
+    r"cointelegraph|decrypt|marsbit|火星财经|金色财经|律动|巴比特|深潮|吴说|区块律动|"
+    r"今日看点|原文标题|作者)[\s:：,，、]*"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*日[\s:：,，]*"
+    r"|(?:消息|快讯|报道|讯|电)[\s:：,，]*"
+    r"|reported on [a-z]+\s*\d{1,2}[\s,]*"
+    r")+",
+    re.IGNORECASE,
+)
+
+
+def _catalyst_event_key(title: str) -> str:
+    """事件聚类 key：先剥掉「媒体名 / 日期 / 消息」报道前缀，再归一化取前 24 字符。
+
+    用于把同一事件的多条重复报道（如 Bonk Guy 4 条）收敛为 1 条。
+    先剥前缀是必须的：同一稿件被不同媒体转载时标题正文相同、仅前缀不同，不剥则同事件
+    会被判成不同事件（审计 §4.2 #7）。中英文跨语言的同事件报道无法仅靠标题归一化收敛，
+    需语义聚类，属独立工单（见交付说明）。
+    """
+    t = title or ""
+    prev = None
+    while prev != t:
+        prev = t
+        t = _CATALYST_TITLE_NOISE_RE.sub("", t).strip()
+    t = re.sub(r"[^\w\u4e00-\u9fff]+", "", t.lower())
+    return t[:24]
+
+
+# 弱相关判据：命中这些「其他项目/平台」标记且不含自身标的时，判为弱相关
+_WEAK_RELEVANCE_MARKERS = (
+    "hyperliquid", "zhipu", "solana top", "top10 成交额", "top 10 成交额",
+)
+
+
+def _catalyst_relevance(item: dict, symbol: str | None, name: str | None) -> int:
+    """催化剂与标的的相关性打分（审计 §4.2 #7）。
+
+    命中自身 symbol / name / 相关交易对 → 高分；只命中其他项目标记 → 0 分（弱相关）。
+    """
+    text = " ".join(str(item.get(k) or "") for k in ("title", "summary", "ai_summary", "seo_keywords"))
+    text_l = text.lower()
+    score = 0
+    if symbol and symbol.lower() in text_l:
+        score += 2
+    if name and name.lower() in text_l:
+        score += 2
+    pairs = item.get("related_pairs") or []
+    if symbol and any(str(p).upper().startswith(symbol.upper()) for p in pairs):
+        score += 1
+    if item.get("link_source") and item.get("link_source") != "auto":
+        score += 1
+    if score == 0 and any(m in text_l for m in _WEAK_RELEVANCE_MARKERS):
+        return 0
+    return score
+
+
+def _dedupe_catalyst_impacts(rows: list[dict], symbol: str | None = None,
+                             name: str | None = None, limit: int = 15,
+                             horizon_gate: bool = True) -> list[dict]:
+    """催化剂去重 + 相关性过滤 + 窗口门控（审计 §4.2 #7）。
+
+    - 同一事件（标题归一化相同）只保留最新一条，重复数记入 duplicate_count；
+    - horizon_days=0（无时间窗口）不得进入结论，标记 excluded_reason='no_horizon'；
+    - 相关性打分为 0 的弱相关条目标记 excluded_reason='weak_relevance'；
+    - 被排除项仍保留在列表中（带 excluded 标记），供前端「已过滤」区展示。
+    """
+    seen: dict[str, dict] = {}
+    kept: list[dict] = []
+    for r in rows:
+        item = dict(r)
+        title = item.get("title") or ""
+        item["duplicate_count"] = 1
+        item["relevance_score"] = _catalyst_relevance(item, symbol, name)
+        # 去重：同一事件聚类只保留最新（查询已按 published_at DESC）
+        key = _catalyst_event_key(title)
+        if key and key in seen:
+            seen[key]["duplicate_count"] = seen[key].get("duplicate_count", 1) + 1
+            continue
+        if key:
+            seen[key] = item
+        kept.append(item)
+
+    for item in kept:
+        if horizon_gate and item.get("horizon_days") in (0, None):
+            item["excluded_reason"] = "no_horizon"
+        elif item.get("relevance_score", 0) == 0:
+            item["excluded_reason"] = "weak_relevance"
+    # 先按发布时间倒序（稳定排序），再把可消费项（未被排除）提到前面
+    kept.sort(key=lambda x: str(x.get("published_at") or ""), reverse=True)
+    kept.sort(key=lambda x: 0 if not x.get("excluded_reason") else 1)
+    return kept[:limit]
+
+
 def _load_catalyst_impacts(asset_id: int, window_days: int = 90) -> list:
     """投研页催化剂影响卡：取该资产近 N 天事件×资产的定向影响推导（P1-4 收口 / A 路径）。
 
     消费 catalyst_impact（规则推导，零 LLM）。失败静默降级为空。
+    审计 §4.2 #7：读取后做事件聚类去重 + 相关性过滤 + horizon 门控。
     """
     try:
         with get_db() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                arow = cur.fetchone()
+                symbol = arow["canonical_symbol"] if arow else None
+                name = arow["canonical_name"] if arow else None
                 cur.execute(
                     """
                     SELECT ci.impact_direction, ci.impact_strength, ci.horizon_days,
                            ac.catalyst_id, ac.title, ac.published_at,
-                           ac.source_url, ac.event_category, ac.ai_summary
+                           ac.source_url, ac.event_category, ac.ai_summary,
+                           ac.seo_keywords, ac.related_pairs
                     FROM biz.catalyst_impact ci
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
                     WHERE ci.asset_id = %s
@@ -3601,9 +3784,8 @@ def _load_catalyst_impacts(asset_id: int, window_days: int = 90) -> list:
                     """,
                     (asset_id, window_days),
                 )
-                cols = [d[0] for d in cur.description] if cur.description else []
-                rows = cur.fetchall()
-                return [dict(zip(cols, r)) for r in rows]
+                raw = [dict(r) for r in cur.fetchall()]
+                return _dedupe_catalyst_impacts(raw, symbol=symbol, name=name)
     except Exception:
         return []
 
@@ -3914,6 +4096,9 @@ def _thesis_row_to_dict(row) -> dict:
         "source_notebook_id": row["source_notebook_id"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
+        # 审计 §4.2 #6/#15：生成时刻的来源清单与确定性快照（旧行可能无此两列）
+        "sources": row.get("sources_json") or [],
+        "analysis": row.get("analysis_json") or {},
     }
 
 
@@ -3953,6 +4138,7 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
         for item in items:
             cites = []
             seen_idx = set()
+            homepage_only = True  # 审计 §4.2 #6：是否「只有官网首页」这类万能引用
             for c in item.get("citations") or []:
                 try:
                     if isinstance(c, dict):
@@ -3967,16 +4153,25 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
                 # 过滤项目官网交易页/产品页的自引（循环引用）
                 if _is_self_serving_source(s):
                     continue
+                if not _is_homepage_source(s):
+                    homepage_only = False
                 seen_idx.add(idx)
                 cites.append({
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",
                     "url": s.get("url") or "",
                 })
+            text = item.get("point") or item.get("risk") or ""
+            # 审计 §4.2 #6：禁止「官网首页」作为数值类结论的唯一引用——
+            # 首页对「资金费率 0.0206%」这类数值结论零证明力，应退回「推断」。
+            if cites and homepage_only and _NUMERIC_POINT_RE.search(str(text)):
+                cites = []
             new_item = dict(item)
             new_item["citations"] = cites
             if not cites:
                 new_item["is_inferred"] = True
+            else:
+                new_item["is_inferred"] = False
             cleaned.append(new_item)
         return cleaned
 
@@ -3992,6 +4187,283 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
                 dim["points"] = _sanitize(dim.get("points") or [])
 
     return thesis_data
+
+
+# ── 审计 §4.2 #5/#6/#11/#14（2026-09-26）：证据分级 / 引用对齐 / 证伪条件 / 确定性门控 ──
+
+# 数值类结论判定：含货币符号、百分号、数量级或两位数以上数字
+_NUMERIC_POINT_RE = re.compile(
+    r"(\$\s*\d|\d[\d,]*\.?\d*\s*%|\d[\d,]*\.?\d*\s*(?:万|亿|百万|千万)|\b\d{2,}(?:\.\d+)?\b)"
+)
+
+_DETERMINISM_WEIGHTS = {"coverage": 0.35, "freshness": 0.25, "consistency": 0.25, "sample": 0.15}
+# 三档：≥70 可下注 / 40–69 仅观察 / <40 不可用于决策
+_DETERMINISM_TIERS = ((70.0, "actionable", "可下注"), (40.0, "watch", "仅观察"), (0.0, "unusable", "不可用于决策"))
+
+
+def _is_homepage_source(s: dict) -> bool:
+    """官网首页（official_website 且无具体路径）——不能作为数值类结论的唯一引用。"""
+    if s.get("type") != "official_website":
+        return False
+    url = (s.get("url") or "").rstrip("/")
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        return not urlparse(url).path.strip("/")
+    except Exception:
+        return False
+
+
+def _iter_thesis_points(thesis_data: dict) -> list[dict]:
+    """遍历结论全部论点（thesis / risks / 四维 points）。"""
+    out = []
+    for item in thesis_data.get("thesis") or []:
+        if isinstance(item, dict):
+            out.append({"kind": "thesis", "item": item})
+    for item in thesis_data.get("risks") or []:
+        if isinstance(item, dict):
+            out.append({"kind": "risk", "item": item})
+    dims = thesis_data.get("dimensions")
+    if isinstance(dims, dict):
+        for dim_key in ("valuation", "supply", "sentiment", "catalyst"):
+            dim = dims.get(dim_key)
+            if isinstance(dim, dict):
+                for item in dim.get("points") or []:
+                    if isinstance(item, dict):
+                        out.append({"kind": dim_key, "item": item})
+    return out
+
+
+def _compute_evidence_stats(thesis_data: dict) -> dict:
+    """证据分级统计（审计 §4.2 #5）：总论点 / 有引用 / 推断 / 推断占比。
+
+    inferred_ratio > 50% 时 conviction 强制锁 low 且不可上调。
+    """
+    points = _iter_thesis_points(thesis_data)
+    total = len(points)
+    cited = sum(1 for p in points if (p["item"].get("citations") or []))
+    if total == 0:
+        return {"total_points": 0, "cited_points": 0, "inferred_points": 0,
+                "inferred_ratio": None, "conviction_locked": False}
+    ratio = round((total - cited) / total, 4)
+    return {"total_points": total, "cited_points": cited,
+            "inferred_points": total - cited, "inferred_ratio": ratio,
+            "conviction_locked": ratio > 0.5}
+
+
+def _freshness_dim(sm: dict) -> tuple[float, list]:
+    """数据新鲜度子分：market/unlock/derivatives 三档平均（≤24h=1.0 / ≤168h=0.5 / 否则 0）。"""
+    fresh = (sm or {}).get("data_freshness") or {}
+    parts, notes = [], []
+    for key, label in (("market", "行情"), ("unlock", "解锁"), ("derivatives", "衍生品")):
+        info = fresh.get(key) or {}
+        age = info.get("age_hours")
+        if age is None:
+            parts.append(0.5)
+            notes.append(f"{label}:无时效信息")
+        elif age <= 24:
+            parts.append(1.0)
+        elif age <= 168:
+            parts.append(0.5)
+            notes.append(f"{label}:{age:.0f}h 偏旧")
+        else:
+            parts.append(0.0)
+            notes.append(f"{label}:{age:.0f}h 严重滞后")
+    if not parts:
+        return 0.5, ["无数据时效信息"]
+    return sum(parts) / len(parts), notes
+
+
+def _consistency_dim(sm: dict) -> tuple[float, list]:
+    """信号一致性子分：资金费率 / OI 变化 / CVD 三者方向是否一致。"""
+    deriv = (sm or {}).get("derivatives") or {}
+
+    def _sign(v):
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return 1 if v > 0 else (-1 if v < 0 else 0)
+
+    def _pick(*keys):
+        for k in keys:
+            if deriv.get(k) is not None:
+                return deriv.get(k)
+        return None
+
+    known = [s for s in (
+        _sign(_pick("funding_rate_pct", "funding_rate")),
+        _sign(_pick("oi_change_24h_pct", "oi_change_24h")),
+        _sign(_pick("cvd_ratio_24h", "cvd_24h_usd")),
+    ) if s is not None]
+    if len(known) < 2:
+        return 0.4, ["衍生品方向数据不足"]
+    if len(set(known)) == 1:
+        return 1.0, ["资金费率/OI/CVD 方向一致"]
+    pos, neg = known.count(1), known.count(-1)
+    if len(known) >= 3 and max(pos, neg) >= len(known) - 1:
+        return 0.6, ["资金费率/OI/CVD 多数同向"]
+    return 0.3, ["资金费率/OI/CVD 方向分裂"]
+
+
+def _sample_dim(missing: list | None) -> tuple[float, list]:
+    """样本充足度子分：资料覆盖完整度（present / 总数）。"""
+    if missing:
+        total = len(missing)
+        present = sum(1 for m in missing if m.get("present"))
+        return (present / total if total else 0.0), [f"资料完整度 {present}/{total}"]
+    return 0.5, ["无资料完整度信息"]
+
+
+def _compute_determinism(thesis_data: dict, structured_metrics: dict,
+                         missing: list | None = None) -> dict:
+    """确定性评分卡（审计 §4.2 #14）：0–100 分 + 三档 + 四维拆解。
+
+    Determinism = 证据覆盖率×0.35 + 数据新鲜度×0.25 + 信号一致性×0.25 + 样本充足度×0.15
+    """
+    ev = _compute_evidence_stats(thesis_data)
+    coverage = (ev["cited_points"] / ev["total_points"]) if ev["total_points"] else 0.0
+    fresh, f_notes = _freshness_dim(structured_metrics)
+    cons, c_notes = _consistency_dim(structured_metrics)
+    sample, s_notes = _sample_dim(missing)
+    breakdown = {
+        "coverage": round(coverage, 4),
+        "freshness": round(fresh, 4),
+        "consistency": round(cons, 4),
+        "sample": round(sample, 4),
+    }
+    score = round(100.0 * sum(breakdown[k] * _DETERMINISM_WEIGHTS[k] for k in _DETERMINISM_WEIGHTS), 1)
+    tier_code, tier_label = "unusable", "不可用于决策"
+    for threshold, code, label in _DETERMINISM_TIERS:
+        if score >= threshold:
+            tier_code, tier_label = code, label
+            break
+    # 审计 §4.2 #6/#14：修复「官网首页万能引用」后，PONS 实测 21 个论点 0 条可核验引用
+    # （coverage=0）。零证据的结论不得进入「仅观察」及以上档位——新鲜度/一致性/样本量
+    # 再好看，也替代不了证据本身。故 coverage=0 时强制封顶到「不可用于决策」档上沿。
+    if coverage == 0:
+        score = min(score, 39.9)
+        tier_code, tier_label = "unusable", "不可用于决策"
+        notes = ["全部论点为推断、无一条可核验引用 → 确定性分封顶 39.9（不可用于决策）"]
+    else:
+        notes = []
+    return {
+        "score": score,
+        "tier": tier_code,
+        "tier_label": tier_label,
+        "weights": dict(_DETERMINISM_WEIGHTS),
+        "breakdown": breakdown,
+        "notes": f_notes + c_notes + s_notes + notes,
+        "evidence": ev,
+    }
+
+
+def _build_falsifiers(thesis_data: dict, structured_metrics: dict) -> list[dict]:
+    """结论证伪条件（审计 §4.2 #11）：什么情况下本结论作废。"""
+    sm = structured_metrics or {}
+    market = sm.get("market") or {}
+    deriv = sm.get("derivatives") or {}
+    unlock = sm.get("unlock") or {}
+    onchain = sm.get("onchain") or {}
+    km = (thesis_data or {}).get("key_metrics") or {}
+
+    def _num(v):
+        try:
+            return float(str(v).replace(",", "").replace("$", "").replace("%", ""))
+        except (TypeError, ValueError):
+            return None
+
+    out = []
+    price = _num(market.get("price_usd")) or _num(km.get("价格") or km.get("price"))
+    if price:
+        out.append({
+            "kind": "price", "label": "价格",
+            "condition": f"价格跌破 ${price * 0.85:,.4f}（较当前 −15%）",
+            "metric": round(price * 0.85, 6),
+        })
+    oi = _num(deriv.get("total_oi_usd"))
+    if oi:
+        out.append({
+            "kind": "oi", "label": "未平仓合约",
+            "condition": f"全市场 OI 跌破 {oi * 0.7:,.0f}（较当前 −30%，杠杆资金离场）",
+            "metric": round(oi * 0.7, 2),
+        })
+    nxt = unlock.get("next_unlock_date")
+    if nxt:
+        out.append({
+            "kind": "unlock", "label": "解锁",
+            "condition": f"{nxt} 解锁前 3 天起本结论失效（需按解锁后筹码重估）",
+            "metric": nxt,
+        })
+    t10 = _num(onchain.get("top10_concentration_pct") or onchain.get("top10_concentration"))
+    if t10 is not None:
+        line = max(80.0, t10 * 1.2)
+        out.append({
+            "kind": "concentration", "label": "筹码集中度",
+            "condition": f"Top10 持仓集中度升破 {line:.1f}%（当前 {t10:.1f}%，越集中抛压越集中）",
+            "metric": round(line, 2),
+        })
+    return out
+
+
+def _load_thesis_versions(asset_id: int, limit: int = 5) -> list[dict]:
+    """读取结论历史版本（审计 §4.2 #15），返回按时间倒序的版本列表。"""
+    try:
+        with get_db() as conn:
+            _ensure_research_tables(conn)
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT version_id, stance, conviction, determinism_score,
+                           determinism_tier, inferred_ratio, key_metrics_json, created_at
+                    FROM biz.research_thesis_version
+                    WHERE asset_id = %s
+                    ORDER BY created_at DESC, version_id DESC LIMIT %s
+                """, (asset_id, limit))
+                versions = []
+                for r in cur.fetchall():
+                    versions.append({
+                        "version_id": r["version_id"],
+                        "stance": r["stance"],
+                        "conviction": r["conviction"],
+                        "determinism_score": float(r["determinism_score"]) if r["determinism_score"] is not None else None,
+                        "determinism_tier": r["determinism_tier"],
+                        "inferred_ratio": float(r["inferred_ratio"]) if r["inferred_ratio"] is not None else None,
+                        "key_metrics": r["key_metrics_json"] or {},
+                        "created_at": str(r["created_at"]),
+                    })
+            return versions
+    except Exception:
+        return []
+
+
+def _diff_thesis_versions(versions: list[dict]) -> dict | None:
+    """对比最近两个版本的 stance / conviction / 确定性分 / 关键数值变化。"""
+    if len(versions) < 2:
+        return None
+    cur_v, prev_v = versions[0], versions[1]
+    changes = []
+    for field, label in (("stance", "立场"), ("conviction", "置信度"),
+                         ("determinism_tier", "确定性档位")):
+        if cur_v.get(field) != prev_v.get(field):
+            changes.append({"field": label, "from": prev_v.get(field), "to": cur_v.get(field)})
+    cur_s, prev_s = cur_v.get("determinism_score"), prev_v.get("determinism_score")
+    if cur_s is not None and prev_s is not None and abs(cur_s - prev_s) >= 1.0:
+        changes.append({"field": "确定性分", "from": prev_s, "to": cur_s})
+    for key in ("价格", "price", "市值", "market_cap", "FDV", "fdv"):
+        o, n = prev_v.get("key_metrics", {}).get(key), cur_v.get("key_metrics", {}).get(key)
+        if o is None or n is None or o == n:
+            continue
+        changes.append({"field": key, "from": o, "to": n})
+    return {
+        "from_version_id": prev_v.get("version_id"),
+        "to_version_id": cur_v.get("version_id"),
+        "from_time": prev_v.get("created_at"),
+        "to_time": cur_v.get("created_at"),
+        "changes": changes,
+    }
 
 
 def _get_cm_netflow_benchmark(cur, asset_id: int) -> dict:
@@ -5306,12 +5778,53 @@ def detect_asset_signals(asset_id: int) -> dict:
     severity_order = {"critical": 0, "warning": 1, "info": 2}
     signals.sort(key=lambda s: severity_order.get(s.get("severity", "info"), 99))
 
+    # 审计 §4.2 #13：输出门控——必须区分「检测了但没触发」与「数据不足无法检测」，
+    # signal_count=0 时不得暗示「中性」。
+    _triggered = {s.get("type") for s in signals}
+    _market_days = data_status.get("market_days") or 0
+
+    def _gate(family: tuple, label: str, available: bool, note: str) -> dict:
+        return {
+            "family": list(family),
+            "label": label,
+            "available": bool(available),
+            "triggered": any(t in _triggered for t in family),
+            "note": note,
+        }
+
+    gate_checks = [
+        _gate(("price_surge", "price_dump"), "价格异动", _market_days >= 1,
+              "已检测（阈值 ±15%）" if _market_days >= 1 else "缺少行情历史，无法取 24h 涨跌幅"),
+        _gate(("volume_surge",), "成交量放大", _market_days >= 8,
+              "已检测（阈值 2× 7 日均量）" if _market_days >= 8
+              else f"行情仅 {_market_days} 天，需 ≥8 天才可检测"),
+        _gate(("oi_surge", "oi_dump"), "OI 异动", bool(data_status.get("has_derivatives")),
+              "已检测（阈值 ±20%）" if data_status.get("has_derivatives") else "数据不足：无衍生品 OI 数据"),
+        _gate(("funding_extreme",), "资金费率极端", bool(data_status.get("has_derivatives")),
+              "已检测（阈值 ±0.05%）" if data_status.get("has_derivatives") else "数据不足：无资金费率数据"),
+        _gate(("unlock_soon",), "解锁临近", bool(data_status.get("has_unlock")),
+              "已检测（阈值 30 天解锁 ≥5%）" if data_status.get("has_unlock") else "数据不足：无解锁日历"),
+    ]
+    available_checks = sum(1 for g in gate_checks if g["available"])
+    if available_checks == 0:
+        gate_summary = "数据不足，无法检测"
+    elif not signals:
+        gate_summary = f"已检测但未触发（{available_checks}/{len(gate_checks)} 项可检测，均未达阈值）"
+    else:
+        gate_summary = f"触发 {len(signals)} 条信号（{available_checks}/{len(gate_checks)} 项可检测）"
+
     return {
         "ok": True,
         "asset_id": asset_id,
         "signals": signals,
         "signal_count": len(signals),
         "data_status": data_status,
+        "signal_gate": {
+            "checks": gate_checks,
+            "available_checks": available_checks,
+            "total_checks": len(gate_checks),
+            "summary": gate_summary,
+        },
         "as_of": as_of_date,
     }
 
@@ -6474,6 +6987,10 @@ def get_divergence_signals(asset_id: int) -> dict:
     }
 
 
+# 审计 §4.2 #9：竞品市值需落在一个数量级内（±3×），避免用 Aave 给 meme 做估值对标
+_COMPETITOR_MCAP_BAND = 3.0
+
+
 def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
     """同赛道竞品结构化对比：按 primary_sector 找同赛道币，聚合关键指标横向对比。
 
@@ -6498,44 +7015,83 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 return {"ok": False, "error": "资产不存在"}
             sector = target["primary_sector"] or "other"
 
-            # 2. 找同赛道币（排除自己），按市值/FDV 降序取前 N 个
+            # 1b. 取当前币市值（审计 §4.2 #9：竞品必须「同量级」，不能用 Aave 给 meme 做估值对标）
+            cur.execute("""
+                SELECT COALESCE(
+                           NULLIF((input_snapshot_json->>'market_cap')::NUMERIC, 0),
+                           NULLIF((input_snapshot_json->>'fdv')::NUMERIC, 0)
+                       ) AS mcap
+                FROM biz.asset_token_unlocks WHERE asset_id = %s
+            """, (asset_id,))
+            _trow = cur.fetchone()
+            target_mcap = _pressure_float(_trow["mcap"]) if _trow else None
+            if not target_mcap:
+                cur.execute("""
+                    SELECT market_cap FROM biz.asset_market_daily
+                    WHERE asset_id = %s AND market_cap IS NOT NULL
+                    ORDER BY market_date DESC LIMIT 1
+                """, (asset_id,))
+                _trow2 = cur.fetchone()
+                target_mcap = _pressure_float(_trow2["market_cap"]) if _trow2 else None
+
+            # 2. 找同赛道币（排除自己），按「市值量级 + 资产属性」匹配（审计 §4.2 #9）
             #    额外过滤：meme 赛道排除 asset_type='coin'（主流公链币被误分类的情况）
             extra_filter = ""
             if sector == "meme":
                 extra_filter = "AND a.asset_type != 'coin'"
-            cur.execute(f"""
-                WITH sector_assets AS (
-                    SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
-                           a.primary_sector
-                    FROM core.asset a
-                    WHERE a.primary_sector = %s
-                      AND a.asset_id <> %s
-                      {extra_filter}
-                ),
-                asset_mcap AS (
-                    SELECT asset_id,
-                           COALESCE(
-                               NULLIF((cb.input_snapshot_json->>'market_cap')::NUMERIC, 0),
-                               NULLIF((cb.input_snapshot_json->>'fdv')::NUMERIC, 0),
-                               0
-                           ) AS mcap
-                    FROM biz.asset_token_unlocks cb
-                    WHERE cb.asset_id IN (SELECT asset_id FROM sector_assets)
-                )
-                SELECT sa.asset_id, sa.canonical_symbol, sa.canonical_name, sa.asset_type,
-                       COALESCE(am.mcap, 0) AS mcap
-                FROM sector_assets sa
-                LEFT JOIN asset_mcap am ON am.asset_id = sa.asset_id
-                ORDER BY am.mcap DESC NULLS LAST, sa.canonical_symbol
-                LIMIT %s
-            """, (sector, asset_id, limit))
-            comp_rows = cur.fetchall()
+
+            def _query_competitors(use_band: bool):
+                band_clause = ""
+                params: list = [sector, asset_id]
+                if use_band and target_mcap:
+                    band_clause = "WHERE (COALESCE(am.mcap, 0) BETWEEN %s AND %s)"
+                    params += [target_mcap / _COMPETITOR_MCAP_BAND, target_mcap * _COMPETITOR_MCAP_BAND]
+                params += [target.get("asset_type"), target_mcap or 0, limit]
+                cur.execute(f"""
+                    WITH sector_assets AS (
+                        SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.asset_type,
+                               a.primary_sector
+                        FROM core.asset a
+                        WHERE a.primary_sector = %s
+                          AND a.asset_id <> %s
+                          {extra_filter}
+                    ),
+                    asset_mcap AS (
+                        SELECT asset_id,
+                               COALESCE(
+                                   NULLIF((cb.input_snapshot_json->>'market_cap')::NUMERIC, 0),
+                                   NULLIF((cb.input_snapshot_json->>'fdv')::NUMERIC, 0),
+                                   0
+                               ) AS mcap
+                        FROM biz.asset_token_unlocks cb
+                        WHERE cb.asset_id IN (SELECT asset_id FROM sector_assets)
+                    )
+                    SELECT sa.asset_id, sa.canonical_symbol, sa.canonical_name, sa.asset_type,
+                           COALESCE(am.mcap, 0) AS mcap
+                    FROM sector_assets sa
+                    LEFT JOIN asset_mcap am ON am.asset_id = sa.asset_id
+                    {band_clause}
+                    ORDER BY (sa.asset_type = %s) DESC,
+                             ABS(COALESCE(am.mcap, 0) - %s) ASC,
+                             sa.canonical_symbol
+                    LIMIT %s
+                """, tuple(params))
+                return cur.fetchall()
+
+            comp_rows = _query_competitors(use_band=True)
+            if len(comp_rows) < 3:
+                # 同量级候选不足 3 个时回退到「同赛道」全量（仍按资产属性排序），避免空列表
+                comp_rows = _query_competitors(use_band=False)
+                matched_by = "sector_only"
+            else:
+                matched_by = "mcap_band_and_type"
 
             if not comp_rows:
                 return {
                     "ok": True,
                     "sector": sector,
                     "sector_label": SECTOR_LABELS.get(sector, sector),
+                    "matched_by": matched_by,
                     "target": {
                         "asset_id": target["asset_id"],
                         "symbol": target["canonical_symbol"],
@@ -6855,6 +7411,7 @@ def get_sector_competitors(asset_id: int, limit: int = 8) -> dict:
                 "ok": True,
                 "sector": sector,
                 "sector_label": SECTOR_LABELS.get(sector, sector),
+                "matched_by": matched_by,
                 "target": {
                     "asset_id": target["asset_id"],
                     "symbol": target["canonical_symbol"],
@@ -6873,6 +7430,7 @@ def get_latest_research_thesis(asset_id: int) -> dict | None:
             cur.execute("""
                 SELECT thesis_id, asset_id, stance, conviction, thesis_json,
                        key_metrics_json, risks_json, catalysts_json,
+                       sources_json, analysis_json,
                        source_notebook_id, created_at, updated_at
                 FROM biz.research_thesis WHERE asset_id = %s
                 ORDER BY updated_at DESC, thesis_id DESC LIMIT 1
@@ -6906,7 +7464,7 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     with get_db() as conn:
         _ensure_research_tables(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT notebook_id, snapshot_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
+            cur.execute("SELECT notebook_id, snapshot_json, missing_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
             nb = cur.fetchone()
     if not nb:
         created = get_or_create_research_notebook(asset_id)
@@ -6914,11 +7472,12 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             return {"ok": False, "error": created.get("error", "无法创建笔记本")}
         with get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                cur.execute("SELECT notebook_id, snapshot_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
+                cur.execute("SELECT notebook_id, snapshot_json, missing_json FROM biz.research_notebook WHERE asset_id = %s", (asset_id,))
                 nb = cur.fetchone()
 
     notebook_id = nb["notebook_id"]
     snapshot = nb.get("snapshot_json") or {}
+    missing_items = nb.get("missing_json") or []
     sources = _build_research_sources(snapshot)
     if not sources:
         return {"ok": False, "error": "该代币暂无投研资料，无法生成结论"}
@@ -7319,9 +7878,18 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                            ac.published_at, ac.event_category,
                            ac.ai_event_type, ac.ai_sentiment, ac.ai_summary,
                            ac.seo_keywords, ac.related_pairs, ac.source_url,
-                           cal.link_source, cal.confidence
+                           cal.link_source, cal.confidence,
+                           cih.horizon_days
                     FROM biz.catalyst_asset_link cal
                     JOIN biz.asset_catalyst ac ON ac.catalyst_id = cal.catalyst_id
+                    -- 审计 §4.2 #7：horizon_days 只存在于 catalyst_impact；显式 0 表示无时间窗口，
+                    -- 该条禁止进结论。未推导出影响（NULL）不视为 0，仍允许进入上下文。
+                    LEFT JOIN LATERAL (
+                        SELECT ci.horizon_days
+                        FROM biz.catalyst_impact ci
+                        WHERE ci.catalyst_id = ac.catalyst_id AND ci.asset_id = cal.asset_id
+                        LIMIT 1
+                    ) cih ON TRUE
                     WHERE cal.asset_id = %s
                       AND ac.published_at >= NOW() - INTERVAL '180 days'
                     ORDER BY ac.published_at DESC
@@ -7344,19 +7912,141 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                         "source_url": r["source_url"],
                         "link_source": r["link_source"],
                         "confidence": float(r["confidence"]) if r["confidence"] else None,
+                        "horizon_days": r["horizon_days"],
                     })
         if catalysts_list:
+            # 审计 §4.2 #7：事件聚类去重 + 弱相关过滤（30 条 → <15）。
+            # 若弱相关项被全部剔除后为空，则回退到去重结果，避免过度过滤导致无催化剂可用。
+            _raw_count = len(catalysts_list)
+            _deduped = _dedupe_catalyst_impacts(
+                catalysts_list, symbol=snapshot.get("symbol"), name=snapshot.get("name"),
+                limit=15, horizon_gate=False,
+            )
+            _clean = [c for c in _deduped if not c.get("excluded_reason")]
+            # 审计 §4.2 #7：horizon_days 显式 = 0（无时间窗口）的条目禁止进结论
+            for _c in _clean:
+                if _c.get("horizon_days") == 0:
+                    _c["excluded_reason"] = "no_horizon"
+            _consumable = [c for c in _clean if not c.get("excluded_reason")]
+            _fallback = [c for c in _deduped if c.get("horizon_days") != 0]
+            catalysts_list = _consumable or _fallback or _deduped
             metrics_structured["catalysts"] = {
-                "total_count": len(catalysts_list),
+                "total_count": _raw_count,
+                "after_dedupe_count": len(catalysts_list),
                 "bullish_count": sum(1 for c in catalysts_list if c["sentiment"] == "bullish"),
                 "bearish_count": sum(1 for c in catalysts_list if c["sentiment"] == "bearish"),
                 "neutral_count": sum(1 for c in catalysts_list if c["sentiment"] == "neutral"),
                 "source_count": len(set(c["source_code"] for c in catalysts_list)),
                 "items": catalysts_list,
+                # 去重/过滤留痕（前端「催化剂去重明细」展示）
+                "excluded_items": [c for c in _deduped if c.get("excluded_reason")],
             }
-            _emit(f"催化剂数据：{len(catalysts_list)} 条（近180天）")
+            _emit(f"催化剂数据：原始 {_raw_count} 条 → 去重过滤后 {len(catalysts_list)} 条")
     except Exception as e:
         _emit(f"催化剂数据采集失败（不影响结论生成）: {e}")
+
+    # ── 竞品对标（审计 §4.2 #9：thesis 必须消费 /competitors，估值维度需同量级横向对标）──
+    try:
+        _comp = get_sector_competitors(asset_id, limit=8)
+        _comp_items = [c for c in (_comp.get("competitors") or []) if not c.get("is_target")]
+        if _comp_items:
+            metrics_structured["competitors"] = {
+                "sector": _comp.get("sector"),
+                "sector_label": _comp.get("sector_label"),
+                "matched_by": _comp.get("matched_by"),
+                "count": len(_comp_items),
+                "items": [
+                    {
+                        "symbol": c.get("symbol"),
+                        "name": c.get("name"),
+                        "type": c.get("type"),
+                        "market_cap": c.get("market_cap"),
+                        "fdv": c.get("fdv"),
+                        "price": c.get("price"),
+                        "change_24h": c.get("change_24h"),
+                        "unlocked_pct": c.get("unlocked_pct"),
+                        "unlock_30d_pct": c.get("unlock_30d_pct"),
+                        "top10_concentration": c.get("top10_concentration"),
+                        "social_score": c.get("social_score"),
+                    }
+                    for c in _comp_items[:5]
+                ],
+            }
+            _emit(f"竞品数据：{_comp.get('sector_label')} 赛道 {len(_comp_items)} 个对标（匹配方式 {_comp.get('matched_by')}）")
+    except Exception as e:
+        _emit(f"竞品数据采集失败（不影响结论生成）: {e}")
+
+    # ── 基本面补充（审计 §4.2 #10）──
+    # 链上 Top10 集中度、社交热度已分别落在 onchain / social 维度；此处补齐剩余「库内已有但未接线」项：
+    #   ① LP 锁仓 / 合约弃权 / 买卖税（biz.asset_tokenomics）
+    #   ② GitHub 开发活跃度（biz.github_repo_activity，按文档入口 github URL 匹配）
+    #   ③ DeFiLlama 协议 TVL（src_dl.protocol_list，经 core.asset_source_map 映射）
+    # 仍缺且本轮不可行的：协议收入/费用（无 fees 采集管道）、审计报告结构化（无 OCR/解析管道），
+    # 两者均需新增外部采集，属独立工单，见交付说明。
+    _fund: dict = {}
+    if isinstance(tokenomics, dict):
+        for _k in ("lp_locked", "contract_renounced", "buy_tax_pct", "sell_tax_pct"):
+            if tokenomics.get(_k) is not None:
+                _fund[_k] = tokenomics[_k]
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT owner_login, repo_name, stars_count, forks_count,
+                           open_issues_count, archived, total_commits_52w,
+                           contributor_count_52w, pushed_at
+                    FROM biz.github_repo_activity
+                    WHERE owner_login || '/' || repo_name IN (
+                        SELECT DISTINCT
+                            SUBSTRING(entry_url FROM 'github\\.com/([^/]+/[^/\\s#?]+)')
+                        FROM biz.doc_source_entry
+                        WHERE asset_id = %s
+                          AND entry_type = 'github'
+                          AND entry_url LIKE '%%github.com%%'
+                    )
+                    ORDER BY stars_count DESC NULLS LAST
+                    LIMIT 3
+                """, (asset_id,))
+                _repos = [{
+                    "repo": f"{r['owner_login']}/{r['repo_name']}",
+                    "stars": r["stars_count"],
+                    "forks": r["forks_count"],
+                    "open_issues": r["open_issues_count"],
+                    "archived": r["archived"],
+                    "commits_52w": r["total_commits_52w"],
+                    "contributors_52w": r["contributor_count_52w"],
+                    "pushed_at": str(r["pushed_at"]) if r["pushed_at"] else None,
+                } for r in cur.fetchall()]
+        if _repos:
+            _fund["github"] = _repos
+    except Exception as e:
+        _emit(f"GitHub 活跃度采集失败（不影响结论生成）: {e}")
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT p.name, p.category, p.tvl, p.change_1d, p.change_7d, p.fetched_at
+                    FROM src_dl.protocol_list p
+                    JOIN core.asset_source_map asm
+                      ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
+                    WHERE asm.asset_id = %s AND p.tvl IS NOT NULL
+                    ORDER BY p.tvl DESC LIMIT 1
+                """, (asset_id,))
+                _pr = cur.fetchone()
+        if _pr:
+            _fund["defillama_tvl"] = {
+                "protocol": _pr["name"],
+                "category": _pr["category"],
+                "tvl_usd": _to_float(_pr["tvl"]),
+                "change_1d_pct": _to_float(_pr["change_1d"]),
+                "change_7d_pct": _to_float(_pr["change_7d"]),
+                "fetched_at": str(_pr["fetched_at"]) if _pr["fetched_at"] else None,
+            }
+    except Exception as e:
+        _emit(f"DeFiLlama TVL 采集失败（不影响结论生成）: {e}")
+    if _fund:
+        metrics_structured["fundamentals"] = _fund
+        _emit(f"基本面补充：{', '.join(sorted(_fund.keys()))}")
 
     metrics_json_str = json.dumps(metrics_structured, ensure_ascii=False, indent=2, default=str)
 
@@ -7403,7 +8093,19 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "12. 数据时效规则：结构化指标 data_freshness 列出各数据源的 as_of / age_hours / stale。\n"
         "    - 引用某维度数据时，若该源 stale=true（滞后超过 24 小时），必须在该维度结论中显式标注"
         "「该数据滞后约 X 天/小时，结论可能失真」，不得把陈旧数据当作实时数据（审计 F7）。\n"
-        "    - 行情/衍生品为实时源；社交、链上持仓等慢变量若滞后，涉及相应维度的判断需降低置信度。\n\n"
+        "    - 行情/衍生品为实时源；社交、链上持仓等慢变量若滞后，涉及相应维度的判断需降低置信度。\n"
+        "13. 竞品对标规则：结构化指标 competitors.items 是「同赛道 + 同市值量级」的对标集"
+        "（matched_by=mcap_band_and_type 表示已按市值量级 ±3× 与资产属性匹配；sector_only 表示同量级候选不足，"
+        "仅保证同赛道）。\n"
+        "    - valuation 维度必须消费 competitors：至少用 1 个同量级竞品的市值/FDV/解锁比例做横向对比。\n"
+        "    - 禁止拿不同量级的蓝筹（如 Aave/1inch 给 meme 币）做估值对标。\n"
+        "    - 若 competitors.items 为空或缺失，valuation 写「暂无同量级对标标的」，不得编造竞品。\n"
+        "14. 基本面规则：结构化指标 fundamentals 含 lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct、"
+        "github（仓库活跃度）、defillama_tvl（协议 TVL）。\n"
+        "    - valuation 或 catalyst 维度应消费可用项（如 TVL 规模与 7 日变化、GitHub 提交/贡献者）。\n"
+        "    - 若 fundamentals 缺失某项（如无 defillama_tvl），写「该项未采集」，"
+        "禁止用资料库正文里的旧 TVL 数字替代。\n"
+        "    - 协议收入/费用（fees/revenue）无采集管道，如需引用只能写「收入数据未采集」。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
         "2. supply（筹码）：回答「风险在哪（筹码层面）」——持仓集中度、代币分配、解锁抛压、鲸鱼动向\n"
@@ -7509,9 +8211,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     # 过滤无效引用（越界/重复/自引），补充 title/url，对无有效引用的论点标记为推断
     def _sanitize_citations(items: list[dict], text_key: str) -> list[dict]:
         cleaned = []
-        seen_idx = set()
         for item in items:
             cites = []
+            seen_idx = set()
+            # 审计 §4.2 #6：是否「只有官网首页」这类万能引用
+            homepage_only = True
             for c in item.get("citations") or []:
                 try:
                     idx = int(c) if isinstance(c, (int, float, str)) else int(c.get("index", 0))
@@ -7523,16 +8227,23 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                 # 过滤项目官网交易页/产品页的自引（循环引用）
                 if _is_self_serving_source(s):
                     continue
+                if not _is_homepage_source(s):
+                    homepage_only = False
                 seen_idx.add(idx)
                 cites.append({
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",
                     "url": s.get("url") or "",
                 })
+            text = item.get("point") or item.get("risk") or ""
+            # 审计 §4.2 #6：禁止「官网首页」作为数值类结论的唯一引用——
+            # 首页对「资金费率 0.0206%」这类数值结论零证明力，应退回「推断」。
+            if cites and homepage_only and _NUMERIC_POINT_RE.search(str(text)):
+                cites = []
             new_item = dict(item)
             new_item["citations"] = cites
-            if not cites:
-                new_item["is_inferred"] = True  # 无引用源，标记为推断
+            # 审计 §4.2 #5：有据=非推断，无据=推断（与读取侧 _sanitize_thesis_citations 同口径）
+            new_item["is_inferred"] = not cites
             cleaned.append(new_item)
         return cleaned
 
@@ -7557,7 +8268,20 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     thesis_payload = {
         "thesis": thesis,
         "dimensions": dimensions_clean,
+        "key_metrics": key_metrics,
     }
+
+    # 审计 §4.2 #5/#11/#14：生成侧即计算证据分级 / 确定性分 / 证伪条件，并作 conviction 强制锁
+    _analysis = _compute_determinism(thesis_payload, metrics_structured, missing_items)
+    _analysis["falsifiers"] = _build_falsifiers(thesis_payload, metrics_structured)
+    if _analysis["evidence"].get("conviction_locked"):
+        _ev = _analysis["evidence"]
+        _emit(
+            f"推断占比 {(_ev.get('inferred_ratio') or 0) * 100:.0f}%"
+            f"（{_ev.get('inferred_points')}/{_ev.get('total_points')} 个论点无引用）> 50%，"
+            f"conviction 由 {conviction} 强制锁定为 low（审计 §4.2 #5）"
+        )
+        conviction = "low"
 
     with get_db() as conn:
         _ensure_research_tables(conn)
@@ -7566,8 +8290,9 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             cur.execute("""
                 INSERT INTO biz.research_thesis
                     (asset_id, stance, conviction, thesis_json, key_metrics_json,
-                     risks_json, catalysts_json, source_notebook_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     risks_json, catalysts_json, sources_json, analysis_json,
+                     source_notebook_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (asset_id, source_notebook_id) DO UPDATE SET
                     stance = EXCLUDED.stance,
                     conviction = EXCLUDED.conviction,
@@ -7575,9 +8300,12 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     key_metrics_json = EXCLUDED.key_metrics_json,
                     risks_json = EXCLUDED.risks_json,
                     catalysts_json = EXCLUDED.catalysts_json,
+                    sources_json = EXCLUDED.sources_json,
+                    analysis_json = EXCLUDED.analysis_json,
                     updated_at = NOW()
                 RETURNING thesis_id, asset_id, stance, conviction, thesis_json,
                           key_metrics_json, risks_json, catalysts_json,
+                          sources_json, analysis_json,
                           source_notebook_id, created_at, updated_at
             """, (
                 asset_id, stance, conviction,
@@ -7585,9 +8313,25 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                 json.dumps(key_metrics, ensure_ascii=False, default=str),
                 json.dumps(risks, ensure_ascii=False),
                 json.dumps(catalysts, ensure_ascii=False),
+                json.dumps(sources, ensure_ascii=False, default=str),
+                json.dumps(_analysis, ensure_ascii=False, default=str),
                 notebook_id,
             ))
             row = cur.fetchone()
+            # 审计 §4.2 #15：结论版本化留痕（append-only，供 stance/conviction/关键数值 diff）
+            if row:
+                cur.execute("""
+                    INSERT INTO biz.research_thesis_version
+                        (thesis_id, asset_id, stance, conviction, key_metrics_json,
+                         determinism_score, determinism_tier, inferred_ratio, payload_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    row["thesis_id"], asset_id, stance, conviction,
+                    json.dumps(key_metrics, ensure_ascii=False, default=str),
+                    _analysis["score"], _analysis["tier"],
+                    _analysis["evidence"].get("inferred_ratio"),
+                    json.dumps(thesis_payload, ensure_ascii=False, default=str),
+                ))
         conn.commit()
 
     _emit("研究结论已生成")
@@ -8339,18 +9083,67 @@ def _parse_unlock_event_date(date_str: str):
     return None
 
 
-def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h):
+def _downside_score(value, cap: float, weight: float) -> float:
+    """把「越负越危险」的指标映射为 0..cap 的抛压分（正值/None 记 0）。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if v >= 0:
+        return 0.0
+    return min(cap, abs(v) * weight)
+
+
+def _unlock_value_score(unlock_pct_30d, turnover_24h) -> float:
+    """解锁价值 ÷ 日均成交额 映射为 0..20 分（审计 §4.2 #8）。
+
+    解锁价值 ≈ unlock_pct_30d% × 市值，日均成交额 ≈ turnover × 市值，
+    故比值 = (unlock_pct_30d/100) / turnover，无需绝对金额。
+    """
+    try:
+        pct = float(unlock_pct_30d or 0.0)
+        to = float(turnover_24h or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if pct <= 0 or to <= 0:
+        return 0.0
+    return min(20.0, ((pct / 100.0) / to) * 40.0)
+
+
+def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h,
+                            drawdown_from_ath=None, cvd_ratio=None,
+                            oi_change_24h=None, unlock_value_usd=None,
+                            volume_24h_usd=None):
     """抛压评分 0-100（越高越危险）。
 
-    unlock_score：未来 30 天解锁占比 × 6，60 分封顶；
-    concentration_score：Top10 集中度映射 0-25 分（越集中解锁抛压越集中）；
-    liquidity_discount：换手率越高承接力越强，减免最多 15 分。
+    审计 §4.2 #8（2026-09-26）重构：抛压不能只看解锁，扩到「解锁 × 筹码集中 × 价格回撤 ×
+    资金流向（CVD/OI）× 解锁价值÷成交额」。各分量：
+      - unlock_score：未来 30 天解锁占比 × 6，60 分封顶；
+      - concentration_score：Top10 集中度映射 0-25 分（越集中抛压越集中）；
+      - liquidity_discount：换手率越高承接力越强，**只抵扣解锁分量**（最多 15 分），
+        不得抹掉价格回撤/资金流向这类已实现抛压；
+      - drawdown_score：ATH 回撤越深越危险，0-30 分；
+      - cvd_score：CVD 净卖出为负，0-15 分；
+      - oi_score：OI 24h 下降（去杠杆/资金离场），0-10 分；
+      - unlock_value_score：解锁价值 ÷ 日均成交额，0-20 分。
     """
     unlock_score = min(60.0, (unlock_pct_30d or 0.0) * 6.0)
     _t10 = min(100.0, max(0.0, top10_concentration or 0.0))  # 越界脏值防御（2026-09-23）
     concentration_score = (_t10 / 100.0) * 25.0
     liquidity_discount = min(15.0, (turnover_24h or 0.0) * 150.0)
-    score = max(0.0, min(100.0, unlock_score + concentration_score - liquidity_discount))
+    drawdown_score = _downside_score(drawdown_from_ath, 30.0, 0.9)
+    cvd_score = _downside_score(cvd_ratio, 15.0, 20.0)
+    oi_score = _downside_score(oi_change_24h, 10.0, 0.3)
+    if unlock_value_usd is not None and volume_24h_usd:
+        try:
+            unlock_value_score = min(20.0, (float(unlock_value_usd) / float(volume_24h_usd)) * 40.0)
+        except (TypeError, ValueError, ZeroDivisionError):
+            unlock_value_score = 0.0
+    else:
+        unlock_value_score = _unlock_value_score(unlock_pct_30d, turnover_24h)
+    score = max(0.0, unlock_score - liquidity_discount) + concentration_score \
+        + drawdown_score + cvd_score + oi_score + unlock_value_score
+    score = max(0.0, min(100.0, score))
     if score >= 60:
         risk = "high"
     elif score >= 30:
@@ -8452,8 +9245,6 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     if market_cap_f and volume_f and market_cap_f > 0:
         turnover_24h = round(volume_f / market_cap_f, 4)
 
-    score, risk = _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h)
-
     # 2.5 ATH/ATL 回撤上下文（biz.asset_perf_daily，CMC price-performance 汇总）
     drawdown_from_ath = None
     ath_price = None
@@ -8471,15 +9262,51 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         ath_price = _pressure_float(prow[0])
         drawdown_from_ath = _pressure_float(prow[1])
 
+    # 2.6 资金流向（CVD / OI 变化）——审计 §4.2 #8：抛压不能只看解锁。
+    #     直接读 biz.asset_derivatives 快照（不调 get_asset_derivatives，避免批量重算时反复 DDL）。
+    cvd_ratio = None
+    oi_change_24h = None
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    "SELECT cvd_ratio_24h, cvd_24h_usd, oi_change_24h_pct "
+                    "FROM biz.asset_derivatives WHERE asset_id = %s",
+                    (asset_id,),
+                )
+                drow = cur.fetchone()
+        if drow:
+            # 优先用 CVD 比率（无量纲，-0.12 即 -12%）；无比率时退回绝对净额
+            cvd_ratio = _pressure_float(drow["cvd_ratio_24h"])
+            if cvd_ratio is None:
+                cvd_ratio = _pressure_float(drow["cvd_24h_usd"])
+            oi_change_24h = _pressure_float(drow["oi_change_24h_pct"])
+    except Exception:
+        pass
+
+    score, risk = _compute_pressure_score(
+        unlock_pct_30d, top10_concentration, turnover_24h,
+        drawdown_from_ath=drawdown_from_ath,
+        cvd_ratio=cvd_ratio,
+        oi_change_24h=oi_change_24h,
+        unlock_value_usd=None,  # 由 unlock_pct_30d × 市值/成交额比推出，见下方 detail
+    )
+
     detail = {
         "unlock_score": round(min(60.0, unlock_pct_30d * 6.0), 2),
         "concentration_score": round(((top10_concentration or 0.0) / 100.0) * 25.0, 2),
         "liquidity_discount": round(min(15.0, (turnover_24h or 0.0) * 150.0), 2),
+        "drawdown_score": round(_downside_score(drawdown_from_ath, 30.0, 0.9), 2),
+        "cvd_score": round(_downside_score(cvd_ratio, 15.0, 20.0), 2),
+        "oi_score": round(_downside_score(oi_change_24h, 10.0, 0.3), 2),
+        "unlock_value_score": round(_unlock_value_score(unlock_pct_30d, turnover_24h), 2),
         "price_usd": price_info.get("price_usd"),
         "market_cap_usd": price_info.get("market_cap_usd"),
         "volume_24h_usd": price_info.get("volume_24h_usd"),
         "ath_price": ath_price,
         "drawdown_from_ath": drawdown_from_ath,
+        "cvd_ratio_24h": cvd_ratio,
+        "oi_change_24h_pct": oi_change_24h,
         "upcoming_events_count": sum(1 for e in events if e.get("is_upcoming")),
     }
 

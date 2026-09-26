@@ -6526,6 +6526,31 @@
             border: 1px solid rgba(245, 158, 11, .35);
         }
 
+        /* 刀2 复验 47bcb4d §五 #1：回测校准状态角标（区分「已校准背书」与「未校准」） */
+        .signal-calib {
+            margin-left: 4px;
+            padding: 1px 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: help;
+        }
+        .signal-calib-ok {
+            background: rgba(34, 197, 94, .16);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, .35);
+        }
+        .signal-calib-none {
+            background: rgba(107, 114, 128, .22);
+            color: #9ca3af;
+            border: 1px solid rgba(107, 114, 128, .40);
+        }
+        .signal-calib-decay {
+            background: rgba(240, 185, 11, .16);
+            color: #f0b90b;
+            border: 1px solid rgba(240, 185, 11, .35);
+        }
+
         /* P1-1（2026-09-18 审计）：AI 分析时刻 */
         .ai-reason-ts {
             margin-left: 6px;
@@ -13637,6 +13662,23 @@
             // 避免"AI 中性谨慎 + 系统 HIGH 看多"同屏打架。
             var fireBadge = level === 'high' && !o._ai_downgraded ? '<span class="signal-fire">🔥 HIGH</span>' : '';
 
+            // 刀2 复验 47bcb4d §五 #1：回测校准状态角标。
+            // 此前「calibrated_ok（有回测背书）」与「表中无此类型/豁免未回测」在 API 上同形，
+            // HIGH 卡无法自证「高确定性」是否有经验支撑。此处按 status.state 显式区分：
+            //   已校准背书 → 绿标；已回测但降权 → 黄标；未校准/未回测 → 灰标。
+            var calibBadge = '';
+            var cs = o.calibration_status;
+            if (cs && cs.state) {
+                var csNote = cs.note || '';
+                if (cs.state === 'calibrated_ok') {
+                    calibBadge = '<span class="signal-calib signal-calib-ok" title="' + escapeHtml(csNote) + '">✔ 已校准背书</span>';
+                } else if (cs.state === 'decayed') {
+                    calibBadge = '<span class="signal-calib signal-calib-decay" title="' + escapeHtml(csNote) + '">↓ 已降权</span>';
+                } else {
+                    calibBadge = '<span class="signal-calib signal-calib-none" title="' + escapeHtml(csNote) + '">未校准</span>';
+                }
+            }
+
             // P1-2：事件驱动直通徽章（AI 不认可但规则保留）
             // 刀4（2026-09-26 审计·P1-B）：v1/v2 富化现在统一带 ai_endorsed 标记，
             // 与 _ai_downgraded 互斥渲染（downgraded 已含"直通"语义，避免双徽章重复）。
@@ -13807,6 +13849,7 @@
                 km +
                 '<span class="signal-score">conv ' + score + '</span>' +
                 fireBadge +
+                calibBadge +
                 bypassBadge +
                 resonanceBadge +
                 '</div>' +

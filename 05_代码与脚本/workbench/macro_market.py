@@ -2708,6 +2708,53 @@ def _signal_type_calibration(signal_type: str) -> dict | None:
     return cal
 
 
+def _calibration_status(signal_type: str) -> dict:
+    """某 signal_type 的回测校准状态（四态），供卡片区分「已回测」与「未校准」。
+
+    复验报告 `核验_刀2_回测闭环_47bcb4d §五 #1`：`_signal_type_calibration` 对
+    「表中无此类型」与「calibrated_ok（factor=1 且不封顶）」都返回 None，公开 API 上
+    完全同形——当前保留 HIGH 的条目到底有没有回测背书，外部无从判断。故在消费端另记
+    一层状态（不改 `_signal_type_calibration` 的既有契约）：
+
+      calibrated_ok   表中有行且 factor>=1 且不封顶 → 已回测且背书通过
+      decayed         表中有行且 factor<1 或 no_high → 已回测但结论差，已降权、不进 HIGH
+      exempt_*        表中有行但属豁免集合 → 从未被回测（聚合/非可交易 target 等），无背书
+      missing         表中无此类型 → 未校准，无背书
+
+    判断依据（2026-09-26 prod 只读实测 19 行）：catalyst 为 calibrated_ok（样本 45 /
+    命中率 77.8%，有背书）；chain_inflow / fng_extreme / narrative 为
+    exempt_not_backtestable（样本 0）——即当时 8 条 HIGH 席位里 5 条坐在从未回测的类型上。
+    """
+    _ensure_calibration_loaded()
+    cal = _SIGNAL_TYPE_CALIBRATION.get(signal_type or "")
+    if not cal:
+        return {
+            "state": "missing", "gate": "missing_calibration", "calibrated": False,
+            "note": "该信号类型未进入回测校准表（未校准），无回测背书",
+        }
+    gate = str(cal.get("gate") or "")
+    n = cal["sample_count"]
+    hr = cal["hit_rate"]
+    hr_txt = f"{hr:.0%}" if hr is not None else "无样本"
+    if gate.startswith("exempt_"):
+        return {
+            "state": gate, "gate": gate, "calibrated": False,
+            "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+            "note": f"该类型属豁免集合（{gate}），从未被回测，无回测背书",
+        }
+    if cal["weight_factor"] >= 1.0 and not cal["no_high"]:
+        return {
+            "state": "calibrated_ok", "gate": gate, "calibrated": True,
+            "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+            "note": f"回测背书通过（样本 {n}、命中率 {hr_txt}）",
+        }
+    return {
+        "state": "decayed", "gate": gate, "calibrated": True,
+        "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+        "note": f"已回测（{gate}，样本 {n}、命中率 {hr_txt}）→ 分数已降权、不进 HIGH 候选",
+    }
+
+
 _MARKET_RULES = _load_market_rules()
 DIVERGENCE_THRESHOLDS = _MARKET_RULES["divergence_thresholds"]
 OPPORTUNITY_THRESHOLDS = _MARKET_RULES["opportunity_thresholds"]
@@ -3181,8 +3228,15 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
     # 「封顶而非删卡」是有意的：衰减后若跌破 MED 门槛会被判 LOW 而整类消失，
     # 那是「低命中类型被封杀」而非「不进 HIGH 候选」，超出刀2 意图（用户 2026-09-26 确认）。
     cal = _signal_type_calibration(st)
+    # 刀2 复验 47bcb4d §五 #1：不管有无衰减，都显式留痕校准状态，让 HIGH 卡可自证
+    # 「有回测背书」还是「未校准/未回测」（此前两者在 API 上同形）。
+    opp["calibration_status"] = _calibration_status(st)
     if cal:
         before = score
+        # 刀2 复验 47bcb4d §五 #4：保卡下限把不同质量的 MED 卡压成同一个 med_min
+        # （58→55 与 78→55），MED 内部相对序坍缩；保留衰减前原分供排序专用
+        # （select_highlight_signals._sort_key 用作同分 tie-break，还原原始质量序）。
+        opp["raw_before_decay"] = before
         if cal["weight_factor"] < 1.0:
             score = max(int(round(score * cal["weight_factor"])), med_min)
         opp["calibration"] = {
@@ -4828,7 +4882,16 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
             score = float(o.get("conviction_score", 0) or 0)
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
-        return (is_high, is_new, resonance, score)
+        # 刀2 复验 47bcb4d §五 #4：回测校准的保卡下限把所有被衰减的卡压成同一个
+        # med_min（58→55 与 78→55 → 同为 55），MED 内部排序退化为随机。末位加入
+        # 衰减前原分（raw_before_decay）作 tie-break，还原原始质量序；无校准字段的卡
+        # 退化为用自身分数，排序结果与改动前完全一致。
+        raw = o.get("raw_before_decay")
+        try:
+            raw = float(raw) if raw is not None else score
+        except (TypeError, ValueError):
+            raw = score
+        return (is_high, is_new, resonance, score, raw)
 
     # 取足够多的候选，确保合并和筛选后还有量
     candidates = sorted(long_opps, key=_sort_key, reverse=True)[:max_total * 10]

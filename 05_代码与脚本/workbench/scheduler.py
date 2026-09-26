@@ -96,6 +96,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 每周专项 ═══
     ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）", "core"),
+    # 刀2 复验 47bcb4d §五 #5：biz.signal_type_calibration 原为一次性快照，只能人工重跑，
+    # 校准窗口随样本陈旧失真（macro_market 按 window_end DESC 取最新窗口消费）。
+    # 纳入周级重算：周日 05:00 北京，避开每日早高峰（data_sync_daily 06:30）。
+    # 落表键 (signal_type, horizon_days, window_end) 幂等，重跑不产生重复行。
+    ("signal_type_calibration_weekly", "0 5 * * 0", "run_signal_type_calibration_backtest.py",
+     ["--days", "30"], "signal_type 回测校准周级重算（每周日 05:00，写入 biz.signal_type_calibration）", "core"),
 
     # ═══ 投研数据提取 ═══
     # P1-1: CMC 行情快照每日 3 次（04/12/20 UTC），防单日采集失败导致快照缺口

@@ -15,6 +15,9 @@
   macro 侧  保卡下限：衰减后仍不低于 med_min（防整类被删）
   macro 侧  豁免（exempt_*）→ 不衰减、保留 HIGH
   macro 侧  消费 SQL 取最新窗口（window_end DESC）+ no_high/weight_factor 字段
+  macro 侧  复验 47bcb4d §五#1  calibration_status 四态留痕（missing/calibrated_ok/decayed/exempt_*）
+  macro 侧  复验 47bcb4d §五#4  raw_before_decay 供 select_highlight_signals 排序还原原序
+  macro 侧  复验 47bcb4d §五#1  前端按状态渲染「已校准 / 未校准」角标
 """
 import os
 import sys
@@ -209,6 +212,70 @@ check(ex["conviction_score"] == 88 and ex["conviction_tier"] == "HIGH",
 check("calibration" not in ex, "豁免不写 calibration 字段（不制造「已校准」错觉）")
 
 
+# ═══════════════ macro 侧：复验 47bcb4d §五 #1 四态状态留痕 ═══════════════
+# 复验发现「calibrated_ok（有回测背书）」与「表中无此类型/豁免未回测」在 API 上同形，
+# HIGH 卡无法自证高确定性是否有经验支撑。_calibration_status 另记一层状态以区分。
+print("[复验#1] calibration_status 四态：missing / calibrated_ok / decayed / exempt_*")
+ms, _, _ = _push(95, "etf_flow")                      # 表内无此类型
+check(ms["calibration_status"]["state"] == "missing"
+      and ms["calibration_status"]["calibrated"] is False
+      and ms["calibration_status"]["gate"] == "missing_calibration",
+      f"表内无此类型 → missing（实得 {ms['calibration_status']['state']}）")
+ok, _, _ = _push(95, "catalyst", cal=_CAL_OK)
+check(ok["calibration_status"]["state"] == "calibrated_ok"
+      and ok["calibration_status"]["calibrated"] is True
+      and ok["calibration_status"]["sample_count"] == 45,
+      f"已回测且背书通过 → calibrated_ok（实得 {ok['calibration_status']['state']}）")
+check("calibration" not in ok,
+      "calibrated_ok 不写重 calibration 字段（状态另挂，不污染卡片）")
+check(ok["conviction_score"] == 95 and ok["conviction_tier"] == "HIGH",
+      "calibrated_ok → 不衰减、保留 HIGH（与上线前一致）")
+check(ok["calibration_status"]["state"] != ms["calibration_status"]["state"],
+      "有背书 / 未校准 在 API 上可分辨（复验#1 核心验收点）")
+dc, _, _ = _push(86, "etf_flow", cal=_CAL_LOW)
+check(dc["calibration_status"]["state"] == "decayed"
+      and dc["calibration_status"]["calibrated"] is True,
+      f"已回测但降权 → decayed（实得 {dc['calibration_status']['state']}）")
+check(ex["calibration_status"]["state"] == "exempt_not_backtestable"
+      and ex["calibration_status"]["calibrated"] is False,
+      f"豁免类型 → exempt_not_backtestable 且无背书（实得 {ex['calibration_status']['state']}）")
+# 状态层是**另记**的：_signal_type_calibration 的既有契约（None 语义）不变，
+# 故 calibrated_ok / missing 仍不产出 calibration 字段（见上方 ok / ms 两例）。
+check(ms.get("raw_before_decay") is None and ok.get("raw_before_decay") is None,
+      "未衰减卡不写 raw_before_decay（无衰减即无原序信息）")
+
+# ═══════════════ macro 侧：复验 47bcb4d §五 #4 保卡下限排序还原 ═══════════════
+print("[复验#4] raw_before_decay 供排序：MED 内还原原始质量序")
+check(dc.get("raw_before_decay") == 86 and ok.get("raw_before_decay") is None,
+      f"衰减卡记 raw_before_decay，未衰减卡不记（实得 {dc.get('raw_before_decay')}）")
+
+
+def _mk(target, score, raw=None, st="etf_flow"):
+    o = {"signal_type": st, "target": target, "direction": "long",
+         "conviction_score": score, "conviction_tier": "MED",
+         "related_dims": ["a", "b"]}
+    if raw is not None:
+        o["raw_before_decay"] = raw
+    return o
+
+
+# 同分（55，均为保卡下限落点）时按衰减前原分排序：raw 78 应排在 raw 58 之前
+_ordered = mm.select_highlight_signals([_mk("BBB", 55, raw=58), _mk("AAA", 55, raw=78)],
+                                       max_total=10, min_resonance=1)
+check([x["target"] for x in _ordered] == ["AAA", "BBB"],
+      f"同分按 raw_before_decay 降序（实得 {[x['target'] for x in _ordered]}）")
+# 无校准字段的卡：末位 tie-break 退化为自身分数 ⇒ 与改动前一致（同分保持输入序）
+_plain = mm.select_highlight_signals([_mk("BBB", 55), _mk("AAA", 55)],
+                                     max_total=10, min_resonance=1)
+check([x["target"] for x in _plain] == ["BBB", "AAA"],
+      f"无 raw_before_decay → 排序行为不变（实得 {[x['target'] for x in _plain]}）")
+# 主序仍是分数：分数高的 raw 低的卡不被反超
+_main = mm.select_highlight_signals([_mk("BBB", 60, raw=10), _mk("AAA", 55, raw=99)],
+                                    max_total=10, min_resonance=1)
+check([x["target"] for x in _main] == ["BBB", "AAA"],
+      f"conviction_score 仍是主序（实得 {[x['target'] for x in _main]}）")
+
+
 # ═══════════════ macro 侧：源码守卫 ═══════════════
 print("[macro] 消费端源码守卫")
 check("SELECT DISTINCT ON (signal_type)" in _MACRO_SRC
@@ -225,6 +292,19 @@ check("_signal_type_calibration(st)" in _push_body
       "衰减写在 _push_opportunity 内且带 med_min 保卡下限")
 check('tier = "MED"' in _push_body and "no_high" in _push_body,
       "no_high → 档位封顶 MED 落在同一函数（单一落点）")
+check("_calibration_status(st)" in _push_body and 'opp["calibration_status"]' in _push_body,
+      "复验#1：状态留痕写在 _push_opportunity 内（每条机会都有）")
+check('opp["raw_before_decay"] = before' in _push_body,
+      "复验#4：衰减前原分落在 _push_opportunity 内")
+_sort_body = _MACRO_SRC.split("def select_highlight_signals(")[1].split("\ndef ")[0]
+check("raw_before_decay" in _sort_body and "raw = score" in _sort_body,
+      "复验#4：排序键消费 raw_before_decay，且缺省退化为自身分数")
+
+# 前端：状态角标渲染
+_HTML_SRC = open(os.path.join(_HERE, "templates", "index.html"), encoding="utf-8").read()
+check("o.calibration_status" in _HTML_SRC and "signal-calib-none" in _HTML_SRC
+      and "signal-calib-ok" in _HTML_SRC,
+      "复验#1：前端按 calibration_status 渲染「已校准/未校准」角标（未校准灰标）")
 
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}")
 sys.exit(1 if failed else 0)

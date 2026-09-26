@@ -16,6 +16,9 @@
   NEW-1 预定动作豁免须「动作词 ∧（实体 ∨ 将来语义）」，单靠 upgrade/list/上线 等词形不算
        （否则陈旧评论恒新鲜，OPT-2 被成规模架空）；
   NEW-2 新鲜条目只有中性时不得印「剔除陈旧后多空持平」（方向不存在），改印「无新鲜方向」。
+复验（核验_催化剂门禁扩容与存量清理_a9e7901 §六 P1）：
+  4 条「通用词漏放行」收口 —— 删 `miner|矿工|上线`、`stacks` 加 `(?!\s+of\b)`、补 `sui`
+  项目名（抵消删 `上线` 的唯一代价）；正反样本各 4/3 条。
 另附「HTML 邮件不得含 markdown 强调符 `**`」护栏（重踩过的坑）。
 """
 import ast
@@ -499,6 +502,32 @@ for _ctx, _why in _MUST_PASS:
     check(lk.has_crypto_context(_ctx) is True,
           f"必须放行 {_ctx[:28]!r}…" + (f"（{_why}）" if _why else ""),
           "真加密新闻被误杀 ⇒ 该 symbol 的催化剂静默缺失")
+
+print("\n【复验 a9e7901·通用词漏放行】4 条（核验_催化剂门禁扩容与存量清理_a9e7901 §二C）")
+# 「通用词」= 既不指向加密、也不指向商品/美股的日常词。它们同时服务商品 gate 与
+# equity gate，故每加一个都会翻转另一边的若干条（报告 §二C 的结构性根因）。
+_MUST_BLOCK_GENERIC = [
+    ("澳洲煤矿矿工罢工，动力煤供应中断", "`矿工` ⇒ COAL gate 翻转"),
+    ("Gold miner output rose 5%", "`miner` ⇒ GOLD gate 翻转"),
+    ("迪士尼+ 上线新剧集", "`上线` ⇒ DIS gate 失效"),
+    ("The company holds stacks of cash", "`stacks` 撞上英文高频短语 `stacks of`"),
+]
+for _ctx, _why in _MUST_BLOCK_GENERIC:
+    check(lk.has_crypto_context(_ctx) is False,
+          f"必须拦下 {_ctx[:24]!r}（{_why}）",
+          "通用词仍能把商品/美股稿放行 ⇒ 撞名 gate 被架空")
+# 反向：删通用词不得误伤真加密新闻（前两条是 prod 实物 cid 的正文）
+_MUST_PASS_AFTER = [
+    ("Foresight News 消息，Sui 生态借贷协议 Suilend 发推表示，其已上线 2.0 版本",
+     "cid 6299：删 `上线` 的唯一代价，靠新增项目名 `sui` 抵消"),
+    ("According to SoSoValue data, SOL spot ETFs recorded a net inflow of $10.3 million",
+     "cid 3259：`spot` 本轮未删 ⇒ SOL 现货 ETF 仍放行"),
+    ("Stacks 网络完成硬分叉，STX 质押量创新高", "`stacks` 未跟 `of` ⇒ 项目名 Stacks 仍放行"),
+]
+for _ctx, _why in _MUST_PASS_AFTER:
+    check(lk.has_crypto_context(_ctx) is True,
+          f"必须放行 {_ctx[:24]!r}…（{_why}）",
+          "收紧误伤真加密新闻 ⇒ 该 symbol 的催化剂静默缺失")
 
 print("\n【P0-4·防漂移】backfill_catalyst_links.py 内联 linker 副本必须同契约")
 

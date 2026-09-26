@@ -1375,3 +1375,15 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **#5 age_hours（533.2 > 168）未做**：`data_freshness.unlock` 取自 tokenomist 采集链路的 `input_snapshot` 时间，报告已界定「需独立重抓任务」（`sync_unlock_events_from_json.py` 只按现有 JSON 重算金额，不刷新采集时间）；**#7（P0-1/P0-2 证据分级+引用索引、P1/P2 共 11 项）按报告界定未纳入**。
 - **新增离线探针 `workbench/test_fdv_degeneracy_20260926.py`（14/0，纯离线不连库不连网）**：覆盖 #2 不变式五种边界（含「流通==最大」真值不误报、无印证 max_supply 不误报）+ #1 源码级守卫口径 + #3 ETL 兜底存在性 + 前端分支。**回归零失败**：`test_highlight_determinacy_20260926`(72/0)、`test_signal_type_calibration_20260926`(73/0)、`test_scan_alert_audit_20260926`(83/0)。
 - **线上验收（须待 Zeabur 重建后复验）**：`GET /api/research/11114/notebook` → `structured_metrics.market.fdv_usd` 应由 `430,970,552.34`（ratio=1.0）变为 **`630,340,818.06`**（= 0.63034 × 1e9，ratio=1.462）。本地离线探针已复算一致。
+
+### 催化剂门禁「通用词漏放行」收口（核验_催化剂门禁扩容与存量清理_a9e7901 §二C / §六 P1，2026-09-26，本次提交）
+
+来源：`核验_催化剂门禁扩容与存量清理_a9e7901_2026-09-26.md` §二C（4 条漏放行）+ §六 P1。同报告 §三 的 NEW-1/NEW-2 已由 `e917e61` 独立收口（见上一节），本轮只做通用词架空那一笔。
+
+- **根因（报告定性准确）**：`_CRYPTO_CONTEXT_RE` **一张词表同时服务商品 gate（`_COMMODITY_AMBIGUOUS_SYMBOLS`）与美股 gate（`_EQUITY_TICKER_COLLISIONS`）**，而表里混进了「既不指向加密、也不指向商品」的**通用词** ⇒ 补加密侧漏词与防商品/美股噪音互为翻转（零和）。报告实测 4 条：`矿工`（`澳洲煤矿矿工罢工` ⇒ COAL 翻转、`Gold miner output` ⇒ GOLD 翻转）、`上线`（`迪士尼+ 上线新剧集` ⇒ DIS 失效）、`stacks`（撞英文高频短语 `stacks of cash`）。
+- **修法（按报告建议的最低成本顺序）**：① 删 `miner|矿工`（撞名清单内无矿业相关 crypto 项目，对判别贡献 ≈0，却实打实翻转 COAL/GOLD）；② `stacks` → `stacks(?!\s+of\b)`；③ 删 `上线`，并**补 `sui` 项目名**兜住其唯一代价。三处改动在 `linker.py` 与 `backfill_catalyst_links.py` 内联副本**逐字同步**（探针已锁字符串相等）。
+- **③ 为何必须补 `sui`**：只读复算发现删 `上线` 会误杀 cid 6299「Foresight News 消息，Sui 生态借贷协议 Suilend 发推表示，其已上线 2.0 版本」——该条**只靠 `上线`** 命中，却是真加密新闻。补 `sui` 属既有约束 ③ 的同型补齐（`tron`/`chainlink`/`optimism`/`aptos`/`arweave`/`starknet` 已按撞名 symbol 的加密侧项目名登记，SUI 漏了）。
+- **prod 只读量化（近 90 天 541 条撞名 symbol 催化剂；两阶段取数规避 `body_text` 的 `ClientWrite` 卡死）**：多变量对照 —— 仅删 `miner|矿工` 翻转 2 条；报告建议的** 拆表**（只认交易对·cashtag·交易所·加密项目名，通用词全出局）翻转 **78** 条；再去 `现货|合约` 翻转 54 条。**最终落地仅 1 条由放行翻转为拦下**：cid 11924「Copper futures hit a record $6.95 a pound…」（**商品噪音，本该拦**），且其 `catalyst_asset_link`/`catalyst_impact` 均为 **0 行**（COPPER 资产名含 `futures` 早被 `_NON_CRYPTO_NAME_SQL` 拦住）⇒ **无需 prod 存量清理**。
+- **刻意不动（报告 §二C 建议 ③ 拆表属更大改动，另开工单）**：`现货` / `spot` 仍能把商品行情快讯放行（`现货黄金`/`spot silver`，近 90 天 ≈47 条），但删它会连带误杀「SOL 现货 ETF」这类**真加密**新闻（cid 3259 / 627）⇒ 同一张表下无解，须靠拆表（商品 gate 宽松 / 美股 gate 只认四类硬证据）才能两者兼得。已在 `linker.py` 约束 ⑤ 注释留档。
+- **探针 83 → 90 断言**：新增「复验 a9e7901·通用词漏放行」段（4 条必须拦下 + 3 条反向必须放行：cid 6299 靠 `sui`、cid 3259 靠未删的 `spot`、`Stacks 网络完成硬分叉` 不得被 `stacks` 负向断言误伤）。**回归零失败**：`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_scenario_label`(48/0)、`test_scan_l1_closed_bar`(16/0)、`test_highlight_audit_20260924`(67/0)、`test_scan_alert_remaining`(16/0)、`test_major_event_alert`(45/0)。
+- **未做**：① 拆表（含报告 §六「提醒」的双副本单源收敛）；② §六 P2「67/0 临时探针转常驻」；③ 门禁收紧只影响**新入库**，存量撞名脏关联未重扫（本轮实测无需清，但历史行未复查）。

@@ -113,6 +113,20 @@ _EQUITY_TICKER_COLLISIONS = frozenset({
 #    （cid 7433/7401/7405）、`Bitcoin and gold are hedges`（cid 4255）、
 #    `美联储加息 / 油价逼近 100 美元`（cid 7335）等。宁可少几个词（漏掉几条行情快讯，
 #    实测残差 ≈9 条/30 天），也不能把商品噪音放进来。
+# ⑤ **通用词**（既不指向加密、也不指向商品/美股的日常词）同样会架空 gate ——
+#    复验 `核验_催化剂门禁扩容与存量清理_a9e7901` §二C 抓到 4 条：
+#      `矿工` ⇒ `澳洲煤矿矿工罢工，动力煤供应中断`（COAL gate 翻转）、
+#               `Gold miner output rose 5%`（GOLD gate 翻转）；
+#      `上线` ⇒ `迪士尼+ 上线新剧集`（DIS gate 失效）；
+#      `stacks` ⇒ 撞上英文高频短语 `The company holds stacks of cash`。
+#    处置：删 `miner|矿工|上线`、给 `stacks` 加 `(?!\s+of\b)`，并**补 `sui` 项目名**
+#    抵消删 `上线` 的唯一代价（近 90 天只读复算：cid 6299「Sui 生态借贷协议 Suilend
+#    已上线 2.0 版本」原本**只靠 `上线`** 放行 —— 属真加密新闻，不能误杀）。
+#    只读复算（近 90 天 541 条撞名 symbol 催化剂）：修正后**仅 1 条**由放行翻转为拦下，
+#    即 cid 11924「Copper futures hit a record $6.95 a pound…」（**商品噪音**，本该拦）。
+#    ⚠️ 留档未处置：`现货` / `spot` 仍会把商品行情快讯放行（`现货黄金`/`spot silver`，
+#    近 90 天 ≈47 条）；要同时保住「SOL 现货 ETF」这类真加密新闻，须按报告 §二C 建议 ③
+#    **拆表**（商品 gate 宽松 / equity gate 只认交易对·cashtag·交易所·加密项目名），另开工单。
 _CRYPTO_CONTEXT_RE = re.compile(
     # cashtag $COPPER（②：必须含字母，排除 `$131`）
     r"\$(?=[A-Za-z0-9]{2,10}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10}"
@@ -120,14 +134,15 @@ _CRYPTO_CONTEXT_RE = re.compile(
     r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}/USDT(?![A-Za-z0-9])"   # SOL/USDT（行情快讯常用）
     r"|(?<![A-Za-z])(?:token|memecoin|meme|crypto|blockchain|on-?chain|onchain"
     r"|defi|dex|cex|airdrop|staking|listing|solana|ethereum|binance"
-    r"|stablecoin|altcoin|wallet|whale|mainnet|testnet|validator|miner|halving"
+    r"|stablecoin|altcoin|wallet|whale|mainnet|testnet|validator|halving"
     r"|perpetual|spot|protocol"
-    r"|tron|chainlink|optimism|aptos|arweave|starknet|stacks"   # ③ 撞名 symbol 加密侧
+    r"|tron|chainlink|optimism|aptos|arweave|starknet|sui"   # ③ 撞名 symbol 加密侧（sui 见 ⑤）
+    r"|stacks(?!\s+of\b)"                                    # ⑤ `stacks of` 是英文高频短语
     r"|bouncebit|bedrock|myshell|blynex|distribute\.ai"
     r"|lookonchain|arkham|nansen|coindesk|cointelegraph|defillama|coingecko"
     r"|coinmarketcap|okx|bybit|coinbase|kraken|uniswap|aave|hyperliquid"
     r")(?![A-Za-z])"
-    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安|钱包|巨鲸|主网|矿工|质押",
+    r"|代币|加密|链上|空投|现货|合约|交易所|币安|钱包|巨鲸|主网|质押",   # ⑤ 已删 上线|矿工
     re.IGNORECASE,
 )
 

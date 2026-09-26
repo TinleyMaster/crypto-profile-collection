@@ -2863,6 +2863,10 @@
                     if (r.kind === 'direction_reversed') {
                         return name + '方向反转（结论 ' + o + ' → 实时 ' + n + '）';
                     }
+                    // 审计 P0-1 续：FDV 退化为与流通市值等值（CMC 下调 max_supply 所致）
+                    if (r.kind === 'fdv_degenerate') {
+                        return name + '退化：与流通市值等值（现 ' + n + '）';
+                    }
                     return name + '偏离 ' + r.rel_diff_pct + '%（结论 ' + o + ' → 实时 ' + n + '）';
                 }).join('；');
                 html += '<div class="t-drift">⚠️ <b>结论已过期</b>：' + escapeHtml(reasonTxt) +

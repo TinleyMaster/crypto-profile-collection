@@ -116,6 +116,44 @@ def repair_degenerate_fdv(conn, days: int | None = None) -> int:
     return n
 
 
+# ── 流通量兜底修复（复验 P1-3，2026-09-26）────────────────────────────
+#
+# 存量脏行：CMC 对低排名币把 circulating_supply 与 market_cap 一起编码成 0（解析层只把
+# market_cap 的 0 归一为 NULL，circulating 仍是字面 0），日表因此出现「circulating_supply=0
+# 且 market_cap=NULL」的行（近 45 天实测 12.7 万行，PONS 2026-08-22/08-23 即此情形），
+# 造成市值断点与除零。写入侧已在 INSERT 中加了同样兜底，这里负责把存量补齐：
+#   circulating_supply ← total_supply；market_cap ← price_usd × total_supply
+# 仅在「确实缺 circulating 且可得 total_supply 与价格」时生效，健康行一律不动。
+_CIRC_REPAIR_SQL = """
+    UPDATE biz.asset_market_daily m
+    SET circulating_supply = NULLIF(m.total_supply, 0),
+        market_cap = COALESCE(
+            m.market_cap,
+            ROUND(m.price_usd * NULLIF(m.total_supply, 0), 2)
+        ),
+        updated_at = NOW()
+    WHERE COALESCE(m.circulating_supply, 0) = 0
+      AND NULLIF(m.total_supply, 0) IS NOT NULL
+      AND m.price_usd > 0
+      {date_filter}
+"""
+
+
+def repair_zero_circulating(conn, days: int | None = None) -> int:
+    """把 circulating_supply=0 的存量脏行按 total_supply 兜底补齐，返回修正行数（幂等）。"""
+    date_filter = ""
+    params: tuple = ()
+    if days is not None:
+        date_filter = "AND m.market_date >= %s"
+        params = ((datetime.now(timezone.utc) - timedelta(days=days)).date(),)
+    sql = _CIRC_REPAIR_SQL.format(date_filter=date_filter)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="ETL CMC quote snapshots into biz.asset_market_daily (daily close)."
@@ -177,6 +215,13 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                 }
 
             # 批量 INSERT ... ON CONFLICT
+            #
+            # 复验 P1-3（2026-09-26）：CMC 对低排名币常把 circulating_supply 与 market_cap
+            # 一起编码成 0（解析层把 market_cap 的 0 归一为 NULL，但 circulating 未归一），
+            # 于是日表出现「circulating_supply=0 且 market_cap=NULL」的脏行（近 45 天实测
+            # 12.4 万行，PONS 08-22/08-23 即此情形）。修复：circulating 为 0/缺失时回退用
+            # total_supply 兜底；market_cap 缺失而价格与兜底供应量可得时，按 price × 供应量
+            # 推导，避免落 NULL 造成市值断点 / 除零。二者均只在 CMC 缺失时生效。
             sql = f"""
                 INSERT INTO biz.asset_market_daily
                     (asset_id, market_date, source_code, price_usd,
@@ -189,10 +234,19 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
                              THEN NULL ELSE q.price_usd END AS price_usd,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
-                             THEN NULL ELSE NULLIF(q.market_cap, 0) END AS market_cap,
+                             THEN NULL
+                             ELSE COALESCE(
+                                 NULLIF(q.market_cap, 0),
+                                 ROUND(
+                                     q.price_usd * COALESCE(
+                                         NULLIF(q.circulating_supply, 0),
+                                         NULLIF(q.total_supply, 0)),
+                                     2)
+                             ) END AS market_cap,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
                              THEN NULL ELSE NULLIF(q.fdv, 0) END AS fdv,
-                        q.circulating_supply,
+                        COALESCE(NULLIF(q.circulating_supply, 0),
+                                 NULLIF(q.total_supply, 0)) AS circulating_supply,
                         q.total_supply,
                         CASE WHEN q.price_usd IS NULL OR q.price_usd <= 0
                              THEN NULL ELSE NULLIF(q.volume_24h, 0) END AS volume_24h,
@@ -234,6 +288,8 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
 
         # FDV 口径修复：必须在写入之后、同一时间窗口内执行（审计 P0-1）
         fdv_repaired = repair_degenerate_fdv(conn, days)
+        # 流通量兜底（复验 P1-3）：INSERT 已带兜底，这里补漏（如被 is_anomaly 过滤掉的行）
+        circ_repaired = repair_zero_circulating(conn, days)
 
         with conn.cursor() as cur:
             # 验证
@@ -246,6 +302,7 @@ def etl_cmc_to_daily(days: int | None, dry_run: bool) -> dict:
             return {
                 "affected": affected,
                 "fdv_repaired": fdv_repaired,
+                "circ_repaired": circ_repaired,
                 "total": row[0],
                 "date_from": str(row[1]) if row[1] else None,
                 "date_to": str(row[2]) if row[2] else None,
@@ -322,7 +379,7 @@ def main() -> int:
     parser.add_argument(
         "--repair-only",
         action="store_true",
-        help="仅执行 FDV 口径修复（不重跑 ETL），配合 --days 限定窗口",
+        help="仅执行口径修复（FDV 退化 + 流通量兜底，不重跑 ETL），配合 --days 限定窗口",
     )
     args = parser.parse_args()
 
@@ -335,7 +392,9 @@ def main() -> int:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             n = repair_degenerate_fdv(conn, args.days)
+            c = repair_zero_circulating(conn, args.days)
         print(f"[FDV] 修复退化/缺失 FDV: {n:,} 行")
+        print(f"[CIRC] 修复 circulating=0/market_cap NULL: {c:,} 行")
         return 0
 
     print(f"[ETL] asset_market_daily from CMC snapshots")
@@ -354,6 +413,8 @@ def main() -> int:
         print(f"[ETL] Affected: {result['affected']:,} rows")
         if result.get("fdv_repaired"):
             print(f"[ETL] FDV 修复: {result['fdv_repaired']:,} rows")
+        if result.get("circ_repaired"):
+            print(f"[ETL] 流通量兜底: {result['circ_repaired']:,} rows")
         print(f"[ETL] Total now: {result['total']:,} rows ({result['assets']:,} assets)")
         if result.get("date_from"):
             print(f"[ETL] Date range: {result['date_from']} ~ {result['date_to']}")

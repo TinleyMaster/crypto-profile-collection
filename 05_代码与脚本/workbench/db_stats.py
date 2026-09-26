@@ -2739,6 +2739,42 @@ def _data_freshness(as_of) -> dict | None:
     return {"as_of": s, "age_hours": age_hours, "stale": age_hours > 24}
 
 
+def _corroborated_max_supply(asset_id: int) -> float | None:
+    """返回「被 CMC 历史快照印证过」的最大供应量（审计 P0-1 续，2026-09-26）。
+
+    守卫口径与 `etl_asset_market_daily_from_cmc.repair_degenerate_fdv` 完全一致：
+    只有当 tokenomist 的 max_supply 曾被 CMC 快照报过（hist_max >= 0.98 × max）时才采信。
+    不加该守卫会把大量代币化股票（MRVLon / CMGon 等）由 LLM 从底层股本抽取的失真
+    max_supply 当成真值，从而把 FDV 改错。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    WITH tok AS (
+                        SELECT max_supply FROM biz.asset_tokenomics
+                        WHERE asset_id = %s AND max_supply IS NOT NULL AND max_supply > 0
+                        ORDER BY updated_at DESC NULLS LAST LIMIT 1
+                    ),
+                    hist AS (
+                        SELECT MAX(q.max_supply) AS cmc_hist_max
+                        FROM src_cmc.cmc_asset_quote_snapshot q
+                        JOIN core.asset_source_map asm
+                          ON asm.source_code = 'cmc'
+                         AND asm.source_asset_key = q.cmc_id::text
+                        WHERE asm.asset_id = %s
+                    )
+                    SELECT t.max_supply AS v
+                    FROM tok t, hist h
+                    WHERE h.cmc_hist_max IS NOT NULL
+                      AND h.cmc_hist_max >= t.max_supply * 0.98
+                """, (asset_id, asset_id))
+                row = cur.fetchone()
+                return _to_float(row["v"]) if row else None
+    except Exception:
+        return None
+
+
 def _build_structured_metrics_from_snapshot(snapshot: dict, asset_id: int) -> dict:
     """从 snapshot.structured 实时拼装结构化指标，与 competitors 接口同源。
 
@@ -2859,6 +2895,13 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
     # 审计 P0-3：流通量优先取 CMC 权威快照（唯一带快照时间、由链上+市场推导的源）；
     # tokenomist 自报 released_pct / float_pct 与 circulating<max_supply 直接冲突，不作事实源。
     # 页面只展示裁决后的**唯一**流通比例并带快照时间（原先 71.2% / 68.4% / 100% 三处打架且无时间戳）。
+    #
+    # early-window 口径确认（复验 P1-4，2026-09-26）：PONS 流通量在 08-21(1e9) → 08-24(714,672,621)
+    # 之间骤降 28.5%，经只读复核判定为 **CMC 口径修正**而非真实销毁：① 08-18~08-23 CMC 直接返回
+    # circulating_supply=0 / market_cap=0（缺数据，已按项目铁律归为缺失）；② 修正后的 714,672,621
+    # 与 tokenomist 抓取的 circulating_supply=712,104,762 仅差 0.36%，说明 1e9 才是早期误报
+    # （CMC 把 max_supply 当流通量上报）。故 08-17~08-21 的 fdv==market_cap 属「流通==最大」的
+    # 数学真值，**不得**按 fdv 退化回改；以 CMC 为权威源的裁决对该窗口同样成立。
     _auth_supply: dict = {}
     try:
         with get_db() as conn:
@@ -2872,9 +2915,11 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                 """, (asset_id,))
                 _arow = cur.fetchone()
                 if _arow:
+                    # CMC 会把「无数据」编码成 0（见 parsers/cmc_quote_snapshot 铁律），
+                    # 故此处按 >0 过滤：0 一律视为缺失，避免伪 0 被当成权威流通量。
                     _auth_supply = {k: _arow[k] for k in
                                     ("total_supply", "circulating_supply", "max_supply")
-                                    if _arow[k] is not None}
+                                    if _arow[k] is not None and (_to_float(_arow[k]) or 0.0) > 0}
                     if _arow.get("quote_time"):
                         _auth_supply["_quote_time"] = str(_arow["quote_time"])
     except (psycopg.errors.UndefinedTable, Exception):
@@ -2927,6 +2972,32 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
             "circulating_snapshot_time": _auth_supply.get("_quote_time"),
             "rejected_sources": _rejected,
         }
+
+    # ── FDV 退化兜底（审计 P0-1 续，2026-09-26）───────────────────────────
+    # src_cmc.cmc_asset_quote_snapshot 是 CMC 原样镜像（不在采集侧改写，保留审计痕迹），
+    # 但 CMC 会在不通知的情况下把 max_supply 下调到 == 流通量，此时
+    # fully_diluted_market_cap 退化成 == market_cap。PONS(asset_id=11114) 2026-09-26
+    # 12:00 快照实测 fdv == mcap == 430,970,552，真值应为 price × 1e9 ≈ 630,340,818。
+    # 日表 biz.asset_market_daily 已由 repair_degenerate_fdv 在写侧修正，而本函数读的是
+    # **另一张表**（快照表），故在此读时兜底；判据/守卫与写侧完全同口径，只在 CMC
+    # 自相矛盾时纠正，绝不推翻 CMC 的正常值（含「流通==最大」时的 fdv==mcap 真值）。
+    if market_price and market_price > 0:
+        _corr_max = _corroborated_max_supply(asset_id)
+        if _corr_max:
+            result["market"]["fdv_corroborated_max_supply"] = _corr_max
+            _circ_v = _to_float((result.get("tokenomics") or {}).get("circulating_supply")) or 0.0
+            _degenerate = (
+                market_fdv is None
+                or market_mcap is None or market_mcap <= 0
+                or abs(market_fdv - market_mcap) <= 0.01 * market_mcap
+            )
+            # 与写侧一致：fdv 缺失时直接补；fdv 退化时要求「印证过的 max_supply」明显大于流通量
+            if _degenerate and (market_fdv is None or _corr_max > _circ_v * 1.02):
+                _new_fdv = round(market_price * _corr_max, 2)
+                if market_fdv is None or _new_fdv > market_fdv * 1.02:
+                    market_fdv = _new_fdv
+                    result["market"]["fdv_usd"] = _new_fdv
+                    result["market"]["fdv_basis"] = "price_x_corroborated_max_supply"
 
     # ── 解锁 ──
     if isinstance(unlocks, dict):
@@ -3258,7 +3329,7 @@ def _detect_thesis_drift(thesis: dict | None, structured_metrics: dict | None) -
         {"stale": bool,
          "reasons": [{"metric", "label", "thesis", "live", "kind"}...],
          "checked": [metric...]}
-    其中 kind ∈ {"rel_diff", "direction_reversed"}。
+    其中 kind ∈ {"rel_diff", "direction_reversed", "fdv_degenerate"}。
     """
     km = (thesis or {}).get("key_metrics")
     if not isinstance(km, dict) or not km:
@@ -3320,6 +3391,29 @@ def _detect_thesis_drift(thesis: dict | None, structured_metrics: dict | None) -
                 "thesis": o,
                 "live": n,
             })
+
+    # 审计 P0-1 续（不变式，2026-09-26）：上面第 1 条判据是「与 thesis 快照比相对偏差」，
+    # 当 thesis 里存的旧 FDV 本身就是错值时，两个错值（旧 431,441,804 / 实时 430,970,552）
+    # 相对偏差仅 0.1% ⇒ 永不告警，检测形同虚设。故补一条**只依赖实时值、不依赖 thesis** 的
+    # 绝对性不变式：fdv 退化为 ≈流通市值，且存在「被 CMC 历史印证过」、且明显大于流通量的
+    # 最大供应量（fdv 本应 = price × max_supply）⇒ CMC 自相矛盾，无条件判 stale。
+    # 门槛沿用「流通 < 最大」这一必要条件，故「流通==最大」时的 fdv==market_cap 真值不误报。
+    _corr_max = _drift_num(market.get("fdv_corroborated_max_supply"))
+    _live_circ = _drift_num((sm.get("tokenomics") or {}).get("circulating_supply"))
+    _lf, _lm = live.get("fdv"), live.get("market_cap")
+    if (_corr_max and _lf and _lm and _lm > 0
+            and _live_circ and _live_circ > 0
+            and abs(_lf - _lm) <= _DRIFT_REL_TOL * _lm
+            and _corr_max > _live_circ * 1.02):
+        reasons.append({
+            "metric": "fdv",
+            "kind": "fdv_degenerate",
+            "thesis": old.get("fdv"),
+            "live": _lf,
+            "corroborated_max_supply": _corr_max,
+        })
+        if "fdv" not in checked:
+            checked.append("fdv")
 
     if not checked:
         return None

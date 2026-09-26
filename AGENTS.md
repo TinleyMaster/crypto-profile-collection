@@ -1172,7 +1172,7 @@
 - **🟡 N-567-4（P4，记档未改）**：`n_to_exchange` 仅在 `>0` 时披露 ⇒ 若上游未来改三态（NULL=未判定），`0` 与「未知」文案不可分。实测当前 `is_to_exchange IS NULL` = **0/8887** ⇒ 无风险，属前瞻记档。
 - **📌 口径归一（已采纳）**：复验指出「元组任一分量被真实纠正」应为 **23**（`from` 13 + `to` 16 − 双侧重叠 6），此前自述「13 行」只覆盖 `from` 侧。**统一按 23 口径**；并注意 **54/77（70%）仅从 `unknown` 变 `?`**（无实质信息增量），「WLD/BEAM/ENA/U/PEPE 变 Binance」**不可外推**为整体效果。
 - **🔴 部署判定更正（复验反转自述，**重要**）**：`0c0c567` **已自动部署**——容器**级重建**（`__daemon__` 与 `[看护] scheduler_watchdog` 两独立进程**同秒**启动）发生在 push 后 **5m33s~7m01s**（四次采样：15:01:23→15:07:11 / 16:09:36→16:16:11 / 16:33:16→16:40:17 / 16:40:50→16:46:23）。⇒ **「push → 约 6 分钟 → 线上生效」是稳定规律**，此前「需 Zeabur 显式 redeploy」的表述**不准确**（代码随容器自动重建上线）。唯一剩余动作 = **等 producer 调度**（`scan_event_watchlist = 17 */6 * * *`，18:17 CST）或手工补跑；验收锚点：`SELECT count(*) FILTER (WHERE source_ref ? 'max_tx') FROM biz.event_watchlist WHERE event_type='onchain_transfer'` 应 > 0（复验时为 0/93）。
-- **🟠 队列积压（复验附带，P3，另议）**：`sys.task` 显示任务**提交→执行**排队 45~75min（`created_at` 精确落在调度点，说明调度正确、是 runner 并发槽位不足；09-24 05:32:40–05:33:11 有 9 个任务连续启动 = 积压排空）。建议单开工单核查 runner 并发槽位。
+- **🟠 队列积压（复验附带，P3）—— 2026-09-26 复核：原「runner 并发槽位不足」定性不成立**：排队 45~75min / 09-24 05:32 有 9 个任务连续启动均为**现象**，真因见下文「队列积压核查」节（① `monitor` 类被候选窗口 `LIMIT 5` **结构性饿死**；② DB 写不可达窗口）。容量实测占用率仅 **42.6%**、排队 p50/p90 = **0 分钟**。
 - **未验/未做（复验边界）**：`5a95b32` 的 coinglass 套餐、`fix_069` 表正确性、N-A56-4/5 均不在本轮。
 
 ### 调度静默处置：data_sync_daily 停滞 30.8h（告警_调度停滞_data_sync_daily，2026-09-26，本次提交 `f11f1a3`）
@@ -1217,6 +1217,38 @@
 - **离线自测**（不触库，monkeypatch `_load_task`/`_append_log`/`_update_task`）：`_load_task` 抛错 → 置 `failed` 且错误串不触发 `blocked_by`；`cmd=None` → 置 `failed`；正常路径 → 仍 `done`。
 
 **口径更正**：`f11f1a3` 的 COALESCE 修复本身**正确且必要**（它 18:47 收割的 3 条 0 日志任务是真僵尸）；本条补修的是让这类静默死亡**不再发生**，并让「已发生」的那类错误串不再被看护当成「任务自身跑不完」。**残留**：收割器仍统一写 `stuck:` ——若 `_run_task` 的失败上报也因 DB 不可达而失败，任务仍会被标 `stuck:` 并短期拦住补跑（本次靠 30h 时间窗 + 下一次 cron 自愈：`cmc_quote_snapshot` 20:00 CST 那次因 `f409bab6af0e` 已 failed 而不受 `_has_active_task` 阻挡，会正常执行并解除告警）。
+
+### 队列积压核查：runner 并发槽位（P3 挂账项，2026-09-26，本次提交）
+
+**结论：容量不是瓶颈，「runner 并发槽位不足」定性不成立；另定位到一个真实代码缺陷（`monitor` 结构性饿死）。**
+
+**容量实测（近 3 天只读）**：
+
+- 排队延迟 `created→started`：`core` n=345，p50=**0** / p90=**0** / avg=8.8 / max=318.8 min；`monitor` n=48，p50=0 / p90=0 / max=323.3；`chain` n=10，p50=0 / p90=0 / max=278.9 ⇒ **90% 的任务 0 分钟即被取走**，长尾全部落在故障窗口。
+- 槽位占用率：总占用 **122.7 槽位小时 / 可用 288（=4×72h）= 42.6%** ⇒ 平均远未打满。
+- 参数：全局 `TASK_MAX_CONCURRENT=4`（`workbench/app.py` L44，**runner 线程驻在 gunicorn web 进程内**）；`CATEGORY_MAX = {chain:1, core:4, monitor:1}`（`task_manager.py` L361）。
+
+**两种停摆（逐小时分进程写入计数，互不相同）**：
+
+| 窗口 | 调度器插入 | 看护插入 | runner 取走 | 判读 |
+|---|---|---|---|---|
+| 09-25 17:00–19:00 | 0 | 0 | 0 | **全进程同时静默** ⇒ DB 写不可达 |
+| 09-26 06:00–09:00 | 0 | 0 | 0 | **全进程同时静默** ⇒ DB 写不可达 |
+| 09-24 12:00–13:32 | 有 | **有** | **0** | 仅 runner 不取 ⇒ **进程内因**（见下） |
+
+**发现①（代码缺陷）：`monitor` 类被候选窗口 `LIMIT 5` 结构性饿死**。`_runner_loop` 取候选为
+
+```sql
+SELECT task_id, category FROM sys.task WHERE status='pending'
+ORDER BY (CASE WHEN name ILIKE '%monitor%' THEN 1 ELSE 0 END), started_at ASC
+LIMIT 5 FOR UPDATE SKIP LOCKED
+```
+
+随后在 Python 侧按 `running_by_cat < CATEGORY_MAX` 逐个筛、命中即 break。当**非 monitor 的 pending ≥5 且其 category 已满**时，候选窗口被同类任务占满，`monitor` 任务**根本不进入候选** ⇒ 即使 `monitor` 槽位空闲也永远不被取走。实况：09-24 12:20 起 pending = 5 个 core（cmc_quote_snapshot / highlight_alert / scan_outcome_settle / etl_asset_market_daily / scan_event_watchlist）+ 1 个 monitor（scan_freshness_watchdog），而 core 已于 12:00 满 4/4 ⇒ `scan_freshness_watchdog` 干等 **73 min**（12:20→13:32）；09-26 同类饿死 **323 min**（05:21→10:45）。**这正是原记录「排队 45~75min」的真因**（并非槽位不足）。
+
+**发现②（非缺陷，但放大积压）：核心槽位被长任务长期占满**。09-24 12:00–13:33 core 满 4/4（`tokenomics_extract_batch` 243min + `spa_browser_crawl_auto` 273min + `b2_ai_noise_clean_by_asset_auto` 257min 三个 09:00–10:00 启动的长任务 + `catalyst_run_all`）；09-25 20:09–09-26 10:21 则被 3 个 core 长任务占 3/4 达 13–14h（`highlight_alert` 852min / `catalyst_run_all` 836min / `catalyst_slow_pipeline` 821min），三者最终**全部由 12h 硬超时收割**。
+
+**建议（未实施）**：把候选查询改为**只取「有空闲槽位」的 category**（如 `AND category = ANY(<free_cats>)`），或在候选窗口内按 category 轮转（`ROW_NUMBER() OVER (PARTITION BY category ORDER BY started_at)`），以消除 `LIMIT 5` 饿死。**不建议**提高 `TASK_MAX_CONCURRENT` —— 利用率仅 42.6%，加槽位既不解饿死、也不解 DB 写不可达。
 
 ### 重大事件邮件「传导逻辑」可读性优化（audit_重大事件邮件_传导逻辑可读性优化_2026-09-26，2026-09-26，本次提交）
 

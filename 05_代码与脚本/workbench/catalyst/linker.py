@@ -75,14 +75,59 @@ _EQUITY_TICKER_COLLISIONS = frozenset({
     "STX",    # Seagate Technology Holdings plc（NASDAQ: STX）
     "AR",     # Antero Resources Corp.（NYSE: AR）
     "OP",     # OceanPal Inc.（NASDAQ: OP）
+    # ── 以下 7 条为 2026-09-26 只读普查**新确证**的同类串台（每条都有实物 cid）──
+    "BB",     # BlackBerry Ltd.（NYSE: BB）—— cid 13616「BlackBerry reported Q2 revenue」
+    "BX",     # Blackstone Inc.（NYSE: BX）—— cid 4164 / 13650「Blackstone 私募基金/赎回排队」
+    "COST",   # Costco Wholesale Corp.（NASDAQ: COST）—— cid 14272 / 5343
+    "DIS",    # The Walt Disney Company（NYSE: DIS）—— cid 13989「Bob Chapek 谈 Disney」
+    "SHELL",  # Shell plc（NYSE: SHELL）—— cid 12572「LNG Canada 股东含 Shell Plc」
+    "BR",     # Broadridge Financial Solutions（NYSE: BR）；另有**国家代码** BR ——
+              # cid 13722「Brazil's central bank cut its 2026 growth forecast」
+    "UBER",   # Uber Technologies Inc.（NYSE: UBER）—— cid 1642；且与
+              # 「Uber Technologies, Inc. • Robinhood Token」（xStock）同名
 })
 
+# 门禁正则四条硬约束（都是只读复算 prod 后踩出来的，改动前请先跑
+# `workbench/test_scan_alert_audit_20260926.py` 的 P0-4 段 + 反例样本）：
+#
+# ① 词表支的边界一律用 `(?<![A-Za-z])` / `(?![A-Za-z])` 而**不是** `\b`（与 scan_daemon 的
+#    `_FP_PAIR_RE` 同坑）：`\b` 走 Unicode 词字符判定，中文也是词字符 ⇒
+#    `Solana于9月18日将目标出块时间…`（prod cid 6173）里 `\bsolana\b` 判不出词尾，
+#    **真实** Solana 新闻被误杀。取「非 ASCII 字母」而非「非字母数字」是为了**保住复数**
+#    （`tokens` / `wallets` / `stablecoins` 若被 `(?![A-Za-z0-9])` 卡住，等于新引入一批漏词）。
+# ② cashtag 支必须要求「至少一个 ASCII 字母」：否则 `$131.5 million`、`$163.3 million`
+#    （cid 10473 DoorDash / cid 13616 BlackBerry / cid 14272 Costco 的正文）会被当成
+#    `$131`/`$163` 型 cashtag ⇒ **美股财报稿直接过闸**，P0-4 白修。
+# ③ 词表不能只列通用词：`Chainlink 战略储备增持 LINK`（cid 5808）、
+#    `Tron 总交易额突破 30 万亿`（cid 13215）、`Optimism 批准 Upgrade 20`（cid 5622）、
+#    `SOL 上涨突破 110 美元`（cid 6781）都**不含**通用词却都是真加密新闻。故补
+#    撞名清单各 symbol 的加密侧项目名 + 加密专属信源 + 行情快讯口径。
+#    只读复算：修 ① 前，近 30 天 358 条撞名 symbol 催化剂被误杀 32 条
+#    （SOL 12 / TRX 5 / APT 4 / SUI 4 / OP 3 / LINK 2 / STX 2）—— **门禁漏词是有代价的**。
+#    ⚠️ 但**不得**纳入 equity 侧高频词（etf / shares / revenue / earnings / settlement /
+#    stock / analyst…），否则 DoorDash 类美股稿会重新过闸。
+# ④ 本正则**同时**服务 `_COMMODITY_AMBIGUOUS_SYMBOLS`（商品 gate），故**不得**纳入
+#    宏观/商品稿的高频词。实测代价：加了 `bitcoin` + `上涨|下跌|涨幅|行情|突破|新高|市值`
+#    后，近 30 天商品同名 gate 有 9 条由「拦下」翻转为「放行」且全是噪音 ——
+#    `金价下跌推动中国黄金进口`（cid 10154/10160）、`BTC/XAU 比率站上 50 周均线`
+#    （cid 7433/7401/7405）、`Bitcoin and gold are hedges`（cid 4255）、
+#    `美联储加息 / 油价逼近 100 美元`（cid 7335）等。宁可少几个词（漏掉几条行情快讯，
+#    实测残差 ≈9 条/30 天），也不能把商品噪音放进来。
 _CRYPTO_CONTEXT_RE = re.compile(
-    r"\$[A-Za-z0-9]{2,10}\b"                 # cashtag $COPPER
-    r"|\b[A-Z0-9]{2,15}USDT\b"               # COPPERUSDT
-    r"|\b(?:token|memecoin|meme|crypto|blockchain|on-?chain|defi|dex|cex|"
-    r"airdrop|staking|listing|solana|ethereum|binance|perpetual|spot)\b"
-    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安",
+    # cashtag $COPPER（②：必须含字母，排除 `$131`）
+    r"\$(?=[A-Za-z0-9]{2,10}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10}"
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}USDT(?![A-Za-z0-9])"    # COPPERUSDT
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}/USDT(?![A-Za-z0-9])"   # SOL/USDT（行情快讯常用）
+    r"|(?<![A-Za-z])(?:token|memecoin|meme|crypto|blockchain|on-?chain|onchain"
+    r"|defi|dex|cex|airdrop|staking|listing|solana|ethereum|binance"
+    r"|stablecoin|altcoin|wallet|whale|mainnet|testnet|validator|miner|halving"
+    r"|perpetual|spot|protocol"
+    r"|tron|chainlink|optimism|aptos|arweave|starknet|stacks"   # ③ 撞名 symbol 加密侧
+    r"|bouncebit|bedrock|myshell|blynex|distribute\.ai"
+    r"|lookonchain|arkham|nansen|coindesk|cointelegraph|defillama|coingecko"
+    r"|coinmarketcap|okx|bybit|coinbase|kraken|uniswap|aave|hyperliquid"
+    r")(?![A-Za-z])"
+    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安|钱包|巨鲸|主网|矿工|质押",
     re.IGNORECASE,
 )
 

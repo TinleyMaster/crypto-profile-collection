@@ -78,14 +78,30 @@ _EQUITY_TICKER_COLLISIONS = frozenset({
     "STX",    # Seagate Technology Holdings plc（NASDAQ: STX）
     "AR",     # Antero Resources Corp.（NYSE: AR）
     "OP",     # OceanPal Inc.（NASDAQ: OP）
+    "BB",     # BlackBerry Ltd.（NYSE: BB）
+    "BX",     # Blackstone Inc.（NYSE: BX）
+    "COST",   # Costco Wholesale Corp.（NASDAQ: COST）
+    "DIS",    # The Walt Disney Company（NYSE: DIS）
+    "SHELL",  # Shell plc（NYSE: SHELL）
+    "BR",     # Broadridge Financial Solutions（NYSE: BR）；另有国家代码 BR
+    "UBER",   # Uber Technologies Inc.（NYSE: UBER）
 })
 
+# 与 linker.py 逐字同源（含「`\b` 在中文处判不出词尾」「cashtag 必须含字母」两处修复）。
 _CRYPTO_CONTEXT_RE = re.compile(
-    r"\$[A-Za-z0-9]{2,10}\b"                 # cashtag $COPPER
-    r"|\b[A-Z0-9]{2,15}USDT\b"               # COPPERUSDT
-    r"|\b(?:token|memecoin|meme|crypto|blockchain|on-?chain|defi|dex|cex|"
-    r"airdrop|staking|listing|solana|ethereum|binance|perpetual|spot)\b"
-    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安",
+    r"\$(?=[A-Za-z0-9]{2,10}(?![A-Za-z0-9]))(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{2,10}"
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}USDT(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])[A-Z0-9]{2,15}/USDT(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z])(?:token|memecoin|meme|crypto|blockchain|on-?chain|onchain"
+    r"|defi|dex|cex|airdrop|staking|listing|solana|ethereum|binance"
+    r"|stablecoin|altcoin|wallet|whale|mainnet|testnet|validator|miner|halving"
+    r"|perpetual|spot|protocol"
+    r"|tron|chainlink|optimism|aptos|arweave|starknet|stacks"
+    r"|bouncebit|bedrock|myshell|blynex|distribute\.ai"
+    r"|lookonchain|arkham|nansen|coindesk|cointelegraph|defillama|coingecko"
+    r"|coinmarketcap|okx|bybit|coinbase|kraken|uniswap|aave|hyperliquid"
+    r")(?![A-Za-z])"
+    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安|钱包|巨鲸|主网|矿工|质押",
     re.IGNORECASE,
 )
 

@@ -1308,3 +1308,22 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **只读 prod 复验（本轮修复后）**：ENJ `catalyst_raw=4` → `catalyst_dir={'bearish':1}`、`catalyst_dir_fresh={'bearish':1}`、`catalyst_stale=0`、`catalyst_all` 1 条（达成审计验收「净空 1」）；DASH `catalyst_stale=1`、`catalyst_dir_fresh` 全 0 ⇒ 假利空不再触发相悖警告与 ×0.75 惩罚。
 - **新增离线探针**：`workbench/test_scan_alert_audit_20260926.py`（43/0 全绿，含 P0-1~P0-4 + P1-1 + `**` 护栏）。回归零失败：`test_scan_alert_audit_deepdive`、`test_scan_alert_header_regime`、`test_scan_scenario_label`、`test_scan_l1_closed_bar`、`test_highlight_audit_20260924`、`test_scan_alert_remaining`。
 - **遗留（需用户授权，本轮未做）**：DASH 那条 DoorDash 存量**脏关联**仍在 `biz.asset_catalyst`（清理属 DELETE 数据操作）；`scripts/bin/backfill_catalyst_links.py` 内联的 linker 副本未同步 P0-4 门禁。
+  → 两项遗留已在下一节完成。
+
+### 美股 ticker 撞名「存量脏关联」清理 + 门禁扩容（审计_盘面异动告警邮件_3封_2026-09-26 遗留项，2026-09-26，本次提交）
+
+来源：上节 P0-4 的两项遗留，经用户授权执行（拍板「DASH 清理深度 = **核心闭环**」「同类 = **扩清单 + 清存量**」）。
+
+- **`backfill_catalyst_links.py` 内联 linker 副本补齐门禁**（commit `155917a`）：该文件自带的 `map_pairs_to_asset_ids` 副本缺 `context_text` 形参，而调用处传 `context_text=ctx` ⇒ 一跑即 `TypeError`，门禁**形同不存在**、重跑会把 P0-4 刚修掉的脏关联写回。已补齐两套集合 / `_CRYPTO_CONTEXT_RE` / `has_crypto_context()` 与签名，并在循环内加门禁。探针新增「防漂移」段（AST 校验两处集合内容一致、正则逐字一致、形参在场）。
+- **门禁正则四条硬约束**（均只读复算 prod 后踩出，已固化进 `linker.py` 注释）：
+  - ① 词表边界一律 `(?<![A-Za-z])` / `(?![A-Za-z])` 而**不是** `\b`：中文也是 Unicode 词字符 ⇒ `Solana于9月18日将目标出块时间…`（cid 6173）里 `\bsolana\b` 判不出词尾，**真 Solana 新闻被误杀**。取「非 ASCII 字母」而非「非字母数字」是为了保住复数（`tokens`/`wallets`/`stablecoins`）。
+  - ② cashtag 支必须要求「至少一个 ASCII 字母」：否则 `$131.5 million` / `$163.3 million` / `$95.72 billion`（cid 10473 DoorDash / 13616 BlackBerry / 14272 Costco 正文）会被当成 `$131`/`$163`/`$95` 型 cashtag ⇒ **美股财报稿直接过闸**，P0-4 白修。
+  - ③ 词表须补撞名 symbol 的**加密侧项目名**（`tron`/`chainlink`/`optimism`/`aptos`/`arweave`/`starknet`/`stacks`/`bouncebit`/`bedrock`/`myshell`/`blynex`/`distribute.ai`）+ 加密专属信源 + `SYM/USDT` 行情口径；**不得**纳入 equity 侧高频词（etf/shares/revenue/earnings/settlement/stock/analyst…）。
+  - ④ 该正则**同时**服务商品 gate（`_COMMODITY_AMBIGUOUS_SYMBOLS`），故**不得**纳入宏观/商品稿高频词：实测加 `bitcoin` + `上涨|下跌|涨幅|行情|突破|新高|市值` 后，30 天内商品 gate 有 **9 条由「拦下」翻转为「放行」且全是噪音**（`金价下跌推动中国黄金进口` cid 10154/10160、`BTC/XAU 比率` 7433/7401/7405、`Bitcoin and gold are hedges` 4255、`美联储加息/油价` 7335）。宁可留残差。
+  - 复算：修 ① 前 30 天 358 条撞名 catalyst 被误杀 **32** 条（SOL 12 / TRX 5 / APT 4 / SUI 4 / OP 3 / LINK 2 / STX 2）；加固后 383 条中丢弃 38 条（≈23 条为正确的美股噪音，**已知残差 ≈9 条/30 天**为纯行情快讯，见下）。
+- **`_EQUITY_TICKER_COLLISIONS` 扩容 9 → 16**（每条都有实物 cid）：新增 `BB`(BlackBerry·13616) / `BX`(Blackstone·4164/13650) / `COST`(Costco·14272/5343) / `DIS`(Disney·13989) / `SHELL`(Shell plc·12572) / `BR`(Broadridge；另有**国家代码** BR·13722) / `UBER`(Uber·1642；亦与「Uber Technologies, Inc. • Robinhood Token」同名)。`linker.py` 与 `backfill_catalyst_links.py` 内联副本同步。
+- **prod 存量清理（核心闭环，单事务，已提交）**：`asset_catalyst.asset_id → NULL` **21** 行 / `DELETE catalyst_asset_link` **20** 行 / `DELETE catalyst_impact` **25** 行 / `DELETE catalyst_resonance` **26** 行，事后残留全 0。保留 `catalyst_signal`（历史信号，已 invalid）与 `catalyst_second_order`（引用的是**其它**资产，属另一笔账）。涉及 cid：`633,847,1296,1642,2334,4164,4337,4906,5343,5453,6880,10473,12096,12326,12485,12572,13616,13650,13722,13989,14272`（另 `3831` 只删 COST 侧行 —— 其 `asset_catalyst.asset_id=9944`(CL, **Crude Oil Derivatives**) 属**另一类撞名**，不在本轮范围）。
+- **探针扩容 43 → 65 断言**：新增 P0-4「反例集」（10 条必须拦下 + 7 条必须放行，ctx 逐字取自 prod）与「防漂移」段。回归零失败：`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_scenario_label`(48/0)、`test_scan_l1_closed_bar`(16/0)、`test_highlight_audit_20260924`(67/0)、`test_scan_alert_remaining`(16/0)。
+- **已知残差（未修，属设计取舍）**：`SOL 升破 110 USDT`(cid 6742)、`SOL 上涨突破 110 美元`(6763/6781)、`SUI 短时触及 1 USDT`(8895)、`Analyst Ali said SUI rebounded…`(14853) 等**纯行情快讯**因不含加密专属词被门禁丢弃（≈9 条/30 天）。修它必然要放进「行情」类通用词，而那样商品 gate 会翻车（见 ④），故按「宁可多列」保留。
+- **兜底扫描（`asset_catalyst` 侧，30 天，覆盖无 impact 行的 catalyst）**：另见 `cid 4804`（SK Hynix/Intel 盘前）、`cid 13755`（Delivery Hero/优步）亦为美股/外卖噪音，但其 `asset_id` 已为 NULL 且**无** impact/link/resonance 行 ⇒ **无可清理**；新门禁已在入库侧拦下。
+- **未做**：P1-2 / P1-3 / P2-*（按用户拍板范围不动）；`_EQUITY_TICKER_COLLISIONS` 仍为**兜底清单、非全量**（完整清单需用 `core.asset.canonical_symbol` 与美股 ticker 全量比对产出，需连库，另立项）。

@@ -379,6 +379,65 @@ lk.map_pairs_to_asset_ids(["ENJUSDT"], _c3, context_text="完全不含加密语�
 check(_c3.calls > 0,
       "未撞名的 symbol（ENJ）不受该门禁影响", f"calls={_c3.calls}")
 
+print("\n【P0-4·反例集】只读 prod 复算出的「必须拦下 / 必须放行」样本（改动前置）")
+# 以下 ctx 全部取自 prod `biz.asset_catalyst` 的 `title + body_text`（逐字），改动正则前
+# 先跑本段 —— 这三条约束我各踩过一次（见 linker.py 注释 ①②③④）。
+_MUST_BLOCK = [   # （cid, ctx, 为什么是噪音）
+    (10473, "DoorDash Inc. agreed to a $131.5 million settlement with New York City "
+            "over a probe into its compliance with minimum-pay rules for couriers, "
+            "according to Bloomberg. The company, the biggest food-delivery firm in "
+            "the US by market share, said the deal resolves the investigation into "
+            "missing wages.", "$131.5 曾被当成 cashtag"),
+    (13616, "According to Wallstreetcn, BlackBerry reported second-quarter revenue of "
+            "$163.3 million versus estimates of $145.8 million, adjusted basic "
+            "earnings per share of $0.070 versus estimates of $0.04.", "$163 曾被当成 cashtag"),
+    (14272, "According to CNBC, Costco Wholesale reported fiscal fourth-quarter revenue "
+            "of $95.72 billion, up 11.1% from a year earlier and above Wall Street "
+            "estimates of $94.86 billion.", "$95 曾被当成 cashtag"),
+    (4164, "Blackstone Inc. is working through a backlog of investors seeking to "
+           "withdraw capital from its flagship private credit fund.", ""),
+    (12572, "Shareholders of LNG Canada, including Shell Plc, are poised to approve "
+            "the final investment decision for the project.", ""),
+    (13989, "Bob Chapek said he never had a chance at Disney and described his 33-month "
+            "tenure as chief executive.", ""),
+    (13722, "Brazil's central bank cut its 2026 economic growth forecast and said the "
+            "slowdown will be sharper than previously expected.", "国家代码 BR"),
+    (1642, "Walmart Inc. will begin delivering food orders from Papa John's "
+           "International Inc. as it expands into restaurant delivery.", ""),
+    (847, "Uber Technologies Inc. is shutting down its services in Nigeria effective "
+          "Sept. 30, according to a company statement.", ""),
+    # 商品侧（cid 10154 的正文）：若不慎把「上涨/下跌/涨幅/行情」等宏观高频词加进词表，
+    # 这条会翻转为「放行」⇒ 商品 gate 被削弱（实测加了 6 个词即翻转 9 条）。
+    (10154, "据彭博社 9 月 22 日报道，中国黄金进口今年处于创纪录水平，受国际金价下跌"
+            "和人民币走强推动。海关数据显示，截至 8 月的采购量已超过 1000 吨。", "商品噪音"),
+]
+for _cid, _ctx, _why in _MUST_BLOCK:
+    check(lk.has_crypto_context(_ctx) is False,
+          f"必须拦下 cid={_cid}" + (f"（{_why}）" if _why else ""),
+          "该 ctx 被判为「含加密语境」⇒ 美股/商品噪音会过闸")
+
+# 已知残差（**不**断言为放行，属明知的代价）：纯行情快讯 `SOL 上涨突破 110 美元…`
+# 这类「裸 ticker + 中文行情词」既无项目名也无加密专属词。若为救它把
+# `上涨|下跌|涨幅|行情|突破` 加进词表，商品 gate 立即被削弱 9 条（见上 _MUST_BLOCK
+# 的 cid 10154）。两害相权：宁漏几条行情快讯（复算 ≈6 条/30 天），不放商品噪音进来。
+_MUST_PASS = [    # 真加密新闻，缺词/边界错就误杀
+    ("PANews 9月24日消息，据 Lookonchain 监测，Tron 的总交易额已正式突破 30 万亿美元。", "项目名 + 信源"),
+    ("PANews 9月18日消息，据 CoinDesk 报道，Solana于9月18日将目标出块时间由 300 毫秒降至 250 毫秒。",
+     "`\\bsolana\\b` 在中文处判不出词尾 ⇒ 曾误杀 cid 6173"),
+    ("Optimism approved Upgrade 20 to move its fault-proof system toward the architecture.",
+     "项目名"),
+    ("BlockBeats 消息，9 月 18 日，据 TradingBeats 监测，Chainlink 战略储备今晨再度增持价值 110 万美元 LINK。",
+     "项目名 ⇒ 曾误杀 cid 5808"),
+    ("Foresight News 消息，据 Gate 行情数据，SOL/USDT 现报 $110，24 小时涨幅 8.16%。",
+     "`BASE/USDT` 斜杠口径"),
+    ("Binance will list NEWUSDT on the spot market and enable trading.", ""),
+    ("某巨鲸向交易所转入 1.2 万枚 ETH，链上出现大额转账。", ""),
+]
+for _ctx, _why in _MUST_PASS:
+    check(lk.has_crypto_context(_ctx) is True,
+          f"必须放行 {_ctx[:28]!r}…" + (f"（{_why}）" if _why else ""),
+          "真加密新闻被误杀 ⇒ 该 symbol 的催化剂静默缺失")
+
 print("\n【P0-4·防漂移】backfill_catalyst_links.py 内联 linker 副本必须同契约")
 
 
@@ -399,7 +458,7 @@ def _const_frozenset(tree, name):
 # `backfill_catalyst_links.py` 内联了 linker 的映射逻辑（避免依赖 workbench 包），
 # 历史上调用处传了 `context_text=ctx` 而函数签名**没有该参数** ⇒ 一跑即 TypeError，
 # 门禁形同不存在、重跑会把脏关联重新写进 `biz.catalyst_asset_link`。
-# 只锁**契约**（参数名 + 两套集合的内容），不比对源码措辞。
+# 只锁**契约**（参数名 + 两套集合 + 正则内容），不比对注释措辞。
 _BF_SRC = open(os.path.join(_SCRIPTS, "bin", "backfill_catalyst_links.py"),
                encoding="utf-8").read()
 _BF_TREE = ast.parse(_BF_SRC)
@@ -412,6 +471,16 @@ for _n in ("_COMMODITY_AMBIGUOUS_SYMBOLS", "_EQUITY_TICKER_COLLISIONS"):
     _a, _b = getattr(lk, _n), _const_frozenset(_BF_TREE, _n)
     check(_a == _b, f"两处 `{_n}` 内容一致（内联副本未漂移）",
           f"linker={_a} backfill={_b}")
+# 正则逐字比对：两份必须同源，否则「补了 linker 忘了 backfill」会让回填重写脏关联
+for _n in ("_CRYPTO_CONTEXT_RE",):
+    # `_CRYPTO_CONTEXT_RE = re.compile(r"…" r"…")`：隐式拼接在 AST 里已被折成单个 Constant
+    _lit = next((n.value.args[0].value for n in _BF_TREE.body
+                 if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                 and n.value.args
+                 and any(isinstance(t, ast.Name) and t.id == _n for t in n.targets)), None)
+    check(_lit == lk._CRYPTO_CONTEXT_RE.pattern,
+          f"两处 `{_n}` 逐字一致（含 cashtag 必须含字母 / 中文边界两处修复）",
+          f"\n    linker  ={lk._CRYPTO_CONTEXT_RE.pattern}\n    backfill={_lit}")
 check("has_crypto_context(" in _BF_SRC,
       "内联副本的映射循环内调用同一门禁 `has_crypto_context`")
 

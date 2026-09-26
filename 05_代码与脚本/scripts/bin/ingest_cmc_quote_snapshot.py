@@ -315,6 +315,58 @@ def main() -> int:
             if skipped_dirty > 0:
                 print(f"[dirty-skip] 本轮跳过 {skipped_dirty} 条脏数据", file=sys.stderr)
 
+            # ═══ A1 写时修：FDV 退化兜底（FIX-DETERMINACY-002，2026-09-27）═══
+            # 现象：CMC 会在不通知的情况下把 max_supply 下调到 == 流通量，使 fully_diluted
+            # 退化成 == market_cap（11114/PONS 实测 fdv==mcap==430,970,552，真值应为
+            # price × 1e9 ≈ 630,340,818），而该表正是 db_stats.structured_metrics.market
+            # 的读取来源，页面上「两个都错的值互相掩护」。
+            # 判据与日表 etl_asset_market_daily_from_cmc.repair_degenerate_fdv 完全同口径：
+            #   ① fdv 为空或 fdv <= market_cap × 1.001（退化）；② max_supply 明显大于流通量；
+            #   ③ 该 max_supply 曾被 CMC 历史快照印证（hist_max >= max_supply × 0.98）。
+            # ③ 是关键守卫：代币化股票（MRVLon/CMGon 等）的 max_supply 由 LLM 从底层股本
+            # 抽取、量级失真，CMC 从未报过该值，一律不改。只「补」不「改小」，健康行零影响。
+            fdv_repaired = 0
+            _cand_cmc_ids = set()
+            for row in clean_rows:
+                _f, _m = row.get("fdv"), row.get("market_cap")
+                _ms, _cs = row.get("max_supply"), row.get("circulating_supply")
+                if (row.get("price_usd") or 0) <= 0 or (_ms or 0) <= 0:
+                    continue
+                _degenerate = (_f is None or _f <= 0
+                               or (_m is not None and _m > 0 and _f <= _m * 1.001))
+                if _degenerate and (_ms or 0) > (_cs or 0) * 1.02:
+                    _cand_cmc_ids.add(row["cmc_id"])
+            _hist_max: dict = {}
+            if _cand_cmc_ids:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT cmc_id, MAX(max_supply)
+                        FROM src_cmc.cmc_asset_quote_snapshot
+                        WHERE cmc_id = ANY(%s) AND max_supply IS NOT NULL AND max_supply > 0
+                        GROUP BY cmc_id
+                        """,
+                        (list(_cand_cmc_ids),),
+                    )
+                    _hist_max = {r[0]: float(r[1]) for r in cur.fetchall() if r[1]}
+            for row in clean_rows:
+                if row["cmc_id"] not in _cand_cmc_ids:
+                    continue
+                _ms = float(row["max_supply"])
+                _cmc_hist_max = _hist_max.get(row["cmc_id"])
+                # 印证判据：无 CMC 历史印证则不动（挡代币化股票）
+                if not _cmc_hist_max or _cmc_hist_max < _ms * 0.98:
+                    continue
+                _new_fdv = round(float(row["price_usd"]) * _ms, 8)
+                _old_fdv = row.get("fdv")
+                # 只在「确实变大」时改写，避免把正常值改小
+                if _old_fdv is None or _new_fdv > float(_old_fdv) * 1.02:
+                    row["fdv"] = _new_fdv
+                    fdv_repaired += 1
+            if fdv_repaired > 0:
+                print(f"[fdv-repair] 本轮修正 {fdv_repaired} 条退化 FDV（price × 印证 max_supply）",
+                      file=sys.stderr)
+
             row_params = [
                 (
                     row["cmc_id"],

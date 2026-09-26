@@ -3052,6 +3052,10 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
                     market_fdv = _new_fdv
                     result["market"]["fdv_usd"] = _new_fdv
                     result["market"]["fdv_basis"] = "price_x_corroborated_max_supply"
+                    # FIX-DETERMINACY-002 A1②（2026-09-27）：显式留痕「读时兜底已生效」。
+                    # 写侧（ingest_cmc_quote_snapshot）已同步加同一判据，两边都修好后本标记
+                    # 只在「镜像尚未被写侧刷新到」的窗口期出现，供线上核对兜底是否触发。
+                    result["market"]["fdv_repaired"] = True
 
     # ── 解锁 ──
     if isinstance(unlocks, dict):
@@ -3196,36 +3200,58 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
     except (psycopg.errors.UndefinedTable, Exception):
         pass
 
-    # ── 抛压评分（简化版，用解锁 + Top10 估算）──
+    # ── 抛压评分（七分量算法，与生成侧 compute_unlock_pressure 同源）──
+    # FIX-DETERMINACY-002 A3（2026-09-27）：原实现是「简化版，用解锁 + Top10 估算」，
+    # 只看 unlock_pct_30d + top10_concentration。反算可定死其失效方式：PONS 在
+    # CVD −31.47%、7 天 −19.46%、巨鲸清仓下仍算出 0.0/low —— 因 unlock_pct_30d=0 且
+    # top10 缺失时两分量皆 0、factors=0 ⇒ 不写任何值。而新七分量算法
+    # （_compute_pressure_score：解锁 × 筹码集中 × 回撤 × CVD/OI × 解锁价值）只在
+    # 生成侧接线（generate_research_thesis ⇒ compute_unlock_pressure），展示侧没跟上，
+    # 于是「页面抛压」与「结论抛压」两套口径打架（且错值进了 thesis.key_metrics）。
+    # 现统一为调用生成侧同一函数；except 分支保留旧简化版作 fallback，
+    # 防 DB 故障打断整页渲染（compute_unlock_pressure 内部要读多张表 + 写缓存）。
     try:
-        pressure = 0.0
-        factors = 0
-        if result["unlock"].get("unlock_pct_30d") is not None:
-            pct = _to_float(result["unlock"]["unlock_pct_30d"]) or 0
-            if pct > 5:
-                pressure += 80
-            elif pct > 1:
-                pressure += 50
-            elif pct > 0.1:
-                pressure += 20
-            factors += 1
-        if result["onchain"].get("top10_concentration_pct") is not None:
-            t10 = _to_float(result["onchain"]["top10_concentration_pct"]) or 0
-            if t10 > 80:
-                pressure += 90
-            elif t10 > 60:
-                pressure += 60
-            elif t10 > 40:
-                pressure += 30
-            factors += 1
-        if factors > 0:
-            score = round(pressure / factors, 1)
-            result["pressure"]["pressure_score"] = score
-            result["pressure"]["risk_level"] = (
-                "high" if score >= 70 else "medium" if score >= 40 else "low"
-            )
+        _p = compute_unlock_pressure(asset_id)
+        if not _p:
+            raise ValueError("compute_unlock_pressure 返回空")
+        result["pressure"]["pressure_score"] = _p.get("pressure_score")
+        result["pressure"]["risk_level"] = _p.get("risk_level")
+        if _p.get("top10_concentration") is not None:
+            result["pressure"]["top10_concentration_pct"] = _p["top10_concentration"]
+        if _p.get("detail"):
+            result["pressure"]["detail"] = _p["detail"]
     except Exception:
-        pass
+        # fallback：旧简化版（解锁 + Top10 估算），仅在七分量算法不可用时兜底
+        try:
+            pressure = 0.0
+            factors = 0
+            if result["unlock"].get("unlock_pct_30d") is not None:
+                pct = _to_float(result["unlock"]["unlock_pct_30d"]) or 0
+                if pct > 5:
+                    pressure += 80
+                elif pct > 1:
+                    pressure += 50
+                elif pct > 0.1:
+                    pressure += 20
+                factors += 1
+            if result["onchain"].get("top10_concentration_pct") is not None:
+                t10 = _to_float(result["onchain"]["top10_concentration_pct"]) or 0
+                if t10 > 80:
+                    pressure += 90
+                elif t10 > 60:
+                    pressure += 60
+                elif t10 > 40:
+                    pressure += 30
+                factors += 1
+            if factors > 0:
+                score = round(pressure / factors, 1)
+                result["pressure"]["pressure_score"] = score
+                result["pressure"]["risk_level"] = (
+                    "high" if score >= 70 else "medium" if score >= 40 else "low"
+                )
+                result["pressure"]["pressure_basis"] = "fallback_unlock_top10_only"
+        except Exception:
+            pass
 
     # ── 数据时效（审计 F7）：notebook 侧也暴露 data_freshness，前端/结论均可标注滞后 ──
     _freshness: dict = {}
@@ -4199,6 +4225,11 @@ _NUMERIC_POINT_RE = re.compile(
 _DETERMINISM_WEIGHTS = {"coverage": 0.35, "freshness": 0.25, "consistency": 0.25, "sample": 0.15}
 # 三档：≥70 可下注 / 40–69 仅观察 / <40 不可用于决策
 _DETERMINISM_TIERS = ((70.0, "actionable", "可下注"), (40.0, "watch", "仅观察"), (0.0, "unusable", "不可用于决策"))
+# C4（FIX-DETERMINACY-002，2026-09-27）：零证据（coverage=0）结论的确定性分封顶值。
+# 必须严格低于「仅观察」档下沿（_DETERMINISM_TIERS 中 watch=40.0）——原为散落字面量 39.9，
+# 距下沿仅 0.1，若日后微调 _DETERMINISM_WEIGHTS 把裸分抬高，零证据结论就可能滑进「仅观察」。
+# 故写死为具名常量、不随权重浮动；< 40.0 的边界由探针断言钉死（test_research_determinacy_20260926）。
+_ZERO_EVIDENCE_SCORE_CAP = 39.9
 
 
 def _is_homepage_source(s: dict) -> bool:
@@ -4345,9 +4376,9 @@ def _compute_determinism(thesis_data: dict, structured_metrics: dict,
     # （coverage=0）。零证据的结论不得进入「仅观察」及以上档位——新鲜度/一致性/样本量
     # 再好看，也替代不了证据本身。故 coverage=0 时强制封顶到「不可用于决策」档上沿。
     if coverage == 0:
-        score = min(score, 39.9)
+        score = min(score, _ZERO_EVIDENCE_SCORE_CAP)
         tier_code, tier_label = "unusable", "不可用于决策"
-        notes = ["全部论点为推断、无一条可核验引用 → 确定性分封顶 39.9（不可用于决策）"]
+        notes = [f"全部论点为推断、无一条可核验引用 → 确定性分封顶 {_ZERO_EVIDENCE_SCORE_CAP}（不可用于决策）"]
     else:
         notes = []
     return {

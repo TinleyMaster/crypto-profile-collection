@@ -6551,6 +6551,19 @@
             border: 1px solid rgba(240, 185, 11, .35);
         }
 
+        /* C2（FIX-DETERMINACY-002，2026-09-27）：HIGH 席位成色指标（高亮区顶部） */
+        .signal-high-credibility {
+            margin: 0 0 8px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #cbd5e1;
+            background: rgba(71, 85, 105, .22);
+            border: 1px solid rgba(100, 116, 139, .35);
+            cursor: help;
+        }
+
         /* P1-1（2026-09-18 审计）：AI 分析时刻 */
         .ai-reason-ts {
             margin-left: 6px;
@@ -13425,6 +13438,17 @@
             const medItems = oppList.filter(function (o) { return signalLevelOf(o) === 'medium'; });
             const total = highItems.length + medItems.length;
 
+            // C2（FIX-DETERMINACY-002，2026-09-27）：HIGH 席位成色一等公民。
+            // 此前「有回测背书」与「从未回测（exempt/missing）」在 HIGH 区无从区分，
+            // 只能逐卡看角标；这里在顶部给出占比，占比本身成为可见指标。
+            // 判定与后端 _calibration_status 同源（calibrated=true / state=calibrated_ok）。
+            var _calibOk = 0;
+            highItems.forEach(function (o) {
+                var cs = o.calibration_status || {};
+                if (cs.calibrated === true || cs.state === 'calibrated_ok') _calibOk++;
+            });
+            var _unbacked = highItems.length - _calibOk;
+
             countEl.textContent = total > 0 ? total + ' 条信号' : '0 条';
 
             if (total === 0) {
@@ -13453,7 +13477,17 @@
                 renderList = highItems.concat(medItems);
             }
 
-            let html = '<div class="signal-list">';
+            let html = '';
+            // C2：高亮区顶部成色指标（仅在有 HIGH 席位时显示）
+            if (highItems.length > 0) {
+                html += '<div class="signal-high-credibility" title="HIGH 席位成色：'
+                     + '「已校准背书」= 该信号类型有回测命中率支持；'
+                     + '「未回测」= 属豁免集合或未进校准表，无历史背书。'
+                     + '未回测类型默认封顶 MED，不在本区。">'
+                     + 'HIGH ' + highItems.length + '：已校准背书 ' + _calibOk
+                     + ' / 未回测 ' + _unbacked + '</div>';
+            }
+            html += '<div class="signal-list">';
             renderList.forEach(function (o) {
                 var lvl = signalLevelOf(o) === 'high' ? 'high' : 'medium';
                 html += renderSignalItem(o, lvl);

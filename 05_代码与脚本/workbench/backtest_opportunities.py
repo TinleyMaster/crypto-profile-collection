@@ -92,6 +92,30 @@ NOT_BACKTESTABLE = {
 # 豁免集合：不参与衰减、保留 HIGH（刀2 §3「映射到权重豁免」，用户 2026-09-26 确认）
 EXEMPT_SIGNAL_TYPES = NOT_CALIBRABLE | NOT_BACKTESTABLE
 
+
+def _load_exempt_allow_high() -> set[str]:
+    """豁免集合中「允许进 HIGH」的白名单（真源 = market_rules.yaml）。
+
+    C1（FIX-DETERMINACY-002，2026-09-27）：豁免类型从未被回测（样本 0），
+    原实现 `_gate_for` 对其返回 no_high=False ⇒ 未回测的类型直冲 HIGH
+    （13 条 HIGH 里 8 条是 exempt_not_backtestable、样本 0，含最高分 mvrv_deep_over 91）。
+    「没样本」不等于「有背书」，故改为默认 no_high=True 封顶 MED；
+    确需进 HIGH 的类型必须在 yaml 的 `opportunity_rules.exempt_allow_high` 显式列入并注明理由。
+    读取失败（缺文件/解析错）回退空集合 = 全部封顶，是安全方向。
+    """
+    try:
+        import yaml
+
+        path = Path(__file__).resolve().parent / "market_rules.yaml"
+        data = yaml.safe_load(open(path, encoding="utf-8")) or {}
+        vals = ((data.get("opportunity_rules") or {}).get("exempt_allow_high")) or []
+        return {str(v).strip() for v in vals if str(v).strip()}
+    except Exception:
+        return set()
+
+
+EXEMPT_ALLOW_HIGH: set[str] = _load_exempt_allow_high()
+
 # 外部兜底上限：避免冷门币把回测拖成小时级
 MAX_EXTERNAL_LOOKUPS = 200
 
@@ -244,13 +268,17 @@ def _is_symbol_target(tgt: str) -> bool:
 def _gate_for(signal_type: str, total: int, hit_rate: float | None) -> tuple[str, float, bool]:
     """刀2 门控判定（纯函数）：返回 (gate, weight_factor, no_high)。
 
-    豁免类型恒不衰减、保留 HIGH；样本不足(<MIN_SAMPLES)或命中率<HIT_RATE_MIN
-    的类型衰减到 DECAY_FACTOR 且不进 HIGH 候选。
+    样本不足(<MIN_SAMPLES)或命中率<HIT_RATE_MIN 的类型衰减到 DECAY_FACTOR 且不进 HIGH 候选。
+    豁免类型不衰减（weight_factor=1.0），但默认 **封顶 MED**（no_high=True）——C1
+    （FIX-DETERMINACY-002，2026-09-27）：豁免 = 从未被回测（样本 0），无背书，
+    不等于「表现好」；只有 `market_rules.yaml` 的 `exempt_allow_high` 显式列入才允许进 HIGH。
     """
     if signal_type in EXEMPT_SIGNAL_TYPES:
         if signal_type in NOT_CALIBRABLE:
-            return "exempt_not_calibrable", 1.0, False
-        return "exempt_not_backtestable", 1.0, False
+            gate = "exempt_not_calibrable"
+        else:
+            gate = "exempt_not_backtestable"
+        return gate, 1.0, signal_type not in EXEMPT_ALLOW_HIGH
     if total < MIN_SAMPLES:
         return "preliminary", DECAY_FACTOR, True
     if hit_rate is not None and hit_rate < HIT_RATE_MIN:

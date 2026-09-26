@@ -2489,6 +2489,10 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会
     "conviction_med_min_low_coverage": 50,   # 可用轴权重 < min_available_weight 时 MED 阈值
     "min_available_weight": 0.5,             # 可用轴权重和低于此值视为覆盖度不足
+    # C1（FIX-DETERMINACY-002，2026-09-27）：豁免集合（从未被回测、样本 0）中「允许进 HIGH」
+    # 的白名单。必须在此登记，否则 yaml 覆盖因「key 不在 target」而失效（同 fng_* 教训）。
+    # 真源是 market_rules.yaml 的 opportunity_rules.exempt_allow_high；当前为空 ⇒ 全部封顶 MED。
+    "exempt_allow_high": [],                 # 豁免类默认封顶 MED；需进 HIGH 须显式列入并注明理由
     "protocol_top_n": 3,                     # P1-3 新协议 TVL 异动取前 N
     "exchange_netflow_min_usd": 100_000_000, # 交易所净流出触发 long 信号最小阈值
     # P0-1 MVRV 估值回归
@@ -2763,6 +2767,31 @@ STRUCTURE_WEIGHTS = _MARKET_RULES["structure_weights"]
 EXTREME_ZONE = _MARKET_RULES["extreme_zone"]
 NARRATIVE_CHAIN = _MARKET_RULES["narrative_chain"]
 SCORING_TUNING = _MARKET_RULES["scoring_tuning"]
+
+# C1（FIX-DETERMINACY-002，2026-09-27）：豁免类（从未被回测、样本 0）默认封顶 MED。
+# 真源 = market_rules.yaml 的 opportunity_rules.exempt_allow_high（当前空）。
+_EXEMPT_ALLOW_HIGH: set = {
+    str(x).strip() for x in (OPPORTUNITY_THRESHOLDS.get("exempt_allow_high") or [])
+    if str(x).strip()
+}
+
+
+def _exempt_no_high(signal_type: str) -> bool:
+    """豁免类是否应封顶 MED（白名单内除外）。
+
+    用 `_calibration_status` 判定而非直接查集合，保证「卡片角标（C2）显示的状态」
+    与「是否封顶」同源、不会打架：角标显示「未校准/未回测」的卡不可能出现在 HIGH。
+    注意这只覆盖 exempt_*（表中有行且 gate 以 exempt_ 开头）；missing（表里完全没这条）
+    仍按原逻辑处理，不在本单范围内。
+    """
+    if not signal_type:
+        return False
+    st = str(signal_type)
+    if st in _EXEMPT_ALLOW_HIGH:
+        return False
+    cs = _calibration_status(st)
+    return str(cs.get("gate") or "").startswith("exempt_")
+
 
 # P1-1 叙事/链榜配置（从 yaml 覆盖）
 NARRATIVE_TOP_N = int(NARRATIVE_CHAIN["narrative_top_n"])
@@ -3254,13 +3283,25 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
         )
 
     tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
+    # C1（FIX-DETERMINACY-002，2026-09-27）：豁免类（从未被回测、样本 0）默认封顶 MED。
+    # 校准表刷新的 no_high 由周级回测写入，最快也要等下一次 signal_type_calibration_weekly
+    # 才生效；此处按 market_rules.yaml 的 exempt_allow_high 即时封顶，当天即可观察 HIGH 席位
+    # 成色（13→5）。封顶非封杀：卡片保留在 MED/观察池。
+    _demoted_exempt = False
+    if tier == "HIGH" and _exempt_no_high(st):
+        tier = "MED"
+        _demoted_exempt = True
+        opp["tier_demote_reason"] = (
+            f"exempt_unbacktested：该类型（{_calibration_status(st).get('gate')}）从未被回测，"
+            "默认封顶 MED（如需进 HIGH，请在 market_rules.yaml 的 exempt_allow_high 显式列入并注明理由）"
+        )
     if cal and cal["no_high"]:
         if tier == "HIGH":
             tier = "MED"
         # 溯源：保卡下限可能已把衰减分抬回 MED（如 86×0.6=52→floor 55），
         # 此时 tier 直接判成 MED、旧写法（仅 tier=="HIGH" 时记）会漏记降档原因；
         # 只要衰减前本可达 HIGH，就记可解释的降档原因。
-        if before >= high_min:
+        if before >= high_min and not _demoted_exempt:
             opp["tier_demote_reason"] = opp.get("calibration_note")
     opp["conviction_score"] = score
     opp["conviction_tier"] = tier

@@ -13,7 +13,8 @@
   macro 侧 无校准 → 行为与上线前一致（HIGH 保留）
   macro 侧  calibrated_low/preliminary → 分数×0.6、档位封顶 MED、卡片保留（不判 LOW）
   macro 侧  保卡下限：衰减后仍不低于 med_min（防整类被删）
-  macro 侧  豁免（exempt_*）→ 不衰减、保留 HIGH
+  macro 侧  豁免（exempt_*）→ 不衰减，但**默认封顶 MED**（C1：未回测 = 无背书，白名单内除外）
+  macro 侧  豁免白名单 exempt_allow_high（yaml 真源，当前空）→ 列入才允许进 HIGH
   macro 侧  消费 SQL 取最新窗口（window_end DESC）+ no_high/weight_factor 字段
   macro 侧  复验 47bcb4d §五#1  calibration_status 四态留痕（missing/calibrated_ok/decayed/exempt_*）
   macro 侧  复验 47bcb4d §五#4  raw_before_decay 供 select_highlight_signals 排序还原原序
@@ -116,10 +117,10 @@ check("_BTC_CACHE" in _BT_SRC and "_EXTERNAL_CACHE" in _BT_SRC and "MAX_EXTERNAL
 
 # ═══════════════ 回测侧：门控纯函数 ═══════════════
 print("[门控] _gate_for 六分支")
-check(bt._gate_for("mvrv_deep_under", 0, None) == ("exempt_not_calibrable", 1.0, False),
-      "NOT_CALIBRABLE → 豁免，不衰减不封顶")
-check(bt._gate_for("narrative", 0, None) == ("exempt_not_backtestable", 1.0, False),
-      "NOT_BACKTESTABLE → 豁免，不衰减不封顶")
+check(bt._gate_for("mvrv_deep_under", 0, None) == ("exempt_not_calibrable", 1.0, True),
+      "NOT_CALIBRABLE → 豁免不衰减，但默认封顶 MED（C1：未回测无背书）")
+check(bt._gate_for("narrative", 0, None) == ("exempt_not_backtestable", 1.0, True),
+      "NOT_BACKTESTABLE → 豁免不衰减，但默认封顶 MED（C1）")
 check(bt._gate_for("github_activity", 28, 0.6071) == ("preliminary", 0.6, True),
       "样本 28 < 30 → preliminary，×0.6 且不进 HIGH（即便命中率 60.7%）")
 check(bt._gate_for("etf_flow", 44, 0.4091) == ("calibrated_low", 0.6, True),
@@ -205,11 +206,13 @@ p, p_exc, p_opps = _push(92, "kol_onchain", cal=pre)
 check(p["conviction_score"] == int(round(92 * 0.6)) and p["conviction_tier"] == "MED",
       f"92 → {int(round(92*0.6))}/MED（实得 {p['conviction_score']}/{p['conviction_tier']}）")
 
-print("[macro] 豁免类型 → 不衰减、保留 HIGH")
+print("[macro] 豁免类型 → 不衰减，但默认封顶 MED（C1）")
 ex, ex_exc, ex_opps = _push(88, "narrative", tgt="AI & Big Data", cal=_CAL_EXEMPT)
-check(ex["conviction_score"] == 88 and ex["conviction_tier"] == "HIGH",
-      f"豁免 → 88/HIGH 原样保留（实得 {ex['conviction_score']}/{ex['conviction_tier']}）")
+check(ex["conviction_score"] == 88 and ex["conviction_tier"] == "MED",
+      f"豁免 → 分数 88 原样保留（不衰减），档位封顶 MED（实得 {ex['conviction_score']}/{ex['conviction_tier']}）")
 check("calibration" not in ex, "豁免不写 calibration 字段（不制造「已校准」错觉）")
+check("exempt_unbacktested" in (ex.get("tier_demote_reason") or ""),
+      f"降档原因可解释（实得 {ex.get('tier_demote_reason')}）")
 
 
 # ═══════════════ macro 侧：复验 47bcb4d §五 #1 四态状态留痕 ═══════════════
@@ -305,6 +308,45 @@ _HTML_SRC = open(os.path.join(_HERE, "templates", "index.html"), encoding="utf-8
 check("o.calibration_status" in _HTML_SRC and "signal-calib-none" in _HTML_SRC
       and "signal-calib-ok" in _HTML_SRC,
       "复验#1：前端按 calibration_status 渲染「已校准/未校准」角标（未校准灰标）")
+
+# ═══════════════ C1/C2（FIX-DETERMINACY-002，2026-09-27）：豁免封顶 + HIGH 成色可见 ═══════════════
+print("[C1] 豁免类默认封顶 MED + yaml 白名单 exempt_allow_high")
+check(bt.EXEMPT_ALLOW_HIGH == set(), f"白名单当前为空（实得 {bt.EXEMPT_ALLOW_HIGH}）")
+_old_allow = bt.EXEMPT_ALLOW_HIGH
+try:
+    bt.EXEMPT_ALLOW_HIGH = {"narrative"}
+    check(bt._gate_for("narrative", 0, None) == ("exempt_not_backtestable", 1.0, False),
+          "白名单内豁免类型 → 不封顶（可进 HIGH）")
+finally:
+    bt.EXEMPT_ALLOW_HIGH = _old_allow
+_YAML = open(os.path.join(_HERE, "market_rules.yaml"), encoding="utf-8").read()
+check("exempt_allow_high:" in _YAML, "market_rules.yaml 登记白名单键（真源）")
+check("exempt_allow_high" in mm.OPPORTUNITY_THRESHOLDS_DEFAULT,
+      "默认阈值表登记该键（否则 yaml 覆盖因 key 不在 target 而失效）")
+check("_exempt_no_high" in _MACRO_SRC and "_EXEMPT_ALLOW_HIGH" in _MACRO_SRC,
+      "macro 即时封顶（不等周级回测刷新表）")
+# 钉死豁免判定（含最高分 mvrv_deep_over 91，13 条 HIGH 中 8 条属此类）
+mm._SIGNAL_TYPE_CALIBRATION.clear()
+mm._SIGNAL_TYPE_CALIBRATION["narrative"] = _CAL_EXEMPT
+mm._SIGNAL_TYPE_CALIBRATION["mvrv_deep_over"] = dict(_CAL_EXEMPT)
+mm._SIGNAL_TYPE_CALIBRATION["catalyst"] = _CAL_OK
+mm._CALIB_LOADED_AT = float("inf")
+check(mm._exempt_no_high("narrative") and mm._exempt_no_high("mvrv_deep_over"),
+      "豁免类型 → 应封顶 MED（含 mvrv_deep_over）")
+check(not mm._exempt_no_high("catalyst"), "有背书的 calibrated_ok 不封顶（保留 HIGH）")
+try:
+    mm._EXEMPT_ALLOW_HIGH.add("narrative")
+    ex2, _, _ = _push(88, "narrative", tgt="AI & Big Data", cal=_CAL_EXEMPT)
+    check(ex2["conviction_tier"] == "HIGH",
+          f"白名单命中 → HIGH 保留（实得 {ex2['conviction_tier']}）")
+finally:
+    mm._EXEMPT_ALLOW_HIGH.discard("narrative")
+mm._SIGNAL_TYPE_CALIBRATION.clear()
+
+print("[C2] 高亮区顶部 HIGH 成色指标")
+check("signal-high-credibility" in _HTML_SRC and "已校准背书" in _HTML_SRC
+      and "未回测" in _HTML_SRC and "_calibOk" in _HTML_SRC,
+      "前端渲染「HIGH N：已校准背书 X / 未回测 Y」")
 
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}")
 sys.exit(1 if failed else 0)

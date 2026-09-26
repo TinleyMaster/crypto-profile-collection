@@ -67,6 +67,14 @@ opportunity_rules:
   # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会
   conviction_med_min_low_coverage: 50   # 可用轴权重 < min_available_weight 时 MED 阈值
   min_available_weight: 0.5             # 可用轴权重和低于此值视为覆盖度不足
+  # C1（FIX-DETERMINACY-002，2026-09-27）：豁免集合（exempt_not_calibrable /
+  #   exempt_not_backtestable，样本 0 = 从未被回测）默认封顶 MED 的白名单。
+  #   「没样本」不等于「有背书」——原实现让 13 条 HIGH 席位中的 8 条坐在从未回测的类型上
+  #   （含最高分 mvrv_deep_over 91），HIGH 成色无从判断。此处为空 ⇒ 全部封顶 MED（保卡不删）。
+  #   若某豁免类型确需进 HIGH，在此显式加入其 signal_type 并注明理由，例如：
+  #     exempt_allow_high: [mvrv_deep_over]   # 理由：…
+  #   macro_market 即时消费本白名单，backtest_opportunities._gate_for 写表时同源读取。
+  exempt_allow_high: []
   # 第二刀新增阈值
   # B1（OPT-HL-DETERMINACY-001）：放宽 fng 极值触发 25→30 / 75→70，让硬情绪信号更易产出
   fng_fear_max: 30                      # 恐贪 ≤30 → 极度恐惧 long 信号
@@ -75,12 +83,21 @@ opportunity_rules:
   protocol_top_n: 3                     # P1-3 新协议 TVL 异动取前 N
   exchange_netflow_min_usd: 100000000   # 交易所净流出触发 long 信号最小阈值（1 亿美元）
   # P0-3 conviction 各轴权重（总和 = 1.0，6 轴含 catalyst；cycle 权重已废除，周期由 regime_mult 调制）
-  conviction_weight_mvrv: 0.28
-  conviction_weight_funding: 0.17
-  conviction_weight_netflow: 0.17
-  conviction_weight_stable: 0.11
-  conviction_weight_roi: 0.17
-  conviction_weight_catalyst: 0.10     # P0-2 临时保持低位：P0-1 回测无 HIGH 样本（MED=29/LOW=481），无法按 tier 校准；待本刀数据轴扩建后 score 分布改善、回测出现 HIGH 档再校准
+  # 透明化标签（X2 · OBI-OPT-BACKTEST-001-CLOSE，2026-09-26）：
+  #   [axiomatic]   = 经验启发式，回测校准不回写此处（六轴权重全部属于此类）；
+  #                   其中 funding / mvrv 两轴对应的 signal_type（funding、mvrv_*）已被
+  #                   NOT_BACKTESTABLE / NOT_CALIBRABLE 排除出回测校准（X2 决策：维持排除，
+  #                   否决回收 funding）⇒ 这两轴长期停留在 axiomatic，保留权重仅作轴贡献占位。
+  #   [calibrated]  = 由 backtest_opportunities.py --write 落 biz.signal_type_calibration
+  #                   （按 signal_type 给 weight_factor / no_high），macro_market 经
+  #                   _load_signal_type_calibration 消费做分数衰减与 HIGH 封顶——
+  #                   该表是本文件之外的第二套校准真源，[calibrated] 项不在本 yaml 内。
+  conviction_weight_mvrv: 0.28            # [axiomatic]
+  conviction_weight_funding: 0.17         # [axiomatic·轴对应 signal_type 被排除出校准]
+  conviction_weight_netflow: 0.17         # [axiomatic]
+  conviction_weight_stable: 0.11          # [axiomatic]
+  conviction_weight_roi: 0.17             # [axiomatic]
+  conviction_weight_catalyst: 0.10     # [axiomatic] P0-2 临时保持低位：P0-1 回测无 HIGH 样本（MED=29/LOW=481），无法按 tier 校准；待本刀数据轴扩建后 score 分布改善、回测出现 HIGH 档再校准
   # P0-B 催化剂因子
   catalyst_window_days: 14             # 催化剂回溯窗口（天）
   catalyst_min_score: 50               # 独立强事件机会类入场门槛；进评分轴按权重比例贡献不限此阈值

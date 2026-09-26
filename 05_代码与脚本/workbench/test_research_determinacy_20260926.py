@@ -431,6 +431,34 @@ check("conviction_locked" in _DB_SRC and 'thesis["conviction"] = "low"' in _DB_S
       "#14 读取侧执行 conviction 锁")
 
 
+# ── C3/C4（FIX-DETERMINACY-002，2026-09-27）──
+print("\n[C3] horizon_days=0 不得进入结论（生成侧亦有硬过滤，不依赖上游 gate）")
+check('_fallback = [c for c in _deduped if c.get("horizon_days") != 0]' in _DB_SRC,
+      "#C3 生成侧过滤 horizon_days=0 的 _fallback 存在")
+check('if _c.get("horizon_days") == 0:' in _DB_SRC
+      and '_c["excluded_reason"] = "no_horizon"' in _DB_SRC,
+      "#C3 显式 =0 标记 no_horizon 后才挑可消费项")
+
+print("\n[C4] 零证据封顶为具名常量且不随权重浮动")
+_cap = ds._ZERO_EVIDENCE_SCORE_CAP
+check(isinstance(_cap, float) and _cap == 39.9, "#C4 封顶常量 = 39.9", _cap)
+check(_cap < 40.0, "#C4 封顶严格低于「仅观察」档下沿（40.0）", _cap)
+check("min(score, _ZERO_EVIDENCE_SCORE_CAP)" in _DB_SRC,
+      "#C4 _compute_determinism 消费该常量（非散落字面量）")
+# 权重扰动下零证据结论仍落 unusable：即便把权重从 coverage 挪走也救不回「仅观察」
+_old_w = dict(ds._DETERMINISM_WEIGHTS)
+try:
+    ds._DETERMINISM_WEIGHTS.clear()
+    ds._DETERMINISM_WEIGHTS.update(
+        {"coverage": 0.10, "freshness": 0.40, "consistency": 0.35, "sample": 0.15})
+    _a_pert = ds._compute_determinism(_pons_thesis, _pons_sm, _pons_missing)
+    check(_a_pert["score"] <= _cap and _a_pert["tier"] == "unusable",
+          "#C4 权重扰动后零证据结论仍 unusable", (_a_pert["score"], _a_pert["tier"]))
+finally:
+    ds._DETERMINISM_WEIGHTS.clear()
+    ds._DETERMINISM_WEIGHTS.update(_old_w)
+
+
 # ─────────────────────────────────────────────────────────
 # #15 结论版本化留痕
 # ─────────────────────────────────────────────────────────

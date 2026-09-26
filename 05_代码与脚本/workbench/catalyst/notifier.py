@@ -1585,18 +1585,49 @@ _TRANSMISSION_TIMELINE = {
     ),
 }
 
-# 「自身受益」动作关键词：命中说明事件直接作用于该代币本身（被买/被锁/被采用）
+# 「自身受益」动作关键词：命中说明事件直接作用于该代币本身（被买/被锁/被纳入/被采用/上线）
+# 注：刻意不含「支持」——「某协议支持 X 链」多指承载关系，方向易误判（复验 P2-2）
 _DIRECT_ACTION_KEYWORDS = (
-    "购入", "买入", "增持", "纳入", "回购", "销毁", "合作", "推出",
-    "上线", "采用", "接入", "集成", "支持", "质押", "托管",
+    "购入", "买入", "增持", "纳入", "回购", "销毁", "质押", "锁仓", "托管",
+    "合作", "推出", "上线", "采用", "接入", "集成",
 )
+
+# 承载关系线索：代币紧邻这些词时多为「底层链/网络」角色（生态间接），非自身受益
+_CARRIER_CUES = ("链", "网络", "主网", "公链", "生态", "链上")
+# 匹配 token 后紧邻位置前需跳过的空白/标点（用于判定「SUI 链」这类承载后缀）
+_CARRIER_TRIM = re.compile(r"^[\s，,。.、:：;；/\\|()\[\]（）【】\"'“”‘’\-—]+")
+
+
+def _mentions_token(text: str, token: str) -> tuple[bool, bool]:
+    """判断 text 是否点名 token，返回 (是否点名, 是否仅作承载角色)。
+
+    - ASCII 词用词边界匹配，避免 `ETH ⊂ ETHEREUM`、`GPT ⊂ CGPT` 误命中（复验 P2-1）；
+      CJK 名称用子串匹配。
+    - 大小写不敏感（复验 P3）。
+    - 紧邻后接「链/网络/主网/公链/生态/链上」→ 视为承载角色（复验 P2-2）。
+    """
+    if not token:
+        return False, False
+    tl, tok = (text or "").lower(), token.lower()
+    if re.fullmatch(r"[a-z0-9$_.]+", tok):
+        pattern = r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])"
+    else:
+        pattern = re.escape(tok)
+    spans = list(re.finditer(pattern, tl))
+    if not spans:
+        return False, False
+    for m in spans:
+        tail = _CARRIER_TRIM.sub("", tl[m.end(): m.end() + 6])
+        if not any(tail.startswith(c) for c in _CARRIER_CUES):
+            return True, False      # 存在非承载角色的点名 → 自身受益
+    return True, True               # 仅以「X 链/生态」形式出现 → 承载角色
 
 
 def _transmission_directness(r: dict) -> tuple[str, str, str]:
     """规则映射「传导直接度」（不新增上游字段）。
 
-    直接利好标的：标题/摘要点名该币自身，且事件属「被买/被锁/被采用/被纳入/合作」；
-    生态间接受益：事件作用在底层链/赛道/协议而非该币自身。
+    直接利好标的：标题/摘要以自身角色点名该币，且事件属「被买/被锁/被采用/被纳入/合作」；
+    生态间接受益：事件作用在底层链/赛道/协议而非该币自身（含「X 链」承载角色）。
 
     Returns:
         (level, label, confidence_cn)，level ∈ {'direct','indirect'}
@@ -1606,11 +1637,11 @@ def _transmission_directness(r: dict) -> tuple[str, str, str]:
             r.get("catalyst_title"), r.get("title_cn"), r.get("ai_summary"),
         ) if x
     )
-    sym = (r.get("symbol") or "").strip()
-    name = (r.get("canonical_name") or "").strip()
-    mentioned = bool((sym and sym in text) or (name and name in text))
+    sym_hit, sym_carrier = _mentions_token(text, (r.get("symbol") or "").strip())
+    name_hit, name_carrier = _mentions_token(text, (r.get("canonical_name") or "").strip())
+    self_mentioned = (sym_hit and not sym_carrier) or (name_hit and not name_carrier)
     has_action = any(k in text for k in _DIRECT_ACTION_KEYWORDS)
-    if mentioned and has_action:
+    if self_mentioned and has_action:
         return "direct", "直接利好标的", "高"
     return "indirect", "生态间接受益", "中"
 

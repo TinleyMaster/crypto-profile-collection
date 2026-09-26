@@ -12,7 +12,8 @@
   7. 失败不阻断主流程：查询异常返回 dict 而非抛异常；无候选不发信
   8. 单轮上限 ≤3（对应「日均 ≤3 条」目标）
   9. 传导逻辑模块（输出层优化）：含「影响传导/预期已消化/传导节奏」、直接度规则映射、
-     二阶「板块联动」仅在数据存在时渲染；不再出现内部术语「未被计入降权」
+     二阶「板块联动」仅在数据存在时渲染；不再出现内部术语「未被计入降权」；
+     直接度规则复验收口：ASCII 词边界（P2-1）、大小写不敏感（P3）、承载角色不误判（P2-2）
 
 运行: python test_major_event_alert.py
 """
@@ -174,6 +175,21 @@ check(N._transmission_directness({
     "symbol": "SUI", "canonical_name": "Sui",
     "title_cn": "RWA 代币作 Bluefin Lend 抵押品", "ai_summary": ""})[0] == "indirect",
     "仅作生态承载链 → 生态间接受益")
+# 复验 P2-1：ASCII 词边界（ETH ⊄ ETHEREUM、GPT ⊄ CGPT）
+check(N._transmission_directness({
+    "symbol": "GPT", "canonical_name": "GptToken",
+    "title_cn": "CGPT 上线某交易所", "ai_summary": ""})[0] == "indirect",
+    "ASCII 词边界：GPT 不误命中 CGPT（复验 P2-1）")
+# 复验 P3：大小写不敏感
+check(N._transmission_directness({
+    "symbol": "SKY", "canonical_name": "Sky",
+    "title_cn": "Galaxy 购入 sky 并纳入财库", "ai_summary": ""})[0] == "direct",
+    "大小写不敏感命中并判直接（复验 P3）")
+# 复验 P2-2：承载角色（X 链/生态）不误判为直接
+check(N._transmission_directness({
+    "symbol": "SUI", "canonical_name": "Sui",
+    "title_cn": "某协议支持 SUI 链的 RWA 抵押", "ai_summary": ""})[0] == "indirect",
+    "承载角色（X 链）不误判为直接（复验 P2-2）")
 # 二阶联动：有数据才渲染，无数据不臆造
 _h_so = N._build_major_event_html(
     _fake_row(second_order_symbols=["AAA", "BBB"], second_order_sector="RWA"))

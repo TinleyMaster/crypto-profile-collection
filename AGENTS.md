@@ -1229,10 +1229,11 @@
   - **③ 预期已消化模块**：`prelaunch_ret_24h` 重解为「公告前已涨 X% ⇒ 部分预期已被提前消化，非零成本」，并按 `resonance_state`（`_RESONANCE_NOTE`）补「系统判定…」；**删掉内部术语「未被计入降权」**。
   - **④ 传导节奏模块**：按 `catalyst_kind` 给即时/短期/中期三阶段（`_TRANSMISSION_TIMELINE`）。
   - **⑤ 板块联动模块**：`_recent_major_events` 新增 `LEFT JOIN LATERAL biz.catalyst_second_order`（取 `array_agg` 同 catalyst 下非本资产的 `canonical_symbol`），**仅消费已有二阶数据**；无数据则不渲染（不臆造传导标的）。
-- **护栏**：`workbench/test_major_event_alert.py` 由 30/30 扩到 **42/42**（新增第 9 节：三模块存在性、直接度规则双向样例、二阶有/无数据两态、内部术语已清除、复验三项）；`py_compile` 通过；「非交易建议 / 不含交易档位」原护栏零回归。
+- **护栏**：`workbench/test_major_event_alert.py` 由 30/30 扩到 **45/45**（新增第 9 节：三模块存在性、直接度规则双向样例、二阶有/无数据两态、内部术语已清除、复验三项、价格尾零三项）；`py_compile` 通过；「非交易建议 / 不含交易档位」原护栏零回归。
 - **复验收口（`audit_重大事件邮件_传导逻辑改动复验_4fb0c59_2026-09-26.md`，本次提交）**：独立复验确认 `4fb0c59` 落地（三段式：源码/注入 39-0/SQL 红线未踩），并开出 2×P2 + 1×P3，本轮按建议收紧直接度规则（仍仅输出层，零 DDL）：
   - **P2-1 子串误命中** → 新增 `_mentions_token()`：ASCII 词用词边界匹配（`(?<![a-z0-9])…(?![a-z0-9])`），`ETH ⊄ ETHEREUM`、`GPT ⊄ CGPT`；CJK 名称仍子串匹配。
   - **P2-2 动作词偏宽** → 动作词表移除最歧义的「支持」；新增承载角色判据（token 紧邻「链/网络/主网/公链/生态/链上」→ 生态间接），封死「某协议支持 SUI 链」误判 direct。
   - **P3 大小写敏感** → 匹配前统一 `lower()`，`SUI`↔`Sui` 均命中。
-  - 三样本复跑仍为 ONDO/SKY=direct、SUI=indirect（规则推导，非硬编码）。**旧项（`_fmt_price` 8 位小数）未动**：属全邮件共享的既有格式，不在本轮 Scope。
+  - 全量回归：`test_major_event_alert` 45/45、`test_fast_alert_audit_rest` 61/61、`test_fast_alert_ai_veto` 46/46、`test_catalyst_channel_dedup` 22/22 全绿。
+  - **旧项闭环**：`_fmt_price` 新增 `_trim_trailing_zeros()`，定点小数去掉无意义尾零（`0.42830000 → 0.4283`、`620.5000 → 620.5`）；极小价仍走科学计数（不回归 2026-09-22 P0 显示修复）。属全邮件共享函数，已跑上述四个通道的离线护栏确认零回归。
 - **待部署**：push 后约 6 分钟 Zeabur 自动重建生效。

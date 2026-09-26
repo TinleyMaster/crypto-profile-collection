@@ -2421,17 +2421,27 @@ def _fmt_ts(v, beijing: bool = True) -> str:
         return str(v)
 
 
+def _trim_trailing_zeros(s: str) -> str:
+    """去掉定点小数无意义的尾零（`0.42830000 → 0.4283`、`620.5000 → 620.5`）。
+
+    复验旧项：现价 `0.42830000` 属显示噪音，读者易误读精度。
+    """
+    if "." not in s:
+        return s
+    return s.rstrip("0").rstrip(".")
+
+
 def _fmt_price(v) -> str:
     if v is None:
         return "—"
     try:
         f = float(v)
         if f >= 1000:
-            return f"{f:,.1f}"
+            return _trim_trailing_zeros(f"{f:,.1f}")
         if f >= 1:
-            return f"{f:,.4f}"
+            return _trim_trailing_zeros(f"{f:,.4f}")
         if f >= 1e-4:
-            return f"{f:.8f}"
+            return _trim_trailing_zeros(f"{f:.8f}")
         # 极小价（meme 常见 1e-12）：固定 8 位小数会被截断成 0.00000000，
         # 让「现价/MA20」看起来像 0（审计 2026-09-22 P0 的显示根因）→ 改科学计数。
         return f"{f:.4e}"

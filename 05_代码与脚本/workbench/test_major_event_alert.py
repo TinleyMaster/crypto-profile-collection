@@ -195,6 +195,10 @@ _h_so = N._build_major_event_html(
     _fake_row(second_order_symbols=["AAA", "BBB"], second_order_sector="RWA"))
 check("板块联动" in _h_so and "AAA" in _h_so, "有二阶数据时渲染「板块联动」")
 check("板块联动" not in _html, "无二阶数据时不渲染「板块联动」（不臆造传导标的）")
+# 复验旧项：价格尾零（0.42830000 → 0.4283）
+check(N._fmt_price(0.4283) == "0.4283", "价格尾零：0.42830000 → 0.4283")
+check(N._fmt_price(620.5) == "620.5" and "620.5000" not in _html, "价格尾零：620.5000 → 620.5")
+check(N._fmt_price(1e-5) == "1.0000e-05", "极小价仍走科学计数（不回归 2026-09-22 P0 显示修复）")
 
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

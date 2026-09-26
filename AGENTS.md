@@ -1365,7 +1365,7 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **NEW-2 根因**：卡片方向段原判据 `fb == 0 and fbear == 0 and fneut == 0`，只在**三项全零**时才印「（剔除陈旧后无新鲜条目）」，否则走 `else` 印「多空持平」。新鲜条目**只有中性**（复验报告合成场景 `{0多,0空,2中}`）时方向同样不存在，却印出「多空持平」（读作「新鲜的多空均衡」，与 N-786-3 立的规矩直接冲突），且因 `f_total=2≠0` 连 ℹ️「未参与结论」也不印 ⇒ 读者看到「净空3 + 多空持平」，既无警告也无说明。
 - **NEW-2 修法**：判据只看方向 → `if fb == 0 and fbear == 0`；文案按 `fneut` 分两支：`fneut` 非零时印「（剔除陈旧后**无新鲜方向**，仅 N 条中性）」（保住「全陈旧 ⇒ 无新鲜条目」的旧文案不失真），否则仍印「（剔除陈旧后无新鲜条目）」。
 - **探针 65 → 83 断言**（`workbench/test_scan_alert_audit_20260926.py`）：新增「复验 NEW-1」段（7 条非预定动作必须不豁免 + 6 条真·预定动作必须豁免（实体/将来语义两通道各取样）+ 实体通道英文公告）与「复验 NEW-2」段（合成 `{0多,0空,2中}` 不得印「多空持平」、须印「无新鲜方向」且如实披露「仅 2 条中性」；反向对照 `{0多,1空,1中}` 仍印「净空1」）。**回归零失败**：`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_scenario_label`(48/0)、`test_scan_l1_closed_bar`(16/0)、`test_highlight_audit_20260924`(67/0)、`test_scan_alert_remaining`(16/0)。
-- **已知残差（未修，不阻塞）**：英文解锁预告「… and MBG **will see** token unlocks」（无具体日期、无 `will unlock`）不在将来语义表内 ⇒ 该条判陈旧；但同一条新闻的中文版（「将于下周迎来大额解锁」）仍豁免，**该资产的新鲜利空由中文版承载**，漏的是重复条目的计数而非方向（prod 实测 2 行，资产 7760/8774）。
+- **已知残差（已于本轮收口，见下一节）**：英文解锁预告「… and MBG **will see** token unlocks」（无具体日期、无 `will unlock`）不在将来语义表内 ⇒ 该条判陈旧。**本轮只读量化推翻其归因**（标题被源库截断，`will see` 根本没入库），真缺口是中文「将迎来」；落地后 prod 净增豁免 5 行，资产 7760/8774/8801/3994。
 - **未做**：runtime 侧佐证（需下一封盘面告警邮件落地后核对相悖警告/强度分是否与新鲜口径一致）；报告 §五 提到的 `cmc_quote_snapshot` 停滞告警属调度侧另一笔账。
 
 ### 一键投研页 P0 修复复验处置（核验_一键投研页P0修复_2cc1e55_2026-09-26，2026-09-26，本次提交）
@@ -1407,3 +1407,14 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **刻意不动（报告 §二C 建议 ③ 拆表属更大改动，另开工单）**：`现货` / `spot` 仍能把商品行情快讯放行（`现货黄金`/`spot silver`，近 90 天 ≈47 条），但删它会连带误杀「SOL 现货 ETF」这类**真加密**新闻（cid 3259 / 627）⇒ 同一张表下无解，须靠拆表（商品 gate 宽松 / 美股 gate 只认四类硬证据）才能两者兼得。已在 `linker.py` 约束 ⑤ 注释留档。
 - **探针 83 → 90 断言**：新增「复验 a9e7901·通用词漏放行」段（4 条必须拦下 + 3 条反向必须放行：cid 6299 靠 `sui`、cid 3259 靠未删的 `spot`、`Stacks 网络完成硬分叉` 不得被 `stacks` 负向断言误伤）。**回归零失败**：`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_scenario_label`(48/0)、`test_scan_l1_closed_bar`(16/0)、`test_highlight_audit_20260924`(67/0)、`test_scan_alert_remaining`(16/0)、`test_major_event_alert`(45/0)。
 - **未做**：① 拆表（含报告 §六「提醒」的双副本单源收敛）；② §六 P2「67/0 临时探针转常驻」；③ 门禁收紧只影响**新入库**，存量撞名脏关联未重扫（本轮实测无需清，但历史行未复查）。
+
+### 盘面告警「will see / 将迎来」残差收口（核验_NEW-1_NEW-2修复_e917e61 §八，2026-09-26，本次提交）
+
+来源：`核验_NEW-1_NEW-2修复_e917e61_2026-09-26.md` §八 唯一的 🔴 项 —— `e917e61` 自留残差「英文 `will see token unlocks` 未纳入 `_SCHEDULED_FUTURE_RE`」（报告称 prod 2 行 / 资产 7760、8774）。**本轮只读量化推翻了该残差的归因**，据实测改口径落地。
+
+- **归因修正（关键）**：残差原文写「英文句式不在表内 ⇒ 该条判陈旧」，实测**不成立** —— 源库把 cid 8072 的标题**截断在 83 字符**（`Token Unlocks data shows that … ID, and MBG wil...`），`will see` **根本没落进 `title + ai_summary`**；近 60 天全库仅 2 行含 `will see`，**均不在 7 天窗内**（cid 5619 新泽西通勤服务降班次、cid 3301 宏观解锁总览）。故「补英文句式就能修好 7760/8774」的前提是错的。
+- **真缺口其实是两条**：① 中文 **`将迎来…`**（原表只有 `将于`，`将迎来大额解锁` 一条也不命中）—— 这才是 cid 8072（英文截断版）被去豁免的真正原因，它靠**其中文 `ai_summary`**「下周XPL、H、SOSO等代币将迎来大额解锁」参与判据；② 英文 `will see <动作词>`（原 `will` 分支要求动词**紧跟** `will`，`will see` 落空）。
+- **修法（两条都补，但性质不同）**：新增 `将\s*迎来` 与 `\bwill\s+see\s+(?:\w+\s+){0,3}(?:delist|list|remov|upgrad|unlock|halt|suspend|migrat|launch)\w*`。英文那条**在 prod 净增豁免 = 0**，属**防御性**（防未截断的英文源）；刻意不写成裸 `\bwill\s+see\b` —— 裸写法会复活 NEW-1 刚消灭的「评论类旧闻」误豁免（`Analysts will see the impact of the halving next month` 含 `halving` 动作词即恒新鲜），故保留词距上限 `{0,3}` 构成「近距将来语义」双重门槛（已写成断言）。
+- **prod 只读量化（7 天窗、>3 天陈旧候选 2321 条、现行豁免 60 条）**：三候选对照 —— A 仅英文 `will see`：**净增 0**；B 仅 `将迎来`：**净增 5**；C 裸 `\bwill\s+see\b`：净增 0。落地 **A+B**。5 行全为真·预告：asset 7760/8774（cid 8072 英文截断版，靠中文 `ai_summary`）、8774/8801（cid 8327「本周 H、SOSO 及 STBL 等将迎来代币一次性大额解锁」）、3994（「B.AI 热门模型权益将迎来新一轮升级」）；**无加密外误伤**。
+- **探针 90 → 96 断言**：新增「复验 e917e61·八」段（3 条残差句式必须豁免：英文未截断版 / cid 8327 中文解锁 / asset 3994 中文升级；3 条必须不豁免：`will see` 词距反例 / prod cid 5619 实物 / 「将迎来抛压」无动作词）。**回归零失败**：`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_scenario_label`(48/0)、`test_scan_l1_closed_bar`(16/0)、`test_highlight_audit_20260924`(67/0)、`test_scan_alert_remaining`(16/0)、`test_major_event_alert`(45/0)。
+- **未做 / 边界**：① **标题截断本身无解**（源库行为；`e917e61` 已刻意排除 `body_text` 作判据输入，理由是正文版会系统性放宽 29 条汇总稿）⇒ 英文截断版只能靠中文 `ai_summary` 兜；② 只影响**新判定**，历史告警快照不回溯；③ runtime 侧佐证仍需下一封盘面告警邮件。

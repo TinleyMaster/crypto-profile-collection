@@ -19,6 +19,10 @@
 复验（核验_催化剂门禁扩容与存量清理_a9e7901 §六 P1）：
   4 条「通用词漏放行」收口 —— 删 `miner|矿工|上线`、`stacks` 加 `(?!\s+of\b)`、补 `sui`
   项目名（抵消删 `上线` 的唯一代价）；正反样本各 4/3 条。
+复验（核验_NEW-1_NEW-2修复_e917e61 §八）：
+  「英文 will see token unlocks 残留」经 prod 只读量化修正为**两条**缺口 —— 中文「将迎来」
+  （真修好 asset 7760/8774，prod 净增豁免 5 行）与英文 `will see + 动作词`（prod 零影响、
+  防御性）；正反样本各 3 条，含 prod 实物 cid 5619 / 8327 与 `will see` 词距反例。
 另附「HTML 邮件不得含 markdown 强调符 `**`」护栏（重踩过的坑）。
 """
 import ast
@@ -243,6 +247,26 @@ for txt, why in [
 check(sd._is_scheduled_action(
     "Binance Will Delist XYZUSDT Spot Trading Pair") is True,
     "交易所公告（实体通道）：Binance 下架 XYZUSDT → 仍豁免")
+
+print("\n【复验 e917e61·八】「will see / 将迎来」残差收口（核验_NEW-1_NEW-2修复_e917e61 §八）")
+for txt, why in [
+        ("Token Unlocks data shows that XPL, H, SOSO, STBL, SOON, BIGTIME, ID, and MBG "
+         "will see token unlocks", "英文 `will see` + 动作词（未截断版）"),
+        ("Foresight News 消息，据 Token Unlocks 数据显示，本周 H、SOSO 及 STBL 等将迎来"
+         "代币一次性大额解锁，总计释放超 2000 万美元", "中文「将迎来…解锁」（prod cid 8327）"),
+        ("ChainCatcher 消息，9 月 25 日 15:00（SGT）起，B.AI 热门模型权益将迎来新一轮升级",
+         "中文「将迎来…升级」（prod asset 3994）")]:
+    check(sd._is_scheduled_action(txt) is True,
+          f"残差句式（{why}）→ 豁免", f"got={sd._is_scheduled_action(txt)}")
+
+for txt, why in [
+        ("Analysts will see the impact of the halving next month",
+         "`will see` 与动作词相隔 5 词 ⇒ 窗口 `{0,3}` 刻意不命中"),
+        ("New Jersey Transit and Amtrak riders will see reduced service and longer travel times",
+         "`will see` 后无动作词（prod cid 5619）⇒ 不豁免"),
+        ("分析师认为该代币将迎来抛压", "「将迎来」但无 `_SCHEDULED_ACTION_RE` 动作词")]:
+    check(sd._is_scheduled_action(txt) is False,
+          f"非预定动作（{why}）→ 不豁免", f"got={sd._is_scheduled_action(txt)}")
 
 
 def _now(days_ago: float) -> _dt.datetime:

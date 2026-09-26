@@ -1581,15 +1581,26 @@ _SCHEDULED_ACTION_RE = re.compile(
 # 「交易所上下架公告（实体）」「将于/将某时上线或关闭」等真·预定动作；ENJ 的 4 版转载
 # （3 中文 + 1 英文）全部仍豁免 —— 复验报告担心的「英文截断版（无交易对、无日期）」回退
 # **未出现**（该版正文含「will remove and cease trading」⇒ 命中 ②）。
-# 残留（已知，不阻塞）：「… and MBG will see token unlocks」这类英文解锁预告句式不在 ②
-# 表内，同一条新闻的中文版（「将于下周迎来大额解锁」）仍会豁免 ⇒ 该资产的新鲜利空由中文
-# 版承载，漏的是重复条目的计数而非方向。
+# 复验收口（核验_NEW-1_NEW-2修复_e917e61 §八「英文 will see token unlocks」残留）：原判
+# 「英文解锁预告句式不在 ② 表内」经 prod 只读量化后**修正** —— 真缺口其实是**两条**：
+#   ① 中文「将迎来…」：原表只有「将于」，`将迎来大额解锁`（cid 8327 等）一条也不命中；
+#   ② 英文 `will see <动作词>`：原 `will` 分支要求动词**紧跟** `will`，`will see` 落空。
+# ⚠️ 英文这条**在 prod 上净增豁免 = 0**：源库把该标题截断在 83 字符（`…and MBG wil...`），
+#    `will see` 根本没落进 `title + ai_summary`；近 60 天全库仅 2 行含 `will see`，均不在
+#    7 天窗内。故 ② 属**防御性**（防未截断的英文源），真正修好 7760/8774 的是 ①。
+# 量化（7 天窗、>3 天陈旧候选 2321 条、现行豁免 60 条）：两条合起来净增豁免 **5** 行 ——
+# asset 7760 / 8774（cid 8072 英文截断版，靠其中文 `ai_summary` 的「将迎来」复活）、
+# 8774 / 8801（cid 8327「本周 H、SOSO 及 STBL 等将迎来代币一次性大额解锁」）、
+# 3994（「B.AI 热门模型权益将迎来新一轮升级」）；全为真·解锁/升级预告，无加密外误伤。
 _SCHEDULED_FUTURE_RE = re.compile(
     r"将于|将要|即将|届时|倒计时|时间确定|定于|拟于|计划于"
     r"|将(?:于|在)?\s*(?:上线|上市|下架|移除|停止交易|解锁|升级|减产|减半|硬分叉"
     r"|开启|关闭|支持|调整|迁移|新增|推出|执行)"
+    r"|将\s*迎来"
     r"|\b(?:scheduled|set)\s+to\b|\bupcoming\b|\bnext\s+week\b"
     r"|\bwill\s+(?:be\s+)?(?:delist|list|remov|upgrad|unlock|halt|suspend|migrat|launch)\w*"
+    r"|\bwill\s+see\s+(?:\w+\s+){0,3}"
+    r"(?:delist|list|remov|upgrad|unlock|halt|suspend|migrat|launch)\w*"
     r"|\bto\s+be\s+(?:delisted|listed|removed|upgraded|unlocked)",
     re.IGNORECASE,
 )

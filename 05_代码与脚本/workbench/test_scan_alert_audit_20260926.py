@@ -379,6 +379,42 @@ lk.map_pairs_to_asset_ids(["ENJUSDT"], _c3, context_text="完全不含加密语�
 check(_c3.calls > 0,
       "未撞名的 symbol（ENJ）不受该门禁影响", f"calls={_c3.calls}")
 
+print("\n【P0-4·防漂移】backfill_catalyst_links.py 内联 linker 副本必须同契约")
+
+
+def _const_frozenset(tree, name):
+    """取模块级 `NAME = frozenset({...})` 的字面量元素（取不到返回 None）。"""
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in n.targets):
+            call = n.value
+            if isinstance(call, ast.Call) and call.args:
+                try:
+                    return frozenset(ast.literal_eval(call.args[0]))
+                except (ValueError, TypeError):
+                    return None
+    return None
+
+
+# `backfill_catalyst_links.py` 内联了 linker 的映射逻辑（避免依赖 workbench 包），
+# 历史上调用处传了 `context_text=ctx` 而函数签名**没有该参数** ⇒ 一跑即 TypeError，
+# 门禁形同不存在、重跑会把脏关联重新写进 `biz.catalyst_asset_link`。
+# 只锁**契约**（参数名 + 两套集合的内容），不比对源码措辞。
+_BF_SRC = open(os.path.join(_SCRIPTS, "bin", "backfill_catalyst_links.py"),
+               encoding="utf-8").read()
+_BF_TREE = ast.parse(_BF_SRC)
+_bf_fn = next((n for n in _BF_TREE.body if isinstance(n, ast.FunctionDef)
+               and n.name == "map_pairs_to_asset_ids"), None)
+check(_bf_fn is not None and "context_text" in [a.arg for a in _bf_fn.args.args],
+      "内联副本 `map_pairs_to_asset_ids` 有 `context_text` 形参（否则调用即 TypeError）",
+      f"args={[a.arg for a in _bf_fn.args.args] if _bf_fn else None}")
+for _n in ("_COMMODITY_AMBIGUOUS_SYMBOLS", "_EQUITY_TICKER_COLLISIONS"):
+    _a, _b = getattr(lk, _n), _const_frozenset(_BF_TREE, _n)
+    check(_a == _b, f"两处 `{_n}` 内容一致（内联副本未漂移）",
+          f"linker={_a} backfill={_b}")
+check("has_crypto_context(" in _BF_SRC,
+      "内联副本的映射循环内调用同一门禁 `has_crypto_context`")
+
 print("\n【护栏】HTML 邮件不得含 markdown 强调符 `**`")
 _html = sd._render_alert_email([_item(res=_res(bull=0, bear=1, stale=1, fresh=(0, 0, 0)))])
 check("**" not in _html, "渲染结果无 `**`（应使用 <b>/<span style>）",

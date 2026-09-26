@@ -53,6 +53,47 @@ _CANONICAL_TOP_SYMBOLS = frozenset({
     "WIF", "BONK", "FLOKI", "ENA", "PENDLE", "JUP", "RENDER", "FET",
 })
 
+# 同名消歧（与 workbench/catalyst/linker.py 手动同步，内联副本）：
+#   · `_COMMODITY_AMBIGUOUS_SYMBOLS` —— 与商品/常用英文词同名（宏观商品新闻误标）；
+#   · `_EQUITY_TICKER_COLLISIONS` —— 与**美股 ticker**撞名（审计_盘面异动告警邮件_3封
+#     _2026-09-26 §三.P0-4：DoorDash（NASDAQ: DASH）新闻误连加密 Dash）。
+# 规则：命中者正文/标题必须含加密语境（`has_crypto_context`）才认，否则跳过。
+#
+# ⚠️ 本脚本此前**调用处传了 `context_text=ctx` 而函数签名没有该参数**（一跑即 TypeError），
+#    根本没有门禁 ⇒ 重跑会**重新写入** P0-4 修掉的脏关联。本轮补齐参数 + 两套集合。
+_COMMODITY_AMBIGUOUS_SYMBOLS = frozenset({
+    "COPPER", "GOLD", "SILVER", "OIL", "GAS", "CRUDE", "BRENT", "IRON", "STEEL",
+    "COAL", "URANIUM", "LITHIUM", "PLATINUM", "PALLADIUM", "COFFEE", "SUGAR",
+    "WHEAT", "CORN", "WATER", "DIAMOND", "ALUMINUM", "ALUMINIUM", "NICKEL",
+    "ZINC", "LEAD", "TIN", "COBALT", "XAU", "XAG", "XPT", "XPD",
+})
+
+_EQUITY_TICKER_COLLISIONS = frozenset({
+    "DASH",   # DoorDash Inc.（NASDAQ: DASH）—— 实物复现
+    "APT",    # Alpha Pro Tech Ltd.（NYSE American: APT）
+    "SUI",    # Sun Communities Inc.（NYSE: SUI）
+    "SOL",    # Emeren Group Ltd.（NYSE: SOL）
+    "TRX",    # TRX Gold Corp.（NYSE American: TRX）
+    "LINK",   # Interlink Electronics Inc.（NASDAQ: LINK）
+    "STX",    # Seagate Technology Holdings plc（NASDAQ: STX）
+    "AR",     # Antero Resources Corp.（NYSE: AR）
+    "OP",     # OceanPal Inc.（NASDAQ: OP）
+})
+
+_CRYPTO_CONTEXT_RE = re.compile(
+    r"\$[A-Za-z0-9]{2,10}\b"                 # cashtag $COPPER
+    r"|\b[A-Z0-9]{2,15}USDT\b"               # COPPERUSDT
+    r"|\b(?:token|memecoin|meme|crypto|blockchain|on-?chain|defi|dex|cex|"
+    r"airdrop|staking|listing|solana|ethereum|binance|perpetual|spot)\b"
+    r"|代币|加密|链上|空投|上线|现货|合约|交易所|币安",
+    re.IGNORECASE,
+)
+
+
+def has_crypto_context(text: str | None) -> bool:
+    """正文/标题是否含加密语境（用于商品/美股同名 symbol 消歧）。"""
+    return bool(text and _CRYPTO_CONTEXT_RE.search(text))
+
 
 def _resolve_canonical_top(conn, base: str) -> int | None:
     """白名单符号 → 真实主网资产（market_cap_rank 非空，取排名最小）。"""
@@ -126,8 +167,14 @@ def map_pairs_to_asset_ids(
     pairs: list[str],
     conn,
     source_hint: str = "binance",
+    context_text: str | None = None,
 ) -> list[int]:
-    """将交易对列表映射为 asset_id 列表（多资产）。"""
+    """将交易对列表映射为 asset_id 列表（多资产）。
+
+    `context_text`（标题+正文）：用于「同名撞车」消歧 —— 商品/常用词
+    （`_COMMODITY_AMBIGUOUS_SYMBOLS`）与美股 ticker（`_EQUITY_TICKER_COLLISIONS`）。
+    为空时不做消歧（向后兼容）。
+    """
     if not pairs:
         return []
 
@@ -137,6 +184,13 @@ def map_pairs_to_asset_ids(
     for pair in pairs:
         base = _extract_base_symbol(pair)
         if not base:
+            continue
+
+        # 同名消歧：商品/常用词 symbol 与**美股 ticker 撞名**者，需正文含加密语境，
+        # 否则视为宏观商品新闻 / 美股快讯误标。
+        ambiguous = (base in _COMMODITY_AMBIGUOUS_SYMBOLS
+                     or base in _EQUITY_TICKER_COLLISIONS)
+        if ambiguous and context_text and not has_crypto_context(context_text):
             continue
 
         # 查缓存

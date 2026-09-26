@@ -1201,3 +1201,17 @@
 - **被堵死的整点任务已疏通**：三个曾长期无法自调度的整点任务全部复跑成功 —— `highlight_alert`、`scan_outcome_settle`（均 `5 * * * *`）**19:05** 提交并 `done`；`scan_freshness_watchdog`（`20 * * * *`）**19:20** 提交（`0fd34fbc2244`）并 `done`（零 error）。`catalyst_run_all` 亦于 18:47 由看护补跑（同批 stale），日志持续增长。
 
 **遗留**：① 上条「平台级事件」的 Zeabur 侧定性（需控制台）；② `sys.task` 排队积压（前节已挂账）本轮未动；③ 冗余 `stash@{0}` 已 drop（内容仅为本轮已上线的 `工作台_OBM_CM执行指南.md` 删除）。
+
+### 重大事件邮件「传导逻辑」可读性优化（audit_重大事件邮件_传导逻辑可读性优化_2026-09-26，2026-09-26，本次提交）
+
+来源：`audit_重大事件邮件_传导逻辑可读性优化_2026-09-26.md`。**仅输出层**：不动 `catalyst_grade` / `classifier` / `resonance` / `catalyst_second_order` 生成逻辑，**零 DDL、零 DB 写入**、不调 LLM。
+
+- **问题**：邮件只讲「发生了什么 + 一堆评分」，不回答读者三问 —— 作用在代币哪一层？直接利好还是仅沾生态光？公告前已涨多少算不算追高？三封样本（ONDO/SKY/SUI）同属 RWA 叙事却被平铺成同一套评分，读者无法感知传导直接度差异。
+- **改动全在 `workbench/catalyst/notifier.py`**（`_build_major_event_html` 重排 + 4 个纯函数 + SQL 补一个 LATERAL）：
+  - **① 影响传导模块**：规则模板给「传导路径」（`ai_event_type`→`rule_event_type`→`catalyst_kind` 逐级取 `_TRANSMISSION_PATH_CN`）+ 复用 `ai_summary` 作「事件要点」+ 「传导直接度」标签。
+  - **② 传导直接度规则映射**（`_transmission_directness`）：标题/摘要点名该币 `symbol`/`canonical_name` 且含「自身受益动作」关键词（购入/买入/纳入/销毁/合作/推出/上线/采用/集成/托管…）→ 「直接利好标的（高）」，否则「生态间接受益（中）」。实测三样本：ONDO/SKY=direct、SUI=indirect，与审计逐条吻合。
+  - **③ 预期已消化模块**：`prelaunch_ret_24h` 重解为「公告前已涨 X% ⇒ 部分预期已被提前消化，非零成本」，并按 `resonance_state`（`_RESONANCE_NOTE`）补「系统判定…」；**删掉内部术语「未被计入降权」**。
+  - **④ 传导节奏模块**：按 `catalyst_kind` 给即时/短期/中期三阶段（`_TRANSMISSION_TIMELINE`）。
+  - **⑤ 板块联动模块**：`_recent_major_events` 新增 `LEFT JOIN LATERAL biz.catalyst_second_order`（取 `array_agg` 同 catalyst 下非本资产的 `canonical_symbol`），**仅消费已有二阶数据**；无数据则不渲染（不臆造传导标的）。
+- **护栏**：`workbench/test_major_event_alert.py` 由 30/30 扩到 **39/39**（新增第 9 节：三模块存在性、直接度规则双向样例、二阶有/无数据两态、内部术语已清除）；`py_compile` 通过；「非交易建议 / 不含交易档位」原护栏零回归。
+- **待部署**：push 后约 6 分钟 Zeabur 自动重建生效。

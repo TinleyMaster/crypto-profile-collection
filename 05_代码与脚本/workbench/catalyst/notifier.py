@@ -1476,6 +1476,8 @@ def _recent_major_events(conn, hours: int = 24,
     - 事件发布时间在 N 小时内：只通报新鲜事件，避免长期停摆后补发陈旧事件
     - 同一资产 N 小时内已发过 major_event 则跳过：一条新闻常被多家媒体重复采集
       （实测 BCH 那条来自 4 家媒体、5 条 catalyst），事件级去重后只发一封
+    - 额外 LEFT JOIN LATERAL 取 `biz.catalyst_second_order` 的二阶标的（只消费、不生成），
+      供邮件「板块联动」模块渲染
     """
     return conn.execute(f"""
         SELECT * FROM (
@@ -1494,7 +1496,9 @@ def _recent_major_events(conn, hours: int = 24,
                    cg.catalyst_kind, cg.tradable,
                    ci.impact_direction, ci.impact_strength,
                    md.price_usd AS current_price, md.change_24h, md.change_7d,
-                   md.volume_24h
+                   md.volume_24h,
+                   so.second_order_symbols, so.second_order_sector,
+                   so.second_order_confidence, so.second_order_count
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
             JOIN biz.asset_catalyst ac
@@ -1509,6 +1513,20 @@ def _recent_major_events(conn, hours: int = 24,
                 ORDER BY m.market_date DESC
                 LIMIT 1
             ) md ON TRUE
+            LEFT JOIN LATERAL (
+                -- 二阶/板块传导：同 catalyst 下、本资产之外的其他受益标的（只消费已有数据）
+                SELECT
+                    array_agg(DISTINCT COALESCE(a2.canonical_symbol, a2.canonical_name))
+                        FILTER (WHERE COALESCE(a2.canonical_symbol, a2.canonical_name) IS NOT NULL)
+                        AS second_order_symbols,
+                    MAX(cso.sector_name) AS second_order_sector,
+                    MAX(cso.confidence)  AS second_order_confidence,
+                    COUNT(*)             AS second_order_count
+                FROM biz.catalyst_second_order cso
+                JOIN core.asset a2 ON a2.asset_id = cso.asset_id
+                WHERE cso.catalyst_id = s.catalyst_id
+                  AND cso.asset_id <> s.asset_id
+            ) so ON TRUE
             WHERE s.tier IN ('A', 'B')
               AND s.status = 'open'
               AND cg.catalyst_kind = ANY(%s::TEXT[])
@@ -1534,6 +1552,99 @@ def _recent_major_events(conn, hours: int = 24,
           NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS, limit)).fetchall()
 
 
+# ---- 重大事件「传导逻辑」渲染（输出层优化：只解释机制，不给买卖建议）----
+# 说明：本组只做「复用已有字段 + 规则映射」，不新增上游字段、不调用 LLM。
+
+# 事件类型 → 传导路径（受影响主体 → 行为变化 → 代币层面结果）
+_TRANSMISSION_PATH_CN = {
+    "partnership": "合作方背书/资源注入 → 采用与关注度提升 → 叙事强化 + 需求预期",
+    "listing": "上线/纳入交易 → 可及性与曝光提升 → 流动性 + 需求提升",
+    "regulation": "监管口径变化 → 合规预期重估 → 赛道资金再配置",
+    "tech_upgrade": "技术升级落地 → 可用性与效率提升 → 链上活性 + 使用需求提升",
+    "funding": "融资到账 → 开发与运营投入提升 → 基本面预期改善",
+    "airdrop": "激励发放 → 用户与资金流入 → 短期活跃度提升",
+    "burn": "供给销毁 → 流通量收缩 → 稀缺性预期提升",
+    "adoption": "机构/协议采用 → 真实使用与锁仓增加 → 需求提升",
+    "hack": "安全事件 → 信任受损 → 抛压与资金流出",
+    "delisting": "下线/移除 → 可及性下降 → 流动性与需求下降",
+    "macro": "宏观变量 → 风险偏好变化 → 板块资金流向变化",
+}
+_DEFAULT_TRANSMISSION_PATH = "事件触发 → 相关主体行为变化 → 代币需求/叙事/链上活性 → 价格表达"
+
+# 持续性 → 传导节奏（即时 / 短期 / 中期），给读者节奏感
+_TRANSMISSION_TIMELINE = {
+    "structural": (
+        "即时：叙事与情绪引爆，关注度骤升",
+        "短期：资金流入 / 采用开始落地",
+        "中期：基本面数据兑现并接受验证",
+    ),
+    "event": (
+        "即时：事件驱动的情绪反应",
+        "短期：资金与关注度变化是否延续",
+        "中期：能否沉淀为持续基本面",
+    ),
+}
+
+# 「自身受益」动作关键词：命中说明事件直接作用于该代币本身（被买/被锁/被采用）
+_DIRECT_ACTION_KEYWORDS = (
+    "购入", "买入", "增持", "纳入", "回购", "销毁", "合作", "推出",
+    "上线", "采用", "接入", "集成", "支持", "质押", "托管",
+)
+
+
+def _transmission_directness(r: dict) -> tuple[str, str, str]:
+    """规则映射「传导直接度」（不新增上游字段）。
+
+    直接利好标的：标题/摘要点名该币自身，且事件属「被买/被锁/被采用/被纳入/合作」；
+    生态间接受益：事件作用在底层链/赛道/协议而非该币自身。
+
+    Returns:
+        (level, label, confidence_cn)，level ∈ {'direct','indirect'}
+    """
+    text = " ".join(
+        str(x) for x in (
+            r.get("catalyst_title"), r.get("title_cn"), r.get("ai_summary"),
+        ) if x
+    )
+    sym = (r.get("symbol") or "").strip()
+    name = (r.get("canonical_name") or "").strip()
+    mentioned = bool((sym and sym in text) or (name and name in text))
+    has_action = any(k in text for k in _DIRECT_ACTION_KEYWORDS)
+    if mentioned and has_action:
+        return "direct", "直接利好标的", "高"
+    return "indirect", "生态间接受益", "中"
+
+
+def _transmission_path(r: dict) -> str:
+    for key in (r.get("ai_event_type"), r.get("rule_event_type"), r.get("catalyst_kind")):
+        k = (key or "").strip().lower()
+        if k in _TRANSMISSION_PATH_CN:
+            return _TRANSMISSION_PATH_CN[k]
+    return _DEFAULT_TRANSMISSION_PATH
+
+
+def _transmission_timeline(r: dict) -> tuple[str, str, str]:
+    k = (r.get("catalyst_kind") or "").strip().lower()
+    return _TRANSMISSION_TIMELINE.get(k, _TRANSMISSION_TIMELINE["event"])
+
+
+def _second_order_symbols(r: dict, limit: int = 5) -> list[str]:
+    """取出二阶/板块传导标的（去重、截断），供「板块联动」模块渲染。"""
+    syms = r.get("second_order_symbols")
+    if not syms:
+        return []
+    if isinstance(syms, str):
+        syms = [syms]
+    out: list[str] = []
+    for s in syms:
+        s = (s or "").strip()
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _major_event_subject(r: dict) -> str:
     sym = r.get("symbol") or "?"
     title = _full_title(r)
@@ -1543,7 +1654,15 @@ def _major_event_subject(r: dict) -> str:
 
 
 def _build_major_event_html(r: dict) -> str:
-    """构建单条「重大事件」通报邮件（自包含，刻意不含交易档位）。"""
+    """构建单条「重大事件」通报邮件（自包含，刻意不含交易档位）。
+
+    板块顺序（传导逻辑可读性优化，仅输出层）：
+      ① 影响传导（传导路径 + 事件要点 + 传导直接度规则映射）
+      ② 预期已消化（prelaunch_ret_24h 重解为「公告前是否已被提前消化」）
+      ③ 传导节奏（即时/短期/中期）
+      ④ 系统评分表（仅供参考）
+      ⑤ 板块联动（二阶传导数据，有则显示）
+    """
     sym = r.get("symbol") or "—"
     name = r.get("canonical_name") or ""
     title = _full_title(r)
@@ -1577,6 +1696,60 @@ def _build_major_event_html(r: dict) -> str:
     src = r.get("source_url") or ""
     src_line = (f'<a href="{src}" style="color:#2563eb">原文链接</a>' if src else "—")
 
+    # ---- 传导逻辑（输出层规则映射：只解释机制，不构成买卖建议）----
+    _dir_level, dir_label, dir_conf = _transmission_directness(r)
+    dir_color = "#b45309" if _dir_level == "direct" else "#4b5563"
+    path_txt = _transmission_path(r)
+    tl_immediate, tl_short, tl_mid = _transmission_timeline(r)
+    res_note = _RESONANCE_NOTE.get(r.get("resonance_state"), "")
+
+    if pre is not None:
+        consume_note = (
+            f'公告前 24h 已涨 {pre_txt} —— 说明部分预期已被市场提前消化，非“零成本”；'
+            f'{res_note}。' if res_note else
+            f'公告前 24h 已涨 {pre_txt} —— 说明部分预期已被市场提前消化，非“零成本”。'
+        )
+    else:
+        consume_note = "公告前 24h 无异动数据，预期消化度暂无法判定。"
+
+    summary_line = (
+        f'<div style="font-size:13px;line-height:1.7;color:#374151;margin-top:4px">'
+        f'<span style="color:#6b7280">事件要点：</span>{summary}</div>' if summary else ""
+    )
+    transmit_block = f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">影响传导</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151">
+      <span style="color:#6b7280">传导路径：</span>{path_txt}
+    </div>
+    {summary_line}
+    <div style="font-size:13px;line-height:1.7;color:#374151;margin-top:6px">
+      <span style="color:#6b7280">传导直接度：</span>
+      <b style="color:{dir_color}">{dir_label}</b>（置信度 {dir_conf}）
+    </div>
+  </div>'''
+
+    consume_block = f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">预期已消化</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151">{consume_note}</div>
+  </div>'''
+
+    timeline_block = f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">传导节奏</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151">
+      · {tl_immediate}<br>· {tl_short}<br>· {tl_mid}
+    </div>
+  </div>'''
+
+    so_syms = _second_order_symbols(r)
+    so_sector = (r.get("second_order_sector") or "").strip()
+    so_block = f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">板块联动</div>
+    <div style="font-size:13px;line-height:1.7;color:#374151">
+      同「{so_sector or "相关"}」赛道的 {'、'.join(so_syms)} 或受带动（置信度中等）；
+      此为二阶传导映射，非直接建议。
+    </div>
+  </div>''' if so_syms else ""
+
     return f"""<html><body style="margin:0;padding:0;background:#f3f4f6">
 <div style="max-width:720px;margin:0 auto;padding:20px;font-family:-apple-system,
   BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif">
@@ -1601,12 +1774,20 @@ def _build_major_event_html(r: dict) -> str:
     </div>
   </div>
 
+  {transmit_block}
+
+  {consume_block}
+
+  {timeline_block}
+
   <div style="background:#fff;border-radius:8px;padding:6px 10px;margin-bottom:14px">
+    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">
+      系统评分 · 仅供参考
+    </div>
     <table style="width:100%;border-collapse:collapse">
       {_kv('重要性', f'{score_line}（{kind}）')}
       {_kv('催化方向', f'{direction} · 影响强度 {strength}（{impact}）')}
-      {_kv('市场确认', f'事件前 24h 已异动 {pre_txt}（未被计入降权）',
-          _pct_color(pre))}
+      {_kv('市场确认', f'事件前 24h 已异动 {pre_txt}', _pct_color(pre))}
       {_kv('共振状态', res)}
       {_kv('当前价', f'{price_txt} · 24h {_pct(chg24)}', _pct_color(chg24))}
       {_kv('信号分层', f"tier {r.get('tier') or '—'} · 合成分 "
@@ -1616,10 +1797,7 @@ def _build_major_event_html(r: dict) -> str:
     </table>
   </div>
 
-  {f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
-    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">AI 摘要</div>
-    <div style="font-size:13px;line-height:1.7;color:#374151">{summary}</div>
-  </div>''' if summary else ''}
+  {so_block}
 
   {f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
     <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">催化剂原文</div>
@@ -1737,6 +1915,14 @@ _REGIME_CN = {
     "risk_on": "风险偏好（Risk On）",
     "neutral": "中性（Neutral）",
     "risk_off": "风险规避（Risk Off）",
+}
+
+# 共振状态 → 「预期消化」补充说明（重大事件邮件「预期已消化」模块）
+_RESONANCE_NOTE = {
+    "confirmed": "系统判定已定价（预期消化较充分）",
+    "weak": "系统判定未充分定价，仍有空间但也可能已部分兑现",
+    "divergent": "系统判定方向背离（价格与事件方向不一致）",
+    "pending": "系统判定尚未反应（价格暂未跟随）",
 }
 
 

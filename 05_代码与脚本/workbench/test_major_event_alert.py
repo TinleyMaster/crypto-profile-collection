@@ -11,6 +11,8 @@
      必须含共振状态与催化方向（避免被读成追高指令）
   7. 失败不阻断主流程：查询异常返回 dict 而非抛异常；无候选不发信
   8. 单轮上限 ≤3（对应「日均 ≤3 条」目标）
+  9. 传导逻辑模块（输出层优化）：含「影响传导/预期已消化/传导节奏」、直接度规则映射、
+     二阶「板块联动」仅在数据存在时渲染；不再出现内部术语「未被计入降权」
 
 运行: python test_major_event_alert.py
 """
@@ -155,6 +157,28 @@ print("== 8. 单轮上限 ==")
 check(N.MAJOR_EVENT_MAX_PER_RUN <= 3, "单轮上限 ≤3", str(N.MAJOR_EVENT_MAX_PER_RUN))
 check("LIMIT %s" in _QUERY_SRC, "SQL 带 LIMIT（上限由参数控制）")
 check(N.MAJOR_EVENT_COOLDOWN_HOURS == 24, "事件级冷却 24h", str(N.MAJOR_EVENT_COOLDOWN_HOURS))
+
+print("== 9. 传导逻辑模块（输出层优化护栏） ==")
+check("影响传导" in _html and "传导直接度" in _html, "含「影响传导」与「传导直接度」模块")
+check("预期已消化" in _html, "含「预期已消化」模块（prelaunch 重解）")
+check("传导节奏" in _html and "即时" in _html and "中期" in _html,
+      "含「传导节奏」三阶段（即时/短期/中期）")
+check("未被计入降权" not in _html, "已去掉内部术语「未被计入降权」")
+check("catalyst_second_order" in _QUERY_SRC, "SQL 消费二阶传导表（板块联动数据源）")
+# 直接度规则：点名自身 + 自身受益动作 → 直接；仅作生态承载 → 间接
+check(N._transmission_directness({
+    "symbol": "SKY", "canonical_name": "Sky",
+    "title_cn": "Galaxy 购入 SKY 并纳入财库", "ai_summary": ""})[0] == "direct",
+    "自身受益动作点名该币 → 直接利好标的")
+check(N._transmission_directness({
+    "symbol": "SUI", "canonical_name": "Sui",
+    "title_cn": "RWA 代币作 Bluefin Lend 抵押品", "ai_summary": ""})[0] == "indirect",
+    "仅作生态承载链 → 生态间接受益")
+# 二阶联动：有数据才渲染，无数据不臆造
+_h_so = N._build_major_event_html(
+    _fake_row(second_order_symbols=["AAA", "BBB"], second_order_sector="RWA"))
+check("板块联动" in _h_so and "AAA" in _h_so, "有二阶数据时渲染「板块联动」")
+check("板块联动" not in _html, "无二阶数据时不渲染「板块联动」（不臆造传导标的）")
 
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

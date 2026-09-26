@@ -230,5 +230,18 @@ check('"suppressed": 0, "skipped": len(new_signal_ids)' in _SRC,
 check(_SRC.count('"suppressed": 0') >= 2, "两处早退分支均已对齐键集")
 check("'suppressed'" in _SRC or '"suppressed"' in _SRC, "正常返回含 suppressed")
 
+print("== 12. 快告警价格去尾零（复验 351d2ae 延伸） ==")
+# 局部 _fmt_price（notifier.py:821）与模块级同口径去尾零，但仍保留 $ 前缀与既有精度档
+_fp = N._build_fast_alert_html(_row(
+    entry_price=620.50, stop_loss=100.00, take_profit=1234.00,
+    current_price=620.50, ai_deep_review=_AI_OK))
+check("$620.5" in _fp and "$620.50" not in _fp, "现价 $620.50 → $620.5（去尾零）")
+check("$100" in _fp and "$100.00" not in _fp, "止损 $100.00 → $100（去尾零）")
+check("$1,234" in _fp and "$1,234.00" not in _fp, "目标 $1,234.00 → $1,234（去尾零）")
+_fp2 = N._build_fast_alert_html(_row(entry_price=1.5788, ai_deep_review=_AI_OK))
+check("$1.58" in _fp2, "非尾零价不受影响：入场 1.5788 → $1.58")
+_fp3 = N._build_fast_alert_html(_row(current_price=1e-10, ai_deep_review=_AI_OK))
+check("$1.0000e-10" in _fp3, "极小价仍走科学计数（局部版科学档未被 trim 误伤）")
+
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

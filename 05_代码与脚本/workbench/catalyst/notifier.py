@@ -822,14 +822,16 @@ def _build_fast_alert_html(row) -> str:
         if val is None:
             return "—"
         v = float(val)
+        # 定点档统一去尾零（与模块级 _fmt_price 同口径）：$620.50 → $620.5、$100.00 → $100。
+        # 科学计数档刻意不 trim（_trim_trailing_zeros("1.0000e-10") 会退化成 "1.0000e-1"）。
         if v >= 1000:
-            return f"${v:,.2f}"
+            return "$" + _trim_trailing_zeros(f"{v:,.2f}")
         if v >= 1:
-            return f"${v:.2f}"
+            return "$" + _trim_trailing_zeros(f"{v:.2f}")
         if v >= 0.01:
-            return f"${v:.4f}"
+            return "$" + _trim_trailing_zeros(f"{v:.4f}")
         if v >= 1e-4:
-            return f"${v:.6f}"
+            return "$" + _trim_trailing_zeros(f"{v:.6f}")
         return f"${v:.4e}"
 
     # ---------- 各区块构建 ----------

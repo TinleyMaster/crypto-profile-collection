@@ -2638,6 +2638,76 @@ def _load_market_rules() -> dict:
     return rules
 
 
+# 刀2（2026-09-26 审计·P0-B）：回测 → 权重 反馈闭环消费端。
+# 读 biz.signal_type_calibration 最新窗口，得各 signal_type 的衰减系数与 HIGH 门控。
+# 语义（用户 2026-09-26 确认）：
+#   · calibrated_low / preliminary → 分数 ×weight_factor 且档位封顶 MED（只降档不删卡）；
+#   · exempt_not_calibrable / exempt_not_backtestable → 豁免，不降权、保留 HIGH
+#     （聚合/硬数据极值无回测样本 ≠ 表现差，与刀3 的 _AGG_HIGH_ALLOWLIST 同源）；
+#   · 表缺失/未写入/DB 不可达 → 返回空 dict ⇒ 行为与上线前完全一致（安全降级）。
+# 加载策略：惰性 + 30min TTL（不在 import 期打 DB，避免拖慢测试/冷启动；
+# 校准表刷新后最多 30min 生效，无需重启）。
+_SIGNAL_TYPE_CALIBRATION: dict = {}
+_CALIB_LOADED_AT: float = 0.0
+_CALIB_TTL_SEC: float = 1800.0
+
+
+def _load_signal_type_calibration() -> dict:
+    """加载 signal_type 级回测校准（失败静默返回 {}，不阻断主流程）。"""
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (signal_type)
+                           signal_type, sample_count, hit_rate,
+                           weight_factor, gate, no_high, window_end
+                    FROM biz.signal_type_calibration
+                    ORDER BY signal_type, window_end DESC, horizon_days ASC
+                    """
+                )
+                out: dict = {}
+                for st, n, hr, factor, gate, no_high, wend in cur.fetchall():
+                    out[st] = {
+                        "sample_count": int(n or 0),
+                        "hit_rate": float(hr) if hr is not None else None,
+                        "weight_factor": float(factor) if factor is not None else 1.0,
+                        "gate": gate,
+                        "no_high": bool(no_high),
+                        "window_end": str(wend),
+                    }
+                return out
+    except Exception as exc:  # noqa: BLE001 —— 校准是增强项，任何失败都必须降级为「不校准」
+        logger.warning("signal_type_calibration 加载失败，本轮不做回测校准：%s", exc)
+        return {}
+
+
+def _ensure_calibration_loaded() -> None:
+    """惰性加载 + TTL 缓存；失败也记时，避免 DB 故障时每次打分都重试。"""
+    global _CALIB_LOADED_AT
+    now = time.time()
+    if _CALIB_LOADED_AT and (now - _CALIB_LOADED_AT) < _CALIB_TTL_SEC:
+        return
+    _SIGNAL_TYPE_CALIBRATION.clear()
+    _SIGNAL_TYPE_CALIBRATION.update(_load_signal_type_calibration())
+    _CALIB_LOADED_AT = now
+
+
+def _signal_type_calibration(signal_type: str) -> dict | None:
+    """取某 signal_type 的校准条目；无校准或为恒等校准（factor=1 且不封顶）返回 None。"""
+    _ensure_calibration_loaded()
+    cal = _SIGNAL_TYPE_CALIBRATION.get(signal_type or "")
+    if not cal:
+        return None
+    if cal["weight_factor"] >= 1.0 and not cal["no_high"]:
+        return None  # calibrated_ok / 无效值 → 与不校准等价
+    return cal
+
+
 _MARKET_RULES = _load_market_rules()
 DIVERGENCE_THRESHOLDS = _MARKET_RULES["divergence_thresholds"]
 OPPORTUNITY_THRESHOLDS = _MARKET_RULES["opportunity_thresholds"]
@@ -3106,7 +3176,39 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
             med_min = int(t.get("conviction_med_min_low_coverage", 50))
             opp["coverage_note"] = f"覆盖度不足({coverage_weight:.2f})，MED 阈值降至 {med_min}"
 
+    # 刀2（2026-09-26 审计·P0-B）：回测校准衰减。
+    # 低命中率 / 样本不足的类型：分数 ×weight_factor，且档位封顶 MED。
+    # 「封顶而非删卡」是有意的：衰减后若跌破 MED 门槛会被判 LOW 而整类消失，
+    # 那是「低命中类型被封杀」而非「不进 HIGH 候选」，超出刀2 意图（用户 2026-09-26 确认）。
+    cal = _signal_type_calibration(st)
+    if cal:
+        before = score
+        if cal["weight_factor"] < 1.0:
+            score = max(int(round(score * cal["weight_factor"])), med_min)
+        opp["calibration"] = {
+            "gate": cal["gate"],
+            "sample_count": cal["sample_count"],
+            "hit_rate": cal["hit_rate"],
+            "weight_factor": cal["weight_factor"],
+            "score_before_decay": before,
+            "window_end": cal["window_end"],
+        }
+        hr_txt = f"{cal['hit_rate']:.0%}" if cal["hit_rate"] is not None else "无样本"
+        opp["calibration_note"] = (
+            f"回测校准（{cal['gate']}，样本 {cal['sample_count']}、命中率 {hr_txt}）："
+            f"分数 {before}→{score}，不进 HIGH 候选"
+        )
+
     tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
+    if cal and cal["no_high"]:
+        if tier == "HIGH":
+            tier = "MED"
+        # 溯源：保卡下限可能已把衰减分抬回 MED（如 86×0.6=52→floor 55），
+        # 此时 tier 直接判成 MED、旧写法（仅 tier=="HIGH" 时记）会漏记降档原因；
+        # 只要衰减前本可达 HIGH，就记可解释的降档原因。
+        if before >= high_min:
+            opp["tier_demote_reason"] = opp.get("calibration_note")
+    opp["conviction_score"] = score
     opp["conviction_tier"] = tier
     # 刀3（2026-09-26 审计·P1-A）：confidence 由 conviction_tier 派生（单一真源）。
     # 各规则此前各自硬编码 "confidence": "high/medium"，与计算档位不同源，是前端

@@ -27,6 +27,12 @@ import macro_market as mm            # noqa: E402
 import ai_signal_analyzer as aia     # noqa: E402
 import yaml                          # noqa: E402
 
+# 刀2（2026-09-26）：_push_opportunity 现会惰性读 biz.signal_type_calibration。
+# 本测试须保持「纯离线」，故钉死为「无校准」基准（TTL 判定永不触发加载）；
+# 校准消费路径由 test_signal_type_calibration_20260926.py 单独覆盖。
+mm._SIGNAL_TYPE_CALIBRATION.clear()
+mm._CALIB_LOADED_AT = float("inf")
+
 passed = 0
 failed = 0
 

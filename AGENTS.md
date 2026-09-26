@@ -1216,7 +1216,27 @@
 - **② 消除静默死亡**：把 `_load_task` / `cmd = list(task["cmd"])` **移入 `try`** ⇒ 失败被记日志并立即置 `failed`，错误串不以 `stuck:`/`timeout:` 开头 ⇒ 看护不再误拦补跑（这是 `blocked_by` 与「基础设施侧死亡」解耦的关键）。except 内的上报再套一层兜底（DB 仍不可达时至少落 stderr），避免「上报失败 → 二次静默死亡」。
 - **离线自测**（不触库，monkeypatch `_load_task`/`_append_log`/`_update_task`）：`_load_task` 抛错 → 置 `failed` 且错误串不触发 `blocked_by`；`cmd=None` → 置 `failed`；正常路径 → 仍 `done`。
 
-**口径更正**：`f11f1a3` 的 COALESCE 修复本身**正确且必要**（它 18:47 收割的 3 条 0 日志任务是真僵尸）；本条补修的是让这类静默死亡**不再发生**，并让「已发生」的那类错误串不再被看护当成「任务自身跑不完」。**残留**：收割器仍统一写 `stuck:` ——若 `_run_task` 的失败上报也因 DB 不可达而失败，任务仍会被标 `stuck:` 并短期拦住补跑（本次靠 30h 时间窗 + 下一次 cron 自愈：`cmc_quote_snapshot` 20:00 CST 那次因 `f409bab6af0e` 已 failed 而不受 `_has_active_task` 阻挡，会正常执行并解除告警）。
+**口径更正**：`f11f1a3` 的 COALESCE 修复本身**正确且必要**（它 18:47 收割的 3 条 0 日志任务是真僵尸）；本条补修的是让这类静默死亡**不再发生**，并让「已发生」的那类错误串不再被看护当成「任务自身跑不完」。**残留**：收割器仍统一写 `stuck:` ——若 `_run_task` 的失败上报也因 DB 不可达而失败，任务仍会被标 `stuck:` 并短期拦住补跑（本次靠 30h 时间窗 + 下一次 cron 自愈：`cmc_quote_snapshot` 20:00 CST 那次因 `f409bab6af0e` 已 failed 而不受 `_has_active_task` 阻挡，会正常执行并解除告警）。**该残留已由下一节的错误标签分流收口。**
+
+### 收割错误标签分流：`nostart:` vs `stuck:`（告警信号准确性，2026-09-26，本次提交）
+
+**动机**：上一节的残留 —— 收割器对条件2 的命中一律写 `stuck: N分钟无新日志，疑似卡死`，看护 `blocked_by` 命中该前缀后固定输出「补跑大概率重蹈覆辙，请先排查根因（如 LLM 欠费 / 上游限频）」。但近 3 天 17 条 `stuck:` 中 **9 条实为基础设施侧静默死亡**（DB 写不可达窗口内线程从未启动）⇒ 告警把运维引向**错误的排查方向**（本会话的起点正是这封误导邮件）。
+
+**动手前的复核（只读）**：原计划「让看护不再因该标签拦补跑」**改不动任何决策** —— 看护两个闸同窗口同谓词：`_last_run_error` 与 `_recent_submission` 均为 `name LIKE '[调度] {key}%' AND started_at > NOW() - 阈值`，而 `submit_scheduled_task` 在**提交时**即写 `started_at` ⇒ **`blocked_by` 是 `recent` 的子集**（`stuck:` 命中 ⇒ `recent` 必为真）。故本轮**只修信号准确性，不动补跑决策**。
+
+**改动**：
+
+- `workbench/task_manager.py`（`_reap_zombie_tasks` 条件2）：`error` 改为 `CASE WHEN NOT EXISTS (SELECT 1 FROM sys.task_log l WHERE l.task_id = t.task_id AND l.created_at >= t.started_at) THEN NOSTART_ERROR 常量 ELSE 'stuck: ' || … END`。零日志与仅提交时 2 条日志者 ⇒ `nostart:`；有运行期日志者 ⇒ `stuck:`。`RETURNING` 增列 `t.error LIKE 'nostart:%%'`（psycopg 裸 `%` 须写 `%%`），收割日志拆出 `未启动=` 计数。
+- `workbench/scheduler_watchdog.py`（`_check_key`）：新增 `infra_died`（`nostart:` 前缀）分支，输出「此为**基础设施侧**（DB 写不可达等），非任务自身跑不完 —— 下一轮 cron 会自然重试；勿按任务侧根因排查」；`blocked_by` 仍只认 `timeout:`/`stuck:`，**补跑闸 `not check_only and not blocked_by and not recent` 一字未改**。
+
+**验证（只读 + 离线，全部通过）**：
+
+- **SQL 保真**：用假 cursor 捕获代码**真实发出**的条件2 SQL，对该 SQL 原文 `EXPLAIN`（只读库、不执行）：占位符 9 = 参数 9，`%%` 转义正常，计划显示 `Index Scan … status='running'` + 条件2 过滤链。
+- **语义回放**：近 3 天 17 条 `stuck:` 在新 CASE 下 → **9 条改判 `nostart:`**（`n_log` ∈ {0, 2}，均无 post-start 日志）/ **8 条仍为 `stuck:`**（`n_log` ≥ 24）。不变式核对「有第 3 条日志却无 post-start 日志」= **0**（与上一节 9/8 分类完全吻合）。
+- **看护文案离线**（monkeypatch `_last_done_ts`/`_last_run_error`/`_recent_submission`/`_send_alert_email`/`submit_scheduled_task`，13 项断言全过）：`nostart:`+存活 ⇒ 不补跑且文案含「基础设施侧」、**不再**出现「LLM 欠费」；`stuck:`+存活 ⇒ 仍指引排查任务侧；空错误+存活 ⇒ 原「问题在任务自身」文案不变；无提交 ⇒ 照常自动补跑（原行为）。
+- `py_compile` 两文件通过。
+
+**边界说明**：正常路径下 `last_err` 非空必然蕴含 `recent=True`，故补跑决策与改前**逐例等价**（不新增自动补跑）。
 
 ### 队列积压核查：runner 并发槽位（P3 挂账项，2026-09-26，本次提交）
 

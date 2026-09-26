@@ -96,6 +96,9 @@ def _last_run_error(key: str, within_seconds: float) -> str | None:
     一直命中（success 不改判据），补跑被永久挡住 —— 实况：data_sync_daily
     命中 18 天前的 stuck 行，导致 30.8h 停滞时未自动补跑。故只让「近阈值
     内的错误」具备拦截效力，窗口外的陈旧错误一律忽略。
+
+    返回的 `nostart:`（取走后从未真正启动，基础设施侧静默死亡，2026-09-26 起）
+    **不**计入该安全闸：调用方另行出「基础设施侧」文案，不指引排查任务侧根因。
     """
     try:
         with _get_db() as conn:
@@ -209,6 +212,11 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     # 补跑只会再空转一轮（窗口外陈旧错误不拦，否则一次 stuck 永久阻塞补跑）
     last_err = _last_run_error(key, threshold) or ""
     blocked_by = last_err if last_err.startswith(("timeout:", "stuck:")) else None
+    # 静默死亡（`nostart:`：被取走后从未真正启动）多因 DB 写不可达等**基础设施侧**
+    # 原因，非任务自身跑不完 ⇒ 单独出文案，不再指引去查「LLM 欠费 / 上游限频」
+    # （2026-09-26）。它不在 blocked_by 内；`last_err` 非空 ⇒ 该行必落在同一
+    # recent 窗口内 ⇒ 补跑决策与改前一致（不新增自动补跑）。
+    infra_died = last_err if last_err.startswith("nostart:") else None
     # 近阈值内已有提交（scheduler 存活）⇒ 只告警不补跑，避免补跑恶性循环
     recent = _recent_submission(key, threshold)
 
@@ -217,6 +225,11 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     if blocked_by:
         rerun_line = (f"⚠️ 未自动补跑：上一轮判定为「{blocked_by[:100]}」，"
                       f"补跑大概率重蹈覆辙，请先排查根因（如 LLM 欠费 / 上游限频）。")
+    elif infra_died:
+        rerun_line = (f"⚠️ 未自动补跑：上一轮「{infra_died[:120]}」。"
+                      f"此为**基础设施侧**（DB 写不可达等），非任务自身跑不完 —— "
+                      f"近 {threshold_hours}h 内已有提交记录，下一轮 cron 会自然重试；"
+                      f"若持续出现请排查 DB 连通性与平台事件（勿按任务侧根因排查）。")
     elif recent:
         rerun_line = (f"⚠️ 未自动补跑：近 {threshold_hours}h 内已有提交记录（scheduler 存活），"
                       f"问题在任务自身（失败/卡住），非调度失活。"
@@ -245,8 +258,9 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
         "rerun_blocked_by": blocked_by, "recent_submission": recent,
         "reason": "超阈值未成功，已告警" + (
             "（补跑已阻止：上轮 " + blocked_by.split(":")[0] + "）" if blocked_by
-            else ("（补跑已阻止：近阈值内有提交，疑似任务自身问题）" if recent
-                  else ("并补跑" if task_id else "（补跑未触发）"))),
+            else ("（补跑已阻止：上轮静默死亡，基础设施侧）" if infra_died
+                  else ("（补跑已阻止：近阈值内有提交，疑似任务自身问题）" if recent
+                        else ("并补跑" if task_id else "（补跑未触发）")))),
     }
 
 

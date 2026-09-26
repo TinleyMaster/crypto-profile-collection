@@ -46,6 +46,12 @@ LONG_TASK_PATTERNS = (
 )
 _LONG_TASK_REGEX = "(" + "|".join(LONG_TASK_PATTERNS) + ")"
 
+# 收割条件2 的两种错误标签（2026-09-26）：按「取走后有无运行期日志」区分 ——
+# `nostart:` 取走后从未真正启动（线程/加载失败，多因 DB 写不可达等基础设施侧原因）；
+# `stuck:` 真卡死（有运行期日志但停更）。看护据前缀区分文案，避免把基础设施侧死亡
+# 误报成「任务自身跑不完」而指引去排查 LLM 欠费/上游限频。
+NOSTART_ERROR = "nostart: 任务被取走后从未真正启动（线程/加载失败或 DB 不可达），已回收"
+
 
 def _kill_proc_tree(proc: subprocess.Popen) -> None:
     """杀掉任务进程及其整个进程组（采集脚本会派生 Playwright 等后代进程）。
@@ -609,6 +615,8 @@ class TaskManager:
         2. 自任务**真正开始运行**（started_at，即 runner 取走时刻）起，最近
            LOG_STUCK_MINUTES 分钟无新日志（卡死检测，需已运行至少 10 分钟；
            零日志任务同样计入，视为「无新日志」）
+        条件2 按「取走后有无运行期日志」分两种错误标签：无 ⇒ `nostart:`（从未
+        真正启动）；有 ⇒ `stuck:`（真卡死）。看护据前缀区分文案（2026-09-26）。
         """
         reaped: list[str] = []
         try:
@@ -647,14 +655,25 @@ class TaskManager:
                     #    对齐后只统计运行期日志：有 post-start 日志者的真卡死照常命中；
                     #    无 post-start 日志者（线程静默死亡，如 _load_task 抛错）由
                     #    COALESCE 兜底立即命中 —— 二者语义清晰（近 3 天 9 例属后者）。
+                    # ③ 错误标签分流（2026-09-26）：命中者再按「取走后有无运行期日志」
+                    #    分 `nostart:` / `stuck:`，供看护出准确文案（原先一律写 stuck:，
+                    #    使基础设施侧静默死亡被当成「任务自身跑不完」）。
                     cur.execute(
                         """
                         UPDATE sys.task t
                         SET status = 'failed',
                             ended_at = NOW(),
-                            error = 'stuck: ' || (CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
-                                                       THEN %s ELSE %s END)
-                                    || '分钟无新日志，疑似卡死',
+                            error = CASE
+                                        WHEN NOT EXISTS (
+                                            SELECT 1 FROM sys.task_log l
+                                            WHERE l.task_id = t.task_id
+                                              AND l.created_at >= t.started_at
+                                        )
+                                        THEN %s
+                                        ELSE 'stuck: ' || (CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
+                                                                THEN %s ELSE %s END)
+                                             || '分钟无新日志，疑似卡死'
+                                    END,
                             updated_at = NOW()
                         WHERE t.status = 'running'
                           AND t.started_at < NOW() - '10 minutes'::interval
@@ -668,20 +687,25 @@ class TaskManager:
                               CASE WHEN t.name ~* %s OR t.cmd::text ~* %s
                                    THEN %s ELSE %s END || ' minutes'
                           )::interval
-                        RETURNING t.task_id
+                        RETURNING t.task_id, t.error LIKE 'nostart:%%'
                         """,
-                        (_LONG_TASK_REGEX, _LONG_TASK_REGEX,
+                        (NOSTART_ERROR,
+                         _LONG_TASK_REGEX, _LONG_TASK_REGEX,
                          str(LONG_TASK_STUCK_MINUTES), str(LOG_STUCK_MINUTES),
                          _LONG_TASK_REGEX, _LONG_TASK_REGEX,
                          str(LONG_TASK_STUCK_MINUTES), str(LOG_STUCK_MINUTES)),
                     )
                     count_stuck = cur.rowcount
-                    reaped.extend(row[0] for row in cur.fetchall())
+                    stuck_rows = cur.fetchall()
+                    reaped.extend(row[0] for row in stuck_rows)
+                    count_nostart = sum(1 for row in stuck_rows if row[1])
 
                     total = count_timeout + count_stuck
                     if total > 0:
                         print(f"[TaskManager] 收割 {total} 个僵尸任务 "
-                              f"(超时={count_timeout}, 卡死={count_stuck})",
+                              f"(超时={count_timeout}, "
+                              f"卡死={count_stuck - count_nostart}, "
+                              f"未启动={count_nostart})",
                               file=sys.stderr)
         except Exception as e:
             print(f"[TaskManager] reap_zombie error: {e}", file=sys.stderr)

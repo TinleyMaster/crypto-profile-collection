@@ -358,6 +358,14 @@ def ai_enrich_highlight_signals(
         # 如果 AI 不认为是高亮，降低排序权重但仍保留（避免一刀切）
         if not ai_result.get("should_highlight") and not ai_result.get("error"):
             enriched_sig["_ai_downgraded"] = True
+            # 刀4（2026-09-26 审计·P1-B）：AI 未背书落档位 + 统一标记（与 v2 同口径）。
+            # 只降 HIGH→MED 一级，MED/LOW 不二次降级。
+            if enriched_sig.get("conviction_tier") == "HIGH":
+                enriched_sig["conviction_tier"] = "MED"
+                enriched_sig["confidence"] = "medium"
+            enriched_sig["ai_endorsed"] = False
+        elif not ai_result.get("error"):
+            enriched_sig["ai_endorsed"] = True
         enriched.append(enriched_sig)
 
     # 按 AI 评分 + 原分数混合排序
@@ -390,6 +398,13 @@ def ai_enrich_risk_signals(
         enriched_sig = {**sig, "ai_analysis": ai_result}
         if not ai_result.get("should_risk") and not ai_result.get("error"):
             enriched_sig["_ai_downgraded"] = True
+            # 刀4（2026-09-26 审计·P1-B）：与高亮侧对称。
+            if enriched_sig.get("conviction_tier") == "HIGH":
+                enriched_sig["conviction_tier"] = "MED"
+                enriched_sig["confidence"] = "medium"
+            enriched_sig["ai_endorsed"] = False
+        elif not ai_result.get("error"):
+            enriched_sig["ai_endorsed"] = True
         enriched.append(enriched_sig)
 
     def _sort_key(s):
@@ -3369,6 +3384,18 @@ def ai_enrich_signals_v2(
             sig["_ai_downgraded"] = True
             sig["_ai_filter_bypassed"] = True
             sig["_ai_filter_reason"] = sig.get("_ai_filter_reason") or "事件驱动信号触发，按规则直通保留"
+
+        # 刀4（2026-09-26 审计·P1-B）：AI 未背书必须显式落到档位与统一标记，
+        # 不能只藏在 _ai_downgraded（邮件渲染层、前端 badge 各读各的口径）。
+        # HIGH→MED 强制降一级；MED/LOW 不再二次降级（避免把卡挤出展示池）。
+        # ai_endorsed 是各展示层共用的单一判据（False=已评审但未背书，缺失=未送 AI）。
+        if sig.get("_ai_downgraded"):
+            if sig.get("conviction_tier") == "HIGH":
+                sig["conviction_tier"] = "MED"
+                sig["confidence"] = "medium"
+            sig["ai_endorsed"] = False
+        elif sig.get("ai_analysis_v2") and not ai_result.get("error"):
+            sig["ai_endorsed"] = True
 
         enriched.append(sig)
 

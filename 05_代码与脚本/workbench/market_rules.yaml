@@ -62,7 +62,6 @@ opportunity_rules:
   resonance_min_source_count: 2          # 共识动量最少独立数据源数（source_count ≥ 2）
   resonance_consensus_top_n: 50          # 扫描共识榜前 N
   resonance_max_results: 10              # 共振榜最多返回条数
-  push_confidence_threshold: medium     # 默认只推 高+中（low 剔除，语义由 conviction 承接）
   conviction_high_min: 70               # conviction ≥70 → HIGH 置顶（从 75 降至 70，让第二刀高 conv 信号进 HIGH）
   conviction_med_min: 55                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
   # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会

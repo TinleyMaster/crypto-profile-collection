@@ -2482,7 +2482,8 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "resonance_min_source_count": 2,         # 共识动量最少独立数据源数
     "resonance_consensus_top_n": 50,         # 扫描共识榜前 N
     "resonance_max_results": 10,             # 共振榜最多返回条数
-    "push_confidence_threshold": "medium",   # 默认只推 高+中（low 剔除，语义由 conviction 承接）
+    # 刀1/P2-D（2026-09-26 审计）：原 "push_confidence_threshold" 已废（全仓无消费，
+    # 语义由 conviction_tier 的 HIGH/MED/LOW 承接），删除死键避免误以为存在推送闸门。
     "conviction_high_min": 70,               # conviction ≥70 → HIGH 置顶（从 75 降至 70）
     "conviction_med_min": 55,                # conviction ≥55 → MED（观察池），<55 → LOW 剔除
     # P0-2 修复：低覆盖资产放宽 MED 阈值，避免数据饿死导致 0 机会
@@ -2494,14 +2495,19 @@ OPPORTUNITY_THRESHOLDS_DEFAULT = {
     "mvrv_deep_undervalued_pct": 15,         # MVRV 百分位 ≤ 此值 → 深度低估
     "mvrv_undervalued_pct": 30,              # MVRV 百分位 ≤ 此值 → 低估
     "mvrv_overvalued_pct": 85,               # MVRV 百分位 ≥ 此值 → 高估
-    # P0-3 conviction 各轴权重（总和 = 1.0，7 轴含 catalyst）
-    "conviction_weight_mvrv": 0.23,          # MVRV 估值权重
-    "conviction_weight_cycle": 0.18,         # 周期相位权重（保留，已由 _finalize_conviction 用 regime_mult 替代加性轴）
-    "conviction_weight_funding": 0.14,       # funding 极性权重
-    "conviction_weight_netflow": 0.14,       # 交易所净流权重
-    "conviction_weight_stable": 0.09,        # 稳定币流向权重
-    "conviction_weight_roi": 0.14,           # ROI 动量权重
-    "conviction_weight_catalyst": 0.08,      # 催化剂因子权重（保守初值，未校准，待 FEAT-CATALYST-002 回测校准）
+    # P0-3 conviction 各轴权重（实际消费 6 轴，总和 = 1.0）
+    # 刀1（2026-09-26 审计·P0-A）：原默认 mvrv .23/cycle .18/funding .14/netflow .14/
+    # stable .09/roi .14/catalyst .08 含 cycle 后仅 0.82 ⇒ yaml 缺失回退本表时
+    # conviction 系统性偏低（同信号因 load 路径不同判出不同档位）。
+    # 现默认值与 market_rules.yaml opportunity_rules 同值（yaml 是运行时真源）。
+    # "conviction_weight_cycle" 死键已删除：全仓无消费者，周期相位由
+    # _finalize_conviction 的 regime_mult 乘入，不作为加性轴。
+    "conviction_weight_mvrv": 0.28,          # MVRV 估值权重
+    "conviction_weight_funding": 0.17,       # funding 极性权重
+    "conviction_weight_netflow": 0.17,       # 交易所净流权重
+    "conviction_weight_stable": 0.11,        # 稳定币流向权重
+    "conviction_weight_roi": 0.17,           # ROI 动量权重
+    "conviction_weight_catalyst": 0.10,      # 催化剂因子权重（P0-2 临时低位，待回测校准）
     # P0-B 催化剂因子
     "catalyst_window_days": 14,              # 催化剂回溯窗口（天）
     "catalyst_min_score": 50,                # 独立强事件机会类入场门槛
@@ -3102,6 +3108,10 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
 
     tier = "HIGH" if score >= high_min else ("MED" if score >= med_min else "LOW")
     opp["conviction_tier"] = tier
+    # 刀3（2026-09-26 审计·P1-A）：confidence 由 conviction_tier 派生（单一真源）。
+    # 各规则此前各自硬编码 "confidence": "high/medium"，与计算档位不同源，是前端
+    # 「双轨判层级」的根源；此处统一覆盖，前端只读 conviction_tier（confidence 仅作兜底）。
+    opp["confidence"] = {"HIGH": "high", "MED": "medium", "LOW": "low"}[tier]
     if tier == "LOW":
         excluded.append(opp)
     else:
@@ -4653,7 +4663,9 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     1. 全量按分数排序取候选池
     2. 同标的合并：同一 target 的多条信号合并为一张卡片，主卡为分数最高的
     3. 共振筛选：币种级 target（如 BTC/ETH）需 ≥ min_resonance 种不同 signal_type 才入选
-       宏观/聚合类 target 不受共振限制（如"恐贪指数极度恐惧"）
+       宏观/聚合类 target 不因共振不足被剔除（如"恐贪指数极度恐惧"），
+       但刀3（P1-C）：聚合类标 HIGH 仍需 ≥2 源（硬数据极值白名单除外），否则降 MED；
+       刀5（P2-C）：decayed_score 跌破 HIGH 门槛的卡降 MED（只降不升，不丢卡）
     4. 按类型配额限制每种卡片数量（以主卡 signal_type 为准）
     5. 按分数降序，限制 max_total
     """
@@ -4706,6 +4718,12 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         score = o.get("decayed_score")
         if score is None:
             score = o.get("conviction_score", 0) or 0
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            # 刀5（P2-C）：decayed_score 由衰减管线产出，正常恒为数值；
+            # 异常值兜底回退原始分，避免排序比较 str/int 直接抛错拖垮整个榜单。
+            score = float(o.get("conviction_score", 0) or 0)
         resonance = len(o.get("related_dims", []) or [])
         is_new = 1 if o.get("is_new_today") else 0
         return (is_high, is_new, resonance, score)
@@ -4738,6 +4756,13 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
             if o.get("conviction_score", 0) > merged.get("conviction_score", 0):
                 merged["conviction_score"] = o["conviction_score"]
                 merged["conviction_tier"] = o.get("conviction_tier", merged.get("conviction_tier"))
+                # 刀5（P2-C）：主卡换源时 decayed_score / 估值过滤说明一并跟随。
+                # 否则「显示分取高分卡、衰减分留在排序首位卡」会让 P2-C 拿两套口径混算
+                # （排序按 decayed_score、档位按 conviction_score，两者可指向不同卡）。
+                if o.get("decayed_score") is not None:
+                    merged["decayed_score"] = o["decayed_score"]
+                if "valuation_filter_note" in o:
+                    merged["valuation_filter_note"] = o.get("valuation_filter_note") or ""
 
     # 计算每张合并卡的共振维度数（不同 signal_type 数量）
     for k, merged in merged_map.items():
@@ -4747,6 +4772,53 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         ))
         merged["resonance_count"] = len(sig_types)
         merged["signal_types"] = sig_types
+
+    # 刀3（2026-09-26 审计·P1-C）：聚合类（非 symbol）target 的 HIGH 门槛与币种 target 统一。
+    # 上方共振筛选刻意放行聚合 target（卡片不因共振不足被剔除），但放行 ≠ 可标 HIGH：
+    # 单源聚合信号顶着 HIGH 会与币种 target 的「≥2 源才 HIGH」自相矛盾。
+    # 处置为确定性降档（HIGH→MED，同步 confidence）而非删卡，配额/展示位不变。
+    # 白名单 = 硬数据极值信号（恐贪极值 / 杠杆极值 / 估值极值）：单源即为事实本身，无需第 2 源确认。
+    _AGG_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme", "mvrv_deep_under"}
+    agg_high_min = max(int(min_resonance), 2)
+    for k, merged in merged_map.items():
+        if merged.get("conviction_tier") != "HIGH":
+            continue
+        if _is_symbol_target(merged.get("target", "")):
+            continue
+        if (merged.get("resonance_count") or 1) >= agg_high_min:
+            continue
+        if (merged.get("signal_type") or "") in _AGG_HIGH_ALLOWLIST:
+            continue
+        merged["conviction_tier"] = "MED"
+        merged["confidence"] = "medium"
+        merged["tier_demote_reason"] = (
+            f"聚合类信号仅 {merged.get('resonance_count') or 1} 源共振，"
+            f"HIGH 门槛（≥{agg_high_min} 源）未达，档位降为 MED"
+        )
+
+    # P2-C（2026-09-26 审计·刀5）：显示档位随时间衰减，防「陈旧 HIGH 恒 HIGH」。
+    # decayed_score 已含时间衰减 + 估值过滤（apply_horizon_to_opportunities 早于本函数执行，
+    # 合并卡为浅拷贝故字段齐全）；仅当衰减后分数跌破 HIGH 门槛时降档，且只降不升
+    # （clamp 到 MED，不产生 LOW 丢卡）——display-only，不回改 conviction_score。
+    _high_min = float(OPPORTUNITY_THRESHOLDS.get("conviction_high_min", 70))
+    for k, merged in merged_map.items():
+        if merged.get("conviction_tier") != "HIGH":
+            continue
+        ds = merged.get("decayed_score")
+        if ds is None:
+            continue
+        try:
+            ds_val = float(ds)
+        except (TypeError, ValueError):
+            continue
+        if ds_val >= _high_min:
+            continue
+        merged["conviction_tier"] = "MED"
+        merged["confidence"] = "medium"
+        merged["tier_demote_reason"] = (
+            f"衰减后 {ds_val:g} 分低于 HIGH 门槛 {_high_min:g}，档位降为 MED"
+            + (f"（{merged['valuation_filter_note']}）" if merged.get("valuation_filter_note") else "")
+        )
 
     # P0-1（2026-09-18 审计）：同标的多信号混合（distributing/accumulating 并存）时
     # 算净方向，禁止挑单条主卡方向掩盖整体（如 ZEC 三连 distributing 被一条错配 outflow 顶成"多"）。

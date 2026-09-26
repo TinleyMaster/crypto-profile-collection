@@ -12,6 +12,10 @@
        （DoorDash（NASDAQ: DASH）新闻不得再连到加密 Dash）；
   P1-1 催化剂去重增加「交易所+动作+有序币种清单」实体（跨语种/跨截断长度转载合并为 1 条；
        清单取未截断的 `body_text`，判等用「同源截断 ⇒ 短者是长者的前缀」）。
+复验（核验_盘面告警邮件修复_d442bd6_2026-09-26）：
+  NEW-1 预定动作豁免须「动作词 ∧（实体 ∨ 将来语义）」，单靠 upgrade/list/上线 等词形不算
+       （否则陈旧评论恒新鲜，OPT-2 被成规模架空）；
+  NEW-2 新鲜条目只有中性时不得印「剔除陈旧后多空持平」（方向不存在），改印「无新鲜方向」。
 另附「HTML 邮件不得含 markdown 强调符 `**`」护栏（重踩过的坑）。
 """
 import ast
@@ -138,6 +142,28 @@ h_short = _body(sd._render_alert_email([_item(
 check("与做空结论相悖" in h_short, "新鲜利多 + 做空 → 仍渲相悖警告（反向分支不回归）")
 
 # ═══════════════════════════════════════════════════════════════
+#  复验 NEW-2 —— 新鲜条目只有中性时不得印「多空持平」
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【复验 NEW-2】新鲜 {0多,0空,2中} → 不得印「多空持平」")
+h_neut = _body(sd._render_alert_email([_item(
+    sig=_sig(p_dir="up"),
+    res=_res(bull=0, bear=3, neut=0, stale=1, latest="2026-09-22",
+             fresh=(0, 0, 2)))]))
+check("多空持平" not in h_neut,
+      "新鲜只有中性 → 不再印「（剔除陈旧后多空持平）」（N-786-3：方向不存在）", h_neut)
+check("剔除陈旧后无新鲜方向" in h_neut,
+      "改印「剔除陈旧后无新鲜方向」", h_neut)
+check("仅 2 条中性" in h_neut,
+      "中性条数如实披露（而非失真地说「无新鲜条目」）", h_neut)
+h_mix = _body(sd._render_alert_email([_item(
+    sig=_sig(p_dir="down"),
+    res=_res(bull=0, bear=2, neut=0, stale=1, latest="2026-09-22",
+             fresh=(0, 1, 1)))]))
+check("剔除陈旧后净空1" in h_mix,
+      "新鲜 0多/1空/1中 → 仍印「净空1」（有新鲜方向时不回归）", h_mix)
+
+# ═══════════════════════════════════════════════════════════════
 #  P0-2 —— 强度分的 ×1.15 / ×0.75 同样吃新鲜口径
 # ═══════════════════════════════════════════════════════════════
 
@@ -178,6 +204,42 @@ for txt, exp in [
           f"got={sd._is_scheduled_action(txt)}")
 check("_is_scheduled_action(" in _res_src,
       "_get_resonance 新鲜度判定调用该判据（源码 AST）")
+
+# ═══════════════════════════════════════════════════════════════
+#  复验 NEW-1 —— 「动作词」不足以判豁免，须再有具体性证据
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【复验 NEW-1】非预定动作的旧闻不得因含 upgrade/list/上线 字样而豁免")
+for txt in [
+        "The network upgrade improves throughput",
+        "Protocol upgrade completed",
+        "Top 100 holders list published",
+        "A listing of new tokens this week",
+        "链上活跃度升级",
+        "该协议上线三个月",
+        "Reviewing the impact of the halving"]:
+    check(sd._is_scheduled_action(txt) is False,
+          f"非预定动作 {txt[:30]!r}… → 不豁免（复验报告 7/7 误报）",
+          f"got={sd._is_scheduled_action(txt)}")
+
+print("\n【复验 NEW-1】真·预定动作仍豁免（实体 / 将来语义 两条通道）")
+for txt, why in [
+        ("币安将于 9 月 25 日 11:00 移除 ENJ/USDC 等现货交易对并停止交易", "实体+将于"),
+        ("According to the announcement from Binance, the exchange will remove and "
+         "cease trading on seven spot trading pairs", "英文截断版：will remove"),
+        ("币安现货和闪兑平台将上线 bStocks 代币化证券 Axe Compute (AGPUB)", "将+动作"),
+        ("Walrus (WAL) is scheduled to unlock about 38.33 million tokens at 10:00 AM",
+         "scheduled to"),
+        ("ChainCatcher 消息，RootData 数据显示，Walrus（WAL）将于北京时间 09 月 27 日 "
+         "10 时解锁约 1.2 亿枚", "将于…解锁"),
+        ("XRP Ledger 的 PermissionDelegationV1_1 升级已于 9 月 21 日进入 14 天激活倒计时",
+         "倒计时")]:
+    check(sd._is_scheduled_action(txt) is True,
+          f"预定动作（{why}）{txt[:28]!r}… → 仍豁免",
+          f"got={sd._is_scheduled_action(txt)}")
+check(sd._is_scheduled_action(
+    "Binance Will Delist XYZUSDT Spot Trading Pair") is True,
+    "交易所公告（实体通道）：Binance 下架 XYZUSDT → 仍豁免")
 
 
 def _now(days_ago: float) -> _dt.datetime:

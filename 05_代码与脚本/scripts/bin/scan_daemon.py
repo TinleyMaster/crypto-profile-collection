@@ -1563,14 +1563,51 @@ _SCHEDULED_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 复验 NEW-1（核验_盘面告警邮件修复_d442bd6_2026-09-26 §三，P1）：`_SCHEDULED_ACTION_RE`
+# 只是「动作**词**」表，而这些词在加密新闻里**极高频**（upgrade/list/上线/解锁…）。仅凭
+# 词形判豁免，等于把「The network upgrade improves throughput」「Top 100 holders list
+# published」这类**陈旧评论/汇总**也判成「发布即预告未来动作」⇒ 7 天查询窗内恒新鲜，
+# 重新驱动 ⚠️ 相悖警告与 ×0.75 —— 正是 P0-1/P0-2 要消灭的「旧闻驱动判定」成规模回归
+# （复验报告 11 条探针中 7 条被误豁免）。
+# 故收紧为：动作词 **∧** 具备「具体性证据」之一：
+#   ① **实体**（`_catalyst_entity` 非 None）= 交易所 + 动作 + 交易对清单，即真实的
+#      上下架/公告（「币安将于 9 月 25 日移除 ENJ/USDC」这类）；
+#   ② **将来语义**（下表）= 明确指向「将要发生」而非「刚刚发生/回顾」。
+# ⚠️ 刻意**不**接受「裸日期」作为证据：中文稿的发稿戳（「PANews 9月22日消息」）必带
+#    `X月X日`，用日期当证据等于没收紧（prod 实测同一 263 条：裸日期版仍豁免 108 条；
+#    且正文版更宽 —— 100 条里 34 条是「今日要闻提示」这类资讯汇总）。
+# prod 实测（近 7 天查询窗内、已 >3 天的 263 条现行豁免）：收紧后豁免 263 → 57（清掉
+# 78%），保留的 57 条为「解锁预告（将于…解锁 / will unlock / is scheduled to unlock）」
+# 「交易所上下架公告（实体）」「将于/将某时上线或关闭」等真·预定动作；ENJ 的 4 版转载
+# （3 中文 + 1 英文）全部仍豁免 —— 复验报告担心的「英文截断版（无交易对、无日期）」回退
+# **未出现**（该版正文含「will remove and cease trading」⇒ 命中 ②）。
+# 残留（已知，不阻塞）：「… and MBG will see token unlocks」这类英文解锁预告句式不在 ②
+# 表内，同一条新闻的中文版（「将于下周迎来大额解锁」）仍会豁免 ⇒ 该资产的新鲜利空由中文
+# 版承载，漏的是重复条目的计数而非方向。
+_SCHEDULED_FUTURE_RE = re.compile(
+    r"将于|将要|即将|届时|倒计时|时间确定|定于|拟于|计划于"
+    r"|将(?:于|在)?\s*(?:上线|上市|下架|移除|停止交易|解锁|升级|减产|减半|硬分叉"
+    r"|开启|关闭|支持|调整|迁移|新增|推出|执行)"
+    r"|\b(?:scheduled|set)\s+to\b|\bupcoming\b|\bnext\s+week\b"
+    r"|\bwill\s+(?:be\s+)?(?:delist|list|remov|upgrad|unlock|halt|suspend|migrat|launch)\w*"
+    r"|\bto\s+be\s+(?:delisted|listed|removed|upgraded|unlocked)",
+    re.IGNORECASE,
+)
+
 
 def _is_scheduled_action(text) -> bool:
     """催化剂是否属「发布即预告未来动作」（生效时间必晚于发布时间）。
 
-    见 `_SCHEDULED_ACTION_RE` 注释：这类事件的 `published_at` 新鲜度判据系统性失真，
-    故不参与「>N 天陈旧」剔除 —— 否则会像 ENJ 那样把**已生效**的硬利空丢掉。
+    见 `_SCHEDULED_ACTION_RE` / `_SCHEDULED_FUTURE_RE` 注释：这类事件的 `published_at`
+    新鲜度判据系统性失真，故不参与「>N 天陈旧」剔除 —— 否则会像 ENJ 那样把**已生效**的
+    硬利空丢掉。但判据必须**动作词 + 具体性证据**两条齐备（复验 NEW-1），否则退化为
+    「凡是含 upgrade/list/上线 字样的旧闻都恒新鲜」。
     """
-    return bool(text and _SCHEDULED_ACTION_RE.search(str(text)))
+    s = str(text or "")
+    if not s or not _SCHEDULED_ACTION_RE.search(s):
+        return False
+    return (_catalyst_entity(s) is not None
+            or bool(_SCHEDULED_FUTURE_RE.search(s)))
 
 
 # 审计 P1-1（审计_盘面异动告警邮件_3封_2026-09-26 §四.P1-1）：跨语种转载未去重。
@@ -1793,6 +1830,11 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
                 out["catalyst_latest"] = pub
             # 审计 P0-3：预定动作类（下架/移除/上线/解锁/升级…）发布时间必然早于
             # 生效时间 ⇒ 不按 published_at 判陈旧（见 `_is_scheduled_action` 注释）。
+            # 复验 NEW-1：判据输入**刻意**用 `title + ai_summary`（标题/摘要）而**不是**
+            # `body_text` —— 与 P1-1 的取数不同源是**有意的**：P1-1 需要**完整**正文才能
+            # 拿到币种清单做转载合并，而本判据只问「标题是否在预告一个将来的动作」，正文
+            # 越长越会引入无关的日期/动词（prod 实测同一 263 条：摘要版留 57 条、正文版
+            # 留 86 条，多出的 29 条集中在「今日要闻提示」「要闻预告」这类资讯汇总）。
             sched = _is_scheduled_action(f"{r['title']} {r['ai_summary'] or ''}")
             if pub < fresh_cut and not sched:
                 out["catalyst_stale"] += 1
@@ -2345,10 +2387,18 @@ def _render_alert_email(items: list[dict],
                     fb = int(fresh.get("bullish", 0))
                     fbear = int(fresh.get("bearish", 0))
                     fneut = int(fresh.get("neutral", 0))
-                    if fb == 0 and fbear == 0 and fneut == 0:
+                    if fb == 0 and fbear == 0:
                         # N-786-3：全陈旧 ⇒ 新鲜方向不存在，不得说成「多空持平」
                         #（那读作「新鲜的多空均衡」，含义与「一条新的都没有」相反）。
-                        cat_dir_txt += "（剔除陈旧后无新鲜条目）"
+                        # 复验 NEW-2：判据**只看方向**（`fb`/`fbear`），不再要求 `fneut`
+                        # 也 >0 —— 新鲜条目**只有中性**时，方向同样不存在，而旧写法会落到
+                        # else 分支印出「多空持平」（复验报告合成场景「新鲜 {0多,0空,2中}」
+                        # 实测印出「（剔除陈旧后多空持平）」，且因 `f_total=2≠0` 连
+                        # ℹ️「未参与结论」也不印 ⇒ 读者只看到「净空3 + 多空持平」，无警告
+                        # 也无说明）。中性条数非零时如实披露，避免「无新鲜条目」失真。
+                        cat_dir_txt += ("（剔除陈旧后无新鲜方向，仅 "
+                                        f"{fneut} 条中性）" if fneut
+                                        else "（剔除陈旧后无新鲜条目）")
                     else:
                         fn = fb - fbear
                         fn_txt = (f"净多{fn}" if fn > 0 else

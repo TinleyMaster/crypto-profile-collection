@@ -1547,6 +1547,124 @@ def _is_repost_of_truncated(key: str, raw: str, seen_raw: list) -> bool:
     return False
 
 
+# 审计 P0-3（审计_盘面异动告警邮件_3封_2026-09-26）：新鲜度原先**只看** `published_at`。
+# 对「发布即预告未来动作」的新闻（下架/移除/上线/解锁/升级/减产…），发布时间**必然**
+# 早于生效时间 —— 3 天阈值在这类事件上是系统性误杀。实物：ENJ 的 3 条催化剂内容 =
+# 币安 09-25 11:00 移除 ENJ/USDC 等现货交易对并停止交易；告警 09-26 16:56 发出时下架
+# 已生效约 29 小时（该币当周最硬的实体利空），却因 `published_at = 09-22`（4 天）被判
+# 「>3 天陈旧」⇒「不计方向」⇒ 仍发出 S1 多头进攻 HIGH 做多。
+# `biz.asset_catalyst` 无生效日列（`event_date` 只在 `biz.event_watchlist`，币安下架不
+# 在其中），故按审计「最低限度」方案落地：命中**预定动作语义**者不参与陈旧剔除
+# （7 天查询窗内始终计入方向）。窗口本身不变，不会造成无限新鲜。
+_SCHEDULED_ACTION_RE = re.compile(
+    r"移除|下架|停止交易|上线|上市|新增.{0,8}交易对|解锁|升级|减产|减半|硬分叉"
+    r"|\b(?:delist|remove|removal|removed|listing|listed|list)\w*\b"
+    r"|\b(?:unlock|upgrade|halving|hard\s*fork|migrat)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def _is_scheduled_action(text) -> bool:
+    """催化剂是否属「发布即预告未来动作」（生效时间必晚于发布时间）。
+
+    见 `_SCHEDULED_ACTION_RE` 注释：这类事件的 `published_at` 新鲜度判据系统性失真，
+    故不参与「>N 天陈旧」剔除 —— 否则会像 ENJ 那样把**已生效**的硬利空丢掉。
+    """
+    return bool(text and _SCHEDULED_ACTION_RE.search(str(text)))
+
+
+# 审计 P1-1（审计_盘面异动告警邮件_3封_2026-09-26 §四.P1-1）：跨语种转载未去重。
+# 实测为 **4** 条：火星财经·中 / PANews·中 / ChainCatcher·中 / 英文原文。一条新闻计成 4 条，
+# 「净空 4」虚高四倍，并放大 P0-1/P0-2 的污染幅度。
+# 该去重的作用域是**单个 asset**（查询已按 `ci.asset_id` 过滤），故按「交易所 + 动作 +
+# 币种清单」的**实体**做二次合并 —— 跨语种、跨截断长度均可归一。
+# ⚠️ 判据刻意**要求三项齐全**（缺一返回 None 即回退精确标题键），且「清单互为前缀」只在
+#    **交易所+动作相同**时才生效：历史上「短标题是长标题纯前缀」的合并策略曾把不同公告
+#    并成一条（误合并 208 组 / 吞掉 249 条），故此处只认「币种/交易对」形态的 token，
+#    不从自由文本里抓任意大写词。
+_FP_EXCHANGES = (
+    ("binance", re.compile(r"币安|binance", re.IGNORECASE)),
+    ("okx", re.compile(r"欧易|okx", re.IGNORECASE)),
+    ("htx", re.compile(r"火币|huobi|htx", re.IGNORECASE)),
+    ("upbit", re.compile(r"upbit", re.IGNORECASE)),
+    ("bithumb", re.compile(r"bithumb", re.IGNORECASE)),
+    ("coinbase", re.compile(r"coinbase", re.IGNORECASE)),
+    ("bybit", re.compile(r"bybit", re.IGNORECASE)),
+    ("kraken", re.compile(r"kraken", re.IGNORECASE)),
+    ("bitget", re.compile(r"bitget", re.IGNORECASE)),
+    ("mexc", re.compile(r"mexc", re.IGNORECASE)),
+    ("kucoin", re.compile(r"库币|kucoin", re.IGNORECASE)),
+    ("gate", re.compile(r"gate\.io|\bgate\b", re.IGNORECASE)),
+    ("poloniex", re.compile(r"poloniex", re.IGNORECASE)),
+)
+_FP_ACTIONS = (
+    ("delist", re.compile(r"移除|下架|停止交易|delist|remov", re.IGNORECASE)),
+    ("list", re.compile(r"上线|上市|新增.{0,8}交易对|list", re.IGNORECASE)),
+    ("unlock", re.compile(r"解锁|unlock", re.IGNORECASE)),
+    ("upgrade", re.compile(r"升级|硬分叉|upgrade|hard\s*fork", re.IGNORECASE)),
+    ("halving", re.compile(r"减半|减产|halving", re.IGNORECASE)),
+    ("migrate", re.compile(r"迁移|swap\s+and\s+rename|migrat", re.IGNORECASE)),
+    ("halt", re.compile(r"暂停|halt|suspend", re.IGNORECASE)),
+)
+# 币种成分只认**交易对/cashtag 形态**（`ENJ/USDC`、`ENJUSDT`、`$ENJ`），不认自由文本里的
+# 大写词 —— 后者在中英混排/机构缩写（NYC、KYC…）下会把同一事件的指纹拆开或拉近。
+_FP_QUOTES = "USDT|USDC|BUSD|FDUSD|TUSD|USDP|BTC|ETH|BNB|TRY|EUR|BRL"
+# 结尾用 `(?![A-Za-z0-9])` 而**不是** `\b`：`\b` 走 Unicode 词字符判定，中文也是词字符，
+# 于是 `TNSR/USDC及 TURTLE/USDC`（prod 实测的 PANews 版正文）里 `…USDC及` 判不出边界
+# ⇒ 漏掉 TNSR、清单与其它版错位一位，前缀判等随之失败（一条也合并不了）。
+_FP_PAIR_RE = re.compile(
+    rf"\$([A-Za-z0-9]{{2,15}})(?![A-Za-z0-9])"
+    rf"|\b([A-Z0-9]{{2,15}})(?:/|-)(?:{_FP_QUOTES})(?![A-Za-z0-9])"
+    rf"|\b([A-Z0-9]{{2,15}})(?:USDT|USDC|FDUSD)(?![A-Za-z0-9])"
+)
+
+
+def _catalyst_entity(text) -> tuple[str, tuple[str, ...]] | None:
+    """催化剂**实体**：(交易所|动作, 币种清单·按正文出现顺序)。
+
+    三项中任一缺失即返回 None（调用方回退精确标题键）—— 见上方注释对误合并的约束。
+
+    ⚠️ 传参必须是**相对完整**的正文（`asset_catalyst.body_text`），**不能**用
+    `title`/`ai_summary`：实测 ENJ 的四版转载标题被源站截到 83 字，币种清单在
+    「…AIXBT/USDC、DOLO/US…」处断掉（英文版整段清单都没进标题）⇒ 用标题算指纹
+    时四版会得到 4 个互不相等的清单，一条也合并不了。
+
+    清单**不排序**、也不要求两版完全相等：源站对同一公告的截断长度各不相同（实测
+    ENJ 四版正文分别含 7/6/7/7 个交易对，短的那版正是长版的前缀）⇒ 判等下沉为
+    「同交易所+同动作，且两份清单互为前缀」（见 `_same_catalyst_batch`）。
+    """
+    s = str(text or "")
+    exchange = next((name for name, rx in _FP_EXCHANGES if rx.search(s)), None)
+    if not exchange:
+        return None
+    action = next((name for name, rx in _FP_ACTIONS if rx.search(s)), None)
+    if not action:
+        return None
+    syms: list[str] = []
+    for m in _FP_PAIR_RE.finditer(s):
+        tok = (m.group(1) or m.group(2) or m.group(3) or "").upper()
+        if tok and tok not in syms:
+            syms.append(tok)
+    if not syms:
+        return None
+    return (f"{exchange}|{action}", tuple(syms))
+
+
+def _same_catalyst_batch(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+    """两份币种清单是否属**同一条公告**的两次截断（同交易所+同动作已在上层判过）。
+
+    清单按正文出现顺序截断 ⇒ 短者必为长者的**前缀**（实测 ENJ 的 7 vs 6）。
+    用顺序比较而非集合相等：集合相等会把「7 个 vs 6 个」这种同源截断判成两条公告。
+
+    单元素清单不具备判别力（不同批次也可能只截到一个交易对），故只有**两版都列出
+    ≥ 2 个交易对**时才接受前缀式合并；长度为 1 的要求完全相等。
+    """
+    if a == b:
+        return True
+    n = min(len(a), len(b))
+    return n >= 2 and a[:n] == b[:n]
+
+
 def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     """返回 {event: [...], catalyst: [...], catalyst_dir: {...}, kol: [...]} 三段共振。
 
@@ -1621,7 +1739,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             """
-            SELECT ac.title, ac.ai_summary, ac.published_at,
+            SELECT ac.title, ac.ai_summary, ac.body_text, ac.published_at,
                    ci.impact_direction, ci.impact_strength
             FROM biz.catalyst_impact ci
             JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
@@ -1634,6 +1752,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     out["catalyst_raw"] = len(rows)
     seen: set[str] = set()
     seen_raw: list[tuple[str, str]] = []   # (归一键, 原始标题) —— 截断转载判等用（P2-N11）
+    seen_fp: list[tuple[str, tuple[str, ...]]] = []   # 实体（交易所|动作 + 有序币种清单）
     fresh_cut = datetime.now(timezone.utc) - timedelta(days=CATALYST_STALE_DAYS)
     for r in rows:
         # 复验 P2-N8：占位符标题（title='null' 等）无可用信息，丢弃后再去重
@@ -1653,6 +1772,18 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
             continue
         seen.add(key)
         seen_raw.append((key, raw))
+        # 审计 P1-1：跨语种转载的**实体**二次合并（见 `_catalyst_entity`）。
+        # 实体为 None（三项不齐）时不做二次合并，保持原精确标题键行为。
+        # 取 `body_text`（相对完整正文）—— 标题被源站截到 83 字，币种清单会在
+        # 「…AIXBT/USDC、DOLO/US…」处断掉，用标题算指纹一条也合并不了。
+        ent = _catalyst_entity(
+            r.get("body_text") or f"{r['title']} {r['ai_summary'] or ''}")
+        if ent is not None:
+            ekey, syms = ent
+            # 同交易所+同动作，且清单属同一条公告的两次截断 ⇒ 判为转载
+            if any(k == ekey and _same_catalyst_batch(s, syms) for k, s in seen_fp):
+                continue
+            seen_fp.append(ent)
         d = str(r["impact_direction"] or "neutral").lower()
         d = d if d in out["catalyst_dir"] else "neutral"
         out["catalyst_dir"][d] += 1
@@ -1660,7 +1791,10 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         if pub is not None:
             if out["catalyst_latest"] is None or pub > out["catalyst_latest"]:
                 out["catalyst_latest"] = pub
-            if pub < fresh_cut:
+            # 审计 P0-3：预定动作类（下架/移除/上线/解锁/升级…）发布时间必然早于
+            # 生效时间 ⇒ 不按 published_at 判陈旧（见 `_is_scheduled_action` 注释）。
+            sched = _is_scheduled_action(f"{r['title']} {r['ai_summary'] or ''}")
+            if pub < fresh_cut and not sched:
                 out["catalyst_stale"] += 1
             else:
                 out["catalyst_dir_fresh"][d] += 1  # OPT-2：新鲜方向构成
@@ -1933,6 +2067,7 @@ def _alert_title(items: list[dict]) -> str:
 # 的在视觉上完全等价。这里给一个**可解释**的相对量：
 #   基量 = 量比 × |OI 增速|
 #   共振方向与结论一致 ×1.15，相悖 ×0.75，无方向数据不加不扣
+#   （共振方向取 `catalyst_dir_fresh` 新鲜口径，陈旧旧闻不加不扣 —— 审计 P0-2）
 #   CVD 与结论同向 ×1.05
 # 只做本封邮件内的相对强弱（绝对阈值无基准；审计 P2-5 亦警示均值会被离群值绑架），
 # 故图例明确写「非胜率」，不对外宣称命中率。
@@ -1957,7 +2092,11 @@ def _alert_strength(it: dict) -> float:
         oi_chg = BRK_STRENGTH_OI_EQUIV  # 见常量注释（P2-5）
     base = abs(float(sig.get("vol_ratio") or 0) * float(oi_chg or 0))
     up = sig.get("p_dir") == "up"
-    cd = res.get("catalyst_dir") or {}
+    # 审计 P0-2（审计_盘面异动告警邮件_3封_2026-09-26）：共振方向读**新鲜**口径。
+    # 原读 `catalyst_dir`（7 天全量窗）⇒ 一条陈旧旧闻把强度压低 25%（实测 DASH
+    # 11.28×5.42=61.2 → ×0.75 = 45.9，邮件印 46.0；ENJ 26.6 → 19.9），而同一封
+    # 邮件的标题/卡片已声明该批旧闻「不计方向」。该分数同时驱动卡片排序。
+    cd = res.get("catalyst_dir_fresh") or {}
     bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
     if bull != bear:
         aligned = (up and bull > bear) or (not up and bear > bull)
@@ -2174,6 +2313,15 @@ def _render_alert_email(items: list[dict],
         # 共振方向构成 + 与结论相悖警示（审计 P0-2）
         cd = res.get("catalyst_dir") or {}
         bull, bear = int(cd.get("bullish", 0)), int(cd.get("bearish", 0))
+        # 审计 P0-1（审计_盘面异动告警邮件_3封_2026-09-26）：**相悖判定必须与标题、
+        # 卡片方向段同用「新鲜」口径**。原用 `catalyst_dir`（7 天全量窗），会把系统
+        # 刚刚判定「不计方向」的陈旧旧闻又拿来下「与结论相悖」的红字结论 —— 同一张
+        # 卡片自相矛盾（B/DASH 与 C/ENJ 两封 `catalyst_dir_fresh` 实测 {0,0,0}，
+        # bear 100% 来自 2026-09-22 那条陈旧条目）。OPT-2「陈旧不推高 conviction」
+        # 在披露侧已落地，判定侧此前漏改。
+        cdf = res.get("catalyst_dir_fresh") or {}
+        f_bull, f_bear = int(cdf.get("bullish", 0)), int(cdf.get("bearish", 0))
+        f_total = f_bull + f_bear + int(cdf.get("neutral", 0))
         linked = res.get("asset_linked", True)
         # 复验 P1-N2：条数与括注方向合计必须同源 —— 原 N 取明细长度（≤4）、括注取
         # 去重全量（≤20），会渲染出「催化剂 4（9多/1空/9中）」这种自相矛盾的结果。
@@ -2210,12 +2358,18 @@ def _render_alert_email(items: list[dict],
                    + (f"（{cat_dir_txt}）" if cat_dir_txt else "")
                    + f" · KOL {len(res['kol']) if linked else 'n/a'}")
         conflict = ""
-        if up and bear > bull:
+        # 审计 P0-1：相悖判定读**新鲜**口径（`f_bull/f_bear`），且新鲜三项全为 0 时
+        # 不渲该警告 —— 改印中性说明，明确「这批旧闻未参与结论」，与标题「不计方向」
+        # 口径一致（原实现是「标题说不计方向、卡片说与结论相悖」的自相矛盾）。
+        if up and f_bear > f_bull:
             conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
                         "⚠️ 共振方向以利空为主，与做多结论相悖，请复核</span>")
-        elif (not up) and bull > bear:
+        elif (not up) and f_bull > f_bear:
             conflict = ("<br><span style='color:#dc2626;font-weight:bold'>"
                         "⚠️ 共振方向以利多为主，与做空结论相悖，请复核</span>")
+        elif cat_n and not f_total:
+            conflict = ("<br><span style='color:#6b7280'>"
+                        "ℹ️ 共振方向无新鲜条目，未参与结论</span>")
         # CVD 机制标签（审计 P1-3 的可做部分：金额列缺失 ⇒ 不做幅度，只做机制判读）
         # 复验 P2-N3：「价涨 + 现货主动卖」有两种**相反**机制，原文案一律断言「OI 增」
         # ⇒ 空头回补（OI 降）场景说反。改为按 oi_dir 分两支，方向未知时不作机制断言。

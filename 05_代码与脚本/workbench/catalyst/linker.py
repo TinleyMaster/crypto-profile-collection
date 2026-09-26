@@ -51,6 +51,32 @@ _COMMODITY_AMBIGUOUS_SYMBOLS = frozenset({
     "ZINC", "LEAD", "TIN", "COBALT", "XAU", "XAG", "XPT", "XPD",
 })
 
+# 美股 ticker 串台（审计_盘面异动告警邮件_3封_2026-09-26 §三.P0-4）：与加密币同名的
+# **美股代码**。Binance Square 的 `pairs` 只给裸 ticker，而两道路径都拦不住：
+#   · `_NON_CRYPTO_NAME_SQL` 按资产**名称**排除 tokenized/商品衍生 —— 加密 Dash 的名称
+#     就是 "Dash"，不含任何脏词；
+#   · `_COMMODITY_AMBIGUOUS_SYMBOLS` 只覆盖商品同名 —— DASH 不在其中，门禁根本不执行。
+# 实测：DASH 卡片唯一 1 条催化剂是「**DoorDash** 与纽约市达成 1.315 亿美元和解，涉及
+# 最低工资合规调查」（纳斯达克: DASH）—— 外卖平台合规新闻被判为该币**利空**，且因它是
+# 唯一一条，直接决定「净空 1」→ 触发「⚠️ 共振相悖」→ 触发强度 ×0.75。**一条假利空
+# 污染三个输出位**。规则与商品同名一致：命中本集合的 symbol，正文/标题必须含**加密语境**
+# （`has_crypto_context`：`$DASH` / `DASHUSDT` / 币安 / 链上 / 代币…）才认。
+# ⚠️ 本集合是**兜底清单、非全量** —— 完整清单需用 `core.asset.canonical_symbol` 与美股
+#    ticker 全量比对产出（需连库，本轮未做）。每条都按「股票名（交易所: 代码）」记档，
+#    便于后续核对与扩充。误纳入的代价很低（真加密新闻几乎必带加密语境会被放行），
+#    漏纳入则残留本缺陷，故宁可多列。
+_EQUITY_TICKER_COLLISIONS = frozenset({
+    "DASH",   # DoorDash Inc.（NASDAQ: DASH）—— 实物复现，见上
+    "APT",    # Alpha Pro Tech Ltd.（NYSE American: APT）
+    "SUI",    # Sun Communities Inc.（NYSE: SUI）
+    "SOL",    # Emeren Group Ltd.（NYSE: SOL）
+    "TRX",    # TRX Gold Corp.（NYSE American: TRX）
+    "LINK",   # Interlink Electronics Inc.（NASDAQ: LINK）
+    "STX",    # Seagate Technology Holdings plc（NASDAQ: STX）
+    "AR",     # Antero Resources Corp.（NYSE: AR）
+    "OP",     # OceanPal Inc.（NASDAQ: OP）
+})
+
 _CRYPTO_CONTEXT_RE = re.compile(
     r"\$[A-Za-z0-9]{2,10}\b"                 # cashtag $COPPER
     r"|\b[A-Z0-9]{2,15}USDT\b"               # COPPERUSDT
@@ -153,8 +179,9 @@ def map_pairs_to_asset_ids(
         pairs: 交易对列表（如 ["BTCUSDT", "ETHUSDT"]）
         conn: 数据库连接
         source_hint: 优先查的数据源（默认 binance，因为交易对来自币安）
-        context_text: 标题+正文；用于「商品/常用词同名」消歧（见
-            `_COMMODITY_AMBIGUOUS_SYMBOLS`）。为空时不做消歧（向后兼容）。
+        context_text: 标题+正文；用于「同名撞车」消歧 —— 商品/常用词
+            （`_COMMODITY_AMBIGUOUS_SYMBOLS`）与美股 ticker
+            （`_EQUITY_TICKER_COLLISIONS`）。为空时不做消歧（向后兼容）。
 
     Returns:
         asset_id 列表（去重，顺序按 pairs 出现顺序）
@@ -170,10 +197,12 @@ def map_pairs_to_asset_ids(
         if not base:
             continue
 
-        # 同名消歧：商品/常用词 symbol 需正文含加密语境，否则视为宏观商品新闻误标
-        ambiguous = base in _COMMODITY_AMBIGUOUS_SYMBOLS
+        # 同名消歧：商品/常用词 symbol 与**美股 ticker 撞名**者，需正文含加密语境，
+        # 否则视为宏观商品新闻 / 美股快讯误标（后者见 `_EQUITY_TICKER_COLLISIONS`）。
+        ambiguous = (base in _COMMODITY_AMBIGUOUS_SYMBOLS
+                     or base in _EQUITY_TICKER_COLLISIONS)
         if ambiguous and context_text and not has_crypto_context(context_text):
-            logger.info("同名消歧：跳过商品/常用词 symbol %s（正文无加密语境）", base)
+            logger.info("同名消歧：跳过商品/美股同名 symbol %s（正文无加密语境）", base)
             continue
 
         # 查缓存（歧义符号不缓存，避免跨文污染）

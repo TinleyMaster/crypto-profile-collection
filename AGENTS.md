@@ -1273,3 +1273,18 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - 全量回归：`test_major_event_alert` 45/45、`test_fast_alert_audit_rest` 61/61、`test_fast_alert_ai_veto` 46/46、`test_catalyst_channel_dedup` 22/22 全绿。
   - **旧项闭环**：`_fmt_price` 新增 `_trim_trailing_zeros()`，定点小数去掉无意义尾零（`0.42830000 → 0.4283`、`620.5000 → 620.5`）；极小价仍走科学计数（不回归 2026-09-22 P0 显示修复）。属全邮件共享函数，已跑上述四个通道的离线护栏确认零回归。
 - **待部署**：push 后约 6 分钟 Zeabur 自动重建生效。
+
+### 盘面异动告警邮件 3 封审计处置（审计_盘面异动告警邮件_3封_2026-09-26，2026-09-26，本次提交）
+
+来源：`audit_盘面异动告警邮件_3封_2026-09-26.md`（样本 PROMUSDT / DASHUSDT / ENJUSDT）。**范围经用户拍板 = P0 四项 + P1-1**；P1-2（8% 下限倒挂）/ P1-3（confidence 不吸收反向证据）/ P2-* 本轮**不动**。
+
+- **P0-1 相悖判定口径不一致**（`_render_alert_email`）：卡片方向段与标题已用**新鲜**口径（`catalyst_dir_fresh`），但「⚠️ 共振方向以利空为主，与做多结论相悖」仍读**全量** `catalyst_dir` ⇒「不计方向」与「相悖警告」同框自相矛盾。改读新鲜口径，且新鲜三项全为 0 时改印中性说明「ℹ️ 共振方向无新鲜条目，未参与结论」。
+- **P0-2 强度分吃陈旧旧闻**（`_alert_strength`）：共振加成 ×1.15 / 相悖惩罚 ×0.75 同样改读 `catalyst_dir_fresh`（陈旧旧闻不加不扣）。DASH 实况：全陈旧利空不再把强度从 61.1 打到 45.9。
+- **P0-3 新鲜度对「预定动作」系统性误杀**：`biz.asset_catalyst` 无生效日列，而「下架/移除/上线/解锁/升级/减半…」类新闻**发布日必然早于生效日** ⇒ 3 天阈值把 09-25 已生效的币安下架（ENJ）判成「陈旧、不计方向」。新增 `_SCHEDULED_ACTION_RE` / `_is_scheduled_action()`：命中预定动作语义者不参与陈旧剔除（7 天查询窗不变，不会造成无限新鲜）。
+- **P0-4 美股 ticker 串台**（`workbench/catalyst/linker.py`）：`DoorDash（NASDAQ: DASH）` 与纽约市和解的新闻被连到加密 Dash。新增 `_EQUITY_TICKER_COLLISIONS`（DASH/APT/SUI/SOL/TRX/LINK/STX/AR/OP，兜底清单非全量）并入同名消歧门禁：撞名 symbol 需正文含**加密语境**（`has_crypto_context`）才认。门禁在**查库前**拦下（探针断言 `conn.calls == 0`）。
+- **P1-1 跨语种转载未去重**：ENJ 的**同一**币安公告实为 **4** 条（火星财经·中 / PANews·中 / ChainCatcher·中 / 英文原文），`_norm_title` 归一后全不相同 ⇒「净空 4」虚高四倍。改为按 `(交易所|动作, 币种清单)` **实体**二次合并（`_catalyst_entity` + `_same_catalyst_batch`）。踩过两个坑，均已固化进注释与探针：
+  - **① 必须用 `body_text` 而非 title/ai_summary**：源站把标题截到 83 字，清单断在「…AIXBT/USDC、DOLO/US…」（英文版整段清单都没进标题）⇒ 用标题算实体会得到 4 个互不相等的清单，一条也合并不了。
+  - **② 清单判等不能用集合相等、也不能用 `\b`**：正文**同样是截断的**（四版分别含 7/6/7/7 个交易对，短者正是长者的前缀）⇒ 改「同源截断 ⇒ 短者是长者的前缀」（长度 1 要求完全相等，避免「同首项不同批次」误并）；而 `\b` 走 Unicode 词字符判定，`…TNSR/USDC及 TURTLE/USDC` 处判不出边界会漏掉 TNSR、清单错位一位，故结尾改用 `(?![A-Za-z0-9])`。
+- **只读 prod 复验（本轮修复后）**：ENJ `catalyst_raw=4` → `catalyst_dir={'bearish':1}`、`catalyst_dir_fresh={'bearish':1}`、`catalyst_stale=0`、`catalyst_all` 1 条（达成审计验收「净空 1」）；DASH `catalyst_stale=1`、`catalyst_dir_fresh` 全 0 ⇒ 假利空不再触发相悖警告与 ×0.75 惩罚。
+- **新增离线探针**：`workbench/test_scan_alert_audit_20260926.py`（43/0 全绿，含 P0-1~P0-4 + P1-1 + `**` 护栏）。回归零失败：`test_scan_alert_audit_deepdive`、`test_scan_alert_header_regime`、`test_scan_scenario_label`、`test_scan_l1_closed_bar`、`test_highlight_audit_20260924`、`test_scan_alert_remaining`。
+- **遗留（需用户授权，本轮未做）**：DASH 那条 DoorDash 存量**脏关联**仍在 `biz.asset_catalyst`（清理属 DELETE 数据操作）；`scripts/bin/backfill_catalyst_links.py` 内联的 linker 副本未同步 P0-4 门禁。

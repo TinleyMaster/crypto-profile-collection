@@ -1488,6 +1488,12 @@ def save_to_db(conn, asset_id: int, data: dict) -> None:
             crawl_status = EXCLUDED.crawl_status,
             last_attempt_at = NOW(),
             updated_at = NOW()
+        -- 复验 #5（2026-09-26）：陈旧刷新会重抓 crawl_status='ok' 的行。若本次因站点
+        -- 反爬/改版而降级（not_found / parse_empty / fail_timeout），不得覆盖已有的成功
+        -- 数据（否则一次抖动就抹掉解锁时间表），与 _mark_not_found「不覆盖已成功的数据」
+        -- 同策略：仅在「原行非 ok」或「本次仍为 ok」时才接受写入。
+        WHERE biz.asset_token_unlocks.crawl_status IS DISTINCT FROM 'ok'
+           OR EXCLUDED.crawl_status = 'ok'
     """
     with conn.cursor() as cur:
         cur.execute(sql, {

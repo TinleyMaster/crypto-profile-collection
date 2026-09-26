@@ -8,6 +8,10 @@
 
 2026-09-15 优化：浏览器搜索频率 i%50→i%200、失败率阈值 30%（原 fail>0 即 exit 1）、
 调度提前至每日 07:00（早报快照前），确保早报"即将解锁"板块用当日数据。
+
+2026-09-26（复验 #5）：原候选查询永久排除 crawl_status='ok'，已抓过的资产再无刷新
+路径（PONS 停在 09-04，age 533h）。新增 --refresh-days：把「ok 且 updated_at 超 N 天」
+的行并入候选池（最旧优先），使解锁数据能随 tokenomics 时间表推进而更新。
 """
 from __future__ import annotations
 
@@ -51,9 +55,66 @@ _PENDING_EXCLUDE = """
 # 只处理市值 >= 该门槛的资产；门槛可用环境变量 MIN_UNLOCK_MCAP 覆盖，默认 2000 万美元。
 MIN_UNLOCK_MCAP = float(os.environ.get("MIN_UNLOCK_MCAP", "20000000"))
 
+# ── 陈旧刷新（复验 #5，2026-09-26）────────────────────────────────────
+# 原候选查询用 _PENDING_EXCLUDE 永久排除 crawl_status='ok' 的行，于是「已抓过一次」
+# 的资产再无刷新路径：实测 PONS(11114) 停在 2026-09-04（age 533h），且待抓新候选
+# 已归零（每日 07:00 任务实为空转），data_freshness.unlock 因此恒 stale。
+# 修复：把「ok 且 updated_at 超过 refresh_days 天」的行并入候选池，排在真正的新
+# 候选之后，仍受 --limit 约束；refresh_days=0 表示关闭该路径（回到旧行为）。
+#
+# 稳态时效（预算即可达性）：设可刷新行数 N、每日预算 B、门槛 D，则稳态刷新周期
+#     T = max(D, N/B)
+# 因为「到龄(D)才进队列」，队列积压时有 T=N/B，否则 T=D。复验要求 T < 168h。
+# 实测（2026-09-26）可通过门槛的 ok 行 N=269，调度日预算 B=100 ⇒ N/B≈2.7 天≈65h；
+# 故 D 只要 < 7 天即达标。默认取 5 天：比 N/B 宽松（不追求极限新鲜度、少些爬取
+# 压力），又留有 48h 余量，避免像 D=7 那样恰好卡在 168h 边界上。
+DEFAULT_REFRESH_DAYS = int(os.environ.get("UNLOCK_REFRESH_DAYS", "5"))
 
-def get_pending_assets(conn, limit: int) -> list[dict]:
-    """获取有 CG 映射但尚无解锁数据的资产列表。
+# 陈旧刷新组的选取条件（与主查询同门槛；仅额外要求 crawl_status='ok' 且已过期）
+_REFRESH_SELECT = """
+    SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
+           asm.source_asset_key AS coingecko_id,
+           COALESCE(a.market_cap, 0) AS mcap, u.updated_at AS last_updated, 1 AS is_refresh
+    FROM biz.asset_token_unlocks u
+    JOIN core.asset a ON a.asset_id = u.asset_id
+    JOIN (
+        SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
+        FROM core.asset_source_map
+        WHERE source_code = 'cg'
+        ORDER BY asset_id, source_asset_key
+    ) asm ON asm.asset_id = a.asset_id
+    WHERE u.crawl_status = 'ok'
+      AND u.updated_at < NOW() - (%s * INTERVAL '1 day')
+      AND a.status = 'active'
+      AND asm.source_asset_key IS NOT NULL
+      AND a.asset_type != 'stablecoin'
+      AND a.primary_sector != 'meme'
+      AND COALESCE(a.market_cap, 0) >= %s
+"""
+
+# 同上，但只取 asset_id（供计数查询 UNION，列数须与主查询一致）
+_REFRESH_SELECT_IDS = """
+    SELECT a.asset_id AS asset_id, 1 AS is_refresh
+    FROM biz.asset_token_unlocks u
+    JOIN core.asset a ON a.asset_id = u.asset_id
+    JOIN (
+        SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
+        FROM core.asset_source_map
+        WHERE source_code = 'cg'
+        ORDER BY asset_id, source_asset_key
+    ) asm ON asm.asset_id = a.asset_id
+    WHERE u.crawl_status = 'ok'
+      AND u.updated_at < NOW() - (%s * INTERVAL '1 day')
+      AND a.status = 'active'
+      AND asm.source_asset_key IS NOT NULL
+      AND a.asset_type != 'stablecoin'
+      AND a.primary_sector != 'meme'
+      AND COALESCE(a.market_cap, 0) >= %s
+"""
+
+
+def get_pending_assets(conn, limit: int, refresh_days: int = DEFAULT_REFRESH_DAYS) -> list[dict]:
+    """获取待采集资产列表（新候选 + 陈旧刷新候选）。
 
     优先处理高市值、非稳定币、非 meme 的资产，跳过已停用资产，
     提升 tokenomics.com 命中率和批量成功率。
@@ -62,55 +123,85 @@ def get_pending_assets(conn, limit: int) -> list[dict]:
 
     P1-1: not_found 墓碑 30 天冷却；parse_empty 视为待重试（不阻塞）。
     隐患1: fail_timeout 墓碑 7 天冷却，避免主流币反复超时浪费配额。
+    复验 #5（2026-09-26）：并入「ok 且 updated_at 超 refresh_days 天」的刷新候选，
+    否则已抓过的资产永不更新。刷新组按 updated_at 升序（最旧优先），避免按市值
+    排序时长尾资产被结构性饿死；新候选组仍按市值降序（行为不变）。
     """
+    refresh_union = ""
+    params: list = [MIN_UNLOCK_MCAP]
+    if refresh_days and refresh_days > 0:
+        refresh_union = "UNION ALL\n" + _REFRESH_SELECT
+        params += [refresh_days, MIN_UNLOCK_MCAP]
+    params.append(limit)
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
-            SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
-                   asm.source_asset_key AS coingecko_id
-            FROM core.asset a
-            JOIN (
-                SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
-                FROM core.asset_source_map
-                WHERE source_code = 'cg'
-                ORDER BY asset_id, source_asset_key
-            ) asm ON asm.asset_id = a.asset_id
-            WHERE a.status = 'active'
-              AND asm.source_asset_key IS NOT NULL
-              AND a.asset_type != 'stablecoin'
-              AND a.primary_sector != 'meme'
-              AND COALESCE(a.market_cap, 0) >= %s
-              {_PENDING_EXCLUDE}
-            ORDER BY COALESCE(a.market_cap, 0) DESC, a.asset_id ASC
+            WITH cand AS (
+                SELECT a.asset_id, a.canonical_symbol AS symbol, a.canonical_name AS name,
+                       asm.source_asset_key AS coingecko_id,
+                       COALESCE(a.market_cap, 0) AS mcap, NULL::timestamptz AS last_updated,
+                       0 AS is_refresh
+                FROM core.asset a
+                JOIN (
+                    SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
+                    FROM core.asset_source_map
+                    WHERE source_code = 'cg'
+                    ORDER BY asset_id, source_asset_key
+                ) asm ON asm.asset_id = a.asset_id
+                WHERE a.status = 'active'
+                  AND asm.source_asset_key IS NOT NULL
+                  AND a.asset_type != 'stablecoin'
+                  AND a.primary_sector != 'meme'
+                  AND COALESCE(a.market_cap, 0) >= %s
+                  {_PENDING_EXCLUDE}
+                {refresh_union}
+            )
+            SELECT asset_id, symbol, name, coingecko_id, is_refresh, last_updated
+            FROM cand
+            ORDER BY is_refresh ASC,
+                     COALESCE(last_updated, 'epoch'::timestamptz) ASC,
+                     mcap DESC, asset_id ASC
             LIMIT %s
             """,
-            (MIN_UNLOCK_MCAP, limit),
+            tuple(params),
         )
         return cur.fetchall()
 
 
-def get_total_pending(conn) -> int:
+def get_total_pending(conn, refresh_days: int = DEFAULT_REFRESH_DAYS) -> tuple[int, int]:
+    """返回 (新候选数, 陈旧刷新候选数)。"""
+    refresh_union = ""
+    params: list = [MIN_UNLOCK_MCAP]
+    if refresh_days and refresh_days > 0:
+        refresh_union = "UNION ALL\n" + _REFRESH_SELECT_IDS
+        params += [refresh_days, MIN_UNLOCK_MCAP]
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT COUNT(DISTINCT a.asset_id)
-            FROM core.asset a
-            JOIN (
-                SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
-                FROM core.asset_source_map
-                WHERE source_code = 'cg'
-                ORDER BY asset_id, source_asset_key
-            ) asm ON asm.asset_id = a.asset_id
-            WHERE a.status = 'active'
-              AND asm.source_asset_key IS NOT NULL
-              AND a.asset_type != 'stablecoin'
-              AND a.primary_sector != 'meme'
-              AND COALESCE(a.market_cap, 0) >= %s
-              {_PENDING_EXCLUDE}
+            WITH cand AS (
+                SELECT a.asset_id AS asset_id, 0 AS is_refresh
+                FROM core.asset a
+                JOIN (
+                    SELECT DISTINCT ON (asset_id) asset_id, source_asset_key
+                    FROM core.asset_source_map
+                    WHERE source_code = 'cg'
+                    ORDER BY asset_id, source_asset_key
+                ) asm ON asm.asset_id = a.asset_id
+                WHERE a.status = 'active'
+                  AND asm.source_asset_key IS NOT NULL
+                  AND a.asset_type != 'stablecoin'
+                  AND a.primary_sector != 'meme'
+                  AND COALESCE(a.market_cap, 0) >= %s
+                  {_PENDING_EXCLUDE}
+                {refresh_union}
+            )
+            SELECT COUNT(*) FILTER (WHERE is_refresh = 0), COUNT(*) FILTER (WHERE is_refresh = 1)
+            FROM cand
             """,
-            (MIN_UNLOCK_MCAP,),
+            tuple(params),
         )
-        return cur.fetchone()[0]
+        row = cur.fetchone()
+        return int(row[0] or 0), int(row[1] or 0)
 
 
 def _mark_fail_timeout(conn, asset_id: int) -> None:
@@ -223,6 +314,9 @@ def main():
                         help="单币超时时间（秒）")
     parser.add_argument("--delay", type=float, default=0.5,
                         help="每币之间延迟（秒）")
+    parser.add_argument("--refresh-days", type=int, default=DEFAULT_REFRESH_DAYS,
+                        help="同时刷新 crawl_status='ok' 且 updated_at 超 N 天的资产"
+                             "（复验 #5；0=关闭，只抓新候选）。默认 %d。" % DEFAULT_REFRESH_DAYS)
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -233,15 +327,17 @@ def main():
 
     # get_connection 是 @contextmanager 生成器，必须用 with 才能拿到真实连接
     with get_connection(settings.database_url) as conn:
-        total_pending = get_total_pending(conn)
+        total_new, total_refresh = get_total_pending(conn, args.refresh_days)
+        total_pending = total_new + total_refresh
         limit = args.limit if args.limit > 0 else total_pending
-        print(f"待采集总数: {total_pending}，本次处理: {limit}")
+        print(f"待采集总数: {total_pending}（新候选 {total_new} + 陈旧刷新 {total_refresh}"
+              f"，刷新门槛 {args.refresh_days} 天），本次处理: {limit}")
 
         if limit == 0:
             print("无待采集资产，退出")
             return 0
 
-        assets = get_pending_assets(conn, limit)
+        assets = get_pending_assets(conn, limit, args.refresh_days)
         if not assets:
             print("无待采集资产")
             return 0
@@ -254,7 +350,8 @@ def main():
     for i, asset in enumerate(assets, 1):
         asset_id = asset["asset_id"]
         symbol = asset.get("symbol", "?")
-        print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
+        _tag = "[刷新] " if asset.get("is_refresh") else ""
+        print(f"  [{i}/{len(assets)}] {_tag}asset_id={asset_id} {symbol} ... ",
               end="", flush=True)
 
         # P2-6: 每 200 个启用一次浏览器首页搜索兜底（提高 API 搜索被拦截时的命中率）。

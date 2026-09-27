@@ -1874,8 +1874,18 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **明确不改（已核）**：① `src_dl.protocol_list.address` = 上游 API 原样落库，重拉即覆盖；② `biz.onchain_holder_snapshot` 13 行 / `onchain_transfer_log` 1 行命中的是 `0xadb2…` 但 **`chain='ethereum'/'eth'`**，属 UNCX 在以太坊的**合法**历史数据（与 solana 脏行共享同一字符串而已），**不动**。
 - **修复后复验（prod 只读）**：solana 链非法形态行 **13 → 0**；3 个待删 `contract_id` 残留 0；15 个 UPDATE 逐行比对真值全 OK；RPC 抽验 3 个还原地址（TAO/PYM/FAB）**全部 `type=mint` / `decimals=9`** ⇒ 大小写还原是**真实账户**，非仅字面整洁。
 - **污染的功能性危害（RPC 对照，决定性证据）**：`getTokenSupply` 对**小写旧值** `taoc6xyv2v8tdlcev4uagugv4vdqswjrgft2kcbrrby` / `7yf97k6jrbkb7bxjyxzmwqlqyxvirltcssgb75qlqan8` 一律 `Invalid param: Invalid`，对**还原后** `taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY` / `7yF97k6jrBkb7BXJYXzmwQLQyxVirLtCSSGb75qLqAN8` 返回真实供应量 ⇒ 小写行**根本取不到链上数据**（本地 sweep 亦见 `TAO 小写 holders=0 supply=None` 而 `9cYXqd… holders=20`）。已删的原生 mint `So1111…1111` 则报 `Invalid param: not a Token mint`（它是 SPL 程序的**原生 mint**，非普通代币 mint —— 顺带说明为何它不该作为 `is_primary` 合约行留存）。
+- **写入方根因收口（用户追问「根因处理完了吗」后补做）**：对 `core.asset_contract` **全部 5 个写入方**逐一清点，确认已无任何路径会把 solana 地址降格：
+  | 写入方 | 触发 | solana 大小写 | 结构护栏 |
+  |---|---|---|---|
+  | `POPULATE_FROM_CMC` | 每日 03:00 流水线 ④ | 保留原样（`CASE`） | ✅ 本轮加 |
+  | `populate_contracts_from_dexscreener` | 每日 03:00 流水线 ⑤ | **不适用** —— `CHAIN_MAP` 只含 EVM 链，`if chain_id not in CHAIN_MAP: continue` 先过滤，**结构上不可能写 solana 行** | — |
+  | `POPULATE_FROM_DL` | 仅手动 `--step populate_dl`（**无调度**） | 保留原样（`CASE`） | ✅ 本轮加 |
+  | `step3b_populate_cg` | 手动 | 保留原样（`CASE_SENSITIVE_CHAINS`） | 无（`DO NOTHING`，CG platforms 形态可靠，历史零污染） |
+  | `phase_chain_contract_backfill` | 手动（无调度） | 保留原样（CMC 原值） | ✅ 本轮加（Python） |
+- **`POPULATE_FROM_DL` 两处既有缺陷已修**（原「未授权留档」项，本轮一并处理）：① **列歧义** —— 外层 `SELECT asset_id` 在 `dl` CTE 与 `core.asset a` 之间歧义 ⇒ 改 `dl.asset_id`（此前该 SQL 在任何情况下都报 `AmbiguousColumn`，是死代码）；② **`token/` 前缀未剥离** —— DefiLlama 自带的 `'solana:token/<addr>'` 格式会让 FAB 这类**合法**地址被新护栏整体拦下 ⇒ 在 CTE 落库前加 `regexp_replace(..., '^token/', '')`。修后 `EXPLAIN` 通过（17 行计划）、候选 **2966 行 / solana 168**（较修复前的 2965/167 恰 +1 = FAB 归一化后通过）、候选中 `token/` 残留 0、solana 候选形态违规 0。⚠️ 修好使该路径**变为可运行**，但其唯一入口仍只有手动 `--step populate_dl|all`，**无任何调度器/流水线调用**（已 grep 确认），故日常行为不变。
+- **唯一剩余的结构性根因（已评估、有意接受）**：唯一索引仍是 `UNIQUE (chain, contract_address)`（**大小写敏感**），意味着**理论上**若未来再出现任一把 solana 地址降格的写入路径，脏小写行仍会与正确值**并存**而非冲突覆盖。之所以不改：改「大小写不敏感」须先清并存的等价变体行，并同步 4 处 `ON CONFLICT (chain, contract_address)` 写法（否则无法推断唯一索引、写入方全部报错），且对 `DO UPDATE` 路径存在「用脏值覆盖好值」的反向风险 —— 属**有意接受的风险**，而非遗漏。当前防线是「写入侧全量 case-safe + 结构护栏」。
+- **验证（本轮）**：探针 `test_contract_addr_guard_20260927.py` 扩至 **37/0**（新增 D 组 4 例：列歧义已消 / `token/` 剥离 / 原样被拦 + 剥离后通过；新增 F 组 5 例：DexScreener 不含 solana、CG 保留原样且 `DO NOTHING` 且跳过原生币）；回归 `test_solana_holder_20260927` 27/0、`test_snapshot_freshness_20260927` 27/0、`test_scan_alert_onchain_addr` exit 0；`py_compile` 2/2；`POPULATE_FROM_CMC`（16 行）与 `POPULATE_FROM_DL`（17 行）`EXPLAIN` 均通过。
 - **回滚点**：`/Users/tinley/Workbuddy/crypto-profile-collection/回滚点_solana合约地址修复_2026-09-27.json`（含 18 行原始快照 `rows`、逐行判定 `plan`、`deleted_rows`/`updated_rows`、`coin_basic_before` 备份）。
-- **遗留（仍未授权）**：`POPULATE_FROM_DL` 的 1 词列歧义（修好会让长期死路径开始写 2965 行）；若将来启用该路径，须**先剥离 DL 的 `<chain>:token/` 前缀**再入库，否则被新护栏整体拦下（FAB 这类合法地址会丢失映射）。
 
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 

@@ -8,6 +8,10 @@
   1) phase_chain_contract_backfill.is_valid_solana_addr  —— Python 侧结构校验
   2) phase_a_build_core.POPULATE_FROM_CMC 的 solana 条件 —— 每日 03:00 流水线 ④
   3) phase_a_build_core.POPULATE_FROM_DL  的 solana 条件 —— DefiLlama 回填
+     （含该 SQL 的 2 处既有缺陷修复：外层 SELECT 首列列歧义 → dl.asset_id；
+       DefiLlama 自带 'token/' 前缀 → 落库前 regexp_replace 剥离）
+另含 F 组「写入方全量清点」：证明 solana 地址的 5 个写入方全部 case-safe 或结构上
+不可能写 solana（populate_contracts_from_dexscreener 的 CHAIN_MAP 只含 EVM 链）。
 
 纯离线：不连库、不发网络请求。
 """
@@ -103,6 +107,14 @@ check("LOWER(COALESCE(addr_chain, raw_chain)) <> 'solana'" in dl,
       "D: solana 条件与链归一化口径一致")
 check("WHEN LOWER(COALESCE(addr_chain, raw_chain)) = 'solana' THEN contract_address" in dl,
       "D: 仍保留「solana 地址原样」的链感知赋值")
+check("dl.asset_id" in dl and "\n    asset_id,\n" not in dl,
+      "D: 外层 SELECT 首列限定为 dl.asset_id（消除与 core.asset 的列歧义）")
+check("regexp_replace(" in dl and "'^token/', ''" in dl,
+      "D: 落库前剥离 DefiLlama 自带的 'token/' 前缀")
+check(not bf.is_valid_solana_addr(URL_FRAG),
+      "D: 'token/<addr>' 原样不通形态校验（护栏会拦）")
+check(bf.is_valid_solana_addr(URL_FRAG.split("token/")[-1]),
+      "D: 剥离 'token/' 后通过形态校验（FAB 场景，不丢合法映射）")
 
 print("\n== E. 相邻回归：其它写入方未被波及 ==")
 check("CASE_SENSITIVE_CHAINS" in core.__dict__ and "solana" in core.CASE_SENSITIVE_CHAINS,
@@ -112,6 +124,22 @@ check(scrape._norm_addr("solana", VALID_B58) == VALID_B58,
       "E: holder_scrape._norm_addr 对 solana 仍保留原样")
 check(scrape._norm_addr("bsc", EVM_ADDR.upper()) == EVM_ADDR,
       "E: holder_scrape._norm_addr 对 EVM 仍转小写")
+
+print("\n== F. 写入方全量清点（core.asset_contract 的 5 个写入方）==")
+import inspect  # noqa: E402
+import populate_contracts_from_dexscreener as ds  # noqa: E402
+check("solana" not in ds.CHAIN_MAP and "solana" not in set(ds.CHAIN_MAP.values()),
+      "F: DexScreener 的 CHAIN_MAP 不含 solana —— 结构上不可能写 solana 行")
+_ds_src = inspect.getsource(ds._pick_contracts)
+check("if chain_id not in CHAIN_MAP" in _ds_src and "addr = (bt.get(\"address\") or \"\").lower()" in _ds_src,
+      "F: DexScreener 先过滤已映射链再取地址，.lower() 只作用于 EVM（大小写不敏感）")
+_cg_src = inspect.getsource(core.step3b_populate_cg)
+check("if chain not in CASE_SENSITIVE_CHAINS:" in _cg_src and "addr = addr.lower()" in _cg_src,
+      "F: CG 步骤对 solana 保留原样（仅非大小写敏感链才 .lower()）")
+check("ON CONFLICT (chain, contract_address) DO NOTHING" in _cg_src,
+      "F: CG 步骤冲突时不覆盖已有主合约")
+check("WHERE asset_type = 'coin'" in _cg_src,
+      "F: CG 步骤跳过原生币（不写原生 mint）")
 
 print(f"\n结果：{PASS} 通过 / {FAIL} 失败")
 sys.exit(1 if FAIL else 0)

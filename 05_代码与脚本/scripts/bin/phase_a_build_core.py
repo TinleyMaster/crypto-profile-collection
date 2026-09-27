@@ -277,12 +277,19 @@ WITH dl AS (
             THEN split_part(p.address, ':', 1)
             ELSE NULL
         END AS addr_chain,
-        CASE
-            WHEN position(':' in p.address) > 0
-                 AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
-            THEN substring(p.address from position(':' in p.address) + 1)
-            ELSE p.address
-        END AS contract_address
+        -- address 归一化：先剥掉「链:」前缀（上面的 CASE），再剥掉 DefiLlama 自带的
+        -- 'token/' 片段（实证 FAB：'solana:token/EdAhkbj5…'，是 DefiLlama API 自己的
+        -- 格式，非本项目解析所致）。'token/' 不剥离则该地址既通不过下面的 solana 形态
+        -- 护栏、也不是可用的 mint。
+        regexp_replace(
+            CASE
+                WHEN position(':' in p.address) > 0
+                     AND split_part(p.address, ':', 1) ~ '^[a-zA-Z][a-zA-Z0-9_-]*$'
+                THEN substring(p.address from position(':' in p.address) + 1)
+                ELSE p.address
+            END,
+            '^token/', ''
+        ) AS contract_address
     FROM src_dl.protocol_list p
     INNER JOIN core.asset_source_map asm
         ON asm.source_code = 'dl'
@@ -291,7 +298,7 @@ WITH dl AS (
       AND p.address != ''
 )
 SELECT
-    asset_id,
+    dl.asset_id,
     CASE
         WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('ethereum', 'ethereum (erc20)', 'eth') THEN 'ethereum'
         WHEN LOWER(COALESCE(addr_chain, raw_chain)) IN ('binance', 'bsc', 'bnb smart chain', 'bnb') THEN 'bsc'

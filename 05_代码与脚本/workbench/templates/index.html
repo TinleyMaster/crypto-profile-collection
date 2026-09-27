@@ -7761,7 +7761,7 @@
             <section id="overview" class="module-card">
                 <div class="module-header">
                     <h2>🌐 大盘分析</h2>
-                    <p class="module-desc">情绪子分 + 结构子分 + 事件日历（事件日历不参与子分计算）</p>
+                    <p class="module-desc">情绪子分 + 结构子分 + BTC 周期定位 + 机会/高危信号 + 板块资金 + 催化剂 + 链上异动 + 估值温度计（事件日历不参与子分计算）</p>
                     <div class="overview-summary" id="overview-summary">
                         <span class="overview-summary-loading">加载中...</span>
                     </div>
@@ -12181,21 +12181,13 @@
         }
 
         // ── 大盘分析 ──
-        const DIM_META = [
-            { key: 'dim1_size', icon: '📊', title: '体量 / 增量存量' },
-            { key: 'dim2_pairs', icon: '📈', title: 'BTC/ETH 盘面' },
-            { key: 'dim3_derivatives_sentiment', icon: '🎭', title: '衍生品 / 情绪' },
-            { key: 'dim4_macro_institution', icon: '🏛️', title: '宏观 / 机构' },
-            { key: 'dim5_sectors', icon: '🔄', title: '板块轮动' },
-            { key: 'dim6_events', icon: '📅', title: '事件日历' },
-        ];
-
         async function loadMarketOverview (force) {
             const grid = document.getElementById('overview-grid');
             const updated = document.getElementById('overview-updated');
             if (!grid) return;
 
-            grid.innerHTML = DIM_META.map(() => '<div class="dim-card loading">加载中…</div>').join('');
+            // 骨架屏占位：卡片的真实清单由 renderOverview 决定，这里只做加载态
+            grid.innerHTML = '<div class="dim-card loading">加载中…</div>'.repeat(6);
             try {
                 const url = '/api/market/overview' + (force ? '?force_refresh=1' : '');
                 const data = await fetchJSON(url, { timeout: 30000 }); // 大盘接口给 30 秒
@@ -12454,7 +12446,8 @@
             </div>`;
 
             // 结构子分卡片（P1: 可读性优化）
-            const structureExtreme = summary.structure_subscore?.components?.market_cap?.extreme !== 'NONE';
+            // P2-C：本卡高亮由 BTC 占比（btc_dominance_extreme）极端触发，非「总市值极端」
+            const structureExtreme = summary.structure_subscore?.components?.market_cap?.btc_dominance_extreme !== 'NONE';
             const structureBandInfo = structureBand(structureScore);
             const structureScoreTxt = structureScore != null ? Number(structureScore).toFixed(1) : 'N/A';
             // 统计异常项
@@ -12560,71 +12553,6 @@
                     <div class="dim-conclusion" style="line-height:1.6;font-size:0.85em;color:#9ca3af">
                         <div>评分构成：0.40×MVRV分位 + 0.30×NUPL近似分位 + 0.30×Liveliness近1年滚动分位</div>
                         <div style="margin-top:4px">${(btcCycle.signals || []).map(s => `<span>• ${s}</span>`).join('<br>')}</div>
-                    </div>
-                </div>`;
-            }
-
-            // 大盘周期热力图（五维：估值/情绪/资金/衍生品/链上）
-            const cycleDash = data.cycle_dashboard || {};
-            if (cycleDash.status === 'ok' || cycleDash.status === 'partial') {
-                const cdHeat = cycleDash.overall_heat;
-                const cdPhase = cycleDash.phase_label || '未知';
-                const cdConsistency = cycleDash.consistency_pct;
-                // 热度颜色
-                let cdColor = '#6b7280';
-                if (cdHeat != null) {
-                    if (cdHeat < 20) cdColor = '#10b981';
-                    else if (cdHeat < 40) cdColor = '#3b82f6';
-                    else if (cdHeat < 60) cdColor = '#06b6d4';
-                    else if (cdHeat < 80) cdColor = '#f59e0b';
-                    else cdColor = '#ef4444';
-                }
-                const cdWidth = cdHeat != null ? Math.min(100, Math.max(0, cdHeat)).toFixed(1) : 0;
-                // 五维数据
-                const cdDims = cycleDash.dimensions || {};
-                const dimOrder = ['valuation', 'sentiment', 'capital', 'derivatives', 'onchain'];
-                let dimRows = '';
-                dimOrder.forEach(function (key) {
-                    const d = cdDims[key] || {};
-                    const s = d.score;
-                    const w = s != null ? Math.min(100, Math.max(0, s)).toFixed(1) : 0;
-                    const c = s != null ? (s < 20 ? '#10b981' : s < 40 ? '#3b82f6' : s < 60 ? '#06b6d4' : s < 80 ? '#f59e0b' : '#ef4444') : '#374151';
-                    const sTxt = s != null ? s.toFixed(1) : 'N/A';
-                    dimRows += `<div class="sub-score-row">
-                        <div class="sub-score-header">
-                            <span class="sub-score-name">${d.label || key} <small style="color:#6b7280">${d.indicator || ''}</small></span>
-                            <span class="sub-score-val" style="color:${c}">${sTxt}</span>
-                        </div>
-                        <div class="sub-score-bar-wrap">
-                            <div class="sub-score-bar" style="width:${w}%;background:${c}"></div>
-                        </div>
-                    </div>`;
-                });
-                const consTxt = cdConsistency != null ? cdConsistency.toFixed(0) + '%' : 'N/A';
-                html += `<div class="dim-card">
-                    <div class="dim-card-header">
-                        <span class="dim-card-icon">🌡️</span>
-                        <span class="dim-card-title">大盘周期热力图</span>
-                        <span class="dim-card-score" style="color:${cdColor};font-weight:700">${cdPhase}</span>
-                    </div>
-                    <div style="padding:8px 12px 0 12px">
-                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-                            <span style="font-size:0.85em;color:#9ca3af">综合周期热度</span>
-                            <span style="font-weight:700;color:${cdColor}">${cdHeat != null ? cdHeat.toFixed(1) + ' / 100' : 'N/A'}</span>
-                        </div>
-                        <div style="width:100%;height:8px;background:#374151;border-radius:4px;overflow:hidden">
-                            <div style="width:${cdWidth}%;height:100%;background:linear-gradient(90deg,#10b981,#3b82f6,#06b6d4,#f59e0b,#ef4444);border-radius:4px"></div>
-                        </div>
-                        <div style="font-size:0.75em;color:#6b7280;margin-top:4px;display:flex;justify-content:space-between">
-                            <span>熊市底部</span><span>牛市早期</span><span>牛市中期</span><span>牛市后期</span><span>泡沫顶部</span>
-                        </div>
-                    </div>
-                    <div class="dim-metrics sub-score-list" style="margin-top:8px">
-                        ${dimRows}
-                    </div>
-                    <div class="dim-conclusion" style="line-height:1.6;font-size:0.85em;color:#9ca3af">
-                        <div>维度一致性：<strong style="color:#d1d5db">${consTxt}</strong> · 数据源：MVRV / 恐贪 / 稳定币流 / 资金费率 / Liveliness</div>
-                        <div style="margin-top:4px">${cycleDash.description || ''}</div>
                     </div>
                 </div>`;
             }
@@ -12928,7 +12856,7 @@
 
             // 右列：链净流入TOP5 + 稳定币净流入分位
             if (chainFlow.length) {
-                chainCol += `<div class="dim-section-label">链净流入 TOP5 · 点击展开协议</div>`;
+                chainCol += `<div class="dim-section-label">链净流入 TOP5（7d，不随时间窗切换）· 点击展开协议</div>`;
                 chainFlow.forEach(function (c, cIdx) {
                     chainCol += chainRow(c, cIdx);
                 });
@@ -12985,7 +12913,7 @@
                         <div class="sector-flow-col">${chainCol}</div>
                     </div>
                 </div>
-                <div class="dim-conclusion">单源失败自动降级标注，不中断主流程 · 点击切换时间窗</div>
+                <div class="dim-conclusion">单源失败自动降级标注，不中断主流程 · 时间窗切换仅作用于叙事榜（链榜固定 7d）</div>
             </div>`;
             document.getElementById('sector-flow-full-section').innerHTML = sectorFlowHtml;
 
@@ -13168,12 +13096,17 @@
             </div>`;
 
             // 事件日历（独立信息栏，不参与子分）
+            // P2-F：后端只产出 hardcoded（宏观硬日程）/ unlock（人工维护解锁峰）/ token_events
+            // （biz.asset_unlock_event 未来 33 天解锁日程，主源），原 gecko 分支对应已废弃的
+            // CoinGecko /events，键恒为空数组，故移除；真实解锁日程改由 token_events 渲染。
             const eventCal = data.event_calendar || {};
+            const tokenEvts = (eventCal.unlock || []).concat(eventCal.token_events || []);
+            const tokenEvtsShown = tokenEvts.slice(0, 15);
             html += `<div class="dim-card">
                 <div class="dim-card-header">
                     <span class="dim-card-icon">📅</span>
                     <span class="dim-card-title">事件日历</span>
-                    <span class="dim-card-score neutral">仅展示</span>
+                    <span class="dim-card-score neutral">仅展示 · ${(eventCal.hardcoded || []).length + tokenEvts.length} 条</span>
                 </div>
                 <div class="dim-metrics">
                     ${(eventCal.hardcoded || []).map(evt => `
@@ -13182,13 +13115,19 @@
                             <span class="dim-metric-val">${evt.event}</span>
                         </div>
                     `).join('')}
-                    ${(eventCal.gecko || []).map(evt => `
+                    ${tokenEvtsShown.map(evt => `
                         <div class="dim-metric-row">
                             <span class="dim-metric-label">${evt.date || 'TBD'}</span>
                             <span class="dim-metric-val">${evt.event}</span>
                         </div>
                     `).join('')}
+                    ${tokenEvts.length > tokenEvtsShown.length ? `
+                        <div class="dim-metric-row">
+                            <span class="dim-metric-label">…</span>
+                            <span class="dim-metric-val" style="color:#6b7280">另有 ${tokenEvts.length - tokenEvtsShown.length} 条代币事件未展示</span>
+                        </div>` : ''}
                 </div>
+                <div class="dim-conclusion">代币事件源：biz.asset_unlock_event（未来 33 天解锁日程）</div>
             </div>`;
 
             // CM MVRV 估值热度卡

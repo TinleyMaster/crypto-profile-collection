@@ -8816,8 +8816,11 @@ def compute_structure_subscore(
             "btc_dominance": global_metrics.get("btc_dominance"),
             "score": mcap_score,
             "weight": STRUCTURE_WEIGHTS["market_cap"],
-            "percentile": btc_dominance_percentile,
-            "extreme": btc_dominance_extreme,
+            # P2-C：本分项得分来自「总市值量程」，但分位/极值来自 BTC 占比。
+            # 原名 percentile/extreme 会把「BTC 占比极端」误读成「市值极端」，
+            # 故显式带 btc_dominance_ 前缀；前端消费点见 index.html structureExtreme。
+            "btc_dominance_percentile": btc_dominance_percentile,
+            "btc_dominance_extreme": btc_dominance_extreme,
         }
         weighted_sum += mcap_score * STRUCTURE_WEIGHTS["market_cap"]
         available_weights += STRUCTURE_WEIGHTS["market_cap"]

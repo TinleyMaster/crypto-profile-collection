@@ -53,7 +53,7 @@ tag_hits AS (
         ('yield-farming', 'defi', 0.7), ('lending', 'defi', 0.8),
         ('borrowing', 'defi', 0.8), ('liquid-staking-tokens-lsds', 'defi', 0.8),
         ('liquid-restaking-tokens-lrts', 'defi', 0.8), ('dex-tools', 'defi', 0.7),
-        ('launchpad', 'defi', 0.6), ('index-fund', 'defi', 0.7),
+        ('launchpad', 'launchpad', 0.6), ('index-fund', 'defi', 0.7),
         ('insurance', 'defi', 0.7), ('prediction-market', 'defi', 0.7),
         -- 稳定币
         ('stablecoin', 'stablecoin', 0.95), ('asset-backed-stablecoin', 'stablecoin', 0.9),
@@ -123,7 +123,7 @@ cat_hits AS (
     CROSS JOIN LATERAL unnest(d.all_categories) AS c(cat)
     JOIN (VALUES
         ('layer-1', 'l1', 0.8), ('layer-2', 'l2', 0.8),
-        ('defi', 'defi', 0.8), ('memes', 'meme', 0.8),
+        ('defi', 'defi', 0.8), ('launchpad', 'launchpad', 0.8), ('memes', 'meme', 0.8),
         ('gaming', 'gamefi', 0.7), ('play-to-earn', 'gamefi', 0.7),
         ('collectibles-nfts', 'gamefi', 0.7),
         ('real-world-assets-protocols', 'rwa', 0.8), ('tokenized-assets', 'rwa', 0.7),
@@ -203,7 +203,7 @@ cg_hits AS (
         ('yield aggregator', 'defi', 0.75), ('indexes', 'defi', 0.7),
         ('insurance', 'defi', 0.7), ('prediction market', 'defi', 0.7),
         ('prediction markets', 'defi', 0.7),
-        ('launchpad', 'defi', 0.65), ('governance', 'defi', 0.5),
+        ('launchpad', 'launchpad', 0.65), ('governance', 'defi', 0.5),
         ('synthetics', 'derivatives', 0.8),
         ('synthetic asset', 'derivatives', 0.75),
         ('asset management', 'defi', 0.6),
@@ -287,7 +287,7 @@ cg_hits AS (
         ('proof of work (pow)', 'l1', 0.4),
         ('multiplier denominated tokens', 'defi', 0.4),
         ('btcfi protocol', 'defi', 0.6),
-        ('surge launchpad', 'defi', 0.5),
+        ('surge launchpad', 'launchpad', 0.5),
         ('discord bots', 'infra', 0.4)
     ) map(cat_name, sector, confidence) ON lower(c.cat) = lower(map.cat_name)
 ),
@@ -321,7 +321,7 @@ dl_hits AS (
         ('dexs', 'defi', 0.9), ('yield', 'defi', 0.85),
         ('lending', 'defi', 0.85), ('derivatives', 'derivatives', 0.9),
         ('liquid staking', 'defi', 0.8), ('farm', 'defi', 0.75),
-        ('launchpad', 'defi', 0.65), ('cdp', 'defi', 0.8),
+        ('launchpad', 'launchpad', 0.65), ('cdp', 'defi', 0.8),
         ('yield aggregator', 'defi', 0.8), ('dex aggregator', 'defi', 0.75),
         ('indexes', 'defi', 0.7), ('prediction market', 'defi', 0.7),
         ('insurance', 'defi', 0.7), ('liquid restaking', 'defi', 0.8),

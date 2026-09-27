@@ -17,6 +17,7 @@ SECTORS = (
     "l1",          # 公链
     "l2",          # 二层 / Rollup
     "defi",        # DeFi 协议
+    "launchpad",   # 打新 / 发射台
     "meme",        # Meme / 土狗
     "gamefi",      # GameFi / NFT
     "rwa",         # 现实资产代币化
@@ -33,6 +34,7 @@ SECTOR_LABELS = {
     "l1": "L1 公链",
     "l2": "L2 二层",
     "defi": "DeFi",
+    "launchpad": "Launchpad 打新平台",
     "meme": "Meme",
     "gamefi": "GameFi / NFT",
     "rwa": "RWA",
@@ -66,7 +68,7 @@ CMC_TAG_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "liquid-staking-tokens-lsds": ("defi", 0.8),
     "liquid-restaking-tokens-lrts": ("defi", 0.8),
     "dex-tools": ("defi", 0.7),
-    "launchpad": ("defi", 0.6),
+    "launchpad": ("launchpad", 0.6),
     "index-fund": ("defi", 0.7),
     "insurance": ("defi", 0.7),
     "prediction-market": ("defi", 0.7),
@@ -167,6 +169,7 @@ CMC_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "layer-1": ("l1", 0.8),
     "layer-2": ("l2", 0.8),
     "defi": ("defi", 0.8),
+    "launchpad": ("launchpad", 0.8),
     "memes": ("meme", 0.8),
     "gaming": ("gamefi", 0.7),
     "play-to-earn": ("gamefi", 0.7),
@@ -261,7 +264,7 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "indexes": ("defi", 0.7),
     "insurance": ("defi", 0.7),
     "prediction market": ("defi", 0.7),
-    "launchpad": ("defi", 0.65),
+    "launchpad": ("launchpad", 0.65),
     "governance": ("defi", 0.5),
     "synthetics": ("derivatives", 0.8),
     # 稳定币
@@ -377,7 +380,7 @@ CG_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "proof of work (pow)": ("l1", 0.4),
     "multiplier denominated tokens": ("defi", 0.4),
     "btcfi protocol": ("defi", 0.6),
-    "surge launchpad": ("defi", 0.5),
+    "surge launchpad": ("launchpad", 0.5),
     "discord bots": ("infra", 0.4),
 }
 
@@ -408,7 +411,7 @@ DL_CATEGORY_SECTOR_MAP: dict[str, tuple[str, float]] = {
     "derivatives": ("derivatives", 0.9),
     "liquid staking": ("defi", 0.8),
     "farm": ("defi", 0.75),
-    "launchpad": ("defi", 0.65),
+    "launchpad": ("launchpad", 0.65),
     "cdp": ("defi", 0.8),
     "yield aggregator": ("defi", 0.8),
     "dex aggregator": ("defi", 0.75),

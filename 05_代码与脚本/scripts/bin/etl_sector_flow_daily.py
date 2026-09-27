@@ -27,6 +27,7 @@ SECTOR_LABELS = {
     "l1": "Layer 1",
     "l2": "Layer 2",
     "defi": "DeFi",
+    "launchpad": "Launchpad",
     "meme": "Memes",
     "ai": "AI & Big Data",
     "rwa": "Real World Assets",

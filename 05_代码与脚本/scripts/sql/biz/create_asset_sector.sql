@@ -12,8 +12,10 @@ CREATE TABLE IF NOT EXISTS biz.asset_sector (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (asset_id, sector, source),
+    -- 白名单必须与 mapping/sector.py 的 SECTORS 逐值一致（含后加的 stablecoin/launchpad）；
+    -- 注意：add_stablecoin_sector.sql 是历史一次性迁移，其列表语义已被此处覆盖。
     CONSTRAINT chk_asset_sector_sector CHECK (
-        sector IN ('l1','l2','defi','meme','gamefi','rwa','ai',
+        sector IN ('l1','l2','defi','launchpad','meme','gamefi','rwa','ai','stablecoin',
                    'cex_token','derivatives','depin','infra','other')
     )
 );

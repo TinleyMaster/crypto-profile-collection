@@ -2864,7 +2864,11 @@ def api_market_overview():
 def api_onchain_thermometer():
     """主流币链上估值温度计：MVRV + ROI + 活跃地址 + 交易数 综合百分位。"""
     try:
-        limit = request.args.get("limit", "10", type=int)
+        # 注意：默认值必须是 int 10，不能是字符串 "10"。
+        # Flask 的 request.args.get(k, default, type=int) 仅在参数「存在」时应用 type；
+        # 参数缺失时直接返回 default 本身（不转换），故 "10" 会以 str 落到 min(30, limit)
+        # → TypeError: '<' not supported between instances of 'str' and 'int'（裸调用必 500）。
+        limit = request.args.get("limit", 10, type=int)
         limit = max(3, min(30, limit))
         result = _get_db_stats().get_onchain_thermometer(limit=limit)
         return jsonify(result)

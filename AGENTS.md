@@ -1584,7 +1584,36 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   4. **P2-E UI 误导**：链榜数据源**只有** `flow_7d`/`flow_7d_pct`（`chainRow`），**无法**随 1d/30d 切换（补 1d/30d 需扩 `fetch_chain_flow`，属新功能），故**不动后端**，仅澄清 UI：链榜 section 标签加「（7d，不随时间窗切换）」，卡尾结论文案由「点击切换时间窗」改为「时间窗切换仅作用于叙事榜（链榜固定 7d）」。
   5. **P2-F 键不匹配**：事件日历卡改为渲染 `hardcoded` + `unlock` + `token_events`，**移除恒空 `gecko` 分支**；token 事件按日期序截断 **15 条**并显式标注「另有 N 条未展示」（后端最多 50 条，不截断会撑爆卡片），卡头「仅展示」补总条数、卡尾标注数据源。
 - **未做 / 边界（须留档）**：① **P2-D 暂缓** —— `mcap_step=40B` 使总市值 ≈3.8T 时 `mcap_score≈95`、牛市 >4T 恒 100，`market_cap` 占结构子分权重 0.25 且长期近满 ⇒ 结构子分被体量托高；但改相对/对数量程会**直接变更结构子分的展示数值**（评分模型变更），超出本轮 bug 修复范畴，待单独评估。② **P2-E 二级现象未改**：7d 叙事榜排序用 `composite_score`（市值腿 + TVL 腿混合）、1d/30d 用纯涨跌幅 ⇒ 三窗排序口径不一致；但 `composite_score` 是 FEAT-SECTOR-006 既定设计（行内已有 `市值+TVL`/`仅市值` mode 徽章说明），改排序键会**变更默认榜序**，非本轮范畴，仅留档。③ P3-G / P3-H 误报不改。④ 线上 runtime 复验须待 Zeabur 重建后执行（`push ≠ 线上生效`），待核 R1~R4（各表新鲜度 / 部署版本 / 实际渲染值 / `catalyst_events` 是否为空）。
-- **校验**：`py_compile`（`macro_market.py`）通过；`index.html` 内联 `<script>` 抽取后 `node --check` 通过；相关探针 `test_macro_market_p0`(**16/16**)、`test_macro_market_board_tier2`(**36/36**) 零失败（全仓无测试引用被改字段 / 事件日历卡）。**未连 prod DB、未落库**。
+- **校验**：`py_compile`（`macro_market.py`）通过；`index.html` 内联 `<script>` 抽取后 `node --check` 通过；相关探针 `test_macro_market_p0`(**16/16**)、`test_macro_market_board_tier2`(**36/36**) 零失败（全仓无测试引用被改字段 / 事件日历卡）。源码侧改动校验**未连 DB、未落库**（线上 runtime 复验见下节，为只读）。
+
+### 大盘板块线上 runtime 复验（R1~R4，2026-09-27，只读）
+
+按用户「按你的判断处理」执行审计第 3 节待办。入口 `https://crypto-profile-collection.zeabur.app`，prod DB 只读（`05_代码与脚本/scripts/.env` 的 `DATABASE_URL`；该文件已由 `.gitignore:17` 覆盖，未外泄）。**全程未做任何写操作。**
+
+- **R2 部署版本 ✅**：`GET /healthz` → `{"ok":true,"status":"alive"}`；首页 HTML 实测含 `btc_dominance_extreme`(×2)、`tokenEvts`(×6)、`不随时间窗切换`(×1)，而 `DIM_META` / `cycle_dashboard` / `eventCal.gecko` 均 **0** ⇒ `c11ef8f` **已在线上生效**（本次修复上线确认，`push` 已生效）。
+- **R3 实际渲染值 ✅**（`GET /api/market/overview`）：`emotion_subscore=57.5/ok/avail_w=1.0`、`structure_subscore=69.9/ok/avail_w=1.0`；`components.market_cap` 键已为 `btc_dominance_percentile`/`btc_dominance_extreme`（实测值 `None`/`NONE`）；`btc_cycle.phase=中性/heat=48.0`；`5板块` narr_ranked=10、chain_ranked=5、`category_flow.status=ok`；`event_calendar` hardcoded=6 / unlock=**0** / token_events=**50** ⇒ **P2-F 修复后真实解锁日程首次可见**（原 50 条算了不渲染，现已进卡，示例 `2026-09-28 SAFE 解锁 1.35%`）。
+- **R4 `catalyst_events` ⚠️ 确认为空**：`opportunity_list.catalyst_events = {total:0, error:0, window_days:14}` ⇒ 大盘级 catalyst 管线无产出（上游数据/管线问题，**非前端缺陷**）；同域 `onchain_anomalies` 有 6 条（窗口 24h、2 KOL），`highlight_signals=10`、`risk_signals=4`。
+- **R1 各表新鲜度**（DB `NOW()=2026-09-27 06:34Z`）：
+
+  | 表 | 最新 | 滞后 | 判定 |
+  |---|---|---|---|
+  | `biz.cm_asset_onchain_daily`（温度计源） | `metric_date=2026-09-25` | **2 天** | ⚠️ 滞后 |
+  | `src_dl.chain_tvl_snapshot`（链榜源） | `snapshot_date=2026-09-23` | **4 天** | ⚠️ 明显滞后（审计记「滞后 3 天」，实际已 4 天） |
+  | `biz.kol_signal`（链上异动源） | `created_at=2026-09-27 06:20Z` | ~14 分钟 | ✅ 新鲜 |
+  | `biz.asset_unlock_event`（解锁源） | `updated_at=2026-09-26 22:33Z` | ~8 小时 | ✅ 可接受（未来日程充足，`unlock_date` 远至 2030） |
+  | `biz.etf_flow_daily`（机构源） | `flow_date=2026-09-25` | **2 天** | ⚠️ 滞后（ETF 惯例 T+1） |
+
+  - **附带发现（供 P2-D 评估参考）**：`market_cap.btc_dominance_percentile = None` ⇒ BTC 占比**历史序列** `status != ok`（序列缺失），使 `market_cap` 的「极端」判定**恒不触发** ⇒ 结构子分卡 `extreme-high` 高亮**永不出现**；与 `mcap_step=40B` 量程饱和叠加，意味着结构子分当前只有「量程腿」在起作用。
+  - **判定：上述 3 处滞后属数据/调度侧（需写操作），不在本轮只读复验范围，未处理**，建议另开数据管道工单。
+
+### 新增缺陷 · 温度计裸调用 500（2026-09-27，本轮 runtime 复验发现并修复）
+
+- **现象**：`GET /api/market/onchain-thermometer`（**不带** `limit`）稳定 **500** `{"error":"'<' not supported between instances of 'str' and 'int'"}`；带 `?limit=10` → **200**。审计第 3 节曾把该端点标 ✅ —— 因当时按带参路径核验，未覆盖缺参路径。
+- **根因**：`app.py` 原为 `request.args.get("limit", "10", type=int)`。Flask/Werkzeug 的 `MultiDict.get(k, default, type=...)` **仅在键存在时**对值施加 `type`；**键缺失时直接返回 `default` 本身、不做转换** ⇒ 裸调用得到字符串 `"10"` ⇒ `min(30, "10")` 抛 TypeError。已用 `MultiDict()` 本地复现同一异常、验证 `int` 默认可修复（`max(3,min(30,10))=10`），与线上 200/500 差异完全吻合。
+- **影响面**：**前端不受影响**（`index.html:14483` 显式调 `?limit=10`）；受影响的是省略参数的 API 直连 / 探针 / 监控。属**潜伏缺陷而非 UI 故障**，故静态审计与浏览器核验均未捕获 —— 这正是 runtime 复验的价值。
+- **修复**：`app.py` 默认值 `"10"` → `10`，并加注释固化这条 Flask 语义坑。全仓扫描 `args.get(..., type=int|float)` **仅此一处**该模式（`app.py` 共 23 处 `type=`，其余默认值/用法正常）。
+- **同类端点数**：同批裸调用扫描 `/api/market/{hot,long-tail,gainers,volume,sector-heatmap,overview,backtest}`、`/api/cm/{mvrv,activity,valuation}` **全部 200**，**仅温度计 500**。
+- **校验**：`py_compile(app.py)` 通过 + `MultiDict` 机制复现/修复验证通过。线上生效确认须待 Zeabur 重建后重跑裸调用（`push ≠ 线上生效`）。
 
 ### 投研页三档确定性框架落地（上游 `方案_三档确定性框架_2026-09-27.md`，2026-09-27，本次提交 `df331d0`）
 

@@ -11,8 +11,12 @@
   P0-d：修假入口（href=0 的「查看详情」affordance 删除）
   P0-e：砍脏卡（催化剂热点 B/C 卡片整块移除；Meme 纯数字改名单；KOL 卡加就绪门）
   P0-f：邮件未发出不得静默成功（SMTP 未配 → 非零退出，交 task_manager/watchdog 可见）
+  P1-a：交易方向可执行化（六要素齐备才进「交易方向」区，缺任一 → 降级「👀 观察」区且计数可查）
+  P1-b：观望闸门（data_quality 中 ok 维度数 < 阈值 → 强制「今日无操作」，只降不升）
 """
 import ast
+import contextlib
+import io
 import json
 import os
 import sys
@@ -58,8 +62,14 @@ def _brief():
             "status": "ok", "headline": "AI赛道领涨，市场整体偏多", "bias": "偏多",
             "market_regime": "震荡", "conviction": "high",
             "trade_suggestions": [
-                {"asset": "BTC", "direction": "做多", "horizon": "波段(1-2周)", "reason": "ETF 持续净流入"},
-                {"asset": "ETH", "direction": "做多", "horizon": "短线(1-3日)", "reason": "链上吸筹"},
+                {"asset": "BTC", "direction": "做多", "horizon": "波段(1-2周)",
+                 "trigger": "BTC 4h 收盘站上 110500", "invalidate": "BTC 跌破 107200",
+                 "target": "114000-118000", "ref_price": 109800, "ref_as_of": "2026-09-27 08:30",
+                 "reason": "ETF 持续净流入"},
+                {"asset": "ETH", "direction": "做多", "horizon": "短线(1-3日)",
+                 "trigger": "ETH 站上 3960", "invalidate": "ETH 跌破 3820",
+                 "target": "4080", "ref_price": 3920, "ref_as_of": "2026-09-27 08:30",
+                 "reason": "链上吸筹"},
             ],
             "watchlist": ["SOL", "AI"],
         },
@@ -317,6 +327,68 @@ try:
     check("- BTC: 12.0M" in _up2, "交易所净流量有数据时正常渲染")
 except Exception as _e:
     check(False, "prompt 层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# P1-a 交易方向可执行化（六要素齐备才进「交易方向」区）
+# ════════════════════════════════════════════════════════
+print("[P1-a] 六要素齐备 → 结构化渲染 ≥5 行")
+_html = sdb.render_brief_html(_brief())
+for _need in ("💡 具体交易方向", "进场", "BTC 4h 收盘站上 110500",
+              "失效", "BTC 跌破 107200", "目标", "114000-118000",
+              "参照", "2026-09-27 08:30"):
+    check(_need in _html, f"交易方向渲染含「{_need}」")
+
+print("[P1-a] 缺可判定要素 → 不进交易区，落「观察」区且计数可见")
+_bad = _brief()
+_bad["M0_ai_summary"]["trade_suggestions"] = [
+    {"asset": "SOL", "direction": "做多", "horizon": "短线(1-3日)", "reason": "仅一句理由"},
+]
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _html_bad = sdb.render_brief_html(_bad)
+_log = _buf.getvalue()
+check("💡 具体交易方向" not in _html_bad, "缺字段条不进入「具体交易方向」区")
+check("👀 观察（不构成建议·缺可判定条件）" in _html_bad, "降级渲染「👀 观察」区（信息不丢弃）")
+check("SOL" in _html_bad and "缺：进场条件" in _html_bad, "观察区列出标的与缺失要素")
+check("交易方向拒收：1 条" in _log, "拒收计数写入渲染日志", _log[-200:])
+
+print("[P1-a] 混合：齐备条进交易区，缺字段条进观察区")
+_mix = _brief()
+_mix["M0_ai_summary"]["trade_suggestions"] = [
+    _brief()["M0_ai_summary"]["trade_suggestions"][0],
+    {"asset": "DOGE", "direction": "做多", "horizon": "短线", "reason": "缺阈值"},
+]
+_html_mix = sdb.render_brief_html(_mix)
+check("💡 具体交易方向" in _html_mix and "BTC" in _html_mix, "齐备条进交易区")
+check("DOGE" in _html_mix and "👀 观察" in _html_mix, "缺字段条进观察区，与交易区并存")
+
+# ════════════════════════════════════════════════════════
+# P1-b 观望闸门（证据覆盖不足 → 强制「今日无操作」，只降不升）
+# ════════════════════════════════════════════════════════
+print("[P1-b] 闸门生效：ok 维度数 < 阈值 → 强制「今日无操作」")
+_bl = _brief()
+_bl["M0_ai_summary"]["data_quality"] = [
+    {"section": "大盘概况", "status": "ok", "items": 1},
+    {"section": "ETF资金流", "status": "empty", "items": 0},
+    {"section": "即将解锁", "status": "empty", "items": 0},
+]
+_html_low = sdb.render_brief_html(_bl)
+check("⚪ 今日无操作" in _html_low, "证据不足 → 输出「今日无操作」")
+check("💡 具体交易方向" not in _html_low, "AI 方向被闸门拦截")
+check("数据覆盖不足" in _html_low, "闸门原因写入正文")
+
+print("[P1-b] 不误伤：ok 维度数达阈值 → 保留方向")
+_bok = _brief()
+_bok["M0_ai_summary"]["data_quality"] = [
+    {"section": "大盘概况", "status": "ok", "items": 1},
+    {"section": "ETF资金流", "status": "ok", "items": 1},
+    {"section": "即将解锁", "status": "empty", "items": 0},
+]
+_html_ok = sdb.render_brief_html(_bok)
+check("做多" in _html_ok and "⚪ 今日无操作" not in _html_ok, "覆盖达标时不降级")
+
+print("[P1-b] 无 data_quality 块 → 不触发闸门（不误伤旧 payload）")
+check("做多" in sdb.render_brief_html(_brief()), "无 data_quality 时保留方向")
 
 # ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")

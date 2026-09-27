@@ -249,6 +249,26 @@ def _fmt_data_as_of(v) -> str:
     return fmt_bj(v, "%m-%d %H:%M", fallback="")
 
 
+# ── P1-a 交易方向可执行化：一条建议要进「交易方向」区，必须齐备这 6 个可判定字段 ──
+# 缺任一 → 该条降级进「👀 观察（不构成建议·缺可判定条件）」区，不可静默丢弃（信息仍在，只是不定性为建议）
+_REQUIRED_TRADE_FIELDS = ("trigger", "invalidate", "target", "horizon", "ref_price", "ref_as_of")
+_TRADE_FIELD_CN = {
+    "trigger": "进场条件", "invalidate": "失效条件", "target": "目标",
+    "horizon": "期限", "ref_price": "参照价", "ref_as_of": "参照时间",
+}
+# ── P1-b 观望闸门：data_quality 中 status=ok 的维度数低于此值 → 证据不足以给方向，强制「今日无操作」──
+_DQ_MIN_OK_FOR_TRADE = 2
+
+
+def _trade_missing_fields(s: dict) -> list:
+    """返回该条建议缺失的可判定字段（中文名列表）。空列表 = 六要素齐备、可执行。"""
+    s = s or {}
+    return [
+        _TRADE_FIELD_CN[f] for f in _REQUIRED_TRADE_FIELDS
+        if s.get(f) is None or not str(s.get(f)).strip()
+    ]
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -325,8 +345,32 @@ def render_brief_html(brief: dict) -> str:
                   f"AI 仍给出 {len(_ai_trade_suggestions)} 条方向 → 强制置为「观察」")
             _ai_trade_suggestions = []
             _no_trade_reason = _no_trade_reason or "当日横盘、无新鲜信号，无明确可执行机会"
+
+        # P1-b 观望闸门：证据覆盖不足（data_quality 中 status=ok 的维度数 < 阈值）时，
+        # 即使 AI 给了方向也强制「今日无操作」。只降不升——本闸门永不把「无操作」升格为「有方向」。
+        _dq0 = ai_summary.get("data_quality") or []
+        _dq_ok0 = sum(1 for d in _dq0 if str((d or {}).get("status")) == "ok")
+        if _dq0 and _dq_ok0 < _DQ_MIN_OK_FOR_TRADE and _ai_trade_suggestions:
+            print(f"[render_brief_html] 观望闸门：证据覆盖仅 {_dq_ok0}/{len(_dq0)} 项"
+                  f"（<{_DQ_MIN_OK_FOR_TRADE}），AI 仍给出 {len(_ai_trade_suggestions)} 条方向 → 强制「今日无操作」")
+            _ai_trade_suggestions = []
+            _no_trade_reason = _no_trade_reason or f"数据覆盖不足（{_dq_ok0}/{len(_dq0)} 项可用），证据不足以支撑方向"
     except Exception:
         pass
+
+    # ── P1-a 可执行化分流：六要素齐备 → 交易方向区；缺任一 → 观察区（不可静默丢弃）──
+    _trade_ready, _trade_excluded = [], []
+    for _s in _ai_trade_suggestions:
+        if _trade_missing_fields(_s):
+            _trade_excluded.append(_s)
+        else:
+            _trade_ready.append(_s)
+    if _trade_excluded:
+        _ex_desc = "、".join(
+            f"{(_s or {}).get('asset') or '?'}（缺 {'/'.join(_trade_missing_fields(_s))}）"
+            for _s in _trade_excluded
+        )
+        print(f"[render_brief_html] 交易方向拒收：{len(_trade_excluded)} 条缺可判定要素 → 降级「观察」：{_ex_desc}")
 
     if ai_summary.get("status") == "ok" and ai_headline:
         # 方向颜色
@@ -379,20 +423,24 @@ def render_brief_html(brief: dict) -> str:
             """)
 
         # 具体交易方向（「今日无操作」是一等公民，与「有方向」同等醒目）
-        if _ai_trade_suggestions:
+        # P1-a：只有六要素齐备的条目才进此区；缺任一者进下方「👀 观察」区（降级而非丢弃）。
+        if _trade_ready:
             html_parts.append(f"""
             <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;font-weight:600;letter-spacing:0.5px">💡 具体交易方向</div>
             """)
-            for s in _ai_trade_suggestions[:4]:
+            for s in _trade_ready[:4]:
                 asset = s.get("asset") or "?"
                 direction = s.get("direction") or ""
                 horizon = s.get("horizon") or ""
+                trigger = s.get("trigger") or ""
+                invalidate = s.get("invalidate") or ""
+                target = s.get("target") or ""
+                ref_price = s.get("ref_price") or ""
+                ref_as_of = s.get("ref_as_of") or ""
                 reason = s.get("reason") or ""
-                conf = str(s.get("confidence") or "").lower()
 
                 dir_color = "#ef4444" if "多" in str(direction) else "#22c55e" if "空" in str(direction) else "#eab308"
                 dir_icon = "▲" if "多" in str(direction) else "▼" if "空" in str(direction) else "◆"
-                conf_cn = {"high": "高", "medium": "中", "low": "低"}.get(conf, conf or "—")
 
                 html_parts.append(f"""
                 <div style="background:rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px;margin-bottom:5px;border-left:3px solid {dir_color}">
@@ -400,7 +448,13 @@ def render_brief_html(brief: dict) -> str:
                     <div style="font-size:13px;font-weight:700">{asset} <span style="color:{dir_color};font-size:12px;margin-left:4px">{dir_icon} {direction}</span></div>
                     <span style="font-size:10px;background:rgba(255,255,255,0.1);padding:1px 6px;border-radius:3px;color:#94a3b8">{horizon}</span>
                   </div>
-                  {f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;line-height:1.5">{reason}</div>' if reason else ''}
+                  <div style="font-size:11px;color:#e2e8f0;margin-top:4px;line-height:1.6">
+                    <span style="color:#22c55e">进场</span> {trigger}<br>
+                    <span style="color:#ef4444">失效</span> {invalidate}<br>
+                    <span style="color:#f59e0b">目标</span> {target}<br>
+                    <span style="color:#94a3b8">参照</span> {ref_price} <span style="color:#64748b">（{ref_as_of}）</span>
+                  </div>
+                  {f'<div style="font-size:11px;color:#94a3b8;margin-top:3px;line-height:1.5">理由：{reason}</div>' if reason else ''}
                 </div>
                 """)
         else:
@@ -408,6 +462,22 @@ def render_brief_html(brief: dict) -> str:
             <div style="background:rgba(148,163,184,0.12);border-radius:6px;padding:8px 10px;margin-bottom:5px;border-left:3px solid #94a3b8">
               <div style="font-size:12.5px;font-weight:700;color:#e2e8f0">⚪ 今日无操作</div>
               {f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;line-height:1.5">{_no_trade_reason}</div>' if _no_trade_reason else ''}
+            </div>
+            """)
+
+        # 👀 观察区：AI 提了方向但缺可判定要素 → 不构成建议，但信息不丢弃（降级而非删除）
+        if _trade_excluded:
+            _obs = "".join(
+                f'<div style="font-size:11px;color:#cbd5e1;line-height:1.6">'
+                f'{(_s or {}).get("asset") or "?"} '
+                f'<span style="color:#94a3b8">{(_s or {}).get("direction") or ""}</span> '
+                f'<span style="color:#f59e0b">缺：{"、".join(_trade_missing_fields(_s))}</span></div>'
+                for _s in _trade_excluded[:5]
+            )
+            html_parts.append(f"""
+            <div style="background:rgba(148,163,184,0.10);border-radius:6px;padding:8px 10px;margin-bottom:5px;border-left:3px solid #64748b">
+              <div style="font-size:11.5px;font-weight:700;color:#cbd5e1">👀 观察（不构成建议·缺可判定条件）</div>
+              <div style="margin-top:3px">{_obs}</div>
             </div>
             """)
 

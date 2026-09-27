@@ -1823,7 +1823,11 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - ① **P1-C 未采用工单原方案「取消硬 `--limit` / 分页续跑遍历完」**。依据 `scheduler.py` 明文史实「chain_transfer_monitor_auto…不再占用 chain 并发槽位，避免每天 5 小时级任务饿死其他 chain 任务」——无界「跑到完」会重现 chain 槽位饿死事故。故保 `--limit`（1200/1200/800/300）+ 旋转排序。
   - ② **P1-D 未删文件**。工单判其「死代码」有误：`phase_chain_holder_snapshot_auto.py` 虽不被 scheduler/supervisord 调度，但仍是 **`app.py` 工作台可见手动触发任务 `chain_holder_snapshot_auto` 的入口**，直删会使该 UI 任务触发即失败。故仅标 DEPRECATED，并注明「若不再需要手动入口，须先删 `app.py` 条目再删本文件」。
 - **验证**：新探针 `workbench/test_snapshot_freshness_20260927.py` **27/0**（A 组调度四条齐备/每日/错峰/`--limit` 保留；B 组看门狗注册/monitor；C 组判定边界：新鲜/3 天告警/恰 2 天不告警/表空告警/阈值与去重键/复用 upsert/恢复清空；D 组旋转排序/`LIMIT` 保留/北京时间排除；E 组 DEPRECATED/未删/app.py 未悬空/不被调度）。既有回归全绿：`test_scan_alert_header_regime` 135/0、`test_macro_market_board_tier2` 36/0、`test_scan_alert_remaining` 29/0、`test_derivatives_signal_gap` 43/0、`test_funding_interval_20260927` 35/0、`test_risk_signal_p0r2_20260927` 14/0、`test_sector_taxonomy_20260927` 34/0、`test_research_3tier_20260927` 82/0、`test_thesis_forward_track_20260927` 63/0；`py_compile` 5/5 OK；`python3 scheduler.py --list` 已确认四条每日 cron 与新看门狗注册生效。
-- **未做 / 边界（须留档）**：① **runtime 24h 观察未做**（须待 Zeabur 约 6 分钟重建后挂 24h，确认无「滞后>2 天」误告警）。② **DB SELECT 未做**（需 prod 只读凭证，待授权）：各链滞后 / 覆盖率对比 / 每日行情行数是否 ≥ 7000。③ **关联项「行情缺口阈值对齐」未做**：`check_cmc_snapshot_gap.py --threshold 7000` 与 `--top 10000` 的实际每日行数需 DB 核查（若真实 < 7000 则下调阈值或上调 top）；本项属只读核查，本轮未改码。④ 旋转覆盖长尾需**数日收敛**（非即时全量），验收看趋势不看单日。
+- **三段式验收（2026-09-27 已执行，只读）**：
+  - **② runtime ✅**：prod `sys.task` 出现新任务 `[调度] onchain_snapshot_freshness - 链上快照·外部看门狗…`，**2026-09-27 09:20:00 UTC 运行 `done`（4s，无 error）** ⇒ `8881a80` 已部署生效；同一时刻 `biz.scan_stall_alert(task='onchain_snapshot_stall')` 写入 `last_email_ts=09:20:00 UTC` ⇒ **告警邮件确已发出**（非静默）；本地对 prod 跑 `--dry-run` 复验判定 `arbitrum 1天[ok]/base 1天[ok]/bsc 1天[ok]/ethereum 0天[ok]/solana 4天[STALE]`，二次运行正确输出「距上次邮件仅 0.5h（<6h），去重跳过」⇒ 阈值与 6h 去重均按预期。
+  - **③ DB SELECT ✅**：链上滞后 `ethereum 0天`、`bsc/arbitrum/base 1天`、**`solana 4天（09-23）`**；近 2 日覆盖 `bsc 1130 / arbitrum 724 / base 679 / ethereum 306 / solana 0`；行情快照近 5 日每日行数 `8154/16304/8155/24468/24456` ⇒ **每日均 ≥ 7000，`check_cmc_snapshot_gap.py --threshold 7000` 阈值合理、无需下调**（关联项闭环）。
+- **新发现（超出 P1-A~D 范围，建议单独立项）**：① **solana 采集实质失效**：自 2026-08-30 起断更（10 天内仅 09-23 落 1 行，历史 2652 资产）。根因**非**调度/`--limit`——本地以 prod `.env` 试采单币（USDT solana）**秒级成功**（`数据来源: Helius RPC (solana)`，解析 20 条持仓）⇒ **代码路径正常**，疑 **prod 侧 `HELIUS_API_KEY` 未配置** ⇒ 回退公共 RPC（429）+ Solscan 网页解析（Cloudflare 拦截），单轮 8.5h 仅出 1 行或 240min 无日志被杀。**处置：核对 Zeabur 环境变量 `HELIUS_API_KEY`，无需改码**。② **周期性「stuck: 240分钟无新日志」被杀**（即工单根因 R3 的真实表现，P1-A~D 未覆盖）：`bsc` 09-22/09-24、`eth` 09-23/09-25、`solana` 09-25 均被杀 ⇒ 即使 P1-A 改每日，**单轮失败仍整日空缺**；现由新看门狗兜底告警（滞后>2 天发信），但「失败即重试/断点续跑」机制仍缺，建议单独立项。③ 现网调度文案暂仍为旧描述（`周二四六 / 周一三五`）系今日 14:00 那轮在重建前已触发所致，非未部署；新每日 cron 首次生效在次日 14:00。
+- **未做 / 边界（须留档）**：① **连续 24h 观察未做**（须明日起，`chain_holder_snapshot_*` 新每日 cron 首次触发在 14:00 北京）。② 旋转覆盖长尾需**数日收敛**（非即时全量），验收看趋势不看单日。
 
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 
@@ -1892,3 +1896,26 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ④ **`data_quality` 的 `partial` 分支在真实数据上是否出现未验证**（现有 7 段生产者可能只产出 ok/empty/error）。
 - ⑤ **SMTP 未配时的「静默成功」已收紧为本轮 P0-f**（原先与上一节同项的待立项目）：`send_daily_brief.main()` 的 `if not notifier.configured:` 分支由 `return 0` 改为 `return 1`，措辞由「[WARN] 跳过邮件发送」改为「[ERROR] 早报邮件未发送（按失败处理，避免静默成功）」。依据 `task_manager.py:782` 的 `error=None if returncode == 0 else f"exit code {returncode}"` —— 旧行为下任务记 `done` 而邮件没发（与 09-26 丢整天的陷阱同类）；现记 `failed: exit code 1`，`daily_brief_email` 已在 `KEY_JOBS`，故会告警 + 补跑。不发信不可能造成重复投递，无告警风暴。**边界**：本轮仍**未**给该分支加「只告警一次」的去重（若连续多日 SMTP 未配，看护会每日告警 + 每日补跑失败）。
 - ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验次日 09:00 邮件头部为「证据覆盖 N/M 项」而非「置信度 85%」、「查看详情」已消失、横盘日不出现方向建议。
+
+### 大盘早报「投资指导意义」重构 P1（2026-09-27，本次提交）
+
+承接上节 P0。P1 收敛为 **P1-a 交易方向可执行化 + P1-b 观望闸门**（原方案 §3.3 M2/M5）；**M4 单一口径裁决、变更日志（M3）、AI 结论落库仍推后**（M3 依赖落库，见 P0 边界②）。
+
+**P1-a 交易方向可执行化**：一条建议要进「💡 具体交易方向」区，必须齐备 **6 个可判定字段** `trigger`/`invalidate`/`target`/`horizon`/`ref_price`/`ref_as_of`，缺任一 → 该条**降级**进「👀 观察（不构成建议·缺可判定条件）」区（**降级而非删除**，信息不丢弃）。
+- `macro_market.generate_morning_brief_ai_summary`：JSON schema 的 `trade_suggestions` 增 `trigger`/`invalidate`/`target`/`ref_price`/`ref_as_of`（`trigger`/`invalidate` 明确要求「价格或指标 + 具体阈值」，禁「关注/择机/逢低/留意」等不可判定表述）；system prompt 要求第 2 条改为「六要素必须齐备，缺任一者不得写进 `trade_suggestions`，改放 `watchlist`」；返回 dict 透传并截断（`trigger`/`invalidate` 160、`target` 120、`ref_price` 24、`ref_as_of` 40 字符）。
+- `scripts/bin/send_daily_brief.py`：模块级新增 `_REQUIRED_TRADE_FIELDS` / `_TRADE_FIELD_CN` / `_trade_missing_fields()`；渲染前把 `_ai_trade_suggestions` 分流为 `_trade_ready`（进交易区，渲染 进场/失效/目标/参照 4 行结构化字段 → 合计 ≥5 行）与 `_trade_excluded`（**打印计数 + 标的 + 缺项到 stdout**，并渲染「👀 观察」小区）。
+- **耦合（必须同步修）**：`workbench/test_daily_brief_p0_20260927.py` 的 `_brief()` fixture 原 `trade_suggestions` 只有 `asset/direction/horizon/reason`，加拒收后会被全部踢出、导致 P0-c 两条「不误伤」断言（`"做多" in html`）失败 → 已给 fixture 补齐 6 字段。
+
+**P1-b 观望闸门**：复用 P0 的 `data_quality`，新增模块级常量 `_DQ_MIN_OK_FOR_TRADE = 2`；渲染前若「有 `data_quality` 块 且 `status=="ok"` 维度数 < 阈值」而 AI 仍给方向 → 强制置空 + 打印日志 + 写入原因「数据覆盖不足（N/M 项可用），证据不足以支撑方向」。**只降不升**的单向闸门，与 P0-c 同处（`render_brief_html` 的 override 区）。无 `data_quality` 块（旧 payload）时**不触发**，避免误伤。
+
+**偏离原方案（留档）**：原方案 §3.3 M2 表述为「5 要素」（参照价 + 时间戳合一）；实现拆为 **6 个独立字段**（`ref_price` 与 `ref_as_of` 分开校验/渲染），因渲染需时间戳单独上屏，合一无法保证「必须带时间戳」。
+
+**验证**：`workbench/test_daily_brief_p0_20260927.py` **49 → 69/0**（新增 20 条：P1-a 齐备条渲染 ≥5 行结构化字段、缺字段条不进交易区、观察区列出标的与缺失项、拒收计数写入渲染日志（`contextlib.redirect_stdout` 捕获）、齐备/缺字段混合并存；P1-b 闸门生效、覆盖达标不误伤、无 `data_quality` 不触发）。回归全绿：`test_daily_brief_20260924` 31/31、`test_daily_brief_p1` 22/22、`test_catalyst_channel_dedup` 22/0、`test_major_event_alert` 55/0；`py_compile` 3/3 OK。
+
+**未做 / 边界（须留档）**：
+- ① **M4 单一口径裁决未做**：同一标的多结论（SOL 67 vs 76）、同赛道两个涨幅数字（AI 18.3 vs 17.1）、2Z 既领涨又高危，均未裁决。
+- ② **变更日志（M3）未做**：依赖 AI 结论落库（P0 边界②），当前 `data_quality`/`trade_suggestions`/`no_trade_reason` 只在「生成→渲染」一次内存链路里。
+- ③ **闸门阈值未校准**：`_DQ_MIN_OK_FOR_TRADE = 2` 为写死值，未做回测校准（与 P0 兜底的 `|BTC|/|ETH| ≤ 1%` 同类保守硬编码）。
+- ④ **`_trade_excluded` 的 `direction` 仍出现在观察区**：属「信息保留」而非建议（观察区显式标注「不构成建议」）；若后续要连方向一并折叠，需另议。
+- ⑤ **交易区仍只渲染前 4 条**（`_trade_ready[:4]`，与旧 `[:4]` 一致）；观察区同样截 `[:5]`。生成侧上限 5 条不变。
+- ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**：需验次日 09:00 邮件「具体交易方向」每条含 进场/失效/目标/参照（带时间戳），且缺字段条目出现在「👀 观察」而非被静默丢弃。

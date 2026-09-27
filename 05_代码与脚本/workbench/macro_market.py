@@ -7940,6 +7940,11 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
       "direction": "做多/做空/观望",
       "asset": "标的，如 BTC/ETH/SOL/AI板块",
       "horizon": "持有周期：短线(1-3天)/波段(1-2周)/中期(1月+)",
+      "trigger": "进场条件：必须是 价格或指标 + 具体阈值，如 'BTC 4h 收盘站上 110500'",
+      "invalidate": "失效条件：必须是 价格或指标 + 具体阈值，如 'BTC 跌破 107200' 或 'ETF 转为净流出'",
+      "target": "目标：价格区间，如 '114000-118000'；或显式写 '移动止盈'",
+      "ref_price": "参照价（拟定条件时依据的当前价，纯数字）",
+      "ref_as_of": "参照价时间戳，如 '2026-09-27 08:30'",
       "reason": "一句话理由",
       "confidence": "high/medium/low"
     }
@@ -7951,13 +7956,16 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
 
 要求：
 1. 默认输出"无操作"：仅当某标的满足明确且可判定的进场条件时，才给出方向；否则
-   trade_suggestions 必须是空数组 []，并填写 no_trade_reason。给出方向时必须写清
-   可判定的进场条件与失效条件，不得只给方向不给阈值。
-2. 数据缺失只能表述为"数据不可用"，严禁表述为"零/无/没有/抛压有限/未见抛压"等。
-3. 若某维度在【数据可用性】中标为 empty/error，凡依赖它的结论必须标注"依据不足"，
+   trade_suggestions 必须是空数组 []，并填写 no_trade_reason。
+2. 每条 trade_suggestions 必须齐备 6 个可判定字段：trigger(进场条件)、invalidate(失效条件)、
+   target(目标)、horizon(期限)、ref_price(参照价)、ref_as_of(参照价时间戳)。trigger/invalidate
+   必须是「价格或指标 + 具体阈值」，禁止写成"关注/择机/逢低/留意"等不可判定表述。缺任一字段的
+   标的不得写进 trade_suggestions，改为放进 watchlist（渲染层会把缺字段的条目踢出「交易方向」区）。
+3. 数据缺失只能表述为"数据不可用"，严禁表述为"零/无/没有/抛压有限/未见抛压"等。
+4. 若某维度在【数据可用性】中标为 empty/error，凡依赖它的结论必须标注"依据不足"，
    不得据此下任何断言。
-4. 禁止为凑满建议数量而给出低置信度或无条件的方向。
-5. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
+5. 禁止为凑满建议数量而给出低置信度或无条件的方向。
+6. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
@@ -8026,6 +8034,12 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
                     "direction": str(s.get("direction", "")),
                     "asset": str(s.get("asset", "")),
                     "horizon": str(s.get("horizon", "")),
+                    # P1-a 可执行化：6 要素透传（缺任一，渲染层会将该条踢出「交易方向」区）
+                    "trigger": str(s.get("trigger", ""))[:160],
+                    "invalidate": str(s.get("invalidate", ""))[:160],
+                    "target": str(s.get("target", ""))[:120],
+                    "ref_price": ("" if s.get("ref_price") is None else str(s.get("ref_price"))[:24]),
+                    "ref_as_of": str(s.get("ref_as_of", ""))[:40],
                     "reason": str(s.get("reason", ""))[:200],
                     "confidence": str(s.get("confidence", "medium")).lower(),
                 }

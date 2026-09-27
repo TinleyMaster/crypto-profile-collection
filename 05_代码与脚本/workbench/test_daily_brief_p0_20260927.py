@@ -472,7 +472,7 @@ _b_tier["M8_watchlist"] = [
 _html_tier = sdb.render_brief_html(_b_tier)
 check(_html_tier.find("ZZHIGH") != -1 and _html_tier.find("ZZHIGH") < _html_tier.find("ZZMED"),
       "HIGH(50) 排在 MED(90) 之前（不跨口径按数值直排）")
-check("按证据等级分组" in _html_tier, "机会卡标题披露排序口径")
+check("按可验证性（是否被回测）分组" in _html_tier, "机会卡标题披露排序口径（W-03 后）")
 
 print("[M4-1] 同一 target 只保留一条结论，其余折叠为「关联」")
 _b_fold = _brief()
@@ -540,6 +540,66 @@ try:
     check(_opps[0]["trigger_logic"].count("18.3") == 1, "幂等：重复执行不叠加")
 except Exception as _e:
     check(False, "M4-3 数据层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-03 gate 分层排序（M4-2 的下一层：可验证性优先）
+# ════════════════════════════════════════════════════════
+print("[W-03] 源码核验：_GATE_RANK 存在且 _tier_score_key 返回 3 元组")
+check(hasattr(sdb, "_GATE_RANK"), "_GATE_RANK 已定义")
+_gr = getattr(sdb, "_GATE_RANK", {})
+check(_gr.get("calibrated_ok", 0) == 4 and _gr.get("calibrated_low", 0) == 3
+      and _gr.get("preliminary", 0) == 2 and _gr.get("exempt_not_calibrable", 0) == 1
+      and _gr.get("exempt_not_backtestable", 0) == 0,
+      "gate 权级与工单定死值一致（ok4>low3>prelim2>not_calibrable1>not_backtestable0）")
+_k = sdb._tier_score_key({"conviction_tier": "MED", "conviction_score": 55,
+                          "calibration_status": {"gate": "calibrated_low"}})
+check(isinstance(_k, tuple) and len(_k) == 3, f"_tier_score_key 返回 3 元组（实得 {_k}）")
+
+print("[W-03] 注入：未回测(99) 与 已回测(50) → 已回测必须排前")
+check(sdb._tier_score_key({"conviction_tier": "MED", "conviction_score": 50,
+                           "calibration_status": {"gate": "calibrated_ok"}})
+      > sdb._tier_score_key({"conviction_tier": "MED", "conviction_score": 99,
+                             "calibration_status": {"gate": "exempt_not_backtestable"}}),
+      "score=50/calibrated_ok 的键 > score=99/exempt_not_backtestable 的键")
+
+print("[W-03] 注入：gate 缺失 → 按 0 处理，排在 calibrated_low 之后")
+check(sdb._tier_score_key({"conviction_tier": "MED", "conviction_score": 99})  # 无 calibration_status
+      < sdb._tier_score_key({"conviction_tier": "MED", "conviction_score": 50,
+                             "calibration_status": {"gate": "calibrated_low"}}),
+      "gate 缺失(0) < calibrated_low(3)：即使分数更高也排后")
+
+print("[W-03] 渲染端：未回测沉到已回测之后 + 徽章对称")
+_bw = _brief()
+_bw.pop("M3_highlights", None)
+_bw.pop("M4_risks", None)
+_bw["M8_watchlist"] = [
+    {"target": "XXXEXEMPT", "conviction_tier": "MED", "conviction_score": 99,
+     "direction": "short", "trigger_logic": "从未回测",
+     "calibration_status": {"gate": "exempt_not_backtestable"}},
+    {"target": "YYYCALOK", "conviction_tier": "HIGH", "conviction_score": 50,
+     "direction": "long", "trigger_logic": "有回测背书",
+     "calibration_status": {"gate": "calibrated_ok"}},
+]
+_html_w = sdb.render_brief_html(_bw)
+check(_html_w.find("YYYCALOK") != -1 and _html_w.find("YYYCALOK") < _html_w.find("XXXEXEMPT"),
+      "渲染顺序：calibrated_ok(50) 排在 exempt_not_backtestable(99) 之前")
+check("未回测" in _html_w, "exempt_* 卡打「未回测」徽章")
+check("回测背书" in _html_w, "calibrated_ok 卡打「回测背书」徽章（对称）")
+
+print("[W-03] 不误伤：calibrated_low(50) 排在同 gate 无字段(99) 之前")
+_bn_w = _brief()
+_bn_w.pop("M3_highlights", None)
+_bn_w.pop("M4_risks", None)
+_bn_w["M8_watchlist"] = [
+    {"target": "NOCALFIELD", "conviction_tier": "MED", "conviction_score": 99,
+     "direction": "long", "trigger_logic": "无校准字段"},
+    {"target": "LOWCALX", "conviction_tier": "MED", "conviction_score": 50,
+     "direction": "long", "trigger_logic": "已回测低命中",
+     "calibration_status": {"gate": "calibrated_low"}},
+]
+_html_wn = sdb.render_brief_html(_bn_w)
+check(_html_wn.find("LOWCALX") != -1 and _html_wn.find("LOWCALX") < _html_wn.find("NOCALFIELD"),
+      "calibrated_low(50) 排在无校准字段(99) 之前")
 
 # ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")

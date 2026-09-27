@@ -277,6 +277,22 @@ def _trade_missing_fields(s: dict) -> list:
 #   · 既领涨/入选机会、又入高危的标的必须输出裁决语，不允许两条并列无解释（M4-4）。
 _TIER_RANK = {"HIGH": 3, "MED": 2, "LOW": 1}
 
+# ── W-03 gate 分层（M4-2 的下一层：可验证性优先） ───────────────────────────
+# 28 条机会里 22 条并列 55 分、MED 组内分数区分度塌陷；而「从未回测」的
+# exempt_not_backtestable（样本 0）分数区间 73–91 反而压过「已回测」的
+# calibrated_low（样本 67，55 分）——最不可验证的信号排在最前。
+# 故在 tier 之上再加一层 gate 权级（按「是否被回测」排序，已定死）：
+#   calibrated_ok(4) > calibrated_low(3) > preliminary(2) > exempt_not_calibrable(1)
+#   > exempt_not_backtestable(0)
+# 未知 gate / calibration_status 缺失 → 0（最不安全的一侧，不是中间值）。
+_GATE_RANK = {
+    "calibrated_ok":           4,   # 有回测背书
+    "calibrated_low":          3,   # 已回测，命中率低
+    "preliminary":             2,   # 已回测，样本不足
+    "exempt_not_calibrable":   1,
+    "exempt_not_backtestable": 0,   # 从未回测
+}
+
 
 def _norm_target_key(t) -> str:
     """target 归一化键：小写、`&`→`and`、仅保留字母数字（中文保留），用于跨板块同一标的归并。"""
@@ -289,11 +305,31 @@ def _target_keys(*vals) -> set:
     return {k for k in (_norm_target_key(v) for v in vals) if k}
 
 
+def _opp_gate(o: dict) -> str:
+    """取机会的校准门（gate）。无 calibration_status 或非 dict → ""（按 0 处理）。"""
+    cs = (o or {}).get("calibration_status")
+    if not isinstance(cs, dict):
+        return ""
+    return str(cs.get("gate") or "")
+
+
 def _tier_score_key(o: dict):
-    """M4-2 排序键：先按证据等级分组，组内再按分数（禁止跨口径按数值直排）。"""
+    """W-03 排序键：可验证性（gate）→ 证据等级（tier）→ 分数。
+
+    M4-2 只按 tier 分层，无法区分「同属 MED 的已回测 calibrated_low 与从未回测
+    exempt_not_backtestable」；升级为三元组后，未回测的信号一律沉到已回测之后。
+    未知 gate / calibration_status 缺失按 0（最不安全的一侧）处理。
+    （同分细化沿用 47bcb4d 的 decayed_score 设计，落在主榜 select_highlight_signals，
+     本函数不承担该项，勿在此回退。）
+    """
+    gate = _opp_gate(o)
     tier = str((o or {}).get("conviction_tier") or "").upper()
     score = (o or {}).get("conviction_score")
-    return (_TIER_RANK.get(tier, 0), score if isinstance(score, (int, float)) else -1)
+    return (
+        _GATE_RANK.get(gate, 0),
+        _TIER_RANK.get(tier, 0),
+        score if isinstance(score, (int, float)) else -1,
+    )
 
 
 def _build_target_registry(brief: dict, ai_trade_ready: list):
@@ -1448,7 +1484,7 @@ def render_brief_html(brief: dict) -> str:
         <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">
           {section_title}
         </div>
-        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按证据等级分组·组内按分数排序 · 仅供参考</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按可验证性（是否被回测）分组 · 组内按证据等级与分数排序 · 仅供参考</div>
     """)
 
     if all_opps:
@@ -1503,6 +1539,17 @@ def render_brief_html(brief: dict) -> str:
             dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
             dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
 
+            # W-03：可验证性徽章——从未回测/exempt_* 显式标「未回测」，与 calibrated_ok
+            # 的「回测背书」对称，避免读者把「没回测过」误当「同等可信」。
+            gate = _opp_gate(opp)
+            gate_badge = ""
+            if gate == "calibrated_ok":
+                gate_badge = ('<span style="background:#dcfce7;color:#166534;font-size:9px;'
+                              'padding:1px 5px;border-radius:3px;font-weight:700">回测背书</span>')
+            elif gate.startswith("exempt"):
+                gate_badge = ('<span style="background:#fee2e2;color:#b91c1c;font-size:9px;'
+                              'padding:1px 5px;border-radius:3px;font-weight:700">未回测</span>')
+
             # 信号源标签
             src_html = ""
             if signal_sources:
@@ -1529,6 +1576,7 @@ def render_brief_html(brief: dict) -> str:
                 </div>
                 <div style="display:flex;align-items:center;gap:5px">
                   <span style="background:{badge_bg};color:{badge_color};font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700">{tier}</span>
+                  {gate_badge}
                   <span style="font-size:11px;color:#64748b;font-weight:600">{score_str}分</span>
                 </div>
               </div>

@@ -1518,7 +1518,13 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **#5（P2）B2 已完成 ✅**：`unlock.age_hours ≈ 0.035h < 168`（见上文 B 组）。
 - **#1（🔴 P0）证据覆盖率虚高 ✅ 本轮处置**（见上）。
 
-**未做 / 边界**：① 未改前端（`research.html` 已按 `is_inferred` 渲染「(推断)」徽标，口径修正后自动正确；`internal_dataset` 仅作数据标记，未新增 UI 文案）；② 未对 PONS 做 LLM 重新生成（读路径实时重算已足够验证，且避免无谓消耗）；③ #2 TVL / #4 门槛边界按上表判为不改码；④ 线上 runtime 复验须待 Zeabur 重建后执行。
+**未做 / 边界**：① 未改前端（`research.html` 已按 `is_inferred` 渲染「(推断)」徽标，口径修正后自动正确；`internal_dataset` 仅作数据标记，未新增 UI 文案）；② 未对 PONS 做 LLM 重新生成（读路径实时重算已足够验证，且避免无谓消耗）；③ #2 TVL / #4 门槛边界按上表判为不改码。
+
+**线上 runtime 复验（2026-09-27，Zeabur 重建后，只读）**：
+- **✅ P0 修复线上生效**：`GET /api/research/11114/notebook` → `analysis.score = 39.9`、`tier = unusable / 不可用于决策`、`breakdown.coverage = 0.0`、（freshness 1.0 / consistency 0.6 / sample 0.4167）、`evidence = {total_points:22, cited_points:0, **weak_cited_points:22**, inferred_points:22, inferred_ratio:1.0, conviction_locked:true}`、`conviction = low`；notes 含「全部论点为推断、无一条可核验引用 → 封顶 39.9」+「22 个论点仅引用内部数据类别…」。**`weak_cited_points` 新键出现即为新代码上线的判定标记**（旧版返回 91.3/actionable 且无该键）。实测 citations **28 条全部 `internal_dataset: true`、`url` 非空 0 条** ⇒ 旧存量行的 `internal_dataset` 回填在线上确认。
+- **✅ A1 FDV**：`GET /api/research/11114/market-history` 32 行含 fdv 字段，**`fdv` 空/0 = 0 行**；末行 `2026-09-27 fdv = 627,555,897.82`（日表为聚合值，不带 `fdv_repaired` 标记）。
+- **✅ C1 豁免封顶**：`GET /api/market/overview` → `opportunity_list.opportunities` 中 **8 条 `exempt_*` 全部 `conviction_tier = MED`**、**`exempt_*` 无一进 HIGH**，11 条带 `tier_demote_reason`（文案「exempt_unbacktested：该类型从未被回测，默认封顶 MED…」）。**本次时点 HIGH = 0**（复验时为 3 条全 `calibrated_ok`）—— 属快照时点/分数衰减的业务漂移，与本轮改动无关（本轮未触碰 `macro_market.py` / `backtest_opportunities.py`）；C1 意图「HIGH 席位必有回测背书」在 HIGH=0 时为空真，不构成回归。
+- **⚠️ 已知抖动**：`/api/market/overview` 是重计算端点，实测多次 **502 / 读超时**（同一次复验内重试 3 次才成功），属该端点既有负载特性，非本次改动引入；复验时按重试即可。**字段名提示**：机会条目的档位字段是 **`conviction_tier`**（`tier` 不存在），成色在 `calibration_status.state`，与 `index.html` 前端一致。
 
 ### 9 币盘面告警邮件 NEW-A / P1-2 / NEW-B 处置（审计_9币盘面告警邮件_2026-09-27，2026-09-27，本次提交）
 

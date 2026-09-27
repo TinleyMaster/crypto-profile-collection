@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""早报「投资指导意义」重构 P0 回归护栏（方案_大盘早报_投资指导意义重构_2026-09-27）。
+
+运行：.venv/bin/python workbench/test_daily_brief_p0_20260927.py
+      （纯离线：渲染层喂合成 brief；prompt 层用假 LLM 捕获 system/user prompt；
+        不连 prod DB、不发信）
+
+  P0-a：去硬编码置信度（删 {"high":85,...}）→ 头部改「证据覆盖 N/M 项」
+  P0-b：数据门控 missing ≠ 0（None-aware 渲染 + 空段标注 + data_quality 块 + 硬约束）
+  P0-c：渲染层兜底（横盘且无新鲜信号时 AI 仍给方向 → 强制「今日无操作」）
+  P0-d：修假入口（href=0 的「查看详情」affordance 删除）
+  P0-e：砍脏卡（催化剂热点 B/C 卡片整块移除；Meme 纯数字改名单；KOL 卡加就绪门）
+"""
+import json
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPTS_BIN = os.path.join(os.path.dirname(_HERE), "scripts", "bin")
+_SCRIPTS_SRC = os.path.join(os.path.dirname(_HERE), "scripts", "src")
+for _p in (_HERE, _SCRIPTS_BIN, _SCRIPTS_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
+import send_daily_brief as sdb  # noqa: E402
+
+passed = 0
+failed = 0
+
+
+def check(cond, name, detail=""):
+    global passed, failed
+    if cond:
+        passed += 1
+        print(f"  \u2713 {name}")
+    else:
+        failed += 1
+        print(f"  \u2717 {name}")
+        if detail:
+            print(f"    {detail}")
+
+
+def _brief():
+    """最小可用 brief（贴近 2026-09-27 早报：横盘、有高亮/风险）。"""
+    return {
+        "M0_tldr": {
+            "date": "2026-09-27",
+            "btc_price": 109800, "btc_change_24h_pct": 0.4,
+            "eth_price": 3920, "eth_change_24h_pct": 0.2,
+            "fear_greed": 72, "fear_greed_label": "Greed",
+        },
+        "DIFF": {"total_mcap_pct": 0.3},
+        "M0_ai_summary": {
+            "status": "ok", "headline": "AI赛道领涨，市场整体偏多", "bias": "偏多",
+            "market_regime": "震荡", "conviction": "high",
+            "trade_suggestions": [
+                {"asset": "BTC", "direction": "做多", "horizon": "波段(1-2周)", "reason": "ETF 持续净流入"},
+                {"asset": "ETH", "direction": "做多", "horizon": "短线(1-3日)", "reason": "链上吸筹"},
+            ],
+            "watchlist": ["SOL", "AI"],
+        },
+        "M2_etf_flow": {
+            "status": "ok", "latest_date": "2026-09-25",
+            "assets": [{"symbol": "BTC", "flow_7d_usd": 1530e6}],
+        },
+        "M3_highlights": [{
+            "target": "SOL", "direction": "long", "conviction_score": 67,
+            "ai_analysis_v2": {"overall_score": 67, "confidence": "MED",
+                               "reason_summary": "ETF 持续净流入", "key_drivers": ["链上吸筹"]},
+        }],
+        "M4_risks": [{"target": "2Z", "ai_analysis_v2": {"overall_score": 88}}],
+        "M6_upcoming_unlocks": {
+            "status": "ok",
+            "unlocks": [{"symbol": "XPL", "unlock_date": "2026-09-29",
+                         "unlock_value_usd": 147e6, "unlock_ratio_circulating": 63.2,
+                         "risk_level": "high"}],
+        },
+    }
+
+
+# ════════════════════════════════════════════════════════
+# P0-d 假入口
+# ════════════════════════════════════════════════════════
+print("[P0-d] 假入口（href=0 的「查看详情」）")
+_html = sdb.render_brief_html(_brief())
+check("查看详情" not in _html, "高危信号条不再出现「查看详情 ↓」")
+check('cursor:pointer">查看详情' not in _html, "假入口的 cursor:pointer span 已删")
+check("今日高危信号（综合风险）" in _html, "高危信号条本体保留（只删假入口）")
+
+# ════════════════════════════════════════════════════════
+# P0-a 去硬编码置信度 → 证据覆盖
+# ════════════════════════════════════════════════════════
+print("[P0-a] 去硬编码置信度 → 证据覆盖 N/M")
+_b = _brief()
+_b["M0_ai_summary"]["data_quality"] = [
+    {"section": "大盘概况", "status": "ok", "items": 1},
+    {"section": "交易所净流量", "status": "empty", "items": 0},
+    {"section": "即将解锁", "status": "empty", "items": 0},
+]
+_html = sdb.render_brief_html(_b)
+check("证据覆盖" in _html, "头部改标「证据覆盖」")
+check("1/3" in _html, "覆盖数 = status ok 维度数 / 总维度数（1/3）")
+check("85%" not in _html, "硬编码 85% 已消失")
+check("置信度" not in _html, "裸「置信度 N%」标签已消失")
+check("证据覆盖</div>" in _html and "项 · 信心" in _html, "覆盖数带单位「项」并保留 LLM 自评信心")
+
+# ════════════════════════════════════════════════════════
+# P0-c 渲染层兜底
+# ════════════════════════════════════════════════════════
+print("[P0-c] 渲染层兜底：横盘 + 无新鲜信号 → 强制「今日无操作」")
+_bc = _brief()
+_bc.pop("M3_highlights")
+_bc.pop("M4_risks")
+_html = sdb.render_brief_html(_bc)
+check("⚪ 今日无操作" in _html, "横盘且无信号 → 输出「今日无操作」")
+check("做多" not in _html, "AI 的做多方向被拦截（不进入邮件）")
+check("当日横盘、无新鲜信号，无明确可执行机会" in _html, "兜底原因写入正文")
+
+print("[P0-c] 不误伤：横盘但有新鲜高亮/风险信号 → 保留 AI 方向")
+_html2 = sdb.render_brief_html(_brief())
+check("做多" in _html2 and "⚪ 今日无操作" not in _html2, "有新鲜信号时不降级")
+
+print("[P0-c] 不误伤：有信号但不横盘 → 保留 AI 方向")
+_bn = _brief()
+_bn["M0_tldr"]["btc_change_24h_pct"] = -2.4
+_bn["M0_tldr"]["eth_change_24h_pct"] = -2.5
+_html3 = sdb.render_brief_html(_bn)
+check("做多" in _html3 and "⚪ 今日无操作" not in _html3, "非横盘时不降级")
+
+# ════════════════════════════════════════════════════════
+# P0-b 空建议为合法输出（no_trade_reason 上屏）
+# ════════════════════════════════════════════════════════
+print("[P0-b] trade_suggestions=[] 是合法输出")
+_be = _brief()
+_be["M0_ai_summary"] = {
+    "status": "ok", "headline": "今日观望", "bias": "中性", "market_regime": "震荡",
+    "trade_suggestions": [],
+    "no_trade_reason": "多处数据不可用且无满足门槛的机会，今日不动是对的",
+    "data_quality": [{"section": "交易所净流量", "status": "empty", "items": 0}],
+}
+_html = sdb.render_brief_html(_be)
+check("⚪ 今日无操作" in _html, "空建议渲染「今日无操作」卡片")
+check("多处数据不可用且无满足门槛的机会，今日不动是对的" in _html, "no_trade_reason 上屏")
+check("0/1" in _html, "覆盖数 0/1（全空，不虚高）")
+
+print("[P0-b] 渲染幂等（同输入两次渲染一致）")
+check(sdb.render_brief_html(_brief()) == sdb.render_brief_html(_brief()), "两次渲染字节一致")
+
+# ════════════════════════════════════════════════════════
+# P0-e 砍脏卡
+# ════════════════════════════════════════════════════════
+print("[P0-e] 催化剂热点（B/C 脏卡）整块移除")
+_bh = _brief()
+_bh["CATALYST_HOTSPOTS"] = [
+    {"symbol": "XRP", "tier": "B", "catalyst_title": "作者：谷昱，ChainCatcher",
+     "resonance_state": "weak", "ai_reason": "仅观察"},
+    {"symbol": "BTC", "tier": "C", "catalyst_title": "Bitget said the vulnerability involved in its",
+     "resonance_state": "weak", "ai_reason": "英文截断"},
+]
+_html = sdb.render_brief_html(_bh)
+check("催化剂热点" not in _html, "卡片标题不再出现")
+check("谷昱" not in _html, "爬虫署名（脏正文）不再上屏")
+check("高置信度 A 级见邮件 Alert" not in _html, "自指另一封邮件的文案已删除")
+
+print("[P0-e] Meme 卡：纯数字 → 名单")
+_bm = _brief()
+_bm["M8_meme"] = {"status": "ok", "summary": {"block": 1, "high": 2, "medium": 102, "low": 3},
+                  "buckets": {"block": [{"symbol": "AAA", "name": "Aaa"}],
+                              "high": [{"symbol": "BBB"}, {"symbol": "CCC"}]}}
+_html = sdb.render_brief_html(_bm)
+check("排雷 1：AAA" in _html, "排雷名单带符号")
+check("高危 2：BBB、CCC" in _html, "高危名单带符号")
+check("中危102" not in _html, "「中危102」纯数字不再上屏")
+
+print("[P0-e] Meme 卡：无 block/high 名单时不出卡")
+_bm2 = _brief()
+_bm2["M8_meme"] = {"status": "ok", "summary": {"block": 0, "high": 0, "medium": 102, "low": 3},
+                   "buckets": {"block": [], "high": [], "medium": [{"symbol": "X"}]}}
+_html = sdb.render_brief_html(_bm2)
+check("Meme 风险" not in _html, "只有中危计数 → 不出卡（原「高危0 · 中危102」噪声）")
+
+print("[P0-e] KOL 卡：需「时间 + 金额」才出")
+_bk = _brief()
+_bk["kol_onchain"] = {"status": "ok", "kols": ["Ai姨"], "signals": [
+    {"symbol": "BTC", "signal_subtype": "smart_money", "kol_name": "Ai姨",
+     "created_at": "2026-09-27T08:00:00"}]}
+_html = sdb.render_brief_html(_bk)
+check("KOL 链上信号" not in _html, "无金额要素的信号不出卡")
+
+_bk2 = _brief()
+_bk2["kol_onchain"] = {"status": "ok", "kols": ["Ai姨"], "signals": [
+    {"symbol": "BTC", "signal_subtype": "smart_money", "kol_name": "Ai姨",
+     "event_usd_value": 12500000, "event_direction": "inflow",
+     "created_at": "2026-09-27T08:00:00"}]}
+_html = sdb.render_brief_html(_bk2)
+check("KOL 链上信号" in _html, "有时间+金额 → 出卡")
+check("12.5M USD" in _html, "金额上屏（可判定）")
+check("2026-09-27T08:00" in _html, "事件时间上屏（可判定）")
+
+# ════════════════════════════════════════════════════════
+# P0-b prompt 层（假 LLM 捕获 prompt）
+# ════════════════════════════════════════════════════════
+print("[P0-b] prompt 层：数据门控 missing ≠ 0")
+_captured = {}
+
+
+class _FakeLLM:
+    def __init__(self, *a, **k):
+        pass
+
+    def is_available(self):
+        return True
+
+    def chat(self, system_prompt, user_prompt, **kw):
+        _captured["system"] = system_prompt
+        _captured["user"] = user_prompt
+        return json.dumps({
+            "headline": "数据多处不可用", "market_regime": "震荡", "bias": "中性",
+            "conviction": "low", "key_drivers": ["数据不可用"], "sector_rotation": "",
+            "trade_suggestions": [],
+            "no_trade_reason": "无满足门槛的机会，今日不动是对的",
+            "risk_warnings": ["数据不可用，依据不足"], "watchlist": [],
+        }, ensure_ascii=False)
+
+
+try:
+    import macro_market as mm  # noqa: E402
+    import crypto_research.clients.llm_client as _llmmod  # noqa: E402
+    _llmmod.LLMClient = _FakeLLM
+
+    _empty_brief = {
+        "M0_tldr": {"btc_change_24h_pct": 0.4, "eth_change_24h_pct": 0.2},
+        "M1_cycle": {}, "M2_flow": {},
+        "M2_sector_flow": {"status": "empty", "sectors": []},
+        "M2_etf_flow": {"status": "empty", "assets": []},
+        "M2_whale_moves": {"status": "empty", "transfers": [], "total_count": 0,
+                           "total_usd": 0, "net_exchange_usd": 0},
+        "M2_exchange_flow": {"status": "empty", "assets": []},
+        "M2_holder_concentration": {"status": "empty", "whale_buying": [], "whale_selling": []},
+        "M3_highlights": [], "M4_risks": [], "M6_catalyst": {},
+        "M6_upcoming_unlocks": {"status": "empty", "unlocks": []},
+    }
+    _res = mm.generate_morning_brief_ai_summary(_empty_brief)
+    _up = _captured.get("user", "")
+    _sp = _captured.get("system", "")
+
+    check(_res.get("status") == "ok", "假 LLM 路径返回 ok", str(_res.get("error")))
+    check("【数据可用性（下结论前必读" in _up, "user_prompt 顶部有数据可用性块")
+    check("- 交易所净流量: empty（无数据）" in _up, "交易所净流量标为 empty")
+    check("- 大盘概况: empty（无数据）" in _up, "空段（M2_flow={}）标为 empty 而非 ok")
+    check("（暂无数据：交易所净流量不可用）" in _up, "空段落渲染「暂无数据」而非空字符串")
+    check("数据不可用（无有效样本）" in _up, "净流入无样本 → 「数据不可用」，不渲染 0.0M")
+    check("交易所净流入：0.0M USD" not in _up, "旧「净流入：0.0M USD」已消失")
+    check("数据不可用" in _up and "- 总笔数：数据不可用 笔" in _up, "总笔数 None-aware")
+    check("严禁表述为" in _sp, "system prompt 含「缺失不得表述为零」硬约束")
+    check("依据不足" in _sp, "system prompt 含「依据不足」硬约束")
+    check("默认输出" in _sp and "no_trade_reason" in _sp, "system prompt 含「默认无操作 + no_trade_reason」")
+    check("不允许" not in _sp and "禁止为凑满建议数量" in _sp, "禁止凑数方向")
+    check(_res.get("no_trade_reason") == "无满足门槛的机会，今日不动是对的", "no_trade_reason 透传")
+    _dq = _res.get("data_quality") or []
+    check(len(_dq) == 7, f"data_quality 覆盖 7 个维度（实际 {len(_dq)}）")
+    check(all(d["status"] == "empty" for d in _dq), "全空场景下无一维度被记为 ok（覆盖不虚高）",
+          str(_dq))
+
+    print("[P0-b] prompt 层：有样本时仍渲染真值")
+    _ok_brief = dict(_empty_brief)
+    _ok_brief["M2_whale_moves"] = {
+        "status": "ok", "transfers": [{"symbol": "BTC", "value_usd": 8e6,
+                                       "to_exchange": True, "from_exchange": False, "chain": "BTC"}],
+        "total_count": 12, "total_usd": 96e6, "net_exchange_usd": 24e6,
+        "exchange_in_count": 3, "exchange_out_count": 1,
+    }
+    _ok_brief["M2_exchange_flow"] = {"status": "ok",
+                                     "assets": [{"symbol": "BTC", "net_flow_usd": 12e6}]}
+    mm.generate_morning_brief_ai_summary(_ok_brief)
+    _up2 = _captured.get("user", "")
+    check("24.0M USD（样本 4 笔）" in _up2, "有样本时渲染真值与样本数")
+    check("- 总笔数：12 笔" in _up2, "有样本时渲染真总笔数")
+    check("- BTC: 12.0M" in _up2, "交易所净流量有数据时正常渲染")
+except Exception as _e:
+    check(False, "prompt 层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
+sys.exit(1 if failed else 0)

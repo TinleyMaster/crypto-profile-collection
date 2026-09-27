@@ -266,7 +266,6 @@ def render_brief_html(brief: dict) -> str:
     stab = brief.get("M2_stablecoin") or {}
     upcoming_unlocks = brief.get("M6_upcoming_unlocks") or {}
     kol_onchain = brief.get("kol_onchain") or {}
-    cat_hotspots = brief.get("CATALYST_HOTSPOTS") or []
 
     # 全部机会按评分排序
     all_opps = sorted(
@@ -312,11 +311,33 @@ def render_brief_html(brief: dict) -> str:
     except Exception:
         _bias_caveat_html = ""
 
+    # 渲染层兜底（LLM 非确定性）：prompt 允许 trade_suggestions 为空 ≠ LLM 会可靠输出空数组。
+    # 当日横盘（|BTC|、|ETH| ≤ 1%）且无新鲜高亮/风险信号时，若 AI 仍给方向，强制降级为「观察」。
+    _ai_trade_suggestions = ai_trade_suggestions
+    _no_trade_reason = str(ai_summary.get("no_trade_reason") or "")
+    try:
+        _bc0 = float(m0.get("btc_change_24h_pct")) if m0.get("btc_change_24h_pct") is not None else None
+        _ec0 = float(m0.get("eth_change_24h_pct")) if m0.get("eth_change_24h_pct") is not None else None
+        _flat = (_bc0 is not None and _ec0 is not None and abs(_bc0) <= 1.0 and abs(_ec0) <= 1.0)
+        _no_signal = not (brief.get("M3_highlights") or []) and not (brief.get("M4_risks") or [])
+        if _flat and _no_signal and _ai_trade_suggestions:
+            print(f"[render_brief_html] 兜底降级：当日横盘(BTC {_bc0}%/ETH {_ec0}%)且无新鲜信号，"
+                  f"AI 仍给出 {len(_ai_trade_suggestions)} 条方向 → 强制置为「观察」")
+            _ai_trade_suggestions = []
+            _no_trade_reason = _no_trade_reason or "当日横盘、无新鲜信号，无明确可执行机会"
+    except Exception:
+        pass
+
     if ai_summary.get("status") == "ok" and ai_headline:
         # 方向颜色
         bias_color = "#ef4444" if "多" in str(ai_bias) else "#22c55e" if "空" in str(ai_bias) else "#f59e0b"
         conviction_cn = {"high": "高", "medium": "中", "low": "低"}.get(str(ai_conviction).lower(), "中")
-        conviction_pct = {"high": 85, "medium": 65, "low": 40}.get(str(ai_conviction).lower(), 50)
+        # 证据覆盖（替代原硬编码 {"high":85,...} 裸百分比）：不再展示与数据无关的置信度数字，
+        # 改展示 data_quality 中 status=ok 的维度数 / 总维度数，与证据量单调相关、可复算。
+        _dq = ai_summary.get("data_quality") or []
+        _dq_ok = sum(1 for d in _dq if str((d or {}).get("status")) == "ok")
+        _dq_total = len(_dq)
+        _cover_txt = f"{_dq_ok}/{_dq_total}" if _dq_total else "—"
 
         html_parts.append(f"""
           <!-- 模块0：AI今日定调 -->
@@ -328,9 +349,9 @@ def render_brief_html(brief: dict) -> str:
                 <div style="font-size:18px;font-weight:800;letter-spacing:-0.5px;line-height:1.3">{ai_headline}</div>
               </div>
               <div style="text-align:right;flex-shrink:0;margin-left:12px">
-                <div style="font-size:10px;color:#64748b">置信度</div>
-                <div style="font-size:18px;font-weight:700;color:{bias_color}">{conviction_pct}%</div>
-                <div style="font-size:9px;color:#64748b">{conviction_cn}</div>
+                <div style="font-size:10px;color:#64748b">证据覆盖</div>
+                <div style="font-size:18px;font-weight:700;color:{bias_color}">{_cover_txt}</div>
+                <div style="font-size:9px;color:#64748b">项 · 信心{conviction_cn}</div>
               </div>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -357,12 +378,12 @@ def render_brief_html(brief: dict) -> str:
             </div>
             """)
 
-        # 具体交易建议
-        if ai_trade_suggestions:
+        # 具体交易方向（「今日无操作」是一等公民，与「有方向」同等醒目）
+        if _ai_trade_suggestions:
             html_parts.append(f"""
             <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;font-weight:600;letter-spacing:0.5px">💡 具体交易方向</div>
             """)
-            for s in ai_trade_suggestions[:4]:
+            for s in _ai_trade_suggestions[:4]:
                 asset = s.get("asset") or "?"
                 direction = s.get("direction") or ""
                 horizon = s.get("horizon") or ""
@@ -382,6 +403,13 @@ def render_brief_html(brief: dict) -> str:
                   {f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;line-height:1.5">{reason}</div>' if reason else ''}
                 </div>
                 """)
+        else:
+            html_parts.append(f"""
+            <div style="background:rgba(148,163,184,0.12);border-radius:6px;padding:8px 10px;margin-bottom:5px;border-left:3px solid #94a3b8">
+              <div style="font-size:12.5px;font-weight:700;color:#e2e8f0">⚪ 今日无操作</div>
+              {f'<div style="font-size:11px;color:#94a3b8;margin-top:2px;line-height:1.5">{_no_trade_reason}</div>' if _no_trade_reason else ''}
+            </div>
+            """)
 
         # 关注列表
         if ai_watchlist:
@@ -561,7 +589,6 @@ def render_brief_html(brief: dict) -> str:
             html_parts.append(f"""
             <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
               ⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个：{risk_preview}
-              <span style="float:right;color:#dc2626;font-weight:600;cursor:pointer">查看详情 ↓</span>
             </div>
             """)
 
@@ -1037,7 +1064,16 @@ def render_brief_html(brief: dict) -> str:
 
     # KOL 链上信号（兜底）
     signals = kol_onchain.get("signals") or []
-    if signals and kol_onchain.get("status") == "ok":
+    # 2026-09-27（早报重构 P0）：原卡只印「币种 + 类型 + 分析师」，无时间/无金额/无方向，
+    # 属不可判定的噪声卡片（重构方案 §2.13）。改为：仅保留「有事件时间 且 有金额」的信号，
+    # 并把金额与时间一并渲染。字段名以 fetch_kol_onchain_signals 的 SELECT 为准
+    # （created_at / event_direction / event_usd_value / event_amount）。
+    _kol_ready = [
+        s for s in signals
+        if s.get("created_at") and (s.get("event_usd_value") or s.get("event_amount"))
+    ]
+    if _kol_ready and kol_onchain.get("status") == "ok":
+        signals = _kol_ready
         # 过滤掉 symbol 明显无效的信号（长度>12、含非字母数字、常见误判词）
         INVALID_SYMBOLS = {"LAPTOP", "PHONE", "TABLET", "DESKTOP", "COMPUTER", "MOBILE"}
         def _is_valid_sym(s):
@@ -1077,11 +1113,19 @@ def render_brief_html(brief: dict) -> str:
             kol = sig.get("kol_name") or ""
             is_bullish = "in" in str(sig.get("event_direction", "")).lower() or "accum" in subtype.lower()
             dot = "#dc2626" if is_bullish else "#16a34a"
+            _usd = sig.get("event_usd_value")
+            if isinstance(_usd, (int, float)) and _usd:
+                _money = f"{round(float(_usd) / 1e6, 2)}M USD"
+            else:
+                _money = str(sig.get("event_amount") or "")
+            _at = str(sig.get("created_at") or "")[:16]
+            _meta = " · ".join(x for x in (_money, _at) if x)
 
             html_parts.append(f"""
               <div style="padding:4px 8px;margin-bottom:2px;border-radius:4px;background:#fafafa;font-size:10.5px;border-left:2px solid {dot}">
                 <span style="font-weight:700;color:#0f172a">{sym}</span>
                 <span style="color:#64748b;margin-left:4px">{subtype_cn}</span>
+                <span style="color:#475569;margin-left:6px">{_meta}</span>
                 <span style="color:#94a3b8;margin-left:6px;float:right">{kol}</span>
               </div>
             """)
@@ -1199,46 +1243,13 @@ def render_brief_html(brief: dict) -> str:
     html_parts.append("</div>")
 
     # ════════════════════════════════════════════════════════
-    # 模块 5.5：📡 催化剂热点（B/C 观察，非交易，来自催化剂管道）
+    # 模块 5.5：📡 催化剂热点 —— 已移除（2026-09-27，早报重构 P0）
+    # 原卡渲染全部 B/C 级热点，实测上屏内容为脏数据（正文出现爬虫署名「作者：谷昱，
+    # ChainCatcher」、英文截断半句），且卡片固定文案自称「高置信度 A 级见邮件 Alert」
+    # 把读者指向另一封邮件（闭环断裂）；6 条全标「仅观察/弱共振」却占一整屏。
+    # P0 判据是「不撒谎」，该卡当前无法被诚实渲染 → 整块移除，不做半修。
+    # 后续重放条件：催化剂 ai_summary 正文质量修复 且 仅 A 级 且 带原文链接。
     # ════════════════════════════════════════════════════════
-    if cat_hotspots:
-        html_parts.append("""
-          <!-- 模块5.5：催化剂热点（观察） -->
-          <div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:10px;padding:12px 14px;margin-bottom:10px">
-            <div style="font-size:13px;font-weight:700;color:#475569;margin-bottom:2px">📡 催化剂热点（仅观察）</div>
-            <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">B/C 级信号 · 非交易建议 · 高置信度 A 级见邮件 Alert</div>
-        """)
-        _tier_cfg = {
-            "B": ("B", "#2563eb", "#dbeafe"),
-            "C": ("C", "#64748b", "#e2e8f0"),
-        }
-        for h in cat_hotspots[:6]:
-            sym = h.get("symbol") or "?"
-            name = h.get("canonical_name") or ""
-            title = h.get("catalyst_title") or "?"
-            tier = h.get("tier") or "?"
-            res = h.get("resonance_state") or ""
-            reason = (h.get("ai_reason") or "").strip()
-            if len(reason) > 90:
-                reason = reason[:89] + "…"
-            tlabel, tcolor, tbg = _tier_cfg.get(tier, (tier, "#64748b", "#e2e8f0"))
-            res_cn = {"confirmed": "共振", "weak": "弱共振", "divergent": "背离",
-                      "pending": "待确认"}.get(res, res or "—")
-            reason_html = (f'<div style="font-size:10.5px;color:#64748b;margin-top:2px">{reason}</div>'
-                           if reason else "")
-            html_parts.append(f"""
-              <div style="padding:6px 8px;margin-bottom:5px;border-radius:6px;background:#fff;border-left:3px solid {tcolor};font-size:11px">
-                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                  <span style="background:{tbg};color:{tcolor};font-size:9px;padding:0 4px;border-radius:2px;font-weight:700">{tlabel}</span>
-                  <span style="font-weight:700;color:#0f172a">{sym}</span>
-                  <span style="color:#94a3b8;font-size:10px">{name}</span>
-                  <span style="margin-left:auto;color:#64748b;font-size:10px">{res_cn}</span>
-                </div>
-                <div style="color:#334155;margin-top:3px">{title}</div>
-                {reason_html}
-              </div>
-            """)
-        html_parts.append("</div>")
 
     # ════════════════════════════════════════════════════════
     # 模块 6：🎯 机会清单
@@ -1365,11 +1376,25 @@ def render_brief_html(brief: dict) -> str:
     meme = brief.get("M8_meme") or {}
     if isinstance(meme, dict) and meme.get("status") == "ok":
         summary = meme.get("summary") or {}
-        if summary:
-            extra_blocks.append((
-                "🐸 Meme 风险（Meme 专项）",
-                f"高危{summary.get('high',0)} · 中危{summary.get('medium',0)} · 低风险{summary.get('low',0)} · 排雷{summary.get('block',0)}"
-            ))
+        # 2026-09-27（早报重构 P0）：原卡片只有「高危N·中危N」纯数字（如「中危102」），
+        # 读者既不知是谁也无处置。改为给出「排雷 / 高危」名单（各最多 5 个）；无名单则不展示。
+        _buckets = meme.get("buckets") or {}
+
+        def _bucket_names(k: str) -> str:
+            return "、".join(
+                str(x.get("symbol") or x.get("name") or "?")
+                for x in (_buckets.get(k) or [])[:5]
+            )
+
+        _block_names = _bucket_names("block")
+        _high_names = _bucket_names("high")
+        if _block_names or _high_names:
+            _lines = []
+            if _block_names:
+                _lines.append(f"排雷 {summary.get('block', 0)}：{_block_names}")
+            if _high_names:
+                _lines.append(f"高危 {summary.get('high', 0)}：{_high_names}")
+            extra_blocks.append(("🐸 Meme 风险（Meme 专项）", " · ".join(_lines)))
 
     if extra_blocks:
         html_parts.append("""

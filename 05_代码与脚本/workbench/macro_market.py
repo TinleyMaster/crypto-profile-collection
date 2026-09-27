@@ -7887,6 +7887,44 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
                 "风险等级": u.get("risk_level"),
             })
 
+        # ── 数据可用性块（missing ≠ 0）──────────────────────────────
+        # 根因：M2_whale_moves.status='empty'（无样本）时 net_exchange_usd 仍为 0，
+        # 旧 prompt 用 .get(..., 0) 渲染成「交易所净流入：0.0M USD」，LLM 读成
+        # 「没有抛压」。此处把每个维度的可用性显式告知 LLM，并让相关渲染 None-aware。
+        _dq_defs = [
+            ("大盘概况", brief.get("M2_flow") or {}, None),
+            ("赛道表现", brief.get("M2_sector_flow") or {}, "sectors"),
+            ("ETF资金流", brief.get("M2_etf_flow") or {}, "assets"),
+            ("交易所净流量", brief.get("M2_exchange_flow") or {}, "assets"),
+            ("大额链上转账", whale_moves, "transfers"),
+            ("巨鲸持仓变化", brief.get("M2_holder_concentration") or {}, "whale_buying"),
+            ("即将解锁", brief.get("M6_upcoming_unlocks") or {}, "unlocks"),
+        ]
+        data_quality = []
+        for _name, _sec, _key in _dq_defs:
+            if not isinstance(_sec, dict) or not _sec:
+                # 无该段（None / {}）→ 明确 empty，绝不按 ok 计（否则「证据覆盖」会虚高）
+                data_quality.append({"section": _name, "status": "empty", "items": 0})
+                continue
+            _st = str(_sec.get("status") or "").lower()
+            _n = len(_sec.get(_key) or []) if _key else 1
+            if _st == "error":
+                _status = "error"
+            elif _st == "empty" or (_key and _n == 0):
+                _status = "empty"
+            elif _st == "partial":
+                _status = "partial"
+            else:
+                _status = "ok"
+            data_quality.append({"section": _name, "status": _status, "items": _n})
+
+        _wm_ok = (str(whale_moves.get("status") or "").lower() == "ok") and bool(whale_moves.get("transfers"))
+        _net_txt = (
+            f"{round(float(whale_moves.get('net_exchange_usd') or 0) / 1e6, 1)}M USD"
+            f"（样本 {whale_moves.get('exchange_in_count', 0) + whale_moves.get('exchange_out_count', 0)} 笔）"
+            if _wm_ok else "数据不可用（无有效样本）"
+        )
+
         system_prompt = """你是一位经验丰富的加密货币宏观分析师，每天早上根据多维度链上和市场数据生成简明的市场定调和交易建议。
 
 你的输出必须是严格的 JSON 格式，包含以下字段：
@@ -7907,17 +7945,25 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
     }
   ],
   "risk_warnings": ["2-3个主要风险点，每条一句话"],
-  "watchlist": ["3-5个值得重点关注的币种或赛道"]
+  "watchlist": ["3-5个值得重点关注的币种或赛道"],
+  "no_trade_reason": "当 trade_suggestions 为空数组时必填：为什么今天不动是对的，一句话"
 }
 
 要求：
-1. 结论要明确，不要模棱两可，必须给出具体的方向判断
-2. 交易建议要具体到标的和方向，不能只说"关注"
-3. 基于数据说话，不要凭空编造信息
-4. 中文输出，简洁专业
+1. 默认输出"无操作"：仅当某标的满足明确且可判定的进场条件时，才给出方向；否则
+   trade_suggestions 必须是空数组 []，并填写 no_trade_reason。给出方向时必须写清
+   可判定的进场条件与失效条件，不得只给方向不给阈值。
+2. 数据缺失只能表述为"数据不可用"，严禁表述为"零/无/没有/抛压有限/未见抛压"等。
+3. 若某维度在【数据可用性】中标为 empty/error，凡依赖它的结论必须标注"依据不足"，
+   不得据此下任何断言。
+4. 禁止为凑满建议数量而给出低置信度或无条件的方向。
+5. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
+
+【数据可用性（下结论前必读；empty/error = 无数据，禁止据此下任何断言）】
+{chr(10).join(f'- {d["section"]}: {d["status"]}' + (f'（{d["items"]} 项）' if d["items"] else '（无数据）') for d in data_quality)}
 
 【大盘概况】
 - BTC 周期阶段：{m1.get('phase', '未知')}
@@ -7934,13 +7980,13 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
 {chr(10).join(f'- {e["币种"]}: 当日 {e["当日净流入_M"]}M，7日 {e["7日净流入_M"]}M' for e in etf_top)}
 
 【交易所净流量（7日，正值=净流入）】
-{chr(10).join(f'- {e["币种"]}: {e["7日净流_M"]}M' for e in exch_top)}
+{chr(10).join(f'- {e["币种"]}: {e["7日净流_M"]}M' for e in exch_top) or '- （暂无数据：交易所净流量不可用）'}
 
 【大额链上转账（24h）】
-- 总笔数：{whale_moves.get('total_count', 0)} 笔
-- 总金额：约 {round(whale_moves.get('total_usd', 0) / 1e6, 1)}M USD
-- 交易所净流入：{round(whale_moves.get('net_exchange_usd', 0) / 1e6, 1)}M USD
-{chr(10).join(f'- {w["币种"]} {w["方向"]} {w["金额_万USD"]:.0f}万USD ({w["链"]})' for w in whale_top)}
+- 总笔数：{whale_moves.get('total_count') if _wm_ok else '数据不可用'} 笔
+- 总金额：{('约 ' + str(round(float(whale_moves.get('total_usd') or 0) / 1e6, 1)) + 'M USD') if _wm_ok else '数据不可用'}
+- 交易所净流入：{_net_txt}
+{chr(10).join(f'- {w["币种"]} {w["方向"]} {w["金额_万USD"]:.0f}万USD ({w["链"]})' for w in whale_top) or '- （暂无数据）'}
 
 【巨鲸持仓变化（7日）】
 增仓 Top5：
@@ -7987,6 +8033,10 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
             ],
             "risk_warnings": [str(x)[:200] for x in (data.get("risk_warnings") or [])][:5],
             "watchlist": [str(x)[:30] for x in (data.get("watchlist") or [])][:8],
+            # 默认无操作：trade_suggestions 可为空数组，空时必须给 no_trade_reason（渲染层据此展示「⚪ 今日无操作」）
+            "no_trade_reason": str(data.get("no_trade_reason", ""))[:200],
+            # 各维度可用性（empty/error=无数据），供渲染层标注证据覆盖数与依据不足
+            "data_quality": data_quality,
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}

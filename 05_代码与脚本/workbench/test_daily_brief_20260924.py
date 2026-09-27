@@ -125,7 +125,16 @@ check("B" * 29 + "…" in html, "驱动因子截断补省略号")
 
 print("[P2-E] 高危维度标注")
 check("今日高危信号（综合风险）" in html, "综合高危标注维度")
-check("Meme 风险（Meme 专项）" in html, "Meme 高危标注专项")
+# Meme 卡 2026-09-27 早报重构 P0 改版：纯计数（本 fixture 高危 0 / 排雷 0）不再上屏，
+# 改为「排雷/高危」名单（详见 test_daily_brief_p0_20260927.py）
+check("Meme 风险（Meme 专项）" not in html, "无 block/high 名单 → Meme 卡不出")
+check("中危102" not in html, "纯「中危102」计数不再上屏")
+_meme_named = _brief()
+_meme_named["M8_meme"] = {"status": "ok", "summary": {"high": 1, "medium": 102, "low": 0, "block": 1},
+                          "buckets": {"block": [{"symbol": "AAA"}], "high": [{"symbol": "BBB"}]}}
+_mh = sdb.render_brief_html(_meme_named)
+check("Meme 风险（Meme 专项）" in _mh and "排雷 1：AAA" in _mh and "高危 1：BBB" in _mh,
+      "有名单 → 出卡并带符号")
 
 print("[P2-I] 解锁措辞")
 check("即将解锁（未来14天，含今日）" in html, "「未来14天」补「含今日」")

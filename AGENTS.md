@@ -1864,3 +1864,31 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ⑤ **`_fetch_github_activity` / `_fetch_dl_tvl` 吞掉异常且不再 `_emit`**：原 inline 实现失败时会打日志，抽取后静默返回空（页面会显示「未采集」，无法区分「无映射」与「查询报错」）。
 - ⑥ **契约与原工单差异**：返回顶层**未含 `symbol`**（`get_asset_tokenomics` 无该字段，避免为此再加一次查询；消费端本来就有 symbol）；字段清单**新增 `tax_info` / `lp_lock_info`**（原工单未列，但两页本就在渲染，纳入后口径才一致）。
 - ⑦ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验 `/api/research/11114/notebook` 的 `structured_metrics.fundamentals` 出现新增键（须触发一次结论生成）、`/api/research/11114/tokenomics` 与 `/api/assets/11114/tokenomics` 的 `meta.coverage` 一致、research 页不截断、index 页补齐通胀与来源。
+
+### 大盘早报「投资指导意义」重构 P0（2026-09-27，本次提交）
+
+来源：`方案_大盘早报_投资指导意义重构_2026-09-27.md`（用户上传，451 行）＋我方修订版方案（用户「按修订方案执行」批准）。样本：`📊_加密大盘早报_2026-09-27.eml`（实测 `href count: 0`、`查看详情`×1、`置信度`×3、`85%`×2）。原方案 P0 含 5 项，本轮**收敛为「不撒谎」最小集**：可算分、观望闸门阈值、条件触发清单均推后到 P1。
+
+**P0-a 去硬编码置信度**：`send_daily_brief.py` 删 `conviction_pct = {"high":85,"medium":65,"low":40}`（与证据量/数据完整度/历史胜率均无关的纯装饰），头部右侧改「**证据覆盖 N/M 项** · 信心X」；N = `data_quality` 中 `status=="ok"` 的维度数，M = 总维度数（无 `data_quality` 时显示 `—`）。
+
+**P0-b 数据门控 missing ≠ 0**（M1 与 M5 合并为**一次** prompt 改动）：
+- `macro_market.generate_morning_brief_ai_summary` 新增 `data_quality` 块：7 个维度逐条 `{section, status(ok/partial/empty/error), items}`；**空段（`None`/`{}`）一律记 `empty`，绝不记 `ok`**（否则「证据覆盖」会虚高，与 P0-a 的展示直接矛盾）。
+- 组装 None-aware：`交易所净流入` 由 `.get('net_exchange_usd', 0)` 改为 `_wm_ok` 驱动——无有效样本时渲染「数据不可用（无有效样本）」，有样本时渲染「N M USD（样本 K 笔）」；`总笔数`/`总金额` 同口径；空段落渲染 `- （暂无数据：交易所净流量不可用）` 而非空字符串（旧行为让 LLM 把「空」读成「零」）。
+- system prompt：旧「必须给出具体方向 / 不能只说关注」三条被替换为 5 条硬约束（默认输出无操作 / 缺失只能表述为「数据不可用」且严禁表述为零·无·没有·抛压有限 / 依赖 empty 维度的结论须标「依据不足」/ 禁止凑数 / 基于数据）；输出 schema 增 `no_trade_reason`。
+- 返回 dict 增 `no_trade_reason`、`data_quality`。`generate_morning_brief` 是**直接赋值** `brief["M0_ai_summary"]`，新键自然透传；`brief_data_model.normalize_brief` 只标准化 M2/M6 特定模块、不触碰 `M0_ai_summary`（已核）。
+
+**P0-c 渲染层兜底**（「允许空数组」≠「LLM 会可靠输出空数组」）：`render_brief_html` 渲染前判断「|BTC|、|ETH| ≤ 1% 且 `M3_highlights` 空 且 `M4_risks` 空」，若 AI 仍给方向 → 强制置空 + 打印降级日志 + 写入兜底原因「当日横盘、无新鲜信号，无明确可执行机会」。**只降不升**的单向闸门。
+
+**P0-d 假入口**：删高危信号条内 `<span style="…cursor:pointer">查看详情 ↓</span>`（全邮件 `href=0`，点了没反应）。本轮选「删 affordance」而非「补真链接」（无落点页面）。
+
+**P0-e 砍脏卡**：① 催化剂热点卡（B/C 级）**整块代码删除**（而非 `cat_hotspots = []` 置空留死分支）——实测上屏为脏数据（正文出现爬虫署名「作者：谷昱，ChainCatcher」、英文截断半句），且固定文案自指「高置信度 A 级见邮件 Alert」把读者指向另一封邮件（闭环断裂）；重放条件留档在源码注释：AI 正文质量修复 且 仅 A 级 且 带原文链接。② Meme 卡由纯数字（`高危0 · 中危102 · 低风险3 · 排雷0`）改「排雷/高危」名单（各 ≤5 个符号），无名单则不出卡。③ KOL 卡加就绪门（需 `created_at` 且有 `event_usd_value`/`event_amount`），并把金额与事件时间渲染上屏——字段名以 `fetch_kol_onchain_signals` 的 SELECT 为准（`created_at`/`event_direction`/`event_usd_value`/`event_amount`，不是 `published_at`/`amount_usd`）。
+
+**验证**：新探针 `workbench/test_daily_brief_p0_20260927.py` **46/0**（纯离线：渲染层喂合成 brief；prompt 层用假 `LLMClient` 捕获 system/user prompt，**不连 DB、不发信**）。冻结断言含：空数据场景 user_prompt **必含**「数据不可用（无有效样本）」「（暂无数据：交易所净流量不可用）」、**不得含**「交易所净流入：0.0M USD」；`data_quality` 7 维全空时**无一被记 ok**；横盘+无信号时 AI 的「做多」不得进入邮件、有信号或非横盘时**不误伤**；空建议渲染「⚪ 今日无操作」+ `no_trade_reason`；渲染幂等（两次渲染字节一致）。`test_daily_brief_20260924` 的旧断言 `Meme 风险（Meme 专项）` 依赖纯计数卡，已同步改版为「无名单不出卡 + 有名单出卡」→ **31/31**。其余回归全绿：`test_daily_brief_p1` 22/0、`test_catalyst_channel_dedup` 22/0、`test_major_event_alert` 55/0；`py_compile` 2/2 OK。
+
+**未做 / 边界（须留档）**：
+- ① **P1 全部未做**：条件触发清单（每条 5 要素 `trigger`/`invalidate`/`target`/`horizon`/`ref_price`+时间戳）、单一口径裁决（同标的多结论、同赛道两个涨幅数字、2Z 既领涨又高危）、「可算分」与观望闸门阈值。
+- ② **AI 结论未落库（P2 前置依赖，实测确认）**：`biz.market_overview_snapshot.payload` 顶层键为 `summary/btc_cycle/meme_risk/resonance/dimensions/fetched_at/event_calendar/chimney_signals/opportunity_list/divergence_signals/institutional_mvrv/smart_money_divergence/onchain_anomaly_signals`，**不含 `M0_ai_summary`/`DIFF`/`M9_degraded`**。故 `data_quality` 与 `no_trade_reason` 目前只活在「生成→渲染」这一次内存链路里，**不落库、不可回测、次日不可比**；变更日志（观点连续性 M2）依赖此，故未做。
+- ③ **兜底闸门阈值是保守硬编码**：只用「|BTC|、|ETH| ≤ 1%」，未做波动率归一（ATR/σ），且只看 BTC/ETH，小市值币横盘不触发。
+- ④ **`data_quality` 的 `partial` 分支在真实数据上是否出现未验证**（现有 7 段生产者可能只产出 ok/empty/error）。
+- ⑤ **未收紧 `send_daily_brief.py` SMTP 未配时 `return 0`（「没发却显示成功」）** —— 与上一节同项，仍待单独立项。
+- ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验次日 09:00 邮件头部为「证据覆盖 N/M 项」而非「置信度 85%」、「查看详情」已消失、横盘日不出现方向建议。

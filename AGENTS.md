@@ -1526,6 +1526,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **✅ C1 豁免封顶**：`GET /api/market/overview` → `opportunity_list.opportunities` 中 **8 条 `exempt_*` 全部 `conviction_tier = MED`**、**`exempt_*` 无一进 HIGH**，11 条带 `tier_demote_reason`（文案「exempt_unbacktested：该类型从未被回测，默认封顶 MED…」）。**本次时点 HIGH = 0**（复验时为 3 条全 `calibrated_ok`）—— 属快照时点/分数衰减的业务漂移，与本轮改动无关（本轮未触碰 `macro_market.py` / `backtest_opportunities.py`）；C1 意图「HIGH 席位必有回测背书」在 HIGH=0 时为空真，不构成回归。
 - **⚠️ 已知抖动**：`/api/market/overview` 是重计算端点，实测多次 **502 / 读超时**（同一次复验内重试 3 次才成功），属该端点既有负载特性，非本次改动引入；复验时按重试即可。**字段名提示**：机会条目的档位字段是 **`conviction_tier`**（`tier` 不存在），成色在 `calibration_status.state`，与 `index.html` 前端一致。
 
+### 🟡 P2 来源表 `internal_dataset` 未回填（复验 `核验_P0证据覆盖率_96fe711_2026-09-27.md` §四，2026-09-27，本次提交）
+
+**现象**：P0 修复后，**论点级 citations** 的 `internal_dataset` 已正确（28/28 为 true），但**顶层来源表 `citation_sources`**（13 条）该字段**全为 `None`**，含前 4 条 url 为空的「代币经济学数据 / 链上持仓数据 / 代币解锁数据 / 合约地址」。评分卡读论点级、结论不受影响，但前端若按来源表判来源性质会拿到未标记状态。
+
+**根因**：`internal_dataset` 回填只写在 `_sanitize*_citations`（**逐论点**回填引用的循环里），**来源表本身从未被 sanitize**；且旧存量行的 `sources_json` 系修复前代码写入，本就没有该键。
+
+**修法**：新增 `db_stats._mark_internal_sources(sources)`（就地、幂等、`None` 安全），判据与论点级 citations **逐字一致**：`internal_dataset = bool(已有标记) or 无 URL`；在读取路径 `get_or_create_research_notebook` 中紧接 `citation_sources` 取值后调用 `_mark_internal_sources(citation_sources)`。**为何用「或 无 URL」而非只读已有标记**：旧存量行没有该键，只读会永远 `None`。**新生成行**无需此步（`_add_structured` 已写 `internal_dataset: True`）。
+
+**探针（`test_research_determinacy_20260926.py`，123 → 127 断言，0 失败）**：来源表用例 `_src_tbl`（`structured/url=None` + `official_website/url=非空`）→ 标记为 `True` / `False`；重复调用幂等；`_mark_internal_sources(None) == []`；源码结构断言读取路径确实调用。
+
+**本轮其余遗留处置**：
+- **板块错配（P2，DefiLlama 标 `Launchpad`、系统标 `sector=defi`）**：复验方独立用 DefiLlama 公开 API 证实 `pons-v1/pons-v2` 的 `tvl` 与 `currentChainTvls` **均为空**（⇒ 遗留 #2 **关闭为「数据源无该指标」**，不再当代码缺陷）。但系统仍把 PONS 归 `defi`、拿 Aave/1inch/Aerodrome 做估值对标、TVL 指标悬空 —— **属分类数据问题，建议独立开工单「PONS sector 重分类 defi → launchpad」**，本单不改码（改分类会影响赛道聚合与竞品选择，需单独评估）。
+- **A3 门槛边界（P2，28.24 vs 30 差 1.76）**：按上一轮约定**仅留档、不加断言**，接受。
+
 ### 9 币盘面告警邮件 NEW-A / P1-2 / NEW-B 处置（审计_9币盘面告警邮件_2026-09-27，2026-09-27，本次提交）
 
 来源：`audit_9币盘面告警邮件_2026-09-27.md`（修复后第一封真实告警邮件；首轮 4×P0 + P1-1 + 两轮复验 NEW-1/NEW-2 已 prod 实证闭环）。本轮按用户「按你的判断处理」取 **NEW-A + P1-2 + NEW-B** 三项（NEW-C/NEW-D/NEW-E 暂缓）。

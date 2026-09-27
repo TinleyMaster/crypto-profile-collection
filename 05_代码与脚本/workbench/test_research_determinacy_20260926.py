@@ -179,6 +179,19 @@ check('new_item["is_inferred"] = not _has_valid_citation(new_item)' in _DB_SRC,
       "#6 生成侧/读取侧 is_inferred 均按「有效引用」（url 非空）判定")
 check('"internal_dataset": bool(s.get("internal_dataset"))' in _DB_SRC,
       "#P0 引用回填 internal_dataset（不删条目，仅标记，兼容旧行）")
+
+# 🆕 P2（复验 核验_P0证据覆盖率_96fe711 §四）：sanitize 原只作用于论点级 citations，
+# 顶层来源表（citation_sources）的 internal_dataset 全为 None → 前端无法判别来源性质。
+_src_tbl = [{"type": "structured", "title": "代币经济学数据", "url": None},
+            {"type": "official_website", "title": "官网", "url": "https://pons.example/"}]
+ds._mark_internal_sources(_src_tbl)
+check(_src_tbl[0]["internal_dataset"] is True and _src_tbl[1]["internal_dataset"] is False,
+      "#P2 来源表补齐 internal_dataset（无 URL 即内部数据类别）", _src_tbl)
+ds._mark_internal_sources(_src_tbl)
+check(_src_tbl[0]["internal_dataset"] is True, "#P2 来源表标记幂等", _src_tbl)
+check(ds._mark_internal_sources(None) == [], "#P2 None/空表安全", None)
+check("_mark_internal_sources(citation_sources)" in _DB_SRC,
+      "#P2 读取路径对 citation_sources 调用标记")
 check("sources_json" in _DB_SRC and "citation_sources" in _DB_SRC,
       "#6 生成时刻来源清单已持久化并透出 citation_sources")
 check('const sources = d.citation_sources || d.sources || [];' in _HTML_SRC,

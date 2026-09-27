@@ -3593,6 +3593,9 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
     citation_sources: list = []
     if thesis:
         citation_sources = thesis.get("sources") or (snapshot.get("sources") or [])
+        # 复验 P2（核验_P0证据覆盖率_96fe711 §四）：sanitize 原先只作用于论点级 citations，
+        # 来源表未标 internal_dataset → 前端若按来源表判性质会拿到 None。此处补齐（幂等）。
+        _mark_internal_sources(citation_sources)
         thesis["structured_metrics"] = structured_metrics
         # 审计 P0-4：结论快照 vs 实时指标背离即标「结论已过期」（价格差 >2% / OI·费率方向反转）
         thesis["drift"] = _detect_thesis_drift(thesis, structured_metrics)
@@ -4151,6 +4154,20 @@ def _is_self_serving_source(s: dict) -> bool:
     except Exception:
         pass
     return False
+
+
+def _mark_internal_sources(sources: list | None) -> list:
+    """就地给来源表补 `internal_dataset` 标记（复验 P2，核验_P0证据覆盖率_96fe711 §四）。
+
+    与 `_sanitize*_citations` 回填论点级引用的判据逐字一致：**无 URL 即内部数据类别**
+    （结构化数据类别，不可核验、只可用于展示）。兼容旧存量行（`sources_json` 由修复前
+    代码写入，无该标记 ⇒ 原样返回 None，前端无法判别来源性质）。幂等，可重复调用。
+    """
+    for s in (sources or []):
+        if isinstance(s, dict):
+            s["internal_dataset"] = bool(s.get("internal_dataset")) \
+                or not str(s.get("url") or "").strip()
+    return sources or []
 
 
 def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) -> dict | None:

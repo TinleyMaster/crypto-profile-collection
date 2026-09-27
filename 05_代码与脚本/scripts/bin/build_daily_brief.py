@@ -184,6 +184,109 @@ def _check_snapshot_gap(days: int = 7) -> list[str]:
     return missing
 
 
+# W-12：变更日志需追踪的关键指标 → 越阈阈值（> 上阈 或 < 下阈 即记「越阈」）
+_M0_DELTA_METRIC_THRESHOLDS = {"fear_greed": [25, 75]}
+
+
+def _extract_delta_view(brief: dict) -> dict:
+    """W-12：从 brief 抽取逐日对比视图（机会方向 / 风险标的 / 关键指标值）。"""
+    opps: dict = {}
+    for o in (brief.get("M8_opportunities") or []) + (brief.get("M8_watchlist") or []):
+        o = o or {}
+        t = str(o.get("target") or o.get("asset") or "").strip()
+        if t and t not in opps:
+            opps[t] = {
+                "direction": str(o.get("direction") or ""),
+                "reason": str(o.get("trigger_logic") or o.get("reason") or "")[:80],
+                "score": o.get("conviction_score"),
+            }
+    risks: dict = {}
+    for r in (brief.get("M4_risks") or []):
+        t = str((r or {}).get("target") or "").strip()
+        if t:
+            risks[t] = {"reason": str((r or {}).get("trigger_logic") or "")[:80]}
+    m0 = brief.get("M0_tldr") or {}
+    metrics: dict = {}
+    if m0.get("fear_greed") is not None:
+        try:
+            metrics["fear_greed"] = float(m0["fear_greed"])
+        except (TypeError, ValueError):
+            pass
+    return {"opps": opps, "risks": risks, "metrics": metrics}
+
+
+def _build_m0_delta(brief: dict, prev_payload: dict | None) -> dict | None:
+    """W-12：与 T-1 早报 diff，返回五类字段齐全的 M0_delta。
+
+    `prev_payload` 为空（无 T-1 行）→ 返回 None，由调用方落 no_baseline 标记。
+    「维持」天数从昨日 M0_delta 的 维持/新增 条目续期（缺省 1 天）。
+    """
+    if not prev_payload:
+        return None
+    cur = _extract_delta_view(brief)
+    prev = _extract_delta_view(prev_payload)
+
+    _keep_days: dict = {}
+    _pd = prev_payload.get("M0_delta") or {}
+    if isinstance(_pd, dict):
+        for _e in (_pd.get("维持") or []) + (_pd.get("新增") or []):
+            _e = _e or {}
+            _t = str(_e.get("target") or "")
+            if _t:
+                try:
+                    _keep_days[_t] = int(_e.get("days") or 1)
+                except (TypeError, ValueError):
+                    _keep_days[_t] = 1
+
+    keep, added, flipped = [], [], []
+    for t, c in cur["opps"].items():
+        p = prev["opps"].get(t)
+        if p is None:
+            added.append({"target": t, "direction": c["direction"]})
+        elif p.get("direction") == c.get("direction"):
+            keep.append({"target": t, "direction": c["direction"],
+                         "days": _keep_days.get(t, 1) + 1, "reason": c.get("reason") or ""})
+        else:
+            flipped.append({"target": t, "from": p.get("direction") or "—",
+                            "to": c.get("direction") or "—", "reason": c.get("reason") or ""})
+    new_risk = [{"target": t} for t in cur["risks"] if t not in prev["risks"]]
+    crossed = []
+    for m, cv in cur["metrics"].items():
+        pv = prev["metrics"].get(m)
+        if pv is None:
+            continue
+        for th in _M0_DELTA_METRIC_THRESHOLDS.get(m, []):
+            if (pv < th <= cv) or (pv > th >= cv):
+                crossed.append({"metric": m, "prev": pv, "curr": cv, "threshold": th})
+    return {"维持": keep, "新增": added, "方向反转": flipped,
+            "新增风险": new_risk, "越阈": crossed}
+
+
+def _read_prev_brief_payload(brief_date: str) -> dict | None:
+    """W-12：读 T-1 早报完整 payload；无行 / 失败返回 None（不阻断主流程）。"""
+    try:
+        import json
+
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT payload FROM biz.daily_brief_snapshot WHERE brief_date = %s",
+                    (brief_date,),
+                )
+                row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        p = row[0]
+        return p if isinstance(p, dict) else json.loads(p)
+    except Exception as e:
+        print(f"[brief_delta] 读取 T-1 brief 失败: {e}")
+        return None
+
+
 def main() -> dict:
     stale = _check_data_freshness()
     today = get_market_overview(force_refresh="1")  # 快照必须最新，绕过 CACHE_TTL
@@ -201,11 +304,23 @@ def main() -> dict:
     if _gap:
         brief.setdefault("M9_degraded", []).append(
             f"market_overview_snapshot 缺日（最近7天缺 {len(_gap)} 天：{', '.join(_gap)}）")
+    # W-12：变更日志（与 T-1 早报 diff）；无 T-1 行 → no_baseline（渲染层输出 W-11 提示，不出空块）
+    _prev_payload = _read_prev_brief_payload(y_date)
+    _delta = _build_m0_delta(brief, _prev_payload)
+    if _delta is None:
+        brief["M0_delta"] = {"status": "no_baseline", "baseline_date": y_date}
+        print(f"[brief_delta] 无 T-1 brief（{y_date}），变更日志输出「无昨日基准」")
+    else:
+        brief["M0_delta"] = _delta
+        print("[brief_delta] 与 {} 对比：维持{} / 新增{} / 反转{} / 新增风险{} / 越阈{}".format(
+            y_date, len(_delta["维持"]), len(_delta["新增"]), len(_delta["方向反转"]),
+            len(_delta["新增风险"]), len(_delta["越阈"])))
     save_snapshot(date.today().isoformat(), today)  # 落库供明日 diff
     _save_brief_snapshot(date.today().isoformat(), brief)  # W-06：完整 brief 落库（P2 前置）
 
     print("M0:", brief.get("M0_tldr"))
     print("DIFF:", brief.get("DIFF"))
+    print("M0_delta:", brief.get("M0_delta"))
     return brief
 
 

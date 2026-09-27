@@ -8190,6 +8190,23 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
                 "风险等级": u.get("risk_level"),
             })
 
+        # W-15：风险后验统计（复用 biz.scan_edge_daily；告警级口径，样本可能不足须如实标注）
+        _aq = brief.get("M0_alert_quality") or {}
+        _pp = []
+        if _aq.get("report_date"):
+            _pp.append(f"报告日 {_aq['report_date']}")
+        if _aq.get("alerts_n") is not None:
+            _pp.append(f"样本(告警) {_aq['alerts_n']} 条")
+        if _aq.get("win_1h") is not None:
+            try:
+                _pp.append(f"T+1h 胜率 {float(_aq['win_1h']) * 100:.1f}%")
+            except (TypeError, ValueError):
+                pass
+        if _aq.get("regime_label"):
+            _pp.append(f"环境 {_aq['regime_label']}")
+        _posterior_lines = ("- " + " · ".join(_pp)) if _pp else \
+            "- （暂无后验样本：该表样本不足，风险条目须标「无后验样本 · 经验判断」）"
+
         # ── 数据可用性块（missing ≠ 0；W-07 下钻到字段级）────────────
         # 根因 1：M2_whale_moves.status='empty'（无样本）时 net_exchange_usd 仍为 0，
         #   旧 prompt 用 .get(..., 0) 渲染成「交易所净流入：0.0M USD」，LLM 读成
@@ -8238,7 +8255,9 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
       "confidence": "high/medium/low"
     }
   ],
-  "risk_warnings": ["2-3个主要风险点，每条一句话"],
+  "risk_warnings": [
+    "2-3个主要风险点，每条按模板：{指标} = {当前值}（截至 {as_of}）；{阈值} 以上属{风险类型}；历史 {N} 次进入该区间后 {T} 日最大回撤中位数 {X}%（样本 {N}，窗口 {起}~{止}）。无后验样本时，末段改写为（无后验样本 · 经验判断）"
+  ],
   "watchlist": ["3-5个值得重点关注的币种或赛道"],
   "no_trade_reason": "当 trade_suggestions 为空数组时必填：为什么今天不动是对的，一句话"
 }
@@ -8259,6 +8278,10 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 7. 某维度显示「暂无数据」时，不得在结论中表述为「零」「无」「没有压力」等；
    只能表述为「该维度数据不可用，不能据此判断」。
 8. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
+9. 风险条目必须可判定：每条必须含「指标 + 当前值 + 数值阈值 + 风险类型」；
+   若【风险后验统计】中该指标有历史样本，须按模板补「历史 N 次…（样本 N，窗口 起~止）」；
+   若无后验样本，末段必须显式写「（无后验样本 · 经验判断）」，不得伪装成统计结论。
+   不含数值阈值的风险条目不得写入 risk_warnings（渲染层会把它移出「风险」区）。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
@@ -8306,6 +8329,9 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 
 【即将解锁（未来14天，按金额排序）】
 {chr(10).join(f'- {u["币种"]}: {u["日期"]} 解锁 {u["金额_M"]}M USD，占流通 {u["占流通_pct"]}%，风险{u["风险等级"]}' for u in unlock_top)}
+
+【风险后验统计（来源 biz.scan_edge_daily，告警级口径；样本可能不足，不足时必须如实标注）】
+{_posterior_lines}
 
 请基于以上数据，生成今日的市场定调和交易建议。"""
 

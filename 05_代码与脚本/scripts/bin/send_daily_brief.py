@@ -507,6 +507,102 @@ def _build_target_registry(brief: dict, ai_trade_ready: list):
     return owners, arbitrations
 
 
+# ── W-12：变更日志（与昨日 diff）渲染 ──
+_M0_DELTA_DIR_CN = {"long": "看多", "short": "看空", "watch": "观望",
+                    "neutral": "中性", "no_trade": "无操作", "": "—"}
+_M0_DELTA_METRIC_CN = {"fear_greed": "恐贪指数"}
+
+
+def _m0_delta_dir(d) -> str:
+    s = str(d or "")
+    return _M0_DELTA_DIR_CN.get(s, s or "—")
+
+
+def _m0_delta_metric(m) -> str:
+    return _M0_DELTA_METRIC_CN.get(str(m), str(m))
+
+
+# ── W-15：风险条目可判定化（阈值 + 后验）──
+_RISK_THRESHOLD_KW = ("阈值", "以上", "以下", "超过", "跌破", "站上", "高于", "低于",
+                      "超买", "超卖", "≥", "<=", ">=", "＞", "＜")
+_POSTERIOR_SAMPLE_RE = re.compile(r"样本\s*\d|历史\s*\d+\s*次|窗口\s*\S*\d")
+
+
+def _risk_has_threshold(text) -> bool:
+    """W-15：风险条目是否含「数值 + 阈值词」的可判定条件。"""
+    s = str(text or "")
+    return any(c.isdigit() for c in s) and any(k in s for k in _RISK_THRESHOLD_KW)
+
+
+def _risk_mark_posterior(text) -> str:
+    """W-15：无后验样本的风险条目必须显式标「（无后验样本 · 经验判断）」。"""
+    s = str(text or "")
+    if _POSTERIOR_SAMPLE_RE.search(s):
+        return s
+    return s + "（无后验样本 · 经验判断）"
+
+
+def _m0_delta_html(brief: dict) -> str:
+    """W-12：变更日志，置于 M0 定调之后的第二块。
+
+    - `M0_delta` 缺失（旧 payload）→ 不出块；
+    - `no_baseline` → 输出 W-11 同款「无昨日基准」提示，不输出空块；
+    - 有基准但五类全空 → 显式「较上一期无变化」（区分"变化/未变化"）；
+    - 有变化 → 按 维持/新增/方向反转/新增风险/越阈 五类分列。
+    """
+    d = brief.get("M0_delta")
+    if not isinstance(d, dict):
+        return ""
+    if d.get("status") == "no_baseline":
+        _bd = d.get("baseline_date") or "昨日"
+        _inner = (f'<div style="font-size:11px;color:#b45309">'
+                  f'⚠️ 无昨日基准（{_bd} 快照缺失），本期无变化对比</div>')
+    else:
+        _rows = []
+        _keep = d.get("维持") or []
+        if _keep:
+            _t = "、".join(
+                f"{e.get('target')} {_m0_delta_dir(e.get('direction'))}（第 {e.get('days')} 日）"
+                for e in _keep[:6])
+            _rows.append(f'<div style="font-size:11px;color:#475569;line-height:1.7">'
+                         f'<span style="color:#0f766e;font-weight:700">维持</span> {_t}</div>')
+        _add = d.get("新增") or []
+        if _add:
+            _t = "、".join(f"{e.get('target')} {_m0_delta_dir(e.get('direction'))}" for e in _add[:6])
+            _rows.append(f'<div style="font-size:11px;color:#475569;line-height:1.7">'
+                         f'<span style="color:#1d4ed8;font-weight:700">新增</span> {_t}</div>')
+        _flip = d.get("方向反转") or []
+        if _flip:
+            _t = "；".join(
+                f"{e.get('target')} {_m0_delta_dir(e.get('from'))} → {_m0_delta_dir(e.get('to'))}"
+                + (f'（{_clip(e.get("reason"), 40)}）' if e.get("reason") else "")
+                for e in _flip[:5])
+            _rows.append(f'<div style="font-size:11px;color:#475569;line-height:1.7">'
+                         f'<span style="color:#b45309;font-weight:700">方向反转</span> {_t}</div>')
+        _nr = d.get("新增风险") or []
+        if _nr:
+            _t = "、".join(str(e.get("target")) for e in _nr[:6])
+            _rows.append(f'<div style="font-size:11px;color:#475569;line-height:1.7">'
+                         f'<span style="color:#dc2626;font-weight:700">新增风险</span> {_t}</div>')
+        _cr = d.get("越阈") or []
+        if _cr:
+            _t = "；".join(
+                f'{_m0_delta_metric(e.get("metric"))} {e.get("prev")} → {e.get("curr")}'
+                f'（阈值 {e.get("threshold")}）' for e in _cr[:5])
+            _rows.append(f'<div style="font-size:11px;color:#475569;line-height:1.7">'
+                         f'<span style="color:#7c3aed;font-weight:700">越阈</span> {_t}</div>')
+        _inner = ("".join(_rows) if _rows
+                  else '<div style="font-size:11px;color:#64748b">较上一期无变化'
+                       '（机会 / 风险 / 关键指标均未变）</div>')
+    return f"""
+      <!-- 模块0.05：变更日志（W-12）-->
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:6px">📋 与昨日变化</div>
+        {_inner}
+      </div>
+    """
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -728,12 +824,26 @@ def render_brief_html(brief: dict) -> str:
             </div>
             """)
 
-        # 风险提示
+        # 风险提示（W-15：可判定化——含数值阈值者进「风险」区，其余移入「注意事项」）
         if ai_risk_warnings:
-            risk_html = "<br>".join(f"⚠️ {r}" for r in ai_risk_warnings[:3])
-            html_parts.append(f"""
+            _risk_ok, _risk_note = [], []
+            for _r in ai_risk_warnings[:5]:
+                (_risk_ok if _risk_has_threshold(_r) else _risk_note).append(_r)
+            if _risk_note:
+                print(f"[render_brief_html] 风险条目移出「风险」区（无数值阈值）："
+                      f"{'；'.join(str(r)[:40] for r in _risk_note)}")
+            if _risk_ok:
+                risk_html = "<br>".join(f"⚠️ {_risk_mark_posterior(r)}" for r in _risk_ok[:3])
+                html_parts.append(f"""
             <div style="font-size:11px;color:#fca5a5;margin-top:8px;line-height:1.6">
               {risk_html}
+            </div>
+            """)
+            if _risk_note:
+                note_html = "<br>".join(f"· {r}" for r in _risk_note[:3])
+                html_parts.append(f"""
+            <div style="font-size:11px;color:#94a3b8;margin-top:6px;line-height:1.6">
+              <span style="color:#cbd5e1;font-weight:600">注意事项（无可判定阈值·不构成风险判定）：</span><br>{note_html}
             </div>
             """)
 
@@ -748,6 +858,11 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;color:#e2e8f0;line-height:1.5">{tldr_text or '今日大盘数据更新中...'}</div>
           </div>
         """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.05：📋 与昨日变化（W-12 变更日志；M0 之后的第二块）
+    # ════════════════════════════════════════════════════════
+    html_parts.append(_m0_delta_html(brief))
 
     # ════════════════════════════════════════════════════════
     # 模块 0.1：📋 数据状态（W-07 置顶；M0 定调之后、第一张数据卡之前）

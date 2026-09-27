@@ -1022,5 +1022,143 @@ except Exception as _e:
     check(False, "W-11 渲染用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
+# W-12 变更日志（与昨日 diff）
+# ════════════════════════════════════════════════════════
+print("[W-12] 源码核验：delta 函数 + 五类字段 + 渲染块位置")
+try:
+    _bdb_src12 = open(os.path.join(_SCRIPTS_BIN, "build_daily_brief.py"), encoding="utf-8").read()
+    check("def _build_m0_delta(" in _bdb_src12, "build_daily_brief 含 _build_m0_delta")
+    check("def _extract_delta_view(" in _bdb_src12, "build_daily_brief 含 _extract_delta_view")
+    check("def _read_prev_brief_payload(" in _bdb_src12, "build_daily_brief 含 _read_prev_brief_payload")
+    check('brief["M0_delta"] = _delta' in _bdb_src12 and '"status": "no_baseline"' in _bdb_src12,
+          "main() 落 M0_delta；无 T-1 行时置 no_baseline")
+    _sdb_src12 = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+    check("def _m0_delta_html(" in _sdb_src12, "send_daily_brief 含 _m0_delta_html")
+    check("📋 与昨日变化" in _sdb_src12, "渲染块标题「与昨日变化」")
+    check("模块 0.05" in _sdb_src12, "变更日志置于 M0 之后的第二块（模块 0.05）")
+except Exception as _e:
+    check(False, "W-12 源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-12] 纯函数：五类字段齐全 + 维持续期 + 反转 + 新增风险 + 越阈")
+try:
+    import build_daily_brief as _bdb12  # noqa: E402
+    check(_bdb12._build_m0_delta({"M0_tldr": {}}, None) is None, "无 T-1 行 → 返回 None")
+    _today12 = {
+        "M0_tldr": {"fear_greed": 82},
+        "M8_opportunities": [
+            {"target": "SOL", "direction": "long", "trigger_logic": "ETF 流入"},
+            {"target": "ETH", "direction": "long", "trigger_logic": "新入选"},
+        ],
+        "M8_watchlist": [{"target": "ADA", "direction": "short", "trigger_logic": "反转为空"}],
+        "M4_risks": [{"target": "MVRV"}],
+    }
+    _prev12 = {
+        "M0_tldr": {"fear_greed": 70},
+        "M8_opportunities": [
+            {"target": "SOL", "direction": "long", "trigger_logic": "旧理由"},
+            {"target": "ADA", "direction": "long", "trigger_logic": "旧方向"},
+        ],
+        "M4_risks": [],
+        "M0_delta": {"维持": [{"target": "SOL", "days": 3}], "新增": []},
+    }
+    _d12 = _bdb12._build_m0_delta(_today12, _prev12)
+    check(set(_d12.keys()) == {"维持", "新增", "方向反转", "新增风险", "越阈"},
+          f"五类字段齐全（实得 {sorted(_d12.keys())}）")
+    _sol12 = next(e for e in _d12["维持"] if e["target"] == "SOL")
+    check(_sol12["days"] == 4, f"维持天数续期（3+1=4，实得 {_sol12['days']}）")
+    check(any(e["target"] == "ETH" for e in _d12["新增"]), "ETH 判为新增")
+    _ada12 = next(e for e in _d12["方向反转"] if e["target"] == "ADA")
+    check(_ada12["from"] == "long" and _ada12["to"] == "short", "ADA 判为方向反转（long→short）")
+    check(any(e["target"] == "MVRV" for e in _d12["新增风险"]), "MVRV 判为新增风险")
+    check(any(e["metric"] == "fear_greed" and e["threshold"] == 75 for e in _d12["越阈"]),
+          "恐贪 70→82 判为越阈 75")
+except Exception as _e:
+    check(False, "W-12 纯函数用例执行", f"{type(_e).__name__}: {_e}")
+
+print("[W-12] 渲染：no_baseline → W-11 提示；有变化分列；无变化显式")
+try:
+    _b12a = _brief()
+    _b12a["M0_delta"] = {"status": "no_baseline", "baseline_date": "2026-09-26"}
+    _h12a = sdb.render_brief_html(_b12a)
+    check("📋 与昨日变化" in _h12a, "变更日志块渲染")
+    check("无昨日基准（2026-09-26 快照缺失），本期无变化对比" in _h12a, "no_baseline → 输出 W-11 提示（不出空块）")
+
+    _b12b = _brief()
+    _b12b["M0_delta"] = {
+        "维持": [{"target": "SOL", "direction": "long", "days": 4, "reason": ""}],
+        "新增": [{"target": "XPL", "direction": "long"}],
+        "方向反转": [{"target": "ADA", "from": "long", "to": "no_trade", "reason": "ETF 转流出"}],
+        "新增风险": [{"target": "MVRV 高估"}],
+        "越阈": [{"metric": "fear_greed", "prev": 70, "curr": 82, "threshold": 75}],
+    }
+    _h12b = sdb.render_brief_html(_b12b)
+    check("SOL 看多（第 4 日）" in _h12b, "维持行含 标的/方向/第 N 日")
+    check("XPL 看多" in _h12b, "新增行渲染")
+    check("ADA 看多 → 无操作" in _h12b, "方向反转行渲染 from → to")
+    check("MVRV 高估" in _h12b, "新增风险行渲染")
+    check("恐贪指数 70 → 82（阈值 75）" in _h12b, "越阈行渲染（metric 中文化）")
+    check("较上一期无变化" not in _h12b, "有变化时不出现「无变化」")
+
+    _b12c = _brief()
+    _b12c["M0_delta"] = {"维持": [], "新增": [], "方向反转": [], "新增风险": [], "越阈": []}
+    check("较上一期无变化" in sdb.render_brief_html(_b12c), "五类全空 → 显式「较上一期无变化」")
+    check("📋 与昨日变化" not in sdb.render_brief_html(_brief()),
+          "无 M0_delta 字段（旧 payload）→ 不出块")
+
+    _b12d = _brief()
+    _b12d["M0_ai_summary"]["data_quality"] = [{"section": "大盘概况", "status": "ok"}]
+    _b12d["M0_delta"] = {"status": "no_baseline", "baseline_date": "2026-09-26"}
+    _h12d = sdb.render_brief_html(_b12d)
+    _i_ai12 = _h12d.find("AI Morning Call")
+    _i_d12 = _h12d.find("📋 与昨日变化")
+    _i_st12 = _h12d.find("📋 数据状态")
+    check(_i_ai12 < _i_d12 < _i_st12, "块序：AI 定调 → 变更日志 → 数据状态（第二块）",
+          f"idx={_i_ai12}/{_i_d12}/{_i_st12}")
+except Exception as _e:
+    check(False, "W-12 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-15 风险条目可判定化（数值阈值 + 后验）
+# ════════════════════════════════════════════════════════
+print("[W-15] 源码核验：模板 / 渲染校验 / 后验统计源")
+try:
+    check("风险条目必须可判定" in _mm_src, "system prompt 含第 9 条风险可判定约束")
+    check("无后验样本 · 经验判断" in _mm_src, "prompt schema 含「无后验样本 · 经验判断」")
+    check("【风险后验统计（来源 biz.scan_edge_daily" in _mm_src, "user_prompt 含后验统计块")
+    _sdb_src15 = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+    check("def _risk_has_threshold(" in _sdb_src15 and "def _risk_mark_posterior(" in _sdb_src15,
+          "渲染层含阈值 / 后验校验函数")
+    check("注意事项（无可判定阈值·不构成风险判定）" in _sdb_src15, "无阈值条目移入「注意事项」区")
+except Exception as _e:
+    check(False, "W-15 源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-15] 渲染：无阈值 → 不进风险区；有后验 → 不加「经验判断」；无后验 → 加标注")
+try:
+    _b15 = _brief()
+    _b15["M0_ai_summary"]["risk_warnings"] = [
+        "恐贪指数极度贪婪，市场情绪过热可能引发短期剧烈回调",               # 无数值阈值
+        "BTC RSI 70.4 超买，84 以上属超买风险（样本 12，窗口 09-01~09-25）",  # 有阈值 + 后验
+    ]
+    _buf15 = io.StringIO()
+    with contextlib.redirect_stdout(_buf15):
+        _h15 = sdb.render_brief_html(_b15)
+    _i_note15 = _h15.find("注意事项（无可判定阈值")
+    _i_greed15 = _h15.find("恐贪指数极度贪婪")
+    check(_i_note15 != -1 and _i_greed15 > _i_note15, "无阈值条目落在「注意事项」区（不在风险区）")
+    check("RSI 70.4 超买" in _h15, "有阈值条目进「风险」区")
+    check("经验判断" not in _h15, "有后验样本的条目不加「经验判断」")
+    check("风险条目移出「风险」区" in _buf15.getvalue(), "移出动作写入渲染日志", _buf15.getvalue()[-160:])
+
+    _b15b = _brief()
+    _b15b["M0_ai_summary"]["risk_warnings"] = ["BTC RSI 70.4 超买，84 以上属超买风险"]
+    _h15b = sdb.render_brief_html(_b15b)
+    check("（无后验样本 · 经验判断）" in _h15b, "无后验样本 → 追加「（无后验样本 · 经验判断）」")
+
+    check(sdb._risk_has_threshold("恐贪指数极度贪婪，可能引发回调") is False, "无数字 → 判为无可判定阈值")
+    check(sdb._risk_has_threshold("MVRV 3.2 阈值以上属高估") is True, "数字 + 阈值词 → 判为可判定")
+except Exception as _e:
+    check(False, "W-15 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

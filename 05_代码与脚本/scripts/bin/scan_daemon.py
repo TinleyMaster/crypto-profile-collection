@@ -216,12 +216,16 @@ def _load_funding_map(conn) -> dict[str, float]:
       同时把候选别名一并注册（'BTCUSDT' 行也注册 'BTC'），使查询侧只需遍历候选；
     - 同符号存在多行历史快照（BTC 12 行），无 ORDER BY 时取到哪条不确定，
       故用 DISTINCT ON 取 fetched_at 最新的一条（审计 P2-4）。
+    - 同时限制快照年龄 `FUNDING_STALE_H`（审计 NEW-B）：源库未覆盖的币会留下很旧的
+      最后一条快照（LSK 12 天），原实现照取 ⇒ 把陈旧费率当期值渲染。超窗直接不供值。
     """
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             "SELECT DISTINCT ON (symbol) symbol, funding_rate "
             "FROM biz.asset_derivatives WHERE funding_rate IS NOT NULL "
-            "ORDER BY symbol, fetched_at DESC"
+            "AND fetched_at > NOW() - make_interval(hours => %s) "
+            "ORDER BY symbol, fetched_at DESC",
+            (FUNDING_STALE_H,),
         )
         out: dict[str, float] = {}
         for r in cur.fetchall():
@@ -537,6 +541,12 @@ MAX_KLINE_AGE_MIN = {"5m": 15, "15m": 35, "1h": 80}
 MAX_OI_BUCKET_AGE_MIN = 20
 # 蓄势池：按小时聚合的 OI 桶允许的最大年龄（分钟）
 MAX_OI_ACC_AGE_MIN = 90
+# 资金费率快照允许的最大年龄（小时）。审计_9币盘面告警邮件_2026-09-27 §二.NEW-B：
+# `_load_funding_map` 原先取每符号 `fetched_at` 最新一条却**不限年龄** ⇒ 源库未覆盖的
+# 币会把陈旧费率当作当期值渲染（邮件 LSK -0.4781% 实为 09-14 的快照、陈旧 12 天；
+# 同批 GALA 9 天 / LA 4 天 / MOODENG 3 天）。采集 `derivatives_batch` 每 6h 一轮、
+# 覆盖 top200 + 近 7 天信号币，正常应 ≤6h ⇒ 超窗（留足 4 轮余量）视为陈旧，不供值。
+FUNDING_STALE_H = 24
 # ── L0 市场环境阈值（审计 P1-2 标定）─────────────────────────────
 # 原值 `btc_1h ±1.0` / `fgi 25·75` / `cap_trend ±1.0` 里两个近乎死条件。用近 7 天
 # 「up + OI↑」触发子集（context_tags 回放，n=98）复算：原阈值下唯一真正降级的维度
@@ -1085,6 +1095,9 @@ def _detect_brk(k1h: list[dict], acc_range: tuple[float, float], now: datetime,
 def task_scan_accumulation() -> dict:
     """蓄势池 ACC/BRK 扫描（单轮）。"""
     with _db() as conn:
+        # NEW-A（审计_9币盘面告警邮件_2026-09-27 §二）：BRK 需与主池同口径接入 L0 市场
+        # 环境（原实现硬编码 `"high"` 绕过 regime，见下方 BRK 分支注释）。
+        regime = _build_regime(conn)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             # 此处**刻意不过滤 source**（与新鲜度判断、主池 OI 变化不同）：
             # 蓄势池 ACC 需要「连续 ≥12 个小时桶」，而实时 5m 采样在停摆/部署窗口
@@ -1199,11 +1212,28 @@ def task_scan_accumulation() -> dict:
             if bar_tag in brk_done.get(sym, set()):
                 brk_dup_skipped += 1
                 continue
+            # P1-2 复发（审计_9币盘面告警邮件_2026-09-27 §二）：BRK 原先落
+            # `price_chg_pct=None` ⇒ 卡片涨幅渲染成 `-`，与失效位并列时「风险回报」无从
+            # 评估（本封 9 币里 6 个 BRK 皆如此）。取触发根（已收盘条 closed[-1]）相对
+            # 前一根的涨跌幅，与主池「触发根涨跌幅」同口径。
+            _prev_c = float(closed[-2]["close_px"]) if len(closed) >= 2 else 0.0
+            brk_chg = ((float(closed[-1]["close_px"]) - _prev_c) / _prev_c * 100
+                       if _prev_c else None)
+            # NEW-A（同审计 §二）：BRK 原先硬编码 `"high"` ⇒ 完全绕过 L0 市场环境，而
+            # `_load_alert_candidates` 无条件收 BRK ⇒ 图例「受限方向信号被降级
+            # high→medium、告警只取 high ⇒ 该方向本轮不发信」对 BRK 变成假声明（本封
+            # 9 币里 6 个 BRK，页头却写「空头环境受限」）。改为与主池同口径：按突破方向
+            # 是否顺 regime 决定 high/medium。
+            brk_conf = ("high"
+                        if (brk["dir"] == "up" and regime["long_fav"])
+                        or (brk["dir"] == "down" and regime["short_fav"])
+                        else "medium")
             tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}", bar_tag]
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
-                            None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
+                            None if brk_chg is None else round(brk_chg, 2),
+                            "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
-                            _lookup_funding(funding_map, sym), "high", tags,
+                            _lookup_funding(funding_map, sym), brk_conf, tags,
                             round(brk["break_px"], 8),
                             # P2-9：BRK 原先只落 trigger_price、不落 stop_loss_pct
                             # ⇒ 卡片有入场价、无失效位。与主池同口径（2×ATR 夹带）。

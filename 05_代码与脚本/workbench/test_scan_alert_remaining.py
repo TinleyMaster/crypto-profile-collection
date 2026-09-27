@@ -138,6 +138,83 @@ check(sd._atr_stop_pct(_narrow[:5], 100.0) is None,
       "样本不足 → None（不知道就别说，不兜底）")
 
 # ═══════════════════════════════════════════════════════════════
+#  二之二、NEW-A / P1-2 —— BRK 接入 L0 regime + 补落 price_chg_pct（源码 AST）
+#  （审计_9币盘面告警邮件_2026-09-27 §二：BRK 原硬编码 confidence="high" 绕过
+#    `_load_alert_candidates` 的市场环境门禁，且 price_chg_pct=None ⇒ 卡片涨幅 `-`）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【NEW-A】BRK 置信度接入 L0 regime（源码 AST）")
+if acc_fn:
+    acc_src = ast.unparse(acc_fn)
+    check("_build_regime" in _called_names(acc_fn),
+          "task_scan_accumulation 调 `_build_regime(conn)`（BRK 与主池同口径）",
+          "未调 ⇒ BRK 无法接入市场环境")
+    check("brk_conf" in acc_src and "long_fav" in acc_src and "short_fav" in acc_src,
+          "BRK 置信度按突破方向是否顺 regime 决定 high/medium",
+          "缺 brk_conf/long_fav/short_fav ⇒ 仍硬编码或未接 regime")
+
+    _brk_append = None
+    for _n in ast.walk(acc_fn):
+        if (isinstance(_n, ast.Call) and isinstance(_n.func, ast.Attribute)
+                and _n.func.attr == "append" and _n.args
+                and isinstance(_n.args[0], ast.Tuple)
+                and any(isinstance(e, ast.Constant) and e.value == "BRK"
+                        for e in _n.args[0].elts)):
+            _brk_append = _n.args[0]
+            break
+    check(_brk_append is not None, "定位到 BRK 的 signals.append(...) 元组")
+    if _brk_append is not None:
+        check(len(_brk_append.elts) == 18,
+              f"BRK 元组占位符 = 18（与 INSERT 列数一致），实得 {len(_brk_append.elts)}")
+        _price_arg = ast.unparse(_brk_append.elts[6])
+        check(_price_arg != "None",
+              "BRK 落 `price_chg_pct`（非 None 常量）",
+              f"第 7 个参数 = {_price_arg} ⇒ 卡片涨幅仍渲染 `-`")
+        _conf_arg = ast.unparse(_brk_append.elts[12])
+        check('"high"' not in _conf_arg and "'high'" not in _conf_arg,
+              "BRK 置信度不再硬编码字面量 \"high\"",
+              f"第 13 个参数 = {_conf_arg}")
+
+print("\n【NEW-B】费率快照新鲜度护栏（源码 AST + 假 cursor 功能）")
+
+
+class _FakeCur:
+    def __init__(self):
+        self.sql = ""
+        self.params = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql, self.params = sql, params
+
+    def fetchall(self):
+        return []
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def cursor(self, **_kw):
+        return self._cur
+
+
+_fc = _FakeCur()
+_fm_out = sd._load_funding_map(_FakeConn(_fc))
+check("fetched_at" in _fc.sql and "make_interval" in _fc.sql,
+      "_load_funding_map 对快照年龄设限（不再无条件取最新一条）",
+      f"SQL={_fc.sql}")
+check(_fc.params == (sd.FUNDING_STALE_H,),
+      f"快照年龄阈值参数 = FUNDING_STALE_H（{sd.FUNDING_STALE_H}h）",
+      f"got params={_fc.params}")
+check(_fm_out == {}, "假 cursor 返空 → 空 map（无兜底 0）")
+
+# ═══════════════════════════════════════════════════════════════
 #  三、P2-7 / P2-9 —— 生产库不变量（只读；连不上则跳过）
 # ═══════════════════════════════════════════════════════════════
 
@@ -209,6 +286,30 @@ if rows is not None:
         if legacy_missing:
             print(f"    \u2139 历史欠账（不判失败）：标记前 {legacy_missing}/{len(pre)} 条"
                   f"无失效位，属修复前产物，随 24h TTL 自然出窗")
+
+# ═══════════════════════════════════════════════════════════════
+#  四、NEW-B —— 生产库：陈旧费率快照不再被取用（只读；连不上则跳过）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【NEW-B】生产库：陈旧（>FUNDING_STALE_H）费率符号不出现在 funding_map")
+
+try:
+    with sd._db() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT symbol FROM biz.asset_derivatives WHERE funding_rate IS NOT NULL "
+                "GROUP BY symbol HAVING MAX(fetched_at) <= NOW() - make_interval(hours => %s)",
+                (sd.FUNDING_STALE_H,),
+            )
+            stale_syms = [r["symbol"] for r in cur.fetchall()]
+        fm = sd._load_funding_map(conn)
+    leaked = sorted(s for s in stale_syms if s in fm)
+    check(not leaked,
+          f"陈旧（>{sd.FUNDING_STALE_H}h）符号不出现在 funding_map",
+          f"泄漏：{leaked}")
+    print(f"    （库内陈旧符号 {len(stale_syms)} 个，funding_map 覆盖 {len(fm)} 键）")
+except Exception as exc:  # noqa: BLE001
+    skip("生产库不变量（NEW-B）", f"无法连库：{type(exc).__name__}: {exc}")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败 / {skipped} 跳过")
 sys.exit(1 if failed else 0)

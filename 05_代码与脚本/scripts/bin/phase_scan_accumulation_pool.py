@@ -35,6 +35,9 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+# L0 市场环境判据复用 daemon 实现（见下方 BRK 分支 NEW-A 注释）：本脚本是**设计口径
+# 副本**，与 daemon 的 `task_scan_accumulation` 同源；共享 `_build_regime` 以免判据漂移。
+from scan_daemon import _build_regime  # noqa: E402
 
 PRICE_QUIET_THR = 1.5          # 价格平静：单根涨跌幅 < 该值(%)
 VOL_CAP_RATIO = 1.5            # 量能未放大上限：< 近 20 周期均值 × 该值
@@ -139,6 +142,8 @@ def main() -> int:
     settings = get_settings(require_database=True)
     now = datetime.now(timezone.utc)
     with get_connection(settings.database_url) as conn:
+        # NEW-A：BRK 与主池同口径接入 L0 市场环境（见下方 BRK 分支）。
+        regime = _build_regime(conn)
         # 小时级 OI（近 13h）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -200,11 +205,23 @@ def main() -> int:
             brk = detect_brk(sym, k1h, (lo, hi))
             if not brk:
                 continue
+            # P1-2 复发 / NEW-A（审计_9币盘面告警邮件_2026-09-27 §二）：BRK 原先落
+            # `price_chg_pct=None`（卡片涨幅渲染成 `-`、风险回报不可评估）且**硬编码
+            # `"high"`**（绕过 L0 市场环境，使图例「受限方向本轮不发信」变假声明）。
+            # 与 daemon 同口径：补触发根涨跌幅，按突破方向是否顺 regime 决定 high/medium。
+            _prev_c = float(k1h[-2]["close_px"]) if len(k1h) >= 2 else 0.0
+            brk_chg = ((float(k1h[-1]["close_px"]) - _prev_c) / _prev_c * 100
+                       if _prev_c else None)
+            brk_conf = ("high"
+                        if (brk["dir"] == "up" and regime["long_fav"])
+                        or (brk["dir"] == "down" and regime["short_fav"])
+                        else "medium")
             tags = [f"brk_{brk['dir']}", f"vol_x={brk['vol_ratio']:.1f}"]
             signals.append((now, sym, "accumulation", "BRK", "1h", brk["dir"],
-                            None, "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
+                            None if brk_chg is None else round(brk_chg, 2),
+                            "up" if brk["vol_ratio"] >= VOL_CAP_RATIO else "flat",
                             round(brk["vol_ratio"], 2), None, None,
-                            funding_map.get(sym), "high", tags))
+                            funding_map.get(sym), brk_conf, tags))
 
         print(f"[accumulation] OI 小时序列 {len(by_sym_oi)} 符号；ACC={sum(1 for s in signals if s[2]=='ACC')}，"
               f"BRK={sum(1 for s in signals if s[2]=='BRK')}")

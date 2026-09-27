@@ -1519,3 +1519,16 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **#1（🔴 P0）证据覆盖率虚高 ✅ 本轮处置**（见上）。
 
 **未做 / 边界**：① 未改前端（`research.html` 已按 `is_inferred` 渲染「(推断)」徽标，口径修正后自动正确；`internal_dataset` 仅作数据标记，未新增 UI 文案）；② 未对 PONS 做 LLM 重新生成（读路径实时重算已足够验证，且避免无谓消耗）；③ #2 TVL / #4 门槛边界按上表判为不改码；④ 线上 runtime 复验须待 Zeabur 重建后执行。
+
+### 9 币盘面告警邮件 NEW-A / P1-2 / NEW-B 处置（审计_9币盘面告警邮件_2026-09-27，2026-09-27，本次提交）
+
+来源：`audit_9币盘面告警邮件_2026-09-27.md`（修复后第一封真实告警邮件；首轮 4×P0 + P1-1 + 两轮复验 NEW-1/NEW-2 已 prod 实证闭环）。本轮按用户「按你的判断处理」取 **NEW-A + P1-2 + NEW-B** 三项（NEW-C/NEW-D/NEW-E 暂缓）。
+
+- **核实更正（两处与报告不符）**：
+  - **NEW-A 的活跃生产者是 daemon，不是报告点名的 `phase_scan_accumulation_pool.py`**。全仓 grep：该脚本**无** scheduler / 测试 / import 引用（`scheduler.py:219` 注释「scan_accumulation_pool(30min) → scan_daemon」），属**设计口径副本**；真正的 BRK 生产者是 `scan_daemon.task_scan_accumulation`（原 `"high"` 硬编码落在此处 L1206），另 `_load_alert_candidates`（L1287）无条件收 BRK。
+  - **遗留「C 组 4 条漏放行（矿工/miner/上线/stacks）」报告已过期** —— `linker.py` 现已是「删 `矿工|miner|上线` + `stacks(?!\s+of\b)` + 补 `sui`」（`ba96264` 已处理），**无需再做**。
+- **NEW-A（P1，BRK 绕过 L0 regime）**：原 `confidence="high"` 硬编码 ⇒ 图例「受限方向信号被降级 high→medium、告警只取 high ⇒ 该方向本轮不发信」对 BRK 是**假声明**（本封 9 币里 6 个 BRK，页头却写「空头环境受限」）。改为 `task_scan_accumulation` 起始处 `regime = _build_regime(conn)`，BRK 按 `brk['dir']` 是否顺 regime 决定 high/medium（与主池同口径）。**设计副本** `phase_scan_accumulation_pool.py` 同步改为 `from scan_daemon import _build_regime`（共享判据防漂移）。
+- **P1-2 复发（BRK 未落 `price_chg_pct`）**：BRK 原落 `price_chg_pct=None` ⇒ 卡片涨幅渲染 `-`，与「-8.00% 失效位」并列时**风险回报不可评估**（本封 6 个 BRK 皆如此）。改为取触发根（已收盘条 `closed[-1]`）相对前一根的涨跌幅（与主池「触发根涨跌幅」同口径）。失效位 `-8.00%` 本身是既有 `STOP_PCT_MIN=8.0` 夹带设计（已带「已触下限 8%（真实 2×ATR 更窄）」披露 + 图例说明），非本轮缺陷。
+- **NEW-B（费率快照陈旧被当期值渲染，比报告更广）**：报告只说「LSK 单行异常」，prod 只读实测根因是 `_load_funding_map` **无任何年龄护栏** —— LSK 行 `fetched_at=09-14`（**陈旧 12 天**）值 −0.4781%；同批 GALA 9 天 / LA 4 天 / MOODENG 3 天 / 1000FLOKI 缺失。新增常量 `FUNDING_STALE_H = 24`，SQL 加 `fetched_at > NOW() - make_interval(hours => 24)`；超窗不供值（渲染回退「n/a（未覆盖）」）。**prod 实测**：库内陈旧符号 **326** 个、funding_map 仅保留 **189** 键，陈旧符号零泄漏。
+- **探针**：`test_scan_alert_remaining.py` **16 → 26** 断言，新增「二之二 NEW-A/P1-2（源码 AST：`_build_regime` 调用、BRK 元组第 7 参非 `None`、第 13 参非字面量 `"high"`）」6 条 +「NEW-B 假 cursor 功能」3 条 +「NEW-B 生产库陈旧符号零泄漏」1 条。**回归零失败**：`test_scan_alert_audit_20260926`(96/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_onchain_addr`(36/0)、`test_scan_l1_closed_bar`(16/0)、`test_scan_scenario_label`(48/0)、`test_squeeze_alert_silence`(18/18)；`py_compile` 两改动文件通过。
+- **未做 / 边界**：① NEW-C（年化 `×3×365` 假设 8h 结算，实测 7/9 为 ≈4h）需扩采集存 settlement-interval 后再按品种换算，未做；② NEW-D（`_catalyst_entity` 仅认 13 家 CEX + 要求三齐全，ZRO 那条连动作词都没有）需新增「非交易所类实体键」，未做；③ NEW-E（FLOKI 方向打标）P3 且该条已判陈旧、无当前影响，未做；④ 存量信号行不受影响（生产者改动只对**下轮**生效）；⑤ 线上 runtime 复验须待 Zeabur 重建后执行（`push ≠ 线上生效`）。

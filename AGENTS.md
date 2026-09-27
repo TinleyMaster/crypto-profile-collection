@@ -1873,6 +1873,7 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **派生表同步**：`biz.coin_basic.primary_contract_address`（内容取自 `core.asset_contract`，`phase_a_coin_basic.py` 口径：`ORDER BY is_primary DESC, contract_id LIMIT 1`）有 **17 行**同值残留 ⇒ 在同一事务内按**同一口径**对 18 个受影响 asset 重算（SOL 归 NULL、UNCX 归 ethereum 行、BOOP 归 `boopkpWqe…`）。
 - **明确不改（已核）**：① `src_dl.protocol_list.address` = 上游 API 原样落库，重拉即覆盖；② `biz.onchain_holder_snapshot` 13 行 / `onchain_transfer_log` 1 行命中的是 `0xadb2…` 但 **`chain='ethereum'/'eth'`**，属 UNCX 在以太坊的**合法**历史数据（与 solana 脏行共享同一字符串而已），**不动**。
 - **修复后复验（prod 只读）**：solana 链非法形态行 **13 → 0**；3 个待删 `contract_id` 残留 0；15 个 UPDATE 逐行比对真值全 OK；RPC 抽验 3 个还原地址（TAO/PYM/FAB）**全部 `type=mint` / `decimals=9`** ⇒ 大小写还原是**真实账户**，非仅字面整洁。
+- **污染的功能性危害（RPC 对照，决定性证据）**：`getTokenSupply` 对**小写旧值** `taoc6xyv2v8tdlcev4uagugv4vdqswjrgft2kcbrrby` / `7yf97k6jrbkb7bxjyxzmwqlqyxvirltcssgb75qlqan8` 一律 `Invalid param: Invalid`，对**还原后** `taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY` / `7yF97k6jrBkb7BXJYXzmwQLQyxVirLtCSSGb75qLqAN8` 返回真实供应量 ⇒ 小写行**根本取不到链上数据**（本地 sweep 亦见 `TAO 小写 holders=0 supply=None` 而 `9cYXqd… holders=20`）。已删的原生 mint `So1111…1111` 则报 `Invalid param: not a Token mint`（它是 SPL 程序的**原生 mint**，非普通代币 mint —— 顺带说明为何它不该作为 `is_primary` 合约行留存）。
 - **回滚点**：`/Users/tinley/Workbuddy/crypto-profile-collection/回滚点_solana合约地址修复_2026-09-27.json`（含 18 行原始快照 `rows`、逐行判定 `plan`、`deleted_rows`/`updated_rows`、`coin_basic_before` 备份）。
 - **遗留（仍未授权）**：`POPULATE_FROM_DL` 的 1 词列歧义（修好会让长期死路径开始写 2965 行）；若将来启用该路径，须**先剥离 DL 的 `<chain>:token/` 前缀**再入库，否则被新护栏整体拦下（FAB 这类合法地址会丢失映射）。
 

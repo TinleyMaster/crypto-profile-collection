@@ -1824,3 +1824,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - ② **P1-D 未删文件**。工单判其「死代码」有误：`phase_chain_holder_snapshot_auto.py` 虽不被 scheduler/supervisord 调度，但仍是 **`app.py` 工作台可见手动触发任务 `chain_holder_snapshot_auto` 的入口**，直删会使该 UI 任务触发即失败。故仅标 DEPRECATED，并注明「若不再需要手动入口，须先删 `app.py` 条目再删本文件」。
 - **验证**：新探针 `workbench/test_snapshot_freshness_20260927.py` **27/0**（A 组调度四条齐备/每日/错峰/`--limit` 保留；B 组看门狗注册/monitor；C 组判定边界：新鲜/3 天告警/恰 2 天不告警/表空告警/阈值与去重键/复用 upsert/恢复清空；D 组旋转排序/`LIMIT` 保留/北京时间排除；E 组 DEPRECATED/未删/app.py 未悬空/不被调度）。既有回归全绿：`test_scan_alert_header_regime` 135/0、`test_macro_market_board_tier2` 36/0、`test_scan_alert_remaining` 29/0、`test_derivatives_signal_gap` 43/0、`test_funding_interval_20260927` 35/0、`test_risk_signal_p0r2_20260927` 14/0、`test_sector_taxonomy_20260927` 34/0、`test_research_3tier_20260927` 82/0、`test_thesis_forward_track_20260927` 63/0；`py_compile` 5/5 OK；`python3 scheduler.py --list` 已确认四条每日 cron 与新看门狗注册生效。
 - **未做 / 边界（须留档）**：① **runtime 24h 观察未做**（须待 Zeabur 约 6 分钟重建后挂 24h，确认无「滞后>2 天」误告警）。② **DB SELECT 未做**（需 prod 只读凭证，待授权）：各链滞后 / 覆盖率对比 / 每日行情行数是否 ≥ 7000。③ **关联项「行情缺口阈值对齐」未做**：`check_cmc_snapshot_gap.py --threshold 7000` 与 `--top 10000` 的实际每日行数需 DB 核查（若真实 < 7000 则下调阈值或上调 top）；本项属只读核查，本轮未改码。④ 旋转覆盖长尾需**数日收敛**（非即时全量），验收看趋势不看单日。
+
+### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
+
+来源：`诊断_早报与催化剂邮件停发_2026-09-27.md`（诊断假说「两套同时停 = 共同上游 DB 连接池毒化」，未连 prod）。用户授权「修复没发的问题」后，先做 **prod 只读取证**（`sys.task`/`task_log`/`catalyst_notification_log`/`catalyst_signal`/`pg_stat_activity`），结论**推翻原假说**：
+
+- **早报**：`daily_brief_email` 09-27 01:00Z 任务 `done`，`task_log` 明写 `[OK] 早报邮件已发送: 已发送`；**仅 09-26 缺跑**（09-25 23:00Z ~ 09-26 02:23Z 无任何 `[调度]` 提交），即 09-26 白天 scheduler 整日静默（与 `f11f1a3` 09-26 18:40「autorestart 改 true」所修事故同窗）。
+- **催化剂**：`catalyst_notification_log` 显示 `major_event` 09-24 ONDO / 09-25 SUI / **09-26 SKY（10:50Z）** 均 `sent`；**09-27 无候选属正常** —— 近 24h 完整 gate（`tier A/B + open + kind∈{structural,event} + prelaunch_ret_24h≥5 + prelaunch_penalty=0 + ai_event_type≠market_update + 发布 <24h`）**候选 = 0**（48h 仅 2 条，均已 >24h 被正确排除）。daemon 存活正常（`catalyst_grade` 逐小时写入至 08:28Z，`catalyst_signal.updated_at` 距查询 7 分钟）。
+- **连接池**：`pg_stat_activity` 无 `idle in transaction` 长事务（仅 14 条 idle，最长 7h54m，非毒化）。
+- **结论**：非「一个共同上游」，而是两件已自愈/正常的事；真正的结构性缺口是**缺少兜底与可观测**。
+
+**改动（2 文件）**：
+- `workbench/scheduler_watchdog.py`：`KEY_JOBS` 增 `("daily_brief_email", "每日大盘早报邮件（09:00）", 30)`。此前白名单**不含早报**，scheduler 静默失活或发送失败时既无告警也无补跑——即 09-26 丢整天的直接原因（「最后一道防线」对早报缺失）。阈值 30h > 24h 周期，与其余日频任务一致；补跑走既有 `submit_scheduled_task`（`SCHEDULE` 内 `daily_brief_email` 存在，已核）。
+- `scripts/bin/catalyst_fast_daemon.py`：常驻循环新增**连续异常计数**（`consecutive_failures`）与 `FAIL_ALERT_ROUNDS`（默认 4 轮 ≈ 1h，`CATALYST_FAIL_ALERT_ROUNDS` 可覆盖）。此前每轮异常被 `try` 吞掉、**无任何对外信号**（daemon 照常心跳、邮件恒 0 无人知）。现连续 N 轮异常即发一封告警邮件（复用 `catalyst.notifier._send_email`，**不依赖 DB**，避免与故障同源），同一段连续故障内只告警一次，恢复后计数归零可再告警。
+
+**验证**：`py_compile` 2/2 OK；自检断言通过（`daily_brief_email` 在 `KEY_JOBS` 且 `SCHEDULE` 可命中；`FAIL_ALERT_ROUNDS=4`；`_alert_consecutive_failures` 在 SMTP 未配时**不抛**仅打印失败；模拟 6 轮全失败 → 告警恰在第 4 轮触发）。既有回归全绿：`test_daily_brief_20260924` 29/0、`test_daily_brief_p1` 22/0、`test_catalyst_channel_dedup` 22/0、`test_major_event_alert` 55/0。
+
+**未做 / 边界（须留档）**：① **未把早报「补发」做成一发即校验的强幂等**：看护是「按 task 状态超阈值未 done」触发的通用兜底，若某日 09:00 发送成功但 task 行写入失败，理论上可能补发第二封（概率极低，未加日级去重锁）。② **未给 `catalyst_fast_daemon` 加进程级心跳**：本轮只做「连续异常」自告警；**进程被 kill 不告警**（依赖 supervisord `autorestart=true` + 容器 FATAL 可见），如需「daemon 死了也报警」须另加 `sys.task` 心跳并纳入看护。③ **未收紧 `send_daily_brief.py` 的 SMTP 未配静默分支**（`notifier.configured == False → return 0`，任务显示 `done` 但未发信）：本次 prod 实测该分支未触发（发送成功），故未改；但它是「没发却显示成功」的同类陷阱，建议后续单独立项。④ **未加 `pool_pre_ping`**：`pg_stat_activity` 无中毒证据、且连接池毒化根因已由 `c6b009e` 处置，故不动连接池（避免无谓行为变更）。⑤ **未回填 09-26 缺失的早报**（补发只对「当前超阈值」生效，不回放历史）。⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）。

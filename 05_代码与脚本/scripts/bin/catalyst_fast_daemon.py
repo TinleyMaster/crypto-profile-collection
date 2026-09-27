@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import traceback
@@ -61,6 +62,36 @@ from catalyst.catalyst_trace import (  # noqa: E402
     reset as trace_reset,
     set_verbose as trace_set_verbose,
 )
+
+
+# 连续异常告警阈值（轮数）。常驻守护进程每轮异常都被 try 吞掉（设计如此：单轮失败
+# 不影响下一轮），但此前**无任何对外信号** —— DB 不可达 / 连接池坏连接 / 上游异常时，
+# 进程照常心跳、A级即时推送与重大事件通报恒为 0 而无人知晓（2026-09-27 排查邮件停发时
+# 确认此可观测缺口）。连续 N 轮异常（默认 4 轮 ≈ 15min×4 = 1h）即发一封告警邮件，
+# 恢复正常后计数清零、可再次告警。可用 CATALYST_FAIL_ALERT_ROUNDS 覆盖。
+FAIL_ALERT_ROUNDS = int(os.getenv("CATALYST_FAIL_ALERT_ROUNDS", "4"))
+
+
+def _alert_consecutive_failures(rounds: int, err: Exception) -> None:
+    """连续多轮异常时发告警邮件（不依赖 DB，避免与故障同源而静默）。"""
+    try:
+        from catalyst.notifier import _send_email
+        body = (
+            f"催化剂快通道守护进程（catalyst_fast_daemon）已连续 {rounds} 轮运行异常。\n\n"
+            f"最近异常：{type(err).__name__}: {err}\n\n"
+            f"含义：每轮 run_fast_once 抛出的异常被吞，A级即时推送与重大事件通报均不会发出，\n"
+            f"而进程存活、心跳照常推进（对内存/日志以外无任何信号）。\n"
+            f"常见根因：DB 不可达 / 连接池坏连接 / 上游接口异常。\n"
+            f"请检查容器内 /app/catalyst_fast_daemon.log 与 DB 连通性。"
+        )
+        ok, msg = _send_email(
+            f"⚠️ 催化剂快通道连续 {rounds} 轮异常，邮件通道可能已静默",
+            body.replace("\n", "<br>"),
+        )
+        print(f"[catalyst_fast_daemon] 连续异常告警邮件 "
+              f"{'已发送' if ok else '发送失败: ' + str(msg)}")
+    except Exception as e:
+        print(f"[catalyst_fast_daemon] 告警邮件本身发送失败: {e}", file=sys.stderr)
 
 
 def load_config() -> dict:
@@ -250,6 +281,7 @@ def main() -> int:
 
     round_count = 0
     running = False
+    consecutive_failures = 0
     while True:
         round_count += 1
         start_ts = time.time()
@@ -271,11 +303,18 @@ def main() -> int:
                   f"告警:{stats.get('alert_sent',0)} "
                   f"抑制:{stats.get('alert_suppressed',0)} "
                   f"重大事件:{stats.get('major_event_sent',0)}")
+            if consecutive_failures >= FAIL_ALERT_ROUNDS:
+                print(f"[catalyst_fast_daemon] 已恢复正常（此前连续 {consecutive_failures} 轮异常）")
+            consecutive_failures = 0
         except Exception as e:
+            consecutive_failures += 1
             elapsed = time.time() - start_ts
             print(f"[catalyst_fast_daemon] 第 {round_count} 轮异常 ({elapsed:.1f}s): {e}",
                   file=sys.stderr)
             traceback.print_exc()
+            # 连续 N 轮异常 → 告警一次（同一段连续故障内不重复轰炸；恢复后计数归零可再告警）
+            if consecutive_failures == FAIL_ALERT_ROUNDS:
+                _alert_consecutive_failures(consecutive_failures, e)
         finally:
             running = False
 

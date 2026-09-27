@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS biz.asset_derivatives (
     next_funding_time     TIMESTAMPTZ,
     funding_rate_7d_avg   NUMERIC(12,8),     -- 7 天平均资金费率
     funding_rate_30d_avg  NUMERIC(12,8),     -- 30 天平均资金费率
+    funding_interval_h    NUMERIC(4,1),      -- 结算间隔（小时）：历史时间戳中位数推导；NULL=回退 8h（NEW-C）
     -- 未平仓合约
     total_oi_usd          NUMERIC(20,2),     -- 全市场 OI 总价值（USDT）
     oi_change_24h_pct     NUMERIC(8,2),      -- OI 24h 变化率

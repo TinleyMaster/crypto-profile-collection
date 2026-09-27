@@ -6681,6 +6681,22 @@ def compute_correlation_matrix(
     }
 
 
+def _derive_funding_interval_h(history) -> float | None:
+    """由结算历史时间戳推导结算间隔（小时，审计 NEW-C）。
+
+    取相邻 `funding_time` 差的中位数（避免个别缺失/重复记录带偏）。Binance U 本位
+    多为 8h，部分品种 4h（LSK/ZRO/PAXG 等）—— 年化口径须为 `(24/间隔)×365`。
+    数据不足返回 None（消费侧回退 8h，不猜测）。与 phase_derivatives_batch.py 同口径。
+    """
+    ts = sorted(int(f.funding_time) for f in (history or [])
+                if getattr(f, "funding_time", None))
+    diffs = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+    if not diffs:
+        return None
+    diffs.sort()
+    return round(diffs[len(diffs) // 2] / 3_600_000, 1)
+
+
 def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     """获取代币衍生品资金面数据（多交易所聚合）。
 
@@ -6705,6 +6721,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                     next_funding_time TIMESTAMPTZ,
                     funding_rate_7d_avg NUMERIC(12,8),
                     funding_rate_30d_avg NUMERIC(12,8),
+                    funding_interval_h NUMERIC(4,1),
                     total_oi_usd NUMERIC(20,2),
                     oi_change_24h_pct NUMERIC(8,2),
                     cvd_24h_usd NUMERIC(20,2),
@@ -6734,6 +6751,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                         "next_funding_time": row["next_funding_time"].isoformat() if row["next_funding_time"] else None,
                         "funding_rate_7d_avg": float(row["funding_rate_7d_avg"]) if row["funding_rate_7d_avg"] else None,
                         "funding_rate_30d_avg": float(row["funding_rate_30d_avg"]) if row["funding_rate_30d_avg"] else None,
+                        "funding_interval_h": float(row["funding_interval_h"]) if row.get("funding_interval_h") is not None else None,
                         "total_oi_usd": float(row["total_oi_usd"]) if row["total_oi_usd"] else None,
                         "oi_change_24h_pct": float(row["oi_change_24h_pct"]) if row["oi_change_24h_pct"] else None,
                         "cvd_24h_usd": float(row["cvd_24h_usd"]) if row["cvd_24h_usd"] else None,
@@ -6792,6 +6810,8 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                     # 7 天 ≈ 21 次结算（每 8h 一次），30 天 ≈ 90 次
                     result["funding_rate_7d_avg"] = sum(rates[:21]) / min(21, len(rates)) if rates else None
                     result["funding_rate_30d_avg"] = sum(rates) / len(rates) if rates else None
+                    # NEW-C：同一份历史顺带推导结算间隔（小时），供年化按实算
+                    result["funding_interval_h"] = _derive_funding_interval_h(fr_hist)
             except Exception:
                 pass
 
@@ -6862,11 +6882,21 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     weighted_funding_7d = 0.0
     weighted_funding_30d = 0.0
     next_funding_ts = None
+    # NEW-C：结算间隔取 OI 价值最大的交易所（费率主导来源），无 OI 时回退任一可得者
+    best_funding_oi = 0.0
+    funding_interval_by_oi = None
+    funding_interval_any = None
 
     for ex in available:
         d = exchanges_detail[ex]
         oi_val = d.get("open_interest_value") or 0
         fr = d.get("funding_rate")
+        if d.get("funding_interval_h") is not None:
+            if funding_interval_any is None:
+                funding_interval_any = d["funding_interval_h"]
+            if oi_val > best_funding_oi:
+                best_funding_oi = oi_val
+                funding_interval_by_oi = d["funding_interval_h"]
         if oi_val and fr is not None:
             total_oi_value += oi_val
             weighted_funding += fr * oi_val
@@ -6881,6 +6911,9 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
     avg_funding = weighted_funding / total_oi_value if total_oi_value > 0 else None
     avg_funding_7d = weighted_funding_7d / total_oi_value if total_oi_value > 0 else None
     avg_funding_30d = weighted_funding_30d / total_oi_value if total_oi_value > 0 else None
+    funding_interval_h = (
+        funding_interval_by_oi if funding_interval_by_oi is not None else funding_interval_any
+    )
 
     # 2. OI 24h 变化（按 OI 价值加权）
     total_oi_change_weighted = 0.0
@@ -6916,11 +6949,11 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
             cur.execute("""
                 INSERT INTO biz.asset_derivatives
                     (asset_id, symbol, funding_rate, funding_rate_pct, next_funding_time,
-                     funding_rate_7d_avg, funding_rate_30d_avg,
+                     funding_rate_7d_avg, funding_rate_30d_avg, funding_interval_h,
                      total_oi_usd, oi_change_24h_pct,
                      cvd_24h_usd, cvd_ratio_24h,
                      exchanges_json, available_exchanges, fetched_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (asset_id) DO UPDATE SET
                     symbol = EXCLUDED.symbol,
                     funding_rate = EXCLUDED.funding_rate,
@@ -6928,6 +6961,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                     next_funding_time = EXCLUDED.next_funding_time,
                     funding_rate_7d_avg = EXCLUDED.funding_rate_7d_avg,
                     funding_rate_30d_avg = EXCLUDED.funding_rate_30d_avg,
+                    funding_interval_h = EXCLUDED.funding_interval_h,
                     total_oi_usd = EXCLUDED.total_oi_usd,
                     oi_change_24h_pct = EXCLUDED.oi_change_24h_pct,
                     cvd_24h_usd = EXCLUDED.cvd_24h_usd,
@@ -6943,6 +6977,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
                 datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc) if next_funding_ts else None,
                 avg_funding_7d,
                 avg_funding_30d,
+                funding_interval_h,
                 round(total_oi_value, 2) if total_oi_value > 0 else None,
                 round(oi_change_24h, 2) if oi_change_24h is not None else None,
                 round(total_cvd, 2) if total_cvd else None,
@@ -6962,6 +6997,7 @@ def get_asset_derivatives(asset_id: int, force_refresh: bool = False) -> dict:
         "next_funding_time": datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc).isoformat() if next_funding_ts else None,
         "funding_rate_7d_avg": avg_funding_7d,
         "funding_rate_30d_avg": avg_funding_30d,
+        "funding_interval_h": funding_interval_h,
         "total_oi_usd": round(total_oi_value, 2) if total_oi_value > 0 else None,
         "oi_change_24h_pct": round(oi_change_24h, 2) if oi_change_24h is not None else None,
         "cvd_24h_usd": round(total_cvd, 2) if total_cvd else None,

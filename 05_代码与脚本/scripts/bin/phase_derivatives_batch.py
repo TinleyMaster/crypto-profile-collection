@@ -84,6 +84,7 @@ def ensure_table(conn) -> None:
                 next_funding_time TIMESTAMPTZ,
                 funding_rate_7d_avg NUMERIC(12,8),
                 funding_rate_30d_avg NUMERIC(12,8),
+                funding_interval_h NUMERIC(4,1),
                 total_oi_usd NUMERIC(20,2),
                 oi_change_24h_pct NUMERIC(8,2),
                 cvd_24h_usd NUMERIC(20,2),
@@ -295,23 +296,53 @@ def merge_pending(ranked: list[dict], gap_assets: list[dict], limit: int) -> lis
     return merged
 
 
+def _derive_funding_interval_h(history) -> float | None:
+    """由结算历史时间戳推导结算间隔（小时，NEW-C）。
+
+    取相邻 `funding_time` 差的中位数（避免个别缺失/重复记录带偏），换算为小时。
+    Binance U 本位多为 8h，部分品种 4h（LSK/ZRO/PAXG 等）—— 年化口径必须是
+    `(24/间隔)×365`，硬编码 ×3×365 会把 4h 品种低估一半。
+    数据不足（相邻间隔为空）返回 None —— 消费侧回退 8h，不猜测。
+    """
+    ts = sorted(int(f.funding_time) for f in (history or [])
+                if getattr(f, "funding_time", None))
+    diffs = [b - a for a, b in zip(ts, ts[1:]) if b > a]
+    if not diffs:
+        return None
+    diffs.sort()
+    return round(diffs[len(diffs) // 2] / 3_600_000, 1)
+
+
 def _aggregate_funding(available: list[str], details: dict) -> dict:
     """跨交易所聚合资金费率（纯函数，便于离线单测）。
 
     有 OI 价值 ⇒ 按 OI 价值加权（原口径不变）；无 OI 价值 ⇒ 等权简单平均
     （**O1 连带修复**：原实现把费率累加嵌在 `if oi_val` 内，OI 缺失时费率被整体
     丢弃 ⇒ 小市值/meme 永远补不上 funding）。两者都无 → None。
+
+    结算间隔（NEW-C）：取 **OI 价值最大**的交易所（即费率主导来源）的间隔；
+    无 OI 权重时回退任一可得者；全无 → None（消费侧回退 8h）。
     """
     total_oi_value = 0.0
     weighted = {1: 0.0, 7: 0.0, 30: 0.0}
     simple = {1: 0.0, 7: 0.0, 30: 0.0}
     cnt = {1: 0, 7: 0, 30: 0}
     next_funding_ts = None
+    best_oi = 0.0
+    interval_by_oi = None
+    any_interval = None
 
     for ex in available:
         d = details.get(ex, {})
         oi_val = d.get("open_interest_value") or 0
         fr = d.get("funding_rate")
+        iv = d.get("funding_interval_h")
+        if iv is not None:
+            if any_interval is None:
+                any_interval = iv
+            if oi_val > best_oi:
+                best_oi = oi_val
+                interval_by_oi = iv
         if fr is not None:
             simple[1] += fr
             cnt[1] += 1
@@ -340,6 +371,7 @@ def _aggregate_funding(available: list[str], details: dict) -> dict:
         "avg_funding_30d": _avg(30),
         "next_funding_ts": next_funding_ts,
         "total_oi_value": total_oi_value if total_oi_value > 0 else None,
+        "interval_h": interval_by_oi if interval_by_oi is not None else any_interval,
     }
 
 
@@ -376,6 +408,8 @@ def fetch_one_asset(symbol: str) -> dict:
                     result["funding_rate_30d_avg"] = (
                         sum(rates) / len(rates) if rates else None
                     )
+                    # NEW-C：同一份历史顺带推导结算间隔（小时），供年化按实算
+                    result["funding_interval_h"] = _derive_funding_interval_h(fr_hist)
             except Exception:
                 pass
 
@@ -448,6 +482,7 @@ def fetch_one_asset(symbol: str) -> dict:
     avg_funding_7d = _fund["avg_funding_7d"]
     avg_funding_30d = _fund["avg_funding_30d"]
     next_funding_ts = _fund["next_funding_ts"]
+    funding_interval_h = _fund["interval_h"]
     total_oi_value = _fund["total_oi_value"] or 0.0
 
     # OI 24h 变化
@@ -487,6 +522,7 @@ def fetch_one_asset(symbol: str) -> dict:
         "avg_funding": avg_funding,
         "avg_funding_7d": avg_funding_7d,
         "avg_funding_30d": avg_funding_30d,
+        "funding_interval_h": funding_interval_h,
         "next_funding_ts": next_funding_ts,
         "total_oi_value": total_oi_value if total_oi_value > 0 else None,
         "oi_change_24h": oi_change_24h,
@@ -509,11 +545,11 @@ def save_result(conn, asset_id: int, result: dict) -> None:
             """
             INSERT INTO biz.asset_derivatives
                 (asset_id, symbol, funding_rate, funding_rate_pct, next_funding_time,
-                 funding_rate_7d_avg, funding_rate_30d_avg,
+                 funding_rate_7d_avg, funding_rate_30d_avg, funding_interval_h,
                  total_oi_usd, oi_change_24h_pct,
                  cvd_24h_usd, cvd_ratio_24h,
                  exchanges_json, available_exchanges, fetched_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (asset_id) DO UPDATE SET
                 symbol = EXCLUDED.symbol,
                 funding_rate = EXCLUDED.funding_rate,
@@ -521,6 +557,7 @@ def save_result(conn, asset_id: int, result: dict) -> None:
                 next_funding_time = EXCLUDED.next_funding_time,
                 funding_rate_7d_avg = EXCLUDED.funding_rate_7d_avg,
                 funding_rate_30d_avg = EXCLUDED.funding_rate_30d_avg,
+                funding_interval_h = EXCLUDED.funding_interval_h,
                 total_oi_usd = EXCLUDED.total_oi_usd,
                 oi_change_24h_pct = EXCLUDED.oi_change_24h_pct,
                 cvd_24h_usd = EXCLUDED.cvd_24h_usd,
@@ -537,6 +574,7 @@ def save_result(conn, asset_id: int, result: dict) -> None:
                 next_funding_time,
                 result["avg_funding_7d"],
                 result["avg_funding_30d"],
+                result.get("funding_interval_h"),
                 round(result["total_oi_value"], 2) if result["total_oi_value"] else None,
                 round(result["oi_change_24h"], 2) if result["oi_change_24h"] is not None else None,
                 round(result["total_cvd"], 2) if result["total_cvd"] else None,

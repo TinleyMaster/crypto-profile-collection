@@ -235,6 +235,49 @@ def _load_funding_map(conn) -> dict[str, float]:
         return out
 
 
+# 结算间隔缺省值（小时）：Binance U 本位永续的主流口径，也是本项修复前的硬编码值。
+FUNDING_INTERVAL_DEFAULT_H = 8.0
+
+
+def _funding_annualize_mult(interval_h) -> float:
+    """资金费率年化倍率 = (24 / 结算间隔小时) × 365。
+
+    审计 NEW-C：原实现写死 ×3×365（=8h 结算），实测 Binance 存在 4h 结算品种
+    （LSK/ZRO/PAXG/ASTER/GRAM/LA/MOODENG 等）⇒ 对它们年化被低估一半（应 ×6×365）。
+    间隔缺失/非法（None 或 ≤0）→ 回退 8h（保持旧口径，不劣化）。
+    """
+    try:
+        iv = float(interval_h)
+    except (TypeError, ValueError):
+        iv = 0.0
+    if iv <= 0:
+        iv = FUNDING_INTERVAL_DEFAULT_H
+    return (24.0 / iv) * 365.0
+
+
+def _load_funding_interval_map(conn) -> dict[str, float]:
+    """资金费率结算间隔表：裸符号 → 间隔（小时，审计 NEW-C）。
+
+    与 `_load_funding_map` 同源同新鲜度口径（DISTINCT ON 取 `fetched_at` 最新、
+    限制 `FUNDING_STALE_H`），保证「费率有值」与「间隔有值」取自同一行快照。
+    未命中 → 消费侧回退 8h（`_funding_annualize_mult`）。
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (symbol) symbol, funding_interval_h "
+            "FROM biz.asset_derivatives WHERE funding_interval_h IS NOT NULL "
+            "AND fetched_at > NOW() - make_interval(hours => %s) "
+            "ORDER BY symbol, fetched_at DESC",
+            (FUNDING_STALE_H,),
+        )
+        out: dict[str, float] = {}
+        for r in cur.fetchall():
+            iv = float(r["funding_interval_h"])
+            for cand in _symbol_candidates(r["symbol"]):
+                out[cand] = iv
+        return out
+
+
 def _http_get(url: str, params: dict | None = None, timeout: int = 20) -> dict | list:
     """Binance API GET：委托 binance_http.fapi_get（全局限频 + 429/418 指数退避 + 全局封禁闸门）。"""
     return fapi_get(url, params, timeout=timeout)
@@ -2360,14 +2403,17 @@ def _render_alert_email(items: list[dict],
                     break
         fund = sig.get("funding_rate")
         # 资金费率原值存的是小数比例（0.00005 = 0.005%），且**不兜底 0**；
-        # 补年化（币安 U 本位 8h 结算 ⇒ ×3×365），单看当期费率无可读性（审计 §三.4）
+        # 补年化：审计 NEW-C 前为硬编码 ×3×365（假设 8h 结算），实测存在 4h 结算品种
+        # （LSK/ZRO/PAXG 等）会被低估一半 ⇒ 改为按品种实际结算间隔 ×(24/间隔)×365，
+        # 间隔由生产者落库（biz.asset_derivatives.funding_interval_h），缺失回退 8h。
         # 费率：无数据时区分「未覆盖」与「0」（审计 P2-3：实测告警币只有 40/53 在
         # 费率源内，绝大多数 `-` 的含义是「我们没这个数据」而非「费率为 0」）。
         if fund is None:
             fund_str = "n/a（未覆盖）"
         else:
             f_pct = float(fund) * 100
-            fund_str = f"{f_pct:+.4f}%（年化 {f_pct * 3 * 365:+.1f}%）"
+            ann_mult = _funding_annualize_mult(it.get("funding_interval_h"))
+            fund_str = f"{f_pct:+.4f}%（年化 {f_pct * ann_mult:+.1f}%）"
         # CVD 幅度（审计 P1-3：`cvd_usd` / `cvd_ratio` 已随生产者落库）
         cvd_usd, cvd_ratio = sig.get("cvd_usd"), sig.get("cvd_ratio")
         cvd_amt = ""
@@ -2591,7 +2637,8 @@ def _render_alert_email(items: list[dict],
               "其卡片另标「触发根」= 该突破判定的已收盘 1h 根；"
               "BRK 判定只用价+量，不落 OI/CVD ⇒ BRK 卡片 OI/CVD 恒为 n/a（设计，非缺失）；"
               "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
-              f"费率年化 = 当期 ×3×365（8h 结算），正 = 多头付空头（多头拥挤）、"
+              "费率年化 = 当期 ×(24/结算间隔)×365（Binance U 本位多为 8h、部分品种 4h；"
+              "间隔缺失按 8h），正 = 多头付空头（多头拥挤）、"
               "负 = 空头付多头（对做多顺风）；"
               f"「失效位」= 2×ATR({STOP_ATR_PERIOD}) "
               f"幅度夹在 [{STOP_BAND_TXT}] "
@@ -2882,9 +2929,12 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
                             for it in to_alert
                             if it["signal"].get("p_dir") and it["signal"].get("oi_dir")})
         priors = _scenario_priors(conn, quadrants)
+        # 审计 NEW-C：结算间隔（小时）随信号带入渲染层，年化按品种实算（缺失回退 8h）。
+        interval_map = _load_funding_interval_map(conn)
         for it in to_alert:
             sig = it["signal"]
             it["prior"] = priors.get((sig.get("p_dir"), sig.get("oi_dir")))
+            it["funding_interval_h"] = _lookup_funding(interval_map, sig.get("symbol") or "")
 
         # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
         # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。

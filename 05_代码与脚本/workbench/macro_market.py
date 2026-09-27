@@ -5176,6 +5176,31 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
         merged["resonance_count"] = len(sig_types)
         merged["signal_types"] = sig_types
 
+    # P0-R2 修复（审计_高危信号_确定性审计与优化_2026-09-26 §三·刀2）：风险侧原先**没有**
+    # 「单源封顶」闸门 —— 高亮侧已有 P1-C（HIGH 需 ≥2 源共振，硬数据极值白名单除外），
+    # 风险侧复制时整块漏掉，故单源风险信号可直冲 HIGH（本卡类型 `mvrv_deep_over` /
+    # `fng_extreme` / `leverage_extreme` 的 target 全是**聚合类文案**，天然绕过上方
+    # 币种级 `min_resonance` 筛选 ⇒ 门槛写死 1 与否都不拦它们）。此处补上同构闸门，
+    # 并**覆盖币种级 target**：审计对风险侧是扁平要求「HIGH 必须 ≥2 源共振」。
+    # 处置为确定性降档（HIGH→MED + 同步 confidence），保留卡片与配额（= 审计所称「观察池」），
+    # 不删卡、不占位变化。白名单刻意**不含 `mvrv_deep_over`**：审计验收明确要求
+    # 「单源 mvrv_deep_over 不显 HIGH」，且其强度公式正是 P0-R1 点名的自创旁路。
+    _RISK_AGG_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme"}
+    risk_high_min = max(int(min_resonance), 2)
+    for k, merged in merged_map.items():
+        if merged.get("conviction_tier") != "HIGH":
+            continue
+        if (merged.get("resonance_count") or 1) >= risk_high_min:
+            continue
+        if (merged.get("signal_type") or "") in _RISK_AGG_HIGH_ALLOWLIST:
+            continue
+        merged["conviction_tier"] = "MED"
+        merged["confidence"] = "medium"
+        merged["tier_demote_reason"] = (
+            f"单源风险信号（{merged.get('resonance_count') or 1} 源共振），"
+            f"HIGH 门槛（≥{risk_high_min} 源）未达，档位降为 MED"
+        )
+
     # ── 4. 共振筛选 ──
     after_resonance: list[dict] = []
     for k in merged_order:
@@ -6506,8 +6531,11 @@ def score_opportunities(overview: dict) -> dict:
     )
 
     # 精选高危信号（FEAT-RISK-001）：对称于高亮信号，聚焦看空/风险
+    # P0-R2（审计_高危信号_确定性审计与优化_2026-09-26 §三）：原写死 `...else 1`
+    # （恒 1）是复制高亮侧时漏改 —— 非 V2 下高亮侧门槛为 2、风险侧仍 1，风险侧
+    # 「确定性」语义系统性更松。改为与高亮侧同源（引同一变量，防再次漂移）。
     risk_max_total = int(t.get("risk_max_total", 8))
-    risk_min_resonance = 1 if ai_v2_enabled_for_init else 1
+    risk_min_resonance = hl_min_resonance
     risk_signals = select_risk_signals(
         opportunities, max_total=risk_max_total,
         min_resonance=risk_min_resonance,

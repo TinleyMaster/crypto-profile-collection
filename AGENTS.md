@@ -1887,6 +1887,19 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证（本轮）**：探针 `test_contract_addr_guard_20260927.py` 扩至 **37/0**（新增 D 组 4 例：列歧义已消 / `token/` 剥离 / 原样被拦 + 剥离后通过；新增 F 组 5 例：DexScreener 不含 solana、CG 保留原样且 `DO NOTHING` 且跳过原生币）；回归 `test_solana_holder_20260927` 27/0、`test_snapshot_freshness_20260927` 27/0、`test_scan_alert_onchain_addr` exit 0；`py_compile` 2/2；`POPULATE_FROM_CMC`（16 行）与 `POPULATE_FROM_DL`（17 行）`EXPLAIN` 均通过。
 - **回滚点**：`/Users/tinley/Workbuddy/crypto-profile-collection/回滚点_solana合约地址修复_2026-09-27.json`（含 18 行原始快照 `rows`、逐行判定 `plan`、`deleted_rows`/`updated_rows`、`coin_basic_before` 备份）。
 
+**续（同日）：脏值兜底邮件告警（用户「如果不能实在闭合，能发邮件提醒一下脏值问题吗」⇒ 加可观测，而非改唯一约束）**
+
+既然唯一约束的大小写敏感**有意不改**（见上条「唯一剩余的结构性根因」），用户要求在无法结构闭合的前提下**补一条邮件兜底**。做法照项目同型先例 `check_onchain_snapshot_freshness.py`（独立看门狗 + 每小时 + 6h 去重 + 恢复解除邮件 + category `monitor`），**不**硬塞进语义不符的盘面扫描看门狗邮件。
+
+- **新增 `scripts/bin/check_contract_addr_hygiene.py`**（`ALERT_TASK_KEY='contract_addr_dirty'`，`REALERT_INTERVAL_H=6`，`--dry-run`，始终 `return 0`）——独立于**任何**写入方，每小时只看最终事实，三类信号任一 > 0 即告警：
+  - **A 硬信号**：`chain='solana'` 且 `contract_address !~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'` 或 `= ANY(原生 mint 白名单)`（Wrapped SOL / System Program）⇒ 明确不可用的脏值（本轮修复的那批）。
+  - **B 软信号**：同一 `asset_id` 内存在「仅大小写不同」的 solana 并存变体对（`b.contract_address = lower(a.contract_address)` 且 `a` 非全小写）⇒ **专为「唯一约束大小写敏感」这一残留风险设的抓手**，正是 BOOP 那种并存形态。
+  - **C 派生不一致**：`biz.coin_basic.primary_contract_address` 与该 asset 在 `core.asset_contract` 的主合约口径（`ORDER BY is_primary DESC, contract_id LIMIT 1`）不一致 ⇒ 脏值已污染到早报/看板消费的派生表。
+  - 去重复用 `biz.scan_stall_alert`（与 `scan_stall` / `onchain_snapshot_stall` 同表不同键，互不抑制）；持续期间每 6h 重发，全部归零后发「✅ 已恢复」并把 `last_email_ts` 置 NULL。收件人 `settings.admin_email or settings.smtp_to`，发件名「合约地址卫生看门狗」。
+- **调度注册**：`workbench/scheduler.py` 的 `SCHEDULE` 新增 `("contract_addr_hygiene", "20 * * * *", "check_contract_addr_hygiene.py", [], "…", "monitor")`（每小时第 20 分，与另两个看门狗同点）。
+- **验证**：新脚本 `--dry-run` 实测 **A=0 / B=0 / C=0**（正与修复后状态一致，不触发越线分支）；探针 `test_contract_addr_guard_20260927.py` 新增 **G 组 15 例**（形态正则与原生 mint 口径同源、三类信号 SQL 语义、去重键独立且复用同表、退出码约定、渲染三分支、调度注册）⇒ **52/0**；回归 `test_solana_holder_20260927` 27/0、`test_snapshot_freshness_20260927` 27/0；`py_compile` 2/2。
+- **定位说明**：这是**兜底可观测**，不替代结构护栏——结构护栏在写入侧（5 个写入方已 case-safe），本邮件只在「栏杆万一漏了」时让脏值**当天可见**，而不是像本次那样静默残留近两个月。
+
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 
 来源：`诊断_早报与催化剂邮件停发_2026-09-27.md`（诊断假说「两套同时停 = 共同上游 DB 连接池毒化」，未连 prod）。用户授权「修复没发的问题」后，先做 **prod 只读取证**（`sys.task`/`task_log`/`catalyst_notification_log`/`catalyst_signal`/`pg_stat_activity`），结论**推翻原假说**：

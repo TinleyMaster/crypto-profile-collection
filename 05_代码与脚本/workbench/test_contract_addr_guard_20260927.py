@@ -141,5 +141,68 @@ check("ON CONFLICT (chain, contract_address) DO NOTHING" in _cg_src,
 check("WHERE asset_type = 'coin'" in _cg_src,
       "F: CG 步骤跳过原生币（不写原生 mint）")
 
+print("\n== G. 脏值邮件看门狗（check_contract_addr_hygiene）==")
+import importlib.util  # noqa: E402
+import re  # noqa: E402
+
+_HYG_PATH = os.path.join(_BIN, "check_contract_addr_hygiene.py")
+_spec = importlib.util.spec_from_file_location("check_contract_addr_hygiene", _HYG_PATH)
+hyg = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(hyg)
+
+# G1 形态正则与原生 mint 口径（与写入侧护栏同源）
+_rx = re.compile(hyg.SOLANA_ADDR_RE)
+check(bool(_rx.match(VALID_B58)) and bool(_rx.match(VALID_LOWER)),
+      "G1: SOLANA_ADDR_RE 放行合法 base58（含大写 / 全小写无 0OIl）")
+check(not _rx.match(LOWER_POLLUTED) and not _rx.match(EVM_ADDR) and not _rx.match(URL_FRAG),
+      "G1: SOLANA_ADDR_RE 拦下 lower 污染 / EVM hex / URL 片段")
+check(WRAPPED_SOL in hyg.SOLANA_NATIVE_MINTS and SYS_PROGRAM in hyg.SOLANA_NATIVE_MINTS,
+      "G2: 原生 mint 白名单含 Wrapped SOL 与 System Program")
+
+# G3 三类信号 SQL 语义（源码断言）
+_hyg_src = open(_HYG_PATH, encoding="utf-8").read()
+check("a.chain = 'solana'" in _hyg_src or "b.chain = 'solana'" in _hyg_src
+      or "ac.chain = 'solana'" in _hyg_src,
+      "G3: 硬信号只针对 solana 链")
+check("!~ %s" in _hyg_src and "= ANY(%s)" in _hyg_src,
+      "G3: 硬信号同时判「形态非法」与「原生 mint」")
+check("b.contract_address = lower(a.contract_address)" in _hyg_src,
+      "G3: 软信号按「仅大小写不同」配对（复用唯一约束大小写敏感的残留抓手）")
+check("IS DISTINCT FROM canon.contract_address" in _hyg_src,
+      "G3: 派生不一致比对 coin_basic 与 core.asset_contract 主合约口径")
+
+# G4 去重键独立 + 复用既有去重表
+check(hyg.ALERT_TASK_KEY not in ("scan_stall", "onchain_snapshot_stall"),
+      "G4: 告警任务键独立，不与 scan/onchain 看门狗互相抑制")
+check("biz.scan_stall_alert" in _hyg_src and "ON CONFLICT (task) DO UPDATE" in _hyg_src,
+      "G4: 复用 biz.scan_stall_alert 去重表（upsert）")
+check(hyg.REALERT_INTERVAL_H == 6, "G4: 6h 重发间隔")
+check("SET last_email_ts=NULL" in _hyg_src,
+      "G4: 恢复后清空告警时间戳（下次再现立即可告警）")
+
+# G5 退出码约定：脏值不以退出码表达（否则每次检查都会误报任务失败）
+check("sys.exit(main())" in _hyg_src and "sys.exit(1)" not in _hyg_src,
+      "G5: 脏值用邮件表达，退出码只代表脚本自身异常")
+
+# G6 渲染三分支（空/满均不抛）
+_htm_full = hyg._render_html({
+    "hard": [{"contract_id": 1, "asset_id": 2, "canonical_symbol": "BOOP",
+              "contract_address": VALID_LOWER, "source_code": "cmc",
+              "updated_at": None}],
+    "variant": [{"contract_id": 3, "asset_id": 4, "lower_addr": VALID_LOWER,
+                 "upper_contract_id": 5, "upper_addr": VALID_B58}],
+    "derived": 7, "total": 9})
+check(all(k in _htm_full for k in ("A 硬信号", "B 软信号", "C 派生不一致")),
+      "G6: 告警 HTML 覆盖三类信号")
+check("未发现脏值" in hyg._render_html({"hard": [], "variant": [], "derived": 0, "total": 0}),
+      "G6: 无脏值时渲染空态")
+
+# G7 调度注册（读 workbench/scheduler.py 源文本，避免 import 触发 DB 依赖）
+_sched_src = open(os.path.join(_HERE, "scheduler.py"), encoding="utf-8").read()
+check('"contract_addr_hygiene"' in _sched_src
+      and '"check_contract_addr_hygiene.py"' in _sched_src
+      and '"monitor")' in _sched_src,
+      "G7: scheduler.SCHEDULE 已注册（每小时 / monitor）")
+
 print(f"\n结果：{PASS} 通过 / {FAIL} 失败")
 sys.exit(1 if FAIL else 0)

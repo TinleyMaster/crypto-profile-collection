@@ -258,6 +258,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 任一条链滞后 >2 天即告警（6h 去重，恢复后自动发解除邮件）。
     ("onchain_snapshot_freshness", "20 * * * *", "check_onchain_snapshot_freshness.py", [],
      "链上快照·外部看门狗（每小时，按链查最新快照日，滞后>2天告警邮件，6h 去重）", "monitor"),
+    # 2026-09-27 solana 合约地址脏值修复：写入方已逐一加护栏，但唯一索引仍是大小写敏感的
+    # `UNIQUE (chain, contract_address)` —— 若未来再出现降格路径，脏小写行会与正确值并存而非
+    # 报冲突覆盖，无法从结构上完全闭合。本任务每小时独立检查三类信号（形态非法/原生 mint、
+    # 仅大小写不同的并存变体、coin_basic 派生不一致），任一 >0 即告警（6h 去重，恢复后解除）。
+    ("contract_addr_hygiene", "20 * * * *", "check_contract_addr_hygiene.py", [],
+     "合约地址·外部看门狗（每小时，查 solana 脏值/大小写并存/派生不一致，告警邮件，6h 去重）", "monitor"),
 
     # ═══ 告警胜率赔率日报（04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §7）═══
     # 结算每小时增量推进未到期窗口；聚合与发信分离，08:20 发信与 09:00 早报解耦

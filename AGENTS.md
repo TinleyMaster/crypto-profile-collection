@@ -1643,9 +1643,18 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   | `biz.etf_flow_daily` | `2026-09-25` | ✅ **正常**：今日 `2026-09-27` 为**周日**，美股/ETF 休市，09-25(周五) 即最近交易日；`ingest_cryptoetf_flow` 最近两次均 `done` |
   | `biz.cm_asset_onchain_daily` | `2026-09-25` | ⚠️ 待观察：`cm_incremental` 每日 `done`（今日 06:30 CST 已跑），但日期分布**缺 09-24**、且无 09-26；每日行数恒为 16（非残缺写入）⇒ 疑 CMC 上游可用性延迟，**非本轮代码缺陷** |
   - 附：`catalyst_events` 已回归 50 条 ⇒ 大盘级催化剂**无需**数据管道工单。
-  - **待批（写操作，未做）**：重跑 `dl_pipeline` 以回填 09-24~09-27 的链 TVL（须用户授权后再动 prod）。
 
-- **本轮校验**：`py_compile`（`macro_market.py` / `conn.py` / `bootstrap_dl_assets_batch.py`）通过；`test_macro_market_p0` **16/16**、`test_macro_market_board_tier2` **36/36**；修复验证探针全绿（详见缺陷 ①② 的「验证」行）。源码侧改动未连 DB 写、未落库。
+- **写操作执行（用户授权后，2026-09-27 15:00~15:13 CST）**：重跑 dl_pipeline 回填链 TVL。
+  - **安全裁剪**：**未**走官方 `run_dl_pipeline.py` 整链，改为逐脚本执行 **①②③④⑥⑦**，**主动跳过 ⑤（`run_refresh_sectors.py`）与 ⑧（`etl_sector_flow_daily.py`）** —— 这两步及其依赖（`crypto_research/mapping/sector.py`、`scripts/sql/biz/{create_asset_sector,refresh_sectors_multi_source}.sql`）**当时正被并行会话修改且未提交**，跑整链会把半成品赛道逻辑写进 prod。⑨（`dedup_assets.py --apply`）一并跳过以收窄写面。
+  - **结果**：① 8386 协议 → ② **`{"status":"success","total":27,"matched":12,"new_assets":5,"mapped":17,"by_kind":{"cmc":2,"gecko":1,"symbol":9,"new":5}}`**（`by_kind` 出现 `"new": 5` ⇒ **旧代码在此必 `KeyError`，修复在 prod 生效的直接证据**；第 2 轮 `total=10/mapped=0` 收敛）→ ③④ 退出码 0 → ⑥ `status: ok` → ⑦ `status: success`。
+  - **数据复验（只读）**：`src_dl.chain_tvl_snapshot` `MAX(snapshot_date)=` **`2026-09-27`**（当日 100 条），`biz.protocol_metric_daily` `MAX(metric_date)=2026-09-27` ⇒ **链榜数据源恢复新鲜**（原卡 09-23）。
+  - **未回填**：`chain_tvl_snapshot` 的 **09-24 / 09-25 / 09-26 三天仍缺**（⑦ 只写「当日」快照，不补历史）。大盘板块只消费「最新」快照，无影响；若需连续序列须另写历史回填。
+
+- **线上生效复验 ✅（2026-09-27 15:16 CST，push 后约 18 分钟）**：`GET /api/market/overview` → `HTTP=200`：`onchain_anomalies = {total: 6, n_kols: 2}`（**error 键消失** ⇒ 缺陷 ① 上线确认），`catalyst_events = {total: 50, window_days: 14}`；`5板块` chain_ranked=5 / narr_ranked=10；`emotion_subscore=57.5`、`structure_subscore=69.9`（与 R3 一致，未因改动漂移）。
+
+- **本轮校验**：`py_compile`（`macro_market.py` / `conn.py` / `bootstrap_dl_assets_batch.py`）通过；`test_macro_market_p0` **16/16**、`test_macro_market_board_tier2` **36/36**；修复验证探针全绿（详见缺陷 ①② 的「验证」行）；prod 写操作已获用户显式授权，且做了写面裁剪。
+
+- **附带收口（只读）**：`btc_dominance_percentile = None` **非缺陷、是已知缺口** —— `fetch_btc_dominance_history()`（`macro_market.py:649-653`）是**显式桩函数**，恒定返回 `{"status":"error","error":"CMC trial API 无 dominance 历史端点","series":[]}`，docstring 已注明「需 CoinMetrics CapBTC.DOM 或其他历史源才能算百分位」。故 P2-D 评估时不应把「极值高亮永不触发」当作 bug，而是**数据源未接**。
 
 ### 投研页三档确定性框架落地（上游 `方案_三档确定性框架_2026-09-27.md`，2026-09-27，本次提交 `df331d0`）
 
@@ -1712,3 +1721,17 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **探针**：`test_derivatives_signal_gap.py` 新增【3d】NEW-G 源码事实 5 条 + 把【4】prod 段由「资产级」改为**符号级**（新增 `_sym_stats`，与 `get_signal_gap_assets` 同口径含别名）→ **43 断言 / 0 失败 / 0 跳过**；`test_scan_alert_remaining.py` 新增【NEW-F】3 条 → **26 → 29 断言 / 0 失败**（含生产库：库内陈旧符号 326 个 / funding_map 仅 189 键）。
 - **回归零失败**：`test_scan_alert_audit_20260926`(96/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_onchain_addr`(36/0)、`test_major_event_alert`(55/0)；`py_compile`（`phase_derivatives_batch.py` / `scan_daemon.py` / 两探针）通过。
 - **未做 / 边界（须留档）**：① **NEW-C 仍暂缓**（本报告用公开 API 实测把证据强化到「本批 5 币里 4 个是 4h 结算 ⇒ 年化低估 50%」，但修它须先扩采集存 `settlement_interval`，本轮未动，图例仍写「×3×365（8h 结算）」）；② NEW-D（LayerZero 双源转载未合并）P3 未做；③ **NEW-A 的降级分支（反向 BRK→medium）仍缺线上样本** —— 本批 4 封全为主池、全做多，零 BRK 卡片；P1-2 同理仅待 BRK 批次佐证；④ 刷新组并入只对**下轮采集**生效，存量陈旧行需等 batch 跑过一轮才被覆盖；⑤ 线上 runtime 复验须待 Zeabur 重建后执行（`push ≠ 线上生效`）。
+
+### PONS 赛道重分类落地（工单 SECTOR-RECLASS-001，2026-09-27，本次提交）
+
+来源：`工单_PONS赛道重分类_SECTOR-RECLASS-001_2026-09-27.md`。走**路线 ①（治本：改映射规则让分类器自己产出 `launchpad`）** —— 因 `refresh_asset_sectors.py` 是「每日全量重建 + `primary_sector` 只从自动分类结果回写」，人工覆盖会被次日刷新抹掉（路线 ② 需新加 override 层，改量更大）。用户选定本工作流后按工单 §八 顺序执行。
+
+- **A 组改码（7 文件）**：`mapping/sector.py`（`SECTORS`/`SECTOR_LABELS` 增 `launchpad`；CMC tag / CG `launchpad` / CG `surge launchpad` / DL `launchpad` 由 `defi` 改向；CMC `category_hint` 补 `launchpad 0.8`；`nft launchpad` **保留 gamefi**）；生产实际生效的 `sql/biz/refresh_sectors_multi_source.sql`（`tag_hits`/`cat_hits`/`cg_hits`/`dl_hits` 共 5 处同步）；展示侧 `templates/index.html`（两份硬编码标签表 + `.sector-launchpad` 配色 `#84cc16`）与 `bin/etl_sector_flow_daily.py`（独立 `SECTOR_LABELS`）。
+- **⚠️ 拦截一处会直接炸库的缺陷（比工单原文更严）**：工单给的 CHECK 白名单为 `l1,l2,defi,launchpad,meme,gamefi,rwa,ai,cex_token,derivatives,depin,infra,other`——**漏了 `stablecoin`**。而 prod 现行约束含 `stablecoin`、表内现存 **1046 行 `sector='stablecoin'`** ⇒ 照原文 `ADD CONSTRAINT` 会因存量行校验失败而**整条迁移报错**（DROP 已执行、ADD 失败 → 事务回滚，数据不脏但迁移永远跑不通）。已把 `fix_071` 与基线 `create_asset_sector.sql` 的白名单补回 `stablecoin`，两份均与 `SECTORS` **逐值一致（14 值）**。
+- **B6 回滚点**：执行前只读落盘至 `/private/tmp/cpc_sector_rollback_20260927/`（`core_asset_primary_sector.csv` 21833 行 + `biz_asset_sector.csv` 28501 行 + `check_constraint.txt` 旧约束定义）。
+- **B3 DDL（prod，已执行）**：`apply_migration.py fix_071_launchpad_sector.sql` → 成功；复查 `pg_get_constraintdef` 现为 14 值，**含 `launchpad` 且保留 `stablecoin`**。DDL 后由 `apply_migration.py` 立即 commit。
+- **B4 全量刷新（prod，已执行）**：`bin/run_refresh_sectors.py`（**生产 SQL 路径**，与每日流水线同源）→ `launchpad` **88 个 primary 资产**（`defi` 3810 → 3689）。`biz.asset_sector` 中 `sector='launchpad'` 标签行 **289** 条。PONS(11114)：`core.asset.primary_sector='launchpad'`，`biz.asset_sector = [('launchpad','cmc',0.80,true), ('launchpad','cg',0.65,false)]`，**无 defi 残留**（与 B1/B2 dry-run 的 `merged=[('launchpad',0.8)]` 预测一致）。
+- **验收 #2 的 DB 侧（只读实测）**：`get_sector_competitors(11114)` → `sector=launchpad / sector_label=Launchpad 打新平台 / matched_by=sector_only`，竞品换成 Launchpad 同类（`10SET/ADAPAD/ATD/BABI/BSCPAD/BTCBAM/DAISY/DAOP`），**不再出现 Aave/1inch/Aerodrome**。
+- **B5 重算 PONS thesis（prod，已执行）**：调 `db_stats.generate_research_thesis(11114)` → 日志「竞品数据：**Launchpad 打新平台** 赛道 8 个对标（匹配方式 sector_only）」「研究结论已生成」，`ok=True`；`biz.research_thesis`(11114) 最新行 `thesis_id=1247` 已刷新，`biz.research_thesis_version` 计 4 行。
+- **探针**：`test_sector_taxonomy_20260927.py` **31 → 34 / 0**（新增「两份 SQL 白名单 == `SECTORS` 逐值一致」×2 +「保留 `stablecoin`」×1，防同类漏项复发）。
+- **未做 / 边界（须留档）**：① **不给 PONS 补 DeFiLlama 映射** —— DL 对 `pons-v1/v2` 的 `tvl`/`currentChainTvls` 本身为空，映射了也拿不到 TVL（遗留 #2 关闭为「数据源无该指标」）；② **`SECTOR_COLLECT_PRIORITY`/`SECTOR_TOPIC_PRIORITY`/`SECTOR_SCORE_WEIGHTS` 未配置 `launchpad`**：采集/主题优先级回退 `other`、评分权重回退默认，launchpad 资产投研资料清单会退化为 other 的通用主题集（不含 `tge_ido`/`exchange_listing` 等发射台强相关主题），属后续独立小改动；③ `etl_sector_flow_daily.py` 中历史命名 `sector_12` 不改（消费方按行动态读，新增 launchpad 行自动生效）；④ 规则改动对全库 launchpad 类资产生效（88 个 primary），不做逐资产手工调整。

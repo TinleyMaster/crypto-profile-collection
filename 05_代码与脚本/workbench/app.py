@@ -1897,8 +1897,15 @@ def api_asset_materials(asset_id: int):
 @app.route("/api/assets/<int:asset_id>/tokenomics")
 def api_asset_tokenomics(asset_id: int):
     try:
-        data = _get_db_stats().get_asset_tokenomics(asset_id)
-        return jsonify({"ok": True, "data": data})
+        stats = _get_db_stats()
+        data = stats.get_asset_tokenomics(asset_id)
+        # meta：基本面唯一事实源的字段信封（来源/时点/置信度/缺失原因），供页面「有值才渲染 + 缺失留痕」
+        # 消费。data 结构保持不变，老前端不受影响（工单 SSOT-001）。
+        try:
+            meta = stats.get_asset_fundamentals(asset_id)
+        except Exception:
+            meta = None
+        return jsonify({"ok": True, "data": data, "meta": meta})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -2420,8 +2427,14 @@ def api_research_thesis(asset_id: int):
 def api_research_tokenomics(asset_id: int):
     """代币经济学结构化数据。"""
     try:
-        data = _get_db_stats().get_asset_tokenomics(asset_id)
-        return jsonify({"ok": True, "data": data or {}})
+        stats = _get_db_stats()
+        data = stats.get_asset_tokenomics(asset_id)
+        # meta 见 /api/assets/<id>/tokenomics 同源说明（工单 SSOT-001）
+        try:
+            meta = stats.get_asset_fundamentals(asset_id)
+        except Exception:
+            meta = None
+        return jsonify({"ok": True, "data": data or {}, "meta": meta})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

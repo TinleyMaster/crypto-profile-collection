@@ -1108,6 +1108,291 @@ def get_asset_tokenomics(asset_id: int) -> dict | None:
             }
 
 
+# ── 代币基本面统一事实源（工单 SSOT-001）────────────────────────────────────
+# 病根：改造前基本面有 4 个组装点且口径漂移——
+#   ① get_asset_tokenomics()（本函数上方）字段最全，但没有逐字段来源/时点；
+#   ② generate_research_thesis 的 inline _fund 只吃 lp_locked / contract_renounced /
+#      buy_tax_pct / sell_tax_pct，导致库里已有的 分配/销毁/排放/通胀/治理/用途
+#      从未进入投研结论主线；
+#   ③ 解锁测算 prompt 另起一套 raw SQL 吃 10 个字段，并复制了一份 CMC supply 校验；
+#   ④ 页面各自渲染一个子集，且 research.html 对长文本做 slice(0,120) 截断。
+# 本函数让三端消费同一份基本面，并给每个字段挂 来源/时点/置信度/缺失原因，
+# 使消费端能区分「没有」(not_collected) 与「没抓」(fetch_failed) 与「陈旧」(stale)。
+#
+# 兼容约束：内部复用 get_asset_tokenomics()，不改其签名与返回结构（另有 4 个消费点）；
+# 本轮不改任何采集脚本，覆盖率问题另开工单。
+
+FUND_MISSING_NOT_COLLECTED = "not_collected"
+FUND_MISSING_FETCH_FAILED = "fetch_failed"
+FUND_MISSING_STALE = "stale"
+
+# tokenomics 行的统一陈旧阈值（天）；字段级细分阈值留待后续工单
+_FUND_STALE_DAYS = 180
+
+# 三端共同消费的字段清单（顺序即页面展示顺序）
+_FUND_TOKENOMICS_FIELDS = (
+    "total_supply", "circulating_supply", "max_supply",
+    "buy_tax_pct", "sell_tax_pct",
+    "lp_locked", "contract_renounced",
+    "allocation", "emission_schedule", "inflation_info",
+    "burn_info", "governance_info", "utility_info",
+)
+
+# 来源标签 → 展示名（页面与日志共用，避免各写一套中文名）
+FUND_SOURCE_LABELS = {
+    "cmc_quote_snapshot": "CMC 快照",
+    "biz.asset_tokenomics": "代币经济学库",
+    "github": "GitHub",
+    "defillama": "DeFiLlama",
+}
+
+
+def _fund_field(value, source, as_of=None, confidence=None, missing_reason=None) -> dict:
+    """构造单个字段的信封。
+
+    missing_reason 四态：
+      None           有值且新鲜（唯一可正常展示的原值态）
+      not_collected  行/字段缺失，从未采集
+      fetch_failed   有重试留痕但仍取不到值，属采集失败
+      stale          有值但 as_of 已超阈值（value 仍为原值，页面需标注陈旧）
+    """
+    return {
+        "value": value,
+        "source": source,
+        "as_of": as_of,
+        "confidence": confidence,
+        "missing_reason": missing_reason,
+    }
+
+
+def _parse_ts(v):
+    """容错解析时间戳（DB 返回值可能是 datetime 或 ISO 字符串）。失败返回 None。"""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    try:
+        ts = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_stale(as_of, stale_days: int) -> bool:
+    ts = _parse_ts(as_of)
+    if ts is None:
+        return False
+    return (datetime.now(timezone.utc) - ts).days > stale_days
+
+
+def _fetch_tokenomics_retry_meta(asset_id: int) -> dict:
+    """读取提取失败留痕（next_retry_at / extract_attempts / extract_status）。
+
+    这三列由 phase_c_extract_tokenomics.py 增量 ALTER 补齐，历史环境可能缺列，
+    因此整体兜底：缺列/查询失败返回空 dict，不影响其他字段装配。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """SELECT next_retry_at, extract_attempts, extract_status
+                       FROM biz.asset_tokenomics WHERE asset_id = %s""",
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else {}
+    except Exception:
+        return {}
+
+
+def _fetch_cmc_supply_baseline(asset_id: int) -> tuple[dict, str | None]:
+    """CMC 权威 supply 基线（最新快照）。
+
+    get_asset_tokenomics 内部已做「偏离权威值 >10 倍则覆盖」，此处只用于标注来源：
+    返回的 supply 值等于 CMC 权威值时，来源记为 cmc_quote_snapshot。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT q.total_supply, q.circulating_supply, q.max_supply, q.quote_time
+                    FROM biz.coin_basic cb
+                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
+                    WHERE cb.asset_id = %s
+                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
+                    """,
+                    (asset_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return {}, None
+        return (
+            {k: row[k] for k in ("total_supply", "circulating_supply", "max_supply")},
+            str(row["quote_time"]) if row["quote_time"] else None,
+        )
+    except Exception:
+        return {}, None
+
+
+def _fetch_github_activity(asset_id: int) -> list[dict]:
+    """GitHub 仓库活跃度（按资料库 github 入口 URL 匹配，最多 3 个仓库）。
+
+    抽取自 generate_research_thesis 原有实现，供三端共用；失败返回空列表。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT owner_login, repo_name, stars_count, forks_count,
+                           open_issues_count, archived, total_commits_52w,
+                           contributor_count_52w, pushed_at
+                    FROM biz.github_repo_activity
+                    WHERE owner_login || '/' || repo_name IN (
+                        SELECT DISTINCT
+                            SUBSTRING(entry_url FROM 'github\\.com/([^/]+/[^/\\s#?]+)')
+                        FROM biz.doc_source_entry
+                        WHERE asset_id = %s
+                          AND entry_type = 'github'
+                          AND entry_url LIKE '%%github.com%%'
+                    )
+                    ORDER BY stars_count DESC NULLS LAST
+                    LIMIT 3
+                """, (asset_id,))
+                rows = cur.fetchall()
+        return [{
+            "repo": f"{r['owner_login']}/{r['repo_name']}",
+            "stars": r["stars_count"],
+            "forks": r["forks_count"],
+            "open_issues": r["open_issues_count"],
+            "archived": r["archived"],
+            "commits_52w": r["total_commits_52w"],
+            "contributors_52w": r["contributor_count_52w"],
+            "pushed_at": str(r["pushed_at"]) if r["pushed_at"] else None,
+        } for r in rows]
+    except Exception:
+        return []
+
+
+def _fetch_dl_tvl(asset_id: int) -> dict | None:
+    """DeFiLlama 协议 TVL（经 core.asset_source_map 映射，取 TVL 最大的 1 条）。
+
+    抽取自 generate_research_thesis 原有实现；失败或无映射返回 None。
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("""
+                    SELECT p.name, p.category, p.tvl, p.change_1d, p.change_7d, p.fetched_at
+                    FROM src_dl.protocol_list p
+                    JOIN core.asset_source_map asm
+                      ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
+                    WHERE asm.asset_id = %s AND p.tvl IS NOT NULL
+                    ORDER BY p.tvl DESC LIMIT 1
+                """, (asset_id,))
+                r = cur.fetchone()
+        if not r:
+            return None
+        return {
+            "protocol": r["name"],
+            "category": r["category"],
+            "tvl_usd": _to_float(r["tvl"]),
+            "change_1d_pct": _to_float(r["change_1d"]),
+            "change_7d_pct": _to_float(r["change_7d"]),
+            "fetched_at": str(r["fetched_at"]) if r["fetched_at"] else None,
+        }
+    except Exception:
+        return None
+
+
+def fundamentals_raw_values(fund: dict | None) -> dict:
+    """把 get_asset_fundamentals 的信封摊平成 {字段: 原值}（None 值不出现）。
+
+    供 prompt 组装消费：LLM 只应看到原值，不该看到来源/时点等元信息。
+    """
+    fields = (fund or {}).get("fields") or {}
+    return {k: v["value"] for k, v in fields.items() if v.get("value") is not None}
+
+
+def get_asset_fundamentals(asset_id: int) -> dict:
+    """代币基本面唯一事实源：投研 prompt / 解锁 prompt / 页面三端同源消费。
+
+    返回 {"asset_id", "fields", "coverage", "tokenomics_row_exists",
+    "extraction_notes", "source_urls", "assembled_at"}。
+    tokenomics 行不存在时 fields 全部标 not_collected，不抛异常。
+    """
+    tok = get_asset_tokenomics(asset_id)
+    tok = tok if isinstance(tok, dict) else {}
+    row_exists = bool(tok)
+
+    retry = _fetch_tokenomics_retry_meta(asset_id) if row_exists else {}
+    attempts = retry.get("extract_attempts")
+    # 有重试留痕且当前仍取不到值 → 判定为「采集失败」而非「未采集」
+    fetch_failed = bool(
+        retry.get("extract_status") in ("failed", "error")
+        or (isinstance(attempts, int) and attempts > 0 and retry.get("next_retry_at") is not None)
+    )
+
+    row_conf = tok.get("confidence")
+    row_as_of = tok.get("updated_at")
+    row_stale = _is_stale(row_as_of, _FUND_STALE_DAYS)
+
+    cmc_supply, cmc_time = _fetch_cmc_supply_baseline(asset_id)
+
+    def _absent_reason() -> str:
+        return FUND_MISSING_FETCH_FAILED if fetch_failed else FUND_MISSING_NOT_COLLECTED
+
+    fields: dict[str, dict] = {}
+    for key in _FUND_TOKENOMICS_FIELDS:
+        raw = tok.get(key)
+        has_value = raw is not None and (not isinstance(raw, (list, dict)) or len(raw) > 0)
+        if not has_value:
+            fields[key] = _fund_field(None, "biz.asset_tokenomics", row_as_of, row_conf,
+                                      _absent_reason())
+            continue
+        src = "biz.asset_tokenomics"
+        as_of = row_as_of
+        # supply 三件套：返回的值与 CMC 权威值一致时，来源记 CMC 快照
+        if cmc_supply.get(key) is not None:
+            try:
+                if float(raw) == float(cmc_supply[key]):
+                    src = "cmc_quote_snapshot"
+                    as_of = cmc_time or row_as_of
+            except (TypeError, ValueError):
+                pass
+        fields[key] = _fund_field(raw, src, as_of, row_conf,
+                                  FUND_MISSING_STALE if row_stale else None)
+
+    repos = _fetch_github_activity(asset_id)
+    fields["github"] = (
+        _fund_field(repos, "github", repos[0].get("pushed_at"), None, None)
+        if repos else
+        _fund_field(None, "github", None, None, FUND_MISSING_NOT_COLLECTED)
+    )
+    tvl = _fetch_dl_tvl(asset_id)
+    fields["defillama_tvl"] = (
+        _fund_field(tvl, "defillama", tvl.get("fetched_at"), None, None)
+        if tvl else
+        _fund_field(None, "defillama", None, None, FUND_MISSING_NOT_COLLECTED)
+    )
+
+    missing = [k for k, v in fields.items() if v.get("value") is None]
+    return {
+        "asset_id": asset_id,
+        "fields": fields,
+        "coverage": {
+            "present": len(fields) - len(missing),
+            "total": len(fields),
+            "missing": missing,
+        },
+        "tokenomics_row_exists": row_exists,
+        "confidence": row_conf,
+        "extraction_notes": tok.get("extraction_notes"),
+        "source_urls": tok.get("source_urls") or [],
+        "assembled_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def get_whitepaper_summary(asset_id: int) -> list[dict]:
     """获取资产的白皮书结构化摘要列表。"""
     with get_db() as conn:
@@ -8752,74 +9037,18 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     except Exception as e:
         _emit(f"竞品数据采集失败（不影响结论生成）: {e}")
 
-    # ── 基本面补充（审计 §4.2 #10）──
-    # 链上 Top10 集中度、社交热度已分别落在 onchain / social 维度；此处补齐剩余「库内已有但未接线」项：
-    #   ① LP 锁仓 / 合约弃权 / 买卖税（biz.asset_tokenomics）
-    #   ② GitHub 开发活跃度（biz.github_repo_activity，按文档入口 github URL 匹配）
-    #   ③ DeFiLlama 协议 TVL（src_dl.protocol_list，经 core.asset_source_map 映射）
+    # ── 基本面补充（工单 SSOT-001：改由 get_asset_fundamentals 唯一事实源装配）──
+    # 链上 Top10 集中度、社交热度已分别落在 onchain / social 维度。改造前此处的 inline _fund
+    # 只吃 lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct，导致库里已有的
+    # 分配 / 销毁 / 排放 / 通胀 / 治理 / 用途 从未进入投研结论主线（此前只进入解锁测算支线）。
+    # 现改为消费唯一事实源，与解锁 prompt、页面三端同源。
     # 仍缺且本轮不可行的：协议收入/费用（无 fees 采集管道）、审计报告结构化（无 OCR/解析管道），
     # 两者均需新增外部采集，属独立工单，见交付说明。
-    _fund: dict = {}
-    if isinstance(tokenomics, dict):
-        for _k in ("lp_locked", "contract_renounced", "buy_tax_pct", "sell_tax_pct"):
-            if tokenomics.get(_k) is not None:
-                _fund[_k] = tokenomics[_k]
     try:
-        with get_db() as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                cur.execute("""
-                    SELECT owner_login, repo_name, stars_count, forks_count,
-                           open_issues_count, archived, total_commits_52w,
-                           contributor_count_52w, pushed_at
-                    FROM biz.github_repo_activity
-                    WHERE owner_login || '/' || repo_name IN (
-                        SELECT DISTINCT
-                            SUBSTRING(entry_url FROM 'github\\.com/([^/]+/[^/\\s#?]+)')
-                        FROM biz.doc_source_entry
-                        WHERE asset_id = %s
-                          AND entry_type = 'github'
-                          AND entry_url LIKE '%%github.com%%'
-                    )
-                    ORDER BY stars_count DESC NULLS LAST
-                    LIMIT 3
-                """, (asset_id,))
-                _repos = [{
-                    "repo": f"{r['owner_login']}/{r['repo_name']}",
-                    "stars": r["stars_count"],
-                    "forks": r["forks_count"],
-                    "open_issues": r["open_issues_count"],
-                    "archived": r["archived"],
-                    "commits_52w": r["total_commits_52w"],
-                    "contributors_52w": r["contributor_count_52w"],
-                    "pushed_at": str(r["pushed_at"]) if r["pushed_at"] else None,
-                } for r in cur.fetchall()]
-        if _repos:
-            _fund["github"] = _repos
+        _fund = fundamentals_raw_values(get_asset_fundamentals(asset_id))
     except Exception as e:
-        _emit(f"GitHub 活跃度采集失败（不影响结论生成）: {e}")
-    try:
-        with get_db() as conn:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                cur.execute("""
-                    SELECT p.name, p.category, p.tvl, p.change_1d, p.change_7d, p.fetched_at
-                    FROM src_dl.protocol_list p
-                    JOIN core.asset_source_map asm
-                      ON asm.source_code = 'dl' AND asm.source_asset_key = p.protocol_id
-                    WHERE asm.asset_id = %s AND p.tvl IS NOT NULL
-                    ORDER BY p.tvl DESC LIMIT 1
-                """, (asset_id,))
-                _pr = cur.fetchone()
-        if _pr:
-            _fund["defillama_tvl"] = {
-                "protocol": _pr["name"],
-                "category": _pr["category"],
-                "tvl_usd": _to_float(_pr["tvl"]),
-                "change_1d_pct": _to_float(_pr["change_1d"]),
-                "change_7d_pct": _to_float(_pr["change_7d"]),
-                "fetched_at": str(_pr["fetched_at"]) if _pr["fetched_at"] else None,
-            }
-    except Exception as e:
-        _emit(f"DeFiLlama TVL 采集失败（不影响结论生成）: {e}")
+        _fund = {}
+        _emit(f"基本面装配失败（不影响结论生成）: {e}")
     if _fund:
         metrics_structured["fundamentals"] = _fund
         _emit(f"基本面补充：{', '.join(sorted(_fund.keys()))}")
@@ -8885,11 +9114,16 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "    - valuation 维度必须消费 competitors：至少用 1 个同量级竞品的市值/FDV/解锁比例做横向对比。\n"
         "    - 禁止拿不同量级的蓝筹（如 Aave/1inch 给 meme 币）做估值对标。\n"
         "    - 若 competitors.items 为空或缺失，valuation 写「暂无同量级对标标的」，不得编造竞品。\n"
-        "14. 基本面规则：结构化指标 fundamentals 含 lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct、"
+        "14. 基本面规则：结构化指标 fundamentals 是代币基本面唯一事实源（工单 SSOT-001），"
+        "含代币经济（total_supply / circulating_supply / max_supply、allocation 分配、"
+        "emission_schedule 释放计划、inflation_info 通胀、burn_info 销毁、governance_info 治理、"
+        "utility_info 用途、buy_tax_pct / sell_tax_pct 买卖税、lp_locked / contract_renounced）、"
         "github（仓库活跃度）、defillama_tvl（协议 TVL）。\n"
-        "    - valuation 或 catalyst 维度应消费可用项（如 TVL 规模与 7 日变化、GitHub 提交/贡献者）。\n"
-        "    - 若 fundamentals 缺失某项（如无 defillama_tvl），写「该项未采集」，"
-        "禁止用资料库正文里的旧 TVL 数字替代。\n"
+        "    - supply（筹码）维度必须消费 allocation（分配明细），说明筹码结构（如团队/投资人占比、锁仓比例）。\n"
+        "    - catalyst 维度应消费 emission_schedule / inflation_info（释放节奏与通胀），"
+        "valuation 或 catalyst 应消费可用项（如 TVL 规模与 7 日变化、GitHub 提交/贡献者）。\n"
+        "    - 若 fundamentals 缺失某项（如无 defillama_tvl、无 allocation），写「该项未采集」，"
+        "禁止用资料库正文里的旧 TVL / 旧分配数字替代。\n"
         "    - 协议收入/费用（fees/revenue）无采集管道，如需引用只能写「收入数据未采集」。\n\n"
         "【四维框架】结论必须按以下四个维度组织，每维都要有数据支撑和引用：\n"
         "1. valuation（估值）：回答「值不值得」——价格、市值、FDV、估值分位、竞品对比\n"
@@ -11305,62 +11539,48 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict
 
     _emit("开始 AI 测算解锁数据...")
 
-    # 1. 获取代币经济学数据
+    # 1. 获取代币经济学数据（工单 SSOT-001：改由 get_asset_fundamentals 唯一事实源）
+    # 改造前此处另起一套 raw SQL 取 10 列，并复制了一份 CMC 权威 supply「偏离 >10 倍即覆盖」
+    # 的校验逻辑，与 get_asset_tokenomics 形成两份实现（修一处必漂移）。现统一消费 SSOT，
+    # supply 安全校验随之内联复用，本地不再重复实现。
+    _fund = get_asset_fundamentals(asset_id)
+    if not _fund.get("tokenomics_row_exists"):
+        return {"ok": False, "error": "无代币经济学数据，无法 AI 测算",
+                "tokenomist_error": tokenomist_error}
+    _fv = fundamentals_raw_values(_fund)
+    tkn = {
+        "total_supply": _fv.get("total_supply"),
+        "max_supply": _fv.get("max_supply"),
+        "circulating_supply": _fv.get("circulating_supply"),
+        "allocation_json": _fv.get("allocation"),
+        "burn_info": _fv.get("burn_info"),
+        "emission_schedule": _fv.get("emission_schedule"),
+        "governance_info": _fv.get("governance_info"),
+        "utility_info": _fv.get("utility_info"),
+        "confidence": _fund.get("confidence"),
+        "source_urls": _fund.get("source_urls") or [],
+    }
+    # 缺失原因留痕：原实现一律写 '无'，无法区分「没有」与「没抓」；此处保留具体原因。
+    _FUND_MISSING_ZH = {
+        FUND_MISSING_NOT_COLLECTED: "未采集",
+        FUND_MISSING_FETCH_FAILED: "采集失败",
+        FUND_MISSING_STALE: "数据陈旧",
+    }
+    _fund_missing = {
+        k: v.get("missing_reason")
+        for k, v in (_fund.get("fields") or {}).items()
+        if v.get("missing_reason")
+        and k in ("allocation", "burn_info", "emission_schedule",
+                  "governance_info", "utility_info")
+    }
+
+    def _or_missing(key: str, value):
+        """缺失时用具体原因替代旧实现的 '无'。"""
+        if value is not None:
+            return value
+        return _FUND_MISSING_ZH.get(_fund_missing.get(key), "未采集")
+
     with get_connection(settings.database_url) as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                """SELECT total_supply, max_supply, circulating_supply,
-                          allocation_json, burn_info, emission_schedule,
-                          governance_info, utility_info, confidence, source_urls
-                   FROM biz.asset_tokenomics WHERE asset_id = %s""",
-                (asset_id,),
-            )
-            tkn = cur.fetchone()
-
-        if not tkn:
-            return {"ok": False, "error": "无代币经济学数据，无法 AI 测算",
-                    "tokenomist_error": tokenomist_error}
-
-        # supply 安全校验：对比 CMC 权威快照，偏离 >10 倍则用权威值覆盖
-        try:
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as _cur:
-                _cur.execute(
-                    """
-                    SELECT q.total_supply AS auth_total,
-                           q.circulating_supply AS auth_circ,
-                           q.max_supply AS auth_max
-                    FROM biz.coin_basic cb
-                    JOIN src_cmc.cmc_asset_quote_snapshot q ON q.cmc_id = cb.cmc_id
-                    WHERE cb.asset_id = %s
-                      AND q.quote_time = (SELECT MAX(quote_time) FROM src_cmc.cmc_asset_quote_snapshot)
-                    """,
-                    (asset_id,),
-                )
-                _auth = _cur.fetchone()
-                if _auth:
-                    tkn = dict(tkn)  # 转可写 dict
-                    for _tok_key, _auth_key in [
-                        ("total_supply", "auth_total"),
-                        ("circulating_supply", "auth_circ"),
-                        ("max_supply", "auth_max"),
-                    ]:
-                        _tv = tkn.get(_tok_key)
-                        _av = _auth.get(_auth_key)
-                        if _av is None:
-                            continue
-                        if _tv is None:
-                            tkn[_tok_key] = _av
-                            continue
-                        try:
-                            _tvf = float(_tv)
-                            _avf = float(_av)
-                            if _avf > 0 and (_tvf / _avf > 10 or _tvf / _avf < 0.1):
-                                tkn[_tok_key] = _av  # 单位疑似错误，用权威值覆盖
-                        except (ValueError, TypeError, ZeroDivisionError):
-                            pass
-        except (psycopg.errors.UndefinedTable, Exception):
-            pass
-
         # 获取 symbol/name/launch_date（launch_date 作为 TGE/上线日期基准）
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
@@ -11404,11 +11624,11 @@ def _ai_estimate_unlocks(asset_id: int, tokenomist_error: str, log=None) -> dict
     当前价格: {price_info.get('price_usd', '未获取')} USD
     市值: {price_info.get('market_cap_usd', '未获取')} USD
     完全稀释估值(FDV): {price_info.get('fdv_usd', '未获取')} USD
-    分配: {json.dumps(tkn.get('allocation_json'), ensure_ascii=False) if tkn.get('allocation_json') else '无'}
-    销毁: {tkn.get('burn_info', '无')}
-    排放: {tkn.get('emission_schedule', '无')}
-    治理: {tkn.get('governance_info', '无')}
-    用途: {tkn.get('utility_info', '无')}
+    分配: {json.dumps(tkn.get('allocation_json'), ensure_ascii=False) if tkn.get('allocation_json') else _or_missing('allocation', None)}
+    销毁: {_or_missing('burn_info', tkn.get('burn_info'))}
+    排放: {_or_missing('emission_schedule', tkn.get('emission_schedule'))}
+    治理: {_or_missing('governance_info', tkn.get('governance_info'))}
+    用途: {_or_missing('utility_info', tkn.get('utility_info'))}
     数据来源: {json.dumps(tkn.get('source_urls', []), ensure_ascii=False)}
     置信度: {tkn.get('confidence')}
     """

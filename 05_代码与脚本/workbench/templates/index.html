@@ -8948,7 +8948,7 @@
                     switch (res.key) {
                         case 'tokenomics':
                             if (res.ok && res.data.ok && res.data.data) {
-                                renderTokenomics(res.data.data);
+                                renderTokenomics(res.data.data, res.data.meta);
                             } else {
                                 setTokenomicsMissing();
                             }
@@ -9561,7 +9561,17 @@
             return h;
         }
 
-        function renderTokenomics (t) {
+        // 基本面字段中文名（与 db_stats._FUND_TOKENOMICS_FIELDS 同清单，工单 SSOT-001）
+        const TKM_FUND_LABELS = {
+            total_supply: '总供应量', circulating_supply: '流通供应量', max_supply: '最大供应量',
+            buy_tax_pct: '买入税', sell_tax_pct: '卖出税', tax_info: '税率说明',
+            lp_locked: '流动性锁定', contract_renounced: '合约权限放弃', lp_lock_info: 'LP 锁定说明',
+            allocation: '代币分配', emission_schedule: '释放计划', inflation_info: '通胀机制',
+            burn_info: '销毁机制', governance_info: '治理', utility_info: '代币用途',
+            github: 'GitHub 活跃度', defillama_tvl: '协议 TVL'
+        };
+
+        function renderTokenomics (t, meta) {
             const indicator = document.getElementById('tkm-indicator');
             const status = document.getElementById('tkm-status');
             const btn = document.getElementById('tkm-run-btn');
@@ -9620,6 +9630,9 @@
             }
             if (t.utility_info) {
                 html += `<tr><td>用途</td><td>${escapeHtml(t.utility_info)}</td></tr>`;
+            }
+            if (t.inflation_info) {
+                html += `<tr><td>通胀机制</td><td>${escapeHtml(t.inflation_info)}</td></tr>`;
             }
             html += '</table>';
 
@@ -9700,6 +9713,23 @@
                 });
                 html += '</div>';
             }
+            // 基本面覆盖与新鲜度（工单 SSOT-001）：卡片级缺失留痕，不在每字段旁堆徽标
+            if (meta && meta.fields) {
+                const cov = meta.coverage || {};
+                const miss = (cov.missing || []).map(k => TKM_FUND_LABELS[k] || k);
+                const staleCnt = Object.keys(meta.fields).filter(k => {
+                    const f = meta.fields[k];
+                    return f && (f.missing_reason === 'stale');
+                }).length;
+                const bits = [];
+                if (cov.total) bits.push(`已采集 ${cov.present}/${cov.total} 项`);
+                if (miss.length) bits.push('缺失：' + miss.join('、'));
+                if (staleCnt > 0) bits.push('⚠️ 数据陈旧（超 180 天）');
+                if (meta.assembled_at) bits.push('数据时点 ' + String(meta.assembled_at).slice(0, 10));
+                if (bits.length) {
+                    html += `<div style="margin-top:8px;font-size:11px;color:#6b7280;line-height:1.7">${escapeHtml(bits.join(' · '))}</div>`;
+                }
+            }
             html += '</div>';
 
             detail.innerHTML = html;
@@ -9775,7 +9805,7 @@
                     title: '代币经济学',
                     url: `/api/assets/${id}/tokenomics`,
                     has: (d) => d && d.ok && d.data && Object.keys(d.data).length > 0,
-                    render: (d) => renderTokenomics(d.data),
+                    render: (d) => renderTokenomics(d.data, d.meta),
                 },
                 {
                     title: '白皮书摘要',
@@ -10447,7 +10477,7 @@
                 try {
                     const d = await (await fetch('/api/assets/' + currentResearchAssetId + '/tokenomics')).json();
                     if (d.ok && d.data && Object.keys(d.data).length > 0) {
-                        renderTokenomics(d.data);
+                        renderTokenomics(d.data, d.meta);
                         return;
                     }
                 } catch (e) { /* 落到兜底分支用 result.data 渲染 */ }

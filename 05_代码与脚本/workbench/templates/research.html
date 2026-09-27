@@ -2143,6 +2143,47 @@
             padding: 10px 12px;
         }
 
+        /* 关键机制 / 治理与用途：逐行渲染，长文本换行不截断（工单 SSOT-001 去掉 slice(0,120)） */
+        .tm-info-rows {
+            background: #111318;
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .tm-row {
+            display: flex;
+            gap: 10px;
+            font-size: 12px;
+            line-height: 1.6;
+            padding: 3px 0;
+        }
+
+        .tm-row + .tm-row {
+            border-top: 1px solid #1a1e26;
+        }
+
+        .tm-row .tm-row-k {
+            flex: 0 0 88px;
+            color: #6b7280;
+        }
+
+        .tm-row .tm-row-v {
+            flex: 1;
+            color: #c9ccd1;
+            word-break: break-word;
+            white-space: pre-wrap;
+        }
+
+        /* 来源与新鲜度页脚 + 卡片级缺失留痕 */
+        .tm-meta {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid #1e222a;
+            font-size: 11px;
+            color: #6b7280;
+            line-height: 1.7;
+        }
+
         .tm-empty {
             color: #6b7280;
             font-size: 13px;
@@ -4429,6 +4470,21 @@
         }
 
         // ── 代币经济学 ──
+        // 基本面字段中文名（与 db_stats._FUND_TOKENOMICS_FIELDS 同清单，工单 SSOT-001）
+        const FUND_LABELS = {
+            total_supply: '总供应量', circulating_supply: '流通供应量', max_supply: '最大供应量',
+            buy_tax_pct: '买入税', sell_tax_pct: '卖出税', tax_info: '税率说明',
+            lp_locked: '流动性锁定', contract_renounced: '合约权限放弃', lp_lock_info: 'LP 锁定说明',
+            allocation: '代币分配', emission_schedule: '释放计划', inflation_info: '通胀机制',
+            burn_info: '销毁机制', governance_info: '治理', utility_info: '代币用途',
+            github: 'GitHub 活跃度', defillama_tvl: '协议 TVL'
+        };
+        const FUND_MISSING_LABELS = { not_collected: '未采集', fetch_failed: '采集失败', stale: '数据陈旧' };
+        const FUND_SOURCE_LABELS = {
+            cmc_quote_snapshot: 'CMC 快照', 'biz.asset_tokenomics': '代币经济学库',
+            github: 'GitHub', defillama: 'DeFiLlama'
+        };
+
         async function loadTokenomics () {
             const box = document.getElementById('r-tokenomics');
             const container = document.getElementById('tm-container');
@@ -4442,39 +4498,86 @@
                     container.innerHTML = '<div class="tm-empty">加载失败: ' + escapeHtml(data.error || '') + '</div>';
                     return;
                 }
-                renderTokenomics(data.data || {});
+                renderTokenomics(data.data || {}, data.meta || null);
             } catch (e) {
                 container.innerHTML = '<div class="tm-empty">网络错误: ' + escapeHtml(e.message) + '</div>';
             }
         }
 
-        function renderTokenomics (d) {
+        // 取值优先走 meta 字段信封（可区分「没有 / 没抓 / 陈旧」）；无 meta 时退回扁平值。
+        function _fundVal (d, meta, key) {
+            const f = meta && meta.fields && meta.fields[key];
+            return f ? f.value : d[key];
+        }
+
+        // 卡片级缺失留痕：覆盖率 + 缺失清单 + 来源 + 数据时点 + 置信度 + 陈旧告警。
+        // 不在每个字段旁堆徽标，避免噪声。
+        function renderFundMeta (meta) {
+            if (!meta || !meta.fields) return '';
+            const cov = meta.coverage || {};
+            const lines = [];
+            if (cov.total) lines.push('已采集 ' + cov.present + '/' + cov.total + ' 项');
+            const missing = cov.missing || [];
+            if (missing.length) {
+                lines.push('缺失：' + missing.map(function (k) { return FUND_LABELS[k] || k; }).join('、'));
+            }
+            const srcSet = {};
+            let staleCount = 0;
+            Object.keys(meta.fields).forEach(function (k) {
+                const f = meta.fields[k];
+                if (!f) return;
+                if (f.value != null && f.source) srcSet[f.source] = true;
+                if (f.missing_reason === FUND_MISSING_LABELS.stale || f.missing_reason === 'stale') staleCount++;
+            });
+            const srcNames = Object.keys(srcSet).map(function (s) { return FUND_SOURCE_LABELS[s] || s; });
+            if (srcNames.length) lines.push('来源：' + srcNames.join(' / '));
+            const tail = [];
+            if (meta.assembled_at) tail.push('数据时点 ' + String(meta.assembled_at).slice(0, 10));
+            if (meta.confidence != null) tail.push('提取置信度 ' + Number(meta.confidence).toFixed(2));
+            if (staleCount > 0) tail.push('⚠️ 数据陈旧（超 180 天）');
+            if (tail.length) lines.push(tail.join(' · '));
+
+            if (!lines.length) return '';
+            return '<div class="tm-meta">' + lines.map(function (l) {
+                return '<div>' + escapeHtml(l) + '</div>';
+            }).join('') + '</div>';
+        }
+
+        function renderTokenomics (d, meta) {
             const container = document.getElementById('tm-container');
-            const hasAny = d.total_supply != null || d.circulating_supply != null || d.max_supply != null ||
-                (d.allocation && Object.keys(d.allocation).length > 0);
+            const hasAny = ['total_supply', 'circulating_supply', 'max_supply', 'allocation'].some(function (k) {
+                return _fundVal(d, meta, k) != null;
+            });
 
             if (!hasAny) {
-                container.innerHTML = '<div class="tm-empty">暂无代币经济学数据</div>';
+                // 缺失留痕：区分「从未采集」与「采集失败」，而非一句模糊的「暂无」
+                const reason = meta && meta.coverage && meta.coverage.total
+                    ? '（' + meta.coverage.present + '/' + meta.coverage.total + ' 项已采集）' : '';
+                container.innerHTML = '<div class="tm-empty">暂无可展示的代币经济学数据' + escapeHtml(reason) + '</div>';
                 return;
             }
 
             let html = '';
 
-            // 核心 supply 指标
-            html += '<div class="tm-grid">';
-            html += '<div class="tm-cell"><div class="tm-label">总供应量</div><div class="tm-value">' + fmtNumberBig(d.total_supply) + '</div></div>';
-            html += '<div class="tm-cell"><div class="tm-label">流通供应量</div><div class="tm-value">' + fmtNumberBig(d.circulating_supply) + '</div></div>';
-            html += '<div class="tm-cell"><div class="tm-label">最大供应量</div><div class="tm-value">' + fmtNumberBig(d.max_supply) + '</div></div>';
-
-            let circRatio = null;
-            if (d.circulating_supply != null && d.total_supply != null && Number(d.total_supply) > 0) {
-                circRatio = Number(d.circulating_supply) / Number(d.total_supply) * 100;
+            // 核心 supply 指标（有值才渲染，无值不占位）
+            let grid = '';
+            [['总供应量', 'total_supply'], ['流通供应量', 'circulating_supply'], ['最大供应量', 'max_supply']]
+                .forEach(function (c) {
+                    const v = _fundVal(d, meta, c[1]);
+                    if (v == null) return;
+                    grid += '<div class="tm-cell"><div class="tm-label">' + c[0] +
+                        '</div><div class="tm-value">' + fmtNumberBig(v) + '</div></div>';
+                });
+            const _circ = _fundVal(d, meta, 'circulating_supply');
+            const _total = _fundVal(d, meta, 'total_supply');
+            if (_circ != null && _total != null && Number(_total) > 0) {
+                grid += '<div class="tm-cell"><div class="tm-label">流通率</div><div class="tm-value">' +
+                    fmtPct(Number(_circ) / Number(_total) * 100) + '</div></div>';
             }
-            html += '<div class="tm-cell"><div class="tm-label">流通率</div><div class="tm-value">' + fmtPct(circRatio) + '</div></div>';
-            html += '</div>';
+            if (grid) html += '<div class="tm-grid">' + grid + '</div>';
 
             // 代币分配
-            const alloc = d.allocation || {};
+            const alloc = _fundVal(d, meta, 'allocation') || {};
             const allocKeys = Object.keys(alloc);
             if (allocKeys.length > 0) {
                 html += '<div class="tm-section-title">代币分配</div><div class="tm-bars">';
@@ -4496,17 +4599,44 @@
                 html += '</div>';
             }
 
-            // 关键信息文本
-            const infoParts = [];
-            if (d.inflation_info) infoParts.push('通胀: ' + String(d.inflation_info).slice(0, 120));
-            if (d.emission_schedule) infoParts.push('排放: ' + String(d.emission_schedule).slice(0, 120));
-            if (d.burn_info) infoParts.push('销毁: ' + String(d.burn_info).slice(0, 120));
-            if (d.lp_locked != null) infoParts.push('流动性锁定: ' + (d.lp_locked ? '是' : '否'));
-            if (d.contract_renounced != null) infoParts.push('合约权限放弃: ' + (d.contract_renounced ? '是' : '否'));
-            if (d.tax_info) infoParts.push('税收: ' + String(d.tax_info).slice(0, 120));
-            if (infoParts.length > 0) {
-                html += '<div class="tm-section-title">关键机制</div><div class="tm-info">' + escapeHtml(infoParts.join(' · ')) + '</div>';
+            // 关键机制：逐行渲染、长文本换行不截断（原实现用 slice(0,120) 截断）
+            let mech = '';
+            [['通胀机制', 'inflation_info'], ['释放计划', 'emission_schedule'], ['销毁机制', 'burn_info'],
+             ['税率说明', 'tax_info'], ['LP 锁定说明', 'lp_lock_info']]
+                .forEach(function (m) {
+                    const v = _fundVal(d, meta, m[1]);
+                    if (v == null || v === '') return;
+                    mech += '<div class="tm-row"><span class="tm-row-k">' + m[0] + '</span><span class="tm-row-v">' +
+                        escapeHtml(String(v)) + '</span></div>';
+                });
+            const _bt = _fundVal(d, meta, 'buy_tax_pct');
+            const _st = _fundVal(d, meta, 'sell_tax_pct');
+            if (_bt != null || _st != null) {
+                const tax = [];
+                if (_bt != null) tax.push('买入 ' + _bt + '%');
+                if (_st != null) tax.push('卖出 ' + _st + '%');
+                mech += '<div class="tm-row"><span class="tm-row-k">买卖税</span><span class="tm-row-v">' +
+                    escapeHtml(tax.join(' / ')) + '</span></div>';
             }
+            [['流动性锁定', 'lp_locked'], ['合约权限放弃', 'contract_renounced']].forEach(function (b) {
+                const v = _fundVal(d, meta, b[1]);
+                if (v == null) return;
+                mech += '<div class="tm-row"><span class="tm-row-k">' + b[0] + '</span><span class="tm-row-v">' +
+                    (v ? '✅ 是' : '❌ 否') + '</span></div>';
+            });
+            if (mech) html += '<div class="tm-section-title">关键机制</div><div class="tm-info-rows">' + mech + '</div>';
+
+            // 治理与用途（改造前只在解锁 prompt 支线被消费，页面与投研主线都看不到）
+            let gu = '';
+            [['治理', 'governance_info'], ['代币用途', 'utility_info']].forEach(function (m) {
+                const v = _fundVal(d, meta, m[1]);
+                if (v == null || v === '') return;
+                gu += '<div class="tm-row"><span class="tm-row-k">' + m[0] + '</span><span class="tm-row-v">' +
+                    escapeHtml(String(v)) + '</span></div>';
+            });
+            if (gu) html += '<div class="tm-section-title">治理与用途</div><div class="tm-info-rows">' + gu + '</div>';
+
+            html += renderFundMeta(meta);
 
             container.innerHTML = html;
         }

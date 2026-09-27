@@ -1841,3 +1841,26 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 **验证**：`py_compile` 2/2 OK；自检断言通过（`daily_brief_email` 在 `KEY_JOBS` 且 `SCHEDULE` 可命中；`FAIL_ALERT_ROUNDS=4`；`_alert_consecutive_failures` 在 SMTP 未配时**不抛**仅打印失败；模拟 6 轮全失败 → 告警恰在第 4 轮触发）。既有回归全绿：`test_daily_brief_20260924` 29/0、`test_daily_brief_p1` 22/0、`test_catalyst_channel_dedup` 22/0、`test_major_event_alert` 55/0。
 
 **未做 / 边界（须留档）**：① **未把早报「补发」做成一发即校验的强幂等**：看护是「按 task 状态超阈值未 done」触发的通用兜底，若某日 09:00 发送成功但 task 行写入失败，理论上可能补发第二封（概率极低，未加日级去重锁）。② **未给 `catalyst_fast_daemon` 加进程级心跳**：本轮只做「连续异常」自告警；**进程被 kill 不告警**（依赖 supervisord `autorestart=true` + 容器 FATAL 可见），如需「daemon 死了也报警」须另加 `sys.task` 心跳并纳入看护。③ **未收紧 `send_daily_brief.py` 的 SMTP 未配静默分支**（`notifier.configured == False → return 0`，任务显示 `done` 但未发信）：本次 prod 实测该分支未触发（发送成功），故未改；但它是「没发却显示成功」的同类陷阱，建议后续单独立项。④ **未加 `pool_pre_ping`**：`pg_stat_activity` 无中毒证据、且连接池毒化根因已由 `c6b009e` 处置，故不动连接池（避免无谓行为变更）。⑤ **未回填 09-26 缺失的早报**（补发只对「当前超阈值」生效，不回放历史）。⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）。
+
+### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
+
+**现象**：同一份 `biz.asset_tokenomics` 有 **4 个组装点**且口径已漂移——① `db_stats.get_asset_tokenomics()` 字段最全（22 列 + `biz.asset_token_unlocks` 的 revenue/valuation/overview）但**无逐字段来源/时点**；② 投研结论 prompt 的 inline `_fund` **只吃 `lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct`**；③ 解锁测算 prompt **另起一套 raw SQL 吃 10 列**并**复制了一份 CMC supply 校验**；④ 页面各渲染一个子集。**核心病根**：库里已有的 `allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **从未进入投研结论主线**（只进解锁支线）——2043 行中 allocation 776、emission 676、utility 1204、governance 328、burn 203、inflation 155 全部对投资决策 prompt 不可见。
+
+**修法（唯一事实源 + 三端接线，不改采集）**：
+1. **新增 `db_stats.get_asset_fundamentals(asset_id)`**：内部复用 `get_asset_tokenomics()`（**不改其签名与返回结构**，保 4 个既有消费点），逐字段返回信封 `{value, source, as_of, confidence, missing_reason}`，另出 `coverage{present,total,missing}`、行级 `confidence`、`source_urls`、`assembled_at`。
+2. **missing_reason 四态**（本轮判据）：`None` 有值且新鲜；`not_collected` 行/字段缺失；`fetch_failed` 有重试留痕（`extract_status ∈ {failed,error}` 或 `extract_attempts>0 且 next_retry_at 非空`）但仍取不到值；`stale` **有值但** `as_of` 超 `_FUND_STALE_DAYS=180`（**value 仍为原值**，消费端规则：`value is not None` 即渲染，再叠加陈旧告警）。**缺失优先于陈旧**：行陈旧时缺失字段仍记 `not_collected`。
+3. **来源标注**：supply 三件套与 CMC 权威快照值一致 → `cmc_quote_snapshot`（`as_of` 用快照 `quote_time`），否则 `biz.asset_tokenomics`；github/defillama_tvl 各自独立来源。
+4. **三端接线**：① 投研主线 `_fund` 改为 `fundamentals_raw_values(get_asset_fundamentals(asset_id))`，prompt 规则 14 同步扩项（新增 allocation / emission_schedule / inflation_info / burn_info / governance_info / utility_info，并要求 supply 维度消费 allocation）。② 解锁 prompt 删除其独立 raw SQL 与重复 CMC 校验，改由 SSOT 组装 `tkn`（键名照旧，下游 payload 不变）；旧实现的缺失占位 `'无'` 改为具体原因（未采集 / 采集失败 / 数据陈旧），`_or_missing()` 承载。③ 页面：两个 tokenomics API **`data` 结构不变**，仅新增同级 `meta`（老前端零影响）。
+5. **页面重构**：`research.html` `renderTokenomics(d, meta)` 改为**有值才渲染 + 卡片级缺失留痕**，**删除 `slice(0,120)` 截断**（长文本由 `.tm-row` 换行承接），新增「治理与用途」分区与 `renderFundMeta()`（覆盖率 / 缺失清单中文名 / 来源 / 数据时点 / 置信度 / 陈旧告警）；`index.html` `renderTokenomics(t, meta)` 补 `inflation_info` 一行与同款覆盖率页脚。
+6. **新增公共小函数**（从 `generate_research_thesis` 抽取，供 SSOT 与主线共用）：`_fetch_github_activity()`、`_fetch_dl_tvl()`、`_fetch_tokenomics_retry_meta()`、`_fetch_cmc_supply_baseline()`、`_parse_ts()`、`_is_stale()`、`_fund_field()`、`fundamentals_raw_values()`；字段清单常量 `_FUND_TOKENOMICS_FIELDS`（15 项）+ `FUND_SOURCE_LABELS`。
+
+**验证**：新探针 `workbench/test_asset_fundamentals_ssot_20260927.py` **68/0**（纯离线，桩掉 5 个外部依赖：契约/四态/来源/Coverage 自洽/raw 摊平/三端源码护栏/规则 14 扩项/两页渲染护栏/字段清单三端一致/API 兼容/只读护栏）。既有回归全绿：`test_research_3tier_20260927` 82/0、`test_research_determinacy_20260926` 127/0、`test_thesis_forward_track_20260927` 63/0、`test_macro_market_p0` 16/16、`test_macro_market_board_tier2` 36/36、`test_fundamental_liquidity` 13/0、`test_unlock_refresh_20260926` 23/0；`py_compile` 2/2 OK；两模板内联 JS 抽取（Jinja 占位替换为字面量后）`node --check` 双 OK。本轮**无 DDL、无数据迁移**（`create_asset_tokenomics.sql` 未动）。
+
+**未做 / 边界（须留档）**：
+- ① **不改任何采集脚本、不提升覆盖率**：`buy_tax_pct 63 / lp_locked 46 / contract_renounced 41` 仍为 **2–3%**，`biz.asset_tokenomics` 总覆盖 2043/21833（9.4%）；覆盖率另开独立工单。
+- ② **存量 495 条 `research_thesis` 未重算**（用户决议）：仅新生成的结论带新增基本面字段；旧结论页的 `structured_metrics.fundamentals` 仍是旧 4 项（读路径不重算 fundamentals）。
+- ③ **`stale` 阈值是行级统一值（180 天）**，未做字段级细分（如 tax/LP 与 allocation 的更新节奏不同）。
+- ④ **CMC supply 查询仍有并行副本**：`_fetch_cmc_supply_baseline()` 与 `_build_structured_metrics_inner`（L~8400）/另一处（L~3010）各自查一次 —— 本次只**消除了解锁 prompt 那份**（净减一处），另两处属其它函数内部语义，未动以免回归。
+- ⑤ **`_fetch_github_activity` / `_fetch_dl_tvl` 吞掉异常且不再 `_emit`**：原 inline 实现失败时会打日志，抽取后静默返回空（页面会显示「未采集」，无法区分「无映射」与「查询报错」）。
+- ⑥ **契约与原工单差异**：返回顶层**未含 `symbol`**（`get_asset_tokenomics` 无该字段，避免为此再加一次查询；消费端本来就有 symbol）；字段清单**新增 `tax_info` / `lp_lock_info`**（原工单未列，但两页本就在渲染，纳入后口径才一致）。
+- ⑦ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验 `/api/research/11114/notebook` 的 `structured_metrics.fundamentals` 出现新增键（须触发一次结论生成）、`/api/research/11114/tokenomics` 与 `/api/assets/11114/tokenomics` 的 `meta.coverage` 一致、research 页不截断、index 页补齐通胀与来源。

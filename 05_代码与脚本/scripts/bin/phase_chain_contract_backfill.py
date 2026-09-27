@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -70,6 +71,26 @@ SUPPORTED_CHAINS = frozenset({
     "ethereum", "bsc", "solana", "polygon", "arbitrum", "base",
     "optimism", "avalanche", "tron", "ton", "sui", "aptos",
 })
+
+# Solana 合约地址结构护栏（base58 大小写敏感）：长度 32–44 且不含 base58 禁用字符
+# 0 O I l。用来挡掉三类已实证的 solana 链污染（见 core.asset_contract 中
+# source_code='cmc'/'dl' 的历史脏行）：
+#   1) 原生 mint（Wrapped SOL / System Program）被当成 SPL 代币合约；
+#   2) EVM hex 地址（0x…）被贴上 solana 链；
+#   3) 区块浏览器 URL 片段（如 token/EdAhkb…）被当作地址。
+SOLANA_ADDR_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+SOLANA_NATIVE_MINTS = frozenset({
+    "So11111111111111111111111111111111111111111",  # Wrapped SOL
+    "11111111111111111111111111111111",             # System Program
+})
+
+
+def is_valid_solana_addr(addr: str) -> bool:
+    """solana 合约地址结构校验：base58 形态且非原生 mint。仅对 solana 链调用。"""
+    if not addr or addr in SOLANA_NATIVE_MINTS:
+        return False
+    return SOLANA_ADDR_RE.match(addr) is not None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -197,6 +218,11 @@ def parse_contracts(
                 continue
             chain = normalize_chain(ca.get("platform") or {})
             if not chain or chain not in SUPPORTED_CHAINS:
+                continue
+            if chain == "solana" and not is_valid_solana_addr(addr):
+                # 挡下 base58 形态非法 / 原生 mint，避免污染 core.asset_contract
+                print(f"  [skip] solana 地址结构非法（非 base58 或原生 mint）: "
+                      f"{addr[:60]} (cmc_id={cmc_id})")
                 continue
             rows.append({
                 "asset_id": asset_id,

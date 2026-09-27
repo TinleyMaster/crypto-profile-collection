@@ -230,6 +230,18 @@ WHERE m.platform_name IS NOT NULL
   AND m.token_address != ''
   AND LOWER(m.platform_name) != 'multi-chain'
   AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
+  -- solana 结构护栏：仅 base58 形态（32–44 字符、不含 0OIl）且非原生 mint 才写入，
+  -- 挡掉 EVM hex 地址 / 浏览器 URL 片段 / 原生 mint 混入 solana 链（历史脏行根因之一）
+  AND (
+      LOWER(m.platform_name) NOT IN ('solana', 'solana (spl)')
+      OR (
+          m.token_address ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+          AND m.token_address NOT IN (
+              'So11111111111111111111111111111111111111111',
+              '11111111111111111111111111111111'
+          )
+      )
+  )
 ON CONFLICT (chain, contract_address) DO UPDATE SET
     asset_id = EXCLUDED.asset_id,
     is_primary = TRUE,
@@ -320,6 +332,18 @@ INNER JOIN core.asset a ON a.asset_id = dl.asset_id
 WHERE LOWER(contract_address) <> '0x0000000000000000000000000000000000000000'
   AND (addr_chain IS NOT NULL OR LOWER(raw_chain) != 'multi-chain')
   AND a.asset_type != 'coin'  -- 原生币不写入非原生链合约，避免污染
+  -- solana 结构护栏（同 CMC）：DefiLlama 的 address 可能是 EVM hex 或 URL 片段，
+  -- 仅当链为 solana 且地址为合法 base58、非原生 mint 时才允许写入
+  AND (
+      LOWER(COALESCE(addr_chain, raw_chain)) <> 'solana'
+      OR (
+          contract_address ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+          AND contract_address NOT IN (
+              'So11111111111111111111111111111111111111111',
+              '11111111111111111111111111111111'
+          )
+      )
+  )
 ON CONFLICT (chain, contract_address) DO NOTHING
 """
 

@@ -1854,6 +1854,14 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **覆盖度实况（纠偏）**：solana 合约 3166 条中 **3143 条已有成功快照（99.3%）**，「断更」实为**时新性缺口**而非覆盖缺口；仅 23 条从未成功（即上述污染 + 边缘个例）。
 - **未做（建议单独立项「数据侧」）**：**地址本体的修复**——须定位并修掉把 solana 地址降格/贴 URL 的写入方（疑似 contract 回填/CMC·DexScreener 侧），再从可信源重同步以**恢复**那 15 个资产（本次仅做队列侧结构过滤，**未改 `core.asset_contract` 任何数据**）；以及 5 个「全小写但形态合法」者（GEOD/FOXSY/AIXCB/SAFA/BELG）仍会每日失败一次（形态上无法与真地址区分，只能靠数据修复）。
 
+**续（同日）：写入方定位 + 护栏落地（用户「先帮我定位并修复那 15 个被污染的数据写入方」）**
+
+- **定位（三段式证据）**：① 16 行污染**全部** `created_at = 2026-07-31`、`source_code ∈ {cmc ×15, dl ×1}`；`cg` 侧 1445 行**零污染**、`cmc_backfill` 35 行零污染；**2026-07-31 之后无任何新增小写行** ⇒ 系建表当日一次性导入产物，非在跑的写入方持续产生。② **写入方早已修复**：`77bf42e`「合约导入保留 Solana 地址原始大小写」修的就是 `POPULATE_FROM_CMC`（现为 `CASE WHEN platform IN ('solana','solana (spl)') THEN token_address ELSE LOWER(...)`）；直接证据 —— BOOP 资产 09-16 又写入**正确大小写**行 `2HrZ5R18H48b8ptL3n8N5zX65zDB4o2cMCHcP3QfSfye`，与 07-31 的小写旧行 `2hrz5r18…` **并存**。③ **机制根因**：建表 DDL 用 `UNIQUE (chain, contract_address)`（**大小写敏感**），与 07-29 初始化 SQL 的原设计 `UNIQUE (chain_id, LOWER(contract_address))` **背离** ⇒ 正确大小写值与旧小写值**不冲突、不覆盖**，正确值只能「并存新增」，旧行**永久存活**（BOOP/TAO 实测并存即此）。
+- **本轮落地（护栏 3 处，纯代码，零数据变更）**：① `phase_chain_contract_backfill.py` 新增 `SOLANA_ADDR_RE = ^[1-9A-HJ-NP-Za-km-z]{32,44}$`、`SOLANA_NATIVE_MINTS`（Wrapped SOL / System Program）与 `is_valid_solana_addr()`，`parse_contracts` 对 solana 剔除并打印（该脚本**无调度调用**，属手动入口；实证它曾写入原生 mint `So1111…1111`）。② `phase_a_build_core.POPULATE_FROM_CMC`（**每日 03:00 流水线 ④，正是这 15 行的源头**）WHERE 增 solana 结构条件。③ `POPULATE_FROM_DL` 同款（DefiLlama 的 `address` 可能是 EVM hex 或 URL 片段，实证 UNCX `0xadb2437e…` / FAB `token/EdAhkb5…`）。三处均**只对 solana 生效**，非 solana 链行为不变。
+- **验证**：`EXPLAIN (COSTS OFF)` 只读验 SQL —— `POPULATE_FROM_CMC` OK（16 行计划）；新探针 `workbench/test_contract_addr_guard_20260927.py` **28/0**（A 结构校验 10 例含「合法全小写不误伤」/ B `parse_contracts` 端到端剔脏 / C·D 两段 SQL 护栏 + 保留链感知赋值 / E 相邻写入方未被波及）；回归 `test_solana_holder_20260927` 27/0、`test_snapshot_freshness_20260927` 27/0、`test_scan_alert_onchain_addr` 退出 0；`py_compile` 2/2 OK。
+- **新发现（既有缺陷，须留档）**：`POPULATE_FROM_DL` 存在**列歧义** —— `SELECT asset_id`（首列）在 `dl` CTE 与 `core.asset a` 之间歧义，**HEAD 版本同样报 `AmbiguousColumn`**（非本轮引入）。叠加 `run_cmc_pipeline.py` 只跑 `--step populate_cmc`、**无任何调度/流水线调用 `populate_dl`** ⇒ 该 SQL 长期是**死代码路径**（生产 `source_code='dl'` 的行来自更早版本）。修复只需 1 词（`dl.asset_id`），已 EXPLAIN 验证修复版 OK（17 行计划）；但修复后候选 **2965 行（solana 167）**、属**行为变更**（会让一条长期失败/未执行的回填突然写库），故**本轮未修**，留待显式授权。
+- **未做（须留档）**：① **未改 `core.asset_contract` 任何数据** —— 16 行污染仍残留（用户本轮只选了「补护栏」）。② **未动唯一约束**：改「大小写不敏感」需先清掉并存的等价变体行，并同步 4~5 处 `ON CONFLICT (chain, contract_address)` 写法（否则无法推断唯一索引、写入方全部报错），改动面大。③ 5 个「全小写但形态合法」者（GEOD/FOXSY/AIXCB/SAFA/BELG）**结构上无法与真地址区分**，护栏拦不住，只能靠数据修复。
+
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 
 来源：`诊断_早报与催化剂邮件停发_2026-09-27.md`（诊断假说「两套同时停 = 共同上游 DB 连接池毒化」，未连 prod）。用户授权「修复没发的问题」后，先做 **prod 只读取证**（`sys.task`/`task_log`/`catalyst_notification_log`/`catalyst_signal`/`pg_stat_activity`），结论**推翻原假说**：

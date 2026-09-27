@@ -5,6 +5,7 @@ from typing import Iterator
 
 import psycopg
 import psycopg_pool
+from psycopg.rows import tuple_row
 
 
 _pool: psycopg_pool.ConnectionPool | None = None
@@ -45,6 +46,13 @@ def get_connection(database_url: str) -> Iterator[psycopg.Connection]:
     pool = _get_pool(database_url)
     with pool.connection() as conn:
         try:
+            # 护栏（2026-09-27）：连接是池内复用的，归还时不重置 row_factory。
+            # 若任何调用方在借出的连接上写 conn.row_factory = dict_row（而非在
+            # cursor(row_factory=...) 上指定），会把 dict_row 毒化进池，后续复用该
+            # 连接的代码拿到 dict 行，凡按元组解包的都会 KeyError/ValueError（实测
+            # 大盘 overview 链上异动块整块失效）。这里在每次借出时归位为默认元组行，
+            # 让「忘记重置」不再能污染他人。
+            conn.row_factory = tuple_row
             yield conn
             conn.commit()
         except Exception:

@@ -1349,8 +1349,14 @@ def fetch_binance_etf_flows() -> dict:
         from datetime import date, timedelta
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
-            conn.row_factory = psycopg.rows.dict_row
-            with conn.cursor() as cur:
+            # 必须在 cursor 上指定 row_factory，绝不能设 conn.row_factory：
+            # get_connection 走全局连接池（crypto_research.db.conn，max_size=5），
+            # 连接用完只 commit+归还、不重置 row_factory ⇒ 会把 dict_row「毒化」进池，
+            # 后续任意复用该连接的代码拿到 dict 行，凡按元组解包的都会炸。
+            # 2026-09-27 实测：大盘 overview 的 get_onchain_anomalies 元组解包拿到
+            # dict 的 key，int('signal_id') → "invalid literal for int() with base 10:
+            # 'signal_id'"，链上异动板块整块 total=0（间歇，取决于池里拿到哪条连接）。
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 # 新鲜度基准：整个表的最新日期（不排除净流入为 0 的休市日）
                 cur.execute("""
                     SELECT MAX(flow_date) AS latest

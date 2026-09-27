@@ -79,8 +79,14 @@ NEW_ASSET_POLICY = ("candidate", "bootstrap_dl_new", 80)
 
 
 def _count_kinds(matched: list[dict]) -> dict[str, int]:
-    """按判据分桶统计（可观测性：确认一手命中占比，而非只看总数）。"""
-    counts = {"cmc": 0, "gecko": 0, "symbol": 0}
+    """按判据分桶统计（可观测性：确认一手命中占比，而非只看总数）。
+
+    "new" 桶对应「无既有资产可复用 → 由协议新建资产」（NEW_ASSET_POLICY），
+    由调用方对上账；必须预置为 0，否则一旦 unmatched 非空，
+    写入侧 kind_counts["new"] += 1 会 KeyError 并令整条 dl_pipeline 中止
+    （2026-09-27 定位：09-24 / 09-26 两条流水线 exit 1，导致链榜 TVL 滞后）。
+    """
+    counts = {"cmc": 0, "gecko": 0, "symbol": 0, "new": 0}
     for e in matched:
         counts[e["match_kind"] or "symbol"] += 1
     return counts

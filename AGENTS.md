@@ -1614,6 +1614,38 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **修复**：`app.py` 默认值 `"10"` → `10`，并加注释固化这条 Flask 语义坑。全仓扫描 `args.get(..., type=int|float)` **仅此一处**该模式（`app.py` 共 23 处 `type=`，其余默认值/用法正常）。
 - **同类端点数**：同批裸调用扫描 `/api/market/{hot,long-tail,gainers,volume,sector-heatmap,overview,backtest}`、`/api/cm/{mvrv,activity,valuation}` **全部 200**，**仅温度计 500**。
 - **校验**：`py_compile(app.py)` 通过 + `MultiDict` 机制复现/修复验证通过。线上生效确认须待 Zeabur 重建后重跑裸调用（`push ≠ 线上生效`）。
+- **线上生效复验 ✅（2026-09-27 14:47 CST，push 后约 8 分钟）**：重建窗口内 `/healthz` 与裸调用均短暂 **502（Bad Gateway）**（容器滚动重启，非缺陷）；重建完成后 `GET /api/market/onchain-thermometer`（裸）→ **200**，`?limit=10` → 200 ⇒ 修复确认上线。**教训：push 后 6~8 分钟内 `500/502` 不代表修复失败，须等重建完成再判定。**
+
+### 大盘板块全板块 runtime 复验续（R4 更正 + 2 个真实缺陷，2026-09-27，本提交）
+
+上节 R4 把「`catalyst_events` 空 / `onchain_anomalies` 有 6 条」记为数据侧问题。本轮复验发现**该判定为误**，实际是**两个代码缺陷**（且会被缓存掩盖、间歇翻转）。
+
+- **R4 更正（先撂）**：再取 `/api/market/overview`（`HTTP=200`，耗时 ~109s 冷算）得 `opportunity_list.catalyst_events = {total: 50, window_days: 14}`（**50 条，正常**），而 `onchain_anomalies = {total: 0, n_kols: 0, error: "invalid literal for int() with base 10: 'signal_id'"}`。即 **R4 的「有 6 条」与「空」两个结论在两次采集中互换**。只读直连 prod 复跑 `get_market_catalysts(window_days=14, limit=50)` 的聚合 SQL 得 `rows=4400`（近 14 天 `biz.asset_catalyst` 11956 条、其中 4400 条有 `catalyst_impact` 关联，`max_published_at` ≈ 采集前 4 分钟）⇒ **催化剂管线本身健康，R4「上游无产出」结论作废**。
+
+- **缺陷 ①（P1）连接池 `row_factory` 毒化 → 链上异动整块失效**
+  - **根因**：`macro_market.py` 的 `fetch_binance_etf_flows()` 在**池内借出的连接**上写 `conn.row_factory = psycopg.rows.dict_row`（旧 `:1352`）。`get_connection` 走全局连接池（`crypto_research/db/conn.py`，`max_size=5`），用完只 `commit()` + 归还、**不重置 `row_factory`** ⇒ 该连接被「毒化」，之后任何复用它的代码都拿到 **dict 行**。`get_onchain_anomalies()` 按 **16 元素元组解包**，拿到 dict 时解出的是 **key** ⇒ `int(sid)` 即 `int('signal_id')`，异常文案与首个 SELECT 列名逐字吻合 ⇒ 被自身 `except` 吞掉 → 该板块 `total=0`。
+  - **为什么间歇且翻转**：是否踩中取决于池里拿到哪条连接；`overview` 缓存（`CACHE_TTL=180s` 新鲜 / `STALE_TTL=2h` 陈旧）会把某次毒化结果固化数分钟~2 小时。**这是「值会自己变」的典型症状，静态审计必漏。**
+  - **修复**：`fetch_binance_etf_flows()` 改为 `conn.cursor(row_factory=psycopg.rows.dict_row)`（cursor 级，不污染连接）。
+  - **护栏（防同类复发）**：`crypto_research/db/conn.py` 的 `get_connection` 在每次**借出**时 `conn.row_factory = tuple_row` 归位，使「忘记重置」不能再污染他人。全仓扫描 `conn.row_factory =` 赋值**仅此 1 处**（已清除）。
+  - **验证（只读）**：`A1` 赋值已清除；`A2` 人为毒化后下一次借出实测 `row_factory = tuple_row` ✅；`A3` 先跑 `fetch_binance_etf_flows()`（旧版即毒化点）再跑 `get_onchain_anomalies()` → `total=6, n_kols=2, error=None` ✅（与 R4 首采的 6 条一致）。
+
+- **缺陷 ②（P1）`dl_pipeline` 因 `KeyError: 'new'` 中止 → 链榜 TVL 滞后 4 天**
+  - **证据（`sys.task` + `sys.task_log`，只读）**：`dl_pipeline` 最近两次 **failed / `exit code 1`**，且**均在 4 秒内死掉**（09-24 20:00Z、09-26 20:00Z）；上一次成功 09-23 20:00Z —— 与 `src_dl.chain_tvl_snapshot` 的 `MAX(snapshot_date)=2026-09-23` **完全对齐**（该表近 12 天分布：09-23 起往前每天 100 行齐整，之后**断在 09-23**）。
+  - **根因**：`scripts/bin/bootstrap_dl_assets_batch.py`（流水线第 ② 步）`kind_counts = _count_kinds(matched)` 的初始桶只有 `{"cmc","gecko","symbol"}`，而写入侧第 245 行要 `kind_counts["new"] += 1`（新建资产桶）⇒ 只要 `unmatched` 非空即 `KeyError: 'new'`；`run_dl_pipeline.py` 遇非零退出码立即**中止整条流水线**，后面的链 TVL 步骤（③）**永远跑不到**。历史能过是因为当时 `unmatched` 恰为空（`--limit 1000` 批次里没有新协议）。
+  - **修复**：`_count_kinds()` 预置 `"new": 0`（并补注释说明该桶语义与事故）。
+  - **验证**：`py_compile` 通过；`_count_kinds([])` / `[{"match_kind":"cmc"}]` / `[{"match_kind":None}]` 三态均含 `new` 桶、`d["new"] += 1` 不再 KeyError ✅。
+  - **教训（设计侧，未改）**：流水线「某一步失败 → 整条中止」会让**无关板块**（链榜）长时间静默停更，且 `scheduler_watchdog` 不感知「表级滞后」。建议后续为 ③ 之后的关键落库步骤加**独立性/新鲜度看门狗**（本轮未做，避免范围外改动）。
+
+- **R1 三张滞后表定性（只读，结论收口）**
+  | 表 | 最新 | 定性 |
+  |---|---|---|
+  | `src_dl.chain_tvl_snapshot` | `2026-09-23` | ❌ **真缺陷**（上游 `dl_pipeline` 中止，已修，见缺陷 ②） |
+  | `biz.etf_flow_daily` | `2026-09-25` | ✅ **正常**：今日 `2026-09-27` 为**周日**，美股/ETF 休市，09-25(周五) 即最近交易日；`ingest_cryptoetf_flow` 最近两次均 `done` |
+  | `biz.cm_asset_onchain_daily` | `2026-09-25` | ⚠️ 待观察：`cm_incremental` 每日 `done`（今日 06:30 CST 已跑），但日期分布**缺 09-24**、且无 09-26；每日行数恒为 16（非残缺写入）⇒ 疑 CMC 上游可用性延迟，**非本轮代码缺陷** |
+  - 附：`catalyst_events` 已回归 50 条 ⇒ 大盘级催化剂**无需**数据管道工单。
+  - **待批（写操作，未做）**：重跑 `dl_pipeline` 以回填 09-24~09-27 的链 TVL（须用户授权后再动 prod）。
+
+- **本轮校验**：`py_compile`（`macro_market.py` / `conn.py` / `bootstrap_dl_assets_batch.py`）通过；`test_macro_market_p0` **16/16**、`test_macro_market_board_tier2` **36/36**；修复验证探针全绿（详见缺陷 ①② 的「验证」行）。源码侧改动未连 DB 写、未落库。
 
 ### 投研页三档确定性框架落地（上游 `方案_三档确定性框架_2026-09-27.md`，2026-09-27，本次提交 `df331d0`）
 

@@ -1641,6 +1641,10 @@ def render_brief_html(brief: dict) -> str:
     # W-01：就绪门必须查 event_time（事件发生时间）。原实现查 created_at（入库时间，DB 默认值恒非空）
     # → 门形同虚设。event_time 全空时整块不出（不渲染空卡、不渲染占位）——该类信号历史命中率 20%，
     # 正确处置是不出，不是「带标注地出」。
+    # ⚠️ 登记（2026-09-27 复验实测）：biz.kol_signal 全表 529 行中 event_time 非空仅 5 行，
+    # 且那 5 行 created_at 都在 24h 窗口外、采集侧从未写入该字段 → **KOL 卡实际等价于「有意停用」**。
+    # 这是符合预期的处置（kol_onchain 回测命中率 20%），**不要当成「卡片坏了」去修**；
+    # 若要恢复出卡，须先在采集侧落 event_time。
     _kol_ready = [
         s for s in signals
         if s.get("event_time") and (s.get("event_usd_value") or s.get("event_amount"))

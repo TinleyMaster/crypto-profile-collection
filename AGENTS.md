@@ -1585,3 +1585,34 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   5. **P2-F 键不匹配**：事件日历卡改为渲染 `hardcoded` + `unlock` + `token_events`，**移除恒空 `gecko` 分支**；token 事件按日期序截断 **15 条**并显式标注「另有 N 条未展示」（后端最多 50 条，不截断会撑爆卡片），卡头「仅展示」补总条数、卡尾标注数据源。
 - **未做 / 边界（须留档）**：① **P2-D 暂缓** —— `mcap_step=40B` 使总市值 ≈3.8T 时 `mcap_score≈95`、牛市 >4T 恒 100，`market_cap` 占结构子分权重 0.25 且长期近满 ⇒ 结构子分被体量托高；但改相对/对数量程会**直接变更结构子分的展示数值**（评分模型变更），超出本轮 bug 修复范畴，待单独评估。② **P2-E 二级现象未改**：7d 叙事榜排序用 `composite_score`（市值腿 + TVL 腿混合）、1d/30d 用纯涨跌幅 ⇒ 三窗排序口径不一致；但 `composite_score` 是 FEAT-SECTOR-006 既定设计（行内已有 `市值+TVL`/`仅市值` mode 徽章说明），改排序键会**变更默认榜序**，非本轮范畴，仅留档。③ P3-G / P3-H 误报不改。④ 线上 runtime 复验须待 Zeabur 重建后执行（`push ≠ 线上生效`），待核 R1~R4（各表新鲜度 / 部署版本 / 实际渲染值 / `catalyst_events` 是否为空）。
 - **校验**：`py_compile`（`macro_market.py`）通过；`index.html` 内联 `<script>` 抽取后 `node --check` 通过；相关探针 `test_macro_market_p0`(**16/16**)、`test_macro_market_board_tier2`(**36/36**) 零失败（全仓无测试引用被改字段 / 事件日历卡）。**未连 prod DB、未落库**。
+
+### 投研页三档确定性框架落地（上游 `方案_三档确定性框架_2026-09-27.md`，2026-09-27，本次提交 `df331d0`）
+
+用户三轮指令：评估上游方案可行性 → 把可落地方案写入 `04_架构与代码方案/` → 「你可以直接按优化方案干」。落地方案文档：`04_架构与代码方案/投研页三档确定性可落地方案_2026-09-27.md`。
+
+**核心设计：分档 = 分证据来源，不是给同一分数改权重。**
+- **短期 S（T+0~14d）= 结构化量化数据「可复现性」口径**，输入 5 项（CVD 24h / OI 变化 / 资金费率 / 抛压评分 / 近端解锁状态，present 即证明已采集），分 = 完整度×0.5 + 新鲜度×0.3 + 方向一致×0.2，**不受 39.9 零证据封顶约束**（仅描述资金面状态，不含方向概率 → 命名为「数据完整度」而非「确定性」）。
+- **中期 M（2~12 周）= 文本 URL 引用可核验口径**，`kind ∈ {catalyst, risk, thesis}`，权重 `coverage 0.50 / freshness 0.20 / sample 0.30`，保留封顶。
+- **长期 L（季度~年）= 先过存在性硬门槛**（审计 / 公开代码库 / 治理三项全 1），过了才走 `coverage 0.55 / freshness 0.15 / sample 0.30`（同样保留封顶）。任一为 0 → `not_evaluable`，**结构上不被 S/M 档拉升**。
+- **M/L 刻意不含 `consistency`**：`_consistency_dim()` 只读 24h 衍生品，对 2–12 周/季度-年无语义（上游「复用四维只调权重」语义不成立）。该维度**仅在 S 档使用**。
+
+**上游方案四处不可落地（已在文档 §1 附代码证据留档）**：
+1. **致命自相矛盾**：上游验收 #3（PONS 短期档 ≥60）与 #7（coverage=0 时封顶 39.9）互斥 —— `coverage` 不分档、三档共用同一个 0 ⇒ 全压 39.9 ⇒ 短期闸门永远打不开。**出路 = 口径分离**（S 档改走量化「可复现性」口径），而非调权重。
+2. 「复用四维、只改权重」在语义上不成立（四维无期限结构，见上）。
+3. 「上线前回测钉死阈值」客观做不到：`backtest_opportunities.py` 的 `SIGNAL_HORIZONS` 最长 30 天、快照全史约 25 天，且回测对象是 `biz.market_overview_snapshot` 的机会清单**而非** `biz.research_thesis` ⇒ **无法校准中/长档阈值**（故闸门一律标注 `uncalibrated`，用结构条件替代上游的绝对分 60/50）。
+4. 上游 P0「板块重分类验收」无法通过：`sector.py` 的 `SECTORS` 枚举**无 `launchpad`**，`DL_CATEGORY_SECTOR_MAP["launchpad"] = ("defi", 0.65)` 是**刻意归一化**。
+   - 附带更正：上游把「missing 二分」当新增能力是**误判** —— `_compute_missing_materials_inner` 早已输出 `impact_dimension` / `impact_desc` / `determinism_gain`。
+
+**改动（2 个代码文件 + 1 新探针 + 1 新文档，零 DDL、零迁移、不改既有 `_compute_determinism` 行为）**：
+- `db_stats.py`（7 处编辑，+477 行）：① L4256 后插入三档常量块 —— `_TIER_CALIBRATION(_NOTE)` / `_HORIZON_BY_KIND` / `_HORIZON_LABELS` / `_SHORT_TERM_INPUTS(5 项)` / `_SHORT_TERM_WEIGHTS` / `_SHORT_TERM_FRESH_MAX_H=24,_SOFT_H=168` / `_TIER_WEIGHTS_3`（m/l，均**不含** consistency）/ `_LONG_TERM_EXISTENCE_KEYS` / `_NEAR_UNLOCK_DAYS,_PCT` / `_M_HORIZON_MIN=14,_MAX=90` / `_MATERIAL_HORIZON`（21 类资料 key → (期限, 性质)）/ `_MISSING_NATURE_LABELS`。② `_iter_thesis_points` 新增 `_horizon_for_kind(kind)`，每点带 `horizon`（未知 kind 返回 `None`，**不静默落默认档**）。③ `_compute_evidence_stats` 签名加 `points: list | None = None`（默认内部重算 ⇒ **向后兼容，默认行为不变**；既有 127 断言据此不改）。④ `_compute_determinism` 后插入约 340 行三档函数块：`_tier_of` / `_sm_get` / `_days_until` / `_tier_point_sets`（未标注归中档并单独计数）/ `_short_term_evidence` / `_near_unlock_pressure` / `_short_term_gate` / `_verifiable_window`（解锁落 [14,90] 天或已有催化剂）/ `_mid_term_gate` / `_long_term_existence` / `_compose_3tier` / `_compute_determinism_3tier`。⑤⑥ 读取侧（`get_or_create_research_notebook` 正常路径 + 降级分支）与 ⑦ 生成侧（`generate_research_thesis`）三处接线 `analysis["determinism_3tier"]`。⑧ `_compute_missing_materials_inner` 条目补 `horizon` / `horizon_label` / `missing_nature(_label)` / `determinism_gain_by_tier`（**保留原 `determinism_gain`**）。
+- `templates/research.html`（+203 行）：新增 `.t-3t*` 样式 + 三档卡渲染块（每档展示 分数 / 档位 / 证据口径 / 论点条数 / 闸门开闭与未开原因 / notes）+ 综合结论卡（`composite.verdict` + `lines` + 「不得用高确定性档掩盖低确定性档」规则）+ 「闸门阈值未校准」徽标（title 挂 `calibration_note`）；缺失项块改为按档展示「补全后：短期档 X → Y；中期档…」（`determinism_gain_by_tier` 与 `determinism_3tier[tier].score` 对算，**旧 `determinism_gain` 保留为回退**）+ 透出 `horizon_label` 与 `missing_nature_label`。
+- 新探针 `test_research_3tier_20260927.py`（**82 断言 / 0 失败**，纯离线不连库不连网），覆盖方案 §6 编号 1/2/3/4/5/6/7/9：结构完整性、期限覆盖率 100%、**口径分离**（同 fixture 下 S 档 ≥70 越封顶而 M/L 仍封顶 unusable）、**存在性硬门槛**（三项全 0 → `not_evaluable`，且 S 档从 0 输入变满分时 L 档判定与 existence 结果**逐字不变**）、**文本档防骗不回退**（28 条空 URL 引用 → M/L 封顶 + `weak_cited_points>0`，S 档分数不受影响）、未校准标注、前端钩子源码级断言、**源码级口径隔离**（`_short_term_evidence` / `_short_term_gate` / `_near_unlock_pressure` 三个函数源码中**不得出现** `_compute_evidence_stats` 与 `_iter_thesis_points`；`_compute_determinism_3tier` 中 `_ZERO_EVIDENCE_SCORE_CAP` 出现 ≥2 次 ⇒ 封顶只施加于 m/l 两处）。
+
+**验证**：`test_research_3tier_20260927.py` **82/0**；既有防骗回归 `test_research_determinacy_20260926.py` **127/0**（未回退）；`py_compile db_stats.py` 通过；`research.html` 内联 `<script>`（`{{ }}` 占位替换后）`node --check` 通过。
+
+**未做 / 边界（须留档）**：
+- **P3 板块重分类（PONS `defi` → `launchpad`）未做**：改分类会影响赛道聚合与竞品选择，且 `SECTORS` 无 `launchpad` 枚举（需同步 taxonomy + DL 映射 + 前端标签），须独立开工单评估。
+- **P4 前向跟踪表 `biz.thesis_forward_track` 未建**：按方案 §8 拍板「本期只建表 + 写入、回填任务随日级调度」，本轮**连建表也未做**（未获数据写入授权）。
+- **闸门阈值全部 `uncalibrated`**：受限于回测框架上限（见上第 3 点），任何「闸门已开 = 可下注」的读法都不成立，前端已显式标注。
+- **存量 `biz.research_thesis` 行不含 `determinism_3tier`**：读取路径会**实时计算**并注入，故旧行无需回填；但 `analysis_json` 落库字段仅对**新生成**结论生效。
+- **线上 runtime 复验待 Zeabur 重建后执行**（`push ≠ 线上生效`）：待核 `/api/research/11114/notebook` 的 `analysis.determinism_3tier` 三档结构 + 前端三档卡渲染。

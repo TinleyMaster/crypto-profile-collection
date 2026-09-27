@@ -17,6 +17,7 @@
   5  非法输入（score / previous）安全退化
   6  阈值不再硬编码在 _compute_pressure_score 内；fallback 的 70/40 第二套口径已消除
   7  previous_risk 从 compute_unlock_pressure 一路透传到 _compute_pressure_score
+  8  分量为 None（未采集）时标记缺失，与「值为 0」区分；分数口径保持不变
 """
 import inspect
 import os
@@ -145,6 +146,44 @@ check(ds._compute_pressure_score(5.2, 0.0, 0.0, previous_risk="medium") == (31.2
 # 滞回基准取自「过期但已展示」的行：源码上缓存早退分支不影响 previous_risk 取值
 check(_cup.find("previous_risk = row[") < _cup.find("score, risk = _compute_pressure_score("),
       "滞回基准在算分之前确定（含 force 路径）")
+
+# ── 8 分量缺失标记（A3 相邻缺陷：缺失当零）──
+print("\n[8] 缺失分量标记（缺失 ≠ 零风险）")
+check(ds._PRESSURE_COMPONENT_TOTAL == 6, "分量总数常量为 6（unlock/concentration/drawdown/cvd/oi/unlock_value）")
+check(ds._pressure_missing_inputs(80.0, 0.1, -30.0, -0.1, -5.0) == [],
+      "输入齐备 → 无缺失")
+check(ds._pressure_missing_inputs(None, 0.1, -30.0, -0.1, -5.0) == ["concentration"],
+      "top10=None → 标记 concentration")
+check(ds._pressure_missing_inputs(None, None, None, None, None)
+      == ["concentration", "turnover", "drawdown", "cvd", "oi"],
+      "全缺 → 五个分量 key 全标")
+check(ds._pressure_missing_inputs(0.0, 0.0, 0.0, 0.0, 0.0) == [],
+      "值为 0（已查明）不被误标为缺失（关键区分）")
+# 分数口径不变：None 仍按 0 计分（口径变更留给产品拍板，本轮只标记）
+check(ds._compute_pressure_score(0.0, None, 0.0) == (0.0, "low"),
+      "top10 缺失：分数口径不变（0.0/low，未擅自抬分）")
+check(ds._compute_pressure_score(0.0, 80.0, 0.0) == (20.0, "low"),
+      "top10=80：集中度分量 20 分（= 缺失时被低估的量级，可跨 30 分档）")
+# 写路径接线
+_cup2 = _src_of("compute_unlock_pressure")
+check("missing_inputs = _pressure_missing_inputs(" in _cup2,
+      "写路径调用 _pressure_missing_inputs")
+check('"missing_inputs": missing_inputs' in _cup2 and '"is_partial": bool(missing_inputs)' in _cup2,
+      "写路径 detail 与顶层返回值含 missing_inputs / is_partial")
+check("_PRESSURE_COMPONENT_TOTAL - len(missing_inputs)" in _cup2,
+      "components_available 由缺失数推导")
+_cached_blk = _cup2[_cup2.find("if row and not force:"):_cup2.find("previous_risk = row[")]
+check("missing_inputs" in _cached_blk and "is_partial" in _cached_blk,
+      "缓存早退分支同样透出缺失标记（旧行无键 → 回退为齐备）")
+# 展示 / 结论侧透出
+check('for _mk in ("missing_inputs", "components_available", "components_total",' in _DB_SRC,
+      "notebook 展示侧循环透出四个缺失标记字段")
+check('result["pressure"][_mk] = _p[_mk]' in _DB_SRC,
+      "notebook 展示侧写入 pressure 块")
+check('metrics_structured["pressure"]["is_partial"]' in _DB_SRC,
+      "结构化指标注入 is_partial（供 LLM 消费）")
+check('pressure.is_partial = true' in _DB_SRC,
+      "system_prompt 规则 5 增加缺失子条（禁止把缺失低分断言为「无抛压」）")
 
 print("\n" + "=" * 60)
 print(f"通过 {passed} / 失败 {failed}")

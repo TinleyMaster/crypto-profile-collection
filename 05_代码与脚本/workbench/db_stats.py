@@ -3260,6 +3260,12 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
         result["pressure"]["risk_level"] = _p.get("risk_level")
         if _p.get("top10_concentration") is not None:
             result["pressure"]["top10_concentration_pct"] = _p["top10_concentration"]
+        # A3 相邻缺陷（2026-09-27）：把「分量缺失」标记透出到 notebook，
+        # 使前端可区分「抛压低（数据齐备）」与「抛压低（分量缺失、无法排除）」。
+        for _mk in ("missing_inputs", "components_available", "components_total",
+                    "is_partial"):
+            if _p.get(_mk) is not None:
+                result["pressure"][_mk] = _p[_mk]
         if _p.get("detail"):
             result["pressure"]["detail"] = _p["detail"]
     except Exception:
@@ -8566,6 +8572,13 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     if pressure:
         metrics_structured["pressure"]["pressure_score"] = pressure.get("pressure_score")
         metrics_structured["pressure"]["risk_level"] = pressure.get("risk_level")
+        # A3 相邻缺陷（2026-09-27）：分量缺失标记注入结构化指标，配合 system_prompt
+        # 规则 5 的子条，禁止把「分量缺失导致的低分」断言为「无抛压」。
+        if pressure.get("is_partial") is not None:
+            metrics_structured["pressure"]["is_partial"] = pressure["is_partial"]
+            metrics_structured["pressure"]["missing_inputs"] = pressure.get("missing_inputs") or []
+            metrics_structured["pressure"]["components_available"] = pressure.get("components_available")
+            metrics_structured["pressure"]["components_total"] = pressure.get("components_total")
         if pressure.get("top10_concentration") is not None:
             metrics_structured["pressure"]["top10_concentration_pct"] = pressure["top10_concentration"]
 
@@ -8830,6 +8843,10 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "则必须写「未来30天无代币解锁」，禁止写存在解锁。\n"
         "   - 若有解锁，只能引用 next_unlock_date / next_unlock_pct / next_unlock_value_usd 的具体值。\n"
         "5. 抛压风险等级必须严格使用 pressure.risk_level，不能自行判断高低。\n"
+        "   - 若 pressure.is_partial = true（有分量未采集，见 pressure.missing_inputs），"
+        "禁止把低分断言为「无抛压」「无集中度风险」等；必须写明「抛压分仅基于 "
+        "components_available/components_total 个分量，缺失项无法排除风险」（如 Top10 集中度缺失）。\n"
+        "   - 仅当 pressure.is_partial = false（分量齐备）时，低分才可写为「当前未见明显抛压」。\n"
         "6. 营收/收入趋势描述必须基于实际序列判断，禁止用「持续下滑」等绝对化表述描述非单调序列："
         "   - 仅当最近 N 个月/周连续下降时，才可用「持续下滑」。"
         "   - 若存在反弹（如 6 月→7 月回升），必须描述为「先降后升」或「近 X 月/周整体下降但期间有反弹」。"
@@ -10018,6 +10035,36 @@ def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h,
     return round(score, 2), risk
 
 
+# ── 抛压分量缺失标记（A3 相邻缺陷，2026-09-27）──
+# 根因：「无数据」与「值=0」不可区分。concentration_score 取 (top10 or 0)/100*25、
+# _downside_score 对 None 返回 0 ⇒ top10 快照缺失时集中度分量记 0 分，被读成
+# 「无集中度风险」。实证（PONS 11114）：top10=NULL ⇒ concentration_score=0，该资产当时
+# score=26.96/low；若集中度为 80%（=20 分）总分即 46.96 → medium，档位被系统性低估。
+# 与项目既有惯例（unlock.data_available、短期闸门「量化输入未齐 N/M」）同源：
+# **分数口径不变**（不改 _compute_pressure_score 的返回与判档），另标注缺失项，
+# 供展示/结论侧区分「已查明为 0」与「未采集」。让缺失项参与 risk_level 判定属口径变更，
+# 需产品拍板，本轮不做（见 AGENTS.md 留档）。
+_PRESSURE_COMPONENT_TOTAL = 6  # unlock / concentration / drawdown / cvd / oi / unlock_value
+
+
+def _pressure_missing_inputs(top10_concentration, turnover_24h,
+                             drawdown_from_ath=None, cvd_ratio=None,
+                             oi_change_24h=None) -> list:
+    """返回「按 0 计分」的缺失分量 key（None ⇒ 未采集，不等于值为 0）。"""
+    missing = []
+    if top10_concentration is None:
+        missing.append("concentration")
+    if turnover_24h is None:
+        missing.append("turnover")
+    if drawdown_from_ath is None:
+        missing.append("drawdown")
+    if cvd_ratio is None:
+        missing.append("cvd")
+    if oi_change_24h is None:
+        missing.append("oi")
+    return missing
+
+
 def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     """计算「未来解锁 × 持仓集中度 × 流动性」交叉抛压评分。
 
@@ -10045,6 +10092,10 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
     if row and not force:
         age = (datetime.now(timezone.utc) - row["calculated_at"]).total_seconds()
         if age < _UNLOCK_PRESSURE_TTL_SECONDS:
+            _cdetail = row["detail_json"] or {}
+            # 缺失标记随 detail 一起缓存；旧行（本轮之前写入）无该键 ⇒ 视为齐备，
+            # 6h TTL 后自然重算补齐，不做回填。
+            _cmiss = _cdetail.get("missing_inputs") or []
             return {
                 "unlock_pct_7d": _pressure_float(row["unlock_pct_7d"]),
                 "unlock_pct_30d": _pressure_float(row["unlock_pct_30d"]),
@@ -10053,7 +10104,12 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
                 "turnover_24h": _pressure_float(row["turnover_24h"]),
                 "pressure_score": _pressure_float(row["pressure_score"]),
                 "risk_level": row["risk_level"],
-                "detail": row["detail_json"] or {},
+                "detail": _cdetail,
+                "missing_inputs": _cmiss,
+                "components_available": _cdetail.get(
+                    "components_available", _PRESSURE_COMPONENT_TOTAL - len(_cmiss)),
+                "components_total": _cdetail.get("components_total", _PRESSURE_COMPONENT_TOTAL),
+                "is_partial": bool(_cmiss),
                 "cached": True,
             }
     # 滞回基准 = 上一档（过期行也用：它就是当前对外展示的档位，抑制抖动必须对齐它）
@@ -10159,6 +10215,12 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         previous_risk=previous_risk,
     )
 
+    # 缺失分量标记（本轮新增）：None 输入在算分时按 0 计，此处显式登记，
+    # 使「已查明为 0」与「未采集」在 detail / 顶层返回值中可区分（分数口径不变）。
+    missing_inputs = _pressure_missing_inputs(
+        top10_concentration, turnover_24h, drawdown_from_ath, cvd_ratio, oi_change_24h)
+    components_available = _PRESSURE_COMPONENT_TOTAL - len(missing_inputs)
+
     detail = {
         "unlock_score": round(min(60.0, unlock_pct_30d * 6.0), 2),
         "concentration_score": round(((top10_concentration or 0.0) / 100.0) * 25.0, 2),
@@ -10175,6 +10237,10 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         "cvd_ratio_24h": cvd_ratio,
         "oi_change_24h_pct": oi_change_24h,
         "upcoming_events_count": sum(1 for e in events if e.get("is_upcoming")),
+        "missing_inputs": missing_inputs,
+        "components_available": components_available,
+        "components_total": _PRESSURE_COMPONENT_TOTAL,
+        "is_partial": bool(missing_inputs),
     }
 
     # 3. 写缓存
@@ -10218,6 +10284,10 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         "pressure_score": score,
         "risk_level": risk,
         "detail": detail,
+        "missing_inputs": missing_inputs,
+        "components_available": components_available,
+        "components_total": _PRESSURE_COMPONENT_TOTAL,
+        "is_partial": bool(missing_inputs),
         "cached": False,
     }
 

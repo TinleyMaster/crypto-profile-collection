@@ -1890,5 +1890,5 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ② **AI 结论未落库（P2 前置依赖，实测确认）**：`biz.market_overview_snapshot.payload` 顶层键为 `summary/btc_cycle/meme_risk/resonance/dimensions/fetched_at/event_calendar/chimney_signals/opportunity_list/divergence_signals/institutional_mvrv/smart_money_divergence/onchain_anomaly_signals`，**不含 `M0_ai_summary`/`DIFF`/`M9_degraded`**。故 `data_quality` 与 `no_trade_reason` 目前只活在「生成→渲染」这一次内存链路里，**不落库、不可回测、次日不可比**；变更日志（观点连续性 M2）依赖此，故未做。
 - ③ **兜底闸门阈值是保守硬编码**：只用「|BTC|、|ETH| ≤ 1%」，未做波动率归一（ATR/σ），且只看 BTC/ETH，小市值币横盘不触发。
 - ④ **`data_quality` 的 `partial` 分支在真实数据上是否出现未验证**（现有 7 段生产者可能只产出 ok/empty/error）。
-- ⑤ **未收紧 `send_daily_brief.py` SMTP 未配时 `return 0`（「没发却显示成功」）** —— 与上一节同项，仍待单独立项。
+- ⑤ **SMTP 未配时的「静默成功」已收紧为本轮 P0-f**（原先与上一节同项的待立项目）：`send_daily_brief.main()` 的 `if not notifier.configured:` 分支由 `return 0` 改为 `return 1`，措辞由「[WARN] 跳过邮件发送」改为「[ERROR] 早报邮件未发送（按失败处理，避免静默成功）」。依据 `task_manager.py:782` 的 `error=None if returncode == 0 else f"exit code {returncode}"` —— 旧行为下任务记 `done` 而邮件没发（与 09-26 丢整天的陷阱同类）；现记 `failed: exit code 1`，`daily_brief_email` 已在 `KEY_JOBS`，故会告警 + 补跑。不发信不可能造成重复投递，无告警风暴。**边界**：本轮仍**未**给该分支加「只告警一次」的去重（若连续多日 SMTP 未配，看护会每日告警 + 每日补跑失败）。
 - ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验次日 09:00 邮件头部为「证据覆盖 N/M 项」而非「置信度 85%」、「查看详情」已消失、横盘日不出现方向建议。

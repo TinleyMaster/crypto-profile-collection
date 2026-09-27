@@ -10,7 +10,9 @@
   P0-c：渲染层兜底（横盘且无新鲜信号时 AI 仍给方向 → 强制「今日无操作」）
   P0-d：修假入口（href=0 的「查看详情」affordance 删除）
   P0-e：砍脏卡（催化剂热点 B/C 卡片整块移除；Meme 纯数字改名单；KOL 卡加就绪门）
+  P0-f：邮件未发出不得静默成功（SMTP 未配 → 非零退出，交 task_manager/watchdog 可见）
 """
+import ast
 import json
 import os
 import sys
@@ -198,6 +200,40 @@ _html = sdb.render_brief_html(_bk2)
 check("KOL 链上信号" in _html, "有时间+金额 → 出卡")
 check("12.5M USD" in _html, "金额上屏（可判定）")
 check("2026-09-27T08:00" in _html, "事件时间上屏（可判定）")
+
+# ════════════════════════════════════════════════════════
+# P0-f 邮件未发出不得静默成功（AST 守卫，比字符串 grep 精确）
+# ════════════════════════════════════════════════════════
+print("[P0-f] SMTP 未配 → 非零退出（不静默成功）")
+try:
+    _sdb_src = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+    _tree = ast.parse(_sdb_src)
+    _main_fn = next(
+        n for n in ast.walk(_tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    _unconfigured_returns = []
+    for _node in ast.walk(_main_fn):
+        if not isinstance(_node, ast.If):
+            continue
+        _t = _node.test
+        if (isinstance(_t, ast.UnaryOp) and isinstance(_t.op, ast.Not)
+                and isinstance(_t.operand, ast.Attribute)
+                and _t.operand.attr == "configured"):
+            for _sub in _node.body:
+                if isinstance(_sub, ast.Return) and isinstance(_sub.value, ast.Constant):
+                    _unconfigured_returns.append(_sub.value.value)
+    check(_unconfigured_returns == [1],
+          "main() 的「not notifier.configured」分支返回 1（task_manager 记 failed 可见）",
+          f"实际 return 值: {_unconfigured_returns}")
+    check("SMTP 未配置，跳过邮件发送" not in _sdb_src,
+          "旧「跳过邮件发送」措辞已移除（不再表现为正常跳过）")
+    # 依赖断言：非零退出确实会被记为失败（task_manager 的判定式）
+    _tm_src = open(os.path.join(_HERE, "task_manager.py"), encoding="utf-8").read()
+    check('error=None if returncode == 0 else f"exit code {returncode}"' in _tm_src,
+          "task_manager 仍以 returncode != 0 记 error（P0-f 的可见性依赖此）")
+except Exception as _e:
+    check(False, "P0-f AST 守卫执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
 # P0-b prompt 层（假 LLM 捕获 prompt）

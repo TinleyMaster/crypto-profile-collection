@@ -1501,9 +1501,14 @@ def main():
         settings = get_settings(require_database=False)
         notifier = EmailNotifier(settings)
         if not notifier.configured:
-            print("[WARN] SMTP 未配置，跳过邮件发送")
+            # 2026-09-27（早报重构 P0 收尾）：旧行为 `return 0` → 任务记 done 但邮件没发，
+            # 属「没发却显示成功」，与 09-26 丢整天的陷阱同类（`task_manager.py:782` 只在
+            # returncode != 0 时写 error）。改为非零退出 → `failed / exit code 1` →
+            # `scheduler_watchdog` 告警 + 补跑（`daily_brief_email` 已在 KEY_JOBS）。
+            # 不发信不可能造成重复投递，故不存在告警风暴。
+            print("[ERROR] SMTP 未配置，早报邮件未发送（按失败处理，避免静默成功）")
             print(html)
-            return 0
+            return 1
 
         m0 = brief.get("M0_tldr", {})
         subject = f"📊 加密大盘早报 {m0.get('date', date.today().isoformat())}"

@@ -332,6 +332,105 @@ def _tier_score_key(o: dict):
     )
 
 
+# ── W-07 数据状态表（下钻到字段级：表有行 ≠ 字段有值）───────────────────────
+# 置于 M0 每日定调之后、第一张数据卡之前：读者先看清哪块能信、截至哪天、滞后几天。
+# empty/error → 状态列「数据不可用」（不显示 0 / —，避免被读成"净流入为零"）。
+_DQ_LAG_WARN = {
+    "恐贪指数": 1, "BTC OI": 1, "CEFI 指数": 1, "赛道TVL": 1,
+    "ETF资金流": 4, "赛道市值": 1, "大盘快照": 1,
+    "交易所净流量": 1, "巨鲸持仓变化": 1,
+}
+_DQ_STATUS_CN = {
+    "ok": ("正常", "#16a34a"),
+    "partial": ("部分可用", "#d97706"),
+    "empty": ("数据不可用", "#dc2626"),
+    "error": ("数据不可用", "#dc2626"),
+}
+
+
+def _dq_lag_warn(section: str) -> int:
+    return _DQ_LAG_WARN.get(str(section or ""), 1)
+
+
+def _dq_status_map(brief: dict) -> dict:
+    """W-07：返回 {section: status} 路由表。"""
+    ai = brief.get("M0_ai_summary") or {}
+    out: dict = {}
+    for d in (ai.get("data_quality") or []):
+        if isinstance(d, dict) and d.get("section"):
+            out[str(d["section"])] = str(d.get("status") or "").lower()
+    return out
+
+
+def _dq_usable(brief: dict, section: str) -> bool:
+    """W-07 路由校验：该维度是否可用（status == 'ok'）。
+
+    渲染层凡取该维度的数值位，必须先过此校验；不可用一律渲染「数据不可用」，禁止渲染 0。
+    缺记录时按可用处理（不误伤无 data_quality 的旧 payload）。
+    """
+    return _dq_status_map(brief).get(str(section), "ok") == "ok"
+
+
+def _data_status_table_html(dq: list) -> str:
+    """W-07：渲染置顶数据状态表（模块 | 截至 | 滞后 | 可用率 | 状态）。
+
+    - status != "ok" → 状态列「数据不可用」，可用率列同样显示「数据不可用」
+      （绝不渲染 0，避免被读成"净流入为零"）；
+    - lag_days >= 该源阈值 → 滞后列标黄。
+    """
+    rows = [d for d in (dq or []) if isinstance(d, dict)]
+    if not rows:
+        return ""
+    body = []
+    for d in rows:
+        sec = str(d.get("section") or "?")
+        st = str(d.get("status") or "").lower()
+        st_cn, st_color = _DQ_STATUS_CN.get(st, ("未知", "#64748b"))
+        as_of = str(d.get("as_of") or "—")
+        lag = d.get("lag_days")
+        if isinstance(lag, int):
+            lag_txt = f"{lag} 天"
+            lag_color = "#b45309" if lag >= _dq_lag_warn(sec) else "#64748b"
+        else:
+            lag_txt, lag_color = "—", "#94a3b8"
+        if st == "ok":
+            cov_txt = f"{d.get('usable')}/{d.get('total')}" if d.get("total") else "—"
+            cov_color = "#334155"
+        elif st == "partial":
+            cov_txt = f"{d.get('usable')}/{d.get('total')}" if d.get("total") else "—"
+            cov_color = "#b45309"
+        else:
+            cov_txt, cov_color = "数据不可用", "#dc2626"
+        body.append(
+            f'<tr>'
+            f'<td style="padding:3px 6px;font-size:11px;color:#334155">{sec}</td>'
+            f'<td style="padding:3px 6px;font-size:11px;color:#64748b">{as_of}</td>'
+            f'<td style="padding:3px 6px;font-size:11px;color:{lag_color}">{lag_txt}</td>'
+            f'<td style="padding:3px 6px;font-size:11px;color:{cov_color}">{cov_txt}</td>'
+            f'<td style="padding:3px 6px;font-size:11px;font-weight:600;color:{st_color}">{st_cn}</td>'
+            f'</tr>'
+        )
+    return f"""
+          <!-- 模块 0.1：📋 数据状态（置顶，字段级可用率） -->
+          <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+            <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:6px">📋 数据状态</div>
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse">
+              <tr>
+                <td style="padding:3px 6px;font-size:10px;color:#94a3b8">模块</td>
+                <td style="padding:3px 6px;font-size:10px;color:#94a3b8">截至</td>
+                <td style="padding:3px 6px;font-size:10px;color:#94a3b8">滞后</td>
+                <td style="padding:3px 6px;font-size:10px;color:#94a3b8">可用率</td>
+                <td style="padding:3px 6px;font-size:10px;color:#94a3b8">状态</td>
+              </tr>
+              {''.join(body)}
+            </table>
+            <div style="font-size:9.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
+              「可用率」= 字段级可用条数/总条数（表有行 ≠ 字段有值）；标注「数据不可用」的维度不得作为结论依据。
+            </div>
+          </div>
+        """
+
+
 def _build_target_registry(brief: dict, ai_trade_ready: list):
     """M4-1 / M4-4：收集全邮件各板块的 target 结论 → 折叠归属 + 冲突裁决。
 
@@ -640,6 +739,11 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;color:#e2e8f0;line-height:1.5">{tldr_text or '今日大盘数据更新中...'}</div>
           </div>
         """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.1：📋 数据状态（W-07 置顶；M0 定调之后、第一张数据卡之前）
+    # ════════════════════════════════════════════════════════
+    html_parts.append(_data_status_table_html(ai_summary.get("data_quality") or []))
 
     # ════════════════════════════════════════════════════════
     # 模块 0.2：📉 告警质量（昨日盘面告警胜率/赔率 → 阈值-行情失配预警）
@@ -1177,6 +1281,15 @@ def render_brief_html(brief: dict) -> str:
                 </td>
               </tr>
             </table>
+          </div>
+        """)
+    else:
+        # W-07 路由校验：status != "ok"（或无可渲染行）→ 数值位一律「数据不可用」，禁止渲染 0
+        html_parts.append(f"""
+          <!-- 交易所净流子模块（不可用显式标注，不渲染 0） -->
+          <div style="background:#fafafa;border-radius:8px;padding:10px 12px">
+            <div style="font-size:11.5px;font-weight:700;color:#475569;margin-bottom:4px">🏦 交易所净流量 TOP（7日）</div>
+            <div style="font-size:11px;color:#dc2626">数据不可用</div>
           </div>
         """)
 

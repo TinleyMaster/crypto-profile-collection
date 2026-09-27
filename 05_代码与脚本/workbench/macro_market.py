@@ -7872,6 +7872,100 @@ def _validate_against_payload(items: list, brief: dict, payload: dict | None = N
     return kept
 
 
+# ── W-07 数据可用性：字段级（表有行 ≠ 字段有值）─────────────────────────────
+# 根因（2026-09-27 连库核验）：biz.cm_asset_onchain_daily 最新日 16 行，仅 2 行填了
+# flow_in/out_ex_usd（可用率 12.5%），但旧 data_quality 只按 fetch_* 的 status 判
+# "ok"（表有行即 ok）→ 早报把"几乎全空"的维度当作可用证据。此处下钻到字段级：
+# usable = 必有字段非空的行数，total = 行数，status="ok" 必须 usable > 0。
+_DQ_FIELD_SPEC = {
+    # section: (列表键, 每条必填字段, as_of 字段名)
+    "大盘概况":     (None,        (),                              None),
+    "赛道表现":     ("sectors",   ("mcap_change_7d_pct",),         "metric_date"),
+    "ETF资金流":    ("assets",    ("flow_7d_usd",),                "latest_date"),
+    "交易所净流量": ("assets",    ("net_flow_usd",),               "latest_date"),
+    "大额链上转账": ("transfers", ("value_usd",),                  None),
+    "巨鲸持仓变化": ("whale_buying", ("whale_balance_change_7d_pct",), "snapshot_date"),
+    "即将解锁":     ("unlocks",   ("unlock_value_usd",),           None),
+}
+
+
+def _dq_normalize(entry: dict) -> dict:
+    """W-07：归一单条 data_quality —— 计算 coverage，且 status='ok' 必须 usable>0。
+
+    表有行但字段全空（usable=0）时，把 'ok' 降为 'empty'，避免"证据覆盖"虚高、
+    也避免渲染层把该维度当可用证据。
+    """
+    e = dict(entry or {})
+    try:
+        total_i = int(e.get("total")) if e.get("total") is not None else 0
+    except (TypeError, ValueError):
+        total_i = 0
+    try:
+        usable_i = int(e.get("usable")) if e.get("usable") is not None else 0
+    except (TypeError, ValueError):
+        usable_i = 0
+    e["total"] = total_i
+    e["usable"] = usable_i
+    e["coverage"] = round(usable_i / total_i, 4) if total_i > 0 else 0.0
+    if str(e.get("status") or "").lower() == "ok" and usable_i <= 0:
+        e["status"] = "empty"
+    return e
+
+
+def _build_data_quality(sec_map: dict, today: "date | None" = None) -> list[dict]:
+    """W-07：组装字段级 data_quality。
+
+    入参 sec_map = {section: 该维度的数据段 dict}；输出每条含
+    {section, status, items, as_of, lag_days, coverage, usable, total}。
+    """
+    from datetime import date as _date
+
+    _now = today or _date.today()
+    out: list[dict] = []
+    for name, sec in sec_map.items():
+        _list_key, _req, _asof_field = _DQ_FIELD_SPEC.get(name, (None, (), None))
+        if not isinstance(sec, dict) or not sec:
+            # 无该段（None / {}）→ 明确 empty，绝不按 ok 计
+            out.append(_dq_normalize({"section": name, "status": "empty", "items": 0,
+                                      "as_of": None, "lag_days": None,
+                                      "usable": 0, "total": 0}))
+            continue
+        _st = str(sec.get("status") or "").lower()
+        if _list_key:
+            items = sec.get(_list_key) or []
+            total = len(items)
+            usable = sum(
+                1 for it in items
+                if isinstance(it, dict) and all(it.get(f) is not None for f in _req)
+            ) if _req else total
+            if _st == "error":
+                status = "error"
+            elif _st == "empty" or total == 0:
+                status = "empty"
+            elif _st == "partial":
+                status = "partial"
+            else:
+                status = "ok"
+        else:
+            # 标量维度（大盘概况）：有段且非 error/empty 即 1 项可用
+            total = 0 if _st in ("error", "empty") else 1
+            usable = total
+            status = "error" if _st == "error" else "empty" if _st == "empty" else "ok"
+        as_of = sec.get(_asof_field) if _asof_field else None
+        lag = None
+        if as_of:
+            try:
+                lag = (_now - _date.fromisoformat(str(as_of)[:10])).days
+            except (ValueError, TypeError):
+                lag = None
+        out.append(_dq_normalize({
+            "section": name, "status": status, "items": total,
+            "as_of": str(as_of)[:10] if as_of else None, "lag_days": lag,
+            "usable": usable, "total": total,
+        }))
+    return out
+
+
 def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) -> dict:
     """用 LLM 生成早报今日定调 + 交易方向建议。
 
@@ -7975,36 +8069,22 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
                 "风险等级": u.get("risk_level"),
             })
 
-        # ── 数据可用性块（missing ≠ 0）──────────────────────────────
-        # 根因：M2_whale_moves.status='empty'（无样本）时 net_exchange_usd 仍为 0，
-        # 旧 prompt 用 .get(..., 0) 渲染成「交易所净流入：0.0M USD」，LLM 读成
-        # 「没有抛压」。此处把每个维度的可用性显式告知 LLM，并让相关渲染 None-aware。
-        _dq_defs = [
-            ("大盘概况", brief.get("M2_flow") or {}, None),
-            ("赛道表现", brief.get("M2_sector_flow") or {}, "sectors"),
-            ("ETF资金流", brief.get("M2_etf_flow") or {}, "assets"),
-            ("交易所净流量", brief.get("M2_exchange_flow") or {}, "assets"),
-            ("大额链上转账", whale_moves, "transfers"),
-            ("巨鲸持仓变化", brief.get("M2_holder_concentration") or {}, "whale_buying"),
-            ("即将解锁", brief.get("M6_upcoming_unlocks") or {}, "unlocks"),
-        ]
-        data_quality = []
-        for _name, _sec, _key in _dq_defs:
-            if not isinstance(_sec, dict) or not _sec:
-                # 无该段（None / {}）→ 明确 empty，绝不按 ok 计（否则「证据覆盖」会虚高）
-                data_quality.append({"section": _name, "status": "empty", "items": 0})
-                continue
-            _st = str(_sec.get("status") or "").lower()
-            _n = len(_sec.get(_key) or []) if _key else 1
-            if _st == "error":
-                _status = "error"
-            elif _st == "empty" or (_key and _n == 0):
-                _status = "empty"
-            elif _st == "partial":
-                _status = "partial"
-            else:
-                _status = "ok"
-            data_quality.append({"section": _name, "status": _status, "items": _n})
+        # ── 数据可用性块（missing ≠ 0；W-07 下钻到字段级）────────────
+        # 根因 1：M2_whale_moves.status='empty'（无样本）时 net_exchange_usd 仍为 0，
+        #   旧 prompt 用 .get(..., 0) 渲染成「交易所净流入：0.0M USD」，LLM 读成
+        #   「没有抛压」。
+        # 根因 2（W-07）：旧判定只看 fetch_* 的 status（表有行即 ok），而
+        #   biz.cm_asset_onchain_daily 最新日 16 行仅 2 行填了 flow_in/out_ex_usd
+        #   （可用率 12.5%）→ 需按字段级 usable/total 判定，ok 必须 usable>0。
+        data_quality = _build_data_quality({
+            "大盘概况":     brief.get("M2_flow") or {},
+            "赛道表现":     brief.get("M2_sector_flow") or {},
+            "ETF资金流":    brief.get("M2_etf_flow") or {},
+            "交易所净流量": brief.get("M2_exchange_flow") or {},
+            "大额链上转账": whale_moves,
+            "巨鲸持仓变化": brief.get("M2_holder_concentration") or {},
+            "即将解锁":     brief.get("M6_upcoming_unlocks") or {},
+        })
 
         _wm_ok = (str(whale_moves.get("status") or "").lower() == "ok") and bool(whale_moves.get("transfers"))
         _net_txt = (
@@ -8060,8 +8140,13 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
 
-【数据可用性（下结论前必读；empty/error = 无数据，禁止据此下任何断言）】
-{chr(10).join(f'- {d["section"]}: {d["status"]}' + (f'（{d["items"]} 项）' if d["items"] else '（无数据）') for d in data_quality)}
+【数据可用性（下结论前必读；empty/error = 无数据，禁止据此下任何断言；可用率=字段级可用条数/总条数）】
+{chr(10).join(
+    f'- {d["section"]}: {d["status"]}（无数据）' if not d["total"]
+    else f'- {d["section"]}: {d["status"]}（可用 {d["usable"]}/{d["total"]}'
+         + (f'，截至 {d["as_of"]}' if d.get("as_of") else '')
+         + (f'，滞后 {d["lag_days"]} 天' if d.get("lag_days") else '') + '）'
+    for d in data_quality)}
 
 【大盘概况】
 - BTC 周期阶段：{m1.get('phase', '未知')}

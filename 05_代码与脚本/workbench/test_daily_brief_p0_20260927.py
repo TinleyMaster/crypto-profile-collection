@@ -791,5 +791,72 @@ else:
     print("  - 跳过（未设置 DATABASE_URL，注入测试为可选联网项）")
 
 # ════════════════════════════════════════════════════════
+# W-07 数据状态表置顶（字段级 usable/total；ok 必须 usable>0）
+# ════════════════════════════════════════════════════════
+print("[W-07] 源码核验：字段级规格 / 归一函数 / 置顶状态表 / 路由校验")
+check("_DQ_FIELD_SPEC" in _mm_src, "macro_market 含字段级规格 _DQ_FIELD_SPEC")
+check("def _dq_normalize(" in _mm_src, "macro_market 含 _dq_normalize（ok 必须 usable>0）")
+check("def _build_data_quality(" in _mm_src, "macro_market 含 _build_data_quality")
+check("\"usable\"" in _mm_src and "\"total\"" in _mm_src and "\"coverage\"" in _mm_src,
+      "data_quality 条目含 usable/total/coverage")
+try:
+    _sdb_src = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+    check("def _data_status_table_html(" in _sdb_src, "渲染层含置顶数据状态表 _data_status_table_html")
+    check("def _dq_usable(" in _sdb_src, "渲染层含路由校验 _dq_usable")
+    check("模块 0.1：📋 数据状态" in _sdb_src, "状态表置于 M0 之后（模块 0.1）")
+    check("数据不可用" in _sdb_src, "渲染层含「数据不可用」文案")
+except Exception as _e:
+    check(False, "W-07 渲染层源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-07] 字段级判定：usable=0 的 ok 必须降为 empty")
+try:
+    import macro_market as _mmw7  # noqa: E402
+    _n0 = _mmw7._dq_normalize({"section": "交易所净流量", "status": "ok", "usable": 0, "total": 16})
+    check(_n0["status"] == "empty", "usable=0,total=16 的 ok → 降为 empty")
+    check(_n0["coverage"] == 0.0, "usable=0 → coverage=0.0")
+    _n1 = _mmw7._dq_normalize({"section": "交易所净流量", "status": "ok", "usable": 2, "total": 16})
+    check(_n1["status"] == "ok", "usable=2 → 仍为 ok")
+    check(abs(_n1["coverage"] - 0.125) < 1e-9, "usable=2,total=16 → coverage=0.125")
+    _dq7 = _mmw7._build_data_quality({
+        "交易所净流量": {"status": "ok", "latest_date": "2026-09-25",
+                      "assets": [{"symbol": "BTC", "net_flow_usd": 1.0},
+                                 {"symbol": "ETH", "net_flow_usd": None}]},
+        "大盘概况": {"status": "ok"},
+    }, today=__import__("datetime").date(2026, 9, 27))
+    _ex7 = next(d for d in _dq7 if d["section"] == "交易所净流量")
+    check(_ex7["usable"] == 1 and _ex7["total"] == 2, "字段级 usable/total 正确（1/2）")
+    check(_ex7["as_of"] == "2026-09-25" and _ex7["lag_days"] == 2, "as_of / lag_days 正确（09-25 → 滞后 2 天）")
+except Exception as _e:
+    check(False, "W-07 字段级用例执行", f"{type(_e).__name__}: {_e}")
+
+print("[W-07] 渲染层：注入 usable=0,total=16 → 状态列「数据不可用」，不渲染 0")
+try:
+    _dq_inj = [
+        {"section": "交易所净流量", "status": "empty", "as_of": "2026-09-25",
+         "lag_days": 2, "coverage": 0.0, "usable": 0, "total": 16},
+        {"section": "大盘概况", "status": "ok", "as_of": None, "lag_days": None,
+         "coverage": 1.0, "usable": 1, "total": 1},
+    ]
+    _tbl = sdb._data_status_table_html(_dq_inj)
+    check("📋 数据状态" in _tbl, "状态表区块渲染存在")
+    check("数据不可用" in _tbl, "empty 维度渲染「数据不可用」")
+    check("0/16" not in _tbl, "empty 维度不得渲染 0/16（不显示 0）")
+    check(">1/1<" in _tbl.replace(" ", ""), "ok 维度渲染可用率 1/1")
+    # 路由校验：不可用维度 → _dq_usable False
+    _br_inj = {"M0_ai_summary": {"data_quality": _dq_inj}}
+    check(sdb._dq_usable(_br_inj, "交易所净流量") is False, "_dq_usable 对 empty 维度返回 False")
+    check(sdb._dq_usable(_br_inj, "大盘概况") is True, "_dq_usable 对 ok 维度返回 True")
+    check(sdb._dq_usable({}, "任意") is True, "无 data_quality 时按可用（不误伤旧 payload）")
+    # 置顶位置：数据状态出现在第一张数据卡之前
+    _html7 = sdb.render_brief_html({**_brief(), "M0_ai_summary": {
+        **(_brief()["M0_ai_summary"]), "data_quality": _dq_inj}})
+    _i_status = _html7.find("📋 数据状态")
+    _i_card = _html7.find("📉 告警质量")
+    check(_i_status != -1 and (_i_card == -1 or _i_status < _i_card),
+          "数据状态表出现在 M0 定调之后、第一张数据卡之前")
+except Exception as _e:
+    check(False, "W-07 渲染层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

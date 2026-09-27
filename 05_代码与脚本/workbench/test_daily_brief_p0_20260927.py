@@ -680,5 +680,31 @@ except Exception as _e:
     check(False, "W-04 数据层用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
+# W-05 数据新鲜度阈值按源配置（days > 2 → days >= max_lag_days）
+# ════════════════════════════════════════════════════════
+print("[W-05] 纯函数判定：>= max_lag 判滞后（日更阈值 1；None 视为滞后）")
+try:
+    from datetime import date as _date, timedelta as _td
+    import build_daily_brief as _bdb  # noqa: E402
+    _today = _date(2026, 9, 27)
+    check(_bdb._freshness_verdict(_today, 1, _today)[0] is False, "今日数据（0 天）→ 不告警")
+    check(_bdb._freshness_verdict(_today - _td(days=1), 1, _today)[0] is True,
+          "昨日数据（1 天 ≥ 1）→ 告警（旧实现 1>2 为 False 会静默放过）")
+    check(_bdb._freshness_verdict(None, 1, _today)[0] is True, "无数据（None）→ 告警")
+    check(_bdb._freshness_verdict(_today - _td(days=3), 4, _today)[0] is False,
+          "ETF 阈值 4：滞后 3 天（跨周末）→ 不告警")
+    check(_bdb._freshness_verdict(_today - _td(days=4), 4, _today)[0] is True,
+          "ETF 阈值 4：滞后 4 天 → 告警")
+except Exception as _e:
+    check(False, "W-05 纯函数用例执行", f"{type(_e).__name__}: {_e}")
+
+print("[W-05] 源码核验：checks 为 4 元组且判定用 >=")
+_bdb_src = open(os.path.join(_SCRIPTS_BIN, "build_daily_brief.py"), encoding="utf-8").read()
+check('"snapshot_date", 1)' in _bdb_src and '"flow_date",     4)' in _bdb_src,
+      "checks 列表已扩为 (名称, 表, 时间列, max_lag_days)")
+check("days >= max_lag_days" in _bdb_src, "判定改为 days >= max_lag_days")
+check("if days > 2" not in _bdb_src, "旧的 days > 2 判定已移除")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

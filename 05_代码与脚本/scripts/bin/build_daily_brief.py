@@ -37,21 +37,35 @@ from macro_market import (  # noqa: E402
 )
 
 
+def _freshness_verdict(latest, max_lag_days: int, today: date | None = None) -> tuple[bool, int | None, str]:
+    """纯函数：判定单个数据源是否滞后。返回 (is_stale, days, label)。
+
+    - latest 为 None（表空 / 查询不到）→ 视为**滞后**（不是「不告警」）；
+    - 否则 days = today - latest，`days >= max_lag_days` 即判滞后
+      （阈值 1 表示「隔天就算滞后」）。
+    """
+    if latest is None:
+        return True, None, "无数据"
+    days = ((today or date.today()) - latest).days
+    return days >= max_lag_days, days, str(latest)
+
+
 def _check_data_freshness() -> list[str]:
-    """早报依赖数据源新鲜度自检：返回滞后（>2 天）或无数据的数据源列表。
+    """早报依赖数据源新鲜度自检：返回滞后（days >= max_lag_days）或无数据的数据源列表。
 
     在生成早报前调用，滞后项打印告警并附加到 brief.degraded（邮件降级标注）。
-    ETF 数据 T+1 更新 + 周末休市，>2 天视为滞后。
+    逐源配置容忍周期：日更源=1（隔天即滞后）；ETF 交易日更、跨周末至多 4 天。
+    旧实现用统一 `days > 2`：恐贪指数 09-25 vs 09-27 = 2 天不告警，采集停更被静默放过。
     """
     stale: list[str] = []
     checks = [
-        ("恐贪指数", "biz.fear_greed_daily", "metric_date"),
-        ("BTC OI", "biz.btc_oi_daily", "metric_date"),
-        ("CEFI 指数", "biz.cefi_index_daily", "metric_date"),
-        ("赛道TVL", "biz.category_tvl_daily", "snapshot_date"),
-        ("ETF资金流", "biz.etf_flow_daily", "flow_date"),
-        ("赛道市值", "biz.sector_flow_daily", "metric_date"),
-        ("大盘快照", "biz.market_snapshot_daily", "snapshot_date"),
+        ("恐贪指数",   "biz.fear_greed_daily",       "metric_date",   1),  # 日更
+        ("BTC OI",    "biz.btc_oi_daily",           "metric_date",   1),  # 日更
+        ("CEFI 指数",  "biz.cefi_index_daily",       "metric_date",   1),  # 日更
+        ("赛道TVL",    "biz.category_tvl_daily",     "snapshot_date", 1),  # 日更
+        ("ETF资金流",  "biz.etf_flow_daily",         "flow_date",     4),  # 交易日更，跨周末至多 4 天
+        ("赛道市值",   "biz.sector_flow_daily",      "metric_date",   1),  # 日更
+        ("大盘快照",   "biz.market_snapshot_daily",  "snapshot_date", 1),  # 日更
     ]
     try:
         from crypto_research.config import get_settings
@@ -60,24 +74,21 @@ def _check_data_freshness() -> list[str]:
         settings = get_settings(require_database=True)
         with get_connection(settings.database_url) as conn:
             with conn.cursor() as cur:
-                for name, tbl, col in checks:
+                for name, tbl, col, max_lag in checks:
                     try:
                         cur.execute(f"SELECT MAX({col}) FROM {tbl}")
                         row = cur.fetchone()
                         latest = row[0] if row else None
-                        if latest is not None:
-                            days = (date.today() - latest).days
-                            if days > 2:
-                                print(f"[freshness] ⚠️ {name}: {latest}（滞后{days}天）")
-                                stale.append(f"{name}({latest})")
-                            else:
-                                print(f"[freshness] ✓ {name}: {latest}")
+                        is_stale, days, label = _freshness_verdict(latest, max_lag)
+                        if is_stale:
+                            _dtxt = f"滞后{days}天" if days is not None else "无数据"
+                            print(f"[freshness] ⚠️ {name}: {label}（{_dtxt}，阈值{max_lag}天）")
+                            stale.append(f"{name}({label}, {_dtxt}, 阈值{max_lag}天)")
                         else:
-                            print(f"[freshness] ⚠️ {name}: 无数据")
-                            stale.append(name)
+                            print(f"[freshness] ✓ {name}: {label}（滞后{days}天，阈值{max_lag}天）")
                     except Exception as e:
                         print(f"[freshness] ⚠️ {name}: 查询失败 {e}")
-                        stale.append(name)
+                        stale.append(f"{name}(查询失败, 阈值{max_lag}天)")
     except Exception as e:
         print(f"[freshness] ⚠️ 自检失败: {e}")
     return stale

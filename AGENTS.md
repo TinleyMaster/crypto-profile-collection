@@ -1837,15 +1837,22 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **已证伪**：prod Zeabur 的 `HELIUS_API_KEY` 已正确配置（`zeabur variable list --id 6a702918fefeb46a88349f8c`，len=36，与本机逐字符相同）；prod 任务日志 299 行中「未配置 HELIUS_API_KEY」出现 0 次。
 - **真因三连**：① **mint 参数/数据**——`SOL(So1111…1111)` 是 solana **原生 mint**（非 SPL token），Helius 恒报 `-32602 not a Token mint`；`USDC(EPjFWdd5…)`/`USDT(Es9vMFrz…)` 持币账户数达千万级，`getTokenLargestAccounts` 恒报 `-32600 Too many accounts requested`（Helius 免费档护栏，公共 RPC 该 method 亦被硬限流 429，**无免费替代源**）。② **静默吞错**——`_scrape_holders_helius` 在 `top_holders_json` 为空时直接 `return None`，真因只散落在 `_json_rpc` 的 print 里且随 `run_single` 的临时文件被删 ⇒ 是本次误判为「缺 key」的直接原因。③ **死回退**——其后回退的 Solscan(Playwright) 已被 Cloudflare 全面拦截，prod 日志逐币皆为「Solscan 未获取到数据」，却**每币硬耗 2~3 分钟**。单轮 300 币即 8~15h，**正是链上任务被判「stuck: 90/240 分钟无新日志」或「12h 超时」而被杀的根因**（09-23 那轮 `dur=30723s`、success=1/fail=299 即此模式）。
 
-**改动（4 文件）**：
+**改动（4 文件；另见本节日末「续」的 solana 地址结构护栏）**：
 - `solana_client.py`：新增 `classify_rpc_error()`（`-32602→invalid_mint`、`-32600+too many accounts→too_many_accounts`、其余 `rpc_error`）；`SolanaClient` 新增 `self.last_error`（`{"kind","method","code","detail"}`），`_json_rpc` 在 RPC error / 429 耗尽 / 网络异常时落盘、成功时清空（原 429 静默无痕）。
 - `phase_chain_holder_scrape.py`：`_scrape_holders_helius` 改返回 `(结果, 失败类别)`，空结果时**显式打印真因**；新增 `PERMANENT_MINT_ERRORS = {invalid_mint, too_many_accounts}`；**摘除 Solscan(Playwright) 回退**，solana 失败即 `return None`（快速失败，当日由看门狗告警，远优于悬挂数小时）。`_scrape_holders_solscan` 实现**保留但注明「当前未被调用」**（待接入 Solscan Pro API 或可用源后复用）。
 - `phase_chain_holder_batch.py`：`EXCLUDE_CONTRACTS` 增补 solana 原生 mint `So11111111111111111111111111111111111111111`（否则每天白占一个待采集名额且永远落 fail 统计）；solana 单币超时由 300s（为 Playwright 留的）**下调至 120s**。
-- `workbench/test_solana_holder_20260927.py`（新）：A~E 五组判据，**23/0**。
+- `workbench/test_solana_holder_20260927.py`（新）：A~F 六组判据，**27/0**（F 组为下文地址结构护栏）。
 
-**验证**：`py_compile` 3/3；新探针 23/0；既有回归 `test_snapshot_freshness_20260927` 27/0、`test_derivatives_signal_gap` / `test_scan_alert_remaining` / `test_funding_interval_20260927` / `test_macro_market_p0` / `test_macro_market_board_tier2` / `test_sector_taxonomy_20260927` 均通过。**runtime（本地连 prod，只读）**：`--asset-id 1814 --chain solana` 秒级返回并打印 `Helius 未取到持仓（invalid_mint）: Invalid param: not a Token mint` + 「判定永久不可采，跳过」（**不再等 2~3 分钟 Playwright**）；`--asset-id 1127` 仍走 `数据来源: Helius RPC (solana)`、解析 20 条持仓 ⇒ 正常路径无回退。
+**验证**：`py_compile` 4/4；新探针 27/0；既有回归 `test_snapshot_freshness_20260927` 27/0、`test_derivatives_signal_gap` / `test_scan_alert_remaining` / `test_funding_interval_20260927` / `test_macro_market_p0` / `test_macro_market_board_tier2` / `test_sector_taxonomy_20260927` 均通过。**runtime（本地连 prod，只读）**：`--asset-id 1814 --chain solana` 秒级返回并打印 `Helius 未取到持仓（invalid_mint）: Invalid param: not a Token mint` + 「判定永久不可采，跳过」（**不再等 2~3 分钟 Playwright**）；`--asset-id 1127` 仍走 `数据来源: Helius RPC (solana)`、解析 20 条持仓 ⇒ 正常路径无回退。
 
 **未做 / 边界**：① **USDC/USDT 等超大持币 mint 仍无数据**——Helius 护栏 + 公共 RPC 硬限流，免费档确无替代源，属**已知且显式**的失败（fast-fail 并计入 fail），如需覆盖须接入付费源（Birdeye/Solscan Pro）。② solana「失败即重试/断点续跑」仍缺（属「新发现②周期性 stuck」范畴，未在本单）：本次仅保证**快速失败 + 不悬挂**，单轮失败当日不再自动补跑，由次日 cron + 看门狗兜底。
+
+**续：Helius 额度证伪 + 合约地址污染（用户问「额度是不是不够」后追加，同日）**
+- **额度不是瓶颈（有据）**：09-27 那轮 275 成功 / 25 失败，25 条失败**逐条**归类为 —— `-32602 invalid_mint / WrongSize` 19 条、`-32600 too many_accounts` 2 条（USDC）、RPC 正常但结果空 4 条（PURR/MA/SPY/TSLA，本地复现确认）；**429/限流/额度 = 0 条**。另用现有 key 突发 60 次请求全 200。⇒ **不建议再申请 key**（多 key 救不回这 25 条中的任何一条；仅当**新代码**打出 `rate_limited` 时才有必要，且需配套多 key 轮换改造，当前只认单个 `HELIUS_API_KEY`）。
+- **真根因 = `core.asset_contract` 的 solana 地址被系统性污染**（23 个从未成功的 solana 合约中）：① **15 个被降格为全小写** —— base58 **大小写敏感**，降格后或解码字节数不对（`-32602 WrongSize`，如 FOXSY/AIXCB/SAFA/BELG）、或指向不存在的 mint（`not a Token mint`，如 GEOD）；其中 11 个还含 base58 禁用字符 `l`（如 PYM/MOEW/LUNA/DEUS/SFA）；② 1 个混入 **Solscan URL 片段**（`token/EdAhkb5…`，L=50）；③ 1 个把 **EVM 地址**贴到 solana 链（`0xadb2437e…`）；④ 1 个是原生 mint（已剔除）；⑤ 4 个 vanity 前缀地址（SPY/PURR/MA/TSLA，Helius 判 not-a-mint/空）。这批行 `last_dt` 恒 NULL ⇒ 永远排待采最前、永远失败、每日白占名额。
+- **本次落地（结构性护栏，零误伤）**：`phase_chain_holder_batch.py` 新增 `SOLANA_ADDR_RE = ^[1-9A-HJ-NP-Za-km-z]{32,44}$` 与 `_sol_guard()`，`get_pending_assets` / `get_total_pending` 对 solana 追加该谓词，拦下 ①中 11 个（含 `l`/0x/URL 片段）等**结构上就非法**的行（实测 prod：solana 队列违规=0，eth/bsc 不受影响）。**未**采用「全小写即污染」的启发式 —— 实测有 1 例全小写地址（TAO `taoc6xyv…`）曾成功，启发式有误伤风险。
+- **覆盖度实况（纠偏）**：solana 合约 3166 条中 **3143 条已有成功快照（99.3%）**，「断更」实为**时新性缺口**而非覆盖缺口；仅 23 条从未成功（即上述污染 + 边缘个例）。
+- **未做（建议单独立项「数据侧」）**：**地址本体的修复**——须定位并修掉把 solana 地址降格/贴 URL 的写入方（疑似 contract 回填/CMC·DexScreener 侧），再从可信源重同步以**恢复**那 15 个资产（本次仅做队列侧结构过滤，**未改 `core.asset_contract` 任何数据**）；以及 5 个「全小写但形态合法」者（GEOD/FOXSY/AIXCB/SAFA/BELG）仍会每日失败一次（形态上无法与真地址区分，只能靠数据修复）。
 
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 

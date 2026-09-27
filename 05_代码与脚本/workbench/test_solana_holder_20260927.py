@@ -205,6 +205,30 @@ check("0x43fd9de06bb69ad771556e171f960a91c42d2955" in _excl,
 check("max(args.timeout, 120)" in _BATCH_SRC and "max(args.timeout, 300)" not in _BATCH_SRC,
       "E3 solana 单币超时由 300s 下调至 120s（Playwright 回退已摘除）")
 
+# ── F. solana 地址结构护栏 ──
+print("[F] phase_chain_holder_batch solana 地址结构护栏")
+import phase_chain_holder_batch as _batch  # noqa: E402
+
+_re = _batch.SOLANA_ADDR_RE
+_ok = [
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",   # USDC
+    "boopkpWqe68MSxLqBGogs8ZbUDN4GXaLhFwNP7mpP1i",      # BOOP（正确大小写，43 位）
+    "So11111111111111111111111111111111111111111",      # 原生 mint（由 EXCLUDE 剔除，非护栏）
+]
+_bad = [
+    "token/EdAhkbj5nF9sRM7XN7ewuW8C9XEUMs8P7cnoQ57SYE96",  # Solscan URL 片段（L=50）
+    "0xadb2437e6f65682b85f814fbc12fec0508a7b1d0",          # EVM 地址贴到 solana 链
+    "7yf97k6jrbkb7bxjyxzmwqlqyxvirltcssgb75qlqan8",        # 降格全小写且含 base58 禁用字符 l
+    "c6q5fmpupjbpox84wbce3rn8hyjg11o4yhembqsuys5l",        # 同上（含 l）
+]
+check(all(re.match(_re, a) for a in _ok), "F1 合法 solana 公钥全部通过护栏")
+check(all(not re.match(_re, a) for a in _bad),
+      "F2 URL 片段 / EVM 地址 / 含 l 的降格地址被拦下（零误伤的结构判据）")
+check(_batch._sol_guard("solana")[0] != "" and _batch._sol_guard("eth") == ("", ()),
+      "F3 仅 solana 链追加护栏，其它链不受影响")
+check(_BATCH_SRC.count("{sol_guard}") == 2,
+      "F4 get_pending_assets / get_total_pending 两处均已接入（口径一致，避免计数漂移）")
+
 print("=" * 60)
 print(f"结果：{passed} 通过 / {failed} 失败")
 print("=" * 60)

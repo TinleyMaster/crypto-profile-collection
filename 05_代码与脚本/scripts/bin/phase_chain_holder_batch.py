@@ -78,6 +78,25 @@ EXCLUDE_CONTRACTS = (
     "So11111111111111111111111111111111111111111",
 )
 
+# Solana 地址「结构护栏」：合法 Solana 公钥必为 base58（32~44 字符，字母表不含 0 O I l）。
+# 背景（2026-09-27 审计）：`core.asset_contract` 的 solana 地址存在系统性污染 ——
+#   ① 被降格成全小写（base58 **大小写敏感**：降格后或解码字节数不对 → Helius -32602 WrongSize，
+#      或指向一个不存在的 mint → -32602 not a Token mint）；
+#   ② 混入 Solscan URL 片段（如 `token/EdAhkb5…`，长度 50）；
+#   ③ 把 EVM 地址贴到 solana 链（如 `0xadb2437e…`）。
+# 这类行 `last_dt` 恒为 NULL ⇒ 永远排在「待采集最前」、永远失败、每天白占一个名额。
+# 此处只做**零误伤**的结构过滤（不是 base58 字符串者铁定不是 Solana 公钥）；
+# 「全小写但形态合法」的那批（GEOD/FOXSY/AIXCB/SAFA/BELG）**不在此过滤** —— 它们形态上无法
+# 与真地址区分，须由数据侧修复地址本身（见 AGENTS.md「Solana 合约地址污染」留档）。
+SOLANA_ADDR_RE = r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
+
+
+def _sol_guard(chain_short: str) -> tuple[str, tuple]:
+    """返回 (SQL 片段, 参数)。仅 solana 链追加 base58 结构护栏，其它链为空片段。"""
+    if chain_short == "solana":
+        return "AND c.contract_address ~ %s", (SOLANA_ADDR_RE,)
+    return "", ()
+
 
 def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
     """获取指定链上有合约地址、今日尚未采快照的资产列表。
@@ -96,6 +115,7 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
 
     placeholders = ",".join(["%s"] * len(db_names))
     exclude_ph = ",".join(["%s"] * len(EXCLUDE_CONTRACTS))
+    sol_guard, sol_params = _sol_guard(chain_short)
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
@@ -113,6 +133,7 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
             WHERE c.chain IN ({placeholders})
               AND c.contract_address IS NOT NULL
               AND c.contract_address NOT IN ({exclude_ph})
+              {sol_guard}
               AND NOT EXISTS (
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
@@ -125,7 +146,7 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
                      c.asset_id ASC
             LIMIT %s
             """,
-            (*db_names, *EXCLUDE_CONTRACTS, limit),
+            (*db_names, *EXCLUDE_CONTRACTS, *sol_params, limit),
         )
         return cur.fetchall()
 
@@ -140,6 +161,7 @@ def get_total_pending(conn, chain_short: str) -> int:
 
     placeholders = ",".join(["%s"] * len(db_names))
     exclude_ph = ",".join(["%s"] * len(EXCLUDE_CONTRACTS))
+    sol_guard, sol_params = _sol_guard(chain_short)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -149,6 +171,7 @@ def get_total_pending(conn, chain_short: str) -> int:
             WHERE c.chain IN ({placeholders})
               AND c.contract_address IS NOT NULL
               AND c.contract_address NOT IN ({exclude_ph})
+              {sol_guard}
               AND NOT EXISTS (
                   SELECT 1 FROM biz.onchain_holder_snapshot s
                   WHERE s.asset_id = c.asset_id
@@ -157,7 +180,7 @@ def get_total_pending(conn, chain_short: str) -> int:
                     AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
             """,
-            (*db_names, *EXCLUDE_CONTRACTS),
+            (*db_names, *EXCLUDE_CONTRACTS, *sol_params),
         )
         return cur.fetchone()[0]
 

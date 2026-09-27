@@ -12739,7 +12739,7 @@
                 var narrFlow = (dim5data.narrative_flow_ranking || {}).ranked || [];
                 if (!narrFlow.length) return;
 
-                // 按当前时间窗的变化率重新排序（blended 模式也基于此周期）
+                // P2-E2: 三窗统一按合成分排序（原 1d/30d 用纯涨跌幅，与 7d 维度不一致）
                 var sorted = narrFlow.slice().sort(function (a, b) {
                     var va = getNarrChangeByWindow(a, win);
                     var vb = getNarrChangeByWindow(b, win);
@@ -12756,10 +12756,10 @@
                 narrCol.innerHTML = html;
             }
 
-            // FEAT-SECTOR-006: 获取指定时间窗的变化率
+            // FEAT-SECTOR-006 + P2-E2: 三窗统一取合成分（后端产出 composite_score_1d/30d）
             function getNarrChangeByWindow (n, win) {
-                if (win === '1d') return n.mcap_change_1d_pct;
-                if (win === '30d') return n.mcap_change_30d_pct;
+                if (win === '1d') return n.composite_score_1d != null ? n.composite_score_1d : n.composite_score;
+                if (win === '30d') return n.composite_score_30d != null ? n.composite_score_30d : n.composite_score;
                 return n.composite_score; // 7d 默认用合成评分
             }
 

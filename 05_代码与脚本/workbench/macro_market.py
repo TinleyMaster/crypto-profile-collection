@@ -69,7 +69,11 @@ SCORING_TUNING_DEFAULT = {
     "funding_high_bull": 65,
     "funding_high_bear": 35,
     "funding_neutral": 50,
-    "mcap_step": 40_000_000_000,
+    # P2-D：体量分项对数量程（0.8T → 0 分，12T → 100 分）。
+    # 必须在此默认表登记：_load_market_rules 只覆盖 target 已存在的键
+    # （`if k in target`），未登记的新键会被静默丢弃。
+    "mcap_log_low": 800_000_000_000,
+    "mcap_log_high": 12_000_000_000_000,
     "rsi_base": 50,
     "rsi_slope": 0.8,
     "ma20_bonus": 5,
@@ -1955,10 +1959,24 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
     有 TVL 腿（映射命中且 TVL≥阈值）= momentum_score * mcap_weight + tvl_change * tvl_weight；
     无 TVL 腿（Meme/L1 等）= momentum_score。
     按合成值降序取前 rank_limit。返回 {status, ranked, degraded}。
+    每条含三窗合成值：composite_score（7d，市值腿 = momentum 三窗混合分）、
+    composite_score_1d / composite_score_30d（市值腿 = 该窗涨跌幅，TVL 腿沿用 7d）——
+    P2-E2：前端三窗统一按这三个键排序，取代原 1d/30d 的纯涨跌幅排序。
     """
     tvl_cats = tvl_flow.get("categories", {}) if tvl_flow.get("status") == "ok" else {}
     mc_w = NARRATIVE_CHAIN["mcap_weight"]
     tvl_w = NARRATIVE_CHAIN["tvl_weight"]
+
+    def _composite(mcap_leg: float | None, tvl_leg: float | None, blended: bool) -> float | None:
+        """按 7d 现有公式合成单窗评分：mc_w×该窗市值腿 + tvl_w×TVL腿；无 TVL 腿则仅市值腿。
+
+        P2-E2：三窗统一排序口径的载体。mcap_leg 缺失（该窗数据不可得）时返回 None，
+        由前端回落 7d 合成值，避免出现「空刻度排到榜首」。
+        """
+        if mcap_leg is None:
+            return None
+        return round(mc_w * mcap_leg + tvl_w * tvl_leg, 2) if blended else round(mcap_leg, 2)
+
     ranked: list[dict] = []
     for item in cat_flow.get("ranked", []):
         momentum = item.get("momentum_score")
@@ -1975,9 +1993,15 @@ def build_narrative_flow_ranking(cat_flow: dict, tvl_flow: dict) -> dict:
         else:
             composite = score
             mode = "mcap_only"
+        # P2-E2：1d/30d 的市值腿换为该窗涨跌幅；TVL 腿只能沿用 7d
+        # （DeFiLlama /protocols 只提供 change_7d，无 1d/30d 口径）。
+        blended = mode == "blended"
+        tvl_leg = tvl_info["tvl_change_7d_pct"] if blended else None
         ranked.append({
             "narrative": item["narrative"],
             "composite_score": round(composite, 2),
+            "composite_score_1d": _composite(item.get("mcap_change_1d_pct"), tvl_leg, blended),
+            "composite_score_30d": _composite(item.get("mcap_change_30d_pct"), tvl_leg, blended),
             "mode": mode,
             "momentum_score": momentum,
             "trend_label": item.get("trend_label", "横盘"),
@@ -8810,12 +8834,18 @@ def compute_structure_subscore(
     available_weights = 0.0
     weighted_sum = 0.0
 
-    # 体量（总市值）- 用 2.5T 为基准，归一化到 0-100
+    # 体量（总市值）- 对数量程归一化到 0-100（P2-D）
     if global_metrics.get("status") == "ok":
         total_mcap = global_metrics.get("total_market_cap", 0)
-        if total_mcap > 0:
-            mcap_score = min(100, max(0, total_mcap / SCORING_TUNING["mcap_step"]))
+        lo = SCORING_TUNING["mcap_log_low"]
+        hi = SCORING_TUNING["mcap_log_high"]
+        if total_mcap > 0 and hi > lo > 0:
+            # 对数刻度：lo → 0 分，hi → 100 分。原线性 mcap_step=40B 量程上限 4T
+            # 贴近当前市值（≈2.9T）已饱和，牛市 >4T 恒 100 ⇒ 失去区分度。
+            ratio = (math.log10(total_mcap) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+            mcap_score = max(0.0, min(100.0, ratio * 100))
         else:
+            # 无市值数据或量程配置非法（hi ≤ lo）→ 退回中性，不参与区分
             mcap_score = 50
         components["market_cap"] = {
             "total_market_cap": total_mcap,

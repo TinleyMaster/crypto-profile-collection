@@ -8,7 +8,9 @@
   1. `_signal_symbol_candidates` 合约符号 → 裸符号归一（B2USDT/1000FLOKIUSDT/…）；
   2. 源码 AST：`--signal-days` 参数存在、`main` 合并信号缺口且缺口不被 --limit 截断；
   3. `get_signal_gap_assets` 查询语义（作用域 main/BRK + NOT EXISTS 无衍生品行）；
-  4. 只读 prod：缺口集合确实「无 asset_derivatives 行」；`--signal-days 0` 恒空。
+  4. 只读 prod：缺口集合确实「无 asset_derivatives 行」；`--signal-days 0` 恒空；
+  5. NEW-G 陈旧刷新组：门槛常量/参数透传，只读 prod 校「刷新组 ⊇ 缺口」且刷新组
+     每个都「有行但最新一行超龄」（审计_盘面告警邮件4封_2026-09-27 §三）。
 """
 import ast
 import os
@@ -200,43 +202,93 @@ _fetch_src = ast.unparse(_func("fetch_one_asset"))
 check("_aggregate_funding" in _fetch_src, "fetch_one_asset 使用 _aggregate_funding")
 
 
+print("\n【3d】NEW-G 陈旧刷新组（审计_盘面告警邮件4封_2026-09-27 §三）")
+check(getattr(pdb, "REFRESH_STALE_H", None) == 12,
+      "REFRESH_STALE_H 常量存在 = 12h", f"got={getattr(pdb, 'REFRESH_STALE_H', None)}")
+check(pdb.REFRESH_STALE_H < 24,
+      "刷新阈值 < scan_daemon.FUNDING_STALE_H(24)（否则刷新追不上护栏下限）")
+check("refresh_hours" in gap_src, "get_signal_gap_assets 接受 refresh_hours 参数")
+check("MAX(fetched_at)" in gap_src, "按每符号最新 fetched_at 做陈旧判定")
+check("refresh_hours" in main_src and "--refresh-hours" in main_src,
+      "main 暴露并透传 --refresh-hours")
+
+# ═══════════════════════════════════════════════════════════════
+#  4. 只读 prod：缺口 + 刷新组不变量
+# ═══════════════════════════════════════════════════════════════
+
 print("\n【4】只读 prod：缺口集合不变量")
 try:
+    from datetime import datetime, timedelta, timezone  # noqa: E402
+
     import psycopg.rows  # noqa: E402
     from crypto_research.config import get_settings  # noqa: E402
     from crypto_research.db.conn import get_connection  # noqa: E402
 
+    def _cnt_funding(conn, ids):
+        if not ids:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM biz.asset_derivatives "
+                "WHERE asset_id = ANY(%s) AND funding_rate IS NOT NULL", (ids,))
+            return cur.fetchone()[0]
+
+    def _sym_stats(conn, syms):
+        """按**符号级**（含别名，与 `get_signal_gap_assets` 同口径）统计：
+        返回 (有费率行的符号数, 最新一行也超龄的符号数)。"""
+        keys = set()
+        for s in syms:
+            keys.update(pdb._signal_symbol_candidates(s))
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, MAX(fetched_at) AS last "
+                        "FROM biz.asset_derivatives WHERE funding_rate IS NOT NULL "
+                        "GROUP BY symbol")
+            latest = {}
+            for sym, last in cur.fetchall():
+                for k in {sym, sym.upper(), *pdb._signal_symbol_candidates(sym)}:
+                    if k in keys and last is not None and (k not in latest or last > latest[k]):
+                        latest[k] = last
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=pdb.REFRESH_STALE_H)
+        with_row = stale = 0
+        for s in syms:
+            ages = [latest[c] for c in pdb._signal_symbol_candidates(s) if c in latest]
+            if ages:
+                with_row += 1
+                if max(ages) < cutoff:
+                    stale += 1
+        return with_row, stale
+
     with get_connection(get_settings().database_url) as conn:
-        gaps = pdb.get_signal_gap_assets(conn, 7)
+        gaps0 = pdb.get_signal_gap_assets(conn, 7, 0)   # 仅 O1 缺口（旧语义）
+        gaps = pdb.get_signal_gap_assets(conn, 7)       # 缺口 + NEW-G 刷新组
+        ids0 = [g["asset_id"] for g in gaps0]
         ids = [g["asset_id"] for g in gaps]
-        if ids:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM biz.asset_derivatives "
-                    "WHERE asset_id = ANY(%s) AND funding_rate IS NOT NULL",
-                    (ids,),
-                )
-                leaked = cur.fetchone()[0]
-        else:
-            leaked = 0
+        leaked0 = _cnt_funding(conn, ids0)
+        id0set = set(ids0)
+        refreshed = [g for g in gaps if g["asset_id"] not in id0set]
+        rf_syms = [g["symbol"] for g in refreshed]
+        rf_with_funding, rf_stale = _sym_stats(conn, rf_syms)
 except Exception as exc:  # noqa: BLE001
     skip("只读 prod 缺口不变量", f"无法连库：{type(exc).__name__}: {exc}")
     gaps = None
 
 if gaps is not None:
-    print(f"    （近 7 天主池/BRK 信号缺口：{len(gaps)} 个，样例："
-          f"{[g['symbol'] for g in gaps[:6]]}）")
-    check(leaked == 0,
-          "缺口资产无任何**带费率**的衍生品行（符号级覆盖自洽）",
-          f"{leaked} 个缺口资产竟已有带费率的行")
+    print(f"    （缺口 refresh_hours=0：{len(ids0)} 个；含刷新组：{len(ids)} 个"
+          f"（刷新组 {len(refreshed)} 个）；样例 {[g['symbol'] for g in gaps[:6]]}）")
+    check(leaked0 == 0,
+          "缺口（refresh_hours=0）资产无任何**带费率**的衍生品行（符号级覆盖自洽）",
+          f"{leaked0} 个缺口资产竟已有带费率的行")
+    check(set(ids0) <= set(ids), "开启刷新组后缺口集仍是其子集（只增不减）")
+    check(len(refreshed) == rf_with_funding,
+          "刷新组每个资产都**有**带费率的行（正是「有旧行、永不刷新」的那批）",
+          f"{len(refreshed)} 个刷新项中仅 {rf_with_funding} 个有带费率的行")
+    check(len(refreshed) == rf_stale,
+          f"刷新组每个资产的最新一行都超 {pdb.REFRESH_STALE_H}h（陈旧判定自洽）",
+          f"{len(refreshed)} 个刷新项中仅 {rf_stale} 个超龄")
     syms_up = [str(g["symbol"]).upper() for g in gaps]
     check(len(syms_up) == len(set(syms_up)),
-          "缺口按符号去重（每个 canonical_symbol 只出现一次）",
+          "结果按符号去重（每个 canonical_symbol 只出现一次）",
           f"重复：{[s for s in set(syms_up) if syms_up.count(s) > 1][:8]}")
-    ranks = [g["market_cap_rank"] for g in gaps if g["market_cap_rank"] is not None]
-    hi = sum(1 for r in ranks if r > 100)
-    print(f"    \u2139 rank 分布：{len(ranks)} 个有排名，其中 rank>100 的 {hi} 个"
-          f"（其余 {len(gaps) - len(ranks)} 个无排名）")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败 / {skipped} 跳过")
 sys.exit(1 if failed else 0)

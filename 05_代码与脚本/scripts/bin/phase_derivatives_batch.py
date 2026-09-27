@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -185,7 +185,14 @@ def _signal_symbol_candidates(symbol: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def get_signal_gap_assets(conn, days: int) -> list[dict]:
+# 陈旧刷新阈值（小时）：「有行、但最新一行也超龄」的信号币并入刷新组。必须显著小于
+# `scan_daemon.FUNDING_STALE_H`(24)，否则刷新速度追不上护栏下限、告警币会长期显示
+# `n/a（未覆盖）`。batch 每 6h 一轮 ⇒ 12h 保证最坏 12+6=18h < 24h。
+REFRESH_STALE_H = 12
+
+
+def get_signal_gap_assets(conn, days: int,
+                          refresh_hours: int = REFRESH_STALE_H) -> list[dict]:
     """O1 缺口资产：近期出现在主池/BRK 信号、且**符号级**尚无资金费率的资产。
 
     - 作用域 = `pool='main' OR scenario='BRK'`（资金费率的**消费方**；squeeze 池不用 funding）；
@@ -196,6 +203,11 @@ def get_signal_gap_assets(conn, days: int) -> list[dict]:
       逐行取会导致 DOGE/BTC/SOL 等被算成十几个「缺口」并重复入库 ⇒ 用
       `DISTINCT ON (upper(canonical_symbol))` + 按 `market_cap_rank NULLS LAST, asset_id`
       只取**最优那条**（与 `scan_daemon._get_asset_id` 的选择一致）；
+    - **含「陈旧刷新组」**（审计_盘面告警邮件4封_2026-09-27 §三/NEW-G）：原实现只补
+      「从无行」的符号，**有旧行的符号永不刷新** ⇒ `_load_funding_map` 的 24h 护栏把它
+      挡成 `n/a（未覆盖）`（实测 MOVR 最后快照 30 天前、却在告警里）。现把「有行、但
+      最新一行超 `refresh_hours`（0=关闭）」的符号一并并入；`merge_pending` 保证并入后
+      不被 `--limit` 截断，故不存在结构性命中不到。
     - 无 `core.asset` 行的 symbol（如 BROCCOLI714）本函数无法覆盖（属主数据治理缺口）。
     """
     if days <= 0:
@@ -221,14 +233,35 @@ def get_signal_gap_assets(conn, days: int) -> list[dict]:
             covered.add(s)
             covered.add(s.upper())
             covered.update(_signal_symbol_candidates(s))
+        # 每符号最新快照时间（用于「陈旧刷新组」判定）
+        cur.execute(
+            "SELECT symbol, MAX(fetched_at) AS last FROM biz.asset_derivatives "
+            "WHERE funding_rate IS NOT NULL GROUP BY symbol"
+        )
+        latest: dict[str, datetime] = {}
+        for r in cur.fetchall():
+            s = r["symbol"] or ""
+            for key in {s, s.upper(), *_signal_symbol_candidates(s)}:
+                prev = latest.get(key)
+                if r["last"] is not None and (prev is None or r["last"] > prev):
+                    latest[key] = r["last"]
 
-    # 未覆盖的候选符号（任一别名已覆盖 ⇒ 该信号非缺口）
+    # ① 缺口：任一别名已覆盖 ⇒ 非缺口，否则整组候选并入
+    # ② 陈旧刷新组（NEW-G）：已覆盖、但最新一行也超龄 ⇒ 并入，否则永远停在护栏之外
     uncovered: set[str] = set()
+    stale: set[str] = set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=refresh_hours)
+              if refresh_hours > 0 else None)
     for s in sig_syms:
         cands = _signal_symbol_candidates(s)
         if not any(c in covered for c in cands):
             uncovered.update(cands)
-    if not uncovered:
+        elif cutoff is not None:
+            ages = [latest[c] for c in cands if c in latest]
+            if ages and max(ages) < cutoff:
+                stale.update(cands)
+    targets = uncovered | stale
+    if not targets:
         return []
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -243,7 +276,7 @@ def get_signal_gap_assets(conn, days: int) -> list[dict]:
             ORDER BY upper(a.canonical_symbol),
                      a.market_cap_rank NULLS LAST, a.asset_id
             """,
-            (sorted(uncovered),),
+            (sorted(targets),),
         )
         return cur.fetchall()
 
@@ -527,6 +560,10 @@ def main() -> int:
     parser.add_argument("--signal-days", type=int, default=7,
                         help="把近 N 天出现在主池/BRK 信号、且尚无衍生品行的 symbol "
                              "优先纳入采集（O1 缺口对齐），0=关闭，默认 7")
+    parser.add_argument("--refresh-hours", type=int, default=REFRESH_STALE_H,
+                        help="把近 N 天出现在信号、但最新衍生品行已超 N 小时的 symbol "
+                             "也并入采集（NEW-G 陈旧刷新组），0=关闭，默认 "
+                             f"{REFRESH_STALE_H}")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -553,7 +590,8 @@ def main() -> int:
                     workflow_name,
                     json.dumps(
                         {"limit": args.limit, "force": args.force,
-                         "delay": args.delay, "signal_days": args.signal_days},
+                         "delay": args.delay, "signal_days": args.signal_days,
+                         "refresh_hours": args.refresh_hours},
                         ensure_ascii=False,
                     ),
                     f"top{args.limit}" if args.limit > 0 else "all",
@@ -567,8 +605,9 @@ def main() -> int:
         ensure_table(conn)
 
         total_pending = get_total_pending(conn, force=args.force)
-        # O1：信号 universe 缺口（近 N 天主池/BRK 出现过、且从无衍生品行）优先纳入。
-        gap_assets = get_signal_gap_assets(conn, args.signal_days)
+        # O1：信号 universe 缺口（近 N 天主池/BRK 出现过、且从无衍生品行）+
+        # NEW-G 陈旧刷新组（有行但最新一行超 --refresh-hours 小时）优先纳入。
+        gap_assets = get_signal_gap_assets(conn, args.signal_days, args.refresh_hours)
 
         # 市值 top-N 待采（--limit 0 = 全量待采）
         ranked_limit = args.limit if args.limit > 0 else total_pending

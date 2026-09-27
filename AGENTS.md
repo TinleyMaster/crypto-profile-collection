@@ -1669,3 +1669,13 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **前向跟踪暂未接入任何前端/告警消费**：写入与回填是纯基建，无读取路径（避免在样本不足时被误读为业绩展示）。
 - **降级结论写 `thesis_id = 0` 的分支未实现**：`_build_fallback_thesis` 走的是读取侧实时拼装、**不落库**，故当前只有 `generate_research_thesis` 真实生成路径会写跟踪行（表结构与注释已预留 `thesis_id=0` 语义）。
 - **线上 runtime 复验待 Zeabur 重建后补**：「表存在」已直接对 prod 验证（见上「验证」段）；尚待确认的是**新生成结论会落行**（需在线上触发一次 `generate_research_thesis`，或等待真实用户/调度生成）。
+
+### 盘面告警邮件 4 封审计处置 NEW-G / NEW-F（审计_盘面告警邮件4封_2026-09-27，2026-09-27，本次提交）
+
+来源：`audit_盘面告警邮件4封_2026-09-27.md`（4 封 runtime 样本，生成于 `78010a6` 部署窗口之后）。按用户「按你的意思办」取 **A=NEW-G + B=NEW-F**（两者都便宜、且直接闭环本报告）；**NEW-C（费率年化 8h 硬假设）仍暂缓**（需先扩采集存 settlement-interval 才能按品种换算）。
+
+- **NEW-G（费率刷新饿死，比报告「MOVR 采集缺失」更准）**：报告猜测 MOVR 是「采集缺失或 NEW-B 护栏拦截」。prod 只读实测：`biz.asset_derivatives` **有** MOVR 行，但 `fetched_at=2026-08-27 22:08`（**陈旧 30 天**）⇒ 被 NEW-B 的 24h 护栏挡成 `n/a（未覆盖）`。根因在 `get_signal_gap_assets`：原判定「已覆盖 = 该符号**有任意一行**」，**不看行龄** ⇒ 有旧行的符号**永不进入采集队列**，无论跑多久都停在护栏之外。改名 ≠ 修好，故补「陈旧刷新组」：新增常量 `REFRESH_STALE_H = 12`（**必须显著小于 `scan_daemon.FUNDING_STALE_H=24`**；batch 每 6h 一轮 ⇒ 12h 保证最坏 12+6=18h < 24h），`get_signal_gap_assets(conn, days, refresh_hours=REFRESH_STALE_H)` 内新增「每符号 `MAX(fetched_at)`」查询与 `latest` 字典（keyed 含别名），把「任一别名已覆盖、但**最新一行也超 `refresh_hours`**」的符号并入 `stale` 组，`targets = uncovered | stale`；新增 CLI `--refresh-hours`（0=关闭）。`merge_pending` 的 `cap=max(limit, len(gap))` 保证并入后**不被 `--limit` 截断**。**prod 实测**：`refresh_hours=0 → 0 个；`refresh_hours=12 → **166 个刷新项**（`0G/4/ACE/ACU/AGT/AIN…`，MOVR 在内），且 166/166 均「有行且最新一行超 12h」。**调度无需改**：`scheduler.py` 的 `derivatives_batch` 未传该参数，走默认 12。
+- **NEW-F（图例不解释卡片内联 ℹ️）**：报告指出 4 封邮件图例全文 **ℹ️ 出现 0 次**，但卡片内联了两处 ℹ️（「纯技术面信号…缺基本面确认」/「共振方向无新鲜条目，未参与结论」）语义各异、读者无从区分「提示」与「风险警告」。核实后实为**三类**（比报告多一类：「CVD … 与做空结论相反」）。`_render_alert_email` 图例结尾补一段：`ℹ️ = 提示性说明（非风险警告，不改变信号），本封出现三类：①纯技术面… ②共振方向无新鲜条目… ③CVD…与做空结论相反…`。
+- **探针**：`test_derivatives_signal_gap.py` 新增【3d】NEW-G 源码事实 5 条 + 把【4】prod 段由「资产级」改为**符号级**（新增 `_sym_stats`，与 `get_signal_gap_assets` 同口径含别名）→ **43 断言 / 0 失败 / 0 跳过**；`test_scan_alert_remaining.py` 新增【NEW-F】3 条 → **26 → 29 断言 / 0 失败**（含生产库：库内陈旧符号 326 个 / funding_map 仅 189 键）。
+- **回归零失败**：`test_scan_alert_audit_20260926`(96/0)、`test_scan_alert_header_regime`(135/0)、`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_onchain_addr`(36/0)、`test_major_event_alert`(55/0)；`py_compile`（`phase_derivatives_batch.py` / `scan_daemon.py` / 两探针）通过。
+- **未做 / 边界（须留档）**：① **NEW-C 仍暂缓**（本报告用公开 API 实测把证据强化到「本批 5 币里 4 个是 4h 结算 ⇒ 年化低估 50%」，但修它须先扩采集存 `settlement_interval`，本轮未动，图例仍写「×3×365（8h 结算）」）；② NEW-D（LayerZero 双源转载未合并）P3 未做；③ **NEW-A 的降级分支（反向 BRK→medium）仍缺线上样本** —— 本批 4 封全为主池、全做多，零 BRK 卡片；P1-2 同理仅待 BRK 批次佐证；④ 刷新组并入只对**下轮采集**生效，存量陈旧行需等 batch 跑过一轮才被覆盖；⑤ 线上 runtime 复验须待 Zeabur 重建后执行（`push ≠ 线上生效`）。

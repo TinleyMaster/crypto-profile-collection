@@ -26,6 +26,28 @@ import requests
 DEFAULT_RPS = 5.0
 
 
+def classify_rpc_error(err: dict[str, Any] | None) -> str:
+    """把 JSON-RPC error 归类为可判定的失败类别（供调用方决定「永久跳过」还是「重试」）。
+
+    - ``invalid_mint``      ：-32602。该地址不是有效的 SPL token mint
+      （如 solana 原生 mint ``So1111…1111``、pump 曲线上未发币地址），**永久不可采**。
+    - ``too_many_accounts`` ：-32600。Helius 对超大持币数的 mint（USDC/USDT 等）
+      的 ``getTokenLargestAccounts`` 加了「账户数过多」护栏，免费档**无解**。
+    - 其余归 ``rpc_error``。
+    调用方（如 phase_chain_holder_scrape）据此对前两类直接判死、不再浪费时间重试/回退。
+    """
+    if not err:
+        return ""
+    code = err.get("code")
+    if code == -32602:
+        return "invalid_mint"
+    if code == -32600:
+        msg = (err.get("message") or "").lower()
+        if "too many accounts" in msg:
+            return "too_many_accounts"
+    return "rpc_error"
+
+
 class SolanaClient:
     """Solana 链上数据采集客户端。"""
 
@@ -43,6 +65,9 @@ class SolanaClient:
         self._supply_cache: dict[str, float] = {}
         # 转账签名分页游标（按 mint 隔离），配合 phase_chain_transfer_monitor 的多页循环
         self._sig_cursor: dict[str, str] = {}
+        # 最近一次 _json_rpc 的失败信息：{"kind","method","code","detail"}；成功时置 None。
+        # 供上层区分「永久不可采」（invalid_mint/too_many_accounts）与「可重试」（rate_limited/network）。
+        self.last_error: dict[str, Any] | None = None
 
     # ── 基础 RPC ────────────────────────────────────────────
     @property
@@ -64,6 +89,11 @@ class SolanaClient:
             try:
                 resp = self.session.post(self._rpc_url, json=payload, timeout=30)
                 if resp.status_code == 429:
+                    # 429 重试耗尽前不报错；耗尽后落到循环外，需留下可诊断的失败类别
+                    self.last_error = {
+                        "kind": "rate_limited", "method": method, "code": 429,
+                        "detail": "HTTP 429：RPC 限流，重试耗尽（公共 RPC 常见；配置 HELIUS_API_KEY 可缓解）",
+                    }
                     time.sleep(2 ** attempt)
                     continue
                 resp.raise_for_status()
@@ -72,11 +102,18 @@ class SolanaClient:
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                     continue
+                self.last_error = {"kind": "network", "method": method, "detail": str(e)[:200]}
                 print(f"  [solana] RPC {method} 失败: {e}")
                 return None
             if "error" in data:
-                print(f"  [solana] RPC {method} 错误: {data['error']}")
+                err = data.get("error") or {}
+                self.last_error = {
+                    "kind": classify_rpc_error(err), "method": method,
+                    "code": err.get("code"), "detail": str(err.get("message"))[:200],
+                }
+                print(f"  [solana] RPC {method} 错误: {err}")
                 return None
+            self.last_error = None
             return data.get("result")
         return None
 

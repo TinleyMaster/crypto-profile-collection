@@ -72,6 +72,10 @@ CHAIN_ALIASES = {
 # 荒诞结果，直接写入会污染 BTC 行。此类原生币（BTC/ETH）本就无 EVM 合约，应跳过。
 EXCLUDE_CONTRACTS = (
     "0x43fd9de06bb69ad771556e171f960a91c42d2955",  # BTC(asset_id=2) 错误映射的 ethereum 合约
+    # SOL(asset_id=1814) 映射到 solana **原生 mint**（43 个 1），它不是 SPL token，
+    # Helius getTokenSupply/getTokenLargestAccounts 恒返回 -32602 not a Token mint → 永不出快照。
+    # 不在此剔除会每天白占一个待采集名额，且永远落进 fail 统计。
+    "So11111111111111111111111111111111111111111",
 )
 
 
@@ -368,9 +372,11 @@ def main():
             print(f"  [{i}/{len(assets)}] asset_id={asset_id} {symbol} ... ",
                   end="", flush=True)
 
-            # Solana 默认优先 Helius（快）；若回退 Solscan(Playwright) 需 2~3 分钟，
-            # 故 solana 链单独放宽超时，避免被默认 30s 打断。
-            timeout = args.timeout if chain != "solana" else max(args.timeout, 300)
+            # Solana 仅走 Helius（秒级，已摘除 Playwright/Solscan 回退），但仍保留
+            # 一个较宽的兜底超时：Helius 偶发网络抖动时单次 RPC 会重试 3 次 ×30s。
+            # 原值 300s 是为 Solscan(Playwright) 留的，现下调至 120s —— 既容得下 RPC
+            # 重试，又避免个别卡死币白占 5 分钟（300 币全卡即 25h，曾被判 stuck）。
+            timeout = args.timeout if chain != "solana" else max(args.timeout, 120)
             ok, reason = run_single(asset_id, chain, timeout=timeout)
             if ok:
                 chain_success += 1

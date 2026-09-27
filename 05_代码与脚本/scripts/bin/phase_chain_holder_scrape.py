@@ -770,6 +770,12 @@ def _scrape_holders_solscan(chain: str, contract_address: str,
                             max_holders: int = 50) -> dict | None:
     """用 Playwright 爬取 Solscan 的 token 持仓分布（Solana SPL 代币）。
 
+    ⚠️ **当前未被调用**（2026-09-27）：solscan.io 已全面 Cloudflare 拦截，
+    本回退在 prod 逐币恒失败（「Solscan 未获取到数据」）却每币耗时 2~3 分钟，
+    单轮 300 币即 8~15 小时 —— 是链上任务被判 stuck/12h 超时的主因，故已从
+    ``scrape_holders`` 摘除。实现予以保留，待将来接入 Solscan Pro API（带 Key）
+    或换用可用的 Solana 持仓源后再复用，避免从零重写 Playwright 解析逻辑。
+
     Solscan 有 Cloudflare 防护（requests 直接访问返回 403），需用无头浏览器
     通过 JS 挑战后解析渲染后的 DOM。token 页面 Overview 提供 total_holders /
     current_supply / 集中度汇总，Holders 标签页提供持币列表表格。
@@ -957,32 +963,52 @@ def _print_holder_summary(result: dict) -> None:
         print(f"  Top 10 集中度: {result.get('top_10_pct')}%")
 
 
-def _scrape_holders_helius(chain: str, contract_address: str, max_holders: int = 20) -> dict | None:
+# 判定为「该 mint 永久不可采」的失败类别：不再重试、不再回退其他源（纯属浪费时间）。
+#   invalid_mint      —— 地址不是有效 SPL token mint（solana 原生 mint So1111…1111、pump 未发币地址）
+#   too_many_accounts —— Helius 对超大持币数 mint（USDC/USDT 等）加的护栏，免费档无解
+PERMANENT_MINT_ERRORS = frozenset({"invalid_mint", "too_many_accounts"})
+
+
+def _scrape_holders_helius(chain: str, contract_address: str,
+                           max_holders: int = 20) -> tuple[dict | None, str]:
     """通过 Helius RPC 获取 Solana 持仓（Top 20，API 级、快、规避 Playwright 超时）。
 
-    返回结构与 _scrape_holders_solscan 对齐（top_holders_json / top_N_pct 等）。
-    无 HELIUS_API_KEY 时回退公共 RPC（getTokenLargestAccounts 可能 429，仅兜底）。
+    返回 ``(结果, 失败类别)``：成功时类别为 ``""``；失败时类别取自
+    ``SolanaClient.last_error["kind"]``（invalid_mint / too_many_accounts /
+    rate_limited / network / rpc_error），无 RPC 错误但结果为空则记 ``empty``。
+    上层据此对「永久不可采」类别直接判死，避免无谓重试与回退。
+
+    注：此处把真因**显式打印**——2026-09-27 排查 solana 断更时，正是该函数在
+    ``top_holders_json`` 为空时静默 ``return None``（真因只散落在 RPC 层日志里、且
+    随子进程临时文件被删），导致误判为「prod 缺 HELIUS_API_KEY」。
     """
     try:
         from crypto_research.clients.solana_client import SolanaClient
         from crypto_research.config import get_settings
     except Exception as e:  # noqa: BLE001
         print(f"  [WARN] 无法加载 Solana 客户端: {e}")
-        return None
+        return None, "import_error"
+
+    settings = get_settings(require_database=False)
+    if not settings.helius_api_key:
+        print("  [WARN] 未配置 HELIUS_API_KEY：Solana 将走公共 RPC，"
+              "getTokenLargestAccounts 极易 429 → 快照持续失败。"
+              "请在环境变量中配置该 Key。")
+    client = SolanaClient(api_key=settings.helius_api_key)
     try:
-        settings = get_settings(require_database=False)
-        if not settings.helius_api_key:
-            print("  [WARN] 未配置 HELIUS_API_KEY：Solana 将走公共 RPC，"
-                  "getTokenLargestAccounts 极易 429 → 快照持续失败。"
-                  "请在环境变量中配置该 Key。")
-        client = SolanaClient(api_key=settings.helius_api_key)
         result = client.get_token_holders(_norm_addr(chain, contract_address), limit=max_holders)
-        if not result["top_holders_json"]:
-            return None
-        return result
     except Exception as e:  # noqa: BLE001
-        print(f"  [WARN] Helius 获取持仓失败: {e}")
-        return None
+        print(f"  [WARN] Helius 获取持仓异常: {e}")
+        return None, "exception"
+
+    if result["top_holders_json"]:
+        return result, ""
+
+    err = client.last_error or {}
+    kind = err.get("kind") or "empty"
+    detail = err.get("detail") or "RPC 正常但该 mint 无持币账户（合法空结果）"
+    print(f"  [solana] Helius 未取到持仓（{kind}）: {detail}")
+    return None, kind
 
 
 def scrape_holders(explorer_url: str, contract_address: str,
@@ -1011,25 +1037,22 @@ def scrape_holders(explorer_url: str, contract_address: str,
         "scraped_at": None,
     }
 
-    # Solana: 优先 Helius RPC（Top 20 持仓，API 级、快、无 Playwright 超时问题），
-    # 失败或拿不到数据再回退 Solscan (Playwright)。
+    # Solana: 仅走 Helius RPC（Top 20 持仓，API 级、秒级）。
+    # 2026-09-27 移除 Solscan(Playwright) 回退：solscan.io 已全面 Cloudflare 拦截，
+    # 回退 100% 失败（prod 日志逐币皆为「Solscan 未获取到数据」），却每币硬耗 2~3 分钟
+    # —— 单轮 300 币即 8~15 小时，正是链上任务被判「stuck: 90/240 分钟无新日志」或
+    # 「12h 超时」而被杀的根因。Helius 不可用时**快速失败**（当日告警）远优于悬挂数小时。
     if chain == "solana":
-        helius_result = _scrape_holders_helius(chain, contract_address, max_holders)
+        helius_result, helius_err = _scrape_holders_helius(chain, contract_address, max_holders)
         if helius_result and helius_result["top_holders_json"]:
             helius_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             print(f"  数据来源: Helius RPC ({chain})")
             _print_holder_summary(helius_result)
             return helius_result
-        print("  [WARN] Helius 未获取到数据，回退 Solscan (Playwright) ...")
-
-        print("  [INFO] 尝试 Solscan (Playwright) 获取持仓...")
-        sol_result = _scrape_holders_solscan(chain, contract_address, max_holders)
-        if sol_result and (sol_result["total_holders"] > 0 or sol_result["top_holders_json"]):
-            sol_result["scraped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            print(f"  数据来源: Solscan ({chain})")
-            _print_holder_summary(sol_result)
-            return sol_result
-        print("  [WARN] Solscan 未获取到数据")
+        if helius_err in PERMANENT_MINT_ERRORS:
+            print(f"  [WARN] Helius 判定该 mint 永久不可采（{helius_err}），跳过（不回退其他源）")
+        else:
+            print(f"  [WARN] Helius 获取持仓失败（{helius_err or 'unknown'}），本轮放弃该币")
         return None
 
     # Step 0: BSC/ETH 优先 Binplorer API（免费 JSON 接口，避免区块浏览器 HTML 被拦截）

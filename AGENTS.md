@@ -1867,7 +1867,12 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ④ **CMC supply 查询仍有并行副本**：`_fetch_cmc_supply_baseline()` 与 `_build_structured_metrics_inner`（L~8400）/另一处（L~3010）各自查一次 —— 本次只**消除了解锁 prompt 那份**（净减一处），另两处属其它函数内部语义，未动以免回归。
 - ⑤ **`_fetch_github_activity` / `_fetch_dl_tvl` 吞掉异常且不再 `_emit`**：原 inline 实现失败时会打日志，抽取后静默返回空（页面会显示「未采集」，无法区分「无映射」与「查询报错」）。
 - ⑥ **契约与原工单差异**：返回顶层**未含 `symbol`**（`get_asset_tokenomics` 无该字段，避免为此再加一次查询；消费端本来就有 symbol）；字段清单**新增 `tax_info` / `lp_lock_info`**（原工单未列，但两页本就在渲染，纳入后口径才一致）。
-- ⑦ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）：需验 `/api/research/11114/notebook` 的 `structured_metrics.fundamentals` 出现新增键（须触发一次结论生成）、`/api/research/11114/tokenomics` 与 `/api/assets/11114/tokenomics` 的 `meta.coverage` 一致、research 页不截断、index 页补齐通胀与来源。
+- ⑦ **runtime 复验已闭环（2026-09-27 17:53 线上生效，`4e984ad`）**：
+  - ✅ **页面侧**：`/api/assets/11114/tokenomics` 与 `/api/research/11114/tokenomics` 均返回同级 `meta`，`meta.coverage` **逐字段一致**（`present 4 / total 15`，missing 11 项），`data` 键数仍 24、**无 `meta` 渗入 `data`**（老前端零影响）；`meta.fields` 15 项信封齐备（supply 三件套 + allocation 记 `missing_reason=None`，其余 `not_collected`）。
+  - ✅ **prompt 侧**：触发一次结论生成（`POST /api/research/11114/thesis`，task `d0f438c3606b`）→ 任务日志出现 `基本面补充：allocation, circulating_supply, max_supply, total_supply`。**改造前 11114 的 4 个旧字段（买/卖税、LP 锁定、弃权）全为 NULL ⇒ 基本面块为空、该行根本不会出现**，故此行即「库里已有字段首次进入投研 prompt」的直接证据。
+  - ✅ **本地只读端到端**（prod DB，无写）：`get_asset_fundamentals(11114)` 与线上 `meta` 完全一致（4/15）；另取字段最丰富的 **DGB(1137) = 10/15**，`allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **六键齐全**，DCR(1231) 8/15，满足工单 7.1「六键有值时非空」。
+  - ⚠️ **工单 7.3-① 措辞不可达（须留档）**：`/api/research/<id>/notebook` 的 `structured_metrics` **读路径不重算 fundamentals** —— 它由 `_build_structured_metrics_from_snapshot → _build_structured_metrics_inner`（L3159/L3186）**实时重建**并**覆盖** `thesis["structured_metrics"]`（L3930），而该函数只产 `market / tokenomics / unlock / onchain / social / derivatives / pressure / data_freshness` **八段、从无 `fundamentals` 段**；`fundamentals` 也**不落 `biz.research_thesis`**（表内仅有 `thesis_json / key_metrics_json / risks_json / catalysts_json / sources_json / analysis_json`），它只作为 **LLM 输入的 `metrics_structured["fundamentals"]`** 存在。故 7.3-① 的原意（证明新字段进了结论生成）由上面的**任务日志行**达成，**未为此改 notebook 读路径**（避免超出「不改采集、页面 data 结构不变」的范围）。
+  - 未验：research / index 页的前端渲染（已由探针 8/9 分区源码护栏 + 模板 `node --check` 覆盖；浏览器人工目检未做）。
 
 ### 大盘早报「投资指导意义」重构 P0（2026-09-27，本次提交）
 

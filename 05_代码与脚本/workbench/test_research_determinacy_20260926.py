@@ -52,7 +52,10 @@ _HTML_SRC = open(
 print("\n[#5] 证据分级强制化（推断占比 >50% → conviction 锁 low）")
 
 _t = {
-    "thesis": [{"point": "a", "citations": [1]}, {"point": "b"}, {"point": "c"}],
+    "thesis": [
+        {"point": "a", "citations": [{"index": 1, "title": "信源", "url": "https://news.example/a"}]},
+        {"point": "b"}, {"point": "c"},
+    ],
     "risks": [],
     "dimensions": {},
 }
@@ -63,8 +66,10 @@ check(abs(_ev["inferred_ratio"] - 0.6667) < 1e-6, "#5 推断占比 = 2/3", _ev)
 check(_ev["conviction_locked"] is True, "#5 占比 >50% → 强制锁 low", _ev)
 
 _t2 = {
-    "thesis": [{"point": "a", "citations": [1]}, {"point": "b"}],
-    "risks": [{"risk": "r1", "citations": [2]}, {"risk": "r2"}],
+    "thesis": [{"point": "a", "citations": [{"index": 1, "url": "https://news.example/a"}]},
+               {"point": "b"}],
+    "risks": [{"risk": "r1", "citations": [{"index": 2, "url": "https://news.example/b"}]},
+              {"risk": "r2"}],
     "dimensions": {},
 }
 _ev2 = ds._compute_evidence_stats(_t2)
@@ -76,7 +81,8 @@ _t3 = {
     "thesis": [],
     "risks": [],
     "dimensions": {
-        "valuation": {"points": [{"point": "v1", "citations": [1]}]},
+        "valuation": {"points": [{"point": "v1",
+                                  "citations": [{"index": 1, "url": "https://news.example/a"}]}]},
         "supply": {"points": [{"point": "s1"}]},
     },
 }
@@ -87,6 +93,34 @@ _ev4 = ds._compute_evidence_stats({"thesis": [], "risks": [], "dimensions": {}})
 check(_ev4["total_points"] == 0 and _ev4["inferred_ratio"] is None,
       "#5 空论点不产生假锁", _ev4)
 check(_ev4["conviction_locked"] is False, "#5 空论点不锁 conviction", _ev4)
+
+# 🆕 P0（复验 FIX-DETERMINACY-002 §五，2026-09-27）：引用数组非空但 url 全空 = 内部数据类别，
+# 不得计入有效引用（原实现只看数组非空 → 28 条空 URL 引用把 coverage 撑到 1.0 / 91.3 actionable）。
+_t_weak = {
+    "thesis": [
+        {"point": "a", "citations": [{"index": 1, "title": "代币经济学数据", "url": "",
+                                      "internal_dataset": True}]},
+        {"point": "b", "citations": [{"index": 2, "title": "链上持仓数据", "url": ""}]},
+    ],
+    "risks": [], "dimensions": {},
+}
+_ev_weak = ds._compute_evidence_stats(_t_weak)
+check(_ev_weak["cited_points"] == 0 and _ev_weak["weak_cited_points"] == 2
+      and _ev_weak["inferred_points"] == 2,
+      "#P0 空 URL 引用不计有效（weak_cited_points 单列）", _ev_weak)
+check(_ev_weak["conviction_locked"] is True,
+      "#P0 空 URL 引用视同推断 → 锁 conviction low", _ev_weak)
+check(ds._has_valid_citation(_t_weak["thesis"][0]) is False
+      and ds._has_valid_citation(_t["thesis"][0]) is True,
+      "#P0 _has_valid_citation 仅认非空 URL", _t_weak["thesis"][0])
+_a_weak = ds._compute_determinism(_t_weak, {}, [])
+check(_a_weak["breakdown"]["coverage"] == 0.0
+      and _a_weak["score"] <= ds._ZERO_EVIDENCE_SCORE_CAP
+      and _a_weak["tier"] == "unusable",
+      "#P0 全空 URL 引用 → coverage=0 → 封顶 unusable（复现 PONS 虚假 91.3 的根因）",
+      (_a_weak["breakdown"], _a_weak["score"], _a_weak["tier"]))
+check(any("内部数据类别" in n for n in _a_weak["notes"]),
+      "#P0 weak_cited 提示写入 notes（可观测）", _a_weak["notes"])
 
 
 # ─────────────────────────────────────────────────────────
@@ -130,9 +164,21 @@ ds._sanitize_thesis_citations(_td4, _srcs)
 check(_td4["thesis"][0]["citations"] == [], "#6 越界索引被过滤", _td4)
 check(_td4["thesis"][0]["is_inferred"] is True, "#6 越界后标记推断", _td4)
 
-# 读取侧与生成侧口径一致：有据=False、无据=True（生成侧为嵌套函数，用源码结构断言）
-check('new_item["is_inferred"] = not cites' in _DB_SRC,
-      "#6 生成侧 is_inferred 双向设置")
+# 内部数据类别（无 URL）引用：保留条目供展示、标 internal_dataset，但视同推断
+# 用「旧存量行」形状（无 internal_dataset 标记，仅无 URL）验证标记的向后兼容
+_STRUCT = {"type": "structured", "title": "代币经济学数据", "url": None}
+_td5 = {"thesis": [{"point": "代币分配 40% 给生态基金", "citations": [1]}],
+        "risks": [], "dimensions": {}}
+ds._sanitize_thesis_citations(_td5, [_STRUCT])
+check(_td5["thesis"][0]["citations"][0].get("internal_dataset") is True,
+      "#P0 无 URL 来源（含旧存量行）→ 标 internal_dataset", _td5)
+check(_td5["thesis"][0]["is_inferred"] is True,
+      "#P0 仅引用内部数据类别（url 空）→ 视同推断", _td5)
+
+check('new_item["is_inferred"] = not _has_valid_citation(new_item)' in _DB_SRC,
+      "#6 生成侧/读取侧 is_inferred 均按「有效引用」（url 非空）判定")
+check('"internal_dataset": bool(s.get("internal_dataset"))' in _DB_SRC,
+      "#P0 引用回填 internal_dataset（不删条目，仅标记，兼容旧行）")
 check("sources_json" in _DB_SRC and "citation_sources" in _DB_SRC,
       "#6 生成时刻来源清单已持久化并透出 citation_sources")
 check('const sources = d.citation_sources || d.sources || [];' in _HTML_SRC,
@@ -367,7 +413,8 @@ check([t[0] for t in ds._DETERMINISM_TIERS] == [70.0, 40.0, 0.0],
 
 # 高质量：全有引用 + 新鲜 + 方向一致 + 资料完整 → 可下注
 _hi_thesis = {
-    "thesis": [{"point": "a", "citations": [1]}, {"point": "b", "citations": [2]}],
+    "thesis": [{"point": "a", "citations": [{"index": 1, "url": "https://news.example/a"}]},
+               {"point": "b", "citations": [{"index": 2, "url": "https://news.example/b"}]}],
     "risks": [], "dimensions": {},
 }
 _hi_sm = {

@@ -1490,3 +1490,32 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **D 组明令不在本单（未做）**：`mvrv_deep_over 91` 归高危板 P0-R1；`backtest_opportunities.py` 取价/skip 复核不做；`linker` 双副本归催化剂单。
 - **探针（全部零失败）**：`test_fdv_degeneracy_20260926`(14/0)、`test_signal_type_calibration_20260926`(**89 → 99**，新增 C1/C2 段 10 断言)、`test_research_determinacy_20260926`(**109 → 115**，新增 C3/C4 段 6 断言)、`test_highlight_determinacy_20260926`(72/0)、`test_macro_market_board_tier2`(36/36)、`test_macro_market_p1_upstream`(24/24)、`test_highlight_audit_20260924`(67/0)、`test_highlight_alert`(68/0)；`py_compile`（6 个改动 py）与 `node --check`（`index.html` 抽取 script + `{{...}}` 占位替换）、`yaml.safe_load(market_rules.yaml)` 全通过。
 - **未做 / 边界**：① 工单 A1②/A2/A4 未重做（已由 `5ef3f02` 落地）；② A2 `kind` 保留 `fdv_degenerate`（工单 `degenerate_fdv` 同义）；③ B1/B2 已授权执行完成（见上）；④ 线上 runtime 复验（重拉 notebook / market-history / overview）须待 Zeabur 重建后执行（`push ≠ 线上生效`）；⑤ A3 验收的 `risk_level != low` 因实时数据漂移未达（score 28.24，详见上）。
+
+### 🔴 P0 证据覆盖率虚高（复验 `核验_FIX-DETERMINACY-002_AC组_95d6bfc_2026-09-27.md` §五，2026-09-27，本次提交）
+
+**现象（复验暴露，比修复前更危险）**：B1 重算后 `/api/research/11114/notebook` 的 `thesis.analysis` 从诚实的 `39.9 / unusable`（27 论点 0 引用）跳到 **`91.3 / actionable`** —— `breakdown.coverage = 1.0`、`evidence = {total_points:22, cited_points:22, inferred_ratio:0.0}`。但 **28 条引用 URL 全为空**（形状 `{"index":1,"title":"代币经济学数据","url":""}`），指向的只是内部数据类别名；其中「链上持仓数据」在 missing 清单里是 **MISS（count=0）**；而 9 条真实来源（官网×3 / docs / twitter×2 / blockscout / defillama×2）**零引用**。数据完备度未变（仍 7/12 缺），分数翻倍 ⇒ 用形式合规冒充实质证据。
+
+**根因**：`db_stats._compute_evidence_stats` 原实现 `cited = sum(1 for p in points if (p["item"].get("citations") or []))` —— **只判 `citations` 数组非空、完全不校验 `url`**。于是 `cited 22/22 → coverage 1.0 → 不触发 39.9 封顶 → 0.35+0.25+0.25+0.0625 ≈ 91.3 → actionable`。
+
+**修法（§五 四条，逐条落地）**：
+1. **有效引用口径收紧（本轮改，`db_stats.py`）**：新增 `_citation_urls(item)`（只收 `url` 非空的引用）与 `_has_valid_citation(item)`；`_compute_evidence_stats` 改为「**≥1 条引用带非空 URL 才计 `cited_points`**」，新增 **`weak_cited_points`**（有 citations 但 url 全空）单列并透出；`inferred_points = total − cited_points`（弱引用同按推断计）。
+2. **内部数据类别标记（不删条目，仅标记）**：`_build_research_sources._add_structured` 新增 `"internal_dataset": True`（结构化源 `url=None`）；读/生成两侧 `_sanitize*_citations` 回填引用时写 `internal_dataset = bool(s.get("internal_dataset")) or not str(s.get("url") or "").strip()` —— **后半段兼容旧存量行**（`sources_json` 无该标记，仅凭「无 URL」判定）。**为何不删条目**：`citation_sources` 是**按位置索引**解引用的，删条目会让所有 `citation.index` 错位。
+3. **`coverage` / `conviction_locked` / 39.9 封顶改用有效引用率**：`_compute_determinism` 的 `coverage = cited_points / total_points` 与 `inferred_ratio` 现均基于有效引用（无需改公式，口径随 ① 自动收紧）；`coverage == 0` 仍触发 `_ZERO_EVIDENCE_SCORE_CAP = 39.9`；新增 notes 文案「N 个论点仅引用内部数据类别（无 URL，不可核验），不计入有效引用」。
+4. **prompt 规则 8 补条（生成侧）**：明确要求 citations 必须指向**带 URL 的可核验来源**；**严禁**引用「代币经济学数据 / 链上持仓数据 / 社交热度数据 / 代币解锁数据 / 合约地址」等内部数据类别；`missing` 清单中的缺失数据集禁止出现在 citations；并写明「引用数组非空 ≠ 有据，系统按引用 URL 非空判有效引用」。
+5. **`is_inferred` 口径同步（读/生成两侧）**：原 `new_item["is_inferred"] = not cites` 改为 `= not _has_valid_citation(new_item)` —— 仅引用内部数据类别的论点不再被标成「有据」（否则前端徽标与评分卡自相矛盾）。
+
+**prod 只读验收（2026-09-27，`get_or_create_research_notebook(11114, force_refresh=False)`，未写库）**：`score = 39.9`、`tier = unusable / 不可用于决策`、`breakdown.coverage = 0.0`（freshness 1.0 / consistency 1.0 / sample 0.4167 未变）、`evidence = {total_points:22, cited_points:0, weak_cited_points:22, inferred_points:22, inferred_ratio:1.0, conviction_locked:true}`、`conviction = low`；notes 含「全部论点为推断、无一条可核验引用 → 封顶 39.9」与「22 个论点仅引用内部数据类别…」；实测 citations 28 条、**url 非空 0 条**。**⚠️ 注意**：analysis 是**读取时实时重算**（`db_stats` 读路径 `_compute_determinism`），旧存量行的 `analysis_json` 无需重算即已修正；无需 LLM 重新生成。`internal_dataset` 回填对旧存量行的生效由探针断言（`_td5` 用无标记的旧行形状）覆盖。
+
+**探针（`test_research_determinacy_20260926.py`，115 → 123 断言，0 失败）**：
+- **fixture 口径同步**：原 #5/#14 fixture 用**裸整数** citations（`[1]`）期望 `cited_points==1` —— 新语义下裸数字无 url 会变 0，已全部改为带 url 的 `{"index","url"}` 形状（`_t` / `_t2` / `_t3` / `_hi_thesis`）。
+- **新增 #P0 断言（8 条）**：`_t_weak`（引用了「代币经济学数据 / 链上持仓数据」但 url 全空）→ `cited_points==0` ∧ `weak_cited_points==2` ∧ `conviction_locked==True`；`_compute_determinism(_t_weak, {}, [])` → `coverage==0` ∧ `score ≤ 39.9` ∧ `tier=="unusable"`（**复现 PONS 虚假 91.3 的根因**）∧ notes 含「内部数据类别」；`_sanitize_thesis_citations` 对**旧行形状**（`type=structured, url=None`，无 `internal_dataset` 键）→ 引用条目回填 `internal_dataset is True` 且 `is_inferred is True`。
+- **源码结构断言更新**：`'new_item["is_inferred"] = not cites'` → `'new_item["is_inferred"] = not _has_valid_citation(new_item)'`；新增 `'"internal_dataset": bool(s.get("internal_dataset"))'`。
+
+**遗留清单本轮结论（复验报告 §六）**：
+- **#2（P1）TVL 未进结论 ❌ 判为数据缺口，非代码**：`core.asset_source_map` 中 11114 仅 `cg`/`cmc` 映射、**无 DeFiLlama 映射**；且 `src_dl.protocol_list` 的 `Pons V1/V2`（Launchpad）`tvl` **本身 NULL** ⇒ `structured_metrics.fundamentals` 无 `defillama_tvl`，与 prompt 规则 14「无则写未采集」一致。**动作：不修代码**（要有 TVL 须先补 `asset_source_map` 的 DL 映射与协议匹配）。
+- **#3（P1）竞品已接入生成 ✅**：B1 重算日志「DeFi 赛道 2 个对标（sector_only）」、valuation 论点含对标/估值；**未逐句核正文是否出现同量级横向对比表述**（复验方标注的未验项），本单不改码。
+- **#4（P2）A3 门槛边界**：`28.24 < 30`（medium）差 1.76，且 28.24 几乎全由 ATH 回撤单分量贡献 ⇒ 回撤再深约 2pp 即跨档。**本单未加断言**（复验建议项，属独立小工单），仅在 AGENTS 留档：`_compute_pressure_score` 阈值 `≥60 high / ≥30 medium / 其余 low`。
+- **#5（P2）B2 已完成 ✅**：`unlock.age_hours ≈ 0.035h < 168`（见上文 B 组）。
+- **#1（🔴 P0）证据覆盖率虚高 ✅ 本轮处置**（见上）。
+
+**未做 / 边界**：① 未改前端（`research.html` 已按 `is_inferred` 渲染「(推断)」徽标，口径修正后自动正确；`internal_dataset` 仅作数据标记，未新增 UI 文案）；② 未对 PONS 做 LLM 重新生成（读路径实时重算已足够验证，且避免无谓消耗）；③ #2 TVL / #4 门槛边界按上表判为不改码；④ 线上 runtime 复验须待 Zeabur 重建后执行。

@@ -2598,6 +2598,9 @@ def _build_research_sources(snapshot: dict) -> list[dict]:
             "type": "structured",
             "title": label,
             "url": None,
+            # 复验 FIX-DETERMINACY-002 §五（P0）：内部数据类别（无 URL，不可核验）显式标记，
+            # 只可用于展示，不得计入「有效引用」——否则会出现 28 条空 URL 引用把覆盖率撑到 1.0。
+            "internal_dataset": True,
             "snippet": json.dumps(val, ensure_ascii=False, default=str),
         })
 
@@ -4186,6 +4189,11 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",
                     "url": s.get("url") or "",
+                    # 复验 FIX-DETERMINACY-002 §五（P0）：内部数据类别无 URL，仅供展示，
+                    # 不计入有效引用（sources 按位置索引，只能标记不能删条目）。
+                    # 兼容旧存量行（sources_json 无该标记）：无 URL 即内部数据类别。
+                    "internal_dataset": bool(s.get("internal_dataset"))
+                    or not str(s.get("url") or "").strip(),
                 })
             text = item.get("point") or item.get("risk") or ""
             # 审计 §4.2 #6：禁止「官网首页」作为数值类结论的唯一引用——
@@ -4194,10 +4202,9 @@ def _sanitize_thesis_citations(thesis_data: dict | None, sources: list[dict]) ->
                 cites = []
             new_item = dict(item)
             new_item["citations"] = cites
-            if not cites:
-                new_item["is_inferred"] = True
-            else:
-                new_item["is_inferred"] = False
+            # 复验 FIX-DETERMINACY-002 §五（P0）：有据 = 至少一条引用带可核验 URL；
+            # 仅引用内部数据类别（url 全空）视同推断，与 _compute_evidence_stats 同口径。
+            new_item["is_inferred"] = not _has_valid_citation(new_item)
             cleaned.append(new_item)
         return cleaned
 
@@ -4266,19 +4273,54 @@ def _iter_thesis_points(thesis_data: dict) -> list[dict]:
     return out
 
 
+def _citation_urls(item: dict) -> list[str]:
+    """提取论点引用中「可核验」的 URL（复验 FIX-DETERMINACY-002 §五 P0）。
+
+    读取/生成两侧的 _sanitize*_citations 已把引用补成 {index,title,url}；此处只认 url 非空：
+    - 旧格式裸数字索引（无 url）
+    - 指向内部数据类别（代币经济学数据 / 链上持仓数据 / 代币解锁数据 / 合约地址）的引用
+    均不计入有效引用 —— 「citations 数组非空」本身不构成证据。
+    """
+    urls = []
+    for c in item.get("citations") or []:
+        if isinstance(c, dict):
+            u = str(c.get("url") or "").strip()
+            if u:
+                urls.append(u)
+    return urls
+
+
+def _has_valid_citation(item: dict) -> bool:
+    """论点是否至少有一条带 URL 的可核验引用（同 _compute_evidence_stats 口径）。"""
+    return bool(_citation_urls(item))
+
+
 def _compute_evidence_stats(thesis_data: dict) -> dict:
-    """证据分级统计（审计 §4.2 #5）：总论点 / 有引用 / 推断 / 推断占比。
+    """证据分级统计（审计 §4.2 #5）：总论点 / 有效引用 / 弱引用 / 推断 / 推断占比。
 
     inferred_ratio > 50% 时 conviction 强制锁 low 且不可上调。
+
+    复验 FIX-DETERMINACY-002 §五（P0）：原实现只判 citations 数组非空，导致 28 条空 URL 的
+    内部数据类别引用把 coverage 撑到 1.0（PONS 91.3/actionable）。现仅「≥1 条引用带非空 URL」
+    计为 cited，其余有引用但全空的记为 weak_cited_points，同样按推断处理。
     """
     points = _iter_thesis_points(thesis_data)
     total = len(points)
-    cited = sum(1 for p in points if (p["item"].get("citations") or []))
+    cited = 0
+    weak_cited = 0
+    for p in points:
+        if not (p["item"].get("citations") or []):
+            continue
+        if _has_valid_citation(p["item"]):
+            cited += 1
+        else:
+            weak_cited += 1
     if total == 0:
-        return {"total_points": 0, "cited_points": 0, "inferred_points": 0,
-                "inferred_ratio": None, "conviction_locked": False}
+        return {"total_points": 0, "cited_points": 0, "weak_cited_points": 0,
+                "inferred_points": 0, "inferred_ratio": None, "conviction_locked": False}
     ratio = round((total - cited) / total, 4)
     return {"total_points": total, "cited_points": cited,
+            "weak_cited_points": weak_cited,
             "inferred_points": total - cited, "inferred_ratio": ratio,
             "conviction_locked": ratio > 0.5}
 
@@ -4381,6 +4423,12 @@ def _compute_determinism(thesis_data: dict, structured_metrics: dict,
         notes = [f"全部论点为推断、无一条可核验引用 → 确定性分封顶 {_ZERO_EVIDENCE_SCORE_CAP}（不可用于决策）"]
     else:
         notes = []
+    # 复验 FIX-DETERMINACY-002 §五（P0）：有 citations 但 url 全空（内部数据类别）单列提示，
+    # 避免「形式上有引用」被误读为有据。
+    if ev.get("weak_cited_points"):
+        notes.append(
+            f"{ev['weak_cited_points']} 个论点仅引用内部数据类别（无 URL，不可核验），不计入有效引用"
+        )
     return {
         "score": score,
         "tier": tier_code,
@@ -8106,6 +8154,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         "   - 英文/代码场景用 B=十亿、M=百万、K=千；中文场景统一用「亿」「千万」「百万」，禁止把 2.48B 写成「约2.48亿」（2.48B=24.8亿）。\n"
         "   - 引用结构化指标 market.market_cap_usd / market.fdv_usd 时，按实际数值换算，不得篡改数量级。\n"
         "8. 论点必须基于资料库事实，并在 citations 中用 [编号] 标注依据（编号对应资料库条目）。\n"
+"   - citations 必须指向【带 URL 的可核验来源】（官网/docs/公告/链上浏览器/数据平台等外部链接）。\n"
+"   - 严禁引用「代币经济学数据」「链上持仓数据」「社交热度数据」「代币解锁数据」「合约地址」"
+"等内部数据类别：它们没有 URL、不可核验，系统不计为有效引用（复验 FIX-DETERMINACY-002 §五）。\n"
+"   - missing 清单中的缺失数据集禁止出现在 citations 中；没有外部来源支撑的论点必须写成推断，"
+"不得硬凑引用编号——「引用数组非空」不等于有据，系统按「引用 URL 非空」判定有效引用。\n"
         "9. 衍生品数据规则：\n"
         "   - 若结构化指标 derivatives.total_oi_usd 存在且 > 0，sentiment 维度必须提及衍生品 OI 数据，\n"
         "     禁止写「缺乏衍生品数据」「衍生品维度缺失」等类似表述。\n"
@@ -8265,6 +8318,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     "index": idx,
                     "title": s.get("title") or s.get("url") or "",
                     "url": s.get("url") or "",
+                    # 复验 FIX-DETERMINACY-002 §五（P0）：内部数据类别无 URL，仅供展示，
+                    # 不计入有效引用（sources 按位置索引，只能标记不能删条目）。
+                    # 兼容旧存量行（sources_json 无该标记）：无 URL 即内部数据类别。
+                    "internal_dataset": bool(s.get("internal_dataset"))
+                    or not str(s.get("url") or "").strip(),
                 })
             text = item.get("point") or item.get("risk") or ""
             # 审计 §4.2 #6：禁止「官网首页」作为数值类结论的唯一引用——
@@ -8274,7 +8332,9 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
             new_item = dict(item)
             new_item["citations"] = cites
             # 审计 §4.2 #5：有据=非推断，无据=推断（与读取侧 _sanitize_thesis_citations 同口径）
-            new_item["is_inferred"] = not cites
+            # 复验 FIX-DETERMINACY-002 §五（P0）：口径收紧为「至少一条引用带可核验 URL」，
+            # 仅引用内部数据类别（url 全空）视同推断。
+            new_item["is_inferred"] = not _has_valid_citation(new_item)
             cleaned.append(new_item)
         return cleaned
 

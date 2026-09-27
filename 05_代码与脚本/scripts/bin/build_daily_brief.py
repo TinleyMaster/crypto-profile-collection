@@ -153,6 +153,37 @@ def _save_brief_snapshot(brief_date: str, brief: dict) -> None:
         print(f"[brief_snapshot] 落库失败: {e}")
 
 
+def _check_snapshot_gap(days: int = 7) -> list[str]:
+    """W-11：校验最近 N 天 biz.market_overview_snapshot 是否连续，返回缺失日期列表。
+
+    缺口会让次日 `load_snapshot(yesterday)` 取不到基准 → `DIFF` 为空（早报「没有与
+    昨日变化」的真正根因）。此处只检测 + 告警 + 记 M9_degraded，**不做历史全量回填**。
+    """
+    missing: list[str] = []
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        today = date.today()
+        want = [(today - timedelta(days=i)).isoformat() for i in range(1, days + 1)]
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT snap_date FROM biz.market_overview_snapshot WHERE snap_date >= %s",
+                    ((today - timedelta(days=days)).isoformat(),),
+                )
+                have = {str(r[0]) for r in cur.fetchall()}
+        missing = [d for d in want if d not in have]
+        if missing:
+            print(f"[snapshot_gap] ⚠️ 最近 {days} 天缺 {len(missing)} 天：{', '.join(missing)}")
+        else:
+            print(f"[snapshot_gap] ✓ 最近 {days} 天快照连续")
+    except Exception as e:
+        print(f"[snapshot_gap] ⚠️ 检测失败: {e}")
+    return missing
+
+
 def main() -> dict:
     stale = _check_data_freshness()
     today = get_market_overview(force_refresh="1")  # 快照必须最新，绕过 CACHE_TTL
@@ -161,6 +192,15 @@ def main() -> dict:
     brief = generate_morning_brief(today, yesterday)
     if stale:
         brief.setdefault("M9_degraded", []).extend(stale)
+    # W-11-1：昨日基准缺失 → DIFF 显式标注 no_baseline（不静默留空，渲染层据此提示）
+    if not brief.get("DIFF"):
+        brief["DIFF"] = {"status": "no_baseline", "baseline_date": y_date}
+        print(f"[brief] 无昨日基准（{y_date} 快照缺失），本期无变化对比")
+    # W-11-2：快照缺日检测（最近 7 天）
+    _gap = _check_snapshot_gap(7)
+    if _gap:
+        brief.setdefault("M9_degraded", []).append(
+            f"market_overview_snapshot 缺日（最近7天缺 {len(_gap)} 天：{', '.join(_gap)}）")
     save_snapshot(date.today().isoformat(), today)  # 落库供明日 diff
     _save_brief_snapshot(date.today().isoformat(), brief)  # W-06：完整 brief 落库（P2 前置）
 

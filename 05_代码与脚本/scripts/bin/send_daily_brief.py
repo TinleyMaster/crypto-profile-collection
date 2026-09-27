@@ -931,6 +931,14 @@ def render_brief_html(brief: dict) -> str:
     btc_chg_str, btc_chg_color = _fmt_pct(btc_change)
     fear_greed = m0.get("fear_greed")
     fg_label = m0.get("fear_greed_label", "")
+    # W-09：恐贪值旁强制显示 as-of 日期（SSOT = biz.market_snapshot_daily.fear_greed_value）
+    fg_as_of = m0.get("fear_greed_as_of")
+    fg_note = m0.get("fear_greed_note")
+    _fg_label_html = f"{fg_label or '—'}" + (f" · 截至 {fg_as_of}" if fg_as_of else "")
+    _fg_note_html = (
+        f'<div style="font-size:9px;color:#b45309;margin-top:1px">{fg_note}</div>'
+        if fg_note else ""
+    )
     phase = m0.get("btc_cycle_phase", "—")
     eth_price = m0.get("eth_price")
     eth_change = m0.get("eth_change_24h_pct")
@@ -956,6 +964,15 @@ def render_brief_html(brief: dict) -> str:
     # P2-C：大盘脉搏数据时点（此前只有日期，与爆仓/ETF/赛道/解锁的标注口径不一致）
     _pulse_as_of = _fmt_data_as_of(m0.get("data_as_of"))
     _pulse_as_of_html = f" · 数据截至 {_pulse_as_of}（北京时间）" if _pulse_as_of else ""
+
+    # W-11：昨日基准缺失时显式提示（DIFF=no_baseline），不在「无变化」上留白
+    _diff_note_html = ""
+    if isinstance(diff, dict) and diff.get("status") == "no_baseline":
+        _bd = diff.get("baseline_date") or "昨日"
+        _diff_note_html = (
+            f'<div style="font-size:10px;color:#b45309;margin-top:6px">'
+            f'⚠️ 无昨日基准（{_bd} 快照缺失），本期无变化对比</div>'
+        )
 
     html_parts.append(f"""
       <!-- 模块1：大盘脉搏 -->
@@ -989,7 +1006,8 @@ def render_brief_html(brief: dict) -> str:
           <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
             <div style="font-size:10px;color:#64748b;margin-bottom:2px">恐贪指数</div>
             <div style="font-size:17px;font-weight:700;color:{_fear_greed_color(fear_greed)}">{fear_greed if fear_greed is not None else 'N/A'}</div>
-            <div style="font-size:10px;color:#64748b;margin-top:1px">{fg_label or '—'}</div>
+            <div style="font-size:10px;color:#64748b;margin-top:1px">{_fg_label_html}</div>
+            {_fg_note_html}
           </div>
         </div>
 
@@ -1011,6 +1029,7 @@ def render_brief_html(brief: dict) -> str:
 
         <!-- P0-D：24h 爆仓概况（无数据时 liq_row 为空串，整行不出现） -->
         {liq_row}
+        {_diff_note_html}
       </div>
     """)
 
@@ -1098,6 +1117,26 @@ def render_brief_html(brief: dict) -> str:
 
     # ETF 资金流
     etf_assets = etf_flow.get("assets") or []
+    # W-10：ETF 是「交易日更」数据，最新 flow_date 可能是前一交易日（周末/节假日季节性停更）。
+    # 数值必须显式标注为「上一交易日(MM-DD)」，不得用无日期限定的「单日」措辞；
+    # 若最新 flow_date 距今日 > 3 天 → 该卡降级为「数据不可用」并进 M9_degraded。
+    _etf_as_of = etf_flow.get("latest_date")
+    try:
+        _etf_lag = (date.today() - date.fromisoformat(str(_etf_as_of)[:10])).days
+    except (ValueError, TypeError):
+        _etf_lag = None
+    _etf_md = str(_etf_as_of)[5:10] if _etf_as_of else "—"
+    if etf_flow.get("status") == "ok" and etf_assets and _etf_lag is not None and _etf_lag > 3:
+        brief.setdefault("M9_degraded", []).append(
+            f"ETF资金流(最新 {_etf_as_of}，滞后 {_etf_lag} 天 > 3 天，数值已隐藏)")
+        html_parts.append(f"""
+          <!-- ETF 子模块（W-10 降级：flow_date 滞后 > 3 天） -->
+          <div style="background:linear-gradient(135deg,#f0f9ff,#e0f2fe);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:4px">📈 ETF 资金流</div>
+            <div style="font-size:11px;color:#dc2626">数据不可用（最新交易日 {_etf_as_of or '—'}，滞后 {_etf_lag} 天 &gt; 3 天，数值已隐藏）</div>
+          </div>
+        """)
+        etf_assets = []
     if etf_flow.get("status") == "ok" and etf_assets:
         # 从 assets 里提取 BTC、ETH 和总净流入。
         # 审计 2026-09-24 P1-1：原先「合计净流入」把全部资产（含 SOL/XRP/…）加总，
@@ -1155,10 +1194,22 @@ def render_brief_html(brief: dict) -> str:
         breakdown = (f"分项：BTC {btc_net_str} + ETH {eth_net_str} + 其他 {others_net_str}"
                      + (f"（{others_detail}）" if others_detail else ""))
 
+        # W-10：单日净流入强制标注「上一交易日(MM-DD)」（不得用无日期限定的「单日」）
+        _latest_by_sym = {}
+        for a in etf_assets:
+            s = (a.get("symbol") or "").upper()
+            if a.get("latest_flow_usd") is not None:
+                _latest_by_sym[s] = float(a.get("latest_flow_usd") or 0)
+        _l_total_s, _ = _fmt_flow(sum(_latest_by_sym.values()))
+        _l_btc_s, _ = _fmt_flow(_latest_by_sym.get("BTC"))
+        _l_eth_s, _ = _fmt_flow(_latest_by_sym.get("ETH"))
+        _prev_day_line = (f"上一交易日({_etf_md}) 净流入：BTC {_l_btc_s} · "
+                          f"ETH {_l_eth_s} · 合计 {_l_total_s}")
+
         html_parts.append(f"""
           <!-- ETF 子模块 -->
           <div style="background:linear-gradient(135deg,#f0f9ff,#e0f2fe);border-radius:8px;padding:10px 12px;margin-bottom:8px">
-            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（7日累计 · 数据截至 {etf_flow.get('latest_date') or '—'}）</div>
+            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（近 7 日累计 · 上一交易日({_etf_md})）</div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
               <div style="text-align:center">
                 <div style="font-size:10px;color:#64748b">BTC ETF</div>
@@ -1173,7 +1224,8 @@ def render_brief_html(brief: dict) -> str:
                 <div style="font-size:14px;font-weight:700;color:{total_net_color}">{total_net_str}</div>
               </div>
             </div>
-            <div style="font-size:9.5px;color:#64748b;margin-top:6px;line-height:1.5">{breakdown}</div>
+            <div style="font-size:9.5px;color:#0369a1;margin-top:6px;line-height:1.5;font-weight:600">{_prev_day_line}</div>
+            <div style="font-size:9.5px;color:#64748b;margin-top:3px;line-height:1.5">{breakdown}</div>
           </div>
         """)
 

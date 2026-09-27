@@ -6389,7 +6389,7 @@ def score_opportunities(overview: dict) -> dict:
                      "event_strength": es,
                      "signal_type": "etf_flow",
                      "key_metric": f"ETF 净流入 +${etf_btc:.0f}M",
-                     "trigger_logic": f"BTC ETF 单日净流入 ${etf_btc:.0f}M（{etf_date}）→ 机构资金持续加仓",
+                     "trigger_logic": f"BTC ETF 上一交易日净流入 ${etf_btc:.0f}M（{etf_date}）→ 机构资金持续加仓",
                      "action_hint": "机构入场确认，回踩可加仓",
                      "invalidation": "ETF 连续 3 日净流出 或 BTC 破位",
                      "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
@@ -6409,7 +6409,7 @@ def score_opportunities(overview: dict) -> dict:
                      "event_strength": es,
                      "signal_type": "etf_flow",
                      "key_metric": f"ETF 净流出 ${etf_btc:.0f}M",
-                     "trigger_logic": f"BTC ETF 单日净流出 ${etf_btc:.0f}M（{etf_date}）→ 机构资金离场",
+                     "trigger_logic": f"BTC ETF 上一交易日净流出 ${etf_btc:.0f}M（{etf_date}）→ 机构资金离场",
                      "action_hint": "机构抛压显现，降低仓位",
                      "invalidation": "ETF 连续 3 日净流入 或 BTC 放量上攻",
                      "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
@@ -6466,7 +6466,7 @@ def score_opportunities(overview: dict) -> dict:
                  "event_strength": es,
                  "signal_type": "etf_flow",
                  "key_metric": f"ETF 净流入 {flow_label}",
-                 "trigger_logic": f"{sym} ETF 单日净流入 {flow_label}（{item.get('date', etf_date)}）→ 机构资金{'加仓' if direction=='long' else '减仓'}",
+                 "trigger_logic": f"{sym} ETF 上一交易日净流入 {flow_label}（{item.get('date', etf_date)}）→ 机构资金{'加仓' if direction=='long' else '减仓'}",
                  "action_hint": action,
                  "invalidation": invalid,
                  "related_dims": ["机构ETF资金流（cryptoetf.today）", "P1 机构行为"],
@@ -7055,6 +7055,68 @@ def _check_price_consistency(brief: dict) -> str | None:
     return None
 
 
+# ── W-09：恐贪指数单一事实源（SSOT）─────────────────────────────────────────
+# 三套数值并存（实况 2026-09-27）：
+#   biz.fear_greed_daily        73 @09-25（fetched_at 后停更）
+#   biz.market_snapshot_daily   74 @09-26（当日截面）← 定为 SSOT
+#   payload.emotion_subscore    70 @09-27（邮件曾直接取这个）
+# 定 SSOT = market_snapshot_daily.fear_greed_value（当日截面语义，与情绪子分同快照链路）。
+FEAR_GREED_SSOT = "biz.market_snapshot_daily.fear_greed_value"
+
+
+def _fear_greed_ssot_verdict(ssot_value, ssot_date, ssot_label,
+                             daily_value=None, daily_date=None) -> dict:
+    """纯函数：按 SSOT 裁决恐贪值（不连库，便于注入测试）。
+
+    - SSOT 缺失 → 返回 {}（渲染层回退旧字段，不伪造）；
+    - `fear_greed_daily`（日线源）与 SSOT 不一致时**以 SSOT 为准**，并标注「日线源滞后」。
+    """
+    if ssot_value is None:
+        return {}
+    out = {
+        "ssot": FEAR_GREED_SSOT,
+        "value": int(ssot_value),
+        "as_of": str(ssot_date),
+        "label": ssot_label,
+        "source": "market_snapshot_daily",
+    }
+    if daily_value is not None:
+        out["daily_line"] = {"value": int(daily_value), "as_of": str(daily_date)}
+        if int(daily_value) != int(ssot_value):
+            out["note"] = (f"日线源滞后（{daily_date} 日线={int(daily_value)}，"
+                           f"已按 SSOT {int(ssot_value)} 取值）")
+    return out
+
+
+def _resolve_fear_greed_ssot() -> dict:
+    """读库取 SSOT（market_snapshot_daily）+ 日线源（fear_greed_daily）后裁决。
+
+    读取失败/表为空 → 返回 {}（不阻断早报，渲染层回退旧字段）。
+    """
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT snapshot_date, fear_greed_value, fear_greed_class "
+                    "FROM biz.market_snapshot_daily WHERE fear_greed_value IS NOT NULL "
+                    "ORDER BY snapshot_date DESC LIMIT 1")
+                s = cur.fetchone()
+                cur.execute(
+                    "SELECT metric_date, value FROM biz.fear_greed_daily "
+                    "WHERE value IS NOT NULL ORDER BY metric_date DESC LIMIT 1")
+                d = cur.fetchone()
+        return _fear_greed_ssot_verdict(
+            s[1] if s else None, s[0] if s else None, s[2] if s else None,
+            d[1] if d else None, d[0] if d else None)
+    except Exception as e:
+        print(f"[morning_brief] 恐贪 SSOT 读取失败: {e}")
+        return {}
+
+
 def _build_tldr(today: dict, opps: list, highlights: list | None = None,
                  risk_signals: list | None = None) -> dict:
     """M0 头部：从 overview 抽取关键指标 + 一句话摘要 + 多空倾向。
@@ -7151,6 +7213,25 @@ def _build_tldr(today: dict, opps: list, highlights: list | None = None,
             f"机会 {high_summary}；风险 {risk_summary}"
         ),
     }
+
+
+def _apply_fear_greed_ssot(result: dict) -> dict:
+    """W-09：把 SSOT（market_snapshot_daily）裁决结果合并进 M0_tldr。
+
+    - `fear_greed` 一律以 SSOT 为准（覆盖 live CMC / emotion_subscore 的取值）；
+    - 追加 `fear_greed_as_of`（SSOT 日期）/`fear_greed_source`/`fear_greed_note`；
+    - SSOT 读不到时**不改动**原字段（渲染层回退，不伪造）。
+    """
+    fg = _resolve_fear_greed_ssot()
+    if fg.get("value") is None:
+        return result
+    result["fear_greed"] = fg["value"]
+    result["fear_greed_label"] = fg.get("label") or result.get("fear_greed_label")
+    result["fear_greed_as_of"] = fg.get("as_of")
+    result["fear_greed_source"] = fg.get("ssot") or FEAR_GREED_SSOT
+    if fg.get("note"):
+        result["fear_greed_note"] = fg["note"]
+    return result
 
 
 def _build_flow(today: dict, diff: dict | None, stab: dict) -> dict:
@@ -8858,7 +8939,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
 
     # 组装基础 brief
     brief = {
-        "M0_tldr": _build_tldr(today, opps, highlights, risk_signals),
+        "M0_tldr": _apply_fear_greed_ssot(_build_tldr(today, opps, highlights, risk_signals)),
         "M0_alert_quality": _load_alert_quality(),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),

@@ -915,5 +915,112 @@ except Exception as _e:
     check(False, "W-08 渲染层用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
+# W-09 恐贪指数 SSOT（market_snapshot_daily.fear_greed_value）
+# ════════════════════════════════════════════════════════
+print("[W-09] 源码核验：SSOT 常量单点定义 + 裁决函数 + 合并入口")
+check("FEAR_GREED_SSOT" in _mm_src, "macro_market 含 SSOT 常量 FEAR_GREED_SSOT")
+check('FEAR_GREED_SSOT = "biz.market_snapshot_daily.fear_greed_value"' in _mm_src,
+      "SSOT 定死为 biz.market_snapshot_daily.fear_greed_value")
+check("def _fear_greed_ssot_verdict(" in _mm_src, "含纯函数 _fear_greed_ssot_verdict（可注入）")
+check("def _apply_fear_greed_ssot(" in _mm_src, "含合并入口 _apply_fear_greed_ssot")
+check("_apply_fear_greed_ssot(_build_tldr(" in _mm_src, "M0_tldr 组装处调用 SSOT 合并")
+
+print("[W-09] 注入：两源冲突 → 取 SSOT 且标注「日线源滞后」")
+try:
+    import macro_market as _mmw9  # noqa: E402
+    _c = _mmw9._fear_greed_ssot_verdict(74, "2026-09-26", "Greed", 73, "2026-09-25")
+    check(_c.get("value") == 74, "冲突时取 SSOT 值（74，非日线 73）")
+    check(_c.get("as_of") == "2026-09-26", "带 SSOT as_of")
+    check("日线源滞后" in (_c.get("note") or ""), "冲突时标注「日线源滞后」")
+    _c2 = _mmw9._fear_greed_ssot_verdict(74, "2026-09-26", "Greed", 74, "2026-09-26")
+    check("note" not in _c2, "两源一致时不加滞后标注")
+    _c3 = _mmw9._fear_greed_ssot_verdict(None, None, None, 73, "2026-09-25")
+    check(_c3 == {}, "SSOT 缺失 → 返回 {}（渲染层回退，不伪造）")
+except Exception as _e:
+    check(False, "W-09 裁决用例执行", f"{type(_e).__name__}: {_e}")
+
+print("[W-09] 渲染：恐贪值旁强制显示 as-of 日期")
+try:
+    _b9 = _brief()
+    _b9["M0_tldr"] = {**_b9["M0_tldr"], "fear_greed": 74, "fear_greed_label": "Greed",
+                      "fear_greed_as_of": "2026-09-26",
+                      "fear_greed_note": "日线源滞后（2026-09-25 日线=73，已按 SSOT 74 取值）"}
+    _h9 = sdb.render_brief_html(_b9)
+    check("截至 2026-09-26" in _h9, "恐贪卡显示 SSOT as-of 日期")
+    check("日线源滞后" in _h9, "冲突标注上屏")
+except Exception as _e:
+    check(False, "W-09 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-10 ETF 卡强制标「上一交易日」+ 滞后 > 3 天降级
+# ════════════════════════════════════════════════════════
+print("[W-10] 源码核验：ETF 文案无「单日」，改用「上一交易日」")
+check("ETF 上一交易日净流入" in _mm_src, "ETF 信号 trigger_logic 改「上一交易日净流入」")
+check("ETF 单日净流入" not in _mm_src and "ETF 单日净流出" not in _mm_src,
+      "ETF 信号 trigger_logic 不再出现「单日」")
+check("上一交易日({" in open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"),
+                              encoding="utf-8").read(), "ETF 卡含「上一交易日(MM-DD)」标注")
+
+print("[W-10] 渲染：最新交易日 → 「上一交易日(MM-DD) 净流入」，无裸「单日」")
+try:
+    import datetime as _dt
+    _today = _dt.date.today()
+    _recent = (_today - _dt.timedelta(days=2)).isoformat()
+    _b10 = _brief()
+    _b10["M2_etf_flow"] = {
+        "status": "ok", "latest_date": _recent,
+        "assets": [{"symbol": "BTC", "flow_7d_usd": 1530e6, "latest_flow_usd": 86.7e6},
+                   {"symbol": "ETH", "flow_7d_usd": 870e6, "latest_flow_usd": 87.0e6}],
+    }
+    _h10 = sdb.render_brief_html(_b10)
+    _md = _recent[5:10]
+    check(f"上一交易日({_md})" in _h10, "ETF 卡显式印「上一交易日(MM-DD)」")
+    check(f"上一交易日({_md}) 净流入" in _h10, "单日净流入标为「上一交易日(MM-DD) 净流入」")
+    check("单日" not in _h10, "ETF 卡内无裸「单日」字样")
+except Exception as _e:
+    check(False, "W-10 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+print("[W-10] 注入：flow_date = today-5 → 降级「数据不可用」+ M9_degraded")
+try:
+    import datetime as _dt2
+    _old = (_dt2.date.today() - _dt2.timedelta(days=5)).isoformat()
+    _b10b = _brief()
+    _b10b["M2_etf_flow"] = {
+        "status": "ok", "latest_date": _old,
+        "assets": [{"symbol": "BTC", "flow_7d_usd": 1530e6, "latest_flow_usd": 86.7e6}],
+    }
+    _h10b = sdb.render_brief_html(_b10b)
+    check("数据不可用（最新交易日" in _h10b, "滞后 > 3 天 → 卡降级为「数据不可用」")
+    check(_b10b.get("M9_degraded"), "降级进 M9_degraded")
+    check(any("ETF资金流" in str(x) for x in (_b10b.get("M9_degraded") or [])),
+          "M9_degraded 含 ETF 降级项")
+    check("1.5B" not in _h10b, "降级时数值被隐藏（不显示 +$1.53B）")
+except Exception as _e:
+    check(False, "W-10 降级用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-11 昨日基准缺失 → DIFF=no_baseline + 渲染提示
+# ════════════════════════════════════════════════════════
+print("[W-11] 源码核验：no_baseline 分支 + 快照缺日检测")
+try:
+    _bdb_src = open(os.path.join(_SCRIPTS_BIN, "build_daily_brief.py"), encoding="utf-8").read()
+    check('"status": "no_baseline"' in _bdb_src, "build_daily_brief 置 DIFF.status=no_baseline")
+    check("def _check_snapshot_gap(" in _bdb_src, "含快照缺日检测 _check_snapshot_gap")
+    check("baseline_date" in _bdb_src, "no_baseline 带 baseline_date")
+except Exception as _e:
+    check(False, "W-11 源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-11] 渲染：DIFF=no_baseline → 显式「无昨日基准」提示")
+try:
+    _b11 = _brief()
+    _b11["DIFF"] = {"status": "no_baseline", "baseline_date": "2026-09-26"}
+    _h11 = sdb.render_brief_html(_b11)
+    check("无昨日基准（2026-09-26 快照缺失），本期无变化对比" in _h11, "渲染「无昨日基准」提示")
+    _b11b = _brief()  # 正常 DIFF 不应出现该提示
+    check("无昨日基准" not in sdb.render_brief_html(_b11b), "正常 DIFF 不误伤")
+except Exception as _e:
+    check(False, "W-11 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

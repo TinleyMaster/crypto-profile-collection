@@ -13,6 +13,7 @@
   P0-f：邮件未发出不得静默成功（SMTP 未配 → 非零退出，交 task_manager/watchdog 可见）
   P1-a：交易方向可执行化（六要素齐备才进「交易方向」区，缺任一 → 降级「👀 观察」区且计数可查）
   P1-b：观望闸门（data_quality 中 ok 维度数 < 阈值 → 强制「今日无操作」，只降不升）
+  P2-a/M4：单一口径裁决（同一 target 全邮件唯一结论：折叠关联 + 等级分组排序 + 同赛道唯一事实源 + 冲突裁决）
 """
 import ast
 import contextlib
@@ -389,6 +390,91 @@ check("做多" in _html_ok and "⚪ 今日无操作" not in _html_ok, "覆盖达
 
 print("[P1-b] 无 data_quality 块 → 不触发闸门（不误伤旧 payload）")
 check("做多" in sdb.render_brief_html(_brief()), "无 data_quality 时保留方向")
+
+# ════════════════════════════════════════════════════════
+# M4 单一口径裁决（方案 §3.3 M4）
+# ════════════════════════════════════════════════════════
+print("[M4-2] 排序口径分离：先按等级分组，组内再按分数")
+_b_tier = _brief()
+_b_tier["M8_opportunities"] = [
+    {"target": "ZZHIGH", "conviction_tier": "HIGH", "conviction_score": 50,
+     "direction": "long", "trigger_logic": "高等级低分"},
+]
+_b_tier["M8_watchlist"] = [
+    {"target": "ZZMED", "conviction_tier": "MED", "conviction_score": 90,
+     "direction": "long", "trigger_logic": "低等级高分"},
+]
+_html_tier = sdb.render_brief_html(_b_tier)
+check(_html_tier.find("ZZHIGH") != -1 and _html_tier.find("ZZHIGH") < _html_tier.find("ZZMED"),
+      "HIGH(50) 排在 MED(90) 之前（不跨口径按数值直排）")
+check("按证据等级分组" in _html_tier, "机会卡标题披露排序口径")
+
+print("[M4-1] 同一 target 只保留一条结论，其余折叠为「关联」")
+_b_fold = _brief()
+_b_fold["M3_highlights"] = [{
+    "target": "SOL", "symbol": "SOL", "direction": "long", "conviction_score": 67,
+    "ai_analysis_v2": {"overall_score": 67, "confidence": "MED", "reason_summary": "高亮结论"},
+}]
+_b_fold["M8_watchlist"] = [{
+    "target": "Solana 链", "symbol": "SOL", "conviction_tier": "MED",
+    "conviction_score": 76, "direction": "long", "trigger_logic": "精选机会的第二份结论",
+}]
+_html_fold = sdb.render_brief_html(_b_fold)
+check("精选机会的第二份结论" not in _html_fold, "重复标的的第二次结论不再上屏")
+check("关联折叠" in _html_fold and "Solana 链 → 见「AI 精选高亮」" in _html_fold,
+      "折叠为「关联」并注明去向")
+check("76分" not in _html_fold, "重复分数 76 被折叠（不并排展示）")
+
+print("[M4-1/M4-3] 同一赛道不出现两个涨幅数字")
+_b_sec = _brief()
+_b_sec["M2_sector_flow"] = {"metric_date": "2026-09-26", "sectors": [
+    {"sector_key": "ai", "sector_label": "AI & Big Data",
+     "mcap_change_7d_pct": 18.3, "composite_score": 90, "leaders": []},
+]}
+_b_sec["M8_opportunities"] = [{
+    "target": "AI & Big Data", "conviction_tier": "HIGH", "conviction_score": 76,
+    "direction": "long", "signal_type": "narrative",
+    "trigger_logic": "AI & Big Data 7d 市值 +17.1% → 资金净流入",
+}]
+_html_sec = sdb.render_brief_html(_b_sec)
+check("+18.3%" in _html_sec, "赛道轮动卡显示赛道 SSOT 涨幅")
+check("+17.1%" not in _html_sec, "同一赛道不再出现第二个涨幅数字")
+
+print("[M4-4] 冲突必须裁决（领涨币同时入高危）")
+_b_arb = _brief()
+_b_arb["M2_sector_flow"] = {"metric_date": "2026-09-26", "sectors": [
+    {"sector_key": "infra", "sector_label": "Infrastructure",
+     "mcap_change_7d_pct": 10.1, "composite_score": 80,
+     "leaders": [{"symbol": "2Z", "name": "DoubleZero"}]},
+]}
+_b_arb["M4_risks"] = [{"target": "2Z", "ai_analysis_v2": {"overall_score": 88, "confidence": "HIGH"}}]
+_html_arb = sdb.render_brief_html(_b_arb)
+check("⚖️ 单一口径裁决" in _html_arb, "输出裁决区块")
+check("2Z 领涨Infrastructure属资金驱动" in _html_arb and "判定：不参与" in _html_arb,
+      "裁决语含归属与判定（不允许两条并列无解释）")
+
+print("[M4-4] 不误伤：无冲突时不输出裁决区块")
+check("⚖️ 单一口径裁决" not in sdb.render_brief_html(_brief()), "无冲突 → 不出现裁决区块")
+
+print("[M4-3] 数据层：叙事机会市值涨幅统一到赛道 SSOT（幂等）")
+try:
+    import macro_market as _mm  # noqa: E402
+    _ssot = _mm._sector_ssot_map({"sectors": [
+        {"sector_key": "ai", "sector_label": "AI & Big Data", "mcap_change_7d_pct": 18.3},
+    ]})
+    check(_ssot.get("aiandbigdata") == 18.3, "SSOT 表按归一化标签索引")
+    _opps = [{"target": "AI & Big Data", "signal_type": "narrative",
+              "trigger_logic": "AI & Big Data 7d 市值 +17.1% → 资金净流入",
+              "key_metric": "市值 +17.1%"}]
+    _n = _mm._unify_sector_metric(_opps, _ssot)
+    check(_n == 1 and "+18.3%" in _opps[0]["trigger_logic"] and "+17.1%" not in _opps[0]["trigger_logic"],
+          "叙事机会的市值涨幅改写为赛道口径")
+    check(_opps[0].get("mcap_change_7d_pct") == 18.3 and _opps[0].get("mcap_ssot") is True,
+          "回填 mcap_change_7d_pct + 标记来源")
+    _mm._unify_sector_metric(_opps, _ssot)
+    check(_opps[0]["trigger_logic"].count("18.3") == 1, "幂等：重复执行不叠加")
+except Exception as _e:
+    check(False, "M4-3 数据层用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")

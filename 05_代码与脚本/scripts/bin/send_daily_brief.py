@@ -269,6 +269,100 @@ def _trade_missing_fields(s: dict) -> list:
     ]
 
 
+# ── M4 单一口径裁决（方案_大盘早报_投资指导意义重构 §3.3 M4） ──────────────
+# 同一封邮件内同一 target 只保留一条结论：
+#   · 「精选机会」卡里凡是已在「交易方向 / AI精选高亮 / 高危信号 / 赛道轮动」出现过结论的
+#     标的，一律折叠为「关联」一行，不再并排展示第二份分数/方向（M4-1）；
+#   · 机会清单先按证据等级（HIGH/MED/LOW）分组、组内再按分数排序，禁止跨口径按数值直排（M4-2）；
+#   · 既领涨/入选机会、又入高危的标的必须输出裁决语，不允许两条并列无解释（M4-4）。
+_TIER_RANK = {"HIGH": 3, "MED": 2, "LOW": 1}
+
+
+def _norm_target_key(t) -> str:
+    """target 归一化键：小写、`&`→`and`、仅保留字母数字（中文保留），用于跨板块同一标的归并。"""
+    s = str(t or "").strip().lower().replace("&", "and")
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+def _target_keys(*vals) -> set:
+    """把 target/symbol/name 等别名一起归一化成键集，任一命中即视为同一标的。"""
+    return {k for k in (_norm_target_key(v) for v in vals) if k}
+
+
+def _tier_score_key(o: dict):
+    """M4-2 排序键：先按证据等级分组，组内再按分数（禁止跨口径按数值直排）。"""
+    tier = str((o or {}).get("conviction_tier") or "").upper()
+    score = (o or {}).get("conviction_score")
+    return (_TIER_RANK.get(tier, 0), score if isinstance(score, (int, float)) else -1)
+
+
+def _build_target_registry(brief: dict, ai_trade_ready: list):
+    """M4-1 / M4-4：收集全邮件各板块的 target 结论 → 折叠归属 + 冲突裁决。
+
+    返回 (owners, arbitrations)：
+      owners: {归一化键: 板块名} —— 已在「交易方向/高亮/高危/赛道轮动」给出结论的标的，
+              「精选机会」卡据此折叠重复项（不并排展示）。领涨币不参与折叠归属（仅用于裁决）。
+      arbitrations: [{target, text}] —— 既领涨/入高亮、又入高危的标的裁决语（两条并列时给解释）。
+    """
+    owners: dict = {}
+    risk_names: dict = {}
+    lead_names: dict = {}
+    highlight_keys: set = set()
+
+    # 1) AI 交易方向（六要素齐备、可执行，最高优先）
+    for s in ai_trade_ready or []:
+        for k in _target_keys((s or {}).get("asset"), (s or {}).get("target")):
+            owners.setdefault(k, "交易方向")
+
+    # 2) AI 精选高亮
+    for h in (brief.get("M3_highlights") or []):
+        ai = h.get("ai_analysis_v2") or {}
+        if not ai or ai.get("error"):
+            continue
+        for k in _target_keys(h.get("target"), h.get("symbol")):
+            owners.setdefault(k, "AI 精选高亮")
+            highlight_keys.add(k)
+
+    # 3) 今日高危信号
+    for r in (brief.get("M4_risks") or []):
+        ai = r.get("ai_analysis_v2") or {}
+        if not ai or ai.get("error"):
+            continue
+        tgt = r.get("target")
+        for k in _target_keys(tgt, r.get("symbol")):
+            owners.setdefault(k, "今日高危信号")
+            risk_names.setdefault(k, tgt)
+
+    # 4) 赛道轮动（赛道名参与折叠归属；领涨币只进裁决）
+    for s in ((brief.get("M2_sector_flow") or {}).get("sectors") or []):
+        label = s.get("sector_label") or s.get("sector_key")
+        for k in _target_keys(label, s.get("sector_key")):
+            owners.setdefault(k, "赛道轮动")
+        for lc in (s.get("leaders") or []):
+            sym = lc if isinstance(lc, str) else lc.get("symbol")
+            if sym:
+                for k in _target_keys(sym):
+                    lead_names.setdefault(k, (sym, label))
+
+    # ── 冲突裁决：同一标的既领涨/入高亮，又入高危（两条方向结论并列时必给解释）──
+    arbitrations = []
+    for k, tgt in risk_names.items():
+        is_lead = k in lead_names
+        is_hl = k in highlight_keys
+        if not (is_lead or is_hl):
+            continue
+        if is_lead:
+            sym, sector = lead_names[k]
+            text = (f"{sym} 领涨{sector or '赛道'}属资金驱动，"
+                    f"同时存在高危信号风险，判定：不参与")
+            nm = sym
+        else:
+            text = f"{tgt} 同时出现在「AI 精选高亮」与「今日高危信号」，两口径冲突，判定：不参与"
+            nm = tgt
+        arbitrations.append({"target": nm, "text": text})
+    return owners, arbitrations
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -287,10 +381,10 @@ def render_brief_html(brief: dict) -> str:
     upcoming_unlocks = brief.get("M6_upcoming_unlocks") or {}
     kol_onchain = brief.get("kol_onchain") or {}
 
-    # 全部机会按评分排序
+    # 全部机会排序：M4-2 先按证据等级（HIGH/MED/LOW）分组，组内再按分数 —— 禁止跨口径按数值直排
     all_opps = sorted(
         (brief.get("M8_opportunities") or []) + (brief.get("M8_watchlist") or []),
-        key=lambda o: (o.get("conviction_score") if isinstance(o.get("conviction_score"), (int, float)) else 0),
+        key=_tier_score_key,
         reverse=True,
     )
 
@@ -663,6 +757,22 @@ def render_brief_html(brief: dict) -> str:
             """)
 
         html_parts.append("</div>")
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.6：⚖️ 单一口径裁决（方案 §3.3 M4-4）
+    # 既领涨/入选机会、又入高危的标的：输出裁决语，避免两个方向结论并列无解释。
+    # 折叠归属表（owners）供下方「精选机会」卡复用（M4-1）。
+    # ════════════════════════════════════════════════════════
+    _tgt_owners, _arbitrations = _build_target_registry(brief, _trade_ready)
+    if _arbitrations:
+        _arb_lines = "<br>".join(f"⚖️ {a['text']}" for a in _arbitrations[:4])
+        html_parts.append(f"""
+          <!-- 模块0.6：单一口径裁决 -->
+          <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #7c3aed">
+            <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">⚖️ 单一口径裁决（同一标的只取一条结论）</div>
+            <div style="font-size:11.5px;color:#475569;line-height:1.7">{_arb_lines}</div>
+          </div>
+        """)
 
     # ════════════════════════════════════════════════════════
     # 模块 1：📊 大盘脉搏
@@ -1333,11 +1443,22 @@ def render_brief_html(brief: dict) -> str:
         <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">
           {section_title}
         </div>
-        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按综合评分排序 · 仅供参考</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按证据等级分组·组内按分数排序 · 仅供参考</div>
     """)
 
     if all_opps:
         display_opps = all_opps[:8 if is_fallback else 6]
+        # M4-1 单一口径裁决：剔除已在「交易方向/高亮/高危/赛道轮动」给出结论的标的，
+        # 折叠为「关联」一行，避免同一标的在邮件内出现两份分数/方向结论。
+        _folded_opps, _kept_opps = [], []
+        for opp in display_opps:
+            _ok = _target_keys(opp.get("target"), opp.get("symbol"), opp.get("name"))
+            _owner = next((_tgt_owners[k] for k in _ok if k in _tgt_owners), None)
+            if _owner:
+                _folded_opps.append((opp.get("target") or opp.get("symbol") or "?", _owner))
+            else:
+                _kept_opps.append(opp)
+        display_opps = _kept_opps
         for opp in display_opps:
             tier = opp.get("conviction_tier", "?")
             score = opp.get("conviction_score", 0)
@@ -1409,6 +1530,14 @@ def render_brief_html(brief: dict) -> str:
               {f'<div style="font-size:10.5px;color:#64748b">{meta_str}</div>' if meta_str else ''}
               {src_html}
               <div style="color:#475569;font-size:11px;margin-top:4px;line-height:1.4">{trigger}</div>
+            </div>
+            """)
+        # M4-1：折叠项以「关联」一行说明去向（信息不丢，只是不再并排列示）
+        if _folded_opps:
+            _fold_txt = " · ".join(f"{_t} → 见「{_s}」" for _t, _s in _folded_opps)
+            html_parts.append(f"""
+            <div style="margin-top:4px;padding:6px 9px;background:#f8fafc;border-radius:6px;font-size:10.5px;color:#64748b;line-height:1.6">
+              关联折叠（同一标的已在其他板块给出结论，此处不重复列示）：{_fold_txt}
             </div>
             """)
     else:

@@ -1924,3 +1924,25 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ④ **`_trade_excluded` 的 `direction` 仍出现在观察区**：属「信息保留」而非建议（观察区显式标注「不构成建议」）；若后续要连方向一并折叠，需另议。
 - ⑤ **交易区仍只渲染前 4 条**（`_trade_ready[:4]`，与旧 `[:4]` 一致）；观察区同样截 `[:5]`。生成侧上限 5 条不变。
 - ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**：需验次日 09:00 邮件「具体交易方向」每条含 进场/失效/目标/参照（带时间戳），且缺字段条目出现在「👀 观察」而非被静默丢弃。
+
+### 早报重构 P2-a：M4 单一口径裁决（2026-09-27）
+
+承接上节 P1。本轮落地原方案 §3.3 **M4 单一口径裁决**四条要求；**变更日志（M3）、AI 结论落库仍推后**（M3 依赖落库，见 P0 边界②）。
+
+**M4-1 同一 target 只保留一条结论（折叠关联）**：`scripts/bin/send_daily_brief.py` 新增模块级 `_norm_target_key()` / `_target_keys()` / `_build_target_registry()`。渲染前扫全邮件各板块（交易方向 / AI 精选高亮 / 今日高危信号 / 赛道轮动），得到 `owners`（归一化键 → 板块名）。「🎯 精选机会」卡对每张卡用 `target`+`symbol`+`name` 三别名归一化，凡命中 `owners` 的标的**不再上屏**，改在卡底部以「关联折叠（…此处不重复列示）：X → 见「Y」」一行说明去向（信息不丢、不并排列示）。**领涨币不参与折叠归属**（领涨非独立结论），只用于 M4-4 裁决。
+
+**M4-2 排序口径分离**：模块级 `_tier_score_key()`（`(_TIER_RANK[tier], score)`），`all_opps` 由原「纯分数直排」改为**先按等级 HIGH/MED/LOW 分组、组内再按分数**；机会卡标题由「按综合评分排序」改为「按证据等级分组·组内按分数排序」，披露口径。
+
+**M4-3 同赛道唯一事实源**：`workbench/macro_market.py` 新增 `_norm_target_key()` / `_sector_ssot_map()` / `_unify_sector_metric()`，在 `generate_morning_brief` 组装 brief 前调用。以 `biz.sector_flow_daily`（`M2_sector_flow.sectors`，日频 ETL）为唯一事实源，把叙事机会（`signal_type="narrative"`）内嵌的「市值 +X%」用 `_SECTOR_MCAP_RE` 改写成赛道口径，并回填 `mcap_change_7d_pct` + `mcap_ssot=True`；SSOT 落 `brief["M4_sector_ssot"]`（`{metric_date, map}`）供渲染层复用。根因：两张卡两条取数路径（日频 ETL vs CMC categories 现算）→ 同一赛道同一天两个涨幅数字（实测 AI & Big Data +18.3% vs +17.1%）。
+
+**M4-4 冲突必须裁决**：`_build_target_registry` 同时产出 `arbitrations`（同一标的**既领涨/入高亮、又入高危**）→ 渲染「⚖️ 单一口径裁决（同一标的只取一条结论）」区块（置于 AI 精选高亮卡之后，最多 4 条）。裁决语例：「2Z 领涨Infrastructure属资金驱动，同时存在高危信号风险，**判定：不参与**」。无冲突时不输出该区块。
+
+**验证**：`workbench/test_daily_brief_p0_20260927.py` **69 → 83/0**（新增 14 条：M4-2 等级分组优先于分数 + 标题披露口径；M4-1 SOL 折叠为「关联」且第二份分数不上屏；M4-1/M4-3 同赛道仅一个涨幅数字；M4-4 裁决语 + 无冲突不输出；M4-3 数据层 SSOT 归一化索引 / 改写 / 回填 / 幂等）。回归全绿：`test_daily_brief_20260924` 31/31、`test_daily_brief_p1` 22/22、`test_catalyst_channel_dedup` 22/0、`test_major_event_alert` 55/0、`test_macro_market_p1_upstream` 24/24；`py_compile` OK。
+
+**未做 / 边界（须留档）**：
+- ① **折叠仅在「精选机会」卡生效**：交易方向 / 高亮 / 高危 / 赛道轮动四个板块本身不去重（它们是结论的**产出位**）；同一标的若同时进「高亮(long)」与「高危(short)」两个产出位，两卡仍并排，但会由 M4-4 裁决区块给出解释。
+- ② **M4-2 只改了「精选机会」列表**：AI 精选高亮卡仍按生成侧顺序取前 3，未做等级分组重排（其条目本就同源同口径）。
+- ③ **M4-3 只统一「叙事机会」**：仅匹配 `target`/`symbol` 归一化后与赛道标签/键相同的条目；CMC 分类名与 `sector_12` 标签不一致时（如「Artificial Intelligence」vs「AI & Big Data」）不触发，数字仍各自显示。
+- ④ **裁决语模板为写死文案**，风险类型未逐条枚举（只说「高危信号风险」），因风险 `signal_types` 未透传到渲染层。
+- ⑤ **变更日志（M3）未做**：仍依赖 AI 结论落库（P0 边界②）。
+- ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**：需验次日 09:00 邮件中同一标的只有一个方向结论、同一赛道只有一个涨幅数字、冲突标的带「判定：不参与」。

@@ -8456,6 +8456,60 @@ def _load_alert_quality() -> dict:
         return {}
 
 
+# ── M4-3 同赛道唯一事实源（方案_大盘早报_投资指导意义重构_2026-09-27 §3.3 M4-3） ──
+# 「赛道轮动」卡读 biz.sector_flow_daily（日频 ETL），而「精选机会」卡里的叙事机会
+# （signal_type="narrative"）读的是 CMC categories 现算的市值涨幅 → 同一赛道同一天出现
+# 两个涨幅数字（实测 AI & Big Data 「赛道轮动」+18.3% vs「精选机会」+17.1%）。
+# 此处以 biz.sector_flow_daily 为唯一事实源，把叙事机会内嵌的「市值 +X%」统一为赛道口径，
+# 并把 SSOT 落 brief["M4_sector_ssot"] 供渲染层复用（保证两张卡显示同一个数字）。
+_SECTOR_MCAP_RE = re.compile(r"(市值\s*)([+-]\d+(?:\.\d+)?)(\s*%)")
+
+
+def _norm_target_key(t) -> str:
+    """target 归一化键：小写、`&`→`and`、仅保留字母数字（中文保留）。"""
+    s = str(t or "").strip().lower().replace("&", "and")
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+def _sector_ssot_map(sector_flow: dict | None) -> dict:
+    """{归一化赛道标签/键: mcap_change_7d_pct}，取自 sector_flow（biz.sector_flow_daily）。"""
+    out: dict = {}
+    for s in ((sector_flow or {}).get("sectors") or []):
+        v = s.get("mcap_change_7d_pct")
+        if v is None:
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        for k in {_norm_target_key(s.get("sector_label")), _norm_target_key(s.get("sector_key"))}:
+            if k:
+                out[k] = v
+    return out
+
+
+def _unify_sector_metric(opps: list | None, ssot: dict) -> int:
+    """把叙事机会内嵌的「市值 +X%」统一为赛道 SSOT 口径；返回改写条数（幂等）。"""
+    if not ssot:
+        return 0
+    n = 0
+    for o in opps or []:
+        keys = {_norm_target_key(o.get("target")), _norm_target_key(o.get("symbol"))}
+        hit = next((ssot[k] for k in keys if k in ssot), None)
+        if hit is None:
+            continue
+        o["mcap_change_7d_pct"] = hit
+        o["mcap_ssot"] = True
+        for f in ("key_metric", "trigger_logic"):
+            txt = o.get(f)
+            if isinstance(txt, str) and "市值" in txt:
+                o[f] = _SECTOR_MCAP_RE.sub(
+                    lambda m, _h=hit: f"{m.group(1)}{_h:+.1f}{m.group(3)}", txt
+                )
+        n += 1
+    return n
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
     早报结构化骨架 V2（重新设计版）。
@@ -8569,6 +8623,12 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     # ── 每日变化榜精简版 ──
     daily_diff_brief = _build_daily_diff_brief(today, highlights, risk_signals)
 
+    # ── M4-3 同赛道唯一事实源：叙事机会的「市值 +X%」统一到赛道 ETL 口径 ──
+    _sector_ssot = _sector_ssot_map(sector_flow)
+    _n_unified = _unify_sector_metric(opps, _sector_ssot)
+    if _n_unified:
+        print(f"[morning_brief] M4-3 同赛道口径统一：{_n_unified} 条机会的市值涨幅改按赛道 SSOT 口径")
+
     # 组装基础 brief
     brief = {
         "M0_tldr": _build_tldr(today, opps, highlights, risk_signals),
@@ -8577,6 +8637,10 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "M2_flow": _build_flow(today, diff, stab),
         "M2_institutional": today.get("institutional_mvrv") or {},
         "M2_sector_flow": sector_flow,
+        "M4_sector_ssot": {
+            "metric_date": (sector_flow or {}).get("metric_date"),
+            "map": dict(_sector_ssot),
+        },
         "M2_etf_flow": etf_flow,
         "M2_whale_moves": whale_moves,
         "M2_exchange_flow": exchange_flow,

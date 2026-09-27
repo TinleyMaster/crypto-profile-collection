@@ -265,3 +265,20 @@ meme_lifecycle:
     liq_decay_max: 5000      # 流动性 <$5K → decay
     social_hot_min: 2        # 30d 内 KOL/GitHub 信号 ≥2 → 有热度
     holder_bleed_max: -10    # holder 30d 变化 ≤-10% → 流失
+
+# ── 抛压分档阈值（A3，2026-09-27）──
+# db_stats._band_risk_level 用：把 _compute_pressure_score 的 0-100 分数映射为
+# low/medium/high，并带滞回带抑制临界抖动。改 yaml 后需重启生效（同本文件其它段）。
+#
+# 为什么需要滞回（实证）：全表 332 行中 35 行（10.5%）落在 [medium_threshold, +10) 边界带内；
+# PONS（11114）实测 26.96 = ATH 回撤 26.02(96.5%) + OI 0.94，而 medium 下界 30 分等价于
+# ATH 回撤 -33.3%，该资产当时 -28.91% ⇒ 再跌约 3.4% 就跨档，且分数里只剩一个连续变量在动，
+# 无滞回则 risk_level 会在 low/medium 间随价格抖动（已实测同日两次计算 28.24 → 26.96），
+# 并沿 库缓存(6h) → notebook → LLM prompt(强制引用) → 结论文本 / 催化剂技术面 一路传导。
+#
+# 滞回语义：以库中「上一档」为基准，向上跨档需 score >= 目标档下界 + band，
+# 向下跨档需 score <= 当前档下界 - band；带内维持原档。（无上一档时按裸阈值判档）
+unlock_pressure:
+  high_threshold: 60       # >= 60 → high（裸阈值，外置前的硬编码值）
+  medium_threshold: 30     # >= 30 → medium，否则 low（裸阈值，外置前的硬编码值）
+  hysteresis_band: 5       # 滞回带宽度（分）：相对 30 分下界约 17%，覆盖实测边界带拥挤区

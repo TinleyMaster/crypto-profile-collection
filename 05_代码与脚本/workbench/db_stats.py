@@ -3288,9 +3288,10 @@ def _build_structured_metrics_inner(snapshot: dict, asset_id: int) -> dict:
             if factors > 0:
                 score = round(pressure / factors, 1)
                 result["pressure"]["pressure_score"] = score
-                result["pressure"]["risk_level"] = (
-                    "high" if score >= 70 else "medium" if score >= 40 else "low"
-                )
+                # A3（2026-09-27）：此前此处用 high>=70 / medium>=40，与主算法 60/30 两套口径
+                # （分数尺度也不同：这里是 20/50/80 与 30/60/90 档位取平均）。现统一走
+                # _band_risk_level（阈值外置 market_rules.yaml），消除同字段双阈值。
+                result["pressure"]["risk_level"] = _band_risk_level(score)
                 result["pressure"]["pressure_basis"] = "fallback_unlock_top10_only"
         except Exception:
             pass
@@ -9835,6 +9836,70 @@ def _pressure_float(v):
         return None
 
 
+# ── 抛压分档阈值（A3，2026-09-27）：外置 market_rules.yaml + 滞回带 ──
+# 项目约定（market_rules.yaml 头部 P2-4）「所有评分/背离阈值全外置于此文件」，
+# 而 60/30 此前硬编码在 _compute_pressure_score 内、展示侧 fallback 另有一套 70/40
+# （且分尺度不可比）→ 同一字段两套口径。本组函数统一为单一口径。
+_PRESSURE_BAND_DEFAULTS = {"high_threshold": 60.0, "medium_threshold": 30.0}
+_PRESSURE_LEVELS = ("low", "medium", "high")
+
+
+def _load_unlock_pressure_rules() -> dict:
+    """从 market_rules.yaml 加载 [unlock_pressure] 段（缺失/解析失败回退内建默认值）。
+
+    回退值 = 外置前的硬编码值（high 60 / medium 30）+ band 0（= 无滞回 = 改造前行为）：
+    yaml 不可用时分档结果与改造前**逐分一致**，不因配置缺失而改变档位。
+    """
+    rules = dict(_PRESSURE_BAND_DEFAULTS)
+    rules["hysteresis_band"] = 0.0
+    try:
+        import yaml
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_rules.yaml")
+        if not os.path.exists(path):
+            return rules
+        data = (yaml.safe_load(open(path, encoding="utf-8")) or {}).get("unlock_pressure") or {}
+        for k in ("high_threshold", "medium_threshold", "hysteresis_band"):
+            if data.get(k) is not None:
+                rules[k] = float(data[k])
+    except Exception:
+        pass
+    return rules
+
+
+_PRESSURE_RULES = _load_unlock_pressure_rules()
+
+
+def _band_risk_level(score, previous: str | None = None) -> str:
+    """抛压分 → risk_level：阈值外置 market_rules.yaml + 滞回带。
+
+    previous 传库中已存的档位即启用滞回（抑制临界抖动）：
+      · 向上跨档需 score >= 目标档下界 + band；
+      · 向下跨档需 score <= 当前档下界 - band；
+      · 带内维持原档。
+    previous 为空/非法或 band<=0 → 退化为裸阈值判档（= 改造前行为）。
+    """
+    high = _PRESSURE_RULES["high_threshold"]
+    med = _PRESSURE_RULES["medium_threshold"]
+    band = _PRESSURE_RULES["hysteresis_band"]
+    thresholds = (med, high)  # [0] = low|medium 界，[1] = medium|high 界
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "low"
+    idx = 2 if s >= high else (1 if s >= med else 0)
+    if previous not in _PRESSURE_LEVELS or band <= 0:
+        return _PRESSURE_LEVELS[idx]
+    prev_idx = _PRESSURE_LEVELS.index(previous)
+    if idx == prev_idx:
+        return _PRESSURE_LEVELS[prev_idx]
+    if idx > prev_idx:  # 向上跨档：需越过目标档下界 + 带宽
+        need = thresholds[idx - 1] + band
+        return _PRESSURE_LEVELS[idx] if s >= need else _PRESSURE_LEVELS[prev_idx]
+    need = thresholds[prev_idx - 1] - band  # 向下跨档：需跌破当前档下界 - 带宽
+    return _PRESSURE_LEVELS[idx] if s <= need else _PRESSURE_LEVELS[prev_idx]
+
+
 def _parse_unlock_event_date(date_str: str):
     """解析解锁事件日期（如 'Feb 15, 2026' / '25 Dec 2026'），失败返回 None。"""
     if not date_str:
@@ -9879,7 +9944,7 @@ def _unlock_value_score(unlock_pct_30d, turnover_24h) -> float:
 def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h,
                             drawdown_from_ath=None, cvd_ratio=None,
                             oi_change_24h=None, unlock_value_usd=None,
-                            volume_24h_usd=None):
+                            volume_24h_usd=None, previous_risk=None):
     """抛压评分 0-100（越高越危险）。
 
     审计 §4.2 #8（2026-09-26）重构：抛压不能只看解锁，扩到「解锁 × 筹码集中 × 价格回撤 ×
@@ -9892,6 +9957,9 @@ def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h,
       - cvd_score：CVD 净卖出为负，0-15 分；
       - oi_score：OI 24h 下降（去杠杆/资金离场），0-10 分；
       - unlock_value_score：解锁价值 ÷ 日均成交额，0-20 分。
+
+    分档（A3，2026-09-27）：阈值外置 market_rules.yaml [unlock_pressure]，并经
+    _band_risk_level 加滞回带；previous_risk 传库中上一档即启用滞回，抑制临界抖动。
     """
     unlock_score = min(60.0, (unlock_pct_30d or 0.0) * 6.0)
     _t10 = min(100.0, max(0.0, top10_concentration or 0.0))  # 越界脏值防御（2026-09-23）
@@ -9910,12 +9978,7 @@ def _compute_pressure_score(unlock_pct_30d, top10_concentration, turnover_24h,
     score = max(0.0, unlock_score - liquidity_discount) + concentration_score \
         + drawdown_score + cvd_score + oi_score + unlock_value_score
     score = max(0.0, min(100.0, score))
-    if score >= 60:
-        risk = "high"
-    elif score >= 30:
-        risk = "medium"
-    else:
-        risk = "low"
+    risk = _band_risk_level(score, previous_risk)
     return round(score, 2), risk
 
 
@@ -9930,34 +9993,35 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
 
     settings = get_settings(require_database=True)
 
-    # 0. 读缓存（未过期且非 force）
-    if not force:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(_ENSURE_UNLOCK_PRESSURE_SQL)
-            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                cur.execute(
-                    """SELECT unlock_pct_7d, unlock_pct_30d, next_unlock_date,
-                              top10_concentration, turnover_24h, pressure_score,
-                              risk_level, detail_json, calculated_at
-                       FROM biz.asset_unlock_pressure WHERE asset_id = %s""",
-                    (asset_id,),
-                )
-                row = cur.fetchone()
-        if row:
-            age = (datetime.now(timezone.utc) - row["calculated_at"]).total_seconds()
-            if age < _UNLOCK_PRESSURE_TTL_SECONDS:
-                return {
-                    "unlock_pct_7d": _pressure_float(row["unlock_pct_7d"]),
-                    "unlock_pct_30d": _pressure_float(row["unlock_pct_30d"]),
-                    "next_unlock_date": str(row["next_unlock_date"]) if row["next_unlock_date"] else None,
-                    "top10_concentration": _pressure_float(row["top10_concentration"]),
-                    "turnover_24h": _pressure_float(row["turnover_24h"]),
-                    "pressure_score": _pressure_float(row["pressure_score"]),
-                    "risk_level": row["risk_level"],
-                    "detail": row["detail_json"] or {},
-                    "cached": True,
-                }
+    # 0. 读缓存行（未过期且非 force 则直接返回；否则该行 risk_level 用作滞回基准）
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(_ENSURE_UNLOCK_PRESSURE_SQL)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """SELECT unlock_pct_7d, unlock_pct_30d, next_unlock_date,
+                          top10_concentration, turnover_24h, pressure_score,
+                          risk_level, detail_json, calculated_at
+                   FROM biz.asset_unlock_pressure WHERE asset_id = %s""",
+                (asset_id,),
+            )
+            row = cur.fetchone()
+    if row and not force:
+        age = (datetime.now(timezone.utc) - row["calculated_at"]).total_seconds()
+        if age < _UNLOCK_PRESSURE_TTL_SECONDS:
+            return {
+                "unlock_pct_7d": _pressure_float(row["unlock_pct_7d"]),
+                "unlock_pct_30d": _pressure_float(row["unlock_pct_30d"]),
+                "next_unlock_date": str(row["next_unlock_date"]) if row["next_unlock_date"] else None,
+                "top10_concentration": _pressure_float(row["top10_concentration"]),
+                "turnover_24h": _pressure_float(row["turnover_24h"]),
+                "pressure_score": _pressure_float(row["pressure_score"]),
+                "risk_level": row["risk_level"],
+                "detail": row["detail_json"] or {},
+                "cached": True,
+            }
+    # 滞回基准 = 上一档（过期行也用：它就是当前对外展示的档位，抑制抖动必须对齐它）
+    previous_risk = row["risk_level"] if row else None
 
     # 1. 读解锁事件 + 持仓集中度
     with get_db() as conn:
@@ -10056,6 +10120,7 @@ def compute_unlock_pressure(asset_id: int, force: bool = False) -> dict | None:
         cvd_ratio=cvd_ratio,
         oi_change_24h=oi_change_24h,
         unlock_value_usd=None,  # 由 unlock_pct_30d × 市值/成交额比推出，见下方 detail
+        previous_risk=previous_risk,
     )
 
     detail = {

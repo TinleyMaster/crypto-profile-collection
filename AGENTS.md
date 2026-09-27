@@ -1753,3 +1753,27 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **E2 实测（翻转样例）**：构造 A（blended，1d 涨幅 2% + TVL 腿 20% → 合成 11.0）vs B（mcap_only，1d 涨幅 8% → 合成 8.0）：**旧纯涨幅榜 B 第一，新合成分榜 A 第一，排序已翻转**；公式逐值核对通过。
 - **校验**：`py_compile macro_market.py` 通过；`templates/index.html` 内联 `<script>`（1 块）`node --check` 通过；`test_macro_market_p0` **16/16**、`test_macro_market_board_tier2` **36/36**（两探针均未断言 `mcap_step` / 结构子分数值，零回退）。
 - **未做 / 边界（须留档）**：① **后端仍按 7d 合成分先截断 `rank_limit=10`，前端再按窗重排** ⇒ 切 1d/30d 是在「7d TOP10 候选集」内重排，非全量重排（工单未要求改，原设计即如此）；若后续要「1d 全量榜」需把截断下移到前端或放宽 `rank_limit`。② 叙事榜行仍以 `toFixed(1)%` 渲染合成分（7d 既有行为，本次未扩大改动面）——合成分不是百分比，1d/30d 也带 `%` 属既有展示缺陷，未在本单修。③ 前端 1d/30d 的 `composite_score_*` 为 `null` 时静默回落 7d 值（数据缺失时该窗与 7d 同序，属预期降级）。④ **线上 runtime 复验须待 Zeabur 重建后执行**（`push ≠ 线上生效`），本单未做。
+
+### A3 抛压分档：阈值外置 yaml + 滞回带（`biz.asset_unlock_pressure.risk_level`，2026-09-27，本次提交）
+
+来源：FIX-DETERMINACY-002 遗留项「A3 验收半达成」——`pressure_score` 已从 0 修到 >0（28.24），但 `risk_level` 仍是 `low`（阈值卡 ≥30）。用户拍板方案：**缓冲带**（阈值外置 + 单一口径 + 滞回），而非口径重构（剥离 ATH 回撤）或维持现状。
+
+**取证（改前，全部为只读实测）**：
+- **阈值硬编码破了自家约定**：`_compute_pressure_score` 内联 `>=60→high / >=30→medium`，而 `market_rules.yaml` 头部明写「P2-4 所有评分/背离阈值全外置于此文件」——抛压分档是当时**唯一没外置**的评分阈值。
+- **同一字段两套阈值（真 bug 级）**：展示侧 fallback 用 `high>=70 / medium>=40`，主算法用 `60/30`，且二者**分数尺度都不同**（fallback 是解锁档位 20/50/80 与集中度档位 30/60/90 取平均）。
+- **PONS（11114）分量拆解**：`26.96 = drawdown 26.02(96.5%) + oi 0.94`；`unlock_score=0`（30d 解锁 0%）、`concentration_score=0`（**top10 = NULL，无 holder 快照 → 缺失当零**）、`liquidity_discount=13.61`（被 `max(0,·)` 全吃）、`cvd_score=0`（CVD +6.85%）、`unlock_value_score=0`。即该资产分数几乎全是**已实现回撤**的投影，不是前瞻抛压。
+- **临界抖动是系统性的**：medium 下界 30 分 ↔ ATH 回撤 **-33.3%**，PONS 当时 -28.91% ⇒ 再跌约 3.4% 即跨档，且分数里只剩一个连续变量在动；同日两次计算已实测漂移 **28.24 → 26.96**。全表 332 行分布 `low 246 / medium 70 / high 16`，p50=15.83，**落在 `[30,40)` 的有 35 行（10.5%）**。
+- **传导面**：写库（6h 缓存）→ notebook 展示 → LLM prompt「抛压风险等级必须严格使用 `pressure.risk_level`」→ **结论文本随抖**；另一路 `phase_catalyst_backfill.py` 把它当 `unlock_pressure` 喂进催化剂技术面评分。
+
+**改动（2 文件改 + 1 新探针，不动分数口径）**：
+- `market_rules.yaml` 新增 `unlock_pressure:` 段（`high_threshold: 60` / `medium_threshold: 30` / `hysteresis_band: 5`），值 = 外置前的硬编码值；段内注释写清滞回原因与实证数字。改 yaml 需重启生效（同本文件其它段）。
+- `db_stats.py` 新增 `_PRESSURE_BAND_DEFAULTS` / `_load_unlock_pressure_rules()` / `_PRESSURE_RULES` / `_band_risk_level()`（照 `meme_risk._load_meme_risk` 的「yaml 缺失即回退内建默认」范式）。**回退值刻意设为 60/30 + band 0**，即 yaml 不可用时分档与改造前**逐分一致**，不因配置缺失而改变档位。
+- `_compute_pressure_score` 新增 `previous_risk` 形参，尾部 `if/elif` 三分档换成 `_band_risk_level(score, previous_risk)`；展示侧 fallback 的 `70/40` 一并改为 `_band_risk_level(score)`（无上一档 → 裸阈值），**消除同字段双阈值**。
+- `compute_unlock_pressure`：把「读缓存行」从 `if not force:` 里提出来**无条件执行**（未过期且非 force 仍早退），使该行的 `risk_level` 成为滞回基准 `previous_risk` —— 过期行也照用，因为它就是当前对外展示的档位，抑制抖动必须对齐它。
+- 新探针 `test_pressure_band_20260927.py`（**53 断言 / 0 失败**，纯离线）：yaml 三键 + 回退默认值、裸阈值与改造前逐分一致、滞回**上/下/跨两档/带内维持**全部边界（34.99/35.0、25.01/25.0、64.99/65.0、55.01/55.0、直跳 64.99/65.0）、非法 score 与非法 previous 安全退化、源码级断言「函数体内不再硬编码 60/30」「fallback 块内无 70/40」「previous_risk 透传且取值早于算分」。
+
+**滞回语义**：以库中上一档为基准，向上跨档需 `score >= 目标档下界 + band`，向下跨档需 `score <= 当前档下界 - band`，带内维持原档；无上一档/非法/`band<=0` 退化为裸阈值。
+
+**验证**：`test_pressure_band_20260927.py` **53/0**；既有回归 `test_daily_brief_p1.py` **22/22**、`test_research_determinacy_20260926.py` **127/0**、`test_research_3tier_20260927.py` **82/0**、`test_thesis_forward_track_20260927.py` **63/0**（含「25.0/low、12.5/low」两条旧断言，口径不变）；`py_compile` 通过；`yaml.safe_load` 校验通过。**prod 只读模拟（不写库）**：332 行逐行 `_band_risk_level(score, 库中档位)` vs 库中原档 —— **即刻改档 0 行**（档位分布与改造前完全一致），**50 行（15.1%）落在滞回带 `[25,35)` 或 `[55,65)` 内**（这部分正是被保护起来的抖动区）。即本改动对现有数据零瞬时影响，只在后续重算时抑制振荡。
+
+**未做 / 边界（须留档）**：① **未做口径重构**：`drawdown_score` 仍计入抛压分（PONS 案例里它占 96.5%），即「抛压分度量的是已实现回撤 + 前瞻解锁」的混合口径未改；剥离它需全表重算 + 前端/LLM 口径同步 + 阈值重校准，本轮未授权。② **`top10 = NULL → concentration_score = 0`（缺失当零）未修**，与「空 URL 引用不封顶」同类防骗漏洞，建议单独立项。③ **滞回只在写入路径生效**：读取侧 `biz.asset_unlock_pressure` 直接返库值，若库中档位由改造前写入且处于带内，不会因本次改动被动更新（这正是「即刻改档 0 行」的原因）。④ **`hysteresis_band` 的 5 分是经验值、未校准**：与三档确定性闸门同属 `uncalibrated`，无「该资产真实抛压事件」的前向样本可对齐；数值集中在 yaml，改一个数即可（无需改码）。⑤ 展示侧 fallback 传 `previous_risk=None`（拿不到上一档），故该紧急路径**无滞回**，代价是极端情况下档位可能与主路径差一档（已在代码注释标明）。⑥ **线上 runtime 复验须待 Zeabur 重建后执行**（`push ≠ 线上生效`），本单未做。

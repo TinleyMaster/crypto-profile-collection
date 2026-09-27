@@ -1616,3 +1616,27 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **闸门阈值全部 `uncalibrated`**：受限于回测框架上限（见上第 3 点），任何「闸门已开 = 可下注」的读法都不成立，前端已显式标注。
 - **存量 `biz.research_thesis` 行不含 `determinism_3tier`**：读取路径会**实时计算**并注入，故旧行无需回填；但 `analysis_json` 落库字段仅对**新生成**结论生效。
 - **线上 runtime 复验已完成（2026-09-27，Zeabur 重建后，只读）✅**：`GET https://crypto-profile-collection.zeabur.app/api/research/11114/notebook`（响应外层 `{ok, data}`，结论在 `data.thesis.analysis`）→ `analysis.determinism_3tier` 三档齐备：**S `92.0 / actionable / structured_quant / gate_open=True`**、**M `32.5 / unusable / text_citation / gate_open=False`**、**L `None / not_evaluable / text_citation / gate_open=False`**；`unmapped_points=0`、`calibration=uncalibrated`、`composite.verdict="仅适合短线/事件驱动；长期不可评估，禁止长期持有叙事"`。`data.missing` 的 `audit_report` 条目已带 `horizon=l / horizon_label=长期 / missing_nature=existence_gate / missing_nature_label=长期档存在性门槛 / determinism_gain_by_tier={l:5,m:0,s:0}`。**口径分离线上实证**：同一结论 `analysis.score=39.9 / unusable`（整体文本口径仍封顶、防骗未回退），而 S 档 92.0 越封顶且闸门开 —— 与方案 §8 拍板 ①（接受 S 档口径分离）一致；M 档 32.5 **低于** 39.9 而非等于，印证封顶是**上限（ceiling）**而非等值（有 3 个原始断言写成 `==` 曾误判为失败，已改为 `<=` + 追加 `tier == "unusable"`）。
+
+### P4 投研结论前向跟踪表落地（`biz.thesis_forward_track`，2026-09-27，本次提交）
+
+用户拍板范围：上一轮「剩余独立轨」多选**只勾了 P4 前向跟踪表**，**未勾 P3 板块重分类**（故本轮不新增 `launchpad` 赛道枚举、不动竞品分池键）。对应方案 §1.3 / §5：`biz.research_thesis` 此前**没有任何前向收益链路**，中/长档闸门阈值客观无数据可校准；本表补上「结论 → 前向收益」链路，作为后续校准基建。
+
+**改动（2 代码文件 + 1 新迁移 + 1 新脚本 + 1 新探针，零删除、不改既有评分/闸门口径）**：
+- 新迁移 `scripts/migrations/fix_072_thesis_forward_track.sql`：`CREATE TABLE IF NOT EXISTS biz.thesis_forward_track`（`track_id / thesis_id / asset_id / as_of / tier_s_score / tier_m_score / tier_l_evaluable / gate_s_open / gate_m_open / price_at / ret_t7_pct / ret_t30_pct / ret_t90_pct / filled_at`，`UNIQUE (asset_id, as_of)`）+ `idx_thesis_forward_due ON (as_of) WHERE filled_at IS NULL`（partial index，表增长后扫描仍轻量）+ 4 条 `COMMENT`。**编号取 072 而非 071**：工作树中并行会话已有未跟踪的 `fix_071_launchpad_sector.sql`（P3 轨），避免同号歧义。
+- `db_stats.py`：① `_ensure_research_tables` 追加同一份幂等 DDL（容器内自愈），并在函数末尾**立即 `conn.commit()`**（项目教训：DDL 取 `AccessExclusiveLock` 不及时 commit 会阻塞表读 15 分钟以上）。② `get_latest_research_thesis` 后新增 P4 块（约 140 行）：`_THESIS_FORWARD_HORIZONS`（7/30/90 → 列名，单一来源）、`_thesis_forward_payload()`（从 `determinism_3tier` 抽字段，L 档 `tier != "not_evaluable"` → `tier_l_evaluable`；缺档位一律 `None` **不臆造**）、`_forward_return_pct()`（`(到期价/基准价-1)×100`，任一侧缺失或非正 → `None`，**不写假数**）、`_fetch_as_of_price()`、`backfill_thesis_forward_track()`。③ `generate_research_thesis` 版本留痕之后接线 upsert：`ON CONFLICT (asset_id, as_of) DO UPDATE` 只更新档位分数与闸门，**不触碰 `ret_*`**（同资产同日重复生成不回退已填收益），`price_at` 用 `COALESCE(EXCLUDED.price_at, 表内已有值)` 保护，`as_of` 取 `(CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date`（与项目北京时间口径一致）。
+- 新脚本 `scripts/bin/backfill_thesis_forward_track.py`：薄壳，调 `db_stats.backfill_thesis_forward_track()` 并打印四计数（复用 `recompute_unlock_pressure.py` 的 workbench/prod 双路径解析写法）。
+- `scheduler.py`：注册日级任务 `("thesis_forward_backfill", "50 7 * * *", ...)`，07:50 触发 —— 位于 `asset_market_daily` 06:15 ETL 之后、避开早高峰，落在 `data_sync_daily`(06:30) 窗口之外。
+- 新探针 `test_thesis_forward_track_20260927.py`（**63 断言 / 0 失败**，纯离线不连库不连网）：DDL 双份齐备（迁移 + `_ensure_research_tables`）+ `conn.commit()` 位于 DDL 块之后、唯一键/partial index 存在、12 列齐备；`_thesis_forward_payload` 抽取（含与 `_compute_determinism_3tier` 真实输出**同源**断言、L 档三态）；`_forward_return_pct` 正负收益与 8 组非法价（`None`/`0`/负数/空串/非数）一律 `None`；写入侧「upsert 分支不含 `ret_*`」+ `COALESCE` 保护 + 北京日期 + 基准价取「as_of 及之前最近收盘价」；回填侧三档到期判定、未到期/已填跳过、`price_at` 空提前 `continue` 且计数、三期全非空才置 `filled_at`；脚本存在 + 调度 key/cron/脚本名一致。
+
+**回填语义（幂等）**：只填「已到期（`as_of + N <= 北京今日`）且 该期次为空 且 `price_at` 非空」的格；到期价取「到期日当日或之后首个可得收盘价」（`source_code IN ('cmc','cmc_historical')`，同日 cmc 优先，与 `_build_structured_metrics_from_snapshot` 同口径）；三期全非空 → 置 `filled_at` 离开到期扫描索引；`price_at` 为空的行三期整体跳过（无基准价算不出收益，不写假数），计入 `skipped_no_price` 可观测。
+
+**验证**：`test_thesis_forward_track_20260927.py` **63/0**；既有回归 `test_research_3tier_20260927.py` **82/0**、`test_research_determinacy_20260926.py` **127/0**（未回退）；`py_compile`（`db_stats.py` / `scheduler.py` / 新脚本 / 新探针）通过。**迁移已 apply 到 prod（幂等）并复验**：`information_schema.columns` 返回 14 列（含 `track_id`）齐备，`pg_indexes` 返回 `thesis_forward_track_pkey / uq_thesis_forward / idx_thesis_forward_due`，当前 0 行。
+
+**偏离方案原文的 1 处（须留档）**：方案 §5 原文要求 `price_at = as_of 当日收盘价，取不到留 NULL`。落地改为**取 `market_date <= as_of` 的最近收盘价**（基准价非空优先）。原因：结论多在盘中生成，而 `etl_asset_market_daily_from_cmc` 每 6 小时才写日行，严格取「当日」会在当日 ETL 未完成时留 `price_at = NULL`，叠加「`price_at` 空则跳过」⇒ 该行**永久无法回填**（死行）。改法代价是极小概率用前一日收盘价作基准（T+7 收益含一日偏移），已在迁移 `COMMENT ON COLUMN price_at` 与函数 docstring 中显式说明。
+
+**未做 / 边界（须留档）**：
+- **P3 板块重分类仍未做**（本轮未被选中）：`SECTORS` 无 `launchpad` 枚举，须独立工单；竞品分池键未动。
+- **闸门阈值仍全部 `uncalibrated`**：本表只是**校准基建**，方案 §5 明确「S 档需 ≥3 个月、M 档 ≥6 个月、L 档 ≥1 年才有样本」；在样本积累前，任何「按 `gate_s_open` 分组比较 `ret_t30_pct`」的结论都**不得宣称统计显著**，前端「未校准」徽标保持不变。
+- **前向跟踪暂未接入任何前端/告警消费**：写入与回填是纯基建，无读取路径（避免在样本不足时被误读为业绩展示）。
+- **降级结论写 `thesis_id = 0` 的分支未实现**：`_build_fallback_thesis` 走的是读取侧实时拼装、**不落库**，故当前只有 `generate_research_thesis` 真实生成路径会写跟踪行（表结构与注释已预留 `thesis_id=0` 语义）。
+- **线上 runtime 复验待 Zeabur 重建后补**：「表存在」已直接对 prod 验证（见上「验证」段）；尚待确认的是**新生成结论会落行**（需在线上触发一次 `generate_research_thesis`，或等待真实用户/调度生成）。

@@ -103,6 +103,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("signal_type_calibration_weekly", "0 5 * * 0", "run_signal_type_calibration_backtest.py",
      ["--days", "30"], "signal_type 回测校准周级重算（每周日 05:00，写入 biz.signal_type_calibration）", "core"),
 
+    # ═══ 投研结论前向跟踪（P4，2026-09-27）═══
+    # 方案：04_架构与代码方案/投研页三档确定性可落地方案_2026-09-27.md §1.3/§5。
+    # biz.research_thesis 此前无任何前向收益链路 → 三档闸门阈值无数据可校准。
+    # 每日 07:50 回填 as_of+7/30/90 到期行的前向收益（幂等，含现成的 asset_market_daily 06:15 ETL 之后）。
+    ("thesis_forward_backfill", "50 7 * * *", "backfill_thesis_forward_track.py", [],
+     "投研结论前向跟踪回填 T+7/30/90 收益（每日 07:50，写入 biz.thesis_forward_track）", "core"),
+
     # ═══ 投研数据提取 ═══
     # P1-1: CMC 行情快照每日 3 次（04/12/20 UTC），防单日采集失败导致快照缺口
     # 脚本内建失败重试 3 次（指数退避），多时段 + 重试 = 单日零缺漏

@@ -1727,6 +1727,34 @@ def _ensure_research_tables(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_research_thesis_version_asset
                 ON biz.research_thesis_version (asset_id, created_at DESC)
         """)
+        # P4（2026-09-27）：投研结论前向跟踪表（方案 §1.3/§5）。同一份 DDL 亦落
+        # scripts/migrations/fix_072_thesis_forward_track.sql，此处保证容器内自愈。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS biz.thesis_forward_track (
+                track_id        SERIAL PRIMARY KEY,
+                thesis_id       INTEGER,
+                asset_id        INTEGER NOT NULL,
+                as_of           DATE NOT NULL,
+                tier_s_score    NUMERIC(5,1),
+                tier_m_score    NUMERIC(5,1),
+                tier_l_evaluable BOOLEAN,
+                gate_s_open     BOOLEAN,
+                gate_m_open     BOOLEAN,
+                price_at        NUMERIC,
+                ret_t7_pct      NUMERIC,
+                ret_t30_pct     NUMERIC,
+                ret_t90_pct     NUMERIC,
+                filled_at       TIMESTAMPTZ,
+                CONSTRAINT uq_thesis_forward UNIQUE (asset_id, as_of)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_thesis_forward_due
+                ON biz.thesis_forward_track (as_of) WHERE filled_at IS NULL
+        """)
+    # 项目教训（sync_unlock_events_from_json.py）：DDL 取 AccessExclusiveLock 后
+    # 若不立即 commit，会阻塞被建表/被 ALTER 表的所有读操作（曾达 15 分钟以上）。
+    conn.commit()
 
 
 def _build_doc_sources(doc_source_entries, research_urls, doc_assets, notebooklm_urls) -> list[dict]:
@@ -7997,6 +8025,146 @@ def get_latest_research_thesis(asset_id: int) -> dict | None:
     return _thesis_row_to_dict(row)
 
 
+# ── P4：投研结论前向跟踪（方案 §1.3/§5）──
+# 三档闸门阈值当前均标 uncalibrated（无前向样本）。本组函数补上「结论 → 前向收益」链路：
+# 生成时写一行（建仓基准），日级任务到期回填 T+7/30/90，积累后可验证闸门区分度。
+
+_THESIS_FORWARD_HORIZONS: tuple[tuple[int, str], ...] = (
+    (7, "ret_t7_pct"), (30, "ret_t30_pct"), (90, "ret_t90_pct"),
+)
+
+
+def _thesis_forward_payload(determinism_3tier: dict | None) -> dict:
+    """从三档确定性结果抽取前向跟踪落表字段。
+
+    缺档位时留 None（不臆造）：s/m 档恒存在，l 档 score 可能为 None（不可评估）→
+    tier_l_evaluable 按 tier 判定，未给出 tier 时同样留 None。
+    """
+    t3 = determinism_3tier or {}
+    s = t3.get("s") or {}
+    m = t3.get("m") or {}
+    l = t3.get("l") or {}
+    l_tier = l.get("tier")
+    return {
+        "tier_s_score": _to_float(s.get("score")),
+        "tier_m_score": _to_float(m.get("score")),
+        "tier_l_evaluable": (None if l_tier is None else (l_tier != "not_evaluable")),
+        "gate_s_open": (None if not s else bool((s.get("gate") or {}).get("open"))),
+        "gate_m_open": (None if not m else bool((m.get("gate") or {}).get("open"))),
+    }
+
+
+def _forward_return_pct(price_at, price_due) -> float | None:
+    """前向收益（%）= (到期价 / 基准价 - 1) × 100；任一侧缺失或非正 → None（不写假数）。"""
+    p0 = _to_float(price_at)
+    p1 = _to_float(price_due)
+    if not p0 or p0 <= 0 or not p1 or p1 <= 0:
+        return None
+    return round((p1 / p0 - 1.0) * 100.0, 2)
+
+
+def _fetch_as_of_price(cur, asset_id: int):
+    """取 as_of 建仓基准价：`market_date <= 北京今日` 的最近收盘价。
+
+    取「最近可得」而非严格当日：结论多在盘中生成，当日 ETL（每 6 小时）可能尚未写入
+    该资产的日行；若严格取当日会留下 price_at 永久为空的行，永远无法回填。
+    同一日期多来源时 cmc 优先、其次 cmc_historical（与 _build_structured_metrics_from_snapshot 同口径）。
+    """
+    cur.execute("""
+        SELECT price_usd FROM biz.asset_market_daily
+        WHERE asset_id = %s
+          AND source_code IN ('cmc', 'cmc_historical')
+          AND market_date <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
+          AND price_usd IS NOT NULL AND price_usd > 0
+        ORDER BY market_date DESC,
+                 CASE source_code WHEN 'cmc' THEN 0 ELSE 1 END
+        LIMIT 1
+    """, (asset_id,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return _to_float(row["price_usd"] if isinstance(row, dict) else row[0])
+
+
+def backfill_thesis_forward_track(log=None) -> dict:
+    """日级回填：对未完成的前向跟踪行，按 as_of+7/30/90 到期取价算前向收益。
+
+    - 幂等：已填的期次不重算；只填「已到期 且 该期次为空 且 price_at 非空」的格。
+    - price_at 为空 → 该行三期均跳过（无基准价算不出收益，不写假数），计入 skipped_no_price。
+    - 三期全部非空 → 置 filled_at（离开到期扫描索引）。
+    """
+    def _emit(msg: str) -> None:
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
+
+    stats = {"scanned": 0, "filled_cells": 0, "rows_completed": 0, "skipped_no_price": 0}
+    with get_db() as conn:
+        _ensure_research_tables(conn)
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT track_id, asset_id, as_of, price_at,
+                       ret_t7_pct, ret_t30_pct, ret_t90_pct,
+                       ((as_of + 7)  <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date) AS due_7,
+                       ((as_of + 30) <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date) AS due_30,
+                       ((as_of + 90) <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date) AS due_90
+                FROM biz.thesis_forward_track
+                WHERE filled_at IS NULL
+                ORDER BY as_of ASC
+            """)
+            rows = cur.fetchall()
+            stats["scanned"] = len(rows)
+
+            for r in rows:
+                price_at = _to_float(r["price_at"])
+                if not price_at:
+                    stats["skipped_no_price"] += 1
+                    continue
+                upd = {}
+                for days, col in _THESIS_FORWARD_HORIZONS:
+                    if not r[f"due_{days}"] or r[col] is not None:
+                        continue
+                    # 到期日（as_of+days）当日或之后的首个可得收盘价
+                    cur.execute(f"""
+                        SELECT price_usd FROM biz.asset_market_daily
+                        WHERE asset_id = %s
+                          AND source_code IN ('cmc', 'cmc_historical')
+                          AND market_date >= (%s::date + %s)
+                          AND price_usd IS NOT NULL AND price_usd > 0
+                        ORDER BY market_date ASC,
+                                 CASE source_code WHEN 'cmc' THEN 0 ELSE 1 END
+                        LIMIT 1
+                    """, (r["asset_id"], r["as_of"], days))
+                    prow = cur.fetchone()
+                    ret = _forward_return_pct(price_at, prow["price_usd"] if prow else None)
+                    if ret is not None:
+                        upd[col] = ret
+                if not upd:
+                    continue
+                sets = ", ".join(f"{c} = %s" for c in upd)
+                cur.execute(
+                    f"UPDATE biz.thesis_forward_track SET {sets} WHERE track_id = %s",
+                    (*upd.values(), r["track_id"]),
+                )
+                stats["filled_cells"] += len(upd)
+                merged = {c: (upd.get(c) if c in upd else r[c])
+                          for _d, c in _THESIS_FORWARD_HORIZONS}
+                if all(v is not None for v in merged.values()):
+                    cur.execute(
+                        "UPDATE biz.thesis_forward_track SET filled_at = NOW() WHERE track_id = %s",
+                        (r["track_id"],),
+                    )
+                    stats["rows_completed"] += 1
+        conn.commit()
+    _emit(
+        f"前向跟踪回填：扫描 {stats['scanned']} 行，填入 {stats['filled_cells']} 格，"
+        f"完成 {stats['rows_completed']} 行，无基准价跳过 {stats['skipped_no_price']} 行"
+    )
+    return stats
+
+
 def generate_research_thesis(asset_id: int, log=None) -> dict:
     """基于资料库生成结构化研究结论（stance/conviction/thesis/risks/catalysts/key_metrics）。
 
@@ -8904,6 +9072,31 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     _analysis["score"], _analysis["tier"],
                     _analysis["evidence"].get("inferred_ratio"),
                     json.dumps(thesis_payload, ensure_ascii=False, default=str),
+                ))
+                # P4（2026-09-27）：前向跟踪建仓行。按 (asset_id, as_of) 幂等 upsert ——
+                # 同资产同日重复生成只更新档位分数与闸门，不回退已填收益（upsert 不触碰 ret_*）。
+                # 收益回填由日级任务 backfill_thesis_forward_track 负责，此处只写 T+0 基准。
+                _fw = _thesis_forward_payload(_analysis.get("determinism_3tier"))
+                cur.execute("""
+                    INSERT INTO biz.thesis_forward_track
+                        (thesis_id, asset_id, as_of, tier_s_score, tier_m_score,
+                         tier_l_evaluable, gate_s_open, gate_m_open, price_at)
+                    VALUES (%s, %s, (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date,
+                            %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (asset_id, as_of) DO UPDATE SET
+                        thesis_id        = EXCLUDED.thesis_id,
+                        tier_s_score     = EXCLUDED.tier_s_score,
+                        tier_m_score     = EXCLUDED.tier_m_score,
+                        tier_l_evaluable = EXCLUDED.tier_l_evaluable,
+                        gate_s_open      = EXCLUDED.gate_s_open,
+                        gate_m_open      = EXCLUDED.gate_m_open,
+                        price_at         = COALESCE(EXCLUDED.price_at,
+                                                    biz.thesis_forward_track.price_at)
+                """, (
+                    row["thesis_id"], asset_id,
+                    _fw["tier_s_score"], _fw["tier_m_score"], _fw["tier_l_evaluable"],
+                    _fw["gate_s_open"], _fw["gate_m_open"],
+                    _fetch_as_of_price(cur, asset_id),
                 ))
         conn.commit()
 

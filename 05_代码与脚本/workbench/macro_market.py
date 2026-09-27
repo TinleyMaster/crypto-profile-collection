@@ -5131,7 +5131,8 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
     quotas = {
         "token_unlock": 3,
         "whale_flow": 3,
-        "mvrv_deep_over": 3,
+        # W-04：mvrv_deep_over 已改为持仓管理提示（direction=watch），不再进高危信号，
+        # 故此处不再为其保留配额。
         "mvrv_over_watch": 2,
         "fng_extreme": 2,
         "leverage_extreme": 2,
@@ -5145,8 +5146,10 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
     }
 
     # ── 1. 筛选风险类信号 ──
+    # W-04：mvrv_deep_over 是持仓管理提示（止盈，非看空），移出风险类，
+    # 只由「精选机会」承载；其 direction=watch 也不再命中 direction=="short"。
     risk_types = {
-        "token_unlock", "whale_flow", "mvrv_deep_over", "mvrv_over_watch",
+        "token_unlock", "whale_flow", "mvrv_over_watch",
         "fng_extreme", "leverage_extreme",
         # FEAT-SIGNAL-SRC 新增
         "price_crash", "sector_outflow",
@@ -5437,8 +5440,11 @@ def score_opportunities(overview: dict) -> dict:
             cycle_phase=cycle_phase, n_confirm=1,
         )
 
-    # ── MVRV 高估/极度高估（short 风险信号） ──
-    # 对称于深度低估/低估观察池，用于高危信号面板
+    # ── MVRV 高估/极度高估（持仓管理提示，非看空方向） ──
+    # W-04：原 direction="short" 会被渲染成「▼ 看空 91分」并排在首位——对只做
+    # 现货、无法做空的读者不可执行，且系统真正想表达的「不追高、中线止盈」被丢掉。
+    # 故 direction 由 short 改为 watch（不构成方向），文案移入 action_hint；
+    # 该条也不再进 risk_signals（它不是风险信号，是持仓管理提示）。
     overvalued_pct = t.get("mvrv_overvalued_pct", 75)
     deep_over_pct = t.get("mvrv_deep_overvalued_pct", 85)
     deep_over = sorted(
@@ -5456,14 +5462,14 @@ def score_opportunities(overview: dict) -> dict:
         strength = max(55, min(95, strength_base + int((avg_pct - deep_over_pct) * per_pct) + min(strength_cap, n_coins * per_coin)))
         _push_opportunity(
             {"target": f"{len(deep_over)} 币 MVRV 极度高估",
-             "direction": "short", "confidence": "high",
+             "direction": "watch", "confidence": "high",
              "conviction_score": strength,
              "signal_type": "mvrv_deep_over",
              "key_metric": f"MVRV ≥{deep_over_pct}%",
              "trigger_logic": (
                  f"{symbols} 等 {n_coins} 个代币 MVRV 百分位 ≥{deep_over_pct}%"
              ),
-             "action_hint": "估值极度偏高，注意回调风险",
+             "action_hint": "不追高 · 中线止盈",
              "invalidation": f"若 MVRV 回落至 <{deep_over_pct}% 或出现新催化剂",
              "related_dims": ["mvrv_universe", "P0-1 估值回归"],
              "involved_symbols": [c.get("symbol") for c in deep_over]},

@@ -602,5 +602,83 @@ check(_html_wn.find("LOWCALX") != -1 and _html_wn.find("LOWCALX") < _html_wn.fin
       "calibrated_low(50) 排在无校准字段(99) 之前")
 
 # ════════════════════════════════════════════════════════
+# W-04 MVRV over 方向语义：止盈 ≠ 看空
+# ════════════════════════════════════════════════════════
+print("[W-04] 源码核验：mvrv_deep_over 不再为 short，且不列入风险类型")
+_mm_src = open(os.path.join(os.path.dirname(_HERE), "workbench", "macro_market.py"),
+               encoding="utf-8").read()
+_ds = _mm_src.find('"target": f"{len(deep_over)} 币 MVRV 极度高估"')
+_de = _mm_src.find("over_watch = [", _ds)
+_block = _mm_src[_ds:_de] if _ds != -1 and _de != -1 else ""
+check('"direction": "watch"' in _block, "mvrv_deep_over 的 direction 已改为 watch")
+check('"direction": "short"' not in _block, "mvrv_deep_over 生成块内不再出现 short")
+check('"action_hint": "不追高 · 中线止盈"' in _block, "action_hint 承载「不追高 · 中线止盈」")
+_rt = _mm_src.find("risk_types = {")
+_rt_end = _mm_src.find("}", _rt)
+check("mvrv_deep_over" not in _mm_src[_rt:_rt_end],
+      "risk_types 不再含 mvrv_deep_over（该条不进 risk_signals）")
+
+print("[W-04] 注入：direction=short 的 mvrv_deep_over 不再渲染为看空")
+_bo = _brief()
+_bo.pop("M3_highlights", None)
+_bo.pop("M4_risks", None)
+_bo["M8_watchlist"] = [{
+    "target": "MVRVTEST", "conviction_tier": "MED", "conviction_score": 91,
+    "direction": "short", "signal_type": "mvrv_deep_over",
+    "trigger_logic": "doge, ada 等 2 个代币 MVRV 百分位 ≥85%",
+    "action_hint": "不追高 · 中线止盈",
+}]
+_ho = sdb.render_brief_html(_bo)
+check("止盈提示" in _ho, "mvrv_deep_over(short) → 渲染「◆ 止盈提示」")
+check("▼ 看空" not in _ho, "不再渲染为「▼ 看空」（对只做现货读者不可执行）")
+check("不追高 · 中线止盈" in _ho, "文案取 action_hint")
+
+print("[W-04] 注入：direction=watch + action_hint → 文案为 action_hint")
+_bo2 = _brief()
+_bo2.pop("M3_highlights", None)
+_bo2.pop("M4_risks", None)
+_bo2["M8_watchlist"] = [{
+    "target": "WATCHTEST", "conviction_tier": "MED", "conviction_score": 55,
+    "direction": "watch", "signal_type": "mvrv_deep_over",
+    "trigger_logic": "MVRV 百分位 90%", "action_hint": "不追高 · 中线止盈",
+}]
+_ho2 = sdb.render_brief_html(_bo2)
+check("止盈提示" in _ho2 and "不追高 · 中线止盈" in _ho2, "watch 卡渲染止盈提示 + action_hint 文案")
+
+print("[W-04] 持仓提示区：被 top-N 截断的 watch/止盈卡仍上屏")
+_bh = _brief()
+_bh.pop("M3_highlights", None)
+_bh.pop("M4_risks", None)
+_bh["M8_watchlist"] = [
+    {"target": f"FILLER{i}", "conviction_tier": "LOW", "conviction_score": 40,
+     "direction": "long", "trigger_logic": "填充", "calibration_status": {"gate": "calibrated_low"}}
+    for i in range(7)
+] + [
+    {"target": "MVRVBURIED", "conviction_tier": "MED", "conviction_score": 91,
+     "direction": "watch", "signal_type": "mvrv_deep_over", "trigger_logic": "MVRV 百分位 90%",
+     "action_hint": "不追高 · 中线止盈", "calibration_status": {"gate": "exempt_not_backtestable"}},
+]
+_html_hh = sdb.render_brief_html(_bh)
+check("◆ 持仓提示" in _html_hh, "出现「◆ 持仓提示」区")
+check("MVRVBURIED" in _html_hh and "不追高 · 中线止盈" in _html_hh,
+      "被 top-N 截断的止盈卡仍在持仓提示区上屏（不被埋没）")
+
+print("[W-04] 数据层：mvrv_deep_over 不再进入 risk_signals")
+try:
+    import macro_market as _mmw  # noqa: E402
+    _ro = [
+        {"target": "2 币 MVRV 极度高估", "direction": "watch", "signal_type": "mvrv_deep_over",
+         "conviction_score": 91, "conviction_tier": "MED", "related_dims": ["mvrv_universe"]},
+        {"target": "SOMECOIN", "direction": "short", "signal_type": "whale_flow",
+         "conviction_score": 80, "conviction_tier": "HIGH", "related_dims": ["a", "b"]},
+    ]
+    _sel = _mmw.select_risk_signals(_ro, max_total=8)
+    _sel_types = [s.get("signal_type") for s in _sel]
+    check("mvrv_deep_over" not in _sel_types, "select_risk_signals 不再输出 mvrv_deep_over")
+    check("whale_flow" in _sel_types, "真风险信号（whale_flow）仍被选出（不误伤）")
+except Exception as _e:
+    check(False, "W-04 数据层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

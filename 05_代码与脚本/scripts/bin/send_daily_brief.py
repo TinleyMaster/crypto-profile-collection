@@ -1487,8 +1487,12 @@ def render_brief_html(brief: dict) -> str:
         <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按可验证性（是否被回测）分组 · 组内按证据等级与分数排序 · 仅供参考</div>
     """)
 
+    _shown_keys: set = set()
     if all_opps:
         display_opps = all_opps[:8 if is_fallback else 6]
+        # W-04：记录已在上方「精选机会」出现（含折叠去向）的标的，供下方「持仓提示」去重。
+        for _o in all_opps[:8 if is_fallback else 6]:
+            _shown_keys |= _target_keys(_o.get("target"), _o.get("symbol"), _o.get("name"))
         # M4-1 单一口径裁决：剔除已在「交易方向/高亮/高危/赛道轮动」给出结论的标的，
         # 折叠为「关联」一行，避免同一标的在邮件内出现两份分数/方向结论。
         _folded_opps, _kept_opps = [], []
@@ -1535,9 +1539,26 @@ def render_brief_html(brief: dict) -> str:
                 badge_color = "#475569"
                 card_bg = "#f8fafc"
 
-            dir_icon = "▲" if direction == "long" else "▼" if direction == "short" else "◆"
-            dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
-            dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
+            # W-04：估值类（MVRV）是持仓管理提示（止盈），不是看空方向；即便拿到旧
+            # 数据（direction=short），也不得渲染成「▼ 看空」。用中性「◆ 止盈提示」
+            # 并取 action_hint 作为文案。其余 watch/neutral（如 github/博弈）用「◆ 观望」，
+            # 避免把「开发停滞」等误标成「止盈」。
+            _is_val_hint = (opp.get("signal_type") in ("mvrv_deep_over", "mvrv_over_watch")
+                            or bool(opp.get("is_valuation")))
+            _is_hold_hint = (direction in ("watch", "neutral") or _is_val_hint)
+            if _is_val_hint:
+                dir_icon, dir_color, dir_cn = "◆", "#64748b", "止盈提示"
+            elif direction in ("watch", "neutral"):
+                dir_icon, dir_color, dir_cn = "◆", "#94a3b8", "观望"
+            else:
+                dir_icon = "▲" if direction == "long" else "▼" if direction == "short" else "◆"
+                dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
+                dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
+
+            _ah = str(opp.get("action_hint") or "").strip()
+            body_text = trigger
+            if _is_hold_hint and _ah:
+                body_text = f"{_ah} · {trigger}" if trigger else _ah
 
             # W-03：可验证性徽章——从未回测/exempt_* 显式标「未回测」，与 calibrated_ok
             # 的「回测背书」对称，避免读者把「没回测过」误当「同等可信」。
@@ -1582,7 +1603,7 @@ def render_brief_html(brief: dict) -> str:
               </div>
               {f'<div style="font-size:10.5px;color:#64748b">{meta_str}</div>' if meta_str else ''}
               {src_html}
-              <div style="color:#475569;font-size:11px;margin-top:4px;line-height:1.4">{trigger}</div>
+              <div style="color:#475569;font-size:11px;margin-top:4px;line-height:1.4">{body_text}</div>
             </div>
             """)
         # M4-1：折叠项以「关联」一行说明去向（信息不丢，只是不再并排列示）
@@ -1597,6 +1618,45 @@ def render_brief_html(brief: dict) -> str:
         html_parts.append('<div style="color:#94a3b8;font-size:12px;padding:16px;text-align:center">暂无推荐机会</div>')
 
     html_parts.append("</div>")
+
+    # ════════════════════════════════════════════════════════
+    # 模块 6b：◆ 持仓提示（W-04）
+    # ════════════════════════════════════════════════════════
+    # direction=watch/neutral 中的**估值类**（MVRV）不是看空方向，而是持仓者动作
+    # （不追高 / 中线止盈）。它们会被「精选机会」按 gate 沉到尾部、被 top-N 截断，
+    # 故独立小卡承载，避免「止盈」这一真正可执行的提示被埋没。
+    # 仅收估值类（mvrv_* / is_valuation）；github「开发停滞」等 watch 不是止盈，不并入。
+    _hold_hints = []
+    for _o in all_opps:
+        _is_val = (_o.get("signal_type") in ("mvrv_deep_over", "mvrv_over_watch")
+                   or bool(_o.get("is_valuation")))
+        if not _is_val:
+            continue
+        if _target_keys(_o.get("target"), _o.get("symbol"), _o.get("name")) & _shown_keys:
+            continue
+        _hold_hints.append(_o)
+    if _hold_hints:
+        _hh_rows = []
+        for _h in _hold_hints[:3]:
+            _tgt = _h.get("target") or _h.get("symbol") or "?"
+            _hint = str(_h.get("action_hint") or "").strip()
+            _metric = str(_h.get("key_metric") or "").strip()
+            _tail = " · ".join(x for x in (_hint, _metric) if x)
+            _hh_rows.append(
+                '<div style="padding:7px 10px;margin:4px 0;border-radius:6px;'
+                'background:#f8fafc;border-left:3px solid #94a3b8">'
+                f'<span style="font-size:13px;font-weight:700;color:#0f172a">{_tgt}</span>'
+                '<span style="color:#64748b;font-size:12px;font-weight:600;margin-left:6px">◆ 止盈提示</span>'
+                f'<div style="color:#475569;font-size:11px;margin-top:3px">{_tail}</div></div>'
+            )
+        html_parts.append(f"""
+      <!-- 模块6b：持仓提示 -->
+      <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+        <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">◆ 持仓提示</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:6px">估值高位的不追高 / 止盈提示 · 非做空方向 · 仅供参考</div>
+        {''.join(_hh_rows)}
+      </div>
+    """)
 
     # ════════════════════════════════════════════════════════
     # 其他信号（精简折叠区）

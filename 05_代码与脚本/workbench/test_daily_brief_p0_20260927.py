@@ -349,6 +349,52 @@ except Exception as _e:
     check(False, "prompt 层用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
+# W-02 风险条目与系统自身判定一致性校验
+# ════════════════════════════════════════════════════════
+print("[W-02] 源码核验：校验函数存在且被调用；prompt 含第 6 条约束")
+try:
+    import macro_market as _mm2  # noqa: E402
+    _mm2_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
+    check("def _validate_against_payload" in _mm2_src, "校验函数 _validate_against_payload 存在")
+    check("_validate_against_payload(_raw_risks, brief, payload" in _mm2_src
+          and "_validate_against_payload(_raw_trades, brief, payload" in _mm2_src,
+          "risk_warnings / trade_suggestions 返回前均调用校验")
+    check("6. 风险条目若引用系统已判定的信号" in _mm2_src, "system prompt 含第 6 条硬约束")
+    check("generate_morning_brief_ai_summary(brief, today)" in _mm2_src,
+          "组装层把 payload 传给 AI 摘要（供校验读系统判定）")
+
+    _b_w02 = {"M4_risks": [{"target": "恐贪指数极度贪婪", "direction": "short",
+                            "signal_type": "fng_extreme"}], "M3_highlights": []}
+    _p_none = {"summary": {"emotion_subscore": {"components": {
+        "fear_greed": {"score": 70.0, "value": 70.0, "extreme": "NONE", "percentile": None}}}}}
+    _p_high = {"summary": {"emotion_subscore": {"components": {
+        "fear_greed": {"score": 92.0, "value": 92.0, "extreme": "HIGH", "percentile": 99.0}}}}}
+    _item = "恐贪指数极度贪婪，市场情绪过热可能引发短期剧烈回调"
+
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        _kept = _mm2._validate_against_payload([_item], _b_w02, _p_none, kind="risk")
+    check(_kept == [], "extreme=NONE + 「极度贪婪」→ 该条被丢弃")
+    check("丢弃与系统判定矛盾的条目" in _buf.getvalue() and "extreme=NONE" in _buf.getvalue(),
+          "丢弃日志含原文与 payload 判定", _buf.getvalue()[-200:])
+
+    _kept2 = _mm2._validate_against_payload([_item], _b_w02, _p_high, kind="risk")
+    check(_kept2 == [_item], "extreme=HIGH（系统判定为极值）→ 同文案保留")
+
+    _kept3 = _mm2._validate_against_payload(["BTC 跌破 107200 则止损离场"], _b_w02, _p_none)
+    check(_kept3 == ["BTC 跌破 107200 则止损离场"], "与系统信号无关的条目不被误伤")
+
+    _b_sol = {"M3_highlights": [{"target": "SOL", "symbol": "SOL", "direction": "long"}]}
+    _kept4 = _mm2._validate_against_payload(
+        [{"asset": "SOL", "direction": "做空", "reason": "逆势"}], _b_sol, None, kind="trade")
+    check(_kept4 == [], "方向矛盾（payload long vs 建议做空）→ 丢弃")
+    _kept5 = _mm2._validate_against_payload(
+        [{"asset": "SOL", "direction": "做多", "reason": "顺势"}], _b_sol, None, kind="trade")
+    check(_kept5 and _kept5[0]["direction"] == "做多", "方向一致 → 保留")
+except Exception as _e:
+    check(False, "W-02 用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 # P1-a 交易方向可执行化（六要素齐备才进「交易方向」区）
 # ════════════════════════════════════════════════════════
 print("[P1-a] 六要素齐备 → 结构化渲染 ≥5 行")

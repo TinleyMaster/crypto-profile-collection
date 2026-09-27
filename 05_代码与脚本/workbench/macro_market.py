@@ -7784,10 +7784,92 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
         return {"status": "error", "unlocks": [], "error": str(e)}
 
 
-def generate_morning_brief_ai_summary(brief: dict) -> dict:
+# ── W-02 风险/建议条目与系统自身判定的一致性校验 ───────────────────────────
+# 根因（2026-09-27 连库核验）：同一份 payload 内，系统把恐贪判为 extreme=NONE
+# （70 分属 Greed），却同时存在一条 target 名为「恐贪指数极度贪婪」的风险信号；
+# LLM 照抄后，邮件对一条从未回测（gate=exempt_not_backtestable，样本 0）的信号
+# 使用了比系统更极端的措辞。此处做后置校验：LLM 的风险/建议若引用了系统已判定的
+# 信号，其极值/方向措辞不得与系统判定矛盾；矛盾条直接丢弃（宁可不说，不可说反）。
+_EXTREME_WORDS = ("极度", "极端", "极为", "史上最", "空前")
+_BULL_WORDS = ("做多", "看多", "看涨", "买入", "抄底", "增持")
+_BEAR_WORDS = ("做空", "看空", "看跌", "卖出", "减仓", "抛售")
+# 仅纳入**带 extreme 字段**的情绪组件（fear_greed / cefi）。derivative 的
+# mvrv_extreme 是「大盘 MVRV」分位判据，与具体币种 MVRV 分位不是同一件事，纳入会误伤。
+_EMOTION_ALIASES = {"fear_greed": ("恐贪", "恐惧贪婪"), "cefi": ("cefi", "机构情绪")}
+
+
+def _system_judgements(brief: dict, payload: dict | None = None) -> list[dict]:
+    """收集系统自身对信号的判定，供 _validate_against_payload 比对。
+
+    - 情绪极值：payload.summary.emotion_subscore.components[*].extreme
+      （extreme="NONE" 表示系统**未**判定为极值）。
+    - 信号方向：brief 的风险/高亮/机会清单（target → direction）。
+    """
+    out: list[dict] = []
+    comps = ((((payload or {}).get("summary") or {}).get("emotion_subscore") or {})
+             .get("components") or {})
+    for key, aliases in _EMOTION_ALIASES.items():
+        c = comps.get(key)
+        if not isinstance(c, dict):
+            continue
+        out.append({"label": key, "aliases": aliases,
+                    "extreme": str(c.get("extreme") or "NONE").upper(), "direction": None})
+    for sec, dflt in (("M4_risks", "short"), ("M3_highlights", "long"),
+                      ("M8_opportunities", None), ("M8_watchlist", None)):
+        for s in (brief.get(sec) or []):
+            tgt = (s or {}).get("target")
+            sym = (s or {}).get("symbol")
+            aliases = tuple(a for a in (str(tgt or ""), str(sym or "")) if a)
+            if not aliases:
+                continue
+            out.append({"label": str(tgt or sym), "aliases": aliases, "extreme": None,
+                        "direction": str((s or {}).get("direction") or dflt or "").lower()})
+    return out
+
+
+def _validate_against_payload(items: list, brief: dict, payload: dict | None = None,
+                              kind: str = "risk") -> list:
+    """W-02：丢弃与系统自身判定矛盾的 LLM 条目（极值措辞 / 方向）。
+
+    仅在条目**引用了系统已判定的信号**时才比对，避免误伤与既有信号无关的表述。
+    返回保留的条目；被丢弃的条目打印 [ai_summary] 日志。
+    """
+    judgements = _system_judgements(brief, payload)
+    kept: list = []
+    for it in (items or []):
+        if isinstance(it, dict):
+            text = " ".join(str(it.get(f) or "") for f in ("asset", "direction", "reason", "target", "trigger"))
+        else:
+            text = str(it)
+        if not text.strip():
+            kept.append(it)
+            continue
+        norm = _norm_target_key(text)
+        reason = ""
+        for j in judgements:
+            if not any(_norm_target_key(a) and _norm_target_key(a) in norm for a in j["aliases"]):
+                continue
+            if j.get("extreme") == "NONE" and any(w in text for w in _EXTREME_WORDS):
+                reason = f"payload: extreme=NONE（{j['label']} 系统未判定为极值）"
+                break
+            d = j.get("direction")
+            if d == "short" and any(w in text for w in _BULL_WORDS):
+                reason = f"payload: {j['label']} direction=short"
+                break
+            if d == "long" and any(w in text for w in _BEAR_WORDS):
+                reason = f"payload: {j['label']} direction=long"
+                break
+        if reason:
+            print(f"[ai_summary] 丢弃与系统判定矛盾的条目: {it}（{reason}）")
+        else:
+            kept.append(it)
+    return kept
+
+
+def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) -> dict:
     """用 LLM 生成早报今日定调 + 交易方向建议。
 
-    输入：brief 完整数据
+    输入：brief 完整数据；payload=大盘 overview 快照（W-02 供一致性校验读系统判定）
     输出：{headline, market_regime, bias, conviction, key_drivers, trade_suggestions, risk_warnings}
     """
     try:
@@ -7965,7 +8047,9 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
 4. 若某维度在【数据可用性】中标为 empty/error，凡依赖它的结论必须标注"依据不足"，
    不得据此下任何断言。
 5. 禁止为凑满建议数量而给出低置信度或无条件的方向。
-6. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
+6. 风险条目若引用系统已判定的信号，其极值/方向措辞必须与系统判定一致。
+   系统标 extreme=NONE 的指标，不得表述为「极度」「极端」。
+7. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
@@ -8021,6 +8105,31 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
 
         data = extract_json_from_llm_response(raw)
 
+        # ── W-02 后置校验：丢弃与系统自身判定（极值/方向）矛盾的条目 ──
+        _raw_trades = [
+            {
+                "direction": str(s.get("direction", "")),
+                "asset": str(s.get("asset", "")),
+                "horizon": str(s.get("horizon", "")),
+                # P1-a 可执行化：6 要素透传（缺任一，渲染层会将该条踢出「交易方向」区）
+                "trigger": str(s.get("trigger", ""))[:160],
+                "invalidate": str(s.get("invalidate", ""))[:160],
+                "target": str(s.get("target", ""))[:120],
+                "ref_price": ("" if s.get("ref_price") is None else str(s.get("ref_price"))[:24]),
+                "ref_as_of": str(s.get("ref_as_of", ""))[:40],
+                "reason": str(s.get("reason", ""))[:200],
+                "confidence": str(s.get("confidence", "medium")).lower(),
+            }
+            for s in (data.get("trade_suggestions") or [])[:5]
+        ]
+        _raw_risks = [str(x)[:200] for x in (data.get("risk_warnings") or [])][:5]
+        trade_suggestions = _validate_against_payload(_raw_trades, brief, payload, kind="trade")
+        risk_warnings = _validate_against_payload(_raw_risks, brief, payload, kind="risk")
+        no_trade_reason = str(data.get("no_trade_reason", ""))[:200]
+        # 全被丢弃 → 走「无操作」分支（与 P0-c 一致，只降不升）
+        if _raw_trades and not trade_suggestions and not no_trade_reason:
+            no_trade_reason = "所有建议条目与系统自身判定矛盾，已剔除；今日不给出方向"
+
         return {
             "status": "ok",
             "headline": str(data.get("headline", ""))[:80],
@@ -8029,26 +8138,11 @@ def generate_morning_brief_ai_summary(brief: dict) -> dict:
             "conviction": str(data.get("conviction", "medium")).lower(),
             "key_drivers": [str(x)[:200] for x in (data.get("key_drivers") or [])][:5],
             "sector_rotation": str(data.get("sector_rotation", ""))[:200],
-            "trade_suggestions": [
-                {
-                    "direction": str(s.get("direction", "")),
-                    "asset": str(s.get("asset", "")),
-                    "horizon": str(s.get("horizon", "")),
-                    # P1-a 可执行化：6 要素透传（缺任一，渲染层会将该条踢出「交易方向」区）
-                    "trigger": str(s.get("trigger", ""))[:160],
-                    "invalidate": str(s.get("invalidate", ""))[:160],
-                    "target": str(s.get("target", ""))[:120],
-                    "ref_price": ("" if s.get("ref_price") is None else str(s.get("ref_price"))[:24]),
-                    "ref_as_of": str(s.get("ref_as_of", ""))[:40],
-                    "reason": str(s.get("reason", ""))[:200],
-                    "confidence": str(s.get("confidence", "medium")).lower(),
-                }
-                for s in (data.get("trade_suggestions") or [])[:5]
-            ],
-            "risk_warnings": [str(x)[:200] for x in (data.get("risk_warnings") or [])][:5],
+            "trade_suggestions": trade_suggestions,
+            "risk_warnings": risk_warnings,
             "watchlist": [str(x)[:30] for x in (data.get("watchlist") or [])][:8],
             # 默认无操作：trade_suggestions 可为空数组，空时必须给 no_trade_reason（渲染层据此展示「⚪ 今日无操作」）
-            "no_trade_reason": str(data.get("no_trade_reason", ""))[:200],
+            "no_trade_reason": no_trade_reason,
             # 各维度可用性（empty/error=无数据），供渲染层标注证据覆盖数与依据不足
             "data_quality": data_quality,
         }
@@ -8690,7 +8784,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     # ── AI 今日定调 + 交易建议（可选） ──
     if use_ai:
         try:
-            ai_summary = generate_morning_brief_ai_summary(brief)
+            ai_summary = generate_morning_brief_ai_summary(brief, today)
             brief["M0_ai_summary"] = ai_summary
         except Exception as e:
             print(f"[morning_brief] AI summary failed: {e}")

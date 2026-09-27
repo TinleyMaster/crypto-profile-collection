@@ -16,7 +16,7 @@
   · ref_price 为空 或 无 asset_id → 该行跳过（无基准价算不出收益，不写假数）。
 
 用法：
-    python backfill_opportunity_outcome.py            # 增量：处理所有未回填 T+7 的到期行
+    python backfill_opportunity_outcome.py            # 增量：处理 outcome_1d/outcome_7d 任一为空的到期行
     python backfill_opportunity_outcome.py --limit 500
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ def backfill_opportunity_outcome(limit: int | None = None, log=print) -> dict:
                        ((snapshot_date + 1) <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date) AS due_1,
                        ((snapshot_date + 7) <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date) AS due_7
                 FROM biz.opportunity_snapshot
-                WHERE outcome_7d IS NULL
+                WHERE outcome_1d IS NULL OR outcome_7d IS NULL
                 ORDER BY snapshot_date ASC
             """
             if limit:

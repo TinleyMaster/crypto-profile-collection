@@ -303,6 +303,26 @@ def _to_int(v):
     return int(f) if f is not None else None
 
 
+# ── 非单品信号（W-13-R1）─────────────────────────────────────────────
+# 这些 signal_type 的 target 是**聚合口径**（多币 / 板块 / 链 / 叙事情绪），payload 里带的
+# asset_id 只是组装时的「代表币」（如「2 币 MVRV 极度高估」→ ADA、「恐贪指数极度贪婪」→ BTC）。
+# 若照抄进 opportunity_snapshot，回填会把聚合结论的错误归因到单币，污染按 gate 分组的效果判据。
+# 故这些类型一律置 asset_id/ref_price 为 NULL（该行如实记「不可按单币追踪」）。
+_NON_ASSET_SIGNAL_TYPES = frozenset({
+    "narrative", "chain_inflow", "chain_outflow", "stablecoin_inflow",
+    "fng_extreme", "leverage_extreme",
+})
+_NON_ASSET_SIGNAL_PREFIXES = ("mvrv_", "sector_")
+
+
+def _is_asset_level_signal(sig) -> bool:
+    """该信号是否可归因到单个资产（决定 asset_id/ref_price 是否落库）。"""
+    s = str(sig or "").strip().lower()
+    if not s or s in _NON_ASSET_SIGNAL_TYPES:
+        return False
+    return not s.startswith(_NON_ASSET_SIGNAL_PREFIXES)
+
+
 def _collect_opportunity_rows(brief: dict) -> list[dict]:
     """W-13：从 brief 抽取机会清单行（M8_opportunities + M8_watchlist）。
 
@@ -310,6 +330,8 @@ def _collect_opportunity_rows(brief: dict) -> list[dict]:
     其余进 M8_watchlist）。按 (target, signal_type) 去重——与表主键一致，
     避免同一 INSERT 内二次命中同一行（ON CONFLICT 会报 "cannot affect row a second time"）；
     同键取分数更高者。
+
+    非单品信号（见 `_NON_ASSET_SIGNAL_TYPES`）的 asset_id 强制为 None，避免前向收益归因错位。
     """
     seen: dict = {}
     for o in (brief.get("M8_opportunities") or []) + (brief.get("M8_watchlist") or []):
@@ -328,7 +350,8 @@ def _collect_opportunity_rows(brief: dict) -> list[dict]:
             "calibration_gate": cal.get("gate"),
             "sample_count": _to_int(cal.get("sample_count")),
             "hit_rate": _to_num(cal.get("hit_rate")),
-            "asset_id": _to_int(o.get("asset_id")),
+            # 非单品信号（聚合口径）不落 asset_id → 顺带 ref_price 也为空
+            "asset_id": _to_int(o.get("asset_id")) if _is_asset_level_signal(sig) else None,
         }
         prev = seen.get((target, sig))
         if prev is None or (row["conviction_score"] or 0) > (prev["conviction_score"] or 0):
@@ -337,10 +360,13 @@ def _collect_opportunity_rows(brief: dict) -> list[dict]:
 
 
 def _resolve_ref_prices(asset_ids: list) -> dict:
-    """W-13：批量取各 asset_id 的建仓基准价（`market_date <= 北京今日` 的最近收盘价）。
+    """W-13：批量取各 asset_id 的建仓基准价及**该价的真实日期**。
 
-    与 db_stats._fetch_as_of_price 同口径（cmc 优先、cmc_historical 次之）：结论多为盘中生成，
-    当日 ETL 可能尚未写入该资产日行，取「最近可得」而非严格当日，避免 ref_price 永久为空。
+    - 价格口径与 db_stats._fetch_as_of_price 一致（cmc 优先、cmc_historical 次之）：结论多为
+      盘中生成，当日 ETL 可能尚未写入该资产日行，取「最近可得」而非严格当日，避免 ref_price
+      永久为空。
+    - 返回 `{asset_id: (price, price_date)}`；`price_date` 为实际取价对应的 market_date
+      （W-13-R2：window 可审计，避免「名义窗口 ≠ 实际窗口」）。
     """
     if not asset_ids:
         return {}
@@ -353,7 +379,7 @@ def _resolve_ref_prices(asset_ids: list) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT ON (asset_id) asset_id, price_usd
+                    SELECT DISTINCT ON (asset_id) asset_id, price_usd, market_date
                     FROM biz.asset_market_daily
                     WHERE asset_id = ANY(%s)
                       AND source_code IN ('cmc', 'cmc_historical')
@@ -365,7 +391,7 @@ def _resolve_ref_prices(asset_ids: list) -> dict:
                     """,
                     (list(asset_ids),),
                 )
-                return {int(r[0]): float(r[1]) for r in cur.fetchall() if r[1] is not None}
+                return {int(r[0]): (float(r[1]), r[2]) for r in cur.fetchall() if r[1] is not None}
     except Exception as e:
         print(f"[opp_snapshot] 基准价解析失败（ref_price 记 NULL）: {e}")
         return {}
@@ -388,7 +414,8 @@ def _save_opportunity_snapshot(brief_date: str, brief: dict) -> int:
             brief_date, r["target"], r["signal_type"], r["direction"],
             r["conviction_score"], r["conviction_tier"], r["calibration_gate"],
             r["sample_count"], r["hit_rate"],
-            prices.get(r["asset_id"]) if r["asset_id"] is not None else None,
+            prices[r["asset_id"]][0] if r["asset_id"] in prices else None,
+            prices[r["asset_id"]][1] if r["asset_id"] in prices else None,
             r["asset_id"],
         )
         for r in rows
@@ -405,8 +432,8 @@ def _save_opportunity_snapshot(brief_date: str, brief: dict) -> int:
                     INSERT INTO biz.opportunity_snapshot (
                         snapshot_date, target, signal_type, direction, conviction_score,
                         conviction_tier, calibration_gate, sample_count, hit_rate,
-                        ref_price, asset_id
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ref_price, ref_price_date, asset_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (snapshot_date, target, signal_type) DO UPDATE
                       SET direction        = EXCLUDED.direction,
                           conviction_score = EXCLUDED.conviction_score,
@@ -415,6 +442,7 @@ def _save_opportunity_snapshot(brief_date: str, brief: dict) -> int:
                           sample_count     = EXCLUDED.sample_count,
                           hit_rate         = EXCLUDED.hit_rate,
                           ref_price        = EXCLUDED.ref_price,
+                          ref_price_date   = EXCLUDED.ref_price_date,
                           asset_id         = EXCLUDED.asset_id,
                           updated_at       = NOW()
                     """,

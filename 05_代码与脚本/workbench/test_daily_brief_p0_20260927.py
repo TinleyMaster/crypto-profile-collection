@@ -2,8 +2,12 @@
 """早报「投资指导意义」重构 P0 回归护栏（方案_大盘早报_投资指导意义重构_2026-09-27）。
 
 运行：.venv/bin/python workbench/test_daily_brief_p0_20260927.py
-      （纯离线：渲染层喂合成 brief；prompt 层用假 LLM 捕获 system/user prompt；
-        不连 prod DB、不发信）
+      （渲染层喂合成 brief；prompt 层用假 LLM 捕获 system/user prompt；不发信。
+        ⚠️ **并非全离线**：默认全离线；但显式设 PROBE_ALLOW_DB_WRITE=1 后，W-06 注入用例
+        会**连 prod 库**、在哨兵日期 1900-01-01 上 INSERT+DELETE（跑完即删，异常也兜底清理）。
+        历史坑：该用例原以 DATABASE_URL 为门控，而探针前面的 get_settings(require_database=True)
+        会经 load_local_env_file() 把 DATABASE_URL 写进 os.environ → 「离线默认」永远不成立、
+        必然写库。故改为显式 opt-in（W-16-c）。）
 
   P0-a：去硬编码置信度（删 {"high":85,...}）→ 头部改「证据覆盖 N/M 项」
   P0-b：数据门控 missing ≠ 0（None-aware 渲染 + 空段标注 + data_quality 块 + 硬约束）
@@ -230,6 +234,32 @@ _kol_block = _kol_src[_kol_src.find("# KOL 链上信号（兜底）"):_kol_src.f
 _kol_code = "\n".join(l for l in _kol_block.splitlines() if not l.strip().startswith("#"))
 check("event_time" in _kol_code, "KOL 卡代码含 event_time")
 check("created_at" not in _kol_code, "KOL 卡代码不再出现 created_at（注释除外）")
+
+print("[W-01] 行为注入：event_time 全空→不出 / 有 event_time+金额→出 / 有 event_time 无金额→过滤")
+try:
+    _bw1 = _brief()
+    _bw1["kol_onchain"] = {"status": "ok", "kols": [{"name": "A"}], "signals": [
+        {"symbol": "AAA", "signal_subtype": "whale_move", "kol_name": "A"},
+    ]}
+    check("KOL 链上信号" not in sdb.render_brief_html(_bw1), "event_time 全空 → 整块不出（不渲染空卡）")
+
+    _bw1b = _brief()
+    _bw1b["kol_onchain"] = {"status": "ok", "kols": [{"name": "A"}], "signals": [
+        {"symbol": "AAA", "signal_subtype": "whale_move", "kol_name": "A",
+         "event_time": "2026-09-27 10:30:00", "event_usd_value": 2000000, "event_direction": "in"},
+    ]}
+    _hw1b = sdb.render_brief_html(_bw1b)
+    check("KOL 链上信号" in _hw1b, "有 event_time + 金额 → 出卡")
+    check("2.0M USD" in _hw1b and "事件时间 2026-09-27 10:30" in _hw1b, "金额与事件时间一并上屏")
+
+    _bw1c = _brief()
+    _bw1c["kol_onchain"] = {"status": "ok", "kols": [{"name": "A"}], "signals": [
+        {"symbol": "AAA", "signal_subtype": "whale_move", "kol_name": "A",
+         "event_time": "2026-09-27 10:30:00", "event_direction": "in"},
+    ]}
+    check("KOL 链上信号" not in sdb.render_brief_html(_bw1c), "有 event_time 无金额 → 过滤不出")
+except Exception as _e:
+    check(False, "W-01 行为注入执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
 # P0-f 邮件未发出不得静默成功（AST 守卫，比字符串 grep 精确）
@@ -755,9 +785,9 @@ finally:
         else:
             os.environ.pop(k, None)
 
-# ③ 注入测试（需 DATABASE_URL 才跑，保持离线默认全绿）
-print("[W-06] 注入测试：同日写两次 → count(*)=1（需 DATABASE_URL）")
-if os.environ.get("DATABASE_URL"):
+# ③ 注入测试（**显式 opt-in**；W-16-c：不再以 DATABASE_URL 为门控——它会被前面用例静默 arm）
+print("[W-06] 注入测试：同日写两次 → count(*)=1（需 PROBE_ALLOW_DB_WRITE=1）")
+if os.environ.get("PROBE_ALLOW_DB_WRITE") == "1" and os.environ.get("DATABASE_URL"):
     _SENT = "1900-01-01"
     try:
         import psycopg  # noqa: E402
@@ -793,8 +823,20 @@ if os.environ.get("DATABASE_URL"):
         check(False, "W-06 注入测试执行", f"{type(_e).__name__}: {_e}")
     finally:
         os.environ.pop("GIT_COMMIT", None)
+        # W-16-b：兜底清理哨兵行——若 INSERT 与 DELETE 之间抛异常，不留 1900-01-01 残骸
+        try:
+            import psycopg as _pg  # noqa: E402
+            _cc = _pg.connect(os.environ["DATABASE_URL"], connect_timeout=30)
+            try:
+                with _cc.cursor() as _cu:
+                    _cu.execute("DELETE FROM biz.daily_brief_snapshot WHERE brief_date=%s", (_SENT,))
+                _cc.commit()
+            finally:
+                _cc.close()
+        except Exception:
+            pass
 else:
-    print("  - 跳过（未设置 DATABASE_URL，注入测试为可选联网项）")
+    print("  - 跳过（未设 PROBE_ALLOW_DB_WRITE=1，注入测试为显式 opt-in 的写库项）")
 
 # ════════════════════════════════════════════════════════
 # W-07 数据状态表置顶（字段级 usable/total；ok 必须 usable>0）
@@ -1179,6 +1221,18 @@ try:
     _sch13 = open(os.path.join(_HERE, "scheduler.py"), encoding="utf-8").read()
     check("opportunity_outcome_backfill" in _sch13, "调度表注册 opportunity_outcome_backfill")
     check("backfill_opportunity_outcome.py" in _sch13, "调度指向回填脚本")
+    # W-13-R1：非单品信号 asset_id 置 NULL
+    check("_NON_ASSET_SIGNAL_TYPES" in _bdb_src13 and "def _is_asset_level_signal(" in _bdb_src13,
+          "R1：含非单品信号白名单 _is_asset_level_signal")
+    check('if _is_asset_level_signal(sig) else None' in _bdb_src13, "R1：asset_id 按单品判定置空")
+    # W-13-R2：ref_price_date 列 + 扫描堵洞
+    _mig13b = open(os.path.join(os.path.dirname(_SCRIPTS_BIN), "migrations",
+                                "fix_076_opportunity_snapshot_ref_date.sql"), encoding="utf-8").read()
+    check("ref_price_date" in _mig13b, "R2：迁移新增 ref_price_date 列")
+    check("WHERE outcome_1d IS NULL OR outcome_7d IS NULL" in _mig13b, "R2：部分索引谓词改为两列任一为空")
+    _bfo13 = open(os.path.join(_SCRIPTS_BIN, "backfill_opportunity_outcome.py"), encoding="utf-8").read()
+    check("WHERE outcome_1d IS NULL OR outcome_7d IS NULL" in _bfo13, "R2：回填扫描条件同步（堵永久空洞）")
+    check("ref_price_date" in _bdb_src13, "R2：upsert 写入 ref_price_date")
 except Exception as _e:
     check(False, "W-13 源码核验", f"{type(_e).__name__}: {_e}")
 
@@ -1203,6 +1257,25 @@ try:
           and abs(_aaa13["hit_rate"] - 0.409) < 1e-9, "calibration_status 映射到 gate/sample_count/hit_rate")
     _bbb13 = next(r for r in _rows13 if r["target"] == "BBB")
     check(_bbb13["signal_type"] == "", "signal_type=None 归一为 ''（PK 不允许 NULL）")
+
+    # W-13-R1 行为用例：非单品信号（聚合 target）asset_id 必须置空，单品照常保留
+    _rows13r = _bdb13._collect_opportunity_rows({
+        "M8_watchlist": [
+            {"target": "2 币 MVRV 极度高估", "signal_type": "mvrv_deep_over",
+             "direction": "short", "conviction_score": 91, "asset_id": 1378},
+            {"target": "恐贪指数极度贪婪", "signal_type": "fng_extreme",
+             "direction": "short", "conviction_score": 76, "asset_id": 2},
+            {"target": "Privacy", "signal_type": "narrative",
+             "direction": "long", "conviction_score": 76, "asset_id": 23111},
+            {"target": "SOL", "signal_type": "catalyst",
+             "direction": "long", "conviction_score": 73, "asset_id": 5426},
+        ],
+    })
+    _agg13 = {r["target"]: r["asset_id"] for r in _rows13r}
+    check(_agg13.get("2 币 MVRV 极度高估") is None and _agg13.get("恐贪指数极度贪婪") is None
+          and _agg13.get("Privacy") is None,
+          "R1：聚合信号（mvrv_/fng_extreme/narrative）asset_id 置 NULL，不把聚合结论归因到代表币")
+    check(_agg13.get("SOL") == 5426, "R1：单品信号 asset_id 照常保留")
 except Exception as _e:
     check(False, "W-13 纯函数用例执行", f"{type(_e).__name__}: {_e}")
 
@@ -1265,6 +1338,19 @@ try:
     check(sdb._cal_line_html(None) == "", "无 calibration_status → 不出校准行")
 except Exception as _e:
     check(False, "W-14 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-16 探针纪律（本文件自身）：写库用例显式 opt-in + 兜底清理 + docstring 如实
+# ════════════════════════════════════════════════════════
+print("[W-16] 探针纪律：写库用例门控 / 兜底清理 / docstring 与事实一致")
+try:
+    _src16 = open(__file__, encoding="utf-8").read()
+    check('os.environ.get("PROBE_ALLOW_DB_WRITE") == "1"' in _src16,
+          "写库用例改显式 opt-in（不再复用会被自动 arm 的 DATABASE_URL）")
+    check("并非全离线" in _src16, "docstring 如实声明「会连 prod」")
+    check("兜底清理哨兵行" in _src16, "INSERT/DELETE 之间异常也兜底清理哨兵行")
+except Exception as _e:
+    check(False, "W-16 探针纪律核验", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")

@@ -115,6 +115,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("thesis_forward_backfill", "50 7 * * *", "backfill_thesis_forward_track.py", [],
      "投研结论前向跟踪回填 T+7/30/90 收益（每日 07:50，写入 biz.thesis_forward_track）", "core"),
 
+    # ═══ 早报机会清单前向追踪（W-13，2026-09-27）═══
+    # 机会清单此前只在 payload JSON，无独立持久化 →「W-03 改了排序是否真的提升指导意义」
+    # 无数据可答。build_daily_brief 已落 biz.opportunity_snapshot，本任务每日回填到期行的
+    # T+1/T+7 前向收益；积累后按 calibration_gate 分组比较收益（周报 SQL 见脚本头注释）。
+    # 07:55 排在 thesis_forward_backfill(07:50) 与 asset_market_daily 06:15 ETL 之后。
+    ("opportunity_outcome_backfill", "55 7 * * *", "backfill_opportunity_outcome.py", [],
+     "机会清单前向收益回填 T+1/T+7（每日 07:55，写入 biz.opportunity_snapshot）", "core"),
+
     # ═══ 投研数据提取 ═══
     # P1-1: CMC 行情快照每日 3 次（04/12/20 UTC），防单日采集失败导致快照缺口
     # 脚本内建失败重试 3 次（指数退避），多时段 + 重试 = 单日零缺漏

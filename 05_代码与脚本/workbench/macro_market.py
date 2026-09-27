@@ -2699,20 +2699,21 @@ def _load_signal_type_calibration() -> dict:
                     """
                     SELECT DISTINCT ON (signal_type)
                            signal_type, sample_count, hit_rate,
-                           weight_factor, gate, no_high, window_end
+                           weight_factor, gate, no_high, window_start, window_end
                     FROM biz.signal_type_calibration
                     ORDER BY signal_type, window_end DESC, horizon_days ASC
                     """
                 )
                 out: dict = {}
-                for st, n, hr, factor, gate, no_high, wend in cur.fetchall():
+                for st, n, hr, factor, gate, no_high, wstart, wend in cur.fetchall():
                     out[st] = {
                         "sample_count": int(n or 0),
                         "hit_rate": float(hr) if hr is not None else None,
                         "weight_factor": float(factor) if factor is not None else 1.0,
                         "gate": gate,
                         "no_high": bool(no_high),
-                        "window_end": str(wend),
+                        "window_start": str(wstart) if wstart is not None else None,
+                        "window_end": str(wend) if wend is not None else None,
                     }
                 return out
     except Exception as exc:  # noqa: BLE001 —— 校准是增强项，任何失败都必须降级为「不校准」
@@ -2773,18 +2774,21 @@ def _calibration_status(signal_type: str) -> dict:
     if gate.startswith("exempt_"):
         return {
             "state": gate, "gate": gate, "calibrated": False,
-            "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+            "sample_count": n, "hit_rate": hr,
+            "window_start": cal.get("window_start"), "window_end": cal["window_end"],
             "note": f"该类型属豁免集合（{gate}），从未被回测，无回测背书",
         }
     if cal["weight_factor"] >= 1.0 and not cal["no_high"]:
         return {
             "state": "calibrated_ok", "gate": gate, "calibrated": True,
-            "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+            "sample_count": n, "hit_rate": hr,
+            "window_start": cal.get("window_start"), "window_end": cal["window_end"],
             "note": f"回测背书通过（样本 {n}、命中率 {hr_txt}）",
         }
     return {
         "state": "decayed", "gate": gate, "calibrated": True,
-        "sample_count": n, "hit_rate": hr, "window_end": cal["window_end"],
+        "sample_count": n, "hit_rate": hr,
+        "window_start": cal.get("window_start"), "window_end": cal["window_end"],
         "note": f"已回测（{gate}，样本 {n}、命中率 {hr_txt}）→ 分数已降权、不进 HIGH 候选",
     }
 

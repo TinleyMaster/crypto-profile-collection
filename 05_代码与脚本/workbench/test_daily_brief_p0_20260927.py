@@ -1160,5 +1160,112 @@ except Exception as _e:
     check(False, "W-15 渲染用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
+# W-13 机会清单落表 + T+1/T+7 效果追踪
+# ════════════════════════════════════════════════════════
+print("[W-13] 源码核验：迁移 / upsert / outcome 脚本 / 调度")
+try:
+    _mig13 = open(os.path.join(os.path.dirname(_SCRIPTS_BIN), "migrations",
+                               "fix_075_opportunity_snapshot.sql"), encoding="utf-8").read()
+    check("biz.opportunity_snapshot" in _mig13, "迁移建 biz.opportunity_snapshot")
+    check("PRIMARY KEY (snapshot_date, target, signal_type)" in _mig13, "主键 (snapshot_date, target, signal_type)")
+    check("outcome_1d" in _mig13 and "outcome_7d" in _mig13, "含 outcome_1d / outcome_7d 列")
+    _bdb_src13 = open(os.path.join(_SCRIPTS_BIN, "build_daily_brief.py"), encoding="utf-8").read()
+    check("def _save_opportunity_snapshot(" in _bdb_src13, "build_daily_brief 含 _save_opportunity_snapshot")
+    check("_save_opportunity_snapshot(date.today().isoformat(), brief)" in _bdb_src13,
+          "main() 落库机会清单")
+    check("ON CONFLICT (snapshot_date, target, signal_type) DO UPDATE" in _bdb_src13, "幂等 upsert")
+    check(os.path.exists(os.path.join(_SCRIPTS_BIN, "backfill_opportunity_outcome.py")),
+          "存在 backfill_opportunity_outcome.py")
+    _sch13 = open(os.path.join(_HERE, "scheduler.py"), encoding="utf-8").read()
+    check("opportunity_outcome_backfill" in _sch13, "调度表注册 opportunity_outcome_backfill")
+    check("backfill_opportunity_outcome.py" in _sch13, "调度指向回填脚本")
+except Exception as _e:
+    check(False, "W-13 源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-13] 纯函数：机会清单抽取（M8 并集 + 按主键去重 + calibration 映射）")
+try:
+    import build_daily_brief as _bdb13  # noqa: E402
+    _rows13 = _bdb13._collect_opportunity_rows({
+        "M8_opportunities": [{
+            "target": "AAA", "signal_type": "etf_flow", "direction": "long",
+            "conviction_score": 70, "conviction_tier": "HIGH", "asset_id": 1378,
+            "calibration_status": {"gate": "calibrated_low", "sample_count": 44, "hit_rate": 0.409},
+        }],
+        "M8_watchlist": [
+            {"target": "AAA", "signal_type": "etf_flow", "direction": "long", "conviction_score": 55},
+            {"target": "BBB", "signal_type": None, "direction": "short", "conviction_score": 30},
+        ],
+    })
+    check(len(_rows13) == 2, f"M8 并集按 (target,signal_type) 去重（实得 {len(_rows13)} 行）")
+    _aaa13 = next(r for r in _rows13 if r["target"] == "AAA")
+    check(_aaa13["conviction_score"] == 70, "同键取分数更高者（55 不覆盖 70）")
+    check(_aaa13["calibration_gate"] == "calibrated_low" and _aaa13["sample_count"] == 44
+          and abs(_aaa13["hit_rate"] - 0.409) < 1e-9, "calibration_status 映射到 gate/sample_count/hit_rate")
+    _bbb13 = next(r for r in _rows13 if r["target"] == "BBB")
+    check(_bbb13["signal_type"] == "", "signal_type=None 归一为 ''（PK 不允许 NULL）")
+except Exception as _e:
+    check(False, "W-13 纯函数用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-14 校准样本量诚实标注（命中率 + 样本量 + 窗口；<50% / <30 / 从未回测）
+# ════════════════════════════════════════════════════════
+print("[W-14] 源码核验：标注函数 + 窗口列加载")
+try:
+    _sdb_src14 = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+    check("def _cal_line_html(" in _sdb_src14 and "def _cal_window(" in _sdb_src14,
+          "渲染层含 _cal_line_html / _cal_window")
+    check("历史命中率低于抛硬币" in _sdb_src14, "命中率 <50% 标注分支")
+    check("样本不足，仅供参考" in _sdb_src14, "样本量 <30 标注分支")
+    check("从未回测" in _sdb_src14, "exempt_* → 「从未回测」分支")
+    check("cal_line = _cal_line_html(opp.get(\"calibration_status\"))" in _sdb_src14, "机会卡渲染 cal_line")
+    check("window_start" in _mm_src, "macro_market 加载 window_start（窗口随校准下发）")
+except Exception as _e:
+    check(False, "W-14 源码核验", f"{type(_e).__name__}: {_e}")
+
+print("[W-14] 渲染：命中率必带样本量与窗口；<50% / <30 / 无样本 分别标注")
+try:
+    _b14 = _brief()
+    _b14["M8_watchlist"] = [{
+        "target": "W14CALTEST", "signal_type": "etf_flow", "direction": "long",
+        "conviction_score": 60, "conviction_tier": "MED", "trigger_logic": "ETF 净流入",
+        "calibration_status": {
+            "gate": "calibrated_low", "hit_rate": 0.409, "sample_count": 44,
+            "window_start": "2026-08-31", "window_end": "2026-09-25",
+        },
+    }]
+    _h14 = sdb.render_brief_html(_b14)
+    check("命中率 40.9%（样本 44，窗口 08-31~09-25）" in _h14, "命中率同时带样本量与窗口")
+    check("历史命中率低于抛硬币" in _h14, "hit_rate=0.41 → 「低于抛硬币」（注入用例）")
+
+    _b14b = _brief()
+    _b14b["M8_watchlist"] = [{
+        "target": "W14CALTEST", "signal_type": "exempt_not_backtestable", "direction": "long",
+        "conviction_score": 60, "conviction_tier": "MED", "trigger_logic": "从未回测",
+        "calibration_status": {
+            "gate": "exempt_not_backtestable", "hit_rate": None, "sample_count": 0,
+            "window_start": None, "window_end": "2026-09-25",
+        },
+    }]
+    _h14b = sdb.render_brief_html(_b14b)
+    check("从未回测" in _h14b, "hit_rate=None + exempt_* → 「从未回测」（注入用例）")
+
+    _b14c = _brief()
+    _b14c["M8_watchlist"] = [{
+        "target": "W14CALTEST", "signal_type": "github_activity", "direction": "long",
+        "conviction_score": 60, "conviction_tier": "MED", "trigger_logic": "开发活跃",
+        "calibration_status": {
+            "gate": "preliminary", "hit_rate": 0.607, "sample_count": 28,
+            "window_start": "2026-08-31", "window_end": "2026-09-25",
+        },
+    }]
+    _h14c = sdb.render_brief_html(_b14c)
+    check("样本 28" in _h14c and "样本不足，仅供参考" in _h14c, "sample_count=28 → 「样本不足，仅供参考」")
+    check("历史命中率低于抛硬币" not in _h14c, "60.7% 不加「低于抛硬币」")
+
+    check(sdb._cal_line_html(None) == "", "无 calibration_status → 不出校准行")
+except Exception as _e:
+    check(False, "W-14 渲染用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

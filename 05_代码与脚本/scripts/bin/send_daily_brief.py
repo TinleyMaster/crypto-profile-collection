@@ -313,6 +313,54 @@ def _opp_gate(o: dict) -> str:
     return str(cs.get("gate") or "")
 
 
+# ── W-14：校准样本量诚实标注（命中率必须与样本量、窗口同时出现）──
+def _cal_window(wstart, wend) -> str:
+    """窗口格式化：窗口 08-31~09-25（缺一端则只显示另一端）。"""
+    def _md(v):
+        s = str(v or "")
+        return s[5:10] if len(s) >= 10 else s
+    a, b = _md(wstart), _md(wend)
+    if a and b:
+        return f"{a}~{b}"
+    return b or a
+
+
+def _cal_line_html(cal) -> str:
+    """W-14：机会卡的校准行。
+
+    - 命中率必须同时给出样本量与窗口；
+    - `sample_count < 30` → 「样本不足，仅供参考」；
+    - `hit_rate < 50%` → 「历史命中率低于抛硬币」；
+    - `exempt_*`（从未回测）→ 「从未回测」。
+    无校准信息 → 返回 ""（不出行）。
+    """
+    if not isinstance(cal, dict) or not cal:
+        return ""
+    gate = str(cal.get("gate") or "")
+    n = cal.get("sample_count")
+    hr = cal.get("hit_rate")
+    try:
+        n_int = int(n) if n is not None else None
+    except (TypeError, ValueError):
+        n_int = None
+    seg = ""
+    if gate.startswith("exempt_") or n_int == 0:
+        seg = "从未回测"
+    elif hr is not None:
+        _win = _cal_window(cal.get("window_start"), cal.get("window_end"))
+        seg = (f"命中率 {float(hr) * 100:.1f}%（样本 {n_int if n_int is not None else '—'}"
+               + (f"，窗口 {_win}）" if _win else "）"))
+        if n_int is not None and n_int < 30:
+            seg += " · 样本不足，仅供参考"
+        if float(hr) < 0.5:
+            seg += " · 历史命中率低于抛硬币"
+    elif n_int is not None:
+        seg = f"样本 {n_int}" + (" · 样本不足，仅供参考" if n_int < 30 else "")
+    if not seg:
+        return ""
+    return (f'<div style="font-size:9.5px;color:#94a3b8;margin-top:3px">🧪 校准：{seg}</div>')
+
+
 def _tier_score_key(o: dict):
     """W-03 排序键：可验证性（gate）→ 证据等级（tier）→ 分数。
 
@@ -1876,6 +1924,8 @@ def render_brief_html(brief: dict) -> str:
             elif gate.startswith("exempt"):
                 gate_badge = ('<span style="background:#fee2e2;color:#b91c1c;font-size:9px;'
                               'padding:1px 5px;border-radius:3px;font-weight:700">未回测</span>')
+            # W-14：校准行——命中率须与样本量、窗口同时出现，并按时长/命中率诚实标注
+            cal_line = _cal_line_html(opp.get("calibration_status"))
 
             # 信号源标签
             src_html = ""
@@ -1910,6 +1960,7 @@ def render_brief_html(brief: dict) -> str:
               {f'<div style="font-size:10.5px;color:#64748b">{meta_str}</div>' if meta_str else ''}
               {src_html}
               <div style="color:#475569;font-size:11px;margin-top:4px;line-height:1.4">{body_text}</div>
+              {cal_line}
             </div>
             """)
         # M4-1：折叠项以「关联」一行说明去向（信息不丢，只是不再并排列示）

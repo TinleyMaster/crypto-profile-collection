@@ -287,6 +287,148 @@ def _read_prev_brief_payload(brief_date: str) -> dict | None:
         return None
 
 
+def _to_num(v):
+    """尽力转 float；不可转 → None（不写假数）。"""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(v):
+    """尽力转 int；不可转 → None。"""
+    f = _to_num(v)
+    return int(f) if f is not None else None
+
+
+def _collect_opportunity_rows(brief: dict) -> list[dict]:
+    """W-13：从 brief 抽取机会清单行（M8_opportunities + M8_watchlist）。
+
+    两键并集即 `opportunity_list.opportunities` 全量（HIGH 进 M8_opportunities，
+    其余进 M8_watchlist）。按 (target, signal_type) 去重——与表主键一致，
+    避免同一 INSERT 内二次命中同一行（ON CONFLICT 会报 "cannot affect row a second time"）；
+    同键取分数更高者。
+    """
+    seen: dict = {}
+    for o in (brief.get("M8_opportunities") or []) + (brief.get("M8_watchlist") or []):
+        o = o or {}
+        target = str(o.get("target") or o.get("asset") or "").strip()
+        if not target:
+            continue
+        sig = str(o.get("signal_type") or "")
+        cal = o.get("calibration_status") if isinstance(o.get("calibration_status"), dict) else {}
+        row = {
+            "target": target,
+            "signal_type": sig,
+            "direction": o.get("direction"),
+            "conviction_score": _to_num(o.get("conviction_score")),
+            "conviction_tier": o.get("conviction_tier"),
+            "calibration_gate": cal.get("gate"),
+            "sample_count": _to_int(cal.get("sample_count")),
+            "hit_rate": _to_num(cal.get("hit_rate")),
+            "asset_id": _to_int(o.get("asset_id")),
+        }
+        prev = seen.get((target, sig))
+        if prev is None or (row["conviction_score"] or 0) > (prev["conviction_score"] or 0):
+            seen[(target, sig)] = row
+    return list(seen.values())
+
+
+def _resolve_ref_prices(asset_ids: list) -> dict:
+    """W-13：批量取各 asset_id 的建仓基准价（`market_date <= 北京今日` 的最近收盘价）。
+
+    与 db_stats._fetch_as_of_price 同口径（cmc 优先、cmc_historical 次之）：结论多为盘中生成，
+    当日 ETL 可能尚未写入该资产日行，取「最近可得」而非严格当日，避免 ref_price 永久为空。
+    """
+    if not asset_ids:
+        return {}
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (asset_id) asset_id, price_usd
+                    FROM biz.asset_market_daily
+                    WHERE asset_id = ANY(%s)
+                      AND source_code IN ('cmc', 'cmc_historical')
+                      AND market_date <= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
+                      AND price_usd IS NOT NULL AND price_usd > 0
+                    ORDER BY asset_id,
+                             market_date DESC,
+                             CASE source_code WHEN 'cmc' THEN 0 ELSE 1 END
+                    """,
+                    (list(asset_ids),),
+                )
+                return {int(r[0]): float(r[1]) for r in cur.fetchall() if r[1] is not None}
+    except Exception as e:
+        print(f"[opp_snapshot] 基准价解析失败（ref_price 记 NULL）: {e}")
+        return {}
+
+
+def _save_opportunity_snapshot(brief_date: str, brief: dict) -> int:
+    """W-13：把当日机会清单落库 `biz.opportunity_snapshot`（幂等 upsert）。
+
+    - 幂等：`ON CONFLICT (snapshot_date, target, signal_type) DO UPDATE`（同日重跑只覆盖）；
+    - ref_price 取不到 → 写 NULL（回填脚本跳过无基准价的行，不写假数）；
+    - 落库失败**不阻断**早报主流程。
+    """
+    rows = _collect_opportunity_rows(brief)
+    if not rows:
+        print("[opp_snapshot] 无机会条目，跳过")
+        return 0
+    prices = _resolve_ref_prices(sorted({r["asset_id"] for r in rows if r["asset_id"] is not None}))
+    values = [
+        (
+            brief_date, r["target"], r["signal_type"], r["direction"],
+            r["conviction_score"], r["conviction_tier"], r["calibration_gate"],
+            r["sample_count"], r["hit_rate"],
+            prices.get(r["asset_id"]) if r["asset_id"] is not None else None,
+            r["asset_id"],
+        )
+        for r in rows
+    ]
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO biz.opportunity_snapshot (
+                        snapshot_date, target, signal_type, direction, conviction_score,
+                        conviction_tier, calibration_gate, sample_count, hit_rate,
+                        ref_price, asset_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (snapshot_date, target, signal_type) DO UPDATE
+                      SET direction        = EXCLUDED.direction,
+                          conviction_score = EXCLUDED.conviction_score,
+                          conviction_tier  = EXCLUDED.conviction_tier,
+                          calibration_gate = EXCLUDED.calibration_gate,
+                          sample_count     = EXCLUDED.sample_count,
+                          hit_rate         = EXCLUDED.hit_rate,
+                          ref_price        = EXCLUDED.ref_price,
+                          asset_id         = EXCLUDED.asset_id,
+                          updated_at       = NOW()
+                    """,
+                    values,
+                )
+            conn.commit()
+        _n_ref = sum(1 for v in values if v[9] is not None)
+        print(f"[opp_snapshot] 已落库 {brief_date}：{len(values)} 条（有基准价 {_n_ref} 条）")
+        return len(values)
+    except Exception as e:
+        print(f"[opp_snapshot] 落库失败: {e}")
+        return 0
+
+
 def main() -> dict:
     stale = _check_data_freshness()
     today = get_market_overview(force_refresh="1")  # 快照必须最新，绕过 CACHE_TTL
@@ -317,6 +459,7 @@ def main() -> dict:
             len(_delta["新增风险"]), len(_delta["越阈"])))
     save_snapshot(date.today().isoformat(), today)  # 落库供明日 diff
     _save_brief_snapshot(date.today().isoformat(), brief)  # W-06：完整 brief 落库（P2 前置）
+    _save_opportunity_snapshot(date.today().isoformat(), brief)  # W-13：机会清单落表（效果追踪）
 
     print("M0:", brief.get("M0_tldr"))
     print("DIFF:", brief.get("DIFF"))

@@ -194,23 +194,42 @@ _bm2["M8_meme"] = {"status": "ok", "summary": {"block": 0, "high": 0, "medium": 
 _html = sdb.render_brief_html(_bm2)
 check("Meme 风险" not in _html, "只有中危计数 → 不出卡（原「高危0 · 中危102」噪声）")
 
-print("[P0-e] KOL 卡：需「时间 + 金额」才出")
+print("[P0-e / W-01] KOL 卡：需「事件时间 + 金额」才出（就绪门查 event_time 而非 created_at）")
+# W-01-a：event_time 全空（仅有 created_at 入库时间）→ 卡整块不出
 _bk = _brief()
 _bk["kol_onchain"] = {"status": "ok", "kols": ["Ai姨"], "signals": [
     {"symbol": "BTC", "signal_subtype": "smart_money", "kol_name": "Ai姨",
+     "event_usd_value": 12500000, "event_direction": "inflow",
      "created_at": "2026-09-27T08:00:00"}]}
 _html = sdb.render_brief_html(_bk)
-check("KOL 链上信号" not in _html, "无金额要素的信号不出卡")
+check("KOL 链上信号" not in _html,
+      "event_time 全空 → 卡整块不出（不再被 created_at 假门放过）")
 
+# W-01-b：有事件时间 + 有金额 → 出卡且印事件时间（带标签）
 _bk2 = _brief()
 _bk2["kol_onchain"] = {"status": "ok", "kols": ["Ai姨"], "signals": [
     {"symbol": "BTC", "signal_subtype": "smart_money", "kol_name": "Ai姨",
      "event_usd_value": 12500000, "event_direction": "inflow",
-     "created_at": "2026-09-27T08:00:00"}]}
+     "event_time": "2026-09-27T08:00:00"}]}
 _html = sdb.render_brief_html(_bk2)
-check("KOL 链上信号" in _html, "有时间+金额 → 出卡")
+check("KOL 链上信号" in _html, "有事件时间+金额 → 出卡")
 check("12.5M USD" in _html, "金额上屏（可判定）")
-check("2026-09-27T08:00" in _html, "事件时间上屏（可判定）")
+check("事件时间 2026-09-27T08:00" in _html, "事件时间上屏且带「事件时间」标签")
+
+# W-01-c：event_time 有、金额无 → 该条被过滤（卡不出）
+_bk3 = _brief()
+_bk3["kol_onchain"] = {"status": "ok", "kols": ["Ai姨"], "signals": [
+    {"symbol": "BTC", "signal_subtype": "smart_money", "kol_name": "Ai姨",
+     "event_time": "2026-09-27T08:00:00"}]}
+_html = sdb.render_brief_html(_bk3)
+check("KOL 链上信号" not in _html, "有事件时间无金额 → 该条被过滤，卡不出")
+
+print("[W-01] 源码核验：就绪门与渲染处均用 event_time，KOL 卡代码不再出现 created_at")
+_kol_src = open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"), encoding="utf-8").read()
+_kol_block = _kol_src[_kol_src.find("# KOL 链上信号（兜底）"):_kol_src.find("html_parts.append(\"</div>\")", _kol_src.find("# KOL 链上信号（兜底）"))]
+_kol_code = "\n".join(l for l in _kol_block.splitlines() if not l.strip().startswith("#"))
+check("event_time" in _kol_code, "KOL 卡代码含 event_time")
+check("created_at" not in _kol_code, "KOL 卡代码不再出现 created_at（注释除外）")
 
 # ════════════════════════════════════════════════════════
 # P0-f 邮件未发出不得静默成功（AST 守卫，比字符串 grep 精确）

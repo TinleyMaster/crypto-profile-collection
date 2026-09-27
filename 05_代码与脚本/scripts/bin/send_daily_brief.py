@@ -1244,13 +1244,16 @@ def render_brief_html(brief: dict) -> str:
 
     # KOL 链上信号（兜底）
     signals = kol_onchain.get("signals") or []
-    # 2026-09-27（早报重构 P0）：原卡只印「币种 + 类型 + 分析师」，无时间/无金额/无方向，
+    # 2026-09-27（早报重构 P0 / W-01）：原卡只印「币种 + 类型 + 分析师」，无时间/无金额/无方向，
     # 属不可判定的噪声卡片（重构方案 §2.13）。改为：仅保留「有事件时间 且 有金额」的信号，
-    # 并把金额与时间一并渲染。字段名以 fetch_kol_onchain_signals 的 SELECT 为准
-    # （created_at / event_direction / event_usd_value / event_amount）。
+    # 并把金额与事件时间一并渲染。字段名以 fetch_kol_onchain_signals 的 SELECT 为准
+    # （event_time / event_direction / event_usd_value / event_amount）。
+    # W-01：就绪门必须查 event_time（事件发生时间）。原实现查 created_at（入库时间，DB 默认值恒非空）
+    # → 门形同虚设。event_time 全空时整块不出（不渲染空卡、不渲染占位）——该类信号历史命中率 20%，
+    # 正确处置是不出，不是「带标注地出」。
     _kol_ready = [
         s for s in signals
-        if s.get("created_at") and (s.get("event_usd_value") or s.get("event_amount"))
+        if s.get("event_time") and (s.get("event_usd_value") or s.get("event_amount"))
     ]
     if _kol_ready and kol_onchain.get("status") == "ok":
         signals = _kol_ready
@@ -1298,7 +1301,9 @@ def render_brief_html(brief: dict) -> str:
                 _money = f"{round(float(_usd) / 1e6, 2)}M USD"
             else:
                 _money = str(sig.get("event_amount") or "")
-            _at = str(sig.get("created_at") or "")[:16]
+            _at = str(sig.get("event_time") or "")[:16]
+            if _at:
+                _at = f"事件时间 {_at}"
             _meta = " · ".join(x for x in (_money, _at) if x)
 
             html_parts.append(f"""

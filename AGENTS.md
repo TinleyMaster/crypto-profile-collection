@@ -1860,7 +1860,21 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **本轮落地（护栏 3 处，纯代码，零数据变更）**：① `phase_chain_contract_backfill.py` 新增 `SOLANA_ADDR_RE = ^[1-9A-HJ-NP-Za-km-z]{32,44}$`、`SOLANA_NATIVE_MINTS`（Wrapped SOL / System Program）与 `is_valid_solana_addr()`，`parse_contracts` 对 solana 剔除并打印（该脚本**无调度调用**，属手动入口；实证它曾写入原生 mint `So1111…1111`）。② `phase_a_build_core.POPULATE_FROM_CMC`（**每日 03:00 流水线 ④，正是这 15 行的源头**）WHERE 增 solana 结构条件。③ `POPULATE_FROM_DL` 同款（DefiLlama 的 `address` 可能是 EVM hex 或 URL 片段，实证 UNCX `0xadb2437e…` / FAB `token/EdAhkb5…`）。三处均**只对 solana 生效**，非 solana 链行为不变。
 - **验证**：`EXPLAIN (COSTS OFF)` 只读验 SQL —— `POPULATE_FROM_CMC` OK（16 行计划）；新探针 `workbench/test_contract_addr_guard_20260927.py` **28/0**（A 结构校验 10 例含「合法全小写不误伤」/ B `parse_contracts` 端到端剔脏 / C·D 两段 SQL 护栏 + 保留链感知赋值 / E 相邻写入方未被波及）；回归 `test_solana_holder_20260927` 27/0、`test_snapshot_freshness_20260927` 27/0、`test_scan_alert_onchain_addr` 退出 0；`py_compile` 2/2 OK。
 - **新发现（既有缺陷，须留档）**：`POPULATE_FROM_DL` 存在**列歧义** —— `SELECT asset_id`（首列）在 `dl` CTE 与 `core.asset a` 之间歧义，**HEAD 版本同样报 `AmbiguousColumn`**（非本轮引入）。叠加 `run_cmc_pipeline.py` 只跑 `--step populate_cmc`、**无任何调度/流水线调用 `populate_dl`** ⇒ 该 SQL 长期是**死代码路径**（生产 `source_code='dl'` 的行来自更早版本）。修复只需 1 词（`dl.asset_id`），已 EXPLAIN 验证修复版 OK（17 行计划）；但修复后候选 **2965 行（solana 167）**、属**行为变更**（会让一条长期失败/未执行的回填突然写库），故**本轮未修**，留待显式授权。
-- **未做（须留档）**：① **未改 `core.asset_contract` 任何数据** —— 16 行污染仍残留（用户本轮只选了「补护栏」）。② **未动唯一约束**：改「大小写不敏感」需先清掉并存的等价变体行，并同步 4~5 处 `ON CONFLICT (chain, contract_address)` 写法（否则无法推断唯一索引、写入方全部报错），改动面大。③ 5 个「全小写但形态合法」者（GEOD/FOXSY/AIXCB/SAFA/BELG）**结构上无法与真地址区分**，护栏拦不住，只能靠数据修复。
+- **未动唯一约束（须留档）**：改「大小写不敏感」需先清掉并存的等价变体行，并同步 4~5 处 `ON CONFLICT (chain, contract_address)` 写法（否则无法推断唯一索引、写入方全部报错），改动面大 ⇒ **本轮明确不做**。5 个「全小写但形态合法」者（GEOD/FOXSY/AIXCB/SAFA/BELG）**结构上无法与真地址区分**，护栏拦不住，只能靠数据修复（下条已修）。
+
+**续（同日）：存量数据修复（用户「按你的判断处理」⇒ 授权做数据修复、不做唯一约束）**
+
+- **范围**：完整污染集合实为 **18 行**（不是 15）—— `cmc` 15 行全小写 + `cmc_backfill` 1 行原生 mint + `dl` 2 行错配。`cg` 1445 行与其余 `cmc_backfill` 干净。
+- **判定口径**：以 CMC `/v2/cryptocurrency/info` 为真值源逐行对照 ⇒ 真值存在且不同 → `UPDATE`（大小写还原）；真值已存在于同 asset 合法行 → `DELETE`（重复）；真值即自身 → `DELETE`（源即脏，如原生 mint）；无真值 → `DELETE`（EVM/URL 错配）。**全局唯一约束预检**：15 个 UPDATE 目标值与**其它任何行**（不限同 asset）零冲突；外键 0 个、依赖视图仅 `asset_contract_map`（纯投影）。
+- **执行结果：15 UPDATE + 3 DELETE**（一个事务内，逐行打印 `rowcount` 并断言 ==1，失败即整体回滚）。
+  - `UPDATE`（大小写还原）：cid 14 TAO / 120 GEOD / 1057 LUNA / 1092 DEUS / 1347 FOXSY / 1380 PUPS / 1442 MOEW / 2329 PYM / 2659 AIXCB / 3575 BELG / 3576 SFA / 3618 SAFA / 4555 CHOMP / 5748 NINJA —— 真值均取自 CMC，且**不是简单 `UPPER()`**（base58 大小写是内容）。
+  - `DELETE`：cid 2072 BOOP（真值 `2HrZ5R18…` 已并存于同 asset）、cid 9376 UNCX（`0xadb2437e…` 是**以太坊地址被贴上 solana 链**，实为另一条 ethereum 行的复制；CMC 无 UNCX solana 记录）、cid 157084 SOL（原生 mint `So1111…1111` 被当 SPL 合约；删后 SOL 与 BTC/ZEC/XMR 一致为 0 合约行，更诚实）。
+- **⚠️ 一处判定修正（原计划误判为 DELETE）**：cid 9655 FAB 原值 `token/EdAhkbj5nF9sRM7XN7ewuW8C9XEUMs8P7cnoQ57SYE96`。回溯上游 `src_dl.protocol_list.address = 'solana:token/EdAhkbj5nF9sRM7XN7ewuW8C9XEUMs8P7cnoQ57SYE96'`（**DefiLlama API 原样返回该格式**，非本项目解析 bug —— `api.llama.fi/protocol/fabric` 实测同值）⇒ 剥离 `token/` 前缀得 44 字符 base58，经 **Solana RPC `getAccountInfo` 证实为真实 SPL mint**（owner=`TokenkegQfe…`、type=mint、decimals=9、mintAuthority=`fabdwk1nQ1mPFD7cVNTbxzZf32NG2pLbZ4fRPzPpiE9`，前缀恰为 `fab`）⇒ 改为 `UPDATE`，保住 FAB 唯一映射。
+- **派生表同步**：`biz.coin_basic.primary_contract_address`（内容取自 `core.asset_contract`，`phase_a_coin_basic.py` 口径：`ORDER BY is_primary DESC, contract_id LIMIT 1`）有 **17 行**同值残留 ⇒ 在同一事务内按**同一口径**对 18 个受影响 asset 重算（SOL 归 NULL、UNCX 归 ethereum 行、BOOP 归 `boopkpWqe…`）。
+- **明确不改（已核）**：① `src_dl.protocol_list.address` = 上游 API 原样落库，重拉即覆盖；② `biz.onchain_holder_snapshot` 13 行 / `onchain_transfer_log` 1 行命中的是 `0xadb2…` 但 **`chain='ethereum'/'eth'`**，属 UNCX 在以太坊的**合法**历史数据（与 solana 脏行共享同一字符串而已），**不动**。
+- **修复后复验（prod 只读）**：solana 链非法形态行 **13 → 0**；3 个待删 `contract_id` 残留 0；15 个 UPDATE 逐行比对真值全 OK；RPC 抽验 3 个还原地址（TAO/PYM/FAB）**全部 `type=mint` / `decimals=9`** ⇒ 大小写还原是**真实账户**，非仅字面整洁。
+- **回滚点**：`/Users/tinley/Workbuddy/crypto-profile-collection/回滚点_solana合约地址修复_2026-09-27.json`（含 18 行原始快照 `rows`、逐行判定 `plan`、`deleted_rows`/`updated_rows`、`coin_basic_before` 备份）。
+- **遗留（仍未授权）**：`POPULATE_FROM_DL` 的 1 词列歧义（修好会让长期死路径开始写 2965 行）；若将来启用该路径，须**先剥离 DL 的 `<chain>:token/` 前缀**再入库，否则被新护栏整体拦下（FAB 这类合法地址会丢失映射）。
 
 ### 早报 / 催化剂邮件「停发」兜底与可观测（2026-09-27，本次提交）
 

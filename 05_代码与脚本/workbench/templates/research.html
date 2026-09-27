@@ -755,6 +755,107 @@
             font-size: 11px;
         }
 
+        /* 三档确定性（方案 §2）：短 S / 中 M / 长 L，分档 = 分证据来源 */
+        .r-thesis .t-3t {
+            margin: 8px 0;
+            padding: 10px 12px;
+            border-radius: 6px;
+            border: 1px solid #2a2f3a;
+            background: #141922;
+            font-size: 12px;
+            line-height: 1.7;
+        }
+        .r-thesis .t-3t-head {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+        .r-thesis .t-3t-title {
+            font-weight: 600;
+            color: #cbd5e1;
+        }
+        .r-thesis .t-3t-uncal {
+            padding: 1px 6px;
+            border-radius: 8px;
+            background: #2a2416;
+            color: #fbbf24;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .r-thesis .t-3t-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 8px;
+        }
+        .r-thesis .t-3t-card {
+            border-radius: 6px;
+            padding: 8px 10px;
+            background: #1a1f2a;
+            border: 1px solid #262c38;
+        }
+        .r-thesis .t-3t-card-top {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .r-thesis .t-3t-h {
+            font-weight: 600;
+            font-size: 12px;
+            color: #e5e7eb;
+        }
+        .r-thesis .t-3t-score {
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .r-thesis .t-3t-basis {
+            color: #6b7280;
+            font-size: 10px;
+            display: block;
+            margin-top: 2px;
+        }
+        .r-thesis .t-3t-gate {
+            margin-top: 6px;
+            font-size: 11px;
+        }
+        .r-thesis .t-3t-gate.closed {
+            color: #f87171;
+        }
+        .r-thesis .t-3t-gate.open {
+            color: #34d399;
+        }
+        .r-thesis .t-3t-reasons {
+            margin: 3px 0 0 14px;
+            color: #9ca3af;
+            font-size: 11px;
+        }
+        .r-thesis .t-3t-note {
+            margin-top: 5px;
+            color: #6b7280;
+            font-size: 11px;
+        }
+        .r-thesis .t-3t-composite {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border-left: 3px solid #6366f1;
+            background: #191b2a;
+            color: #c7d2fe;
+            font-size: 12px;
+        }
+        .r-thesis .t-3t-composite ul {
+            margin: 4px 0 0 16px;
+            color: #a5b4fc;
+        }
+        .r-thesis .t-3t-rule {
+            margin-top: 4px;
+            color: #6b7280;
+            font-size: 11px;
+        }
+
         /* 审计 §4.2 #11：证伪条件区块 */
         .r-thesis .t-falsify {
             margin: 8px 0;
@@ -3025,6 +3126,74 @@
                 html += '</div>';
             }
 
+            // 三档确定性（方案 §2）：短 S（量化数据口径）/ 中 M / 长 L（文本引用口径）。
+            // 分档 = 分证据来源，不共用口径，也不得用高分档掩盖低分档。
+            const t3 = analysis && analysis.determinism_3tier;
+            if (t3 && t3.s && t3.m && t3.l) {
+                const t3Color = {
+                    actionable: { bg: '#0b3d2a', color: '#34d399' },
+                    watch: { bg: '#2a2416', color: '#fbbf24' },
+                    unusable: { bg: '#3d1616', color: '#f87171' },
+                    not_evaluable: { bg: '#1f2430', color: '#9ca3af' }
+                };
+                const basisLabel = {
+                    structured_quant: '结构化量化数据 · 可复现性口径',
+                    text_citation: '文本论点 · URL 引用可核验口径'
+                };
+                function _tierCard (tier, horizonTitle) {
+                    const c = t3Color[tier.tier] || t3Color.watch;
+                    const hasScore = tier.score !== null && tier.score !== undefined;
+                    let card = '<div class="t-3t-card">' +
+                        '<div class="t-3t-card-top">' +
+                        '<span class="t-3t-h">' + escapeHtml(tier.horizon_label || horizonTitle) + '</span>' +
+                        (hasScore
+                            ? '<span class="t-3t-score" style="color:' + c.color + '">' + tier.score + '</span>' +
+                              '<span style="color:#6b7280;font-size:10px">/100</span>'
+                            : '<span class="t-3t-score" style="color:' + c.color + '">—</span>') +
+                        '<span class="t-det-tier" style="background:' + c.bg + ';color:' + c.color + '">' +
+                        escapeHtml(tier.tier_label || '') + '</span>' +
+                        '</div>' +
+                        '<span class="t-3t-basis">' + escapeHtml(basisLabel[tier.evidence_basis] || '') +
+                        ' · 论点 ' + (tier.points_count || 0) + ' 条</span>';
+                    const g = tier.gate || {};
+                    card += '<div class="t-3t-gate ' + (g.open ? 'open' : 'closed') + '">' +
+                        (g.open ? '✅ 闸门已开' : '⛔ 闸门未开') + '</div>';
+                    if (!g.open && (g.blocked_by || []).length) {
+                        card += '<ul class="t-3t-reasons">';
+                        g.blocked_by.forEach(function (r) {
+                            card += '<li>' + escapeHtml(r) + '</li>';
+                        });
+                        card += '</ul>';
+                    }
+                    if ((tier.notes || []).length) {
+                        card += '<div class="t-3t-note">' + escapeHtml(tier.notes.join('；')) + '</div>';
+                    }
+                    return card + '</div>';
+                }
+                html += '<div class="t-3t">' +
+                    '<div class="t-3t-head">' +
+                    '<span class="t-3t-title">📐 三档确定性（短期 / 中期 / 长期）</span>' +
+                    '<span class="t-3t-uncal" title="' +
+                    attrEscape(t3.calibration_note || '') + '">闸门阈值未校准</span>' +
+                    '</div>' +
+                    '<div class="t-3t-grid">' +
+                    _tierCard(t3.s, '短期') + _tierCard(t3.m, '中期') + _tierCard(t3.l, '长期') +
+                    '</div>';
+                const comp = t3.composite || {};
+                if (comp.verdict) {
+                    html += '<div class="t-3t-composite">🧭 <b>' + escapeHtml(comp.verdict) + '</b><ul>';
+                    (comp.lines || []).forEach(function (ln) {
+                        html += '<li>' + escapeHtml(ln) + '</li>';
+                    });
+                    html += '</ul>';
+                    if (comp.rule) {
+                        html += '<div class="t-3t-rule">' + escapeHtml(comp.rule) + '</div>';
+                    }
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+
             // 审计 §4.2 #11：证伪条件 —— 明确「什么情况下本结论作废」
             const falsifiers = (analysis && analysis.falsifiers) || [];
             if (falsifiers.length) {
@@ -4580,20 +4749,38 @@
                             valuation: '估值', supply: '筹码', sentiment: '情绪',
                             catalyst: '催化', risks: '风险'
                         }[m.impact_dimension] || m.impact_dimension || '';
-                        // 当前确定性分（来自结论的确定性评分卡）
-                        const curScore = (d.thesis && d.thesis.analysis && d.thesis.analysis.score != null)
-                            ? Number(d.thesis.analysis.score) : null;
-                        const gain = Number(m.determinism_gain || 0);
+                        // 三档确定性（方案 §2.6）：按档给出补全增益 —— 让 unusable 从终点变成带箭头的指引
+                        const _t3 = (d.thesis && d.thesis.analysis && d.thesis.analysis.determinism_3tier) || null;
+                        const gainT = m.determinism_gain_by_tier;
                         let gainTxt = '';
-                        if (gain > 0) {
-                            gainTxt = (curScore != null && !isNaN(curScore))
-                                ? '补全后确定性分 ' + curScore + ' → ' + Math.min(100, curScore + gain)
-                                : '补全后确定性分可 +' + gain;
+                        if (gainT && _t3) {
+                            const parts = [];
+                            [['s', '短期'], ['m', '中期'], ['l', '长期']].forEach(function (pair) {
+                                const g = Number(gainT[pair[0]] || 0);
+                                if (g <= 0) return;
+                                const cur = _t3[pair[0]] ? _t3[pair[0]].score : null;
+                                parts.push(pair[1] + '档 ' + ((cur !== null && cur !== undefined)
+                                    ? cur + ' → ' + Math.min(100, cur + g) : '+' + g));
+                            });
+                            if (parts.length) gainTxt = '补全后：' + parts.join('；');
+                        }
+                        if (!gainTxt) {
+                            // 回退：旧口径（整体确定性分）
+                            const curScore = (d.thesis && d.thesis.analysis && d.thesis.analysis.score != null)
+                                ? Number(d.thesis.analysis.score) : null;
+                            const gain = Number(m.determinism_gain || 0);
+                            if (gain > 0) {
+                                gainTxt = (curScore != null && !isNaN(curScore))
+                                    ? '补全后确定性分 ' + curScore + ' → ' + Math.min(100, curScore + gain)
+                                    : '补全后确定性分可 +' + gain;
+                            }
                         }
                         side += '<div class="no-data" style="color:#fbbf24;text-align:left;line-height:1.6">' +
                             '⛔ 缺失：' + escapeHtml(m.label) +
+                            (m.horizon_label ? '（影响' + escapeHtml(m.horizon_label) + '）' : '') +
                             (dimLabel ? '<br>影响维度：' + escapeHtml(dimLabel) +
                                 (m.impact_desc ? '（' + escapeHtml(m.impact_desc) + '）' : '') : '') +
+                            (m.missing_nature_label ? '<br>性质：' + escapeHtml(m.missing_nature_label) : '') +
                             (gainTxt ? '<br>' + escapeHtml(gainTxt) : '') +
                             '</div>';
                     }

@@ -2319,6 +2319,12 @@ def _compute_missing_materials_inner(snapshot: dict) -> list[dict]:
         is_present = bool(present.get(key))
         # 审计 §4.2 #12：缺失项标注影响维度 + 补全后的确定性增益
         _dim, _desc, _gain = _MATERIAL_IMPACT.get(key, (None, spec["description"], 0))
+        # 三档确定性（方案 §2.6）：资料按期限归位 + 缺失性质二分（可采集 / 长期档存在性门槛）+
+        # 按档给出补全增益，让 unusable 从终点变成带箭头的指引。
+        _h, _nature = _MATERIAL_HORIZON.get(key, (None, "collectable"))
+        _gain_by_tier = {k: 0 for k in ("s", "m", "l")}
+        if not is_present and _gain and _h in _gain_by_tier:
+            _gain_by_tier[_h] = _gain
         items.append({
             "key": key,
             "label": spec["label"],
@@ -2330,6 +2336,11 @@ def _compute_missing_materials_inner(snapshot: dict) -> list[dict]:
             "impact_dimension": _dim,
             "impact_desc": _desc,
             "determinism_gain": 0 if is_present else _gain,
+            "horizon": _h,
+            "horizon_label": _HORIZON_LABELS.get(_h),
+            "missing_nature": _nature,
+            "missing_nature_label": _MISSING_NATURE_LABELS.get(_nature),
+            "determinism_gain_by_tier": _gain_by_tier,
         })
 
     # ── 结构化数据补充摘要链接 ──
@@ -3604,6 +3615,10 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
         # 审计 §4.2 #5/#11/#14：按当前实时数据计算证据分级 / 确定性评分卡 / 证伪条件
         analysis = _compute_determinism(thesis, structured_metrics, missing)
         analysis["falsifiers"] = _build_falsifiers(thesis, structured_metrics)
+        # 三档确定性（短/中/长）：分档 = 分证据来源，与评分卡同源实时重算，
+        # 避免「blob 停在修复前、只有分数吃到修复」的新鲜度问题（方案 §2.7）。
+        analysis["determinism_3tier"] = _compute_determinism_3tier(
+            thesis, structured_metrics, missing)
         # 审计 §4.2 #5：推断点占比 >50% → conviction 强制锁 low 且不可上调
         if analysis["evidence"].get("conviction_locked"):
             thesis["conviction_raw"] = thesis.get("conviction")
@@ -3619,6 +3634,8 @@ def get_or_create_research_notebook(asset_id: int, force_refresh: bool = False) 
         thesis = _build_fallback_thesis(snapshot, structured_metrics, asset_id)
         thesis["analysis"] = _compute_determinism(thesis, structured_metrics, missing)
         thesis["analysis"]["falsifiers"] = _build_falsifiers(thesis, structured_metrics)
+        thesis["analysis"]["determinism_3tier"] = _compute_determinism_3tier(
+            thesis, structured_metrics, missing)
         thesis["versions"] = _load_thesis_versions(asset_id)
         thesis["version_diff"] = _diff_thesis_versions(thesis["versions"])
 
@@ -4255,6 +4272,99 @@ _DETERMINISM_TIERS = ((70.0, "actionable", "可下注"), (40.0, "watch", "仅观
 # 故写死为具名常量、不随权重浮动；< 40.0 的边界由探针断言钉死（test_research_determinacy_20260926）。
 _ZERO_EVIDENCE_SCORE_CAP = 39.9
 
+# ── 三档确定性（短 S / 中 M / 长 L）：分档 = 分证据来源 ─────────────────────
+# 设计详见 04_架构与代码方案/投研页三档确定性可落地方案_2026-09-27.md §2。
+#   · 短期档 S：证据是结构化量化数据，口径 = 「可复现性」（存在 + 采集时间 + 新鲜度），
+#               不适用「URL 引用可核验」口径 ⇒ 不受 _ZERO_EVIDENCE_SCORE_CAP 封顶。
+#               防骗等价护栏：① 输入必须取自结构化表且带 fetched_at；② 输出只描述
+#               资金面状态与数据完整度，不输出方向概率；③ 不消费 _compute_evidence_stats()
+#               （防文本口径混回量化档），三条由探针钉死。
+#   · 中期档 M：证据是文本论点，沿用 URL 引用口径 + 39.9 封顶。
+#   · 长期档 L：先过「存在性硬门槛」（审计 / 公开代码库 / 治理），三项全 1 才进入加权；
+#               任一为 0 ⇒ not_evaluable，且结构上不被 S/M 档拉升。
+# 权重与阈值为经验初值、未回测校准：当前无 thesis 级前向收益样本，回测框架
+# （backtest_opportunities.py）最长持有期 30 天且对象是机会清单而非结论，无法校准
+# 中/长档（方案 §1.3）。校准基建见方案 §5。
+_TIER_CALIBRATION = "uncalibrated"
+_TIER_CALIBRATION_NOTE = "经验初值·未校准（无 thesis 级前向样本）"
+
+# 论点 kind → 期限。覆盖 _iter_thesis_points 全部产出；未命中返回 None。
+_HORIZON_BY_KIND = {
+    "sentiment": "s",   # 社交热度 / 拥挤度 / KOL 情绪 → 近端
+    "supply": "s",      # 筹码集中度 / 鲸鱼抛压 → 近端
+    "catalyst": "m",    # 催化剂日程 / 上所 / 路线图
+    "risk": "m",        # 风险点多数落在事件窗口
+    "thesis": "m",      # 汇总论点，保守归中档
+    "valuation": "l",   # 代币经济学 / 基本面锚
+}
+_HORIZON_LABELS = {"s": "短期", "m": "中期", "l": "长期"}
+# 未标注期限的论点保守归中档（中档受 39.9 封顶），单独计数以便提示，不静默丢弃。
+_HORIZON_DEFAULT = "m"
+
+# 短期档量化输入：key → (展示名, structured_metrics 取值路径)。
+# 「近端解锁状态」另按 unlock.next_unlock_date / data_available 单独判定。
+_SHORT_TERM_INPUTS = (
+    ("cvd", "CVD 24h", ("derivatives", "cvd_ratio_24h")),
+    ("oi", "OI 变化 24h", ("derivatives", "oi_change_24h_pct")),
+    ("funding", "资金费率", ("derivatives", "funding_rate_pct")),
+    ("pressure", "抛压评分", ("pressure", "pressure_score")),
+)
+_SHORT_TERM_WEIGHTS = {"completeness": 0.5, "freshness": 0.3, "consistency": 0.2}
+_SHORT_TERM_FRESH_MAX_H = 24.0
+_SHORT_TERM_FRESH_SOFT_H = 168.0
+# 分母 = 4 项量化输入 + 1 项近端解锁状态
+_SHORT_TERM_INPUT_TOTAL = len(_SHORT_TERM_INPUTS) + 1
+
+# 中/长档权重刻意不含 consistency：_consistency_dim 只读 24h 衍生品
+# （funding / OI / CVD），对「2~12 周」与「季度~年」两个维度无语义（方案 §1.2），
+# 故按期限适配子分重配权重，而不是把短线字段乘一个长期权重。
+_TIER_WEIGHTS_3 = {
+    "m": {"coverage": 0.50, "freshness": 0.20, "sample": 0.30},
+    "l": {"coverage": 0.55, "freshness": 0.15, "sample": 0.30},
+}
+# 长期档存在性硬门槛：三项存在性任一为 0 → 长期档不可评估。
+_LONG_TERM_EXISTENCE_KEYS = (
+    ("audit_report", "第三方审计报告"),
+    ("github_repo", "公开代码库"),
+    ("dao_governance", "治理机制"),
+)
+_NEAR_UNLOCK_DAYS = 14     # 短期档「临近解锁」窗口
+_NEAR_UNLOCK_PCT = 5.0     # 窗口内解锁占比超过该值 ⇒ 明确反向
+_M_HORIZON_MIN_DAYS = 14   # 中期档「可验证窗口」下沿
+_M_HORIZON_MAX_DAYS = 90   # 中期档「可验证窗口」上沿
+
+# 投研资料 key → (期限, 缺失性质)。缺失性质：
+#   collectable    —— 可采集，补齐即提升对应档位分数
+#   existence_gate —— 长期档存在性门槛项，缺失则长期档不可评估
+#                     （Launchpool / Meme 类通常结构缺失、难以补齐，但不做绝对断言）
+_MATERIAL_HORIZON = {
+    "onchain_holder_data": ("s", "collectable"),
+    "social_heat": ("s", "collectable"),
+    "contract_address": ("s", "collectable"),
+    "token_unlock_data": ("m", "collectable"),
+    "exchange_listing": ("m", "collectable"),
+    "major_event_announcement": ("m", "collectable"),
+    "onchain_abnormal_event": ("m", "collectable"),
+    "tge_ido_info": ("m", "collectable"),
+    "competitor_material": ("m", "collectable"),
+    "lp_liquidity_info": ("m", "collectable"),
+    "treasury_multisig": ("m", "collectable"),
+    "team_vc": ("l", "collectable"),
+    "roadmap": ("l", "collectable"),
+    "third_party_rating": ("l", "collectable"),
+    "whitepaper_docs": ("l", "collectable"),
+    "official_website": ("l", "collectable"),
+    "tokenomics": ("l", "collectable"),
+    "bug_bounty": ("l", "collectable"),
+    "audit_report": ("l", "existence_gate"),
+    "github_repo": ("l", "existence_gate"),
+    "dao_governance": ("l", "existence_gate"),
+}
+_MISSING_NATURE_LABELS = {
+    "collectable": "可采集",
+    "existence_gate": "长期档存在性门槛",
+}
+
 
 def _is_homepage_source(s: dict) -> bool:
     """官网首页（official_website 且无具体路径）——不能作为数值类结论的唯一引用。"""
@@ -4270,15 +4380,24 @@ def _is_homepage_source(s: dict) -> bool:
         return False
 
 
+def _horizon_for_kind(kind: str) -> str | None:
+    """论点 kind → 期限（s/m/l）。未标注返回 None（由调用方计数，不静默落档）。"""
+    return _HORIZON_BY_KIND.get(kind)
+
+
 def _iter_thesis_points(thesis_data: dict) -> list[dict]:
-    """遍历结论全部论点（thesis / risks / 四维 points）。"""
+    """遍历结论全部论点（thesis / risks / 四维 points）。
+
+    每项附带 `horizon`（s/m/l，未标注为 None）——三档确定性按此切分论点，
+    而不是给同一批论点换个权重（方案 §2.1）。
+    """
     out = []
     for item in thesis_data.get("thesis") or []:
         if isinstance(item, dict):
-            out.append({"kind": "thesis", "item": item})
+            out.append({"kind": "thesis", "horizon": _horizon_for_kind("thesis"), "item": item})
     for item in thesis_data.get("risks") or []:
         if isinstance(item, dict):
-            out.append({"kind": "risk", "item": item})
+            out.append({"kind": "risk", "horizon": _horizon_for_kind("risk"), "item": item})
     dims = thesis_data.get("dimensions")
     if isinstance(dims, dict):
         for dim_key in ("valuation", "supply", "sentiment", "catalyst"):
@@ -4286,7 +4405,8 @@ def _iter_thesis_points(thesis_data: dict) -> list[dict]:
             if isinstance(dim, dict):
                 for item in dim.get("points") or []:
                     if isinstance(item, dict):
-                        out.append({"kind": dim_key, "item": item})
+                        out.append({"kind": dim_key, "horizon": _horizon_for_kind(dim_key),
+                                    "item": item})
     return out
 
 
@@ -4312,7 +4432,7 @@ def _has_valid_citation(item: dict) -> bool:
     return bool(_citation_urls(item))
 
 
-def _compute_evidence_stats(thesis_data: dict) -> dict:
+def _compute_evidence_stats(thesis_data: dict, points: list | None = None) -> dict:
     """证据分级统计（审计 §4.2 #5）：总论点 / 有效引用 / 弱引用 / 推断 / 推断占比。
 
     inferred_ratio > 50% 时 conviction 强制锁 low 且不可上调。
@@ -4320,8 +4440,11 @@ def _compute_evidence_stats(thesis_data: dict) -> dict:
     复验 FIX-DETERMINACY-002 §五（P0）：原实现只判 citations 数组非空，导致 28 条空 URL 的
     内部数据类别引用把 coverage 撑到 1.0（PONS 91.3/actionable）。现仅「≥1 条引用带非空 URL」
     计为 cited，其余有引用但全空的记为 weak_cited_points，同样按推断处理。
+
+    `points` 可选：由调用方传入已切分的论点子集（三档确定性按期限分别统计），
+    缺省仍遍历全部论点 —— 默认行为与口径完全不变。
     """
-    points = _iter_thesis_points(thesis_data)
+    points = _iter_thesis_points(thesis_data) if points is None else points
     total = len(points)
     cited = 0
     weak_cited = 0
@@ -4455,6 +4578,345 @@ def _compute_determinism(thesis_data: dict, structured_metrics: dict,
         "notes": f_notes + c_notes + s_notes + notes,
         "evidence": ev,
     }
+
+
+# ── 三档确定性（短 S / 中 M / 长 L）──────────────────────────────────────
+
+def _tier_of(score: float) -> tuple[str, str]:
+    """分数 → (tier_code, tier_label)，复用既有三档门槛（70 / 40 / 0）。"""
+    for threshold, code, label in _DETERMINISM_TIERS:
+        if score >= threshold:
+            return code, label
+    return "unusable", "不可用于决策"
+
+
+def _sm_get(node, path: tuple):
+    """按路径从 structured_metrics 安全取值，任一层非 dict 即返回 None。"""
+    for seg in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(seg)
+    return node
+
+
+def _days_until(date_str) -> float | None:
+    """距今剩余天数（负值 = 已过期）。无法解析返回 None。"""
+    if not date_str:
+        return None
+    raw = str(date_str).strip()
+    _dt = None
+    try:
+        _dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            _dt = datetime.strptime(raw[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    _now = datetime.now(_dt.tzinfo) if _dt.tzinfo else datetime.now()
+    return (_dt - _now).total_seconds() / 86400.0
+
+
+def _tier_point_sets(thesis_data: dict) -> dict:
+    """按期限切分论点。
+
+    未标注期限的论点归入中档（保守：中档受 39.9 封顶）并单独计数，
+    既不放任其进入短期量化档，也不静默丢弃。
+    """
+    buckets: dict[str, list[dict]] = {"s": [], "m": [], "l": []}
+    unmapped = 0
+    for p in _iter_thesis_points(thesis_data):
+        h = p.get("horizon")
+        if h not in buckets:
+            unmapped += 1
+            buckets[_HORIZON_DEFAULT].append(p)
+            continue
+        buckets[h].append(p)
+    return {"buckets": buckets, "unmapped": unmapped}
+
+
+def _short_term_evidence(sm: dict) -> dict:
+    """短期档证据：结构化量化数据的「可复现性」，不走 URL 引用口径。
+
+    防骗等价护栏：输入只取结构化表字段（存在即证明已采集），输出只给
+    完整度/新鲜度/方向一致，不给方向概率。
+    """
+    present, absent = [], []
+    for key, label, path in _SHORT_TERM_INPUTS:
+        if _to_float(_sm_get(sm, path)) is not None:
+            present.append(key)
+        else:
+            absent.append(label)
+    unlock = sm.get("unlock") or {}
+    # 「无解锁事件」也是有效判定结果（表示已查明），故 data_available 亦计为就位
+    if unlock.get("data_available") is True or unlock.get("next_unlock_date"):
+        present.append("unlock")
+    else:
+        absent.append("近端解锁状态")
+
+    age = _sm_get(sm, ("data_freshness", "derivatives", "age_hours"))
+    fresh_notes = []
+    if age is None:
+        freshness = 0.0
+        fresh_notes.append("衍生品无时效信息")
+    else:
+        age = float(age)
+        if age <= _SHORT_TERM_FRESH_MAX_H:
+            freshness = 1.0
+        elif age <= _SHORT_TERM_FRESH_SOFT_H:
+            freshness = 0.5
+            fresh_notes.append(f"衍生品 {age:.0f}h 偏旧")
+        else:
+            freshness = 0.0
+            fresh_notes.append(f"衍生品 {age:.0f}h 严重滞后")
+
+    consistency, cons_notes = _consistency_dim(sm)
+    return {
+        "present": present, "absent": absent,
+        "completeness": round(len(present) / _SHORT_TERM_INPUT_TOTAL, 4),
+        "freshness": round(freshness, 4),
+        "consistency": round(consistency, 4),
+        "notes": fresh_notes + cons_notes,
+    }
+
+
+def _near_unlock_pressure(sm: dict) -> dict:
+    """临近解锁压力：下个解锁在 _NEAR_UNLOCK_DAYS 天内且占比 > _NEAR_UNLOCK_PCT。"""
+    unlock = sm.get("unlock") or {}
+    days = _days_until(unlock.get("next_unlock_date"))
+    pct = _to_float(unlock.get("next_unlock_pct"))
+    hit = bool(days is not None and days <= _NEAR_UNLOCK_DAYS
+               and pct is not None and pct > _NEAR_UNLOCK_PCT)
+    return {"hit": hit,
+            "days": round(days, 1) if days is not None else None,
+            "pct": pct}
+
+
+def _short_term_gate(st: dict, near: dict, sm: dict) -> dict:
+    """短期闸门：结构条件（方案 §2.5），非绝对分数；未校准。"""
+    cvd = _to_float(_sm_get(sm, ("derivatives", "cvd_ratio_24h")))
+    pressure = _to_float(_sm_get(sm, ("pressure", "pressure_score")))
+    reasons = []
+    if st["completeness"] < 1.0:
+        reasons.append(f"量化输入未齐（{len(st['present'])}/{_SHORT_TERM_INPUT_TOTAL}）")
+    if st["freshness"] < 1.0:
+        reasons.append("衍生品数据不新鲜（>24h）")
+    if near["hit"]:
+        reasons.append(f"临近解锁压力（{near['days']:.0f} 天 / {near['pct']:.1f}%）")
+    if cvd is not None and cvd < 0 and pressure is not None and pressure >= 70:
+        reasons.append("资金净流出（CVD<0）且抛压评分 high")
+    return {"open": not reasons, "blocked_by": reasons, "calibration": _TIER_CALIBRATION}
+
+
+def _verifiable_window(sm: dict) -> dict:
+    """中期「可验证事件窗口」：解锁落在 [14, 90] 天，或已有采集到的催化剂。"""
+    unlock = sm.get("unlock") or {}
+    days = _days_until(unlock.get("next_unlock_date"))
+    _days_r = round(days, 1) if days is not None else None
+    if days is not None and _M_HORIZON_MIN_DAYS <= days <= _M_HORIZON_MAX_DAYS:
+        return {"open": True, "basis": f"解锁在 {days:.0f} 天后（落中期窗口内）",
+                "next_unlock_days": _days_r}
+    cats = sm.get("catalysts") or {}
+    if isinstance(cats, dict) and (cats.get("items") or []):
+        return {"open": True, "basis": f"已采集催化剂 {len(cats['items'])} 条",
+                "next_unlock_days": _days_r}
+    reason = ("无解锁日程数据，且无已采集催化剂" if days is None else
+              f"下个解锁在 {days:.0f} 天后，不在中期窗口 "
+              f"[{_M_HORIZON_MIN_DAYS}, {_M_HORIZON_MAX_DAYS}] 天内")
+    return {"open": False, "reason": reason, "next_unlock_days": _days_r}
+
+
+def _mid_term_gate(m_ev: dict, sm: dict) -> dict:
+    """中期闸门：中期证据可核验 + 催化剂进入可验证窗口；未校准。"""
+    reasons = []
+    if (m_ev.get("cited_points") or 0) <= 0:
+        reasons.append("中期论点无一条可核验引用")
+    window = _verifiable_window(sm)
+    if not window["open"]:
+        reasons.append(window["reason"])
+    return {"open": not reasons, "blocked_by": reasons,
+            "window": window, "calibration": _TIER_CALIBRATION}
+
+
+def _long_term_existence(missing: list | None) -> dict:
+    """长期档存在性硬门槛：审计 / 公开代码库 / 治理，三项全 1 才可评估。
+
+    存在性是事实、不参与加权 —— 于是「Launchpool 类长期不可评估」是公式的
+    自然结果，不需要任何额外特判（方案 §2.4）。缺失清单为空时无法判定，
+    保守取不可评估。
+    """
+    present_by_key = {}
+    for it in (missing or []):
+        if isinstance(it, dict) and it.get("key"):
+            present_by_key[it["key"]] = bool(it.get("present"))
+    checks = {key: {"label": label, "present": present_by_key.get(key)}
+              for key, label in _LONG_TERM_EXISTENCE_KEYS}
+    total = len(_LONG_TERM_EXISTENCE_KEYS)
+    if not present_by_key:
+        return {"checks": checks, "passed": 0, "total": total, "evaluable": False,
+                "reason": "缺失清单为空，无法判定长期存在性"}
+    absent = [c["label"] for c in checks.values() if c["present"] is not True]
+    return {
+        "checks": checks, "passed": total - len(absent), "total": total,
+        "evaluable": not absent,
+        "reason": "" if not absent else "、".join(absent) + " 存在性为 0（长期档存在性门槛未过）",
+    }
+
+
+def _compose_3tier(res: dict) -> dict:
+    """综合结论：显式标注每档状态，禁止用高确定性档掩盖低确定性档（方案 §2.2）。"""
+    s, m, l = res["s"], res["m"], res["l"]
+    s_open, m_open = bool(s["gate"]["open"]), bool(m["gate"]["open"])
+    l_eval = l["tier"] != "not_evaluable"
+    l_line = (f"{l['score']}/100，{l['tier_label']}" if l_eval else l["tier_label"])
+    lines = [
+        f"短期：{'可行动' if s_open else '闸门未开'}（{s['score']}/100）",
+        f"中期：{'可行动' if m_open else '闸门未开'}（{m['score']}/100）",
+        f"长期：{'可评估' if l_eval else '不可评估'}（{l_line}）",
+    ]
+    if s_open and m_open and not l_eval:
+        verdict = "短线 + 事件仓位；长期不可评估，禁止长期持有叙事"
+    elif s_open and not l_eval:
+        verdict = "仅适合短线/事件驱动；长期不可评估，禁止长期持有叙事"
+    elif l_eval and (s_open or m_open):
+        verdict = "具备讨论长期持有的数据基础（仍需过中/短期闸门）"
+    elif l_eval:
+        verdict = "长期档可评估，但中/短期闸门均未开"
+    else:
+        verdict = "三档闸门均未开，无期限可行动"
+    unavail = [lbl for lbl, ok in (("短期", s_open), ("中期", m_open), ("长期", l_eval)) if not ok]
+    return {
+        "verdict": verdict, "lines": lines, "unavailable_horizons": unavail,
+        "rule": "任一档不可评估时必须写明该期限不可行动，不得用高确定性档掩盖低确定性档",
+        "calibration": _TIER_CALIBRATION,
+    }
+
+
+def _compute_determinism_3tier(thesis_data: dict, structured_metrics: dict,
+                               missing: list | None = None) -> dict:
+    """三档确定性（短 S / 中 M / 长 L）—— 分档 = 分证据来源，不共用口径。
+
+    与 _compute_determinism 的关系：后者是「整体单值 + 零证据封顶」，行为保持不变；
+    本函数在其之上叠加期限维度。S 档走结构化量化数据口径（不受 39.9 封顶），
+    M/L 档走文本引用口径（保留封顶）。
+    """
+    sm = structured_metrics or {}
+    split = _tier_point_sets(thesis_data)
+    buckets = split["buckets"]
+
+    # ── 短期档 S：量化数据口径 ──
+    st = _short_term_evidence(sm)
+    s_score = round(100.0 * (
+        st["completeness"] * _SHORT_TERM_WEIGHTS["completeness"]
+        + st["freshness"] * _SHORT_TERM_WEIGHTS["freshness"]
+        + st["consistency"] * _SHORT_TERM_WEIGHTS["consistency"]), 1)
+    s_tier, s_tier_label = _tier_of(s_score)
+    s_notes = list(st["notes"])
+    s_notes.append(
+        f"短期档走量化数据口径（{len(st['present'])}/{_SHORT_TERM_INPUT_TOTAL} 项输入就位），"
+        f"不适用零证据封顶 {_ZERO_EVIDENCE_SCORE_CAP}；仅描述资金面状态，不含方向概率")
+    if st["absent"]:
+        s_notes.append("未就位输入：" + "、".join(st["absent"]))
+    near = _near_unlock_pressure(sm)
+
+    # ── 中期档 M：文本引用口径 + 39.9 封顶 ──
+    m_points = buckets["m"]
+    m_ev = _compute_evidence_stats(thesis_data, m_points)
+    m_cov = (m_ev["cited_points"] / m_ev["total_points"]) if m_ev["total_points"] else 0.0
+    m_fresh, m_fresh_notes = _freshness_dim(sm)
+    m_sample, m_sample_notes = _sample_dim(missing)
+    m_breakdown = {"coverage": round(m_cov, 4), "freshness": round(m_fresh, 4),
+                   "sample": round(m_sample, 4)}
+    m_score = round(100.0 * sum(m_breakdown[k] * _TIER_WEIGHTS_3["m"][k] for k in m_breakdown), 1)
+    m_notes = list(m_fresh_notes) + list(m_sample_notes)
+    if not m_points:
+        m_notes.append("中期档无对应论点（catalyst / risk / thesis 均为空）")
+    if m_cov == 0:
+        m_score = min(m_score, _ZERO_EVIDENCE_SCORE_CAP)
+        m_tier, m_tier_label = "unusable", "不可用于决策"
+        m_notes.append(f"中期档论点为推断、无一条可核验引用 → 封顶 {_ZERO_EVIDENCE_SCORE_CAP}")
+    else:
+        m_tier, m_tier_label = _tier_of(m_score)
+    if m_ev.get("weak_cited_points"):
+        m_notes.append(
+            f"{m_ev['weak_cited_points']} 个中期论点仅引用内部数据类别（无 URL，不可核验）")
+
+    # ── 长期档 L：先过存在性硬门槛，再走文本引用口径 ──
+    l_existence = _long_term_existence(missing)
+    l_points = buckets["l"]
+    if not l_existence["evaluable"]:
+        l_score, l_tier, l_tier_label = None, "not_evaluable", "不可评估（长期档存在性门槛未过）"
+        l_breakdown = None
+        l_notes = [
+            l_existence["reason"],
+            "存在性门槛为资产固有属性；未补齐前任何「长期持有」结论均不成立，"
+            "且不因短期/中期档分数高而改判",
+        ]
+    else:
+        l_ev = _compute_evidence_stats(thesis_data, l_points)
+        l_cov = (l_ev["cited_points"] / l_ev["total_points"]) if l_ev["total_points"] else 0.0
+        l_fresh, l_fresh_notes = _freshness_dim(sm)
+        l_sample, l_sample_notes = _sample_dim(missing)
+        l_breakdown = {"coverage": round(l_cov, 4), "freshness": round(l_fresh, 4),
+                       "sample": round(l_sample, 4)}
+        l_score = round(100.0 * sum(l_breakdown[k] * _TIER_WEIGHTS_3["l"][k] for k in l_breakdown), 1)
+        l_notes = list(l_fresh_notes) + list(l_sample_notes)
+        if not l_points:
+            l_notes.append("长期档无对应论点（valuation 为空）")
+        if l_cov == 0:
+            l_score = min(l_score, _ZERO_EVIDENCE_SCORE_CAP)
+            l_tier, l_tier_label = "unusable", "不可用于决策"
+            l_notes.append(f"长期档论点为推断、无一条可核验引用 → 封顶 {_ZERO_EVIDENCE_SCORE_CAP}")
+        else:
+            l_tier, l_tier_label = _tier_of(l_score)
+
+    result = {
+        "calibration": _TIER_CALIBRATION,
+        "calibration_note": _TIER_CALIBRATION_NOTE,
+        "unmapped_points": split["unmapped"],
+        "weights": {k: dict(v) for k, v in _TIER_WEIGHTS_3.items()},
+        "s": {
+            "horizon": "s", "horizon_label": _HORIZON_LABELS["s"],
+            "title": "短期数据完整度 / 资金面状态",
+            "score": s_score, "tier": s_tier, "tier_label": s_tier_label,
+            "evidence_basis": "structured_quant",
+            "breakdown": {"completeness": st["completeness"], "freshness": st["freshness"],
+                          "consistency": st["consistency"]},
+            "weights": dict(_SHORT_TERM_WEIGHTS),
+            "inputs_present": st["present"], "inputs_absent": st["absent"],
+            "points_count": len(buckets["s"]),
+            "gate": _short_term_gate(st, near, sm),
+            "near_unlock": near,
+            "notes": s_notes,
+        },
+        "m": {
+            "horizon": "m", "horizon_label": _HORIZON_LABELS["m"],
+            "title": "中期事件驱动",
+            "score": m_score, "tier": m_tier, "tier_label": m_tier_label,
+            "evidence_basis": "text_citation",
+            "breakdown": m_breakdown,
+            "weights": dict(_TIER_WEIGHTS_3["m"]),
+            "points_count": len(m_points),
+            "evidence": m_ev,
+            "gate": _mid_term_gate(m_ev, sm),
+            "notes": m_notes,
+        },
+        "l": {
+            "horizon": "l", "horizon_label": _HORIZON_LABELS["l"],
+            "title": "长期基本面",
+            "score": l_score, "tier": l_tier, "tier_label": l_tier_label,
+            "evidence_basis": "text_citation",
+            "breakdown": l_breakdown,
+            "weights": dict(_TIER_WEIGHTS_3["l"]),
+            "points_count": len(l_points),
+            "existence": l_existence,
+            "gate": {"open": bool(l_existence["evaluable"]),
+                     "blocked_by": [] if l_existence["evaluable"] else [l_existence["reason"]],
+                     "calibration": _TIER_CALIBRATION},
+            "notes": l_notes,
+        },
+    }
+    result["composite"] = _compose_3tier(result)
+    return result
 
 
 def _build_falsifiers(thesis_data: dict, structured_metrics: dict) -> list[dict]:
@@ -8382,6 +8844,9 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     # 审计 §4.2 #5/#11/#14：生成侧即计算证据分级 / 确定性分 / 证伪条件，并作 conviction 强制锁
     _analysis = _compute_determinism(thesis_payload, metrics_structured, missing_items)
     _analysis["falsifiers"] = _build_falsifiers(thesis_payload, metrics_structured)
+    # 三档确定性（短/中/长）：随结论一并落 analysis_json，供版本 diff 与前端三档卡
+    _analysis["determinism_3tier"] = _compute_determinism_3tier(
+        thesis_payload, metrics_structured, missing_items)
     if _analysis["evidence"].get("conviction_locked"):
         _ev = _analysis["evidence"]
         _emit(

@@ -352,6 +352,15 @@ def _dq_lag_warn(section: str) -> int:
     return _DQ_LAG_WARN.get(str(section or ""), 1)
 
 
+# ── W-08-4：链上大额转账「参考类」名单（稳定币 / 黄金代币）────────────────────
+# 这些资产的转账不构成 BTC/ETH 供给变动，只能作避险情绪/结算通道参考。
+# 依据：2026-09-27 邮件把「XAUt 和 USDC 大额转账为主」当供给信号表述。
+_REFERENCE_SYMBOLS = {
+    "USDT", "USDC", "DAI", "TUSD", "FDUSD", "PYUSD", "RLUSD", "USDE", "USDS",
+    "BUSD", "USDD", "GUSD", "FRAX", "XAUT", "PAXG",
+}
+
+
 def _dq_status_map(brief: dict) -> dict:
     """W-07：返回 {section: status} 路由表。"""
     ai = brief.get("M0_ai_summary") or {}
@@ -1308,14 +1317,17 @@ def render_brief_html(brief: dict) -> str:
     if whale_moves.get("status") == "ok":
         transfers = whale_moves.get("transfers") or []
         if transfers:
-            html_parts.append(f"""
-              <div style="font-size:11.5px;font-weight:700;color:#7c3aed;margin-bottom:5px">💸 大额转账（24h Top {len(transfers[:6])}）</div>
-            """)
-            for t in transfers[:6]:
+            # W-08-4：拆两栏 —— 影响供给类 / 参考类（稳定币·黄金代币不构成 BTC/ETH 供给变动）。
+            # 依据：邮件正文把「XAUt 和 USDC 大额转账为主」当成了供给信号，实为避险/结算通道。
+            _supply_xfers = [t for t in transfers
+                             if str(t.get("symbol") or "").upper() not in _REFERENCE_SYMBOLS]
+            _ref_xfers = [t for t in transfers
+                          if str(t.get("symbol") or "").upper() in _REFERENCE_SYMBOLS]
+
+            def _xfer_row(t: dict, dim: bool = False) -> str:
                 sym = t.get("symbol", "?")
                 amount_usd = t.get("value_usd") or t.get("amount_usd")
                 amt_str = _fmt_mcap(amount_usd) if amount_usd else "—"
-
                 from_label = _resolve_addr_label(
                     t.get("from_label"), t.get("from_labels"),
                     t.get("from_label_names"), t.get("from_address"))
@@ -1323,14 +1335,11 @@ def render_brief_html(brief: dict) -> str:
                     t.get("to_label"), t.get("to_labels"),
                     t.get("to_label_names"), t.get("to_address"))
                 direction = t.get("direction") or ""
-
-                # 判断方向：从交易所转出 = 看多；转入交易所 = 看空
                 is_inflow = "exchange" in str(direction).lower() and "in" in str(direction).lower()
                 is_outflow = "exchange" in str(direction).lower() and "out" in str(direction).lower()
                 dot_color = "#16a34a" if is_outflow else "#dc2626" if is_inflow else "#7c3aed"
-
-                html_parts.append(f"""
-                  <div style="padding:5px 8px;margin-bottom:3px;border-radius:5px;background:#fafafa;border-left:2px solid {dot_color};font-size:11px">
+                return f"""
+                  <div style="padding:5px 8px;margin-bottom:3px;border-radius:5px;background:#fafafa;border-left:2px solid {dot_color};font-size:11px;{'opacity:0.7' if dim else ''}">
                     <div style="display:flex;justify-content:space-between;align-items:center">
                       <span style="font-weight:700;color:#0f172a">{sym}</span>
                       <span style="color:#475569;font-weight:600">{amt_str}</span>
@@ -1339,7 +1348,24 @@ def render_brief_html(brief: dict) -> str:
                       {from_label} → {to_label}
                     </div>
                   </div>
-                """)
+                """
+
+            html_parts.append(f"""
+              <div style="font-size:11.5px;font-weight:700;color:#7c3aed;margin-bottom:5px">💸 大额转账（24h）</div>
+              <div style="font-size:10px;color:#64748b;margin-bottom:4px">影响供给类（构成潜在买卖压）</div>
+            """)
+            if _supply_xfers:
+                for t in _supply_xfers[:5]:
+                    html_parts.append(_xfer_row(t))
+            else:
+                html_parts.append('<div style="font-size:10.5px;color:#94a3b8">无</div>')
+            if _ref_xfers:
+                html_parts.append(
+                    '<div style="font-size:10px;color:#94a3b8;margin:6px 0 4px">'
+                    '参考类（稳定币 · 黄金代币，不构成 BTC/ETH 供给变动）</div>'
+                )
+                for t in _ref_xfers[:3]:
+                    html_parts.append(_xfer_row(t, dim=True))
 
     # 持仓集中度
     if holder_conc.get("status") == "ok":

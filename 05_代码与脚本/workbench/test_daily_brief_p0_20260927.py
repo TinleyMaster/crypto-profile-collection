@@ -295,6 +295,10 @@ try:
     import macro_market as mm  # noqa: E402
     import crypto_research.clients.llm_client as _llmmod  # noqa: E402
     _llmmod.LLMClient = _FakeLLM
+    # W-08：空段落会回退到全局口径（get_global_cex_netflow，联网）；此处打桩为 None
+    # 保持本探针「纯离线 + 确定性」，专门覆盖「全局也不可用」的最坏分支。
+    _gn_orig = mm._fetch_global_cex_netflow_7d
+    mm._fetch_global_cex_netflow_7d = lambda: None
 
     _empty_brief = {
         "M0_tldr": {"btc_change_24h_pct": 0.4, "eth_change_24h_pct": 0.2},
@@ -316,7 +320,7 @@ try:
     check("【数据可用性（下结论前必读" in _up, "user_prompt 顶部有数据可用性块")
     check("- 交易所净流量: empty（无数据）" in _up, "交易所净流量标为 empty")
     check("- 大盘概况: empty（无数据）" in _up, "空段（M2_flow={}）标为 empty 而非 ok")
-    check("（暂无数据：交易所净流量不可用）" in _up, "空段落渲染「暂无数据」而非空字符串")
+    check("交易所净流量不可用，不得据此判断抛压" in _up, "空段落渲染「暂无数据」而非空字符串（W-08）")
     check("数据不可用（无有效样本）" in _up, "净流入无样本 → 「数据不可用」，不渲染 0.0M")
     check("交易所净流入：0.0M USD" not in _up, "旧「净流入：0.0M USD」已消失")
     check("数据不可用" in _up and "- 总笔数：数据不可用 笔" in _up, "总笔数 None-aware")
@@ -329,6 +333,8 @@ try:
     check(len(_dq) == 7, f"data_quality 覆盖 7 个维度（实际 {len(_dq)}）")
     check(all(d["status"] == "empty" for d in _dq), "全空场景下无一维度被记为 ok（覆盖不虚高）",
           str(_dq))
+
+    mm._fetch_global_cex_netflow_7d = _gn_orig
 
     print("[P0-b] prompt 层：有样本时仍渲染真值")
     _ok_brief = dict(_empty_brief)
@@ -856,6 +862,57 @@ try:
           "数据状态表出现在 M0 定调之后、第一张数据卡之前")
 except Exception as _e:
     check(False, "W-07 渲染层用例执行", f"{type(_e).__name__}: {_e}")
+
+# ════════════════════════════════════════════════════════
+# W-08 交易所净流路径统一 + 空态「数据不可用」+ 符号标注 + 参考类拆分
+# ════════════════════════════════════════════════════════
+print("[W-08] 源码核验：全局口径回退 + 两处符号标注分别正确 + 系统约束 7")
+check("def _fetch_global_cex_netflow_7d(" in _mm_src, "macro_market 含全局净流回退 _fetch_global_cex_netflow_7d")
+check("get_global_cex_netflow" in _mm_src, "回退取数走 db_stats.get_global_cex_netflow")
+check("正值 = 净流出交易所" in _mm_src, "全局净流标注「正值 = 净流出交易所（潜在看涨）」")
+check("正值 = 净流入交易所" in _mm_src and "符号相反" in _mm_src,
+      "whale 侧标注「正值 = 净流入交易所（潜在抛压）」且注明与全局符号相反")
+check("暂无数据：交易所净流量不可用，不得据此判断抛压" in _mm_src, "空段落渲染非空「暂无数据」文案")
+check("某维度显示「暂无数据」时，不得在结论中表述为" in _mm_src, "system prompt 含第 7 条硬约束（缺失不得表述为零）")
+
+print("[W-08] 参考类名单：稳定币/黄金代币（XAUt、USDC 必须在内）")
+try:
+    check("XAUT" in sdb._REFERENCE_SYMBOLS, "XAUT 在参考类名单")
+    check("USDC" in sdb._REFERENCE_SYMBOLS, "USDC 在参考类名单")
+    check("BTC" not in sdb._REFERENCE_SYMBOLS and "ETH" not in sdb._REFERENCE_SYMBOLS,
+          "BTC/ETH 不在参考类名单（属影响供给类）")
+except Exception as _e:
+    check(False, "W-08 参考类名单", f"{type(_e).__name__}: {_e}")
+
+print("[W-08] 渲染层：大额转账拆两栏（XAUt/USDC 进参考类，BTC 进影响供给类）")
+try:
+    _bw8 = _brief()
+    _bw8["M2_whale_moves"] = {
+        "status": "ok",
+        "transfers": [
+            {"symbol": "BTC", "value_usd": 8e6, "from_label": "Binance", "to_label": "未知钱包",
+             "direction": "exchange_out"},
+            {"symbol": "XAUT", "value_usd": 5e6, "from_label": "未知钱包", "to_label": "OKX",
+             "direction": "exchange_in"},
+            {"symbol": "USDC", "value_usd": 3e6, "from_label": "Circle", "to_label": "未知钱包",
+             "direction": ""},
+        ],
+        "total_count": 3, "total_usd": 16e6,
+    }
+    _html8 = sdb.render_brief_html(_bw8)
+    check("影响供给类（构成潜在买卖压）" in _html8, "出现「影响供给类」分栏标题")
+    check("参考类（稳定币 · 黄金代币，不构成 BTC/ETH 供给变动）" in _html8, "出现「参考类」分栏标题")
+    _i_supply = _html8.find("影响供给类")
+    _i_ref = _html8.find("参考类")
+    # 只在「影响供给类」到「参考类」之间的片段里查符号，避免命中邮件其他处的 BTC
+    _supply_zone = _html8[_i_supply:_i_ref]
+    _ref_zone = _html8[_i_ref:]
+    check(_i_supply != -1 and _i_ref != -1 and ">BTC<" in _supply_zone and ">XAUT<" not in _supply_zone,
+          "BTC 落在「影响供给类」栏，XAUT 不在该栏")
+    check(">XAUT<" in _ref_zone, "XAUT 落在「参考类」栏")
+    check(">USDC<" in _ref_zone, "USDC 落在「参考类」栏")
+except Exception as _e:
+    check(False, "W-08 渲染层用例执行", f"{type(_e).__name__}: {_e}")
 
 # ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")

@@ -7966,6 +7966,24 @@ def _build_data_quality(sec_map: dict, today: "date | None" = None) -> list[dict
     return out
 
 
+def _fetch_global_cex_netflow_7d() -> float | None:
+    """W-08：全局 CEX 7 日净流量（单位 M USD，正值 = 净流出交易所/提币到链上）。
+
+    早报原走的 per-asset 口径（biz.cm_asset_onchain_daily，rank<=100）因
+    flow_in/out_ex_usd 字段大面积缺失，按早报 WHERE 复跑常返回 0 条；而全局口径
+    （biz.onchain_transfer_log）有值（实测 netflow_7d=+$111.9M）。取不到返回 None。
+    """
+    try:
+        from db_stats import get_global_cex_netflow
+
+        r = get_global_cex_netflow(hours=7 * 24)
+        if r.get("ok") and r.get("has_data"):
+            return round(float(r.get("netflow_usd") or 0.0) / 1e6, 1)
+    except Exception as e:
+        print(f"[ai_summary] 全局交易所净流获取失败: {e}")
+    return None
+
+
 def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) -> dict:
     """用 LLM 生成早报今日定调 + 交易方向建议。
 
@@ -8031,6 +8049,28 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
                 "币种": a.get("symbol"),
                 "7日净流_M": round(float(a.get("net_flow_usd") or 0) / 1e6, 2),
             })
+
+        # W-08 交易所净流路径统一：per-asset 口径（cm_asset_onchain_daily，rank<=100）
+        # 因 flow_in/out_ex_usd 字段大面积缺失，常返回 0 条 → 空段落被 LLM 脑补成
+        # 「交易所净流入为零，抛压有限」（这是全封邮件里最接近投资结论的一句，且是错的）。
+        # 改为：段落为空时回退到有数据的全局口径（onchain_transfer_log），并显式标注符号约定。
+        _exch_prompt_lines = "\n".join(
+            f'- {e["币种"]}: {e["7日净流_M"]}M USD' for e in exch_top
+        )
+        if not _exch_prompt_lines:
+            _gn7d = _fetch_global_cex_netflow_7d()
+            if _gn7d is not None:
+                _exch_prompt_lines = (
+                    f"- 全市场 7 日净流量：{_gn7d:+.1f}M USD"
+                    "（正值 = 净流出交易所、提币到链上=潜在看涨；负值 = 净流入交易所=潜在抛压）"
+                )
+            else:
+                _exch_prompt_lines = "- （暂无数据：交易所净流量不可用，不得据此判断抛压）"
+        else:
+            _exch_prompt_lines = (
+                "- 口径：净流 = 流入交易所 − 流出交易所（正值 = 净流入交易所 = 潜在抛压）\n"
+                + _exch_prompt_lines
+            )
 
         # 巨鲸增减持精简
         whale_buy_top = []
@@ -8135,7 +8175,9 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 5. 禁止为凑满建议数量而给出低置信度或无条件的方向。
 6. 风险条目若引用系统已判定的信号，其极值/方向措辞必须与系统判定一致。
    系统标 extreme=NONE 的指标，不得表述为「极度」「极端」。
-7. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
+7. 某维度显示「暂无数据」时，不得在结论中表述为「零」「无」「没有压力」等；
+   只能表述为「该维度数据不可用，不能据此判断」。
+8. 基于数据说话，不要凭空编造信息。中文输出，简洁专业。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
@@ -8162,13 +8204,13 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 【ETF 资金流】
 {chr(10).join(f'- {e["币种"]}: 当日 {e["当日净流入_M"]}M，7日 {e["7日净流入_M"]}M' for e in etf_top)}
 
-【交易所净流量（7日，正值=净流入）】
-{chr(10).join(f'- {e["币种"]}: {e["7日净流_M"]}M' for e in exch_top) or '- （暂无数据：交易所净流量不可用）'}
+【交易所净流量（7日）】
+{_exch_prompt_lines}
 
 【大额链上转账（24h）】
 - 总笔数：{whale_moves.get('total_count') if _wm_ok else '数据不可用'} 笔
 - 总金额：{('约 ' + str(round(float(whale_moves.get('total_usd') or 0) / 1e6, 1)) + 'M USD') if _wm_ok else '数据不可用'}
-- 交易所净流入：{_net_txt}
+- 交易所净流入（口径：流入交易所 − 流出交易所；**正值 = 净流入交易所 = 潜在抛压**，与上方全市场净流量符号相反）：{_net_txt}
 {chr(10).join(f'- {w["币种"]} {w["方向"]} {w["金额_万USD"]:.0f}万USD ({w["链"]})' for w in whale_top) or '- （暂无数据）'}
 
 【巨鲸持仓变化（7日）】

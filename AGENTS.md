@@ -1808,3 +1808,19 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 **验证**：`test_pressure_band_20260927.py` **68/0**；既有回归 `test_research_determinacy_20260926.py` **127/0**、`test_research_3tier_20260927.py` **82/0**、`test_thesis_forward_track_20260927.py` **63/0**；`py_compile` 通过。
 
 **未做 / 边界（须留档）**：① **未改分数口径**：缺失仍按 0 计分，本轮只做标记——让缺失参与判档（缺失时不判 low、或按最坏值填充）属口径变更，需产品拍板。② **前端未加徽标**：`index.html`（抛压风险行）、`research.html`（抛压评分）仍只显示分数/档位，未渲染「分量缺失 N/6」；本轮刻意不动模板（`index.html` 常有并行会话未提交改动，避串台），标记已在 API 与结论文本可用。③ **旧缓存行（6h TTL 内）视为齐备**：`detail_json` 无 `missing_inputs` 键 ⇒ `is_partial=false`，TTL 过期重算后自然补齐，不做回填。④ **`unlock_pct_30d = 0` 不标缺失**：解锁是否「真无事件」由既有 `unlock.data_available` 单独判定（规则 4），本标记不重复。⑤ **线上 runtime 复验须待 Zeabur 重建后执行**（`push ≠ 线上生效`），本单未做。
+
+### 链上快照系统性滞后修复 OBI-OPT-SNAPSHOT-FRESHNESS P1-A~D（2026-09-27，本次提交 8881a80）
+
+来源：`工单_OBI-OPT-SNAPSHOT-FRESHNESS_2026-09-27.md`（上游 OBI-OPT-BACKTEST-001 拆解项 X3）。用户授权「按你的判断处理」后落地。
+
+- **根因三连**：链上快照（`biz.onchain_holder_snapshot`）分链**隔日**运行（`1,3,5`/`2,4,6`）+ 单轮 `--limit` 截断 + RPC 失败无兜底 ⇒ 每条链天然滞后 1–2 天、长尾（rank 靠后合约）永远轮不到、单次失败即整日空缺，实测滞后达 3 天。
+- **改动（4 文件 + 1 探针）**：
+  - **P1-A** `scheduler.py`：四条 `chain_holder_snapshot_*` cron 由隔日改**每日**，错峰 **14:00 / 14:20 / 14:40 / 15:00**（各差 20 分钟，比工单草案的 14:00/14:30/15:00 更细，避 RPC 并发挤兑）。
+  - **P1-B** 新增 `scripts/bin/check_onchain_snapshot_freshness.py`（仿 `check_scan_freshness.py`）：按链 `SELECT chain, MAX(snapshot_date) ... GROUP BY chain`，滞后 **>2 天**发告警邮件；复用 `biz.scan_stall_alert` 表 + **独立去重键 `onchain_snapshot_stall`**（`ON CONFLICT (task) DO UPDATE`），6h 静默、恢复后清空时间戳并解除；**整表为空按滞后告警**（不静默通过）；**恰 2 天不告警**（`>2` 才告警）；退出码恒 0（停摆用邮件表达，非退出码）。scheduler 注册 `onchain_snapshot_freshness`（`20 * * * *`，**monitor** 类）。
+  - **P1-C** `phase_chain_holder_batch.get_pending_assets` 改**「最久未采优先」限界旋转**：新增 `LEFT JOIN LATERAL (SELECT MAX(s.snapshot_date) AS last_dt FROM biz.onchain_holder_snapshot s WHERE s.asset_id=c.asset_id AND s.chain=c.chain) ls ON TRUE`，排序由「仅 `market_cap_rank ASC`」改为 `ls.last_dt ASC NULLS FIRST, a.market_cap_rank ASC NULLS LAST, c.asset_id ASC`。未采过的资产（`last_dt` NULL）恒排最前，已采资产按陈旧度跨日轮转 ⇒ 长尾数日内自然覆盖。
+  - **P1-D** `phase_chain_holder_snapshot_auto.py` 头部加 **DEPRECATED** 段（说明自动化调度角色已废弃、保留原因、`--limit 0` 长任务占槽位风险）。
+- **两处定调偏离（须留档）**：
+  - ① **P1-C 未采用工单原方案「取消硬 `--limit` / 分页续跑遍历完」**。依据 `scheduler.py` 明文史实「chain_transfer_monitor_auto…不再占用 chain 并发槽位，避免每天 5 小时级任务饿死其他 chain 任务」——无界「跑到完」会重现 chain 槽位饿死事故。故保 `--limit`（1200/1200/800/300）+ 旋转排序。
+  - ② **P1-D 未删文件**。工单判其「死代码」有误：`phase_chain_holder_snapshot_auto.py` 虽不被 scheduler/supervisord 调度，但仍是 **`app.py` 工作台可见手动触发任务 `chain_holder_snapshot_auto` 的入口**，直删会使该 UI 任务触发即失败。故仅标 DEPRECATED，并注明「若不再需要手动入口，须先删 `app.py` 条目再删本文件」。
+- **验证**：新探针 `workbench/test_snapshot_freshness_20260927.py` **27/0**（A 组调度四条齐备/每日/错峰/`--limit` 保留；B 组看门狗注册/monitor；C 组判定边界：新鲜/3 天告警/恰 2 天不告警/表空告警/阈值与去重键/复用 upsert/恢复清空；D 组旋转排序/`LIMIT` 保留/北京时间排除；E 组 DEPRECATED/未删/app.py 未悬空/不被调度）。既有回归全绿：`test_scan_alert_header_regime` 135/0、`test_macro_market_board_tier2` 36/0、`test_scan_alert_remaining` 29/0、`test_derivatives_signal_gap` 43/0、`test_funding_interval_20260927` 35/0、`test_risk_signal_p0r2_20260927` 14/0、`test_sector_taxonomy_20260927` 34/0、`test_research_3tier_20260927` 82/0、`test_thesis_forward_track_20260927` 63/0；`py_compile` 5/5 OK；`python3 scheduler.py --list` 已确认四条每日 cron 与新看门狗注册生效。
+- **未做 / 边界（须留档）**：① **runtime 24h 观察未做**（须待 Zeabur 约 6 分钟重建后挂 24h，确认无「滞后>2 天」误告警）。② **DB SELECT 未做**（需 prod 只读凭证，待授权）：各链滞后 / 覆盖率对比 / 每日行情行数是否 ≥ 7000。③ **关联项「行情缺口阈值对齐」未做**：`check_cmc_snapshot_gap.py --threshold 7000` 与 `--top 10000` 的实际每日行数需 DB 核查（若真实 < 7000 则下调阈值或上调 top）；本项属只读核查，本轮未改码。④ 旋转覆盖长尾需**数日收敛**（非即时全量），验收看趋势不看单日。

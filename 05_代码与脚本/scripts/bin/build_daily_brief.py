@@ -94,6 +94,65 @@ def _check_data_freshness() -> list[str]:
     return stale
 
 
+def _read_app_commit() -> str | None:
+    """W-06：读取生成时的代码版本（env 优先，其次 /app/.git_head / 仓库 .git_head）。
+
+    读不到返回 None（写 NULL，不阻断早报主流程）。
+    """
+    for key in ("APP_COMMIT", "GIT_COMMIT", "GIT_SHA"):
+        v = os.environ.get(key)
+        if v and v.strip():
+            return v.strip()[:64]
+    for path in ("/app/.git_head", os.path.join(_code_root, ".git_head")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                v = f.read().strip()
+            if v:
+                return v[:64]
+        except Exception:
+            pass
+    return None
+
+
+def _save_brief_snapshot(brief_date: str, brief: dict) -> None:
+    """W-06：把**完整 brief** 落库（含 M0_ai_summary / data_quality），供 P2 变更日志与事后复盘。
+
+    - 幂等：`ON CONFLICT (brief_date) DO UPDATE`（同日重跑只覆盖，不产生重复行）；
+    - payload 不裁剪；为便于按工单口径查询（`payload ? 'data_quality'`），
+      若 brief 顶层无 data_quality，则从 M0_ai_summary.data_quality 提升一份到顶层；
+    - 落库失败**不阻断**早报主流程（早报本身比留痕重要）。
+    """
+    import json
+
+    payload_obj = dict(brief or {})
+    if "data_quality" not in payload_obj:
+        payload_obj["data_quality"] = (brief.get("M0_ai_summary") or {}).get("data_quality") or []
+    app_commit = _read_app_commit()
+    try:
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        payload = json.dumps(payload_obj, ensure_ascii=False, default=str)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO biz.daily_brief_snapshot (brief_date, payload, app_commit)
+                    VALUES (%s, %s::jsonb, %s)
+                    ON CONFLICT (brief_date) DO UPDATE
+                      SET payload = EXCLUDED.payload,
+                          app_commit = EXCLUDED.app_commit,
+                          created_at = NOW()
+                    """,
+                    (brief_date, payload, app_commit),
+                )
+            conn.commit()
+        print(f"[brief_snapshot] 已落库 {brief_date}（app_commit={app_commit}）")
+    except Exception as e:
+        print(f"[brief_snapshot] 落库失败: {e}")
+
+
 def main() -> dict:
     stale = _check_data_freshness()
     today = get_market_overview(force_refresh="1")  # 快照必须最新，绕过 CACHE_TTL
@@ -103,6 +162,7 @@ def main() -> dict:
     if stale:
         brief.setdefault("M9_degraded", []).extend(stale)
     save_snapshot(date.today().isoformat(), today)  # 落库供明日 diff
+    _save_brief_snapshot(date.today().isoformat(), brief)  # W-06：完整 brief 落库（P2 前置）
 
     print("M0:", brief.get("M0_tldr"))
     print("DIFF:", brief.get("DIFF"))

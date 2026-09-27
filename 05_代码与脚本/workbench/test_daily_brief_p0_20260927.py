@@ -706,5 +706,90 @@ check("days >= max_lag_days" in _bdb_src, "判定改为 days >= max_lag_days")
 check("if days > 2" not in _bdb_src, "旧的 days > 2 判定已移除")
 
 # ════════════════════════════════════════════════════════
+# W-06 落库早报完整 brief（daily_brief_snapshot 表 + upsert）
+# ════════════════════════════════════════════════════════
+print("[W-06] 源码核验：DDL / upsert / app_commit / 顶层 data_quality 提升")
+_w06_ddl = os.path.join(os.path.dirname(_HERE), "scripts", "migrations",
+                        "fix_074_daily_brief_snapshot.sql")
+check(os.path.isfile(_w06_ddl), "迁移文件 fix_074_daily_brief_snapshot.sql 存在")
+if os.path.isfile(_w06_ddl):
+    _ddl_src = open(_w06_ddl, encoding="utf-8").read()
+    check("CREATE TABLE IF NOT EXISTS biz.daily_brief_snapshot" in _ddl_src,
+          "DDL 创建 biz.daily_brief_snapshot")
+    check("brief_date  DATE        PRIMARY KEY" in _ddl_src, "brief_date 为主键（upsert 依据）")
+    check("app_commit" in _ddl_src, "DDL 含 app_commit 列")
+
+check("ON CONFLICT (brief_date) DO UPDATE" in _bdb_src, "落库使用 ON CONFLICT DO UPDATE（幂等 upsert）")
+check("def _save_brief_snapshot(" in _bdb_src, "_save_brief_snapshot 函数存在")
+check("def _read_app_commit(" in _bdb_src, "_read_app_commit 函数存在")
+check('"APP_COMMIT", "GIT_COMMIT", "GIT_SHA"' in _bdb_src, "app_commit 支持 env GIT_COMMIT 等键")
+check("/app/.git_head" in _bdb_src, "app_commit 回退读 /app/.git_head")
+check('if "data_quality" not in payload_obj' in _bdb_src
+      and '(brief.get("M0_ai_summary") or {}).get("data_quality")' in _bdb_src,
+      "顶层缺 data_quality 时从 M0_ai_summary 提升（满足 payload ? 'data_quality'）")
+_i_save_snap = _bdb_src.find("save_snapshot(date.today().isoformat(), today)")
+_i_brief_snap = _bdb_src.find("_save_brief_snapshot(date.today().isoformat(), brief)")
+check(_i_save_snap != -1 and _i_brief_snap != -1 and _i_save_snap < _i_brief_snap,
+      "main() 中 brief 落库在 save_snapshot 之后")
+
+print("[W-06] 纯函数：_read_app_commit 读 env（env 优先，读不到 None）")
+_old_env = {k: os.environ.pop(k, None) for k in ("APP_COMMIT", "GIT_COMMIT", "GIT_SHA")}
+try:
+    os.environ["GIT_COMMIT"] = "abc123"
+    check(_bdb._read_app_commit() == "abc123", "env GIT_COMMIT 被读取")
+    os.environ["APP_COMMIT"] = "top999"
+    check(_bdb._read_app_commit() == "top999", "APP_COMMIT 优先级高于 GIT_COMMIT")
+    del os.environ["APP_COMMIT"], os.environ["GIT_COMMIT"]
+    _no_env = _bdb._read_app_commit()
+    check(_no_env is None or isinstance(_no_env, str), "无 env 时回退文件或返回 None（不抛异常）")
+finally:
+    for k, v in _old_env.items():
+        if v is not None:
+            os.environ[k] = v
+        else:
+            os.environ.pop(k, None)
+
+# ③ 注入测试（需 DATABASE_URL 才跑，保持离线默认全绿）
+print("[W-06] 注入测试：同日写两次 → count(*)=1（需 DATABASE_URL）")
+if os.environ.get("DATABASE_URL"):
+    _SENT = "1900-01-01"
+    try:
+        import psycopg  # noqa: E402
+        _b1 = {"M0_tldr": {"date": _SENT, "mark": "first"},
+               "M0_ai_summary": {"data_quality": [{"section": "market", "status": "ok"}]}}
+        _b2 = {"M0_tldr": {"date": _SENT, "mark": "second"},
+               "M0_ai_summary": {"data_quality": [{"section": "market", "status": "ok"}]}}
+        os.environ["GIT_COMMIT"] = "probecommit"
+        _bdb._save_brief_snapshot(_SENT, _b1)
+        _bdb._save_brief_snapshot(_SENT, _b2)
+        _c = psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=30)
+        try:
+            with _c.cursor() as _cur:
+                _cur.execute("SELECT count(*), max(jsonb_typeof(payload)), "
+                             "bool_and(payload ? 'M0_ai_summary'), "
+                             "bool_and(payload ? 'data_quality'), "
+                             "max(payload->'M0_tldr'->>'mark'), max(app_commit) "
+                             "FROM biz.daily_brief_snapshot WHERE brief_date=%s", (_SENT,))
+                _r = _cur.fetchone()
+            check(_r[0] == 1, "同日两次写入 → count(*)=1（upsert 不产生重复行）", f"实际 count={_r[0]}")
+            check(_r[1] == "object", "payload 为 jsonb 对象")
+            check(_r[2] is True, "payload 含 M0_ai_summary")
+            check(_r[3] is True, "payload 含顶层 data_quality")
+            check(_r[4] == "second", "第二次写入生效（DO UPDATE 覆盖）")
+            check(_r[5] == "probecommit", "app_commit 落库正确")
+            _cur2 = _c.cursor()
+            _cur2.execute("DELETE FROM biz.daily_brief_snapshot WHERE brief_date=%s", (_SENT,))
+            _c.commit()
+            _cur2.close()
+        finally:
+            _c.close()
+    except Exception as _e:
+        check(False, "W-06 注入测试执行", f"{type(_e).__name__}: {_e}")
+    finally:
+        os.environ.pop("GIT_COMMIT", None)
+else:
+    print("  - 跳过（未设置 DATABASE_URL，注入测试为可选联网项）")
+
+# ════════════════════════════════════════════════════════
 print(f"\n{'=' * 46}\n通过 {passed} / 失败 {failed}\n{'=' * 46}")
 sys.exit(1 if failed else 0)

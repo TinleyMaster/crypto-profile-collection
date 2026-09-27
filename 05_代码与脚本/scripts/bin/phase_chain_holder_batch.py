@@ -76,9 +76,13 @@ EXCLUDE_CONTRACTS = (
 
 
 def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
-    """获取指定链上有合约地址但尚无今日快照的资产列表。
+    """获取指定链上有合约地址、今日尚未采快照的资产列表。
 
-    排序按 market_cap_rank 优先（TOP 资产先入队），rank 缺失的排后面，asset_id 兜底。
+    排序（OBI-OPT-SNAPSHOT-FRESHNESS X3，2026-09-27）：先按**最近一次快照日升序、NULLS FIRST**，
+    再按 market_cap_rank 升序。原实现只按 rank 排序 ⇒ 每次 run 都从头吃「前 N 名」，长尾
+    （rank 靠后的合约）因单轮 `--limit` 截断而**永远轮不到**（实测滞后累积至 3 天）。
+    改为「最久未采优先」后，未采过的资产（last_dt 为 NULL）恒排最前，已采资产按陈旧度轮转，
+    长尾在数日内被自然覆盖 —— **无需放大 `--limit`**（放大反而会「跑到完」饿死 chain 槽位）。
     """
     db_names = tuple(
         k for k, v in CHAIN_ALIASES.items() if v == chain_short
@@ -96,6 +100,12 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
                    a.canonical_symbol AS symbol, a.canonical_name AS name
             FROM core.asset_contract c
             JOIN core.asset a ON a.asset_id = c.asset_id
+            LEFT JOIN LATERAL (
+                SELECT MAX(s.snapshot_date) AS last_dt
+                FROM biz.onchain_holder_snapshot s
+                WHERE s.asset_id = c.asset_id
+                  AND s.chain = c.chain
+            ) ls ON TRUE
             WHERE c.chain IN ({placeholders})
               AND c.contract_address IS NOT NULL
               AND c.contract_address NOT IN ({exclude_ph})
@@ -106,7 +116,9 @@ def get_pending_assets(conn, chain_short: str, limit: int) -> list[dict]:
                     -- 按北京时间判断"今日"，避免 UTC 时区下凌晨跑批被误判为已采集
                     AND s.snapshot_date >= (CURRENT_DATE AT TIME ZONE 'Asia/Shanghai')::date
               )
-            ORDER BY a.market_cap_rank ASC NULLS LAST, c.asset_id ASC
+            ORDER BY ls.last_dt ASC NULLS FIRST,
+                     a.market_cap_rank ASC NULLS LAST,
+                     c.asset_id ASC
             LIMIT %s
             """,
             (*db_names, *EXCLUDE_CONTRACTS, limit),

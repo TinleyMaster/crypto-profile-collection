@@ -1,4 +1,18 @@
 """
+DEPRECATED（OBI-OPT-SNAPSHOT-FRESHNESS X3，2026-09-27）：
+  本文件的**自动化调度角色**已废弃 —— 链上快照现由 scheduler.py 的四条
+  `chain_holder_snapshot_*`（分链、每日、错峰 14:00/14:20/14:40/15:00）承担；
+  本文件既不被 supervisord.conf 也不被 scheduler.py 调用，已不参与定时采集。
+
+  保留原因：app.py 的 `chain_holder_snapshot_auto`（工作台「链上持仓快照采集（每日单次）」
+  手动触发入口）仍指向本文件，直接删除会使该 UI 任务触发即失败。若确定不再需要该手动入口，
+  须先删除 app.py 中的 `chain_holder_snapshot_auto` 条目，再删本文件。
+
+  ⚠️ 本文件内部调用 batch 版时用 `--limit 0`（不限量、一次跑完），属长任务，可能长时间
+  占用 chain 并发槽位（scheduler.py 史实见「避免每天 5 小时级任务饿死其他 chain 任务」）。
+  手动触发前请知悉此影响。
+
+--- 以下为原始说明 ---
 Phase 1: 链上持仓快照采集（每日单次模式）。
 每天运行一次，拉取全部有合约地址的资产的 Top 持有者数据。
 不做循环，一次跑完。
@@ -33,9 +47,10 @@ def _stream_reader(pipe, prefix: str):
 
 
 def main():
-    # 注意：原 phase_chain_holder_snapshot.py 已被拆分为 batch(调度) + scrape(单币)，
-    # 但该文件名已不存在，导致每日调度启动即失败（P1-3 实质未恢复的根因之一）。
-    # 此处改为调用 batch 版（真正的每日全量采集入口）。
+    # 历史（已闭合）：原 phase_chain_holder_snapshot.py 曾被拆分为 batch(调度) + scrape(单币)，
+    # 但调度仍指向已不存在的旧文件名，导致每日调度「启动即失败」（P1-3 根因之一）。该问题已由
+    # scheduler.py 的分链调度 chain_holder_snapshot_batch 修复；本文件仅为手动入口，内部改调
+    # batch 版（全量入口，--limit 0）。详见文件头 DEPRECATED 说明。
     script = os.path.join(SCRIPT_DIR, "phase_chain_holder_batch.py")
 
     print("=" * 60)

@@ -69,13 +69,18 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）", "core"),
     ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）", "core"),
 
-    # ═══ 链上快照（隔日运行，持仓分布属周级缓慢变化）═══
+    # ═══ 链上快照（每日运行；长尾由 batch 内「最近采集日」旋转跨日覆盖）═══
     # P2-1: 从早高峰(05:30-07:00)挪到午后(14:00-15:00)削峰；持仓数据慢变，午后跑不影响
-    #       早间 long_tail/meme_risk/lifecycle 消费"最新快照"；隔日运行以减少 RPC 调用
-    ("chain_holder_snapshot_bsc", "0 14 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "bsc", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（周一三五 午后，单轮上限 1200 防止超时）", "chain"),
-    ("chain_holder_snapshot_eth", "0 14 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "eth", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（周二四六 午后，单轮上限 1200 防止超时）", "chain"),
-    ("chain_holder_snapshot_base_arb", "30 14 * * 1,3,5", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--limit", "800", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（周一三五 午后，单轮上限 800 防止超时）", "chain"),
-    ("chain_holder_snapshot_solana", "0 15 * * 2,4,6", "phase_chain_holder_batch.py", ["--chains", "solana", "--limit", "300", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（周二四六 午后，单轮上限 300 防止超时）", "chain"),
+    #       早间 long_tail/meme_risk/lifecycle 消费"最新快照"。
+    # OBI-OPT-SNAPSHOT-FRESHNESS X3（2026-09-27）：原隔日（`1,3,5` / `2,4,6`）令每条链天然
+    #       滞后 1–2 天；改每日，并把四链错峰到 14:00 / 14:20 / 14:40 / 15:00（避免 RPC 并发挤兑）。
+    #       单轮 `--limit` 保留：无界「跑到完」会把 chain 并发槽位饿死（史实见下方 L148 注释）；
+    #       长尾不再靠放大 limit，而由 phase_chain_holder_batch 的
+    #       「最近采集日 ASC NULLS FIRST」排序跨日轮转覆盖。
+    ("chain_holder_snapshot_bsc", "0 14 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（每日 14:00，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_eth", "20 14 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（每日 14:20，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_base_arb", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--limit", "800", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_solana", "0 15 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--limit", "300", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日 15:00，单轮上限 300 防超时；长尾跨日轮转）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),
     ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "100"], "Meme 四阶段生命周期（每日 09:00）", "core"),
@@ -240,6 +245,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 停摆>30min 告警（6h 去重），恢复后自动发解除邮件。
     ("scan_freshness_watchdog", "20 * * * *", "check_scan_freshness.py", [],
      "盘面扫描·外部看门狗（每小时，独立于 scan_daemon 存活，数据停摆>30min 告警邮件）", "monitor"),
+    # OBI-OPT-SNAPSHOT-FRESHNESS X3（2026-09-27）：链上持仓快照原为隔日运行，滞后 1–2 天且
+    # 无外部看门狗（单轮失败即整日空缺、无人知晓）。本任务按链查最新 snapshot_date，
+    # 任一条链滞后 >2 天即告警（6h 去重，恢复后自动发解除邮件）。
+    ("onchain_snapshot_freshness", "20 * * * *", "check_onchain_snapshot_freshness.py", [],
+     "链上快照·外部看门狗（每小时，按链查最新快照日，滞后>2天告警邮件，6h 去重）", "monitor"),
 
     # ═══ 告警胜率赔率日报（04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §7）═══
     # 结算每小时增量推进未到期窗口；聚合与发信分离，08:20 发信与 09:00 早报解耦

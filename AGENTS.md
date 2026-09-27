@@ -1700,7 +1700,8 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **闸门阈值仍全部 `uncalibrated`**：本表只是**校准基建**，方案 §5 明确「S 档需 ≥3 个月、M 档 ≥6 个月、L 档 ≥1 年才有样本」；在样本积累前，任何「按 `gate_s_open` 分组比较 `ret_t30_pct`」的结论都**不得宣称统计显著**，前端「未校准」徽标保持不变。
 - **前向跟踪暂未接入任何前端/告警消费**：写入与回填是纯基建，无读取路径（避免在样本不足时被误读为业绩展示）。
 - **降级结论写 `thesis_id = 0` 的分支未实现**：`_build_fallback_thesis` 走的是读取侧实时拼装、**不落库**，故当前只有 `generate_research_thesis` 真实生成路径会写跟踪行（表结构与注释已预留 `thesis_id=0` 语义）。
-- **线上 runtime 复验待 Zeabur 重建后补**：「表存在」已直接对 prod 验证（见上「验证」段）；尚待确认的是**新生成结论会落行**（需在线上触发一次 `generate_research_thesis`，或等待真实用户/调度生成）。
+- **线上 runtime 复验已完成（2026-09-27，Zeabur 重建后）✅**：`POST /api/research/11114/thesis`（异步任务，返回 `{ok,pending,task_id}`，须轮询 `/api/tasks/<id>/log` 而非等待响应体）→ 任务日志走到「研究结论已生成 / 执行完成」（`推断占比 73%（16/22 个论点无引用）> 50%，conviction 由 low 强制锁定为 low`）→ 直连 prod 复查：**`biz.thesis_forward_track` 落行 1 条** —— `track_id=1 / thesis_id=1247 / asset_id=11114 / as_of=2026-09-27（北京今日，时区口径正确）/ tier_s_score=92.0 / tier_m_score=38.1 / tier_l_evaluable=False / gate_s_open=True / gate_m_open=True / price_at=0.627555897822132 / ret_t7·30·90 全 NULL / filled_at NULL`。写入钩子端到端打通，档位分数与闸门均与 `analysis.determinism_3tier` 一致（S 92.0 与既有线上读数吻合），`ret_*`/`filled_at` 保持空是对的（as_of=今日，T+7 未到期）。**另**：本次 m 档 `38.1 / gate_open=True`，与上次线上读数 `32.5 / gate_open=False` 不同 —— 原因是本次生成有 6/22 条论点带**可核验 URL 引用**（此前 0 条 ⇒ coverage=0 ⇒ 封顶且闸门必关），故 `coverage>0` 使中期闸门结构性打开、分数为未封顶真值（38.1 < 39.9 且非封顶上限），与 `_mid_term_gate` 的「中期 coverage > 0」结构条件自洽，**非回退**。
+- **回填任务对 prod 实跑复验 ✅**：本地执行 `scripts/bin/backfill_thesis_forward_track.py`（连 prod，`_ensure_research_tables` 幂等 + 只读扫描，无写入）→ `扫描 1 行，填入 0 格，完成 0 行，无基准价跳过 0 行`，即 `as_of + 7/30/90` 到期闸门、partial index 扫描、`price_at` 非空路径在真实 schema 上全部跑通，且当前正确为 **no-op**（唯一行的 as_of = 今日，尚未到期）。
 
 ### 盘面告警邮件 4 封审计处置 NEW-G / NEW-F（审计_盘面告警邮件4封_2026-09-27，2026-09-27，本次提交）
 

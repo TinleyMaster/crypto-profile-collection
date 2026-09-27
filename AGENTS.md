@@ -1536,6 +1536,8 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 **探针（`test_research_determinacy_20260926.py`，123 → 127 断言，0 失败）**：来源表用例 `_src_tbl`（`structured/url=None` + `official_website/url=非空`）→ 标记为 `True` / `False`；重复调用幂等；`_mark_internal_sources(None) == []`；源码结构断言读取路径确实调用。
 
+**线上 runtime 复验（2026-09-27，Zeabur 重建后，只读）✅**：`GET /api/research/11114/notebook` → `citation_sources` **13 条：`internal_dataset=True` 4 条**（代币经济学数据 / 链上持仓数据 / 代币解锁数据 / 合约地址，均 `url=None`）、**`=False` 9 条**（docs / 官网 / twitter / blockscout / defillama 等真实 URL）、**`=None` 0 条**；「无 URL 却未标 internal」的残余条目 **为空**。回归核对无劣化：`39.9 / unusable`、`coverage=0.0`、`weak_cited_points=22`、`cited_points=0`。（重建窗口内 `notebook` 端点亦出现 502，与 overview 同属既有抖动。）
+
 **本轮其余遗留处置**：
 - **板块错配（P2，DefiLlama 标 `Launchpad`、系统标 `sector=defi`）**：复验方独立用 DefiLlama 公开 API 证实 `pons-v1/pons-v2` 的 `tvl` 与 `currentChainTvls` **均为空**（⇒ 遗留 #2 **关闭为「数据源无该指标」**，不再当代码缺陷）。但系统仍把 PONS 归 `defi`、拿 Aave/1inch/Aerodrome 做估值对标、TVL 指标悬空 —— **属分类数据问题，建议独立开工单「PONS sector 重分类 defi → launchpad」**，本单不改码（改分类会影响赛道聚合与竞品选择，需单独评估）。
 - **A3 门槛边界（P2，28.24 vs 30 差 1.76）**：按上一轮约定**仅留档、不加断言**，接受。

@@ -2072,3 +2072,21 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证**：`test_highlight_audit_20260924.py` **75 → 80/0**；回归 `test_highlight_alert`(68/0)、`test_highlight_determinacy_20260926`(72/0)、`test_macro_market_p0`(16/0)、`test_macro_market_board_tier2`(36/0)、`test_macro_market_p1_upstream`(24/0)、`test_risk_signal_p0r2_20260927`(14/0)、`test_signal_type_calibration_20260926`(99/0)、`test_major_event_alert`(55/0) 全绿；workbench 全量 **51 套件**仅 `test_scan_alert_header_regime.py`(74/9) 红，且该套件**只 import 并发会话正在改的 `scan_daemon.py` / `build_scan_edge_report.py`（未提交 WIP），不 import 本轮任何文件** ⇒ 与本次改动无关。`py_compile` 3/3 通过。
 - **待部署**：`macro_market.py` / `ai_signal_analyzer.py` 在 web 应用进程内，需 Zeabur redeploy 后网页高亮榜才生效；**邮件层 N4 的行为证据最早要到 2026-09-29 08:34 CST 之后那封**（高亮邮件读的快照每日 08:34 才写一次，今日那份早于上线）。
 - **未做 / 边界**：① **N5-4（两个早报红套件治理）按复验建议单独出单**，本轮未做；② 复验的验收 #1（线上顺序用 `(ai_approved, mixed, ai_score, es)` 逐项重算相等）需 redeploy 后执行；③ 上一轮遗留 M2（HIGH 泛滥 / conv 扎堆）/ N2-b / decision 路径间歇失败根因**本轮未触碰**。
+
+### 告警邮件「开仓依据」复验 N-8702-A~H 处置（复验_告警邮件开仓依据_8702607_2026-09-28，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_告警邮件开仓依据_8702607_2026-09-28.md`。复验确认 `8702607`「全项到位、测试计数逐项复现、真库重渲染全部兑现」，另开 **8 条新缺陷（N-8702-A~H）+ 3 项自述纠正**。本轮按报告 §十 待拍板建议**全部落地**（A~H + 自述②③），**零删除、未改 tier/评分口径、未改任何阈值**。改动面：`scan_daemon.py` / `build_scan_edge_report.py` / 新迁移 `fix_079` / 探针。
+
+- **N-8702-A（P2，已修）桶 `n` 是 1h 口径、而 `sl_rate/ret_p75/mfe_p75` 在 24h 子集**：邮件把 28 行的分位印成「同档 n=57」。新增 `biz.scan_edge_bucket.n_24h`（迁移 `fix_079`，幂等 `ADD COLUMN IF NOT EXISTS`）；`_mk_bucket` 产出 `n_24h=a24["n"]`；`save()` 写入。渲染侧 `_build_reason` 新增 `_n24(r)`（24h 真分母，缺值回退 1h `n`），`_row` 门槛对 **24h 单独生效**（防「1h n=10 过关、24h 只看 4 行」）、`_stat(r)` 打印 `_n24`。**已对 prod 执行 fix_079 + 重跑 `build_scan_edge_report --date 2026-09-27` 回填**（实测 `funding_sign/>0` n=57/n_24h=29、`vol_ratio/>6` n=10/n_24h=4 ⇒ 该档现判「样本不足」）。
+- **N-8702-B（P2，已修）同封「窗口」双口径**：槽⑤ 原用当日 `win_1h/be_1h`、批级摘要用 `roll3_*` ⇒「批级窗口为负」与「批级环境为正」并存。槽⑤ 改用 `roll3_*`（缺则回退当日并标口径「近 3 日滚动 / YYYY-MM-DD 当日」）。
+- **N-8702-C（P2，已修）判读只设顺风下限、无逆风上限**：判据由 `goods>=2 and rr>=RR` 改为 **`goods>=2 and bads<=1 and rr>=RR`**；槽③④ 统一补 `_stat`（24h 分母/均值/止损率）。**物证级效果**：复验原例 INXUSDT 由【可开】（bads=3）改判【观望】；且该档 `vol_ratio/<2.5` 现显式披露「止损率 57.1%」。
+- **N-8702-D（P3，已修）混合方向批丢失「环境受限」**：`_batch_direction_line` 混合分支原直接 return；现逐方向补「多头受限：…/空头受限：…」，双方均顺风时显式「环境 ✓ 双方均未受限」。
+- **N-8702-E（P3，已修）依据段静默降级 + 图例撒谎（= 自述②）**：`_load_reason_context` 异常/无日报时写 `REASON_HEARTBEAT_TASK='scan_alert_reason'` 心跳（`last_error` 记原因；不在 `STALL_HEARTBEAT_TASKS`）；图例拆为「核心段（恒在）+ 本批方向锚点（`dir_line` 有则加）+ 依据段锚点（`has_reason` 有则加）」，**降级时不再宣称有依据段**、2 参旧调用方亦不再凭空多 463 字符。
+- **N-8702-F（P3，已修）暴增警示的「当日」= 日报日**：文案改「⚠️ 告警量暴增（日报日 YYYY-MM-DD）：…」；倍数改走 `_reason_mod().ALERT_SURGE_X` 真源（自述③，`REASON_ALERT_SURGE_X` 降为模块不可导入时的回退）。
+- **N-8702-G（P4，已修）写侧/读侧降级不对称**：`save()` 新增 `_existing_bucket_cols()` 预检，缺 `sl_rate/ret_p75/mfe_p75/n_24h` 任一 ⇒ 降级为「不带该列写」并显式告警（原为 `UndefinedColumn` 直接崩）。
+- **N-8702-H（P4，已修）「本批共性逆风」实为主池**：文案改「主池共性逆风」「主池 N 币量比落最高档」。
+- **自述①已闭环**：`fix_078` 确已执行（复验实测），本轮追加 `fix_079`（已 apply prod）。
+- **探针**：`test_scan_alert_header_regime.py` **183 → 198/0**（新增 N-8702-A/C/D/E/F 用例 + `_mk_bucket` 的 `n_24h` + `save()` 缺列降级假连接用例 + 源码级心跳/真源守卫）。回归全绿：`test_scan_edge_metrics`(71/0)、`test_scan_alert_onchain_addr`(36/0)、`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_remaining`(29/0)、`test_scan_scenario_label`(48/0)、`test_scan_alert_audit_20260926`(96/0)、`test_funding_interval_20260927`(35/0)、`test_scan_l1_closed_bar`(16/0)、`test_derivatives_signal_gap`(43/0)、`test_squeeze_battle`(143/143)、`test_squeeze_fuel`(99/99)、`test_squeeze_alert_silence`(18/18)、`test_liq_history_scope`(39/0)；`py_compile` 2/2。
+- **prod 只读端到端复验**：`_load_reason_context` + `_build_reason` 真库实跑，INXUSDT 姿态渲染出「同档 n=23 / n=29」「量比 <2.5 档 · n=7 · 止损率 57.1%」「窗口（批级 近 3 日滚动）」「3 顺 2 逆 ⇒ 观望」；心跳 `scan_alert_reason` 写入 `last_ok_at`、`last_error=NULL`。
+- **待部署**：`scan_daemon.py` 需重启容器后生效（`build_scan_edge_report.py` 为调度脚本，下次调度即用新码）。
+- **未做 / 边界**：① **N-8702-A 的 B 方案（跨日滚动窗口，避开当日结算滞后）不在本单**，按待拍板列入下个工单；② 2 参旧调用方「行为逐字不变」的旧自述**已被本轮修正**（图例不再无条件输出新锚点），对应断言已覆盖；③ 复验的「真实邮件观感」需等下一批告警邮件（部署后）。

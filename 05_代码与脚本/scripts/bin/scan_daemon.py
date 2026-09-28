@@ -1361,8 +1361,16 @@ REASON_LOOKBACK_DAYS = 3
 # ⚠️ 这是**判定门槛**（非统计数值），随 §3.3「顺风 ≥2 且 RR ≥1.5」口径。
 REASON_RR_MIN = 1.5
 # 批级「告警量暴增」警示倍数（§八.7：09-23 告警 176 条 = 均值 5.0 倍，当日 avg_24h
-# -5.75%、PF 0.26）。与 `build_scan_edge_report.ALERT_SURGE_X` 同值同口径。
+# -5.75%、PF 0.26）。⚠️ 真源是 `build_scan_edge_report.ALERT_SURGE_X`，本常量只是
+# **模块不可导入时的回退**（渲染层经 `_reason_mod()` 优先取真源，见 _render_batch_summary）。
+# 复验 N-8702-F 亦提醒：该警示比的是「日报日」的告警量（最多 3 天前），不是本封批次
+# ⇒ 文案显式标「（日报日 YYYY-MM-DD）」，不得让读者读成「本封暴增」。
 REASON_ALERT_SURGE_X = 1.5
+# 「开仓依据」上下文降级心跳（复验 N-8702-E）：`_load_reason_context` 任何异常/无日报
+# 都会使整段静默消失（且图例原先仍宣称有该段）。写一条心跳让降级可观测。
+# 该 task 键**不在** STALL_HEARTBEAT_TASKS / HEARTBEAT_MAX_AGE_MIN 内，不会被停摆检测
+# 误当任务（同 SHADOW_MARKER_TASK 的处理）。
+REASON_HEARTBEAT_TASK = "scan_alert_reason"
 
 
 def _load_alert_candidates(conn, window_min: int) -> list[dict]:
@@ -1516,11 +1524,12 @@ _REASON_MOD: object = None
 
 
 def _reason_mod():
-    """惰性导入同目录的 `build_scan_edge_report`（只取桶边界与门槛两个常量）。
+    """惰性导入同目录的 `build_scan_edge_report`（取桶边界、门槛、暴增倍数）。
 
-    只为复用**单一真源**：`bucket_of`（桶边界）与 `MIN_BUCKET_N`（桶样本门槛）。
-    若在渲染层复制这两个定义，数据层改桶边界时邮件会静默错档 —— 这是本项目高频
-    复发项（派生字段与单一真源失联）。导入失败（部署只拷了 daemon）⇒ 返回 None，
+    只为复用**单一真源**：`bucket_of`（桶边界）、`MIN_BUCKET_N`（桶样本门槛）、
+    `ALERT_SURGE_X`（告警量暴增倍数，N-8702-F/自述③ —— 曾在此复制字面量）。
+    若在渲染层复制这些定义，数据层改动时邮件会静默失联 —— 这是本项目高频复发项
+    （派生字段与单一真源失联）。导入失败（部署只拷了 daemon）⇒ 返回 None，
     依据段整体降级不渲染（宁缺勿错）。
     """
     global _REASON_MOD
@@ -1543,7 +1552,8 @@ def _load_reason_context(conn) -> dict | None:
     `biz.scan_edge_bucket` 全部桶（键 = (dim, bucket)）、以及该日之前 7 个「有告警日」
     的均量（暴增警示基线，与日报规则 A 同口径：≥3 个有效日才给基线）。
 
-    任何异常（表未建 / 列缺失 / 无数据）⇒ 返回 None，依据段整体不渲染。
+    任何异常（表未建 / 列缺失 / 无数据）⇒ 返回 None，依据段整体不渲染；并写一条
+    `REASON_HEARTBEAT_TASK` 心跳（`last_error` 记原因）使降级可观测（N-8702-E）。
     """
     cutoff = to_bj(datetime.now(timezone.utc)).date() - timedelta(days=REASON_LOOKBACK_DAYS)
     try:
@@ -1556,9 +1566,12 @@ def _load_reason_context(conn) -> dict | None:
                 " ORDER BY report_date DESC LIMIT 1", (cutoff,))
             daily = cur.fetchone()
             if not daily:
+                _write_heartbeat(REASON_HEARTBEAT_TASK, False,
+                                 f"近 {REASON_LOOKBACK_DAYS} 天无 scan_edge_daily 日报")
                 return None
+            # n_24h 由 fix_079 提供；旧行/未回填时为 NULL（消费侧回退 1h n）。
             cur.execute(
-                "SELECT dim, bucket, n, win_1h, be_1h, avg_24h, share, edge, "
+                "SELECT dim, bucket, n, n_24h, win_1h, be_1h, avg_24h, share, edge, "
                 "       sl_rate, ret_p75, mfe_p75 "
                 "  FROM biz.scan_edge_bucket WHERE report_date = %s",
                 (daily["report_date"],))
@@ -1570,7 +1583,10 @@ def _load_reason_context(conn) -> dict | None:
             prev = [int(r["alerts_n"]) for r in cur.fetchall()]
     except Exception as exc:
         print(f"[reason] 依据上下文不可用，依据段降级: {exc}")
+        _write_heartbeat(REASON_HEARTBEAT_TASK, False,
+                         f"{type(exc).__name__}: {exc}"[:300])
         return None
+    _write_heartbeat(REASON_HEARTBEAT_TASK, True)
     prev_avg = (sum(prev) / len(prev)) if len(prev) >= 3 else None
     return {"report_date": daily["report_date"], "daily": daily, "buckets": buckets,
             "prev_alert_avg": prev_avg}
@@ -1598,9 +1614,21 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
     flags: dict = {"funding_tailwind": None, "vol_label": None,
                    "vol_top": False, "vol_p75_neg": False}
 
+    def _n24(r) -> int:
+        """24h 条件统计的真实分母（fix_079 的 `n_24h`）。
+
+        N-8702-A：桶 `n` 是 **1h** 口径，而 `avg_24h/sl_rate/ret_p75/mfe_p75` 全在 24h
+        子集上 ⇒ 用 `n` 会虚报分母。旧快照/未回填行 `n_24h` 为 NULL 时回退 `n`（不劣化）。
+        """
+        v = r.get("n_24h")
+        return int(v if v is not None else (r.get("n") or 0))
+
     def _row(dim, label):
         r = buckets.get((dim, label))
-        if not r or int(r.get("n") or 0) < min_n:
+        if not r:
+            return None
+        # 门槛对 24h 统计**单独生效**（否则「1h n=10 过关、24h 只看 4 行」）。
+        if _n24(r) < min_n:
             return None
         return r
 
@@ -1608,7 +1636,7 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         avg, sl = r.get("avg_24h"), r.get("sl_rate")
         avg_txt = f"{float(avg):+.2f}%" if avg is not None else "n/a"
         sl_txt = f"{float(sl) * 100:.1f}%" if sl is not None else "n/a"
-        return f"同档 n={r['n']} · 24h 均值 {avg_txt} · 止损率 {sl_txt}"
+        return f"同档 n={_n24(r)} · 24h 均值 {avg_txt} · 止损率 {sl_txt}"
 
     def _add(kind, text):
         slots.append({"kind": kind, "text": text})
@@ -1663,7 +1691,7 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         flags["vol_p75_neg"] = p75 < 0
         _add("bad" if p75 < 0 else "good",
              f"{'逆风' if p75 < 0 else ''}量比：{float(vr):.2f}x 落 {vlabel} 档"
-             f"〔该档 24h P75 {p75:+.2f}%〕")
+             f"〔{_stat(vrow)} · 该档 24h P75 {p75:+.2f}%〕")
     else:
         if vr is None:
             _add("info", "量比：n/a")
@@ -1683,17 +1711,25 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         _add("good" if rr >= REASON_RR_MIN else "bad",
              f"风险结构：入场 {_fmt_num(entry, 6)} · 失效 {_fmt_num(barrier, 6)}"
              f"（{'-' if up else '+'}{stop:.2f}%）· 参考目标 {_fmt_num(target, 6)}"
-             f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，非保证能到）⇒ RR {rr:.2f}")
+             f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，非保证能到；{_stat(vrow)}）⇒ RR {rr:.2f}")
     else:
         _add("info", "风险结构：无同档目标位（该档样本不足或无失效位），RR 不可算")
 
-    # ⑤ 窗口（批级：当日日报的 1h 胜率 vs 盈亏平衡）
+    # ⑤ 窗口（批级：**与批级摘要同源**取近 3 日滚动 1h 胜率 vs 盈亏平衡）
+    # N-8702-B：原用当日 `win_1h/be_1h`，而批级摘要用 `roll3_*` ⇒ 同一封邮件里
+    # 「批级窗口为负」与「批级环境为正」双口径互斥、每张卡被扣一个 ✗。缺 roll3 时
+    # 才回退当日，并在文案里显式标出口径（当日 / 近 3 日滚动）。
     d = ctx.get("daily") or {}
-    w1, b1, a24 = d.get("win_1h"), d.get("be_1h"), d.get("avg_24h")
+    w1, b1 = d.get("roll3_win_1h"), d.get("roll3_be_1h")
+    wlabel = "近 3 日滚动"
+    if w1 is None or b1 is None:
+        w1, b1 = d.get("win_1h"), d.get("be_1h")
+        wlabel = f"{d.get('report_date')} 当日"
+    a24 = d.get("avg_24h")
     if w1 is not None and b1 is not None:
         ok = float(w1) >= float(b1)
         _add("good" if ok else "bad",
-             f"窗口（批级 {d.get('report_date')}）：1h 胜率 {float(w1) * 100:.1f}% "
+             f"窗口（批级 {wlabel}）：1h 胜率 {float(w1) * 100:.1f}% "
              f"{'≥' if ok else '<'} 盈亏平衡 {float(b1) * 100:.1f}%"
              f"（短窗{'为正' if ok else '为负'}）"
              + (f" · 24h 均值 {float(a24):+.2f}%" if a24 is not None else ""))
@@ -1706,9 +1742,12 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         tone = "observe"
         note = ("蓄势池突破（BRK）独立观察档：判定只用价+量，无 OI/CVD/先验，"
                 "不参与本批可开性统计")
-    elif goods >= 2 and rr is not None and rr >= REASON_RR_MIN:
+    elif goods >= 2 and bads <= 1 and rr is not None and rr >= REASON_RR_MIN:
+        # N-8702-C：顺风下限之外**必须**有逆风上限 —— 原实现只看 `goods >= 2`，
+        # `bads=3` 仍判「可开」。同时要求 RR 过线。
         tone = "pass"
-        note = f"顺风 {goods} 项、RR {rr:.2f} ≥ {REASON_RR_MIN:g} ⇒ 【可开】"
+        note = (f"顺风 {goods} 项、逆风 {bads} 项、RR {rr:.2f} ≥ {REASON_RR_MIN:g} "
+                "⇒ 【可开】")
     elif goods == 0:
         tone = "avoid"
         note = f"{bads} 项逆风、无顺风项 ⇒ 【不建议新开】"
@@ -1765,8 +1804,19 @@ def _batch_direction_line(items: list[dict], regime: dict | None) -> str:
         dirlab, key, my_word, opp_word = f"混合（多 {ups} / 空 {downs}）", None, "", ""
     else:
         return ""
-    if not regime or key is None:
+    if not regime:
         return f"本批方向「{dirlab}」"
+    if key is None:
+        # N-8702-D：混合批次原直接 return，丢失「环境受限」披露（show_tags 无条件剔除
+        # 受限 tag + 本分支不补）⇒ 整封邮件再也看不到哪个方向受限。此处逐方向补。
+        blocks = []
+        if not bool(regime.get("long_fav")):
+            blocks.append(f"多头受限：{' / '.join(regime.get('long_block') or []) or '原因未知'}")
+        if not bool(regime.get("short_fav")):
+            blocks.append(f"空头受限：{' / '.join(regime.get('short_block') or []) or '原因未知'}")
+        if blocks:
+            return f"本批方向「{dirlab}」：{'；'.join(blocks)}"
+        return f"本批方向「{dirlab}」：环境 ✓ 双方均未受限"
     fav = bool(regime.get("long_fav") if key == "up" else regime.get("short_fav"))
     opp_fav = bool(regime.get("short_fav") if key == "up" else regime.get("long_fav"))
     my_block = (regime.get("long_block") if key == "up" else regime.get("short_block")) or []
@@ -1802,17 +1852,19 @@ def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
         watch_n = sum(1 for _, r in main if r["tone"] == "watch")
         avoid_n = sum(1 for _, r in main if r["tone"] == "avoid")
         head = (f"📊 本批可开性：主池 {len(main)} 币中 {pass_n} 币通过"
-                f"（顺风 ≥2 且 RR ≥{REASON_RR_MIN:g}） · {watch_n} 币观望"
+                f"（顺风 ≥2、逆风 ≤1 且 RR ≥{REASON_RR_MIN:g}） · {watch_n} 币观望"
                 f" · {avoid_n} 币不建议")
         if brk_n:
             head += f" · BRK 观察 {brk_n} 币"
         lines.append(head)
         no_tail = sum(1 for _, r in main if r["flags"].get("funding_tailwind") is False)
-        tail = f"本批共性逆风：{no_tail}/{len(main)} 无空头付费顺风"
+        # N-8702-H：此计数只覆盖**主池**（`main`），本批 14 币里 11 币是 BRK 时，写「本批」
+        # 会让「3/3」被读成全体 ⇒ 文案改「主池」。
+        tail = f"主池共性逆风：{no_tail}/{len(main)} 无空头付费顺风"
         top = [r for _, r in main if r["flags"].get("vol_top")]
         if top:
             neg = sum(1 for r in top if r["flags"].get("vol_p75_neg"))
-            tail += f" · {len(top)} 币量比落最高档"
+            tail += f" · 主池 {len(top)} 币量比落最高档"
             tail += "（该档历史 24h P75 为负）" if neg else "（该档历史 24h P75 非负）"
         lines.append(tail)
 
@@ -1834,10 +1886,17 @@ def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
             env += f" · {daily.get('report_date')} 边缘桶 {top_b['dim']}={top_b['bucket']}"
         lines.append(env)
 
-    # 告警量暴增警示（§八.7：09-23 公告 176 条 = 均值 5.0 倍，当日 avg_24h -5.75%）
+    # 告警量暴增警示（§八.7：09-23 公告 176 条 = 均值 5.0 倍，当日 avg_24h -5.75%）。
+    # N-8702-F：比的是**日报日**（最多 3 天前）的告警量，不是本封批次 ⇒ 文案标出日报日；
+    # 自述③：倍数真源 `build_scan_edge_report.ALERT_SURGE_X`（`_reason_mod()` 复用），
+    # 常量仅作模块不可导入时的回退。
+    mod = _reason_mod()
+    surge_x = (float(getattr(mod, "ALERT_SURGE_X", REASON_ALERT_SURGE_X))
+               if mod else REASON_ALERT_SURGE_X)
     prev_avg, alerts_n = ctx.get("prev_alert_avg"), daily.get("alerts_n")
-    if prev_avg and alerts_n and float(alerts_n) > float(prev_avg) * REASON_ALERT_SURGE_X:
-        lines.append(f"⚠️ 告警量暴增：当日 {int(alerts_n)} 条 ≈ 最近有告警日均值 "
+    if prev_avg and alerts_n and float(alerts_n) > float(prev_avg) * surge_x:
+        lines.append(f"⚠️ 告警量暴增（日报日 {daily.get('report_date')}）：当日 "
+                     f"{int(alerts_n)} 条 ≈ 最近有告警日均值 "
                      f"{float(prev_avg):.1f} 的 {float(alerts_n) / float(prev_avg):.1f} 倍"
                      "（历史该形态当日 avg_24h 显著为负，属系统性质量下降）")
     if not lines:
@@ -3014,6 +3073,8 @@ def _render_alert_email(items: list[dict],
             f"</div>"
         )
     body = "".join(body_parts)
+    # N-8702-E：图例的新增锚点只在对应段落实际渲染时出现（否则降级时图例撒谎）。
+    has_reason = any(it.get("reason") for it in items)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：场景编号按行自身维度重算 —— "
               "生产扫描只用「价方向 × OI 方向」两维（S1 多头进攻 / S2 空头扎实 / "
               "S3 多头减仓 / S4 空头兑现），回测口径另含 CVD 维（S1..S8，其中 S5..S8 为"
@@ -3083,19 +3144,30 @@ def _render_alert_email(items: list[dict],
               "ℹ️ = 提示性说明（非风险警告，不改变信号），本封出现三类："
               "①「纯技术面信号…缺基本面确认」= 该币无催化剂且费率未覆盖，结论仅基于盘面；"
               "②「共振方向无新鲜条目，未参与结论」= 共振条目全为陈旧（>X 天），不计入多空结论；"
-              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号；"
-              # 审计_告警邮件开仓依据缺失 §三：新段落的口径锚点（否则读者无从判断
-              # 「同档均值 +2.12%」这类数字从哪来、RR 怎么算）。
-              "「🎯 开仓依据」= 本币顺/逆风逐槽陈列（① CVD 一致性 ② 费率符号 "
-              "③ 量比档位 ④ 风险结构 ⑤ 批级窗口），槽内括注均为同档历史样本"
-              "（n / 均值 / 止损率，来自当日分桶表，样本不足时标「样本不足」）；"
-              "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
-              "（mfe_24h）P75（历史分位，非保证能到）；「⇒ 判读」= 由槽位派生的开仓建议"
-              "（顺风 ≥2 且 RR ≥1.5 判「可开」，RR <1 判「观望」，零顺风或多重逆风判"
-              "「不建议」，BRK 因维度缺失统一进「观察档」）；「📊 本批可开性」= 本封全批"
-              "汇总；「本批方向」= 按本批做多/做空方向重述环境是否受限（受限方向若与"
-              "本批方向相反，则本批实际不受限）；「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个"
-              "有告警日均值 ×1.5（历史此类批次平均收益显著为负，属批级风险提示）。</p>")
+              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号；")
+    # 审计_告警邮件开仓依据缺失 §三：新段落的口径锚点。N-8702-E / 自述②：这些锚点
+    # **只在本封实际渲染了对应段落时**加入 —— 否则依据段降级（reason_ctx 为空）时
+    # 图例仍宣称有该段，与正文不一致；且原实现无条件输出，2 参旧调用方也凭空多出
+    # 463 字符（「与旧行为逐字一致」不成立）。本批方向锚点跟随 `dir_line`。
+    legend_dir = ("「本批方向」= 按本批做多/做空方向重述环境是否受限"
+                  "（受限方向若与本批方向相反，则本批实际不受限；混合批次逐方向披露受限情况）；")
+    legend_reason = ("「🎯 开仓依据」= 本币顺/逆风逐槽陈列（① CVD 一致性 ② 费率符号 "
+                     "③ 量比档位 ④ 风险结构 ⑤ 批级窗口），槽内括注均为同档历史样本"
+                     "（n / 均值 / 止损率，来自当日分桶表；n 为该统计自己的 24h 分母，"
+                     "样本不足时标「样本不足」）；"
+                     "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
+                     "（mfe_24h）P75（历史分位，非保证能到）；「⇒ 判读」= 由槽位派生的开仓建议"
+                     f"（顺风 ≥2、逆风 ≤1 且 RR ≥{REASON_RR_MIN:g} 判「可开」，RR <1 判"
+                     "「观望」，零顺风判「不建议」，BRK 因维度缺失统一进「观察档」）；"
+                     "「📊 本批可开性」= 本封全批汇总；")
+    legend_surge = ("「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个有告警日均值 ×1.5"
+                    "（「当日」为日报日、非本封批次；历史此类批次平均收益显著为负，"
+                    "属批级风险提示）。")
+    if dir_line:
+        legend += legend_dir
+    if has_reason:
+        legend += legend_reason + legend_surge
+    legend += "</p>"
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
                 "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"

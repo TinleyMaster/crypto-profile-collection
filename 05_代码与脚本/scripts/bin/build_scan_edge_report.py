@@ -509,7 +509,8 @@ def _mk_bucket(dim: str, label: str, sub: list[dict], n_base: int) -> dict:
     # ⚠️ 只用 24h 已结算样本；缺值不参与（不回落 0，否则会伪造「该档无风险」）。
     sl_vals = [bool(r["sl_hit_24h"]) for r in sub if r["sl_hit_24h"] is not None]
     sl_rate = (sum(1 for x in sl_vals if x) / len(sl_vals)) if sl_vals else None
-    return {"dim": dim, "bucket": label, "n": a1["n"], "win_1h": a1["win"],
+    return {"dim": dim, "bucket": label, "n": a1["n"], "n_24h": a24["n"],
+            "win_1h": a1["win"],
             "win_4h": a4["win"], "odds_1h": a1["odds"], "be_1h": a1["be"],
             "pf_1h": a1["pf"], "avg_1h": a1["avg"], "avg_24h": a24["avg"],
             "share": share, "edge": edge,
@@ -539,6 +540,28 @@ def _jsonb(v):
     return None if v is None else json.dumps(v, ensure_ascii=False, default=str)
 
 
+def _existing_bucket_cols(conn) -> set[str]:
+    """`biz.scan_edge_bucket` 现有列名（用于可选列降级，见 save()）。
+
+    N-8702-G：写侧原先**硬引用** fix_078/fix_079 新增列 ⇒ 缺列时抛
+    `UndefinedColumn`（不是降级、是崩），而读侧是静默降级 ⇒ 两侧不对称。这里对
+    「可选列」做一次存在性预检，缺列时降级为「不带该列写」并显式告警，避免换环境
+    （或回滚迁移后）先跑日报直接失败。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='biz' AND table_name='scan_edge_bucket'")
+        return {r[0] for r in cur.fetchall()}
+
+
+# 可选列（fix_078 三列 + fix_079 n_24h）：缺任一 ⇒ 该列不写并告警，其余照写。
+OPTIONAL_BUCKET_COLS = ("sl_rate", "ret_p75", "mfe_p75", "n_24h")
+# 必填列（表创建即有）。
+BASE_BUCKET_COLS = ("report_date", "dim", "bucket", "n", "win_1h", "win_4h",
+                    "odds_1h", "be_1h", "pf_1h", "avg_1h", "avg_24h", "share", "edge")
+
+
 def save(conn, day: dict, buckets: list[dict]) -> None:
     cols = list(DAILY_COLS)
     vals = []
@@ -548,6 +571,17 @@ def save(conn, day: dict, buckets: list[dict]) -> None:
             v = _jsonb(v)
         vals.append(v)
     updates = ",".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "report_date")
+    # N-8702-G：对可选列做存在性预检；缺列则降级（不崩）、显式告警。
+    try:
+        have = _existing_bucket_cols(conn)
+    except Exception:  # noqa: BLE001 - 预检失败按「全缺」处理，走降级
+        have = set()
+    bucket_cols = list(BASE_BUCKET_COLS) + [c for c in OPTIONAL_BUCKET_COLS if c in have]
+    missing = [c for c in OPTIONAL_BUCKET_COLS if c not in have]
+    if missing:
+        print(f"[edge] 警告：biz.scan_edge_bucket 缺可选列 {missing}，本次写入降级"
+              f"（请执行 fix_078 / fix_079 迁移）；开仓依据段将缺相应统计。",
+              file=sys.stderr)
     with conn.cursor() as cur:
         cur.execute(
             f"INSERT INTO biz.scan_edge_daily ({','.join(cols)}, updated_at) "
@@ -556,13 +590,10 @@ def save(conn, day: dict, buckets: list[dict]) -> None:
         cur.execute("DELETE FROM biz.scan_edge_bucket WHERE report_date = %s", (day["report_date"],))
         for b in buckets:
             cur.execute(
-                "INSERT INTO biz.scan_edge_bucket (report_date, dim, bucket, n, win_1h, win_4h, "
-                "odds_1h, be_1h, pf_1h, avg_1h, avg_24h, share, edge, "
-                "sl_rate, ret_p75, mfe_p75) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (day["report_date"], b["dim"], b["bucket"], b["n"], b["win_1h"], b["win_4h"],
-                 b["odds_1h"], b["be_1h"], b["pf_1h"], b["avg_1h"], b["avg_24h"],
-                 b["share"], b["edge"], b["sl_rate"], b["ret_p75"], b["mfe_p75"]))
+                f"INSERT INTO biz.scan_edge_bucket ({','.join(bucket_cols)}) "
+                f"VALUES ({','.join(['%s'] * len(bucket_cols))})",
+                tuple(day["report_date"] if c == "report_date" else b.get(c)
+                      for c in bucket_cols))
     conn.commit()
 
 

@@ -761,7 +761,12 @@ def _build_regime(conn) -> dict:
         tags.append(f"多头环境受限（{'/'.join(long_block) or '原因未知'}）")
     if not short_fav:
         tags.append(f"空头环境受限（{'/'.join(short_block) or '原因未知'}）")
-    return {"tags": tags, "long_fav": long_fav, "short_fav": short_fav}
+    # 分方向原因随包返回（审计_告警邮件开仓依据缺失 §三.4）：页头需按**本批方向**表述
+    # 「环境 ✓ 未受限（受限的是空头方向：…）」——只靠 tags 里的合并串无法拆出
+    # 「受限的是哪个方向、原因是什么」。这两个键是**新增**的，tags/long_fav/short_fav
+    # 语义不变（`phase_scan_accumulation_pool` 等调用方不受影响）。
+    return {"tags": tags, "long_fav": long_fav, "short_fav": short_fav,
+            "long_block": long_block, "short_block": short_block}
 
 
 def _last_closed_idx(rows: list[dict], iv: str, now: datetime) -> int | None:
@@ -1342,6 +1347,22 @@ CROSS_POOL_MUTE_MIN = 60
 PRIOR_HORIZON_H = 12
 PRIOR_LOOKBACK_DAYS = 30
 PRIOR_MIN_N = 10
+# ── 开仓依据（审计_告警邮件开仓依据缺失_2026-09-28 §三/§四）──────────────────
+# 卡片新增「🎯 开仓依据」段：把库里**已有**的条件期望（`biz.scan_edge_bucket` /
+# `biz.scan_edge_daily`）搬到读者眼前。根因是邮件只印分布的左半边（中位 + 胜率），
+# 右半边（均值 / MFE / 赔率 / 止损率）全藏在库里 ⇒ 理性读者只能读出「别开」。
+# 🔴 铁律（§四）：渲染层**不得内置任何统计数字**，只做「按本卡数值查桶 + 印表里的数」。
+#    `+6.57%` / P75 这类数字一旦硬编码，市场一变就成谎言且无人发现。
+# 桶样本门槛与 `build_scan_edge_report.MIN_BUCKET_N` **同源**（惰性导入校验，见
+# `_reason_min_n()`）：低于门槛不出依据行，且**禁止回落全局均值**（那正是「跨币种
+# 共享先验」的老毛病）。日报新鲜度：只用最近 N 天内的 `scan_edge_daily` 行。
+REASON_LOOKBACK_DAYS = 3
+# 参考目标位（同档历史 MFE P75）对应的最小盈亏比：低于它即判「观望」。
+# ⚠️ 这是**判定门槛**（非统计数值），随 §3.3「顺风 ≥2 且 RR ≥1.5」口径。
+REASON_RR_MIN = 1.5
+# 批级「告警量暴增」警示倍数（§八.7：09-23 告警 176 条 = 均值 5.0 倍，当日 avg_24h
+# -5.75%、PF 0.26）。与 `build_scan_edge_report.ALERT_SURGE_X` 同值同口径。
+REASON_ALERT_SURGE_X = 1.5
 
 
 def _load_alert_candidates(conn, window_min: int) -> list[dict]:
@@ -1485,6 +1506,344 @@ def _scenario_priors(conn, quadrants: list[tuple[str, str]]) -> dict[tuple[str, 
         win = sum(1 for v in vals if v > 0) / n * 100
         out[key] = {"n": n, "median": median, "win": win, "horizon": PRIOR_HORIZON_H}
     return out
+
+
+# ═══════════════════════════════════════════════════════════════
+#  开仓依据（审计_告警邮件开仓依据缺失_2026-09-28 §三/§四）
+# ═══════════════════════════════════════════════════════════════
+
+_REASON_MOD: object = None
+
+
+def _reason_mod():
+    """惰性导入同目录的 `build_scan_edge_report`（只取桶边界与门槛两个常量）。
+
+    只为复用**单一真源**：`bucket_of`（桶边界）与 `MIN_BUCKET_N`（桶样本门槛）。
+    若在渲染层复制这两个定义，数据层改桶边界时邮件会静默错档 —— 这是本项目高频
+    复发项（派生字段与单一真源失联）。导入失败（部署只拷了 daemon）⇒ 返回 None，
+    依据段整体降级不渲染（宁缺勿错）。
+    """
+    global _REASON_MOD
+    if _REASON_MOD is None:
+        try:
+            if str(SCRIPT_DIR) not in sys.path:
+                sys.path.insert(0, str(SCRIPT_DIR))
+            import build_scan_edge_report as _m
+            _REASON_MOD = _m
+        except Exception as exc:              # pragma: no cover - 部署形态兜底
+            print(f"[reason] build_scan_edge_report 不可用，依据段降级: {exc}")
+            _REASON_MOD = False
+    return _REASON_MOD or None
+
+
+def _load_reason_context(conn) -> dict | None:
+    """「开仓依据」的数据上下文（§四：数字必须来自表，模板零常数）。
+
+    取最近 `REASON_LOOKBACK_DAYS` 天内最新的 `biz.scan_edge_daily` 一行、同日
+    `biz.scan_edge_bucket` 全部桶（键 = (dim, bucket)）、以及该日之前 7 个「有告警日」
+    的均量（暴增警示基线，与日报规则 A 同口径：≥3 个有效日才给基线）。
+
+    任何异常（表未建 / 列缺失 / 无数据）⇒ 返回 None，依据段整体不渲染。
+    """
+    cutoff = to_bj(datetime.now(timezone.utc)).date() - timedelta(days=REASON_LOOKBACK_DAYS)
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT report_date, alerts_n, win_1h, be_1h, pf_1h, win_24h, be_24h, "
+                "       avg_24h, odds_24h, roll3_win_1h, roll3_be_1h, roll3_pf_1h, "
+                "       top_share_bucket "
+                "  FROM biz.scan_edge_daily WHERE report_date >= %s "
+                " ORDER BY report_date DESC LIMIT 1", (cutoff,))
+            daily = cur.fetchone()
+            if not daily:
+                return None
+            cur.execute(
+                "SELECT dim, bucket, n, win_1h, be_1h, avg_24h, share, edge, "
+                "       sl_rate, ret_p75, mfe_p75 "
+                "  FROM biz.scan_edge_bucket WHERE report_date = %s",
+                (daily["report_date"],))
+            buckets = {(r["dim"], r["bucket"]): r for r in cur.fetchall()}
+            cur.execute(
+                "SELECT alerts_n FROM biz.scan_edge_daily "
+                " WHERE report_date < %s AND alerts_n > 0 "
+                " ORDER BY report_date DESC LIMIT 7", (daily["report_date"],))
+            prev = [int(r["alerts_n"]) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"[reason] 依据上下文不可用，依据段降级: {exc}")
+        return None
+    prev_avg = (sum(prev) / len(prev)) if len(prev) >= 3 else None
+    return {"report_date": daily["report_date"], "daily": daily, "buckets": buckets,
+            "prev_alert_avg": prev_avg}
+
+
+def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
+    """按 §三.2 组装「开仓依据」五槽 + 判读（①②③⑤ 数据现成，④ 目标位由同档 MFE P75 派生）。
+
+    🔴 所有数字取自 `ctx`（= 表），渲染层零常数。任一项桶样本 < `MIN_BUCKET_N` ⇒ 该项
+    降级为「该档样本不足」提示，**不回落全局均值**（§四.3：那正是「跨币种共享先验」的
+    老毛病）。`ctx` 缺失或模块不可导入 ⇒ 返回 None（整段不渲染）。
+    """
+    mod = _reason_mod()
+    if not ctx or not mod:
+        return None
+    buckets = ctx.get("buckets") or {}
+    if not buckets:
+        return None
+    min_n = int(getattr(mod, "MIN_BUCKET_N", 5))
+    top_vol_label = mod.BUCKETS["vol_ratio"][-1][1]
+
+    up = sig.get("p_dir") == "up"
+    is_brk = (sig.get("pool") == "accumulation" or sig.get("scenario") == "BRK")
+    slots: list[dict] = []
+    flags: dict = {"funding_tailwind": None, "vol_label": None,
+                   "vol_top": False, "vol_p75_neg": False}
+
+    def _row(dim, label):
+        r = buckets.get((dim, label))
+        if not r or int(r.get("n") or 0) < min_n:
+            return None
+        return r
+
+    def _stat(r) -> str:
+        avg, sl = r.get("avg_24h"), r.get("sl_rate")
+        avg_txt = f"{float(avg):+.2f}%" if avg is not None else "n/a"
+        sl_txt = f"{float(sl) * 100:.1f}%" if sl is not None else "n/a"
+        return f"同档 n={r['n']} · 24h 均值 {avg_txt} · 止损率 {sl_txt}"
+
+    def _add(kind, text):
+        slots.append({"kind": kind, "text": text})
+
+    # ① 资金一致（CVD 与价方向）
+    cvd = sig.get("cvd_dir")
+    align = mod.cvd_align_of(sig.get("p_dir"), cvd)
+    if align is None:
+        _add("info", "资金一致：无价格方向，无从判定")
+    else:
+        row = _row("cvd_align", align)
+        if align == "同向":
+            _add("good" if row else "info",
+                 (f"资金一致：CVD {cvd} 与价同向〔{_stat(row)}〕" if row
+                  else "资金一致：CVD 与价同向（该档样本不足，无历史依据）"))
+        elif cvd is None:
+            _add("info", "资金一致：CVD n/a（该档含反向/缺失样本"
+                         + (f"〔{_stat(row)}〕" if row else "，且样本不足）"))
+        else:
+            _add("bad" if row else "info",
+                 (f"资金背离：CVD {cvd} 与价反向〔{_stat(row)}〕" if row
+                  else "资金背离：CVD 与价反向（该档样本不足，无历史依据）"))
+
+    # ② 顺/逆风费率
+    fund = sig.get("funding_rate")
+    fsign = mod.funding_sign_of(fund)
+    if fsign is None:
+        _add("info", "费率：未覆盖（n/a），无历史依据")
+    else:
+        flags["funding_tailwind"] = (fsign == "<=0")
+        row = _row("funding_sign", fsign)
+        f_pct = float(fund) * 100
+        if fsign == "<=0":
+            _add("good" if row else "info",
+                 (f"顺风费率：费率 {f_pct:+.4f}%（空头付费）〔{_stat(row)}〕" if row
+                  else "顺风费率：费率 ≤0（该档样本不足，无历史依据）"))
+        else:
+            # ⚠️ 口径（审计 §2.3 限定①）：`>0` 组多为 Binance 默认档（中性），
+            #    文案必须写「无空头付费顺风」，不得写成「多头拥挤」。
+            _add("bad" if row else "info",
+                 (f"无费率顺风：费率 {f_pct:+.4f}%（无空头付费顺风）〔{_stat(row)}〕"
+                  if row else "无费率顺风：费率 >0（该档样本不足，无历史依据）"))
+
+    # ③ 量比档 + 该档 24h P75（④ 的目标位与 RR 复用本档）
+    vr = sig.get("vol_ratio")
+    vlabel = mod.bucket_of("vol_ratio", vr) if vr is not None else None
+    vrow = _row("vol_ratio", vlabel) if vlabel else None
+    flags["vol_label"] = vlabel
+    flags["vol_top"] = bool(vlabel and vlabel == top_vol_label)
+    if vrow is not None and vrow.get("ret_p75") is not None:
+        p75 = float(vrow["ret_p75"])
+        flags["vol_p75_neg"] = p75 < 0
+        _add("bad" if p75 < 0 else "good",
+             f"{'逆风' if p75 < 0 else ''}量比：{float(vr):.2f}x 落 {vlabel} 档"
+             f"〔该档 24h P75 {p75:+.2f}%〕")
+    else:
+        if vr is None:
+            _add("info", "量比：n/a")
+        else:
+            _add("info", f"量比：{float(vr):.2f}x 落 {vlabel} 档"
+                         "（该档样本不足，无历史依据）")
+
+    # ④ 风险结构：参考目标位 = 同档（量比档）历史 MFE P75
+    trig, sp = sig.get("trigger_price"), sig.get("stop_loss_pct")
+    mfe75 = float(vrow["mfe_p75"]) if (vrow is not None and vrow.get("mfe_p75") is not None) else None
+    rr = None
+    if trig is not None and sp is not None and float(sp) > 0 and mfe75 is not None:
+        entry, stop = float(trig), float(sp)
+        target = entry * (1 + mfe75 / 100) if up else entry * (1 - mfe75 / 100)
+        barrier = entry * (1 - stop / 100) if up else entry * (1 + stop / 100)
+        rr = mfe75 / stop          # 做多/做空同式（分子分母同取对齐方向）
+        _add("good" if rr >= REASON_RR_MIN else "bad",
+             f"风险结构：入场 {_fmt_num(entry, 6)} · 失效 {_fmt_num(barrier, 6)}"
+             f"（{'-' if up else '+'}{stop:.2f}%）· 参考目标 {_fmt_num(target, 6)}"
+             f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，非保证能到）⇒ RR {rr:.2f}")
+    else:
+        _add("info", "风险结构：无同档目标位（该档样本不足或无失效位），RR 不可算")
+
+    # ⑤ 窗口（批级：当日日报的 1h 胜率 vs 盈亏平衡）
+    d = ctx.get("daily") or {}
+    w1, b1, a24 = d.get("win_1h"), d.get("be_1h"), d.get("avg_24h")
+    if w1 is not None and b1 is not None:
+        ok = float(w1) >= float(b1)
+        _add("good" if ok else "bad",
+             f"窗口（批级 {d.get('report_date')}）：1h 胜率 {float(w1) * 100:.1f}% "
+             f"{'≥' if ok else '<'} 盈亏平衡 {float(b1) * 100:.1f}%"
+             f"（短窗{'为正' if ok else '为负'}）"
+             + (f" · 24h 均值 {float(a24):+.2f}%" if a24 is not None else ""))
+    else:
+        _add("info", "窗口：当日日报无 1h 胜率/盈亏平衡数据")
+
+    goods = sum(1 for s in slots if s["kind"] == "good")
+    bads = sum(1 for s in slots if s["kind"] == "bad")
+    if is_brk:
+        tone = "observe"
+        note = ("蓄势池突破（BRK）独立观察档：判定只用价+量，无 OI/CVD/先验，"
+                "不参与本批可开性统计")
+    elif goods >= 2 and rr is not None and rr >= REASON_RR_MIN:
+        tone = "pass"
+        note = f"顺风 {goods} 项、RR {rr:.2f} ≥ {REASON_RR_MIN:g} ⇒ 【可开】"
+    elif goods == 0:
+        tone = "avoid"
+        note = f"{bads} 项逆风、无顺风项 ⇒ 【不建议新开】"
+    elif rr is not None and rr < 1.0:
+        tone = "watch"
+        note = f"{goods} 顺 {bads} 逆，但 RR {rr:.2f} < 1 ⇒ 【观望·不建议新开】"
+    else:
+        tone = "watch"
+        note = f"{goods} 顺 {bads} 逆 ⇒ 【观望】"
+    return {"slots": slots, "rr": rr, "goods": goods, "bads": bads,
+            "tone": tone, "note": note, "is_brk": is_brk, "flags": flags}
+
+
+_REASON_ICON = {"good": "✓", "bad": "✗", "info": "·"}
+_REASON_COLOR = {"good": "#15803d", "bad": "#b91c1c", "info": "#6b7280"}
+_REASON_TONE_COLOR = {"pass": "#15803d", "watch": "#b45309",
+                      "avoid": "#b91c1c", "observe": "#6b7280"}
+
+
+def _render_reason(reason: dict | None) -> str:
+    """渲染「🎯 开仓依据」段（无 reason ⇒ 空串，旧调用方行为不变）。"""
+    if not reason:
+        return ""
+    rows = "".join(
+        f"<br><span style='color:{_REASON_COLOR[s['kind']]}'>"
+        f"{_REASON_ICON[s['kind']]} {s['text']}</span>"
+        for s in reason.get("slots") or [])
+    tone_color = _REASON_TONE_COLOR.get(reason.get("tone"), "#374151")
+    title = "🎯 开仓依据（观察档）" if reason.get("is_brk") else "🎯 开仓依据"
+    return ("<div style='margin:4px 0;padding:6px 8px;background:#fff;"
+            "border:1px dashed #d1d5db;border-radius:4px;font-size:11.5px;"
+            "line-height:1.55;color:#111'>"
+            f"<b>{title}</b>{rows}"
+            f"<br><b style='color:{tone_color}'>⇒ 判读：{reason['note']}</b></div>")
+
+
+def _is_brk_sig(sig: dict) -> bool:
+    return sig.get("pool") == "accumulation" or sig.get("scenario") == "BRK"
+
+
+def _batch_direction_line(items: list[dict], regime: dict | None) -> str:
+    """页头「本批方向」行（审计 §三.4：修根因⑤ 语义反转）。
+
+    现状只列**受限方向**（本批全做多却写「空头环境受限」）⇒ 读者读成「环境受限，
+    别开」。改为按本批方向表述：「环境 ✓ 未受限（受限的是空头方向：…原因…）」。
+    """
+    ups = sum(1 for it in items if it["signal"].get("p_dir") == "up")
+    downs = sum(1 for it in items if it["signal"].get("p_dir") == "down")
+    if ups and not downs:
+        dirlab, key, my_word, opp_word = "做多", "up", "多头", "空头"
+    elif downs and not ups:
+        dirlab, key, my_word, opp_word = "做空", "down", "空头", "多头"
+    elif ups and downs:
+        dirlab, key, my_word, opp_word = f"混合（多 {ups} / 空 {downs}）", None, "", ""
+    else:
+        return ""
+    if not regime or key is None:
+        return f"本批方向「{dirlab}」"
+    fav = bool(regime.get("long_fav") if key == "up" else regime.get("short_fav"))
+    opp_fav = bool(regime.get("short_fav") if key == "up" else regime.get("long_fav"))
+    my_block = (regime.get("long_block") if key == "up" else regime.get("short_block")) or []
+    opp_block = (regime.get("short_block") if key == "up" else regime.get("long_block")) or []
+    if not fav:
+        txt = f"本批方向「{dirlab}」：环境 ⚠ 受限（{my_word}方向：{' / '.join(my_block) or '原因未知'}）"
+    else:
+        txt = f"本批方向「{dirlab}」：环境 ✓ 未受限"
+        if not opp_fav and opp_block:
+            txt += f"（受限的是{opp_word}方向：{' / '.join(opp_block)}）"
+    return txt
+
+
+def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
+    """批级可开性摘要（审计 §三.3）+ 告警量暴增警示（§八.7）。
+
+    §三.3 的心理作用远大于单卡细节：读者第一眼就知道「今天该不该动手」，而不是逐张
+    卡片自己猜。计数取自各卡 `reason.tone`（同一真源），BRK 单列为「观察档」。
+    """
+    if not batch:
+        return ""
+    ctx = batch.get("ctx") or {}
+    daily = ctx.get("daily") or {}
+    have = [(it, it.get("reason")) for it in items if it.get("reason")]
+    if not have:
+        return ""
+    main = [(it, r) for it, r in have if not r.get("is_brk")]
+    brk_n = sum(1 for it in items if _is_brk_sig(it["signal"]))
+    lines: list[str] = []
+
+    if main:
+        pass_n = sum(1 for _, r in main if r["tone"] == "pass")
+        watch_n = sum(1 for _, r in main if r["tone"] == "watch")
+        avoid_n = sum(1 for _, r in main if r["tone"] == "avoid")
+        head = (f"📊 本批可开性：主池 {len(main)} 币中 {pass_n} 币通过"
+                f"（顺风 ≥2 且 RR ≥{REASON_RR_MIN:g}） · {watch_n} 币观望"
+                f" · {avoid_n} 币不建议")
+        if brk_n:
+            head += f" · BRK 观察 {brk_n} 币"
+        lines.append(head)
+        no_tail = sum(1 for _, r in main if r["flags"].get("funding_tailwind") is False)
+        tail = f"本批共性逆风：{no_tail}/{len(main)} 无空头付费顺风"
+        top = [r for _, r in main if r["flags"].get("vol_top")]
+        if top:
+            neg = sum(1 for r in top if r["flags"].get("vol_p75_neg"))
+            tail += f" · {len(top)} 币量比落最高档"
+            tail += "（该档历史 24h P75 为负）" if neg else "（该档历史 24h P75 非负）"
+        lines.append(tail)
+
+    # 批级环境（近 3 日滚动优先，缺则退当日）
+    w1, b1, pf1 = (daily.get("roll3_win_1h"), daily.get("roll3_be_1h"),
+                   daily.get("roll3_pf_1h"))
+    label = "近 3 日滚动"
+    if w1 is None or b1 is None:
+        w1, b1, pf1 = daily.get("win_1h"), daily.get("be_1h"), daily.get("pf_1h")
+        label = f"{daily.get('report_date')} 当日"
+    if w1 is not None and b1 is not None:
+        env = (f"当前批级环境：{label} 1h 胜率 {float(w1) * 100:.1f}% "
+               f"{'≥' if float(w1) >= float(b1) else '<'} 盈亏平衡 "
+               f"{float(b1) * 100:.1f}%")
+        if pf1 is not None:
+            env += f"（PF {float(pf1):.2f}）"
+        top_b = daily.get("top_share_bucket")
+        if isinstance(top_b, dict) and top_b.get("dim"):
+            env += f" · {daily.get('report_date')} 边缘桶 {top_b['dim']}={top_b['bucket']}"
+        lines.append(env)
+
+    # 告警量暴增警示（§八.7：09-23 公告 176 条 = 均值 5.0 倍，当日 avg_24h -5.75%）
+    prev_avg, alerts_n = ctx.get("prev_alert_avg"), daily.get("alerts_n")
+    if prev_avg and alerts_n and float(alerts_n) > float(prev_avg) * REASON_ALERT_SURGE_X:
+        lines.append(f"⚠️ 告警量暴增：当日 {int(alerts_n)} 条 ≈ 最近有告警日均值 "
+                     f"{float(prev_avg):.1f} 的 {float(alerts_n) / float(prev_avg):.1f} 倍"
+                     "（历史该形态当日 avg_24h 显著为负，属系统性质量下降）")
+    if not lines:
+        return ""
+    return ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
+            + "<br>".join(lines) + "</p>")
 
 
 def _get_asset_id(conn, symbol: str) -> int | None:
@@ -2346,7 +2705,16 @@ def _render_resonance_msgs(res: dict) -> str:
 
 
 def _render_alert_email(items: list[dict],
-                        regime_tags: list[str] | None = None) -> str:
+                        regime_tags: list[str] | None = None,
+                        batch: dict | None = None) -> str:
+    """渲染告警邮件。
+
+    `batch`（可选，审计_告警邮件开仓依据缺失 §三.3/§3.4）：
+      `{"regime": _build_regime 的返回, "ctx": _load_reason_context 的返回}`。
+      传入时页头改「按本批方向」表述（受限方向从「市场环境」行挪到方向行），并追加
+      批级可开性摘要 + 告警量暴增警示。**不传 ⇒ 与旧行为逐字一致**（既有离线探针
+      全部按 2 参数调用，不受影响）。
+    """
     # 统一标注北京时间（东八区）：数据存储与判定口径仍是 UTC，仅展示层转换。
     now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     # 卡片按相对强度降序（审计 §三.6：原按 signal_ts 平铺同色，量比 8.55x 与 2.69x
@@ -2365,20 +2733,35 @@ def _render_alert_email(items: list[dict],
             s = str(t)
             if s.startswith(("btc_1h=", "fgi=", "cap_trend=")) or "环境受限" in s:
                 regime_tags.append(s)
+    # 审计 §3.4（根因⑤：页头「空头环境受限」在全是做多的一封里语义反转）：有 batch 时
+    # 把「环境受限」从「市场环境」行挪到「本批方向」行，避免读者把「受限的是空头」读成
+    # 「环境受限、别开」。无 batch（旧调用方）⇒ 保持原样，逐字不变。
+    show_tags = ([t for t in regime_tags if "环境受限" not in str(t)]
+                 if batch is not None else regime_tags)
     env_line = ""
-    if regime_tags:
+    if show_tags:
         env_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
-                    "市场环境 " + " | ".join(regime_tags) + "</p>")
+                    "市场环境 " + " | ".join(show_tags) + "</p>")
+    # 本批方向（按方向的顺/逆风判读，需 `_build_regime` 的 long_fav/short_fav 与分向原因）
+    dir_line = ""
+    if batch:
+        d_txt = _batch_direction_line(items, batch.get("regime"))
+        if d_txt:
+            dir_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
+                        + d_txt + "</p>")
     # BRK 状态人文化后**并列**展示（不替换 regime）：批次级只报条数，明细见卡片。
     brk_n = sum(1 for it in items if it["signal"].get("scenario") == "BRK")
+    brk_line = ""
     if brk_n:
-        env_line += ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
-                     f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
+        brk_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
+                    f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
+    summary = _render_batch_summary(items, batch)
     body_parts = []
     for idx, it in enumerate(items):
         sig = it["signal"]
         res = it["resonance"]
         pool_label = "蓄势池BRK" if sig["pool"] == "accumulation" else "主池"
+        is_brk_card = _is_brk_sig(sig)
         up = sig["p_dir"] == "up"
         arrow_color = "#ef4444" if up else "#22c55e"   # 中文惯例：多头=红 / 空头=绿
         dir_label = "↑ 做多" if up else "↓ 做空"
@@ -2594,20 +2977,28 @@ def _render_alert_email(items: list[dict],
         prior = it.get("prior")
         prior_txt = ""
         if prior:
+            # 审计 §八.6：本行由「卡片主证据位」**降级为亚行**（置于「开仓依据」段之后）
+            # ——它是跨币种共享的常量且历史恒负，占主证据位是负收益。补「跨币种共享」
+            # 以免读者仍把它当本币专属依据。
             prior_txt = (f"<br><small style='color:#6b7280'>历史同象限（价/OI 方向）"
                          f"{prior['horizon']}h 方向对齐 中位 {prior['median']:+.2f}% / "
-                         f"胜率 {prior['win']:.0f}%（n={prior['n']}，仅含已告警样本，"
-                         f"非无偏基准）</small>")
+                         f"胜率 {prior['win']:.0f}%（n={prior['n']}，跨币种共享，"
+                         f"仅含已告警样本，非无偏基准）</small>")
         elif sc == "BRK":
             # 审计 OPT-3：`_scenario_priors` 样本池只取主池 ⇒ BRK 恒无先验。原实现
             # `if prior:` 静默省略该行，读者分不清「无样本」还是「漏渲染」⇒ 显式标注。
             prior_txt = ("<br><small style='color:#6b7280'>历史同象限：BRK 暂无历史先验"
                          "（先验样本池仅含主池信号）</small>")
+        # 开仓依据（审计_告警邮件开仓依据缺失 §3.1）：插在「共振」行之后、「失效位」
+        # 行之前 —— 即读者形成判断的那一刻。数据由 task_scan_alert 预先挂在
+        # `it["reason"]`（旧调用方不提供 ⇒ 空串，行为逐字不变）。
+        reason_txt = _render_reason(it.get("reason"))
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
             f"<div style='font-size:15px'>{rank} <b>{sig['symbol']}</b> {badge} {bar} "
-            f"<span style='color:#6b7280;font-size:12px'>{pool_label} · "
+            f"<span style='color:#6b7280;font-size:12px'>{pool_label}"
+            f"{'（观察档）' if is_brk_card else ''} · "
             f"{lv_txt or (sig.get('timeframe') or '-')}{brk_bar}</span> {flat_note}</div>"
             f"<div style='margin:2px 0 4px'><b>{sc_label}</b> "
             f"<b style='color:{arrow_color}'>{dir_label}</b> "
@@ -2618,7 +3009,7 @@ def _render_alert_email(items: list[dict],
             f"CVD {cvd or 'n/a'}{cvd_amt} | 费率 {fund_str}</small>"
             f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
-            f"{invalid_txt}{prior_txt}"
+            f"{reason_txt}{invalid_txt}{prior_txt}"
             f"{_render_resonance_msgs(res)}"
             f"</div>"
         )
@@ -2692,7 +3083,19 @@ def _render_alert_email(items: list[dict],
               "ℹ️ = 提示性说明（非风险警告，不改变信号），本封出现三类："
               "①「纯技术面信号…缺基本面确认」= 该币无催化剂且费率未覆盖，结论仅基于盘面；"
               "②「共振方向无新鲜条目，未参与结论」= 共振条目全为陈旧（>X 天），不计入多空结论；"
-              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号。</p>")
+              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号；"
+              # 审计_告警邮件开仓依据缺失 §三：新段落的口径锚点（否则读者无从判断
+              # 「同档均值 +2.12%」这类数字从哪来、RR 怎么算）。
+              "「🎯 开仓依据」= 本币顺/逆风逐槽陈列（① CVD 一致性 ② 费率符号 "
+              "③ 量比档位 ④ 风险结构 ⑤ 批级窗口），槽内括注均为同档历史样本"
+              "（n / 均值 / 止损率，来自当日分桶表，样本不足时标「样本不足」）；"
+              "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
+              "（mfe_24h）P75（历史分位，非保证能到）；「⇒ 判读」= 由槽位派生的开仓建议"
+              "（顺风 ≥2 且 RR ≥1.5 判「可开」，RR <1 判「观望」，零顺风或多重逆风判"
+              "「不建议」，BRK 因维度缺失统一进「观察档」）；「📊 本批可开性」= 本封全批"
+              "汇总；「本批方向」= 按本批做多/做空方向重述环境是否受限（受限方向若与"
+              "本批方向相反，则本批实际不受限）；「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个"
+              "有告警日均值 ×1.5（历史此类批次平均收益显著为负，属批级风险提示）。</p>")
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
                 "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"
@@ -2711,7 +3114,8 @@ def _render_alert_email(items: list[dict],
             f"<h2 style='margin:0 0 6px;color:#111'>🚨 盘面异动告警</h2>"
             f"<p style='margin:0 0 6px;color:#374151;font-size:13px'>"
             f"生成于 {now} · 共 {len(items)} 个币</p>"
-            f"{env_line}{body}{legend}{footnote}</body></html>")
+            f"{env_line}{dir_line}{brk_line}{summary}{body}{legend}{footnote}"
+            "</body></html>")
 
 
 def _stall_parts(conn, now: datetime) -> list[str]:
@@ -2931,15 +3335,21 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
         priors = _scenario_priors(conn, quadrants)
         # 审计 NEW-C：结算间隔（小时）随信号带入渲染层，年化按品种实算（缺失回退 8h）。
         interval_map = _load_funding_interval_map(conn)
+        # 开仓依据（审计_告警邮件开仓依据缺失 §三）：批级上下文（当日分桶 + 批级窗口
+        # + 近 7 个有告警日的量能）只查一次，逐信号据此组装顺/逆风槽位。
+        reason_ctx = _load_reason_context(conn)
         for it in to_alert:
             sig = it["signal"]
             it["prior"] = priors.get((sig.get("p_dir"), sig.get("oi_dir")))
             it["funding_interval_h"] = _lookup_funding(interval_map, sig.get("symbol") or "")
+            it["reason"] = _build_reason(sig, reason_ctx)
 
         # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
         # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。
-        regime_tags = _build_regime(conn)["tags"]
-        html = _render_alert_email(to_alert, regime_tags)
+        regime = _build_regime(conn)
+        regime_tags = regime["tags"]
+        batch = {"regime": regime, "ctx": reason_ctx}
+        html = _render_alert_email(to_alert, regime_tags, batch)
         from crypto_research.clients.notifier import EmailNotifier
         settings = _SETTINGS or get_settings(require_database=True)
         notifier = EmailNotifier(settings)

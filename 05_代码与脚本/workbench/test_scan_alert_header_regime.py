@@ -143,8 +143,8 @@ _fn = next((n for n in _tree.body
             if isinstance(n, ast.FunctionDef) and n.name == "task_scan_alert"), None)
 _src = ast.unparse(_fn) if _fn else ""
 check("_build_regime(conn)" in _src, "task_scan_alert 调 _build_regime(conn)")
-check("_render_alert_email(to_alert, regime_tags)" in _src,
-      "把 regime_tags 传入 _render_alert_email（与 context_tags 解耦）")
+check("_render_alert_email(to_alert, regime_tags, batch)" in _src,
+      "把 regime_tags + batch 传入 _render_alert_email（与 context_tags 解耦）")
 
 # ═══════════════════════════════════════════════════════════════
 #  N-pure3-1：btc_1h 只用**已收盘** 1h 条（live 价不可复现 + 图例措辞）
@@ -541,6 +541,183 @@ for _lit in ("「共振」行下方的消息明细块", "📅 事件预置", "�
              f"「共 M 条，仅列最新 {sd.RESONANCE_MSG_MAX} 条」",
              "利多=红 / 利空=绿 / 中性=灰", "解锁事件记利空"):
     check(_lit in _leg_msg, f"图例声明 {_lit}")
+
+# ═══════════════════════════════════════════════════════════════
+#  开仓依据（审计_告警邮件开仓依据缺失_2026-09-28 §三/§四/§六）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【开仓依据】上下文构造 + 槽位/判读")
+
+
+def _brow(dim, bucket, n, avg_24h=None, sl_rate=None, ret_p75=None, mfe_p75=None):
+    return {"dim": dim, "bucket": bucket, "n": n, "avg_24h": avg_24h,
+            "sl_rate": sl_rate, "ret_p75": ret_p75, "mfe_p75": mfe_p75}
+
+
+def _ctx(alerts_n=40, prev_avg=35.0, vol6_n=50, vol6_mfe=12.0):
+    """假桶表（列与 fix_078 后的 biz.scan_edge_bucket 一致）。"""
+    return {
+        "report_date": "2026-09-27",
+        "daily": {"report_date": "2026-09-27", "alerts_n": alerts_n,
+                  "win_1h": 0.42, "be_1h": 0.465, "pf_1h": 1.49,
+                  "win_24h": 0.269, "be_24h": 0.19, "avg_24h": 1.71, "odds_24h": 4.26,
+                  "roll3_win_1h": 0.525, "roll3_be_1h": 0.465, "roll3_pf_1h": 1.49,
+                  "top_share_bucket": {"dim": "scenario", "bucket": "S1"}},
+        "buckets": {
+            ("cvd_align", "同向"): _brow("cvd_align", "同向", 156, 2.12, 0.301),
+            ("cvd_align", "反向/缺失"): _brow("cvd_align", "反向/缺失", 94, -0.63, 0.330),
+            ("funding_sign", "<=0"): _brow("funding_sign", "<=0", 54, 6.57, 0.204),
+            ("funding_sign", ">0"): _brow("funding_sign", ">0", 152, -1.09, 0.362),
+            ("vol_ratio", "2.5-4"): _brow("vol_ratio", "2.5-4", 30, 1.50, 0.300, 3.0, 16.0),
+            ("vol_ratio", ">6"): _brow("vol_ratio", ">6", vol6_n, -1.20, 0.350, -0.23, vol6_mfe),
+        },
+        "prev_alert_avg": prev_avg,
+    }
+
+
+def _sig_r(p_dir="up", cvd_dir="up", funding=-0.000280, vol_ratio=3.0,
+           trigger=0.070730, stop=8.0, pool="main", scenario="S1"):
+    return {"id": 91, "symbol": "TESTUSDT", "pool": pool, "scenario": scenario,
+            "timeframe": "15m", "p_dir": p_dir, "price_chg_pct": 3.20,
+            "vol_ratio": vol_ratio, "oi_dir": "up", "oi_chg_pct": 5.0,
+            "cvd_dir": cvd_dir, "cvd_usd": -31684.0, "cvd_ratio": -0.144,
+            "funding_rate": funding, "confidence": "high", "status": "active",
+            "context_tags": ["lv2_15m"], "trigger_price": trigger,
+            "stop_loss_pct": stop, "breakout_px": trigger}
+
+
+_ctx1 = _ctx()
+
+print("\n【开仓依据】顺风批次：①CVD 同向 ②费率≤0 ③量比档 ④RR 全 ✓ / ⑤窗口 ✗")
+_r1 = sd._build_reason(_sig_r(), _ctx1)
+_h1 = sd._render_reason(_r1)
+check(_r1["tone"] == "pass" and _r1["rr"] == 2.0,
+      "四顺一逆 + RR 2.00 ⇒ tone=pass", f"tone={_r1['tone']} rr={_r1['rr']}")
+check("🎯 开仓依据" in _h1 and "观察档" not in _h1, "主池卡片标「🎯 开仓依据」（非观察档）")
+check("✓ 资金一致：CVD up 与价同向〔同档 n=156 · 24h 均值 +2.12% · 止损率 30.1%〕" in _h1,
+      "① 槽列同档 n/均值/止损率（逐字来自桶表）")
+check("✓ 顺风费率：费率 -0.0280%（空头付费）〔同档 n=54 · 24h 均值 +6.57% · 止损率 20.4%〕"
+      in _h1, "② 槽按费率符号取「顺风」档（文案为「空头付费」而非「多头拥挤」）")
+check("量比：3.00x 落 2.5-4 档〔该档 24h P75 +3.00%〕" in _h1, "③ 槽印该量比档 24h P75")
+check(f"参考目标 {sd._fmt_num(0.070730 * 1.16, 6)}"
+      f"（同档历史最大有利偏移 P75 +16.00%，非保证能到）⇒ RR 2.00" in _h1,
+      "④ 做多：参考目标 = 入场 ×(1+P75)，RR = P75 ÷ 止损幅度（同式）")
+check(f"失效 {sd._fmt_num(0.070730 * 0.92, 6)}（-8.00%）" in _h1, "④ 做多失效位在入场下方")
+check("✗ 窗口（批级 2026-09-27）：1h 胜率 42.0% < 盈亏平衡 46.5%（短窗为负）"
+      " · 24h 均值 +1.71%" in _h1, "⑤ 槽印批级 1h 胜率 vs 盈亏平衡（当日日报）")
+check("⇒ 判读：顺风 4 项、RR 2.00 ≥ 1.5 ⇒ 【可开】" in _h1, "判读 = 顺风计数 + RR 门槛")
+
+print("\n【开仓依据】做空符号（P2-N7 教训：失效位在上方、目标在下方）")
+_r2 = sd._build_reason(_sig_r(p_dir="down", cvd_dir="down", trigger=0.100000), _ctx1)
+_h2r = sd._render_reason(_r2)
+check(f"失效 {sd._fmt_num(0.100000 * 1.08, 6)}（+8.00%）" in _h2r,
+      "做空：失效位在入场上方且带 + 号")
+check(f"参考目标 {sd._fmt_num(0.100000 * 0.84, 6)}" in _h2r, "做空：参考目标在入场下方")
+check("RR 2.00" in _h2r, "做空 RR 与做多同式（分子分母同取对齐方向）")
+
+print("\n【开仓依据】逆风批次必须出现「不建议/观望」判读（§六.2）")
+_r3 = sd._build_reason(_sig_r(cvd_dir="down", funding=0.000050, vol_ratio=7.0),
+                       _ctx(vol6_mfe=8.0))
+_h3r = sd._render_reason(_r3)
+check(_r3["tone"] == "avoid" and _r3["goods"] == 0,
+      "CVD 反向 + 费率>0 + 量比最高档（P75 负、RR<1）⇒ 零顺风 ⇒ avoid",
+      f"tone={_r3['tone']} goods={_r3['goods']}")
+check("✗ 无费率顺风：费率 +0.0050%（无空头付费顺风）" in _h3r,
+      "费率 >0 文案为「无空头付费顺风」（不得写成「多头拥挤」）")
+check("✗ 逆风量比：7.00x 落 >6 档〔该档 24h P75 -0.23%〕" in _h3r, "量比最高档标「逆风」")
+check("⇒ 判读：5 项逆风、无顺风项 ⇒ 【不建议新开】" in _h3r, "逆风批次明确写「不建议新开」")
+
+print("\n【开仓依据】桶样本不足 → 不出依据数字，不回落全局均值（§四.3 / §六.4）")
+_r4 = sd._build_reason(_sig_r(vol_ratio=7.0), _ctx(vol6_n=2))
+_h4 = sd._render_reason(_r4)
+check("该档样本不足，无历史依据" in _h4, "n<MIN_BUCKET_N ⇒ 显式「该档样本不足」")
+check("-1.20" not in _h4 and "12.00" not in _h4,
+      "不得回落该档全局均值/未被信任的分位（防「跨币种共享先验」复活）")
+check("RR 不可算" in _h4, "无同档目标位 ⇒ RR 不可算（不臆造）")
+
+print("\n【开仓依据】BRK 独立观察档（§3.5 方案 B / §八.4）")
+_r5 = sd._build_reason(_sig_r(pool="accumulation", scenario="BRK", cvd_dir=None,
+                             funding=-0.00961608, vol_ratio=29.93), _ctx1)
+_h5 = sd._render_reason(_r5)
+check(_r5["is_brk"] and _r5["tone"] == "observe", "BRK ⇒ tone=observe")
+check("🎯 开仓依据（观察档）" in _h5, "BRK 卡片标「观察档」")
+check("独立观察档：判定只用价+量，无 OI/CVD/先验，不参与本批可开性统计" in _h5,
+      "BRK 判读说明其先验池与主池不同源")
+
+print("\n【开仓依据】批级摘要 + 本批方向 + 告警量暴增（§3.3 / §3.4 / §八.7）")
+_REG = {"tags": [], "long_fav": True, "short_fav": False,
+        "long_block": [], "short_block": ["FGI72(Greed)"]}
+_batch = {"regime": _REG, "ctx": _ctx1}
+_bitems = [{"signal": _sig_r(), "resonance": _res(), "reason": _r1},
+           {"signal": _sig_r(pool="accumulation", scenario="BRK", cvd_dir=None),
+            "resonance": _res(), "reason": _r5}]
+_hb = sd._render_alert_email(_bitems, REGIME, _batch)
+check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2 且 RR ≥1.5） · 0 币观望"
+      " · 0 币不建议 · BRK 观察 1 币" in _hb, "批级可开性摘要（BRK 单列观察档）")
+check("本批共性逆风：0/1 无空头付费顺风" in _hb, "批级共性逆风计数")
+check("当前批级环境：近 3 日滚动 1h 胜率 52.5% ≥ 盈亏平衡 46.5%（PF 1.49）"
+      " · 2026-09-27 边缘桶 scenario=S1" in _hb, "批级环境取近 3 日滚动（优先于当日）")
+check("本批方向「做多」：环境 ✓ 未受限（受限的是空头方向：FGI72(Greed)）" in _hb,
+      "页头按本批方向表述（修根因⑤语义反转）")
+check("空头环境受限" not in _hb.split("市场环境")[1].split("</p>")[0],
+      "有 batch 时「市场环境」行不再单列受限方向（已挪到方向行）")
+_h_surge = sd._render_batch_summary(_bitems, {"regime": _REG, "ctx": _ctx(alerts_n=176)})
+check("⚠️ 告警量暴增：当日 176 条 ≈ 最近有告警日均值 35.0 的 5.0 倍" in _h_surge,
+      "告警量 ≥ 近 7 个有告警日均值 ×1.5 ⇒ 批级警示")
+check("告警量暴增" not in sd._render_batch_summary(
+    _bitems, {"regime": _REG, "ctx": _ctx(alerts_n=40)}), "未越阈值时不误报暴增")
+
+print("\n【开仓依据】向后兼容 + `**` 护栏 + 图例锚点")
+_h_old = sd._render_alert_email([{"signal": _main_sig(), "resonance": _res()}], REGIME)
+_body_old = _body(_h_old)
+check("🎯 开仓依据" not in _body_old,
+      "旧调用方（无 reason / 无 batch）⇒ 不渲染依据段，行为逐字不变")
+check("📊 本批可开性" not in _body_old, "无 batch ⇒ 不渲染批级摘要")
+check("**" not in _h1 and "**" not in _h5 and "**" not in _hb, "依据/摘要文案无 `**`")
+_leg_r = sd._render_alert_email(_bitems, REGIME, _batch).split("图例：")[1]
+for _lit in ("「🎯 开仓依据」", "「RR」", "非保证能到", "「📊 本批可开性」",
+             "「本批方向」", "「⚠️ 告警量暴增」"):
+    check(_lit in _leg_r, f"图例声明 {_lit}")
+
+print("\n【开仓依据】AST —— 渲染层与 task_scan_alert 接线")
+_ast = ast.parse(open(sd.__file__, encoding="utf-8").read())
+_rr_fn = next((n for n in _ast.body
+               if isinstance(n, ast.FunctionDef) and n.name == "_render_alert_email"), None)
+_rr_src = ast.unparse(_rr_fn) if _rr_fn else ""
+check("_render_reason(it.get(" in _rr_src, "卡片循环调 _render_reason(it.get('reason'))")
+check("{brk_line}" in _rr_src and "{summary}" in _rr_src and "{dir_line}" in _rr_src,
+      "return 拼入 batch 三段（方向 / BRK / 批级摘要）")
+_ta = next((n for n in _ast.body
+            if isinstance(n, ast.FunctionDef) and n.name == "task_scan_alert"), None)
+_ta_src = ast.unparse(_ta) if _ta else ""
+check("_load_reason_context(conn)" in _ta_src, "task_scan_alert 取批级上下文一次")
+check("_build_reason(sig, reason_ctx)" in _ta_src, "逐信号组装开仓依据")
+
+print("\n【开仓依据】数据层单一真源（§四.1/§四.3）：分类维 + 分位 + 桶三字段")
+import build_scan_edge_report as _edge  # noqa: E402
+check(_edge.funding_sign_of(-0.0003) == "<=0" and _edge.funding_sign_of(0.0) == "<=0"
+      and _edge.funding_sign_of(0.00005) == ">0" and _edge.funding_sign_of(None) is None,
+      "funding_sign_of：≤0 为顺风档、缺值不入桶")
+check(_edge.cvd_align_of("up", "up") == "同向" and _edge.cvd_align_of("up", "down") == "反向/缺失"
+      and _edge.cvd_align_of("up", None) == "反向/缺失" and _edge.cvd_align_of(None, "up") is None,
+      "cvd_align_of：反向与缺失合档、无价方向不入桶（BRK 落「反向/缺失」）")
+check(_edge.pctl([1, 2, 3, 4], 0.75) == 3.25 and _edge.pctl([], 0.75) is None,
+      "pctl 线性插值分位；空样本 None")
+check(_edge.bucket_of("vol_ratio", 3.0) == "2.5-4"
+      and _edge.bucket_of("vol_ratio", 7.0) == ">6"
+      and _edge.BUCKETS["vol_ratio"][-1][1] == ">6",
+      "桶边界由 build_scan_edge_report 独占（渲染层经 _reason_mod 惰性复用）")
+_mb = _edge._mk_bucket("vol_ratio", "2.5-4", [
+    {"aligned_ret_1h": 1.0, "aligned_ret_4h": 1.0, "aligned_ret_24h": 4.0,
+     "sl_hit_24h": True, "mfe_24h": 10.0},
+    {"aligned_ret_1h": -1.0, "aligned_ret_4h": 0.0, "aligned_ret_24h": -2.0,
+     "sl_hit_24h": False, "mfe_24h": 2.0},
+    {"aligned_ret_1h": 0.5, "aligned_ret_4h": 0.0, "aligned_ret_24h": 6.0,
+     "sl_hit_24h": None, "mfe_24h": 4.0},
+], 3)
+check(_mb["sl_rate"] == 0.5, "_mk_bucket 止损命中率只计非空样本（2 条中 1 条命中）")
+check(abs(_mb["ret_p75"] - 5.0) < 1e-9 and abs(_mb["mfe_p75"] - 7.0) < 1e-9,
+      "_mk_bucket 产出 24h 收益 P75 与 MFE P75", f"ret={_mb['ret_p75']} mfe={_mb['mfe_p75']}")
 
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

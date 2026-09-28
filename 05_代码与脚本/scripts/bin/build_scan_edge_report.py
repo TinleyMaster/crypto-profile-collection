@@ -60,7 +60,7 @@ MIN_ALERT_DAYS = 3         # 规则 A/B 分母「有告警日」的最少天数�
 OPEN_TOP_BUCKETS = {("vol_ratio", ">6"), ("price_chg", ">8"), ("oi_chg", ">6")}
 # 同一批样本被多维度重复报出时的保留优先级（越靠前越具体、越可操作）
 DIM_DEDUPE_ORDER = ("scenario", "pool", "timeframe", "vol_ratio", "price_chg", "oi_chg",
-                    "confidence", "regime")
+                    "confidence", "regime", "funding_sign", "cvd_align")
 
 
 def _dim_rank(dim: str) -> int:
@@ -74,6 +74,12 @@ BUCKETS: dict[str, list[tuple[float | None, str]]] = {
     "oi_chg": [(1, "<1"), (3, "1-3"), (6, "3-6"), (None, ">6")],
 }
 PASSTHROUGH_DIMS = ("timeframe", "scenario", "confidence", "pool", "regime")
+# 分类维度（值由信号自身判定，非数值分桶）——供告警邮件「开仓依据」的条件期望查询
+# （审计_告警邮件开仓依据缺失_2026-09-28 §四.1）。标签固定且有序，保证桶总是被建出来
+# （有样本时），渲染侧按同一函数取标签即可命中，不靠字符串猜。
+CATEGORICAL_DIMS = ("funding_sign", "cvd_align")
+FUNDING_SIGN_LABELS = ("<=0", ">0")
+CVD_ALIGN_LABELS = ("同向", "反向/缺失")
 
 
 # ──────────────────────────── 纯函数（可离线单测） ────────────────────────────
@@ -107,6 +113,42 @@ def bucket_of(dim: str, value) -> str | None:
         if edge is None or x < edge:
             return label
     return BUCKETS[dim][-1][1]
+
+
+def funding_sign_of(v) -> str | None:
+    """费率符号分类（审计 §四.1）。`<=0` = 空头付多头的顺风档。
+
+    ⚠️ 口径提醒（审计 §2.3 限定①）：`>0` 组绝大部分是 Binance 默认档 `+0.0050%`
+    （**中性**），并非「多头极度拥挤」⇒ 渲染文案必须写「无空头付费顺风」，
+    不得写成「多头拥挤」。缺值返回 None（不入桶，避免把「未覆盖」混进 `>0`）。
+    """
+    if v is None:
+        return None
+    return "<=0" if float(v) <= 0 else ">0"
+
+
+def cvd_align_of(p_dir, cvd_dir) -> str | None:
+    """CVD 与价格方向是否一致（审计 §四.1）。`p_dir` 缺失时无法判定 → None。
+
+    沿用审计探针口径：`反向` 与 `缺失` 合为一档（实测该组均值 -0.63%）。BRK 信号
+    `cvd_dir` 恒 NULL ⇒ 落 `反向/缺失`档；BRK 卡片另走「观察档」渲染，不参与可开性。
+    """
+    if p_dir is None:
+        return None
+    return "同向" if cvd_dir == p_dir else "反向/缺失"
+
+
+def pctl(vals: list, q: float) -> float | None:
+    """线性插值分位数（q∈[0,1]）；空样本返回 None。"""
+    v = sorted(float(x) for x in vals if x is not None)
+    if not v:
+        return None
+    if len(v) == 1:
+        return v[0]
+    pos = (len(v) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (pos - lo)
 
 
 def classify_regime(btc_amp_pct: float | None, gt05_ratio: float | None,
@@ -212,7 +254,9 @@ SELECT o.signal_id, o.symbol, o.pool, o.scenario, o.timeframe, o.p_dir, o.alerte
        o.aligned_ret_1h, o.aligned_ret_4h, o.aligned_ret_12h, o.aligned_ret_24h,
        o.btc_ret_1h, o.btc_ret_24h, o.excess_24h, o.mae_24h, o.mfe_24h, o.sl_hit_24h,
        o.last_window,
-       s.vol_ratio, s.price_chg_pct, s.oi_chg_pct, s.confidence
+       s.vol_ratio, s.price_chg_pct, s.oi_chg_pct, s.confidence,
+       -- fix_078（开仓依据 §四.1）：条件期望的两维判据来源
+       s.cvd_dir, s.funding_rate
   FROM biz.scan_signal_outcome o
   JOIN biz.scan_signal s ON s.id = o.signal_id
  WHERE (o.alerted_at AT TIME ZONE 'Asia/Shanghai')::date = %s
@@ -342,6 +386,27 @@ def compute(conn, d: date) -> tuple[dict, list[dict]]:
         for label, sub in sorted(groups.items()):
             buckets.append(_mk_bucket(dim, label, sub, n_base))
 
+    # 分类维度（开仓依据 §四.1）：费率符号 / CVD 一致性。标签由函数派生（单一真源），
+    # 渲染侧调同一函数取键 ⇒ 不靠字符串对齐。缺值不入桶（既不该算顺风也不该算逆风）。
+    for dim in CATEGORICAL_DIMS:
+        groups = {}
+        for r in rows:
+            if r["aligned_ret_1h"] is None:
+                continue
+            if dim == "funding_sign":
+                key = funding_sign_of(r["funding_rate"])
+                labels = FUNDING_SIGN_LABELS
+            else:
+                key = cvd_align_of(r["p_dir"], r["cvd_dir"])
+                labels = CVD_ALIGN_LABELS
+            if key is None:
+                continue
+            groups.setdefault(key, []).append(r)
+        for label in labels:
+            sub = groups.get(label)
+            if sub:
+                buckets.append(_mk_bucket(dim, label, sub, n_base))
+
     # 单值维度（当日只有一个桶，如 confidence 全为 high、regime 全为 range）不携带
     # 区分信息 —— 取消其 edge 标记，否则「100% 占比且负期望」会天天误报。
     dim_counts: dict[str, int] = {}
@@ -437,10 +502,20 @@ def _mk_bucket(dim: str, label: str, sub: list[dict], n_base: int) -> dict:
     share = a1["n"] / n_base
     edge = (a1["n"] >= MIN_BUCKET_N and a1["win"] is not None and a1["be"] is not None
             and a1["win"] < a1["be"] and share >= EDGE_BUCKET_SHARE)
+    # fix_078：开仓依据用的三项条件统计（审计 §三.2 槽①③④）
+    #   sl_rate  —— 该桶 24h 止损命中率（风险披露）
+    #   ret_p75  —— 该桶 24h 方向对齐净收益 P75（量比档「该档 24h P75」）
+    #   mfe_p75  —— 该桶 24h 最大有利偏移 P75（「参考目标位」）
+    # ⚠️ 只用 24h 已结算样本；缺值不参与（不回落 0，否则会伪造「该档无风险」）。
+    sl_vals = [bool(r["sl_hit_24h"]) for r in sub if r["sl_hit_24h"] is not None]
+    sl_rate = (sum(1 for x in sl_vals if x) / len(sl_vals)) if sl_vals else None
     return {"dim": dim, "bucket": label, "n": a1["n"], "win_1h": a1["win"],
             "win_4h": a4["win"], "odds_1h": a1["odds"], "be_1h": a1["be"],
             "pf_1h": a1["pf"], "avg_1h": a1["avg"], "avg_24h": a24["avg"],
-            "share": share, "edge": edge}
+            "share": share, "edge": edge,
+            "sl_rate": sl_rate,
+            "ret_p75": pctl([r["aligned_ret_24h"] for r in sub], 0.75),
+            "mfe_p75": pctl([r["mfe_24h"] for r in sub], 0.75)}
 
 
 DAILY_COLS = (
@@ -482,11 +557,12 @@ def save(conn, day: dict, buckets: list[dict]) -> None:
         for b in buckets:
             cur.execute(
                 "INSERT INTO biz.scan_edge_bucket (report_date, dim, bucket, n, win_1h, win_4h, "
-                "odds_1h, be_1h, pf_1h, avg_1h, avg_24h, share, edge) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "odds_1h, be_1h, pf_1h, avg_1h, avg_24h, share, edge, "
+                "sl_rate, ret_p75, mfe_p75) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (day["report_date"], b["dim"], b["bucket"], b["n"], b["win_1h"], b["win_4h"],
                  b["odds_1h"], b["be_1h"], b["pf_1h"], b["avg_1h"], b["avg_24h"],
-                 b["share"], b["edge"]))
+                 b["share"], b["edge"], b["sl_rate"], b["ret_p75"], b["mfe_p75"]))
     conn.commit()
 
 
@@ -515,7 +591,8 @@ def print_report(day: dict, buckets: list[dict]) -> None:
             mark = " ⚠边缘" if b["edge"] else ""
             print(f"    {b['dim']:<11}{b['bucket']:<9}n={b['n']:<4}胜率 {_pct(b['win_1h']):>7}  "
                   f"平衡线 {_pct(b['be_1h']):>7}  PF {_fmt(b['pf_1h']):>6}  "
-                  f"占比 {_pct(b['share']):>7}{mark}")
+                  f"占比 {_pct(b['share']):>7}  止损 {_pct(b['sl_rate']):>7}  "
+                  f"P75 {_fmt(b['ret_p75']):>7}  MFE-P75 {_fmt(b['mfe_p75']):>7}{mark}")
     print(f"  结论：{day['conclusion']}")
 
 

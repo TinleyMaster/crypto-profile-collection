@@ -259,13 +259,26 @@ _TRADE_FIELD_CN = {
 # ── P1-b 观望闸门：data_quality 中 status=ok 的维度数低于此值 → 证据不足以给方向，强制「今日无操作」──
 _DQ_MIN_OK_FOR_TRADE = 2
 
+# ── P1-2（审计 2026-09-28）：可判定字段的「伪值」也要算缺失 ───────────────────
+# LLM 有时把缺失字段写成字面量 "N/A" / "无" / "—"，它们非空却不可判定（如 XRP「参照 N/A」），
+# 会导致缺字段条目混进「交易方向」区。与 _REQUIRED_TRADE_FIELDS 同源判定。
+_VALUE_PLACEHOLDERS = {"n/a", "na", "none", "null", "无", "—", "-", "--", "未知", "待定"}
+
+
+def _is_placeholder_value(v) -> bool:
+    """占位符/伪值判定：None、空白、或 N/A·无·— 一类不可判定字面量。"""
+    if v is None:
+        return True
+    s = str(v).strip()
+    return (not s) or (s.lower() in _VALUE_PLACEHOLDERS)
+
 
 def _trade_missing_fields(s: dict) -> list:
     """返回该条建议缺失的可判定字段（中文名列表）。空列表 = 六要素齐备、可执行。"""
     s = s or {}
     return [
         _TRADE_FIELD_CN[f] for f in _REQUIRED_TRADE_FIELDS
-        if s.get(f) is None or not str(s.get(f)).strip()
+        if _is_placeholder_value(s.get(f))
     ]
 
 
@@ -458,9 +471,16 @@ def _data_status_table_html(dq: list) -> str:
             cov_color = "#b45309"
         else:
             cov_txt, cov_color = "数据不可用", "#dc2626"
+        # P0-2（审计 2026-09-28）：不可用维度的口径披露（如「替代源估算」「解锁事件由催化剂管道提供」），
+        # 避免同一封邮件里「数据不可用」旁边又给具体数字而无任何交代。
+        _note = str(d.get("note") or "").strip()
+        _note_html = (
+            f'<div style="font-size:9px;color:#b45309;margin-top:1px;line-height:1.4">{_note}</div>'
+            if _note else ""
+        )
         body.append(
             f'<tr>'
-            f'<td style="padding:3px 6px;font-size:11px;color:#334155">{sec}</td>'
+            f'<td style="padding:3px 6px;font-size:11px;color:#334155">{sec}{_note_html}</td>'
             f'<td style="padding:3px 6px;font-size:11px;color:#64748b">{as_of}</td>'
             f'<td style="padding:3px 6px;font-size:11px;color:{lag_color}">{lag_txt}</td>'
             f'<td style="padding:3px 6px;font-size:11px;color:{cov_color}">{cov_txt}</td>'
@@ -486,6 +506,147 @@ def _data_status_table_html(dq: list) -> str:
             </div>
           </div>
         """
+
+
+# ── P0-1（审计 2026-09-28）：顶部风险叙事与「全做多」交易方向的缝合层 ──────────
+# 根因：研判模块吐「顶部/贪婪」风险，交易模块只生成多头信号，中间没有缝合层，
+# 读者拿到「环境危险但快做多」。本层在交易方向区强制追加环境约束注脚 + 失效翻转视角。
+_TOP_RISK_FEAR_GREED = 70     # 恐贪 ≥70 视为贪婪区（与 fng_greed_min 一致）
+_TOP_RISK_MIN_POSITION = "建议单笔不超过常态仓位的 50%"
+
+
+def _top_risk_guard_html(phase, fear_greed, has_trades: bool) -> str:
+    """顶部/贪婪环境下的交易约束注脚。无触发条件时返回空串（不渲染空壳）。"""
+    flags = []
+    try:
+        if phase and "顶" in str(phase):
+            flags.append(f"BTC 周期：{phase}")
+    except Exception:
+        pass
+    try:
+        fg = float(fear_greed) if fear_greed is not None and str(fear_greed) != "" else None
+    except (TypeError, ValueError):
+        fg = None
+    if fg is not None and fg >= _TOP_RISK_FEAR_GREED:
+        flags.append(f"恐贪 {fg:.0f}（贪婪区）")
+    if not flags:
+        return ""
+    _scope = "以上方向" if has_trades else "今日方向"
+    _items = [
+        "战术性参与：以短线 / 事件驱动为主，不新开杠杆",
+        f"轻仓：{_TOP_RISK_MIN_POSITION}",
+        "必带止损：未给失效价的方向不得执行",
+        "可部分止盈：已有持仓者优先逢高减仓 / 对冲，不追高",
+    ]
+    _li = "".join(f"<li>{x}</li>" for x in _items)
+    return f"""
+    <div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:8px 10px;margin:6px 0">
+      <div style="font-size:11px;font-weight:700;color:#92400e">⚠️ 高风险环境约束（{' · '.join(flags)}）</div>
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:10.5px;color:#78350f;line-height:1.6">{_li}</ul>
+      <div style="font-size:10.5px;color:#92400e;margin-top:4px;line-height:1.5">
+        失效翻转：若 BTC 跌破 50 日均线或恐贪回落至中性以下，{_scope}全部失效，转观望 / 减仓。
+      </div>
+    </div>
+    """
+
+
+# ── P1-1（审计 2026-09-28）：今日操作清单（TL;DR）→ 前 1/3 内可见 ────────────
+def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = None) -> str:
+    """把最可执行的方向摘要置顶（六要素齐备的交易方向优先，其次机会清单）。
+
+    `owners`（M4-1 折叠归属表）用于排除已在其他板块给出结论的标的 —— 否则摘要会把
+    「精选机会」里被折叠掉的重复结论又渲染一遍（破坏 M4-1「同一标的只留一条结论」）。
+    """
+    rows = []
+    for s in (trade_ready or [])[:3]:
+        asset = (s or {}).get("asset") or "?"
+        direction = (s or {}).get("direction") or ""
+        trigger = _clip((s or {}).get("trigger") or "", 70)
+        invalidate = _clip((s or {}).get("invalidate") or "", 50)
+        if not trigger:
+            continue
+        rows.append(
+            f'<div style="font-size:11px;color:#0f172a;line-height:1.6;margin-bottom:3px">'
+            f'<b>{asset}</b> <span style="color:#64748b">{direction}</span> · '
+            f'{trigger}' + (f'（失效：{invalidate}）' if invalidate else '') + '</div>'
+        )
+    # 若交易方向不足 3 条，用机会清单补足（含具体逻辑的优先）
+    if len(rows) < 3:
+        _seen = {str((s or {}).get("asset") or "").strip().lower() for s in (trade_ready or [])}
+        for o in (all_opps or []):
+            if len(rows) >= 3:
+                break
+            tgt = str(((o or {}).get("target") or (o or {}).get("symbol") or "")).strip()
+            if not tgt or tgt.lower() in _seen:
+                continue
+            # M4-1：已在「高亮 / 高危 / 赛道轮动」给出结论的标的，不在摘要里重复。
+            if owners:
+                _tk = _target_keys((o or {}).get("target"), (o or {}).get("symbol"), (o or {}).get("name"))
+                if any(k in owners for k in _tk):
+                    continue
+            logic = _clip((o or {}).get("trigger_logic") or "", 70)
+            if not logic:
+                continue
+            _seen.add(tgt.lower())
+            rows.append(
+                f'<div style="font-size:11px;color:#0f172a;line-height:1.6;margin-bottom:3px">'
+                f'<b>{tgt}</b> <span style="color:#64748b">观察/机会</span> · {logic}</div>'
+            )
+    if not rows:
+        return ""
+    return f"""
+      <!-- 模块0.01：今日操作清单（TL;DR） -->
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #0ea5e9">
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">🎯 今日操作清单（摘要）</div>
+        {''.join(rows)}
+        <div style="font-size:9.5px;color:#94a3b8;margin-top:4px">摘要摘自交易方向 / 机会清单；完整条件见下方对应板块，不构成投资建议。</div>
+      </div>
+    """
+
+
+# ── P1-3（审计 2026-09-28）：高危信号逐条「风险点 + 应对」解读 ────────────────
+# 稳定币类（USDC/USDS 等）出现在高危榜时，读者无从理解，必须解释「为何高危」。
+_STABLE_RISK_SYMBOLS = {"USDC", "USDS", "USDT", "DAI", "TUSD", "FDUSD", "PYUSD", "RLUSD",
+                        "USDE", "BUSD", "USDD", "GUSD", "FRAX", "XAUT", "PAXG", "CBBTC"}
+
+
+def _risk_one_liner(r: dict) -> str:
+    """从风险信号里抽一行「风险点 + 应对」（数据驱动，不臆造）。"""
+    r = r or {}
+    tgt = str(r.get("target") or r.get("symbol") or "?").strip()
+    key_metric = str(r.get("key_metric") or "").strip()
+    hint = str(r.get("action_hint") or "").strip()
+    logic = str(r.get("trigger_logic") or "").strip()
+    sig = str(r.get("signal_type") or "").strip()
+    _up = tgt.upper()
+    if _up in _STABLE_RISK_SYMBOLS:
+        return f"{tgt}：稳定币 / 锚定资产风险（脱锚、储备或监管），" \
+               f"应对 = 避险时缩短稳定币敞口、分散托管。"
+    # 优先用信号自带的风险点与应对，其次触发器逻辑
+    risk = key_metric or logic
+    if len(risk) > 60:
+        risk = _clip(risk, 60)
+    if risk and hint:
+        return f"{tgt}：{risk}，应对 = {hint}。"
+    if risk:
+        return f"{tgt}：{risk}。"
+    if hint:
+        return f"{tgt}：应对 = {hint}。"
+    if sig == "fng_extreme":
+        return f"{tgt}：情绪极值，防回撤；应对 = 降杠杆、部分止盈。"
+    return f"{tgt}：系统高危信号（综合风险），请结合下方风险提示谨慎对待。"
+
+
+# ── P1-4（审计 2026-09-28）：证据覆盖 N/M 的缺项明细 ──────────────────────────
+def _coverage_missing_names(dq: list) -> list:
+    """返回 data_quality 中 status != ok 的维度名列表（供「证据覆盖」旁披露缺哪几项）。"""
+    out = []
+    for d in (dq or []):
+        if not isinstance(d, dict):
+            continue
+        if str(d.get("status") or "").lower() != "ok":
+            out.append(str(d.get("section") or "?"))
+    return out
 
 
 def _build_target_registry(brief: dict, ai_trade_ready: list):
@@ -764,6 +925,9 @@ def render_brief_html(brief: dict) -> str:
         _dq_ok = sum(1 for d in _dq if str((d or {}).get("status")) == "ok")
         _dq_total = len(_dq)
         _cover_txt = f"{_dq_ok}/{_dq_total}" if _dq_total else "—"
+        # P1-4：读者看到 N/M 即需知其缺哪两项，无需翻到数据状态表
+        _dq_missing = _coverage_missing_names(_dq)
+        _cover_missing_txt = ("缺 " + "、".join(_dq_missing)) if _dq_missing else ""
 
         html_parts.append(f"""
           <!-- 模块0：AI今日定调 -->
@@ -778,6 +942,7 @@ def render_brief_html(brief: dict) -> str:
                 <div style="font-size:10px;color:#64748b">证据覆盖</div>
                 <div style="font-size:18px;font-weight:700;color:{bias_color}">{_cover_txt}</div>
                 <div style="font-size:9px;color:#64748b">项 · 信心{conviction_cn}</div>
+                {f'<div style="font-size:9px;color:#fca5a5;margin-top:1px">{_cover_missing_txt}</div>' if _cover_missing_txt else ''}
               </div>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -895,6 +1060,11 @@ def render_brief_html(brief: dict) -> str:
             </div>
             """)
 
+        # P0-1（审计 2026-09-28）：顶部/贪婪环境下的交易约束缝合层（顶部风险叙事 vs 全做多）。
+        # 注：phase / fear_greed 在下方「大盘脉搏」才定义，此处直接用 m0 取值。
+        html_parts.append(_top_risk_guard_html(
+            m0.get("btc_cycle_phase"), m0.get("fear_greed"), has_trades=bool(_trade_ready)))
+
         html_parts.append("</div>")
     else:
         # AI 不可用时的降级：用 M0 TLDR
@@ -906,6 +1076,13 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;color:#e2e8f0;line-height:1.5">{tldr_text or '今日大盘数据更新中...'}</div>
           </div>
         """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.01：🎯 今日操作清单（P1-1，审计 2026-09-28）——邮件前 1/3 可见
+    # M4-1 折叠归属表需先算，摘要据此排除已在其他板块给出结论的标的（避免重复结论）。
+    # ════════════════════════════════════════════════════════
+    _tgt_owners, _arbitrations = _build_target_registry(brief, _trade_ready)
+    html_parts.append(_build_tldr_html(_trade_ready, all_opps, _tgt_owners))
 
     # ════════════════════════════════════════════════════════
     # 模块 0.05：📋 与昨日变化（W-12 变更日志；M0 之后的第二块）
@@ -929,6 +1106,14 @@ def render_brief_html(brief: dict) -> str:
             aq_color, aq_label = "#d97706", "观察"
         elif aq.get("severity") == "high":
             aq_color, aq_label = "#dc2626", "失配"
+        # P2-3（审计 2026-09-28）：术语段（S1/平衡线/PF/边缘桶）对普通读者可读性低 →
+        # 置顶一句白话结论，先给结论再看指标。
+        _aq_plain = {
+            "normal": "白话结论：近期盘面告警整体有效，阈值与行情匹配。",
+            "watch": "白话结论：近期盘面告警胜率偏低（观察级），阈值或需微调，暂不宜重仓跟随。",
+            "high": "白话结论：近期盘面告警胜率明显偏低、与行情失配，建议收紧阈值或暂停跟随。",
+        }.get(str(aq.get("severity") or "normal").lower(),
+              "白话结论：近期盘面告警状态未知，请谨慎参考。")
         aq_n = str(aq["alerts_n"]) if aq.get("alerts_n") is not None else "-"
         aq_win = f"{aq['win_1h'] * 100:.1f}%"
         aq_be = f"{aq['be_1h'] * 100:.1f}%" if aq.get("be_1h") is not None else "-"
@@ -950,6 +1135,7 @@ def render_brief_html(brief: dict) -> str:
               <div style="font-size:13px;font-weight:700;color:#0f172a">📉 告警质量（阈值-行情失配预警）</div>
               <div style="font-size:11px;font-weight:700;color:{aq_color}">{aq_label}</div>
             </div>
+            <div style="font-size:11.5px;color:{aq_color};font-weight:600;margin-bottom:3px">{_aq_plain}</div>
             <div style="font-size:12px;color:#475569;line-height:1.6">
               {aq.get('report_date') or '-'} 告警 {aq_n} 条 · 当日 T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
               近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF {aq_rpf}）·
@@ -1031,6 +1217,13 @@ def render_brief_html(brief: dict) -> str:
             doubt_html = ""
             if ai_doubt or h.get("_ai_downgraded"):
                 doubt_html = '<span style="font-size:9px;background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">AI存疑</span>'
+            # P1-7（审计 2026-09-28）：正文自称「不构成高亮或高危」却列在「AI 精选高亮」下 →
+            # 归类与措辞自相矛盾，显式标注「观察级（非高亮）」。
+            obs_html = ""
+            if h.get("_ai_downgraded") or "不构成高亮" in str(reason) or "不构成高亮" in str(ai.get("reason_summary") or ""):
+                obs_html = ('<span style="font-size:9px;background:#e2e8f0;color:#475569;'
+                            'padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">'
+                            '观察级（非高亮）</span>')
 
             html_parts.append(f"""
             <div style="padding:10px 12px;margin:6px 0;border-radius:8px;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecaca;border-left:3px solid #dc2626">
@@ -1040,6 +1233,7 @@ def render_brief_html(brief: dict) -> str:
                   <span style="font-size:11px;color:{dir_color};font-weight:700">{dir_icon} {dir_cn}</span>
                   <span style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">{confidence}</span>
                   {doubt_html}
+                  {obs_html}
                 </div>
                 <div style="text-align:right;flex-shrink:0">
                   <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
@@ -1059,12 +1253,18 @@ def render_brief_html(brief: dict) -> str:
         # 高危信号（如果有，加一个小警示条）
         ai_risks = [r for r in risk_signals if r.get("ai_analysis_v2") and not r["ai_analysis_v2"].get("error")]
         if ai_risks:
-            # 展示全部高危信号名称（不只前 3 个），避免数量与名称不符
-            risk_preview = "、".join(r.get("target", "?") for r in ai_risks)
+            # P1-3（审计 2026-09-28）：原只列名字（含稳定币 USDC/USDS/CBBTC，读者无法理解），
+            # 现逐条给「风险点 + 应对」一行（数据驱动，稳定币类必解释为何高危）。
             risk_count = len(ai_risks)
+            _risk_rows = "".join(
+                f'<div style="font-size:10.5px;color:#991b1b;line-height:1.55;margin-top:2px">'
+                f'• {_risk_one_liner(r)}</div>'
+                for r in ai_risks
+            )
             html_parts.append(f"""
             <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
-              ⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个：{risk_preview}
+              <div>⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个</div>
+              {_risk_rows}
             </div>
             """)
 
@@ -1075,7 +1275,6 @@ def render_brief_html(brief: dict) -> str:
     # 既领涨/入选机会、又入高危的标的：输出裁决语，避免两个方向结论并列无解释。
     # 折叠归属表（owners）供下方「精选机会」卡复用（M4-1）。
     # ════════════════════════════════════════════════════════
-    _tgt_owners, _arbitrations = _build_target_registry(brief, _trade_ready)
     if _arbitrations:
         _arb_lines = "<br>".join(f"⚖️ {a['text']}" for a in _arbitrations[:4])
         html_parts.append(f"""
@@ -1202,13 +1401,21 @@ def render_brief_html(brief: dict) -> str:
     # ════════════════════════════════════════════════════════
     narratives = (brief.get("M2_sector_flow") or {}).get("sectors") or []
     sector_date = (brief.get("M2_sector_flow") or {}).get("metric_date") or ""
+    # P1-6（审计 2026-09-28）：赛道 / ETF / 巨鲸数据源滞后于全局标题「截至今日」，
+    # 逐卡标注真实截至日与滞后天数，避免「新鲜感是假的」。
+    try:
+        _sector_lag = (date.today() - date.fromisoformat(str(sector_date)[:10])).days
+    except (ValueError, TypeError):
+        _sector_lag = None
+    _sector_lag_txt = f" · 截至 {str(sector_date)[5:10]}，滞后 {_sector_lag} 天" if (
+        _sector_lag is not None and _sector_lag > 0) else ""
 
     html_parts.append(f"""
       <!-- 模块2：赛道轮动 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
         <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:8px;display:flex;align-items:center">
           <span style="margin-right:6px">🏭</span>赛道轮动
-          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">7日市值变化 · 功能分类{sector_date}</span>
+          <span style="margin-left:auto;font-size:10px;color:#94a3b8;font-weight:400">7日市值变化 · 功能分类{sector_date}{_sector_lag_txt}</span>
         </div>
     """)
 
@@ -1241,10 +1448,25 @@ def render_brief_html(brief: dict) -> str:
             if leaders:
                 coin_parts = []
                 for c in leaders[:3]:
-                    sym = c if isinstance(c, str) else c.get("symbol", "?")
-                    coin_parts.append(f'<span style="font-size:10px;color:#64748b">{sym}</span>')
+                    if isinstance(c, str):
+                        coin_parts.append(f'<span style="font-size:10px;color:#64748b">{c}</span>')
+                        continue
+                    sym = c.get("symbol", "?")
+                    # P1-5（审计 2026-09-28）：领涨币原只给名字，读者要「买哪个」无从判断；
+                    # 补个币 7d 涨幅（数据已在 fetch_sector_flow_with_leaders 的 SELECT 中）。
+                    _c7 = c.get("percent_change_7d")
+                    if _c7 is None:
+                        coin_parts.append(f'<span style="font-size:10px;color:#64748b">{sym}</span>')
+                    else:
+                        _c7f = float(_c7)
+                        _c7_color = "#dc2626" if _c7f >= 0 else "#16a34a"
+                        coin_parts.append(
+                            f'<span style="font-size:10px;color:#64748b">{sym} '
+                            f'<span style="color:{_c7_color};font-weight:600">'
+                            f'{_c7f:+.1f}%</span></span>'
+                        )
                 leader_label = "相对强势" if (mcap7d is not None and float(mcap7d) < 0) else "领涨币"
-                coins_html = f'<div style="font-size:10px;color:#94a3b8;margin-top:3px">{leader_label}：{" · ".join(coin_parts)}</div>'
+                coins_html = f'<div style="font-size:10px;color:#94a3b8;margin-top:3px">{leader_label}（7日）：{" · ".join(coin_parts)}</div>'
 
             html_parts.append(f"""
               <div style="padding:7px 8px;margin-bottom:4px;border-radius:6px;background:#fafafa">
@@ -1372,7 +1594,7 @@ def render_brief_html(brief: dict) -> str:
         html_parts.append(f"""
           <!-- ETF 子模块 -->
           <div style="background:linear-gradient(135deg,#f0f9ff,#e0f2fe);border-radius:8px;padding:10px 12px;margin-bottom:8px">
-            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（近 7 日累计 · 上一交易日({_etf_md})）</div>
+            <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（近 7 日累计 · 上一交易日({_etf_md}){f'，滞后 {_etf_lag} 天' if (_etf_lag is not None and _etf_lag > 0) else ''}）</div>
             <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
               <div style="text-align:center">
                 <div style="font-size:10px;color:#64748b">BTC ETF</div>
@@ -1588,9 +1810,11 @@ def render_brief_html(brief: dict) -> str:
         whales_buying = holder_conc.get("whale_buying") or []
         whales_selling = holder_conc.get("whale_selling") or []
 
+        _hc_as_of = str(holder_conc.get("snapshot_date") or "")[:10]
+        _hc_as_of_txt = f"（截至 {_hc_as_of}）" if _hc_as_of else ""
         html_parts.append(f"""
           <div style="margin-top:8px">
-            <div style="font-size:11.5px;font-weight:700;color:#b45309;margin-bottom:5px">🎯 巨鲸动向</div>
+            <div style="font-size:11.5px;font-weight:700;color:#b45309;margin-bottom:5px">🎯 巨鲸动向{_hc_as_of_txt}</div>
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse">
               <tr>
                 <td width="50%" valign="top" style="padding-right:6px">
@@ -2043,7 +2267,10 @@ def render_brief_html(brief: dict) -> str:
         bear = sm.get("bearish") or []
         bull_str = " ".join(f'<span style="color:#16a34a;font-weight:600">🐂{s.get("symbol","?")}</span>' for s in bull[:3])
         bear_str = " ".join(f'<span style="color:#dc2626;font-weight:600">🐻{s.get("symbol","?")}</span>' for s in bear[:3])
-        extra_blocks.append(("🐋 聪明钱", f"{bull_str} {bear_str}"))
+        # P2-3（审计 2026-09-28）：术语堆砌无上下文 → 补一行口径注解。
+        _sm_note = ('<div style="font-size:9.5px;color:#94a3b8;margin-top:2px">'
+                    '聪明钱 = 链上监控地址的净买入（🐂）/ 净卖出（🐻）方向</div>')
+        extra_blocks.append(("🐋 聪明钱（链上监控地址净买卖）", f"{bull_str} {bear_str}{_sm_note}"))
 
     # Meme 风险
     meme = brief.get("M8_meme") or {}

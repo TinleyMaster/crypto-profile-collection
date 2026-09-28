@@ -17,6 +17,7 @@
 """
 import os
 import sys
+from datetime import date as _date
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS_BIN = os.path.join(os.path.dirname(_HERE), "scripts", "bin")
@@ -63,7 +64,9 @@ def _brief():
         "M0_ai_summary": {"status": "ok", "headline": "结构性偏多", "bias": "偏多",
                           "market_regime": "震荡"},
         "M2_etf_flow": {
-            "status": "ok", "latest_date": "2026-09-22",
+            # 用当日日期：W-10 对 flow_date 滞后 > 3 天会整卡降级为「数据不可用」，
+            # 写死日期会随时间漂移使本组 ETF 断言失效（测试对系统时钟敏感）。
+            "status": "ok", "latest_date": _date.today().isoformat(),
             "assets": [
                 {"symbol": "BTC", "flow_7d_usd": 582.4e6},
                 {"symbol": "ETH", "flow_7d_usd": -95.5e6},

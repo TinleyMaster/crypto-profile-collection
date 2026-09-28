@@ -6298,6 +6298,7 @@ def score_opportunities(overview: dict) -> dict:
     _fear_max = t.get("fng_fear_max", 30)
     _greed_min = t.get("fng_greed_min", 70)
 
+    # 审计 2026-09-28（准确性 P1）：标签随实际分值分档（模块级 _fng_extreme_label）。
     # A. 恐贪极值
     _fg = (overview.get("dimensions") or {}).get("3情绪") or {}
     _fg_val = (((_fg.get("data") or {}).get("fear_greed") or {}).get("value"))
@@ -6308,7 +6309,7 @@ def score_opportunities(overview: dict) -> dict:
         if _fg_val <= _fear_max:
             strength = max(70, min(95, 50 + 50 * ((50 - _fg_val) / 50)))
             _push_opportunity(
-                {"target": "恐贪指数极度恐惧", "direction": "long", "confidence": "high",
+                {"target": _fng_extreme_label(_fg_val, is_greed=False), "direction": "long", "confidence": "high",
                  "conviction_score": strength,
                  # N3：事件强度 = 恐贪偏离中性的程度（|val-50|×2，越极端越强）。
                  "event_strength": _event_strength_score("score", abs(_fg_val - 50) * 2, t),
@@ -6323,7 +6324,7 @@ def score_opportunities(overview: dict) -> dict:
         elif _fg_val >= _greed_min:
             strength = max(70, min(95, 50 + 50 * ((_fg_val - 50) / 50)))
             _push_opportunity(
-                {"target": "恐贪指数极度贪婪", "direction": "short", "confidence": "high",
+                {"target": _fng_extreme_label(_fg_val, is_greed=True), "direction": "short", "confidence": "high",
                  "conviction_score": strength,
                  # N3：同上，事件强度 = 恐贪偏离中性的程度。
                  "event_strength": _event_strength_score("score", abs(_fg_val - 50) * 2, t),
@@ -7489,9 +7490,16 @@ def fetch_etf_flow_trend(days: int = 7) -> dict:
 def _dedup_whale_transfers(transfers: list[dict]) -> list[dict]:
     """去重链上大额转账中的"往返"（A→B 与 B→A）与"多跳"（A→B→C）事件。
 
-    判定条件：symbol 相同 + 金额相近（±2%）+ 地址首尾相接或互反。
+    判定条件：symbol 相同 + 金额相近（±2%）+ **共享任一地址端点**（无向：A→B 与 B→A、
+    A→B 与 B→C 均视为同一链路）。
     每条链路只保留金额最大的一条，避免 Top N 注水。
     无地址信息的记录不做合并（保守保留）。
+
+    ⚠️ 审计 2026-09-28 P2-1（顺序依赖 bug）：旧实现只认「链尾相接」（cand.from == tail），
+    当同一多跳链的两跳 block_timestamp 相同、且下游那跳先被处理时，反向跳**合并不上**，
+    TAO 5Q544→BQ72→J6nzA 这类中转被计成两笔（同额 $133.3M 出现两次，总额虚高）。
+    改为**无向并查集**：两条转账只要共享任一地址端点（from/to）且金额相近，即并入同一簇；
+    每簇只留金额最大的一条。与处理顺序无关。
     """
     if not transfers or len(transfers) < 2:
         return transfers
@@ -7519,40 +7527,62 @@ def _dedup_whale_transfers(transfers: list[dict]) -> list[dict]:
 
     deduped: list[dict] = []
     for sym, group in by_sym.items():
-        if len(group) <= 1:
+        n = len(group)
+        if n <= 1:
             deduped.extend(group)
             continue
-        # 按时间升序，贪心合并链路
-        group = sorted(group, key=lambda x: str(x.get("block_timestamp") or ""))
-        used = [False] * len(group)
-        for i, cur in enumerate(group):
-            if used[i]:
-                continue
-            chain = [cur]
-            used[i] = True
-            tail = _addr(cur, "to_address")
-            changed = True
-            while changed:
-                changed = False
-                for j, cand in enumerate(group):
-                    if used[j]:
-                        continue
-                    cfrom, cto = _addr(cand, "from_address"), _addr(cand, "to_address")
-                    if not (cfrom and cto):
-                        continue
-                    # 与链尾相接（cand.from == tail）即视为同一条多跳/往返链路
-                    if tail and cfrom == tail:
-                        if _near(cur.get("value_usd"), cand.get("value_usd")):
-                            chain.append(cand)
-                            used[j] = True
-                            if cto:
-                                tail = cto
-                            changed = True
-                            break
-            deduped.append(max(chain, key=lambda x: _fval(x.get("value_usd"))))
+        parent = list(range(n))
+
+        def _find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _union(a, b):
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        # 无向合并：共享任一端点地址 + 金额相近 ⇒ 同一链路
+        for i in range(n):
+            ei = group[i]
+            efrom_i, eto_i = _addr(ei, "from_address"), _addr(ei, "to_address")
+            for j in range(i + 1, n):
+                ej = group[j]
+                efrom_j, eto_j = _addr(ej, "from_address"), _addr(ej, "to_address")
+                i_pts = {a for a in (efrom_i, eto_i) if a}
+                j_pts = {a for a in (efrom_j, eto_j) if a}
+                if not i_pts or not j_pts:
+                    continue
+                if not (i_pts & j_pts):
+                    continue
+                if _near(ei.get("value_usd"), ej.get("value_usd")):
+                    _union(i, j)
+        clusters: dict[int, list] = defaultdict(list)
+        for i in range(n):
+            clusters[_find(i)].append(group[i])
+        for members in clusters.values():
+            deduped.append(max(members, key=lambda x: _fval(x.get("value_usd"))))
     # 还原金额降序（与原展示顺序一致）
     deduped.sort(key=lambda x: _fval(x.get("value_usd")), reverse=True)
     return deduped
+
+
+def _fng_extreme_label(value, is_greed: bool) -> str:
+    """审计 2026-09-28（准确性 P1）：恐贪信号 target 的「极度」措辞随分值分档。
+
+    根因：触发阈值 `fng_greed_min` 默认 70，而 alternative.me 分类里 70 属 Greed
+    （75+ 才是 Extreme Greed）⇒ 旧 target 一律写「极度贪婪」，与同封「大盘脉搏」的
+    "Greed" 自相矛盾且夸大。分档后：≥75 才称「极度贪婪」，≤25 才称「极度恐惧」。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "恐贪指数贪婪" if is_greed else "恐贪指数恐惧"
+    if is_greed:
+        return "恐贪指数极度贪婪" if v >= 75 else "恐贪指数贪婪"
+    return "恐贪指数极度恐惧" if v <= 25 else "恐贪指数恐惧"
 
 
 def fetch_onchain_whale_moves(hours: int = 24, limit: int = 10) -> dict:
@@ -8149,11 +8179,12 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
         _exch_prompt_lines = "\n".join(
             f'- {e["币种"]}: {e["7日净流_M"]}M USD' for e in exch_top
         )
+        _gn7d = None  # 审计 2026-09-28 P0-2：保存替代源取值，供 data_quality 口径披露
         if not _exch_prompt_lines:
             _gn7d = _fetch_global_cex_netflow_7d()
             if _gn7d is not None:
                 _exch_prompt_lines = (
-                    f"- 全市场 7 日净流量：{_gn7d:+.1f}M USD"
+                    f"- 【替代源估算 · 非「交易所净流量」模块口径】全市场 7 日净流量：{_gn7d:+.1f}M USD"
                     "（正值 = 净流出交易所、提币到链上=潜在看涨；负值 = 净流入交易所=潜在抛压）"
                 )
             else:
@@ -8235,6 +8266,21 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
             "即将解锁":     brief.get("M6_upcoming_unlocks") or {},
         })
 
+        # 审计 2026-09-28 P0-2：口径一致性披露 —— 状态表标「数据不可用」的维度，
+        # 不得在其数值卡片 / 结论里无交代地出现具体数字（消除同一封邮件的自相矛盾）。
+        _cat_unlock = any(
+            str((e or {}).get("type") or "") == "unlock"
+            for e in ((brief.get("M6_catalyst") or {}).get("token_events") or [])
+        )
+        for _d in data_quality:
+            _sec = str(_d.get("section") or "")
+            if _sec == "交易所净流量" and str(_d.get("status")) != "ok" and _gn7d is not None:
+                _d["note"] = (f"本封以全市场链上转账全局口径估算 {_gn7d:+.1f}M USD"
+                              "（替代源，非该模块口径）")
+            elif _sec == "即将解锁" and str(_d.get("status")) != "ok" and _cat_unlock:
+                _d["note"] = ("解锁事件由催化剂管道（宏观&代币事件）提供，"
+                              "与「即将解锁」模块口径不同")
+
         _wm_ok = (str(whale_moves.get("status") or "").lower() == "ok") and bool(whale_moves.get("transfers"))
         _net_txt = (
             f"{round(float(whale_moves.get('net_exchange_usd') or 0) / 1e6, 1)}M USD"
@@ -8293,6 +8339,11 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
    若【风险后验统计】中该指标有历史样本，须按模板补「历史 N 次…（样本 N，窗口 起~止）」；
    若无后验样本，末段必须显式写「（无后验样本 · 经验判断）」，不得伪装成统计结论。
    不含数值阈值的风险条目不得写入 risk_warnings（渲染层会把它移出「风险」区）。
+10. 口径一致性：【数据可用性】中标 empty / error 的维度，不得当作该维度可用。若某维度
+    以「替代源估算」方式提供了数值，引用时必须保留「替代源估算」字样（不得当作该模块口径）；
+    不得出现「数据不可用」与具体数字并列而无交代的表述。
+11. 巨鲸摘要必须同时提及增持与减持（如「增持 N 个 / 减持 M 个」），禁止只挑增持做结论；
+    不得用「向优质标的集中」等未经证实的定性措辞。
 """
 
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
@@ -8329,9 +8380,9 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
 {chr(10).join(f'- {w["币种"]} {w["方向"]} {w["金额_万USD"]:.0f}万USD ({w["链"]})' for w in whale_top) or '- （暂无数据）'}
 
 【巨鲸持仓变化（7日）】
-增仓 Top5：
+增仓 {len(holder_conc.get('whale_buying') or [])} 个（列 Top5）：
 {chr(10).join(f'- {w["币种"]}: +{w["7日增仓_pct"]}%' for w in whale_buy_top)}
-减仓 Top5：
+减仓 {len(holder_conc.get('whale_selling') or [])} 个（列 Top5）：
 {chr(10).join(f'- {w["币种"]}: {w["7日减仓_pct"]}%' for w in whale_sell_top)}
 
 【信号】

@@ -2019,3 +2019,25 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ④ **裁决语模板为写死文案**，风险类型未逐条枚举（只说「高危信号风险」），因风险 `signal_types` 未透传到渲染层。
 - ⑤ **变更日志（M3）未做**：仍依赖 AI 结论落库（P0 边界②）。
 - ⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**：需验次日 09:00 邮件中同一标的只有一个方向结论、同一赛道只有一个涨幅数字、冲突标的带「判定：不参与」。
+
+### 加密大盘早报 2026-09-28 审计处置（指导意义 + 详细度，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_加密大盘早报_2026-09-28.md`。审计判定「可读性已不是问题，短板是**把数据转成决策**这一层」。本轮落地 **P0-1 / P0-2 / P1-1 / P1-3 / P1-4 / P1-5 / P1-6 / P1-7 / 准确性P1 / P2-1 / P2-2 / P2-3**；**P1-2（板块目标=移动止盈无规则）由既有 P1-a 六要素闸门部分覆盖，未再加模板**；BTC $85K 取整口径属数据源，未改。**零 DDL、零迁移、未改任何阈值/评分权重、未改 tier 判定口径**。
+
+- **P0-1 顶部风险缝合层（`send_daily_brief._top_risk_guard_html`）**：`BTC 周期` 含「顶」或 `恐贪 ≥ 70` 时，在 AI 定调块的交易方向之后强制追加「⚠️ 高风险环境约束」注脚 —— 战术性/轻仓（**建议单笔不超过常态仓位的 50%**，常量 `_TOP_RISK_MIN_POSITION`）/必带止损/可部分止盈，并给「失效翻转」视角（BTC 跌破 50 日线或恐贪回落中性 → 方向全失效，转观望/减仓）。无触发条件时返回空串（不渲染空壳）。
+- **P0-2 内部数据矛盾（口径一致性）**：① **交易所净流量**：`generate_morning_brief_ai_summary` 的全局口径替代源文案加「**【替代源估算 · 非「交易所净流量」模块口径】**」，并在 `data_quality` 该维度打 `note`「本封以全市场链上转账全局口径估算 X（替代源，非该模块口径）」；② **即将解锁**：`M6_upcoming_unlocks` 不可用但催化剂 `token_events` 有 unlock 事件时，`data_quality` 该维度打 `note`「解锁事件由催化剂管道（宏观&代币事件）提供，与「即将解锁」模块口径不同」；③ `send_daily_brief._data_status_table_html` 新增渲染 `note`；④ system prompt 新增规则 10（empty 维度不得当可用、引用替代源必须保留标注）。
+- **P1-1 今日操作清单（TL;DR）**：新增 `_build_tldr_html`，置于 AI Morning Call 正下方（邮件前 1/3）。优先取六要素齐备的交易方向（asset + 方向 + 进场 + 失效），不足 3 条用机会清单 `trigger_logic` 补足；**遵守 M4-1 折叠**（`_tgt_owners` 已在其他板块给出结论的标的不重复），否则会把「精选机会」被折叠掉的重复结论又渲一遍（首版即踩此坑，`test_daily_brief_p0_20260927` M4-1/M4-3 断言当场抓到，已改为先算 `_build_target_registry` 再建摘要）。
+- **P1-3 高危信号逐条解读**：新增 `_risk_one_liner`，把原「只列名字」改为逐条「风险点 + 应对」；稳定币/锚定资产（`_STABLE_RISK_SYMBOLS` 含 USDC/USDS/CBBTC/XAUt 等）必解释「脱锚/储备/监管，应对=缩短敞口」。
+- **P1-4 证据覆盖缺项披露**：AI 定调头部「证据覆盖 N/M」旁新增「缺 X、Y」（`_coverage_missing_names`），读者无需翻到数据状态表。
+- **P1-5 赛道领涨币涨幅**：赛道卡领涨币由「只有符号」改为「符号 + 7d 涨幅」（数据本就在 `fetch_sector_flow_with_leaders` 的 SELECT 中，此前未渲染）。
+- **P1-6 数据时效逐卡标注**：ETF 卡补「，滞后 N 天」；赛道卡补「截至 MM-DD，滞后 N 天」；巨鲸动向补「（截至 snapshot_date）」。
+- **P1-7 DePIN 自相矛盾**：高亮卡若 `_ai_downgraded` 或 reason 含「不构成高亮」→ 渲染灰色徽章「观察级（非高亮）」。
+- **准确性 P1（恐贪标签）**：`macro_market._fng_extreme_label(value, is_greed)`（模块级纯函数）—— 70–74 标「恐贪指数贪婪」、≥75 才「极度贪婪」；≤25「极度恐惧」、其余「恐惧」。根治「同封脉搏 Greed vs 高危榜极度贪婪」的自相矛盾。
+- **P2-1 大额转账去重顺序 bug**：`_dedup_whale_transfers` 由「只认链尾相接（有向贪心）」改为**无向并查集**（共享任一端点 + 金额相近即同链，每簇留最大额）。修复同一多跳链两跳 `block_timestamp` 相同、下游先处理时反向跳合并不上 ⇒ TAO 5Q544→BQ72→J6nzA 被计两笔、总额虚高的问题。
+- **P2-2 巨鲸摘要选择性**：prompt 增规则 11（必须同时提增持/减持数量，禁「向优质集中」定性）；user_prompt 巨鲸段补「增仓 N 个 / 减仓 M 个」计数。
+- **P2-3 术语注解**：聪明钱标题改「🐋 聪明钱（链上监控地址净买卖）」+ 一行口径；告警质量区置顶「白话结论」（按 severity normal/watch/high 三分支）。
+- **P1-2 伪值防漏（顺带）**：`_trade_missing_fields` 新增 `_is_placeholder_value`，把 `N/A`/`无`/`—`/`未知` 等不可判定字面量也算缺失（原 XRP「参照 N/A」会混进交易方向区）。
+- **自测**：新增 `workbench/test_daily_brief_20260928.py` **36/36**（伪值判定/六要素、覆盖缺项、顶部注脚三分支、TL;DR 折叠排除、稳定币解读、观察级徽章、渲染集成含赛道涨幅/时效/缺项/`**` 护栏、多跳去重双向/往返/无共享端点、恐贪标签四档、状态表 note）。**回归**：workbench 全量 **50 个 `test_*.py` 全部 exit=0**（含 `test_daily_brief_p0_20260927` 279/0、`test_daily_brief_p1` 22/22、`test_macro_market_*`、`test_highlight_*`、`test_risk_signal_p0r2`、`test_signal_type_calibration`）。`py_compile` 2 文件通过。
+  - **顺带修一处时间脆弱测试**：`test_daily_brief_20260924` 的 ETF fixture 写死 `latest_date="2026-09-22"`，当系统日期 >3 天后 W-10 会把整卡降级为「数据不可用」使 4 条 ETF 断言失效（本次运行实测 27/31）⇒ 改为 `date.today().isoformat()`（31/31）。**该失败与本轮改动无关，属测试对系统时钟敏感**。
+- **未做 / 边界（须留档）**：① **P1-2（移动止盈无规则）未加模板** —— 由既有 P1-a 六要素闸门（trigger/invalidate/target/horizon/ref_price/ref_as_of）覆盖，`移动止盈` 是 prompt 显式允许的 target 写法；如产品要求页内展示回撤规则需另立项。② **BTC $85K 取整偏高 / 日变不匹配** 属取数源口径（审计判 P2 待核），本轮未改。③ **P0-1 的轻仓 50% 为审计建议默认值**（未回测校准），写在常量 `_TOP_RISK_MIN_POSITION`，可一行调整。④ **P0-2 交易所净流量替代源仍会出现在 AI 结论**（只是加了标注），审计的「是否保留」属产品决策，未做删除。⑤ **大额转账去重仅按 symbol + 共享端点 + 金额 ±2%**：同币同地址对不同金额的多笔不会合并（保守）。
+- **待部署**：`send_daily_brief.py` / `macro_market.py` 改的是早报渲染与 AI 提示层，需容器 **redeploy** 后次日 09:00 邮件生效。

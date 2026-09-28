@@ -15,6 +15,8 @@
   N2   催化剂展示分去撞顶 + score 主轴夹 [40,90] + 静默降级留痕
   N3   funding / fng_extreme 补 event_strength
   N4   event_strength 参与排序（池层 _sort_key + 邮件 card_sort_key 末级 tie-break）
+  N5   N4 三层收口（AI 终排末级补 es / 池层终排显式 raw→es / 护栏去自证）
+  N6   N5 承重加固（终排 es 判别例 / AI 终排 es 层级判别例 / 主卡换源 es 跟随）
 """
 import os
 import sys
@@ -322,6 +324,108 @@ finally:
 check([o["target"] for o in _ai_tie] == ["板块J", "板块I"],
       "N5-1 AI 终排：同分时 es 高者排前（不再打乱上游 es 序）",
       str([o["target"] for o in _ai_tie]))
+
+# ── N6-1：终排（池层最终排序）的 es 单独承重 ──
+# 候选池 _sort_key 的 es 前面还压着 tier / is_new / 共振维数三个分量，它们能把
+# 「低 es 卡」先顶上去；只有终排的 es 能把顺序翻回来。此处构造「共振维数」与
+# 「es」方向相反的两张卡，专门检验终排 es 是否在做事（M-F 突变体即针对此处）。
+_hl_term = mm.select_highlight_signals(
+    [_tie_opp("板块M", 10, score=60, res=2), _tie_opp("板块N", 90, score=60, res=1)],
+    max_total=10, min_resonance=1)
+check([o["target"] for o in _hl_term] == ["板块N", "板块M"],
+      "N6-1 终排 es 承重：候选池按共振维数把 M 排前，终排须按 es 翻回 N",
+      str([o["target"] for o in _hl_term]))
+
+# ── N6-2：AI 终排 es 的「层级」（须排在各主分量之后）──────────────────
+# 仅源码文本守卫不算承重：构造「mixed 并列、ai_score 与 es 方向相反」的并列组，
+# 正确实现（ai_score 在 es 前）与把 es 提前的实现给出相反顺序。
+def _enrich_opp2(tgt, ai, es, base):
+    # mixed = 0.5*ai + 0.5*base ⇒ 取 (ai=80,base=40)/(ai=60,base=60) 使 mixed 并列
+    # 同为 60，而 ai_score 与 es 方向相反。非符号 target 走 skipped，不触网络。
+    return {"target": tgt, "direction": "long", "signal_type": "narrative",
+            "conviction_score": base, "conviction_tier": "MED",
+            "event_strength": es, "ai_analysis_v2": {"overall_score": ai}}
+
+
+ai2.load_ai_signal_rules = lambda *a, **k: {
+    "event_driven": set(), "slow_variable": set(),
+    "max_review_per_run": 15, "slow_min_resonance": 2,
+}
+ai2.analyze_asset_v2 = lambda *a, **k: {"error": "test-stub"}
+try:
+    _ai_layer = ai2.ai_enrich_signals_v2(
+        [_enrich_opp2("板块O", 80, 10, 40), _enrich_opp2("板块P", 60, 90, 60)],
+        direction="long")
+finally:
+    ai2.load_ai_signal_rules = _orig_rules
+    ai2.analyze_asset_v2 = _orig_analyze
+check([o["target"] for o in _ai_layer] == ["板块O", "板块P"],
+      "N6-2 AI 终排 es 层级：mixed 并列时 ai_score 先于 es（高 es 不得越级）",
+      str([o["target"] for o in _ai_layer]))
+
+# v2 高危支：sort key (ai_approved, mixed, base_score, es)，mixed = 0.5*(100-ai) + 0.5*base。
+# 取 (ai=90,base=60)/(ai=60,base=30) 使 mixed 并列 35，base_score 与 es 方向相反。
+ai2.load_ai_signal_rules = lambda *a, **k: {
+    "event_driven": set(), "slow_variable": set(),
+    "max_review_per_run": 15, "slow_min_resonance": 2,
+}
+ai2.analyze_asset_v2 = lambda *a, **k: {"error": "test-stub"}
+try:
+    _ai_layer_short = ai2.ai_enrich_signals_v2(
+        [_enrich_opp2("板块U", 90, 10, 60), _enrich_opp2("板块V", 60, 90, 30)],
+        direction="short")
+finally:
+    ai2.load_ai_signal_rules = _orig_rules
+    ai2.analyze_asset_v2 = _orig_analyze
+check([o["target"] for o in _ai_layer_short] == ["板块U", "板块V"],
+      "N6-2 AI 终排（高危支）es 层级：mixed 并列时 base_score 先于 es",
+      str([o["target"] for o in _ai_layer_short]))
+
+# V1 回退（高亮）：sort key (-downgraded, mixed, ai_score, es)，mixed = 0.4*ai + 0.6*base。
+# 取 (ai=90,base=60)/(ai=60,base=80) 使 mixed 并列 72，ai_score 与 es 方向相反。
+_orig_merged = ai2._analyze_merged_signal
+ai2._analyze_merged_signal = lambda sig, direction: {
+    "ai_score": sig.get("_test_ai", 0), "should_highlight": True, "should_risk": True,
+}
+try:
+    _v1_hi = ai2.ai_enrich_highlight_signals([
+        {"target": "板块Q", "_test_ai": 90, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 10},
+        {"target": "板块R", "_test_ai": 60, "conviction_score": 80,
+         "conviction_tier": "MED", "event_strength": 90},
+    ])
+    # V1 回退（高危）：sort key (…, mixed, base_score, es)，mixed = 0.4*(100-ai) + 0.6*base。
+    # 取 (ai=90,base=60)/(ai=60,base=40) 使 mixed 并列 40，base_score 与 es 方向相反。
+    _v1_risk = ai2.ai_enrich_risk_signals([
+        {"target": "板块S", "_test_ai": 90, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 10},
+        {"target": "板块T", "_test_ai": 60, "conviction_score": 40,
+         "conviction_tier": "MED", "event_strength": 90},
+    ])
+finally:
+    ai2._analyze_merged_signal = _orig_merged
+check([o["target"] for o in _v1_hi] == ["板块Q", "板块R"],
+      "N6-2 V1 高亮终排 es 层级：mixed 并列时 ai_score 先于 es",
+      str([o["target"] for o in _v1_hi]))
+check([o["target"] for o in _v1_risk] == ["板块S", "板块T"],
+      "N6-2 V1 高危终排 es 层级：mixed 并列时 base_score 先于 es",
+      str([o["target"] for o in _v1_risk]))
+
+# ── N6-3：主卡换源时 event_strength 跟随 ──
+# 同一 target 两条子信号：p1(分60/共振2维/es30) 先被候选池顶到前面成为主卡，
+# p2(分80/共振1维/es95) 因分更高触发换源 ⇒ 合并卡 es 须跟随为 95（而非残留 30）。
+_swap = mm.select_highlight_signals(
+    [{"target": "板块X", "direction": "long", "signal_type": "narrative",
+      "conviction_score": 60, "conviction_tier": "MED",
+      "related_dims": ["d1", "d2"], "event_strength": 30},
+     {"target": "板块X", "direction": "long", "signal_type": "narrative",
+      "conviction_score": 80, "conviction_tier": "MED",
+      "related_dims": ["d1"], "event_strength": 95}],
+    max_total=10, min_resonance=1)
+check(len(_swap) == 1 and _swap[0]["conviction_score"] == 80
+      and _swap[0]["event_strength"] == 95,
+      "N6-3 主卡换源时 event_strength 跟随（不得残留旧主卡值）",
+      str([(o["target"], o.get("conviction_score"), o.get("event_strength")) for o in _swap]))
 
 # ── 汇总 ──
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")

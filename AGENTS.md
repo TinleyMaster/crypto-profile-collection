@@ -2073,6 +2073,19 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **待部署**：`macro_market.py` / `ai_signal_analyzer.py` 在 web 应用进程内，需 Zeabur redeploy 后网页高亮榜才生效；**邮件层 N4 的行为证据最早要到 2026-09-29 08:34 CST 之后那封**（高亮邮件读的快照每日 08:34 才写一次，今日那份早于上线）。
 - **未做 / 边界**：① **N5-4（两个早报红套件治理）按复验建议单独出单**，本轮未做；② 复验的验收 #1（线上顺序用 `(ai_approved, mixed, ai_score, es)` 逐项重算相等）需 redeploy 后执行；③ 上一轮遗留 M2（HIGH 泛滥 / conv 扎堆）/ N2-b / decision 路径间歇失败根因**本轮未触碰**。
 
+### N5 承重加固 N6-1/2/3（复验 `复验_79d3d2e_N5排序三层收口_2026-09-28.md`，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_79d3d2e_N5排序三层收口_2026-09-28.md`。复验确认 `79d3d2e` 代码正确、范围干净、测试 80/0 精确复现、**N5-1 已进容器**（容器重建 11:59:11 CST，推送后 8m05s），但 15 组突变体中 **4 组不承重**（M-F/M-L/M-I）。本轮**只补护栏（纯测试）**，不动生产代码。**零 DDL、零迁移、无生产行为变更**。
+
+- **N6-1（P3）终排 es 判别例**：终排 `_final_sort_key` 的 es 前面还压着 tier/is_new/共振维数（**候选池** key），它们能把「低 es 卡」先顶上去，只有终排的 es 能翻回。构造「共振维数与 es 方向相反」的两张同分卡（`板块M` 共振 2 维/es10 vs `板块N` 共振 1 维/es90）⇒ 正确实现 `[N, M]`，去掉终排 es 则 `[M, N]`。**实测 M-F（终排去 es）、M-L（终排读错字段）双双由 rc=0 转 rc=1。**
+- **N6-2（P3）AI 终排 es 层级判别例**：此前 `es` 的位置只被源码文本守卫兜住（M-B/M-M/M-J 等）。补三条**离线行为断言**（stub `load_ai_signal_rules` / `analyze_asset_v2` / `_analyze_merged_signal`，非符号 target 走 skipped 分支 ⇒ **不连库不连网**），构造「mixed 并列、ai_score（或 base_score）与 es 方向相反」的并列组：
+  - v2 long：`(ai80,es10,base40)/(ai60,es90,base60)` ⇒ mixed 并列 60，正确 `[O,P]`；es 提前则 `[P,O]`。
+  - v2 short：`(ai90,es10,base60)/(ai60,es90,base30)` ⇒ mixed 并列 35，正确 `[U,V]`。
+  - V1 高亮：`(ai90,es10,base60)/(ai60,es90,base80)` ⇒ mixed 并列 72，正确 `[Q,R]`；V1 高危：`(ai90,es10,base60)/(ai60,es90,base40)` ⇒ mixed 并列 40，正确 `[S,T]`。
+- **N6-3（P3）主卡换源 es 跟随**：同一 target 两条子信号，`p1(分60/共振2维/es30)` 先被候选池（共振维数）顶到前面成为主卡，`p2(分80/共振1维/es95)` 因分更高触发换源 ⇒ 合并卡 `event_strength` 须为 95。**实测 M-I（换源 es 不跟随）由 rc=0 转 rc=1。**
+- **验证**：`test_highlight_audit_20260924.py` **80 → 86/0**；**9 组突变体全部 rc=1**（M-F/M-L/M-I 以及 M-B/M-M/M-D/M-E/M-H/M-J，含原「仅源码守卫」者）；恢复校验 86/0。既有回归（`test_highlight_alert` 68/0、`test_highlight_determinacy_20260926` 72/0、`test_macro_market_*`、`test_risk_signal_p0r2` 14/0、`test_signal_type_calibration` 99/0、`test_major_event_alert` 55/0）全绿；`py_compile` 通过。
+- **未做 / 边界（须留档）**：① **N6-4（线上行为态取证）为观测项，不改码** —— 需一份含「判别性并列组」（前 N-1 分量完全相同且上游序与 es 序相反）的线上快照才能补 N5-1 的行为证据，当前样本不具判别力（复验 §4.2）；② 复验 §二末段登记的 **`decayed_score`（候选池主序）vs `conviction_score`（终排主序）口径分裂**属既有设计，**本轮未动**（改主序口径是行为变更，需产品拍板）；③ `select_risk_signals` 池层未补 es（其终排走 AI short 分支，行为已由 N5-1 覆盖）。
+
 ### 告警邮件「开仓依据」复验 N-8702-A~H 处置（复验_告警邮件开仓依据_8702607_2026-09-28，2026-09-28，本次提交）
 
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_告警邮件开仓依据_8702607_2026-09-28.md`。复验确认 `8702607`「全项到位、测试计数逐项复现、真库重渲染全部兑现」，另开 **8 条新缺陷（N-8702-A~H）+ 3 项自述纠正**。本轮按报告 §十 待拍板建议**全部落地**（A~H + 自述②③），**零删除、未改 tier/评分口径、未改任何阈值**。改动面：`scan_daemon.py` / `build_scan_edge_report.py` / 新迁移 `fix_079` / 探针。

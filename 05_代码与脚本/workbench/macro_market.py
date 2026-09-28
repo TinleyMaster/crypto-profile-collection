@@ -5008,6 +5008,10 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
                 # （排序按 decayed_score、档位按 conviction_score，两者可指向不同卡）。
                 if o.get("decayed_score") is not None:
                     merged["decayed_score"] = o["decayed_score"]
+                # N5-3（复验 f225ac3）：主卡换源时 event_strength 一并跟随，
+                # 否则卡片展示的事件强度与主卡分数可能来自不同子信号。
+                if o.get("event_strength") is not None:
+                    merged["event_strength"] = o.get("event_strength")
                 if "valuation_filter_note" in o:
                     merged["valuation_filter_note"] = o.get("valuation_filter_note") or ""
 
@@ -5091,8 +5095,25 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
             continue  # 币种级信号不满足共振条件，跳过
         after_resonance.append(merged)
 
-    # 按主卡分数降序
-    after_resonance.sort(key=lambda x: x.get("conviction_score", 0), reverse=True)
+    # 按主卡分数降序（N5-3：末级显式补 raw→es，与上方候选池 _sort_key 的 tie-break
+    # 顺序一致，不再依赖 list.sort 稳定性对同分顺序的隐式传播；缺失值安全退化）
+    def _final_sort_key(x):
+        try:
+            score = float(x.get("conviction_score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        raw = x.get("raw_before_decay")
+        try:
+            raw = float(raw) if raw is not None else score
+        except (TypeError, ValueError):
+            raw = score
+        try:
+            es = float(x.get("event_strength") or 0)
+        except (TypeError, ValueError):
+            es = 0.0
+        return (score, raw, es)
+
+    after_resonance.sort(key=_final_sort_key, reverse=True)
 
     # ── 4. 按类型配额限制（配额是合并后的卡片数，不是信号数） ──
     type_counts: dict[str, int] = {}

@@ -375,7 +375,10 @@ def ai_enrich_highlight_signals(
         downgraded = 1 if s.get("_ai_downgraded") else 0
         # 混合分：AI分占40%，原规则分占60%；被降级的排后面
         mixed = ai_score * 0.4 + base_score * 0.6
-        return (-downgraded, mixed, ai_score)
+        # N5-1（复验 f225ac3）：末级挂事件强度，使 AI 终排不覆盖上游已按 es 排好的
+        # 同分顺序（此前该键不给 es，会让「事件强度与卡片顺序自洽」在 AI 路径上失效）。
+        es = _safe_float(s.get("event_strength")) or 0.0
+        return (-downgraded, mixed, ai_score, es)
 
     enriched.sort(key=_sort_key, reverse=True)
     return enriched + rest
@@ -414,7 +417,9 @@ def ai_enrich_risk_signals(
         # 风险信号：ai_score 越低风险越高？反过来用 100 - ai_score
         risk_score = 100 - ai_score if ai_score > 0 else 0
         mixed = risk_score * 0.4 + base_score * 0.6
-        return (-downgraded, mixed, base_score)
+        # N5-1：与高亮侧对称，末级挂事件强度。
+        es = _safe_float(s.get("event_strength")) or 0.0
+        return (-downgraded, mixed, base_score, es)
 
     enriched.sort(key=_sort_key, reverse=True)
     return enriched + rest
@@ -3405,6 +3410,10 @@ def ai_enrich_signals_v2(
         base_score = s.get("conviction_score", 0) or 0
         has_v2 = bool(s.get("ai_analysis_v2") and not s.get("ai_analysis_v2", {}).get("error"))
         downgraded = 1 if s.get("_ai_downgraded") else 0
+        # N5-1（复验 f225ac3）：末级挂事件强度。此函数是网页高亮榜的最终排序真源，
+        # 排在 select_highlight_signals 之后并整体覆盖其顺序；缺 es 会让上游按 es
+        # 排好的同分卡被重新打乱（实测 PENDLE(es79)→ZEC(es80)→JUP(es81) 事件强度升序）。
+        es = _safe_float(s.get("event_strength")) or 0.0
 
         if direction == "long":
             # 排序优先级：AI认可且不降级 > 基础分 > AI分
@@ -3412,13 +3421,13 @@ def ai_enrich_signals_v2(
             # - 第2层：按混合分排序（有V2的用混合分，没V2的用基础分）
             ai_approved = 1 if (has_v2 and not downgraded) else 0
             mixed = ai_score * 0.5 + base_score * 0.5 if has_v2 else base_score
-            return (ai_approved, mixed, ai_score)
+            return (ai_approved, mixed, ai_score, es)
         else:
             # 风险信号对称
             ai_approved = 1 if (has_v2 and not downgraded) else 0
             risk_score = 100 - ai_score if ai_score > 0 else 0
             mixed = risk_score * 0.5 + base_score * 0.5 if has_v2 else base_score
-            return (ai_approved, mixed, base_score)
+            return (ai_approved, mixed, base_score, es)
 
     all_signals = enriched + skipped
     all_signals.sort(key=_sort_key, reverse=True)

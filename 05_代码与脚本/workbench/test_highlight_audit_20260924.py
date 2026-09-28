@@ -28,6 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import macro_market as mm  # noqa: E402
 import send_highlight_alert as sha  # noqa: E402
+import ai_signal_analyzer as ai2  # noqa: E402
 
 passed = 0
 failed = 0
@@ -244,12 +245,24 @@ _hl_tie = mm.select_highlight_signals([_tie_opp("板块A", 60), _tie_opp("板块
                                       max_total=10, min_resonance=1)
 check([o["target"] for o in _hl_tie] == ["板块B", "板块A"],
       "N4 池层：同分时事件强度高者排前", str([o["target"] for o in _hl_tie]))
-# 分数优先于 es（es 不得越级）
-_hl_hi_score = mm.select_highlight_signals([_tie_opp("板块C", 99, score=80),
-                                            _tie_opp("板块D", 10, score=70)],
+# 分数优先于 es（N5-2：高分卡给低 es、低分卡给高 es，才具判别力——
+# 若实现把 es 提到 score 之前，低分高 es 卡会越级，本断言必红）
+_hl_hi_score = mm.select_highlight_signals([_tie_opp("板块C", 10, score=80),
+                                            _tie_opp("板块D", 99, score=70)],
                                            max_total=10, min_resonance=1)
 check([o["target"] for o in _hl_hi_score] == ["板块C", "板块D"],
-      "N4 池层：分数仍优先于事件强度", str([o["target"] for o in _hl_hi_score]))
+      "N4 池层：分数仍优先于事件强度（高 es 不得越级压过高分卡）",
+      str([o["target"] for o in _hl_hi_score]))
+# raw（衰减前原分）优先于 es（N5-2：raw 是保卡下限压平后的还原序，优先级更高；
+# 若实现把 es 提到 raw 之前，高 es 低 raw 卡会越级，本断言必红）
+_hl_raw_es = mm.select_highlight_signals(
+    [{"target": "板块G", "direction": "long", "signal_type": "narrative",
+      "conviction_score": 70, "conviction_tier": "MED", "related_dims": ["x"],
+      "raw_before_decay": 90, "event_strength": 10},
+     _tie_opp("板块H", 90)], max_total=10, min_resonance=1)
+check([o["target"] for o in _hl_raw_es] == ["板块G", "板块H"],
+      "N4 池层：raw 优先于 es（高 es 不得越级压过高 raw）",
+      str([o["target"] for o in _hl_raw_es]))
 # 缺 es 不崩、视为 0
 _hl_noes = mm.select_highlight_signals(
     [{"target": "板块E", "direction": "long", "signal_type": "narrative",
@@ -269,6 +282,46 @@ check(_k_score > _k_hi, "N4 邮件层：分数仍优先于 es")
 check(sha.card_sort_key(({"conviction_tier": "HIGH", "conviction_score": 70},
                          sha.ALERT_NEW)) == (1, 1, 70, 0.0),
       "N4 邮件层：缺 es 视为 0（不崩、不改变既有排序）")
+
+# ── N5-1：AI 终排（网页高亮榜的最终真源）末级必须带 es ──
+# 覆盖 ai_enrich_signals_v2 的 long/short 两支 + V1 回退 ai_enrich_highlight_signals。
+# 该层排在 select_highlight_signals 之后并整体覆盖其顺序，缺 es 就等于 N4 在网页端没生效。
+_AI_SRC = open(os.path.join(_HERE, "ai_signal_analyzer.py"), encoding="utf-8").read()
+check('return (ai_approved, mixed, ai_score, es)' in _AI_SRC,
+      "N5-1 v2 long 终排末级加 es")
+check('return (ai_approved, mixed, base_score, es)' in _AI_SRC,
+      "N5-1 v2 short 终排末级加 es")
+check('return (-downgraded, mixed, ai_score, es)' in _AI_SRC
+      and 'return (-downgraded, mixed, base_score, es)' in _AI_SRC,
+      "N5-1 V1 回退（高亮/高危）末级加 es")
+
+
+def _enrich_opp(tgt, es, base=70, ai=70):
+    # 供 ai_enrich_signals_v2 排序用：同 base 同 AI，仅 es 不同 ⇒ 只有末级 es 能分胜负。
+    # target 用非符号（聚合类）⇒ 走 skipped 分支，不触发任何 AI/网络调用。
+    return {"target": tgt, "direction": "long", "signal_type": "narrative",
+            "conviction_score": base, "conviction_tier": "MED",
+            "event_strength": es,
+            "ai_analysis_v2": {"overall_score": ai}}
+
+
+# 隔离外部依赖：load_ai_signal_rules 不读 yaml、analyze_asset_v2 不被调用（非符号 target）
+_orig_rules = ai2.load_ai_signal_rules
+_orig_analyze = ai2.analyze_asset_v2
+ai2.load_ai_signal_rules = lambda *a, **k: {
+    "event_driven": set(), "slow_variable": set(),
+    "max_review_per_run": 15, "slow_min_resonance": 2,
+}
+ai2.analyze_asset_v2 = lambda *a, **k: {"error": "test-stub"}
+try:
+    _ai_tie = ai2.ai_enrich_signals_v2([_enrich_opp("板块I", 10), _enrich_opp("板块J", 90)],
+                                       direction="long")
+finally:
+    ai2.load_ai_signal_rules = _orig_rules
+    ai2.analyze_asset_v2 = _orig_analyze
+check([o["target"] for o in _ai_tie] == ["板块J", "板块I"],
+      "N5-1 AI 终排：同分时 es 高者排前（不再打乱上游 es 序）",
+      str([o["target"] for o in _ai_tie]))
 
 # ── 汇总 ──
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")

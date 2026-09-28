@@ -14,6 +14,7 @@
   N1   GitHub decline 侧事件强度封顶 60（消除温和区/极端区方向语义倒挂）
   N2   催化剂展示分去撞顶 + score 主轴夹 [40,90] + 静默降级留痕
   N3   funding / fng_extreme 补 event_strength
+  N4   event_strength 参与排序（池层 _sort_key + 邮件 card_sort_key 末级 tie-break）
 """
 import os
 import sys
@@ -222,6 +223,52 @@ _check = [o for o in _hl_out if o.get("signal_type") == "conflict_game"]
 check(len(_cats) == 3 and len(_check) == 1 and len(_hl_out) == 4,
       "T10 conflict_game 独立配额，catalyst 仍可选满 3（不互挤）",
       f"catalyst={len(_cats)} conflict_game={len(_check)} total={len(_hl_out)}")
+
+# ── N4：event_strength 参与排序（tie-break） ──
+print("[N4] event_strength 参与排序")
+check('return (is_high, is_new, resonance, score, raw, es)' in _MACRO_SRC,
+      "N4 select_highlight_signals._sort_key 末级加 event_strength（在 raw 之后）")
+check('return (is_high, is_new, score, _safe_float(card.get("event_strength")))' in
+      open(os.path.join(_SCRIPTS_BIN, "send_highlight_alert.py"), encoding="utf-8").read(),
+      "N4 邮件 card_sort_key 末级加 event_strength")
+
+
+def _tie_opp(tgt, es, score=70, res=1):
+    return {"target": tgt, "direction": "long", "signal_type": "narrative",
+            "conviction_score": score, "conviction_tier": "MED",
+            "related_dims": ["P1-1 叙事榜（市值）"] * res, "event_strength": es}
+
+
+# 同分同共振：es 高的排前（池层排序）
+_hl_tie = mm.select_highlight_signals([_tie_opp("板块A", 60), _tie_opp("板块B", 85)],
+                                      max_total=10, min_resonance=1)
+check([o["target"] for o in _hl_tie] == ["板块B", "板块A"],
+      "N4 池层：同分时事件强度高者排前", str([o["target"] for o in _hl_tie]))
+# 分数优先于 es（es 不得越级）
+_hl_hi_score = mm.select_highlight_signals([_tie_opp("板块C", 99, score=80),
+                                            _tie_opp("板块D", 10, score=70)],
+                                           max_total=10, min_resonance=1)
+check([o["target"] for o in _hl_hi_score] == ["板块C", "板块D"],
+      "N4 池层：分数仍优先于事件强度", str([o["target"] for o in _hl_hi_score]))
+# 缺 es 不崩、视为 0
+_hl_noes = mm.select_highlight_signals(
+    [{"target": "板块E", "direction": "long", "signal_type": "narrative",
+      "conviction_score": 70, "conviction_tier": "MED", "related_dims": ["x"]},
+     _tie_opp("板块F", 50)], max_total=10, min_resonance=1)
+check([o["target"] for o in _hl_noes] == ["板块F", "板块E"], "N4 缺 es 视为 0 不崩")
+
+# 邮件层排序键
+_k_hi = sha.card_sort_key(({"conviction_tier": "HIGH", "conviction_score": 70,
+                            "event_strength": 80}, sha.ALERT_NEW))
+_k_lo = sha.card_sort_key(({"conviction_tier": "HIGH", "conviction_score": 70,
+                            "event_strength": 60}, sha.ALERT_NEW))
+check(_k_hi > _k_lo, "N4 邮件层：同分时 es 高者键更大")
+_k_score = sha.card_sort_key(({"conviction_tier": "HIGH", "conviction_score": 80,
+                               "event_strength": 0}, sha.ALERT_NEW))
+check(_k_score > _k_hi, "N4 邮件层：分数仍优先于 es")
+check(sha.card_sort_key(({"conviction_tier": "HIGH", "conviction_score": 70},
+                         sha.ALERT_NEW)) == (1, 1, 70, 0.0),
+      "N4 邮件层：缺 es 视为 0（不崩、不改变既有排序）")
 
 # ── 汇总 ──
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")

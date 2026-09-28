@@ -153,8 +153,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      ["--scope", "all", "--interval", "4h", "--days", "7"],
      "CoinGlass 爆仓历史-多所聚合（每日 02:10，4h 分段增量）", "core"),
     # CGV4-003：跨所衍生品快照（OI 聚合/分所/币本位 + 各所资金费率）→ biz.coinglass_derivatives_snapshot。
+    #   当前定位「跨所备用/对账源」：只入库、不改既有 Binance fapi / biz.asset_derivatives 链路。
     #   资金费率 1 次拉全（1900+ 币）；OI 每币 1 次 ⇒ ≈528 请求 ≈22 min。多空比默认不采
     #   （既有决议走 Binance 免费端点，--with-ls 可显式开启）。
+    #   消费侧下一步：等 2–3 天数据积累后跑 scripts/bin/phase_audit_coinglass_vs_binance.py
+    #   对账，再决定是否并行注入。
     ("coinglass_derivatives_snapshot", "10 3 * * *", "ingest_coinglass_derivatives.py",
      ["--limit", "600"],
      "CoinGlass 跨所衍生品快照（每日 03:10，OI 聚合/分所/币本位 + 各所资金费率）", "core"),

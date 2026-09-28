@@ -1917,6 +1917,25 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 **未做 / 边界（须留档）**：① **未把早报「补发」做成一发即校验的强幂等**：看护是「按 task 状态超阈值未 done」触发的通用兜底，若某日 09:00 发送成功但 task 行写入失败，理论上可能补发第二封（概率极低，未加日级去重锁）。② **未给 `catalyst_fast_daemon` 加进程级心跳**：本轮只做「连续异常」自告警；**进程被 kill 不告警**（依赖 supervisord `autorestart=true` + 容器 FATAL 可见），如需「daemon 死了也报警」须另加 `sys.task` 心跳并纳入看护。③ **未收紧 `send_daily_brief.py` 的 SMTP 未配静默分支**（`notifier.configured == False → return 0`，任务显示 `done` 但未发信）：本次 prod 实测该分支未触发（发送成功），故未改；但它是「没发却显示成功」的同类陷阱，建议后续单独立项。④ **未加 `pool_pre_ping`**：`pg_stat_activity` 无中毒证据、且连接池毒化根因已由 `c6b009e` 处置，故不动连接池（避免无谓行为变更）。⑤ **未回填 09-26 缺失的早报**（补发只对「当前超阈值」生效，不回放历史）。⑥ **runtime 复验须待 Zeabur 约 6 分钟重建**（`push ≠ 线上生效`）。
 
+### 催化剂 A 级 Alert 通道静默可观测（2026-09-28，本次提交）
+
+来源：用户报「**最近几天都没收到催化剂邮件**」。经 prod 只读取证（`catalyst_notification_log` / `catalyst_signal` / `asset_catalyst`），结论：**管道与 SMTP 均存活**，停的只是「A 级 Alert」这一侧的候选供给。
+
+**诊断物证**：
+- `fast_alert` 最后发送 **09-23 16:50 UTC**、`slow_digest` 最后 **09-23 16:30 UTC**；同期 `major_event` 09-24 ONDO / 09-25 SUI / 09-26 SKY / 09-27 NEAR 仍**每天发** ⇒ 摄入、分级、发信链路正常，问题只在 `tier='A' AND status='open'` 候选为 0。
+- 自 09-24 起无任何新建 `tier='A' AND status='open'` 信号（最后 3 条在 09-23）。
+- 上游 `asset_catalyst` 日入库量 **9/21~9/24 约 1300~1600 条 → 9/25~9/28 约 300~475 条**（≈3~4 倍塌陷）；期间少数 `composite_score>=80` 的样本**全部 `resonance_state='confirmed'`**，按设计降级为 `status='watch'`，被 `status='open'` 排除。
+- 代码根因：`notifier.py` 旧 docstring 承诺「无 A 级信号发空窗 note」，实现实为**静默跳过**——git 追溯确认 `058c246`（2026-09-16）显式删除了空窗邮件、只留 docstring 未同步。
+
+**改动（3 文件，均仅本人改动）**：
+- `workbench/catalyst/notifier.py`：订正过时 docstring；新增**运维侧告警通道** `send_channel_silence_alert()`（`NTYPE_CHANNEL_SILENCE='channel_silence'`、哨兵 `SENTINEL_CHANNEL_SILENCE_SIGNAL_ID=-3`、`CHANNEL_SILENCE_DAYS=3` 可被 env `CATALYST_SILENCE_DAYS` 覆盖）。**维持 `058c246` 决议**：空窗期**不**向用户发「今日无信号」邮件；只当 `MAX(created_at) FROM catalyst_signal WHERE tier='A' AND status='open'` 距今 ≥ 阈值时，向运维发一封告警。判据无状态、不落表、无 DDL（直接读地面事实，历史可复算）；发送频率由既有 `_try_acquire_send_lock` 的 24h 去重约束（空转期间至多每天一封）。
+- `scripts/bin/phase_catalyst_pipeline.py`：慢通道 `send_major_event_alerts` 之后挂载 `send_channel_silence_alert()`（`--no-alert` 时跳过）。
+- `workbench/test_channel_silence_alert.py`：新增离线护栏测试 **29/0**（通道独立、负号哨兵、快照 SQL 字段、阈值判定、从未产生候选、24h 去重、渲染护栏、失败不阻断）。
+
+**验证**：`py_compile` 2/2 OK；`test_channel_silence_alert.py` 29/0 全绿。
+
+**未做 / 边界（须留档）**：① **上游掉量根因（「抓得少 vs 翻旧帖」）未查实**：本轮只定位到 `asset_catalyst` 日入库量 3~4 倍塌陷 + 高分样本全被判「已定价」两重因素，但**采集端为何掉量**（源站节奏下降 / 翻旧帖稀释 / 采集器限流）尚未取证，属独立工单。② **口径只用单一全资产 MAX(created_at)，不拆 crypto/stock**：两封 digest 候选同源，且 `slow_digest_stock` 实测从未有过 A 级候选，故不拆；若日后美股通道独立出量需拆双哨兵。③ **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`）。
+
 ### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
 
 **现象**：同一份 `biz.asset_tokenomics` 有 **4 个组装点**且口径已漂移——① `db_stats.get_asset_tokenomics()` 字段最全（22 列 + `biz.asset_token_unlocks` 的 revenue/valuation/overview）但**无逐字段来源/时点**；② 投研结论 prompt 的 inline `_fund` **只吃 `lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct`**；③ 解锁测算 prompt **另起一套 raw SQL 吃 10 列**并**复制了一份 CMC supply 校验**；④ 页面各渲染一个子集。**核心病根**：库里已有的 `allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **从未进入投研结论主线**（只进解锁支线）——2043 行中 allocation 776、emission 676、utility 1204、governance 328、burn 203、inflation 155 全部对投资决策 prompt 不可见。

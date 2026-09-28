@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -1295,7 +1296,8 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     定位（OPT-CATALYST-ALERT-001 P0-1）：从「24h B/C 汇总」转型为「高置信度 A 级 Alert」。
     - 仅 tier='A' 且 status='open'（d3：未充分定价的可动作信号）+ 有完整交易档位
       （entry/stop/tp）的信号入选，按分取前 2
-    - 无 A 级信号 → 发极简「空窗 note」（决策①：女王接受空窗，写明原因，避免通道静默死掉）
+    - 无 A 级信号 → **静默跳过，不发空窗邮件**（`058c246` 2026-09-16 决议：空窗不发信避免刷屏）。
+      「通道空转」这件事改由 `send_channel_silence_alert()` 在**运维侧**告警，不在本函数内
     - 各自独立去重（sentinel + ntype），互不影响
     """
     is_crypto = asset_class == "crypto"
@@ -1313,7 +1315,8 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     new_count = len(rows)
 
     if not rows:
-        # 无 A 级信号 → 静默跳过，不发空窗邮件
+        # 无 A 级信号 → 静默跳过，不发空窗邮件（058c246 决议）。
+        # 通道长期空转由 send_channel_silence_alert() 在运维侧告警。
         return {"sent": 0, "skipped": 1, "failed": 0,
                 "reason": f"{label} 24h 内无 A 级高置信度信号，静默跳过",
                 "new_signals_24h": 0}
@@ -1438,6 +1441,218 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
         ORDER BY t.composite_score DESC
         LIMIT 2
     """, (hours, DEDUP_WINDOW_HOURS)).fetchall()
+
+
+# =====================================================================
+# 通道静默可观测（空窗不发用户邮件，只在运维侧告警）
+# =====================================================================
+#
+# 背景（2026-09-28 排查用户报「最近几天都没收到催化剂邮件」）：
+# A 级 Alert 的入选口径是 `tier='A' AND status='open'`。该口径为 0 行时通道**静默**——
+# 读者无法区分「今天真的没有可动作信号」与「通道坏了」。实测物证：`fast_alert` 最后
+# 发送 2026-09-23 16:50 UTC、`slow_digest` 最后 2026-09-23 16:30 UTC 之后连续 5 天无信，
+# 而同期的 `major_event` 仍在每天发送 ⇒ 管道与 SMTP 都正常，停的只是候选供给。
+#
+# 2026-09-16 的 `058c246` 已显式决定「无 A 级信号时**不发**空窗邮件」（避免刷屏）；
+# 本节**维持该决定**：不新增用户可见邮件，只把「通道空转」变成运维侧可见的告警。
+#
+# 判据刻意不落表、无 DDL，直接读地面事实：
+#     MAX(created_at) FROM biz.catalyst_signal WHERE tier='A' AND status='open'
+# 该值距今超过阈值即视为空转。无状态 ⇒ 不受容器重启影响、历史可复算、无需初始化计数器。
+# 发送频率由既有 `_try_acquire_send_lock` 的 `DEDUP_WINDOW_HOURS`(=24h) 约束
+# ⇒ 空转期间至多每天一封。
+#
+# 口径边界：只用一个「全资产」的 MAX(created_at)，不拆 crypto / stock。理由：两封 digest
+# 的候选都来自该集合，且实测 `slow_digest_stock` 从未有过 A 级候选（唯一一次发送是
+# 2026-09-15 的空窗期）。若日后美股通道真的独立出量，需拆分为两个哨兵分别判定。
+
+NTYPE_CHANNEL_SILENCE = "channel_silence"
+SENTINEL_CHANNEL_SILENCE_SIGNAL_ID = -3   # 负号哨兵，同 -1/-2 约定（NULL 不触发 UNIQUE）
+CHANNEL_SILENCE_DAYS = int(os.getenv("CATALYST_SILENCE_DAYS", "3"))
+
+
+def _channel_silence_snapshot(conn) -> dict:
+    """通道健康度快照（只读，纯查询，不发信）。"""
+    return conn.execute("""
+        SELECT
+            (SELECT MAX(created_at) FROM biz.catalyst_signal
+              WHERE tier = 'A' AND status = 'open')                         AS last_a_open_at,
+            (SELECT COUNT(*) FROM biz.catalyst_signal
+              WHERE tier = 'A' AND status = 'open')                         AS a_open_total,
+            (SELECT COUNT(*) FROM biz.catalyst_signal
+              WHERE tier = 'A' AND created_at > NOW() - INTERVAL '7 days')  AS a_new_7d,
+            (SELECT COUNT(*) FROM biz.asset_catalyst
+              WHERE COALESCE(published_at, created_at)
+                    > NOW() - INTERVAL '24 hours')                          AS upstream_24h,
+            (SELECT COUNT(*) FROM biz.asset_catalyst
+              WHERE COALESCE(published_at, created_at)
+                    > NOW() - INTERVAL '7 days')                            AS upstream_7d,
+            (SELECT MAX(sent_at) FROM biz.catalyst_notification_log
+              WHERE notification_type = %s AND status = 'sent')             AS last_major_event_at,
+            (SELECT MAX(sent_at) FROM biz.catalyst_notification_log
+              WHERE notification_type = %s AND status = 'sent')             AS last_fast_alert_at
+    """, (NTYPE_MAJOR_EVENT, NTYPE_FAST_ALERT)).fetchone()
+
+
+def _build_channel_silence_html(snap: dict, threshold: int, days_silent) -> str:
+    """构建通道空转告警邮件 HTML（运维视角，非投资建议）。"""
+    days_txt = f"{days_silent:.1f} 天" if days_silent is not None else "—（从未产生候选）"
+    rows = [
+        ("最后一条 A 级候选（tier=A 且 status=open）", _fmt_ts(snap.get("last_a_open_at"))),
+        ("距今", days_txt),
+        ("告警阈值", f"{threshold} 天"),
+        ("近 7 天新增 A 级信号（任意状态）", f"{snap.get('a_new_7d', 0)} 条"),
+        ("当前 A+open 存量", f"{snap.get('a_open_total', 0)} 条"
+                          "（均超出 24h 窗口，不会触发发送）"),
+        ("上游催化剂入库 · 近 24h / 近 7 天",
+         f"{snap.get('upstream_24h', 0)} / {snap.get('upstream_7d', 0)} 条"),
+    ]
+    cross = [
+        ("最后一条 📢 重大事件通报", _fmt_ts(snap.get("last_major_event_at"))),
+        ("最后一条 🚀 A 级快讯", _fmt_ts(snap.get("last_fast_alert_at"))),
+    ]
+    tr = "".join(
+        f"<tr><td style='padding:6px 10px;color:#6b7280;font-size:12px'>{k}</td>"
+        f"<td style='padding:6px 10px;font-size:13px;color:#111827'>{v}</td></tr>"
+        for k, v in rows
+    )
+    tr_cross = "".join(
+        f"<tr><td style='padding:6px 10px;color:#6b7280;font-size:12px'>{k}</td>"
+        f"<td style='padding:6px 10px;font-size:13px;color:#111827'>{v}</td></tr>"
+        for k, v in cross
+    )
+    return f"""
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                max-width:720px;margin:0 auto;padding:20px">
+      <div style="background:#fffbeb;border-left:4px solid #f59e0b;
+                  padding:14px 16px;border-radius:8px">
+        <div style="font-size:16px;font-weight:600;color:#92400e">
+          ⚠️ 催化剂 A 级 Alert 通道已空转
+        </div>
+        <div style="font-size:13px;color:#78350f;margin-top:6px">
+          「🚀 A级催化剂信号」与「🎯 催化剂 Alert·A级」两封邮件都要求
+          <b>tier=A 且 status=open</b>，该口径已连续 {days_txt} 没有新候选，
+          因此这两封邮件都不会发出。<b>这不是发送故障</b>——请勿按 SMTP/调度问题排查。
+        </div>
+      </div>
+
+      <div style="margin-top:16px;font-size:13px;font-weight:600;color:#111827">
+        候选供给现状
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-top:6px;
+                    background:#f9fafb;border-radius:8px">{tr}</table>
+
+      <div style="margin-top:16px;font-size:13px;font-weight:600;color:#111827">
+        交叉判定（用于区分「候选为 0」与「管道已死」）
+      </div>
+      <table style="width:100%;border-collapse:collapse;margin-top:6px;
+                    background:#f9fafb;border-radius:8px">{tr_cross}</table>
+      <div style="font-size:12px;color:#6b7280;margin-top:6px">
+        若「重大事件通报」仍在近期发送，说明摄入、分级、发信链路均正常，
+        问题只在 A 级候选供给。
+      </div>
+
+      <div style="margin-top:16px;font-size:13px;font-weight:600;color:#111827">
+        常见原因（按历史发生频次）
+      </div>
+      <ol style="font-size:12.5px;color:#374151;line-height:1.7;margin:6px 0 0 0;
+                 padding-left:20px">
+        <li><b>上游供给下降</b>：`biz.asset_catalyst` 日入库量塌陷 ⇒ 分母变小。
+            核对上面的「上游催化剂入库」两列与历史同期。</li>
+        <li><b>高分信号全被判为「已定价」</b>：`resonance_state='confirmed'` 会按设计
+            降级为 `status='watch'`（依据：confirmed 72h 前瞻超额 -2.16%，n=47），
+            被 `status='open'` 排除。核对 `a_new_7d` 是否 &gt; 0 —— 若 &gt; 0 但候选仍为 0，
+            基本就是这一条。</li>
+      </ol>
+
+      <div style="margin-top:16px;font-size:13px;font-weight:600;color:#111827">
+        排查 SQL（可直接复制）
+      </div>
+      <pre style="background:#111827;color:#e5e7eb;padding:12px;border-radius:8px;
+                  font-size:11.5px;overflow-x:auto;line-height:1.6">
+-- 1) 高分信号为何没进 open
+SELECT signal_id, asset_id, tier, status, composite_score, resonance_state, created_at
+FROM biz.catalyst_signal
+WHERE created_at &gt; NOW() - INTERVAL '7 days' AND composite_score &gt;= 80
+ORDER BY created_at DESC;
+
+-- 2) 上游供给趋势（按发布日）
+SELECT COALESCE(published_at, created_at)::date AS d, COUNT(*)
+FROM biz.asset_catalyst
+WHERE COALESCE(published_at, created_at) &gt; NOW() - INTERVAL '14 days'
+GROUP BY 1 ORDER BY 1;</pre>
+
+      <div style="margin-top:18px;font-size:11px;color:#9ca3af;text-align:center;
+                  line-height:1.6">
+        本邮件为<b>运维告警</b>（notification_type=channel_silence），24h 内至多一封。<br>
+        按 2026-09-16 <code>058c246</code> 的决议，空窗期<b>不</b>向用户发送「今日无信号」邮件。<br>
+        阈值可通过环境变量 <code>CATALYST_SILENCE_DAYS</code> 调整（当前 {threshold} 天）。
+      </div>
+    </div>
+    """
+
+
+def send_channel_silence_alert(conn, days: int | None = None) -> dict:
+    """A 级 Alert 通道长期无新候选时，发一封运维告警邮件。
+
+    与 `send_slow_digest` 完全分开：独立 `notification_type`（`channel_silence`）
+    ⇒ 独立去重，不影响 A 级 Alert 自身的 24h 去重位。
+
+    Args:
+        conn: 数据库连接
+        days: 空转阈值（天），缺省取 `CHANNEL_SILENCE_DAYS`
+              （env `CATALYST_SILENCE_DAYS`，默认 3）
+
+    Returns:
+        dict: {sent, skipped, failed, reason, days_silent, last_a_open_at}
+    """
+    try:
+        ensure_notification_table(conn)
+    except Exception as e:
+        logger.warning("确保通知表存在失败: %s", e)
+
+    threshold = CHANNEL_SILENCE_DAYS if days is None else int(days)
+    try:
+        snap = _channel_silence_snapshot(conn)
+    except Exception as e:
+        logger.warning("通道静默快照查询失败: %s", e, exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 0,
+                "reason": f"快照查询失败: {e}",
+                "days_silent": None, "last_a_open_at": None}
+
+    last_at = snap.get("last_a_open_at")
+    days_silent = None
+    if last_at is not None:
+        days_silent = (datetime.now(timezone.utc) - last_at).total_seconds() / 86400.0
+    base = {"days_silent": None if days_silent is None else round(days_silent, 2),
+            "last_a_open_at": last_at}
+
+    # 通道正常 → 既不发信，也不占用去重位（避免把正常期的窗口浪费掉）
+    if days_silent is not None and days_silent < threshold:
+        return {**base, "sent": 0, "skipped": 1, "failed": 0,
+                "reason": f"通道正常：最近候选 {days_silent:.1f} 天前（阈值 {threshold} 天）"}
+
+    subject = (f"⚠️ 催化剂 A 级 Alert 通道已空转 {int(days_silent)} 天（无新候选）"
+               if days_silent is not None
+               else "⚠️ 催化剂 A 级 Alert 通道从未产生过候选")
+    if not _try_acquire_send_lock(conn, SENTINEL_CHANNEL_SILENCE_SIGNAL_ID,
+                                  NTYPE_CHANNEL_SILENCE, None, subject):
+        return {**base, "sent": 0, "skipped": 1, "failed": 0,
+                "reason": "24h 内已告警过，跳过"}
+
+    try:
+        body = _build_channel_silence_html(snap, threshold, days_silent)
+    except Exception as e:
+        logger.warning("通道静默告警渲染失败: %s", e, exc_info=True)
+        return {**base, "sent": 0, "skipped": 0, "failed": 1,
+                "reason": f"渲染失败: {e}"}
+
+    ok, msg = _send_email(subject, body)
+    _mark_sent(conn, SENTINEL_CHANNEL_SILENCE_SIGNAL_ID, NTYPE_CHANNEL_SILENCE,
+               None, subject, status="sent" if ok else "failed",
+               error_msg=None if ok else msg)
+    return {**base, "sent": 1 if ok else 0, "skipped": 0,
+            "failed": 0 if ok else 1, "reason": msg}
 
 
 # =====================================================================

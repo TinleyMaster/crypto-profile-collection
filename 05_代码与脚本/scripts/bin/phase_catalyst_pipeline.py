@@ -109,6 +109,7 @@ from catalyst.notifier import (
     send_fast_alerts_for_new_signals,
     send_major_event_alerts,
     send_slow_digest,
+    send_channel_silence_alert,
 )
 from catalyst.catalyst_trace import trace_step, reset as trace_reset, summary as trace_summary, set_verbose as trace_set_verbose
 
@@ -2187,6 +2188,17 @@ def main() -> int:
                     print(f"  📢 重大事件: 发送 {major_result['sent']} 条通报")
                 if major_result["failed"] > 0:
                     print(f"  ⚠️  重大事件发送失败: {major_result['failed']} 条")
+
+            # 4.6 A 级 Alert 通道静默可观测（运维侧告警，不发空窗邮件——
+            #     维持 058c246 决议；只当通道空转 ≥ 阈值天数时告警运维）
+            if args.no_alert:
+                print("  🔕 通道静默: 跳过（--no-alert）")
+            else:
+                silence_result = send_channel_silence_alert(conn)
+                if silence_result["sent"] > 0:
+                    print(f"  🔕 通道静默: 已发运维告警（空转 {silence_result.get('days_silent')} 天）")
+                elif silence_result["failed"] > 0:
+                    print(f"  ⚠️  通道静默告警失败: {silence_result.get('reason')}")
 
             print()
             print("慢通道完成 ✓")

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import date, timedelta
@@ -32,7 +33,15 @@ from pathlib import Path
 # ── 路径兼容 ──
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-sys.path.insert(0, str(SCRIPT_DIR.parent / "scripts" / "src"))
+# scripts/src 兼容双布局（与 scheduler.py 一致）：
+#   prod 扁平: /app/backtest_opportunities.py → /app/scripts/src
+#   本地源码: .../05_代码与脚本/workbench/ → ../scripts/src
+if os.path.exists("/app/scripts/src"):
+    _SCRIPTS_SRC = Path("/app/scripts/src")
+else:
+    _SCRIPTS_SRC = SCRIPT_DIR.parent / "scripts" / "src"
+if str(_SCRIPTS_SRC) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_SRC))
 
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection

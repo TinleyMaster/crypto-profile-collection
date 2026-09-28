@@ -2183,3 +2183,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **与 D3 的关系**：D3 是**独立派生** `diff_streak_up` 机会（变化榜连板独立成信号）；U-A 是在**既有暴涨/暴跌/量价齐升机会**里标注连板并小幅加成。两路互不冲突（信号层双保险）。
 - **未做 / 边界（须留档）**：① **U-B（`M5_daily_diff` 渲染）未做** —— `_build_daily_diff_brief` 每次仍计算但不消费，属已知死代码，待产品拍板是否新增「📊 每日变化榜」模块；② 阈值 3 为工单/与 D3 口径一致的拍板值，非回测校准；③ 加成 cap 8 / per_hit 2 为经验值（工单建议档）；④ live 只读复算基于沙箱抓取的 09-27 `daily_diff_summary`，非直连 prod DB。
 - **待部署**：`macro_market.py` 需容器 **redeploy** 后次日早报机会文案生效。
+
+### U-B：复活早报「每日变化榜」模块（工单_U-B复活早报变化榜模块_M5_daily_diff_2026-09-28，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\工单_U-B复活早报变化榜模块_M5_daily_diff_2026-09-28.md`。**零 DDL、零迁移**；Q1~Q4 取工单建议（模块 1.5 / 7 分类 Top5 / 保留 ⭐⚠️ / 连板暂不做）。改动面：`send_daily_brief.py`（渲染层）+ `macro_market.py`（生产者，**工单原以为「数据已就绪、不改」——实测前提不成立**）+ 新探针。
+
+- **🔴 先纠正工单前提（物证级）**：工单称「`_build_daily_diff_brief` 已就绪、数据已进 brief」，实测**两处缺陷叠加** ⇒ M5 从来就是 `{}`：
+  1. **形态不匹配**：`db_stats.get_daily_diff_summary` 返回的是 `{ok,diff_date,available_sectors,available_tiers,categories:{cat:{up,down}}}`，旧 `_build_daily_diff_brief` 按「扁平 `{label:[items]}`」遍历该 dict ⇒ 命中 `available_sectors`（str 列表）并在 `it.get(...)` 处抛 `AttributeError`（本地复现坐实）。旧 `CATEGORY_LABELS` 的键 `price_change_24h_down` 也不存在（真实是 `price_change_24h` 的 `up/down` 两侧）。
+  2. **导入+调用双错**（线 5518 preload 与 8862 兜底同款）：`from crypto_research.db import db_stats` —— 该模块**不存在**（`db_stats.py` 在 workbench 根 / 容器 `/app`），必然 `ImportError` 被 `except` 吞掉；且 `get_daily_diff_summary` **自开连接池、不接收 conn**，旧码却传了 `conn`（会被当 `diff_date`）。
+- **修复 1（生产者 `macro_market._build_daily_diff_brief`）**：按**嵌套 categories** 拍平为展示顺序 7 榜（涨/跌幅榜来自同一 `price_change_24h` 的 up/down；成交量异动取放量、缺则缩量；**即将解锁取 `unlock_7d` 的 `down` 侧**——生成器口径落 direction='down'，实测 up=0/down=20），每条透传 `category`/`direction` 并打 ⭐/⚠️；保留扁平输入兼容（注入/旧形态）。空/异常一律返回 `{}`。
+- **修复 2（导入与调用，两处）**：`from crypto_research.db import db_stats` → `import db_stats`；`get_daily_diff_summary(conn)` → `get_daily_diff_summary()`。**连带效果（须留档）**：5518 preload 修复后 `overview["daily_diff_summary"]` 首次真正落地 ⇒ **D3 `derive_board_opportunities`(FEAT-SIGNAL-SRC-003) 同步复活**（该特性此前因同一 ImportError 一直空转）。prod 只读实测 09-27 阈值 3 下派生 **n=3（1 long / 2 short）**，量级很小、属预期。
+- **渲染层（`send_daily_brief.py`）**：新增 `import html`；`_fmt_diff_value`（量价齐升/赛道轮动=X.X 分、**即将解锁=美元金额**（`_fmt_mcap`，避免渲染成 `621274868.38%`）、其余=百分比）；`_render_daily_diff_html(brief)`（空/非 dict/无条目 → `""`；7 榜固定序 + 未知键追加；⭐/⚠️ 标记 + 数值；纯展示不查库）；`render_brief_html` 在**模块 1.5**（大盘脉搏之后、赛道轮动之前）`html_parts.append(_render_daily_diff_html(brief))`。
+- **三通道验收**：
+  - **源码/探针**：新增 `workbench/test_send_daily_brief_m5.py` **29/0**（嵌套拍平/不抛异常/7 榜序/Top5/⭐⚠️/category·direction 透传/空兜底/扁平兼容/数值口径含解锁金额/渲染空串与正常/接线位次/端到端 `render_brief_html` 含「每日变化榜」且在赛道轮动之前）。
+  - **prod 只读（通道2/3）**：`get_daily_diff_summary()` 实测 7 类（含 `tvl_surge_24h`，未纳入 7 榜；`unlock_7d` up=0/down=20）；`_build_daily_diff_brief` 产出 **7 榜全非空**；真库渲染预览：`价格涨幅榜 +50.81%… / 价格跌幅榜 -22.33%… / 成交量异动 +829.20%… / 量价齐升 99.6 分… / 赛道轮动 128.8 分… / 即将解锁 $621.3M… / 市值变化榜 +80.07%…`。
+  - **回归**：workbench 全量 **53 个 `test_*.py` 全部 exit=0**；`py_compile` 3/3。
+- **未做 / 边界（须留档）**：① **`tvl_surge_24h` 未纳入**（工单只列 7 类、网页端 `DIFF_CATEGORY_LABELS` 也无此键）——数据存在但早报未展示，如需可后续加；② **连板标注（Q4）未做**（U-A 已在信号层落地）；③ `_fmt_diff_value` 对 `volume_surge_24h/down`（缩量）沿用网页端不显 `+`（值为正、语义为缩量），未另造口径；④ 存量快照无 `M5_daily_diff` 内容，需 **redeploy + 次日 build** 才有真数据（`push ≠ 线上生效`）；⑤ D3 复活属本次连带修复，若产品认为需单独评估请回退 5518 处改动（仅影响 D3，不影响 M5——M5 走 8862 兜底）。
+- **待部署**：`send_daily_brief.py` / `macro_market.py` 需容器 **redeploy**，次日 08:30 快照 + 09:00 早报生效。

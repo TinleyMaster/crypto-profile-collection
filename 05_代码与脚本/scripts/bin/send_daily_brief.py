@@ -11,6 +11,7 @@ scheduler.py 注册：daily_brief_email（09:00 Asia/Shanghai，在 daily_brief_
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import re
 import sys
@@ -217,6 +218,91 @@ def _render_liquidation_row(liq: dict) -> str:
         'font-size:10.5px;color:#334155">'
         f'💥 {head}'
         f'<div style="font-size:9px;color:#94a3b8;margin-top:2px">{foot}</div>'
+        '</div>'
+    )
+
+
+# ── U-B：每日变化榜（消费 M5_daily_diff）────────────────────────────────
+_DIFF_CATEGORY_ORDER = (
+    "价格涨幅榜", "价格跌幅榜", "成交量异动", "量价齐升",
+    "赛道轮动", "即将解锁", "市值变化榜",
+)
+_DIFF_CATEGORY_COLOR = {"价格涨幅榜": "#ef4444", "价格跌幅榜": "#22c55e"}
+
+
+def _fmt_diff_value(item: dict) -> str:
+    """单条变化榜数值：量价齐升/赛道轮动为综合分（X.X 分）、即将解锁为美元金额，其余为百分比。
+
+    口径依据各榜 `metric_label` / 生成器 SQL：
+      - price_change_24h / volume_surge_24h（量/市值比）/ market_cap_mover → 百分比；
+      - price_volume_surge / sector_rotation → 综合分；
+      - unlock_7d → 7 天解锁价值（USD，非百分比，避免渲染成 `621274868.38%`）。
+    缺失 metric_value 显示「—」（缺失≠0），metric_label 仅作兜底。
+    """
+    v = item.get("metric_value")
+    if v is None:
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return html.escape(str(item.get("metric_label") or "—"))
+    if item.get("category") in ("price_volume_surge", "sector_rotation"):
+        return f"{f:.1f} 分"
+    if item.get("category") == "unlock_7d":
+        return _fmt_mcap(f)
+    sign = "+" if item.get("direction") == "up" else ""
+    return f"{sign}{f:.2f}%"
+
+
+def _render_daily_diff_html(brief: dict) -> str:
+    """渲染「📈 每日变化榜」区块（消费 `brief["M5_daily_diff"]`）。
+
+    - 空 dict / 非 dict / 无任何条目 → 返回空串（不产生空壳，不破坏其他模块）。
+    - 7 分类按固定顺序渲染，未知类别追加在后；各榜最多展示已截断的 Top5。
+    - 每条 = ⭐ 高亮 / ⚠️ 高危 标记 + symbol + 数值（格式同网页端变化榜）。
+    - 纯展示：不查库、不调 AI（数据已由 `macro_market._build_daily_diff_brief` 组装进 brief）。
+    """
+    m5 = brief.get("M5_daily_diff")
+    if not isinstance(m5, dict) or not m5:
+        return ""
+    keys = [k for k in _DIFF_CATEGORY_ORDER if k in m5] + [
+        k for k in m5 if k not in _DIFF_CATEGORY_ORDER
+    ]
+    rows = []
+    for label in keys:
+        items = m5.get(label)
+        if not isinstance(items, list) or not items:
+            continue
+        color = _DIFF_CATEGORY_COLOR.get(label, "#334155")
+        chips = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sym = html.escape(str(it.get("symbol") or "?"))
+            marks = ("⭐" if it.get("is_highlight") else "") + ("⚠️" if it.get("is_risk") else "")
+            chips.append(
+                '<span style="display:inline-block;margin:1px 8px 1px 0;font-size:10.5px;color:#334155">'
+                f'{marks}<b>{sym}</b> '
+                f'<span style="color:{color};font-weight:600">{_fmt_diff_value(it)}</span>'
+                '</span>'
+            )
+        if not chips:
+            continue
+        rows.append(
+            '<div style="font-size:11px;color:#475569;line-height:1.9">'
+            f'<span style="font-weight:700;color:#0f172a">{html.escape(str(label))}</span>'
+            '<span style="color:#94a3b8">｜</span>' + "".join(chips) + '</div>'
+        )
+    if not rows:
+        return ""
+    return (
+        '<div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;'
+        'box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #0ea5e9">'
+        '<div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">'
+        '📈 每日变化榜'
+        '<span style="font-size:10px;color:#94a3b8;font-weight:400;margin-left:6px">'
+        '⭐ 高亮信号 · ⚠️ 高危信号｜各榜 Top5（数据源：每日变化榜快照）</span></div>'
+        + "".join(rows) +
         '</div>'
     )
 
@@ -1394,6 +1480,11 @@ def render_brief_html(brief: dict) -> str:
         {_diff_note_html}
       </div>
     """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 1.5：📈 每日变化榜（U-B：消费 M5_daily_diff，缺失时整块不出现）
+    # ════════════════════════════════════════════════════════
+    html_parts.append(_render_daily_diff_html(brief))
 
     # ════════════════════════════════════════════════════════
     # 模块 2：🏭 赛道轮动（功能分类 12 赛道 + 领涨币）

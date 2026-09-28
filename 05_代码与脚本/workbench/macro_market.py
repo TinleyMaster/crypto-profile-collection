@@ -5513,15 +5513,15 @@ def score_opportunities(overview: dict) -> dict:
     # 如果 overview 里没有，从 DB 补拉
     if not overview.get("daily_diff_summary"):
         try:
-            from crypto_research.db.conn import get_connection
-            from crypto_research.config import get_settings
-            from crypto_research.db import db_stats
+            # U-B（2026-09-28）：db_stats 在 workbench 根目录（容器内 /app），
+            # 旧写法 `from crypto_research.db import db_stats` 不存在该模块 ⇒ ImportError
+            # 被 except 吞掉 ⇒ overview 永远拿不到变化榜（D3 变化榜信号 / M5 一并哑火）。
+            # 且 get_daily_diff_summary 自开连接池，不接收 conn 参数（旧码把 conn 当 diff_date）。
+            import db_stats
 
-            settings = get_settings(require_database=True)
-            with get_connection(settings.database_url) as conn:
-                diff_data = db_stats.get_daily_diff_summary(conn)
-                if diff_data and diff_data.get("ok"):
-                    overview["daily_diff_summary"] = diff_data
+            diff_data = db_stats.get_daily_diff_summary()
+            if diff_data and diff_data.get("ok"):
+                overview["daily_diff_summary"] = diff_data
         except Exception:
             pass
 
@@ -8837,24 +8837,29 @@ def _fetch_fallback_recommendations(limit: int = 8) -> list[dict]:
 
 def _build_daily_diff_brief(today: dict, highlights: list,
                             risk_signals: list) -> dict:
-    """M5 每日变化榜早报精简版（BRIEF-OPT-002）。
+    """M5 每日变化榜早报精简版（BRIEF-OPT-002 / U-B）。
 
     从 overview 的 daily_diff_summary 里取各分类 Top5，
     并给每条打上 ⭐ 高亮信号 / ⚠️ 高危信号 标记。
-    如果 overview 里没有变化榜数据（降级场景），从 DB 直接取。
-    """
-    diff_data = today.get("daily_diff_summary") or {}
-    if not diff_data:
-        try:
-            from crypto_research.db.conn import get_connection
-            from crypto_research.config import get_settings
+    overview 里没有变化榜数据（降级场景）时从 DB 直接取。
 
-            settings = get_settings(require_database=True)
-            with get_connection(settings.database_url) as conn:
-                from crypto_research.db import db_stats
-                diff_data = db_stats.get_daily_diff_summary(conn)
+    ⚠️ 数据形态（2026-09-28 U-B 修正）：`db_stats.get_daily_diff_summary` 返回的是
+    `{"ok":…, "diff_date":…, "available_sectors":[…], "categories":{cat:{"up":[…],"down":[…]}}}`。
+    旧实现按「扁平 {label: [items]}」遍历该 dict，会命中 available_sectors（str 列表）并在
+    `it.get(...)` 处抛 AttributeError ⇒ M5 从未产出过有效数据（且调用方整体崩在组装层）。
+    现按嵌套形态拍平为展示顺序的 7 个榜，并保留扁平输入兼容（注入测试/旧形态）。
+    任何异常/空数据都返回 {}（渲染层空串跳过，不破坏其他模块）。
+    """
+    raw = today.get("daily_diff_summary")
+    if not isinstance(raw, dict) or not raw:
+        raw = {}
+        try:
+            # U-B：db_stats 位于 workbench 根（容器内 /app），不是 crypto_research.db；
+            # get_daily_diff_summary 自开连接池、不接收 conn（详见 _build_daily_diff_brief docstring）。
+            import db_stats
+            raw = db_stats.get_daily_diff_summary() or {}
         except Exception:
-            diff_data = {}
+            raw = {}
 
     highlight_syms: set[str] = set()
     risk_syms: set[str] = set()
@@ -8874,30 +8879,54 @@ def _build_daily_diff_brief(today: dict, highlights: list,
             risk_syms.add(tgt)
 
     CATEGORY_LIMIT = 5
-    CATEGORY_LABELS = {
-        "price_change_24h": "价格涨幅榜",
-        "price_change_24h_down": "价格跌幅榜",
-        "volume_surge_24h": "成交量异动",
-        "price_volume_surge": "量价齐升",
-        "sector_rotation": "赛道轮动",
-        "unlock_7d": "即将解锁",
-        "market_cap_mover": "市值变化榜",
-    }
+    cats = raw.get("categories") if isinstance(raw, dict) else None
+
+    # (展示标签, 条目列表, 类别键, 方向) —— 类别键/方向供渲染层按品类格式化数值。
+    ordered: list[tuple[str, list, str, str]] = []
+    if isinstance(cats, dict) and cats:
+        def _side(cat: str, side: str) -> list:
+            data = cats.get(cat)
+            if not isinstance(data, dict):
+                return []
+            items = data.get(side)
+            return items if isinstance(items, list) else []
+
+        ordered = [
+            ("价格涨幅榜", _side("price_change_24h", "up"), "price_change_24h", "up"),
+            ("价格跌幅榜", _side("price_change_24h", "down"), "price_change_24h", "down"),
+            # 成交量异动：放量为主，无放量时缩量兜底
+            ("成交量异动", _side("volume_surge_24h", "up") or _side("volume_surge_24h", "down"),
+             "volume_surge_24h", "up"),
+            ("量价齐升", _side("price_volume_surge", "up"), "price_volume_surge", "up"),
+            ("赛道轮动", _side("sector_rotation", "up"), "sector_rotation", "up"),
+            # 解锁抛压：生成器落 direction='down'（无「涨」的含义），故取 down、up 兜底
+            ("即将解锁", _side("unlock_7d", "down") or _side("unlock_7d", "up"),
+             "unlock_7d", "down"),
+            ("市值变化榜", _side("market_cap_mover", "up"), "market_cap_mover", "up"),
+        ]
+    else:
+        # 兼容扁平输入：{label: [items]}
+        for k, v in raw.items():
+            if isinstance(v, list):
+                ordered.append((str(k), v, str(k), ""))
 
     result: dict[str, list[dict]] = {}
-    for cat, items in (diff_data or {}).items():
-        if not items or not isinstance(items, list):
+    for label, items, cat_key, direction in ordered:
+        if not items:
             continue
-        top = items[:CATEGORY_LIMIT]
         tagged = []
-        for it in top:
+        for it in items[:CATEGORY_LIMIT]:
+            if not isinstance(it, dict):
+                continue
             sym = str(it.get("symbol") or "").upper()
             entry = dict(it)
             entry["is_highlight"] = sym in highlight_syms
             entry["is_risk"] = sym in risk_syms
+            entry["category"] = it.get("category") or cat_key
+            entry["direction"] = it.get("direction") or direction
             tagged.append(entry)
-        label = CATEGORY_LABELS.get(cat, cat)
-        result[label] = tagged
+        if tagged:
+            result[label] = tagged
 
     return result
 

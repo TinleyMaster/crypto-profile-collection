@@ -1695,7 +1695,7 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         flags["vol_p75_neg"] = p75 < 0
         _add("bad" if p75 < 0 else "good",
              f"{'逆风' if p75 < 0 else ''}量比：{float(vr):.2f}x 落 {vlabel} 档"
-             f"（档位经验值·跨币共享）〔{_stat(vrow)} · 该档 24h P75 {p75:+.2f}%〕", "vol")
+             f"（档位经验值·跨币共享）〔{_stat(vrow)} · 该档 24h 收益 P75 {p75:+.2f}%〕", "vol")
     else:
         if vr is None:
             _add("info", "量比：n/a", "vol")
@@ -1765,16 +1765,18 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         tone = "pass"
         note = (f"顺风 {goods} 维、逆风 {bads} 维、RR {rr:.2f} ≥ {REASON_RR_MIN:g} "
                 "⇒ 【可开】")
+    elif goods == 0 and bads == 0:
+        # N-11A4-L：四槽全 info（无价方向 + 费率未覆盖 + 量比档样本不足）⇒ 无可用维度。
+        # 原文案「0 维逆风、无顺风项 ⇒ 【不建议新开】」自相矛盾（0 逆风却「不建议」）且
+        # 零理由 ⇒ 改「观望」+ 明示数据缺失（真库近 7 天 0 命中，属理论边界）。
+        tone = "watch"
+        note = "无可用维度（数据缺失）⇒ 【观望】"
     elif goods == 0:
         tone = "avoid"
         note = f"{bads} 维逆风、无顺风项 ⇒ 【不建议新开】"
-    elif rr is not None and rr < 1.0:
-        tone = "watch"
-        note = f"{goods} 顺 {bads} 逆，但 RR {rr:.2f} < 1 ⇒ 【观望】"
     else:
-        # 复验 N-11A4-C（复验_告警邮件N-0928系列_11a49b1）：拒绝时**必须披露未达条件**
-        # —— 原实现落到兜底只印「N 顺 M 逆 ⇒ 【观望】」，会出现「全屏无 ✗ 却拒绝开仓」
-        # （量比档样本不足 / P75=0 等），与「列出理由才让人放心」的产品目标相反。
+        # 复验 N-11A4-C/M：拒绝时**必须披露未达条件**。原 `rr < 1` 单列支只印 RR、不披露
+        # P75/维数（口径不一致）⇒ 合并进本支，统一由 unmet 列表披露（含 RR<1 的情形）。
         tone = "watch"
         unmet: list[str] = []
         if rr is None:
@@ -1782,9 +1784,9 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         elif rr < REASON_RR_MIN:
             unmet.append(f"RR {rr:.2f} < {REASON_RR_MIN:g}")
         if ret_p75 is None:
-            unmet.append("该档 24h P75 不可得")
+            unmet.append("该档 24h 收益 P75 不可得")
         elif ret_p75 <= 0:
-            unmet.append(f"该档 24h P75 {ret_p75:+.2f}% ≤ 0")
+            unmet.append(f"该档 24h 收益 P75 {ret_p75:+.2f}% ≤ 0")
         if goods < 2:
             unmet.append(f"顺风维数 {goods} < 2")
         if bads > 1:
@@ -1886,6 +1888,7 @@ def _render_batch_summary(items: list[dict], batch: dict | None,
     if out is not None:
         out["surge_shown"] = False
         out["summary_head_shown"] = False
+        out["batch_rows_shown"] = False
     if not batch:
         return ""
     ctx = batch.get("ctx") or {}
@@ -1902,7 +1905,7 @@ def _render_batch_summary(items: list[dict], batch: dict | None,
         watch_n = sum(1 for _, r in main if r["tone"] == "watch")
         avoid_n = sum(1 for _, r in main if r["tone"] == "avoid")
         head = (f"📊 本批可开性：主池 {len(main)} 币中 {pass_n} 币通过"
-                f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h P75 > 0，"
+                f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h 收益 P75 > 0，"
                 f"按币级独立维度计）"
                 f" · {watch_n} 币观望"
                 f" · {avoid_n} 币不建议")
@@ -1957,6 +1960,8 @@ def _render_batch_summary(items: list[dict], batch: dict | None,
             out["surge_shown"] = True
     if not lines:
         return ""
+    if out is not None:
+        out["batch_rows_shown"] = True
     return ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
             + "<br>".join(lines) + "</p>")
 
@@ -3226,8 +3231,8 @@ def _render_alert_email(items: list[dict],
               "「其中 N/M 笔流向交易所」= 流入交易所（潜在抛压）的笔数）、"
               "KOL 取 direction 的 long/short；未关联资产的催化剂/KOL 两段不渲染明细"
               "（无从查询 ≠ 0，与「共振」行的 n/a 一致）；"
-              "「历史同场景」= 同场景已告警信号的方向对齐后验（中位/胜率/样本量；"
-              "「按场景跨币种聚合」，同一场景的所有币共用同一组数字，与具体币无关；"
+              "「历史同象限」= 同象限（价方向 × OI 方向）已告警信号的方向对齐后验（中位/胜率/样本量；"
+              "「按象限跨币种聚合」，同一象限的所有币共用同一组数字，与具体币无关；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × |OI 增速|，BRK 无 OI 增速时取 "
               "3.0 等当量；新鲜共振方向与结论一致 ×1.15 / 相悖 ×0.75，CVD 同向 ×1.05），"
@@ -3256,14 +3261,22 @@ def _render_alert_email(items: list[dict],
                      "样本不足时标「样本不足」）；判读按「币级独立维度」计数"
                      "（③④ 同属量比档，合并为 1 维；档位经验值为跨币共享、非本币特异性）；"
                      "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
-                     "（mfe_24h）P75（乐观上界、非保证能到；判「可开」还须该档 24h P75 > 0）；"
+                     "（mfe_24h）P75（乐观上界、非保证能到；判「可开」还须该档 24h 收益 "
+                     "P75 > 0）；"
                      "「⇒ 判读」= 由槽位派生的开仓建议"
-                     f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h P75 > 0 判"
+                     f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h 收益 "
+                     f"P75 > 0 判"
                      "「可开」，RR <1 判「观望」，零顺风判「不建议」，BRK 因维度缺失统一进"
-                     "「观察档」）；")
+                     "「观察档」；判「观望」时以「（可开未达：…）」逐项列出未达条件）；")
     # N-11A4-F：本批可开性锚点只在正文实际渲染该行时挂（原随 has_reason 无条件输出 ⇒
     # 整批全 BRK（main 为空）时正文无该行、图例却印，与 N-0928-6 同类多报）。
-    legend_summary = "「📊 本批可开性」= 本封全批汇总；"
+    legend_summary = ("「📊 本批可开性」= 本封全批汇总；"
+                      "「主池共性逆风」= 主池中无空头付费顺风（费率>0 或缺失）的币数/主池币数；")
+    # N-EML-2：批级行的图例锚点（原先正文出现、图例零解释）。
+    legend_batch = ("「当前批级环境」= 近 3 日滚动（缺则当日）的 1h 胜率 vs 盈亏平衡、PF 与"
+                    "当日边缘桶；「边缘桶」= 当日占比高、胜率低于盈亏平衡的桶；"
+                    "「近 3 日滚动」= 含当日的近 3 个有告警日均值；"
+                    "「盈亏平衡」= 由赔率推出的胜率门槛 1/(1+赔率)。")
     legend_surge = ("「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个有告警日均值 ×1.5"
                     "（「当日」为日报日、非本封批次；历史此类批次平均收益显著为负，"
                     "属批级风险提示）。")
@@ -3273,6 +3286,8 @@ def _render_alert_email(items: list[dict],
         legend += legend_reason
         if _summary_out.get("summary_head_shown"):
             legend += legend_summary
+        if _summary_out.get("batch_rows_shown"):
+            legend += legend_batch
         if _summary_out.get("surge_shown"):
             legend += legend_surge
     legend += "</p>"

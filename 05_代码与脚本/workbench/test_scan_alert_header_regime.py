@@ -603,8 +603,8 @@ check("✓ 资金一致：CVD up 与价同向〔同档 n=156 · 24h 均值 +2.12
 check("✓ 顺风费率：费率 -0.0280%（空头付费）〔同档 n=54 · 24h 均值 +6.57% · 止损率 20.4%〕"
       in _h1, "② 槽按费率符号取「顺风」档（文案为「空头付费」而非「多头拥挤」）")
 check("量比：3.00x 落 2.5-4 档（档位经验值·跨币共享）〔同档 n=30 · 24h 均值 +1.50%"
-      " · 止损率 30.0% · 该档 24h P75 +3.00%〕" in _h1,
-      "③ 槽印该量比档 24h P75 + 同档统计 + 跨币共享标注（N-8702-C/N-0928-1）")
+      " · 止损率 30.0% · 该档 24h 收益 P75 +3.00%〕" in _h1,
+      "③ 槽印该量比档 24h 收益 P75 + 同档统计 + 跨币共享标注（N-8702-C/N-0928-1/N-EML-1）")
 check(f"参考目标 {sd._fmt_num(0.070730 * 1.16, 6)}"
       f"（同档历史最大有利偏移 P75 +16.00%，为乐观上界、非保证能到；档位经验值·跨币共享；"
       f"同档 n=30 · 24h 均值 +1.50% · 止损率 30.0%）⇒ RR 2.00" in _h1,
@@ -635,7 +635,7 @@ check(_r3["tone"] == "avoid" and _r3["goods"] == 0,
 check("✗ 无费率顺风：费率 +0.0050%（无空头付费顺风）" in _h3r,
       "费率 >0 文案为「无空头付费顺风」（不得写成「多头拥挤」）")
 check("✗ 逆风量比：7.00x 落 >6 档（档位经验值·跨币共享）〔同档 n=50 · 24h 均值 -1.20%"
-      " · 止损率 35.0% · 该档 24h P75 -0.23%〕" in _h3r, "量比最高档标「逆风」+ 同档统计")
+      " · 止损率 35.0% · 该档 24h 收益 P75 -0.23%〕" in _h3r, "量比最高档标「逆风」+ 同档统计")
 check("⇒ 判读：3 维逆风、无顺风项 ⇒ 【不建议新开】" in _h3r, "逆风批次明确写「不建议新开」")
 
 print("\n【N-0928-1/5】判读按币级独立维度计数（③④ 同维合并；批级窗口不计入）")
@@ -661,9 +661,9 @@ check(_rneg["rr"] == 2.0 and _rneg["ret_p75"] == -1.0 and _rneg["tone"] != "pass
       f"tone={_rneg['tone']} rr={_rneg['rr']} ret_p75={_rneg['ret_p75']}")
 
 print("\n【N-11A4-C】判读兜底分支必须披露未达条件（不可「无理由地否决」）")
-check("可开未达" in sd._render_reason(_rneg) and "该档 24h P75 -1.00% ≤ 0"
+check("可开未达" in sd._render_reason(_rneg) and "该档 24h 收益 P75 -1.00% ≤ 0"
       in sd._render_reason(_rneg),
-      "ret_p75<0 ⇒ 兜底披露「可开未达：该档 24h P75 -1.00% ≤ 0」")
+      "ret_p75<0 ⇒ 兜底披露「可开未达：该档 24h 收益 P75 -1.00% ≤ 0」")
 # ret_p75==0：③ 打 ✓、无任何 ✗，但 P75>0 不成立 ⇒ 不得「零理由拒绝」
 _ctx_zero = _ctx()
 _ctx_zero["buckets"][("vol_ratio", "2.5-4")]["ret_p75"] = 0.0
@@ -671,19 +671,53 @@ _ctx_zero["buckets"][("vol_ratio", "2.5-4")]["mfe_p75"] = 16.0
 _rzero = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=3.0), _ctx_zero)
 _hzero = sd._render_reason(_rzero)
 check(_rzero["tone"] == "watch" and "可开未达" in _hzero
-      and "该档 24h P75 +0.00% ≤ 0" in _hzero,
+      and "该档 24h 收益 P75 +0.00% ≤ 0" in _hzero,
       "全屏无 ✗（3 顺 0 逆）但 P75=0 ⇒ 仍需披露未达条件（N-11A4-C 核心场景）")
 # 量比档样本不足（vrow=None，现实常态）⇒ RR 不可算，仍须给理由
 _rnone = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=1.0), _ctx1)
 _hnone = sd._render_reason(_rnone)
-check("可开未达" in _hnone and "RR 不可算" in _hnone and "P75 不可得" in _hnone,
-      "量比档样本不足（无 ✗、无 RR）⇒ 披露「RR 不可算…；该档 24h P75 不可得」")
+check("可开未达" in _hnone and "RR 不可算" in _hnone and "该档 24h 收益 P75 不可得" in _hnone,
+      "量比档样本不足（无 ✗、无 RR）⇒ 披露「RR 不可算…；该档 24h 收益 P75 不可得」")
 # 对照：「可开」分支本就列全条件，不得被兜底文案污染
 check("可开未达" not in _h1, "判「可开」时不出现「可开未达」")
 
 print("\n【N-11A4-B】批级单列分隔行有断言承重")
 check("—— 以下为批级（全批共享，不计入上列顺/逆风计数）——" in _h1,
       "批级窗口与币级槽之间有单列分隔行（原无断言 ⇒ 删除可逃逸）")
+
+print("\n【N-11A4-K】兜底披露的三个「主力」子项各有断言（RR<1.5 / 顺风维数 / 逆风维数）")
+_ctx_m = _ctx()
+_ctx_m["buckets"][("vol_ratio", "2.5-4")]["ret_p75"] = 2.0
+_ctx_m["buckets"][("vol_ratio", "2.5-4")]["mfe_p75"] = 11.0   # rr = 11/8 = 1.375
+_rm = sd._build_reason(_sig_r(cvd_dir="up", funding=0.000050, vol_ratio=3.0), _ctx_m)
+_hm = sd._render_reason(_rm)
+check(_rm["goods"] == 1 and _rm["bads"] == 2,
+      "构造 1 顺 2 逆（③ good ④ bad ⇒ 量比维记 bad）", f"{_rm['goods']}/{_rm['bads']}")
+check("RR 1.38 < 1.5" in _hm and "顺风维数 1 < 2" in _hm and "逆风维数 2 > 1" in _hm,
+      "兜底逐个披露 RR<1.5 / 顺风维数 / 逆风维数（删任一 unmet.append 本断言必红）",
+      _hm[-160:])
+_ctx_k2 = _ctx()
+# 仅 ① 顺风（费率未覆盖 → info；量比落 ctx 未含的 <2.5 档 → info）⇒ goods=1、bads=0
+_rk2 = sd._build_reason(_sig_r(cvd_dir="up", funding=None, vol_ratio=1.0), _ctx_k2)
+check(_rk2["goods"] == 1 and _rk2["bads"] == 0 and "顺风维数 1 < 2" in sd._render_reason(_rk2),
+      "单顺风（其余 info）⇒ 披露「顺风维数 1 < 2」")
+
+print("\n【N-11A4-L】avoid 分支在「0 维逆风」时不得自相矛盾（四槽全 info）")
+_rl = sd._build_reason(_sig_r(p_dir=None, cvd_dir=None, funding=None, vol_ratio=1.0), _ctx1)
+check(_rl["goods"] == 0 and _rl["bads"] == 0 and _rl["tone"] == "watch"
+      and "无可用维度（数据缺失）" in sd._render_reason(_rl),
+      "四槽全 info ⇒ 「无可用维度（数据缺失）⇒ 【观望】」（非「0 维逆风 ⇒ 不建议」）",
+      f"tone={_rl['tone']} g/b={_rl['goods']}/{_rl['bads']}")
+
+print("\n【N-11A4-M】rr<1 分支并入兜底披露（统一口径，不再只印 RR）")
+_ctx_rr = _ctx()
+_ctx_rr["buckets"][("vol_ratio", "2.5-4")]["ret_p75"] = -1.0
+_ctx_rr["buckets"][("vol_ratio", "2.5-4")]["mfe_p75"] = 4.0   # rr = 0.5 < 1
+_rr1 = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=3.0), _ctx_rr)
+_hrr1 = sd._render_reason(_rr1)
+check(_rr1["tone"] == "watch" and "可开未达" in _hrr1
+      and "RR 0.50 < 1.5" in _hrr1 and "该档 24h 收益 P75 -1.00% ≤ 0" in _hrr1,
+      "rr<1 时同样披露 RR<1.5 与 P75≤0（原该支只印 RR 不披露 P75）", _hrr1[-200:])
 
 print("\n【N-8702-A】24h 统计用自己的真分母（不虚报 1h n）/ 门槛单独生效")
 _ctx_a = _ctx()
@@ -726,7 +760,7 @@ _bitems = [{"signal": _sig_r(), "resonance": _res(), "reason": _r1},
             "resonance": _res(), "reason": _r5}]
 _hb = sd._render_alert_email(_bitems, REGIME, _batch)
 check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2 维、逆风 ≤1 维、RR ≥1.5 且该档"
-      " 24h P75 > 0，按币级独立维度计） · 0 币观望"
+      " 24h 收益 P75 > 0，按币级独立维度计） · 0 币观望"
       " · 0 币不建议 · BRK 观察 1 币" in _hb, "批级可开性摘要（BRK 单列观察档）")
 check("主池共性逆风：0/1 无空头付费顺风" in _hb, "主池共性逆风计数（N-8702-H 口径）")
 check("当前批级环境：近 3 日滚动 1h 胜率 52.5% ≥ 盈亏平衡 46.5%（PF 1.49）"
@@ -816,9 +850,16 @@ check("📊 本批可开性" not in _body_old, "无 batch ⇒ 不渲染批级摘
 check("**" not in _h1 and "**" not in _h5 and "**" not in _hb, "依据/摘要文案无 `**`")
 _leg_r = sd._render_alert_email(_bitems, REGIME, _batch).split("图例：")[1]
 for _lit in ("「🎯 开仓依据」", "「RR」", "非保证能到", "「📊 本批可开性」",
-             "「本批方向」", "币级独立维度", "乐观上界"):
+             "「本批方向」", "币级独立维度", "乐观上界", "可开未达"):
     check(_lit in _leg_r, f"图例声明 {_lit}")
 check("新鲜共振方向" in _leg_r, "图例强度条标「新鲜」共振方向（N-0928-7）")
+
+print("\n【N-EML-2/3】图例补批级行锚点 + 「象限」术语与卡片统一")
+for _lit in ("「当前批级环境」", "「边缘桶」", "「盈亏平衡」", "「近 3 日滚动」",
+             "「主池共性逆风」"):
+    check(_lit in _leg_r, f"图例补批级行锚点 {_lit}")
+check("「历史同象限」" in _leg_r and "「历史同场景」" not in _leg_r,
+      "图例术语与卡片一致（历史同象限，非历史同场景）")
 
 print("\n【开仓依据】AST —— 渲染层与 task_scan_alert 接线")
 _ast = ast.parse(open(sd.__file__, encoding="utf-8").read())

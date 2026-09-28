@@ -798,6 +798,26 @@ check("「📊 本批可开性」" not in _h_brk_only.split("图例：")[1],
 check("「🎯 开仓依据」" in _h_brk_only.split("图例：")[1],
       "全 BRK 批图例仍保留「🎯 开仓依据」锚点（依据段本身在渲染）")
 
+print("\n【N-A6-B】batch_rows_shown 守卫的负向断言（无批级行 ⇒ 图例不得挂批级锚点）")
+# 构造「无批级行」场景：ctx.daily 缺 roll3_*/win_1h（批级环境行不渲染）+ 全 BRK（main 空）
+_ctx_nowin = {"report_date": "2026-09-27",
+              "daily": {"report_date": "2026-09-27", "alerts_n": 0},
+              "buckets": {}, "prev_alert_avg": None}
+_batch_nowin = {"regime": _REG, "ctx": _ctx_nowin}
+_out_flag = {}
+_s_nowin = sd._render_batch_summary(_brk_only, _batch_nowin, _out_flag)
+check(_s_nowin == "" and _out_flag.get("batch_rows_shown") is False,
+      "无批级行时 summary 为空且 batch_rows_shown=False"
+      "（守卫改 `if True:` 或赋值提前到 `if not lines` 之前时本断言/下条必红）",
+      f"summary={_s_nowin!r} flag={_out_flag}")
+_h_nowin = sd._render_alert_email(_brk_only, REGIME, _batch_nowin)
+_leg_nowin = _h_nowin.split("图例：")[1]
+check("「当前批级环境」" not in _leg_nowin and "「边缘桶」" not in _leg_nowin
+      and "「主池共性逆风」" not in _leg_nowin,
+      "正文无批级行 ⇒ 图例不挂批级行锚点（N-A6-B 图例多报）")
+check("「🎯 开仓依据」" in _leg_nowin,
+      "依据段仍在渲染 ⇒ 图例保留「🎯 开仓依据」锚点（负向断言不误伤）")
+
 print("\n【N-8702-D】混合方向批必须披露环境受限（旧实现直接丢失）")
 _REG_mixed = {"tags": [], "long_fav": True, "short_fav": False,
               "long_block": [], "short_block": ["FGI72(Greed)"]}

@@ -1768,7 +1768,10 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
     elif goods == 0 and bads == 0:
         # N-11A4-L：四槽全 info（无价方向 + 费率未覆盖 + 量比档样本不足）⇒ 无可用维度。
         # 原文案「0 维逆风、无顺风项 ⇒ 【不建议新开】」自相矛盾（0 逆风却「不建议」）且
-        # 零理由 ⇒ 改「观望」+ 明示数据缺失（真库近 7 天 0 命中，属理论边界）。
+        # 零理由 ⇒ 改「观望」+ 明示数据缺失。
+        # 频率（复验 N-A6-A 更正）：**在会渲染开仓依据的 high 置信主池告警中近 7 天 0 命中**
+        # （属实；`_build_reason` 唯一调用点在 `task_scan_alert`，候选硬过滤 confidence='high'）；
+        # **全库**近 7 天有 7 例（均为 low 置信的 squeeze/SQZ_CHURN，走独立渲染器、不渲染本段）。
         tone = "watch"
         note = "无可用维度（数据缺失）⇒ 【观望】"
     elif goods == 0:

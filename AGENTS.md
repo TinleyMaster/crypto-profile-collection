@@ -2133,3 +2133,19 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **自测**：`test_macro_market_board_tier2.py` **36 → 51/0**（新增 G 组 15 条：G1 mcap_tier ±6、G2 vol 分位 +6/+3/0、G3 sector clamp 0/4/8、G4 总 cap 80、G5 缺字段保守 base、G6 未知 tier 0、G7 常量值域 + 小批次不分位、G8 缺值不抛异常/派生数不变）。**回归**：workbench 全量 **52 个 `test_*.py` 全部 exit=0**；`py_compile` 通过；`scheduler.py --list` 确认提醒 job 已移除。
 - **runtime 只读复验（R1 待办）**：`GET /api/daily-diff`（2026-09-27）⇒ ① `streak_start_ambiguous` 字段在响应中出现 **235 次**（接口已透出）；② `volume_surge_24h/up` 40 条中 `streak_start_ambiguous=True` 的 4 条（KII/SXT/ME/ACT，🔥20 天）——**不再是「11 条同值 🔥16 天」**，且前端连板榜 `if (item.streak_start_ambiguous) return` 将其排除。③ `/api/market/overview` 本轮多次超时未取到（重端点 + 沙箱网络），`diff_streak_up` 信号数未在本次核到。
 - **待部署**：`macro_market.py`（D3）/ `scheduler.py`（R3 提醒退役）需容器 **redeploy** 后生效。
+
+### 告警邮件开仓依据 N-0928 系列处置（审计_告警邮件_6413c1f上线首封_2026-09-28，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\审计_告警邮件_6413c1f上线首封_2026-09-28.md`。该审计**铁证**了 `6413c1f` 已上线（真库批喂真码重渲染 9787 字节、去时间戳逐字节相等），N-8702-A~H 线上全部生效；另开 **N-0928-1~7**。本轮按 §七 待拍板建议全部落地（1~6），**零 DDL、未改阈值、未改 tier/评分口径**（仅一处新增 `SUMMARY_DEDUP_*` 去重参数）。改动面：`scan_daemon.py` / 探针（+ `AGENTS.md`）。
+
+- **N-0928-1（P2）5 槽中 4 槽跨币共享 + ③④ 同维双计**：判读 `goods/bads` 改按**币级独立维度**计数（`_add` 带 `grp`/`coin`；①②③④ 为币级、③④ 同属量比档合并为 1 维、⑤ 批级）；某维度同时顺/逆 ⇒ 记逆（保守）。槽③ 文案补「（档位经验值·跨币共享）」。
+- **N-0928-2（P2）RR 是 mfe 乐观上界**：判「可开」新增必要条件 `ret_p75 > 0`；槽④ 文案标「为乐观上界」；图例同步。**物证效果**：MARSCOIN（`vol_ratio/4-6`，ret_p75=-2.44% 而 mfe_p75=+2.31%，RR=0.29）现被挡在【观望】。
+- **N-0928-3（P3）催化剂跨语言转载未合并**：新增摘要骨架去重 `_norm_summary()`（小写 + 仅字母/数字/汉字）+ `_is_similar_summary(key, day, seen)`（`difflib` 相似度 ≥ `SUMMARY_DEDUP_RATIO=0.9` **且** 同 UTC 日，长度差限制，短摘要 <20 不进层），在 `_get_resonance` 标题去重之后二次合并。**prod 只读实测**：MARSCOINUSDT `catalyst_dir` `{bearish:2,bullish:1}` → `{bearish:1,bullish:1}`（净空 1 → 净 0），两条近乎逐字相同的中/英利空合并为 1。
+- **N-0928-4（P3）槽⑤ 括注时间口径混搭**：1h 用 `roll3_*`、`24h 均值` 是单日 ⇒ 文案改「24h 均值（日报日 {report_date}）」。
+- **N-0928-5（P3）判读混加批级共享项**：批级窗口（⑤）退出 `goods/bads`，`_render_reason` 单列「—— 以下为批级（全批共享，不计入上列顺/逆风计数）——」；rr<1 分支文案由「【观望·不建议新开】」改「【观望】」与摘要用词统一。
+- **N-0928-6（P4）图例多报「⚠️ 告警量暴增」**：`_render_batch_summary(items, batch, out=None)` 回填 `out["surge_shown"]`，图例 `legend_surge` 仅在 `surge_shown` 时挂。
+- **N-0928-7（P4）图例「共振方向 ×1.15/×0.75」未标新鲜**：改「新鲜共振方向…」。
+- **探针**：`test_scan_alert_header_regime.py` **198 → 210/0**（新增 N-0928-1/2/4/5 槽位与计数、N-0928-3 摘要去重 4 例含跨日/低相似/过短、N-0928-6 图例暴增守卫、N-0928-7 图例新鲜）。回归全绿：`test_scan_edge_metrics`(71/0)、`test_scan_alert_onchain_addr`(36/0)、`test_scan_alert_audit_deepdive`(75/0)、`test_scan_alert_remaining`(29/0)、`test_scan_scenario_label`(48/0)、`test_scan_alert_audit_20260926`(96/0)、`test_funding_interval_20260927`(35/0)、`test_scan_l1_closed_bar`(16/0)、`test_derivatives_signal_gap`(43/0)、`test_squeeze_battle`(143/143)、`test_squeeze_fuel`(99/99)、`test_squeeze_alert_silence`(18/18)、`test_liq_history_scope`(39/0)；`py_compile` 通过。
+- **prod 只读端到端复验**：MARSCOINUSDT 真库 `_get_resonance` + `_build_reason` 渲染——`catalyst_dir {bearish:1,bullish:1}`、判读「3 维逆风、无顺风项 ⇒ 【不建议新开】」（量比维只计 1）、批级窗口单列、`ret_p75=-2.44%` 使 RR 0.29 不判可开。
+- **待部署**：`scan_daemon.py` 需重启容器后生效。
+- **未做 / 边界**：① 报告 §七#7「长窗统计选日规则（`T-1 且 24h 覆盖 ≥90%`）」按建议**单开工单**，本轮不做；② N-0928-1 的「重」方案（④ 目标位改本币 2×ATR）按待拍板取「最省」方案，未做；③ 摘要去重阈值 0.9 为经验值（未回测），有 `SUMMARY_DEDUP_MIN_LEN`/`RATIO` 两个常量可调。

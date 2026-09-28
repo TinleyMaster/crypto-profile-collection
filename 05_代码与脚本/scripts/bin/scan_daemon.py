@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import html
 import json
 import math
@@ -1638,33 +1639,35 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         sl_txt = f"{float(sl) * 100:.1f}%" if sl is not None else "n/a"
         return f"同档 n={_n24(r)} · 24h 均值 {avg_txt} · 止损率 {sl_txt}"
 
-    def _add(kind, text):
-        slots.append({"kind": kind, "text": text})
+    def _add(kind, text, grp, coin=True):
+        # `grp` = 独立维度（判读按维度计数，N-0928-1：③④ 同属量比档，合并为 1 维）；
+        # `coin` = 是否币级（False = 批级共享槽，不计入顺/逆风，N-0928-5）。
+        slots.append({"kind": kind, "text": text, "grp": grp, "coin": coin})
 
     # ① 资金一致（CVD 与价方向）
     cvd = sig.get("cvd_dir")
     align = mod.cvd_align_of(sig.get("p_dir"), cvd)
     if align is None:
-        _add("info", "资金一致：无价格方向，无从判定")
+        _add("info", "资金一致：无价格方向，无从判定", "cvd")
     else:
         row = _row("cvd_align", align)
         if align == "同向":
             _add("good" if row else "info",
                  (f"资金一致：CVD {cvd} 与价同向〔{_stat(row)}〕" if row
-                  else "资金一致：CVD 与价同向（该档样本不足，无历史依据）"))
+                  else "资金一致：CVD 与价同向（该档样本不足，无历史依据）"), "cvd")
         elif cvd is None:
             _add("info", "资金一致：CVD n/a（该档含反向/缺失样本"
-                         + (f"〔{_stat(row)}〕" if row else "，且样本不足）"))
+                         + (f"〔{_stat(row)}〕" if row else "，且样本不足）"), "cvd")
         else:
             _add("bad" if row else "info",
                  (f"资金背离：CVD {cvd} 与价反向〔{_stat(row)}〕" if row
-                  else "资金背离：CVD 与价反向（该档样本不足，无历史依据）"))
+                  else "资金背离：CVD 与价反向（该档样本不足，无历史依据）"), "cvd")
 
     # ② 顺/逆风费率
     fund = sig.get("funding_rate")
     fsign = mod.funding_sign_of(fund)
     if fsign is None:
-        _add("info", "费率：未覆盖（n/a），无历史依据")
+        _add("info", "费率：未覆盖（n/a），无历史依据", "funding")
     else:
         flags["funding_tailwind"] = (fsign == "<=0")
         row = _row("funding_sign", fsign)
@@ -1672,15 +1675,16 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         if fsign == "<=0":
             _add("good" if row else "info",
                  (f"顺风费率：费率 {f_pct:+.4f}%（空头付费）〔{_stat(row)}〕" if row
-                  else "顺风费率：费率 ≤0（该档样本不足，无历史依据）"))
+                  else "顺风费率：费率 ≤0（该档样本不足，无历史依据）"), "funding")
         else:
             # ⚠️ 口径（审计 §2.3 限定①）：`>0` 组多为 Binance 默认档（中性），
             #    文案必须写「无空头付费顺风」，不得写成「多头拥挤」。
             _add("bad" if row else "info",
                  (f"无费率顺风：费率 {f_pct:+.4f}%（无空头付费顺风）〔{_stat(row)}〕"
-                  if row else "无费率顺风：费率 >0（该档样本不足，无历史依据）"))
+                  if row else "无费率顺风：费率 >0（该档样本不足，无历史依据）"), "funding")
 
     # ③ 量比档 + 该档 24h P75（④ 的目标位与 RR 复用本档）
+    # N-0928-1：档位统计是**跨币共享经验值**（非本币特异性），显式标注。
     vr = sig.get("vol_ratio")
     vlabel = mod.bucket_of("vol_ratio", vr) if vr is not None else None
     vrow = _row("vol_ratio", vlabel) if vlabel else None
@@ -1691,17 +1695,18 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         flags["vol_p75_neg"] = p75 < 0
         _add("bad" if p75 < 0 else "good",
              f"{'逆风' if p75 < 0 else ''}量比：{float(vr):.2f}x 落 {vlabel} 档"
-             f"〔{_stat(vrow)} · 该档 24h P75 {p75:+.2f}%〕")
+             f"（档位经验值·跨币共享）〔{_stat(vrow)} · 该档 24h P75 {p75:+.2f}%〕", "vol")
     else:
         if vr is None:
-            _add("info", "量比：n/a")
+            _add("info", "量比：n/a", "vol")
         else:
             _add("info", f"量比：{float(vr):.2f}x 落 {vlabel} 档"
-                         "（该档样本不足，无历史依据）")
+                         "（该档样本不足，无历史依据）", "vol")
 
-    # ④ 风险结构：参考目标位 = 同档（量比档）历史 MFE P75
+    # ④ 风险结构：参考目标位 = 同档（量比档）历史 MFE P75（与 ③ 同属量比维 ⇒ 判读只计 1 维）
     trig, sp = sig.get("trigger_price"), sig.get("stop_loss_pct")
     mfe75 = float(vrow["mfe_p75"]) if (vrow is not None and vrow.get("mfe_p75") is not None) else None
+    ret_p75 = float(vrow["ret_p75"]) if (vrow is not None and vrow.get("ret_p75") is not None) else None
     rr = None
     if trig is not None and sp is not None and float(sp) > 0 and mfe75 is not None:
         entry, stop = float(trig), float(sp)
@@ -1711,14 +1716,18 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         _add("good" if rr >= REASON_RR_MIN else "bad",
              f"风险结构：入场 {_fmt_num(entry, 6)} · 失效 {_fmt_num(barrier, 6)}"
              f"（{'-' if up else '+'}{stop:.2f}%）· 参考目标 {_fmt_num(target, 6)}"
-             f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，非保证能到；{_stat(vrow)}）⇒ RR {rr:.2f}")
+             f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，为乐观上界、非保证能到；"
+             f"{_stat(vrow)}）⇒ RR {rr:.2f}", "vol")
     else:
-        _add("info", "风险结构：无同档目标位（该档样本不足或无失效位），RR 不可算")
+        _add("info", "风险结构：无同档目标位（该档样本不足或无失效位），RR 不可算", "vol")
 
     # ⑤ 窗口（批级：**与批级摘要同源**取近 3 日滚动 1h 胜率 vs 盈亏平衡）
     # N-8702-B：原用当日 `win_1h/be_1h`，而批级摘要用 `roll3_*` ⇒ 同一封邮件里
     # 「批级窗口为负」与「批级环境为正」双口径互斥、每张卡被扣一个 ✗。缺 roll3 时
     # 才回退当日，并在文案里显式标出口径（当日 / 近 3 日滚动）。
+    # N-0928-5：本槽是**批级共享**（同批所有币同值）⇒ 不计入顺/逆风计数，单列展示。
+    # N-0928-4：`24h 均值` 取的是**单日**（日报日）`avg_24h`（表无 roll3 版），
+    # 与「近 3 日滚动」的 1h 口径不同 ⇒ 显式标注日报日。
     d = ctx.get("daily") or {}
     w1, b1 = d.get("roll3_win_1h"), d.get("roll3_be_1h")
     wlabel = "近 3 日滚动"
@@ -1732,32 +1741,40 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
              f"窗口（批级 {wlabel}）：1h 胜率 {float(w1) * 100:.1f}% "
              f"{'≥' if ok else '<'} 盈亏平衡 {float(b1) * 100:.1f}%"
              f"（短窗{'为正' if ok else '为负'}）"
-             + (f" · 24h 均值 {float(a24):+.2f}%" if a24 is not None else ""))
+             + (f" · 24h 均值（日报日 {d.get('report_date')}） {float(a24):+.2f}%"
+                if a24 is not None else ""), "batch", coin=False)
     else:
-        _add("info", "窗口：当日日报无 1h 胜率/盈亏平衡数据")
+        _add("info", "窗口：当日日报无 1h 胜率/盈亏平衡数据", "batch", coin=False)
 
-    goods = sum(1 for s in slots if s["kind"] == "good")
-    bads = sum(1 for s in slots if s["kind"] == "bad")
+    # 判读计数（N-0928-1/5）：**只计币级独立维度**（①②③④，其中 ③④ 同属量比档合并为 1 维）；
+    # 批级窗口（⑤）全批共享、对具体币零信息 ⇒ 单列不计。某维度同时出现顺/逆 ⇒ 记逆（保守）。
+    coin_slots = [s for s in slots if s.get("coin", True)]
+    good_g = {s["grp"] for s in coin_slots if s["kind"] == "good"}
+    bad_g = {s["grp"] for s in coin_slots if s["kind"] == "bad"}
+    goods = len(good_g - bad_g)
+    bads = len(bad_g)
     if is_brk:
         tone = "observe"
         note = ("蓄势池突破（BRK）独立观察档：判定只用价+量，无 OI/CVD/先验，"
                 "不参与本批可开性统计")
-    elif goods >= 2 and bads <= 1 and rr is not None and rr >= REASON_RR_MIN:
-        # N-8702-C：顺风下限之外**必须**有逆风上限 —— 原实现只看 `goods >= 2`，
-        # `bads=3` 仍判「可开」。同时要求 RR 过线。
+    elif (goods >= 2 and bads <= 1 and rr is not None and rr >= REASON_RR_MIN
+          and ret_p75 is not None and ret_p75 > 0):
+        # N-8702-C：顺风下限之外**必须**有逆风上限。N-0928-2：RR 基于**最大有利偏移**
+        # （乐观上界），再加一道 `ret_p75 > 0`（该档真实收益中位以上分位为正）必要条件
+        # —— 否则会「P75 亏 2.44% 却因 mfe 高而 RR 过线」自证高估。
         tone = "pass"
-        note = (f"顺风 {goods} 项、逆风 {bads} 项、RR {rr:.2f} ≥ {REASON_RR_MIN:g} "
+        note = (f"顺风 {goods} 维、逆风 {bads} 维、RR {rr:.2f} ≥ {REASON_RR_MIN:g} "
                 "⇒ 【可开】")
     elif goods == 0:
         tone = "avoid"
-        note = f"{bads} 项逆风、无顺风项 ⇒ 【不建议新开】"
+        note = f"{bads} 维逆风、无顺风项 ⇒ 【不建议新开】"
     elif rr is not None and rr < 1.0:
         tone = "watch"
-        note = f"{goods} 顺 {bads} 逆，但 RR {rr:.2f} < 1 ⇒ 【观望·不建议新开】"
+        note = f"{goods} 顺 {bads} 逆，但 RR {rr:.2f} < 1 ⇒ 【观望】"
     else:
         tone = "watch"
         note = f"{goods} 顺 {bads} 逆 ⇒ 【观望】"
-    return {"slots": slots, "rr": rr, "goods": goods, "bads": bads,
+    return {"slots": slots, "rr": rr, "ret_p75": ret_p75, "goods": goods, "bads": bads,
             "tone": tone, "note": note, "is_brk": is_brk, "flags": flags}
 
 
@@ -1771,10 +1788,19 @@ def _render_reason(reason: dict | None) -> str:
     """渲染「🎯 开仓依据」段（无 reason ⇒ 空串，旧调用方行为不变）。"""
     if not reason:
         return ""
-    rows = "".join(
-        f"<br><span style='color:{_REASON_COLOR[s['kind']]}'>"
-        f"{_REASON_ICON[s['kind']]} {s['text']}</span>"
-        for s in reason.get("slots") or [])
+
+    def _line(s):
+        return (f"<br><span style='color:{_REASON_COLOR[s['kind']]}'>"
+                f"{_REASON_ICON[s['kind']]} {s['text']}</span>")
+
+    coin_slots = [s for s in (reason.get("slots") or []) if s.get("coin", True)]
+    batch_slots = [s for s in (reason.get("slots") or []) if not s.get("coin", True)]
+    rows = "".join(_line(s) for s in coin_slots)
+    if batch_slots:
+        # N-0928-5：批级槽（全批共享，对具体币零信息）单列，不与币级槽混计顺/逆风。
+        rows += ("<br><span style='color:#9ca3af;font-size:11px'>"
+                 "—— 以下为批级（全批共享，不计入上列顺/逆风计数）——</span>")
+        rows += "".join(_line(s) for s in batch_slots)
     tone_color = _REASON_TONE_COLOR.get(reason.get("tone"), "#374151")
     title = "🎯 开仓依据（观察档）" if reason.get("is_brk") else "🎯 开仓依据"
     return ("<div style='margin:4px 0;padding:6px 8px;background:#fff;"
@@ -1830,12 +1856,18 @@ def _batch_direction_line(items: list[dict], regime: dict | None) -> str:
     return txt
 
 
-def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
+def _render_batch_summary(items: list[dict], batch: dict | None,
+                          out: dict | None = None) -> str:
     """批级可开性摘要（审计 §三.3）+ 告警量暴增警示（§八.7）。
 
     §三.3 的心理作用远大于单卡细节：读者第一眼就知道「今天该不该动手」，而不是逐张
     卡片自己猜。计数取自各卡 `reason.tone`（同一真源），BRK 单列为「观察档」。
+
+    `out`（可选，N-0928-6）：回填 `{"surge_shown": bool}` —— 供图例判断是否挂「⚠️ 告警量
+    暴增」锚点（原图例无条件输出该锚点，正文 0 条暴增时也印 ⇒ 图例多报）。
     """
+    if out is not None:
+        out["surge_shown"] = False
     if not batch:
         return ""
     ctx = batch.get("ctx") or {}
@@ -1852,7 +1884,8 @@ def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
         watch_n = sum(1 for _, r in main if r["tone"] == "watch")
         avoid_n = sum(1 for _, r in main if r["tone"] == "avoid")
         head = (f"📊 本批可开性：主池 {len(main)} 币中 {pass_n} 币通过"
-                f"（顺风 ≥2、逆风 ≤1 且 RR ≥{REASON_RR_MIN:g}） · {watch_n} 币观望"
+                f"（顺风 ≥2 维、逆风 ≤1 维且 RR ≥{REASON_RR_MIN:g}，按币级独立维度计）"
+                f" · {watch_n} 币观望"
                 f" · {avoid_n} 币不建议")
         if brk_n:
             head += f" · BRK 观察 {brk_n} 币"
@@ -1899,6 +1932,8 @@ def _render_batch_summary(items: list[dict], batch: dict | None) -> str:
                      f"{int(alerts_n)} 条 ≈ 最近有告警日均值 "
                      f"{float(prev_avg):.1f} 的 {float(alerts_n) / float(prev_avg):.1f} 倍"
                      "（历史该形态当日 avg_24h 显著为负，属系统性质量下降）")
+        if out is not None:
+            out["surge_shown"] = True
     if not lines:
         return ""
     return ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
@@ -2035,6 +2070,38 @@ def _is_repost_of_truncated(key: str, raw: str, seen_raw: list) -> bool:
             if (len(key) >= MIN_TRUNC_DEDUP_LEN and k.startswith(key)
                     and raw.endswith(_TRUNC_TAILS)):
                 return True
+    return False
+
+
+# 审计 N-0928-3（审计_告警邮件_6413c1f上线首封_2026-09-28 §四）：**跨语言转载**未合并
+# —— 同一条 Bonk Guy 新闻被「火星财经（中）/ BlockBeats（英）」各记一条，标题语言不同
+# 致 `_norm_title` 判等失败 ⇒ 名片「净空 1」实为净 0；明细两条利空经 `ai_summary` 后
+# 近乎逐字相同（物证：signal 3075 的 `detail.resonance_snapshot`）。
+# 标题归一够不着（跨语言），但 `ai_summary` 恒为**中文摘要**（实测 3775/3775），故补一层
+# 摘要骨架去重：归一（仅留字母/数字/汉字、小写、去标点空白）后做模糊相似 + **同 UTC 日**
+# 双条件。阈值取高（0.9）以极小化误合并（P1-N1 误合并 208 组的教训：纯前缀/宽松判据会
+# 把不同公告并掉）。空摘要/过短不进此层（无从比较）。
+SUMMARY_DEDUP_MIN_LEN = 20
+SUMMARY_DEDUP_RATIO = 0.9
+
+
+def _norm_summary(s) -> str:
+    """摘要归一（跨语言转载去重用）：小写 + 仅留字母/数字/汉字，去标点空白。"""
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
+def _is_similar_summary(key: str, day: str | None, seen_sum: list[tuple[str, str | None]]) -> bool:
+    """`key` 是否与已见条目的摘要骨架高度相似且同日（跨语言同事件转载）。
+
+    判据 = `difflib` 相似度 ≥ `SUMMARY_DEDUP_RATIO` **且** 同一 UTC 日；任一缺失 ⇒ 不合并。
+    """
+    if not key or len(key) < SUMMARY_DEDUP_MIN_LEN or day is None:
+        return False
+    for k, d in seen_sum:
+        if d != day or abs(len(k) - len(key)) > max(4, len(key) // 4):
+            continue
+        if difflib.SequenceMatcher(None, key, k).ratio() >= SUMMARY_DEDUP_RATIO:
+            return True
     return False
 
 
@@ -2292,6 +2359,7 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
     seen: set[str] = set()
     seen_raw: list[tuple[str, str]] = []   # (归一键, 原始标题) —— 截断转载判等用（P2-N11）
     seen_fp: list[tuple[str, tuple[str, ...]]] = []   # 实体（交易所|动作 + 有序币种清单）
+    seen_sum: list[tuple[str, str | None]] = []   # (摘要骨架, UTC 日) —— 跨语言转载（N-0928-3）
     fresh_cut = datetime.now(timezone.utc) - timedelta(days=CATALYST_STALE_DAYS)
     for r in rows:
         # 复验 P2-N8：占位符标题（title='null' 等）无可用信息，丢弃后再去重
@@ -2309,8 +2377,16 @@ def _get_resonance(conn, symbol: str, asset_id: int | None) -> dict:
         raw = str(r["title"] or "").strip()
         if not key or key in seen or _is_repost_of_truncated(key, raw, seen_raw):
             continue
+        # N-0928-3：跨语言/跨源**同事件**（标题语言不同 ⇒ 标题归一够不着，但 ai_summary
+        # 恒为中文摘要且近乎逐字相同）⇒ 按摘要骨架 + 同日二次合并。
+        pub_d0 = str(r["published_at"])[:10] if r["published_at"] is not None else None
+        sum_key = _norm_summary(r.get("ai_summary"))
+        if _is_similar_summary(sum_key, pub_d0, seen_sum):
+            continue
         seen.add(key)
         seen_raw.append((key, raw))
+        if sum_key:
+            seen_sum.append((sum_key, pub_d0))
         # 审计 P1-1：跨语种转载的**实体**二次合并（见 `_catalyst_entity`）。
         # 实体为 None（三项不齐）时不做二次合并，保持原精确标题键行为。
         # 取 `body_text`（相对完整正文）—— 标题被源站截到 83 字，币种清单会在
@@ -2814,7 +2890,8 @@ def _render_alert_email(items: list[dict],
     if brk_n:
         brk_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
                     f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
-    summary = _render_batch_summary(items, batch)
+    _summary_out: dict = {}
+    summary = _render_batch_summary(items, batch, _summary_out)
     body_parts = []
     for idx, it in enumerate(items):
         sig = it["signal"]
@@ -3132,9 +3209,9 @@ def _render_alert_email(items: list[dict],
               "「按场景跨币种聚合」，同一场景的所有币共用同一组数字，与具体币无关；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × |OI 增速|，BRK 无 OI 增速时取 "
-              "3.0 等当量；共振方向与结论一致 ×1.15 / 相悖 ×0.75，CVD 同向 ×1.05），"
+              "3.0 等当量；新鲜共振方向与结论一致 ×1.15 / 相悖 ×0.75，CVD 同向 ×1.05），"
               "按最高分对数归一，条后数字为原始分数，非胜率；「不含涨幅」、也不含催化剂"
-              "强度（催化剂仅以方向 ×1.15/×0.75 修正，与体量无关），且 OI 为"
+              "强度（催化剂仅以新鲜方向 ×1.15/×0.75 修正，与体量无关），且 OI 为"
               "乘性因子 ⇒ OI 近乎持平时分数必然贴地（此时 OI 段会显示「OI 持平」）；"
               "「已确认」徽章 = 信号发出后 6 小时内出现一根已收盘 1h K 线的收盘价越过"
               "「触发根极值」⇒ 延续已被市场跟随（质量升格，非入场门槛：实测等确认再"
@@ -3152,12 +3229,15 @@ def _render_alert_email(items: list[dict],
     legend_dir = ("「本批方向」= 按本批做多/做空方向重述环境是否受限"
                   "（受限方向若与本批方向相反，则本批实际不受限；混合批次逐方向披露受限情况）；")
     legend_reason = ("「🎯 开仓依据」= 本币顺/逆风逐槽陈列（① CVD 一致性 ② 费率符号 "
-                     "③ 量比档位 ④ 风险结构 ⑤ 批级窗口），槽内括注均为同档历史样本"
+                     "③ 量比档位 ④ 风险结构；⑤ 批级窗口单列、全批共享不计入计数），"
+                     "槽内括注均为同档历史样本"
                      "（n / 均值 / 止损率，来自当日分桶表；n 为该统计自己的 24h 分母，"
-                     "样本不足时标「样本不足」）；"
+                     "样本不足时标「样本不足」）；判读按「币级独立维度」计数"
+                     "（③④ 同属量比档，合并为 1 维；档位经验值为跨币共享、非本币特异性）；"
                      "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
-                     "（mfe_24h）P75（历史分位，非保证能到）；「⇒ 判读」= 由槽位派生的开仓建议"
-                     f"（顺风 ≥2、逆风 ≤1 且 RR ≥{REASON_RR_MIN:g} 判「可开」，RR <1 判"
+                     "（mfe_24h）P75（乐观上界、非保证能到；判「可开」还须该档 24h P75 > 0）；"
+                     "「⇒ 判读」= 由槽位派生的开仓建议"
+                     f"（顺风 ≥2 维、逆风 ≤1 维且 RR ≥{REASON_RR_MIN:g} 判「可开」，RR <1 判"
                      "「观望」，零顺风判「不建议」，BRK 因维度缺失统一进「观察档」）；"
                      "「📊 本批可开性」= 本封全批汇总；")
     legend_surge = ("「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个有告警日均值 ×1.5"
@@ -3166,7 +3246,10 @@ def _render_alert_email(items: list[dict],
     if dir_line:
         legend += legend_dir
     if has_reason:
-        legend += legend_reason + legend_surge
+        legend += legend_reason
+        if _summary_out.get("surge_shown"):
+            # N-0928-6：暴增锚点只在正文实际渲染了暴增行时挂（原无条件输出 ⇒ 图例多报）。
+            legend += legend_surge
     legend += "</p>"
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"

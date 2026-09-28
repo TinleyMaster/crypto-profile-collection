@@ -602,18 +602,19 @@ check("✓ 资金一致：CVD up 与价同向〔同档 n=156 · 24h 均值 +2.12
       "① 槽列同档 n/均值/止损率（逐字来自桶表）")
 check("✓ 顺风费率：费率 -0.0280%（空头付费）〔同档 n=54 · 24h 均值 +6.57% · 止损率 20.4%〕"
       in _h1, "② 槽按费率符号取「顺风」档（文案为「空头付费」而非「多头拥挤」）")
-check("量比：3.00x 落 2.5-4 档〔同档 n=30 · 24h 均值 +1.50% · 止损率 30.0%"
-      " · 该档 24h P75 +3.00%〕" in _h1, "③ 槽印该量比档 24h P75 + 同档统计（N-8702-C）")
+check("量比：3.00x 落 2.5-4 档（档位经验值·跨币共享）〔同档 n=30 · 24h 均值 +1.50%"
+      " · 止损率 30.0% · 该档 24h P75 +3.00%〕" in _h1,
+      "③ 槽印该量比档 24h P75 + 同档统计 + 跨币共享标注（N-8702-C/N-0928-1）")
 check(f"参考目标 {sd._fmt_num(0.070730 * 1.16, 6)}"
-      f"（同档历史最大有利偏移 P75 +16.00%，非保证能到；同档 n=30 · 24h 均值 +1.50%"
-      f" · 止损率 30.0%）⇒ RR 2.00" in _h1,
-      "④ 做多：参考目标 = 入场 ×(1+P75)，RR = P75 ÷ 止损幅度 + 同档统计（N-8702-C）")
+      f"（同档历史最大有利偏移 P75 +16.00%，为乐观上界、非保证能到；同档 n=30"
+      f" · 24h 均值 +1.50% · 止损率 30.0%）⇒ RR 2.00" in _h1,
+      "④ 做多：参考目标 = 入场 ×(1+P75)（标「乐观上界」）+ 同档统计（N-0928-2）")
 check(f"失效 {sd._fmt_num(0.070730 * 0.92, 6)}（-8.00%）" in _h1, "④ 做多失效位在入场下方")
 check("✓ 窗口（批级 近 3 日滚动）：1h 胜率 52.5% ≥ 盈亏平衡 46.5%（短窗为正）"
-      " · 24h 均值 +1.71%" in _h1,
-      "⑤ 槽改用近 3 日滚动（与批级摘要同源，N-8702-B）")
-check("⇒ 判读：顺风 5 项、逆风 0 项、RR 2.00 ≥ 1.5 ⇒ 【可开】" in _h1,
-      "判读 = 顺风计数 + 逆风计数 + RR 门槛")
+      " · 24h 均值（日报日 2026-09-27） +1.71%" in _h1,
+      "⑤ 槽用近 3 日滚动 1h（同源摘要）+ 24h 均值标日报日口径（N-8702-B/N-0928-4）")
+check("⇒ 判读：顺风 3 维、逆风 0 维、RR 2.00 ≥ 1.5 ⇒ 【可开】" in _h1,
+      "判读 = 币级独立维度顺/逆风计数 + RR 门槛（N-0928-1/5）")
 
 print("\n【开仓依据】做空符号（P2-N7 教训：失效位在上方、目标在下方）")
 _r2 = sd._build_reason(_sig_r(p_dir="down", cvd_dir="down", trigger=0.100000), _ctx1)
@@ -632,16 +633,31 @@ check(_r3["tone"] == "avoid" and _r3["goods"] == 0,
       f"tone={_r3['tone']} goods={_r3['goods']}")
 check("✗ 无费率顺风：费率 +0.0050%（无空头付费顺风）" in _h3r,
       "费率 >0 文案为「无空头付费顺风」（不得写成「多头拥挤」）")
-check("✗ 逆风量比：7.00x 落 >6 档〔同档 n=50 · 24h 均值 -1.20% · 止损率 35.0%"
-      " · 该档 24h P75 -0.23%〕" in _h3r, "量比最高档标「逆风」+ 同档统计")
-check("⇒ 判读：5 项逆风、无顺风项 ⇒ 【不建议新开】" in _h3r, "逆风批次明确写「不建议新开」")
+check("✗ 逆风量比：7.00x 落 >6 档（档位经验值·跨币共享）〔同档 n=50 · 24h 均值 -1.20%"
+      " · 止损率 35.0% · 该档 24h P75 -0.23%〕" in _h3r, "量比最高档标「逆风」+ 同档统计")
+check("⇒ 判读：3 维逆风、无顺风项 ⇒ 【不建议新开】" in _h3r, "逆风批次明确写「不建议新开」")
 
-print("\n【N-8702-C】判读逆风上限：bads=2 时即使顺风 ≥2 也不得判「可开」")
+print("\n【N-0928-1/5】判读按币级独立维度计数（③④ 同维合并；批级窗口不计入）")
 _r6 = sd._build_reason(_sig_r(cvd_dir="down", funding=0.000050, vol_ratio=3.0), _ctx1)
-# ①②bad、③good、④good（RR 2.0）、⑤good ⇒ goods=3、bads=2；旧实现只看 goods>=2 ⇒ 误判可开
-check(_r6["goods"] == 3 and _r6["bads"] == 2 and _r6["tone"] == "watch",
-      "3 顺 2 逆、RR 2.0 ⇒ 不得判「可开」（bads<=1 上限）",
+# ①bad ②bad ③good ④good（同属量比维 ⇒ 合并 1 维）⑤good（批级，不计）
+# ⇒ goods=1（vol）、bads=2（cvd/funding）；旧实现 goods=3 ⇒ 误判可开
+check(_r6["goods"] == 1 and _r6["bads"] == 2 and _r6["tone"] == "watch",
+      "1 顺 2 逆、RR 2.0 ⇒ 不得判「可开」（③④ 同维 + 批级不计入）",
       f"tone={_r6['tone']} goods={_r6['goods']} bads={_r6['bads']}")
+# 批级槽不计入计数：单看币级槽，故 goods 不受 roll3 正负影响
+_r6b = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=3.0), _ctx1)
+check(_r6b["goods"] == 3 and _r6b["bads"] == 0,
+      "①②③④ 全顺 ⇒ 币级维度 goods=3（量比维只计 1）", f"{_r6b['goods']}/{_r6b['bads']}")
+
+print("\n【N-0928-2】RR 只是在最大有利偏移上的乐观上界；另加该档 24h P75>0 必要条件")
+# 量比档 ret_p75 为负（P75 亏）但 mfe 高 ⇒ RR 仍可 >1.5；不得因此判可开
+_ctx_neg = _ctx()
+_ctx_neg["buckets"][("vol_ratio", "2.5-4")]["ret_p75"] = -1.0   # 真实 P75 为负
+_ctx_neg["buckets"][("vol_ratio", "2.5-4")]["mfe_p75"] = 16.0   # 乐观面仍高 ⇒ RR 2.0
+_rneg = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=3.0), _ctx_neg)
+check(_rneg["rr"] == 2.0 and _rneg["ret_p75"] == -1.0 and _rneg["tone"] != "pass",
+      "ret_p75<0（P75 亏）⇒ 即使 RR≥1.5 也不得判「可开」（N-0928-2 必要条件）",
+      f"tone={_rneg['tone']} rr={_rneg['rr']} ret_p75={_rneg['ret_p75']}")
 
 print("\n【N-8702-A】24h 统计用自己的真分母（不虚报 1h n）/ 门槛单独生效")
 _ctx_a = _ctx()
@@ -683,7 +699,8 @@ _bitems = [{"signal": _sig_r(), "resonance": _res(), "reason": _r1},
            {"signal": _sig_r(pool="accumulation", scenario="BRK", cvd_dir=None),
             "resonance": _res(), "reason": _r5}]
 _hb = sd._render_alert_email(_bitems, REGIME, _batch)
-check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2、逆风 ≤1 且 RR ≥1.5） · 0 币观望"
+check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2 维、逆风 ≤1 维且 RR ≥1.5，"
+      "按币级独立维度计） · 0 币观望"
       " · 0 币不建议 · BRK 观察 1 币" in _hb, "批级可开性摘要（BRK 单列观察档）")
 check("主池共性逆风：0/1 无空头付费顺风" in _hb, "主池共性逆风计数（N-8702-H 口径）")
 check("当前批级环境：近 3 日滚动 1h 胜率 52.5% ≥ 盈亏平衡 46.5%（PF 1.49）"
@@ -698,6 +715,18 @@ check("⚠️ 告警量暴增（日报日 2026-09-27）：当日 176 条 ≈ 最
       "告警量 ≥ 近 7 个有告警日均值 ×1.5 ⇒ 批级警示（标出日报日，N-8702-F）")
 check("告警量暴增" not in sd._render_batch_summary(
     _bitems, {"regime": _REG, "ctx": _ctx(alerts_n=40)}), "未越阈值时不误报暴增")
+
+print("\n【N-0928-6】图例「⚠️ 告警量暴增」锚点只在正文实际渲染暴增行时出现")
+_hb_surge = sd._render_alert_email(_bitems, REGIME,
+                                   {"regime": _REG, "ctx": _ctx(alerts_n=176)})
+_hb_nosurge = sd._render_alert_email(_bitems, REGIME,
+                                     {"regime": _REG, "ctx": _ctx(alerts_n=40)})
+check("「⚠️ 告警量暴增」" in _hb_surge.split("图例：")[1],
+      "正文有暴增行 ⇒ 图例挂暴增锚点")
+check("「⚠️ 告警量暴增」" not in _hb_nosurge.split("图例：")[1],
+      "正文无暴增行 ⇒ 图例不挂暴增锚点（N-0928-6 图例多报）")
+check("「📊 本批可开性」" in _hb_nosurge.split("图例：")[1],
+      "图例依据段锚点仍随 has_reason 独立生效（不因缺少暴增而整段消失）")
 
 print("\n【N-8702-D】混合方向批必须披露环境受限（旧实现直接丢失）")
 _REG_mixed = {"tags": [], "long_fav": True, "short_fav": False,
@@ -751,8 +780,9 @@ check("📊 本批可开性" not in _body_old, "无 batch ⇒ 不渲染批级摘
 check("**" not in _h1 and "**" not in _h5 and "**" not in _hb, "依据/摘要文案无 `**`")
 _leg_r = sd._render_alert_email(_bitems, REGIME, _batch).split("图例：")[1]
 for _lit in ("「🎯 开仓依据」", "「RR」", "非保证能到", "「📊 本批可开性」",
-             "「本批方向」", "「⚠️ 告警量暴增」"):
+             "「本批方向」", "币级独立维度", "乐观上界"):
     check(_lit in _leg_r, f"图例声明 {_lit}")
+check("新鲜共振方向" in _leg_r, "图例强度条标「新鲜」共振方向（N-0928-7）")
 
 print("\n【开仓依据】AST —— 渲染层与 task_scan_alert 接线")
 _ast = ast.parse(open(sd.__file__, encoding="utf-8").read())
@@ -795,6 +825,24 @@ check(abs(_mb["ret_p75"] - 5.0) < 1e-9 and abs(_mb["mfe_p75"] - 7.0) < 1e-9,
       "_mk_bucket 产出 24h 收益 P75 与 MFE P75", f"ret={_mb['ret_p75']} mfe={_mb['mfe_p75']}")
 check(_mb["n_24h"] == 3, "fix_079：_mk_bucket 产出 24h 真分母 n_24h（3 条 24h 非空）",
       f"n_24h={_mb['n_24h']}")
+
+print("\n【N-0928-3】催化剂跨语言转载摘要骨架去重（同事件中/英两版）")
+# 物证：signal 3075 的两条利空（火星财经中文 / BlockBeats 英文）ai_summary 近乎逐字相同
+_sum_a = "交易员Bonk Guy持仓代币价值1660万美元，较峰值回撤约1100万美元，前三大持仓为PONS、USELESS、MARSCOIN。"
+_sum_b = "交易员Bonk Guy持仓代币价值约1660万美元，较峰值回撤1100万美元，前三大持仓为PONS、USELESS、MARSCOIN。"
+_ka, _kb = sd._norm_summary(_sum_a), sd._norm_summary(_sum_b)
+check(_ka and _kb and _ka != _kb,
+      "归一保留字母/数字/汉字、去标点空白（两版骨架不完全等但高度相似）", _ka)
+check(sd._is_similar_summary(_kb, "2026-09-22", [(_ka, "2026-09-22")]),
+      "两版（同 UTC 日）判为同事件转载 ⇒ 合并（净空 2 → 1）")
+check(not sd._is_similar_summary(_kb, "2026-09-23", [(_ka, "2026-09-22")]),
+      "跨日不合并（防把不同日期的相似播报并掉）")
+check(not sd._is_similar_summary(sd._norm_summary("以太坊完成 Pectra 升级，提升吞吐与质押上限"),
+                                 "2026-09-22", [(_ka, "2026-09-22")]),
+      "不同事件（低相似度）不合并")
+_norm_short = sd._norm_summary("代币上涨")
+check(not sd._is_similar_summary(_norm_short, "2026-09-22", [(_norm_short, "2026-09-22")]),
+      "过短摘要（<20）不进摘要去重层（无从比较）")
 
 print("\n【N-8702-G】save() 对可选列做存在性预检降级（缺列不崩、显式告警）")
 _esrc = open(_edge.__file__, encoding="utf-8").read()

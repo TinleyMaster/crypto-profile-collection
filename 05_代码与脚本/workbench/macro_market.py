@@ -3550,6 +3550,62 @@ def _finalize_conviction(raw_strength: float, cycle_phase: str, n_confirm: int, 
     return score, {"raw_strength": raw_strength, "regime_mult": regime_mult, "resonance_bonus": bonus}
 
 
+# ── 连板增强接早报（工单 连板增强接早报 2026-09-28，U-A）──────────────────────
+# 让 907e913 的跨日连板（streak_days）+ 740e31c 的口径屏障（streak_start_ambiguous）
+# 在「变化榜信号层」（FEAT-SIGNAL-SRC-001）被消费：命中连板的异动信号在 trigger_logic
+# 上标注、并在强度上小幅加成（分数上限不变）。阈值 3 天（与 D3 派生一致，Q2 拍板）；
+# 连跌只标注不加成（Q3 拍板：连跌是弱势确认，不应抬 confidence）。
+_DIFF_STREAK_MIN_DAYS = 3
+_DIFF_STREAK_BONUS_CAP = 8
+_DIFF_STREAK_BONUS_PER_HIT = 2
+
+
+def _diff_streak_hits(items: list, min_days: int = _DIFF_STREAK_MIN_DAYS) -> list:
+    """筛选「连板 ≥ min_days 且起点非榜单口径变更日（非 ambiguous）」的条目。
+
+    与 740e31c 口径屏障一致：ambiguous_start 的连板天数=口径年龄，不代表强度，剔除。
+    """
+    out = []
+    for it in (items or []):
+        try:
+            sd = int(it.get("streak_days") or 1)
+        except (TypeError, ValueError):
+            sd = 1
+        if sd >= min_days and not it.get("streak_start_ambiguous"):
+            out.append(it)
+    return out
+
+
+def _diff_streak_note(hits: list, label: str = "强势") -> str:
+    """连板命中 → trigger_logic 追加文案（最多列 3 个）；无命中返回空串。"""
+    if not hits:
+        return ""
+    parts = [f"{it.get('symbol')}连续{int(it.get('streak_days') or 0)}天" for it in hits[:3]]
+    return f"（其中 {'、'.join(parts)} 持续{label}）"
+
+
+def _diff_streak_bonus(hits: list) -> int:
+    """连板命中加成：min(cap, 命中数 × per_hit)。"""
+    return min(_DIFF_STREAK_BONUS_CAP, len(hits) * _DIFF_STREAK_BONUS_PER_HIT)
+
+
+def augment_diff_streak(items: list, base_strength: float, cap: int,
+                        label: str = "强势", apply_bonus: bool = True,
+                        t: dict | None = None) -> tuple[str, float]:
+    """U-A 单点：在既有异动信号的强度上叠加连板。
+
+    返回 (追加强度文案, 加成后强度)；无连板命中时文案为空串、强度原样返回。
+    `apply_bonus=False` 只标注不加成（price_crash 用：连跌是弱势确认）。
+    分数上限 `cap` 传入并保持（90/92/88 各自不变）。
+    """
+    min_days = (t or {}).get("diff_streak_min_days", _DIFF_STREAK_MIN_DAYS)
+    hits = _diff_streak_hits(items, min_days)
+    note = _diff_streak_note(hits, label)
+    if apply_bonus:
+        base_strength = min(cap, base_strength + _diff_streak_bonus(hits))
+    return note, base_strength
+
+
 # ══════════════════════════════════════════════════════════════
 # FEAT-HORIZON-001: 信号周期 & 时间衰减 & 估值过滤器
 # ══════════════════════════════════════════════════════════════
@@ -5609,6 +5665,8 @@ def score_opportunities(overview: dict) -> dict:
                 top_pct = strong[0].get("metric_value", 0)
                 avg_pct = sum(it.get("metric_value", 0) for it in strong) / len(strong)
                 strength = min(90, 45 + int(top_pct * 0.8) + len(strong) * 3)
+                # U-A：连板强势子集标注 + 强度加成（原始分上限 90 不变）
+                _note, strength = augment_diff_streak(strong, strength, 90, "强势", t=t)
                 _push_opportunity(
                     {"target": f"{len(strong)} 币 24h 暴涨",
                      "direction": "long", "confidence": "medium",
@@ -5617,7 +5675,7 @@ def score_opportunities(overview: dict) -> dict:
                      "key_metric": f"24h 涨幅 ≥{t.get('diff_price_surge_pct', 15)}%",
                      "trigger_logic": (
                          f"{', '.join(syms)} 24h 涨幅超 {t.get('diff_price_surge_pct', 15)}%，"
-                         f"最高 {top_pct:.1f}%，平均 {avg_pct:.1f}%"
+                         f"最高 {top_pct:.1f}%，平均 {avg_pct:.1f}%{_note}"
                      ),
                      "action_hint": "关注强势突破，追高需谨慎",
                      "invalidation": "若 48h 内回落至涨幅 50% 以下",
@@ -5636,6 +5694,9 @@ def score_opportunities(overview: dict) -> dict:
                 max_drop = abs(crash[0].get("metric_value", 0))
                 avg_drop = sum(abs(it.get("metric_value", 0)) for it in crash) / len(crash)
                 strength = min(92, 50 + int(max_drop * 0.6) + len(crash) * 4)
+                # U-A：连跌只标注、**不加成**（连跌是弱势确认，不应抬 confidence —— Q3）
+                _note, _ = augment_diff_streak(crash, strength, 92, "走弱",
+                                               apply_bonus=False, t=t)
                 _push_opportunity(
                     {"target": f"{len(crash)} 币 24h 暴跌",
                      "direction": "short", "confidence": "medium",
@@ -5644,7 +5705,7 @@ def score_opportunities(overview: dict) -> dict:
                      "key_metric": f"24h 跌幅 ≥{t.get('diff_price_crash_pct', 12)}%",
                      "trigger_logic": (
                          f"{', '.join(syms)} 24h 跌幅超 {t.get('diff_price_crash_pct', 12)}%，"
-                         f"最大 {max_drop:.1f}%，平均 {avg_drop:.1f}%"
+                         f"最大 {max_drop:.1f}%，平均 {avg_drop:.1f}%{_note}"
                      ),
                      "action_hint": "警惕继续下行，抄底需等待企稳",
                      "invalidation": "若 48h 内收复跌幅 50% 以上",
@@ -5661,6 +5722,8 @@ def score_opportunities(overview: dict) -> dict:
             syms = [str(it.get("symbol", "?")) for it in top_pvs]
             top_price_change = top_pvs[0].get("metric_value", 0)
             strength = min(88, 55 + int(top_price_change * 0.5) + len(top_pvs) * 2)
+            # U-A：连板 + 量价齐升共振标注 + 强度加成（上限 88 不变）
+            _note, strength = augment_diff_streak(pvs, strength, 88, "共振", t=t)
             _push_opportunity(
                 {"target": f"{len(top_pvs)} 币 量价齐升",
                  "direction": "long", "confidence": "high",
@@ -5668,7 +5731,7 @@ def score_opportunities(overview: dict) -> dict:
                  "signal_type": "price_volume_surge",
                  "key_metric": "价格 + 成交量双升",
                  "trigger_logic": (
-                     f"{', '.join(syms)} 量价齐升，价格涨幅最高 {top_price_change:.1f}%"
+                     f"{', '.join(syms)} 量价齐升，价格涨幅最高 {top_price_change:.1f}%{_note}"
                  ),
                  "action_hint": "量价共振，关注趋势延续性",
                  "invalidation": "若成交量快速萎缩或价格跌破支撑",

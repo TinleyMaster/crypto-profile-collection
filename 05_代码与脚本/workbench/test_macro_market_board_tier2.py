@@ -24,6 +24,9 @@ F. 口径屏障 —— 连板起点恰为榜单口径变更日时标记 streak_s
 G. D3 结构化字段加权 —— mcap_tier / vol_mcap_ratio（pvs 分位）/
    composite_score（sector_rotation clamp）加成，总 cap 80、缺字段保守 0、
    不改「是否派生」（工单 变化榜D3信号联动+D4质量收口 2026-09-28）
+H. U-A 连板增强接早报 —— FEAT-SIGNAL-SRC-001 三段（price_surge/price_crash/
+   pvs）消费 streak_days：命中（≥3 且非 ambiguous）加注强度文案 +（涨侧）小幅加成；
+   连跌只标注不加成；上限 90/92/88 不变（工单 连板增强接早报 2026-09-28）
 """
 import os
 import sys
@@ -367,6 +370,48 @@ _g8 = mm.derive_board_opportunities(_cats("price_volume_surge", "up", [
 ]), streak_threshold=3)
 check(len(_g8) == 4 and all("board_score_bonus" in o for o in _g8),
       "G8 vol_mcap 缺值/None 不抛异常且派生数不变")
+
+# ── H. U-A 连板增强接早报 ──
+print("[H] 连板增强接早报（U-A）")
+_h_items = [
+    {"symbol": "AAA", "streak_days": 5},
+    {"symbol": "BBB", "streak_days": 2},                                  # 未达阈值
+    {"symbol": "CCC", "streak_days": 4, "streak_start_ambiguous": True},  # 口径变更日 → 剔除
+    {"symbol": "DDD", "streak_days": 3},
+]
+_hits = mm._diff_streak_hits(_h_items)
+check([x["symbol"] for x in _hits] == ["AAA", "DDD"],
+      "H1 命中集：sd>=3 且非 ambiguous（BBB 2天 / CCC ambiguous 剔除）")
+_note = mm._diff_streak_note(_hits, "强势")
+check("AAA连续5天" in _note and "持续强势" in _note, "H2 note 含「AAA连续5天」「持续强势」", _note)
+check(mm._diff_streak_note([]) == "", "H2b 无命中 → 空 note")
+check(mm._diff_streak_bonus(_hits) == 4, "H3 2 命中 → +4（2×2）")
+check(mm._diff_streak_bonus([{}] * 5) == 8, "H3b 5 命中 → 封顶 8")
+
+# H4~ 单点集成（真实被三段调用的函数）
+_n, _s = mm.augment_diff_streak([{"symbol": "X", "streak_days": 5}], 60, 90, "强势")
+check("X连续5天" in _n and _s == 62, "H4 命中 → note 含「X连续5天」、强度 60→62")
+_n2, _s2 = mm.augment_diff_streak([{"symbol": "X", "streak_days": 5}], 60, 90, "走弱",
+                                  apply_bonus=False)
+check("连续5天" in _n2 and _s2 == 60, "H5 连跌只标注不加成（apply_bonus=False）")
+_n3, _s3 = mm.augment_diff_streak([{"symbol": "X", "streak_days": 5}], 90, 90, "强势")
+check(_s3 == 90, "H6 加成后仍封顶 90")
+_n4, _s4 = mm.augment_diff_streak([{"symbol": "X", "streak_days": 2}], 60, 90, "强势")
+check(_n4 == "" and _s4 == 60, "H7 sd=2 未达阈值 → 不加注不加成")
+_n5, _s5 = mm.augment_diff_streak(
+    [{"symbol": "X", "streak_days": 9, "streak_start_ambiguous": True}], 60, 90, "强势")
+check(_n5 == "" and _s5 == 60, "H7b ambiguous 连板 → 不加注不加成")
+
+# H8 源码守卫：三段落接线 + 上限值 + 文案拼接
+check(_MACRO_SRC.count("augment_diff_streak(") == 4, "H8a 1 定义 + 3 处调用")
+check('augment_diff_streak(strong, strength, 90, "强势"' in _MACRO_SRC,
+      "H8b price_surge 段接线（cap 90）")
+check('augment_diff_streak(crash, strength, 92, "走弱"' in _MACRO_SRC
+      and "apply_bonus=False" in _MACRO_SRC, "H8c price_crash 段标注不加成（cap 92）")
+check('augment_diff_streak(pvs, strength, 88, "共振"' in _MACRO_SRC,
+      "H8d pvs 段接线（cap 88）")
+check(mm._DIFF_STREAK_MIN_DAYS == 3, "H8e 阈值常量 3（与 D3 派生一致）")
+check("{_note}" in _MACRO_SRC, "H8f note 已拼进 trigger_logic")
 
 # ── 汇总 ──
 print(f"\n{passed}/{passed + failed} 通过")

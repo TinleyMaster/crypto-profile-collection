@@ -2149,3 +2149,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **prod 只读端到端复验**：MARSCOINUSDT 真库 `_get_resonance` + `_build_reason` 渲染——`catalyst_dir {bearish:1,bullish:1}`、判读「3 维逆风、无顺风项 ⇒ 【不建议新开】」（量比维只计 1）、批级窗口单列、`ret_p75=-2.44%` 使 RR 0.29 不判可开。
 - **待部署**：`scan_daemon.py` 需重启容器后生效。
 - **未做 / 边界**：① 报告 §七#7「长窗统计选日规则（`T-1 且 24h 覆盖 ≥90%`）」按建议**单开工单**，本轮不做；② N-0928-1 的「重」方案（④ 目标位改本币 2×ATR）按待拍板取「最省」方案，未做；③ 摘要去重阈值 0.9 为经验值（未回测），有 `SUMMARY_DEDUP_MIN_LEN`/`RATIO` 两个常量可调。
+
+### 连板增强接早报 U-A（工单_连板增强接早报_2026-09-28，2026-09-28，本次提交）
+
+来源：`工单_连板增强接早报_2026-09-28.md`。**候选范围**：U-A（信号层接 `streak_days`，必做）+ U-B（复活 BRIEF-OPT-002 展示层，可选/待拍板）。**本轮只做 U-A**（Q1 取工单建议「不做 U-B，仅 U-A 足够」），Q2 阈值 = 3（与 D3 一致），Q3 连跌只标注不加成。**零 DDL、零迁移、不改判定口径/上限**。
+
+- **关键发现（工单已核实，本轮沿用）**：`_build_daily_diff_brief` 产出的 `M5_daily_diff` 是**死代码**——`brief` 里 put 了但全仓零 get，早报 HTML 无「每日变化榜」板块；因此连板接早报的真实高杠杆点是**信号层**（`FEAT-SIGNAL-SRC-001` 的 `price_surge`/`price_crash`/`price_volume_surge` 机会，已渲染进机会清单），而非展示层。U-B 未做，`M5_daily_diff` 仍为死代码（**待拍板**是否复活）。
+- **U-A 落地（`macro_market.py`）**：新增纯函数 `_diff_streak_hits` / `_diff_streak_note` / `_diff_streak_bonus` + 单点 `augment_diff_streak(items, base_strength, cap, label, apply_bonus, t)`；三段接线：
+  - `price_surge`：命中连板 → `trigger_logic` 追「（其中 QNT连续4天 持续强势）」+ 强度 `min(90, base+bonus)`。
+  - `price_crash`：命中连跌 → 只标注「持续走弱」，**不加成**（`apply_bonus=False`；连跌是弱势确认，不应抬 confidence —— Q3）。
+  - `price_volume_surge`：命中 → 标「持续共振」+ `min(88, base+bonus)`。
+  - 阈值 / 加成常量：`_DIFF_STREAK_MIN_DAYS=3`、`_DIFF_STREAK_BONUS_CAP=8`、`_DIFF_STREAK_BONUS_PER_HIT=2`；与 `740e31c` 口径屏障一致，`streak_start_ambiguous=True` 一律剔除（口径年龄≠强度）。可用 `t["diff_streak_min_days"]` 覆盖阈值。
+  - **不改** `n_confirm`/`direction`/`signal_type`/`key_metric`/上限值（90/92/88）——只动文案与分数。
+- **通道2 prod 只读复算（live 09-27 `daily_diff_summary`）**：`price_change_24h/up` 强势(≥15%)17 条 → U-A 命中 **1 条 = QNT（连续4天）**；`price_change_24h/down` 强势(≥12%)8 条 → 命中 **1 条 = SAGA（连续4天，走弱）**；`price_volume_surge/up` 30 条 → 命中 0（无 ≥3 天）。即当日早报 `price_surge`/`price_crash` 文案会分别标注 QNT / SAGA 的连板。
+- **探针**：`test_macro_market_board_tier2.py` **51 → 67/0**（新增 H 组 16 条：H1 命中集剔 ambiguous/未达阈值、H2 note 文案、H3 加成封顶、H4 命中→+2、H5 连跌不加成、H6 cap 90、H7 未达阈值/ambiguous 不变、H8 源码守卫「1 定义 + 3 调用 / 各段 cap 90/92/88 / apply_bonus=False / `{_note}` 已拼接」）。**回归**：workbench 全量 **52 个 `test_*.py` 全部 exit=0**；`py_compile` 通过。
+- **与 D3 的关系**：D3 是**独立派生** `diff_streak_up` 机会（变化榜连板独立成信号）；U-A 是在**既有暴涨/暴跌/量价齐升机会**里标注连板并小幅加成。两路互不冲突（信号层双保险）。
+- **未做 / 边界（须留档）**：① **U-B（`M5_daily_diff` 渲染）未做** —— `_build_daily_diff_brief` 每次仍计算但不消费，属已知死代码，待产品拍板是否新增「📊 每日变化榜」模块；② 阈值 3 为工单/与 D3 口径一致的拍板值，非回测校准；③ 加成 cap 8 / per_hit 2 为经验值（工单建议档）；④ live 只读复算基于沙箱抓取的 09-27 `daily_diff_summary`，非直连 prod DB。
+- **待部署**：`macro_market.py` 需容器 **redeploy** 后次日早报机会文案生效。

@@ -2086,6 +2086,18 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证**：`test_highlight_audit_20260924.py` **80 → 86/0**；**9 组突变体全部 rc=1**（M-F/M-L/M-I 以及 M-B/M-M/M-D/M-E/M-H/M-J，含原「仅源码守卫」者）；恢复校验 86/0。既有回归（`test_highlight_alert` 68/0、`test_highlight_determinacy_20260926` 72/0、`test_macro_market_*`、`test_risk_signal_p0r2` 14/0、`test_signal_type_calibration` 99/0、`test_major_event_alert` 55/0）全绿；`py_compile` 通过。
 - **未做 / 边界（须留档）**：① **N6-4（线上行为态取证）为观测项，不改码** —— 需一份含「判别性并列组」（前 N-1 分量完全相同且上游序与 es 序相反）的线上快照才能补 N5-1 的行为证据，当前样本不具判别力（复验 §4.2）；② 复验 §二末段登记的 **`decayed_score`（候选池主序）vs `conviction_score`（终排主序）口径分裂**属既有设计，**本轮未动**（改主序口径是行为变更，需产品拍板）；③ `select_risk_signals` 池层未补 es（其终排走 AI short 分支，行为已由 N5-1 覆盖）。
 
+### N7-1 删除型承重加固（复验 `复验_814ad8d_N6承重加固_2026-09-28.md`，2026-09-28，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_814ad8d_N6承重加固_2026-09-28.md`。复验确认 N6-1/2/3 三条加固**全部真承重**（12 组突变体全 rc=1，上轮不承重的 M-F/M-L/M-I 全数转红）、86/0 精确复现、`814ad8d` 已部署（容器重建 13:33:53/54 CST，滞后 5m18s），并独立核对了 N6-2 四条断言的 mixed 并列公式与源码同源、离线不连库不连网。唯一新发现 **N7-1（P4）**：删除型突变在 v2-short / V1-高亮 / V1-高危三条支路上**只有源码文本守卫**（M10/M11/M12），无行为断言响应；本轮**只补护栏（纯测试）**，不动生产代码。**零 DDL、零迁移、无生产行为变更**。
+
+- **N7-1（P4，已修）三条删除型行为断言**：`test_highlight_audit_20260924.py` 新增 ——
+  - v2 高危支：`(ai70,base60,es10)` vs `(ai70,base60,es90)` ⇒ mixed 并列 45、base_score 并列 60，**仅 es 不同**；正确 `[Y,W]`，删掉 es 分量即回落输入的稳定序 `[W,Y]`。
+  - V1 高亮：`(ai70,base60,es10)` vs `(ai70,base60,es90)` ⇒ mixed 并列 64、ai_score 并列，仅 es 不同。
+  - V1 高危：`(ai70,base60,es10)` vs `(ai70,base60,es90)` ⇒ mixed 并列 48、base_score 并列，仅 es 不同。
+  - v2 long 的删除型已由既有 N5-1 `_ai_tie` 行为断言覆盖（M9）。
+- **验证（本轮实测）**：`test_highlight_audit_20260924.py` **86 → 89/0**；**删除型承重的独立见证** —— 把三处 `_sort_key` 的 `es = _safe_float(...) or 0.0` 全部改为 `es = 0.0`（**return 元组不动 ⇒ 源码文本守卫保持全绿**），跑出 **85/4（rc=1）**，4 条失败正是 `_ai_tie`（long）+ 三条 N7-1 删除型断言 ⇒ **证明它们是行为承重，而非只靠字符串守卫**；恢复后 89/0。回归（`test_highlight_alert` 68/0、`test_highlight_determinacy_20260926` 72/0、`test_macro_market_*`、`test_risk_signal_p0r2` 14/0、`test_signal_type_calibration` 99/0、`test_major_event_alert` 55/0）全绿；`py_compile` 通过。
+- **未做 / 边界（须留档）**：① **N6-4（线上行为态取证）仍为观测项**（需「前 N-1 分量全等且上游序与 es 序相反」的快照）；② 复验 §六 登记的 `decayed_score` vs `conviction_score` 主序口径分裂、`select_risk_signals` 池层未补 es、两个历史红套件（`test_daily_brief_p0_20260927` 出生即红 263/16；`test_daily_brief_20260924`）均**不在本轮范围**。
+
 ### 告警邮件「开仓依据」复验 N-8702-A~H 处置（复验_告警邮件开仓依据_8702607_2026-09-28，2026-09-28，本次提交）
 
 来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_告警邮件开仓依据_8702607_2026-09-28.md`。复验确认 `8702607`「全项到位、测试计数逐项复现、真库重渲染全部兑现」，另开 **8 条新缺陷（N-8702-A~H）+ 3 项自述纠正**。本轮按报告 §十 待拍板建议**全部落地**（A~H + 自述②③），**零删除、未改 tier/评分口径、未改任何阈值**。改动面：`scan_daemon.py` / `build_scan_edge_report.py` / 新迁移 `fix_079` / 探针。

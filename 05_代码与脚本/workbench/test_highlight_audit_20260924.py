@@ -17,6 +17,7 @@
   N4   event_strength 参与排序（池层 _sort_key + 邮件 card_sort_key 末级 tie-break）
   N5   N4 三层收口（AI 终排末级补 es / 池层终排显式 raw→es / 护栏去自证）
   N6   N5 承重加固（终排 es 判别例 / AI 终排 es 层级判别例 / 主卡换源 es 跟随）
+  N7-1 删除型承重（v2 高危 / V1 高亮 / V1 高危：同 mixed 同主键时 es 高者排前）
 """
 import os
 import sys
@@ -374,12 +375,20 @@ try:
     _ai_layer_short = ai2.ai_enrich_signals_v2(
         [_enrich_opp2("板块U", 90, 10, 60), _enrich_opp2("板块V", 60, 90, 30)],
         direction="short")
+    # N7-1 删除型承重：同 mixed 且同 base_score，仅 es 不同 ⇒ 删掉 es 分量即回落到
+    # 输入稳定序（[W,Y]），与正确序 [Y,W] 相反，故该断言能抓住「es 整个消失」。
+    _ai_del_short = ai2.ai_enrich_signals_v2(
+        [_enrich_opp2("板块W", 70, 10, 60), _enrich_opp2("板块Y", 70, 90, 60)],
+        direction="short")
 finally:
     ai2.load_ai_signal_rules = _orig_rules
     ai2.analyze_asset_v2 = _orig_analyze
 check([o["target"] for o in _ai_layer_short] == ["板块U", "板块V"],
       "N6-2 AI 终排（高危支）es 层级：mixed 并列时 base_score 先于 es",
       str([o["target"] for o in _ai_layer_short]))
+check([o["target"] for o in _ai_del_short] == ["板块Y", "板块W"],
+      "N7-1 v2 高危支删除型承重：同 mixed 同 base_score 时 es 高者排前",
+      str([o["target"] for o in _ai_del_short]))
 
 # V1 回退（高亮）：sort key (-downgraded, mixed, ai_score, es)，mixed = 0.4*ai + 0.6*base。
 # 取 (ai=90,base=60)/(ai=60,base=80) 使 mixed 并列 72，ai_score 与 es 方向相反。
@@ -402,6 +411,20 @@ try:
         {"target": "板块T", "_test_ai": 60, "conviction_score": 40,
          "conviction_tier": "MED", "event_strength": 90},
     ])
+    # N7-1 删除型承重：同 mixed 且同 ai_score（高亮）/ base_score（高危），仅 es 不同
+    # ⇒ 删掉 es 分量即回落到输入稳定序，与正确序相反。
+    _v1_del_hi = ai2.ai_enrich_highlight_signals([
+        {"target": "板块Z", "_test_ai": 70, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 10},
+        {"target": "板块2", "_test_ai": 70, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 90},
+    ])
+    _v1_del_risk = ai2.ai_enrich_risk_signals([
+        {"target": "板块3", "_test_ai": 70, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 10},
+        {"target": "板块4", "_test_ai": 70, "conviction_score": 60,
+         "conviction_tier": "MED", "event_strength": 90},
+    ])
 finally:
     ai2._analyze_merged_signal = _orig_merged
 check([o["target"] for o in _v1_hi] == ["板块Q", "板块R"],
@@ -410,6 +433,12 @@ check([o["target"] for o in _v1_hi] == ["板块Q", "板块R"],
 check([o["target"] for o in _v1_risk] == ["板块S", "板块T"],
       "N6-2 V1 高危终排 es 层级：mixed 并列时 base_score 先于 es",
       str([o["target"] for o in _v1_risk]))
+check([o["target"] for o in _v1_del_hi] == ["板块2", "板块Z"],
+      "N7-1 V1 高亮删除型承重：同 mixed 同 ai_score 时 es 高者排前",
+      str([o["target"] for o in _v1_del_hi]))
+check([o["target"] for o in _v1_del_risk] == ["板块4", "板块3"],
+      "N7-1 V1 高危删除型承重：同 mixed 同 base_score 时 es 高者排前",
+      str([o["target"] for o in _v1_del_risk]))
 
 # ── N6-3：主卡换源时 event_strength 跟随 ──
 # 同一 target 两条子信号：p1(分60/共振2维/es30) 先被候选池顶到前面成为主卡，

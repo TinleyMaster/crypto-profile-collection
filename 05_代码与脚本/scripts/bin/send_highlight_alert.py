@@ -196,14 +196,16 @@ def symbol_count(cards: list[dict]) -> int:
 
 
 def card_sort_key(item: tuple[dict, str]) -> tuple:
-    """邮件内排序：HIGH 优先 → 新增优先 → 分数降序。"""
+    """邮件内排序：HIGH 优先 → 新增优先 → 分数降序 → 事件强度降序。"""
     card, kind = item
     is_high = 1 if str(card.get("conviction_tier") or "").upper() == "HIGH" else 0
     is_new = 1 if kind == ALERT_NEW else 0
     score = _safe_float(card.get("decayed_score")
                         if card.get("decayed_score") is not None
                         else card.get("conviction_score"))
-    return (is_high, is_new, score)
+    # 末级按事件强度：同分时避免「事件强度 86 排在 81 之后」的展示自相矛盾。
+    # _safe_float 对缺失/非数值（event_strength 可由催化剂卡等路径留空）退化为 0.0。
+    return (is_high, is_new, score, _safe_float(card.get("event_strength")))
 
 
 # =====================================================================

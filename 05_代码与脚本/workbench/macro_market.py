@@ -4966,7 +4966,14 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
             raw = float(raw) if raw is not None else score
         except (TypeError, ValueError):
             raw = score
-        return (is_high, is_new, resonance, score, raw)
+        # 末级再挂事件强度：与句首的 HIGH/新增/共振/分数同分时按真实事件量排，
+        # 让「事件强度」与卡片顺序自洽。放在 raw 之后（raw 是保卡下限压平的还原，
+        # 优先级更高）；event_strength 缺失（催化剂等路径可为空）退化为 0。
+        try:
+            es = float(o.get("event_strength") or 0)
+        except (TypeError, ValueError):
+            es = 0.0
+        return (is_high, is_new, resonance, score, raw, es)
 
     # 取足够多的候选，确保合并和筛选后还有量
     candidates = sorted(long_opps, key=_sort_key, reverse=True)[:max_total * 10]

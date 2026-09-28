@@ -21,6 +21,8 @@
 
 判定（§6.4）：p90 绝对差异 < T 且资金费率同向率 > 80% ⇒ injectable（可进入阶段二并行注入）；
 否则 monitor_only（保留 Binance 主路、CG 仅作异常监测）；样本不足 ⇒ insufficient_data。
+⚠️ 「同向率」= **两源同正负占比**（`_same_sign`），**不是**差值 `CG-BN` 的正负主导——
+后者会把「两源符号相反」（最该拦下的危险态）误算成同向。
 T 只留代码常量（`FUNDING_ABS_DIFF_P90_T`，当前未校准），不在文档留数字。
 
 CLI：`--symbols` / `--limit`（默认全池）、`--hours`（默认 48h）、`--json`、`--probe`。
@@ -143,12 +145,43 @@ def pctile(sorted_vals: list[float], p: float) -> float | None:
     return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
 
 
+def _same_sign(a: float, b: float) -> bool:
+    """两源是否同正负（任一侧为 0 ⇒ 不算同向）。
+
+    对应 §6.4「符号同向率（即**两源是否同正负**）」——注意**不是**差值 `a-b` 的正负主导：
+    两源符号相反（如 CG=+0.0001 / BN=-0.0001）时差值恒为 `2a` 正号，旧算法会把它误算成同向。
+    """
+    return (a > 0 and b > 0) or (a < 0 and b < 0)
+
+
+def summarize_pairs(pairs: list[dict], key: str, flag_key: str | None = None) -> dict:
+    """对 pairs 中该 key 的差值做分位统计（纯函数，可离线单测）。
+
+    `same_direction_pct` 取 `flag_key` 对应的**布尔同向标志**（两源同正负）占比，
+    与差值自身正负无关；无 flag_key/无样本 ⇒ None（缺失≠0）。
+    """
+    vals = sorted([p[key] for p in pairs if key in p])
+    out = {
+        "n": len(vals),
+        "p50": pctile(vals, 0.5),
+        "p90": pctile(vals, 0.9),
+        "p95": pctile(vals, 0.95),
+        "same_direction_pct": None,
+    }
+    if flag_key:
+        flags = [p[flag_key] for p in pairs if flag_key in p]
+        if flags:
+            out["same_direction_pct"] = round(sum(flags) / len(flags) * 100, 1)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="CGV4-003 对账：coinglass_derivatives_snapshot vs asset_derivatives（只读）")
     ap.add_argument("--symbols", default="",
                     help="指定对比币（逗号分隔，本库合约码，如 BTCUSDT,1000PEPEUSDT）；默认全池")
-    ap.add_argument("--limit", type=int, default=0, help="只对比前 N 个币（0 = 全池）")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="只对比前 N 个币（按基码字典序，作用在 coinglass 侧；0 = 全池）")
     ap.add_argument("--hours", type=int, default=DEFAULT_LOOKBACK_H,
                     help=f"只看最近 N 小时快照（默认 {DEFAULT_LOOKBACK_H}h，覆盖 2 个日频周期）")
     ap.add_argument("--min-pairs", type=int, default=MIN_PAIRS,
@@ -215,31 +248,23 @@ def main() -> int:
             rec["funding_rate_abs_diff"] = cg_f - bn_f
             denom = abs(bn_f) if bn_f != 0 else 1e-12
             rec["funding_rate_rel_diff"] = (cg_f - bn_f) / denom
+            rec["funding_same_sign"] = _same_sign(cg_f, bn_f)
         if cg_oi is not None and bn_oi is not None and bn_oi != 0:
             rec["oi_usd_rel_diff"] = (cg_oi - bn_oi) / bn_oi
+            rec["oi_same_sign"] = _same_sign(cg_oi, bn_oi)
         if len(rec) > 1:
             pairs.append(rec)
 
+    # 样本不足由本门槛先以 rc=1 拦下；judge() 的 insufficient_data 只是防御性分支
+    # （仅在 summarize 返回 None 时触发，正常路径走不到），两者口径一致：缺失≠0、不臆断。
     if len(pairs) < args.min_pairs:
         print(f"[audit] 配对样本 {len(pairs)} < {args.min_pairs}，暂不输出差异。"
               f"coinglass 最近 {args.hours}h All 行 {len(cg_rows)} 币，"
               f"与 Binance 源重叠 {len(pairs)} 币。", file=sys.stderr)
         return 1
 
-    def summarize(key: str) -> dict:
-        vals = sorted([p[key] for p in pairs if key in p])
-        pos = sum(1 for v in vals if v > 0)
-        neg = sum(1 for v in vals if v < 0)
-        return {
-            "n": len(vals),
-            "p50": pctile(vals, 0.5),
-            "p90": pctile(vals, 0.9),
-            "p95": pctile(vals, 0.95),
-            "same_direction_pct": round(max(pos, neg) / len(vals) * 100, 1) if vals else None,
-        }
-
-    funding_diff = summarize("funding_rate_abs_diff")
-    funding_rel = summarize("funding_rate_rel_diff")
+    funding_diff = summarize_pairs(pairs, "funding_rate_abs_diff", "funding_same_sign")
+    funding_rel = summarize_pairs(pairs, "funding_rate_rel_diff", "funding_same_sign")
     result = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "lookback_hours": args.hours,
@@ -250,7 +275,7 @@ def main() -> int:
         "binance_rows": len(bn_rows),
         "funding_rate_diff": funding_diff,
         "funding_rate_rel_diff": funding_rel,
-        "oi_usd_rel_diff": summarize("oi_usd_rel_diff"),
+        "oi_usd_rel_diff": summarize_pairs(pairs, "oi_usd_rel_diff", "oi_same_sign"),
         "judgment": judge(funding_diff, funding_rel),
         "samples": pairs[:20] if args.json else None,
     }

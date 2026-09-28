@@ -8,6 +8,8 @@
   ② **CLI 契约**：`--symbols` / `--limit` / `--hours` / `--json` / `--probe` 齐备（§6.4 表）；
   ③ **判定规则**：p90 绝对差异 < T 且同向率 > 80% ⇒ injectable；否则 monitor_only；
      缺样本 ⇒ insufficient_data（缺失≠0，不臆断）；阈值 T 只留代码常量（不在文档留数字）；
+     ⚠️ 「同向率」= **两源同正负占比**（`_same_sign`），**非**差值 `CG-BN` 的正负主导
+     （后者会把「两源符号相反」误算成同向——见测试3b 回归护栏）；
   ④ **符号口径**：合约码 → 币种基码映射与 ingest 同逻辑（BTCUSDT→BTC / 1000PEPEUSDT→1000PEPE）；
   ⑤ **口径隔离**：coinglass 取 `exchange='All'` 聚合行；Binance 取 `row_number()` 最新一行。
 
@@ -86,6 +88,24 @@ check("sys.exit(main())" in _SRC and "__main__" in _SRC,
       "入口受 __main__ 保护（import 不连库、不执行对账）")
 
 
+def _module_level_calls(tree, names=("get_connection", "get_settings")) -> list[str]:
+    """模块顶层（函数/类定义之外）对 DB 入口的调用 —— 应为空，否则 import 即连库。"""
+    found: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                    and sub.func.id in names):
+                found.append(sub.func.id)
+    return found
+
+
+check(not _module_level_calls(ast.parse(_SRC)),
+      "模块顶层无 get_connection/get_settings 调用（import 即安全，测试纯度守卫）",
+      str(_module_level_calls(ast.parse(_SRC))))
+
+
 # ════════════════════════════════════════════════════════════
 # 3. 不变量③：判定规则（纯函数 judge）
 # ════════════════════════════════════════════════════════════
@@ -118,6 +138,37 @@ for _missing in (
           f"缺样本 {_missing} ⇒ insufficient_data（缺失≠0，不臆断方向）", str(_v))
 check("judgment" in _SRC and "judge(funding_diff, funding_rel)" in _SRC,
       "判定结果实际进入输出（result['judgment']，非只算不算）")
+
+
+# ── 3b. 同向率语义：两源同正负（而非差值 CG-BN 的正负主导）─────────
+print("\n【测试3b】同向率 = 两源同正负占比（P1 修复回归护栏）")
+check(au._same_sign(0.0001, 0.0002) is True and au._same_sign(-0.0001, -0.0002) is True,
+      "同为正 / 同为负 ⇒ 同向")
+check(au._same_sign(0.0001, -0.0001) is False, "符号相反 ⇒ 不同向")
+check(au._same_sign(0.0, 0.0001) is False and au._same_sign(0.0, 0.0) is False,
+      "任一为 0 ⇒ 不算同向（方向不可判）")
+
+# 复现审计原例：两源符号相反 ⇒ 差值 cg-bn 恒为正，旧算法（差值的正负主导）会误判 100% 同向
+_pairs = [
+    {"funding_rate_abs_diff": 0.0002, "funding_same_sign": False},   # cg=+0.0001 bn=-0.0001
+    {"funding_rate_abs_diff": 0.0002, "funding_same_sign": False},
+    {"funding_rate_abs_diff": 0.0001, "funding_same_sign": True},
+    {"funding_rate_abs_diff": 0.0001, "funding_same_sign": True},
+]
+_s = au.summarize_pairs(_pairs, "funding_rate_abs_diff", "funding_same_sign")
+check(_s["same_direction_pct"] == 50.0,
+      "同向率按「两源同正负」标志计（2/4=50%），非差值正负主导（旧算法会得 100%）", str(_s))
+check(abs(_s["p90"] - 0.0002) < 1e-12 and _s["n"] == 4,
+      "分位仍基于差值（p90=0.0002）——只修同向率口径，不动统计口径", str(_s))
+
+_dir = au.judge({"p90": 0.0001, "same_direction_pct": 0.0}, {"p90": 0.1})
+check(_dir["verdict"] == "monitor_only",
+      "两源全符号相反（同向率 0%）⇒ monitor_only（不因 p90<T 误判 injectable）", str(_dir))
+
+_noflag = au.summarize_pairs(_pairs, "funding_rate_abs_diff")
+check(_noflag["same_direction_pct"] is None, "无 flag_key ⇒ 同向率 None（缺失≠0）")
+check(au.summarize_pairs([], "funding_rate_abs_diff", "funding_same_sign")["same_direction_pct"] is None,
+      "无样本 ⇒ 同向率 None（不返回 0 冒充）")
 
 
 # ════════════════════════════════════════════════════════════

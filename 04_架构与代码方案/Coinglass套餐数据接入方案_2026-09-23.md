@@ -496,7 +496,9 @@ CoinGlass 侧重复取**无增益**，且 3 接口 × 池规模会吃掉额度�
 **落地状态（2026-09-28）**：脚本已按本表完整实现 —— `--symbols` / `--limit` 参与配对收敛，
 判定由纯函数 `judge()` 输出三态 `injectable` / `monitor_only` / `insufficient_data`
 （缺样本不臆断方向），阈值常量 `FUNDING_ABS_DIFF_P90_T`（未校准，仅作两态区分）。
-离线护栏单测 `workbench/test_coinglass_audit_20260928.py`（37 断言，纯源码/纯函数，不连库）。
+「符号同向率」严格取**两源同正负占比**（`_same_sign`；任一侧为 0 不算同向），
+**不是**差值 `CG-BN` 的正负主导（后者会把「两源符号相反」误算成同向）。
+离线护栏单测 `workbench/test_coinglass_audit_20260928.py`（纯源码/纯函数，不连库）。
 
 **何时可跑**：需 `coinglass_derivatives_snapshot` 积累至少 2 天生产数据（即容器重启后第 3 天起）。
 当前手工验证只有 3 币 71 行，无统计意义，**不立即跑对账**。

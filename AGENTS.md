@@ -2103,3 +2103,21 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **prod 只读端到端复验**：`_load_reason_context` + `_build_reason` 真库实跑，INXUSDT 姿态渲染出「同档 n=23 / n=29」「量比 <2.5 档 · n=7 · 止损率 57.1%」「窗口（批级 近 3 日滚动）」「3 顺 2 逆 ⇒ 观望」；心跳 `scan_alert_reason` 写入 `last_ok_at`、`last_error=NULL`。
 - **待部署**：`scan_daemon.py` 需重启容器后生效（`build_scan_edge_report.py` 为调度脚本，下次调度即用新码）。
 - **未做 / 边界**：① **N-8702-A 的 B 方案（跨日滚动窗口，避开当日结算滞后）不在本单**，按待拍板列入下个工单；② 2 参旧调用方「行为逐字不变」的旧自述**已被本轮修正**（图例不再无条件输出新锚点），对应断言已覆盖；③ 复验的「真实邮件观感」需等下一批告警邮件（部署后）。
+
+### 变化榜 R3 决策落地 + D3 信号联动 + D4 质量收口（2026-09-28，本次提交）
+
+来源：`决策_R3产出策略_2026-09-28.md` + `工单_变化榜D3信号联动+D4质量收口_2026-09-28.md`。**零 DDL、零迁移**；R3 三项维持现状（不改判定策略），D3 按工单建议档实施，D4 三条经 live 数据核实不成立。
+
+- **R3（产出策略）拍板 = 维持现状，但退役过期提醒**：R3-1 `volume_surge_24h` **不加回** Tier2 白名单；R3-2 不新增总开关（复用 `diff_streak_threshold: 0` 入口开关）；R3-3 阈值维持 3。**代码动作**：`scheduler.py` 删除一次性「国庆后待办·评估 volume_surge 加回」提醒 job（原 `0 9 6 10 *`，会在 2026-10-06 发一封「请拍板」邮件，现决策已下，留着即误导），并删除 `scripts/bin/remind_tier2_revisit.py`；原地留注释登记决策出处。
+- **D3（信号联动字段加权，`macro_market.derive_board_opportunities`）**：`conviction_score = base(52+(sd-3)*6) + mcap_tier 加成 + vol_mcap_ratio 分位加成（仅 pvs）+ composite_score clamp 加成（仅 sector_rotation）`，**总 cap 80 不变、不改是否派生**。
+  - 常量：`_MCAP_TIER_BONUS={top10:6,top100:4,top500:2,top1000:0}`、`_VOL_MCAP_HIGH_BONUS=6 / _VOL_MCAP_MID_BONUS=3`（批次分位 top25%/前50%）、`_VOL_MCAP_MIN_BATCH=4`（小批次不分位）、`_SECTOR_BONUS_CAP=8`（`clamp(round((cs-50)/5),0,8)`）。
+  - 口径取舍（工单 D3-1~D3-3 的建议档）：D3-1 启用 mcap_tier 加成；**D3-2 `primary_sector` 不加权**（缺赛道热度基准，易主观）；D3-3 启用 vol 分位 + sector clamp。
+  - 加成分量落 `board_score_bonus={mcap_tier,vol_mcap,sector}` 供溯源；缺 tier / 缺 detail / 未知值一律 0（保守，不改基准分）。
+  - 数据来源已核实（非臆测）：`db_stats.get_daily_diff_summary` 的 item 顶层带 `mcap_tier`，`detail` 带 `vol_mcap_ratio`（pvs）/ `composite_score`（sector_rotation，`daily_diff_generator` L684-705 落库）。
+- **D4（数据质量三条）经 live 09-27 数据核实，均为单日假象 / 已被信号侧规避，不改码**：
+  - D4-1 `price_change_24h` rank 基准：09-23 曾现 down 从 721 起；live 09-27 实测 up rank 1-37、down rank 1-23（**均从 1 起**）⇒ 跨方向不可比问题不复现。
+  - D4-2 `volume_surge_24h` down 语义：live down 值域 [-98.79,-57.81]（缩量），语义冲突仍在；但 `_BOARD_DIRECTIONAL` 已排除该榜双向（信号侧不消费），展示层是否改标「缩量」属可选微调，按工单**先不管**。
+  - D4-3 `market_cap_mover` down 缺 1~4：live 09-27 down n=5、rank 1-5（**无缺口**）⇒ 观察不复现，非预期缺陷。
+- **自测**：`test_macro_market_board_tier2.py` **36 → 51/0**（新增 G 组 15 条：G1 mcap_tier ±6、G2 vol 分位 +6/+3/0、G3 sector clamp 0/4/8、G4 总 cap 80、G5 缺字段保守 base、G6 未知 tier 0、G7 常量值域 + 小批次不分位、G8 缺值不抛异常/派生数不变）。**回归**：workbench 全量 **52 个 `test_*.py` 全部 exit=0**；`py_compile` 通过；`scheduler.py --list` 确认提醒 job 已移除。
+- **runtime 只读复验（R1 待办）**：`GET /api/daily-diff`（2026-09-27）⇒ ① `streak_start_ambiguous` 字段在响应中出现 **235 次**（接口已透出）；② `volume_surge_24h/up` 40 条中 `streak_start_ambiguous=True` 的 4 条（KII/SXT/ME/ACT，🔥20 天）——**不再是「11 条同值 🔥16 天」**，且前端连板榜 `if (item.streak_start_ambiguous) return` 将其排除。③ `/api/market/overview` 本轮多次超时未取到（重端点 + 沙箱网络），`diff_streak_up` 信号数未在本次核到。
+- **待部署**：`macro_market.py`（D3）/ `scheduler.py`（R3 提醒退役）需容器 **redeploy** 后生效。

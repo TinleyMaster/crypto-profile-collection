@@ -21,6 +21,9 @@ D. ai_enrich_signals_v2 —— P4 跳过门（全 ai_skip 跳过；混合卡仍�
 E. 时序结构 —— 注入点必须在 _resolve_symbols_to_asset_ids 之前（P1-1）
 F. 口径屏障 —— 连板起点恰为榜单口径变更日时标记 streak_start_ambiguous，
    展示层（强势面板 / 🔥N天 角标）据此不主张强度（FIX-DIFF-STREAK-SEGMENT）
+G. D3 结构化字段加权 —— mcap_tier / vol_mcap_ratio（pvs 分位）/
+   composite_score（sector_rotation clamp）加成，总 cap 80、缺字段保守 0、
+   不改「是否派生」（工单 变化榜D3信号联动+D4质量收口 2026-09-28）
 """
 import os
 import sys
@@ -284,6 +287,86 @@ check("if (item.streak_start_ambiguous) return;" in _IDX_SRC,
 check("item.streak_start_ambiguous" in _IDX_SRC
       and "该日为榜单口径变更日，起点之前无可比数据" in _IDX_SRC,
       "F8 🔥N天 角标保留事实但在 tooltip 显式标注不可比")
+
+# ── G. D3 结构化字段加权 ──
+print("[G] D3 结构化字段加权")
+
+
+def _item(sym, sd=3, mv=10.0, mcap_tier=None, detail=None):
+    it = {"symbol": sym, "streak_days": sd, "metric_value": mv,
+          "streak_first_date": "2026-09-01", "asset_id": 3000 + len(sym)}
+    if mcap_tier is not None:
+        it["mcap_tier"] = mcap_tier
+    if detail is not None:
+        it["detail"] = detail
+    return it
+
+
+def _cats(cat, direction, items):
+    return {cat: {direction: items}}
+
+
+# G1 mcap_tier 加成（同类别同连板，仅分层不同）
+_g1 = {o["target"]: o for o in mm.derive_board_opportunities(_cats("price_change_24h", "up", [
+    _item("HA", mcap_tier="top10"), _item("HB", mcap_tier="top1000"),
+]), streak_threshold=3)}
+check(_g1["HA"]["conviction_score"] - _g1["HB"]["conviction_score"] == 6,
+      "G1 mcap_tier 加成：top10 比 top1000 高 6 分",
+      f"HA={_g1['HA']['conviction_score']} HB={_g1['HB']['conviction_score']}")
+check(_g1["HA"]["board_score_bonus"]["mcap_tier"] == 6
+      and _g1["HB"]["board_score_bonus"]["mcap_tier"] == 0,
+      "G1b 溯源字段 board_score_bonus.mcap_tier 正确")
+
+# G2 vol_mcap_ratio 批次分位加成（n=4：top25%→+6 / 前50%→+3 / 其余 0）
+_g2 = {o["target"]: o for o in mm.derive_board_opportunities(_cats("price_volume_surge", "up", [
+    _item("V1", detail={"vol_mcap_ratio": 0.1}), _item("V2", detail={"vol_mcap_ratio": 0.5}),
+    _item("V3", detail={"vol_mcap_ratio": 1.0}), _item("V4", detail={"vol_mcap_ratio": 2.0}),
+]), streak_threshold=3)}
+check(_g2["V4"]["board_score_bonus"]["vol_mcap"] == 6, "G2 vol top25% → +6")
+check(_g2["V3"]["board_score_bonus"]["vol_mcap"] == 3, "G2b vol 前50% → +3")
+check(_g2["V2"]["board_score_bonus"]["vol_mcap"] == 0
+      and _g2["V1"]["board_score_bonus"]["vol_mcap"] == 0, "G2c vol 后50% → 0")
+
+# G3 composite_score clamp 加成（仅 sector_rotation；(cs-50)/5，clamp [0,8]）
+_g3 = {o["target"]: o for o in mm.derive_board_opportunities(_cats("sector_rotation", "up", [
+    _item("S1", detail={"composite_score": 50}), _item("S2", detail={"composite_score": 70}),
+    _item("S3", detail={"composite_score": 30}), _item("S4", detail={"composite_score": 100}),
+]), streak_threshold=3)}
+check(_g3["S1"]["board_score_bonus"]["sector"] == 0, "G3 composite=50 → +0")
+check(_g3["S2"]["board_score_bonus"]["sector"] == 4, "G3b composite=70 → +4")
+check(_g3["S4"]["board_score_bonus"]["sector"] == 8, "G3c composite=100 → clamp +8")
+check(_g3["S3"]["board_score_bonus"]["sector"] == 0, "G3d composite<50 不扣分（clamp 下界 0）")
+
+# G4 总 cap 80（base 82 + 加成仍封顶 80）
+_g4 = mm.derive_board_opportunities(_cats("price_change_24h", "up", [
+    _item("C1", sd=8, mcap_tier="top10"),
+]), streak_threshold=3)
+check(_g4[0]["conviction_score"] == 80, "G4 总 cap 80：base 82 + top10 加成仍 = 80")
+
+# G5 缺字段保守 0（不改基准分）
+_g5 = mm.derive_board_opportunities(_cats("price_change_24h", "up", [_item("N1")]), streak_threshold=3)
+check(_g5[0]["conviction_score"] == 52
+      and _g5[0]["board_score_bonus"] == {"mcap_tier": 0, "vol_mcap": 0, "sector": 0},
+      "G5 缺 tier/detail → 无加成，分数=base 52")
+
+# G6 未知 mcap_tier → 0（保守）
+_g6 = mm.derive_board_opportunities(_cats("price_change_24h", "up", [
+    _item("U1", mcap_tier="top9999")]), streak_threshold=3)
+check(_g6[0]["board_score_bonus"]["mcap_tier"] == 0, "G6 未知 mcap_tier → 0")
+
+# G7 常量与 generator 值域一致 + 小批次不分位
+check(set(mm._MCAP_TIER_BONUS) == {"top10", "top100", "top500", "top1000"},
+      "G7 mcap_tier 键与 daily_diff_generator 值域一致")
+check(mm._vol_mcap_bonus_map([{"symbol": "x", "detail": {"vol_mcap_ratio": 1.0}}]) == {},
+      "G7b pvs 批次 <4 → 不分位（避免单条被判 top25%）")
+
+# G8 vol_mcap 缺值 / None 不抛异常
+_g8 = mm.derive_board_opportunities(_cats("price_volume_surge", "up", [
+    _item("W1", detail={}), _item("W2", detail={"vol_mcap_ratio": None}),
+    _item("W3", detail={"vol_mcap_ratio": 1.0}), _item("W4", detail={"vol_mcap_ratio": 2.0}),
+]), streak_threshold=3)
+check(len(_g8) == 4 and all("board_score_bonus" in o for o in _g8),
+      "G8 vol_mcap 缺值/None 不抛异常且派生数不变")
 
 # ── 汇总 ──
 print(f"\n{passed}/{passed + failed} 通过")

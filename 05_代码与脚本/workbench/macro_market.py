@@ -4782,6 +4782,48 @@ _BOARD_STREAK_BASE_SCORE = 52
 _BOARD_STREAK_STEP = 6
 _BOARD_STREAK_SCORE_CAP = 80
 
+# ── D3（2026-09-28 工单）信号联动字段加权 ────────────────────────────────────
+# 让连板派生的 conviction 不止「天数」，还吸收 daily_diff_summary.detail_json 已有的
+# 结构化字段（不新增数据采集）。只影响精选排序与过门槛，**不改变「是否派生」**。
+# 口径（女王大人拍板档 = 二狗建议）：
+#   D3-1 mcap_tier 加成：大市值连板更不易被操纵、流动性更好 ⇒ 更可信
+#   D3-2 primary_sector 不加权（缺赛道热度基准，易主观）
+#   D3-3 vol_mcap_ratio（仅 price_volume_surge，批次内分位）+
+#        composite_score（仅 sector_rotation，clamp）加成
+_MCAP_TIER_BONUS = {"top10": 6, "top100": 4, "top500": 2, "top1000": 0}
+_VOL_MCAP_HIGH_BONUS = 6   # 批次内 vol_mcap_ratio 前 25%
+_VOL_MCAP_MID_BONUS = 3    # 前 50%
+_VOL_MCAP_MIN_BATCH = 4    # 批次小于此数不分位（避免小样本把单条判成 top25%）
+_SECTOR_BONUS_CAP = 8      # composite_score 加成上限
+
+
+def _vol_mcap_bonus_map(pvs_items: list, min_batch: int = _VOL_MCAP_MIN_BATCH) -> dict:
+    """price_volume_surge 榜单内按 vol_mcap_ratio **批次分位**映射加成。
+
+    top25% → +6 / top50% → +3 / 其余 0；缺值或批次 < min_batch 一律 0（保守）。
+    键用 symbol（同一批次榜单内 symbol 唯一）。
+    """
+    pairs = []
+    for it in (pvs_items or []):
+        v = (it.get("detail") or {}).get("vol_mcap_ratio")
+        sym = str(it.get("symbol") or "")
+        if sym and isinstance(v, (int, float)):
+            pairs.append((sym, float(v)))
+    if len(pairs) < min_batch:
+        return {}
+    vals = sorted(v for _, v in pairs)
+    n = len(vals)
+
+    def _q(p):  # 位置分位（确定性，无插值）
+        return vals[min(n - 1, int(p * n))]
+
+    hi, mid = _q(0.75), _q(0.50)
+    out: dict = {}
+    for sym, v in pairs:
+        out[sym] = (_VOL_MCAP_HIGH_BONUS if v >= hi
+                    else _VOL_MCAP_MID_BONUS if v >= mid else 0)
+    return out
+
 # 连板信号 related_dims 用中文标签（避免透出内部 category 串）
 _BOARD_CAT_LABELS = {
     "price_change_24h": "24h涨跌幅",
@@ -4823,10 +4865,15 @@ def derive_board_opportunities(diff_cats: dict, streak_threshold: int = 3,
     - target 用单个 symbol，便于与同标的的 AI/催化剂机会在 select_*_signals
       中合并 → 提升共振数，起「增强」而非「另起噪声」的作用。
     - 机械信号标 ai_skip=True（P4），ai_enrich_signals_v2 会跳过 LLM 增强省成本。
+    - conviction_score = 连板基础分 + D3 结构化字段加成（mcap_tier / vol_mcap_ratio /
+      sector composite），封顶 _BOARD_STREAK_SCORE_CAP；**不改变是否派生**。
     - 纯函数：不查库、不写库；tiering/去重交给调用方 _push_opportunity。
     """
     if not diff_cats or streak_threshold <= 0:
         return []
+
+    # D3-3：pvs 榜 vol_mcap_ratio 批次分位 → 加成映射（其余类别恒 0）
+    _vol_bonus = _vol_mcap_bonus_map((diff_cats.get("price_volume_surge") or {}).get("up") or [])
 
     by_dir: dict[str, list[tuple[int, str, dict]]] = {"long": [], "short": []}
     for cat, cat_data in (diff_cats or {}).items():
@@ -4853,10 +4900,20 @@ def derive_board_opportunities(diff_cats: dict, streak_threshold: int = 3,
             if not sym:
                 continue
             cat_label = _BOARD_CAT_LABELS.get(cat, cat)
-            score = min(
+            # D3 结构化字段加成（缺字段/未知 tier 一律 0，保守）
+            _tier_bonus = _MCAP_TIER_BONUS.get(str(it.get("mcap_tier") or ""), 0)
+            _detail = it.get("detail") or {}
+            _vol_b = _vol_bonus.get(sym, 0) if cat == "price_volume_surge" else 0
+            _sec_b = 0
+            if cat == "sector_rotation":
+                _cs = _detail.get("composite_score")
+                if isinstance(_cs, (int, float)):
+                    _sec_b = max(0, min(_SECTOR_BONUS_CAP, round((float(_cs) - 50) / 5)))
+            score = max(0, min(
                 _BOARD_STREAK_SCORE_CAP,
-                _BOARD_STREAK_BASE_SCORE + (sd - streak_threshold) * _BOARD_STREAK_STEP,
-            )
+                _BOARD_STREAK_BASE_SCORE + (sd - streak_threshold) * _BOARD_STREAK_STEP
+                + _tier_bonus + _vol_b + _sec_b,
+            ))
             metric = it.get("metric_value")
             if isinstance(metric, (int, float)):
                 metric_txt = (f"{metric:.1f} 分" if cat == "price_volume_surge"
@@ -4869,6 +4926,9 @@ def derive_board_opportunities(diff_cats: dict, streak_threshold: int = 3,
                 "direction": direction,
                 "confidence": "medium",
                 "conviction_score": score,
+                # D3 溯源：各加成分量（便于验收与排查「分数为何变高」）
+                "board_score_bonus": {"mcap_tier": _tier_bonus,
+                                      "vol_mcap": _vol_b, "sector": _sec_b},
                 "signal_type": signal_type,
                 "key_metric": f"连续 {sd} 天在榜 · {cat_label}",
                 "trigger_logic": (

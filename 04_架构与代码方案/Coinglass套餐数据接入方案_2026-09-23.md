@@ -76,11 +76,15 @@ Hobbyist 套餐提供 **80+ 接口、30 req/min（≈43,200 次/天）**，线�
 | `/api/futures/open-interest/aggregated-*` | 聚合 OI / 稳定币本位 / 币本位拆分 | ✅ | `>=4h` |
 | `/api/futures/orderbook/ask-bids-history`（含 aggregated） | 挂单深度（±range） | ✅ | `>=4h` |
 | `/api/futures/open-interest/exchange-list`、`/taker-buy-sell-volume/exchange-list`、`/funding-rate/accumulated-exchange-list`、`/pairs-markets` | 全市场快照类 | ✅ | **无限制** |
+| `/api/futures/funding-rate/exchange-list` | 全币种各所当期费率（**无参一次拉全**，实测 1909 币 ⇒ 费率维度近乎零成本） | ✅ | **无限制** |
+| `/api/futures/{global,top-account,top-position}-long-short-*/history` | 全站 / 顶级交易员（账户数、持仓量）多空比 | ✅ | `>=4h`（**2026-09-28 复测已可用**，见 §2.3） |
+| `/api/futures/open-interest/exchange-list` | 跨所 OI 快照（含 `exchange="All"` 聚合行 + 币本位/稳定币本位拆分，一次请求拿全） | ✅ | **无限制** |
+| `/api/futures/funding-rate/arbitrage` | 各所资金费率套利 | ❌ | Hobbyist ⇒ `code=401 Upgrade plan`（2026-09-28 实测，勿接） |
 | `/api/futures/liquidation/map`、`/aggregated-map`、`/max-pain`、`/orderbook/large-limit-order*`、`/liquidation/order` | 清算地图 / 大额挂单 / 实时爆仓单 | ❌ | Standard+ |
 
 ### 2.3 已确认不可用（勿重复探测）
 
-- **多空比全系列**（`global/top-long-short-*`、`net-position`）：Hobbyist 下 404 ⇒ 大户多空仓仍只能走 Binance 免费端点 + §10.10 的代理口径。
+- ~~**多空比全系列**（`global/top-long-short-*`、`net-position`）：Hobbyist 下 404~~ ⇒ **2026-09-28 复测已变更**：`global-long-short-account-ratio` / `top-long-short-account-ratio` / `top-long-short-position-ratio` 的 `/history` 在 **≥4h** 下返回 `code=0`；`1h` 粒度仍 `403 + upgrade_required=STANDARD`。**但既有决议不变**：大户多空仓仍走 Binance 免费端点（`/futures/data/*`，5m 粒度），CoinGlass 侧仅作为**并行源**落库备用，不替换现役链路（工单红线⑤）。
 - **爆仓热图 model1~3**：401 Upgrade plan。
 - `/api/futures/coins-markets`、`/coins-price-change`、`/api/spot/coins-markets`：文档标注 ❌（**反直觉**，只有 `pairs-markets` 可用）。
 
@@ -358,6 +362,40 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 **保留策略**：`liquidation_history` **不纳入 `prune_scan_data` 清理**（体量可控且为回测资产）；
 若日后体量增长，再按 `interval` 分档处理（同 `prune_scan_data` 的既有分档风格）。
 
+### 5.3 `fix_077_coinglass_derivatives_snapshot.sql`（**CGV4-003 已落地**，2026-09-28，幂等可重复执行）
+
+工单 `工单_CoinGlass_V4接入_按优先级_2026-09-28.md` CGV4-003 的目标表：用 CoinGlass V4 **跨所聚合**
+衍生品数据（OI 聚合/分所/币本位 + 各所资金费率 + 多空比）绕开 Binance fapi 单所免费源在当前 IDC
+出口被 418 封禁的结构性问题。
+
+```sql
+CREATE TABLE IF NOT EXISTS biz.coinglass_derivatives_snapshot (
+    symbol                   TEXT        NOT NULL,   -- 币种基码（BTC / 1000PEPE），≠ liquidation_history 的合约码
+    exchange                 TEXT        NOT NULL,   -- 交易所名；'All' = 接口给的跨所聚合行
+    ts                       TIMESTAMPTZ NOT NULL,   -- 快照采集时刻（分钟对齐）
+    oi_usd / oi_quantity / oi_coin_margin_usd / oi_stablecoin_margin_usd / oi_change_24h_pct,
+    funding_rate / funding_rate_interval_h / next_funding_time,
+    ls_global_* / ls_top_account_* / ls_top_position_*（多空比，默认不采，见 §6.3）,
+    source TEXT NOT NULL DEFAULT 'coinglass_v4',
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (symbol, exchange, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_cg_deriv_snap_sym_ts
+    ON biz.coinglass_derivatives_snapshot (symbol, ts DESC);
+```
+
+**三条口径红线（写进表注释，违反即返工）**
+
+1. **`exchange='All'` 是接口返回的跨所聚合行，非本项目自算** ⇒ 与各所分列行**共存**，消费时**按需择一**，
+   **严禁**把 `All` 行与分所行**相加**（重复计数）。PK 含 `exchange` ⇒ 结构上二者是不同主键行，不会互相覆盖。
+2. `symbol` 为**币种基码**（`BTC` / `1000PEPE`）——与 CoinGlass `open-interest/exchange-list` /
+   `funding-rate/exchange-list` 的请求口径一致；**≠** `biz.liquidation_history.symbol`（合约码 `BTCUSDT`）。
+3. `oi_*` 为**当期快照**（非分段增量、非滚动窗口），时间序列靠多次采集累积；严谨的「OI 变化」请用
+   `oi_change_24h_pct` 或跨 `ts` 自查，**勿跨表换算**。
+
+> 定位：本表是**并行源**。既有 `biz.asset_derivatives` / Binance fapi 链路**原样保留，零改动**
+> （工单红线⑤「仅新增不改既有链路」）；新表是否接消费端另行立项。
+
 ---
 
 ## 6. 脚本与调度
@@ -377,10 +415,52 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 
 **并发**：单进程串行 + `min_request_gap=2.5s`（**不并发**，避免与 daemon 争额度）。
 
-### 6.2 调度
+### 6.2 调度（**2026-09-28 更新：P1 已挂日频保鲜**）
 
-- **P0/P1 均不进 `scheduler.py`**：P1 是一次性回填 + 手动重跑，无周期语义。
-- 若日后需要滚动保鲜（如每月补一次尾部），再按 `告警胜率赔率日报方案` 的方式注册 `core` 类别任务（**不新增类别**，`task_manager.CATEGORY_MAX` 未收录的类别会落到默认上限 2）。
+原结论「P0/P1 均不进 `scheduler.py`」**已作废**。实测发现 P1 脚本虽已落地，却**从未注册任何调度**
+（`scheduler.py` / `supervisord.conf` 均无条目）⇒ `biz.liquidation_history` 只在 **2026-09-28 被手动
+全量回填过一次**，此后不再增长（通路「没死，但没有心跳」）。现按 CGV4-002 挂回调度。
+
+`workbench/scheduler.py` 的 `SCHEDULE` 新增三条 `core` 类目条目（**不新增类别**）：
+
+| key | cron（Asia/Shanghai） | 脚本与参数 | 单轮预算 |
+|---|---|---|---|
+| `coinglass_liq_history_binance` | `10 1 * * *` | `phase_backfill_liq_history.py --scope binance --interval 4h --days 7` | 527 次 ≈ 22 min |
+| `coinglass_liq_history_all` | `10 2 * * *` | `phase_backfill_liq_history.py --scope all --interval 4h --days 7` | 528 次 ≈ 22 min |
+| `coinglass_derivatives_snapshot` | `10 3 * * *` | `ingest_coinglass_derivatives.py --limit 600` | 528 次 ≈ 22 min |
+
+**为什么必须错峰（红线②）**：HOBBYIST 是**全 key 30 req/min**，三个作业各自按 `min_request_gap=2.5s`
+（≈24 req/min）串行取数 ⇒ **任两者重叠即 48 req/min，击穿配额**。故间隔 1h（单轮 ≤25 min，远小于容器
+寿命实测 ≈74.6 min），且与 `scan_daemon` 的 coin-list（5 min 一轮 ≈0.2 req/min）共享后仍留 ≈6 req/min 余量。
+
+**为什么日频且 `--days 7`**：`@4h` 单请求即覆盖全窗口（180 天），**请求数与 `--days` 无关** ⇒ 窗口只决定
+「回写多少历史桶」。日频只需覆盖「相邻两轮之间的新增桶」+ 一周失败冗余，取 7 天可把写放大从
+180 桶/币压到 42 桶/币。
+
+> ⚠️ **日频不得用 `--resume`**：游标语义是「已覆盖到 `done_through`」，日频复用会因
+> `done_through <= resume_floor` 恒真而**永久跳过全部币种**（静默停摆）。
+> **部署动作**：`scheduler.py` 改动**需重启容器**才生效。
+
+### 6.3 `scripts/bin/ingest_coinglass_derivatives.py`（新增，CGV4-003）
+
+| CLI | 语义 |
+|---|---|
+| `--probe` | 套餐边界复验（5 个用例，不写库） |
+| `--dry-run` | 只算请求数与预计耗时，不写库 |
+| `--limit N` | 只采前 N 个池内币（`0` = 全池）；调度用 `600` 作单轮上界 |
+| `--symbols BTCUSDT,ETHUSDT` | 指定币（**本库合约码**，落库前经 `base_code()` 去计价后缀） |
+| `--with-ls` | 附带 Binance 单所多空比（3 接口/币，**默认不采**） |
+| `--min-gap` | 请求最小间隔（默认 2.5s；`<2.0` 打印告警） |
+
+**取数成本（2026-09-28 实测）**：资金费率 `funding-rate/exchange-list` **无参一次拉全**（1909 币）⇒
+1 次请求；OI `open-interest/exchange-list?symbol=<基码>` **每币 1 次**（一次拿全 `All` 聚合 + 各所 +
+币本位/稳定币本位拆分）。⇒ 全池 ≈528 次。
+
+**多空比默认不采的理由**：项目既有决议是「多空比走 Binance 免费端点（`/futures/data/*`，5m 粒度）」，
+CoinGlass 侧重复取**无增益**，且 3 接口 × 池规模会吃掉额度；需要时用 `--with-ls` 显式开启。
+
+**容错**：429 / `code != 0` 走指数退避（1→2→4→8s，上限 3 次）后**跳过该币，不整轮失败**；
+资金费率取不到 ⇒ **降级为「仅 OI」**继续（密钥/额度故障不当致命）。缺失一律留 `NULL`（**不补 0**）。
 
 ---
 
@@ -403,7 +483,10 @@ CREATE TABLE IF NOT EXISTS biz.liquidation_backfill_cursor (
 | **P0-B** | 补 24h 多空分列（**已确认必需**：P0-D 方向行依赖） | ✅ **已上线**（`fix_068`） |
 | **P0-A** | 扫描侧消费改造（展示 + 标注 + 标定维度） | ✅ **已完成**（2026-09-24，`metrics.fuel` 新增 `liq_bg_*` 四键 + `FUEL_METRIC_VER` 1→2） |
 | **P0-C** | 混合口径偏高幅度**下界**（标定脚本侧） | ✅ **已完成**（2026-09-24，口径 A/B 分表 + 四门闸门；实测 `--days 1` ⇒ rc=3 样本不可用，属预期） |
-| **P1** | `fix_069` + 回填脚本 + 游标 + 单测 | ✅ **已完成**（2026-09-24，迁移已应用且幂等；回填按需手动执行） |
+| **P1** | `fix_069` + 回填脚本 + 游标 + 单测 | ✅ **已完成**（2026-09-24，迁移已应用且幂等） |
+| **CGV4-000** | V4 客户端补齐（全局限流器 + `X-RateLimit` 记录 + 8 个跨所端点） | ✅ **已完成**（2026-09-28） |
+| **CGV4-002** | P1 回填**挂回日频调度**（复活通路，见 §6.2） | ✅ **已完成**（2026-09-28，三条作业注册；**待重启容器生效**） |
+| **CGV4-003** | `fix_077` + `ingest_coinglass_derivatives.py` + 调度 + 单测 | ✅ **已完成**（2026-09-28，迁移已应用且幂等） |
 | **P2** | 按 §4.5 触发条件单独立项 | ⬜ 未排期 |
 
 **部署动作（P0-D 上线后必做）**：`fix_068` 迁移应用 + **重启 `scan_daemon` 容器**（否则写入端仍是旧 INSERT，新列恒为 NULL）。
@@ -523,6 +606,59 @@ python workbench/calib_squeeze_liq_thr.py --days 1 --json
 > - **正式标定闸门**：`liquidation_snapshot` 自 2026-09-21 起积累，要满足 `MIN_SPAN_DAYS=30` 需等到 **≈2026-10-21 之后**（与设计文档 B6/A1 指向的 10 月中下旬一致），或改用 P1 回填的 `biz.liquidation_history`（4h 分段增量、180 天，结果集远小）。
 > - **遗留疑点（诚实披露，未锁定）**：服务端 7.15 s vs 客户端 144.9–604.2 s 的 20–85× 差距根因**尚未确定**。已排除：索引缺失、结果集行数膨胀、单纯带宽（200k 窄行传输实测 3.6 s）。⇒ **不建议**在没有 30 天数据做验证的前提下重写为「服务端聚合」，那会改变统计口径。
 
+### 8.3 CGV4-000 / 002 / 003 验收命令（2026-09-28 已完成，可独立复跑）
+
+```bash
+# 0) 语法检查（期望 exit=0）
+python -m py_compile 05_代码与脚本/workbench/scheduler.py \
+                     05_代码与脚本/scripts/bin/ingest_coinglass_derivatives.py \
+                     05_代码与脚本/scripts/src/crypto_research/clients/coinglass_client.py
+
+# 1) fix_077 迁移幂等：连跑两次，第二次应为 0 变更、无异常
+python 05_代码与脚本/scripts/apply_migration.py fix_077_coinglass_derivatives_snapshot.sql
+
+# 2) 套餐边界复验（期望失败项 0）：OI exchange-list / OI aggregated-history /
+#    funding-rate/exchange-list（n≈1909）/ funding-rate/accumulated(1d) / 多空比(Binance,4h)
+python 05_代码与脚本/scripts/bin/ingest_coinglass_derivatives.py --probe
+
+# 3) dry-run：期望「宇宙 527 币，预计请求 528 次 × 2.5s ≈ 22.0 分钟」，不写库
+python 05_代码与脚本/scripts/bin/ingest_coinglass_derivatives.py --dry-run
+
+# 4) 小样本真跑（3 币）：期望落库「All 聚合 + 各所」多行，All 行 oi_usd 有值、
+#    分所行 funding_rate 有值（All 行无费率属正常：费率是分所概念）
+python 05_代码与脚本/scripts/bin/ingest_coinglass_derivatives.py --symbols BTCUSDT,ETHUSDT,SOLUSDT
+
+# 5) 002 小样本真跑（双口径各 1 次）：期望各 42~43 行/币（7 天 @4h），退出码 0
+python 05_代码与脚本/scripts/bin/phase_backfill_liq_history.py --scope binance --interval 4h --days 7 --symbols BTCUSDT
+python 05_代码与脚本/scripts/bin/phase_backfill_liq_history.py --scope all     --interval 4h --days 7 --symbols BTCUSDT
+
+# 6) 调度注册（期望三条 coinglass_* 齐备，cron = 10 1/2/3 * * *）
+python 05_代码与脚本/workbench/scheduler.py --list
+
+# 7) 单测（新增护栏 + 既有口径回归）
+python 05_代码与脚本/workbench/test_coinglass_v4_ingest_20260928.py   # 期望 65/65
+python 05_代码与脚本/workbench/test_liq_history_scope.py              # 期望 39/39（既有回归）
+```
+
+**实测取证（2026-09-28，本机复跑）**
+
+| 项 | 结果 |
+|---|---|
+| `py_compile`（scheduler / ingest / client / 新测试） | 全绿（EXIT=0） |
+| `apply_migration.py fix_077…` ×2 | 两次均「执行成功」⇒ **幂等通过** |
+| `ingest_coinglass_derivatives.py --probe` | 5 用例全 `OK`（n=23 / 3 / 1909 / 1913 / 3）；`失败项 0 个`；响应**无 `X-RateLimit-*` 头**（`last_rate_limit={}`，客户端已容错） |
+| `--dry-run` | 宇宙 527 币、528 次 × 2.5s ≈ **22.0 min** |
+| `--symbols BTCUSDT,ETHUSDT,SOLUSDT` | 落库 **71 行 / 3 币 / 24 个 exchange**（含 `All`）；`BTC·All` = `oi_usd 5.44e10`、`oi_change_24h_pct -0.67`、费率 `NULL`（聚合行无费率）；`BTC·Binance` = `funding_rate -0.001419`、`interval_h 8`；`funding_rate IS NULL` 的行 12 条（CME/Deribit/dYdX 等无资金费率的场所，**留 NULL 不补 0**）；`ts` 单值分钟对齐 |
+| `phase_backfill_liq_history.py`（binance/all 各 `--days 7 --symbols BTCUSDT`） | 86 行 / 43 行；`BTCUSDT` 两 scope 各 **1080 行**（= 180 天 @4h，与手动全量回填一致），最新桶 `2026-09-28 00:00 UTC` 的 `fetched_at` 被本轮刷新 ⇒ **UPSERT 生效、旧行未被删** |
+| DB 存量 | `biz.liquidation_history` **1,126,841 行 / 527 币**（此前仅手动回填一次；本改动**不重算历史**） |
+| `scheduler.py --list` | 三条 `coinglass_*` 齐备，cron = `10 1/2/3 * * *` |
+| `test_coinglass_v4_ingest_20260928.py` | **65/65 passed** |
+| `test_liq_history_scope.py` | **39/39 passed**（既有口径回归无退化） |
+
+**部署动作（CGV4-002 / 003 上线后）**：`fix_077` 迁移**已应用**；`scheduler.py` 改动 ⇒
+**需重启容器**（否则三条新作业不注册，`liquidation_history` 继续停更）。两个采集脚本本身
+**离线可跑**，重启前也可手动 `--run-once` 补跑。
+
 ---
 
 ## 9. 风险与注意
@@ -533,8 +669,9 @@ python workbench/calib_squeeze_liq_thr.py --days 1 --json
 | **覆盖率护栏的分母与分子同源塌陷** | 分母 = 过去 24h 该表出现过的 `count(DISTINCT symbol)`，与分子同源自洽；代价是**持续性整体截断无法检出** | 已披露为已知局限；兜底需**跨天对比 `symbols_covered`**（后续增量，不在 P0-D） |
 | **两套爆仓口径被混用**（最高风险） | 滚动窗口（snapshot）与分段增量（history）数值不可换算；混用即重演 P1-1 假 0 | 独立表 + PK 含 `interval`/`exchange_scope` + 表注释首行声明 + 单测不变量 1/2 |
 | **回填被误接进实时判定** | 4h 粒度无法支撑 5m 窗口判定 | N2 写入方案 + 单测不变量 1 |
-| **额度争抢** | 回填 24 req/min 与 daemon 共用同一 key | 留 6 req/min 余量；daemon 单次调用影响可忽略；若出现 429 优先降回填速度 |
-| **作业跨执行窗口被中断** | 88 min ≫ 实例寿命实测 ≈74.6 min ⇒ 必然跨窗口；中断源为**实例定期回收 / 部署重启**（常态机制），**非**历史那几次异常停摆 | 游标表 + `--resume`（强约束） |
+| **额度争抢** | 新增三条日频作业，与 `scan_daemon` 的 coin-list 共用同一 key（全局限 30 req/min） | 三作业**错峰 01:10 / 02:10 / 03:10**（间隔 1h ≫ 单轮 22 min）+ 各自 `min_request_gap=2.5s`（24 req/min）；daemon ≈0.2 req/min ⇒ 留 ≈6 req/min 余量。若出现 429 优先降采集速度（脚本内建指数退避） |
+| **调度空转（本轮发现并修复）** | 脚本已落地却**从未注册调度** ⇒ `liquidation_history` 只在手动回填那次之后**永久停更**，且无任何告警 | 已按 §6.2 挂入 `SCHEDULE`；单测不变量⑤断言三条作业齐备、错峰、且**不带 `--resume`**（日频复用游标会静默全跳过） |
+| **手动全量回填跨执行窗口被中断** | 全池 180 天 ≈88 min ≫ 实例寿命实测 ≈74.6 min ⇒ 必然跨窗口（**仅手动回填场景**；日频作业单轮 ≈22 min，不跨窗口） | 游标表 + `--resume`（**仅手动全量回填使用**） |
 | **官方限频与实测不符** | 官方 30/min，实测曾 1.3 req/s 无 429 | 以官方 30/min 为预算，实测高值视为突发额度，不作为依赖 |
 | **密钥单点**（§13 已披露） | `COINGLASS_API_KEY` 缺失时 `CoinGlassClient.__init__` 抛错 | 回填脚本独立读配置、失败不阻塞 daemon；**「coin-list 失败降级为跳过该轮」另立工单**（§11） |
 | **符号取值域未知** | 请求侧直传合约码 ⇒ 不存在 `coin-list` 那种「抢码」问题；剩余风险只在 `aggregated-history` 的**返回值币种码写法**（如是否给 `1000PEPE`、是否带 `USDT`） | `--probe` 实测取值域后再定「币种码 → 合约码」映射方向；小样本验收含 `1000PEPEUSDT` 等前缀币 |
@@ -555,6 +692,8 @@ python workbench/calib_squeeze_liq_thr.py --days 1 --json
 | 同上 §12.1 A3 / B11 / C9 | 「无法标定/无样本外」改为「样本已具备，待跑标定」 | ✅ 已完成（2026-09-24） |
 | 同上 §13 CoinGlass 依赖项 | 更新额度使用情况与回填预算 | ✅ 已完成（2026-09-24：补官方 30/min、288 次/天（0.7%）、回填 1054/2108 次 ≈ 88 min、游标 + resume 依据） |
 | `clients/coinglass_client.py` 模块 docstring | 增封装 `liquidation_aggregated_history()` 等方法与实测边界 | ✅ 已完成（2026-09-24） |
+| 本方案 §2.2 / §2.3 / §5.3 / §6.2 / §6.3 / §8 / §9 | 本轮（CGV4-000/002/003）实测边界更正、新表与调度、验收命令与取证 | ✅ 已完成（2026-09-28，与本轮代码同提交） |
+| 本方案 §6.2（原文「P0/P1 均不进 `scheduler.py`」） | **该结论已作废并就地改写**（P1 已挂日频保鲜），不留旧表述 | ✅ 已完成（2026-09-28） |
 | `AGENTS.md` | 追加本轮约束条目（口径分离、回填节流、游标续跑、链上源选 CM 而非 CoinGlass） | ✅ 已完成（2026-09-24，本方案同轮提交） |
 
 ---
@@ -567,3 +706,5 @@ python workbench/calib_squeeze_liq_thr.py --days 1 --json
 4. ~~`--scope all` 的全交易所列表获取方式（`supported-exchanges` 动态拼 vs 官方是否接受 `Binance,OKX,...` 全量），需 `--probe` 实测~~ → **已定（2026-09-24 `--probe` 实测）**：`aggregated-history` 的 `exchange_list` **必填**（缺失 ⇒ `code=400`），**无 `all` 快捷值** ⇒ 由 `supported-exchanges`（实测 `n=11`）动态拼接全量。同批实测：`symbol` 须传**币种基码**（传合约码 `BTCUSDT` ⇒ `code=0` 但**静默 0 行**）。
 5. `coin-list` 失败时 `scan_squeeze` 整轮失败（§13 密钥单点）是否要降级为「跳过爆仓维、其余照跑」——**另立工单**。
 6. ~~**早报展示位版式**：现有 `research.html` 的衍生品指标网格是否足够承载「四档 + 多空方向」~~ → **已定**：邮件侧在「3衍生品」内新增**一行**（合计 + 多空方向 + `1h/24h` 占比 + 口径脚注），由 `_render_liquidation_row()` 渲染；`research.html` 网格版式**本轮不改**（网页侧随后续维扩再定）。
+7. ~~工单 CGV4-001（Coin NetFlow 链上净流）/ CGV4-004（ETF 净流入 / Grayscale / Coinbase Premium）是否按工单接入~~ → **已定（2026-09-28，主人裁决）：不接**。与既有方案 §4.6 正面冲突：净流用 CM Community（比 CoinGlass 可靠）、ETF 已有 `biz.etf_flow_daily`（收益 < 成本）⇒ **以既有方案为准**。
+8. ~~工单 CGV4-005（Hyperliquid 鲸鱼 / On-chain / Options）/ CGV4-006~~ → **CGV4-006 决议不接**；CGV4-005 未纳入本轮范围（本轮只执行 000 / 002 / 003）。

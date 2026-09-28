@@ -135,6 +135,29 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily", "core"),
     ("social_heat_batch", "0 8 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 08:00，早报快照前就绪）", "core"),
     ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）", "core"),
+
+    # ═══ CoinGlass V4 数据接入（工单_CoinGlass_V4接入_按优先级_2026-09-28.md）═══
+    # 红线：**仅新增，不改既有链路**（binance fapi / biz.asset_derivatives 原样保留）。
+    # 额度纪律：HOBBYIST 全局限 30 req/min，三个作业统一串行 + min_request_gap=2.5s
+    #   （≈24 req/min），故**必须错峰**且单轮 ≤25 min（远小于容器寿命 ≈74.6 min）；
+    #   与 scan_daemon 的 coin-list（5 min 一轮 ≈0.2 req/min）共享额度仍留 6 req/min 余量。
+    # CGV4-002：4h 爆仓历史**日频增量**（复活通路——脚本早已落地但从未挂过调度，
+    #   导致 biz.liquidation_history 只在 2026-09-28 被手动全量回填过一次）。
+    #   ⚠️ 日频**不得**用 --resume：游标语义是「已覆盖到 done_through」，日频复用会永久跳过
+    #   （--days 7 窗口仅需覆盖「相邻两轮之间的新增桶」+ 一周失败冗余；@4h 单请求即覆盖全窗口，
+    #   请求数与 --days 无关，缩小窗口只为压低无谓写放大）。
+    ("coinglass_liq_history_binance", "10 1 * * *", "phase_backfill_liq_history.py",
+     ["--scope", "binance", "--interval", "4h", "--days", "7"],
+     "CoinGlass 爆仓历史-单所 Binance（每日 01:10，4h 分段增量）", "core"),
+    ("coinglass_liq_history_all", "10 2 * * *", "phase_backfill_liq_history.py",
+     ["--scope", "all", "--interval", "4h", "--days", "7"],
+     "CoinGlass 爆仓历史-多所聚合（每日 02:10，4h 分段增量）", "core"),
+    # CGV4-003：跨所衍生品快照（OI 聚合/分所/币本位 + 各所资金费率）→ biz.coinglass_derivatives_snapshot。
+    #   资金费率 1 次拉全（1900+ 币）；OI 每币 1 次 ⇒ ≈528 请求 ≈22 min。多空比默认不采
+    #   （既有决议走 Binance 免费端点，--with-ls 可显式开启）。
+    ("coinglass_derivatives_snapshot", "10 3 * * *", "ingest_coinglass_derivatives.py",
+     ["--limit", "600"],
+     "CoinGlass 跨所衍生品快照（每日 03:10，OI 聚合/分所/币本位 + 各所资金费率）", "core"),
     # ETF 资金流日频入库（每日 06:00 + 12:00 北京，早于早报快照 08:30；cryptoetf.today 为 T+1 更新）
     # 此前该 ingest 未注册调度，导致 biz.etf_flow_daily 停留在旧日期（早报 ETF 数据滞后）
     # 双跑（2026-09-18 审计 F3）：上游 T-1 数据发布偏晚（实测 09-17 数据在 09-18 09:35 北京仍未发布），

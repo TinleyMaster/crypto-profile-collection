@@ -4,7 +4,8 @@
 Binance 侧 `allForceOrders` 已下线（404），实时 `!forceOrder` 订阅长期无产出
 （biz.liquidation_events 至今 0 行），故爆仓只能用 CoinGlass。
 K线 / OI / CVD / 多空比仍走自建与 Binance 免费端点（`/futures/data/*`，5m 粒度、
-500 根历史），不重复取，故本客户端不封装多空比接口。
+500 根历史）作为**现役**来源。多空比在 CoinGlass 侧已于 2026-09-28 复测确认
+**≥4h 可用**（见下），故一并封装为**并行备用源**——但**不替换**现役链路。
 
 鉴权与响应约定：
   - 请求头 `CG-API-KEY: <key>`
@@ -16,8 +17,8 @@ HOBBYIST 套餐实测边界（2026-09-21 实测，勿重复探测）：
     低于该粒度返回 code=403 + details.upgrade_required=STANDARD
   - 可用：liquidation/coin-list、liquidation/history(4h+)、liquidation/exchange-list、
     open-interest/history(4h+)、taker-buy-sell-volume/history(4h+)、funding-rate/history(4h+)
-  - 不可用：多空比全系列（404）、爆仓热图（401 Upgrade plan）
-  - 限频宽松：约 1.3 req/s 连续 30 次请求无 429
+  - 不可用：爆仓热图（401 Upgrade plan）、`funding-rate/arbitrage`（401 Upgrade plan）
+  - 限频宽松：约 1.3 req/s 连续 30 次请求无 429（**突发额度，不可依赖**；预算一律按官方 30/min）
 
 2026-09-24 实测补充（P1 回填前先探，勿再重复探测）：
   - `liquidation/history`：`exchange=Binance` + `symbol=<合约码>`（`BTCUSDT`/`1000PEPEUSDT` 均可）
@@ -42,6 +43,7 @@ HOBBYIST 套餐实测边界（2026-09-21 实测，勿重复探测）：
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -52,6 +54,8 @@ from urllib3.util.retry import Retry
 DEFAULT_BASE_URL = "https://open-api-v4.coinglass.com"
 # HOBBYIST 及以上套餐可用的最小粒度集合（低于此集合返回 403）
 SUPPORTED_INTERVALS_HOBBYIST = ("4h", "6h", "8h", "12h", "1d", "1w")
+# HOBBYIST 套餐全局速率上限（次/分钟）——多任务共享，须客户端级限流（工单 CGV4 红线②）
+DEFAULT_RATE_PER_MIN = 30.0
 
 
 class CoinGlassError(RuntimeError):
@@ -63,6 +67,40 @@ class CoinGlassError(RuntimeError):
         self.status = status
 
 
+class TokenBucket:
+    """进程内全局令牌桶限流器（默认 30 req/min 对齐 HOBBYIST 套餐上限）。
+
+    与 `min_request_gap`（固定间隔）的区别：令牌桶允许短时突发（容量 = burst），
+    长期平均速率被钉死在 `rate_per_min`，更适合「一次突发几个小请求 + 长时间空转」
+    的采集形态。多任务共享同一 key 时应各持一个桶（跨进程不共享，见工单红线②）。
+    """
+
+    def __init__(self, rate_per_min: float = DEFAULT_RATE_PER_MIN,
+                 burst: int | None = None) -> None:
+        self.rate = max(0.0, rate_per_min) / 60.0  # 令牌/秒
+        self.capacity = float(burst if burst is not None else max(1, int(rate_per_min)))
+        self._tokens = self.capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def consume(self, n: float = 1.0) -> float:
+        """消费 n 个令牌，不足则睡眠等待。返回累计等待秒数。"""
+        if self.rate <= 0:
+            return 0.0
+        waited = 0.0
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= n:
+                    self._tokens -= n
+                    return waited
+                wait = (n - self._tokens) / self.rate
+            time.sleep(wait)
+            waited += wait
+
+
 class CoinGlassClient:
     """CoinGlass OpenAPI 客户端。"""
 
@@ -72,6 +110,7 @@ class CoinGlassClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = 20,
         min_request_gap: float = 0.0,
+        rate_per_min: float | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("COINGLASS_API_KEY 未配置")
@@ -80,6 +119,10 @@ class CoinGlassClient:
         self.timeout = timeout
         self.min_request_gap = max(0.0, min_request_gap)
         self._last_request_ts = 0.0
+        # 全局令牌桶（可选）；未传 rate_per_min 时退化为纯 min_request_gap 节流
+        self._bucket = TokenBucket(rate_per_min) if rate_per_min and rate_per_min > 0 else None
+        # 最近一次响应中的 X-RateLimit-* 头（配额监控用），get_raw 每次刷新
+        self.last_rate_limit: dict[str, str] = {}
 
         self.session = requests.Session()
         self.session.trust_env = False
@@ -101,11 +144,12 @@ class CoinGlassClient:
     # ── 内部方法 ─────────────────────────────────────────────────
 
     def _throttle(self) -> None:
-        if self.min_request_gap <= 0:
-            return
-        gap = self.min_request_gap - (time.time() - self._last_request_ts)
-        if gap > 0:
-            time.sleep(gap)
+        if self.min_request_gap > 0:
+            gap = self.min_request_gap - (time.time() - self._last_request_ts)
+            if gap > 0:
+                time.sleep(gap)
+        if self._bucket is not None:
+            self._bucket.consume(1.0)
 
     def get_raw(self, path: str, params: dict | None = None) -> dict:
         """返回完整响应体（含 code/msg/data），不抛业务错误（便于排查套餐边界）。"""
@@ -113,6 +157,9 @@ class CoinGlassClient:
         self._throttle()
         resp = self.session.get(url, params=params, timeout=self.timeout)
         self._last_request_ts = time.time()
+        # 记录 X-RateLimit-* 响应头供配额监控（工单 CGV4-000）
+        self.last_rate_limit = {k: v for k, v in resp.headers.items()
+                                if k.lower().startswith("x-ratelimit")}
         try:
             body: Any = resp.json()
         except ValueError:
@@ -195,6 +242,71 @@ class CoinGlassClient:
                              interval: str = "4h", limit: int = 100) -> list[dict]:
         """资金费率历史（OHLC），粒度 ≥4h；仅作辅助（8h 结算滞后指标）。"""
         return self._as_list(self.get("/api/futures/funding-rate/history", {
+            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    # ── 跨所衍生品聚合（CGV4-003，2026-09-28 HOBBYIST 实测可用）───────────
+    # 实测补充（2026-09-28，勿重复探测）：
+    #   - `open-interest/exchange-list`：`symbol` 取**币种基码**（BTC），返回含 `exchange="All"`
+    #     的跨所聚合行 + 各所分列 + 币本位/稳定币本位拆分（一次请求拿全「聚合/分所/币本位」）。
+    #   - `funding-rate/exchange-list`：**无参**，一次返回全币种（对症 1900+）当期费率快照，
+    #     每币含 `stablecoin_margin_list` / `coin_margin_list`（各所 funding_rate/interval/next_time）。
+    #   - `open-interest/aggregated-history`：OHLC（**字符串**），`symbol` 取币种基码。
+    #   - 多空比三接口（global/top-account/top-position）：`exchange`+`symbol`(合约码)，粒度 ≥4h。
+    #   - ❌ `funding-rate/arbitrage` 返回 code=401 Upgrade plan（HOBBYIST 不可用，勿接）。
+
+    def open_interest_exchange_list(self, symbol: str) -> list[dict]:
+        """跨所未平仓合约（OI）快照：`symbol` 传**币种基码**（BTC / 1000PEPE）。
+
+        返回每所一行（`exchange`，含 `"All"` 聚合行）：
+        `open_interest_usd` / `open_interest_quantity` /
+        `open_interest_by_coin_margin`(币本位) / `open_interest_by_stable_coin_margin` /
+        `open_interest_change_percent_{5m,15m,30m,1h,4h,24h}`。一次请求即得「聚合/分所/币本位」。
+        """
+        return self._as_list(self.get("/api/futures/open-interest/exchange-list", {"symbol": symbol}))
+
+    def open_interest_aggregated_history(self, symbol: str,
+                                         interval: str = "4h", limit: int = 100) -> list[dict]:
+        """跨所聚合 OI 历史（OHLC，`open/high/low/close` 为**字符串**）；`symbol` 传币种基码。"""
+        return self._as_list(self.get("/api/futures/open-interest/aggregated-history", {
+            "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def open_interest_aggregated_stablecoin_history(self, exchange_list: list[str] | str, symbol: str,
+                                                    interval: str = "4h", limit: int = 100) -> list[dict]:
+        """跨所聚合**稳定币本位** OI 历史（OHLC）；`exchange_list` 必填、无 `all` 快捷值。"""
+        ex = exchange_list if isinstance(exchange_list, str) else ",".join(exchange_list)
+        return self._as_list(self.get("/api/futures/open-interest/aggregated-stablecoin-history", {
+            "exchange_list": ex, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def funding_rate_exchange_list(self) -> list[dict]:
+        """全币种·各所当期资金费率快照（**无参，一次拉全**）。
+
+        每行 `{symbol(基码), stablecoin_margin_list:[{exchange, funding_rate,
+        funding_rate_interval, next_funding_time}], coin_margin_list:[...]}`。
+        实测单请求返回 1900+ 币种 ⇒ 费率维度近乎零成本。
+        """
+        return self._as_list(self.get("/api/futures/funding-rate/exchange-list"))
+
+    def funding_rate_accumulated_exchange_list(self, range_: str = "1d") -> list[dict]:
+        """各所**累计**资金费率快照（`range` 必填，如 1d/7d/30d）；含币本位/稳定币本位分列。"""
+        return self._as_list(self.get("/api/futures/funding-rate/accumulated-exchange-list",
+                                      {"range": range_}))
+
+    def global_long_short_account_ratio_history(self, exchange: str, symbol: str,
+                                                interval: str = "4h", limit: int = 100) -> list[dict]:
+        """全站账户多空比历史（`symbol` 为**合约码**；HOBBYIST 粒度 ≥4h）。"""
+        return self._as_list(self.get("/api/futures/global-long-short-account-ratio/history", {
+            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def top_long_short_account_ratio_history(self, exchange: str, symbol: str,
+                                             interval: str = "4h", limit: int = 100) -> list[dict]:
+        """顶级交易员**账户数**多空比历史（`symbol` 为合约码；粒度 ≥4h）。"""
+        return self._as_list(self.get("/api/futures/top-long-short-account-ratio/history", {
+            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def top_long_short_position_ratio_history(self, exchange: str, symbol: str,
+                                              interval: str = "4h", limit: int = 100) -> list[dict]:
+        """顶级交易员**持仓量**多空比历史（`symbol` 为合约码；粒度 ≥4h）。"""
+        return self._as_list(self.get("/api/futures/top-long-short-position-ratio/history", {
             "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
 
     @staticmethod

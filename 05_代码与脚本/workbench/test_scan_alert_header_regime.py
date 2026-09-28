@@ -606,9 +606,10 @@ check("量比：3.00x 落 2.5-4 档（档位经验值·跨币共享）〔同档 
       " · 止损率 30.0% · 该档 24h P75 +3.00%〕" in _h1,
       "③ 槽印该量比档 24h P75 + 同档统计 + 跨币共享标注（N-8702-C/N-0928-1）")
 check(f"参考目标 {sd._fmt_num(0.070730 * 1.16, 6)}"
-      f"（同档历史最大有利偏移 P75 +16.00%，为乐观上界、非保证能到；同档 n=30"
-      f" · 24h 均值 +1.50% · 止损率 30.0%）⇒ RR 2.00" in _h1,
-      "④ 做多：参考目标 = 入场 ×(1+P75)（标「乐观上界」）+ 同档统计（N-0928-2）")
+      f"（同档历史最大有利偏移 P75 +16.00%，为乐观上界、非保证能到；档位经验值·跨币共享；"
+      f"同档 n=30 · 24h 均值 +1.50% · 止损率 30.0%）⇒ RR 2.00" in _h1,
+      "④ 做多：参考目标 = 入场 ×(1+P75)（标「乐观上界」+ 跨币共享）+ 同档统计"
+      "（N-0928-2/N-11A4-H）")
 check(f"失效 {sd._fmt_num(0.070730 * 0.92, 6)}（-8.00%）" in _h1, "④ 做多失效位在入场下方")
 check("✓ 窗口（批级 近 3 日滚动）：1h 胜率 52.5% ≥ 盈亏平衡 46.5%（短窗为正）"
       " · 24h 均值（日报日 2026-09-27） +1.71%" in _h1,
@@ -659,6 +660,31 @@ check(_rneg["rr"] == 2.0 and _rneg["ret_p75"] == -1.0 and _rneg["tone"] != "pass
       "ret_p75<0（P75 亏）⇒ 即使 RR≥1.5 也不得判「可开」（N-0928-2 必要条件）",
       f"tone={_rneg['tone']} rr={_rneg['rr']} ret_p75={_rneg['ret_p75']}")
 
+print("\n【N-11A4-C】判读兜底分支必须披露未达条件（不可「无理由地否决」）")
+check("可开未达" in sd._render_reason(_rneg) and "该档 24h P75 -1.00% ≤ 0"
+      in sd._render_reason(_rneg),
+      "ret_p75<0 ⇒ 兜底披露「可开未达：该档 24h P75 -1.00% ≤ 0」")
+# ret_p75==0：③ 打 ✓、无任何 ✗，但 P75>0 不成立 ⇒ 不得「零理由拒绝」
+_ctx_zero = _ctx()
+_ctx_zero["buckets"][("vol_ratio", "2.5-4")]["ret_p75"] = 0.0
+_ctx_zero["buckets"][("vol_ratio", "2.5-4")]["mfe_p75"] = 16.0
+_rzero = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=3.0), _ctx_zero)
+_hzero = sd._render_reason(_rzero)
+check(_rzero["tone"] == "watch" and "可开未达" in _hzero
+      and "该档 24h P75 +0.00% ≤ 0" in _hzero,
+      "全屏无 ✗（3 顺 0 逆）但 P75=0 ⇒ 仍需披露未达条件（N-11A4-C 核心场景）")
+# 量比档样本不足（vrow=None，现实常态）⇒ RR 不可算，仍须给理由
+_rnone = sd._build_reason(_sig_r(cvd_dir="up", funding=-0.000280, vol_ratio=1.0), _ctx1)
+_hnone = sd._render_reason(_rnone)
+check("可开未达" in _hnone and "RR 不可算" in _hnone and "P75 不可得" in _hnone,
+      "量比档样本不足（无 ✗、无 RR）⇒ 披露「RR 不可算…；该档 24h P75 不可得」")
+# 对照：「可开」分支本就列全条件，不得被兜底文案污染
+check("可开未达" not in _h1, "判「可开」时不出现「可开未达」")
+
+print("\n【N-11A4-B】批级单列分隔行有断言承重")
+check("—— 以下为批级（全批共享，不计入上列顺/逆风计数）——" in _h1,
+      "批级窗口与币级槽之间有单列分隔行（原无断言 ⇒ 删除可逃逸）")
+
 print("\n【N-8702-A】24h 统计用自己的真分母（不虚报 1h n）/ 门槛单独生效")
 _ctx_a = _ctx()
 # funding_sign/>0：1h n=152、24h n=152 默认；显式给 n_24h=28 验证打印真分母
@@ -699,8 +725,8 @@ _bitems = [{"signal": _sig_r(), "resonance": _res(), "reason": _r1},
            {"signal": _sig_r(pool="accumulation", scenario="BRK", cvd_dir=None),
             "resonance": _res(), "reason": _r5}]
 _hb = sd._render_alert_email(_bitems, REGIME, _batch)
-check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2 维、逆风 ≤1 维且 RR ≥1.5，"
-      "按币级独立维度计） · 0 币观望"
+check("📊 本批可开性：主池 1 币中 1 币通过（顺风 ≥2 维、逆风 ≤1 维、RR ≥1.5 且该档"
+      " 24h P75 > 0，按币级独立维度计） · 0 币观望"
       " · 0 币不建议 · BRK 观察 1 币" in _hb, "批级可开性摘要（BRK 单列观察档）")
 check("主池共性逆风：0/1 无空头付费顺风" in _hb, "主池共性逆风计数（N-8702-H 口径）")
 check("当前批级环境：近 3 日滚动 1h 胜率 52.5% ≥ 盈亏平衡 46.5%（PF 1.49）"
@@ -727,6 +753,16 @@ check("「⚠️ 告警量暴增」" not in _hb_nosurge.split("图例：")[1],
       "正文无暴增行 ⇒ 图例不挂暴增锚点（N-0928-6 图例多报）")
 check("「📊 本批可开性」" in _hb_nosurge.split("图例：")[1],
       "图例依据段锚点仍随 has_reason 独立生效（不因缺少暴增而整段消失）")
+
+print("\n【N-11A4-F】整批全 BRK（main 为空）时图例不得印「📊 本批可开性」")
+_brk_only = [{"signal": _sig_r(pool="accumulation", scenario="BRK", cvd_dir=None),
+              "resonance": _res(), "reason": _r5}]
+_h_brk_only = sd._render_alert_email(_brk_only, REGIME, _batch)
+check("📊 本批可开性" not in _h_brk_only, "全 BRK 批正文无「📊 本批可开性」行")
+check("「📊 本批可开性」" not in _h_brk_only.split("图例：")[1],
+      "全 BRK 批图例不印「📊 本批可开性」锚点（N-11A4-F 同 N-0928-6 法）")
+check("「🎯 开仓依据」" in _h_brk_only.split("图例：")[1],
+      "全 BRK 批图例仍保留「🎯 开仓依据」锚点（依据段本身在渲染）")
 
 print("\n【N-8702-D】混合方向批必须披露环境受限（旧实现直接丢失）")
 _REG_mixed = {"tags": [], "long_fav": True, "short_fav": False,
@@ -843,6 +879,57 @@ check(not sd._is_similar_summary(sd._norm_summary("以太坊完成 Pectra 升级
 _norm_short = sd._norm_summary("代币上涨")
 check(not sd._is_similar_summary(_norm_short, "2026-09-22", [(_norm_short, "2026-09-22")]),
       "过短摘要（<20）不进摘要去重层（无从比较）")
+
+print("\n【N-11A4-A】摘要去重的**接线**承重（行为级：真库真函数 _get_resonance）")
+# 两条同币同日、标题不同（中/英）、ai_summary 近乎逐字相同 ⇒ 必须合并为 1 条 bearish
+_RES_ROWS = [
+    {"title": "火星财经消息，9 月 22 日，知名交易员 Bonk Guy 目前持仓代币总价值约 1660 万美元…",
+     "ai_summary": _sum_a, "body_text": "",
+     "published_at": datetime(2026, 9, 22, 7, 33, tzinfo=timezone.utc),
+     "impact_direction": "bearish", "impact_strength": "weak"},
+    {"title": "BlockBeats reported on September 22 that well-known trader Bonk Guy currently holds…",
+     "ai_summary": _sum_b, "body_text": "",
+     "published_at": datetime(2026, 9, 22, 7, 28, tzinfo=timezone.utc),
+     "impact_direction": "bearish", "impact_strength": "weak"},
+]
+
+
+class _ResCur:
+    def __init__(self):
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        s = sql.lower()
+        if "event_watchlist" in s or "kol_signal" in s:
+            self._rows = []
+        elif "catalyst_impact" in s:
+            self._rows = _RES_ROWS
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return None
+
+
+class _ResConn:
+    def cursor(self, *a, **k):
+        return _ResCur()
+
+
+_res = sd._get_resonance(_ResConn(), "MARSCOINUSDT", 1)
+check(_res["catalyst_raw"] == 2 and _res["catalyst_dir"]["bearish"] == 1,
+      "接线承重：跨语言同事件被 _get_resonance 合并（bearish 2→1）"
+      "——把 `_is_similar_summary(...)` 换成 `if False` 时本断言必红",
+      f"raw={_res['catalyst_raw']} dir={_res['catalyst_dir']}")
 
 print("\n【N-8702-G】save() 对可选列做存在性预检降级（缺列不崩、显式告警）")
 _esrc = open(_edge.__file__, encoding="utf-8").read()

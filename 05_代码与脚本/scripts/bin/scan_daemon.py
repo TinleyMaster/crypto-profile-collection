@@ -1717,7 +1717,7 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
              f"风险结构：入场 {_fmt_num(entry, 6)} · 失效 {_fmt_num(barrier, 6)}"
              f"（{'-' if up else '+'}{stop:.2f}%）· 参考目标 {_fmt_num(target, 6)}"
              f"（同档历史最大有利偏移 P75 {mfe75:+.2f}%，为乐观上界、非保证能到；"
-             f"{_stat(vrow)}）⇒ RR {rr:.2f}", "vol")
+             f"档位经验值·跨币共享；{_stat(vrow)}）⇒ RR {rr:.2f}", "vol")
     else:
         _add("info", "风险结构：无同档目标位（该档样本不足或无失效位），RR 不可算", "vol")
 
@@ -1772,8 +1772,25 @@ def _build_reason(sig: dict, ctx: dict | None) -> dict | None:
         tone = "watch"
         note = f"{goods} 顺 {bads} 逆，但 RR {rr:.2f} < 1 ⇒ 【观望】"
     else:
+        # 复验 N-11A4-C（复验_告警邮件N-0928系列_11a49b1）：拒绝时**必须披露未达条件**
+        # —— 原实现落到兜底只印「N 顺 M 逆 ⇒ 【观望】」，会出现「全屏无 ✗ 却拒绝开仓」
+        # （量比档样本不足 / P75=0 等），与「列出理由才让人放心」的产品目标相反。
         tone = "watch"
-        note = f"{goods} 顺 {bads} 逆 ⇒ 【观望】"
+        unmet: list[str] = []
+        if rr is None:
+            unmet.append("RR 不可算（该档样本不足或无失效位）")
+        elif rr < REASON_RR_MIN:
+            unmet.append(f"RR {rr:.2f} < {REASON_RR_MIN:g}")
+        if ret_p75 is None:
+            unmet.append("该档 24h P75 不可得")
+        elif ret_p75 <= 0:
+            unmet.append(f"该档 24h P75 {ret_p75:+.2f}% ≤ 0")
+        if goods < 2:
+            unmet.append(f"顺风维数 {goods} < 2")
+        if bads > 1:
+            unmet.append(f"逆风维数 {bads} > 1")
+        note = (f"{goods} 顺 {bads} 逆 ⇒ 【观望】"
+                + (f"（可开未达：{'；'.join(unmet)}）" if unmet else ""))
     return {"slots": slots, "rr": rr, "ret_p75": ret_p75, "goods": goods, "bads": bads,
             "tone": tone, "note": note, "is_brk": is_brk, "flags": flags}
 
@@ -1868,6 +1885,7 @@ def _render_batch_summary(items: list[dict], batch: dict | None,
     """
     if out is not None:
         out["surge_shown"] = False
+        out["summary_head_shown"] = False
     if not batch:
         return ""
     ctx = batch.get("ctx") or {}
@@ -1884,12 +1902,15 @@ def _render_batch_summary(items: list[dict], batch: dict | None,
         watch_n = sum(1 for _, r in main if r["tone"] == "watch")
         avoid_n = sum(1 for _, r in main if r["tone"] == "avoid")
         head = (f"📊 本批可开性：主池 {len(main)} 币中 {pass_n} 币通过"
-                f"（顺风 ≥2 维、逆风 ≤1 维且 RR ≥{REASON_RR_MIN:g}，按币级独立维度计）"
+                f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h P75 > 0，"
+                f"按币级独立维度计）"
                 f" · {watch_n} 币观望"
                 f" · {avoid_n} 币不建议")
         if brk_n:
             head += f" · BRK 观察 {brk_n} 币"
         lines.append(head)
+        if out is not None:
+            out["summary_head_shown"] = True
         no_tail = sum(1 for _, r in main if r["flags"].get("funding_tailwind") is False)
         # N-8702-H：此计数只覆盖**主池**（`main`），本批 14 币里 11 币是 BRK 时，写「本批」
         # 会让「3/3」被读成全体 ⇒ 文案改「主池」。
@@ -3237,9 +3258,12 @@ def _render_alert_email(items: list[dict],
                      "「RR」= 参考目标位 ÷ 失效位幅度，参考目标位取同量比档 24h 最大有利偏移"
                      "（mfe_24h）P75（乐观上界、非保证能到；判「可开」还须该档 24h P75 > 0）；"
                      "「⇒ 判读」= 由槽位派生的开仓建议"
-                     f"（顺风 ≥2 维、逆风 ≤1 维且 RR ≥{REASON_RR_MIN:g} 判「可开」，RR <1 判"
-                     "「观望」，零顺风判「不建议」，BRK 因维度缺失统一进「观察档」）；"
-                     "「📊 本批可开性」= 本封全批汇总；")
+                     f"（顺风 ≥2 维、逆风 ≤1 维、RR ≥{REASON_RR_MIN:g} 且该档 24h P75 > 0 判"
+                     "「可开」，RR <1 判「观望」，零顺风判「不建议」，BRK 因维度缺失统一进"
+                     "「观察档」）；")
+    # N-11A4-F：本批可开性锚点只在正文实际渲染该行时挂（原随 has_reason 无条件输出 ⇒
+    # 整批全 BRK（main 为空）时正文无该行、图例却印，与 N-0928-6 同类多报）。
+    legend_summary = "「📊 本批可开性」= 本封全批汇总；"
     legend_surge = ("「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个有告警日均值 ×1.5"
                     "（「当日」为日报日、非本封批次；历史此类批次平均收益显著为负，"
                     "属批级风险提示）。")
@@ -3247,8 +3271,9 @@ def _render_alert_email(items: list[dict],
         legend += legend_dir
     if has_reason:
         legend += legend_reason
+        if _summary_out.get("summary_head_shown"):
+            legend += legend_summary
         if _summary_out.get("surge_shown"):
-            # N-0928-6：暴增锚点只在正文实际渲染了暴增行时挂（原无条件输出 ⇒ 图例多报）。
             legend += legend_surge
     legend += "</p>"
     footnote = ("<p style='color:#999;font-size:12px'>"

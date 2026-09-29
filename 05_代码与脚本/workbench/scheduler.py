@@ -133,6 +133,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("sync_core_supply", "20 */6 * * *", "sync_core_supply_from_cmc.py", ["--sync"], "主表 supply/市值对齐 CMC（每 6 小时，ETL 后）", "core"),
     # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）
     # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily", "core"),
+    # 兜底（2026-09-29，诊断_变化榜数据卡09-27）：`data_sync_daily` 以「关键任务失败 →
+    # 整跑失败」的串行模型运行，一旦前置关键任务（如 `资产同名去重` 撞锁）失败，排在后面的
+    # `每日 diff 变化榜` 就被连累不执行（实测 09-28 22:30 UTC 那次即此）。虽然子任务隔离
+    # （df4444f）已消除 break，仍加一条与 data_sync_daily 解耦的兜底：每日 08:05（ETL 06:15
+    # 与日同步 06:30 之后、早报快照 08:30 之前）幂等重生成一次（ON CONFLICT DO NOTHING）。
+    ("daily_diff_fallback", "5 8 * * *", "daily_diff_generator.py", [],
+     "每日变化榜兜底（每日 08:05，ETL/日同步后，幂等；防日同步关键任务失败连累）", "core"),
     ("social_heat_batch", "0 8 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 08:00，早报快照前就绪）", "core"),
     # 错峰（2026-09-29 告警收敛）：原 `30 */6` 与 `data_sync_daily`（`30 6`，其内部
     # 「资产同名去重」会 DELETE core.asset、级联 ~42 张 FK 子表）**同 06:30 起跑**，

@@ -2396,3 +2396,15 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **二次修复（错峰，本次追加）**：`scheduler.py` 的 `derivatives_batch` 由 `30 */6 * * *` → **`5 */6 * * *`**（06:05 起跑、约 06:17 完成，与 06:30 的去重错开）。universe 只依赖 `core.asset.market_cap_rank`、不依赖同窗 ETL，错峰无副作用；`data_sync_daily` 保持 `30 6` 不动（避免下游时序连锁）。护栏：`test_dedup_assets_resilience.py` +3 断言（`derivatives_batch` 在 5 */6、不在 30 */6、`data_sync_daily` 仍在 30 6）。
 - **根因定性（两层）**：① **告警根因**（严重度误判）已治——瞬时锁超时是良性、幂等的清理失败，不该升级为「关键任务失败→整条日同步 failed→告警」，现按「重试+跳过」处理（exit 0）；② **锁竞争**（删父行 vs 并发写子行）是结构性的，**靠错峰降低频率、不追求 100% 消除**（硬消除需停并发写/长事务，代价更大）。
 - **未做 / 边界（须留档）**：① 锁耗尽跳过 = 该批重复资产延后至次日清理（幂等、无数据丢失）；② 其他常驻写 `core.asset` FK 子表的任务（如 `catalyst_fast_daemon` 写 `biz.asset_catalyst`，FK=NO ACTION）仍可能偶发短事务竞争，由 120s 宽锁 + 重试覆盖；③ **需容器 redeploy** 后下次 06:05/06:30（北京）生效。
+
+### 变化榜数据卡 09-27 诊断处置（诊断_变化榜数据卡09-27_根因_data_sync_daily_2026-09-29，2026-09-29，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\诊断_变化榜数据卡09-27_根因_data_sync_daily_2026-09-29.md`。用户授权：**P0 立即补跑 09-28**、**P2 加独立兜底调度**。**零 DDL**。
+
+- **🔴 更正诊断的根因归属（物证级，prod `sys.task_log` 只读）**：诊断报告推测「L32 赛道刷新 / L54 supply 对齐」导致 break，实测**都不是**——失败 run `361d0b6a6c59`（09-28 22:30 UTC = 09-29 06:30 CST，69s）的日志显示：子任务 2 **`资产同名去重`（`dedup_assets.py --apply`）** 因 `lock timeout`（E/ACC、HOODIE）`exit=2` → 旧编排 `[FAIL] 关键任务 [资产同名去重] 失败，终止后续任务` → 只跑 2/14、`每日 diff 变化榜`（排第 8）从未执行 ⇒ 09-28 零行。与 AGENTS 上一节「dedup 锁竞争」**同源**；报告的 L58 位置/前序任务列表与实码不符。
+- **✅ P2-A 已在 HEAD（无需改码）**：诊断建议的「子任务隔离」早已提交——`df4444f`（`run_data_sync_daily.py` 去掉 `break`，14 个子任务全跑，`critical` 只影响整体退出码）、`4fb35ff`（`dedup_assets` 锁耗尽 `exit 0` 跳过）、`4f5cf8d`。三者均为 `HEAD` 祖先（`merge-base --is-ancestor` 已验证），09-28 那次失败是**旧构建**产物。
+- **✅ P0 补跑（用户授权，prod 写）**：执行 `daily_diff_generator.py --date 2026-09-28`（幂等 `ON CONFLICT DO NOTHING`）→ 本次仅补 **9 行**（`market_cap_mover 1` + `sector_rotation 8`），说明 09-28 其余 ~230 行**此前已被回填**（并发进程/他方）；复查 `biz.daily_diff_summary` 09-28 现 **239 行**（09-27 = 235），恢复完成。09-29 因 `asset_market_daily` 09-29 未就绪（=0）暂不可补，待 ETL 就绪或次日跑批。
+- **✅ P2-B 独立兜底调度（本次提交）**：`scheduler.py` 新增 `("daily_diff_fallback", "5 8 * * *", "daily_diff_generator.py", [], …, "core")` —— 每日 **08:05（北京）**（ETL 06:15 → 日同步 06:30 → 早报快照 08:30 之间）幂等重生成变化榜，与 `data_sync_daily` 解耦；即便日同步关键任务失败也不会让变化榜缺日。`scheduler.py --list` 实测已注册。
+- **验证**：workbench 全量 **60 个 `test_*.py` 全部 exit=0**；`py_compile scheduler.py` 通过；`scheduler.py --list` 含 `daily_diff_fallback  5 8 * * *`。
+- **未做 / 边界（须留档）**：① 未改 `data_sync_daily` 的 `critical` 标记（真实错误仍应 `exit 1` 告警，已在上一节理由）；② 未加「加载失败邮件告警」；③ `daily_diff_generator` 默认取 `max(market_date)`，故兜底只会生成「最新有行情的一天」——若 09-29 ETL 迟迟不就绪，兜底不会凭空补历史缺口（历史缺口仍需显式 `--date`）。
+- **待部署**：`scheduler.py` 需容器 **redeploy** 后 `daily_diff_fallback` 生效。

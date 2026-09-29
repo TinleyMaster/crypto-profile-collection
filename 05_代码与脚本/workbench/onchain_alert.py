@@ -151,6 +151,7 @@ def onchain_alert_stream():
                     "tl.tx_hash NOT LIKE '0xtest%%'",
                     "tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
+                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
                 ]
                 feed_params = [hours]
                 if chain:
@@ -197,6 +198,7 @@ def onchain_alert_stream():
                     "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
                     "tl.tx_hash NOT LIKE '0xtest%%'",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
+                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
                 ]
                 stats_params = []
                 if chain:
@@ -249,6 +251,7 @@ def onchain_alert_stream():
                     "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
                     "tl.tx_hash NOT LIKE '0xtest%%'",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
+                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
                 ]
                 sum_params = [hours]
                 if chain:
@@ -305,6 +308,7 @@ def onchain_alert_stream():
                       AND (tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)
                       AND tl.tx_hash NOT LIKE '0xtest%%'
                       AND (f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)
+                      AND (f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))
                     GROUP BY 1
                     ORDER BY (SUM(COALESCE(tl.value_usd, 0))) DESC
                     LIMIT 15

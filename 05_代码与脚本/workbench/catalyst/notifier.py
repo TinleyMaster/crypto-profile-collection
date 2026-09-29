@@ -1793,6 +1793,19 @@ def _recent_major_events(conn, hours: int = 24,
                     WHEN head ~ 'etf' THEN 'etf'
                     WHEN head ~ '美联储|federal reserve|rate hike|rate cut|加息|降息|基点|basis point|通胀|非农'
                         THEN 'macro'
+                    -- 审计 2026-09-29 P1-2：上游 AI/规则把「基金会推出某安全/生态计划」误标
+                    -- regulation（Arbitrum Security Program 被当监管事件，传导路径错配成
+                    -- 「监管口径变化」）。**仅在标题无任何监管线索时**降级：有合作/推出线索 →
+                    -- partnership，否则 → other。先判「无监管线索」再判合作线索，避免
+                    -- 「SEC 推出新规」这类真监管被误降级。监管线索刻意不含裸 sec/ban
+                    -- （会误命中 security/arbitrum 等）。
+                    WHEN raw_event_type = 'regulation'
+                         AND head !~ '监管|合规|法案|立法|条例|诉讼|起诉|禁止|禁令|制裁|罚款|证券|法院|国会|听证|cftc|lawsuit|regulation|regulatory|compliance|sanction|enforcement|court|congress|证监会|反垄断|antitrust|sec[[:space:]]'
+                         AND head ~ '基金会|foundation|合作|伙伴|partnership|联合|推出|上线|launch|program|计划|倡议|initiative'
+                        THEN 'partnership'
+                    WHEN raw_event_type = 'regulation'
+                         AND head !~ '监管|合规|法案|立法|条例|诉讼|起诉|禁止|禁令|制裁|罚款|证券|法院|国会|听证|cftc|lawsuit|regulation|regulatory|compliance|sanction|enforcement|court|congress|证监会|反垄断|antitrust|sec[[:space:]]'
+                        THEN 'other'
                     -- 行情播报识别（修复旧口径漏网：AI 误分类即放行）：
                     -- 实测 Rhea「24H 涨幅 131%%」被判 partnership 入池，属负 alpha
                     WHEN (head ~ '涨幅' AND head ~ '%%') OR head ~ '价格突破|暴涨'
@@ -1905,6 +1918,46 @@ _DIRECT_ACTION_KEYWORDS = (
     "购入", "买入", "增持", "纳入", "回购", "销毁", "质押", "锁仓", "托管",
     "合作", "推出", "上线", "采用", "接入", "集成",
 )
+# 英文动作词（审计 2026-09-29 P1-3）：ai_summary 常为英文，中文词表恒不命中，
+# 导致一律落入「生态间接受益」。补英文后与中文同判。
+_DIRECT_ACTION_KEYWORDS_EN = (
+    "buy", "purchase", "acquire", "acquired", "add", "added to", "treasury",
+    "stake", "staked", "lock", "locked", "custody", "burn", "burned",
+    "integrate", "integrates", "integrated", "adopt", "adopts", "adopted",
+    "launch", "launches", "launched", "list", "listed", "listing",
+    "partnership", "partnered", "invest", "invested", "backed",
+)
+# 媒体/出版方名（审计 2026-09-29 P1-1）：邮件「来源」此前打印发现渠道 id
+# （kol_news_media_binance_square_9），非真实媒体。标题/正文常带出版方名，抽出来展示。
+_MEDIA_NAMES = (
+    "ChainCatcher", "Foresight News", "BlockBeats", "PANews", "Odaily",
+    "The Block", "CoinDesk", "Cointelegraph", "Decrypt", "CryptoSlate",
+    "CryptoBriefing", "Protos", "Cryptonomist", "NS3.AI", "ZDNet", "Decrypt",
+    "DL News", "Bloomberg", "Reuters", "CoinGape", "U.Today", "BeInCrypto",
+    "火星财经", "金色财经", "巴比特", "律动", "深潮", "Foresight", "动察",
+    "星球日报", "链捕手", "PANews", "ForesightNews", "CoinVoice", "Blocklike",
+)
+_MEDIA_RE = re.compile(
+    "|".join(re.escape(m) for m in sorted(set(_MEDIA_NAMES), key=len, reverse=True)),
+    re.IGNORECASE)
+
+
+def _extract_publisher(*texts: str) -> str | None:
+    """从标题/正文首段抽真实媒体/出版方名（找不到返回 None，绝不臆造）。"""
+    for text in texts:
+        if not text:
+            continue
+        m = _MEDIA_RE.search(text[:200])
+        if m:
+            return m.group(0)
+    return None
+
+
+def _display_source(r: dict) -> str:
+    """邮件「来源」展示真实出版方；抽不到再回落发现渠道 id（source_code）。"""
+    pub = _extract_publisher(r.get("catalyst_title"), r.get("title_cn"),
+                             r.get("catalyst_body"))
+    return pub or (r.get("source_code") or "—")
 
 # 承载关系线索：代币紧邻这些词时多为「底层链/网络」角色（生态间接），非自身受益
 _CARRIER_CUES = ("链", "网络", "主网", "公链", "生态", "链上")
@@ -1942,19 +1995,28 @@ def _transmission_directness(r: dict) -> tuple[str, str, str]:
 
     直接利好标的：标题/摘要以自身角色点名该币，且事件属「被买/被锁/被采用/被纳入/合作」；
     生态间接受益：事件作用在底层链/赛道/协议而非该币自身（含「X 链」承载角色）。
+    **利空型（审计 2026-09-29 P1-3）**：被点名 → 「直接受损标的」（直接利空传导）；
+    仅承载 → 「生态间接承压」——不得再写成「受益」，否则与利空型结论自相矛盾。
 
     Returns:
-        (level, label, confidence_cn)，level ∈ {'direct','indirect'}
+        (level, label, confidence_cn)，level ∈ {'direct','indirect','harm','harm_indirect'}
     """
     text = " ".join(
         str(x) for x in (
             r.get("catalyst_title"), r.get("title_cn"), r.get("ai_summary"),
         ) if x
     )
+    text_l = text.lower()
     sym_hit, sym_carrier = _mentions_token(text, (r.get("symbol") or "").strip())
     name_hit, name_carrier = _mentions_token(text, (r.get("canonical_name") or "").strip())
     self_mentioned = (sym_hit and not sym_carrier) or (name_hit and not name_carrier)
-    has_action = any(k in text for k in _DIRECT_ACTION_KEYWORDS)
+    has_action = (any(k in text for k in _DIRECT_ACTION_KEYWORDS)
+                  or any(k in text_l for k in _DIRECT_ACTION_KEYWORDS_EN))
+    is_bearish = bool(r.get("is_bearish"))
+    if is_bearish:
+        if self_mentioned:
+            return "harm", "直接受损标的（利空传导）", "高"
+        return "harm_indirect", "生态间接承压（利空传导）", "中"
     if self_mentioned and has_action:
         return "direct", "直接利好标的", "高"
     return "indirect", "生态间接受益", "中"
@@ -1990,6 +2052,27 @@ def _second_order_symbols(r: dict, limit: int = 5) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+# 板块枚举 → 中文标签（审计 2026-09-29 P2-2：原始 `l1` 枚举泄漏到邮件）。
+# 优先用 mapping/sector.SECTOR_LABELS 单一真源；不可导入时用等价兜底表。
+try:  # pragma: no cover - 依赖导入环境
+    from crypto_research.mapping.sector import SECTOR_LABELS as _SECTOR_LABELS
+except Exception:  # noqa: BLE001
+    _SECTOR_LABELS = {
+        "l1": "L1 公链", "l2": "L2 二层", "defi": "DeFi", "launchpad": "Launchpad 打新平台",
+        "meme": "Meme", "gamefi": "GameFi / NFT", "rwa": "RWA", "ai": "AI + Crypto",
+        "stablecoin": "稳定币", "cex_token": "平台币", "derivatives": "衍生品",
+        "depin": "DePIN", "infra": "基础设施", "other": "其他",
+    }
+
+
+def _sector_label(code) -> str:
+    """板块枚举 → 中文标签；未知/空原样返回（不臆造）。"""
+    c = str(code or "").strip()
+    if not c:
+        return ""
+    return _SECTOR_LABELS.get(c.lower(), c)
 
 
 def _major_event_subject(r: dict) -> str:
@@ -2045,7 +2128,8 @@ def _build_major_event_html(r: dict) -> str:
 
     # ---- 传导逻辑（输出层规则映射：只解释机制，不构成买卖建议）----
     _dir_level, dir_label, dir_conf = _transmission_directness(r)
-    dir_color = "#b45309" if _dir_level == "direct" else "#4b5563"
+    dir_color = {"direct": "#b45309", "harm": "#dc2626",
+                 "harm_indirect": "#b45309"}.get(_dir_level, "#4b5563")
     path_txt = _transmission_path(r)
     tl_immediate, tl_short, tl_mid = _transmission_timeline(r)
     res_note = _RESONANCE_NOTE.get(r.get("resonance_state"), "")
@@ -2096,12 +2180,12 @@ def _build_major_event_html(r: dict) -> str:
   </div>'''
 
     so_syms = _second_order_symbols(r)
-    so_sector = (r.get("second_order_sector") or "").strip()
+    so_sector_txt = _sector_label(r.get("second_order_sector"))
     so_block = f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
     <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">板块联动</div>
     <div style="font-size:13px;line-height:1.7;color:#374151">
-      同「{so_sector or "相关"}」赛道的 {'、'.join(so_syms)} 或受带动（置信度中等）；
-      此为二阶传导映射，非直接建议。
+      同「{so_sector_txt or "相关"}」赛道相关标的：{'、'.join(so_syms)}
+      （二阶传导映射，非直接建议；若主题币归因有误，此联动亦可能失真）。
     </div>
   </div>''' if so_syms else ""
 
@@ -2124,7 +2208,7 @@ def _build_major_event_html(r: dict) -> str:
     </div>
     <div style="font-size:15px;line-height:1.6;color:#111827;margin-top:10px">{title}</div>
     <div style="font-size:12px;color:#6b7280;margin-top:8px">
-      发布：{_fmt_ts(r.get('published_at'))} · 来源 {r.get('source_code') or '—'}
+      发布：{_fmt_ts(r.get('published_at'))} · 来源 {_display_source(r)}
       · 事件类别 {r.get('event_type_norm') or r.get('ai_event_type')
                   or r.get('rule_event_type') or '—'}
     </div>
@@ -2406,7 +2490,7 @@ def _build_a_alert_card(r: dict) -> str:
     source_section = (
         _g("G0", "事件来源与原文",
            _kv("发布时间", _fmt_ts(r.get("published_at")))
-           + _kv("信息源", _html.escape(str(r.get("source_code") or "—")))
+           + _kv("信息源", _html.escape(_display_source(r)))
            + _kv("事件分类", _html.escape(str(r.get("event_category") or "—")))
            + _kv("原文链接", url_html)
            + '<div style="font-size:12.5px;font-weight:600;color:#111827;margin-top:8px;line-height:1.5">'

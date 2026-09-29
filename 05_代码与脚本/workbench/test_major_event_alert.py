@@ -264,5 +264,64 @@ check(N._fmt_price(1234.567) == "1,234.6" and N._fmt_price("620.5") == "620.5",
 check(N._fmt_price(1e-10) == "1.0000e-10",
       "科学计数分支未被 trim（指数尾零陷阱守卫）")
 
+print("== 11. 审计 2026-09-29 修复护栏 ==")
+# P1-3 极性：利空型不得再写「受益」
+_d_harm = N._transmission_directness({
+    "symbol": "XRP", "canonical_name": "XRP",
+    "title_cn": "D'CENT 钱包 12.4M XRP 被盗，7000+ 钱包受影响", "ai_summary": "",
+    "is_bearish": True})
+check(_d_harm[0] == "harm" and "受损" in _d_harm[1],
+      "利空型点名该币 → 「直接受损标的」（不再写受益）", str(_d_harm))
+_d_harm_ind = N._transmission_directness({
+    "symbol": "SUI", "canonical_name": "Sui",
+    "title_cn": "某交易所被盗资金经 SUI 链转移", "ai_summary": "",
+    "is_bearish": True})
+check(_d_harm_ind[0] == "harm_indirect" and "承压" in _d_harm_ind[1],
+      "利空型仅载体角色（X 链）→ 「生态间接承压」", str(_d_harm_ind))
+_d_en = N._transmission_directness({
+    "symbol": "SKY", "canonical_name": "Sky",
+    "title_cn": None, "ai_summary": "Galaxy acquires SKY and adds it to treasury"})
+check(_d_en[0] == "direct", "英文动作词（acquire/add to treasury）判直接利好", str(_d_en))
+check("生态间接受益" not in N._build_major_event_html(_fake_row(
+    is_bearish=True, event_type_norm="security", ai_sentiment="bearish",
+    catalyst_title="某协议遭攻击，损失 1200 万美元", catalyst_body="hack", ai_summary="被盗")),
+      "利空型邮件不再出现「生态间接受益」字样")
+
+# P1-1 来源展示真实媒体
+check(N._extract_publisher("ChainCatcher 消息，据 Lookonchain 监测…") == "ChainCatcher",
+      "从标题抽媒体名：ChainCatcher")
+check(N._extract_publisher(None, "Foresight News 报道，Arbitrum 基金会…") == "Foresight News",
+      "从正文抽媒体名：Foresight News")
+check(N._extract_publisher("某协议遭攻击，损失 1200 万美元") is None,
+      "无媒体名时返回 None（不臆造）")
+check(N._display_source(_fake_row()) == "kol_catalyst_binance_square_7",
+      "无媒体名时回落 source_code（不丢溯源）")
+_html_pub = N._build_major_event_html(_fake_row(
+    catalyst_title="Foresight News 消息，Arbitrum 基金会推出安全计划", title_cn=None))
+check("Foresight News" in _html_pub, "邮件「来源」展示真实媒体名")
+check("kol_catalyst_binance_square_7" not in _html_pub,
+      "渠道 id 不再出现在邮件正文（仅内部溯源）")
+
+# P1-2 类别：误标 regulation 降级（不路由到监管口径）
+check("raw_event_type = 'regulation'" in _QUERY_SRC and "THEN 'partnership'" in _QUERY_SRC
+      and "THEN 'other'" in _QUERY_SRC,
+      "SQL 对无监管线索的 regulation 做降级（partnership/other）")
+check("基金会|foundation" in _QUERY_SRC and "program" in _QUERY_SRC,
+      "降级判据含「基金会/foundation/program」（Arbitrum 类事件）")
+check("cftc" in _QUERY_SRC and "l lawsuit" not in _QUERY_SRC
+      and "|sec|" not in _QUERY_SRC,
+      "监管线索含 cftc 等强线索，且刻意不含裸 sec/ban（避免误命中 security/arbitrum）")
+
+# P2-2 板块枚举翻译
+check(N._sector_label("l1") == "L1 公链" and N._sector_label("RWA") == "RWA",
+      "板块枚举翻译（l1→L1 公链，大小写不敏感）",
+      f"{N._sector_label('l1')} / {N._sector_label('RWA')}")
+check(N._sector_label("weird") == "weird" and N._sector_label(None) == "",
+      "未知枚举原样返回、空→空（不臆造）")
+_html_sec = N._build_major_event_html(_fake_row(
+    second_order_symbols=["AAA"], second_order_sector="l1"))
+check("L1 公链" in _html_sec and "「l1」" not in _html_sec,
+      "板块联动不再泄漏原始枚举 l1")
+
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

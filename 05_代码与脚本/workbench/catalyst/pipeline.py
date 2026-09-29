@@ -18,12 +18,51 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from .models import CatalystItem
-from .linker import map_pairs_to_asset_ids, extract_pairs_from_text
+from .linker import map_pairs_to_asset_ids, extract_pairs_from_text, extract_base_symbol
 
 logger = logging.getLogger(__name__)
+
+# 稳定币/计价代币：多作「出资/计价单位」出现，极少是事件主语；归因主币时降权。
+_STABLE_BASES = frozenset({
+    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD", "DAI", "USDE", "USDD",
+    "PYUSD", "FRAX", "GUSD", "USDS", "USD1", "EURT", "EURC", "XAUT", "PAXG",
+})
+_UNSEEN = 10 ** 9
+
+
+def _symbol_pos(text_lower: str, base: str) -> int:
+    """base 在文本中首次出现位置（词边界、大小写不敏感）；未出现返回 _UNSEEN。"""
+    if not base:
+        return _UNSEEN
+    m = re.search(r"(?<![a-z0-9])" + re.escape(base.lower()) + r"(?![a-z0-9])", text_lower)
+    return m.start() if m else _UNSEEN
+
+
+def _order_pairs_by_salience(pairs: list[str], title: str | None, body: str | None) -> list[str]:
+    """按「事件主语」显著度重排交易对，使 `asset_ids[0]` 尽量落在事件主语上。
+
+    审计 2026-09-29 P0-1：原实现 `primary_asset_id = asset_ids[0]` = 正文首个命中
+    token，导致「XRP 被盗」挂到 XLM、「Arbitrum 基金会安全计划」挂到 USDC（出资币）。
+    启发式（纯函数、无法判定时保持原序，不劣化）：
+      ① 稳定币/计价代币降权（多为出资单位，非主语）；
+      ② 标题命中优先于正文命中（标题即事件主语所在）；
+      ③ 同层按出现位置靠前优先；最后按原顺序稳定排序。
+    """
+    if len(pairs) <= 1:
+        return list(pairs)
+    tl, bl = (title or "").lower(), (body or "").lower()
+
+    def _key(item):
+        idx, pair = item
+        base = (extract_base_symbol(pair) or "").upper()
+        is_stable = 1 if base in _STABLE_BASES else 0
+        return (is_stable, _symbol_pos(tl, base), _symbol_pos(bl, base), idx)
+
+    return [p for _, p in sorted(enumerate(pairs), key=_key)]
 
 
 def upsert_catalyst_item(
@@ -198,6 +237,7 @@ def _merge_catalyst(
     ctx = " ".join(str(x) for x in (
         item.title, item.body_text,
         existing.get("title"), existing.get("body_text")) if x)
+    all_pairs = _order_pairs_by_salience(all_pairs, ctx, None)
     asset_ids = map_pairs_to_asset_ids(all_pairs, conn, context_text=ctx)
     _update_asset_links(catalyst_id, asset_ids, link_source, conn)
 
@@ -224,6 +264,9 @@ def _resolve_asset_ids(
 
     if not pairs:
         return []
+
+    # P0-1：按事件主语显著度重排（稳定币降权 + 标题优先），使 asset_ids[0] 尽量是主语
+    pairs = _order_pairs_by_salience(pairs, item.title, item.body_text)
 
     ctx = (item.title or "") + " " + (item.body_text or "")
     return map_pairs_to_asset_ids(pairs, conn, context_text=ctx)

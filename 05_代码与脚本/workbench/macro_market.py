@@ -2678,16 +2678,28 @@ def _load_market_rules() -> dict:
 #   · calibrated_low / preliminary → 分数 ×weight_factor 且档位封顶 MED（只降档不删卡）；
 #   · exempt_not_calibrable / exempt_not_backtestable → 豁免，不降权、保留 HIGH
 #     （聚合/硬数据极值无回测样本 ≠ 表现差，与刀3 的 _AGG_HIGH_ALLOWLIST 同源）；
-#   · 表缺失/未写入/DB 不可达 → 返回空 dict ⇒ 行为与上线前完全一致（安全降级）。
+#   · 表缺失/未写入/DB 不可达 → 返回空 dict。
 # 加载策略：惰性 + 30min TTL（不在 import 期打 DB，避免拖慢测试/冷启动；
 # 校准表刷新后最多 30min 生效，无需重启）。
+#
+# ⚠️ 2026-09-29（复验 N9）：「空 dict」在 N2 之后**不再等价于上线前行为**——因为
+# `missing_calibration` 现与 exempt_* 同口径封顶 MED，加载失败会让「所有类型」都被
+# 判为未回测 ⇒ 当日全部 HIGH 被误降 MED。故新增 `_CALIB_LOAD_FAILED` 哨兵：
+# 加载失败时 `_exempt_no_high` 一律返回 False（保守不封顶），避免 DB 抖动静默清零 HIGH。
 _SIGNAL_TYPE_CALIBRATION: dict = {}
 _CALIB_LOADED_AT: float = 0.0
 _CALIB_TTL_SEC: float = 1800.0
+# 校准表加载失败哨兵（N9）：True ⇒ 表不可信，不做任何「未回测封顶」（保守放行）。
+_CALIB_LOAD_FAILED: bool = False
 
 
 def _load_signal_type_calibration() -> dict:
-    """加载 signal_type 级回测校准（失败静默返回 {}，不阻断主流程）。"""
+    """加载 signal_type 级回测校准（失败静默返回 {}，不阻断主流程）。
+
+    失败时置 `_CALIB_LOAD_FAILED=True`（N9）：调用方据此保守放行，而非把「读不到表」
+    误判成「所有类型都没回测」→ 全量降档。
+    """
+    global _CALIB_LOAD_FAILED
     try:
         from crypto_research.config import get_settings
         from crypto_research.db.conn import get_connection
@@ -2715,9 +2727,11 @@ def _load_signal_type_calibration() -> dict:
                         "window_start": str(wstart) if wstart is not None else None,
                         "window_end": str(wend) if wend is not None else None,
                     }
+                _CALIB_LOAD_FAILED = False
                 return out
     except Exception as exc:  # noqa: BLE001 —— 校准是增强项，任何失败都必须降级为「不校准」
         logger.warning("signal_type_calibration 加载失败，本轮不做回测校准：%s", exc)
+        _CALIB_LOAD_FAILED = True
         return {}
 
 
@@ -2827,6 +2841,10 @@ def _exempt_no_high(signal_type: str) -> bool:
         return False
     st = str(signal_type)
     if st in _EXEMPT_ALLOW_HIGH:
+        return False
+    # N9（2026-09-29 复验）：校准表加载失败 ⇒ 表不可信，绝不据此把「读不到=未回测」当封顶
+    # 依据（否则 DB 抖动会让当日所有 HIGH 被静默降 MED）。保守放行。
+    if _CALIB_LOAD_FAILED:
         return False
     cs = _calibration_status(st)
     gate = str(cs.get("gate") or "")
@@ -9129,6 +9147,20 @@ def _brief_top_opportunities(opps: list, top_n: int = 3, label: str = ""):
     return out, src_ids
 
 
+def _split_brief_opportunities(opps: list, top_n: int = 3, label: str = ""):
+    """把机会池切成 (机会清单, 观察清单) —— 两者**不重叠**（复验 MU6 行为承重，2026-09-29）。
+
+    机会清单 = `_brief_top_opportunities` 的产物（HIGH 原对象 + 兜底项深拷贝）；
+    观察清单 = 其余对象。兜底项的**原始对象**必须从观察清单剔除——否则早报里同一条
+    信号会在「机会段（带降档说明）」与「观察段（不带）」各出现一次 = 重复。
+    抽为纯函数以便离线行为断言（此前用源码文本守卫，MU6 突变逃逸）。
+    """
+    items, fallback_src_ids = _brief_top_opportunities(opps, top_n, label)
+    keep_ids = {id(o) for o in items} | set(fallback_src_ids)
+    watchlist = [o for o in opps if id(o) not in keep_ids]
+    return items, watchlist
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
     早报结构化骨架 V2（重新设计版）。
@@ -9244,10 +9276,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
 
     # ── M2-A2/A3（2026-09-28）：早报机会/高危段兜底，避免降档规则使 HIGH=0 时空窗 ──
     # HIGH ∪ 池内 conv 前 3；兜底项打 display_demoted/display_note，渲染层强制标注。
-    _m8_opportunities, _m8_fallback_src_ids = _brief_top_opportunities(
+    _m8_opportunities, _m8_watchlist = _split_brief_opportunities(
         opps, 3, label="非高确定性档（当日 HIGH 不足）")
-    _m8_keep_ids = {id(o) for o in _m8_opportunities} | set(_m8_fallback_src_ids)
-    _m8_watchlist = [o for o in opps if id(o) not in _m8_keep_ids]
     _m4_risks, _ = _brief_top_opportunities(
         risk_signals, 3, label="非高确定性档（当日高危 HIGH 不足）")
 

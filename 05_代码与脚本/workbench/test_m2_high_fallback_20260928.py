@@ -98,17 +98,40 @@ check(mm._exempt_no_high("price_surge") is True,
 check(mm._exempt_no_high("narrative") is True, "N2 exempt_* 仍封顶")
 check(mm._exempt_no_high("catalyst") is False, "N2 calibrated_ok 不封顶（回测背书通过）")
 
+# ── N9：校准表加载失败 ⇒ 保守不封顶（防 DB 抖动静默清零 HIGH） ──
+print("[N9] 加载失败保守降级")
+_prev_flag = mm._CALIB_LOAD_FAILED
+mm._CALIB_LOAD_FAILED = True
+check(mm._exempt_no_high("price_surge") is False, "N9 加载失败 ⇒ 不封顶（保守放行）")
+check(mm._exempt_no_high("narrative") is False, "N9 加载失败 ⇒ exempt 亦不封顶")
+mm._CALIB_LOAD_FAILED = _prev_flag
+check(mm._exempt_no_high("price_surge") is True, "N9 恢复后仍正常封顶")
+
+# ── MU6：机会/观察两清单不重叠（兜底原对象必须剔除） ──
+print("[MU6] _split_brief_opportunities 不重复")
+_opps3 = [_opp("H1", 66, tier="HIGH"), _opp("A", 80), _opp("B", 78),
+          _opp("C", 70), _opp("D", 50)]
+_items3, _watch3 = mm._split_brief_opportunities(_opps3, 3)
+check([o["target"] for o in _items3] == ["H1", "A", "B", "C"], "机会 = HIGH ∪ 池内前 3")
+check([o["target"] for o in _watch3] == ["D"], "仅剩余对象进观察清单")
+_fb_src = [_opps3[1], _opps3[2], _opps3[3]]
+check(all(id(o) not in {id(w) for w in _watch3} for o in _fb_src),
+      "兜底项的**原始对象**不在 watchlist（去 src_ids 即红 —— MU6）")
+check(id(_opps3[0]) not in {id(w) for w in _watch3}, "HIGH 原对象不在 watchlist")
+check(len(_items3) + len(_watch3) == len(_opps3), "机会∪观察 = 全池（不丢不重）")
+
 # ── A2/A3：macro_market brief 接线（源码守卫）──
 print("[A2/A3] macro_market 接线")
 _mm_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 check("def _brief_top_opportunities(" in _mm_src, "helper 已定义")
-check("_brief_top_opportunities(" in _mm_src and "opps, 3, label=" in _mm_src,
-      "M8_opportunities 用 HIGH ∪ 前 3")
+check("def _split_brief_opportunities(" in _mm_src and "_split_brief_opportunities(opps" in _mm_src,
+      "机会/观察切分走 _split_brief_opportunities（MU6 接线守卫）")
 check("risk_signals, 3, label=" in _mm_src, "M4_risks 高危侧同口径对称")
 check('"M8_opportunities": _m8_opportunities' in _mm_src, "brief 使用 _m8_opportunities")
 check('"M8_watchlist": _m8_watchlist' in _mm_src, "brief 使用 _m8_watchlist（剔除兜底项，避免重复）")
 check('"M4_risks": _m4_risks' in _mm_src, "brief 使用 _m4_risks")
 check('gate == "missing_calibration"' in _mm_src, "N2 源码含 missing_calibration 同口径判定")
+check("_CALIB_LOAD_FAILED" in _mm_src, "N9 源码含加载失败哨兵")
 
 # ── A1：早报渲染消费降档说明 ──
 print("[A1] 早报渲染消费降档说明")
@@ -142,6 +165,11 @@ check(_err is None, "render_brief_html 不抛异常", _err)
 check("降档说明" in _html, "早报 HTML 含「降档说明」（展示层可解释 78 分 MED）")
 check("exempt_unbacktested" in _html or "非高确定性档" in _html,
       "早报带出降档原因（exempt / 兜底标注）")
+check("无满足回测背书的 HIGH" in _html, "N10 无 HIGH 时早报显式标注 HIGH 供给不足")
+_brief_hi = dict(_brief)
+_brief_hi["M8_opportunities"] = [_opp("CAT", 80, tier="HIGH")]
+_html_hi = sdb.render_brief_html(_brief_hi)
+check("无满足回测背书的 HIGH" not in _html_hi, "N10 有 HIGH 时不显示供给不足标注")
 
 # ── A1：前端消费 ──
 print("[A1] 前端 index.html 消费")

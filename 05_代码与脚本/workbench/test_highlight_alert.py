@@ -206,12 +206,14 @@ check("在池 1 条" in _hold, "抬头含在池计数")
 check("新增 1 条 · 升级 0 条" in _hold, "抬头统计行口径不变")
 # Q1（复验 cae0431 M5）：正文=池全集，抽 build_pool_items 并做行为断言
 _pool_cards = [_card(target=f"T{i}") for i in range(10)]
-_granted = {sha.card_key(_pool_cards[0]): sha.ALERT_NEW}
+# granted 钉到**末尾**卡（复验 MU2）：同分下若不排序，新增卡不会排到最前 ⇒ 断言有判别力
+_granted = {sha.card_key(_pool_cards[-1]): sha.ALERT_NEW}
 _items = sha.build_pool_items(_pool_cards, _granted, max_cards=10)
 check(len(_items) == 10, "build_pool_items 返回池全集（非仅增量；M5 突变必杀）", str(len(_items)))
 check(sum(1 for _, k in _items if k == sha.ALERT_NEW) == 1, "仅 granted 标 new")
 check(sum(1 for _, k in _items if k == sha.ALERT_HOLD) == 9, "其余 9 张标「在池」")
-check(_items[0][1] == sha.ALERT_NEW, "新增卡排最前（card_sort_key）")
+check(_items[0][1] == sha.ALERT_NEW and _items[0][0]["target"] == "T9",
+      "新增卡排最前（card_sort_key；去排序即红 —— MU2）")
 check(len(sha.build_pool_items(_pool_cards, {}, max_cards=3)) == 3, "max_cards 截断生效")
 check("build_pool_items(highlights, _kinds" in _sha_src
       and "build_pool_items(highlights, _granted_kinds" in _sha_src,

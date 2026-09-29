@@ -2297,10 +2297,10 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - `classify_card` 触发逻辑不变（仍只 new/upgrade 才发信，不发退场/降级邮件）；但**正文改为渲染当前高亮池全集**——本轮获批发送的 new/upgrade 标徽章、其余标「📌 在池」（新增 `ALERT_HOLD`/`ALERT_LABEL`）。`main` 阶段1 仍只对 candidates 取锁去重；阶段2 用 `pool_items`（granted kind 或 HOLD）渲染，抬头加「在池 N 条」。`--dry-run` 同样给池全集。⇒ 读者每次都能看到「现在池里有哪些」，退出/降级卡因不在池中自然消失，无需另发退场邮件（等于把 R3「每日全集」并入每次告警，不新增邮件通道、不刷屏）。
   - **R4 聚合类不计币**：新增 `AGGREGATE_SIGNAL_TYPES`（narrative / chain_inflow / sector_* / stablecoin_* / mvrv_* / fng_extreme / leverage_extreme / btc_left_accum / cm_adoption_divergence）；`symbol_count` 对聚合类 target 不再单凭正则判币（DePIN/Oracles 不再计；真实币仍走 `involved_symbols`）。prod 只读实测：09-28 高亮池覆盖币数 **7 → 6**（差值为 DePIN）、09-29 **15 → 14**（差值为 Oracles）。
 - **M2 方案 A（展示层，零算法风险）**：
-  - **A2/A3（`macro_market.py`）**：新增纯函数 `_brief_top_opportunities(opps, top_n=3, label)` = 「HIGH ∪ 池内 conv 前 3」，兜底项**就地**打 `display_demoted=True` + `display_note`（含 `tier_demote_reason`），供渲染层强制标注。早报 `M8_opportunities = _brief_top_opportunities(opps,3)`、`M4_risks = _brief_top_opportunities(risk_signals,3)`（高危侧对称）；`M8_watchlist` 剔除兜底项（并集不丢、不重复）。**prod 只读实测**：09-28（HIGH=0）→ 兜底 3 条（AI & Big Data / DePIN / 2 币 MVRV 极度高估），机会段不再空窗；09-29（HIGH=3）→ 返回 6 条（3 HIGH + 3 兜底）。
+  - **A2/A3（`macro_market.py`）**：新增纯函数 `_brief_top_opportunities(opps, top_n=3, label)` = 「HIGH ∪ 池内 conv 前 3」；~~兜底项就地打 `display_demoted`+`display_note`~~ ⚠️ **更正（`1d66940` N3）**：兜底项已改为 **`copy.deepcopy` 后再打标**并通过 `_split_brief_opportunities` 返回 `(机会, 观察)` 两不重叠清单（就地打标会污染共享的高亮卡对象）。早报 `M8_opportunities`/`M4_risks` 用它（高危侧对称）。**prod 只读实测**：09-28（HIGH=0）→ 兜底 3 条（AI & Big Data / DePIN / 2 币 MVRV 极度高估），机会段不再空窗；09-29（HIGH=3）→ 3 HIGH + 3 兜底。
   - **A1（三处消费 `tier_demote_reason`）**：高亮邮件 `render_card` 加「⬇️ 降档说明」；早报 `send_daily_brief` 的 AI 精选高亮卡与精选机会卡各加降档说明行（优先 `display_note` 再 `tier_demote_reason`）；前端 `index.html` `renderSignalItem` 加 `.signal-demote` 行（消费 `o.display_note || o.tier_demote_reason`）。
 - **验证**：`test_highlight_alert.py` **68 → 77/0**（新增 H7：池同步/在池徽章/R4 聚合类/降档说明/main 池全集接线）；新增 `test_m2_high_fallback_20260928.py` **21/0**（A2 helper 全分支 + brief 接线源码守卫 + A1 早报渲染带降档说明 + 前端消费）。workbench 全量 **56 个 `test_*.py` 全部 exit=0**；`py_compile` 3/3；`node --check`（index.html script）通过。
-- **未做 / 边界（须留档）**：① **M2 方案 B（放行硬数据极值类进 HIGH）未做**（用户选「只做 A」）；② **C（为 11 类豁免设计可回测口径）/ D（分位数 tier）/ E（turnover 加分）均未做**；③ `_brief_top_opportunities` 对 `opps` 是**就地**加键（`display_demoted`/`display_note`），无其它消费者读取该二键，安全；④ 存量早报快照仍是旧口径，需 **redeploy + 次日 build** 才生效（`push ≠ 线上生效`）；⑤ 「每日无变化也发一封池摘要」未单独建通道（并入告警正文，见上）。
+- **未做 / 边界（须留档）**：① **M2 方案 B（放行硬数据极值类进 HIGH）未做**（用户选「只做 A」）；② **C（为 11 类豁免设计可回测口径）/ D（分位数 tier）/ E（turnover 加分）均未做**；③ ~~`_brief_top_opportunities` 对 `opps` 是就地加键，无其它消费者读取该二键，安全~~ ⚠️ **该判断已被 `1d66940` 证伪**：`highlight_signals` 与 `opportunities` 共享 dict，就地打标会连带污染高亮卡；现已改 deepcopy（见上条更正）；④ 存量早报快照仍是旧口径，需 **redeploy + 次日 build** 才生效（`push ≠ 线上生效`）；⑤ 「每日无变化也发一封池摘要」未单独建通道（并入告警正文，见上）。
 - **待部署**：`send_highlight_alert.py`（scheduler 子进程）/ `send_daily_brief.py` / `macro_market.py` / `index.html` 需容器 **redeploy** 后生效。
 
 ### 早报 U-A 可见性修复 + 审计 2026-09-29 处置（审计_加密大盘早报_2026-09-29，2026-09-29，本次提交）
@@ -2326,3 +2326,16 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证**：`test_highlight_alert` **77 → 82/0**、`test_m2_high_fallback` **21 → 30/0**、`test_signal_type_calibration_20260926` 与 `test_highlight_determinacy_20260926` 改契约后绿；workbench 全量 **57 个 `test_*.py` 全部 exit=0**；`py_compile` 4/4。
 - **未做 / 边界（须留档）**：① **M2 方案 B/C/D/E 仍不做**（B 放行硬数据极值需另行拍板）；② **行为态验收仍需转发邮件**（邮件正文不落库；早报 A2 兜底场景待 HIGH=0 的日子，可用 09-28 快照离线回填验证）；③ N2 属**原则取舍**，会使 HIGH 更稀缺（用户已知并接受）。
 - **待部署**：`macro_market.py` / `send_highlight_alert.py` 需容器 **redeploy** 后生效。
+
+### `1d66940` 复验 Q1~Q4 处置（复验_1d66940_Q1-Q4处置_2026-09-29，2026-09-29，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_1d66940_Q1-Q4处置_2026-09-29.md`。复验确认 Q1~Q4 源码全部到位、离线测试独立复现（82/0、30/0）、5 套回归全绿、`py_compile` 6/6、**已部署**（容器 09:42:59 CST 同秒重启，滞后 6m11s）、真数据回填确认 N1/N3 生效；另开 **MU2/MU6 突变逃逸** + **N9/N10**。用户拍板：**N10 接受 + 图例标注**。**零 DDL、不改评分/阈值**。
+
+- **Q1（P2，已修）排序断言判别性（MU2）**：原 `build_pool_items` 行为断言里 granted 恰钉在**首张**卡 ⇒ 同分下排序与否同序，断言恒绿。改为 granted 钉**末尾卡（T9）**并断言 `_items[0][0]["target"] == "T9"`；去排序突变 → rc=1。（M5「退回只渲染增量」上轮已堵死。）
+- **Q2（P2，已修）watchlist 去重无行为断言（MU6 真风险）**：`M8_watchlist` 剔除兜底项原先只有**源码文本守卫**（去掉 `| set(fallback_src_ids)` 仍全绿）⇒ 早报里同一条信号会在「机会段（带降档说明）」与「观察段（不带）」各出现一次。新增纯函数 `macro_market._split_brief_opportunities(opps, top_n, label)` 返回 `(机会, 观察)` 两**不重叠**清单并在 `generate_morning_brief` 使用；补行为断言（兜底原始对象不在 watchlist、HIGH 原对象不在 watchlist、`len(机会)+len(观察)=全池`）。去 `| set(src_ids)` 突变 → rc=1。
+- **Q3/N10（战略，用户拍板「接受 + 图例标注」）**：N2 后能进 HIGH 的只剩有回测背书的类型（prod 实测仅 `catalyst`，且 09-29 catalyst 最高 62 < 70）⇒ HIGH 档**实质无供给**。接受现状，并把「无 HIGH」显式写进早报：`send_daily_brief` 机会段在 `M8_opportunities` 无 HIGH 时加注「⚠️ 当日无满足回测背书的 HIGH 档信号（HIGH 现主要由有回测背书的类型供给）；下方为池内分数靠前项，属『非高确定性』，勿当高置信对待」，有 HIGH 时不显示（动态、无陈旧断言）。**未做** price_* 可回测口径与方案 B 白名单。
+- **Q4（P1，已修）N9 校准加载失败静默清零 HIGH**：N2 之后「表为空」= 所有类型 `missing_calibration` ⇒ 全量降 MED，而注释仍写「空 dict = 安全降级」。新增哨兵 `_CALIB_LOAD_FAILED`（`_load_signal_type_calibration` 失败置 True、成功置 False），`_exempt_no_high` 见哨兵**保守返回 False（不封顶）**；同步改掉 2681 行陈旧注释。突变去哨兵 → rc=1。**未做**：加载失败的邮件告警（仅 `logger.warning`，新增告警通道需去重设计，留档）。
+- **Q4b（文档）**：更正 `AGENTS.md` `cae0431` 节「兜底项就地打标…无其它消费者…安全」的陈旧/自相矛盾表述（就地打标会污染高亮卡，已改 deepcopy + `_split_brief_opportunities`）。
+- **验证**：`test_highlight_alert` **82/0**、`test_m2_high_fallback` **30 → 41/0**；突变 MU2/MU6/MU7(N9) 全部 rc=1；workbench 全量 **57 个 `test_*.py` 全部 exit=0**；`py_compile` 4/4。
+- **未做 / 边界（须留档）**：① N9 的邮件告警未做（仅日志）；② N10 的 price_* 回测口径/方案 B 未做（用户选「接受+标注」）；③ 行为态验收需转发邮件（邮件正文不落库）；早报 N2 效果待 **09-30 08:35** 快照（应见 0 HIGH + 3 兜底、`display_note` 含 `missing_calibration`）。
+- **待部署**：`macro_market.py` / `send_daily_brief.py` 需容器 **redeploy** 后生效。

@@ -2191,6 +2191,14 @@ def render_brief_html(brief: dict) -> str:
     # ════════════════════════════════════════════════════════
     is_fallback = bool(all_opps and all_opps[0].get("is_fallback"))
     section_title = "🔥 今日热门币种" if is_fallback else "🎯 精选机会"
+    # N10（2026-09-29 复验）：N2 后能进 HIGH 的只剩有回测背书的类型（实测仅 catalyst）。
+    # 当日无 HIGH 时显式说明，避免读者把「兜底展示」误读为「真的没有机会」。
+    _n_high_opp = sum(1 for _o in (brief.get("M8_opportunities") or [])
+                      if str(_o.get("conviction_tier") or "").upper() == "HIGH")
+    _high_supply_note = ("" if _n_high_opp else
+                         '<div style="font-size:10.5px;color:#b45309;margin-bottom:6px;line-height:1.5">'
+                         '⚠️ 当日无满足回测背书的 HIGH 档信号（HIGH 现主要由有回测背书的类型供给）；'
+                         '下方为池内分数靠前项，属「非高确定性」，勿当高置信对待。</div>')
 
     html_parts.append(f"""
       <!-- 模块6：机会清单 -->
@@ -2199,6 +2207,7 @@ def render_brief_html(brief: dict) -> str:
           {section_title}
         </div>
         <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按可验证性（是否被回测）分组 · 组内按证据等级与分数排序 · 仅供参考</div>
+        {_high_supply_note}
     """)
 
     _shown_keys: set = set()

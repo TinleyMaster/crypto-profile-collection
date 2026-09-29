@@ -75,7 +75,7 @@ FAIL_ALERT_ROUNDS = int(os.getenv("CATALYST_FAIL_ALERT_ROUNDS", "4"))
 def _alert_consecutive_failures(rounds: int, err: Exception) -> None:
     """连续多轮异常时发告警邮件（不依赖 DB，避免与故障同源而静默）。"""
     try:
-        from catalyst.notifier import _send_email
+        from catalyst.notifier import _send_email, ops_recipients
         body = (
             f"催化剂快通道守护进程（catalyst_fast_daemon）已连续 {rounds} 轮运行异常。\n\n"
             f"最近异常：{type(err).__name__}: {err}\n\n"
@@ -87,6 +87,7 @@ def _alert_consecutive_failures(rounds: int, err: Exception) -> None:
         ok, msg = _send_email(
             f"⚠️ 催化剂快通道连续 {rounds} 轮异常，邮件通道可能已静默",
             body.replace("\n", "<br>"),
+            to=ops_recipients(),
         )
         print(f"[catalyst_fast_daemon] 连续异常告警邮件 "
               f"{'已发送' if ok else '发送失败: ' + str(msg)}")

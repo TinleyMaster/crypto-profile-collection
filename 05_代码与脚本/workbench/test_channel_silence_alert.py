@@ -100,7 +100,7 @@ _now = _dt.datetime.now(_dt.timezone.utc)
 
 _orig = {k: getattr(N, k) for k in
          ("ensure_notification_table", "_channel_silence_snapshot",
-          "_try_acquire_send_lock", "_send_email", "_mark_sent")}
+          "_try_acquire_send_lock", "_send_email", "_mark_sent", "ops_recipients")}
 
 
 def _snap(last_at, **over):
@@ -131,11 +131,15 @@ try:
     sent = {}
     N._channel_silence_snapshot = lambda conn: _snap(_now - _dt.timedelta(days=5))
     N._try_acquire_send_lock = lambda *a, **k: True
-    N._send_email = lambda subject, body: sent.update(subject=subject, body=body) or (True, "ok")
+    N.ops_recipients = lambda: "admin@example.com"
+    N._send_email = lambda subject, body, **k: sent.update(
+        subject=subject, body=body, to=k.get("to")) or (True, "ok")
     N._mark_sent = lambda *a, **k: None
     _r = N.send_channel_silence_alert(_CaptureConn(), days=3)
     check(_r["sent"] == 1 and _r["failed"] == 0, "空转 ≥ 阈值：sent=1", str(_r))
     check("空转" in sent.get("subject", ""), "主题含「空转」", sent.get("subject"))
+    check(sent.get("to") == "admin@example.com",
+          "运维告警只发管理员（ops_recipients 转发到 _send_email）", str(sent.get("to")))
     check(_r["days_silent"] is not None and _r["days_silent"] >= 3,
           "days_silent 数值回传（≥ 阈值）", str(_r["days_silent"]))
 finally:
@@ -147,7 +151,9 @@ try:
     N._channel_silence_snapshot = lambda conn: _snap(None)
     N._try_acquire_send_lock = lambda *a, **k: True
     sent = {}
-    N._send_email = lambda subject, body: sent.update(subject=subject, body=body) or (True, "ok")
+    N.ops_recipients = lambda: "admin@example.com"
+    N._send_email = lambda subject, body, **k: sent.update(
+        subject=subject, body=body) or (True, "ok")
     N._mark_sent = lambda *a, **k: None
     _r = N.send_channel_silence_alert(_CaptureConn(), days=3)
     check(_r["sent"] == 1, "last_a_open_at 为 NULL 仍会告警（从未产生候选）", str(_r))

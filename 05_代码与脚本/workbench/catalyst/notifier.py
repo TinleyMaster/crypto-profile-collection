@@ -216,16 +216,37 @@ def _get_email_notifier():
         return None
 
 
-def _send_email(subject: str, body_html: str) -> tuple[bool, str]:
-    """发送邮件。失败返回 (False, reason)。"""
+def _send_email(subject: str, body_html: str, to: str | None = None) -> tuple[bool, str]:
+    """发送邮件。失败返回 (False, reason)。
+
+    Args:
+        subject / body_html: 主题与 HTML 正文
+        to: 收件人（逗号分隔）。**运维告警专用**：留空则用 SMTP_TO 全量收件人；
+            系统/运维类邮件（通道空转、守护进程异常等）应传 `ops_recipients()`，
+            只发管理员（ADMIN_EMAIL），未配置才回退 SMTP_TO。
+    """
     notifier = _get_email_notifier()
     if notifier is None:
         return False, "SMTP 未配置或不可用"
     try:
-        ok, msg = notifier.send(subject, body_html, from_name="催化剂信号")
+        ok, msg = notifier.send(subject, body_html, from_name="催化剂信号", to=to)
         return ok, msg
     except Exception as e:
         return False, str(e)
+
+
+def ops_recipients() -> str | None:
+    """运维告警收件人：优先 ADMIN_EMAIL，未配置回退 SMTP_TO。
+
+    与盘面扫描停摆 / 合约地址卫生 / 链上快照看门狗等既有运维邮件同口径
+    （见 crypto_research.clients.notifier.send 的 docstring）。
+    """
+    try:
+        from crypto_research.config import get_settings
+        s = get_settings(require_database=False)
+        return s.admin_email or s.smtp_to
+    except Exception:
+        return None
 
 
 # =====================================================================
@@ -1648,7 +1669,7 @@ def send_channel_silence_alert(conn, days: int | None = None) -> dict:
         return {**base, "sent": 0, "skipped": 0, "failed": 1,
                 "reason": f"渲染失败: {e}"}
 
-    ok, msg = _send_email(subject, body)
+    ok, msg = _send_email(subject, body, to=ops_recipients())
     _mark_sent(conn, SENTINEL_CHANNEL_SILENCE_SIGNAL_ID, NTYPE_CHANNEL_SILENCE,
                None, subject, status="sent" if ok else "failed",
                error_msg=None if ok else msg)

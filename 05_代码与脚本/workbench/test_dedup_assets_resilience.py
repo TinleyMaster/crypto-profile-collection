@@ -318,5 +318,34 @@ check(_run_main_with(_mixed)[0] == 2, "混合（锁+真实错误）→ 退出码
 
 
 # ════════════════════════════════════════════════════════════
+# 10. 子任务挂死隔离（2026-09-29）：run_task 超时 → 终止并返回 124，主循环继续
+# ════════════════════════════════════════════════════════════
+print("\n【测试10】run_task 子任务超时隔离（挂死不再阻塞后续）")
+import contextlib as _ctx  # noqa: E402
+import io as _io  # noqa: E402
+import run_data_sync_daily as _orch  # noqa: E402
+
+_orig_subrun = _orch.subprocess.run
+
+
+def _boom(*a, **k):
+    raise _orch.subprocess.TimeoutExpired(cmd=a[0], timeout=1)
+
+
+_orch.subprocess.run = _boom
+try:
+    with _ctx.redirect_stdout(_io.StringIO()) as _buf:
+        _rc = _orch.run_task("挂死任务", "x.py", [])
+finally:
+    _orch.subprocess.run = _orig_subrun
+check(_rc == _orch.TIMEOUT_RC == 124, "挂死子任务 → run_task 返回 124（不抛异常，主循环可继续）", str(_rc))
+check("[TIMEOUT]" in _buf.getvalue() and "不影响其余子任务继续执行" in _buf.getvalue(),
+      "超时打印 [TIMEOUT] 文案（可见、不静默）")
+check("timeout=SUBTASK_TIMEOUT_SEC" in _ORCH and "subprocess.TimeoutExpired" in _ORCH
+      and "SUBTASK_TIMEOUT_SEC = int(os.getenv(" in _ORCH,
+      "源码守卫：subprocess.run 带超时 + 捕获 TimeoutExpired + 常量可 env 覆盖")
+
+
+# ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

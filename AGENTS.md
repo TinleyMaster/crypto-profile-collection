@@ -2408,3 +2408,12 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证**：workbench 全量 **60 个 `test_*.py` 全部 exit=0**；`py_compile scheduler.py` 通过；`scheduler.py --list` 含 `daily_diff_fallback  5 8 * * *`。
 - **未做 / 边界（须留档）**：① 未改 `data_sync_daily` 的 `critical` 标记（真实错误仍应 `exit 1` 告警，已在上一节理由）；② 未加「加载失败邮件告警」；③ `daily_diff_generator` 默认取 `max(market_date)`，故兜底只会生成「最新有行情的一天」——若 09-29 ETL 迟迟不就绪，兜底不会凭空补历史缺口（历史缺口仍需显式 `--date`）。
 - **待部署**：`scheduler.py` 需容器 **redeploy** 后 `daily_diff_fallback` 生效。
+
+### data_sync_daily 子任务「挂死」隔离（用户「改任一子任务失败不影响其他任务的执行」，2026-09-29，本次提交）
+
+- **核实现状**：**失败隔离早已存在**——`run_data_sync_daily.py`（2026-09-28 `df4444f`）已去掉 `break`，14 个子任务无论成败都依次执行；`critical` 只影响整体退出码、不影响执行。容器实跑日志亦印证（`共 14 个子任务（相互隔离：任一失败不中止其余）`）。
+- **仍缺的一环 = 挂死（hang）**：`subprocess.run(cmd)` **无超时**，一个网络无响应的子任务会**永久阻塞**、后续子任务全部不跑（本机/沙盒实测 `sync_core_supply_from_cmc.py` 可挂 >30min；与本次重跑时容器被重建打断是两回事）。这才是「一个子任务影响其他子任务」的剩余形态。
+- **修复（`scripts/bin/run_data_sync_daily.py`）**：`run_task` 改为 `subprocess.run(..., timeout=SUBTASK_TIMEOUT_SEC)` 并捕获 `subprocess.TimeoutExpired` → 打印 `[TIMEOUT] … 超时 Ns，已终止该子任务（不影响其余子任务继续执行）`、返回 `TIMEOUT_RC=124`、**主循环继续**。常量 `SUBTASK_TIMEOUT_SEC = int(os.getenv("DATA_SYNC_SUBTASK_TIMEOUT_SEC", "1800"))`（默认 30min，远大于整条调度正常 3~5min；外层 task_manager 12h 硬超时兜底）；启动行同步披露超时上限。
+- **语义**：超时=一种失败（计入 `failed_names`；若属 `critical` 则整体退出码仍非 0，保持可见），但**绝不再阻塞其余子任务**。
+- **自测**：`test_dedup_assets_resilience.py` 新增【测试10】：monkeypatch `subprocess.run` 抛 `TimeoutExpired` → `run_task` 返回 **124**、打印 `[TIMEOUT]` 且含「不影响其余子任务继续执行」；源码守卫 `timeout=SUBTASK_TIMEOUT_SEC` + `subprocess.TimeoutExpired` + 常量 env 可覆盖。**47/47**；workbench 全量 **60 个 `test_*.py` 全部 exit=0**；`py_compile` 通过。
+- **未动**：`critical` 标记与退出码语义（真实失败仍需 `exit 1` 告警，符合用户只要求「不影响其他任务的执行」）；仅对挂死新增隔离。

@@ -16,7 +16,7 @@
   10. 解锁事件 JSON→结构化同步
   11. KOL 信号回测
 
-子任务隔离（2026-09-28）：
+子任务隔离（2026-09-28 / 2026-09-29 加固）：
   任一子任务失败**不再中止后续子任务**——14 个子任务全部依次执行。
   原设计对「赛道分类刷新 / 资产同名去重 / 主表 supply 对齐」三个关键任务做
   「失败即终止全调度」（`break`），实测一次瞬时锁竞争（删 core.asset 触发 ~42 张
@@ -24,6 +24,12 @@
   代价远大于收益。现改为：全部执行；第 4 参含义由 `continue_on_fail` 改为
   `critical`——**只影响整体退出码**（关键任务失败 → 退出码非 0，保持失败可见；
   非关键任务失败只记录、不拖累整体），**不再影响执行**。
+
+  另外（2026-09-29）：**挂死（hang）也算一种失败**。原先 `subprocess.run` 无超时，
+  一个网络无响应的子任务会永久阻塞、后续子任务全部不跑（本机/沙盒实测 sync_core_supply
+  可挂 >30min）。现给每个子任务加**墙钟上限** `SUBTASK_TIMEOUT_SEC`（默认 1800s，
+  远大于正常整条调度 3~5min），超时即终止该子任务并**继续下一个**（隔离），
+  外层 task_manager 的 12h 硬超时仍作最终兜底。
 """
 
 import subprocess
@@ -33,6 +39,13 @@ from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 BIN_DIR = SCRIPTS_DIR
+
+# 单个子任务的墙钟上限（秒）：任一子任务挂死（网络无响应等）不会拖垮整条调度——
+# 超时即终止该子任务并继续下一个（隔离）。默认 1800s（30min），远大于正常耗时
+# （整条调度 3~5min）；可用环境变量 DATA_SYNC_SUBTASK_TIMEOUT_SEC 覆盖。
+# 超时返回码沿用 coreutils `timeout` 约定 124。
+SUBTASK_TIMEOUT_SEC = int(os.getenv("DATA_SYNC_SUBTASK_TIMEOUT_SEC", "1800"))
+TIMEOUT_RC = 124
 
 # 执行顺序：(任务名, 脚本名, 参数列表, critical)
 #   critical=True  → 失败时整体退出码非 0（关键路径，需关注），但**不中止**其余子任务；
@@ -86,13 +99,18 @@ def run_task(name: str, script: str, args: list[str]) -> int:
     print(f"  CMD: {' '.join(cmd)}")
     print(f"{'='*60}")
     try:
-        result = subprocess.run(cmd, cwd=str(SCRIPTS_DIR.parent))
+        result = subprocess.run(cmd, cwd=str(SCRIPTS_DIR.parent), timeout=SUBTASK_TIMEOUT_SEC)
         rc = result.returncode
         if rc == 0:
             print(f"[OK] {name} 完成")
         else:
             print(f"[FAIL] {name} 失败 (exit={rc})")
         return rc
+    except subprocess.TimeoutExpired:
+        # 挂死 = 一种失败：终止该子任务，继续其余子任务（隔离），不抛出、不阻塞。
+        print(f"[TIMEOUT] {name} 超时 {SUBTASK_TIMEOUT_SEC}s，已终止该子任务"
+              f"（不影响其余子任务继续执行）")
+        return TIMEOUT_RC
     except Exception as e:
         print(f"[FAIL] {name} 异常: {e}")
         return 1
@@ -101,7 +119,8 @@ def run_task(name: str, script: str, args: list[str]) -> int:
 def main() -> int:
     print("=" * 60)
     print("每日数据同步/矫正总调度")
-    print(f"共 {len(TASKS)} 个子任务（相互隔离：任一失败不中止其余）")
+    print(f"共 {len(TASKS)} 个子任务（相互隔离：任一失败/挂死都不中止其余；"
+          f"单任务超时上限 {SUBTASK_TIMEOUT_SEC}s）")
     print("=" * 60)
 
     success = 0

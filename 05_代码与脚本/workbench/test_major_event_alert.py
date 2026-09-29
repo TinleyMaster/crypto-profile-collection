@@ -323,5 +323,29 @@ _html_sec = N._build_major_event_html(_fake_row(
 check("L1 公链" in _html_sec and "「l1」" not in _html_sec,
       "板块联动不再泄漏原始枚举 l1")
 
+# P2-1 归因一致性披露（稳定币 + 大幅「事件前异动」= 错挂迹象）
+check(N._prelaunch_attribution_warning({
+    "symbol": "USDC", "prelaunch_ret_24h": -11.89}).startswith("⚠️"),
+      "P2-1：稳定币展示币 + 大幅「事件前异动」→ 披露归因可能错位")
+check(N._prelaunch_attribution_warning({
+    "symbol": "USDC", "prelaunch_ret_24h": 0.02}) == "",
+      "P2-1：稳定币异动正常（0.02%）不误报")
+check(N._prelaunch_attribution_warning({
+    "symbol": "ARB", "prelaunch_ret_24h": -11.89}) == "",
+      "P2-1：非稳定币不触发该披露（避免噪声）")
+check("归因/数据源错位" in N._build_major_event_html(_fake_row(
+    symbol="USDC", canonical_name="USD Coin", prelaunch_ret_24h=-11.89,
+    is_bearish=False, ai_sentiment="neutral")),
+      "P2-1：USDC 式错挂行邮件含归因披露")
+
+# P2-3 低时延兜底任务接线（脚本存在 + scheduler 注册每 30 分钟）
+_bin = os.path.join(os.path.dirname(_here), "scripts", "bin")
+check(os.path.exists(os.path.join(_bin, "send_major_events.py")),
+      "P2-3：send_major_events.py 存在")
+_sched = open(os.path.join(_here, "scheduler.py"), encoding="utf-8").read()
+check('"catalyst_major_events"' in _sched and '"*/30 * * * *"' in _sched,
+      "P2-3：scheduler 注册 catalyst_major_events（每 30 分钟）")
+check('"send_major_events.py"' in _sched, "P2-3：调度指向 send_major_events.py")
+
 print(f"\n{'=' * 50}\n通过 {passed} / 失败 {failed}\n{'=' * 50}")
 sys.exit(1 if failed else 0)

@@ -2075,6 +2075,25 @@ def _sector_label(code) -> str:
     return _SECTOR_LABELS.get(c.lower(), c)
 
 
+# 稳定币/计价代币（展示价≈$1）：若其「公告前 24h 异动」显著，几乎必是归因错位
+# （审计 2026-09-29 P2-1：USDC 显示 -11.89%，实为真主题币 ARB 的跌幅——展示 symbol 取
+#  signal.asset_id，而 prelaunch_ret_24h 是按 catalyst 绑定，二者不同源时即错挂）。
+_STABLE_SYMBOLS = frozenset({
+    "USDT", "USDC", "BUSD", "TUSD", "USDP", "FDUSD", "DAI", "USDE", "USDD",
+    "PYUSD", "FRAX", "GUSD", "USDS", "USD1", "EURT", "EURC", "USDY", "USD0",
+})
+
+
+def _prelaunch_attribution_warning(r: dict) -> str:
+    """检测「展示币种」与「事件前异动」不同源的迹象，返回披露文案（无则空串，不臆断）。"""
+    sym = str(r.get("symbol") or "").upper()
+    pre = _to_float(r.get("prelaunch_ret_24h"))
+    if pre is not None and sym in _STABLE_SYMBOLS and abs(pre) >= 2.0:
+        return (f"⚠️ 展示币 {sym} 为稳定币，却出现「事件前 24h 异动 {pre:+.2f}%」，"
+                f"与稳定币常识不符，多为归因/数据源错位；请以催化剂原文为准。")
+    return ""
+
+
 def _major_event_subject(r: dict) -> str:
     sym = r.get("symbol") or "?"
     title = _full_title(r)
@@ -2150,6 +2169,9 @@ def _build_major_event_html(r: dict) -> str:
         )
     else:
         consume_note = "公告前 24h 无异动数据，预期消化度暂无法判定。"
+    _attr_warn = _prelaunch_attribution_warning(r)
+    if _attr_warn:
+        consume_note = f"{consume_note}<br>{_attr_warn}"
 
     summary_line = (
         f'<div style="font-size:13px;line-height:1.7;color:#374151;margin-top:4px">'

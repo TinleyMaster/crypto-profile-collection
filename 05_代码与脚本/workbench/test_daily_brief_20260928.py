@@ -183,6 +183,40 @@ check("聪明钱 = 链上监控地址的净买入" in open(
 check("白话结论" in open(os.path.join(_SCRIPTS_BIN, "send_daily_brief.py"),
                         encoding="utf-8").read(), "告警质量补白话结论")
 
+# ── U-A 可见性 + P2-3 TL;DR 措辞 + P1-7 观察级标题（审计 2026-09-29）──
+print("[U-A 可见性] trigger_logic 连板注脚补显到高亮卡")
+_logic = ("QNT, SOON, AUDIO 24h 涨幅超 15%，最高 50.8%，平均 23.6%（其中 QNT连续4天 持续强势）")
+check(sdb._streak_hint(_logic) == "（其中 QNT连续4天 持续强势）", "H-1 _streak_hint 正确提取")
+check(sdb._streak_hint("A, B 24h 涨幅超 15%，最高 10%") == "", "H-2 无注脚 → 空串")
+# AI reason_summary 覆盖 trigger_logic 时，注脚须补显
+_b_hl = {
+    "M0_tldr": {}, "M0_ai_summary": {"status": "ok", "headline": "x", "bias": "中性"},
+    "M3_highlights": [{"target": "17 币 24h 暴涨", "direction": "long", "conviction_score": 80,
+                       "trigger_logic": _logic,
+                       "ai_analysis_v2": {"overall_score": 80, "confidence": "HIGH",
+                                          "reason_summary": "RWA催化剂驱动QNT暴涨，RSI 96.7 透支"}}],
+}
+_h_hl = sdb.render_brief_html(_b_hl)
+check("QNT连续4天 持续强势" in _h_hl, "H-3 AI reason_summary 覆盖时仍显连板注脚")
+check("RSI 96.7" in _h_hl, "H-4 原 reason_summary 不丢")
+check("（含观察级）" not in _h_hl, "H-5 无观察级条目 → 标题不加注")
+
+# P1-7：含「不构成高亮」条目 → 标题注明（含观察级）
+_b_obs = {
+    "M0_tldr": {}, "M0_ai_summary": {"status": "ok", "headline": "x", "bias": "中性"},
+    "M3_highlights": [{"target": "DePIN", "direction": "long", "conviction_score": 60,
+                       "ai_analysis_v2": {"overall_score": 60, "confidence": "MED",
+                                          "reason_summary": "缺乏个券验证，不构成高亮或高危"}}],
+}
+check("（含观察级）" in sdb.render_brief_html(_b_obs), "H-6 含观察级 → 高亮标题注明")
+
+# P2-3：无新开方向时 TL;DR 标题改「观察 / 持仓参考」
+check(sdb._build_tldr_html([], [{"target": "PENDLE", "trigger_logic": "站上 2.66 观察"}], {})
+      .find("观察 / 持仓参考") != -1, "H-7 无方向 → TL;DR 标题改「观察/持仓参考」")
+check("今日操作清单" in sdb._build_tldr_html(
+    [{"asset": "ETH", "direction": "做多", "trigger": "站上 2700",
+      "invalidate": "跌破 2600"}], [], {}), "H-8 有方向 → 仍为「今日操作清单」")
+
 print("\n" + "=" * 46)
 print(f"{passed}/{passed + failed} 通过")
 print("=" * 46)

@@ -2275,3 +2275,15 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **验证**：`test_highlight_alert.py` **68 → 77/0**（新增 H7：池同步/在池徽章/R4 聚合类/降档说明/main 池全集接线）；新增 `test_m2_high_fallback_20260928.py` **21/0**（A2 helper 全分支 + brief 接线源码守卫 + A1 早报渲染带降档说明 + 前端消费）。workbench 全量 **56 个 `test_*.py` 全部 exit=0**；`py_compile` 3/3；`node --check`（index.html script）通过。
 - **未做 / 边界（须留档）**：① **M2 方案 B（放行硬数据极值类进 HIGH）未做**（用户选「只做 A」）；② **C（为 11 类豁免设计可回测口径）/ D（分位数 tier）/ E（turnover 加分）均未做**；③ `_brief_top_opportunities` 对 `opps` 是**就地**加键（`display_demoted`/`display_note`），无其它消费者读取该二键，安全；④ 存量早报快照仍是旧口径，需 **redeploy + 次日 build** 才生效（`push ≠ 线上生效`）；⑤ 「每日无变化也发一封池摘要」未单独建通道（并入告警正文，见上）。
 - **待部署**：`send_highlight_alert.py`（scheduler 子进程）/ `send_daily_brief.py` / `macro_market.py` / `index.html` 需容器 **redeploy** 后生效。
+
+### 早报 U-A 可见性修复 + 审计 2026-09-29 处置（审计_加密大盘早报_2026-09-29，2026-09-29，本次提交）
+
+来源：`审计_加密大盘早报_2026-09-29.md`（对象 = 09-29 09:00 早报，U-A/U-B 部署验收）。**关键更正：审计的 U-A「未观测到 ⇒ 倾向漏部署」判断错误**——实测 U-A 已部署且正常，问题在**渲染层不可见**。
+
+- **U-A 诊断（物证级，live 只读）**：`git merge-base --is-ancestor 9859fb8 775e9d7` = **真**（U-A `9859fb8` 是 U-B `775e9d7` 的直接祖先，14:25 < 15:15）；既然 U-B 已部署，U-A 必在同一镜像内。`GET /api/market/overview` 实测 `opportunity_list` 的 `17 币 24h 暴涨` `trigger_logic` = `QNT, SOON, AUDIO, SHFL, INX 24h 涨幅超 15%，最高 50.8%，平均 23.6%（其中 QNT连续4天 持续强势）`、`8 币 24h 暴跌` = `…（其中 SAGA连续4天 持续走弱）` ⇒ **U-A 已生效**。
+  - **真因（渲染层遮蔽）**：① `send_daily_brief` 的 AI 精选高亮卡渲染 `reason_summary or trigger_logic`，而 AI 已给 `17 币 24h 暴涨` 写了 reason_summary（「…RSI96.7 透支…」）⇒ 连板注脚被覆盖；② 同一聚合机会被 **M4-1 折叠**出「精选机会」⇒ `trigger_logic` 在邮件里**无处渲染**。两者叠加 ⇒ 连板信息全封不可见。
+- **修法（`send_daily_brief.py`，零 DDL）**：新增 `_streak_hint(logic)`（正则 `（其中…持续(强势|走弱|共振)）` 提取连板注脚）；高亮卡在 `reason_summary` 覆盖时**补显**连板注脚（去重、不改 reason 口径）。⇒ `QNT连续4天 持续强势` 进入邮件。
+- **同批 P2/P1-7（审计 §五）**：① **P2-3**「今日无操作 vs 操作清单」矛盾 → `_build_tldr_html` 无新开方向时标题改「🎯 观察 / 持仓参考（非新开方向）」并注明「今日无新开方向（见 AI 定调「今日无操作」）」；② **P1-7 残留** → 高亮区含「观察级（非高亮）」条目时标题加「（含观察级）」。
+- **未改（留档）**：① **恐贪 73 vs 74**：风险信号 `key_metric` 取 overview `3情绪`（73），大盘脉搏取 SSOT（74），两源不一致；改需把信号侧 fng 源切到 SSOT（可能移动阈值），属独立小工单。② **恐贪「不可用」vs「74」**：Morning Call 的「不可用」是 LLM 文本，非渲染层可确定性修复，需 prompt/数据门控，留档。
+- **自测**：`test_daily_brief_20260928.py` **36 → 44/0**（新增 H-1~H-8：`_streak_hint` 提取/空串、reason_summary 覆盖时补显且原 reason 不丢、无观察级不加注、含观察级加注、TL;DR 无方向改标题/有方向保持）。回归：workbench 全量 57 个 test 中 **55 通过**；**2 个失败（`test_highlight_determinacy_20260926` / `test_signal_type_calibration_20260926`）与本次无关**——已用 `git stash` 在无本次改动的 HEAD 上复现同样失败，属并发进程在制品（raw 95→MED 等 tier 断言）。`py_compile` 通过。
+- **待部署**：`send_daily_brief.py` 需容器 **redeploy** 后次日 09:00 邮件生效（U-A 连板注脚才会在 AI 高亮卡出现）。

@@ -64,6 +64,19 @@ def _clip(s, n: int) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
+# ── U-A 可见性（审计 2026-09-29）：连板注脚只写在 trigger_logic，而 AI 精选高亮卡
+# 渲染 `reason_summary`、且该聚合机会被 M4-1 折叠出「精选机会」⇒ 连板信息在邮件里
+# 彻底不可见（live 核实：trigger_logic 含「（其中 QNT连续4天 持续强势）」，卡片不显）。
+# 此正则从 trigger_logic 提取连板段，补显到高亮卡（不改 reason 口径、不重复）。
+_STREAK_HINT_RE = re.compile(r"（其中[^）]*持续(?:强势|走弱|共振)）")
+
+
+def _streak_hint(logic) -> str:
+    """从 trigger_logic 提取 U-A 连板注脚（形如「（其中 QNT连续4天 持续强势）」）；无则空串。"""
+    m = _STREAK_HINT_RE.search(str(logic or ""))
+    return m.group(0) if m else ""
+
+
 def _classify_degraded(items: list[str]) -> dict:
     """降级项分类：critical(核心)/warning(辅助)/info(增强)。
     核心降级：影响主决策的关键数据缺失（BTC价格、总市值、恐贪等）
@@ -644,6 +657,7 @@ def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = No
     「精选机会」里被折叠掉的重复结论又渲染一遍（破坏 M4-1「同一标的只留一条结论」）。
     """
     rows = []
+    _from_trades = False
     for s in (trade_ready or [])[:3]:
         asset = (s or {}).get("asset") or "?"
         direction = (s or {}).get("direction") or ""
@@ -656,6 +670,7 @@ def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = No
             f'<b>{asset}</b> <span style="color:#64748b">{direction}</span> · '
             f'{trigger}' + (f'（失效：{invalidate}）' if invalidate else '') + '</div>'
         )
+        _from_trades = True
     # 若交易方向不足 3 条，用机会清单补足（含具体逻辑的优先）
     if len(rows) < 3:
         _seen = {str((s or {}).get("asset") or "").strip().lower() for s in (trade_ready or [])}
@@ -680,12 +695,19 @@ def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = No
             )
     if not rows:
         return ""
+    # P2-3（审计 2026-09-29）：无「新开方向」时，标题/口径须与 AI 定调「今日无操作」区分，
+    # 否则读者见「无操作」又见「操作清单」会困惑。
+    _title = ("🎯 今日操作清单（摘要）" if _from_trades
+              else "🎯 观察 / 持仓参考（非新开方向）")
+    _desc = ("摘要摘自交易方向 / 机会清单；完整条件见下方对应板块，不构成投资建议。"
+             if _from_trades else
+             "今日无新开方向（见 AI 定调「今日无操作」）；以下为观察 / 既有持仓参考，非新开建仓建议。")
     return f"""
       <!-- 模块0.01：今日操作清单（TL;DR） -->
       <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #0ea5e9">
-        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">🎯 今日操作清单（摘要）</div>
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">{_title}</div>
         {''.join(rows)}
-        <div style="font-size:9.5px;color:#94a3b8;margin-top:4px">摘要摘自交易方向 / 机会清单；完整条件见下方对应板块，不构成投资建议。</div>
+        <div style="font-size:9.5px;color:#94a3b8;margin-top:4px">{_desc}</div>
       </div>
     """
 
@@ -1244,12 +1266,21 @@ def render_brief_html(brief: dict) -> str:
 
     if ai_highlights:
         display_highlights = ai_highlights[:3]  # 最多 3 个
+        # P1-7（审计 2026-09-29）：卡内可能含「观察级（非高亮）」条目，标题须注明，
+        # 避免「非高亮却挂在高亮区」的观感。
+        _has_obs = any(
+            (hh.get("_ai_downgraded")
+             or "不构成高亮" in str(((hh.get("ai_analysis_v2") or {}).get("reason_summary")) or "")
+             or "不构成高亮" in str(hh.get("trigger_logic") or ""))
+            for hh in display_highlights
+        )
+        _hl_title = "🎯 AI 精选高亮信号（含观察级）" if _has_obs else "🎯 AI 精选高亮信号"
 
         html_parts.append(f"""
           <!-- 模块：AI精选高亮信号 -->
           <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-              <div style="font-size:13px;font-weight:700;color:#0f172a">🎯 AI 精选高亮信号</div>
+              <div style="font-size:13px;font-weight:700;color:#0f172a">{_hl_title}</div>
               <div style="font-size:10px;color:#94a3b8">六维评分 · 自动搜索补全</div>
             </div>
         """)
@@ -1261,6 +1292,11 @@ def render_brief_html(brief: dict) -> str:
             overall_score = ai.get("overall_score") or base_score
             confidence = ai.get("confidence") or "MED"
             reason = ai.get("reason_summary") or h.get("trigger_logic") or ""
+            # U-A 可见性：AI reason_summary 会覆盖 trigger_logic 的连板注脚，且该聚合机会
+            # 已被 M4-1 折叠出「精选机会」⇒ 连板信息在邮件里不可见。此处补显（去重、不改口径）。
+            _sh = _streak_hint(h.get("trigger_logic"))
+            if _sh and _sh not in reason:
+                reason = f"{reason} {_sh}" if reason else _sh
             key_drivers = ai.get("key_drivers") or []
             score_card = ai.get("score_card") or {}
 

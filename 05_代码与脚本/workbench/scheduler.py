@@ -201,6 +201,11 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # watchlist_monitor 已迁移到 scan_daemon 常驻进程（30min 轮询），scheduler 不再调度
     # ("watchlist_monitor", "*/30 * * * *", "phase_watchlist_monitor.py", [], "解锁/空头/大户监控（单次）", "monitor"),
     ("binance_bapi_health", "0 9,21 * * *", "binance_bapi_healthcheck.py", [], "Binance bapi 存活探测+失败邮件告警（每日2次）", "monitor"),
+    # 标签富化积压提醒（2026-09-29）：monitor_auto 云端只收集不爬取（服务器 IP 被 Cloudflare 拦），
+    #   爬取靠本地 backfill_enrich_labels 手动跑——此前该提醒脚本从未挂调度，富化断供 11 天无人知晓
+    #   （标签库 09-18 后零新增，积压 5,878 陌生地址静默）。每日 10:00 查积压，超 500 发邮件。
+    ("enrich_reminder", "0 10 * * *", "enrich_reminder.py", [],
+     "链上标签富化积压提醒（每日 10:00，陌生地址>500 发邮件，只查 DB 不爬取）", "monitor"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
     # P0-2 修复：净流轴从仅 ETH 扩展到 ETH+BSC+TRON

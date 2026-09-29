@@ -2878,10 +2878,18 @@ def _signal_row_to_deep_review_input(row: dict) -> dict:
 #      而非交易档位。方向（利好/利空/中性）仅作徽章标注。
 #   ④ 概览统计（亚行）：信号总数、tier 分布、事件类型分布、本周催化剂入库数
 #
-# 「重要事件」口径（用户确认）：tier='A' **或** resonance_state='confirmed'（高共振），
-# 排除 divergent（方向背离无有效影响），按 composite_score 降序截断至 WEEKLY_EVENT_LIMIT。
-# 说明：confirmed 的信号在库中为 status='watch'（已被价格消化），但正是「已产生影响」
-# 的周报素材，故**不**按 status 过滤（区别于 A 级 Alert 通道的 status='open' 口径）。
+# 「重要事件」口径（2026-09-29 用户质疑「这些重要吗、覆盖全了吗」后**重建**）：
+# 首版用 tier='A' OR resonance_state='confirmed'，实测无效——
+#   ① tier 是**可交易性**强度（event_type_weights 里 listing=95），窗口内 13 条 A 级里
+#      11 条是上新公告；而 BTC ETF 创纪录流入、Bitget 被盗 3.516 亿、美联储加息、
+#      CLARITY 法案受阻等**全部落选**。
+#   ② `OR ... ORDER BY composite_score DESC LIMIT 30` 里，A 级分数(80~88)占满 Top30，
+#      confirmed(均分 58) 几乎进不来，OR 形同虚设。
+#   ③ 素材取自 biz.catalyst_signal，而窗口内 4698/7049 条原始事件**无 asset_id**
+#      （宏观/监管/无标的），从不进入 signal 表 → 采集口径天然漏掉一半要闻。
+# 现口径：素材改为 biz.asset_catalyst 原始事件，按「市场显著性」排序，
+#   importance = 类型权重 × 资产权重 + 共振/广度加成（见 _WEEKLY_TYPE_WEIGHT 与
+#   _weekly_key_events 的 SQL），剔除 market_update 行情噪音，单类型配额防淹没。
 #
 # 叙事由 LLM（DeepSeek）生成，每周仅 1 次调用；LLM 不可用时回退为
 # 「标题 + 已有 ai_summary」的模板拼接（无主题分组、无总述润色），不阻断发信。
@@ -2894,6 +2902,37 @@ SENTINEL_WEEKLY_REPORT_SIGNAL_ID = -4   # 负号哨兵，同 -1/-2/-3 约定（N
 
 # 送入 LLM 的事件上限（控制 prompt 规模与单次调用成本）
 WEEKLY_EVENT_LIMIT = 30
+
+# 单类型配额：防止某一类事件淹没清单（首版 listing 占 11/13 即因此）
+WEEKLY_MAX_PER_TYPE = 8
+
+# 周报「事件重要性」权重表 —— 口径 = **市场显著性**，与 grade.py 的
+# event_type_weights（**可交易性**）刻意分离，二者不可互相替代：
+#   · listing 95→62：上新公告量大（窗口 1737 条），高权重会淹没清单；
+#   · regulation 75→80、tech_upgrade 55→68：周报看的是「影响面」；
+#   · 新增 security/macro/etf 三类高权（95/88/85）——它们在库里被误分类
+#     （黑客事件落 other、ETF/美联储落 market_update），故 SQL 里先做关键词兜底归类。
+_WEEKLY_TYPE_WEIGHT = {
+    "security": 95,       # 被盗/攻击/漏洞/rug
+    "macro": 88,          # 美联储/利率/CPI/非农
+    "etf": 85,            # ETF 审批与资金流
+    "regulation": 80,     # 监管/法案/合规
+    "delisting": 72,      # 下架/退市
+    "tech_upgrade": 68,   # 主网/硬分叉/重大升级
+    "listing": 62,        # 上新（数量大 → 降权）
+    "funding": 55,        # 融资
+    "burn": 52,           # 销毁
+    "partnership": 45,    # 合作
+    "airdrop": 45,
+    "staking": 40,
+    "governance": 40,
+    "market_update": 18,  # 纯行情播报（整类剔除）
+    "other": 32,
+}
+
+# 无关联标的的宏观/监管类事件，给可读占位标的（避免事件卡渲染为「—」）
+_WEEKLY_SYMBOL_FALLBACK = {"macro": "宏观", "regulation": "监管",
+                           "security": "安全", "etf": "ETF"}
 
 
 def _weekly_window(end_ts=None) -> tuple[datetime, datetime, str]:
@@ -2977,33 +3016,167 @@ def _weekly_overview_stats(conn, start_utc, end_utc) -> dict:
     }
 
 
+# 标题前缀噪音（去重用）：来源署名 +「消息/快讯/发推」等转述词、以及中英日期。
+# 同一事件被多家媒体转述时标题只差前缀，剥离后才可能归并（实测 Payy Network
+# 被 Specter Investigation 一条监测稿复制到 4 个来源，占掉 4 个 security 名额）。
+_WEEKLY_SOURCE_PREFIX = re.compile(
+    r"^(?:[\w\s·\-—:：,，.。!！?？\"'“”()（）\[\]【】|/]*?"
+    r"(?:消息|报道|快讯|讯|发推表示|公告|披露|监测)[，,：:\s]*"
+    r"|\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日[，,。.:：\s]*"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*日[，,。.:：\s]*"
+    r"|(?:昨日|今日|昨夜今晨)[，,。.:：\s]*"
+    r")"
+)
+
+
+def _weekly_story_key(row: dict) -> str:
+    """同一事件被多来源/多资产重复入库时的去重键：剥前缀 + 标题归一化。
+
+    先反复剥离来源署名/日期等前缀噪音，再保留字母数字与汉字（含 CJK）截断 40 字符；
+    字面量 'null' 等占位标题视为空，交由调用方回退为 catalyst_id
+    （避免所有空标题被折叠成一条）。
+
+    局限（已知）：跨来源**改写**（同语言不同措辞、中英双语）无法靠标题归一化归并，
+    这类冗余交由 LLM 在叙事阶段合并——prompt 已要求 events 只保留 8~15 条。
+    """
+    t = str(row.get("title_cn") or row.get("title") or "").lower()
+    for _ in range(6):
+        stripped = _WEEKLY_SOURCE_PREFIX.sub("", t, count=1)
+        if stripped == t:
+            break
+        t = stripped
+    key = "".join(ch for ch in t if ch.isalnum())[:40]
+    return "" if key in ("", "null", "none", "nan") else key
+
+
 def _weekly_key_events(conn, start_utc, end_utc, limit: int | None = None) -> list[dict]:
     """本周「重要事件」清单（周报素材，非交易信号）。
 
-    口径：created_at 在窗口内 且（tier='A' 或 resonance_state='confirmed'），
-    排除 divergent，按 composite_score DESC 截断至 limit。
-
-    注意：**不**按 status='open' 过滤——confirmed 的信号按 d3 分层在库中为
-    status='watch'（价格已消化），但「已被定价」恰恰是周报要回看的影响事实。
+    素材为 biz.asset_catalyst 原始事件（含无 asset_id 的宏观/监管类，它们从不进入
+    signal 表），先剔除占位标题（'null'）与「要闻汇总/日报」类聚合帖，再按**标题**
+    关键词兜底归类 security/etf/macro（不看 ai_summary，避免无关事件蹭到关键词），
+    然后按「市场显著性」打分：importance = 类型权重 × 资产权重 + confirmed 共振加成；
+    剔除 market_update 噪音。返回前按标题归一化去重、加广度加成、施加单类型配额，
+    按 importance 降序截断。
     """
     lim = limit if limit is not None else WEEKLY_EVENT_LIMIT
-    return conn.execute("""
-        SELECT s.signal_id, s.tier, s.composite_score,
-               s.confidence, s.resonance_state, s.created_at,
-               a.canonical_name, a.canonical_symbol AS symbol, a.primary_sector,
-               ac.title, ac.title_cn, ac.ai_summary,
-               COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS event_type,
-               COALESCE(ac.ai_sentiment, 'neutral') AS sentiment,
-               ac.source_code, ac.published_at
-        FROM biz.catalyst_signal s
-        JOIN core.asset a ON s.asset_id = a.asset_id
-        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-        WHERE s.created_at >= %s AND s.created_at < %s
-          AND (s.tier = 'A' OR s.resonance_state = 'confirmed')
-          AND COALESCE(s.resonance_state, '') <> 'divergent'
-        ORDER BY s.composite_score DESC
+    pool = max(lim * 10, 400)
+    rows = conn.execute("""
+        WITH base AS (
+            SELECT ac.catalyst_id, ac.asset_id AS raw_asset_id, ac.created_at,
+                   ac.title, ac.title_cn, ac.ai_summary, ac.source_code, ac.published_at,
+                   COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS raw_event_type,
+                   COALESCE(ac.ai_sentiment, 'neutral') AS sentiment,
+                   a.canonical_name, a.canonical_symbol AS symbol, a.primary_sector,
+                   a.market_cap_rank, a.market_cap,
+                   s.signal_id, s.tier, s.composite_score, s.confidence,
+                   s.resonance_state, s.status,
+                   LOWER(COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '')) AS head
+            FROM biz.asset_catalyst ac
+            LEFT JOIN core.asset a ON ac.asset_id = a.asset_id
+            LEFT JOIN LATERAL (
+                SELECT si.signal_id, si.tier, si.composite_score, si.confidence,
+                       si.resonance_state, si.status
+                FROM biz.catalyst_signal si
+                WHERE si.catalyst_id = ac.catalyst_id
+                ORDER BY si.composite_score DESC NULLS LAST, si.signal_id
+                LIMIT 1
+            ) s ON TRUE
+            WHERE ac.created_at >= %s AND ac.created_at < %s
+              AND COALESCE(s.resonance_state, '') <> 'divergent'
+              -- 剔除占位标题（LLM 漏译写成的字面量 'null'）与「要闻汇总/日报」类
+              -- 无单一事件的聚合帖：其标题不含事件，只会污染关键词归类
+              AND LOWER(COALESCE(ac.title_cn, ac.title, ''))
+                  NOT IN ('', 'null', 'none', 'nan', 'tl;dr')
+              AND LOWER(COALESCE(ac.title_cn, ac.title, ''))
+                  !~ '^(今日要闻|要闻预告|要闻提示|一、|二、|热点新闻|行情|盘前|盘后|每日|快讯汇总|市场综述)'
+        ),
+        categorized AS (
+            SELECT *,
+                CASE
+                    -- 关键词只匹配**标题**（ai_summary 过长，会在无关事件里蹭到关键词，
+                    -- 实测把「今日要闻提示：」「标普500指数…」等误判成 security/macro/etf）
+                    WHEN head ~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull'
+                        THEN 'security'
+                    WHEN head ~ 'etf' THEN 'etf'
+                    WHEN head ~ '美联储|federal reserve|rate hike|rate cut|加息|降息|基点|basis point|通胀|非农'
+                        THEN 'macro'
+                    ELSE raw_event_type
+                END AS category
+            FROM base
+        ),
+        scored AS (
+            SELECT *,
+                CASE category
+                    WHEN 'security' THEN 95 WHEN 'macro' THEN 88 WHEN 'etf' THEN 85
+                    WHEN 'regulation' THEN 80 WHEN 'delisting' THEN 72
+                    WHEN 'tech_upgrade' THEN 68 WHEN 'listing' THEN 62
+                    WHEN 'funding' THEN 55 WHEN 'burn' THEN 52 WHEN 'partnership' THEN 45
+                    WHEN 'airdrop' THEN 45 WHEN 'staking' THEN 40 WHEN 'governance' THEN 40
+                    WHEN 'market_update' THEN 18 ELSE 32
+                END::numeric AS type_w,
+                (CASE
+                    WHEN raw_asset_id IS NULL THEN 0.75          -- 无标的 → 市场级事件
+                    WHEN market_cap_rank IS NULL THEN 0.35
+                    WHEN market_cap_rank <= 10 THEN 1.00
+                    WHEN market_cap_rank <= 30 THEN 0.80
+                    WHEN market_cap_rank <= 100 THEN 0.62
+                    WHEN market_cap_rank <= 500 THEN 0.45
+                    ELSE 0.30
+                END)::numeric AS asset_w
+            FROM categorized
+        )
+        SELECT catalyst_id, raw_asset_id, signal_id, tier, composite_score, confidence,
+               resonance_state, status, created_at, canonical_name, symbol, primary_sector,
+               market_cap_rank, market_cap, title, title_cn, ai_summary, source_code,
+               published_at, category AS event_type, sentiment,
+               ROUND(
+                   type_w * (CASE WHEN category IN ('security','macro','etf','regulation')
+                                  THEN GREATEST(asset_w, 0.5) ELSE asset_w END)
+                   + CASE WHEN resonance_state = 'confirmed' THEN 6 ELSE 0 END, 1
+               ) AS importance
+        FROM scored
+        WHERE category <> 'market_update'
+        ORDER BY importance DESC, composite_score DESC NULLS LAST, catalyst_id
         LIMIT %s
-    """, (start_utc, end_utc, lim)).fetchall()
+    """, (start_utc, end_utc, pool)).fetchall()
+
+    # 同一事件去重：保留重要性最高的一条，聚合其余行出现的标的
+    best: dict[str, dict] = {}
+    for r in rows:
+        key = _weekly_story_key(r) or f"cid:{r.get('catalyst_id')}"
+        cur = best.get(key)
+        if cur is None:
+            d = dict(r)
+            d["symbols"] = [d.get("symbol")] if d.get("symbol") else []
+            best[key] = d
+        else:
+            sym = r.get("symbol")
+            if sym and sym not in cur["symbols"]:
+                cur["symbols"].append(sym)
+
+    items = list(best.values())
+    for d in items:
+        # 广度加成：覆盖标的越多 → 越偏「市场级」重要事件（上限 +15）
+        d["importance"] = round(float(d.get("importance") or 0)
+                                + min(max(len(d["symbols"]) - 1, 0), 5) * 3, 1)
+        if not d.get("symbol"):
+            d["symbol"] = _WEEKLY_SYMBOL_FALLBACK.get(str(d.get("event_type")))
+    items.sort(key=lambda d: (-float(d.get("importance") or 0),
+                              -float(d.get("composite_score") or 0)))
+
+    # 单类型配额：防止某一类（如 listing / regulation）淹没清单
+    out: list[dict] = []
+    used: dict[str, int] = {}
+    for d in items:
+        et = str(d.get("event_type") or "other")
+        if used.get(et, 0) >= WEEKLY_MAX_PER_TYPE:
+            continue
+        used[et] = used.get(et, 0) + 1
+        out.append(d)
+        if len(out) >= lim:
+            break
+    return out
 
 
 _SENTIMENT_CN = {"bullish": "利好", "bearish": "利空", "neutral": "中性"}
@@ -3043,6 +3216,7 @@ def _weekly_events_brief(events: list[dict]) -> list[dict]:
     for r in events:
         brief.append({
             "symbol": str(r.get("symbol") or ""),
+            "symbols": [str(x) for x in (r.get("symbols") or [])][:6],
             "name": str(r.get("canonical_name") or ""),
             "sector": str(r.get("primary_sector") or ""),
             "event_type": str(r.get("event_type") or ""),
@@ -3149,8 +3323,9 @@ def _weekly_fallback_narrative(events: list[dict]) -> dict:
             "direction": str(r.get("sentiment") or "neutral"),
         })
     return {
-        "overview": (f"本周共产生 {len(events)} 条重要催化剂事件（A 级或高共振）。"
-                     "以下按信号强度降序列出事件与已有解读"
+        "overview": (f"本周共产生 {len(events)} 条重要催化剂事件"
+                     "（按事件类型与标的重要性筛选）。"
+                     "以下按事件重要性降序列出事件与已有解读"
                      "（AI 摘要暂不可用，此处为事件原始摘要拼接）。"),
         "themes": [],
         "events": ev_out,

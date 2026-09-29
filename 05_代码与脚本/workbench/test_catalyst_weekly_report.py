@@ -5,8 +5,11 @@
   2. 负号哨兵：SENTINEL_WEEKLY_REPORT_SIGNAL_ID = -4（与 -1/-2/-3 互异）
   3. 自然周窗口：北京时区，上周一 00:00 ~ 本周一 00:00，恰好 7 天
   4. 概览统计 SQL：事件类型/情感用 COALESCE 统一口径，含 tier/来源分布
-  5. 重要事件 SQL：tier='A' OR resonance_state='confirmed'，排除 divergent，
-     **不**按 status='open' 过滤（confirmed 的 watch 事件正是周报素材），LIMIT 截断
+  5. 重要事件 SQL（2026-09-29 重建「市场显著性」口径）：素材取自
+     biz.asset_catalyst 原始事件（含无 asset_id 的宏观/监管类），关键词兜底归类
+     security/etf/macro，剔除 market_update，按 importance 降序；
+     **不**按 status='open' 过滤（confirmed 的 watch 事件正是周报素材）
+  5b. Python 侧：同一事件多来源去重、广度加成、单类型配额、无标的占位标的
   6. 叙事链路：LLM 优先、失败回退模板拼装（不阻断）；events 为空时 LLM 直接跳过
   7. 自然周去重：本周已发过 → skipped；发送锁拒绝 → skipped；dry-run 不占去重位
   8. 渲染护栏：含「本周总述 / 主线主题 / 大事记与影响」与影响解读，
@@ -56,6 +59,12 @@ check(len({N.SENTINEL_WEEKLY_REPORT_SIGNAL_ID, N.SENTINEL_CHANNEL_SILENCE_SIGNAL
            -1, -2}) == 4, "哨兵集合 {-4,-3,-1,-2} 互不重复")
 check(N.WEEKLY_EVENT_LIMIT >= 10, "LLM 事件上限 ≥10（保证素材量）",
       str(N.WEEKLY_EVENT_LIMIT))
+check(0 < N.WEEKLY_MAX_PER_TYPE < N.WEEKLY_EVENT_LIMIT,
+      "单类型配额 < 总上限（防止某一类淹没清单）",
+      f"cap={N.WEEKLY_MAX_PER_TYPE} limit={N.WEEKLY_EVENT_LIMIT}")
+check(N._WEEKLY_TYPE_WEIGHT["security"] > N._WEEKLY_TYPE_WEIGHT["listing"],
+      "周报权重：security > listing（市场显著性 ≠ 可交易性）",
+      str(N._WEEKLY_TYPE_WEIGHT.get("security")))
 
 print("== 3. 自然周窗口 ==")
 _tz = _dt.timezone(_dt.timedelta(hours=8))
@@ -100,22 +109,98 @@ check("GROUP BY tier" in _all_sql, "含 tier 分布 GROUP BY")
 check("ac.source_code AS key" in _all_sql and "GROUP BY 1" in _all_sql,
       "含来源分布（source_code AS key + GROUP BY 1）")
 
-print("== 5. 重要事件 SQL ==")
+print("== 5. 重要事件 SQL（重建口径 2026-09-29） ==")
 _c2 = _CaptureConn()
 N._weekly_key_events(_c2, _start, _end_utc)
 _sql = _c2.calls[0][0]
 _params = _c2.calls[0][1]
-check("(s.tier = 'A' OR s.resonance_state = 'confirmed')" in _sql,
-      "口径为 tier='A' OR resonance_state='confirmed'（A级+高共振）")
+check("FROM biz.asset_catalyst ac" in _sql,
+      "素材取自 biz.asset_catalyst 原始事件（含无 asset_id 的宏观/监管类）")
+check("LEFT JOIN LATERAL" in _sql and "FROM biz.catalyst_signal si" in _sql,
+      "signal 表降级为左连补充（tier/resonance），不再做过滤底盘")
+check("(s.tier = 'A' OR s.resonance_state = 'confirmed')" not in _sql,
+      "废弃旧口径 tier='A' OR confirmed（tier 是可交易性，非重要性）")
 check("COALESCE(s.resonance_state, '') <> 'divergent'" in _sql,
       "排除 divergent（方向背离无有效影响）")
+check("'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull'" in _sql,
+      "黑客/被盗类关键词兜底归类 security（库中误落 other）")
+check("WHEN head ~ 'etf' THEN 'etf'" in _sql,
+      "ETF 类关键词兜底归类（库中误落 market_update）")
+check("head ~ '美联储|federal reserve|rate hike|rate cut|加息|降息" in _sql,
+      "宏观（美联储/利率）关键词兜底归类（库中误落 market_update）")
+check("COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '')) AS head" in _sql,
+      "关键词匹配字段 head 仅由标题构成（不含 ai_summary）", "")
+check("NOT IN ('', 'null', 'none', 'nan', 'tl;dr')" in _sql,
+      "剔除占位标题（LLM 漏译写成字面量 'null'）")
+check("!~ '^(今日要闻|要闻预告|要闻提示|一、|二、|热点新闻|行情" in _sql,
+      "剔除「要闻汇总/日报」类无单一事件的聚合帖")
+check("WHERE category <> 'market_update'" in _sql,
+      "剔除 market_update 纯行情播报（窗口占 38%）")
+check("WHEN 'security' THEN 95" in _sql and "WHEN 'listing' THEN 62" in _sql,
+      "周报权重表：security 最高权、listing 降权（区别于 grade 的可交易性权重）")
+check("WHEN raw_asset_id IS NULL THEN 0.75" in _sql,
+      "无标的的宏观/监管事件按「市场级」计权（不再因无 asset_id 被埋没）")
+check("ORDER BY importance DESC" in _sql and "LIMIT %s" in _sql,
+      "按 importance 降序截断（单一排序键，无 OR/LIMIT 吞没问题）")
+check(_params[2] == max(N.WEEKLY_EVENT_LIMIT * 10, 400),
+      "候选池放大后续由 Python 去重/配额收敛", str(_params))
 check("s.status = 'open'" not in _sql,
       "**不**按 status='open' 过滤（confirmed 的 watch 事件是周报素材）")
-check("ORDER BY s.composite_score DESC" in _sql, "按 composite_score 降序")
-check("LIMIT %s" in _sql and _params[2] == N.WEEKLY_EVENT_LIMIT,
-      "LIMIT 截断至 WEEKLY_EVENT_LIMIT", str(_params))
-check("JOIN core.asset a" in _sql and "JOIN biz.asset_catalyst ac" in _sql,
-      "联表 core.asset + biz.asset_catalyst")
+
+
+class _RowsConn:
+    """返回预设行的假连接（用于验证 Python 侧去重/配额/占位标的逻辑）。"""
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, sql, params=None):
+        rows = self.rows
+
+        class _C:
+            def fetchall(_self):
+                return rows
+        return _C()
+
+
+print("== 5b. 去重 / 单类型配额 / 占位标的 ==")
+_dup = [
+    {"catalyst_id": 1, "signal_id": 11, "event_type": "regulation", "importance": 80.0,
+     "composite_score": 50, "symbol": "BTC", "title_cn": "《CLARITY法案》在参议院受阻",
+     "sentiment": "bearish"},
+    {"catalyst_id": 2, "signal_id": 12, "event_type": "regulation", "importance": 78.0,
+     "composite_score": 40, "symbol": "ETH", "title_cn": "《CLARITY法案》在参议院受阻",
+     "sentiment": "bearish"},
+    {"catalyst_id": 3, "signal_id": None, "event_type": "macro", "importance": 88.0,
+     "composite_score": None, "symbol": None, "title_cn": "美联储加息 25 个基点",
+     "sentiment": "bearish"},
+]
+_ev = N._weekly_key_events(_RowsConn(_dup), _start, _end_utc)
+check(len(_ev) == 2, "同一事件多来源重复入库 → 去重为 1 条", str(len(_ev)))
+check(_ev[0]["event_type"] == "macro" and _ev[0]["symbol"] == "宏观",
+      "无标的的宏观事件给可读占位标的，且按 importance 居首",
+      str({k: _ev[0].get(k) for k in ("event_type", "symbol", "importance")}))
+_reg = [d for d in _ev if d["event_type"] == "regulation"][0]
+check(_reg["symbols"] == ["BTC", "ETH"], "去重后聚合同一事件的多个标的", str(_reg["symbols"]))
+check(_reg["importance"] == 83.0, "市场级事件获得广度加成（80 + 3）", str(_reg["importance"]))
+
+_cap_rows = [{"catalyst_id": 100 + i, "signal_id": 200 + i, "event_type": "listing",
+              "importance": 40.0, "composite_score": 30, "symbol": "AAA",
+              "title_cn": f"某交易平台上新公告第 {i} 号", "sentiment": "bullish"}
+             for i in range(12)]
+_cap = N._weekly_key_events(_RowsConn(_cap_rows), _start, _end_utc)
+check(len(_cap) == N.WEEKLY_MAX_PER_TYPE,
+      "单类型配额生效（12 条 listing 仅保留 WEEKLY_MAX_PER_TYPE 条）", str(len(_cap)))
+
+_k = N._weekly_story_key
+check(_k({"title_cn": "ChainCatcher 消息，Payy Network 遭攻击"})
+      == _k({"title_cn": "火星财经消息，Payy Network 遭攻击"}),
+      "剥离来源署名前缀后同一事件归并（跨来源转述）")
+check(_k({"title_cn": "PANews 9月23日消息，据 SoSoValue 数据，XRP 现货 ETF 单日净流入"})
+      == _k({"title_cn": "ChainCatcher 消息，据 SoSoValue 数据，XRP 现货 ETF 单日净流入"}),
+      "剥离来源 + 日期前缀后归并")
+check(_k({"title_cn": "BTC 现货 ETF 创纪录净流入"}) != _k({"title_cn": "ETH 升级完成"}),
+      "不同事件不误归并")
+check(_k({"title_cn": "null"}) == "", "占位标题 'null' → 空键（回退 catalyst_id）")
 
 print("== 6. 叙事链路 ==")
 check(N._weekly_llm_narrative([], {"signals_total": 0}, "w") is None,
@@ -138,10 +223,10 @@ _brief = N._weekly_events_brief([{
     "resonance_state": "weak", "composite_score": 88.5, "created_at": _end,
     "title_cn": "标题", "ai_summary": "摘要",
 }])
-check(set(_brief[0]) == {"symbol", "name", "sector", "event_type", "sentiment",
-                         "tier", "resonance_state", "score", "published_at",
-                         "title", "summary"},
-      "LLM 输入字段集固定（去噪）", str(sorted(_brief[0])))
+check(set(_brief[0]) == {"symbol", "symbols", "name", "sector", "event_type",
+                         "sentiment", "tier", "resonance_state", "score",
+                         "published_at", "title", "summary"},
+      "LLM 输入字段集固定（去噪，含 symbols 供主题聚合）", str(sorted(_brief[0])))
 check(_brief[0]["score"] == 88.5, "score 数值化（非字符串）", str(_brief[0]["score"]))
 
 print("== 7. 发送流程 ==")

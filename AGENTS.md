@@ -1958,6 +1958,33 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 **未做 / 边界（须留档）**：① **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`，新调度项 `catalyst_weekly_report` 需容器重建后才注册，首个执行点为周一 09:00）。② **确认为 `submit_scheduled_task` 白名单/看护未覆盖**：新任务不在 `scheduler_watchdog.KEY_JOBS`，若某周静默失败不会触发告警+补跑（首期先观察，如需可后补）。③ **周报无历史归档表**：叙事仅在邮件正文，未落库（如需「往期周报」页面须另加工单）。④ **LLM 叙事为一次成稿无事实校验**：prompt 已禁止编造，但未做「输出 symbol ⊆ 输入 symbol」的机器校验（回退路径不受影响）。
 
+#### 周报选材口径重建（2026-09-29，同日追加）
+
+来源：用户收到首封周报（标题「重要事件 13 条」）后质疑「**确定这些是重要的催化剂？你联网查一下，是否覆盖全了**」。经与用户二次确认：① 选材口径 =「**重建事件重要性口径**」（放弃 `tier` 作为主口径）；② 采集缺口 =「**一并排查修复**」（非仅记工单）。
+
+**取证（窗口 2026-09-21~09-28 北京，prod 只读）—— 四条根因**：
+- **根因 1（口径错配）**：`tier` 唯一来源是 `composite_score`（A≥80/B≥60/C≥40），其权重表在 `grade.py`/`catalyst_rules.yaml` 里是**可交易性**（listing=95）；而周报要的是**市场显著性**。结果 13 条 A 级中 **11 条是 listing**（分数 80~88），同期 **BTC 现货 ETF 创纪录流入 C/57、Bitget 被盗 3.516 亿 C/66、美联储加息 C/69、Fetch.ai 被黑 B/69、CLARITY 法案受阻 C/58–68、Binance 投资 Circle B/75 全部落选**。
+- **根因 2（SQL bug）**：旧 SQL `WHERE (s.tier = 'A' OR s.resonance_state = 'confirmed') ... ORDER BY composite_score DESC LIMIT 30` —— A 级 80~88 占满 Top30，confirmed 均分仅 58.4 几无机会，**`OR` 被 `ORDER BY + LIMIT` 吃掉、形同虚设**。
+- **根因 3（类型噪音）**：窗口内 `market_update` 纯行情播报 6788 条（**38%**），稀释候选池。
+- **根因 4（采集/消费缺口，最关键）**：窗口内 `biz.asset_catalyst` 7049 条中 **4698 条 `asset_id IS NULL`（67%）**，**从不进入 `biz.catalyst_signal`**，故《CLARITY 法案》《Genius 法案》、稳定币监管、美联储加息等宏观/监管要闻**天然不可能入选**。另：窗口内全部事件**仅来自 6 个 `kol_*_binance_square_*` 源**（2743/1475/1132/744/493/462），即**仅币安广场 KOL 内容**。
+
+**修法（消费侧重写，不动采集）**：
+1. **素材底盘更换**：`_weekly_key_events()` 从 `biz.catalyst_signal` 改为 **`biz.asset_catalyst` 原始事件**（含无 asset_id 的宏观/监管类），`catalyst_signal` 降级为 `LEFT JOIN LATERAL`（仅补 tier/composite_score/confidence/resonance_state/status）。
+2. **两套权重刻意分离**：新增 `_WEEKLY_TYPE_WEIGHT` = **市场显著性**（security 95 / macro 88 / etf 85 / regulation 80 / delisting 72 / tech_upgrade 68 / **listing 62** / funding 55 / burn 52 / partnership 45 / airdrop 45 / staking 40 / governance 40 / market_update 18 / other 32），与 `grade.py` 的 `event_type_weights`（**可交易性**）**互不可替代**；注释已写明。
+3. **关键词兜底归类**（库里常见误落 `other` / `market_update`）：security（hack|exploit|stolen|breach|drain|被盗|被黑|遭攻击|漏洞|rug pull）→ etf → macro（美联储|rate hike/cut|加息|降息|基点|通胀|非农）→ 否则回落 `raw_event_type`。**仅匹配标题**（`head` 由 `COALESCE(title_cn,'') || ' ' || COALESCE(title,'')` 构成，**不含 `ai_summary`**）—— 首版误用整段摘要，「Taiko DAO 安全委员会提案」被判 security-95、「今日要闻提示：」「一、热点新闻精选」「TL;DR」「标普500指数…」被判 macro/etf，故收敛到仅标题。
+4. **`market_update` 整类剔除**（`WHERE category <> 'market_update'`）。
+5. **无标的按「市场级」计权**：`raw_asset_id IS NULL → asset_w=0.75`，且 security/macro/etf/regulation 四类取 `GREATEST(asset_w, 0.5)`，避免宏观要闻因无 asset_id 被埋没；渲染侧补可读占位标的（`_WEEKLY_SYMBOL_FALLBACK`：宏观/监管/安全/ETF）。
+6. **候选池放大 + Python 侧收敛**：SQL 按 `importance DESC` 取 `max(WEEKLY_EVENT_LIMIT*10, 400)` = 400 条，Python 侧再做 ① **同一事件去重**（`_weekly_story_key`：`_WEEKLY_SOURCE_PREFIX` 循环剥「来源+日期+转述词」前缀 → 去非字母数字 → 取 40 字符；空键回退 `cid:{catalyst_id}`）并**聚合多标的**；② **广度加成**（覆盖标的数每多 1 个 +3，上限 +15）；③ **单类型配额** `WEEKLY_MAX_PER_TYPE=8`（首版 listing 占 11/13 即因此）；④ 排序后截断。
+7. **占位标题与聚合帖剔除**（两类噪音源）：标题为字面量 `'null'/'none'/'nan'/''/'tl;dr'`（LLM 漏译写入）→ `NOT IN` 直接剔除；「今日要闻|要闻预告|要闻提示|一、|二、|热点新闻|行情|盘前|盘后|每日|快讯汇总|市场综述」前缀 → `!~` 剔除（此类帖标题不含单一事件，只会污染关键词归类）。
+8. **`_weekly_events_brief` 增 `symbols` 字段**（供 LLM 做主题聚合）；`_weekly_fallback_narrative` 措辞订正（「A 级或高共振」→「按事件类型与标的重要性筛选」；「按信号强度降序」→「按事件重要性降序」）。
+
+**验证**：`py_compile` EXIT=0；`test_catalyst_weekly_report.py` **78/0 全绿**（section 5 全量重写为 13 条新口径断言 + 新增 section 5b「去重/广度加成/占位标的/单类型配额/`_weekly_story_key`」假连接护栏）；**prod dry-run EXIT=0**：窗口 2026-09-21~09-28，候选池 30 条（类型分布 security 8 / etf 8 / macro 8 / regulation 6），LLM 产出 **4 主题 + 14 事件**，**覆盖全部外部大事**——美联储加息 25bp、BTC 现货 ETF 流入 23.1 亿美元、XRP/SOL/ETH 现货 ETF 净流入、贝莱德 ETH ETF 20 日买入 10.1 亿、Bitget 3.516 亿漏洞、XRP 2000 万硬件钱包被盗、Payy Network 被攻、CLARITY 受阻、巴尔鹰派、Hyperliquid 监管、CFTC 调查 Kalshi、DOGE ETF。剥前缀去重收益实测（全周 7049 行）：no-strip/40 → 唯一键 6617（1.07x）；**strip/40 → 5974（1.18x）**；strip/20 → 4978（1.42x），故取 strip/40。
+
+**未做 / 边界（须留档）**：
+- ① **源覆盖缺口（独立工单，本轮未修）**：ETH `Glamsterdam`/`Fusaka` 升级在库中 **0 条**（`Fusaka` ILIKE 命中 0；`Glamsterdam` 4 条均 Taiko 无关巧合）—— 属**采源问题**（当前仅 6 个币安广场 KOL 源），**不新增采源无法修复**。（注：原先怀疑的「Solana ETF 创纪录流入」为**误报**——英文 `Solana ETF` 搜得 0，但中文「SOL 现货 ETF 单日总净流入」在库存在且已入选。）
+- ② **跨来源改写无法靠标题归一化归并**（同语言不同措辞、中英双语；如 Payy Network 4 个变体、XRP ETF 3 个变体），**交由 LLM 在叙事阶段合并**（prompt 已限定 events 8~15 条）。已写入 `_weekly_story_key` docstring 留档。
+- ③ **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`）。首封周报（旧口径 13 条）已在 2026-09-29 09:00 发出并占自然周去重位，**本周不会再发新口径版本**；新口径将于下一自然周首次生效（需先 redeploy）。
+
 ### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
 
 **现象**：同一份 `biz.asset_tokenomics` 有 **4 个组装点**且口径已漂移——① `db_stats.get_asset_tokenomics()` 字段最全（22 列 + `biz.asset_token_unlocks` 的 revenue/valuation/overview）但**无逐字段来源/时点**；② 投研结论 prompt 的 inline `_fund` **只吃 `lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct`**；③ 解锁测算 prompt **另起一套 raw SQL 吃 10 列**并**复制了一份 CMC supply 校验**；④ 页面各渲染一个子集。**核心病根**：库里已有的 `allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **从未进入投研结论主线**（只进解锁支线）——2043 行中 allocation 776、emission 676、utility 1204、governance 328、burn 203、inflation 155 全部对投资决策 prompt 不可见。

@@ -465,6 +465,7 @@ def run_grade(conn, grader: CatalystGrader,
             skipped += 1
             trace_step("G1_grade", catalyst_id=result.catalyst_id,
                        title=(row.get("title") or "") if hasattr(row, "get") else None,
+                       symbol=row.get("anchor_symbol") if hasattr(row, "get") else None,
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         count += 1
@@ -480,6 +481,7 @@ def run_grade(conn, grader: CatalystGrader,
             "G1_grade",
             catalyst_id=result.catalyst_id,
             title=(row.get("title") or "") if hasattr(row, "get") else None,
+            symbol=row.get("anchor_symbol") if hasattr(row, "get") else None,
             passed=not is_noise,
             reason=("noise：无关联资产/弱事件，G2 前置过滤" if is_noise else None),
             metrics={
@@ -511,11 +513,14 @@ def run_resonance(conn, scorer: ResonanceScorer,
     """
     query = """
         SELECT DISTINCT ac.catalyst_id, ac.published_at,
+                        ac.title,
+                        a.canonical_symbol AS symbol,
                         cal.asset_id,
                         ci.impact_direction
         FROM biz.asset_catalyst ac
         JOIN biz.catalyst_asset_link cal ON ac.catalyst_id = cal.catalyst_id
         JOIN biz.catalyst_grade cg ON ac.catalyst_id = cg.catalyst_id
+        LEFT JOIN core.asset a ON a.asset_id = cal.asset_id
         LEFT JOIN biz.catalyst_impact ci ON ac.catalyst_id = ci.catalyst_id AND cal.asset_id = ci.asset_id
         WHERE cg.catalyst_kind != 'noise'
           AND NOT EXISTS (
@@ -553,6 +558,7 @@ def run_resonance(conn, scorer: ResonanceScorer,
 
         if asset_24h is None:
             trace_step("G2_resonance", catalyst_id=catalyst_id_val, asset_id=asset_id,
+                       title=row["title"], symbol=row["symbol"],
                        passed=False, reason="无行情数据(percent_change_24h=None)，跳过")
             continue  # 无行情数据跳过
 
@@ -590,6 +596,7 @@ def run_resonance(conn, scorer: ResonanceScorer,
             )
         except _LockRetryExhausted:
             trace_step("G2_resonance", catalyst_id=catalyst_id_val, asset_id=asset_id,
+                       title=row["title"], symbol=row["symbol"],
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         count += 1
@@ -604,6 +611,8 @@ def run_resonance(conn, scorer: ResonanceScorer,
             "G2_resonance",
             catalyst_id=catalyst_id_val,
             asset_id=asset_id,
+            title=row["title"],
+            symbol=row["symbol"],
             passed=not is_pending,
             reason=("共振pending（低于 weak 阈值），G6 不会入选" if is_pending else None),
             metrics={
@@ -645,13 +654,15 @@ def run_signal(conn, builder: CatalystSignalBuilder,
     query = """
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
                cg.catalyst_kind, cg.base_strength,
-               ac.published_at,
+               ac.published_at, ac.title,
+               a.canonical_symbol AS symbol,
                COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction,
                cs.entry_price, cs.stop_loss, cs.take_profit,
                cs.technical_state, cs.fundamental_pass
         FROM biz.catalyst_resonance cr
         JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
+        LEFT JOIN core.asset a ON a.asset_id = cr.asset_id
         LEFT JOIN biz.catalyst_impact ci
           ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
         LEFT JOIN biz.catalyst_signal cs
@@ -711,6 +722,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             )
         except _LockRetryExhausted:
             trace_step("G6_signal", catalyst_id=signal.catalyst_id,
+                       asset_id=row["asset_id"], title=row["title"], symbol=row["symbol"],
                        passed=False, reason="锁冲突重试耗尽，跳过")
             continue
         # sig_result 为 None 是正常情况（tier 太低不写入），不是锁冲突
@@ -740,6 +752,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
             else:
                 reason = "tier=None（分数不足或RR不达标）"
         trace_step("G6_signal", catalyst_id=row["catalyst_id"], asset_id=row["asset_id"],
+                   title=row["title"], symbol=row["symbol"],
                    passed=not dropped, reason=reason,
                    metrics={"tier": signal.tier, "composite": signal.composite_score,
                             "rr": signal.rr_ratio, "kind": signal.kind,
@@ -862,7 +875,7 @@ def run_slow_second_order(conn, config: dict,
     query = """
         SELECT DISTINCT ON (cg.catalyst_id)
                cg.catalyst_id, cg.catalyst_kind, cg.base_strength,
-               ac.rule_event_type, ac.ai_sentiment, ac.published_at
+               ac.rule_event_type, ac.ai_sentiment, ac.published_at, ac.title
         FROM biz.catalyst_grade cg
         JOIN biz.asset_catalyst ac ON cg.catalyst_id = ac.catalyst_id
         WHERE cg.catalyst_kind IN ('structural', 'event')
@@ -937,6 +950,7 @@ def run_slow_second_order(conn, config: dict,
 
         if not mapper.should_do_second_order(kind, base_strength):
             trace_step("SO_second_order", catalyst_id=catalyst_id,
+                       title=cat_row["title"],
                        passed=False,
                        reason=f"should_do_second_order=False（kind={kind}, base={base_strength}）")
             continue
@@ -945,6 +959,7 @@ def run_slow_second_order(conn, config: dict,
         direct_sectors = list(cat_sectors.get(catalyst_id, set()))
         if not direct_sectors:
             trace_step("SO_second_order", catalyst_id=catalyst_id,
+                       title=cat_row["title"],
                        passed=False, reason="无直连板块(primary_sector)可展开")
             continue
 
@@ -975,6 +990,7 @@ def run_slow_second_order(conn, config: dict,
             cat_count += count
 
         trace_step("SO_second_order", catalyst_id=catalyst_id, passed=True,
+                   title=cat_row["title"],
                    metrics={"kind": kind, "base_strength": base_strength,
                             "mappings": cat_count})
 
@@ -1181,11 +1197,13 @@ def refresh_second_order_resonance(conn, config: dict,
                cs.composite_score, cs.tier,
                cs.persistence, cs.fundamental_pass, cs.technical_state,
                cs.regime, cs.entry_price, cs.stop_loss, cs.take_profit,
-               ac.ai_sentiment, ac.published_at
+               ac.ai_sentiment, ac.published_at, ac.title,
+               a.canonical_symbol AS symbol
         FROM biz.catalyst_signal cs
         JOIN biz.catalyst_second_order cso
           ON cso.catalyst_id = cs.catalyst_id AND cso.asset_id = cs.asset_id
         JOIN biz.asset_catalyst ac ON ac.catalyst_id = cs.catalyst_id
+        LEFT JOIN core.asset a ON a.asset_id = cs.asset_id
         WHERE cs.status IN ('open', 'watch', 'invalid')
         ORDER BY cs.catalyst_id DESC
     """
@@ -1253,6 +1271,7 @@ def refresh_second_order_resonance(conn, config: dict,
 
         if new_status != row["status"]:
             transitions.append((row["catalyst_id"], row["asset_id"],
+                                row["title"], row["symbol"],
                                 row["status"], new_status, signal.composite_score))
             if new_status == "open":
                 promoted += 1
@@ -1290,8 +1309,9 @@ def refresh_second_order_resonance(conn, config: dict,
 
     # 只追溯状态迁移（每轮量级小，且是下游「可动作集合」的真实变化），
     # 纯分数修正不逐条追溯，避免每轮数百行噪声
-    for cat_id, asset_id, prev_status, new_status, composite in transitions:
+    for cat_id, asset_id, cat_title, cat_symbol, prev_status, new_status, composite in transitions:
         trace_step("SO_resonance_refresh", catalyst_id=cat_id, asset_id=asset_id,
+                   title=cat_title, symbol=cat_symbol,
                    passed=True,
                    reason=f"status {prev_status} → {new_status}",
                    metrics={"prev_status": prev_status, "status": new_status,
@@ -1334,8 +1354,8 @@ def run_slow_g3g5(conn, config: dict,
                cs.kind, cs.base_strength,
                cs.resonance_score, cs.resonance_state,
                cs.regime, cs.expires_at,
-               ac.rule_event_type, ac.ai_sentiment, ac.published_at,
-               a.asset_type, a.primary_sector,
+               ac.rule_event_type, ac.ai_sentiment, ac.published_at, ac.title,
+               a.asset_type, a.primary_sector, a.canonical_symbol AS symbol,
                ci.impact_direction,
                (cso.catalyst_id IS NOT NULL) AS is_second_order
         FROM biz.catalyst_signal cs
@@ -1496,6 +1516,8 @@ def run_slow_g3g5(conn, config: dict,
             "G3G5_recalc",
             catalyst_id=catalyst_id,
             asset_id=asset_id,
+            title=row["title"],
+            symbol=row["symbol"],
             passed=signal.tier is not None,
             reason=(f"重算后 tier=None → 置 invalid（composite={signal.composite_score}）"
                     if signal.tier is None else None),

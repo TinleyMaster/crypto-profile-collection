@@ -57,6 +57,44 @@
             text-decoration: underline;
         }
 
+        /* 视图快捷 tab */
+        .tabs {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        .tab {
+            background: #171a21;
+            border: 1px solid #2a2f3a;
+            color: #c7ccd6;
+            border-radius: 6px;
+            padding: 6px 13px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .tab:hover {
+            border-color: #3b82f6;
+        }
+
+        .tab.active {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #fff;
+        }
+
+        .tab .cnt {
+            color: #9ca3af;
+            font-size: 11px;
+            margin-left: 4px;
+        }
+
+        .tab.active .cnt {
+            color: #dbeafe;
+        }
+
         /* 筛选栏 */
         .filters {
             display: flex;
@@ -112,6 +150,19 @@
         }
 
         /* 分步统计卡片 */
+        .grid-title {
+            font-size: 13px;
+            color: #c7ccd6;
+            margin: 4px 0 6px;
+            font-weight: 600;
+        }
+
+        .grid-note {
+            font-size: 12px;
+            color: #8a92a0;
+            margin-bottom: 12px;
+        }
+
         .grid {
             display: grid;
             gap: 12px;
@@ -205,17 +256,18 @@
         }
 
         .id-chip {
-            font-size: 12px;
-            color: #93c5fd;
+            font-size: 11px;
+            color: #7d8aa0;
             cursor: pointer;
             background: #111827;
-            border: 1px solid #1e3a5f;
+            border: 1px solid #232a36;
             border-radius: 4px;
             padding: 1px 6px;
         }
 
         .id-chip:hover {
             background: #1e3a5f;
+            color: #93c5fd;
         }
 
         .time {
@@ -225,10 +277,35 @@
             flex-shrink: 0;
         }
 
-        .title {
-            margin-top: 6px;
+        /* 行首：标题 · 币种（人话，优先） */
+        .headline {
+            margin-top: 8px;
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .headline .sym {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 13px;
-            color: #d1d5db;
+            font-weight: 700;
+            color: #fbbf24;
+            background: #231a05;
+            border: 1px solid #4a3a0a;
+            border-radius: 4px;
+            padding: 1px 7px;
+        }
+
+        .headline .title-text {
+            font-size: 14px;
+            color: #e6e8eb;
+            font-weight: 500;
+        }
+
+        .headline .title-text.muted {
+            color: #6b7280;
+            font-weight: 400;
         }
 
         .reason {
@@ -238,6 +315,11 @@
             background: #1f1115;
             border-radius: 5px;
             padding: 5px 8px;
+        }
+
+        .reason.pass-reason {
+            color: #86efac;
+            background: #0d1f14;
         }
 
         .metrics {
@@ -257,11 +339,65 @@
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
 
+        .metric[title] {
+            cursor: help;
+        }
+
         .empty {
             text-align: center;
             color: #6b7280;
             padding: 40px 0;
             font-size: 13px;
+        }
+
+        /* 字段图例 */
+        .legend {
+            background: #12151b;
+            border: 1px solid #1e222a;
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 18px;
+            font-size: 12px;
+        }
+
+        .legend summary {
+            cursor: pointer;
+            color: #93c5fd;
+            font-size: 13px;
+        }
+
+        .legend table {
+            margin-top: 10px;
+            border-collapse: collapse;
+            width: 100%;
+        }
+
+        .legend th,
+        .legend td {
+            text-align: left;
+            padding: 4px 10px 4px 0;
+            vertical-align: top;
+            border-bottom: 1px solid #1a1f27;
+        }
+
+        .legend th {
+            color: #8a92a0;
+            font-weight: 500;
+        }
+
+        .legend td.k {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            color: #fbbf24;
+            white-space: nowrap;
+        }
+
+        .legend td.l {
+            color: #d1d5db;
+            white-space: nowrap;
+        }
+
+        .legend td.d {
+            color: #8a92a0;
         }
     </style>
 </head>
@@ -276,31 +412,23 @@
             <a class="back-link" href="/">← 返回工作台</a>
         </header>
 
+        <div class="tabs" id="tabs"></div>
+
         <div class="filters">
             <input type="date" id="f-date" title="日期">
-            <select id="f-stage">
-                <option value="">全部步骤</option>
-                <option value="L1_classify">L1 分类</option>
-                <option value="G1_grade">G1 分级</option>
-                <option value="G2_resonance">G2 共振</option>
-                <option value="G6_signal">G6 信号</option>
-                <option value="SO_second_order">二阶展开</option>
-                <option value="G3G5_recalc">G3-G5 重算</option>
-            </select>
-            <select id="f-passed">
-                <option value="">通过+被拦</option>
-                <option value="1">仅通过</option>
-                <option value="0">仅被拦</option>
-            </select>
-            <input type="text" id="f-cat" placeholder="催化剂 ID…" style="width:110px">
-            <input type="text" id="f-q" placeholder="标题关键词…">
+            <input type="text" id="f-cat" placeholder="催化剂 ID…" style="width:120px">
+            <input type="text" id="f-q" placeholder="搜索 标题 / 币种 / 催化剂ID…">
             <button class="btn" onclick="load()">查询</button>
             <label><input type="checkbox" id="f-autorefresh" onchange="toggleAuto()"> 自动刷新(30s)</label>
         </div>
 
         <div class="meta" id="meta">加载中…</div>
 
+        <div class="grid-title">各步骤当日计数</div>
+        <div class="grid-note">说明：每张卡 = 该步骤当日 trace 的独立计数（通过/被拦），<b>不是串联漏斗</b>；同一催化剂会在多步各计一次。默认「关键决策」视图已折叠 G6 通过洪水，但卡片数字仍为该步骤当日全量。</div>
         <div class="grid" id="summary"></div>
+
+        <details class="legend" id="legend"></details>
 
         <div id="entries">
             <div class="empty">加载中…</div>
@@ -314,9 +442,25 @@
             "G2_resonance": "G2 共振",
             "G6_signal": "G6 信号",
             "SO_second_order": "二阶展开",
+            "SO_resonance_refresh": "二阶共振刷新",
             "G3G5_recalc": "G3-G5 重算",
         };
 
+        // 快捷视图 tab：key=折叠 G6 通过的决策视图；空=全部；passed0=仅被拦；其余=单阶段
+        const TABS = [
+            { key: "key", label: "关键决策" },
+            { key: "", label: "全部" },
+            { key: "passed0", label: "仅被拦" },
+            { key: "L1_classify", label: "L1 分类" },
+            { key: "G1_grade", label: "G1 分级" },
+            { key: "G2_resonance", label: "G2 共振" },
+            { key: "G6_signal", label: "G6 信号" },
+            { key: "SO_second_order", label: "二阶展开" },
+            { key: "G3G5_recalc", label: "G3-G5 重算" },
+        ];
+
+        let currentTab = "key";
+        let legendMap = {};
         let autoTimer = null;
 
         function toggleAuto () {
@@ -335,21 +479,55 @@
         }
 
         function fmtMetric (v) {
-            if (v == null) return "null";
+            if (v == null || v === "null") return "—";
+            if (v === true) return "是";
+            if (v === false) return "否";
             if (typeof v === 'number') return (Number.isInteger(v) ? v : v.toFixed(4));
             return v;
+        }
+
+        function metricTip (k) {
+            const l = legendMap[k];
+            return l ? `${l.label}：${l.desc}` : "";
+        }
+
+        function renderTabs () {
+            const el = document.getElementById('tabs');
+            el.innerHTML = TABS.map(t => {
+                const active = t.key === currentTab ? ' active' : '';
+                return `<button class="tab${active}" onclick="switchTab('${t.key}')">${esc(t.label)}</button>`;
+            }).join('');
+        }
+
+        function switchTab (key) {
+            currentTab = key;
+            renderTabs();
+            load();
+        }
+
+        function renderLegend (legend) {
+            legendMap = legend || {};
+            const keys = Object.keys(legendMap);
+            const el = document.getElementById('legend');
+            if (!keys.length) { el.style.display = 'none'; return; }
+            const rows = keys.map(k => {
+                const l = legendMap[k] || {};
+                return `<tr><td class="k">${esc(k)}</td><td class="l">${esc(l.label || '')}</td><td class="d">${esc(l.desc || '')}</td></tr>`;
+            }).join('');
+            el.innerHTML = `<summary>📖 字段说明（点击展开）</summary>
+                <table><thead><tr><th>字段</th><th>含义</th><th>取值 / 说明</th></tr></thead>
+                <tbody>${rows}</tbody></table>`;
         }
 
         async function load () {
             const params = new URLSearchParams();
             const d = document.getElementById('f-date').value;
-            const stage = document.getElementById('f-stage').value;
-            const passed = document.getElementById('f-passed').value;
             const cat = document.getElementById('f-cat').value.trim();
             const q = document.getElementById('f-q').value.trim();
+            if (currentTab === "key") params.set('view', 'key');
+            else if (currentTab === "passed0") params.set('passed', '0');
+            else if (currentTab) params.set('stage', currentTab);
             if (d) params.set('date', d);
-            if (stage) params.set('stage', stage);
-            if (passed) params.set('passed', passed);
             if (cat) params.set('catalyst_id', cat);
             if (q) params.set('q', q);
             params.set('limit', 300);
@@ -365,6 +543,8 @@
         }
 
         function render (json) {
+            renderLegend(json.legend);
+
             document.getElementById('meta').textContent =
                 `日期 ${json.date} · 共 ${json.total} 条 · 当前显示前 ${json.entries.length} 条` +
                 (json.dates.length ? `（可用日志日期：${json.dates.slice(0, 10).join(', ')}${json.dates.length > 10 ? '…' : ''}）` : '');
@@ -394,14 +574,23 @@
                 const stageName = STAGE_CN[r.stage] || r.stage || '?';
                 const pass = !!r.passed;
                 const catChip = r.catalyst_id != null ?
-                    `<span class="id-chip" title="点击过滤该催化剂" onclick="filterCat(${r.catalyst_id})">cat ${r.catalyst_id}</span>` : '';
+                    `<span class="id-chip" title="点击过滤该催化剂" onclick="filterCat(${r.catalyst_id})">catalyst #${r.catalyst_id}</span>` : '';
                 const assetChip = r.asset_id != null ?
-                    `<span class="id-chip" title="点击过滤该资产" onclick="filterAsset(${r.asset_id})">asset ${r.asset_id}</span>` : '';
-                const titleHtml = r.title ? `<div class="title">${esc(r.title)}</div>` : '';
-                const reasonHtml = r.reason ? `<div class="reason">⚠ ${esc(r.reason)}</div>` : '';
+                    `<span class="id-chip" title="打开该资产投研页" onclick="filterAsset(${r.asset_id})">asset #${r.asset_id}</span>` : '';
+
+                // 行首：事件标题 · 币种（人话优先；裸 ID 降为次要 chip）
+                let headline = '';
+                if (r.symbol) headline += `<span class="sym">${esc(r.symbol)}</span>`;
+                if (r.title) headline += `<span class="title-text">${esc(r.title)}</span>`;
+                if (!headline) {
+                    headline = `<span class="title-text muted">（无标题 · catalyst #${r.catalyst_id != null ? r.catalyst_id : '?'}）</span>`;
+                }
+
+                const reasonHtml = r.reason ?
+                    `<div class="reason${pass ? ' pass-reason' : ''}">${pass ? '✓' : '⚠'} ${esc(r.reason)}</div>` : '';
                 const metricsHtml = Object.entries(r.metrics || {}).length ?
                     `<div class="metrics">${Object.entries(r.metrics).map(([k, v]) =>
-                        `<span class="metric">${esc(k)}=${esc(fmtMetric(v))}</span>`).join('')}</div>` : '';
+                        `<span class="metric" title="${esc(metricTip(k))}">${esc(k)}=${esc(fmtMetric(v))}</span>`).join('')}</div>` : '';
                 return `
                 <div class="log-row ${pass ? 'passed' : 'dropped'}">
                     <div class="top">
@@ -410,7 +599,7 @@
                         ${catChip}${assetChip}
                         <span class="time">${esc(r.ts || '')}</span>
                     </div>
-                    ${titleHtml}
+                    <div class="headline">${headline}</div>
                     ${reasonHtml}
                     ${metricsHtml}
                 </div>`;
@@ -426,7 +615,8 @@
             window.open('/research/' + id, '_blank');
         }
 
-        // 初始化：默认选最新日期
+        // 初始化
+        renderTabs();
         load();
     </script>
 </body>

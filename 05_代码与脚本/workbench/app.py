@@ -739,6 +739,35 @@ TRACE_DIR = Path(os.environ.get(
     str(Path(__file__).resolve().parent / "output" / "catalyst_trace"),
 ))
 
+# 追溯页的纯逻辑（阶段顺序 / 字段图例 / 视图分层 / 通过原因 / 标题回填）集中在
+# catalyst.catalyst_trace 模块，app.py 只保留 HTTP 层，便于离线单测。
+try:
+    from catalyst.catalyst_trace import (  # noqa: E402
+        TRACE_STAGE_ORDER,
+        TRACE_METRIC_LEGEND,
+        trace_stage_sort_key,
+        trace_is_key_row,
+        trace_derive_pass_reason,
+        trace_enrich_from_db,
+    )
+except Exception as _e:  # pragma: no cover - 导入失败时页面降级（不应发生在正常部署）
+    print(f"[WARN] catalyst_trace 展示辅助导入失败，追溯页功能降级: {_e}")
+
+    TRACE_STAGE_ORDER = []
+    TRACE_METRIC_LEGEND = {}
+
+    def trace_stage_sort_key(item):
+        return 0
+
+    def trace_is_key_row(rec):
+        return True
+
+    def trace_derive_pass_reason(rec):
+        return rec.get("reason")
+
+    def trace_enrich_from_db(entries, conn):
+        return entries
+
 
 @app.route("/catalyst")
 def catalyst_trace_page():
@@ -752,11 +781,14 @@ def api_catalyst_trace():
 
     Query params:
         date:        YYYY-MM-DD，默认最新有数据的日期
-        stage:       步骤过滤（L1_classify / G1_grade / G2_resonance / G6_signal / SO_second_order / G3G5_recalc）
+        stage:       步骤过滤（L1_classify / G1_grade / G2_resonance / G6_signal /
+                     SO_second_order / SO_resonance_refresh / G3G5_recalc），
+                     支持逗号分隔多阶段
         catalyst_id: 催化剂 ID 过滤
         asset_id:    资产 ID 过滤
         passed:      '1'=仅通过 / '0'=仅被拦
-        q:           标题模糊搜索
+        q:           标题/币种/催化剂 ID 模糊搜索
+        view:        'key'=关键决策视图（折叠 G6 通过洪水，默认不折叠）
         limit:       最多返回条数，默认 200，最大 1000
     """
     try:
@@ -764,9 +796,11 @@ def api_catalyst_trace():
 
         date_str = request.args.get("date") or ""
         stage = request.args.get("stage") or ""
+        stage_set = {s.strip() for s in stage.split(",") if s.strip()}
         catalyst_id = request.args.get("catalyst_id", type=int)
         asset_id = request.args.get("asset_id", type=int)
         passed_arg = request.args.get("passed")
+        view = (request.args.get("view") or "").strip()
         q = (request.args.get("q") or "").strip()
         try:
             limit = max(1, min(int(request.args.get("limit", 200)), 1000))
@@ -787,7 +821,7 @@ def api_catalyst_trace():
             selected = [files[0]]
             date_str = files[0].stem
 
-        # 读取 + 过滤
+        # 读取 + 过滤（q 延后到回填 title/symbol 之后再过滤）
         entries = []
         for f in selected:
             try:
@@ -800,7 +834,7 @@ def api_catalyst_trace():
                             rec = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        if stage and rec.get("stage") != stage:
+                        if stage_set and rec.get("stage") not in stage_set:
                             continue
                         if catalyst_id is not None and rec.get("catalyst_id") != catalyst_id:
                             continue
@@ -809,27 +843,60 @@ def api_catalyst_trace():
                         if passed_arg in ("1", "0"):
                             if bool(rec.get("passed")) != (passed_arg == "1"):
                                 continue
-                        if q and q not in str(rec.get("title") or ""):
-                            continue
                         entries.append(rec)
             except OSError:
                 continue
 
-        # 分步统计（基于全量过滤结果，不受 limit 截断影响）
+        # 读取层回填 title/symbol（P0-1）；DB 不可用时保持原样，页面仍可用
+        if entries:
+            try:
+                from crypto_research.config import get_settings
+                from crypto_research.db.conn import get_connection
+
+                settings = get_settings(require_database=True)
+                with get_connection(settings.database_url) as conn:
+                    trace_enrich_from_db(entries, conn)
+            except Exception as _e:
+                print(f"[WARN] catalyst trace 标题/币种回填失败（页面仍可用）: {_e}")
+
+        # q 搜索（标题 / 币种 / 催化剂 ID）
+        if q:
+            ql = q.lower()
+            entries = [
+                r for r in entries
+                if ql in str(r.get("title") or "").lower()
+                or ql in str(r.get("symbol") or "").lower()
+                or q in str(r.get("catalyst_id") or "")
+            ]
+
+        # 分步统计（基于显式过滤后的全量，不受 view/limit 影响）
         stage_stats = defaultdict(lambda: {"passed": 0, "dropped": 0})
         for r in entries:
-            s = stage_stats.get(r.get("stage") or "?")
-            if s is None:
-                stage_stats[r.get("stage") or "?"] = s = {"passed": 0, "dropped": 0}
+            s = stage_stats.setdefault(r.get("stage") or "?", {"passed": 0, "dropped": 0})
             if r.get("passed"):
                 s["passed"] += 1
             else:
                 s["dropped"] += 1
 
+        # 视图分层：key = 折叠 G6 通过洪水（只影响列表，不影响上方统计卡）
+        if view == "key":
+            entries = [r for r in entries if trace_is_key_row(r)]
+
+        # 通过原因回填（P1-3）
+        for r in entries:
+            if r.get("passed") and not r.get("reason"):
+                r["reason"] = trace_derive_pass_reason(r)
+
         total = len(entries)
         # 时间倒序 + 截断
         entries.sort(key=lambda r: r.get("ts", ""), reverse=True)
         entries = entries[:limit]
+
+        summary = [
+            {"stage": k, "passed": v["passed"], "dropped": v["dropped"]}
+            for k, v in stage_stats.items()
+        ]
+        summary.sort(key=trace_stage_sort_key)
 
         return jsonify({
             "ok": True,
@@ -837,10 +904,9 @@ def api_catalyst_trace():
             "dates": dates,
             "total": total,
             "entries": entries,
-            "summary": [
-                {"stage": k, "passed": v["passed"], "dropped": v["dropped"]}
-                for k, v in sorted(stage_stats.items())
-            ],
+            "summary": summary,
+            "legend": TRACE_METRIC_LEGEND,
+            "view": view,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

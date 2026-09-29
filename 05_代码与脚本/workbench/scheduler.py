@@ -206,6 +206,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   （标签库 09-18 后零新增，积压 5,878 陌生地址静默）。每日 10:00 查积压，超 500 发邮件。
     ("enrich_reminder", "0 10 * * *", "enrich_reminder.py", [],
      "链上标签富化积压提醒（每日 10:00，陌生地址>500 发邮件，只查 DB 不爬取）", "monitor"),
+
+    # ═══ 链上净流因子（P0 数据利用 2026-09-29）═══
+    # 资产×小时交易所净流聚合（读侧 union 归因，与 onchain_alert 页同口径）。
+    # 每小时 :20 回看 6h 幂等 upsert（不含进行中的当前小时，错过窗口下轮自动补齐）；
+    # 消费者 JOIN core.asset 取 symbol（早报评分/扫描池/catalyst 验证后续接入）。
+    ("onchain_netflow_factor", "20 * * * *", "backfill_netflow_factor.py", ["--hours", "6"],
+     "资产净流因子小时聚合（每小时 :20，回看 6h 幂等 upsert，纯读侧不碰采集）", "core"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
     # P0-2 修复：净流轴从仅 ETH 扩展到 ETH+BSC+TRON

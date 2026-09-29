@@ -13,7 +13,7 @@
 import argparse
 import os
 import psycopg2
-import psycopg.rows
+import psycopg2.extras
 
 URL = os.environ.get("DATABASE_URL")
 if not URL:
@@ -27,8 +27,8 @@ DAYS = args.days
 
 def main():
     with psycopg2.connect(URL, connect_timeout=30) as conn:
-        conn.read_only = True
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        conn.readonly = True
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
 
             print(f"=== ① 地址表分布（union 归因覆盖范围，窗口 {DAYS}d）===")
             cur.execute("""

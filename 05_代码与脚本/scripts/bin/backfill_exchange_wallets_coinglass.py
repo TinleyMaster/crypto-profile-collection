@@ -34,14 +34,14 @@ except ImportError:  # pragma: no cover
 
 try:
     import psycopg2
-    import psycopg.rows
 except ImportError:  # pragma: no cover
     psycopg2 = None
 
 CG_BASE = "https://open-api-v4.coinglass.com"
 
 # 与解析器 address_label_resolver.CASE_SENSITIVE_CHAINS 对齐
-CASE_SENSITIVE_CHAINS = {"solana", "tron", "ton", "sui", "aptos"}
+# 注：bitcoin 地址是 base58check、大小写敏感，绝不能 lower（否则变成另一个地址）
+CASE_SENSITIVE_CHAINS = {"bitcoin", "solana", "tron", "ton", "sui", "aptos"}
 
 # 单链原生币 symbol -> chain（小写，对齐 transfer_log / onchain_exchange_wallet 取值）
 SINGLE_CHAIN = {

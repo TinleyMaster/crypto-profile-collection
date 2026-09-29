@@ -2215,6 +2215,19 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **探针**：`test_scan_alert_header_regime.py` **232 → 235/0**。全量 14 套相关回归 rc=0；`py_compile` 通过。
 - **未做 / 边界**：N-11A4-G 维持门槛（复验认同）；部署逐字闭环待下一封邮件（4 字面指纹：`该档 24h 收益 P75` / `「历史同象限」` / `该判读门槛…未做样本外校准` / `「当前批级环境」= 近 3 日滚动（缺则当日）的 1h 胜率 vs 盈亏平衡`）。
 
+### L0 告警邮件融合变化榜（工单_L0告警邮件融合变化榜_2026-09-29，2026-09-29，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\工单_L0告警邮件融合变化榜_2026-09-29.md`。决策：变化榜已接网页端/信号层高亮/早报，唯独告警邮件零引用；本轮做 **L0（纯文案上下文）** —— 渲染时标注同源变化榜上榜信息，**不改判读、不抬 conviction、不绕门槛**（守 N-11A4-G 定调）。**零 DDL、未改阈值/tier 口径**。
+
+- **改动 1（`scan_daemon.py` 顶部）**：新增 workbench 路径候选探测（`<root>/workbench` → `/app` → `<root>`，防容器扁平拷贝坑），并**裸** `import db_stats`（`try/except` 降级，导入失败不阻断守护进程）。
+- **改动 2/3（`task_scan_alert`）**：复用 `_get_asset_id` 避免重复查；预查 `db_stats.get_daily_diff_summary()`（自开连接池、不接 conn），经纯函数 `_diff_board_map()` 建 `asset_id → [上榜记录]` 反查 map，给每个 `it` 挂 `asset_id`/`diff_boards`/`diff_date`。
+- **改动 4（`_render_alert_email`）**：新增纯函数 `_render_diff_boards(it)`，在卡片方向行之后独立一行渲染 `📌 同源变化榜：🔥 连续N天登涨幅榜 TopR（最近可用变化榜 YYYY-MM-DD）`。Q1 连板 ≥3 用 🔥（与 U-A 口径统一）；Q2 独立一行不混入 reason 判读段；Q3 显式披露变化榜数据日期（prod 可能滞后）；Q4 **BRK 蓄势池不标**（变化榜是「已发生异动」，语义不同）。图例补 `legend_diff` 锚点，守卫跟随 `has_diff`（仅本封确有非 BRK 卡片渲染标注时挂）。
+- **判读纪律（源码级断言）**：`_build_reason` / `_load_reason_context` **不引用** `diff_boards`；diff 只进渲染层，不改 goods/bads/RR/conviction。
+- **探针**：新增 `workbench/test_scan_alert_diff_boards.py` **20/0**（A 命中/连板/非连板/rank 缺失/无日期；B 不在榜+BRK；C 旧 2 参调用逐字无痕迹+图例守卫；D 判读纪律源码级+tone 无关；E `_diff_board_map` 纯函数）。全量 15 套相关回归 rc=0；`py_compile` 通过。
+- **prod 只读复验（通道2）**：`get_daily_diff_summary()` → `diff_date=2026-09-27`、162 资产上榜；QNT(1555) `price_change_24h/up rank1 streak4`、SAGA(4888) `price_change_24h/down rank5 streak4`、随机 id 无命中 —— 与工单预期一致。
+- **待部署**：`scan_daemon.py` 需重启容器后生效；验收：含 QNT/SAGA 的告警邮件卡片出现「📌 同源变化榜：…」，且判读 tone 不受影响。
+- **未做 / 边界**：L1（披露性加权，标「双重确认」）/ L2（综合评分联立）**不在 scope**；L2 须先做 A3 holdout 校准（G 定调硬前提），否则数据窥探 + 门槛失守。
+
 ### 连板增强接早报 U-A（工单_连板增强接早报_2026-09-28，2026-09-28，本次提交）
 
 来源：`工单_连板增强接早报_2026-09-28.md`。**候选范围**：U-A（信号层接 `streak_days`，必做）+ U-B（复活 BRIEF-OPT-002 展示层，可选/待拍板）。**本轮只做 U-A**（Q1 取工单建议「不做 U-B，仅 U-A 足够」），Q2 阈值 = 3（与 D3 一致），Q3 连跌只标注不加成。**零 DDL、零迁移、不改判定口径/上限**。

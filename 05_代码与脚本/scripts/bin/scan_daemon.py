@@ -52,10 +52,26 @@ PROJECT_SRC = SCRIPT_DIR.parent / "src"
 if str(PROJECT_SRC) not in sys.path:
     sys.path.insert(0, str(PROJECT_SRC))
 
+# workbench 路径候选（候选探测，勿单点硬编码）：`db_stats` 在 workbench 根 / 容器 `/app`
+# —— 容器内 `workbench/*` 被 Dockerfile 扁平拷到 `/app`，单写 `<root>/workbench` 会失效。
+_CODE_ROOT = SCRIPT_DIR.parent.parent
+for _cand in (str(_CODE_ROOT / "workbench"), "/app", str(_CODE_ROOT)):
+    if os.path.isdir(_cand) and _cand not in sys.path:
+        sys.path.insert(0, _cand)
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import psycopg.rows  # noqa: E402
 import psycopg_pool  # noqa: E402
+
+# 变化榜（L0 融合，工单_L0告警邮件融合变化榜_2026-09-29）：**裸** `import db_stats`（该模块名
+# 即 `db_stats`，位于 workbench 根 / 容器 /app；不得写 `from crypto_research.db import db_stats`
+# —— 该模块不存在，U-B 已踩坑）。导入失败不阻断守护进程 ⇒ 降级为「不标注变化榜」。
+try:
+    import db_stats  # noqa: E402
+except Exception as _db_exc:  # pragma: no cover - 部署形态兜底
+    db_stats = None
+    print(f"[scan_daemon] db_stats 不可用，变化榜标注降级: {_db_exc}", file=sys.stderr)
 
 from crypto_research.analysis import squeeze as sqz  # noqa: E402
 from crypto_research.analysis import squeeze_fuel as sqz_fuel  # noqa: E402
@@ -1546,6 +1562,34 @@ def _reason_mod():
     return _REASON_MOD or None
 
 
+def _diff_board_map(diff_data: dict | None) -> tuple[dict, object]:
+    """变化榜 → `{asset_id: [上榜记录]}` 反查 map + 数据日期（工单_L0 融合）。
+
+    `db_stats.get_daily_diff_summary()` 的 `categories[cat][direction] = [item...]`，每条
+    item 自带 `asset_id`/`rank`/`metric_value`/`streak_days`。**纯展示上下文** ——
+    不参与 `_build_reason` 判读、不抬 conviction、不绕门槛（守 N-11A4-G 定调）。
+    纯函数（离线可测）：喂 raw dict 即得 map，不连库。
+    """
+    m: dict = {}
+    if not isinstance(diff_data, dict):
+        return m, None
+    for cat, sides in (diff_data.get("categories") or {}).items():
+        if not isinstance(sides, dict):
+            continue
+        for direction, items in sides.items():
+            for it in (items or []):
+                a = it.get("asset_id") if isinstance(it, dict) else None
+                if a is None:
+                    continue
+                m.setdefault(a, []).append({
+                    "category": cat, "direction": direction,
+                    "rank": it.get("rank"),
+                    "metric_value": it.get("metric_value"),
+                    "streak_days": it.get("streak_days"),
+                })
+    return m, diff_data.get("diff_date")
+
+
 def _load_reason_context(conn) -> dict | None:
     """「开仓依据」的数据上下文（§四：数字必须来自表，模板零常数）。
 
@@ -1834,6 +1878,44 @@ def _render_reason(reason: dict | None) -> str:
 
 def _is_brk_sig(sig: dict) -> bool:
     return sig.get("pool") == "accumulation" or sig.get("scenario") == "BRK"
+
+
+def _render_diff_boards(it: dict) -> str:
+    """「📌 同源变化榜」标注（L0 融合，工单_L0告警邮件融合变化榜_2026-09-29）。
+
+    纯展示上下文：只把变化榜上榜信息标在卡片上，**绝不**写入 `it["reason"]`、
+    不参与 `_build_reason` 的 goods/bads/RR、不抬 conviction、不绕门槛
+    （守 N-11A4-G「维持门槛」定调）。Q4：BRK（蓄势池）不标 —— 变化榜是「已发生异动」，
+    与蓄势池语义不同。Q3：无 `diff_date` 时省略日期后缀（诚实，不臆造当日）。
+    """
+    boards = it.get("diff_boards") or []
+    if not boards or _is_brk_sig(it.get("signal") or {}):
+        return ""
+    tags: list[str] = []
+    for b in boards:
+        cat, dr = b.get("category"), b.get("direction")
+        rk, sd = b.get("rank"), b.get("streak_days") or 1
+        rk_txt = f"Top{rk}" if rk is not None else "上榜"
+        if cat == "price_change_24h" and dr == "up":
+            tags.append(f"🔥 连续{sd}天登涨幅榜 {rk_txt}" if sd >= 3 else f"📈 登涨幅榜 {rk_txt}")
+        elif cat == "price_change_24h" and dr == "down":
+            tags.append(f"🔻 连续{sd}天登跌幅榜 {rk_txt}" if sd >= 3 else f"📉 登跌幅榜 {rk_txt}")
+        elif cat == "volume_surge_24h":
+            tags.append(f"📊 登放量榜 {rk_txt}")
+        elif cat == "price_volume_surge" and dr == "up":
+            tags.append(f"⚡ 量价齐升榜 {rk_txt}")
+        elif cat == "unlock_7d" and dr == "down":
+            tags.append(f"🔓 登即将解锁榜 {rk_txt}")
+        elif cat == "market_cap_mover" and dr == "up":
+            tags.append(f"💰 登市值变动榜 {rk_txt}")
+        elif cat == "sector_rotation" and dr == "up":
+            tags.append(f"🧭 登板块轮动榜 {rk_txt}")
+    if not tags:
+        return ""
+    ddate = it.get("diff_date")
+    suffix = f"（最近可用变化榜 {ddate}）" if ddate else ""
+    return ("<p style='margin:0 0 6px;color:#6b7280;font-size:11px'>"
+            "📌 同源变化榜：" + " · ".join(tags) + suffix + "</p>")
 
 
 def _batch_direction_line(items: list[dict], regime: dict | None) -> str:
@@ -3158,6 +3240,8 @@ def _render_alert_email(items: list[dict],
         # 行之前 —— 即读者形成判断的那一刻。数据由 task_scan_alert 预先挂在
         # `it["reason"]`（旧调用方不提供 ⇒ 空串，行为逐字不变）。
         reason_txt = _render_reason(it.get("reason"))
+        # L0 变化榜标注（工单_L0）：纯展示、不污染判读；无上榜/BRK ⇒ 空串。
+        diff_txt = _render_diff_boards(it)
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
@@ -3169,6 +3253,7 @@ def _render_alert_email(items: list[dict],
             f"<b style='color:{arrow_color}'>{dir_label}</b> "
             f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
             f"</div>"
+            f"{diff_txt}"
             f"<small style='color:#111'>量比 {_fmt_num(sig.get('vol_ratio'), 2, 'x')} | "
             f"{oi_txt} | "
             f"CVD {cvd or 'n/a'}{cvd_amt} | 费率 {fund_str}</small>"
@@ -3181,6 +3266,9 @@ def _render_alert_email(items: list[dict],
     body = "".join(body_parts)
     # N-8702-E：图例的新增锚点只在对应段落实际渲染时出现（否则降级时图例撒谎）。
     has_reason = any(it.get("reason") for it in items)
+    # L0 变化榜标注同法：仅当本封确有非 BRK 卡片渲染了上榜标注时才挂图例锚点。
+    has_diff = any((it.get("diff_boards") and not _is_brk_sig(it.get("signal") or {}))
+                   for it in items)
     legend = ("<p style='color:#6b7280;font-size:12px'>图例：场景编号按行自身维度重算 —— "
               "生产扫描只用「价方向 × OI 方向」两维（S1 多头进攻 / S2 空头扎实 / "
               "S3 多头减仓 / S4 空头兑现），回测口径另含 CVD 维（S1..S8，其中 S5..S8 为"
@@ -3289,6 +3377,10 @@ def _render_alert_email(items: list[dict],
     legend_surge = ("「⚠️ 告警量暴增」= 当日告警数 ≥ 近 7 个有告警日均值 ×1.5"
                     "（「当日」为日报日、非本封批次；历史此类批次平均收益显著为负，"
                     "属批级风险提示）。")
+    # L0 变化榜标注锚点（仅当本封确有非 BRK 卡片渲染了该标注时挂，避免图例多报）。
+    legend_diff = ("「📌 同源变化榜」= 本币在「每日变化榜」的上榜标注（连板 ≥3 天用 🔥）；"
+                   "纯展示上下文，不改判读 / 不抬 conviction / 不绕门槛；"
+                   "括号内为变化榜数据日期（生产可能滞后，非当日即诚实披露）。")
     if dir_line:
         legend += legend_dir
     if has_reason:
@@ -3299,6 +3391,8 @@ def _render_alert_email(items: list[dict],
             legend += legend_batch
         if _summary_out.get("surge_shown"):
             legend += legend_surge
+    if has_diff:
+        legend += legend_diff
     legend += "</p>"
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
@@ -3523,14 +3617,26 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
                     f"跨池互斥：squeeze 池已在 {CROSS_POOL_MUTE_MIN} 分钟内告警")
                 suppressed += 1
                 continue
+            aid = _get_asset_id(conn, c["symbol"])   # 复用（_get_resonance 内原本也需查一次）
             to_alert.append({
                 "signal": c,
-                "resonance": _get_resonance(conn, c["symbol"], _get_asset_id(conn, c["symbol"])),
+                "resonance": _get_resonance(conn, c["symbol"], aid),
+                "asset_id": aid,
             })
 
         if not to_alert:
             return {"candidates": len(candidates), "alerts": 0,
                     "suppressed_cross_pool": suppressed}
+
+        # 变化榜（L0 融合，工单_L0告警邮件融合变化榜_2026-09-29）：预查一次、建
+        # `asset_id → [上榜记录]` 反查 map（`get_daily_diff_summary` 自开连接池、不接 conn）。
+        # **纯文案上下文**：只标注、不改判读/不抬 conviction/不绕门槛（守 N-11A4-G 定调）。
+        diff_map, diff_date = {}, None
+        if db_stats is not None:
+            try:
+                diff_map, diff_date = _diff_board_map(db_stats.get_daily_diff_summary())
+            except Exception as exc:                # noqa: BLE001 - 变化榜失败不阻断告警
+                print(f"[diff] 变化榜不可用，跳过标注: {exc}")
 
         # 历史先验：只对本封出现的 (价方向, OI 方向) 象限取一次
         quadrants = sorted({(it["signal"].get("p_dir"), it["signal"].get("oi_dir"))
@@ -3547,6 +3653,8 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
             it["prior"] = priors.get((sig.get("p_dir"), sig.get("oi_dir")))
             it["funding_interval_h"] = _lookup_funding(interval_map, sig.get("symbol") or "")
             it["reason"] = _build_reason(sig, reason_ctx)
+            it["diff_date"] = diff_date
+            it["diff_boards"] = diff_map.get(it.get("asset_id"), [])
 
         # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
         # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。

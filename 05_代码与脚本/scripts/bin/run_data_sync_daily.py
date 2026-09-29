@@ -15,6 +15,15 @@
   9. GitHub 链接重标 + 白皮书升级（链接分类矫正）
   10. 解锁事件 JSON→结构化同步
   11. KOL 信号回测
+
+子任务隔离（2026-09-28）：
+  任一子任务失败**不再中止后续子任务**——14 个子任务全部依次执行。
+  原设计对「赛道分类刷新 / 资产同名去重 / 主表 supply 对齐」三个关键任务做
+  「失败即终止全调度」（`break`），实测一次瞬时锁竞争（删 core.asset 触发 ~42 张
+  子表 FK 级联撞锁，见 dedup_assets 韧性修复）就让其余 11 个子任务全部不跑，
+  代价远大于收益。现改为：全部执行；第 4 参含义由 `continue_on_fail` 改为
+  `critical`——**只影响整体退出码**（关键任务失败 → 退出码非 0，保持失败可见；
+  非关键任务失败只记录、不拖累整体），**不再影响执行**。
 """
 
 import subprocess
@@ -25,47 +34,47 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 BIN_DIR = SCRIPTS_DIR
 
-# 执行顺序：(任务名, 脚本名, 参数列表, 失败是否继续)
-# 关键路径任务失败则终止；非关键任务失败继续往下走
+# 执行顺序：(任务名, 脚本名, 参数列表, critical)
+#   critical=True  → 失败时整体退出码非 0（关键路径，需关注），但**不中止**其余子任务；
+#   critical=False → 失败只记录，不影响整体退出码（多为依赖外部 API 的易抖任务）。
+# 所有子任务无论成败都依次执行（隔离）。
 TASKS = [
     # ─── 基础层 ───
-    ("赛道分类刷新", "run_refresh_sectors.py", [], False),
-    # 去重失败**不再终止后续 13 个子任务**（2026-09-28）：删除 core.asset 触发 ~42 张
-    # 子表 FK 级联/检查，与同窗 derivatives_batch 等并发写子表时可能撞锁超时；一次瞬时
-    # 锁竞争曾让整条 data_sync_daily 判失败（2026-09-28 06:30 运行）。脚本已内建
-    # 等锁放宽 + 退避重试；万一仍失败，也应让 supply 对齐/diff/解锁/KOL 回测等独立子任务
-    # 继续跑（去重幂等、次日自愈），避免一刀切中止全部同步。
+    ("赛道分类刷新", "run_refresh_sectors.py", [], True),
+    # 去重失败**不影响后续子任务**（2026-09-28）：删 core.asset 触发 ~42 张子表 FK
+    # 级联/检查，与同窗 derivatives_batch 等并发写子表时可能撞锁超时；脚本已内建
+    # 等锁放宽 + 退避重试。仍标为 critical：去重是基础层，长期失败需关注。
     ("资产同名去重", "dedup_assets.py", ["--apply"], True),
-    ("官网 primary 裁决", "run_refresh_primary_website.py", [], True),
+    ("官网 primary 裁决", "run_refresh_primary_website.py", [], False),
 
     # ─── 文档入口层 ───
-    ("CMC 文档入口补充", "refresh_doc_source_entries_from_cmc_auto.py", [], True),
-    ("CG 文档入口补充", "refresh_doc_source_entries_from_cg_auto.py", [], True),
-    ("DL 文档入口补充", "refresh_doc_source_entries_from_dl_auto.py", [], True),
+    ("CMC 文档入口补充", "refresh_doc_source_entries_from_cmc_auto.py", [], False),
+    ("CG 文档入口补充", "refresh_doc_source_entries_from_cg_auto.py", [], False),
+    ("DL 文档入口补充", "refresh_doc_source_entries_from_dl_auto.py", [], False),
     # 注：双源文档入口补充（supplement_doc_entries_dual_auto.py）已从每日同步移除——
     # 其候选查询对 doc_source_entry 的反连接走全表扫描（1.8GB），导致每日同步卡死
     # （详见 复验结论_data_sync_daily执行情况_2026-08-27.md，task 4221708 卡在 Round 89/200）。
 
     # ─── 第三方数据层 ───
-    ("第三方评级/审计回填", "phase_b2_third_party_auto.py", [], True),
-    ("TGE/融资轮次采集", "phase_b2_third_party_raises_auto.py", [], True),
+    ("第三方评级/审计回填", "phase_b2_third_party_auto.py", [], False),
+    ("TGE/融资轮次采集", "phase_b2_third_party_raises_auto.py", [], False),
 
     # ─── 行情/市值层 ───
-    ("主表 supply/市值对齐 CMC", "sync_core_supply_from_cmc.py", ["--sync"], False),
-    ("CMC 分类聚合", "ingest_cmc_category.py", [], True),
+    ("主表 supply/市值对齐 CMC", "sync_core_supply_from_cmc.py", ["--sync"], True),
+    ("CMC 分类聚合", "ingest_cmc_category.py", [], False),
 
     # ─── 信号层 ───
-    ("每日 diff 变化榜", "daily_diff_generator.py", [], True),
+    ("每日 diff 变化榜", "daily_diff_generator.py", [], False),
 
     # ─── 链接分类矫正 ───
     ("链接分类重标 (GitHub/白皮书)", "backfill_classify_links.py",
-     ["--relabel-entry-types", "--upgrade-whitepaper"], True),
+     ["--relabel-entry-types", "--upgrade-whitepaper"], False),
 
     # ─── 解锁层 ───
-    ("解锁事件 JSON→结构化同步", "sync_unlock_events_from_json.py", [], True),
+    ("解锁事件 JSON→结构化同步", "sync_unlock_events_from_json.py", [], False),
 
     # ─── KOL 层 ───
-    ("KOL 信号回测", "kol_backtest_batch.py", [], True),
+    ("KOL 信号回测", "kol_backtest_batch.py", [], False),
 ]
 
 
@@ -80,43 +89,49 @@ def run_task(name: str, script: str, args: list[str]) -> int:
         result = subprocess.run(cmd, cwd=str(SCRIPTS_DIR.parent))
         rc = result.returncode
         if rc == 0:
-            print(f"✅ {name} 完成")
+            print(f"[OK] {name} 完成")
         else:
-            print(f"❌ {name} 失败 (exit={rc})")
+            print(f"[FAIL] {name} 失败 (exit={rc})")
         return rc
     except Exception as e:
-        print(f"❌ {name} 异常: {e}")
+        print(f"[FAIL] {name} 异常: {e}")
         return 1
 
 
 def main() -> int:
     print("=" * 60)
     print("每日数据同步/矫正总调度")
-    print(f"共 {len(TASKS)} 个子任务")
+    print(f"共 {len(TASKS)} 个子任务（相互隔离：任一失败不中止其余）")
     print("=" * 60)
 
     success = 0
     failed = 0
     failed_names = []
+    critical_failed = []
 
-    for name, script, args, continue_on_fail in TASKS:
+    for name, script, args, critical in TASKS:
         rc = run_task(name, script, args)
         if rc == 0:
             success += 1
-        else:
-            failed += 1
-            failed_names.append(name)
-            if not continue_on_fail:
-                print(f"\n⛔ 关键任务 [{name}] 失败，终止后续任务")
-                break
+            continue
+        failed += 1
+        failed_names.append(name)
+        if critical:
+            critical_failed.append(name)
+        # 不 break：子任务相互隔离，继续执行其余任务（2026-09-28）
 
     print(f"\n{'='*60}")
     print(f"全部完成：成功 {success} / 失败 {failed} / 共 {len(TASKS)}")
     if failed_names:
         print(f"失败任务：{', '.join(failed_names)}")
+    if critical_failed:
+        print(f"⚠️ 关键任务失败（不影响其余子任务已执行，但需关注）：{', '.join(critical_failed)}")
     print(f"{'='*60}")
 
-    return 1 if failed > 0 else 0
+    # 退出码：仅「关键任务失败」时非 0（保持关键路径失败可见）；非关键任务失败只记录、
+    # 不拖累整体状态，避免单个易抖子任务（外部 API 限频等）把整条日同步长期钉成 failed。
+    # 注意：全部任务失败时，其中的关键任务必然失败 ⇒ 仍返回 1（系统性故障信号）。
+    return 1 if critical_failed else 0
 
 
 if __name__ == "__main__":

@@ -154,9 +154,9 @@ check(_SRC.count("_run(cur,") + _SRC.count("_run(\n") >= 5 or "_run(" in _SRC,
 
 
 # ════════════════════════════════════════════════════════════
-# 5. 编排降级：去重不再关键，其余关键项未被误伤
+# 5. 编排隔离：任一子任务失败都不中止其余
 # ════════════════════════════════════════════════════════════
-print("\n【测试5】data_sync_daily 关键任务面（只降级去重）")
+print("\n【测试5】data_sync_daily 子任务隔离（结构面）")
 _tree = ast.parse(_ORCH)
 _tasks = None
 for _n in _tree.body:
@@ -165,13 +165,72 @@ for _n in _tree.body:
         _tasks = ast.literal_eval(_n.value)
 check(isinstance(_tasks, list) and len(_tasks) > 0, "TASKS 可枚举（守卫非空转）")
 _by_name = {t[0]: t for t in (_tasks or [])}
+check(all(len(t) == 4 for t in (_tasks or [])), "四元组 (name, script, args, critical)")
 check(_by_name.get("资产同名去重", [None] * 4)[3] is True,
-      "「资产同名去重」continue_on_fail=True（失败不再中止后续子任务）",
-      str(_by_name.get("资产同名去重")))
-check(_by_name.get("赛道分类刷新", [None] * 4)[3] is False,
-      "「赛道分类刷新」仍为关键（未被误伤）")
-check(_by_name.get("主表 supply/市值对齐 CMC", [None] * 4)[3] is False,
-      "「主表 supply/市值对齐 CMC」仍为关键（未被误伤）")
+      "「资产同名去重」critical=True", str(_by_name.get("资产同名去重")))
+check(_by_name.get("赛道分类刷新", [None] * 4)[3] is True,
+      "「赛道分类刷新」critical=True")
+check(_by_name.get("主表 supply/市值对齐 CMC", [None] * 4)[3] is True,
+      "「主表 supply/市值对齐 CMC」critical=True")
+check(_by_name.get("KOL 信号回测", [None] * 4)[3] is False,
+      "非关键任务（KOL 回测）critical=False")
+import re  # noqa: E402
+check("not continue_on_fail" not in _ORCH
+      and not re.search(r"^\s*break\s*$", _ORCH, re.M),
+      "已移除「失败即 break 中止」的分支（真 break 语句，非注释）")
+check("⛔" not in _ORCH and "终止后续任务" not in _ORCH,
+      "不再输出「关键任务失败，终止后续任务」")
+check("return 1 if critical_failed else 0" in _ORCH,
+      "退出码只取决于「关键任务失败」")
+
+
+# ════════════════════════════════════════════════════════════
+# 6. 编排隔离：行为面（monkeypatch run_task，验证失败后仍跑完全部）
+# ════════════════════════════════════════════════════════════
+print("\n【测试6】子任务隔离（行为）：失败不中止其余 + 退出码语义")
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import run_data_sync_daily as orch  # noqa: E402  （模块级不连库）
+
+
+def _run_orch(tasks, fail_names):
+    calls = []
+    orch.TASKS = tasks
+
+    def fake(name, script, args):
+        calls.append(name)
+        return 1 if name in fail_names else 0
+
+    orig = orch.run_task
+    orch.run_task = fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = orch.main()
+    finally:
+        orch.run_task = orig
+    return calls, rc
+
+
+_calls, _rc = _run_orch(
+    [("A", "a.py", [], True), ("B", "b.py", [], False), ("C", "c.py", [], False)],
+    {"A"})
+check(_calls == ["A", "B", "C"], "关键任务 A 失败后，B/C 仍被执行（不再中止）", str(_calls))
+check(_rc == 1, "关键任务失败 ⇒ 退出码 1（保持失败可见）", str(_rc))
+
+_calls2, _rc2 = _run_orch(
+    [("A", "a.py", [], False), ("B", "b.py", [], False)], {"A", "B"})
+check(_calls2 == ["A", "B"], "非关键任务失败也跑完其余", str(_calls2))
+check(_rc2 == 0, "非关键任务全失败 ⇒ 退出码 0（不拖累整体状态）", str(_rc2))
+
+_calls3, _rc3 = _run_orch(
+    [("A", "a.py", [], True), ("B", "b.py", [], True), ("C", "c.py", [], True)],
+    {"A", "B", "C"})
+check(len(_calls3) == 3, "全部失败仍逐个执行（无提前退出）")
+check(_rc3 == 1, "全部失败（含关键任务）⇒ 退出码 1（系统性故障信号）", str(_rc3))
+
+_calls4, _rc4 = _run_orch(
+    [("A", "a.py", [], True), ("B", "b.py", [], True)], {"B"})
+check(_calls4 == ["A", "B"] and _rc4 == 1, "中间关键任务失败：后续仍执行且退出码非 0")
 
 
 # ════════════════════════════════════════════════════════════

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>链上异动告警 · On-Chain Alert</title>
+<style>
+  :root {
+    --bg: #0c0f17;
+    --panel: #141925;
+    --panel-2: #1b2230;
+    --border: #263041;
+    --text: #e6edf6;
+    --muted: #8a97ab;
+    --accent: #4f8cff;
+    --inflow: #f59e0b;   /* 转入交易所（潜在抛压） */
+    --outflow: #10b981;  /* 从交易所转出（提币） */
+    --danger: #ff5b6e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: linear-gradient(180deg, #121826, #0c0f17);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  header h1 .sub { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+
+  .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+  .filters select, .filters input {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; font-size: 12px; outline: none;
+  }
+  .filters input { width: 120px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    background: var(--panel-2); color: var(--muted); border: none; padding: 6px 11px;
+    cursor: pointer; font-size: 12px;
+  }
+  .seg button.active { background: var(--accent); color: #fff; }
+  .btn-refresh {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+  }
+  .btn-refresh:hover { border-color: var(--accent); }
+
+  .summary { display: flex; gap: 12px; padding: 14px 20px 0; flex-wrap: wrap; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 16px; min-width: 150px;
+  }
+  .card .k { color: var(--muted); font-size: 11px; }
+  .card .v { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .card.inflow .v { color: var(--inflow); }
+  .card.outflow .v { color: var(--outflow); }
+
+  .layout { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px 20px 40px; }
+  @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden;
+  }
+  .panel h2 {
+    font-size: 13px; margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px; color: var(--muted);
+  }
+  .panel h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--outflow);
+    box-shadow: 0 0 8px var(--outflow); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  tbody tr:hover { background: var(--panel-2); }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+  .badge.inflow { background: rgba(245,158,11,.15); color: var(--inflow); }
+  .badge.outflow { background: rgba(16,185,129,.15); color: var(--outflow); }
+  .badge.internal { background: rgba(79,140,255,.15); color: var(--accent); }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* 柱图 */
+  .chart { padding: 14px; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 160px; }
+  .bars .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; }
+  .bars .bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 1px; }
+  .bars .bar.in { background: var(--inflow); }
+  .bars .bar.out { background: var(--outflow); }
+  .legend { display: flex; gap: 16px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; margin-top: 6px; }
+
+  .empty { padding: 30px; text-align: center; color: var(--muted); }
+  .err { padding: 20px; color: var(--danger); }
+  .updated { color: var(--muted); font-size: 11px; padding: 0 20px 10px; }
+  .loading { opacity: .5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>链上异动告警 <span class="sub">On-Chain Alert · 大额转账实时流</span></h1>
+  <div class="filters">
+    <select id="f-chain"><option value="">全部链</option></select>
+    <select id="f-exchange"><option value="">全部交易所</option></select>
+    <div class="seg" id="f-dir">
+      <button data-v="all" class="active">全部</button>
+      <button data-v="inflow">流入</button>
+      <button data-v="outflow">流出</button>
+    </div>
+    <input id="f-symbol" placeholder="代币符号…" />
+    <select id="f-hours">
+      <option value="1">近 1h</option>
+      <option value="6">近 6h</option>
+      <option value="24" selected>近 24h</option>
+      <option value="72">近 72h</option>
+      <option value="168">近 7d</option>
+    </select>
+    <button class="btn-refresh" id="btn-refresh">刷新</button>
+  </div>
+</header>
+
+<div class="summary" id="summary"></div>
+<div class="updated" id="updated"></div>
+
+<div class="layout">
+  <div class="panel">
+    <h2><span class="dot"></span> 大额转账流 <span id="feed-count" style="margin-left:auto;color:var(--muted)"></span></h2>
+    <div id="feed">
+      <div class="empty">加载中…</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" style="margin-bottom:16px;">
+      <h2>24h 流入 / 流出（按小时）</h2>
+      <div class="chart">
+        <div class="bars" id="bars"></div>
+        <div class="legend">
+          <span><i style="background:var(--inflow)"></i>流入（转入交易所）</span>
+          <span><i style="background:var(--outflow)"></i>流出（提币离场）</span>
+        </div>
+        <div class="axis"><span>24h 前</span><span>现在</span></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>交易所榜单（按窗口美元量）</h2>
+      <div id="lb"><div class="empty">—</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let timer = null;
+
+function fmtUsd(v) {
+  if (v == null) return "—";
+  const a = Math.abs(v);
+  if (a >= 1e9) return "$" + (v / 1e9).toFixed(2) + "B";
+  if (a >= 1e6) return "$" + (v / 1e6).toFixed(2) + "M";
+  if (a >= 1e3) return "$" + (v / 1e3).toFixed(1) + "K";
+  return "$" + v.toFixed(0);
+}
+function fmtNum(v) {
+  if (v == null) return "—";
+  return v.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function getFilters() {
+  return {
+    hours: $("#f-hours").value,
+    chain: $("#f-chain").value,
+    exchange: $("#f-exchange").value,
+    direction: $("#f-dir .active").dataset.v,
+    symbol: $("#f-symbol").value.trim(),
+  };
+}
+
+async function loadMeta() {
+  try {
+    const r = await fetch("/api/onchain-alert/meta");
+    const j = await r.json();
+    if (!j.ok) return;
+    const fc = $("#f-chain");
+    j.chains.forEach(c => { const o = document.createElement("option"); o.value = c; o.textContent = c; fc.appendChild(o); });
+    const fe = $("#f-exchange");
+    j.exchanges.forEach(e => { const o = document.createElement("option"); o.value = e; o.textContent = e; fe.appendChild(o); });
+  } catch (e) { /* 忽略，下拉留空也能用 */ }
+}
+
+async function load() {
+  const f = getFilters();
+  const qs = new URLSearchParams(f).toString();
+  const feed = $("#feed");
+  feed.classList.add("loading");
+  try {
+    const r = await fetch("/api/onchain-alert/stream?" + qs);
+    const j = await r.json();
+    if (!j.ok) { feed.innerHTML = '<div class="err">接口错误：' + esc(j.error) + '</div>'; return; }
+
+    // 总览卡
+    const s = j.summary;
+    $("#summary").innerHTML = `
+      <div class="card"><div class="k">窗口笔数</div><div class="v">${s.total_count}</div></div>
+      <div class="card inflow"><div class="k">流入总额（转入交易所）</div><div class="v">${fmtUsd(s.inflow_usd)}</div></div>
+      <div class="card outflow"><div class="k">流出总额（提币离场）</div><div class="v">${fmtUsd(s.outflow_usd)}</div></div>
+      <div class="card"><div class="k">净流入（流出-流入）</div><div class="v">${fmtUsd(s.outflow_usd - s.inflow_usd)}</div></div>`;
+
+    // 转账流
+    $("#feed-count").textContent = "共 " + j.transfers.length + " 条";
+    if (!j.transfers.length) {
+      feed.innerHTML = '<div class="empty">当前筛选下无大额转账记录</div>';
+    } else {
+      let rows = j.transfers.map(t => {
+        const dirCls = t.direction;
+        const dirTxt = t.direction === "inflow" ? "流入" : t.direction === "outflow" ? "流出" : "内部";
+        const tx = t.explorer_url ? `<a href="${esc(t.explorer_url)}" target="_blank" class="mono">${esc((t.tx_hash||"").slice(0,10))}…</a>` : '<span class="mono">' + esc((t.tx_hash||"").slice(0,10)) + '…</span>';
+        return `<tr>
+          <td class="mono">${esc((t.block_timestamp||"").replace("T"," ").slice(0,16))}</td>
+          <td><b>${esc(t.symbol)}</b> <span class="mono" style="color:var(--muted)">${esc(t.chain_disp)}</span></td>
+          <td>${esc(t.exchange || "—")}</td>
+          <td><span class="badge ${dirCls}">${dirTxt}</span></td>
+          <td class="num">${fmtNum(t.value)}</td>
+          <td class="num">${fmtUsd(t.value_usd)}</td>
+          <td>${tx}</td>
+        </tr>`;
+      }).join("");
+      feed.innerHTML = `<table><thead><tr>
+        <th>时间</th><th>代币 / 链</th><th>交易所</th><th>方向</th><th>数量</th><th>美元价值</th><th>交易</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    // 柱图
+    const maxV = Math.max(1, ...j.hourly.map(h => Math.max(h.inflow_usd, h.outflow_usd)));
+    $("#bars").innerHTML = j.hourly.map(h => {
+      const ih = Math.round(h.inflow_usd / maxV * 100);
+      const oh = Math.round(h.outflow_usd / maxV * 100);
+      return `<div class="col" title="流入 ${fmtUsd(h.inflow_usd)} / 流出 ${fmtUsd(h.outflow_usd)}">
+        <div class="bar out" style="height:${oh}%"></div>
+        <div class="bar in" style="height:${ih}%"></div>
+      </div>`;
+    }).join("");
+
+    // 榜单
+    if (!j.exchanges.length) {
+      $("#lb").innerHTML = '<div class="empty">—</div>';
+    } else {
+      let lr = j.exchanges.map(e => `<tr>
+        <td><b>${esc(e.exchange)}</b></td>
+        <td class="num" style="color:var(--inflow)">${fmtUsd(e.inflow_usd)}</td>
+        <td class="num" style="color:var(--outflow)">${fmtUsd(e.outflow_usd)}</td>
+        <td class="num">${e.count}</td>
+      </tr>`).join("");
+      $("#lb").innerHTML = `<table><thead><tr><th>交易所</th><th>流入</th><th>流出</th><th>笔数</th></tr></thead><tbody>${lr}</tbody></table>`;
+    }
+
+    $("#updated").textContent = "更新于 " + new Date().toLocaleTimeString() + " · 数据窗口 " + f.hours + "h";
+  } catch (e) {
+    feed.innerHTML = '<div class="err">请求失败：' + esc(e.message) + '</div>';
+  } finally {
+    feed.classList.remove("loading");
+  }
+}
+
+// 事件
+$("#btn-refresh").onclick = load;
+$("#f-hours").onchange = load;
+$("#f-chain").onchange = load;
+$("#f-exchange").onchange = load;
+$("#f-symbol").oninput = debounce(load, 400);
+document.querySelectorAll("#f-dir button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#f-dir button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active"); load();
+});
+function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
+
+// 初始化
+loadMeta();
+load();
+timer = setInterval(load, 45000);
+</script>
+</body>
+</html>

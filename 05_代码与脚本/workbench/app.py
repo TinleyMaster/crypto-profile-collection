@@ -59,6 +59,14 @@ try:
 except Exception as _e:
     print(f"[WARN] catalyst blueprint 挂载失败，催化剂板块将不可用: {_e}")
 
+# 链上异动告警模块（CoinGlass On-Chain Alert 风格：跨资产大额转账流 + 24h 统计）
+try:
+    from onchain_alert import onchain_alert_bp  # noqa: E402
+    app.register_blueprint(onchain_alert_bp)
+    print("[OK] onchain_alert blueprint 已挂载：/onchain-alert")
+except Exception as _e:
+    print(f"[WARN] onchain_alert blueprint 挂载失败: {_e}")
+
 # 解锁数据异步拉取状态（已迁移到 task_manager 的 TaskManager，走 sys.task 表）。
 # 以下为遗留死代码，仅作注释保留供参考。
 # 原 key 格式: f"{asset_id}:{force}"

@@ -2811,12 +2811,17 @@ _EXEMPT_ALLOW_HIGH: set = {
 
 
 def _exempt_no_high(signal_type: str) -> bool:
-    """豁免类是否应封顶 MED（白名单内除外）。
+    """未回测/未校准类是否应封顶 MED（白名单内除外）。
 
     用 `_calibration_status` 判定而非直接查集合，保证「卡片角标（C2）显示的状态」
     与「是否封顶」同源、不会打架：角标显示「未校准/未回测」的卡不可能出现在 HIGH。
-    注意这只覆盖 exempt_*（表中有行且 gate 以 exempt_ 开头）；missing（表里完全没这条）
-    仍按原逻辑处理，不在本单范围内。
+
+    覆盖两类（2026-09-29 复验 N2 扩展）：
+      - `exempt_*`：表中有行但属豁免集合（聚合/非可交易 target），从未被回测；
+      - `missing_calibration`：表里压根没这条（未进入回测校准表）。
+    两者都无回测背书，均按「未回测不进 HIGH」封顶 MED，否则该原则对新类型形同虚设
+    （实测 09-29 三条 HIGH 全来自不在表内的 price_surge/crash/pvs）。
+    白名单 `exempt_allow_high`（当前空）可显式放行并须注明理由。
     """
     if not signal_type:
         return False
@@ -2824,7 +2829,8 @@ def _exempt_no_high(signal_type: str) -> bool:
     if st in _EXEMPT_ALLOW_HIGH:
         return False
     cs = _calibration_status(st)
-    return str(cs.get("gate") or "").startswith("exempt_")
+    gate = str(cs.get("gate") or "")
+    return gate.startswith("exempt_") or gate == "missing_calibration"
 
 
 # P1-1 叙事/链榜配置（从 yaml 覆盖）
@@ -3325,10 +3331,17 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
     if tier == "HIGH" and _exempt_no_high(st):
         tier = "MED"
         _demoted_exempt = True
-        opp["tier_demote_reason"] = (
-            f"exempt_unbacktested：该类型（{_calibration_status(st).get('gate')}）从未被回测，"
-            "默认封顶 MED（如需进 HIGH，请在 market_rules.yaml 的 exempt_allow_high 显式列入并注明理由）"
-        )
+        _gate = str(_calibration_status(st).get("gate") or "")
+        if _gate == "missing_calibration":
+            opp["tier_demote_reason"] = (
+                f"missing_calibration：该类型（{st}）未进入回测校准表（未校准、无回测背书），"
+                "默认封顶 MED（如需进 HIGH，须先产出回测背书）"
+            )
+        else:
+            opp["tier_demote_reason"] = (
+                f"exempt_unbacktested：该类型（{_gate}）从未被回测，"
+                "默认封顶 MED（如需进 HIGH，请在 market_rules.yaml 的 exempt_allow_high 显式列入并注明理由）"
+            )
     if cal and cal["no_high"]:
         if tier == "HIGH":
             tier = "MED"
@@ -9079,26 +9092,41 @@ def _unify_sector_metric(opps: list | None, ssot: dict) -> int:
     return n
 
 
-def _brief_top_opportunities(opps: list, top_n: int = 3, label: str = "") -> list:
+def _brief_top_opportunities(opps: list, top_n: int = 3, label: str = ""):
     """早报清单兜底：HIGH ∪ 池内 conv 前 top_n（M2-A2/A3，2026-09-28）。
 
     背景：C1（未回测不进 HIGH）+ 降档规则上线后，09-28 高亮 10 条 0 HIGH ⇒ 早报
     `M8_opportunities` 整段空窗。判据由「仅 HIGH」放宽为「HIGH ∪ 池内 conv 前 top_n」，
-    让机会段不再因降档规则而空。兜底项**就地**打 `display_demoted=True` + `display_note`，
-    供渲染层强制标注「非高确定性」，绝不让未回测/降档项伪装成高确定性。
+    让机会段不再因降档规则而空。
+
+    返回 `(items, fallback_src_ids)`：
+      - `items` = HIGH 原对象 + 兜底项的**深拷贝**（打 `display_demoted`/`display_note`）。
+        用深拷贝是为避免污染同一 dict 对象的高亮卡（N3：`highlight_signals` 与
+        `opportunities` 共享对象，就地打标会让高亮区也出现「降档说明」）。
+      - `fallback_src_ids` = 兜底项对应的**原始对象 id**，供调用方从 `M8_watchlist`
+        中剔除（否则原对象仍在 watchlist，与兜底副本重复）。
+
+    文案（复验 N1）：HIGH 充足时不得说「当日 HIGH 不足」——
+    有 HIGH 用「池内分数靠前（非 HIGH）」，无 HIGH 才用调用方传入的「…HIGH 不足」措辞。
     """
+    import copy as _copy
+
     high = [o for o in opps if str(o.get("conviction_tier") or "").upper() == "HIGH"]
     rest = [o for o in opps if str(o.get("conviction_tier") or "").upper() != "HIGH"]
     rest.sort(key=lambda o: o.get("conviction_score") or 0, reverse=True)
-    fallback = rest[:max(0, int(top_n))]
-    for o in fallback:
-        o["display_demoted"] = True
-        if not o.get("display_note"):
-            reason = str(o.get("tier_demote_reason") or "").strip()
-            base = label or "非高确定性档"
-            o["display_note"] = (f"{base}，按池内分数展示（降档原因：{reason}）"
-                                 if reason else f"{base}，按池内分数展示")
-    return high + fallback
+    fallback_src = rest[:max(0, int(top_n))]
+    prefix = (label or "非高确定性档") if not high else "池内分数靠前（非 HIGH）"
+    out = list(high)
+    src_ids: list[int] = []
+    for src in fallback_src:
+        src_ids.append(id(src))
+        c = _copy.deepcopy(src)
+        reason = str(c.get("tier_demote_reason") or "").strip()
+        c["display_demoted"] = True
+        c["display_note"] = (f"{prefix}，按池内分数展示（降档原因：{reason}）"
+                             if reason else f"{prefix}，按池内分数展示")
+        out.append(c)
+    return out, src_ids
 
 
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
@@ -9216,10 +9244,12 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
 
     # ── M2-A2/A3（2026-09-28）：早报机会/高危段兜底，避免降档规则使 HIGH=0 时空窗 ──
     # HIGH ∪ 池内 conv 前 3；兜底项打 display_demoted/display_note，渲染层强制标注。
-    _m8_opportunities = _brief_top_opportunities(opps, 3, label="非高确定性档（当日 HIGH 不足）")
-    _m8_keep_ids = {id(o) for o in _m8_opportunities}
+    _m8_opportunities, _m8_fallback_src_ids = _brief_top_opportunities(
+        opps, 3, label="非高确定性档（当日 HIGH 不足）")
+    _m8_keep_ids = {id(o) for o in _m8_opportunities} | set(_m8_fallback_src_ids)
     _m8_watchlist = [o for o in opps if id(o) not in _m8_keep_ids]
-    _m4_risks = _brief_top_opportunities(risk_signals, 3, label="非高确定性档（当日高危 HIGH 不足）")
+    _m4_risks, _ = _brief_top_opportunities(
+        risk_signals, 3, label="非高确定性档（当日高危 HIGH 不足）")
 
     # ── M4-3 同赛道唯一事实源：叙事机会的「市值 +X%」统一到赛道 ETL 口径 ──
     _sector_ssot = _sector_ssot_map(sector_flow)

@@ -10,7 +10,7 @@
   回测侧  D1  批量取价 SQL 口径（DISTINCT ON 同 symbol 取 asset_id 最小 + 排除包装/桥接币）
   回测侧  门控  _gate_for 六种分支（豁免×2 / preliminary / calibrated_low / calibrated_ok）
   回测侧  落表  ON CONFLICT 键 = (signal_type, horizon_days, window_end)，skipped 计数入库
-  macro 侧 无校准 → 行为与上线前一致（HIGH 保留）
+  macro 侧 无校准（missing_calibration）→ 同口径**封顶 MED**（N2：未回测不进 HIGH）
   macro 侧  calibrated_low/preliminary → 分数×0.6、档位封顶 MED、卡片保留（不判 LOW）
   macro 侧  保卡下限：衰减后仍不低于 med_min（防整类被删）
   macro 侧  豁免（exempt_*）→ 不衰减，但**默认封顶 MED**（C1：未回测 = 无背书，白名单内除外）
@@ -154,13 +154,15 @@ check("UNIQUE (signal_type, horizon_days, window_end)" in _MSQL,
       "迁移 DDL 唯一键与 ON CONFLICT 一致")
 
 
-# ═══════════════ macro 侧：无校准 = 与上线前一致 ═══════════════
-print("[macro] 无校准 → 行为与上线前完全一致")
-hi, hi_exc, hi_opps = _push(95, "etf_flow")          # etf_flow 无校准条目
-check(hi["conviction_tier"] == "HIGH" and hi["confidence"] == "high",
-      f"无校准 → raw 95 仍 HIGH/high（实得 {hi['conviction_tier']}）")
-check("calibration" not in hi and "calibration_note" not in hi and "tier_demote_reason" not in hi,
-      "无校准 → 不写 calibration 字段（不污染卡片）")
+# ═══════════════ macro 侧：未校准（missing_calibration）→ 同口径封顶 MED（N2） ═══════════════
+print("[macro] 无校准 → missing_calibration 同口径封顶 MED（2026-09-29 N2）")
+hi, hi_exc, hi_opps = _push(95, "etf_flow")          # 空校准表 ⇒ missing_calibration
+check(hi["conviction_tier"] == "MED" and hi["confidence"] == "medium",
+      f"无校准 → raw 95 封顶 MED/medium（实得 {hi['conviction_tier']}）")
+check("missing_calibration" in (hi.get("tier_demote_reason") or ""),
+      "无校准 → 写明 missing_calibration 降档原因")
+check("calibration" not in hi and "calibration_note" not in hi,
+      "无校准 → 不写 calibration 衰减字段（不污染卡片；calibration_status 另计）")
 
 check(mm._signal_type_calibration("nonexistent_type") is None, "未登记类型返回 None")
 mm._SIGNAL_TYPE_CALIBRATION.clear()

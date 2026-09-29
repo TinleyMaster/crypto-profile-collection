@@ -231,6 +231,24 @@ def card_sort_key(item: tuple[dict, str]) -> tuple:
     return (is_high, is_new, score, _safe_float(card.get("event_strength")))
 
 
+def build_pool_items(highlights: list[dict], granted_kinds: dict,
+                     max_cards: int | None = None) -> list[tuple[dict, str]]:
+    """组装邮件正文的「当前高亮池」（池同步显示，2026-09-28）。
+
+    - 本轮获准发送的卡（`granted_kinds[card_key]` 存在）保留其 new/upgrade 徽章；
+    - 其余在池卡标 ALERT_HOLD（📌 在池），使读者每次都能看到池内全集，
+      退出/降级卡因不在池中自然消失（不发退场邮件）。
+    - 按 card_sort_key 排序（HIGH/新增优先），可选截断 max_cards。
+
+    抽为纯函数以便离线行为断言（复验 `cae0431` M5：正文退回只渲染增量曾逃逸）。
+    """
+    items = [(c, granted_kinds.get(card_key(c)) or ALERT_HOLD) for c in highlights]
+    items.sort(key=card_sort_key, reverse=True)
+    if max_cards:
+        return items[:max_cards]
+    return items
+
+
 # =====================================================================
 # 渲染
 # =====================================================================
@@ -613,9 +631,8 @@ def main() -> int:
         if args.dry_run:
             # 与高亮池同步显示：正文给「当前池全集」，本轮新增/升级标徽章，其余「在池」
             _kinds = {card_key(c): k for c, k in candidates}
-            _pool = [(c, _kinds.get(card_key(c)) or ALERT_HOLD) for c in highlights]
-            _pool.sort(key=card_sort_key, reverse=True)
-            print(render_html(_pool[:args.max_cards], actual_date, len(highlights)))
+            print(render_html(build_pool_items(highlights, _kinds, args.max_cards),
+                              actual_date, len(highlights)))
             return 0
 
         subject = (f"⚡ 高亮信号提醒（新增 "
@@ -630,9 +647,7 @@ def main() -> int:
 
     # ── 阶段 2：渲染 + 发送（正文同步展示当前高亮池全集）──
     _granted_kinds = {card_key(c): k for c, k in granted}
-    pool_items = [(c, _granted_kinds.get(card_key(c)) or ALERT_HOLD) for c in highlights]
-    pool_items.sort(key=card_sort_key, reverse=True)
-    pool_items = pool_items[:args.max_cards]
+    pool_items = build_pool_items(highlights, _granted_kinds, args.max_cards)
     html = render_html(pool_items, actual_date, len(highlights))
     cards = [c for c, _ in pool_items]
     n_new = sum(1 for _, k in pool_items if k == ALERT_NEW)

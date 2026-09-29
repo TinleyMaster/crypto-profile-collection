@@ -47,17 +47,18 @@ def _opp(tgt, score, tier="MED", **kw):
     return d
 
 
-# ── A2：_brief_top_opportunities ──
+# ── A2：_brief_top_opportunities（返回 (items, fallback_src_ids)） ──
 print("[A2] _brief_top_opportunities")
 _opps = [_opp("A", 78), _opp("B", 76), _opp("C", 70), _opp("D", 65), _opp("E", 60)]
-_out = mm._brief_top_opportunities(_opps, 3)
+_out, _src = mm._brief_top_opportunities(_opps, 3, label="非高确定性档（当日 HIGH 不足）")
 check([o["target"] for o in _out] == ["A", "B", "C"], "0 HIGH → 取池内 conv 前 3（不空窗）")
 check(all(o.get("display_demoted") is True for o in _out), "兜底项全部打 display_demoted")
 check(all(o.get("display_note") for o in _out), "兜底项全部带 display_note（强制标注）")
+check(_src == [id(_opps[0]), id(_opps[1]), id(_opps[2])], "返回兜底项原始 id 供 watchlist 剔除")
 
 _opps2 = [_opp("H1", 66, tier="HIGH"), _opp("H2", 64, tier="HIGH"),
           _opp("A", 78), _opp("B", 76), _opp("C", 70), _opp("D", 65)]
-_out2 = mm._brief_top_opportunities(_opps2, 3)
+_out2, _src2 = mm._brief_top_opportunities(_opps2, 3)
 check([o["target"] for o in _out2] == ["H1", "H2", "A", "B", "C"],
       "HIGH 全保留 + 池内 conv 前 3 兜底", str([o["target"] for o in _out2]))
 _map = {o["target"]: o for o in _out2}
@@ -65,21 +66,49 @@ check(not _map["H1"].get("display_demoted") and not _map["H2"].get("display_demo
       "HIGH 项不打降档标记")
 check(_map["A"].get("display_demoted") is True, "兜底项打降档标记")
 
-check(mm._brief_top_opportunities([], 3) == [], "空池 → []")
+check(mm._brief_top_opportunities([], 3)[0] == [], "空池 → []")
 # 兜底项携带 tier_demote_reason 时进入 display_note
-_r = mm._brief_top_opportunities([_opp("X", 75, tier_demote_reason="exempt_unbacktested：未回测")], 3)
+_r, _ = mm._brief_top_opportunities([_opp("X", 75, tier_demote_reason="exempt_unbacktested：未回测")], 3)
 check("exempt_unbacktested" in _r[0]["display_note"], "降档原因写入 display_note",
       _r[0]["display_note"])
+
+# N1：HIGH 充足时文案不得说「当日 HIGH 不足」
+check("HIGH 不足" in _out[0]["display_note"], "无 HIGH 时用「当日 HIGH 不足」措辞")
+check("池内分数靠前（非 HIGH）" in _map["A"]["display_note"]
+      and "HIGH 不足" not in _map["A"]["display_note"],
+      "有 HIGH 时改用「池内分数靠前（非 HIGH）」（N1 文案不说谎）", _map["A"]["display_note"])
+
+# N3：兜底项是深拷贝，不污染原始（高亮卡）对象
+_orig3 = [_opp("Y", 77)]
+_orig3[0]["display_demoted"] = False
+_c3, _ = mm._brief_top_opportunities(_orig3, 3)
+check(_orig3[0].get("display_demoted") is False and "display_note" not in _orig3[0],
+      "N3 兜底打标不污染原始对象（deepcopy）")
+check(_c3[-1]["display_demoted"] is True, "副本被正确打标")
+
+# ── N2：missing_calibration 与 exempt_* 同口径封顶 ──
+print("[N2] missing_calibration 封顶")
+mm._SIGNAL_TYPE_CALIBRATION.clear()
+mm._SIGNAL_TYPE_CALIBRATION["catalyst"] = {
+    "gate": "calibrated_ok", "sample_count": 45, "hit_rate": 0.78,
+    "weight_factor": 1.0, "no_high": False, "window_end": "2026-09-25"}
+mm._CALIB_LOADED_AT = float("inf")   # 离线：不触 DB
+check(mm._exempt_no_high("price_surge") is True,
+      "N2 未入表类型（missing_calibration）封顶 MED")
+check(mm._exempt_no_high("narrative") is True, "N2 exempt_* 仍封顶")
+check(mm._exempt_no_high("catalyst") is False, "N2 calibrated_ok 不封顶（回测背书通过）")
 
 # ── A2/A3：macro_market brief 接线（源码守卫）──
 print("[A2/A3] macro_market 接线")
 _mm_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
 check("def _brief_top_opportunities(" in _mm_src, "helper 已定义")
-check('_brief_top_opportunities(opps, 3' in _mm_src, "M8_opportunities 用 HIGH ∪ 前 3")
-check('_brief_top_opportunities(risk_signals, 3' in _mm_src, "M4_risks 高危侧同口径对称")
+check("_brief_top_opportunities(" in _mm_src and "opps, 3, label=" in _mm_src,
+      "M8_opportunities 用 HIGH ∪ 前 3")
+check("risk_signals, 3, label=" in _mm_src, "M4_risks 高危侧同口径对称")
 check('"M8_opportunities": _m8_opportunities' in _mm_src, "brief 使用 _m8_opportunities")
 check('"M8_watchlist": _m8_watchlist' in _mm_src, "brief 使用 _m8_watchlist（剔除兜底项，避免重复）")
 check('"M4_risks": _m4_risks' in _mm_src, "brief 使用 _m4_risks")
+check('gate == "missing_calibration"' in _mm_src, "N2 源码含 missing_calibration 同口径判定")
 
 # ── A1：早报渲染消费降档说明 ──
 print("[A1] 早报渲染消费降档说明")

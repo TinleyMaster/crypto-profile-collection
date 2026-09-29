@@ -28,9 +28,14 @@ import ai_signal_analyzer as aia     # noqa: E402
 import yaml                          # noqa: E402
 
 # 刀2（2026-09-26）：_push_opportunity 现会惰性读 biz.signal_type_calibration。
-# 本测试须保持「纯离线」，故钉死为「无校准」基准（TTL 判定永不触发加载）；
+# 本测试须保持「纯离线」，故钉死校准表（TTL 判定永不触发加载）；
 # 校准消费路径由 test_signal_type_calibration_20260926.py 单独覆盖。
+# N2（2026-09-29）：missing_calibration 现与 exempt_* 同口径封顶 MED，故本测试把
+# 使用的 catalyst 钉为 calibrated_ok（否则 tier 恒被压成 MED，测不到「分数→档位」）。
 mm._SIGNAL_TYPE_CALIBRATION.clear()
+mm._SIGNAL_TYPE_CALIBRATION["catalyst"] = {
+    "sample_count": 45, "hit_rate": 0.7778, "weight_factor": 1.0,
+    "gate": "calibrated_ok", "no_high": False, "window_end": "2026-09-25"}
 mm._CALIB_LOADED_AT = float("inf")
 
 passed = 0

@@ -2287,3 +2287,15 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **未改（留档）**：① **恐贪 73 vs 74**：风险信号 `key_metric` 取 overview `3情绪`（73），大盘脉搏取 SSOT（74），两源不一致；改需把信号侧 fng 源切到 SSOT（可能移动阈值），属独立小工单。② **恐贪「不可用」vs「74」**：Morning Call 的「不可用」是 LLM 文本，非渲染层可确定性修复，需 prompt/数据门控，留档。
 - **自测**：`test_daily_brief_20260928.py` **36 → 44/0**（新增 H-1~H-8：`_streak_hint` 提取/空串、reason_summary 覆盖时补显且原 reason 不丢、无观察级不加注、含观察级加注、TL;DR 无方向改标题/有方向保持）。回归：workbench 全量 57 个 test 中 **55 通过**；**2 个失败（`test_highlight_determinacy_20260926` / `test_signal_type_calibration_20260926`）与本次无关**——已用 `git stash` 在无本次改动的 HEAD 上复现同样失败，属并发进程在制品（raw 95→MED 等 tier 断言）。`py_compile` 通过。
 - **待部署**：`send_daily_brief.py` 需容器 **redeploy** 后次日 09:00 邮件生效（U-A 连板注脚才会在 AI 高亮卡出现）。
+
+### `cae0431` 复验四问处置 Q1~Q4（复验_cae0431_高亮邮件池同步与M2方案A_2026-09-29，2026-09-29，本次提交）
+
+来源：`E:\瞎搞乱搞\workbuddy\crypto-profile-collection\复验_cae0431_高亮邮件池同步与M2方案A_2026-09-29.md`。复验确认 `cae0431` 源码齐备、离线测试独立复现、5 套相关回归未破、**已部署**（容器 09-29 08:56:27 CST 同秒重启，滞后 8m43s）、**前端 A1 有铁证**（线上首页含 `signal-demote`×2、`降档说明`×1），指出 **M5 突变逃逸**（正文退回只渲染增量仍全绿）与 N1/N2/N3 三项。用户拍板：**N2 同口径封顶、N3 deepcopy**；Q1/Q2 按复验建议做。**零 DDL、不改评分/阈值口径**。
+
+- **Q1（P2，已修）核心改动承重**：邮件正文组装抽为纯函数 `send_highlight_alert.build_pool_items(highlights, granted_kinds, max_cards)`（本轮获准项保留 new/upgrade、其余标 `ALERT_HOLD`；`card_sort_key` 排序、可选截断）；`main` 阶段2 与 `--dry-run` 均调它。`test_highlight_alert` 补**行为断言**（池 10 卡 + 1 granted ⇒ 全集 10 / 1 new / 9 在池 / 新增排首 / max_cards 截断）+ 阶段2 调用守卫（`build_pool_items(highlights, _granted_kinds`）。**独立见证**：`pool_items = granted`（退回只渲染增量）→ rc=1、`build_pool_items` 丢 granted → rc=1；恢复 82/0。
+- **Q2/N1（P2，已修）兜底文案不说谎**：`_brief_top_opportunities` 的 `display_note` 前缀按「当日是否有 HIGH」二选一——有 HIGH 用「池内分数靠前（非 HIGH）」，无 HIGH 才用调用方传入的「非高确定性档（当日 HIGH 不足）」。避免 HIGH 充足时仍印「HIGH 不足」。
+- **N2（P2，已修，原则取舍）`missing_calibration` 与 `exempt_*` 同口径封顶 MED**：`_exempt_no_high` 判据由「gate 以 `exempt_` 开头」扩为「`exempt_*` **或 `missing_calibration`**」；降档原因区分文案（`missing_calibration：该类型未进入回测校准表…`）。根因：不在校准表的类型（如 `price_surge/crash/pvs`）此前绕过「未回测不进 HIGH」直进 HIGH。**prod 只读实测**：三类 gate 均为 `missing_calibration` ⇒ 下轮重算起归零（09-29 那 3 条 HIGH 将降 MED）；`catalyst`(calibrated_ok) 不封顶。**连带**：更新 `test_signal_type_calibration_20260926`（无校准断言由「仍 HIGH」改为「封顶 MED + missing_calibration 原因」）与 `test_highlight_determinacy_20260926`（把其 `_push` 用的 `catalyst` 钉为 calibrated_ok，保持「分数→档位」测试语义）。
+- **N3（P2，已修）兜底打标不污染高亮卡**：`_brief_top_opportunities` 对兜底项改 **`copy.deepcopy` 后再打** `display_demoted`/`display_note`，返回 `(items, fallback_src_ids)`；调用方用 `fallback_src_ids` 从 `M8_watchlist` 剔除原始对象（避免副本与原对象重复）。**prod 只读实测**：原对象 `display_demoted` 保持 None、副本被正确打标。
+- **验证**：`test_highlight_alert` **77 → 82/0**、`test_m2_high_fallback` **21 → 30/0**、`test_signal_type_calibration_20260926` 与 `test_highlight_determinacy_20260926` 改契约后绿；workbench 全量 **57 个 `test_*.py` 全部 exit=0**；`py_compile` 4/4。
+- **未做 / 边界（须留档）**：① **M2 方案 B/C/D/E 仍不做**（B 放行硬数据极值需另行拍板）；② **行为态验收仍需转发邮件**（邮件正文不落库；早报 A2 兜底场景待 HIGH=0 的日子，可用 09-28 快照离线回填验证）；③ N2 属**原则取舍**，会使 HIGH 更稀缺（用户已知并接受）。
+- **待部署**：`macro_market.py` / `send_highlight_alert.py` 需容器 **redeploy** 后生效。

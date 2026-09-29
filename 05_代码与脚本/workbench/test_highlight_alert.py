@@ -204,8 +204,18 @@ _hold = sha.render_html([(card, sha.ALERT_NEW), (card, sha.ALERT_HOLD)], "2026-0
 check("📌 在池" in _hold, "在池卡片渲染「📌 在池」徽章")
 check("在池 1 条" in _hold, "抬头含在池计数")
 check("新增 1 条 · 升级 0 条" in _hold, "抬头统计行口径不变")
-check("pool_items" in _sha_src and "_granted_kinds" in _sha_src,
-      "main 正文渲染池全集（pool_items/_granted_kinds），非仅增量")
+# Q1（复验 cae0431 M5）：正文=池全集，抽 build_pool_items 并做行为断言
+_pool_cards = [_card(target=f"T{i}") for i in range(10)]
+_granted = {sha.card_key(_pool_cards[0]): sha.ALERT_NEW}
+_items = sha.build_pool_items(_pool_cards, _granted, max_cards=10)
+check(len(_items) == 10, "build_pool_items 返回池全集（非仅增量；M5 突变必杀）", str(len(_items)))
+check(sum(1 for _, k in _items if k == sha.ALERT_NEW) == 1, "仅 granted 标 new")
+check(sum(1 for _, k in _items if k == sha.ALERT_HOLD) == 9, "其余 9 张标「在池」")
+check(_items[0][1] == sha.ALERT_NEW, "新增卡排最前（card_sort_key）")
+check(len(sha.build_pool_items(_pool_cards, {}, max_cards=3)) == 3, "max_cards 截断生效")
+check("build_pool_items(highlights, _kinds" in _sha_src
+      and "build_pool_items(highlights, _granted_kinds" in _sha_src,
+      "main 阶段2 与 dry-run 正文均经 build_pool_items 组装（退回只渲染增量即红）")
 # M2-A1：卡片刻消费 tier_demote_reason
 _dem = sha.render_html([(_card(tier_demote_reason="exempt_unbacktested：该类型从未被回测"),
                          sha.ALERT_NEW)], "2026-09-23", 1)

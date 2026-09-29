@@ -148,7 +148,7 @@ def onchain_alert_stream():
                 # ── 主查询：跨资产大额转账流（至少一端命中交易所）──
                 feed_conds = [
                     "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%'",
+                    "tl.tx_hash NOT LIKE '0xtest%%'",
                     "tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
                 ]
@@ -195,7 +195,7 @@ def onchain_alert_stream():
                 stats_conds = [
                     "tl.block_timestamp >= NOW() - INTERVAL '24 hours'",
                     "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%'",
+                    "tl.tx_hash NOT LIKE '0xtest%%'",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
                 ]
                 stats_params = []
@@ -247,7 +247,7 @@ def onchain_alert_stream():
                 sum_conds = [
                     "tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
                     "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%'",
+                    "tl.tx_hash NOT LIKE '0xtest%%'",
                     "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
                 ]
                 sum_params = [hours]
@@ -303,7 +303,7 @@ def onchain_alert_stream():
                     LEFT JOIN exch t ON t.address = tl.to_address AND t.chain = tl.chain
                     WHERE tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')
                       AND (tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)
-                      AND tl.tx_hash NOT LIKE '0xtest%'
+                      AND tl.tx_hash NOT LIKE '0xtest%%'
                       AND (f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)
                     GROUP BY 1
                     ORDER BY (SUM(COALESCE(tl.value_usd, 0))) DESC

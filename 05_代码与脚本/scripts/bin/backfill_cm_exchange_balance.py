@@ -23,6 +23,13 @@ CM 免费层对 `SplyExUSD` 提供全历史（2026-09-29 实测：btc 2021-01-01
 ⚠️ 口径提醒：CM 返回带 `SplyExUSD-status: "flash"` ⇒ 该字段会被 CM **事后修订**。
     适合做参考基准/展示，不适合做要求严格可复现的判定输入。
 
+⚠️ 已知数据边界（2026-09-29 实测，**不裁数据**）：CM 的 `SplyExUSD` 只在 **2011 年**段自相矛盾——
+    首日 2011-04-24 与 `FlowInExUSD` 撞值（同为 228.4778）；2011 年 252 天里有 13 天出现
+    「flow_in + flow_out = 0 而余额仍逐日跳动」（最大日变动 24.7%）；2012 年起未再检出。
+    ⇒ 该 13 天不宜作为判定输入。不删行：本表为**多写方共写**，删行会连带毁掉同行的
+    cap_mvrv_cur / flow_in_ex_usd / price_usd；且下游（macro_market.py）只读最近 30 天窗口，
+    2011 年段实际无消费方，删除无收益、有风险。
+
 用法：
     python backfill_cm_exchange_balance.py --dry-run            # 只预览（默认仅 btc）
     python backfill_cm_exchange_balance.py --coins btc,eth      # 实跑

@@ -95,6 +95,15 @@ API_WINDOW_DAYS = 90
 # 限流：请求间隔（秒）
 REQUEST_INTERVAL = 0.5
 
+# ⚠️ 已知隐患（2026-09-29 记录，**未修**）：下面 20 列全部无条件 `= EXCLUDED.*`，
+# 而 fetch_asset_metrics 是「`if cm_key in row` 才赋值，缺键即 None」⇒ 任何被**二次写入**的
+# 日期，只要 CM 那一次返回缺某个指标，该列现存好值就被写成 NULL（btc 的 flow_in/out_ex_usd
+# 已有 5636 天）。已知触发路径：手工定向回填后次日 06:30 增量会重刷同一天。
+# 精确改法：每列改成 `COALESCE(EXCLUDED.col, cm_asset_onchain_daily.col)`——INSERT 路径不受
+# 影响（新行无旧值），仅 UPDATE 且 EXCLUDED 为 NULL 时保留旧值，属严格改进。
+# 未立即改的理由：本语句是每日 06:30（Asia/Shanghai）生产增量链路的唯一写入点，改前须先做
+# 「真实行 + 事务回滚」验证（dry-run 不覆盖 SQL 执行路径）。
+
 # UPSERT SQL
 UPSERT_SQL = """
 INSERT INTO biz.cm_asset_onchain_daily (

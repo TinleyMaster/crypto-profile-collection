@@ -30,7 +30,12 @@ BIN_DIR = SCRIPTS_DIR
 TASKS = [
     # ─── 基础层 ───
     ("赛道分类刷新", "run_refresh_sectors.py", [], False),
-    ("资产同名去重", "dedup_assets.py", ["--apply"], False),
+    # 去重失败**不再终止后续 13 个子任务**（2026-09-28）：删除 core.asset 触发 ~42 张
+    # 子表 FK 级联/检查，与同窗 derivatives_batch 等并发写子表时可能撞锁超时；一次瞬时
+    # 锁竞争曾让整条 data_sync_daily 判失败（2026-09-28 06:30 运行）。脚本已内建
+    # 等锁放宽 + 退避重试；万一仍失败，也应让 supply 对齐/diff/解锁/KOL 回测等独立子任务
+    # 继续跑（去重幂等、次日自愈），避免一刀切中止全部同步。
+    ("资产同名去重", "dedup_assets.py", ["--apply"], True),
     ("官网 primary 裁决", "run_refresh_primary_website.py", [], True),
 
     # ─── 文档入口层 ───

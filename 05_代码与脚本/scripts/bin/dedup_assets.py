@@ -1,8 +1,8 @@
 """合并 core.asset 中「完全同名」的真重复记录（symbol + canonical_name 完全相同）。
 
-背景：core.asset 存在 19 组完全同名重复（约 38 条），每组是一条 CoinGecko 来源
-的空壳记录（无合约地址）+ 一条 CMC 来源的有合约记录，同一项目被两个数据源拆成了
-两条。本脚本把这些记录合并为一条，迁移所有关联数据后删除冗余记录。
+背景：core.asset 存在若干组完全同名重复，每组通常是一条 CoinGecko 来源的空壳记录
+（无合约地址）+ 一条 CMC 来源的有合约记录，同一项目被两个数据源拆成了两条。
+本脚本把这些记录合并为一条，迁移所有关联数据后删除冗余记录。
 
 安全策略：
 - 只处理「完全同名」重复（symbol + canonical_name 完全相同），无歧义。
@@ -10,19 +10,32 @@
 - 其余作为 drop：迁移其关联数据到 keep，再删除。
 - 每组独立事务：一组失败不影响其他组；失败组回滚并记录，供人工复查。
 
+韧性（2026-09-28，修 data_sync_daily 因 lock_timeout 失败）：
+- 删除 core.asset 会触发 ~42 张子表的外键级联/检查（单次 DELETE 实测 ~3.4s），
+  与同窗（06:30）运行的 derivatives_batch 等写子表任务并发时会撞锁。
+- 全局连接池默认 lock_timeout=30s 对该清理任务过紧：一次瞬时锁竞争就让整条
+  data_sync_daily 判失败（失败即终止后续 13 个子任务）。故本脚本：
+  ① 本任务连接单独放宽 lock_timeout（`--lock-timeout-ms`，默认 120s）；
+  ② 锁竞争错误（lock_timeout 55P03 / 死锁 40P01）按 5/15/30s 退避重试至多 3 次；
+  ③ 失败信息带「出错语句」上下文，便于定位是哪张表/哪一步被锁。
+
 用法：
   python dedup_assets.py --dry-run   预览合并计划，不写库
   python dedup_assets.py --apply     执行合并
+  python dedup_assets.py --apply --lock-timeout-ms 180000   # 容忍更长等锁
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import psycopg
+import psycopg.errors
 import psycopg.rows
 from crypto_research.config import get_settings
 from crypto_research.db.conn import get_connection
@@ -68,6 +81,46 @@ SINGLE_TABLES = [
     "biz.asset_social_heat",        # PK(asset_id), NO ACTION
     "biz.coin_basic",               # PK(asset_id), NO ACTION
 ]
+
+# 默认等锁上限（毫秒）：全局连接池默认 30s 对「删 core.asset 触发大量 FK 级联」过紧。
+DEFAULT_LOCK_TIMEOUT_MS = 120_000
+LOCK_RETRIES = 3
+LOCK_RETRY_BACKOFF_SEC = (5, 15, 30)
+
+# 最近一次执行的语句标签（出错时随异常带出，定位是哪张表/哪一步被锁）。
+_LAST_STMT = {"label": "?"}
+
+
+def _run(cur, label: str, sql: str, params: tuple | None = None) -> int:
+    """执行一条语句并记录标签；返回 rowcount。异常原样抛出（保留 sqlstate 供重试判定）。"""
+    _LAST_STMT["label"] = label
+    cur.execute(sql, params) if params is not None else cur.execute(sql)
+    return cur.rowcount
+
+
+def is_lock_error(e: BaseException) -> bool:
+    """锁竞争类错误（可安全重试）：lock_timeout(55P03) / 死锁(40P01)。"""
+    if isinstance(e, (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected)):
+        return True
+    return getattr(e, "sqlstate", None) in ("55P03", "40P01")
+
+
+def _retry_wait(attempt: int) -> int:
+    """第 attempt 次重试前的等待秒数（attempt 从 0 计）。"""
+    return LOCK_RETRY_BACKOFF_SEC[min(attempt, len(LOCK_RETRY_BACKOFF_SEC) - 1)]
+
+
+def _stmt_label(e: BaseException) -> str:
+    return getattr(e, "dedup_stmt", "?")
+
+
+def _connect_direct(settings, lock_timeout_ms: int):
+    """本任务专用直连（不借用全局连接池）：单独设置 lock_timeout，避免污染池内连接。"""
+    return psycopg.connect(
+        settings.database_url,
+        connect_timeout=30,
+        options=f"-c lock_timeout={int(lock_timeout_ms)}",
+    )
 
 
 def _load_groups(conn) -> list[dict]:
@@ -124,23 +177,20 @@ def _load_groups(conn) -> list[dict]:
 
 def _merge_primary_sector(cur, keep_id: int, drop_id: int) -> None:
     """若 keep 赛道为 other 且 drop 有更具体赛道，则提升到 keep。"""
-    cur.execute(
-        "SELECT primary_sector FROM core.asset WHERE asset_id = %s", (keep_id,),
-    )
+    _run(cur, "读取 keep 赛道", "SELECT primary_sector FROM core.asset WHERE asset_id = %s",
+         (keep_id,))
     keep_sector = cur.fetchone()["primary_sector"]
-    cur.execute(
-        "SELECT primary_sector FROM core.asset WHERE asset_id = %s", (drop_id,),
-    )
+    _run(cur, "读取 drop 赛道", "SELECT primary_sector FROM core.asset WHERE asset_id = %s",
+         (drop_id,))
     drop_sector = cur.fetchone()["primary_sector"]
     if (keep_sector in (None, "other")) and (drop_sector not in (None, "other")):
-        cur.execute(
-            "UPDATE core.asset SET primary_sector = %s, updated_at = NOW() WHERE asset_id = %s",
-            (drop_sector, keep_id),
-        )
+        _run(cur, "提升 keep 主赛道",
+             "UPDATE core.asset SET primary_sector = %s, updated_at = NOW() WHERE asset_id = %s",
+             (drop_sector, keep_id))
 
 
 def _apply_group(conn, group: dict) -> dict:
-    """在独立事务中合并一组；返回执行统计。"""
+    """在独立事务中合并一组；返回执行统计。失败时异常带 dedup_stmt 上下文后原样抛出。"""
     keep_id = group["keep"]["asset_id"]
     stats = {"keep": keep_id, "drops": [], "migrated_rows": 0, "errors": []}
 
@@ -151,7 +201,7 @@ def _apply_group(conn, group: dict) -> dict:
             # 0) doc_source_entry 去重：drop 与 keep 收录了相同 URL 的文档时，
             #    删 drop 的重复行（保留 keep），否则后续 UPDATE 会违反
             #    uq_biz_doc_source_entry_entity_url 唯一约束。
-            cur.execute("""
+            stats["migrated_rows"] += _run(cur, "doc_source_entry 去重", """
                 DELETE FROM biz.doc_source_entry d
                 USING biz.doc_source_entry k
                 WHERE d.asset_id = %s AND k.asset_id = %s
@@ -166,37 +216,43 @@ def _apply_group(conn, group: dict) -> dict:
                 if tbl in CONFLICT_AWARE_TABLES:
                     key_cols = CONFLICT_AWARE_TABLES[tbl]
                     join_cond = " AND ".join(f"d.{c} = k.{c}" for c in key_cols)
-                    cur.execute(f"""
+                    stats["migrated_rows"] += _run(cur, f"{tbl} 冲突行删除", f"""
                         DELETE FROM {tbl} d
                         USING {tbl} k
                         WHERE d.asset_id = %s AND k.asset_id = %s
                           AND {join_cond}
                     """, (drop_id, keep_id))
 
-                cur.execute(
+                stats["migrated_rows"] += _run(
+                    cur, f"{tbl} 迁移",
                     f"UPDATE {tbl} SET asset_id = %s WHERE asset_id = %s",
-                    (keep_id, drop_id),
-                )
-                stats["migrated_rows"] += cur.rowcount
+                    (keep_id, drop_id))
 
             # 2) 单行表：keep 无记录时迁移，随后清掉 drop 残留
             for tbl in SINGLE_TABLES:
-                cur.execute(
+                stats["migrated_rows"] += _run(
+                    cur, f"{tbl} 单行迁移",
                     f"UPDATE {tbl} SET asset_id = %s WHERE asset_id = %s "
                     f"AND NOT EXISTS (SELECT 1 FROM {tbl} k WHERE k.asset_id = %s)",
-                    (keep_id, drop_id, keep_id),
-                )
-                stats["migrated_rows"] += cur.rowcount
-                cur.execute(f"DELETE FROM {tbl} WHERE asset_id = %s", (drop_id,))
+                    (keep_id, drop_id, keep_id))
+                stats["migrated_rows"] += _run(
+                    cur, f"{tbl} 残留清理",
+                    f"DELETE FROM {tbl} WHERE asset_id = %s", (drop_id,))
 
             # 3) 合并主赛道
             _merge_primary_sector(cur, keep_id, drop_id)
 
-            # 4) 删除冗余资产
-            cur.execute("DELETE FROM core.asset WHERE asset_id = %s", (drop_id,))
+            # 4) 删除冗余资产（触发 ~42 张子表 FK 级联/检查，是撞锁高发语句）
+            stats["migrated_rows"] += _run(
+                cur, "删除冗余 core.asset",
+                "DELETE FROM core.asset WHERE asset_id = %s", (drop_id,))
             stats["drops"].append(drop_id)
-        except Exception as e:  # 单组回滚由外层 conn.rollback 处理
-            stats["errors"].append(f"{drop_id}: {e}")
+        except Exception as e:  # 单组回滚由外层 rollback 处理
+            try:
+                e.dedup_stmt = _LAST_STMT["label"]
+            except Exception:
+                pass
+            stats["errors"].append(f"{drop_id}: [{_LAST_STMT['label']}] {e}")
             raise
     return stats
 
@@ -216,6 +272,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="预览合并计划，不写库")
     ap.add_argument("--apply", action="store_true", help="执行合并")
+    ap.add_argument("--lock-timeout-ms", type=int, default=DEFAULT_LOCK_TIMEOUT_MS,
+                    help=f"本任务等锁上限（毫秒，默认 {DEFAULT_LOCK_TIMEOUT_MS}；"
+                         f"全局连接池默认 30s 对本清理任务过紧）")
     args = ap.parse_args()
 
     if not (args.dry_run or args.apply):
@@ -249,18 +308,33 @@ def main() -> int:
         print("DRY-RUN 完成，未做任何修改。确认无误后运行 --apply。")
         return 0
 
-    # apply：每组独立事务
+    # apply：每组独立事务；锁竞争按 5/15/30s 退避重试至多 LOCK_RETRIES 次
     ok, failed = 0, 0
     for g in groups:
-        try:
-            with get_connection(settings.database_url) as conn:
-                stats = _apply_group(conn, g)
-            ok += 1
-            print(f"[OK] {g['symbol']} 合并完成: keep={stats['keep']}, drops={stats['drops']}, "
-                  f"迁移 {stats['migrated_rows']} 行")
-        except Exception as e:
+        last_err: BaseException | None = None
+        for attempt in range(LOCK_RETRIES + 1):
+            try:
+                with _connect_direct(settings, args.lock_timeout_ms) as conn:
+                    stats = _apply_group(conn, g)
+                ok += 1
+                last_err = None
+                print(f"[OK] {g['symbol']} 合并完成: keep={stats['keep']}, "
+                      f"drops={stats['drops']}, 迁移 {stats['migrated_rows']} 行")
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if is_lock_error(e) and attempt < LOCK_RETRIES:
+                    wait = _retry_wait(attempt)
+                    print(f"[RETRY] {g['symbol']} 撞锁超时（{_stmt_label(e)}）⇒ "
+                          f"{wait}s 后重试 {attempt + 1}/{LOCK_RETRIES}", flush=True)
+                    time.sleep(wait)
+                    continue
+                break
+        if last_err is not None:
             failed += 1
-            print(f"[FAIL] {g['symbol']} 合并失败（已回滚）: {e}")
+            kind = "锁竞争，重试已耗尽" if is_lock_error(last_err) else "错误（不重试）"
+            print(f"[FAIL] {g['symbol']} 合并失败（已回滚，{kind}）: "
+                  f"[{_stmt_label(last_err)}] {last_err}")
 
     print(f"\n完成：成功 {ok} 组，失败 {failed} 组。")
     return 0 if failed == 0 else 2

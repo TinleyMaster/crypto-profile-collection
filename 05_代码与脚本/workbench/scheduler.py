@@ -134,7 +134,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # P0-2: 删除 daily_diff_summary 独立调度（已在 data_sync_daily 中运行一次）
     # ("daily_diff_summary", "30 */6 * * *", "daily_diff_generator.py", [], "每日 diff 变化榜（每 6 小时，ETL 后）——已移入 data_sync_daily", "core"),
     ("social_heat_batch", "0 8 * * *", "phase_c_social_heat_batch.py", ["--limit", "500", "--delay", "0.5", "--timeout", "60"], "社交热度批量采集（每日 08:00，早报快照前就绪）", "core"),
-    ("derivatives_batch", "30 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200）", "core"),
+    # 错峰（2026-09-29 告警收敛）：原 `30 */6` 与 `data_sync_daily`（`30 6`，其内部
+    # 「资产同名去重」会 DELETE core.asset、级联 ~42 张 FK 子表）**同 06:30 起跑**，
+    # 本任务（写 `biz.asset_derivatives`，是 core.asset 的 FK 子表）持续 ~12min 持锁，
+    # 让去重等锁超时 → 整条日同步 failed → 反复告警。改 `5 */6`（06:05 起跑、约 06:17 完成，
+    # 与 06:30 的去重错开）。universe 只依赖 core.asset.market_cap_rank，不依赖同窗 ETL，错峰无副作用。
+    ("derivatives_batch", "5 */6 * * *", "phase_derivatives_batch.py", ["--limit", "200", "--delay", "0.2"], "衍生品资金面批量采集（每 6 小时 top 200；错峰 06:05 避开日同步去重撞锁）", "core"),
 
     # ═══ CoinGlass V4 数据接入（工单_CoinGlass_V4接入_按优先级_2026-09-28.md）═══
     # 红线：**仅新增，不改既有链路**（binance fapi / biz.asset_derivatives 原样保留）。
@@ -203,6 +208,10 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
     # P1-6: 决策管道慢通道独立调度（4h 一次，仅跑二阶展开+G3G5+巡检，不消耗 LLM 额度）
     ("catalyst_slow_pipeline", "30 */4 * * *", "phase_catalyst_pipeline.py", ["--slow"], "催化剂决策管道慢通道（每 4 小时）", "core"),
+    # 审计 2026-09-29 P2-3：重大事件此前只随慢通道（4h）/catalyst_run_all（12h）/快 daemon 发送，
+    #   快 daemon 间歇失效时事件排队数小时（实测 XLM 8.6h）。独立高频兜底：每 30 分钟只读候选 +
+    #   原子去重（同资产 24h + 发送锁），不会重复发信，把时延上限压到 ~30min。
+    ("catalyst_major_events", "*/30 * * * *", "send_major_events.py", [], "重大事件通道·低时延兜底（每 30 分钟）", "core"),
     # 催化剂周报：概览+A级清单，自然周去重，每周一 09:00 发送
     ("catalyst_weekly_report", "0 9 * * 1", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core"),
 

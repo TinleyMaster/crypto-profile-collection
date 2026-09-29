@@ -248,5 +248,18 @@ check("if is_lock_error(last_err):" in _SRC,
 
 
 # ════════════════════════════════════════════════════════════
+# 8. 调度错峰：derivatives_batch 避开 06:30（与日同步去重同窗）
+# ════════════════════════════════════════════════════════════
+print("\n【测试8】derivatives_batch 错峰（避开 06:30 去重撞锁）")
+_SCHED = open(os.path.join(_HERE, "scheduler.py"), encoding="utf-8").read()
+check('("derivatives_batch", "5 */6 * * *"' in _SCHED,
+      "derivatives_batch 已错峰到 5 */6（06:05 起跑，06:30 前完成）")
+check('("derivatives_batch", "30 */6 * * *"' not in _SCHED,
+      "derivatives_batch 不再与 data_sync_daily 同在 :30 相位")
+check('("data_sync_daily", "30 6 * * *"' in _SCHED,
+      "data_sync_daily 仍在 30 6（未动，避免下游时序连锁）")
+
+
+# ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

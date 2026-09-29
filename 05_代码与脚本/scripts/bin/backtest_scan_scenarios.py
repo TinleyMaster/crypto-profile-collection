@@ -15,6 +15,17 @@
     python backtest_scan_scenarios.py                      # 全量回测
     python backtest_scan_scenarios.py --symbols 10         # 只测前 10 个符号
     python backtest_scan_scenarios.py --min-n 20 --cost 0.001
+    python backtest_scan_scenarios.py --holdout-days 10    # 时序切分：最近 10 天=test，其余=train
+
+holdout（方案 §14，2026-09-29）：
+    --holdout-days N 开启时序切分（按 entry 时间，最近 N 天为 test，其余为 train），
+    train/test 并列输出 + 指标影子消融（RSI/%B/BBW 三分位分桶）。
+    ⚠️ 纪律：test 含不同 regime 才有验证意义；单一 regime 内的 holdout 通过 ≠ A3 关闭，
+    所有 test 侧结论一律标 provisional（不得引用为「已标定」证据）。
+
+技术指标（方案 §14）：
+    每个触发点记录 RSI(14)/布林带 %B/BBW，输出三分位分桶的影子消融——
+    只验证「指标是否补真缺口」，不改触发逻辑；替换线上阈值属标定决策，须另行走查。
 """
 from __future__ import annotations
 
@@ -37,6 +48,12 @@ import psycopg.rows  # noqa: E402
 
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
+from crypto_research.analysis.technical_indicators import (  # noqa: E402
+    bbw as bb_width,
+    bollinger_series,
+    percent_b,
+    rsi_series,
+)
 
 PRICE_THR_1H = 4.0            # 1h 单根涨跌幅阈值（%），2026-09-17 阈值敏感性标定：高确定性定位 3.0→4.0
 VOL_RATIO_THR = 2.0           # 量 ≥ N × 近 20 根均值
@@ -47,6 +64,10 @@ MIN_N = 20                    # 桶最少样本数
 MIN_DAYS = 5                  # 最少独立天数
 MIN_KLINES_BARS = 1000        # 只测有足够 1h 历史的符号
 FUND_POS_THR = 0.0001         # 资金费率正负判定阈值（±1bp/8h）
+RSI_PERIOD = 14               # 影子消融用（§14.2：RSI 限衰竭方向验证，不改触发）
+BB_PERIOD = 20                # 布林带周期（影子消融用）
+BB_STD = 2.0                  # 布林带 σ 倍数
+INDICATOR_BUCKETS = ("low", "mid", "high")   # 三分位桶
 
 SCENARIOS = ("Pup_OIup", "Pup_OIdown", "Pdown_OIup", "Pdown_OIdown")
 
@@ -145,6 +166,10 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
     """
     n = len(bars)
     max_h = max(HORIZONS)
+    # 影子指标（§14）：整序列一次 O(n) 预计算，触发点查表；不改触发逻辑、只随 trade 落记录
+    closes = [b["close"] for b in bars]
+    rsi_s = rsi_series(closes, RSI_PERIOD)
+    bb_s = bollinger_series(closes, BB_PERIOD, BB_STD)
     for t in range(LOOKBACK + 1, n - max_h - 1):
         bar = bars[t]
         prev = bars[t - 1]
@@ -157,6 +182,14 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
         if abs(chg) < price_thr or vol_ratio < vol_thr:
             continue
         direction = "up" if chg >= 0 else "down"
+
+        # 影子指标取值（头部数据不足为 None → 消融时跳过）
+        rsi_val = rsi_s[t]
+        pb_val = bbw_val = None
+        bb = bb_s[t]
+        if bb is not None:
+            pb_val = percent_b(bar["close"], bb[1], bb[2])
+            bbw_val = bb_width(bb[0], bb[1], bb[2])
 
         # OI 方向（可缺失 → 基线样本，用于消融）
         h = hour_key(bar["t"])
@@ -173,22 +206,81 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
         if not entry:
             continue
         day = bars[t + 1]["t"].date()
+        entry_ts = bars[t + 1]["t"]
         for hz in HORIZONS:
             exit_close = bars[t + hz]["close"]
             if not exit_close:
                 continue
             ret_long = (exit_close - entry) / entry
             ret = ret_long if direction == "up" else -ret_long
-            trades[scenario].append((hz, day, ret - cost, ftag))
+            # 记录结构：(hz, day, net_ret, fund_tag, entry_ts, rsi, percent_b, bbw)
+            trades[scenario].append((hz, day, ret - cost, ftag,
+                                     entry_ts, rsi_val, pb_val, bbw_val))
+
+
+def split_trades(trades: dict[str, list], cutoff: datetime,
+                 ) -> tuple[dict[str, list], dict[str, list]]:
+    """按 entry 时间（记录第 5 位）时序切分：entry < cutoff → train，否则 test。
+
+    时序切分（非随机）——杜绝未来信息泄漏进 train。
+    """
+    train: dict[str, list] = defaultdict(list)
+    test: dict[str, list] = defaultdict(list)
+    for sc, recs in trades.items():
+        for r in recs:
+            (train if r[4] < cutoff else test)[sc].append(r)
+    return train, test
+
+
+def summarize_indicator_buckets(trades: dict[str, list], min_n: int,
+                                horizons: tuple[int, ...] = (1,)) -> list[dict]:
+    """指标影子消融（§14）：RSI / %B / BBW 各按全样本三分位切 low/mid/high 桶。
+
+    只回答一个问题——「指标分位与收益是否单调/有边际」，不改触发逻辑。
+    指标缺失（None）的记录跳过。horizons 默认只看 1h（§8.1 最关键窗口）。
+    """
+    idx_by_name = {"rsi": 5, "percent_b": 6, "bbw": 7}
+    rows: list[dict] = []
+    for name, idx in idx_by_name.items():
+        recs = [r for sc, rs in trades.items() for r in rs
+                if r[0] in horizons and r[idx] is not None]
+        if len(recs) < min_n * 3:
+            continue
+        vals = sorted(r[idx] for r in recs)
+        q1, q2 = vals[len(vals) // 3], vals[2 * len(vals) // 3]
+        for bucket in INDICATOR_BUCKETS:
+            if bucket == "low":
+                sub = [r for r in recs if r[idx] <= q1]
+            elif bucket == "mid":
+                sub = [r for r in recs if q1 < r[idx] <= q2]
+            else:
+                sub = [r for r in recs if r[idx] > q2]
+            if len(sub) < min_n:
+                continue
+            nets = [r[2] for r in sub]
+            wins = sum(1 for x in nets if x > 0)
+            gross_win = sum(x for x in nets if x > 0)
+            gross_loss = abs(sum(x for x in nets if x < 0))
+            rows.append({
+                "indicator": name, "bucket": bucket,
+                "cut_low": round(q1, 4), "cut_high": round(q2, 4),
+                "n": len(sub), "win_rate": wins / len(sub),
+                "avg_ret_net": sum(nets) / len(nets),
+                "profit_factor": gross_win / gross_loss if gross_loss else float("inf"),
+            })
+    return rows
 
 
 def sweep_all(klines: dict[str, list], oi_hourly: dict[str, dict[datetime, float]],
               funding: dict[str, tuple[list, list[float]]], cost: float,
               price_thrs: list[float], vol_thrs: list[float],
-              min_n: int, min_days: int) -> list[dict]:
+              min_n: int, min_days: int,
+              cutoff: datetime | None = None) -> list[dict]:
     """阈值敏感性扫描：对每组 (price_thr, vol_thr) 跑全宇宙，聚焦 P↑OI↑ 场景。
 
-    返回行：{price_thr, vol_thr, scenario, horizon, n, days, win_rate,
+    cutoff 给定时（holdout 模式），每个阈值组的 train/test 并列输出，
+    行多一列 split ∈ {train, test}——阈值选择仍只允许看 train，test 只做对照。
+    返回行：{price_thr, vol_thr, split, scenario, horizon, n, days, win_rate,
              avg_ret_net, profit_factor, day_t_stat}。
     """
     rows: list[dict] = []
@@ -198,13 +290,21 @@ def sweep_all(klines: dict[str, list], oi_hourly: dict[str, dict[datetime, float
             for sym in klines:
                 scan_symbol(klines[sym], oi_hourly.get(sym, {}),
                             funding.get(sym), trades, cost, price_thr=pt, vol_thr=vt)
-            for r in summarize(trades, min_n, min_days):
-                if r["scenario"] not in ("Pup_OIup", "Pup_OIdown"):
-                    continue
-                r = dict(r)
-                r["price_thr"] = pt
-                r["vol_thr"] = vt
-                rows.append(r)
+            splits: list[tuple[str, dict[str, list]]]
+            if cutoff is not None:
+                tr, te = split_trades(trades, cutoff)
+                splits = [("train", tr), ("test", te)]
+            else:
+                splits = [("all", trades)]
+            for split_name, sub_trades in splits:
+                for r in summarize(sub_trades, min_n, min_days):
+                    if r["scenario"] not in ("Pup_OIup", "Pup_OIdown"):
+                        continue
+                    r = dict(r)
+                    r["price_thr"] = pt
+                    r["vol_thr"] = vt
+                    r["split"] = split_name
+                    rows.append(r)
     return rows
 
 
@@ -289,6 +389,9 @@ def main() -> int:
                         help="扫描的量比阈值列表（逗号分隔，默认 1.5,2.0,3.0,4.0）")
     parser.add_argument("--lookback-days", type=int, default=0,
                         help="只加载最近 N 天 1h K 线（0=全量；回测建议 45：覆盖 30 天 OI + 缓冲）")
+    parser.add_argument("--holdout-days", type=int, default=0,
+                        help="时序切分：最近 N 天 entry 的信号为 test、其余为 train（0=关闭）。"
+                             "test 只做对照，阈值/参数选择只允许看 train（§14.4）")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
@@ -311,23 +414,35 @@ def main() -> int:
               f"OI 小时序列 {sum(len(v) for v in oi_hourly.values())} 点；"
               f"funding 序列 {sum(len(v[0]) for v in funding.values())} 点")
 
+        cutoff: datetime | None = None
+        if args.holdout_days > 0 and klines:
+            global_max_t = max(bars[-1]["t"] for bars in klines.values() if bars)
+            cutoff = global_max_t - timedelta(days=args.holdout_days)
+            print(f"[holdout] 时序切分：entry < {cutoff:%Y-%m-%d %H:%M} → train，"
+                  f"其余（最近 {args.holdout_days} 天）→ test")
+            print("[holdout] ⚠️ 纪律：test 含不同 regime 才有验证意义；"
+                  "单一 regime 内的 holdout 通过 ≠ A3 关闭，test 侧结论一律 provisional")
+
         if args.sweep:
             pt_list = [float(x) for x in args.price_thrs.split(",") if x.strip()]
             vt_list = [float(x) for x in args.vol_thrs.split(",") if x.strip()]
             print(f"[sweep] 阈值网格 {len(pt_list)}×{len(vt_list)}={len(pt_list) * len(vt_list)} 组，"
                   f"聚焦 P↑OI↑ / P↑OI↓")
             srows = sweep_all(klines, oi_hourly, funding, args.cost,
-                              pt_list, vt_list, args.min_n, MIN_DAYS)
-            print(f"\n{'价格阈值':>6}{'量比阈值':>6}{'场景':<10}{'窗口h':>5}{'n':>6}"
+                              pt_list, vt_list, args.min_n, MIN_DAYS, cutoff=cutoff)
+            print(f"\n{'split':>6}{'价格阈值':>6}{'量比阈值':>6}{'场景':<10}{'窗口h':>5}{'n':>6}"
                   f"{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
-            print("-" * 76)
-            for r in sorted(srows, key=lambda x: (x["price_thr"], x["vol_thr"],
+            print("-" * 84)
+            for r in sorted(srows, key=lambda x: (x["split"], x["price_thr"], x["vol_thr"],
                                                   x["scenario"], x["horizon_h"])):
-                print(f"{r['price_thr']:>6.1f}{r['vol_thr']:>6.1f}{r['scenario']:<10}"
+                print(f"{r['split']:>6}{r['price_thr']:>6.1f}{r['vol_thr']:>6.1f}{r['scenario']:<10}"
                       f"{r['horizon_h']:>5}{r['n']:>6}{r['win_rate']:>8.1%}"
                       f"{r['avg_ret_net'] * 100:>10.3f}"
                       f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
                       f"{r['day_t_stat']:>8.2f}")
+            if cutoff is not None:
+                print("\n[sweep] ⚠️ 阈值选择只允许看 train 行；test 行仅对照，"
+                      "样本内与 test 的差距即过拟合度量（§14.4）")
             if srows:
                 out_path = Path(args.out) if args.out else \
                     SCRIPT_DIR.parent / "data" / "backtest_threshold_sweep.csv"
@@ -344,20 +459,60 @@ def main() -> int:
             scan_symbol(klines.get(sym, []), oi_hourly.get(sym, {}),
                         funding.get(sym), trades, args.cost)
 
-        rows = summarize(trades, args.min_n, MIN_DAYS)
-        print(f"\n{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
-        print("-" * 76)
-        for r in sorted(rows, key=lambda x: (x["scenario"], x["horizon_h"])):
-            print(f"{r['scenario']:<16}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
-                  f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
-                  f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
-                  f"{r['day_t_stat']:>8.2f}")
+        def _print_rows(rs: list[dict]) -> None:
+            print(f"{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
+            print("-" * 76)
+            for r in sorted(rs, key=lambda x: (x["scenario"], x["horizon_h"])):
+                print(f"{r['scenario']:<16}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
+                      f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
+                      f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
+                      f"{r['day_t_stat']:>8.2f}")
 
-        # 消融对比：baseline vs 各 P×OI 桶
-        base = next((r for r in rows if r["scenario"] == "BASELINE_ONLY" and r["horizon_h"] == 1), None)
+        csv_rows: list[dict] = []
+        if cutoff is not None:
+            tr, te = split_trades(trades, cutoff)
+            for split_name, sub in (("train", tr), ("test", te)):
+                print(f"\n=== {split_name}（{'训练集：阈值/参数选择依据' if split_name == 'train' else '测试集：仅对照，结论 provisional'}）===")
+                rows = summarize(sub, args.min_n, MIN_DAYS)
+                _print_rows(rows)
+                for r in rows:
+                    r = dict(r)
+                    r["split"] = split_name
+                    csv_rows.append(r)
+            print("\n[holdout] ⚠️ train/test 差距即过拟合度量；"
+                  "若全窗口为单一 regime，test 通过也不能外推（A1/A2，§12.1）")
+        else:
+            rows = summarize(trades, args.min_n, MIN_DAYS)
+            _print_rows(rows)
+            csv_rows = [dict(r, split="all") for r in rows]
+
+        # 指标影子消融（§14.3）：RSI/%B/BBW 三分位 → 验证边际贡献，不改触发
+        ablation_scope: list[tuple[str, dict[str, list]]] = (
+            [("train", tr), ("test", te)] if cutoff is not None else [("all", trades)])
+        irows: list[dict] = []
+        for split_name, sub in ablation_scope:
+            for r in summarize_indicator_buckets(sub, args.min_n):
+                r = dict(r)
+                r["split"] = split_name
+                irows.append(r)
+        if irows:
+            print(f"\n=== 指标影子消融（1h 窗口，三分位分桶；影子模式：不改触发逻辑 §14.3）===")
+            print(f"{'split':>6}{'指标':<12}{'分位':>5}{'切点':>18}{'n':>6}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}")
+            print("-" * 84)
+            for r in sorted(irows, key=lambda x: (x["split"], x["indicator"], x["bucket"])):
+                cuts = f"[{r['cut_low']}, {r['cut_high']}]"
+                print(f"{r['split']:>6}{r['indicator']:<12}{r['bucket']:>5}{cuts:>18}"
+                      f"{r['n']:>6}{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
+                      f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}")
+            print("[indicators] ⚠️ 分位间收益单调/分化明显 → 该指标有边际，可进入 holdout 复核；"
+                  "无分化 → 不准入告警逻辑（四条硬杠 §14.1）")
+
+        # 消融对比：baseline vs 各 P×OI 桶（holdout 模式只看 train——选择依据）
+        abl_rows = [r for r in csv_rows if r.get("split") in ("all", "train")]
+        base = next((r for r in abl_rows if r["scenario"] == "BASELINE_ONLY" and r["horizon_h"] == 1), None)
         if base:
             print(f"\n=== 消融（1h 窗口，baseline 净均={base['avg_ret_net'] * 100:.3f}%）===")
-            for r in rows:
+            for r in abl_rows:
                 if r["scenario"] == "BASELINE_ONLY":
                     continue
                 delta = (r["avg_ret_net"] - base["avg_ret_net"]) * 100
@@ -381,10 +536,18 @@ def main() -> int:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["scenario"])
+            w = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()) if csv_rows else ["scenario"])
             w.writeheader()
-            w.writerows(rows)
+            w.writerows(csv_rows)
         print(f"\n[backtest] 结果已存 {args.out}")
+
+        if irows:
+            iout = out_path.with_name("backtest_indicator_ablation.csv")
+            with open(iout, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(irows[0].keys()))
+                w.writeheader()
+                w.writerows(irows)
+            print(f"[backtest] 指标影子消融已存 {iout}")
 
         if frows:
             fout = out_path.with_name("backtest_funding_ablation.csv")

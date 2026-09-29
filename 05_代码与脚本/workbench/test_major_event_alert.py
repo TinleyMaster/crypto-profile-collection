@@ -1,12 +1,12 @@
 """重大事件通道（major_event）离线护栏测试。
 
-覆盖 2026-09-23 新增通道的硬约束：
+覆盖重大事件通道（2026-09-23 建；2026-09-29 口径重建）的硬约束：
   1. 通道独立：notification_type 与 A 级 Alert 的三种类型互不重叠（独立去重）
-  2. 重要性闸门独立于 tier：判据必须允许 tier='B'（不得只放 'A'）
+  2. 重要性闸门独立于 tier：不得再用 tier/status 当重要性判据
   3. 事件级去重：一条新闻被多家媒体采成多条 catalyst 时只发一封
      （DISTINCT ON (s.asset_id) + 同资产 24h 已发则跳过）
-  4. 负 alpha 类别排除：ai_event_type='market_update'（行情播报）不得入池
-  5. 市场确认门槛：prelaunch_ret_24h >= 阈值 且 prelaunch_penalty = 0
+  4. 负 alpha 类别排除：行情播报（含被 AI 误分类者）不得入池
+  5. 双向市场确认门槛：利好型 |异动| ≥ 阈值且未降权；利空型由类型权重直达
   6. 渲染护栏：邮件不含任何交易档位字样、必须含「非交易建议」、
      必须含共振状态与催化方向（避免被读成追高指令）
   7. 失败不阻断主流程：查询异常返回 dict 而非抛异常；无候选不发信
@@ -86,32 +86,51 @@ check(len({N.NTYPE_MAJOR_EVENT, N.NTYPE_FAST_ALERT, N.NTYPE_SLOW_DIGEST,
       "major_event 与 fast_alert/slow_digest/slow_digest_stock 互不重叠")
 
 print("== 2. 重要性闸门独立于 tier ==")
-check("tier IN ('A', 'B')" in _QUERY_SRC, "候选包含 tier='B'（不因未达 A 而漏报）",
-      _QUERY_SRC[:200])
-check("s.tier = 'A'" not in _QUERY_SRC and "tier='A'" not in _QUERY_SRC,
-      "候选未把 tier 收窄为仅 'A'")
-check("s.status = 'open'" in _QUERY_SRC, "仍要求 status='open'（方向/定价闸门未放开）")
+check("tier IN ('A', 'B')" not in _QUERY_SRC and "tier IN ('A','B')" not in _QUERY_SRC,
+      "不再用 tier 当重要性闸门（tier 只作展示，不做入选）")
+check("s.status = 'open'" not in _QUERY_SRC,
+      "不再要求 status='open'（可交易性闸门已与重要性解耦）")
 check("entry_price" not in _QUERY_SRC and "take_profit" not in _QUERY_SRC,
       "判据不依赖 entry/stop/tp（不因给不出交易计划而漏报）")
+check(N.MAJOR_EVENT_MIN_IMPORTANCE == 70.0,
+      "重要性改为市场显著性阈值 importance>=70",
+      str(N.MAJOR_EVENT_MIN_IMPORTANCE))
+check("importance >= %s" in _QUERY_SRC, "SQL 以 importance 作为闸门")
+check("_WEEKLY_TYPE_WEIGHT" in _SRC and "{weight_case}" in _QUERY_SRC,
+      "类型权重复用周报 _WEEKLY_TYPE_WEIGHT（避免第二份口径漂移）")
+check(N._WEEKLY_TYPE_WEIGHT.get("security") == 95
+      and N._WEEKLY_TYPE_WEIGHT.get("etf") == 85,
+      "security/etf 高权已在权重表内（旧 grade 表缺 security 键）")
 
 print("== 3. 事件级去重 ==")
-check("DISTINCT ON (s.asset_id)" in _QUERY_SRC, "每资产只留一条（多 catalyst 归并）")
-check("ns.asset_id = s.asset_id" in _QUERY_SRC,
+check("DISTINCT ON (asset_id)" in _QUERY_SRC, "每资产只留一条（多 catalyst 归并）")
+check("ns.asset_id = gated.asset_id" in _QUERY_SRC,
       "24h 冷却按资产判定（代表信号变化也不会重发）")
 check("nl.status = 'sent'" in _QUERY_SRC, "只有成功发送才计入冷却（失败可重试）")
 check("nl.notification_type = %s" in _QUERY_SRC, "冷却按 notification_type 隔离")
 
 print("== 4. 负 alpha 类别排除 ==")
-check("<> 'market_update'" in _QUERY_SRC, "排除行情播报类（负 alpha）")
-check("catalyst_kind = ANY(%s::TEXT[])" in _QUERY_SRC, "按 catalyst_kind 白名单过滤")
-check(N.MAJOR_EVENT_KINDS == ("structural", "event"),
-      "白名单为 structural/event（排除 sentiment/noise）", str(N.MAJOR_EVENT_KINDS))
+check("category <> 'market_update'" in _QUERY_SRC, "行情播报归 market_update 后剔除")
+check("head ~ '涨幅' AND head ~ '%%'" in _QUERY_SRC,
+      "标题含「涨幅…%」判为行情播报（修复 AI 误分类漏网）")
+check("价格突破|暴涨" in _QUERY_SRC, "标题含「价格突破/暴涨」判为行情播报")
+check("COALESCE(cg.catalyst_kind, '') <> 'noise'" in _QUERY_SRC,
+      "剔除噪音 kind（替代旧 kind 白名单）")
+check("catalyst_kind = ANY" not in _QUERY_SRC,
+      "旧 kind 白名单已删除（曾把 security 类挡在门外）")
 
-print("== 5. 市场确认门槛 ==")
-check("cg.prelaunch_ret_24h >= %s" in _QUERY_SRC, "要求事件前已异动")
-check("cg.prelaunch_penalty = 0" in _QUERY_SRC, "要求异动未被计入降权")
-check(N.MAJOR_EVENT_MIN_PRELAUNCH_RET >= 5.0,
-      "异动阈值不低于 5%（实测 BCH 为 8.26%）", str(N.MAJOR_EVENT_MIN_PRELAUNCH_RET))
+print("== 5. 双向市场确认门槛 ==")
+check("ABS(COALESCE(prelaunch_ret_24h, 0)) >= %s" in _QUERY_SRC,
+      "利好型用双向绝对值（不限涨跌，修复只认涨幅的单向性）")
+check("cg.prelaunch_ret_24h >= %s" not in _QUERY_SRC,
+      "旧的单向 >= 门槛已删除（曾结构性灭杀利空型事件）")
+check("COALESCE(prelaunch_penalty, 0) = 0" in _QUERY_SRC, "要求异动未被计入降权")
+check("category IN ('security', 'delisting')" in _QUERY_SRC
+      and "= 'bearish'" in _QUERY_SRC,
+      "利空型 = security/delisting 或 ai_sentiment=bearish")
+check("AND (is_bearish" in _QUERY_SRC, "利空型可绕过异动门槛（类型权重直达）")
+check(N.MAJOR_EVENT_MIN_MOVE >= 5.0,
+      "利好型异动阈值不低于 5%（实测 BCH 为 8.26%）", str(N.MAJOR_EVENT_MIN_MOVE))
 check("published_at > NOW() - " in _QUERY_SRC, "只通报新鲜事件（避免停摆后补发陈旧事件）")
 
 print("== 6. 渲染护栏 ==")
@@ -124,6 +143,17 @@ check(not _hit, "不含任何交易档位/方向指令字样", f"命中: {_hit}"
 check("共振状态" in _html, "展示共振状态（避免引导追高）")
 check("催化方向" in _html and "利好" in _html, "展示催化方向标签")
 check("市场确认" in _html and "+8.26%" in _html, "展示事件前异动幅度")
+# 利空型（security/delisting）：不得写成「公告前 24h 已涨」，改由类型权重直达
+_html_bear = N._build_major_event_html(_fake_row(
+    is_bearish=True, event_type_norm="security",
+    prelaunch_ret_24h=None, ai_sentiment="bearish",
+    catalyst_title="某协议遭攻击，损失 1200 万美元", title_cn=None,
+    ai_event_type="other", rule_event_type="other"))
+check("利空型重大事件" in _html_bear, "利空型渲染「不以涨幅确认」文案")
+check("公告前 24h 已涨" not in _html_bear,
+      "利空型不得写「公告前 24h 已涨」（防把利空写反）")
+check("事件类型直达" in _html_bear, "利空型「市场确认」行改为「事件类型直达」")
+check("安全事件" in _html_bear, "传导路径优先取 event_type_norm=security")
 _subj = N._major_event_subject(_fake_row())
 check("重大事件" in _subj and "BCH" in _subj, "主题含通道标识与标的", _subj)
 check(len(_subj) <= 90, "主题长度受控（≤90 字）", str(len(_subj)))

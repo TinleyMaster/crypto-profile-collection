@@ -1660,47 +1660,74 @@ def send_channel_silence_alert(conn, days: int | None = None) -> dict:
 # 重大事件通道（重要性闸门，独立于 tier 的可交易性闸门）
 # =====================================================================
 #
-# 背景（2026-09-23 排查）：A 级 Alert 的入选口径是 `tier='A' AND status='open'`，
-# 而 tier 同时承担了「重要性」与「可交易性」两件事——价格档位不齐、RR 不足、
-# 方向不符都会把 A/B 封顶到 C。于是「CME 将于 10/19 上线 BCH 与 UNI 期货」这类
-# 重大利好因为给不出可交易档位而完全静默（实测 tier='A' AND status='open' 全表 0 行）。
-#
-# 本通道把「重要性」单独拎出来：判据只读 catalyst_grade 的原始字段 + 事件前的
-# 价格异动，不要求 entry/stop/tp，因此不会因为「给不出交易计划」而漏报。
-# 反向约束同样重要——该判据近 6 天实测命中 9 条（≈1.3 条/天），既捞得到 BCH 那条，
-# 也不会把「24h 涨幅播报」这类负 alpha 内容捞进来。
+# 背景：
+# · 2026-09-23 建通道：A 级 Alert 口径是 `tier='A' AND status='open'`，而 tier 同时
+#   承担「重要性」与「可交易性」——价格档位不齐/RR 不足/方向不符都会封顶到 C，
+#   于是「CME 将上线 BCH 与 UNI 期货」这类重大利好因给不出档位而静默。
+# · 2026-09-29 用户质疑「重大事件邮件是否也漏了大事」后**重建**：旧口径
+#   `s.tier IN ('A','B') AND s.status='open'` 把可交易性当重要性用，叠加 4 处结构性
+#   缺陷，实测历史仅 8 封（09-23~09-28），类型全为 partnership/funding/listing，
+#   security/regulation/etf/macro 类 **0 封**：
+#   ① tier 语义错位：tier 由档位/RR/方向闸门决定（event_type_weights 里 listing=95），
+#      与「事件是否重大」无关；
+#   ② 排序口径错：inner 以 composite_score 截断（DISTINCT ON 后 A 级高分占满名额）；
+#   ③ market_update 过滤可绕过：只精确匹配 ai_event_type，误分类即放行——实测
+#      Rhea「24H 涨幅 131%」判 partnership、Bitwise「NEAR 现货 ETF 递表」判 funding
+#      入池，且被渲染成「融资到账 → 基本面改善」（解释错误）；
+#   ④ prelaunch_ret_24h >= 5 单向性：要求事件**发生前已涨**≥5%，结构性灭杀利空型
+#      重大事件（有 asset_id 的 security 类 71 条仅 4 条通过、macro 13→0）；
+#   ⑤ 权重表缺 security 键 + structural_event_types 不含 security：hack 类 event_weight
+#      兜底 15 分，且被 kind 白名单挡在门外。
+# 现口径（与周报同源，口径 = **市场显著性**，非可交易性）：
+#   · 权重复用周报 _WEEKLY_TYPE_WEIGHT（security95/macro88/etf85/regulation80/…），
+#     不再读 grade 的 event_weight；
+#   · 分类先做**标题关键词兜底**（security/etf/macro）+ 行情播报识别（「涨幅…%」/
+#     「价格突破/暴涨」→ market_update 并剔除），再回落 AI/规则类型；
+#   · importance = 类型权重 × 资产权重（market_cap_rank 分档，NULL→0.5）+ confirmed 加成；
+#   · 双向门槛：利空型（security/delisting 或 ai_sentiment=bearish）由类型权重直达，
+#     不以涨幅为准；利好型仍要求事件前 24h |异动| ≥5% 且未被计入降权（市场已确认）；
+#   · 仍要求 asset_id（无标的的宏观/监管事件只进周报、不进逐条告警）。
 #
 # 邮件刻意不出现任何交易档位，并显式标注「非交易建议」，避免被读成开单指令。
 
 NTYPE_MAJOR_EVENT = "major_event"     # 重大事件通道（与 A 级 Alert 分开渲染/去重）
 
-MAJOR_EVENT_MIN_PRELAUNCH_RET = 5.0   # 事件前 24h 已异动 ≥5%：市场已确认事件有效
+MAJOR_EVENT_MIN_MOVE = 5.0            # 利好型门槛：事件前 24h |异动| ≥5%（市场已确认）
+MAJOR_EVENT_MIN_IMPORTANCE = 70.0     # 市场显著性门槛（类型权重 × 资产权重）
 MAJOR_EVENT_COOLDOWN_HOURS = 24       # 同一资产 24h 内只发一次（事件级去重）
-MAJOR_EVENT_KINDS = ("structural", "event")
 MAJOR_EVENT_MAX_PER_RUN = 3           # 单轮上限，配合「日均 ≤3 条」目标
+_MAJOR_BEARISH_TYPES = ("security", "delisting")  # 利空型：不以涨幅确认，权重直达
 
 
 def _recent_major_events(conn, hours: int = 24,
                          limit: int = MAJOR_EVENT_MAX_PER_RUN) -> list[dict]:
-    """过去 N 小时发布的「重大事件」候选（每资产留最高分一条）。
+    """过去 N 小时发布的「重大事件」候选（每资产留重要性最高一条）。
 
     入选条件（缺一不可）：
-    - `tier IN ('A','B')` 且 `status='open'`：合成分 ≥60，且未被方向闸门
-      /价格档位闸门压到 C（即方向为多头、未被判为已充分定价）
-    - `catalyst_kind IN ('structural','event')`：排除情绪稿与噪音
-    - `prelaunch_ret_24h >= 5` 且 `prelaunch_penalty = 0`：事件前 24h 市场已异动，
-      且该异动未被计入降权（避免通报已经涨完的事件）
-    - `ai_event_type <> 'market_update'`：排除纯行情播报（负 alpha 类别）
-    - 事件发布时间在 N 小时内：只通报新鲜事件，避免长期停摆后补发陈旧事件
+    - `importance >= MAJOR_EVENT_MIN_IMPORTANCE`：类型权重（**市场显著性**）× 资产权重
+    - `is_bearish OR (|prelaunch_ret_24h| >= MAJOR_EVENT_MIN_MOVE
+      AND prelaunch_penalty = 0)`：利空型（security/delisting/bearish）由事件类型权重
+      直达、不以涨幅为准；利好型要求事件前市场已确认（**双向绝对值**，不限涨跌）
+    - `category <> 'market_update'`：剔除行情播报（负 alpha）
+    - `catalyst_kind <> 'noise'`：剔除噪音
+    - 标题非占位（'null' 等）且非「要闻汇总/日报」聚合帖
+    - 事件发布时间在 N 小时内：只通报新鲜事件，避免停摆后补发陈旧事件
     - 同一资产 N 小时内已发过 major_event 则跳过：一条新闻常被多家媒体重复采集
       （实测 BCH 那条来自 4 家媒体、5 条 catalyst），事件级去重后只发一封
     - 额外 LEFT JOIN LATERAL 取 `biz.catalyst_second_order` 的二阶标的（只消费、不生成），
       供邮件「板块联动」模块渲染
+
+    口径说明：`category` 先按**标题**关键词兜底归类 security/etf/macro（与周报同源，
+    不看 ai_summary 以免无关事件蹭词），并识别行情播报；`importance` 的权重表直接复用
+    周报 `_WEEKLY_TYPE_WEIGHT`，避免两处权重漂移。
     """
+    # 类型权重表 → SQL CASE（复用周报权重，避免第二份口径）
+    weight_case = "\n                    ".join(
+        f"WHEN '{k}' THEN {int(v)}" for k, v in _WEEKLY_TYPE_WEIGHT.items()
+    )
     return conn.execute(f"""
-        SELECT * FROM (
-            SELECT DISTINCT ON (s.asset_id)
-                   s.signal_id, s.catalyst_id, s.asset_id,
+        WITH base AS (
+            SELECT s.signal_id, s.catalyst_id, s.asset_id,
                    s.tier, s.composite_score, s.resonance_state, s.resonance_score,
                    s.kind, s.created_at,
                    a.canonical_name, a.canonical_symbol AS symbol,
@@ -1716,7 +1743,9 @@ def _recent_major_events(conn, hours: int = 24,
                    md.price_usd AS current_price, md.change_24h, md.change_7d,
                    md.volume_24h,
                    so.second_order_symbols, so.second_order_sector,
-                   so.second_order_confidence, so.second_order_count
+                   so.second_order_confidence, so.second_order_count,
+                   LOWER(COALESCE(ac.title_cn, '') || ' ' || COALESCE(ac.title, '')) AS head,
+                   COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS raw_event_type
             FROM biz.catalyst_signal s
             JOIN core.asset a ON s.asset_id = a.asset_id
             JOIN biz.asset_catalyst ac
@@ -1745,28 +1774,93 @@ def _recent_major_events(conn, hours: int = 24,
                 WHERE cso.catalyst_id = s.catalyst_id
                   AND cso.asset_id <> s.asset_id
             ) so ON TRUE
-            WHERE s.tier IN ('A', 'B')
-              AND s.status = 'open'
-              AND cg.catalyst_kind = ANY(%s::TEXT[])
-              AND cg.prelaunch_ret_24h >= %s
-              AND cg.prelaunch_penalty = 0
-              AND COALESCE(ac.ai_event_type, '') <> 'market_update'
-              AND ac.published_at > NOW() - (%s::int * INTERVAL '1 hour')
+            WHERE ac.published_at > NOW() - (%s::int * INTERVAL '1 hour')
+              AND COALESCE(cg.catalyst_kind, '') <> 'noise'
               AND {ASSET_NAME_FILTER_SQL}
+              -- 剔除占位标题（LLM 漏译写成的字面量 'null'）与「要闻汇总/日报」类
+              -- 无单一事件的聚合帖：其标题不含事件，只会污染关键词归类
+              AND LOWER(COALESCE(ac.title_cn, ac.title, ''))
+                  NOT IN ('', 'null', 'none', 'nan', 'tl;dr')
+              AND LOWER(COALESCE(ac.title_cn, ac.title, ''))
+                  !~ '^(今日要闻|要闻预告|要闻提示|一、|二、|热点新闻|行情|盘前|盘后|每日|快讯汇总|市场综述)'
+        ),
+        categorized AS (
+            SELECT *,
+                CASE
+                    -- 关键词只匹配**标题**（ai_summary 过长，会在无关事件里蹭到关键词）
+                    WHEN head ~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull'
+                        THEN 'security'
+                    WHEN head ~ 'etf' THEN 'etf'
+                    WHEN head ~ '美联储|federal reserve|rate hike|rate cut|加息|降息|基点|basis point|通胀|非农'
+                        THEN 'macro'
+                    -- 行情播报识别（修复旧口径漏网：AI 误分类即放行）：
+                    -- 实测 Rhea「24H 涨幅 131%%」被判 partnership 入池，属负 alpha
+                    WHEN (head ~ '涨幅' AND head ~ '%%') OR head ~ '价格突破|暴涨'
+                        THEN 'market_update'
+                    ELSE raw_event_type
+                END AS category
+            FROM base
+        ),
+        scored AS (
+            SELECT *,
+                CASE category
+                    {weight_case}
+                    ELSE 32
+                END::numeric AS type_w,
+                (CASE
+                    WHEN market_cap_rank IS NULL THEN 0.5
+                    WHEN market_cap_rank <= 10 THEN 1.00
+                    WHEN market_cap_rank <= 30 THEN 0.80
+                    WHEN market_cap_rank <= 100 THEN 0.62
+                    WHEN market_cap_rank <= 500 THEN 0.45
+                    ELSE 0.30
+                END)::numeric AS asset_w
+            FROM categorized
+        ),
+        gated AS (
+            SELECT *,
+                (category IN ('security', 'delisting')
+                 OR LOWER(COALESCE(ai_sentiment, '')) = 'bearish') AS is_bearish,
+                ROUND(type_w * asset_w
+                      + CASE WHEN resonance_state = 'confirmed' THEN 6 ELSE 0 END, 1)
+                    AS importance
+            FROM scored
+            WHERE category <> 'market_update'
+        )
+        SELECT * FROM (
+            SELECT DISTINCT ON (asset_id)
+                   signal_id, catalyst_id, asset_id,
+                   tier, composite_score, resonance_state, resonance_score,
+                   kind, created_at, canonical_name, symbol, primary_sector,
+                   asset_market_cap, market_cap_rank,
+                   catalyst_title, title_cn, ai_summary, ai_event_type, ai_sentiment,
+                   rule_event_type, source_code, source_url, published_at, catalyst_body,
+                   authority_score, event_weight, scope_score,
+                   prelaunch_ret_24h, prelaunch_penalty, catalyst_kind, tradable,
+                   impact_direction, impact_strength,
+                   current_price, change_24h, change_7d, volume_24h,
+                   second_order_symbols, second_order_sector,
+                   second_order_confidence, second_order_count,
+                   category AS event_type_norm, is_bearish, importance
+            FROM gated
+            WHERE importance >= %s
+              AND (is_bearish
+                   OR (ABS(COALESCE(prelaunch_ret_24h, 0)) >= %s
+                       AND COALESCE(prelaunch_penalty, 0) = 0))
               AND NOT EXISTS (
                   SELECT 1
                   FROM biz.catalyst_notification_log nl
                   JOIN biz.catalyst_signal ns ON ns.signal_id = nl.signal_id
-                  WHERE ns.asset_id = s.asset_id
+                  WHERE ns.asset_id = gated.asset_id
                     AND nl.notification_type = %s
                     AND nl.status = 'sent'
                     AND nl.sent_at > NOW() - (%s::int * INTERVAL '1 hour')
               )
-            ORDER BY s.asset_id, s.composite_score DESC
+            ORDER BY asset_id, importance DESC, composite_score DESC NULLS LAST
         ) t
-        ORDER BY t.composite_score DESC
+        ORDER BY t.importance DESC, t.composite_score DESC NULLS LAST
         LIMIT %s
-    """, (list(MAJOR_EVENT_KINDS), MAJOR_EVENT_MIN_PRELAUNCH_RET, hours,
+    """, (hours, MAJOR_EVENT_MIN_IMPORTANCE, MAJOR_EVENT_MIN_MOVE,
           NTYPE_MAJOR_EVENT, MAJOR_EVENT_COOLDOWN_HOURS, limit)).fetchall()
 
 
@@ -1784,6 +1878,8 @@ _TRANSMISSION_PATH_CN = {
     "burn": "供给销毁 → 流通量收缩 → 稀缺性预期提升",
     "adoption": "机构/协议采用 → 真实使用与锁仓增加 → 需求提升",
     "hack": "安全事件 → 信任受损 → 抛压与资金流出",
+    "security": "安全事件 → 信任受损与资产风险 → 抛压 + 风控重估（利空传导）",
+    "etf": "ETF 递表/审批/资金流 → 机构通道打开 → 增量需求预期",
     "delisting": "下线/移除 → 可及性下降 → 流动性与需求下降",
     "macro": "宏观变量 → 风险偏好变化 → 板块资金流向变化",
 }
@@ -1865,7 +1961,9 @@ def _transmission_directness(r: dict) -> tuple[str, str, str]:
 
 
 def _transmission_path(r: dict) -> str:
-    for key in (r.get("ai_event_type"), r.get("rule_event_type"), r.get("catalyst_kind")):
+    # 优先用归一化事件类别（含关键词兜底的 security/etf/macro），再回落 AI/规则类型
+    for key in (r.get("event_type_norm"), r.get("ai_event_type"),
+                r.get("rule_event_type"), r.get("catalyst_kind")):
         k = (key or "").strip().lower()
         if k in _TRANSMISSION_PATH_CN:
             return _TRANSMISSION_PATH_CN[k]
@@ -1952,7 +2050,15 @@ def _build_major_event_html(r: dict) -> str:
     tl_immediate, tl_short, tl_mid = _transmission_timeline(r)
     res_note = _RESONANCE_NOTE.get(r.get("resonance_state"), "")
 
-    if pre is not None:
+    is_bearish = bool(r.get("is_bearish"))
+    if is_bearish:
+        # 利空型（安全/下架类）不以「事件前已涨」作确认——旧文案会把利空事件写反
+        consume_note = (
+            f'本条属利空型重大事件，不以事件前涨幅作为确认条件，改由事件类型权重直达；'
+            f'{res_note}。' if res_note else
+            '本条属利空型重大事件，不以事件前涨幅作为确认条件，改由事件类型权重直达。'
+        )
+    elif pre is not None:
         consume_note = (
             f'公告前 24h 已涨 {pre_txt} —— 说明部分预期已被市场提前消化，非“零成本”；'
             f'{res_note}。' if res_note else
@@ -2019,7 +2125,8 @@ def _build_major_event_html(r: dict) -> str:
     <div style="font-size:15px;line-height:1.6;color:#111827;margin-top:10px">{title}</div>
     <div style="font-size:12px;color:#6b7280;margin-top:8px">
       发布：{_fmt_ts(r.get('published_at'))} · 来源 {r.get('source_code') or '—'}
-      · 事件类别 {r.get('ai_event_type') or r.get('rule_event_type') or '—'}
+      · 事件类别 {r.get('event_type_norm') or r.get('ai_event_type')
+                  or r.get('rule_event_type') or '—'}
     </div>
   </div>
 
@@ -2036,7 +2143,10 @@ def _build_major_event_html(r: dict) -> str:
     <table style="width:100%;border-collapse:collapse">
       {_kv('重要性', f'{score_line}（{kind}）')}
       {_kv('催化方向', f'{direction} · 影响强度 {strength}（{impact}）')}
-      {_kv('市场确认', f'事件前 24h 已异动 {pre_txt}', _pct_color(pre))}
+      {_kv('市场确认',
+           '事件类型直达（利空型不以异动确认）' if is_bearish
+           else f'事件前 24h 已异动 {pre_txt}',
+           '#6b7280' if is_bearish else _pct_color(pre))}
       {_kv('共振状态', res)}
       {_kv('当前价', f'{price_txt} · 24h {_pct(chg24)}', _pct_color(chg24))}
       {_kv('信号分层', f"tier {r.get('tier') or '—'} · 合成分 "

@@ -1985,6 +1985,34 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - ② **跨来源改写无法靠标题归一化归并**（同语言不同措辞、中英双语；如 Payy Network 4 个变体、XRP ETF 3 个变体），**交由 LLM 在叙事阶段合并**（prompt 已限定 events 8~15 条）。已写入 `_weekly_story_key` docstring 留档。
 - ③ **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`）。首封周报（旧口径 13 条）已在 2026-09-29 09:00 发出并占自然周去重位，**本周不会再发新口径版本**；新口径将于下一自然周首次生效（需先 redeploy）。
 
+#### 重大事件通道口径重建（2026-09-29，同日追加）
+
+来源：用户收到两封 NEAR「📢 [重大事件]」邮件（Rhea Finance 跨链 DeFi／Bitwise NEAR 现货 ETF 递表）后提出「**合理怀疑重大事件邮件通道也存在同样的问题**」。经与用户二次确认三项决议：① 修复范围 =「**全面重建口径**」（`asset_catalyst` 为底盘 + 市场显著性权重 + 关键词兜底归类 + 统一 `COALESCE(ai, rule, 'other')`）；② 门槛 =「**按利好/利空双向判定**」（利好型用异动绝对值；利空型不以涨幅为准、由事件类型权重直达）；③ 无 `asset_id` 的宏观/监管事件 =「**不进逐条告警，只进周报**」→ 告警通道保留 `asset_id` 硬要求。
+
+**取证（窗口 2026-09-15~09-29，prod 只读）**：`major_event` 通道历史**仅 8 封**（09-23~09-28），类型分布 partnership 4 / funding 3 / listing 1，**security/regulation/etf/macro 各 0 封**。五条根因：
+- **根因 ①（tier 语义错位）**：`_recent_major_events` 用 `s.tier IN ('A','B') AND s.status='open'` 做「重要性闸门」，而 `tier` 由价格档位/RR/方向闸门决定（`event_type_weights` 里 listing=95），注释却自称「重要性闸门」——**可交易性被当成了重要性**。
+- **根因 ②（素材依赖 asset_id + 排序口径错）**：`JOIN ac ON ac.catalyst_id=s.catalyst_id AND ac.asset_id=s.asset_id`，窗口 12972 条中 **8886 条（68.5%）无 asset_id** 永不入选（regulation 无标的 88%=1608/1818、macro 86%=244/285）；且 inner 以 `composite_score` 截断（A 级高分占满名额）。
+- **根因 ③（market_update 过滤可绕过）**：只精确匹配 `ai_event_type <> 'market_update'`，误分类即放行——实测 Rhea「价格突破 0.19 美元，24H 涨幅 131%」被判 **partnership** 入池；Bitwise「NEAR 现货 ETF 提交最终招股说明书」被判 **funding** → 渲染成「融资到账 → 基本面改善」，**解释错误**。
+- **根因 ④（prelaunch 门槛单向性，最狠）**：`prelaunch_ret_24h >= 5 AND prelaunch_penalty = 0` 要求事件**发生前已涨** ≥5% → **结构性灭杀利空型重大事件**。有 asset_id 事件的通过数：security 71→**4**、macro 13→**0**、delisting 22→5、regulation 210→27、etf 40→6。近 14 天全量候选仅 7 条（partnership 4/listing 2/funding 1，全 tier=B）。
+- **根因 ⑤（权重表缺 security）**：`catalyst_rules.yaml` 的 `event_type_weights` **无 `security` 键**（只有 listing95/delisting90/burn80/regulation75/airdrop70/funding65/partnership60/tech_upgrade55/market_update25/other15）→ hack 类 `event_weight` 兜底 15（邮件实测显示「事件权重 15」）；且 `structural_event_types={listing,delisting,burn,regulation,tech_upgrade}` **不含 security** → 旧 `catalyst_kind = ANY('{structural,event}')` 把低分 security 事件（kind=sentiment/noise）一并排除。
+
+**修法（只动消费侧 `notifier.py`，不动采集/分级）**：
+1. **常量**：保留 `NTYPE_MAJOR_EVENT`／`MAJOR_EVENT_COOLDOWN_HOURS=24`／`MAJOR_EVENT_MAX_PER_RUN=3`；**删除** `MAJOR_EVENT_MIN_PRELAUNCH_RET`／`MAJOR_EVENT_KINDS`；**新增** `MAJOR_EVENT_MIN_MOVE=5.0`、`MAJOR_EVENT_MIN_IMPORTANCE=70.0`、`_MAJOR_BEARISH_TYPES=('security','delisting')`。
+2. **权重复用**：类型权重直接复用周报 `_WEEKLY_TYPE_WEIGHT`（security95/macro88/etf85/regulation80/delisting72/…）——在函数内把该表**运行时**拼成 SQL `CASE`（`weight_case`），保证两处口径不漂移。
+3. **SQL 重建**（`WITH base → categorized → scored → gated`）：`head` 仍仅由标题构成（`COALESCE(title_cn,'')||' '||COALESCE(title,'')`）；`category` 关键词兜底 security → etf → macro，**并新增行情播报识别**（`head ~ '涨幅' AND head ~ '%'`、`head ~ '价格突破|暴涨'` → `market_update`）再回落 `raw_event_type`；`importance = 类型权重 × 资产权重`（`market_cap_rank` 分档 1.00/0.80/0.62/0.45/0.30，NULL→0.5）`+ confirmed 加成 6`。
+4. **WHERE 重写**：`importance >= MAJOR_EVENT_MIN_IMPORTANCE` AND `(is_bearish OR (ABS(prelaunch_ret_24h) >= 5 AND prelaunch_penalty=0))` AND 发布时间窗口 AND `ASSET_NAME_FILTER_SQL` AND 24h 同资产冷却 NOT EXISTS AND `category <> 'market_update'` AND `catalyst_kind <> 'noise'` AND 标题非占位/非聚合帖；**删除** `s.tier IN ('A','B')`／`s.status='open'`／`catalyst_kind = ANY(...)`／旧的 `<> 'market_update'`。`is_bearish = category IN ('security','delisting') OR ai_sentiment='bearish'`。
+5. **排序**：`DISTINCT ON (asset_id) ... ORDER BY asset_id, importance DESC, composite_score DESC NULLS LAST`，外层 `ORDER BY importance DESC, composite_score DESC NULLS LAST LIMIT %s`（不再按合成分截断）。
+6. **渲染**：SELECT 增 `category AS event_type_norm`／`importance`／`is_bearish`；`_transmission_path` 优先取 `event_type_norm`；`_TRANSMISSION_PATH_CN` 新增 `security`／`etf` 键；「事件类别」行改用 `event_type_norm`；`_build_major_event_html` 的「预期已消化」与「市场确认」两处按 `is_bearish` 分支——**利空型不再写「公告前 24h 已涨」**（旧文案会把利空写反），改「事件类型直达（利空型不以异动确认）」。
+
+**验证**：`py_compile` EXIT=0；`test_major_event_alert.py` **67/0 全绿**（section 2/4/5 全量重写为新口径断言 + section 6 新增利空型渲染护栏 4 条）；`test_catalyst_weekly_report.py` **78/0 无回归**；**prod 只读探针**（窗口 336h=14 天，`_recent_major_events` 实跑）→ 候选 **14 条**：**security 8 / etf 3 / regulation 3**（旧口径此三类合计 0），利空型 9 条，含 **Bitget 3.516 亿被盗（BNB）**、**XRP 硬件钱包 2000 万被盗**、**Payy Network 跨链合约被攻**、**CME 上线 BCH 期货（监管待批）**、**Grayscale Zcash ETF**、**SEC 代币化股票豁免（UNI）**；两封 NEAR 邮件对应事件在窗口内**候选 0 条**（Rhea 归 `market_update` 剔除；NEAR ETF 重要性 <70）。
+
+**未做 / 边界（须留档）**：
+- ① **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`，容器重建后新口径才在线上告警通道生效）。
+- ② **仍在 `asset_id` 硬要求内**：无标的的宏观/监管事件按用户决议只进周报、不进逐条告警（告警需 `signal_id` 作为发送锁/去重锚点）。
+- ③ **`market_update` 识别靠标题正则**：`涨幅…%`／`价格突破/暴涨` 属启发式，标题同时含「涨幅」与真实事件的少数混合帖会被整类剔除（误差方向偏保守）。
+- ④ **阈值 70 为主观分界**：NEAR「ETF 递表」类（etf 85 × asset_w 0.62~0.80 = 52.7~68）落在阈值下缘，属「市场显著性不足」而非漏采；如需上调/下调只改 `MAJOR_EVENT_MIN_IMPORTANCE` 一处。
+- ⑤ **SQL 注释内的字面量 `%` 必须写成 `%%`**：psycopg 的占位符解析器**不识别 SQL 注释**，注释里出现裸 `%` 会抛 `UnicodeDecodeError`（本轮实测踩坑，已在注释中规避）。
+
 ### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
 
 **现象**：同一份 `biz.asset_tokenomics` 有 **4 个组装点**且口径已漂移——① `db_stats.get_asset_tokenomics()` 字段最全（22 列 + `biz.asset_token_unlocks` 的 revenue/valuation/overview）但**无逐字段来源/时点**；② 投研结论 prompt 的 inline `_fund` **只吃 `lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct`**；③ 解锁测算 prompt **另起一套 raw SQL 吃 10 列**并**复制了一份 CMC supply 校验**；④ 页面各渲染一个子集。**核心病根**：库里已有的 `allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **从未进入投研结论主线**（只进解锁支线）——2043 行中 allocation 776、emission 676、utility 1204、governance 328、burn 203、inflation 155 全部对投资决策 prompt 不可见。

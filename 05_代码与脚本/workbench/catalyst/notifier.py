@@ -21,6 +21,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from .asset_filter import ASSET_NAME_FILTER_SQL, IS_STOCK_SQL, is_non_crypto, is_stock
 
@@ -2860,6 +2861,353 @@ def _signal_row_to_deep_review_input(row: dict) -> dict:
     if d.get("description_short"):
         d["description_short"] = _strip_stale_price_sentences(d["description_short"])
     return d
+
+
+# =====================================================================
+# 催化剂周报（每周一 09:00 北京）
+# =====================================================================
+#
+# 背景（2026-09-29 用户需求「我想每周收到催化剂的周报」）：
+# 与 24h 的 A 级 Alert（快通道/慢通道）不同，周报是**自然周**维度的固定节奏邮件，
+# 面向「回看上周整体催化剂面貌」而非「即时可动作信号」。
+#
+# 内容结构（用户已确认「概览 + A 级清单」）：
+#   ① 概览：本周催化剂多维统计——信号总数、tier 分布、事件类型分布、情感分布、
+#      来源分布、本周催化剂入库数
+#   ② A 级清单：本周窗口内 tier='A' 且 status='open' 且 entry/stop/tp 齐全的高置信
+#      信号逐条列出（币种 + 事件类型 + 情感 + 标题 + 交易档位 + 时间）
+#
+# 去重：sentinel -4 + ntype 'weekly_report'，按**自然周**去重（本周已发过即跳过），
+# 不同于 24h 去重的 Alert 通道。发送频率由调度器约束（每周一 09:00 触发一次）。
+
+NTYPE_WEEKLY_REPORT = "weekly_report"
+SENTINEL_WEEKLY_REPORT_SIGNAL_ID = -4   # 负号哨兵，同 -1/-2/-3 约定（NULL 不触发 UNIQUE）
+
+
+def _weekly_window(end_ts=None) -> tuple[datetime, datetime, str]:
+    """计算自然周窗口（北京时区）：上周一 00:00 ~ 本周一 00:00，返回 UTC 边界。
+
+    Args:
+        end_ts: 窗口计算参考时刻（tz-aware）。缺省用当前时刻。
+
+    Returns:
+        (start_utc, end_utc, label)，label 形如「2026-09-21 ~ 2026-09-28（北京）」
+    """
+    tz = ZoneInfo("Asia/Shanghai")
+    if end_ts is None:
+        end_ts = datetime.now(timezone.utc)
+    elif getattr(end_ts, "tzinfo", None) is None:
+        end_ts = end_ts.replace(tzinfo=timezone.utc)
+    bj = end_ts.astimezone(tz)
+    this_monday = (bj - timedelta(days=bj.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    last_monday = this_monday - timedelta(days=7)
+    return (last_monday.astimezone(timezone.utc),
+            this_monday.astimezone(timezone.utc),
+            f"{last_monday.strftime('%Y-%m-%d')} ~ {this_monday.strftime('%Y-%m-%d')}（北京）")
+
+
+def _weekly_overview_stats(conn, start_utc, end_utc) -> dict:
+    """本周催化剂多维统计（概览）。
+
+    Returns:
+        {signals_total, tier_dist, event_type_dist, sentiment_dist, source_dist, catalysts_new}
+    """
+    total = conn.execute("""
+        SELECT COUNT(*) AS cnt FROM biz.catalyst_signal
+        WHERE created_at >= %s AND created_at < %s
+    """, (start_utc, end_utc)).fetchone()
+    tier_rows = conn.execute("""
+        SELECT tier, COUNT(*) AS cnt FROM biz.catalyst_signal
+        WHERE created_at >= %s AND created_at < %s
+        GROUP BY tier ORDER BY cnt DESC, tier
+    """, (start_utc, end_utc)).fetchall()
+    event_rows = conn.execute("""
+        SELECT COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS key, COUNT(*) AS cnt
+        FROM biz.catalyst_signal s
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.created_at >= %s AND s.created_at < %s
+        GROUP BY 1 ORDER BY cnt DESC
+    """, (start_utc, end_utc)).fetchall()
+    sentiment_rows = conn.execute("""
+        SELECT COALESCE(ac.ai_sentiment, 'neutral') AS key, COUNT(*) AS cnt
+        FROM biz.catalyst_signal s
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.created_at >= %s AND s.created_at < %s
+        GROUP BY 1 ORDER BY cnt DESC
+    """, (start_utc, end_utc)).fetchall()
+    source_rows = conn.execute("""
+        SELECT ac.source_code AS key, COUNT(*) AS cnt
+        FROM biz.catalyst_signal s
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.created_at >= %s AND s.created_at < %s
+        GROUP BY 1 ORDER BY cnt DESC
+    """, (start_utc, end_utc)).fetchall()
+    catalysts_new = conn.execute("""
+        SELECT COUNT(*) AS cnt FROM biz.asset_catalyst
+        WHERE created_at >= %s AND created_at < %s
+    """, (start_utc, end_utc)).fetchone()
+
+    def _cnt(row) -> int:
+        return int(row["cnt"]) if row and row.get("cnt") is not None else 0
+
+    def _pairs(rows):
+        return [(r["key"] or "?", int(r["cnt"])) for r in rows if r.get("cnt")]
+
+    return {
+        "signals_total": _cnt(total),
+        "tier_dist": [(r["tier"] or "?", int(r["cnt"])) for r in tier_rows if r.get("cnt")],
+        "event_type_dist": _pairs(event_rows),
+        "sentiment_dist": _pairs(sentiment_rows),
+        "source_dist": _pairs(source_rows),
+        "catalysts_new": _cnt(catalysts_new),
+    }
+
+
+def _weekly_a_signals(conn, start_utc, end_utc) -> list[dict]:
+    """本周窗口内 A 级高置信信号清单（简化卡片，含交易档位）。
+
+    入选：created_at 在窗口内 + tier='A' + status='open' + entry/stop/tp 齐全。
+    按 composite_score DESC 排序。
+    """
+    return conn.execute("""
+        SELECT s.signal_id, s.tier, s.composite_score,
+               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
+               s.confidence, s.resonance_state, s.created_at,
+               a.canonical_name, a.canonical_symbol AS symbol, a.primary_sector,
+               ac.title, ac.title_cn, ac.ai_summary,
+               COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS event_type,
+               COALESCE(ac.ai_sentiment, 'neutral') AS sentiment,
+               ac.source_code, ac.published_at
+        FROM biz.catalyst_signal s
+        JOIN core.asset a ON s.asset_id = a.asset_id
+        JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
+        WHERE s.tier = 'A'
+          AND s.status = 'open'
+          AND s.created_at >= %s AND s.created_at < %s
+          AND s.entry_price IS NOT NULL
+          AND s.stop_loss IS NOT NULL
+          AND s.take_profit IS NOT NULL
+        ORDER BY s.composite_score DESC
+    """, (start_utc, end_utc)).fetchall()
+
+
+_SENTIMENT_CN = {"bullish": "利好", "bearish": "利空", "neutral": "中性"}
+_SENTIMENT_COLOR = {"bullish": "#059669", "bearish": "#dc2626", "neutral": "#6b7280"}
+
+
+def _build_weekly_a_card(r: dict) -> str:
+    """周报 A 级信号简化卡片（币种 + 事件 + 档位 + 标题 + 时间）。"""
+    import html as _html
+
+    entry = _to_float(r.get("entry_price"))
+    sl = _to_float(r.get("stop_loss"))
+    tp = _to_float(r.get("take_profit"))
+    rr = _to_float(r.get("rr_ratio"))
+    dir_cn, dir_color = _trade_direction(entry, sl, tp)
+    score = float(r.get("composite_score") or 0)
+    symbol = _html.escape(str(r.get("symbol") or r.get("canonical_name") or "—"))
+    name = _html.escape(str(r.get("canonical_name") or ""))
+    sector = _html.escape(str(r.get("primary_sector") or "—"))
+    event_type = _html.escape(str(r.get("event_type") or "—"))
+    sentiment = str(r.get("sentiment") or "neutral")
+    sentiment_cn = _SENTIMENT_CN.get(sentiment, sentiment)
+    sentiment_color = _SENTIMENT_COLOR.get(sentiment, "#6b7280")
+    source = _html.escape(str(r.get("source_code") or "—"))
+    title = _complete_text(r.get("title_cn") or r.get("title") or "",
+                           r.get("ai_summary") or "")
+    title = _html.escape(title)
+    confidence = r.get("confidence")
+    conf_txt = f"{_to_float(confidence):.3f}" if confidence is not None else "—"
+    resonance = _RESONANCE_CN.get(r.get("resonance_state"),
+                                  r.get("resonance_state") or "—")
+
+    plan = (
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px">'
+        + _plan_cell("方向", dir_cn, dir_color)
+        + _plan_cell("入场", _fmt_price(entry), "#111827")
+        + _plan_cell("止损", _fmt_price(sl), "#dc2626")
+        + _plan_cell("止盈", _fmt_price(tp), "#059669")
+        + _plan_cell("盈亏比", f"{rr:.2f}" if rr else "—", "#111827")
+        + "</div>"
+    )
+
+    return f"""
+    <div style="border:1px solid #eef2f7;border-left:3px solid #7c3aed;border-radius:8px;
+                padding:12px 14px;margin-bottom:10px;background:#fff">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <div style="font-size:15px;font-weight:800;color:#111827">
+          {symbol}<span style="font-weight:400;color:#6b7280;font-size:12px"> · {name}</span>
+        </div>
+        <span style="background:#7c3aed;color:#fff;padding:2px 9px;border-radius:20px;
+                     font-size:11px;font-weight:700">A级 · {score:.1f}</span>
+      </div>
+      <div style="font-size:12px;color:#374151;margin:6px 0 4px;line-height:1.6">{title}</div>
+      <div style="font-size:11px;color:#6b7280">
+        事件类型 <span style="color:#111827;font-weight:600">{event_type}</span>
+        · 情感 <span style="color:{sentiment_color};font-weight:600">{sentiment_cn}</span>
+        · 来源 <span style="color:#111827">{source}</span>
+        · 板块 <span style="color:#111827">{sector}</span>
+      </div>
+      {plan}
+      <div style="font-size:11px;color:#6b7280">
+        置信度 <span style="color:#111827">{conf_txt}</span>
+        · 共振 <span style="color:#111827">{resonance}</span>
+        · 创建 <span style="color:#111827">{_fmt_ts(r.get("created_at"))}</span>
+      </div>
+    </div>
+    """
+
+
+def _build_weekly_report_html(stats: dict, a_rows: list[dict], window_label: str) -> str:
+    """构建催化剂周报邮件 HTML（概览统计 + A 级清单）。"""
+    import html as _html
+
+    total = stats.get("signals_total", 0)
+    catalysts_new = stats.get("catalysts_new", 0)
+
+    def _bar_rows(pairs) -> str:
+        if not pairs:
+            return '<div style="color:#9ca3af;font-size:12px">本周无数据</div>'
+        mx = max(c for _, c in pairs) or 1
+        rows = []
+        for k, c in pairs:
+            pct = c / mx * 100
+            rows.append(
+                '<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
+                f'<div style="flex:0 0 110px;font-size:11px;color:#6b7280;text-align:right">'
+                f'{_html.escape(str(k))}</div>'
+                '<div style="flex:1;background:#eef2f7;border-radius:4px;height:16px">'
+                f'<div style="height:16px;background:linear-gradient(90deg,#7c3aed,#3b82f6);'
+                f'border-radius:4px;width:{pct:.0f}%"></div></div>'
+                f'<div style="flex:0 0 32px;font-size:11px;color:#111827;font-weight:600">{c}</div>'
+                "</div>"
+            )
+        return "".join(rows)
+
+    cards = "".join(_build_weekly_a_card(r) for r in a_rows)
+    if not cards:
+        cards = ('<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;'
+                 'border-radius:8px">本周无 A 级高置信信号</div>')
+
+    return f"""
+    <div style="font-family:sans-serif;max-width:760px;margin:auto;padding:16px;background:#f3f4f6">
+      <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:24px;border-radius:12px">
+        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · 周报</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">本周催化剂概览 + A 级清单</div>
+        <div style="margin-top:4px;font-size:13px;opacity:.8">窗口 {_html.escape(window_label)} · 信号 {total} 条 · 新入库催化剂 {catalysts_new} 条</div>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
+        <h3 style="font-size:15px;margin:0 0 12px;color:#111827">📊 概览（本周信号多维统计）</h3>
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+          {_plan_cell("信号总数", str(total), "#7c3aed")}
+          {_plan_cell("催化剂入库", str(catalysts_new), "#3b82f6")}
+          {_plan_cell("A 级清单", str(len(a_rows)), "#059669")}
+        </div>
+
+        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">Tier 分布</div>
+        {_bar_rows(stats.get("tier_dist", []))}
+        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">事件类型分布</div>
+        {_bar_rows(stats.get("event_type_dist", []))}
+        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">情感分布</div>
+        {_bar_rows(stats.get("sentiment_dist", []))}
+        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">来源分布</div>
+        {_bar_rows(stats.get("source_dist", []))}
+
+        <h3 style="font-size:15px;margin:22px 0 12px;color:#111827">🟣 A 级清单（本周高置信信号）</h3>
+        {cards}
+
+        <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
+          由催化剂决策管道自动生成 · 自然周去重 · 每周一 09:00 发送
+        </div>
+      </div>
+    </div>
+    """
+
+
+def _weekly_report_already_sent(conn, start_utc, end_utc) -> bool:
+    """本周（自然周窗口内）是否已成功发送过周报。"""
+    row = conn.execute("""
+        SELECT 1 FROM biz.catalyst_notification_log
+        WHERE notification_type = %s AND status = 'sent'
+          AND sent_at >= %s AND sent_at < %s
+        LIMIT 1
+    """, (NTYPE_WEEKLY_REPORT, start_utc, end_utc)).fetchone()
+    return row is not None
+
+
+def send_catalyst_weekly_report(conn, end_ts=None) -> dict:
+    """发送催化剂周报（概览 + A 级清单）。
+
+    Args:
+        conn: 数据库连接
+        end_ts: 窗口计算参考时刻（tz-aware），缺省用当前时刻。
+
+    Returns:
+        dict: {sent, skipped, failed, reason, window, a_count, signals_total}
+    """
+    try:
+        ensure_notification_table(conn)
+    except Exception as e:
+        logger.warning("确保通知表存在失败: %s", e)
+
+    try:
+        start_utc, end_utc, window_label = _weekly_window(end_ts)
+    except Exception as e:
+        logger.warning("周报窗口计算失败: %s", e, exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 0,
+                "reason": f"窗口计算失败: {e}",
+                "window": None, "a_count": 0, "signals_total": 0}
+
+    # 自然周去重：本周已发过即跳过
+    try:
+        if _weekly_report_already_sent(conn, start_utc, end_utc):
+            return {"sent": 0, "skipped": 1, "failed": 0,
+                    "reason": f"本周（{window_label}）周报已发送过，跳过",
+                    "window": window_label, "a_count": 0, "signals_total": 0}
+    except Exception as e:
+        logger.warning("周报去重预检失败: %s", e, exc_info=True)
+
+    try:
+        stats = _weekly_overview_stats(conn, start_utc, end_utc)
+        a_rows = _weekly_a_signals(conn, start_utc, end_utc)
+    except Exception as e:
+        logger.warning("周报统计/清单查询失败: %s", e, exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 0,
+                "reason": f"查询失败: {e}",
+                "window": window_label, "a_count": 0, "signals_total": 0}
+
+    subject = f"📊 催化剂周报 · {window_label} · A级 {len(a_rows)} 条"
+
+    # 原子占锁（防并发/重复触发）
+    if not _try_acquire_send_lock(conn, SENTINEL_WEEKLY_REPORT_SIGNAL_ID,
+                                  NTYPE_WEEKLY_REPORT, None, subject):
+        return {"sent": 0, "skipped": 1, "failed": 0,
+                "reason": "发送锁未获取（可能已在发送中），跳过",
+                "window": window_label, "a_count": len(a_rows),
+                "signals_total": stats.get("signals_total", 0)}
+
+    try:
+        body = _build_weekly_report_html(stats, a_rows, window_label)
+    except Exception as e:
+        logger.warning("周报渲染失败: %s", e, exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 1,
+                "reason": f"渲染失败: {e}",
+                "window": window_label, "a_count": len(a_rows),
+                "signals_total": stats.get("signals_total", 0)}
+
+    ok, msg = _send_email(subject, body)
+    _mark_sent(conn, SENTINEL_WEEKLY_REPORT_SIGNAL_ID, NTYPE_WEEKLY_REPORT,
+               None, subject, status="sent" if ok else "failed",
+               error_msg=None if ok else msg)
+
+    return {"sent": 1 if ok else 0, "skipped": 0,
+            "failed": 0 if ok else 1, "reason": msg,
+            "window": window_label, "a_count": len(a_rows),
+            "signals_total": stats.get("signals_total", 0)}
 
 
 

@@ -1936,6 +1936,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 **未做 / 边界（须留档）**：① **上游掉量根因（「抓得少 vs 翻旧帖」）未查实**：本轮只定位到 `asset_catalyst` 日入库量 3~4 倍塌陷 + 高分样本全被判「已定价」两重因素，但**采集端为何掉量**（源站节奏下降 / 翻旧帖稀释 / 采集器限流）尚未取证，属独立工单。② **口径只用单一全资产 MAX(created_at)，不拆 crypto/stock**：两封 digest 候选同源，且 `slow_digest_stock` 实测从未有过 A 级候选，故不拆；若日后美股通道独立出量需拆双哨兵。③ **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`）。
 
+### 催化剂周报（2026-09-29，本次提交）
+
+来源：用户「**我想每周收到催化剂的周报**」。经 AskUserQuestion 确认三点：① 内容 =「概览 + A 级清单」（顶部本周催化剂多维统计，下方 A 级高置信信号逐条清单）；② 发送时间 = 周一 09:00（北京时间）；③ 收件人 = 复用现有催化剂邮箱（SMTP_TO）。
+
+**改动（4 文件，均仅本人改动）**：
+- `workbench/catalyst/notifier.py`：新增 `send_catalyst_weekly_report()` 及配套函数。`NTYPE_WEEKLY_REPORT='weekly_report'`、哨兵 `SENTINEL_WEEKLY_REPORT_SIGNAL_ID=-4`（延续 -1/-2/-3 负号哨兵约定）。自然周窗口 `_weekly_window()`（北京时区，上周一 00:00 ~ 本周一 00:00）；概览统计 `_weekly_overview_stats()`（信号总数 / tier / 事件类型 / 情感 / 来源分布 + 催化剂入库数，事件类型与情感沿用 `COALESCE` 统一口径）；A 级清单 `_weekly_a_signals()`（tier='A' + status='open' + entry/stop/tp 齐全，按 `composite_score DESC`）。**去重按自然周**（`_weekly_report_already_sent` 查本周窗口内 `status='sent'`），而非 Alert 通道的 24h 窗口；发送频率由调度器约束（每周一 09:00 触发一次），发送仍走既有 `_try_acquire_send_lock` 原子占锁防并发。
+- `scripts/bin/send_catalyst_weekly.py`：薄脚本（复用 `_setup_paths()` 路径探测 + `get_conn` + 调 `send_catalyst_weekly_report`，支持 `--dry-run` 只读预览）。
+- `workbench/scheduler.py`：`SCHEDULE` 新增 `("catalyst_weekly_report", "0 9 * * 1", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core")`。
+- `workbench/test_catalyst_weekly_report.py`：离线护栏测试 **39/0**（通道独立、负号哨兵 -4、自然周窗口恰 7 天且北京周一 00:00、概览/清单 SQL 口径、自然周去重、发送流程三分支、渲染护栏含交易档位且不含运维告警字样、失败不阻断）。
+
+**验证**：`py_compile` 4/4 OK；`test_catalyst_weekly_report.py` 39/0 全绿；`send_catalyst_weekly.py --help` 导入正常。
+
+**未做 / 边界（须留档）**：① **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`，新调度项 `catalyst_weekly_report` 需容器重建后才生效）。② **首期窗口可能为空**：上线后首个周一（10-05）窗口内若 A 级候选为 0，周报仍会发「本周无 A 级高置信信号」占位（概览统计照常），不会静默跳过——这与 `channel_silence` 的「空窗不发用户邮件」决议不冲突（那是 A 级 Alert 逐条通道，周报是周期性汇总）。③ **A 级清单仅取 `status='open'`**：已被价格确认降级为 `watch` 的高分样本不进周报清单（延续 d3 分层决议）。
+
 ### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
 
 **现象**：同一份 `biz.asset_tokenomics` 有 **4 个组装点**且口径已漂移——① `db_stats.get_asset_tokenomics()` 字段最全（22 列 + `biz.asset_token_unlocks` 的 revenue/valuation/overview）但**无逐字段来源/时点**；② 投研结论 prompt 的 inline `_fund` **只吃 `lp_locked / contract_renounced / buy_tax_pct / sell_tax_pct`**；③ 解锁测算 prompt **另起一套 raw SQL 吃 10 列**并**复制了一份 CMC supply 校验**；④ 页面各渲染一个子集。**核心病根**：库里已有的 `allocation / burn_info / emission_schedule / inflation_info / governance_info / utility_info` **从未进入投研结论主线**（只进解锁支线）——2043 行中 allocation 776、emission 676、utility 1204、governance 328、burn 203、inflation 155 全部对投资决策 prompt 不可见。

@@ -203,6 +203,8 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("catalyst_run_all", "0 */12 * * *", "catalyst_run_all.py", [], "催化剂全链路：摄入→AI预处理→thesis重生（每 12 小时）", "core"),
     # P1-6: 决策管道慢通道独立调度（4h 一次，仅跑二阶展开+G3G5+巡检，不消耗 LLM 额度）
     ("catalyst_slow_pipeline", "30 */4 * * *", "phase_catalyst_pipeline.py", ["--slow"], "催化剂决策管道慢通道（每 4 小时）", "core"),
+    # 催化剂周报：概览+A级清单，自然周去重，每周一 09:00 发送
+    ("catalyst_weekly_report", "0 9 * * 1", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core"),
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),

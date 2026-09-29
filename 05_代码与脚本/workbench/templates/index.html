@@ -5814,6 +5814,16 @@
             border-left: 2px solid #f59e0b;
         }
 
+        .signal-demote {
+            font-size: 11px;
+            color: #b45309;
+            margin-top: 4px;
+            padding: 3px 8px;
+            background: rgba(180, 83, 9, .08);
+            border-radius: 4px;
+            border-left: 2px solid #b45309;
+        }
+
         .st-mvrv {
             background: rgba(59, 130, 246, .18);
             color: #60a5fa;
@@ -13627,6 +13637,10 @@
             // 估值过滤器提示
             var valFilterNote = o.valuation_filter_note ? '<div class="signal-val-filter">🔊 ' + escapeHtml(o.valuation_filter_note) + '</div>' : '';
 
+            // M2-A1（2026-09-28）：档位被降档（或早报兜底）时给出原因，避免「78 分却是 MED」无从理解。
+            var _demoteTxt = o.display_note || o.tier_demote_reason || '';
+            var demoteLine = _demoteTxt ? '<div class="signal-demote">⬇️ 降档说明：' + escapeHtml(_demoteTxt) + '</div>' : '';
+
             // 多信号合并：all_signals 数组（主卡 + 其他信号）
             var allSignals = o.all_signals && o.all_signals.length ? o.all_signals : [o];
             var isMerged = allSignals.length > 1;
@@ -13870,6 +13884,7 @@
             strengthLine +
             eventStrengthLine +
             valFilterNote +
+            demoteLine +
                 aiReasonHtml +
                 (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
                 multiSignalHtml +

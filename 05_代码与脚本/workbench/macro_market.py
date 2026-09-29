@@ -9079,6 +9079,28 @@ def _unify_sector_metric(opps: list | None, ssot: dict) -> int:
     return n
 
 
+def _brief_top_opportunities(opps: list, top_n: int = 3, label: str = "") -> list:
+    """早报清单兜底：HIGH ∪ 池内 conv 前 top_n（M2-A2/A3，2026-09-28）。
+
+    背景：C1（未回测不进 HIGH）+ 降档规则上线后，09-28 高亮 10 条 0 HIGH ⇒ 早报
+    `M8_opportunities` 整段空窗。判据由「仅 HIGH」放宽为「HIGH ∪ 池内 conv 前 top_n」，
+    让机会段不再因降档规则而空。兜底项**就地**打 `display_demoted=True` + `display_note`，
+    供渲染层强制标注「非高确定性」，绝不让未回测/降档项伪装成高确定性。
+    """
+    high = [o for o in opps if str(o.get("conviction_tier") or "").upper() == "HIGH"]
+    rest = [o for o in opps if str(o.get("conviction_tier") or "").upper() != "HIGH"]
+    rest.sort(key=lambda o: o.get("conviction_score") or 0, reverse=True)
+    fallback = rest[:max(0, int(top_n))]
+    for o in fallback:
+        o["display_demoted"] = True
+        if not o.get("display_note"):
+            reason = str(o.get("tier_demote_reason") or "").strip()
+            base = label or "非高确定性档"
+            o["display_note"] = (f"{base}，按池内分数展示（降档原因：{reason}）"
+                                 if reason else f"{base}，按池内分数展示")
+    return high + fallback
+
+
 def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = True) -> dict:
     """
     早报结构化骨架 V2（重新设计版）。
@@ -9192,6 +9214,13 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     # ── 每日变化榜精简版 ──
     daily_diff_brief = _build_daily_diff_brief(today, highlights, risk_signals)
 
+    # ── M2-A2/A3（2026-09-28）：早报机会/高危段兜底，避免降档规则使 HIGH=0 时空窗 ──
+    # HIGH ∪ 池内 conv 前 3；兜底项打 display_demoted/display_note，渲染层强制标注。
+    _m8_opportunities = _brief_top_opportunities(opps, 3, label="非高确定性档（当日 HIGH 不足）")
+    _m8_keep_ids = {id(o) for o in _m8_opportunities}
+    _m8_watchlist = [o for o in opps if id(o) not in _m8_keep_ids]
+    _m4_risks = _brief_top_opportunities(risk_signals, 3, label="非高确定性档（当日高危 HIGH 不足）")
+
     # ── M4-3 同赛道唯一事实源：叙事机会的「市值 +X%」统一到赛道 ETL 口径 ──
     _sector_ssot = _sector_ssot_map(sector_flow)
     _n_unified = _unify_sector_metric(opps, _sector_ssot)
@@ -9216,7 +9245,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "M2_holder_concentration": holder_concentration,
         "M2_stablecoin": stab,
         "M3_highlights": highlights,
-        "M4_risks": risk_signals,
+        "M4_risks": _m4_risks,
         "M5_daily_diff": daily_diff_brief,
         "M6_catalyst": today.get("event_calendar") or {},
         "M6_upcoming_unlocks": upcoming_unlocks,
@@ -9225,12 +9254,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
             d for d in divs
             if d.get("label") in ("DANGEROUS", "DIVERGENT")
         ],
-        "M8_opportunities": [
-            o for o in opps if o.get("conviction_tier") == "HIGH"
-        ],
-        "M8_watchlist": [
-            o for o in opps if o.get("conviction_tier") != "HIGH"
-        ],
+        "M8_opportunities": _m8_opportunities,
+        "M8_watchlist": _m8_watchlist,
         "M8_resonance": today.get("resonance") or {},
         "M8_meme": today.get("meme_risk") or {},
         "M8_chimney": today.get("chimney_signals") or {},

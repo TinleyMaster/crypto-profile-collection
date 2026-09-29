@@ -1310,6 +1310,10 @@ def render_brief_html(brief: dict) -> str:
                 obs_html = ('<span style="font-size:9px;background:#e2e8f0;color:#475569;'
                             'padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">'
                             '观察级（非高亮）</span>')
+            # M2-A1（2026-09-28）：档位被降档时给出原因，避免读者看到「78 分却是 MED」无从理解。
+            _hl_demote = str(h.get("display_note") or h.get("tier_demote_reason") or "").strip()
+            demote_html = (f'<div style="font-size:9.5px;color:#b45309;margin-top:4px">'
+                           f'⬇️ 降档说明：{html.escape(_hl_demote)}</div>' if _hl_demote else "")
 
             html_parts.append(f"""
             <div style="padding:10px 12px;margin:6px 0;border-radius:8px;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecaca;border-left:3px solid #dc2626">
@@ -1333,6 +1337,7 @@ def render_brief_html(brief: dict) -> str:
                 </div>
                 {mini_dims_html}
               </div>
+              {demote_html}
             </div>
             """)
 
@@ -2245,6 +2250,10 @@ def render_brief_html(brief: dict) -> str:
                               'padding:1px 5px;border-radius:3px;font-weight:700">未回测</span>')
             # W-14：校准行——命中率须与样本量、窗口同时出现，并按时长/命中率诚实标注
             cal_line = _cal_line_html(opp.get("calibration_status"))
+            # M2-A1/A2：降档/兜底项给出原因，避免读者看到「78 分却是 MED」无从理解。
+            _opp_demote = str(opp.get("display_note") or opp.get("tier_demote_reason") or "").strip()
+            demote_line = (f'<div style="font-size:9.5px;color:#b45309;margin-top:3px">'
+                           f'⬇️ 降档说明：{html.escape(_opp_demote)}</div>' if _opp_demote else "")
 
             # 信号源标签
             src_html = ""
@@ -2280,6 +2289,7 @@ def render_brief_html(brief: dict) -> str:
               {src_html}
               <div style="color:#475569;font-size:11px;margin-top:4px;line-height:1.4">{body_text}</div>
               {cal_line}
+              {demote_line}
             </div>
             """)
         # M4-1：折叠项以「关联」一行说明去向（信息不丢，只是不再并排列示）

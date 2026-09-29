@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""高亮信号 · 增量邮件提醒（每小时探测，仅「新增/升级」发信）。
+"""高亮信号提醒邮件（每小时探测；发信时**同步展示当前高亮池全集**）。
 
 数据源：biz.market_overview_snapshot.payload → opportunity_list.highlight_signals
     由 build_daily_brief.py 每日 08:30 落库。本脚本**只读**该快照，
     不重算 overview、不调用 LLM，因此每轮开销近乎为零，可安全地每小时探测。
 
-发信条件（二者之一，见 classify_card）：
+发信触发（见 classify_card）：
     new      卡片首次出现（去重表内无「已发送」记录）
     upgrade  tier 由 MED 升到 HIGH，或共振源数（resonance_count）较上次增加
+    （仅当存在 new/upgrade 时才发信；不因「退出/降级」单独发信）
+
+正文口径（2026-09-28 「只进不出」审计处置）：邮件不再只渲染增量卡，而是渲染
+    **当前高亮池全集**——被本轮判定为 new/upgrade 的标对应徽章，其余标「📌 在池」。
+    这样读者每次都能看到「池子里现在有哪些」，退出/降级的卡因不在池中而自然消失，
+    无需另发退场邮件（主人明确：和高亮池同步显示，不发退场邮件）。
 
 去重冷却：biz.highlight_alert_log，UNIQUE(card_key, alert_kind) + 默认 24h 窗口，
     INSERT ... ON CONFLICT ... RETURNING 原子加锁（范式同 catalyst/notifier.py）。
@@ -48,7 +54,9 @@ from crypto_research.utils.time_utils import fmt_bj  # noqa: E402
 TIER_RANK = {"LOW": 0, "MED": 1, "HIGH": 2}
 ALERT_NEW = "new"
 ALERT_UPGRADE = "upgrade"
-ALERT_LABEL = {ALERT_NEW: "🆕 新增", ALERT_UPGRADE: "⬆️ 升级"}
+# 「在池」不是发信触发，而是池内未变化卡片的展示徽章（见 render_html / main）。
+ALERT_HOLD = "hold"
+ALERT_LABEL = {ALERT_NEW: "🆕 新增", ALERT_UPGRADE: "⬆️ 升级", ALERT_HOLD: "📌 在池"}
 
 DEFAULT_COOLDOWN_HOURS = 24
 DEFAULT_LOOKBACK_DAYS = 7
@@ -56,6 +64,16 @@ DEFAULT_MAX_CARDS = 10
 STALE_LOCK_MINUTES = 30  # 崩溃残留的 sending 锁，超过该时长允许重新获取
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,10}$")
+
+# 聚合/宏观类信号：其 target 是「板块名 / 榜单名」（如 DePIN、Solana 链），
+# 不是可交易币种。这些卡片即使 target 恰好形如 symbol（如 "DEPIN"）也**不计入覆盖币数**；
+# 其中真正涉及的币走 involved_symbols 计。R4（2026-09-28 审计）。
+AGGREGATE_SIGNAL_TYPES = {
+    "narrative", "chain_inflow", "sector_inflow", "sector_outflow",
+    "stablecoin_inflow", "stablecoin_outflow",
+    "mvrv_deep_under", "mvrv_deep_over", "mvrv_under_watch",
+    "fng_extreme", "leverage_extreme", "btc_left_accum", "cm_adoption_divergence",
+}
 
 SIGNAL_TYPE_LABEL = {
     "mvrv_deep_under": "MVRV深度低估", "mvrv_under_watch": "MVRV偏低",
@@ -183,11 +201,16 @@ def _safe_float(v, default: float = 0.0) -> float:
 
 
 def symbol_count(cards: list[dict]) -> int:
-    """覆盖币数：symbol 形态 target + involved_symbols 并集。"""
+    """覆盖币数：symbol 形态 target + involved_symbols 并集。
+
+    R4（2026-09-28 审计）：聚合/宏观类信号（narrative / chain_inflow / sector_* 等）
+    的 target 是板块名/榜单名，不是币种——即使形如 symbol（如 "DePIN"）也不计币；
+    其涉及的真实币仍由 involved_symbols 计入。
+    """
     syms: set[str] = set()
     for c in cards:
         tgt = str(c.get("target") or "").strip().upper()
-        if SYMBOL_RE.match(tgt):
+        if SYMBOL_RE.match(tgt) and primary_signal_type(c) not in AGGREGATE_SIGNAL_TYPES:
             syms.add(tgt)
         for s in (c.get("involved_symbols") or []):
             if s:
@@ -354,6 +377,10 @@ def render_card(card: dict, kind: str) -> str:
     action = f'<div style="font-size:11px;color:#166534;margin-top:4px">🎯 {_e(card.get("action_hint"))}</div>' if card.get("action_hint") else ""
     invalid = f'<div style="font-size:11px;color:#991b1b;margin-top:2px">⚠️ 失效条件：{_e(card.get("invalidation"))}</div>' if card.get("invalidation") else ""
     val_note = f'<div style="font-size:11px;color:#92400e;margin-top:2px">🔊 {_e(card.get("valuation_filter_note"))}</div>' if card.get("valuation_filter_note") else ""
+    # M2-A1（2026-09-28）：档位被降档时给出原因，避免读者看到「78 分却是 MED」无从理解。
+    demote = (f'<div style="font-size:11px;color:#b45309;margin-top:2px">⬇️ 降档说明：'
+              f'{_e(card.get("tier_demote_reason"))}</div>'
+              if card.get("tier_demote_reason") else "")
     dims = _dim_labels(card.get("related_dims"))
     dims_txt = f'<div style="font-size:11px;color:#64748b">来源维度：{_e(", ".join(dims))}</div>' if dims else ""
 
@@ -374,25 +401,30 @@ def render_card(card: dict, kind: str) -> str:
       {action}
       {invalid}
       {val_note}
+      {demote}
       {_render_merged_signals(card)}
       {_render_ai_block(card)}
     </div>"""
 
 
 def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights: int) -> str:
+    """渲染邮件正文。items = 当前高亮池（本轮新增/升级 + 在池）逐卡 (card, kind)。"""
     n_new = sum(1 for _, k in items if k == ALERT_NEW)
-    n_up = len(items) - n_new
+    n_up = sum(1 for _, k in items if k == ALERT_UPGRADE)
+    n_hold = sum(1 for _, k in items if k == ALERT_HOLD)
     cards = [c for c, _ in items]
     now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
+    hold_txt = f" · 在池 {n_hold} 条" if n_hold else ""
     head = f"""
     <h2 style="margin:0 0 4px">⚡ 高亮信号提醒</h2>
     <p style="margin:0 0 12px;color:#666;font-size:13px">
-      新增 {n_new} 条 · 升级 {n_up} 条 · 覆盖 {symbol_count(cards)} 币 ·
+      新增 {n_new} 条 · 升级 {n_up} 条{hold_txt} · 覆盖 {symbol_count(cards)} 币 ·
       数据快照 {_e(snap_date)}（当日高亮池共 {total_highlights} 条） · 生成于 {now}
     </p>"""
-    body = "".join(render_card(c, k) for c, k in items)
     if not items:
         body = '<p style="color:#999">本轮无新增/升级高亮信号。</p>'
+    else:
+        body = "".join(render_card(c, k) for c, k in items)
     return f'<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;max-width:720px">{head}{body}</div>'
 
 
@@ -579,7 +611,11 @@ def main() -> int:
             return 0
 
         if args.dry_run:
-            print(render_html(capped, actual_date, len(highlights)))
+            # 与高亮池同步显示：正文给「当前池全集」，本轮新增/升级标徽章，其余「在池」
+            _kinds = {card_key(c): k for c, k in candidates}
+            _pool = [(c, _kinds.get(card_key(c)) or ALERT_HOLD) for c in highlights]
+            _pool.sort(key=card_sort_key, reverse=True)
+            print(render_html(_pool[:args.max_cards], actual_date, len(highlights)))
             return 0
 
         subject = (f"⚡ 高亮信号提醒（新增 "
@@ -592,10 +628,18 @@ def main() -> int:
         if len(granted) < len(capped):
             print(f"[highlight_alert] {len(capped) - len(granted)} 条命中冷却窗口，已跳过")
 
-    # ── 阶段 2：渲染 + 发送 ──
-    html = render_html(granted, actual_date, len(highlights))
-    cards = [c for c, _ in granted]
-    subject = f"⚡ 高亮信号提醒（{len(granted)} 条 · {symbol_count(cards)} 币）"
+    # ── 阶段 2：渲染 + 发送（正文同步展示当前高亮池全集）──
+    _granted_kinds = {card_key(c): k for c, k in granted}
+    pool_items = [(c, _granted_kinds.get(card_key(c)) or ALERT_HOLD) for c in highlights]
+    pool_items.sort(key=card_sort_key, reverse=True)
+    pool_items = pool_items[:args.max_cards]
+    html = render_html(pool_items, actual_date, len(highlights))
+    cards = [c for c, _ in pool_items]
+    n_new = sum(1 for _, k in pool_items if k == ALERT_NEW)
+    n_up = sum(1 for _, k in pool_items if k == ALERT_UPGRADE)
+    n_hold = sum(1 for _, k in pool_items if k == ALERT_HOLD)
+    subject = (f"⚡ 高亮信号提醒（新增 {n_new} · 升级 {n_up} · 在池 {n_hold} 条 · "
+               f"{symbol_count(cards)} 币）")
 
     from crypto_research.clients.notifier import EmailNotifier
 

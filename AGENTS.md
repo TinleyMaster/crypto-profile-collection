@@ -2240,3 +2240,17 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - **回归**：workbench 全量 **53 个 `test_*.py` 全部 exit=0**；`py_compile` 3/3。
 - **未做 / 边界（须留档）**：① **`tvl_surge_24h` 未纳入**（工单只列 7 类、网页端 `DIFF_CATEGORY_LABELS` 也无此键）——数据存在但早报未展示，如需可后续加；② **连板标注（Q4）未做**（U-A 已在信号层落地）；③ `_fmt_diff_value` 对 `volume_surge_24h/down`（缩量）沿用网页端不显 `+`（值为正、语义为缩量），未另造口径；④ 存量快照无 `M5_daily_diff` 内容，需 **redeploy + 次日 build** 才有真数据（`push ≠ 线上生效`）；⑤ D3 复活属本次连带修复，若产品认为需单独评估请回退 5518 处改动（仅影响 D3，不影响 M5——M5 走 8862 兜底）。
 - **待部署**：`send_daily_brief.py` / `macro_market.py` 需容器 **redeploy**，次日 08:30 快照 + 09:00 早报生效。
+
+### 高亮邮件「只进不出」+ M2 方案 A（审计_高亮信号邮件_只进不出诊断 / 处置建议_M2_HIGH档位收死与早报空窗，2026-09-28，本次提交）
+
+**范围**：邮件「只进不出」诊断（用户拍板「和高亮池同步显示，不用退送邮件」；R3 每日全集「你看着办」）+ M2 报告**只做方案 A**（展示层，用户拍板）。**零 DDL、零迁移、不改评分/档位/白名单**。
+
+- **高亮邮件改为与池同步（`send_highlight_alert.py`）**：
+  - `classify_card` 触发逻辑不变（仍只 new/upgrade 才发信，不发退场/降级邮件）；但**正文改为渲染当前高亮池全集**——本轮获批发送的 new/upgrade 标徽章、其余标「📌 在池」（新增 `ALERT_HOLD`/`ALERT_LABEL`）。`main` 阶段1 仍只对 candidates 取锁去重；阶段2 用 `pool_items`（granted kind 或 HOLD）渲染，抬头加「在池 N 条」。`--dry-run` 同样给池全集。⇒ 读者每次都能看到「现在池里有哪些」，退出/降级卡因不在池中自然消失，无需另发退场邮件（等于把 R3「每日全集」并入每次告警，不新增邮件通道、不刷屏）。
+  - **R4 聚合类不计币**：新增 `AGGREGATE_SIGNAL_TYPES`（narrative / chain_inflow / sector_* / stablecoin_* / mvrv_* / fng_extreme / leverage_extreme / btc_left_accum / cm_adoption_divergence）；`symbol_count` 对聚合类 target 不再单凭正则判币（DePIN/Oracles 不再计；真实币仍走 `involved_symbols`）。prod 只读实测：09-28 高亮池覆盖币数 **7 → 6**（差值为 DePIN）、09-29 **15 → 14**（差值为 Oracles）。
+- **M2 方案 A（展示层，零算法风险）**：
+  - **A2/A3（`macro_market.py`）**：新增纯函数 `_brief_top_opportunities(opps, top_n=3, label)` = 「HIGH ∪ 池内 conv 前 3」，兜底项**就地**打 `display_demoted=True` + `display_note`（含 `tier_demote_reason`），供渲染层强制标注。早报 `M8_opportunities = _brief_top_opportunities(opps,3)`、`M4_risks = _brief_top_opportunities(risk_signals,3)`（高危侧对称）；`M8_watchlist` 剔除兜底项（并集不丢、不重复）。**prod 只读实测**：09-28（HIGH=0）→ 兜底 3 条（AI & Big Data / DePIN / 2 币 MVRV 极度高估），机会段不再空窗；09-29（HIGH=3）→ 返回 6 条（3 HIGH + 3 兜底）。
+  - **A1（三处消费 `tier_demote_reason`）**：高亮邮件 `render_card` 加「⬇️ 降档说明」；早报 `send_daily_brief` 的 AI 精选高亮卡与精选机会卡各加降档说明行（优先 `display_note` 再 `tier_demote_reason`）；前端 `index.html` `renderSignalItem` 加 `.signal-demote` 行（消费 `o.display_note || o.tier_demote_reason`）。
+- **验证**：`test_highlight_alert.py` **68 → 77/0**（新增 H7：池同步/在池徽章/R4 聚合类/降档说明/main 池全集接线）；新增 `test_m2_high_fallback_20260928.py` **21/0**（A2 helper 全分支 + brief 接线源码守卫 + A1 早报渲染带降档说明 + 前端消费）。workbench 全量 **56 个 `test_*.py` 全部 exit=0**；`py_compile` 3/3；`node --check`（index.html script）通过。
+- **未做 / 边界（须留档）**：① **M2 方案 B（放行硬数据极值类进 HIGH）未做**（用户选「只做 A」）；② **C（为 11 类豁免设计可回测口径）/ D（分位数 tier）/ E（turnover 加分）均未做**；③ `_brief_top_opportunities` 对 `opps` 是**就地**加键（`display_demoted`/`display_note`），无其它消费者读取该二键，安全；④ 存量早报快照仍是旧口径，需 **redeploy + 次日 build** 才生效（`push ≠ 线上生效`）；⑤ 「每日无变化也发一封池摘要」未单独建通道（并入告警正文，见上）。
+- **待部署**：`send_highlight_alert.py`（scheduler 子进程）/ `send_daily_brief.py` / `macro_market.py` / `index.html` 需容器 **redeploy** 后生效。

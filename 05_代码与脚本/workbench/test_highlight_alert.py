@@ -188,5 +188,28 @@ check('"highlight_alert"' in _sched and '"send_highlight_alert.py"' in _sched,
       "scheduler.py 已注册 highlight_alert")
 check('("highlight_alert", "5 * * * *"' in _sched, "cron 为每小时 05 分")
 
+print("\n[H7] 池同步显示 + R4 聚合类不计币 + 降档说明")
+# R4：narrative 板块名（如 DePIN）不是币种，不计入覆盖币数；真实币走 involved_symbols
+check(sha.symbol_count([_card(target="DePIN", signal_type="narrative",
+                              involved_symbols=[])]) == 0,
+      "narrative 板块名 DePIN 不计币（R4）")
+check(sha.symbol_count([_card(target="DePIN", signal_type="narrative",
+                              involved_symbols=["AAA", "BBB"])]) == 2,
+      "聚合类仍按 involved_symbols 计真实币")
+check(sha.symbol_count([_card(target="SOL", signal_type="whale_flow")]) == 1, "普通币种仍计币")
+check("DePIN" in sha.AGGREGATE_SIGNAL_TYPES or "narrative" in sha.AGGREGATE_SIGNAL_TYPES,
+      "聚合类集合已定义 narrative")
+# 池同步：正文含「在池」徽章 + 抬头在池计数（同分同卡以不同 kind 模拟）
+_hold = sha.render_html([(card, sha.ALERT_NEW), (card, sha.ALERT_HOLD)], "2026-09-23", 2)
+check("📌 在池" in _hold, "在池卡片渲染「📌 在池」徽章")
+check("在池 1 条" in _hold, "抬头含在池计数")
+check("新增 1 条 · 升级 0 条" in _hold, "抬头统计行口径不变")
+check("pool_items" in _sha_src and "_granted_kinds" in _sha_src,
+      "main 正文渲染池全集（pool_items/_granted_kinds），非仅增量")
+# M2-A1：卡片刻消费 tier_demote_reason
+_dem = sha.render_html([(_card(tier_demote_reason="exempt_unbacktested：该类型从未被回测"),
+                         sha.ALERT_NEW)], "2026-09-23", 1)
+check("降档说明" in _dem and "exempt_unbacktested" in _dem, "邮件卡消费 tier_demote_reason")
+
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")
 sys.exit(1 if failed else 0)

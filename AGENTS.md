@@ -2383,3 +2383,13 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   - **踩坑（两处严格护栏）**：① 高亮徽章 `title` 初版写「模型（AI）**置信度**」→ 撞 `test_daily_brief_p0_20260927` 的 `"置信度" not in html` 护栏 ⇒ 改「模型（AI）信心」；② 名词速查初版含「**>85%** 偏贵」→ 撞同测试 `"85%" not in html`（反硬编码置信度）护栏 ⇒ 删数字改「越高越易抛压」。**该测试是对 09-27 P0-a 的守卫，非误伤，措辞须绕开其禁词**。
 - **未改（留档）**：R-4 恐贪 73 vs 74（信号侧源 vs SSOT，改需切源、可能动阈值）；R-9 告警质量区块折叠 + 删调试词（`边缘桶 price_chg=<3`/`规则 C/D` 出自 `build_scan_edge_report` 的 conclusion，非本渲染层）；R-13 降档说明逐条展开（已由 R-5 消歧）；R-14 关联折叠内联（结构微调）。
 - **待部署**：`send_daily_brief.py` / `macro_market.py` 需容器 **redeploy** 后次日 09:00 邮件生效。
+
+### data_sync_daily「老是告警」根因修复（2026-09-29，本次提交）
+
+来源：看护邮件「关键 cron `data_sync_daily` 已 30.7 小时无成功执行（最近 done `1790549530.869194`）／未自动补跑（scheduler 存活），最近错误 `exit code 1`」。**物证级只读排查（prod `sys.task`/`sys.task_log`）**：
+
+- **最近一次 run = task `361d0b6a6c59`（09-28 22:30 UTC = 09-29 06:30 CST，耗时 69s，`failed / exit code 1`）**；日志 42~43 行：`全部完成：成功 1 / 失败 1 / 共 14`、`失败任务：资产同名去重`。子任务 2 `dedup_assets.py --apply` 输出 `[FAIL] E/ACC … canceling statement due to lock timeout` / `[FAIL] HOODIE … lock timeout`、`exit=2`。
+- **根因链**：① 删 `core.asset` 触发 ~42 张子表 FK 级联，06:30 与 `derivatives_batch`（`30 */6 * * *`，**同 06:30**）并发写子表 ⇒ 撞 `lock_timeout`；② 当时部署的还是**旧编排**（critical 失败即 `break`）⇒ 只跑了 2/14 子任务、整体退出 1。`4f5cf8d`（09-29 08:37 提交）已加「每组独立事务 + 宽锁 120s + 5/15/30s 重试 + 子任务隔离」，**但晚于该 run**，且**它仍把「资产同名去重」标 `critical=True`**、`dedup_assets.main()` 只要有一组失败仍 `return 2` ⇒ 即便部署，残留锁超时仍会 `exit 1` → 看护反复报「任务自身失败」。
+- **修复（`scripts/bin/dedup_assets.py`，外溢最小）**：`main()` 区分 **锁竞争耗尽**（`failed_lock`）与 **真实错误**（`failed_other`）——① 锁耗尽 → 打印 `[WARN] … 撞锁重试已耗尽，本轮跳过（幂等，次日重试）`，**退出码 0**（同名去重是幂等的机会性清理，锁是调度竞争非数据故障）；② 只有非锁竞争的真实错误（约束冲突/数据异常）才 `return 2`（保持失败可见）。**不改编排 `critical` 标记**（真实错误仍会 `exit 1` → 告警，正确）；不改调度（06:30 与 derivatives_batch 同窗属既有安排，另议）。
+- **自测**：`test_dedup_assets_resilience.py` **+4 断言**（`failed_lock`/`failed_other` 分流、`return 2 if failed_other else 0`、`[WARN] 本轮跳过` 文案、`is_lock_error` 同源判据）。**回归**：workbench 全量 **59 个 `test_*.py` 全部 exit=0**；`py_compile` 通过。
+- **未做 / 边界（须留档）**：① **06:30 与 `derivatives_batch` 同窗**是撞锁诱因，根治可错峰（如 derivatives_batch 改 `45 */6`）——本轮未动调度，避免影响 derivatives 下游节拍；② 锁耗尽跳过 = 该批重复资产延后至次日清理（幂等、无数据丢失）；③ **需容器 redeploy** 后下次 06:30（北京）生效。

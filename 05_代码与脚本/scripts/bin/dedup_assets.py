@@ -18,6 +18,10 @@
   ① 本任务连接单独放宽 lock_timeout（`--lock-timeout-ms`，默认 120s）；
   ② 锁竞争错误（lock_timeout 55P03 / 死锁 40P01）按 5/15/30s 退避重试至多 3 次；
   ③ 失败信息带「出错语句」上下文，便于定位是哪张表/哪一步被锁。
+  ④ **锁耗尽不算硬失败（2026-09-29 告警收敛）**：同名去重是幂等的机会性清理，06:30
+     与 derivatives_batch 同窗时偶发撞锁属常态；重试耗尽后**跳过该组**（打印 [WARN]，
+     次日再试），退出码仍为 0 —— 避免整条 data_sync_daily 被"任务自身失败"钉住并反复告警。
+     仅**非锁竞争**的真实错误（约束冲突/数据异常等）才返回非 0（保持失败可见）。
 
 用法：
   python dedup_assets.py --dry-run   预览合并计划，不写库
@@ -309,7 +313,7 @@ def main() -> int:
         return 0
 
     # apply：每组独立事务；锁竞争按 5/15/30s 退避重试至多 LOCK_RETRIES 次
-    ok, failed = 0, 0
+    ok, failed_lock, failed_other = 0, 0, 0
     for g in groups:
         last_err: BaseException | None = None
         for attempt in range(LOCK_RETRIES + 1):
@@ -331,13 +335,20 @@ def main() -> int:
                     continue
                 break
         if last_err is not None:
-            failed += 1
-            kind = "锁竞争，重试已耗尽" if is_lock_error(last_err) else "错误（不重试）"
-            print(f"[FAIL] {g['symbol']} 合并失败（已回滚，{kind}）: "
-                  f"[{_stmt_label(last_err)}] {last_err}")
+            if is_lock_error(last_err):
+                # 锁竞争是并发清理的常态（06:30 与 derivatives_batch 同窗）、幂等且次日重试
+                # ⇒ 不计硬失败，避免整条 data_sync_daily 长期被判 failed 并反复告警。
+                failed_lock += 1
+                print(f"[WARN] {g['symbol']} 撞锁重试已耗尽，本轮跳过（幂等，次日重试）: "
+                      f"[{_stmt_label(last_err)}] {last_err}")
+            else:
+                failed_other += 1
+                print(f"[FAIL] {g['symbol']} 合并失败（已回滚，错误不重试）: "
+                      f"[{_stmt_label(last_err)}] {last_err}")
 
-    print(f"\n完成：成功 {ok} 组，失败 {failed} 组。")
-    return 0 if failed == 0 else 2
+    print(f"\n完成：成功 {ok} 组，撞锁跳过 {failed_lock} 组，失败 {failed_other} 组。")
+    # 仅真实错误（非锁竞争）返回非 0；锁耗尽按「本轮跳过」处理（退出码 0）。
+    return 2 if failed_other else 0
 
 
 if __name__ == "__main__":

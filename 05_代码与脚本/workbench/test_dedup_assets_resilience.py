@@ -234,5 +234,19 @@ check(_calls4 == ["A", "B"] and _rc4 == 1, "中间关键任务失败：后续仍
 
 
 # ════════════════════════════════════════════════════════════
+# 7. 锁耗尽非硬失败（2026-09-29 告警收敛）：锁竞争重试耗尽 ⇒ 退出码 0
+# ════════════════════════════════════════════════════════════
+print("\n【测试7】dedup_assets 锁耗尽退出码语义（锁竞争→0 / 真实错误→2）")
+check("failed_lock" in _SRC and "failed_other" in _SRC,
+      "main() 区分「撞锁跳过」与「真实错误」两类计数")
+check("return 2 if failed_other else 0" in _SRC,
+      "退出码只取决于真实错误：锁耗尽仍返回 0（不拖垮 data_sync_daily / 不误告警）")
+check("撞锁重试已耗尽，本轮跳过（幂等，次日重试）" in _SRC,
+      "锁耗尽打印 [WARN]「本轮跳过（幂等，次日重试）」（保留可见性、不静默）")
+check("if is_lock_error(last_err):" in _SRC,
+      "按 is_lock_error 分流（与重试判据同源）")
+
+
+# ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

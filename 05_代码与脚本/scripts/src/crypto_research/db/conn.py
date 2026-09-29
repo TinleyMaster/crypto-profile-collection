@@ -32,7 +32,18 @@ def _get_pool(database_url: str) -> psycopg_pool.ConnectionPool:
             timeout=30,
             # lock_timeout=30s：被其他事务持锁时快速失败并留痕，
             # 避免 UPDATE 无限等锁导致任务"90 分钟无日志"被看护误杀（2026-09-15 P0）
-            kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
+            # TCP keepalives（2026-09-29）：远端连接半开（网络抖动）时，任何
+            # connect_timeout / lock_timeout 都覆盖不到，语句会在协议层永久挂起，
+            # 表现为「任务长时间无日志」被看护/收割器误杀（catalyst_run_all 周期性
+            # stuck 同源）。keepalives 让半开连接 ~60s 内报错而非永久挂起。
+            kwargs={
+                "connect_timeout": 30,
+                "options": "-c lock_timeout=30000",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 3,
+            },
         )
     return _pool
 

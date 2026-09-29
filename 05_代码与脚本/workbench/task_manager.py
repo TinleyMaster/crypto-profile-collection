@@ -95,7 +95,23 @@ def _get_pool() -> psycopg_pool.ConnectionPool:
             timeout=30,
             # lock_timeout=30s：sys.task / task_log 写入被锁时快速失败，
             # 避免任务状态/日志写入无限阻塞（2026-09-15 P0 看护误杀同源）
-            kwargs={"connect_timeout": 30, "options": "-c lock_timeout=30000"},
+            # 2026-09-29 加固：补 statement_timeout / idle_in_transaction / TCP keepalives。
+            # 根因：catalyst_run_all 日志量大，_run_task 逐行 `_append_log` 同步写库；
+            # 若某条写入因**远端连接半开**（网络抖动）在协议层挂死，connect_timeout
+            # 与 lock_timeout 都覆盖不到 ⇒ 该任务的**日志读取线程**永久卡住 ⇒ 子进程
+            # stdout 管道（64KB）填满 ⇒ 子进程一起冻住，且 90min 阶段超时的
+            # 「<<< 超时」也写不进去 ⇒ 240min 后被收割为 `stuck: 240分钟无新日志`，
+            # 12h cron 的 18h 看护阈值随即告警（catalyst_run_all 反复报警的来源）。
+            # keepalives 让半开连接 ~60s 内报错；statement_timeout 兜底慢语句。
+            kwargs={
+                "connect_timeout": 30,
+                "options": "-c lock_timeout=30000 -c statement_timeout=300000 "
+                           "-c idle_in_transaction_session_timeout=60000",
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 3,
+            },
         )
         # 确保 sys  schema 和核心表存在（幂等）
         _ensure_schema_and_tables()
@@ -286,6 +302,27 @@ def _append_log(task_id: str, line: str) -> None:
                 """,
                 (task_id, task_id, line),
             )
+
+
+def _safe_append_log(task_id: str, line: str, state: dict | None = None) -> bool:
+    """写一行日志但**绝不抛出**（2026-09-29）。
+
+    读取线程与子进程 stdout 是「生产者-消费者」：读取线程一旦因单行写失败而死，
+    子进程写 stdout 的管道（64KB）会被填满，进而**冻结子进程本身**（catalyst_run_all
+    周期性 `stuck: 240分钟无新日志` 的机制）。故逐行写失败只记录、不中断读取。
+    返回是否写入成功；`state` 传入时累计 `log_failures`。
+    """
+    try:
+        _append_log(task_id, line)
+        return True
+    except Exception as e:  # noqa: BLE001
+        if state is not None:
+            state["log_failures"] = state.get("log_failures", 0) + 1
+            if state["log_failures"] <= 3:
+                print(f"[TaskManager] {task_id} 日志写入失败 "
+                      f"(#{state['log_failures']}): {type(e).__name__}: {e}",
+                      file=sys.stderr)
+        return False
 
 
 def _read_log(task_id: str, limit: int = 200) -> list[str]:
@@ -756,16 +793,27 @@ class TaskManager:
             self._local_procs[task_id] = proc
 
             assert proc.stdout
+            log_state = {"log_failures": 0}
             for raw_line in proc.stdout:
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
-                _append_log(task_id, line)
-                self._try_parse_stats(task_id, line)
+                # 逐行兜底：写库失败不中断读取（否则管道填满会冻住子进程，
+                # 见 _safe_append_log 注释；2026-09-29 修 catalyst 周期性 stuck）
+                _safe_append_log(task_id, line, log_state)
+                try:
+                    self._try_parse_stats(task_id, line)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[TaskManager] {task_id} stats 解析失败: {e}", file=sys.stderr)
 
             proc.wait()
             returncode = proc.returncode
             self._local_procs.pop(task_id, None)
+            if log_state["log_failures"]:
+                _safe_append_log(
+                    task_id,
+                    f"[WARN] 运行期有 {log_state['log_failures']} 行日志写入失败（DB 抖动），"
+                    f"日志可能不完整")
 
             # 重新读取确认状态（可能被 stop 收割器改过）
             task = _load_task(task_id)

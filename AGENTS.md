@@ -2417,3 +2417,15 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **语义**：超时=一种失败（计入 `failed_names`；若属 `critical` 则整体退出码仍非 0，保持可见），但**绝不再阻塞其余子任务**。
 - **自测**：`test_dedup_assets_resilience.py` 新增【测试10】：monkeypatch `subprocess.run` 抛 `TimeoutExpired` → `run_task` 返回 **124**、打印 `[TIMEOUT]` 且含「不影响其余子任务继续执行」；源码守卫 `timeout=SUBTASK_TIMEOUT_SEC` + `subprocess.TimeoutExpired` + 常量 env 可覆盖。**47/47**；workbench 全量 **60 个 `test_*.py` 全部 exit=0**；`py_compile` 通过。
 - **未动**：`critical` 标记与退出码语义（真实失败仍需 `exit 1` 告警，符合用户只要求「不影响其他任务的执行」）；仅对挂死新增隔离。
+
+### scheduler_watchdog 告警去重持久化（用户「怎么还在报错」，2026-09-29，本次提交）
+
+来源：用户再收到 `data_sync_daily` 停滞告警（32.5h，与上一条 30.7h 仅隔 ~2h）。**只读核查定性**：
+
+- **告警本身「正确」但不会因手工重跑而消除**：看护 `_last_done_ts` 只统计 `name LIKE '[调度] data_sync_daily%'` 的行；而手工/Web 触发的任务名是「每日数据同步/矫正总调度」（**不含** `data_sync_daily`），永远不匹配。实况：`[调度]` 最近 done = **09-27 22:30 UTC**、09-28 22:30 **failed**、下一次 = **09-29 22:30 UTC（= 09-30 06:30 CST）** ⇒ 只能等下一次调度成功才会清零（届时跑的是已修复代码，应 14/14）。
+- **重复告警的真因 = 去重状态不持久**：`scheduler_watchdog._last_alerted` 是**进程内 dict**，**每次容器重启即清零**；实测看护心跳间隔 6~23min（≠ 配置 30min）⇒ 容器被并发进程频繁 redeploy ⇒ 同一停滞状态被反复告警（30.7h / 32.5h 两次即此）。
+- **修复（`workbench/scheduler_watchdog.py`）**：去重状态持久化到 `biz.scan_stall_alert`（与其它看门狗同表，key 前缀 `sched_stall:`）——新增 `_last_alert_ts(key)` / `_mark_alerted(key)`；`_check_key` 用 `_last_alert_ts` 判静默期（替换 `_last_alerted.get`），且**仅在 `mail_ok` 时落时间**（发送失败不占位、下轮可重试）。⇒ 重启后仍记住上次告警时间，同一停滞期内每阈值只告警一次。
+- **自测**：`test_scheduler_watchdog_dedup_20260929.py` **9/9**（源码守卫：前缀/复用表/不再用进程内 dict/仅成功落时间；行为：假连接断言 `_last_alert_ts` 查询与 `_mark_alerted` UPSERT 的 key 加前缀 `sched_stall:`、无记录→None）。workbench 全量 **61 个 `test_*.py` 全部 exit=0**；`py_compile` 通过。
+- **落地动作**：因旧代码（未部署）仍用进程内 dict，部署新代码前可能再告警一次；**已向 `biz.scan_stall_alert` 预置 `sched_stall:data_sync_daily = NOW()`**，使新代码上线后立即进入静默期（等价于「刚告警过」），**不再重复轰炸**；`data_sync_daily` 于 09-30 06:30 CST 调度成功后 `stale=false`，告警自然解除。
+- **未动**：看护阈值（30h）与 `_recent_submission` 逻辑；`biz.scan_stall_alert` 建表（已存在，复用）。
+- **待部署**：`scheduler_watchdog.py` 需容器 **redeploy** 后生效。

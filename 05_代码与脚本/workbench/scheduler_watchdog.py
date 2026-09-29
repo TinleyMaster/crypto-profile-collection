@@ -60,8 +60,43 @@ KEY_JOBS = [
     ("daily_brief_email", "每日大盘早报邮件（09:00）", 30),
 ]
 
-# 告警状态：每 key 记录上次告警时间，避免重复轰炸
-_last_alerted: dict[str, float] = {}
+# 告警去重（2026-09-29）：原为进程内 `_last_alerted` dict，**每次容器重启即清零** ⇒
+# 频繁 redeploy 期间同一个停滞状态被反复告警（实测同一 stale 在 30.7h/32.5h 两次发出）。
+# 改为持久化到 `biz.scan_stall_alert`（与其它看门狗同表、不同 key 前缀 `sched_stall:`），
+# 重启后仍能记住「上次告警时间」，真正做到「同一停滞期内每阈值只告警一次」。
+ALERT_DEDUP_PREFIX = "sched_stall:"
+
+
+def _last_alert_ts(key: str) -> float | None:
+    """读该 key 上次成功告警时间（epoch 秒），持久化于 biz.scan_stall_alert。"""
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT last_email_ts FROM biz.scan_stall_alert WHERE task=%s",
+                            (ALERT_DEDUP_PREFIX + key,))
+                row = cur.fetchone()
+        if row and row[0]:
+            return row[0].timestamp()
+        return None
+    except Exception as e:
+        print(f"[看护] _last_alert_ts 查询失败 {key}: {e}", file=sys.stderr)
+        return None
+
+
+def _mark_alerted(key: str) -> None:
+    """记录该 key 本次告警时间（持久化，重启不清零）。"""
+    try:
+        with _get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO biz.scan_stall_alert (task, last_email_ts, updated_at) "
+                    "VALUES (%s, NOW(), NOW()) "
+                    "ON CONFLICT (task) DO UPDATE SET "
+                    "last_email_ts=EXCLUDED.last_email_ts, updated_at=EXCLUDED.updated_at",
+                    (ALERT_DEDUP_PREFIX + key,),
+                )
+    except Exception as e:
+        print(f"[看护] _mark_alerted 写库失败 {key}: {e}", file=sys.stderr)
 
 
 def _last_done_ts(key: str) -> float | None:
@@ -205,12 +240,11 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
     if not stale:
         return {"key": key, "ok": True, "last_done": last, "stale_for": None}
 
-    # 静默期抑制重复告警：同 key 距上次告警 < 阈值才再次发
-    last_alert = _last_alerted.get(key, 0)
-    if now - last_alert < threshold:
+    # 静默期抑制重复告警：同 key 距上次告警 < 阈值才再次发（持久化，重启不清零）
+    last_alert = _last_alert_ts(key)
+    if last_alert is not None and now - last_alert < threshold:
         return {"key": key, "ok": False, "stale": True, "alerted": False, "reason": "静默期内已告警"}
 
-    _last_alerted[key] = now
     hours = round(stale_for / 3600, 1) if stale_for else 0
 
     # 补跑安全闸：**近阈值内**上一轮被硬超时/卡死收割 ⇒ 任务自身跑不完，
@@ -248,6 +282,9 @@ def _check_key(key: str, desc: str, threshold_hours: int, check_only: bool) -> d
         f"{rerun_line}"
     )
     mail_ok = _send_alert_email(subject, body)
+    if mail_ok:
+        # 仅发送成功后落去重时间（失败不占位，下一轮可重试）
+        _mark_alerted(key)
 
     # 补跑（check_only 时不补；上一轮 timeout/stuck 或近阈值内已提交时也不补）
     task_id = None

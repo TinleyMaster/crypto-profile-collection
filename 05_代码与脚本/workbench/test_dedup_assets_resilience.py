@@ -261,5 +261,62 @@ check('("data_sync_daily", "30 6 * * *"' in _SCHED,
 
 
 # ════════════════════════════════════════════════════════════
+# 9. 行为面：main() 退出码（锁耗尽→0 / 真实错误→2）—— monkeypatch，不连库
+# ════════════════════════════════════════════════════════════
+print("\n【测试9】dedup main() 退出码行为（锁耗尽→0 / 真实错误→2）")
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import types  # noqa: E402
+
+
+def _run_main_with(apply_fn, n_groups=2):
+    orig = (dd.get_settings, dd.get_connection, dd._load_groups, dd._connect_direct,
+            dd._apply_group, dd.time.sleep)
+    dd.get_settings = lambda: types.SimpleNamespace(database_url="postgresql://x")
+    dd.get_connection = lambda url=None: contextlib.nullcontext(None)
+    dd._load_groups = lambda conn: [
+        {"symbol": f"S{i}", "name": "n", "keep": {}, "drops": []} for i in range(n_groups)]
+    dd._connect_direct = lambda settings, ms: contextlib.nullcontext(None)
+    dd._apply_group = apply_fn
+    dd.time.sleep = lambda s: None
+    argv = sys.argv
+    sys.argv = ["dedup_assets.py", "--apply"]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = dd.main()
+    finally:
+        (dd.get_settings, dd.get_connection, dd._load_groups, dd._connect_direct,
+         dd._apply_group, dd.time.sleep) = orig
+        sys.argv = argv
+    return rc, buf.getvalue()
+
+
+def _raise_lock(conn, g):
+    raise psycopg.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+
+def _raise_other(conn, g):
+    raise ValueError("constraint violation")
+
+
+_rc_lock, _out_lock = _run_main_with(_raise_lock)
+check(_rc_lock == 0, "锁耗尽 → 退出码 0（不再拖垮 data_sync_daily）", str(_rc_lock))
+check("撞锁重试已耗尽，本轮跳过" in _out_lock and "撞锁跳过 2 组" in _out_lock,
+      "锁耗尽打印 [WARN] + 计数（可见、不静默）")
+check(_run_main_with(_raise_other)[0] == 2, "真实错误 → 退出码 2（保持失败可见）")
+_gc = {"n": 0}
+
+
+def _mixed(conn, g):
+    _gc["n"] += 1
+    if _gc["n"] == 1:
+        raise psycopg.errors.LockNotAvailable("lock")
+    raise ValueError("boom")
+
+
+check(_run_main_with(_mixed)[0] == 2, "混合（锁+真实错误）→ 退出码 2（真实错误优先）")
+
+
+# ════════════════════════════════════════════════════════════
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

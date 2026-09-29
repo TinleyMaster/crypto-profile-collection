@@ -2869,19 +2869,31 @@ def _signal_row_to_deep_review_input(row: dict) -> dict:
 #
 # 背景（2026-09-29 用户需求「我想每周收到催化剂的周报」）：
 # 与 24h 的 A 级 Alert（快通道/慢通道）不同，周报是**自然周**维度的固定节奏邮件，
-# 面向「回看上周整体催化剂面貌」而非「即时可动作信号」。
+# 面向「回看上周发生了什么重要的事、分别有什么影响」而非「即时可动作信号」。
 #
-# 内容结构（用户已确认「概览 + A 级清单」）：
-#   ① 概览：本周催化剂多维统计——信号总数、tier 分布、事件类型分布、情感分布、
-#      来源分布、本周催化剂入库数
-#   ② A 级清单：本周窗口内 tier='A' 且 status='open' 且 entry/stop/tp 齐全的高置信
-#      信号逐条列出（币种 + 事件类型 + 情感 + 标题 + 交易档位 + 时间）
+# 内容结构（用户 2026-09-29 二次确认）：
+#   ① 本周总述：LLM 概括本周催化剂主线、整体方向与最值得关注的变化
+#   ② 主线主题：2~5 条主题（如「ETF 与机构资金」），各带脉络与影响
+#   ③ 大事记与影响：逐条列出重要事件 + **影响解读**（作用机制/持续性），
+#      而非交易档位。方向（利好/利空/中性）仅作徽章标注。
+#   ④ 概览统计（亚行）：信号总数、tier 分布、事件类型分布、本周催化剂入库数
+#
+# 「重要事件」口径（用户确认）：tier='A' **或** resonance_state='confirmed'（高共振），
+# 排除 divergent（方向背离无有效影响），按 composite_score 降序截断至 WEEKLY_EVENT_LIMIT。
+# 说明：confirmed 的信号在库中为 status='watch'（已被价格消化），但正是「已产生影响」
+# 的周报素材，故**不**按 status 过滤（区别于 A 级 Alert 通道的 status='open' 口径）。
+#
+# 叙事由 LLM（DeepSeek）生成，每周仅 1 次调用；LLM 不可用时回退为
+# 「标题 + 已有 ai_summary」的模板拼接（无主题分组、无总述润色），不阻断发信。
 #
 # 去重：sentinel -4 + ntype 'weekly_report'，按**自然周**去重（本周已发过即跳过），
 # 不同于 24h 去重的 Alert 通道。发送频率由调度器约束（每周一 09:00 触发一次）。
 
 NTYPE_WEEKLY_REPORT = "weekly_report"
 SENTINEL_WEEKLY_REPORT_SIGNAL_ID = -4   # 负号哨兵，同 -1/-2/-3 约定（NULL 不触发 UNIQUE）
+
+# 送入 LLM 的事件上限（控制 prompt 规模与单次调用成本）
+WEEKLY_EVENT_LIMIT = 30
 
 
 def _weekly_window(end_ts=None) -> tuple[datetime, datetime, str]:
@@ -2965,15 +2977,18 @@ def _weekly_overview_stats(conn, start_utc, end_utc) -> dict:
     }
 
 
-def _weekly_a_signals(conn, start_utc, end_utc) -> list[dict]:
-    """本周窗口内 A 级高置信信号清单（简化卡片，含交易档位）。
+def _weekly_key_events(conn, start_utc, end_utc, limit: int | None = None) -> list[dict]:
+    """本周「重要事件」清单（周报素材，非交易信号）。
 
-    入选：created_at 在窗口内 + tier='A' + status='open' + entry/stop/tp 齐全。
-    按 composite_score DESC 排序。
+    口径：created_at 在窗口内 且（tier='A' 或 resonance_state='confirmed'），
+    排除 divergent，按 composite_score DESC 截断至 limit。
+
+    注意：**不**按 status='open' 过滤——confirmed 的信号按 d3 分层在库中为
+    status='watch'（价格已消化），但「已被定价」恰恰是周报要回看的影响事实。
     """
+    lim = limit if limit is not None else WEEKLY_EVENT_LIMIT
     return conn.execute("""
         SELECT s.signal_id, s.tier, s.composite_score,
-               s.entry_price, s.stop_loss, s.take_profit, s.rr_ratio,
                s.confidence, s.resonance_state, s.created_at,
                a.canonical_name, a.canonical_symbol AS symbol, a.primary_sector,
                ac.title, ac.title_cn, ac.ai_summary,
@@ -2983,89 +2998,232 @@ def _weekly_a_signals(conn, start_utc, end_utc) -> list[dict]:
         FROM biz.catalyst_signal s
         JOIN core.asset a ON s.asset_id = a.asset_id
         JOIN biz.asset_catalyst ac ON s.catalyst_id = ac.catalyst_id
-        WHERE s.tier = 'A'
-          AND s.status = 'open'
-          AND s.created_at >= %s AND s.created_at < %s
-          AND s.entry_price IS NOT NULL
-          AND s.stop_loss IS NOT NULL
-          AND s.take_profit IS NOT NULL
+        WHERE s.created_at >= %s AND s.created_at < %s
+          AND (s.tier = 'A' OR s.resonance_state = 'confirmed')
+          AND COALESCE(s.resonance_state, '') <> 'divergent'
         ORDER BY s.composite_score DESC
-    """, (start_utc, end_utc)).fetchall()
+        LIMIT %s
+    """, (start_utc, end_utc, lim)).fetchall()
 
 
 _SENTIMENT_CN = {"bullish": "利好", "bearish": "利空", "neutral": "中性"}
 _SENTIMENT_COLOR = {"bullish": "#059669", "bearish": "#dc2626", "neutral": "#6b7280"}
 
 
-def _build_weekly_a_card(r: dict) -> str:
-    """周报 A 级信号简化卡片（币种 + 事件 + 档位 + 标题 + 时间）。"""
+_WEEKLY_SYSTEM_PROMPT = """你是加密货币催化剂分析员。用户会给你一份「本周重要催化剂事件」清单（JSON），
+你要输出一份中文周报，说明**本周发生了什么重要的事、分别有什么影响**。
+
+严格按以下 JSON 结构输出（不要输出 JSON 以外的任何文字）：
+{
+  "overview": "本周总述，2~4 句：本周催化剂的主线、整体方向倾向、最值得关注的变化",
+  "themes": [
+    {"name": "主题名（6~12 字，如「ETF 与机构资金」）",
+     "summary": "该主题本周的脉络与市场影响，2~4 句",
+     "symbols": ["BTC", "ETH"]}
+  ],
+  "events": [
+    {"symbol": "BTC",
+     "headline": "事件一句话标题（25 字内，中文）",
+     "impact": "该事件的影响解读，2~3 句：说明对标的本身、所在板块或市场情绪的作用机制与持续性",
+     "direction": "bullish | bearish | neutral"}
+  ]
+}
+
+硬性要求：
+1. 只使用清单中出现的事实，**不得编造**价格、数字、时间或清单未提及的事件。
+2. `impact` 必须写「影响」而非复述标题——要说明作用机制（如解锁抛压、流动性改善、机构资金流入）与持续性。
+3. `themes` 按重要性从高到低，2~5 个；`events` 只保留清单中最重要的 8~15 条，按其重要性排序。
+4. `symbol` 必须与清单中的 symbol 完全一致；`direction` 只能取 bullish/bearish/neutral。
+5. 全部中文输出（symbol 保持原文大写）。"""
+
+
+def _weekly_events_brief(events: list[dict]) -> list[dict]:
+    """把事件行压缩为 LLM 输入（去噪、限长，只保留叙事所需字段）。"""
+    brief = []
+    for r in events:
+        brief.append({
+            "symbol": str(r.get("symbol") or ""),
+            "name": str(r.get("canonical_name") or ""),
+            "sector": str(r.get("primary_sector") or ""),
+            "event_type": str(r.get("event_type") or ""),
+            "sentiment": str(r.get("sentiment") or "neutral"),
+            "tier": str(r.get("tier") or ""),
+            "resonance_state": str(r.get("resonance_state") or ""),
+            "score": round(_to_float(r.get("composite_score")) or 0.0, 1),
+            "published_at": _fmt_ts(r.get("published_at") or r.get("created_at")),
+            "title": str(r.get("title_cn") or r.get("title") or "")[:120],
+            "summary": str(r.get("ai_summary") or "")[:300],
+        })
+    return brief
+
+
+def _weekly_llm_narrative(events: list[dict], stats: dict,
+                          window_label: str) -> dict | None:
+    """调用 LLM 生成本周叙事（总述 + 主题 + 逐条影响）。失败返回 None。"""
+    if not events:
+        return None
+    try:
+        import json as _json
+
+        from crypto_research.config import get_settings
+        from crypto_research.clients.llm_client import LLMClient
+    except Exception as e:
+        logger.warning("周报 LLM 依赖导入失败: %s", e)
+        return None
+
+    try:
+        settings = get_settings(require_database=False)
+        llm = LLMClient(settings, rpm=10, timeout=180)
+        if not llm.is_available():
+            logger.warning("周报 LLM 不可用，回退模板叙事")
+            return None
+    except Exception as e:
+        logger.warning("周报 LLM 构建失败: %s", e)
+        return None
+
+    user_prompt = _json.dumps({
+        "window": window_label,
+        "stats": {
+            "signals_total": stats.get("signals_total", 0),
+            "catalysts_new": stats.get("catalysts_new", 0),
+            "event_type_dist": stats.get("event_type_dist", []),
+        },
+        "events": _weekly_events_brief(events),
+    }, ensure_ascii=False)
+
+    try:
+        raw = llm.chat(
+            _WEEKLY_SYSTEM_PROMPT, user_prompt,
+            temperature=0.3, max_tokens=4096,
+            response_format={"type": "json_object"},
+            use_cache=False,   # 每周一次，不缓存
+        )
+    except Exception as e:
+        logger.warning("周报 LLM 调用失败: %s", e, exc_info=True)
+        return None
+
+    from .ai_enhance import _extract_json
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        logger.warning("周报 LLM 返回非 JSON，回退模板叙事")
+        return None
+
+    themes = []
+    for t in (data.get("themes") or [])[:5]:
+        if not isinstance(t, dict) or not t.get("name"):
+            continue
+        themes.append({
+            "name": str(t.get("name"))[:32],
+            "summary": str(t.get("summary") or "")[:600],
+            "symbols": [str(s)[:16] for s in (t.get("symbols") or [])][:12],
+        })
+
+    ev_out = []
+    for e in (data.get("events") or [])[:20]:
+        if not isinstance(e, dict) or not e.get("headline"):
+            continue
+        d = str(e.get("direction") or "neutral").lower()
+        ev_out.append({
+            "symbol": str(e.get("symbol") or "")[:16],
+            "headline": str(e.get("headline"))[:80],
+            "impact": str(e.get("impact") or "")[:800],
+            "direction": d if d in _SENTIMENT_CN else "neutral",
+        })
+
+    return {
+        "overview": str(data.get("overview") or "")[:900],
+        "themes": themes,
+        "events": ev_out,
+        "source": "llm",
+    }
+
+
+def _weekly_fallback_narrative(events: list[dict]) -> dict:
+    """LLM 不可用时的模板叙事：标题 + 已有 ai_summary，无主题分组。"""
+    ev_out = []
+    for r in events[:15]:
+        ev_out.append({
+            "symbol": str(r.get("symbol") or ""),
+            "headline": str(r.get("title_cn") or r.get("title") or "")[:80],
+            "impact": _complete_text(r.get("ai_summary") or "", r.get("title") or "")[:800],
+            "direction": str(r.get("sentiment") or "neutral"),
+        })
+    return {
+        "overview": (f"本周共产生 {len(events)} 条重要催化剂事件（A 级或高共振）。"
+                     "以下按信号强度降序列出事件与已有解读"
+                     "（AI 摘要暂不可用，此处为事件原始摘要拼接）。"),
+        "themes": [],
+        "events": ev_out,
+        "source": "fallback",
+    }
+
+
+def _weekly_event_card(ev: dict) -> str:
+    """周报单条事件卡：标的 + 标题 + 影响解读 + 方向徽章。"""
     import html as _html
 
-    entry = _to_float(r.get("entry_price"))
-    sl = _to_float(r.get("stop_loss"))
-    tp = _to_float(r.get("take_profit"))
-    rr = _to_float(r.get("rr_ratio"))
-    dir_cn, dir_color = _trade_direction(entry, sl, tp)
-    score = float(r.get("composite_score") or 0)
-    symbol = _html.escape(str(r.get("symbol") or r.get("canonical_name") or "—"))
-    name = _html.escape(str(r.get("canonical_name") or ""))
-    sector = _html.escape(str(r.get("primary_sector") or "—"))
-    event_type = _html.escape(str(r.get("event_type") or "—"))
-    sentiment = str(r.get("sentiment") or "neutral")
-    sentiment_cn = _SENTIMENT_CN.get(sentiment, sentiment)
-    sentiment_color = _SENTIMENT_COLOR.get(sentiment, "#6b7280")
-    source = _html.escape(str(r.get("source_code") or "—"))
-    title = _complete_text(r.get("title_cn") or r.get("title") or "",
-                           r.get("ai_summary") or "")
-    title = _html.escape(title)
-    confidence = r.get("confidence")
-    conf_txt = f"{_to_float(confidence):.3f}" if confidence is not None else "—"
-    resonance = _RESONANCE_CN.get(r.get("resonance_state"),
-                                  r.get("resonance_state") or "—")
-
-    plan = (
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 6px">'
-        + _plan_cell("方向", dir_cn, dir_color)
-        + _plan_cell("入场", _fmt_price(entry), "#111827")
-        + _plan_cell("止损", _fmt_price(sl), "#dc2626")
-        + _plan_cell("止盈", _fmt_price(tp), "#059669")
-        + _plan_cell("盈亏比", f"{rr:.2f}" if rr else "—", "#111827")
-        + "</div>"
-    )
+    symbol = _html.escape(str(ev.get("symbol") or "—"))
+    headline = _html.escape(str(ev.get("headline") or ""))
+    impact = _html.escape(str(ev.get("impact") or ""))
+    direction = str(ev.get("direction") or "neutral")
+    dir_cn = _SENTIMENT_CN.get(direction, "中性")
+    dir_color = _SENTIMENT_COLOR.get(direction, "#6b7280")
 
     return f"""
-    <div style="border:1px solid #eef2f7;border-left:3px solid #7c3aed;border-radius:8px;
+    <div style="border:1px solid #eef2f7;border-left:3px solid {dir_color};border-radius:8px;
                 padding:12px 14px;margin-bottom:10px;background:#fff">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <div style="font-size:15px;font-weight:800;color:#111827">
-          {symbol}<span style="font-weight:400;color:#6b7280;font-size:12px"> · {name}</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="font-size:13px;font-weight:800;color:#111827;line-height:1.5">
+          <span style="color:#7c3aed">{symbol}</span>
+          <span style="font-weight:600"> · {headline}</span>
         </div>
-        <span style="background:#7c3aed;color:#fff;padding:2px 9px;border-radius:20px;
-                     font-size:11px;font-weight:700">A级 · {score:.1f}</span>
+        <span style="flex:0 0 auto;background:{dir_color};color:#fff;padding:2px 9px;
+                     border-radius:20px;font-size:11px;font-weight:700">{dir_cn}</span>
       </div>
-      <div style="font-size:12px;color:#374151;margin:6px 0 4px;line-height:1.6">{title}</div>
-      <div style="font-size:11px;color:#6b7280">
-        事件类型 <span style="color:#111827;font-weight:600">{event_type}</span>
-        · 情感 <span style="color:{sentiment_color};font-weight:600">{sentiment_cn}</span>
-        · 来源 <span style="color:#111827">{source}</span>
-        · 板块 <span style="color:#111827">{sector}</span>
-      </div>
-      {plan}
-      <div style="font-size:11px;color:#6b7280">
-        置信度 <span style="color:#111827">{conf_txt}</span>
-        · 共振 <span style="color:#111827">{resonance}</span>
-        · 创建 <span style="color:#111827">{_fmt_ts(r.get("created_at"))}</span>
-      </div>
+      <div style="font-size:12px;color:#374151;margin-top:6px;line-height:1.7">{impact}</div>
     </div>
     """
 
 
-def _build_weekly_report_html(stats: dict, a_rows: list[dict], window_label: str) -> str:
-    """构建催化剂周报邮件 HTML（概览统计 + A 级清单）。"""
+def _build_weekly_report_html(stats: dict, narrative: dict, window_label: str) -> str:
+    """构建催化剂周报邮件 HTML（本周总述 + 主线主题 + 大事记与影响 + 概览附录）。"""
     import html as _html
 
     total = stats.get("signals_total", 0)
     catalysts_new = stats.get("catalysts_new", 0)
+    themes = narrative.get("themes") or []
+    events = narrative.get("events") or []
+    overview = narrative.get("overview") or ""
+    is_llm = narrative.get("source") == "llm"
+
+    theme_blocks = ""
+    for t in themes:
+        chips = "".join(
+            f'<span style="display:inline-block;background:#eef2ff;color:#4338ca;'
+            f'border-radius:10px;padding:1px 8px;font-size:11px;margin:2px 4px 2px 0">'
+            f'{_html.escape(s)}</span>' for s in (t.get("symbols") or [])
+        )
+        theme_blocks += f"""
+        <div style="border:1px solid #eef2f7;border-radius:8px;padding:12px 14px;
+                    margin-bottom:10px;background:#fafaff">
+          <div style="font-size:13px;font-weight:800;color:#4338ca">{_html.escape(t.get("name") or "")}</div>
+          <div style="font-size:12px;color:#374151;margin-top:5px;line-height:1.7">{_html.escape(t.get("summary") or "")}</div>
+          <div style="margin-top:6px">{chips}</div>
+        </div>
+        """
+    if not theme_blocks:
+        theme_blocks = '<div style="color:#9ca3af;font-size:12px">本周无显著主线主题</div>'
+
+    event_blocks = "".join(_weekly_event_card(e) for e in events)
+    if not event_blocks:
+        event_blocks = ('<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;'
+                        'border-radius:8px">本周无重要催化剂事件</div>')
+
+    overview_block = (
+        f'<div style="font-size:13px;color:#1f2937;line-height:1.8;background:#f8fafc;'
+        f'border-radius:8px;padding:14px 16px">{_html.escape(overview)}</div>'
+        if overview else ""
+    )
 
     def _bar_rows(pairs) -> str:
         if not pairs:
@@ -3075,53 +3233,52 @@ def _build_weekly_report_html(stats: dict, a_rows: list[dict], window_label: str
         for k, c in pairs:
             pct = c / mx * 100
             rows.append(
-                '<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
+                '<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
                 f'<div style="flex:0 0 110px;font-size:11px;color:#6b7280;text-align:right">'
                 f'{_html.escape(str(k))}</div>'
-                '<div style="flex:1;background:#eef2f7;border-radius:4px;height:16px">'
-                f'<div style="height:16px;background:linear-gradient(90deg,#7c3aed,#3b82f6);'
+                '<div style="flex:1;background:#eef2f7;border-radius:4px;height:12px">'
+                f'<div style="height:12px;background:linear-gradient(90deg,#7c3aed,#3b82f6);'
                 f'border-radius:4px;width:{pct:.0f}%"></div></div>'
                 f'<div style="flex:0 0 32px;font-size:11px;color:#111827;font-weight:600">{c}</div>'
                 "</div>"
             )
         return "".join(rows)
 
-    cards = "".join(_build_weekly_a_card(r) for r in a_rows)
-    if not cards:
-        cards = ('<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;'
-                 'border-radius:8px">本周无 A 级高置信信号</div>')
+    src_note = ("叙事由 AI 生成" if is_llm
+                else "AI 叙事不可用，已回退为事件原始摘要拼接")
 
     return f"""
     <div style="font-family:sans-serif;max-width:760px;margin:auto;padding:16px;background:#f3f4f6">
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:24px;border-radius:12px">
         <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · 周报</div>
-        <div style="font-size:24px;font-weight:700;margin-top:8px">本周催化剂概览 + A 级清单</div>
-        <div style="margin-top:4px;font-size:13px;opacity:.8">窗口 {_html.escape(window_label)} · 信号 {total} 条 · 新入库催化剂 {catalysts_new} 条</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">本周重要催化剂事件与影响</div>
+        <div style="margin-top:4px;font-size:13px;opacity:.8">窗口 {_html.escape(window_label)} · 重要事件 {len(events)} 条 · 信号 {total} 条 · 新入库催化剂 {catalysts_new} 条</div>
       </div>
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <h3 style="font-size:15px;margin:0 0 12px;color:#111827">📊 概览（本周信号多维统计）</h3>
+        <h3 style="font-size:15px;margin:0 0 10px;color:#111827">📝 本周总述</h3>
+        {overview_block}
 
+        <h3 style="font-size:15px;margin:22px 0 10px;color:#111827">🧭 主线主题</h3>
+        {theme_blocks}
+
+        <h3 style="font-size:15px;margin:22px 0 10px;color:#111827">📌 大事记与影响</h3>
+        {event_blocks}
+
+        <h3 style="font-size:14px;margin:26px 0 8px;color:#6b7280">📊 本周概览（附录）</h3>
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
           {_plan_cell("信号总数", str(total), "#7c3aed")}
           {_plan_cell("催化剂入库", str(catalysts_new), "#3b82f6")}
-          {_plan_cell("A 级清单", str(len(a_rows)), "#059669")}
+          {_plan_cell("重要事件", str(len(events)), "#059669")}
         </div>
-
-        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">Tier 分布</div>
-        {_bar_rows(stats.get("tier_dist", []))}
-        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">事件类型分布</div>
+        <div style="margin:12px 0 4px;font-size:11px;font-weight:700;color:#6b7280">事件类型分布</div>
         {_bar_rows(stats.get("event_type_dist", []))}
-        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">情感分布</div>
-        {_bar_rows(stats.get("sentiment_dist", []))}
-        <div style="margin:14px 0 6px;font-size:12px;font-weight:700;color:#374151">来源分布</div>
-        {_bar_rows(stats.get("source_dist", []))}
-
-        <h3 style="font-size:15px;margin:22px 0 12px;color:#111827">🟣 A 级清单（本周高置信信号）</h3>
-        {cards}
+        <div style="margin:12px 0 4px;font-size:11px;font-weight:700;color:#6b7280">Tier 分布</div>
+        {_bar_rows(stats.get("tier_dist", []))}
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">
-          由催化剂决策管道自动生成 · 自然周去重 · 每周一 09:00 发送
+          {src_note} · 由催化剂决策管道自动生成 · 自然周去重 · 每周一 09:00 发送<br>
+          本邮件为研究性事件回顾，非投资建议。
         </div>
       </div>
     </div>
@@ -3139,75 +3296,95 @@ def _weekly_report_already_sent(conn, start_utc, end_utc) -> bool:
     return row is not None
 
 
-def send_catalyst_weekly_report(conn, end_ts=None) -> dict:
-    """发送催化剂周报（概览 + A 级清单）。
+def send_catalyst_weekly_report(conn, end_ts=None, dry_run: bool = False) -> dict:
+    """发送催化剂周报（本周重要事件总结 + 影响解读）。
 
     Args:
         conn: 数据库连接
         end_ts: 窗口计算参考时刻（tz-aware），缺省用当前时刻。
+        dry_run: 仅查询/生成叙事，不发信、不占去重位。
 
     Returns:
-        dict: {sent, skipped, failed, reason, window, a_count, signals_total}
+        dict: {sent, skipped, failed, reason, window, event_count,
+               signals_total, narrative_source, body}
     """
     try:
         ensure_notification_table(conn)
     except Exception as e:
         logger.warning("确保通知表存在失败: %s", e)
 
+    def _ret(sent=0, skipped=0, failed=0, reason="", window=None,
+             event_count=0, signals_total=0, narrative_source=None, body=None):
+        return {"sent": sent, "skipped": skipped, "failed": failed, "reason": reason,
+                "window": window, "event_count": event_count,
+                "signals_total": signals_total, "narrative_source": narrative_source,
+                "body": body}
+
     try:
         start_utc, end_utc, window_label = _weekly_window(end_ts)
     except Exception as e:
         logger.warning("周报窗口计算失败: %s", e, exc_info=True)
-        return {"sent": 0, "skipped": 0, "failed": 0,
-                "reason": f"窗口计算失败: {e}",
-                "window": None, "a_count": 0, "signals_total": 0}
+        return _ret(reason=f"窗口计算失败: {e}")
 
-    # 自然周去重：本周已发过即跳过
-    try:
-        if _weekly_report_already_sent(conn, start_utc, end_utc):
-            return {"sent": 0, "skipped": 1, "failed": 0,
-                    "reason": f"本周（{window_label}）周报已发送过，跳过",
-                    "window": window_label, "a_count": 0, "signals_total": 0}
-    except Exception as e:
-        logger.warning("周报去重预检失败: %s", e, exc_info=True)
+    # 自然周去重：本周已发过即跳过（dry-run 不参与）
+    if not dry_run:
+        try:
+            if _weekly_report_already_sent(conn, start_utc, end_utc):
+                return _ret(skipped=1, window=window_label,
+                            reason=f"本周（{window_label}）周报已发送过，跳过")
+        except Exception as e:
+            logger.warning("周报去重预检失败: %s", e, exc_info=True)
 
     try:
         stats = _weekly_overview_stats(conn, start_utc, end_utc)
-        a_rows = _weekly_a_signals(conn, start_utc, end_utc)
+        events = _weekly_key_events(conn, start_utc, end_utc)
     except Exception as e:
         logger.warning("周报统计/清单查询失败: %s", e, exc_info=True)
-        return {"sent": 0, "skipped": 0, "failed": 0,
-                "reason": f"查询失败: {e}",
-                "window": window_label, "a_count": 0, "signals_total": 0}
+        return _ret(window=window_label, reason=f"查询失败: {e}")
 
-    subject = f"📊 催化剂周报 · {window_label} · A级 {len(a_rows)} 条"
+    # 叙事：优先 LLM，失败回退模板拼装（不阻断发信）
+    narrative = _weekly_llm_narrative(events, stats, window_label)
+    if narrative is None:
+        narrative = _weekly_fallback_narrative(events)
+
+    subject = f"📊 催化剂周报 · {window_label} · 重要事件 {len(narrative.get('events') or [])} 条"
+
+    if dry_run:
+        try:
+            body = _build_weekly_report_html(stats, narrative, window_label)
+        except Exception as e:
+            logger.warning("周报渲染失败: %s", e, exc_info=True)
+            return _ret(failed=1, window=window_label, reason=f"渲染失败: {e}")
+        return _ret(window=window_label, event_count=len(events),
+                    signals_total=stats.get("signals_total", 0),
+                    narrative_source=narrative.get("source"),
+                    reason=f"[DRY-RUN] {subject}", body=body)
 
     # 原子占锁（防并发/重复触发）
     if not _try_acquire_send_lock(conn, SENTINEL_WEEKLY_REPORT_SIGNAL_ID,
                                   NTYPE_WEEKLY_REPORT, None, subject):
-        return {"sent": 0, "skipped": 1, "failed": 0,
-                "reason": "发送锁未获取（可能已在发送中），跳过",
-                "window": window_label, "a_count": len(a_rows),
-                "signals_total": stats.get("signals_total", 0)}
+        return _ret(skipped=1, window=window_label,
+                    reason="发送锁未获取（可能已在发送中），跳过",
+                    event_count=len(events),
+                    signals_total=stats.get("signals_total", 0))
 
     try:
-        body = _build_weekly_report_html(stats, a_rows, window_label)
+        body = _build_weekly_report_html(stats, narrative, window_label)
     except Exception as e:
         logger.warning("周报渲染失败: %s", e, exc_info=True)
-        return {"sent": 0, "skipped": 0, "failed": 1,
-                "reason": f"渲染失败: {e}",
-                "window": window_label, "a_count": len(a_rows),
-                "signals_total": stats.get("signals_total", 0)}
+        return _ret(failed=1, window=window_label, reason=f"渲染失败: {e}",
+                    event_count=len(events),
+                    signals_total=stats.get("signals_total", 0))
 
     ok, msg = _send_email(subject, body)
     _mark_sent(conn, SENTINEL_WEEKLY_REPORT_SIGNAL_ID, NTYPE_WEEKLY_REPORT,
                None, subject, status="sent" if ok else "failed",
                error_msg=None if ok else msg)
 
-    return {"sent": 1 if ok else 0, "skipped": 0,
-            "failed": 0 if ok else 1, "reason": msg,
-            "window": window_label, "a_count": len(a_rows),
-            "signals_total": stats.get("signals_total", 0)}
+    return _ret(sent=1 if ok else 0, failed=0 if ok else 1, reason=msg,
+                window=window_label, event_count=len(events),
+                signals_total=stats.get("signals_total", 0),
+                narrative_source=narrative.get("source"))
 
 
 

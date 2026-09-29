@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """催化剂周报邮件发送（薄脚本）。
 
-流程：get_conn → send_catalyst_weekly_report → 打印结果。
+周报内容：本周重要催化剂事件总结 + 影响解读（叙事由 LLM 生成，失败回退模板拼接）。
 scheduler.py 注册：catalyst_weekly_report（每周一 09:00 Asia/Shanghai）。
 
 用法：
     python send_catalyst_weekly.py              # 生成 + 发送（自然周去重）
-    python send_catalyst_weekly.py --dry-run    # 仅打印统计/清单，不发送
+    python send_catalyst_weekly.py --dry-run    # 仅生成并打印，不发信不占去重位
 """
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -60,43 +59,29 @@ from catalyst.notifier import send_catalyst_weekly_report  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="催化剂周报邮件发送")
-    parser.add_argument("--dry-run", action="store_true", help="仅打印统计/清单，不发送")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="仅生成并打印周报，不发信、不占去重位")
     args = parser.parse_args()
 
     try:
         with get_conn() as conn:
-            if args.dry_run:
-                # 复用内部窗口/统计函数做只读预览（不触发去重/发送）
-                from catalyst.notifier import (
-                    _weekly_window,
-                    _weekly_overview_stats,
-                    _weekly_a_signals,
-                )
-                start_utc, end_utc, window_label = _weekly_window()
-                stats = _weekly_overview_stats(conn, start_utc, end_utc)
-                a_rows = _weekly_a_signals(conn, start_utc, end_utc)
-                print(f"[DRY-RUN] 窗口 {window_label}")
-                print(f"[DRY-RUN] 信号总数 {stats['signals_total']} · "
-                      f"新入库催化剂 {stats['catalysts_new']} · A 级清单 {len(a_rows)} 条")
-                print(f"[DRY-RUN] tier 分布 {stats['tier_dist']}")
-                print(f"[DRY-RUN] 事件类型 {stats['event_type_dist']}")
-                print(f"[DRY-RUN] 情感 {stats['sentiment_dist']}")
-                for r in a_rows:
-                    print(f"[DRY-RUN] A级 {r.get('symbol')} "
-                          f"(score={float(r.get('composite_score') or 0):.1f}) "
-                          f"{r.get('title_cn') or r.get('title') or ''}")
-                return 0
-
-            result = send_catalyst_weekly_report(conn)
+            result = send_catalyst_weekly_report(conn, dry_run=args.dry_run)
     except Exception as e:
-        print(f"[ERROR] 周报发送异常: {e}")
+        print(f"[ERROR] 周报执行异常: {e}")
         return 1
+
+    print(f"[INFO] 窗口 {result.get('window')} · 重要事件 {result.get('event_count')} 条 · "
+          f"信号 {result.get('signals_total')} 条 · 叙事来源 {result.get('narrative_source')}")
 
     if result.get("sent"):
         print(f"[OK] 周报已发送: {result.get('reason')}")
         return 0
     if result.get("skipped"):
         print(f"[INFO] 跳过发送: {result.get('reason')}")
+        return 0
+    if result.get("body"):
+        print(result["body"])
+        print(f"[DRY-RUN] {result.get('reason')}")
         return 0
     print(f"[ERROR] 周报发送失败: {result.get('reason')}")
     return 1

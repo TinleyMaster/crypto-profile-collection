@@ -1938,17 +1938,25 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 
 ### 催化剂周报（2026-09-29，本次提交）
 
-来源：用户「**我想每周收到催化剂的周报**」。经 AskUserQuestion 确认三点：① 内容 =「概览 + A 级清单」（顶部本周催化剂多维统计，下方 A 级高置信信号逐条清单）；② 发送时间 = 周一 09:00（北京时间）；③ 收件人 = 复用现有催化剂邮箱（SMTP_TO）。
+来源：用户「**我想每周收到催化剂的周报**」，随后**纠正需求**为「**周报总结——总结这周发生了哪些重要的事情，分别有什么影响**」（初版实现的「统计仪表盘 + A 级交易信号清单」方向不对，已重构为**叙事型周报**）。
+
+**需求三确认**：① 时间 = 周一 09:00（北京）；② 收件人 = 复用现有催化剂邮箱（SMTP_TO）；③ 二次确认：重要事件口径 =「A 级 + 高共振」、影响呈现 =「AI 叙事解读」、允许每周一次的 LLM 调用。
 
 **改动（4 文件，均仅本人改动）**：
-- `workbench/catalyst/notifier.py`：新增 `send_catalyst_weekly_report()` 及配套函数。`NTYPE_WEEKLY_REPORT='weekly_report'`、哨兵 `SENTINEL_WEEKLY_REPORT_SIGNAL_ID=-4`（延续 -1/-2/-3 负号哨兵约定）。自然周窗口 `_weekly_window()`（北京时区，上周一 00:00 ~ 本周一 00:00）；概览统计 `_weekly_overview_stats()`（信号总数 / tier / 事件类型 / 情感 / 来源分布 + 催化剂入库数，事件类型与情感沿用 `COALESCE` 统一口径）；A 级清单 `_weekly_a_signals()`（tier='A' + status='open' + entry/stop/tp 齐全，按 `composite_score DESC`）。**去重按自然周**（`_weekly_report_already_sent` 查本周窗口内 `status='sent'`），而非 Alert 通道的 24h 窗口；发送频率由调度器约束（每周一 09:00 触发一次），发送仍走既有 `_try_acquire_send_lock` 原子占锁防并发。
-- `scripts/bin/send_catalyst_weekly.py`：薄脚本（复用 `_setup_paths()` 路径探测 + `get_conn` + 调 `send_catalyst_weekly_report`，支持 `--dry-run` 只读预览）。
+- `workbench/catalyst/notifier.py`：新增 `send_catalyst_weekly_report()` 及配套函数。
+  - 常量：`NTYPE_WEEKLY_REPORT='weekly_report'`、哨兵 `SENTINEL_WEEKLY_REPORT_SIGNAL_ID=-4`（延续 -1/-2/-3 负号哨兵约定）、`WEEKLY_EVENT_LIMIT=30`（送入 LLM 的事件上限）。
+  - 窗口：`_weekly_window()`（北京时区，上周一 00:00 ~ 本周一 00:00）。
+  - 素材：`_weekly_key_events()` 口径 = `tier='A' OR resonance_state='confirmed'`，排除 `divergent`，按 `composite_score DESC` 取 Top 30。**关键：不按 `status='open'` 过滤**——按 d3 分层，confirmed 的信号在库中为 `status='watch'`（价格已消化），但「已被定价」正是周报要回看的影响事实（与 A 级 Alert 通道的 `status='open'` 口径刻意不同）。另 `_weekly_overview_stats()` 出多维统计作附录（事件类型/情感沿用 `COALESCE` 统一口径）。
+  - 叙事：`_weekly_events_brief()` 压缩输入 → `_weekly_llm_narrative()`（LLMClient，temperature 0.3 / max_tokens 4096 / `use_cache=False`）输出 `{overview, themes[], events[]}`；**失败回退** `_weekly_fallback_narrative()`（标题 + 已有 `ai_summary` 拼接，无主题分组，正文明确标注「AI 叙事不可用」），**回退不阻断发信**。
+  - 渲染：`_build_weekly_report_html()` 四段式 = 本周总述 / 主线主题（含标的 chips）/ 大事记与影响（逐条 impact + 利好·利空·中性徽章）/ 本周概览（附录）；**已移除交易档位**（用户未选），并加「非投资建议」免责。Prompt 硬约束含「不得编造价格/数字」。
+  - 去重：`_weekly_report_already_sent()` 按**自然周**（本周窗口内 `status='sent'`），非 Alert 通道的 24h 窗口；发送走既有 `_try_acquire_send_lock` 原子占锁。新增 `dry_run` 参数（只查不发、不占去重位、返回 body）。
+- `scripts/bin/send_catalyst_weekly.py`：薄脚本（复用 `_setup_paths()` 路径探测 + `get_conn` + `send_catalyst_weekly_report`，`--dry-run` 打印渲染结果）。
 - `workbench/scheduler.py`：`SCHEDULE` 新增 `("catalyst_weekly_report", "0 9 * * 1", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core")`。
-- `workbench/test_catalyst_weekly_report.py`：离线护栏测试 **39/0**（通道独立、负号哨兵 -4、自然周窗口恰 7 天且北京周一 00:00、概览/清单 SQL 口径、自然周去重、发送流程三分支、渲染护栏含交易档位且不含运维告警字样、失败不阻断）。
+- `workbench/test_catalyst_weekly_report.py`：离线护栏测试 **57/0**（通道独立、负号哨兵 -4、自然周窗口恰 7 天且北京周一 00:00、概览/重要事件 SQL 口径（含「不按 status 过滤」断言）、叙事链路（LLM/回退/dry-run）、自然周去重、渲染三段结构 + 交易字样负向断言 + 运维告警负向断言、失败不阻断）。
 
-**验证**：`py_compile` 4/4 OK；`test_catalyst_weekly_report.py` 39/0 全绿；`send_catalyst_weekly.py --help` 导入正常。
+**验证**：`py_compile` 4/4 OK；`test_catalyst_weekly_report.py` 57/0 全绿；**实跑 dry-run 连 prod**（窗口 2026-09-21~09-28：候选 30 条、LLM 产出 14 条事件 + 主题分组、exit=0）——端到端链路（SQL → LLM → 渲染）已验证。
 
-**未做 / 边界（须留档）**：① **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`，新调度项 `catalyst_weekly_report` 需容器重建后才生效）。② **首期窗口可能为空**：上线后首个周一（10-05）窗口内若 A 级候选为 0，周报仍会发「本周无 A 级高置信信号」占位（概览统计照常），不会静默跳过——这与 `channel_silence` 的「空窗不发用户邮件」决议不冲突（那是 A 级 Alert 逐条通道，周报是周期性汇总）。③ **A 级清单仅取 `status='open'`**：已被价格确认降级为 `watch` 的高分样本不进周报清单（延续 d3 分层决议）。
+**未做 / 边界（须留档）**：① **runtime 复验须待 Zeabur redeploy**（`push ≠ 线上生效`，新调度项 `catalyst_weekly_report` 需容器重建后才注册，首个执行点为周一 09:00）。② **确认为 `submit_scheduled_task` 白名单/看护未覆盖**：新任务不在 `scheduler_watchdog.KEY_JOBS`，若某周静默失败不会触发告警+补跑（首期先观察，如需可后补）。③ **周报无历史归档表**：叙事仅在邮件正文，未落库（如需「往期周报」页面须另加工单）。④ **LLM 叙事为一次成稿无事实校验**：prompt 已禁止编造，但未做「输出 symbol ⊆ 输入 symbol」的机器校验（回退路径不受影响）。
 
 ### 代币基本面统一 SSOT（工单 SSOT-001，2026-09-27，本次提交）
 

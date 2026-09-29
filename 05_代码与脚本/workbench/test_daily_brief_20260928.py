@@ -217,6 +217,47 @@ check("今日操作清单" in sdb._build_tldr_html(
     [{"asset": "ETH", "direction": "做多", "trigger": "站上 2700",
       "invalidate": "跌破 2600"}], [], {}), "H-8 有方向 → 仍为「今日操作清单」")
 
+# ── 审计 2026-09-29 小白可读性：R-1/R-5/R-6/R-8/R-11/R-12 + R-3（SSOT 删除）──
+print("[审计0929] 小白可读性 R-1/5/6/8/11/12 + R-3")
+_b_rd = {
+    "M0_tldr": {"fear_greed": 74, "fear_greed_label": "Greed"},
+    "M0_ai_summary": {
+        "status": "ok", "headline": "RWA 单周暴涨 34%，资金转向实体资产赛道",
+        "bias": "偏多", "market_regime": "震荡",
+        "trade_suggestions": [dict(_full, asset="ETH", direction="做多")],
+        "watchlist": ["PENDLE", "AI"],
+        "data_quality": [{"section": "大盘概况", "status": "ok"}],
+    },
+    "M3_highlights": [{
+        "target": "17 币 24h 暴涨", "direction": "long", "conviction_score": 80,
+        "trigger_logic": _logic,
+        "ai_analysis_v2": {"overall_score": 80, "confidence": "LOW", "direction": "short",
+                           "reason_summary": "RWA催化剂驱动QNT暴涨，RSI 96.7 透支"}}],
+}
+_h_rd = sdb.render_brief_html(_b_rd)
+check("今日 3 句话" in _h_rd and "名词速查" in _h_rd, "R-12/R-7 顶部 3 句话 + 名词速查")
+check("行动：" in _h_rd, "R-1 头条下加「行动」chip")
+check("关键三维评分（技术/基本面/情绪）" in _h_rd and "六维评分 ·" not in _h_rd,
+      "R-6 标题改「关键三维评分」（不再称六维）")
+check("AI信心 LOW" in _h_rd and "AI存疑" not in _h_rd, "R-5/R-11 徽章标「AI信心」且不再叫「AI存疑」")
+check("AI观点分歧" in _h_rd, "R-11 AI 判反 → 「AI观点分歧」")
+check("综合评分（满分100）" in _h_rd, "R-8 综合评分加满分刻度")
+# R-8：恐贪刻度（大盘脉搏卡）
+_b_fg = {"M0_tldr": {"fear_greed": 74, "fear_greed_label": "Greed"},
+         "M0_ai_summary": {"status": "ok", "headline": "x", "bias": "中性"}}
+check("（0-100，>50 偏贪婪）" in sdb.render_brief_html(_b_fg), "R-8 恐贪加 0-100 刻度")
+# R-1：无方向时行动 chip 显示「今日无操作」
+_b_noop = {"M0_tldr": {}, "M0_ai_summary": {"status": "ok", "headline": "x", "bias": "中性"}}
+check("行动：今日无操作" in sdb.render_brief_html(_b_noop), "R-1 无方向 → 「行动：今日无操作」")
+
+# R-5 降档文案不再与徽章口径冲突（信号档位 ≠ 模型信心）
+check("信号档位封顶 MED" in _mm_src and "档位降为 MED" not in _mm_src,
+      "R-5 降档文案改「信号档位封顶 MED」")
+# R-3：恐贪 note 删内部词 SSOT
+_fgv = mm._fear_greed_ssot_verdict(74, "2026-09-26", "Greed", 72, "2026-09-25")
+check("SSOT" not in (_fgv.get("note") or "") and "最新官方值 74" in (_fgv.get("note") or ""),
+      "R-3 恐贪 note 删「SSOT」改「最新官方值」")
+
 print("\n" + "=" * 46)
 print(f"{passed}/{passed + failed} 通过")
 print("=" * 46)

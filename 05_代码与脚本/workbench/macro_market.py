@@ -5191,7 +5191,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         merged["confidence"] = "medium"
         merged["tier_demote_reason"] = (
             f"聚合类信号仅 {merged.get('resonance_count') or 1} 源共振，"
-            f"HIGH 门槛（≥{agg_high_min} 源）未达，档位降为 MED"
+            f"HIGH 门槛（≥{agg_high_min} 源）未达，信号档位封顶 MED"
         )
 
     # P2-C（2026-09-26 审计·刀5）：显示档位随时间衰减，防「陈旧 HIGH 恒 HIGH」。
@@ -5214,7 +5214,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         merged["conviction_tier"] = "MED"
         merged["confidence"] = "medium"
         merged["tier_demote_reason"] = (
-            f"衰减后 {ds_val:g} 分低于 HIGH 门槛 {_high_min:g}，档位降为 MED"
+            f"衰减后 {ds_val:g} 分低于 HIGH 门槛 {_high_min:g}，信号档位封顶 MED"
             + (f"（{merged['valuation_filter_note']}）" if merged.get("valuation_filter_note") else "")
         )
 
@@ -5410,7 +5410,7 @@ def select_risk_signals(opportunities: list[dict], max_total: int = 8,
         merged["confidence"] = "medium"
         merged["tier_demote_reason"] = (
             f"单源风险信号（{merged.get('resonance_count') or 1} 源共振），"
-            f"HIGH 门槛（≥{risk_high_min} 源）未达，档位降为 MED"
+            f"HIGH 门槛（≥{risk_high_min} 源）未达，信号档位封顶 MED"
         )
 
     # ── 4. 共振筛选 ──
@@ -7270,8 +7270,9 @@ def _fear_greed_ssot_verdict(ssot_value, ssot_date, ssot_label,
     if daily_value is not None:
         out["daily_line"] = {"value": int(daily_value), "as_of": str(daily_date)}
         if int(daily_value) != int(ssot_value):
+            # R-3（审计 2026-09-29 小白视角）：删内部词「SSOT」，改为用户可读措辞。
             out["note"] = (f"日线源滞后（{daily_date} 日线={int(daily_value)}，"
-                           f"已按 SSOT {int(ssot_value)} 取值）")
+                           f"已采用最新官方值 {int(ssot_value)}）")
     return out
 
 

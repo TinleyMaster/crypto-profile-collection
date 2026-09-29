@@ -712,6 +712,46 @@ def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = No
     """
 
 
+# ── R-12（审计 2026-09-29 小白视角）：顶部「3 句话版」+ 名词速查 ─────────────
+# 早报 13+ 区块对纯新手过密，开头先给「大盘/能不能动/最该盯」三句 + 一行术语白话。
+_GLOSSARY_LINE = ("名词速查：RWA=实物资产上链 · MVRV=市值/已实现价值比（越高越易抛压） · "
+                  "共振=多数据源同向印证 · HIGH/MED/LOW=信号档位高/中/低 · 命中率=历史回测准确率")
+
+
+def _build_top_summary_html(ai_summary: dict, trade_ready: list, risks: list) -> str:
+    """顶部「今日 3 句话」摘要卡；无 AI 定调时也能降级产出。"""
+    ai_summary = ai_summary or {}
+    regime = ai_summary.get("market_regime") or ""
+    bias = ai_summary.get("bias") or ""
+    watch = ai_summary.get("watchlist") or []
+    no_trade = str(ai_summary.get("no_trade_reason") or "").strip()
+
+    l1 = f"大盘：{regime or '见下方大盘脉搏'}" + (f"，方向{bias}" if bias else "")
+    if trade_ready:
+        l2 = f"能不能动：有 {len(trade_ready)} 条可执行方向（详见下方「交易方向」）"
+    else:
+        l2 = "能不能动：今日无新开方向（观望）" + (f" —— {_clip(no_trade, 50)}" if no_trade else "")
+    if watch:
+        l3 = "最该盯：" + " · ".join(str(w) for w in watch[:3])
+    elif risks:
+        l3 = f"最该盯：风险信号「{(risks[0] or {}).get('target') or '?'}」"
+    else:
+        l3 = "最该盯：见下方「AI 精选高亮 / 今日高危」"
+    _rows = "".join(
+        f'<div style="font-size:11.5px;color:#0f172a;line-height:1.6;margin-bottom:2px">'
+        f'<b style="color:#0ea5e9">{n}.</b> {t}</div>'
+        for n, t in (("①", l1), ("②", l2), ("③", l3))
+    )
+    return f"""
+      <!-- 模块00：今日 3 句话（小白速读） -->
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #0ea5e9">
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">🧭 今日 3 句话</div>
+        {_rows}
+        <div style="font-size:9.5px;color:#94a3b8;margin-top:5px;line-height:1.5">{_GLOSSARY_LINE}</div>
+      </div>
+    """
+
+
 # ── P1-3（审计 2026-09-28）：高危信号逐条「风险点 + 应对」解读 ────────────────
 # 稳定币类（USDC/USDS 等）出现在高危榜时，读者无从理解，必须解释「为何高危」。
 _STABLE_RISK_SYMBOLS = {"USDC", "USDS", "USDT", "DAI", "TUSD", "FDUSD", "PYUSD", "RLUSD",
@@ -1023,6 +1063,9 @@ def render_brief_html(brief: dict) -> str:
         )
         print(f"[render_brief_html] 交易方向拒收：{len(_trade_excluded)} 条缺可判定要素 → 降级「观察」：{_ex_desc}")
 
+    # R-12（审计 2026-09-29）：顶部「3 句话」小白速读卡（无论 AI 是否可用都出）。
+    html_parts.append(_build_top_summary_html(ai_summary, _trade_ready, brief.get("M4_risks") or []))
+
     if ai_summary.get("status") == "ok" and ai_headline:
         # 方向颜色
         bias_color = "#ef4444" if "多" in str(ai_bias) else "#22c55e" if "空" in str(ai_bias) else "#f59e0b"
@@ -1053,9 +1096,10 @@ def render_brief_html(brief: dict) -> str:
                 {f'<div style="font-size:9px;color:#fca5a5;margin-top:1px">{_cover_missing_txt}</div>' if _cover_missing_txt else ''}
               </div>
             </div>
-            <div style="display:flex;gap:8px;margin-bottom:10px">
+            <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
               <span style="font-size:10.5px;background:rgba(255,255,255,0.1);padding:2px 8px;border-radius:4px;color:#e2e8f0">市场：{ai_regime or '—'}</span>
               <span style="font-size:10.5px;background:{bias_color}22;padding:2px 8px;border-radius:4px;color:{bias_color}">方向：{ai_bias or '—'}</span>
+              <span style="font-size:10.5px;background:{'#86efac22' if _trade_ready else '#fca5a522'};padding:2px 8px;border-radius:4px;color:{'#86efac' if _trade_ready else '#fca5a5'}">行动：{f'{len(_trade_ready)} 条方向' if _trade_ready else '今日无操作'}</span>
             </div>
             {_bias_caveat_html}
         """)
@@ -1281,7 +1325,7 @@ def render_brief_html(brief: dict) -> str:
           <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
               <div style="font-size:13px;font-weight:700;color:#0f172a">{_hl_title}</div>
-              <div style="font-size:10px;color:#94a3b8">六维评分 · 自动搜索补全</div>
+              <div style="font-size:10px;color:#94a3b8">关键三维评分（技术/基本面/情绪）· 自动搜索补全</div>
             </div>
         """)
 
@@ -1335,10 +1379,11 @@ def render_brief_html(brief: dict) -> str:
                 driver_items = " · ".join(_clip(d, 30) for d in key_drivers[:2])
                 drivers_html = f'<div style="font-size:10px;color:#0369a1;margin-top:4px">💡 {driver_items}</div>'
 
-            # AI 存疑标注（AI 判反或降级时）
+            # AI 观点分歧标注（AI 判反或降级时；R-11 审计 2026-09-29：原「AI存疑」
+            # 字面像「AI 有疑问」，改为「AI观点分歧」让小白一眼懂「AI 不认同该方向」）
             doubt_html = ""
             if ai_doubt or h.get("_ai_downgraded"):
-                doubt_html = '<span style="font-size:9px;background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">AI存疑</span>'
+                doubt_html = '<span style="font-size:9px;background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">AI观点分歧</span>'
             # P1-7（审计 2026-09-28）：正文自称「不构成高亮或高危」却列在「AI 精选高亮」下 →
             # 归类与措辞自相矛盾，显式标注「观察级（非高亮）」。
             obs_html = ""
@@ -1357,13 +1402,13 @@ def render_brief_html(brief: dict) -> str:
                 <div style="display:flex;align-items:center;gap:8px">
                   <span style="font-size:15px;font-weight:800;color:#0f172a">{target}</span>
                   <span style="font-size:11px;color:{dir_color};font-weight:700">{dir_icon} {dir_cn}</span>
-                  <span style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">{confidence}</span>
+                  <span title="模型（AI）信心，与信号档位是两套口径" style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">AI信心 {confidence}</span>
                   {doubt_html}
                   {obs_html}
                 </div>
                 <div style="text-align:right;flex-shrink:0">
                   <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
-                  <div style="font-size:9px;color:#94a3b8">综合评分</div>
+                  <div style="font-size:9px;color:#94a3b8">综合评分（满分100）</div>
                 </div>
               </div>
               <div style="display:flex;gap:10px;align-items:center">
@@ -1423,7 +1468,8 @@ def render_brief_html(brief: dict) -> str:
     # W-09：恐贪值旁强制显示 as-of 日期（SSOT = biz.market_snapshot_daily.fear_greed_value）
     fg_as_of = m0.get("fear_greed_as_of")
     fg_note = m0.get("fear_greed_note")
-    _fg_label_html = f"{fg_label or '—'}" + (f" · 截至 {fg_as_of}" if fg_as_of else "")
+    # R-8（审计 2026-09-29）：数字加刻度，避免小白不知高低怎么判。
+    _fg_label_html = f"{fg_label or '—'}（0-100，>50 偏贪婪）" + (f" · 截至 {fg_as_of}" if fg_as_of else "")
     _fg_note_html = (
         f'<div style="font-size:9px;color:#b45309;margin-top:1px">{fg_note}</div>'
         if fg_note else ""

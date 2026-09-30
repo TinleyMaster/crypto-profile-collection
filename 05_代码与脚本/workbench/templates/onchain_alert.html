@@ -750,13 +750,14 @@
           <td><b>${esc(t.symbol)}</b></td>
           <td>${frm}</td>
           <td>${to}</td>
-          <td class="num">${fmtQty(t.quantity)}</td>
+          <td class="num">${fmtUsd(t.value_usd)}</td>
+          <td class="num qty-cell">${fmtQty(t.quantity)}</td>
           <td style="white-space:nowrap">${fmtTime(t.ts)}</td>
           <td><span class="badge ${t.direction}">${dirTxt}</span> ${tx}</td>
         </tr>`;
           }).join("");
           histBox.innerHTML = `<table><thead><tr>
-        <th>代币</th><th>From</th><th>To</th><th style="text-align:right">数量</th><th>时间</th><th>方向 / 交易</th>
+        <th>代币</th><th>From</th><th>To</th><th style="text-align:right">金额</th><th style="text-align:right">数量</th><th>时间</th><th>方向 / 交易</th>
       </tr></thead><tbody>${hr}</tbody></table>`;
         }
       } catch (e) {

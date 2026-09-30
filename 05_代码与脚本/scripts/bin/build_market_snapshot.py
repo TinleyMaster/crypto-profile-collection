@@ -17,7 +17,8 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -129,6 +130,21 @@ def _to_int(v, default=None):
         return int(float(v))
     except (ValueError, TypeError):
         return default
+
+
+def _json_default(o):
+    """json.dumps 兜底：overview 里含 DB 取出的 NUMERIC（Decimal）与时间对象。
+
+    PostgreSQL NUMERIC 经 psycopg 取出即 Decimal，非 JSON 原生类型；日期/时间同理。
+    Decimal 转 float（JSON 数值语义），date/datetime 转 ISO 字符串，其余兜底 str。
+    （此前 raw_payload 直接 json.dumps 触发 TypeError: Object of type Decimal is not
+    JSON serializable，导致 market_daily 快照任务整跑失败。）
+    """
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
 
 
 def extract_snapshot(overview: dict) -> dict:
@@ -276,7 +292,7 @@ def upsert_snapshot(conn, snapshot_date, snap: dict, raw_payload: dict | None) -
 
     vals = [snapshot_date] + [snap[f] for f in fields]
     if raw_payload:
-        vals.append(json.dumps(raw_payload, ensure_ascii=False))
+        vals.append(json.dumps(raw_payload, ensure_ascii=False, default=_json_default))
 
     with conn.cursor() as cur:
         cur.execute(sql, vals)

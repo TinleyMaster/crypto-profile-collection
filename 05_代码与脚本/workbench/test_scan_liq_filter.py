@@ -51,27 +51,27 @@ UTC = timezone.utc
 
 
 def main() -> int:
-    MIN = sd.LIQ_MIN_QUOTE_VOL_24H_USD
+    MIN = sd.LIQ_MIN_QUOTE_VOL_7D_USD
     OI = sd.LIQ_MIN_OI_USD
 
     # ── A) _liq_verdict 四档 + 边界 + unknown ──
     print("A) _liq_verdict")
     check(sd._liq_verdict(MIN, OI, 1.0) == ("pass", "ok"), "极高两口径 → pass")
     check(sd._liq_verdict(MIN * 100, OI * 100, 0.0) == ("pass", "ok"), "极高含 age=0 → pass")
-    check(sd._liq_verdict(MIN - 1, OI, 1.0) == ("low", "vol24_below"),
-          "vol24 略低 → low/vol24_below")
+    check(sd._liq_verdict(MIN - 1, OI, 1.0) == ("low", "vol7d_below"),
+          "vol7d 略低 → low/vol7d_below")
     check(sd._liq_verdict(MIN, OI - 1, 1.0) == ("low", "oi_below"),
-          "vol24 达标但 OI 略低 → low/oi_below")
-    check(sd._liq_verdict(1.0, 1.0, 1.0) == ("low", "vol24_below"),
-          "极低 → low（vol24 先命中）")
+          "vol7d 达标但 OI 略低 → low/oi_below")
+    check(sd._liq_verdict(1.0, 1.0, 1.0) == ("low", "vol7d_below"),
+          "极低 → low（vol7d 先命中）")
     # 边界不差一：恰好等于门槛 → pass（判据是 `<` 严格小于）
     check(sd._liq_verdict(MIN, OI, sd.LIQ_OI_MAX_AGE_MIN)[0] == "pass",
-          "边界：vol24==门槛 且 age==上限 → pass")
+          "边界：vol7d==门槛 且 age==上限 → pass")
     check(sd._liq_verdict(MIN - 0.01, OI, 1.0)[0] == "low",
-          "边界：vol24 差 0.01 → low")
+          "边界：vol7d 差 0.01 → low")
     # unknown：默认放行（不误杀）
-    check(sd._liq_verdict(None, OI, 1.0) == ("unknown", "vol24_missing"),
-          "vol24 缺失 → unknown/vol24_missing")
+    check(sd._liq_verdict(None, OI, 1.0) == ("unknown", "vol7d_missing"),
+          "vol7d 缺失 → unknown/vol7d_missing")
     check(sd._liq_verdict(MIN, None, 1.0) == ("unknown", "oi_missing"),
           "OI 缺失 → unknown/oi_missing")
     check(sd._liq_verdict(MIN, OI, None) == ("unknown", "oi_missing"),
@@ -124,12 +124,25 @@ def main() -> int:
 
     # 闸门位置：_compute_l2 之后、signals.append 之前
     i_l2 = _SD_SRC.index("l2 = _compute_l2(")
-    i_gate = _SD_SRC.index("vol24 = _sum_vol24_from_klines")
+    i_gate = _SD_SRC.index("vol24 = _sum_vol24_from_klines")   # 仅记录
+    i_vol7d = _SD_SRC.index("vol7d = vol7d_map.get(sym)")       # 判定用
     i_low = _SD_SRC.index('if liq_v == "low"')
     i_append = _SD_SRC.index("signals.append((")
     check(i_l2 < i_gate < i_low < i_append, "闸门含 low 分桶且在写入之前")
     check(i_l2 < i_gate < i_append, "闸门在 L2 之后、写 scan_signal 之前",
           f"i_l2={i_l2} i_gate={i_gate} i_append={i_append}")
+    check(i_l2 < i_vol7d < i_low, "常态 vol7d 参与判定（在 low 分桶之前）",
+          f"i_l2={i_l2} i_vol7d={i_vol7d} i_low={i_low}")
+    # 口径护栏：判定必须走 vol7d，不得回到 vol24
+    check("_liq_verdict(vol7d, oi_usd, oi_age)" in _SD_SRC,
+          "判定入参是 vol7d（非常态升级后的 vol24）")
+    check("vol7d_usd < LIQ_MIN_QUOTE_VOL_7D_USD" in _SD_SRC,
+          "门槛常量为 LIQ_MIN_QUOTE_VOL_7D_USD")
+    check("LIQ_FILTER_ALTER_VOL7D_DDL" in _SD_SRC and
+          "ADD COLUMN IF NOT EXISTS vol7d_usd" in sd.LIQ_FILTER_ALTER_VOL7D_DDL,
+          "旧表补列 ALTER 存在且幂等")
+    check("_load_vol7d_avg(conn, list(by_sym_k.keys()))" in _SD_SRC,
+          "整池一次聚合加载（非逐币查询）")
     check("if LIQ_FILTER_ENABLED:" in _SD_SRC and "continue" in
           _SD_SRC[i_gate:i_append], "阶段 B 才 continue（阶段 A 不拦截）")
 
@@ -138,8 +151,8 @@ def main() -> int:
                   _SD_SRC, re.S)
     check(bool(m), "过滤桶 INSERT 存在")
     if m:
-        check(m.group(1).count("%s") == 14,
-              "INSERT 占位符 == 14（与元组字段数一致）",
+        check(m.group(1).count("%s") == 15,
+              "INSERT 占位符 == 15（含新增 vol7d_usd，与元组字段数一致）",
               f"count={m.group(1).count('%s')}")
 
     # 零新 API：闸门区块不出现 HTTP 调用
@@ -147,7 +160,7 @@ def main() -> int:
     check("_http_get" not in gate_block and "fapi_get" not in gate_block,
           "闸门区块零新 API")
     check("vol24 = _sum_vol24_from_klines" in gate_block,
-          "24h 成交额走 asset_klines 求和（DB 原生）")
+          "24h 成交额走 asset_klines 求和（DB 原生，仅记录）")
 
     print(f"\n[test_scan_liq_filter] {passed}/{passed + failed} 通过")
     return 0 if failed == 0 else 1

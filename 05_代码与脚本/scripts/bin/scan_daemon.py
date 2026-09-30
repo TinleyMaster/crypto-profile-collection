@@ -624,11 +624,19 @@ FUNDING_STALE_H = 24
 #   已按实测校正为：24h 成交额 = `biz.asset_klines` 1h `quote_vol` 求和（主池已加载，
 #   零新查询）；OI 名义价值 = `biz.oi_cvd_snapshot.oi_usd`（**采集侧已是「张数×标记价」
 #   的 USD 名义价值**，无需再乘当前价）。详见工单落地回写。
+# ⚠️ 判定口径已于 2026-09-30 从「当前 24h」改为「过去 7 天常态日均」——
+#   看当前 24h 双向都错（工单 §9.8(5)-4）：
+#     · 一波流小币在爆发当天**反而通过**：常态 <300 万的 21 个币里 13 个（61.9%）
+#       靠当日放量冲过门槛（CELO 45.5万 → 8138万，178.9x）；
+#     · 正常大币在清淡日**反被误杀**：常态 ≥300 万的 218 个里 24 个（11.0%）跌破门槛。
+#   故门槛对「常态流动性」判定，`vol24`（当前 24h）降级为**仅记录**字段。
 LIQ_FILTER_ENABLED = False                # 阶段 A：影子（只记录、不拦截）；阶段 B 待授权
-LIQ_PLAN_NOTIONAL_USD = 300.0             # 单笔计划仓位（USDT）
+LIQ_PLAN_NOTIONAL_USD = 300.0             # 单笔计划仓位（USDT）⚠️ 待 PO 按真实资金规模确认
 LIQ_MAX_PARTICIPATION = 0.0001            # 单笔占日成交额/OI 上限（1 bp）
-LIQ_MIN_QUOTE_VOL_24H_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION   # 3,000,000
+LIQ_MIN_QUOTE_VOL_7D_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION    # 3,000,000（常态日均）
 LIQ_MIN_OI_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION              # 3,000,000
+LIQ_VOL7D_DAYS = 7                        # 常态窗口（天）
+LIQ_VOL7D_CACHE_TTL_MIN = 60              # 进程内缓存：常态值变化慢，无需每轮重聚合
 # 快照超龄（与 `MAX_OI_BUCKET_AGE_MIN` 同口径）：超龄视为 `liq_unknown`（默认放行+打标）。
 LIQ_OI_MAX_AGE_MIN = MAX_OI_BUCKET_AGE_MIN
 # 惰性建表 DDL（工单 §4 只列 scan_daemon.py 一个生产文件 ⇒ 不另编迁移，靠本 DDL 自愈；
@@ -646,6 +654,7 @@ CREATE TABLE IF NOT EXISTS biz.scan_liq_filter_log (
     vol_ratio     numeric(12,4),
     l1_level      integer,
     vol24_usd     numeric(22,2),
+    vol7d_usd     numeric(22,2),
     oi_usd        numeric(22,2),
     oi_age_min    numeric(10,2),
     verdict       text        NOT NULL,
@@ -654,6 +663,10 @@ CREATE TABLE IF NOT EXISTS biz.scan_liq_filter_log (
 )"""
 LIQ_FILTER_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_scan_liq_filter_at "
                         "ON biz.scan_liq_filter_log (filtered_at DESC)")
+# 2026-09-30 口径升级补列（幂等）：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的旧表加列，
+# 影子期若已建过表则必须有这条 ALTER，否则写入会因缺列整轮失败。
+LIQ_FILTER_ALTER_VOL7D_DDL = ("ALTER TABLE biz.scan_liq_filter_log "
+                              "ADD COLUMN IF NOT EXISTS vol7d_usd numeric(22,2)")
 # ── L0 市场环境阈值（审计 P1-2 标定）─────────────────────────────
 # 原值 `btc_1h ±1.0` / `fgi 25·75` / `cap_trend ±1.0` 里两个近乎死条件。用近 7 天
 # 「up + OI↑」触发子集（context_tags 回放，n=98）复算：原阈值下唯一真正降级的维度
@@ -1013,6 +1026,7 @@ def _ensure_liq_filter_table(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(LIQ_FILTER_DDL)
         cur.execute(LIQ_FILTER_INDEX_DDL)
+        cur.execute(LIQ_FILTER_ALTER_VOL7D_DDL)   # 旧表补 vol7d_usd 列（幂等）
     conn.commit()
     _LIQ_TABLE_READY = True
 
@@ -1020,8 +1034,10 @@ def _ensure_liq_filter_table(conn) -> None:
 def _sum_vol24_from_klines(by_iv: dict[str, list[dict]]) -> float | None:
     """近 24h USD 成交额 = 近 1 天 1h 条 `quote_vol` 求和。
 
-    主池已加载近 1 天全周期 K 线（`by_sym_k`）⇒ 零新查询。无 1h 条 → None
-    （数据缺失，交由 `_liq_verdict` 判 `unknown`）。
+    主池已加载近 1 天全周期 K 线（`by_sym_k`）⇒ 零新查询。无 1h 条 → None。
+
+    ⚠️ 2026-09-30 起**本值仅作记录，不参与判定**（见 `LIQ_MIN_QUOTE_VOL_7D_USD`
+    注释）：当前 24h 含脉冲，会被一波流当天放量骗过，也会在清淡日误杀大币。
     """
     bars = by_iv.get("1h") or []
     if not bars:
@@ -1046,24 +1062,59 @@ def _oi_notional(oi_rows: list[dict], now: datetime) -> tuple[float | None, floa
     return float(oi), age
 
 
-def _liq_verdict(vol24_usd: float | None, oi_usd: float | None,
+# 常态成交额缓存（进程内 TTL）：`{ts: datetime, map: {symbol: vol7d_avg}}`
+_VOL7D_CACHE: dict = {"ts": None, "map": {}}
+
+
+def _load_vol7d_avg(conn, symbols: list[str], ttl_min: float = LIQ_VOL7D_CACHE_TTL_MIN,
+                    days: int = LIQ_VOL7D_DAYS) -> dict[str, float]:
+    """池内各币「过去 N 天日均成交额」（USD/天），带进程内 TTL 缓存。
+
+    与 `_sum_vol24_from_klines` 的分工：本值**用于判定**（常态流动性），后者仅记录。
+    成本：主池只加载近 1 天 K 线，N 天须另行聚合；常态值变化慢 ⇒ TTL 缓存避免每轮
+    重扫 49k+ 行。缓存 miss 时一次 GROUP BY 拿全池，非逐币查询。
+    """
+    now = datetime.now(timezone.utc)
+    ts = _VOL7D_CACHE.get("ts")
+    if ts is not None and (now - ts).total_seconds() / 60 < ttl_min:
+        return _VOL7D_CACHE["map"]
+    out: dict[str, float] = {}
+    if symbols:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT symbol, SUM(quote_vol) / %s AS vol_avg "
+                "FROM biz.asset_klines "
+                "WHERE interval = '1h' AND open_time >= now() - (%s * interval '1 day') "
+                "  AND symbol = ANY(%s) "
+                "GROUP BY symbol",
+                (days, days, list(symbols)),
+            )
+            for r in cur.fetchall():
+                if r.get("vol_avg") is not None:
+                    out[r["symbol"]] = float(r["vol_avg"])
+    _VOL7D_CACHE["ts"] = now
+    _VOL7D_CACHE["map"] = out
+    return out
+
+
+def _liq_verdict(vol7d_usd: float | None, oi_usd: float | None,
                  oi_age_min: float | None) -> tuple[str, str]:
     """流动性闸门判定（纯函数，可离线单测）。返回 `(verdict, reason)`。
 
-    * `unknown` —— 24h 成交额缺失 / OI 快照缺失或超龄（与 `LIQ_OI_MAX_AGE_MIN` 同口径）
+    * `unknown` —— 常态成交额缺失 / OI 快照缺失或超龄（与 `LIQ_OI_MAX_AGE_MIN` 同口径）
       ⇒ **默认放行**并打标（避免系统未成熟时误杀、避免静默吞信号）；
-    * `low`     —— 24h 成交额 `< LIQ_MIN_QUOTE_VOL_24H_USD` **或** OI 名义价值
+    * `low`     —— **7 天常态日均**成交额 `< LIQ_MIN_QUOTE_VOL_7D_USD` **或** OI 名义价值
       `< LIQ_MIN_OI_USD`（二元剔除；不加权、不降权）；
     * `pass`    —— 两口径均达标。
     """
-    if vol24_usd is None:
-        return "unknown", "vol24_missing"
+    if vol7d_usd is None:
+        return "unknown", "vol7d_missing"
     if oi_usd is None or oi_age_min is None:
         return "unknown", "oi_missing"
     if oi_age_min > LIQ_OI_MAX_AGE_MIN:
         return "unknown", "oi_stale"
-    if vol24_usd < LIQ_MIN_QUOTE_VOL_24H_USD:
-        return "low", "vol24_below"
+    if vol7d_usd < LIQ_MIN_QUOTE_VOL_7D_USD:
+        return "low", "vol7d_below"
     if oi_usd < LIQ_MIN_OI_USD:
         return "low", "oi_below"
     return "pass", "ok"
@@ -1119,7 +1170,9 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         signals: list[tuple] = []
         filtered_rows: list[tuple] = []
         liq_stats = {"pass": 0, "low": 0, "unknown": 0}
-        vol24_samples: list[float] = []
+        vol7d_samples: list[float] = []
+        # 常态成交额：整池一次聚合 + TTL 缓存（逐币查会把主池轮次拖垮）
+        vol7d_map = _load_vol7d_avg(conn, list(by_sym_k.keys()))
         stale_symbols = 0
         for sym in sorted(by_sym_k):
             # 新鲜度护栏：数据陈旧直接跳过（防采集停摆时用旧数据出假信号）
@@ -1154,17 +1207,19 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             # 大量永不触发的币、以及冷却跳过的币一并计入，令「剔除比例」失真（工单
             # §2.1 的落点按意图理解为「入池前」，非 `_l1_eval` 之内）。
             # 阶段 A：`LIQ_FILTER_ENABLED=False` ⇒ 只记录不拦截；阶段 B 才 `continue`。
-            vol24 = _sum_vol24_from_klines(by_sym_k[sym])
+            vol24 = _sum_vol24_from_klines(by_sym_k[sym])   # 仅记录（含脉冲）
+            vol7d = vol7d_map.get(sym)                      # 判定用（常态）
             oi_usd, oi_age = _oi_notional(by_sym_oi.get(sym, []), now)
-            liq_v, liq_reason = _liq_verdict(vol24, oi_usd, oi_age)
+            liq_v, liq_reason = _liq_verdict(vol7d, oi_usd, oi_age)
             liq_stats[liq_v] += 1
-            if vol24 is not None:
-                vol24_samples.append(vol24)
+            if vol7d is not None:
+                vol7d_samples.append(vol7d)
             if liq_v == "low":
                 filtered_rows.append((
                     now, sym, l1["iv"], direction, l2["scenario"],
                     round(l1["chg_pct"], 4), round(l1["vol_ratio"], 4), l1["level"],
                     None if vol24 is None else round(vol24, 2),
+                    None if vol7d is None else round(vol7d, 2),
                     None if oi_usd is None else round(oi_usd, 2),
                     None if oi_age is None else round(oi_age, 2),
                     liq_v, liq_reason, LIQ_FILTER_ENABLED,
@@ -1221,9 +1276,9 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 cur.executemany(
                     "INSERT INTO biz.scan_liq_filter_log "
                     "(filtered_at, symbol, timeframe, direction, scenario, price_chg_pct, "
-                    " vol_ratio, l1_level, vol24_usd, oi_usd, oi_age_min, verdict, reason, "
-                    " enforced) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    " vol_ratio, l1_level, vol24_usd, vol7d_usd, oi_usd, oi_age_min, "
+                    " verdict, reason, enforced) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     filtered_rows,
                 )
         conn.commit()
@@ -1239,13 +1294,13 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
     if evaluated:
         low_pct = liq_stats["low"] / evaluated * 100
         unk_pct = liq_stats["unknown"] / evaluated * 100
-        p10 = _pctl(vol24_samples, 0.10)
-        p50 = _pctl(vol24_samples, 0.50)
-        p90 = _pctl(vol24_samples, 0.90)
+        p10 = _pctl(vol7d_samples, 0.10)
+        p50 = _pctl(vol7d_samples, 0.50)
+        p90 = _pctl(vol7d_samples, 0.90)
         print(f"[scan_daemon][liq_filter] {'拦截' if LIQ_FILTER_ENABLED else '影子'}"
               f"：评估 {evaluated} 条 · low {liq_stats['low']}（{low_pct:.1f}%）· "
               f"unknown {liq_stats['unknown']}（{unk_pct:.1f}%）· pass {liq_stats['pass']} · "
-              f"落桶 {len(filtered_rows)} 条 · vol24 分位 "
+              f"落桶 {len(filtered_rows)} 条 · vol7d 常态日均分位 "
               f"p10/p50/p90 = {_fmt_usd_abs(p10)}/{_fmt_usd_abs(p50)}/{_fmt_usd_abs(p90)}")
 
     return {"regime_tags": regime["tags"], "symbols_checked": total,

@@ -353,7 +353,9 @@ def main() -> int:
                          str(SCRIPTS_DIR / "bin" / "mine_whale_candidates.py"),
                          "--days", "30", "--top", "0"],
                         cwd=str(SCRIPTS_DIR), env=env,
-                        capture_output=True, text=True, timeout=900)
+                        capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                        timeout=900)
                     tail = (mine.stdout or "").strip().splitlines()[-12:]
                     for ln in tail:
                         emit(f"  [mine] {ln}")

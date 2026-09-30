@@ -53,6 +53,18 @@ VOL24_BARS = 24           # 24 根 1h（旧口径，双口径对照用）
 MIN_VOL7D_BARS = 168      # 不足 7 天历史的触发点跳过（不猜）
 LIQ_MIN_USD = 3_000_000.0  # 现网门槛 X/ρ（300 / 1e-4），双口径对照的切点
 
+# ---- 滑点模型（阶段 C，SCAN-LIQ-DEPTH-001）----
+# 线性深度模型：±1% 单侧累计挂单 D（USD），吃 X 美元单的价格冲击 ≈
+#   impact_bp = 100 * X / D
+# 推导：深度在 ±1% 区间内近似均匀 ⇒ 消耗占比 f = X/D，价格位移 = f × 1%，
+# 换算 bp = f × 1% × 10000 = 100·X/D。例：X=300、D=6 万 ⇒ 0.5bp/边。
+# 局限（必须随表声明）：①均匀分布假设——真实盘口近密远疏，本模型是**下界偏乐观**；
+# ②静态快照是 MM 毫秒补单后的瞬时存量，@4h 采样点与实际成交时刻可能错位；
+# ③ X > 单侧深度时模型失效（冲击>100bp），一律打 unfillable 标记。
+SLIP_RANGE_PCT = 1        # 用 ±1% 档（最保守的近端深度）
+SLIP_UNFILLABLE_BP = 100  # 单边冲击超此值视为模型失效
+SLIP_X_SENS = (300, 1000, 3000, 10000)  # X 敏感度档（USD）
+
 # 绝对档（USD/天，常态日均）
 ABS_EDGES = [
     (0, 1_000_000, "<100万"),
@@ -66,8 +78,54 @@ ABS_EDGES = [
 QUINT_LABELS = ("Q1 最冷20%", "Q2", "Q3", "Q4", "Q5 最热20%")
 
 
+def load_depth_history(conn, universe):
+    """加载 ±1% 档 4h 深度快照：{sym: [(ts, bids_usd, asks_usd), ...] 按 ts 升序}。
+
+    exchange_scope='binance'（与现网扫描对象一致）。无数据的币不在返回映射里。
+    """
+    out = defaultdict(list)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT symbol, ts, bids_usd, asks_usd FROM biz.orderbook_depth_history "
+            "WHERE exchange_scope='binance' AND interval='4h' AND range_pct=%s "
+            "AND symbol = ANY(%s) ORDER BY symbol, ts",
+            (SLIP_RANGE_PCT, universe),
+        )
+        for sym, ts, bids, asks in cur.fetchall():
+            out[sym].append((ts, float(bids or 0), float(asks or 0)))
+    return out
+
+
+def slip_roundtrip_bp(d_ask, d_bid, x_usd):
+    """给定 ±1% 单侧深度，按线性模型算 X 美元单的往返滑点（bp）。
+
+    买入口吃 asks、卖出口吃 bids，双边 impact 相加。
+    返回 (slip_bp, flag)；flag: 'ok' | 'unfillable'（单边 X>D，模型失效）。
+    """
+    slip_ask = 100.0 * x_usd / d_ask
+    slip_bid = 100.0 * x_usd / d_bid
+    slip = slip_ask + slip_bid
+    if slip_ask > SLIP_UNFILLABLE_BP or slip_bid > SLIP_UNFILLABLE_BP:
+        return slip, "unfillable"
+    return slip, "ok"
+
+
+def depth_at(depth_list, entry_ts):
+    """取 ts <= entry_ts 的最近 4h 快照（无前视）。返回 (d_ask, d_bid) 或 None。"""
+    if not depth_list:
+        return None
+    idx = bisect.bisect_right(depth_list, (entry_ts, float("inf"), float("inf"))) - 1
+    if idx < 0:
+        return None
+    _, bids, asks = depth_list[idx]
+    if asks <= 0 or bids <= 0:
+        return None
+    return asks, bids
+
+
 def scan_symbol_liq(sym, bars, oi_hours, trades, cost,
-                    price_thr=bss.PRICE_THR_1H, vol_thr=bss.VOL_RATIO_THR):
+                    price_thr=bss.PRICE_THR_1H, vol_thr=bss.VOL_RATIO_THR,
+                    depth_list=None, x_usd=0.0):
     """与 bss.scan_symbol 触发逻辑一致，额外落 symbol + vol7d（entry 之前，无前视）。"""
     n = len(bars)
     if n <= bss.LOOKBACK + 1 + max(bss.HORIZONS) + 1:
@@ -111,6 +169,9 @@ def scan_symbol_liq(sym, bars, oi_hours, trades, cost,
         if not entry:
             continue
         day = bars[t + 1]["t"].date()
+        entry_ts = bars[t + 1]["t"]
+        d_pair = depth_at(depth_list, entry_ts) if depth_list is not None else None
+        d_ask, d_bid = d_pair if d_pair else (None, None)
         for hz in bss.HORIZONS:
             exit_close = bars[t + hz]["close"]
             if not exit_close:
@@ -120,6 +181,7 @@ def scan_symbol_liq(sym, bars, oi_hours, trades, cost,
             trades[scenario].append({
                 "symbol": sym, "hz": hz, "day": day,
                 "ret": ret - cost, "vol7d": vol7d, "vol24": vol24,
+                "d_ask": d_ask, "d_bid": d_bid,
             })
 
 
@@ -213,6 +275,82 @@ def print_dual(rows, thr, label):
           f"{sn['avg_ret'] * 100:>11.3f}{sn['day_avg'] * 100:>10.3f}{sn['day_t']:>8.2f}")
 
 
+def print_slip(rows, label, cost_bp=bss.COST * 1e4):
+    """滑点透视：盘口深度线性模型下，X 美元单的往返滑点对收益的侵蚀。
+
+    输出三块：
+      ④a 默认 X 档的滑点分布 + 含/不含滑点的收益对照（24h 窗口）；
+      ④b X 敏感度（同一批信号按不同仓位重算）；
+      ④c 按深度五分位分层的滑点与净收益（谁在吃滑点）。
+    覆盖外/缺快照的信号单独计数，不混入。
+    """
+    rows24 = [r for r in rows if r["hz"] == 24]
+    have = [r for r in rows24 if r["d_ask"] is not None]
+    missing = len(rows24) - len(have)
+    print(f"\n=== ④ 盘口滑点透视（±1% 深度线性模型，24h 窗口）— {label} ===")
+    print(f"覆盖 {len(have)}/{len(rows24)}（缺深度快照 {missing} 条，不入表）")
+    if not have:
+        return
+    print(f"⚠️ 模型假设：深度在 ±1% 内均匀（下界偏乐观）；静态快照、MM 毫秒补单。")
+
+    for x in SLIP_X_SENS:
+        slips = []
+        for r in have:
+            s, flag = slip_roundtrip_bp(r["d_ask"], r["d_bid"], x)
+            if flag == "ok":
+                slips.append((s, r))
+        vals = sorted(s for s, _ in slips)
+        n = len(vals)
+        q = lambda p: vals[min(n - 1, int(n * p))]
+        unfill = len(have) - n
+        # 收益对照（日聚类）：**同一 ok 子集**，含/不含滑点才可比
+        base_rows = [dict(r) for _, r in slips]
+        adj_rows = [dict(r, ret=r["ret"] - s / 1e4) for s, r in slips]
+        base = day_clustered_stats(base_rows)
+        adj = day_clustered_stats(adj_rows)
+        print(f"\n-- X = {x:,} USDT（单边 unfillable {unfill} 条不计）--")
+        print(f"   往返滑点 bp：p50={q(0.5):.2f}  p90={q(0.9):.2f}  "
+              f"p99={q(0.99):.2f}  max={vals[-1]:.1f}")
+        print(f"   滑点>手续费({cost_bp:.1f}bp) 的信号占比："
+              f"{sum(1 for v in vals if v > cost_bp) / n:.1%}")
+        if base and adj:
+            print(f"   24h 净均收益：不含滑点 {base['avg_ret'] * 100:.3f}% → "
+                  f"含滑点 {adj['avg_ret'] * 100:.3f}%"
+                  f"（侵蚀 {base['avg_ret'] * 100 - adj['avg_ret'] * 100:.3f}pp）")
+
+    # ④c 按深度五分位（横截面，同批信号按 entry 日重算排名）
+    by_day = defaultdict(list)
+    for r in have:
+        by_day[r["day"]].append(r)
+    dlab = ("D1 最薄20%", "D2", "D3", "D4", "D5 最厚20%")
+    for day, rs in by_day.items():
+        vals = sorted((r["d_ask"] + r["d_bid"]) / 2 for r in rs)
+        m = len(vals)
+        for r in rs:
+            rank = bisect.bisect_right(vals, (r["d_ask"] + r["d_bid"]) / 2) / m
+            r["dq"] = min(4, int(rank * 5))
+    print(f"\n-- ④c 按 entry 日横截面深度五分位（X={SLIP_X_SENS[0]:,}）--")
+    print(f"{'分组':<12}{'n':>7}{'天数':>6}{'滑点p50bp':>11}{'滑点p90bp':>11}"
+          f"{'净均收益%(含滑点)':>16}{'日t':>8}")
+    print("-" * 74)
+    for i, lab in enumerate(dlab):
+        grp = [r for r in have if r.get("dq") == i]
+        if not grp:
+            continue
+        slips = sorted(slip_roundtrip_bp(r["d_ask"], r["d_bid"], SLIP_X_SENS[0])[0]
+                       for r in grp)
+        n = len(slips)
+        p50, p90 = slips[n // 2], slips[min(n - 1, int(n * 0.9))]
+        adj_rows = [dict(r, ret=r["ret"]
+                         - slip_roundtrip_bp(r["d_ask"], r["d_bid"], SLIP_X_SENS[0])[0] / 1e4)
+                    for r in grp]
+        s = day_clustered_stats(adj_rows)
+        if not s or s["n"] < 5:
+            continue
+        print(f"{lab:<12}{s['n']:>7}{s['n_days']:>6}{p50:>11.2f}{p90:>11.2f}"
+              f"{s['avg_ret'] * 100:>16.3f}{s['day_t']:>8.2f}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="流动性分层回测（只读，描述性）")
     ap.add_argument("--symbols", type=int, default=0, help="只测前 N 个符号")
@@ -222,6 +360,8 @@ def main() -> int:
                     help="聚焦场景（默认 Pup_OIup）；ALL=全部场景合并")
     ap.add_argument("--dual", action="store_true",
                     help="追加双口径对照（vol24 vs vol7d 过同一门槛的四象限差异）")
+    ap.add_argument("--slip", action="store_true",
+                    help="追加盘口滑点透视（±1% 深度线性模型，需 biz.orderbook_depth_history）")
     args = ap.parse_args()
 
     settings = get_settings(require_database=True)
@@ -239,11 +379,13 @@ def main() -> int:
               f"成本 {args.cost:.3f}，回看 {args.lookback_days} 天")
         klines = bss.load_klines(conn, universe, args.lookback_days)
         oi_hourly = bss.load_oi_hourly(conn, universe)
-        print(f"[liq-layer] K线 {sum(len(v) for v in klines.values())} 根")
-
+        depth_hist = load_depth_history(conn, universe)
+        print(f"[liq-layer] K线 {sum(len(v) for v in klines.values())} 根 · "
+              f"深度快照覆盖 {len(depth_hist)}/{len(universe)} 币")
     trades = defaultdict(list)
     for sym, bars in klines.items():
-        scan_symbol_liq(sym, bars, oi_hourly.get(sym, {}), trades, args.cost)
+        scan_symbol_liq(sym, bars, oi_hourly.get(sym, {}), trades, args.cost,
+                        depth_list=depth_hist.get(sym))
 
     if args.scenario == "ALL":
         rows_all = [r for recs in trades.values() for r in recs]
@@ -290,6 +432,8 @@ def main() -> int:
 
     if args.dual:
         print_dual(rows_all, LIQ_MIN_USD, scen_label)
+    if args.slip:
+        print_slip(rows_all, scen_label)
 
     print("\n[liq-layer] ⚠️ 纪律：以上均为**描述性观察**（45 天单一 regime）。"
           "\n  差异只能作为「需跨 regime 复验的线索」，不能据此选阈值（§14.4）。"

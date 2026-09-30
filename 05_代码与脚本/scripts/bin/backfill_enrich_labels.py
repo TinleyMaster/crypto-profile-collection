@@ -54,6 +54,14 @@ CASE_SENSITIVE_CHAINS = {"solana", "tron", "ton", "sui", "aptos"}
 # 爬取尝试表名
 FETCH_ATTEMPT_TABLE = "biz.onchain_label_fetch_attempt"
 
+# 免 key 公共 JSON-RPC（用于批量判定 EOA/合约），已用真实合约+EOA 地址交叉验证
+# 支持 JSON-RPC batch：N 个地址只发 1 次 HTTP 请求，代价远低于逐个调 Etherscan API
+PUBLIC_RPC = {
+    "eth": ["https://ethereum-rpc.publicnode.com", "https://cloudflare-eth.com"],
+    "base": ["https://base-rpc.publicnode.com", "https://mainnet.base.org"],
+    "polygon": ["https://rpc-mainnet.matic.quiknode.pro", "https://polygon-rpc.com"],
+}
+
 
 def ensure_attempt_table(conn) -> None:
     """确保爬取尝试记录表存在。"""
@@ -76,11 +84,13 @@ def ensure_attempt_table(conn) -> None:
     conn.commit()
 
 
-def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool = True) -> list[str]:
+def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool = True,
+                            min_count: int = 1) -> list[str]:
     """从转账记录中捞出没有地址标签的地址（按出现频次倒序，优先爬高频地址）。
 
     只查 from_address / to_address 中出现过、但 onchain_address_label 中没有的地址。
     skip_attempted=True 时，跳过已经爬过（无论成功失败）的地址。
+    min_count>1 时，只保留出现次数 >= min_count 的地址（过滤一次性散户长尾）。
     """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -107,6 +117,11 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
                 )
             """
             params.append(chain)
+
+        min_clause = ""
+        if min_count > 1:
+            min_clause = "AND ac.cnt >= %s"
+            params.append(min_count)
 
         params.append(limit)
 
@@ -144,6 +159,7 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
                  {'LOWER(l.addr)' if not case_sensitive else 'l.addr'}
             WHERE l.addr IS NULL
               {attempt_clause}
+              {min_clause}
             ORDER BY ac.cnt DESC
             LIMIT %s
         """, tuple(params))
@@ -153,8 +169,12 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
     return [r["addr"] for r in rows]
 
 
-def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True) -> int:
-    """估算总共有多少个无标签地址（用于预览）。"""
+def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
+                          min_count: int = 1) -> int:
+    """估算总共有多少个无标签地址（用于预览）。
+
+    与 get_unlabeled_addresses 保持同一口径：支持 skip_attempted 与 min_count 过滤。
+    """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -179,15 +199,28 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True) -> int:
             """
             params.append(chain)
 
+        min_clause = ""
+        if min_count > 1:
+            min_clause = "AND ac.cnt >= %s"
+            params.append(min_count)
+
         cur.execute(f"""
             WITH all_addrs AS (
-                SELECT DISTINCT {addr_col_from} AS addr
+                -- 必须 UNION ALL（保留重复），否则 addr_counts.cnt 恒为 1，
+                -- min_count 过滤会退化成「永远 0 条」（与 get_unlabeled_addresses 同口径）
+                SELECT {addr_col_from} AS addr
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s AND from_address IS NOT NULL
-                UNION
-                SELECT DISTINCT {addr_col_to} AS addr
+                UNION ALL
+                SELECT {addr_col_to} AS addr
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s AND to_address IS NOT NULL
+            ),
+            addr_counts AS (
+                SELECT addr, COUNT(*) AS cnt
+                FROM all_addrs
+                WHERE addr IS NOT NULL AND addr <> ''
+                GROUP BY addr
             ),
             labeled AS (
                 SELECT LOWER(address) AS addr
@@ -199,14 +232,86 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True) -> int:
                 WHERE chain = %s
             )
             SELECT COUNT(*) AS cnt
-            FROM all_addrs ac
+            FROM addr_counts ac
             LEFT JOIN labeled l ON LOWER(ac.addr) = LOWER(l.addr)
-            WHERE l.addr IS NULL AND ac.addr IS NOT NULL AND ac.addr <> ''
+            WHERE l.addr IS NULL
               {attempt_clause}
+              {min_clause}
         """, tuple(params))
 
         row = cur.fetchone()
     return row["cnt"] if row else 0
+
+
+def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100
+                           ) -> tuple[list[str], dict[str, int]]:
+    """批量剔除合约地址，只保留 EOA。
+
+    原理：eth_getCode 返回 '0x' 即 EOA，返回字节码即合约。
+    交易所热钱包必然是 EOA，代币合约/路由/金库都是合约 —— 后者爬 HTML 永远查不到
+    交易所标签，属纯浪费请求，故前置剔除。
+
+    用 JSON-RPC batch（100 地址/次 HTTP 请求）+ 免 key 公共节点，
+    代价远低于逐个调 Etherscan 的 eth_getCode 代理接口。
+
+    返回 (保留的 EOA 列表, 被剔除的合约列表, 统计字典)。
+    判定失败的地址一律**保留**（保守，不误杀）。
+    """
+    urls = PUBLIC_RPC.get(chain) or []
+    stats = {"kept_eoa": 0, "dropped_contract": 0, "unknown": 0, "rpc_error": 0}
+    dropped: list[str] = []
+    if not urls or not addrs:
+        stats["kept_eoa"] = len(addrs)
+        if not urls:
+            print(f"  ⚠️  {chain} 无可用公共 RPC，跳过合约过滤（全部保留）")
+        return list(addrs), dropped, stats
+
+    import json as _json
+    import urllib.request
+
+    kept: list[str] = []
+    last_err = None
+    for start in range(0, len(addrs), batch_size):
+        batch = addrs[start:start + batch_size]
+        payload = [{"jsonrpc": "2.0", "id": i, "method": "eth_getCode",
+                    "params": [a, "latest"]} for i, a in enumerate(batch)]
+        body = _json.dumps(payload).encode()
+
+        result = None
+        for url in urls:                       # 逐个端点兜底
+            try:
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": "crypto-research/1.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = _json.loads(resp.read().decode())
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if not isinstance(result, list) or len(result) != len(batch):
+            # 整批判定失败 → 保守全保留，交给后续 HTML 爬取
+            kept.extend(batch)
+            stats["rpc_error"] += len(batch)
+            print(f"  ⚠️  RPC 判定失败({last_err})，本批 {len(batch)} 个地址全部保留")
+            continue
+
+        # result 顺序可能与请求不一致，按 id 对齐
+        by_id = {item.get("id"): (item.get("result") or "") for item in result}
+        for i, addr in enumerate(batch):
+            code = by_id.get(i)
+            if code is None:
+                kept.append(addr)
+                stats["unknown"] += 1
+            elif code == "0x":
+                kept.append(addr)
+                stats["kept_eoa"] += 1
+            else:
+                dropped.append(addr)             # 有字节码 = 合约，剔除
+                stats["dropped_contract"] += 1
+    return kept, dropped, stats
 
 
 def main():
@@ -221,6 +326,11 @@ def main():
                         help="每个请求的最小间隔秒数（默认 0.5 秒，并发模式下为每线程延迟）")
     parser.add_argument("--concurrency", type=int, default=5,
                         help="并发爬取线程数（默认 5，建议不超过 10 避免触发反爬）")
+    parser.add_argument("--min-count", type=int, default=3, dest="min_count",
+                        help="只爬在转账记录中出现 >=N 次的地址（默认 3，过滤一次性散户长尾）；"
+                             "设 0 或 1 表示不过滤")
+    parser.add_argument("--include-contracts", action="store_true", dest="include_contracts",
+                        help="不做合约前置剔除（默认会用 eth_getCode 剔除合约，只保留 EOA）")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：只统计，不爬取、不写库")
     parser.add_argument("--db-url", type=str, default=None,
@@ -272,14 +382,18 @@ def _ensure_conn(conn, db_url: str):
 
 
 def _record_attempts(conn, chain: str, ok_addrs: list[str], no_label_addrs: list[str],
-                     source: str = "explorer_html") -> int:
+                     source: str = "explorer_html",
+                     contract_addrs: list[str] | None = None) -> int:
     """批量写入爬取尝试记录，返回写入条数。
 
     ok: 成功查到标签
     no_label: 页面正常但无标签
+    contract: 前置判定为合约，从未爬取 HTML（语义上永不需要再爬）
     失败的（403/429/网络错误）不记，留给下次重试。
     """
-    all_addrs = [(a, "ok") for a in ok_addrs] + [(a, "no_label") for a in no_label_addrs]
+    all_addrs = ([(a, "ok") for a in ok_addrs]
+                 + [(a, "no_label") for a in no_label_addrs]
+                 + [(a, "contract") for a in (contract_addrs or [])])
     if not all_addrs:
         return 0
 
@@ -472,12 +586,16 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         print(f"链: {chain}")
         print(f"{'=' * 60}")
 
-        # 先预览总量
-        total_unlabeled = count_total_unlabeled(conn, chain)
-        print(f"  无标签地址总数（估算）: {total_unlabeled}")
+        min_count = max(1, int(getattr(args, "min_count", 1)))
+        exclude_contracts = not bool(getattr(args, "include_contracts", False))
+
+        # 先预览总量（与下方取地址保持同一口径）
+        total_unlabeled = count_total_unlabeled(conn, chain, min_count=min_count)
+        print(f"  无标签地址总数（估算, cnt>={min_count}）: {total_unlabeled}")
         effective_limit = args.limit if args.limit > 0 else total_unlabeled
         print(f"  本次计划爬取: {min(effective_limit, total_unlabeled)} 个")
         print(f"  并发数: {args.concurrency}")
+        print(f"  合约前置剔除: {'开（只留 EOA）' if exclude_contracts else '关'}")
 
         if args.dry_run:
             print("  [dry-run] 跳过实际爬取")
@@ -488,13 +606,35 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             continue
 
         # 捞出待爬地址
-        addresses = get_unlabeled_addresses(conn, chain, effective_limit)
+        addresses = get_unlabeled_addresses(conn, chain, effective_limit,
+                                            min_count=min_count)
         if not addresses:
             print("  没有找到待富化地址")
             continue
 
         print(f"  捞出 {len(addresses)} 个待爬地址（按频次排序）")
         print(f"  前 5 个: {addresses[:5]}")
+
+        # 前置剔除合约地址（obtained via eth_getCode），只保留 EOA
+        dropped_contracts: list[str] = []
+        if exclude_contracts:
+            addresses, dropped_contracts, fstats = batch_filter_contracts(chain, addresses)
+            print(f"  合约过滤: EOA {fstats['kept_eoa']} 个 / 剔除合约 "
+                  f"{fstats['dropped_contract']} 个 / 判定失败保留 "
+                  f"{fstats['rpc_error'] + fstats['unknown']} 个")
+            if not addresses:
+                print("  过滤后无 EOA 地址，跳过")
+                # 剔除的合约仍要落 attempt，避免以后重复 RPC 判定
+                if dropped_contracts:
+                    ensure_attempt_table(conn)
+                    try:
+                        n = _record_attempts(conn, chain, [], [],
+                                             contract_addrs=dropped_contracts)
+                        conn.commit()
+                        print(f"  已记录 {n} 个合约地址（下次自动跳过）")
+                    except Exception as e:
+                        print(f"  ⚠️  记录合约跳过失败: {e}")
+                continue
 
         # 初始化 resolver（DB 查询用，单线程安全）
         resolver = AddressLabelResolver(conn, chain)
@@ -615,6 +755,16 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                   f"本批查到标签 {batch_stats['ok']} 个, "
                   f"入库 {batch_inserted} 条, "
                   f"回填 {batch_backfilled} 条{fail_str}")
+
+        # 把本次前置剔除的合约地址落 attempt 表（status='contract'），下次直接跳过
+        if dropped_contracts:
+            try:
+                n = _record_attempts(conn, chain, [], [],
+                                     contract_addrs=dropped_contracts)
+                conn.commit()
+                attempt_recorded += n
+            except Exception as e:
+                print(f"  ⚠️  记录合约跳过失败: {e}")
 
         # 清理所有线程的 fetcher
         for f in thread_local.values():

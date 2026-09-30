@@ -550,9 +550,19 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                         if info:
                             batch_results[addr.lower()] = info
                             batch_stats["ok"] += 1
+                        elif status == "no_label":
+                            # 页面正常但无标签 —— 必须入 attempt 表，否则下轮重复爬。
+                            # 注意：'no_label' 同时是 batch_stats 的键，
+                            # 若放到 `elif status in batch_stats` 之后判断会被该分支截获，
+                            # 导致 batch_no_label 恒为空、skip_attempted 形同虚设（历史 bug）。
+                            batch_no_label.append(addr.lower())
+                            batch_stats["no_label"] += 1
                         elif status in batch_stats:
+                            # http_403 / http_429 / http_other / network_error：
+                            # 按设计不入 attempt 表，留给下轮重试
                             batch_stats[status] += 1
                         else:
+                            # 未知状态（含 invalid_address）：按无标签记账并跳过
                             batch_no_label.append(addr.lower())
                             batch_stats["no_label"] += 1
 

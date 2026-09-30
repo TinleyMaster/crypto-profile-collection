@@ -92,12 +92,14 @@ def ensure_attempt_table(conn) -> None:
 
 
 def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool = True,
-                            min_count: int = 1) -> list[str]:
+                            min_count: int = 1, since_hours: float = 0) -> list[str]:
     """从转账记录中捞出没有地址标签的地址（按出现频次倒序，优先爬高频地址）。
 
     只查 from_address / to_address 中出现过、但 onchain_address_label 中没有的地址。
     skip_attempted=True 时，跳过已经爬过（无论成功失败）的地址。
     min_count>1 时，只保留出现次数 >= min_count 的地址（过滤一次性散户长尾）。
+    since_hours>0 时只统计最近 N 小时出现过的地址（热跑口径，避免陈年长尾占坑）；
+    0 = 不限窗口（每日全量口径）。
     """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -111,9 +113,16 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
             addr_col_to = "LOWER(to_address)"
             compare = "="
 
+        # 增量窗口：热跑时只捞最近 N 小时的新转账地址，防止和陈年长尾互相占坑
+        since_clause = ""
+        since_params: list = []
+        if since_hours and since_hours > 0:
+            since_clause = "AND block_timestamp >= NOW() - (%s * INTERVAL '1 hour')"
+            since_params = [since_hours]
+
         # 已尝试过的地址（无标签/失败的都算）
         attempt_clause = ""
-        params = [chain, chain, chain, chain]
+        params = [chain, *since_params, chain, *since_params, chain, chain]
         if skip_attempted:
             attempt_clause = f"""
                 AND NOT EXISTS (
@@ -138,11 +147,13 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s
                   AND from_address IS NOT NULL
+                  {since_clause}
                 UNION ALL
                 SELECT {addr_col_to} AS addr
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s
                   AND to_address IS NOT NULL
+                  {since_clause}
             ),
             addr_counts AS (
                 SELECT addr, COUNT(*) AS cnt
@@ -177,10 +188,10 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
 
 
 def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
-                          min_count: int = 1) -> int:
+                          min_count: int = 1, since_hours: float = 0) -> int:
     """估算总共有多少个无标签地址（用于预览）。
 
-    与 get_unlabeled_addresses 保持同一口径：支持 skip_attempted 与 min_count 过滤。
+    与 get_unlabeled_addresses 保持同一口径：支持 skip_attempted / min_count / since_hours。
     """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -194,8 +205,14 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
             addr_col_to = "LOWER(to_address)"
             compare = "="
 
+        since_clause = ""
+        since_params: list = []
+        if since_hours and since_hours > 0:
+            since_clause = "AND block_timestamp >= NOW() - (%s * INTERVAL '1 hour')"
+            since_params = [since_hours]
+
         attempt_clause = ""
-        params = [chain, chain, chain, chain]
+        params = [chain, *since_params, chain, *since_params, chain, chain]
         if skip_attempted:
             attempt_clause = f"""
                 AND NOT EXISTS (
@@ -218,10 +235,12 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
                 SELECT {addr_col_from} AS addr
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s AND from_address IS NOT NULL
+                  {since_clause}
                 UNION ALL
                 SELECT {addr_col_to} AS addr
                 FROM biz.onchain_transfer_log
                 WHERE chain = %s AND to_address IS NOT NULL
+                  {since_clause}
             ),
             addr_counts AS (
                 SELECT addr, COUNT(*) AS cnt
@@ -370,6 +389,13 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
     import json as _json
     import urllib.request
 
+    # 显式禁用一切代理（P0，2026-09-30 实测踩坑）：
+    # 启动器虽清了环境变量，但 Windows 上 urllib.urlopen 还会回落读
+    # **注册表系统代理**（Clash 类工具开了系统代理就是 127.0.0.1:7890）。
+    # 代理半死不活时每批 30s 超时 × 2 端点 × 2 重试，161 批能拖 5+ 小时
+    # 且全程无日志输出（RPC 过滤在首条打印之前）。公共 RPC 节点必须直连。
+    _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
     kept: list[str] = []
     last_err = None
     for batch_no, start in enumerate(range(0, len(addrs), batch_size)):
@@ -392,7 +418,7 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
                         url, data=body,
                         headers={"Content-Type": "application/json",
                                  "User-Agent": "crypto-research/1.0"})
-                    with urllib.request.urlopen(req, timeout=30) as resp:
+                    with _OPENER.open(req, timeout=30) as resp:
                         result = _json.loads(resp.read().decode())
                 except Exception as e:
                     last_err = e
@@ -428,6 +454,12 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
 
         if batch_delay > 0:
             time.sleep(batch_delay)        # 节流，避免整批被 429
+
+        # 每 20 批打一行进度：RPC 过滤在「合约过滤:」汇总行之前，
+        # 不打中间进度的话几千地址会静默十几分钟，容易被误判卡死
+        if (batch_no + 1) % 20 == 0:
+            done = min(batch_no + 1, (len(addrs) + batch_size - 1) // batch_size)
+            print(f"  RPC 判定进度: {min((batch_no + 1) * batch_size, len(addrs))}/{len(addrs)}")
 
         if by_id is None:
             # 整批判定失败 → 保守全保留，交给后续 HTML 爬取
@@ -478,6 +510,10 @@ def main():
                         help="每条链最多验证多少个 medium 地址（默认 0=不限）")
     parser.add_argument("--medium-source", type=str, default=None, dest="medium_source",
                         help="只验证指定来源的 medium 地址（如 evm_propagate）；默认不限来源")
+    parser.add_argument("--since-hours", type=float, default=0, dest="since_hours",
+                        help="只捞最近 N 小时内出现的转账地址（默认 0=不限，即全量口径）。"
+                             "本机热跑（每 30 分钟一次）应带窗口，例如 --since-hours 4："
+                             "否则队列会被陈年长尾占满，新转账地址排不进来，榜单持续漏报")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：只统计，不爬取、不写库")
     parser.add_argument("--db-url", type=str, default=None,
@@ -780,6 +816,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         exclude_contracts = not bool(getattr(args, "include_contracts", False))
         verify_medium = bool(getattr(args, "verify_medium", False))
         medium_source = getattr(args, "medium_source", None) or None
+        since_hours = float(getattr(args, "since_hours", 0) or 0)
 
         # ── 队列一：medium 待验证地址（跨链传播副本，命中即升 high）──
         medium_addrs: list[str] = []
@@ -793,8 +830,10 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                   + f"，本次计划爬 {min(med_limit, total_medium)} 个")
 
         # ── 队列二：无标签地址（原逻辑）──
-        total_unlabeled = count_total_unlabeled(conn, chain, min_count=min_count)
-        print(f"  无标签地址总数（估算, cnt>={min_count}）: {total_unlabeled}")
+        total_unlabeled = count_total_unlabeled(conn, chain, min_count=min_count,
+                                               since_hours=since_hours)
+        window_txt = f"，窗口近 {since_hours:g}h" if since_hours > 0 else "，窗口不限"
+        print(f"  无标签地址总数（估算, cnt>={min_count}{window_txt}）: {total_unlabeled}")
         effective_limit = args.limit if args.limit > 0 else total_unlabeled
         print(f"  本次计划爬取: {min(effective_limit, total_unlabeled)} 个")
         print(f"  并发数: {args.concurrency}")
@@ -817,7 +856,8 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
 
         # 捞出待爬地址
         addresses = get_unlabeled_addresses(conn, chain, effective_limit,
-                                            min_count=min_count)
+                                            min_count=min_count,
+                                            since_hours=since_hours)
 
         # 前置剔除合约地址（obtained via eth_getCode），只保留 EOA
         dropped_contracts: list[str] = []

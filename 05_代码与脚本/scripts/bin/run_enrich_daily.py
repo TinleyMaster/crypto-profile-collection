@@ -17,15 +17,27 @@
     3. 日志落盘滚动 —— 每天一个文件，默认保留 14 天。
     4. 结束写 SUMMARY —— 退出码 / 耗时 / 从日志里抓到的新增标签数。
 
+两种模式（同一个脚本、同一把锁，互斥运行）：
+    daily（默认）—— 每日全量：清 medium 验证 + 无标签长尾，跑一晚。
+    hot          —— 每 30 分钟热跑：只捞最近窗口内的新地址，把
+                    「大额转账出现 → 打上标签」的间隔从最坏近 24h 压到 ~30min。
+
+为什么必须两种模式并存：
+    热跑解决了「新转账打标太慢」，但清不掉历史长尾；全量解决了长尾，但一天只跑
+    一次。只留热跑会让积压永远清不完，只留全量会让页面天天漏报新转账。
+
 用法：
-    python run_enrich_daily.py                  # 计划任务调用（默认全链增量）
+    python run_enrich_daily.py                  # 计划任务调用（默认 daily 全量）
+    python run_enrich_daily.py --mode hot       # 热跑（计划任务每 30 分钟调用）
     python run_enrich_daily.py --dry-run        # 只打印将要执行的命令，不真跑
     python run_enrich_daily.py --force          # 忽略锁与进程检测强制执行
     python run_enrich_daily.py --extra-args "--limit 200 --min-count 3"
 
-注册为每日计划任务（PowerShell，普通权限即可）：
+注册为计划任务（PowerShell，普通权限即可；两个任务共用一把锁，撞车时后到者跳过）：
     $py  = "C:\\Users\\SuperTing\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe"
     $sc  = "E:\\瞎搞乱搞\\web3\\加密货币研究报告\\05_代码与脚本\\scripts"
+
+    # ① 每日全量 21:00
     $act = New-ScheduledTaskAction -Execute $py `
              -Argument "-u `"$sc\\bin\\run_enrich_daily.py`"" -WorkingDirectory $sc
     $trg = New-ScheduledTaskTrigger -Daily -At 21:00
@@ -38,6 +50,17 @@
     # attempt 表，次日自动重试），但白等一晚，故放宽到 10 小时。
     Register-ScheduledTask -TaskName "CryptoOnchainEnrichDaily" -Action $act `
              -Trigger $trg -Settings $set -Force
+
+    # ② 热跑：每 30 分钟一次，每次限时 25 分钟（超时自动结束，下一轮接着来）
+    $actH = New-ScheduledTaskAction -Execute $py `
+              -Argument "-u `"$sc\\bin\\run_enrich_daily.py`" --mode hot" -WorkingDirectory $sc
+    $trgH = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddHours(1) `
+              -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $setH = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+              -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+              -ExecutionTimeLimit (New-TimeSpan -Minutes 25)
+    Register-ScheduledTask -TaskName "CryptoOnchainEnrichHot" -Action $actH `
+             -Trigger $trgH -Settings $setH -Force
 """
 from __future__ import annotations
 
@@ -84,6 +107,31 @@ DEFAULT_ARGS = [
     "--concurrency", "2",
     "--delay", "2.0",
 ]
+
+# 热跑参数（--mode hot）。三处与全量的差异都是刻意的：
+#   --since-hours 4：限定「最近 4 小时出现过的地址」。不带窗口时候选池按全库频次
+#                    排序，历史长尾会把 --limit 占满，新转账地址根本挤不进队列
+#                    ——页面就会持续漏报当前窗口的大额转账。
+#   --limit 150    ：单轮上限，按 0.6~0.9 地址/秒约 3~4 分钟跑完，不会占用到
+#                    下一轮（30 分钟）的开跑时刻；超时也只影响本轮，下轮接着来。
+#   不带 --verify-medium：medium 验证是「一次性清历史库存」的工作，属于每日全量
+#                    的范畴；热跑只做新地址增量，避免把配额花在重复验证上。
+HOT_ARGS = [
+    "--chain", "eth,base,polygon",
+    "--min-count", "1",
+    "--limit", "150",
+    "--since-hours", "4",
+    "--concurrency", "2",
+    "--delay", "2.0",
+]
+
+MODE_ARGS = {"daily": DEFAULT_ARGS, "hot": HOT_ARGS}
+
+# 每日全量的触发时刻（与上面注册命令保持一致）。热跑在这个时刻前后
+# HOT_DAILY_GUARD_MIN 分钟内直接跳过：两者抢同一把锁，若热跑恰好先拿到锁，
+# 当日全量就会被「已有实例」挡掉一整天（单实例保护在热跑里同样生效）。
+DAILY_TRIGGER_HOUR = 21
+HOT_DAILY_GUARD_MIN = 15
 
 # 从进度行里抓「已查到标签 N 个」用于 SUMMARY
 LABEL_RE = re.compile(r"已查到标签\s*(\d+)\s*个")
@@ -171,9 +219,15 @@ def release_lock() -> None:
         pass
 
 
+def _in_daily_guard(now: datetime) -> bool:
+    """热跑是否落在每日全量的前后保护窗口内（用于让位）。"""
+    start = now.replace(hour=DAILY_TRIGGER_HOUR, minute=0, second=0, microsecond=0)
+    return abs((now - start).total_seconds()) <= HOT_DAILY_GUARD_MIN * 60
+
+
 def clean_old_logs() -> None:
     cutoff = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
-    for f in LOG_DIR.glob("enrich_daily_*.log"):
+    for f in LOG_DIR.glob("enrich_*.log"):
         try:
             mtime = datetime.fromtimestamp(f.stat().st_mtime)
             if mtime < cutoff:
@@ -186,7 +240,10 @@ def main() -> int:
     global LOG_DIR, LOCK_FILE          # 必须在任何引用之前声明
 
     parser = argparse.ArgumentParser(
-        description="本地每日地址标签富化调度启动器（单实例 + 实时日志）")
+        description="本地地址标签富化调度启动器（单实例 + 实时日志）")
+    parser.add_argument("--mode", choices=("daily", "hot"), default="daily",
+                        help="daily=每日全量（清 medium + 长尾）；"
+                             "hot=每 30 分钟热跑（只捞最近 4h 新地址）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印将要执行的命令，不真正启动")
     parser.add_argument("--force", action="store_true",
@@ -202,12 +259,14 @@ def main() -> int:
         LOG_DIR = Path(args.log_dir)
         LOCK_FILE = LOG_DIR / "enrich_daily.lock"
 
-    cmd = [sys.executable, "-u", str(TARGET_SCRIPT), *DEFAULT_ARGS]
+    mode = args.mode
+    mode_txt = "热跑" if mode == "hot" else "每日全量"
+    cmd = [sys.executable, "-u", str(TARGET_SCRIPT), *MODE_ARGS[mode]]
     if args.extra_args.strip():
         cmd += args.extra_args.strip().split()
 
     _log("=" * 68)
-    _log(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 每日地址标签富化")
+    _log(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 地址标签富化（{mode_txt}）")
     _log(f"  工作目录: {SCRIPTS_DIR}")
     _log(f"  解释器  : {sys.executable}")
     _log(f"  命令    : {' '.join(cmd)}")
@@ -216,11 +275,19 @@ def main() -> int:
         _log("  [dry-run] 未实际执行")
         return 0
 
+    # 热跑避开每日全量的触发时刻：两者共用一把锁，热跑若先抢到锁会让当日全量
+    # 被单实例保护挡掉，长尾与 medium 验证就整整一天不跑。
+    if mode == "hot" and not args.force and _in_daily_guard(datetime.now()):
+        _log(f"  ⏸ 距每日全量（{DAILY_TRIGGER_HOUR:02d}:00）不足 "
+             f"{HOT_DAILY_GUARD_MIN} 分钟，本次热跑让位跳过")
+        return 0
+
     # 日志文件必须在任何分支判断之前打开：
     # 计划任务下控制台输出会丢弃，若「跳过」不留痕，事后无法区分
     # 「任务没跑」和「跑了但被单实例保护跳过」——踩过这个坑。
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / f"enrich_daily_{datetime.now():%Y%m%d}.log"
+    # 两种模式分开记日志：热跑一天 48 次，混进全量日志里会把一夜的长跑日志淹掉
+    log_path = LOG_DIR / f"enrich_{'hot' if mode == 'hot' else 'daily'}_{datetime.now():%Y%m%d}.log"
     t0 = time.time()
     last_label_n = 0
     last_upgrade_n = 0
@@ -262,43 +329,71 @@ def main() -> int:
                       "https_proxy", "ALL_PROXY", "all_proxy"):
                 env.pop(p, None)
 
+            # 【不要改回 stdout=PIPE 实时读】2026-09-30 实测踩坑：
+            # 在 Windows 计划任务会话下，Popen(stdout=PIPE) + 逐行读的模式
+            # 子进程输出会被无限期憋住（14 分钟一个字节都到不了父进程，
+            # 进程被杀后缓冲才一次性吐出）——同脚本交互终端下完全实时。
+            # 熔断器因此全瞎，且日志文件 14 分钟不增长，极易误判卡死被杀。
+            # 现改为：子进程 stdout 直接绑日志文件（绕开 PIPE），
+            # 父进程定期 seek 读文件尾部做 429 熔断 + 计数提取。
+            # 子进程 stdout 直接绑日志文件（见下方 Popen 注释）
+            log_handle = lf
+
             proc = subprocess.Popen(
-                cmd, cwd=str(SCRIPTS_DIR), stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, env=env,
-                text=True, encoding="utf-8", errors="replace")
+                cmd, cwd=str(SCRIPTS_DIR), stdout=log_handle,
+                stderr=subprocess.STDOUT, env=env)
+
+            file_offset = 0
+            try:
+                file_offset = log_handle.tell()
+            except Exception:
+                file_offset = 0
 
             bad_streak = 0
             halted_by_429 = False
-            for line in proc.stdout:                # 逐行 tee，实时可见
-                m = LABEL_RE.search(line)
-                if m:
-                    last_label_n = int(m.group(1))
-                mu = UPGRADE_RE.search(line)
-                if mu:
-                    last_upgrade_n += int(mu.group(1))
+            last_progress_print = ""
+            while proc.poll() is None:
+                time.sleep(30)
+                # 读日志文件增量（二进制 seek 避免文本模式 tell 的 cookie 问题）
+                try:
+                    with open(log_path, "rb") as rf:
+                        rf.seek(file_offset)
+                        chunk = rf.read()
+                        file_offset = rf.tell()
+                except OSError:
+                    continue
+                text = chunk.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    m = LABEL_RE.search(line)
+                    if m:
+                        last_label_n = int(m.group(1))
+                    mu = UPGRADE_RE.search(line)
+                    if mu:
+                        last_upgrade_n += int(mu.group(1))
 
-                # 限流熔断：连续多批大面积 429 说明 IP 已进惩罚窗口，
-                # 继续跑既拿不到数据又会加深惩罚（实测惩罚后即使降速也只有
-                # ~0.5/秒有效产出），不如早停，失败的未记账次日自动重试。
-                if "批次完成" in line:
-                    m429 = FAIL429_RE.search(line)
-                    n429 = int(m429.group(1)) if m429 else 0
-                    if n429 >= BAD_BATCH_429:
-                        bad_streak += 1
-                    else:
-                        bad_streak = 0
-                    if bad_streak >= BAD_BATCH_STREAK:
-                        emit(f"  🛑 连续 {bad_streak} 批大面积 429（每批 "
-                             f"≥{BAD_BATCH_429} 个失败），判定 IP 已进入限流"
-                             f"惩罚窗口，主动中止本次运行")
-                        emit("     已爬到的标签已入库；失败地址未记账，明日自动重试")
-                        proc.terminate()
-                        halted_by_429 = True
-                        break
+                    # 429 熔断（从文件增量里检测，与旧 PIPE 逻辑同阈值）
+                    if "批次完成" in line:
+                        last_progress_print = line.strip()
+                        m429 = FAIL429_RE.search(line)
+                        n429 = int(m429.group(1)) if m429 else 0
+                        if n429 >= BAD_BATCH_429:
+                            bad_streak += 1
+                        else:
+                            bad_streak = 0
+                        if bad_streak >= BAD_BATCH_STREAK:
+                            emit(f"  🛑 连续 {bad_streak} 批大面积 429（每批 "
+                                 f"≥{BAD_BATCH_429} 个失败），判定 IP 已进入限流"
+                                 f"惩罚窗口，主动中止本次运行")
+                            emit("     已爬到的标签已入库；失败地址未记账，明日自动重试")
+                            proc.terminate()
+                            halted_by_429 = True
+                            break
+                if halted_by_429:
+                    break
+                # 每 30 秒打一行最新批次进度（控制台可观测）
+                if last_progress_print:
+                    emit(f"  [watch] {last_progress_print}")
 
-                lf.write(line)
-                print(line, end="", flush=True)
-            proc.stdout.close()
             try:
                 exit_code = proc.wait(timeout=30)
             except subprocess.TimeoutExpired:

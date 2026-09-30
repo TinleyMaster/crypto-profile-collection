@@ -57,9 +57,16 @@ FETCH_ATTEMPT_TABLE = "biz.onchain_label_fetch_attempt"
 # 免 key 公共 JSON-RPC（用于批量判定 EOA/合约），已用真实合约+EOA 地址交叉验证
 # 支持 JSON-RPC batch：N 个地址只发 1 次 HTTP 请求，代价远低于逐个调 Etherscan API
 PUBLIC_RPC = {
-    "eth": ["https://ethereum-rpc.publicnode.com", "https://cloudflare-eth.com"],
-    "base": ["https://base-rpc.publicnode.com", "https://mainnet.base.org"],
-    "polygon": ["https://rpc-mainnet.matic.quiknode.pro", "https://polygon-rpc.com"],
+    # 每个备用端点都已用「已知 EOA + 已知合约」交叉验证过 getCode 判定正确。
+    # 注意：cloudflare-eth.com 对 batch 请求静默返回无 result 的错误体
+    # （实测判定结果 ['?','?']），会伪装成「unknown」而保留全部地址，已剔除。
+    # ankr 不支持 JSON-RPC batch，llamarpc 常返 525，均不可用。
+    "eth": ["https://ethereum-rpc.publicnode.com",
+            "https://eth-mainnet.public.blastapi.io"],
+    "base": ["https://base-rpc.publicnode.com",
+             "https://base-mainnet.public.blastapi.io"],
+    "polygon": ["https://polygon-bor-rpc.publicnode.com",
+                "https://polygon.rpc.thirdweb.com"],
 }
 
 
@@ -276,18 +283,21 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
 
     kept: list[str] = []
     last_err = None
-    for start in range(0, len(addrs), batch_size):
+    for batch_no, start in enumerate(range(0, len(addrs), batch_size)):
         batch = addrs[start:start + batch_size]
+        # 轮换首选端点：避免每批都先砸在同一个（可能正在限流的）节点上
+        rot = batch_no % len(urls)
+        ordered = urls[rot:] + urls[:rot]
         payload = [{"jsonrpc": "2.0", "id": i, "method": "eth_getCode",
                     "params": [a, "latest"]} for i, a in enumerate(batch)]
         body = _json.dumps(payload).encode()
 
-        result = None
+        by_id = None
         # 失败退避重试：公共节点突发 429 通常短暂，退避后重试成功率很高
         for attempt in range(max_retries):
             if attempt > 0:
                 time.sleep(1.5 * attempt)   # 1.5s → 3s
-            for url in urls:               # 逐个端点兜底
+            for url in ordered:              # 逐个端点兜底（已轮换起始位置）
                 try:
                     req = urllib.request.Request(
                         url, data=body,
@@ -295,17 +305,42 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
                                  "User-Agent": "crypto-research/1.0"})
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         result = _json.loads(resp.read().decode())
-                    break
                 except Exception as e:
                     last_err = e
                     continue
-            if result is not None:
+
+                if not isinstance(result, list) or len(result) != len(batch):
+                    last_err = ValueError("非 batch 响应")
+                    continue
+
+                # 关键：逐项校验 result 是否为非空字符串。
+                # 实测 mainnet.base.org 返回 100 条响应但有效结果 0/100、
+                # quiknode polygon 只有 20/100 有效 —— 这类「HTTP 200 但结果为空」
+                # 若当成正常响应处理，空值会落到 else 分支被判成「合约」剔除，
+                # 真实 EOA 会被误杀并以 status='contract' 入 attempt 表永久不再重爬。
+                _map: dict[int, str | None] = {}
+                _valid = 0
+                for item in result:
+                    if not isinstance(item, dict):
+                        continue
+                    r = item.get("result")
+                    if isinstance(r, str) and r:
+                        _valid += 1
+                    _map[item.get("id")] = r if isinstance(r, str) else None
+
+                if _valid < len(batch) * 0.9:
+                    last_err = ValueError(f"有效结果仅 {_valid}/{len(batch)}")
+                    continue
+
+                by_id = _map
+                break
+            if by_id is not None:
                 break
 
         if batch_delay > 0:
             time.sleep(batch_delay)        # 节流，避免整批被 429
 
-        if not isinstance(result, list) or len(result) != len(batch):
+        if by_id is None:
             # 整批判定失败 → 保守全保留，交给后续 HTML 爬取
             kept.extend(batch)
             stats["rpc_error"] += len(batch)
@@ -313,10 +348,10 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
             continue
 
         # result 顺序可能与请求不一致，按 id 对齐
-        by_id = {item.get("id"): (item.get("result") or "") for item in result}
         for i, addr in enumerate(batch):
             code = by_id.get(i)
-            if code is None:
+            if not code:
+                # None / 空串 = 该地址判定失败，保守保留（绝不按合约剔除）
                 kept.append(addr)
                 stats["unknown"] += 1
             elif code == "0x":

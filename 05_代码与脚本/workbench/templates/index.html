@@ -11217,17 +11217,27 @@
             'price_change_24h': '24h 涨跌幅',
             'volume_surge_24h': '成交量异动',
             'price_volume_surge': '量价齐升',
+            'market_cap_mover': '市值变化榜',
             'sector_rotation': '板块轮动',
             'fund_flow': '资金流向',
-            'unlock_7d': '解锁抛压'
+            'unlock_7d': '解锁抛压',
+            'tvl_surge_24h': 'TVL 增幅',
+            'social_surge': '社交热度',
+            'cmc_gainers_24h': 'CMC 涨幅榜',
+            'cmc_losers_24h': 'CMC 跌幅榜'
         };
         const DIFF_CATEGORY_TIP = {
             'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
             'volume_surge_24h': '放量榜：按 24h 量/市值比（换手率）排序，左列为放量最显著；缩量榜：按 24h 成交量环比前一日降幅排序，右列为缩量最显著',
             'price_volume_surge': '涨幅前 50% 且 放量前 50% 的交集，按量价共振综合分排序：真正有资金推动的异动',
+            'market_cap_mover': '按 24h 市值变动率绝对值排序（大资金进出），涨/跌各自从 1 起排名',
             'sector_rotation': '连续 3 天赛道强度排名前 5 的板块，搭配量价齐升领涨龙头：高确定性的板块轮动机会',
             'fund_flow': '资金流向榜：上层为赛道级资金净流入/净流出，下层为币种级大资金进出（以市值变动近似）',
-            'unlock_7d': '按未来 7 天代币解锁抛压占流通市值比例排序：左列为抛压最大'
+            'unlock_7d': '按未来 7 天代币解锁抛压占流通市值比例排序：左列为抛压最大',
+            'tvl_surge_24h': '按 24h 协议 TVL 环比增幅排序（DeFi 资金流入）',
+            'social_surge': '按社交热度日环比增幅排序（需有前一日数据）',
+            'cmc_gainers_24h': 'CMC 官方 24h 涨幅榜（覆盖全市场含新币）',
+            'cmc_losers_24h': 'CMC 官方 24h 跌幅榜（覆盖全市场含新币）'
         };
         const SECTOR_LABELS_SHORT = {
             'l1': 'L1', 'l2': 'L2', 'defi': 'DeFi', 'launchpad': 'Launchpad',

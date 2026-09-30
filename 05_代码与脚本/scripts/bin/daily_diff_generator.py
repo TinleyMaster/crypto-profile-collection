@@ -573,6 +573,25 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
 
+# 本生成器负责的类别（同日重跑需先清空，见 generate_for_date 的幂等替换语义）。
+# 审计_每日变化榜_2026-09-30 F1：ON CONFLICT DO NOTHING 是「只增不改」，而
+# data_sync_daily 与 daily_diff_fallback 同一天会各跑一次；两次运行之间
+# asset_market_daily 刷新会导致入选资产集合漂移，新资产以新 rank 插入、旧行留存
+# ⇒ 行数 > SQL 的 LIMIT、rank 出现重复。改为「先删当日该类别全部行再插入」。
+GENERATED_CATEGORIES = (
+    "price_change_24h",
+    "price_volume_surge",
+    "volume_surge_24h",
+    "market_cap_mover",
+    "cmc_gainers_24h",
+    "cmc_losers_24h",
+    "unlock_7d",
+    "social_surge",
+    "tvl_surge_24h",
+    "sector_rotation",
+)
+
+
 def _compute_sector_strength(cur, d: date) -> list[dict]:
     """计算指定日期各赛道的强度分，返回 [{sector, strength_score, rank, ...}]"""
     cur.execute(SECTOR_ROTATION_SQL, (str(d), str(d)))
@@ -717,6 +736,15 @@ def _generate_sector_rotation(cur, d: date, lookback_days: int = 3, top_n_sector
 def generate_for_date(cur, d: date) -> dict:
     """为指定日期生成所有榜单，返回 {category: count}。"""
     date_str = str(d)
+
+    # 幂等替换语义：同日重跑先清空本生成器负责的类别，避免旧运行的行与新运行混存
+    # （审计_每日变化榜_2026-09-30 F1：不删会导致 行数 > LIMIT、rank 重复）。
+    # 全部语句在同一事务内，中途失败整批回滚，不会留下「只删未插」的半截数据。
+    cur.execute(
+        "DELETE FROM biz.daily_diff_summary WHERE diff_date = %s AND category = ANY(%s)",
+        (date_str, list(GENERATED_CATEGORIES)),
+    )
+
     result = {}
 
     cur.execute(PRICE_CHANGE_SQL, (date_str, date_str))

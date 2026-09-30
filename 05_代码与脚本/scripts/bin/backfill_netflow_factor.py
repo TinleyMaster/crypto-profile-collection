@@ -10,11 +10,18 @@
 归因口径 = 读侧 union 两张地址表（与 workbench/onchain_alert.py 完全一致）；
 同所家族互转、is_suspect、0xtest% 全部剔除。
 
+时间与窗口：
+    两种模式互斥，--since/--until 优先于 --hours：
+      --hours N        相对窗口： [NOW()-N小时, 当前UTC整点)      —— 调度增量用（默认 6）
+      --since T        绝对窗口： [T, --until 或 当前UTC整点)      —— 历史回填用
+    上限仍排除「进行中的当前小时」，保证桶边界稳定、可任意重放。
+
 实现要点：
     写入 = 单条 INSERT INTO ... SELECT ... ON CONFLICT，聚合与 upsert 全程 DB 端完成，
     数据不离开数据库（跨公网逐行 upsert 的 round-trip 版本已废弃，31 天窗口 1h+ → 秒级）。
     桶按 UTC 截断（SET TIME ZONE 'UTC'），不含进行中的当前小时（边界稳定可重放）。
     幂等：ON CONFLICT DO UPDATE，窗口可任意重叠重跑。
+    历史回填按 --chunk-days 切块（默认 7 天），避免单个长事务锁表过久、失败时便于断点续跑。
 
 用法：
     # 预览（不写库，打印 top5 聚合行）
@@ -23,13 +30,17 @@
     # 实际回填（调度默认每小时跑，回看 6h）
     python backfill_netflow_factor.py --hours 6
 
-    # 首次播种 30 天历史
-    python backfill_netflow_factor.py --hours 744
+    # 历史回填：从 8 月 1 日补到当前 UTC 整点（分块，幂等）
+    python backfill_netflow_factor.py --since 2026-08-01
+
+    # 指定终止时间（左闭右开）
+    python backfill_netflow_factor.py --since 2026-08-01 --until 2026-09-01
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -52,8 +63,8 @@ WITH exch AS (
 tl AS (
     SELECT asset_id, block_timestamp, value_usd, from_address, to_address, chain
     FROM biz.onchain_transfer_log
-    WHERE block_timestamp >= NOW() - (%s * INTERVAL '1 hour')
-      AND block_timestamp <  date_trunc('hour', NOW())
+    WHERE block_timestamp >= %s::timestamptz
+      AND block_timestamp <  %s::timestamptz
       AND asset_id IS NOT NULL
       AND value_usd IS NOT NULL AND value_usd > 0
       AND (is_suspect IS NOT TRUE)
@@ -114,10 +125,24 @@ def _symbol_of(conn, asset_id: int) -> str:
         return str(row[0]) if row else f"#{asset_id}"
 
 
+def _parse_ts(s: str) -> datetime:
+    """解析 --since/--until；无时区信息一律按 UTC 处理（与桶口径一致）。"""
+    d = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="资产净流因子小时聚合回填（幂等，DB 端单语句）")
     parser.add_argument("--hours", type=int, default=6,
-                        help="回看窗口（小时），默认 6；首播 30 天用 744")
+                        help="相对回看窗口（小时），默认 6；调度增量用")
+    parser.add_argument("--since", type=str, default=None,
+                        help="绝对起始时间（UTC，如 2026-08-01），历史回填用；优先于 --hours")
+    parser.add_argument("--until", type=str, default=None,
+                        help="绝对终止时间（左闭右开），默认当前 UTC 整点")
+    parser.add_argument("--chunk-days", type=int, default=7,
+                        help="历史回填分块天数，默认 7")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印聚合结果 top5，不写库")
     parser.add_argument("--db-url", type=str, default=None,
@@ -134,28 +159,57 @@ def main() -> None:
         # 桶边界必须按 UTC 截断，否则 date_trunc 跟随会话时区会漂移
         with conn.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
+            cur.execute("SELECT date_trunc('hour', NOW())")
+            now_hour = cur.fetchone()[0]
 
-        with conn.cursor() as cur:
-            cur.execute(SELECT_SQL, (args.hours,))
-            rows = cur.fetchall()
-
-        total_in = sum(float(r[2]) for r in rows)
-        total_out = sum(float(r[4]) for r in rows)
-        print(f"窗口 {args.hours}h（不含进行中的当前小时）: "
-              f"聚合行={len(rows)}  总流入=${total_in:,.0f}  总流出=${total_out:,.0f}")
-
-        if args.dry_run:
-            for r in rows[:5]:
-                net = float(r[2]) - float(r[4])
-                print(f"  {r[0]:%m-%d %H:%M} {_symbol_of(conn, r[1]):<10} "
-                      f"in=${float(r[2]):>14,.0f} out=${float(r[4]):>14,.0f} "
-                      f"net=${net:>14,.0f} (i{r[3]}/o{r[5]})")
-            print("[dry-run] 未写库")
+        # 窗口解析：--since/--until 优先，否则按 --hours 相对回看
+        end = _parse_ts(args.until) if args.until else now_hour
+        start = (_parse_ts(args.since) if args.since
+                 else end - timedelta(hours=args.hours))
+        if start >= end:
+            print(f"⚠️ 空窗口 [{start} → {end})，无事可做")
             return
 
-        with conn.cursor() as cur:
-            cur.execute(INSERT_SQL, (args.hours,))
-            print(f"✅ DB 端 upsert 完成，影响行={cur.rowcount} → biz.onchain_netflow_hourly")
+        chunks: list[tuple] = []
+        cur_start = start
+        step = timedelta(days=max(1, args.chunk_days))
+        while cur_start < end:
+            cur_end = min(cur_start + step, end)
+            chunks.append((cur_start, cur_end))
+            cur_start = cur_end
+
+        print(f"窗口 [{start:%Y-%m-%d %H:%M}Z → {end:%Y-%m-%d %H:%M}Z)  "
+              f"分 {len(chunks)} 块（每块 ≤{args.chunk_days}天）"
+              f"{'  [dry-run 不写库]' if args.dry_run else ''}")
+
+        total_rows = 0
+        for i, (cs, ce) in enumerate(chunks, 1):
+            with conn.cursor() as cur:
+                cur.execute(SELECT_SQL, (cs, ce))
+                rows = cur.fetchall()
+
+            total_in = sum(float(r[2]) for r in rows)
+            total_out = sum(float(r[4]) for r in rows)
+            total_rows += len(rows)
+            print(f"  [{i}/{len(chunks)}] {cs:%m-%d %H:%M} → {ce:%m-%d %H:%M}: "
+                  f"聚合行={len(rows):>6}  流入=${total_in:>16,.0f}  流出=${total_out:>16,.0f}")
+
+            if args.dry_run:
+                for r in rows[:5]:
+                    net = float(r[2]) - float(r[4])
+                    print(f"      {r[0]:%m-%d %H:%M} {_symbol_of(conn, r[1]):<10} "
+                          f"in=${float(r[2]):>14,.0f} out=${float(r[4]):>14,.0f} "
+                          f"net=${net:>14,.0f} (i{r[3]}/o{r[5]})")
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(INSERT_SQL, (cs, ce))
+                print(f"      ✅ upsert 影响行={cur.rowcount}")
+
+        if args.dry_run:
+            print(f"[dry-run] 未写库；窗口聚合行合计={total_rows}")
+        else:
+            print(f"✅ 完成：{len(chunks)} 块，聚合行合计={total_rows} → biz.onchain_netflow_hourly")
 
 
 if __name__ == "__main__":

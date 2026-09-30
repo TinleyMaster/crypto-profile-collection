@@ -34,7 +34,10 @@
     python run_enrich_daily.py --extra-args "--limit 200 --min-count 3"
 
 注册为计划任务（PowerShell，普通权限即可；两个任务共用一把锁，撞车时后到者跳过）：
-    $py  = "C:\\Users\\SuperTing\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe"
+    解释器固定用 C:\\python\\python311\\python.exe —— 已注册的 Daily 任务用的就是它，
+    换解释器会让两个任务在命令行的进程扫描口径上不一致。
+
+    $py  = "C:\\python\\python311\\python.exe"
     $sc  = "E:\\瞎搞乱搞\\web3\\加密货币研究报告\\05_代码与脚本\\scripts"
 
     # ① 每日全量 21:00
@@ -52,15 +55,24 @@
              -Trigger $trg -Settings $set -Force
 
     # ② 热跑：每 30 分钟一次，每次限时 25 分钟（超时自动结束，下一轮接着来）
+    # 注意 -Daily 与 -RepetitionInterval 在 New-ScheduledTaskTrigger 里属于不同的
+    # 参数集，会报 "Parameter set cannot be resolved"；必须写成 -Once + 重复。
     $actH = New-ScheduledTaskAction -Execute $py `
               -Argument "-u `"$sc\\bin\\run_enrich_daily.py`" --mode hot" -WorkingDirectory $sc
-    $trgH = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddHours(1) `
-              -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trgH = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddHours(7) `
+              -RepetitionInterval (New-TimeSpan -Minutes 30) `
+              -RepetitionDuration (New-TimeSpan -Days 3650)
     $setH = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
               -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
               -ExecutionTimeLimit (New-TimeSpan -Minutes 25)
     Register-ScheduledTask -TaskName "CryptoOnchainEnrichHot" -Action $actH `
              -Trigger $trgH -Settings $setH -Force
+
+已知边界：
+    - 每日全量跑起来（3.5~5 小时）期间，热跑每一轮都会被单实例保护跳过；
+      这是刻意的——两者共用 Etherscan 配额，抢跑只会把 IP 打进限流惩罚窗口。
+    - 热跑在 21:00 前后 HOT_DAILY_GUARD_MIN 分钟内主动让位，否则它若先拿到锁，
+      当日全量会被跳过，长尾与 medium 验证就整整一天不跑。
 """
 from __future__ import annotations
 

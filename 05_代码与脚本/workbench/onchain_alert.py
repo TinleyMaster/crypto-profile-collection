@@ -83,6 +83,11 @@ _TEST_TX_PREFIX = "0xtest%"
 # 交易所家族判定：先按冒号拆（Binance: Hot Wallet 20 → Binance），再按空格拆（Binance 14 → Binance）
 _FAMILY_SQL = "split_part(split_part({col}, ':', 1), ' ', 1)"
 
+# 标签新鲜度阈值（小时）：本地热跑每 30min 一次，故 >2h 视为偏旧；>26h 表示漏掉
+# 一整轮每日全量（生产上真实发生过 11 天断供，见 scheduler.py 的 enrich_reminder 注释）。
+LABEL_AGING_HOURS = 2.0
+LABEL_STALE_HOURS = 26.0
+
 
 def _explorer_url(chain: str, tx_hash: str) -> str | None:
     tpl = _EXPLORER_TX.get((chain or "").lower())
@@ -143,26 +148,35 @@ def _exch_cte() -> str:
     """
 
 
+def _window_conds(hours, chain, *, asset_id=None, alias="src"):
+    """窗口 / 链 / 脏数据过滤条件，ranking、chart、history、漏报量共用。
+
+    返回 (条件列表, 参数列表)——条件顺序即占位符顺序，调用方按序拼接不得重排。
+    """
+    conds = [
+        f"{alias}.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
+        f"{alias}.asset_id IS NOT NULL",
+        f"{alias}.value_usd IS NOT NULL AND {alias}.value_usd > 0",
+        f"{alias}.is_suspect IS NOT TRUE",
+        f"{alias}.tx_hash NOT LIKE %s",
+    ]
+    params: list = [hours, _TEST_TX_PREFIX]
+    if chain:
+        conds.append(f"{alias}.chain = %s")
+        params.append(chain)
+    if asset_id is not None:
+        conds.append(f"{alias}.asset_id = %s")
+        params.append(asset_id)
+    return conds, params
+
+
 def _base_cte(hours, chain, exchange, *, asset_id=None):
     """四层 CTE：tl（窗口/链/脏数据）→ j（JOIN exch）→ clean（剔同所互转）
     → flagged（算 is_in / is_out）。ranking / chart / history 共用。
 
     返回 (sql 片段, 参数列表)。筛选条件按需拼接，不做 `%s IS NULL OR ...` 的参数体操。
     """
-    conds = [
-        "src.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
-        "src.asset_id IS NOT NULL",
-        "src.value_usd IS NOT NULL AND src.value_usd > 0",
-        "src.is_suspect IS NOT TRUE",
-        "src.tx_hash NOT LIKE %s",
-    ]
-    params: list = [hours, _TEST_TX_PREFIX]
-    if chain:
-        conds.append("src.chain = %s")
-        params.append(chain)
-    if asset_id is not None:
-        conds.append("src.asset_id = %s")
-        params.append(asset_id)
+    conds, params = _window_conds(hours, chain, asset_id=asset_id, alias="src")
 
     # j 层已把 exchange_name 投影为 f_ex / t_ex，家族投影为 f_fam / t_fam；
     # clean / flagged 层只能引用这些投影列，不能再写 f.xxx / t.xxx（会丢 FROM 别名）。
@@ -260,6 +274,70 @@ def _bucket_label(span: int) -> str:
     return {300: "5 分钟", 900: "15 分钟"}.get(span, "1 小时")
 
 
+def _unlabeled_stats(cur, hours, chain, *, asset_id=None):
+    """本窗口内「两端都没命中交易所标签」的转账笔数与金额（漏报量）。
+
+    这些行被 clean 层整行剔除 ⇒ 在榜单/流水里完全不可见。标签富化只能在本机跑
+    （服务器 IP 被 Cloudflare 拦），一旦本地任务断供，表现就是「榜单静默变空」
+    而不是报错。把漏报量显式暴露，让静默缺口可被察觉。
+
+    注意：不受 exchange 筛选影响——它描述的是「完全没有交易所身份」的那部分转账。
+    """
+    conds, params = _window_conds(hours, chain, asset_id=asset_id, alias="tl")
+    cur.execute(f"""
+        {_exch_cte()},
+        unl AS (
+            SELECT tl.asset_id, tl.chain, tl.value_usd, tl.from_address, tl.to_address
+            FROM biz.onchain_transfer_log tl
+            WHERE {' AND '.join(conds)}
+        )
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(unl.value_usd), 0) AS usd
+        FROM unl
+        LEFT JOIN exch f ON f.address = unl.from_address AND f.chain = unl.chain
+        LEFT JOIN exch t ON t.address = unl.to_address   AND t.chain = unl.chain
+        WHERE f.exchange_name IS NULL AND t.exchange_name IS NULL
+    """, params)
+    r = cur.fetchone()
+    return {"count": int(r["cnt"] or 0), "value_usd": float(r["usd"] or 0)}
+
+
+def _label_freshness(cur):
+    """标签库最新写入时间与年龄（页面「标签新鲜度」提示）。
+
+    取两张标签表的 MAX(时间列)：onchain_address_label.updated_at / onchain_exchange_wallet.added_at。
+    看护阈值按「是否漏掉一整轮本地富化」设定：
+      - 正常：本地热跑每 30min 一次 ⇒ 年龄通常 < 1h
+      - 偏旧 aging：> 2h（本地任务被跳过或拖延）
+      - 停更 stale：> 26h（漏掉每日全量一轮 ⇒ 已在生产发生过一次 11 天断供）
+    """
+    cur.execute("SELECT MAX(updated_at) AS ts FROM biz.onchain_address_label")
+    a = cur.fetchone()["ts"]
+    cur.execute("SELECT MAX(added_at) AS ts FROM biz.onchain_exchange_wallet")
+    b = cur.fetchone()["ts"]
+
+    latest = max([t for t in (a, b) if t is not None], default=None)
+    if latest is None:
+        return {
+            "updated_at": None, "age_hours": None, "level": "unknown",
+            "aging_hours": LABEL_AGING_HOURS, "stale_hours": LABEL_STALE_HOURS,
+        }
+
+    age_hours = (datetime.now(timezone.utc) - latest).total_seconds() / 3600.0
+    if age_hours >= LABEL_STALE_HOURS:
+        level = "stale"
+    elif age_hours >= LABEL_AGING_HOURS:
+        level = "aging"
+    else:
+        level = "fresh"
+    return {
+        "updated_at": latest.isoformat(),
+        "age_hours": round(age_hours, 2),
+        "level": level,
+        "aging_hours": LABEL_AGING_HOURS,
+        "stale_hours": LABEL_STALE_HOURS,
+    }
+
+
 @onchain_alert_bp.route("/onchain-alert")
 def onchain_alert_page():
     return render_template("onchain_alert.html")
@@ -288,6 +366,7 @@ def onchain_alert_ranking():
                     HAVING COUNT(*) FILTER (WHERE is_in OR is_out) > 0
                 """, params)
                 rows = [dict(r) for r in cur.fetchall()]
+                unlabeled = _unlabeled_stats(cur, hours, chain)
 
                 # 按视图派生指标并排序（跨币种数量不可比 → 一律按美元指标排名）
                 ranked = []
@@ -334,6 +413,7 @@ def onchain_alert_ranking():
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "filters": {"chain": chain, "exchange": exchange, "limit": limit},
             "total_count": len(ranked),
+            "unlabeled": unlabeled,
             "ranking": ranked,
         })
     except Exception as e:
@@ -484,6 +564,10 @@ def onchain_alert_meta():
                     ORDER BY 1
                 """)
                 exchanges = [r["family"] for r in cur.fetchall() if r["family"]]
-        return jsonify({"ok": True, "chains": chains, "exchanges": exchanges})
+                freshness = _label_freshness(cur)
+        return jsonify({
+            "ok": True, "chains": chains, "exchanges": exchanges,
+            "label_freshness": freshness,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

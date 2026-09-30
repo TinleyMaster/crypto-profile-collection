@@ -133,6 +133,26 @@
       padding: 10px 20px 0;
     }
 
+    /* 状态行：标签新鲜度 / 漏报量提示。链路事实是标签富化只能在本机跑
+       （服务器 IP 被区块浏览器拦），所以这里要能一眼看出标签是否停更。 */
+    .updated .sep {
+      margin: 0 7px;
+      opacity: .45;
+    }
+
+    .updated .lbl.fresh {
+      color: var(--inflow);
+    }
+
+    .updated .lbl.aging {
+      color: #f0b429;
+    }
+
+    .updated .lbl.stale {
+      color: var(--danger);
+      font-weight: 600;
+    }
+
     .layout {
       display: grid;
       grid-template-columns: minmax(320px, 420px) 1fr;
@@ -515,6 +535,8 @@
     let timer = null;
     let selectedAssetId = null;   // 切换视图/窗口时尽量保留已选代币
     let selectedSymbol = "";
+    let labelFreshness = null;    // 页面级：标签库新鲜度（来自 /meta）
+    let lastUnlabeled = null;     // 窗口级：未打标漏报量（来自 /ranking）
 
     function fmtUsd (v) {
       if (v == null) return "—";
@@ -542,6 +564,38 @@
       return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
     }
     function cls (v) { return v > 0 ? "pos" : v < 0 ? "neg" : "zero"; }
+    function fmtAge (h) {
+      if (h == null) return "无记录";
+      if (h < 1) return Math.max(1, Math.round(h * 60)) + " 分钟前";
+      if (h < 48) return h.toFixed(1) + " 小时前";
+      return (h / 24).toFixed(1) + " 天前";
+    }
+
+    // 标签新鲜度三档文案（阈值由后端给出，前端不写死）
+    const FRESH_TEXT = { fresh: "新鲜", aging: "偏旧", stale: "停更", unknown: "无记录" };
+
+    // 状态行：更新时刻 + 数据源 + 标签库新鲜度 + 本窗口未打标漏报量
+    function renderStatus () {
+      const lf = labelFreshness;
+      const level = (lf && lf.level) || "unknown";
+      const ageTxt = lf ? fmtAge(lf.age_hours) : "无记录";
+      const tip = "链上地址标签由本机定时富化写入"
+        + "（服务器 IP 被区块浏览器拦截，无法在云端爬取）。"
+        + "「偏旧」指超过 2 小时、「停更」指超过 26 小时——此时榜单可能因地址未打标而漏报。";
+      let html = "更新于 " + esc(new Date().toLocaleTimeString())
+        + '<span class="sep">·</span>数据源 5 分钟粒度'
+        + '<span class="sep">·</span>'
+        + `<span class="lbl ${level}" title="${esc(tip)}">标签库 ${FRESH_TEXT[level] || "无记录"} · ${esc(ageTxt)}</span>`;
+
+      const u = lastUnlabeled;
+      if (u && u.count > 0) {
+        html += '<span class="sep">·</span>'
+          + '<span class="lbl" title="本时间窗内两端均未命中交易所标签的转账，'
+          + '已被榜单剔除（属漏报，不是误报）">'
+          + `未打标漏报 ${u.count} 笔 · ${fmtUsd(u.value_usd)}</span>`;
+      }
+      $("#updated").innerHTML = html;
+    }
     function coinBg (sym) {
       // 同名稳定配色：按 symbol 哈希取色相
       let h = 0;
@@ -564,10 +618,12 @@
         const r = await fetch("/api/onchain-alert/meta");
         const j = await r.json();
         if (!j.ok) return;
+        labelFreshness = j.label_freshness || null;
         const fc = $("#f-chain");
         j.chains.forEach(c => { const o = document.createElement("option"); o.value = c; o.textContent = c; fc.appendChild(o); });
         const fe = $("#f-exchange");
         j.exchanges.forEach(e => { const o = document.createElement("option"); o.value = e; o.textContent = e; fe.appendChild(o); });
+        renderStatus();   // meta 先到也可能先渲染（load 与 loadMeta 并发）
       } catch (e) { /* 忽略，下拉留空也能用 */ }
     }
 
@@ -581,6 +637,7 @@
         const r = await fetch("/api/onchain-alert/ranking?" + qs);
         const j = await r.json();
         if (!j.ok) { box.innerHTML = '<div class="err">接口错误：' + esc(j.error) + '</div>'; return null; }
+        lastUnlabeled = j.unlabeled || null;
 
         $("#rank-view-label").textContent = "· " + j.view_label + " · 近 " + j.hours + "h";
         $("#rank-count").textContent = "共 " + j.ranking.length + " 个代币";
@@ -728,7 +785,7 @@
         $("#chart-title").textContent = "流入/流出统计";
         $("#hist-title").textContent = "转账流水明细";
       }
-      $("#updated").textContent = "更新于 " + new Date().toLocaleTimeString() + " · 数据源 5 分钟粒度";
+      renderStatus();
     }
 
     // 事件

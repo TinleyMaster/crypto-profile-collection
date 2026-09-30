@@ -57,17 +57,31 @@ LOG_DIR = Path(os.environ.get(
 LOCK_FILE = LOG_DIR / "enrich_daily.lock"
 LOG_RETENTION_DAYS = 14
 
-# 默认执行参数：全链、min-count=1（只处理未爬过的新地址，天然增量）、保守并发
+# 默认执行参数：全链、min-count=1（只处理未爬过的新地址，天然增量）
+#
+# 【速率是硬约束，别再往上调】2026-09-30 全量实测：
+#   - concurrency 6 / delay 0.4（约 2.1 地址/秒）：跑 12,552 个，
+#     从第 2,050 个（16%）开始持续 429，最终 5,174 个失败（41%），
+#     失败地址不入 attempt 表 ⇒ 次日原样重爬，白跑一整晚。
+#   - concurrency 2 / delay 1.5（约 1.2 地址/秒）：120 个端到端 0 失败。
+# 现取更保守的一档（约 1 地址/秒），宁可慢也不要把 IP 打进惩罚窗口——
+# 一旦被惩罚，后续数小时即使降速仍只有 ~0.5/秒的有效产出，得不偿失。
 DEFAULT_ARGS = [
     "--chain", "eth,base,polygon",
     "--min-count", "1",
     "--limit", "0",
-    "--concurrency", "5",
-    "--delay", "0.5",
+    "--concurrency", "2",
+    "--delay", "2.0",
 ]
 
 # 从进度行里抓「已查到标签 N 个」用于 SUMMARY
 LABEL_RE = re.compile(r"已查到标签\s*(\d+)\s*个")
+# 从批次行里抓「失败: 429×N」用于限流熔断
+FAIL429_RE = re.compile(r"429[×x](\d+)")
+
+# 熔断阈值：一批 50 个里挂掉 >=25 个算「大面积 429」，连续这么多批就停
+BAD_BATCH_429 = 25
+BAD_BATCH_STREAK = 6
 
 
 def _log(msg: str) -> None:
@@ -239,19 +253,47 @@ def main() -> int:
                 stderr=subprocess.STDOUT, env=env,
                 text=True, encoding="utf-8", errors="replace")
 
+            bad_streak = 0
+            halted_by_429 = False
             for line in proc.stdout:                # 逐行 tee，实时可见
                 m = LABEL_RE.search(line)
                 if m:
                     last_label_n = int(m.group(1))
+
+                # 限流熔断：连续多批大面积 429 说明 IP 已进惩罚窗口，
+                # 继续跑既拿不到数据又会加深惩罚（实测惩罚后即使降速也只有
+                # ~0.5/秒有效产出），不如早停，失败的未记账次日自动重试。
+                if "批次完成" in line:
+                    m429 = FAIL429_RE.search(line)
+                    n429 = int(m429.group(1)) if m429 else 0
+                    if n429 >= BAD_BATCH_429:
+                        bad_streak += 1
+                    else:
+                        bad_streak = 0
+                    if bad_streak >= BAD_BATCH_STREAK:
+                        emit(f"  🛑 连续 {bad_streak} 批大面积 429（每批 "
+                             f"≥{BAD_BATCH_429} 个失败），判定 IP 已进入限流"
+                             f"惩罚窗口，主动中止本次运行")
+                        emit("     已爬到的标签已入库；失败地址未记账，明日自动重试")
+                        proc.terminate()
+                        halted_by_429 = True
+                        break
+
                 lf.write(line)
                 print(line, end="", flush=True)
             proc.stdout.close()
-            exit_code = proc.wait()
+            try:
+                exit_code = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                exit_code = proc.wait()
 
             elapsed = time.time() - t0
+            tail = f"（因限流熔断中止，已处理约 {bad_streak * 50} 个的最后窗口）" \
+                if halted_by_429 else ""
             summary = (f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] END "
                        f"exit={exit_code} 耗时={elapsed / 60:.1f}分钟 "
-                       f"新增标签≈{last_label_n}\n")
+                       f"新增标签≈{last_label_n}{tail}\n")
             lf.write(summary)
             _log(summary.strip())
     finally:

@@ -49,7 +49,9 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 VOL7D_BARS = 168          # 7 天 × 24 根 1h
+VOL24_BARS = 24           # 24 根 1h（旧口径，双口径对照用）
 MIN_VOL7D_BARS = 168      # 不足 7 天历史的触发点跳过（不猜）
+LIQ_MIN_USD = 3_000_000.0  # 现网门槛 X/ρ（300 / 1e-4），双口径对照的切点
 
 # 绝对档（USD/天，常态日均）
 ABS_EDGES = [
@@ -92,6 +94,8 @@ def scan_symbol_liq(sym, bars, oi_hours, trades, cost,
             vol7d = None
         else:
             vol7d = (cum[t + 1] - cum[t + 1 - VOL7D_BARS]) / 7.0
+        # vol24：entry 之前 24 根 1h（旧口径，同样无前视）——仅用于双口径对照
+        vol24 = None if t + 1 - VOL24_BARS < 0 else (cum[t + 1] - cum[t + 1 - VOL24_BARS])
         direction = "up" if chg >= 0 else "down"
 
         h = bss.hour_key(bar["t"])
@@ -115,7 +119,7 @@ def scan_symbol_liq(sym, bars, oi_hours, trades, cost,
             ret = ret_long if direction == "up" else -ret_long
             trades[scenario].append({
                 "symbol": sym, "hz": hz, "day": day,
-                "ret": ret - cost, "vol7d": vol7d,
+                "ret": ret - cost, "vol7d": vol7d, "vol24": vol24,
             })
 
 
@@ -157,6 +161,58 @@ def print_table(title, buckets, order):
                   f"{s['avg_ret'] * 100:>11.3f}{s['day_avg'] * 100:>10.3f}{s['day_t']:>8.2f}")
 
 
+def print_dual(rows, thr, label):
+    """双口径对照：同一批信号下，「当前 24h」与「7 天常态」分别过门槛，差在哪。
+
+    回答的问题：把判据从 vol24 换成 vol7d，实际改变了什么？
+      A 误杀纠正 —— vol24<thr 但 vol7d>=thr（旧口径剔、新口径留）
+      B 一波流漏网 —— vol24>=thr 但 vol7d<thr（旧口径留、新口径剔）
+      C 都剔 / D 都留 —— 两口径一致的部分
+    仅看 24h 窗口（聚焦，避免三窗口把结论摊薄）。
+    """
+    quads = {"A 误杀纠正(旧剔→新留)": [], "B 一波流漏网(旧留→新剔)": [],
+             "C 两口径都剔": [], "D 两口径都留": []}
+    skipped = 0
+    for r in rows:
+        if r["hz"] != 24:
+            continue
+        if r["vol24"] is None or r["vol7d"] is None:
+            skipped += 1
+            continue
+        lo24, lo7d = r["vol24"] < thr, r["vol7d"] < thr
+        if lo24 and not lo7d:
+            quads["A 误杀纠正(旧剔→新留)"].append(r)
+        elif (not lo24) and lo7d:
+            quads["B 一波流漏网(旧留→新剔)"].append(r)
+        elif lo24:
+            quads["C 两口径都剔"].append(r)
+        else:
+            quads["D 两口径都留"].append(r)
+
+    print(f"\n=== ③ 双口径对照（门槛 {thr:,.0f} USD，24h 窗口）— {label} ===")
+    print(f"{'象限':<22}{'n':>6}{'天数':>6}{'胜率':>8}{'净均收益%':>11}"
+          f"{'日均值%':>10}{'日t值':>8}")
+    print("-" * 72)
+    for k in ("A 误杀纠正(旧剔→新留)", "B 一波流漏网(旧留→新剔)",
+              "C 两口径都剔", "D 两口径都留"):
+        s = day_clustered_stats(quads[k])
+        if not s:
+            print(f"{k:<22}{0:>6}")
+            continue
+        print(f"{k:<22}{s['n']:>6}{s['n_days']:>6}{s['win_rate']:>8.1%}"
+              f"{s['avg_ret'] * 100:>11.3f}{s['day_avg'] * 100:>10.3f}{s['day_t']:>8.2f}")
+    if skipped:
+        print(f"（跳过 {skipped} 条：历史不足 24h/7d）")
+
+    old_cut = quads["A 误杀纠正(旧剔→新留)"] + quads["C 两口径都剔"]
+    new_cut = quads["B 一波流漏网(旧留→新剔)"] + quads["C 两口径都剔"]
+    so, sn = day_clustered_stats(old_cut), day_clustered_stats(new_cut)
+    print(f"{'— 旧口径剔除集 (A+C)':<22}{so['n']:>6}{so['n_days']:>6}{so['win_rate']:>8.1%}"
+          f"{so['avg_ret'] * 100:>11.3f}{so['day_avg'] * 100:>10.3f}{so['day_t']:>8.2f}")
+    print(f"{'— 新口径剔除集 (B+C)':<22}{sn['n']:>6}{sn['n_days']:>6}{sn['win_rate']:>8.1%}"
+          f"{sn['avg_ret'] * 100:>11.3f}{sn['day_avg'] * 100:>10.3f}{sn['day_t']:>8.2f}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="流动性分层回测（只读，描述性）")
     ap.add_argument("--symbols", type=int, default=0, help="只测前 N 个符号")
@@ -164,6 +220,8 @@ def main() -> int:
     ap.add_argument("--lookback-days", type=int, default=45)
     ap.add_argument("--scenario", type=str, default="Pup_OIup",
                     help="聚焦场景（默认 Pup_OIup）；ALL=全部场景合并")
+    ap.add_argument("--dual", action="store_true",
+                    help="追加双口径对照（vol24 vs vol7d 过同一门槛的四象限差异）")
     args = ap.parse_args()
 
     settings = get_settings(require_database=True)
@@ -229,6 +287,9 @@ def main() -> int:
             q_buckets[QUINT_LABELS[r["q"]]].append(r)
     print_table(f"② 按池内当日横截面五分位分层（排名语义）— {scen_label}",
                 q_buckets, list(QUINT_LABELS))
+
+    if args.dual:
+        print_dual(rows_all, LIQ_MIN_USD, scen_label)
 
     print("\n[liq-layer] ⚠️ 纪律：以上均为**描述性观察**（45 天单一 regime）。"
           "\n  差异只能作为「需跨 regime 复验的线索」，不能据此选阈值（§14.4）。"

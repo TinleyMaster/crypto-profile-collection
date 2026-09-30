@@ -243,8 +243,9 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
     return row["cnt"] if row else 0
 
 
-def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100
-                           ) -> tuple[list[str], dict[str, int]]:
+def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
+                           batch_delay: float = 0.25, max_retries: int = 2
+                           ) -> tuple[list[str], list[str], dict[str, int]]:
     """批量剔除合约地址，只保留 EOA。
 
     原理：eth_getCode 返回 '0x' 即 EOA，返回字节码即合约。
@@ -256,6 +257,10 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100
 
     返回 (保留的 EOA 列表, 被剔除的合约列表, 统计字典)。
     判定失败的地址一律**保留**（保守，不误杀）。
+
+    限流处理（2026-09-30）：免 key 公共节点对连续突发很敏感，16k 地址 161 批串行打过去
+    会被 429 打到全线失败，结果是「全部保留」——合约过滤形同虚设，白爬 ~45% 的合约。
+    故加 batch_delay 节流 + 失败退避重试；重试后仍失败的批次才保守全保留。
     """
     urls = PUBLIC_RPC.get(chain) or []
     stats = {"kept_eoa": 0, "dropped_contract": 0, "unknown": 0, "rpc_error": 0}
@@ -278,18 +283,27 @@ def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100
         body = _json.dumps(payload).encode()
 
         result = None
-        for url in urls:                       # 逐个端点兜底
-            try:
-                req = urllib.request.Request(
-                    url, data=body,
-                    headers={"Content-Type": "application/json",
-                             "User-Agent": "crypto-research/1.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    result = _json.loads(resp.read().decode())
+        # 失败退避重试：公共节点突发 429 通常短暂，退避后重试成功率很高
+        for attempt in range(max_retries):
+            if attempt > 0:
+                time.sleep(1.5 * attempt)   # 1.5s → 3s
+            for url in urls:               # 逐个端点兜底
+                try:
+                    req = urllib.request.Request(
+                        url, data=body,
+                        headers={"Content-Type": "application/json",
+                                 "User-Agent": "crypto-research/1.0"})
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        result = _json.loads(resp.read().decode())
+                    break
+                except Exception as e:
+                    last_err = e
+                    continue
+            if result is not None:
                 break
-            except Exception as e:
-                last_err = e
-                continue
+
+        if batch_delay > 0:
+            time.sleep(batch_delay)        # 节流，避免整批被 429
 
         if not isinstance(result, list) or len(result) != len(batch):
             # 整批判定失败 → 保守全保留，交给后续 HTML 爬取

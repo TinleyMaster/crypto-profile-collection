@@ -143,7 +143,9 @@ MODE_ARGS = {"daily": DEFAULT_ARGS, "hot": HOT_ARGS}
 # 每日全量的触发时刻（与上面注册命令保持一致）。热跑在这个时刻前后
 # HOT_DAILY_GUARD_MIN 分钟内直接跳过：两者抢同一把锁，若热跑恰好先拿到锁，
 # 当日全量就会被「已有实例」挡掉一整天（单实例保护在热跑里同样生效）。
-DAILY_TRIGGER_HOUR = 21
+# 2026-09-30 改 9：工作电脑只有工作日开机、21:00 已关机 ⇒ 全量改到 09:00
+# 触发 + StartWhenAvailable 开机补跑；热跑在 09:00 前后让位。
+DAILY_TRIGGER_HOUR = 9
 HOT_DAILY_GUARD_MIN = 15
 
 # 从进度行里抓「已查到标签 N 个」用于 SUMMARY
@@ -319,15 +321,39 @@ def main() -> int:
                  f"CMD: {' '.join(cmd)}\n{'=' * 60}")
 
             # --- 单实例保护 ---
+            # 工作电脑场景（2026-09-30）：只有工作日开机，全量改为 09:00 触发 +
+            # 开机补跑（StartWhenAvailable）。周一开机时全量与热跑可能同时补跑，
+            # 热跑若先抢到锁会把全量整个挤掉 ⇒ 全量改为「等占用者跑完再上」
+            # （上限 45 分钟，等不到才放弃）；热跑保持立即让位。
             running = find_running_enrich_pids()
             if running and not args.force:
-                emit(f"  ⛔ 检测到 {len(running)} 个正在运行的富化进程 "
-                     f"(PID={running})，本次跳过以避免抢配额")
-                emit("     若确认是残留，加 --force 强制执行")
-                emit(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] END "
-                     f"exit=0 耗时={(time.time() - t0) / 60:.1f}分钟 "
-                     f"结果=跳过(已有实例)")
-                return 0
+                if mode == "daily":
+                    wait_max = 45 * 60
+                    waited = 0
+                    emit(f"  ⏳ 全量遇到正在运行的实例 (PID={running})，"
+                         f"等待其结束再上（最长 45 分钟）")
+                    while waited < wait_max:
+                        time.sleep(30)
+                        waited += 30
+                        running = find_running_enrich_pids()
+                        if not running:
+                            break
+                    if running:
+                        emit(f"  ⛔ 等待 {waited // 60} 分钟仍有实例在跑 (PID={running})，"
+                             f"本次全量放弃")
+                        emit(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] END "
+                             f"exit=0 耗时={(time.time() - t0) / 60:.1f}分钟 "
+                             f"结果=放弃(等待超时)")
+                        return 0
+                    emit(f"  ✅ 占用实例已结束（等了 {waited // 60} 分钟），全量继续")
+                else:
+                    emit(f"  ⛔ 检测到 {len(running)} 个正在运行的富化进程 "
+                         f"(PID={running})，本次跳过以避免抢配额")
+                    emit("     若确认是残留，加 --force 强制执行")
+                    emit(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] END "
+                         f"exit=0 耗时={(time.time() - t0) / 60:.1f}分钟 "
+                         f"结果=跳过(已有实例)")
+                    return 0
 
             if not acquire_lock(force=args.force):
                 emit(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] END "

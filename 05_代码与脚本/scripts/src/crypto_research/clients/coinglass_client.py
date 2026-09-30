@@ -318,3 +318,63 @@ class CoinGlassClient:
                 if isinstance(data.get(key), list):
                     return data[key]
         return []
+
+    # ── 盘口深度（SCAN-LIQ-DEPTH-001，2026-09-30 HOBBYIST 三轮实测）───────────
+    # 实测边界（勿重复探测）：
+    #   - 单所端 `orderbook/ask-bids-history`：`symbol` 传**合约码**（BTCUSDT；传基码 BTC ⇒
+    #     code=400）。粒度地板 4h（1h ⇒ code=403 upgrade_required=STANDARD）。
+    #   - 聚合端 `orderbook/aggregated-ask-bids-history`：`symbol` 传**币种基码**（BTC；传合约码
+    #     ⇒ code=0 但**静默 0 行**）；`exchange_list` **必填**，支持 'ALL'。
+    #   - `range` = **深度百分比**（0.25/0.5/0.75/1/2/3/5/10，缺省 1 ⇒ ±1%）；
+    #     返回 ±range 价格区间内的累计挂单 USD/数量；range=2 的深度 ⊃ range=1。
+    #   - 返回结构 `[{bids_usd, bids_quantity, asks_usd, asks_quantity, time(ms)}]`，
+    #     聚合端加 `aggregated_` 前缀；**无 price、无 best bid/ask ⇒ 价差维度不可得**。
+    #   - 历史范围 @4h = **180 天**（limit=2000 实回 1080 点，2026-04-03 → 当天）；
+    #     `limit` 上限被服务端历史截断（500/1000/2000 分别回 500/1000/1080）。
+    #   - **`start_time`/`end_time` 生效**（与 liquidation/history 被忽略不同）：
+    #     传窗口精确返回窗口内点 ⇒ 可用于精确补窗口。
+    #   - ❌ `orderbook/large-limit-order` ⇒ code=401 Upgrade plan（Standard+，勿接）。
+    #   - 响应 `code` 为**字符串** "0"（业务码），判成功须用 `str(code) == "0"`。
+    #   - ⚠️ **`range` 格式敏感**（2026-09-30 实测）：整数值只接受「1」「2」格式；
+    #     传 `1.0` / `"1.0"` / `2.0` ⇒ code=0 但**静默 0 行**（非整数的 0.25/0.75 正常）。
+    #     ⇒ 一律经 `_norm_range()` 规范化（整数值 float 转 int），**不得**直接透传 float。
+
+    @staticmethod
+    def _norm_range(range_: float) -> float | int:
+        """range 参数规范化：整数值 float 转 int（服务端对 1.0 静默返回 0 行，实测）。"""
+        f = float(range_)
+        return int(f) if f == int(f) else f
+
+    def orderbook_ask_bids_history(self, exchange: str, symbol: str,
+                                   interval: str = "4h", limit: int = 100,
+                                   range_: float = 1.0,
+                                   start_time: int | None = None,
+                                   end_time: int | None = None) -> list[dict]:
+        """单所盘口深度历史：±range_% 价格区间内的累计挂单 USD/数量，粒度 ≥4h。
+
+        `symbol` 为**交易对级合约码**（`BTCUSDT` / `1000PEPEUSDT`）。
+        `range_` 为**价格百分比带宽**（1.0 ⇒ ±1%），不是档位序号。
+        返回 `[{time(ms), bids_usd, bids_quantity, asks_usd, asks_quantity}]`（数值）。
+        ⚠️ 静态盘口存量（非流量），与成交额不同量纲，严禁换算；
+        无 best bid/ask ⇒ 价差不可得。`start_time`/`end_time`（ms）生效，可精确取窗口。
+        """
+        params: dict = {"exchange": exchange, "symbol": symbol,
+                        "interval": interval, "limit": limit,
+                        "range": self._norm_range(range_)}
+        if start_time is not None:
+            params["start_time"] = start_time
+        if end_time is not None:
+            params["end_time"] = end_time
+        return self._as_list(self.get("/api/futures/orderbook/ask-bids-history", params))
+
+    def orderbook_aggregated_ask_bids_history(self, exchange_list: list[str] | str, symbol: str,
+                                              interval: str = "4h", limit: int = 100,
+                                              range_: float = 1.0) -> list[dict]:
+        """跨所聚合盘口深度历史；`symbol` 为**币种基码**（BTC，传合约码静默 0 行）。
+
+        `exchange_list` **必填**，支持 `'ALL'`。返回 `aggregated_*` 前缀字段。
+        """
+        ex = exchange_list if isinstance(exchange_list, str) else ",".join(exchange_list)
+        return self._as_list(self.get("/api/futures/orderbook/aggregated-ask-bids-history", {
+            "exchange_list": ex, "symbol": symbol, "interval": interval,
+            "limit": limit, "range": self._norm_range(range_)}))

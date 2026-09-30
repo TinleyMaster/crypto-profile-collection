@@ -173,6 +173,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("coinglass_derivatives_snapshot", "10 3 * * *", "ingest_coinglass_derivatives.py",
      ["--limit", "600"],
      "CoinGlass 跨所衍生品快照（每日 03:10，OI 聚合/分所/币本位 + 各所资金费率）", "core"),
+    # SCAN-LIQ-DEPTH-001 阶段 A：盘口深度历史**日频保鲜** → biz.orderbook_depth_history。
+    #   ⚠️ 与 CGV4-002 同一教训：只落地脚本不挂调度 = 通路没心跳 ⇒ 回填当天即停更。
+    #   ⚠️ 日频**不得**用 --resume（游标语义会让日频永久全跳过，同爆仓回填）。
+    #   单轮 ≈294 请求 ≈12 min；错峰 04:10（前三条 01:10/02:10/03:10 各 ≤22 min，已完成）。
+    #   ⚠️ range 格式敏感（1.0 静默空集）——由客户端 `_norm_range()` 兜底，CLI 无需特判。
+    ("coinglass_ob_depth", "10 4 * * *", "phase_backfill_ob_depth.py",
+     ["--scope", "binance", "--interval", "4h", "--days", "7", "--range", "1"],
+     "CoinGlass 盘口深度历史-单所 Binance（每日 04:10，±1% 挂单深度 @4h）", "core"),
     # ETF 资金流日频入库（每日 06:00 + 12:00 北京，早于早报快照 08:30；cryptoetf.today 为 T+1 更新）
     # 此前该 ingest 未注册调度，导致 biz.etf_flow_daily 停留在旧日期（早报 ETF 数据滞后）
     # 双跑（2026-09-18 审计 F3）：上游 T-1 数据发布偏晚（实测 09-17 数据在 09-18 09:35 北京仍未发布），

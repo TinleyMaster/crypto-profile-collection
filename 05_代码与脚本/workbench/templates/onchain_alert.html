@@ -291,6 +291,30 @@
       width: 34px;
     }
 
+    /* 榜单表固定列宽：否则超长币名会把「金额」列挤出 420px 面板被 overflow:hidden 裁掉，
+       用户只看到「数量」列，会误以为榜单按数量排序（实际后端按金额降序）。 */
+    #rank table {
+      table-layout: fixed;
+    }
+
+    #rank .c-rank {
+      width: 42px;
+    }
+
+    #rank .c-amt {
+      width: 86px;
+    }
+
+    #rank .c-qty {
+      width: 96px;
+    }
+
+    /* 数量为次要信息（榜单排序键是金额），弱化展示 */
+    .qty-cell {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
     /* 柱图 */
     .chart {
       padding: 14px 14px 8px;
@@ -576,12 +600,12 @@
             <div class="nm">${esc(t.name || "")}</div>
           </div>
         </div></td>
-        <td class="num">${fmtQty(t.quantity)}</td>
         <td class="num ${cls(t.value_usd)}">${fmtUsd(t.value_usd)}</td>
+        <td class="num qty-cell">${fmtQty(t.quantity)}</td>
       </tr>`;
         }).join("");
         box.innerHTML = `<table><thead><tr>
-      <th>排名</th><th>代币</th><th style="text-align:right">数量</th><th style="text-align:right">美元值</th>
+      <th class="c-rank">排名</th><th>代币</th><th class="c-amt" style="text-align:right">金额</th><th class="c-qty" style="text-align:right">数量</th>
     </tr></thead><tbody id="rank-body">${rows}</tbody></table>`;
 
         box.querySelectorAll("#rank-body tr").forEach(tr => {

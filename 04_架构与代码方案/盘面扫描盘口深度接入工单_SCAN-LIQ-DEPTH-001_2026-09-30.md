@@ -387,3 +387,41 @@ python 05_代码与脚本/scripts/bin/backtest_liq_layer.py --lookback-days 45 -
 
 **待 PO 确认**：①认不认「vol7d 100 万 + 深度只标注不拦截」这个阶段 B 结论；
 ②认了的话阶段 D（scan_daemon 信号时刻记深度，影子只记录不拦截）是否开工。
+
+## §10 阶段 D：实时深度采集（2026-09-30 晚，PO 拍板方案 A「一次上」后交付）
+
+**身份**：纯影子。对**本轮被流动性闸门评估过的触发币**（含 low 被剔组，为攒
+「low vs pass」异动时刻深度对照）在信号时刻拉 Binance fapi `/fapi/v1/depth`，
+聚合落 `biz.scan_depth_log`。**不拦截、不降权、零影响信号主链路**。
+
+**实现**（全部在 `scan_daemon.py`，复用 `_http_get` 全局限频/429/418 退避）：
+- 采集位置：信号/过滤日志 `commit()` **之后** ⇒ 采集失败绝不拖垮扫描轮；
+- 对象按轮去重（set），逐币一次调用（`limit=500`，weight=10，全局限速兜底）；
+- `_aggregate_depth` 纯函数：mid / spread_bp / d_ask±1% / d_bid±1% /
+  **cov_ask_pct / cov_bid_pct**（实际覆盖半径）/ levels；
+- 单币失败记 `status='error'` 行、空响应记 `empty`（失败也是数据）；落库失败 rollback 放弃本轮；
+- 建表挂惰性 `_ensure_liq_filter_table`（幂等 DDL + ALTER 补列），随首轮回自愈。
+
+**⚠️ REST 覆盖半径坑（runtime 实测发现，比代码本身更值钱）**：
+REST depth 单次最多 1000 档，**大币 ±1% 远超档位可达范围**——BTC 500 档仅覆盖 ±0.07%，
+若直接拿 d 值当"±1% 深度"，会把「没采到」当「深度薄」。故 cov 列强制同落，
+分析侧规则：**cov < 1% 时 d 只代表覆盖带内累计；cov ≥ 1% 才是真 ±1% 全量**。
+小币实测 cov 远超 1%（AVNT ±119%/±27.7%、MAGMA ±17%），其 ±1% 值与 CG 快照
+（7.05 万 / 3.57 万）同量级交叉吻合 ⇒ 口径互验通过。
+**附带收获**：best bid/ask 随 depth 免费拿到 ⇒ spread_bp 落库，**B8 价差半边在实时侧闭环**
+（CG 历史快照无 best bid/ask 的缺口只限历史，实时不再缺）。
+
+**新增表**：`biz.scan_depth_log`（captured_at / symbol / trigger_count / pool /
+mid_price / spread_bp / d_ask_1pct / d_bid_1pct / cov_ask_pct / cov_bid_pct / levels / status / err）
+
+**验收（三通道）**：
+
+| 通道 | 结果 |
+|---|---|
+| 源码 | ✅ 常量区 + `_aggregate_depth` + `_capture_depths` + 主循环挂钩（commit 后）+ 惰性建表 |
+| runtime | ✅ py_compile；真盘验证 BTC（spread 0.01bp / cov ±0.07%）· AVNT（1.54bp / ±1% 全覆盖）· MAGMA（3.65bp）；DDL 落库 + ALTER 幂等实测（预建旧表补 cov 列成功） |
+| 注入测试 | ✅ 新增 `test_scan_depth_capture.py` **27/27**（聚合边界含入/覆盖半径/交叉盘口/非法输入/源码护栏 10 条）；回归 `test_scan_liq_filter` 42/42 |
+
+**部署（PO 容器侧，一次重启三件事）**：`git pull` → 重启 scan_daemon 容器 ⇒
+①vol7d 门槛 100 万生效；②流动性影子日志开跑；③深度采集开跑；④（scheduler 重启同批注册 `coinglass_ob_depth` 04:10 日频作业）。
+影子期 24~48h 后可回答：异动瞬间 spread 分布、低/高流动性组的真实盘口差异、cov 分布（哪些币的 ±1% 是真的）。

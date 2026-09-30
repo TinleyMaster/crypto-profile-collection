@@ -667,6 +667,46 @@ LIQ_FILTER_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_scan_liq_filter_at "
 # 影子期若已建过表则必须有这条 ALTER，否则写入会因缺列整轮失败。
 LIQ_FILTER_ALTER_VOL7D_DDL = ("ALTER TABLE biz.scan_liq_filter_log "
                               "ADD COLUMN IF NOT EXISTS vol7d_usd numeric(22,2)")
+
+# ── 盘口深度采集（工单 SCAN-LIQ-DEPTH-001 阶段 D，2026-09-30 PO 拍板方案 A）──
+# **纯影子**：对「本轮被流动性闸门评估过的触发信号」在信号时刻拉 Binance fapi
+# `/fapi/v1/depth`（limit=50，weight=2），聚合 ±1% 单侧挂单 USD + 价差，
+# 落 `biz.scan_depth_log`。**不拦截、不降权、不影响信号主链路**——攒
+# 「异动瞬间深度 vs 常态深度」的实测分布，回答静态 4h 快照回答不了的问题。
+# 失败一律记 status='error' 行（不吞异常进主循环；无数据 ≥ 缺数据）。
+# 与 CG 4h 快照（biz.orderbook_depth_history）的关系：互补而非替代——
+# 本表是「事件时刻实测」，CG 表是「常态基线」；对照口径见工单 §9。
+DEPTH_CAPTURE_ENABLED = True              # 纯记录无开关必要，留作 kill switch
+DEPTH_RANGE_PCT = 0.01                    # 聚合半径 ±1%（与 CG 快照 range=1 对齐，便于对照）
+DEPTH_LIMIT = 500                         # fapi depth 档位数（weight=10）。
+# ⚠️ 实测坑（2026-09-30）：REST depth 单次最多 1000 档，**大币 ±1% 远超档位可达范围**
+#   （BTC 50 档只覆盖 ±0.0x%，500 档也不到 ±1%）⇒ d_ask/d_bid 是「±1% 内、且仅到
+#   档位可达处」的累计值，必须配 cov_ask_pct/cov_bid_pct（实际覆盖半径%）一起读，
+#   否则把「没采到」当「深度薄」。CG 快照的 ±1% 是全簿聚合，两者不可直接对比。
+DEPTH_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS biz.scan_depth_log (
+    id            bigserial PRIMARY KEY,
+    captured_at   timestamptz  NOT NULL,
+    symbol        text         NOT NULL,
+    trigger_count integer      NOT NULL DEFAULT 1,
+    pool          text         NOT NULL DEFAULT 'main',
+    mid_price     numeric(20,8),
+    spread_bp     numeric(12,3),
+    d_ask_1pct    numeric(22,2),
+    d_bid_1pct    numeric(22,2),
+    cov_ask_pct   numeric(10,4),
+    cov_bid_pct   numeric(10,4),
+    levels        integer,
+    status        text         NOT NULL,
+    err           text
+)"""
+DEPTH_LOG_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_scan_depth_log_at "
+                       "ON biz.scan_depth_log (captured_at DESC)")
+# 同 vol7d 之课：预建过的旧表补覆盖半径列（幂等 ALTER）
+DEPTH_LOG_ALTER_COV_DDL = (
+    "ALTER TABLE biz.scan_depth_log "
+    "ADD COLUMN IF NOT EXISTS cov_ask_pct numeric(10,4), "
+    "ADD COLUMN IF NOT EXISTS cov_bid_pct numeric(10,4)")
 # ── L0 市场环境阈值（审计 P1-2 标定）─────────────────────────────
 # 原值 `btc_1h ±1.0` / `fgi 25·75` / `cap_trend ±1.0` 里两个近乎死条件。用近 7 天
 # 「up + OI↑」触发子集（context_tags 回放，n=98）复算：原阈值下唯一真正降级的维度
@@ -1027,8 +1067,93 @@ def _ensure_liq_filter_table(conn) -> None:
         cur.execute(LIQ_FILTER_DDL)
         cur.execute(LIQ_FILTER_INDEX_DDL)
         cur.execute(LIQ_FILTER_ALTER_VOL7D_DDL)   # 旧表补 vol7d_usd 列（幂等）
+        cur.execute(DEPTH_LOG_DDL)                # 阶段 D：深度采集影子表（幂等）
+        cur.execute(DEPTH_LOG_INDEX_DDL)
+        cur.execute(DEPTH_LOG_ALTER_COV_DDL)      # 旧表补覆盖半径列（幂等）
     conn.commit()
     _LIQ_TABLE_READY = True
+
+
+def _aggregate_depth(data: dict, pct: float = DEPTH_RANGE_PCT) -> dict | None:
+    """把 Binance `/fapi/v1/depth` 响应聚合为 ±pct 单侧挂单 USD（纯函数，可离线单测）。
+
+    * mid = (best_bid + best_ask) / 2；spread_bp = (ask−bid)/mid × 1e4（B8 价差
+      半边在**实时侧**顺手补上——CG 快照无 best bid/ask）；
+    * d_ask = price ≤ mid×(1+pct) 的 asks 的 price×qty 之和；d_bid 对称（≥，含边界）；
+    * cov_ask_pct / cov_bid_pct = 最远档位距 mid 的百分比——**实际覆盖半径**。
+      REST depth 档位有限，大币 ±1% 根本采不满 ⇒ 深度值必须配覆盖半径一起读
+      （cov < pct 时 d 是「到可达处为止」的累计，不是真 ±pct 全量）；
+    * 档位缺失 / best 价非正 / ask ≤ bid（交叉盘口）⇒ None（数据不可信，宁缺毋假）。
+    """
+    try:
+        bids = [(float(p), float(q)) for p, q in (data.get("bids") or [])]
+        asks = [(float(p), float(q)) for p, q in (data.get("asks") or [])]
+    except (TypeError, ValueError):
+        return None
+    if not bids or not asks:
+        return None
+    best_bid, best_ask = bids[0][0], asks[0][0]
+    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
+        return None
+    mid = (best_bid + best_ask) / 2
+    return {
+        "mid": mid,
+        "spread_bp": (best_ask - best_bid) / mid * 1e4,
+        "d_ask": sum(p * q for p, q in asks if p <= mid * (1 + pct)),
+        "d_bid": sum(p * q for p, q in bids if p >= mid * (1 - pct)),
+        "cov_ask_pct": (asks[-1][0] - mid) / mid * 100,
+        "cov_bid_pct": (mid - bids[-1][0]) / mid * 100,
+        "levels": len(bids) + len(asks),
+    }
+
+
+def _capture_depths(conn, symbols: list[str], now: datetime, pool: str = "main") -> int:
+    """信号时刻逐币拉盘口并落 `biz.scan_depth_log`（纯影子，异常绝不外抛）。
+
+    返回成功写入的行数。单个币失败记 status='error' 行（err 摘要），
+    全局失败（如网络不可达）记 stderr 后放弃本轮——采集永不拖垮扫描。
+    """
+    if not symbols:
+        return 0
+    rows: list[tuple] = []
+    for sym in symbols:
+        try:
+            raw = _http_get(f"{FAPI_BASE}/fapi/v1/depth",
+                            {"symbol": sym, "limit": DEPTH_LIMIT})
+            agg = _aggregate_depth(raw) if isinstance(raw, dict) else None
+            if agg is None:
+                rows.append((now, sym, pool, None, None, None, None, None, None,
+                             None, "empty", None))
+            else:
+                rows.append((now, sym, pool,
+                             round(agg["mid"], 8), round(agg["spread_bp"], 3),
+                             round(agg["d_ask"], 2), round(agg["d_bid"], 2),
+                             round(agg["cov_ask_pct"], 4), round(agg["cov_bid_pct"], 4),
+                             agg["levels"], "ok", None))
+        except Exception as e:  # noqa: BLE001 —— 采集失败只记录，绝不外抛
+            rows.append((now, sym, pool, None, None, None, None, None, None,
+                         None, "error", str(e)[:200]))
+    written = 0
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO biz.scan_depth_log "
+                "(captured_at, symbol, pool, mid_price, spread_bp, "
+                " d_ask_1pct, d_bid_1pct, cov_ask_pct, cov_bid_pct, levels, "
+                " status, err) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                rows,
+            )
+        conn.commit()
+        written = len(rows)
+    except Exception as e:  # noqa: BLE001 —— 写库失败放弃本轮采集（已 rollback）
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[scan_daemon][depth_capture] 落库失败放弃本轮（{len(rows)} 条）：{e}",
+              file=sys.stderr)
+    return written
 
 
 def _sum_vol24_from_klines(by_iv: dict[str, list[dict]]) -> float | None:
@@ -1171,6 +1296,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         filtered_rows: list[tuple] = []
         liq_stats = {"pass": 0, "low": 0, "unknown": 0}
         vol7d_samples: list[float] = []
+        depth_syms: set[str] = set()
         # 常态成交额：整池一次聚合 + TTL 缓存（逐币查会把主池轮次拖垮）
         vol7d_map = _load_vol7d_avg(conn, list(by_sym_k.keys()))
         stale_symbols = 0
@@ -1212,6 +1338,7 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             oi_usd, oi_age = _oi_notional(by_sym_oi.get(sym, []), now)
             liq_v, liq_reason = _liq_verdict(vol7d, oi_usd, oi_age)
             liq_stats[liq_v] += 1
+            depth_syms.add(sym)      # 阶段 D：被评估过的触发币 ⇒ 信号时刻盘口采集对象
             if vol7d is not None:
                 vol7d_samples.append(vol7d)
             if liq_v == "low":
@@ -1282,6 +1409,15 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                     filtered_rows,
                 )
         conn.commit()
+
+        # ── 盘口深度采集（SCAN-LIQ-DEPTH-001 阶段 D，纯影子）──
+        # 位置：信号/过滤日志 commit **之后** ⇒ 采集失败/延迟零影响主链路；
+        # 对象 = 本轮全部被评估币（含 low 被剔的）⇒ 攒「low 组 vs pass 组」的
+        # 异动时刻深度对照。去重 set，逐币一次 fapi 调用（weight=2，全局限频兜底）。
+        if DEPTH_CAPTURE_ENABLED and depth_syms:
+            n_depth = _capture_depths(conn, sorted(depth_syms), now)
+            if n_depth:
+                print(f"[scan_daemon][depth_capture] 采集 {n_depth} 币盘口（±1% 单侧 + 价差）")
 
     total = len(by_sym_k)
     if total and stale_symbols / total > 0.2:

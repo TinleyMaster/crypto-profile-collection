@@ -2,21 +2,25 @@
 链上异动告警（CoinGlass On-Chain Alert 风格）蓝图。
 
 功能：
-  - GET /onchain-alert              渲染独立页面
-  - GET /api/onchain-alert/stream   跨资产大额转账实时流 + 24h 统计 + 交易所榜单
+  - GET /onchain-alert                 渲染独立页面
+  - GET /api/onchain-alert/ranking     代币级净流榜单（视图 tab × 时间窗 × 链/交易所筛选）
+  - GET /api/onchain-alert/token       选中代币的流入流出统计序列 + 转账流水明细
+  - GET /api/onchain-alert/meta        筛选项（链 + 交易所家族名）
 
 设计要点（与既有管道的边界）：
-  - 复用 biz.onchain_transfer_log（chain_transfer_monitor 守护进程已生产级写入），不新增采集。
+  - 复用 biz.onchain_transfer_log（chain_transfer_monitor 守护进程已生产级写入），不新增采集、不新增表。
   - 归因采用「读侧 union」：同时匹配 biz.onchain_exchange_wallet(confidence='high')
     与 biz.onchain_address_label(label_type='exchange')，在查询层实时重新判定
-    from/to 是否为交易所钱包。这样不改动写入 daemon、不引入误标风险，
-    页面覆盖率立即吃到已入库的交易所标签地址（含用户那上万条）。
+    from/to 是否为交易所钱包。这样不改动写入 daemon、不引入误标风险。
   - 方向语义对齐 CoinGlass：Inflow = 转入交易所（潜在抛压）；Outflow = 从交易所转出（提币）。
+  - 视图口径：net_inflow = inflow - outflow（正=净充提至交易所）；
+              net_outflow = outflow - inflow（正=净提币离场）。
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from flask import Blueprint, render_template, jsonify, request
 
 try:
@@ -56,7 +60,7 @@ _EXPLORER_TX = {
     "aptos": "https://explorer.aptoslabs.com/txn/{tx}",
 }
 
-# 链展示名（给交易所榜单/筛选用）
+# 链展示名（给筛选用）
 _CHAIN_LABEL = {
     "eth": "Ethereum", "ethereum": "Ethereum",
     "bsc": "BSC", "bnb": "BSC",
@@ -64,6 +68,20 @@ _CHAIN_LABEL = {
     "polygon": "Polygon", "avax": "Avalanche", "avalanche": "Avalanche",
     "solana": "Solana", "tron": "Tron", "ton": "TON", "sui": "Sui", "aptos": "Aptos",
 }
+
+# 视图 -> 展示名
+VIEW_LABELS = {
+    "net_inflow": "净流入",
+    "inflow": "流入",
+    "net_outflow": "净流出",
+    "outflow": "流出",
+}
+
+# 交易哈希的测试数据前缀（参数化传入，避免裸 % 被当成占位符）
+_TEST_TX_PREFIX = "0xtest%"
+
+# 交易所家族判定：先按冒号拆（Binance: Hot Wallet 20 → Binance），再按空格拆（Binance 14 → Binance）
+_FAMILY_SQL = "split_part(split_part({col}, ':', 1), ' ', 1)"
 
 
 def _explorer_url(chain: str, tx_hash: str) -> str | None:
@@ -74,47 +92,172 @@ def _explorer_url(chain: str, tx_hash: str) -> str | None:
 
 
 def _chain_disp(chain: str) -> str:
-    return _CHAIN_LABEL.get((chain or "").lower(), (chain or "?".upper()))
+    return _CHAIN_LABEL.get((chain or "").lower(), (chain or "?").upper())
 
 
-def _build_exch_cte() -> str:
+def _short_addr(addr: str | None) -> str:
+    """地址缩写展示（对齐 CoinGlass 的 0xa8c_20b 风格）。"""
+    if not addr:
+        return "—"
+    a = str(addr)
+    if len(a) <= 14:
+        return a
+    return f"{a[:6]}_{a[-4:]}"
+
+
+def _pick_label(exchange: str | None, names, address: str | None) -> str:
+    """From/To 展示优先级：交易所名 > 首个标签名 > 缩写地址。"""
+    if exchange:
+        return exchange
+    if names:
+        for n in names:
+            if n:
+                return str(n)
+    return _short_addr(address)
+
+
+def _exch_cte() -> str:
     """交易所地址集合：high 置信度钱包库 + exchange 标签地址库（high/medium）。
 
     读侧 union，不写入任何表。
+    外层按 (address, chain) 收敛为一行——若同一地址同时存在于两张表、或带两个
+    不同 exchange_name，UNION 的三元组去重不成立，LEFT JOIN 会让行数翻倍、
+    使 per-asset 的 SUM(value_usd) 放大。
     """
     return """
-        WITH exch AS (
-            SELECT address, chain, exchange_name, 'wallet' AS src
+        WITH exch_raw AS (
+            SELECT address, chain, exchange_name
             FROM biz.onchain_exchange_wallet
             WHERE confidence = 'high'
             UNION
-            SELECT address, chain, label_name AS exchange_name, 'label' AS src
+            SELECT address, chain, label_name
             FROM biz.onchain_address_label
             WHERE label_type = 'exchange'
               AND confidence IN ('high', 'medium')
+        ),
+        exch AS (
+            SELECT address, chain, min(exchange_name) AS exchange_name
+            FROM exch_raw
+            GROUP BY address, chain
         )
     """
 
 
-def _classify(rows):
-    """根据 from/to 交易所命中，给每行定方向并计算展示字段。"""
-    out = []
-    for r in rows:
-        from_exch = r.get("from_exch")
-        to_exch = r.get("to_exch")
-        if to_exch and not from_exch:
-            direction = "inflow"          # 转入交易所
-        elif from_exch and not to_exch:
-            direction = "outflow"         # 从交易所转出
-        elif from_exch and to_exch:
-            direction = "internal"        # 交易所内部划转
-        else:
-            direction = "unknown"
-        r["direction"] = direction
-        # 展示用的交易所名（优先 from，其次 to）
-        r["exchange"] = to_exch or from_exch
-        out.append(r)
-    return out
+def _base_cte(hours, chain, exchange, *, asset_id=None):
+    """四层 CTE：tl（窗口/链/脏数据）→ j（JOIN exch）→ clean（剔同所互转）
+    → flagged（算 is_in / is_out）。ranking / chart / history 共用。
+
+    返回 (sql 片段, 参数列表)。筛选条件按需拼接，不做 `%s IS NULL OR ...` 的参数体操。
+    """
+    conds = [
+        "src.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
+        "src.asset_id IS NOT NULL",
+        "src.value_usd IS NOT NULL AND src.value_usd > 0",
+        "src.is_suspect IS NOT TRUE",
+        "src.tx_hash NOT LIKE %s",
+    ]
+    params: list = [hours, _TEST_TX_PREFIX]
+    if chain:
+        conds.append("src.chain = %s")
+        params.append(chain)
+    if asset_id is not None:
+        conds.append("src.asset_id = %s")
+        params.append(asset_id)
+
+    # j 层已把 exchange_name 投影为 f_ex / t_ex，家族投影为 f_fam / t_fam；
+    # clean / flagged 层只能引用这些投影列，不能再写 f.xxx / t.xxx（会丢 FROM 别名）。
+    # 同所家族互转剔除：必须保留 NULL 守卫（NOT(f=t) 会因 NULL 比较误杀单端命中的正常流入流出）
+    clean_conds = [
+        "(f_ex IS NOT NULL OR t_ex IS NOT NULL)",
+        "(f_ex IS NULL OR t_ex IS NULL OR f_fam <> t_fam)",
+    ]
+
+    # 交易所筛选：按家族等值匹配；选 E 时 inflow 只认「转入 E」，outflow 只认「转出 E」
+    if exchange:
+        in_flag = "(t_ex IS NOT NULL AND t_fam = %s)"
+        out_flag = "(f_ex IS NOT NULL AND f_fam = %s)"
+        clean_conds.append("(f_fam = %s OR t_fam = %s)")
+        flag_params = [exchange, exchange, exchange, exchange]
+    else:
+        in_flag = "(t_ex IS NOT NULL)"
+        out_flag = "(f_ex IS NOT NULL)"
+        flag_params = []
+
+    sql = f"""
+        {_exch_cte()},
+        tl AS (
+            SELECT src.asset_id, src.chain, src.block_timestamp, src.value, src.value_usd,
+                   src.from_address, src.to_address, src.tx_hash,
+                   src.from_label_names, src.to_label_names
+            FROM biz.onchain_transfer_log src
+            WHERE {' AND '.join(conds)}
+        ),
+        j AS (
+            SELECT tl.*,
+                   f.exchange_name AS f_ex,
+                   t.exchange_name AS t_ex,
+                   {_FAMILY_SQL.format(col='f.exchange_name')} AS f_fam,
+                   {_FAMILY_SQL.format(col='t.exchange_name')} AS t_fam
+            FROM tl
+            LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
+            LEFT JOIN exch t ON t.address = tl.to_address   AND t.chain = tl.chain
+        ),
+        clean AS (
+            SELECT * FROM j
+            WHERE {' AND '.join(clean_conds)}
+        ),
+        flagged AS (
+            SELECT clean.*, {in_flag} AS is_in, {out_flag} AS is_out
+            FROM clean
+        )
+    """
+    return sql, params + flag_params
+
+
+def _view_metric(view, inflow_usd, outflow_usd, inflow_qty, outflow_qty):
+    """按视图派生 (美元指标, 数量指标)。"""
+    if view == "inflow":
+        return inflow_usd, inflow_qty
+    if view == "outflow":
+        return outflow_usd, outflow_qty
+    if view == "net_outflow":
+        return outflow_usd - inflow_usd, outflow_qty - inflow_qty
+    # net_inflow（默认）
+    return inflow_usd - outflow_usd, inflow_qty - outflow_qty
+
+
+def _parse_common_args():
+    """解析 ranking / token 的公共查询参数。"""
+    try:
+        hours = int(request.args.get("hours", 24))
+    except (TypeError, ValueError):
+        hours = 24
+    hours = min(24, max(1, hours))
+    if hours not in (1, 4, 24):
+        hours = 24
+
+    view = (request.args.get("view") or "net_inflow").strip().lower()
+    if view not in VIEW_LABELS:
+        view = "net_inflow"
+
+    chain = (request.args.get("chain") or "").strip() or None
+    exchange = (request.args.get("exchange") or "").strip() or None
+
+    try:
+        limit = int(request.args.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = min(200, max(1, limit))
+    return hours, view, chain, exchange, limit
+
+
+def _bucket_span(hours: int) -> int:
+    """自适应桶粒度（秒）：短窗口用细桶，否则 1h 窗口只剩 1 根柱子。"""
+    return {1: 300, 4: 900}.get(hours, 3600)
+
+
+def _bucket_label(span: int) -> str:
+    return {300: "5 分钟", 900: "15 分钟"}.get(span, "1 小时")
 
 
 @onchain_alert_bp.route("/onchain-alert")
@@ -122,234 +265,191 @@ def onchain_alert_page():
     return render_template("onchain_alert.html")
 
 
-@onchain_alert_bp.route("/api/onchain-alert/stream")
-def onchain_alert_stream():
+@onchain_alert_bp.route("/api/onchain-alert/ranking")
+def onchain_alert_ranking():
+    """代币级净流榜单：按当前视图的美元指标降序。"""
     try:
-        # 参数
-        try:
-            hours = max(1, min(168, int(request.args.get("hours", 24))))
-        except (TypeError, ValueError):
-            hours = 24
-        chain = (request.args.get("chain") or "").strip() or None
-        exchange = (request.args.get("exchange") or "").strip() or None
-        direction = (request.args.get("direction") or "all").strip().lower()
-        if direction not in ("inflow", "outflow", "internal", "all"):
-            direction = "all"
-        symbol = (request.args.get("symbol") or "").strip() or None
-        try:
-            limit = max(1, min(500, int(request.args.get("limit", 150))))
-        except (TypeError, ValueError):
-            limit = 150
+        hours, view, chain, exchange, limit = _parse_common_args()
 
         with _get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-                exch_cte = _build_exch_cte()
+                cur.execute("SET TIME ZONE 'UTC'")
+                cte, params = _base_cte(hours, chain, exchange)
+                cur.execute(f"""
+                    {cte}
+                    SELECT asset_id,
+                           COALESCE(SUM(value_usd) FILTER (WHERE is_in), 0)  AS inflow_usd,
+                           COALESCE(SUM(value)     FILTER (WHERE is_in), 0)  AS inflow_qty,
+                           COALESCE(SUM(value_usd) FILTER (WHERE is_out), 0) AS outflow_usd,
+                           COALESCE(SUM(value)     FILTER (WHERE is_out), 0) AS outflow_qty,
+                           COUNT(*) FILTER (WHERE is_in OR is_out)           AS cnt
+                    FROM flagged
+                    GROUP BY asset_id
+                    HAVING COUNT(*) FILTER (WHERE is_in OR is_out) > 0
+                """, params)
+                rows = [dict(r) for r in cur.fetchall()]
 
-                # ── 主查询：跨资产大额转账流（至少一端命中交易所）──
-                feed_conds = [
-                    "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%%'",
-                    "tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
-                    "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
-                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
-                ]
-                feed_params = [hours]
-                if chain:
-                    feed_conds.append("tl.chain = %s")
-                    feed_params.append(chain)
-                if symbol:
-                    feed_conds.append("(a.canonical_symbol ILIKE %s OR a.canonical_name ILIKE %s)")
-                    feed_params.append(f"%{symbol}%")
-                    feed_params.append(f"%{symbol}%")
-                if exchange:
-                    feed_conds.append("(f.exchange_name ILIKE %s OR t.exchange_name ILIKE %s)")
-                    feed_params.append(f"%{exchange}%")
-                    feed_params.append(f"%{exchange}%")
+                # 按视图派生指标并排序（跨币种数量不可比 → 一律按美元指标排名）
+                ranked = []
+                for r in rows:
+                    inflow_usd = float(r["inflow_usd"] or 0)
+                    outflow_usd = float(r["outflow_usd"] or 0)
+                    inflow_qty = float(r["inflow_qty"] or 0)
+                    outflow_qty = float(r["outflow_qty"] or 0)
+                    metric_usd, metric_qty = _view_metric(
+                        view, inflow_usd, outflow_usd, inflow_qty, outflow_qty)
+                    ranked.append({
+                        "asset_id": r["asset_id"],
+                        "inflow_usd": inflow_usd,
+                        "outflow_usd": outflow_usd,
+                        "netflow_usd": inflow_usd - outflow_usd,
+                        "value_usd": metric_usd,
+                        "quantity": metric_qty,
+                        "count": int(r["cnt"] or 0),
+                    })
+                ranked = [x for x in ranked if x["value_usd"] != 0]
+                ranked.sort(key=lambda x: x["value_usd"], reverse=True)
+                ranked = ranked[:limit]
 
-                feed_sql = f"""
-                    {exch_cte}
-                    SELECT
-                        tl.log_id, tl.asset_id, tl.chain, tl.contract_address,
-                        tl.tx_hash, tl.from_address, tl.to_address,
-                        tl.value, tl.value_usd,
-                        tl.block_number, tl.block_timestamp,
-                        tl.from_label, tl.to_label,
-                        a.canonical_symbol, a.canonical_name,
-                        f.exchange_name AS from_exch,
-                        t.exchange_name AS to_exch
-                    FROM biz.onchain_transfer_log tl
-                    LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
-                    LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
-                    LEFT JOIN exch t ON t.address = tl.to_address AND t.chain = tl.chain
-                    WHERE {' AND '.join(feed_conds)}
-                    ORDER BY tl.block_timestamp DESC
-                    LIMIT %s
-                """
-                cur.execute(feed_sql, feed_params + [limit])
-                feed_rows = cur.fetchall()
-                feed = _classify([dict(r) for r in feed_rows])
+                # 补 symbol / name
+                ids = [x["asset_id"] for x in ranked]
+                meta = {}
+                if ids:
+                    cur.execute(
+                        "SELECT asset_id, canonical_symbol, canonical_name"
+                        " FROM core.asset WHERE asset_id = ANY(%s)", (ids,))
+                    for a in cur.fetchall():
+                        meta[a["asset_id"]] = a
+                for i, x in enumerate(ranked, 1):
+                    a = meta.get(x["asset_id"]) or {}
+                    x["rank"] = i
+                    x["symbol"] = a.get("canonical_symbol") or f"#{x['asset_id']}"
+                    x["name"] = a.get("canonical_name") or ""
 
-                if direction != "all":
-                    feed = [x for x in feed if x["direction"] == direction]
+        return jsonify({
+            "ok": True,
+            "view": view,
+            "view_label": VIEW_LABELS[view],
+            "hours": hours,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "filters": {"chain": chain, "exchange": exchange, "limit": limit},
+            "total_count": len(ranked),
+            "ranking": ranked,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-                # ── 24h 统计（按小时桶，Inflow vs Outflow）──
-                stats_conds = [
-                    "tl.block_timestamp >= NOW() - INTERVAL '24 hours'",
-                    "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%%'",
-                    "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
-                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
-                ]
-                stats_params = []
-                if chain:
-                    stats_conds.append("tl.chain = %s")
-                    stats_params.append(chain)
-                if exchange:
-                    stats_conds.append("(f.exchange_name ILIKE %s OR t.exchange_name ILIKE %s)")
-                    stats_params.append(f"%{exchange}%")
-                    stats_params.append(f"%{exchange}%")
 
-                stats_sql = f"""
-                    {exch_cte}
-                    SELECT
-                        date_trunc('hour', tl.block_timestamp) AS bucket,
-                        SUM(CASE WHEN t.exchange_name IS NOT NULL AND f.exchange_name IS NULL
-                                 THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS inflow_usd,
-                        SUM(CASE WHEN f.exchange_name IS NOT NULL AND t.exchange_name IS NULL
-                                 THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS outflow_usd
-                    FROM biz.onchain_transfer_log tl
-                    LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
-                    LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
-                    LEFT JOIN exch t ON t.address = tl.to_address AND t.chain = tl.chain
-                    WHERE {' AND '.join(stats_conds)}
+@onchain_alert_bp.route("/api/onchain-alert/token")
+def onchain_alert_token():
+    """选中代币：流入流出统计序列（发散柱图）+ 转账流水明细。"""
+    try:
+        hours, view, chain, exchange, limit = _parse_common_args()
+        try:
+            asset_id = int(request.args.get("asset_id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "asset_id 参数无效"}), 400
+        if asset_id <= 0:
+            return jsonify({"ok": False, "error": "asset_id 必填"}), 400
+
+        span = _bucket_span(hours)
+
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute("SET TIME ZONE 'UTC'")
+                cte, params = _base_cte(hours, chain, exchange, asset_id=asset_id)
+
+                # ── 统计序列（chart）──
+                cur.execute(f"""
+                    {cte}
+                    SELECT to_timestamp(
+                               floor(extract(epoch FROM block_timestamp)::double precision / %s) * %s
+                           ) AS bucket,
+                           COALESCE(SUM(value_usd) FILTER (WHERE is_in), 0)  AS inflow_usd,
+                           COALESCE(SUM(value_usd) FILTER (WHERE is_out), 0) AS outflow_usd
+                    FROM flagged
                     GROUP BY 1
                     ORDER BY 1
-                """
-                cur.execute(stats_sql, stats_params)
-                hourly_raw = {
-                    r["bucket"].strftime("%Y-%m-%d %H:00:00"): r
-                    for r in cur.fetchall()
-                }
+                """, params + [span, span])
+                raw = {r["bucket"]: r for r in cur.fetchall()}
 
-                # 补全 24 个整点桶（无数据补 0），保证柱图连续
-                from datetime import datetime, timedelta, timezone
-                now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-                hourly = []
-                for i in range(23, -1, -1):
-                    b = now - timedelta(hours=i)
-                    key = b.strftime("%Y-%m-%d %H:00:00")
-                    rec = hourly_raw.get(key)
-                    hourly.append({
-                        "bucket": b.strftime("%Y-%m-%dT%H:00:00Z"),
+                # ── 零填充（UTC 对齐，保证柱图连续）──
+                now_epoch = int(datetime.now(timezone.utc).timestamp())
+                cur_bucket = now_epoch - now_epoch % span          # 当前（进行中）桶的起点
+                n_buckets = (hours * 3600) // span                 # 1h→12×5min / 4h→16×15min / 24h→24×1h
+                start_epoch = cur_bucket - (n_buckets - 1) * span
+
+                chart = []
+                for i in range(n_buckets):
+                    b = datetime.fromtimestamp(start_epoch + i * span, tz=timezone.utc)
+                    rec = raw.get(b)
+                    chart.append({
+                        "bucket": b.isoformat().replace("+00:00", "Z"),
                         "inflow_usd": float(rec["inflow_usd"]) if rec else 0.0,
                         "outflow_usd": float(rec["outflow_usd"]) if rec else 0.0,
                     })
 
-                # ── 总览 + 交易所榜单（按当前 hours 窗口）──
-                sum_conds = [
-                    "tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')",
-                    "(tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)",
-                    "tl.tx_hash NOT LIKE '0xtest%%'",
-                    "(f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)",
-                    "(f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))",
-                ]
-                sum_params = [hours]
-                if chain:
-                    sum_conds.append("tl.chain = %s")
-                    sum_params.append(chain)
-                if exchange:
-                    sum_conds.append("(f.exchange_name ILIKE %s OR t.exchange_name ILIKE %s)")
-                    sum_params.append(f"%{exchange}%")
-                    sum_params.append(f"%{exchange}%")
+                # ── 流水明细（history）──
+                cur.execute(f"""
+                    {cte}
+                    SELECT block_timestamp, chain, tx_hash,
+                           from_address, to_address, value, value_usd,
+                           f_ex, t_ex, is_in, is_out,
+                           from_label_names, to_label_names
+                    FROM flagged
+                    WHERE (is_in OR is_out)
+                    ORDER BY block_timestamp DESC
+                    LIMIT %s
+                """, params + [limit])
+                hist_rows = cur.fetchall()
 
-                sum_sql = f"""
-                    {exch_cte}
-                    SELECT
-                        COUNT(*) AS total,
-                        SUM(CASE WHEN t.exchange_name IS NOT NULL AND f.exchange_name IS NULL
-                                 THEN 1 ELSE 0 END) AS inflow_cnt,
-                        SUM(CASE WHEN f.exchange_name IS NOT NULL AND t.exchange_name IS NULL
-                                 THEN 1 ELSE 0 END) AS outflow_cnt,
-                        SUM(CASE WHEN t.exchange_name IS NOT NULL AND f.exchange_name IS NULL
-                                 THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS inflow_usd,
-                        SUM(CASE WHEN f.exchange_name IS NOT NULL AND t.exchange_name IS NULL
-                                 THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS outflow_usd
-                    FROM biz.onchain_transfer_log tl
-                    LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
-                    LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
-                    LEFT JOIN exch t ON t.address = tl.to_address AND t.chain = tl.chain
-                    WHERE {' AND '.join(sum_conds)}
-                """
-                cur.execute(sum_sql, sum_params)
-                s = cur.fetchone() or {}
-                summary = {
-                    "total_count": int(s.get("total") or 0),
-                    "inflow_count": int(s.get("inflow_cnt") or 0),
-                    "outflow_count": int(s.get("outflow_cnt") or 0),
-                    "inflow_usd": float(s.get("inflow_usd") or 0),
-                    "outflow_usd": float(s.get("outflow_usd") or 0),
-                    "window_hours": hours,
-                }
+                # ── 代币基础信息 ──
+                cur.execute(
+                    "SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s",
+                    (asset_id,))
+                a = cur.fetchone() or {}
+                symbol = a.get("canonical_symbol") or f"#{asset_id}"
+                name = a.get("canonical_name") or ""
 
-                # 交易所榜单
-                lb_sql = f"""
-                    {exch_cte}
-                    SELECT COALESCE(t.exchange_name, f.exchange_name) AS exchange,
-                           SUM(CASE WHEN t.exchange_name IS NOT NULL AND f.exchange_name IS NULL
-                                    THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS inflow_usd,
-                           SUM(CASE WHEN f.exchange_name IS NOT NULL AND t.exchange_name IS NULL
-                                    THEN COALESCE(tl.value_usd, 0) ELSE 0 END) AS outflow_usd,
-                           COUNT(*) AS cnt
-                    FROM biz.onchain_transfer_log tl
-                    LEFT JOIN core.asset a ON a.asset_id = tl.asset_id
-                    LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
-                    LEFT JOIN exch t ON t.address = tl.to_address AND t.chain = tl.chain
-                    WHERE tl.block_timestamp >= NOW() - (%s * INTERVAL '1 hour')
-                      AND (tl.is_suspect IS NOT TRUE OR tl.is_suspect IS NULL)
-                      AND tl.tx_hash NOT LIKE '0xtest%%'
-                      AND (f.exchange_name IS NOT NULL OR t.exchange_name IS NOT NULL)
-                      AND (f.exchange_name IS NULL OR t.exchange_name IS NULL OR split_part(split_part(f.exchange_name, ':', 1), ' ', 1) <> split_part(split_part(t.exchange_name, ':', 1), ' ', 1))
-                    GROUP BY 1
-                    ORDER BY (SUM(COALESCE(tl.value_usd, 0))) DESC
-                    LIMIT 15
-                """
-                cur.execute(lb_sql, [hours])
-                exchanges = [
-                    {
-                        "exchange": r["exchange"],
-                        "inflow_usd": float(r["inflow_usd"] or 0),
-                        "outflow_usd": float(r["outflow_usd"] or 0),
-                        "count": int(r["cnt"] or 0),
-                    }
-                    for r in cur.fetchall()
-                ]
+        history = []
+        for r in hist_rows:
+            direction = "inflow" if (r["is_in"] and not r["is_out"]) else (
+                "outflow" if (r["is_out"] and not r["is_in"]) else "internal")
+            history.append({
+                "ts": r["block_timestamp"].isoformat(),
+                "symbol": symbol,
+                "from": _pick_label(r["f_ex"], r["from_label_names"], r["from_address"]),
+                "to": _pick_label(r["t_ex"], r["to_label_names"], r["to_address"]),
+                "from_is_exchange": r["f_ex"] is not None,
+                "to_is_exchange": r["t_ex"] is not None,
+                "quantity": float(r["value"]) if r["value"] is not None else 0.0,
+                "value_usd": float(r["value_usd"]) if r["value_usd"] is not None else 0.0,
+                "direction": direction,
+                "chain_disp": _chain_disp(r["chain"]),
+                "tx_hash": r["tx_hash"],
+                "explorer_url": _explorer_url(r["chain"], r["tx_hash"]),
+            })
 
-                # 给 feed 行补展示字段
-                for x in feed:
-                    x["symbol"] = x.get("canonical_symbol") or "?"
-                    x["name"] = x.get("canonical_name") or ""
-                    x["chain_disp"] = _chain_disp(x.get("chain", ""))
-                    x["value"] = float(x["value"]) if x.get("value") is not None else 0.0
-                    x["value_usd"] = float(x["value_usd"]) if x.get("value_usd") is not None else 0.0
-                    x["block_timestamp"] = str(x["block_timestamp"]) if x.get("block_timestamp") else None
-                    x["explorer_url"] = _explorer_url(x.get("chain", ""), x.get("tx_hash", ""))
-                    # 清理内部字段
-                    x.pop("canonical_symbol", None)
-                    x.pop("canonical_name", None)
-                    x.pop("from_exch", None)
-                    x.pop("to_exch", None)
-
+        totals_in = sum(b["inflow_usd"] for b in chart)
+        totals_out = sum(b["outflow_usd"] for b in chart)
         return jsonify({
             "ok": True,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "filters": {
-                "hours": hours, "chain": chain, "exchange": exchange,
-                "direction": direction, "symbol": symbol, "limit": limit,
+            "asset_id": asset_id,
+            "symbol": symbol,
+            "name": name,
+            "view": view,
+            "view_label": VIEW_LABELS[view],
+            "hours": hours,
+            "bucket_span_sec": span,
+            "bucket_label": _bucket_label(span),
+            "totals": {
+                "inflow_usd": totals_in,
+                "outflow_usd": totals_out,
+                "netflow_usd": totals_in - totals_out,
+                "count": len(history),
             },
-            "summary": summary,
-            "hourly": hourly,
-            "exchanges": exchanges,
-            "transfers": feed,
+            "chart": chart,
+            "history": history,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -357,7 +457,7 @@ def onchain_alert_stream():
 
 @onchain_alert_bp.route("/api/onchain-alert/meta")
 def onchain_alert_meta():
-    """下拉筛选用：可用链 + 交易所列表（读侧 union 的投影）。"""
+    """下拉筛选用：可用链 + 交易所家族名（读侧 union 的投影）。"""
     try:
         with _get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -370,15 +470,20 @@ def onchain_alert_meta():
                     ) s ORDER BY 1
                 """)
                 chains = [r["chain"] for r in cur.fetchall()]
-                cur.execute("""
-                    SELECT DISTINCT exchange_name FROM (
+                # 返回家族名：与查询层的家族等值匹配保持一致
+                # （下拉若是 "Binance 14"/"Binance: Hot Wallet 20" 这类子钱包名，匹配会对不上）
+                cur.execute(f"""
+                    SELECT DISTINCT {_FAMILY_SQL.format(col='exchange_name')} AS family
+                    FROM (
                         SELECT exchange_name FROM biz.onchain_exchange_wallet WHERE confidence='high'
                         UNION
                         SELECT label_name AS exchange_name FROM biz.onchain_address_label
                         WHERE label_type='exchange' AND confidence IN ('high','medium')
-                    ) s ORDER BY 1
+                    ) s
+                    WHERE exchange_name IS NOT NULL
+                    ORDER BY 1
                 """)
-                exchanges = [r["exchange_name"] for r in cur.fetchall()]
+                exchanges = [r["family"] for r in cur.fetchall() if r["family"]]
         return jsonify({"ok": True, "chains": chains, "exchanges": exchanges})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

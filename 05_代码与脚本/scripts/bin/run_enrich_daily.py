@@ -116,6 +116,7 @@ DEFAULT_ARGS = [
     "--min-count", "1",
     "--limit", "0",
     "--verify-medium",
+    "--whale-priority",
     "--concurrency", "2",
     "--delay", "2.0",
 ]
@@ -340,6 +341,28 @@ def main() -> int:
             for p in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy",
                       "https_proxy", "ALL_PROXY", "all_proxy"):
                 env.pop(p, None)
+
+            # --- 预步骤：刷新 whale 候选榜（仅每日全量，非致命）---
+            # 富化队列带 --whale-priority 时按候选榜 score 排序（大额+交易所往来
+            # 密集优先）。榜刷新失败只损失排序质量，队列自动退化为频次序。
+            if mode == "daily":
+                emit("  ── 预步骤：刷新 whale 候选榜（mine_whale_candidates 30d）──")
+                try:
+                    mine = subprocess.run(
+                        [sys.executable, "-u",
+                         str(SCRIPTS_DIR / "bin" / "mine_whale_candidates.py"),
+                         "--days", "30", "--top", "0"],
+                        cwd=str(SCRIPTS_DIR), env=env,
+                        capture_output=True, text=True, timeout=900)
+                    tail = (mine.stdout or "").strip().splitlines()[-12:]
+                    for ln in tail:
+                        emit(f"  [mine] {ln}")
+                    if mine.returncode != 0:
+                        emit(f"  ⚠️  候选榜刷新失败 exit={mine.returncode}，"
+                             f"队列退化为频次序: {(mine.stderr or '')[-200:]}")
+                except Exception as e:
+                    emit(f"  ⚠️  候选榜刷新异常（不阻断）: {e}")
+                emit("  ── 预步骤完成 ──")
 
             # 【不要改回 stdout=PIPE 实时读】2026-09-30 实测踩坑：
             # 在 Windows 计划任务会话下，Popen(stdout=PIPE) + 逐行读的模式

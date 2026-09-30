@@ -97,7 +97,9 @@ def ensure_attempt_table(conn) -> None:
 
 
 def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool = True,
-                            min_count: int = 1, since_hours: float = 0) -> list[str]:
+                            min_count: int = 1, since_hours: float = 0,
+                            whale_priority: bool = False,
+                            whale_window_days: int = 30) -> list[str]:
     """从转账记录中捞出没有地址标签的地址（按出现频次倒序，优先爬高频地址）。
 
     只查 from_address / to_address 中出现过、但 onchain_address_label 中没有的地址。
@@ -105,6 +107,8 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
     min_count>1 时，只保留出现次数 >= min_count 的地址（过滤一次性散户长尾）。
     since_hours>0 时只统计最近 N 小时出现过的地址（热跑口径，避免陈年长尾占坑）；
     0 = 不限窗口（每日全量口径）。
+    whale_priority=True 时按 whale 候选榜 score 降序优先（2026-09-30 P2 联动：
+    大额+交易所往来密切的地址价值远高于高频散户），无榜或表缺失自动退化为频次序。
     """
     case_sensitive = chain in CASE_SENSITIVE_CHAINS
 
@@ -118,6 +122,23 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
             addr_col_to = "LOWER(to_address)"
             compare = "="
 
+        # whale 候选榜排序（表缺失 → 退化为频次序）
+        whale_join = ""
+        whale_order = "ORDER BY ac.cnt DESC"
+        whale_params: list = []
+        if whale_priority:
+            with conn.cursor() as chk:
+                chk.execute("""SELECT 1 FROM information_schema.tables
+                               WHERE table_name = 'onchain_whale_candidate'""")
+                if chk.fetchone():
+                    cmp_expr = ("LOWER(wco.address) = LOWER(ac.addr)"
+                                if not case_sensitive else "wco.address = ac.addr")
+                    whale_join = (f"LEFT JOIN biz.onchain_whale_candidate wco "
+                                  f"ON wco.chain = %s AND wco.window_days = %s "
+                                  f"AND {cmp_expr}")
+                    whale_order = "ORDER BY wco.score DESC NULLS LAST, ac.cnt DESC"
+                    whale_params = [chain, whale_window_days]
+
         # 增量窗口：热跑时只捞最近 N 小时的新转账地址，防止和陈年长尾互相占坑
         since_clause = ""
         since_params: list = []
@@ -127,7 +148,7 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
 
         # 已尝试过的地址（无标签/失败的都算）
         attempt_clause = ""
-        params = [chain, *since_params, chain, *since_params, chain, chain]
+        params = [chain, *since_params, chain, *since_params, chain, chain, *whale_params]
         if skip_attempted:
             attempt_clause = f"""
                 AND NOT EXISTS (
@@ -180,10 +201,11 @@ def get_unlabeled_addresses(conn, chain: str, limit: int, skip_attempted: bool =
             LEFT JOIN labeled l
               ON {'LOWER(ac.addr)' if not case_sensitive else 'ac.addr'} {compare}
                  {'LOWER(l.addr)' if not case_sensitive else 'l.addr'}
+            {whale_join}
             WHERE l.addr IS NULL
               {attempt_clause}
               {min_clause}
-            ORDER BY ac.cnt DESC
+            {whale_order}
             LIMIT %s
         """, tuple(params))
 
@@ -510,6 +532,12 @@ def main():
                         help="零爬取重分类模式：用当前关键词表重新分类 attempt 表里 "
                              "status='unclassified' 且有 raw_tag 的地址，命中直接写库。"
                              "不发任何 HTTP 请求；扩词表（新交易所/做市商）后跑这个即可捞回")
+    parser.add_argument("--whale-priority", action="store_true", dest="whale_priority",
+                        help="无标签队列按 whale 候选榜 score 降序优先"
+                             "（biz.onchain_whale_candidate，由 mine_whale_candidates.py 产出；"
+                             "榜缺失自动退化为频次序）")
+    parser.add_argument("--whale-window", type=int, default=30, dest="whale_window",
+                        help="whale 候选榜窗口天数（默认 30，须与挖掘时一致）")
     parser.add_argument("--verify-medium", action="store_true", dest="verify_medium",
                         help="把 confidence='medium' 的地址（evm_propagate 跨链传播副本）"
                              "也拉进爬取队列真爬验证，命中即原地升级为 high。"
@@ -919,10 +947,17 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                                                 source=medium_source)
             print(f"  捞出 {len(medium_addrs)} 个 medium 待验证地址")
 
-        # 捞出待爬地址
+        # 捞出待爬地址（whale 候选榜 score 优先 → 频次降序）
+        whale_on = bool(getattr(args, "whale_priority", False))
         addresses = get_unlabeled_addresses(conn, chain, effective_limit,
                                             min_count=min_count,
-                                            since_hours=since_hours)
+                                            since_hours=since_hours,
+                                            whale_priority=whale_on,
+                                            whale_window_days=int(
+                                                getattr(args, "whale_window", 30)))
+        if whale_on:
+            print("  队列排序: whale 候选榜 score 优先（交易所往来+体量+中位数+资产数）"
+                  "→ 频次降序")
 
         # 前置剔除合约地址（obtained via eth_getCode），只保留 EOA
         dropped_contracts: list[str] = []

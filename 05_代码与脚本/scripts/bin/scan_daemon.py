@@ -631,10 +631,10 @@ FUNDING_STALE_H = 24
 #     · 正常大币在清淡日**反被误杀**：常态 ≥300 万的 218 个里 24 个（11.0%）跌破门槛。
 #   故门槛对「常态流动性」判定，`vol24`（当前 24h）降级为**仅记录**字段。
 LIQ_FILTER_ENABLED = False                # 阶段 A：影子（只记录、不拦截）；阶段 B 待授权
-LIQ_PLAN_NOTIONAL_USD = 300.0             # 单笔计划仓位（USDT）⚠️ 待 PO 按真实资金规模确认
+LIQ_PLAN_NOTIONAL_USD = 100.0             # 单笔计划仓位（USDT）— PO 拍板 2026-09-30（先小仓验证胜率赔率）
 LIQ_MAX_PARTICIPATION = 0.0001            # 单笔占日成交额/OI 上限（1 bp）
-LIQ_MIN_QUOTE_VOL_7D_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION    # 3,000,000（常态日均）
-LIQ_MIN_OI_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION              # 3,000,000
+LIQ_MIN_QUOTE_VOL_7D_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION    # 1,000,000（常态日均）
+LIQ_MIN_OI_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION              # 1,000,000
 LIQ_VOL7D_DAYS = 7                        # 常态窗口（天）
 LIQ_VOL7D_CACHE_TTL_MIN = 60              # 进程内缓存：常态值变化慢，无需每轮重聚合
 # 快照超龄（与 `MAX_OI_BUCKET_AGE_MIN` 同口径）：超龄视为 `liq_unknown`（默认放行+打标）。

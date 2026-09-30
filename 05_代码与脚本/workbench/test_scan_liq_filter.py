@@ -115,8 +115,10 @@ def main() -> int:
     # ── E) 源码护栏 ──
     print("E) 源码护栏")
     check(sd.LIQ_FILTER_ENABLED is False, "开关默认 False（阶段 A 影子）")
-    check(abs(MIN - 3_000_000.0) < 1e-6 and abs(OI - 3_000_000.0) < 1e-6,
-          "门槛 = 300 / 1e-4 = 3,000,000（先验反推）")
+    # 门槛由常量自洽反推（不硬编码具体值——X 拍板后会变，X=100 → 1,000,000）
+    check(abs(MIN - sd.LIQ_PLAN_NOTIONAL_USD / sd.LIQ_MAX_PARTICIPATION) < 1e-6
+          and abs(OI - sd.LIQ_PLAN_NOTIONAL_USD / sd.LIQ_MAX_PARTICIPATION) < 1e-6,
+          "门槛 = X / ρ（先验反推，与常量自洽）")
     check(sd.LIQ_OI_MAX_AGE_MIN == sd.MAX_OI_BUCKET_AGE_MIN, "超龄口径同 MAX_OI_BUCKET_AGE_MIN")
     check("CREATE TABLE IF NOT EXISTS biz.scan_liq_filter_log" in _SD_SRC, "DDL 建表存在")
     check("_ensure_liq_filter_table(conn)" in _SD_SRC, "主池调用惰性建表")

@@ -199,7 +199,7 @@ def get_exchange_map(conn, chain: str) -> dict[str, str]:
 
 
 def get_last_block(conn, chain: str, contract_address: str) -> int:
-    """获取上次扫描到的区块号。"""
+    """获取上次扫描到的区块号（旧口径；新代码优先用独立水位表）。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("""
             SELECT MAX(block_number) AS last_block
@@ -208,6 +208,39 @@ def get_last_block(conn, chain: str, contract_address: str) -> int:
         """, (chain, contract_address))
         row = cur.fetchone()
         return row["last_block"] or 0 if row else 0
+
+
+def get_scan_cursor(conn, chain: str, contract_address: str, cursor_type: str = "block") -> int:
+    """从独立水位表获取上次扫描位置；无记录时 fallback 到已入库行的 MAX(block_number)。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""
+            SELECT cursor_value FROM biz.onchain_transfer_scan_cursor
+            WHERE chain = %s AND contract_address = %s AND cursor_type = %s
+        """, (chain, contract_address, cursor_type))
+        row = cur.fetchone()
+        if row:
+            return int(row["cursor_value"]) or 0
+    # 迁移前存量数据兼容：按旧口径取
+    if cursor_type == "block":
+        return get_last_block(conn, chain, contract_address)
+    return 0
+
+
+def save_scan_cursor(
+    conn, chain: str, contract_address: str, cursor_value: int,
+    cursor_type: str = "block",
+) -> None:
+    """写回独立水位表。cursor_value 应为 0 时仍写入，避免反复 fallback 到旧口径。"""
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute("""
+            INSERT INTO biz.onchain_transfer_scan_cursor (
+                chain, contract_address, cursor_type, cursor_value, updated_at
+            ) VALUES (%s, %s, %s, %s, NOW())
+            ON CONFLICT (chain, contract_address, cursor_type) DO UPDATE SET
+                cursor_value = EXCLUDED.cursor_value,
+                updated_at = NOW()
+        """, (chain, contract_address, cursor_type, int(cursor_value)))
+    conn.commit()
 
 
 def get_asset_supply_decimals(conn, asset_id: int, chain: str, contract_address: str) -> dict:
@@ -387,13 +420,17 @@ def _get_latest_block_approx(client, client_type: str) -> int:
 
     block_num = 0
     try:
-        if client_type == "rpc" and hasattr(client, "get_block_number"):
-            block_num = client.get_block_number()
+        if hasattr(client, "get_block_number"):
+            raw = client.get_block_number()
+            if isinstance(raw, str) and raw.startswith("0x"):
+                block_num = int(raw, 16)
+            else:
+                block_num = int(raw or 0)
         else:
-            # Etherscan 模式下用 eth_blockNumber 也可以，但我们直接用估算
-            block_num = 20000000  # 粗略值，不影响大额判断
+            # 该客户端无取最新块号能力（如 ethplorer），用兜底值
+            block_num = 99999999
     except Exception:
-        block_num = 20000000
+        block_num = 99999999
 
     _latest_block_cache[cache_key] = (time.time(), block_num)
     return block_num
@@ -431,8 +468,12 @@ def collect_transfers(
     if not contract_address:
         return {"asset_id": asset_id, "symbol": symbol, "processed": 0, "written": 0}
 
-    # 获取上次扫描到的区块号，从该区块之后开始扫描
-    last_block = get_last_block(conn, chain, contract_address)
+    # 获取上次扫描位置；新代码优先使用独立水位表，与「已入库大额行」解耦。
+    # 这样即使本次没有大额入库（价格缺失/低于阈值），水位也会按实际扫描范围推进，
+    # 避免下次重复扫，也避免头部大额入库后游标跳到最新、漏掉同区间中段大额。
+    is_explorer_source = client_type == "explorer"
+    cursor_type = "timestamp" if is_explorer_source else "block"
+    last_cursor = get_scan_cursor(conn, chain, contract_address, cursor_type)
 
     # 获取代币价格（从数据库多源 fallback，最后用硬编码兜底）
     price_usd = get_asset_price(conn, asset_id, symbol)
@@ -445,15 +486,36 @@ def collect_transfers(
     total_processed = 0
     seen_raw = set()          # 已见过的 tx_hash
     overlap_pages = 0         # 连续完全重叠的页数
+    raw_transfers_all = []    # 原始 API 返回，用于计算扫描水位
+
+    # Ethplorer/Binplorer（explorer 源）的分页 page 参数被服务端忽略，翻页会返回同一批；
+    # 且该源 blockNumber 恒为 0，无法按区块游标真正回溯。对 explorer 源一次性取最大窗口
+    #（limit=1000），由外层守护进程的高频重访来弥补覆盖；其他源（etherscan/rpc）按区块升序
+    # 从旧到新推进，并用独立水位表记录实际覆盖位置。
+    if is_explorer_source:
+        page_offset = 1000
+        max_pages = 1
+        sort = "desc"
+        start_block = 0
+        end_block = 99999999
+    else:
+        page_offset = 100
+        max_pages = 20          # 单次资产扫描上限提高到 2000 条原始操作
+        sort = "asc"
+        start_block = last_cursor + 1 if last_cursor > 0 else 0
+        end_block = _get_latest_block_approx(client, client_type)
+        if end_block <= 0:
+            end_block = 99999999
 
     # 分页拉取转账记录
-    for page in range(1, 11):  # 最多 10 页 = 上限 1000 条转账
+    for page in range(1, max_pages + 1):
         transfers = client.get_token_transfers(
             contract_address,
             page=page,
-            offset=100,
-            sort="desc",
-            start_block=last_block + 1 if last_block > 0 else 0,
+            offset=page_offset,
+            sort=sort,
+            start_block=start_block,
+            end_block=end_block,
         )
         if not transfers:
             break
@@ -470,6 +532,7 @@ def collect_transfers(
             seen_raw.add(t.get("hash"))
 
         total_processed += len(transfers)
+        raw_transfers_all.extend(transfers)
 
         for tx in transfers:
             try:
@@ -564,8 +627,33 @@ def collect_transfers(
             except (ValueError, TypeError):
                 continue
 
-        if len(transfers) < 100:
+        if len(transfers) < page_offset:
             break
+
+    # ── 写回独立扫描水位 ──
+    # 仅当 API 调用成功返回（未抛异常/超时）且非 dry-run 时才更新；失败时保持旧水位，
+    # 避免把半截数据当成已覆盖。dry-run 不修改任何表。
+    if not dry_run:
+        try:
+            if is_explorer_source:
+                if raw_transfers_all:
+                    min_ts = min(
+                        int(t.get("timeStamp", 0)) for t in raw_transfers_all
+                        if t.get("timeStamp") is not None
+                    )
+                    save_scan_cursor(conn, chain, contract_address, min_ts, "timestamp")
+            else:
+                if raw_transfers_all:
+                    max_block = max(
+                        int(t.get("blockNumber", 0)) for t in raw_transfers_all
+                        if t.get("blockNumber") is not None
+                    )
+                    save_scan_cursor(conn, chain, contract_address, max_block, "block")
+                elif end_block > 0 and end_block != 99999999:
+                    # 请求区间内确实没有转账，把水位推进到 end_block，避免下次重复扫
+                    save_scan_cursor(conn, chain, contract_address, end_block, "block")
+        except Exception as e:
+            print(f"[cursor-save-fail] {symbol}/{chain}: {e}", file=sys.stderr)
 
     # ── 批量解析地址标签（数组列） ──
     if label_resolver is not None and all_transfers:

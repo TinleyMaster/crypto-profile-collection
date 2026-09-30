@@ -115,8 +115,8 @@ class EthplorerClient:
         }
 
     def get_token_transfers(self, contract_address: str, page: int = 1,
-                            offset: int = 100, sort: str = "desc",
-                            start_block: int = 0) -> list[dict]:
+                            offset: int = 1000, sort: str = "desc",
+                            start_block: int = 0, end_block: int = 0) -> list[dict]:
         """获取代币近期转账列表（getTokenHistory），无需 Etherscan Key。
 
         这是持仓快照 getTopTokenHolders 的"转账版"等价数据源：免费、免 Key、
@@ -127,14 +127,18 @@ class EthplorerClient:
         形状：value(raw 字符串) / tokenDecimal / from / to / hash / timeStamp(epoch) /
         blockNumber。
 
-        注意：分页参数名为 limit（非 pageSize），缺省仅返回 10 条；单次最多 1000 条。
-        历史窗口约 30 天（免费档）/ 更长（Personal Key）。
+        注意：
+        - 分页参数名为 limit（非 pageSize），单次最多 1000 条（实测可用）。
+        - page 参数在 Ethplorer/Binplorer 当前接口中实际被忽略，翻页无效；
+          因此这里一次性拉取最大窗口，由调用方用时间/区块水位控制回溯范围。
+        - 历史窗口约 30 天（freekey）/ 更长（Personal Key）。
         """
         # getTokenHistory 的分页参数叫 limit，不是 pageSize；缺省只给 10 条。
-        # 实测 offset 可达 1000，故这里统一取 min(offset, 1000)。
+        # 实测单次 limit=1000 可用，而 page 参数被服务端忽略，翻页会返回同一批。
+        # 故一次性取最大窗口，由上层水位控制扫描进度。
         limit = min(offset, 1000)
         data = self._get(
-            f"/getTokenHistory/{contract_address}?limit={limit}&page={page}"
+            f"/getTokenHistory/{contract_address}?limit={limit}"
         )
         if "error" in data:
             return []

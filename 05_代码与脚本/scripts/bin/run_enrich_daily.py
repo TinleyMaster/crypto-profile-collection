@@ -363,7 +363,6 @@ def main() -> int:
 
             bad_streak = 0
             halted_by_429 = False
-            last_progress_print = ""
             while proc.poll() is None:
                 time.sleep(30)
                 # 读日志文件增量（二进制 seek 避免文本模式 tell 的 cookie 问题）
@@ -376,6 +375,8 @@ def main() -> int:
                     continue
                 text = chunk.decode("utf-8", errors="replace")
                 for line in text.splitlines():
+                    if line.lstrip().startswith("[watch]"):
+                        continue   # 防御：历史日志里残留的 watch 行不参与计数/熔断
                     m = LABEL_RE.search(line)
                     if m:
                         last_label_n = int(m.group(1))
@@ -385,7 +386,6 @@ def main() -> int:
 
                     # 429 熔断（从文件增量里检测，与旧 PIPE 逻辑同阈值）
                     if "批次完成" in line:
-                        last_progress_print = line.strip()
                         m429 = FAIL429_RE.search(line)
                         n429 = int(m429.group(1)) if m429 else 0
                         if n429 >= BAD_BATCH_429:
@@ -402,9 +402,10 @@ def main() -> int:
                             break
                 if halted_by_429:
                     break
-                # 每 30 秒打一行最新批次进度（控制台可观测）
-                if last_progress_print:
-                    emit(f"  [watch] {last_progress_print}")
+                # 注意：不要把手扫描到的进度行再 emit 回日志文件——子进程本来就
+                # 直写同一文件，回写会制造重复行，且含「批次完成」的回写行会被
+                # 下一轮扫描再次命中 → 计数翻倍、[watch] 前缀递归嵌套、
+                # 429 熔断被同一条旧行重复计数而误触发（2026-09-30 实测）。
 
             try:
                 exit_code = proc.wait(timeout=30)

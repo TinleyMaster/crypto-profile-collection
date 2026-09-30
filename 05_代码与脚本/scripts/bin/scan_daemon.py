@@ -607,6 +607,53 @@ MAX_OI_ACC_AGE_MIN = 90
 # 同批 GALA 9 天 / LA 4 天 / MOODENG 3 天）。采集 `derivatives_batch` 每 6h 一轮、
 # 覆盖 top200 + 近 7 天信号币，正常应 ≤6h ⇒ 超窗（留足 4 轮余量）视为陈旧，不供值。
 FUNDING_STALE_H = 24
+
+# ── 主池入池流动性闸门（工单 SCAN-LIQ-FILTER-001，2026-09-30）──────────────
+# **第三类改动**：不是预测（会不会赚），而是**可执行性约束**（进不进得去、出不出得来）。
+# 「一波流小币」在任何行情里都交易不了 ⇒ regime 无关 ⇒ 不受阈值 sweep（34a4297）
+# 与 regime 闸门（SCAN-REGIME-GATE-001）两个判决覆盖。归属设计文档 §12.1-A4
+# （成本模型缺费率/滑点）——修补已知欠账，非新增 alpha 旋钮。
+#
+# 门槛由**执行经济性先验**反推，**不由回测收益挑选**（否则退化成第 16 个过拟合旋钮）：
+#   单笔计划仓位 X = LIQ_PLAN_NOTIONAL_USD（与 SIGNAL_MAX_NOTIONAL_USDT 同量级）
+#   要求单笔占比 ≤ LIQ_MAX_PARTICIPATION（1 bp = 0.01%）的「24h 成交额」/「OI 名义价值」
+#   ⇒ 最小门槛 = X / 1e-4 = 3,000,000 USD（1 bp 是「下单不显著扰动盘口」的保守先验）。
+#
+# ⚠️ 工单 §2.2 写的源列 `biz.oi_cvd_snapshot.h_quote_volume` / `.oi_cum` **不存在**
+#   （实测该表仅列 symbol/ts/exchange/oi_usd/cvd_5m_usd/cvd_1h_usd/vol_5m_usd/source），
+#   已按实测校正为：24h 成交额 = `biz.asset_klines` 1h `quote_vol` 求和（主池已加载，
+#   零新查询）；OI 名义价值 = `biz.oi_cvd_snapshot.oi_usd`（**采集侧已是「张数×标记价」
+#   的 USD 名义价值**，无需再乘当前价）。详见工单落地回写。
+LIQ_FILTER_ENABLED = False                # 阶段 A：影子（只记录、不拦截）；阶段 B 待授权
+LIQ_PLAN_NOTIONAL_USD = 300.0             # 单笔计划仓位（USDT）
+LIQ_MAX_PARTICIPATION = 0.0001            # 单笔占日成交额/OI 上限（1 bp）
+LIQ_MIN_QUOTE_VOL_24H_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION   # 3,000,000
+LIQ_MIN_OI_USD = LIQ_PLAN_NOTIONAL_USD / LIQ_MAX_PARTICIPATION              # 3,000,000
+# 快照超龄（与 `MAX_OI_BUCKET_AGE_MIN` 同口径）：超龄视为 `liq_unknown`（默认放行+打标）。
+LIQ_OI_MAX_AGE_MIN = MAX_OI_BUCKET_AGE_MIN
+# 惰性建表 DDL（工单 §4 只列 scan_daemon.py 一个生产文件 ⇒ 不另编迁移，靠本 DDL 自愈；
+# 阶段 A 影子期只落 `verdict='low'`（被过滤桶），`unknown`/`pass` 只进日志统计）。
+LIQ_FILTER_DDL = """
+CREATE TABLE IF NOT EXISTS biz.scan_liq_filter_log (
+    id            bigserial PRIMARY KEY,
+    filtered_at   timestamptz NOT NULL,
+    symbol        text        NOT NULL,
+    pool          text        NOT NULL DEFAULT 'main',
+    timeframe     text,
+    direction     text,
+    scenario      text,
+    price_chg_pct numeric(12,4),
+    vol_ratio     numeric(12,4),
+    l1_level      integer,
+    vol24_usd     numeric(22,2),
+    oi_usd        numeric(22,2),
+    oi_age_min    numeric(10,2),
+    verdict       text        NOT NULL,
+    reason        text,
+    enforced      boolean     NOT NULL DEFAULT false
+)"""
+LIQ_FILTER_INDEX_DDL = ("CREATE INDEX IF NOT EXISTS idx_scan_liq_filter_at "
+                        "ON biz.scan_liq_filter_log (filtered_at DESC)")
 # ── L0 市场环境阈值（审计 P1-2 标定）─────────────────────────────
 # 原值 `btc_1h ±1.0` / `fgi 25·75` / `cap_trend ±1.0` 里两个近乎死条件。用近 7 天
 # 「up + OI↑」触发子集（context_tags 回放，n=98）复算：原阈值下唯一真正降级的维度
@@ -949,6 +996,92 @@ def _atr_stop_pct(bars: list[dict], ref_px: float) -> float | None:
     return max(STOP_PCT_MIN, min(STOP_PCT_MAX, pct))
 
 
+# ── 流动性闸门（工单 SCAN-LIQ-FILTER-001）──────────────────────────
+_LIQ_TABLE_READY = False
+
+
+def _ensure_liq_filter_table(conn) -> None:
+    """惰性建 `biz.scan_liq_filter_log`（幂等；进程内只建一次）。
+
+    工单 §4 只列 `scan_daemon.py` 一个生产文件 ⇒ 不另编迁移，靠本函数自愈建表
+    （与 `db_stats._ensure_research_tables` 同模式）。DDL 后立即 commit，避免
+    `AccessExclusiveLock` 挂到主池后续写事务上。
+    """
+    global _LIQ_TABLE_READY
+    if _LIQ_TABLE_READY:
+        return
+    with conn.cursor() as cur:
+        cur.execute(LIQ_FILTER_DDL)
+        cur.execute(LIQ_FILTER_INDEX_DDL)
+    conn.commit()
+    _LIQ_TABLE_READY = True
+
+
+def _sum_vol24_from_klines(by_iv: dict[str, list[dict]]) -> float | None:
+    """近 24h USD 成交额 = 近 1 天 1h 条 `quote_vol` 求和。
+
+    主池已加载近 1 天全周期 K 线（`by_sym_k`）⇒ 零新查询。无 1h 条 → None
+    （数据缺失，交由 `_liq_verdict` 判 `unknown`）。
+    """
+    bars = by_iv.get("1h") or []
+    if not bars:
+        return None
+    return sum(float(b.get("quote_vol") or 0) for b in bars)
+
+
+def _oi_notional(oi_rows: list[dict], now: datetime) -> tuple[float | None, float | None]:
+    """OI 名义价值（USD）与最新桶年龄（分钟）。
+
+    `oi_rows` 已按 ts 升序（`task_scan_main_pool` 的查询 `ORDER BY symbol, ts`）。
+    采集侧 `oi_usd` **已是「张数 × 标记价」的 USD 名义价值**；无有效值 → (None, None)。
+    """
+    if not oi_rows:
+        return None, None
+    latest = oi_rows[-1]
+    oi = latest.get("oi_usd")
+    if oi is None:
+        return None, None
+    ts = latest.get("ts")
+    age = (now - ts).total_seconds() / 60 if ts is not None else None
+    return float(oi), age
+
+
+def _liq_verdict(vol24_usd: float | None, oi_usd: float | None,
+                 oi_age_min: float | None) -> tuple[str, str]:
+    """流动性闸门判定（纯函数，可离线单测）。返回 `(verdict, reason)`。
+
+    * `unknown` —— 24h 成交额缺失 / OI 快照缺失或超龄（与 `LIQ_OI_MAX_AGE_MIN` 同口径）
+      ⇒ **默认放行**并打标（避免系统未成熟时误杀、避免静默吞信号）；
+    * `low`     —— 24h 成交额 `< LIQ_MIN_QUOTE_VOL_24H_USD` **或** OI 名义价值
+      `< LIQ_MIN_OI_USD`（二元剔除；不加权、不降权）；
+    * `pass`    —— 两口径均达标。
+    """
+    if vol24_usd is None:
+        return "unknown", "vol24_missing"
+    if oi_usd is None or oi_age_min is None:
+        return "unknown", "oi_missing"
+    if oi_age_min > LIQ_OI_MAX_AGE_MIN:
+        return "unknown", "oi_stale"
+    if vol24_usd < LIQ_MIN_QUOTE_VOL_24H_USD:
+        return "low", "vol24_below"
+    if oi_usd < LIQ_MIN_OI_USD:
+        return "low", "oi_below"
+    return "pass", "ok"
+
+
+def _pctl(vals: list[float], q: float) -> float | None:
+    """线性插值分位数（q∈[0,1]）；空样本 → None（影子期分位分布用）。"""
+    v = sorted(float(x) for x in vals if x is not None)
+    if not v:
+        return None
+    if len(v) == 1:
+        return v[0]
+    pos = (len(v) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (pos - lo)
+
+
 def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
     """主池扫描（单轮）。"""
     with _db() as conn:
@@ -980,9 +1113,13 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             by_sym_oi.setdefault(r["symbol"], []).append(r)
 
         funding_map = _load_funding_map(conn)
+        _ensure_liq_filter_table(conn)
 
         now = datetime.now(timezone.utc)
         signals: list[tuple] = []
+        filtered_rows: list[tuple] = []
+        liq_stats = {"pass": 0, "low": 0, "unknown": 0}
+        vol24_samples: list[float] = []
         stale_symbols = 0
         for sym in sorted(by_sym_k):
             # 新鲜度护栏：数据陈旧直接跳过（防采集停摆时用旧数据出假信号）
@@ -1010,6 +1147,30 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
                 confidence = "high" if regime["short_fav"] else "medium"
             else:
                 confidence = "medium" if regime["short_fav"] else "low"
+
+            # ── 流动性闸门（工单 SCAN-LIQ-FILTER-001，阶段 A 影子）──
+            # 位置：L1+L2 通过、写 `scan_signal` 之前 ⇒ 影子统计的分母 = 「本会入池的
+            # 信号」。**不放在字面的 801-815 行（`_l1_eval` 价量判定）之前**：那会把
+            # 大量永不触发的币、以及冷却跳过的币一并计入，令「剔除比例」失真（工单
+            # §2.1 的落点按意图理解为「入池前」，非 `_l1_eval` 之内）。
+            # 阶段 A：`LIQ_FILTER_ENABLED=False` ⇒ 只记录不拦截；阶段 B 才 `continue`。
+            vol24 = _sum_vol24_from_klines(by_sym_k[sym])
+            oi_usd, oi_age = _oi_notional(by_sym_oi.get(sym, []), now)
+            liq_v, liq_reason = _liq_verdict(vol24, oi_usd, oi_age)
+            liq_stats[liq_v] += 1
+            if vol24 is not None:
+                vol24_samples.append(vol24)
+            if liq_v == "low":
+                filtered_rows.append((
+                    now, sym, l1["iv"], direction, l2["scenario"],
+                    round(l1["chg_pct"], 4), round(l1["vol_ratio"], 4), l1["level"],
+                    None if vol24 is None else round(vol24, 2),
+                    None if oi_usd is None else round(oi_usd, 2),
+                    None if oi_age is None else round(oi_age, 2),
+                    liq_v, liq_reason, LIQ_FILTER_ENABLED,
+                ))
+                if LIQ_FILTER_ENABLED:
+                    continue
 
             ctx_tags = regime["tags"] + [f"lv{l1['level']}_{l1['iv']}"]
             # 入场/失效位（审计 P2-4：表里有 trigger_price / stop_loss_pct，但主池
@@ -1055,6 +1216,16 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
             """
             with conn.cursor() as cur:
                 cur.executemany(insert_sql, signals)
+        if filtered_rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO biz.scan_liq_filter_log "
+                    "(filtered_at, symbol, timeframe, direction, scenario, price_chg_pct, "
+                    " vol_ratio, l1_level, vol24_usd, oi_usd, oi_age_min, verdict, reason, "
+                    " enforced) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    filtered_rows,
+                )
         conn.commit()
 
     total = len(by_sym_k)
@@ -1062,8 +1233,25 @@ def task_scan_main_pool(cooldown_h: float = 6.0) -> dict:
         print(f"[scan_daemon][main_pool] ⚠️ {stale_symbols}/{total} 币数据陈旧，"
               f"疑似采集停摆，本轮信号不完整", file=sys.stderr)
 
+    # 影子期统计（工单 §3 IN-2 / §5②）：被剔除比例 / unknown 占比 / vol24 分位分布。
+    # 走现有日志通道，不加新面板。阶段 A 只记录，不改信号产生与推送行为。
+    evaluated = sum(liq_stats.values())
+    if evaluated:
+        low_pct = liq_stats["low"] / evaluated * 100
+        unk_pct = liq_stats["unknown"] / evaluated * 100
+        p10 = _pctl(vol24_samples, 0.10)
+        p50 = _pctl(vol24_samples, 0.50)
+        p90 = _pctl(vol24_samples, 0.90)
+        print(f"[scan_daemon][liq_filter] {'拦截' if LIQ_FILTER_ENABLED else '影子'}"
+              f"：评估 {evaluated} 条 · low {liq_stats['low']}（{low_pct:.1f}%）· "
+              f"unknown {liq_stats['unknown']}（{unk_pct:.1f}%）· pass {liq_stats['pass']} · "
+              f"落桶 {len(filtered_rows)} 条 · vol24 分位 "
+              f"p10/p50/p90 = {_fmt_usd_abs(p10)}/{_fmt_usd_abs(p50)}/{_fmt_usd_abs(p90)}")
+
     return {"regime_tags": regime["tags"], "symbols_checked": total,
-            "stale_skipped": stale_symbols, "signals": len(signals)}
+            "stale_skipped": stale_symbols, "signals": len(signals),
+            "liq_evaluated": evaluated, "liq_low": liq_stats["low"],
+            "liq_unknown": liq_stats["unknown"], "liq_filtered": len(filtered_rows)}
 
 
 # ═══════════════════════════════════════════════════════════════

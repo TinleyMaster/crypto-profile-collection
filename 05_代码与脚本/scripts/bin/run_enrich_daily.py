@@ -31,7 +31,11 @@
     $trg = New-ScheduledTaskTrigger -Daily -At 21:00
     $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
              -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-             -ExecutionTimeLimit (New-TimeSpan -Hours 4)
+             -ExecutionTimeLimit (New-TimeSpan -Hours 10)
+    # 超时为什么是 10 小时：带上 --verify-medium 后单轮队列约 1.1 万个地址
+    # （medium 待验证 ~6k + 无标签长尾 ~5k），按 0.6~0.9 地址/秒需要 3.5~5 小时；
+    # 4 小时会在「长尾」段被硬截断。被截断不丢数据（失败/未跑的地址不入
+    # attempt 表，次日自动重试），但白等一晚，故放宽到 10 小时。
     Register-ScheduledTask -TaskName "CryptoOnchainEnrichDaily" -Action $act `
              -Trigger $trg -Settings $set -Force
 """
@@ -64,18 +68,27 @@ LOG_RETENTION_DAYS = 14
 #     从第 2,050 个（16%）开始持续 429，最终 5,174 个失败（41%），
 #     失败地址不入 attempt 表 ⇒ 次日原样重爬，白跑一整晚。
 #   - concurrency 2 / delay 1.5（约 1.2 地址/秒）：120 个端到端 0 失败。
-# 现取更保守的一档（约 1 地址/秒），宁可慢也不要把 IP 打进惩罚窗口——
+# 现取更保守的一档（约 0.6~0.9 地址/秒），宁可慢也不要把 IP 打进惩罚窗口——
 # 一旦被惩罚，后续数小时即使降速仍只有 ~0.5/秒的有效产出，得不偿失。
+#
+# 【--verify-medium 为什么必须带上】2026-09-30：
+#   库里 19,352 条 confidence='medium' 全部是 evm_propagate 的跨链传播副本，
+#   它们「有标签」所以永远进不了富化队列，从未被浏览器真实验证过。
+#   带上本开关后进入队列，命中即原地升级 high（实测 30 个命中 21 个，70%，
+#   远高于散户长尾的 ~2%），是投入产出比最高的一批地址。
 DEFAULT_ARGS = [
     "--chain", "eth,base,polygon",
     "--min-count", "1",
     "--limit", "0",
+    "--verify-medium",
     "--concurrency", "2",
     "--delay", "2.0",
 ]
 
 # 从进度行里抓「已查到标签 N 个」用于 SUMMARY
 LABEL_RE = re.compile(r"已查到标签\s*(\d+)\s*个")
+# 抓「升级 medium→high N 条」—— medium 验证的核心产出，值得单列
+UPGRADE_RE = re.compile(r"升级 medium→high\s*(\d+)\s*条")
 # 从批次行里抓「失败: 429×N」用于限流熔断
 FAIL429_RE = re.compile(r"429[×x](\d+)")
 
@@ -210,6 +223,7 @@ def main() -> int:
     log_path = LOG_DIR / f"enrich_daily_{datetime.now():%Y%m%d}.log"
     t0 = time.time()
     last_label_n = 0
+    last_upgrade_n = 0
     exit_code = -1
 
     try:
@@ -259,6 +273,9 @@ def main() -> int:
                 m = LABEL_RE.search(line)
                 if m:
                     last_label_n = int(m.group(1))
+                mu = UPGRADE_RE.search(line)
+                if mu:
+                    last_upgrade_n += int(mu.group(1))
 
                 # 限流熔断：连续多批大面积 429 说明 IP 已进惩罚窗口，
                 # 继续跑既拿不到数据又会加深惩罚（实测惩罚后即使降速也只有
@@ -293,7 +310,8 @@ def main() -> int:
                 if halted_by_429 else ""
             summary = (f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] END "
                        f"exit={exit_code} 耗时={elapsed / 60:.1f}分钟 "
-                       f"新增标签≈{last_label_n}{tail}\n")
+                       f"新增标签≈{last_label_n} "
+                       f"medium→high={last_upgrade_n}{tail}\n")
             lf.write(summary)
             _log(summary.strip())
     finally:

@@ -250,6 +250,95 @@ def count_total_unlabeled(conn, chain: str, skip_attempted: bool = True,
     return row["cnt"] if row else 0
 
 
+def count_medium_addresses(conn, chain: str, skip_attempted: bool = True,
+                           source: str | None = None) -> int:
+    """统计该链上「置信度 medium（待验证）」的地址数。
+
+    口径与 get_medium_addresses 完全一致：
+      - confidence = 'medium'
+      - 同一 (address, chain) 上还没有 high 记录（已有 high 的不用再验证）
+      - skip_attempted=True 时排除已爬过（attempt 表有记录）的，保证幂等
+    """
+    with conn.cursor() as cur:
+        sql = f"""
+            SELECT COUNT(*)
+            FROM biz.onchain_address_label m
+            WHERE m.chain = %s
+              AND m.confidence = 'medium'
+              AND NOT EXISTS (
+                    SELECT 1 FROM biz.onchain_address_label h
+                    WHERE h.chain = m.chain
+                      AND LOWER(h.address) = LOWER(m.address)
+                      AND h.confidence = 'high'
+              )
+        """
+        params: list = [chain]
+        if source:
+            sql += " AND m.source = %s"
+            params.append(source)
+        if skip_attempted:
+            sql += f"""
+              AND NOT EXISTS (
+                    SELECT 1 FROM {FETCH_ATTEMPT_TABLE} fa
+                    WHERE fa.chain = m.chain
+                      AND LOWER(fa.address) = LOWER(m.address)
+              )
+            """
+        cur.execute(sql, tuple(params))
+        row = cur.fetchone()
+    return row[0] if row else 0
+
+
+def get_medium_addresses(conn, chain: str, limit: int, skip_attempted: bool = True,
+                         source: str | None = None) -> list[str]:
+    """捞出该链上 confidence='medium' 的待验证地址（跨链传播副本为主）。
+
+    为什么需要它：evm_propagate 把 A 链的 high 标签复制到其他 EVM 链，
+    副本置信度是 medium。这些地址在原脚本里永远不会被爬 —— 富化只捞
+    「onchain_address_label 里没有」的地址，而副本已经有标签了。
+    结果是 19k 条 medium 从未被区块浏览器真实验证过。
+
+    本函数把它们捞出来送进爬取队列，命中即原地升级为 high（见 _write_batch）。
+
+    source 可限定只验证某个来源（如 'evm_propagate'），None = 所有 medium。
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        # SELECT 必须用 LOWER(m.address)：GROUP BY 的是表达式，
+        # 直接选 m.address 会触发 "column must appear in the GROUP BY clause"。
+        sql = f"""
+            SELECT LOWER(m.address) AS address
+            FROM biz.onchain_address_label m
+            WHERE m.chain = %s
+              AND m.confidence = 'medium'
+              AND NOT EXISTS (
+                    SELECT 1 FROM biz.onchain_address_label h
+                    WHERE h.chain = m.chain
+                      AND LOWER(h.address) = LOWER(m.address)
+                      AND h.confidence = 'high'
+              )
+        """
+        params: list = [chain]
+        if source:
+            sql += " AND m.source = %s"
+            params.append(source)
+        if skip_attempted:
+            sql += f"""
+              AND NOT EXISTS (
+                    SELECT 1 FROM {FETCH_ATTEMPT_TABLE} fa
+                    WHERE fa.chain = m.chain
+                      AND LOWER(fa.address) = LOWER(m.address)
+              )
+            """
+        # 同一地址在该链可能有多个 label_type/label_name 的 medium 行 → 去重
+        sql += " GROUP BY LOWER(m.address) ORDER BY MIN(m.label_id)"
+        if limit and limit > 0:
+            sql += " LIMIT %s"
+            params.append(limit)
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+    return [r["address"] for r in rows]
+
+
 def batch_filter_contracts(chain: str, addrs: list[str], batch_size: int = 100,
                            batch_delay: float = 0.25, max_retries: int = 2
                            ) -> tuple[list[str], list[str], dict[str, int]]:
@@ -380,6 +469,15 @@ def main():
                              "设 0 或 1 表示不过滤")
     parser.add_argument("--include-contracts", action="store_true", dest="include_contracts",
                         help="不做合约前置剔除（默认会用 eth_getCode 剔除合约，只保留 EOA）")
+    parser.add_argument("--verify-medium", action="store_true", dest="verify_medium",
+                        help="把 confidence='medium' 的地址（evm_propagate 跨链传播副本）"
+                             "也拉进爬取队列真爬验证，命中即原地升级为 high。"
+                             "这些地址原本永远不会进入队列——富化只捞「没有标签」的地址，"
+                             "而副本已经有标签了")
+    parser.add_argument("--medium-limit", type=int, default=0, dest="medium_limit",
+                        help="每条链最多验证多少个 medium 地址（默认 0=不限）")
+    parser.add_argument("--medium-source", type=str, default=None, dest="medium_source",
+                        help="只验证指定来源的 medium 地址（如 evm_propagate）；默认不限来源")
     parser.add_argument("--dry-run", action="store_true",
                         help="预览模式：只统计，不爬取、不写库")
     parser.add_argument("--db-url", type=str, default=None,
@@ -485,22 +583,63 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
             batch_backfilled = 0
 
             if not filtered:
-                return conn, 0, 0, inserted_total, backfilled_total
+                return conn, 0, 0, 0, inserted_total, 0, backfilled_total
 
             # 1. 写 address_label
             inserted = 0
+            upgraded = 0
             with conn.cursor() as cur:
                 for addr_l, info in filtered.items():
                     raw_meta = json.dumps({
                         "label_text": info["label_text"],
                         "fetched_from": "address_page",
                     }, ensure_ascii=False)
+                    # ① 原地升级（medium/low → high）
+                    #
+                    # 这一步必须先于 INSERT，否则验证形同虚设：
+                    # 唯一键是 (address, chain, label_type, label_name)，而
+                    # evm_propagate 副本的 label_name 常常与浏览器标签名相同
+                    # （例如都是 "Binance"）→ 原 INSERT ... DO NOTHING 会静默
+                    # 跳过，medium 永远升不了 high，白爬一整晚。
+                    # 这里把同 (address, chain, label_type) 下所有非 high 行
+                    # 一次性升成 high，并统一采用浏览器真实标签名。
+                    # LOWER(address) 匹配：EVM 链大小写混存时也能命中
+                    # （索引换不来正确性，量级仅每批几十条）。
+                    cur.execute("""
+                        UPDATE biz.onchain_address_label
+                        SET confidence = %s,
+                            source = %s,
+                            label_name = %s,
+                            display_name = %s,
+                            raw_meta = %s::jsonb,
+                            updated_at = NOW()
+                        WHERE chain = %s
+                          AND LOWER(address) = LOWER(%s)
+                          AND label_type = %s
+                          AND confidence <> 'high'
+                    """, (
+                        ENRICH_CONFIDENCE, ENRICH_SOURCE,
+                        info["display_name"], info["display_name"], raw_meta,
+                        chain, addr_l, info["label_type"],
+                    ))
+                    if cur.rowcount:
+                        upgraded += cur.rowcount
+                        continue
+
+                    # ② 没有可升级的旧行 → 插入新行
+                    # 冲突时（同名不同源的旧记录）同样升级为 high，但绝不降级 high。
                     cur.execute("""
                         INSERT INTO biz.onchain_address_label
                             (address, chain, label_type, label_name, display_name,
                              confidence, source, raw_meta)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (address, chain, label_type, label_name) DO NOTHING
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (address, chain, label_type, label_name) DO UPDATE
+                        SET confidence = EXCLUDED.confidence,
+                            source = EXCLUDED.source,
+                            display_name = EXCLUDED.display_name,
+                            raw_meta = EXCLUDED.raw_meta,
+                            updated_at = NOW()
+                        WHERE biz.onchain_address_label.confidence <> 'high'
                     """, (
                         addr_l, chain, info["label_type"],
                         info["display_name"], info["display_name"],
@@ -539,6 +678,7 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
             conn.commit()
             inserted_total += inserted
             batch_inserted = inserted
+            batch_upgraded = upgraded
 
             # 2. 回填转账记录
             case_sensitive = chain in CS_CHAINS
@@ -601,7 +741,8 @@ def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
             backfilled_total += from_up + to_up
             batch_backfilled = from_up + to_up
 
-            return conn, batch_inserted, batch_backfilled, inserted_total, backfilled_total
+            return (conn, batch_inserted, batch_upgraded, batch_backfilled,
+                    inserted_total, batch_upgraded, backfilled_total)
 
         except psycopg.OperationalError as e:
             # 连接错误：重连后重试
@@ -637,53 +778,80 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
 
         min_count = max(1, int(getattr(args, "min_count", 1)))
         exclude_contracts = not bool(getattr(args, "include_contracts", False))
+        verify_medium = bool(getattr(args, "verify_medium", False))
+        medium_source = getattr(args, "medium_source", None) or None
 
-        # 先预览总量（与下方取地址保持同一口径）
+        # ── 队列一：medium 待验证地址（跨链传播副本，命中即升 high）──
+        medium_addrs: list[str] = []
+        total_medium = 0
+        if verify_medium:
+            total_medium = count_medium_addresses(conn, chain,
+                                                  source=medium_source)
+            med_limit = args.medium_limit if args.medium_limit > 0 else total_medium
+            print(f"  medium 待验证地址: {total_medium} 个"
+                  + (f"（source={medium_source}）" if medium_source else "")
+                  + f"，本次计划爬 {min(med_limit, total_medium)} 个")
+
+        # ── 队列二：无标签地址（原逻辑）──
         total_unlabeled = count_total_unlabeled(conn, chain, min_count=min_count)
         print(f"  无标签地址总数（估算, cnt>={min_count}）: {total_unlabeled}")
         effective_limit = args.limit if args.limit > 0 else total_unlabeled
         print(f"  本次计划爬取: {min(effective_limit, total_unlabeled)} 个")
         print(f"  并发数: {args.concurrency}")
-        print(f"  合约前置剔除: {'开（只留 EOA）' if exclude_contracts else '关'}")
+        print(f"  合约前置剔除: {'开（只留 EOA）' if exclude_contracts else '关'}"
+              f"（medium 验证队列不做剔除）")
 
         if args.dry_run:
             print("  [dry-run] 跳过实际爬取")
             continue
 
-        if total_unlabeled == 0:
+        if total_unlabeled == 0 and total_medium == 0:
             print("  没有需要富化的地址，跳过")
             continue
+
+        if verify_medium and total_medium:
+            med_limit = args.medium_limit if args.medium_limit > 0 else total_medium
+            medium_addrs = get_medium_addresses(conn, chain, med_limit,
+                                                source=medium_source)
+            print(f"  捞出 {len(medium_addrs)} 个 medium 待验证地址")
 
         # 捞出待爬地址
         addresses = get_unlabeled_addresses(conn, chain, effective_limit,
                                             min_count=min_count)
-        if not addresses:
-            print("  没有找到待富化地址")
-            continue
-
-        print(f"  捞出 {len(addresses)} 个待爬地址（按频次排序）")
-        print(f"  前 5 个: {addresses[:5]}")
 
         # 前置剔除合约地址（obtained via eth_getCode），只保留 EOA
         dropped_contracts: list[str] = []
-        if exclude_contracts:
+        if exclude_contracts and addresses:
             addresses, dropped_contracts, fstats = batch_filter_contracts(chain, addresses)
             print(f"  合约过滤: EOA {fstats['kept_eoa']} 个 / 剔除合约 "
                   f"{fstats['dropped_contract']} 个 / 判定失败保留 "
                   f"{fstats['rpc_error'] + fstats['unknown']} 个")
-            if not addresses:
-                print("  过滤后无 EOA 地址，跳过")
-                # 剔除的合约仍要落 attempt，避免以后重复 RPC 判定
-                if dropped_contracts:
-                    ensure_attempt_table(conn)
-                    try:
-                        n = _record_attempts(conn, chain, [], [],
-                                             contract_addrs=dropped_contracts)
-                        conn.commit()
-                        print(f"  已记录 {n} 个合约地址（下次自动跳过）")
-                    except Exception as e:
-                        print(f"  ⚠️  记录合约跳过失败: {e}")
-                continue
+
+        # 合并队列：medium 优先（交易所副本价值远高于散户长尾）
+        #
+        # medium 队列**不做合约剔除**：这里的地址本来就带着「疑似交易所」标签，
+        # 交易所的多签/金库常常是合约（有字节码），若走 eth_getCode 会被误删；
+        # 验证的目的正是要确认它们，剔除等于自废武功。
+        merged = list(dict.fromkeys(list(medium_addrs) + list(addresses)))
+        n_med = len(medium_addrs)
+        addresses = merged
+        if not addresses:
+            print("  过滤后无 EOA 地址，跳过")
+            # 剔除的合约仍要落 attempt，避免以后重复 RPC 判定
+            if dropped_contracts:
+                ensure_attempt_table(conn)
+                try:
+                    n = _record_attempts(conn, chain, [], [],
+                                         contract_addrs=dropped_contracts)
+                    conn.commit()
+                    print(f"  已记录 {n} 个合约地址（下次自动跳过）")
+                except Exception as e:
+                    print(f"  ⚠️  记录合约跳过失败: {e}")
+            continue
+
+        print(f"  合计 {len(addresses)} 个待爬地址"
+              f"（medium 验证 {n_med} + 无标签 {len(addresses) - n_med}）")
+        print(f"  前 5 个: {addresses[:5]}")
 
         # 初始化 resolver（DB 查询用，单线程安全）
         resolver = AddressLabelResolver(conn, chain)
@@ -699,6 +867,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             "http_403": 0, "http_429": 0, "http_other": 0, "network_error": 0,
         }
         inserted_total = 0
+        upgraded_total = 0
         backfilled_total = 0
         attempt_recorded = 0
         done_count = 0
@@ -768,11 +937,14 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             # 本批写库（带连接断开自动重连重试）
             batch_inserted = 0
             batch_backfilled = 0
+            batch_upgraded = 0
             if batch_results:
                 try:
-                    conn, batch_inserted, batch_backfilled, inserted_total, backfilled_total = \
+                    (conn, batch_inserted, batch_upgraded, batch_backfilled,
+                     inserted_total, batch_upgraded_total, backfilled_total) = \
                         _write_batch(conn, db_url, chain, batch_results, resolver,
                                      inserted_total, backfilled_total)
+                    upgraded_total += batch_upgraded_total
                 except Exception as e:
                     print(f"  ⚠️  本批写库失败（重试后仍失败）: {e}")
                     import traceback
@@ -803,6 +975,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             print(f"  ── 批次完成 {batch_end}/{len(addresses)} ({pct:.0f}%) ── "
                   f"本批查到标签 {batch_stats['ok']} 个, "
                   f"入库 {batch_inserted} 条, "
+                  f"升级 medium→high {batch_upgraded} 条, "
                   f"回填 {batch_backfilled} 条{fail_str}")
 
         # 把本次前置剔除的合约地址落 attempt 表（status='contract'），下次直接跳过
@@ -827,6 +1000,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         print(f"    无标签: {stat_counts['no_label']} 个")
         print(f"    爬取失败: {sum(stat_counts[k] for k in ['http_403','http_429','http_other','network_error'])} 个")
         print(f"    入库新标签: {inserted_total} 条")
+        print(f"    升级 medium→high: {upgraded_total} 条")
         print(f"    回填转账记录: {backfilled_total} 条")
         print(f"    记录尝试: {attempt_recorded} 条（下次自动跳过）")
         print(f"    平均速度: {len(addresses)/elapsed:.1f} 地址/秒")

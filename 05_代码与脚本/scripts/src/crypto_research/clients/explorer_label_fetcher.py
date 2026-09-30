@@ -61,6 +61,32 @@ EXCHANGE_NAME_MAP = {
     "poloniex": "Poloniex", "deribit": "Deribit", "bitmart": "BitMart", "lbank": "LBank",
     "xt.com": "XT.COM", "xtcom": "XT.COM", "bittrex": "Bittrex", "bitmex": "BitMEX",
     "korbit": "Korbit", "coinone": "Coinone", "ftx": "FTX", "hotbit": "Hotbit",
+    # 2026-09-30 P0-B：漏网交易所。抽查历史 no_label 实测 "GMO Coin 3" 被漏
+    # （日本交易所，老词表没有），一并补齐其他二线所。
+    "gmo coin": "GMO Coin", "bitflyer": "bitFlyer", "coincheck": "Coincheck",
+    "bitbank": "Bitbank", "bitvavo": "Bitvavo", "wazirx": "WazirX",
+    "phemex": "Phemex", "bitrue": "Bitrue", "ascendex": "AscendEX",
+    "hashkey": "HashKey", "bitso": "Bitso", "bitpanda": "Bitpanda",
+    "cex.io": "CEX.IO", "bingx": "BingX", "coinw": "CoinW",
+    "digifinex": "DigiFinex",
+}
+
+# 做市商 / 自营交易公司关键词 → market_maker
+# 2026-09-30 P0-A：Etherscan 给做市商的名字标签就是公司名（如 "Wintermute"），
+# 不含 "market maker" 字样，老逻辑全部漏掉并误记 no_label。
+# 注意：短关键词（gsr/dwf/b2c2/qcp）必须按词边界匹配，否则 "dogsrock" 这类
+# 字符串会误命中 "gsr" —— 见 _classify_label 里的 _kw_match。
+MARKET_MAKER_MAP = {
+    "wintermute": "Wintermute",
+    "jump trading": "Jump Trading", "jump crypto": "Jump Crypto",
+    "gsr": "GSR", "cumberland": "Cumberland", "flowdesk": "Flowdesk",
+    "b2c2": "B2C2", "dwf": "DWF Labs", "amber": "Amber Group",
+    "kronos": "Kronos Research", "sigil": "Sigil Fund",
+    "galaxy digital": "Galaxy Digital", "keyrock": "Keyrock",
+    "portofino": "Portofino Technologies", "susanoo": "Susanoo",
+    "efficient frontier": "Efficient Frontier", "folkwang": "Folkwang",
+    "selini": "Selini Capital", "auros": "Auros",
+    "qcp": "QCP Capital", "alameda": "Alameda Research",
 }
 
 # 单独处理的交易所关键词（需要额外条件避免误匹配）
@@ -187,6 +213,7 @@ class ExplorerLabelFetcher:
         stats 包含:
           - ok: 成功查到标签的数量
           - no_label: 页面正常但无标签
+          - unclassified: 页面有标签但不在关键词表（原始标签见 attempt.raw_tag）
           - http_403: 被反爬拦截
           - http_429: 被限流
           - http_other: 其他 HTTP 错误
@@ -195,12 +222,12 @@ class ExplorerLabelFetcher:
         """
         results: dict[str, dict[str, Any]] = {}
         stats = {
-            "ok": 0, "no_label": 0,
+            "ok": 0, "no_label": 0, "unclassified": 0,
             "http_403": 0, "http_429": 0, "http_other": 0,
             "network_error": 0, "total": len(addresses),
         }
         for addr in addresses:
-            info, status = self.fetch_with_status(addr)
+            info, status, _raw_tag = self.fetch_with_status(addr)
             if info:
                 results[addr.lower()] = info
                 stats["ok"] += 1
@@ -212,28 +239,32 @@ class ExplorerLabelFetcher:
 
     def fetch_with_status(
         self, address: str
-    ) -> tuple[dict[str, Any] | None, str]:
-        """带状态码的抓取，返回 (label_info, status)。
+    ) -> tuple[dict[str, Any] | None, str, str | None]:
+        """带状态码的抓取，返回 (label_info, status, raw_tag)。
 
-        status: 'ok', 'no_label', 'http_403', 'http_429', 'http_other',
-                'network_error', 'invalid_address'
+        status: 'ok', 'no_label', 'unclassified', 'http_403', 'http_429',
+                'http_other', 'network_error', 'invalid_address'
+        raw_tag: 页面提取到的原始标签文本（ok / unclassified 时有值）。
+                 unclassified = 页面有标签但不在关键词表 —— 与 no_label（真无
+                 标签）语义不同：老逻辑把两者混记 no_label 永久跳过，实测把
+                 GMO Coin 等漏网交易所和项目方标签全埋了（2026-09-30 P1）。
         """
         if not RE_EVM_ADDR.match(address or ""):
-            return None, "invalid_address"
+            return None, "invalid_address", None
 
         html, status = self._fetch_page_with_status(address)
         if not html:
-            return None, status
+            return None, status, None
 
         label_text = self._extract_name_tag(html)
         if not label_text:
-            return None, "no_label"
+            return None, "no_label", None
 
         info = self._classify_label(label_text)
         if not info:
-            return None, "no_label"
+            return None, "unclassified", label_text
 
-        return info, "ok"
+        return info, "ok", label_text
 
     # ── 内部：HTTP ──────────────────────────────────────────
 
@@ -585,13 +616,26 @@ class ExplorerLabelFetcher:
 
     # ── 内部：标签分类 ──────────────────────────────────────
 
-    def _classify_label(self, label_text: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _kw_match(kw: str, low: str) -> bool:
+        """关键词匹配：短词（<=4 字符）按词边界匹配防子串误伤。
+
+        例：'gsr' 不应命中 'dogsrock'；'b2c2'/'dwf'/'qcp' 同理。
+        长词用普通子串匹配（够具体，误伤概率可忽略）。
+        """
+        if len(kw) <= 4:
+            return re.search(r"\b" + re.escape(kw) + r"\b", low) is not None
+        return kw in low
+
+    @staticmethod
+    def _classify_label(label_text: str) -> dict[str, Any] | None:
         """将原始标签文本分类为 label_type + display_name。
 
         策略：
         1. 先匹配交易所关键词 → exchange
-        2. 再匹配非交易所高价值关键词 → 对应类型
-        3. 都不匹配 → 返回 None（不存，避免噪声）
+        2. 再做市商/自营交易公司关键词 → market_maker
+        3. 再匹配非交易所高价值关键词 → 对应类型
+        4. 都不匹配 → 返回 None（调用方记 unclassified 并保留原文）
         """
         low = label_text.lower().strip()
 
@@ -620,6 +664,17 @@ class ExplorerLabelFetcher:
                         "is_exchange": True,
                     }
 
+        # 1c. 做市商 / 自营交易公司（2026-09-30 P0-A）
+        for kw, normalized in sorted(MARKET_MAKER_MAP.items(), key=lambda x: -len(x[0])):
+            if ExplorerLabelFetcher._kw_match(kw, low):
+                return {
+                    "label_text": label_text,
+                    "label_type": "market_maker",
+                    "display_name": label_text,
+                    "normalized_name": normalized,
+                    "is_exchange": False,
+                }
+
         # 2. 非交易所高价值标签匹配
         for kw, label_type in NON_EXCHANGE_LABEL_TYPES:
             if kw in low:
@@ -630,5 +685,5 @@ class ExplorerLabelFetcher:
                     "is_exchange": False,
                 }
 
-        # 3. 兜底：不存（避免 other 类噪声）
+        # 3. 兜底：不存（由调用方记 unclassified + 保留原始标签文本）
         return None

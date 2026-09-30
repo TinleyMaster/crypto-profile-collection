@@ -88,6 +88,11 @@ def ensure_attempt_table(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_label_attempt_chain_status
             ON {FETCH_ATTEMPT_TABLE} (chain, status)
         """)
+        # 2026-09-30 P1：raw_tag 存「页面有标签但未识别」的原始标签文本。
+        # 价值：以后扩充关键词表后可直接 SQL 重分类（--reclassify），零爬取。
+        cur.execute(f"""
+            ALTER TABLE {FETCH_ATTEMPT_TABLE} ADD COLUMN IF NOT EXISTS raw_tag TEXT
+        """)
     conn.commit()
 
 
@@ -501,6 +506,10 @@ def main():
                              "设 0 或 1 表示不过滤")
     parser.add_argument("--include-contracts", action="store_true", dest="include_contracts",
                         help="不做合约前置剔除（默认会用 eth_getCode 剔除合约，只保留 EOA）")
+    parser.add_argument("--reclassify", action="store_true",
+                        help="零爬取重分类模式：用当前关键词表重新分类 attempt 表里 "
+                             "status='unclassified' 且有 raw_tag 的地址，命中直接写库。"
+                             "不发任何 HTTP 请求；扩词表（新交易所/做市商）后跑这个即可捞回")
     parser.add_argument("--verify-medium", action="store_true", dest="verify_medium",
                         help="把 confidence='medium' 的地址（evm_propagate 跨链传播副本）"
                              "也拉进爬取队列真爬验证，命中即原地升级为 high。"
@@ -564,33 +573,80 @@ def _ensure_conn(conn, db_url: str):
         return new_conn
 
 
+def reclassify_unclassified(conn, chain: str, resolver, db_url: str) -> tuple[int, int, int, int]:
+    """零爬取重分类（2026-09-30 P1）：对 attempt 表 status='unclassified'
+    且有 raw_tag 的地址，用当前关键词表重新分类，命中者按与爬取完全相同的
+    口径写标签库（先原地升级再插入），attempt 状态改 ok。
+
+    价值：扩关键词表（新交易所/做市商）后不用重爬，跑这个就能捞回历史未识别标签。
+    返回 (扫描数, 命中数, 入库条数, 升级条数)。
+    """
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT address, raw_tag FROM {FETCH_ATTEMPT_TABLE}
+            WHERE chain = %s AND source = 'explorer_html'
+              AND status = 'unclassified' AND raw_tag IS NOT NULL
+        """, (chain,))
+        rows = cur.fetchall()
+    if not rows:
+        return 0, 0, 0, 0
+
+    hit_results: dict[str, dict] = {}
+    for addr, tag in rows:
+        info = ExplorerLabelFetcher._classify_label(tag)
+        if info:
+            hit_results[addr.lower()] = info
+    if not hit_results:
+        return len(rows), 0, 0, 0
+
+    # 复用爬取同款写库路径（upgrade-then-insert，唯一键口径一致）
+    ret = _write_batch(conn, db_url, chain, hit_results, resolver, 0, 0)
+    conn = ret[0]
+    batch_inserted, batch_upgraded = ret[1], ret[2]
+
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            UPDATE {FETCH_ATTEMPT_TABLE}
+            SET status = 'ok', last_attempt_at = NOW()
+            WHERE chain = %s AND source = 'explorer_html'
+              AND status = 'unclassified' AND lower(address) = ANY(%s)
+        """, (chain, list(hit_results.keys())))
+    conn.commit()
+    return len(rows), len(hit_results), batch_inserted, batch_upgraded
+
+
 def _record_attempts(conn, chain: str, ok_addrs: list[str], no_label_addrs: list[str],
                      source: str = "explorer_html",
-                     contract_addrs: list[str] | None = None) -> int:
+                     contract_addrs: list[str] | None = None,
+                     unclassified: list[tuple[str, str]] | None = None) -> int:
     """批量写入爬取尝试记录，返回写入条数。
 
     ok: 成功查到标签
     no_label: 页面正常但无标签
     contract: 前置判定为合约，从未爬取 HTML（语义上永不需要再爬）
+    unclassified: [(addr, raw_tag)] 页面有标签但不在关键词表 —— 2026-09-30 P1
+                  从 no_label 拆出，raw_tag 落库供 --reclassify 零爬取重分类。
     失败的（403/429/网络错误）不记，留给下次重试。
     """
-    all_addrs = ([(a, "ok") for a in ok_addrs]
-                 + [(a, "no_label") for a in no_label_addrs]
-                 + [(a, "contract") for a in (contract_addrs or [])])
-    if not all_addrs:
+    all_rows = ([(a, "ok", None) for a in ok_addrs]
+                + [(a, "no_label", None) for a in no_label_addrs]
+                + [(a, "contract", None) for a in (contract_addrs or [])]
+                + [(a, "unclassified", t) for a, t in (unclassified or [])])
+    if not all_rows:
         return 0
 
     with conn.cursor() as cur:
         cur.executemany(f"""
-            INSERT INTO {FETCH_ATTEMPT_TABLE} (address, chain, source, status)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO {FETCH_ATTEMPT_TABLE} (address, chain, source, status, raw_tag)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (address, chain, source) DO UPDATE
             SET attempt_count = {FETCH_ATTEMPT_TABLE}.attempt_count + 1,
                 last_attempt_at = NOW(),
-                status = EXCLUDED.status
-        """, [(addr, chain, source, status) for addr, status in all_addrs])
+                status = EXCLUDED.status,
+                raw_tag = COALESCE(EXCLUDED.raw_tag, {FETCH_ATTEMPT_TABLE}.raw_tag)
+        """, [(addr, chain, source, status, tag) for addr, status, tag in all_rows])
     conn.commit()
-    return len(all_addrs)
+    return len(all_rows)
 
 
 def _write_batch(conn, db_url: str, chain: str, batch_results: dict, resolver,
@@ -818,6 +874,15 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         medium_source = getattr(args, "medium_source", None) or None
         since_hours = float(getattr(args, "since_hours", 0) or 0)
 
+        # ── 零爬取重分类模式（--reclassify）：只吃 attempt.raw_tag，不发请求 ──
+        if getattr(args, "reclassify", False):
+            ensure_attempt_table(conn)
+            resolver = AddressLabelResolver(conn, chain)
+            scanned, hit, ins, up = reclassify_unclassified(conn, chain, resolver, db_url)
+            print(f"  [reclassify] 扫描 unclassified {scanned} 条，命中 {hit} 个"
+                  f"（入库 {ins} 条 / 升级 {up} 条）")
+            continue
+
         # ── 队列一：medium 待验证地址（跨链传播副本，命中即升 high）──
         medium_addrs: list[str] = []
         total_medium = 0
@@ -903,7 +968,7 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         stats_lock = Lock()
         result_map: dict[str, dict] = {}  # addr -> label_info
         stat_counts = {
-            "ok": 0, "no_label": 0,
+            "ok": 0, "no_label": 0, "unclassified": 0,
             "http_403": 0, "http_429": 0, "http_other": 0, "network_error": 0,
         }
         inserted_total = 0
@@ -915,8 +980,8 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
 
         # 并发爬取函数：每个线程一个 fetcher（requests 非线程安全）
         def _fetch_one(addr: str, fetcher: ExplorerLabelFetcher):
-            info, status = fetcher.fetch_with_status(addr)
-            return addr, info, status
+            info, status, raw_tag = fetcher.fetch_with_status(addr)
+            return addr, info, status, raw_tag
 
         # 用线程局部变量存每个线程的 fetcher
         thread_local = {}
@@ -936,13 +1001,14 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             batch = addresses[batch_start:batch_start + batch_size]
             batch_results: dict[str, dict] = {}
             batch_no_label: list[str] = []
+            batch_unclassified: list[tuple[str, str]] = []   # (addr, raw_tag)
             batch_stats = {k: 0 for k in stat_counts}
 
             # 并发爬取本批
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                 futures = {pool.submit(_worker, addr): addr for addr in batch}
                 for future in as_completed(futures):
-                    addr, info, status = future.result()
+                    addr, info, status, raw_tag = future.result()
                     with stats_lock:
                         done_count += 1
                         if info:
@@ -955,6 +1021,11 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                             # 导致 batch_no_label 恒为空、skip_attempted 形同虚设（历史 bug）。
                             batch_no_label.append(addr.lower())
                             batch_stats["no_label"] += 1
+                        elif status == "unclassified":
+                            # 页面有标签但不在关键词表 —— 原始标签落 attempt.raw_tag，
+                            # 以后扩词表用 --reclassify 零爬取重分类（2026-09-30 P1）。
+                            batch_unclassified.append((addr.lower(), raw_tag))
+                            batch_stats["unclassified"] += 1
                         elif status in batch_stats:
                             # http_403 / http_429 / http_other / network_error：
                             # 按设计不入 attempt 表，留给下轮重试
@@ -990,10 +1061,11 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
                     import traceback
                     traceback.print_exc()
 
-            # 记录爬取尝试（ok + no_label），避免下次重复爬
+            # 记录爬取尝试（ok + no_label + unclassified），避免下次重复爬
             try:
                 ok_list = list(batch_results.keys())
-                n = _record_attempts(conn, chain, ok_list, batch_no_label)
+                n = _record_attempts(conn, chain, ok_list, batch_no_label,
+                                     unclassified=batch_unclassified)
                 attempt_recorded += n
             except Exception as e:
                 print(f"  ⚠️  记录爬取尝试失败: {e}")
@@ -1012,11 +1084,13 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
             if batch_stats["network_error"]:
                 fail_parts.append(f"网络×{batch_stats['network_error']}")
             fail_str = f"，失败: {', '.join(fail_parts)}" if fail_parts else ""
+            uncl_str = (f", 未识别 {batch_stats['unclassified']} 个"
+                        if batch_stats["unclassified"] else "")
             print(f"  ── 批次完成 {batch_end}/{len(addresses)} ({pct:.0f}%) ── "
                   f"本批查到标签 {batch_stats['ok']} 个, "
                   f"入库 {batch_inserted} 条, "
                   f"升级 medium→high {batch_upgraded} 条, "
-                  f"回填 {batch_backfilled} 条{fail_str}")
+                  f"回填 {batch_backfilled} 条{uncl_str}{fail_str}")
 
         # 把本次前置剔除的合约地址落 attempt 表（status='contract'），下次直接跳过
         if dropped_contracts:
@@ -1038,6 +1112,8 @@ def _run_for_chains(conn, chains: list[str], args, db_url: str) -> None:
         print(f"    爬取地址: {len(addresses)} 个")
         print(f"    查到标签: {stat_counts['ok']} 个")
         print(f"    无标签: {stat_counts['no_label']} 个")
+        print(f"    有标签未识别: {stat_counts['unclassified']} 个（原始标签已落 attempt.raw_tag，"
+              f"扩词表后跑 --reclassify 零爬取捞回）")
         print(f"    爬取失败: {sum(stat_counts[k] for k in ['http_403','http_429','http_other','network_error'])} 个")
         print(f"    入库新标签: {inserted_total} 条")
         print(f"    升级 medium→high: {upgraded_total} 条")

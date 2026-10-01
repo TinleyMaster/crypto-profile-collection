@@ -1079,18 +1079,17 @@ def fetch_onchain_anomaly_signals() -> dict:
         netflow_7d = net_7d["netflow_usd"]
 
         # 30d 历史净流量序列（用于 Z-score 归一化）
+        # 读因子表 biz.onchain_netflow_hourly（与页面/评分同一口径，2026-10-01 归一）。
+        # 因子表 netflow_usd = inflow - outflow（正=抛压），此处按本函数既有符号契约
+        # 取 outflow - inflow（正=提币离场/看涨）。
         with get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("""
                     SELECT
-                        date_trunc('day', block_timestamp)::date AS day,
-                        SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END)
-                          - SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END) AS netflow
-                    FROM biz.onchain_transfer_log
-                    WHERE block_timestamp >= NOW() - INTERVAL '30 days'
-                      AND value_usd IS NOT NULL
-                      AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                      AND (from_label = 'exchange' OR to_label = 'exchange')
+                        (bucket_hour AT TIME ZONE 'UTC')::date AS day,
+                        SUM(outflow_usd) - SUM(inflow_usd) AS netflow
+                    FROM biz.onchain_netflow_hourly
+                    WHERE bucket_hour >= date_trunc('hour', NOW()) - INTERVAL '30 days'
                     GROUP BY 1
                     ORDER BY 1
                 """)
@@ -1118,7 +1117,6 @@ def fetch_onchain_anomaly_signals() -> dict:
                 "inflow_7d_usd": net_7d["inflow_usd"],
                 "outflow_7d_usd": net_7d["outflow_usd"],
                 "covered_transfers": net_7d["covered_transfers"],
-                "by_exchange": net_7d.get("by_exchange", []),
                 "cm_benchmark": net_7d.get("cm_benchmark", {}),
             },
             "cefi_score": cefi_score,
@@ -7137,15 +7135,15 @@ def _flow_dir_change(y_flow, t_flow):
 
 
 def _netflow_slope(t: dict) -> float | None:
-    """链上净流 7d 斜率（近 7d 均值 vs 前 7d 均值 %）。字段缺失 → None（降级铁律）。"""
+    """链上净流 7d 斜率（近 7d 均值 vs 前 7d 均值 %）。字段缺失 → None（降级铁律）。
+
+    daily_netflows_30d 是 fetch_onchain_anomaly_signals 产出的 float 列表（按日升序），
+    此处曾按 [{"netflow": ...}] 取数，与本函数唯一输入契约不符 → 恒返回 None（死代码）。
+    """
     oc = (t.get("onchain_anomaly_signals") or {}).get("daily_netflows_30d")
     if not isinstance(oc, list):
         return None
-    pts = [
-        float(x.get("netflow"))
-        for x in oc
-        if isinstance(x, dict) and x.get("netflow") is not None
-    ]
+    pts = [float(x) for x in oc if x is not None]
     if len(pts) < 14:
         return None
     recent = sum(pts[-7:]) / 7

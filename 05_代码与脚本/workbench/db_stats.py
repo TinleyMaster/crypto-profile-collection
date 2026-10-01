@@ -5588,86 +5588,39 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
       - 正值 = 净流出交易所（提币到链上，潜在看涨/惜售）
       - 负值 = 净流入交易所（充值，潜在抛压）
 
-    数据来源：biz.onchain_transfer_log（链上大额转账监控）
-    与 get_cex_netflow 的区别：不传 asset_id，聚合全市场所有资产。
+    数据来源：biz.onchain_netflow_hourly（资产×小时净流因子表，2026-10-01 起为唯一真源）。
+      归因口径 = 读侧 union（biz.onchain_exchange_wallet ∪ biz.onchain_address_label）
+      ＋同所家族合并剔除内部转账，与 workbench/onchain_alert.py 页面完全一致。
+      切换前本函数直读 biz.onchain_transfer_log.from_label/to_label 列（不合并家族、不吃
+      medium 标签库），同一 7d 窗口实测流出比页面口径低 8.4% —— 页面净流与打分净流不是
+      同一个数，故归一。影子对比：因子表 vs 原始 union 偏差 inflow +0.18% / outflow +0.00%。
+
+    符号换算：因子表 netflow_usd = inflow - outflow（正=抛压，对齐 CoinGlass），
+      本函数按既有契约返回 netflow = outflow - inflow（正=提币离场/看涨），故取负号。
 
     返回：
       - netflow_usd: 指定时间窗口内全局净流量
       - inflow_usd / outflow_usd: 流入/流出
-      - covered_transfers: 有效转账笔数
+      - covered_transfers: 归因边数（同一笔两端都归到交易所时计 2）
     """
     hours = max(1, min(720, hours))
 
     with get_db() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            # 确保表存在
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS biz.onchain_transfer_log (
-                    log_id SERIAL PRIMARY KEY,
-                    asset_id INTEGER,
-                    chain TEXT NOT NULL,
-                    contract_address TEXT NOT NULL,
-                    tx_hash TEXT NOT NULL,
-                    from_address TEXT NOT NULL,
-                    to_address TEXT NOT NULL,
-                    value NUMERIC NOT NULL,
-                    value_usd NUMERIC(15,2),
-                    from_label TEXT,
-                    to_label TEXT,
-                    from_exchange TEXT,
-                    to_exchange TEXT,
-                    block_number INTEGER,
-                    block_timestamp TIMESTAMPTZ,
-                    is_to_exchange BOOLEAN DEFAULT FALSE,
-                    alert_sent_at TIMESTAMPTZ,
-                    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CONSTRAINT uq_onchain_tx UNIQUE (chain, tx_hash, contract_address, from_address, to_address)
-                )
-            """)
-
-            # 全局净流量（仅带交易所标签的转账）
+            # 因子表桶按 UTC 整点截断，且不含「进行中的当前小时」，故窗口右端开区间
             cur.execute("""
                 SELECT
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow,
-                    COUNT(*) AS cnt
-                FROM biz.onchain_transfer_log
-                WHERE block_timestamp >= NOW() - make_interval(hours => %s)
-                  AND value_usd IS NOT NULL
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND (from_label = 'exchange' OR to_label = 'exchange')
+                    COALESCE(SUM(outflow_usd), 0) AS outflow,
+                    COALESCE(SUM(inflow_usd), 0)  AS inflow,
+                    COALESCE(SUM(inflow_cnt + outflow_cnt), 0) AS cnt
+                FROM biz.onchain_netflow_hourly
+                WHERE bucket_hour >= date_trunc('hour', NOW()) - make_interval(hours => %s)
+                  AND bucket_hour <  date_trunc('hour', NOW())
             """, (hours,))
             r = cur.fetchone()
             outflow = float(r["outflow"] or 0)
             inflow = float(r["inflow"] or 0)
             netflow = outflow - inflow  # 正=从交易所出来=净流入链上
-
-            # 按交易所分组
-            cur.execute("""
-                SELECT
-                    COALESCE(from_exchange, to_exchange) AS exchange_name,
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow
-                FROM biz.onchain_transfer_log
-                WHERE block_timestamp >= NOW() - make_interval(hours => %s)
-                  AND value_usd IS NOT NULL
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND (from_label = 'exchange' OR to_label = 'exchange')
-                GROUP BY COALESCE(from_exchange, to_exchange)
-                ORDER BY GREATEST(
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0)
-                ) DESC
-            """, (hours,))
-            by_exchange = [
-                {
-                    "exchange": row["exchange_name"],
-                    "outflow_usd": float(row["outflow"]),
-                    "inflow_usd": float(row["inflow"]),
-                    "netflow_usd": float(row["outflow"]) - float(row["inflow"]),
-                }
-                for row in cur.fetchall()
-            ]
 
             # CM 基准：在 with 块内计算（BTC asset_id=26195）
             cm_benchmark = _get_cm_netflow_benchmark(cur, 26195)
@@ -5678,8 +5631,7 @@ def get_global_cex_netflow(hours: int = 24) -> dict:
         "netflow_usd": round(netflow, 2),
         "inflow_usd": round(inflow, 2),
         "outflow_usd": round(outflow, 2),
-        "covered_transfers": r["cnt"],
-        "by_exchange": by_exchange,
+        "covered_transfers": int(r["cnt"]),
         "cm_benchmark": cm_benchmark,
     }
 

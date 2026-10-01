@@ -1,4 +1,4 @@
-"""技术指标纯计算模块（RSI / 布林带），零第三方依赖、不碰 DB / 网络。
+"""技术指标纯计算模块（RSI / 布林带 / ATR），零第三方依赖、不碰 DB / 网络。
 
 设计约定（方案 §14，2026-09-29 评审定稿）：
   - 指标一律**先影子**（只落 metrics / 回测消融，不发信、不改判定），边际贡献经
@@ -98,3 +98,36 @@ def bbw(mid: float, upper: float, lower: float) -> float:
     if mid <= 0:
         return 0.0
     return (upper - lower) / mid
+
+
+def atr_series(highs: list[float], lows: list[float], closes: list[float],
+               period: int = 14) -> list[float | None]:
+    """Wilder ATR（真实波幅均值）；输出与输入等长，前 period 个为 None。
+
+    TR[i] = max(high-low, |high-close[i-1]|, |low-close[i-1]|)——含日内高低幅与跳空，
+    与布林带用的收盘对收盘标准差（σ）**口径不同、不可互换**：布林带用 σ 度量离散度，
+    ATR 度量的是含跳空的真实波动烈度。
+
+    ⚠️ **不要假定 ATR > σ**：虽然 `high-low ≥ 0` 使 TR 的单根值一般不小于 |close 变动|，
+    但经 Wilder 平滑后的 ATR 与总体 σ 的相对大小取决于波动结构。实测（`biz.asset_klines`
+    1h，2026-10-01）`ATR(14)/σ20 ≈ 0.66`——加密 1h 收盘波动大，1.5×ATR 止损反而**窄于**
+    2σ 止盈。任何依赖「ATR 与 σ 比值」的推断都必须实测，不得用先验。
+
+    首值：TR[1..period] 的简单平均；此后 avg = (avg*(period-1) + TR[i]) / period
+    （与 rsi_series 的 Wilder 平滑口径一致）。
+    """
+    n = len(closes)
+    out: list[float | None] = [None] * n
+    if period <= 0 or n < period + 1:
+        return out
+    avg = sum(_true_range(highs[i], lows[i], closes[i - 1])
+              for i in range(1, period + 1)) / period
+    out[period] = avg
+    for i in range(period + 1, n):
+        avg = (avg * (period - 1) + _true_range(highs[i], lows[i], closes[i - 1])) / period
+        out[i] = avg
+    return out
+
+
+def _true_range(high: float, low: float, prev_close: float) -> float:
+    return max(high - low, abs(high - prev_close), abs(low - prev_close))

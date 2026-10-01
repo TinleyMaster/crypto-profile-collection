@@ -2731,3 +2731,36 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **产物**：`scripts/migrations/fix_083_onchain_transfer_log_solana_addr_hygiene.sql`（新，入库）、
   `scripts/bin/phase_chain_transfer_monitor.py`（改，入库）、AGENTS.md 本节。
   临时探针/执行器脚本在 `/tmp`，已随手删除，未入库。
+
+### 外部流传策略（布林带 + RSI 均值回归）评审：**FAIL**（2026-10-01，本次提交）
+
+来源：用户贴出一份流传的「布林带下轨 + RSI 超卖 + RSI 拐头向上」均值回归策略，问「这策略如何」。
+**零 DDL、零生产写、零线上代码变更**；工具为手动脚本、不入调度，**无需 redeploy**。
+
+- **补充**：`crypto_research/analysis/technical_indicators.py` 新增 `atr_series`（Wilder ATR(14)，
+  与 `rsi_series` 同平滑口径）+ 私有 `_true_range`；模块 docstring 补 ATR。
+  配套单测 `workbench/test_atr_series.py` **10/10 通过**（手算精确值 + 跳空捕捉 + 头部 None 不变量）。
+- **新脚本**：`scripts/bin/backtest_bb_rsi_mr.py`（事件级 MAE/MFE、**路径依赖出场**、一次定参不扫参；
+  服务端游标+`itersize` 防抖、`--self-test` 离线注入测试、`--holdout-days` 时序切分、`--max-hold`/`--cost` 可调）。
+- **口径（逐字取自策略文本）**：入场三条件（`low≤下轨` + `RSI<30` + `RSI` 拐头向上；空头镜像）；
+  止损 `下轨 − 1.5×ATR`；止盈「回到中轨」；入场取 **t+1 开盘**；同根内既触止损又触止盈 → 保守判**止损先**；
+  成本双边 taker 0.1%。**双臂**：dynamic（逐根中轨，主）/ static（锁定信号根中轨，对照）。
+- **样本**：191 符号 / 466,837 根 1h / 2026-06-18 ~ 10-01 / **105 独立日**（受 1h K 线起点限制）。
+- **两个先验被实测推翻（留档，防再次误推）**：① 「止损 1.5×ATR 比止盈 2σ 宽 ⇒ 赔率倒挂」**错**——
+  实测 `ATR(14)/σ20 ≈ 0.66`（ATR **小于** σ），计划 R:R **1.82:1 对交易者有利**；
+  ② 「中轨移动吃掉利润」**错**——dynamic/static 两臂期望几乎相同（**−0.461% vs −0.460%**），
+  漂移「压盈利」与「提命中」（30.7%→46.9%）两效应恰好抵消。
+- **结果（FAIL）**：漏斗 触带 133,240 → +RSI 区 25,748(19.3%) → +拐头 **4,273(16.6%)**（总保留 3.2%）。
+  all n=4,273 **净期望 −0.461% / PF 0.76 / 日 t −1.83**；train −0.410%(t −0.89)、
+  **test 最近30天 −0.588%(t −2.62)** ⇒ 双侧皆负、非单 regime 假象。多空极度不对称：
+  多头 +0.070%(PF 1.05, t −0.46, 近似零期望不可判定)、**空头 −0.753%(PF 0.66, t −2.26 显著负)**。
+  计划赔率 1.82:1 是幻觉：实际盈利均值仅计划的 68%/55%，实际亏损均值 −3.32% > 止损中位 2.33%
+  ⇒ 实际平衡胜率 52.5% vs 实际胜率 44.1%（差 −4.9pp）。2,005 笔止盈中 93 笔（4.6%）中轨已跌破入场价、实为亏损出场。
+- **结论**：该策略**不成立（结构性非参数）**；与 §8.1.10 线上 BRK 空头（−3.353%、t −2.06）同向互证
+  「空头突破类信号在本市场环境下无效」。**不建议改造**（砍空头后多头仅 PF 1.05、未计滑点与资金费）。
+- **文档同步**：设计方案 §8.1.12（新增，含口径表/双臂/结果/行动项/边界）。
+- **产物**：`scripts/bin/backtest_bb_rsi_mr.py`（新，入库）、
+  `scripts/src/crypto_research/analysis/technical_indicators.py`（改，入库）、
+  `workbench/test_atr_series.py`（新，入库）、AGENTS.md 本节、设计方案 §8.1.12；
+  `scripts/data/backtest_bb_rsi_mr_events.csv`（+`_summary`）为本地产物，`scripts/data/` 已 gitignore，不入库。
+- **边界**：价格史仅 105 天且单边上涨 ⇒ 结论是「**在本次样本上不成立**」，非「均值回归永久无效」；脚本可重入，样本拉长后须复核。

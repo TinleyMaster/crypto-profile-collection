@@ -4280,10 +4280,50 @@
         function renderCexNetflow (data, container) {
             const n24 = data.netflow_24h_usd;
             const n7d = data.netflow_7d_usd;
+
+            let html = '<div class="dvc-title">🔗 链上 CEX 资金流</div>';
+
+            // CM 基准对照（交易所原生聚合，与地址库覆盖无关，始终展示）
+            const cm = data.cm_benchmark || {};
+            let cmHtml = '';
+            if (cm.status === 'ok') {
+                const cm24 = cm.netflow_24h_usd || 0;
+                const cm7d = cm.netflow_7d_usd || 0;
+                const cmCls24 = cm24 > 0 ? 'positive' : (cm24 < 0 ? 'negative' : '');
+                const cmCls7d = cm7d > 0 ? 'positive' : (cm7d < 0 ? 'negative' : '');
+                // 背离标记：onchain 与 CM 7d 符号相反
+                const divergence = (n7d > 0 && cm7d < 0) || (n7d < 0 && cm7d > 0);
+                const divBadge = divergence ? '<span style="background:#7f1d1d;color:#f87171;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:6px;">背离</span>' : '';
+
+                cmHtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e222a;">';
+                cmHtml += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">CM 基准（交易所原生聚合）' + divBadge + '</div>';
+                cmHtml += '<div class="dvc-metrics">';
+                cmHtml += '<div class="dvc-metric"><div class="dvcm-label">CM 24h</div>';
+                cmHtml += '<div class="dvcm-value ' + cmCls24 + '" style="font-size:12px;">' + (cm24 >= 0 ? '+' : '') + formatUsdBig(cm24) + '</div></div>';
+                cmHtml += '<div class="dvc-metric"><div class="dvcm-label">CM 7d</div>';
+                cmHtml += '<div class="dvcm-value ' + cmCls7d + '" style="font-size:12px;">' + (cm7d >= 0 ? '+' : '') + formatUsdBig(cm7d) + '</div></div>';
+                cmHtml += '<div class="dvc-metric"><div class="dvcm-label">数据日</div>';
+                cmHtml += '<div class="dvcm-value" style="font-size:11px;color:#8a92a0;">' + (cm.latest_date || '-') + '</div></div>';
+                cmHtml += '</div>';
+                cmHtml += '<div style="font-size:9px;color:#4b5563;margin-top:3px;">CM=交易所原生聚合日频 T-1；onchain=链上大额转账（依赖地址库）</div>';
+                cmHtml += '</div>';
+            } else if (cm.status === 'unavailable') {
+                cmHtml += '<div style="margin-top:6px;font-size:10px;color:#6b7280;">CM 基准不可用（' + escapeHtml(cm.note || '免费层仅 BTC/ETH') + '）</div>';
+            }
+
+            // 归因依据不足：窗口内有转账，但无一条能归因到交易所地址库 ⇒ 净流不可读作 0
+            if (data.attribution_status === 'no_attribution') {
+                html += '<div class="dvc-empty">7d 窗口内有 ' + (data.window_transfers_7d || 0) +
+                    ' 笔大额转账，但无一条能归因到交易所地址库' +
+                    '<small>交易所净流「依据不足」，不可读作 0</small></div>';
+                html += cmHtml;
+                container.innerHTML = html;
+                return;
+            }
+
             const cls24 = n24 > 0 ? 'positive' : (n24 < 0 ? 'negative' : '');
             const cls7d = n7d > 0 ? 'positive' : (n7d < 0 ? 'negative' : '');
 
-            let html = '<div class="dvc-title">🔗 链上 CEX 资金流</div>';
             html += '<div class="dvc-metrics">';
             html += '<div class="dvc-metric"><div class="dvcm-label">24h 净流入</div>';
             html += '<div class="dvcm-value ' + cls24 + '">' + (n24 >= 0 ? '+' : '') + formatUsdBig(n24) + '</div></div>';
@@ -4294,32 +4334,7 @@
                 formatUsdBig(data.inflow_24h_usd) + ' / ' + formatUsdBig(data.outflow_24h_usd) + '</div></div>';
             html += '</div>';
 
-            // CM 基准对照
-            const cm = data.cm_benchmark || {};
-            if (cm.status === 'ok') {
-                const cm24 = cm.netflow_24h_usd || 0;
-                const cm7d = cm.netflow_7d_usd || 0;
-                const cmCls24 = cm24 > 0 ? 'positive' : (cm24 < 0 ? 'negative' : '');
-                const cmCls7d = cm7d > 0 ? 'positive' : (cm7d < 0 ? 'negative' : '');
-                // 背离标记：onchain 与 CM 7d 符号相反
-                const divergence = (n7d > 0 && cm7d < 0) || (n7d < 0 && cm7d > 0);
-                const divBadge = divergence ? '<span style="background:#7f1d1d;color:#f87171;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:6px;">背离</span>' : '';
-
-                html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e222a;">';
-                html += '<div style="font-size:10px;color:#6b7280;margin-bottom:4px;">CM 基准（交易所原生聚合）' + divBadge + '</div>';
-                html += '<div class="dvc-metrics">';
-                html += '<div class="dvc-metric"><div class="dvcm-label">CM 24h</div>';
-                html += '<div class="dvcm-value ' + cmCls24 + '" style="font-size:12px;">' + (cm24 >= 0 ? '+' : '') + formatUsdBig(cm24) + '</div></div>';
-                html += '<div class="dvc-metric"><div class="dvcm-label">CM 7d</div>';
-                html += '<div class="dvcm-value ' + cmCls7d + '" style="font-size:12px;">' + (cm7d >= 0 ? '+' : '') + formatUsdBig(cm7d) + '</div></div>';
-                html += '<div class="dvc-metric"><div class="dvcm-label">数据日</div>';
-                html += '<div class="dvcm-value" style="font-size:11px;color:#8a92a0;">' + (cm.latest_date || '-') + '</div></div>';
-                html += '</div>';
-                html += '<div style="font-size:9px;color:#4b5563;margin-top:3px;">CM=交易所原生聚合日频 T-1；onchain=链上大额转账（依赖地址库）</div>';
-                html += '</div>';
-            } else if (cm.status === 'unavailable') {
-                html += '<div style="margin-top:6px;font-size:10px;color:#6b7280;">CM 基准不可用（' + escapeHtml(cm.note || '免费层仅 BTC/ETH') + '）</div>';
-            }
+            html += cmHtml;
 
             // 按交易所分布
             if (data.by_exchange && data.by_exchange.length > 0) {
@@ -4335,7 +4350,6 @@
                 });
             } else if (data.netflow_24h_usd || data.netflow_7d_usd) {
                 // 总额有数但分所明细缺失：标注不可用原因（CM 免费层仅 BTC/ETH 等）
-                const cm = data.cm_benchmark || {};
                 const reason = (cm.status === 'ok' || cm.status === 'unavailable') && cm.note
                     ? cm.note
                     : '分所明细依赖交易所钱包地址库覆盖';

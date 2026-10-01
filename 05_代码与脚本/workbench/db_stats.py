@@ -5400,12 +5400,17 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
       - 负值 = 净流出（充值到交易所，潜在抛压）
 
     数据来源：biz.onchain_transfer_log（链上大额转账监控）
-    标签来源：biz.onchain_exchange_wallet（交易所钱包地址库）
+    归因口径：读侧 union（biz.onchain_exchange_wallet ∪ biz.onchain_address_label）
+      ＋同所家族合并剔除内部转账，镜像 workbench/onchain_alert.py::_exch_cte
+      （2026-10-01 归一。此前直读 from_label/to_label 列，不合并同所家族、不吃
+      medium 标签库，导致资产页净流与链上异动页/评分对不上）。
 
     返回：
       - 24h / 7d 两个时间窗口的净流入金额
       - 按交易所分组明细
       - 大额转账 Top 列表
+      - attribution_status: ok / no_attribution / no_transfers
+        （no_attribution = 有转账但无一条归因到交易所 ⇒ 净流「依据不足」，不可读作 0）
     """
     hours = max(1, min(720, hours))
 
@@ -5468,6 +5473,8 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     "asset_id": asset_id,
                     "has_data": False,
                     "message": "暂无链上转账数据，链上监控采集中",
+                    "attribution_status": "no_transfers",
+                    "netflow_source": "union_attribution",
                     "netflow_24h_usd": None,
                     "netflow_7d_usd": None,
                     "inflow_24h_usd": None,
@@ -5477,54 +5484,87 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
                     "cm_benchmark": cm_benchmark,
                 }
 
-            # 24h 净流入
-            cur.execute("""
+            # 读侧 union 归因 CTE（镜像 workbench/onchain_alert.py::_exch_cte，与页面同源）
+            # 外层按 (address, chain) 收敛为一行：同一地址可能带多个 exchange_name，
+            # 否则 LEFT JOIN 会让行数翻倍、per-asset SUM(value_usd) 被放大。
+            # 家族判定：Binance: Hot Wallet 20 → Binance；Binance 14 → Binance
+            _base = """
+                WITH exch_raw AS (
+                    SELECT address, chain, exchange_name FROM biz.onchain_exchange_wallet WHERE confidence = 'high'
+                    UNION
+                    SELECT address, chain, label_name FROM biz.onchain_address_label
+                    WHERE label_type = 'exchange' AND confidence IN ('high', 'medium')
+                ),
+                exch AS (
+                    SELECT address, chain, min(exchange_name) AS exchange_name
+                    FROM exch_raw GROUP BY address, chain
+                ),
+                tl AS (
+                    SELECT tx_hash, from_address, to_address, value, value_usd, block_timestamp, chain
+                    FROM biz.onchain_transfer_log
+                    WHERE asset_id = %s
+                      AND value_usd IS NOT NULL AND value_usd > 0
+                      AND (is_suspect IS NOT TRUE)
+                      AND tx_hash NOT LIKE '0xtest%%'
+                      AND block_timestamp >= NOW() - make_interval(hours => %s)
+                ),
+                j AS (
+                    SELECT tl.*, f.exchange_name AS f_ex, t.exchange_name AS t_ex
+                    FROM tl
+                    LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
+                    LEFT JOIN exch t ON t.address = tl.to_address   AND t.chain = tl.chain
+                ),
+                clean AS (
+                    SELECT * FROM j
+                    WHERE (f_ex IS NOT NULL OR t_ex IS NOT NULL)
+                      AND (f_ex IS NULL OR t_ex IS NULL
+                           OR split_part(split_part(f_ex, ':', 1), ' ', 1)
+                              <> split_part(split_part(t_ex, ':', 1), ' ', 1))
+                )
+            """
+
+            # 24h 净流入（outflow = 从交易所转出，inflow = 转入交易所）
+            cur.execute(_base + """
                 SELECT
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow_from_exchange,
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
-                FROM biz.onchain_transfer_log
-                WHERE asset_id = %s
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
-            """, (asset_id,))
+                    COALESCE(SUM(value_usd) FILTER (WHERE f_ex IS NOT NULL), 0) AS outflow,
+                    COALESCE(SUM(value_usd) FILTER (WHERE t_ex IS NOT NULL), 0) AS inflow
+                FROM clean
+            """, (asset_id, 24))
             r24 = cur.fetchone()
-            outflow_24h = float(r24["outflow_from_exchange"] or 0)
-            inflow_24h = float(r24["inflow_to_exchange"] or 0)
+            outflow_24h = float(r24["outflow"] or 0)
+            inflow_24h = float(r24["inflow"] or 0)
             netflow_24h = outflow_24h - inflow_24h  # 正=从交易所出来=净流入链上
 
-            # 7d 净流入
-            cur.execute("""
+            # 7d 净流入（同时统计窗口内总转账数与已归因数，用于判定「依据不足」）
+            cur.execute(_base + """
                 SELECT
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow_from_exchange,
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow_to_exchange
-                FROM biz.onchain_transfer_log
-                WHERE asset_id = %s
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND block_timestamp >= NOW() - INTERVAL '7 days'
-            """, (asset_id,))
+                    COALESCE(SUM(value_usd) FILTER (WHERE f_ex IS NOT NULL), 0) AS outflow,
+                    COALESCE(SUM(value_usd) FILTER (WHERE t_ex IS NOT NULL), 0) AS inflow,
+                    COUNT(*) AS attributed_cnt,
+                    (SELECT COUNT(*) FROM tl) AS window_cnt
+                FROM clean
+            """, (asset_id, 168))
             r7 = cur.fetchone()
-            outflow_7d = float(r7["outflow_from_exchange"] or 0)
-            inflow_7d = float(r7["inflow_to_exchange"] or 0)
+            outflow_7d = float(r7["outflow"] or 0)
+            inflow_7d = float(r7["inflow"] or 0)
             netflow_7d = outflow_7d - inflow_7d
+            window_cnt = int(r7["window_cnt"] or 0)
+            attributed_cnt = int(r7["attributed_cnt"] or 0)
 
             # 按交易所分组（24h）
-            cur.execute("""
+            cur.execute(_base + """
                 SELECT
-                    COALESCE(from_exchange, to_exchange) AS exchange_name,
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS outflow,
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0) AS inflow
-                FROM biz.onchain_transfer_log
-                WHERE asset_id = %s
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
-                  AND (from_label = 'exchange' OR to_label = 'exchange')
-                GROUP BY COALESCE(from_exchange, to_exchange)
+                    COALESCE(f_ex, t_ex) AS exchange_name,
+                    COALESCE(SUM(value_usd) FILTER (WHERE f_ex IS NOT NULL), 0) AS outflow,
+                    COALESCE(SUM(value_usd) FILTER (WHERE t_ex IS NOT NULL), 0) AS inflow
+                FROM clean
+                GROUP BY 1
                 ORDER BY GREATEST(
-                    COALESCE(SUM(CASE WHEN from_label = 'exchange' THEN value_usd ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN to_label = 'exchange' THEN value_usd ELSE 0 END), 0)
+                    COALESCE(SUM(value_usd) FILTER (WHERE f_ex IS NOT NULL), 0),
+                    COALESCE(SUM(value_usd) FILTER (WHERE t_ex IS NOT NULL), 0)
                 ) DESC
                 LIMIT 10
-            """, (asset_id,))
+            """, (asset_id, 24))
             by_exchange = [
                 {
                     "exchange": r["exchange_name"],
@@ -5536,38 +5576,43 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
             ]
 
             # Top 大额转账（24h）
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, from_label, to_label,
-                       from_exchange, to_exchange, value, value_usd, block_timestamp
-                FROM biz.onchain_transfer_log
-                WHERE asset_id = %s
-                  AND (is_suspect IS NOT TRUE OR is_suspect IS NULL)
-                  AND block_timestamp >= NOW() - INTERVAL '24 hours'
-                  AND (from_label = 'exchange' OR to_label = 'exchange')
+            cur.execute(_base + """
+                SELECT tx_hash, from_address, to_address, f_ex, t_ex, value, value_usd, block_timestamp
+                FROM clean
                 ORDER BY value_usd DESC NULLS LAST
                 LIMIT 10
-            """, (asset_id,))
+            """, (asset_id, 24))
             top_transfers = [
                 {
                     "tx_hash": r["tx_hash"],
                     "from": r["from_address"],
                     "to": r["to_address"],
-                    "from_label": r["from_label"],
-                    "to_label": r["to_label"],
-                    "from_exchange": r["from_exchange"],
-                    "to_exchange": r["to_exchange"],
+                    "from_label": "exchange" if r["f_ex"] else None,
+                    "to_label": "exchange" if r["t_ex"] else None,
+                    "from_exchange": r["f_ex"],
+                    "to_exchange": r["t_ex"],
                     "value": float(r["value"]),
                     "value_usd": float(r["value_usd"]) if r["value_usd"] else None,
                     "timestamp": r["block_timestamp"].isoformat() if r["block_timestamp"] else None,
-                    "direction": "to_exchange" if r["to_label"] == "exchange" else "from_exchange",
+                    "direction": "to_exchange" if r["t_ex"] else "from_exchange",
                 }
                 for r in cur.fetchall()
             ]
+
+            # 归因状态：窗口内有转账却一条都没归因到交易所 ⇒ 净流「依据不足」，不可读作 0
+            if attributed_cnt > 0:
+                attribution_status = "ok"
+            elif window_cnt > 0:
+                attribution_status = "no_attribution"
+            else:
+                attribution_status = "no_transfers"
 
     return {
         "ok": True,
         "asset_id": asset_id,
         "has_data": True,
+        "attribution_status": attribution_status,
+        "netflow_source": "union_attribution",
         "netflow_24h_usd": round(netflow_24h, 2),
         "netflow_7d_usd": round(netflow_7d, 2),
         "inflow_24h_usd": round(inflow_24h, 2),
@@ -5577,6 +5622,7 @@ def get_cex_netflow(asset_id: int, hours: int = 24) -> dict:
         "by_exchange": by_exchange,
         "top_transfers": top_transfers,
         "total_transfers": total_transfers,
+        "window_transfers_7d": window_cnt,
         "cm_benchmark": cm_benchmark,
     }
 

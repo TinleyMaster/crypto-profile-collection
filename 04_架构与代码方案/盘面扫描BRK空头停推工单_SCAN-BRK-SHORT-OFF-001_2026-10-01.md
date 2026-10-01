@@ -132,3 +132,31 @@ JSON 留档、`signal_ts/p_dir/symbol` 齐全），**但不进告警邮件**，�
 | 触发时 BTC 1h < −0.5% 组 | n=94，−3.987%，胜率 18.1% |
 | 同期 `main/S1 up` 对照 | n=347，+0.050% |
 | 同期 BRK `up` 对照 | n=140，−0.719% |
+
+---
+
+## 10. 实施记录（2026-10-01，已落地，待线上观察）
+
+**已改文件（单个）**：`scripts/bin/scan_daemon.py`
+
+| 落点 | 内容 |
+|---|---|
+| 常量区（`CROSS_POOL_MUTE_MIN` 之后） | `SUPPRESS_BRK_SHORT = True` + `SUPPRESS_BRK_SHORT_REASON`（附依据长注释：§8.1.10 数字、三条缺陷、禁用阈值型修补、回滚方式） |
+| `_is_brk_short(c)`（`_mark_alert_suppressed` 之前） | 纯谓词，不碰 DB/全局状态；抽函数只为满足通道③ 注入测试并使「单点」可 grep 核验 |
+| `task_scan_alert` 候选过滤循环内 | `if _is_brk_short(c): _mark_alert_suppressed(...); suppressed_brk_short += 1; continue`（置于跨池互斥之前） |
+| `task_scan_alert` 返回值 | 两处携带抑制计数的 return 各增 `suppressed_brk_short` |
+
+**验收进度（§4 三通道）**：
+
+| 通道 | 状态 | 结果 |
+|---|---|---|
+| ① 源码核验 | ✅ 已完成 | `py_compile` 通过；`grep` 确认全仓 `_load_alert_candidates` **仅 1 处调用**（`task_scan_alert`）、`UPDATE ... alerted_at` **仅 1 处**（同函数成功分支）⇒ 无第二处 BRK-down 发信/放行路径；`SUPPRESS_BRK_SHORT` 全仓 3 处（定义 1 + 谓词 1 + 调用 1） |
+| ③ 注入测试 | ✅ 已完成 | 6 组断言全 PASS：态 1（默认 True）BRK `down` ⇒ 抑制、BRK `up` ⇒ 放行、`main/S1 up` ⇒ 放行、`main/S2 down` ⇒ 放行、ACC `flat` ⇒ 放行；态 2（置 `False` 回滚）**全部放行**；空 dict 不抛异常 |
+| ② 线上 runtime | ⏳ 待观察 ≥3 天 | 需核对：ⓐ 邮件 BRK down 卡片数 = 0；ⓑ `alert_suppressed_reason LIKE 'BRK空头停推%'` 行数 = 同期 BRK down/high 新增行数（抑制 ≠ 丢失）；ⓒ 日报 `alerts_n` 口径不失真；ⓓ 无看门狗误报 |
+
+**未做**：未连 prod 执行 `--run-once alert`（该命令会真实发信且需占用单实例锁，生产 daemon 在跑），
+通道 ② 改为部署后按上表只读比对。
+
+**回滚**：`SUPPRESS_BRK_SHORT = False` 单行即可，无 DB 变更、无需补数据。
+
+**注**：Zeabur 容器约 6 分钟后自动重建上线，通道 ② 的观察窗口自该时点起算。

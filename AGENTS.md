@@ -2595,9 +2595,9 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **未动**：零线上代码、零阈值、零调度、零 DDL（全部 SELECT）。临时查询脚本在 `/tmp`，随手删除，未入库。
 - **产物**：文档 §8.1.10（新增）+ §8.1.9 行动项② 补指针；AGENTS.md 本节。**无代码/CSV 产物**。
 
-### 工单 SCAN-BRK-SHORT-OFF-001：BRK 空头停推（已开，待实施）（2026-10-01，本次提交）
+### 工单 SCAN-BRK-SHORT-OFF-001：BRK 空头停推（**已实施落地**）（2026-10-01，本次提交）
 
-来源：上节结论落地时用户选择「开独立工单：评估 BRK 空头整体停推」。**本工单只出方案，本次未改任何线上代码。**
+来源：上节结论落地时用户选择「开独立工单：评估 BRK 空头整体停推」，工单开立后用户指示「执行」⇒ 本提交为**代码实施**。
 
 - **位置**：`04_架构与代码方案/盘面扫描BRK空头停推工单_SCAN-BRK-SHORT-OFF-001_2026-10-01.md`
 - **预登记判据（已锁死，开工前逐条满足）**：① 按日聚类 |t| ≥ 2（实测 **t=−2.06**）；
@@ -2619,4 +2619,14 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **解禁判据（预登记）**：影子期 ≥30 独立日且前向 ≥50 笔时复评，须**同时**满足
   按日 t > 0、24h 净均 > **+0.20%**（覆盖双边成本）、剔最大批次后仍为正。
 - **本轮不动多头**：BRK `up` n=140 亦为负（−0.719%），但未达上述四条判据，另列观察项。
-- **产物**：工单文件（新，入库）+ 文档 §8.1.10 行动项② 补指针 + AGENTS.md 本节。**未改代码**。
+- **实施落点（`scan_daemon.py` 单文件）**：
+  ① 常量区加 `SUPPRESS_BRK_SHORT = True` + `SUPPRESS_BRK_SHORT_REASON`（含依据长注释）；
+  ② 加纯谓词 [`_is_brk_short(c)`](file:///Users/tinley/项目/代码/crypto-profile-collection/05_代码与脚本/scripts/bin/scan_daemon.py#L1846-L1855)（抽函数只为可注入测试 + 使「单点」可 grep 核验）；
+  ③ [task_scan_alert](file:///Users/tinley/项目/代码/crypto-profile-collection/05_代码与脚本/scripts/bin/scan_daemon.py#L4008-L4018) 候选循环内 `if _is_brk_short(c): _mark_alert_suppressed(...); suppressed_brk_short += 1; continue`；
+  ④ 两处 return 各加 `suppressed_brk_short` 计数。
+- **验收**：通道①（`py_compile` 通过；grep 确认 `_load_alert_candidates` 全仓**仅 1 处调用**、`UPDATE ... alerted_at` **仅 1 处** ⇒ 无第二处 BRK-down 发信路径）
+  与通道③（6 组注入断言全 PASS：默认态抑制 BRK down / 放行 up 与 main；回滚态全部放行；空 dict 不抛异常）**已完成**；
+  通道②（线上 ≥3 天：邮件 BRK down 卡片数=0、抑制行数=同期新增 BRK down/high 行数、日报口径不失真、看门狗不误报）**待观察**。
+- **未做**：未连 prod 跑 `--run-once alert`（会真实发信且需占单实例锁，生产 daemon 在跑）。
+- **回滚**：`SUPPRESS_BRK_SHORT = False` 单行，无 DB 变更、无需补数据。
+- **产物**：工单文件（§10 实施记录）、`scripts/bin/scan_daemon.py`、文档 §8.1.10 行动项② 指针、AGENTS.md 本节。

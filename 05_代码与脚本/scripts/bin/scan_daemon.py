@@ -1738,6 +1738,24 @@ LOST_SIGNAL_LOOKBACK_H = 6
 # `alert_suppressed_at` 留痕（**不能**只跳过 —— 主池候选集按 `alerted_at IS NULL` 取，
 # 不留下标记的话它会在 20 分钟窗口内反复重试、随后又被「丢信号检测」当异常计数）。
 CROSS_POOL_MUTE_MIN = 60
+# ── BRK 空头停推（工单 SCAN-BRK-SHORT-OFF-001，2026-10-01）────────────────────
+# 依据（设计方案 §8.1.10 只读追查）：BRK 空头已结算 130 笔、24h 净 **−3.353%**、
+# 胜率 26.9%，按日聚类 **t=−2.06**（7 个独立日），且**剔最大小时批次（n=38，−2.205%）
+# 与同 bar 去重（n=28 bar，−2.535%）后仍为负** —— 本项目迄今唯一 |t|>2 的负面结论。
+# 三条结构性缺陷：① `detect_brk` 只有「量比≥3.0 + 破 12h 区间沿」，`oi_dir`/`cvd_dir`
+# 恒为 None（246 条 BRK 全为空）；② L0 闸门 `short_fav` 默认 True，**顺周期**放行追跌
+# （BTC 跌>0.5% 时 n=94 −3.987%/胜率 18.1%，而唯一不亏的一组 n=20 +0.557% 恰被降级拦掉）；
+# ③ 09-23T14 一根 1h K 线 99 币同时破位（占 76%），冷却按符号 ⇒ 全部放行。
+#
+# 处置 = **影子抑制**（非删除信号、非改判据）：信号照常落库、留痕，只是不进告警邮件，
+# 使前向样本继续积累以便复评（解禁判据见工单 §5：≥30 独立日且 ≥50 笔后，
+# 须按日 t>0 且净>+0.20% 且剔最大批次仍为正，三条同时满足）。
+# **不得**改为任何阈值型修补（如「BTC 跌 >0.5% 就不发空头」）——那是 A3 / regime /
+# 方向闸门三次样本内选参翻车的同型（§8.1.10 行动项①）。
+# 回滚：本常量置 False 即恢复发信，无 DB 变更、无数据补写。
+SUPPRESS_BRK_SHORT = True
+# 抑制原因（写入 `alert_suppressed_reason`，供线上核验与复评查询按前缀匹配）。
+SUPPRESS_BRK_SHORT_REASON = "BRK空头停推(SCAN-BRK-SHORT-OFF-001)：§8.1.10 负期望证据"
 # 历史先验（审计 P2-5）：同场景已告警信号的方向对齐后验。用**中位数 + 胜率 + 样本量**
 # 呈现（均值会被 AKEUSDT +147.99% 这类离群值绑架，实测 +24h 均值 +8.79% vs 中位 +3.60%）。
 PRIOR_HORIZON_H = 12
@@ -1823,6 +1841,18 @@ def _cross_pool_recent(conn, symbols: list[str], pools: tuple[str, ...]) -> set[
             "AND alerted_at > NOW() - make_interval(mins => %s)",
             (symbols, list(pools), CROSS_POOL_MUTE_MIN))
         return {r[0] for r in cur.fetchall()}
+
+
+def _is_brk_short(c: dict) -> bool:
+    """BRK 空头停推的判定谓词（工单 SCAN-BRK-SHORT-OFF-001）。
+
+    抽成纯函数（不碰 DB / 全局状态）只为满足工单 §4 通道③ 的注入测试，
+    并使「单点判定」可被 grep 核验：全仓仅 `task_scan_alert` 一处调用。
+    """
+    return bool(SUPPRESS_BRK_SHORT
+                and c.get("pool") == "accumulation"
+                and c.get("scenario") == "BRK"
+                and c.get("p_dir") == "down")
 
 
 def _mark_alert_suppressed(conn, ids: list[int], reason: str) -> None:
@@ -3986,10 +4016,18 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
         seen: set[str] = set()
         to_alert: list[dict] = []
         suppressed = 0
+        suppressed_brk_short = 0
         for c in candidates:
             if c["symbol"] in seen or _in_cooldown_alert(conn, c["symbol"]):
                 continue
             seen.add(c["symbol"])
+            # BRK 空头停推（工单 SCAN-BRK-SHORT-OFF-001，依据见 SUPPRESS_BRK_SHORT 常量处）：
+            # 结构性抑制，**单点**落在此处（发信组装层），不改 `detect_brk` 判据、不动落库。
+            # 置于跨池互斥之前：本抑制是无条件的，与另一池是否告警无关。
+            if _is_brk_short(c):
+                _mark_alert_suppressed(conn, [c["id"]], SUPPRESS_BRK_SHORT_REASON)
+                suppressed_brk_short += 1
+                continue
             if c["symbol"] in muted:
                 _mark_alert_suppressed(
                     conn, [c["id"]],
@@ -4005,7 +4043,8 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
 
         if not to_alert:
             return {"candidates": len(candidates), "alerts": 0,
-                    "suppressed_cross_pool": suppressed}
+                    "suppressed_cross_pool": suppressed,
+                    "suppressed_brk_short": suppressed_brk_short}
 
         # 变化榜（L0 融合，工单_L0告警邮件融合变化榜_2026-09-29）：预查一次、建
         # `asset_id → [上榜记录]` 反查 map（`get_daily_diff_summary` 自开连接池、不接 conn）。
@@ -4078,7 +4117,8 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
                 )
             conn.commit()
             return {"candidates": len(candidates), "alerts": len(ids),
-                    "suppressed_cross_pool": suppressed}
+                    "suppressed_cross_pool": suppressed,
+                    "suppressed_brk_short": suppressed_brk_short}
         else:
             print(f"[alert] 发送失败: {msg}")
             return {"candidates": len(candidates), "alerts": 0, "error": msg}

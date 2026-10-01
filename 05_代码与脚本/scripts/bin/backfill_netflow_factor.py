@@ -7,8 +7,9 @@
     inflow  = 转入交易所（充值，潜在抛压）
     outflow = 提币离场（吸筹/自托管）
     netflow = inflow - outflow（正=抛压偏多，负=吸筹偏多）
-归因口径 = 读侧 union 两张地址表（与 workbench/onchain_alert.py 完全一致）；
-同所家族互转、is_suspect、0xtest% 全部剔除。
+归因口径 = 读侧 union 两张地址表（与 workbench/onchain_alert.py 完全一致），
+并按 (address, chain) 收敛为一行后，才做家族合并、剔除同所互转、
+is_suspect 行与 0xtest% 测试交易。
 
 时间与窗口：
     两种模式互斥，--since/--until 优先于 --hours：
@@ -60,12 +61,20 @@ from crypto_research.db.conn import get_connection
 
 # 与 workbench/onchain_alert.py 完全一致的归因 CTE + 聚合体
 # 家族判定：先按冒号拆（Binance: Hot Wallet 20 → Binance），再按空格拆（Binance 14 → Binance）
+# exch 必须按 (address, chain) 收敛为一行：同一地址可同时存在于两张标签表、或带多个
+#   不同 exchange_name（实测 7933 个地址带 2 个名字、46 个带 3 个）。UNION 只对三元组
+#   去重，名字串不同就留成多行，LEFT JOIN 会让行数成倍放大、per-asset 与全局 SUM 同步虚高
+#   （2026-10-01 修复前实测全局 outflow +93%、inflow +72%，net 放大 2.9 倍）。
 _AGG_BODY = """
-WITH exch AS (
+WITH exch_raw AS (
     SELECT address, chain, exchange_name FROM biz.onchain_exchange_wallet WHERE confidence = 'high'
     UNION
     SELECT address, chain, label_name FROM biz.onchain_address_label
     WHERE label_type = 'exchange' AND confidence IN ('high', 'medium')
+),
+exch AS (
+    SELECT address, chain, min(exchange_name) AS exchange_name
+    FROM exch_raw GROUP BY address, chain
 ),
 tl AS (
     SELECT asset_id, block_timestamp, value_usd, from_address, to_address, chain

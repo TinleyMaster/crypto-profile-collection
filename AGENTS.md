@@ -2429,3 +2429,20 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **落地动作**：因旧代码（未部署）仍用进程内 dict，部署新代码前可能再告警一次；**已向 `biz.scan_stall_alert` 预置 `sched_stall:data_sync_daily = NOW()`**，使新代码上线后立即进入静默期（等价于「刚告警过」），**不再重复轰炸**；`data_sync_daily` 于 09-30 06:30 CST 调度成功后 `stale=false`，告警自然解除。
 - **未动**：看护阈值（30h）与 `_recent_submission` 逻辑；`biz.scan_stall_alert` 建表（已存在，复用）。
 - **待部署**：`scheduler_watchdog.py` 需容器 **redeploy** 后生效。
+
+### CVD 维度回测首测（P1 第四轮，拆 S1/S2、S7/S8）（2026-10-01，本次提交）
+
+来源：`phase_check_cvd_ready.py` 自动提醒邮件「CVD 数据已就绪：可跑维度回测（拆 S1/S2）」——CVD 自 2026-09-16 起实时累积满 14 天。**零 DDL、零生产写**；回测脚本为手动工具、不入调度，**无需 redeploy**。
+
+- **DB 核验（只读，prod）**：`biz.oi_cvd_snapshot WHERE cvd_5m_usd IS NOT NULL` = **579,280 行**，范围 09-16 05:40 → 10-01 03:05（UTC），来源以 `realtime` 为主（`backfill` 仅 6 行）。
+- **代码（`scripts/bin/backtest_scan_scenarios.py`）**：接入 CVD 维——① 新增 `load_cvd_hourly`（`date_trunc('hour', ts)` + `SUM(cvd_5m_usd)`）；② `SCENARIO8` 常量按 §4.3 ②「设计口径」映射 `(P,OI,CVD) → S1..S8`；③ `scan_symbol` 记录元组**末尾追加 `cvd_dir`（index 8）**；④ 新增 `summarize_cvd` + main「CVD 维度拆分」表 + CVD 边际（S2−S1 / S8−S7）+ `backtest_cvd_scenarios.csv` 输出。**向后兼容**：P×OI 四象限表、`sweep`、funding 消融、指标影子消融**全不动**（`scan_symbol` 新参 `cvd_hours=None` 默认；`sweep_all` 不传）。帧头 docstring 同步去掉「CVD 暂不可回测」。
+- **运行**：`python bin/backtest_scan_scenarios.py --min-n 15`（191 符号；K线 465,546 根 / OI 小时 151,198 点 / CVD 小时 36,409 点）。CVD 覆盖记录 1,221（含各窗口），缺失 NA 14,865。
+- **结果（8 场景，仅 S1/S2/S7/S8 达标；S3~S6 在 CVD 覆盖期内样本 <门槛）**：S1 P↑OI↑CVD↑ n=146（1h −0.56% / 4h −0.35% / 24h −0.45%，日t −0.64）；S2 P↑OI↑CVD↓ n=93（+0.51% / −0.10% / −2.01%，−0.81）；S7 P↓OI↓CVD↓ n=93（+0.68% / +1.08% / −1.53%，−0.32）；S8 P↓OI↓CVD↑ n=33（−0.21% / −5.27% / −5.21%，−1.51）。CVD 边际：**S2−S1** 24h **−1.56%**、**S8−S7** 4h **−6.35%**。
+- **结论（全 provisional）**：① 样本极薄、全桶 |日 t|<2.1，**无统计显著性**；② P↑OI↑ 侧方向符合设计（S2「诱多」24h 差于 S1），但两者 24h **均负**，只成立相对关系、不构成「CVD↑ 更优」绝对证据；③ P↓OI↓ 侧**与设计相反**——S8（设计=见底反弹）反而最差（4h −5.27%、t=−2.02），§4.3 ② 对 S8 的乐观解读未被支持；④ **区间口径警告**：CVD 覆盖窗内 P↑OI↑ 汇总 24h 仅 +3.65%、其子桶 S1/S2 均负 ⇒ 子样本落在与首轮 +5.24% 不同的（更差）regime，**CVD 拆分不可与首轮绝对值并列引用**。
+- **决策（用户拍板）**：**暂不把 CVD 纳入 L2 置信度分级**（证据不足）。改动**只落回测框架 + 文档**，线上 `scan_daemon._compute_l2` 置信度公式**未动**。
+- **口径边界（留档）**：回测取**触发根所在整小时** CVD 净额符号，线上 `_compute_l2` 取**近 2 个 5m 桶**（≈10min），两窗口不同（与 OI 的 §12.1-B18 同类）；若未来纳入分级须先对齐。
+- **文档同步**：设计方案 §8 新增「P1 第四轮 · CVD 维拆分」（表+结论+口径边界）；§4.3 待验证、§8 局限 4、§8 复验机制、§3 阶段表 P1 行、§8.1、§12.1-A3、§14.6 的「三轮→四轮」同步。
+- **阈值复校（`--sweep`，邮件标注「可选」）**：已跑通 **全量历史口径** 6×4=24 组（产出 `backtest_threshold_sweep.csv`）——**方向性结论无回归**：① 价格阈值仍是主杠杆（P↑OI↑ 24h：2.0 档 +2.67% → 4.5 档 +4.93%，PF 1.65→1.78）；② 量比阈值仍几乎无边际贡献，`VOL_RATIO_THR=2.0` 定位不变；③ 日 t 全档 0.3~1.5 仍不显著，`PRICE_THR_1H` 状态不变。⚠️ 绝对值**不可与第三轮 45 天窗表并列**（n 不同，如 4.5/1.5：554 vs 909），全量口径整体更低，与「近期 regime 更差」同向。与第三轮严格同口径的 `--lookback-days 45` 复跑**未完成**：远端 PG 流式返回大结果集时多次 `server closed the connection unexpectedly`（环境侧网络/代理中断，非脚本缺陷；时段内本机曾重启、`/tmp` 被清空），留待下次复校。
+- **回归**：`py_compile` 通过；30 符号小样本干跑（`--symbols 30 --min-n 3`）与 191 符号全量均 exit 0，四个 CSV 正常产出。
+- **产物**：`scripts/data/backtest_cvd_scenarios.csv`（+ 既有 `backtest_scan_results.csv` / `_indicator_ablation` / `_funding_ablation` / `_threshold_sweep`）。
+- **遗留**：① CVD 覆盖窗仅 14 天且小时覆盖 ~57%，随窗口拉长须复跑；② A3 holdout 仍未跑；③ 第三轮同口径（45 天窗）`--sweep` 复跑待补。

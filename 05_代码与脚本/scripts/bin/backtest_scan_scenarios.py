@@ -6,8 +6,10 @@
   - 收益口径：1h/4h/24h 三窗口，净收益 = 毛收益 − 双边 taker 手续费（0.05%×2）
   - 消融：baseline（价+量触发）vs 叠加 OI 方向的 P×OI 分桶 → 量化 OI 的边际增量
   - 横截面去相关：按入场日聚类，报告独立天数 + 日级 t 统计（保守 CI）
-  - CVD 无历史源 → 8 场景中 CVD 维暂不可回测（评审 §5.1），本框架输出 P×OI 四象限，
-    CVD 维待 WebSocket 流式数据积累后按同框架扩展
+  - CVD 维度：接入 biz.oi_cvd_snapshot.cvd_5m_usd（2026-09-16 起实时积累），按「触发根所在
+    小时」的净额符号拆设计方案 §4.3 ② 的 8 场景 S1..S8；P×OI 四象限表保留不变（向后兼容）。
+    ⚠️ 口径边界：回测取**整小时** CVD 净额符号，线上 _compute_l2 取**近 2 个 5m 桶**（≈10min），
+    两者窗口不同（与 OI 的 §12.1-B18 同类），结论映射线上时须留意
   - funding 消融（历史已回填 biz.funding_rate_hist）：每个 P×OI 场景再按结算点资金费率
     正/负/近零拆分 → 验证"高费率做多更差"假设，评估拥挤度过滤是否值得加进 L2 校验
 
@@ -71,6 +73,18 @@ INDICATOR_BUCKETS = ("low", "mid", "high")   # 三分位桶
 
 SCENARIOS = ("Pup_OIup", "Pup_OIdown", "Pdown_OIup", "Pdown_OIdown")
 
+# 设计方案 §4.3 ② 的「设计口径」8 场景：(p_dir, oi_dir, cvd_dir) → S1..S8
+SCENARIO8 = {
+    ("up", "up", "up"): "S1",      # 现货买盘强 + 合约新开多仓，真实多头进攻
+    ("up", "up", "down"): "S2",    # 现货主动卖，上涨靠合约杠杆，诱多
+    ("down", "up", "down"): "S3",  # 现货砸盘 + 合约新开空单，真实空头
+    ("down", "up", "up"): "S4",    # 现货承接，下跌由合约空头砸出，诱空
+    ("up", "down", "up"): "S5",    # 合约平仓 + 现货买入，获利了结
+    ("up", "down", "down"): "S6",  # 空头回补，非新多进场
+    ("down", "down", "down"): "S7",  # 空头止盈平仓，跌势衰竭
+    ("down", "down", "up"): "S8",  # 现货承接 + 空头离场，抛压释放
+}
+
 
 def load_klines(conn, symbols: list[str], lookback_days: int = 0) -> dict[str, list[dict]]:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -115,6 +129,28 @@ def load_oi_hourly(conn, symbols: list[str]) -> dict[str, dict[datetime, float]]
     return dict(out)
 
 
+def load_cvd_hourly(conn, symbols: list[str]) -> dict[str, dict[datetime, float]]:
+    """小时级 CVD 净额（实时 5m 桶按小时求和），返回 {symbol: {hour_ts: cvd_sum}}。
+
+    ⚠️ 窗口口径：取**触发根所在整小时**的 CVD 净额和（sum > 0 → 主动买盘强），
+    与线上 `_compute_l2` 的「近 2 个 5m 桶」不同（同类边界见 §12.1-B18）。
+    无数据（2026-09-16 前的触发根）返回缺键 → 该记录 cvd_dir 为 None（不进 8 场景桶）。
+    """
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            "SELECT symbol, date_trunc('hour', ts) AS h, SUM(cvd_5m_usd) AS cvd "
+            "FROM biz.oi_cvd_snapshot WHERE cvd_5m_usd IS NOT NULL AND symbol = ANY(%s) "
+            "GROUP BY symbol, date_trunc('hour', ts)",
+            (symbols,),
+        )
+        rows = cur.fetchall()
+    out: dict[str, dict[datetime, float]] = defaultdict(dict)
+    for r in rows:
+        if r["cvd"] is not None:
+            out[r["symbol"]][r["h"]] = float(r["cvd"])
+    return dict(out)
+
+
 def load_funding(conn, symbols: list[str]) -> dict[str, tuple[list, list[float]]]:
     """资金费率历史（8h 结算点）→ {symbol: (sorted_fts, rates)}，供 bisect 近邻查找。"""
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -155,6 +191,7 @@ def hour_key(dt: datetime) -> datetime:
 def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 funding: tuple[list, list[float]] | None,
                 trades: dict[str, list], cost: float,
+                cvd_hours: dict[datetime, float] | None = None,
                 price_thr: float = PRICE_THR_1H,
                 vol_thr: float = VOL_RATIO_THR) -> None:
     """扫描单符号，产出 (scenario, horizon, day, net_ret, fund_tag) 记录。
@@ -202,6 +239,13 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
             scenario = "BASELINE_ONLY"
         ftag = funding_tag(funding, h) or "NA"
 
+        # CVD 方向（触发根所在小时内 cvd_5m_usd 净额和的符号；可缺失 → 不进 8 场景桶）
+        cvd_sum = (cvd_hours or {}).get(h)
+        if cvd_sum is None or cvd_sum == 0:
+            cvd_dir = None
+        else:
+            cvd_dir = "up" if cvd_sum > 0 else "down"
+
         entry = bars[t + 1]["open"]
         if not entry:
             continue
@@ -213,9 +257,9 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 continue
             ret_long = (exit_close - entry) / entry
             ret = ret_long if direction == "up" else -ret_long
-            # 记录结构：(hz, day, net_ret, fund_tag, entry_ts, rsi, percent_b, bbw)
+            # 记录结构：(hz, day, net_ret, fund_tag, entry_ts, rsi, percent_b, bbw, cvd_dir)
             trades[scenario].append((hz, day, ret - cost, ftag,
-                                     entry_ts, rsi_val, pb_val, bbw_val))
+                                     entry_ts, rsi_val, pb_val, bbw_val, cvd_dir))
 
 
 def split_trades(trades: dict[str, list], cutoff: datetime,
@@ -341,6 +385,68 @@ def summarize(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
     return rows
 
 
+def _parse_quadrant(scenario: str) -> tuple[str, str] | None:
+    """从 P×OI 场景键（如 "Pup_OIup"）解析 (p_dir, oi_dir)；BASELINE_ONLY 返回 None。"""
+    if not scenario.startswith("P") or "_" not in scenario:
+        return None
+    p_part, oi_part = scenario.split("_", 1)
+    return p_part[1:], oi_part[2:]
+
+
+def _pick_row(rows: list[dict], split_name: str, label: str, hz: int) -> dict | None:
+    return next((r for r in rows if r["split"] == split_name
+                 and r["scenario"] == label and r["horizon_h"] == hz), None)
+
+
+def summarize_cvd(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
+    """CVD 维度拆分：按设计方案 §4.3 ② 的 8 场景（S1..S8）分桶统计。
+
+    仅统计有 CVD 方向的记录（cvd_dir 缺失 → 跳过，不进任何 S 桶）。
+    统计口径与 summarize() 一致（日级聚类 t 统计）。
+    """
+    by_s: dict[str, list] = defaultdict(list)
+    for scenario, recs in trades.items():
+        pq = _parse_quadrant(scenario)
+        if pq is None:
+            continue
+        p_dir, oi_dir = pq
+        for r in recs:
+            if r[8] is None:
+                continue
+            label = SCENARIO8.get((p_dir, oi_dir, r[8]))
+            if label:
+                by_s[label].append(r)
+    rows: list[dict] = []
+    for label in sorted(by_s):
+        recs = by_s[label]
+        for hz in HORIZONS:
+            sub = [r for r in recs if r[0] == hz]
+            if len(sub) < min_n:
+                continue
+            nets = [r[2] for r in sub]
+            days = {r[1] for r in sub}
+            if len(days) < min_days:
+                continue
+            wins = sum(1 for x in nets if x > 0)
+            gross_win = sum(x for x in nets if x > 0)
+            gross_loss = abs(sum(x for x in nets if x < 0))
+            day_means: dict = defaultdict(list)
+            for r in sub:
+                day_means[r[1]].append(r[2])
+            dm = [sum(v) / len(v) for v in day_means.values()]
+            day_mean = sum(dm) / len(dm)
+            day_std = (sum((x - day_mean) ** 2 for x in dm) / (len(dm) - 1)) ** 0.5 if len(dm) > 1 else 0.0
+            t_stat = day_mean / (day_std / (len(dm) ** 0.5)) if day_std > 0 else 0.0
+            rows.append({
+                "scenario": label, "horizon_h": hz, "n": len(sub),
+                "days": len(dm), "win_rate": wins / len(sub),
+                "avg_ret_net": sum(nets) / len(nets), "expectancy": sum(nets) / len(sub),
+                "profit_factor": gross_win / gross_loss if gross_loss else float("inf"),
+                "day_t_stat": t_stat, "day_avg": day_mean,
+            })
+    return rows
+
+
 def summarize_funding(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
     """funding 消融：每个 (scenario, horizon, fund_tag) 分桶统计。"""
     rows: list[dict] = []
@@ -409,9 +515,11 @@ def main() -> int:
 
         klines = load_klines(conn, universe, args.lookback_days)
         oi_hourly = load_oi_hourly(conn, universe)
+        cvd_hourly = load_cvd_hourly(conn, universe)
         funding = load_funding(conn, universe)
         print(f"[backtest] K线 {sum(len(v) for v in klines.values())} 根；"
               f"OI 小时序列 {sum(len(v) for v in oi_hourly.values())} 点；"
+              f"CVD 小时序列 {sum(len(v) for v in cvd_hourly.values())} 点；"
               f"funding 序列 {sum(len(v[0]) for v in funding.values())} 点")
 
         cutoff: datetime | None = None
@@ -457,7 +565,8 @@ def main() -> int:
         trades: dict[str, list] = defaultdict(list)
         for sym in universe:
             scan_symbol(klines.get(sym, []), oi_hourly.get(sym, {}),
-                        funding.get(sym), trades, args.cost)
+                        funding.get(sym), trades, args.cost,
+                        cvd_hours=cvd_hourly.get(sym, {}))
 
         def _print_rows(rs: list[dict]) -> None:
             print(f"{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
@@ -485,6 +594,46 @@ def main() -> int:
             rows = summarize(trades, args.min_n, MIN_DAYS)
             _print_rows(rows)
             csv_rows = [dict(r, split="all") for r in rows]
+
+        # CVD 维度拆分（设计方案 §4.3 ② 的 8 场景 S1..S8）
+        cvd_csv_rows: list[dict] = []
+        cvd_scope: list[tuple[str, dict[str, list]]] = (
+            [("train", tr), ("test", te)] if cutoff is not None else [("all", trades)])
+        for split_name, sub in cvd_scope:
+            for r in summarize_cvd(sub, args.min_n, MIN_DAYS):
+                r = dict(r)
+                r["split"] = split_name
+                cvd_csv_rows.append(r)
+        _cvd_seen = sum(1 for rs in trades.values() for r in rs if r[8] is not None)
+        _cvd_miss = sum(1 for rs in trades.values() for r in rs if r[8] is None)
+        print(f"\n[cvd] 有 CVD 方向的记录（含各窗口）{_cvd_seen}，缺失 NA（不进 8 场景桶）{_cvd_miss}")
+        if cvd_csv_rows:
+            print("\n=== CVD 维度拆分（8 场景 S1..S8，触发根小时 CVD 净额符号；设计口径 §4.3 ②）===")
+            print(f"{'split':>6}{'场景':<6}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
+            print("-" * 84)
+            for r in sorted(cvd_csv_rows, key=lambda x: (x["split"], x["scenario"], x["horizon_h"])):
+                print(f"{r['split']:>6}{r['scenario']:<6}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
+                      f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
+                      f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
+                      f"{r['day_t_stat']:>8.2f}")
+            print("\n[CVD 边际] 同一 P×OI 象限内 CVD↑ vs CVD↓ 的组内差（括号为各自 n / 日 t）：")
+            for split_name in sorted({r["split"] for r in cvd_csv_rows}):
+                for hz in HORIZONS:
+                    s1 = _pick_row(cvd_csv_rows, split_name, "S1", hz)
+                    s2 = _pick_row(cvd_csv_rows, split_name, "S2", hz)
+                    s7 = _pick_row(cvd_csv_rows, split_name, "S7", hz)
+                    s8 = _pick_row(cvd_csv_rows, split_name, "S8", hz)
+                    if s1 and s2:
+                        print(f"  [{split_name} {hz}h] S2(CVD↓)−S1(CVD↑) = "
+                              f"{(s2['avg_ret_net'] - s1['avg_ret_net']) * 100:>+7.3f}%"
+                              f"  (S1 n={s1['n']}/t={s1['day_t_stat']:.2f}；"
+                              f"S2 n={s2['n']}/t={s2['day_t_stat']:.2f})")
+                    if s7 and s8:
+                        print(f"  [{split_name} {hz}h] S8(CVD↑)−S7(CVD↓) = "
+                              f"{(s8['avg_ret_net'] - s7['avg_ret_net']) * 100:>+7.3f}%"
+                              f"  (S7 n={s7['n']}/t={s7['day_t_stat']:.2f}；"
+                              f"S8 n={s8['n']}/t={s8['day_t_stat']:.2f})")
+            print("[cvd] ⚠️ 样本仅 09-16 起 14 天、单一 regime，结论一律 provisional（§12.1-A1/A2）")
 
         # 指标影子消融（§14.3）：RSI/%B/BBW 三分位 → 验证边际贡献，不改触发
         ablation_scope: list[tuple[str, dict[str, list]]] = (
@@ -556,6 +705,14 @@ def main() -> int:
                 w.writeheader()
                 w.writerows(frows)
             print(f"[backtest] funding 消融已存 {fout}")
+
+        if cvd_csv_rows:
+            cout = out_path.with_name("backtest_cvd_scenarios.csv")
+            with open(cout, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(cvd_csv_rows[0].keys()))
+                w.writeheader()
+                w.writerows(cvd_csv_rows)
+            print(f"[backtest] CVD 8 场景拆分已存 {cout}")
     return 0
 
 

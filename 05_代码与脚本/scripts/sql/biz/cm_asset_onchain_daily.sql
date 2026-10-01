@@ -1,6 +1,7 @@
 -- Coin Metrics Community 档链上日频指标表（仅达标主流币）
 -- 数据源：github.com/coinmetrics/data（CC BY-NC 4.0）
--- 数据冻结于 2026-05-24，纯历史分位用
+-- 由 CM Community 载入脚本持续追加/刷新（2026-10-01 实测 max(metric_date)=2026-09-29，
+-- 近 7 天仍有 83 行入库），纯历史分位用。早前「数据冻结于 2026-05-24」的说法与实况矛盾，已更正。
 
 CREATE TABLE IF NOT EXISTS biz.cm_asset_onchain_daily (
     asset_id                    INTEGER  NOT NULL REFERENCES core.asset(asset_id),
@@ -22,5 +23,5 @@ CREATE TABLE IF NOT EXISTS biz.cm_asset_onchain_daily (
 CREATE INDEX IF NOT EXISTS ix_cm_onchain_asset_date ON biz.cm_asset_onchain_daily (asset_id, metric_date);
 CREATE INDEX IF NOT EXISTS ix_cm_onchain_symbol ON biz.cm_asset_onchain_daily (cm_symbol);
 
-COMMENT ON TABLE biz.cm_asset_onchain_daily IS 'Coin Metrics Community 档链上日频指标（仅达标主流币）；数据冻结 2026-05-24，纯历史分位用';
-COMMENT ON COLUMN biz.cm_asset_onchain_daily.source_cutoff IS '数据源截止日期，所有行均为 2026-05-24，严禁伪装实时';
+COMMENT ON TABLE biz.cm_asset_onchain_daily IS 'Coin Metrics Community 档链上日频指标（仅达标主流币）；由 CM 载入脚本持续更新，纯历史分位用';
+COMMENT ON COLUMN biz.cm_asset_onchain_daily.source_cutoff IS '数据源截止日期，**逐行**标注而非全表统一值（2026-10-01 实测：48,573 行为 2026-09-29，matic 组 2,392 行停留在 2025-11-12）；消费侧须按该列判断新鲜度，严禁伪装实时';

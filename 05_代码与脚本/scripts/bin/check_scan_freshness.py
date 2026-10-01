@@ -18,6 +18,12 @@
 也未被跨池互斥静音 ⇒ 报静默（用影子标记区分「主动静默」与「疑似故障」，见
 `_squeeze_silence_note`）。
 
+只读健康观测（不进「停摆」分节，越线才渲染，共用 squeeze_health 去重键）：
+  - 轧空池队列/入队/拒判 + OI 桶完整度（`_collect_squeeze_health`）
+  - **funding 费率** MAX(funding_time) > 24 小时（`_collect_funding_health`，2026-10-01 新增：
+    该采集此前未注册调度、只挂工作台手动触发，2026-09-17 后静默停滞 14 天无人知晓，
+    见设计方案 §12.1-B26。8h 结算点、不驱动实时扫描，故只作提示不作停摆）
+
 去重：biz.scan_stall_alert（task='scan_stall'）——与 scan_daemon 内置停摆告警
 （_check_and_alert_stall）共用同一去重键与 6h 静默期，同一停摆事件只发一封邮件。
 停摆持续期间每 6 小时重发一封汇总邮件。
@@ -388,8 +394,37 @@ def _collect_squeeze_health(conn) -> list[str]:
     return notes
 
 
+# funding 费率采集健康（2026-10-01，§12.1-B26）：该任务此前**未注册调度**、只挂工作台
+# 手动触发，2026-09-17 后静默停滞 14 天无人知晓（A3 holdout 复盘时才发现 funding 消融在
+# test 段无数据）。现已在 scheduler 注册为每日 02:40 增量（8h 结算点，正常滞后 ≤3h），
+# 此处只读观测 MAX(funding_time)，落后 >24h 即提示（阈值留 ~9× 余量，不产生噪音）。
+FUNDING_MAX_AGE_H = 24
+
+
+def _collect_funding_health(conn) -> list[str]:
+    """funding 费率新鲜度（只读观测）：最新结算点落后 > FUNDING_MAX_AGE_H 小时 → 提示。
+
+    与 OI/15m 那三项不同，funding 是**8h 结算点**、不驱动实时扫描，所以不进 items 的
+    「停摆」分支（否则会误报「扫描已无法产出信号」），只作健康提示。
+    """
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT MAX(funding_time) AS mx FROM biz.funding_rate_hist")
+            mx = cur.fetchone()["mx"]
+    except Exception as e:  # noqa: BLE001
+        print(f"[看门狗] funding 新鲜度检查跳过（{e}）", file=sys.stderr)
+        return []
+    if mx is None:
+        return ["funding 费率表为空（biz.funding_rate_hist 无任何数据）"]
+    age_h = (datetime.now(timezone.utc) - mx).total_seconds() / 3600
+    if age_h <= FUNDING_MAX_AGE_H:
+        return []
+    return [f"funding 费率已停更：最新结算点 {_fmt_bj(mx)}，距今 {age_h:.0f}h"
+            f"（阈值 {FUNDING_MAX_AGE_H}h）⇒ 请检查调度任务 scan_funding_backfill 是否执行"]
+
+
 def _render_health_html(notes: list[str]) -> str:
-    return ("<h3 style='margin:18px 0 6px'>🩺 轧空池 / 采样健康（只读观测）</h3>"
+    return ("<h3 style='margin:18px 0 6px'>🩺 轧空池 / 采样 / 费率采集健康（只读观测）</h3>"
             "<ul>" + "".join(f"<li>{n}</li>" for n in notes) + "</ul>")
 
 
@@ -402,7 +437,7 @@ def main() -> int:
     with psycopg.connect(settings.database_url, connect_timeout=15) as conn:
         items = _collect_items(conn)
         stale_items = [it for it in items if it["stale"]]
-        health_notes = _collect_squeeze_health(conn)
+        health_notes = _collect_squeeze_health(conn) + _collect_funding_health(conn)
         now = datetime.now(timezone.utc)
 
         print(f"[看门狗] {now:%m-%d %H:%M} UTC 检查：")
@@ -411,7 +446,7 @@ def main() -> int:
             mark = "STALE" if it["stale"] else "ok"
             print(f"  {it['name']:<8} {age:>10}  [{mark}] (阈值 {it['threshold']}m)")
         if health_notes:
-            print("[看门狗] 轧空池/采样健康提示：")
+            print("[看门狗] 轧空池/采样/费率采集健康提示：")
             for n in health_notes:
                 print(f"  - {n}")
 
@@ -470,10 +505,11 @@ def main() -> int:
         else:
             print(f"[看门狗] 健康提示 {len(health_notes)} 项"
                   + ("（dry-run 不发送）" if args.dry_run else " → 发提示邮件"))
-            subject = "⚠️ 盘面扫描健康提示（轧空池/采样缺口）"
+            subject = "⚠️ 盘面扫描健康提示（采集缺口）"
             title = "⚠️ 盘面扫描健康提示（外部看门狗）"
-            intro = ("<p>数据本身仍新鲜，但轧空池/采样出现以下情况："
-                     "重启丢桶不可回补，会让覆盖率闸门更频繁拒判，需观察。</p>")
+            intro = ("<p>数据本身仍新鲜，但以下采集环节出现情况（轧空/采样丢桶不可回补、"
+                     "会让覆盖率闸门更频繁拒判；funding 费率停更会让回测消融与拥挤度标签"
+                     "断档），需观察：</p>")
         if silent:
             print("[看门狗] 疑似静默失败（数据停摆但采集任务心跳判为正常）：")
             for s in silent:

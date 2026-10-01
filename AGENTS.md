@@ -2466,7 +2466,21 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
 - **结论（FAIL）**：① **§8 旗舰结论 P↑OI↑ 24h +5.773% 样本外崩塌至 −0.093%**（Δ≈−5.87pp），是样本内选参产物，不得再作「已标定」证据，与 §8.1 线上 +0.896% 失配**同向且更差**；② train 侧唯一有显著性的桶（P↓OI↑，三窗口日 t ≤ −2.1）test 侧全退到 |t| < 1.2，**参数不稳健**（非反向可用）；③ test 侧 12 个组合 |t| ≤ 1.9，无一条显著；④ **指标影子消融同步未通过**——`bbw` train 单调（low→high：−0.339% → −0.094%）而 test **完全反转**（+0.244% → −0.653%），`rsi`/`percent_b` 亦不一致 ⇒ 按 §14.1 三指标**均不准入告警逻辑**；⑤ **sweep 的阈值单调性被证伪**：train 严格递增、test **严格递减**，选出的 4.5/1.5 恰是 test 最差档之一（**数据窥探直接反例**）；唯一两侧一致的结论是**量比无边际**（`VOL_RATIO_THR=2.0` 定位不变）。
 - **效力边界（不得过度解读，三条均为数据面事实）**：(a) `biz.oi_cvd_snapshot` 的 OI 自 **2026-08-26** 起（36 天）⇒ P×OI 的 train 段实际仅 **08-26→09-17 = 22 天**，与 test **相邻**，不是跨 regime 切分；(b) 两段**同属上涨 regime**（BTC train +19.11% / test +10.43%；ETH +40.43% / +11.50%；test 全宇宙等权 +21.43%）⇒ 本次「未通过」**不能外推为跨 regime 失效**，证明的是**参数在相邻窗口内不稳**，但已足够否定「已标定」表述；(c) **funding 消融在 test 段无数据**——`biz.funding_rate_hist` 最大值 = 2026-09-17 05:00（恰为 cutoff）。
 - **决策/影响**：A3 **仍未关闭**，但 §4.3 置信度分级 / §9 选信号口径继续标 `待验证假设`，不得引用 §8 样本内数字；关闭需**真正的跨 regime holdout**（当前唯一具备跨 regime 样本面的是爆仓维 `biz.liquidation_history` 180 天）。**线上代码/阈值/调度一律未动。**
-- **顺带发现（新增 §12.1-B26）**：`scan_funding_backfill` 只挂工作台任务表、**未进 `scheduler.py` 定时**（该列表只有 `scan_oi_backfill` 等）⇒ funding 自 09-17 起停滞 14 天，影响 §8 funding 消融 / B12 费率拥挤度 / A4 补费率成本项。行动项：接入调度 + 加 freshness 告警。
+- **顺带发现（新增 §12.1-B26）**：`scan_funding_backfill` 只挂工作台任务表、**未进 `scheduler.py` 定时**（该列表只有 `scan_oi_backfill` 等）⇒ funding 自 09-17 起停滞 14 天，影响 §8 funding 消融 / B12 费率拥挤度 / A4 补费率成本项。行动项：接入调度 + 加 freshness 告警 → **同日已修复，见下节**。
 - **读数口径提醒（留档）**：`summarize`/sweep 行里「净均收益%」是**按笔**均值、「日t值」是**按日等权**，两者可反号（如 test P↑OI↑ 2.0/2.0 24h：按笔 +1.001%、日 t −0.35）⇒ 按 §8 自己的日级聚类口径读 t，勿只看按笔均值。
 - **回归**：`py_compile` 通过；主回测与 sweep 两次全量跑均 exit 0；四个 CSV 正常产出。
 - **产物**：文档 §8「阈值复校」新增 ⑥、§12.1-A3（主回测表 + sweep 表 + 边界 + 行动项）、§12.1-B26、§11 阶段表 P1 行；临时日志 `data/_a3_h14*.log` 与 `data/_a3_h14*.csv` 已清理（未入库）。
+
+### funding 采集接回调度 + 修复 `--incremental` 潜伏缺陷（B26 修复）（2026-10-01，本次提交）
+
+来源：上节 A3 复盘发现 `biz.funding_rate_hist` 停在 09-17（停滞 14 天）。用户确认「按你的意思办」→ 执行 A3 复盘列出的行动项①。**唯一涉及生产的改动 = 新增一个调度条目**（无 DDL、无线上阈值改动）。
+
+- **根因（两层）**：① `phase_backfill_funding_history.py` 只挂工作台任务表 `scan_funding_backfill`（`default_args=["--full"]`），**未注册到 `scheduler.py`** ⇒ 只能人工点、无自动保鲜；② 更隐蔽的是 **`--incremental` 路径本身是坏的**——`main()` 在线程池内逐符号调 `get_last_funding_time(conn, sym)`，**6 个抓取线程共用同一条 psycopg 连接**，连接被打死。实测：`[funding] 完成 185 符号，13407 条，失败 6` 之后 `psycopg.OperationalError: the connection is closed`，**upsert 一条没写进去**（`MAX(funding_time)` 仍是 09-17）。⇒ 与 B26 的停滞互为因果：即使有人想接自动化，增量路径也跑不通。
+- **改动**：
+  1. `workbench/scheduler.py`：新增 `scan_funding_backfill`，cron **`40 2 * * *`**（北京 02:40），脚本 `phase_backfill_funding_history.py`，args `["--incremental"]`，category `core`。避开 01:00 周日 OI 回填、03:05 CVD 就绪检查、06:30~09:00 邮件/早报高峰；8h 结算点、日频增量正常滞后 ≤3h。
+  2. `scripts/bin/phase_backfill_funding_history.py`：`get_last_funding_time(conn, sym)`（逐符号、线程内调用）→ **`get_last_funding_times(conn, symbols)`（批量、线程启动前一次取回）**，`_run()` 不再碰 DB，线程内只发 HTTP。
+  3. `scripts/bin/check_scan_freshness.py`：新增常量 `FUNDING_MAX_AGE_H=24` + `_collect_funding_health(conn)`，挂进既有 `health_notes`（复用 `squeeze_health` 去重键与每小时那次检查）。**刻意不进 `items` 的「停摆」分支**——funding 是 8h 结算点、不驱动实时扫描，进停摆分支会让邮件误报「主池/蓄势池扫描已无法产出有效信号」。连带把健康分节标题/邮件主题/引导语从「轧空池/采样」泛化为「轧空池/采样/费率采集」「采集缺口」。
+- **验证**：`py_compile` 三个文件通过；`check_scan_freshness.py --dry-run` **修复前**正确报出「funding 费率已停更：最新结算点 09-17 13:00（北京时间），距今 337h（阈值 24h）」；`--incremental` 补 **14,046 行**、`MAX(funding_time)` → **2026-10-01 06:00 UTC**、191 符号全部新鲜；**重跑幂等（0 条新增）**；`--dry-run` **修复后** funding 项不再出现（转正常），其余观测项与既有行为不变。
+- **影响**：§8 funding 消融 / §4.3 B12 费率拥挤度标签 / A4「补费率成本项」的数据面恢复；**funding 消融的 train/test 对照从「无法做」变为「可做」**（下次 A3 复跑补上，本次未重跑）。调度生效需容器重建（push 后约 6 分钟）。
+- **未动**：线上扫描逻辑/阈值/`scan_daemon`/DB 结构一律未改；`SQUEEZE_ALERT_SHADOW` 影子模式维持原状（看门狗仍在提示，非本轮范围）。
+- **产物**：文档 §12.1-B26 改写为「发现 + 同日修复」（含③潜伏缺陷与验证数）、§12.1-A3 (c) 标注已修复；AGENTS.md 本节。

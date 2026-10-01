@@ -316,6 +316,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 仍由 scheduler 调度（≥4h 或低频维护任务）：
     ("scan_oi_backfill", "0 1 * * 0", "phase_backfill_oi_history.py", [],
      "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
+    # funding 历史此前只挂工作台任务表（scan_funding_backfill，默认 --full），**未注册调度** ⇒
+    # 2026-09-17 后无人采集、biz.funding_rate_hist 静默停滞 14 天（A3 holdout 复盘时发现：
+    # funding 消融在 test 段无数据，§12.1-B26）。8h 结算点，日频增量足以保鲜：
+    # 正常滞后 ≤3h，看门狗阈值 24h 有 ~9× 余量。02:40 避开 01:00 周日 OI 回填、
+    # 03:05 CVD 就绪检查，以及 06:30/08:10/08:20/09:00 的邮件与早报高峰。
+    ("scan_funding_backfill", "40 2 * * *", "phase_backfill_funding_history.py",
+     ["--incremental"],
+     "盘面扫描·funding 历史增量（每天 02:40，只补缺失结算点，供 funding 消融/拥挤度标签）", "core"),
     ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
      "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
     ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],

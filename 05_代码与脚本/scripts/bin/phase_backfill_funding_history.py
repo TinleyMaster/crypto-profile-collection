@@ -62,14 +62,27 @@ def get_covered(conn) -> set[str]:
         return {sym for sym, n in cur.fetchall() if n >= COVERED_COUNT}
 
 
-def get_last_funding_time(conn, symbol: str) -> datetime | None:
+def get_last_funding_times(conn, symbols: list[str]) -> dict[str, datetime]:
+    """批量取各符号的最新结算点 → {symbol: funding_time}（缺失的符号不在字典里）。
+
+    ⚠️ 2026-10-01 修复：原先在线程池内逐符号调 `get_last_funding_time(conn, sym)`，
+    6 个抓取线程共用**同一条** psycopg 连接，会把连接打死（实测：13407 条抓到了，
+    upsert 前连接已 closed → 一条没落库，funding 静默停滞的 `--incremental` 增量
+    路径实际从未成功过）。改为线程启动前一次性批量取回，线程内只发 HTTP、不碰 DB。
+    """
+    out: dict[str, datetime] = {}
+    if not symbols:
+        return out
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT MAX(funding_time) AS t FROM biz.funding_rate_hist WHERE symbol=%s",
-            (symbol,),
+            "SELECT symbol, MAX(funding_time) AS t FROM biz.funding_rate_hist "
+            "WHERE symbol = ANY(%s) GROUP BY symbol",
+            (symbols,),
         )
-        r = cur.fetchone()
-        return r[0] if r else None
+        for sym, t in cur.fetchall():
+            if t is not None:
+                out[sym] = t
+    return out
 
 
 def fetch_funding(symbol: str, incremental: bool, last_time: datetime | None) -> list[tuple]:
@@ -101,12 +114,15 @@ def main() -> int:
         print(f"[funding] {'增量' if args.incremental else '回填'} 宇宙 {len(symbols)}，"
               f"跳过 {len(covered)}，待处理 {len(todo)}")
 
+        # 增量模式：线程启动前一次性批量取回各符号最新结算点（见 get_last_funding_times
+        # docstring：在线程内用主连接查询会把连接打死）
+        last_map = get_last_funding_times(conn, todo) if args.incremental else {}
+
         results: dict[str, list[tuple]] = {}
         errors = 0
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             def _run(sym):
-                last = get_last_funding_time(conn, sym) if args.incremental else None
-                return sym, fetch_funding(sym, args.incremental, last)
+                return sym, fetch_funding(sym, args.incremental, last_map.get(sym))
             futs = {pool.submit(_run, s): s for s in todo}
             for fut in as_completed(futs):
                 s = futs[fut]

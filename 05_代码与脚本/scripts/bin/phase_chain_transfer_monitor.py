@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,11 @@ CHAIN_NAME_MAP = {
 
 # 大小写敏感链（地址不得 .lower()，否则会指向错误地址）
 CASE_SENSITIVE_CHAINS = frozenset({"solana", "tron", "ton", "sui", "aptos"})
+
+# solana 地址结构护栏（ADDRHYG-001，2026-10-01）：base58 字符集（排除 0/O/I/l）+ 32~44 位。
+# 与 phase_chain_holder_batch.SOLANA_ADDR_RE / phase_chain_contract_backfill.SOLANA_ADDR_RE 同一判据，
+# 用于拦住 0x 开头的 EVM 地址、`token/xxx` 等 URL 片段、以及被 lower() 降格后含禁用字符 l 的串。
+SOLANA_ADDR_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 SUPPORTED_CHAINS = ("eth", "bsc", "solana", "polygon", "arbitrum", "base", "optimism", "avalanche",
                     "tron", "ton", "sui", "aptos")
 
@@ -584,6 +590,16 @@ def collect_transfers(
                 # P2-2: 空/零地址过滤
                 if (not from_addr or not to_addr
                         or from_addr in _ZERO_ADDRESSES or to_addr in _ZERO_ADDRESSES):
+                    continue
+
+                # P2-3（ADDRHYG-001，2026-10-01）：solana 地址结构护栏。
+                # base58 大小写敏感，脏值形态（0x 开头 / URL 片段 / 含禁用字符 l 的降格串）
+                # 会让归因 join（exch.address = tl.from_address）永久失配，写入前直接拒收。
+                if chain == "solana" and not (
+                    SOLANA_ADDR_RE.match(from_addr) and SOLANA_ADDR_RE.match(to_addr)
+                ):
+                    print(f"[bad-sol-addr] {symbol}/{chain} tx={tx.get('hash', '')[:12]} "
+                          f"from={from_addr[:14]} to={to_addr[:14]} → 跳过", file=sys.stderr)
                     continue
 
                 from_exchange = exchange_map.get(from_addr)

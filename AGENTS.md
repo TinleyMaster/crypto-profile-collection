@@ -2688,3 +2688,46 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
   `scripts/data/backtest_funding_signal.csv`（本地产物，`scripts/data/` 已 gitignore，不入库）、
   文档 §8.1.11（新增）、工单 `盘面扫描资金费率策略工单_SCAN-FUNDING-001_2026-10-01.md`（新，含 §8 结论回填）、
   AGENTS.md 本节。
+
+### solana 转账日志地址脏值治理（工单 ADDRHYG-001，2026-10-01，本次提交）
+
+- **触发**：用户「先修 solana 空地址和大小写问题」。只读诊断 `biz.onchain_transfer_log` 全表命中两类脏值。
+- **诊断（2026-10-01 实测）**：
+  ① **196 行「单端残缺」**：`from_address`/`to_address` 有一端为空串，**仅 solana 存在**
+  （eth 199,529 / bsc 78,388 / base 27,957 / optimism 3,798 / polygon 621 / avalanche 493 / arbitrum 139
+  全为 0）。成因是旧解析器按 `pre/postTokenBalances` 逐账户记账，每条只写得出单端 owner（对端未知），
+  同一笔转账落成 from-only + to-only 两行；因唯一键含 `from_address,to_address`，新解析器写出的双端行
+  **不会**与之冲突，故这些残行会永久留存。
+  ② **92 行「全小写」双端行**（按 `lower()` 归并出 **67 组，每组都有含大写的规范形式**）：
+  base58 大小写敏感，全小写串解出字节 ≠ 真实地址 ⇒ 归因 SQL
+  （`_exch_cte` 的 `f.address = tl.from_address AND f.chain = tl.chain`）直接 join 失配。
+  实证 Bitget 热钱包 `A77HErqtfN1hLLpvZ9pCtu66FEtM8BveoaKbbMoZ4RiR` 的小写变体（5 行）全部丢归因。
+  ③ **根因已闭环**：两类脏值时间分布均止于 2026-09-03 前（空地址 3/5/6/7/8/9 月；小写 6~8 月），
+  **近 7 天零新增**——现写入方已有空地址过滤 + `CASE_SENSITIVE_CHAINS` 不 lower，
+  实测近 7 天 solana 4,947 行中 empty=0 / lower=0。本次只治存量 + 补结构护栏。
+- **处置（用户裁定：归一化 + 单端行标脏；写入方 + DB CHECK）**：
+  ① 大小写归一：按同组含大写的规范形式替换（`min(addr) FILTER (WHERE addr <> lower(addr))`）；
+  归一后与已有规范行**完全同键的 83 行直接删重**（保留规范行），其余 **22 行原地改**。
+  判据依据：44 位 base58 全落「小写或数字」的概率 ≈ 0.586^44 ≈ 5e-11 ⇒ 全小写形态几乎必然是 lower() 产物。
+  ② 单端残缺 **182 行置 `is_suspect=TRUE`**：**不伪造对端**（无链上依据合并即编造），
+  下游 30+ 处统一按 `is_suspect IS NOT TRUE` 过滤 ⇒ 标记即退出统计口径。
+  ③ 归一后仍残留、且**两端同时**全小写的 1 行（log_id=5278 / asset 2315 / 2026-08-01，全表无同组规范形式、
+  交易所库/标签库均无命中）：无法判定正确大小写，同样标脏（判据取「两端全小写」，概率 ≈ 3e-21，零误伤）。
+  ④ 写入方护栏：`phase_chain_transfer_monitor.py` 新增 `SOLANA_ADDR_RE = ^[1-9A-HJ-NP-Za-km-z]{32,44}$`，
+  写入前拒收（拦 0x 开头 EVM 地址、`token/xxx` URL 片段、含 base58 禁用字符 `l` 的降格串），
+  与 `phase_chain_holder_batch` / `phase_chain_contract_backfill` 同一判据。
+  ⑤ DB 护栏：`ck_onchain_transfer_log_addr_not_empty`（from/to 两列非空，**NOT VALID**——存量单端行已标脏隔离，
+  只约束后续 INSERT/UPDATE，避免全表校验扫描）。**不把「不得全小写」写进 CHECK**：真实地址理论上可全小写，有误伤风险，
+  大小写正确性由写入侧 `CASE_SENSITIVE_CHAINS` 保证。
+- **验收**：迁移 `scripts/migrations/fix_083_onchain_transfer_log_solana_addr_hygiene.sql` 跑两遍：
+  首跑 DELETE 83 / UPDATE 22 / 标脏 182 + 1；复跑全部 rowcount=0（幂等）。
+  复验：残留未标脏 0 / 0 / 0（单端、全小写、其它链空地址），CHECK 已在位。
+  注入测试：空 from / 空 to 均被 `CheckViolation` 拒收，正常行通过（事务回滚不留痕）。
+  写入方单测（stub client + dry-run）：4 条原始转账中 3 条结构脏地址被 `[bad-sol-addr]` 拦下、仅 1 条合法入库。
+  归因侧：Bitget 该地址的小写变体行（原归因 0）归一后并入归因，该地址归因行数 389
+  （全表 solana 归因命中 921 / 15,671 clean 行）。
+- **未动**：非 solana 链零改动（312,823 行 / 17,830 行原先已标脏保持不变）；不动采集频率、不动阈值、不动调度。
+  受影响小时桶由既有 `onchain_netflow_factor`（168h 回看 + 每日 04:40 30d 深修复）自动重算。
+- **产物**：`scripts/migrations/fix_083_onchain_transfer_log_solana_addr_hygiene.sql`（新，入库）、
+  `scripts/bin/phase_chain_transfer_monitor.py`（改，入库）、AGENTS.md 本节。
+  临时探针/执行器脚本在 `/tmp`，已随手删除，未入库。

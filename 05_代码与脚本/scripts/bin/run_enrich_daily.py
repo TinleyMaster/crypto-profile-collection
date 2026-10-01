@@ -22,7 +22,7 @@
     hot          —— 每 30 分钟热跑：只捞最近 4h 窗口内的新地址，把
                     「大额转账出现 → 打上标签」的间隔从最坏近 24h 压到 ~30min。
     backlog      —— 每 30 分钟清积压：不限时间窗，按 whale 候选榜 + 频次从全库
-                    长尾里取（每链 --limit 900），把历史积压慢慢啃完。
+                    长尾里取（每链 --limit 400，约 13 分钟跑完），把历史积压慢慢啃完。
 
 为什么必须三种模式并存：
     热跑解决了「新转账打标太慢」，但清不掉历史长尾；全量解决了长尾，但一天只跑
@@ -110,11 +110,23 @@
         launchctl kickstart -k gui/$(id -u)/com.tinley.crypto.enrich.backlog   # 立即触发一轮
         launchctl bootout  gui/$(id -u)/com.tinley.crypto.enrich.backlog       # 卸载
 
-    睡眠/唤醒：StartCalendarInterval 错过会在唤醒时补跑一次（连错多天也只补一次）；
-    StartInterval 自上次启动起算，睡眠跨过周期同样只补跑一次，节拍相位不固定对齐 :00/:30。
-    两者都不会把机器从睡眠中唤醒（WakeSystem 仅 LaunchDaemon 可用）。
+    睡眠/唤醒：【这条 2026-10-01 实测纠正过，原文写错了】StartInterval 在睡眠期间
+    根本不计时，醒来也不会补拍 —— 当天的日志很清楚：16:39 跑完后机器 16:40 进入
+    Deep Idle，到 18:08 唤醒，本该 18:09:29 触发的那一拍并没有触发，中间整整 90
+    分钟一次都没跑。所以「每 30 分钟一轮」的前提是「机器这 30 分钟得醒着」。本机
+    是电池供电的笔记本，空闲几分钟就睡，实测白天 8 轮的真实间隔是 41/56/55/89
+    分钟。对策见下面「已知边界」第一条。
+    另外，launchd 不会为了跑任务把机器从睡眠中唤醒（WakeSystem 仅 LaunchDaemon 可用）。
 
 已知边界：
+    - 【每 30 分钟一轮的真实前提】机器醒着。本脚本为此做两件事：
+      ① 单轮上限收到 MAX_RUNTIME_MIN["backlog"/"hot"]=15 分钟、backlog 队列收到
+         --limit 400，保证一轮在每一拍内干净跑完。上限若贴着 30 分钟，收尾会顶到
+         下一拍、被 StartInterval 整拍跳过，实测节拍漂到 55~60 分钟。
+      ② 运行期用 caffeinate -i 拦空闲休眠（见 _start_keepawake），避免跑到一半
+         被睡冻住、白耗到上限才被杀。合盖/主动睡眠仍然会睡，只是下一拍不会补。
+      如果哪天要「合上盖子也每 30 分钟跑」，只能装 root LaunchDaemon 配
+      StartCalendarInterval + WakeSystem 定时唤醒，代价是明显的电池消耗。
     - 每日全量跑起来期间，热跑/清积压每一轮都会被单实例保护跳过；
       这是刻意的——它们共用 Etherscan 配额，抢跑只会把 IP 打进限流惩罚窗口。
       故 daily 的运行上限收在 MAX_RUNTIME_MIN["daily"]=3h（不是 Windows 的 10h）：
@@ -204,13 +216,16 @@ HOT_ARGS = [
 # 清积压参数（--mode backlog，2026-10-01 macOS 新增）。与热跑的唯一差别：
 #   不带 --since-hours ⇒ 不限时间窗，队列按 whale 候选榜 + 频次从全库积压里取，
 #   这才是「把 3 万个历史长尾啃完」的口径；热跑只补最近 4h 的新地址、不减积压。
-#   --limit 900 是「每条链」上限（见 backfill_enrich_labels.py 的 --limit 说明）：
-#   eth 吃满 900，base/polygon 受自身存量截断，单轮实际 ≈ 900~1900 个，
-#   按 0.6~0.9 地址/秒约 20~30 分钟，正好卡在 30 分钟节拍内。
+#   --limit 400 是「每条链」上限（见 backfill_enrich_labels.py 的 --limit 说明）。
+#   【为什么从 900 降到 400】2026-10-01 实测：--limit 900 时单轮实际约 700 个
+#   地址、耗时 18 分钟，加上收尾接近 25 分钟 —— 几乎等于 30 分钟的节拍。
+#   launchd 的 StartInterval 一旦在「上一轮还在跑」时到点，那一拍就被整拍跳过，
+#   实际节拍漂到 55~60 分钟。压到 400（约 500 个地址、13 分钟）才能在每一拍内
+#   干净跑完，真正拿到 30 分钟一轮；每轮少爬的部分由「轮数翻倍」补回来。
 BACKLOG_ARGS = [
     "--chain", "eth,base,polygon",
     "--min-count", "1",
-    "--limit", "900",
+    "--limit", "400",
     "--whale-priority",
     "--concurrency", "2",
     "--delay", "2.0",
@@ -223,7 +238,9 @@ MODE_ARGS = {"daily": DEFAULT_ARGS, "hot": HOT_ARGS, "backlog": BACKLOG_ARGS}
 # 页面标签年龄突破 workbench/onchain_alert.py 的 LABEL_STALE_HOURS=26h（历史上真发生过
 # 11 天断供）。到点强杀即可，未爬的地址不入 attempt 表，下一轮自动续跑。
 # daily 收在 3h（Windows 原为 10h）：它持锁期间 30 分钟档全停，3h 后必须把锁还回去。
-MAX_RUNTIME_MIN = {"daily": 180, "hot": 25, "backlog": 25}
+# backlog/hot 从 25 收到 15：上限必须明显小于 30 分钟的节拍，否则单轮收尾会顶到
+# 下一拍、导致那一拍被 StartInterval 整拍跳过（详见 BACKLOG_ARGS 上方注释）。
+MAX_RUNTIME_MIN = {"daily": 180, "hot": 15, "backlog": 15}
 
 # 每日全量的触发时刻（与上面注册命令保持一致）。热跑在这个时刻前后
 # HOT_DAILY_GUARD_MIN 分钟内直接跳过：两者抢同一把锁，若热跑恰好先拿到锁，
@@ -578,6 +595,30 @@ def alert_egress_ip_recovered(mode_txt: str, log_path: Path) -> None:
         _save_ip_state(state)
 
 
+def _start_keepawake():
+    """macOS：本轮运行期间拦掉「空闲休眠」，返回 caffeinate 进程（可 None）。
+
+    2026-10-01 实测：这台笔记本在电池 + 空闲时几乎每分钟都在睡（pmset 日志里
+    12:12 / 12:15 / 13:06… 反复 Entering Sleep）。一轮跑到一半被睡，子进程连同
+    网络请求一起被冻住，白耗到运行上限才被杀——曾把它误判成「本机速度只有
+    0.1 地址/秒」。
+
+    为什么是 caffeinate -i：-i 只拦「空闲休眠」，合盖/主动睡眠照样生效，符合
+    「只在我用电脑时跑」的定位。为什么用 -w 绑自己的 PID 而不是直接包住子进程：
+    这样本进程一退（正常结束、超时强杀、被 launchd 收掉）断言立刻释放，不会把
+    机器长期吊着不让睡；同时子进程仍是直接子进程，terminate() 语义不变。
+    """
+    if os.name != "posix" or not Path("/usr/bin/caffeinate").exists():
+        return None
+    try:
+        return subprocess.Popen(
+            ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        _log(f"  ⚠️  caffeinate 启动失败（不影响本轮）: {e}")
+        return None
+
+
 def main() -> int:
     global LOG_DIR, LOCK_FILE          # 必须在任何引用之前声明
 
@@ -748,6 +789,8 @@ def main() -> int:
             # 子进程 stdout 直接绑日志文件（见下方 Popen 注释）
             log_handle = lf
 
+            # 运行期防睡：这一轮跑完之前别让机器空闲休眠（详见 _start_keepawake）
+            keepawake = _start_keepawake()
             proc = subprocess.Popen(
                 cmd, cwd=str(SCRIPTS_DIR), stdout=log_handle,
                 stderr=subprocess.STDOUT, env=env)
@@ -848,6 +891,14 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 exit_code = proc.wait()
+
+            # 子进程已结束，还机器自由（caffeinate 也绑了本进程 PID，即使这里
+            # 出意外，本进程退出时它也会自行释放）
+            if keepawake:
+                try:
+                    keepawake.terminate()
+                except Exception:
+                    pass
 
             elapsed = time.time() - t0
             if halted_by_429:

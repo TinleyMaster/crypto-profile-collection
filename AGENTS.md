@@ -2594,3 +2594,29 @@ LIMIT 5 FOR UPDATE SKIP LOCKED
   ——可判定且不依赖选参，但属线上行为变更，须独立工单；③ 「同 bar 多币同时破位」的**同质信号合并**可单列。
 - **未动**：零线上代码、零阈值、零调度、零 DDL（全部 SELECT）。临时查询脚本在 `/tmp`，随手删除，未入库。
 - **产物**：文档 §8.1.10（新增）+ §8.1.9 行动项② 补指针；AGENTS.md 本节。**无代码/CSV 产物**。
+
+### 工单 SCAN-BRK-SHORT-OFF-001：BRK 空头停推（已开，待实施）（2026-10-01，本次提交）
+
+来源：上节结论落地时用户选择「开独立工单：评估 BRK 空头整体停推」。**本工单只出方案，本次未改任何线上代码。**
+
+- **位置**：`04_架构与代码方案/盘面扫描BRK空头停推工单_SCAN-BRK-SHORT-OFF-001_2026-10-01.md`
+- **预登记判据（已锁死，开工前逐条满足）**：① 按日聚类 |t| ≥ 2（实测 **t=−2.06**）；
+  ② 剔最大批次后净仍 < 0（n=38，**−2.205%**）；③ 同 bar 去重后净仍 < 0（n=28 bar，−2.535%）；
+  ④ 独立日 ≥ 5 且已结算 ≥ 50（7 日 / 130 笔）。
+- **推荐处置 = 影子抑制**（非删除、非改判据）：在 `task_scan_alert` 的候选过滤循环内**单点**判定
+  `pool='accumulation' AND scenario='BRK' AND p_dir='down'` ⇒ 复用既有
+  [scan_daemon.py::_mark_alert_suppressed](file:///Users/tinley/项目/代码/crypto-profile-collection/05_代码与脚本/scripts/bin/scan_daemon.py#L1828-L1844)
+  写 `alert_suppressed_at/reason` 并 `continue`；新增模块级常量 `SUPPRESS_BRK_SHORT = True`
+  （与 `LIQ_FILTER_ENABLED` 同款式，**回滚 = 单行置 False**）。
+- **为什么不改判据**：任何阈值型修补（如「BTC 跌 >0.5% 就不发空头」）都是 A3 / regime / 方向闸门
+  **三次样本内选参翻车**的同型，§8.1.10 行动项① 已明令禁止。
+- **开工前已查证无需改动的两处看门狗**：
+  `_stall_parts`（丢信号检测，候选集恰含 BRK）**已**排除 `alert_suppressed_at IS NOT NULL` ⇒ 抑制行不误计；
+  `check_scan_freshness._collect_squeeze_health` 作用域仅 `pool='squeeze'` ⇒ 不误报。
+- **为什么不动 `collect_scan_outcome.py`**：其 `CAND_SQL` 以 `alerted_at IS NOT NULL` 为候选条件，
+  被抑制行 `alerted_at` 恒 NULL ⇒ 不进 `scan_signal_outcome`，日报与 §8.1.7「线上真发的告警」样本面
+  **保持纯净**；前向复评不需要 outcome 表（`asset_klines` 常驻，按 `signal_ts` 现算即可）。
+- **解禁判据（预登记）**：影子期 ≥30 独立日且前向 ≥50 笔时复评，须**同时**满足
+  按日 t > 0、24h 净均 > **+0.20%**（覆盖双边成本）、剔最大批次后仍为正。
+- **本轮不动多头**：BRK `up` n=140 亦为负（−0.719%），但未达上述四条判据，另列观察项。
+- **产物**：工单文件（新，入库）+ 文档 §8.1.10 行动项② 补指针 + AGENTS.md 本节。**未改代码**。

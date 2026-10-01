@@ -217,10 +217,18 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ 链上净流因子（P0 数据利用 2026-09-29）═══
     # 资产×小时交易所净流聚合（读侧 union 归因，与 onchain_alert 页同口径）。
-    # 每小时 :20 回看 6h 幂等 upsert（不含进行中的当前小时，错过窗口下轮自动补齐）；
+    # 幂等 upsert（不含进行中的当前小时，错过窗口下轮自动补齐）；
     # 消费者 JOIN core.asset 取 symbol（早报评分/扫描池/catalyst 验证后续接入）。
-    ("onchain_netflow_factor", "20 * * * *", "backfill_netflow_factor.py", ["--hours", "6"],
-     "资产净流因子小时聚合（每小时 :20，回看 6h 幂等 upsert，纯读侧不碰采集）", "core"),
+    #
+    # 回看窗 168h 而非 6h（2026-10-01 修复）：transfer_log 迟到写入是常态，实测 14d
+    #   延迟分布 6~24h 11.8% / 24~72h 2.4% / >72h 2.1%。窗口只有 6h 时，凡迟到 >6h
+    #   的转账永远落在后续任何一次窗口之外 ⇒ 留下永久低覆盖小时（当时 336 小时里
+    #   202 个覆盖 <90%，整体仅 76.8% 成交量）。放宽到 7d 后迟到行可被后续窗口自愈。
+    ("onchain_netflow_factor", "20 * * * *", "backfill_netflow_factor.py", ["--hours", "168"],
+     "资产净流因子小时聚合（每小时 :20，回看 7d 幂等 upsert，覆盖迟到写入）", "core"),
+    # 每日深修复：回看 30d 重算，兜住 >7d 才入库的极端迟到行（避免累积成静默缺口）。
+    ("onchain_netflow_repair", "40 4 * * *", "backfill_netflow_factor.py", ["--hours", "720"],
+     "资产净流因子每日深修复（回看 30d 重算，兜 >7d 极端迟到行）", "core"),
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
     # P0-2 修复：净流轴从仅 ETH 扩展到 ETH+BSC+TRON

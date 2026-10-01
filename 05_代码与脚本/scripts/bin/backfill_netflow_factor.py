@@ -16,6 +16,13 @@
       --since T        绝对窗口： [T, --until 或 当前UTC整点)      —— 历史回填用
     上限仍排除「进行中的当前小时」，保证桶边界稳定、可任意重放。
 
+迟到写入与回看窗（2026-10-01 修复）：
+    biz.onchain_transfer_log 是「迟到写入」常态源——实测 14d 内 15% 的行在区块时间
+    6h 后才入库（延迟分布：6~24h 11.8% / 24~72h 2.4% / >72h 2.1%）。回看窗若只有
+    6h，迟到行就永远落在后续任何一次窗口之外，留下永久低覆盖小时（修复前实测
+    336 小时里 202 个覆盖 <90%，整体仅 76.8% 成交量）。故调度改为每小时 --hours 168
+    ＋每日 --hours 720 深修复。聚合幂等，放宽窗口只是多算几行、不会重复计数。
+
 实现要点：
     写入 = 单条 INSERT INTO ... SELECT ... ON CONFLICT，聚合与 upsert 全程 DB 端完成，
     数据不离开数据库（跨公网逐行 upsert 的 round-trip 版本已废弃，31 天窗口 1h+ → 秒级）。
@@ -27,8 +34,8 @@
     # 预览（不写库，打印 top5 聚合行）
     python backfill_netflow_factor.py --hours 48 --dry-run
 
-    # 实际回填（调度默认每小时跑，回看 6h）
-    python backfill_netflow_factor.py --hours 6
+    # 实际回填（调度每小时跑，回看 7d；每日 04:40 深修复回看 30d）
+    python backfill_netflow_factor.py --hours 168
 
     # 历史回填：从 8 月 1 日补到当前 UTC 整点（分块，幂等）
     python backfill_netflow_factor.py --since 2026-08-01
@@ -136,7 +143,7 @@ def _parse_ts(s: str) -> datetime:
 def main() -> None:
     parser = argparse.ArgumentParser(description="资产净流因子小时聚合回填（幂等，DB 端单语句）")
     parser.add_argument("--hours", type=int, default=6,
-                        help="相对回看窗口（小时），默认 6；调度增量用")
+                        help="相对回看窗口（小时），默认 6；调度用 168（每小时）/ 720（每日深修复）")
     parser.add_argument("--since", type=str, default=None,
                         help="绝对起始时间（UTC，如 2026-08-01），历史回填用；优先于 --hours")
     parser.add_argument("--until", type=str, default=None,

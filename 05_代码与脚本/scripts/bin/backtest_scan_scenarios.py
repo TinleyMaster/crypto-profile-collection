@@ -70,6 +70,7 @@ RSI_PERIOD = 14               # 影子消融用（§14.2：RSI 限衰竭方向�
 BB_PERIOD = 20                # 布林带周期（影子消融用）
 BB_STD = 2.0                  # 布林带 σ 倍数
 INDICATOR_BUCKETS = ("low", "mid", "high")   # 三分位桶
+BATCH_ROWS = 20000              # 服务端游标分批取数行数（见 load_klines docstring）
 
 SCENARIOS = ("Pup_OIup", "Pup_OIdown", "Pdown_OIup", "Pdown_OIdown")
 
@@ -87,7 +88,16 @@ SCENARIO8 = {
 
 
 def load_klines(conn, symbols: list[str], lookback_days: int = 0) -> dict[str, list[dict]]:
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    """加载 1h K 线。
+
+    ⚠️ 2026-10-01 排障：一次取近 50 万行时，远端连接抖动会让服务端长期阻塞在
+    `ClientWrite`（客户端 0% CPU、UTIME 仅 0.5s），整段数据既拿不到也报不出，
+    `--lookback-days 45` 比全量更易触发。改用**服务端游标 + 分批迭代**（`itersize`）
+    把大结果集切成小批次：单批次失败面更小，峰值内存同步下降。取数语义完全不变。
+    """
+    out: dict[str, list[dict]] = defaultdict(list)
+    with conn.cursor(name="bt_klines", row_factory=psycopg.rows.dict_row) as cur:
+        cur.itersize = BATCH_ROWS
         if lookback_days > 0:
             cur.execute(
                 "SELECT symbol, open_time, open_px, close_px, quote_vol FROM biz.asset_klines "
@@ -102,30 +112,28 @@ def load_klines(conn, symbols: list[str], lookback_days: int = 0) -> dict[str, l
                 "WHERE interval='1h' AND symbol = ANY(%s) ORDER BY symbol, open_time",
                 (symbols,),
             )
-        rows = cur.fetchall()
-    out: dict[str, list[dict]] = defaultdict(list)
-    for r in rows:
-        out[r["symbol"]].append({
-            "t": r["open_time"], "open": float(r["open_px"]),
-            "close": float(r["close_px"]), "vol": float(r["quote_vol"] or 0),
-        })
+        for r in cur:
+            out[r["symbol"]].append({
+                "t": r["open_time"], "open": float(r["open_px"]),
+                "close": float(r["close_px"]), "vol": float(r["quote_vol"] or 0),
+            })
     return dict(out)
 
 
 def load_oi_hourly(conn, symbols: list[str]) -> dict[str, dict[datetime, float]]:
     """小时级 OI（回填 1h 点 + 实时 5m 桶聚合），返回 {symbol: {hour_ts: oi}}。"""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    out: dict[str, dict[datetime, float]] = defaultdict(dict)
+    with conn.cursor(name="bt_oi", row_factory=psycopg.rows.dict_row) as cur:
+        cur.itersize = BATCH_ROWS
         cur.execute(
             "SELECT symbol, date_trunc('hour', ts) AS h, AVG(oi_usd) AS oi "
             "FROM biz.oi_cvd_snapshot WHERE oi_usd IS NOT NULL AND symbol = ANY(%s) "
             "GROUP BY symbol, date_trunc('hour', ts)",
             (symbols,),
         )
-        rows = cur.fetchall()
-    out: dict[str, dict[datetime, float]] = defaultdict(dict)
-    for r in rows:
-        if r["oi"] is not None:
-            out[r["symbol"]][r["h"]] = float(r["oi"])
+        for r in cur:
+            if r["oi"] is not None:
+                out[r["symbol"]][r["h"]] = float(r["oi"])
     return dict(out)
 
 
@@ -136,35 +144,35 @@ def load_cvd_hourly(conn, symbols: list[str]) -> dict[str, dict[datetime, float]
     与线上 `_compute_l2` 的「近 2 个 5m 桶」不同（同类边界见 §12.1-B18）。
     无数据（2026-09-16 前的触发根）返回缺键 → 该记录 cvd_dir 为 None（不进 8 场景桶）。
     """
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    out: dict[str, dict[datetime, float]] = defaultdict(dict)
+    with conn.cursor(name="bt_cvd", row_factory=psycopg.rows.dict_row) as cur:
+        cur.itersize = BATCH_ROWS
         cur.execute(
             "SELECT symbol, date_trunc('hour', ts) AS h, SUM(cvd_5m_usd) AS cvd "
             "FROM biz.oi_cvd_snapshot WHERE cvd_5m_usd IS NOT NULL AND symbol = ANY(%s) "
             "GROUP BY symbol, date_trunc('hour', ts)",
             (symbols,),
         )
-        rows = cur.fetchall()
-    out: dict[str, dict[datetime, float]] = defaultdict(dict)
-    for r in rows:
-        if r["cvd"] is not None:
-            out[r["symbol"]][r["h"]] = float(r["cvd"])
+        for r in cur:
+            if r["cvd"] is not None:
+                out[r["symbol"]][r["h"]] = float(r["cvd"])
     return dict(out)
 
 
 def load_funding(conn, symbols: list[str]) -> dict[str, tuple[list, list[float]]]:
     """资金费率历史（8h 结算点）→ {symbol: (sorted_fts, rates)}，供 bisect 近邻查找。"""
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    out: dict[str, tuple[list, list[float]]] = defaultdict(lambda: ([], []))
+    with conn.cursor(name="bt_funding", row_factory=psycopg.rows.dict_row) as cur:
+        cur.itersize = BATCH_ROWS
         cur.execute(
             "SELECT symbol, funding_time, rate FROM biz.funding_rate_hist "
             "WHERE symbol = ANY(%s) ORDER BY symbol, funding_time",
             (symbols,),
         )
-        rows = cur.fetchall()
-    out: dict[str, tuple[list, list[float]]] = defaultdict(lambda: ([], []))
-    for r in rows:
-        if r["rate"] is not None:
-            out[r["symbol"]][0].append(r["funding_time"])
-            out[r["symbol"]][1].append(float(r["rate"]))
+        for r in cur:
+            if r["rate"] is not None:
+                out[r["symbol"]][0].append(r["funding_time"])
+                out[r["symbol"]][1].append(float(r["rate"]))
     return {k: v for k, v in out.items() if v[0]}
 
 
@@ -499,6 +507,7 @@ def main() -> int:
                         help="时序切分：最近 N 天 entry 的信号为 test、其余为 train（0=关闭）。"
                              "test 只做对照，阈值/参数选择只允许看 train（§14.4）")
     args = parser.parse_args()
+    out_explicit = bool(args.out)   # 是否显式给了 --out（下方会把默认值写回 args.out）
 
     settings = get_settings(require_database=True)
     with get_connection(settings.database_url) as conn:
@@ -684,6 +693,14 @@ def main() -> int:
             args.out = str(SCRIPT_DIR.parent / "data" / "backtest_scan_results.csv")
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        # 护栏（2026-10-01）：兄弟 CSV 曾用固定名，`--out data/_a3_h14_scan.csv` 这类
+        # 自定义输出仍会把 data/backtest_{indicator,funding,cvd}_*.csv 这些已 tracked 的
+        # 全窗口证据（split=all）覆盖成 holdout（split=train/test）结果。显式给 `--out`
+        # 时兄弟文件改用 `<out_stem>_*` 前缀；不给 `--out` 时保持既有文件名不变。
+        def _sibling(base_name: str) -> Path:
+            if out_explicit:
+                return out_path.with_name(f"{out_path.stem}_{base_name}")
+            return out_path.with_name(base_name)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()) if csv_rows else ["scenario"])
             w.writeheader()
@@ -691,7 +708,7 @@ def main() -> int:
         print(f"\n[backtest] 结果已存 {args.out}")
 
         if irows:
-            iout = out_path.with_name("backtest_indicator_ablation.csv")
+            iout = _sibling("backtest_indicator_ablation.csv")
             with open(iout, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=list(irows[0].keys()))
                 w.writeheader()
@@ -699,7 +716,7 @@ def main() -> int:
             print(f"[backtest] 指标影子消融已存 {iout}")
 
         if frows:
-            fout = out_path.with_name("backtest_funding_ablation.csv")
+            fout = _sibling("backtest_funding_ablation.csv")
             with open(fout, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=list(frows[0].keys()))
                 w.writeheader()
@@ -707,7 +724,7 @@ def main() -> int:
             print(f"[backtest] funding 消融已存 {fout}")
 
         if cvd_csv_rows:
-            cout = out_path.with_name("backtest_cvd_scenarios.csv")
+            cout = _sibling("backtest_cvd_scenarios.csv")
             with open(cout, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=list(cvd_csv_rows[0].keys()))
                 w.writeheader()

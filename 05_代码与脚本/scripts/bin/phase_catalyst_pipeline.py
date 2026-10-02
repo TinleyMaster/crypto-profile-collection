@@ -1809,6 +1809,14 @@ def run_ai_decision(conn, config: dict, limit: int | None = None) -> dict:
         new_tp = dec.get("target_price") if dec.get("target_price") is not None else _to_num(r.get("take_profit"))
         new_sl = dec.get("stop_loss") if dec.get("stop_loss") is not None else _to_num(r.get("stop_loss"))
 
+        # 审计 2026-10-02 P1-2：AI 自评否定结论必须消费 —— ai_reason 自曝
+        # 「资产错配/标的不匹配」时，把 tier 从 A/B 封顶到 C（只降级不改分），
+        # 否则信号层最后一道质量门形同虚设（AI 判了错配照样挂 A 级占推送位）。
+        new_tier = r["tier"]
+        if _ai_negation_in_reason(dec.get("reasoning")) and new_tier in ("A", "B"):
+            new_tier = "C"
+            print(f"    ⚠️  signal {r['signal_id']} AI 自评否定结论 → tier {r['tier']} 降级为 C")
+
         conn.execute(
             """
             UPDATE biz.catalyst_signal
@@ -1816,10 +1824,11 @@ def run_ai_decision(conn, config: dict, limit: int | None = None) -> dict:
                 investment_cycle = %s,
                 take_profit = %s,
                 stop_loss = %s,
+                tier = %s,
                 updated_at = NOW()
             WHERE signal_id = %s
             """,
-            (dec.get("reasoning"), dec.get("investment_cycle"), new_tp, new_sl, r["signal_id"]),
+            (dec.get("reasoning"), dec.get("investment_cycle"), new_tp, new_sl, new_tier, r["signal_id"]),
         )
         enhanced += 1
 
@@ -1833,6 +1842,23 @@ def _to_num(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+# 审计 2026-10-02 P1-2：AI 自评打架 —— A/B 级 2,118 条中 80 条 ai_reason 自曝
+#   「资产错配/标的不匹配」却仍挂 A(2)/B(78) 高分（含 signal 1085989 XRP A 86 分
+#   自述「严重资产错配」）。根因：run_ai_decision 只把 ai_reason 落库，从不消费
+#   否定结论 → 信号层最后一道质量门漏检。
+# 修法（与 RR/方向/价格闸门同属「只降级不改分」的显式例外）：写入 ai_reason 后
+# 检测否定关键词，命中即把 tier 从 A/B 封顶到 C（不占 A/B 推送位，composite 保留
+# 供回测/统计口径不变）。
+AI_NEGATION_KEYWORDS = ("错配", "不匹配", "不一致", "不适用", "标的不对", "无相关标的")
+
+
+def _ai_negation_in_reason(reason: str | None) -> bool:
+    """判断 AI 推荐原因是否自曝「资产/标的不匹配」等否定结论。"""
+    if not reason:
+        return False
+    return any(kw in reason for kw in AI_NEGATION_KEYWORDS)
 
 
 # =====================================================================

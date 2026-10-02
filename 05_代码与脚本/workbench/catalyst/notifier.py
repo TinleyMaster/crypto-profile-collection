@@ -598,6 +598,16 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
             suppressed += 1
             _mark_sent(conn, row["signal_id"], NTYPE_FAST_ALERT, "A", None,
                        status="suppressed", error_msg=f"AI 否决：{why}")
+            # 审计 2026-10-02 P1-2：AI 否定结论必须消费到信号层质量门。
+            # 此前 AI 判「资产错配/不建议」只抑制发信，DB 里 tier 仍挂 A，
+            # 早报/看板/回测读 tier 时这条「被否决的高分」照样占据 A 级。
+            # 与慢通道 run_ai_decision 的降级口径一致：tier 封顶 C（只降级不改分）。
+            if (row.get("tier") or "").strip().upper() in ("A", "B"):
+                conn.execute(
+                    "UPDATE biz.catalyst_signal SET tier = 'C', updated_at = NOW() "
+                    "WHERE signal_id = %s AND status IN ('open', 'watch')",
+                    (row["signal_id"],),
+                )
             logger.info("A 级快讯已抑制 [%s] signal=%s：%s",
                         row["symbol"], row["signal_id"], why)
             continue

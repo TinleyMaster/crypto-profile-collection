@@ -254,6 +254,16 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("catalyst_major_events", "*/30 * * * *", "send_major_events.py", [], "重大事件通道·低时延兜底（每 30 分钟）", "core"),
     # 催化剂周报：概览+A级清单，自然周去重，每周一 09:00 发送
     ("catalyst_weekly_report", "0 9 * * mon", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core"),
+    # 审计 2026-10-02 P0-1：catalyst_outcome 自 2026-09-18 起停摆 15 天（9/18 后 26,441 条信号
+    #   回填率 0%）——根因是 collect_catalyst_outcome.py 从未注册调度（结果回流层无任何定时任务）。
+    #   该脚本幂等：只结算未结算的 (catalyst_id, asset_id)，7d/14d 窗口走 daily 推进，重复跑无害。
+    #   频率选 4h 对齐慢通道节奏（窗口 4h/24h/72h 天然按此推进），错峰 :15 避开 slow 的 :30 槽位。
+    ("catalyst_outcome_collect", "15 */4 * * *", "collect_catalyst_outcome.py", [], "催化剂结局结算（outcome 回填，每 4 小时；2026-10-02 P0-1 补注册）", "core"),
+    # 审计 2026-10-02 P1-3：catalyst_calibration 21 行窗口全部锁死在 2026-09-11~09-18 ——
+    #   根因是 calibrate_catalyst_weights.py 从未注册调度（校准表只在手工/一次性跑过）。
+    #   周级重算：依赖 outcome（已由 catalyst_outcome_collect 保证持续回流），周日 05:00 错峰
+    #   signal_type_calibration_weekly（同样周日 05:00，改到 05:30 避免同分钟争 core 槽位）。
+    ("catalyst_calibration_weekly", "30 5 * * sun", "calibrate_catalyst_weights.py", [], "催化剂权重校准周级重算（每周日 05:30，2026-10-02 P1-3 补注册）", "core"),
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),

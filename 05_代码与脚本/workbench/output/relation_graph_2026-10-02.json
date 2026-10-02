@@ -1,0 +1,1322 @@
+{
+  "generated_at": "2026-10-02T15:37:34.147725+00:00",
+  "args": {
+    "top_n": 400,
+    "min_days": 90,
+    "min_members": 3,
+    "winsorize_pct": 50.0,
+    "output": "",
+    "selftest": false
+  },
+  "window": "2026-06-21 ~ 2026-10-02",
+  "universe": {
+    "n": 116,
+    "n_days": 104,
+    "n_excluded_stable": 29
+  },
+  "baseline": {
+    "mean": 0.1267,
+    "median": 0.1152
+  },
+  "dims": {
+    "sector": {
+      "n_groups_analyzed": 12,
+      "n_groups_total": 12,
+      "groups": [
+        {
+          "group": "depin",
+          "n": 8,
+          "n_pairs": 28,
+          "mean": 0.312,
+          "median": 0.3528,
+          "max": 0.6157,
+          "tightness": 0.1853,
+          "top_pairs": [
+            {
+              "a": "TAO",
+              "b": "RENDER",
+              "corr": 0.6157
+            },
+            {
+              "a": "RENDER",
+              "b": "GRT",
+              "corr": 0.5473
+            },
+            {
+              "a": "ICP",
+              "b": "FIL",
+              "corr": 0.5335
+            },
+            {
+              "a": "FIL",
+              "b": "AR",
+              "corr": 0.5162
+            },
+            {
+              "a": "TAO",
+              "b": "GRT",
+              "corr": 0.4976
+            }
+          ]
+        },
+        {
+          "group": "gamefi",
+          "n": 14,
+          "n_pairs": 91,
+          "mean": 0.2547,
+          "median": 0.267,
+          "max": 0.6675,
+          "tightness": 0.128,
+          "top_pairs": [
+            {
+              "a": "ENS",
+              "b": "FLOKI",
+              "corr": 0.6675
+            },
+            {
+              "a": "PENGU",
+              "b": "FLOKI",
+              "corr": 0.6465
+            },
+            {
+              "a": "FET",
+              "b": "FLOKI",
+              "corr": 0.6295
+            },
+            {
+              "a": "FET",
+              "b": "ENS",
+              "corr": 0.5909
+            },
+            {
+              "a": "RENDER",
+              "b": "FET",
+              "corr": 0.5723
+            }
+          ]
+        },
+        {
+          "group": "ai",
+          "n": 19,
+          "n_pairs": 171,
+          "mean": 0.1947,
+          "median": 0.1731,
+          "max": 0.6157,
+          "tightness": 0.068,
+          "top_pairs": [
+            {
+              "a": "TAO",
+              "b": "RENDER",
+              "corr": 0.6157
+            },
+            {
+              "a": "NEAR",
+              "b": "RENDER",
+              "corr": 0.587
+            },
+            {
+              "a": "RENDER",
+              "b": "FET",
+              "corr": 0.5723
+            },
+            {
+              "a": "RENDER",
+              "b": "GRT",
+              "corr": 0.5473
+            },
+            {
+              "a": "NEAR",
+              "b": "GRT",
+              "corr": 0.5458
+            }
+          ]
+        },
+        {
+          "group": "l1",
+          "n": 62,
+          "n_pairs": 1891,
+          "mean": 0.1615,
+          "median": 0.1506,
+          "max": 0.7091,
+          "tightness": 0.0348,
+          "top_pairs": [
+            {
+              "a": "APT",
+              "b": "OP",
+              "corr": 0.7091
+            },
+            {
+              "a": "TIA",
+              "b": "OP",
+              "corr": 0.696
+            },
+            {
+              "a": "BNB",
+              "b": "CAKE",
+              "corr": 0.6585
+            },
+            {
+              "a": "APT",
+              "b": "TIA",
+              "corr": 0.6422
+            },
+            {
+              "a": "ZEC",
+              "b": "DASH",
+              "corr": 0.6417
+            }
+          ]
+        },
+        {
+          "group": "defi",
+          "n": 58,
+          "n_pairs": 1653,
+          "mean": 0.1575,
+          "median": 0.1508,
+          "max": 0.7299,
+          "tightness": 0.0308,
+          "top_pairs": [
+            {
+              "a": "SOL",
+              "b": "JLP",
+              "corr": 0.7299
+            },
+            {
+              "a": "TIA",
+              "b": "OP",
+              "corr": 0.696
+            },
+            {
+              "a": "ENS",
+              "b": "FLOKI",
+              "corr": 0.6675
+            },
+            {
+              "a": "BNB",
+              "b": "CAKE",
+              "corr": 0.6585
+            },
+            {
+              "a": "SHIB",
+              "b": "FLOKI",
+              "corr": 0.6543
+            }
+          ]
+        },
+        {
+          "group": "l2",
+          "n": 10,
+          "n_pairs": 45,
+          "mean": 0.157,
+          "median": 0.156,
+          "max": 0.5443,
+          "tightness": 0.0303,
+          "top_pairs": [
+            {
+              "a": "IMX",
+              "b": "OP",
+              "corr": 0.5443
+            },
+            {
+              "a": "STRK",
+              "b": "OP",
+              "corr": 0.5389
+            },
+            {
+              "a": "ARB",
+              "b": "OP",
+              "corr": 0.5311
+            },
+            {
+              "a": "STX",
+              "b": "OP",
+              "corr": 0.4313
+            },
+            {
+              "a": "ARB",
+              "b": "STRK",
+              "corr": 0.4185
+            }
+          ]
+        },
+        {
+          "group": "infra",
+          "n": 78,
+          "n_pairs": 3003,
+          "mean": 0.1553,
+          "median": 0.1414,
+          "max": 0.8975,
+          "tightness": 0.0286,
+          "top_pairs": [
+            {
+              "a": "TRX",
+              "b": "SUN",
+              "corr": 0.8975
+            },
+            {
+              "a": "TRX",
+              "b": "LEO",
+              "corr": 0.8283
+            },
+            {
+              "a": "DOGE",
+              "b": "FLOKI",
+              "corr": 0.7623
+            },
+            {
+              "a": "LEO",
+              "b": "SUN",
+              "corr": 0.7576
+            },
+            {
+              "a": "APT",
+              "b": "OP",
+              "corr": 0.7091
+            }
+          ]
+        },
+        {
+          "group": "derivatives",
+          "n": 11,
+          "n_pairs": 55,
+          "mean": 0.1483,
+          "median": 0.1571,
+          "max": 0.565,
+          "tightness": 0.0216,
+          "top_pairs": [
+            {
+              "a": "JUP",
+              "b": "RAY",
+              "corr": 0.565
+            },
+            {
+              "a": "ASTER",
+              "b": "CAKE",
+              "corr": 0.4815
+            },
+            {
+              "a": "ONDO",
+              "b": "INJ",
+              "corr": 0.3652
+            },
+            {
+              "a": "INJ",
+              "b": "PENDLE",
+              "corr": 0.3396
+            },
+            {
+              "a": "JUP",
+              "b": "PENDLE",
+              "corr": 0.334
+            }
+          ]
+        },
+        {
+          "group": "cex_token",
+          "n": 35,
+          "n_pairs": 595,
+          "mean": 0.1481,
+          "median": 0.1404,
+          "max": 0.7498,
+          "tightness": 0.0214,
+          "top_pairs": [
+            {
+              "a": "LEO",
+              "b": "HTX",
+              "corr": 0.7498
+            },
+            {
+              "a": "BNB",
+              "b": "CAKE",
+              "corr": 0.6585
+            },
+            {
+              "a": "SOL",
+              "b": "JUP",
+              "corr": 0.6302
+            },
+            {
+              "a": "BNB",
+              "b": "GT",
+              "corr": 0.623
+            },
+            {
+              "a": "ETC",
+              "b": "TIA",
+              "corr": 0.5689
+            }
+          ]
+        },
+        {
+          "group": "meme",
+          "n": 17,
+          "n_pairs": 136,
+          "mean": 0.1365,
+          "median": 0.1023,
+          "max": 0.7623,
+          "tightness": 0.0098,
+          "top_pairs": [
+            {
+              "a": "DOGE",
+              "b": "FLOKI",
+              "corr": 0.7623
+            },
+            {
+              "a": "DOGE",
+              "b": "PEPE",
+              "corr": 0.688
+            },
+            {
+              "a": "PEPE",
+              "b": "FLOKI",
+              "corr": 0.6879
+            },
+            {
+              "a": "SHIB",
+              "b": "FLOKI",
+              "corr": 0.6543
+            },
+            {
+              "a": "PENGU",
+              "b": "FLOKI",
+              "corr": 0.6465
+            }
+          ]
+        },
+        {
+          "group": "rwa",
+          "n": 15,
+          "n_pairs": 105,
+          "mean": 0.1365,
+          "median": 0.1166,
+          "max": 1.0,
+          "tightness": 0.0098,
+          "top_pairs": [
+            {
+              "a": "XAUt",
+              "b": "PAXG",
+              "corr": 1.0
+            },
+            {
+              "a": "QNT",
+              "b": "SOON",
+              "corr": 0.5867
+            },
+            {
+              "a": "HBAR",
+              "b": "ALGO",
+              "corr": 0.5335
+            },
+            {
+              "a": "HBAR",
+              "b": "XDC",
+              "corr": 0.4995
+            },
+            {
+              "a": "QNT",
+              "b": "XDC",
+              "corr": 0.4862
+            }
+          ]
+        },
+        {
+          "group": "launchpad",
+          "n": 6,
+          "n_pairs": 15,
+          "mean": 0.1232,
+          "median": 0.0925,
+          "max": 0.565,
+          "tightness": -0.0035,
+          "top_pairs": [
+            {
+              "a": "JUP",
+              "b": "RAY",
+              "corr": 0.565
+            },
+            {
+              "a": "HYPE",
+              "b": "PUMP",
+              "corr": 0.2856
+            },
+            {
+              "a": "HYPE",
+              "b": "JUP",
+              "corr": 0.2767
+            },
+            {
+              "a": "HYPE",
+              "b": "RAY",
+              "corr": 0.226
+            },
+            {
+              "a": "JUP",
+              "b": "VIRTUAL",
+              "corr": 0.1232
+            }
+          ]
+        }
+      ]
+    },
+    "chain": {
+      "n_groups_analyzed": 10,
+      "n_groups_total": 10,
+      "groups": [
+        {
+          "group": "tron",
+          "n": 5,
+          "n_pairs": 10,
+          "mean": 0.4509,
+          "median": 0.4764,
+          "max": 1.0,
+          "tightness": 0.3242,
+          "top_pairs": [
+            {
+              "a": "HTX",
+              "b": "SUN",
+              "corr": 1.0
+            },
+            {
+              "a": "JST",
+              "b": "SUN",
+              "corr": 0.6466
+            },
+            {
+              "a": "HTX",
+              "b": "JST",
+              "corr": 0.6256
+            },
+            {
+              "a": "BTT",
+              "b": "SUN",
+              "corr": 0.4925
+            },
+            {
+              "a": "HTX",
+              "b": "BTT",
+              "corr": 0.4864
+            }
+          ]
+        },
+        {
+          "group": "aptos",
+          "n": 3,
+          "n_pairs": 3,
+          "mean": 0.2408,
+          "median": 0.1992,
+          "max": 0.3748,
+          "tightness": 0.1141,
+          "top_pairs": [
+            {
+              "a": "APT",
+              "b": "BONK",
+              "corr": 0.3748
+            },
+            {
+              "a": "CAKE",
+              "b": "APT",
+              "corr": 0.1992
+            },
+            {
+              "a": "CAKE",
+              "b": "BONK",
+              "corr": 0.1484
+            }
+          ]
+        },
+        {
+          "group": "optimism",
+          "n": 9,
+          "n_pairs": 36,
+          "mean": 0.2394,
+          "median": 0.2071,
+          "max": 0.5604,
+          "tightness": 0.1127,
+          "top_pairs": [
+            {
+              "a": "DOT",
+              "b": "WLD",
+              "corr": 0.5604
+            },
+            {
+              "a": "WLD",
+              "b": "OP",
+              "corr": 0.5496
+            },
+            {
+              "a": "UNI",
+              "b": "OP",
+              "corr": 0.5107
+            },
+            {
+              "a": "DOT",
+              "b": "OP",
+              "corr": 0.4936
+            },
+            {
+              "a": "UNI",
+              "b": "PENDLE",
+              "corr": 0.4543
+            }
+          ]
+        },
+        {
+          "group": "avalanche",
+          "n": 9,
+          "n_pairs": 36,
+          "mean": 0.1905,
+          "median": 0.1579,
+          "max": 0.5103,
+          "tightness": 0.0638,
+          "top_pairs": [
+            {
+              "a": "UNI",
+              "b": "CAKE",
+              "corr": 0.5103
+            },
+            {
+              "a": "AVAX",
+              "b": "LUNC",
+              "corr": 0.4968
+            },
+            {
+              "a": "CAKE",
+              "b": "LUNC",
+              "corr": 0.4658
+            },
+            {
+              "a": "ETH",
+              "b": "SPX",
+              "corr": 0.4447
+            },
+            {
+              "a": "GRT",
+              "b": "LUNC",
+              "corr": 0.4414
+            }
+          ]
+        },
+        {
+          "group": "polygon",
+          "n": 10,
+          "n_pairs": 45,
+          "mean": 0.178,
+          "median": 0.2101,
+          "max": 0.4414,
+          "tightness": 0.0513,
+          "top_pairs": [
+            {
+              "a": "GRT",
+              "b": "LUNC",
+              "corr": 0.4414
+            },
+            {
+              "a": "ATOM",
+              "b": "LUNC",
+              "corr": 0.414
+            },
+            {
+              "a": "ATOM",
+              "b": "GRT",
+              "corr": 0.383
+            },
+            {
+              "a": "BONK",
+              "b": "GRT",
+              "corr": 0.3641
+            },
+            {
+              "a": "UNI",
+              "b": "LDO",
+              "corr": 0.3592
+            }
+          ]
+        },
+        {
+          "group": "solana",
+          "n": 27,
+          "n_pairs": 351,
+          "mean": 0.1721,
+          "median": 0.1547,
+          "max": 0.6157,
+          "tightness": 0.0454,
+          "top_pairs": [
+            {
+              "a": "TAO",
+              "b": "RENDER",
+              "corr": 0.6157
+            },
+            {
+              "a": "TAO",
+              "b": "JUP",
+              "corr": 0.6148
+            },
+            {
+              "a": "SUI",
+              "b": "RENDER",
+              "corr": 0.5727
+            },
+            {
+              "a": "JUP",
+              "b": "RAY",
+              "corr": 0.565
+            },
+            {
+              "a": "SUI",
+              "b": "TAO",
+              "corr": 0.5538
+            }
+          ]
+        },
+        {
+          "group": "arbitrum",
+          "n": 16,
+          "n_pairs": 120,
+          "mean": 0.1644,
+          "median": 0.1607,
+          "max": 0.5103,
+          "tightness": 0.0377,
+          "top_pairs": [
+            {
+              "a": "UNI",
+              "b": "CAKE",
+              "corr": 0.5103
+            },
+            {
+              "a": "UNI",
+              "b": "PENDLE",
+              "corr": 0.4543
+            },
+            {
+              "a": "MORPHO",
+              "b": "PENDLE",
+              "corr": 0.4467
+            },
+            {
+              "a": "PENDLE",
+              "b": "LDO",
+              "corr": 0.446
+            },
+            {
+              "a": "UNI",
+              "b": "ARB",
+              "corr": 0.441
+            }
+          ]
+        },
+        {
+          "group": "base",
+          "n": 19,
+          "n_pairs": 171,
+          "mean": 0.1326,
+          "median": 0.1222,
+          "max": 0.4936,
+          "tightness": 0.0059,
+          "top_pairs": [
+            {
+              "a": "DOT",
+              "b": "OP",
+              "corr": 0.4936
+            },
+            {
+              "a": "BONK",
+              "b": "OP",
+              "corr": 0.451
+            },
+            {
+              "a": "MORPHO",
+              "b": "PENDLE",
+              "corr": 0.4467
+            },
+            {
+              "a": "ICP",
+              "b": "OP",
+              "corr": 0.4458
+            },
+            {
+              "a": "ETH",
+              "b": "SPX",
+              "corr": 0.4447
+            }
+          ]
+        },
+        {
+          "group": "ethereum",
+          "n": 62,
+          "n_pairs": 1891,
+          "mean": 0.1305,
+          "median": 0.1254,
+          "max": 1.0,
+          "tightness": 0.0038,
+          "top_pairs": [
+            {
+              "a": "XAUt",
+              "b": "PAXG",
+              "corr": 1.0
+            },
+            {
+              "a": "TRX",
+              "b": "HTX",
+              "corr": 0.895
+            },
+            {
+              "a": "TRX",
+              "b": "LEO",
+              "corr": 0.8283
+            },
+            {
+              "a": "TRX",
+              "b": "XAUt",
+              "corr": 0.799
+            },
+            {
+              "a": "TRX",
+              "b": "PAXG",
+              "corr": 0.7933
+            }
+          ]
+        },
+        {
+          "group": "bsc",
+          "n": 22,
+          "n_pairs": 231,
+          "mean": 0.0957,
+          "median": 0.0792,
+          "max": 0.6543,
+          "tightness": -0.031,
+          "top_pairs": [
+            {
+              "a": "SHIB",
+              "b": "FLOKI",
+              "corr": 0.6543
+            },
+            {
+              "a": "PENGU",
+              "b": "FLOKI",
+              "corr": 0.6465
+            },
+            {
+              "a": "BONK",
+              "b": "FLOKI",
+              "corr": 0.5867
+            },
+            {
+              "a": "PENGU",
+              "b": "BONK",
+              "corr": 0.5177
+            },
+            {
+              "a": "UNI",
+              "b": "CAKE",
+              "corr": 0.5103
+            }
+          ]
+        }
+      ]
+    },
+    "narrative": {
+      "n_groups_analyzed": 14,
+      "n_groups_total": 14,
+      "groups": [
+        {
+          "group": "Metaverse",
+          "n": 4,
+          "n_pairs": 6,
+          "mean": 0.3311,
+          "median": 0.3541,
+          "max": 0.4424,
+          "tightness": 0.2044,
+          "top_pairs": [
+            {
+              "a": "STX",
+              "b": "FLOKI",
+              "corr": 0.4424
+            },
+            {
+              "a": "RENDER",
+              "b": "FLOKI",
+              "corr": 0.397
+            },
+            {
+              "a": "VIRTUAL",
+              "b": "FLOKI",
+              "corr": 0.3554
+            },
+            {
+              "a": "RENDER",
+              "b": "VIRTUAL",
+              "corr": 0.3527
+            },
+            {
+              "a": "RENDER",
+              "b": "STX",
+              "corr": 0.2931
+            }
+          ]
+        },
+        {
+          "group": "DePIN",
+          "n": 6,
+          "n_pairs": 15,
+          "mean": 0.3124,
+          "median": 0.3602,
+          "max": 0.6157,
+          "tightness": 0.1857,
+          "top_pairs": [
+            {
+              "a": "TAO",
+              "b": "RENDER",
+              "corr": 0.6157
+            },
+            {
+              "a": "ICP",
+              "b": "FIL",
+              "corr": 0.5335
+            },
+            {
+              "a": "FIL",
+              "b": "AR",
+              "corr": 0.5162
+            },
+            {
+              "a": "ICP",
+              "b": "RENDER",
+              "corr": 0.479
+            },
+            {
+              "a": "RENDER",
+              "b": "FIL",
+              "corr": 0.4511
+            }
+          ]
+        },
+        {
+          "group": "NFTs & Collectibles",
+          "n": 8,
+          "n_pairs": 28,
+          "mean": 0.3063,
+          "median": 0.3313,
+          "max": 0.5723,
+          "tightness": 0.1796,
+          "top_pairs": [
+            {
+              "a": "RENDER",
+              "b": "FET",
+              "corr": 0.5723
+            },
+            {
+              "a": "PENGU",
+              "b": "FET",
+              "corr": 0.5224
+            },
+            {
+              "a": "RENDER",
+              "b": "IMX",
+              "corr": 0.4582
+            },
+            {
+              "a": "RENDER",
+              "b": "CFX",
+              "corr": 0.4481
+            },
+            {
+              "a": "RENDER",
+              "b": "PENGU",
+              "corr": 0.4435
+            }
+          ]
+        },
+        {
+          "group": "Gaming",
+          "n": 6,
+          "n_pairs": 15,
+          "mean": 0.236,
+          "median": 0.3007,
+          "max": 0.4582,
+          "tightness": 0.1093,
+          "top_pairs": [
+            {
+              "a": "RENDER",
+              "b": "IMX",
+              "corr": 0.4582
+            },
+            {
+              "a": "STX",
+              "b": "FLOKI",
+              "corr": 0.4424
+            },
+            {
+              "a": "RENDER",
+              "b": "FLOKI",
+              "corr": 0.397
+            },
+            {
+              "a": "STX",
+              "b": "IMX",
+              "corr": 0.3904
+            },
+            {
+              "a": "IMX",
+              "b": "FLOKI",
+              "corr": 0.3872
+            }
+          ]
+        },
+        {
+          "group": "AI & Big Data",
+          "n": 14,
+          "n_pairs": 91,
+          "mean": 0.1979,
+          "median": 0.1706,
+          "max": 0.6157,
+          "tightness": 0.0712,
+          "top_pairs": [
+            {
+              "a": "TAO",
+              "b": "RENDER",
+              "corr": 0.6157
+            },
+            {
+              "a": "NEAR",
+              "b": "RENDER",
+              "corr": 0.587
+            },
+            {
+              "a": "RENDER",
+              "b": "FET",
+              "corr": 0.5723
+            },
+            {
+              "a": "RENDER",
+              "b": "GRT",
+              "corr": 0.5473
+            },
+            {
+              "a": "NEAR",
+              "b": "GRT",
+              "corr": 0.5458
+            }
+          ]
+        },
+        {
+          "group": "Memes",
+          "n": 12,
+          "n_pairs": 66,
+          "mean": 0.1937,
+          "median": 0.1242,
+          "max": 0.7623,
+          "tightness": 0.067,
+          "top_pairs": [
+            {
+              "a": "DOGE",
+              "b": "FLOKI",
+              "corr": 0.7623
+            },
+            {
+              "a": "DOGE",
+              "b": "PEPE",
+              "corr": 0.688
+            },
+            {
+              "a": "PEPE",
+              "b": "FLOKI",
+              "corr": 0.6879
+            },
+            {
+              "a": "SHIB",
+              "b": "FLOKI",
+              "corr": 0.6543
+            },
+            {
+              "a": "PENGU",
+              "b": "FLOKI",
+              "corr": 0.6465
+            }
+          ]
+        },
+        {
+          "group": "File Storage",
+          "n": 3,
+          "n_pairs": 3,
+          "mean": 0.1909,
+          "median": 0.1204,
+          "max": 0.5162,
+          "tightness": 0.0642,
+          "top_pairs": [
+            {
+              "a": "FIL",
+              "b": "AR",
+              "corr": 0.5162
+            },
+            {
+              "a": "FIL",
+              "b": "BTT",
+              "corr": 0.1204
+            },
+            {
+              "a": "BTT",
+              "b": "AR",
+              "corr": -0.0638
+            }
+          ]
+        },
+        {
+          "group": "Layer 2",
+          "n": 9,
+          "n_pairs": 36,
+          "mean": 0.1721,
+          "median": 0.1697,
+          "max": 0.5443,
+          "tightness": 0.0454,
+          "top_pairs": [
+            {
+              "a": "IMX",
+              "b": "OP",
+              "corr": 0.5443
+            },
+            {
+              "a": "STRK",
+              "b": "OP",
+              "corr": 0.5389
+            },
+            {
+              "a": "ARB",
+              "b": "OP",
+              "corr": 0.5311
+            },
+            {
+              "a": "STX",
+              "b": "OP",
+              "corr": 0.4313
+            },
+            {
+              "a": "ARB",
+              "b": "STRK",
+              "corr": 0.4185
+            }
+          ]
+        },
+        {
+          "group": "DeFi",
+          "n": 35,
+          "n_pairs": 595,
+          "mean": 0.155,
+          "median": 0.1584,
+          "max": 0.6285,
+          "tightness": 0.0283,
+          "top_pairs": [
+            {
+              "a": "DOT",
+              "b": "ATOM",
+              "corr": 0.6285
+            },
+            {
+              "a": "JUP",
+              "b": "RAY",
+              "corr": 0.565
+            },
+            {
+              "a": "DOT",
+              "b": "WLD",
+              "corr": 0.5604
+            },
+            {
+              "a": "RENDER",
+              "b": "GRT",
+              "corr": 0.5473
+            },
+            {
+              "a": "WLD",
+              "b": "RENDER",
+              "corr": 0.5443
+            }
+          ]
+        },
+        {
+          "group": "Layer 1",
+          "n": 38,
+          "n_pairs": 703,
+          "mean": 0.1549,
+          "median": 0.1389,
+          "max": 0.6422,
+          "tightness": 0.0282,
+          "top_pairs": [
+            {
+              "a": "APT",
+              "b": "TIA",
+              "corr": 0.6422
+            },
+            {
+              "a": "SUI",
+              "b": "SEI",
+              "corr": 0.6114
+            },
+            {
+              "a": "FIL",
+              "b": "APT",
+              "corr": 0.6111
+            },
+            {
+              "a": "SUI",
+              "b": "KAS",
+              "corr": 0.6101
+            },
+            {
+              "a": "APT",
+              "b": "AR",
+              "corr": 0.5924
+            }
+          ]
+        },
+        {
+          "group": "Derivatives",
+          "n": 7,
+          "n_pairs": 21,
+          "mean": 0.1476,
+          "median": 0.1104,
+          "max": 0.565,
+          "tightness": 0.0209,
+          "top_pairs": [
+            {
+              "a": "JUP",
+              "b": "RAY",
+              "corr": 0.565
+            },
+            {
+              "a": "ASTER",
+              "b": "CAKE",
+              "corr": 0.4815
+            },
+            {
+              "a": "HYPE",
+              "b": "JUP",
+              "corr": 0.2767
+            },
+            {
+              "a": "ASTER",
+              "b": "DRV",
+              "corr": 0.2317
+            },
+            {
+              "a": "HYPE",
+              "b": "RAY",
+              "corr": 0.226
+            }
+          ]
+        },
+        {
+          "group": "Zero Knowledge",
+          "n": 6,
+          "n_pairs": 15,
+          "mean": 0.1433,
+          "median": 0.1155,
+          "max": 0.4741,
+          "tightness": 0.0166,
+          "top_pairs": [
+            {
+              "a": "WLD",
+              "b": "IMX",
+              "corr": 0.4741
+            },
+            {
+              "a": "WLD",
+              "b": "STRK",
+              "corr": 0.3344
+            },
+            {
+              "a": "ZEC",
+              "b": "LIT",
+              "corr": 0.3315
+            },
+            {
+              "a": "IMX",
+              "b": "STRK",
+              "corr": 0.2701
+            },
+            {
+              "a": "NIGHT",
+              "b": "IMX",
+              "corr": 0.2581
+            }
+          ]
+        },
+        {
+          "group": "Real World Assets",
+          "n": 13,
+          "n_pairs": 78,
+          "mean": 0.1324,
+          "median": 0.1116,
+          "max": 1.0,
+          "tightness": 0.0057,
+          "top_pairs": [
+            {
+              "a": "XAUt",
+              "b": "PAXG",
+              "corr": 1.0
+            },
+            {
+              "a": "HBAR",
+              "b": "ALGO",
+              "corr": 0.5335
+            },
+            {
+              "a": "HBAR",
+              "b": "XDC",
+              "corr": 0.4995
+            },
+            {
+              "a": "QNT",
+              "b": "XDC",
+              "corr": 0.4862
+            },
+            {
+              "a": "XLM",
+              "b": "HBAR",
+              "corr": 0.4637
+            }
+          ]
+        },
+        {
+          "group": "Privacy",
+          "n": 8,
+          "n_pairs": 28,
+          "mean": 0.1109,
+          "median": 0.0681,
+          "max": 0.6417,
+          "tightness": -0.0158,
+          "top_pairs": [
+            {
+              "a": "ZEC",
+              "b": "DASH",
+              "corr": 0.6417
+            },
+            {
+              "a": "DASH",
+              "b": "DCR",
+              "corr": 0.3054
+            },
+            {
+              "a": "XTZ",
+              "b": "STRK",
+              "corr": 0.2716
+            },
+            {
+              "a": "CC",
+              "b": "DCR",
+              "corr": 0.2657
+            },
+            {
+              "a": "CC",
+              "b": "DASH",
+              "corr": 0.2586
+            }
+          ]
+        }
+      ]
+    },
+    "issuer": {
+      "n_groups_analyzed": 0,
+      "n_groups_total": 1,
+      "groups": []
+    }
+  }
+}

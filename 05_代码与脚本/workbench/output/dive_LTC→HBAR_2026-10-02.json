@@ -1,0 +1,375 @@
+{
+  "generated_at": "2026-10-02T11:09:44.614728+00:00",
+  "pair": "LTC→HBAR",
+  "window": "2026-06-04 ~ 2026-10-02",
+  "n_days": 121,
+  "lag_profile": [
+    {
+      "lag": -14,
+      "corr": 0.002224340008044802,
+      "n": 106
+    },
+    {
+      "lag": -13,
+      "corr": 0.07375194093009967,
+      "n": 107
+    },
+    {
+      "lag": -12,
+      "corr": -0.0022517873034708508,
+      "n": 108
+    },
+    {
+      "lag": -11,
+      "corr": 0.009990580200461344,
+      "n": 109
+    },
+    {
+      "lag": -10,
+      "corr": 0.10424928632277489,
+      "n": 110
+    },
+    {
+      "lag": -9,
+      "corr": -0.12037142516971684,
+      "n": 111
+    },
+    {
+      "lag": -8,
+      "corr": -0.21519848007072015,
+      "n": 112
+    },
+    {
+      "lag": -7,
+      "corr": 0.032331940498747366,
+      "n": 113
+    },
+    {
+      "lag": -6,
+      "corr": 0.02529209557434636,
+      "n": 114
+    },
+    {
+      "lag": -5,
+      "corr": 0.009394190397513038,
+      "n": 115
+    },
+    {
+      "lag": -4,
+      "corr": 0.13198868525183552,
+      "n": 116
+    },
+    {
+      "lag": -3,
+      "corr": 0.016523281874181065,
+      "n": 117
+    },
+    {
+      "lag": -2,
+      "corr": 0.08426182856377631,
+      "n": 118
+    },
+    {
+      "lag": -1,
+      "corr": -0.18385085183818364,
+      "n": 119
+    },
+    {
+      "lag": 0,
+      "corr": 0.1333899923653349,
+      "n": 120
+    },
+    {
+      "lag": 1,
+      "corr": -0.06910688240059441,
+      "n": 119
+    },
+    {
+      "lag": 2,
+      "corr": 0.23642258421184656,
+      "n": 118
+    },
+    {
+      "lag": 3,
+      "corr": -0.056648344346661356,
+      "n": 117
+    },
+    {
+      "lag": 4,
+      "corr": 0.5306157827418283,
+      "n": 116
+    },
+    {
+      "lag": 5,
+      "corr": -0.21704545725375302,
+      "n": 115
+    },
+    {
+      "lag": 6,
+      "corr": 0.11909637596412877,
+      "n": 114
+    },
+    {
+      "lag": 7,
+      "corr": -0.1336523140592326,
+      "n": 113
+    },
+    {
+      "lag": 8,
+      "corr": 0.06338839109890813,
+      "n": 112
+    },
+    {
+      "lag": 9,
+      "corr": 0.091042930213459,
+      "n": 111
+    },
+    {
+      "lag": 10,
+      "corr": -0.11122573200593332,
+      "n": 110
+    },
+    {
+      "lag": 11,
+      "corr": 0.14491703300759895,
+      "n": 109
+    },
+    {
+      "lag": 12,
+      "corr": -0.21616301608560168,
+      "n": 108
+    },
+    {
+      "lag": 13,
+      "corr": 0.04696297335026376,
+      "n": 107
+    },
+    {
+      "lag": 14,
+      "corr": -0.13792102452608648,
+      "n": 106
+    }
+  ],
+  "best": {
+    "lag": 4,
+    "corr": 0.5306
+  },
+  "sync_corr": 0.1334,
+  "robustness": {
+    "first_half_corr": 0.0434,
+    "second_half_corr": 0.1447
+  },
+  "event_study": {
+    "lag": 4,
+    "win": 2,
+    "thresh": 5.0,
+    "n_events": 3,
+    "day": {
+      "n": 3,
+      "follow_prob": 0.6666666666666666,
+      "mean_excess": 9.361043118694814,
+      "base_n": 114,
+      "base_prob": 0.37719298245614036,
+      "base_mean": -0.25839709685035156,
+      "lift": 1.767441860465116
+    },
+    "cum_win": {
+      "n": 3,
+      "follow_prob": 0.6666666666666666,
+      "mean_excess": 3.452769870351972,
+      "base_n": 113,
+      "base_prob": 0.415929203539823,
+      "base_mean": -0.0962762419343857,
+      "lift": 1.6028368794326242
+    }
+  },
+  "catalyst": {
+    "leader_n": 11,
+    "follower_n": 3,
+    "surge_episodes": 3,
+    "surge_with_leader_catalyst": 1,
+    "surge_with_follower_catalyst": 1,
+    "true_transmission_candidates": [
+      "2026-09-17"
+    ],
+    "annotations": [
+      {
+        "surge_date": "2026-09-05",
+        "leader_excess_pct": 7.02,
+        "leader_catalysts": [],
+        "follow_date": "2026-09-09",
+        "follower_excess_pct": -2.38,
+        "follower_catalysts": []
+      },
+      {
+        "surge_date": "2026-09-17",
+        "leader_excess_pct": 5.18,
+        "leader_catalysts": [],
+        "follow_date": "2026-09-21",
+        "follower_excess_pct": 0.23,
+        "follower_catalysts": []
+      },
+      {
+        "surge_date": "2026-09-24",
+        "leader_excess_pct": 16.69,
+        "leader_catalysts": [
+          "Litecoin gained nearly 8% to $66 in 24 hours even as broader",
+          "BlockBeats 消息，9 月 24 日，据 HTX 行情信息，LTC 突破 71 美元，24 小时涨幅扩大至 12",
+          "Foresight News 消息，据 Bitget 行情数据，LTC 突破 70 USDT，现报 70.75 USDT",
+          "火星财经消息，9 月 24 日，据 行情信息，LTC 突破 71 美元，24 小时涨幅扩大至 12.3%。"
+        ],
+        "follow_date": "2026-09-28",
+        "follower_excess_pct": 30.23,
+        "follower_catalysts": [
+          "Foresight News 消息，据 Bitget 行情数据，HBAR（Hedera）短时触及 0.1249 USDT",
+          "火星财经消息，9 月 29 日，据 行情信息，NMR 领涨山寨市场，24 小时大涨超 40%，一度触及 15.5 美元，",
+          "BlockBeats 消息，9 月 30 日，知名交易员 Doctor Profit 表示，已平仓 HBAR 小幅盈利。"
+        ]
+      }
+    ],
+    "leader_catalysts": [
+      {
+        "catalyst_id": 168,
+        "title": "Canadian company Luxxfolio said it has brought 228 Bitmain Scrypt miners into op...",
+        "published_at": "2026-08-27 09:53:54+00:00",
+        "category": "Binance News",
+        "kind": "sentiment",
+        "strength": 62,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 2931,
+        "title": "The U.S. Securities and Exchange Commission has received a filing from Grayscale...",
+        "published_at": "2026-09-13 00:40:57+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 90,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 13649,
+        "title": "Litecoin gained nearly 8% to $66 in 24 hours even as broader markets weakened. A...",
+        "published_at": "2026-09-24 11:41:55+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 57,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13867,
+        "title": "BlockBeats 消息，9 月 24 日，据 HTX 行情信息，LTC 突破 71 美元，24 小时涨幅扩大至 12.3%。",
+        "published_at": "2026-09-24 14:00:28+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13892,
+        "title": "Foresight News 消息，据 Bitget 行情数据，LTC 突破 70 USDT，现报 70.75 USDT，24 小时涨幅 12.76%。",
+        "published_at": "2026-09-24 14:03:37+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13896,
+        "title": "火星财经消息，9 月 24 日，据 行情信息，LTC 突破 71 美元，24 小时涨幅扩大至 12.3%。",
+        "published_at": "2026-09-24 14:13:46+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 18149,
+        "title": "Lite Strategy, a Litecoin treasury company listed on Nasdaq under the ticker LIT...",
+        "published_at": "2026-09-29 12:54:39+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 83,
+        "sentiment": "bullish",
+        "event_type": "funding"
+      },
+      {
+        "catalyst_id": 18164,
+        "title": "ChainCatcher 消息，据 Globenewswire 报道，莱特币财库公司 Lite Strategy（Nasdaq：LITS）公布截至 2026 年...",
+        "published_at": "2026-09-29 12:57:22+00:00",
+        "category": "ChainCatcher · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 18196,
+        "title": "火星财经消息，据 Globenewswire 报道，莱特币财库公司 Lite Strategy（Nasdaq：LITS）公布截至 2026 年 6 月 30 日...",
+        "published_at": "2026-09-29 13:03:41+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 53,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 18213,
+        "title": "BlockBeats 消息，9 月 29 日，Lite Strategy, Inc.（纳斯达克代码：LITS）是美国首家将莱特币作为主要储备资产的上市公司，今日...",
+        "published_at": "2026-09-29 13:29:52+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "event",
+        "strength": 53,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 20968,
+        "title": "PANews 10月1日消息，Greywick Digital宣布已与莱特币基金会签署谅解备忘录，计划在Canton Network推出莱特币资产cLTC，用于...",
+        "published_at": "2026-10-01 13:17:36+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      }
+    ],
+    "follower_catalysts": [
+      {
+        "catalyst_id": 16786,
+        "title": "Foresight News 消息，据 Bitget 行情数据，HBAR（Hedera）短时触及 0.1249 USDT，现报 0.12 USDT，24 小时涨...",
+        "published_at": "2026-09-28 14:13:37+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 17560,
+        "title": "火星财经消息，9 月 29 日，据 行情信息，NMR 领涨山寨市场，24 小时大涨超 40%，一度触及 15.5 美元，现报 14.1 美元。 消息面上，NMR...",
+        "published_at": "2026-09-29 05:13:35+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 18513,
+        "title": "BlockBeats 消息，9 月 30 日，知名交易员 Doctor Profit 表示，已平仓 HBAR 小幅盈利。突破看起来像是假突破，在关注比特币 7....",
+        "published_at": "2026-09-29 16:55:13+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bearish",
+        "event_type": "market_update"
+      }
+    ]
+  }
+}

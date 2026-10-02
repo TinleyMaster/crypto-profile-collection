@@ -1,0 +1,2241 @@
+{
+  "generated_at": "2026-10-02T15:59:11.191202+00:00",
+  "args": {
+    "top_n": 400,
+    "min_days": 90,
+    "min_members": 3,
+    "winsorize_pct": 50.0,
+    "event_thresh": 0.05,
+    "horizons": [
+      1,
+      2,
+      3
+    ],
+    "min_events": 5,
+    "judge_min_events": 20,
+    "fee_pct": 0.1,
+    "baseline_min": 30,
+    "output": "",
+    "selftest": false
+  },
+  "window": "2026-06-21 ~ 2026-10-02",
+  "universe": {
+    "n": 116,
+    "n_days": 104,
+    "n_excluded_stable": 29
+  },
+  "baseline": {
+    "mean": 0.1267,
+    "first": 0.0862,
+    "second": 0.1527
+  },
+  "dims": {
+    "sector": {
+      "n_groups_analyzed": 12,
+      "n_groups_total": 12,
+      "groups": [
+        {
+          "group": "cex_token",
+          "n": 35,
+          "stability": {
+            "first": 0.1056,
+            "second": 0.1719,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 241,
+            "n_members": 35,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 241,
+                "ev_prob": 0.5435684647302904,
+                "ev_mean": 0.003960059811266108,
+                "base_n": 210,
+                "base_prob": 0.3380952380952381,
+                "base_mean": -0.003751120788739367,
+                "lift": 1.607737712582549,
+                "excess_diff": 0.007711180600005476,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 239,
+                "ev_prob": 0.606694560669456,
+                "ev_mean": 0.005441964256054415,
+                "base_n": 210,
+                "base_prob": 0.49047619047619045,
+                "base_mean": -0.003026724729915136,
+                "lift": 1.2369500751513183,
+                "excess_diff": 0.008468688985969551,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 235,
+                "ev_prob": 0.5446808510638298,
+                "ev_mean": 0.00152588251099573,
+                "base_n": 210,
+                "base_prob": 0.4238095238095238,
+                "base_mean": -0.00546380911963402,
+                "lift": 1.2852020081281377,
+                "excess_diff": 0.00698969163062975,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 241,
+              "mean": 0.012793526572675762,
+              "prob": 0.7510373443983402
+            }
+          }
+        },
+        {
+          "group": "l2",
+          "n": 10,
+          "stability": {
+            "first": 0.121,
+            "second": 0.1643,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 89,
+            "n_members": 10,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 88,
+                "ev_prob": 0.6022727272727273,
+                "ev_mean": 0.016339598617541234,
+                "base_n": 220,
+                "base_prob": 0.4318181818181818,
+                "base_mean": -0.0022433555975484537,
+                "lift": 1.3947368421052633,
+                "excess_diff": 0.018582954215089688,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 88,
+                "ev_prob": 0.5340909090909091,
+                "ev_mean": 0.005781450411414363,
+                "base_n": 220,
+                "base_prob": 0.42727272727272725,
+                "base_mean": 0.00016660390073464258,
+                "lift": 1.25,
+                "excess_diff": 0.0056148465106797205,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 86,
+                "ev_prob": 0.45348837209302323,
+                "ev_mean": 0.0034735204176432875,
+                "base_n": 220,
+                "base_prob": 0.5636363636363636,
+                "base_mean": 0.007786393962276952,
+                "lift": 0.804576144036009,
+                "excess_diff": -0.004312873544633665,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 89,
+              "mean": 0.02406955733084554,
+              "prob": 0.7191011235955056
+            }
+          }
+        },
+        {
+          "group": "rwa",
+          "n": 15,
+          "stability": {
+            "first": 0.0925,
+            "second": 0.1625,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 102,
+            "n_members": 15,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 102,
+                "ev_prob": 0.5392156862745098,
+                "ev_mean": 0.00479953782871072,
+                "base_n": 180,
+                "base_prob": 0.3888888888888889,
+                "base_mean": -0.0038857911230448005,
+                "lift": 1.3865546218487395,
+                "excess_diff": 0.00868532895175552,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 102,
+                "ev_prob": 0.6078431372549019,
+                "ev_mean": 0.006507145075501197,
+                "base_n": 180,
+                "base_prob": 0.49444444444444446,
+                "base_mean": -0.0007193038233849528,
+                "lift": 1.2293456708526105,
+                "excess_diff": 0.0072264488988861494,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 100,
+                "ev_prob": 0.52,
+                "ev_mean": 0.0035993924768336527,
+                "base_n": 180,
+                "base_prob": 0.5277777777777778,
+                "base_mean": -0.0012709618462937089,
+                "lift": 0.9852631578947368,
+                "excess_diff": 0.004870354323127362,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 102,
+              "mean": 0.01543535157081064,
+              "prob": 0.7254901960784313
+            }
+          }
+        },
+        {
+          "group": "depin",
+          "n": 8,
+          "stability": {
+            "first": 0.2292,
+            "second": 0.3258,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 54,
+            "n_members": 8,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 54,
+                "ev_prob": 0.46296296296296297,
+                "ev_mean": 0.005464751951222867,
+                "base_n": 432,
+                "base_prob": 0.3680555555555556,
+                "base_mean": -0.0023714719733425255,
+                "lift": 1.2578616352201257,
+                "excess_diff": 0.007836223924565393,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 53,
+                "ev_prob": 0.49056603773584906,
+                "ev_mean": 0.006963817850893363,
+                "base_n": 432,
+                "base_prob": 0.36342592592592593,
+                "base_mean": -0.0035768693866902205,
+                "lift": 1.3498377598846292,
+                "excess_diff": 0.010540687237583585,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 53,
+                "ev_prob": 0.4716981132075472,
+                "ev_mean": 0.0036365706923644414,
+                "base_n": 432,
+                "base_prob": 0.3888888888888889,
+                "base_mean": -0.002747835492048548,
+                "lift": 1.2129380053908356,
+                "excess_diff": 0.006384406184412989,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 54,
+              "mean": 0.03230733078667301,
+              "prob": 0.8703703703703703
+            }
+          }
+        },
+        {
+          "group": "derivatives",
+          "n": 11,
+          "stability": {
+            "first": 0.0971,
+            "second": 0.1786,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 103,
+            "n_members": 11,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 102,
+                "ev_prob": 0.6372549019607843,
+                "ev_mean": 0.009680221854991324,
+                "base_n": 132,
+                "base_prob": 0.5454545454545454,
+                "base_mean": 0.003153754792363997,
+                "lift": 1.1683006535947713,
+                "excess_diff": 0.006526467062627326,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 102,
+                "ev_prob": 0.5980392156862745,
+                "ev_mean": 0.00632654012111151,
+                "base_n": 132,
+                "base_prob": 0.4621212121212121,
+                "base_mean": -0.0002355586034921059,
+                "lift": 1.2941176470588236,
+                "excess_diff": 0.0065620987246036155,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 102,
+                "ev_prob": 0.5980392156862745,
+                "ev_mean": 0.0034509752801437114,
+                "base_n": 132,
+                "base_prob": 0.2196969696969697,
+                "base_mean": -0.00407613725969037,
+                "lift": 2.7221095334685597,
+                "excess_diff": 0.007527112539834082,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 103,
+              "mean": 0.01900569439151181,
+              "prob": 0.7475728155339806
+            }
+          }
+        },
+        {
+          "group": "meme",
+          "n": 17,
+          "stability": {
+            "first": 0.089,
+            "second": 0.1636,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 167,
+            "n_members": 17,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 167,
+                "ev_prob": 0.5568862275449101,
+                "ev_mean": 0.002571229734959595,
+                "base_n": 34,
+                "base_prob": 0.5,
+                "base_mean": -0.019328577838793475,
+                "lift": 1.1137724550898203,
+                "excess_diff": 0.02189980757375307,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 166,
+                "ev_prob": 0.46987951807228917,
+                "ev_mean": 0.0008737261842205828,
+                "base_n": 34,
+                "base_prob": 0.5,
+                "base_mean": -0.0018480716712319652,
+                "lift": 0.9397590361445783,
+                "excess_diff": 0.002721797855452548,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 166,
+                "ev_prob": 0.4759036144578313,
+                "ev_mean": -0.0004569389316834594,
+                "base_n": 34,
+                "base_prob": 0.0,
+                "base_mean": -0.01085366446488968,
+                "lift": null,
+                "excess_diff": 0.01039672553320622,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 167,
+              "mean": 0.009984684363968592,
+              "prob": 0.6946107784431138
+            }
+          }
+        },
+        {
+          "group": "l1",
+          "n": 62,
+          "stability": {
+            "first": 0.1185,
+            "second": 0.1853,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 406,
+            "n_members": 62,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 405,
+                "ev_prob": 0.5432098765432098,
+                "ev_mean": 0.004357490127359371,
+                "base_n": 124,
+                "base_prob": 0.5,
+                "base_mean": 0.0011695183442156582,
+                "lift": 1.0864197530864197,
+                "excess_diff": 0.0031879717831437126,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 402,
+                "ev_prob": 0.5,
+                "ev_mean": 0.003095231969687807,
+                "base_n": 124,
+                "base_prob": 0.0,
+                "base_mean": -0.007949770356362847,
+                "lift": null,
+                "excess_diff": 0.011045002326050653,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 395,
+                "ev_prob": 0.48860759493670886,
+                "ev_mean": 0.0017966191610943529,
+                "base_n": 124,
+                "base_prob": 0.0,
+                "base_mean": -0.012246303442334187,
+                "lift": null,
+                "excess_diff": 0.014042922603428539,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 406,
+              "mean": 0.01475326794098385,
+              "prob": 0.7339901477832512
+            }
+          }
+        },
+        {
+          "group": "gamefi",
+          "n": 14,
+          "stability": {
+            "first": 0.1389,
+            "second": 0.2969,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 143,
+            "n_members": 14,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 143,
+                "ev_prob": 0.5104895104895105,
+                "ev_mean": 0.004646788674878385,
+                "base_n": 84,
+                "base_prob": 0.5238095238095238,
+                "base_mean": 0.013740133699411414,
+                "lift": 0.9745708836617928,
+                "excess_diff": -0.00909334502453303,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 142,
+                "ev_prob": 0.5492957746478874,
+                "ev_mean": 0.008901539499024808,
+                "base_n": 84,
+                "base_prob": 0.47619047619047616,
+                "base_mean": 0.013064614966152974,
+                "lift": 1.1535211267605636,
+                "excess_diff": -0.0041630754671281665,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 141,
+                "ev_prob": 0.3900709219858156,
+                "ev_mean": -0.002972517173036931,
+                "base_n": 84,
+                "base_prob": 0.5476190476190477,
+                "base_mean": 0.017568493316889564,
+                "lift": 0.7123034227567067,
+                "excess_diff": -0.020541010489926494,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 143,
+              "mean": 0.020519513432487764,
+              "prob": 0.6783216783216783
+            }
+          }
+        },
+        {
+          "group": "launchpad",
+          "n": 6,
+          "stability": {
+            "first": 0.1325,
+            "second": 0.1405,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": true
+          },
+          "event": {
+            "n_events": 73,
+            "n_members": 6,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 73,
+                "ev_prob": 0.4657534246575342,
+                "ev_mean": 0.0029906599127040483,
+                "base_n": 90,
+                "base_prob": 0.5777777777777777,
+                "base_mean": 0.005041145174484323,
+                "lift": 0.8061116965226555,
+                "excess_diff": -0.002050485261780275,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 73,
+                "ev_prob": 0.5616438356164384,
+                "ev_mean": 0.007577430667479861,
+                "base_n": 90,
+                "base_prob": 0.5555555555555556,
+                "base_mean": 0.006157907356125718,
+                "lift": 1.010958904109589,
+                "excess_diff": 0.0014195233113541428,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 73,
+                "ev_prob": 0.5753424657534246,
+                "ev_mean": 0.00236476327045478,
+                "base_n": 90,
+                "base_prob": 0.4777777777777778,
+                "base_mean": 0.006032107769844615,
+                "lift": 1.2042051608792608,
+                "excess_diff": -0.0036673444993898354,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 73,
+              "mean": 0.011708490171877984,
+              "prob": 0.7123287671232876
+            }
+          }
+        },
+        {
+          "group": "infra",
+          "n": 78,
+          "stability": {
+            "first": 0.1089,
+            "second": 0.1824,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 617,
+            "n_members": 78,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 617,
+                "ev_prob": 0.5850891410048622,
+                "ev_mean": 0.005098883678604509,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 615,
+                "ev_prob": 0.5430894308943089,
+                "ev_mean": 0.004124051501068177,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 608,
+                "ev_prob": 0.5016447368421053,
+                "ev_mean": 0.0016468911589779737,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 617,
+              "mean": 0.014849775616307839,
+              "prob": 0.7406807131280388
+            }
+          }
+        },
+        {
+          "group": "defi",
+          "n": 58,
+          "stability": {
+            "first": 0.0945,
+            "second": 0.1901,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 506,
+            "n_members": 58,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 505,
+                "ev_prob": 0.5524752475247525,
+                "ev_mean": 0.002778327668099573,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 501,
+                "ev_prob": 0.5548902195608783,
+                "ev_mean": 0.00479122092941924,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 496,
+                "ev_prob": 0.5181451612903226,
+                "ev_mean": 0.0024781923712465996,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 506,
+              "mean": 0.013972962385985742,
+              "prob": 0.7035573122529645
+            }
+          }
+        },
+        {
+          "group": "ai",
+          "n": 19,
+          "stability": {
+            "first": 0.1133,
+            "second": 0.2221,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 225,
+            "n_members": 19,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 224,
+                "ev_prob": 0.5669642857142857,
+                "ev_mean": 0.009688759096282723,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 223,
+                "ev_prob": 0.5426008968609866,
+                "ev_mean": 0.005794283731713777,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 221,
+                "ev_prob": 0.5384615384615384,
+                "ev_mean": 0.0038412737612502365,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 225,
+              "mean": 0.017619813521452466,
+              "prob": 0.6844444444444444
+            }
+          }
+        }
+      ]
+    },
+    "chain": {
+      "n_groups_analyzed": 10,
+      "n_groups_total": 10,
+      "groups": [
+        {
+          "group": "arbitrum",
+          "n": 16,
+          "stability": {
+            "first": 0.0793,
+            "second": 0.2006,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": true
+          },
+          "event": {
+            "n_events": 138,
+            "n_members": 16,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 137,
+                "ev_prob": 0.5766423357664233,
+                "ev_mean": 0.005989047801807312,
+                "base_n": 128,
+                "base_prob": 0.390625,
+                "base_mean": -0.0009047109584221422,
+                "lift": 1.4762043795620436,
+                "excess_diff": 0.006893758760229455,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 136,
+                "ev_prob": 0.5735294117647058,
+                "ev_mean": 0.004014148468340307,
+                "base_n": 128,
+                "base_prob": 0.28125,
+                "base_mean": -0.002842494621002922,
+                "lift": 2.0392156862745097,
+                "excess_diff": 0.006856643089343229,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 135,
+                "ev_prob": 0.5777777777777777,
+                "ev_mean": 0.002974591377166962,
+                "base_n": 128,
+                "base_prob": 0.2734375,
+                "base_mean": -0.005592222625877814,
+                "lift": 2.113015873015873,
+                "excess_diff": 0.008566814003044775,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 138,
+              "mean": 0.017065270790572944,
+              "prob": 0.6956521739130435
+            }
+          }
+        },
+        {
+          "group": "optimism",
+          "n": 9,
+          "stability": {
+            "first": 0.1059,
+            "second": 0.294,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 90,
+            "n_members": 9,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 89,
+                "ev_prob": 0.550561797752809,
+                "ev_mean": 0.008292778560077043,
+                "base_n": 153,
+                "base_prob": 0.39215686274509803,
+                "base_mean": 0.0019384055325645541,
+                "lift": 1.403932584269663,
+                "excess_diff": 0.006354373027512489,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 88,
+                "ev_prob": 0.5113636363636364,
+                "ev_mean": 0.001942437768629711,
+                "base_n": 153,
+                "base_prob": 0.3202614379084967,
+                "base_mean": -0.001041760100585396,
+                "lift": 1.5967068645640075,
+                "excess_diff": 0.002984197869215107,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 86,
+                "ev_prob": 0.5348837209302325,
+                "ev_mean": 0.00141533976512119,
+                "base_n": 153,
+                "base_prob": 0.39869281045751637,
+                "base_mean": -0.0022944269803212174,
+                "lift": 1.3415935951200912,
+                "excess_diff": 0.003709766745442407,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 90,
+              "mean": 0.020594722809091286,
+              "prob": 0.7444444444444445
+            }
+          }
+        },
+        {
+          "group": "polygon",
+          "n": 10,
+          "stability": {
+            "first": 0.1164,
+            "second": 0.215,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 69,
+            "n_members": 10,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 69,
+                "ev_prob": 0.5362318840579711,
+                "ev_mean": 0.0022955655296435016,
+                "base_n": 250,
+                "base_prob": 0.424,
+                "base_mean": -0.0006367279519645411,
+                "lift": 1.2646978397593658,
+                "excess_diff": 0.002932293481608043,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 68,
+                "ev_prob": 0.5294117647058824,
+                "ev_mean": 0.0013846609871832546,
+                "base_n": 250,
+                "base_prob": 0.504,
+                "base_mean": 0.0016635965126740428,
+                "lift": 1.050420168067227,
+                "excess_diff": -0.00027893552549078816,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 67,
+                "ev_prob": 0.4626865671641791,
+                "ev_mean": -0.0008323486418049467,
+                "base_n": 250,
+                "base_prob": 0.416,
+                "base_mean": -0.0003191360837465737,
+                "lift": 1.112227324913892,
+                "excess_diff": -0.0005132125580583729,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 69,
+              "mean": 0.015341085031943896,
+              "prob": 0.7101449275362319
+            }
+          }
+        },
+        {
+          "group": "avalanche",
+          "n": 9,
+          "stability": {
+            "first": 0.1305,
+            "second": 0.2126,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 71,
+            "n_members": 9,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 71,
+                "ev_prob": 0.5633802816901409,
+                "ev_mean": 0.0008917419279280865,
+                "base_n": 270,
+                "base_prob": 0.4703703703703704,
+                "base_mean": -0.0020120301598814754,
+                "lift": 1.1977376067428191,
+                "excess_diff": 0.002903772087809562,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 69,
+                "ev_prob": 0.5072463768115942,
+                "ev_mean": 0.0019616195806345616,
+                "base_n": 270,
+                "base_prob": 0.4703703703703704,
+                "base_mean": -0.0012888675880006163,
+                "lift": 1.078397808969531,
+                "excess_diff": 0.0032504871686351777,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 67,
+                "ev_prob": 0.5522388059701493,
+                "ev_mean": 0.005476102205478574,
+                "base_n": 270,
+                "base_prob": 0.4185185185185185,
+                "base_mean": -0.001461826338843002,
+                "lift": 1.3195086514331,
+                "excess_diff": 0.006937928544321577,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 71,
+              "mean": 0.015728589323685323,
+              "prob": 0.7183098591549296
+            }
+          }
+        },
+        {
+          "group": "base",
+          "n": 19,
+          "stability": {
+            "first": 0.0713,
+            "second": 0.154,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": true
+          },
+          "event": {
+            "n_events": 220,
+            "n_members": 19,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 219,
+                "ev_prob": 0.5296803652968036,
+                "ev_mean": 0.004324565815957488,
+                "base_n": 38,
+                "base_prob": 0.5,
+                "base_mean": 0.0008532937982714761,
+                "lift": 1.0593607305936072,
+                "excess_diff": 0.003471272017686012,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 217,
+                "ev_prob": 0.5529953917050692,
+                "ev_mean": 0.005704858713886803,
+                "base_n": 38,
+                "base_prob": 0.5,
+                "base_mean": -0.001057431802921726,
+                "lift": 1.1059907834101383,
+                "excess_diff": 0.006762290516808529,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 215,
+                "ev_prob": 0.5441860465116279,
+                "ev_mean": 0.006700717166175992,
+                "base_n": 38,
+                "base_prob": 0.02631578947368421,
+                "base_mean": -0.004772338072098556,
+                "lift": 20.679069767441863,
+                "excess_diff": 0.011473055238274549,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 220,
+              "mean": 0.014348829848004572,
+              "prob": 0.7090909090909091
+            }
+          }
+        },
+        {
+          "group": "solana",
+          "n": 27,
+          "stability": {
+            "first": 0.142,
+            "second": 0.1936,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 236,
+            "n_members": 27,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 236,
+                "ev_prob": 0.4957627118644068,
+                "ev_mean": 0.0011310991932709448,
+                "base_n": 108,
+                "base_prob": 0.6666666666666666,
+                "base_mean": -0.0020959233113063266,
+                "lift": 0.7436440677966102,
+                "excess_diff": 0.0032270225045772714,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 234,
+                "ev_prob": 0.5341880341880342,
+                "ev_mean": 0.002985715805292647,
+                "base_n": 108,
+                "base_prob": 0.9722222222222222,
+                "base_mean": 0.010708952678317377,
+                "lift": 0.5494505494505495,
+                "excess_diff": -0.00772323687302473,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 232,
+                "ev_prob": 0.5689655172413793,
+                "ev_mean": 0.0025719279479351886,
+                "base_n": 108,
+                "base_prob": 0.75,
+                "base_mean": 0.012477941541194871,
+                "lift": 0.7586206896551725,
+                "excess_diff": -0.009906013593259683,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 236,
+              "mean": 0.014861103477597486,
+              "prob": 0.7542372881355932
+            }
+          }
+        },
+        {
+          "group": "ethereum",
+          "n": 62,
+          "stability": {
+            "first": 0.0939,
+            "second": 0.1542,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 448,
+            "n_members": 62,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 447,
+                "ev_prob": 0.46756152125279643,
+                "ev_mean": 0.0008533121709813592,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 443,
+                "ev_prob": 0.54627539503386,
+                "ev_mean": 0.0028518039630677956,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 438,
+                "ev_prob": 0.5205479452054794,
+                "ev_mean": 0.0016212164399885395,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 448,
+              "mean": 0.01080419247639012,
+              "prob": 0.7075892857142857
+            }
+          }
+        },
+        {
+          "group": "bsc",
+          "n": 22,
+          "stability": {
+            "first": 0.0545,
+            "second": 0.136,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 262,
+            "n_members": 22,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 262,
+                "ev_prob": 0.5877862595419847,
+                "ev_mean": 0.004431587618563288,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 259,
+                "ev_prob": 0.6447876447876448,
+                "ev_mean": 0.006510792006102645,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 256,
+                "ev_prob": 0.578125,
+                "ev_mean": 0.003016945992876362,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 262,
+              "mean": 0.011367711045963673,
+              "prob": 0.6717557251908397
+            }
+          }
+        },
+        {
+          "group": "tron",
+          "n": 5,
+          "stability": {
+            "first": 0.3761,
+            "second": 0.4958,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 14,
+            "n_members": 5,
+            "fee_pct": 0.1,
+            "sample_ready": false,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 14,
+                "ev_prob": 0.5714285714285714,
+                "ev_mean": -0.002246760119614299,
+                "base_n": 360,
+                "base_prob": 0.5555555555555556,
+                "base_mean": -0.000714636847646194,
+                "lift": 1.0285714285714285,
+                "excess_diff": -0.001532123271968105,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 14,
+                "ev_prob": 0.5,
+                "ev_mean": -0.0018210226131489637,
+                "base_n": 360,
+                "base_prob": 0.5166666666666667,
+                "base_mean": -0.0018524471729841638,
+                "lift": 0.9677419354838709,
+                "excess_diff": 3.1424559835200065e-05,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 14,
+                "ev_prob": 0.2857142857142857,
+                "ev_mean": -0.006633613263823884,
+                "base_n": 360,
+                "base_prob": 0.5166666666666667,
+                "base_mean": -0.0017349613786570516,
+                "lift": 0.5529953917050691,
+                "excess_diff": -0.004898651885166833,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 14,
+              "mean": 0.004896192973604538,
+              "prob": 0.7142857142857143
+            }
+          }
+        },
+        {
+          "group": "aptos",
+          "n": 3,
+          "stability": {
+            "first": 0.2332,
+            "second": 0.261,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 19,
+            "n_members": 3,
+            "fee_pct": 0.1,
+            "sample_ready": false,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 19,
+                "ev_prob": 0.3684210526315789,
+                "ev_mean": 0.011850291547867695,
+                "base_n": 213,
+                "base_prob": 0.39436619718309857,
+                "base_mean": -0.003959867884665747,
+                "lift": 0.9342105263157895,
+                "excess_diff": 0.01581015943253344,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 19,
+                "ev_prob": 0.631578947368421,
+                "ev_mean": 0.01331516701461787,
+                "base_n": 213,
+                "base_prob": 0.40375586854460094,
+                "base_mean": -0.0025551795161045917,
+                "lift": 1.5642594859241126,
+                "excess_diff": 0.015870346530722463,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 19,
+                "ev_prob": 0.47368421052631576,
+                "ev_mean": 0.0037244048372204216,
+                "base_n": 213,
+                "base_prob": 0.4225352112676056,
+                "base_mean": -0.001450056253633134,
+                "lift": 1.1210526315789473,
+                "excess_diff": 0.005174461090853556,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 19,
+              "mean": 0.025381896918612395,
+              "prob": 0.7368421052631579
+            }
+          }
+        }
+      ]
+    },
+    "narrative": {
+      "n_groups_analyzed": 14,
+      "n_groups_total": 14,
+      "groups": [
+        {
+          "group": "Layer 1",
+          "n": 38,
+          "stability": {
+            "first": 0.1087,
+            "second": 0.185,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 227,
+            "n_members": 38,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 227,
+                "ev_prob": 0.5506607929515418,
+                "ev_mean": 0.002978221694485172,
+                "base_n": 304,
+                "base_prob": 0.125,
+                "base_mean": -0.004895030368265712,
+                "lift": 4.405286343612334,
+                "excess_diff": 0.007873252062750885,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 225,
+                "ev_prob": 0.4444444444444444,
+                "ev_mean": 0.0020426640262101755,
+                "base_n": 304,
+                "base_prob": 0.125,
+                "base_mean": -0.00695150811541214,
+                "lift": 3.5555555555555554,
+                "excess_diff": 0.008994172141622316,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 222,
+                "ev_prob": 0.43243243243243246,
+                "ev_mean": 0.00044271989153830174,
+                "base_n": 304,
+                "base_prob": 0.25,
+                "base_mean": -0.008691634423255427,
+                "lift": 1.7297297297297298,
+                "excess_diff": 0.009134354314793728,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 227,
+              "mean": 0.013406803396478432,
+              "prob": 0.6916299559471366
+            }
+          }
+        },
+        {
+          "group": "Privacy",
+          "n": 8,
+          "stability": {
+            "first": 0.0261,
+            "second": 0.1477,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 64,
+            "n_members": 8,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 64,
+                "ev_prob": 0.640625,
+                "ev_mean": 0.010178544340048263,
+                "base_n": 296,
+                "base_prob": 0.36824324324324326,
+                "base_mean": -0.0028335916995730816,
+                "lift": 1.7396788990825687,
+                "excess_diff": 0.013012136039621345,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 64,
+                "ev_prob": 0.4375,
+                "ev_mean": 0.0014600111920547,
+                "base_n": 296,
+                "base_prob": 0.41216216216216217,
+                "base_mean": -0.0017104826557391157,
+                "lift": 1.0614754098360655,
+                "excess_diff": 0.003170493847793816,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 63,
+                "ev_prob": 0.5396825396825397,
+                "ev_mean": 0.0037868706124361182,
+                "base_n": 296,
+                "base_prob": 0.39864864864864863,
+                "base_mean": -0.0013967994392659535,
+                "lift": 1.3537799300511164,
+                "excess_diff": 0.005183670051702072,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 64,
+              "mean": 0.02051183447120833,
+              "prob": 0.75
+            }
+          }
+        },
+        {
+          "group": "NFTs & Collectibles",
+          "n": 8,
+          "stability": {
+            "first": 0.2068,
+            "second": 0.3431,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 55,
+            "n_members": 8,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 55,
+                "ev_prob": 0.4909090909090909,
+                "ev_mean": 0.0008989057721950196,
+                "base_n": 368,
+                "base_prob": 0.358695652173913,
+                "base_mean": -0.00039463946617626243,
+                "lift": 1.368595041322314,
+                "excess_diff": 0.001293545238371282,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 55,
+                "ev_prob": 0.6181818181818182,
+                "ev_mean": 0.01039268108582484,
+                "base_n": 368,
+                "base_prob": 0.3423913043478261,
+                "base_mean": -0.0017016793663161749,
+                "lift": 1.8054834054834052,
+                "excess_diff": 0.012094360452141014,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 54,
+                "ev_prob": 0.5,
+                "ev_mean": -0.0007744241146270685,
+                "base_n": 368,
+                "base_prob": 0.391304347826087,
+                "base_mean": 0.0011402166550911683,
+                "lift": 1.2777777777777777,
+                "excess_diff": -0.0019146407697182366,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 55,
+              "mean": 0.026134655150391296,
+              "prob": 0.7636363636363637
+            }
+          }
+        },
+        {
+          "group": "Real World Assets",
+          "n": 13,
+          "stability": {
+            "first": 0.0923,
+            "second": 0.1573,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 78,
+            "n_members": 13,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 78,
+                "ev_prob": 0.5256410256410257,
+                "ev_mean": 0.0035536020050852012,
+                "base_n": 312,
+                "base_prob": 0.38461538461538464,
+                "base_mean": -0.003074661089777402,
+                "lift": 1.3666666666666667,
+                "excess_diff": 0.006628263094862603,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 78,
+                "ev_prob": 0.5,
+                "ev_mean": 0.003409364104386494,
+                "base_n": 312,
+                "base_prob": 0.4519230769230769,
+                "base_mean": 5.639833480781273e-05,
+                "lift": 1.1063829787234043,
+                "excess_diff": 0.0033529657695786814,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 77,
+                "ev_prob": 0.4805194805194805,
+                "ev_mean": 0.0026166399213931844,
+                "base_n": 312,
+                "base_prob": 0.41025641025641024,
+                "base_mean": -0.002220083062078578,
+                "lift": 1.1712662337662338,
+                "excess_diff": 0.004836722983471762,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 78,
+              "mean": 0.014870348762102288,
+              "prob": 0.6794871794871795
+            }
+          }
+        },
+        {
+          "group": "Derivatives",
+          "n": 7,
+          "stability": {
+            "first": 0.1261,
+            "second": 0.1652,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 77,
+            "n_members": 7,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 76,
+                "ev_prob": 0.6052631578947368,
+                "ev_mean": 0.01210105339038064,
+                "base_n": 154,
+                "base_prob": 0.45454545454545453,
+                "base_mean": 0.0013198130552694296,
+                "lift": 1.331578947368421,
+                "excess_diff": 0.01078124033511121,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 76,
+                "ev_prob": 0.5789473684210527,
+                "ev_mean": 0.006709764313939016,
+                "base_n": 154,
+                "base_prob": 0.4675324675324675,
+                "base_mean": -0.0010209835258044148,
+                "lift": 1.2383040935672516,
+                "excess_diff": 0.007730747839743431,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 76,
+                "ev_prob": 0.6052631578947368,
+                "ev_mean": 0.007321966468106759,
+                "base_n": 154,
+                "base_prob": 0.35714285714285715,
+                "base_mean": -0.0038524659260021276,
+                "lift": 1.694736842105263,
+                "excess_diff": 0.011174432394108886,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 77,
+              "mean": 0.019906348685896618,
+              "prob": 0.7272727272727273
+            }
+          }
+        },
+        {
+          "group": "Layer 2",
+          "n": 9,
+          "stability": {
+            "first": 0.1451,
+            "second": 0.1766,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 70,
+            "n_members": 9,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 70,
+                "ev_prob": 0.5428571428571428,
+                "ev_mean": 0.012667249786634267,
+                "base_n": 306,
+                "base_prob": 0.41830065359477125,
+                "base_mean": -0.0004331326397269757,
+                "lift": 1.297767857142857,
+                "excess_diff": 0.013100382426361242,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 70,
+                "ev_prob": 0.5285714285714286,
+                "ev_mean": 0.0029539481072530555,
+                "base_n": 306,
+                "base_prob": 0.3660130718954248,
+                "base_mean": -0.0009416467997173987,
+                "lift": 1.4441326530612246,
+                "excess_diff": 0.003895594906970454,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 68,
+                "ev_prob": 0.45588235294117646,
+                "ev_mean": 0.0019482968952748722,
+                "base_n": 306,
+                "base_prob": 0.47058823529411764,
+                "base_mean": 0.007108753354375592,
+                "lift": 0.96875,
+                "excess_diff": -0.00516045645910072,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 70,
+              "mean": 0.02586039129664459,
+              "prob": 0.7714285714285715
+            }
+          }
+        },
+        {
+          "group": "DePIN",
+          "n": 6,
+          "stability": {
+            "first": 0.2292,
+            "second": 0.3296,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 37,
+            "n_members": 6,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 37,
+                "ev_prob": 0.4864864864864865,
+                "ev_mean": 0.005785897587982716,
+                "base_n": 360,
+                "base_prob": 0.39444444444444443,
+                "base_mean": -0.0016808408450100319,
+                "lift": 1.2333460220784165,
+                "excess_diff": 0.007466738432992748,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 37,
+                "ev_prob": 0.40540540540540543,
+                "ev_mean": 0.0010293200474781033,
+                "base_n": 360,
+                "base_prob": 0.3638888888888889,
+                "base_mean": -0.002338613380310308,
+                "lift": 1.1140911904270685,
+                "excess_diff": 0.003367933427788411,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 37,
+                "ev_prob": 0.5135135135135135,
+                "ev_mean": 0.004730284907354381,
+                "base_n": 360,
+                "base_prob": 0.37777777777777777,
+                "base_mean": -0.0030400332826043762,
+                "lift": 1.3593004769475356,
+                "excess_diff": 0.007770318189958757,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 37,
+              "mean": 0.03470597579309534,
+              "prob": 0.8648648648648649
+            }
+          }
+        },
+        {
+          "group": "Zero Knowledge",
+          "n": 6,
+          "stability": {
+            "first": 0.0646,
+            "second": 0.1917,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": true
+          },
+          "event": {
+            "n_events": 64,
+            "n_members": 6,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 64,
+                "ev_prob": 0.484375,
+                "ev_mean": 0.0039922702337795175,
+                "base_n": 156,
+                "base_prob": 0.4166666666666667,
+                "base_mean": -0.0018865459783925659,
+                "lift": 1.1624999999999999,
+                "excess_diff": 0.005878816212172083,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 64,
+                "ev_prob": 0.484375,
+                "ev_mean": 0.0021679064273775355,
+                "base_n": 156,
+                "base_prob": 0.391025641025641,
+                "base_mean": -0.0030669745745015332,
+                "lift": 1.2387295081967213,
+                "excess_diff": 0.005234881001879068,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 62,
+                "ev_prob": 0.6451612903225806,
+                "ev_mean": 0.008273750973442863,
+                "base_n": 156,
+                "base_prob": 0.3525641025641026,
+                "base_mean": -0.00513438941075724,
+                "lift": 1.8299120234604105,
+                "excess_diff": 0.013408140384200103,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 64,
+              "mean": 0.016754527944143234,
+              "prob": 0.703125
+            }
+          }
+        },
+        {
+          "group": "Metaverse",
+          "n": 4,
+          "stability": {
+            "first": 0.2393,
+            "second": 0.3514,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 27,
+            "n_members": 4,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 27,
+                "ev_prob": 0.4444444444444444,
+                "ev_mean": 0.0009867095026154077,
+                "base_n": 248,
+                "base_prob": 0.3911290322580645,
+                "base_mean": 0.0005919357019590962,
+                "lift": 1.13631156930126,
+                "excess_diff": 0.0003947738006563115,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 27,
+                "ev_prob": 0.5925925925925926,
+                "ev_mean": 0.012000781618412225,
+                "base_n": 248,
+                "base_prob": 0.40725806451612906,
+                "base_mean": 0.00025494713000964676,
+                "lift": 1.455078841217455,
+                "excess_diff": 0.011745834488402577,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 26,
+                "ev_prob": 0.4230769230769231,
+                "ev_mean": -0.006971467663849574,
+                "base_n": 248,
+                "base_prob": 0.41935483870967744,
+                "base_mean": 0.002443365573423361,
+                "lift": 1.0088757396449703,
+                "excess_diff": -0.009414833237272935,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 27,
+              "mean": 0.02537614387010564,
+              "prob": 0.7407407407407407
+            }
+          }
+        },
+        {
+          "group": "Memes",
+          "n": 12,
+          "stability": {
+            "first": 0.1464,
+            "second": 0.219,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 98,
+            "n_members": 12,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 98,
+                "ev_prob": 0.46938775510204084,
+                "ev_mean": 0.0015913872294722694,
+                "base_n": 84,
+                "base_prob": 0.5,
+                "base_mean": -0.005647949234871411,
+                "lift": 0.9387755102040817,
+                "excess_diff": 0.0072393364643436806,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 98,
+                "ev_prob": 0.40816326530612246,
+                "ev_mean": -0.0003697632556027485,
+                "base_n": 84,
+                "base_prob": 0.16666666666666666,
+                "base_mean": -0.010083475743819683,
+                "lift": 2.4489795918367347,
+                "excess_diff": 0.009713712488216935,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 98,
+                "ev_prob": 0.37755102040816324,
+                "ev_mean": -0.0035144295621693917,
+                "base_n": 84,
+                "base_prob": 0.4166666666666667,
+                "base_mean": -0.0029004771182661294,
+                "lift": 0.9061224489795917,
+                "excess_diff": -0.0006139524439032623,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 98,
+              "mean": 0.010809143234062055,
+              "prob": 0.6530612244897959
+            }
+          }
+        },
+        {
+          "group": "Gaming",
+          "n": 6,
+          "stability": {
+            "first": 0.1393,
+            "second": 0.2721,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 66,
+            "n_members": 6,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 66,
+                "ev_prob": 0.3787878787878788,
+                "ev_mean": 0.004319791785696694,
+                "base_n": 120,
+                "base_prob": 0.575,
+                "base_mean": 0.007704231066551507,
+                "lift": 0.6587615283267457,
+                "excess_diff": -0.003384439280854813,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 66,
+                "ev_prob": 0.42424242424242425,
+                "ev_mean": 0.004704987211944478,
+                "base_n": 120,
+                "base_prob": 0.5166666666666667,
+                "base_mean": 0.0107726739255392,
+                "lift": 0.8211143695014662,
+                "excess_diff": -0.0060676867135947225,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 65,
+                "ev_prob": 0.3230769230769231,
+                "ev_mean": -0.007377691416868687,
+                "base_n": 120,
+                "base_prob": 0.55,
+                "base_mean": 0.009753978988480377,
+                "lift": 0.5874125874125874,
+                "excess_diff": -0.017131670405349065,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 66,
+              "mean": 0.016299507479396652,
+              "prob": 0.6060606060606061
+            }
+          }
+        },
+        {
+          "group": "DeFi",
+          "n": 35,
+          "stability": {
+            "first": 0.0766,
+            "second": 0.1932,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": false,
+            "one_side": true
+          },
+          "event": {
+            "n_events": 320,
+            "n_members": 35,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 319,
+                "ev_prob": 0.554858934169279,
+                "ev_mean": 0.0026205513788859817,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 316,
+                "ev_prob": 0.5537974683544303,
+                "ev_mean": 0.0046557938468772715,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 312,
+                "ev_prob": 0.5769230769230769,
+                "ev_mean": 0.0048125746796869075,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 320,
+              "mean": 0.013108470564761266,
+              "prob": 0.709375
+            }
+          }
+        },
+        {
+          "group": "AI & Big Data",
+          "n": 14,
+          "stability": {
+            "first": 0.1405,
+            "second": 0.2104,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 179,
+            "n_members": 14,
+            "fee_pct": 0.1,
+            "sample_ready": true,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 178,
+                "ev_prob": 0.5842696629213483,
+                "ev_mean": 0.010531388561991793,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "2": {
+                "ev_n": 177,
+                "ev_prob": 0.5423728813559322,
+                "ev_mean": 0.0074207873110864455,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              },
+              "3": {
+                "ev_n": 175,
+                "ev_prob": 0.5428571428571428,
+                "ev_mean": 0.004778168162803285,
+                "base_n": 0,
+                "base_prob": null,
+                "base_mean": null,
+                "lift": null,
+                "excess_diff": null,
+                "lift_ok": false
+              }
+            },
+            "sync_same_day": {
+              "n": 179,
+              "mean": 0.01697175526369389,
+              "prob": 0.659217877094972
+            }
+          }
+        },
+        {
+          "group": "File Storage",
+          "n": 3,
+          "stability": {
+            "first": 0.2083,
+            "second": 0.1843,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 18,
+            "n_members": 3,
+            "fee_pct": 0.1,
+            "sample_ready": false,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 18,
+                "ev_prob": 0.4444444444444444,
+                "ev_mean": 0.008295241850271208,
+                "base_n": 225,
+                "base_prob": 0.4088888888888889,
+                "base_mean": 0.000759620997847896,
+                "lift": 1.0869565217391304,
+                "excess_diff": 0.0075356208524233114,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 18,
+                "ev_prob": 0.3888888888888889,
+                "ev_mean": -0.0074007379338370165,
+                "base_n": 225,
+                "base_prob": 0.41333333333333333,
+                "base_mean": 0.002149560486163478,
+                "lift": 0.9408602150537635,
+                "excess_diff": -0.009550298420000495,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 18,
+                "ev_prob": 0.4444444444444444,
+                "ev_mean": -0.0032208736398989493,
+                "base_n": 225,
+                "base_prob": 0.36444444444444446,
+                "base_mean": -0.0006320689883177147,
+                "lift": 1.2195121951219512,
+                "excess_diff": -0.0025888046515812344,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 18,
+              "mean": 0.04577862229088787,
+              "prob": 0.7777777777777778
+            }
+          }
+        }
+      ]
+    },
+    "issuer": {
+      "n_groups_analyzed": 1,
+      "n_groups_total": 1,
+      "groups": [
+        {
+          "group": "Tron Foundation",
+          "n": 3,
+          "stability": {
+            "first": 0.5273,
+            "second": 0.8051,
+            "base_first": 0.0862,
+            "base_second": 0.1527,
+            "stable": true,
+            "one_side": false
+          },
+          "event": {
+            "n_events": 6,
+            "n_members": 3,
+            "fee_pct": 0.1,
+            "sample_ready": false,
+            "skipped": false,
+            "per_h": {
+              "1": {
+                "ev_n": 6,
+                "ev_prob": 0.6666666666666666,
+                "ev_mean": 0.001788050151428892,
+                "base_n": 255,
+                "base_prob": 0.5333333333333333,
+                "base_mean": -0.0023322888599653776,
+                "lift": 1.25,
+                "excess_diff": 0.00412033901139427,
+                "lift_ok": true
+              },
+              "2": {
+                "ev_n": 6,
+                "ev_prob": 0.5,
+                "ev_mean": -0.0023936640579987623,
+                "base_n": 255,
+                "base_prob": 0.5137254901960784,
+                "base_mean": -0.002760217395871787,
+                "lift": 0.9732824427480917,
+                "excess_diff": 0.00036655333787302463,
+                "lift_ok": true
+              },
+              "3": {
+                "ev_n": 6,
+                "ev_prob": 0.3333333333333333,
+                "ev_mean": -0.007360262497813158,
+                "base_n": 255,
+                "base_prob": 0.5215686274509804,
+                "base_mean": -0.0026302601692956918,
+                "lift": 0.6390977443609022,
+                "excess_diff": -0.004730002328517466,
+                "lift_ok": true
+              }
+            },
+            "sync_same_day": {
+              "n": 6,
+              "mean": 0.0031656657799576937,
+              "prob": 0.5
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,1621 @@
+{
+  "generated_at": "2026-10-02T14:31:44.936562+00:00",
+  "args": {
+    "selftest": false,
+    "hourly_top": 150,
+    "hourly_min_bars": 500,
+    "hourly_lag_max": 48,
+    "hours_days": 90,
+    "days_top": 200,
+    "days_min_days": 60,
+    "days_lag_max": 14,
+    "winsorize_pct": 50.0,
+    "min_corr": 0.15,
+    "top_pairs": 30,
+    "events_source": "both",
+    "events_days": 30,
+    "confidence": [
+      "high",
+      "medium"
+    ],
+    "surge_pct": 15.0,
+    "cooldown_h": 12.0,
+    "min_events": 5,
+    "output": ""
+  },
+  "hourly": {
+    "n_symbols": 150,
+    "n_bars": 2141,
+    "pairs_scanned": 22350,
+    "pairs_above_threshold": 65,
+    "top_lead_lag": [
+      {
+        "leader": "GUSDT",
+        "follower": "FORMUSDT",
+        "lag": 33,
+        "corr": -0.3169,
+        "sync_corr": 0.0157,
+        "leader_sector": "stablecoin",
+        "follower_sector": "gamefi"
+      },
+      {
+        "leader": "FORMUSDT",
+        "follower": "BCHUSDT",
+        "lag": 20,
+        "corr": 0.2763,
+        "sync_corr": 0.1054,
+        "leader_sector": "gamefi",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "LSKUSDT",
+        "follower": "CVCUSDT",
+        "lag": 9,
+        "corr": 0.2653,
+        "sync_corr": 0.1834,
+        "leader_sector": "l2",
+        "follower_sector": "infra"
+      },
+      {
+        "leader": "SAGAUSDT",
+        "follower": "SEIUSDT",
+        "lag": 10,
+        "corr": 0.2296,
+        "sync_corr": 0.0448,
+        "leader_sector": "l1",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "HYPEUSDT",
+        "follower": "NEIROUSDT",
+        "lag": 34,
+        "corr": 0.2173,
+        "sync_corr": 0.1356,
+        "leader_sector": "l1",
+        "follower_sector": "meme"
+      },
+      {
+        "leader": "VTHOUSDT",
+        "follower": "LSKUSDT",
+        "lag": 21,
+        "corr": 0.2113,
+        "sync_corr": 0.1274,
+        "leader_sector": "l1",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDCUSDT",
+        "follower": "FORMUSDT",
+        "lag": 15,
+        "corr": -0.209,
+        "sync_corr": 0.0319,
+        "leader_sector": "meme",
+        "follower_sector": "gamefi"
+      },
+      {
+        "leader": "HYPEUSDT",
+        "follower": "ETHUSDT",
+        "lag": 1,
+        "corr": 0.2063,
+        "sync_corr": 0.2026,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "SOPHUSDT",
+        "follower": "IOSTUSDT",
+        "lag": 38,
+        "corr": 0.2024,
+        "sync_corr": 0.1941,
+        "leader_sector": "gamefi",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "VTHOUSDT",
+        "follower": "CVCUSDT",
+        "lag": 9,
+        "corr": 0.2007,
+        "sync_corr": 0.0405,
+        "leader_sector": "l1",
+        "follower_sector": "infra"
+      },
+      {
+        "leader": "LSKUSDT",
+        "follower": "REZUSDT",
+        "lag": 5,
+        "corr": 0.2003,
+        "sync_corr": 0.0085,
+        "leader_sector": "l2",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "RENDERUSDT",
+        "follower": "BCHUSDT",
+        "lag": 44,
+        "corr": 0.1999,
+        "sync_corr": 0.3474,
+        "leader_sector": "depin",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "GUSDT",
+        "follower": "USDCUSDT",
+        "lag": 18,
+        "corr": 0.1996,
+        "sync_corr": 0.0158,
+        "leader_sector": "stablecoin",
+        "follower_sector": "meme"
+      },
+      {
+        "leader": "ONGUSDT",
+        "follower": "TRUMPUSDT",
+        "lag": 38,
+        "corr": 0.1908,
+        "sync_corr": 0.0191,
+        "leader_sector": "l1",
+        "follower_sector": "meme"
+      },
+      {
+        "leader": "ARKUSDT",
+        "follower": "SANDUSDT",
+        "lag": 38,
+        "corr": -0.1902,
+        "sync_corr": 0.0823,
+        "leader_sector": "ai",
+        "follower_sector": "gamefi"
+      },
+      {
+        "leader": "ETCUSDT",
+        "follower": "TRUMPUSDT",
+        "lag": 4,
+        "corr": 0.1888,
+        "sync_corr": 0.2699,
+        "leader_sector": "l1",
+        "follower_sector": "meme"
+      },
+      {
+        "leader": "SAGAUSDT",
+        "follower": "BTWUSDT",
+        "lag": 10,
+        "corr": 0.1886,
+        "sync_corr": -0.0339,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "BRUSDT",
+        "follower": "GUSDT",
+        "lag": 39,
+        "corr": 0.1865,
+        "sync_corr": -0.0068,
+        "leader_sector": "defi",
+        "follower_sector": "stablecoin"
+      },
+      {
+        "leader": "IOSTUSDT",
+        "follower": "VTHOUSDT",
+        "lag": 20,
+        "corr": 0.1863,
+        "sync_corr": 0.0006,
+        "leader_sector": "l1",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "BOMEUSDT",
+        "follower": "TRUMPUSDT",
+        "lag": 20,
+        "corr": 0.1855,
+        "sync_corr": 0.17,
+        "leader_sector": "meme",
+        "follower_sector": "meme"
+      },
+      {
+        "leader": "FFUSDT",
+        "follower": "FORMUSDT",
+        "lag": 17,
+        "corr": -0.1854,
+        "sync_corr": 0.0262,
+        "leader_sector": "defi",
+        "follower_sector": "gamefi"
+      },
+      {
+        "leader": "FORMUSDT",
+        "follower": "TIAUSDT",
+        "lag": 27,
+        "corr": 0.1834,
+        "sync_corr": 0.1431,
+        "leader_sector": "gamefi",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "VTHOUSDT",
+        "follower": "REZUSDT",
+        "lag": 11,
+        "corr": 0.182,
+        "sync_corr": -0.0265,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "CVCUSDT",
+        "follower": "REZUSDT",
+        "lag": 2,
+        "corr": 0.1817,
+        "sync_corr": 0.0833,
+        "leader_sector": "infra",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "RAYSOLUSDT",
+        "follower": "SOPHUSDT",
+        "lag": 39,
+        "corr": 0.1804,
+        "sync_corr": 0.0619,
+        "leader_sector": null,
+        "follower_sector": "gamefi"
+      },
+      {
+        "leader": "SAGAUSDT",
+        "follower": "SUIUSDT",
+        "lag": 10,
+        "corr": 0.1782,
+        "sync_corr": 0.0887,
+        "leader_sector": "l1",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "CVCUSDT",
+        "follower": "FFUSDT",
+        "lag": 40,
+        "corr": 0.1777,
+        "sync_corr": 0.0048,
+        "leader_sector": "infra",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "USDCUSDT",
+        "follower": "BCHUSDT",
+        "lag": 35,
+        "corr": -0.1768,
+        "sync_corr": -0.0124,
+        "leader_sector": "meme",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "SYNUSDT",
+        "follower": "BRUSDT",
+        "lag": 4,
+        "corr": 0.1758,
+        "sync_corr": 0.009,
+        "leader_sector": "defi",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "CAKEUSDT",
+        "follower": "FORMUSDT",
+        "lag": 34,
+        "corr": 0.1752,
+        "sync_corr": 0.1702,
+        "leader_sector": "derivatives",
+        "follower_sector": "gamefi"
+      }
+    ],
+    "top_sync": [
+      {
+        "a": "PAXGUSDT",
+        "b": "XAUTUSDT",
+        "corr": 0.9984
+      },
+      {
+        "a": "XAUTUSDT",
+        "b": "PAXGUSDT",
+        "corr": 0.9984
+      },
+      {
+        "a": "XAUTUSDT",
+        "b": "TRXUSDT",
+        "corr": 0.7226
+      },
+      {
+        "a": "TRXUSDT",
+        "b": "XAUTUSDT",
+        "corr": 0.7226
+      },
+      {
+        "a": "PAXGUSDT",
+        "b": "TRXUSDT",
+        "corr": 0.718
+      },
+      {
+        "a": "TRXUSDT",
+        "b": "PAXGUSDT",
+        "corr": 0.718
+      },
+      {
+        "a": "DASHUSDT",
+        "b": "ZENUSDT",
+        "corr": 0.6802
+      },
+      {
+        "a": "ZENUSDT",
+        "b": "DASHUSDT",
+        "corr": 0.6802
+      },
+      {
+        "a": "TRXUSDT",
+        "b": "USDCUSDT",
+        "corr": 0.6765
+      },
+      {
+        "a": "USDCUSDT",
+        "b": "TRXUSDT",
+        "corr": 0.6765
+      }
+    ],
+    "window_start": "2026-07-04T16:00:00",
+    "window_end": "2026-10-02T14:00:00"
+  },
+  "daily": {
+    "n_symbols": 62,
+    "n_bars": 74,
+    "pairs_scanned": 3782,
+    "pairs_above_threshold": 3544,
+    "top_lead_lag": [
+      {
+        "leader": "BCH",
+        "follower": "ONDO",
+        "lag": 2,
+        "corr": 0.6642,
+        "sync_corr": 0.1284,
+        "leader_sector": "l1",
+        "follower_sector": "rwa"
+      },
+      {
+        "leader": "BCH",
+        "follower": "MORPHO",
+        "lag": 2,
+        "corr": 0.6512,
+        "sync_corr": -0.083,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "DOT",
+        "follower": "AVAX",
+        "lag": 12,
+        "corr": 0.6343,
+        "sync_corr": 0.3925,
+        "leader_sector": "ai",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "LTC",
+        "follower": "HBAR",
+        "lag": 4,
+        "corr": 0.6313,
+        "sync_corr": 0.1395,
+        "leader_sector": "l1",
+        "follower_sector": "rwa"
+      },
+      {
+        "leader": "AVAX",
+        "follower": "QNT",
+        "lag": 8,
+        "corr": 0.6166,
+        "sync_corr": 0.099,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "BCH",
+        "follower": "RAIN",
+        "lag": 4,
+        "corr": 0.6012,
+        "sync_corr": -0.1558,
+        "leader_sector": "l1",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "AVAX",
+        "follower": "HBAR",
+        "lag": 8,
+        "corr": 0.6009,
+        "sync_corr": -0.0363,
+        "leader_sector": "l1",
+        "follower_sector": "rwa"
+      },
+      {
+        "leader": "XRP",
+        "follower": "HBAR",
+        "lag": 14,
+        "corr": 0.5982,
+        "sync_corr": 0.0455,
+        "leader_sector": "l1",
+        "follower_sector": "rwa"
+      },
+      {
+        "leader": "USDf",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5934,
+        "sync_corr": -0.1454,
+        "leader_sector": "defi",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "PYUSD",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5931,
+        "sync_corr": -0.1441,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDT",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.593,
+        "sync_corr": -0.1443,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDD",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5929,
+        "sync_corr": -0.143,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDC",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5926,
+        "sync_corr": -0.1438,
+        "leader_sector": "meme",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "RLUSD",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5922,
+        "sync_corr": -0.1443,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "U",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5917,
+        "sync_corr": -0.145,
+        "leader_sector": "defi",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDe",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5917,
+        "sync_corr": -0.1444,
+        "leader_sector": null,
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USD1",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5913,
+        "sync_corr": -0.1345,
+        "leader_sector": "meme",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "TRX",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5909,
+        "sync_corr": -0.2208,
+        "leader_sector": "l1",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "DAI",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5907,
+        "sync_corr": -0.1448,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "USDY",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5854,
+        "sync_corr": -0.1437,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "NEAR",
+        "follower": "QNT",
+        "lag": 10,
+        "corr": 0.5732,
+        "sync_corr": 0.225,
+        "leader_sector": "ai",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "MORPHO",
+        "follower": "RAIN",
+        "lag": 2,
+        "corr": 0.5572,
+        "sync_corr": 0.0006,
+        "leader_sector": "defi",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "USDG",
+        "follower": "ARB",
+        "lag": 12,
+        "corr": -0.5535,
+        "sync_corr": -0.1403,
+        "leader_sector": "meme",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "RAIN",
+        "follower": "DOT",
+        "lag": 14,
+        "corr": 0.5534,
+        "sync_corr": 0.0553,
+        "leader_sector": "defi",
+        "follower_sector": "ai"
+      },
+      {
+        "leader": "MORPHO",
+        "follower": "BNB",
+        "lag": 13,
+        "corr": 0.5533,
+        "sync_corr": 0.1858,
+        "leader_sector": "defi",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "BCH",
+        "follower": "LTC",
+        "lag": 2,
+        "corr": 0.5498,
+        "sync_corr": 0.1529,
+        "leader_sector": "l1",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "ETH",
+        "follower": "SOL",
+        "lag": 7,
+        "corr": 0.5471,
+        "sync_corr": 0.2254,
+        "leader_sector": "defi",
+        "follower_sector": "defi"
+      },
+      {
+        "leader": "UNI",
+        "follower": "ARB",
+        "lag": 1,
+        "corr": 0.5417,
+        "sync_corr": 0.4716,
+        "leader_sector": "defi",
+        "follower_sector": "l2"
+      },
+      {
+        "leader": "HTX",
+        "follower": "BCH",
+        "lag": 1,
+        "corr": -0.5381,
+        "sync_corr": -0.1411,
+        "leader_sector": "cex_token",
+        "follower_sector": "l1"
+      },
+      {
+        "leader": "USDD",
+        "follower": "BCH",
+        "lag": 1,
+        "corr": -0.5364,
+        "sync_corr": -0.2516,
+        "leader_sector": "stablecoin",
+        "follower_sector": "l1"
+      }
+    ],
+    "top_sync": [
+      {
+        "a": "USDC",
+        "b": "RLUSD",
+        "corr": 1.0137
+      },
+      {
+        "a": "RLUSD",
+        "b": "USDC",
+        "corr": 1.0137
+      },
+      {
+        "a": "PYUSD",
+        "b": "RLUSD",
+        "corr": 1.0137
+      },
+      {
+        "a": "RLUSD",
+        "b": "PYUSD",
+        "corr": 1.0137
+      },
+      {
+        "a": "USDT",
+        "b": "USDC",
+        "corr": 1.0137
+      },
+      {
+        "a": "USDC",
+        "b": "USDT",
+        "corr": 1.0137
+      },
+      {
+        "a": "USDT",
+        "b": "RLUSD",
+        "corr": 1.0137
+      },
+      {
+        "a": "RLUSD",
+        "b": "USDT",
+        "corr": 1.0137
+      },
+      {
+        "a": "USDC",
+        "b": "PYUSD",
+        "corr": 1.0137
+      },
+      {
+        "a": "PYUSD",
+        "b": "USDC",
+        "corr": 1.0137
+      }
+    ],
+    "granularity": "day",
+    "window_start": "2026-07-21",
+    "window_end": "2026-10-02"
+  },
+  "sector_rotation": {
+    "n_sectors": 8,
+    "pairs": [
+      {
+        "leader_sector": "stablecoin",
+        "follower_sector": "l2",
+        "lag_days": 12,
+        "corr": -0.4743
+      },
+      {
+        "leader_sector": "cex_token",
+        "follower_sector": "l2",
+        "lag_days": 12,
+        "corr": -0.4445
+      },
+      {
+        "leader_sector": "defi",
+        "follower_sector": "rwa",
+        "lag_days": 3,
+        "corr": -0.4177
+      },
+      {
+        "leader_sector": "ai",
+        "follower_sector": "defi",
+        "lag_days": 9,
+        "corr": 0.3985
+      },
+      {
+        "leader_sector": "l1",
+        "follower_sector": "rwa",
+        "lag_days": 2,
+        "corr": 0.3624
+      },
+      {
+        "leader_sector": "stablecoin",
+        "follower_sector": "defi",
+        "lag_days": 4,
+        "corr": 0.3553
+      },
+      {
+        "leader_sector": "ai",
+        "follower_sector": "rwa",
+        "lag_days": 3,
+        "corr": -0.353
+      },
+      {
+        "leader_sector": "cex_token",
+        "follower_sector": "rwa",
+        "lag_days": 3,
+        "corr": -0.3509
+      },
+      {
+        "leader_sector": "meme",
+        "follower_sector": "rwa",
+        "lag_days": 10,
+        "corr": -0.3441
+      },
+      {
+        "leader_sector": "l2",
+        "follower_sector": "ai",
+        "lag_days": 2,
+        "corr": 0.3378
+      },
+      {
+        "leader_sector": "defi",
+        "follower_sector": "meme",
+        "lag_days": 1,
+        "corr": -0.3042
+      },
+      {
+        "leader_sector": "meme",
+        "follower_sector": "cex_token",
+        "lag_days": 7,
+        "corr": 0.2958
+      },
+      {
+        "leader_sector": "cex_token",
+        "follower_sector": "stablecoin",
+        "lag_days": 9,
+        "corr": -0.286
+      },
+      {
+        "leader_sector": "meme",
+        "follower_sector": "l2",
+        "lag_days": 12,
+        "corr": -0.2842
+      },
+      {
+        "leader_sector": "stablecoin",
+        "follower_sector": "l1",
+        "lag_days": 7,
+        "corr": 0.2818
+      },
+      {
+        "leader_sector": "rwa",
+        "follower_sector": "defi",
+        "lag_days": 2,
+        "corr": 0.2665
+      },
+      {
+        "leader_sector": "defi",
+        "follower_sector": "l2",
+        "lag_days": 2,
+        "corr": -0.2557
+      },
+      {
+        "leader_sector": "l1",
+        "follower_sector": "cex_token",
+        "lag_days": 5,
+        "corr": -0.2537
+      },
+      {
+        "leader_sector": "l2",
+        "follower_sector": "cex_token",
+        "lag_days": 2,
+        "corr": 0.2475
+      },
+      {
+        "leader_sector": "defi",
+        "follower_sector": "l1",
+        "lag_days": 1,
+        "corr": -0.2471
+      }
+    ]
+  },
+  "events": {
+    "scan": 685,
+    "kline_surge": 1069,
+    "total": 1754
+  },
+  "event_study": [
+    {
+      "leader": "LSKUSDT",
+      "follower": "CVCUSDT",
+      "lag": 9,
+      "n_events": 13,
+      "h1": {
+        "n": 13,
+        "follow_prob": 0.23076923076923078,
+        "mean_excess": -2.5891505690209957,
+        "base_prob": 0.48751835535976507,
+        "base_mean": 0.010785774556504524,
+        "lift": 0.47335495829471735
+      },
+      "h4": {
+        "n": 13,
+        "follow_prob": 0.3076923076923077,
+        "mean_excess": -2.7989050762672534,
+        "base_prob": 0.4598039215686274,
+        "base_mean": 0.0482905862689791,
+        "lift": 0.6691815647039528
+      },
+      "h12": {
+        "n": 13,
+        "follow_prob": 0.38461538461538464,
+        "mean_excess": -1.2986423408053083,
+        "base_prob": 0.45177165354330706,
+        "base_mean": 0.12336384191976231,
+        "lift": 0.8513490866432044
+      },
+      "h24": {
+        "n": 13,
+        "follow_prob": 0.5384615384615384,
+        "mean_excess": -0.8500782787909759,
+        "base_prob": 0.42326732673267325,
+        "base_mean": 0.268213511019186,
+        "lift": 1.2721547458389564
+      }
+    },
+    {
+      "leader": "ARKUSDT",
+      "follower": "SANDUSDT",
+      "lag": 38,
+      "n_events": 10,
+      "h1": {
+        "n": 8,
+        "follow_prob": 0.25,
+        "mean_excess": -1.4664935439573812,
+        "base_prob": 0.47218259629101283,
+        "base_mean": 0.0030913208061513387,
+        "lift": 0.5294561933534743
+      },
+      "h4": {
+        "n": 8,
+        "follow_prob": 0.5,
+        "mean_excess": -1.2322789372158582,
+        "base_prob": 0.4633333333333333,
+        "base_mean": 0.01738210641390455,
+        "lift": 1.079136690647482
+      },
+      "h12": {
+        "n": 8,
+        "follow_prob": 0.5,
+        "mean_excess": 6.714112375923296,
+        "base_prob": 0.43881453154875716,
+        "base_mean": -0.041538316715329864,
+        "lift": 1.1394335511982572
+      },
+      "h24": {
+        "n": 6,
+        "follow_prob": 0.3333333333333333,
+        "mean_excess": -3.1284558083798824,
+        "base_prob": 0.40048076923076925,
+        "base_mean": -0.24675138338019428,
+        "lift": 0.8323329331732692
+      }
+    },
+    {
+      "leader": "ONGUSDT",
+      "follower": "TRUMPUSDT",
+      "lag": 38,
+      "n_events": 11,
+      "h1": {
+        "n": 11,
+        "follow_prob": 0.36363636363636365,
+        "mean_excess": 7.2618543266752,
+        "base_prob": 0.47741321921065144,
+        "base_mean": 0.005595343307098485,
+        "lift": 0.761680550525172
+      },
+      "h4": {
+        "n": 11,
+        "follow_prob": 0.36363636363636365,
+        "mean_excess": 5.271184943513614,
+        "base_prob": 0.4542857142857143,
+        "base_mean": 0.030975335306427657,
+        "lift": 0.8004574042309891
+      },
+      "h12": {
+        "n": 11,
+        "follow_prob": 0.36363636363636365,
+        "mean_excess": 5.306444382913366,
+        "base_prob": 0.4359464627151052,
+        "base_mean": 0.0657096572413475,
+        "lift": 0.8341307814992025
+      },
+      "h24": {
+        "n": 11,
+        "follow_prob": 0.36363636363636365,
+        "mean_excess": 3.370701795730197,
+        "base_prob": 0.4485576923076923,
+        "base_mean": 0.10145787749050032,
+        "lift": 0.8106791386534151
+      }
+    },
+    {
+      "leader": "LSKUSDT",
+      "follower": "REZUSDT",
+      "lag": 5,
+      "n_events": 13,
+      "h1": {
+        "n": 13,
+        "follow_prob": 0.38461538461538464,
+        "mean_excess": -1.2825728633652542,
+        "base_prob": 0.4857008907641819,
+        "base_mean": 0.008441437418944252,
+        "lift": 0.791877041877042
+      },
+      "h4": {
+        "n": 13,
+        "follow_prob": 0.38461538461538464,
+        "mean_excess": -0.8231932806988221,
+        "base_prob": 0.46150234741784035,
+        "base_mean": 0.03395744794238557,
+        "lift": 0.8333985444870492
+      },
+      "h12": {
+        "n": 13,
+        "follow_prob": 0.5384615384615384,
+        "mean_excess": 0.01916970305017009,
+        "base_prob": 0.4524033930254477,
+        "base_mean": 0.0983210373880257,
+        "lift": 1.1902243589743589
+      },
+      "h24": {
+        "n": 13,
+        "follow_prob": 0.46153846153846156,
+        "mean_excess": 2.4560543787860944,
+        "base_prob": 0.4483412322274882,
+        "base_mean": 0.20094570741709203,
+        "lift": 1.0294356805984712
+      }
+    },
+    {
+      "leader": "SAGAUSDT",
+      "follower": "SUIUSDT",
+      "lag": 10,
+      "n_events": 19,
+      "h1": {
+        "n": 19,
+        "follow_prob": 0.42105263157894735,
+        "mean_excess": 1.6792068061524912,
+        "base_prob": 0.4950727358047865,
+        "base_mean": 0.010535134522551568,
+        "lift": 0.8504864055874282
+      },
+      "h4": {
+        "n": 19,
+        "follow_prob": 0.42105263157894735,
+        "mean_excess": 2.108090959535156,
+        "base_prob": 0.47274436090225563,
+        "base_mean": 0.03994993602649259,
+        "lift": 0.8906560636182902
+      },
+      "h12": {
+        "n": 19,
+        "follow_prob": 0.47368421052631576,
+        "mean_excess": 2.7818817704105983,
+        "base_prob": 0.44764150943396225,
+        "base_mean": 0.11813803099668553,
+        "lift": 1.0581775830514115
+      },
+      "h24": {
+        "n": 19,
+        "follow_prob": 0.5789473684210527,
+        "mean_excess": 2.757648391287772,
+        "base_prob": 0.45493358633776093,
+        "base_mean": 0.24630309856277843,
+        "lift": 1.2725975522748476
+      }
+    },
+    {
+      "leader": "SYNUSDT",
+      "follower": "BRUSDT",
+      "lag": 4,
+      "n_events": 20,
+      "h1": {
+        "n": 20,
+        "follow_prob": 0.45,
+        "mean_excess": -1.0368521087624358,
+        "base_prob": 0.48338792700046795,
+        "base_mean": 0.09523509789777215,
+        "lift": 0.9309293320425944
+      },
+      "h4": {
+        "n": 20,
+        "follow_prob": 0.5,
+        "mean_excess": -1.2410928131179184,
+        "base_prob": 0.47141518275538896,
+        "base_mean": 0.44166478412056615,
+        "lift": 1.0606361829025845
+      },
+      "h12": {
+        "n": 20,
+        "follow_prob": 0.25,
+        "mean_excess": 5.8159208584966615,
+        "base_prob": 0.44026340545625586,
+        "base_mean": 1.482149371318569,
+        "lift": 0.5678418803418803
+      },
+      "h24": {
+        "n": 19,
+        "follow_prob": 0.42105263157894735,
+        "mean_excess": 11.989506022935549,
+        "base_prob": 0.4498580889309366,
+        "base_mean": 3.0658491292403727,
+        "lift": 0.9359676794509934
+      }
+    },
+    {
+      "leader": "BRUSDT",
+      "follower": "GUSDT",
+      "lag": 39,
+      "n_events": 17,
+      "h1": {
+        "n": 17,
+        "follow_prob": 0.47058823529411764,
+        "mean_excess": 3.799161747592522,
+        "base_prob": 0.49665391969407263,
+        "base_mean": 0.025449943739074592,
+        "lift": 0.9475174092736228
+      },
+      "h4": {
+        "n": 17,
+        "follow_prob": 0.4117647058823529,
+        "mean_excess": 0.9116838202538727,
+        "base_prob": 0.4944949736716132,
+        "base_mean": 0.08417781782888882,
+        "lift": 0.8326974545868686
+      },
+      "h12": {
+        "n": 17,
+        "follow_prob": 0.47058823529411764,
+        "mean_excess": 0.8111127347988392,
+        "base_prob": 0.47333012974531474,
+        "base_mean": 0.21666908707941773,
+        "lift": 0.9942072260376231
+      },
+      "h24": {
+        "n": 17,
+        "follow_prob": 0.35294117647058826,
+        "mean_excess": 0.9467000635820978,
+        "base_prob": 0.4610923151280812,
+        "base_mean": 0.42372219980756043,
+        "lift": 0.7654458009618943
+      }
+    },
+    {
+      "leader": "BOMEUSDT",
+      "follower": "TRUMPUSDT",
+      "lag": 20,
+      "n_events": 12,
+      "h1": {
+        "n": 11,
+        "follow_prob": 0.45454545454545453,
+        "mean_excess": 0.4047995925276405,
+        "base_prob": 0.47619047619047616,
+        "base_mean": 0.004176825937105978,
+        "lift": 0.9545454545454546
+      },
+      "h4": {
+        "n": 11,
+        "follow_prob": 0.45454545454545453,
+        "mean_excess": -0.11952712839694568,
+        "base_prob": 0.45325779036827196,
+        "base_mean": 0.025204065058438568,
+        "lift": 1.002840909090909
+      },
+      "h12": {
+        "n": 11,
+        "follow_prob": 0.36363636363636365,
+        "mean_excess": -0.1349680234882972,
+        "base_prob": 0.4327014218009479,
+        "base_mean": 0.05198961338216189,
+        "lift": 0.8403863387434033
+      },
+      "h24": {
+        "n": 11,
+        "follow_prob": 0.45454545454545453,
+        "mean_excess": 1.2702331966910436,
+        "base_prob": 0.44518589132507147,
+        "base_mean": 0.0858421009643339,
+        "lift": 1.0210239439361495
+      }
+    },
+    {
+      "leader": "GUSDT",
+      "follower": "USDCUSDT",
+      "lag": 18,
+      "n_events": 6,
+      "h1": {
+        "n": 6,
+        "follow_prob": 0.5,
+        "mean_excess": -4.7812784924306575,
+        "base_prob": 0.49123767798466594,
+        "base_mean": -0.018384139600577467,
+        "lift": 1.0178372352285396
+      },
+      "h4": {
+        "n": 6,
+        "follow_prob": 0.16666666666666666,
+        "mean_excess": -4.8071898148785115,
+        "base_prob": 0.47339550191991225,
+        "base_mean": -0.07415490876797629,
+        "lift": 0.35206643491695633
+      },
+      "h12": {
+        "n": 4,
+        "follow_prob": 0.0,
+        "mean_excess": -7.359607384713506,
+        "base_prob": 0.45950413223140496,
+        "base_mean": -0.2228438860546266,
+        "lift": 0.0
+      },
+      "h24": {
+        "n": 4,
+        "follow_prob": 0.0,
+        "mean_excess": -7.5897572950333005,
+        "base_prob": 0.46089850249584025,
+        "base_mean": -0.43591171887043056,
+        "lift": 0.0
+      }
+    },
+    {
+      "leader": "VTHOUSDT",
+      "follower": "CVCUSDT",
+      "lag": 9,
+      "n_events": 6,
+      "h1": {
+        "n": 6,
+        "follow_prob": 0.5,
+        "mean_excess": 0.6136575699483799,
+        "base_prob": 0.48751835535976507,
+        "base_mean": 0.010785774556504524,
+        "lift": 1.025602409638554
+      },
+      "h4": {
+        "n": 6,
+        "follow_prob": 0.5,
+        "mean_excess": 2.417819973167679,
+        "base_prob": 0.4598039215686274,
+        "base_mean": 0.0482905862689791,
+        "lift": 1.0874200426439233
+      },
+      "h12": {
+        "n": 6,
+        "follow_prob": 0.3333333333333333,
+        "mean_excess": 2.136435389850949,
+        "base_prob": 0.45177165354330706,
+        "base_mean": 0.12336384191976231,
+        "lift": 0.7378358750907771
+      },
+      "h24": {
+        "n": 6,
+        "follow_prob": 0.5,
+        "mean_excess": 12.645790840835048,
+        "base_prob": 0.42326732673267325,
+        "base_mean": 0.268213511019186,
+        "lift": 1.1812865497076024
+      }
+    },
+    {
+      "leader": "RAYSOLUSDT",
+      "follower": "SOPHUSDT",
+      "lag": 39,
+      "n_events": 15,
+      "h1": {
+        "n": 13,
+        "follow_prob": 0.5384615384615384,
+        "mean_excess": 0.25925153266230166,
+        "base_prob": 0.4775972427375677,
+        "base_mean": -0.017314764739267244,
+        "lift": 1.1274385408406027
+      },
+      "h4": {
+        "n": 13,
+        "follow_prob": 0.46153846153846156,
+        "mean_excess": 1.060048782013329,
+        "base_prob": 0.4437869822485207,
+        "base_mean": -0.05137085919167068,
+        "lift": 1.04
+      },
+      "h12": {
+        "n": 13,
+        "follow_prob": 0.38461538461538464,
+        "mean_excess": 9.421876862580406,
+        "base_prob": 0.4163366336633663,
+        "base_mean": -0.08275958283132387,
+        "lift": 0.9238086527028264
+      },
+      "h24": {
+        "n": 13,
+        "follow_prob": 0.38461538461538464,
+        "mean_excess": 1.4843032102839389,
+        "base_prob": 0.4113545816733068,
+        "base_mean": -0.26823864107161755,
+        "lift": 0.9349972061836469
+      }
+    },
+    {
+      "leader": "SAGAUSDT",
+      "follower": "BTWUSDT",
+      "lag": 10,
+      "n_events": 19,
+      "h1": {
+        "n": 19,
+        "follow_prob": 0.631578947368421,
+        "mean_excess": 5.331671822610556,
+        "base_prob": 0.5527921163772876,
+        "base_mean": 0.1958898277745936,
+        "lift": 1.1425252434992403
+      },
+      "h4": {
+        "n": 19,
+        "follow_prob": 0.6842105263157895,
+        "mean_excess": 6.237304711567019,
+        "base_prob": 0.5643796992481203,
+        "base_mean": 0.7677546091280371,
+        "lift": 1.212323064113239
+      },
+      "h12": {
+        "n": 19,
+        "follow_prob": 0.631578947368421,
+        "mean_excess": 5.108521469313579,
+        "base_prob": 0.5938679245283018,
+        "base_mean": 2.1198058448938646,
+        "lift": 1.0635006897704946
+      },
+      "h24": {
+        "n": 19,
+        "follow_prob": 0.6842105263157895,
+        "mean_excess": 4.717650271402486,
+        "base_prob": 0.610056925996205,
+        "base_mean": 3.963468279852167,
+        "lift": 1.121551935827126
+      }
+    },
+    {
+      "leader": "FFUSDT",
+      "follower": "FORMUSDT",
+      "lag": 17,
+      "n_events": 11,
+      "h1": {
+        "n": 11,
+        "follow_prob": 0.5454545454545454,
+        "mean_excess": 2.1176239388614775,
+        "base_prob": 0.4659711872826627,
+        "base_mean": 0.0067749670783198235,
+        "lift": 1.1705756929637525
+      },
+      "h4": {
+        "n": 11,
+        "follow_prob": 0.5454545454545454,
+        "mean_excess": 1.9249926024410977,
+        "base_prob": 0.46417910447761196,
+        "base_mean": 0.023624753460840718,
+        "lift": 1.1750950014615609
+      },
+      "h12": {
+        "n": 11,
+        "follow_prob": 0.45454545454545453,
+        "mean_excess": -0.5210858569227235,
+        "base_prob": 0.44705294705294707,
+        "base_mean": 0.05783617104866692,
+        "lift": 1.0167597765363128
+      },
+      "h24": {
+        "n": 11,
+        "follow_prob": 0.45454545454545453,
+        "mean_excess": -0.09754182311723682,
+        "base_prob": 0.46080402010050253,
+        "base_mean": 0.11442095944579019,
+        "lift": 0.986418161990681
+      }
+    },
+    {
+      "leader": "CVCUSDT",
+      "follower": "REZUSDT",
+      "lag": 2,
+      "n_events": 5,
+      "h1": {
+        "n": 5,
+        "follow_prob": 0.6,
+        "mean_excess": -3.232535105690939,
+        "base_prob": 0.4859550561797753,
+        "base_mean": 0.008534161319247347,
+        "lift": 1.2346820809248553
+      },
+      "h4": {
+        "n": 5,
+        "follow_prob": 0.2,
+        "mean_excess": -3.5392638288245863,
+        "base_prob": 0.4608532583216127,
+        "base_mean": 0.027287525334505878,
+        "lift": 0.43397761953204483
+      },
+      "h12": {
+        "n": 5,
+        "follow_prob": 0.6,
+        "mean_excess": 1.7405544404375874,
+        "base_prob": 0.45176470588235296,
+        "base_mean": 0.09012880883289384,
+        "lift": 1.328125
+      },
+      "h24": {
+        "n": 5,
+        "follow_prob": 0.4,
+        "mean_excess": 2.441106039314478,
+        "base_prob": 0.44770468528159013,
+        "base_mean": 0.19018229231506675,
+        "lift": 0.8934460887949262
+      }
+    },
+    {
+      "leader": "FORMUSDT",
+      "follower": "BCHUSDT",
+      "lag": 20,
+      "n_events": 8,
+      "h1": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 7.955965748021131,
+        "base_prob": 0.495992456388496,
+        "base_mean": 0.0009110571341651484,
+        "lift": 1.2600998098859315
+      },
+      "h4": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 7.993510959027616,
+        "base_prob": 0.47875354107648727,
+        "base_mean": 0.003947656442095757,
+        "lift": 1.305473372781065
+      },
+      "h12": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 11.799216794341255,
+        "base_prob": 0.4369668246445498,
+        "base_mean": 0.013215717492470873,
+        "lift": 1.4303145336225596
+      },
+      "h24": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 10.021631576937253,
+        "base_prob": 0.38036224976167776,
+        "base_mean": 0.04453851460940802,
+        "lift": 1.643170426065163
+      }
+    },
+    {
+      "leader": "FORMUSDT",
+      "follower": "TIAUSDT",
+      "lag": 27,
+      "n_events": 8,
+      "h1": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 3.8009626161103487,
+        "base_prob": 0.4815515610217597,
+        "base_mean": -0.0019208960392912788,
+        "lift": 1.2978880157170922
+      },
+      "h4": {
+        "n": 8,
+        "follow_prob": 0.75,
+        "mean_excess": 3.6102826963091363,
+        "base_prob": 0.45902415916627193,
+        "base_mean": -0.010900273510578389,
+        "lift": 1.6339009287925697
+      },
+      "h12": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 5.785699109305513,
+        "base_prob": 0.4484070375653828,
+        "base_mean": -0.04414948018035899,
+        "lift": 1.3938229056203606
+      },
+      "h24": {
+        "n": 8,
+        "follow_prob": 0.625,
+        "mean_excess": 3.8815891182187796,
+        "base_prob": 0.4285031085604974,
+        "base_mean": -0.10361489570737914,
+        "lift": 1.4585658482142856
+      }
+    },
+    {
+      "leader": "SAGAUSDT",
+      "follower": "SEIUSDT",
+      "lag": 10,
+      "n_events": 19,
+      "h1": {
+        "n": 19,
+        "follow_prob": 0.631578947368421,
+        "mean_excess": 2.8953662975851375,
+        "base_prob": 0.48381041764429844,
+        "base_mean": 0.005748150273410339,
+        "lift": 1.3054265148808004
+      },
+      "h4": {
+        "n": 19,
+        "follow_prob": 0.631578947368421,
+        "mean_excess": 3.565196854061534,
+        "base_prob": 0.46146616541353386,
+        "base_mean": 0.02234018383579076,
+        "lift": 1.3686354378818735
+      },
+      "h12": {
+        "n": 19,
+        "follow_prob": 0.631578947368421,
+        "mean_excess": 4.019695853616807,
+        "base_prob": 0.41179245283018867,
+        "base_mean": 0.07070346922986914,
+        "lift": 1.5337312353047567
+      },
+      "h24": {
+        "n": 19,
+        "follow_prob": 0.7368421052631579,
+        "mean_excess": 3.6008921590989726,
+        "base_prob": 0.39990512333965844,
+        "base_mean": 0.15329021336960647,
+        "lift": 1.8425422988075169
+      }
+    },
+    {
+      "leader": "VTHOUSDT",
+      "follower": "REZUSDT",
+      "lag": 11,
+      "n_events": 6,
+      "h1": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 5.49967170696504,
+        "base_prob": 0.48566055477197934,
+        "base_mean": 0.010732930440008757,
+        "lift": 1.3727008712487898
+      },
+      "h4": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 4.655697276445843,
+        "base_prob": 0.4613935969868173,
+        "base_mean": 0.03737363420302432,
+        "lift": 1.806122448979592
+      },
+      "h12": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 6.262352022353304,
+        "base_prob": 0.45368620037807184,
+        "base_mean": 0.10693094930772921,
+        "lift": 1.4694444444444443
+      },
+      "h24": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 7.0741051113363165,
+        "base_prob": 0.44961977186311786,
+        "base_mean": 0.2124186037894398,
+        "lift": 1.4827343199436223
+      }
+    },
+    {
+      "leader": "GUSDT",
+      "follower": "FORMUSDT",
+      "lag": 33,
+      "n_events": 6,
+      "h1": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 6.8074568072742485,
+        "base_prob": 0.4656985478217326,
+        "base_mean": 0.008100737761989798,
+        "lift": 1.4315412186379928
+      },
+      "h4": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 5.80350766287701,
+        "base_prob": 0.4663991975927783,
+        "base_mean": 0.031253329344075785,
+        "lift": 1.4293906810035841
+      },
+      "h12": {
+        "n": 6,
+        "follow_prob": 0.6666666666666666,
+        "mean_excess": 2.4766153936038866,
+        "base_prob": 0.45065458207452164,
+        "base_mean": 0.08475753597338045,
+        "lift": 1.4793296089385475
+      },
+      "h24": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 2.0797355349436697,
+        "base_prob": 0.4645390070921986,
+        "base_mean": 0.1603299014915456,
+        "lift": 1.7938931297709924
+      }
+    },
+    {
+      "leader": "IOSTUSDT",
+      "follower": "VTHOUSDT",
+      "lag": 20,
+      "n_events": 7,
+      "h1": {
+        "n": 7,
+        "follow_prob": 0.7142857142857143,
+        "mean_excess": 5.731521972610815,
+        "base_prob": 0.4818138875767596,
+        "base_mean": 0.025096076187793616,
+        "lift": 1.4824929971988796
+      },
+      "h4": {
+        "n": 7,
+        "follow_prob": 0.7142857142857143,
+        "mean_excess": 6.030417255682147,
+        "base_prob": 0.46830652790917693,
+        "base_mean": 0.1072766052474745,
+        "lift": 1.5252525252525253
+      },
+      "h12": {
+        "n": 7,
+        "follow_prob": 0.7142857142857143,
+        "mean_excess": 7.3386632539290755,
+        "base_prob": 0.4491927825261159,
+        "base_mean": 0.2994240461879126,
+        "lift": 1.5901540320144971
+      },
+      "h24": {
+        "n": 7,
+        "follow_prob": 0.7142857142857143,
+        "mean_excess": 4.41149428646858,
+        "base_prob": 0.43218720152817575,
+        "base_mean": 0.5451100126478486,
+        "lift": 1.6527229676400947
+      }
+    },
+    {
+      "leader": "VTHOUSDT",
+      "follower": "LSKUSDT",
+      "lag": 21,
+      "n_events": 6,
+      "h1": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 70.156430884932,
+        "base_prob": 0.49339622641509434,
+        "base_mean": 0.08327954094386869,
+        "lift": 1.6889738687061824
+      },
+      "h4": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 114.29918320137983,
+        "base_prob": 0.45347189418989137,
+        "base_mean": 0.44190054708592774,
+        "lift": 1.8376736111111112
+      },
+      "h12": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 155.44583007932644,
+        "base_prob": 0.43812233285917496,
+        "base_mean": 1.5045865935694622,
+        "lift": 1.9020562770562772
+      },
+      "h24": {
+        "n": 6,
+        "follow_prob": 0.8333333333333334,
+        "mean_excess": 128.0396582257283,
+        "base_prob": 0.44730567477348593,
+        "base_mean": 3.6323115568221995,
+        "lift": 1.8630063965884862
+      }
+    }
+  ]
+}

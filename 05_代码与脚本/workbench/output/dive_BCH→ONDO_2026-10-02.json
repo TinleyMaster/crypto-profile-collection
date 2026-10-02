@@ -1,0 +1,690 @@
+{
+  "generated_at": "2026-10-02T13:51:36.984296+00:00",
+  "pair": "BCH→ONDO",
+  "window": "2026-06-04 ~ 2026-10-02",
+  "n_days": 121,
+  "lag_profile": [
+    {
+      "lag": -14,
+      "corr": -0.07576399241680283,
+      "n": 106
+    },
+    {
+      "lag": -13,
+      "corr": -0.07843157397621374,
+      "n": 107
+    },
+    {
+      "lag": -12,
+      "corr": 0.025574025261112313,
+      "n": 108
+    },
+    {
+      "lag": -11,
+      "corr": -0.044614904879942456,
+      "n": 109
+    },
+    {
+      "lag": -10,
+      "corr": -0.04564276212567358,
+      "n": 110
+    },
+    {
+      "lag": -9,
+      "corr": -0.025262268085966377,
+      "n": 111
+    },
+    {
+      "lag": -8,
+      "corr": -0.044158082629893666,
+      "n": 112
+    },
+    {
+      "lag": -7,
+      "corr": -0.055218821502424624,
+      "n": 113
+    },
+    {
+      "lag": -6,
+      "corr": 0.06793485274293135,
+      "n": 114
+    },
+    {
+      "lag": -5,
+      "corr": 0.11147491225436697,
+      "n": 115
+    },
+    {
+      "lag": -4,
+      "corr": 0.05446406082618992,
+      "n": 116
+    },
+    {
+      "lag": -3,
+      "corr": 0.018191424647709724,
+      "n": 117
+    },
+    {
+      "lag": -2,
+      "corr": -0.05535031524715145,
+      "n": 118
+    },
+    {
+      "lag": -1,
+      "corr": -0.028316726188936738,
+      "n": 119
+    },
+    {
+      "lag": 0,
+      "corr": 0.06854779652790226,
+      "n": 120
+    },
+    {
+      "lag": 1,
+      "corr": -0.03194220877343383,
+      "n": 119
+    },
+    {
+      "lag": 2,
+      "corr": 0.47726376481541544,
+      "n": 118
+    },
+    {
+      "lag": 3,
+      "corr": -0.05776699766077515,
+      "n": 117
+    },
+    {
+      "lag": 4,
+      "corr": -0.030428958832614175,
+      "n": 116
+    },
+    {
+      "lag": 5,
+      "corr": 0.06550375359155794,
+      "n": 115
+    },
+    {
+      "lag": 6,
+      "corr": -0.10070344413114968,
+      "n": 114
+    },
+    {
+      "lag": 7,
+      "corr": -0.0465175542553981,
+      "n": 113
+    },
+    {
+      "lag": 8,
+      "corr": -0.12553324358483434,
+      "n": 112
+    },
+    {
+      "lag": 9,
+      "corr": -0.05299919658533408,
+      "n": 111
+    },
+    {
+      "lag": 10,
+      "corr": 0.0028707679709976657,
+      "n": 110
+    },
+    {
+      "lag": 11,
+      "corr": 0.0514452196726534,
+      "n": 109
+    },
+    {
+      "lag": 12,
+      "corr": 0.016937853038944354,
+      "n": 108
+    },
+    {
+      "lag": 13,
+      "corr": 0.02723119727727081,
+      "n": 107
+    },
+    {
+      "lag": 14,
+      "corr": -0.13655580063604078,
+      "n": 106
+    }
+  ],
+  "best": {
+    "lag": 2,
+    "corr": 0.4773
+  },
+  "sync_corr": 0.0685,
+  "robustness": {
+    "first_half_corr": -0.0414,
+    "second_half_corr": 0.1266
+  },
+  "event_study": {
+    "lag": 2,
+    "win": 2,
+    "thresh": 5.0,
+    "n_events": 4,
+    "fee_pct": 0.1,
+    "sample_ready": false,
+    "day": {
+      "n": 4,
+      "follow_prob": 1.0,
+      "mean_excess": 8.889890104588375,
+      "base_n": 111,
+      "base_prob": 0.3783783783783784,
+      "base_mean": -0.37772779646451443,
+      "lift": 2.642857142857143
+    },
+    "cum_win": {
+      "n": 4,
+      "follow_prob": 1.0,
+      "mean_excess": 4.998350651483624,
+      "base_n": 110,
+      "base_prob": 0.37272727272727274,
+      "base_mean": -0.15986281366839317,
+      "lift": 2.6829268292682924
+    }
+  },
+  "catalyst": {
+    "leader_n": 16,
+    "follower_n": 27,
+    "surge_episodes": 4,
+    "surge_with_leader_catalyst": 1,
+    "surge_with_follower_catalyst": 2,
+    "true_transmission_candidates": [
+      "2026-06-16",
+      "2026-08-21"
+    ],
+    "annotations": [
+      {
+        "surge_date": "2026-06-16",
+        "leader_excess_pct": 6.03,
+        "leader_catalysts": [],
+        "follow_date": "2026-06-18",
+        "follower_excess_pct": 0.35,
+        "follower_catalysts": []
+      },
+      {
+        "surge_date": "2026-08-21",
+        "leader_excess_pct": 23.19,
+        "leader_catalysts": [],
+        "follow_date": "2026-08-23",
+        "follower_excess_pct": 3.93,
+        "follower_catalysts": []
+      },
+      {
+        "surge_date": "2026-09-17",
+        "leader_excess_pct": 5.34,
+        "leader_catalysts": [],
+        "follow_date": "2026-09-19",
+        "follower_excess_pct": 7.55,
+        "follower_catalysts": [
+          "Dr. Lani Clinton and Ondo investor David Chen have petitione",
+          "PANews 9月18日消息，据SoSoValue数据，美国加息靴子落地叠加油价回落，以及SEC 发布\"创新豁免\"，推动"
+        ]
+      },
+      {
+        "surge_date": "2026-09-22",
+        "leader_excess_pct": 26.22,
+        "leader_catalysts": [
+          "According to the announcement from Binance, the exchange wil",
+          "BlockBeats 消息，9 月 22 日，据市场消息，美国芝商所将推出 BCH（Bitcoin Cash）与 Uni",
+          "BlockBeats 消息，9 月 22 日，据 HTX 行情信息，受益于芝商所上线期货品种，UNI 和 BCH 短时均",
+          "PANews 9月22日消息，据CME官方公告，芝商所（CME）计划于10月19日（视监管审批情况而定）推出比特币现金（",
+          "CME plans to launch Bitcoin Cash (BCH) and Uniswap (UNI) fut",
+          "Foresight News 消息，芝加哥商品交易所集团宣布，在获得监管部门批准后，将于 10 月 19 日推出 BCH"
+        ],
+        "follow_date": "2026-09-24",
+        "follower_excess_pct": 24.13,
+        "follower_catalysts": [
+          "币圈内卷美股，Ondo 悄悄站住潮头。",
+          "Foresight News 消息，据 RWA.xyz 数据显示，当前代币化股票协议在资产管理规模与标的丰富度上呈现出多",
+          "ChainCatcher 消息，据 RWA.xyz 数据显示，当前代币化股票协议在资产管理规模与标的丰富度上呈现出多元特",
+          "Ondo Finance and BlackRock have launched a tokenized smart p",
+          "PANews 9月24日消息，ONDO与贝莱德合作推出代币化“智能投资组合”。",
+          "火星财经消息，9 月 24 日，据市场消息，ONDO 与贝莱德合作推出代币化「智能投资组合」。",
+          "Foresight News 消息，Ondo Finance 宣布推出由贝莱德（BlackRock）定制支持的智能投资组",
+          "火星财经消息，9 月 24 日，据 行情信息，ONDO 短线拉升突破 0.47 美元，24 小时涨幅扩大至超 7%。 消",
+          "火星财经消息，Ondo Finance 推出全新链上产品类别 Ondo Intelligent Portfolios，以",
+          "Foresight News 消息，据 Bitget 行情数据，ONDO 突破 0.5 USDT，24 小时涨幅 21.",
+          "ChainCatcher 消息，据三位知情人士透露，现实世界资产代币化平台 Ondo Finance 在创始人兼首席执行",
+          "Ondo Finance sought a sale after the death of its founder an"
+        ]
+      }
+    ],
+    "leader_catalysts": [
+      {
+        "catalyst_id": 10348,
+        "title": "According to the announcement from Binance, the exchange will update the Cross M...",
+        "published_at": "2026-09-22 09:16:48+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 60,
+        "sentiment": "neutral",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 10574,
+        "title": "BlockBeats 消息，9 月 22 日，据市场消息，美国芝商所将推出 BCH（Bitcoin Cash）与 Uniswap 期货以扩展加密衍生品组合。",
+        "published_at": "2026-09-22 12:33:28+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 49,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 10576,
+        "title": "BlockBeats 消息，9 月 22 日，据 HTX 行情信息，受益于芝商所上线期货品种，UNI 和 BCH 短时均现小幅上涨，其中 UNI 拉升 2.99...",
+        "published_at": "2026-09-22 12:37:16+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "structural",
+        "strength": 78,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 10572,
+        "title": "PANews 9月22日消息，据CME官方公告，芝商所（CME）计划于10月19日（视监管审批情况而定）推出比特币现金（BCH）及Uniswap（UNI）期货，...",
+        "published_at": "2026-09-22 12:37:23+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "structural",
+        "strength": 70,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 10571,
+        "title": "CME plans to launch Bitcoin Cash (BCH) and Uniswap (UNI) futures on October 19, ...",
+        "published_at": "2026-09-22 12:41:33+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 71,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 10573,
+        "title": "Foresight News 消息，芝加哥商品交易所集团宣布，在获得监管部门批准后，将于 10 月 19 日推出 BCH 和 UNI 期货。市场参与者可以选择交...",
+        "published_at": "2026-09-22 12:43:49+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "structural",
+        "strength": 70,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 11801,
+        "title": "PANews 9月23日消息，欧易OKX行情显示，BCH过去24小时上涨31.3%，现报354.5 USDT，盘中最高触及363 USDT；UNI过去24小时上...",
+        "published_at": "2026-09-23 08:56:47+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 44,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 11862,
+        "title": "火星财经消息，9 月 23 日，据 行情信息，山寨代币涨势延续，涨幅居前的有： MET 24 小时涨幅 35.63%，报 0.386 美元； BCH 24 小时...",
+        "published_at": "2026-09-23 09:43:56+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 52,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 12267,
+        "title": "Bitcoin Cash jumped 28% to nearly $349 after CME Group said it will list BCH and...",
+        "published_at": "2026-09-23 14:17:50+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 79,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 12372,
+        "title": "Bitcoin failed at $87,300 for a second straight session and slipped back to $84,...",
+        "published_at": "2026-09-23 15:05:19+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 71,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 12480,
+        "title": "ChainCatcher 消息，衍生品交易所芝商所集团（CME Group）表示，待监管审核通过后，将于 10 月 19 日推出 Bitcoin Cash（BC...",
+        "published_at": "2026-09-23 16:10:58+00:00",
+        "category": "ChainCatcher · 新闻媒体",
+        "kind": "structural",
+        "strength": 73,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 12755,
+        "title": "Foresight News 消息，据 Decrypt 报道，芝加哥商品交易所（CME Group）计划于 10 月 19 日推出 Bitcoin Cash（B...",
+        "published_at": "2026-09-24 00:43:42+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 49,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 12750,
+        "title": "CME Group plans to launch Bitcoin Cash (BCH) and Uniswap (UNI) futures on Octobe...",
+        "published_at": "2026-09-24 00:44:08+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 50,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 12757,
+        "title": "BlockBeats 消息，9 月 24 日，芝加哥商品交易所（CME Group）计划于 10 月 19 日推出 Bitcoin Cash（BCH）和 Uni...",
+        "published_at": "2026-09-24 00:44:26+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 49,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 12775,
+        "title": "火星财经消息，9 月 24 日，芝加哥商品交易所（CME Group）计划于 10 月 19 日推出 Bitcoin Cash（BCH）和 Uniswap（UN...",
+        "published_at": "2026-09-24 00:53:45+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "sentiment",
+        "strength": 49,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 12771,
+        "title": "PANews 9月24日消息，据 Decrypt 报道，芝加哥商品交易所（CME Group）计划于 10 月 19 日推出 Bitcoin Cash（BCH）...",
+        "published_at": "2026-09-24 01:01:04+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "structural",
+        "strength": 70,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      }
+    ],
+    "follower_catalysts": [
+      {
+        "catalyst_id": 4237,
+        "title": "Ondo Finance said it will accelerate its expansion in the Asia-Pacific market by...",
+        "published_at": "2026-09-15 11:33:58+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "structural",
+        "strength": 82,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 5667,
+        "title": "Dr. Lani Clinton and Ondo investor David Chen have petitioned a Hawaiian court f...",
+        "published_at": "2026-09-17 21:43:09+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "sentiment",
+        "strength": 40,
+        "sentiment": "neutral",
+        "event_type": "other"
+      },
+      {
+        "catalyst_id": 5764,
+        "title": "PANews 9月18日消息，据SoSoValue数据，美国加息靴子落地叠加油价回落，以及SEC 发布\"创新豁免\"，推动代币化 NMS 股票链上交易，恐慌情绪迅...",
+        "published_at": "2026-09-18 10:08:45+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "event",
+        "strength": 61,
+        "sentiment": "neutral",
+        "event_type": "regulation"
+      },
+      {
+        "catalyst_id": 9345,
+        "title": "PANews 9月21日消息，据Ondo Finance公告，获批机构现可通过Alpaca的Instant Tokenization Network，使用其已持...",
+        "published_at": "2026-09-21 14:14:43+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 9416,
+        "title": "火星财经消息，Ondo 宣布，即日起获批机构可通过 Alpaca 的 Instant Tokenization Network，使用其已持有的股票铸造 Ondo...",
+        "published_at": "2026-09-21 15:14:02+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 13079,
+        "title": "币圈内卷美股，Ondo 悄悄站住潮头。",
+        "published_at": "2026-09-24 04:03:57+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "structural",
+        "strength": 74,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13094,
+        "title": "Foresight News 消息，据 RWA.xyz 数据显示，当前代币化股票协议在资产管理规模与标的丰富度上呈现出多元特征。从资产管理规模来看，排名前五的平...",
+        "published_at": "2026-09-24 04:13:38+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "structural",
+        "strength": 77,
+        "sentiment": "neutral",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13098,
+        "title": "ChainCatcher 消息，据 RWA.xyz 数据显示，当前代币化股票协议在资产管理规模与标的丰富度上呈现出多元特征。",
+        "published_at": "2026-09-24 04:16:14+00:00",
+        "category": "ChainCatcher · 新闻媒体",
+        "kind": "structural",
+        "strength": 77,
+        "sentiment": "neutral",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 13678,
+        "title": "Ondo Finance and BlackRock have launched a tokenized smart portfolio. According ...",
+        "published_at": "2026-09-24 12:04:26+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 57,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 13688,
+        "title": "PANews 9月24日消息，ONDO与贝莱德合作推出代币化“智能投资组合”。",
+        "published_at": "2026-09-24 12:06:01+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "event",
+        "strength": 70,
+        "sentiment": "bullish",
+        "event_type": "funding"
+      },
+      {
+        "catalyst_id": 13704,
+        "title": "火星财经消息，9 月 24 日，据市场消息，ONDO 与贝莱德合作推出代币化「智能投资组合」。",
+        "published_at": "2026-09-24 12:13:41+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 74,
+        "sentiment": "bullish",
+        "event_type": "funding"
+      },
+      {
+        "catalyst_id": 13751,
+        "title": "Foresight News 消息，Ondo Finance 宣布推出由贝莱德（BlackRock）定制支持的智能投资组合（Ondo Intelligent P...",
+        "published_at": "2026-09-24 12:33:35+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "event",
+        "strength": 74,
+        "sentiment": "bullish",
+        "event_type": "funding"
+      },
+      {
+        "catalyst_id": 13802,
+        "title": "火星财经消息，9 月 24 日，据 行情信息，ONDO 短线拉升突破 0.47 美元，24 小时涨幅扩大至超 7%。 消息面上，ondo 与贝莱德合作推出代币化...",
+        "published_at": "2026-09-24 13:13:39+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 74,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 13875,
+        "title": "火星财经消息，Ondo Finance 推出全新链上产品类别 Ondo Intelligent Portfolios，以单一可转让链上代币呈现精选投资组合。首批...",
+        "published_at": "2026-09-24 13:53:47+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 66,
+        "sentiment": "bullish",
+        "event_type": "funding"
+      },
+      {
+        "catalyst_id": 13914,
+        "title": "Foresight News 消息，据 Bitget 行情数据，ONDO 突破 0.5 USDT，24 小时涨幅 21.78%，创年内新高。",
+        "published_at": "2026-09-24 14:23:36+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "event",
+        "strength": 66,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 14174,
+        "title": "ChainCatcher 消息，据三位知情人士透露，现实世界资产代币化平台 Ondo Finance 在创始人兼首席执行官 Nathan Allman 今年去世...",
+        "published_at": "2026-09-24 20:21:00+00:00",
+        "category": "ChainCatcher · 新闻媒体",
+        "kind": "event",
+        "strength": 63,
+        "sentiment": "bearish",
+        "event_type": "other"
+      },
+      {
+        "catalyst_id": 14168,
+        "title": "Ondo Finance sought a sale after the death of its founder and CEO, Nathan Allman...",
+        "published_at": "2026-09-24 20:24:22+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "sentiment",
+        "strength": 49,
+        "sentiment": "bearish",
+        "event_type": "other"
+      },
+      {
+        "catalyst_id": 16937,
+        "title": "ChainCatcher 消息，据 The Defiant 报道，Ondo Finance 旗下永续合约平台 Ondo Perps 已上线 12 种代币化股票与...",
+        "published_at": "2026-09-28 16:15:53+00:00",
+        "category": "ChainCatcher · 新闻媒体",
+        "kind": "structural",
+        "strength": 85,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 16940,
+        "title": "Ondo Perps, the perpetuals platform under Ondo Finance, has launched spot tradin...",
+        "published_at": "2026-09-28 16:24:38+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 57,
+        "sentiment": "bullish",
+        "event_type": "listing"
+      },
+      {
+        "catalyst_id": 17303,
+        "title": "PANews 9月29日消息，据Cointelegraph报道，Ondo Perps推出代币化股票和ETF的24/7现货交易，允许交易者将持仓作为永续合约抵押品...",
+        "published_at": "2026-09-29 02:02:36+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 17632,
+        "title": "PANews 9月29日消息，据The Block报道，Ondo Finance与KakaoPay Securities合作，探索建立通往韩国股票的全球门户。",
+        "published_at": "2026-09-29 06:36:08+00:00",
+        "category": "PANews · 新闻媒体",
+        "kind": "structural",
+        "strength": 77,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 17775,
+        "title": "Foresight News 消息，据首尔经济日报报道，Kakao Pay 已分别与 Ondo Finance 和 Dinari 签署谅解备忘录，共同研究韩国上...",
+        "published_at": "2026-09-29 08:13:39+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "event",
+        "strength": 74,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 17767,
+        "title": "Kakao Pay has signed memorandums of understanding with Ondo Finance and Dinari t...",
+        "published_at": "2026-09-29 08:15:59+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 76,
+        "sentiment": "bullish",
+        "event_type": "partnership"
+      },
+      {
+        "catalyst_id": 17960,
+        "title": "BlockBeats 消息，9 月 29 日，Ondo Perps CEO David Wells 表示，美国永续合约市场存在「巨大机会」，Ondo 探索这一市...",
+        "published_at": "2026-09-29 10:54:35+00:00",
+        "category": "BlockBeats · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 17982,
+        "title": "Foresight News 消息，据 The Block 报道，Ondo Perps CEO David Wells 在接受采访时表示，美国永续合约市场蕴藏着...",
+        "published_at": "2026-09-29 11:03:35+00:00",
+        "category": "Foresight News · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 17988,
+        "title": "火星财经消息，9 月 29 日，Ondo Perps 首席执行官 David Wells 表示，美国永续合约市场存在「巨大机会」，Ondo 探索这一市场「是有意...",
+        "published_at": "2026-09-29 11:03:46+00:00",
+        "category": "MarsBit News · 新闻媒体",
+        "kind": "event",
+        "strength": 56,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      },
+      {
+        "catalyst_id": 17973,
+        "title": "Ondo Perps CEO David Wells said the U.S. perpetual futures market presents a lar...",
+        "published_at": "2026-09-29 11:05:00+00:00",
+        "category": "Binance News · 催化剂账号",
+        "kind": "event",
+        "strength": 57,
+        "sentiment": "bullish",
+        "event_type": "market_update"
+      }
+    ]
+  }
+}

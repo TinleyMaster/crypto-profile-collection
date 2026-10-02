@@ -35,6 +35,43 @@ RULE = {
 }
 DEFAULT_RULE = ("neutral", "weak", 0)
 
+# 审计 2026-10-02：impact_strength 原为纯 event_type 静态查表（同类型事件强度永远一样），
+# 与真实影响无关——用 outcome 实测 72h 超额反查：strong 档均值 5.32% 反而被 weak 档 4.94%
+# 追平（n=208），而市值分层是唯一强判别因子（<1亿 6.93% vs ≥50亿 1.80%，3.8 倍差距）。
+# 修法：strength 改为「event_type 基础档 × 关联资产最小市值」联合判定（与 grade._mcap_score
+# 同分档口径），mcap 仅作上调、永不降档——保留事件类型语义，同时让小市值事件真实反映
+# 更高的预期影响幅度。
+STRENGTH_ORDER = ["weak", "medium", "strong"]  # 档位索引越大影响越强
+MCAP_BOOST = [  # (上限, 升档数)，命中首个即停
+    (1e8, 2),   # <1 亿：小市值是影响首要因子（实测 6.93%），升两档
+    (1e9, 1),   # <10 亿：升一档
+    (None, 0),  # 其余保持
+]
+
+
+def _mcap_boost(min_mcap: float | None) -> int:
+    """关联资产最小市值 → strength 升档数。无市值数据保守不升档。"""
+    if min_mcap is None or min_mcap <= 0:
+        return 0
+    for cap, boost in MCAP_BOOST:
+        if cap is None or min_mcap < cap:
+            return boost
+    return 0
+
+
+def _resolve_strength(base_strength: str, min_mcap: float | None) -> str:
+    """event_type 基础档 + mcap 升档 → 最终 strength。
+
+    mcap 只上调不降档：例如 funding(medium)+<1亿(升2) → strong；
+    listing(strong)+任意 mcap → strong（保持，避免过度膨胀）。
+    """
+    try:
+        idx = STRENGTH_ORDER.index(base_strength)
+    except ValueError:
+        idx = STRENGTH_ORDER.index("weak")
+    idx = min(len(STRENGTH_ORDER) - 1, idx + _mcap_boost(min_mcap))
+    return STRENGTH_ORDER[idx]
+
 
 def _load_sql(relative: str) -> str:
     sql_dir = SCRIPT_DIR.parent / "sql"
@@ -61,8 +98,8 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str,
     else:
         direction = RULE.get(event_type, DEFAULT_RULE)[0]
 
-    # 强度 & 周期：沿用 event_type 规则
-    _, strength, horizon = RULE.get(event_type, DEFAULT_RULE)
+    # 基础强度 & 周期：沿用 event_type 规则；mcap 升档在拿到关联资产后计算
+    _, base_strength, horizon = RULE.get(event_type, DEFAULT_RULE)
 
     # 1) 优先：catalyst_asset_link（已建立的链接关系）
     cur.execute(
@@ -131,6 +168,19 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str,
     if not links:
         return 0
 
+    # 关联资产最小市值 → strength 升档（审计 2026-10-02：市值是实测唯一强判别因子，
+    # 纯 event_type 静态分档与真实影响无关）。无市值数据保守保持基础档。
+    min_mcap = None
+    asset_ids = [link[0] for link in links]
+    cur.execute(
+        "SELECT min(market_cap) FROM core.asset WHERE asset_id = ANY(%s) AND market_cap > 0",
+        (asset_ids,),
+    )
+    row = cur.fetchone()
+    if row and row[0] is not None:
+        min_mcap = float(row[0])
+    strength = _resolve_strength(base_strength, min_mcap)
+
     sql = _load_sql("biz/upsert_catalyst_impact.sql")
     params = [
         (catalyst_id, link[0], direction, strength, horizon, "rule")
@@ -163,14 +213,46 @@ def incremental(cur) -> int:
     return backfill_all(cur)
 
 
+def restrength_all(cur, limit: int | None = None) -> int:
+    """存量 impact 全量重算 strength（审计 2026-10-02 第一步改造）。
+
+    背景：本次把 impact_strength 从纯 event_type 静态查表改为
+    「event_type 基础档 × 关联资产最小市值升档」。backfill_all 只补
+    「无 impact 记录」的新 catalyst（NOT EXISTS），存量 1 万+ 条 impact
+    不会自动按新口径重算。本函数遍历全部既有 impact，重新读取 event_type
+    与关联资产市值，按新逻辑重写 strength（ON CONFLICT DO UPDATE 幂等；
+    mcap 只上调不降档，不会把旧 strong 降回去）。
+    """
+    # 分批取 catalyst_id，避免一次性载入过多
+    cur.execute("SELECT DISTINCT catalyst_id FROM biz.catalyst_impact ORDER BY catalyst_id")
+    cat_ids = [r[0] for r in cur.fetchall()]
+    if limit:
+        cat_ids = cat_ids[:limit]
+
+    done = 0
+    for cid in cat_ids:
+        cur.execute(
+            "SELECT COALESCE(ai_event_type, rule_event_type, 'other'), ai_sentiment "
+            "FROM biz.asset_catalyst WHERE catalyst_id = %s",
+            (cid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            continue
+        done += build_for_catalyst(cur, cid, row[0] or "other", row[1])
+    return done
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="催化剂事件因子化（规则推导）")
     parser.add_argument("--backfill", action="store_true", help="一次性回填所有未推导的 catalyst")
     parser.add_argument("--incremental", action="store_true", help="增量：仅处理新 catalyst")
+    parser.add_argument("--restrength", action="store_true",
+                        help="存量 impact 全量重算 strength（2026-10-02 mcap 并入后刷新历史）")
     parser.add_argument("--catalyst-id", type=int, help="单条 catalyst ID 推导")
     args = parser.parse_args()
 
-    if not args.backfill and not args.incremental and not args.catalyst_id:
+    if not args.backfill and not args.incremental and not args.catalyst_id and not args.restrength:
         parser.print_help()
         return 1
 
@@ -203,6 +285,12 @@ def main() -> int:
                 n = incremental(cur)
                 conn.commit()
                 print(f"incremental done: {n} impacts upserted")
+                return 0
+
+            if args.restrength:
+                n = restrength_all(cur)
+                conn.commit()
+                print(f"restrength done: {n} impacts upserted")
                 return 0
 
     return 0

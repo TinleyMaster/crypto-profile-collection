@@ -23,17 +23,30 @@ from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
 # event_type → (direction, strength, horizon_days)
+# 2026-10-02 数据校准版（来源：scan_catalyst_impact_from_moves.py 前瞻口径，近 90 天
+# top300 资产，催化剂发布后 2 天内平均|异动|）：
+#   delisting 5.03% / burn 4.55% / partnership 4.03% / tech_upgrade 3.76% /
+#   listing 3.59% / funding 3.09% / regulation 2.84% / market_update(播报) ≈2%
+# 据此校准：
+#   · partnership 由 medium 上调 strong（实测 4.03%，方向对齐 +2.90%）
+#   · listing 由 strong 下调 medium（实测 3.59%，低于 partnership/tech_upgrade）
+#   · regulation 由 strong 大幅下调 weak（实测 2.84% 且方向对齐仅 +0.25%，中性事件
+#     对价格几乎没有方向性影响，原 strong 严重高估）
+#   · market_update 维持 weak（行情播报，前瞻力≈0，且不参与 mcap 升档）
 RULE = {
-    "listing":      ("bullish", "strong", 7),
+    "listing":      ("bullish", "medium", 7),
     "delisting":    ("bearish", "strong", 0),
     "burn":         ("bullish", "strong", 30),
-    "partnership":  ("bullish", "medium", 14),
+    "partnership":  ("bullish", "strong", 14),
     "tech_upgrade": ("bullish", "medium", 14),
     "funding":      ("bullish", "medium", 14),
-    "regulation":   ("neutral", "strong", 0),
+    "regulation":   ("neutral", "weak", 0),
     "market_update":("neutral", "weak", 0),
 }
 DEFAULT_RULE = ("neutral", "weak", 0)
+
+# 行情播报/非事件类：不参与 mcap 升档（前瞻力≈0，避免小市值播报被误标 strong）
+NON_EVENT_TYPES = {"market_update", "other"}
 
 # 审计 2026-10-02：impact_strength 原为纯 event_type 静态查表（同类型事件强度永远一样），
 # 与真实影响无关——用 outcome 实测 72h 超额反查：strong 档均值 5.32% 反而被 weak 档 4.94%
@@ -59,12 +72,16 @@ def _mcap_boost(min_mcap: float | None) -> int:
     return 0
 
 
-def _resolve_strength(base_strength: str, min_mcap: float | None) -> str:
+def _resolve_strength(base_strength: str, min_mcap: float | None,
+                      event_type: str = "") -> str:
     """event_type 基础档 + mcap 升档 → 最终 strength。
 
     mcap 只上调不降档：例如 funding(medium)+<1亿(升2) → strong；
     listing(strong)+任意 mcap → strong（保持，避免过度膨胀）。
+    行情播报/非事件类（market_update/other）固定基础档、不随市值升档。
     """
+    if event_type in NON_EVENT_TYPES:
+        return base_strength
     try:
         idx = STRENGTH_ORDER.index(base_strength)
     except ValueError:
@@ -179,7 +196,7 @@ def build_for_catalyst(cur, catalyst_id: int, event_type: str,
     row = cur.fetchone()
     if row and row[0] is not None:
         min_mcap = float(row[0])
-    strength = _resolve_strength(base_strength, min_mcap)
+    strength = _resolve_strength(base_strength, min_mcap, event_type)
 
     sql = _load_sql("biz/upsert_catalyst_impact.sql")
     params = [

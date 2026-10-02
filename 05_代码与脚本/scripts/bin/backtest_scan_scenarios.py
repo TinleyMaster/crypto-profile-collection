@@ -196,6 +196,40 @@ def hour_key(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
+def funding_interval_cost(funding: tuple[list, list[float]] | None, entry_ts: datetime,
+                          hz: int, direction: str) -> float | None:
+    """区间 `(entry_ts, entry_ts + hz]` 内资金费率成本，已按方向对齐符号。
+
+    §12.1-A4：符号口径与 `collect_scan_outcome.funding_cost` **一致** —— 多头（up）
+    正费率支付 ⇒ `+Σ`；空头（down）正费率收取 ⇒ `−Σ`。区间**左开右闭**（恰落在
+    `entry_ts` 的结算点属入场前，不计入）。
+
+    ⚠️ **单位是分数（不是百分数）**：`rate` 本就是小数（0.0001 = 1bp），本函数直接
+    求和返回，与调用方的 `ret`（分数，如 0.058）、`cost`（分数，0.001）**同制**，
+    可直接相减。展示时由上层 `× 100` 转百分数。切勿在此处再 `× 100`——那会让
+    `summarize` 的 `r[2] - r[9]` 变成「分数 − 百分数」的单位混用（实测把 24h 的
+    5.8% 放大成 103%，是把 1bp 当成 1% 用）。
+
+    —— 与 `collect_scan_outcome.funding_cost` 的唯一差异就在此处：那个函数的
+    `aligned_ret_*` 是**百分数**故 `× 100`；本回测的 `ret` 是**分数**故不乘。
+    两者口径同源，只是宿主单位不同。
+
+    与 `funding_tag` 的区别：那个取 ≤h 的**最近一个**结算点做拥挤度打标，本函数是
+    对区间内**全部**结算点求和得真实持仓成本，两者语义不同、不可互换。
+
+    ⚠️ 结算周期**不统一**（实测 4h 主导 / 8h / 1h 混杂）⇒ 按真实结算点求和，
+    **不得硬编码「24h = 3 个结算点」**。缺该 symbol 费率序列 → None（缺数据不记 0）；
+    有序列但区间内无结算点 → 0.0（确无结算即确无费用）。
+    """
+    if not funding or direction not in ("up", "down"):
+        return None
+    fts, rates = funding
+    i0 = bisect.bisect_right(fts, entry_ts)
+    i1 = bisect.bisect_right(fts, entry_ts + timedelta(hours=hz))
+    sign = 1.0 if direction == "up" else -1.0
+    return sign * sum(rates[i0:i1])
+
+
 def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 funding: tuple[list, list[float]] | None,
                 trades: dict[str, list], cost: float,
@@ -265,9 +299,12 @@ def scan_symbol(bars: list[dict], oi_hours: dict[datetime, float],
                 continue
             ret_long = (exit_close - entry) / entry
             ret = ret_long if direction == "up" else -ret_long
-            # 记录结构：(hz, day, net_ret, fund_tag, entry_ts, rsi, percent_b, bbw, cvd_dir)
+            fcost = funding_interval_cost(funding, entry_ts, hz, direction)
+            # 记录结构：(hz, day, net_ret, fund_tag, entry_ts, rsi, percent_b, bbw, cvd_dir, fund_cost)
+            # ⚠️ 只能在**尾部追加**：split_trades(r[4]) / summarize_cvd(r[8]) / 指标分桶 r[5..7]
+            #    全按固定索引解包，插在中间会静默错位。
             trades[scenario].append((hz, day, ret - cost, ftag,
-                                     entry_ts, rsi_val, pb_val, bbw_val, cvd_dir))
+                                     entry_ts, rsi_val, pb_val, bbw_val, cvd_dir, fcost))
 
 
 def split_trades(trades: dict[str, list], cutoff: datetime,
@@ -383,12 +420,17 @@ def summarize(trades: dict[str, list], min_n: int, min_days: int) -> list[dict]:
             day_mean = sum(dm) / len(dm)
             day_std = (sum((x - day_mean) ** 2 for x in dm) / (len(dm) - 1)) ** 0.5 if len(dm) > 1 else 0.0
             t_stat = day_mean / (day_std / (len(dm) ** 0.5)) if day_std > 0 else 0.0
+            # §12.1-A4：含资金费率净收益（r[9]）——只在费率序列可得的样本上算，
+            # 缺序列的样本不拉进分母（缺数据不得记 0）；n_fund 供判断该列的可信度。
+            nets_fund = [r[2] - r[9] for r in sub if len(r) > 9 and r[9] is not None]
             rows.append({
                 "scenario": scenario, "horizon_h": hz, "n": len(sub),
                 "days": len(dm), "win_rate": wins / len(sub),
                 "avg_ret_net": sum(nets) / len(nets), "expectancy": sum(nets) / len(sub),
                 "profit_factor": gross_win / gross_loss if gross_loss else float("inf"),
                 "day_t_stat": t_stat, "day_avg": day_mean,
+                "avg_ret_net_fund": (sum(nets_fund) / len(nets_fund)) if nets_fund else None,
+                "n_fund": len(nets_fund),
             })
     return rows
 
@@ -578,13 +620,17 @@ def main() -> int:
                         cvd_hours=cvd_hourly.get(sym, {}))
 
         def _print_rows(rs: list[dict]) -> None:
-            print(f"{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
-            print("-" * 76)
+            print(f"{'场景':<16}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}"
+                  f"{'盈亏比':>8}{'日t值':>8}{'含费率%':>10}{'n费率':>7}")
+            print("-" * 93)
             for r in sorted(rs, key=lambda x: (x["scenario"], x["horizon_h"])):
+                nf = r.get("avg_ret_net_fund")
                 print(f"{r['scenario']:<16}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
                       f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
                       f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
-                      f"{r['day_t_stat']:>8.2f}")
+                      f"{r['day_t_stat']:>8.2f}"
+                      f"{nf * 100 if nf is not None else float('nan'):>10.3f}"
+                      f"{r.get('n_fund', 0):>7}")
 
         csv_rows: list[dict] = []
         if cutoff is not None:

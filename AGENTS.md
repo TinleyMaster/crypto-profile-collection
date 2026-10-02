@@ -2852,3 +2852,56 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **产物**：`scripts/bin/backtest_scan_scenarios.py`（改，入库）、设计方案 §12.1-A3 (c) 改写 + §8 funding 消融结论后加样本外复核交叉引用（入库）、AGENTS.md 本节。
   临时文件 `/tmp/_a3_funding_holdout.log`、`/tmp/_a3_funding_holdout*.csv`、`/tmp/_smoke_a3*`、`/tmp/_doc_worktree_backup.md` 已清理，未入库。
 - **未动**：线上扫描逻辑/阈值/调度/DB 结构一律未改；funding 采集调度（B26，每日 02:40）维持原状。
+
+### A4 成本项补齐（资金费率 + 滑点）：**已关闭**（§12.1-A4）（2026-10-02，本次提交）
+
+来源：§12.1-A4 长期挂账「回测与结局结算的成本口径都只有双边 taker 0.1%，不含滑点 / 不含资金费率 ⇒
+24h 净期望被系统性高估，边际为正的场景扣费后大概率为负」。用户拍板三个口径决策后实施：
+**① 本轮只补资金费率**（滑点已由 `backtest_liq_layer.py` 阶段 C 做掉，X ≤ 1,000 USDT 侵蚀 < 0.04pp）；
+**② 用「新增对照列」落库**（不动既有 `aligned_ret_*` 语义）；**③ 线上日报/邮件口径暂不切**，先对照。
+
+- **DDL（`scripts/migrations/fix_084_scan_outcome_funding_cost.sql`，已应用+幂等）**：`biz.scan_signal_outcome` 新增 **17 列**，
+  全 `ADD COLUMN IF NOT EXISTS` + `COMMENT ON COLUMN` + 执行前后 information_schema 计数校验（应 17）：
+  `funding_pct_{1,4,12,24}h`（区间费率成本 %）、`net_ret_{w}h`（`aligned_ret_w − funding_pct_w`）、
+  `btc_net_ret_{w}h`（BTCUSDT 侧同口径）、`excess_net_{w}h`（两者之差）、`funding_src TEXT`（三态 `ok`/`partial`/`none`，NULL=窗口未到期）。
+- **结算侧改造（`scripts/bin/collect_scan_outcome.py`）**：`CAND_SQL` 加 4 个 `LATERAL`（信号侧 `fw`、BTC 侧 `fb` 各一次扫描、
+  用 `count(rate) FILTER` / `sum(rate) FILTER` 出 4 个窗口；`fc`/`fbc` 取 `max(funding_time)` 供覆盖判定）；
+  新增纯函数 `window_cover` / `funding_cost` / `_worst_cover`；`OUT_COLS` 尾部 17 列；未到期窗口显式写 NULL。
+  口径：区间**左开右闭** `(alerted_at, alerted_at+w]`；`funding_pct_w = sign × Σ rate × 100`，`sign = +1(up) / −1(down)`。
+- **⚠️ 两条留档（易错处）**：
+  ① **结算周期不统一**（实测 `biz.funding_rate_hist` 4h 主导 73,994 条 / 8h 32,796 / 1h 2,891 / 3h 8 / 2h 7）
+  ⇒ 一律按区间内**真实结算点**求和，**严禁硬编码「24h = 3 个结算点」**；
+  ② **单位陷阱（本次实际踩到）**：`rate` 是**分数**（0.0001=1bp），而结算侧 `aligned_ret_*` 是**百分数**（须 `×100`）、
+  回测侧 `ret` 是**分数**（不得 `×100`）。回测侧 `funding_interval_cost` 最初多乘了 100（照抄结算侧），
+  使 `summarize` 的 `r[2] − r[9]` 变成「分数 − 百分数」，把 `P↑OI↑ 24h` 的 5.8% 放大显示成 **103.6%**；
+  修法 = 该函数去掉 `×100`（返回分数，与 `ret`/`cost` 同制），并加一条「返回值 < 0.01」的单位回归断言。**缺数据不得记 0**（`funding_src` + NULL）。
+- **`--force` 静默失效事故**：`CAND_SQL` 里内联的守卫字面量与 `_RESOLVED_GUARD` 常量是**两份拷贝**，
+  改常量未同步改 SQL ⇒ `.replace()` 匹配失败、`--force` 完全无效（历史重算只捞到 **102/830** 行）。
+  修法：`CAND_SQL` 内联守卫换成占位符 `__RESOLVED_GUARD__`，常量定义后 `CAND_SQL = CAND_SQL.replace(...)`
+  ⇒ **守卫只此一处定义**。修复后重跑得 **830 行**。
+- **resolved 行冻结低估值缺陷（自查发现）**：结算每小时跑（`scan_outcome_settle` `5 * * * *`）而费率回填每日 02:40
+  （`scan_funding_backfill`）⇒ 回填前结算的行只看得到滞后 ≤24h 的费率，`funding_src` 落 partial/none 且成本系统性低估，
+  而 resolved 行被守卫跳过 ⇒ **永久冻结**。修法：`_RESOLVED_GUARD` 增第三分支
+  `OR (o.funding_src IS DISTINCT FROM 'ok' AND o.alerted_at >= NOW() - INTERVAL '3 days')`（`FRESH_REDO_DAYS = 3`），
+  近 3 天费率未补齐的行持续重算、次日自动收敛为 ok；超窗旧行由 `--force` 一次性补齐（本轮已执行）。
+  另设 `COVER_TOL = 8h`（一个最大常见结算间隔）容忍「窗口末端不对齐结算点」的误判。
+- **回测侧改造（`scripts/bin/backtest_scan_scenarios.py`）**：新增 `funding_interval_cost`（bisect 左开右闭求和）；
+  `scan_symbol` 把费率成本以 **`r[9]` 尾部追加**（⚠️ `split_trades(r[4])`/`summarize_cvd(r[8])`/指标分桶 `r[5..7]` 全按固定索引解包，
+  **只能尾部追加**）；`summarize` 增 `avg_ret_net_fund` / `n_fund`（缺费率序列的样本**不拉进分母**）；`_print_rows` 加「含费率% / n费率」两列。
+- **A4 头条结论（费率影响极小，不翻转任何结论）**：
+  - **线上结算口径（无选参自由度）**：main 池 n=264 —— `aligned_ret_24h` **−0.1847% → −0.1474%**（费率反而 **+0.037pp**）；
+    `excess_24h −0.0666% → excess_net_24h −0.0196%`；accumulation(BRK) n=246 —— **−2.0746% → −2.0743%**。
+  - **回测侧（45 天口径）**：`P↑OI↑ 24h train` 5.846% → **6.823%**、`P↓OI↑ 24h` −3.426% → **−4.065%**，量级 bp ~ 1pp，符号不变。
+  - ⇒ 费率对 24h 净期望的影响 **≤ 0.04pp（线上）/ bp~1pp（回测）**；结合滑点结论，**§12.1-A4「成本双重低估」不成立**，
+    原估「边际为正场景扣费后大概率为负」**未被证实**。§8/§8.1.7/§8.1.8 相关成本注脚已同步为「已补齐、不改变符号/量级」。
+- **验证**：`py_compile` 通过；`workbench/test_scan_edge_metrics.py` 扩 4 组新断言（`window_cover` 三态 / `funding_cost` 四态+符号 /
+  `_worst_cover` / `settle_row` 新列 / 单位回归）→ **100 通过 / 0 失败 / 0 跳过**（原 71）；
+  **落库独立对账**：四窗口各 527 行（2108 组列三元组）与独立 SQL 重算 **bad=0**（校验 `funding_pct == sign×Σrate×100`、
+  `net_ret == aligned_ret − funding_pct`、`btc_net_ret == btc_ret − sign×Σ(BTCUSDT rate)×100`、`excess_net == net_ret − btc_net_ret`）。
+  覆盖率分布（DB 分组）：`ok=527 / partial=10 / none=255 / na=38`。
+- **产物**：`scripts/migrations/fix_084_scan_outcome_funding_cost.sql`（新增，入库）、`scripts/bin/collect_scan_outcome.py`（改，入库）、
+  `scripts/bin/backtest_scan_scenarios.py`（改，入库）、`workbench/test_scan_edge_metrics.py`（改，入库）、
+  设计方案 §12.1-A4 改写 + §8 成本注脚同步（入库）、AGENTS.md 本节。
+  临时文件 `/tmp/_a4_bt.csv` 及 `/tmp/_a4_bt_*.csv` 兄弟文件已清理，未入库。
+- **未动**：线上扫描触发逻辑/阈值/调度一律未改（仅结算任务多算 17 列）；**日报/邮件净收益口径仍读 `aligned_ret_*`（未切）**，
+  待样本积累后另议；流动性闸门工单 SCAN-LIQ-FILTER-001 与本项无关，**仍独立在办**。

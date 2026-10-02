@@ -28,6 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import collect_scan_outcome as co  # noqa: E402
 import build_scan_edge_report as be  # noqa: E402
+import backtest_scan_scenarios as bss  # noqa: E402
 
 passed = 0
 failed = 0
@@ -133,6 +134,108 @@ check(_nodata["outcome_state"] == "no_data" and _nodata["last_window"] == 0,
       f"got={_nodata['outcome_state']}")
 _nodir = co.settle_row({**_raw, "p_dir": None}, _t0 + timedelta(hours=25))
 check(_nodir["outcome_state"] == "no_data", "p_dir 为空 → no_data")
+
+# ═══════════════════════════════════════════════════════════════
+#  一·B §12.1-A4 资金费率成本（离线纯函数）
+# ═══════════════════════════════════════════════════════════════
+
+print("\n【P0】费率覆盖度 `window_cover`（缺数据不得记 0 的判据）")
+check(co.window_cover(None, _t0, 24) == "none", "无该 symbol 费率序列 → none")
+check(co.window_cover(_t0, _t0, 24) == "none",
+      "序列末端恰落在告警时刻 → none（入场后一个结算点都没抓到）")
+check(co.window_cover(_t0 + timedelta(hours=20), _t0, 24) == "ok",
+      "序列末端达窗口末端−8h 内 → ok（容差覆盖结算点不对齐窗口边界）")
+check(co.window_cover(_t0 + timedelta(hours=10), _t0, 24) == "partial",
+      "序列只更新到窗口中途 → partial（成本会低估，须标记）")
+
+print("\n【P0】区间费率成本 `funding_cost`（符号/换算/缺失四态）")
+_c, _s = co.funding_cost(0.0004, 2, "up", "ok")
+check(abs(_c - 0.04) < 1e-9 and _s == "ok",
+      "多头 + 正费率（0.0001+0.0003，小数）×100 = +0.04% ⇒ 多头支付",
+      f"got={(_c, _s)}")
+_c, _s = co.funding_cost(0.0004, 2, "down", "ok")
+check(abs(_c + 0.04) < 1e-9 and _s == "ok",
+      "空头 + 同一正费率 = −0.04% ⇒ 空头收取（符号必须反向）",
+      f"got={(_c, _s)}")
+_c, _ = co.funding_cost(-0.0005, 1, "down", "ok")
+check(abs(_c - 0.05) < 1e-9, "空头 + 负费率 = +0.05% ⇒ 空头反而收到钱", f"got={_c}")
+_c, _s = co.funding_cost(0.0, 0, "up", "ok")
+check(_c == 0.0 and _s == "ok",
+      "有覆盖但区间内无结算点 = 合法 0（确无结算即确无费用）", f"got={(_c, _s)}")
+_c, _s = co.funding_cost(0.0, 0, "up", "partial")
+check(_c is None and _s == "partial",
+      "覆盖只到中途且区间无点 = NULL + partial（不可判，**不得记 0**）", f"got={(_c, _s)}")
+_c, _s = co.funding_cost(0.0004, 2, "up", "none")
+check(_c is None and _s == "none", "完全无覆盖 → NULL + none（缺数据不记 0）", f"got={(_c, _s)}")
+_c, _s = co.funding_cost(0.0004, 2, None, "ok")
+check(_c is None and _s == "none", "方向未知 → NULL（不参与统计）", f"got={(_c, _s)}")
+_c, _s = co.funding_cost(0.0004, 2, "up", "partial")
+check(abs(_c - 0.04) < 1e-9 and _s == "partial",
+      "覆盖到中途但有结算点 → 仍给最佳估值 + partial（可对照但须标记）", f"got={(_c, _s)}")
+check(co._worst_cover(["ok", "partial", "ok"]) == "partial"
+      and co._worst_cover(["ok", "none"]) == "none" and co._worst_cover([]) is None,
+      "行级 funding_src 取各窗口最差态（none > partial > ok）；无到期窗口 → NULL")
+
+print("\n【P0】整行结算的费率对照列 `settle_row`")
+# f_max 取告警后 2 天 ⇒ 四个窗口全 ok；BTC 侧同；费率点仅给 4h/24h
+_rawf = {**_raw, "f_max": _t0 + timedelta(days=2), "bf_max": _t0 + timedelta(days=2),
+         "fs_1h": 0.0, "fn_1h": 0, "fs_4h": 0.0004, "fn_4h": 2,
+         "fs_12h": 0.0004, "fn_12h": 2, "fs_24h": 0.0003, "fn_24h": 3,
+         "bfs_1h": 0.0, "bfn_1h": 0, "bfs_4h": 0.0002, "bfn_4h": 1,
+         "bfs_12h": 0.0002, "bfn_12h": 1, "bfs_24h": 0.0006, "bfn_24h": 3}
+_rf = co.settle_row(_rawf, _t0 + timedelta(hours=25))
+check(_rf["funding_src"] == "ok", "全窗口有覆盖 → funding_src=ok", f"got={_rf['funding_src']}")
+check(abs(_rf["funding_pct_4h"] - 0.04) < 1e-9,
+      "funding_pct_4h = 区间两结算点之和 ×100 = 0.04%", f"got={_rf['funding_pct_4h']}")
+check(abs(_rf["net_ret_4h"] - (_rf["aligned_ret_4h"] - 0.04)) < 1e-9,
+      "net_ret_4h = aligned_ret_4h − funding_pct_4h（既有列一字未动）",
+      f"got={_rf['net_ret_4h']} vs {_rf['aligned_ret_4h']}")
+check(abs(_rf["funding_pct_1h"] - 0.0) < 1e-9 and _rf["net_ret_1h"] == _rf["aligned_ret_1h"],
+      "1h 区间无结算点 ⇒ 费率 0，net 与 aligned 相等（合法 0 不是缺失）",
+      f"got={_rf['funding_pct_1h']}/{_rf['net_ret_1h']}")
+check(abs(_rf["btc_net_ret_24h"] - (_rf["btc_ret_24h"] - 0.06)) < 1e-9,
+      "BTC 侧同口径扣费（用 BTCUSDT 费率序列）", f"got={_rf['btc_net_ret_24h']}")
+check(abs(_rf["excess_net_24h"] - (_rf["net_ret_24h"] - _rf["btc_net_ret_24h"])) < 1e-9,
+      "excess_net_24h = net_ret_24h − btc_net_ret_24h（新口径 alpha）",
+      f"got={_rf['excess_net_24h']}")
+# 缺覆盖：整行费率列必须为 NULL（不是 0），且 funding_src=none
+_rawn = co.settle_row({**_raw, "f_max": None, "bf_max": None}, _t0 + timedelta(hours=25))
+check(_rawn["funding_src"] == "none" and _rawn["funding_pct_24h"] is None
+      and _rawn["net_ret_24h"] is None and _rawn["btc_net_ret_24h"] is None
+      and _rawn["excess_net_24h"] is None,
+      "无费率覆盖 → 四组对照列全 NULL + funding_src=none（绝不记 0）",
+      f"got={_rawn['funding_pct_24h']}/{_rawn['net_ret_24h']}/{_rawn['funding_src']}")
+# 未到期窗口的费率列同样不得提前写入
+check(_rf["funding_pct_24h"] is not None
+      and co.settle_row(_rawf, _t0 + timedelta(hours=5))["funding_pct_24h"] is None,
+      "未到期窗口的费率/净收益列写 NULL（5h 时点 12h/24h 不写）")
+# 既有测试夹具（不含任何 funding 键）必须走「缺数据」分支而非崩溃
+_l = co.settle_row(_raw, _t0 + timedelta(hours=25))
+check(_l["funding_src"] == "none" and _l["net_ret_24h"] is None,
+      "旧夹具（无 funding 键）→ funding_src=none、净收益 NULL（向后兼容不崩）",
+      f"got={_l['funding_src']}")
+
+print("\n【P0】回测侧同口径 `funding_interval_cost`（区间左开右闭）")
+_fts = [_t0, _t0 + timedelta(hours=4), _t0 + timedelta(hours=8)]
+_rates = [0.0001, 0.0001, 0.0001]
+check(abs(bss.funding_interval_cost((_fts, _rates), _t0, 4, "up") - 0.0001) < 1e-9,
+      "entry 恰在结算点：区间 (t0, t0+4h] 只含 4h 那一点 ⇒ 1bp（左开右闭）",
+      f"got={bss.funding_interval_cost((_fts, _rates), _t0, 4, 'up')}")
+check(abs(bss.funding_interval_cost((_fts, _rates), _t0, 24, "up") - 0.0002) < 1e-9,
+      "24h 区间含 4h/8h 两点 ⇒ 2bp（按真实结算点求和，非硬编码 3 点）",
+      f"got={bss.funding_interval_cost((_fts, _rates), _t0, 24, 'up')}")
+check(abs(bss.funding_interval_cost((_fts, _rates), _t0, 24, "down") + 0.0002) < 1e-9,
+      "空头符号反向 ⇒ −2bp", f"got={bss.funding_interval_cost((_fts, _rates), _t0, 24, 'down')}")
+# 单位回归（§12.1-A4 事故留档）：返回**分数**（与 ret/cost 同制），不再 ×100。
+# 若此处退化为百分数，summarize 的 r[2]-r[9] 即单位混用（把 1bp 当 1% 用）。
+check(abs(bss.funding_interval_cost((_fts, _rates), _t0, 4, "up")) < 0.01,
+      "⚠️ 单位回归：返回值 < 0.01（分数制），不得是百分数（×100 会放大两个数量级）",
+      f"got={bss.funding_interval_cost((_fts, _rates), _t0, 4, 'up')}")
+check(bss.funding_interval_cost((_fts, _rates), _t0 + timedelta(hours=9), 1, "up") == 0.0,
+      "区间内无结算点 ⇒ 0.0（有序列但确无结算，不是缺数据）")
+check(bss.funding_interval_cost(None, _t0, 4, "up") is None,
+      "无该 symbol 费率序列 ⇒ None（缺数据不记 0）")
+check(bss.funding_interval_cost((_fts, _rates), _t0, 4, None) is None, "方向未知 ⇒ None")
 
 # ═══════════════════════════════════════════════════════════════
 #  二、P1 聚合口径（离线纯函数）

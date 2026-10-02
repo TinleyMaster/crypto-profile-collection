@@ -1756,6 +1756,19 @@ CROSS_POOL_MUTE_MIN = 60
 SUPPRESS_BRK_SHORT = True
 # 抑制原因（写入 `alert_suppressed_reason`，供线上核验与复评查询按前缀匹配）。
 SUPPRESS_BRK_SHORT_REASON = "BRK空头停推(SCAN-BRK-SHORT-OFF-001)：§8.1.10 负期望证据"
+# ── 同质信号合并（工单 SCAN-MERGE-001，2026-10-02）───────────────────────────
+# 一次市场级事件被渲染成 N 张独立卡片（实物 09-23T14 一根 1h K 线 92 个 BRK 币同时向下
+# 破位 ⇒ 92 张卡片各渲「共振/CVD/OI/开仓依据」）。合并口径（预登记，工单 §2）：
+#   * 合并键 = `(bar= 标签, p_dir)`，且 `pool='accumulation' AND scenario='BRK'`
+#     （`bar=` 是生产去重已用的同根键，P2-7；方向不同是不同事件；主池无 `bar=` 不合并）；
+#   * 阈值 ≥5：线上只读实证 BRK 同根组规模分布**双峰**（n≤4 共 96 组为常态巧合区，
+#     n≥5 共 7 组 / 171 行 = 全量告警 20% 为稀有市场事件区），自然断点恰在 5；
+#   * **只改渲染层**：`alerted_at`/`detail` 快照/冷却/去重/outcome 全部按币逐条不变，
+#     标题与批级摘要仍按币数计数，仅把正文 N 张卡片压成 1 张「市场级事件」卡。
+# 回滚：本常量置 0 即恢复逐卡渲染，无 DB 变更、无数据补写。
+MERGE_BRK_MIN = 5
+# 事件卡内直接列出（按强度降序取前 N）的币数，其余折叠为「+N 币」。
+MERGE_BRK_CHIPS = 12
 # 历史先验（审计 P2-5）：同场景已告警信号的方向对齐后验。用**中位数 + 胜率 + 样本量**
 # 呈现（均值会被 AKEUSDT +147.99% 这类离群值绑架，实测 +24h 均值 +8.79% vs 中位 +3.60%）。
 PRIOR_HORIZON_H = 12
@@ -2287,6 +2300,47 @@ def _render_reason(reason: dict | None) -> str:
 
 def _is_brk_sig(sig: dict) -> bool:
     return sig.get("pool") == "accumulation" or sig.get("scenario") == "BRK"
+
+
+def _brk_bar_root(sig: dict) -> str | None:
+    """从 `context_tags` 抽 BRK 同根 `bar=` 标签（UTC 字符串，如 `2026-09-23T14`）。
+
+    `bar=` 是蓄势池生产去重已用的同根键（P2-7，格式 `bar=%Y-%m-%dT%H`）。无标签或
+    非 BRK 返回 None ⇒ 不参与合并。纯函数（不碰 DB / 全局），可注入测试。
+    """
+    if not (sig.get("pool") == "accumulation" and sig.get("scenario") == "BRK"):
+        return None
+    for t in sig.get("context_tags") or []:
+        s = str(t)
+        if s.startswith("bar=") and len(s) >= 17:
+            return s[4:]
+    return None
+
+
+def _brk_merge_plan(items: list[dict], min_n: int) -> dict[int, list[int]]:
+    """同质信号合并的分组计划（工单 SCAN-MERGE-001）。
+
+    输入 **已按强度降序** 的 items；按 `(bar_root, p_dir)` 分组，仅保留组规模 ≥ min_n
+    的 BRK 组。返回 `{代表下标: [成员下标...]}`：代表 = 组内**最强**（降序输入下即组内
+    首个出现的下标），成员 = 其余下标（仍按强度降序）。
+
+    纯函数：不碰 DB / 全局，只读入参。语义保证：
+      - 非 BRK（主池 / 无 `bar=` 标签）恒不合并；
+      - 同根但 `p_dir` 不同 → 不同组；
+      - 组规模 < min_n → 不合并（各自成卡）。
+    """
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, it in enumerate(items):
+        sig = it.get("signal") or {}
+        br = _brk_bar_root(sig)
+        if br is None:
+            continue
+        groups.setdefault((br, sig.get("p_dir")), []).append(i)
+    plan: dict[int, list[int]] = {}
+    for members in groups.values():
+        if len(members) >= min_n:
+            plan[members[0]] = members[1:]
+    return plan
 
 
 def _render_diff_boards(it: dict) -> str:
@@ -3359,6 +3413,70 @@ def _render_resonance_msgs(res: dict) -> str:
             + "".join(blocks) + "</div>")
 
 
+def _median(vals: list[float]) -> float | None:
+    """简易中位数（纯本地，避免为一次调用引入 statistics 依赖）。"""
+    if not vals:
+        return None
+    vs = sorted(vals)
+    n = len(vs)
+    mid = n // 2
+    return vs[mid] if n % 2 else (vs[mid - 1] + vs[mid]) / 2
+
+
+def _render_market_event_card(card_no: int, rep: dict, members: list[dict],
+                              arrow_color: str, dir_label: str, up: bool) -> str:
+    """同根破位合并后的「市场级事件」卡（工单 SCAN-MERGE-001）。
+
+    `rep` = 组内最强信号（`it` 结构），`members` = 其余成员（按强度降序，均含
+    `signal`）。一张卡回答「市场做了什么」：方向 + 币数 + 触发根 + 量比/涨跌幅区间 +
+    前 `MERGE_BRK_CHIPS` 币清单。**不含**逐币共振/CVD/OI/开仓依据（事件卡的本质是
+    同根，逐币属性属第二层信息）。纯本地 HTML 组装，无 DB / 无全局。
+    """
+    rank = _CIRCLED[card_no] if card_no < len(_CIRCLED) else f"{card_no + 1}."
+    n = 1 + len(members)                     # 组规模（代表 + 成员）
+    sig = rep.get("signal") or {}
+    bar_root = _brk_bar_root(sig) or ""
+    bar_txt = f" · 触发根 {fmt_bj(bar_root, '%m/%d %H:%M')}" if bar_root else ""
+    # 量比中位（组内全部）、涨跌幅区间（组内全部，按方向读）
+    vrs = [float(it["signal"].get("vol_ratio")) for it in [rep] + members
+           if it["signal"].get("vol_ratio") is not None]
+    vr_mid = _median(vrs)
+    vr_txt = f"量比中位 {vr_mid:.1f}x" if vr_mid is not None else "量比 n/a"
+    chgs = [float(it["signal"].get("price_chg_pct")) for it in [rep] + members
+            if it["signal"].get("price_chg_pct") is not None]
+    chg_txt = ""
+    if chgs:
+        lo, hi = min(chgs), max(chgs)
+        chg_txt = (f" · 涨幅 {lo:+.2f}% ~ {hi:+.2f}%" if up
+                   else f" · 跌幅 {lo:+.2f}% ~ {hi:+.2f}%")
+    # 前 N 币 chips（组内按强度降序 = rep 先、members 依序）
+    chips_all = [rep] + members
+    shown = chips_all[:MERGE_BRK_CHIPS]
+    chips = "".join(
+        f"<span style='display:inline-block;margin:2px 4px 0 0;padding:1px 6px;"
+        f"background:#eef2ff;border:1px solid #c7d2fe;border-radius:3px;"
+        f"font-size:11.5px;color:#3730a3'>{it['signal']['symbol']}</span>"
+        for it in shown)
+    more = n - len(shown)
+    more_txt = (f"<span style='display:inline-block;margin:2px 4px 0 0;padding:1px 6px;"
+                f"background:#f3f4f6;border:1px solid #d1d5db;border-radius:3px;"
+                f"font-size:11.5px;color:#6b7280'>+{more} 币</span>" if more > 0 else "")
+    return (
+        f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
+        f"{arrow_color};background:#fefce8;color:#111'>"
+        f"<div style='font-size:15px'>{rank} <b>市场级事件</b> "
+        f"<span style='background:#fef3c7;color:#92400e;padding:1px 5px;"
+        f"border-radius:3px;font-size:11px'>{n} 币</span>"
+        f"<span style='color:#6b7280;font-size:12px'>蓄势池BRK{bar_txt}</span></div>"
+        f"<div style='margin:2px 0 4px'><b>同根 · {dir_label}</b> "
+        f"<span style='color:#374151'>{vr_txt}{chg_txt}</span></div>"
+        f"<div>{chips}{more_txt}</div>"
+        f"<div style='margin-top:4px'><small style='color:#6b7280'>"
+        f"同 1h 根同向破位 {n} 币，视为单次市场事件；各币仍单独计入告警与冷却。</small></div>"
+        f"</div>"
+    )
+
+
 def _render_alert_email(items: list[dict],
                         regime_tags: list[str] | None = None,
                         batch: dict | None = None) -> str:
@@ -3412,8 +3530,15 @@ def _render_alert_email(items: list[dict],
                     f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
     _summary_out: dict = {}
     summary = _render_batch_summary(items, batch, _summary_out)
+    # 同质信号合并（工单 SCAN-MERGE-001）：**只压正文卡片**，标题/摘要仍按币数计数。
+    # 计划在排序后算（输入已按强度降序 ⇒ 组内首个下标 = 最强代表）。
+    merge_plan = _brk_merge_plan(items, MERGE_BRK_MIN)
+    _merged_idx: set[int] = set()
+    _card_no = 0          # 渲染卡号：合并批中事件卡占一张，成员跳过 ⇒ 编号连续
     body_parts = []
     for idx, it in enumerate(items):
+        if idx in _merged_idx:      # 已并入事件卡的成员，跳过（不单独渲染）
+            continue
         sig = it["signal"]
         res = it["resonance"]
         pool_label = "蓄势池BRK" if sig["pool"] == "accumulation" else "主池"
@@ -3422,6 +3547,15 @@ def _render_alert_email(items: list[dict],
         arrow_color = "#ef4444" if up else "#22c55e"   # 中文惯例：多头=红 / 空头=绿
         dir_label = "↑ 做多" if up else "↓ 做空"
         sc = sig.get("scenario") or "-"
+        # 同质信号合并（工单 SCAN-MERGE-001）：代表下标 → 渲染单张「市场级事件」卡，
+        # 其余成员标记跳过。事件卡用不到逐币的共振/CVD/OI/开仓依据等重计算，提前分支出。
+        if idx in merge_plan:
+            members = [items[i] for i in merge_plan[idx]]
+            _merged_idx.update(merge_plan[idx])
+            body_parts.append(_render_market_event_card(
+                _card_no, it, members, arrow_color, dir_label, up))
+            _card_no += 1
+            continue
         # 编号 + 文案由行自身维度重算（两套 scenario 编码共用编号空间，见 _scenario_label）
         sc_label = _scenario_label(sig)
         # lv 代号 → 可读级别（审计 P2-2：原样渲染 lv3_1h 对收件人不可自解释）
@@ -3599,7 +3733,8 @@ def _render_alert_email(items: list[dict],
             badge += (f" <span style='background:#dbeafe;color:#1d4ed8;padding:1px 5px;"
                       f"border-radius:3px;font-size:11px'>已确认</span>")
         bar = _strength_bar(_alert_strength(it), top, arrow_color) if top > 0 else ""
-        rank = _CIRCLED[idx] if idx < len(_CIRCLED) else f"{idx + 1}."
+        rank = _CIRCLED[_card_no] if _card_no < len(_CIRCLED) else f"{_card_no + 1}."
+        _card_no += 1
         # 失效位（审计 P2-4）：生产者已落 trigger_price / stop_loss_pct ⇒ 渲染价格与幅度
         trig_px, stop_pct = sig.get("trigger_price"), sig.get("stop_loss_pct")
         invalid_txt = ""

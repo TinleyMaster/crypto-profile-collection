@@ -173,6 +173,14 @@ class CatalystGrader:
             "lt_100m": 90, "lt_1b": 80, "lt_5b": 60, "ge_5b": 40, "unknown": 50,
         })
 
+        # 审计 2026-10-02：实测影响档位 → 事件权重（替代纯 event_type 先验查表）。
+        # 档位来自 catalyst_impact.impact_strength（build_catalyst_impact 数据校准版，
+        # 已含 mcap 联合判定）。映射值按事件研究实测排序设定，可在 yaml 覆盖：
+        #   strong(3)=85（delisting/burn/partnership 档）、medium(2)=62、weak(1)=40。
+        self.impact_level_weights = config.get("impact_level_weights", {
+            3: 85, 2: 62, 1: 40,
+        })
+
         # 发布前启动程度惩罚（实测：>10% 追高风险显著，作扣分项）
         pl = config.get("prelaunch_penalty", {})
         self.prelaunch_enabled = pl.get("enabled", False)
@@ -215,8 +223,9 @@ class CatalystGrader:
         # 2) 权威度（实测校准优先，样本不足回退先验）
         authority = self._authority_score(source_code)
 
-        # 3) 事件权重（实测校准优先）
-        event_weight = self._event_weight(event_type)
+        # 3) 事件权重（实测校准优先：impact_level 实测档位 > calibration > event_type 先验）
+        event_weight = self._event_weight(event_type,
+                                          catalyst.get("impact_level"))
 
         # 4) 影响聚焦度（实测校准优先）
         pairs = catalyst.get("related_pairs") or []
@@ -327,8 +336,23 @@ class CatalystGrader:
         """查实测校准权重（仅 calibrated 模式生效）。"""
         return self.calibration.get(dim, {}).get(value)
 
-    def _event_weight(self, event_type: str) -> int:
-        """事件权重：实测校准优先，回退先验 yaml。"""
+    def _event_weight(self, event_type: str, impact_level=None) -> int:
+        """事件权重：实测影响档位优先，回退实测校准，最后 event_type 先验。
+
+        审计 2026-10-02：影响程度接进 G1。impact_level 来自 catalyst_impact 的
+        impact_strength（strong=3/medium=2/weak=1，取该 catalyst 关联资产最高档，
+        已含 event_type + mcap 联合校准——见 build_catalyst_impact 的数据校准版
+        RULE）。档位→权重用事件研究实测排序（delisting/burn/partnership 强、
+        listing/tech_upgrade/funding 中、regulation/market_update/other 弱），
+        修正了 yaml 先验的倒挂（listing 95 > delisting 90 与实际相反）。
+        无 impact 数据（新 catalyst 尚未 build impact 或未绑资产）时回退原逻辑。
+        """
+        if impact_level is not None:
+            try:
+                return self.impact_level_weights.get(int(impact_level),
+                                                     self.event_type_weights.get(event_type, 15))
+            except (TypeError, ValueError):
+                pass
         calib = self._calibrated("event_type", event_type)
         if calib is not None:
             return calib

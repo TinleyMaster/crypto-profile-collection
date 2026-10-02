@@ -408,7 +408,16 @@ def run_grade(conn, grader: CatalystGrader,
                 WHERE cal3.catalyst_id = ac.catalyst_id
                   AND a2.canonical_symbol IS NOT NULL
                 ORDER BY (a2.market_cap IS NULL), a2.market_cap ASC
-                LIMIT 1) AS anchor_symbol
+                LIMIT 1) AS anchor_symbol,
+               -- 审计 2026-10-02：影响程度接进 G1。取该 catalyst 关联资产中
+               -- impact_strength 的最高档（strong>medium>weak），供 _event_weight
+               -- 做实测校准（替代纯 event_type 先验查表）。无 impact 行为 NULL，
+               -- 由 grade.py 回退 event_type 权重。
+               (SELECT MAX(CASE ci.impact_strength
+                             WHEN 'strong' THEN 3 WHEN 'medium' THEN 2
+                             WHEN 'weak' THEN 1 ELSE 0 END)
+                FROM biz.catalyst_impact ci
+                WHERE ci.catalyst_id = ac.catalyst_id) AS impact_level
         FROM biz.asset_catalyst ac
         LEFT JOIN biz.catalyst_asset_link cal ON ac.catalyst_id = cal.catalyst_id
         WHERE ac.rule_event_type IS NOT NULL
@@ -453,6 +462,10 @@ def run_grade(conn, grader: CatalystGrader,
                 catalyst_row["prelaunch_ret_24h"] = _compute_prelaunch_ret(
                     klines, published_at.timestamp()
                 )
+
+        # 审计 2026-10-02：impact_level（实测影响强度档位 1/2/3）随行传给 G1，
+        # _event_weight 优先消费（替代纯 event_type 先验）。值为 None 时不参与。
+        catalyst_row["impact_level"] = row.get("impact_level")
 
         result = grader.grade(catalyst_row, linked_assets=linked if linked else None)
         try:

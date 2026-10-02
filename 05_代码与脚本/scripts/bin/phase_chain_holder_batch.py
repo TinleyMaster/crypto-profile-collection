@@ -309,6 +309,8 @@ def main():
                         help="单币超时时间（秒）")
     parser.add_argument("--delay", type=float, default=0.5,
                         help="每币之间延迟（秒，避免触发限流）")
+    parser.add_argument("--max-consec-fail", type=int, default=20,
+                        help="单链连续失败超过该阈值即熔断本轮（防上游整体故障时整轮烧满 12h 槽位，0=禁用）")
     args = parser.parse_args()
 
     _sweep_stale_temp_files()
@@ -388,6 +390,7 @@ def main():
 
         chain_success = 0
         chain_fail = 0
+        consec_fail = 0
 
         for i, asset in enumerate(assets, 1):
             asset_id = asset["asset_id"]
@@ -403,10 +406,20 @@ def main():
             ok, reason = run_single(asset_id, chain, timeout=timeout)
             if ok:
                 chain_success += 1
+                consec_fail = 0
                 print("OK")
             else:
                 chain_fail += 1
+                consec_fail += 1
                 print(f"FAIL ({reason})")
+                # 熔断（2026-10-03）：上游整体故障（限流/网络劣化）时，单币逐个打满超时
+                # 会让整轮跑数小时甚至被 12h 硬超时收割、占死唯一 chain 槽位（10-01/10-02
+                # 实况：eth/bsc 全灭后 base/arb 排队 8h、solana 排队 10h）。连续失败超阈值
+                # 立即止损，等下一次调度重试。
+                if args.max_consec_fail > 0 and consec_fail >= args.max_consec_fail:
+                    print(f"\n  [熔断] {chain} 连续失败 {consec_fail} 次，"
+                          f"判定上游故障，中止本轮（保留已成功 {chain_success} 条）")
+                    break
 
             if i < len(assets) and args.delay > 0:
                 time.sleep(args.delay)

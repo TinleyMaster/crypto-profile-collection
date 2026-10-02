@@ -79,9 +79,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #       单轮 `--limit` 保留：无界「跑到完」会把 chain 并发槽位饿死（史实见下方 L148 注释）；
     #       长尾不再靠放大 limit，而由 phase_chain_holder_batch 的
     #       「最近采集日 ASC NULLS FIRST」排序跨日轮转覆盖。
-    ("chain_holder_snapshot_bsc", "0 14 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - BSC 链（每日 14:00，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
-    ("chain_holder_snapshot_eth", "20 14 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--limit", "1200", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - ETH 链（每日 14:20，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
-    ("chain_holder_snapshot_base_arb", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--limit", "800", "--delay", "0.3", "--timeout", "45"], "链上持仓快照 - Base+Arb 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
+    # ⚠️ 超时 45s → 90s（2026-10-03 处置）：免费持币 API（ethplorer/binplorer/blockscout）对
+    #       容器出口 IP 的响应已劣化到 ~40-50s（本地直连仍 <1s，容器 45s 超时临界被整轮杀灭；
+    #       10-01/10-02 全链 0 快照即此）。实测容器 90s 超时单币可成功。配合
+    #       phase_chain_holder_batch 的连续失败熔断（--max-consec-fail 20）与 scrape 直连修复
+    #       （去掉每子进程连接池退出 20s 空耗），单轮仍可落在 12h 硬超时内。
+    ("chain_holder_snapshot_bsc", "0 14 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--limit", "1200", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - BSC 链（每日 14:00，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_eth", "20 14 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--limit", "1200", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - ETH 链（每日 14:20，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_base_arb", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Base+Arb 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
     ("chain_holder_snapshot_solana", "0 15 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--limit", "300", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日 15:00，单轮上限 300 防超时；长尾跨日轮转）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),

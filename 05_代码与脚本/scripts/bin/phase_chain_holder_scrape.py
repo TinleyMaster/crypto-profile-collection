@@ -31,7 +31,6 @@ import requests
 from bs4 import BeautifulSoup
 
 from crypto_research.config import get_settings
-from crypto_research.db.conn import get_connection
 from crypto_research.clients.ethplorer_client import get_ethplorer_client
 
 
@@ -1262,7 +1261,14 @@ def main() -> int:
         print(f"ERROR: 不支持的链: {raw_chain}")
         return 1
 
-    with get_connection(settings.database_url) as conn:
+    # 一次性子进程：直连代替全局连接池（2026-10-03 修复）。
+    # 原用 crypto_research.db.conn.get_connection（psycopg_pool 全局池），但每个
+    # 子进程都会新建一个池且**退出时不关闭**——psycopg_pool 的工作线程在解释器
+    # atexit 时停不掉，每个线程白等 5s（实测 4 个线程 = 20s/币），批量 1200 币
+    # 因此多耗 ~7h；容器侧 DB 抖动时该等待可能更长，是"240min 无日志被判 stuck"
+    # 的放大器之一。本脚本单次只跑 1 币，直连更合适（psycopg 3 的 with 块退出
+    # 自动 commit/rollback/close，语义与 get_connection 一致）。
+    with psycopg.connect(settings.database_url, connect_timeout=15) as conn:
         info = resolve_contract(conn, args.asset_id, args.contract, chain)
         if not info:
             print(f"ERROR: 无法找到合约地址或资产信息")

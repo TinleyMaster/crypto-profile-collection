@@ -1345,16 +1345,31 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
 
     rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class)
     new_count = len(rows)
+    tier_label = "A级"
 
     if not rows:
-        # 无 A 级信号 → 静默跳过，不发空窗邮件（058c246 决议）。
+        # 审计 2026-10-02 P0-3：A 级 open 长期为 0（全库 A 级 24 条、open 0 条），
+        # 导致 slow_digest 连续静默。方案 B：无 A 级时回退到「B 级高置信度」
+        # （composite>=70 的 open 信号，有完整档位）兜底出信，避免通道长期空转。
+        # 仅 crypto 走此回退；美股/商品通道 A 级候选本就几乎为零，维持原静默语义
+        # （058c246 决议不破，避免 stock 通道刷屏）。
+        if is_crypto:
+            rows = _recent_new_a_signals(conn, hours=24, asset_class=asset_class,
+                                         min_tier="B", min_composite=70)
+            new_count = len(rows)
+            if rows:
+                tier_label = "B级"
+
+    if not rows:
+        # 无 A/B 高置信度信号 → 静默跳过，不发空窗邮件（058c246 决议）。
         # 通道长期空转由 send_channel_silence_alert() 在运维侧告警。
         return {"sent": 0, "skipped": 1, "failed": 0,
-                "reason": f"{label} 24h 内无 A 级高置信度信号，静默跳过",
+                "reason": f"{label} 24h 内无 A/B 级高置信度信号，静默跳过",
                 "new_signals_24h": 0}
     else:
-        subject = f"🎯 催化剂 Alert·{label}·A级 {new_count} 条"
-        body = _build_slow_digest_html(rows, stats, class_label=label)
+        subject = f"🎯 催化剂 Alert·{label}·{tier_label} {new_count} 条"
+        body = _build_slow_digest_html(rows, stats, class_label=label,
+                                       tier_label=tier_label)
 
     ok, msg = _send_email(subject, body)
     _mark_sent(conn, sentinel, ntype, None, subject,
@@ -1371,16 +1386,18 @@ def _send_slow_digest_class(conn, stats: dict, asset_class: str) -> dict:
     }
 
 
-def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") -> list[dict]:
-    """过去 N 小时内 A 级新信号（按资产类别，按资产去重留最高分，取前 2）。
+def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto",
+                          min_tier: str = "A", min_composite: int | None = None) -> list[dict]:
+    """过去 N 小时内新信号（按资产类别，按资产去重留最高分，取前 2）。
 
     入选条件（OPT-CATALYST-ALERT-001 P0-1/P0-2 语义闸门，d3 修订）：
-    - tier = 'A'（composite_score → tier 单点真源不变，DB tier 不改）
+    - tier = min_tier（composite_score → tier 单点真源不变，DB tier 不改）
     - status = 'open'（d3：open 已表示「价格未充分定价」，即真正的可动作集合。
       原先额外要求 resonance_state='confirmed' 是反向的——实测 confirmed 的
       72h 前瞻超额 -2.16%（n=47）远弱于 weak +1.58%（n=231），
       即「等价格确认再开单」等于追高；confirmed 现已归入观察池 status='watch'）
     - entry/stop/tp 齐全（可交易性）
+    - 可选 min_composite 门槛（方案 B 回退用：无 A 级时取 B 级 composite≥70 的高置信度信号）
     - 近 DEDUP_WINDOW_HOURS 内**未被快讯发过**（pre_alert_sent_at 判据）——
       跨通道去重，digest 仅作快讯的兜底（诊断_催化剂A级邮件延迟链路_XRP_BCH_2026-09-24）
     composite_score DESC 取前 2 条（每日 1~2 idea）。
@@ -1390,6 +1407,11 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
     供 _build_a_alert_card 一次渲染，邮件不依赖外链网页。
     """
     filter_sql = ASSET_NAME_FILTER_SQL if asset_class == "crypto" else IS_STOCK_SQL
+    composite_clause = "AND s.composite_score >= %s" if min_composite is not None else ""
+    params: list = [hours, min_tier]
+    if min_composite is not None:
+        params.append(min_composite)
+    params.append(DEDUP_WINDOW_HOURS)
     return conn.execute(f"""
         SELECT * FROM (
             SELECT DISTINCT ON (a.asset_id)
@@ -1458,7 +1480,8 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
             ) pool ON TRUE
             WHERE s.status = 'open'
               AND s.created_at > NOW() - (%s::int * INTERVAL '1 hour')
-              AND s.tier = 'A'
+              AND s.tier = %s
+              {composite_clause}
               AND s.entry_price IS NOT NULL
               AND s.stop_loss IS NOT NULL
               AND s.take_profit IS NOT NULL
@@ -1472,7 +1495,7 @@ def _recent_new_a_signals(conn, hours: int = 24, asset_class: str = "crypto") ->
         ) t
         ORDER BY t.composite_score DESC
         LIMIT 2
-    """, (hours, DEDUP_WINDOW_HOURS)).fetchall()
+    """, params).fetchall()
 
 
 # =====================================================================
@@ -1724,9 +1747,16 @@ def send_channel_silence_alert(conn, days: int | None = None) -> dict:
 NTYPE_MAJOR_EVENT = "major_event"     # 重大事件通道（与 A 级 Alert 分开渲染/去重）
 
 MAJOR_EVENT_MIN_MOVE = 5.0            # 利好型门槛：事件前 24h |异动| ≥5%（市场已确认）
-MAJOR_EVENT_MIN_IMPORTANCE = 70.0     # 市场显著性门槛（类型权重 × 资产权重）
-MAJOR_EVENT_COOLDOWN_HOURS = 24       # 同一资产 24h 内只发一次（事件级去重）
-MAJOR_EVENT_MAX_PER_RUN = 3           # 单轮上限，配合「日均 ≤3 条」目标
+# 审计 2026-10-02 P0-3：通知停发根因之一是 major_event 门槛过高 —— importance=类型权重×资产权重
+# ≥70 时，只有 security/macro/etf 类且市值 top10 的资产才可能过线（近 7 天每天过线候选 2~33 条，
+# 其中 BTC 占大半；10-02 仅 2 条全被 24h 去重拦截 → 通道 0 封）。放宽到 55：让
+#   · regulation(80)×市值≤30(0.8)=64 ✓、tech_upgrade(68)×市值≤10(1.0)=68 ✓
+#   · funding(55)×市值≤10(1.0)=55 ✓、listing(62)×市值≤30(0.8)=49.6 → 仍不够（listing 数量大
+#     保持降权，避免刷屏）
+# 同时去重窗口 24h→12h、单轮上限 3→5，让通道在候选稀疏时仍能产出。
+MAJOR_EVENT_MIN_IMPORTANCE = 55.0     # 市场显著性门槛（类型权重 × 资产权重）
+MAJOR_EVENT_COOLDOWN_HOURS = 12       # 同一资产 12h 内只发一次（事件级去重）
+MAJOR_EVENT_MAX_PER_RUN = 5           # 单轮上限，配合「日均 ≤5 条」目标
 _MAJOR_BEARISH_TYPES = ("security", "delisting")  # 利空型：不以涨幅确认，权重直达
 
 
@@ -2915,13 +2945,16 @@ def _fmt_price(v) -> str:
 
 
 def _build_slow_digest_html(a_rows, stats: dict,
-                            class_label: str = "加密货币") -> str:
+                            class_label: str = "加密货币",
+                            tier_label: str = "A级") -> str:
     """构建 A 级 Alert 邮件 HTML（OPT-CATALYST-ALERT-001 改版）。
 
     Args:
-        a_rows: 24h 内 A 级去重新信号（最多 2 条，未充分定价 + 完整交易档位）
+        a_rows: 24h 内去重新信号（最多 2 条，未充分定价 + 完整交易档位）
         stats: 慢通道统计（second_order_count / expired_count）
         class_label: 资产类别中文标签（加密货币 / 美股·商品）
+        tier_label: 档位标签（A级 / B级；审计 2026-10-02 P0-3 方案 B：无 A 级时
+            回退 B 级高置信度，邮件头部/标题随之标注，避免文案与卡片不符）
 
     每条卡片在邮件内完整展开「交易计划 + 催化剂原文 + 决策链 G0-G7 + 代币快照」，
     不依赖外链网页（用户口径：拿到邮件即看到整个决策过程与代币全部信息）。
@@ -2932,22 +2965,22 @@ def _build_slow_digest_html(a_rows, stats: dict,
     cards = "".join(_build_a_alert_card(r) for r in a_rows)
     if not cards:
         cards = ('<div style="padding:16px;text-align:center;color:#9ca3af;background:#f9fafb;'
-                 'border-radius:8px">过去 24h 无 A 级新信号</div>')
+                 'border-radius:8px">过去 24h 无 {tier_label} 新信号</div>')
 
     return f"""
     <div style="font-family:sans-serif;max-width:760px;margin:auto;padding:16px;background:#f3f4f6">
       <div style="background:linear-gradient(135deg,#7c3aed,#3b82f6);color:#fff;padding:24px;border-radius:12px">
-        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · A 级 Alert</div>
-        <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} A级 新增 {len(a_rows)} 条可交易信号</div>
+        <div style="font-size:12px;opacity:.7;text-transform:uppercase;letter-spacing:1px">催化剂决策管道 · {class_label} · {tier_label} Alert</div>
+        <div style="font-size:24px;font-weight:700;margin-top:8px">{class_label} {tier_label} 新增 {len(a_rows)} 条可交易信号</div>
         <div style="margin-top:4px;font-size:13px;opacity:.8">24h 窗口 · 未充分定价(weak)可动作池 · 二阶受益 {so_count} 条 · 过期 {expired} 条</div>
       </div>
 
       <div style="background:#fff;border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 12px 12px">
-        <h3 style="font-size:15px;margin:0 0 12px;color:#111827">🟣 A 级信号（过去 24h 新增 · 未充分定价可动作 + 完整交易档位）</h3>
+        <h3 style="font-size:15px;margin:0 0 12px;color:#111827">🟣 {tier_label} 信号（过去 24h 新增 · 未充分定价可动作 + 完整交易档位）</h3>
         {cards}
 
         <div style="margin-top:20px;padding:12px;background:#f0f9ff;border-radius:8px;font-size:12px;color:#0369a1">
-          💡 B/C 级热点已下沉至每日早报「📡 催化剂热点」观察区；本邮件仅保留高置信度 A 级 idea。
+          💡 C 级及以下热点已下沉至每日早报「📡 催化剂热点」观察区；本邮件仅保留高置信度 idea。
         </div>
 
         <div style="margin-top:20px;font-size:11px;color:#9ca3af;text-align:center">

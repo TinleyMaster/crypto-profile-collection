@@ -1,4 +1,4 @@
-"""技术指标纯计算模块（RSI / 布林带 / ATR），零第三方依赖、不碰 DB / 网络。
+"""技术指标纯计算模块（RSI / 布林带 / ATR / MACD），零第三方依赖、不碰 DB / 网络。
 
 设计约定（方案 §14，2026-09-29 评审定稿）：
   - 指标一律**先影子**（只落 metrics / 回测消融，不发信、不改判定），边际贡献经
@@ -131,3 +131,62 @@ def atr_series(highs: list[float], lows: list[float], closes: list[float],
 
 def _true_range(high: float, low: float, prev_close: float) -> float:
     return max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+
+def ema_series(values: list[float], period: int) -> list[float | None]:
+    """指数移动平均；输出与输入等长，前 period-1 个为 None。
+
+    首值 = 前 period 个值的简单平均（种子），此后 e[i] = v[i]*k + e[i-1]*(1-k)，
+    k = 2/(period+1)。种子取 SMA 与 `rsi_series` / `atr_series` 的 Wilder 首值口径同思路
+    （先简单平均、再递推），避免「首值 = values[0]」带来的长尾初始化偏差。
+    """
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if period <= 0 or n < period:
+        return out
+    prev = sum(values[:period]) / period
+    out[period - 1] = prev
+    k = 2.0 / (period + 1)
+    for i in range(period, n):
+        prev = values[i] * k + prev * (1.0 - k)
+        out[i] = prev
+    return out
+
+
+def macd_series(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9,
+                ) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """MACD(12,26,9)；返回 (DIF, DEA, hist) 三个等长列表，头部数据不足为 None。
+
+    DIF  = EMA(fast) − EMA(slow)
+    DEA  = EMA(signal) of DIF（信号线）
+    hist = DIF − DEA（柱；**不乘 2**，即原始口径）
+
+    预热长度：DIF 自下标 slow−1 起有值（EMA 种子落在 slow−1），hist 自
+    slow+signal−2 起有值（标准 12/26/9 ⇒ 下标 33，即前 34 根为 None）。
+
+    ⚠️ 本函数目前**只服务离线回测**（`backtest_bb_rsi_mr.py` 的趋势过滤臂），
+    **未接入线上扫描**——设计方案 §14 已判定「MACD 与现有价 × OI 方向判定冗余，
+    暂不加维度」，要改该结论须先有 holdout 为正的消融证据。
+    """
+    n = len(closes)
+    dif: list[float | None] = [None] * n
+    dea: list[float | None] = [None] * n
+    hist: list[float | None] = [None] * n
+    if fast <= 0 or slow <= 0 or signal <= 0 or fast >= slow:
+        return dif, dea, hist
+    ema_fast = ema_series(closes, fast)
+    ema_slow = ema_series(closes, slow)
+    for i in range(n):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            dif[i] = ema_fast[i] - ema_slow[i]
+    start = next((i for i, v in enumerate(dif) if v is not None), None)
+    if start is not None:
+        seg = dif[start:]
+        if len(seg) >= signal:
+            sub = ema_series([float(v) for v in seg], signal)
+            for j, v in enumerate(sub):
+                dea[start + j] = v
+    for i in range(n):
+        if dif[i] is not None and dea[i] is not None:
+            hist[i] = dif[i] - dea[i]
+    return dif, dea, hist

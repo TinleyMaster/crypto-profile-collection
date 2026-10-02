@@ -18,6 +18,13 @@ static 两臂期望几乎相同（−0.461% vs −0.460%）。漂移确实把每
 
 故本脚本设 **dynamic / static 双臂**，两臂之差用于**量化**漂移效应（而非预设它有罪）。
 
+2026-10-02 追加：**MACD(12,26,9) 趋势过滤臂**（`--macd-filter`）。规则一次定参：
+`hist > 0` 只做多、`hist < 0` 只做空（上涨趋势买回调 / 下跌趋势卖反弹），预热期与
+`hist == 0` 两侧都挡。`hist` 取信号根 t（无前视）。周期给两个口径做 A/B：`1h`（同周期）
+与 `1d`（**库中无日线**，由 1h 现聚合，且每根 1h 只用「最近一个已收盘日」的日线 hist）。
+⚠️ 该门**只减不增**：它只能筛掉趋势不同向的事件，不能创造新事件——故 A/B 只能回答
+「留下来的那部分是否变好」，不能证明 MACD 有边际。
+
 本脚本**不做参数拟合、不做网格搜索、不改线上任何逻辑**，只回答一个问题：
 
     按实际成交口径，单笔期望收益是否为正、且日级 t 值是否显著？
@@ -48,6 +55,7 @@ static 两臂期望几乎相同（−0.461% vs −0.460%）。漂移确实把每
     python backtest_bb_rsi_mr.py --self-test                 # 离线注入测试（无 DB）
     python backtest_bb_rsi_mr.py --lookback-days 90          # 快速版
     python backtest_bb_rsi_mr.py --holdout-days 30           # 时序切分 train/test
+    python backtest_bb_rsi_mr.py --holdout-days 30 --macd-filter both   # 加 MACD 过滤双臂
 """
 from __future__ import annotations
 
@@ -74,6 +82,7 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 from crypto_research.analysis.technical_indicators import (  # noqa: E402
     atr_series,
     bollinger_series,
+    macd_series,
     rsi_series,
 )
 
@@ -85,6 +94,16 @@ ATR_PERIOD = 14
 RSI_OVERSOLD = 30.0
 RSI_OVERBOUGHT = 70.0
 ATR_STOP_MULT = 1.5
+
+# ── MACD 趋势过滤（2026-10-02 追加，**一次定参**：标准 12/26/9，不扫参不调周期）──
+# 规则（预登记，结果出来后不得回改）：
+#   hist > 0 ⇒ 只允许做多（上升趋势里买回调）
+#   hist < 0 ⇒ 只允许做空（下降趋势里卖反弹）
+#   hist 无值（预热期）或 == 0 ⇒ 两侧都挡（无趋势信息，不入场）
+# hist 取**信号根 t** 的值（只用 close[0..t]，入场在 t+1 开盘）⇒ 无前视。
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
 
 DEFAULT_MAX_HOLD = 72          # 小时；超时按最后一根收盘平仓
 COST = 0.001                   # 双边 taker 手续费（0.05%×2），与 backtest_scan_scenarios 同口径
@@ -125,6 +144,51 @@ def load_klines(conn, symbols: list[str], lookback_days: int = 0) -> dict[str, l
                 "close": float(r["close_px"]),
             })
     return dict(out)
+
+
+def resample_daily(bars: list[dict]) -> list[tuple]:
+    """把 1h K 线按 `open_time` 的日期聚合成日 K，返回 [(date, bar), ...]（升序）。
+
+    close 取当日最后一根 1h 的收盘（即日线收盘），high/low 取当日极值。
+    库中**只有 5m/15m/1h，没有日线表**，故日级口径一律由 1h 现聚合，避免引入第二个
+    数据源造成口径分叉。
+    """
+    out: list[tuple] = []
+    for b in bars:
+        d = b["t"].date()
+        if out and out[-1][0] == d:
+            row = out[-1][1]
+            row["high"] = max(row["high"], b["high"])
+            row["low"] = min(row["low"], b["low"])
+            row["close"] = b["close"]
+        else:
+            out.append((d, {"t": b["t"], "open": b["open"], "high": b["high"],
+                            "low": b["low"], "close": b["close"]}))
+    return out
+
+
+def daily_hist_for_bars(bars: list[dict], fast: int, slow: int, signal: int,
+                        ) -> list[float | None]:
+    """返回与 1h `bars` **等长**的「日线 MACD hist」序列（跨周期过滤用）。
+
+    第 i 根 1h 取「日期严格早于该根所属日」的**最后一个已收盘日**的 hist——
+    当天的日 K 尚未收盘，用它会引入前视。预热不足时该根为 None（两侧都挡）。
+    """
+    n = len(bars)
+    out: list[float | None] = [None] * n
+    days = resample_daily(bars)
+    if len(days) < slow + signal:
+        return out
+    closes = [d[1]["close"] for d in days]
+    hist = macd_series(closes, fast, slow, signal)[2]
+    j = -1                                   # 指向「最近一个已收盘日」
+    for i, b in enumerate(bars):
+        d = b["t"].date()
+        while j + 1 < len(days) and days[j + 1][0] < d:
+            j += 1
+        if j >= 0:
+            out[i] = hist[j]
+    return out
 
 
 def resolve_trade(bars: list[dict], bands: list, t: int, side: str,
@@ -174,13 +238,17 @@ def resolve_trade(bars: list[dict], bands: list, t: int, side: str,
 
 
 def scan_symbol_events(symbol: str, bars: list[dict], max_hold: int,
-                       target_mode: str = "dynamic") -> tuple[list[dict], dict]:
+                       target_mode: str = "dynamic",
+                       macd_hist: list[float | None] | None = None,
+                       ) -> tuple[list[dict], dict]:
     """扫描单符号，返回 (事件明细, 漏斗计数)。
 
-    漏斗三层：触及下轨/上轨 → 叠加 RSI 超买超卖 → 叠加 RSI 拐头（=策略真正入场）。
-    第三层与第二层的差即「RSI 拐头确认」这个过滤器的净作用。
+    漏斗逐层收窄：触及外轨 → RSI 进超买超卖区 → RSI 拐头 → （可选）MACD 趋势同向
+    → 入场。相邻两层之差即该过滤器的净作用。
+    `macd_hist` 为与 bars 等长的 hist 序列（None = 不过滤；1h 或日线口径由调用方决定）。
     """
-    funnel = {"touch": 0, "rsi_zone": 0, "entry": 0, "dropped_geom": 0}
+    funnel = {"touch": 0, "rsi_zone": 0, "rsi_turn": 0,
+              "macd_blocked": 0, "entry": 0, "dropped_geom": 0}
     n = len(bars)
     if n < BB_PERIOD + RSI_PERIOD + ATR_PERIOD + 3:
         return [], funnel
@@ -225,6 +293,16 @@ def scan_symbol_events(symbol: str, bars: list[dict], max_hold: int,
                 continue
         else:
             if cur_rsi >= prev_rsi:
+                continue
+        funnel["rsi_turn"] += 1
+
+        # 第四层（可选）：MACD 趋势同向——上涨趋势(hist>0)只做多、下跌趋势(hist<0)只做空。
+        # hist 取信号根 t（只用 close[0..t]），入场在 t+1 开盘 ⇒ 无前视；预热期 None 两侧都挡。
+        if macd_hist is not None:
+            h = macd_hist[t]
+            if h is None or h == 0.0 or (side == "long" and h < 0.0) \
+                    or (side == "short" and h > 0.0):
+                funnel["macd_blocked"] += 1
                 continue
 
         if atr[t] is None or atr[t] <= 0:
@@ -353,16 +431,46 @@ def print_summary(s: dict) -> None:
     print(f"  结论: {s['verdict']}")
 
 
-def print_funnel(funnel: dict) -> None:
-    print("\n=== 事件漏斗（三层条件逐层收窄）===")
-    touch, zone, entry = funnel["touch"], funnel["rsi_zone"], funnel["entry"]
+def print_funnel(funnel: dict, macd_on: bool = False) -> None:
+    print("\n=== 事件漏斗（逐层条件收窄）===")
+    touch, zone, turn = funnel["touch"], funnel["rsi_zone"], funnel["rsi_turn"]
+    entry, blocked = funnel["entry"], funnel["macd_blocked"]
     keep2 = f"(保留 {zone / touch:.1%})" if touch else "(N/A)"
-    keep3 = f"(保留 {entry / zone:.1%})" if zone else "(N/A)"
+    keep3 = f"(保留 {turn / zone:.1%})" if zone else "(N/A)"
+    keep4 = f"(保留 {entry / turn:.1%})" if turn else "(N/A)"
     print(f"  ① 触及布林带外轨            : {touch:>7}")
     print(f"  ② + RSI 进超买/超卖区       : {zone:>7}   {keep2}")
-    print(f"  ③ + RSI 拐头（=入场）       : {entry:>7}   {keep3} ← 策略实际入场事件")
+    if macd_on:
+        print(f"  ③ + RSI 拐头（候选）        : {turn:>7}   {keep3}")
+        print(f"  ④ + MACD 趋势同向（=入场）  : {entry:>7}   {keep4} ← 策略实际入场事件")
+        share = f"（占候选 {blocked / turn:.1%}）" if turn else ""
+        print(f"     ↳ 被 MACD 挡掉           : {blocked:>7}{share}")
+    else:
+        print(f"  ③ + RSI 拐头（=入场）       : {entry:>7}   {keep4} ← 策略实际入场事件")
     if funnel["dropped_geom"]:
         print(f"  [丢弃] 入场价已越过止损/止盈（跳空）: {funnel['dropped_geom']}")
+
+
+def print_ab(index: dict, scenarios: list[str]) -> None:
+    """横向 A/B：同一批 K 线、同一事件流，只有入场门不同。
+
+    ⚠️ MACD 门**只减不增**——它不会新增事件，只能筛掉趋势不同向的。故 A/B 只能回答
+    「留下的那一部分是否更好」，不能回答「MACD 能创造边际」。
+    """
+    if len(scenarios) < 2:
+        return
+    print("\n\n=== MACD 趋势过滤 A/B（同一批 K 线，仅入场门不同）===")
+    print(f"  {'场景':<11}{'侧':<7}{'n':>7}{'止盈先':>9}{'净期望':>11}{'PF':>7}{'日t':>8}")
+    for scen in scenarios:
+        for lab in ("all", "long", "short"):
+            s = index.get((scen, lab))
+            if not s:
+                continue
+            pf = 999.0 if s["profit_factor"] == float("inf") else s["profit_factor"]
+            print(f"  {scen:<11}{lab:<7}{s['n']:>7}{s['target_first']:>9.1%}"
+                  f"{s['avg_ret_net']:>+11.3%}{pf:>7.2f}{s['day_t_stat']:>8.2f}")
+    print("  ⇒ 若多头臂仍 ≈ PF 1.05 / 日 t 不显著 ⇒ **MACD 救不了该策略**（不再叠加过滤器）；"
+          "若留下的事件数 <1000 ⇒ 不可判定。")
 
 
 EVENT_FIELDS = (
@@ -421,13 +529,46 @@ def self_test() -> int:
     s = summarize(events, COST, "self-test")
     assert s is not None and s["n"] == len(events)
     assert abs(s["target_first"] + s["stop_first"] + s["timeout_share"] - 1.0) < 1e-9
+
+    # ── MACD 趋势过滤：用常量 hist 序列验「档位」语义 + 守恒，再跑真实 MACD 序列 ──
+    nb = len(bars)
+    ev_up, fn_up = scan_symbol_events("SYNTH", bars, DEFAULT_MAX_HOLD,
+                                      macd_hist=[1.0] * nb)
+    ev_dn, fn_dn = scan_symbol_events("SYNTH", bars, DEFAULT_MAX_HOLD,
+                                      macd_hist=[-1.0] * nb)
+    assert all(e["side"] == "long" for e in ev_up), "[self-test] hist>0 仍放进空头"
+    assert all(e["side"] == "short" for e in ev_dn), "[self-test] hist<0 仍放进多头"
+    # 门在几何过滤之前 ⇒ 「只留多 + 只留空」必须恰好还原不过滤时的入场数
+    assert fn_up["entry"] + fn_dn["entry"] == funnel["entry"], \
+        (f"[self-test] MACD 过滤非守恒：{fn_up['entry']} + {fn_dn['entry']}"
+         f" != {funnel['entry']}")
+    assert fn_up["macd_blocked"] + fn_dn["macd_blocked"] == fn_up["rsi_turn"] > 0, \
+        "[self-test] 常量 hist 下「被挡数之和」应等于候选总数（多头挡空头 + 空头挡多头）"
+    ev_none, fn_none = scan_symbol_events("SYNTH", bars, DEFAULT_MAX_HOLD,
+                                          macd_hist=[None] * nb)
+    assert not ev_none and fn_none["rsi_turn"] > 0 \
+        and fn_none["macd_blocked"] == fn_none["rsi_turn"], "[self-test] hist 无值时未全挡"
+
+    hist_real = macd_series([b["close"] for b in bars],
+                            MACD_FAST, MACD_SLOW, MACD_SIGNAL)[2]
+    ev_m, fn_m = scan_symbol_events("SYNTH", bars, DEFAULT_MAX_HOLD, macd_hist=hist_real)
+    for e in ev_m:
+        h = hist_real[e["entry_k"] - 1]        # 信号根 t = entry_k − 1
+        assert h is not None and ((h > 0) == (e["side"] == "long")), e
+
     print(f"[self-test] OK：方向 {sorted(sides)}")
     print_funnel(funnel)
+    print(f"[self-test] MACD 门：hist>0 仅多头 {len(ev_up)} 笔 / hist<0 仅空头 "
+          f"{len(ev_dn)} 笔（两者合计 = 基线 {funnel['entry']} 笔，守恒通过）；"
+          f"恒无值全挡 {fn_none['macd_blocked']} 笔")
+    print(f"[self-test] 真实 MACD(12,26,9)：入场 {len(ev_m)} 笔 / 挡掉 "
+          f"{fn_m['macd_blocked']} 笔（候选 {fn_m['rsi_turn']} 笔）")
+    print_funnel(fn_m, macd_on=True)
     print(f"[self-test] 止盈先 {s['target_first']:.1%} / 止损先 {s['stop_first']:.1%} / "
           f"超时 {s['timeout_share']:.1%}；计划平衡胜率 {s['breakeven_planned']:.1%} / "
           f"实际平衡胜率 {s['breakeven_realized']:.1%}")
     print("[self-test] 不变量全部通过（结局枚举 / 持仓上限 / MAE·MFE 非负 / "
-          "止损收益= −planned_risk / 入场价=t+1 开盘）")
+          "止损收益= −planned_risk / 入场价=t+1 开盘 / MACD 门符号一致且守恒）")
     return 0
 
 
@@ -443,6 +584,9 @@ def main() -> int:
     parser.add_argument("--holdout-days", type=int, default=0,
                         help="时序切分：最近 N 天的入场为 test、其余为 train（0=关闭）")
     parser.add_argument("--out", type=str, default="", help="事件明细 CSV 路径")
+    parser.add_argument("--macd-filter", choices=("none", "1h", "1d", "both"), default="none",
+                        help="MACD(12,26,9) 趋势过滤（一次定参）：hist>0 只做多 / hist<0 只做空；"
+                             "1h=同周期、1d=日线(1h 现聚合)、both=两者都跑做 A/B")
     parser.add_argument("--self-test", action="store_true", help="离线注入测试（无 DB）")
     args = parser.parse_args()
 
@@ -468,57 +612,93 @@ def main() -> int:
         t_max = max(v[-1]["t"] for v in klines.values() if v)
         print(f"[bbrsi] K 线 {total_bars} 根，窗口 {t_min:%Y-%m-%d} ~ {t_max:%Y-%m-%d}")
 
-    # 双臂：dynamic（主口径，逐根中轨）/ static（对照，锁定信号根中轨）
-    arms: dict[str, list[dict]] = {"dynamic": [], "static": []}
-    funnel_total: dict[str, int] = defaultdict(int)
-    for sym in universe:
-        bars = klines.get(sym) or []
-        for mode in ("dynamic", "static"):
-            evs, fn = scan_symbol_events(sym, bars, args.max_hold, target_mode=mode)
-            arms[mode].extend(evs)
-            if mode == "dynamic":          # 事件检测与 target_mode 无关，漏斗只记一次
-                for k, v in fn.items():
-                    funnel_total[k] += v
-    for m in arms:
-        arms[m].sort(key=lambda e: e["entry_ts"])
-    all_events = arms["dynamic"]
+    # ── 场景：baseline（不过滤）为基准；MACD 门按周期拆成 1h / 日线两臂做 A/B ──
+    scenarios: list[tuple[str, str]] = [("baseline", "none")]
+    if args.macd_filter in ("1h", "both"):
+        scenarios.append(("macd_1h", "1h"))
+    if args.macd_filter in ("1d", "both"):
+        scenarios.append(("macd_1d", "1d"))
+    print(f"[bbrsi] 场景 {[s for s, _ in scenarios]}；MACD 参数 "
+          f"{MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}（一次定参，不扫参不调周期）")
 
-    print_funnel(funnel_total)
-    if not all_events:
-        print("\n[bbrsi] 无入场事件，无法判定（放宽 --lookback-days 或检查数据覆盖）")
+    hist_cache: dict[tuple[str, str], list[float | None]] = {}
+
+    def hist_for(sym: str, bars: list[dict], tf: str) -> list[float | None] | None:
+        """按符号取该场景的 hist 序列（1h 用同周期收盘；1d 用 1h 现聚合的日线）。"""
+        if tf == "none":
+            return None
+        key = (sym, tf)
+        if key not in hist_cache:
+            if tf == "1h":
+                hist_cache[key] = macd_series(
+                    [b["close"] for b in bars], MACD_FAST, MACD_SLOW, MACD_SIGNAL)[2]
+            else:
+                hist_cache[key] = daily_hist_for_bars(
+                    bars, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+        return hist_cache[key]
+
+    # 双臂：dynamic（主口径，逐根中轨）/ static（对照，锁定信号根中轨）
+    arms: dict[str, dict[str, list[dict]]] = {}
+    funnels: dict[str, dict] = {}
+    for scen, tf in scenarios:
+        arms[scen] = {"dynamic": [], "static": []}
+        fn_total: dict[str, int] = defaultdict(int)
+        for sym in universe:
+            bars = klines.get(sym) or []
+            hist = hist_for(sym, bars, tf)
+            for mode in ("dynamic", "static"):
+                evs, fn = scan_symbol_events(sym, bars, args.max_hold,
+                                             target_mode=mode, macd_hist=hist)
+                arms[scen][mode].extend(evs)
+                if mode == "dynamic":      # 事件检测与 target_mode 无关，漏斗只记一次
+                    for k, v in fn.items():
+                        fn_total[k] += v
+        for m in arms[scen]:
+            arms[scen][m].sort(key=lambda e: e["entry_ts"])
+        funnels[scen] = fn_total
+
+    base = scenarios[0][0]
+    if not arms[base]["dynamic"]:
+        print("\n[bbrsi] 基线无入场事件，无法判定（放宽 --lookback-days 或检查数据覆盖）")
         return 1
 
-    print(f"\n[bbrsi] 多空分布: " + "，".join(
-        f"{sd} {sum(1 for e in all_events if e['side'] == sd)}"
-        for sd in sorted({e['side'] for e in all_events})))
-
-    rows: list[dict] = []
-    if args.holdout_days > 0:
-        cutoff = t_max - timedelta(days=args.holdout_days)
-        tr = [e for e in all_events if e["entry_ts"] < cutoff]
-        te = [e for e in all_events if e["entry_ts"] >= cutoff]
+    cutoff = t_max - timedelta(days=args.holdout_days) if args.holdout_days > 0 else None
+    if cutoff is not None:
         print(f"[holdout] entry < {cutoff:%Y-%m-%d %H:%M} → train，其余 → test")
         print("[holdout] ⚠️ 纪律：test 含不同 regime 才有验证意义；"
               "本脚本不调参，故 test 仅作稳定性对照，结论一律 provisional")
-        for lab, sub in (("train", tr), ("test", te)):
-            s = summarize(sub, args.cost, lab)
-            if s:
-                print_summary(s)
-                rows.append(s)
-    else:
-        for lab, sub in (("all", all_events),
-                         ("long", [e for e in all_events if e["side"] == "long"]),
-                         ("short", [e for e in all_events if e["side"] == "short"])):
-            s = summarize(sub, args.cost, lab)
-            if s:
-                print_summary(s)
-                rows.append(s)
 
-    # 对照臂：static 锁定中轨。两臂之差 = 「中轨漂移」吃掉的每笔收益（本策略核心亏损机制）
-    s_dyn = summarize(all_events, args.cost, "static_arm:dynamic逐根中轨")
-    s_sta = summarize(arms["static"], args.cost, "static_arm:static锁定中轨")
+    # 逐场景：漏斗 → 多空分布 → all/long/short（+ train/test）分节汇总
+    rows: list[dict] = []
+    index: dict[tuple[str, str], dict] = {}
+    for scen, _tf in scenarios:
+        ev_all = arms[scen]["dynamic"]
+        print(f"\n\n########## 场景 {scen}（MACD 过滤 "
+              f"{'开' if scen != base else '关'}） ##########")
+        print_funnel(funnels[scen], macd_on=scen != base)
+        print("[bbrsi] 多空分布: " + "，".join(
+            f"{sd} {sum(1 for e in ev_all if e['side'] == sd)}"
+            for sd in sorted({e['side'] for e in ev_all})))
+        sections = [("all", ev_all),
+                    ("long", [e for e in ev_all if e["side"] == "long"]),
+                    ("short", [e for e in ev_all if e["side"] == "short"])]
+        if cutoff is not None:
+            sections += [("train", [e for e in ev_all if e["entry_ts"] < cutoff]),
+                         ("test", [e for e in ev_all if e["entry_ts"] >= cutoff])]
+        for lab, sub in sections:
+            s = summarize(sub, args.cost, f"{scen}:{lab}")
+            if s:
+                print_summary(s)
+                rows.append(s)
+                index[(scen, lab)] = s
+
+    print_ab(index, [s for s, _ in scenarios])
+
+    # 对照臂：static 锁定中轨（仅基线）。两臂之差 = 「中轨漂移」吃掉的每笔收益
+    s_dyn = summarize(arms[base]["dynamic"], args.cost, "static_arm:dynamic逐根中轨")
+    s_sta = summarize(arms[base]["static"], args.cost, "static_arm:static锁定中轨")
     if s_dyn and s_sta:
-        print("\n=== 中轨漂移效应（双臂对照，仅 all 口径）===")
+        print("\n=== 中轨漂移效应（双臂对照，基线 all 口径）===")
         print(f"  dynamic（逐根中轨，主）: 止盈先 {s_dyn['target_first']:>7.1%} / "
               f"期望 {s_dyn['avg_ret_net']:>+7.3%} / PF "
               f"{s_dyn['profit_factor'] if s_dyn['profit_factor'] != float('inf') else 999:.2f}")
@@ -531,10 +711,14 @@ def main() -> int:
 
     out_path = Path(args.out) if args.out else \
         SCRIPT_DIR.parent / "data" / "backtest_bb_rsi_mr_events.csv"
-    write_csv(out_path, EVENT_FIELDS, all_events)
-    print(f"\n[bbrsi] 事件明细 {len(all_events)} 行已存 {out_path}")
-    write_csv(out_path.with_name(f"{out_path.stem}_summary.csv"), SUMMARY_FIELDS, rows)
-    print(f"[bbrsi] 汇总已存 {out_path.with_name(f'{out_path.stem}_summary.csv')}")
+    for scen, _tf in scenarios:
+        p = out_path if scen == base else \
+            out_path.with_name(f"{out_path.stem}_{scen}{out_path.suffix}")
+        write_csv(p, EVENT_FIELDS, arms[scen]["dynamic"])
+        print(f"\n[bbrsi] 事件明细 {len(arms[scen]['dynamic'])} 行（{scen}）已存 {p}")
+    sum_path = out_path.with_name(f"{out_path.stem}_summary.csv")
+    write_csv(sum_path, SUMMARY_FIELDS, rows)
+    print(f"[bbrsi] 汇总 {len(rows)} 行已存 {sum_path}")
     print("[bbrsi] ⚠️ 本脚本只测量赔率几何与路径结局，不含任何参数选择；"
           "结论可用于否决策略，不构成准入证据")
     return 0

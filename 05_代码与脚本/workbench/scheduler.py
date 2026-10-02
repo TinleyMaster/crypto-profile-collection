@@ -62,12 +62,14 @@ TZ = os.getenv("SCHEDULER_TIMEZONE", "Asia/Shanghai")
 
 # 调度表：(key, cron, script, args, 说明, category)
 # cron 为 5 段式（分 时 日 月 周）。
+# ⚠️ 周字段（第 5 段）必须用英文名（mon/tue/…/sun）：APScheduler 的 CronTrigger 是
+#    0=周一、1=周二…（非标准 cron 的 0=周日），用数字会整体错位一天（2026-10-02 已修 7 处）。
 # category: core(默认) / chain(链上重任务) / monitor(监控)
 SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # ═══ 数据源流水线 ═══
     ("cmc_pipeline", "0 3 * * *", "run_cmc_pipeline.py", [], "CMC 一键流水线（每日）", "core"),
     ("dl_pipeline", "0 4 * * *", "run_dl_pipeline.py", [], "DefiLlama 一键流水线（每日）", "core"),
-    ("cg_pipeline", "0 5 * * 1", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）", "core"),
+    ("cg_pipeline", "0 5 * * mon", "run_cg_pipeline.py", [], "CoinGecko 一键流水线（每周一，月配额 10k）", "core"),
 
     # ═══ 链上快照（每日运行；长尾由 batch 内「最近采集日」旋转跨日覆盖）═══
     # P2-1: 从早高峰(05:30-07:00)挪到午后(14:00-15:00)削峰；持仓数据慢变，午后跑不影响
@@ -84,7 +86,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),
     ("lifecycle_daily", "0 9 * * *", "phase_meme_lifecycle.py", ["--limit", "100"], "Meme 四阶段生命周期（每日 09:00）", "core"),
-    ("insider_cluster_weekly", "30 4 * * 1", "phase_chain_insider_clusters.py", ["--limit", "9999"],
+    ("insider_cluster_weekly", "30 4 * * mon", "phase_chain_insider_clusters.py", ["--limit", "9999"],
      "Meme insider 钱包聚类 - Solana（每周一 04:30，RugCheck /report）", "chain"),
 
     # ═══ MEME 调度补齐（2026-09-11，方案 A）═══
@@ -100,7 +102,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "每日数据同步/矫正总调度（赛道→去重→文档入口→第三方→supply对齐→diff→链接重标→解锁→KOL回测）", "core"),
 
     # ═══ 每周专项 ═══
-    ("third_party_hacks", "30 8 * * 1", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）", "core"),
+    ("third_party_hacks", "30 8 * * mon", "phase_b2_third_party_hacks.py", [], "链上异常事件采集（每周一）", "core"),
     # 刀2 复验 47bcb4d §五 #5：biz.signal_type_calibration 原为一次性快照，只能人工重跑，
     # 校准窗口随样本陈旧失真（macro_market 按 window_end DESC 取最新窗口消费）。
     # 纳入周级重算：周日 05:00 北京，避开每日早高峰（data_sync_daily 06:30）。
@@ -234,7 +236,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # seed_exchange_wallets 已弃用（2026-08-28），由 collect_exchange_wallets 替代
     # ("seed_exchange_wallets", "0 3 * * 1", "seed_exchange_wallets_auto.py", [], "交易所钱包地址自动采集（每周一）", "core"),
     # P0-2 修复：净流轴从仅 ETH 扩展到 ETH+BSC+TRON
-    ("collect_exchange_wallets", "30 3 * * 1", "collect_exchange_wallets.py", ["--chains", "eth,bsc,tron", "--sources", "community,ethplorer", "--apply"], "CEX 地址分级收集-社区源+快照标签（每周一，社区库更新慢）", "core"),
+    ("collect_exchange_wallets", "30 3 * * mon", "collect_exchange_wallets.py", ["--chains", "eth,bsc,tron", "--sources", "community,ethplorer", "--apply"], "CEX 地址分级收集-社区源+快照标签（每周一，社区库更新慢）", "core"),
 
     # ═══ KOL 信号监控（已迁移到 kol_daemon.py 常驻进程，scheduler 不再兜底，避免重复抓取）═══
     # ("kol_monitor_fallback", "*/5 * * * *", "kol_monitor_run.py", ["--run-once"], "KOL 信号监控兜底", "core"),
@@ -250,7 +252,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   原子去重（同资产 24h + 发送锁），不会重复发信，把时延上限压到 ~30min。
     ("catalyst_major_events", "*/30 * * * *", "send_major_events.py", [], "重大事件通道·低时延兜底（每 30 分钟）", "core"),
     # 催化剂周报：概览+A级清单，自然周去重，每周一 09:00 发送
-    ("catalyst_weekly_report", "0 9 * * 1", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core"),
+    ("catalyst_weekly_report", "0 9 * * mon", "send_catalyst_weekly.py", [], "催化剂周报（每周一 09:00）", "core"),
 
     # ═══ 大盘早报邮件 ═══
     ("daily_brief_email", "0 9 * * *", "send_daily_brief.py", [], "每日大盘早报邮件发送（09:00，在 snapshot 之后）", "core"),
@@ -289,7 +291,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
 
     # ═══ CMC 付费档持久化（需 Startup/Professional 套餐，403 时自动跳过）═══
     # OHLCV K线回填（每周一次，避免频繁消耗付费额度；配合解锁/回测分析）
-    ("cmc_ohlcv_weekly", "30 3 * * 1", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天，需付费套餐，403 自动跳过）", "core"),
+    ("cmc_ohlcv_weekly", "30 3 * * mon", "ingest_cmc_ohlcv.py", ["--days", "90", "--top", "1000"], "CMC 历史 OHLCV 回填（每周一，top1000×90天，需付费套餐，403 自动跳过）", "core"),
     # CMC 分类刷新（列表每日 + 成员按 7 天窗口续传）——此前未注册调度，last_updated 冻结（2026-09-15 P2）
     ("cmc_category_refresh", "30 2 * * *", "ingest_cmc_category.py", [], "CMC 分类刷新（列表每日，成员按 7 天窗口续传省配额）", "core"),
     # 叙事板块→资产映射 ETL（B2 修复 2026-09-23）：此前**未注册调度**，biz.sector_narrative_asset
@@ -316,7 +318,7 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   - catalyst_fast_pipeline(15min)  → catalyst_fast_daemon
     #
     # 仍由 scheduler 调度（≥4h 或低频维护任务）：
-    ("scan_oi_backfill", "0 1 * * 0", "phase_backfill_oi_history.py", [],
+    ("scan_oi_backfill", "0 1 * * sun", "phase_backfill_oi_history.py", [],
      "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
     # funding 历史此前只挂工作台任务表（scan_funding_backfill，默认 --full），**未注册调度** ⇒
     # 2026-09-17 后无人采集、biz.funding_rate_hist 静默停滞 14 天（A3 holdout 复盘时发现：

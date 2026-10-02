@@ -2764,3 +2764,49 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
   `workbench/test_atr_series.py`（新，入库）、AGENTS.md 本节、设计方案 §8.1.12；
   `scripts/data/backtest_bb_rsi_mr_events.csv`（+`_summary`）为本地产物，`scripts/data/` 已 gitignore，不入库。
 - **边界**：价格史仅 105 天且单边上涨 ⇒ 结论是「**在本次样本上不成立**」，非「均值回归永久无效」；脚本可重入，样本拉长后须复核。
+
+### A3 funding 消融 train/test 对照补齐 + 回测工具 split 缺陷修复（2026-10-02，本次提交）
+
+来源：B26 修复后 §12.1-A3 (c) 留了一句「funding 消融的 train/test 对照**下次 A3 复跑即可补上**」，
+用户选择「重跑 A3 funding 消融对照」。**零 DDL、零生产写、零线上代码变更**；回测脚本为手动工具、不入调度，**无需 redeploy**。
+
+- **复跑前先发现工具缺陷（旧文档欠账的前提不成立）**：`backtest_scan_scenarios.py` 的 `summarize_funding()`
+  只接收**全量** `trades`、输出**无 `split` 列**——价格侧 `summarize()`（第 273-284 行 `split_trades`）与 CVD 侧
+  `summarize_cvd()` 都已是 train/test 并列，唯独 funding 侧没有 ⇒ **即便 funding 数据补齐，「对照」也读不出来**；
+  更隐蔽的是 test 段会沿用 **cutoff 之前冻结的费率**（`bisect_right(fts, h)` 取 ≤ h 最近结算点，而 fts 里根本没有 test 段结算点）
+  **而不自知**。⇒ 光复跑无法兑现文档承诺，必须先补 split。
+- **代码改动（本次唯一，`scripts/bin/backtest_scan_scenarios.py`）**：funding 消融块照 CVD 同款引入
+  `fund_scope = [("train", tr), ("test", te)] if cutoff is not None else [("all", trades)]`，
+  逐 split 调 `summarize_funding()` 并给每行打 `r["split"]`，打印与 CSV 同步加 `split` 列（排序键前置 split）。
+  `--holdout-days` 未开启时退化为单行 `all`，**向后兼容**。
+- **运行口径**：`--min-n 15 --holdout-days 14 --lookback-days 45`，universe 191 符号，
+  cutoff = **2026-09-18 02:00**（test = 09-18→10-02，14 天）。加载量：K线 190,693 根 / OI 小时 154,461 点 / CVD 39,672 点 / funding 109,887 点。
+  ⚠️ **train 左界取 45 天而非全量**：远端库抖动会让服务端游标停在 `FETCH FORWARD 20000` 的 `ClientRead`（客户端 0% CPU、dur 150s+），
+  实测吞吐仅 ~267 行/秒且有并行会话同时在压同一库；全量（500,838 行）两次均在第一个 FETCH 挂死，缩窗到 45 天（225,330 行）后一次通过。
+  **仅本次运行的取数窗口，未对 DB 访问层做任何永久改动。**
+- **价格侧主表复现原轮结论（证明本次运行可信）**：P↑OI↑ 24h train **+5.839%**(t=1.42) → test **−0.547%**(t=0.38)
+  （原轮 +5.773% → −0.093%）；P↓OI↑ train −3.426% → test −0.630%。⇒ 与 §12.1-A3 (a)/(b) 的「样本内选参产物」判断一致。
+- **funding 关键结果（P↑OI↑ × 费率，24h）**：
+  | 费率 | train 净均（PF / 日 t） | test 净均（PF / 日 t） | 判定 |
+  |---|---|---|---|
+  | +（正） | **+5.687%**（1.84 / 1.00） | **−3.301%**（0.64 / −1.38） | **反转（Δ≈−9.0pp）** |
+  | −（负） | +11.836%（2.62 / 0.20） | +2.936%（1.37 / 0.70） | 同向、幅度 −75% |
+  | 0（近零） | +3.679%（1.72 / 1.42） | −0.190%（0.96 / −1.04） | 反转至 0 |
+- **四条结论**：① **§8 旗舰 funding 结论在 test 段反转**——§8 称「P↑OI↑ 正费率反而更好（+5.96%、PF 1.87）仅是强趋势伴随」，
+  本轮 train 复现（三桶全正），**test 段却塌**（正费率桶 PF 0.64，train 的三个正期望桶 test 只剩负费率为正）⇒ **样本内产物**，不得再引用为「已标定」。
+  test 侧「正费率最差」反而**弱支持**原始假设（高费率=拥挤），但 n=59 / 12 独立日、t=−1.38，**不显著、不构成证据**。
+  ② **裸追涨（BASELINE_ONLY）无法对照**：train 侧复现 §8（正费率 24h **−3.668%** / t=**−2.41**，差于近零 **+1.901%** / t=+2.24）；
+  test 侧正/负费率桶均不足 `MIN_N`（仅近零桶 n=27、7 天）⇒ §8 结论 1 的样本外**既未证伪也未证实**。
+  ③ **空头侧全负在 test 段保持**：`Pdown_OIup` 24h 正费率 test **−7.075%**、日 t=**−3.04**（train −4.107%），
+  是 test 段**唯一** |t|>2 的费率桶且与 train 同向 ⇒ §8 结论 4 方向一致。④ **工程结论不变**：两侧合起来**没有任何费率桶给出稳定且显著的分化**
+  ⇒ funding **仍不做硬过滤**，只留在 `context_tags` 作加分项（若按 §8 的「正费率更优」加过滤，在 test 段会正好杀反）。
+- **效力边界**：test 侧各费率桶普遍 n<100、独立日 5~14 天、且与 train **同属上涨 regime** ⇒ 全部 `provisional`，
+  按 §14.4「不得引用为已标定证据」；本轮 train 左界 45 天（原轮为全量），故 train 桶 n/天数与原轮不完全可比。
+- **验证**：`py_compile` 通过；smoke 跑（`--symbols 3 --holdout-days 14`）确认 funding 表出现 `split` 列且 train/test 两类行齐备；
+  正式跑 exit 0；CSV `split` 列就位。
+- **顺带发现（工作树事故，非本次引入）**：开始留档时发现工作树的设计方案比 HEAD **少了 371 行**（§8.1.7~§8.1.12 六个已提交小节 +
+  §12.1-A4 的 §8.1.7 交叉引用）——即工作树文件停在「§8.1.7 之前」的旧态。**已 `git checkout HEAD --` 还原后重做本次 §12.1-A3 (c) 编辑**，
+  提交 diff 收敛为「+31 / −5」两处，**未把该回退带入提交**。⚠️ 若并行会话正在改同一文件，须先 `git diff` 复核再落笔。
+- **产物**：`scripts/bin/backtest_scan_scenarios.py`（改，入库）、设计方案 §12.1-A3 (c) 改写 + §8 funding 消融结论后加样本外复核交叉引用（入库）、AGENTS.md 本节。
+  临时文件 `/tmp/_a3_funding_holdout.log`、`/tmp/_a3_funding_holdout*.csv`、`/tmp/_smoke_a3*`、`/tmp/_doc_worktree_backup.md` 已清理，未入库。
+- **未动**：线上扫描逻辑/阈值/调度/DB 结构一律未改；funding 采集调度（B26，每日 02:40）维持原状。

@@ -677,14 +677,23 @@ def main() -> int:
                 print(f"  {r['scenario']:<16} n={r['n']:<6} 净均={r['avg_ret_net'] * 100:>7.3f}%  "
                       f"Δvs基线={delta:>+7.3f}%")
 
-        # funding 消融：按资金费率正/负/近零拆开
-        frows = summarize_funding(trades, args.min_n, MIN_DAYS)
+        # funding 消融：按资金费率正/负/近零拆开；holdout 模式下与价格/CVD 一致给 train/test 并列
+        # （2026-10-01 修复：原实现只喂全量 trades、无 split 列 ⇒ 即便 funding 历史补齐，
+        #   「train/test 对照」也读不出来，且 test 段只能沿用 cutoff 前的冻结费率而不自知。）
+        frows: list[dict] = []
+        fund_scope: list[tuple[str, dict[str, list]]] = (
+            [("train", tr), ("test", te)] if cutoff is not None else [("all", trades)])
+        for split_name, sub in fund_scope:
+            for r in summarize_funding(sub, args.min_n, MIN_DAYS):
+                r = dict(r)
+                r["split"] = split_name
+                frows.append(r)
         if frows:
             print(f"\n=== funding 消融（资金费率: + 正 / - 负 / 0 近零 / NA 无数据）===")
-            print(f"{'场景':<16}{'费率':>5}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
-            print("-" * 84)
-            for r in sorted(frows, key=lambda x: (x["scenario"], x["horizon_h"], x["fund_tag"])):
-                print(f"{r['scenario']:<16}{r['fund_tag']:>5}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
+            print(f"{'split':>6}{'场景':<16}{'费率':>5}{'窗口h':>5}{'n':>6}{'天数':>5}{'胜率':>8}{'净均收益%':>10}{'盈亏比':>8}{'日t值':>8}")
+            print("-" * 92)
+            for r in sorted(frows, key=lambda x: (x["split"], x["scenario"], x["horizon_h"], x["fund_tag"])):
+                print(f"{r['split']:>6}{r['scenario']:<16}{r['fund_tag']:>5}{r['horizon_h']:>5}{r['n']:>6}{r['days']:>5}"
                       f"{r['win_rate']:>8.1%}{r['avg_ret_net'] * 100:>10.3f}"
                       f"{r['profit_factor'] if r['profit_factor'] != float('inf') else 999:>8.2f}"
                       f"{r['day_t_stat']:>8.2f}")

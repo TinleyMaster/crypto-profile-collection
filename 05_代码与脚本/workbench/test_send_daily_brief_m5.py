@@ -78,7 +78,7 @@ except Exception as e:  # noqa: BLE001
     m5, _raised = {}, f"{type(e).__name__}: {e}"
 check(_raised is None, "嵌套形态不抛异常（旧实现在 available_sectors 处崩）", _raised)
 check(list(m5.keys()) == ["价格涨幅榜", "价格跌幅榜", "成交量异动", "量价齐升",
-                          "赛道轮动", "即将解锁", "市值变化榜"],
+                          "轮动强度榜", "即将解锁", "市值变化榜"],
       "7 榜按固定展示顺序产出", str(list(m5.keys())))
 check(len(m5.get("价格涨幅榜", [])) == 5, "各榜 Top5 截断（6 条只留 5）")
 check(m5["价格涨幅榜"][0]["symbol"] == "AAA" and m5["价格涨幅榜"][0]["is_highlight"] is True,
@@ -128,7 +128,7 @@ check(sdb._render_daily_diff_html({"M5_daily_diff": {"空榜": []}}) == "", "榜
 html_out = sdb._render_daily_diff_html({"M5_daily_diff": m5})
 check("每日变化榜" in html_out, "含标题「每日变化榜」")
 check(all(lb in html_out for lb in ["价格涨幅榜", "价格跌幅榜", "成交量异动", "量价齐升",
-                                    "赛道轮动", "即将解锁", "市值变化榜"]),
+                                    "轮动强度榜", "即将解锁", "市值变化榜"]),
       "含 7 个榜名")
 check("⭐" in html_out and "⚠️" in html_out, "含 ⭐/⚠️ 标记")
 check("+12.34%" in html_out and "88.0 分" in html_out, "含格式化的涨跌幅与综合分")

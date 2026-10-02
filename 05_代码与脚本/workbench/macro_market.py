@@ -3081,7 +3081,9 @@ def detect_price_oi_divergence(btc_closes: list[float], oi_series: list[dict], t
             interp = f"价跌 {price_pct:.1f}% 但 OI 暴增 {oi_pct:.1f}%：杠杆堆积未出清，下跌风险延续"
         else:
             label = "DIVERGENT"
-            interp = f"价跌 {price_pct:.1f}% 但 OI 基本未动 {oi_pct:.1f}%：空头被动持仓，警惕急拉"
+            # P2-7（审计 2026-10-01）：|oi|≥2% 不得称「基本未动」，按幅度选词。
+            _oi_word = "基本持平" if abs(oi_pct or 0) < 2 else ("小幅变动" if abs(oi_pct or 0) < 5 else "逆势变动")
+            interp = f"价跌 {price_pct:.1f}% 但 OI{_oi_word} {oi_pct:.1f}%：空头被动持仓，警惕急拉"
     else:
         if oi_pct >= t["oi_surge_pct"]:
             label = "DANGEROUS"
@@ -3152,20 +3154,28 @@ def detect_price_stablecoin_divergence(btc_closes: list[float], sc_series: list[
                 "interpretation": "价格/稳定币变化无法计算", "metrics": metrics}
 
     flow_b = netflow / 1e9
+    # P1-1（审计 2026-10-01）：DIVERGENT 分支硬编码「净流出」一词，当净流为正但低于
+    # 显著阈值（5B，如 +3.1B）时会渲染出「净流出 +3.1B」这种符号相反的谎言。
+    # 改为按实际符号选词；正流入但未达阈值时如实写「净流入（低于显著阈值），偏弱」。
+    _flow_word = "净流入" if netflow >= 0 else "净流出"
     if price_pct >= t["price_up_pct"]:
         if netflow < -t["stablecoin_flow_min_usd"]:
             label = "DIVERGENT"
             interp = f"价涨 {price_pct:.1f}% 但稳定币净流出 {flow_b:+.1f}B：存量博弈，上涨或虚"
         else:
             label = "HEALTHY"
-            interp = f"价涨 {price_pct:.1f}% + 稳定币净流 {flow_b:+.1f}B：场外弹药充足"
+            interp = f"价涨 {price_pct:.1f}% + 稳定币{_flow_word} {flow_b:+.1f}B：场外弹药充足"
     elif price_pct <= t["price_down_pct"]:
         if netflow > t["stablecoin_flow_min_usd"]:
             label = "HEALTHY"
             interp = f"价跌 {price_pct:.1f}% 但稳定币净流入 {flow_b:+.1f}B：场外弹药积累，左侧信号"
         else:
             label = "DIVERGENT"
-            interp = f"价跌 {price_pct:.1f}% + 稳定币净流出 {flow_b:+.1f}B：抛压延续"
+            if netflow >= 0:
+                interp = (f"价跌 {price_pct:.1f}% + 稳定币净流入 {flow_b:+.1f}B"
+                          f"（低于显著阈值 {t['stablecoin_flow_min_usd']/1e9:.0f}B，未形成弹药积累）：偏弱，中性偏空")
+            else:
+                interp = f"价跌 {price_pct:.1f}% + 稳定币净流出 {flow_b:+.1f}B：抛压延续"
     else:
         if netflow > t["stablecoin_flow_min_usd"]:
             label = "HEALTHY"
@@ -8928,7 +8938,9 @@ def _build_daily_diff_brief(today: dict, highlights: list,
             ("成交量异动", _side("volume_surge_24h", "up") or _side("volume_surge_24h", "down"),
              "volume_surge_24h", "up"),
             ("量价齐升", _side("price_volume_surge", "up"), "price_volume_surge", "up"),
-            ("赛道轮动", _side("sector_rotation", "up"), "sector_rotation", "up"),
+            # P1-9（审计 2026-10-01）：此处原标签「赛道轮动」实为币种强度分榜，
+            # 与独立板块赛道轮动同名不同义 → 改「轮动强度榜」（强度分非百分比，见渲染层说明）。
+            ("轮动强度榜", _side("sector_rotation", "up"), "sector_rotation", "up"),
             # 解锁抛压：生成器落 direction='down'（无「涨」的含义），故取 down、up 兜底
             ("即将解锁", _side("unlock_7d", "down") or _side("unlock_7d", "up"),
              "unlock_7d", "down"),

@@ -79,10 +79,10 @@ check(any("今天" in w for w in mm._validate_macro_events([{"date": today, "eve
       "B1 命中「今天」告警")
 check(any("不可解析" in w for w in mm._validate_macro_events([{"date": "2026/09/11", "event": "X"}])),
       "B2 日期不可解析告警")
-dup = mm._validate_macro_events([{"date": "2026-10-02", "event": "NFP 非农"},
-                                 {"date": "2026-10-02", "event": "NFP 非农"}])
+dup = mm._validate_macro_events([{"date": "2099-10-02", "event": "NFP 非农"},
+                                 {"date": "2099-10-02", "event": "NFP 非农"}])
 check(any("重复" in w for w in dup), "B3 重复日程告警", str(dup))
-check(mm._validate_macro_events([{"date": "2026-10-02", "event": "NFP 非农"}]) == [],
+check(mm._validate_macro_events([{"date": "2099-10-02", "event": "NFP 非农"}]) == [],
       "B4 正常日程无告警")
 
 # ── C. ticker 助手 ──

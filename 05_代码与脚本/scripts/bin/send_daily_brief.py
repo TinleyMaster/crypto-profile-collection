@@ -158,6 +158,24 @@ def _resolve_addr_label(raw_label, labels_arr, names_arr, addr):
     return "未知地址"
 
 
+def _fmt_price_usd(v) -> str:
+    """P1-6（审计 2026-10-01）：BTC/ETH 价格用个位精度（$83,412），不用 $83K 紧凑格式。
+
+    `_fmt_mcap` 的 K 缩写在价格场景下有效数字仅 2 位，在顶部风险判断下不够用。
+    """
+    if v is None:
+        return "N/A"
+    try:
+        f = float(v)
+    except Exception:
+        return str(v)
+    if f >= 1000:
+        return f"${f:,.0f}"
+    if f >= 100:
+        return f"${f:,.0f}"
+    return f"${f:.2f}"
+
+
 def _fmt_mcap(v):
     """市值/金额缩写：B / M / K。"""
     if v is None:
@@ -206,13 +224,28 @@ def _render_liquidation_row(liq: dict) -> str:
     head = f"24h 爆仓 {_fmt_mcap(total_f)}"
     long24, short24 = liq.get("long_24h"), liq.get("short_24h")
     if long24 is not None and short24 is not None:
-        bias = "以多头为主" if float(long24) >= float(short24) else "以空头为主"
+        try:
+            _lf, _sf = float(long24), float(short24)
+            _tot = _lf + _sf
+            _diff_pp = abs(_lf - _sf) / _tot * 100 if _tot > 0 else 0
+            # P2-1（审计 2026-10-01）：52.4%/47.6% 差 4.7pct 称「为主」夸大。
+            # 差值 <10pct 一律「略占优」，≥10pct 才「为主」。
+            if _diff_pp < 10:
+                bias = "以多头略占优" if _lf >= _sf else "以空头略占优"
+            else:
+                bias = "以多头为主" if _lf >= _sf else "以空头为主"
+        except Exception:
+            bias = "以多头为主" if float(long24) >= float(short24) else "以空头为主"
         head += f"（多 {_fmt_mcap(long24)} / 空 {_fmt_mcap(short24)}，{bias}）"
 
     liq_1h = liq.get("liq_usd_1h")
     if liq_1h is not None and total_f > 0:
         try:
-            head += f" · 近 1h 占 24h 的 {float(liq_1h) / total_f * 100:.1f}%"
+            _pct1h = float(liq_1h) / total_f * 100
+            head += f" · 近 1h 占 24h 的 {_pct1h:.1f}%"
+            # P2-2（审计 2026-10-01）：0.9% 远低于均匀基准 4.17%，是「爆仓冷却」信号，补一句白话。
+            if _pct1h < 2.0:
+                head += "（显著低于均匀基准 4.2%，近 1h 爆仓冷却）"
         except (TypeError, ValueError):
             pass
 
@@ -236,11 +269,16 @@ def _render_liquidation_row(liq: dict) -> str:
 
 
 # ── U-B：每日变化榜（消费 M5_daily_diff）────────────────────────────────
+# P1-9（审计 2026-10-01）：变化榜内「赛道轮动」一行实为币种强度分榜，与独立板块
+# 「🏭 赛道轮动（7日市值变化·功能分类）」同名不同义 → 改名「轮动强度榜」。
+# P1-10：该榜分数可 >100（强度分非百分比）且原序列非降序 → 补口径说明，不再谎称百分比。
 _DIFF_CATEGORY_ORDER = (
     "价格涨幅榜", "价格跌幅榜", "成交量异动", "量价齐升",
-    "赛道轮动", "即将解锁", "市值变化榜",
+    "轮动强度榜", "即将解锁", "市值变化榜",
 )
 _DIFF_CATEGORY_COLOR = {"价格涨幅榜": "#ef4444", "价格跌幅榜": "#22c55e"}
+# 旧键「赛道轮动」→ 新标签映射（兼容旧快照）
+_DIFF_LABEL_ALIAS = {"赛道轮动": "轮动强度榜"}
 
 
 def _fmt_diff_value(item: dict) -> str:
@@ -274,10 +312,19 @@ def _render_daily_diff_html(brief: dict) -> str:
     - 7 分类按固定顺序渲染，未知类别追加在后；各榜最多展示已截断的 Top5。
     - 每条 = ⭐ 高亮 / ⚠️ 高危 标记 + symbol + 数值（格式同网页端变化榜）。
     - 纯展示：不查库、不调 AI（数据已由 `macro_market._build_daily_diff_brief` 组装进 brief）。
+    - P1-9/10：旧快照键「赛道轮动」映射为「轮动强度榜」；强度分非百分比，标题注明口径。
     """
     m5 = brief.get("M5_daily_diff")
     if not isinstance(m5, dict) or not m5:
         return ""
+    # 别名归一：旧「赛道轮动」→「轮动强度榜」
+    try:
+        for _old, _new in _DIFF_LABEL_ALIAS.items():
+            if _old in m5 and _new not in m5:
+                m5 = dict(m5)
+                m5[_new] = m5.pop(_old)
+    except Exception:
+        pass
     keys = [k for k in _DIFF_CATEGORY_ORDER if k in m5] + [
         k for k in m5 if k not in _DIFF_CATEGORY_ORDER
     ]
@@ -287,16 +334,32 @@ def _render_daily_diff_html(brief: dict) -> str:
         if not isinstance(items, list) or not items:
             continue
         color = _DIFF_CATEGORY_COLOR.get(label, "#334155")
+        # P1-10：轮动强度榜上游序列可能非降序，此处按分值降序重排，保证展示有序。
+        try:
+            if label == "轮动强度榜":
+                items = sorted([x for x in items if isinstance(x, dict)],
+                               key=lambda x: float(x.get("metric_value") or 0), reverse=True)
+        except Exception:
+            pass
         chips = []
         for it in items:
             if not isinstance(it, dict):
                 continue
             sym = html.escape(str(it.get("symbol") or "?"))
             marks = ("⭐" if it.get("is_highlight") else "") + ("⚠️" if it.get("is_risk") else "")
+            _val_txt = _fmt_diff_value(it)
+            # P1-2（审计 2026-10-01）：市值变化榜极端值（BEAM +5350% 未进价格榜）
+            # 疑似 supply 跳变，加注警示，不再裸奔。
+            _warn = ""
+            try:
+                if label == "市值变化榜" and abs(float(it.get("metric_value") or 0)) >= 500:
+                    _warn = " <span style='color:#b45309'>(⚠️疑似supply变动)</span>"
+            except Exception:
+                pass
             chips.append(
                 '<span style="display:inline-block;margin:1px 8px 1px 0;font-size:10.5px;color:#334155">'
                 f'{marks}<b>{sym}</b> '
-                f'<span style="color:{color};font-weight:600">{_fmt_diff_value(it)}</span>'
+                f'<span style="color:{color};font-weight:600">{_val_txt}</span>{_warn}'
                 '</span>'
             )
         if not chips:
@@ -689,9 +752,28 @@ def _build_tldr_html(trade_ready: list, all_opps: list, owners: dict | None = No
             if not logic:
                 continue
             _seen.add(tgt.lower())
+            # P0-3（审计 2026-10-01）：方向标签必须读 direction 动态渲染，
+            # 看空（抛压）不得贴「观察/机会」。RLUSD 看空进「风险」即本分支覆盖。
+            _d = str((o or {}).get("direction") or "").lower()
+            if _d in ("short", "bearish", "看空"):
+                _dlabel = "风险/看空"
+            elif _d in ("long", "bullish", "看多"):
+                _dlabel = "观察/机会"
+            else:
+                _dlabel = "观察/持仓参考"
+            # P2-3（审计 2026-10-01）：赛道名（narrative/sector_rotation 机会的 target
+            # 即赛道，如 Oracles）不得裸混入币种列表，前缀「赛道：」区分。
+            _tgt_disp = tgt
+            try:
+                _sig = str((o or {}).get("signal_type") or "")
+                _sec = str((o or {}).get("sector") or "")
+                if _sig in ("narrative", "sector_rotation") or (_sec and _sec.lower() == tgt.lower()):
+                    _tgt_disp = f"赛道：{tgt}"
+            except Exception:
+                pass
             rows.append(
                 f'<div style="font-size:11px;color:#0f172a;line-height:1.6;margin-bottom:3px">'
-                f'<b>{tgt}</b> <span style="color:#64748b">观察/机会</span> · {logic}</div>'
+                f'<b>{_tgt_disp}</b> <span style="color:#64748b">{_dlabel}</span> · {logic}</div>'
             )
     if not rows:
         return ""
@@ -718,15 +800,55 @@ _GLOSSARY_LINE = ("名词速查：RWA=实物资产上链 · MVRV=市值/已实�
                   "共振=多数据源同向印证 · HIGH/MED/LOW=信号档位高/中/低 · 命中率=历史回测准确率")
 
 
-def _build_top_summary_html(ai_summary: dict, trade_ready: list, risks: list) -> str:
-    """顶部「今日 3 句话」摘要卡；无 AI 定调时也能降级产出。"""
+def _build_top_summary_html(ai_summary: dict, trade_ready: list, risks: list, pulse: dict | None = None) -> str:
+    """顶部「今日 3 句话」摘要卡；无 AI 定调时也能降级产出。
+
+    P0-1（审计 2026-10-01）：`market_regime` 为空时禁止输出「见下方大盘脉搏」占位串。
+    改为用大盘脉搏已有字段自动拼装（BTC/恐贪/总市值）， pulse 缺失时才省略①句。
+    """
     ai_summary = ai_summary or {}
     regime = ai_summary.get("market_regime") or ""
     bias = ai_summary.get("bias") or ""
     watch = ai_summary.get("watchlist") or []
     no_trade = str(ai_summary.get("no_trade_reason") or "").strip()
 
-    l1 = f"大盘：{regime or '见下方大盘脉搏'}" + (f"，方向{bias}" if bias else "")
+    if regime:
+        l1 = f"大盘：{regime}" + (f"，方向{bias}" if bias else "")
+    else:
+        # 用脉搏字段拼装，不再输出占位符
+        _p = pulse or {}
+        _segs = []
+        try:
+            _bp = _p.get("btc_price")
+            _bc = _p.get("btc_change_24h_pct")
+            if _bp is not None:
+                try:
+                    _bp_f = float(_bp)
+                    _bp_s = f"${_bp_f:,.0f}" if _bp_f >= 1000 else f"${_bp_f:.0f}"
+                except Exception:
+                    _bp_s = str(_bp)
+                _chg = ""
+                try:
+                    _chg = f" {_bc:+.1f}%" if _bc is not None else ""
+                except Exception:
+                    _chg = ""
+                _segs.append(f"BTC {_bp_s}{_chg}")
+        except Exception:
+            pass
+        _fg = _p.get("fear_greed")
+        _fgl = _p.get("fear_greed_label") or ""
+        if _fg is not None:
+            _segs.append(f"恐贪 {_fg}{_fgl}")
+        _mc = _p.get("total_market_cap")
+        if _mc is not None:
+            try:
+                _segs.append(f"总市值 {_fmt_mcap(float(_mc))}")
+            except Exception:
+                pass
+        if _segs:
+            l1 = "大盘：" + " / ".join(_segs) + (f"，方向{bias}" if bias else "")
+        else:
+            l1 = ""  # 无脉搏数据时整句省略，不输出占位符
     if trade_ready:
         l2 = f"能不能动：有 {len(trade_ready)} 条可执行方向（详见下方「交易方向」）"
     else:
@@ -737,10 +859,12 @@ def _build_top_summary_html(ai_summary: dict, trade_ready: list, risks: list) ->
         l3 = f"最该盯：风险信号「{(risks[0] or {}).get('target') or '?'}」"
     else:
         l3 = "最该盯：见下方「AI 精选高亮 / 今日高危」"
+    _items = [(("①", l1) if l1 else None), (("②", l2)), (("③", l3))]
+    _items = [x for x in _items if x]
     _rows = "".join(
         f'<div style="font-size:11.5px;color:#0f172a;line-height:1.6;margin-bottom:2px">'
         f'<b style="color:#0ea5e9">{n}.</b> {t}</div>'
-        for n, t in (("①", l1), ("②", l2), ("③", l3))
+        for n, t in _items
     )
     return f"""
       <!-- 模块00：今日 3 句话（小白速读） -->
@@ -816,7 +940,12 @@ def _build_target_registry(brief: dict, ai_trade_ready: list):
             owners.setdefault(k, "交易方向")
 
     # 2) AI 精选高亮
-    for h in (brief.get("M3_highlights") or []):
+    # P0-2（审计 2026-10-01）：折叠集合必须 ⊆ 实际已渲染集合。
+    # 渲染侧为 ai_valid[:3]（见 display_highlights），此处必须同口径截断，
+    # 否则 JUP 这类「进池但被 Top3 截掉」的标的会被悬空折叠（两边都不显示）。
+    _hl_valid = [h for h in (brief.get("M3_highlights") or [])
+                 if (h.get("ai_analysis_v2") and not (h.get("ai_analysis_v2") or {}).get("error"))]
+    for h in _hl_valid[:3]:
         ai = h.get("ai_analysis_v2") or {}
         if not ai or ai.get("error"):
             continue
@@ -1064,7 +1193,9 @@ def render_brief_html(brief: dict) -> str:
         print(f"[render_brief_html] 交易方向拒收：{len(_trade_excluded)} 条缺可判定要素 → 降级「观察」：{_ex_desc}")
 
     # R-12（审计 2026-09-29）：顶部「3 句话」小白速读卡（无论 AI 是否可用都出）。
-    html_parts.append(_build_top_summary_html(ai_summary, _trade_ready, brief.get("M4_risks") or []))
+    # P0-1（审计 2026-10-01）：pulse 透传供①句降级拼装，杜绝「见下方大盘脉搏」占位符。
+    # m0 即 M0_tldr（btc_price/btc_change_24h_pct/fear_greed/total_market_cap），直接复用。
+    html_parts.append(_build_top_summary_html(ai_summary, _trade_ready, brief.get("M4_risks") or [], m0))
 
     if ai_summary.get("status") == "ok" and ai_headline:
         # 方向颜色
@@ -1278,9 +1409,12 @@ def render_brief_html(brief: dict) -> str:
         aq_rbe = f"{aq['roll3_be_1h'] * 100:.1f}%" if aq.get("roll3_be_1h") is not None else "-"
         aq_rpf = f"{aq['roll3_pf_1h']:.2f}" if aq.get("roll3_pf_1h") is not None else "-"
         # conclusion 由本系统生成，可能含 `<`（如 PF<1）；早报未引入 html.escape，这里做最小实体转义
+        # P1-5（审计 2026-10-01）：160 硬截断会切断括号（「胜率 21…」），改句子边界截断。
         aq_note = (aq.get("conclusion") or "").strip().replace("<", "&lt;").replace(">", "&gt;")
-        if len(aq_note) > 160:
-            aq_note = aq_note[:160] + "…"
+        if len(aq_note) > 220:
+            _cut = aq_note[:220]
+            _m = max(_cut.rfind("；"), _cut.rfind("。"), _cut.rfind("，"), _cut.rfind("、"), _cut.rfind(" "))
+            aq_note = (_cut[:_m + 1] if _m > 120 else _cut).rstrip() + "…"
         html_parts.append(f"""
           <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid {aq_color}">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -1290,11 +1424,11 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:11.5px;color:{aq_color};font-weight:600;margin-bottom:3px">{_aq_plain}</div>
             <div style="font-size:12px;color:#475569;line-height:1.6">
               {aq.get('report_date') or '-'} 告警 {aq_n} 条 · 当日 T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
-              近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF {aq_rpf}）·
-              赔率 {aq_odds} · PF {aq_pf} · 环境 {aq.get('regime_label') or '-'}
+              近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF(滚动) {aq_rpf}）·
+              赔率(当日) {aq_odds} · PF(当日) {aq_pf} · 环境 {aq.get('regime_label') or '-'}
             </div>
             <div style="font-size:10.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
-              说明：「当日」与「近3日滚动」是两个不同窗口的同一指标，失配判定以滚动口径为准；单日胜率波动大，不宜据此判断阈值优劣。
+              说明：「当日」与「近3日滚动」是两个不同窗口的同一指标，失配判定以滚动口径为准；单日胜率波动大，不宜据此判断阈值优劣。滚动口径暂无独立赔率（PF(滚动)已含赔率信息）。
             </div>
             {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
           </div>
@@ -1435,7 +1569,7 @@ def render_brief_html(brief: dict) -> str:
             )
             html_parts.append(f"""
             <div style="margin-top:6px;padding:8px 12px;background:#fef2f2;border-radius:6px;font-size:11px;color:#991b1b">
-              <div>⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个</div>
+              <div>⚠️ 今日高危信号（综合风险）<b>{risk_count}</b> 个<span style="color:#b91c1c;font-weight:400"> · 口径：综合风险确认子集，不同于顶部「风险信号」池计数</span></div>
               {_risk_rows}
             </div>
             """)
@@ -1522,13 +1656,13 @@ def render_brief_html(brief: dict) -> str:
           <!-- BTC -->
           <div style="background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
             <div style="font-size:10px;color:#64748b;margin-bottom:2px">BTC</div>
-            <div style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:-0.3px">{_fmt_mcap(btc_price) if btc_price else 'N/A'}</div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:-0.3px">{_fmt_price_usd(btc_price) if btc_price else 'N/A'}</div>
             <div style="font-size:10px;color:{btc_chg_color};margin-top:1px;font-weight:600">{btc_chg_str}</div>
           </div>
           <!-- ETH -->
           <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
             <div style="font-size:10px;color:#64748b;margin-bottom:2px">ETH</div>
-            <div style="font-size:16px;font-weight:700;color:#0f172a">{_fmt_mcap(eth_price) if eth_price else 'N/A'}</div>
+            <div style="font-size:16px;font-weight:700;color:#0f172a">{_fmt_price_usd(eth_price) if eth_price else 'N/A'}</div>
             <div style="font-size:10px;color:{eth_chg_color};margin-top:1px;font-weight:600">{eth_chg_str}</div>
           </div>
           <!-- 总市值 -->
@@ -1557,7 +1691,7 @@ def render_brief_html(brief: dict) -> str:
             <div style="font-size:13px;font-weight:700;color:#334155">{phase}</div>
           </div>
           <div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">
-            <div style="font-size:9.5px;color:#94a3b8">BTC 7日波动率</div>
+            <div style="font-size:9.5px;color:#94a3b8">BTC 7日波动率（日化）</div>
             <div style="font-size:13px;font-weight:700;color:#334155">{btc_vol_str}</div>
           </div>
         </div>
@@ -1620,6 +1754,16 @@ def render_brief_html(brief: dict) -> str:
                     trend_badge = '<span style="background:#fee2e2;color:#991b1b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">回调↓</span>'
                 else:
                     trend_badge = '<span style="background:#f1f5f9;color:#64748b;font-size:9.5px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px">横盘</span>'
+            # P1-8（审计 2026-10-01）：Stablecoin 赛道市值为价格口径，不含新铸造量，
+            # 与「稳定币供应 +1.0%」不是同一口径，必须显式标注，防打架误读。
+            _stable_note = ""
+            try:
+                _skey = str(n.get("sector_key") or "") + str(name or "")
+                if "stable" in _skey.lower() or "稳定" in str(name or ""):
+                    _stable_note = ('<span style="font-size:9px;color:#94a3b8;margin-left:5px">'
+                                    '市值口径，不含新铸造量</span>')
+            except Exception:
+                pass
 
             # 领涨币（赛道内 7d 涨幅前列；赛道整体下跌时标注"相对强势"避免歧义）
             coins_html = ""
@@ -1652,7 +1796,7 @@ def render_brief_html(brief: dict) -> str:
                   <div style="display:flex;align-items:center;min-width:0">
                     <span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;background:#e2e8f0;color:#475569;font-size:10.5px;font-weight:700;border-radius:4px;margin-right:6px;flex-shrink:0">{idx+1}</span>
                     <span style="font-size:12.5px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</span>
-                    {trend_badge}
+                    {trend_badge}{_stable_note}
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;margin-left:6px;flex-shrink:0">
                     <span style="font-size:12px;color:{chg_color};font-weight:700">{chg_str}</span>
@@ -1748,16 +1892,23 @@ def render_brief_html(brief: dict) -> str:
 
         # 分项拆解（使「全部 ETF 合计」可核验）：BTC + ETH + 其他 = 合计。
         # 其他按绝对额降序取前 3 个币种做明细，其余仅计金额。
+        # P1-3（审计 2026-10-01）：前3明细之和 ≠ 其他合计时必须显式交代余量，否则缺 $21M。
         others_net = sum(v for _, v in others)
         others_net_str, _ = _fmt_flow(others_net)
         others_sorted = sorted(others, key=lambda x: -abs(x[1]))
         others_detail = " · ".join(
             f"{s} {'+' if v >= 0 else ''}{v/1e6:.0f}M" for s, v in others_sorted[:3]
         )
+        _top3_sum = sum(v for _, v in others_sorted[:3])
+        _rest = others_net - _top3_sum
+        if abs(_rest) >= 0.5e6:
+            _rest_s = f"+{ _rest/1e6:.0f}M" if _rest >= 0 else f"{_rest/1e6:.0f}M"
+            others_detail = (others_detail + f" · 其他小币种 {_rest_s}") if others_detail else f"其他小币种 {_rest_s}"
         breakdown = (f"分项：BTC {btc_net_str} + ETH {eth_net_str} + 其他 {others_net_str}"
                      + (f"（{others_detail}）" if others_detail else ""))
 
         # W-10：单日净流入强制标注「上一交易日(MM-DD)」（不得用无日期限定的「单日」）
+        # P1-3（审计 2026-10-01）：上一交易日合计含「其他」，必须同行列出，否则 66-3≠77。
         _latest_by_sym = {}
         for a in etf_assets:
             s = (a.get("symbol") or "").upper()
@@ -1766,8 +1917,10 @@ def render_brief_html(brief: dict) -> str:
         _l_total_s, _ = _fmt_flow(sum(_latest_by_sym.values()))
         _l_btc_s, _ = _fmt_flow(_latest_by_sym.get("BTC"))
         _l_eth_s, _ = _fmt_flow(_latest_by_sym.get("ETH"))
+        _l_oth = sum(v for k, v in _latest_by_sym.items() if k not in ("BTC", "ETH"))
+        _l_oth_s, _ = _fmt_flow(_l_oth)
         _prev_day_line = (f"上一交易日({_etf_md}) 净流入：BTC {_l_btc_s} · "
-                          f"ETH {_l_eth_s} · 合计 {_l_total_s}")
+                          f"ETH {_l_eth_s} · 其他 {_l_oth_s} · 合计 {_l_total_s}")
 
         html_parts.append(f"""
           <!-- ETF 子模块 -->
@@ -1966,8 +2119,8 @@ def render_brief_html(brief: dict) -> str:
                 """
 
             html_parts.append(f"""
-              <div style="font-size:11.5px;font-weight:700;color:#7c3aed;margin-bottom:5px">💸 大额转账（24h）</div>
-              <div style="font-size:10px;color:#64748b;margin-bottom:4px">影响供给类（构成潜在买卖压）</div>
+              <div style="font-size:11.5px;font-weight:700;color:#7c3aed;margin-bottom:5px">💸 大额转账（24h · 单笔明细口径）</div>
+              <div style="font-size:10px;color:#64748b;margin-bottom:4px">影响供给类（构成潜在买卖压） · 单笔列示，与机会清单的「N 笔合计」聚合口径不同，不可直接对比单笔最大额</div>
             """)
             if _supply_xfers:
                 for t in _supply_xfers[:5]:
@@ -2166,11 +2319,20 @@ def render_brief_html(brief: dict) -> str:
                 days_color = "#64748b"
 
             value_str = _fmt_mcap(value_usd) if value_usd else "—"
-
+            # P1-11（审计 2026-10-01）：⚠️ 必须按「解锁额/流通市值」百分比阈值，
+            # 不得按绝对金额（否则 2Z 45.69% 无标、TAO 小额反有标）。
+            _warn = ""
+            try:
+                _pct_f = float(pct) if pct is not None else None
+            except Exception:
+                _pct_f = None
+            if _pct_f is not None and _pct_f >= 10:
+                _warn = " ⚠️"
+            # 符号后追加 ⚠️（百分比口径），金额大的小比例不再误标
             html_parts.append(f"""
               <div style="padding:5px 8px;margin-bottom:3px;border-radius:5px;background:#fef2f2;border-left:2px solid #dc2626;font-size:11px">
                 <div style="display:flex;justify-content:space-between;align-items:center">
-                  <span style="font-weight:700;color:#0f172a">{sym}</span>
+                  <span style="font-weight:700;color:#0f172a">{sym}{_warn}</span>
                   <span style="font-size:10px;color:{days_color};font-weight:600">{days_str}</span>
                 </div>
                 <div style="font-size:10px;color:#64748b;margin-top:1px">
@@ -2195,12 +2357,16 @@ def render_brief_html(brief: dict) -> str:
             ev_date = ev.get("date", "")
             ev_name = ev.get("event", "?")
             ev_type = ev.get("type", "")
+            # P2-12（审计 2026-10-01）：只显示「1d/已过」无绝对日期，CPI/FOMC 无法核验。
+            # 改为「MM-DD + 相对天数」双显。
+            _ev_md = str(ev_date)[5:10] if len(str(ev_date)) >= 10 else str(ev_date or "")
             try:
                 days_until = (date.fromisoformat(ev_date) - date.today()).days
                 days_str = f"{days_until}d" if days_until > 0 else "今天" if days_until == 0 else "已过"
                 days_color = "#dc2626" if 0 <= days_until <= 7 else ("#f59e0b" if days_until <= 14 else "#94a3b8")
+                days_str = f"{_ev_md} · {days_str}" if _ev_md else days_str
             except Exception:
-                days_str = ""
+                days_str = _ev_md
                 days_color = "#94a3b8"
 
             type_badge = ""
@@ -2239,12 +2405,19 @@ def render_brief_html(brief: dict) -> str:
     section_title = "🔥 今日热门币种" if is_fallback else "🎯 精选机会"
     # N10（2026-09-29 复验）：N2 后能进 HIGH 的只剩有回测背书的类型（实测仅 catalyst）。
     # 当日无 HIGH 时显式说明，避免读者把「兜底展示」误读为「真的没有机会」。
+    # P1-13（审计 2026-10-01）：顶部「机会 N 条」必须拆分有回测背书数，否则虚增密度。
     _n_high_opp = sum(1 for _o in (brief.get("M8_opportunities") or [])
                       if str(_o.get("conviction_tier") or "").upper() == "HIGH")
+    _n_backed = sum(1 for _o in (brief.get("M8_opportunities") or [])
+                    if _opp_gate(_o) == "calibrated_ok")
+    _n_opp_total = len(brief.get("M8_opportunities") or [])
     _high_supply_note = ("" if _n_high_opp else
                          '<div style="font-size:10.5px;color:#b45309;margin-bottom:6px;line-height:1.5">'
                          '⚠️ 当日无满足回测背书的 HIGH 档信号（HIGH 现主要由有回测背书的类型供给）；'
                          '下方为池内分数靠前项，属「非高确定性」，勿当高置信对待。</div>')
+    # P1-13：标题旁追加背书计数（有回测背书 X/Y）
+    if _n_opp_total:
+        section_title = f"{section_title}（{ _n_opp_total} 条，其中有回测背书 {_n_backed} 条）"
 
     html_parts.append(f"""
       <!-- 模块6：机会清单 -->
@@ -2373,7 +2546,7 @@ def render_brief_html(brief: dict) -> str:
                 <div style="display:flex;align-items:center;gap:5px">
                   <span style="background:{badge_bg};color:{badge_color};font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700">{tier}</span>
                   {gate_badge}
-                  <span style="font-size:11px;color:#64748b;font-weight:600">{score_str}分</span>
+                  <span style="font-size:11px;color:#64748b;font-weight:600" title="综合评分（conviction_score），与模块0.01的决策信号分不同口径">综合评分 {score_str}分</span>
                 </div>
               </div>
               {f'<div style="font-size:10.5px;color:#64748b">{meta_str}</div>' if meta_str else ''}
@@ -2455,14 +2628,17 @@ def render_brief_html(brief: dict) -> str:
     # 聪明钱背离
     sm = brief.get("M8_smart_money") or {}
     if isinstance(sm, dict) and sm.get("status") == "ok" and (sm.get("bullish") or sm.get("bearish")):
-        bull = sm.get("bullish") or []
-        bear = sm.get("bearish") or []
-        bull_str = " ".join(f'<span style="color:#16a34a;font-weight:600">🐂{s.get("symbol","?")}</span>' for s in bull[:3])
-        bear_str = " ".join(f'<span style="color:#dc2626;font-weight:600">🐻{s.get("symbol","?")}</span>' for s in bear[:3])
-        # P2-3（审计 2026-09-28）：术语堆砌无上下文 → 补一行口径注解。
-        _sm_note = ('<div style="font-size:9.5px;color:#94a3b8;margin-top:2px">'
-                    '聪明钱 = 链上监控地址的净买入（🐂）/ 净卖出（🐻）方向</div>')
-        extra_blocks.append(("🐋 聪明钱（链上监控地址净买卖）", f"{bull_str} {bear_str}{_sm_note}"))
+        # P2-6（审计 2026-10-01）：稳定币（USDe/USDC 等）净买卖方向无意义，从该榜剔除。
+        _STABLE_SM = {"USDE", "USDC", "USDT", "DAI", "TUSD", "FDUSD", "PYUSD", "USDS", "BUSD", "USDD", "GUSD", "FRAX", "RLUSD"}
+        bull = [s for s in (sm.get("bullish") or []) if str(s.get("symbol") or "").upper() not in _STABLE_SM]
+        bear = [s for s in (sm.get("bearish") or []) if str(s.get("symbol") or "").upper() not in _STABLE_SM]
+        if bull or bear:
+            bull_str = " ".join(f'<span style="color:#16a34a;font-weight:600">🐂{s.get("symbol","?")}</span>' for s in bull[:3])
+            bear_str = " ".join(f'<span style="color:#dc2626;font-weight:600">🐻{s.get("symbol","?")}</span>' for s in bear[:3])
+            # P2-3（审计 2026-09-28）：术语堆砌无上下文 → 补一行口径注解。
+            _sm_note = ('<div style="font-size:9.5px;color:#94a3b8;margin-top:2px">'
+                        '聪明钱 = 链上监控地址的净买入（🐂）/ 净卖出（🐻）方向（已剔除稳定币）</div>')
+            extra_blocks.append(("🐋 聪明钱（链上监控地址净买卖）", f"{bull_str} {bear_str}{_sm_note}"))
 
     # Meme 风险
     meme = brief.get("M8_meme") or {}

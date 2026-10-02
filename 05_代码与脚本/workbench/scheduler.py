@@ -368,6 +368,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "盘面告警·质量日报聚合（08:10，胜率/赔率/PF/平衡线 + 阈值-行情失配判定）", "core"),
     ("scan_edge_email", "20 8 * * *", "send_scan_edge_report.py", [],
      "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
+
+    # ═══ 实证联动因子效果验证 ═══
+    # 二阶受益已接入 asset_linkage_factor（2026-10-02 c155ac8）。脚本每日只读对比
+    # linkage_factor vs sector 的 72h 命中质量，样本≥25 且 7 天冷却外才发邮件通知，
+    # 避免用户遗忘验证节点。09:40 错开早报(09:00)/edge邮件(08:20)槽位。
+    ("linkage_validation", "40 9 * * *", "validate_linkage_factor.py", [],
+     "联动因子效果验证+通知（每日 09:40，样本≥25 且 7 天冷却外才发信）", "core"),
 ]
 
 # 注：一次性「国庆后待办·评估 volume_surge_24h 加回 Tier 2 白名单（R3-1）」提醒

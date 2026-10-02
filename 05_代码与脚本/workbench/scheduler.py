@@ -105,7 +105,9 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 校准窗口随样本陈旧失真（macro_market 按 window_end DESC 取最新窗口消费）。
     # 纳入周级重算：周日 05:00 北京，避开每日早高峰（data_sync_daily 06:30）。
     # 落表键 (signal_type, horizon_days, window_end) 幂等，重跑不产生重复行。
-    ("signal_type_calibration_weekly", "0 5 * * 0", "run_signal_type_calibration_backtest.py",
+    # ⚠️ day_of_week 必须用名称：APScheduler 的 CronTrigger 是 0=周一（非标准 cron 的 0=周日），
+    #    原写法 "0 5 * * 0" 实际跑在周一，与「周日」意图错位一天（已于 2026-10-02 修）。
+    ("signal_type_calibration_weekly", "0 5 * * sun", "run_signal_type_calibration_backtest.py",
      ["--days", "30"], "signal_type 回测校准周级重算（每周日 05:00，写入 biz.signal_type_calibration）", "core"),
 
     # ═══ 投研结论前向跟踪（P4，2026-09-27）═══

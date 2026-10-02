@@ -29,10 +29,15 @@ from pathlib import Path
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
-_SCRIPTS_SRC = _HERE.parent / "scripts" / "src"
-for p in (_SCRIPTS_SRC, _HERE.parent / "scripts" / "bin"):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+# 兼容两种目录布局（scheduler.py 同款模式）：
+#   本地：workbench/ 与 scripts/ 平级 → _HERE.parent / "scripts"
+#   容器：Dockerfile 把 workbench/*.py 平铺到 /app、scripts/src 在 /app/scripts/src
+#         → _HERE / "scripts"
+for scripts_dir in (_HERE.parent / "scripts", _HERE / "scripts"):
+    for sub in ("src", "bin"):
+        p = scripts_dir / sub
+        if p.is_dir() and str(p) not in sys.path:
+            sys.path.insert(0, str(p))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 

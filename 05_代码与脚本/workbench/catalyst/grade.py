@@ -180,6 +180,10 @@ class CatalystGrader:
         self.impact_level_weights = config.get("impact_level_weights", {
             3: 85, 2: 62, 1: 40,
         })
+        # 行情播报/非事件：不消费 impact_level（与 build_catalyst_impact NON_EVENT_TYPES
+        # 同口径），固定走 calibration/yaml 先验，避免 weak 档 40 抬高其权重。
+        self.non_event_types = set(config.get("impact_non_event_types",
+                                              ("market_update", "other")))
 
         # 发布前启动程度惩罚（实测：>10% 追高风险显著，作扣分项）
         pl = config.get("prelaunch_penalty", {})
@@ -343,11 +347,17 @@ class CatalystGrader:
         impact_strength（strong=3/medium=2/weak=1，取该 catalyst 关联资产最高档，
         已含 event_type + mcap 联合校准——见 build_catalyst_impact 的数据校准版
         RULE）。档位→权重用事件研究实测排序（delisting/burn/partnership 强、
-        listing/tech_upgrade/funding 中、regulation/market_update/other 弱），
-        修正了 yaml 先验的倒挂（listing 95 > delisting 90 与实际相反）。
-        无 impact 数据（新 catalyst 尚未 build impact 或未绑资产）时回退原逻辑。
+        listing/tech_upgrade/funding 中、regulation 弱），修正了 yaml 先验的
+        倒挂（listing 95 > delisting 90 与实际相反）。
+
+        边界（离线重放 2026-10-02 发现）：market_update/other 是行情播报/非事件
+        （前瞻力≈0，方向对齐仅 ~1%），必须**排除在 impact_level 覆盖之外**——
+        否则 weak 档=40 会把它们从 yaml 先验 25/15 抬高到 40，导致 4,127 条
+        market_update base_strength 上升、大量 C→B 误升。与 build_catalyst_impact
+        的 NON_EVENT_TYPES 同口径：这类事件固定走 calibration/yaml 先验。
+        无 impact 数据（新 catalyst 尚未 build impact 或未绑资产）时同样回退。
         """
-        if impact_level is not None:
+        if impact_level is not None and event_type not in self.non_event_types:
             try:
                 return self.impact_level_weights.get(int(impact_level),
                                                      self.event_type_weights.get(event_type, 15))

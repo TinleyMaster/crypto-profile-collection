@@ -80,6 +80,15 @@ from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E4
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.utils.time_utils import fmt_bj, to_bj  # noqa: E402
 
+# 催化剂归因（伪领先识别，工单：代币联动研究 → 告警归因）。与 db_stats 同款降级策略：
+# 模块缺失/异常只去掉归因标注，绝不阻断告警发送（归因是上下文，不是闸门）。
+try:
+    import catalyst_attribution  # noqa: E402  同目录模块（scripts/bin）
+except Exception as _cat_exc:  # pragma: no cover - 部署形态兜底
+    catalyst_attribution = None
+    print(f"[scan_daemon] catalyst_attribution 不可用，归因标注降级: {_cat_exc}",
+          file=sys.stderr)
+
 # ── 日志流韧性（审计 P0-A 根因修复） ────────────────────────────
 
 
@@ -3477,6 +3486,17 @@ def _render_market_event_card(card_no: int, rep: dict, members: list[dict],
     )
 
 
+def _render_attribution(it: dict) -> str:
+    """卡片归因行（伪领先识别）。无归因数据返回空串，不打扰既有布局。"""
+    attr = it.get("attribution")
+    if not attr or catalyst_attribution is None:
+        return ""
+    try:
+        return catalyst_attribution.render_attribution_html(attr)
+    except Exception:  # noqa: BLE001 - 渲染失败降级为空串
+        return ""
+
+
 def _render_alert_email(items: list[dict],
                         regime_tags: list[str] | None = None,
                         batch: dict | None = None) -> str:
@@ -3528,6 +3548,17 @@ def _render_alert_email(items: list[dict],
     if brk_n:
         brk_line = ("<p style='margin:0 0 8px;color:#374151;font-size:13px'>"
                     f"本批含蓄势池突破（BRK）{brk_n} 条</p>")
+    # 空头通道披露（工单 SCAN-SHORT-DISCLOSE-001，§12.1-B19 治理·选项 1）：
+    # 告警层推空头 high（当前为主池 S2 down），执行层却只做多 ⇒ 读者每周收到「↓ 做空」
+    # 卡片而系统永不下空单。本行为**纯披露**：当批含空头时在头部明示「执行层仅做多、
+    # 空头通道仅作状态提示」——不改判据/阈值/置信度，不停推（S2 全历史仅 36 封、
+    # 未达停推判据，另列观察）。BRK down 已停推，当前空头卡恒为主池单卡（无合并）。
+    short_n = sum(1 for it in items if it["signal"].get("p_dir") == "down")
+    short_line = ""
+    if short_n:
+        short_line = ("<p style='margin:0 0 8px;color:#92400e;font-size:13px'>"
+                      f"本批含空头 {short_n} 条 —— 执行层仅做多，空头通道仅作状态提示、"
+                      "不构成交易建议</p>")
     _summary_out: dict = {}
     summary = _render_batch_summary(items, batch, _summary_out)
     # 同质信号合并（工单 SCAN-MERGE-001）：**只压正文卡片**，标题/摘要仍按币数计数。
@@ -3803,6 +3834,7 @@ def _render_alert_email(items: list[dict],
             f"CVD {cvd or 'n/a'}{cvd_amt} | 费率 {fund_str}</small>"
             f"{cvd_flag}{tech_note}"
             f"<br><small style='color:#111'>共振：{res_txt}{conflict}</small>"
+            f"{_render_attribution(it)}"
             f"{reason_txt}{invalid_txt}{prior_txt}"
             f"{_render_resonance_msgs(res)}"
             f"</div>"
@@ -3956,7 +3988,7 @@ def _render_alert_email(items: list[dict],
             f"<h2 style='margin:0 0 6px;color:#111'>🚨 盘面异动告警</h2>"
             f"<p style='margin:0 0 6px;color:#374151;font-size:13px'>"
             f"生成于 {now} · 共 {len(items)} 个币</p>"
-            f"{env_line}{dir_line}{brk_line}{summary}{body}{legend}{footnote}"
+            f"{env_line}{dir_line}{brk_line}{short_line}{summary}{body}{legend}{footnote}"
             "</body></html>")
 
 
@@ -4201,6 +4233,23 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
         # 开仓依据（审计_告警邮件开仓依据缺失 §三）：批级上下文（当日分桶 + 批级窗口
         # + 近 7 个有告警日的量能）只查一次，逐信号据此组装顺/逆风槽位。
         reason_ctx = _load_reason_context(conn)
+        # 催化剂归因（伪领先识别）：自身/同赛道催化剂 → independent / sector_narrative
+        # / pure_move。失败只降级标注、不阻断告警（归因是上下文，不是闸门）。
+        # P0 审计 C1：原逐条串行 ~10 次远程往返 ≈4s/条，批量告警一次几十条会显著拉长
+        # 发信延迟 → 改 attribution_for_many 整批集合查询（整批 ~7 次往返），并记录
+        # 批次耗时便于观察。
+        _attr_map: dict = {}
+        if catalyst_attribution is not None and to_alert:
+            try:
+                _t0 = time.monotonic()
+                _attr_map = catalyst_attribution.attribution_for_many(
+                    conn, [(it["signal"].get("symbol") or "", it.get("asset_id"))
+                           for it in to_alert])
+                _dt = time.monotonic() - _t0
+                print(f"[alert] 归因批次 {len(to_alert)} 条 · 总耗时 {_dt * 1000:.0f}ms · "
+                      f"均耗 {_dt / len(to_alert) * 1000:.0f}ms")
+            except Exception as exc:  # noqa: BLE001 - 归因失败不阻断告警
+                print(f"[alert] 归因批处理失败，本批降级为空标注: {exc}")
         for it in to_alert:
             sig = it["signal"]
             it["prior"] = priors.get((sig.get("p_dir"), sig.get("oi_dir")))
@@ -4208,6 +4257,7 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
             it["reason"] = _build_reason(sig, reason_ctx)
             it["diff_date"] = diff_date
             it["diff_boards"] = diff_map.get(it.get("asset_id"), [])
+            it["attribution"] = _attr_map.get(sig.get("symbol") or "", {})
 
         # 审计 B1：头部市场环境必须是**批次级全局 L0 regime**，与逐信号 context_tags
         # 解耦（BRK 信号的 context_tags 是 brk_*/vol_x=/bar= 原始 token，会污染头部）。
@@ -4235,6 +4285,7 @@ def task_scan_alert(window_min: int = NEW_WINDOW_MIN) -> dict:
             captured = datetime.now(timezone.utc).isoformat()
             snapshots = [
                 (json.dumps({"resonance_snapshot": it["resonance"],
+                             "attribution_snapshot": it.get("attribution"),
                              "captured_at": captured},
                             ensure_ascii=False, default=str),
                  it["signal"]["id"])
@@ -5504,6 +5555,23 @@ def _run_task_loop(name: str, interval_sec: int, func, offset_sec: int = 0,
 
 
 # 任务定义：(name, interval_sec, offset_sec, func, kwargs)
+def task_refresh_stable_groups() -> dict:
+    """周任务：重跑组内联动回测，刷新稳定联动组名单（扫描归因数据源）。
+
+    内部以子进程跑 workbench/backtest_group_linkage.py（约 2-3 分钟），
+    只把两段样本均超基线的组写入 biz.stable_linkage_group。失败不阻断
+    守护进程：异常交给 _run_task_loop 记录，下一轮（7 天后）重试。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "refresh_stable_groups", SCRIPT_DIR / "refresh_stable_groups.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # run()（非 run_once）：失败会发运维告警邮件（P0 审计 C3）
+    return mod.run()
+
+
 TASK_DEFS = [
     ("scan_klines",       300,  0,  task_scan_klines,       {"min_vol_usd": 5_000_000}),
     ("scan_oi_cvd",       300,  120, task_scan_oi_cvd,      {"min_vol_usd": 5_000_000}),
@@ -5525,6 +5593,9 @@ TASK_DEFS = [
     # offset 大小不影响正确性，仅取 480s 做错峰。
     ("confirm_signals",   1800,  480, task_confirm_signals,   {}),
     ("prune_scan_data",   86400, 600, task_prune_scan_data, {}),
+    # 稳定联动组周刷新（扫描归因「同稳定组可能联动」数据源，工单：代币联动研究）：
+    # 7 天一轮；offset 600 错峰避开告警(180)/主池(60) 发送高峰。
+    ("refresh_stable_groups", 604800, 600, task_refresh_stable_groups, {}),
 ]
 # 耦合校验（工单 P0-1）：首轮宽限上限必须大于最大 offset + 首轮余量，否则「本实例
 # 尚未跑完首轮」的宽限会把正常的慢启动误报成「线程从未启动」。改 TASK_DEFS 的

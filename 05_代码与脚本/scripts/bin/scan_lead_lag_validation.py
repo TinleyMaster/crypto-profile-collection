@@ -230,6 +230,8 @@ def main() -> int:
     parser.add_argument("--corr", type=float, default=CORR_THRESHOLD)
     parser.add_argument("--thresh", type=float, default=MOVE_THRESHOLD)
     parser.add_argument("--top", type=int, default=TOP_N)
+    parser.add_argument("--write", action="store_true",
+                        help="将验证通过的对写入 biz.asset_linkage_factor（默认只读）")
     args = parser.parse_args()
 
     conn = get_conn()
@@ -305,6 +307,30 @@ def main() -> int:
         n_same_only = sum(1 for _, es in results if es["lag1"] <= es["base_pos"] + 0.08 and es["same"] > 0.6)
         print(f"  有领先-滞后效应(滞后1d显著): {n_lag}/{len(results)}")
         print(f"  仅同期联动(无时序,同涨同跌): {n_same_only}/{len(results)}")
+
+        # ---- 落库（--write）：验证通过的对写入 biz.asset_linkage_factor ----
+        if args.write:
+            # 建表（幂等）
+            ddl_path = SCRIPT_DIR.parent / "sql" / "biz" / "asset_linkage_factor.sql"
+            ddl = ddl_path.read_text(encoding="utf-8")
+            conn.execute(ddl)
+            # 清空旧数据（本表为全量重算快照）
+            conn.execute("DELETE FROM biz.asset_linkage_factor")
+            inserted = 0
+            for (a, b, rho), es in results:
+                if not (es["lag1"] - es["base_pos"] > 0.08 and es["lag1"] > 0.55):
+                    continue
+                conn.execute("""
+                    INSERT INTO biz.asset_linkage_factor
+                        (asset_id_a, asset_id_b, correlation, lag1_rate, lag2_rate,
+                         base_rate, n_move)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (a, b, rho, es["lag1"], es["lag2"], es["base_pos"], es["n_move"]))
+                inserted += 1
+            conn.commit()
+            print("\n" + "=" * 78)
+            print(f"落库完成：biz.asset_linkage_factor 写入 {inserted} 对（验证通过：滞后1d 显著）")
+            print("=" * 78)
         return 0
     finally:
         conn.close()

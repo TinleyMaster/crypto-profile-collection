@@ -970,13 +970,23 @@ def run_slow_second_order(conn, config: dict,
 
         direct_assets = [l["asset_id"] for l in cat_links.get(catalyst_id, [])]
         direct_sectors = list(cat_sectors.get(catalyst_id, set()))
+
+        # 4.1 实证联动对展开（优先）：A 有催化剂 → 联动 B（次日实证跟涨）
+        cat_count = 0
+        linkage_results = mapper.build_order2_from_linkage(
+            conn, catalyst_id, direct_assets)
+        linkage_ids = {r.asset_id for r in linkage_results}
+        all_so_results.extend(linkage_results)
+        cat_count += len(linkage_results)
+
         if not direct_sectors:
             trace_step("SO_second_order", catalyst_id=catalyst_id,
                        title=cat_row["title"],
-                       passed=False, reason="无直连板块(primary_sector)可展开")
+                       passed=bool(linkage_results),
+                       reason="无直连板块(primary_sector)可展开"
+                             + (f"，联动对展开 {len(linkage_results)} 个" if linkage_results else ""))
             continue
 
-        cat_count = 0
         for sector in direct_sectors:
             pool = sector_pool.get(sector, [])
             direct_set = set(direct_assets)
@@ -984,6 +994,8 @@ def run_slow_second_order(conn, config: dict,
             for cand in pool:
                 if cand["asset_id"] in direct_set:
                     continue
+                if cand["asset_id"] in linkage_ids:
+                    continue  # 已由实证联动展开，避免重复
                 conf = mapper.order2_confidence
                 if base_strength >= 70:
                     conf = min(conf + 0.1, 0.8)
@@ -1005,7 +1017,8 @@ def run_slow_second_order(conn, config: dict,
         trace_step("SO_second_order", catalyst_id=catalyst_id, passed=True,
                    title=cat_row["title"],
                    metrics={"kind": kind, "base_strength": base_strength,
-                            "mappings": cat_count})
+                            "mappings": cat_count,
+                            "linkage_mappings": len(linkage_results)})
 
     if not all_so_results:
         return {"second_order_count": 0, "new_signals": 0}

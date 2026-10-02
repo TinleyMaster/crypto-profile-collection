@@ -51,6 +51,12 @@ class SecondOrderMapper:
         self.max_second_order = int(g3.get("max_second_order", 10))
         self.order2_confidence = float(g3.get("order2_base_confidence", 0.45))
         self.min_kind_for_order2 = g3.get("min_kind", "event")  # structural > event > sentiment
+        # 实证联动因子（biz.asset_linkage_factor）展开配置
+        self.linkage_enabled = bool(g3.get("linkage_enabled", True))
+        self.linkage_min_n = int(g3.get("linkage_min_n", 10))
+        self.linkage_min_gain = float(g3.get("linkage_min_gain", 0.15))
+        # 置信度 = 实测 lag1 跟涨率 × 缩水系数（实证但样本有限，打 8 折保守）
+        self.linkage_conf_shrink = float(g3.get("linkage_conf_shrink", 0.8))
         # 只对这些 kind 做二阶
         self.kind_allow_order2 = {"structural", "event"}
 
@@ -115,6 +121,70 @@ class SecondOrderMapper:
                 if added >= per_sector_quota:
                     break
 
+        return results
+
+    def build_order2_from_linkage(
+        self,
+        conn,
+        catalyst_id: int,
+        direct_asset_ids: list[int],
+        max_per_catalyst: int | None = None,
+    ) -> list["SecondOrderResult"]:
+        """从实证联动因子表（biz.asset_linkage_factor）展开二阶受益。
+
+        与 build_order2_from_sector 互补：sector 是"同板块泛化"，这里是
+        "A 异动 → B 次日实证跟涨"的高精度联动对。置信度直接用实测 lag1
+        跟涨率 × 缩水系数（保守）。
+
+        Args:
+            conn: 数据库连接
+            catalyst_id: 催化剂 ID
+            direct_asset_ids: 已直连的 asset_id 列表（排除用，同时是联动锚点）
+            max_per_catalyst: 该 catalyst 最多取几个联动对（默认用 self.max_second_order）
+
+        Returns:
+            实证联动二阶受益列表（不含直连资产）
+        """
+        if not self.linkage_enabled or not direct_asset_ids:
+            return []
+        cap = max_per_catalyst or self.max_second_order
+        direct_set = set(direct_asset_ids)
+        rows = conn.execute("""
+            SELECT asset_id_a, asset_id_b, lag1_rate, base_rate
+            FROM biz.asset_linkage_factor
+            WHERE (asset_id_a = ANY(%s::BIGINT[]) OR asset_id_b = ANY(%s::BIGINT[]))
+              AND n_move >= %s
+              AND (lag1_rate - base_rate) >= %s
+            ORDER BY (lag1_rate - base_rate) DESC
+            LIMIT %s
+        """, (list(direct_set), list(direct_set),
+              self.linkage_min_n, self.linkage_min_gain, cap * 4)).fetchall()
+
+        results: list[SecondOrderResult] = []
+        seen: set[int] = set()
+        for r in rows:
+            # 取"非直连"那一端作为二阶标的
+            target = None
+            if r["asset_id_a"] in direct_set and r["asset_id_b"] not in direct_set:
+                target = r["asset_id_b"]
+            elif r["asset_id_b"] in direct_set and r["asset_id_a"] not in direct_set:
+                target = r["asset_id_a"]
+            else:
+                continue  # 两端都在直连里或都不在，跳过
+            if target in seen:
+                continue
+            conf = round(min(0.95, max(0.3, r["lag1_rate"] * self.linkage_conf_shrink)), 3)
+            results.append(SecondOrderResult(
+                catalyst_id=catalyst_id,
+                asset_id=target,
+                order_level=2,
+                confidence=conf,
+                sector_name=None,
+                link_basis="linkage_factor",
+            ))
+            seen.add(target)
+            if len(results) >= cap:
+                break
         return results
 
     @staticmethod

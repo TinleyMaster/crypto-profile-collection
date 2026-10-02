@@ -1135,6 +1135,13 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
 
         direct_assets = [l["asset_id"] for l in cat_links.get(catalyst_id, [])]
         direct_sectors = list(cat_sectors.get(catalyst_id, set()))
+
+        # 4.1 实证联动对展开（优先）：A 有催化剂 → 联动 B（次日实证跟涨）
+        linkage_results = mapper.build_order2_from_linkage(
+            conn, catalyst_id, direct_assets)
+        linkage_ids = {r.asset_id for r in linkage_results}
+        all_so_results.extend(linkage_results)
+
         if not direct_sectors:
             continue
 
@@ -1146,6 +1153,8 @@ def step6b_second_order(conn, config: dict, dry_run: bool = False) -> dict:
             for cand in pool:
                 if cand["asset_id"] in direct_set:
                     continue
+                if cand["asset_id"] in linkage_ids:
+                    continue  # 已由实证联动展开，避免重复
                 # 信心度：二阶基础信心 + 强度加成
                 conf = mapper.order2_confidence
                 if base_strength >= 70:

@@ -53,6 +53,31 @@ _LONG_TASK_REGEX = "(" + "|".join(LONG_TASK_PATTERNS) + ")"
 NOSTART_ERROR = "nostart: 任务被取走后从未真正启动（线程/加载失败或 DB 不可达），已回收"
 
 
+def _adapt_cmd(cmd: list[str]) -> list[str]:
+    """跨环境命令适配（本地/容器共享 sys.task 队列时必需）。
+
+    任务 cmd 由提交方（scheduler / Flask）在本进程环境构造并固化到共享 DB：
+    cmd[0]=提交方 sys.executable、脚本=提交方 WORKER_SCRIPTS_DIR 下的绝对路径。
+    任何环境的 runner 都可能取走执行（容器 scheduler 提交 → 本地 runner 消费，
+    或反向），直接跑另一环境的绝对路径会 FileNotFoundError（实况：容器提交的
+    `/usr/local/bin/python -u /app/scripts/bin/xxx.py` 被本地 runner 取走后
+    [Errno 2] 失败）。执行前把「当前环境不存在」的解释器换成 sys.executable、
+    把绝对路径 .py 脚本映射到本环境 WORKER_SCRIPTS_DIR 同名脚本（存在才替换），
+    使任务在两个环境都能被正确消费。
+    """
+    if not cmd:
+        return cmd
+    out = list(cmd)
+    if os.path.basename(out[0]).startswith("python") and not os.path.exists(out[0]):
+        out[0] = sys.executable
+    for i, tok in enumerate(out):
+        if tok.endswith(".py") and os.path.isabs(tok) and not os.path.exists(tok):
+            local = WORKER_SCRIPTS_DIR / Path(tok).name
+            if local.exists():
+                out[i] = str(local)
+    return out
+
+
 def _kill_proc_tree(proc: subprocess.Popen) -> None:
     """杀掉任务进程及其整个进程组（采集脚本会派生 Playwright 等后代进程）。
 
@@ -777,6 +802,14 @@ class TaskManager:
             if not task:
                 return
             cmd = list(task["cmd"])
+            adapted = _adapt_cmd(cmd)
+            if adapted != cmd:
+                _safe_append_log(
+                    task_id,
+                    f"[TASK] 跨环境路径适配: {' '.join(adapted)}",
+                    {"log_failures": 0},
+                )
+                cmd = adapted
 
             _append_log(task_id, f"[TASK] 开始执行，cwd={WORKER_SCRIPTS_DIR.parent}")
             proc = subprocess.Popen(

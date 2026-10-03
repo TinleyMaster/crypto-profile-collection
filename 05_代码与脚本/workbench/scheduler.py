@@ -190,6 +190,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     ("coinglass_ob_depth", "10 4 * * *", "phase_backfill_ob_depth.py",
      ["--scope", "binance", "--interval", "4h", "--days", "7", "--range", "1"],
      "CoinGlass 盘口深度历史-单所 Binance（每日 04:10，±1% 挂单深度 @4h）", "core"),
+    # 爆仓极值日窗口覆盖层（fix_088，2026-10-03 投研结论落地）：BTC/ETH 日频爆仓环境 +
+    # 可行动窗口 → biz.liq_daily_regime，供早报/告警环境段只读展示。
+    # 自刷新输入（币安 1d K线 + CoinGlass @1d 爆仓，~6 次请求）；05:30 错开 01-04 点
+    # CoinGlass 作业、早于早报快照 08:30。
+    ("liq_daily_regime", "30 5 * * *", "build_liq_daily_regime.py", [],
+     "爆仓极值日窗口覆盖层（每日 05:30，BTC/ETH 日频 regime → biz.liq_daily_regime）", "core"),
     # ETF 资金流日频入库（每日 06:00 + 12:00 北京，早于早报快照 08:30；cryptoetf.today 为 T+1 更新）
     # 此前该 ingest 未注册调度，导致 biz.etf_flow_daily 停留在旧日期（早报 ETF 数据滞后）
     # 双跑（2026-09-18 审计 F3）：上游 T-1 数据发布偏晚（实测 09-17 数据在 09-18 09:35 北京仍未发布），

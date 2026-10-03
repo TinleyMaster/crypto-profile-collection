@@ -883,6 +883,28 @@ def _build_regime(conn) -> dict:
     except Exception:
         pass
 
+    # 爆仓极值日窗口（M2_liq_regime 覆盖层，2026-10-03 新增）——**只读标注，不进闸门**。
+    # 数据源 biz.liq_daily_regime（build_liq_daily_regime.py 日频维护）。仅把 BTC 的
+    # 空爆窗口/双爆窗口写进 tags 供告警环境段展示；**不改 long_fav/short_fav**（日频粒度
+    # 不匹配 5m 判定窗口，铁律禁止接入实时判定）。表缺失/异常 ⇒ 静默无标注。
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT bucket, long_window, capitulation_window "
+                "FROM biz.liq_daily_regime WHERE symbol='BTCUSDT' "
+                "ORDER BY ts DESC LIMIT 1"
+            )
+            r = cur.fetchone()
+        if r:
+            if r.get("long_window"):
+                tags.append("爆仓:空爆窗口（轧空后上涨窗口）")
+            elif r.get("capitulation_window"):
+                tags.append("爆仓:双爆窗口（恐慌顶点观察）")
+            elif r.get("bucket"):
+                tags.append(f"爆仓:{r['bucket']}")
+    except Exception:
+        pass
+
     if not long_fav:
         tags.append(f"多头环境受限（{'/'.join(long_block) or '原因未知'}）")
     if not short_fav:

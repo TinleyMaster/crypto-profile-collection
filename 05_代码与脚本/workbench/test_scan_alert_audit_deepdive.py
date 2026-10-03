@@ -277,7 +277,9 @@ check("font-size:11px'></span>" not in h_no_conf,
       "confidence 为 None 时不渲染空药丸（原 `…font-size:11px'></span>`）", h_no_conf)
 h_conf = _body(sd._render_alert_email([_item(sig=_sig(confidence="high"))]))
 check(">HIGH</span>" in h_conf, "confidence='high' → 渲染 `HIGH` 药丸（实物 id=1303/1304）")
-check(">HIGH</span>" in h_conf and h_conf.index(">HIGH</span>") < h_conf.index("量比"),
+# 2026-10-03：顶部速读面板（审计改造）在卡片**之前**也含「量比」字样 ⇒ 位置断言须
+# 限定在卡片内（`rindex` 取卡片量比行），语义不变：HIGH 药丸仍须在卡片头量比行之前。
+check(">HIGH</span>" in h_conf and h_conf.index(">HIGH</span>") < h_conf.rindex("量比"),
       "药丸位置在卡片头（量比行之前）")
 
 # ═══════════════════════════════════════════════════════════════

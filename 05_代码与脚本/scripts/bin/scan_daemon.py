@@ -3377,6 +3377,11 @@ def _render_resonance_msgs(res: dict) -> str:
             if len(txt) > RESONANCE_MSG_CHARS:
                 txt = txt[:RESONANCE_MSG_CHARS - 1] + "…"
             name, fg, bg = _DIR_CN.get(str(m.get("dir")), _DIR_CN["neutral"])
+            # 2026-10-03 审计③：催化剂只罗列、无「权重」展示 ⇒ 按 impact_strength 补强弱标签。
+            _st_cn = {"strong": "强", "medium": "中", "weak": "弱"}.get(
+                str(m.get("strength") or "").lower(), "")
+            strength = (f"<span style='color:#9ca3af;font-size:10px'>权重{_st_cn}</span> "
+                        if _st_cn else "")
             kind = (f"<span style='color:#6b7280'>{html.escape(str(m['kind']))}</span> "
                     if m.get("kind") else "")
             conf = (f" <span style='color:#9ca3af'>conf {float(m['conf']):.2f}</span>"
@@ -3407,7 +3412,7 @@ def _render_resonance_msgs(res: dict) -> str:
             rows.append(
                 f"<div style='margin-top:3px'>"
                 f"<span style='background:{bg};color:{fg};font-size:10px;padding:0 4px;"
-                f"border-radius:2px;font-weight:700'>{name}</span> {kind}"
+                f"border-radius:2px;font-weight:700'>{name}</span> {strength}{kind}"
                 f"<span style='color:#111'>{html.escape(txt)}</span>{conf}{date}</div>"
                 f"{addr_html}")
         tail = (f" <span style='color:#9ca3af'>（共 {total} 条，仅列最新 {len(rows)} 条）</span>"
@@ -3497,6 +3502,253 @@ def _render_attribution(it: dict) -> str:
         return ""
 
 
+# ═══════════════════════════════════════════════════════════════
+# 摘要层（2026-10-03 审计「盘面异动告警邮件」改造，方案A·对内自用版）
+# 审计结论：原邮件是机器原始 dump —— 可读性差（术语无释义、结论埋在段落末尾）、
+# 共振只给总数（黑盒）、「S2 空头扎实」与「不建议新开」无醒目冲突标记、
+# 免责声明藏在文末图例。本层做**纯增量**改造：顶部免责前置 + 速读面板 +
+# 共振分布披露 + 术语速查 + 卡片判定高亮带；既有文案与探针断言逐字保留。
+# 所有函数为纯函数（只读入参，不碰 DB / 全局），可离线测试。
+# ═══════════════════════════════════════════════════════════════
+VERDICT_CN = {
+    "pass":    ("✅ 可开",        "#15803d", "#dcfce7"),
+    "watch":   ("⏸ 观望",        "#b45309", "#fef3c7"),
+    "avoid":   ("⛔ 不建议新开",  "#b91c1c", "#fee2e2"),
+    "observe": ("👀 观察档",      "#6b7280", "#f1f5f9"),
+}
+
+
+def _card_verdict(it: dict) -> tuple[str, str, str] | None:
+    """卡片判定结论（可开/观望/不建议新开/观察档）+ 配色。
+
+    真源 = `it["reason"]["tone"]`（与「🎯 开仓依据」段、批级摘要同源），避免三处
+    各说各话；无 reason（离线探针/旧调用方）返回 None ⇒ 不渲染高亮带，行为不变。
+    """
+    reason = it.get("reason") or {}
+    tone = reason.get("tone")
+    if tone in VERDICT_CN:
+        return VERDICT_CN[tone]
+    return None
+
+
+def _card_lv_txt(sig: dict) -> str:
+    """卡片级别可读文案（`lv2_15m` → 「15m 级异动」；无则用 timeframe）。"""
+    for t in (sig.get("context_tags") or []):
+        if str(t).startswith("lv") and "_" in str(t):
+            return f"{str(t).split('_')[-1]} 级异动"
+    return str(sig.get("timeframe") or "-")
+
+
+def _card_invalid_short(sig: dict) -> str | None:
+    """失效位速览（做多「跌破」/做空「升破」+ 价格 + 幅度），与卡片主行同口径。"""
+    trig, sp = sig.get("trigger_price"), sig.get("stop_loss_pct")
+    if trig is None or sp is None:
+        return None
+    sp = float(sp)
+    up = sig.get("p_dir") == "up"
+    barrier = float(trig) * (1 - sp / 100) if up else float(trig) * (1 + sp / 100)
+    return (f"{'跌破' if up else '升破'} {_fmt_num(barrier, 6)}"
+            f"（{'-' if up else '+'}{sp:.2f}%）")
+
+
+def _card_flaw_txt(it: dict) -> str:
+    """一句话「核心矛盾/缺陷」：币级逆风槽 + 样本不足 + 新鲜共振相悖。
+
+    只取币级槽（`coin=True`），批级窗口（全批共享）不混入；短句化，避免与主卡片
+    完整表述重复。审计要求：矛盾必须与信号方向同屏，防止读者断章取义。
+    """
+    parts: list[str] = []
+    reason = it.get("reason") or {}
+    for s in reason.get("slots") or []:
+        if not s.get("coin", True):
+            continue
+        txt = str(s.get("text") or "")
+        if s.get("kind") == "bad":
+            short = re.split(r"[〔（]", txt)[0].strip().rstrip("：:")
+            if short:
+                parts.append(short)
+        elif s.get("kind") == "info" and "样本不足" in txt:
+            parts.append("样本有限，历史参考弱")
+    sig = it.get("signal") or {}
+    res = it.get("resonance") or {}
+    up = sig.get("p_dir") == "up"
+    cdf = res.get("catalyst_dir_fresh") or {}
+    f_bull, f_bear = int(cdf.get("bullish", 0)), int(cdf.get("bearish", 0))
+    if up and f_bear > f_bull:
+        parts.append("新鲜共振以利空为主，与做多相悖")
+    elif (not up) and f_bull > f_bear:
+        parts.append("新鲜共振以利多为主，与做空相悖")
+    return "；".join(dict.fromkeys(parts))
+
+
+def _card_logic_txt(it: dict) -> str:
+    """一句话核心逻辑：场景 + 级别 + 方向涨跌 + 资金/费率/催化剂构成。"""
+    sig = it["signal"]
+    res = it.get("resonance") or {}
+    sc = _scenario_label(sig)
+    lv = _card_lv_txt(sig)
+    dir_cn = "做空" if sig.get("p_dir") == "down" else "做多"
+    chg = _fmt_num(sig.get("price_chg_pct"), 2, "%", signed=True)
+    cvd = str(sig.get("cvd_dir") or "n/a")
+    vr = _fmt_num(sig.get("vol_ratio"), 2, "x")
+    fund = sig.get("funding_rate")
+    fund_txt = "费率 n/a" if fund is None else f"费率 {float(fund) * 100:+.4f}%"
+    cd = res.get("catalyst_dir") or {}
+    cat_n = _catalyst_total(cd)
+    if cat_n:
+        cat_txt = (f"{int(cd.get('bullish', 0))}多/{int(cd.get('bearish', 0))}空/"
+                   f"{int(cd.get('neutral', 0))}中")
+    elif res.get("asset_linked", True):
+        cat_txt = "无催化剂"
+    else:
+        cat_txt = "催化剂 n/a"
+    return (f"{sc} · {lv} · {dir_cn} {chg}；CVD {cvd} · 量比 {vr} · "
+            f"{fund_txt}；催化剂 {cat_txt}")
+
+
+def _card_sample_weak(it: dict) -> bool:
+    """卡片是否带「样本不足」披露（该档无历史依据 ⇒ 挂「样本有限」徽章）。"""
+    reason = it.get("reason") or {}
+    return any("样本不足" in str(s.get("text") or "")
+               for s in (reason.get("slots") or []))
+
+
+def _card_linkage_txt(it: dict) -> str:
+    """催化剂×盘面联动的一句话解读（审计③：催化剂只罗列、不解释与信号的联动）。
+
+    由「信号方向 × 新鲜催化剂方向」派生，回答「为什么这些消息会与信号同框」——
+    例：空头信号 + 利多催化剂 = 「利好兑现 / 追高防反抽」结构，利多消息不构成空头
+    反证。纯展示层解读，不改变判读；无新鲜催化剂时返回空串。
+    """
+    sig = it.get("signal") or {}
+    res = it.get("resonance") or {}
+    up = sig.get("p_dir") == "up"
+    cdf = res.get("catalyst_dir_fresh") or {}
+    f_bull = int(cdf.get("bullish", 0))
+    f_bear = int(cdf.get("bearish", 0))
+    f_neut = int(cdf.get("neutral", 0))
+    if f_bull + f_bear + f_neut == 0:
+        return ""
+    if up:
+        if f_bear > f_bull:
+            return "利空催化剂与做多同框：多头缺基本面背书，警惕逆势反弹中的利空兑现"
+        return "新鲜催化剂以利多为主，与做多形成基本面+盘面共振"
+    if f_bull > f_bear:
+        return "利多催化剂与做空同框：属「利好兑现 / 追高防反抽」结构，利多消息不构成空头反证"
+    return "催化剂中性，未提供多头基本面支撑：空头结论仍由盘面（价×OI）独立驱动"
+
+
+def _render_disclaimer() -> str:
+    """免责/使用边界（审计：从文末图例前置到邮件最顶，醒目化）。"""
+    return ("<div style='margin:0 0 8px;padding:8px 10px;background:#fff7ed;"
+            "border:1px solid #fdba74;border-left:4px solid #f97316;"
+            "border-radius:4px;font-size:12.5px;color:#7c2d12;line-height:1.55'>"
+            "<b>⚠️ 使用边界（先读）：</b>本邮件为盘面数据分析参考，"
+            "<b>不构成投资建议</b>。「高置信 / HIGH」指<b>盘面形态置信</b>"
+            "（价×OI 组合达标），<b>不等于盈利概率</b>；样本不足处仅作披露、"
+            "不抬高可信度。执行层仅做多，<b>空头通道仅作状态提示</b>。</div>")
+
+
+def _render_quick_summary(items: list[dict]) -> str:
+    """顶部「速读面板」：每币一句话结论（审计：摘要优先，明细仍在卡片）。
+
+    机器原始 dump 缺「面向人」的摘要层：结论埋在段落末尾、读者要先读完一整张卡。
+    本面板把每币的 判定 / 核心逻辑 / 风险 / 关键数据 压成数行置顶。
+    """
+    if not items:
+        return ""
+    rows = []
+    for it in items:
+        sig = it["signal"]
+        sym = str(sig.get("symbol") or "?")
+        up = sig.get("p_dir") == "up"
+        arrow = "#ef4444" if up else "#22c55e"
+        dir_cn = "做多" if up else "做空"
+        chg = _fmt_num(sig.get("price_chg_pct"), 2, "%", signed=True)
+        v = _card_verdict(it)
+        v_txt_html = (f" 判定：<b style='color:{v[1]}'>[{v[0]}]</b>" if v else "")
+        logic = html.escape(_card_logic_txt(it))
+        flaw = html.escape(_card_flaw_txt(it))
+        fund = sig.get("funding_rate")
+        fund_txt = "费率 n/a" if fund is None else f"费率 {float(fund) * 100:+.4f}%"
+        vr = _fmt_num(sig.get("vol_ratio"), 2, "x")
+        inv = _card_invalid_short(sig)
+        inv_txt = f" · 失效位 {inv}" if inv else ""
+        flaw_txt = (f"<div style='color:#b91c1c'>⚠️ 风险：{flaw}</div>" if flaw else "")
+        # 2026-10-03 审计③：催化剂只罗列、不解释与信号的联动 ⇒ 补一句话联动解读。
+        linkage = html.escape(_card_linkage_txt(it))
+        linkage_txt = (f"<div style='color:#0369a1'>🔗 联动解读：{linkage}</div>"
+                       if linkage else "")
+        rows.append(
+            f"<div style='margin:6px 0;padding:7px 10px;background:#fff;"
+            f"border:1px solid #e5e7eb;border-left:4px solid {arrow};border-radius:4px;"
+            f"font-size:12.5px;line-height:1.55'>"
+            f"<div><b style='color:{arrow}'>{'🟥' if up else '🟩'} {sym}</b>"
+            f"<span style='color:#374151'>｜{_scenario_label(sig)} · "
+            f"{_card_lv_txt(sig)} · {dir_cn} {chg}</span>{v_txt_html}</div>"
+            f"<div style='color:#374151'>核心逻辑：{logic}</div>"
+            f"{flaw_txt}"
+            f"{linkage_txt}"
+            f"<div style='color:#6b7280'>关键数据：量比 {vr} · {fund_txt}{inv_txt}</div>"
+            f"</div>")
+    return ("<div style='margin:8px 0 0'><div style='font-size:13px;font-weight:700;"
+            "color:#0f172a'>📌 一句话速读</div>" + "".join(rows) + "</div>")
+
+
+def _render_resonance_distribution(items: list[dict]) -> str:
+    """共振总数逐币摊开（审计：标题只给「含共振 N 条」是黑盒，无法核验）。
+
+    逐币列出 事件/催化剂/KOL 三段计数，小计之和 = 标题「含共振 N 条」（同源），
+    明细仍由各币卡片的「共振消息明细」块展开。
+    """
+    if not items:
+        return ""
+    rows = []
+    total = 0
+    for it in items:
+        sig = it["signal"]
+        res = it.get("resonance") or {}
+        linked = res.get("asset_linked", True)
+        cd = res.get("catalyst_dir") or {}
+        cat_n = _catalyst_total(cd)
+        if linked and cat_n:
+            cat_txt = (f"{cat_n} 条（{int(cd.get('bullish', 0))}多/"
+                       f"{int(cd.get('bearish', 0))}空/{int(cd.get('neutral', 0))}中）")
+        elif linked:
+            cat_txt = "0 条"
+        else:
+            cat_txt = "n/a（未关联资产）"
+        ev = len(res.get("event") or [])
+        kol = len(res.get("kol") or []) if linked else 0
+        sub = ev + (cat_n if linked else 0) + kol
+        total += sub
+        rows.append(
+            f"<div style='font-size:12px;color:#334155'>· {sig.get('symbol')}："
+            f"事件 {ev} · 催化剂 {cat_txt} · KOL {kol}（小计 {sub}）</div>")
+    return ("<div style='margin:6px 0 0;padding:8px 10px;background:#f8fafc;"
+            "border:1px solid #e5e7eb;border-radius:4px'>"
+            "<div style='font-size:12.5px;color:#0f172a'><b>共振分布</b>"
+            f"<span style='color:#6b7280;font-size:11px'>"
+            + ("（合计 0 条，本批为纯盘面信号；明细见各币卡片）" if total == 0
+               else f"（合计 {total} 条，与标题「含共振 N 条」同源；明细见各币卡片）")
+            + "</span></div>"
+            + "".join(rows) + "</div>")
+
+
+def _render_glossary() -> str:
+    """术语快速释义 + 数据口径（审计：FGI/CVD/OI/RR/S1~S4 等缩写须邮件内可读）。"""
+    return ("<div style='margin:6px 0 0;padding:6px 8px;background:#f8fafc;"
+            "border:1px solid #e5e7eb;border-radius:4px;font-size:11.5px;"
+            "color:#475569;line-height:1.6'>"
+            "<b>术语速查：</b>HIGH/高置信 = 盘面形态置信（价×OI 组合），≠ 盈利概率；"
+            "S1~S4 = 价×OI 场景（S2=空头扎实）；CVD = 主动买/卖方向；"
+            "OI = 未平仓合约量；费率 = 资金费率（正=多头付空头）；"
+            "量比 = 放量倍数；RR = 盈亏比；失效位 = 触发 2×ATR 的止损价；"
+            "FGI = 恐慌贪婪指数；PF = 利润因子；盈亏平衡 = 由赔率推出的胜率门槛。<br>"
+            "<b>数据口径：</b>OI/CVD/费率取 Binance U 本位永续；信号 = 近 20 分钟新触发；"
+            "催化剂窗 = 7 天（&gt;3 天计陈旧、不推高判定）；胜率窗 = 近 3 日滚动。</div>")
+
+
 def _render_alert_email(items: list[dict],
                         regime_tags: list[str] | None = None,
                         batch: dict | None = None) -> str:
@@ -3505,8 +3757,11 @@ def _render_alert_email(items: list[dict],
     `batch`（可选，审计_告警邮件开仓依据缺失 §三.3/§3.4）：
       `{"regime": _build_regime 的返回, "ctx": _load_reason_context 的返回}`。
       传入时页头改「按本批方向」表述（受限方向从「市场环境」行挪到方向行），并追加
-      批级可开性摘要 + 告警量暴增警示。**不传 ⇒ 与旧行为逐字一致**（既有离线探针
-      全部按 2 参数调用，不受影响）。
+      批级可开性摘要 + 告警量暴增警示。**不传 ⇒ 除下方摘要层外与旧行为一致**。
+
+    2026-10-03 审计优化（方案A·对内自用版）：免责/使用边界前置 + 顶部速读面板
+    （每币一句话结论 / 共振分布 / 术语速查）+ 卡片判定高亮带为**无条件纯增量**
+    —— 2 参/3 参调用都会渲染，既有文案与探针断言逐字保留。
     """
     # 统一标注北京时间（东八区）：数据存储与判定口径仍是 UTC，仅展示层转换。
     now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
@@ -3763,6 +4018,11 @@ def _render_alert_email(items: list[dict],
         if sig.get("status") == "confirmed" and sig.get("pool") == "main":
             badge += (f" <span style='background:#dbeafe;color:#1d4ed8;padding:1px 5px;"
                       f"border-radius:3px;font-size:11px'>已确认</span>")
+        # 2026-10-03 审计优化：样本不足却标 HIGH 的「矛盾」在此明示 —— HIGH 是盘面形态
+        # 置信（价×OI 组合），非历史样本胜率；「样本有限」徽章提醒勿据此加码。
+        if _card_sample_weak(it):
+            badge += (" <span style='background:#fef3c7;color:#92400e;padding:1px 5px;"
+                      "border-radius:3px;font-size:11px'>样本有限</span>")
         bar = _strength_bar(_alert_strength(it), top, arrow_color) if top > 0 else ""
         rank = _CIRCLED[_card_no] if _card_no < len(_CIRCLED) else f"{_card_no + 1}."
         _card_no += 1
@@ -3817,6 +4077,22 @@ def _render_alert_email(items: list[dict],
         reason_txt = _render_reason(it.get("reason"))
         # L0 变化榜标注（工单_L0）：纯展示、不污染判读；无上榜/BRK ⇒ 空串。
         diff_txt = _render_diff_boards(it)
+        # 2026-10-03 审计优化：判定结论与信号方向**同屏高亮**（防「只看空头扎实、
+        # 忽略不建议新开」的断章取义）。一句话逻辑 + 核心矛盾前置；有 reason 才渲染。
+        verdict_banner = ""
+        _v = _card_verdict(it)
+        if _v:
+            _logic = html.escape(_card_logic_txt(it))
+            _flaw = html.escape(_card_flaw_txt(it))
+            verdict_banner = (
+                f"<div style='margin:4px 0;padding:5px 8px;background:{_v[2]};"
+                f"border-left:3px solid {_v[1]};border-radius:4px;font-size:12.5px;"
+                f"line-height:1.5'>"
+                f"<b style='color:{_v[1]};font-size:13px'>判定结论：{_v[0]}</b>"
+                f"<span style='color:#111'>｜{_logic}</span>"
+                + (f"<div style='color:#b91c1c;font-size:12px'>⚠️ {_flaw}</div>"
+                   if _flaw else "")
+                + "</div>")
         body_parts.append(
             f"<div style='margin:8px 0;padding:10px 12px;border-left:4px solid "
             f"{arrow_color};background:#f9fafb;color:#111'>"
@@ -3824,6 +4100,7 @@ def _render_alert_email(items: list[dict],
             f"<span style='color:#6b7280;font-size:12px'>{pool_label}"
             f"{'（观察档）' if is_brk_card else ''} · "
             f"{lv_txt or (sig.get('timeframe') or '-')}{brk_bar}</span> {flat_note}</div>"
+            f"{verdict_banner}"
             f"<div style='margin:2px 0 4px'><b>{sc_label}</b> "
             f"<b style='color:{arrow_color}'>{dir_label}</b> "
             f"<span style='color:#374151'>{_fmt_num(sig.get('price_chg_pct'), 2, '%', signed=True)}</span>"
@@ -3845,10 +4122,15 @@ def _render_alert_email(items: list[dict],
     # L0 变化榜标注同法：仅当本封确有非 BRK 卡片渲染了上榜标注时才挂图例锚点。
     has_diff = any((it.get("diff_boards") and not _is_brk_sig(it.get("signal") or {}))
                    for it in items)
-    legend = ("<p style='color:#6b7280;font-size:12px'>图例：场景编号按行自身维度重算 —— "
-              "生产扫描只用「价方向 × OI 方向」两维（S1 多头进攻 / S2 空头扎实 / "
-              "S3 多头减仓 / S4 空头兑现），回测口径另含 CVD 维（S1..S8，其中 S5..S8 为"
-              "兑现与反转）；「N 级异动」= 触发周期；"
+    # 2026-10-03 审计优化：图例由单段巨墙拆为带小标题的分段（审计①：几乎无法阅读）。
+    # 全部口径文案**逐字保留**（探针按子串断言），仅按语义拆段 + 加粗节标题。
+    _leg_p = lambda s: f"<p style='color:#6b7280;font-size:12px'>{s}</p>"
+    legend_parts = [
+        _leg_p(
+            "图例：<b>场景与市场环境。</b>场景编号按行自身维度重算 —— "
+            "生产扫描只用「价方向 × OI 方向」两维（S1 多头进攻 / S2 空头扎实 / "
+            "S3 多头减仓 / S4 空头兑现），回测口径另含 CVD 维（S1..S8，其中 S5..S8 为"
+            "兑现与反转）；「N 级异动」= 触发周期；"
               f"「市场环境」= 全局 regime（btc_1h = BTC 最近两根已收盘 1h 的收盘涨跌；"
               f"fgi = 恐慌贪婪指数；cap_trend = 总市值日环比）；任一越过门槛"
               f"（BTC ±{REGIME_BTC_1H_THR:g}% / FGI {REGIME_FGI_FEAR:g}·"
@@ -3857,8 +4139,9 @@ def _render_alert_email(items: list[dict],
               "而告警只取 high ⇒ 该方向本轮不发信（非否决该方向本身）；"
               "「本批含蓄势池突破（BRK）N 条」= 本封含蓄势池突破信号数，"
               "其卡片另标「触发根」= 该突破判定的已收盘 1h 根；"
-              "BRK 判定只用价+量，不落 OI/CVD ⇒ BRK 卡片 OI/CVD 恒为 n/a（设计，非缺失）；"
-              "CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
+              "BRK 判定只用价+量，不落 OI/CVD ⇒ BRK 卡片 OI/CVD 恒为 n/a（设计，非缺失）。"),
+        _leg_p(
+            "<b>指标口径。</b>CVD up/down = 主动买/卖占比方向，其后为净额与占同窗口成交额的比；"
               "费率年化 = 当期 ×(24/结算间隔)×365（Binance U 本位多为 8h、部分品种 4h；"
               "间隔缺失按 8h），正 = 多头付空头（多头拥挤）、"
               "负 = 空头付多头（对做多顺风）；"
@@ -3867,8 +4150,9 @@ def _render_alert_email(items: list[dict],
               "带内（工单 P2-4：原 21 根反向极值实测幅度不可用，-11.97% 配 +4.69% 涨幅 "
               "⇒ 风险回报倒挂）；"
               f"「已触下限/上限」= 失效位被夹到 [{STOP_BAND_TXT}] 边界，真实 2×ATR 在"
-              "该边界之外（更窄/更宽），非「2×ATR 恰等于该值」；"
-              "「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
+              "该边界之外（更窄/更宽），非「2×ATR 恰等于该值」。"),
+        _leg_p(
+            "<b>催化剂与共振。</b>「催化剂」括注的「净多/净空」= 利多−利空条数（中性不计方向），"
               "「最新/含 N 条 >X 天/剔除陈旧后净X/无新鲜条目」= 催化剂新鲜度（7 天窗口"
               "含陈旧条目；「剔除陈旧后净X」= 去掉 >X 天条目后的方向净值，陈旧旧闻不推高"
               "conviction；「无新鲜条目」= 全部 >X 天）；标题「含共振 N 条（k/M 币）」为全量口径"
@@ -3897,8 +4181,9 @@ def _render_alert_email(items: list[dict],
               "（完整、可复制到区块浏览器）——两行均豁免单条 90 字截断；摘要中的"
               "「其中 N/M 笔流向交易所」= 流入交易所（潜在抛压）的笔数）、"
               "KOL 取 direction 的 long/short；未关联资产的催化剂/KOL 两段不渲染明细"
-              "（无从查询 ≠ 0，与「共振」行的 n/a 一致）；"
-              "「历史同象限」= 同象限（价方向 × OI 方向）已告警信号的方向对齐后验（中位/胜率/样本量；"
+              "（无从查询 ≠ 0，与「共振」行的 n/a 一致）。"),
+        _leg_p(
+            "<b>后验、强度与提示。</b>「历史同象限」= 同象限（价方向 × OI 方向）已告警信号的方向对齐后验（中位/胜率/样本量；"
               "「按象限跨币种聚合」，同一象限的所有币共用同一组数字，与具体币无关；"
               "样本仅覆盖告警期、含顺风期选择偏置，非无偏基准）；"
               "强度条 = 本封邮件内「相对」强弱（量比 × |OI 增速|，BRK 无 OI 增速时取 "
@@ -3914,7 +4199,8 @@ def _render_alert_email(items: list[dict],
               "ℹ️ = 提示性说明（非风险警告，不改变信号），本封出现三类："
               "①「纯技术面信号…缺基本面确认」= 该币无催化剂且费率未覆盖，结论仅基于盘面；"
               "②「共振方向无新鲜条目，未参与结论」= 共振条目全为陈旧（>X 天），不计入多空结论；"
-              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号；")
+              "③「CVD … 与做空结论相反」= 主动买卖方向与做空相悖，仅提示、不改变信号。"),
+    ]
     # 审计_告警邮件开仓依据缺失 §三：新段落的口径锚点。N-8702-E / 自述②：这些锚点
     # **只在本封实际渲染了对应段落时**加入 —— 否则依据段降级（reason_ctx 为空）时
     # 图例仍宣称有该段，与正文不一致；且原实现无条件输出，2 参旧调用方也凭空多出
@@ -3958,18 +4244,18 @@ def _render_alert_email(items: list[dict],
                    "纯展示上下文，不改判读 / 不抬 conviction / 不绕门槛；"
                    "括号内为变化榜数据日期（生产可能滞后，非当日即诚实披露）。")
     if dir_line:
-        legend += legend_dir
+        legend_parts.append(_leg_p(legend_dir))
     if has_reason:
-        legend += legend_reason
+        legend_parts.append(_leg_p(legend_reason))
         if _summary_out.get("summary_head_shown"):
-            legend += legend_summary
+            legend_parts.append(_leg_p(legend_summary))
         if _summary_out.get("batch_rows_shown"):
-            legend += legend_batch
+            legend_parts.append(_leg_p(legend_batch))
         if _summary_out.get("surge_shown"):
-            legend += legend_surge
+            legend_parts.append(_leg_p(legend_surge))
     if has_diff:
-        legend += legend_diff
-    legend += "</p>"
+        legend_parts.append(_leg_p(legend_diff))
+    legend = "".join(legend_parts)
     footnote = ("<p style='color:#999;font-size:12px'>"
                 "n/a = 该维度无从查询（资产未关联 / 不在数据源内），≠ 数值为 0；"
                 "共振各段 n/a = 本库未关联该资产；催化剂 N 与括注方向合计同源"
@@ -3980,6 +4266,12 @@ def _render_alert_email(items: list[dict],
                 "本邮件为盘面数据分析参考，不构成投资建议。</p>")
     # 可访问性（审计 P2-6）：显式 charset/lang/color-scheme；所有文本节点给 color，
     # 防深色模式客户端下浅底 + 继承浅色字导致不可读。
+    # 2026-10-03 审计优化（方案A·对内自用版）：免责/使用边界前置到最顶；
+    # 顶部速读面板 = 每币一句话结论 + 共振分布 + 术语速查（摘要优先，明细仍在卡片）。
+    disclaimer = _render_disclaimer()
+    quick = _render_quick_summary(items)
+    res_dist = _render_resonance_distribution(items)
+    glossary = _render_glossary()
     return ("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
             "<meta name='color-scheme' content='light'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'></head>"
@@ -3988,7 +4280,10 @@ def _render_alert_email(items: list[dict],
             f"<h2 style='margin:0 0 6px;color:#111'>🚨 盘面异动告警</h2>"
             f"<p style='margin:0 0 6px;color:#374151;font-size:13px'>"
             f"生成于 {now} · 共 {len(items)} 个币</p>"
-            f"{env_line}{dir_line}{brk_line}{short_line}{summary}{body}{legend}{footnote}"
+            f"{disclaimer}"
+            f"{env_line}{dir_line}{brk_line}{short_line}"
+            f"{quick}{res_dist}{glossary}"
+            f"{summary}{body}{legend}{footnote}"
             "</body></html>")
 
 

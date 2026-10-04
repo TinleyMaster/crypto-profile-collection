@@ -83,6 +83,23 @@ _TEST_TX_PREFIX = "0xtest%"
 # 交易所家族判定：先按冒号拆（Binance: Hot Wallet 20 → Binance），再按空格拆（Binance 14 → Binance）
 _FAMILY_SQL = "split_part(split_part({col}, ':', 1), ' ', 1)"
 
+# ── 榜单噪音过滤 ──
+# 默认剔除稳定币（core.asset.asset_type='stablecoin'，不受 symbol 重名污染，
+# 且不误杀名字带 USDT/USDC 的 meme 币）。可选额外剔除封装/质押/LP/合成资产。
+_STABLE_ASSET_TYPE = "stablecoin"
+_NOISE_SECTORS = {"wrapped", "lp_token", "synthetic"}
+# 质押/封装/RWA 衍生品噪音（流动性往返无交易信号，且不在 asset_type='stablecoin' 覆盖内）。
+# 全部存大写，与 SQL 侧 UPPER(canonical_symbol) 比较保持一致。
+_NOISE_SYMBOLS = {
+    "STETH", "WSTETH", "CBETH", "BBSOL", "SOLVBTC", "XAUT", "PAXG",
+    "SNDKB", "SNDK", "BTCB", "WBTC", "WETH", "USDB", "EURT",
+}
+
+# 盘面信号共振窗口（小时）：榜单/详情展示近 N 小时内 scan_signal 的高置信异动
+SIGNAL_LOOKBACK_HOURS = 24
+# 链上大额单笔高亮阈值（美元）：超过则流水明细打「大额」徽标
+LARGE_TRANSFER_USD = 5_000_000
+
 # 标签新鲜度阈值（小时）：本地热跑每 30min 一次，故 >2h 视为偏旧；>26h 表示漏掉
 # 一整轮每日全量（生产上真实发生过 11 天断供，见 scheduler.py 的 enrich_reminder 注释）。
 LABEL_AGING_HOURS = 2.0
@@ -257,12 +274,15 @@ def _parse_common_args():
     chain = (request.args.get("chain") or "").strip() or None
     exchange = (request.args.get("exchange") or "").strip() or None
 
+    # 稳定币/封装噪音过滤：默认剔除（榜单只留交易型代币）
+    exclude_stable = request.args.get("exclude_stable", "1") not in ("0", "false", "False")
+
     try:
         limit = int(request.args.get("limit", 50))
     except (TypeError, ValueError):
         limit = 50
     limit = min(200, max(1, limit))
-    return hours, view, chain, exchange, limit
+    return hours, view, chain, exchange, limit, exclude_stable
 
 
 def _bucket_span(hours: int) -> int:
@@ -338,6 +358,171 @@ def _label_freshness(cur):
     }
 
 
+def _contract_symbol_candidates(symbol: str) -> list[str]:
+    """裸符号 → 合约符号候选（scan_signal.symbol 存 Binance 永续合约名，如
+    'B2USDT' / '1000FLOKIUSDT'；core.asset 存裸符号 'B2' / 'FLOKI'）。
+
+    与 scan_daemon._symbol_candidates 反向：从裸符号生成「最贴切→最宽松」候选，
+    供页面共振标注跨表匹配（不做归一化会让盘面信号恒空，见审计 P0-1）。
+    """
+    s = (symbol or "").upper().strip()
+    if not s:
+        return []
+    cands = [s, s + "USDT"]
+    if s not in ("BTC", "ETH", "XRP", "DOGE"):
+        cands.append("1000" + s + "USDT")
+    return cands
+
+
+def _fetch_scan_signals(cur, asset_ids: list[int], hours: int = SIGNAL_LOOKBACK_HOURS) -> dict[int, list[dict]]:
+    """批量取近 N 小时盘面信号（high/medium），按 asset_id 归组。
+
+    返回 {asset_id: [{pool, scenario, confidence, signal_ts, p_dir, oi_dir}]}，
+    只保留每条 symbol 的**最新**一条信号（同币 12h 告警冷却，避免卡片刷屏）。
+    """
+    if not asset_ids:
+        return {}
+    # 先取裸符号，再生成合约候选
+    cur.execute(
+        "SELECT asset_id, canonical_symbol FROM core.asset WHERE asset_id = ANY(%s)",
+        (asset_ids,))
+    sym_map = {r["asset_id"]: r["canonical_symbol"] for r in cur.fetchall()}
+    cand_map: dict[str, int] = {}      # 合约候选符号 -> asset_id
+    for aid, sym in sym_map.items():
+        for c in _contract_symbol_candidates(sym):
+            cand_map.setdefault(c, aid)
+    if not cand_map:
+        return {}
+
+    cur.execute(f"""
+        SELECT symbol, pool, scenario, confidence, signal_ts, p_dir, oi_dir
+        FROM (
+            SELECT symbol, pool, scenario, confidence, signal_ts, p_dir, oi_dir,
+                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY signal_ts DESC) AS rn
+            FROM biz.scan_signal
+            WHERE symbol = ANY(%s)
+              AND confidence IN ('high', 'medium')
+              AND signal_ts > NOW() - make_interval(hours => %s)
+        ) s
+        WHERE rn = 1
+    """, (list(cand_map.keys()), hours))
+    out: dict[int, list[dict]] = {}
+    for r in cur.fetchall():
+        aid = cand_map.get(r["symbol"])
+        if aid is None:
+            continue
+        out.setdefault(aid, []).append({
+            "pool": r["pool"], "scenario": r["scenario"],
+            "confidence": r["confidence"],
+            "signal_ts": r["signal_ts"].isoformat() if r["signal_ts"] else None,
+            "p_dir": r["p_dir"], "oi_dir": r["oi_dir"],
+        })
+    return out
+
+
+def _fetch_event_watchlist(cur, symbol: str, limit: int = 5) -> list[dict]:
+    """事件预置层共振：解锁 / 链上大额转账观察名单（与 scan_daemon 同口径）。
+
+    biz.event_watchlist.symbol 存裸符号（含少数合约符号残留），候选展开匹配；
+    事件本身**方向**：解锁=新增流通（抛压）⇒ 利空；链上转账方向不明 ⇒ 中性。
+    """
+    if not symbol:
+        return []
+    cands = _contract_symbol_candidates(symbol)
+    cur.execute("""
+        SELECT event_type, event_date, event_pct, detail, updated_at
+        FROM biz.event_watchlist
+        WHERE symbol = ANY(%s)
+        ORDER BY event_date DESC NULLS LAST, id DESC
+        LIMIT %s
+    """, (cands, limit))
+    out = []
+    for r in cur.fetchall():
+        out.append({
+            "type": r["event_type"],               # unlock / onchain_transfer
+            "date": str(r["event_date"])[:10] if r["event_date"] else None,
+            "event_pct": float(r["event_pct"]) if r["event_pct"] is not None else None,
+            "detail": str(r["detail"] or "").strip(),
+            "direction": "bearish" if r["event_type"] == "unlock" else "neutral",
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        })
+    return out
+
+
+def _stable_flow_summary(cur, hours, chain, exchange, limit: int = 5) -> dict | None:
+    """稳定币大额转账汇总：即使榜单默认剔除稳定币，也把「稳定币↔交易所」
+    的净流入作为独立信号返回（资金入所待命 = 潜在买盘，链上活跃度前置指标）。
+
+    与 ranking 同口径（_base_cte），只对 core.asset.asset_type='stablecoin'
+    的资产聚合；返回 {net_inflow_usd, per: [{symbol, inflow_usd, outflow_usd, net}]}。
+    全部稳定币净流出时仍返回（net 为负），供前端提示「提币离场」。
+    """
+    cte, params = _base_cte(hours, chain, exchange)
+    cur.execute(f"""
+        {cte}
+        SELECT a.canonical_symbol,
+               COALESCE(SUM(value_usd) FILTER (WHERE is_in), 0)  AS inflow_usd,
+               COALESCE(SUM(value_usd) FILTER (WHERE is_out), 0) AS outflow_usd,
+               COUNT(*) FILTER (WHERE is_in OR is_out)           AS cnt
+        FROM flagged
+        JOIN core.asset a ON a.asset_id = flagged.asset_id
+        WHERE a.asset_type = '{_STABLE_ASSET_TYPE}'
+        GROUP BY a.asset_id, a.canonical_symbol
+        HAVING COUNT(*) FILTER (WHERE is_in OR is_out) > 0
+        ORDER BY (COALESCE(SUM(value_usd) FILTER (WHERE is_in), 0)
+                - COALESCE(SUM(value_usd) FILTER (WHERE is_out), 0)) DESC
+        LIMIT %s
+    """, params + [limit])
+    rows = cur.fetchall()
+    if not rows:
+        return None
+    per = []
+    net_total = 0.0
+    for r in rows:
+        inf = float(r["inflow_usd"] or 0)
+        outf = float(r["outflow_usd"] or 0)
+        net_total += inf - outf
+        per.append({
+            "symbol": r["canonical_symbol"],
+            "inflow_usd": inf, "outflow_usd": outf, "net_usd": inf - outf,
+            "count": int(r["cnt"] or 0),
+        })
+    return {"net_inflow_usd": net_total, "per": per}
+
+
+def _fetch_catalyst_direction(cur, asset_id: int, days: int = 7) -> dict:
+    """近 N 天催化剂方向构成（bullish/bearish/neutral 计数 + 最新一条标题）。"""
+    cur.execute("""
+        SELECT ci.impact_direction AS d, COUNT(*) AS cnt
+        FROM biz.catalyst_impact ci
+        JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+        WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
+        GROUP BY 1
+    """, (asset_id, days))
+    dirs = {"bullish": 0, "bearish": 0, "neutral": 0}
+    for r in cur.fetchall():
+        d = (r["d"] or "neutral").lower()
+        if d in dirs:
+            dirs[d] = int(r["cnt"] or 0)
+    cur.execute("""
+        SELECT ac.title, ac.published_at
+        FROM biz.catalyst_impact ci
+        JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
+        WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
+        ORDER BY ac.published_at DESC LIMIT 1
+    """, (asset_id, days))
+    latest = cur.fetchone()
+    return {
+        "days": days,
+        "dirs": dirs,
+        "latest": {
+            "title": latest["title"] if latest else None,
+            "published_at": (latest["published_at"].isoformat()
+                             if latest and latest["published_at"] else None),
+        } if latest else None,
+    }
+
+
 @onchain_alert_bp.route("/onchain-alert")
 def onchain_alert_page():
     return render_template("onchain_alert.html")
@@ -347,12 +532,24 @@ def onchain_alert_page():
 def onchain_alert_ranking():
     """代币级净流榜单：按当前视图的美元指标降序。"""
     try:
-        hours, view, chain, exchange, limit = _parse_common_args()
+        hours, view, chain, exchange, limit, exclude_stable = _parse_common_args()
 
         with _get_db() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute("SET TIME ZONE 'UTC'")
                 cte, params = _base_cte(hours, chain, exchange)
+
+                # 噪音过滤：稳定币默认剔除；可选再剔除封装/质押/LP/合成（asset_type 判定）
+                noise_filter = ""
+                if exclude_stable:
+                    noise_filter = (
+                        "AND asset_id NOT IN (SELECT asset_id FROM core.asset "
+                        f"WHERE asset_type = '{_STABLE_ASSET_TYPE}')"
+                        " AND asset_id NOT IN (SELECT asset_id FROM core.asset"
+                        " WHERE UPPER(canonical_symbol) = ANY(%s))"
+                    )
+                    params = params + [list(_NOISE_SYMBOLS)]
+
                 cur.execute(f"""
                     {cte}
                     SELECT asset_id,
@@ -362,11 +559,18 @@ def onchain_alert_ranking():
                            COALESCE(SUM(value)     FILTER (WHERE is_out), 0) AS outflow_qty,
                            COUNT(*) FILTER (WHERE is_in OR is_out)           AS cnt
                     FROM flagged
+                    WHERE asset_id IS NOT NULL {noise_filter}
                     GROUP BY asset_id
                     HAVING COUNT(*) FILTER (WHERE is_in OR is_out) > 0
                 """, params)
                 rows = [dict(r) for r in cur.fetchall()]
                 unlabeled = _unlabeled_stats(cur, hours, chain)
+
+                # 稳定币资金流独立信号：榜单剔除稳定币时，仍汇总「稳定币↔交易所」
+                # 净流入（潜在买盘），避免把这块数据完全藏掉。
+                stable_summary = None
+                if exclude_stable:
+                    stable_summary = _stable_flow_summary(cur, hours, chain, exchange)
 
                 # 按视图派生指标并排序（跨币种数量不可比 → 一律按美元指标排名）
                 ranked = []
@@ -390,7 +594,7 @@ def onchain_alert_ranking():
                 ranked.sort(key=lambda x: x["value_usd"], reverse=True)
                 ranked = ranked[:limit]
 
-                # 补 symbol / name
+                # 补 symbol / name / 24h 涨跌幅 / 市值
                 ids = [x["asset_id"] for x in ranked]
                 meta = {}
                 if ids:
@@ -399,11 +603,37 @@ def onchain_alert_ranking():
                         " FROM core.asset WHERE asset_id = ANY(%s)", (ids,))
                     for a in cur.fetchall():
                         meta[a["asset_id"]] = a
+                # 最近一天行情（change_24h / market_cap）：LATERAL 取每条最新日
+                mkt = {}
+                if ids:
+                    cur.execute("""
+                        SELECT m.asset_id, m.change_24h, m.market_cap, m.market_date
+                        FROM biz.asset_market_daily m
+                        JOIN LATERAL (
+                            SELECT MAX(market_date) AS d
+                            FROM biz.asset_market_daily
+                            WHERE asset_id = m.asset_id
+                              AND market_date <= CURRENT_DATE
+                        ) lat ON lat.d = m.market_date
+                        WHERE m.asset_id = ANY(%s) AND m.market_date = lat.d
+                    """, (ids,))
+                    for a in cur.fetchall():
+                        if a["asset_id"] not in mkt or (
+                                a["market_date"] and mkt[a["asset_id"]]["market_date"] is None):
+                            mkt[a["asset_id"]] = a
+                # 盘面信号共振（近 24h high/medium）
+                sig_map = _fetch_scan_signals(cur, ids)
                 for i, x in enumerate(ranked, 1):
                     a = meta.get(x["asset_id"]) or {}
+                    m = mkt.get(x["asset_id"]) or {}
                     x["rank"] = i
                     x["symbol"] = a.get("canonical_symbol") or f"#{x['asset_id']}"
                     x["name"] = a.get("canonical_name") or ""
+                    x["change_24h"] = (float(m["change_24h"])
+                                       if m.get("change_24h") is not None else None)
+                    x["market_cap"] = (float(m["market_cap"])
+                                       if m.get("market_cap") is not None else None)
+                    x["signals"] = sig_map.get(x["asset_id"], [])
 
         return jsonify({
             "ok": True,
@@ -411,9 +641,11 @@ def onchain_alert_ranking():
             "view_label": VIEW_LABELS[view],
             "hours": hours,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "filters": {"chain": chain, "exchange": exchange, "limit": limit},
+            "filters": {"chain": chain, "exchange": exchange, "limit": limit,
+                        "exclude_stable": exclude_stable},
             "total_count": len(ranked),
             "unlabeled": unlabeled,
+            "stable_summary": stable_summary,
             "ranking": ranked,
         })
     except Exception as e:
@@ -422,9 +654,9 @@ def onchain_alert_ranking():
 
 @onchain_alert_bp.route("/api/onchain-alert/token")
 def onchain_alert_token():
-    """选中代币：流入流出统计序列（发散柱图）+ 转账流水明细。"""
+    """选中代币：流入流出统计序列（发散柱图）+ 转账流水明细 + 共振上下文。"""
     try:
-        hours, view, chain, exchange, limit = _parse_common_args()
+        hours, view, chain, exchange, limit, _ = _parse_common_args()
         try:
             asset_id = int(request.args.get("asset_id", 0))
         except (TypeError, ValueError):
@@ -491,10 +723,16 @@ def onchain_alert_token():
                 symbol = a.get("canonical_symbol") or f"#{asset_id}"
                 name = a.get("canonical_name") or ""
 
+                # ── 共振上下文：盘面信号 + 事件预置（解锁/链上大额）+ 催化剂方向 ──
+                signals = _fetch_scan_signals(cur, [asset_id]).get(asset_id, [])
+                events = _fetch_event_watchlist(cur, symbol)
+                catalysts = _fetch_catalyst_direction(cur, asset_id)
+
         history = []
         for r in hist_rows:
             direction = "inflow" if (r["is_in"] and not r["is_out"]) else (
                 "outflow" if (r["is_out"] and not r["is_in"]) else "internal")
+            value_usd = float(r["value_usd"]) if r["value_usd"] is not None else 0.0
             history.append({
                 "ts": r["block_timestamp"].isoformat(),
                 "symbol": symbol,
@@ -503,7 +741,8 @@ def onchain_alert_token():
                 "from_is_exchange": r["f_ex"] is not None,
                 "to_is_exchange": r["t_ex"] is not None,
                 "quantity": float(r["value"]) if r["value"] is not None else 0.0,
-                "value_usd": float(r["value_usd"]) if r["value_usd"] is not None else 0.0,
+                "value_usd": value_usd,
+                "is_large": value_usd >= LARGE_TRANSFER_USD,
                 "direction": direction,
                 "chain_disp": _chain_disp(r["chain"]),
                 "tx_hash": r["tx_hash"],
@@ -528,8 +767,161 @@ def onchain_alert_token():
                 "netflow_usd": totals_in - totals_out,
                 "count": len(history),
             },
+            "resonance": {
+                "signals": signals,
+                "events": events,
+                "catalysts": catalysts,
+            },
             "chart": chart,
             "history": history,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@onchain_alert_bp.route("/api/onchain-alert/holders")
+def onchain_alert_holders():
+    """某币持仓大户趋势：最近 N 个快照的 top 持仓变化（地址级）。
+
+    数据源 biz.onchain_holder_snapshot（每日调度采集，见 scheduler.py 的
+    chain_holder_snapshot_* 任务）：每 (asset_id, chain, snapshot_date) 一条，
+    top_holders_json 为 [{rank, address, label, amount, pct}] 地址级明细。
+
+    相邻快照对比口径：
+      - 新进 top10：最新快照有、上一个快照无（首次进入榜单）
+      - 增持/减持：最新 vs 上一个快照的 pct 差
+    取链规则：不传 chain 时自动选「快照最新」的链（同一资产多链分别快照）。
+    """
+    try:
+        try:
+            asset_id = int(request.args.get("asset_id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "asset_id 参数无效"}), 400
+        if asset_id <= 0:
+            return jsonify({"ok": False, "error": "asset_id 必填"}), 400
+        chain = (request.args.get("chain") or "").strip() or None
+        try:
+            days = int(request.args.get("days", 14))
+        except (TypeError, ValueError):
+            days = 14
+        days = min(60, max(3, days))
+        top_n = 10
+
+        with _get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                # 资产基础信息
+                cur.execute(
+                    "SELECT canonical_symbol, canonical_name FROM core.asset WHERE asset_id = %s",
+                    (asset_id,))
+                a = cur.fetchone() or {}
+                symbol = a.get("canonical_symbol") or f"#{asset_id}"
+                name = a.get("canonical_name") or ""
+
+                # 未指定链 → 取快照最新的一条链（同资产多链分别快照）
+                if not chain:
+                    cur.execute("""
+                        SELECT chain FROM biz.onchain_holder_snapshot
+                        WHERE asset_id = %s
+                        ORDER BY snapshot_date DESC, fetched_at DESC LIMIT 1
+                    """, (asset_id,))
+                    r = cur.fetchone()
+                    if not r:
+                        return jsonify({
+                            "ok": True, "asset_id": asset_id, "symbol": symbol,
+                            "name": name, "chain": None, "snapshots": [], "top": [],
+                        })
+                    chain = r["chain"]
+
+                # 最近 N 个快照（快照非每日连续，按日期倒序取 N 条）
+                cur.execute("""
+                    SELECT snapshot_date, total_holders, top10_concentration,
+                           whale_balance_change_7d_pct, whale_balance_change_30d_pct,
+                           top_holders_json
+                    FROM biz.onchain_holder_snapshot
+                    WHERE asset_id = %s AND chain = %s
+                    ORDER BY snapshot_date DESC
+                    LIMIT %s
+                """, (asset_id, chain, days))
+                snaps = cur.fetchall()
+                if not snaps:
+                    return jsonify({
+                        "ok": True, "asset_id": asset_id, "symbol": symbol,
+                        "name": name, "chain": chain, "snapshots": [], "top": [],
+                    })
+                snaps = list(reversed(snaps))  # 时间升序
+
+                snapshots = []
+                for s in snaps:
+                    top = s["top_holders_json"] or []
+                    snapshots.append({
+                        "date": str(s["snapshot_date"]),
+                        "total_holders": s["total_holders"],
+                        "top10_concentration": (float(s["top10_concentration"])
+                                                if s["top10_concentration"] is not None else None),
+                        "whale_7d_pct": (float(s["whale_balance_change_7d_pct"])
+                                         if s["whale_balance_change_7d_pct"] is not None else None),
+                        "whale_30d_pct": (float(s["whale_balance_change_30d_pct"])
+                                          if s["whale_balance_change_30d_pct"] is not None else None),
+                        "top_n": len(top),
+                    })
+
+                # 相邻对比：最新 vs 上一个快照
+                latest_top = snaps[-1]["top_holders_json"] or []
+                prev_top_map = {}
+                if len(snaps) >= 2:
+                    for h in (snaps[-2]["top_holders_json"] or []):
+                        prev_top_map[str(h.get("address") or "").lower()] = h
+
+                top = []
+                seen_addrs = set()
+                for h in latest_top[:top_n]:
+                    addr = str(h.get("address") or "").lower()
+                    if not addr or addr in seen_addrs:
+                        continue
+                    seen_addrs.add(addr)
+                    prev = prev_top_map.get(addr)
+                    cur_pct = float(h.get("pct") or 0)
+                    prev_pct = float(prev.get("pct") or 0) if prev else None
+                    top.append({
+                        "rank": int(h.get("rank") or 0),
+                        "address": addr,
+                        "amount": str(h.get("amount") or ""),
+                        "pct": cur_pct,
+                        "delta_pct": round(cur_pct - prev_pct, 4) if prev_pct is not None else None,
+                        "is_new": prev is None,          # 上一快照无此地址 = 新进 top
+                    })
+
+                # 批量补地址身份（exchange > market_maker > dex > 其它，按置信度取优）
+                if top:
+                    addrs = [t["address"] for t in top]
+                    cur.execute("""
+                        SELECT address, label_type, label_name, confidence
+                        FROM biz.onchain_address_label
+                        WHERE address = ANY(%s)
+                          AND label_type IN ('exchange', 'market_maker', 'dex', 'whale', 'mev_bot')
+                          AND confidence IN ('high', 'medium')
+                        ORDER BY CASE label_type
+                            WHEN 'exchange' THEN 0 WHEN 'market_maker' THEN 1
+                            WHEN 'dex' THEN 2 ELSE 3 END,
+                            confidence DESC
+                    """, (addrs,))
+                    labels = {}
+                    for r in cur.fetchall():
+                        labels.setdefault(str(r["address"]).lower(), r)
+                    for t in top:
+                        lb = labels.get(t["address"])
+                        t["label"] = (lb["label_name"] if lb and lb["label_name"] else
+                                      lb["label_type"] if lb else None)
+                        t["label_type"] = lb["label_type"] if lb else None
+
+        return jsonify({
+            "ok": True,
+            "asset_id": asset_id,
+            "symbol": symbol,
+            "name": name,
+            "chain": chain,
+            "snapshots": snapshots,
+            "top": top,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

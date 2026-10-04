@@ -155,7 +155,7 @@
 
     .layout {
       display: grid;
-      grid-template-columns: minmax(320px, 420px) 1fr;
+      grid-template-columns: minmax(380px, 480px) 1fr;
       gap: 16px;
       padding: 12px 20px 40px;
       align-items: start;
@@ -318,15 +318,19 @@
     }
 
     #rank .c-rank {
-      width: 42px;
+      width: 38px;
     }
 
     #rank .c-amt {
-      width: 86px;
+      width: 78px;
     }
 
     #rank .c-qty {
-      width: 96px;
+      width: 78px;
+    }
+
+    #rank .c-cap {
+      width: 62px;
     }
 
     /* 数量为次要信息（榜单排序键是金额），弱化展示 */
@@ -472,6 +476,285 @@
       background: rgba(79, 140, 255, .15);
       color: var(--accent);
     }
+
+    .badge.large {
+      background: rgba(240, 180, 41, .15);
+      color: #f0b429;
+    }
+
+    /* 盘面信号徽标 */
+    .sig-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      border: 1px solid;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    .sig-badge.high {
+      color: #ff8f5b;
+      border-color: rgba(255, 143, 91, .5);
+      background: rgba(255, 143, 91, .1);
+    }
+
+    .sig-badge.medium {
+      color: #f0b429;
+      border-color: rgba(240, 180, 41, .5);
+      background: rgba(240, 180, 41, .08);
+    }
+
+    /* 涨跌幅 */
+    .chg {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .chg.pos {
+      color: var(--inflow);
+    }
+
+    .chg.neg {
+      color: var(--outflow);
+    }
+
+    .chg.na {
+      color: var(--muted);
+    }
+
+    /* 共振面板 */
+    .res-panel {
+      padding: 12px 14px;
+    }
+
+    .res-row {
+      display: flex;
+      gap: 8px;
+      padding: 5px 0;
+      font-size: 12px;
+      border-bottom: 1px dashed var(--border);
+    }
+
+    .res-row:last-child {
+      border-bottom: none;
+    }
+
+    .res-row .tag {
+      flex: none;
+      width: 74px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .res-row .tag i {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    .res-row .body {
+      min-width: 0;
+      color: var(--text);
+    }
+
+    .res-row .body .t {
+      font-weight: 600;
+    }
+
+    .res-row .body .d {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 1px;
+    }
+
+    .res-empty {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 8px 0;
+    }
+
+    .res-title {
+      color: var(--muted);
+      font-size: 11px;
+      padding: 10px 14px 4px;
+      display: flex;
+      gap: 14px;
+    }
+
+    .res-title .dir {
+      font-weight: 600;
+    }
+
+    .res-title .dir.bullish {
+      color: var(--inflow);
+    }
+
+    .res-title .dir.bearish {
+      color: var(--outflow);
+    }
+
+    /* 大额流水行 */
+    #hist tbody tr.large-row td {
+      background: rgba(240, 180, 41, .05);
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .toggle input {
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    /* 稳定币资金流提示条（榜单头部，独立信号） */
+    .stable-flow {
+      margin: 10px 14px 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: rgba(16, 185, 129, .06);
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .stable-flow .head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 2px;
+    }
+
+    .stable-flow .head b {
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .stable-flow .net {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stable-flow .per {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 10px;
+      margin-top: 3px;
+    }
+
+    .stable-flow .per span {
+      white-space: nowrap;
+    }
+
+    /* 大户持仓趋势面板 */
+    .hld-sum {
+      display: flex;
+      gap: 18px;
+      padding: 10px 14px 6px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+
+    .hld-sum b {
+      display: block;
+      font-size: 13px;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .hld-table-wrap {
+      overflow-x: auto;
+    }
+
+    #hld table {
+      table-layout: fixed;
+      min-width: 520px;
+    }
+
+    #hld .c-addr {
+      width: 120px;
+    }
+
+    #hld .c-pct {
+      width: 70px;
+    }
+
+    #hld .c-delta {
+      width: 84px;
+    }
+
+    .hld-addr {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .hld-label {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-left: 4px;
+      vertical-align: middle;
+      background: rgba(79, 140, 255, .12);
+      color: var(--accent);
+    }
+
+    .hld-label.mm {
+      background: rgba(240, 180, 41, .12);
+      color: #f0b429;
+    }
+
+    .hld-label.dex {
+      background: rgba(16, 185, 129, .12);
+      color: var(--inflow);
+    }
+
+    .badge.new-holder {
+      background: rgba(255, 143, 91, .15);
+      color: #ff8f5b;
+    }
+
+    /* 集中度趋势 mini bar（横向，每快照一个色块） */
+    .conc-trend {
+      display: flex;
+      gap: 3px;
+      align-items: flex-end;
+      height: 30px;
+      padding: 8px 14px 4px;
+    }
+
+    .conc-trend .seg {
+      flex: 1;
+      min-width: 4px;
+      border-radius: 2px 2px 0 0;
+      background: var(--accent);
+      opacity: .85;
+      position: relative;
+      cursor: default;
+    }
+
+    .conc-trend .seg:hover {
+      opacity: 1;
+    }
+
+    .conc-trend .seg.newest {
+      background: var(--inflow);
+    }
   </style>
 </head>
 
@@ -496,6 +779,9 @@
       <select id="f-exchange">
         <option value="">全部交易所</option>
       </select>
+      <label class="toggle" title="剔除 USDT/USDC 等稳定币及封装代币，聚焦交易型代币异动">
+        <input type="checkbox" id="f-stable" checked /> 排除稳定币
+      </label>
       <button class="btn-refresh" id="btn-refresh">刷新</button>
     </div>
   </header>
@@ -518,6 +804,18 @@
       <div class="panel">
         <h2 id="chart-title">流入/流出统计 <span class="muted" id="chart-sub"></span></h2>
         <div id="chart">
+          <div class="empty">请选择左侧代币</div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>共振上下文 <span class="muted" id="res-sub"></span></h2>
+        <div id="res">
+          <div class="empty">请选择左侧代币</div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>大户持仓趋势 <span class="muted" id="hld-sub"></span></h2>
+        <div id="hld">
           <div class="empty">请选择左侧代币</div>
         </div>
       </div>
@@ -570,6 +868,43 @@
       if (h < 48) return h.toFixed(1) + " 小时前";
       return (h / 24).toFixed(1) + " 天前";
     }
+    function fmtPct (v) {
+      if (v == null) return "—";
+      const s = v > 0 ? "+" : "";
+      return s + v.toFixed(2) + "%";
+    }
+    function fmtCap (v) {
+      if (v == null) return "—";
+      const a = Math.abs(v);
+      if (a >= 1e9) return "$" + (a / 1e9).toFixed(1) + "B";
+      if (a >= 1e6) return "$" + (a / 1e6).toFixed(0) + "M";
+      return "$" + a.toFixed(0);
+    }
+    function sigBadges (signals) {
+      if (!signals || !signals.length) return "";
+      const poolTxt = { main: "主池", accumulation: "蓄势", squeeze: "挤兑" };
+      return signals.slice(0, 3).map(s => {
+        const sc = s.scenario || s.pool || "信号";
+        const lbl = (poolTxt[s.pool] ? poolTxt[s.pool] + "·" : "") + sc;
+        return `<span class="sig-badge ${s.confidence}" title="盘面信号 ${lbl}（${s.confidence}）">${esc(lbl)}</span>`;
+      }).join("");
+    }
+    function sigRow (signals) {
+      if (!signals || !signals.length) return "";
+      const poolTxt = { main: "主池", accumulation: "蓄势", squeeze: "挤兑" };
+      return signals.map(s => {
+        const sc = s.scenario || s.pool || "信号";
+        const lbl = (poolTxt[s.pool] ? poolTxt[s.pool] + "·" : "") + sc;
+        const t = s.signal_ts ? fmtTime(s.signal_ts) : "";
+        const dirs = [s.p_dir ? "P=" + s.p_dir : "", s.oi_dir ? "OI=" + s.oi_dir : ""]
+          .filter(Boolean).join(" ");
+        return `<div class="res-row">
+          <span class="tag"><i style="background:${s.confidence === "high" ? "#ff8f5b" : "#f0b429"}"></i>盘面信号</span>
+          <div class="body"><div class="t">${esc(lbl)} <span class="sig-badge ${s.confidence}">${s.confidence}</span></div>
+          <div class="d">${esc(dirs)} · ${esc(t)}</div></div>
+        </div>`;
+      }).join("");
+    }
 
     // 标签新鲜度三档文案（阈值由后端给出，前端不写死）
     const FRESH_TEXT = { fresh: "新鲜", aging: "偏旧", stale: "停更", unknown: "无记录" };
@@ -609,6 +944,7 @@
         chain: $("#f-chain").value,
         exchange: $("#f-exchange").value,
         view: $("#f-view .active").dataset.v,
+        exclude_stable: $("#f-stable").checked ? "1" : "0",
         limit: 50,
       };
     }
@@ -646,23 +982,43 @@
           box.innerHTML = '<div class="empty">当前窗口无交易所流向数据</div>';
           return [];
         }
+        // 稳定币资金流独立信号（榜单默认排除稳定币，但它的入所/提币是潜在买盘/离场信号）
+        let stableHtml = "";
+        const ss = j.stable_summary;
+        if (ss && ss.per && ss.per.length) {
+          const net = ss.net_inflow_usd;
+          const netCls = net > 0 ? "pos" : net < 0 ? "neg" : "zero";
+          const dirTxt = net > 0 ? "净流入交易所（潜在买盘）" : net < 0 ? "净流出交易所（提币离场）" : "净流入 0";
+          const per = ss.per.map(p => {
+            const c = p.net_usd > 0 ? "pos" : p.net_usd < 0 ? "neg" : "zero";
+            return `<span>${esc(p.symbol)} <b class="${c}">${fmtUsd(p.net_usd)}</b></span>`;
+          }).join("");
+          stableHtml = `<div class="stable-flow" title="稳定币大额转账汇总（与榜单同口径，含交易所钱包互转剔除）">
+            <div class="head"><b>稳定币资金流</b>
+              <span class="net ${netCls}">${fmtUsd(net)}</span>
+              <span>· ${esc(dirTxt)}</span></div>
+            <div class="per">${per}</div>
+          </div>`;
+        }
         const rows = j.ranking.map(t => {
           const active = t.asset_id === selectedAssetId ? " class=\"active\"" : "";
+          const chgCls = t.change_24h == null ? "na" : t.change_24h > 0 ? "pos" : "neg";
           return `<tr${active} data-id="${t.asset_id}" data-sym="${esc(t.symbol)}">
         <td class="rankno">${t.rank}</td>
         <td><div class="token">
           <span class="coin" style="background:${coinBg(t.symbol)}">${esc((t.symbol || "?").slice(0, 1))}</span>
           <div style="min-width:0">
-            <div class="sym">${esc(t.symbol)}</div>
-            <div class="nm">${esc(t.name || "")}</div>
+            <div class="sym">${esc(t.symbol)} ${sigBadges(t.signals)}</div>
+            <div class="nm">${esc(t.name || "")} · <span class="chg ${chgCls}">${fmtPct(t.change_24h)}</span></div>
           </div>
         </div></td>
         <td class="num ${cls(t.value_usd)}">${fmtUsd(t.value_usd)}</td>
         <td class="num qty-cell">${fmtQty(t.quantity)}</td>
+        <td class="num qty-cell" title="市值 ${fmtCap(t.market_cap)}">${fmtCap(t.market_cap)}</td>
       </tr>`;
         }).join("");
-        box.innerHTML = `<table><thead><tr>
-      <th class="c-rank">排名</th><th>代币</th><th class="c-amt" style="text-align:right">金额</th><th class="c-qty" style="text-align:right">数量</th>
+        box.innerHTML = `${stableHtml}<table><thead><tr>
+      <th class="c-rank">排名</th><th>代币</th><th class="c-amt" style="text-align:right">金额</th><th class="c-qty" style="text-align:right">数量</th><th style="text-align:right">市值</th>
     </tr></thead><tbody id="rank-body">${rows}</tbody></table>`;
 
         box.querySelectorAll("#rank-body tr").forEach(tr => {
@@ -683,7 +1039,123 @@
       }
     }
 
-    // ── 选中代币：统计图 + 流水 ──
+    // ── 选中代币：统计图 + 共振 + 流水 ──
+    function renderResonance (res) {
+      const box = $("#res");
+      if (!res) { box.innerHTML = '<div class="res-empty">无共振数据</div>'; return; }
+      const parts = [];
+      // 催化剂方向
+      const c = res.catalysts;
+      if (c && c.dirs) {
+        const total = c.dirs.bullish + c.dirs.bearish + c.dirs.neutral;
+        if (total > 0) {
+          const dirHtml = ["bullish", "bearish", "neutral"].map(d =>
+            `<span class="dir ${d}">${d === "bullish" ? "利好" : d === "bearish" ? "利空" : "中性"} ${c.dirs[d]}</span>`
+          ).join("");
+          parts.push(`<div class="res-title">催化剂 · 近 ${c.days} 天 ${total} 条：${dirHtml}</div>`);
+          if (c.latest && c.latest.title) {
+            parts.push(`<div class="res-row">
+              <span class="tag"><i style="background:var(--accent)"></i>最新催化</span>
+              <div class="body"><div class="t">${esc(c.latest.title)}</div>
+              <div class="d">${esc(fmtTime(c.latest.published_at))}</div></div>
+            </div>`);
+          }
+        }
+      }
+      // 事件预置（解锁/链上大额）
+      const evs = res.events || [];
+      evs.forEach(ev => {
+        const kind = ev.type === "unlock" ? "解锁" : "链上转账";
+        const dirColor = ev.direction === "bearish" ? "var(--outflow)" : "var(--accent)";
+        parts.push(`<div class="res-row">
+          <span class="tag"><i style="background:${dirColor}"></i>${kind}</span>
+          <div class="body"><div class="t">${esc(ev.detail || "—")}</div>
+          <div class="d">${ev.date ? esc(ev.date) : ""}${ev.event_pct != null ? " · " + esc(ev.event_pct) + "%" : ""}</div></div>
+        </div>`);
+      });
+      // 盘面信号
+      parts.push(sigRow(res.signals || []));
+      if (!parts.length) {
+        box.innerHTML = '<div class="res-empty">近 24h 无盘面信号 / 近 7 天无催化剂，亦无解锁/链上大额预置</div>';
+      } else {
+        box.innerHTML = parts.join("");
+      }
+    }
+
+    function renderHolders (j) {
+      const box = $("#hld");
+      if (!j || !j.ok) { box.innerHTML = '<div class="res-empty">无持仓快照数据</div>'; return; }
+      const snaps = j.snapshots || [];
+      const top = j.top || [];
+      if (!snaps.length || !top.length) {
+        box.innerHTML = '<div class="res-empty">该链暂无大户快照（长尾币轮转采集，可稍后重试）</div>';
+        return;
+      }
+      const last = snaps[snaps.length - 1];
+      const first = snaps[0];
+      const chg = (a, b) => {
+        if (a == null || b == null) return null;
+        return a - b;
+      };
+      const top10Delta = chg(last.top10_concentration, first.top10_concentration);
+      const holderDelta = chg(last.total_holders, first.total_holders);
+      const whaleDelta = last.whale_7d_pct;
+      const fmtDelta = (v, suf = "") => v == null ? "—" : (v > 0 ? "+" : "") + v.toFixed(2) + suf;
+      const concMax = Math.max(...snaps.map(s => s.top10_concentration || 0), 1);
+      const segs = snaps.map((s, i) => {
+        const h = Math.max(4, Math.round((s.top10_concentration || 0) / concMax * 100));
+        return `<div class="seg ${i === snaps.length - 1 ? "newest" : ""}"
+          style="height:${h}%" title="${esc(s.date)} top10=${s.top10_concentration}%"></div>`;
+      }).join("");
+
+      // 汇总行
+      const sum = `
+        <div class="hld-sum">
+          <span>Top10 集中度<b>${last.top10_concentration ?? "—"}%</b>
+            ${top10Delta != null ? `<span class="${cls(top10Delta)}">(${fmtDelta(top10Delta, "pp")})</span>` : ""}</span>
+          <span>总持币地址<b>${last.total_holders ?? "—"}</b>
+            ${holderDelta != null ? `<span class="${cls(holderDelta)}">(${fmtDelta(holderDelta)})</span>` : ""}</span>
+          <span>巨鲸 7d 变化<b class="${cls(whaleDelta)}">${fmtDelta(whaleDelta, "%")}</b></span>
+          <span>快照天数<b>${snaps.length}</b></span>
+        </div>`;
+
+      // 大户表
+      const rows = top.map(t => {
+        const deltaCls = t.delta_pct == null ? "zero" : t.delta_pct > 0 ? "pos" : t.delta_pct < 0 ? "neg" : "zero";
+        const deltaTxt = t.is_new ? '<span class="badge new-holder">新进</span>'
+          : `<span class="${deltaCls}">${fmtDelta(t.delta_pct, "pp")}</span>`;
+        const lblCls = t.label_type === "market_maker" ? "mm" : t.label_type === "dex" ? "dex" : "";
+        const lbl = t.label ? `<span class="hld-label ${lblCls}">${esc(t.label)}</span>` : "";
+        return `<tr>
+          <td class="rankno">${t.rank}</td>
+          <td><div class="hld-addr">${esc((t.address || "").slice(0, 12))}…${lbl}</div></td>
+          <td class="num">${(t.pct ?? 0).toFixed(2)}%</td>
+          <td class="num">${deltaTxt}</td>
+        </tr>`;
+      }).join("");
+
+      box.innerHTML = `${sum}
+        <div class="conc-trend" title="Top10 持仓集中度变化（每日快照）">${segs}</div>
+        <div class="hld-table-wrap"><table><thead><tr>
+          <th class="c-addr">排名 / 地址</th><th class="c-pct" style="text-align:right">占比</th><th class="c-delta" style="text-align:right">较上期变化</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>`;
+    }
+
+    async function loadHolders () {
+      if (!selectedAssetId) return;
+      const box = $("#hld");
+      box.classList.add("loading");
+      try {
+        const r = await fetch(`/api/onchain-alert/holders?asset_id=${selectedAssetId}&days=14`);
+        const j = await r.json();
+        renderHolders(j);
+      } catch (e) {
+        box.innerHTML = '<div class="res-empty">大户数据加载失败</div>';
+      } finally {
+        box.classList.remove("loading");
+      }
+    }
+
     async function loadToken () {
       if (!selectedAssetId) return;
       const f = getFilters();
@@ -698,6 +1170,7 @@
         if (!j.ok) {
           chartBox.innerHTML = '<div class="err">接口错误：' + esc(j.error) + '</div>';
           histBox.innerHTML = '<div class="err">接口错误：' + esc(j.error) + '</div>';
+          renderResonance(null);
           return;
         }
         selectedSymbol = j.symbol;
@@ -705,6 +1178,11 @@
         // 标题
         $("#chart-title").innerHTML = `${esc(j.symbol)} 流入/流出统计 <span class="muted">· ${esc(j.bucket_label)} · 近 ${j.hours}h</span>`;
         $("#hist-title").innerHTML = `${esc(j.symbol)} 转账流水明细 <span class="right-slot">共 ${j.history.length} 条</span>`;
+
+        // 共振上下文
+        renderResonance(j.resonance);
+        // 大户持仓趋势（独立接口）
+        await loadHolders();
 
         // 柱图（流入向上、流出向下，零轴居中）
         const maxV = Math.max(1, ...j.chart.map(h => Math.max(h.inflow_usd, h.outflow_usd)));
@@ -746,14 +1224,15 @@
             const tx = t.explorer_url
               ? `<a href="${esc(t.explorer_url)}" target="_blank" class="mono" title="${esc(t.tx_hash)}">${esc((t.tx_hash || "").slice(0, 10))}…</a>`
               : "";
-            return `<tr>
+            const large = t.is_large ? ' <span class="badge large" title="单笔 ≥ $5M 大额异动">大额</span>' : "";
+            return `<tr class="${t.is_large ? "large-row" : ""}">
           <td><b>${esc(t.symbol)}</b></td>
           <td>${frm}</td>
           <td>${to}</td>
           <td class="num">${fmtUsd(t.value_usd)}</td>
           <td class="num qty-cell">${fmtQty(t.quantity)}</td>
           <td style="white-space:nowrap">${fmtTime(t.ts)}</td>
-          <td><span class="badge ${t.direction}">${dirTxt}</span> ${tx}</td>
+          <td><span class="badge ${t.direction}">${dirTxt}</span>${large} ${tx}</td>
         </tr>`;
           }).join("");
           histBox.innerHTML = `<table><thead><tr>
@@ -783,6 +1262,8 @@
       } else {
         $("#chart").innerHTML = '<div class="empty">当前窗口无数据</div>';
         $("#hist").innerHTML = '<div class="empty">—</div>';
+        $("#res").innerHTML = '<div class="empty">—</div>';
+        $("#hld").innerHTML = '<div class="empty">—</div>';
         $("#chart-title").textContent = "流入/流出统计";
         $("#hist-title").textContent = "转账流水明细";
       }
@@ -794,6 +1275,7 @@
     $("#f-hours").onchange = load;
     $("#f-chain").onchange = load;
     $("#f-exchange").onchange = load;
+    $("#f-stable").onchange = load;
     document.querySelectorAll("#f-view button").forEach(b => b.onclick = () => {
       document.querySelectorAll("#f-view button").forEach(x => x.classList.remove("active"));
       b.classList.add("active");

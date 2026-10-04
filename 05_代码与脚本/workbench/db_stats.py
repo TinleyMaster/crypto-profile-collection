@@ -8497,6 +8497,24 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
     结论严格依据笔记本资料库，并附带抛压评分作为量化辅助；每次生成追加一条新记录，
     保留历史版本用于「当时判断 vs 后续走势」回溯。
     """
+    def _strip_nul(o):
+        """递归剔除字符串中的 NUL（U+0000）——PostgreSQL text/jsonb 不接受 \\x00。
+
+        2026-10-04：thesis 重生偶发 `\\u0000 cannot be converted to text`——
+        笔记本资料（sources 等）里爬取文本含 NUL，json.dumps 原样带入 INSERT 即被拒。
+        """
+        if isinstance(o, str):
+            return o.replace("\x00", "")
+        if isinstance(o, list):
+            return [_strip_nul(v) for v in o]
+        if isinstance(o, dict):
+            return {k: _strip_nul(v) for k, v in o.items()}
+        return o
+
+    def _jd(o, **kw):
+        """json.dumps 前先剥 NUL（确保参数里没有 U+0000）。"""
+        return json.dumps(_strip_nul(o), ensure_ascii=False, **kw)
+
     def _emit(msg: str) -> None:
         if log:
             try:
@@ -9167,6 +9185,11 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
         est = extract_json_from_llm_response(raw)
     except Exception as e:
         return {"ok": False, "error": f"AI 返回解析失败: {e}"}
+    if not isinstance(est, dict):
+        # 2026-10-04：LLM 偶发返回顶层数组（list）→ est.get() 直接 AttributeError
+        # （10-04 12:00 thesis 重生 asset 3615 即此：'list' object has no attribute 'get'）
+        return {"ok": False,
+                "error": f"AI 返回格式异常（期望 JSON 对象，实际 {type(est).__name__}）"}
 
     stance = (est.get("stance") or "neutral").lower()
     if stance not in ("bullish", "bearish", "neutral"):
@@ -9336,12 +9359,12 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                           source_notebook_id, created_at, updated_at
             """, (
                 asset_id, stance, conviction,
-                json.dumps(thesis_payload, ensure_ascii=False),
-                json.dumps(key_metrics, ensure_ascii=False, default=str),
-                json.dumps(risks, ensure_ascii=False),
-                json.dumps(catalysts, ensure_ascii=False),
-                json.dumps(sources, ensure_ascii=False, default=str),
-                json.dumps(_analysis, ensure_ascii=False, default=str),
+                _jd(thesis_payload),
+                _jd(key_metrics, default=str),
+                _jd(risks),
+                _jd(catalysts),
+                _jd(sources, default=str),
+                _jd(_analysis, default=str),
                 notebook_id,
             ))
             row = cur.fetchone()
@@ -9354,10 +9377,10 @@ def generate_research_thesis(asset_id: int, log=None) -> dict:
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     row["thesis_id"], asset_id, stance, conviction,
-                    json.dumps(key_metrics, ensure_ascii=False, default=str),
+                    _jd(key_metrics, default=str),
                     _analysis["score"], _analysis["tier"],
                     _analysis["evidence"].get("inferred_ratio"),
-                    json.dumps(thesis_payload, ensure_ascii=False, default=str),
+                    _jd(thesis_payload, default=str),
                 ))
                 # P4（2026-09-27）：前向跟踪建仓行。按 (asset_id, as_of) 幂等 upsert ——
                 # 同资产同日重复生成只更新档位分数与闸门，不回退已填收益（upsert 不触碰 ret_*）。

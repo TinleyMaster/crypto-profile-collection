@@ -202,19 +202,29 @@ class CoinGlassClient:
         return self._as_list(self.get("/api/futures/liquidation/coin-list"))
 
     def liquidation_history(self, exchange: str, symbol: str,
-                            interval: str = "4h", limit: int = 100) -> list[dict]:
+                            interval: str = "4h", limit: int = 100,
+                            start_time: int | None = None,
+                            end_time: int | None = None) -> list[dict]:
         """单交易所·单币种爆仓历史（多头/空头爆仓额），粒度 ≥4h。
 
         `symbol` 为**交易对级合约码**（本库口径，如 `BTCUSDT` / `1000PEPEUSDT`）。
         返回 `[{time(ms), long_liquidation_usd, short_liquidation_usd}]`，数值为**字符串**。
         ⚠️ 分段增量（每个 interval 区间内新增的爆仓额），**不是**滚动窗口快照；
         与 `liquidation_coin_list` 的 `*_liq_usd_1h` 口径不可换算、不可相加（见模块 docstring）。
+        `start_time`/`end_time`（毫秒）可选：传则回查指定历史区间（默认最近 limit 条）。
         """
-        return self._as_list(self.get("/api/futures/liquidation/history", {
-            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+        params: dict = {"exchange": exchange, "symbol": symbol,
+                        "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["start_time"] = start_time
+        if end_time is not None:
+            params["end_time"] = end_time
+        return self._as_list(self.get("/api/futures/liquidation/history", params))
 
     def liquidation_aggregated_history(self, exchange_list: list[str] | str, symbol: str,
-                                       interval: str = "4h", limit: int = 1080) -> list[dict]:
+                                       interval: str = "4h", limit: int = 1080,
+                                       start_time: int | None = None,
+                                       end_time: int | None = None) -> list[dict]:
         """币种级·多所聚合爆仓历史，粒度 ≥4h。
 
         `symbol` 取**币种基码**（`BTC` / `1000PEPE`）——传合约码不报错但**返回 0 行**（实测）。
@@ -222,10 +232,16 @@ class CoinGlassClient:
         传 list 时按逗号拼接；全所口径用 `supported_exchanges()` 的返回值。
         返回 `[{time(ms), aggregated_long_liquidation_usd, aggregated_short_liquidation_usd}]`（数值）。
         ⚠️ 同为**分段增量**口径；`limit` 上限 4500，但 @4h 服务端最多回 180 天（1080 点）。
+        `start_time`/`end_time`（毫秒）可选：传则回查指定历史区间（默认最近 limit 条）。
         """
         ex = exchange_list if isinstance(exchange_list, str) else ",".join(exchange_list)
-        return self._as_list(self.get("/api/futures/liquidation/aggregated-history", {
-            "exchange_list": ex, "symbol": symbol, "interval": interval, "limit": limit}))
+        params: dict = {"exchange_list": ex, "symbol": symbol,
+                        "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["start_time"] = start_time
+        if end_time is not None:
+            params["end_time"] = end_time
+        return self._as_list(self.get("/api/futures/liquidation/aggregated-history", params))
 
     def supported_exchanges(self) -> list[str]:
         """当前套餐支持的交易所名列表（用于拼 `aggregated-history` 的 `exchange_list`）。"""

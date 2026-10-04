@@ -52,7 +52,10 @@ class SolanaClient:
     """Solana 链上数据采集客户端。"""
 
     def __init__(self, api_key: str | None = None, calls_per_second: float = DEFAULT_RPS) -> None:
-        self.api_key = (api_key or "").strip() or None
+        # 支持逗号分隔的多 key（2026-10-04）：HELIUS_API_KEY="k1,k2" 时，某把 key 被
+        # Helius 限流(HTTP 429)则自动轮换到下一把，全部试尽才判 rate_limited。
+        self.api_keys = [k.strip() for k in str(api_key or "").split(",") if k.strip()]
+        self._key_index = 0
         self.calls_per_second = calls_per_second
         self._min_interval = 1.0 / calls_per_second
         self._last_call = 0.0
@@ -71,10 +74,20 @@ class SolanaClient:
 
     # ── 基础 RPC ────────────────────────────────────────────
     @property
+    def api_key(self) -> str | None:
+        """当前生效的 key（未配/全空时 None → 回退公共 RPC）。"""
+        return self.api_keys[self._key_index] if self.api_keys else None
+
+    @property
     def _rpc_url(self) -> str:
         if self.api_key:
             return f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
         return "https://api.mainnet-beta.solana.com"
+
+    def _rotate_key(self) -> None:
+        """轮换到下一把 key（429 时调用）。单 key / 无 key 时不动。"""
+        if len(self.api_keys) > 1:
+            self._key_index = (self._key_index + 1) % len(self.api_keys)
 
     def _rate_limit(self) -> None:
         elapsed = time.monotonic() - self._last_call
@@ -85,7 +98,9 @@ class SolanaClient:
     def _json_rpc(self, method: str, params: list[Any], retries: int = 3) -> dict[str, Any] | None:
         self._rate_limit()
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        for attempt in range(retries):
+        # 多 key 轮换：每把 key 至少给一次机会（429 时切下一把，短等重试）
+        max_attempts = max(retries, len(self.api_keys)) if self.api_keys else retries
+        for attempt in range(max_attempts):
             try:
                 resp = self.session.post(self._rpc_url, json=payload, timeout=30)
                 if resp.status_code == 429:
@@ -94,12 +109,18 @@ class SolanaClient:
                         "kind": "rate_limited", "method": method, "code": 429,
                         "detail": "HTTP 429：RPC 限流，重试耗尽（公共 RPC 常见；配置 HELIUS_API_KEY 可缓解）",
                     }
-                    time.sleep(2 ** attempt)
+                    if len(self.api_keys) > 1:
+                        self._rotate_key()
+                        if attempt < max_attempts - 1:
+                            time.sleep(0.5)  # 换 key 后短等即可
+                    else:
+                        if attempt < max_attempts - 1:
+                            time.sleep(2 ** attempt)
                     continue
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as e:  # noqa: BLE001
-                if attempt < retries - 1:
+                if attempt < max_attempts - 1:
                     time.sleep(2 ** attempt)
                     continue
                 self.last_error = {"kind": "network", "method": method, "detail": str(e)[:200]}

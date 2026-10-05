@@ -37,19 +37,17 @@ WITH volbase AS (
            quote_vol,
            AVG(quote_vol) OVER (PARTITION BY symbol ORDER BY open_time
                ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS avg20,
-           LEAD(close_px, 24) OVER (PARTITION BY symbol ORDER BY open_time) AS px24h,
-           close_px / LAG(close_px, 24) OVER (PARTITION BY symbol ORDER BY open_time) - 1 AS chg24
+           LEAD(close_px, 24) OVER (PARTITION BY symbol ORDER BY open_time) AS px24h
     FROM biz.asset_klines
     WHERE interval = '1h' AND open_px > 0 AND close_px > 0
 ),
 evt AS (
     SELECT symbol, open_time, close_px AS px0, chg1h,
            quote_vol / avg20 AS vr,
-           px24h / close_px - 1 AS r24h,
-           chg24
+           px24h / close_px - 1 AS r24h
     FROM volbase
     WHERE avg20 > 0 AND quote_vol / avg20 >= 1.5 AND abs(chg1h) >= 0.015
-      AND px24h IS NOT NULL AND chg24 IS NOT NULL
+      AND px24h IS NOT NULL
 ),
 btc AS (
     SELECT open_time, close_px,
@@ -57,10 +55,23 @@ btc AS (
     FROM biz.asset_klines
     WHERE interval = '1h' AND symbol = 'BTCUSDT' AND open_px > 0
 ),
+-- 日收盘口径 24h 涨幅（当日最后一根1h收盘 / 昨日最后一根收盘），与 combined 版一致
+daily AS (
+    SELECT DISTINCT ON (symbol, DATE(open_time)) symbol, DATE(open_time) AS d, close_px
+    FROM biz.asset_klines
+    WHERE interval = '1h' AND close_px > 0
+    ORDER BY symbol, DATE(open_time), open_time DESC
+),
+dchg AS (
+    SELECT s.symbol, s.d, s.close_px / p.close_px - 1 AS chg24
+    FROM daily s JOIN daily p ON p.symbol = s.symbol AND p.d = s.d - 1
+),
 ev AS (
-    SELECT e.symbol, e.open_time, e.chg1h, e.vr, e.r24h, e.chg24,
+    SELECT e.symbol, e.open_time, e.chg1h, e.vr, e.r24h, d.chg24,
            b.px24 / b.close_px - 1 AS btc_r24
-    FROM evt e LEFT JOIN btc b ON b.open_time = e.open_time
+    FROM evt e
+    LEFT JOIN dchg d ON d.symbol = e.symbol AND d.d = DATE(e.open_time)
+    LEFT JOIN btc b ON b.open_time = e.open_time
 ),
 x AS (
     SELECT *,
@@ -84,7 +95,7 @@ SELECT {bucket_expr} AS bucket,
        AVG((r24h > 0.001)::int) AS win_c1, AVG((r24h > 0.003)::int) AS win_c3,
        AVG(r24h - 0.001) AS m_c1, AVG(r24h - 0.003) AS m_c3
 FROM x
-WHERE chg1h >= 0.03 AND vr >= 2
+WHERE chg1h >= 0.03 AND vr >= 2 AND chg24 IS NOT NULL
 GROUP BY bucket
 ORDER BY bucket
 """

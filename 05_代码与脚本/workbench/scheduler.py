@@ -282,6 +282,12 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 仅「新增卡片」或「tier 升到 HIGH / 共振源数增加」时发信，24h 冷却去重。
     ("highlight_alert", "5 * * * *", "send_highlight_alert.py", [], "高亮信号增量邮件提醒（每小时探测，仅新增/升级发信）", "core"),
 
+    # ═══ 追涨风险告警（涨幅榜回测 → 盘面扫描落地）═══
+    # 依据：《涨幅榜冲高回落回测方案_2026-10-03.md》Part C（币安永续版）：
+    # 涨幅≥20% + 正资金费率（拥挤多头）+ 放量 ⇒ 次日跌概率 62~64%（vs 近零费率 48%）。
+    # 每 30 分钟扫描一次，同合约 6h 冷却；只告警"勿追/规避"，非做空信号。
+    ("chase_risk", "*/30 * * * *", "scan_chase_risk.py", ["--apply"], "追涨风险告警（币安涨幅≥20%+正资金费率+放量；每30分钟，6h冷却）", "core"),
+
     # ═══ DEX 流动性扫描（MEME-03）═══
     ("liquidity_scan", "10 8 * * *", "phase_chain_liquidity.py", ["--limit", "100"], "DEX 流动性扫描（DexScreener+GeckoTerminal，每日 08:10）", "chain"),
 

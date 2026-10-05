@@ -208,6 +208,60 @@ check(o and o.get("conviction_tier") == "MED",
       f"min_resonance=1 时聚合 HIGH 门槛仍为 2（实得 {o and o.get('conviction_tier')}）")
 
 
+# ═══════════════ OPT-HL-DETERMINACY-002（2026-10-03 审计）：币种单源 HIGH 降档 ═══════════════
+print("[OPT-HL-DETERMINACY-002] 币种 target 单源 HIGH 降档（硬数据极值白名单除外）")
+
+# 单源币种 HIGH → 降 MED（min_resonance=1 模拟 V2 模式：单源卡能进候选池）
+r = mm.select_highlight_signals(
+    [_opp("WMETAX", "github_activity", score=88, dims=["github_repo_activity"])],
+    max_total=10, min_resonance=1)
+o = _by_target(r).get("WMETAX")
+check(o is not None and o.get("conviction_tier") == "MED",
+      f"单源币种 HIGH → MED（实得 {o and o.get('conviction_tier')}）", str(o))
+check(o and o.get("confidence") == "medium", "confidence 同步 medium")
+check(o and "tier_demote_reason" in o and "多因子共振" in o["tier_demote_reason"],
+      "带可解释降档说明（含多因子共振门槛）")
+
+# 双源币种 HIGH → 保留
+r = mm.select_highlight_signals([
+    _opp("ETH", "github_activity", score=88, dims=["github_repo_activity"]),
+    _opp("ETH", "etf_flow", score=80, dims=["etf_flow"]),
+], max_total=10, min_resonance=1)
+o = _by_target(r).get("ETH")
+check(o and o.get("conviction_tier") == "HIGH",
+      f"双源币种保留 HIGH（实得 {o and o.get('conviction_tier')}）")
+
+# 白名单：硬数据极值单源币种保留 HIGH
+for st in ("fng_extreme", "leverage_extreme", "mvrv_deep_under"):
+    r = mm.select_highlight_signals([_opp("BTC", st, score=95, dims=[st])],
+                                    max_total=10, min_resonance=1)
+    o = _by_target(r).get("BTC")
+    check(o and o.get("conviction_tier") == "HIGH",
+          f"白名单 {st} 单源保留 HIGH（实得 {o and o.get('conviction_tier')}）")
+
+# 单源 MED 不被二次降级（只降 HIGH）
+r = mm.select_highlight_signals(
+    [_opp("SOL", "github_activity", tier="MED", score=60, dims=["github_repo_activity"])],
+    max_total=10, min_resonance=1)
+o = _by_target(r).get("SOL")
+check(o and o.get("conviction_tier") == "MED", "单源 MED 不二次降级")
+
+
+# ═══════════════ A2（2026-10-03 审计 #2）：calibration_status 透传历史统计 ═══════════════
+print("[A2] calibration_status 透传 avg_pnl_pct / avg_alpha / wins / losses")
+mm._SIGNAL_TYPE_CALIBRATION["github_activity"] = {
+    "sample_count": 40, "hit_rate": 0.62, "weight_factor": 1.0,
+    "gate": "calibrated_ok", "no_high": False, "window_end": "2026-10-01",
+    "avg_pnl_pct": 3.5, "avg_alpha": 1.8, "wins": 25, "losses": 15}
+mm._CALIB_LOADED_AT = float("inf")
+_cs = mm._calibration_status("github_activity")
+check(_cs.get("state") == "calibrated_ok"
+      and _cs.get("avg_pnl_pct") == 3.5 and _cs.get("avg_alpha") == 1.8
+      and _cs.get("wins") == 25 and _cs.get("losses") == 15
+      and _cs.get("sample_count") == 40,
+      "calibration_status 透传 avg_pnl/avg_alpha/wins/losses", str(_cs))
+
+
 # ═══════════════ 刀5 / P2-C：显示档位随时间衰减 ═══════════════
 print("[刀5·P2-C] decayed_score 跌破 HIGH 门槛 → 降 MED（只降不升，不丢卡）")
 HIGH_MIN = float(mm.OPPORTUNITY_THRESHOLDS.get("conviction_high_min", 70))

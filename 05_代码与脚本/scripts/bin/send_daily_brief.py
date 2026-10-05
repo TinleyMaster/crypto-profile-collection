@@ -268,6 +268,49 @@ def _render_liquidation_row(liq: dict) -> str:
     )
 
 
+def _render_liq_regime_row(reg: dict) -> str:
+    """渲染「爆仓极值日窗口」一行（M2_liq_regime，2026-10-03 新增，只读展示）。
+
+    展示 BTC/ETH 最近完整日的爆仓环境 + 可行动窗口（投研结论：空爆极值日后的 7-14 日
+    显著上涨，胜率 61%；多空双爆为恐慌顶点观察）。**仅环境标注，不构成交易建议。**
+    表缺失/空/error ⇒ 返回空串整行隐藏（缺失≠0，绝不伪造 0）。
+    """
+    if not isinstance(reg, dict) or reg.get("status") != "ok":
+        return ""
+    syms = reg.get("symbols") or {}
+    if not syms:
+        return ""
+    label_map = {
+        "EXT-SHORT": "空爆极值",
+        "EXT-LONG": "多爆极值",
+        "EXT-MIX": "多空双爆",
+    }
+    parts = []
+    for sym in ("BTCUSDT", "ETHUSDT"):
+        r = syms.get(sym)
+        if not r:
+            continue
+        sym_cn = "BTC" if sym == "BTCUSDT" else "ETH"
+        if r.get("long_window"):
+            d7 = r.get("long_window_days_7d")
+            parts.append(f"{sym_cn} 空爆窗口 {d7}/7（轧空后上涨窗口）")
+        elif r.get("capitulation_window"):
+            parts.append(f"{sym_cn} 双爆窗口（恐慌顶点观察）")
+        elif r.get("bucket") and label_map.get(r["bucket"]):
+            parts.append(f"{sym_cn} {label_map[r['bucket']]}（p{float(r['pct'])*100:.0f}）")
+        else:
+            parts.append(f"{sym_cn} 环境常态")
+    body = " · ".join(parts)
+    foot = ("口径：爆仓/成交额近90日分位 + 多空占比（日频，仅环境标注，不构成交易建议）")
+    return (
+        '<div style="margin-top:6px;background:#fffbeb;border-radius:6px;padding:6px 8px;'
+        'font-size:10.5px;color:#92400e">'
+        f'🪙 爆仓环境 {body}'
+        f'<div style="font-size:9px;color:#b45309;margin-top:2px">{foot}</div>'
+        '</div>'
+    )
+
+
 # ── U-B：每日变化榜（消费 M5_daily_diff）────────────────────────────────
 # P1-9（审计 2026-10-01）：变化榜内「赛道轮动」一行实为币种强度分榜，与独立板块
 # 「🏭 赛道轮动（7日市值变化·功能分类）」同名不同义 → 改名「轮动强度榜」。
@@ -279,6 +322,9 @@ _DIFF_CATEGORY_ORDER = (
 _DIFF_CATEGORY_COLOR = {"价格涨幅榜": "#ef4444", "价格跌幅榜": "#22c55e"}
 # 旧键「赛道轮动」→ 新标签映射（兼容旧快照）
 _DIFF_LABEL_ALIAS = {"赛道轮动": "轮动强度榜"}
+# 每日变化榜低市值警示阈值：market_cap_rank > 500 或 mcap_tier 属低档 → 视为小市值妖币
+_DIFF_SMALL_CAP_RANK = 500
+_DIFF_SMALL_CAP_TIERS = ("top1000", "top3000")
 
 
 def _fmt_diff_value(item: dict) -> str:
@@ -303,6 +349,22 @@ def _fmt_diff_value(item: dict) -> str:
         return _fmt_mcap(f)
     sign = "+" if item.get("direction") == "up" else ""
     return f"{sign}{f:.2f}%"
+
+
+def _is_small_cap_diff_item(it: dict) -> bool:
+    """每日变化榜小市值判定（防追高警示）。
+
+    领涨榜会混入低流通小市值妖币（如 7 日 +1756% 的标的），散户易被涨幅吸引追高。
+    判定依据（有明确信号才打标，数据缺失不武断）：
+    ① market_cap_rank 有值且 > 500；② mcap_tier 属 top1000/top3000 低档。
+    """
+    try:
+        r = it.get("market_cap_rank")
+        if r is not None:
+            return int(r) > _DIFF_SMALL_CAP_RANK
+    except (TypeError, ValueError):
+        pass
+    return str(it.get("mcap_tier") or "").lower() in _DIFF_SMALL_CAP_TIERS
 
 
 def _render_daily_diff_html(brief: dict) -> str:
@@ -356,10 +418,14 @@ def _render_daily_diff_html(brief: dict) -> str:
                     _warn = " <span style='color:#b45309'>(⚠️疑似supply变动)</span>"
             except Exception:
                 pass
+            # 低市值警示：涨幅榜/异动榜上的小市值妖币易诱导追高，显式打标
+            _sc_tag = ""
+            if _is_small_cap_diff_item(it):
+                _sc_tag = " <span style='color:#b45309'>(⚡低市值·防追高)</span>"
             chips.append(
                 '<span style="display:inline-block;margin:1px 8px 1px 0;font-size:10.5px;color:#334155">'
                 f'{marks}<b>{sym}</b> '
-                f'<span style="color:{color};font-weight:600">{_val_txt}</span>{_warn}'
+                f'<span style="color:{color};font-weight:600">{_val_txt}</span>{_warn}{_sc_tag}'
                 '</span>'
             )
         if not chips:
@@ -420,6 +486,30 @@ _TRADE_FIELD_CN = {
 }
 # ── P1-b 观望闸门：data_quality 中 status=ok 的维度数低于此值 → 证据不足以给方向，强制「今日无操作」──
 _DQ_MIN_OK_FOR_TRADE = 2
+
+# ── 信号失配期管控：告警 T+1h 胜率持续低于平衡线时，系统自己的信号体系处于失效期 ──
+# 依据 M0_alert_quality（biz.scan_edge_daily 最新行）。此状态下继续向用户推「看多/看空」
+# 高亮信号会让投资者跟随失效信号 → 渲染层把高亮卡的买卖方向强制降级为「观察级」。
+_ALERT_GATE_SEVERITY = "high"  # 阈值-行情失配（失配判定的最终口径）
+
+
+def _alert_signal_gate(brief: dict) -> tuple[bool, str]:
+    """信号失配期判定：返回 (是否失配, 说明)。
+
+    判定口径与告警质量卡一致（以滚动口径为准，避免单日胜率波动误触发）：
+    ① severity == 'high'（阈值-行情失配）；② 近3日滚动 T+1h 胜率 < 滚动平衡线。
+    无数据 / 正常 → (False, "")，不影响原有行为。
+    """
+    aq = (brief or {}).get("M0_alert_quality") or {}
+    if str(aq.get("severity") or "").lower() == _ALERT_GATE_SEVERITY:
+        return True, "告警胜率与行情失配（severity=high）"
+    try:
+        rw, rb = aq.get("roll3_win_1h"), aq.get("roll3_be_1h")
+        if rw is not None and rb is not None and float(rw) < float(rb):
+            return True, f"近3日滚动 T+1h 胜率 {float(rw) * 100:.1f}% < 平衡线 {float(rb) * 100:.1f}%"
+    except (TypeError, ValueError):
+        pass
+    return False, ""
 
 # ── P1-2（审计 2026-09-28）：可判定字段的「伪值」也要算缺失 ───────────────────
 # LLM 有时把缺失字段写成字面量 "N/A" / "无" / "—"，它们非空却不可判定（如 XRP「参照 N/A」），
@@ -1097,6 +1187,8 @@ def render_brief_html(brief: dict) -> str:
     today = date.today().isoformat()
     m0 = brief.get("M0_tldr", {})
     ai_summary = brief.get("M0_ai_summary") or {}
+    # 信号失配期管控：告警胜率持续低于平衡线时，下方所有买卖方向信号降级为观察级
+    _sig_gate_on, _sig_gate_reason = _alert_signal_gate(brief)
     diff = brief.get("DIFF", {})
     sector_flow = brief.get("M2_sector_flow") or {}
     etf_flow = brief.get("M2_etf_flow") or {}
@@ -1360,6 +1452,15 @@ def render_brief_html(brief: dict) -> str:
           </div>
         """)
 
+    # 信号失配期横幅：置于 AI 定调卡之后、数据卡之前，把「当前信号体系失效」摆到最显眼位置
+    if _sig_gate_on:
+        html_parts.append(f"""
+          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:10px;color:#991b1b;font-size:11px;line-height:1.6">
+            ⚠️ <b>信号失配期</b>：{html.escape(_sig_gate_reason)}。为保护投资者，本封早报中「AI 精选高亮」的
+            买卖方向已自动降级为<b>观察级</b>，不作为开仓依据；请以观望 / 减仓为主，避免跟随失效信号。
+          </div>
+        """)
+
     # ════════════════════════════════════════════════════════
     # 模块 0.01：🎯 今日操作清单（P1-1，审计 2026-09-28）——邮件前 1/3 可见
     # M4-1 折叠归属表需先算，摘要据此排除已在其他板块给出结论的标的（避免重复结论）。
@@ -1453,6 +1554,16 @@ def render_brief_html(brief: dict) -> str:
             for hh in display_highlights
         )
         _hl_title = "🎯 AI 精选高亮信号（含观察级）" if _has_obs else "🎯 AI 精选高亮信号"
+        if _sig_gate_on:
+            _hl_title = "🎯 AI 精选高亮信号（失配期 · 观察级）"
+        # 口径统一：AI 定调「今日无操作」时，本区高亮仅作研究观察，避免读者误以为与上方矛盾
+        _hl_notes = []
+        if _sig_gate_on:
+            _hl_notes.append('<span style="color:#b45309">失配期 · 买卖方向已降级为观察</span>')
+        if not _trade_ready:
+            _hl_notes.append('<span style="color:#b45309">AI 定调今日无操作 · 本区仅供观察</span>')
+        _hl_notes.append('<span style="color:#94a3b8">研究信号 · 未含进场/止损/失效价，可执行方向以「交易方向」为准</span>')
+        _hl_sub_note = " · ".join(_hl_notes)
 
         html_parts.append(f"""
           <!-- 模块：AI精选高亮信号 -->
@@ -1461,6 +1572,7 @@ def render_brief_html(brief: dict) -> str:
               <div style="font-size:13px;font-weight:700;color:#0f172a">{_hl_title}</div>
               <div style="font-size:10px;color:#94a3b8">关键三维评分（技术/基本面/情绪）· 自动搜索补全</div>
             </div>
+            <div style="font-size:9.5px;color:#94a3b8;margin:-4px 0 8px;line-height:1.5">{_hl_sub_note}</div>
         """)
 
         for h in display_highlights:
@@ -1482,6 +1594,12 @@ def render_brief_html(brief: dict) -> str:
             # AI 判定与基础方向相反时不反向展示，而是标注"AI 存疑"，
             # 避免同一标的在高亮/机会两个板块出现相反方向的矛盾。
             direction = h.get("direction") or "long"
+            # 信号失配期管控：系统信号体系失效时，买卖方向一律降级为「观望」，
+            # 只提示关注、不提示追涨杀跌（避免投资者跟随失效信号）。
+            gate_obs_html = ""
+            if _sig_gate_on:
+                direction = "watch"
+                gate_obs_html = '<span style="font-size:9px;background:#fef2f2;color:#b91c1c;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:4px">失配期 · 观察</span>'
             ai_direction = ai.get("direction") or ""
             ai_doubt = bool(ai_direction and ai_direction not in ("long", "neutral"))
             dir_icon = "▲" if direction == "long" else "◆" if direction in ("watch", "neutral") else "▼"
@@ -1529,6 +1647,13 @@ def render_brief_html(brief: dict) -> str:
             _hl_demote = str(h.get("display_note") or h.get("tier_demote_reason") or "").strip()
             demote_html = (f'<div style="font-size:9.5px;color:#b45309;margin-top:4px">'
                            f'⬇️ 降档说明：{html.escape(_hl_demote)}</div>' if _hl_demote else "")
+            # 三件套诚实化：信号若自带失效价（invalidation），如实展示；
+            # 缺失则不伪造（区块注记已声明「未含进场/止损/失效价」）。
+            inval_html = ""
+            _inv_txt = str(h.get("invalidation") or h.get("invalidate") or "").strip()
+            if _inv_txt and not _is_placeholder_value(_inv_txt):
+                inval_html = (f'<div style="font-size:10px;color:#b91c1c;margin-top:4px;line-height:1.5">'
+                              f'失效：{html.escape(_clip(_inv_txt, 60))}</div>')
 
             html_parts.append(f"""
             <div style="padding:10px 12px;margin:6px 0;border-radius:8px;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecaca;border-left:3px solid #dc2626">
@@ -1539,6 +1664,7 @@ def render_brief_html(brief: dict) -> str:
                   <span title="模型（AI）信心，与信号档位是两套口径" style="font-size:9px;background:{conf_color}22;color:{conf_color};padding:1px 5px;border-radius:3px;font-weight:600">AI信心 {confidence}</span>
                   {doubt_html}
                   {obs_html}
+                  {gate_obs_html}
                 </div>
                 <div style="text-align:right;flex-shrink:0">
                   <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
@@ -1552,6 +1678,7 @@ def render_brief_html(brief: dict) -> str:
                 </div>
                 {mini_dims_html}
               </div>
+              {inval_html}
               {demote_html}
             </div>
             """)
@@ -1629,6 +1756,8 @@ def render_brief_html(brief: dict) -> str:
     # P0-D：24h 爆仓概况（只读快照渲染，禁止在渲染期调 CoinGlass）
     # 旧快照缺 M2_liquidation / 覆盖率不足 / 列 NULL ⇒ 整行隐藏（缺失≠0，不显示 0）
     liq_row = _render_liquidation_row(brief.get("M2_liquidation"))
+    # 爆仓极值日窗口（M2_liq_regime，2026-10-03 新增，只读展示，缺失整行隐藏）
+    liq_regime_row = _render_liq_regime_row(brief.get("M2_liq_regime"))
 
     # P2-C：大盘脉搏数据时点（此前只有日期，与爆仓/ETF/赛道/解锁的标注口径不一致）
     _pulse_as_of = _fmt_data_as_of(m0.get("data_as_of"))
@@ -1698,6 +1827,8 @@ def render_brief_html(brief: dict) -> str:
 
         <!-- P0-D：24h 爆仓概况（无数据时 liq_row 为空串，整行不出现） -->
         {liq_row}
+        <!-- 爆仓极值日窗口（M2_liq_regime，缺失整行隐藏） -->
+        {liq_regime_row}
         {_diff_note_html}
       </div>
     """)

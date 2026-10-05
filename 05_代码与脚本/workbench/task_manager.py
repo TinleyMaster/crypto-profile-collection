@@ -329,18 +329,60 @@ def _append_log(task_id: str, line: str) -> None:
             )
 
 
-def _safe_append_log(task_id: str, line: str, state: dict | None = None) -> bool:
-    """写一行日志但**绝不抛出**（2026-09-29）。
+# 日志写库硬超时（2026-10-03）：防「写挂死 → 读取线程卡 → stdout 管道满 → 批量冻住」。
+# 5335bfc 只兜住了「写失败（抛错）」，但 pool checkout/连接半开**挂死**时 _append_log
+# 会无限阻塞——读取线程照样卡死，子进程 stdout 管道（64KB）填满后批量冻在 print 上，
+# 表现就是 chain_holder_snapshot 反复「中途 240min 无日志」（10-03 bsc 在 [993/1200] 冻结）。
+_log_inflight: dict[str, bool] = {}
+_log_inflight_lock = threading.Lock()
+LOG_WRITE_TIMEOUT_SEC = float(os.getenv("LOG_WRITE_TIMEOUT_SEC", "10") or 10)
 
-    读取线程与子进程 stdout 是「生产者-消费者」：读取线程一旦因单行写失败而死，
-    子进程写 stdout 的管道（64KB）会被填满，进而**冻结子进程本身**（catalyst_run_all
-    周期性 `stuck: 240分钟无新日志` 的机制）。故逐行写失败只记录、不中断读取。
-    返回是否写入成功；`state` 传入时累计 `log_failures`。
+
+def _safe_append_log(task_id: str, line: str, state: dict | None = None) -> bool:
+    """写一行日志但**绝不抛出**且**绝不阻塞读取线程**（2026-09-29 + 2026-10-03 加固）。
+
+    读取线程与子进程 stdout 是「生产者-消费者」：读取线程一旦因单行写失败/挂死而停，
+    子进程写 stdout 的管道（64KB）会被填满，进而**冻结子进程本身**。
+    这里把每次写库放进独立线程 + `join(LOG_WRITE_TIMEOUT_SEC)` 硬超时：正常时快速返回；
+    挂死时放弃本轮（线程后台自愈），并把该 task 标记为「写进行中」，后续行直接跳过
+    直到超时线程结束——保证读取线程每行最多等 10s，管道永不填满。
+    返回是否写入成功；`state` 传入时累计 `log_failures` / `log_skips`。
     """
-    try:
-        _append_log(task_id, line)
-        return True
-    except Exception as e:  # noqa: BLE001
+    with _log_inflight_lock:
+        if _log_inflight.get(task_id):
+            # 上一个写还没结束（挂死中）：跳过本行，读取线程立即继续
+            if state is not None:
+                state["log_skips"] = state.get("log_skips", 0) + 1
+            return False
+        _log_inflight[task_id] = True
+
+    result: dict = {}
+
+    def _do_write() -> None:
+        try:
+            _append_log(task_id, line)
+            result["ok"] = True
+        except Exception as e:  # noqa: BLE001
+            result["err"] = e
+        finally:
+            with _log_inflight_lock:
+                _log_inflight[task_id] = False
+
+    t = threading.Thread(target=_do_write, name=f"logw-{task_id}", daemon=True)
+    t.start()
+    t.join(timeout=LOG_WRITE_TIMEOUT_SEC)
+
+    if t.is_alive():
+        # 写库挂死（超时）：放弃本轮，写线程后台自愈（池内 statement_timeout 兜底）。
+        if state is not None:
+            state["log_failures"] = state.get("log_failures", 0) + 1
+            if state["log_failures"] <= 3:
+                print(f"[TaskManager] {task_id} 日志写库挂起超时 "
+                      f"(#{state['log_failures']})，跳过该行以保读取线程不死",
+                      file=sys.stderr)
+        return False
+    if result.get("err"):
+        e = result["err"]
         if state is not None:
             state["log_failures"] = state.get("log_failures", 0) + 1
             if state["log_failures"] <= 3:
@@ -348,6 +390,7 @@ def _safe_append_log(task_id: str, line: str, state: dict | None = None) -> bool
                       f"(#{state['log_failures']}): {type(e).__name__}: {e}",
                       file=sys.stderr)
         return False
+    return True
 
 
 def _read_log(task_id: str, limit: int = 200) -> list[str]:

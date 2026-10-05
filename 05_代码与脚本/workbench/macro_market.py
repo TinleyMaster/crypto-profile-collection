@@ -999,6 +999,49 @@ def fetch_liquidation_overview() -> dict:
         return {**_liq_result_base(0, 0), "status": "error", "error": str(e)}
 
 
+def fetch_liq_daily_regime() -> dict:
+    """爆仓极值日窗口（M2_liq_regime，2026-10-03 新增，只读展示不进分）。
+
+    数据源 biz.liq_daily_regime（build_liq_daily_regime.py 日频维护，口径与回测一致）。
+    返回 BTC/ETH 最近完整日的 bucket / pct / 窗口标注 + 近 7 日空爆窗口天数。
+    表缺失/为空 ⇒ status='empty'（渲染层整行隐藏，缺失≠0）。
+    """
+    out: dict = {"status": "ok", "symbols": {}}
+    try:
+        from db_stats import get_db
+        import psycopg.rows
+
+        with get_db() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                for sym in ("BTCUSDT", "ETHUSDT"):
+                    cur.execute(
+                        "SELECT ts, bucket, pct, long_share, is_extreme, "
+                        "       long_window, capitulation_window "
+                        "FROM biz.liq_daily_regime WHERE symbol=%s ORDER BY ts DESC LIMIT 1",
+                        (sym,))
+                    r = cur.fetchone()
+                    if not r:
+                        continue
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM biz.liq_daily_regime "
+                        "WHERE symbol=%s AND long_window "
+                        "AND ts > CURRENT_DATE - INTERVAL '8 days'", (sym,))
+                    lw7 = int(cur.fetchone()["n"])
+                    out["symbols"][sym] = {
+                        "ts": str(r["ts"]), "bucket": r["bucket"],
+                        "pct": float(r["pct"]) if r["pct"] is not None else None,
+                        "long_share": float(r["long_share"]) if r["long_share"] is not None else None,
+                        "is_extreme": r["is_extreme"], "long_window": r["long_window"],
+                        "capitulation_window": r["capitulation_window"],
+                        "long_window_days_7d": lw7,
+                    }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+    if not out.get("symbols"):
+        out["status"] = "empty"
+    return out
+
+
 def _read_liquidation_snapshot() -> tuple[list[dict], int]:
     """读爆仓快照：返回 (每币最新一行, 覆盖率分母)。
 
@@ -2709,16 +2752,21 @@ def _load_signal_type_calibration() -> dict:
                     """
                     SELECT DISTINCT ON (signal_type)
                            signal_type, sample_count, hit_rate,
+                           avg_pnl_pct, avg_alpha, wins, losses,
                            weight_factor, gate, no_high, window_start, window_end
                     FROM biz.signal_type_calibration
                     ORDER BY signal_type, window_end DESC, horizon_days ASC
                     """
                 )
                 out: dict = {}
-                for st, n, hr, factor, gate, no_high, wstart, wend in cur.fetchall():
+                for st, n, hr, apnl, alpha, w, l, factor, gate, no_high, wstart, wend in cur.fetchall():
                     out[st] = {
                         "sample_count": int(n or 0),
                         "hit_rate": float(hr) if hr is not None else None,
+                        "avg_pnl_pct": float(apnl) if apnl is not None else None,
+                        "avg_alpha": float(alpha) if alpha is not None else None,
+                        "wins": int(w or 0),
+                        "losses": int(l or 0),
                         "weight_factor": float(factor) if factor is not None else 1.0,
                         "gate": gate,
                         "no_high": bool(no_high),
@@ -2783,25 +2831,33 @@ def _calibration_status(signal_type: str) -> dict:
     n = cal["sample_count"]
     hr = cal["hit_rate"]
     hr_txt = f"{hr:.0%}" if hr is not None else "无样本"
+    _stats = {
+        "sample_count": n,
+        "hit_rate": hr,
+        "avg_pnl_pct": cal.get("avg_pnl_pct"),
+        "avg_alpha": cal.get("avg_alpha"),
+        "wins": cal.get("wins"),
+        "losses": cal.get("losses"),
+    }
     if gate.startswith("exempt_"):
         return {
             "state": gate, "gate": gate, "calibrated": False,
-            "sample_count": n, "hit_rate": hr,
             "window_start": cal.get("window_start"), "window_end": cal["window_end"],
             "note": f"该类型属豁免集合（{gate}），从未被回测，无回测背书",
+            **_stats,
         }
     if cal["weight_factor"] >= 1.0 and not cal["no_high"]:
         return {
             "state": "calibrated_ok", "gate": gate, "calibrated": True,
-            "sample_count": n, "hit_rate": hr,
             "window_start": cal.get("window_start"), "window_end": cal["window_end"],
             "note": f"回测背书通过（样本 {n}、命中率 {hr_txt}）",
+            **_stats,
         }
     return {
         "state": "decayed", "gate": gate, "calibrated": True,
-        "sample_count": n, "hit_rate": hr,
         "window_start": cal.get("window_start"), "window_end": cal["window_end"],
         "note": f"已回测（{gate}，样本 {n}、命中率 {hr_txt}）→ 分数已降权、不进 HIGH 候选",
+        **_stats,
     }
 
 
@@ -5200,6 +5256,31 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
         merged["tier_demote_reason"] = (
             f"聚合类信号仅 {merged.get('resonance_count') or 1} 源共振，"
             f"HIGH 门槛（≥{agg_high_min} 源）未达，信号档位封顶 MED"
+        )
+
+    # OPT-HL-DETERMINACY-002（2026-10-03 审计·高确定性机会视角）：币种 target 单源 HIGH 降档。
+    # 聚合类已有 P1-C 闸门，但**币种 target 在 V2（min_resonance=1）下无此保护**：
+    # 单因子（如 github_activity 开发提交爆发、单条催化剂）即可打 HIGH，
+    # 而「开发活跃 ≠ 币价会涨」，缺少「事件 + 资金面/链上持仓」多因子共振校验
+    # 会把伪基本面信号误当成强机会（实测 WMETAX/UNI 仅 github 单维即 HIGH）。
+    # 处置与 P1-C 同构：单源 HIGH → 降 MED（封顶非封杀，卡片保留），
+    # 白名单 = 硬数据极值（恐贪极值 / 杠杆极值 / MVRV 深度低估）：单源即为事实本身。
+    _SYM_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme", "mvrv_deep_under"}
+    for k, merged in merged_map.items():
+        if merged.get("conviction_tier") != "HIGH":
+            continue
+        if not _is_symbol_target(merged.get("target", "")):
+            continue
+        if (merged.get("resonance_count") or 1) >= 2:
+            continue
+        if (merged.get("signal_type") or "") in _SYM_HIGH_ALLOWLIST:
+            continue
+        merged["conviction_tier"] = "MED"
+        merged["confidence"] = "medium"
+        merged["tier_demote_reason"] = (
+            f"单源信号（仅 {merged.get('resonance_count') or 1} 个独立维度）未达"
+            f"多因子共振门槛（≥2），信号档位封顶 MED；"
+            f"如需 HIGH 须叠加资金面/链上/事件等第二维度确认"
         )
 
     # P2-C（2026-09-26 审计·刀5）：显示档位随时间衰减，防「陈旧 HIGH 恒 HIGH」。
@@ -8081,11 +8162,44 @@ def fetch_upcoming_unlocks(days: int = 14) -> dict:
                     JOIN core.asset a ON a.asset_id = e.asset_id
                     WHERE e.unlock_date >= CURRENT_DATE
                       AND e.unlock_date <= CURRENT_DATE + (%s || ' days')::INTERVAL
-                      AND e.unlock_value_usd >= 1000000
                     ORDER BY e.unlock_value_usd DESC NULLS LAST
-                    LIMIT 20
+                    LIMIT 40
                 """, (days,))
                 unlocks = [dict(r) for r in cur.fetchall()]
+
+                # ── 解锁金额兜底（数据补全）：unlock_value_usd 缺失时按
+                # unlock_amount × 最新价（asset_market_daily）实时补算。
+                # 根因：表里存在真实解锁事件（催化剂管道可见），但 unlock_value_usd 为
+                # NULL，被原 `AND e.unlock_value_usd >= 1000000` 过滤后整段判「不可用」，
+                # 与催化剂栏展示同批事件自相矛盾。
+                _need_price = [u["asset_id"] for u in unlocks
+                               if u.get("unlock_value_usd") is None and u.get("unlock_amount") is not None]
+                _prices: dict[int, float] = {}
+                if _need_price:
+                    cur.execute("""
+                        SELECT DISTINCT ON (asset_id) asset_id, price_usd
+                        FROM biz.asset_market_daily
+                        WHERE asset_id = ANY(%s)
+                          AND source_code IN ('cmc', 'cmc_historical')
+                          AND price_usd IS NOT NULL AND price_usd > 0
+                        ORDER BY asset_id, market_date DESC,
+                                 CASE source_code WHEN 'cmc' THEN 0 ELSE 1 END
+                    """, (_need_price,))
+                    _prices = {int(r[0]): float(r[1]) for r in cur.fetchall() if r[1] is not None}
+                for u in unlocks:
+                    if u.get("unlock_value_usd") is None and u.get("unlock_amount") is not None:
+                        _p = _prices.get(u["asset_id"])
+                        if _p is not None:
+                            try:
+                                u["unlock_value_usd"] = float(u["unlock_amount"]) * _p
+                                u["unlock_value_src"] = "computed"
+                            except (TypeError, ValueError):
+                                pass
+                # 金额可判定者优先；金额未知且无法补算的行不伪造 0，直接剔除
+                unlocks = sorted(
+                    (u for u in unlocks if u.get("unlock_value_usd") is not None),
+                    key=lambda u: float(u.get("unlock_value_usd") or 0), reverse=True,
+                )[:20]
 
                 return {
                     "status": "ok" if unlocks else "empty",
@@ -8530,6 +8644,24 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
     不得用「向优质标的集中」等未经证实的定性措辞。
 """
 
+        # ── 口径统一（W-16）：喂给 LLM 的 BTC 周期/趋势与恐贪指数一律用系统 SSOT 口径 ──
+        # 旧实现：BTC 趋势取 m1['trend']（btc_cycle 无此字段 → 恒为「未知」）、恐贪取
+        # M2_flow 的 fear_greed（未走 SSOT 裁决，常为空）→ LLM 反复输出「趋势与恐贪
+        # 数据不可用」，而大盘脉搏卡却显示恐贪 72 / 周期顶部风险，同一封邮件自相矛盾。
+        # 改为：周期定位用 m1.phase_label（与脉搏卡同源），恐贪用 M0_tldr 的 SSOT 值。
+        _btc_trend_txt = (m1.get("phase_label") or m1.get("phase") or "数据不可用")
+        _btc_cycle_note = ""
+        if m1.get("cycle_heat_score") is not None:
+            _btc_cycle_note = f"，周期热度 {m1.get('cycle_heat_score')}（{m1.get('cycle_heat_label') or '—'}）"
+        _fg_ssot = m0.get("fear_greed")
+        _fg_txt = "数据不可用"
+        if _fg_ssot is not None:
+            _fg_txt = f"{_fg_ssot}（{m0.get('fear_greed_label') or ''}）"
+            if m0.get("fear_greed_as_of"):
+                _fg_txt += f"（截至 {m0.get('fear_greed_as_of')}）"
+            if m0.get("fear_greed_note"):
+                _fg_txt += f"；{m0.get('fear_greed_note')}"
+
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
 
 【数据可用性（下结论前必读；empty/error = 无数据，禁止据此下任何断言；可用率=字段级可用条数/总条数）】
@@ -8540,10 +8672,9 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
          + (f'，滞后 {d["lag_days"]} 天' if d.get("lag_days") else '') + '）'
     for d in data_quality)}
 
-【大盘概况】
-- BTC 周期阶段：{m1.get('phase', '未知')}
-- BTC 趋势：{m1.get('trend', '未知')}
-- 恐贪指数：{m2.get('fear_greed', {}).get('value', '未知')}（{m2.get('fear_greed', {}).get('label', '')}）
+【大盘概况】（BTC 周期/恐贪均为系统 SSOT 口径，与早报「大盘脉搏」卡一致，除非标注数据不可用否则不得写成数据缺失）
+- BTC 周期定位：{_btc_trend_txt}{_btc_cycle_note}
+- 恐贪指数：{_fg_txt}
 - 24h 涨跌幅：{m2.get('btc_change', {}).get('change_24h', '未知')}%
 - 总市值：{m2.get('total_market_cap', '未知')}
 - 24h 成交量：{m2.get('total_volume_24h', '未知')}
@@ -9194,6 +9325,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
             ("exchange_flow", fetch_exchange_net_flow_summary, (7,)),
             ("upcoming_unlocks", fetch_upcoming_unlocks, (14,)),
             ("catalyst_hotspots", _collect_catalyst_hotspots, ()),
+            ("liq_regime", fetch_liq_daily_regime, ()),
         ]
         results: dict = {}
 
@@ -9234,6 +9366,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
             pass
 
     catalyst_hotspots = p["catalyst_hotspots"]
+    liq_regime = p["liq_regime"]
     if not isinstance(catalyst_hotspots, list):
         catalyst_hotspots = []
 
@@ -9315,6 +9448,7 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "M2_exchange_flow": exchange_flow,
         "M2_holder_concentration": holder_concentration,
         "M2_stablecoin": stab,
+        "M2_liq_regime": liq_regime,
         "M3_highlights": highlights,
         "M4_risks": _m4_risks,
         "M5_daily_diff": daily_diff_brief,

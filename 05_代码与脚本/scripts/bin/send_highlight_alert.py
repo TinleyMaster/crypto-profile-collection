@@ -24,6 +24,8 @@
     python send_highlight_alert.py --snap-date 2026-09-23
     python send_highlight_alert.py --to a@b.com --cooldown-hours 12
     python send_highlight_alert.py --force            # 忽略冷却窗口（人工补发）
+    python send_highlight_alert.py --demo             # 全池按「新增」渲染并发送，不回写去重表（预览排版）
+    python send_highlight_alert.py --demo --dry-run   # 预览排版且不发信
 
 scheduler.py 注册：highlight_alert（每小时 05 分，Asia/Shanghai）。
 """
@@ -200,8 +202,8 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
-def symbol_count(cards: list[dict]) -> int:
-    """覆盖币数：symbol 形态 target + involved_symbols 并集。
+def card_symbols(cards: list[dict]) -> set[str]:
+    """高亮池涉及的全部币种 symbol（symbol 形态 target + involved_symbols 并集）。
 
     R4（2026-09-28 审计）：聚合/宏观类信号（narrative / chain_inflow / sector_* 等）
     的 target 是板块名/榜单名，不是币种——即使形如 symbol（如 "DePIN"）也不计币；
@@ -215,7 +217,12 @@ def symbol_count(cards: list[dict]) -> int:
         for s in (c.get("involved_symbols") or []):
             if s:
                 syms.add(str(s).upper())
-    return len(syms)
+    return syms
+
+
+def symbol_count(cards: list[dict]) -> int:
+    """覆盖币数：symbol 形态 target + involved_symbols 并集（复用 card_symbols）。"""
+    return len(card_symbols(cards))
 
 
 def card_sort_key(item: tuple[dict, str]) -> tuple:
@@ -361,6 +368,76 @@ def _render_ai_block(card: dict) -> str:
     return f'<div style="margin-top:6px;padding:6px 8px;background:#f8fafc;border-radius:3px">{"".join(parts)}</div>'
 
 
+def _render_calibration_line(card: dict) -> str:
+    """该类型历史回测统计（审计 2026-10-03 #2）：把 signal_type 级的历史命中率 /
+    平均收益 / 相对 BTC 超额显式挂到卡片上，让「conv 77」有历史统计背书可查。
+
+    数据来自卡片自带的 `calibration_status`（macro_market 生产时透传）。无样本 /
+    未校准的类型只说明「无背书」，不臆造 0。
+    """
+    cs = card.get("calibration_status") or {}
+    if not cs or "sample_count" not in cs:
+        return ""
+    n = int(cs.get("sample_count") or 0)
+    hr = cs.get("hit_rate")
+    ap = cs.get("avg_pnl_pct")
+    aa = cs.get("avg_alpha")
+    parts = [f"样本 {n}"]
+    if hr is not None:
+        parts.append(f"命中率 {hr * 100:.0f}%")
+    if ap is not None:
+        parts.append(f"平均收益 {ap:+.1f}%")
+    if aa is not None:
+        parts.append(f"相对BTC超额 {aa:+.1f}%")
+    if n == 0 or (hr is None and ap is None and aa is None):
+        parts.append("无回测背书")
+    return (f'<div style="font-size:11px;color:#475569;margin-top:2px">'
+            f'📊 该类型历史：{" · ".join(parts)}</div>')
+
+
+def _render_risk_panel(card: dict) -> str:
+    """前置风险过滤面板（审计 2026-10-03 #4）：流通市值 / 未来30天解锁 / 合约审计。
+
+    数据在 main() 内经 `load_risk_panels` 查库后注入 card["_risk_panel"]，渲染保持纯函数。
+    无 asset_id / 无数据的卡不渲染（聚合类、未匹配资产天然跳过）。
+    """
+    rp = card.get("_risk_panel") or {}
+    if not rp:
+        return ""
+    bits = []
+    mcap = rp.get("mcap_usd")
+    if mcap:
+        if mcap >= 1e9:
+            bits.append(f"市值 ${mcap / 1e9:.2f}B")
+        elif mcap >= 1e6:
+            bits.append(f"市值 ${mcap / 1e6:.1f}M")
+        elif mcap > 0:
+            bits.append(f"市值 ${mcap / 1e3:.0f}K")  # 小市值用 K 展示，避免 .0f 四舍五入成 $0M
+    up = rp.get("unlock_30d_pct")
+    up_usd = rp.get("unlock_30d_usd")
+    if up is not None and up > 0:
+        bits.append(f"30d解锁 {up:.1f}%")
+    elif up_usd:
+        bits.append(f"30d解锁 ${up_usd / 1e6:.1f}M")
+    else:
+        bits.append("30d解锁 无")
+    audit = rp.get("audit_status")
+    bits.append(f"审计 {audit or '未覆盖'}")
+    color = "#b45309" if rp.get("risk_flag") else "#475569"
+    return (f'<div style="font-size:11px;color:{color};margin-top:2px">'
+            f'🛡 风险前置：{" · ".join(bits)}</div>')
+
+
+def _render_type_position(card: dict) -> str:
+    """类型定位提示（审计 2026-10-03 #3）：低权重因子（持续性开发提交）单列，
+    明确「不是落地里程碑」，只作佐证维度——配合生产侧单源降档形成自洽口径。"""
+    if primary_signal_type(card) != "github_activity":
+        return ""
+    return (f'<div style="font-size:11px;color:#92400e;margin-top:2px">'
+            f'🧭 类型定位：开发提交属持续性运维行为，非落地里程碑（主网上线/审计/融资）；'
+            f'仅作佐证维度，需叠加资金面/事件第二维度确认</div>')
+
+
 def render_card(card: dict, kind: str) -> str:
     tier = str(card.get("conviction_tier") or "").upper()
     # M4（2026-09-24 审计）：AI 明确不背书（_ai_downgraded）的卡片不得以 HIGH 呈现，
@@ -410,6 +487,7 @@ def render_card(card: dict, kind: str) -> str:
         <span style="display:inline-block;margin-left:4px;padding:1px 6px;background:#e0e7ff;color:#3730a3;border-radius:3px;font-size:10px">{_e(ALERT_LABEL.get(kind, kind))}</span>
         <span style="font-size:11px;color:#64748b;margin-left:6px">{_e(dir_cn)} · {_e(horizon)} · conv {score}{decayed_txt}</span>
       </div>
+      {_render_risk_panel(card)}
       <div style="margin-bottom:4px">{_render_signal_types(card)}</div>
       {km}
       {strength_line}
@@ -420,12 +498,29 @@ def render_card(card: dict, kind: str) -> str:
       {invalid}
       {val_note}
       {demote}
+      {_render_calibration_line(card)}
+      {_render_type_position(card)}
       {_render_merged_signals(card)}
       {_render_ai_block(card)}
     </div>"""
 
 
-def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights: int) -> str:
+def _render_resonance_section(resonance_symbols: list[str] | None) -> str:
+    """跨模型共振汇总区（审计 2026-10-03 #5）：同时命中「基本面高亮池」与
+    「盘面异动告警」的标的单独拎出，作为最高确定性候选池。空则整块不渲染。"""
+    if not resonance_symbols:
+        return ""
+    syms = "、".join(f"<b>{_e(s)}</b>" for s in resonance_symbols)
+    return f"""
+    <div style="margin:0 0 12px;padding:10px 12px;border:1px solid #f59e0b;border-left:4px solid #f59e0b;border-radius:5px;background:#fffbeb">
+      <div style="font-size:13px;font-weight:700;color:#92400e">⚡ 基本面×盘面 跨模型共振（{len(resonance_symbols)} 币）</div>
+      <div style="font-size:12px;color:#78350f;margin-top:2px">{syms}</div>
+      <div style="font-size:11px;color:#92400e;margin-top:2px">同时命中「高亮信号池（基本面/事件）」与「盘面异动告警（资金/合约）」，两模型共振确认，作为最高确定性候选池优先观察。</div>
+    </div>"""
+
+
+def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights: int,
+                resonance_symbols: list[str] | None = None) -> str:
     """渲染邮件正文。items = 当前高亮池（本轮新增/升级 + 在池）逐卡 (card, kind)。"""
     n_new = sum(1 for _, k in items if k == ALERT_NEW)
     n_up = sum(1 for _, k in items if k == ALERT_UPGRADE)
@@ -433,17 +528,20 @@ def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights:
     cards = [c for c, _ in items]
     now = fmt_bj(datetime.now(timezone.utc), "%Y-%m-%d %H:%M") + "（北京时间）"
     hold_txt = f" · 在池 {n_hold} 条" if n_hold else ""
+    reso_txt = f" · 跨模型共振 {len(resonance_symbols)} 币" if resonance_symbols else ""
     head = f"""
     <h2 style="margin:0 0 4px">⚡ 高亮信号提醒</h2>
     <p style="margin:0 0 12px;color:#666;font-size:13px">
-      新增 {n_new} 条 · 升级 {n_up} 条{hold_txt} · 覆盖 {symbol_count(cards)} 币 ·
+      新增 {n_new} 条 · 升级 {n_up} 条{hold_txt} · 覆盖 {symbol_count(cards)} 币{reso_txt} ·
       数据快照 {_e(snap_date)}（当日高亮池共 {total_highlights} 条） · 生成于 {now}
     </p>"""
+    resonance_html = _render_resonance_section(resonance_symbols)
     if not items:
         body = '<p style="color:#999">本轮无新增/升级高亮信号。</p>'
     else:
         body = "".join(render_card(c, k) for c, k in items)
-    return f'<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;max-width:720px">{head}{body}</div>'
+    return (f'<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;max-width:720px">'
+            f'{head}{resonance_html}{body}</div>')
 
 
 # =====================================================================
@@ -534,6 +632,106 @@ def load_sent_states(conn, lookback_days: int) -> dict[str, dict]:
         return {r["card_key"]: r for r in cur.fetchall()}
 
 
+def load_risk_panels(conn, cards: list[dict]) -> dict[int, dict]:
+    """前置风险面板（审计 2026-10-03 #4）：流通市值 / 未来30天解锁 / 合约审计。
+
+    按卡片 asset_id 批量查三张表，返回 {asset_id: {mcap_usd, unlock_30d_usd,
+    unlock_30d_pct, audit_status, risk_flag}}。任一查询失败整体降级为空（不阻断发信）。
+    """
+    ids = sorted({int(c["asset_id"]) for c in cards if c.get("asset_id") is not None})
+    if not ids:
+        return {}
+    try:
+        out: dict[int, dict] = {}
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT asset_id, market_cap
+                FROM biz.v_asset_market_daily_primary
+                WHERE market_date = (SELECT MAX(market_date) FROM biz.v_asset_market_daily_primary)
+                  AND asset_id = ANY(%s)
+                """,
+                (ids,),
+            )
+            mcap = {r["asset_id"]: float(r["market_cap"] or 0) for r in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT asset_id,
+                       COALESCE(SUM(unlock_value_usd), 0) AS total_usd
+                FROM biz.asset_unlock_event
+                WHERE unlock_date BETWEEN NOW() AND NOW() + INTERVAL '30 days'
+                  AND asset_id = ANY(%s)
+                GROUP BY asset_id
+                """,
+                (ids,),
+            )
+            unlock = {r["asset_id"]: float(r["total_usd"] or 0) for r in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT asset_id, source_status, is_honeypot, risk_score
+                FROM biz.asset_contract_security
+                WHERE asset_id = ANY(%s)
+                """,
+                (ids,),
+            )
+            audits = {r["asset_id"]: r for r in cur.fetchall()}
+        for aid in ids:
+            m = mcap.get(aid) or 0.0
+            t_usd = unlock.get(aid) or 0.0
+            entry = {
+                "mcap_usd": m or None,
+                "unlock_30d_usd": t_usd or None,
+                "unlock_30d_pct": (t_usd / m * 100) if (m and t_usd) else None,
+                "audit_status": None,
+                "risk_flag": False,
+            }
+            a = audits.get(aid)
+            if a:
+                if a.get("source_status") == "hit":
+                    if a.get("is_honeypot"):
+                        entry["audit_status"], entry["risk_flag"] = "⚠️蜜罐", True
+                    else:
+                        rs = a.get("risk_score")
+                        if rs is not None and float(rs) >= 70:
+                            entry["audit_status"], entry["risk_flag"] = (
+                                f"⚠️风险{float(rs):.0f}", True)
+                        else:
+                            entry["audit_status"] = "✅已扫描"
+                else:
+                    entry["audit_status"] = "未覆盖"
+            if entry["mcap_usd"] or entry["unlock_30d_usd"] or entry["audit_status"]:
+                out[aid] = entry
+        return out
+    except Exception as e:
+        print(f"[highlight_alert] 风险面板查询失败（降级跳过）: {e}")
+        return {}
+
+
+def load_recent_scan_symbols(conn, hours: int = 24) -> set[str]:
+    """近 N 小时盘面异动告警（biz.scan_signal high/medium 置信）涉及的币种。
+
+    与高亮池做交集即为「基本面×盘面 跨模型共振」标的（审计 2026-10-03 #5）。
+    失败返回空集（不阻断发信）。
+    """
+    try:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT symbol
+                FROM biz.scan_signal
+                WHERE created_at > NOW() - make_interval(hours => %s)
+                  AND confidence IN ('high', 'medium')
+                  AND symbol IS NOT NULL AND TRIM(symbol) <> ''
+                """,
+                (int(hours),),
+            )
+            return {str(r["symbol"]).strip().upper() for r in cur.fetchall()
+                    if str(r["symbol"] or "").strip()}
+    except Exception as e:
+        print(f"[highlight_alert] 盘面共振查询失败（降级跳过）: {e}")
+        return {}
+
+
 def acquire_send_lock(conn, card: dict, kind: str, subject: str, cooldown_hours: int) -> bool:
     """原子获取发送权；返回 False 表示处于冷却窗口内（或取锁异常）。"""
     key = card_key(card)
@@ -594,6 +792,8 @@ def main() -> int:
                     help=f"单封邮件最多卡片数（默认 {DEFAULT_MAX_CARDS}）")
     ap.add_argument("--to", default=None, help="收件人（默认 SMTP_TO）")
     ap.add_argument("--force", action="store_true", help="忽略冷却窗口（人工补发）")
+    ap.add_argument("--demo", action="store_true",
+                    help="演示模式：把当前高亮池全部按「新增」渲染并发送，不回写去重表（人工预览排版用，不污染真实告警）")
     args = ap.parse_args()
 
     from crypto_research.config import get_settings
@@ -614,11 +814,26 @@ def main() -> int:
         highlights = extract_highlights(row["payload"])
         prev_states = load_sent_states(conn, args.lookback_days)
 
-        candidates: list[tuple[dict, str]] = []
+        # 审计 2026-10-03：#4 前置风险面板（市值/30d解锁/审计）注入卡片；
+        # #5 跨模型共振：高亮池 ∩ 近 24h 盘面异动告警币种。
+        risk_panels = load_risk_panels(conn, highlights)
         for card in highlights:
-            kind = classify_card(card, prev_states.get(card_key(card)))
-            if kind:
-                candidates.append((card, kind))
+            aid = card.get("asset_id")
+            if aid is not None and int(aid) in risk_panels:
+                card["_risk_panel"] = risk_panels[int(aid)]
+        scan_syms = load_recent_scan_symbols(conn, hours=24)
+        resonance_symbols = sorted(card_symbols(highlights) & scan_syms)
+
+        candidates: list[tuple[dict, str]] = []
+        if args.demo:
+            # 演示模式：全池按「新增」渲染（跳过 classify 判定与发送锁），
+            # 用于人工预览新排版；不回写去重表，不占冷却、不污染真实告警。
+            candidates = [(c, ALERT_NEW) for c in highlights]
+        else:
+            for card in highlights:
+                kind = classify_card(card, prev_states.get(card_key(card)))
+                if kind:
+                    candidates.append((card, kind))
         candidates.sort(key=card_sort_key, reverse=True)
         capped = candidates[:args.max_cards]
 
@@ -632,29 +847,33 @@ def main() -> int:
             # 与高亮池同步显示：正文给「当前池全集」，本轮新增/升级标徽章，其余「在池」
             _kinds = {card_key(c): k for c, k in candidates}
             print(render_html(build_pool_items(highlights, _kinds, args.max_cards),
-                              actual_date, len(highlights)))
+                              actual_date, len(highlights), resonance_symbols))
             return 0
 
         subject = (f"⚡ 高亮信号提醒（新增 "
                    f"{sum(1 for _, k in capped if k == ALERT_NEW)} · 升级 "
                    f"{sum(1 for _, k in capped if k == ALERT_UPGRADE)}）")
-        granted = [it for it in capped if acquire_send_lock(conn, it[0], it[1], subject, cooldown)]
-        if not granted:
-            print("[highlight_alert] 全部命中冷却窗口，不发信")
-            return 0
-        if len(granted) < len(capped):
-            print(f"[highlight_alert] {len(capped) - len(granted)} 条命中冷却窗口，已跳过")
+        if args.demo:
+            granted = capped          # 演示模式：不取发送锁（不写去重表、不占冷却）
+        else:
+            granted = [it for it in capped if acquire_send_lock(conn, it[0], it[1], subject, cooldown)]
+            if not granted:
+                print("[highlight_alert] 全部命中冷却窗口，不发信")
+                return 0
+            if len(granted) < len(capped):
+                print(f"[highlight_alert] {len(capped) - len(granted)} 条命中冷却窗口，已跳过")
 
     # ── 阶段 2：渲染 + 发送（正文同步展示当前高亮池全集）──
     _granted_kinds = {card_key(c): k for c, k in granted}
     pool_items = build_pool_items(highlights, _granted_kinds, args.max_cards)
-    html = render_html(pool_items, actual_date, len(highlights))
+    html = render_html(pool_items, actual_date, len(highlights), resonance_symbols)
     cards = [c for c, _ in pool_items]
     n_new = sum(1 for _, k in pool_items if k == ALERT_NEW)
     n_up = sum(1 for _, k in pool_items if k == ALERT_UPGRADE)
     n_hold = sum(1 for _, k in pool_items if k == ALERT_HOLD)
     subject = (f"⚡ 高亮信号提醒（新增 {n_new} · 升级 {n_up} · 在池 {n_hold} 条 · "
-               f"{symbol_count(cards)} 币）")
+               f"{symbol_count(cards)} 币"
+               + (f" · 共振 {len(resonance_symbols)} 币" if resonance_symbols else "") + "）")
 
     from crypto_research.clients.notifier import EmailNotifier
 
@@ -668,10 +887,11 @@ def main() -> int:
     )
     print(f"[highlight_alert] 发送结果: {'成功' if ok else '失败'} - {msg}")
 
-    # ── 阶段 3：回写状态（失败留 'failed'，下一轮可重试）──
-    with get_connection(settings.database_url) as conn:
-        for card, kind in granted:
-            mark_result(conn, card, kind, "sent" if ok else "failed", None if ok else str(msg))
+    # ── 阶段 3：回写状态（失败留 'failed'，下一轮可重试；演示模式不回写）──
+    if not args.demo:
+        with get_connection(settings.database_url) as conn:
+            for card, kind in granted:
+                mark_result(conn, card, kind, "sent" if ok else "failed", None if ok else str(msg))
 
     return 0 if ok else 1
 

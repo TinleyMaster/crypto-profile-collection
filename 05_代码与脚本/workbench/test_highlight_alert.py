@@ -223,5 +223,71 @@ _dem = sha.render_html([(_card(tier_demote_reason="exempt_unbacktested：该类�
                          sha.ALERT_NEW)], "2026-09-23", 1)
 check("降档说明" in _dem and "exempt_unbacktested" in _dem, "邮件卡消费 tier_demote_reason")
 
+print("\n[H8] 审计 2026-10-03：历史统计 / 风险面板 / 类型定位 / 跨模型共振")
+# #2 历史统计面板：calibration_status 渲染该类型历史命中率/收益/超额
+_cal = _card(signal_type="github_activity",
+             calibration_status={"state": "calibrated_ok", "sample_count": 40,
+                                 "hit_rate": 0.62, "avg_pnl_pct": 3.5,
+                                 "avg_alpha": 1.8, "wins": 25, "losses": 15})
+_html_cal = sha.render_card(_cal, sha.ALERT_NEW)
+for tok in ["📊 该类型历史", "样本 40", "命中率 62%", "平均收益 +3.5%", "相对BTC超额 +1.8%"]:
+    check(tok in _html_cal, f"历史统计面板含「{tok}」")
+# 样本 0 / 无统计 → 明示无背书，不臆造 0
+_html_cal0 = sha.render_card(_card(signal_type="narrative",
+                                   calibration_status={"state": "exempt_not_backtestable",
+                                                       "sample_count": 0, "hit_rate": None}),
+                             sha.ALERT_NEW)
+check("样本 0" in _html_cal0 and "无回测背书" in _html_cal0, "无样本类型明示「无回测背书」")
+# 无 calibration_status 的卡不渲染该行
+check("该类型历史" not in sha.render_card(_card(), sha.ALERT_NEW), "无校准状态不渲染历史统计行")
+
+# #4 前置风险面板：市值 / 30d解锁 / 审计
+_rp = _card(_risk_panel={"mcap_usd": 12.5e9, "unlock_30d_pct": 2.3,
+                         "unlock_30d_usd": 3.1e8, "audit_status": "✅已扫描"})
+_html_rp = sha.render_card(_rp, sha.ALERT_NEW)
+for tok in ["🛡 风险前置", "市值 $12.50B", "30d解锁 2.3%", "审计 ✅已扫描"]:
+    check(tok in _html_rp, f"风险面板含「{tok}」")
+check(_html_rp.index("🛡 风险前置") < _html_rp.index("巨鲸异动"),
+      "风险面板位于卡片顶部（先于信号类型/强度信息）")
+check("风险前置" not in sha.render_card(_card(), sha.ALERT_NEW), "无风险数据不渲染风险面板")
+# 蜜罐/高风险 → 醒目色 + risk_flag
+_rp_risk = sha.render_card(_card(_risk_panel={"mcap_usd": 1e8, "unlock_30d_pct": 0,
+                                               "unlock_30d_usd": 0, "audit_status": "⚠️蜜罐",
+                                               "risk_flag": True}), sha.ALERT_NEW)
+check("⚠️蜜罐" in _rp_risk and "#b45309" in _rp_risk, "蜜罐标注醒目色")
+# 小市值用 K 展示，避免四舍五入成 $0M
+_rp_small = sha.render_card(_card(_risk_panel={"mcap_usd": 5e5, "unlock_30d_pct": 0,
+                                               "unlock_30d_usd": 0, "audit_status": None}),
+                            sha.ALERT_NEW)
+check("市值 $500K" in _rp_small and "$0M" not in _rp_small, "小市值以 K 展示")
+
+# #3 类型定位：github_activity 卡渲染「持续性开发≠里程碑」
+_html_tp = sha.render_card(_card(signal_type="github_activity"), sha.ALERT_NEW)
+check("🧭 类型定位" in _html_tp and "非落地里程碑" in _html_tp, "github 卡渲染类型定位提示")
+check("类型定位" not in sha.render_card(_card(signal_type="catalyst"), sha.ALERT_NEW),
+      "非 github 卡不渲染类型定位提示")
+
+# #5 跨模型共振汇总区（render_html 显式入参，空则整块不渲染）
+_html_reso = sha.render_html([(_card(), sha.ALERT_HOLD)], "2026-10-03", 5, ["SOL", "BTC"])
+check("基本面×盘面 跨模型共振" in _html_reso and "SOL" in _html_reso and "BTC" in _html_reso,
+      "共振汇总区渲染命中币种")
+check("跨模型共振 2 币" in _html_reso, "抬头含共振币数")
+check("跨模型共振" not in sha.render_html([(_card(), sha.ALERT_HOLD)], "2026-10-03", 5),
+      "无共振时不渲染汇总区")
+
+# card_symbols：聚合类 target 不计币、involved_symbols 计币（与 symbol_count 同口径）
+check(sha.card_symbols([_card(target="SOL"),
+                        _card(target="DePIN", signal_type="narrative",
+                              involved_symbols=["AAA", "BBB"])]) == {"SOL", "AAA", "BBB"},
+      "card_symbols 正确收集币种（聚合类 target 不计币）")
+
+# 源码守卫：风险面板 / 盘面共振查询已接入 main 且降级不阻断
+check("def load_risk_panels" in _sha_src and "def load_recent_scan_symbols" in _sha_src,
+      "风险面板与盘面共振查询函数已定义")
+check("_risk_panel" in _sha_src and "resonance_symbols" in _sha_src,
+      "main 已注入 _risk_panel 与 resonance_symbols")
+check("risk_panels" in _sha_src and "scan_signal" in _sha_src,
+      "数据源为 biz.scan_signal（盘面异动）+ 资产宽表")
+
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")
 sys.exit(1 if failed else 0)

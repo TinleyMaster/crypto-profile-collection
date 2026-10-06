@@ -925,8 +925,9 @@
       const u = lastUnlabeled;
       if (u && u.count > 0) {
         html += '<span class="sep">·</span>'
-          + '<span class="lbl" title="本时间窗内两端均未命中交易所标签的转账，'
-          + '已被榜单剔除（属漏报，不是误报）">'
+          + '<span class="lbl" title="本时间窗内两端均未命中交易所标签的可交易代币转账'
+          + '（已剔除稳定币/封装类资产，并按交易去重）。这部分无法判定流入还是流出，'
+          + '已被榜单整行剔除——属覆盖缺口，不是误报">'
           + `未打标漏报 ${u.count} 笔 · ${fmtUsd(u.value_usd)}</span>`;
       }
       $("#updated").innerHTML = html;

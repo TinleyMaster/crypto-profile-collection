@@ -91,7 +91,7 @@ _NOISE_SECTORS = {"wrapped", "lp_token", "synthetic"}
 # 质押/封装/RWA 衍生品噪音（流动性往返无交易信号，且不在 asset_type='stablecoin' 覆盖内）。
 # 全部存大写，与 SQL 侧 UPPER(canonical_symbol) 比较保持一致。
 _NOISE_SYMBOLS = {
-    "STETH", "WSTETH", "CBETH", "BBSOL", "SOLVBTC", "XAUT", "PAXG",
+    "STETH", "WSTETH", "CBETH", "CBBTC", "BBSOL", "SOLVBTC", "XAUT", "PAXG",
     "SNDKB", "SNDK", "BTCB", "WBTC", "WETH", "USDB", "EURT",
 }
 
@@ -295,11 +295,17 @@ def _bucket_label(span: int) -> str:
 
 
 def _unlabeled_stats(cur, hours, chain, *, asset_id=None):
-    """本窗口内「两端都没命中交易所标签」的转账笔数与金额（漏报量）。
+    """本窗口内「两端都没命中交易所标签」的可交易代币转账（去重后）笔数与金额。
 
     这些行被 clean 层整行剔除 ⇒ 在榜单/流水里完全不可见。标签富化只能在本机跑
     （服务器 IP 被 Cloudflare 拦），一旦本地任务断供，表现就是「榜单静默变空」
-    而不是报错。把漏报量显式暴露，让静默缺口可被察觉。
+    而不是报错。把缺口量显式暴露，让静默缺口可被察觉。
+
+    口径必须与榜单对齐，否则这个数字会被两类噪音放大成假信号：
+      - 剔除稳定币与封装/质押类噪音资产。这类资产靠封装/解封往返搬量，与榜单要表达的
+        「可交易标的资金流」不是一回事；实测 CBBTC/WBTC 一类占未标注量的 98%。
+      - 按 (tx_hash, asset_id) 去重取 MAX(value_usd)。同一笔交易内的多跳 Transfer
+        （套利/闪电贷/bridge 路由）会把同一笔钱按跳数重复计入，实测虚增约 50%。
 
     注意：不受 exchange 筛选影响——它描述的是「完全没有交易所身份」的那部分转账。
     """
@@ -307,16 +313,23 @@ def _unlabeled_stats(cur, hours, chain, *, asset_id=None):
     cur.execute(f"""
         {_exch_cte()},
         unl AS (
-            SELECT tl.asset_id, tl.chain, tl.value_usd, tl.from_address, tl.to_address
+            SELECT tl.asset_id, tl.tx_hash, tl.value_usd
             FROM biz.onchain_transfer_log tl
+            JOIN core.asset a ON a.asset_id = tl.asset_id
+            LEFT JOIN exch f ON f.address = tl.from_address AND f.chain = tl.chain
+            LEFT JOIN exch t ON t.address = tl.to_address   AND t.chain = tl.chain
             WHERE {' AND '.join(conds)}
+              AND a.asset_type <> '{_STABLE_ASSET_TYPE}'
+              AND UPPER(a.canonical_symbol) <> ALL(%s)
+              AND f.exchange_name IS NULL AND t.exchange_name IS NULL
+        ),
+        one AS (
+            SELECT tx_hash, asset_id, MAX(value_usd) AS value_usd
+            FROM unl GROUP BY tx_hash, asset_id
         )
-        SELECT COUNT(*) AS cnt, COALESCE(SUM(unl.value_usd), 0) AS usd
-        FROM unl
-        LEFT JOIN exch f ON f.address = unl.from_address AND f.chain = unl.chain
-        LEFT JOIN exch t ON t.address = unl.to_address   AND t.chain = unl.chain
-        WHERE f.exchange_name IS NULL AND t.exchange_name IS NULL
-    """, params)
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(value_usd), 0) AS usd
+        FROM one
+    """, params + [list(_NOISE_SYMBOLS)])
     r = cur.fetchone()
     return {"count": int(r["cnt"] or 0), "value_usd": float(r["usd"] or 0)}
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""涨幅榜周期回测 · 历史回填：Binance USDT 永续 1h K 线 + 资金费率（2023-01-01 起）。
+"""涨幅榜周期回测 · 历史回填：Binance USDT 永续 1h K 线 + 资金费率（支持任意起始日期）。
 
 背景（2026-10-03）：现有 1h K 线仅 2026-06-18 起（~3.5 个月），不足一个完整 4 年周期。
-本脚本把 1h K 线 + 资金费率回填到一个完整牛市周期起点（默认 2023-01-01，
-覆盖 2023 熊底 → 2024 减半 → 2025 牛市顶 → 2026 调整），供 backtest_binance_gainers.py
-与 backtest_hourly_reversal.py 做跨周期稳健性验证。
+本脚本把 1h K 线 + 资金费率回填到完整周期起点（默认 2023-01-01；测 ≥2 轮周期用
+--start-date 2020-01-01，覆盖 2020 减半牛市 → 2021-2022 熊市 → 2023 熊底 → 2024 减半 →
+2025 牛市顶 → 2026 调整，供 backtest_binance_gainers.py / backtest_hourly_reversal.py
+做跨周期稳健性验证）。
 
-数据源：Binance FAPI 公开接口（无需 key）。
+数据源：Binance FAPI 公开接口（无需 key）。每个合约从其上市日（onboardDate）开始拉，
+2020 前未上市的合约自动从上市日补起。
 
 实现（2026-10-04 第四版，直连 + 多 worker 定稿）：
   - v1 并发（共享 binance_http 全局锁）：全局锁串行化，纯并发无收益
@@ -18,14 +20,17 @@
     在 Binance fapi 2400 weight/min 限额内）→ 理论 ~50 分钟完成全部。
   - 每符号完成后主线程立即 upsert + commit（可续跑，已入库符号自动跳过）。
 
-体量（529 合约 × ~3.8 年）：
-  - 1h K 线 ≈ 1760 万行；资金费率 ≈ 190 万条；存储 ≈ 1.7GB。
+体量（529 合约，按起始日期估算）：
+  - 2023-01-01 起：1h K 线 ≈ 1760 万行；资金费率 ≈ 190 万条；存储 ≈ 1.7GB
+  - 2020-01-01 起：1h K 线 ≈ 3150 万行；资金费率 ≈ 394 万条；存储 ≈ 2.5GB
+    （2020 前上市的合约少，实际按各合约 onboardDate 分档）
 
 用法：
-    python backfill_cycle_history.py                          # 直连 + 4 worker
-    python backfill_cycle_history.py --proxy --workers 1      # 走代理串行（回退）
-    python backfill_cycle_history.py --no-funding             # 只回填 K 线
-    python backfill_cycle_history.py --limit-symbols 3 --dry-run   # 冒烟
+    python backfill_cycle_history.py                                   # 2023-01-01 起（默认）
+    python backfill_cycle_history.py --start-date 2020-01-01           # 回填到 2020（≥2 轮周期）
+    python backfill_cycle_history.py --proxy --workers 1               # 走代理串行（回退）
+    python backfill_cycle_history.py --no-funding                      # 只回填 K 线
+    python backfill_cycle_history.py --limit-symbols 3 --dry-run       # 冒烟
 """
 from __future__ import annotations
 
@@ -154,9 +159,9 @@ def fetch_funding(session: requests.Session, symbol: str, start_ms: int, end_ms:
     return rows
 
 
-def klines_covered(conn, symbols: list[str], start_ms: int, session: requests.Session) -> set[str]:
+def klines_covered(conn, symbols: list[str], start_ms: int,
+                   onboard: dict[str, int]) -> set[str]:
     """已覆盖 = 库内最早已 ≤ 有效起点（max(上市日, 窗口起点)）且最新 ≥ now-容差。"""
-    onboard = get_onboard_dates(session)
     tol = datetime.now(timezone.utc) - timedelta(hours=TOLERANCE_H)
     out: set[str] = set()
     with conn.cursor() as cur:
@@ -174,16 +179,27 @@ def klines_covered(conn, symbols: list[str], start_ms: int, session: requests.Se
     return out
 
 
-def funding_covered(conn, symbols: list[str]) -> set[str]:
+def funding_covered(conn, symbols: list[str], start_ms: int,
+                    onboard: dict[str, int]) -> set[str]:
+    """已覆盖 = 库内最早费率 ≤ 有效起点（max(上市日, 窗口起点)）且最新 ≥ now-容差。
+
+    注意必须同时检查 MIN 与 MAX：若只查 MAX，之前回填到 2023 的合约（最新费率=now）
+    会被误判为已覆盖，导致把窗口起点改到 2020 后费率段被跳过。
+    """
     tol = datetime.now(timezone.utc) - timedelta(hours=TOLERANCE_H)
     out: set[str] = set()
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT symbol, MAX(funding_time) FROM biz.funding_rate_hist "
+            "SELECT symbol, MIN(funding_time), MAX(funding_time) FROM biz.funding_rate_hist "
             "WHERE symbol = ANY(%s) GROUP BY symbol",
             (symbols,),
         )
-        out = {sym for sym, mx in cur.fetchall() if mx is not None and mx >= tol}
+        for sym, mn, mx in cur.fetchall():
+            if mn is None or mx is None or mx < tol:
+                continue
+            limit = max(onboard.get(sym, 0), start_ms)
+            if mn <= datetime.fromtimestamp(limit / 1000.0, tz=timezone.utc):
+                out.add(sym)
     return out
 
 
@@ -295,6 +311,7 @@ def main() -> int:
     settings = get_settings(require_database=True)
     boot = make_session(not args.proxy)
     symbols = get_usdt_perpetuals(boot)
+    onboard = get_onboard_dates(boot)  # 上市日映射（covered 判定 + 2020 前合约分档）
     if args.limit_symbols:
         symbols = symbols[: args.limit_symbols]
     print(f"[symbols] {len(symbols)} 个 USDT 永续，窗口 {args.start_date} ~ now，"
@@ -308,7 +325,7 @@ def main() -> int:
         try:
             with get_connection(settings.database_url) as conn:
                 # ---- 1h K 线 ----
-                covered = klines_covered(conn, symbols, start_ms, boot)
+                covered = klines_covered(conn, symbols, start_ms, onboard)
                 todo = [s for s in symbols if s not in covered]
                 print(f"[klines] 已覆盖跳过 {len(covered)}，待拉 {len(todo)}")
                 if todo:
@@ -319,7 +336,7 @@ def main() -> int:
 
                 # ---- 资金费率 ----
                 if not args.no_funding:
-                    fcov = funding_covered(conn, symbols)
+                    fcov = funding_covered(conn, symbols, start_ms, onboard)
                     ftodo = [s for s in symbols if s not in fcov]
                     print(f"[funding] 已覆盖跳过 {len(fcov)}，待拉 {len(ftodo)}")
                     if ftodo:

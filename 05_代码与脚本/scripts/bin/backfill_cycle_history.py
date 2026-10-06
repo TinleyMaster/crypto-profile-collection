@@ -28,6 +28,7 @@
 用法：
     python backfill_cycle_history.py                                   # 2023-01-01 起（默认）
     python backfill_cycle_history.py --start-date 2020-01-01           # 回填到 2020（≥2 轮周期）
+    python backfill_cycle_history.py --workers 1 --gap 0.8 --start-date 2020-01-01  # 共享出口 IP（Zeabur 容器）防 429
     python backfill_cycle_history.py --proxy --workers 1               # 走代理串行（回退）
     python backfill_cycle_history.py --no-funding                      # 只回填 K 线
     python backfill_cycle_history.py --limit-symbols 3 --dry-run       # 冒烟
@@ -60,9 +61,17 @@ DEFAULT_START = "2023-01-01"
 KLINES_PAGE = 1500          # klines 单请求上限
 FUNDING_PAGE = 1000         # fundingRate 单请求上限
 TOLERANCE_H = 48            # 续跑容差：已覆盖到 now-48h 内视为已覆盖
-PAGE_GAP_S = 0.25           # 每 worker 分页请求最小间隔（3 worker → 全局 ~2.4 req/s ≈
-                            # 1440 weight/min，klines limit=1500 权重 10/请求，
-                            # 4 worker×0.12s 实测打满 2400/min 触发 429 → 调 3 worker 0.25s）
+PAGE_GAP_S = 0.25           # 每 worker 分页请求最小间隔（默认；--gap 可覆盖）。
+                            # 注意：Binance 单 IP 限额 ~2400 weight/min，klines limit=1500
+                            # 权重 10/请求 → 上限 ~4 req/s。N worker × (1/gap) 必须 ≤ 4，
+                            # 否则 429。共享出口 IP（Zeabur 容器）建议 --workers 1 --gap 0.8
+                            # （1.25 req/s），比 3 worker×0.25s（12 req/s）稳妥得多。
+
+
+def set_page_gap(seconds: float) -> None:
+    """运行时设置分页请求间隔（--gap 参数；默认 0.25 保持向后兼容）。"""
+    global PAGE_GAP_S
+    PAGE_GAP_S = float(seconds)
 
 
 def make_session(direct: bool) -> requests.Session:
@@ -300,9 +309,12 @@ def main() -> int:
     parser.add_argument("--no-funding", action="store_true", help="只回填 K 线，跳过资金费率")
     parser.add_argument("--limit-symbols", type=int, default=0, help="只处理前 N 个符号（冒烟）")
     parser.add_argument("--dry-run", action="store_true", help="只抓取打印，不写库")
-    parser.add_argument("--workers", type=int, default=3, help="并发 worker 数（默认 3，>3 易触发 429）")
+    parser.add_argument("--workers", type=int, default=3, help="并发 worker 数（共享出口 IP 建议 1）")
+    parser.add_argument("--gap", type=float, default=PAGE_GAP_S,
+                        help="每 worker 分页请求最小间隔秒（默认 0.25；共享出口 IP 建议 0.8~1.5）")
     parser.add_argument("--proxy", action="store_true", help="走环境代理（默认直连，绕过 socks 抖动）")
     args = parser.parse_args()
+    set_page_gap(args.gap)
 
     start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start_ms = int(start.timestamp() * 1000)

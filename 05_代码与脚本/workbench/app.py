@@ -712,9 +712,9 @@ TASK_DEFS = {
     # ═══ 涨幅榜周期回测：1h K 线历史回填到 2020（测 ≥2 轮周期）═══
     "backfill_cycle_2020": {
         "name": "涨幅榜周期回测·1h K线回填到2020",
-        "description": "把 529 个 USDT 永续 1h K线 + 资金费率回填到 2020-01-01（覆盖 ≥2 轮周期：2020减半牛→21-22熊→23-26周期；断点续跑，预计 1~3h，后台运行勿重复提交）",
+        "description": "把 525 个 USDT 永续 1h K线 + 资金费率回填到 2020-01-01（覆盖 ≥2 轮周期：2020减半牛→21-22熊→23-26周期；1 worker + 0.8s 间隔防 429；断点续跑，预计 2~5h，后台运行勿重复提交）",
         "script": "backfill_cycle_history.py",
-        "default_args": ["--start-date", "2020-01-01", "--workers", "3"],
+        "default_args": ["--start-date", "2020-01-01", "--workers", "1", "--gap", "0.8"],
         "category": "维护",
     },
 }

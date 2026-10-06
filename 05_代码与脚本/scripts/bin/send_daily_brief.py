@@ -1179,6 +1179,55 @@ def _m0_delta_html(brief: dict) -> str:
     """
 
 
+def _render_signal_track_html(data: dict) -> str:
+    """📈 信号战绩（机会清单前向校验）——设计 04_架构与代码方案/早报板块顶层重设计_2026-10-06.md §2.4。
+
+    数据来自生成层聚合的 brief["M0_signal_track"]（macro_market._aggregate_signal_track，方向对齐口径）。
+    空 / 异常 → 返回空串（旧快照无该键 / 加载失败时不高估，直接不渲染）。
+    """
+    if not data or data.get("error"):
+        return ""
+    d1 = data.get("1d") or {}
+    d7 = data.get("7d") or {}
+    n1 = int(d1.get("n") or 0)
+    n7 = int(d7.get("n") or 0)
+    if n1 + n7 == 0:
+        return ('<div style="background:#fff;border-radius:10px;padding:8px 14px;margin-bottom:10px;'
+                'box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #94a3b8">'
+                '<span style="font-size:12.5px;font-weight:700;color:#0f172a">📈 信号战绩（机会清单前向校验）</span>'
+                '<span style="font-size:11px;color:#94a3b8;margin-left:8px">暂无已结算样本'
+                '（机会 T+1 前向逐日回填中，待样本积累）</span></div>')
+
+    def _f1(stat):
+        if not stat or not stat.get("n"):
+            return "（无样本）"
+        hit = f"命中 {float(stat['hit']) * 100:.1f}%" if stat.get("hit") is not None else "命中 -"
+        mean = "均值 -" if stat.get("mean_pct") is None else f"均值 {float(stat['mean_pct']):+.2f}%"
+        return f"{hit} · {mean}"
+
+    seg = [f"T+1 已结算 {n1} 条：{_f1(d1)}"]
+    if n7:
+        seg.append(f"T+7 已结算 {n7} 条：{_f1(d7)}")
+    b1 = data.get("backed_1d") or {}
+    o1 = data.get("other_1d") or {}
+    if b1.get("n") or o1.get("n"):
+        seg.append(f"按回测背书（T+1）：有背书 {b1.get('n', 0)} 条 {_f1(b1)}"
+                   f"；无/未回测 {o1.get('n', 0)} 条 {_f1(o1)}")
+    _asof = data.get("as_of")
+    _asof_txt = f"，样本覆盖截至 {_asof}（前向已回填）" if _asof else ""
+    return f"""
+      <!-- 模块0.3：信号战绩（机会清单前向校验）-->
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #7c3aed">
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:4px">📈 信号战绩（机会清单前向校验）</div>
+        <div style="font-size:11.5px;color:#475569;line-height:1.6">{' · '.join(seg)}</div>
+        <div style="font-size:9.5px;color:#94a3b8;line-height:1.5;margin-top:3px">
+          口径：long 取 +、short 取 −（方向对齐，评价「跟随信号的对错」）；watch 无方向预期不计命中；
+          均值未计交易成本{_asof_txt}。样本不足时命中率仅供参考。
+        </div>
+      </div>
+    """
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -1534,6 +1583,13 @@ def render_brief_html(brief: dict) -> str:
             {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
           </div>
         """)
+
+    # ════════════════════════════════════════════════════════
+    # 模块 0.3：📈 信号战绩（机会清单前向校验）——设计 04_架构与代码方案/早报板块顶层重设计_2026-10-06.md §2.4
+    # 数据来自生成层 macro_market._load_signal_track_record（只读 biz.opportunity_snapshot 已结算行）。
+    # 缺数据/无新键 → 返回空串，不影响其它模块。
+    # ════════════════════════════════════════════════════════
+    html_parts.append(_render_signal_track_html(brief.get("M0_signal_track") or {}))
 
     # ════════════════════════════════════════════════════════
     # 模块 0.5：🎯 AI 精选高亮信号（V2 六维评分 + Web 搜索补全）

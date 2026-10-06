@@ -9331,6 +9331,81 @@ def _load_alert_quality() -> dict:
         return {}
 
 
+# ── M0 信号战绩（机会清单前向校验）──
+# 设计依据：04_架构与代码方案/早报板块顶层重设计_2026-10-06.md §2.4「信号后验 / 战绩面板——最该加」。
+# 数据：biz.opportunity_snapshot（build_daily_brief W-12 落表 + backfill_opportunity_outcome 每日 07:55
+# 回填 T+1/T+7 前向收益），早报 08:30 生成时已新鲜。
+# 口径：direction ∈ {long, short} 计入命中/均值；方向对齐 aligned = +outcome(long) / -outcome(short)；
+#   watch 无方向预期，单列计数不计命中；「按回测背书」= calibration_gate ∈ {calibrated_ok}。
+_TRACK_BACKED_GATES = {"calibrated_ok"}
+
+
+def _aggregate_signal_track(rows: list) -> dict:
+    """纯函数：聚合已结算机会的前向收益（方向对齐口径）。不连库，供注入测试。"""
+    def _stat(subset, col):
+        n = h = 0
+        s = 0.0
+        for r in (subset or []):
+            d = str((r or {}).get("direction") or "").lower()
+            if d not in ("long", "short"):
+                continue
+            v = (r or {}).get(col)
+            if v is None:
+                continue
+            a = float(v) * (1 if d == "long" else -1)
+            n += 1
+            s += a
+            if a > 0:
+                h += 1
+        return {"n": n, "hit": (round(h / n, 4) if n else None),
+                "mean_pct": (round(s / n, 4) if n else None)}
+
+    rows = list(rows or [])
+    out = {
+        "as_of": None,
+        "watch_n": sum(1 for r in rows if str((r or {}).get("direction") or "").lower() not in ("long", "short")),
+        "1d": _stat(rows, "outcome_1d"),
+        "7d": _stat(rows, "outcome_7d"),
+        "backed_1d": _stat([r for r in rows if (r or {}).get("calibration_gate") in _TRACK_BACKED_GATES], "outcome_1d"),
+        "other_1d": _stat([r for r in rows if (r or {}).get("calibration_gate") not in _TRACK_BACKED_GATES], "outcome_1d"),
+    }
+    _ds = [str(r.get("snapshot_date")) for r in rows
+           if r.get("snapshot_date") is not None
+           and (r.get("outcome_1d") is not None or r.get("outcome_7d") is not None)]
+    out["as_of"] = max(_ds) if _ds else None
+    return out
+
+
+def _load_signal_track_record() -> dict:
+    """机会清单 T+1/T+7 前向校验（只读 biz.opportunity_snapshot 已结算行）。
+
+    异常/空表 → 返回 {error}，渲染层跳过该板块（诚实降级，不影响早报其它模块）。
+    """
+    try:
+        import psycopg.rows
+
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        rows: list = []
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT snapshot_date, direction, calibration_gate, outcome_1d, outcome_7d
+                      FROM biz.opportunity_snapshot
+                     WHERE outcome_1d IS NOT NULL OR outcome_7d IS NOT NULL
+                     ORDER BY snapshot_date ASC
+                    """
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        return _aggregate_signal_track(rows)
+    except Exception as e:
+        print(f"[morning_brief] signal track fetch failed: {e}")
+        return {"error": str(e)}
+
+
 # ── M4-3 同赛道唯一事实源（方案_大盘早报_投资指导意义重构_2026-09-27 §3.3 M4-3） ──
 # 「赛道轮动」卡读 biz.sector_flow_daily（日频 ETL），而「精选机会」卡里的叙事机会
 # （signal_type="narrative"）读的是 CMC categories 现算的市值涨幅 → 同一赛道同一天出现
@@ -9568,6 +9643,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
     brief = {
         "M0_tldr": _apply_fear_greed_ssot(_build_tldr(today, opps, highlights, risk_signals)),
         "M0_alert_quality": _load_alert_quality(),
+        # 信号战绩（机会清单前向校验）——§2.4「最该加」；生成期即聚合，渲染层只读展示
+        "M0_signal_track": _load_signal_track_record(),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),
         "M2_institutional": today.get("institutional_mvrv") or {},

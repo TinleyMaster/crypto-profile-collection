@@ -8,21 +8,12 @@
     scan_daemon 进程死亡、线程卡死、Binance 限频、部署被移除等任何原因导致的数据
     停摆都会被发现（只要 scheduler 所在容器还活着）
 
-检查项与阈值：
+检查项与阈值（2026-10-06 v1→v2 切换：v1 信号/轧空/funding 采集已退役，仅保留数据采集观测）：
   - 15m K线   MAX(open_time)  > 30 分钟（与 daemon 停摆告警同口径）
   - OI 采样   MAX(ts)         > 30 分钟（exchange='binance'）
-  - 扫描信号  MAX(signal_ts)  > 60 分钟（主池 15min / 蓄势池 30min，护栏跳过陈旧币时放宽）
-
-输出面观测（诊断_轧空邮件断流_2026-09-23 §6.2，P0）：以上三项只看「输入面」，无法发现
-「判定照常落库、邮件却没发出」的静默断流。轧空池另加一条：近 6h 判定成立却既未发信、
-也未被跨池互斥静音 ⇒ 报静默（用影子标记区分「主动静默」与「疑似故障」，见
-`_squeeze_silence_note`）。
 
 只读健康观测（不进「停摆」分节，越线才渲染，共用 squeeze_health 去重键）：
-  - 轧空池队列/入队/拒判 + OI 桶完整度（`_collect_squeeze_health`）
-  - **funding 费率** MAX(funding_time) > 24 小时（`_collect_funding_health`，2026-10-01 新增：
-    该采集此前未注册调度、只挂工作台手动触发，2026-09-17 后静默停滞 14 天无人知晓，
-    见设计方案 §12.1-B26。8h 结算点、不驱动实时扫描，故只作提示不作停摆）
+  - OI 5m 桶完整度（`_collect_oi_bucket_health`）：采样线程丢桶不可回补，会抬高覆盖率判定。
 
 去重：biz.scan_stall_alert（task='scan_stall'）——与 scan_daemon 内置停摆告警
 （_check_and_alert_stall）共用同一去重键与 6h 静默期，同一停摆事件只发一封邮件。
@@ -63,19 +54,18 @@ WATCHDOG_TASK_KEY = "scan_stall"
 HEALTH_TASK_KEY = "squeeze_health"
 KLINE_MAX_AGE_MIN = 30
 OI_MAX_AGE_MIN = 30
-SIGNAL_MAX_AGE_MIN = 60
 REALERT_INTERVAL_H = 6
-# 任务心跳：3× 任务周期（scan_klines/oi/liquidation/alert/squeeze 300s→15min，
-# main_pool 900s→45min，accumulation/watchlist 1800s→90min，prune 24h→72h），
+# 任务心跳：3× 任务周期（scan_klines/oi/liquidation 300s→15min，prune 24h→72h），
 # 与 scan_daemon.STALL_HEARTBEAT_GRACE 同口径，且必须与 TASK_DEFS 全覆盖
 # （审计 P0-B：原先漏了 squeeze/liquidation/watchlist，而 2026-09-21 停摆里
 # 唯一留下物证的任务恰恰是盲区中的 scan_squeeze）。
+# 2026-10-06 v1→v2 切换：scan_daemon 仅运行数据采集任务（--only），
+# v1 信号/轧空/生命周期任务（scan_alert/scan_squeeze/scan_main_pool/scan_accumulation/
+# watchlist_monitor/expire_signals/confirm_signals）已退役，从预期集中移除。
 # 判据读 last_ok_at（最近一次成功）而非 last_run_at —— 见 _collect_items 注释。
 HEARTBEAT_MAX_AGE_MIN = {
     "scan_klines": 15, "scan_oi_cvd": 15, "scan_liquidation": 15,
-    "scan_alert": 15, "scan_squeeze": 15,
-    "scan_main_pool": 45, "scan_accumulation": 90, "watchlist_monitor": 90,
-    "expire_signals": 90, "confirm_signals": 90, "prune_scan_data": 4320,
+    "prune_scan_data": 4320,
 }
 # 「本实例尚未跑完首轮」的宽限上限（分钟）：该状态的等待时间应由该任务 offset 决定，
 # 而上面阈值是 3×周期 —— 对 1800s/86400s 周期任务给到 90/4320 分钟，远大于容器重启
@@ -93,7 +83,6 @@ DAEMON_START_TASK = "__daemon__"
 DATA_SOURCE_TASKS = {
     "15m K线": ("scan_klines",),
     "OI 实时采样": ("scan_oi_cvd",),
-    "扫描信号": ("scan_alert", "scan_main_pool"),
 }
 
 
@@ -133,15 +122,12 @@ def _collect_items(conn) -> list[dict]:
             "SELECT MAX(ts) AS mx FROM biz.oi_cvd_snapshot "
             "WHERE exchange='binance' AND source='realtime'")
         mx_oi = cur.fetchone()["mx"]
-        cur.execute("SELECT MAX(signal_ts) AS mx FROM biz.scan_signal")
-        mx_sig = cur.fetchone()["mx"]
 
     now = datetime.now(timezone.utc)
     items = []
     for name, mx, threshold in (
         ("15m K线", mx_k, KLINE_MAX_AGE_MIN),
         ("OI 实时采样", mx_oi, OI_MAX_AGE_MIN),
-        ("扫描信号", mx_sig, SIGNAL_MAX_AGE_MIN),
     ):
         if mx is None:
             items.append({"name": name, "mx": None, "age_min": None,
@@ -264,108 +250,21 @@ def _render_items_html(items: list[dict]) -> str:
             + "".join(rows) + "</table>")
 
 
-# 轧空池/采样健康（工单 SQZ-01/06）：只读观测，越线才渲染，避免告警噪音。
-SQUEEZE_TRACKING_WARN = 9        # 队列占用 ≥ 9/12（75%）
-SQUEEZE_ENQ24H_WARN = 20         # 近 24h 入队 ≥ 20 条
-SQUEEZE_REJECT_WARN = 3          # 当前仍处「覆盖率/尾部拒判」状态的 track 行数（非次数）
+# OI 桶完整度（工单 SQZ-01/06，2026-10-06 v1→v2 后仅保留此项）：只读观测，越线才渲染。
 OI_BUCKET_WINDOW_H = 2           # OI 桶完整度观察窗（小时）
 OI_BUCKET_DEFICIT_RATIO = 0.9    # 该窗口 OI 桶数 < 期望 ×0.9 → 判为缺口
-SQUEEZE_QUEUE_MAX = 12           # 与 squeeze.TRACK_QUEUE_MAX 同口径（展示用）
-
-# ── 轧空通道「输出面」观测（诊断_轧空邮件断流_2026-09-23 §6.2，P0）────────────
-# 既有健康检查只看「输入面」（数据新鲜度 / 队列 / 入队数 / 拒判数），**从不看邮件是否
-# 真的发出**。影子模式（scan_daemon.SQUEEZE_ALERT_SHADOW）把发信短路后判定照常落库 ⇒
-# 两层看门狗全部无感、静默断流可无限期持续（2026-09-23 实况：04:12 后 8 笔判定 0 发信）。
-# 判据：近 N 小时有判定（status='confirmed'），却既未发信（alerted_at IS NULL）、
-# 也未被跨池互斥静音（alert_suppressed_at IS NULL）。
-SQUEEZE_SILENCE_WINDOW_H = 6
-# 影子分支写的可观测标记（task 键，见 scan_daemon.SHADOW_MARKER_TASK）：
-# 存在且新鲜 ⇒ 静默是**有意**的（影子模式，非故障）；否则 ⇒ 疑似发信分支故障。
-# ⚠️ 必须与 scan_daemon.SHADOW_MARKER_TASK 同值（有单测守卫）。
-SHADOW_MARKER_TASK = "squeeze_shadow"
 
 
-def _squeeze_silence_note(silenced: int, shadow_ts: datetime | None,
-                          now: datetime) -> str | None:
-    """输出面判据（诊断 §6.2）：判定成立却既未发信、也未被静音 → 返回提示文案。
+def _collect_oi_bucket_health(conn) -> list[str]:
+    """OI 5m 桶完整度：近 `OI_BUCKET_WINDOW_H` 小时 `oi_cvd_snapshot` 的 5m 桶数不足期望
+    → 快照不可回补，会抬高覆盖率拒判率（与本文件既有 OI 新鲜度检查互补：后者只看
+    MAX(ts)，看不到中段/尾部缺桶）。
 
-    纯函数（便于注入单测）：`silenced` 为窗口内「已判定、未发信、未被跨池互斥静音」的
-    笔数；`shadow_ts` 为影子标记心跳的 `last_run_at`（无标记传 None）。
-      - `silenced <= 0` → None（无静默，不渲染）；
-      - 影子标记新鲜（≤ 窗口）→ **主动静默**文案（非故障，但需让运维知道通道是暗的）；
-      - 否则 → **疑似故障**文案（发信分支被短路或 notifier.send 失败）。
-    """
-    if silenced <= 0:
-        return None
-    shadow_fresh = (
-        shadow_ts is not None
-        and (now - shadow_ts).total_seconds() <= SQUEEZE_SILENCE_WINDOW_H * 3600)
-    if shadow_fresh:
-        return (f"轧空通道影子模式：近 {SQUEEZE_SILENCE_WINDOW_H}h 判定成立但主动静默 "
-                f"{silenced} 笔（非故障；恢复发信需将 scan_daemon.SQUEEZE_ALERT_SHADOW "
-                f"置 False 并重启）")
-    return (f"轧空通道静默 {silenced} 笔（近 {SQUEEZE_SILENCE_WINDOW_H}h）：判定已成立，"
-            f"但既未发信、亦未被跨池互斥静音 ⇒ 疑似发信分支被短路或发送失败，"
-            f"请立即检查 scan_daemon")
-
-
-def _collect_squeeze_health(conn) -> list[str]:
-    """轧空池健康 + OI 桶完整度（SQZ-01/06）：返回越线提示；未越线返回 []。
-
-    - 队列占用 / 24h 入队 / 覆盖率拒判：只读 `biz.squeeze_track`（reason 由
-      `scan_daemon` 拒判分支显式写入，无需改表）。
-    - OI 桶完整度：近 `OI_BUCKET_WINDOW_H` 小时 `oi_cvd_snapshot` 的 5m 桶数不足期望
-      → 快照不可回补，会抬高覆盖率拒判率（工单 SQZ-06，与本文件既有 OI 新鲜度检查
-      互补：后者只看 MAX(ts)，看不到中段/尾部缺桶）。
-      ⚠️ **常态评估**（复验 P2-3）：桶完整度**不再**要求「`__daemon__` 近 2h 启动过」
-      才观测——线程慢死 / 任务卡住 / 采样跳过属非重启型丢桶，实测正常期 OI 栅格就缺
-      24~26%，正是这种形态。重启与否**只影响文案**（用于区分归因）。
+    ⚠️ **常态评估**（复验 P2-3）：桶完整度**不再**要求「`__daemon__` 近 2h 启动过」
+    才观测——线程慢死 / 任务卡住 / 采样跳过属非重启型丢桶，实测正常期 OI 栅格就缺
+    24~26%，正是这种形态。重启与否**只影响文案**（用于区分归因）。
     """
     notes: list[str] = []
-    try:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                "SELECT count(*) FILTER (WHERE status='tracking') AS tracking, "
-                "       count(*) FILTER (WHERE status='judged')   AS judged, "
-                "       count(*) FILTER (WHERE status='expired')  AS expired, "
-                "       count(*) FILTER (WHERE started_at > NOW() - INTERVAL '24 hours') "
-                "                                               AS enq_24h, "
-                "       count(*) FILTER (WHERE status='tracking' "
-                "                          AND reason LIKE '判定窗口%') AS reject "
-                "FROM biz.squeeze_track")
-            row = cur.fetchone()
-        if row["tracking"] >= SQUEEZE_TRACKING_WARN:
-            notes.append(f"轧空队列占用 {row['tracking']}/{SQUEEZE_QUEUE_MAX}"
-                         f"（≥{SQUEEZE_TRACKING_WARN}，接近上限）")
-        if row["enq_24h"] >= SQUEEZE_ENQ24H_WARN:
-            notes.append(f"轧空池近 24h 入队 {row['enq_24h']} 条（≥{SQUEEZE_ENQ24H_WARN}）")
-        if row["reject"] >= SQUEEZE_REJECT_WARN:
-            notes.append(f"覆盖率/尾部/中段闸门拒判中 {row['reject']} 条 track"
-                         f"（≥{SQUEEZE_REJECT_WARN}；同一 track 多轮被拒只计 1）")
-    except Exception as e:  # noqa: BLE001
-        print(f"[看门狗] 轧空池健康检查跳过（{e}）", file=sys.stderr)
-
-    # 输出面：判定成立却未发信（诊断 §6.2，P0）—— 用影子标记区分「主动静默」与「故障静默」
-    try:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                "SELECT count(*) AS n FROM biz.scan_signal "
-                "WHERE pool='squeeze' AND status='confirmed' "
-                "AND alerted_at IS NULL AND alert_suppressed_at IS NULL "
-                "AND signal_ts > NOW() - make_interval(hours => %s)",
-                (SQUEEZE_SILENCE_WINDOW_H,))
-            silenced = int(cur.fetchone()["n"] or 0)
-            cur.execute(
-                "SELECT last_run_at FROM biz.scan_heartbeat WHERE task=%s",
-                (SHADOW_MARKER_TASK,))
-            r = cur.fetchone()
-        note = _squeeze_silence_note(silenced, r["last_run_at"] if r else None,
-                                     datetime.now(timezone.utc))
-        if note:
-            notes.append(note)
-    except Exception as e:  # noqa: BLE001
-        print(f"[看门狗] 轧空通道静默检查跳过（{e}）", file=sys.stderr)
-
     try:
         now = datetime.now(timezone.utc)
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -394,37 +293,8 @@ def _collect_squeeze_health(conn) -> list[str]:
     return notes
 
 
-# funding 费率采集健康（2026-10-01，§12.1-B26）：该任务此前**未注册调度**、只挂工作台
-# 手动触发，2026-09-17 后静默停滞 14 天无人知晓（A3 holdout 复盘时才发现 funding 消融在
-# test 段无数据）。现已在 scheduler 注册为每日 02:40 增量（8h 结算点，正常滞后 ≤3h），
-# 此处只读观测 MAX(funding_time)，落后 >24h 即提示（阈值留 ~9× 余量，不产生噪音）。
-FUNDING_MAX_AGE_H = 24
-
-
-def _collect_funding_health(conn) -> list[str]:
-    """funding 费率新鲜度（只读观测）：最新结算点落后 > FUNDING_MAX_AGE_H 小时 → 提示。
-
-    与 OI/15m 那三项不同，funding 是**8h 结算点**、不驱动实时扫描，所以不进 items 的
-    「停摆」分支（否则会误报「扫描已无法产出信号」），只作健康提示。
-    """
-    try:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute("SELECT MAX(funding_time) AS mx FROM biz.funding_rate_hist")
-            mx = cur.fetchone()["mx"]
-    except Exception as e:  # noqa: BLE001
-        print(f"[看门狗] funding 新鲜度检查跳过（{e}）", file=sys.stderr)
-        return []
-    if mx is None:
-        return ["funding 费率表为空（biz.funding_rate_hist 无任何数据）"]
-    age_h = (datetime.now(timezone.utc) - mx).total_seconds() / 3600
-    if age_h <= FUNDING_MAX_AGE_H:
-        return []
-    return [f"funding 费率已停更：最新结算点 {_fmt_bj(mx)}，距今 {age_h:.0f}h"
-            f"（阈值 {FUNDING_MAX_AGE_H}h）⇒ 请检查调度任务 scan_funding_backfill 是否执行"]
-
-
 def _render_health_html(notes: list[str]) -> str:
-    return ("<h3 style='margin:18px 0 6px'>🩺 轧空池 / 采样 / 费率采集健康（只读观测）</h3>"
+    return ("<h3 style='margin:18px 0 6px'>🩺 OI 采样健康（只读观测）</h3>"
             "<ul>" + "".join(f"<li>{n}</li>" for n in notes) + "</ul>")
 
 
@@ -437,7 +307,7 @@ def main() -> int:
     with psycopg.connect(settings.database_url, connect_timeout=15) as conn:
         items = _collect_items(conn)
         stale_items = [it for it in items if it["stale"]]
-        health_notes = _collect_squeeze_health(conn) + _collect_funding_health(conn)
+        health_notes = _collect_oi_bucket_health(conn)
         now = datetime.now(timezone.utc)
 
         print(f"[看门狗] {now:%m-%d %H:%M} UTC 检查：")
@@ -446,7 +316,7 @@ def main() -> int:
             mark = "STALE" if it["stale"] else "ok"
             print(f"  {it['name']:<8} {age:>10}  [{mark}] (阈值 {it['threshold']}m)")
         if health_notes:
-            print("[看门狗] 轧空池/采样/费率采集健康提示：")
+            print("[看门狗] OI 采样健康提示：")
             for n in health_notes:
                 print(f"  - {n}")
 

@@ -346,20 +346,29 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #   - catalyst_fast_pipeline(15min)  → catalyst_fast_daemon
     #
     # 仍由 scheduler 调度（≥4h 或低频维护任务）：
-    ("scan_oi_backfill", "0 1 * * sun", "phase_backfill_oi_history.py", [],
-     "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
+    # ═══ v1→v2 切换（2026-10-06）：v1 信号+告警已退役 ═══
+    # 以下 v1 支持任务随 v1 退役停掉（supervisord 的 scan_daemon 已改 --only 只跑数据采集，
+    # 邮件告警由下方 scan_gainers_v2 承接）：
+    #   - scan_oi_backfill（每周 OI 历史回填，服务 v1 回测）
+    #   - scan_funding_backfill（funding 历史增量，服务 v1 funding 消融）
+    #   - scan_cvd_ready_check（CVD 就绪提醒，服务 v1 回测复校）
+    #   - scan_outcome_settle / scan_edge_report / scan_edge_email（v1 告警质量日报，见下节）
+    # 保留：scan_event_watchlist（**onchain_alert 页面依赖 event_watchlist**，与 v1 告警无关）、
+    #        scan_freshness_watchdog（已按 v2 口径更新预期任务集）。
+    # ("scan_oi_backfill", "0 1 * * sun", "phase_backfill_oi_history.py", [],
+    #  "盘面扫描·OI 历史回填（每周日，维护 30 天 1h OI 窗口，断点续跑）", "core"),
     # funding 历史此前只挂工作台任务表（scan_funding_backfill，默认 --full），**未注册调度** ⇒
     # 2026-09-17 后无人采集、biz.funding_rate_hist 静默停滞 14 天（A3 holdout 复盘时发现：
     # funding 消融在 test 段无数据，§12.1-B26）。8h 结算点，日频增量足以保鲜：
     # 正常滞后 ≤3h，看门狗阈值 24h 有 ~9× 余量。02:40 避开 01:00 周日 OI 回填、
     # 03:05 CVD 就绪检查，以及 06:30/08:10/08:20/09:00 的邮件与早报高峰。
-    ("scan_funding_backfill", "40 2 * * *", "phase_backfill_funding_history.py",
-     ["--incremental"],
-     "盘面扫描·funding 历史增量（每天 02:40，只补缺失结算点，供 funding 消融/拥挤度标签）", "core"),
+    # ("scan_funding_backfill", "40 2 * * *", "phase_backfill_funding_history.py",
+    #  ["--incremental"],
+    #  "盘面扫描·funding 历史增量（每天 02:40，只补缺失结算点，供 funding 消融/拥挤度标签）", "core"),
     ("scan_event_watchlist", "17 */6 * * *", "phase_build_event_watchlist.py", [],
-     "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时）", "core"),
-    ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],
-     "盘面扫描·CVD 数据就绪检查（每天，精确 CVD 积累≥14 天自动邮件提醒复校）", "core"),
+     "盘面扫描·事件预置层（解锁/链上转账 → event_watchlist，每 6 小时；onchain_alert 依赖，保留）", "core"),
+    # ("scan_cvd_ready_check", "5 3 * * *", "phase_check_cvd_ready.py", [],
+    #  "盘面扫描·CVD 数据就绪检查（每天，精确 CVD 积累≥14 天自动邮件提醒复校）", "core"),
     # 外部看门狗（2026-09-21）：scan_daemon 内置停摆告警随进程死亡而失效（Zeabur 部署被移除
     # 后采集静默停摆 63h 无人知晓）。此任务独立于 scan_daemon 存活，只查数据是否停更，
     # 停摆>30min 告警（6h 去重），恢复后自动发解除邮件。
@@ -378,13 +387,22 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
      "合约地址·外部看门狗（每小时，查 solana 脏值/大小写并存/派生不一致，告警邮件，6h 去重）", "monitor"),
 
     # ═══ 告警胜率赔率日报（04_架构与代码方案/告警胜率赔率日报方案_2026-09-23.md §7）═══
+    # ⚠️ v1→v2 切换（2026-10-06）：v1 信号+告警已退役，质量日报/结局结算随之停掉。
+    # 如需给 v2 信号（scan_gainer_signal）补结果闭环，按 v2 文档 §8 P4 单独实现。
     # 结算每小时增量推进未到期窗口；聚合与发信分离，08:20 发信与 09:00 早报解耦
-    ("scan_outcome_settle", "5 * * * *", "collect_scan_outcome.py", [],
-     "盘面告警·结局增量结算（每小时，T+1h/4h/12h/24h 方向对齐净收益 + BTC beta 对照）", "core"),
-    ("scan_edge_report", "10 8 * * *", "build_scan_edge_report.py", [],
-     "盘面告警·质量日报聚合（08:10，胜率/赔率/PF/平衡线 + 阈值-行情失配判定）", "core"),
-    ("scan_edge_email", "20 8 * * *", "send_scan_edge_report.py", [],
-     "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
+    # ("scan_outcome_settle", "5 * * * *", "collect_scan_outcome.py", [],
+    #  "盘面告警·结局增量结算（每小时，T+1h/4h/12h/24h 方向对齐净收益 + BTC beta 对照）", "core"),
+    # ("scan_edge_report", "10 8 * * *", "build_scan_edge_report.py", [],
+    #  "盘面告警·质量日报聚合（08:10，胜率/赔率/PF/平衡线 + 阈值-行情失配判定）", "core"),
+    # ("scan_edge_email", "20 8 * * *", "send_scan_edge_report.py", [],
+    #  "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
+
+    # ═══ 盘面异动扫描 v2（2026-10-06，替代 v1 邮件告警）═══
+    # 依据：《盘面异动扫描系统设计方案_v2_2026-10-05.md》。涨幅榜定位（24h 涨幅档）× 强度确认
+    # （放量/静默）→ scan_gainer_signal + 邮件。每 30 分钟扫描（与追涨风险告警同频）；
+    # --apply 落库 + --alert 发邮件；同币同类型 12h 冷却去重。
+    ("scan_gainers_v2", "*/30 * * * *", "scan_gainers_v2.py", ["--apply", "--alert"],
+     "盘面异动扫描 v2·涨幅榜信号（每30分钟，落库+邮件告警）", "core"),
 
     # ═══ 实证联动因子效果验证 ═══
     # 二阶受益已接入 asset_linkage_factor（2026-10-02 c155ac8）。脚本每日只读对比

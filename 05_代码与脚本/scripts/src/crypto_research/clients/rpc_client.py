@@ -102,6 +102,8 @@ class RpcTransferClient:
         self._req_id = 0
         # 代币精度缓存：contract -> decimals
         self._decimals_cache: dict[str, int] = {}
+        # 合约总量缓存：contract -> totalSupply（人类单位）
+        self._supply_cache: dict[str, float] = {}
 
     @property
     def current_endpoint(self) -> str:
@@ -229,6 +231,35 @@ class RpcTransferClient:
                 decimals = 18
         self._decimals_cache[contract] = decimals
         return decimals
+
+    def get_token_total_supply(self, contract_address: str) -> float | None:
+        """查询 ERC20 合约自身的 totalSupply()（人类单位），带缓存。
+
+        用于合约身份校验：同名仿冒合约的 totalSupply 会与真实资产的权威
+        供应量相差若干数量级（实测 DOT@base 差 2.8e11 倍、NEX@bsc 差 8.7e4 倍）。
+        查询失败返回 None（**不缓存失败**，留待下次重试），调用方据此保持
+        core.asset_contract.onchain_checked_at 为 NULL。
+        """
+        contract = contract_address.lower()
+        if not contract.startswith("0x"):
+            contract = "0x" + contract
+        if contract in self._supply_cache:
+            return self._supply_cache[contract]
+
+        # totalSupply() 函数选择器 = 0x18160ddd
+        result = self._json_rpc("eth_call", [{
+            "to": contract,
+            "data": "0x18160ddd",
+        }, "latest"])
+        if not (isinstance(result, str) and result.startswith("0x") and len(result) > 2):
+            return None
+        try:
+            raw = int(result, 16)
+        except ValueError:
+            return None
+        supply = raw / (10 ** self.get_token_decimals(contract))
+        self._supply_cache[contract] = supply
+        return supply
 
     def get_token_transfers(
         self, contract_address: str, page: int = 1, offset: int = 100,

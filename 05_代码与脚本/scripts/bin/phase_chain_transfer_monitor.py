@@ -76,6 +76,19 @@ CHAIN_NAME_MAP = {
     "apt": "aptos",
 }
 
+# 反向：短链名 -> core.asset_contract.chain 可能出现的取值。
+# 该表混用全称与短名（eth 存为 'ethereum'，base 存为 'base'），
+# 合约身份校验按 (chain, address) 定位时必须同时匹配这些别名。
+_CHAIN_DB_ALIASES: dict[str, list[str]] = {}
+for _full, _short in CHAIN_NAME_MAP.items():
+    _aliases = _CHAIN_DB_ALIASES.setdefault(_short, [])
+    for _cand in (_full, _short):
+        if _cand not in _aliases:
+            _aliases.append(_cand)
+
+# 支持 eth_call 的 EVM 链（合约身份校验依赖 totalSupply() 调用，非 EVM 链不适用）
+_EVM_CHAINS = frozenset({"eth", "bsc", "polygon", "arbitrum", "base", "optimism", "avalanche"})
+
 # 大小写敏感链（地址不得 .lower()，否则会指向错误地址）
 CASE_SENSITIVE_CHAINS = frozenset({"solana", "tron", "ton", "sui", "aptos"})
 
@@ -274,6 +287,97 @@ def get_asset_supply_decimals(conn, asset_id: int, chain: str, contract_address:
                 out["decimals"] = int(row["decimals"]) if row.get("decimals") is not None else None
     except Exception:
         pass
+    return out
+
+
+# 冒充币判定阈值：合约自身 totalSupply() 与 core.asset 权威供应量相差超过此倍数，
+# 判定为「同名仿冒合约」，其流水不归属真实 asset_id。
+# 实测基准（2026-10-06）：DOT@base/arbitrum/optimism 差 2.8e11 倍、NEX@bsc 差 8.7e4 倍。
+# 只认「>>」方向——桥接/包装代币在单链上的 supply 小于全局 supply 属正常，反向不判。
+_IMPOSTOR_SUPPLY_RATIO = 100.0
+
+# 合约身份校验专用的公共 RPC 客户端（按链复用，保持限速状态）。
+# explorer/etherscan 采集源不具备 eth_call，但校验仍需链上读数，故单独建一份。
+_verify_rpc_clients: dict[str, object] = {}
+
+
+def _get_verify_client(chain: str, primary_client):
+    """取用于「合约身份校验」的客户端。
+
+    采集源自身若具备 get_token_total_supply（即 RPC 源）则直接复用；
+    否则对 EVM 链懒建公共 RPC 客户端（每链复用同一实例，避免丢失限速状态）。
+    非 EVM 链返回 None（校验不适用）。
+    """
+    if primary_client is not None and hasattr(primary_client, "get_token_total_supply"):
+        return primary_client
+    if chain not in _EVM_CHAINS:
+        return None
+    if chain not in _verify_rpc_clients:
+        try:
+            _verify_rpc_clients[chain] = get_rpc_client(chain)
+        except ValueError:
+            _verify_rpc_clients[chain] = None
+    return _verify_rpc_clients[chain]
+
+
+def get_contract_verification(
+    conn, asset_id: int, chain: str, contract_address: str,
+    client=None, persist: bool = True,
+) -> dict:
+    """读取/落库合约身份校验元数据（core.asset_contract.onchain_*）。
+
+    返回 {contract_id, decimals, onchain_total_supply, onchain_checked_at}。
+
+    流程：
+      1. 按 (chain 别名, contract_address) 定位 core.asset_contract 行（一次定死）；
+      2. onchain_checked_at 非 NULL → 直接返回缓存，不重复打 RPC；
+      3. 否则（且 client 具备链上读能力）取 totalSupply()，**取到才** UPDATE +
+         onchain_checked_at=NOW()；取不到保持 NULL 以便下次重试（不把网络抖动固化）。
+
+    persist=False（dry-run）只读不写。异常时 rollback 以免污染后续写库。
+    """
+    out = {"contract_id": None, "decimals": None,
+           "onchain_total_supply": None, "onchain_checked_at": None}
+    try:
+        aliases = _CHAIN_DB_ALIASES.get(chain, [chain])
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("""
+                SELECT contract_id, decimals, onchain_total_supply, onchain_checked_at
+                FROM core.asset_contract
+                WHERE LOWER(chain) = ANY(%s) AND LOWER(contract_address) = LOWER(%s)
+                ORDER BY is_primary DESC, contract_id
+                LIMIT 1
+            """, (aliases, contract_address))
+            row = cur.fetchone()
+        if not row:
+            return out
+        out["contract_id"] = row["contract_id"]
+        out["decimals"] = int(row["decimals"]) if row["decimals"] is not None else None
+        if row["onchain_total_supply"] is not None:
+            out["onchain_total_supply"] = float(row["onchain_total_supply"])
+        if row["onchain_checked_at"] is not None:
+            out["onchain_checked_at"] = row["onchain_checked_at"]
+            return out
+        # 尚未校验过 → 尝试链上取 totalSupply（仅 EVM RPC 具备该方法）
+        if client is None or not hasattr(client, "get_token_total_supply"):
+            return out
+        supply = client.get_token_total_supply(contract_address)
+        if supply is None:
+            return out
+        out["onchain_total_supply"] = supply
+        if persist:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE core.asset_contract
+                       SET onchain_total_supply = %s, onchain_checked_at = NOW()
+                     WHERE contract_id = %s
+                """, (supply, row["contract_id"]))
+    except Exception as e:
+        print(f"[contract-verify-fail] {chain} {contract_address}: {e}", file=sys.stderr)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     return out
 
 
@@ -488,6 +592,27 @@ def collect_transfers(
     supply_dec = get_asset_supply_decimals(conn, asset_id, chain, contract_address)
     supply_cap = supply_dec["total_supply"] or supply_dec["circulating_supply"]
 
+    # 合约身份校验（写入侧治根因）：core.asset_contract_map 把同一地址挂到多链时，
+    # 部分链上部署的是同名仿冒合约（totalSupply 相差数量级），其「数量 × 真实单价」
+    # 会凭空造出巨额伪美元额。此处读一次链上 totalSupply 并与权威供应量比对，
+    # 判定为冒充币时该资产本轮所有流水标 is_suspect（读侧已过滤 is_suspect）。
+    try:
+        contract_ver = get_contract_verification(
+            conn, asset_id, chain, contract_address,
+            _get_verify_client(chain, client), persist=not dry_run)
+    except Exception as e:
+        print(f"[contract-verify-fail] {symbol}/{chain}: {e}", file=sys.stderr)
+        contract_ver = {"onchain_total_supply": None}
+    onchain_supply = contract_ver.get("onchain_total_supply")
+    is_impostor = bool(
+        onchain_supply and supply_cap and supply_cap > 0
+        and onchain_supply > supply_cap * _IMPOSTOR_SUPPLY_RATIO
+    )
+    if is_impostor:
+        print(f"[impostor] {symbol}/{chain} contract={contract_address[:12]}… "
+              f"onchain_supply={onchain_supply:.4g} vs asset_supply={supply_cap:.4g} "
+              f"({onchain_supply / supply_cap:.3g}×) → 该合约流水标脏", file=sys.stderr)
+
     all_transfers = []
     total_processed = 0
     seen_raw = set()          # 已见过的 tx_hash
@@ -554,7 +679,8 @@ def collect_transfers(
                 value = value_raw / (10 ** decimals)
 
                 # P0-1: 金额量纲 sanity check：value 远超流通量（>5×）→ 标 is_suspect
-                is_suspect = False
+                # 叠加合约身份校验结论：冒充币的整条合约流水一律标脏（见 is_impostor）
+                is_suspect = is_impostor
                 if supply_cap and supply_cap > 0 and value > supply_cap * 5:
                     is_suspect = True
                     print(f"[suspect] {symbol}/{chain} tx={tx.get('hash', '')[:12]} "
@@ -802,6 +928,102 @@ def _print_source_banner(chain: str, client_type: str) -> None:
     print(f"  [{chain}] {msg}")
 
 
+def run_verify_contracts(
+    conn, *, chain: str | None = None, asset_id: int | None = None,
+    dry_run: bool = False, limit: int = 0,
+) -> dict:
+    """批量校验 biz.onchain_transfer_log 中出现过的 (chain, contract) 合约身份。
+
+    对每个合约读一次链上 totalSupply()，与 core.asset 权威供应量比对；
+    相差 > _IMPOSTOR_SUPPLY_RATIO 倍 → 判定同名仿冒合约，把该合约的存量流水标
+    is_suspect=TRUE（读侧 workbench/onchain_alert.py 已过滤 is_suspect）。
+
+    只扫流水里真实出现过的合约，把 RPC 调用量压到最小；每链复用同一客户端限速。
+    dry_run=True 只统计不写库（含不写 onchain_* 缓存）。
+    """
+    conds = ["TRUE"]
+    params: list = []
+    if chain:
+        conds.append("tl.chain = %s")
+        params.append(chain)
+    if asset_id:
+        conds.append("tl.asset_id = %s")
+        params.append(asset_id)
+    sql = f"""
+        SELECT tl.chain, tl.contract_address, tl.asset_id,
+               a.canonical_symbol,
+               COALESCE(a.total_supply, a.circulating_supply) AS asset_supply,
+               COUNT(*) AS row_cnt
+        FROM biz.onchain_transfer_log tl
+        JOIN core.asset a ON a.asset_id = tl.asset_id
+        WHERE {' AND '.join(conds)}
+        GROUP BY 1, 2, 3, 4, 5
+        ORDER BY row_cnt DESC
+    """
+    if limit and limit > 0:
+        sql += f" LIMIT {int(limit)}"
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, params)
+        rows = [dict(r) for r in cur.fetchall()]
+
+    mode_note = "（--dry-run 只统计不写库）" if dry_run else ""
+    print(f"待校验合约 {len(rows)} 个{mode_note}\n")
+
+    checked = impostors = suspect_rows = 0
+    skipped_chains: dict[str, int] = {}
+    for i, r in enumerate(rows, 1):
+        ch, addr, aid = r["chain"], r["contract_address"], r["asset_id"]
+        sym = r["canonical_symbol"]
+        # 非 EVM 链无 eth_call，无法读 totalSupply()，直接跳过（不刷屏）
+        if ch not in _EVM_CHAINS:
+            skipped_chains[ch] = skipped_chains.get(ch, 0) + 1
+            continue
+        supply = float(r["asset_supply"]) if r["asset_supply"] is not None else None
+        ver = get_contract_verification(
+            conn, aid, ch, addr, _get_verify_client(ch, None), persist=not dry_run)
+        onchain = ver.get("onchain_total_supply")
+        if onchain is None:
+            print(f"  [{i}/{len(rows)}] {sym}/{ch} {addr[:12]}… 链上取值失败，留待重试")
+            continue
+        checked += 1
+        ratio = (onchain / supply) if (supply and supply > 0) else None
+        is_impostor = ratio is not None and ratio > _IMPOSTOR_SUPPLY_RATIO
+        if not is_impostor:
+            if not dry_run:
+                conn.commit()   # 落库 onchain_* 缓存
+            if ratio is not None and ratio > 5:
+                print(f"  [{i}/{len(rows)}] 🟡 存疑 {sym}/{ch} {addr[:12]}… "
+                      f"onchain={onchain:.4g} / asset={supply:.4g} = {ratio:.3g}×")
+            continue
+        impostors += 1
+        if dry_run:
+            print(f"  [{i}/{len(rows)}] 🔴 冒充 {sym}/{ch} {addr[:12]}… "
+                  f"onchain={onchain:.4g} / asset={supply:.4g} = {ratio:.3g}× "
+                  f"→ 将标脏 {r['row_cnt']} 行")
+            continue
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE biz.onchain_transfer_log
+                   SET is_suspect = TRUE
+                 WHERE chain = %s AND LOWER(contract_address) = LOWER(%s) AND asset_id = %s
+                   AND is_suspect IS NOT TRUE
+            """, (ch, addr, aid))
+            updated = cur.rowcount
+        conn.commit()
+        suspect_rows += updated
+        print(f"  [{i}/{len(rows)}] 🔴 冒充 {sym}/{ch} {addr[:12]}… "
+              f"onchain={onchain:.4g} / asset={supply:.4g} = {ratio:.3g}× → 标脏 {updated} 行")
+
+    skip_note = ""
+    if skipped_chains:
+        detail = ", ".join(f"{c}×{n}" for c, n in sorted(skipped_chains.items(), key=lambda x: -x[1]))
+        skip_note = f"；跳过非 EVM 链 {sum(skipped_chains.values())} 个（{detail}）"
+    print(f"\n完成: 取值成功 {checked}/{len(rows)}, 判定冒充 {impostors}, "
+          f"标脏 {suspect_rows} 行" + ("（dry-run 未写库）" if dry_run else "") + skip_note)
+    return {"total": len(rows), "checked": checked,
+            "impostors": impostors, "suspect_rows": suspect_rows}
+
+
 def main():
     parser = argparse.ArgumentParser(description="链上大额转账监控")
     parser.add_argument("--asset-id", type=int, default=None, help="指定资产 ID")
@@ -822,9 +1044,21 @@ def main():
                              "（仅支持 eth/base/polygon，服务器 IP 可能被 Cloudflare 拦截，建议本地执行）")
     parser.add_argument("--enrich-delay", type=float, default=2.0,
                         help="富化爬取的请求间隔秒数（默认 2 秒，礼貌限速）")
+    parser.add_argument("--verify-contracts", action="store_true",
+                        help="合约身份校验回填模式：扫描已入库流水里出现过的 (chain, 合约)，"
+                             "读链上 totalSupply() 判定同名仿冒合约并标脏其流水，不采集转账。"
+                             "配合 --chain/--asset-id/--limit 收窄范围，--dry-run 只统计不写库")
     args = parser.parse_args()
 
     settings = get_settings(require_database=True)
+
+    # ── 合约身份校验回填（独立模式，不做转账采集） ──
+    if args.verify_contracts:
+        with get_connection(settings.database_url) as conn:
+            run_verify_contracts(
+                conn, chain=args.chain, asset_id=args.asset_id,
+                dry_run=args.dry_run, limit=args.limit)
+        return
 
     with get_connection(settings.database_url) as conn:
         assets = get_asset_contracts(conn, args.asset_id)

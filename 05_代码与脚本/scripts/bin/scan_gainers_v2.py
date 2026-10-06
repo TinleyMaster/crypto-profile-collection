@@ -37,6 +37,7 @@ if str(PROJECT_SRC) not in sys.path:
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 from crypto_research.clients.binance_http import fapi_get  # noqa: E402
+from crypto_research.clients.notifier import EmailNotifier  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
@@ -65,6 +66,54 @@ SIGNAL_DEFS = [
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+
+
+def build_gainer_alert_html(hits: list[dict]) -> str:
+    """构建涨幅榜信号告警邮件 HTML。"""
+    rows = ""
+    for h in hits:
+        vr_s = "n/a" if h["vr"] is None else f"{h['vr']:.2f}"
+        fund_s = "n/a" if h["fund"] is None else f"{h['fund']:.4%}"
+        color = "#16a34a" if h["direction"] == "LONG" else "#dc2626"
+        emoji = "🟢" if h["direction"] == "LONG" else "🔴"
+        rows += f"""
+        <tr>
+          <td style="padding:6px;border:1px solid #eee">{emoji} {h['symbol']}</td>
+          <td style="padding:6px;border:1px solid #eee;color:{color}"><b>{h['sig_type']}</b></td>
+          <td style="padding:6px;border:1px solid #eee">{h['direction']}</td>
+          <td style="padding:6px;border:1px solid #eee">{h['chg']:+.1f}%</td>
+          <td style="padding:6px;border:1px solid #eee">${h['price']:,.4f}</td>
+          <td style="padding:6px;border:1px solid #eee">{vr_s}</td>
+          <td style="padding:6px;border:1px solid #eee">{fund_s}</td>
+          <td style="padding:6px;border:1px solid #eee">${h['vol']/1e6:.0f}M</td>
+        </tr>"""
+    return f"""
+    <div style="font-family:sans-serif;max-width:800px;margin:auto">
+      <h2 style="color:#1e40af">📊 涨幅榜信号告警（v2）</h2>
+      <p>检测到 <b>{len(hits)}</b> 个新信号：</p>
+      <table style="border-collapse:collapse;width:100%">
+        <tr style="background:#f3f4f6">
+          <th style="padding:6px;border:1px solid #eee">代币</th>
+          <th style="padding:6px;border:1px solid #eee">信号类型</th>
+          <th style="padding:6px;border:1px solid #eee">方向</th>
+          <th style="padding:6px;border:1px solid #eee">24h涨幅</th>
+          <th style="padding:6px;border:1px solid #eee">价格</th>
+          <th style="padding:6px;border:1px solid #eee">量比</th>
+          <th style="padding:6px;border:1px solid #eee">资金费率</th>
+          <th style="padding:6px;border:1px solid #eee">24h成交额</th>
+        </tr>
+        {rows}
+      </table>
+      <p style="color:#666;margin-top:16px">
+        <b>信号说明：</b><br>
+        • SHORT_LONG：短线做多（≥50%涨幅+放量）→ T+24h<br>
+        • MID_LONG：次档做多（20~50%涨幅+放量）→ T+24h<br>
+        • TRAP_SHORT：诱多做空（<5%涨幅+放量）→ T+24h<br>
+        • EXT_SHORT：极端做空（≥75%涨幅+静默）→ T+7d
+      </p>
+      <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约</p>
+    </div>
+    """
 
 
 def load_vol_avg_7d(conn) -> dict[str, float]:
@@ -145,6 +194,7 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="落库（默认 dry-run）")
+    ap.add_argument("--alert", action="store_true", help="发送邮件告警（需配置 SMTP）")
     ap.add_argument("--min-vol", type=float, default=MIN_VOL)
     ap.add_argument("--cooldown-h", type=float, default=COOLDOWN_H)
     args = ap.parse_args()
@@ -171,6 +221,21 @@ def main() -> int:
                         (h["ts"], h["symbol"], h["price"], h["chg"], h["vol"], h["vr"],
                          h["fund"], h["sig_type"], h["window"], h["direction"]),
                     )
+
+    # 邮件告警
+    if args.alert and hits:
+        notifier = EmailNotifier(settings)
+        if notifier.configured:
+            html = build_gainer_alert_html(hits)
+            ok, msg = notifier.send(
+                subject=f"[涨幅榜告警] 检测到 {len(hits)} 个新信号",
+                body_html=html,
+                from_name="盘面异动扫描 v2",
+            )
+            print(f"[alert] 邮件告警: {msg}")
+        else:
+            print("[alert] SMTP 未配置，跳过邮件告警")
+
     return 0
 
 

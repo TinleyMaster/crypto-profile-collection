@@ -93,8 +93,15 @@ bars AS (
     JOIN biz.asset_klines k ON k.symbol = ev.symbol AND k.interval = '1h'
          AND k.open_time > ev.eo AND k.open_time <= ev.eo + interval '168 hours'
          AND k.high_px > 0 AND k.low_px > 0 AND k.close_px > 0
-)
-SELECT symbol, eo, entry, chg1h, vr, chg24,
+),
+bq AS MATERIALIZED (
+    SELECT b.*,
+           MAX(high_px) OVER (PARTITION BY symbol, eo ORDER BY h_off
+               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS ph
+    FROM bars b
+),
+agg AS (
+    SELECT symbol, eo, entry, chg1h, vr, chg24,
        MIN(h_off) FILTER (WHERE high_px >= entry * 1.02) AS hp2,
        MIN(h_off) FILTER (WHERE high_px >= entry * 1.03) AS hp3,
        MIN(h_off) FILTER (WHERE high_px >= entry * 1.05) AS hp5,
@@ -127,14 +134,39 @@ SELECT symbol, eo, entry, chg1h, vr, chg24,
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.92)  AS tr8,
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.90)  AS tr10,
        MIN(h_off) FILTER (WHERE low_px <= ph * 0.85)  AS tr15,
-       MAX(ph) AS px_peak   -- 168h 窗口内滚动最高（跟踪止盈出场价 = 峰值×(1-tr)）
- FROM (
-     SELECT b.*,
-            MAX(high_px) OVER (PARTITION BY symbol, eo ORDER BY h_off
-                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS ph
-     FROM bars b
- ) bq
- GROUP BY symbol, eo, entry, chg1h, vr, chg24
+       MAX(ph) AS px_peak   -- 168h 窗口内滚动最高（仅用于参考，不出场计算）
+    FROM bq
+    GROUP BY symbol, eo, entry, chg1h, vr, chg24
+),
+-- 跟踪止盈触发时刻的滚动峰值（出场价 = 触发时刻峰值 ×(1-tr)）
+tr3_first AS (
+    SELECT DISTINCT ON (symbol, eo) symbol, eo, ph AS ph_tr3
+    FROM bq WHERE low_px <= ph * 0.97 ORDER BY symbol, eo, h_off
+),
+tr5_first AS (
+    SELECT DISTINCT ON (symbol, eo) symbol, eo, ph AS ph_tr5
+    FROM bq WHERE low_px <= ph * 0.95 ORDER BY symbol, eo, h_off
+),
+tr8_first AS (
+    SELECT DISTINCT ON (symbol, eo) symbol, eo, ph AS ph_tr8
+    FROM bq WHERE low_px <= ph * 0.92 ORDER BY symbol, eo, h_off
+),
+tr10_first AS (
+    SELECT DISTINCT ON (symbol, eo) symbol, eo, ph AS ph_tr10
+    FROM bq WHERE low_px <= ph * 0.90 ORDER BY symbol, eo, h_off
+),
+tr15_first AS (
+    SELECT DISTINCT ON (symbol, eo) symbol, eo, ph AS ph_tr15
+    FROM bq WHERE low_px <= ph * 0.85 ORDER BY symbol, eo, h_off
+)
+SELECT a.*,
+       t3.ph_tr3, t5.ph_tr5, t8.ph_tr8, t10.ph_tr10, t15.ph_tr15
+FROM agg a
+LEFT JOIN tr3_first  t3  ON t3.symbol  = a.symbol AND t3.eo  = a.eo
+LEFT JOIN tr5_first  t5  ON t5.symbol  = a.symbol AND t5.eo  = a.eo
+LEFT JOIN tr8_first  t8  ON t8.symbol  = a.symbol AND t8.eo  = a.eo
+LEFT JOIN tr10_first t10 ON t10.symbol = a.symbol AND t10.eo = a.eo
+LEFT JOIN tr15_first t15 ON t15.symbol = a.symbol AND t15.eo = a.eo
 """
 
 # 列名 ↔ 阈值（high 触达=做多止盈/做空止损；low 触达=做多止损/做空止盈）
@@ -218,8 +250,10 @@ def load_events() -> list[dict]:
 
 def _vec_rows(rows):
     """把事件列表转成 numpy 结构化数组（NaN=缺失），供向量化网格。"""
+    TR_PH_COLS = ["ph_tr3", "ph_tr5", "ph_tr8", "ph_tr10", "ph_tr15"]
     keys = (["entry", "chg24", "eo", "px_peak"] + [c for c, _ in HP_COLS]
-            + [c for c, _ in SL_COLS] + [c for c, _ in C_COLS] + [c for c, _ in TR_COLS])
+            + [c for c, _ in SL_COLS] + [c for c, _ in C_COLS] + [c for c, _ in TR_COLS]
+            + TR_PH_COLS)
     out: dict[str, np.ndarray] = {}
     for k in keys:
         if k == "eo":
@@ -253,8 +287,9 @@ def _returns_vec(arr, direction, n, tp, sl, tr):
     ret_time = direction * (cn / entry - 1)
     hit_tp = ~np.isnan(t_tp) & (np.isnan(t_sl) | (t_tp < t_sl))
     hit_sl = ~np.isnan(t_sl) & (np.isnan(t_tp) | (t_sl <= t_tp))
-    if tr is not None:      # 跟踪止盈真实出场收益（近似：全窗口峰值回撤 tr）
-        tp_val = arr["px_peak"] * (1 - tr) / entry - 1
+    if tr is not None:      # 跟踪止盈出场收益：触发时刻的滚动峰值 ×(1-tr)
+        ph_at_tr = arr[f"ph_tr{int(tr * 100)}"]
+        tp_val = ph_at_tr * (1 - tr) / entry - 1
     else:
         tp_val = tp
     ret = np.where(hit_tp, tp_val, np.where(hit_sl, -sl, ret_time))

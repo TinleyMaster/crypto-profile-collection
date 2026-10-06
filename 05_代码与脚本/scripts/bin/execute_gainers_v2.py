@@ -32,12 +32,15 @@ from crypto_research.clients.binance_futures import BinanceFuturesClient  # noqa
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
-# ── 交易参数（回测最优，风险约束：单笔最差 ≥ -10%）──────────────
-# SHORT_LONG/MID_LONG 为做多；TRAP_SHORT 为做空（无跟踪止盈，SQL 未算做空侧回撤）
+# ── 交易参数（2026-10-06 细分档回测定稿，含 0.2% 成本）──────────────
+# SHORT_LONG = 短线做多（涨幅≥50%，TRAIL 3%，持仓 24h）
+# MID_LONG   = 中线做多（涨幅 20~50%，TRAIL 3%，持仓 168h）
+# TRAP_SHORT = 诱多做空（涨幅<5%，FIX 止盈 50% / 止损 10%，持仓 12h）
+# 实盘硬止损 -10% 作为黑天鹅保护（跟踪止盈 3% 先触发，硬止损兜底）
 PARAMS: dict[str, dict] = {
-    "SHORT_LONG": {"N": 12, "TP": 0.50, "TR": None, "SL": 0.10},
-    "MID_LONG":   {"N": 12, "TP": 0.10, "TR": None, "SL": 0.10},
-    "TRAP_SHORT": {"N": 12, "TP": 0.0,  "TR": None, "SL": 0.10},
+    "SHORT_LONG": {"N": 24,  "TP": None, "TR": 0.03, "SL": 0.10},
+    "MID_LONG":   {"N": 168, "TP": None, "TR": 0.03, "SL": 0.10},
+    "TRAP_SHORT": {"N": 12,  "TP": 0.50, "TR": None, "SL": 0.10},
 }
 
 # 风控（100U 实验）
@@ -100,10 +103,13 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     client.set_leverage(sig["symbol"], lev)
     direction = "LONG" if sig["direction"] == "LONG" else "SHORT"
     try:
-        r = client.open_position(sig["symbol"], direction, notional,
-                                 entry_price=None, leverage=lev,
-                                 stop_loss_pct=p["SL"] * 100 if p["SL"] else 0,
-                                 take_profit_pct=p["TP"] * 100 if p.get("TP") else 0)
+        r = client.open_position(
+            sig["symbol"], direction, notional,
+            entry_price=None, leverage=lev,
+            stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
+            take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
+            trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
+        )
         rec.update(decision="ordered", order=r.get("orderId"), reason="ok")
     except Exception as e:  # noqa: BLE001
         rec.update(decision="error", reason=f"{type(e).__name__}: {e}")

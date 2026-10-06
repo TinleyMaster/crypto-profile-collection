@@ -204,7 +204,7 @@ class BinanceFuturesClient:
         self,
         symbol: str,
         side: str,  # BUY / SELL
-        order_type: str,  # LIMIT / MARKET
+        order_type: str,  # LIMIT / MARKET / STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET
         quantity: float | None = None,
         price: float | None = None,
         time_in_force: str = "GTC",
@@ -213,14 +213,14 @@ class BinanceFuturesClient:
         stop_price: float | None = None,
         position_side: str | None = None,
         new_client_order_id: str | None = None,
+        callback_rate: float | None = None,
     ) -> dict:
         """下单（自动规整数量/价格精度）。
 
         Args:
             symbol: 合约代码，如 BTCUSDT
             side: BUY / SELL（开多 BUY、开空 SELL；平仓单用相反方向）
-            order_type: LIMIT(挂单) / MARKET(市价) /
-                        STOP_MARKET / TAKE_PROFIT_MARKET（配合 stop_price）
+            order_type: LIMIT / MARKET / STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET
             quantity: 数量（必填，除非 close_position=True）
             price: 限价单价格
             time_in_force: GTC / IOC / FOK / POST_ONLY
@@ -229,6 +229,7 @@ class BinanceFuturesClient:
             stop_price: 触发价（STOP_MARKET / TAKE_PROFIT_MARKET 必填）
             position_side: 双向持仓模式下的持仓方向（LONG/SHORT）。单向模式传 None。
                           平仓单方向与开仓相反：平多=SELL+LONG，平空=BUY+SHORT。
+            callback_rate: 跟踪止盈回调比例（TRAILING_STOP_MARKET 必填，单位 %，如 3.0 = 3%）
         """
         info = self.get_exchange_info(symbol)
         params: dict[str, Any] = {"symbol": symbol, "side": side, "type": order_type}
@@ -253,6 +254,12 @@ class BinanceFuturesClient:
                 params["price"] = _round_price_to_tick(float(price), info["tick_size"])
                 params["timeInForce"] = time_in_force
 
+        if order_type == "TRAILING_STOP_MARKET":
+            if callback_rate is None:
+                raise BinanceFuturesError("TRAILING_STOP_MARKET 必须传 callback_rate（%）")
+            params["callbackRate"] = f"{callback_rate:.1f}"
+            params["workingType"] = "CONTRACT_PRICE"  # 用合约价格触发（非标记价格）
+
         if reduce_only:
             params["reduceOnly"] = "true"
         if new_client_order_id:
@@ -269,6 +276,37 @@ class BinanceFuturesClient:
         return self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
 
     # ───────────────────────── 组合下单辅助 ─────────────────────────
+    def place_trailing_stop(
+        self,
+        symbol: str,
+        direction: str,  # long / short
+        callback_rate: float,  # 回调比例 %，如 3.0 = 3%
+        quantity: float | None = None,
+        close_position: bool = True,
+    ) -> dict:
+        """挂跟踪止盈平仓单（TRAILING_STOP_MARKET）。
+
+        跟踪逻辑：做多时价格创新高后回落 callback_rate% 触发平仓；
+                  做空时价格创新低后反弹 callback_rate% 触发平仓。
+
+        Args:
+            symbol: 合约代码
+            direction: long / short（持仓方向，平仓 side 与之相反）
+            callback_rate: 回调比例 %（如 3.0 表示 3%）
+            quantity: 平仓数量（close_position=True 时可省略）
+            close_position: True=全部平仓（默认）
+        """
+        close_side = "SELL" if direction == "long" else "BUY"
+        position_side = "LONG" if direction == "long" else "SHORT"
+        return self.place_order(
+            symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
+            quantity=quantity if not close_position else None,
+            close_position=close_position,
+            position_side=position_side,
+            callback_rate=callback_rate,
+            new_client_order_id=f"trl{direction[:1]}{callback_rate:.0f}",
+        )
+
     def open_position(
         self,
         symbol: str,
@@ -278,13 +316,15 @@ class BinanceFuturesClient:
         leverage: int = 5,
         stop_loss_pct: float = 0.0,
         take_profit_pct: float = 0.0,
+        trailing_stop_pct: float = 0.0,
     ) -> dict:
         """开仓（做多/做空）。
 
         - direction=long  -> BUY（position_side=LONG）
         - direction=short -> SELL（position_side=SHORT）
         - entry_price 为空时用市价单，否则用限价单挂在进场价
-        - 自动设置杠杆；可选附带固定止损/止盈（STOP_MARKET / TAKE_PROFIT_MARKET 全平）
+        - 自动设置杠杆；可选附带固定止损/止盈/跟踪止盈
+        - trailing_stop_pct > 0 时挂 TRAILING_STOP_MARKET（与固定止损互斥，优先跟踪止盈）
         """
         side = "BUY" if direction == "long" else "SELL"
         position_side = "LONG" if direction == "long" else "SHORT"
@@ -315,13 +355,20 @@ class BinanceFuturesClient:
         result["_price"] = order_price or cur
         entry_used = order_price or cur
 
-        # 可选固定止损/止盈
-        if stop_loss_pct and stop_loss_pct > 0:
+        # 可选跟踪止盈 / 固定止损/止盈
+        if trailing_stop_pct and trailing_stop_pct > 0:
             try:
-                sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct, is_stop=True)
-                result["_stop_loss"] = sl
+                trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct)
+                result["_trailing_stop"] = trl
             except BinanceFuturesError as e:
-                result["_stop_loss"] = {"error": str(e)}
+                result["_trailing_stop"] = {"error": str(e)}
+        else:
+            if stop_loss_pct and stop_loss_pct > 0:
+                try:
+                    sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct, is_stop=True)
+                    result["_stop_loss"] = sl
+                except BinanceFuturesError as e:
+                    result["_stop_loss"] = {"error": str(e)}
         if take_profit_pct and take_profit_pct > 0:
             try:
                 tp = self.place_sltp(symbol, direction, entry_used, take_profit_pct, is_stop=False)

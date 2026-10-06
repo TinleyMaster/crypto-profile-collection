@@ -3335,6 +3335,23 @@ def _resolve_confidence(sources: list[tuple[str, str]], t: dict) -> tuple[str, s
     return "medium", direction
 
 
+def _list_partial_note(total, listed) -> str:
+    """聚合条目标题币数 > 正文列出币数时的披露后缀（审计 2026-10-06 高亮信号 Problem-1）。
+
+    标题取「全部满足条件的币数」（如「11 币 24h 暴涨」），而正文只列头部 N 个币；
+    数量超过列出数时必须显式告知「共 N 币，仅列头部 M 币」，否则标题数 ≠ 展开数、
+    读者无从知道其余币是谁。没有任何溢出时不返回任何内容。
+    """
+    try:
+        t = int(total)
+        l = int(listed)
+    except (TypeError, ValueError):
+        return ""
+    if l < 0 or t <= l:
+        return ""
+    return f"；共 {t} 币，仅列头部 {l} 币"
+
+
 def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict], t: dict,
                       cycle_phase: str = "unknown", n_confirm: int = 1) -> None:
     """FEAT-HIGHLIGHT-003：写入 conviction_tier 并按 tier 过滤。
@@ -3410,20 +3427,28 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
     # 才生效；此处按 market_rules.yaml 的 exempt_allow_high 即时封顶，当天即可观察 HIGH 席位
     # 成色（13→5）。封顶非封杀：卡片保留在 MED/观察池。
     _demoted_exempt = False
-    if tier == "HIGH" and _exempt_no_high(st):
-        tier = "MED"
-        _demoted_exempt = True
+    # 审计 2026-10-06（高亮信号逻辑审计 Problem-2）：降档说明此前只在「本可 HIGH 却被压下
+    # 到 MED」时写，导致同类卡一个有一条、一个没有（实测成交量异动↔量价齐升、
+    # ASTER↔WMETAX、AI&BigData/DePIN 叙事↔price_surge）。「无回测背书 → 封顶 MED」是
+    # **常驻口径**而非「分数被改」，应对所有落进 MED 的该类卡一律给说明——低分卡同样被
+    # 结构性封顶，读者同样需要知道为什么它是 MED。
+    _gate = None
+    if _exempt_no_high(st):
         _gate = str(_calibration_status(st).get("gate") or "")
-        if _gate == "missing_calibration":
-            opp["tier_demote_reason"] = (
-                f"missing_calibration：该类型（{st}）未进入回测校准表（未校准、无回测背书），"
-                "默认封顶 MED（如需进 HIGH，须先产出回测背书）"
-            )
-        else:
-            opp["tier_demote_reason"] = (
-                f"exempt_unbacktested：该类型（{_gate}）从未被回测，"
-                "默认封顶 MED（如需进 HIGH，请在 market_rules.yaml 的 exempt_allow_high 显式列入并注明理由）"
-            )
+        if tier == "HIGH":
+            tier = "MED"
+            _demoted_exempt = True
+        if tier == "MED":
+            if _gate == "missing_calibration":
+                opp["tier_demote_reason"] = (
+                    f"missing_calibration：该类型（{st}）未进入回测校准表（未校准、无回测背书），"
+                    "默认封顶 MED（如需进 HIGH，须先产出回测背书）"
+                )
+            else:
+                opp["tier_demote_reason"] = (
+                    f"exempt_unbacktested：该类型（{_gate}）从未被回测，"
+                    "默认封顶 MED（如需进 HIGH，请在 market_rules.yaml 的 exempt_allow_high 显式列入并注明理由）"
+                )
     if cal and cal["no_high"]:
         if tier == "HIGH":
             tier = "MED"
@@ -3434,6 +3459,11 @@ def _push_opportunity(opp: dict, opportunities: list[dict], excluded: list[dict]
             opp["tier_demote_reason"] = opp.get("calibration_note")
     opp["conviction_score"] = score
     opp["conviction_tier"] = tier
+    # 审计 2026-10-06（高亮信号通道准入标准 · P1 档位透明）：把本卡 HIGH 门槛写到卡片上，
+    # 供渲染层对「常规 MED（未降档）」的卡展示「conv X 未达 HIGH 门槛 ≥Y」，让读者看到
+    # "为何 MED / 距 HIGH 差多少"，并让档位口径透明——档位只由 conviction_score + 纪律决定，
+    # AI 综合分仅作复核展示（AI 不背书时档位不高于 MED）。
+    opp["high_threshold"] = high_min
     # 刀3（2026-09-26 审计·P1-A）：confidence 由 conviction_tier 派生（单一真源）。
     # 各规则此前各自硬编码 "confidence": "high/medium"，与计算档位不同源，是前端
     # 「双轨判层级」的根源；此处统一覆盖，前端只读 conviction_tier（confidence 仅作兜底）。
@@ -5243,20 +5273,22 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     _AGG_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme", "mvrv_deep_under"}
     agg_high_min = max(int(min_resonance), 2)
     for k, merged in merged_map.items():
-        if merged.get("conviction_tier") != "HIGH":
-            continue
         if _is_symbol_target(merged.get("target", "")):
             continue
         if (merged.get("resonance_count") or 1) >= agg_high_min:
             continue
         if (merged.get("signal_type") or "") in _AGG_HIGH_ALLOWLIST:
             continue
-        merged["conviction_tier"] = "MED"
-        merged["confidence"] = "medium"
-        merged["tier_demote_reason"] = (
-            f"聚合类信号仅 {merged.get('resonance_count') or 1} 源共振，"
-            f"HIGH 门槛（≥{agg_high_min} 源）未达，信号档位封顶 MED"
-        )
+        if merged.get("conviction_tier") == "HIGH":
+            merged["conviction_tier"] = "MED"
+            merged["confidence"] = "medium"
+        # 审计 2026-10-06：共振不足是**常驻**封顶口径——所有落进 MED 的聚合卡都该有说明，
+        # 不只在「险些 HIGH」时写（否则同类卡一条有一道无）。
+        if merged.get("conviction_tier") == "MED" and not merged.get("tier_demote_reason"):
+            merged["tier_demote_reason"] = (
+                f"聚合类信号仅 {merged.get('resonance_count') or 1} 源共振，"
+                f"HIGH 门槛（≥{agg_high_min} 源）未达，信号档位封顶 MED"
+            )
 
     # OPT-HL-DETERMINACY-002（2026-10-03 审计·高确定性机会视角）：币种 target 单源 HIGH 降档。
     # 聚合类已有 P1-C 闸门，但**币种 target 在 V2（min_resonance=1）下无此保护**：
@@ -5267,21 +5299,24 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # 白名单 = 硬数据极值（恐贪极值 / 杠杆极值 / MVRV 深度低估）：单源即为事实本身。
     _SYM_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme", "mvrv_deep_under"}
     for k, merged in merged_map.items():
-        if merged.get("conviction_tier") != "HIGH":
-            continue
         if not _is_symbol_target(merged.get("target", "")):
             continue
         if (merged.get("resonance_count") or 1) >= 2:
             continue
         if (merged.get("signal_type") or "") in _SYM_HIGH_ALLOWLIST:
             continue
-        merged["conviction_tier"] = "MED"
-        merged["confidence"] = "medium"
-        merged["tier_demote_reason"] = (
-            f"单源信号（仅 {merged.get('resonance_count') or 1} 个独立维度）未达"
-            f"多因子共振门槛（≥2），信号档位封顶 MED；"
-            f"如需 HIGH 须叠加资金面/链上/事件等第二维度确认"
-        )
+        if merged.get("conviction_tier") == "HIGH":
+            merged["conviction_tier"] = "MED"
+            merged["confidence"] = "medium"
+        # 审计 2026-10-06（Problem-2）：ASTER（MED）与 WMETAX（76→MED）同属「开发活跃/单源」，
+        # 此前 ASTER 因分数本达不到 HIGH 而不记降档说明 → 一个有一条、一个没有。单源封顶是
+        # **常驻**口径——落进 MED 的单源卡一律给说明（已有更具体的 reason 时不覆盖）。
+        if merged.get("conviction_tier") == "MED" and not merged.get("tier_demote_reason"):
+            merged["tier_demote_reason"] = (
+                f"单源信号（仅 {merged.get('resonance_count') or 1} 个独立维度）未达"
+                f"多因子共振门槛（≥2），信号档位封顶 MED；"
+                f"如需 HIGH 须叠加资金面/链上/事件等第二维度确认"
+            )
 
     # P2-C（2026-09-26 审计·刀5）：显示档位随时间衰减，防「陈旧 HIGH 恒 HIGH」。
     # decayed_score 已含时间衰减 + 估值过滤（apply_horizon_to_opportunities 早于本函数执行，
@@ -5787,6 +5822,9 @@ def score_opportunities(overview: dict) -> dict:
                 strength = min(90, 45 + int(top_pct * 0.8) + len(strong) * 3)
                 # U-A：连板强势子集标注 + 强度加成（原始分上限 90 不变）
                 _note, strength = augment_diff_streak(strong, strength, 90, "强势", t=t)
+                # 审计 2026-10-06（高亮信号逻辑审计 Problem-1）：标题「N 币」= 全部满足条件的币数，
+                # 而正文只列头部 5 个——数量超过列出数时必须显式披露「共 N 币，仅列头部 5」。
+                _list_note = _list_partial_note(len(strong), len(syms))
                 _push_opportunity(
                     {"target": f"{len(strong)} 币 24h 暴涨",
                      "direction": "long", "confidence": "medium",
@@ -5795,7 +5833,7 @@ def score_opportunities(overview: dict) -> dict:
                      "key_metric": f"24h 涨幅 ≥{t.get('diff_price_surge_pct', 15)}%",
                      "trigger_logic": (
                          f"{', '.join(syms)} 24h 涨幅超 {t.get('diff_price_surge_pct', 15)}%，"
-                         f"最高 {top_pct:.1f}%，平均 {avg_pct:.1f}%{_note}"
+                         f"最高 {top_pct:.1f}%，平均 {avg_pct:.1f}%{_note}{_list_note}"
                      ),
                      "action_hint": "关注强势突破，追高需谨慎",
                      "invalidation": "若 48h 内回落至涨幅 50% 以下",
@@ -5817,6 +5855,8 @@ def score_opportunities(overview: dict) -> dict:
                 # U-A：连跌只标注、**不加成**（连跌是弱势确认，不应抬 confidence —— Q3）
                 _note, _ = augment_diff_streak(crash, strength, 92, "走弱",
                                                apply_bonus=False, t=t)
+                # 审计 2026-10-06（同 price_surge）：标题「N 币」与正文头部 5 币的披露对齐。
+                _list_note = _list_partial_note(len(crash), len(syms))
                 _push_opportunity(
                     {"target": f"{len(crash)} 币 24h 暴跌",
                      "direction": "short", "confidence": "medium",
@@ -5825,7 +5865,7 @@ def score_opportunities(overview: dict) -> dict:
                      "key_metric": f"24h 跌幅 ≥{t.get('diff_price_crash_pct', 12)}%",
                      "trigger_logic": (
                          f"{', '.join(syms)} 24h 跌幅超 {t.get('diff_price_crash_pct', 12)}%，"
-                         f"最大 {max_drop:.1f}%，平均 {avg_drop:.1f}%{_note}"
+                         f"最大 {max_drop:.1f}%，平均 {avg_drop:.1f}%{_note}{_list_note}"
                      ),
                      "action_hint": "警惕继续下行，抄底需等待企稳",
                      "invalidation": "若 48h 内收复跌幅 50% 以上",

@@ -476,6 +476,21 @@ def render_card(card: dict, kind: str) -> str:
     demote = (f'<div style="font-size:11px;color:#b45309;margin-top:2px">⬇️ 降档说明：'
               f'{_e(card.get("tier_demote_reason"))}</div>'
               if card.get("tier_demote_reason") else "")
+    # 审计 2026-10-06（高亮信号通道准入标准 · P1 档位透明）：常规 MED（未降档、纯因分数不足）
+    # 的卡片也必须自证「为何 MED / 距 HIGH 差多少」——尤其催化卡读者常误以为「AI 综合 65」把
+    # 它压下来，实际上档位只由 conviction_score 决定，AI 综合仅复核展示。
+    med_note = ""
+    if tier == "MED" and not card.get("tier_demote_reason"):
+        _sc = _safe_float(card.get("conviction_score"))
+        _hi = card.get("high_threshold")
+        if _sc > 0 and _hi is not None:
+            med_note = (f'<div style="font-size:10.5px;color:#94a3b8;margin-top:2px">'
+                        f'conv {_sc:.0f} 未达 HIGH 门槛（≥{_safe_float(_hi):.0f}），常规 MED；'
+                        f'档位由 conviction_score 判定，与 AI 综合无关</div>')
+        elif _sc > 0:
+            med_note = (f'<div style="font-size:10.5px;color:#94a3b8;margin-top:2px">'
+                        f'conv {_sc:.0f} 未达 HIGH 档，常规 MED；档位由 conviction_score 判定，'
+                        f'与 AI 综合无关</div>')
     dims = _dim_labels(card.get("related_dims"))
     dims_txt = f'<div style="font-size:11px;color:#64748b">来源维度：{_e(", ".join(dims))}</div>' if dims else ""
 
@@ -498,6 +513,7 @@ def render_card(card: dict, kind: str) -> str:
       {invalid}
       {val_note}
       {demote}
+      {med_note}
       {_render_calibration_line(card)}
       {_render_type_position(card)}
       {_render_merged_signals(card)}
@@ -536,12 +552,22 @@ def render_html(items: list[tuple[dict, str]], snap_date: str, total_highlights:
       数据快照 {_e(snap_date)}（当日高亮池共 {total_highlights} 条） · 生成于 {now}
     </p>"""
     resonance_html = _render_resonance_section(resonance_symbols)
+    # 审计 2026-10-06（高亮信号通道准入标准 · P1 档位透明）：整封说明档位/AI 综合口径，
+    # 消除「为什么全是 MED」「是不是 AI 综合把我压下来的」的误读。
+    tier_legend = (
+        '<div style="margin:0 0 12px;padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;'
+        'border-radius:5px;font-size:11px;color:#475569;line-height:1.65">'
+        '🎚 档位口径：HIGH/MED/LOW 由系统强度 <b>conviction_score</b> 结合档位纪律'
+        '（多源共振 ≥2、回测背书、时间衰减）判定；每条「常规 MED」卡片会标注当前分与 HIGH 门槛差。'
+        '<br>🤖 AI 综合分为复核展示：AI 不背书时档位不高于 MED，但 <b>AI 综合低 ≠ 系统分低</b>'
+        '——档位不看 AI 综合。无回测背书的类型（missing_calibration）一律封顶 MED 并带降档说明。</div>'
+    )
     if not items:
         body = '<p style="color:#999">本轮无新增/升级高亮信号。</p>'
     else:
         body = "".join(render_card(c, k) for c, k in items)
     return (f'<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;max-width:720px">'
-            f'{head}{resonance_html}{body}</div>')
+            f'{head}{tier_legend}{resonance_html}{body}</div>')
 
 
 # =====================================================================

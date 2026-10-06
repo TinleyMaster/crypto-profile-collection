@@ -4,6 +4,7 @@ FEAT-SECTOR-003: 赛道日频快照 ETL（市值 + TVL + 净流入）
 
 数据源：
   - 市值：src_cmc.cmc_asset_quote_snapshot + biz.asset_sector
+    （赛道涨跌幅 = 期初市值加权，权重 = 当前市值/(1+r)，避免用当前市值加权使已涨币被过度放大）
   - TVL：biz.protocol_metric_daily + biz.asset_sector
   - 净流入：TVL × 加权变化率（截尾 5% 避免异常值干扰）
 
@@ -61,6 +62,11 @@ def calc_sector_mcap(conn, metric_date: date) -> dict[str, dict]:
     返回 {sector_key: {market_cap, coin_count, mcap_change_1d/7d/30d_pct}}
     """
     with conn.cursor() as cur:
+        # P1（审计 2026-10-06）：赛道市值变化由「当前市值加权」改为「期初市值加权」。
+        # 根因：旧式 SUM(mcap_now * r) / SUM(mcap_now) 用**事后**市值做权重 ⇒ 已上涨的币
+        # 被过度加权（Infrastructure 因单币 DHN 7d +15115% 被放大成赛道 +2497.6%）。
+        # 正确口径：权重 = 期初市值 = mcap_now/(1+r/100)（r 为该窗口涨跌幅），使单币贡献
+        # 回归其真实起点权重；r ≤ -100% 会导致除零，视为无效剔除。
         cur.execute("""
             WITH daily_quote AS (
                 SELECT DISTINCT ON (cmc_id)
@@ -71,22 +77,37 @@ def calc_sector_mcap(conn, metric_date: date) -> dict[str, dict]:
                 WHERE market_cap IS NOT NULL
                   AND quote_time::date = %s
                 ORDER BY cmc_id, quote_time DESC
+            ),
+            base AS (
+                SELECT
+                    s.sector,
+                    dq.market_cap,
+                    dq.percent_change_24h AS r_24h,
+                    dq.percent_change_7d AS r_7d,
+                    dq.percent_change_30d AS r_30d,
+                    CASE WHEN dq.percent_change_24h IS NOT NULL AND dq.percent_change_24h > -100
+                         THEN dq.market_cap / (1 + dq.percent_change_24h / 100.0) END AS bw_24h,
+                    CASE WHEN dq.percent_change_7d IS NOT NULL AND dq.percent_change_7d > -100
+                         THEN dq.market_cap / (1 + dq.percent_change_7d / 100.0) END AS bw_7d,
+                    CASE WHEN dq.percent_change_30d IS NOT NULL AND dq.percent_change_30d > -100
+                         THEN dq.market_cap / (1 + dq.percent_change_30d / 100.0) END AS bw_30d
+                FROM biz.asset_sector s
+                JOIN core.asset_source_map asm
+                  ON s.asset_id = asm.asset_id
+                 AND asm.source_code = 'cmc'
+                JOIN daily_quote dq
+                  ON asm.source_asset_key::bigint = dq.cmc_id
+                WHERE s.is_primary = true
             )
             SELECT
-                s.sector,
+                sector,
                 count(*) as coin_count,
-                SUM(dq.market_cap) as total_mcap,
-                SUM(dq.market_cap * dq.percent_change_24h) / NULLIF(SUM(dq.market_cap), 0) as w_24h,
-                SUM(dq.market_cap * dq.percent_change_7d) / NULLIF(SUM(dq.market_cap), 0) as w_7d,
-                SUM(dq.market_cap * dq.percent_change_30d) / NULLIF(SUM(dq.market_cap), 0) as w_30d
-            FROM biz.asset_sector s
-            JOIN core.asset_source_map asm
-              ON s.asset_id = asm.asset_id
-             AND asm.source_code = 'cmc'
-            JOIN daily_quote dq
-              ON asm.source_asset_key::bigint = dq.cmc_id
-            WHERE s.is_primary = true
-            GROUP BY s.sector
+                SUM(market_cap) as total_mcap,
+                SUM(bw_24h * r_24h) / NULLIF(SUM(bw_24h), 0) as w_24h,
+                SUM(bw_7d * r_7d) / NULLIF(SUM(bw_7d), 0) as w_7d,
+                SUM(bw_30d * r_30d) / NULLIF(SUM(bw_30d), 0) as w_30d
+            FROM base
+            GROUP BY sector
         """, (metric_date,))
         rows = cur.fetchall()
 

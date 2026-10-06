@@ -6569,6 +6569,15 @@ def score_opportunities(overview: dict) -> dict:
     if _fg_val is None:
         _emo = (overview.get("summary") or {}).get("emotion_subscore") or {}
         _fg_val = ((_emo.get("components") or {}).get("fear_greed") or {}).get("value")
+    # P2（审计 2026-10-06）：恐贪值统一到 SSOT（与「大盘脉搏」同源），消除同一封邮件
+    # 里脉搏 70（截至 10-05）与高危信号 73（实时）两个数字并存的口径混用。
+    # SSOT 读不到时保留原 live 值（不阻断）。
+    try:
+        _fg_ssot_val = _resolve_fear_greed_ssot().get("value")
+        if _fg_ssot_val is not None:
+            _fg_val = _fg_ssot_val
+    except Exception:
+        pass
     if _fg_val is not None:
         if _fg_val <= _fear_max:
             strength = max(70, min(95, 50 + 50 * ((50 - _fg_val) / 50)))
@@ -8224,6 +8233,104 @@ _BEAR_WORDS = ("做空", "看空", "看跌", "卖出", "减仓", "抛售")
 _EMOTION_ALIASES = {"fear_greed": ("恐贪", "恐惧贪婪"), "cefi": ("cefi", "机构情绪")}
 
 
+# ── P0（审计 2026-10-06）：交易方向「参照价」必须锚定系统实时价 ────────────────
+# 根因：喂给 LLM 的 prompt 从未给出 BTC/ETH 现价（旧代码 `m2.get('btc_change')` 恒为空），
+# LLM 只能凭训练记忆填 ref_price，实测写出 BTC 115000 / ETH 4200，与大盘脉搏 85818/2714
+# 偏离 34%~55% ⇒ 进场/失效/目标全部错位、具误导性。两道防线：
+#   ① prompt 显式注入实时价（见 generate_morning_brief_ai_summary）；
+#   ② 后置闸门丢弃参照价与实时价严重偏离的条目（宁可不说，不可说错）。
+_PRICE_GUARD_MAX_DEV = 0.30  # 参照价与系统实时价最大允许偏离（30%）
+
+
+def _parse_price_num(x):
+    """把 85818 / '85,818' / '$85,818.00' / '85818 USD' 解析为正浮点数；失败返回 None。"""
+    if x is None or isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if v > 0 else None
+    s = str(x).strip().replace(",", "").replace("$", "")
+    for unit in ("USD", "usd", "美元"):
+        s = s.replace(unit, "")
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _asset_names_symbol(asset, symbol) -> bool:
+    """asset 文本是否指名 symbol（独立 token 匹配，避免 'BTC' 命中 'BTCETF'）。"""
+    import re
+    if not asset or not symbol:
+        return False
+    return re.search(rf"(?<![A-Za-z0-9]){re.escape(str(symbol).upper())}(?![A-Za-z0-9])",
+                     str(asset).upper()) is not None
+
+
+def _build_brief_price_map(m0, payload=None) -> dict:
+    """构建「标的符号 → 系统实时价」映射（仅 BTC/ETH，取自 SSOT M0_tldr 与 payload）。
+
+    用于校验 LLM 交易建议的参照价。拿不到价的标的无法纳入本闸门（不误伤）。
+    """
+    pm: dict = {}
+    m0 = m0 or {}
+    for sym, key in (("BTC", "btc_price"), ("ETH", "eth_price")):
+        v = _parse_price_num(m0.get(key))
+        if v:
+            pm[sym] = v
+    try:
+        dims = (payload or {}).get("dimensions") or {}
+        d = ((dims.get("2盘面") or {}).get("data") or {})
+        for sym, key in (("BTC", "btc"), ("ETH", "eth")):
+            v = _parse_price_num((d.get(key) or {}).get("price"))
+            if v and sym not in pm:
+                pm[sym] = v
+    except Exception:
+        pass
+    return pm
+
+
+def _trade_ref_price_ok(trade, price_map, max_dev=_PRICE_GUARD_MAX_DEV):
+    """校验交易建议的参照价与系统实时价是否一致。返回 (ok, reason)。
+
+    仅校验能在 price_map 命中的标的；无法命中（未提供实时价）→ (True, "")，不在本闸门职责内。
+    """
+    asset = (trade or {}).get("asset")
+    for sym, px in (price_map or {}).items():
+        sp = _parse_price_num(px)
+        if sp is None or not _asset_names_symbol(asset, sym):
+            continue
+        rp = _parse_price_num((trade or {}).get("ref_price"))
+        if rp is None:
+            return False, f"{sym} 参照价缺失或非数值"
+        dev = abs(rp - sp) / sp
+        if dev > max_dev:
+            return False, (f"{sym} 参照价 {rp:,.0f} 偏离系统实时价 {sp:,.0f} 达 {dev * 100:.0f}%"
+                           f"（阈值 {max_dev * 100:.0f}%）")
+        return True, ""
+    return True, ""
+
+
+def _filter_trade_ref_price(trades, price_map) -> list:
+    """丢弃参照价与系统实时价严重偏离的交易建议（P0，防误导读者）。"""
+    kept = []
+    for s in (trades or []):
+        ok, reason = _trade_ref_price_ok(s, price_map)
+        if ok:
+            kept.append(s)
+        else:
+            print(f"[ai_summary] 丢弃参照价异常的交易建议: {s.get('asset')} "
+                  f"ref_price={s.get('ref_price')}（{reason}）")
+    return kept
+
+
 def _system_judgements(brief: dict, payload: dict | None = None) -> list[dict]:
     """收集系统自身对信号的判定，供 _validate_against_payload 比对。
 
@@ -8642,6 +8749,11 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
     不得出现「数据不可用」与具体数字并列而无交代的表述。
 11. 巨鲸摘要必须同时提及增持与减持（如「增持 N 个 / 减持 M 个」），禁止只挑增持做结论；
     不得用「向优质标的集中」等未经证实的定性措辞。
+12. 【价格锚定 · 关键】trade_suggestions 的 ref_price 必须填上方【大盘概况】给出的实时价；
+    trigger/invalidate/target 的价格必须与该实时价在同一量级（如 BTC 现价 8 万多时，
+    不得出现 11 万/12 万 这类价格）。标的不是 BTC/ETH、或上方未给出其实时价时，不得为该标的
+    给出交易方向（改放进 watchlist）。严禁凭记忆填写参照价——系统会校验参照价与实时价的偏离，
+    偏离过大者整条作废。
 """
 
         # ── 口径统一（W-16）：喂给 LLM 的 BTC 周期/趋势与恐贪指数一律用系统 SSOT 口径 ──
@@ -8662,6 +8774,20 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
             if m0.get("fear_greed_note"):
                 _fg_txt += f"；{m0.get('fear_greed_note')}"
 
+        # P0（审计 2026-10-06）：注入系统实时价，供 LLM 填写 ref_price；并供后置闸门校验。
+        price_map = _build_brief_price_map(m0, payload)
+        _bp = price_map.get("BTC")
+        _ep = price_map.get("ETH")
+
+        def _px_txt(v, dec):
+            return f"{v:,.{dec}f} USD" if v else "数据不可用"
+
+        def _chg_txt(v):
+            try:
+                return f"{float(v):+.2f}" if v is not None else "未知"
+            except (TypeError, ValueError):
+                return "未知"
+
         user_prompt = f"""以下是今日加密市场的多维度数据，请综合分析生成今日早报定调和交易建议。
 
 【数据可用性（下结论前必读；empty/error = 无数据，禁止据此下任何断言；可用率=字段级可用条数/总条数）】
@@ -8672,10 +8798,11 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
          + (f'，滞后 {d["lag_days"]} 天' if d.get("lag_days") else '') + '）'
     for d in data_quality)}
 
-【大盘概况】（BTC 周期/恐贪均为系统 SSOT 口径，与早报「大盘脉搏」卡一致，除非标注数据不可用否则不得写成数据缺失）
+【大盘概况】（BTC 周期/恐贪/现价均为系统 SSOT 口径，与早报「大盘脉搏」卡一致，除非标注数据不可用否则不得写成数据缺失）
 - BTC 周期定位：{_btc_trend_txt}{_btc_cycle_note}
 - 恐贪指数：{_fg_txt}
-- 24h 涨跌幅：{m2.get('btc_change', {}).get('change_24h', '未知')}%
+- BTC 现价：{_px_txt(_bp, 0)}（24h {_chg_txt(m0.get('btc_change_24h_pct'))}%）
+- ETH 现价：{_px_txt(_ep, 2)}（24h {_chg_txt(m0.get('eth_change_24h_pct'))}%）
 - 总市值：{m2.get('total_market_cap', '未知')}
 - 24h 成交量：{m2.get('total_volume_24h', '未知')}
 
@@ -8740,12 +8867,18 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
             for s in (data.get("trade_suggestions") or [])[:5]
         ]
         _raw_risks = [str(x)[:200] for x in (data.get("risk_warnings") or [])][:5]
-        trade_suggestions = _validate_against_payload(_raw_trades, brief, payload, kind="trade")
+        # P0（审计 2026-10-06）：先剔除参照价与系统实时价严重偏离的条目，再做系统判定一致性校验。
+        _price_checked = _filter_trade_ref_price(_raw_trades, price_map)
+        _dropped_price = len(_raw_trades) - len(_price_checked)
+        trade_suggestions = _validate_against_payload(_price_checked, brief, payload, kind="trade")
         risk_warnings = _validate_against_payload(_raw_risks, brief, payload, kind="risk")
         no_trade_reason = str(data.get("no_trade_reason", ""))[:200]
         # 全被丢弃 → 走「无操作」分支（与 P0-c 一致，只降不升）
         if _raw_trades and not trade_suggestions and not no_trade_reason:
-            no_trade_reason = "所有建议条目与系统自身判定矛盾，已剔除；今日不给出方向"
+            if _dropped_price and not _price_checked:
+                no_trade_reason = ("交易建议的参照价与系统实时价严重偏离，已全部作废；今日不给出方向")
+            else:
+                no_trade_reason = "所有建议条目与系统自身判定矛盾，已剔除；今日不给出方向"
 
         return {
             "status": "ok",

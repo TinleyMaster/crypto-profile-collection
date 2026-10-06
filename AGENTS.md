@@ -2965,3 +2965,17 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **观察项**：主池 S2 down 空头通道的负期望证据继续积累（≥30 独立日 ≥50 笔后复核是否
   同 BRK 停推流程）；09-18 09:44 ~ 09-21 02:50 扫描任务停摆约 41 小时（事故型漏报）的
   **daemon 日志根因排查**另列待办。
+
+
+### 早报可信度审计 2026-10-06 处置（P0 参照价锚定 / P1 赛道期初加权 / P2 恐贪 SSOT，本次提交）
+
+来源：`早报可信度审计_2026-10-06.md`（对象 = 当日 `加密大盘早报_2026-10-06.eml`）。**零 DDL、零迁移**。P0 为本次核心。
+
+- **P0（已修）交易方向参照价与实时价脱节 34%~55%**：实物 BTC 参照 115000（实时 85818）、ETH 4200（实时 2714）。审计推断「读到陈旧价格源/另一套管道」**不成立**——真因是**喂给 LLM 的 prompt 从未给出 BTC/ETH 现价**（`generate_morning_brief_ai_summary` 的【大盘概况】用了 `m2.get('btc_change', {})`，而 `M2_flow`（`_build_flow`）**根本没有 `btc_change` 键** ⇒ 恒为「未知」），LLM 只能凭训练记忆填 `ref_price`，写出 2025 年量级的价。
+  - **修法 1（prompt 注入）**：改用 `M0_tldr` 的 SSOT 现价（`btc_price`/`eth_price`），【大盘概况】新增「BTC 现价 / ETH 现价（含 24h 涨跌）」两行；system prompt 新增第 12 条「价格锚定」硬约束（ref_price 必须取自上方实时价、标的无实时价则不得给方向、严禁凭记忆填写）。
+  - **修法 2（后置闸门）**：新增 `_parse_price_num` / `_asset_names_symbol`（独立 token 匹配，`BTC` 不误命中 `BTCETF`）/ `_build_brief_price_map` / `_trade_ref_price_ok` / `_filter_trade_ref_price`；`_raw_trades` 在过 `_validate_against_payload` **之前**先过价格闸门，命中标的参照价偏离 > **30%**（`_PRICE_GUARD_MAX_DEV`）整条作废；全被作废 → `no_trade_reason` 写「参照价与系统实时价严重偏离，已全部作废」。未提供实时价的标的（如 SOL）不纳入闸门、不误伤。
+- **P1（已修）赛道市值变化被单币拉爆**：`Infrastructure` 7d 显示 **+2497.6%**。审计归因「等权简单平均」**不准确**——`etl_sector_flow_daily.calc_sector_mcap` 用的是**市值加权**，但权重取**当前市值**（`SUM(mcap_now*r)/SUM(mcap_now)`）⇒ 已暴涨的币被事后加权（实测 DHN 7d +15115%、现市值 7.5 亿占赛道 16.4% ⇒ 单币贡献 2483%）。**修法**：改用**期初市值加权**（权重 = `mcap_now/(1+r/100)`，r ≤ -100% 剔除防除零）。只读实测：infra 7d **2497.6% → 26.88%**，其余赛道同步小幅回落（消除赢家过度加权），排序更合理（infra 26.9 > gamefi 6.6 > ai 5.2 > …）。
+- **P2（已修）恐贪时间戳/口径混用**：大盘脉搏用 SSOT（70，截至 10-05）、`fng_extreme` 高危信号用 live（73）。修法：`score_opportunities` 的 `_fg_val` 统一取 `_resolve_fear_greed_ssot()`（与脉搏同源），读不到时保留原 live 值。
+- **探针**：新增 `workbench/test_brief_price_guard_20261006.py`（**全绿**，纯离线）：P0 解析/符号匹配/闸门/价表 21 例 + **假 LLM 集成**（prompt 含实时价、BTC 115000 被剔除仅留 ETH、全偏离 → 作废无操作）+ P1 源码守卫 4 例 + 真库功能校验（infra<500）+ P2 源码守卫。更新 `test_daily_brief_p0_20260927.py` 的 W-02 守卫（trade 调用点由 `_raw_trades` 改为 `_price_checked`）→ **280/280**。**回归**：`test_macro_market_p0` 16/16、`test_macro_market_board_tier2` 67/67、`test_daily_brief_20260924` 31/31、`test_daily_brief_20260928` 54/54、`test_m2_high_fallback` 41/0、`test_highlight_alert` 106/0、`test_highlight_audit_20260924` 89/0、`test_highlight_determinacy_20260926` 81/0、`test_signal_type_calibration_20260926` 100/0、`test_risk_signal_p0r2` 14/0、`test_research_3tier` 82/0、`test_thesis_forward_track` 63/0、`test_sector_taxonomy` 34/0、`test_brief_data_model` 20/0 全绿；`py_compile` 4/4。
+- **⚠️ 与本次无关的既有失败（未改，留档）**：`test_major_event_alert.py` = 87 通过 / 3 失败（断言 `_recent_major_events` 的 `MAJOR_EVENT_MIN_IMPORTANCE=70 / MAX_PER_RUN=3 / COOLDOWN=24`，而 HEAD 实为 **55 / 5 / 12**）——由并发提交 **`5be6ad4`（催化剂 P0-3 放宽 major_event 门槛）** 引入、**测试未同步**，位于 `catalyst/notifier.py`，与本轮 macro/etl 改动无导入关系。属并发进程职责，**未纳入本提交**。
+- **待部署**：`macro_market.py`（早报生成）/ `etl_sector_flow_daily.py`（`dl_pipeline` 每日 04:00）需容器 **redeploy** 后生效（`push ≠ 线上生效`）；P1 数据随 `dl_pipeline` 次日刷新，未做手工 prod 写。

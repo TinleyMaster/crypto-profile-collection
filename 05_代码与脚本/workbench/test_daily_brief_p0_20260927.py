@@ -393,8 +393,10 @@ try:
     _mm2_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
     check("def _validate_against_payload" in _mm2_src, "校验函数 _validate_against_payload 存在")
     check("_validate_against_payload(_raw_risks, brief, payload" in _mm2_src
-          and "_validate_against_payload(_raw_trades, brief, payload" in _mm2_src,
-          "risk_warnings / trade_suggestions 返回前均调用校验")
+          and "_validate_against_payload(_price_checked, brief, payload" in _mm2_src,
+          "risk_warnings / trade_suggestions 返回前均调用校验（trade 先过参照价闸门）")
+    check("_filter_trade_ref_price(_raw_trades, price_map)" in _mm2_src,
+          "trade_suggestions 在校验前先过参照价锚定闸门（P0 审计 2026-10-06）")
     check("6. 风险条目若引用系统已判定的信号" in _mm2_src, "system prompt 含第 6 条硬约束")
     check("generate_morning_brief_ai_summary(brief, today)" in _mm2_src,
           "组装层把 payload 传给 AI 摘要（供校验读系统判定）")

@@ -105,6 +105,15 @@ LARGE_TRANSFER_USD = 5_000_000
 LABEL_AGING_HOURS = 2.0
 LABEL_STALE_HOURS = 26.0
 
+# 催化剂标题脏值过滤：上游 kol_news_media_binance_square_11 有 508 条把字面量
+# 'null' 写进 title（原帖本身无标题），其中 419 条已被 catalyst_impact 关联。
+# 这些记录的方向计数与「最新一条标题」都是噪音，展示层统一剔除。
+# 依赖 ac 别名——只用于 JOIN biz.asset_catalyst ac 的查询。
+_CATALYST_TITLE_OK = (
+    "ac.title IS NOT NULL AND btrim(ac.title) <> '' "
+    "AND lower(btrim(ac.title)) <> 'null'"
+)
+
 
 def _explorer_url(chain: str, tx_hash: str) -> str | None:
     tpl = _EXPLORER_TX.get((chain or "").lower())
@@ -504,12 +513,17 @@ def _stable_flow_summary(cur, hours, chain, exchange, limit: int = 5) -> dict | 
 
 
 def _fetch_catalyst_direction(cur, asset_id: int, days: int = 7) -> dict:
-    """近 N 天催化剂方向构成（bullish/bearish/neutral 计数 + 最新一条标题）。"""
-    cur.execute("""
+    """近 N 天催化剂方向构成（bullish/bearish/neutral 计数 + 最新一条标题）。
+
+    剔除 title 为 NULL/空/字面量 'null' 的脏记录（见 _CATALYST_TITLE_OK），
+    否则「利好/利空」计数会被无标题帖的方向判定污染、卡片标题会显示成 "null"。
+    """
+    cur.execute(f"""
         SELECT ci.impact_direction AS d, COUNT(*) AS cnt
         FROM biz.catalyst_impact ci
         JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
         WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
+          AND {_CATALYST_TITLE_OK}
         GROUP BY 1
     """, (asset_id, days))
     dirs = {"bullish": 0, "bearish": 0, "neutral": 0}
@@ -517,11 +531,12 @@ def _fetch_catalyst_direction(cur, asset_id: int, days: int = 7) -> dict:
         d = (r["d"] or "neutral").lower()
         if d in dirs:
             dirs[d] = int(r["cnt"] or 0)
-    cur.execute("""
+    cur.execute(f"""
         SELECT ac.title, ac.published_at
         FROM biz.catalyst_impact ci
         JOIN biz.asset_catalyst ac ON ac.catalyst_id = ci.catalyst_id
         WHERE ci.asset_id = %s AND ac.published_at > NOW() - make_interval(days => %s)
+          AND {_CATALYST_TITLE_OK}
         ORDER BY ac.published_at DESC LIMIT 1
     """, (asset_id, days))
     latest = cur.fetchone()

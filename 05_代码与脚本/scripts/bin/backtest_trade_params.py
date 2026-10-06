@@ -7,7 +7,7 @@
   - 止损 SL ∈ {0, 2%,3%,5%,8%,10%}（0=不设）
   - 杠杆 Lev ∈ {1x,3x,5x,8x,10x}（净值模拟，含爆仓：单笔 -100%）
 
-信号集（事件 = 放量大阳 bar：1h 单根≥3% & 量比≥2×；当日涨幅=日收盘口径）：
+信号集（事件 = 放量大阳 bar：1h 单根≥3% & 量比≥2×；chg24=事件时点滚动 24h 涨幅，对齐线上 ticker/24hr）：
   A 短线做多   chg24≥50%
   B 次档做多   chg24 20~50%
   C 诱多做空   chg24<5%（方向做空）
@@ -69,21 +69,23 @@ evt AS (
     FROM volbase
     WHERE avg20 > 0 AND quote_vol / avg20 >= 1.5 AND abs(chg1h) >= 0.015
 ),
-daily AS (
-    SELECT DISTINCT ON (symbol, DATE(open_time)) symbol, DATE(open_time) AS d, close_px
-    FROM biz.asset_klines
-    WHERE interval = '1h' AND close_px > 0
-    ORDER BY symbol, DATE(open_time), open_time DESC
-),
 dchg AS (
-    SELECT s.symbol, s.d, s.close_px / p.close_px - 1 AS chg24
-    FROM daily s JOIN daily p ON p.symbol = s.symbol AND p.d = s.d - 1
+    -- 事件时点可得的滚动 24h 涨幅：事件 bar 收盘 / 24h 前（含）那根 bar 收盘。
+    -- 对齐线上 ticker/24hr，严禁使用当日日终收盘（否则引入前视偏差）。
+    SELECT DISTINCT ON (e.symbol, e.open_time)
+           e.symbol, e.open_time, e.entry / p.close_px - 1 AS chg24
+    FROM evt e
+    JOIN biz.asset_klines p
+      ON p.symbol = e.symbol AND p.interval = '1h' AND p.close_px > 0
+     AND p.open_time <= e.open_time - interval '24 hours'
+     AND p.open_time >  e.open_time - interval '36 hours'   -- 容忍缺 bar，回看上限 12h
+    ORDER BY e.symbol, e.open_time, p.open_time DESC
 ),
 ev AS (
     SELECT e.symbol, e.open_time AS eo, e.entry, e.chg1h, e.vr, d.chg24
     FROM evt e
-    JOIN dchg d ON d.symbol = e.symbol AND d.d = DATE(e.open_time)
-    WHERE e.chg1h >= 0.03 AND e.vr >= 2 AND d.chg24 IS NOT NULL
+    JOIN dchg d ON d.symbol = e.symbol AND d.open_time = e.open_time
+    WHERE e.chg1h >= 0.03 AND e.vr >= 2
 ),
 bars AS (
     SELECT ev.symbol, ev.eo, ev.entry, ev.chg1h, ev.vr, ev.chg24,
@@ -339,7 +341,7 @@ def main() -> int:
     args = ap.parse_args()
 
     rows = load_events()
-    print(f"[events] {len(rows):,} 条（涨异动×日口径）；缓存 {CACHE}")
+    print(f"[events] {len(rows):,} 条（涨异动×滚动24h口径）；缓存 {CACHE}")
     if args.limit:
         rows = rows[: args.limit]
 

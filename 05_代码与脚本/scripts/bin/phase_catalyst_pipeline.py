@@ -674,39 +674,54 @@ def run_signal(conn, builder: CatalystSignalBuilder,
     # catalyst 实为 2 个事件），各自生成独立 signal ⇒ 邮件重复 + 校准样本虚增。
     # 全量刷新时按 (asset_id, 事件类型, 90min 时间窗) 分组，只保留共振分最高的一条
     # 生成/更新信号；单条重算（--catalyst-id）跳过去重，保持精确重算能力。
+    #
+    # ⚠ 2026-10-07 事故修复：_rn 是 SELECT 列表别名，不能被同一查询的 WHERE 引用
+    #   （SQL 逻辑执行顺序 WHERE 先于 SELECT）⇒ 生产 UndefinedColumn: column "_rn"。
+    #   已改为子查询包装：ROW_NUMBER 在子查询内算，_rn 过滤移到外层。
     dedup_col = "" if catalyst_id is not None else """, ROW_NUMBER() OVER (
         PARTITION BY cr.asset_id,
                      COALESCE(ac.ai_event_type, ac.rule_event_type, 'other'),
                      date_bin('90 minutes', ac.published_at, TIMESTAMPTZ '2020-01-01')
         ORDER BY cr.resonance_score DESC, cg.base_strength DESC, cr.catalyst_id
     ) AS _rn"""
-    dedup_where = "" if catalyst_id is not None else " AND _rn = 1"
     query = f"""
-        SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
-               cg.catalyst_kind, cg.base_strength,
-               ac.published_at, ac.title,
-               a.canonical_symbol AS symbol,
-               COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction,
-               cs.entry_price, cs.stop_loss, cs.take_profit,
-               cs.technical_state, cs.fundamental_pass
-               {dedup_col}
-        FROM biz.catalyst_resonance cr
-        JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
-        JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
-        LEFT JOIN core.asset a ON a.asset_id = cr.asset_id
-        LEFT JOIN biz.catalyst_impact ci
-          ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
-        LEFT JOIN biz.catalyst_signal cs
-          ON cs.catalyst_id = cr.catalyst_id AND cs.asset_id = cr.asset_id
-        WHERE cg.catalyst_kind != 'noise'
-          AND cr.resonance_state != 'pending'
-          {dedup_where}
+        SELECT t.catalyst_id, t.asset_id, t.resonance_score, t.resonance_state,
+               t.catalyst_kind, t.base_strength,
+               t.published_at, t.title,
+               t.symbol,
+               t.impact_direction,
+               t.entry_price, t.stop_loss, t.take_profit,
+               t.technical_state, t.fundamental_pass
+        FROM (
+            SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
+                   cg.catalyst_kind, cg.base_strength,
+                   ac.published_at, ac.title,
+                   a.canonical_symbol AS symbol,
+                   COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction,
+                   cs.entry_price, cs.stop_loss, cs.take_profit,
+                   cs.technical_state, cs.fundamental_pass
+                   {dedup_col}
+            FROM biz.catalyst_resonance cr
+            JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
+            JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
+            LEFT JOIN core.asset a ON a.asset_id = cr.asset_id
+            LEFT JOIN biz.catalyst_impact ci
+              ON cr.catalyst_id = ci.catalyst_id AND cr.asset_id = ci.asset_id
+            LEFT JOIN biz.catalyst_signal cs
+              ON cs.catalyst_id = cr.catalyst_id AND cs.asset_id = cr.asset_id
+            WHERE cg.catalyst_kind != 'noise'
+              AND cr.resonance_state != 'pending'
+        ) t
+        WHERE 1 = 1
     """
     params = []
     if catalyst_id is not None:
-        query += " AND cr.catalyst_id = %s"
+        query += " AND t.catalyst_id = %s"
         params.append(catalyst_id)
-    query += " ORDER BY cr.catalyst_id DESC"
+    else:
+        # 全量刷新：外层过滤去重序号（子查询内算好 _rn，外层引用合法）
+        query += " AND t._rn = 1"
+    query += " ORDER BY t.catalyst_id DESC"
     if limit:
         query += " LIMIT %s"
         params.append(limit)

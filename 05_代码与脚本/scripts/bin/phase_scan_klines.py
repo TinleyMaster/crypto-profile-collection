@@ -40,6 +40,7 @@ FAPI_BASE = "https://fapi.binance.com"
 DEFAULT_INTERVALS = ("5m", "15m", "1h")
 INCREMENTAL_LIMIT = 10          # 增量模式：每币每周期拉最近 N 根
 BACKFILL_PAGE_LIMIT = 1500      # 回填模式：单请求最大 K 线数
+FLUSH_ROWS = 50_000             # 回填分批落库阈值（约 0.5KB/行，避免千万行驻留内存）
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
 
 UPSERT_SQL = """
@@ -199,27 +200,37 @@ def main() -> int:
 
             all_rows: list[tuple] = []
             errors = 0
+            fetched = 0
             for fut in as_completed(tasks):
                 try:
                     rows = fut.result()
-                    all_rows.extend(rows)
                 except Exception as e:  # noqa: BLE001
                     errors += 1
                     if errors <= 10:
                         print(f"[warn] 拉取失败: {e}", file=sys.stderr)
+                    continue
+                fetched += len(rows)
+                all_rows.extend(rows)
+                # 分批落库：回填 1380 天 × 500+ 合约可达千万行，
+                # 全量驻留内存再一次性 upsert 会 OOM（约 0.5KB/行）。
+                if not args.dry_run and len(all_rows) >= FLUSH_ROWS:
+                    execute_many(conn, UPSERT_SQL, all_rows)
+                    print(f"[db] upsert {len(all_rows)} 行（累计抓取 {fetched} 根）")
+                    all_rows.clear()
 
-        print(f"[fetch] 完成，共 {len(all_rows)} 根 K 线，失败 {errors} 个任务")
+        print(f"[fetch] 完成，共 {fetched} 根 K 线，失败 {errors} 个任务")
         if args.dry_run:
             for r in all_rows[:5]:
                 print("  样例:", r[0], r[1], r[2].isoformat(), r[5])
             return 0
-        if errors and not all_rows:
+        if errors and not fetched:
             return 1
-        if not all_rows:
+        if not fetched:
             return 0
 
-        execute_many(conn, UPSERT_SQL, all_rows)
-        print(f"[db] upsert {len(all_rows)} 行完成")
+        if all_rows:
+            execute_many(conn, UPSERT_SQL, all_rows)
+            print(f"[db] upsert {len(all_rows)} 行（末批）")
     return 0
 
 

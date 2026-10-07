@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -41,7 +42,7 @@ SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据给定�
 
 只输出 JSON，不要输出其他内容。JSON 格式：
 {
-  "event_type": "listing|delisting|burn|partnership|regulation|tech_upgrade|funding|market_update|other",
+  "event_type": "listing|delisting|burn|partnership|regulation|tech_upgrade|funding|security|unlock|mint|airdrop|market_update|other",
   "sentiment": "bullish|bearish|neutral",
   "summary": "一句话摘要（不超过100字）",
   "keywords": ["关键词1", "关键词2", "关键词3"]
@@ -55,12 +56,16 @@ SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据给定�
 - regulation: 监管/合规/政策
 - tech_upgrade: 技术升级/主网升级/硬分叉
 - funding: 融资/投资/募资
+- security: 安全事件/漏洞/被盗/黑客攻击/钓鱼
+- unlock: 代币解锁/流通释放/vesting
+- mint: 增发/铸造/新增供应
+- airdrop: 空投/奖励分发
 - market_update: 市场动态/行情更新/产品更新
 - other: 其他
 
 情感判断说明：
 - bullish: 明显利好（上新、合作、融资、销毁等）
-- bearish: 明显利空（下架、监管处罚、安全事件等）
+- bearish: 明显利空（下架、监管处罚、安全事件、解锁、增发等）
 - neutral: 中性（技术升级、常规公告、无法判断）
 """
 
@@ -79,8 +84,46 @@ RULE_EVENT_PATTERNS: list[tuple[str, list[str], str]] = [
 ]
 
 
+# 空/占位标题正则（标题缺失或只有作者名/符号等垃圾时，直接判噪声，不送 LLM）
+_EMPTY_TITLE_RE = re.compile(r"^(?:null|none|n/?a|作者|来源|作者[:：]|from|by|#|-)+\s*$", re.IGNORECASE)
+# 明显非加密的宏观/传统金融标题关键词（news_media 源混入的全球财经快讯）
+_NON_CRYPTO_TITLE_KW = re.compile(
+    r"\b(russia|israel|ukrain|venezuela|canada|brazil|quebec|iran|guinea|chile|"
+    r"world bank|european union|federal reserve|treasury|crude oil|brent|wti|"
+    r"jpmorgan|nomura|citadel|ubs|goldman|ubs|citi|credit trader|"
+    r"acquisition|takeover|merger|billion bond|share price|stock market|s&p|dow|nasdaq)\b",
+    re.IGNORECASE)
+
+
+def _looks_like_noise(catalyst: dict) -> bool:
+    """判定是否应直接跳过 LLM：空/占位标题，或明显非加密新闻标题。"""
+    title = (catalyst.get("title") or "").strip()
+    if not title or title.lower() in {"null", "none", "n/a", "作者", "来源"}:
+        return True
+    if len(title) < 4:
+        return True
+    if _EMPTY_TITLE_RE.match(title):
+        return True
+    # 作者署名被误当标题（如 "作者：Frank，PANews" / "来源：XX"）
+    if re.match(r"^(?:作者|来源)[：:]\s*\S", title) and len(title) < 40:
+        return True
+    # 非加密标题：标题无任何加密相关词，却命中宏观/传统金融词
+    body = (catalyst.get("body_text") or "")[:200]
+    has_crypto_hint = bool(
+        re.search(r"bitcoin|btc|eth|ethereum|crypto|coin|token|chain|wallet|defi|"
+                  r"stablecoin|web3|altcoin|加密|币|链上|代币|区块链|交易所", title + " " + body, re.IGNORECASE)
+    )
+    if not has_crypto_hint and _NON_CRYPTO_TITLE_KW.search(title):
+        return True
+    return False
+
+
 def rule_based_classify(catalyst: dict) -> dict | None:
     """规则前置快速判断。能从标题/分类直接确定的返回结果 dict，否则返回 None。"""
+    # 空/占位标题 → 直接 other + neutral，不调 LLM（审计 2026-10-07：516 条占位标题被 AI 硬猜分类）
+    if _looks_like_noise(catalyst):
+        return _make_rule_result(catalyst, "other", "neutral", "规则: 空/占位或非加密标题")
+
     title = (catalyst.get("title") or "").lower()
     event_category = (catalyst.get("event_category") or "").lower()
     text = title + " " + event_category
@@ -162,7 +205,8 @@ def process_one(llm: LLMClient, catalyst: dict) -> dict:
     # 字段校验 + 归一化
     event_type = (result.get("event_type") or "other").lower()
     valid_types = {"listing", "delisting", "burn", "partnership", "regulation",
-                   "tech_upgrade", "funding", "market_update", "other"}
+                   "tech_upgrade", "funding", "security", "unlock", "mint",
+                   "airdrop", "market_update", "other"}
     if event_type not in valid_types:
         event_type = "other"
 
@@ -194,7 +238,7 @@ PACK_SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据�
   "results": [
     {
       "catalyst_id": 123,
-      "event_type": "listing|delisting|burn|partnership|regulation|tech_upgrade|funding|market_update|other",
+      "event_type": "listing|delisting|burn|partnership|regulation|tech_upgrade|funding|security|unlock|mint|airdrop|market_update|other",
       "sentiment": "bullish|bearish|neutral",
       "summary": "一句话摘要（不超过100字）",
       "keywords": ["关键词1", "关键词2", "关键词3"]
@@ -210,12 +254,16 @@ PACK_SYSTEM_PROMPT = """你是一名加密货币事件分析助手。请根据�
 - regulation: 监管/合规/政策
 - tech_upgrade: 技术升级/主网升级/硬分叉
 - funding: 融资/投资/募资
+- security: 安全事件/漏洞/被盗/黑客攻击/钓鱼
+- unlock: 代币解锁/流通释放/vesting
+- mint: 增发/铸造/新增供应
+- airdrop: 空投/奖励分发
 - market_update: 市场动态/行情更新/产品更新
 - other: 其他
 
 情感判断说明：
 - bullish: 明显利好（上新、合作、融资、销毁等）
-- bearish: 明显利空（下架、监管处罚、安全事件等）
+- bearish: 明显利空（下架、监管处罚、安全事件、解锁、增发等）
 - neutral: 中性（技术升级、常规公告、无法判断）
 """
 
@@ -292,7 +340,8 @@ def process_pack(llm: LLMClient, cats: list[dict]) -> dict[int, dict]:
         # 字段校验 + 归一化
         event_type = (r.get("event_type") or "other").lower()
         valid_types = {"listing", "delisting", "burn", "partnership", "regulation",
-                       "tech_upgrade", "funding", "market_update", "other"}
+                       "tech_upgrade", "funding", "security", "unlock", "mint",
+                       "airdrop", "market_update", "other"}
         if event_type not in valid_types:
             event_type = "other"
 

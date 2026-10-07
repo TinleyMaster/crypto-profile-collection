@@ -50,6 +50,18 @@ rule_event_keywords:
     keywords: ["升级", "主网", "迭代", "硬分叉", "硬分岔", "upgrade", "mainnet", "fork", "V2", "V3", "release", "launchpad", "testnet"]
     require_token_hint: false
 
+  - event_type: "security"
+    keywords: ["漏洞", "被盗", "黑客", "钓鱼", "hack", "hacked", "stolen", "phish", "scam", "rug pull", "rugpull", "安全事件", "盗走", "失窃", "被攻击", "遭攻击"]
+    require_token_hint: false
+
+  - event_type: "unlock"
+    keywords: ["解锁", "unlock", "cliff", "vesting", "代币解锁", "token unlock", "释放流通"]
+    require_token_hint: false
+
+  - event_type: "mint"
+    keywords: ["增发", "铸造", "mint", "minted", "新增供应", "增发流通"]
+    require_token_hint: false
+
   - event_type: "market_update"
     keywords: ["行情", "市场回顾", "周报", "月报", "展望", "market update", "weekly", "monthly", "market recap", "outlook"]
     require_token_hint: false
@@ -84,15 +96,20 @@ mcap_scores:
   unknown: 50       # 无市值数据中性
 
 # 事件类型权重分（0-100）
+# 2026-10-07 审计：新增 security/unlock/mint 三类（此前被 AI 归入 other/market_update，
+# 属高影响事件却拿低权重）；权重按 72h 影响矩阵实测 + 市场常识设定
 event_type_weights:
   listing: 95
   delisting: 90
   burn: 80
   regulation: 75
+  security: 75        # 2026-10-07 新增（此前归 other 权重 15，严重低估利空影响）
   airdrop: 70
   funding: 65
   partnership: 60
+  unlock: 60          # 2026-10-07 新增（解锁流通释放，利空）
   tech_upgrade: 55
+  mint: 50            # 2026-10-07 新增（增发稀释，利空）
   market_update: 25
   other: 15
 
@@ -132,7 +149,7 @@ kind_thresholds:
   # 无标的 + other → noise
 
 # structural 类事件类型（满足其一且 strength ≥ structural_min_strength → structural）
-structural_event_types: ["listing", "delisting", "burn", "regulation", "tech_upgrade"]
+structural_event_types: ["listing", "delisting", "burn", "regulation", "security", "unlock", "mint", "tech_upgrade"]
 # sentiment 类事件类型
 sentiment_event_types: ["market_update"]
 

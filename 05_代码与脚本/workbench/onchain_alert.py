@@ -903,16 +903,17 @@ def onchain_alert_holders():
                 top = []
                 seen_addrs = set()
                 for h in latest_top[:top_n]:
-                    addr = str(h.get("address") or "").lower()
-                    if not addr or addr in seen_addrs:
+                    addr_raw = str(h.get("address") or "").strip()
+                    addr_key = addr_raw.lower()
+                    if not addr_key or addr_key in seen_addrs:
                         continue
-                    seen_addrs.add(addr)
-                    prev = prev_top_map.get(addr)
+                    seen_addrs.add(addr_key)
+                    prev = prev_top_map.get(addr_key)
                     cur_pct = float(h.get("pct") or 0)
                     prev_pct = float(prev.get("pct") or 0) if prev else None
                     top.append({
                         "rank": int(h.get("rank") or 0),
-                        "address": addr,
+                        "address": addr_raw,
                         "amount": str(h.get("amount") or ""),
                         "pct": cur_pct,
                         "delta_pct": round(cur_pct - prev_pct, 4) if prev_pct is not None else None,
@@ -921,7 +922,7 @@ def onchain_alert_holders():
 
                 # 批量补地址身份（exchange > market_maker > dex > 其它，按置信度取优）
                 if top:
-                    addrs = [t["address"] for t in top]
+                    addrs = [t["address"].lower() for t in top]
                     cur.execute("""
                         SELECT address, label_type, label_name, confidence
                         FROM biz.onchain_address_label
@@ -937,7 +938,7 @@ def onchain_alert_holders():
                     for r in cur.fetchall():
                         labels.setdefault(str(r["address"]).lower(), r)
                     for t in top:
-                        lb = labels.get(t["address"])
+                        lb = labels.get(t["address"].lower())
                         t["label"] = (lb["label_name"] if lb and lb["label_name"] else
                                       lb["label_type"] if lb else None)
                         t["label_type"] = lb["label_type"] if lb else None

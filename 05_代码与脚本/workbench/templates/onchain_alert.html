@@ -681,11 +681,11 @@
 
     #hld table {
       table-layout: fixed;
-      min-width: 520px;
+      min-width: 820px;
     }
 
     #hld .c-addr {
-      width: 120px;
+      width: 220px;
     }
 
     #hld .c-pct {
@@ -697,9 +697,24 @@
     }
 
     .hld-addr {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .hld-addr a {
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: 11px;
-      color: var(--muted);
+      color: var(--accent);
+      word-break: break-all;
+      line-height: 1.35;
+    }
+
+    .hld-addr .hld-label {
+      flex: none;
     }
 
     .hld-label {
@@ -879,6 +894,30 @@
       if (a >= 1e9) return "$" + (a / 1e9).toFixed(1) + "B";
       if (a >= 1e6) return "$" + (a / 1e6).toFixed(0) + "M";
       return "$" + a.toFixed(0);
+    }
+
+    const EXPLORER_ADDR_TPL = {
+      eth: "https://etherscan.io/address/{addr}",
+      ethereum: "https://etherscan.io/address/{addr}",
+      bsc: "https://bscscan.com/address/{addr}",
+      bnb: "https://bscscan.com/address/{addr}",
+      arbitrum: "https://arbiscan.io/address/{addr}",
+      base: "https://basescan.org/address/{addr}",
+      optimism: "https://optimistic.etherscan.io/address/{addr}",
+      polygon: "https://polygonscan.com/address/{addr}",
+      avax: "https://snowtrace.io/address/{addr}",
+      avalanche: "https://snowtrace.io/address/{addr}",
+      solana: "https://solscan.io/account/{addr}",
+      tron: "https://tronscan.org/#/address/{addr}",
+      ton: "https://tonscan.org/address/{addr}",
+      sui: "https://suiscan.xyz/mainnet/address/{addr}",
+      aptos: "https://explorer.aptoslabs.com/account/{addr}",
+    };
+
+    function addrExplorerUrl (chain, addr) {
+      if (!chain || !addr) return null;
+      const tpl = EXPLORER_ADDR_TPL[(chain || "").toLowerCase()];
+      return tpl ? tpl.replace("{addr}", encodeURIComponent(addr)) : null;
     }
     function sigBadges (signals) {
       if (!signals || !signals.length) return "";
@@ -1127,9 +1166,14 @@
           : `<span class="${deltaCls}">${fmtDelta(t.delta_pct, "pp")}</span>`;
         const lblCls = t.label_type === "market_maker" ? "mm" : t.label_type === "dex" ? "dex" : "";
         const lbl = t.label ? `<span class="hld-label ${lblCls}">${esc(t.label)}</span>` : "";
+        const addr = t.address || "";
+        const href = addrExplorerUrl(j.chain, addr);
+        const addrHtml = href
+          ? `<a href="${href}" target="_blank" rel="noopener" title="${esc(addr)}">${esc(addr)}</a>`
+          : `<span title="${esc(addr)}">${esc(addr)}</span>`;
         return `<tr>
           <td class="rankno">${t.rank}</td>
-          <td><div class="hld-addr">${esc((t.address || "").slice(0, 12))}…${lbl}</div></td>
+          <td><div class="hld-addr">${addrHtml}${lbl}</div></td>
           <td class="num">${(t.pct ?? 0).toFixed(2)}%</td>
           <td class="num">${deltaTxt}</td>
         </tr>`;

@@ -1228,6 +1228,136 @@ def _render_signal_track_html(data: dict) -> str:
     """
 
 
+def _grid_table(cells: list[str]) -> str:
+    """等宽多列布局：用 table 实现（Outlook 桌面端兼容），替代 `display:grid`。
+
+    Outlook（Word 引擎）不支持 grid/flex，会塌成一列；table 是邮件里最稳的
+    多列方案。各列内部仍是普通 div（背景/圆角等照常渲染）。
+    """
+    cells = [c for c in (cells or []) if c]
+    if not cells:
+        return ""
+    col_w = int(100 / len(cells))
+    tds = "".join(
+        f'<td width="{col_w}%" valign="top" style="padding:0 3px;text-align:center">{c}</td>'
+        for c in cells
+    )
+    return (
+        f'<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'role="presentation" style="border-collapse:collapse;table-layout:fixed">'
+        f'<tr>{tds}</tr></table>'
+    )
+
+
+def _render_yesterday_review_html(data: dict) -> str:
+    """🔄 昨日复盘：T-1 机会 × T+1 结算，逐条打 ✓/✗（诚实性显性化）。
+
+    数据来自生成层 brief["M0_yesterday_review"]（macro_market._load_yesterday_review）。
+    空 / 异常 / 无条目 → 返回空串（不产生空壳）。
+    """
+    if not isinstance(data, dict) or data.get("error"):
+        return ""
+    items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return ""
+    _date = str(data.get("date") or "昨日")
+    _dir_cn = {"long": "看多", "short": "看空"}
+    _rows = []
+    for i in items[:8]:
+        tgt = html.escape(str(i.get("target") or "?"))
+        d = str(i.get("direction") or "").lower()
+        _d_cn = _dir_cn.get(d, d or "—")
+        _score = i.get("score")
+        _score_txt = f"<span style=\"color:#94a3b8;font-size:10px\">（{float(_score):.0f}分）</span>" \
+            if isinstance(_score, (int, float)) else ""
+        st = i.get("status")
+        if st == "hit":
+            _mark = '<span style="color:#16a34a;font-weight:700">✅ 命中</span>'
+            _ret = f"<span style=\"color:#16a34a;font-weight:600\">{float(i['ret']):+.2f}%</span>" \
+                if i.get("ret") is not None else ""
+        elif st == "miss":
+            _mark = '<span style="color:#dc2626;font-weight:700">❌ 未中</span>'
+            _ret = f"<span style=\"color:#dc2626;font-weight:600\">{float(i['ret']):+.2f}%</span>" \
+                if i.get("ret") is not None else ""
+        elif st == "flat":
+            _mark = '<span style="color:#64748b;font-weight:700">➖ 持平</span>'
+            _ret = ""
+        else:
+            _mark = '<span style="color:#94a3b8;font-weight:700">⏳ 待结算</span>'
+            _ret = ""
+        _d_color = "#dc2626" if d == "long" else "#16a34a" if d == "short" else "#64748b"
+        _rows.append(
+            f'<div style="display:flex;justify-content:space-between;align-items:center;'
+            f'padding:4px 0;border-bottom:1px solid #f1f5f9;font-size:11.5px">'
+            f'<span style="color:#334155;font-weight:600">{tgt}</span>'
+            f'<span style="color:{_d_color};font-weight:600">{_d_cn}</span>{_score_txt}'
+            f'<span style="margin-left:auto">{_mark} {_ret}</span></div>'
+        )
+    return f"""
+      <!-- 模块0.04：昨日复盘（2026-10-07 新增）-->
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid #0f766e">
+        <div style="font-size:12.5px;font-weight:700;color:#0f172a;margin-bottom:6px">🔄 昨日复盘<span style="font-size:10px;color:#94a3b8;font-weight:400;margin-left:6px">T-1 机会 · T+1 结算（方向对齐：long 取 +、short 取 −）</span></div>
+        {''.join(_rows)}
+        <div style="font-size:9.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
+          口径：昨日（{_date}）早报机会清单的 1 日结算；「待结算」表示该行尚未到期回填。仅作复盘参考，不构成投资建议。
+        </div>
+      </div>
+    """
+
+
+def _render_alert_quality_html(brief: dict) -> str:
+    """📉 告警质量（阈值-行情失配预警）——元信息，沉入底部附录。
+
+    数据来自 macro_market._load_alert_quality（只读 biz.scan_edge_daily 最新一行）。
+    缺数据时整块跳过（返回空串）。
+    """
+    aq = (brief or {}).get("M0_alert_quality") or {}
+    if aq.get("win_1h") is None:
+        return ""
+    aq_color, aq_label = "#16a34a", "正常"
+    if aq.get("severity") == "watch":
+        aq_color, aq_label = "#d97706", "观察"
+    elif aq.get("severity") == "high":
+        aq_color, aq_label = "#dc2626", "失配"
+    _aq_plain = {
+        "normal": "白话结论：近期盘面告警整体有效，阈值与行情匹配。",
+        "watch": "白话结论：近期盘面告警胜率偏低（观察级），阈值或需微调，暂不宜重仓跟随。",
+        "high": "白话结论：近期盘面告警胜率明显偏低、与行情失配，建议收紧阈值或暂停跟随。",
+    }.get(str(aq.get("severity") or "normal").lower(),
+          "白话结论：近期盘面告警状态未知，请谨慎参考。")
+    aq_n = str(aq["alerts_n"]) if aq.get("alerts_n") is not None else "-"
+    aq_win = f"{aq['win_1h'] * 100:.1f}%"
+    aq_be = f"{aq['be_1h'] * 100:.1f}%" if aq.get("be_1h") is not None else "-"
+    aq_odds = f"{aq['odds_1h']:.2f}" if aq.get("odds_1h") is not None else "-"
+    aq_pf = f"{aq['pf_1h']:.2f}" if aq.get("pf_1h") is not None else "-"
+    aq_rwin = f"{aq['roll3_win_1h'] * 100:.1f}%" if aq.get("roll3_win_1h") is not None else "-"
+    aq_rbe = f"{aq['roll3_be_1h'] * 100:.1f}%" if aq.get("roll3_be_1h") is not None else "-"
+    aq_rpf = f"{aq['roll3_pf_1h']:.2f}" if aq.get("roll3_pf_1h") is not None else "-"
+    aq_note = (aq.get("conclusion") or "").strip().replace("<", "&lt;").replace(">", "&gt;")
+    if len(aq_note) > 220:
+        _cut = aq_note[:220]
+        _m = max(_cut.rfind("；"), _cut.rfind("。"), _cut.rfind("，"), _cut.rfind("、"), _cut.rfind(" "))
+        aq_note = (_cut[:_m + 1] if _m > 120 else _cut).rstrip() + "…"
+    return f"""
+      <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid {aq_color}">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div style="font-size:13px;font-weight:700;color:#0f172a">📉 告警质量（阈值-行情失配预警）</div>
+          <div style="font-size:11px;font-weight:700;color:{aq_color}">{aq_label}</div>
+        </div>
+        <div style="font-size:11.5px;color:{aq_color};font-weight:600;margin-bottom:3px">{_aq_plain}</div>
+        <div style="font-size:12px;color:#475569;line-height:1.6">
+          {aq.get('report_date') or '-'} 告警 {aq_n} 条 · 当日 T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
+          近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF(滚动) {aq_rpf}）·
+          赔率(当日) {aq_odds} · PF(当日) {aq_pf} · 环境 {aq.get('regime_label') or '-'}
+        </div>
+        <div style="font-size:10.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
+          说明：「当日」与「近3日滚动」是两个不同窗口的同一指标，失配判定以滚动口径为准；单日胜率波动大，不宜据此判断阈值优劣。滚动口径暂无独立赔率（PF(滚动)已含赔率信息）。
+        </div>
+        {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
+      </div>
+    """
+
+
 def render_brief_html(brief: dict) -> str:
     """
     早报 HTML V2 — 6 大模块 + AI 定调。
@@ -1258,7 +1388,7 @@ def render_brief_html(brief: dict) -> str:
     html_parts = []
     # 外层容器
     html_parts.append(f"""
-    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;max-width:680px;margin:auto;background:#f1f5f9;padding:10px;color:#0f172a;line-height:1.5">
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;width:680px;max-width:100%;margin:auto;background:#f1f5f9;padding:10px;color:#0f172a;line-height:1.5">
     """)
 
     # ════════════════════════════════════════════════════════
@@ -1523,73 +1653,26 @@ def render_brief_html(brief: dict) -> str:
     html_parts.append(_m0_delta_html(brief))
 
     # ════════════════════════════════════════════════════════
-    # 模块 0.1：📋 数据状态（W-07 置顶；M0 定调之后、第一张数据卡之前）
+    # 模块 0.04：🔄 昨日复盘（2026-10-07）——T-1 机会 × T+1 结算，逐条打 ✓/✗
+    # 诚实性显性化：读者可直接核验「昨天说的今天对不对」。
     # ════════════════════════════════════════════════════════
-    html_parts.append(_data_status_table_html(ai_summary.get("data_quality") or []))
+    html_parts.append(_render_yesterday_review_html(brief.get("M0_yesterday_review") or {}))
 
-    # ════════════════════════════════════════════════════════
-    # 模块 0.2：📉 告警质量（昨日盘面告警胜率/赔率 → 阈值-行情失配预警）
-    # 数据来自 macro_market._load_alert_quality（只读 biz.scan_edge_daily 最新一行）。
-    # 缺数据时整块跳过，不影响其他模块。
-    # ════════════════════════════════════════════════════════
-    aq = brief.get("M0_alert_quality") or {}
-    if aq.get("win_1h") is not None:
-        aq_color, aq_label = "#16a34a", "正常"
-        if aq.get("severity") == "watch":
-            aq_color, aq_label = "#d97706", "观察"
-        elif aq.get("severity") == "high":
-            aq_color, aq_label = "#dc2626", "失配"
-        # P2-3（审计 2026-09-28）：术语段（S1/平衡线/PF/边缘桶）对普通读者可读性低 →
-        # 置顶一句白话结论，先给结论再看指标。
-        _aq_plain = {
-            "normal": "白话结论：近期盘面告警整体有效，阈值与行情匹配。",
-            "watch": "白话结论：近期盘面告警胜率偏低（观察级），阈值或需微调，暂不宜重仓跟随。",
-            "high": "白话结论：近期盘面告警胜率明显偏低、与行情失配，建议收紧阈值或暂停跟随。",
-        }.get(str(aq.get("severity") or "normal").lower(),
-              "白话结论：近期盘面告警状态未知，请谨慎参考。")
-        aq_n = str(aq["alerts_n"]) if aq.get("alerts_n") is not None else "-"
-        aq_win = f"{aq['win_1h'] * 100:.1f}%"
-        aq_be = f"{aq['be_1h'] * 100:.1f}%" if aq.get("be_1h") is not None else "-"
-        aq_odds = f"{aq['odds_1h']:.2f}" if aq.get("odds_1h") is not None else "-"
-        aq_pf = f"{aq['pf_1h']:.2f}" if aq.get("pf_1h") is not None else "-"
-        # 审计 2026-09-24 P2-B：当日 win_1h 与「近3日滚动」roll3_win_1h 是两个不同窗口的
-        # 同一指标，并排显示时读者会读成「胜率到底高还是低」（实测 59.1% vs 44.5%）。
-        # 现将两个窗口显式分列标注，并说明失配判定以滚动口径为准。
-        aq_rwin = f"{aq['roll3_win_1h'] * 100:.1f}%" if aq.get("roll3_win_1h") is not None else "-"
-        aq_rbe = f"{aq['roll3_be_1h'] * 100:.1f}%" if aq.get("roll3_be_1h") is not None else "-"
-        aq_rpf = f"{aq['roll3_pf_1h']:.2f}" if aq.get("roll3_pf_1h") is not None else "-"
-        # conclusion 由本系统生成，可能含 `<`（如 PF<1）；早报未引入 html.escape，这里做最小实体转义
-        # P1-5（审计 2026-10-01）：160 硬截断会切断括号（「胜率 21…」），改句子边界截断。
-        aq_note = (aq.get("conclusion") or "").strip().replace("<", "&lt;").replace(">", "&gt;")
-        if len(aq_note) > 220:
-            _cut = aq_note[:220]
-            _m = max(_cut.rfind("；"), _cut.rfind("。"), _cut.rfind("，"), _cut.rfind("、"), _cut.rfind(" "))
-            aq_note = (_cut[:_m + 1] if _m > 120 else _cut).rstrip() + "…"
-        html_parts.append(f"""
-          <div style="background:#fff;border-radius:10px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-left:4px solid {aq_color}">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-              <div style="font-size:13px;font-weight:700;color:#0f172a">📉 告警质量（阈值-行情失配预警）</div>
-              <div style="font-size:11px;font-weight:700;color:{aq_color}">{aq_label}</div>
-            </div>
-            <div style="font-size:11.5px;color:{aq_color};font-weight:600;margin-bottom:3px">{_aq_plain}</div>
-            <div style="font-size:12px;color:#475569;line-height:1.6">
-              {aq.get('report_date') or '-'} 告警 {aq_n} 条 · 当日 T+1h 胜率 {aq_win}（平衡线 {aq_be}）·
-              近3日滚动 {aq_rwin}（平衡线 {aq_rbe}，PF(滚动) {aq_rpf}）·
-              赔率(当日) {aq_odds} · PF(当日) {aq_pf} · 环境 {aq.get('regime_label') or '-'}
-            </div>
-            <div style="font-size:10.5px;color:#94a3b8;line-height:1.5;margin-top:4px">
-              说明：「当日」与「近3日滚动」是两个不同窗口的同一指标，失配判定以滚动口径为准；单日胜率波动大，不宜据此判断阈值优劣。滚动口径暂无独立赔率（PF(滚动)已含赔率信息）。
-            </div>
-            {f'<div style="font-size:11px;color:#94a3b8;line-height:1.5;margin-top:4px">{aq_note}</div>' if aq_note else ''}
-          </div>
-        """)
+    # ── 元信息（数据状态 / 告警质量 / 信号战绩）下沉到邮件底部「附录」─────────
+    # 2026-10-07：这三块是「关于数据的运维信息」，对普通读者是噪音，且打断
+    # 结论 → 数据的主线。统一收集后在页脚前以「附录 · 数据与方法」输出；
+    # 顶部 AI 定调卡仍保留「证据覆盖 N/M + 缺项」披露，读者无需翻到底部也能
+    # 知道哪些数据可信。
+    _meta_sections: list = []
 
-    # ════════════════════════════════════════════════════════
-    # 模块 0.3：📈 信号战绩（机会清单前向校验）——设计 04_架构与代码方案/早报板块顶层重设计_2026-10-06.md §2.4
-    # 数据来自生成层 macro_market._load_signal_track_record（只读 biz.opportunity_snapshot 已结算行）。
-    # 缺数据/无新键 → 返回空串，不影响其它模块。
-    # ════════════════════════════════════════════════════════
-    html_parts.append(_render_signal_track_html(brief.get("M0_signal_track") or {}))
+    # 模块 0.1：📋 数据状态（W-07 字段级可用率）
+    _meta_sections.append(_data_status_table_html(ai_summary.get("data_quality") or []))
+
+    # 模块 0.2：📉 告警质量（阈值-行情失配预警）——已抽取为独立函数
+    _meta_sections.append(_render_alert_quality_html(brief))
+
+    # 模块 0.3：📈 信号战绩（机会清单前向校验）
+    _meta_sections.append(_render_signal_track_html(brief.get("M0_signal_track") or {}))
 
     # ════════════════════════════════════════════════════════
     # 模块 0.5：🎯 AI 精选高亮信号（V2 六维评分 + Web 搜索补全）
@@ -1637,6 +1720,13 @@ def render_brief_html(brief: dict) -> str:
             ai = h.get("ai_analysis_v2") or {}
             overall_score = ai.get("overall_score") or base_score
             confidence = ai.get("confidence") or "MED"
+            # P1-评分语义（2026-10-07）：分数色块按档位表达质量（高=红热/中=黄/低=灰），
+            # 不再固定红色——否则 47 分与 66 分同色，读者无从判断好坏。
+            try:
+                _os_f = float(overall_score)
+                _overall_score_color = "#dc2626" if _os_f >= 70 else "#f59e0b" if _os_f >= 50 else "#94a3b8"
+            except (TypeError, ValueError):
+                _overall_score_color = "#94a3b8"
             reason = ai.get("reason_summary") or h.get("trigger_logic") or ""
             # U-A 可见性：AI reason_summary 会覆盖 trigger_logic 的连板注脚，且该聚合机会
             # 已被 M4-1 折叠出「精选机会」⇒ 连板信息在邮件里不可见。此处补显（去重、不改口径）。
@@ -1723,7 +1813,7 @@ def render_brief_html(brief: dict) -> str:
                   {gate_obs_html}
                 </div>
                 <div style="text-align:right;flex-shrink:0">
-                  <div style="font-size:18px;font-weight:800;color:#dc2626;line-height:1">{overall_score}</div>
+                  <div style="font-size:18px;font-weight:800;color:{_overall_score_color};line-height:1">{overall_score}</div>
                   <div style="font-size:9px;color:#94a3b8">综合评分（满分100）</div>
                 </div>
               </div>
@@ -1828,6 +1918,56 @@ def render_brief_html(brief: dict) -> str:
             f'⚠️ 无昨日基准（{_bd} 快照缺失），本期无变化对比</div>'
         )
 
+    # Outlook 兼容（2026-10-07）：大盘脉搏两处 `display:grid` 改 table（Word 引擎不支持 grid）
+    _pulse_btc_cell = (
+        '<div style="background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:8px;'
+        'padding:10px 6px;text-align:center;border:1px solid #e2e8f0">'
+        '<div style="font-size:10px;color:#64748b;margin-bottom:2px">BTC</div>'
+        f'<div style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:-0.3px">'
+        f'{_fmt_price_usd(btc_price) if btc_price else "N/A"}</div>'
+        f'<div style="font-size:10px;color:{btc_chg_color};margin-top:1px;font-weight:600">{btc_chg_str}</div>'
+        '</div>'
+    )
+    _pulse_eth_cell = (
+        '<div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;'
+        'border:1px solid #e2e8f0">'
+        '<div style="font-size:10px;color:#64748b;margin-bottom:2px">ETH</div>'
+        f'<div style="font-size:16px;font-weight:700;color:#0f172a">'
+        f'{_fmt_price_usd(eth_price) if eth_price else "N/A"}</div>'
+        f'<div style="font-size:10px;color:{eth_chg_color};margin-top:1px;font-weight:600">{eth_chg_str}</div>'
+        '</div>'
+    )
+    _pulse_mcap_cell = (
+        '<div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;'
+        'border:1px solid #e2e8f0">'
+        '<div style="font-size:10px;color:#64748b;margin-bottom:2px">总市值</div>'
+        f'<div style="font-size:15px;font-weight:700;color:#0f172a">{_fmt_mcap(total_mcap)}</div>'
+        f'<div style="font-size:10px;color:{mcap_chg_color};margin-top:1px;font-weight:600">{mcap_chg_str}</div>'
+        '</div>'
+    )
+    _pulse_fg_cell = (
+        '<div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;'
+        'border:1px solid #e2e8f0">'
+        '<div style="font-size:10px;color:#64748b;margin-bottom:2px">恐贪指数</div>'
+        f'<div style="font-size:17px;font-weight:700;color:{_fear_greed_color(fear_greed)}">'
+        f'{fear_greed if fear_greed is not None else "N/A"}</div>'
+        f'<div style="font-size:10px;color:#64748b;margin-top:1px">{_fg_label_html}</div>'
+        f'{_fg_note_html}'
+        '</div>'
+    )
+    _pulse_grid4 = _grid_table([_pulse_btc_cell, _pulse_eth_cell, _pulse_mcap_cell, _pulse_fg_cell])
+    _pulse_grid3 = _grid_table([
+        '<div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">'
+        '<div style="font-size:9.5px;color:#94a3b8">24h 成交量</div>'
+        f'<div style="font-size:13px;font-weight:700;color:#334155">{vol_str}</div></div>',
+        '<div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">'
+        '<div style="font-size:9.5px;color:#94a3b8">BTC 周期</div>'
+        f'<div style="font-size:13px;font-weight:700;color:#334155">{phase}</div></div>',
+        '<div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">'
+        '<div style="font-size:9.5px;color:#94a3b8">BTC 7日波动率（日化）</div>'
+        f'<div style="font-size:13px;font-weight:700;color:#334155">{btc_vol_str}</div></div>',
+    ])
+
     html_parts.append(f"""
       <!-- 模块1：大盘脉搏 -->
       <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
@@ -1836,50 +1976,11 @@ def render_brief_html(brief: dict) -> str:
           <div style="font-size:10px;color:#94a3b8">{today}{_pulse_as_of_html}</div>
         </div>
 
-        <!-- 两排指标 -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px">
-          <!-- BTC -->
-          <div style="background:linear-gradient(135deg,#f8fafc,#f1f5f9);border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
-            <div style="font-size:10px;color:#64748b;margin-bottom:2px">BTC</div>
-            <div style="font-size:16px;font-weight:700;color:#0f172a;letter-spacing:-0.3px">{_fmt_price_usd(btc_price) if btc_price else 'N/A'}</div>
-            <div style="font-size:10px;color:{btc_chg_color};margin-top:1px;font-weight:600">{btc_chg_str}</div>
-          </div>
-          <!-- ETH -->
-          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
-            <div style="font-size:10px;color:#64748b;margin-bottom:2px">ETH</div>
-            <div style="font-size:16px;font-weight:700;color:#0f172a">{_fmt_price_usd(eth_price) if eth_price else 'N/A'}</div>
-            <div style="font-size:10px;color:{eth_chg_color};margin-top:1px;font-weight:600">{eth_chg_str}</div>
-          </div>
-          <!-- 总市值 -->
-          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
-            <div style="font-size:10px;color:#64748b;margin-bottom:2px">总市值</div>
-            <div style="font-size:15px;font-weight:700;color:#0f172a">{_fmt_mcap(total_mcap)}</div>
-            <div style="font-size:10px;color:{mcap_chg_color};margin-top:1px;font-weight:600">{mcap_chg_str}</div>
-          </div>
-          <!-- 恐贪 -->
-          <div style="background:#f8fafc;border-radius:8px;padding:10px 6px;text-align:center;border:1px solid #e2e8f0">
-            <div style="font-size:10px;color:#64748b;margin-bottom:2px">恐贪指数</div>
-            <div style="font-size:17px;font-weight:700;color:{_fear_greed_color(fear_greed)}">{fear_greed if fear_greed is not None else 'N/A'}</div>
-            <div style="font-size:10px;color:#64748b;margin-top:1px">{_fg_label_html}</div>
-            {_fg_note_html}
-          </div>
-        </div>
+        <!-- 两排指标（Outlook 兼容：table 布局） -->
+        {_pulse_grid4}
 
         <!-- 底部附加指标 -->
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
-          <div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">
-            <div style="font-size:9.5px;color:#94a3b8">24h 成交量</div>
-            <div style="font-size:13px;font-weight:700;color:#334155">{vol_str}</div>
-          </div>
-          <div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">
-            <div style="font-size:9.5px;color:#94a3b8">BTC 周期</div>
-            <div style="font-size:13px;font-weight:700;color:#334155">{phase}</div>
-          </div>
-          <div style="text-align:center;background:#f8fafc;border-radius:6px;padding:6px 4px">
-            <div style="font-size:9.5px;color:#94a3b8">BTC 7日波动率（日化）</div>
-            <div style="font-size:13px;font-weight:700;color:#334155">{btc_vol_str}</div>
-          </div>
-        </div>
+        {_pulse_grid3}
 
         <!-- P0-D：24h 爆仓概况（无数据时 liq_row 为空串，整行不出现） -->
         {liq_row}
@@ -2109,24 +2210,24 @@ def render_brief_html(brief: dict) -> str:
         _prev_day_line = (f"上一交易日({_etf_md}) 净流入：BTC {_l_btc_s} · "
                           f"ETH {_l_eth_s} · 其他 {_l_oth_s} · 合计 {_l_total_s}")
 
+        # Outlook 兼容（2026-10-07）：ETF 三列 `display:grid` → table
+        _etf_grid = _grid_table([
+            ('<div style="text-align:center">'
+             '<div style="font-size:10px;color:#64748b">BTC ETF</div>'
+             f'<div style="font-size:14px;font-weight:700;color:{btc_net_color}">{btc_net_str}</div></div>'),
+            ('<div style="text-align:center">'
+             '<div style="font-size:10px;color:#64748b">ETH ETF</div>'
+             f'<div style="font-size:14px;font-weight:700;color:{eth_net_color}">{eth_net_str}</div></div>'),
+            ('<div style="text-align:center">'
+             '<div style="font-size:10px;color:#64748b">全部 ETF 合计</div>'
+             f'<div style="font-size:14px;font-weight:700;color:{total_net_color}">{total_net_str}</div></div>'),
+        ])
+
         html_parts.append(f"""
           <!-- ETF 子模块 -->
           <div style="background:linear-gradient(135deg,#f0f9ff,#e0f2fe);border-radius:8px;padding:10px 12px;margin-bottom:8px">
             <div style="font-size:11.5px;font-weight:700;color:#0369a1;margin-bottom:6px">📈 ETF 资金流（近 7 日累计 · 上一交易日({_etf_md}){f'，滞后 {_etf_lag} 天' if (_etf_lag is not None and _etf_lag > 0) else ''}）</div>
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
-              <div style="text-align:center">
-                <div style="font-size:10px;color:#64748b">BTC ETF</div>
-                <div style="font-size:14px;font-weight:700;color:{btc_net_color}">{btc_net_str}</div>
-              </div>
-              <div style="text-align:center">
-                <div style="font-size:10px;color:#64748b">ETH ETF</div>
-                <div style="font-size:14px;font-weight:700;color:{eth_net_color}">{eth_net_str}</div>
-              </div>
-              <div style="text-align:center">
-                <div style="font-size:10px;color:#64748b">全部 ETF 合计</div>
-                <div style="font-size:14px;font-weight:700;color:{total_net_color}">{total_net_str}</div>
-              </div>
-            </div>
+            {_etf_grid}
             <div style="font-size:9.5px;color:#0369a1;margin-top:6px;line-height:1.5;font-weight:600">{_prev_day_line}</div>
             <div style="font-size:9.5px;color:#64748b;margin-top:3px;line-height:1.5">{breakdown}</div>
           </div>
@@ -2605,6 +2706,10 @@ def render_brief_html(brief: dict) -> str:
     # P1-13：标题旁追加背书计数（有回测背书 X/Y）
     if _n_opp_total:
         section_title = f"{section_title}（{ _n_opp_total} 条，其中有回测背书 {_n_backed} 条）"
+    # 失配期（2026-10-07）：标题注明本区方向已与 AI 精选一致降级为「观察」
+    _opp_section_note = ("按可验证性（是否被回测）分组 · 组内按证据等级与分数排序 · 仅供参考"
+                         + ('<br><span style="color:#b45309">失配期 · 下方买卖方向已与「AI 精选高亮」'
+                            '一致降级为观察级，不作为开仓依据</span>' if _sig_gate_on else ""))
 
     html_parts.append(f"""
       <!-- 模块6：机会清单 -->
@@ -2612,7 +2717,7 @@ def render_brief_html(brief: dict) -> str:
         <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px">
           {section_title}
         </div>
-        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">按可验证性（是否被回测）分组 · 组内按证据等级与分数排序 · 仅供参考</div>
+        <div style="font-size:10.5px;color:#94a3b8;margin-bottom:8px">{_opp_section_note}</div>
         {_high_supply_note}
     """)
 
@@ -2684,6 +2789,15 @@ def render_brief_html(brief: dict) -> str:
                 dir_color = "#dc2626" if direction == "long" else "#16a34a" if direction == "short" else "#64748b"
                 dir_cn = "看多" if direction == "long" else "看空" if direction == "short" else direction
 
+            # P1-失配期（2026-10-07）：信号体系失效时，机会清单的买卖方向与 AI 精选
+            # 区一致降级为「观望」——避免「顶部无操作、下方 ▲ 看多 HIGH」的自相矛盾。
+            # 估值类（止盈提示）不受影响（它是持仓动作，不是方向信号）。
+            _opp_gate_badge = ""
+            if _sig_gate_on and not _is_val_hint:
+                dir_icon, dir_color, dir_cn = "◆", "#94a3b8", "观望"
+                _opp_gate_badge = ('<span style="background:#fef2f2;color:#b91c1c;font-size:9px;'
+                                   'padding:1px 5px;border-radius:3px;font-weight:600">失配期 · 观察</span>')
+
             _ah = str(opp.get("action_hint") or "").strip()
             body_text = trigger
             if _is_hold_hint and _ah:
@@ -2733,6 +2847,7 @@ def render_brief_html(brief: dict) -> str:
                 <div style="display:flex;align-items:center;gap:5px">
                   <span style="background:{badge_bg};color:{badge_color};font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700">{tier}</span>
                   {gate_badge}
+                  {_opp_gate_badge}
                   <span style="font-size:11px;color:#64748b;font-weight:600" title="综合评分（conviction_score），与模块0.01的决策信号分不同口径">综合评分 {score_str}分</span>
                 </div>
               </div>
@@ -2864,6 +2979,21 @@ def render_brief_html(brief: dict) -> str:
               <div style="color:#475569;margin-top:2px">{content}</div>
             </div>
             """)
+        html_parts.append("</div>")
+
+    # 元信息下沉（2026-10-07）：数据状态 / 告警质量 / 信号战绩 → 底部「附录 · 数据与方法」
+    _meta_blocks = [m for m in _meta_sections if m]
+    if _meta_blocks:
+        html_parts.append("""
+          <!-- 附录：数据与方法（元信息下沉，2026-10-07）-->
+          <div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05);border-top:3px solid #e2e8f0">
+            <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:6px">📋 附录 · 数据与方法</div>
+            <div style="font-size:10.5px;color:#94a3b8;line-height:1.6;margin-bottom:8px">
+              以下为数据可用性、告警质量与本系统信号战绩的元信息，供核验可复算；不影响上方结论阅读。
+            </div>
+        """)
+        for _mb in _meta_blocks:
+            html_parts.append(_mb)
         html_parts.append("</div>")
 
     # 降级标注（分层：核心红/辅助黄/增强隐藏）

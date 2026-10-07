@@ -8551,6 +8551,47 @@ def _fetch_global_cex_netflow_7d() -> float | None:
     return None
 
 
+# ── 早报顶部速读文案的截断治理（2026-10-07）────────────────────────────
+# 旧实现 watchlist 用 `str(x)[:30]` 裸切片：汉字被切成半截（「市值」→「市」、
+# 「观察是否补涨或」），且括号不闭合，直接出现在邮件顶部「今日 3 句话 /
+# 重点关注」里，观感像 AI 没写完。改为按句读边界截断 + 闭合括号 + 省略号。
+_STRONG_BREAKS = "。；！？）】"
+_WEAK_BREAKS = "，、：·"
+
+
+def _clip_watch_item(s, n: int = 60) -> str:
+    """按句读边界截断 watchlist 单项（宁完整不破碎）。
+
+    策略（按优先级）：
+    1. 长度 ≤ n → 原样返回；
+    2. [20, n] 内找最后一个「强断点」（。；！？）】）→ 在其后截断；
+    3. 否则 [20, n] 内最后一个「弱断点」（，、：·）→ 截断后剥掉尾随弱断点；
+    4. 否则前向找下一个强断点（最多再延长 60 字）→ 避免半截词；
+    5. 截断段左括号未闭合 → 补右括号；一律以「…」收尾。
+    """
+    s = "" if s is None else str(s).strip()
+    if len(s) <= n:
+        return s
+    cut = n
+    for i in range(n - 1, max(19, n - 41), -1):
+        if s[i] in _STRONG_BREAKS:
+            cut = i + 1
+            break
+    else:
+        for i in range(n - 1, max(19, n - 41), -1):
+            if s[i] in _WEAK_BREAKS:
+                cut = i + 1
+                break
+        else:
+            nxt = next((i for i in range(n, min(len(s), n + 60))
+                        if s[i] in _STRONG_BREAKS), None)
+            cut = (nxt + 1) if nxt is not None else n
+    seg = s[:cut].rstrip("，、：· ")
+    if seg.count("（") > seg.count("）"):
+        seg += "）"
+    return seg + "…"
+
+
 def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) -> dict:
     """用 LLM 生成早报今日定调 + 交易方向建议。
 
@@ -8930,7 +8971,7 @@ def generate_morning_brief_ai_summary(brief: dict, payload: dict | None = None) 
             "sector_rotation": str(data.get("sector_rotation", ""))[:200],
             "trade_suggestions": trade_suggestions,
             "risk_warnings": risk_warnings,
-            "watchlist": [str(x)[:30] for x in (data.get("watchlist") or [])][:8],
+            "watchlist": [_clip_watch_item(x) for x in (data.get("watchlist") or [])][:8],
             # 默认无操作：trade_suggestions 可为空数组，空时必须给 no_trade_reason（渲染层据此展示「⚪ 今日无操作」）
             "no_trade_reason": no_trade_reason,
             # 各维度可用性（empty/error=无数据），供渲染层标注证据覆盖数与依据不足
@@ -9446,6 +9487,70 @@ def _load_signal_track_record() -> dict:
         return {"error": str(e)}
 
 
+# ── 昨日复盘（2026-10-07）：T-1 机会 × T+1 结算，逐条打 ✓/✗ ────────────────
+# 与「信号战绩」的差异：战绩是全体已结算行的滚动统计；本模块只看**昨日**那批机会
+# 今天对不对（诚实性显性化，读者可逐条核验）。outcome_1d 方向对齐：
+#   long 取 +、short 取 −（与 _aggregate_signal_track 同口径）。
+# 无 T-1 行 / 未结算 → items 为空或标 pending，渲染层降级不虚报。
+def _load_yesterday_review(days_back: int = 1) -> dict:
+    """昨日机会复盘：读 T-1 机会清单及其 T+1 结算结果。
+
+    返回 {date, items:[{target, direction, score, status, ret}]}；
+    status ∈ hit/miss/flat/pending；异常 → {error}。
+    """
+    try:
+        from datetime import date, timedelta
+
+        import psycopg.rows
+
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        y_date = (date.today() - timedelta(days=days_back)).isoformat()
+        rows: list = []
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT target, direction, conviction_score, outcome_1d
+                      FROM biz.opportunity_snapshot
+                     WHERE snapshot_date = %s
+                       AND direction IN ('long', 'short')
+                     ORDER BY conviction_score DESC NULLS LAST
+                    """,
+                    (y_date,),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+        items = []
+        for r in rows:
+            d = str(r.get("direction") or "").lower()
+            if d not in ("long", "short"):
+                continue
+            ret = r.get("outcome_1d")
+            item = {
+                "target": str(r.get("target") or "?"),
+                "direction": d,
+                "score": r.get("conviction_score"),
+            }
+            if ret is None:
+                item["status"] = "pending"
+            else:
+                try:
+                    aligned = float(ret) * (1 if d == "long" else -1)
+                    item["status"] = ("hit" if aligned > 0
+                                      else "miss" if aligned < 0 else "flat")
+                    item["ret"] = round(aligned * 100, 2)
+                    item["raw_ret"] = round(float(ret) * 100, 2)
+                except (TypeError, ValueError):
+                    item["status"] = "pending"
+            items.append(item)
+        return {"date": y_date, "items": items[:8]}
+    except Exception as e:
+        print(f"[morning_brief] yesterday review fetch failed: {e}")
+        return {"error": str(e)}
+
+
 # ── M4-3 同赛道唯一事实源（方案_大盘早报_投资指导意义重构_2026-09-27 §3.3 M4-3） ──
 # 「赛道轮动」卡读 biz.sector_flow_daily（日频 ETL），而「精选机会」卡里的叙事机会
 # （signal_type="narrative"）读的是 CMC categories 现算的市值涨幅 → 同一赛道同一天出现
@@ -9685,6 +9790,8 @@ def generate_morning_brief(today: dict, yesterday: dict | None, use_ai: bool = T
         "M0_alert_quality": _load_alert_quality(),
         # 信号战绩（机会清单前向校验）——§2.4「最该加」；生成期即聚合，渲染层只读展示
         "M0_signal_track": _load_signal_track_record(),
+        # 昨日复盘（2026-10-07）：T-1 机会 × T+1 结算，逐条打 ✓/✗
+        "M0_yesterday_review": _load_yesterday_review(),
         "M1_cycle": cycle,
         "M2_flow": _build_flow(today, diff, stab),
         "M2_institutional": today.get("institutional_mvrv") or {},

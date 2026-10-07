@@ -112,6 +112,8 @@ from catalyst.notifier import (
     send_channel_silence_alert,
 )
 from catalyst.catalyst_trace import trace_step, reset as trace_reset, summary as trace_summary, set_verbose as trace_set_verbose
+# 事件类型默认方向（单真源，与 collect_catalyst_outcome 同表，含 security/unlock/mint）
+from collect_catalyst_outcome import EVENT_TYPE_DIRECTION  # noqa: E402
 
 
 def load_config() -> dict:
@@ -529,7 +531,8 @@ def run_resonance(conn, scorer: ResonanceScorer,
                         ac.title,
                         a.canonical_symbol AS symbol,
                         cal.asset_id,
-                        ci.impact_direction
+                        ci.impact_direction,
+                        COALESCE(ac.ai_event_type, ac.rule_event_type, 'other') AS event_type
         FROM biz.asset_catalyst ac
         JOIN biz.catalyst_asset_link cal ON ac.catalyst_id = cal.catalyst_id
         JOIN biz.catalyst_grade cg ON ac.catalyst_id = cg.catalyst_id
@@ -562,7 +565,10 @@ def run_resonance(conn, scorer: ResonanceScorer,
     for row in rows:
         asset_id = row["asset_id"]
         catalyst_id_val = row["catalyst_id"]
-        impact_dir = row["impact_direction"] or "bullish"
+        # 方向：优先 catalyst_impact 的 impact_direction；缺失时回退事件类型默认方向
+        # （2026-10-07 修复：原 fallback 恒为 bullish，导致 security/unlock 等利空事件
+        #  在下跌时被误判 divergent；改走事件类型默认方向，未知类型兜底 neutral）
+        impact_dir = row["impact_direction"] or EVENT_TYPE_DIRECTION.get(row["event_type"]) or "neutral"
 
         # 获取资产收益 + 量能
         asset_snap = get_cmc_snapshot_ret(conn, asset_id)

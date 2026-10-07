@@ -6,14 +6,13 @@
   - 实盘口径：24h 涨幅用 ticker/24hr 滚动口径（日收盘口径的实盘近似），文档已标注。
 
 信号（scan_gainer_signal）：
-  SHORT_LONG  短线做多  chg24h≥50%   + 放量(24h量≥2×7日均)   窗口 T+24h LONG
-  MID_LONG    次档做多  chg24h 20~50% + 放量                  窗口 T+24h LONG
-  TRAP_SHORT  诱多做空  chg24h<5%     + 放量（未上榜却放量）    窗口 T+24h SHORT
-  EXT_SHORT   极端做空  chg24h≥75%    + 低量(≤1×7日均,静默上涨) 窗口 T+7d  SHORT
+  SHORT_LONG  短线做多  chg24h≥50%    + 放量(24h量≥2×7日日均量) 窗口 T+24h LONG
+  MID_LONG    次档做多  chg24h 20~50% + 放量                    窗口 T+24h LONG
+  TRAP_SHORT  诱多做空  chg24h<5%     + 放量（未上榜却放量）      窗口 T+24h SHORT
 
 说明：
-  - 「涨异动(放量大阳) ∩ 极端涨幅」做空 7 日为负期望（回测 -4.14%），故 EXT_SHORT 要求**低量静默**
-    而非放量；放量极端涨幅反而应做多（动量延续）。
+  - EXT_SHORT（极端涨幅 ≥75% + 低量静默做空）经量比口径修复后回测为 0 事件、信号不成立，
+    已于 2026-10-07 从本扫描器移除（详见设计方案 §10.3.3）。
   - 冷却：同 symbol 同信号类型最近 12h 已出信号则跳过。
   - 默认 dry-run（只打印不落库）；--apply 才落库。
 
@@ -43,12 +42,9 @@ from crypto_research.db.conn import get_connection  # noqa: E402
 
 GAIN_SHORT_LONG = 50.0        # 短线做多：24h 涨幅 ≥50%
 GAIN_MID_LONG_LO, GAIN_MID_LONG_HI = 20.0, 50.0
-GAIN_EXT_SHORT = 75.0         # 极端做空：≥75%
 GAIN_TRAP_SHORT = 5.0         # 诱多做空：<5%
-VOL_RATIO_LONG = 2.0          # 放量（做多确认）≥2× 7日均量
-VOL_RATIO_SHORT_MAX = 1.0     # 静默（做空确认）≤1× 7日均量
+VOL_RATIO_LONG = 2.0          # 放量（做多确认）≥2× 7日日均量
 MIN_VOL = 20_000_000          # 最小 24h 成交额（USDT）
-MIN_FUND_NEG = -0.0002        # 极端做空可选：费率不过分负（可调）
 COOLDOWN_H = 12               # 同币同类型冷却（小时）
 
 # 信号类型 → (窗口, 方向, 涨幅判定)
@@ -59,8 +55,6 @@ SIGNAL_DEFS = [
      lambda c: GAIN_MID_LONG_LO <= c < GAIN_MID_LONG_HI, lambda vr: vr >= VOL_RATIO_LONG),
     ("TRAP_SHORT", "T24H", "SHORT",
      lambda c: c < GAIN_TRAP_SHORT, lambda vr: vr >= VOL_RATIO_LONG),
-    ("EXT_SHORT", "T7D", "SHORT",
-     lambda c: c >= GAIN_EXT_SHORT, lambda vr: vr <= VOL_RATIO_SHORT_MAX),
 ]
 
 
@@ -108,8 +102,7 @@ def build_gainer_alert_html(hits: list[dict]) -> str:
         <b>信号说明：</b><br>
         • SHORT_LONG：短线做多（≥50%涨幅+放量）→ T+24h<br>
         • MID_LONG：次档做多（20~50%涨幅+放量）→ T+24h<br>
-        • TRAP_SHORT：诱多做空（<5%涨幅+放量）→ T+24h<br>
-        • EXT_SHORT：极端做空（≥75%涨幅+静默）→ T+7d
+        • TRAP_SHORT：诱多做空（<5%涨幅+放量）→ T+24h
       </p>
       <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约</p>
     </div>
@@ -137,7 +130,9 @@ def recent_signals(conn, hours: float) -> set[tuple[str, str]]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT symbol, signal_type FROM biz.scan_gainer_signal "
-            "WHERE scan_ts >= NOW() - make_interval(hours => %s)",
+            # 用乘法而非 make_interval(hours => %s)：后者只接受 int，CLI 传 float 会报
+            # "function make_interval(hours => double precision) does not exist"。
+            "WHERE scan_ts >= NOW() - (%s * INTERVAL '1 hour')",
             (hours,),
         )
         return {(r[0], r[1]) for r in cur.fetchall()}

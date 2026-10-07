@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""交易系统参数回测：持仓时间 × 固定止盈 × 固定止损 × 杠杆（2023~2026，529 合约 1h）。
+"""交易系统参数回测：持仓时间 × 固定止盈 × 固定止损（2023~2026，529 合约 1h）。
 
-对 v2 方案的每个信号集，网格搜索最优（持仓时间 N、止盈 TP、止损 SL、杠杆 Lev）：
+对 v2 方案的每个信号集，网格搜索最优（持仓时间 N、止盈 TP、止损 SL）：
   - 持仓时间 N ∈ {6,12,24,36,48,72,96,120,144,168} 小时（T+6h ~ T+7d）
   - 止盈 TP ∈ {0, 5%,10%,20%,30%,50%}（0=不设）
   - 止损 SL ∈ {0, 2%,3%,5%,8%,10%}（0=不设）
-  - 杠杆 Lev ∈ {1x,3x,5x,8x,10x}（净值模拟，含爆仓：单笔 -100%）
+  - 产出为 **1x 毛收益**（不扣成本、不乘杠杆）；含 0.2% 成本 × 杠杆 1/3/5x 的细分档见
+    §10.3.2（`backtest_bucket_params.py`）
 
 信号集（事件 = 放量大阳 bar：1h 单根≥3% & 量比≥2×；chg24=事件时点滚动 24h 涨幅，对齐线上 ticker/24hr）：
   A 短线做多   chg24≥50%
@@ -17,7 +18,7 @@
   先触止盈 → +TP；先触止损 → -SL；同 bar 同时触 → 保守算止损；持有 N 小时未触 → 按第 N 根收盘平仓。
 
 服务端一次性计算每事件的「首次触达序号 + 各时点收盘」，本地 numpy 向量化跑网格。
-用法：python bin/backtest_trade_params.py [--signal A] [--leverage 1 3 5 8 10] [--limit 200000]
+用法：python bin/backtest_trade_params.py [--signal A] [--limit 200000]
 """
 from __future__ import annotations
 
@@ -48,8 +49,6 @@ N_LIST = [6, 12, 24, 36, 48, 72, 96, 120, 144, 168]
 TP_LIST = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50]
 SL_LIST = [0.0, 0.03, 0.05, 0.08, 0.10]      # 止损档（10% 已满足 -15% 风险约束）
 TR_LIST = [0.03, 0.05, 0.08, 0.10, 0.15]            # 跟踪止盈（峰值回撤），仅做多
-LEV_LIST = [1, 3, 5, 8, 10]
-POS_PCT = 0.30          # 净值模拟：单笔投入占权益比例（100U 实验 ≈ 30U/笔）
 MIN_N = 30
 WORST_LIMIT = -0.15     # 选择约束：单笔最差收益 ≥ -15%（防黑天鹅）
 
@@ -299,7 +298,7 @@ def _returns_vec(arr, direction, n, tp, sl, tr):
     return ret
 
 
-def grid_signal(arr, direction, lev_list=LEV_LIST):
+def grid_signal(arr, direction):
     """对一组事件做网格，返回统计列表（固定/跟踪两种出场模式，单笔统计 + 风险约束）。"""
     results = []
     for n in N_LIST:
@@ -336,7 +335,6 @@ def grid_signal(arr, direction, lev_list=LEV_LIST):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--signal", default="ALL", choices=["ALL", *SIGNALS])
-    ap.add_argument("--leverage", nargs="+", type=int, default=LEV_LIST)
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
@@ -358,7 +356,7 @@ def main() -> int:
             if len(sub) < MIN_N:
                 continue
             arr = _vec_rows(sub)
-            grid = grid_signal(arr, direction, args.leverage)
+            grid = grid_signal(arr, direction)
             # 选择标准：单笔最差 ≥ WORST_LIMIT（风险约束）→ PF 降序 → 胜率降序
             safe = [g for g in grid if g["worst"] >= WORST_LIMIT]
             pool = safe if len(safe) >= 3 else grid

@@ -441,6 +441,36 @@ def fetch_by_id(conn, catalyst_id: int) -> dict | None:
     return d
 
 
+def fetch_by_ids(conn, ids: list[int]) -> list[dict]:
+    """按 ID 列表批量获取（顺序保持传入顺序）。"""
+    if not ids:
+        return []
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT catalyst_id, source_code, source_article_id, source_article_code,
+                   title, body_text, body_html, event_category, related_pairs,
+                   published_at, source_url
+            FROM biz.asset_catalyst
+            WHERE catalyst_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        by_id = {r["catalyst_id"]: dict(r) for r in cur.fetchall()}
+    out = []
+    for cid in ids:
+        d = by_id.get(cid)
+        if d is None:
+            continue
+        if isinstance(d["related_pairs"], str):
+            try:
+                d["related_pairs"] = json.loads(d["related_pairs"])
+            except Exception:
+                d["related_pairs"] = []
+        out.append(d)
+    return out
+
+
 def update_result(conn, catalyst_id: int, ai_data: dict) -> None:
     """更新 AI 处理结果到数据库。"""
     with conn.cursor() as cur:
@@ -471,6 +501,8 @@ def main():
     parser.add_argument("--max-items", type=int, default=0, help="最多处理条数（0=全部）")
     parser.add_argument("--catalyst-id", type=int, help="只处理指定 catalyst_id")
     parser.add_argument("--force", action="store_true", help="忽略 ai_processed 状态强制重跑")
+    parser.add_argument("--catalyst-ids", type=str, default="",
+                        help="定向重跑：逗号分隔的 catalyst_id 列表（仅处理这些，省 token）")
     parser.add_argument("--sleep", type=float, default=0.5, help="每条之间的间隔秒数")
     parser.add_argument("--pack-size", type=int, default=20,
                         help="批量打包大小（0=逐条处理，>0=每 pack_size 条一次 LLM 请求，默认 20）")
@@ -497,6 +529,74 @@ def main():
                   f"sentiment={result['ai_sentiment']}, "
                   f"summary={result['ai_summary'][:50]}")
             return 0
+
+        # 定向重跑模式：只处理传入的 catalyst_id 列表（省 token，2026-10-07 分类审计新增）
+        if args.catalyst_ids:
+            ids = [int(x) for x in args.catalyst_ids.split(",") if x.strip().isdigit()]
+            if not ids:
+                print("错误：--catalyst-ids 无有效 id")
+                return 1
+            pending = fetch_by_ids(conn, ids)
+            print(f"定向重跑 {len(pending)} 条（传入 {len(ids)} 个 id）")
+            if not pending:
+                print("没有找到对应的催化剂，完成。")
+                return 0
+            processed = 0
+            failed = 0
+            use_pack = args.pack_size > 0
+            if use_pack:
+                for pack_start in range(0, len(pending), args.pack_size):
+                    pack = pending[pack_start:pack_start + args.pack_size]
+                    print(f"[pack {pack_start // args.pack_size + 1}/"
+                          f"{(len(pending) + args.pack_size - 1) // args.pack_size}] 处理 {len(pack)} 条")
+                    try:
+                        pack_results = process_pack(llm, pack)
+                        for cat in pack:
+                            cid = cat["catalyst_id"]
+                            if cid in pack_results:
+                                update_result(conn, cid, pack_results[cid])
+                                processed += 1
+                                print(f"  ✓ catalyst_id={cid}: "
+                                      f"{pack_results[cid]['ai_event_type']}, "
+                                      f"{pack_results[cid]['ai_sentiment']}")
+                            else:
+                                print(f"  ⚠ catalyst_id={cid} 未在 pack 结果中，降级单条")
+                                try:
+                                    result = process_one(llm, cat)
+                                    update_result(conn, cid, result)
+                                    processed += 1
+                                    print(f"  ✓ (降级) catalyst_id={cid}: "
+                                          f"{result['ai_event_type']}")
+                                except Exception as e:
+                                    failed += 1
+                                    print(f"  ✗ (降级) catalyst_id={cid} 失败: {e}")
+                    except Exception as e:
+                        print(f"  ✗ pack 解析失败: {e}，降级逐条")
+                        for cat in pack:
+                            cid = cat["catalyst_id"]
+                            try:
+                                result = process_one(llm, cat)
+                                update_result(conn, cid, result)
+                                processed += 1
+                            except Exception as e2:
+                                failed += 1
+                                print(f"  ✗ catalyst_id={cid} 失败: {e2}")
+                    time.sleep(args.sleep)
+            else:
+                for cat in pending:
+                    cid = cat["catalyst_id"]
+                    try:
+                        result = process_one(llm, cat)
+                        update_result(conn, cid, result)
+                        processed += 1
+                        print(f"  ✓ catalyst_id={cid}: {result['ai_event_type']}")
+                    except Exception as e:
+                        failed += 1
+                        print(f"  ✗ catalyst_id={cid} 失败: {e}")
+                    time.sleep(args.sleep)
+            total = processed + failed
+            print(f"\n完成：成功 {processed} 条，失败 {failed} 条，共 {total} 条")
+            return 0 if (total == 0 or processed / total >= 0.9) else 1
 
         # 批量模式
         processed = 0

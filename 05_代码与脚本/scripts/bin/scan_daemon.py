@@ -5441,8 +5441,10 @@ LIQ_RETENTION_DAYS = 30   # biz.liquidation_snapshot 保留天数（约 15 万�
 # 审计 §12.1-1：原先只清 liquidation_snapshot，oi_cvd_snapshot / asset_klines 只增不减。
 # oi_cvd_snapshot 约 15 万行/天（288 桶 × 528 币），90 天 ≈ 1350 万行。
 OI_CVD_RETENTION_DAYS = 90
-# asset_klines 按周期分档：5m 量最大、只留够回测的窗口；1h 便宜且是最长参考周期，留 2 年。
-KLINE_RETENTION_DAYS = {"5m": 90, "15m": 180, "1h": 730}
+# asset_klines 按周期分档：5m 量最大、只留够回测的窗口。
+# 1h **不再设保留期**（不入档 = 永不清理）：它是回测的最长参考周期，原先的 730 天
+# 会把「全周期 2023~2026」回测窗口裁到近 2 年（详见设计方案 §10.5.5）。
+KLINE_RETENTION_DAYS = {"5m": 90, "15m": 180}
 
 
 def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
@@ -5452,7 +5454,7 @@ def task_prune_scan_data(retention_days: int = LIQ_RETENTION_DAYS) -> dict:
 
       - `biz.liquidation_snapshot`：`LIQ_RETENTION_DAYS`（30 天，稳态约 450 万行）
       - `biz.oi_cvd_snapshot`：`OI_CVD_RETENTION_DAYS`（90 天）
-      - `biz.asset_klines`：按周期分档 `KLINE_RETENTION_DAYS`（5m/15m/1h）
+      - `biz.asset_klines`：按周期分档 `KLINE_RETENTION_DAYS`（5m/15m；1h 不清理）
 
     两条 DELETE 都命中现有索引（`idx_oi_cvd_snapshot_ts`、
     `idx_asset_klines_interval_ot`），不会退化成全表扫描。

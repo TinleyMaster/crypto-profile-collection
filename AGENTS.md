@@ -2991,3 +2991,18 @@ null/negative**（A3 阈值 sweep 样本外反向 / `regime_label` `descriptive_
 - **实拍（真库 demo dry-run 2026-10-06）**：图例 1、常规 MED 注记 8、降档说明 4 / missing_calibration 3 / 单源 1，无 `**` 护栏违规；10-06 池内旧卡均走无数字回退（下次 build 起带 high_threshold）。
 - **探针**：`workbench/test_highlight_logic_fix_20261006.py`（29 断言：`_list_partial_note` 5 + 源码守卫 3 + `_push` MED 常驻说明 6 含 calibrated_ok 不误伤 + `select_highlight_signals` 单源 MED 常驻 4 含双源不误伤 + 源码守卫 3 + 档位透明 7 + 合并保留 high_threshold 1）。回归：highlight/calibration/macro 12 套全绿；`py_compile` 3/3。
 - **留档（未做，需产品拍板/数据基建）**：① §2.1 高亮主通道 A/B/C（已校准+正期望+多源≥2）硬准入门槛——现行为「全 MED 照进、封顶保留」，收紧=整个池构成变化，属产品决策；② 量价类类型级回测回流 `signal_type_calibration`（OBI 因子级已有量比结果但未回流）；③ 窗口型 24h 暴涨「在池」状态机（`in_pool`=池内存在且非 new/upgrade，窗口型持续在池属设计，未改）；④ 叙事板块「不进主通道」排除（产品口径）。
+
+### arbitrum 链上快照断更 3 天：`base,arb` 合并任务解耦（2026-10-07，本次提交）
+
+来源：链上快照滞后告警「arbitrum 最新 2026-10-04（距今 3 天），其余链正常」。**只读 prod 排查（`sys.task` / `sys.task_log` / `biz.onchain_holder_snapshot`）**：
+
+- **现象**：`arbitrum` 逐日 `MAX(snapshot_date)=2026-10-04`；`base` 仍为 `2026-10-06`。两条链共用任务 `chain_holder_snapshot_base_arb`（`--chains base,arb --limit 800`）。
+- **根因（物证级）**：`phase_chain_holder_batch.main()` 按 `--chains` 顺序**串行**处理；base 在前、arb 在后。该任务 `--limit 800` 是**每链**上限，而 base 待采 **1328**（`last_dt ASC NULLS FIRST` 旋转，每天都有 ~800 可采）⇒ base **恒先跑满自己的 800**，arb 只能吃剩余时间。
+  - **10-05 运行 `cfd9cb8361b0`**：`created 06:40 → started 07:34`，base 跑到 `[586/800]` 后**240 分钟无新日志**（Blockscout 对容器劣化，大量 `FAIL (timeout 90s)`），于 13:37 被判 `stuck` 收割 —— **从未进入 arb**。
+  - **10-06 运行 `af7ca10af37f`**：base 每币 ~58s（`USDC/WETH/WRSTH` 等重币），12h 仅跑到 `[741/800]`，于 22:57 被 `timeout: 运行超过 12h 自动终止` —— **同样从未进入 arb**。
+  - ⇒ base 因先跑而**每天仍刷新**（故告警只报 arb），arb 连续两天被 base 吃满 12h 预算而**零覆盖**，叠加 10-04 最后成功 ⇒ arb 断更 3 天。**与「chain 并发槽位=1」无关**（`CATEGORY_MAX["chain"]=1` 只令四链串行，不吞链路），也非调度未注册。
+- **修复（`workbench/scheduler.py`）**：把 `chain_holder_snapshot_base_arb` **拆成两条独立任务** —— `chain_holder_snapshot_base`（`40 14 * * *`）与 `chain_holder_snapshot_arb`（`50 14 * * *`），与既有 bsc/eth/solana「一链一任务」形态一致。拆分后 base 超时被收割**不再吞掉 arb 的轮次**：arb 作为独立提交在其后排队，base 结束/被杀即开跑。
+- **回归**：`workbench/test_snapshot_freshness_20260927.py` 由 4 链改 5 链（新增 `A2b 已无合并任务 base_arb` 防回归）→ **29/29 通过**；`py_compile scheduler.py` 通过；`scheduler.py --list` 实测五条 `chain_holder_snapshot_*` 齐备（bsc/eth/base/arb/solana）。
+- **未动**：`phase_chain_holder_batch.py` 采集逻辑、`--limit`、旋转排序、看门狗 `check_onchain_snapshot_freshness.py`（按表事实判定，不依赖任务名）一律未改。
+- **待部署**：`scheduler.py` 需容器 **redeploy** 后新任务注册；下一次北京 14:40/14:50 调度即按新拆分运行。base 的 ~58s/币 属上游 Blockscout 对容器出口劣化（非本轮范围，见 `scheduler.py` 2026-10-03 注释）。
+- **未做/边界**：未手工触发 prod 补跑 arb（`chain` 槽位=1 且生产 daemon 在跑；新拆分任务首发即覆盖）；base 单链仍可能在重币日超 12h 被收割（其自身覆盖不受本轮影响，另列为观察项）。

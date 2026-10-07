@@ -86,7 +86,15 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #       （去掉每子进程连接池退出 20s 空耗），单轮仍可落在 12h 硬超时内。
     ("chain_holder_snapshot_bsc", "0 14 * * *", "phase_chain_holder_batch.py", ["--chains", "bsc", "--limit", "1200", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - BSC 链（每日 14:00，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
     ("chain_holder_snapshot_eth", "20 14 * * *", "phase_chain_holder_batch.py", ["--chains", "eth", "--limit", "1200", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - ETH 链（每日 14:20，单轮上限 1200 防超时；长尾跨日轮转）", "chain"),
-    ("chain_holder_snapshot_base_arb", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base,arb", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Base+Arb 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
+    # ⚠️ 2026-10-07 拆分：原 `base,arb` 合并在**同一任务**里顺序处理（base 在前）。
+    #   base 待采 1328 > limit 800，恒先跑；当 Base Blockscout 对容器出口劣化到 ~58s/币
+    #   （10-05/10-06 实测）时，base 单链就吃满 12h 硬超时 → arb **永远轮不到**，
+    #   造成 arbitrum 连续 3 天无快照（10-04 后断更），而 base 因先跑仍新鲜。
+    #   改为一链一任务后，两条链各自独立提交、独立占用 chain 槽位：base 超时被收割也不会
+    #   再吞掉 arb 的轮次（arb 在其后排队，base 结束/被杀即开跑）。与 bsc/eth/solana
+    #   的既有「一链一任务」形态一致。
+    ("chain_holder_snapshot_base", "40 14 * * *", "phase_chain_holder_batch.py", ["--chains", "base", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Base 链（每日 14:40，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
+    ("chain_holder_snapshot_arb", "50 14 * * *", "phase_chain_holder_batch.py", ["--chains", "arb", "--limit", "800", "--delay", "0.3", "--timeout", "90"], "链上持仓快照 - Arbitrum 链（每日 14:50，单轮上限 800 防超时；长尾跨日轮转）", "chain"),
     ("chain_holder_snapshot_solana", "0 15 * * *", "phase_chain_holder_batch.py", ["--chains", "solana", "--limit", "300", "--delay", "0.5", "--timeout", "60"], "链上持仓快照 - Solana 链（每日 15:00，单轮上限 300 防超时；长尾跨日轮转）", "chain"),
     ("contract_security_scan", "0 8 * * *", "phase_chain_contract_security.py", ["--limit", "100"], "合约安全扫描 - GoPlus/RugCheck（每日 100 币）", "chain"),
     ("meme_risk_daily", "30 8 * * *", "phase_meme_risk_labels.py", ["--limit", "100"], "Meme 五维风险标签（每日 08:30）", "core"),

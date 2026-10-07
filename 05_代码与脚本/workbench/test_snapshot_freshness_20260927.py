@@ -4,8 +4,10 @@
 运行：python workbench/test_snapshot_freshness_20260927.py（纯离线，不连网、不连库）
 
 覆盖：
-  A. scheduler.py —— 四条 `chain_holder_snapshot_*` 由隔日改每日（day-of-week=*）+ 错峰；
-     单轮 `--limit` 保留（防无界「跑到完」饿死 chain 槽位）
+  A. scheduler.py —— 五条 `chain_holder_snapshot_*` 每日（day-of-week=*）+ 错峰；
+     单轮 `--limit` 保留（防无界「跑到完」饿死 chain 槽位）。
+     2026-10-07 拆分：原 `base_arb` 合并任务令 base 先跑吞满预算、arb 断更 3 天 ⇒
+     拆为 `base` / `arb` 两条独立任务（bsc/eth/base/arb/solana）。
   B. scheduler.py —— `onchain_snapshot_freshness` 已注册（每小时、monitor 类）
   C. check_onchain_snapshot_freshness.py —— 滞后判定（含 2 天边界 / 表空不静默）+ 去重键
   D. phase_chain_holder_batch.py —— `get_pending_assets` 改「最久未采优先」且保留 LIMIT
@@ -45,18 +47,20 @@ def check(cond, name, detail=""):
             print(f"    {detail}")
 
 
-# ── A. scheduler 四条链上快照：每日 + 错峰 + 保 limit ──
+# ── A. scheduler 五条链上快照：每日 + 错峰 + 保 limit ──
 print("[A] scheduler chain_holder_snapshot_*")
 _lines = [ln for ln in _SCHED.splitlines() if '"chain_holder_snapshot_' in ln]
-check(len(_lines) == 4, "A1 四条链上快照调度存在", f"got {len(_lines)}")
+check(len(_lines) == 5, "A1 五条链上快照调度存在（base/arb 已拆分）", f"got {len(_lines)}")
 
 _crons = {}
 for ln in _lines:
     m = re.search(r'"chain_holder_snapshot_(\w+)",\s*"([^"]+)"', ln)
     if m:
         _crons[m.group(1)] = m.group(2)
-check(set(_crons) == {"bsc", "eth", "base_arb", "solana"},
-      "A2 四链齐备（bsc/eth/base_arb/solana）", str(sorted(_crons)))
+check(set(_crons) == {"bsc", "eth", "base", "arb", "solana"},
+      "A2 五链齐备（bsc/eth/base/arb/solana，base_arb 已拆）", str(sorted(_crons)))
+check("base_arb" not in _crons,
+      "A2b 已无合并任务 base_arb（防 base 吞掉 arb 轮次）")
 
 for key, cron in _crons.items():
     f = cron.split()
@@ -65,7 +69,7 @@ for key, cron in _crons.items():
 check(not any(x in ln for ln in _lines for x in ("1,3,5", "2,4,6")),
       "A4 隔日 cron（1,3,5 / 2,4,6）已清除")
 check(len({tuple(c.split()[:2]) for c in _crons.values()}) == len(_crons),
-      "A5 四链错峰（时/分组合各不相同）", str(_crons))
+      "A5 五链错峰（时/分组合各不相同）", str(_crons))
 check(all('"--limit"' in ln for ln in _lines),
       "A6 单轮 --limit 保留（防 chain 槽位饿死，未改无界「跑到完」）")
 

@@ -111,6 +111,7 @@ class CoinGlassClient:
         timeout: int = 20,
         min_request_gap: float = 0.0,
         rate_per_min: float | None = None,
+        burst: int | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("COINGLASS_API_KEY 未配置")
@@ -119,8 +120,9 @@ class CoinGlassClient:
         self.timeout = timeout
         self.min_request_gap = max(0.0, min_request_gap)
         self._last_request_ts = 0.0
-        # 全局令牌桶（可选）；未传 rate_per_min 时退化为纯 min_request_gap 节流
-        self._bucket = TokenBucket(rate_per_min) if rate_per_min and rate_per_min > 0 else None
+        # 全局令牌桶（可选）；burst 默认=rate_per_min（满桶可突发），
+        # 大批量回填时建议传小 burst（如 2）平滑请求，避免 Coinglass 滑动窗口 429
+        self._bucket = TokenBucket(rate_per_min, burst=burst) if rate_per_min and rate_per_min > 0 else None
         # 最近一次响应中的 X-RateLimit-* 头（配额监控用），get_raw 每次刷新
         self.last_rate_limit: dict[str, str] = {}
 
@@ -260,6 +262,21 @@ class CoinGlassClient:
         return self._as_list(self.get("/api/futures/funding-rate/history", {
             "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
 
+    def basis_history(self, exchange: str, symbol: str,
+                      interval: str = "4h", limit: int = 2000) -> list[dict]:
+        """期货基差历史（永续-现货价差，粒度 ≥4h）。
+
+        HOBBYIST 实测边界（2026-10-06，勿重复探测）：
+          - 返回 `[{time, open_basis, close_basis, open_change, close_change}]`；
+            basis 单位 = **百分比（%）**，change 单位 = **基点（bp）**；
+          - @4h=180 天（1080 点）、@12h=360 天（720 点）、@1d=全历史（实测回 1000+ 点至 2024-01）；
+          - `symbol` 取**合约码**（`BTCUSDT`；传基码 `BTC` ⇒ code=500）；
+            ⚠️ **1000/1000000 前缀币**（1000PEPEUSDT/1000000MOGUSDT 等）服务端返回
+            code=500 ⇒ 本接口**不支持乘数前缀币**，消费侧须跳过（勿当错误重试）。
+        """
+        return self._as_list(self.get("/api/futures/basis/history", {
+            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
     # ── 跨所衍生品聚合（CGV4-003，2026-09-28 HOBBYIST 实测可用）───────────
     # 实测补充（2026-09-28，勿重复探测）：
     #   - `open-interest/exchange-list`：`symbol` 取**币种基码**（BTC），返回含 `exchange="All"`
@@ -323,6 +340,21 @@ class CoinGlassClient:
                                               interval: str = "4h", limit: int = 100) -> list[dict]:
         """顶级交易员**持仓量**多空比历史（`symbol` 为合约码；粒度 ≥4h）。"""
         return self._as_list(self.get("/api/futures/top-long-short-position-ratio/history", {
+            "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
+
+    def taker_buy_sell_volume_history(self, exchange: str, symbol: str,
+                                      interval: str = "4h", limit: int = 2000) -> list[dict]:
+        """主动买卖量历史（CVD 源，`symbol` 为合约码；粒度 ≥4h）。
+
+        HOBBYIST 实测边界（2026-10-06，勿重复探测）：
+          - 返回 `[{time, taker_buy_volume_usd, taker_sell_volume_usd}]`（**字符串**数值）；
+          - @4h 服务端最多回 **180 天**（=1080 点，limit 3000/4500 均被截断到 1080）；
+            @6h/8h/12h = 360 天，@1d = 全历史；
+          - `startTime`/`endTime` **被忽略**（传了仍返回最新 N 点）⇒ 要更长历史只能放大 interval；
+          - 体积单位疑似**百万 USD**（数值量级 ~1e3~1e5），消费侧只用比值
+            （taker_net_ratio = (buy-sell)/(buy+sell)）时单位自然抵消，勿按绝对 USD 解读。
+        """
+        return self._as_list(self.get("/api/futures/taker-buy-sell-volume/history", {
             "exchange": exchange, "symbol": symbol, "interval": interval, "limit": limit}))
 
     @staticmethod

@@ -447,6 +447,24 @@ TASK_DEFS = {
         "force_arg": "--force",  # 单币调用始终强制覆盖
         "hidden": True,  # 主任务面板不显示，通过投研分析面板调用
     },
+    # 盘面衍生品因子相关性投研（CVD/多空比/OI/基差/爆仓 ↔ 价格，Coinglass 全年历史）
+    # 容器内执行（DB 内网访问，避开本地→云数据库跨公网带宽瓶颈）
+    "cg_factor_corr_4h": {
+        "name": "盘面因子相关性投研 4h（180天）",
+        "description": "CVD/多空比/OI/基差/爆仓不对称 ↔ 价格 桶级相关性（@4h，180 天样本）",
+        "script": "research_cg_factor_corr.py",
+        "default_args": ["--interval", "4h", "--ratio-type", "top_position"],
+        "category": "投研分析",
+        "hidden": True,
+    },
+    "cg_factor_corr_12h": {
+        "name": "盘面因子相关性投研 12h（360天）",
+        "description": "CVD/多空比/OI/基差/爆仓不对称 ↔ 价格 桶级相关性（@12h，全年样本）",
+        "script": "research_cg_factor_corr.py",
+        "default_args": ["--interval", "12h", "--ratio-type", "top_position"],
+        "category": "投研分析",
+        "hidden": True,
+    },
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",

@@ -12,6 +12,8 @@ L1 粗筛与回测的数据源。增量模式每次拉每币每周期最近 10 �
     python phase_scan_klines.py --limit-symbols 5 --dry-run   # 冒烟：只拉 5 个币、不落库
     python phase_scan_klines.py --backfill-days 90 --intervals 1h   # 回填 90 天 1h
     python phase_scan_klines.py --backfill-days 3 --force           # 采集停摆后补缺口（忽略续跑跳过）
+    python phase_scan_klines.py --backfill-days 1380 --fill-earlier --intervals 1h
+                                                        # 扩展历史：只补比现有最早一根更早的窗口
 """
 from __future__ import annotations
 
@@ -41,6 +43,7 @@ DEFAULT_INTERVALS = ("5m", "15m", "1h")
 INCREMENTAL_LIMIT = 10          # 增量模式：每币每周期拉最近 N 根
 BACKFILL_PAGE_LIMIT = 1500      # 回填模式：单请求最大 K 线数
 FLUSH_ROWS = 50_000             # 回填分批落库阈值（约 0.5KB/行，避免千万行驻留内存）
+TASK_BATCH = 16                 # 每批提交的任务数（批内跑完释放 future，约 350MB 上限）
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600}
 
 UPSERT_SQL = """
@@ -67,6 +70,17 @@ def get_covered(conn, interval: str, end_ms: int) -> set[str]:
             (interval,),
         )
         return {sym for sym, last_ot in cur.fetchall() if last_ot >= tol}
+
+
+def get_earliest(conn, interval: str) -> dict[str, datetime]:
+    """返回每个符号已入库的最早 open_time（`--fill-earlier` 用于定位待补缺口）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT symbol, MIN(open_time) FROM biz.asset_klines "
+            "WHERE interval = %s GROUP BY symbol",
+            (interval,),
+        )
+        return dict(cur.fetchall())
 
 
 def get_usdt_perpetuals() -> list[str]:
@@ -169,6 +183,9 @@ def main() -> int:
     parser.add_argument("--force", action="store_true",
                         help="回填模式忽略续跑跳过（用于采集停摆后的缺口补填：续跑只看最新 K 线"
                              "是否新鲜，缺口在中间时会被误判为已覆盖）")
+    parser.add_argument("--fill-earlier", action="store_true",
+                        help="每币只回填「比库里现有最早一根更早」的窗口，已覆盖区间不重抓不重写"
+                             "（扩展历史用；--force 是补中间缺口，两者用途不同）")
     parser.add_argument("--dry-run", action="store_true", help="只拉取打印，不写库")
     parser.add_argument("--workers", type=int, default=8, help="并发数（默认 8）")
     args = parser.parse_args()
@@ -180,43 +197,62 @@ def main() -> int:
         print(f"[symbols] 共 {len(symbols)} 个合约，周期 {intervals}，"
               f"模式={'回填' + str(args.backfill_days) + '天' if args.backfill_days else '增量'}")
 
-        tasks = []
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            if args.backfill_days:
-                end_ms = int(time.time() * 1000)
-                start_ms = end_ms - args.backfill_days * 86400 * 1000
-                for iv in intervals:
-                    covered = set() if args.force else get_covered(conn, iv, end_ms)
-                    n_skip = sum(1 for s in symbols if s in covered)
-                    for sym in symbols:
-                        if sym in covered:
-                            continue
-                        tasks.append(pool.submit(fetch_backfill, sym, iv, start_ms, end_ms))
-                    print(f"[symbols] {iv} 续跑跳过已覆盖 {n_skip} 个，待拉 {len(symbols) - n_skip} 个")
-            else:
+        # 任务规格：**不预先 submit**。一次性 submit 全部任务会让 tasks 列表持有所有
+        # future 的强引用，而已完成的 future 会一直保留自己的 result（每币 1.5~3.3 万行
+        # ≈ 10~22MB），回填 1380 天 × 500+ 合约时会有上千万行常驻内存直至 OOM。
+        specs: list[tuple] = []
+        if args.backfill_days:
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - args.backfill_days * 86400 * 1000
+            for iv in intervals:
+                covered = set() if args.force else get_covered(conn, iv, end_ms)
+                n_skip = sum(1 for s in symbols if s in covered)
+                # --fill-earlier：每币只回填「比库里现有最早一根更早」的窗口，
+                # 已覆盖区间不重抓、不重写（重复 upsert 会让表体积虚胀）。
+                earliest = get_earliest(conn, iv) if args.fill_earlier else {}
+                n_uptodate = 0
                 for sym in symbols:
-                    for iv in intervals:
-                        tasks.append(pool.submit(fetch_incremental, sym, iv))
+                    if sym in covered:
+                        continue
+                    sym_end_ms = end_ms
+                    if args.fill_earlier:
+                        first_ot = earliest.get(sym)
+                        sym_end_ms = int(first_ot.timestamp() * 1000) if first_ot else end_ms
+                        if sym_end_ms <= start_ms:
+                            n_uptodate += 1
+                            continue
+                    specs.append((fetch_backfill, sym, iv, start_ms, sym_end_ms))
+                print(f"[symbols] {iv} 续跑跳过已覆盖 {n_skip} 个，待拉 "
+                      f"{len(symbols) - n_skip - n_uptodate} 个"
+                      + (f"，已早于窗口起点无需回填 {n_uptodate} 个" if args.fill_earlier else ""))
+        else:
+            for sym in symbols:
+                for iv in intervals:
+                    specs.append((fetch_incremental, sym, iv))
 
-            all_rows: list[tuple] = []
-            errors = 0
-            fetched = 0
-            for fut in as_completed(tasks):
-                try:
-                    rows = fut.result()
-                except Exception as e:  # noqa: BLE001
-                    errors += 1
-                    if errors <= 10:
-                        print(f"[warn] 拉取失败: {e}", file=sys.stderr)
-                    continue
-                fetched += len(rows)
-                all_rows.extend(rows)
-                # 分批落库：回填 1380 天 × 500+ 合约可达千万行，
-                # 全量驻留内存再一次性 upsert 会 OOM（约 0.5KB/行）。
-                if not args.dry_run and len(all_rows) >= FLUSH_ROWS:
-                    execute_many(conn, UPSERT_SQL, all_rows)
-                    print(f"[db] upsert {len(all_rows)} 行（累计抓取 {fetched} 根）")
-                    all_rows.clear()
+        all_rows: list[tuple] = []
+        errors = 0
+        fetched = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            # 分批提交：每批 TASK_BATCH 个，批内跑完即释放 future 及其结果。
+            for i in range(0, len(specs), TASK_BATCH):
+                futures = [pool.submit(fn, *rest) for fn, *rest in specs[i:i + TASK_BATCH]]
+                for fut in as_completed(futures):
+                    try:
+                        rows = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        errors += 1
+                        if errors <= 10:
+                            print(f"[warn] 拉取失败: {e}", file=sys.stderr)
+                        continue
+                    fetched += len(rows)
+                    all_rows.extend(rows)
+                    # 分批落库：缓冲上限 FLUSH_ROWS，避免千万行驻留内存（约 0.5KB/行）。
+                    if not args.dry_run and len(all_rows) >= FLUSH_ROWS:
+                        execute_many(conn, UPSERT_SQL, all_rows)
+                        print(f"[db] upsert {len(all_rows)} 行（累计抓取 {fetched} 根）")
+                        all_rows.clear()
+                futures = []  # 释放本批 future，切断其对 result 的引用
 
         print(f"[fetch] 完成，共 {fetched} 根 K 线，失败 {errors} 个任务")
         if args.dry_run:

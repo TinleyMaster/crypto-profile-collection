@@ -38,6 +38,12 @@ NTYPE_SLOW_DIGEST_STOCK = "slow_digest_stock"  # 慢通道汇总邮件（美股/
 # 去重窗口：同一信号同一类型 24h 内不重复发
 DEDUP_WINDOW_HOURS = 24
 
+# 快提醒 stale 校验（审计 2026-10-07 P0）：entry_price 与最新价偏差超过该比例视为
+# 信号过期（价格在信号生成后大幅异动，入场价失真）。NMR 案例：快通道用事件前旧行情
+# 生成 entry=12.74，价格 5 分钟暴涨 47% 后仍推送 "可动作" ⇒ 实际 RR 从 2.50 塌缩到 0.22。
+STALE_PRICE_DEV_PCT = 0.15   # 偏差 >15% 判 stale（entry 高于现价=触发位已远超，低于=破位）
+
+
 # slow_digest 的 signal_id 哨兵值（NULL 不触发 UNIQUE 约束，用负数占位保证去重生效）
 SENTINEL_SLOW_DIGEST_SIGNAL_ID = -1      # 加密货币汇总
 SENTINEL_SLOW_DIGEST_STOCK_SIGNAL_ID = -2  # 美股/商品汇总
@@ -161,6 +167,24 @@ def _mark_signal_notified(conn, signal_ids: list[int], column: str) -> None:
                     getattr(cur, "rowcount", -1), len(ids))
     except Exception as e:
         logger.warning("回写 catalyst_signal.%s 失败（%s 条）: %s", column, len(ids), e)
+
+
+def _is_stale_price(entry_price, current_price) -> bool:
+    """判断信号是否因价格大幅异动而过期（审计 2026-10-07 P0）。
+
+    快通道用事件前行情快照生成 entry/stop/tp，事件导致价格暴涨/暴跌后旧档位失真
+    （NMR：entry=12.74 vs 现价 17.0，RR 2.50→0.22）。entry 或现价缺失时按不 stale
+    处理（由价格完整性闸门另行把关）。
+    """
+    try:
+        entry = float(entry_price)
+        cur = float(current_price)
+    except (TypeError, ValueError):
+        return False
+    if entry <= 0 or cur <= 0:
+        return False
+    dev = abs(cur - entry) / entry
+    return dev > STALE_PRICE_DEV_PCT
 
 
 def _slow_digest_sent_recently(conn, signal_ids: list[int]) -> set[int]:
@@ -579,6 +603,27 @@ def send_fast_alerts_for_new_signals(conn, new_signal_ids: list[int]) -> dict:
         # 慢通道 digest 近 24h 已覆盖 ⇒ 跳过（双向去重的快讯侧）
         if row["signal_id"] in _slow_sent:
             skipped += 1
+            continue
+
+        # stale 校验（审计 2026-10-07 P0）：entry_price 与最新价偏差超阈值不发。
+        # 快通道用事件前行情快照生成档位，事件导致价格暴涨后旧档位失真（NMR 案例
+        # entry=12.74 vs 现价 17.0，实际 RR 从 2.50 塌缩到 0.22）。跳过并把信号
+        # 降为 watch（已定价/失真，不再作为可动作入口）。取锁前拦截，不留 sending 残迹。
+        stale = _is_stale_price(row.get("entry_price"), row.get("current_price"))
+        if stale:
+            skipped += 1
+            try:
+                conn.execute(
+                    "UPDATE biz.catalyst_signal SET status = 'watch', updated_at = NOW() "
+                    "WHERE signal_id = %s AND status = 'open'",
+                    (row["signal_id"],),
+                )
+                conn.commit()
+            except Exception:
+                pass
+            logger.info("A 级快讯跳过 [%s] signal=%s：stale（entry=%s vs 现价=%s）",
+                        row.get("symbol"), row["signal_id"],
+                        row.get("entry_price"), row.get("current_price"))
             continue
 
         # 原子获取发送锁（防并发重复）；同时检查 24h 去重窗口

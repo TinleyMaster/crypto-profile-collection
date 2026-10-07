@@ -41,6 +41,10 @@ RULE = {
     "tech_upgrade": ("bullish", "medium", 14),
     "funding":      ("bullish", "medium", 14),
     "regulation":   ("neutral", "weak", 0),
+    "security":     ("bearish", "medium", 0),   # 2026-10-07 新增：安全事件/漏洞 → 利空
+    "unlock":       ("bearish", "medium", 0),   # 2026-10-07 新增：代币解锁 → 利空
+    "mint":         ("bearish", "medium", 0),   # 2026-10-07 新增：增发稀释 → 利空
+    "airdrop":      ("bullish", "weak", 7),     # 2026-10-07 对齐：空投 → 利多
     "market_update":("neutral", "weak", 0),
 }
 DEFAULT_RULE = ("neutral", "weak", 0)

@@ -62,6 +62,9 @@ RESOLVED_WINDOW = 336
 #   funding     (n=28,  中位 -0.78%, 涨占比 0.32) → 原 bullish 证伪，样本不足降 neutral
 #   burn        (n=14,  中位 -0.77%, 涨占比 0.43) → 原 bullish 证伪，样本不足降 neutral
 #   delisting / regulation / market_update → 实测无矛盾，维持原判
+#
+# 2026-10-07 审计：补 security/unlock/mint（此前漏配导致邮件方向—/背离假象）。
+#   新增类型无历史实测，按市场常识设定——安全事件/解锁/增发均为利空。
 EVENT_TYPE_DIRECTION = {
     "listing": "bullish",
     "delisting": "bearish",
@@ -71,6 +74,9 @@ EVENT_TYPE_DIRECTION = {
     "partnership": "bullish",
     "tech_upgrade": "bearish",
     "regulation": "neutral",
+    "security": "bearish",   # 2026-10-07 新增：安全事件/漏洞/被盗 → 利空
+    "unlock": "bearish",     # 2026-10-07 新增：代币解锁流通释放 → 利空
+    "mint": "bearish",       # 2026-10-07 新增：增发/铸造稀释 → 利空
     "market_update": "neutral",
     "other": None,
 }

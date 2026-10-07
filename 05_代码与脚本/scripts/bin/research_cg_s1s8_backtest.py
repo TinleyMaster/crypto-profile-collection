@@ -227,8 +227,21 @@ def build_scene_panel(oi_rows: list, cvd_rows: list, klines: dict[str, dict],
 
 # ── 输出 ──────────────────────────────────────────────────────
 
+# 用户口径 S1-S8 的三元方向 (p, oi, cvd)，1=↑ 0=↓（与用户表格严格一致）
+SCENE_MAP = {
+    (1, 1, 1): "S1",   # P↑ OI↑ CVD↑  真实多头进攻
+    (1, 1, 0): "S2",   # P↑ OI↑ CVD↓  诱多（杠杆推动）
+    (0, 1, 0): "S3",   # P↓ OI↑ CVD↓  真实空头
+    (0, 1, 1): "S4",   # P↓ OI↑ CVD↑  诱空（现货承接）
+    (1, 0, 1): "S5",   # P↑ OI↓ CVD↑  获利了结
+    (1, 0, 0): "S6",   # P↑ OI↓ CVD↓  空头回补
+    (0, 0, 0): "S7",   # P↓ OI↓ CVD↓  空头止盈·跌势衰竭
+    (0, 0, 1): "S8",   # P↓ OI↓ CVD↑  抛压释放·现货承接
+}
+
+
 def scene_key(r: dict) -> str:
-    return f"S{r['p'] * 4 + r['oi'] * 2 + r['cvd'] + 1}"
+    return SCENE_MAP.get((r["p"], r["oi"], r["cvd"]), "S?")
 
 
 def print_results(panel: list[dict], title: str, use_excess: bool = False) -> None:

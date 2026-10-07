@@ -455,7 +455,6 @@ TASK_DEFS = {
         "script": "research_cg_factor_corr.py",
         "default_args": ["--interval", "4h", "--ratio-type", "top_position"],
         "category": "投研分析",
-        "hidden": True,
     },
     "cg_factor_corr_12h": {
         "name": "盘面因子相关性投研 12h（360天）",
@@ -463,7 +462,6 @@ TASK_DEFS = {
         "script": "research_cg_factor_corr.py",
         "default_args": ["--interval", "12h", "--ratio-type", "top_position"],
         "category": "投研分析",
-        "hidden": True,
     },
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {

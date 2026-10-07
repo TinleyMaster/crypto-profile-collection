@@ -670,7 +670,18 @@ def run_signal(conn, builder: CatalystSignalBuilder,
     # 覆盖掉慢通道（run_slow_g3g5）刚算出的正确档位，导致 tier='A' AND status='open'
     # 恒为 0 行、A 级 Alert 邮件被静默跳过。
     # upsert_to_db 对三档用 COALESCE 保留库内旧值，故库内档位即该行有效档位，读回即可。
-    query = """
+    # 多源去重（审计 2026-10-07 P2）：同一事件被多个媒体源重复采集（NMR 案例 5 条
+    # catalyst 实为 2 个事件），各自生成独立 signal ⇒ 邮件重复 + 校准样本虚增。
+    # 全量刷新时按 (asset_id, 事件类型, 90min 时间窗) 分组，只保留共振分最高的一条
+    # 生成/更新信号；单条重算（--catalyst-id）跳过去重，保持精确重算能力。
+    dedup_col = "" if catalyst_id is not None else """, ROW_NUMBER() OVER (
+        PARTITION BY cr.asset_id,
+                     COALESCE(ac.ai_event_type, ac.rule_event_type, 'other'),
+                     date_bin('90 minutes', ac.published_at, TIMESTAMPTZ '2020-01-01')
+        ORDER BY cr.resonance_score DESC, cg.base_strength DESC, cr.catalyst_id
+    ) AS _rn"""
+    dedup_where = "" if catalyst_id is not None else " AND _rn = 1"
+    query = f"""
         SELECT cr.catalyst_id, cr.asset_id, cr.resonance_score, cr.resonance_state,
                cg.catalyst_kind, cg.base_strength,
                ac.published_at, ac.title,
@@ -678,6 +689,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
                COALESCE(ci.impact_direction, ac.ai_sentiment) AS impact_direction,
                cs.entry_price, cs.stop_loss, cs.take_profit,
                cs.technical_state, cs.fundamental_pass
+               {dedup_col}
         FROM biz.catalyst_resonance cr
         JOIN biz.catalyst_grade cg ON cr.catalyst_id = cg.catalyst_id
         JOIN biz.asset_catalyst ac ON cr.catalyst_id = ac.catalyst_id
@@ -688,6 +700,7 @@ def run_signal(conn, builder: CatalystSignalBuilder,
           ON cs.catalyst_id = cr.catalyst_id AND cs.asset_id = cr.asset_id
         WHERE cg.catalyst_kind != 'noise'
           AND cr.resonance_state != 'pending'
+          {dedup_where}
     """
     params = []
     if catalyst_id is not None:

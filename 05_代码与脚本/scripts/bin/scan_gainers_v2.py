@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,14 +63,38 @@ def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
 
 
-def build_gainer_alert_html(hits: list[dict]) -> str:
-    """构建涨幅榜信号告警邮件 HTML。"""
+def load_exit_profile() -> dict:
+    """加载 backtest_exit_profile.py 生成的出场画像（胜率/期望/PF/持仓时长）。
+
+    文件不存在或损坏时返回空 dict（告警邮件不附预期，不影响扫描主流程）。
+    """
+    p = SCRIPT_DIR.parent / "data" / "exit_profile.json"
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("signals", {})
+    except Exception:
+        return {}
+
+
+def build_gainer_alert_html(hits: list[dict], profiles: dict | None = None) -> str:
+    """构建涨幅榜信号告警邮件 HTML。profiles 提供各信号回测预期。"""
+    profiles = profiles or {}
     rows = ""
     for h in hits:
         vr_s = "n/a" if h["vr"] is None else f"{h['vr']:.2f}"
         fund_s = "n/a" if h["fund"] is None else f"{h['fund']:.4%}"
         color = "#16a34a" if h["direction"] == "LONG" else "#dc2626"
         emoji = "🟢" if h["direction"] == "LONG" else "🔴"
+        # 回测预期
+        prof = profiles.get(h["sig_type"])
+        exp_s = "—"
+        if prof:
+            win = prof.get("win_rate")
+            mean = prof.get("mean")
+            if win is not None and mean is not None:
+                exp_s = f"{win*100:.0f}% / {mean*100:+.1f}%"
         rows += f"""
         <tr>
           <td style="padding:6px;border:1px solid #eee">{emoji} {h['symbol']}</td>
@@ -80,9 +105,10 @@ def build_gainer_alert_html(hits: list[dict]) -> str:
           <td style="padding:6px;border:1px solid #eee">{vr_s}</td>
           <td style="padding:6px;border:1px solid #eee">{fund_s}</td>
           <td style="padding:6px;border:1px solid #eee">${h['vol']/1e6:.0f}M</td>
+          <td style="padding:6px;border:1px solid #eee">{exp_s}</td>
         </tr>"""
     return f"""
-    <div style="font-family:sans-serif;max-width:800px;margin:auto">
+    <div style="font-family:sans-serif;max-width:860px;margin:auto">
       <h2 style="color:#1e40af">📊 涨幅榜信号告警（v2）</h2>
       <p>检测到 <b>{len(hits)}</b> 个新信号：</p>
       <table style="border-collapse:collapse;width:100%">
@@ -95,6 +121,7 @@ def build_gainer_alert_html(hits: list[dict]) -> str:
           <th style="padding:6px;border:1px solid #eee">量比</th>
           <th style="padding:6px;border:1px solid #eee">资金费率</th>
           <th style="padding:6px;border:1px solid #eee">24h成交额</th>
+          <th style="padding:6px;border:1px solid #eee">回测胜率/期望</th>
         </tr>
         {rows}
       </table>
@@ -104,7 +131,8 @@ def build_gainer_alert_html(hits: list[dict]) -> str:
         • MID_LONG：次档做多（20~50%涨幅+放量）→ T+24h<br>
         • TRAP_SHORT：诱多做空（<5%涨幅+放量）→ T+24h
       </p>
-      <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约</p>
+      <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约<br>
+      回测口径：滚动24h涨幅（对齐线上ticker/24hr，无前视）。</p>
     </div>
     """
 
@@ -223,7 +251,8 @@ def main() -> int:
     if args.alert and hits:
         notifier = EmailNotifier(settings)
         if notifier.configured:
-            html = build_gainer_alert_html(hits)
+            profiles = load_exit_profile()
+            html = build_gainer_alert_html(hits, profiles)
             ok, msg = notifier.send(
                 subject=f"[涨幅榜告警] 检测到 {len(hits)} 个新信号",
                 body_html=html,

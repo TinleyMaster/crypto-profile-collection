@@ -20,6 +20,9 @@
 节流与容错：
   - 串行 + `min_request_gap`（默认 2.5s ≈ 24 req/min，为 scan_daemon 的 coin-list 留余量）。
   - 429 / code != 0 走指数退避（1→2→4→8s，上限 3 次）后跳过该币，**不整轮失败**。
+  - **CoinGlass 未收录的新币**（code=400 + 'supported symbol'）降级为**跳过（unsupported）**，
+    不计入失败、不触发告警——新上线币每天轮询池必然混入，属结构性现象（2026-10-07 修复，
+    此前把这类币计为 failed 导致任务天天 exit 1）。
   - 资金费率取不到 ⇒ 降级为「仅 OI」继续（密钥/额度故障不当致命）。
 
 用法：
@@ -29,7 +32,7 @@
   python ingest_coinglass_derivatives.py --symbols BTCUSDT,ETHUSDT
   python ingest_coinglass_derivatives.py --with-ls --limit 50    # 附带 Binance 多空比
 
-退出码：0 = 无失败；1 = 有币种取数失败（部分完成）
+退出码：0 = 无失败（CoinGlass 未收录的跳过不计）；1 = 有真实取数失败（429 打满/网络/其他 code）
 """
 from __future__ import annotations
 
@@ -47,7 +50,7 @@ if str(PROJECT_SRC) not in sys.path:
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-from crypto_research.clients.coinglass_client import CoinGlassClient  # noqa: E402
+from crypto_research.clients.coinglass_client import CoinGlassClient, CoinGlassError  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
@@ -134,18 +137,29 @@ def base_code(contract_symbol: str) -> str:
 
 
 def fetch_with_retry(fn, *args, **kwargs):
-    """带指数退避的取数（1→2→4→8s，上限 3 次重试）。返回 (结果, 失败原因)。"""
-    last_err: str | None = None
+    """带指数退避的取数（1→2→4→8s，上限 3 次重试）。返回 (结果, 异常对象)。"""
+    last_err: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
             return fn(*args, **kwargs), None
         except Exception as e:  # noqa: BLE001
-            last_err = f"{type(e).__name__}: {e}"
+            last_err = e
             if attempt >= MAX_RETRIES:
                 break
             wait = RETRY_BACKOFFS[min(attempt, len(RETRY_BACKOFFS) - 1)]
             time.sleep(wait)
     return None, last_err
+
+
+def is_unsupported_symbol(err) -> bool:
+    """CoinGlass「币种未被收录」业务错误（code=400 + 'supported symbol'）⇒ 跳过而非失败。
+
+    新上线/CoinGlass 尚未收录的币会稳定返回该错误，属**结构性必然**（每天轮询池都会
+    混入新币），必须从「失败」中降级，否则任务永远 failed 天天告警。
+    """
+    if isinstance(err, CoinGlassError) and err.code == "400":
+        return "supported symbol" in str(err)
+    return False
 
 
 def build_funding_map(raw: list[dict]) -> dict[str, dict[str, dict]]:
@@ -310,7 +324,7 @@ def main() -> int:
 
         # ── 2) 逐币 OI（+ 可选多空比）→ 合并 upsert ─────────────────────
         rows_written = 0
-        ok = failed = empty = 0
+        ok = failed = empty = unsupported = 0
         failures: list[dict] = []
         ls_failed = 0
         t0 = time.time()
@@ -318,8 +332,12 @@ def main() -> int:
             base = base_code(sym)
             oi_raw, err = fetch_with_retry(client.open_interest_exchange_list, base)
             if err:
+                if is_unsupported_symbol(err):
+                    unsupported += 1
+                    print(f"[skip] {sym} CoinGlass 未收录 ⇒ 跳过（不计失败）", file=sys.stderr)
+                    continue
                 failed += 1
-                failures.append({"symbol": sym, "error": err})
+                failures.append({"symbol": sym, "error": f"{type(err).__name__}: {err}"})
                 print(f"[fail] {sym} OI 取数失败：{err}", file=sys.stderr)
                 continue
             oi_by_ex = oi_rows_for(oi_raw or [])
@@ -333,7 +351,12 @@ def main() -> int:
             if args.with_ls:
                 ls_data, ls_err = ls_rows(client, sym, LS_EXCHANGE_DEFAULT, args.ls_interval, 1)
                 if ls_err:
-                    ls_failed += 1
+                    if is_unsupported_symbol(ls_err):
+                        unsupported += 1
+                        print(f"[skip] {sym} 多空比：CoinGlass 未收录 ⇒ 跳过（不计失败）",
+                              file=sys.stderr)
+                    else:
+                        ls_failed += 1
                 elif ls_data:
                     ls_by_ex[LS_EXCHANGE_DEFAULT] = ls_data
 
@@ -361,15 +384,18 @@ def main() -> int:
                 el = time.time() - t0
                 print(f"[cg-deriv] {i}/{len(symbols)} 币，{rows_written} 行，已用 {el / 60:.1f} 分钟")
 
-        out = dict(plan, ok=ok, failed=failed, empty=empty, ls_failed=ls_failed,
-                   rows_written=rows_written, failures=failures[:20],
+        out = dict(plan, ok=ok, failed=failed, empty=empty, unsupported=unsupported,
+                   ls_failed=ls_failed, rows_written=rows_written, failures=failures[:20],
                    funding_symbols=len(funding_map),
                    elapsed_min=round((time.time() - t0) / 60, 1))
         if args.json:
             print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
         else:
-            print(f"\n[cg-deriv] 完成：成功 {ok} 币 / 失败 {failed} / 空集 {empty}，"
+            print(f"\n[cg-deriv] 完成：成功 {ok} 币 / 失败 {failed} / 跳过 {unsupported} / 空集 {empty}，"
                   f"落库 {rows_written} 行，用时 {out['elapsed_min']} 分钟")
+            if unsupported:
+                print(f"[cg-deriv] ⚠️ {unsupported} 币 CoinGlass 未收录（400 supported symbol）⇒ 跳过，"
+                      "不计失败（新币结构性必然，不触发告警）")
             print("⚠️ 口径提醒：exchange='All' 为接口给的跨所聚合行，与分所行严禁相加；"
                   "本表为并行源，不改既有 binance fapi / biz.asset_derivatives 链路。")
         return 1 if (failed or ls_failed) else 0

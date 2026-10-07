@@ -43,30 +43,36 @@ WORST_LIMIT = -0.20  # 放宽风险约束
 
 def build_sql(vr_max: float) -> str:
     return f"""
+    -- 日线聚合：事件本体 = 当日最后一根 1h bar（entry/eo 与 chg24 同源，日线收盘粒度）
+    -- day_vol = 当日全部 1h bar 的 quote_vol 之和（做量比的分子，与日均量同量纲）
     WITH daily AS (
-        SELECT DISTINCT ON (symbol, DATE(open_time))
-            symbol, DATE(open_time) AS d,
-            open_time, close_px, quote_vol
+        SELECT symbol, DATE(open_time) AS d,
+               MAX(open_time) AS open_time,
+               (ARRAY_AGG(close_px ORDER BY open_time DESC))[1] AS close_px,
+               SUM(quote_vol) AS day_vol
         FROM biz.asset_klines
         WHERE interval = '1h' AND close_px > 0 AND open_px > 0
-        ORDER BY symbol, DATE(open_time), open_time DESC
+        GROUP BY symbol, DATE(open_time)
     ),
+    -- 量比基线：事件日之前 7 个交易日的日均量（trailing 窗口，只用事件时点可得的历史，
+    -- 严禁使用 NOW()/未来窗口，否则对 2021~2026 历史事件构成前视泄漏）
     vol_avg AS (
-        SELECT symbol, SUM(quote_vol) / 7.0 AS avg_daily_vol
-        FROM biz.asset_klines
-        WHERE interval = '1h' AND open_time >= NOW() - INTERVAL '7 days'
-            AND quote_vol IS NOT NULL
-        GROUP BY symbol
+        SELECT symbol, d,
+               AVG(day_vol) OVER (
+                   PARTITION BY symbol ORDER BY d
+                   ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+               ) AS avg_daily_vol
+        FROM daily
     ),
     dchg AS (
         SELECT s.symbol, s.d, s.open_time AS eo, s.close_px AS entry,
                s.close_px / p.close_px - 1 AS chg24,
                CASE WHEN va.avg_daily_vol > 0
-                    THEN s.quote_vol / va.avg_daily_vol
+                    THEN s.day_vol / va.avg_daily_vol
                     ELSE NULL END AS vol_ratio
         FROM daily s
         JOIN daily p ON p.symbol = s.symbol AND p.d = s.d - 1
-        LEFT JOIN vol_avg va ON va.symbol = s.symbol
+        LEFT JOIN vol_avg va ON va.symbol = s.symbol AND va.d = s.d
         WHERE s.close_px / p.close_px - 1 >= 0.75
     ),
     ev AS (

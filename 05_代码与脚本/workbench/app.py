@@ -463,6 +463,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "12h", "--ratio-type", "top_position"],
         "category": "投研分析",
     },
+    # S1-S8 盘面八象限场景回测（P×OI×CVD×VOL，Coinglass 全年历史）
+    "cg_s1s8_4h": {
+        "name": "S1-S8 八象限场景回测 4h（180天）",
+        "description": "P×OI×CVD×VOL 八场景后续价格表现回测（@4h，180 天样本）",
+        "script": "research_cg_s1s8_backtest.py",
+        "default_args": ["--interval", "4h"],
+        "category": "投研分析",
+    },
+    "cg_s1s8_12h": {
+        "name": "S1-S8 八象限场景回测 12h（360天）",
+        "description": "P×OI×CVD×VOL 八场景后续价格表现回测（@12h，全年样本）",
+        "script": "research_cg_s1s8_backtest.py",
+        "default_args": ["--interval", "12h"],
+        "category": "投研分析",
+    },
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",

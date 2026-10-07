@@ -172,7 +172,9 @@ def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
         if vol < min_vol:
             continue
         avg = vol_avg.get(sym)
-        vr = vol / (avg * 24) if avg and avg > 0 else None   # 24h量 / 7日均量
+        # 24h量 / 7日日均量。注意 avg 已是「日均」成交额（见 load_vol_avg_7d），
+        # 不能再 ×24，否则量比被缩小 24 倍：做空「≤1×」恒真、做多「≥2×」永不触发。
+        vr = vol / avg if avg and avg > 0 else None
         fund = funding.get(sym)
         for sig_type, window, direction, c_ok, v_ok in SIGNAL_DEFS:
             if not c_ok(chg):

@@ -12,6 +12,9 @@
     优先 catalyst_impact.impact_direction，缺失用 event_type 默认方向
   结算状态：
     14d(336h) 窗口算完后置 outcome_state='resolved'
+  结算节奏：
+    按窗口里程碑逐个推进（L1: 4h/24h/72h/168h/336h；L2: 24h/168h/336h），
+    每个里程碑到期即回补该窗口，而非只在 7d/14d 才重算
 
 性能：K 线 / CMC 快照 / market_daily 全部一次性批量预加载到内存，
 窗口计算在内存完成，避免逐条 DB 查询。
@@ -540,10 +543,15 @@ def fetch_pending_signals(conn, limit: int | None) -> list[dict]:
         WHERE co.outcome_id IS NULL
            OR (
                 co.outcome_state IN ('pending', 'no_data')
-                AND (
-                      (co.last_window < 168 AND cs.created_at + INTERVAL '168 hours' <= NOW())
-                   OR (co.last_window < 336 AND cs.created_at + INTERVAL '336 hours' <= NOW())
-                )
+                AND cs.created_at + make_interval(hours => (
+                        SELECT MIN(m)
+                        FROM unnest(
+                            CASE WHEN co.data_tier = 'L1'
+                                 THEN ARRAY[4, 24, 72, 168, 336]
+                                 ELSE ARRAY[24, 168, 336] END
+                        ) AS m
+                        WHERE m > co.last_window
+                    )) <= NOW()
               )
         ORDER BY cs.created_at ASC
     """

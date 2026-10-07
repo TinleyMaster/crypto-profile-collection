@@ -250,6 +250,10 @@ def main() -> int:
                     # 分批落库：缓冲上限 FLUSH_ROWS，避免千万行驻留内存（约 0.5KB/行）。
                     if not args.dry_run and len(all_rows) >= FLUSH_ROWS:
                         execute_many(conn, UPSERT_SQL, all_rows)
+                        # 每批独立提交：get_connection 只在 with 退出时 commit 一次，
+                        # 不显式提交则全部批次同处一个事务 —— 中途崩溃会整体回滚，
+                        # 且长时间持锁会拖住并发写入者（实测 lock_timeout 30s 触发）。
+                        conn.commit()
                         print(f"[db] upsert {len(all_rows)} 行（累计抓取 {fetched} 根）")
                         all_rows.clear()
                 futures = []  # 释放本批 future，切断其对 result 的引用

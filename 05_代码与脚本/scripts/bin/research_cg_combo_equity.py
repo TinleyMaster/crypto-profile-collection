@@ -29,6 +29,7 @@ import os
 import statistics
 import sys
 from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -162,6 +163,7 @@ def max_drawdown(equities: list[float]) -> float:
 def run_backtest(signals: dict, timeline: list, klines: dict[str, dict],
                  interval: str, max_pos: int, cost: float) -> dict:
     hold_h = HORIZONS[interval][-1]
+    hold_delta = timedelta(hours=hold_h)
     cash = 1.0
     positions: list[dict] = []          # {sym, entry_t, dir, weight, entry_px}
     pos_syms: set = set()
@@ -169,7 +171,7 @@ def run_backtest(signals: dict, timeline: list, klines: dict[str, dict],
     closed_by_dir: dict[int, list] = {1: [], -1: []}
     equity_curve: list[tuple] = []
     skipped = 0
-    marks: dict[str, dict] = {sym: px for sym, px in klines.items()}
+    marks: dict[str, dict] = klines
 
     def price_now(sym: str, t) -> float:
         px = marks.get(sym, {})
@@ -188,7 +190,7 @@ def run_backtest(signals: dict, timeline: list, klines: dict[str, dict],
 
     for t in timeline:
         # 1) 平仓到期
-        due = [p for p in positions if p["entry_t"] + hold_h <= t]
+        due = [p for p in positions if p["entry_t"] + hold_delta <= t]
         for p in due:
             now = price_now(p["sym"], t)
             ret = (now / p["entry_px"] - 1.0) * p["dir"]
@@ -323,6 +325,7 @@ def main() -> None:
 def equity_curve_for_month(signals, timeline, klines, interval, max_pos, cost):
     """轻量重算净值曲线（返回 (t, equity) 列表，供月度聚合）。"""
     hold_h = HORIZONS[interval][-1]
+    hold_delta = timedelta(hours=hold_h)
     cash = 1.0
     positions: list[dict] = []
     pos_syms: set = set()
@@ -343,7 +346,7 @@ def equity_curve_for_month(signals, timeline, klines, interval, max_pos, cost):
 
     out = []
     for t in timeline:
-        due = [p for p in positions if p["entry_t"] + hold_h <= t]
+        due = [p for p in positions if p["entry_t"] + hold_delta <= t]
         for p in due:
             now = price_now(p["sym"], t)
             ret = (now / p["entry_px"] - 1.0) * p["dir"]

@@ -7,7 +7,8 @@
   - OI  = 桶内 OI 变化方向（oi_close/oi_open - 1 > 0 = ↑）
   - CVD = 桶内净主动方向（Σtaker_buy - Σtaker_sell > 0 = ↑）
   - VOL = 桶内成交额相对放量（Σ(buy+sell) ≥ 该币自身中位数 = ↑）
-  八象限 = P/OI/CVD 三方向组合（VOL↑ 为场景前提，不参与分桶）：
+  八象限 = P/OI/CVD 三方向组合；VOL 作为第四维做**分列对比**（每个场景输出
+  放量↑ / 缩量↓ 两行），检验成交量是否在场景内产生额外区分（v2.4）。
 
   | # | P | OI | CVD | 解读 | 信号 |
   | S1 | ↑ | ↑ | ↑ | 现货买盘强+合约新开多仓，真实多头进攻 | 多头趋势延续 |
@@ -257,45 +258,57 @@ def print_results(panel: list[dict], title: str, use_excess: bool = False) -> No
             return b - btc if b is not None and btc is not None else None
         return r["fwd"].get(h)
 
-    # 全部桶基线
+    # 全样本基线（含放量+缩量）与 VOL 分列基线
+    base_all = {h: stats_of([_y(r, h) for r in panel if _y(r, h) is not None]) for h in hs}
     vol_up = [r for r in panel if r["vol"] == 1]
-    base = {h: stats_of([_y(r, h) for r in vol_up if _y(r, h) is not None]) for h in hs}
-    print(f"  {'场景':<4} {'P':>2} {'OI':>2} {'CVD':>2} {'n':>7} | "
+    vol_dn = [r for r in panel if r["vol"] == 0]
+    base_up = {h: stats_of([_y(r, h) for r in vol_up if _y(r, h) is not None]) for h in hs}
+    base_dn = {h: stats_of([_y(r, h) for r in vol_dn if _y(r, h) is not None]) for h in hs}
+    print(f"  {'场景':<4} {'P':>2} {'OI':>2} {'CVD':>2} {'VOL':>2} {'n':>7} | "
           + " | ".join(f"H{h}h" for h in hs))
     for k in [f"S{i}" for i in range(1, 9)]:
-        rows = [r for r in vol_up if scene_key(r) == k]
-        if not rows:
-            print(f"  {k:<4} {'':>2} {'':>2} {'':>2} {0:>7} | 无样本")
-            continue
-        p = rows[0]
-        cells = []
-        for h in hs:
-            st = stats_of([_y(r, h) for r in rows if _y(r, h) is not None])
-            cells.append(f"{st['mean']*100:+6.2f}/{st['win']*100:3.0f}%"
-                         if st["n"] >= MIN_N else "  --/--")
-        print(f"  {k:<4} {'↑' if p['p'] else '↓':>2} {'↑' if p['oi'] else '↓':>2} "
-              f"{'↑' if p['cvd'] else '↓':>2} {len(rows):>7} | " + " | ".join(cells))
-    bcells = []
-    for h in hs:
-        st = base[h]
-        bcells.append(f"{st['mean']*100:+6.2f}/{st['win']*100:3.0f}%" if st["n"] >= MIN_N else "  --/--")
-    print(f"  基线(VOL↑全样本)  {len(vol_up):>7} | " + " | ".join(bcells))
+        rows_up = [r for r in vol_up if scene_key(r) == k]
+        rows_dn = [r for r in vol_dn if scene_key(r) == k]
+        p = (rows_up or rows_dn)[0]
+        for tag, rows in (("↑", rows_up), ("↓", rows_dn)):
+            if not rows:
+                print(f"  {k:<4} {'↑' if p['p'] else '↓':>2} {'↑' if p['oi'] else '↓':>2} "
+                      f"{'↑' if p['cvd'] else '↓':>2} {tag:>2} {0:>7} | 无样本")
+                continue
+            cells = []
+            for h in hs:
+                st = stats_of([_y(r, h) for r in rows if _y(r, h) is not None])
+                cells.append(f"{st['mean']*100:+6.2f}/{st['win']*100:3.0f}%"
+                             if st["n"] >= MIN_N else "  --/--")
+            print(f"  {k:<4} {'↑' if p['p'] else '↓':>2} {'↑' if p['oi'] else '↓':>2} "
+                  f"{'↑' if p['cvd'] else '↓':>2} {tag:>2} {len(rows):>7} | " + " | ".join(cells))
 
-    # 场景解读对照（只打印样本充足的）
-    print(f"\n  —— 场景解读核对（均值收益相对基线的方向） ——")
+    def _base_line(base: dict, label: str) -> None:
+        bcells = []
+        for h in hs:
+            st = base[h]
+            bcells.append(f"{st['mean']*100:+6.2f}/{st['win']*100:3.0f}%" if st["n"] >= MIN_N else "  --/--")
+        print(f"  {label:<14} {len(vol_up) if '放量' in label else len(vol_dn) if '缩量' in label else len(panel):>7} | "
+              + " | ".join(bcells))
+
+    _base_line(base_up, "基线·放量VOL↑")
+    _base_line(base_dn, "基线·缩量VOL↓")
+    _base_line(base_all, "基线·全样本")
+
+    # VOL 分列差异核对（放量 vs 缩量，最远档）
+    print(f"\n  —— VOL 分列差异核对（H{hs[-1]}h 均值收益 %） ——")
     for k in [f"S{i}" for i in range(1, 9)]:
-        rows = [r for r in vol_up if scene_key(r) == k]
-        if len(rows) < MIN_N:
-            print(f"  {k}: 样本不足 (n={len(rows)})")
-            continue
-        # 用第一档前瞻（H{hs[0]}）与最远档
-        h1, hlast = hs[0], hs[-1]
-        m1 = statistics.mean([_y(r, h1) for r in rows if _y(r, h1) is not None])
-        ml = statistics.mean([_y(r, hlast) for r in rows if _y(r, hlast) is not None])
-        b1 = base[h1]["mean"]; bl = base[hlast]["mean"]
+        rows_up = [r for r in vol_up if scene_key(r) == k]
+        rows_dn = [r for r in vol_dn if scene_key(r) == k]
+        hlast = hs[-1]
+        mu = statistics.mean([_y(r, hlast) for r in rows_up if _y(r, hlast) is not None]) if len(rows_up) >= MIN_N else None
+        md = statistics.mean([_y(r, hlast) for r in rows_dn if _y(r, hlast) is not None]) if len(rows_dn) >= MIN_N else None
         nm, desc = SCENARIOS[k]
-        print(f"  {k} {nm:<10} | H{h1} {m1*100:+.2f}% (基线{b1*100:+.2f}%) "
-              f"| H{hlast} {ml*100:+.2f}% (基线{bl*100:+.2f}%) | 解读:{desc}")
+        if mu is None and md is None:
+            print(f"  {k} {nm:<10} | 样本不足")
+            continue
+        fmt = lambda v: "  --" if v is None else f"{v*100:+6.2f}"
+        print(f"  {k} {nm:<10} | 放量{fmt(mu)}  缩量{fmt(md)}  (Δ{'%+.2f' % ((mu-md)*100) if mu is not None and md is not None else '--'})")
 
 
 def main() -> None:

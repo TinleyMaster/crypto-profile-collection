@@ -77,6 +77,7 @@ EVENT_TYPE_DIRECTION = {
     "security": "bearish",   # 2026-10-07 新增：安全事件/漏洞/被盗 → 利空
     "unlock": "bearish",     # 2026-10-07 新增：代币解锁流通释放 → 利空
     "mint": "bearish",       # 2026-10-07 新增：增发/铸造稀释 → 利空
+    "etf": "bullish",        # 2026-10-08 新增：ETF 递表/审批/资金流 → 利多
     "market_update": "neutral",
     "other": None,
 }

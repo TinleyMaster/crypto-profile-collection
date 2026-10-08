@@ -9,6 +9,23 @@
 # 匹配优先级按列表顺序，命中即止
 # ---------------------------------------------------------------------
 rule_event_keywords:
+  # security 最前置（2026-10-08 审计）：攻击事件必须优先于 listing/delisting 判定。
+  # 旧序 delisting 在前，裸 "remove" 会命中「removed ETH from contract」→ 攻击被误判下架
+  # （MakerDAO 案例：rule_et=delisting，scope 判 structural、挂 11 个资产信号）。
+  - event_type: "security"
+    keywords: ["漏洞", "被盗", "黑客", "钓鱼", "hack", "hacked", "stolen", "phish", "scam",
+               "rug pull", "rugpull", "安全事件", "盗走", "失窃", "被攻击", "遭攻击",
+               "exploit", "exploited", "attacker", "攻击者", "攻击"]
+    require_token_hint: false
+
+  - event_type: "delisting"
+    # 2026-10-08 收紧：移除裸 "remove"（在攻击正文「removed X from contract」里误命中），
+    # 保留明确的「下架」语境词。置于 listing 之前，避免 "delist X/USDT trading pair"
+    # 被 listing 的裸 "trading pair" 抢先判成「上线」（方向相反的错误）。
+    keywords: ["下架", "下市", "退市", "delist", "delisted", "de-listing", "delisting"]
+    title_only: true
+    require_token_hint: true
+
   # listing（P0-2 收紧，2026-09-21）：只在标题匹配 + 只保留「公告型」短语。
   # 旧表用 新增/发行/上市/list/launch 在长正文里做子串匹配，把行情综述/播客
   # 里的「Arc Chain上线」「代币发行平台」「股价自上市以来」「relistings」误判成
@@ -19,11 +36,6 @@ rule_event_keywords:
                "to list", "will list", "listed on", "listing on", "launch on"]
     title_only: true
     # 必须同时含有 token/交易对特征（避免"上线新功能"误命中）
-    require_token_hint: true
-
-  - event_type: "delisting"
-    keywords: ["下架", "下市", "退市", "移除", "delist", "remove", "will be removed", "de-listing"]
-    title_only: true
     require_token_hint: true
 
   - event_type: "burn"
@@ -48,10 +60,6 @@ rule_event_keywords:
 
   - event_type: "tech_upgrade"
     keywords: ["升级", "主网", "迭代", "硬分叉", "硬分岔", "upgrade", "mainnet", "fork", "V2", "V3", "release", "launchpad", "testnet"]
-    require_token_hint: false
-
-  - event_type: "security"
-    keywords: ["漏洞", "被盗", "黑客", "钓鱼", "hack", "hacked", "stolen", "phish", "scam", "rug pull", "rugpull", "安全事件", "盗走", "失窃", "被攻击", "遭攻击"]
     require_token_hint: false
 
   - event_type: "unlock"

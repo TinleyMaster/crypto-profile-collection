@@ -45,6 +45,7 @@ RULE = {
     "unlock":       ("bearish", "medium", 0),   # 2026-10-07 新增：代币解锁 → 利空
     "mint":         ("bearish", "medium", 0),   # 2026-10-07 新增：增发稀释 → 利空
     "airdrop":      ("bullish", "weak", 7),     # 2026-10-07 对齐：空投 → 利多
+    "etf":          ("bullish", "medium", 14),  # 2026-10-08 新增：ETF 递表/审批/资金流 → 利多
     "market_update":("neutral", "weak", 0),
 }
 DEFAULT_RULE = ("neutral", "weak", 0)

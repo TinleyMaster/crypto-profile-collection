@@ -493,6 +493,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "12h"],
         "category": "投研分析",
     },
+    # 深度缩量 × OI × 价格方向 组合回测
+    "cg_vol_deep_combo_4h": {
+        "name": "深度缩量×OI×价格方向 组合回测 4h",
+        "description": "深缩(VR<0.3) × OI增/降 × 涨后/跌后 三维 8 组（@4h）",
+        "script": "research_cg_vol_deep_combo.py",
+        "default_args": ["--interval", "4h"],
+        "category": "投研分析",
+    },
+    "cg_vol_deep_combo_12h": {
+        "name": "深度缩量×OI×价格方向 组合回测 12h",
+        "description": "深缩(VR<0.3) × OI增/降 × 涨后/跌后 三维 8 组（@12h 全年）",
+        "script": "research_cg_vol_deep_combo.py",
+        "default_args": ["--interval", "12h"],
+        "category": "投研分析",
+    },
     # VOL 量能强度分档回测（缩量要多缩才有效？）
     "cg_vol_buckets_4h": {
         "name": "VOL 量能强度分档回测 4h",

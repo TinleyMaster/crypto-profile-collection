@@ -241,6 +241,93 @@ tier_thresholds:
   C: 40
   # < 40 不入信号表（仅 grade/resonance 留底供回测）
 
+# ---------------------------------------------------------------------
+# 源头内容过滤（审计 2026-10-08 P0：kol_catalyst_binance_square_7 噪声源）
+# ---------------------------------------------------------------------
+# Binance News 官方账号（币安广场全量财经 RSS）85% 为非加密内容
+# （美元/原油/伊朗/Disney/台积电等），被当成加密催化剂采集入库，
+# 污染 market_update/other 分布、稀释事件研究与校准样本。
+# 对指定 source 做「噪声黑名单」过滤：命中任一噪声词才拦截。
+# 采用黑名单而非白名单（实测白名单误杀 50% 正经加密新闻，如
+# Justin Sun/Token2049/NEAR Intents/Ripple Custody），宁多勿漏。
+source_crypto_filter:
+  enabled: true
+  # 噪声黑名单关键词（命中任一 → 拦截）。英文按词边界匹配。
+  # 仅覆盖「宏观/传统金融/政治/商品/他国事务」等明确非加密主题。
+  noise_keywords:
+    - "dollar"
+    - "yen"
+    - "pound"
+    - "bond"
+    - "treasury"
+    - "yield"
+    - "crude"
+    - "oil"
+    - "gas"
+    - "gold"
+    - "silver"
+    - "stock"
+    - "equities"
+    - "shares"
+    - "fed"
+    - "federal reserve"
+    - "inflation"
+    - "cpi"
+    - "nonfarm"
+    - "payroll"
+    - "央行"
+    - "美联储"
+    - "加息"
+    - "降息"
+    - "原油"
+    - "黄金"
+    - "债券"
+    - "股市"
+    - "上证"
+    - "恒生"
+    - "日经"
+    - "美元"
+    - "日元"
+    - "人民币"
+    - "特朗普"
+    - "trump"
+    - "伊朗"
+    - "iran"
+    - "israel"
+    - "以色列"
+    - "乌克兰"
+    - "ukraine"
+    - "russia"
+    - "俄罗斯"
+    - "中国"
+    - "china"
+    - "india"
+    - "印度"
+    - "japan"
+    - "日本"
+    - "korea"
+    - "韩国"
+    - "disney"
+    - "nba"
+    - "nfl"
+    - "hiring"
+    - "ipo"
+    - "ai stocks"
+    - "earnings"
+    - "airport"
+    - "airline"
+    - "loan"
+    - "bank"
+    - "银行"
+    - "证交所"
+    - "交易所集团"
+    - "dow"
+    - "nasdaq"
+    - "s&p"
+    - "trade war"
+    - "tariff"
+    - "贸易"
+
 # 信号过期天数（按 kind）
 signal_expiry_days:
   structural: 7

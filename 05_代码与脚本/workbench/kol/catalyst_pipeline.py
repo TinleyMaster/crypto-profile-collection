@@ -35,6 +35,71 @@ from catalyst.db import get_conn  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------
+# 源头内容过滤（审计 2026-10-08 P0：kol_catalyst_binance_square_7 噪声源）
+# ---------------------------------------------------------------------
+# Binance News 官方账号（币安广场全量财经 RSS）85% 为非加密内容
+# （美元/原油/伊朗/Disney/台积电等），被当成加密催化剂采集入库。
+# 规则外置在 catalyst_rules.yaml 的 source_crypto_filter 段；这里只负责
+# 加载并应用「加密相关性」白名单：命中任一关键词才放行入库。
+_SOURCE_FILTER_CACHE: dict | None = None
+
+
+def _load_source_filter() -> dict:
+    """惰性加载 source_crypto_filter 配置（进程内缓存，避免每帖读盘）。"""
+    global _SOURCE_FILTER_CACHE
+    if _SOURCE_FILTER_CACHE is not None:
+        return _SOURCE_FILTER_CACHE
+    try:
+        import yaml
+        candidates = [
+            Path("/app/catalyst_rules.yaml"),               # 容器扁平部署
+            Path(__file__).resolve().parent / "catalyst_rules.yaml",  # workbench/catalyst/
+        ]
+        rules_path = next((p for p in candidates if p.exists()), None)
+        if not rules_path:
+            _SOURCE_FILTER_CACHE = {"enabled": False, "keywords": []}
+            return _SOURCE_FILTER_CACHE
+        cfg = yaml.safe_load(rules_path.read_text(encoding="utf-8")) or {}
+        _SOURCE_FILTER_CACHE = cfg.get("source_crypto_filter", {"enabled": False, "keywords": []})
+    except Exception as e:
+        logger.warning("加载 source_crypto_filter 失败，按不过滤处理: %s", e)
+        _SOURCE_FILTER_CACHE = {"enabled": False, "keywords": []}
+    return _SOURCE_FILTER_CACHE
+
+
+def _is_crypto_relevant(text: str) -> bool:
+    """判断内容是否「非加密噪声」（审计 2026-10-08 P0 修正为黑名单策略）。
+
+    原白名单方案（命中加密词才放行）误杀严重：Binance News 全量财经流里，
+    "Justin Sun/Token2049/NEAR Intents/Ripple Custody" 等正经加密新闻因关键词
+    覆盖不全被拦，实测 50% 加密内容误杀。改为**黑名单**：只有命中明确的
+    「宏观/传统金融/政治/商品」噪声关键词才拦截，其余一律放行——宁多勿漏，
+    保住全部加密内容，只拦明确无关项。
+
+    Returns:
+        True = 放行；False = 命中噪声关键词，拦截
+    """
+    cfg = _load_source_filter()
+    if not cfg.get("enabled"):
+        return True
+    # 噪声黑名单（词边界匹配英文）
+    noise_kws = (cfg.get("noise_keywords") or []) + (cfg.get("keywords") or [])
+    if not noise_kws:
+        return True
+    low = (text or "").lower()
+    import re
+    for kw in noise_kws:
+        if not kw:
+            continue
+        if kw.isascii() and kw.isalpha():
+            if re.search(rf"\b{re.escape(kw.lower())}\b", low):
+                return False
+        else:
+            if kw.lower() in low:
+                return False
+    return True
+
 
 def build_source_code(profile: dict) -> str:
     """根据博主档案生成 catalyst source_code。
@@ -68,10 +133,19 @@ def scraped_post_to_catalyst(post, profile: dict) -> CatalystItem | None:
         profile: kol_profile 行 dict
 
     Returns:
-        CatalystItem，无正文则返回 None
+        CatalystItem，无正文或非加密内容则返回 None
     """
     if not post.content_text:
         return None
+
+    # 源头内容过滤（审计 2026-10-08 P0）：仅对「催化剂型 KOL 账号」应用加密相关性
+    # 白名单——Binance News（kol_catalyst_binance_square_7）全量财经 RSS 85% 非加密，
+    # 污染 catalyst 表与校准样本。kol/news_media 型（真人博主/专业加密媒体）不过滤。
+    if profile.get("kol_type") == "catalyst":
+        source_code = build_source_code(profile)
+        if source_code == "kol_catalyst_binance_square_7":
+            if not _is_crypto_relevant(post.content_text):
+                return None
 
     # 标题：取正文第一行或前 80 字
     title = _extract_title(post.content_text)

@@ -508,6 +508,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "12h"],
         "category": "投研分析",
     },
+    # 盘面因子组合净值回测（深缩做多 + S3 放量做空）
+    "cg_combo_equity_12h": {
+        "name": "盘面因子组合净值回测 12h",
+        "description": "深缩做多 + S3放量做空 多币等权组合，净值/年化/回撤/夏普（@12h 全年）",
+        "script": "research_cg_combo_equity.py",
+        "default_args": ["--interval", "12h", "--max-pos", "8"],
+        "category": "投研分析",
+    },
+    "cg_combo_equity_4h": {
+        "name": "盘面因子组合净值回测 4h",
+        "description": "深缩做多 + S3放量做空 多币等权组合，净值/年化/回撤/夏普（@4h）",
+        "script": "research_cg_combo_equity.py",
+        "default_args": ["--interval", "4h", "--max-pos", "12"],
+        "category": "投研分析",
+    },
     # VOL 量能强度分档回测（缩量要多缩才有效？）
     "cg_vol_buckets_4h": {
         "name": "VOL 量能强度分档回测 4h",

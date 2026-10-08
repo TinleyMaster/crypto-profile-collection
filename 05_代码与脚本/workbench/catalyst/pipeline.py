@@ -262,6 +262,21 @@ def _resolve_asset_ids(
         if pairs:
             link_source = "cashtag"
 
+    # 项目方名 → 代币前置（审计 2026-10-08 P0）：币安广场帖子的 tradingPairsV2 标注
+    # 常把事件挂到「被提及的大市值代币」而非项目方本体（Solv Protocol 事件被挂 BTC、
+    # 因正文提 "BTC+ 业务/50 BTC"）。标题出现项目方名且库中有对应代币时，将该项目方
+    # 代币前置为事件主语，使邮件标题/行情落到真实标的（Solv Protocol → SOLV）。
+    # 无法匹配时保持原序，不劣化。
+    if item.title:
+        proj_ids = _match_project_name_to_assets(conn, item.title)
+        if proj_ids:
+            base_list = [extract_base_symbol(p) or "" for p in pairs]
+            # 只补「尚未在 pairs 里」的项目方代币，避免重复
+            missing = [a for a in proj_ids if a["symbol"] not in base_list]
+            if missing:
+                pairs = [m["symbol"] + "USDT" for m in missing] + pairs
+                link_source = "project_name"
+
     if not pairs:
         return []
 
@@ -270,6 +285,58 @@ def _resolve_asset_ids(
 
     ctx = (item.title or "") + " " + (item.body_text or "")
     return map_pairs_to_asset_ids(pairs, conn, context_text=ctx)
+
+
+def _match_project_name_to_assets(conn, title: str) -> list[dict]:
+    """从标题提取项目方名并匹配 core.asset（返回 [{symbol, asset_id}]）。
+
+    匹配策略（审计 2026-10-08 P0，防人名/仿盘误配）：
+      仅用**组织词强信号**提取项目方名——紧跟组织词（Protocol/Foundation/
+      Labs/Network/DAO/Chain…）前的大写词，或形如 `XxxDAO` 的复合词：
+      "Solv Protocol"→Solv、"Arbitrum Foundation"→Arbitrum、"MakerDAO"→Maker。
+      人名词（"Meng Yan said"、"Justin Sun"）后无组织词，自然落空。
+      不做兜底分支：无组织词时返回空，由原交易对关联（BTCUSDT 等）兜底，
+      避免 "Bitcoin spot ETFs"→BITCOIN 仿盘、"Justin Sun"→SUN 人名币 的误配。
+    """
+    try:
+        title = title or ""
+        words = set(
+            re.findall(
+                r"([A-Z][A-Za-z0-9\-\.]{2,})\s+(?:protocol|foundation|labs?|network|dao|chain|swap|finance|capital|group|token)\b",
+                title, flags=re.I,
+            )
+        )
+        # 复合词：XxxDAO / XxxChain / XxxSwap（无空格分隔的组织词）
+        words |= set(
+            re.findall(r"([A-Z][A-Za-z0-9\-\.]{2,})(?:DAO|Chain|Swap|Finance|Network|Protocol)\b", title)
+        )
+    except Exception:
+        return []
+    if not words:
+        return []
+    rows = conn.execute(
+        """
+        SELECT a.asset_id, a.canonical_symbol, a.canonical_name, a.market_cap_rank
+        FROM core.asset a
+        WHERE (
+            LOWER(a.canonical_symbol) = ANY(%s::text[])
+            OR EXISTS (
+                -- canonical_name 词边界精确匹配（"Arbitrum" ↔ Arbitrum，防 Bitcoin Cash 误配）
+                SELECT 1 FROM unnest(%s::text[]) w
+                WHERE LOWER(COALESCE(a.canonical_name, '')) ~
+                      ('(^|[^a-z])' || LOWER(w) || '([^a-z]|$)')
+            )
+        )
+          AND LOWER(a.canonical_symbol) NOT IN
+              ('usdt', 'usdc', 'busd', 'tusd', 'usdp', 'fdusd', 'usd', 'usde', 'usd1')
+          AND LOWER(COALESCE(a.canonical_name, '')) !~ 'bridged|wrapped|intents|staked|second chance|base coin|trophy|tomato'
+          AND a.market_cap_rank IS NOT NULL
+        ORDER BY a.market_cap_rank ASC, a.asset_id
+        LIMIT 3
+        """,
+        ([w.lower() for w in words], [w.lower() for w in words]),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _update_asset_links(

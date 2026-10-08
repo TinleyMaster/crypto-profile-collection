@@ -2228,7 +2228,14 @@ def _build_major_event_html(r: dict) -> str:
     impact = _DIRECTION_CN.get(r.get("impact_direction"), r.get("impact_direction") or "—")
     strength = _IMPACT_STRENGTH_CN.get(r.get("impact_strength"),
                                        r.get("impact_strength") or "—")
-    res = _RESONANCE_CN.get(r.get("resonance_state"), r.get("resonance_state") or "—")
+    # 利空信号不显示「可动作」（审计 2026-10-08）：security/delisting 类重大事件
+    # 的 signal 实际 status=invalid（本系统做多口径，利空不产做多机会），但旧文案
+    # 按 resonance_state 显示 "weak → open 可动作"，与「利空传导」自相矛盾。
+    # 利空时改显示「利空事件（不产做多机会）」；非利空才展示 resonance 定价语义。
+    if bool(r.get("is_bearish")) or str(r.get("impact_direction") or "").lower() == "bearish":
+        res = "利空事件（不产做多机会，已剔除）"
+    else:
+        res = _RESONANCE_CN.get(r.get("resonance_state"), r.get("resonance_state") or "—")
     kind = _KIND_CN.get(r.get("catalyst_kind"), "—")
 
     pre = _to_float(r.get("prelaunch_ret_24h"))
@@ -2370,15 +2377,29 @@ def _build_major_event_html(r: dict) -> str:
 
   {so_block}
 
-  {f'''<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">
-    <div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">催化剂原文</div>
-    <div style="font-size:13px;line-height:1.7;color:#374151;white-space:pre-wrap">{body[:2000]}</div>
-  </div>''' if body else ''}
+  {_major_event_detail_block(summary, body)}
 
   <div style="font-size:11px;color:#9ca3af;text-align:center;padding:8px">
     由催化剂管道「重大事件」通道自动发送 · 判据与 A 级 Alert 独立
   </div>
 </div></body></html>"""
+
+
+def _major_event_detail_block(summary: str, body: str) -> str:
+    """重大事件「催化剂详情」区块：中文摘要为主，英文原文折叠（审计 2026-10-08）。"""
+    if not (summary or body):
+        return ""
+    parts = ['<div style="background:#fff;border-radius:8px;padding:16px 20px;margin-bottom:14px">',
+             '<div style="font-size:13px;font-weight:700;color:#111827;margin-bottom:6px">催化剂详情</div>']
+    if summary:
+        parts.append(f'<div style="font-size:13px;line-height:1.7;color:#374151">{summary}</div>')
+    if body:
+        parts.append('<details style="margin-top:8px">'
+                     '<summary style="font-size:12px;color:#6b7280;cursor:pointer">原文（英文）</summary>'
+                     f'<div style="font-size:13px;line-height:1.7;color:#374151;white-space:pre-wrap;margin-top:6px">{body[:2000]}</div>'
+                     '</details>')
+    parts.append('</div>')
+    return "".join(parts)
 
 
 def send_major_event_alerts(conn, hours: int = 24) -> dict:
@@ -2405,6 +2426,16 @@ def send_major_event_alerts(conn, hours: int = 24) -> dict:
         return {"sent": 0, "skipped": 0, "failed": 0, "signals": [], "reason": None}
 
     sent_ids, failed_ids, skipped = [], [], 0
+    # 惰性翻译器（审计 2026-10-08）：重大事件邮件要求全中文，若 AI 预处理未跑到该
+    # catalyst（title_cn/ai_summary 缺失，如 kol_catalyst_binance_square_7 新帖），
+    # 发送前即时补译并回写，确保标题/正文展示中文。
+    try:
+        from .ai_enhance import CatalystTranslator
+        _translator = CatalystTranslator.from_settings()
+    except Exception as e:
+        logger.warning("重大事件翻译器加载失败（邮件将显示原文）: %s", e)
+        _translator = None
+
     for r in rows:
         sid = r["signal_id"]
         subject = _major_event_subject(r)
@@ -2413,6 +2444,31 @@ def send_major_event_alerts(conn, hours: int = 24) -> dict:
                                       r.get("tier"), subject):
             skipped += 1
             continue
+
+        # 发送前补中文（仅在缺 title_cn 时调用一次，成功回写；失败降级原文不阻断发送）
+        if _translator and not r.get("title_cn"):
+            try:
+                tr = _translator.translate(
+                    r.get("catalyst_title") or "",
+                    r.get("catalyst_body") or "",
+                )
+                if tr and tr.get("title_cn"):
+                    conn.execute(
+                        "UPDATE biz.asset_catalyst "
+                        "SET title_cn = %s, ai_summary = COALESCE(%s, ai_summary), "
+                        "    ai_processed = true, ai_processed_at = NOW() "
+                        "WHERE catalyst_id = %s",
+                        (tr["title_cn"], tr.get("summary_cn"), r["catalyst_id"]),
+                    )
+                    conn.commit()
+                    # Row 只读 → 可变 dict，更新渲染字段
+                    r = dict(r)
+                    r["title_cn"] = tr["title_cn"]
+                    r["ai_summary"] = tr.get("summary_cn") or r.get("ai_summary")
+                    logger.info("重大事件补译成功 sig=%s", sid)
+            except Exception as e:
+                logger.warning("重大事件补译失败 sig=%s（降级原文）: %s", sid, e)
+
         ok, msg = _send_email(subject, _build_major_event_html(r))
         _mark_sent(conn, sid, NTYPE_MAJOR_EVENT, r.get("tier"), subject,
                    status="sent" if ok else "failed",

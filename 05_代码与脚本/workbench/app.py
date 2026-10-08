@@ -478,6 +478,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "12h"],
         "category": "投研分析",
     },
+    # S3/S4 × OI 增幅强度分档回测（检验拥挤回落是否集中在极端桶，含成本线）
+    "cg_s1s8_strength_4h": {
+        "name": "S3/S4 × OI 强度分档回测 4h",
+        "description": "S3 做空 / S4 做多按 OI 增幅分 5 档 + 0.3% 成本线（@4h）",
+        "script": "research_cg_s1s8_strength.py",
+        "default_args": ["--interval", "4h"],
+        "category": "投研分析",
+    },
+    "cg_s1s8_strength_12h": {
+        "name": "S3/S4 × OI 强度分档回测 12h",
+        "description": "S3 做空 / S4 做多按 OI 增幅分 5 档 + 0.3% 成本线（@12h 全年）",
+        "script": "research_cg_s1s8_strength.py",
+        "default_args": ["--interval", "12h"],
+        "category": "投研分析",
+    },
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",

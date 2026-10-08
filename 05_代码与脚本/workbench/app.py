@@ -493,6 +493,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "12h"],
         "category": "投研分析",
     },
+    # VOL 量能强度分档回测（缩量要多缩才有效？）
+    "cg_vol_buckets_4h": {
+        "name": "VOL 量能强度分档回测 4h",
+        "description": "VOL_ratio 深度缩量→深度放量分档 + S1-S8×四大类（@4h）",
+        "script": "research_cg_vol_buckets.py",
+        "default_args": ["--interval", "4h"],
+        "category": "投研分析",
+    },
+    "cg_vol_buckets_12h": {
+        "name": "VOL 量能强度分档回测 12h",
+        "description": "VOL_ratio 深度缩量→深度放量分档 + S1-S8×四大类（@12h 全年）",
+        "script": "research_cg_vol_buckets.py",
+        "default_args": ["--interval", "12h"],
+        "category": "投研分析",
+    },
     # ═══ 链上数据 ═══
     "chain_holder_snapshot": {
         "name": "链上持仓快照采集",

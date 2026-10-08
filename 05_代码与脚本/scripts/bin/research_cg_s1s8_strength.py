@@ -216,7 +216,10 @@ def print_strength(panel: list[dict], title: str, use_excess: bool, cost: float)
             print(f"  {label}: 无样本")
             continue
         chgs = sorted(r["oi_chg"] for r in rows)
-        qs = [chgs[int(len(chgs) * i / NB)] for i in range(NB + 1)]
+        if len(chgs) < NB:
+            print(f"  {label}: 样本不足（n={len(chgs)} < {NB}）无法分档")
+            continue
+        qs = [chgs[min(int(len(chgs) * i / NB), len(chgs) - 1)] for i in range(NB + 1)]
         print(f"\n  —— {label}（n={len(rows)}）按 OI 增幅分 {NB} 档 ——")
         print(f"    {'档':<4} {'OI增幅区间':<16} {'n':>6} | "
               + " | ".join(f"H{h}h" for h in hs))

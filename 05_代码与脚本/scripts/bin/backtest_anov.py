@@ -114,26 +114,24 @@ def main() -> int:
     print(f"加载 1h quote_vol（{len(syms)} 币，{start} 起）...", flush=True)
     vols = _load_vols(syms, start)
 
+    # 预计算每币 AnoV 序列（rolling quantile 为 C 实现，整条一次算完，避免逐事件重算）
+    ano_ser = {sym: {n: _anov(s, n) for n in N_LIST} for sym, s in vols.items()}
+
     ano = {n: np.full(len(rows), np.nan) for n in N_LIST}
     miss = 0
     for i, r in enumerate(rows):
-        s = vols.get(r["symbol"])
-        if s is None:
+        aser = ano_ser.get(r["symbol"])
+        if aser is None:
             miss += 1
             continue
-        idx = s.index
-        t = r["eo"]
-        # 事件 bar 前一小时往前 n+2 根（不含信号 bar）
-        end = idx.searchsorted(t, side="left")
-        if end < 3:
-            continue
-        win = s.iloc[max(0, end - 50):end]  # 最多取前 50 根足够 n<=48
-        if len(win) < 3:
-            continue
         for n in N_LIST:
-            v = _anov(win, n).iloc[-1]
-            if v == v:
-                ano[n][i] = v
+            ser = aser[n]
+            # 事件 bar 前一小时（不含信号 bar）的 AnoV
+            j = ser.index.searchsorted(r["eo"], side="left") - 1
+            if 0 <= j < len(ser):
+                v = float(ser.iloc[j])
+                if v == v:
+                    ano[n][i] = v
     have = ~np.isnan(ano[20])
     print(f"AnoV 可关联: {int(have.sum()):,}（缺失 {miss}）\n")
 

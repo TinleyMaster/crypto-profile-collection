@@ -105,6 +105,7 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     rec = {
         "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],
         "direction": sig["direction"], "params": p,
+        "notional": notional, "leverage": lev,
     }
     if not live or not settings.signal_trade_enabled:
         rec.update(decision="dry_run", reason="V2_TRADE_ENABLED=0 or dry-run")
@@ -133,10 +134,46 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
             trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
         )
-        rec.update(decision="ordered", order=r.get("orderId"), reason="ok")
+        rec.update(decision="ordered", order=r.get("orderId"), reason="ok",
+                   order_id=r.get("orderId"),
+                   open_price=float(r.get("avgPrice") or r.get("_price") or 0),
+                   open_qty=float(r.get("_qty") or 0))
     except Exception as e:  # noqa: BLE001
         rec.update(decision="error", reason=f"{type(e).__name__}: {e}")
     return rec
+
+
+def _reconcile_closed(client, settings, conn) -> int:
+    """对账：查 v2_trade_log 中未平仓记录，若币安已无持仓 → 拉 income 回填盈亏。
+
+    TRAIL/SL/TP 触发后由币安自动平仓，本函数轮询补录 close_ts / realized_pnl。
+    返回本次回填笔数。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, symbol, open_ts FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
+        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
+    n = 0
+    for t in rows:
+        try:
+            if client.get_position_amt(t["symbol"]) != 0:
+                continue  # 仍持仓
+            start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+            incomes = client.get_income(t["symbol"], start_ms=start_ms)
+            pnl = sum(float(i.get("income", 0)) for i in incomes
+                      if i.get("incomeType") == "REALIZED_PNL")
+            comm = sum(float(i.get("income", 0)) for i in incomes
+                       if i.get("incomeType") == "COMMISSION")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.v2_trade_log SET close_ts=NOW(), realized_pnl_usdt=%s, "
+                    "commission_usdt=%s, win=%s, exit_reason='unknown' WHERE id=%s",
+                    (pnl, comm, pnl + comm > 0, t["id"]),
+                )
+            print(f"  [reconcile] {t['symbol']} 已平仓 pnl={pnl:+.4f} comm={comm:+.4f} win={pnl+comm>0}")
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  [reconcile] {t['symbol']} 对账失败: {type(e).__name__}: {e}")
+    return n
 
 
 def main() -> int:
@@ -170,6 +207,24 @@ def main() -> int:
                             "WHERE id=%s",
                             (rec["decision"], datetime.now(timezone.utc), sig["id"]),
                         )
+                    # 实盘开仓 → 写 v2_trade_log（供实盘胜率复验）
+                    if rec["decision"] == "ordered":
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO biz.v2_trade_log "
+                                "(signal_id, symbol, signal_type, direction, open_ts, "
+                                " open_price, open_qty, notional_usdt, leverage, order_id) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                                "ON CONFLICT (signal_id) DO NOTHING",
+                                (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
+                                 datetime.now(timezone.utc), rec.get("open_price"),
+                                 rec.get("open_qty"), rec.get("notional"), rec.get("leverage"),
+                                 rec.get("order_id")),
+                            )
+        if args.watch:
+            # 对账已平仓持仓（TRAIL/SL/TP 触发后补录盈亏）
+            with get_connection(settings.database_url) as conn:
+                _reconcile_closed(client, settings, conn)
         if not args.watch:
             break
         import time

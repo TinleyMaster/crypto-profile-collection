@@ -188,6 +188,23 @@ class BinanceFuturesClient:
                 return float(p.get("positionAmt", 0))
         return 0.0
 
+    def get_income(self, symbol: str | None = None,
+                   start_ms: int | None = None, end_ms: int | None = None,
+                   limit: int = 500) -> list[dict]:
+        """已实现收益流水（USER_DATA /fapi/v1/income）。
+
+        incomeType: REALIZED_PNL（平仓盈亏）、COMMISSION（手续费）等。
+        用于实盘胜率对账：按 symbol + 时间窗拉取已平仓的盈亏与手续费。
+        """
+        params: dict = {"limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if start_ms:
+            params["startTime"] = start_ms
+        if end_ms:
+            params["endTime"] = end_ms
+        return self._request("GET", "/fapi/v1/income", params=params, signed=True)
+
     def get_position_mode(self) -> str:
         """双开模式检测：dual=双向持仓，oneway=单向持仓。"""
         if self._position_mode is None:

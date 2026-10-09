@@ -1826,6 +1826,17 @@ def _recent_major_events(conn, hours: int = 24,
     口径说明：`category` 先按**标题**关键词兜底归类 security/etf/macro（与周报同源，
     不看 ai_summary 以免无关事件蹭词），并识别行情播报；`importance` 的权重表直接复用
     周报 `_WEEKLY_TYPE_WEIGHT`，避免两处权重漂移。
+
+    审计 2026-10-09 P1（A+B+C 组合修复，仅作用于本通道、不影响周报）：
+    - B 非事件降级：观点帖（发文表示/预计/预测/评论称…）、个人案例（社区用户/某用户…）、
+      月度汇总（每月/月报/盘点…）、媒体自宣（launched its own/self-、推出自有…）
+      统一降级 other——这类「非单一资产事件」此前被 ai/rule 误判 security/listing 后，
+      凭大市值权重（asset_w=1.0）以 62~95 分过线（实测 5 封误发邮件全部命中该缺陷）。
+    - C 兜底收紧：etf 关键词要求「事件性」表述（获批/上市/提交/招股…），排除单日资金流
+      这类常规数据（仅凭 'etf' 一词即可 85×asset_w 过线，属周报口径复用过宽）。
+    - A security 实锤门槛：category=security 时要求标题命中真实攻击词或权威分≥60。
+      实测权威分无法单独区分真攻击与观点帖（「79th Vault 被盗 1,251 万」与「Vitalik 警告」
+      同为 auth=40），故采用「实锤词 OR 高权威」双通道，真攻击不误杀。
     """
     # 类型权重表 → SQL CASE（复用周报权重，避免第二份口径）
     weight_case = "\n                    ".join(
@@ -1894,9 +1905,45 @@ def _recent_major_events(conn, hours: int = 24,
             SELECT *,
                 CASE
                     -- 关键词只匹配**标题**（ai_summary 过长，会在无关事件里蹭到关键词）
+                    -- 审计 2026-10-09 P1（方案 B）：重大事件通道混入「非单一资产事件」——观点帖
+                    -- （Vitalik 警告 AI 密码学风险 / Immunefi 评论）、个人案例（机场 WiFi 钓鱼）、
+                    -- 月度汇总（零时月报）、媒体自宣（Decrypt 自家 Money Accounts），被 ai/rule 误判
+                    -- security/listing 后，凭大市值权重（asset_w=1.0）以 62~95 分过线。
+                    -- 此处统一降级 other（type_w=32，大市值也过不了 55 阈值）：
+                    --   观点帖：发文/发推/发帖 + 表示/称/警告/提醒/呼吁，以及 预计/预测/观点/评论称/分析称
+                    --   个人案例：社区用户/某用户/有用户称/有网友/用户发文
+                    --   汇总帖：每月/月度/月报/盘点/回顾
+                    --   媒体自宣：launched its own/self-（英文特征；中文「推出自家产品」与真事件无法
+                    --      区分，靠宣布动作词保护，不在此降级）
+                    --   英文观点：said that / warned that / urged / called for / argued that 等
+                    -- 排除两类（避免误伤真事件）：
+                    --   ① 标题含**平台级实锤攻击词**（遭攻击/hack/exploit/漏洞/rug…）→ 真攻击不降级。
+                    --      注意不包含裸「被盗/被黑」：个人钱包「被盗 3.7 BNB」（机场 WiFi 钓鱼）也含
+                    --      「被盗」，属个人级，必须降级；平台级以「遭攻击/漏洞/hack」等区分。
+                    --   ② 标题含**宣布动作词**（宣布/推出/上线/发布/获批/通过/完成 等）→ 真落地不降级
+                    WHEN (
+                            (
+                                head ~ '发文表示|发推表示|发文称|发推称|发文指出|发推指出|发文警告|发推警告|发文提醒|发推提醒|发文呼吁|发推呼吁|发帖表示|发帖称|警告称|提醒称|评论称|预计|预测|观点|分析称|呼吁'
+                                OR head ~ '社区用户|某用户|有用户称|一位用户|有网友|用户发文|用户称|小号钱包'
+                                OR head ~ 'said that|warns? that|warned that|urged|called for|argued that|believes that|said an unnamed|said in a memo|said in a post|said on X|wrote in a memo|said during|estimated that|estimates that'
+                            )
+                            AND head !~ 'hack|exploit|breach|drain|漏洞|rug ?pull|遭攻击|被黑|被钓鱼|钓鱼攻击'
+                            AND head !~ '宣布|推出|上线|发布|公布|获批|批准|通过|完成|上市|启动|实施|落地|达成|签署|收购|launch|announc|approv|filed|completed|integrates'
+                        )
+                        -- 汇总/盘点帖直接降级：回顾性质，内部即使含「完成/上线」等宣布词
+                        -- （如「国庆假期错过的消息：OKX 完成融资」）也非单一事件，不受宣布词保护
+                        OR head ~ '每月|月度|月报|盘点|回顾|错过的消息'
+                        OR head ~ 'launched its (own |self[- ])'
+                        THEN 'other'
+                    -- 实锤攻击 → security（真安全事件优先于 opinion 降级/其他归类）
                     WHEN head ~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull'
                         THEN 'security'
-                    WHEN head ~ 'etf' THEN 'etf'
+                    -- ETF：收紧为**事件性**表述（审批/上市/提交/招股/上市决策），排除「单日资金流」这类
+                    -- 常规数据（审计 2026-10-09 P1：ZEC/SOL/XRP ETF 单日净流入流出仅凭 'etf' 一词
+                    -- 即以 85×asset_w 过线，属周报口径复用过宽）
+                    WHEN head ~ 'etf'
+                         AND head ~ '(获批|批准|上市|提交|申请|通过|推出|上线|招股|approv|launch|filed|prospectus|decision|意见)'
+                        THEN 'etf'
                     WHEN head ~ '美联储|federal reserve|rate hike|rate cut|加息|降息|基点|basis point|通胀|非农'
                         THEN 'macro'
                     -- 审计 2026-09-29 P1-2：上游 AI/规则把「基金会推出某安全/生态计划」误标
@@ -1945,6 +1992,14 @@ def _recent_major_events(conn, hours: int = 24,
                     AS importance
             FROM scored
             WHERE category <> 'market_update'
+              -- 审计 2026-10-09 P1（方案 A）：security 类要求「实锤」——标题命中真实攻击词
+              -- （hack/exploit/被盗/被黑/遭攻击/漏洞/rug/被转走/被钓鱼/被窃取），或权威分≥60
+              -- （官方公告/权威媒体背书）。实测权威分无法单独区分：真攻击「79th Vault 被盗 1,251 万」
+              -- 与观点帖「Vitalik 警告」同为 auth=40，故采用「实锤词 OR 高权威」双通道。
+              -- 仅靠类型权重 95×市值权重 1.0 即过线（个人案例/观点帖即使未被方案 B 降级也不得放行）。
+              AND (category <> 'security'
+                   OR head ~ 'hack|exploit|stolen|steal|breach|drain|被盗|被黑|遭攻击|漏洞|rug ?pull|被转走|被钓鱼|钓鱼攻击|被窃取'
+                   OR COALESCE(authority_score, 0) >= 60)
         )
         SELECT * FROM (
             SELECT DISTINCT ON (asset_id)

@@ -3,9 +3,9 @@
 
 依据（盘面异动扫描系统设计方案 v2 + 交易参数回测）：
   - 信号来自 scan_gainers_v2.py（涨幅榜定位 × 强度确认）
-  - 方向：SHORT_LONG / MID_LONG 做多；TRAP_SHORT 做空（EXT_SHORT 剔除：bar 级负期望）
+  - 方向：SHORT_LONG 做多；MID_LONG 仅 B 右上角（chg30~50% + vr≥5.6）；TRAP_SHORT 不实盘
   - 交易参数：N 持仓时间 / TP 固定止盈 / TR 跟踪止盈 / SL 固定止损（回测最优，见 PARAMS）
-  - 100U 实验风控：V2_TRADE_ENABLED=1 才下单；单笔名义/杠杆/最大持仓数可配
+  - 100U 实验风控：V2_TRADE_ENABLED=1 才下单；分层杠杆/名义（A=3x/60U，其他 1x/20U）
 
 用法：
     python bin/execute_gainers_v2.py --dry-run        # 只打印决策（默认）
@@ -54,11 +54,12 @@ MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测
 LEVERAGE_BY_SIGNAL: dict[str, int] = {"SHORT_LONG": 3, "MID_LONG": 1, "TRAP_SHORT": 1}
 NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 60.0, "MID_LONG": 20.0, "TRAP_SHORT": 20.0}
 
-# 实盘信号白名单（2026-10-07 决策：仅 SHORT_LONG 实盘）
-# - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）
-# - MID_LONG（20~50% 做多）：胜率 54.4% / 期望 +2.3%，待叠加辅助指标回测通过后启用
+# 实盘信号白名单（2026-10-07 扩容决策 C3：A + B右上角并行）
+# - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）→ 3x / 60U
+# - MID_LONG 仅 B 右上角子集（chg30~50% + vr≥5.6，扫描器已过滤）：
+#   胜率 66.2% / 期望 +4.3% / PF 8.4 → 1x / 20U 不加杠杆
 # - TRAP_SHORT（<5% 做空）：滚动 24h 口径全周期负期望，不实盘
-LIVE_SIGNALS = ("SHORT_LONG",)
+LIVE_SIGNALS = ("SHORT_LONG", "MID_LONG")
 
 
 def _fmt(t: datetime) -> str:

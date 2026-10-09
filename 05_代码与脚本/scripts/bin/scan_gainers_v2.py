@@ -7,7 +7,7 @@
 
 信号（scan_gainer_signal）：
   SHORT_LONG  短线做多  chg24h≥50%    + 放量(24h量≥2×7日日均量) 窗口 T+24h LONG
-  MID_LONG    次档做多  chg24h 20~50% + 放量                    窗口 T+24h LONG
+  MID_LONG    B右上角    chg24h 30~50% + 强放量(vr≥5.6)          窗口 T+24h LONG
   TRAP_SHORT  诱多做空  chg24h<5%     + 放量（未上榜却放量）      窗口 T+24h SHORT
 
 说明：
@@ -48,12 +48,20 @@ VOL_RATIO_LONG = 2.0          # 放量（做多确认）≥2× 7日日均量
 MIN_VOL = 20_000_000          # 最小 24h 成交额（USDT）
 COOLDOWN_H = 12               # 同币同类型冷却（小时）
 
+# B 右上角过滤（2026-10-07 扩容决策 C3）
+# - MID_LONG 池（chg20~50%）内按「涨幅+量比组合 rank 前 20%」= B 右上角
+#   回测实际区间 chg[30%,50%] & vr≥5.6，期望 +4.25% / 胜率 66.2% / PF 8.4
+#   （对比全 MID_LONG +2.00% / PF 3.3：只做最强子集，质量接近 A）
+# - 阈值近似 rank 前 20%（实盘扫描单轮候选少，rank 不稳定，用回测 Q5 区间作固定阈值）
+B_TOP_CHG_LO = 30.0           # B 右上角：涨幅 ≥30%
+B_TOP_VR = 5.6                # B 右上角：量比 ≥5.6（回测 Q5 下界）
+
 # 信号类型 → (窗口, 方向, 涨幅判定)
 SIGNAL_DEFS = [
     ("SHORT_LONG", "T24H", "LONG",
      lambda c: c >= GAIN_SHORT_LONG, lambda vr: vr >= VOL_RATIO_LONG),
     ("MID_LONG", "T24H", "LONG",
-     lambda c: GAIN_MID_LONG_LO <= c < GAIN_MID_LONG_HI, lambda vr: vr >= VOL_RATIO_LONG),
+     lambda c: B_TOP_CHG_LO <= c < GAIN_MID_LONG_HI, lambda vr: vr >= B_TOP_VR),
     ("TRAP_SHORT", "T24H", "SHORT",
      lambda c: c < GAIN_TRAP_SHORT, lambda vr: vr >= VOL_RATIO_LONG),
 ]

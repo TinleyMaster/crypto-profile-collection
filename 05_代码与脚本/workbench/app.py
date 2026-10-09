@@ -765,6 +765,13 @@ TASK_DEFS = {
     },
 
     # ═══ 盘面异动扫描：数据回填 / 流式采集（P1/P0 补全）═══
+    "scan_klines_backfill_2022": {
+        "name": "盘面扫描·K 线历史回填至 2022-11",
+        "description": "1h K 线 --fill-earlier 补 2022-11-09 起的更早缺口（2022-12-27 之前，按各币实际上线时间截断；幂等不重写已有）",
+        "script": "phase_scan_klines.py",
+        "default_args": ["--intervals", "1h", "--fill-earlier", "--backfill-days", "1440"],
+        "category": "盘面扫描",
+    },
     "scan_oi_backfill": {
         "name": "盘面扫描·OI 历史回填",
         "description": "Binance openInterestHist 免费回填最近 ~30 天 1h OI 到 oi_cvd_snapshot（断点续跑，跳过已覆盖；回测前置数据）",

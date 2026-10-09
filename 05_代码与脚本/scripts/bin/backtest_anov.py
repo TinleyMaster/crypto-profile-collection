@@ -72,7 +72,9 @@ def _load_vols(syms, start) -> dict[str, pd.Series]:
 
 def _anov(vol: pd.Series, n: int) -> pd.Series:
     vabs = vol.pct_change().abs()
-    return vabs.rolling(n, min_periods=3).apply(_top30_mean, raw=True)
+    # 向量化近似（原 rolling.apply(Python) 在全量 1900 万行上极慢）：
+    # 前 30% 分位均值 ≈ 85% 分位数（pandas rolling.quantile 为 C 实现，秒级）
+    return vabs.rolling(n, min_periods=3).quantile(0.85)
 
 
 def _stats(ret):

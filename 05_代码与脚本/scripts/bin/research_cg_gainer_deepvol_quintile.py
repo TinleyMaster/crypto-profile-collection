@@ -91,10 +91,14 @@ def main() -> None:
     for (sym, ts), v in vol_sum.items():
         vol_by_sym[sym].append(v)
     vol_med = {sym: statistics.median(vs) for sym, vs in vol_by_sym.items() if vs}
+    # 每币的桶时间戳集合（用于遍历真实桶）
+    ts_by_sym: dict[str, list] = defaultdict(list)
+    for sym, ts in vol_sum:
+        ts_by_sym[sym].append(ts)
 
     # 构建桶级面板：每币每桶 → (24h涨幅, vr, fwd)
     rows_out: list[dict] = []
-    for sym, fb in vol_by_sym.items():
+    for sym, tss in ts_by_sym.items():
         px = klines.get(sym)
         if not px:
             continue
@@ -110,7 +114,7 @@ def main() -> None:
         vm = vol_med.get(sym)
         if vm is None or vm <= 0:
             continue
-        for ts in sorted(fb):
+        for ts in sorted(tss):
             if ts not in idx or (sym, ts) not in vol_sum:
                 continue
             if idx[ts] + iv_h + max(HORIZONS[interval]) >= n:

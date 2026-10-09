@@ -205,7 +205,10 @@ def main() -> int:
             end_ms = int(time.time() * 1000)
             start_ms = end_ms - args.backfill_days * 86400 * 1000
             for iv in intervals:
-                covered = set() if args.force else get_covered(conn, iv, end_ms)
+                # --fill-earlier：目标是补「比库里现有最早更早」的窗口，与最新 K 线
+                # 是否新鲜无关——因此必须忽略 covered 续跑跳过，否则每天增量采集的
+                # 币（covered=True）会被挡在回填之外，历史缺口永远补不上。
+                covered = set() if (args.force or args.fill_earlier) else get_covered(conn, iv, end_ms)
                 n_skip = sum(1 for s in symbols if s in covered)
                 # --fill-earlier：每币只回填「比库里现有最早一根更早」的窗口，
                 # 已覆盖区间不重抓、不重写（重复 upsert 会让表体积虚胀）。

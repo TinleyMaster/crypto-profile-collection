@@ -47,33 +47,42 @@ PARAMS: dict[str, dict] = {
 MAX_POSITIONS = 3          # 最大同时持仓数
 MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测风险约束）
 
+# 实盘信号白名单（2026-10-07 决策：仅 SHORT_LONG 实盘）
+# - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）
+# - MID_LONG（20~50% 做多）：胜率 54.4% / 期望 +2.3%，待叠加辅助指标回测通过后启用
+# - TRAP_SHORT（<5% 做空）：滚动 24h 口径全周期负期望，不实盘
+LIVE_SIGNALS = ("SHORT_LONG",)
+
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
 
 
 def load_pending(conn, max_rows: int = 20) -> list[dict]:
-    """读待执行信号（active 且未执行，限可交易信号类型）。"""
+    """读待执行信号（active 且未执行，仅限实盘白名单信号类型）。"""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, symbol, signal_type, signal_window, direction, "
             "       price_usd, chg_24h_pct, funding_rate, scan_ts "
             "FROM biz.scan_gainer_signal "
             "WHERE status = 'active' AND exec_state IS NULL "
-            "  AND signal_type IN ('SHORT_LONG','MID_LONG','TRAP_SHORT') "
+            "  AND signal_type IN %s "
             "ORDER BY scan_ts DESC LIMIT %s",
-            (max_rows,),
+            (LIVE_SIGNALS, max_rows),
         )
         return [dict(zip([d.name for d in cur.description], rr)) for rr in cur.fetchall()]
 
 
-def open_positions(client, conn) -> int:
-    """当前未平持仓数（按币安账户实际持仓统计）。"""
+def account_positions(client) -> list[str]:
+    """当前未平持仓的 symbol 列表（按币安账户实际持仓统计）。
+
+    一次调用同时服务「总持仓数」与「同币不叠仓」两类校验。
+    """
     try:
         pos = client.get_position_risk()
-        return len([p for p in pos if abs(float(p.get("positionAmt", 0))) > 0])
+        return [p.get("symbol") for p in pos if abs(float(p.get("positionAmt", 0))) > 0]
     except Exception:
-        return 0
+        return []
 
 
 def place_order(client, settings, sig: dict, live: bool) -> dict:
@@ -91,12 +100,17 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     if not live or not settings.signal_trade_enabled:
         rec.update(decision="dry_run", reason="V2_TRADE_ENABLED=0 or dry-run")
         return rec
-    # 实盘：余额 / 持仓上限校验
+    # 实盘：余额 / 同币不叠仓 / 持仓上限校验
     bal = client.get_balance("USDT")
     if bal is None or bal < margin * 1.2:
         rec.update(decision="skipped", reason=f"balance_low {bal}")
         return rec
-    if open_positions(client, None) >= MAX_POSITIONS:
+    held = account_positions(client)
+    if sig["symbol"] in held:
+        # 同币已有未平持仓（含跨类型升级，如 MID_LONG→SHORT_LONG）→ 禁止叠仓
+        rec.update(decision="skipped", reason="already_holding")
+        return rec
+    if len(held) >= MAX_POSITIONS:
         rec.update(decision="skipped", reason="max_positions")
         return rec
     # 下单

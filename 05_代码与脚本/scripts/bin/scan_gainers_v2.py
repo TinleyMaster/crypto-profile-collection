@@ -247,20 +247,24 @@ def main() -> int:
                          h["fund"], h["sig_type"], h["window"], h["direction"]),
                     )
 
-    # 邮件告警
+    # 邮件告警（2026-10-07 起仅实盘信号 A=SHORT_LONG；B/C 仍在研究不入告警）
     if args.alert and hits:
-        notifier = EmailNotifier(settings)
-        if notifier.configured:
-            profiles = load_exit_profile()
-            html = build_gainer_alert_html(hits, profiles)
-            ok, msg = notifier.send(
-                subject=f"[涨幅榜告警] 检测到 {len(hits)} 个新信号",
-                body_html=html,
-                from_name="盘面异动扫描 v2",
-            )
-            print(f"[alert] 邮件告警: {msg}")
+        alert_hits = [h for h in hits if h["sig_type"] == "SHORT_LONG"]
+        if not alert_hits:
+            print("[alert] 本次无 A 信号（SHORT_LONG），不发送邮件")
         else:
-            print("[alert] SMTP 未配置，跳过邮件告警")
+            notifier = EmailNotifier(settings)
+            if notifier.configured:
+                profiles = load_exit_profile()
+                html = build_gainer_alert_html(alert_hits, profiles)
+                ok, msg = notifier.send(
+                    subject=f"[涨幅榜告警] A 信号 {len(alert_hits)} 个",
+                    body_html=html,
+                    from_name="盘面异动扫描 v2",
+                )
+                print(f"[alert] 邮件告警: {msg}")
+            else:
+                print("[alert] SMTP 未配置，跳过邮件告警")
 
     return 0
 

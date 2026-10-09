@@ -36,6 +36,8 @@ OUT = SCRIPT_DIR.parent / "data" / "exit_profile.json"
 TR = 0.03
 COST = 0.003        # 往返成本（0.3%）
 FIX_N, FIX_TP, FIX_SL = 12, 0.50, 0.10     # TRAP_SHORT 参数
+TR_LIST = [0.03, 0.05, 0.08, 0.10, 0.15]   # 跟踪止盈档位扫描（峰值回撤）
+TR_COL = {0.03: "ph_tr3", 0.05: "ph_tr5", 0.08: "ph_tr8", 0.10: "ph_tr10", 0.15: "ph_tr15"}
 
 # scan_gainers_v2.py 信号类型 → (chg 判定, 方向)
 # 注：chg24 采用「滚动 24h」口径（对齐线上 ticker/24hr，无前视偏差）。
@@ -76,9 +78,9 @@ def _stats(ret: np.ndarray) -> dict | None:
     }
 
 
-def _hold_hours(arr: dict[str, np.ndarray], mask: np.ndarray) -> float:
-    """TRAIL 3% 实际持仓时长：首次满足 hp_N >= ph_tr3 的最小 N（中位）。"""
-    ph = arr["ph_tr3"]
+def _hold_hours(arr: dict[str, np.ndarray], mask: np.ndarray, ph_col: str) -> float:
+    """TRAIL 实际持仓时长：首次满足 hp_N >= 触发峰值的最小 N（中位）。"""
+    ph = arr[ph_col]
     m = mask & ~np.isnan(ph)
     if not m.any():
         return float("nan")
@@ -90,9 +92,60 @@ def _hold_hours(arr: dict[str, np.ndarray], mask: np.ndarray) -> float:
     return float(np.nanmedian(exit_h))
 
 
+def _net_stats(ret: np.ndarray, cost: float = COST) -> dict:
+    """扣成本后的胜率/期望/PF。"""
+    rs = ret[~np.isnan(ret)]
+    if len(rs) == 0:
+        return {"win_rate": float("nan"), "mean": float("nan"), "pf": float("nan")}
+    rs_net = rs - cost
+    gross_w = float(rs_net[rs_net > 0].sum())
+    gross_l = abs(float(rs_net[rs_net <= 0].sum())) if (rs_net <= 0).any() else 0.0
+    return {
+        "win_rate": float((rs_net > 0).mean()),
+        "mean": float(rs_net.mean()),
+        "pf": gross_w / gross_l if gross_l > 0 else float("inf"),
+    }
+
+
+def run_sensitivity(arr: dict[str, np.ndarray], chg24: np.ndarray, entry: np.ndarray) -> None:
+    """TR 档位敏感性：对做多信号扫描 3/5/8/10/15% 跟踪止盈，对比胜率/期望/PF。"""
+    print("\n" + "=" * 96)
+    print("TR 档位敏感性（做多信号，实际出场口径，毛收益）")
+    print("=" * 96)
+    for sig, label, c_ok, direction in PROFILE_DEFS:
+        if direction != 1:
+            continue
+        mask = c_ok(chg24)
+        print(f"\n■ {label} ({sig})  n={int(mask.sum()):,}")
+        print(f"  {'TR':>6} {'触发率%':>8} {'胜率%':>7} {'盈亏比':>6} {'期望%':>7} "
+              f"{'中位%':>7} {'PF':>6} {'最差%':>7} {'持仓h':>6} {'扣0.3%胜率%':>10} {'扣0.3%期望%':>10}")
+        best_pf, best_tr = -1.0, None
+        for tr in TR_LIST:
+            ph_col = TR_COL[tr]
+            ph = arr[ph_col]
+            ret = np.where(~np.isnan(ph), ph * (1 - tr) / entry - 1, np.nan)
+            ret = np.where(mask, ret, np.nan)
+            st = _stats(ret)
+            if st is None:
+                continue
+            hold = _hold_hours(arr, mask, ph_col)
+            net = _net_stats(ret)
+            trigger = int(((~np.isnan(ph)) & mask).sum())
+            hold_s = f"{hold:.0f}" if not np.isnan(hold) else "n/a"
+            print(f"  {tr*100:>5.0f}% {trigger/int(mask.sum())*100:>7.1f}% "
+                  f"{st['win_rate']*100:>7.1f} {st['payoff']:>6.2f} {st['mean']*100:>7.2f} "
+                  f"{st['median']*100:>7.2f} {st['pf']:>6.1f} {st['worst']*100:>7.1f} "
+                  f"{hold_s:>6} {net['win_rate']*100:>10.1f} {net['mean']*100:>10.2f}")
+            if st["pf"] > best_pf and st["worst"] >= -0.15:
+                best_pf, best_tr = st["pf"], tr
+        if best_tr is not None:
+            print(f"  → 最优 TR（风险约束最差≥-15%）: {best_tr*100:.0f}%  (PF={best_pf:.1f})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="强制重建事件缓存（约 20 分钟）")
+    ap.add_argument("--sensitivity", action="store_true", help="TR 档位敏感性扫描（3~15%）")
     args = ap.parse_args()
 
     if args.refresh and CACHE.exists():
@@ -101,6 +154,10 @@ def main() -> int:
     arr = _vec_rows(rows)
     chg24 = arr["chg24"]
     entry = arr["entry"]
+
+    if args.sensitivity:
+        run_sensitivity(arr, chg24, entry)
+        return 0
 
     print(f"事件总数: {len(rows):,}  缓存: {CACHE.name}")
     print("=" * 72)
@@ -120,7 +177,7 @@ def main() -> int:
             ph = arr["ph_tr3"]
             ret = np.where(~np.isnan(ph), ph * (1 - TR) / entry - 1, np.nan)
             ret = np.where(mask, ret, np.nan)
-            hold = _hold_hours(arr, mask)
+            hold = _hold_hours(arr, mask, "ph_tr3")
             mode = "TRAIL3"
         else:                   # 做空：FIX 12h TP50 SL10
             ret = _returns_vec(arr, direction, FIX_N, FIX_TP, FIX_SL, None)

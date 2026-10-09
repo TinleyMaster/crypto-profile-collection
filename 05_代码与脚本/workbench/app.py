@@ -787,6 +787,13 @@ TASK_DEFS = {
         "default_args": ["--intervals", "1h", "--fill-earlier", "--backfill-days", "1440"],
         "category": "盘面扫描",
     },
+    "backtest_anov": {
+        "name": "回测·AnoV 异常变化强度因子 × A/B 信号",
+        "description": "AnoV（量变化率 top30% 均值，quote_vol 近似）对 A/B 信号分桶+过滤规则回测。容器内网跑全量快；可加 --start 2026-01-01 等缩样本",
+        "script": "backtest_anov.py",
+        "default_args": [],
+        "category": "回测",
+    },
     "scan_oi_backfill": {
         "name": "盘面扫描·OI 历史回填",
         "description": "Binance openInterestHist 免费回填最近 ~30 天 1h OI 到 oi_cvd_snapshot（断点续跑，跳过已覆盖；回测前置数据）",

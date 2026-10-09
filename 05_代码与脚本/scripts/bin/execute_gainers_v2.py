@@ -47,6 +47,13 @@ PARAMS: dict[str, dict] = {
 MAX_POSITIONS = 3          # 最大同时持仓数
 MAX_LOSS_EQUITY_PCT = 15.0  # 单笔最大亏损占总权益 %（硬顶，回测风险约束）
 
+# 分层杠杆/名义（2026-10-07 决策：纯 A 高胜率高赔率 → 加杠杆重仓；其他信号 1x 不加杠杆）
+# - SHORT_LONG（A）：胜率 71.1% / 期望 +5.6% / PF 14.2 → 3x、60U（SL10%×3x=本金 -30%/笔 兜底）
+# - MID_LONG（B）/TRAP_SHORT（C）：待扩容验证，1x、20U 小仓试错（不加杠杆）
+# 未列出的信号类型回退到 env 兜底值。
+LEVERAGE_BY_SIGNAL: dict[str, int] = {"SHORT_LONG": 3, "MID_LONG": 1, "TRAP_SHORT": 1}
+NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 60.0, "MID_LONG": 20.0, "TRAP_SHORT": 20.0}
+
 # 实盘信号白名单（2026-10-07 决策：仅 SHORT_LONG 实盘）
 # - SHORT_LONG（≥50% 做多）：胜率 71.1% / 期望 +5.6% / PF 14.2（含 0.3% 成本）
 # - MID_LONG（20~50% 做多）：胜率 54.4% / 期望 +2.3%，待叠加辅助指标回测通过后启用
@@ -90,8 +97,9 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
     p = PARAMS.get(sig["signal_type"])
     if p is None:
         return {"decision": "skipped", "reason": "no_params"}
-    notional = settings.signal_max_notional_usdt
-    lev = settings.signal_leverage
+    # 分层杠杆/名义：按信号类型取配置，未列出的回退 env 兜底值
+    notional = NOTIONAL_BY_SIGNAL.get(sig["signal_type"], settings.signal_max_notional_usdt)
+    lev = LEVERAGE_BY_SIGNAL.get(sig["signal_type"], settings.signal_leverage)
     margin = notional / lev
     rec = {
         "signal_id": sig["id"], "symbol": sig["symbol"], "signal_type": sig["signal_type"],

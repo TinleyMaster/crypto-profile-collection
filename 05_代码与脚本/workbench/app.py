@@ -523,6 +523,21 @@ TASK_DEFS = {
         "default_args": ["--interval", "4h", "--max-pos", "12"],
         "category": "投研分析",
     },
+    # 涨幅榜 × 深缩排序 分档回测（24h 涨幅>0 池内按缩量分 5 档）
+    "cg_gainer_deepvol_4h": {
+        "name": "涨幅榜×深缩排序 分档回测 4h",
+        "description": "24h涨幅>0 候选池内按 VOL_ratio 分 5 档，看 H4/H8/H12/H24 单调性（@4h）",
+        "script": "research_cg_gainer_deepvol_quintile.py",
+        "default_args": ["--interval", "4h"],
+        "category": "投研分析",
+    },
+    "cg_gainer_deepvol_12h": {
+        "name": "涨幅榜×深缩排序 分档回测 12h",
+        "description": "24h涨幅>0 候选池内按 VOL_ratio 分 5 档，看 H12/H24/H48/H72 单调性（@12h）",
+        "script": "research_cg_gainer_deepvol_quintile.py",
+        "default_args": ["--interval", "12h"],
+        "category": "投研分析",
+    },
     # VOL 量能强度分档回测（缩量要多缩才有效？）
     "cg_vol_buckets_4h": {
         "name": "VOL 量能强度分档回测 4h",

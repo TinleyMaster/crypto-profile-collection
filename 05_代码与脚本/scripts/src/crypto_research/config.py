@@ -63,7 +63,7 @@ class Settings:
     # 币安子账户合约 API（只开「合约交易」权限，不开提现）
     binance_api_key: str | None = None
     binance_api_secret: str | None = None
-    binance_fapi_base_url: str = "https://fapi.binance.com"
+    binance_fapi_base_url: str = "https://papi.binance.com"  # PM 统一账户必须用 papi（不是 fapi）
     # 风控参数
     signal_trade_enabled: bool = False          # 总开关，=1 才真正下单
     signal_max_notional_usdt: float = 300.0     # 单笔最大名义价值（USDT）

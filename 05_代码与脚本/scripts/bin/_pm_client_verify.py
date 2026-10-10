@@ -24,6 +24,7 @@ def main():
     secret = os.environ["BINANCE_API_SECRET"]
 
     print(f"🔑 Key: {key[:12]}...{key[-4:]}")
+    print(f"📡 ENV BINANCE_FAPI_BASE_URL = {os.environ.get('BINANCE_FAPI_BASE_URL', '(未设置 → 用代码默认)')}")
     print(f"📡 settings.binance_fapi_base_url = {settings.binance_fapi_base_url}")
 
     client = BinanceFuturesClient(key, secret, base_url=settings.binance_fapi_base_url)

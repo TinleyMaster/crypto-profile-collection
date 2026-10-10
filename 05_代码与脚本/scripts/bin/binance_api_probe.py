@@ -31,6 +31,14 @@ def main():
         print("❌ BINANCE_API_KEY / SECRET 未配置"); sys.exit(1)
 
     print(f"🔑 Key len={len(key)}  ⚠️ Portfolio Margin 账户 → papi.binance.com")
+
+    # 出口 IP（用用户指定的 checkip.amazonaws.com）
+    try:
+        r = requests.get("https://checkip.amazonaws.com/", timeout=10)
+        egress_ip = r.text.strip()
+        print(f"🌐 出口 IP（checkip.amazonaws.com）: {egress_ip}")
+    except Exception as e:
+        print(f"🌐 出口 IP 查询失败: {e}")
     print()
 
     # ── 基础设施 ──

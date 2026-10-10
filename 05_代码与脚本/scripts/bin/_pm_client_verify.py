@@ -42,11 +42,31 @@ def main():
         print(f"2️⃣  ❌ {e}")
 
     # 3. get_balance（papi）—— 关键验证
-    print(f"\n3️⃣  ⭐ client.get_balance('USDT') ...", end=" ", flush=True)
+    print(f"\n3️⃣  ⭐ 原始 GET /papi/v1/balance 响应 ...", end=" ", flush=True)
     try:
+        params = {"timestamp": int(time.time()*1000), "recvWindow": 5000}
+        qs = "&".join(f"{k}={v}" for k,v in sorted(params.items()))
+        sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        full_url = f"{client.base_url}/papi/v1/balance?{qs}&signature={sig}"
+        r = requests.get(full_url, headers={"X-MBX-APIKEY": key}, timeout=15)
+        print(f"HTTP {r.status_code}")
+        print(f"  原始响应: {r.text[:2000]}")
         bal = client.get_balance("USDT")
-        print(f"✅ {bal} USDT")
-    except BinanceFuturesError as e:
+        print(f"  客户端解析 USDT = {bal}")
+    except Exception as e:
+        print(f"❌ {e}")
+
+    # 3.5 原始 GET /papi/v1/account
+    print(f"\n3.5 ⭐ 原始 GET /papi/v1/account 响应 ...", end=" ", flush=True)
+    try:
+        params = {"timestamp": int(time.time()*1000), "recvWindow": 5000}
+        qs = "&".join(f"{k}={v}" for k,v in sorted(params.items()))
+        sig = hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        full_url = f"{client.base_url}/papi/v1/account?{qs}&signature={sig}"
+        r = requests.get(full_url, headers={"X-MBX-APIKEY": key}, timeout=15)
+        print(f"HTTP {r.status_code}")
+        print(f"  原始响应: {r.text[:2000]}")
+    except Exception as e:
         print(f"❌ {e}")
         return
 

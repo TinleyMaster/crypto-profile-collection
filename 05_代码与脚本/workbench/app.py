@@ -801,6 +801,14 @@ TASK_DEFS = {
         "default_args": [],
         "category": "实盘",
     },
+    "pm_client_verify": {
+        "name": "实盘·PM 客户端直接验证（get_balance/set_leverage/open_position）",
+        "description": "绕过 V2_TRADE_ENABLED，直接调 BinanceFuturesClient 关键方法验证 PM 下单链路完整可用（极小 qty 测试下单）",
+        "script": "_pm_client_verify.py",
+        "default_args": [],
+        "category": "实盘",
+        "hidden": True,
+    },
     "execute_gainers_v2": {
         "name": "实盘·盘面信号执行器（dry-run）",
         "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 V2_TRADE_ENABLED=1 + --apply）",

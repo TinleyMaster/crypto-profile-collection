@@ -794,6 +794,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "回测",
     },
+    "binance_api_probe": {
+        "name": "实盘·币安子账户 API 探针",
+        "description": "容器内验证 fapi 网络 + Key 签名 + 合约权限 + 余额。必须在容器跑（本地 fapi 被 GFW 封）",
+        "script": "binance_api_probe.py",
+        "default_args": [],
+        "category": "实盘",
+    },
     "scan_oi_backfill": {
         "name": "盘面扫描·OI 历史回填",
         "description": "Binance openInterestHist 免费回填最近 ~30 天 1h OI 到 oi_cvd_snapshot（断点续跑，跳过已覆盖；回测前置数据）",

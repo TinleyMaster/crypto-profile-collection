@@ -808,6 +808,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "实盘",
     },
+    "check_wallet": {
+        "name": "实盘·查 API Key 权限 + 资金/PM 账户余额",
+        "description": "查 api.binance.com/sapi/v1/account/apiRestrictions + 资金账户 USDT 余额 + PM 账户余额",
+        "script": "_check_wallet.py",
+        "default_args": [],
+        "category": "实盘",
+    },
     "execute_gainers_v2": {
         "name": "实盘·盘面信号执行器（dry-run）",
         "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 V2_TRADE_ENABLED=1 + --apply）",

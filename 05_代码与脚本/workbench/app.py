@@ -796,10 +796,25 @@ TASK_DEFS = {
     },
     "binance_api_probe": {
         "name": "实盘·币安子账户 API 探针",
-        "description": "容器内验证 fapi 网络 + Key 签名 + 合约权限 + 余额。必须在容器跑（本地 fapi 被 GFW 封）",
+        "description": "容器内验证 papi 网络 + Key 签名 + PM 账户余额/下单。必须在容器跑（本地 IP 被币安拦截）",
         "script": "binance_api_probe.py",
         "default_args": [],
         "category": "实盘",
+    },
+    "execute_gainers_v2": {
+        "name": "实盘·盘面信号执行器（dry-run）",
+        "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 V2_TRADE_ENABLED=1 + --apply）",
+        "script": "execute_gainers_v2.py",
+        "default_args": [],
+        "category": "实盘",
+    },
+    "execute_gainers_v2_apply": {
+        "name": "实盘·盘面信号执行器（真实下单）",
+        "description": "⚠️ 真实下单！需要 Zeabur 环境变量 V2_TRADE_ENABLED=1。3x/60U 做多（SHORT_LONG）+ 1x/20U 中线（MID_LONG 仅 B右上角）",
+        "script": "execute_gainers_v2.py",
+        "default_args": ["--apply"],
+        "category": "实盘",
+        "hidden": True,
     },
     "scan_oi_backfill": {
         "name": "盘面扫描·OI 历史回填",

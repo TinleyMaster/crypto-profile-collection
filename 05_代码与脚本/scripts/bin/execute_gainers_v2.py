@@ -74,9 +74,9 @@ def load_pending(conn, max_rows: int = 20) -> list[dict]:
             "       price_usd, chg_24h_pct, funding_rate, scan_ts "
             "FROM biz.scan_gainer_signal "
             "WHERE status = 'active' AND exec_state IS NULL "
-            "  AND signal_type IN %s "
+            "  AND signal_type = ANY(%s::text[]) "
             "ORDER BY scan_ts DESC LIMIT %s",
-            (LIVE_SIGNALS, max_rows),
+            (list(LIVE_SIGNALS), max_rows),
         )
         return [dict(zip([d.name for d in cur.description], rr)) for rr in cur.fetchall()]
 

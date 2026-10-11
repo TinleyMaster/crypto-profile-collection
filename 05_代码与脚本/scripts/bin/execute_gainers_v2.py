@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -77,7 +78,7 @@ def load_pending(conn, max_rows: int = 20) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, symbol, signal_type, signal_window, direction, "
-            "       price_usd, chg_24h_pct, funding_rate, scan_ts "
+            "       price_usd, chg_24h_pct, funding_rate, scan_ts, vol_24h_usd, params "
             "FROM biz.scan_gainer_signal "
             "WHERE status = 'active' AND exec_state IS NULL "
             "  AND signal_type = ANY(%s::text[]) "
@@ -144,23 +145,58 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
             trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
         )
-        rec.update(decision="ordered", order=r.get("orderId"), reason="ok",
-                   order_id=r.get("orderId"),
-                   open_price=float(r.get("avgPrice") or r.get("_price") or 0),
-                   open_qty=float(r.get("_qty") or 0))
+        order_id = r.get("orderId")
+        # 全量留痕：开仓单原始响应（剔除内部下划线字段）+ 各保护单原始响应（含 orderId）
+        entry_resp = {k: v for k, v in r.items() if not k.startswith("_")}
+        protective = {
+            "stop_loss": r.get("_stop_loss"),
+            "trailing_stop": r.get("_trailing_stop"),
+            "take_profit": r.get("_take_profit"),
+        }
+        qty = float(r.get("_qty") or 0)
+        avg = float(r.get("avgPrice") or 0) or float(r.get("_price") or 0)
+        # MARKET 单 POST ACK 的 avgPrice 常为 0 → 回查真实成交均价/量（best-effort，失联不阻断）
+        if order_id and float(r.get("avgPrice") or 0) <= 0:
+            try:
+                o = client.get_order(sig["symbol"], order_id)
+                entry_resp["_fetched_order"] = o
+                avg = float(o.get("avgPrice") or 0) or avg
+                qty = float(o.get("executedQty") or 0) or qty
+            except Exception as e:  # noqa: BLE001
+                print(f"  [warn] {sig['symbol']} 回查成交失败: {type(e).__name__}: {e}")
+        rec.update(decision="ordered", order=order_id, reason="ok", order_id=order_id,
+                   client_order_id=r.get("clientOrderId"),
+                   open_price=avg, open_qty=qty,
+                   margin=(notional / lev) if lev else None,
+                   entry_resp=entry_resp, protective=protective)
     except Exception as e:  # noqa: BLE001
         rec.update(decision="error", reason=f"{type(e).__name__}: {e}")
     return rec
 
 
-def _reconcile_closed(client, settings, conn) -> int:
-    """对账：查 v2_trade_log 中未平仓记录，若币安已无持仓 → 拉 income 回填盈亏。
+def _filled_order(client, symbol: str, order_id) -> dict | None:
+    """按 orderId 查单，返回 FILLED 的订单（否则 None）。用于判定哪张保护单触发了出场。"""
+    if not order_id:
+        return None
+    try:
+        o = client.get_order(symbol, order_id)
+        return o if str(o.get("status")) == "FILLED" else None
+    except Exception:  # noqa: BLE001
+        return None
 
-    TRAIL/SL/TP 触发后由币安自动平仓，本函数轮询补录 close_ts / realized_pnl。
+
+def _reconcile_closed(client, settings, conn) -> int:
+    """对账：查 v2_trade_log 中未平仓记录，若币安已无持仓 → 回填出场明细与盈亏。
+
+    出场判定（全量留痕）：从记录的保护单（SL/TR/TP）里找哪张 status=FILLED → 即出场单，
+    再按该出场单 orderId 拉 userTrades，**把盈亏精确定位到本笔订单**（realizedPnl，
+    手续费取负），从而剔除同币手动单对 income 的污染。无保护单成交（运维/到期平仓）
+    才回退按 symbol 时间窗 income，并标 exit_reason='manual_or_unknown' 以区分口径。
     返回本次回填笔数。"""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, open_ts FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
+            "SELECT id, symbol, open_ts, protective_orders, order_id "
+            "FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
     n = 0
     for t in rows:
@@ -176,19 +212,52 @@ def _reconcile_closed(client, settings, conn) -> int:
                     print(f"  [reconcile] 撤销遗留挂单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
                 except Exception as e:  # noqa: BLE001
                     print(f"  [reconcile] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
-            start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
-            incomes = client.get_income(t["symbol"], start_ms=start_ms)
-            pnl = sum(float(i.get("income", 0)) for i in incomes
-                      if i.get("incomeType") == "REALIZED_PNL")
-            comm = sum(float(i.get("income", 0)) for i in incomes
-                       if i.get("incomeType") == "COMMISSION")
+
+            prot = t.get("protective_orders") or {}
+            exit_order = None
+            exit_reason = "unknown"
+            for key, reason in (("stop_loss", "sl"), ("trailing_stop", "trail"),
+                                ("take_profit", "tp")):
+                filled = _filled_order(client, t["symbol"], (prot.get(key) or {}).get("orderId"))
+                if filled:
+                    exit_order, exit_reason = filled, reason
+                    break
+
+            exit_order_id = None
+            close_price = None
+            close_resp = None
+            income_detail = None
+            if exit_order is not None:
+                exit_order_id = exit_order.get("orderId")
+                close_resp = exit_order
+                close_price = float(exit_order.get("avgPrice") or 0) or None
+                trades = client.get_user_trades(t["symbol"], order_id=exit_order_id)
+                income_detail = trades
+                pnl = sum(float(x.get("realizedPnl", 0)) for x in trades)
+                # userTrades 的 commission 为正数（实付手续费）→ 取负，与 income 口径一致
+                comm = -sum(float(x.get("commission", 0)) for x in trades)
+            else:
+                exit_reason = "manual_or_unknown"
+                start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+                incomes = client.get_income(t["symbol"], start_ms=start_ms)
+                income_detail = incomes
+                pnl = sum(float(i.get("income", 0)) for i in incomes
+                          if i.get("incomeType") == "REALIZED_PNL")
+                comm = sum(float(i.get("income", 0)) for i in incomes
+                           if i.get("incomeType") == "COMMISSION")
+
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE biz.v2_trade_log SET close_ts=NOW(), realized_pnl_usdt=%s, "
-                    "commission_usdt=%s, win=%s, exit_reason='unknown' WHERE id=%s",
-                    (pnl, comm, pnl + comm > 0, t["id"]),
+                    "UPDATE biz.v2_trade_log SET close_ts=NOW(), close_price=%s, "
+                    "realized_pnl_usdt=%s, commission_usdt=%s, win=%s, exit_reason=%s, "
+                    "exit_order_id=%s, close_resp=%s::jsonb, income_detail=%s::jsonb, "
+                    "updated_at=NOW() WHERE id=%s",
+                    (close_price, pnl, comm, pnl + comm > 0, exit_reason, exit_order_id,
+                     json.dumps(close_resp) if close_resp else None,
+                     json.dumps(income_detail) if income_detail else None, t["id"]),
                 )
-            print(f"  [reconcile] {t['symbol']} 已平仓 pnl={pnl:+.4f} comm={comm:+.4f} win={pnl+comm>0}")
+            print(f"  [reconcile] {t['symbol']} 已平仓 exit={exit_reason} "
+                  f"pnl={pnl:+.4f} comm={comm:+.4f} win={pnl+comm>0}")
             n += 1
         except Exception as e:  # noqa: BLE001
             print(f"  [reconcile] {t['symbol']} 对账失败: {type(e).__name__}: {e}")
@@ -266,19 +335,43 @@ def main() -> int:
                                 "WHERE id=%s",
                                 (rec["decision"], datetime.now(timezone.utc), sig["id"]),
                             )
-                        # 实盘开仓 → 写 v2_trade_log（供实盘胜率复验）
+                        # 实盘开仓 → 写 v2_trade_log（全量留痕，供追溯复验 + 完善策略）
+                        # 只记机器人下单（origin='bot'）；手动单不经过本脚本、不入本表。
                         if rec["decision"] == "ordered":
+                            sp = sig.get("params") or {}
+                            eo = sp.get("event_bar_ts")
+                            eo_dt = None
+                            if eo:
+                                try:
+                                    eo_dt = datetime.fromisoformat(eo)
+                                except (TypeError, ValueError):
+                                    eo_dt = None
+                            p = rec.get("params") or {}
                             with conn.cursor() as cur:
                                 cur.execute(
-                                    "INSERT INTO biz.v2_trade_log "
-                                    "(signal_id, symbol, signal_type, direction, open_ts, "
-                                    " open_price, open_qty, notional_usdt, leverage, order_id) "
-                                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                                    "INSERT INTO biz.v2_trade_log ("
+                                    " signal_id, symbol, signal_type, direction, open_ts,"
+                                    " open_price, open_qty, notional_usdt, leverage, order_id,"
+                                    " origin, signal_window, scan_ts, event_bar_ts, ref_price_usd,"
+                                    " chg_24h_pct, chg1h_pct, vr_1h, funding_rate, vol_24h_usd,"
+                                    " margin_usdt, planned_hold_h, sl_pct, tr_pct, tp_pct,"
+                                    " entry_client_order_id, entry_resp, protective_orders,"
+                                    " base_url, dry_run, updated_at"
+                                    ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                                    " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,NOW()) "
                                     "ON CONFLICT (signal_id) DO NOTHING",
                                     (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
                                      datetime.now(timezone.utc), rec.get("open_price"),
                                      rec.get("open_qty"), rec.get("notional"), rec.get("leverage"),
-                                     rec.get("order_id")),
+                                     rec.get("order_id"), "bot", sig.get("signal_window"),
+                                     sig.get("scan_ts"), eo_dt, sig.get("price_usd"),
+                                     sig.get("chg_24h_pct"), sp.get("chg1h_pct"), sp.get("vr_1h"),
+                                     sig.get("funding_rate"), sig.get("vol_24h_usd"),
+                                     rec.get("margin"), p.get("N"), p.get("SL"), p.get("TR"),
+                                     p.get("TP"), rec.get("client_order_id"),
+                                     json.dumps(rec.get("entry_resp")) if rec.get("entry_resp") else None,
+                                     json.dumps(rec.get("protective")) if rec.get("protective") else None,
+                                     settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:
                 # 对账已平仓持仓（TRAIL/SL/TP 触发后补录盈亏）

@@ -305,6 +305,28 @@ class BinanceFuturesClient:
         params = {"symbol": symbol} if symbol else None
         return self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
 
+    def get_order(self, symbol: str, order_id: int | str) -> dict:
+        """按 orderId 查单笔订单（含 avgPrice / executedQty / status）。
+
+        MARKET 单的 POST ACK 里 avgPrice 常为 0，需回查本接口拿真实成交均价与成交量。
+        """
+        return self._request("GET", "/fapi/v1/order",
+                             {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    def get_user_trades(self, symbol: str, order_id: int | str | None = None,
+                        start_ms: int | None = None, limit: int = 500) -> list[dict]:
+        """成交明细（USER_DATA /fapi/v1/userTrades），可按 orderId 精确过滤。
+
+        每条含 realizedPnl / commission / price / qty。用于把盈亏**精确定位到本笔订单**，
+        避免 get_income(symbol) 把同币的手动单一起算进来（污染复验口径）。
+        """
+        params: dict = {"symbol": symbol, "limit": limit}
+        if order_id is not None:
+            params["orderId"] = order_id
+        if start_ms:
+            params["startTime"] = start_ms
+        return self._request("GET", "/fapi/v1/userTrades", params=params, signed=True)
+
     # ───────────────────────── 组合下单辅助 ─────────────────────────
     def place_trailing_stop(
         self,

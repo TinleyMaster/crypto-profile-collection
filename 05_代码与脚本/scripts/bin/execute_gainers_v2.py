@@ -167,6 +167,15 @@ def _reconcile_closed(client, settings, conn) -> int:
         try:
             if client.get_position_amt(t["symbol"]) != 0:
                 continue  # 仍持仓
+            # 平仓后清理遗留的保护单：SL 与 TR 都是 closePosition 单，只会触发其中一个，
+            # 另一个在 API 侧不会随持仓归零自动撤销；若不撤，同 symbol 下次开仓会被这张
+            # 旧单立即平掉（币安 API 不提供 UI 那种「成交自动撤销同类单」的行为）。
+            for o in client.get_open_orders(t["symbol"]):
+                try:
+                    client.cancel_order(t["symbol"], o["orderId"])
+                    print(f"  [reconcile] 撤销遗留挂单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  [reconcile] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
             start_ms = int(t["open_ts"].replace(tzinfo=timezone.utc).timestamp() * 1000)
             incomes = client.get_income(t["symbol"], start_ms=start_ms)
             pnl = sum(float(i.get("income", 0)) for i in incomes

@@ -354,7 +354,8 @@ class BinanceFuturesClient:
         - direction=short -> SELL（position_side=SHORT）
         - entry_price 为空时用市价单，否则用限价单挂在进场价
         - 自动设置杠杆；可选附带固定止损/止盈/跟踪止盈
-        - trailing_stop_pct > 0 时挂 TRAILING_STOP_MARKET（与固定止损互斥，优先跟踪止盈）
+        - 传入的止损、跟踪止盈、止盈**全部挂出**（互不排斥）：固定止损走
+          STOP_MARKET(closePosition)，跟踪止盈走 TRAILING_STOP_MARKET(closePosition)
         """
         side = "BUY" if direction == "long" else "SELL"
         position_side = "LONG" if direction == "long" else "SHORT"
@@ -385,20 +386,22 @@ class BinanceFuturesClient:
         result["_price"] = order_price or cur
         entry_used = order_price or cur
 
-        # 可选跟踪止盈 / 固定止损/止盈
+        # 保护性平仓单：固定止损 / 跟踪止盈 / 固定止盈 —— 三者**相互独立、全部挂出**。
+        # 币安允许 STOP_MARKET(closePosition) 与 TRAILING_STOP_MARKET(closePosition) 同时
+        # 存在于同一持仓侧；只有「GTE_GTC + closePosition」才限一张（-4130）。原实现把
+        # 跟踪止盈与固定止损写成 if/else 互斥，导致 TR>0 时硬止损被静默跳过（实盘裸奔）。
+        if stop_loss_pct and stop_loss_pct > 0:
+            try:
+                sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct, is_stop=True)
+                result["_stop_loss"] = sl
+            except BinanceFuturesError as e:
+                result["_stop_loss"] = {"error": str(e)}
         if trailing_stop_pct and trailing_stop_pct > 0:
             try:
                 trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct)
                 result["_trailing_stop"] = trl
             except BinanceFuturesError as e:
                 result["_trailing_stop"] = {"error": str(e)}
-        else:
-            if stop_loss_pct and stop_loss_pct > 0:
-                try:
-                    sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct, is_stop=True)
-                    result["_stop_loss"] = sl
-                except BinanceFuturesError as e:
-                    result["_stop_loss"] = {"error": str(e)}
         if take_profit_pct and take_profit_pct > 0:
             try:
                 tp = self.place_sltp(symbol, direction, entry_used, take_profit_pct, is_stop=False)

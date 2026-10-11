@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -61,13 +62,18 @@ NOTIONAL_BY_SIGNAL: dict[str, float] = {"SHORT_LONG": 60.0, "MID_LONG": 20.0, "T
 # - TRAP_SHORT（<5% 做空）：滚动 24h 口径全周期负期望，不实盘
 LIVE_SIGNALS = ("SHORT_LONG", "MID_LONG")
 
+# 信号时效上限（小时）：常驻执行器停机/重建后重启时，仅执行该窗口内扫描到的新鲜信号，
+# 避免把早已错过入场时点（scan_ts 陈旧）的信号当作真单打下。扫描器每 30min 一轮，
+# 2h 窗口有 ~4 轮余量，正常抖动不会漏单。
+MAX_SIGNAL_AGE_H = 2
+
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
 
 
 def load_pending(conn, max_rows: int = 20) -> list[dict]:
-    """读待执行信号（active 且未执行，仅限实盘白名单信号类型）。"""
+    """读待执行信号（active 且未执行，仅限实盘白名单信号类型 + 时效窗口内）。"""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, symbol, signal_type, signal_window, direction, "
@@ -75,8 +81,9 @@ def load_pending(conn, max_rows: int = 20) -> list[dict]:
             "FROM biz.scan_gainer_signal "
             "WHERE status = 'active' AND exec_state IS NULL "
             "  AND signal_type = ANY(%s::text[]) "
+            "  AND scan_ts >= NOW() - (%s * INTERVAL '1 hour') "
             "ORDER BY scan_ts DESC LIMIT %s",
-            (list(LIVE_SIGNALS), max_rows),
+            (list(LIVE_SIGNALS), MAX_SIGNAL_AGE_H, max_rows),
         )
         return [dict(zip([d.name for d in cur.description], rr)) for rr in cur.fetchall()]
 
@@ -186,48 +193,58 @@ def main() -> int:
 
     settings = get_settings(require_database=True)
     live = args.apply and settings.signal_trade_enabled
+    # 单一客户端实例：既服务下单，也服务 --watch 的平仓对账。
+    # 必须建在 while 之外——对账与本轮「有无待执行信号」无关，若建在 for 循环内，
+    # 无信号轮次（常态）会把 client 漏成未定义 → NameError 崩溃。
+    client = BinanceFuturesClient(settings.binance_api_key,
+                                  settings.binance_api_secret,
+                                  base_url=settings.binance_fapi_base_url)
 
     while True:
-        with get_connection(settings.database_url) as conn:
-            pending = load_pending(conn, args.max_rows)
-        if not pending:
-            print(f"[{_fmt(datetime.now(timezone.utc))}] 无待执行信号")
-        for sig in pending:
-            client = BinanceFuturesClient(settings.binance_api_key,
-                                          settings.binance_api_secret,
-                                          base_url=settings.binance_fapi_base_url)
-            rec = place_order(client, settings, sig, live)
-            print(f"  {sig['symbol']:<12} {sig['signal_type']:<12} {sig['direction']:<6} "
-                  f"→ {rec['decision']} {rec.get('reason','')} {rec.get('order','')}")
-            if rec["decision"] in ("ordered", "skipped", "error"):
-                with get_connection(settings.database_url) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s "
-                            "WHERE id=%s",
-                            (rec["decision"], datetime.now(timezone.utc), sig["id"]),
-                        )
-                    # 实盘开仓 → 写 v2_trade_log（供实盘胜率复验）
-                    if rec["decision"] == "ordered":
+        try:
+            with get_connection(settings.database_url) as conn:
+                pending = load_pending(conn, args.max_rows)
+            if not pending:
+                print(f"[{_fmt(datetime.now(timezone.utc))}] 无待执行信号")
+            for sig in pending:
+                rec = place_order(client, settings, sig, live)
+                print(f"  {sig['symbol']:<12} {sig['signal_type']:<12} {sig['direction']:<6} "
+                      f"→ {rec['decision']} {rec.get('reason','')} {rec.get('order','')}")
+                if rec["decision"] in ("ordered", "skipped", "error"):
+                    with get_connection(settings.database_url) as conn:
                         with conn.cursor() as cur:
                             cur.execute(
-                                "INSERT INTO biz.v2_trade_log "
-                                "(signal_id, symbol, signal_type, direction, open_ts, "
-                                " open_price, open_qty, notional_usdt, leverage, order_id) "
-                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                                "ON CONFLICT (signal_id) DO NOTHING",
-                                (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
-                                 datetime.now(timezone.utc), rec.get("open_price"),
-                                 rec.get("open_qty"), rec.get("notional"), rec.get("leverage"),
-                                 rec.get("order_id")),
+                                "UPDATE biz.scan_gainer_signal SET exec_state=%s, executed_at=%s "
+                                "WHERE id=%s",
+                                (rec["decision"], datetime.now(timezone.utc), sig["id"]),
                             )
-        if args.watch:
-            # 对账已平仓持仓（TRAIL/SL/TP 触发后补录盈亏）
-            with get_connection(settings.database_url) as conn:
-                _reconcile_closed(client, settings, conn)
-        if not args.watch:
-            break
-        import time
+                        # 实盘开仓 → 写 v2_trade_log（供实盘胜率复验）
+                        if rec["decision"] == "ordered":
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "INSERT INTO biz.v2_trade_log "
+                                    "(signal_id, symbol, signal_type, direction, open_ts, "
+                                    " open_price, open_qty, notional_usdt, leverage, order_id) "
+                                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                                    "ON CONFLICT (signal_id) DO NOTHING",
+                                    (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
+                                     datetime.now(timezone.utc), rec.get("open_price"),
+                                     rec.get("open_qty"), rec.get("notional"), rec.get("leverage"),
+                                     rec.get("order_id")),
+                                )
+            if args.watch:
+                # 对账已平仓持仓（TRAIL/SL/TP 触发后补录盈亏）
+                with get_connection(settings.database_url) as conn:
+                    _reconcile_closed(client, settings, conn)
+            if not args.watch:
+                break
+        except Exception as e:  # noqa: BLE001
+            # 常驻进程：单轮内的 DB 抖动 / 币安 5xx / 网络闪断不得整进程退出，
+            # 打印后交给下一轮重试（supervisord 的 autorestart 只兜进程级死亡）。
+            print(f"[{_fmt(datetime.now(timezone.utc))}] 本轮异常（跳过，下轮重试）: "
+                  f"{type(e).__name__}: {e}")
+            if not args.watch:
+                break
         time.sleep(args.interval)
     return 0
 

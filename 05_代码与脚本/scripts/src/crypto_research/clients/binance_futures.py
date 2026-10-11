@@ -65,6 +65,7 @@ class BinanceFuturesClient:
         self.session.headers.update({"X-MBX-APIKEY": api_key})
         self._time_offset_ms: int | None = None
         self._exchange_info: dict[str, dict] = {}
+        self._exchange_all: dict[str, dict] = {}  # 全量合约原始条目（按 symbol 建索引）
         self._position_mode: str | None = None  # "dual" | "oneway"
 
     # ───────────────────────── 基础设施 ─────────────────────────
@@ -150,10 +151,22 @@ class BinanceFuturesClient:
         return float(data["price"])
 
     def get_exchange_info(self, symbol: str) -> dict:
-        """返回 symbol 的过滤规则（缓存）。"""
+        """返回 symbol 的过滤规则（缓存）。
+
+        ⚠️ 不能依赖 /fapi/v1/exchangeInfo 的 symbol 过滤（2026-10-11 实测）：该端点
+        会忽略 symbol 参数、恒返回全量合约，且 symbols[0] 是 BTCUSDT。原实现直接取
+        symbols[0]，于是**所有合约都套用了 BTCUSDT 的 stepSize/tickSize** —— 例如
+        STRKUSDT 真实 step=0.1（quantityPrecision=1），却被当成 BTC 的 0.001，算出
+        数量 531.914（3 位小数）后被币安以 -1111「Precision is over the maximum」
+        拒单。改为一次性缓存全量映射后按 symbol 精确取名，端点是否过滤都不影响结果。
+        """
         if symbol not in self._exchange_info:
-            data = self._public_request("/fapi/v1/exchangeInfo", {"symbol": symbol})
-            sym = data["symbols"][0]
+            if not self._exchange_all:
+                data = self._public_request("/fapi/v1/exchangeInfo")
+                self._exchange_all = {s.get("symbol"): s for s in data.get("symbols", [])}
+            sym = self._exchange_all.get(symbol)
+            if sym is None:
+                raise BinanceFuturesError(f"exchangeInfo 无此合约: {symbol}")
             filters = {f["filterType"]: f for f in sym["filters"]}
             info = {
                 "quantity_precision": sym.get("quantityPrecision", 8),

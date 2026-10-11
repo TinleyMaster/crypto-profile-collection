@@ -290,6 +290,14 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     # 仅「新增卡片」或「tier 升到 HIGH / 共振源数增加」时发信，24h 冷却去重。
     ("highlight_alert", "5 * * * *", "send_highlight_alert.py", [], "高亮信号增量邮件提醒（每小时探测，仅新增/升级发信）", "core"),
 
+    # ═══ 涨幅榜实盘策略（涨幅榜扫描 → 实际出场结算 → 日报）═══
+    # 结算幂等（已 matured 行跳过、censored 重算），每日 08:15 错峰（liquidity_scan 08:10 /
+    # meme_risk_daily 08:30）；日报紧随其后 08:20 只读 outcome 表发送。
+    ("gainer_outcome_collect", "15 8 * * *", "collect_gainer_outcome.py", ["--days", "7"],
+     "涨幅榜信号实际出场结算（每日 08:15，TRAIL3%/FIX12h 口径 → biz.scan_gainer_outcome）", "core"),
+    ("gainer_daily_report", "20 8 * * *", "build_gainer_daily_report.py", [],
+     "涨幅榜实盘策略日报邮件（每日 08:20，结算后发送）", "core"),
+
     # ═══ 追涨风险告警（涨幅榜回测 → 盘面扫描落地）═══
     # 依据：《涨幅榜冲高回落回测方案_2026-10-03.md》Part C（币安永续版）：
     # 涨幅≥20% + 正资金费率（拥挤多头）+ 放量 ⇒ 次日跌概率 62~64%（vs 近零费率 48%）。

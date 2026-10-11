@@ -803,7 +803,7 @@ TASK_DEFS = {
     },
     "pm_client_verify": {
         "name": "实盘·PM 客户端直接验证",
-        "description": "绕过 V2_TRADE_ENABLED，直接调 BinanceFuturesClient 的 get_balance/set_leverage/open_position 完整验证 PM 下单链路",
+        "description": "绕过 SIGNAL_TRADE_ENABLED，直接调 BinanceFuturesClient 的 get_balance/set_leverage/open_position 完整验证 PM 下单链路",
         "script": "_pm_client_verify.py",
         "default_args": [],
         "category": "实盘",
@@ -817,21 +817,21 @@ TASK_DEFS = {
     },
     "realtime_preflight": {
         "name": "实盘·上线前预检（fapi 域名+余额+持仓+开关）",
-        "description": "确认客户端走 fapi + 账户余额/持仓/挂单 + V2_TRADE_ENABLED 开关。上线前必跑",
+        "description": "确认客户端走 fapi + 账户余额/持仓/挂单 + SIGNAL_TRADE_ENABLED 开关。上线前必跑",
         "script": "realtime_preflight.py",
         "default_args": [],
         "category": "实盘",
     },
     "execute_gainers_v2": {
         "name": "实盘·盘面信号执行器（dry-run）",
-        "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 V2_TRADE_ENABLED=1 + --apply）",
+        "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 SIGNAL_TRADE_ENABLED=1 + --apply）",
         "script": "execute_gainers_v2.py",
         "default_args": [],
         "category": "实盘",
     },
     "execute_gainers_v2_apply": {
         "name": "实盘·盘面信号执行器（真实下单）",
-        "description": "⚠️ 真实下单！需要 Zeabur 环境变量 V2_TRADE_ENABLED=1。3x/60U 做多（SHORT_LONG）+ 1x/20U 中线（MID_LONG 仅 B右上角）",
+        "description": "⚠️ 真实下单！需要 Zeabur 环境变量 SIGNAL_TRADE_ENABLED=1。3x/60U 做多（SHORT_LONG）+ 1x/20U 中线（MID_LONG 仅 B右上角）",
         "script": "execute_gainers_v2.py",
         "default_args": ["--apply"],
         "category": "实盘",

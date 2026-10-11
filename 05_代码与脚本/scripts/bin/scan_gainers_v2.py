@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""v2 盘面异动扫描引擎：涨幅榜定位 × 强度确认 → 信号落库（盘面异动扫描系统设计方案 v2）。
+"""v2 盘面异动扫描引擎：放量大阳事件 × 涨幅榜档位 → 信号落库。
 
-回测依据（《盘面异动扫描系统设计方案_v2_2026-10-05.md》+ 交易参数回测）：
-  - 方向只来自涨幅榜档位；价量异动=强度确认；时间窗口定多空（T+24h 动量 / T+7d 反转）。
-  - 实盘口径：24h 涨幅用 ticker/24hr 滚动口径（日收盘口径的实盘近似），文档已标注。
+口径（**严格对齐回测** backtest_trade_params.py，2026-10-11 改造）
+-----------------------------------------------------------------
+  - 数据源：`biz.asset_klines` interval='1h' 的**最后一根已收盘 1h bar**（不再读滚动 24h 快照）。
+  - 事件 = 放量大阳 1h bar：`chg1h = close/open − 1 ≥ 3%` 且 `vr = quote_vol ÷ 前 20 根 1h 均量 ≥ 2`。
+  - `chg24` = 事件 bar 收盘 ÷ 24h 前最近 bar 收盘 − 1（回看上限 36h，容忍缺 bar）；
+    **入场价 = 事件 bar 收盘**（与回测 entry 完全一致）。
+  - 档位由 `chg24` 定：A ≥50% / B 30~50% / C <5%；`vr` 只用于 B 右上角过滤。
 
 信号（scan_gainer_signal）：
-  SHORT_LONG  短线做多  chg24h≥50%    + 放量(24h量≥2×7日日均量) 窗口 T+24h LONG
-  MID_LONG    B右上角    chg24h 30~50% + 强放量(vr≥5.6)          窗口 T+24h LONG
-  TRAP_SHORT  诱多做空  chg24h<5%     + 放量（未上榜却放量）      窗口 T+24h SHORT
+  SHORT_LONG  短线做多  chg24≥50%                    窗口 T+24h LONG
+  MID_LONG    B右上角    chg24 30~50% 且 vr(1h)≥5.6   窗口 T+24h LONG
+  TRAP_SHORT  诱多做空  chg24<5%                      窗口 T+24h SHORT
 
 说明：
-  - EXT_SHORT（极端涨幅 ≥75% + 低量静默做空）经量比口径修复后回测为 0 事件、信号不成立，
-    已于 2026-10-07 从本扫描器移除（详见设计方案 §10.3.3）。
-  - 冷却：同 symbol 同信号类型最近 12h 已出信号则跳过。
+  - 旧版读 `/fapi/v1/ticker/24hr`（滚动快照）、vr 用「24h量÷7日日均量」的**日量比**口径，
+    与回测（1h 事件 bar）不一致，信号时点滞后中位 ~14.5h、87% 不满足 chg1h≥3%。
+    本次改为读 1h bar（治本）。`vol_ratio_7d` 列语义随之变为 **1h 量比**（全库唯一消费方=本脚本）。
+  - 去重：同一「事件 bar」只出一次（`params->>'event_bar_ts'` 幂等）；同币 12h 冷却可选（`--cooldown-h`，默认 0=关）。
+  - EXT_SHORT（极端涨幅 ≥75% + 低量静默做空）经量比口径修复后回测为 0 事件，已于 2026-10-07 移除。
   - 默认 dry-run（只打印不落库）；--apply 才落库。
 
 用法：
@@ -36,6 +42,8 @@ if str(PROJECT_SRC) not in sys.path:
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
+from psycopg.rows import dict_row  # noqa: E402
+
 from crypto_research.clients.binance_http import fapi_get  # noqa: E402
 from crypto_research.clients.notifier import EmailNotifier  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
@@ -51,30 +59,72 @@ try:
 except Exception:  # noqa: BLE001 —— 任何异常都回退，保证扫描器可用
     ALERT_SIGNALS = ("SHORT_LONG", "MID_LONG")
 
-GAIN_SHORT_LONG = 50.0        # 短线做多：24h 涨幅 ≥50%
-GAIN_MID_LONG_LO, GAIN_MID_LONG_HI = 20.0, 50.0
-GAIN_TRAP_SHORT = 5.0         # 诱多做空：<5%
-VOL_RATIO_LONG = 2.0          # 放量（做多确认）≥2× 7日日均量
-MIN_VOL = 20_000_000          # 最小 24h 成交额（USDT）
-COOLDOWN_H = 12               # 同币同类型冷却（小时）
+GAIN_SHORT_LONG = 50.0        # 短线做多：chg24 ≥50%
+GAIN_MID_LONG_HI = 50.0
+GAIN_TRAP_SHORT = 5.0         # 诱多做空：chg24 <5%
+B_TOP_CHG_LO = 30.0           # B 右上角：chg24 ≥30%
+B_TOP_VR = 5.6                # B 右上角：**1h 量比** ≥5.6（回测 Q5 下界，口径=1h）
+EVENT_CHG1H_MIN = 0.03        # 事件：1h 涨幅 ≥3%
+EVENT_VR_MIN = 2.0            # 事件：1h 量比 ≥2
+MIN_VOL = 20_000_000          # 最小 24h 成交额（USDT，流动性护栏；回测无此过滤，实盘防滑点）
+COOLDOWN_H = 0                # 同币同类型冷却（小时，0=关；由事件 bar 幂等去重替代）
+EVENT_LOOKBACK_DAYS = 5       # 事件 SQL 回看天数（需覆盖 20 根均量窗 + 36h chg24 回看）
 
-# B 右上角过滤（2026-10-07 扩容决策 C3）
-# - MID_LONG 池（chg20~50%）内按「涨幅+量比组合 rank 前 20%」= B 右上角
-#   回测实际区间 chg[30%,50%] & vr≥5.6，期望 +4.25% / 胜率 66.2% / PF 8.4
-#   （对比全 MID_LONG +2.00% / PF 3.3：只做最强子集，质量接近 A）
-# - 阈值近似 rank 前 20%（实盘扫描单轮候选少，rank 不稳定，用回测 Q5 区间作固定阈值）
-B_TOP_CHG_LO = 30.0           # B 右上角：涨幅 ≥30%
-B_TOP_VR = 5.6                # B 右上角：量比 ≥5.6（回测 Q5 下界）
-
-# 信号类型 → (窗口, 方向, 涨幅判定)
+# 信号类型 → (窗口, 方向, 判定)。c24=chg24(百分数)，vr=1h 量比。
 SIGNAL_DEFS = [
     ("SHORT_LONG", "T24H", "LONG",
-     lambda c: c >= GAIN_SHORT_LONG, lambda vr: vr >= VOL_RATIO_LONG),
+     lambda c24, vr: c24 >= GAIN_SHORT_LONG),
     ("MID_LONG", "T24H", "LONG",
-     lambda c: B_TOP_CHG_LO <= c < GAIN_MID_LONG_HI, lambda vr: vr >= B_TOP_VR),
+     lambda c24, vr: B_TOP_CHG_LO <= c24 < GAIN_MID_LONG_HI and vr >= B_TOP_VR),
     ("TRAP_SHORT", "T24H", "SHORT",
-     lambda c: c < GAIN_TRAP_SHORT, lambda vr: vr >= VOL_RATIO_LONG),
+     lambda c24, vr: c24 < GAIN_TRAP_SHORT),
 ]
+
+# 事件 SQL（严格镜像 backtest_trade_params.py 的 evt/dchg）：最后一根【已收盘】1h bar。
+EVENT_SQL = """
+WITH kl AS (
+    SELECT symbol, open_time, open_px, close_px, quote_vol,
+           AVG(quote_vol) OVER (PARTITION BY symbol ORDER BY open_time
+               ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS avg20,
+           SUM(quote_vol) OVER (PARTITION BY symbol ORDER BY open_time
+               ROWS BETWEEN 23 PRECEDING AND CURRENT ROW) AS vol24
+    FROM biz.asset_klines
+    WHERE interval = '1h' AND open_px > 0 AND close_px > 0
+      AND open_time >= date_trunc('hour', NOW()) - (%(lookback_days)s * INTERVAL '1 day')
+),
+lastc AS (
+    -- 每 symbol 的最后一根【已收盘】1h bar（显式排除当前未收盘 bar）
+    SELECT symbol, MAX(open_time) AS eo
+    FROM kl
+    WHERE open_time < date_trunc('hour', NOW())
+    GROUP BY symbol
+),
+evt AS (
+    SELECT k.symbol, k.open_time AS eo, k.close_px AS entry,
+           k.close_px / k.open_px - 1 AS chg1h,
+           k.quote_vol / NULLIF(k.avg20, 0) AS vr,
+           k.vol24 AS vol_24h
+    FROM kl k
+    JOIN lastc l ON l.symbol = k.symbol AND l.eo = k.open_time
+    WHERE k.avg20 > 0
+      AND k.quote_vol / NULLIF(k.avg20, 0) >= %(vr_min)s
+      AND k.close_px / k.open_px - 1 >= %(chg1h_min)s
+),
+dchg AS (
+    -- 事件时点可得的滚动 24h 涨幅：事件 bar 收盘 ÷ 24h 前最近 bar 收盘（回看上限 36h）
+    SELECT DISTINCT ON (e.symbol, e.eo)
+           e.symbol, e.eo, e.entry / p.close_px - 1 AS chg24
+    FROM evt e
+    JOIN biz.asset_klines p
+      ON p.symbol = e.symbol AND p.interval = '1h' AND p.close_px > 0
+     AND p.open_time <= e.eo - INTERVAL '24 hours'
+     AND p.open_time >  e.eo - INTERVAL '36 hours'
+    ORDER BY e.symbol, e.eo, p.open_time DESC
+)
+SELECT e.symbol, e.eo, e.entry, e.chg1h, e.vr, e.vol_24h, d.chg24
+FROM evt e
+JOIN dchg d ON d.symbol = e.symbol AND d.eo = e.eo
+"""
 
 
 def _fmt(t: datetime) -> str:
@@ -132,23 +182,25 @@ def build_gainer_alert_html(hits: list[dict], profiles: dict | None = None) -> s
           <td style="padding:6px;border:1px solid #eee">{h['direction']}</td>
           <td style="padding:6px;border:1px solid #eee">{h['chg']:+.1f}%</td>
           <td style="padding:6px;border:1px solid #eee">${h['price']:,.4f}</td>
+          <td style="padding:6px;border:1px solid #eee">{h['chg1h']:+.1f}%</td>
           <td style="padding:6px;border:1px solid #eee">{vr_s}</td>
           <td style="padding:6px;border:1px solid #eee">{fund_s}</td>
           <td style="padding:6px;border:1px solid #eee">${h['vol']/1e6:.0f}M</td>
           <td style="padding:6px;border:1px solid #eee">{exp_s}</td>
         </tr>"""
     return f"""
-    <div style="font-family:sans-serif;max-width:860px;margin:auto">
+    <div style="font-family:sans-serif;max-width:920px;margin:auto">
       <h2 style="color:#1e40af">📊 涨幅榜信号告警（v2）</h2>
-      <p>检测到 <b>{len(hits)}</b> 个新信号：</p>
+      <p>检测到 <b>{len(hits)}</b> 个新信号（事件 bar：放量大阳 1h）：</p>
       <table style="border-collapse:collapse;width:100%">
         <tr style="background:#f3f4f6">
           <th style="padding:6px;border:1px solid #eee">代币</th>
           <th style="padding:6px;border:1px solid #eee">信号类型</th>
           <th style="padding:6px;border:1px solid #eee">方向</th>
           <th style="padding:6px;border:1px solid #eee">24h涨幅</th>
-          <th style="padding:6px;border:1px solid #eee">价格</th>
-          <th style="padding:6px;border:1px solid #eee">量比</th>
+          <th style="padding:6px;border:1px solid #eee">入场价(事件收盘)</th>
+          <th style="padding:6px;border:1px solid #eee">1h涨幅</th>
+          <th style="padding:6px;border:1px solid #eee">1h量比</th>
           <th style="padding:6px;border:1px solid #eee">资金费率</th>
           <th style="padding:6px;border:1px solid #eee">24h成交额</th>
           <th style="padding:6px;border:1px solid #eee">回测胜率/期望</th>
@@ -157,33 +209,55 @@ def build_gainer_alert_html(hits: list[dict], profiles: dict | None = None) -> s
       </table>
       <p style="color:#666;margin-top:16px">
         <b>信号说明：</b>（实盘白名单 A+B；C 诱多做空不实盘、不告警）<br>
-        • SHORT_LONG（A）：短线做多 ≥50%涨幅 + 放量<br>
-        • MID_LONG（B 右上角）：次档做多 30~50%涨幅 + 量比≥5.6
+        • SHORT_LONG（A）：短线做多 ≥50%涨幅（事件 bar：1h≥3% 放量）<br>
+        • MID_LONG（B 右上角）：次档做多 30~50%涨幅 + 1h量比≥5.6
       </p>
       <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约<br>
-      回测口径：滚动24h涨幅（对齐线上ticker/24hr，无前视）。</p>
+      回测口径：1h 事件 bar（chg1h≥3% & vr≥2），入场价=事件 bar 收盘，与 backtest_trade_params.py 对齐。</p>
     </div>
     """
 
 
-def load_vol_avg_7d(conn) -> dict[str, float]:
-    """近 7 日日均成交额（USDT）→ {symbol: avg_daily_quote_vol}。"""
+def load_events(conn) -> list[dict]:
+    """读 1h 事件（放量大阳 + 滚动 24h 涨幅），严格对齐回测 SQL。"""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(EVENT_SQL, {
+            "vr_min": EVENT_VR_MIN,
+            "chg1h_min": EVENT_CHG1H_MIN,
+            "lookback_days": EVENT_LOOKBACK_DAYS,
+        })
+        return cur.fetchall()
+
+
+def load_funding() -> dict[str, float]:
+    """当前资金费率（best-effort）。拉取失败返回空 dict（funding 维度记 n/a，不影响主流程）。"""
     out: dict[str, float] = {}
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT symbol, SUM(quote_vol) / 7.0 AS avg_daily "
-            "FROM biz.asset_klines "
-            "WHERE interval = '1h' AND open_time >= NOW() - INTERVAL '7 days' "
-            "  AND quote_vol IS NOT NULL GROUP BY symbol",
-        )
-        for sym, avg in cur.fetchall():
-            if avg is not None and float(avg) > 0:
-                out[sym] = float(avg)
+    try:
+        premium = fapi_get("https://fapi.binance.com/fapi/v1/premiumIndex")
+        for p in premium:
+            sym = p.get("symbol", "")
+            if p.get("lastFundingRate") is not None:
+                out[sym] = float(p["lastFundingRate"])
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 资金费率拉取失败（funding=n/a）：{e}")
     return out
 
 
+def load_emitted_events(conn) -> set[tuple[str, str]]:
+    """近 2 天已落库的 (symbol, event_bar_ts) 集合（事件 bar 幂等去重）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT symbol, params->>'event_bar_ts' FROM biz.scan_gainer_signal "
+            "WHERE scan_ts >= NOW() - INTERVAL '2 days' "
+            "  AND params->>'event_bar_ts' IS NOT NULL",
+        )
+        return {(r[0], r[1]) for r in cur.fetchall() if r[1]}
+
+
 def recent_signals(conn, hours: float) -> set[tuple[str, str]]:
-    """最近 hours 小时内已出信号的 (symbol, signal_type) 集合（冷却去重）。"""
+    """最近 hours 小时内已出信号的 (symbol, signal_type) 集合（可选冷却去重）。"""
+    if hours <= 0:
+        return set()
     with conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT symbol, signal_type FROM biz.scan_gainer_signal "
@@ -196,51 +270,35 @@ def recent_signals(conn, hours: float) -> set[tuple[str, str]]:
 
 
 def scan(conn, min_vol: float, cooldown_h: float) -> list[dict]:
-    fapi = "https://fapi.binance.com"
-    ticker = fapi_get(f"{fapi}/fapi/v1/ticker/24hr")
-    premium = fapi_get(f"{fapi}/fapi/v1/premiumIndex")
-
-    funding: dict[str, float] = {}
-    for p in premium:
-        sym = p.get("symbol", "")
-        if p.get("lastFundingRate") is not None:
-            funding[sym] = float(p["lastFundingRate"])
-
-    vol_avg = load_vol_avg_7d(conn)
+    events = load_events(conn)
+    funding = load_funding()
+    emitted = load_emitted_events(conn)
     cooled = recent_signals(conn, cooldown_h)
     now = datetime.now(timezone.utc)
 
     hits: list[dict] = []
-    for t in ticker:
-        sym = t.get("symbol", "")
-        if not sym.endswith("USDT"):
+    for e in events:
+        sym = e["symbol"]
+        vol24 = float(e["vol_24h"] or 0)
+        if vol24 < min_vol or e["chg24"] is None:
             continue
-        try:
-            chg = float(t.get("priceChangePercent") or 0)
-            price = float(t.get("lastPrice") or 0)
-            vol = float(t.get("quoteVolume") or 0)
-        except (TypeError, ValueError):
+        chg24_pct = float(e["chg24"]) * 100.0
+        chg1h = float(e["chg1h"]) * 100.0
+        vr = float(e["vr"])
+        eo_iso = e["eo"].isoformat()
+        # 同一事件 bar 只出一次（不再依赖 30min 轮询频率去重）
+        if (sym, eo_iso) in emitted:
             continue
-        if vol < min_vol:
-            continue
-        avg = vol_avg.get(sym)
-        # 24h量 / 7日日均量。注意 avg 已是「日均」成交额（见 load_vol_avg_7d），
-        # 不能再 ×24，否则量比被缩小 24 倍：做空「≤1×」恒真、做多「≥2×」永不触发。
-        vr = vol / avg if avg and avg > 0 else None
-        fund = funding.get(sym)
-        for sig_type, window, direction, c_ok, v_ok in SIGNAL_DEFS:
-            if not c_ok(chg):
-                continue
-            if vr is None:      # 无量数据（非 529 回填合约，如美股代币）→ 量能维度不可判定，跳过
-                continue
-            if not v_ok(vr):
+        for sig_type, window, direction, ok in SIGNAL_DEFS:
+            if not ok(chg24_pct, vr):
                 continue
             if (sym, sig_type) in cooled:
                 continue
             hits.append({
-                "symbol": sym, "price": price, "chg": chg, "vol": vol,
-                "vr": vr, "fund": fund, "sig_type": sig_type,
-                "window": window, "direction": direction, "ts": now,
+                "symbol": sym, "price": float(e["entry"]), "chg": chg24_pct,
+                "chg1h": chg1h, "vol": vol24, "vr": vr, "fund": funding.get(sym),
+                "sig_type": sig_type, "window": window, "direction": direction,
+                "ts": now, "event_bar_ts": eo_iso,
             })
     return hits
 
@@ -257,23 +315,29 @@ def main() -> int:
     with get_connection(settings.database_url) as conn:
         hits = scan(conn, args.min_vol, args.cooldown_h)
 
-    print(f"[scan] 命中 {len(hits)} 条（{'APPLY 落库' if args.apply else 'DRY-RUN'}，冷却 {args.cooldown_h}h）")
+    print(f"[scan] 命中 {len(hits)} 条（{'APPLY 落库' if args.apply else 'DRY-RUN'}，"
+          f"冷却 {args.cooldown_h}h，最小24h额 ${args.min_vol/1e6:.0f}M）")
     for h in hits:
         vr_s = "n/a" if h["vr"] is None else f"{h['vr']:.2f}"
         fund_s = "n/a" if h["fund"] is None else f"{h['fund']:.4%}"
         print(f"  {_fmt(h['ts'])} {h['symbol']:<12} {h['sig_type']:<12} {h['window']:<5} "
-              f"{h['direction']:<6} chg={h['chg']:+.1f}% vr={vr_s} "
-              f"fund={fund_s} vol=${h['vol']/1e6:.0f}M")
+              f"{h['direction']:<6} chg24={h['chg']:+.1f}% chg1h={h['chg1h']:+.1f}% "
+              f"vr1h={vr_s} fund={fund_s} vol=${h['vol']/1e6:.0f}M "
+              f"@${h['price']:,.4f} bar={h['event_bar_ts']}")
         if args.apply:
             with get_connection(settings.database_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO biz.scan_gainer_signal "
                         "(scan_ts, symbol, price_usd, chg_24h_pct, vol_24h_usd, vol_ratio_7d, "
-                        " funding_rate, signal_type, signal_window, direction) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        " funding_rate, signal_type, signal_window, direction, params) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (h["ts"], h["symbol"], h["price"], h["chg"], h["vol"], h["vr"],
-                         h["fund"], h["sig_type"], h["window"], h["direction"]),
+                         h["fund"], h["sig_type"], h["window"], h["direction"],
+                         json.dumps({"caliber": "1h_event", "event_bar_ts": h["event_bar_ts"],
+                                     "chg1h_pct": round(h["chg1h"], 4),
+                                     "vr_1h": round(h["vr"], 4),
+                                     "vol_24h_usd": h["vol"]})),
                     )
 
     # 邮件告警（实盘白名单 A=SHORT_LONG + B=MID_LONG 右上角；C 不实盘、不告警）

@@ -414,11 +414,13 @@ SCHEDULE: list[tuple[str, str, str, list[str], str, str]] = [
     #  "盘面告警·质量日报邮件（08:20，与 09:00 早报解耦）", "core"),
 
     # ═══ 盘面异动扫描 v2（2026-10-06，替代 v1 邮件告警）═══
-    # 依据：《盘面异动扫描系统设计方案_v2_2026-10-05.md》。涨幅榜定位（24h 涨幅档）× 强度确认
-    # （放量/静默）→ scan_gainer_signal + 邮件。每 30 分钟扫描（与追涨风险告警同频）；
-    # --apply 落库 + --alert 发邮件；同币同类型 12h 冷却去重。
-    ("scan_gainers_v2", "*/30 * * * *", "scan_gainers_v2.py", ["--apply", "--alert"],
-     "盘面异动扫描 v2·涨幅榜信号（每30分钟，落库+邮件告警）", "core"),
+    # 依据：《盘面异动扫描系统设计方案_v2_2026-10-05.md》。**2026-10-11 口径改造**：
+    # 改为读 biz.asset_klines 的最后一根【已收盘】1h bar（放量大阳事件：chg1h≥3% & vr≥2），
+    # 与 backtest_trade_params.py 事件定义逐行对齐（旧版读滚动 ticker/24hr，入场滞后中位 ~14.5h）。
+    # 扫描点错开到 :05/:35（scan_daemon 每 5min 刷新 klines，避开整点 :00 撞未落终值的 bar）；
+    # 事件 bar 幂等去重（params.event_bar_ts）；--apply 落库 + --alert 发邮件。
+    ("scan_gainers_v2", "5,35 * * * *", "scan_gainers_v2.py", ["--apply", "--alert"],
+     "盘面异动扫描 v2·1h事件bar信号（每小时:05/:35，落库+邮件告警）", "core"),
 
     # ═══ 实证联动因子效果验证 ═══
     # 二阶受益已接入 asset_linkage_factor（2026-10-02 c155ac8）。脚本每日只读对比

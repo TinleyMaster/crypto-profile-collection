@@ -752,9 +752,11 @@ def main() -> None:
     if args.test_connection:
         sys.exit(test_connection(settings))
 
-    live = args.live and settings.signal_trade_enabled
+    live = args.live and settings.signal_trade_enabled and settings.kol_auto_trade_enabled
     if args.live and not settings.signal_trade_enabled:
         logger.warning("--live 已指定，但 SIGNAL_TRADE_ENABLED 未设为 1，仍按 dry-run 执行")
+    elif args.live and not settings.kol_auto_trade_enabled:
+        logger.warning("--live 已指定，但 KOL_AUTO_TRADE_ENABLED 未设为 1，KOL 实盘保持关闭（dry-run）")
 
     whitelist = "、".join(settings.signal_kol_whitelist) if settings.signal_kol_whitelist else "全部 kol 博主"
     logger.info("模式=%s 总开关=%s 单笔名义=%.0fUSDT 杠杆=%s 下单方式=%s 冷却=%smin "

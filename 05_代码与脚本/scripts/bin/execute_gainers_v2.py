@@ -185,53 +185,114 @@ def _filled_order(client, symbol: str, order_id) -> dict | None:
         return None
 
 
-def _reconcile_closed(client, settings, conn) -> int:
-    """对账：查 v2_trade_log 中未平仓记录，若币安已无持仓 → 回填出场明细与盈亏。
+def close_expired(client, conn) -> int:
+    """到期平仓：持有 ≥ planned_hold_h 且仍持仓的机器人单，市价了结（对齐回测）。
 
-    出场判定（全量留痕）：从记录的保护单（SL/TR/TP）里找哪张 status=FILLED → 即出场单，
-    再按该出场单 orderId 拉 userTrades，**把盈亏精确定位到本笔订单**（realizedPnl，
-    手续费取负），从而剔除同币手动单对 income 的污染。无保护单成交（运维/到期平仓）
+    回测出场规则：持有 N 小时未触发 TRAIL/SL/TP → 按第 N 根收盘平仓（见
+    backtest_trade_params.py）。实盘此前只挂 TRAIL3/SL10%，不会到期了结，导致
+    未触发保护单的持仓无限期持有 —— 出场分布与回测不一致。本函数补齐该支：
+    撤保护单 → 市价全平 → 写 exit_order_id/exit_reason='expiry'，盈亏由
+    _reconcile_closed 下一轮按该 orderId 精确回填（close_ts 待成交明细齐备后置）。
+
+    仅处理 origin='bot'（手动单不入本表、不受影响）。返回本轮平仓笔数。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, symbol, open_ts, planned_hold_h FROM biz.v2_trade_log "
+            "WHERE close_ts IS NULL AND exit_order_id IS NULL AND origin = 'bot' "
+            "  AND planned_hold_h IS NOT NULL AND planned_hold_h > 0 "
+            "  AND NOW() >= open_ts + (planned_hold_h * INTERVAL '1 hour') "
+            "ORDER BY open_ts")
+        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
+    n = 0
+    for t in rows:
+        try:
+            amt = client.get_position_amt(t["symbol"])
+            if amt == 0:
+                continue  # 已被 TRAIL/SL 平掉，交给 _reconcile_closed 回填
+            pos_side = "LONG" if amt > 0 else "SHORT"
+            close_side = "SELL" if amt > 0 else "BUY"
+            # 撤保护单：closePosition 单与全平市价单冲突（-4045）
+            for o in client.get_open_orders(t["symbol"]):
+                try:
+                    client.cancel_order(t["symbol"], o["orderId"])
+                    print(f"  [expiry] 撤保护单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  [expiry] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
+            r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
+                                   close_position=True, position_side=pos_side)
+            oid = r.get("orderId")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.v2_trade_log SET exit_order_id=%s, exit_reason='expiry', "
+                    "close_resp=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                    (oid, json.dumps(r), t["id"]))
+            print(f"  [expiry] {t['symbol']} 持有≥{t['planned_hold_h']}h 市价平仓 orderId={oid}")
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  [expiry] {t['symbol']} 平仓失败: {type(e).__name__}: {e}")
+    return n
+
+
+def _reconcile_closed(client, settings, conn) -> int:
+    """对账：查 v2_trade_log 中未平仓记录，回填出场明细与盈亏。
+
+    出场判定（全量留痕）：
+    - 到期平仓（close_expired 已写入 exit_order_id）：出场单已知，直接用其 orderId 取成交；
+    - TRAIL/SL/TP 触发：从记录的保护单里找哪张 status=FILLED → 即出场单。
+    再按出场单 orderId 拉 userTrades，**把盈亏精确定位到本笔订单**（realizedPnl，
+    手续费取负），从而剔除同币手动单对 income 的污染。无保护单成交（运维手动平仓）
     才回退按 symbol 时间窗 income，并标 exit_reason='manual_or_unknown' 以区分口径。
     返回本次回填笔数。"""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, open_ts, protective_orders, order_id "
+            "SELECT id, symbol, open_ts, protective_orders, order_id, exit_order_id, exit_reason "
             "FROM biz.v2_trade_log WHERE close_ts IS NULL ORDER BY open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
     n = 0
     for t in rows:
         try:
-            if client.get_position_amt(t["symbol"]) != 0:
-                continue  # 仍持仓
-            # 平仓后清理遗留的保护单：SL 与 TR 都是 closePosition 单，只会触发其中一个，
-            # 另一个在 API 侧不会随持仓归零自动撤销；若不撤，同 symbol 下次开仓会被这张
-            # 旧单立即平掉（币安 API 不提供 UI 那种「成交自动撤销同类单」的行为）。
-            for o in client.get_open_orders(t["symbol"]):
-                try:
-                    client.cancel_order(t["symbol"], o["orderId"])
-                    print(f"  [reconcile] 撤销遗留挂单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
-                except Exception as e:  # noqa: BLE001
-                    print(f"  [reconcile] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
-
-            prot = t.get("protective_orders") or {}
+            exit_order_id = t.get("exit_order_id")
             exit_order = None
-            exit_reason = "unknown"
-            for key, reason in (("stop_loss", "sl"), ("trailing_stop", "trail"),
-                                ("take_profit", "tp")):
-                filled = _filled_order(client, t["symbol"], (prot.get(key) or {}).get("orderId"))
-                if filled:
-                    exit_order, exit_reason = filled, reason
-                    break
+            if exit_order_id:
+                # 到期平仓路径：出场单是本进程下的市价平仓单，orderId 已知，直接用其取成交，
+                # 不再重复判定保护单。
+                exit_reason = t.get("exit_reason") or "expiry"
+                exit_order = _filled_order(client, t["symbol"], exit_order_id)
+                if exit_order is None:
+                    continue  # 尚未成交，下轮再试
+            else:
+                if client.get_position_amt(t["symbol"]) != 0:
+                    continue  # 仍持仓
+                # 平仓后清理遗留的保护单：SL 与 TR 都是 closePosition 单，只会触发其中一个，
+                # 另一个在 API 侧不会随持仓归零自动撤销；若不撤，同 symbol 下次开仓会被这张
+                # 旧单立即平掉（币安 API 不提供 UI 那种「成交自动撤销同类单」的行为）。
+                for o in client.get_open_orders(t["symbol"]):
+                    try:
+                        client.cancel_order(t["symbol"], o["orderId"])
+                        print(f"  [reconcile] 撤销遗留挂单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"  [reconcile] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
 
-            exit_order_id = None
+                prot = t.get("protective_orders") or {}
+                exit_reason = "unknown"
+                for key, reason in (("stop_loss", "sl"), ("trailing_stop", "trail"),
+                                    ("take_profit", "tp")):
+                    filled = _filled_order(client, t["symbol"], (prot.get(key) or {}).get("orderId"))
+                    if filled:
+                        exit_order, exit_reason = filled, reason
+                        break
+
             close_price = None
             close_resp = None
             income_detail = None
             if exit_order is not None:
-                exit_order_id = exit_order.get("orderId")
+                exit_order_id = exit_order.get("orderId") or exit_order_id
                 close_resp = exit_order
                 close_price = float(exit_order.get("avgPrice") or 0) or None
                 trades = client.get_user_trades(t["symbol"], order_id=exit_order_id)
+                if not trades:
+                    continue  # 成交明细尚未就绪，下轮再回填（避免误写 0 盈亏）
                 income_detail = trades
                 pnl = sum(float(x.get("realizedPnl", 0)) for x in trades)
                 # userTrades 的 commission 为正数（实付手续费）→ 取负，与 income 口径一致
@@ -374,7 +435,10 @@ def main() -> int:
                                      settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:
-                # 对账已平仓持仓（TRAIL/SL/TP 触发后补录盈亏）
+                # 到期平仓（对齐回测：持有 N 小时未触发保护单 → 市价了结）
+                with get_connection(settings.database_url) as conn:
+                    close_expired(client, conn)
+                # 对账已平仓持仓（TRAIL/SL/TP/到期 触发后补录盈亏）
                 with get_connection(settings.database_url) as conn:
                     _reconcile_closed(client, settings, conn)
             if not args.watch:

@@ -41,6 +41,16 @@ from crypto_research.clients.notifier import EmailNotifier  # noqa: E402
 from crypto_research.config import get_settings  # noqa: E402
 from crypto_research.db.conn import get_connection  # noqa: E402
 
+# 邮件告警范围 = 实盘白名单（A 短线做多 SHORT_LONG + B 右上角 MID_LONG）；C(TRAP_SHORT) 不实盘、不告警。
+# 单一事实来源：优先复用 execute_gainers_v2.LIVE_SIGNALS（其顶层仅 import + 常量，
+# 无网络/下单副作用），import 失败才回退本地常量 —— ⚠ 回退值须与
+# bin/execute_gainers_v2.py:LIVE_SIGNALS 保持同步。
+try:
+    from execute_gainers_v2 import LIVE_SIGNALS as _LIVE_SIGNALS  # noqa: E402
+    ALERT_SIGNALS: tuple[str, ...] = tuple(_LIVE_SIGNALS)
+except Exception:  # noqa: BLE001 —— 任何异常都回退，保证扫描器可用
+    ALERT_SIGNALS = ("SHORT_LONG", "MID_LONG")
+
 GAIN_SHORT_LONG = 50.0        # 短线做多：24h 涨幅 ≥50%
 GAIN_MID_LONG_LO, GAIN_MID_LONG_HI = 20.0, 50.0
 GAIN_TRAP_SHORT = 5.0         # 诱多做空：<5%
@@ -69,6 +79,18 @@ SIGNAL_DEFS = [
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+
+
+def alert_subject(hits: list[dict]) -> str:
+    """告警邮件标题：按实盘类型统计，只列本次有命中的类型（A 短线 / B 右上角）。"""
+    n_a = sum(1 for h in hits if h["sig_type"] == "SHORT_LONG")
+    n_b = sum(1 for h in hits if h["sig_type"] == "MID_LONG")
+    parts = []
+    if n_a:
+        parts.append(f"A 信号 {n_a} 个")
+    if n_b:
+        parts.append(f"B 信号 {n_b} 个")
+    return "[涨幅榜告警] " + " / ".join(parts)
 
 
 def load_exit_profile() -> dict:
@@ -134,10 +156,9 @@ def build_gainer_alert_html(hits: list[dict], profiles: dict | None = None) -> s
         {rows}
       </table>
       <p style="color:#666;margin-top:16px">
-        <b>信号说明：</b><br>
-        • SHORT_LONG：短线做多（≥50%涨幅+放量）→ T+24h<br>
-        • MID_LONG：次档做多（20~50%涨幅+放量）→ T+24h<br>
-        • TRAP_SHORT：诱多做空（<5%涨幅+放量）→ T+24h
+        <b>信号说明：</b>（实盘白名单 A+B；C 诱多做空不实盘、不告警）<br>
+        • SHORT_LONG（A）：短线做多 ≥50%涨幅 + 放量<br>
+        • MID_LONG（B 右上角）：次档做多 30~50%涨幅 + 量比≥5.6
       </p>
       <p style="color:#999;font-size:12px">盘面异动扫描系统 v2 · 回测依据：2023~2026全周期529合约<br>
       回测口径：滚动24h涨幅（对齐线上ticker/24hr，无前视）。</p>
@@ -255,18 +276,18 @@ def main() -> int:
                          h["fund"], h["sig_type"], h["window"], h["direction"]),
                     )
 
-    # 邮件告警（2026-10-07 起仅实盘信号 A=SHORT_LONG；B/C 仍在研究不入告警）
+    # 邮件告警（实盘白名单 A=SHORT_LONG + B=MID_LONG 右上角；C 不实盘、不告警）
     if args.alert and hits:
-        alert_hits = [h for h in hits if h["sig_type"] == "SHORT_LONG"]
+        alert_hits = [h for h in hits if h["sig_type"] in ALERT_SIGNALS]
         if not alert_hits:
-            print("[alert] 本次无 A 信号（SHORT_LONG），不发送邮件")
+            print("[alert] 本次无 A/B 实盘信号，不发送邮件")
         else:
             notifier = EmailNotifier(settings)
             if notifier.configured:
                 profiles = load_exit_profile()
                 html = build_gainer_alert_html(alert_hits, profiles)
                 ok, msg = notifier.send(
-                    subject=f"[涨幅榜告警] A 信号 {len(alert_hits)} 个",
+                    subject=alert_subject(alert_hits),
                     body_html=html,
                     from_name="盘面异动扫描 v2",
                 )

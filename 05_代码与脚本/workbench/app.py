@@ -794,6 +794,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "回测",
     },
+    "backtest_divergence": {
+        "name": "回测·顶背离（价格新高×RSI/量未新高）× A/B 做多信号",
+        "description": "顶背离负向过滤器回测：信号 bar 收盘判定（价格创新高但 RSI/成交量未创新高），看「有背离」子集期望是否显著低于全池。可加 --start 2026-01-01 缩样本",
+        "script": "backtest_divergence.py",
+        "default_args": [],
+        "category": "回测",
+    },
     "binance_api_probe": {
         "name": "实盘·币安子账户 API 探针",
         "description": "容器内验证 papi 网络 + Key 签名 + PM 账户余额/下单。必须在容器跑（本地 IP 被币安拦截）",

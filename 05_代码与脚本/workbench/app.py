@@ -801,6 +801,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "回测",
     },
+    "backtest_cooldown": {
+        "name": "回测·冷却时间扫描（同币同类型去重）× A/B 做多信号",
+        "description": "扫描信号发射层冷却 C∈{0..168}h：保留笔数/剔除率/总PnL/单笔/PF，判断更长冷却的 trade-off。复刻 scan_gainers_v2 的 COOLDOWN_H 口径。可加 --start 2026-01-01",
+        "script": "backtest_cooldown.py",
+        "default_args": [],
+        "category": "回测",
+    },
     "binance_api_probe": {
         "name": "实盘·币安子账户 API 探针",
         "description": "容器内验证 papi 网络 + Key 签名 + PM 账户余额/下单。必须在容器跑（本地 IP 被币安拦截）",

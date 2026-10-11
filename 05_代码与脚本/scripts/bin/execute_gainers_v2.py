@@ -132,7 +132,10 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
         return rec
     # 下单
     client.set_leverage(sig["symbol"], lev)
-    direction = "LONG" if sig["direction"] == "LONG" else "SHORT"
+    # ⚠️ open_position/place_trailing_stop 的 direction 契约是**小写** long/short；
+    #    传大写 "LONG" 会落入其 else 分支 → 实际下 SELL/SHORT，多空完全反向
+    #    （2026-10-11 实盘复现：SHORT_LONG 信号开出了 -539.1 的空头持仓）。
+    direction = "long" if sig["direction"] == "LONG" else "short"
     try:
         r = client.open_position(
             sig["symbol"], direction, notional,
@@ -183,9 +186,40 @@ def _reconcile_closed(client, settings, conn) -> int:
     return n
 
 
+def close_symbol(client, symbol: str) -> int:
+    """运维：市价平掉某 symbol 的全部持仓。
+
+    先撤该 symbol 的挂单（含 closePosition 的 TRAIL/SL/TP —— 币安同一持仓侧只允许
+    一张 closePosition 单，不撤会 -4045 冲突），再对该侧下 closePosition 全平单。
+    双向持仓模式下用 positionSide 表达方向，不传 reduceOnly（hedge 模式禁用）。
+    """
+    amt = client.get_position_amt(symbol)
+    if amt == 0:
+        print(f"  {symbol} 无持仓，跳过")
+        return 0
+    pos_side = "LONG" if amt > 0 else "SHORT"
+    close_side = "SELL" if amt > 0 else "BUY"
+    for o in client.get_open_orders(symbol):
+        try:
+            client.cancel_order(symbol, o["orderId"])
+            print(f"  撤单 {symbol} {o.get('type')} id={o.get('orderId')}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  撤单失败 id={o.get('orderId')}: {type(e).__name__}: {e}")
+    try:
+        r = client.place_order(symbol=symbol, side=close_side, order_type="MARKET",
+                               close_position=True, position_side=pos_side)
+        print(f"  平仓 {symbol} {pos_side} amt={amt} → orderId={r.get('orderId')}")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"  平仓失败 {symbol}: {type(e).__name__}: {e}")
+        return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真实下单（需 SIGNAL_TRADE_ENABLED=1）")
+    ap.add_argument("--close-symbol", metavar="SYM",
+                    help="运维：市价平掉该 symbol 全部持仓后退出（不下新单）")
     ap.add_argument("--watch", action="store_true", help="常驻：下单 + 到期平仓")
     ap.add_argument("--interval", type=int, default=600)
     ap.add_argument("--max-rows", type=int, default=20)
@@ -199,6 +233,11 @@ def main() -> int:
     client = BinanceFuturesClient(settings.binance_api_key,
                                   settings.binance_api_secret,
                                   base_url=settings.binance_fapi_base_url)
+
+    # 运维平仓分支：只平指定 symbol 的持仓后退出，不开新单、不进常驻循环。
+    if args.close_symbol:
+        close_symbol(client, args.close_symbol.upper())
+        return 0
 
     while True:
         try:

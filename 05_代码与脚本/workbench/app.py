@@ -815,6 +815,13 @@ TASK_DEFS = {
         "default_args": [],
         "category": "实盘",
     },
+    "realtime_preflight": {
+        "name": "实盘·上线前预检（fapi 域名+余额+持仓+开关）",
+        "description": "确认客户端走 fapi + 账户余额/持仓/挂单 + V2_TRADE_ENABLED 开关。上线前必跑",
+        "script": "realtime_preflight.py",
+        "default_args": [],
+        "category": "实盘",
+    },
     "execute_gainers_v2": {
         "name": "实盘·盘面信号执行器（dry-run）",
         "description": "读取 scan_gainer_signal 白名单信号→风控→下单准备。默认 dry-run（真实下单需 V2_TRADE_ENABLED=1 + --apply）",

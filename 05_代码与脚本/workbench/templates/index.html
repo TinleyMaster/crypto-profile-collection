@@ -1816,7 +1816,8 @@
             flex: 1;
             display: flex;
             overflow: hidden;
-            min-width: 0;   /* 允许子项收缩，防横向溢出把右缘顶出屏幕 */
+            min-width: 0;
+            /* 允许子项收缩，防横向溢出把右缘顶出屏幕 */
         }
 
         .ai-trace-list {
@@ -1888,7 +1889,8 @@
         .ai-trace-detail {
             flex: 1;
             overflow-y: auto;
-            overflow-x: hidden;   /* 长 JSON/思考文本不把右缘顶出屏幕 */
+            overflow-x: hidden;
+            /* 长 JSON/思考文本不把右缘顶出屏幕 */
             min-width: 0;
             padding: 16px 20px;
         }
@@ -6551,16 +6553,19 @@
             font-weight: 700;
             cursor: help;
         }
+
         .signal-calib-ok {
             background: rgba(34, 197, 94, .16);
             color: #4ade80;
             border: 1px solid rgba(34, 197, 94, .35);
         }
+
         .signal-calib-none {
             background: rgba(107, 114, 128, .22);
             color: #9ca3af;
             border: 1px solid rgba(107, 114, 128, .40);
         }
+
         .signal-calib-decay {
             background: rgba(240, 185, 11, .16);
             color: #f0b90b;
@@ -11224,7 +11229,13 @@
             'tvl_surge_24h': 'TVL 增幅',
             'social_surge': '社交热度',
             'cmc_gainers_24h': 'CMC 涨幅榜',
-            'cmc_losers_24h': 'CMC 跌幅榜'
+            'cmc_losers_24h': 'CMC 跌幅榜',
+            'whale_mover': '巨鲸筹码',
+            'exchange_flow_24h': '交易所资金流',
+            'derivatives_oi': 'OI 变动',
+            'funding_rate_extreme': '资金费率',
+            'liquidation_24h': '清算榜',
+            'long_short_ratio': '多空比'
         };
         const DIFF_CATEGORY_TIP = {
             'price_change_24h': '按全市场 24 小时涨跌幅从大到小排序：左列为头部（涨得最多），右列为尾部（跌得最多）',
@@ -11237,7 +11248,13 @@
             'tvl_surge_24h': '按 24h 协议 TVL 环比增幅排序（DeFi 资金流入）',
             'social_surge': '按社交热度日环比增幅排序（需有前一日数据）',
             'cmc_gainers_24h': 'CMC 官方 24h 涨幅榜（覆盖全市场含新币）',
-            'cmc_losers_24h': 'CMC 官方 24h 跌幅榜（覆盖全市场含新币）'
+            'cmc_losers_24h': 'CMC 官方 24h 跌幅榜（覆盖全市场含新币）',
+            'whale_mover': '链上持仓快照中鲸鱼地址 7d 持仓变动：左列为增持吸筹（up），右列为减持出货（down）· 取 |变动| 最大的链',
+            'exchange_flow_24h': '按当日链上交易所充提净额排序：左列为净提币（囤币/吸筹），右列为净充值（潜在砸盘）· 已过滤 <3 个整点观测 / <$0.5M 噪声',
+            'derivatives_oi': 'Coinglass 跨所聚合 OI 24h 变动：左列为 OI 增（杠杆/新仓入场），右列为 OI 减（去杠杆/平仓）· 取最新快照',
+            'funding_rate_extreme': 'Coinglass Binance 最新资金费率极端值：左列为高正费率（多军拥挤/回调风险），右列为负费率（空军拥挤/轧空风险）· 仅看方向不看绝对值',
+            'liquidation_24h': '按 24h 全所清算额排序：左列为多单爆仓占主导（下跌踩踏），右列为空单爆仓占主导（上涨轧空）',
+            'long_short_ratio': 'Binance 大户持仓多空比（top_position_ratio，缺失回退全体账户）：左列为多空比高（>1，大户多单占优/拥挤看多），右列为低（<1，拥挤看空）· 每日 03:20 采集取最新快照'
         };
         const SECTOR_LABELS_SHORT = {
             'l1': 'L1', 'l2': 'L2', 'defi': 'DeFi', 'launchpad': 'Launchpad',
@@ -11284,6 +11301,34 @@
             diffColorScheme = diffColorScheme === 'red-up' ? 'green-up' : 'red-up';
             localStorage.setItem('diffColorScheme', diffColorScheme);
             applyDiffColorScheme();
+        }
+
+        // 宏观速览条：稳定币总供给 + 净流（市场总水龙头）
+        function _renderDiffMacro (sc) {
+            if (!sc) return '';
+            const fmtB = v => (v === null || v === undefined) ? '—' :
+                (v >= 0 ? '+' : '') + Number(v).toFixed(2) + 'B';
+            const up = diffColorScheme === 'red-up';  // 是否 A 股配色
+            const posColor = up ? '#ef5350' : '#26a69a';  // 正(增/流入)颜色
+            const negColor = up ? '#26a69a' : '#ef5350';  // 负(减/流出)颜色
+            const colorOf = v => (v === null || v === undefined || v === 0) ? '#888' : (v > 0 ? posColor : negColor);
+            const b = color => '<span style="color:' + color + ';font-weight:600">';
+            const e = '</span>';
+            return '' +
+                '<div style="display:flex;flex-wrap:wrap;gap:6px 22px;align-items:center;' +
+                'padding:8px 12px;margin:6px 0 2px;background:rgba(38,166,154,0.07);' +
+                'border:1px solid rgba(38,166,154,0.25);border-radius:8px;font-size:12px;color:#bbb">' +
+                '<span style="font-weight:700;color:#8fd3c7">💧 宏观速览</span>' +
+                '<span>稳定币总供给 ' + b('#ddd') + fmtB(sc.total_supply_b) + e +
+                ' <span style="color:#777">(' + (sc.date || '') + ')</span></span>' +
+                '<span>1d 净流 ' + b(colorOf(sc.change_1d_b)) + fmtB(sc.change_1d_b) + e + '</span>' +
+                '<span>7d 净流 ' + b(colorOf(sc.netflow_7d_b)) + fmtB(sc.netflow_7d_b) + e + '</span>' +
+                '<span>30d 净流 ' + b(colorOf(sc.netflow_30d_b)) + fmtB(sc.netflow_30d_b) + e + '</span>' +
+                (sc.total_7d_pct !== null && sc.total_7d_pct !== undefined
+                    ? '<span>总供给 7d ' + b(colorOf(sc.total_7d_pct)) + (sc.total_7d_pct >= 0 ? '+' : '') + Number(sc.total_7d_pct).toFixed(2) + '%' + e + '</span>'
+                    : '') +
+                '<span style="color:#777;margin-left:auto">市场总水龙头：净流入=弹药积累（偏多），净流出=流动性收缩（偏空）</span>' +
+                '</div>';
         }
 
         async function loadDailyDiff (isRefresh) {
@@ -11335,6 +11380,11 @@
                 }
 
                 let html = '';
+
+                // ── 宏观速览条（稳定币总供给 = 市场总水龙头）──
+                if (data.macro && data.macro.stablecoin) {
+                    html += _renderDiffMacro(data.macro.stablecoin);
+                }
 
                 // ── 强势面板（连板/板块龙头/量价齐升）：仅最新日期视图展示 ──
                 // streak_days 语义为「截至该日」，历史视图不展示以免与「当前强势」混淆
@@ -11401,14 +11451,26 @@
                     'volume_surge_24h': ['📈 放量榜', '全市场 Top（成交量异动最大）'],
                     'price_volume_surge': ['🔥 量价齐升', '涨幅 + 放量双确认（共振得分）'],
                     'sector_rotation': ['🌀 板块轮动', '强势赛道 + 领涨龙头（高确定性）'],
-                    'unlock_7d': ['🔓 抛压榜', '全市场 Top（未来 7d 解锁抛压最大）']
+                    'unlock_7d': ['🔓 抛压榜', '全市场 Top（未来 7d 解锁抛压最大）'],
+                    'whale_mover': ['🐋 巨鲸吸筹', '7d 鲸鱼持仓增持 Top（up）'],
+                    'exchange_flow_24h': ['🏦 净提币', '提币离场（囤币/吸筹）Top'],
+                    'derivatives_oi': ['⚙️ OI 增加', '24h OI 增幅 Top（新仓/杠杆）'],
+                    'funding_rate_extreme': ['🔥 高正费率', '多军拥挤（回调/反转风险）'],
+                    'liquidation_24h': ['💥 多单爆仓', '下跌踩踏（多军集中爆仓）'],
+                    'long_short_ratio': ['⚖️ 多占优', '大户持仓多空比 >1（拥挤看多）']
                 };
                 const downHeadMap = {
                     'price_change_24h': ['📉 跌幅榜', '全市场 Bottom（24h 跌幅最大）'],
                     'volume_surge_24h': ['📉 缩量榜', '全市场 Bottom（成交量异动最小）'],
                     'price_volume_surge': ['💤 低位盘整', '跌幅 + 缩量（资金不关注）'],
                     'sector_rotation': ['', ''],
-                    'unlock_7d': ['🔒 轻压榜', '全市场 Bottom（未来 7d 解锁抛压最小）']
+                    'unlock_7d': ['🔒 轻压榜', '全市场 Bottom（未来 7d 解锁抛压最小）'],
+                    'whale_mover': ['🐋 巨鲸出货', '7d 鲸鱼持仓减持 Top（down）'],
+                    'exchange_flow_24h': ['🏦 净充值', '充币进所（潜在砸盘）Top'],
+                    'derivatives_oi': ['⚙️ OI 减少', '24h OI 降幅 Top（去杠杆/平仓）'],
+                    'funding_rate_extreme': ['❄️ 负费率', '空军拥挤（轧空风险）'],
+                    'liquidation_24h': ['💥 空单爆仓', '上涨轧空（空军集中爆仓）'],
+                    'long_short_ratio': ['⚖️ 空占优', '大户持仓多空比 <1（拥挤看空）']
                 };
                 const upHead = upHeadMap[currentDiffCategory] || ['📈 正向榜', '全市场 Top'];
                 const downHead = downHeadMap[currentDiffCategory] || ['📉 负向榜', '全市场 Bottom'];
@@ -11460,17 +11522,47 @@
             }
         }
 
+        // ── 榜单数值单位映射 ──────────────────────────────────────────────
+        // metric_value 语义随榜单不同，不能一律按百分比渲染：
+        //   pct=百分比 / score=综合分 / usd=美元金额 / ratio=比值(倍) / rate=费率(需 4 位小数)
+        const DIFF_VAL_UNIT = {
+            price_volume_surge: 'score',
+            sector_rotation: 'score',
+            unlock_7d: 'usd',
+            exchange_flow_24h: 'usd',
+            liquidation_24h: 'usd',
+            long_short_ratio: 'ratio',
+            funding_rate_extreme: 'rate'
+        };
+
+        function _fmtUsdCompact (v) {
+            const sign = v < 0 ? '-$' : '$';
+            const a = Math.abs(v);
+            if (a >= 1e9) return sign + (a / 1e9).toFixed(2) + 'B';
+            if (a >= 1e6) return sign + (a / 1e6).toFixed(2) + 'M';
+            if (a >= 1e3) return sign + (a / 1e3).toFixed(1) + 'K';
+            return sign + a.toFixed(0);
+        }
+
+        function _formatDiffMetric (category, v) {
+            if (v === null || v === undefined) return '-';
+            switch (DIFF_VAL_UNIT[category]) {
+                case 'score': return v.toFixed(1) + ' 分';
+                case 'usd': return _fmtUsdCompact(v);
+                case 'ratio': return v.toFixed(2) + 'x';
+                case 'rate': return v.toFixed(4) + '%';
+                default: return v.toFixed(2) + '%';
+            }
+        }
+
         // 渲染单条 diff 记录
         function _renderDiffItem (item, direction, category) {
             let val = '-';
             let valSign = '';
             if (item.metric_value !== null && item.metric_value !== undefined) {
-                if (category === 'price_volume_surge') {
-                    val = item.metric_value.toFixed(1) + ' 分';
-                } else {
-                    val = item.metric_value.toFixed(2) + '%';
-                }
-                valSign = direction === 'up' ? '+' : '';
+                val = _formatDiffMetric(category, item.metric_value);
+                const unit = DIFF_VAL_UNIT[category];
+                valSign = (direction === 'up' && (unit === undefined || unit === 'rate')) ? '+' : '';
             }
             const rankLabel = direction === 'up' ? 'Top ' : 'Bottom ';
             const sector = item.primary_sector;
@@ -11499,8 +11591,8 @@
                     ? '连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '，该日为榜单口径变更日，起点之前无可比数据）'
                     : '连续在榜 ' + item.streak_days + ' 天（起始 ' + (item.streak_first_date || '') + '）';
                 html += '<span class="streak-badge" title="' + sdTitle + '">🔥' + item.streak_days + '天</span>';
-            // streak_start_ambiguous：起点恰为榜单口径变更日，天数=口径年龄而非标的强度，
-            // 事实仍成立（确实连续在榜 N 天）故保留角标，仅在 tooltip 显式说明不可比。
+                // streak_start_ambiguous：起点恰为榜单口径变更日，天数=口径年龄而非标的强度，
+                // 事实仍成立（确实连续在榜 N 天）故保留角标，仅在 tooltip 显式说明不可比。
             }
             html += '</span>';
             html += '<span class="value">' + valSign + val + '</span>';
@@ -11515,20 +11607,12 @@
         const DIFF_STRONG_TOP_LEADER = 4;    // 板块龙头展示条数
         const DIFF_STRONG_TOP_SURGE = 5;     // 量价齐升展示条数
 
-        // 格式化榜单数值（量价齐升为综合分，其余为百分比）
-        function _strongVal (item, category) {
-            if (item.metric_value === null || item.metric_value === undefined) return '-';
-            return category === 'price_volume_surge'
-                ? item.metric_value.toFixed(1) + ' 分'
-                : item.metric_value.toFixed(2) + '%';
-        }
-
         // 连板榜：遍历全部类别/方向，取 streak_days>=门槛，按连板天数降序
         function _collectDiffStreaks (categories) {
             const rows = [];
-        // 排除 streak_start_ambiguous（连板起点恰为榜单口径变更日，如 volume_surge_24h
-        // 2026-09-08 由 top-20 扩到 top-40）：这类连板天数=口径年龄而非标的强度，
-        // 跨标的比较无区分度，放进「强势榜」会把榜单灌成同一数值。
+            // 排除 streak_start_ambiguous（连板起点恰为榜单口径变更日，如 volume_surge_24h
+            // 2026-09-08 由 top-20 扩到 top-40）：这类连板天数=口径年龄而非标的强度，
+            // 跨标的比较无区分度，放进「强势榜」会把榜单灌成同一数值。
             Object.keys(categories).forEach(cat => {
                 ['up', 'down'].forEach(dir => {
                     (categories[cat][dir] || []).forEach(item => {
@@ -11597,7 +11681,7 @@
                         + '<span class="strong-symbol">' + escapeHtml(r.item.symbol) + '</span>';
                     const meta = escapeHtml(catLabel) + ' ' + dirLabel;
                     const val = '<span class="strong-val ' + r.dir + '">'
-                        + _strongVal(r.item, r.cat) + '</span>';
+                        + _formatDiffMetric(r.cat, r.item.metric_value) + '</span>';
                     const title = (r.item.name || r.item.symbol) + ' · ' + catLabel
                         + ' · 连续 ' + r.sd + ' 天（起始 ' + (r.item.streak_first_date || '') + '）';
                     html += _renderStrongRow(r.item.asset_id, symbolHtml, meta, val, title);
@@ -11618,7 +11702,7 @@
                     const consec = (item.detail && item.detail.consecutive_days)
                         || item.consecutive_days || 0;
                     const meta = escapeHtml(sectorLabel) + (consec ? ' · ' + consec + '天' : '');
-                    const val = '<span class="strong-val up">' + _strongVal(item, 'sector_rotation') + '</span>';
+                    const val = '<span class="strong-val up">' + _formatDiffMetric('sector_rotation', item.metric_value) + '</span>';
                     const title = (item.name || item.symbol) + ' · ' + sectorLabel + ' 龙头';
                     html += _renderStrongRow(item.asset_id,
                         '<span class="strong-symbol">' + escapeHtml(item.symbol) + '</span>',
@@ -11637,7 +11721,7 @@
                     const sector = item.primary_sector;
                     const sectorLabel = sector ? (SECTOR_LABELS_SHORT[sector] || sector) : '';
                     const meta = escapeHtml(sectorLabel || (item.name || ''));
-                    const val = '<span class="strong-val up">' + _strongVal(item, 'price_volume_surge') + '</span>';
+                    const val = '<span class="strong-val up">' + _formatDiffMetric('price_volume_surge', item.metric_value) + '</span>';
                     const title = (item.name || item.symbol) + ' · 量价共振综合分';
                     html += _renderStrongRow(item.asset_id,
                         '<span class="strong-symbol">' + escapeHtml(item.symbol) + '</span>',
@@ -13479,11 +13563,11 @@
             // C2：高亮区顶部成色指标（仅在有 HIGH 席位时显示）
             if (highItems.length > 0) {
                 html += '<div class="signal-high-credibility" title="HIGH 席位成色：'
-                     + '「已校准背书」= 该信号类型有回测命中率支持；'
-                     + '「未回测」= 属豁免集合或未进校准表，无历史背书。'
-                     + '未回测类型默认封顶 MED，不在本区。">'
-                     + 'HIGH ' + highItems.length + '：已校准背书 ' + _calibOk
-                     + ' / 未回测 ' + _unbacked + '</div>';
+                    + '「已校准背书」= 该信号类型有回测命中率支持；'
+                    + '「未回测」= 属豁免集合或未进校准表，无历史背书。'
+                    + '未回测类型默认封顶 MED，不在本区。">'
+                    + 'HIGH ' + highItems.length + '：已校准背书 ' + _calibOk
+                    + ' / 未回测 ' + _unbacked + '</div>';
             }
             html += '<div class="signal-list">';
             renderList.forEach(function (o) {
@@ -13892,10 +13976,10 @@
                 (o.trigger_logic ? '<div class="signal-logic">' + escapeHtml(o.trigger_logic) + '</div>' : '') +
                 scoreBar +
                 decayBar +
-            strengthLine +
-            eventStrengthLine +
-            valFilterNote +
-            demoteLine +
+                strengthLine +
+                eventStrengthLine +
+                valFilterNote +
+                demoteLine +
                 aiReasonHtml +
                 (mainReason ? '<div class="signal-reason">' + mainReason + '</div>' : '') +
                 multiSignalHtml +

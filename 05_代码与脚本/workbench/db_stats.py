@@ -12075,6 +12075,51 @@ def _fetch_streak_map(cur, target_date: str) -> dict:
     return out
 
 
+def _fetch_diff_macro(cur) -> dict:
+    """每日变化榜顶部「宏观速览条」：稳定币总供给 + 净流（市场总水龙头）。
+
+    只读 biz.stablecoin_supply_daily（DeFiLlama 免费源），返回最近 31 天尾部窗口的
+    总供给、1d/7d/30d 净流与占比；无数据时返回 None（前端隐藏该条）。
+    """
+    cur.execute("""
+        SELECT metric_date, total_supply_usd, net_flow_usd
+        FROM biz.stablecoin_supply_daily
+        WHERE source_code = 'defillama'
+        ORDER BY metric_date DESC
+        LIMIT 31
+    """)
+    rows = cur.fetchall()
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r["metric_date"])
+    latest = rows[-1]
+    total_now = float(latest["total_supply_usd"] or 0) / 1e9  # 十亿
+    # 净流直接用表内 net_flow_usd（当日供给 - 前日供给）
+    def _sum_net(n: int) -> float:
+        return sum(float(r["net_flow_usd"] or 0) for r in rows[-n:]) / 1e9 if n <= len(rows) else 0.0
+
+    total_prev_7 = float(rows[-8]["total_supply_usd"] or 0) / 1e9 if len(rows) >= 8 else None
+    total_prev_30 = float(rows[0]["total_supply_usd"] or 0) / 1e9 if len(rows) >= 30 else None
+
+    def _pct(cur_, prev_) -> float | None:
+        return round((cur_ - prev_) / prev_ * 100, 2) if prev_ else None
+
+    net_7 = _sum_net(7)
+    net_30 = _sum_net(min(30, len(rows)))
+    return {
+        "stablecoin": {
+            "date": str(latest["metric_date"]),
+            "total_supply_b": round(total_now, 2),
+            "change_1d_b": round(_sum_net(1), 3),
+            "netflow_7d_b": round(net_7, 3),
+            "netflow_30d_b": round(net_30, 3),
+            "total_7d_pct": _pct(total_now, total_prev_7),
+            "total_30d_pct": _pct(total_now, total_prev_30),
+            "days": len(rows),
+        },
+    }
+
+
 def get_daily_diff_streaks(diff_date: str | None = None) -> dict:
     """权威 N 日连板数：截至 diff_date 每个 (asset_id, category, direction) 的连续上榜天数。
 
@@ -12277,6 +12322,7 @@ def get_daily_diff_summary(diff_date: str | None = None, categories: list[str] |
                 "available_sectors": available_sectors,
                 "available_tiers": available_tiers,
                 "categories": result,
+                "macro": _fetch_diff_macro(cur),
             }
 
 

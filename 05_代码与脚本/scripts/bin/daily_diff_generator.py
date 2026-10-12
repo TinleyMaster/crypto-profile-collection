@@ -573,6 +573,372 @@ ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 新增 5 类榜单（2026-10-12）：
+#   whale_mover         巨鲸筹码榜      <- biz.onchain_holder_snapshot（7d 鲸鱼持仓变动）
+#   exchange_flow_24h   交易所资金流榜   <- biz.onchain_netflow_hourly（按日聚合充/提币）
+#   derivatives_oi      OI 变动榜       <- biz.coinglass_derivatives_snapshot（All 聚合行）
+#   funding_rate_extreme 资金费率极端榜  <- biz.coinglass_derivatives_snapshot（Binance 行）
+#   liquidation_24h     清算榜          <- biz.liquidation_snapshot（24h 清算 + 多空结构）
+# 注：协议收入榜（Token Terminal 类）暂无数据源（DL 免费 API 无 fees/revenue），未实现。
+#
+# 映射说明：core.asset.canonical_symbol 不唯一（同名符号多个项目），衍生品类 symbol→asset
+# 统一走 _SYM_BEST CTE（DISTINCT ON canonical_symbol，取 market_cap_rank 最优行），
+# 与 phase_derivatives_batch.py 的选择一致。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# symbol → 最优 asset 的公共 CTE 头（供衍生品类复用）
+_SYM_BEST_CTE = """
+best AS (
+    SELECT DISTINCT ON (upper(a.canonical_symbol))
+        a.asset_id,
+        upper(a.canonical_symbol) AS sym,
+        a.market_cap_rank,
+        a.primary_sector,
+        a.asset_type,
+        a.canonical_symbol AS display_symbol
+    FROM core.asset a
+    WHERE a.canonical_symbol IS NOT NULL
+    ORDER BY upper(a.canonical_symbol), a.market_cap_rank NULLS LAST, a.asset_id
+)
+"""
+
+# ── 巨鲸筹码榜：whale_mover（biz.onchain_holder_snapshot，7d 巨鲸持仓变动）──
+# up = 吸筹（鲸鱼 7d 增持）；down = 出货（鲸鱼 7d 减持）。
+# 每资产取「|7d 变动| 最大的链」为信号链；过滤单庄币（top10 集中度≥95%）与过少持仓。
+WHALE_MOVER_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH best_chain AS (
+    SELECT DISTINCT ON (h.asset_id)
+        h.asset_id, h.chain, h.snapshot_date,
+        h.whale_balance_change_7d_pct, h.whale_balance_change_30d_pct,
+        h.holder_change_7d, h.top10_concentration, h.total_holders,
+        h.tier_distribution_json
+    FROM biz.onchain_holder_snapshot h
+    WHERE h.snapshot_date = (
+            SELECT max(snapshot_date) FROM biz.onchain_holder_snapshot
+            WHERE snapshot_date <= %s::DATE
+          )
+      AND h.whale_balance_change_7d_pct IS NOT NULL
+    ORDER BY h.asset_id, ABS(h.whale_balance_change_7d_pct) DESC
+)
+SELECT
+    %s::DATE,
+    'whale_mover',
+    bc.asset_id,
+    ROUND(bc.whale_balance_change_7d_pct::numeric, 3),
+    '7d 巨鲸持仓变动 (%%)',
+    ROW_NUMBER() OVER (
+        PARTITION BY (bc.whale_balance_change_7d_pct >= 0)
+        ORDER BY ABS(bc.whale_balance_change_7d_pct) DESC
+    ),
+    CASE WHEN bc.whale_balance_change_7d_pct >= 0 THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'whale_change_7d_pct', bc.whale_balance_change_7d_pct,
+        'whale_change_30d_pct', bc.whale_balance_change_30d_pct,
+        'holder_change_7d', bc.holder_change_7d,
+        'top10_concentration', bc.top10_concentration,
+        'total_holders', bc.total_holders,
+        'chain', bc.chain,
+        'snapshot_date', bc.snapshot_date,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM best_chain bc
+JOIN core.asset a ON a.asset_id = bc.asset_id
+WHERE a.market_cap_rank <= 3000
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+  AND bc.total_holders >= 50          -- 持仓人数过少时巨鲸变动无统计意义
+  AND bc.top10_concentration < 95     -- 剔除单庄/高度集中币
+  AND ABS(bc.whale_balance_change_7d_pct) >= 0.5  -- 至少 ±0.5 个百分点才算异动
+ORDER BY ABS(bc.whale_balance_change_7d_pct) DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+# ── 交易所资金流榜：exchange_flow_24h（biz.onchain_netflow_hourly 按日聚合）──
+# 语义对齐 onchain_alert：inflow=充值进所（潜在砸盘）、outflow=提币离场（囤币/吸筹）。
+# up = 提币净额为正（囤币）；down = 充币净额为正（砸盘）。metric_value = 提币净额（USD）。
+EXCHANGE_FLOW_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH day AS (
+    SELECT
+        asset_id,
+        sum(inflow_usd)  AS in_usd,
+        sum(outflow_usd) AS out_usd,
+        sum(netflow_usd) AS net_usd,
+        sum(inflow_cnt)  AS in_cnt,
+        sum(outflow_cnt) AS out_cnt,
+        count(*)         AS buckets
+    FROM biz.onchain_netflow_hourly
+    WHERE bucket_hour::date = %s::DATE
+    GROUP BY asset_id
+)
+SELECT
+    %s::DATE,
+    'exchange_flow_24h',
+    day.asset_id,
+    ROUND((day.out_usd - day.in_usd)::numeric, 0) AS withdraw_net_usd,
+    '24h 提币净额 (USD)',
+    ROW_NUMBER() OVER (
+        PARTITION BY (day.out_usd >= day.in_usd)
+        ORDER BY ABS(day.out_usd - day.in_usd) DESC
+    ),
+    CASE WHEN day.out_usd >= day.in_usd THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'withdraw_net_usd', ROUND((day.out_usd - day.in_usd)::numeric, 0),
+        'netflow_usd', ROUND(day.net_usd::numeric, 0),
+        'inflow_usd', ROUND(day.in_usd::numeric, 0),
+        'outflow_usd', ROUND(day.out_usd::numeric, 0),
+        'inflow_cnt', day.in_cnt,
+        'outflow_cnt', day.out_cnt,
+        'buckets', day.buckets,
+        'primary_sector', a.primary_sector,
+        'mcap_tier', CASE
+            WHEN a.market_cap_rank <= 10 THEN 'top10'
+            WHEN a.market_cap_rank <= 100 THEN 'top100'
+            WHEN a.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM day
+JOIN core.asset a ON a.asset_id = day.asset_id
+WHERE a.market_cap_rank <= 3000
+  AND day.buckets >= 3                     -- 至少 3 个整点桶，避免偶发噪声
+  AND ABS(day.out_usd - day.in_usd) >= 500000  -- 提/充净额至少 $0.5M
+  AND COALESCE(a.asset_type, '') NOT IN ('stablecoin', 'stable')
+ORDER BY ABS(day.out_usd - day.in_usd) DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+# ── OI 变动榜：derivatives_oi（coinglass 跨所聚合 All 行，24h OI 变动）──
+# up = OI 增（杠杆/新仓入场）；down = OI 减（去杠杆/平仓）。
+DERIVATIVES_OI_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (symbol)
+        symbol, ts, oi_usd, oi_change_24h_pct
+    FROM biz.coinglass_derivatives_snapshot
+    WHERE exchange = 'All'
+      AND ts::date <= %s::DATE
+      AND oi_change_24h_pct IS NOT NULL
+    ORDER BY symbol, ts DESC
+),
+""" + _SYM_BEST_CTE + """
+SELECT
+    %s::DATE,
+    'derivatives_oi',
+    best.asset_id,
+    ROUND(l.oi_change_24h_pct::numeric, 3),
+    '24h OI 变动 (%%)',
+    ROW_NUMBER() OVER (
+        PARTITION BY (l.oi_change_24h_pct >= 0)
+        ORDER BY ABS(l.oi_change_24h_pct) DESC
+    ),
+    CASE WHEN l.oi_change_24h_pct >= 0 THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'oi_change_24h_pct', l.oi_change_24h_pct,
+        'oi_usd', l.oi_usd,
+        'contract_symbol', l.symbol,
+        'ts', l.ts,
+        'primary_sector', best.primary_sector,
+        'mcap_tier', CASE
+            WHEN best.market_cap_rank <= 10 THEN 'top10'
+            WHEN best.market_cap_rank <= 100 THEN 'top100'
+            WHEN best.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM latest l
+JOIN best ON best.sym = l.symbol
+WHERE COALESCE(best.asset_type, '') NOT IN ('stablecoin', 'stable')
+  AND ABS(l.oi_change_24h_pct) >= 5   -- 至少 ±5 个百分点才算异动
+ORDER BY ABS(l.oi_change_24h_pct) DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+# ── 资金费率极端榜：funding_rate_extreme（coinglass Binance 行，最新费率）──
+# up = 高正费率（多军拥挤，回调/轧空反转风险）；down = 负费率（空军拥挤，轧空风险）。
+FUNDING_EXTREME_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (symbol)
+        symbol, ts, funding_rate, funding_rate_interval_h
+    FROM biz.coinglass_derivatives_snapshot
+    WHERE exchange = 'Binance'
+      AND ts::date <= %s::DATE
+      AND ts::date >= %s::DATE - INTERVAL '7 days'  -- 新鲜度护栏：无近 7d 快照的旧数据不上榜
+      AND funding_rate IS NOT NULL
+    ORDER BY symbol, ts DESC
+),
+""" + _SYM_BEST_CTE + """
+SELECT
+    %s::DATE,
+    'funding_rate_extreme',
+    best.asset_id,
+    ROUND((l.funding_rate * 100)::numeric, 4),
+    '资金费率 (%%)',
+    ROW_NUMBER() OVER (
+        PARTITION BY (l.funding_rate >= 0)
+        ORDER BY ABS(l.funding_rate) DESC
+    ),
+    CASE WHEN l.funding_rate >= 0 THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'funding_rate', l.funding_rate,
+        'funding_rate_pct', ROUND((l.funding_rate * 100)::numeric, 4),
+        'interval_h', l.funding_rate_interval_h,
+        'ts', l.ts,
+        'primary_sector', best.primary_sector,
+        'mcap_tier', CASE
+            WHEN best.market_cap_rank <= 10 THEN 'top10'
+            WHEN best.market_cap_rank <= 100 THEN 'top100'
+            WHEN best.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM latest l
+JOIN best ON best.sym = l.symbol
+WHERE COALESCE(best.asset_type, '') NOT IN ('stablecoin', 'stable')
+  AND ABS(l.funding_rate) >= 0.0001  -- 至少 0.01 个百分点/周期才算极端
+ORDER BY ABS(l.funding_rate) DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+# ── 清算榜：liquidation_24h（biz.liquidation_snapshot，24h 清算额 + 多空结构）──
+# symbol 为合约码（'1000BONKUSDT'），剥 USDT 后映射 asset。
+# up = 多单爆仓占主导（下跌踩踏）；down = 空单爆仓占主导（上涨轧空）。
+LIQUIDATION_24H_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (symbol)
+        symbol, ts, liq_usd_24h, long_liq_usd_24h, short_liq_usd_24h
+    FROM biz.liquidation_snapshot
+    WHERE ts::date <= %s::DATE
+      AND liq_usd_24h IS NOT NULL
+    ORDER BY symbol, ts DESC
+),
+base AS (
+    SELECT symbol,
+           upper(CASE WHEN symbol LIKE '%%USDT' THEN left(symbol, length(symbol) - 4)
+                      ELSE symbol END) AS base_sym
+    FROM latest
+),
+""" + _SYM_BEST_CTE + """
+SELECT
+    %s::DATE,
+    'liquidation_24h',
+    best.asset_id,
+    ROUND(l.liq_usd_24h::numeric, 0),
+    '24h 清算额 (USD)',
+    ROW_NUMBER() OVER (
+        PARTITION BY (l.long_liq_usd_24h >= COALESCE(l.short_liq_usd_24h, 0))
+        ORDER BY l.liq_usd_24h DESC
+    ),
+    CASE WHEN l.long_liq_usd_24h >= COALESCE(l.short_liq_usd_24h, 0) THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'liq_usd_24h', ROUND(l.liq_usd_24h::numeric, 0),
+        'long_liq_usd_24h', ROUND(COALESCE(l.long_liq_usd_24h, 0)::numeric, 0),
+        'short_liq_usd_24h', ROUND(COALESCE(l.short_liq_usd_24h, 0)::numeric, 0),
+        'long_ratio_24h', ROUND(
+            (CASE WHEN l.liq_usd_24h > 0
+                  THEN COALESCE(l.long_liq_usd_24h, 0) / l.liq_usd_24h * 100
+                  ELSE NULL END)::numeric, 1),
+        'contract_symbol', l.symbol,
+        'ts', l.ts,
+        'primary_sector', best.primary_sector,
+        'mcap_tier', CASE
+            WHEN best.market_cap_rank <= 10 THEN 'top10'
+            WHEN best.market_cap_rank <= 100 THEN 'top100'
+            WHEN best.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM base b
+JOIN latest l ON l.symbol = b.symbol
+JOIN best ON best.sym = b.base_sym
+WHERE COALESCE(best.asset_type, '') NOT IN ('stablecoin', 'stable')
+  AND l.liq_usd_24h >= 500000   -- 至少 $0.5M 清算额
+ORDER BY l.liq_usd_24h DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+
+# ── 多空比榜：long_short_ratio（biz.long_short_ratio，Binance 免费 /futures/data/*）──
+# 数据由 ingest_binance_lsr.py 每日 03:20 以 period='1d' 落库。
+# 主指标 = 大户持仓多空比（top_position_ratio，研究显示唯一有前景的信号），缺失回退 global。
+# up = 多空比高（>1，大户多单占优/拥挤看多）；down = 多空比低（<1，拥挤看空）。
+LONG_SHORT_RATIO_SQL = """
+INSERT INTO biz.daily_diff_summary
+    (diff_date, category, asset_id, metric_value, metric_label, rank, direction, detail_json)
+WITH latest AS (
+    SELECT DISTINCT ON (symbol)
+        symbol, ts, top_position_ratio, top_account_ratio, global_ratio, taker_ratio
+    FROM biz.long_short_ratio
+    WHERE ts::date <= %s::DATE
+      AND ts::date >= %s::DATE - INTERVAL '7 days'  -- 新鲜度护栏：无近 7d 数据的旧行不上榜
+      AND (top_position_ratio IS NOT NULL OR global_ratio IS NOT NULL)
+    ORDER BY symbol, ts DESC
+),
+base AS (
+    SELECT symbol,
+           upper(CASE WHEN symbol LIKE '%%USDT' THEN left(symbol, length(symbol) - 4)
+                      ELSE symbol END) AS base_sym,
+           COALESCE(top_position_ratio, global_ratio) AS ratio,
+           top_position_ratio, top_account_ratio, global_ratio, taker_ratio, ts
+    FROM latest
+),
+""" + _SYM_BEST_CTE + """
+SELECT
+    %s::DATE,
+    'long_short_ratio',
+    best.asset_id,
+    ROUND(b.ratio::numeric, 3),
+    '大户持仓多空比',
+    ROW_NUMBER() OVER (
+        PARTITION BY (b.ratio >= 1)
+        ORDER BY ABS(b.ratio - 1) DESC
+    ),
+    CASE WHEN b.ratio >= 1 THEN 'up' ELSE 'down' END,
+    jsonb_build_object(
+        'top_position_ratio', b.top_position_ratio,
+        'top_account_ratio', b.top_account_ratio,
+        'global_ratio', b.global_ratio,
+        'taker_ratio', b.taker_ratio,
+        'contract_symbol', b.symbol,
+        'ts', b.ts,
+        'primary_sector', best.primary_sector,
+        'mcap_tier', CASE
+            WHEN best.market_cap_rank <= 10 THEN 'top10'
+            WHEN best.market_cap_rank <= 100 THEN 'top100'
+            WHEN best.market_cap_rank <= 500 THEN 'top500'
+            ELSE 'top3000'
+        END
+    )
+FROM base b
+JOIN best ON best.sym = b.base_sym
+WHERE COALESCE(best.asset_type, '') NOT IN ('stablecoin', 'stable')
+  AND b.ratio IS NOT NULL
+  AND ABS(b.ratio - 1) >= 0.05   -- 至少 ±5 个百分点失衡才算异动
+ORDER BY ABS(b.ratio - 1) DESC
+LIMIT 40
+ON CONFLICT (diff_date, category, asset_id, direction) DO NOTHING
+"""
+
+
 # 本生成器负责的类别（同日重跑需先清空，见 generate_for_date 的幂等替换语义）。
 # 审计_每日变化榜_2026-09-30 F1：ON CONFLICT DO NOTHING 是「只增不改」，而
 # data_sync_daily 与 daily_diff_fallback 同一天会各跑一次；两次运行之间
@@ -589,6 +955,14 @@ GENERATED_CATEGORIES = (
     "social_surge",
     "tvl_surge_24h",
     "sector_rotation",
+    # 新增 5 类（2026-10-12）
+    "whale_mover",
+    "exchange_flow_24h",
+    "derivatives_oi",
+    "funding_rate_extreme",
+    "liquidation_24h",
+    # 多空比榜（2026-10-12，数据源 ingest_binance_lsr.py）
+    "long_short_ratio",
 )
 
 
@@ -789,6 +1163,50 @@ def generate_for_date(cur, d: date) -> dict:
 
     # sector_rotation：板块轮动信号（依赖 price_volume_surge 已生成）
     result["sector_rotation"] = _generate_sector_rotation(cur, d)
+
+    # ── 新增 5 类（2026-10-12）：有数据才生成，无数据记 0 不报错 ──
+    cur.execute("SELECT count(*) FROM biz.onchain_holder_snapshot")
+    if cur.fetchone()[0] > 0:
+        cur.execute(WHALE_MOVER_SQL, (date_str, date_str))
+        result["whale_mover"] = cur.rowcount
+    else:
+        result["whale_mover"] = 0
+
+    cur.execute("SELECT count(*) FROM biz.onchain_netflow_hourly")
+    if cur.fetchone()[0] > 0:
+        cur.execute(EXCHANGE_FLOW_SQL, (date_str, date_str))
+        result["exchange_flow_24h"] = cur.rowcount
+    else:
+        result["exchange_flow_24h"] = 0
+
+    cur.execute("SELECT count(*) FROM biz.coinglass_derivatives_snapshot WHERE exchange = 'All'")
+    if cur.fetchone()[0] > 0:
+        cur.execute(DERIVATIVES_OI_SQL, (date_str, date_str))
+        result["derivatives_oi"] = cur.rowcount
+    else:
+        result["derivatives_oi"] = 0
+
+    cur.execute("SELECT count(*) FROM biz.coinglass_derivatives_snapshot WHERE exchange = 'Binance'")
+    if cur.fetchone()[0] > 0:
+        cur.execute(FUNDING_EXTREME_SQL, (date_str, date_str, date_str))
+        result["funding_rate_extreme"] = cur.rowcount
+    else:
+        result["funding_rate_extreme"] = 0
+
+    cur.execute("SELECT count(*) FROM biz.liquidation_snapshot")
+    if cur.fetchone()[0] > 0:
+        cur.execute(LIQUIDATION_24H_SQL, (date_str, date_str))
+        result["liquidation_24h"] = cur.rowcount
+    else:
+        result["liquidation_24h"] = 0
+
+    # 多空比榜：依赖 ingest_binance_lsr.py（period='1d'）或 scan_daemon（5m 历史）
+    cur.execute("SELECT count(*) FROM biz.long_short_ratio")
+    if cur.fetchone()[0] > 0:
+        cur.execute(LONG_SHORT_RATIO_SQL, (date_str, date_str, date_str))
+        result["long_short_ratio"] = cur.rowcount
+    else:
+        result["long_short_ratio"] = 0
 
     return result
 

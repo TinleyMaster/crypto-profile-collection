@@ -68,6 +68,17 @@ LIVE_SIGNALS = ("SHORT_LONG", "MID_LONG")
 # 2h 窗口有 ~4 轮余量，正常抖动不会漏单。
 MAX_SIGNAL_AGE_H = 2
 
+# 浮盈保本止损（2026-10-12）：持仓浮盈 ≥ BREAKEVEN_TRIGGER_PCT% 时，把硬止损
+# （STOP_MARKET）从原 -10% 上移到入场价附近（BREAKEVEN_STOP_PCT），锁定盈利/保本，
+# 防跳空/闪崩把浮盈打回亏损。与跟踪止盈 TR 配合：正常回撤由 TR（峰值-3%）先触发，
+# 本止损只在价格跌破保本线时兜底。
+# 阈值取 5% 的数学依据：浮盈 X% 时 TR 线 = 入场×(1+X)×0.97。要求 TR 线高于保本线
+# （入场价）→ (1+X)×0.97 > 1 → X > 3.09%。5% 时 TR 线 = 入场×1.0185，比保本线高
+# 1.85%，SL/TR 不会抢触发；若设 3% 会与保本线几乎重叠。5% 也高于放量大阳币的日间
+# 噪声，避免频繁挪止损被甩出（本应到 TR 的仓位过早出局）。
+BREAKEVEN_TRIGGER_PCT = 5.0   # 浮盈 ≥5% 触发止损上移
+BREAKEVEN_STOP_PCT = 0.0      # 保本止损位置：入场价 +0%（纯保本；想锁微利可调 +1~2%）
+
 
 def _fmt(t: datetime) -> str:
     return t.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
@@ -429,6 +440,114 @@ def _reconcile_closed(client, settings, conn) -> int:
     return n
 
 
+def _ensure_protective(client, conn, settings) -> int:
+    """保护单自愈 + 浮盈保本止损（--watch 每轮调用）。
+
+    两类动作（幂等；单笔异常只打印不阻断整体；仅处理未平仓 bot 单）：
+
+    1. 自愈补挂：保护单缺失或挂单失败（protective_orders 里 stop_loss/trailing_stop
+       是 error 或缺 orderId，如子账户 -4120/-4136 历史裸奔单）→ 按 sl_pct/tr_pct
+       重新补挂（binance_futures 已内置 Algo Order API fallback）。部署后首轮即给
+       存量 SUSDT/WUSDT 裸奔仓自动补挂 SL10%+TR3%。
+
+    2. 浮盈保本：保护单已就绪且浮盈 ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、把硬止损
+       上移到入场价附近（BREAKEVEN_STOP_PCT），锁盈利/保本防跳空。幂等：止损触发价
+       已不低于保本线则跳过。TR（峰值-3%）不动，仍由它先兑现正常回撤。
+
+    返回处理笔数。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, symbol, direction, open_ts, open_price, sl_pct, tr_pct, "
+            "       protective_orders "
+            "FROM biz.v2_trade_log "
+            "WHERE close_ts IS NULL AND origin='bot' "
+            "ORDER BY open_ts")
+        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
+    n = 0
+    for t in rows:
+        try:
+            amt = client.get_position_amt(t["symbol"])
+            if abs(amt) <= 0:
+                continue  # 已平仓（TR/SL/到期），交给 _reconcile_closed 回填
+            entry = float(t["open_price"] or 0)
+            if entry <= 0:
+                continue
+            direction = "long" if str(t["direction"]).upper() == "LONG" else "short"
+            prot = t.get("protective_orders") or {}
+            sl = prot.get("stop_loss") or {}
+            trl = prot.get("trailing_stop") or {}
+            sl_missing = not sl.get("orderId") or "error" in sl
+            trl_missing = not trl.get("orderId") or "error" in trl
+
+            # ── 1) 自愈补挂缺失保护单 ──
+            if sl_missing or trl_missing:
+                # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
+                _cancel_protective_orders(client, t["symbol"], prot)
+                new_prot = prot.copy()
+                changed = False
+                if sl_missing and (t.get("sl_pct") or 0) > 0:
+                    r = client.place_sltp(t["symbol"], direction, entry,
+                                          float(t["sl_pct"]) * 100, is_stop=True)
+                    new_prot["stop_loss"] = r
+                    changed = True
+                if trl_missing and (t.get("tr_pct") or 0) > 0:
+                    r = client.place_trailing_stop(t["symbol"], direction,
+                                                   float(t["tr_pct"]) * 100,
+                                                   quantity=abs(amt))
+                    new_prot["trailing_stop"] = r
+                    changed = True
+                if changed:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
+                            "updated_at=NOW() WHERE id=%s",
+                            (json.dumps(new_prot), t["id"]))
+                    print(f"  [ensure] 补挂保护单 {t['symbol']} id={t['id']} "
+                          f"sl={'ok' if not sl_missing else ''} trl={'ok' if not trl_missing else ''}")
+                    n += 1
+                continue  # 本轮先补挂，浮盈保本下轮评估
+
+            # ── 2) 浮盈保本止损 ──
+            cur_px = client.get_price(t["symbol"])
+            pnl = (cur_px / entry - 1) if direction == "long" else (1 - cur_px / entry)
+            if pnl < BREAKEVEN_TRIGGER_PCT / 100:
+                continue
+            target_stop = (entry * (1 + BREAKEVEN_STOP_PCT / 100)) if direction == "long" \
+                else (entry * (1 - BREAKEVEN_STOP_PCT / 100))
+            cur_stop = float(sl.get("stopPrice") or 0)
+            if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
+                             (direction == "short" and cur_stop <= target_stop)):
+                continue  # 已到保本线，幂等跳过
+            # 撤旧止损（algo 单按 clientAlgoId 撤，普通单按 orderId 撤）
+            try:
+                if sl.get("clientAlgoId"):
+                    client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
+                elif sl.get("orderId"):
+                    client.cancel_order(t["symbol"], sl["orderId"])
+            except Exception as e:  # noqa: BLE001
+                print(f"  [ensure] 撤旧止损失败 {t['symbol']}: {type(e).__name__}: {e}")
+            # 挂保本止损（保留 TR 不动）
+            be_pct = abs(target_stop / entry - 1) * 100
+            new_sl = client.place_sltp(t["symbol"], direction, entry, be_pct,
+                                       is_stop=True, quantity=abs(amt))
+            new_sl["breakeven"] = True
+            new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
+            new_sl["moved_from_pct"] = t.get("sl_pct")
+            prot["stop_loss"] = new_sl
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
+                    "updated_at=NOW() WHERE id=%s",
+                    (json.dumps(prot), t["id"]))
+            print(f"  [ensure] 浮盈保本 {t['symbol']} pnl={pnl*100:+.1f}% "
+                  f"止损 {cur_stop}→{target_stop:.6g} id={t['id']}")
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  [ensure] {t['symbol']} 异常: {type(e).__name__}: {e}")
+    return n
+
+
 def close_symbol(client, symbol: str) -> int:
     """运维：市价平掉某 symbol 的全部持仓。
 
@@ -549,6 +668,9 @@ def main() -> int:
                                      settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:
+                # 保护单自愈（补挂缺失/失败保护单，部署后即给存量裸奔仓补挂）+ 浮盈保本止损
+                with get_connection(settings.database_url) as conn:
+                    _ensure_protective(client, conn, settings)
                 # 到期平仓（对齐回测：持有 N 小时未触发保护单 → 市价了结）
                 with get_connection(settings.database_url) as conn:
                     close_expired(client, conn)

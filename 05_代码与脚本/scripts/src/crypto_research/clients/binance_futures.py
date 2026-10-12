@@ -538,14 +538,18 @@ class BinanceFuturesClient:
         pct: float,
         is_stop: bool,  # True=止损(STOP_MARKET 全平) / False=止盈(TAKE_PROFIT_MARKET 全平)
         quantity: float | None = None,  # 传入开仓数量，供 -4136 时以数量挂单兜底
+        stop_price: float | None = None,  # 直传触发价（覆盖 pct 推导；浮盈保本止损可高于入场价）
     ) -> dict:
         """挂止损/止盈平仓单（closePosition 全平，方向与开仓相反）。
 
-        价格方向（相对进场价）：
+        价格方向（相对进场价，未传 stop_price 时按 pct 推导）：
         - 空单止损：进场价上方 pct%，平空 → BUY + SHORT
         - 空单止盈：进场价下方 pct%，平空 → BUY + SHORT
         - 多单止损：进场价下方 pct%，平多 → SELL + LONG
         - 多单止盈：进场价上方 pct%，平多 → SELL + LONG
+
+        ⚠️ stop_price 直传：pct 推导只能把止损挂在入场价一侧（多单下方/空单上方），
+        浮盈保本止损要挂在**入场价上方**（多单，覆盖成本后净保本），必须直传触发价。
 
         ⚠️ 自动回退（2026-10-12 实测 SUSDT/WUSDT）：
         - 普通接口 -4120（子账户条件单须走 Algo API）→ 回退 place_algo_order(closePosition)
@@ -562,6 +566,8 @@ class BinanceFuturesClient:
         else:
             trigger_price = entry_price * (1 - pct / 100) if direction == "short" else entry_price * (1 + pct / 100)
             order_type = "TAKE_PROFIT_MARKET"
+        if stop_price is not None:
+            trigger_price = float(stop_price)  # 直传触发价优先（浮盈保本止损）
 
         trigger_price = _round_price_to_tick(trigger_price, info["tick_size"])
         tag = "sl" if is_stop else "tp"

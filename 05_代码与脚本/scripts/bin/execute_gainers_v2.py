@@ -69,15 +69,17 @@ LIVE_SIGNALS = ("SHORT_LONG", "MID_LONG")
 MAX_SIGNAL_AGE_H = 2
 
 # 浮盈保本止损（2026-10-12）：持仓浮盈 ≥ BREAKEVEN_TRIGGER_PCT% 时，把硬止损
-# （STOP_MARKET）从原 -10% 上移到入场价附近（BREAKEVEN_STOP_PCT），锁定盈利/保本，
+# （STOP_MARKET）从原 -10% 上移到入场价附近（BREAKEVEN_COST_COVER_PCT），锁定盈利，
 # 防跳空/闪崩把浮盈打回亏损。与跟踪止盈 TR 配合：正常回撤由 TR（峰值-3%）先触发，
 # 本止损只在价格跌破保本线时兜底。
 # 阈值取 5% 的数学依据：浮盈 X% 时 TR 线 = 入场×(1+X)×0.97。要求 TR 线高于保本线
-# （入场价）→ (1+X)×0.97 > 1 → X > 3.09%。5% 时 TR 线 = 入场×1.0185，比保本线高
-# 1.85%，SL/TR 不会抢触发；若设 3% 会与保本线几乎重叠。5% 也高于放量大阳币的日间
-# 噪声，避免频繁挪止损被甩出（本应到 TR 的仓位过早出局）。
-BREAKEVEN_TRIGGER_PCT = 5.0   # 浮盈 ≥5% 触发止损上移
-BREAKEVEN_STOP_PCT = 0.0      # 保本止损位置：入场价 +0%（纯保本；想锁微利可调 +1~2%）
+# （入场价上方 0.4%）→ (1+X)×0.97 > 1.004 → X > 3.51%。5% 时 TR 线 = 入场×1.0185，
+# 比保本线（1.004）高 1.45%，SL/TR 不抢触发。5% 也高于放量大阳币的日间噪声。
+# 保本线不是 0%（纯保本）：STOP_MARKET 触发为市价单有滑点 + 双边 taker 手续费，
+# 停在入场价实际是亏损离场。0.4% = 0.1% 双边 taker（0.05%×2）+ 0.3% 滑点预算
+# （与项目回测 COST=0.003 口径一致；放量大阳币急跌时盘口瞬时薄，保守给足）。
+BREAKEVEN_TRIGGER_PCT = 5.0        # 浮盈 ≥5% 触发止损上移
+BREAKEVEN_COST_COVER_PCT = 0.4      # 保本线：入场价 +0.4%（多单）/ −0.4%（空单），覆盖手续费+滑点
 
 
 def _fmt(t: datetime) -> str:
@@ -451,8 +453,9 @@ def _ensure_protective(client, conn, settings) -> int:
        存量 SUSDT/WUSDT 裸奔仓自动补挂 SL10%+TR3%。
 
     2. 浮盈保本：保护单已就绪且浮盈 ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、把硬止损
-       上移到入场价附近（BREAKEVEN_STOP_PCT），锁盈利/保本防跳空。幂等：止损触发价
-       已不低于保本线则跳过。TR（峰值-3%）不动，仍由它先兑现正常回撤。
+       上移到入场价 ± BREAKEVEN_COST_COVER_PCT（覆盖手续费+滑点的净保本线），
+       锁盈利防跳空。幂等：止损触发价已不低于保本线则跳过。TR（峰值-3%）不动，
+       仍由它先兑现正常回撤。
 
     返回处理笔数。
     """
@@ -513,8 +516,10 @@ def _ensure_protective(client, conn, settings) -> int:
             pnl = (cur_px / entry - 1) if direction == "long" else (1 - cur_px / entry)
             if pnl < BREAKEVEN_TRIGGER_PCT / 100:
                 continue
-            target_stop = (entry * (1 + BREAKEVEN_STOP_PCT / 100)) if direction == "long" \
-                else (entry * (1 - BREAKEVEN_STOP_PCT / 100))
+            # 保本线 = 入场价 ± 成本覆盖（0.4%：0.1% 双边 taker + 0.3% 滑点预算），
+            # 不是 0%（纯保本）——市价止损触发有滑点+手续费，停在入场价实际是亏。
+            target_stop = (entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)) if direction == "long" \
+                else (entry * (1 - BREAKEVEN_COST_COVER_PCT / 100))
             cur_stop = float(sl.get("stopPrice") or 0)
             if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
                              (direction == "short" and cur_stop <= target_stop)):
@@ -527,10 +532,10 @@ def _ensure_protective(client, conn, settings) -> int:
                     client.cancel_order(t["symbol"], sl["orderId"])
             except Exception as e:  # noqa: BLE001
                 print(f"  [ensure] 撤旧止损失败 {t['symbol']}: {type(e).__name__}: {e}")
-            # 挂保本止损（保留 TR 不动）
-            be_pct = abs(target_stop / entry - 1) * 100
-            new_sl = client.place_sltp(t["symbol"], direction, entry, be_pct,
-                                       is_stop=True, quantity=abs(amt))
+            # 挂保本止损（保留 TR 不动）；stop_price 直传目标触发价
+            new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
+                                       is_stop=True, quantity=abs(amt),
+                                       stop_price=target_stop)
             new_sl["breakeven"] = True
             new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
             new_sl["moved_from_pct"] = t.get("sl_pct")

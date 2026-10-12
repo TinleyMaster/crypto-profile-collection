@@ -480,8 +480,12 @@ def _ensure_protective(client, conn, settings) -> int:
             prot = t.get("protective_orders") or {}
             sl = prot.get("stop_loss") or {}
             trl = prot.get("trailing_stop") or {}
-            sl_missing = not sl.get("orderId") or "error" in sl
-            trl_missing = not trl.get("orderId") or "error" in trl
+            # 保护单是否有效：algo 单只有 algoId/clientAlgoId（无 orderId），普通单有 orderId
+            def _prot_ok(v: dict) -> bool:
+                return bool(v) and "error" not in v and (
+                    v.get("orderId") or v.get("algoId") or v.get("clientAlgoId"))
+            sl_missing = not _prot_ok(sl)
+            trl_missing = not _prot_ok(trl)
 
             # ── 1) 自愈补挂缺失保护单 ──
             if sl_missing or trl_missing:
@@ -524,10 +528,11 @@ def _ensure_protective(client, conn, settings) -> int:
             if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
                              (direction == "short" and cur_stop <= target_stop)):
                 continue  # 已到保本线，幂等跳过
-            # 撤旧止损（algo 单按 clientAlgoId 撤，普通单按 orderId 撤）
+            # 撤旧止损（algo 单按 clientAlgoId/algoId 撤，普通单按 orderId 撤）
             try:
-                if sl.get("clientAlgoId"):
-                    client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
+                if sl.get("clientAlgoId") or sl.get("algoId"):
+                    client.cancel_algo_order(algo_id=sl.get("algoId"),
+                                             client_algo_id=sl.get("clientAlgoId"))
                 elif sl.get("orderId"):
                     client.cancel_order(t["symbol"], sl["orderId"])
             except Exception as e:  # noqa: BLE001

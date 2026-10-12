@@ -169,9 +169,10 @@ check(agg and agg.get("confidence") == "medium", "confidence 同步 medium")
 check(agg and "tier_demote_reason" in agg, "带降档说明（可解释）")
 
 # 双源聚合 HIGH → 保留
+# 注：narrative（板块信号）已随 2026-10-12 审计移出高亮池，此处用 sector_inflow 作第二源夹具
 r = mm.select_highlight_signals([
-    _opp("24h 稳定币净流入 $12B", "stablecoin_inflow", score=92, dims=["stablecoin_inflow", "narrative"]),
-    _opp("24h 稳定币净流入 $12B", "narrative", score=80, dims=["narrative"]),
+    _opp("24h 稳定币净流入 $12B", "stablecoin_inflow", score=92, dims=["stablecoin_inflow", "sector_inflow"]),
+    _opp("24h 稳定币净流入 $12B", "sector_inflow", score=80, dims=["sector_inflow"]),
 ], max_total=10)
 agg = _by_target(r).get("24h 稳定币净流入 $12B")
 check(agg and agg.get("conviction_tier") == "HIGH",
@@ -211,9 +212,15 @@ check(o and o.get("conviction_tier") == "MED",
 # ═══════════════ OPT-HL-DETERMINACY-002（2026-10-03 审计）：币种单源 HIGH 降档 ═══════════════
 print("[OPT-HL-DETERMINACY-002] 币种 target 单源 HIGH 降档（硬数据极值白名单除外）")
 
-# 单源币种 HIGH → 降 MED（min_resonance=1 模拟 V2 模式：单源卡能进候选池）
+# 审计 2026-10-09：开发活跃（github_activity）对价格几乎无影响，整体移出高亮池
 r = mm.select_highlight_signals(
     [_opp("WMETAX", "github_activity", score=88, dims=["github_repo_activity"])],
+    max_total=10, min_resonance=1)
+check(_by_target(r).get("WMETAX") is None, "github_activity 整体移出高亮信号池")
+
+# 单源币种 HIGH → 降 MED（min_resonance=1 模拟 V2 模式：单源卡能进候选池）
+r = mm.select_highlight_signals(
+    [_opp("WMETAX", "catalyst", score=88, dims=["catalyst_events"])],
     max_total=10, min_resonance=1)
 o = _by_target(r).get("WMETAX")
 check(o is not None and o.get("conviction_tier") == "MED",
@@ -224,7 +231,7 @@ check(o and "tier_demote_reason" in o and "多因子共振" in o["tier_demote_re
 
 # 双源币种 HIGH → 保留
 r = mm.select_highlight_signals([
-    _opp("ETH", "github_activity", score=88, dims=["github_repo_activity"]),
+    _opp("ETH", "catalyst", score=88, dims=["catalyst_events"]),
     _opp("ETH", "etf_flow", score=80, dims=["etf_flow"]),
 ], max_total=10, min_resonance=1)
 o = _by_target(r).get("ETH")
@@ -241,7 +248,7 @@ for st in ("fng_extreme", "leverage_extreme", "mvrv_deep_under"):
 
 # 单源 MED 不被二次降级（只降 HIGH）
 r = mm.select_highlight_signals(
-    [_opp("SOL", "github_activity", tier="MED", score=60, dims=["github_repo_activity"])],
+    [_opp("SOL", "catalyst", tier="MED", score=60, dims=["catalyst_events"])],
     max_total=10, min_resonance=1)
 o = _by_target(r).get("SOL")
 check(o and o.get("conviction_tier") == "MED", "单源 MED 不二次降级")

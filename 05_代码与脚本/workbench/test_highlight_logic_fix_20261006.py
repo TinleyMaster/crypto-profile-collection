@@ -135,9 +135,10 @@ try:
                 "confidence": "high" if tier == "HIGH" else "medium",
                 "related_dims": dims if dims is not None else [st]}
 
-    # ASTER：开发活跃（github_activity）单源，raw 分本就 MED（此前无说明，仅 WMETAX(高分) 有）
+    # ASTER：催化剂（catalyst）单源，raw 分本就 MED（此前无说明，仅 WMETAX(高分) 有）
+    # 注：github_activity 已于 2026-10-09 审计移出高亮池，此处用催化剂代替夹具
     r = mm.select_highlight_signals(
-        [_opp("ASTER", "github_activity", "MED", 60, ["github_repo_activity"])],
+        [_opp("ASTER", "catalyst", "MED", 60, ["catalyst_events"])],
         max_total=10, min_resonance=1)
     o = _by_target(r).get("ASTER")
     check(o is not None and o.get("conviction_tier") == "MED", "ASTER 单源 MED 保留")
@@ -146,7 +147,7 @@ try:
 
     # WMETAX：高分 MED（HIGH→MED 路径）应保持既有说明
     r2 = mm.select_highlight_signals(
-        [_opp("WMETAX", "github_activity", "HIGH", 88, ["github_repo_activity"])],
+        [_opp("WMETAX", "catalyst", "HIGH", 88, ["catalyst_events"])],
         max_total=10, min_resonance=1)
     o2 = _by_target(r2).get("WMETAX")
     check(o2 and o2.get("conviction_tier") == "MED" and "单源" in (o2.get("tier_demote_reason") or ""),
@@ -154,7 +155,7 @@ try:
 
     # 双源 MED（两张卡合并 → resonance≥2）不应出现「单源封顶」说明（不误伤）
     r3 = mm.select_highlight_signals(
-        [_opp("ETH", "github_activity", "MED", 68, ["github_repo_activity"]),
+        [_opp("ETH", "catalyst", "MED", 68, ["catalyst_events"]),
          _opp("ETH", "etf_flow", "MED", 60, ["etf_flow"])],
         max_total=10, min_resonance=1)
     o3 = _by_target(r3).get("ETH")

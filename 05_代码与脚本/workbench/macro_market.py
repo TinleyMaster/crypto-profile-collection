@@ -5155,7 +5155,7 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
     # 旧配额已废弃，新配额约为原来的 1.5 倍
     quotas = {
         "mvrv_deep_under": 3, "mvrv_under_watch": 2,
-        "catalyst": 3, "whale_flow": 3, "github_activity": 2,
+        "catalyst": 3, "whale_flow": 3,
         "funding": 2, "token_unlock": 2, "kol_onchain": 2,
         "fng_extreme": 2, "leverage_extreme": 2, "stablecoin_inflow": 2,
         "etf_flow": 2,
@@ -5174,10 +5174,20 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
 
     # ── 1. 筛选多头方向信号（高亮信号 = 机会/看多） ──
     # FEAT-HIGHLIGHT-FIX: 严格过滤 direction，避免空头信号混进机会区
+    # 审计 2026-10-09：开发活跃（github_activity）对价格几乎无影响（审计结论），
+    # 移出高亮信号池——提交爆发 ≠ 币价会涨，避免伪基本面信号占用展示位。
+    # 审计 2026-10-12：无投资指导意义的信号类型整体移出高亮池——
+    #   github_activity：开发提交属持续性运维，非落地里程碑，平均收益 -0.4%（WMETAX/UNI 案例）；
+    #   volume_surge：放量 ≠ 方向，类型无回测背书，放量出货概率高（聚合卡「N 币 成交量异动」）；
+    #   narrative：板块信号温和流入，只作选币起点，非交易依据（聚合卡「Layer 2 / AI & Big Data」等）。
+    _HL_EXCLUDE_TYPES = {
+        "mvrv_deep_over", "mvrv_over_watch",
+        "github_activity", "volume_surge", "narrative",
+    }
     long_opps = [
         o for o in opportunities
         if o.get("direction") in ("long", None, "", "bullish")
-        and o.get("signal_type") not in ("mvrv_deep_over", "mvrv_over_watch")
+        and o.get("signal_type") not in _HL_EXCLUDE_TYPES
     ]
 
     if not long_opps:
@@ -5292,9 +5302,10 @@ def select_highlight_signals(opportunities: list[dict], max_total: int = 10,
 
     # OPT-HL-DETERMINACY-002（2026-10-03 审计·高确定性机会视角）：币种 target 单源 HIGH 降档。
     # 聚合类已有 P1-C 闸门，但**币种 target 在 V2（min_resonance=1）下无此保护**：
-    # 单因子（如 github_activity 开发提交爆发、单条催化剂）即可打 HIGH，
-    # 而「开发活跃 ≠ 币价会涨」，缺少「事件 + 资金面/链上持仓」多因子共振校验
-    # 会把伪基本面信号误当成强机会（实测 WMETAX/UNI 仅 github 单维即 HIGH）。
+    # 单因子（如单条催化剂）即可打 HIGH，而「单一事件 ≠ 币价会涨」，
+    # 缺少「事件 + 资金面/链上持仓」多因子共振校验
+    # 会把伪基本面信号误当成强机会（实测 WMETAX/UNI 仅单维即 HIGH）。
+    # 审计 2026-10-09：github_activity（开发活跃）对价格几乎无影响，已在筛选源头整体移出高亮池。
     # 处置与 P1-C 同构：单源 HIGH → 降 MED（封顶非封杀，卡片保留），
     # 白名单 = 硬数据极值（恐贪极值 / 杠杆极值 / MVRV 深度低估）：单源即为事实本身。
     _SYM_HIGH_ALLOWLIST = {"fng_extreme", "leverage_extreme", "mvrv_deep_under"}
@@ -5598,6 +5609,164 @@ def _enrich_highlights_with_ai_v2(signals: list[dict], all_opps: list[dict],
         pass  # AI 增强失败不影响主流程
 
     return signals
+
+
+def _attach_technical_snapshot(highlights: list[dict]) -> list[dict]:
+    """给高亮信号卡附加技术面快照（价格/成交量/布林带/RSI/ATR/EMA）。
+
+    审计 2026-10-09：高亮卡此前只有分数与事件，缺「当前价格处于什么技术位置」，
+    读者无法判断追高/回踩。这里用日线收盘序列（biz.v_asset_market_daily_primary）
+    计算常用指标后挂到卡片 `technical_snapshot` 字段；快照持久化后邮件/前端共用。
+
+    指标口径（日线级，无 OHLC）：
+    - price_usd / change_24h_pct: 最新收盘价与当日涨跌幅
+    - volume_24h_usd / volume_7d_avg_usd: 最新 24h 成交量与 7 日均量
+    - boll_upper/mid/lower: 20 日布林带（中轨=SMA20，带宽=2×标准差）
+    - rsi_14: 14 日 RSI（简单移动平均法，与 ai_signal_analyzer 同口径）
+    - atr_30d: 30 日近似 ATR（价格×日均绝对收益率，无 OHLC 口径，同 G5 technical）
+    - ema20 / ema60: 指数移动平均（SMA 种子）
+
+    仅挂单币种卡：聚合/多币种信号（价格暴涨、量价齐升、叙事、板块资金流等）的
+    asset_id 只是参与币之一，把某一币的技术面当整组信号的技术面会误导读者，故跳过。
+    任一资产数据不足或查询失败 → 该卡不挂字段（降级不阻断主流程）。
+    """
+    # 聚合/多币种信号类型（与 send_highlight_alert.AGGREGATE_SIGNAL_TYPES + 量价/连板榜同口径）
+    _skip_types = frozenset({
+        "narrative", "chain_inflow", "sector_inflow", "sector_outflow",
+        "stablecoin_inflow", "stablecoin_outflow",
+        "mvrv_deep_under", "mvrv_deep_over", "mvrv_under_watch",
+        "fng_extreme", "leverage_extreme", "btc_left_accum", "cm_adoption_divergence",
+        "price_surge", "price_crash", "price_volume_surge", "volume_surge",
+        "diff_streak_up", "diff_streak_down",
+    })
+    if not highlights:
+        return highlights
+
+    def _primary_type(c: dict) -> str:
+        st = str(c.get("signal_type") or "").strip()
+        if st:
+            return st
+        for s in (c.get("signal_types") or []):
+            if s:
+                return str(s)
+        return ""
+
+    ids = sorted({int(c["asset_id"]) for c in highlights
+                  if c.get("asset_id") is not None and _primary_type(c) not in _skip_types})
+    if not ids:
+        return highlights
+    try:
+        import math
+        import psycopg.rows
+        from crypto_research.config import get_settings
+        from crypto_research.db.conn import get_connection
+
+        settings = get_settings(require_database=True)
+        with get_connection(settings.database_url) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT asset_id, market_date, price_usd, volume_24h, change_24h
+                    FROM biz.v_asset_market_daily_primary
+                    WHERE asset_id = ANY(%s)
+                    ORDER BY asset_id, market_date ASC
+                    """,
+                    (ids,),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "attach technical snapshot failed: %s: %s", type(exc).__name__, exc)
+        return highlights
+
+    # 按 asset_id 聚合日线（升序：老→新）
+    by_asset: dict[int, list[dict]] = {}
+    for r in rows:
+        by_asset.setdefault(int(r["asset_id"]), []).append(r)
+
+    def _ema(values: list[float], period: int) -> float | None:
+        if len(values) < period:
+            return None
+        k = 2.0 / (period + 1)
+        ema = sum(values[:period]) / period  # 以 SMA 为种子
+        for v in values[period:]:
+            ema = v * k + ema * (1 - k)
+        return ema
+
+    for c in highlights:
+        if _primary_type(c) in _skip_types:
+            continue
+        aid = c.get("asset_id")
+        if aid is None:
+            continue
+        daily = by_asset.get(int(aid))
+        if not daily or len(daily) < 20:
+            continue
+        prices = [float(d["price_usd"]) for d in daily if d.get("price_usd") is not None]
+        if len(prices) < 20 or prices[-1] <= 0:
+            continue
+        last = prices[-1]
+        snap: dict = {"as_of": str(daily[-1]["market_date"]), "data_days": len(prices)}
+
+        # 价格与当日涨跌
+        snap["price_usd"] = last
+        chg = daily[-1].get("change_24h")
+        if chg is not None:
+            snap["change_24h_pct"] = round(float(chg), 2)
+
+        # 成交量
+        if daily[-1].get("volume_24h") is not None:
+            snap["volume_24h_usd"] = float(daily[-1]["volume_24h"])
+        vols = [float(d["volume_24h"]) for d in daily if d.get("volume_24h") is not None]
+        if len(vols) >= 7:
+            snap["volume_7d_avg_usd"] = sum(vols[-7:]) / 7
+
+        # 布林带（20, 2σ）
+        window = prices[-20:]
+        mid = sum(window) / 20
+        std = math.sqrt(sum((v - mid) ** 2 for v in window) / 20)
+        snap.update({
+            "boll_upper": mid + 2 * std,
+            "boll_mid": mid,
+            "boll_lower": max(mid - 2 * std, 0.0),
+            "boll_period": 20,
+            "boll_std": 2.0,
+        })
+
+        # RSI(14)
+        if len(prices) >= 15:
+            gains, losses = [], []
+            for i in range(1, len(prices)):
+                diff = prices[i] - prices[i - 1]
+                gains.append(max(diff, 0.0))
+                losses.append(max(-diff, 0.0))
+            avg_g = sum(gains[-14:]) / 14
+            avg_l = sum(losses[-14:]) / 14
+            if avg_l == 0:
+                snap["rsi_14"] = 100.0
+            else:
+                rs = avg_g / avg_l
+                snap["rsi_14"] = round(100 - 100 / (1 + rs), 2)
+
+        # ATR(30d 近似)
+        if len(prices) >= 30:
+            rets = [abs(prices[i] / prices[i - 1] - 1)
+                    for i in range(1, len(prices)) if prices[i - 1] > 0]
+            if rets:
+                snap["atr_30d"] = last * (sum(rets[-30:]) / min(len(rets), 30))
+
+        # EMA
+        e20 = _ema(prices, 20)
+        if e20 is not None:
+            snap["ema20"] = e20
+        e60 = _ema(prices, 60)
+        if e60 is not None:
+            snap["ema60"] = e60
+
+        c["technical_snapshot"] = snap
+
+    return highlights
 
 
 def score_opportunities(overview: dict) -> dict:
@@ -6957,6 +7126,14 @@ def score_opportunities(overview: dict) -> dict:
         catalyst_events = get_market_catalysts(window_days=cat_window, limit=cat_limit)
     except Exception:
         pass
+
+    # 审计 2026-10-09：高亮卡附技术面快照（价格/成交量/布林带/RSI/ATR/EMA），
+    # 供邮件/前端展示「当前价格处于什么技术位置」；失败降级不阻断主流程。
+    if highlights:
+        try:
+            highlights = _attach_technical_snapshot(highlights)
+        except Exception:
+            pass
 
     # 链上异动板块（KOL 分析博主发现的链上大额异动）
     onchain_anomalies = {"anomalies": [], "total": 0, "hours": 24, "n_kols": 0}

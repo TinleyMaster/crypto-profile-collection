@@ -438,6 +438,166 @@ def _render_type_position(card: dict) -> str:
             f'仅作佐证维度，需叠加资金面/事件第二维度确认</div>')
 
 
+def _fmt_sig(x, sig: int = 4) -> str | None:
+    """按有效数字格式化价格（极小价不被抹成 0，且不产生尾部零）。
+
+    用 %.Ng 有效数字格式：0.4 → "0.4"、0.367753 → "0.3678"、
+    1.2e-12 → "1.2e-12"（meme 极小价不丢精度）。
+    """
+    if x is None:
+        return None
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if x == 0:
+        return "0"
+    return f"{x:.{sig}g}"
+
+
+def _fmt_vol_usd(v) -> str | None:
+    """成交量 USD 缩写（K/M/B）。"""
+    if v is None:
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if v >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.1f}M"
+    if v >= 1e3:
+        return f"${v / 1e3:.0f}K"
+    return f"${v:.0f}"
+
+
+def _render_technical_snapshot(card: dict) -> str:
+    """技术面快照：价格 / 成交量 / 布林带 / RSI / ATR / EMA。
+
+    审计 2026-10-09：高亮卡此前只有分数与事件，缺「当前价格处于什么技术位置」，
+    读者无法判断追高/回踩。数据来自快照构建时注入的 `technical_snapshot`
+    （日线级指标，无 OHLC；布林带 20±2σ、RSI14、ATR30d 近似、EMA20/60）。
+    无快照的卡（聚合类 / 老快照）不渲染该行。
+    """
+    ts = card.get("technical_snapshot")
+    if not isinstance(ts, dict):
+        return ""
+    parts: list[str] = []
+
+    price = _fmt_sig(ts.get("price_usd"))
+    if price:
+        chg = ts.get("change_24h_pct")
+        chg_txt = f"（24h {chg:+.2f}%）" if isinstance(chg, (int, float)) else ""
+        parts.append(f"价格 ${price}{chg_txt}")
+
+    vol = _fmt_vol_usd(ts.get("volume_24h_usd"))
+    if vol:
+        v7 = _fmt_vol_usd(ts.get("volume_7d_avg_usd"))
+        parts.append(f"成交量 {vol}" + (f"（7日均 {v7}）" if v7 else ""))
+
+    if all(ts.get(k) is not None for k in ("boll_upper", "boll_mid", "boll_lower")):
+        bu = _fmt_sig(ts["boll_upper"]); bm = _fmt_sig(ts["boll_mid"]); bl = _fmt_sig(ts["boll_lower"])
+        parts.append(f"布林带 {bu}/{bm}/{bl}")
+
+    rsi = ts.get("rsi_14")
+    if isinstance(rsi, (int, float)):
+        tag = "超买" if rsi >= 70 else ("超卖" if rsi <= 30 else "")
+        parts.append(f"RSI {rsi:.1f}{tag}")
+
+    atr = _fmt_sig(ts.get("atr_30d"))
+    if atr:
+        parts.append(f"ATR {atr}")
+
+    e20 = _fmt_sig(ts.get("ema20"))
+    if e20:
+        e60 = _fmt_sig(ts.get("ema60"))
+        parts.append(f"EMA20/60 {e20}" + (f"/{e60}" if e60 else ""))
+
+    if not parts:
+        return ""
+    return (f'<div style="font-size:11px;color:#0f172a;margin-top:4px;padding:5px 8px;'
+            f'background:#f1f5f9;border-radius:3px">📈 技术面 · {" · ".join(parts)}</div>')
+
+
+def _collect_catalyst_events(card: dict) -> list[dict]:
+    """收集卡片上的全部催化剂事件（主卡 + 各子信号），按 catalyst_id 去重。
+
+    生产快照里 catalyst_events 可能同时挂在主卡与 all_signals 子信号上
+    （同一条事件多源转载还会各带一个 catalyst_id），故统一聚合、去重后再渲染。
+    """
+    events: list[dict] = []
+    seen: set = set()
+    for src in ([card] + (card.get("all_signals") or [])):
+        for ev in (src.get("catalyst_events") or []):
+            cid = ev.get("catalyst_id")
+            if cid is not None:
+                if cid in seen:
+                    continue
+                seen.add(cid)
+            events.append(ev)
+    return events
+
+
+def _render_catalyst_events(card: dict) -> str:
+    """催化剂卡片：把事件原文（标题+来源媒体+时间+方向+摘要）渲染进卡片。
+
+    审计 2026-10-09：此前催化卡只给「催化剂 77分」等分数，事件原文全部藏在
+    `catalyst_events` 字段未展示，读者无法判断「这条多单到底基于什么事件」。
+    现将标题、来源、时间、方向、正文摘要逐条列出；合并卡多源转载只列首条摘要、
+    其余按来源/时间列出标题，避免同一事件刷屏。
+    """
+    events = _collect_catalyst_events(card)
+    if not events:
+        return ""
+    # 同一事件多源转载：body 基本一致，只保留首条全文，其余折叠成一行
+    grouped: list[dict] = []
+    bodies_seen: set = set()
+    for ev in sorted(events, key=lambda e: str(e.get("event_date") or ""), reverse=True):
+        body = str(ev.get("body_text") or "").strip()
+        full_key = body[:80] if body else ""
+        dup = bool(full_key and full_key in bodies_seen)
+        if body and not dup:
+            bodies_seen.add(full_key)
+        grouped.append({**ev, "_dup_of_body": dup})
+
+    rows = []
+    for ev in grouped:
+        title = str(ev.get("title") or "").strip()
+        if not title:
+            continue
+        body = str(ev.get("body_text") or "").strip()
+        cat = str(ev.get("category") or "").strip()
+        if not cat:
+            # category 缺失时，source 是内部表名，剥离管线编号后兜底展示
+            src = str(ev.get("source") or "").strip()
+            cat = _PIPELINE_CODE_RE.sub("", src) or "媒体"
+        date = str(ev.get("event_date") or "").strip()
+        dir_cn = {"bullish": "看多", "bearish": "看空"}.get(ev.get("direction"), "中性")
+        strength_cn = {"strong": "强", "medium": "中", "weak": "弱"}.get(ev.get("strength"), "")
+        meta = " · ".join(x for x in [cat, date, strength_cn + "事件" if strength_cn else "", dir_cn] if x)
+        if ev.get("_dup_of_body"):
+            # 同事件的其他媒体转载：一行标题，不再重复正文
+            rows.append(
+                f'<div style="margin-top:4px;padding-left:10px;border-left:2px solid #e2e8f0">'
+                f'<span style="font-size:11px;color:#475569">{_e(title)}</span>'
+                f'<span style="font-size:11px;color:#94a3b8"> · {_e(meta)}</span></div>'
+            )
+            continue
+        excerpt = body if len(body) <= 200 else body[:200] + "…"
+        rows.append(
+            f'<div style="margin-top:6px;padding:6px 8px;background:#f8fafc;border-radius:3px;'
+            f'border-left:3px solid #e0e7ff">'
+            f'<div style="font-size:12px;color:#0f172a;font-weight:600">{_e(title)}</div>'
+            f'<div style="font-size:11px;color:#64748b;margin-top:2px">{_e(meta)}</div>'
+            + (f'<div style="font-size:11px;color:#475569;margin-top:2px">{_e(excerpt)}</div>' if excerpt else '')
+            + f'</div>'
+        )
+    head = (f'<div style="margin-top:6px"><div style="font-size:12px;font-weight:600;color:#334155">'
+            f'📰 催化剂事件（{len(events)} 条报道）</div>{"".join(rows)}</div>')
+    return head
+
+
 def render_card(card: dict, kind: str) -> str:
     tier = str(card.get("conviction_tier") or "").upper()
     # M4（2026-09-24 审计）：AI 明确不背书（_ai_downgraded）的卡片不得以 HIGH 呈现，
@@ -509,6 +669,8 @@ def render_card(card: dict, kind: str) -> str:
       {event_line}
       {dims_txt}
       {logic}
+      {_render_technical_snapshot(card)}
+      {_render_catalyst_events(card)}
       {action}
       {invalid}
       {val_note}

@@ -289,5 +289,78 @@ check("_risk_panel" in _sha_src and "resonance_symbols" in _sha_src,
 check("risk_panels" in _sha_src and "scan_signal" in _sha_src,
       "数据源为 biz.scan_signal（盘面异动）+ 资产宽表")
 
+print("\n[H9] 审计 2026-10-09：催化剂事件原文渲染（让读者看到「为什么」）")
+_ev = {"title": "Stacks 创始人 Muneeb Ali 公布回归后 30 天重点",
+       "category": "MarsBit News · 新闻媒体", "source": "kol_news_media_binance_square_11",
+       "strength": "strong", "direction": "bullish", "event_date": "2026-10-07",
+       "catalyst_id": 26262, "body_text": "包括扩大机构业务拓展、简化管理架构、发布未来两年路线图…"}
+_html_cat = sha.render_card(_card(signal_type="catalyst", catalyst_events=[_ev]),
+                            sha.ALERT_NEW)
+for tok in ["📰 催化剂事件", "Muneeb Ali", "MarsBit News", "2026-10-07",
+            "强事件", "看多", "扩大机构业务拓展"]:
+    check(tok in _html_cat, f"催化剂卡渲染事件原文含「{tok}」")
+check("📰 催化剂事件" in _html_cat and
+      _html_cat.index("📰 催化剂事件") < _html_cat.index("AI 综合"),
+      "事件原文块位于 AI 复核之前（先给事实，再给复核）")
+# 无事件 / 非催化剂卡不渲染该块
+check("📰 催化剂事件" not in sha.render_card(_card(), sha.ALERT_NEW),
+      "无 catalyst_events 不渲染事件块")
+check("📰 催化剂事件" not in sha.render_card(_card(catalyst_events=[]), sha.ALERT_NEW),
+      "空事件列表不渲染事件块")
+# 主卡 + 子信号（all_signals）同一事件按 catalyst_id 去重
+_card_merged = _card(signal_type="catalyst",
+                     catalyst_events=[_ev],
+                     all_signals=[{"signal_type": "catalyst",
+                                   "catalyst_events": [dict(_ev, catalyst_id=26262)],
+                                   "key_metric": "催化剂 77分",
+                                   "trigger_logic": "决策信号 77 分"}])
+check(sha._collect_catalyst_events(_card_merged) == [_ev],
+      "主卡与子信号同一 catalyst_id 去重")
+_html_merged = sha.render_card(_card_merged, sha.ALERT_NEW)
+check(_html_merged.count("📰") == 1, "去重后事件块只渲染一份")
+# 多源转载（正文相同）折叠成一行标题，不重复正文
+_ev2 = dict(_ev, catalyst_id=26242, title="ChainCatcher：Muneeb Ali 公布回归后 30 天重点",
+            source="kol_news_media_binance_square_12",
+            category="ChainCatcher · 新闻媒体")
+_html_multi = sha.render_card(_card(signal_type="catalyst",
+                                    catalyst_events=[_ev, _ev2]), sha.ALERT_NEW)
+check(_html_multi.count("扩大机构业务拓展") == 1,
+      "多源转载同正文折叠，正文只出现一次")
+
+print("\n[H10] 审计 2026-10-09：高亮卡技术面快照（价格/成交量/布林带/RSI/ATR/EMA）")
+_ts = {"price_usd": 0.367753, "change_24h_pct": 0.69, "volume_24h_usd": 3.76e7,
+       "volume_7d_avg_usd": 2.5e7, "boll_upper": 0.4, "boll_mid": 0.3447, "boll_lower": 0.2894,
+       "rsi_14": 62.53, "atr_30d": 0.01723, "ema20": 0.3428, "ema60": 0.2813,
+       "as_of": "2026-10-08", "data_days": 120}
+_html_ts = sha.render_card(_card(technical_snapshot=_ts), sha.ALERT_NEW)
+for tok in ["📈 技术面", "价格 $0.3678", "24h +0.69%", "成交量 $37.6M", "7日均 $25.0M",
+            "布林带 0.4/0.3447/0.2894", "RSI 62.5", "ATR 0.01723", "EMA20/60 0.3428/0.2813"]:
+    check(tok in _html_ts, f"技术面渲染含「{tok}」")
+check(_html_ts.index("📈 技术面") < _html_ts.index("AI 综合"),
+      "技术面块位于 AI 复核之前")
+# 无快照 / 非 dict → 不渲染
+check("📈 技术面" not in sha.render_card(_card(), sha.ALERT_NEW), "无快照不渲染技术面")
+check("📈 技术面" not in sha.render_card(_card(technical_snapshot=[]), sha.ALERT_NEW),
+      "非 dict 快照不渲染技术面")
+# RSI 超买/超卖标签
+_ts_ob = sha.render_card(_card(technical_snapshot=dict(_ts, rsi_14=82.3)), sha.ALERT_NEW)
+check("RSI 82.3超买" in _ts_ob, "RSI≥70 标「超买」")
+_ts_os = sha.render_card(_card(technical_snapshot=dict(_ts, rsi_14=21.0)), sha.ALERT_NEW)
+check("RSI 21.0超卖" in _ts_os, "RSI≤30 标「超卖」")
+# 极小价不被抹 0（meme 币，e-notation 保精度）
+_ts_small = sha.render_card(_card(technical_snapshot=dict(_ts, price_usd=1.2e-12,
+                                                          boll_upper=1.5e-12, boll_mid=1.1e-12,
+                                                          boll_lower=0.7e-12, atr_30d=3e-13)),
+                            sha.ALERT_NEW)
+check("价格 $1.2e-12" in _ts_small and "ATR 3e-13" in _ts_small,
+      "极小价 e-notation 保精度不抹 0")
+
+# 源码守卫：macro_market 已定义 _attach_technical_snapshot 并在 score_opportunities 接入
+_mac_src = open(os.path.join(_HERE, "macro_market.py"), encoding="utf-8").read()
+check("def _attach_technical_snapshot" in _mac_src, "macro_market 已定义 _attach_technical_snapshot")
+check("_attach_technical_snapshot(highlights)" in _mac_src, "score_opportunities 已接入技术面快照")
+check("technical_snapshot" in _sha_src and "_render_technical_snapshot(card)" in _sha_src,
+      "邮件渲染已接入技术面快照")
+
 print(f"\n{'=' * 60}\n通过 {passed} / 失败 {failed}\n{'=' * 60}")
 sys.exit(1 if failed else 0)

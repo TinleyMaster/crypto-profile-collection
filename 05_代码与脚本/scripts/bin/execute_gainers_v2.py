@@ -72,6 +72,13 @@ MAX_SIGNAL_AGE_H = 2
 # （STOP_MARKET）从原 -10% 上移到入场价附近（BREAKEVEN_COST_COVER_PCT），锁定盈利，
 # 防跳空/闪崩把浮盈打回亏损。与跟踪止盈 TR 配合：正常回撤由 TR（峰值-3%）先触发，
 # 本止损只在价格跌破保本线时兜底。
+# ⚠️ 浮盈口径 = **入场后最高价**（峰值），不是轮询时刻的瞬时价（2026-10-12 修正）：
+#   执行器 5min 轮询一次，瞬时价口径会漏掉插针。实盘复现：WUSDT id=5 入场 07:06 后
+#   07:25 插针至 +5.32%（5m bar high）旋即回落到 +3~4%，此后各轮询点价格均 <+5%，
+#   保本损始终未挂——用户看到「价格已超入场价 5% 却没有保本损」。
+#   峰值取 biz.asset_klines 中 5m/15m/1h（任一可用）自入场起（open_time ≥ 入场时刻，
+#   不含入场所在那根 bar，避免把入场前的高点算进来）的 MAX(high)，空单取 MIN(low)。
+#   仍要求「当前价在保本线盈利侧」才上移（否则会立刻触发市价止损，见 _ensure_protective）。
 # 阈值取 5% 的数学依据：浮盈 X% 时 TR 线 = 入场×(1+X)×0.97。要求 TR 线高于保本线
 # （入场价上方 0.4%）→ (1+X)×0.97 > 1.004 → X > 3.51%。5% 时 TR 线 = 入场×1.0185，
 # 比保本线（1.004）高 1.45%，SL/TR 不抢触发。5% 也高于放量大阳币的日间噪声。
@@ -541,9 +548,11 @@ def _ensure_protective(client, conn, settings) -> int:
        回测峰值从「入场后 bar 的 high」累积、实盘原生 TR 从「入场价」激活，导致
        「入场即回调≥3%再突破」的币实盘被 TR 打掉而回测吃到突破，故改用软件复刻回测。
 
-    2. 浮盈保本：硬止损已就绪且浮盈 ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、把硬止损
-       上移到入场价 ± BREAKEVEN_COST_COVER_PCT（覆盖手续费+滑点的净保本线），
-       锁盈利防跳空。幂等：止损触发价已不低于保本线则跳过。正常回撤由软件 TR
+    2. 浮盈保本：硬止损已就绪且**入场后峰值浮盈** ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、
+       把硬止损上移到入场价 ± BREAKEVEN_COST_COVER_PCT（覆盖手续费+滑点的净保本线），
+       锁盈利防跳空。浮盈用「入场后 5m/15m/1h bar 的最高价」（不是轮询时刻瞬时价，
+       瞬时价会漏掉插针）；且仅当当前价仍在保本线盈利侧才上移（否则挂出即触发）。
+       幂等：止损触发价已不低于保本线则跳过。正常回撤由软件 TR
        （峰值-3%）先兑现，保本止损只在跳空/闪崩跌破保本线时兜底。
 
     返回处理笔数。
@@ -551,8 +560,14 @@ def _ensure_protective(client, conn, settings) -> int:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, symbol, direction, open_ts, open_price, sl_pct, tr_pct, "
-            "       protective_orders "
-            "FROM biz.v2_trade_log "
+            "       protective_orders, "
+            "       (SELECT COALESCE(MAX(k.high_px), 0) FROM biz.asset_klines k "
+            "         WHERE k.symbol = t.symbol AND k.interval IN ('5m','15m','1h') "
+            "           AND k.open_time >= t.open_ts) AS peak_intra, "
+            "       (SELECT COALESCE(MIN(k.low_px), 1e18) FROM biz.asset_klines k "
+            "         WHERE k.symbol = t.symbol AND k.interval IN ('5m','15m','1h') "
+            "           AND k.open_time >= t.open_ts) AS trough_intra "
+            "FROM biz.v2_trade_log t "
             "WHERE close_ts IS NULL AND origin='bot' "
             "ORDER BY open_ts")
         rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
@@ -605,14 +620,29 @@ def _ensure_protective(client, conn, settings) -> int:
                 continue  # 本轮先补挂，浮盈保本下轮评估
 
             # ── 2) 浮盈保本止损 ──
+            # 浮盈口径 = 入场后已记录的峰值价（5m/15m/1h bar 的 high），不是轮询时刻
+            # 瞬时价——瞬时价会漏掉插针（WUSDT id=5：07:25 插针 +5.32% 后回落至 +3~4%，
+            # 保本损始终不触发）。空单用最低价。
             cur_px = client.get_price(t["symbol"])
-            pnl = (cur_px / entry - 1) if direction == "long" else (1 - cur_px / entry)
+            peak_intra = float(t.get("peak_intra") or 0)
+            trough_intra = float(t.get("trough_intra") or 0)
+            if direction == "long":
+                ref_px = peak_intra if peak_intra > 0 else cur_px
+                pnl = ref_px / entry - 1
+            else:
+                ref_px = trough_intra if 0 < trough_intra < 1e17 else cur_px
+                pnl = 1 - ref_px / entry
             if pnl < BREAKEVEN_TRIGGER_PCT / 100:
                 continue
             # 保本线 = 入场价 ± 成本覆盖（0.4%：0.1% 双边 taker + 0.3% 滑点预算），
             # 不是 0%（纯保本）——市价止损触发有滑点+手续费，停在入场价实际是亏。
             target_stop = (entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)) if direction == "long" \
                 else (entry * (1 - BREAKEVEN_COST_COVER_PCT / 100))
+            # 仅在当前价处于保本线盈利侧才上移止损：否则挂出即触发市价止损（追保平仓）。
+            if direction == "long" and cur_px <= target_stop:
+                continue
+            if direction == "short" and cur_px >= target_stop:
+                continue
             # Algo 条件单的触发价字段是 triggerPrice（closePosition 单的 stopPrice 恒为 0），
             # 只看 stopPrice 会导致幂等判断永远落空 → 每轮撤单重挂止损（churn）。
             cur_stop = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
@@ -634,6 +664,8 @@ def _ensure_protective(client, conn, settings) -> int:
                                        is_stop=True, stop_price=target_stop)
             new_sl["breakeven"] = True
             new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
+            new_sl["breakeven_ref"] = "peak_intra"
+            new_sl["peak_price"] = ref_px
             new_sl["moved_from_pct"] = t.get("sl_pct")
             prot["stop_loss"] = new_sl
             with conn.cursor() as cur:
@@ -641,7 +673,8 @@ def _ensure_protective(client, conn, settings) -> int:
                     "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
                     "updated_at=NOW() WHERE id=%s",
                     (json.dumps(prot), t["id"]))
-            print(f"  [ensure] 浮盈保本 {t['symbol']} pnl={pnl*100:+.1f}% "
+            print(f"  [ensure] 浮盈保本 {t['symbol']} 峰值浮盈={pnl*100:+.1f}% "
+                  f"(峰值价 {ref_px:.6g} 现价 {cur_px:.6g}) "
                   f"止损 {cur_stop}→{target_stop:.6g} id={t['id']}")
             n += 1
         except Exception as e:  # noqa: BLE001

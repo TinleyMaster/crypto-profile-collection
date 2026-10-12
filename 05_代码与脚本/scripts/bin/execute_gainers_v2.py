@@ -10,7 +10,7 @@
 用法：
     python bin/execute_gainers_v2.py --dry-run        # 只打印决策（默认）
     python bin/execute_gainers_v2.py --apply          # 真实下单（需 SIGNAL_TRADE_ENABLED=1）
-    python bin/execute_gainers_v2.py --apply --watch --interval 600   # 常驻：下单 + 到期平仓
+    python bin/execute_gainers_v2.py --apply --watch --interval 600   # 常驻：下单 + 软件跟踪止盈 + 到期平仓
 
 注意：本脚本在 Zeabur 容器内运行（子账户 API Key 绑定服务器 IP），本机仅 dry-run。
 """
@@ -257,7 +257,10 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
             entry_price=None, leverage=lev,
             stop_loss_pct=p["SL"] * 100 if p.get("SL") else 0,
             take_profit_pct=p["TP"] * 100 if p.get("TP") else 0,
-            trailing_stop_pct=p["TR"] * 100 if p.get("TR") else 0,
+            # ⚠️ 不再挂原生 TRAILING_STOP_MARKET：TR 由软件 _trail_check 接管
+            #（对齐回测「峰值=入场后已收盘 1h bar max high」语义，2026-10-12）。
+            # p["TR"] 仍保留在 params 落库，供 _trail_check 按 tr_pct 回调判定。
+            trailing_stop_pct=0,
         )
         order_id = r.get("orderId")
         # 全量留痕：开仓单原始响应（剔除内部下划线字段）+ 各保护单原始响应（含 orderId）
@@ -310,6 +313,88 @@ def _filled_order(client, symbol: str, order_id) -> dict | None:
         return o if str(o.get("status")) == "FILLED" else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _trail_check(client, conn) -> int:
+    """软件跟踪止盈（对齐回测 1h bar 峰值回撤语义，--watch 每轮调用）。
+
+    回测（backtest_trade_params.py）TR 判定：
+        ph = 入场后各已收盘 1h bar 的滚动最高 high（不含入场 bar、不含当前判定 bar）
+        触发 = low <= ph × (1-tr)，出场价 = ph×(1-tr)
+    实盘对齐：峰值 = biz.asset_klines 中入场后**已收盘** 1h bar 的 MAX(high_px)
+    （当前未收盘 bar 不计入，等同回测「1 PRECEDING」语义；空单用 MIN(low_px)），
+    每轮轮询最新价，触及 峰值×(1-tr)（多单）/ 谷值×(1+tr)（空单）→ 市价平仓。
+
+    与原生 TRAILING_STOP_MARKET 的关键差异（2026-10-12 对齐原因）：
+    原生 TR 从「挂单时最新价（入场价）」激活，入场后回调 ≥3% 立即触发；回测峰值
+    从「入场后 bar 的 high」累积（回调 bar 的 high 低于入场价时触发线更低），
+    「入场即回调≥3%再突破」的币回测能吃到突破、原生 TR 却在回调中被打掉。
+    本函数复刻回测判定，消除该乐观偏差。
+
+    ⚠️ 近似：触发判定用每轮轮询时刻价格（默认 5min），回测用 1h bar 的 low——
+    轮询间隔内的瞬时触达可能漏检（价格快速跌破触发线又拉回）。回调 3% 多为趋势性
+    回撤，5min 采样大概率能捕捉；可调小 --interval 提高灵敏度。
+
+    返回本轮平仓笔数。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.id, t.symbol, t.direction, t.tr_pct, t.open_ts, t.protective_orders, "
+            "       (SELECT COALESCE(MAX(k.high_px), 0) FROM biz.asset_klines k "
+            "         WHERE k.symbol = t.symbol AND k.interval = '1h' "
+            "           AND k.open_time > t.open_ts "
+            "           AND k.open_time + interval '1 hour' <= NOW()) AS peak, "
+            "       (SELECT COALESCE(MIN(k.low_px), 1e18) FROM biz.asset_klines k "
+            "         WHERE k.symbol = t.symbol AND k.interval = '1h' "
+            "           AND k.open_time > t.open_ts "
+            "           AND k.open_time + interval '1 hour' <= NOW()) AS trough "
+            "FROM biz.v2_trade_log t "
+            "WHERE t.close_ts IS NULL AND t.exit_order_id IS NULL "
+            "  AND t.origin = 'bot' AND COALESCE(t.tr_pct, 0) > 0 "
+            "ORDER BY t.open_ts")
+        rows = [dict(zip([d.name for d in cur.description], r)) for r in cur.fetchall()]
+    n = 0
+    for t in rows:
+        try:
+            tr = float(t["tr_pct"])  # tr_pct 落库即小数（0.03 = 3%）
+            is_long = str(t["direction"]).upper() == "LONG"
+            if is_long:
+                peak = float(t["peak"] or 0)
+                if peak <= 0:
+                    continue  # 入场后尚无已收盘 bar，等待
+                trigger_px = peak * (1 - tr)
+                ref_px = peak
+            else:
+                trough = float(t["trough"] or 0)
+                if trough <= 0 or trough >= 1e17:
+                    continue
+                trigger_px = trough * (1 + tr)
+                ref_px = trough
+            cur_px = client.get_price(t["symbol"])
+            hit = (cur_px <= trigger_px) if is_long else (cur_px >= trigger_px)
+            if not hit:
+                continue
+            # 触发 → 市价全平（复用 close_expired 流程；exit_reason='trail'）
+            amt = client.get_position_amt(t["symbol"])
+            if amt == 0:
+                continue
+            pos_side = "LONG" if amt > 0 else "SHORT"
+            close_side = "SELL" if amt > 0 else "BUY"
+            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
+            r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
+                                   close_position=True, position_side=pos_side)
+            oid = r.get("orderId")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE biz.v2_trade_log SET exit_order_id=%s, exit_reason='trail', "
+                    "close_resp=%s::jsonb, updated_at=NOW() WHERE id=%s",
+                    (oid, json.dumps(r), t["id"]))
+            print(f"  [trail] {t['symbol']} 峰值{ref_px:.6g} 回撤{tr*100:.0f}% 触发，"
+                  f"市价平仓 orderId={oid}（触发线={trigger_px:.6g}）")
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  [trail] {t['symbol']} 异常: {type(e).__name__}: {e}")
+    return n
 
 
 def close_expired(client, conn) -> int:
@@ -447,15 +532,18 @@ def _ensure_protective(client, conn, settings) -> int:
 
     两类动作（幂等；单笔异常只打印不阻断整体；仅处理未平仓 bot 单）：
 
-    1. 自愈补挂：保护单缺失或挂单失败（protective_orders 里 stop_loss/trailing_stop
-       是 error 或缺 orderId，如子账户 -4120/-4136 历史裸奔单）→ 按 sl_pct/tr_pct
-       重新补挂（binance_futures 已内置 Algo Order API fallback）。部署后首轮即给
-       存量 SUSDT/WUSDT 裸奔仓自动补挂 SL10%+TR3%。
+    1. 自愈补挂：**硬止损（STOP_MARKET）** 缺失或挂单失败（protective_orders 里
+       stop_loss 是 error 或缺 orderId，如子账户 -4120 历史裸奔单）→ 按 sl_pct 重新
+       补挂（binance_futures 已走 Algo Order API）。部署后首轮即给存量裸奔仓补挂 SL。
+       **跟踪止盈由软件 TR 接管（_trail_check，峰值=入场后已收盘 1h bar 的 max high，
+       回调 tr_pct 触发），不再挂原生 TRAILING_STOP_MARKET** —— 2026-10-12 对齐回测：
+       回测峰值从「入场后 bar 的 high」累积、实盘原生 TR 从「入场价」激活，导致
+       「入场即回调≥3%再突破」的币实盘被 TR 打掉而回测吃到突破，故改用软件复刻回测。
 
-    2. 浮盈保本：保护单已就绪且浮盈 ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、把硬止损
+    2. 浮盈保本：硬止损已就绪且浮盈 ≥ BREAKEVEN_TRIGGER_PCT% → 撤旧止损、把硬止损
        上移到入场价 ± BREAKEVEN_COST_COVER_PCT（覆盖手续费+滑点的净保本线），
-       锁盈利防跳空。幂等：止损触发价已不低于保本线则跳过。TR（峰值-3%）不动，
-       仍由它先兑现正常回撤。
+       锁盈利防跳空。幂等：止损触发价已不低于保本线则跳过。正常回撤由软件 TR
+       （峰值-3%）先兑现，保本止损只在跳空/闪崩跌破保本线时兜底。
 
     返回处理笔数。
     """
@@ -485,24 +573,19 @@ def _ensure_protective(client, conn, settings) -> int:
                 return bool(v) and "error" not in v and (
                     v.get("orderId") or v.get("algoId") or v.get("clientAlgoId"))
             sl_missing = not _prot_ok(sl)
-            trl_missing = not _prot_ok(trl)
 
-            # ── 1) 自愈补挂缺失保护单 ──
-            if sl_missing or trl_missing:
+            # ── 1) 自愈补挂缺失硬止损（TR 由 _trail_check 软件接管，不补原生单）──
+            if sl_missing:
                 # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
                 _cancel_protective_orders(client, t["symbol"], prot)
                 new_prot = prot.copy()
+                new_prot["trailing_stop"] = {"mode": "software",
+                                             "tr_pct": float(t.get("tr_pct") or 0)}
                 changed = False
-                if sl_missing and (t.get("sl_pct") or 0) > 0:
+                if (t.get("sl_pct") or 0) > 0:
                     r = client.place_sltp(t["symbol"], direction, entry,
                                           float(t["sl_pct"]) * 100, is_stop=True)
                     new_prot["stop_loss"] = r
-                    changed = True
-                if trl_missing and (t.get("tr_pct") or 0) > 0:
-                    r = client.place_trailing_stop(t["symbol"], direction,
-                                                   float(t["tr_pct"]) * 100,
-                                                   quantity=abs(amt))
-                    new_prot["trailing_stop"] = r
                     changed = True
                 if changed:
                     with conn.cursor() as cur:
@@ -510,8 +593,8 @@ def _ensure_protective(client, conn, settings) -> int:
                             "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
                             "updated_at=NOW() WHERE id=%s",
                             (json.dumps(new_prot), t["id"]))
-                    print(f"  [ensure] 补挂保护单 {t['symbol']} id={t['id']} "
-                          f"sl={'ok' if not sl_missing else ''} trl={'ok' if not trl_missing else ''}")
+                    print(f"  [ensure] 补挂硬止损 {t['symbol']} id={t['id']} "
+                          f"sl=ok（TR=软件接管）")
                     n += 1
                 continue  # 本轮先补挂，浮盈保本下轮评估
 
@@ -678,9 +761,12 @@ def main() -> int:
                                      settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:
-                # 保护单自愈（补挂缺失/失败保护单，部署后即给存量裸奔仓补挂）+ 浮盈保本止损
+                # 保护单自愈（补挂缺失/失败硬止损，部署后即给存量裸奔仓补挂）+ 浮盈保本止损
                 with get_connection(settings.database_url) as conn:
                     _ensure_protective(client, conn, settings)
+                # 软件跟踪止盈（对齐回测 1h bar 峰值回撤：峰值=入场后已收盘 bar max high）
+                with get_connection(settings.database_url) as conn:
+                    _trail_check(client, conn)
                 # 到期平仓（对齐回测：持有 N 小时未触发保护单 → 市价了结）
                 with get_connection(settings.database_url) as conn:
                     close_expired(client, conn)

@@ -101,6 +101,107 @@ def account_positions(client) -> list[str]:
         return []
 
 
+# ───────────────────────── 防裸奔：保护单失败 → 回滚 + 告警 ─────────────────────────
+# 2026-10-12 实盘教训（SUSDT/WUSDT）：子账户条件单（STOP_MARKET/TRAILING）在普通
+# /fapi/v1/order 被 -4120/-4136 拒绝，而 open_position 把失败静默吞进 protective 字段
+# → 开仓成功但无止损/追踪止盈，实盘裸奔。本组函数：保护单任一失败 → 回滚开仓 +
+# 邮件告警，禁止裸奔落地。
+
+def _cancel_protective_orders(client, symbol: str, prot: dict | None) -> None:
+    """撤某单的保护单：先按普通接口撤（openOrders 里可见的），再按 clientAlgoId 撤残余
+    Algo 条件单（子账户条件单可能不进 openOrders，须走 DELETE /fapi/v1/algo/order）。"""
+    try:
+        for o in client.get_open_orders(symbol):
+            try:
+                client.cancel_order(symbol, o["orderId"])
+                print(f"    撤保护单 {symbol} {o.get('type')} id={o.get('orderId')}")
+            except Exception as e:  # noqa: BLE001
+                print(f"    撤单失败 {symbol} id={o.get('orderId')}: {type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"    查询挂单失败 {symbol}: {type(e).__name__}: {e}")
+    for key in ("stop_loss", "trailing_stop", "take_profit"):
+        po = (prot or {}).get(key) or {}
+        cid = po.get("clientAlgoId") or po.get("newClientOrderId")
+        if cid:
+            try:
+                client.cancel_algo_order(client_algo_id=cid)
+                print(f"    撤 Algo 条件单 {symbol} {key} clientAlgoId={cid}")
+            except Exception as e:  # noqa: BLE001
+                print(f"    撤 Algo 条件单失败 {symbol} {key}: {type(e).__name__}: {e}")
+
+
+def _close_all_market(client, symbol: str, reason: str) -> tuple[bool, str]:
+    """按当前持仓方向市价 closePosition 全平（回滚用）。"""
+    try:
+        amt = client.get_position_amt(symbol)
+    except Exception as e:  # noqa: BLE001
+        return False, f"持仓查询失败: {type(e).__name__}: {e}"
+    if abs(amt) <= 0:
+        return True, f"持仓为 0，无需平仓（{reason}）"
+    pos_side = "LONG" if amt > 0 else "SHORT"
+    close_side = "SELL" if amt > 0 else "BUY"
+    try:
+        r = client.place_order(symbol=symbol, side=close_side, order_type="MARKET",
+                               close_position=True, position_side=pos_side)
+        return True, f"市价全平成功（orderId={r.get('orderId')}，{reason}）"
+    except Exception as e:  # noqa: BLE001
+        return False, f"市价全平失败: {type(e).__name__}: {e}（{reason}）"
+
+
+def _rollback_entry(client, symbol: str, order_id) -> tuple[bool, str]:
+    """保护单失败后的开仓回滚：未成交撤单，已成交市价全平。
+
+    返回 (是否成功, 说明)。MARKET 单 POST ACK 时多为 NEW，但实际几乎瞬间成交，
+    故先查单状态：NEW → 撤单；FILLED/其他 → 市价 closePosition 全平。
+    """
+    if not order_id:
+        return False, "无开仓单 orderId 可回滚"
+    try:
+        o = client.get_order(symbol, order_id)
+        status = str(o.get("status", ""))
+    except Exception as e:  # noqa: BLE001
+        # 查单失败（订单可能已不存在）→ 直接按当前持仓市价全平
+        return _close_all_market(client, symbol, f"查单失败({type(e).__name__}: {e})")
+    if status == "NEW":
+        try:
+            client.cancel_order(symbol, order_id)
+            return True, f"开仓单未成交已撤（orderId={order_id}）"
+        except Exception as e:  # noqa: BLE001
+            return _close_all_market(client, symbol, f"撤单失败({type(e).__name__}: {e})")
+    # 已成交（FILLED/PARTIALLY_FILLED）或状态不明 → 市价全平
+    return _close_all_market(client, symbol, f"开仓单状态={status}")
+
+
+def _alert_protective_failed(settings, sig: dict, p_err: str, rollback_msg: str) -> None:
+    """保护单挂单失败 → 邮件告警（实盘防裸奔：绝不静默）。"""
+    try:
+        from crypto_research.clients.notifier import EmailNotifier
+        nf = EmailNotifier(settings)
+        if not nf.configured:
+            print(f"  [ALERT] SMTP 未配置，无法邮件告警: {sig['symbol']} {p_err}")
+            return
+        subject = f"🚨 实盘保护单挂单失败已回滚 {sig['symbol']} {sig['signal_type']}"
+        rows = "".join(
+            f"<tr><td style='padding:6px;border:1px solid #ddd'>{k}</td>"
+            f"<td style='padding:6px;border:1px solid #ddd'>{v}</td></tr>"
+            for k, v in [("币种", sig["symbol"]), ("信号类型", sig["signal_type"]),
+                         ("方向", sig["direction"]), ("开仓价", sig.get("price_usd")),
+                         ("保护单错误", p_err), ("回滚结果", rollback_msg)]
+        )
+        body = (
+            "<div style='font-family:sans-serif;font-size:14px;color:#171717'>"
+            "<h3 style='margin:0 0 8px'>🚨 实盘保护单挂单失败，已自动回滚开仓</h3>"
+            "<p>该实盘开仓的保护单（止损/追踪止盈）挂单失败，为避免裸奔已自动回滚"
+            "（未成交撤单 / 已成交市价平仓）。请检查币安账户确认无残留持仓。</p>"
+            f"<table style='border-collapse:collapse'>{rows}</table></div>"
+        )
+        ok, msg = nf.send(subject=subject, body_html=body, from_name="实盘保护单告警",
+                          to=settings.admin_email or settings.smtp_to)
+        print(f"  [ALERT] 保护单失败告警邮件 {'OK' if ok else 'FAIL'}: {msg}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [ALERT] 告警邮件发送异常: {type(e).__name__}: {e}")
+
+
 def place_order(client, settings, sig: dict, live: bool) -> dict:
     """单信号风控 + 下单。返回决策记录。"""
     p = PARAMS.get(sig["signal_type"])
@@ -164,6 +265,19 @@ def place_order(client, settings, sig: dict, live: bool) -> dict:
                 qty = float(o.get("executedQty") or 0) or qty
             except Exception as e:  # noqa: BLE001
                 print(f"  [warn] {sig['symbol']} 回查成交失败: {type(e).__name__}: {e}")
+        # ⚠️ 防裸奔（2026-10-12 SUSDT/WUSDT 教训）：保护单（止损/追踪止盈）任一失败
+        # → 回滚开仓 + 邮件告警，绝不留下「开仓成功但无保护单」的裸奔持仓。
+        p_err = r.get("_protective_error")
+        if p_err:
+            rb_ok, rb_msg = _rollback_entry(client, sig["symbol"], order_id)
+            rec.update(decision="aborted", order=order_id,
+                       reason=f"protective_failed: {p_err} | rollback={rb_msg}",
+                       rollback_ok=rb_ok, open_price=avg, open_qty=qty,
+                       margin=(notional / lev) if lev else None,
+                       entry_resp=entry_resp, protective=protective)
+            print(f"  [ROLLBACK] {sig['symbol']} 保护单失败→回滚开仓: {p_err} | {rb_msg}")
+            _alert_protective_failed(settings, sig, p_err, rb_msg)
+            return rec
         rec.update(decision="ordered", order=order_id, reason="ok", order_id=order_id,
                    client_order_id=r.get("clientOrderId"),
                    open_price=avg, open_qty=qty,
@@ -198,7 +312,7 @@ def close_expired(client, conn) -> int:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, open_ts, planned_hold_h FROM biz.v2_trade_log "
+            "SELECT id, symbol, open_ts, planned_hold_h, protective_orders FROM biz.v2_trade_log "
             "WHERE close_ts IS NULL AND exit_order_id IS NULL AND origin = 'bot' "
             "  AND planned_hold_h IS NOT NULL AND planned_hold_h > 0 "
             "  AND NOW() >= open_ts + (planned_hold_h * INTERVAL '1 hour') "
@@ -212,13 +326,8 @@ def close_expired(client, conn) -> int:
                 continue  # 已被 TRAIL/SL 平掉，交给 _reconcile_closed 回填
             pos_side = "LONG" if amt > 0 else "SHORT"
             close_side = "SELL" if amt > 0 else "BUY"
-            # 撤保护单：closePosition 单与全平市价单冲突（-4045）
-            for o in client.get_open_orders(t["symbol"]):
-                try:
-                    client.cancel_order(t["symbol"], o["orderId"])
-                    print(f"  [expiry] 撤保护单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
-                except Exception as e:  # noqa: BLE001
-                    print(f"  [expiry] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
+            # 撤保护单（closePosition 单与全平市价单冲突 -4045；Algo 条件单一并撤）
+            _cancel_protective_orders(client, t["symbol"], t.get("protective_orders"))
             r = client.place_order(symbol=t["symbol"], side=close_side, order_type="MARKET",
                                    close_position=True, position_side=pos_side)
             oid = r.get("orderId")
@@ -267,14 +376,9 @@ def _reconcile_closed(client, settings, conn) -> int:
                 # 平仓后清理遗留的保护单：SL 与 TR 都是 closePosition 单，只会触发其中一个，
                 # 另一个在 API 侧不会随持仓归零自动撤销；若不撤，同 symbol 下次开仓会被这张
                 # 旧单立即平掉（币安 API 不提供 UI 那种「成交自动撤销同类单」的行为）。
-                for o in client.get_open_orders(t["symbol"]):
-                    try:
-                        client.cancel_order(t["symbol"], o["orderId"])
-                        print(f"  [reconcile] 撤销遗留挂单 {t['symbol']} {o.get('type')} id={o.get('orderId')}")
-                    except Exception as e:  # noqa: BLE001
-                        print(f"  [reconcile] 撤单失败 {t['symbol']} id={o.get('orderId')}: {type(e).__name__}: {e}")
-
+                # 子账户的 Algo 条件单（可能不进 openOrders）按 clientAlgoId 一并撤销。
                 prot = t.get("protective_orders") or {}
+                _cancel_protective_orders(client, t["symbol"], prot)
                 exit_reason = "unknown"
                 for key, reason in (("stop_loss", "sl"), ("trailing_stop", "trail"),
                                     ("take_profit", "tp")):
@@ -388,7 +492,7 @@ def main() -> int:
                 rec = place_order(client, settings, sig, live)
                 print(f"  {sig['symbol']:<12} {sig['signal_type']:<12} {sig['direction']:<6} "
                       f"→ {rec['decision']} {rec.get('reason','')} {rec.get('order','')}")
-                if rec["decision"] in ("ordered", "skipped", "error"):
+                if rec["decision"] in ("ordered", "aborted", "skipped", "error"):
                     with get_connection(settings.database_url) as conn:
                         with conn.cursor() as cur:
                             cur.execute(
@@ -397,8 +501,9 @@ def main() -> int:
                                 (rec["decision"], datetime.now(timezone.utc), sig["id"]),
                             )
                         # 实盘开仓 → 写 v2_trade_log（全量留痕，供追溯复验 + 完善策略）
-                        # 只记机器人下单（origin='bot'）；手动单不经过本脚本、不入本表。
-                        if rec["decision"] == "ordered":
+                        # 只记机器人单（origin='bot'）；手动单不经过本脚本、不入本表。
+                        # aborted = 保护单失败已回滚，同样留痕（exit_reason='aborted_protective'）。
+                        if rec["decision"] in ("ordered", "aborted"):
                             sp = sig.get("params") or {}
                             eo = sp.get("event_bar_ts")
                             eo_dt = None
@@ -408,6 +513,13 @@ def main() -> int:
                                 except (TypeError, ValueError):
                                     eo_dt = None
                             p = rec.get("params") or {}
+                            aborted = rec["decision"] == "aborted"
+                            # aborted（保护单失败已回滚）：不落成交价/量，close_ts=now，
+                            # exit_reason='aborted_protective' 标记即时了结，留痕可追溯。
+                            v2_open_price = None if aborted else rec.get("open_price")
+                            v2_open_qty = None if aborted else rec.get("open_qty")
+                            v2_close_ts = datetime.now(timezone.utc) if aborted else None
+                            v2_exit_reason = "aborted_protective" if aborted else None
                             with conn.cursor() as cur:
                                 cur.execute(
                                     "INSERT INTO biz.v2_trade_log ("
@@ -417,13 +529,14 @@ def main() -> int:
                                     " chg_24h_pct, chg1h_pct, vr_1h, funding_rate, vol_24h_usd,"
                                     " margin_usdt, planned_hold_h, sl_pct, tr_pct, tp_pct,"
                                     " entry_client_order_id, entry_resp, protective_orders,"
-                                    " base_url, dry_run, updated_at"
+                                    " close_ts, exit_reason, base_url, dry_run, updated_at"
                                     ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                                    " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,NOW()) "
+                                    " %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,"
+                                    " %s,%s,%s,%s,NOW()) "
                                     "ON CONFLICT (signal_id) DO NOTHING",
                                     (sig["id"], sig["symbol"], sig["signal_type"], sig["direction"],
-                                     datetime.now(timezone.utc), rec.get("open_price"),
-                                     rec.get("open_qty"), rec.get("notional"), rec.get("leverage"),
+                                     datetime.now(timezone.utc), v2_open_price,
+                                     v2_open_qty, rec.get("notional"), rec.get("leverage"),
                                      rec.get("order_id"), "bot", sig.get("signal_window"),
                                      sig.get("scan_ts"), eo_dt, sig.get("price_usd"),
                                      sig.get("chg_24h_pct"), sp.get("chg1h_pct"), sp.get("vr_1h"),
@@ -432,6 +545,7 @@ def main() -> int:
                                      p.get("TP"), rec.get("client_order_id"),
                                      json.dumps(rec.get("entry_resp")) if rec.get("entry_resp") else None,
                                      json.dumps(rec.get("protective")) if rec.get("protective") else None,
+                                     v2_close_ts, v2_exit_reason,
                                      settings.binance_fapi_base_url, not live),
                                 )
             if args.watch:

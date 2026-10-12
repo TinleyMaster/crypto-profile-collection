@@ -301,6 +301,65 @@ class BinanceFuturesClient:
         return self._request("DELETE", "/fapi/v1/order",
                              {"symbol": symbol, "orderId": order_id}, signed=True)
 
+    # ─────────────────────── Algo Order API（条件单）───────────────────────
+    # 背景（2026-10-12 实盘复现）：子账户在普通 /fapi/v1/order 上不支持
+    # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET —— 报 -4120
+    # "Order type not supported for this endpoint. Please use the Algo Order
+    # API endpoints instead."。因此条件单（止损/止盈/追踪止盈）必须走
+    # /fapi/v1/algo/order 挂单、DELETE /fapi/v1/algo/order 撤单。
+    def place_algo_order(
+        self,
+        symbol: str,
+        side: str,  # BUY / SELL
+        order_type: str,  # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET
+        quantity: float | None = None,
+        stop_price: float | None = None,
+        close_position: bool = False,
+        position_side: str | None = None,
+        callback_rate: float | None = None,
+        new_client_order_id: str | None = None,
+        working_type: str = "CONTRACT_PRICE",
+    ) -> dict:
+        """通过 Algo Order API 挂条件单（closePosition 与 quantity 二选一）。
+
+        响应含 algoId / clientAlgoId / success；挂出的条件单触发后才是普通订单。
+        """
+        info = self.get_exchange_info(symbol)
+        params: dict[str, Any] = {"symbol": symbol, "side": side, "type": order_type}
+        # 双向持仓模式必须显式指定 positionSide（单向模式不可传）
+        if self.get_position_mode() == "dual":
+            if not position_side:
+                raise BinanceFuturesError("双向持仓模式下必须显式指定 position_side")
+            params["positionSide"] = position_side
+        if close_position:
+            params["closePosition"] = "true"
+        elif quantity is not None:
+            params["quantity"] = _round_down_to_step(float(quantity), info["step_size"])
+        if order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"):
+            if stop_price is not None:
+                params["stopPrice"] = _round_price_to_tick(float(stop_price), info["tick_size"])
+        if order_type == "TRAILING_STOP_MARKET":
+            if callback_rate is None:
+                raise BinanceFuturesError("TRAILING_STOP_MARKET 必须传 callback_rate（%）")
+            params["callbackRate"] = f"{callback_rate:.1f}"
+        if working_type:
+            params["workingType"] = working_type
+        if new_client_order_id:
+            params["newClientOrderId"] = new_client_order_id
+        return self._request("POST", "/fapi/v1/algo/order", params, signed=True)
+
+    def cancel_algo_order(self, algo_id: int | str | None = None,
+                          client_algo_id: str | None = None) -> dict:
+        """按 algoId 或 clientAlgoId 撤销条件单（DELETE /fapi/v1/algo/order）。"""
+        if not algo_id and not client_algo_id:
+            raise BinanceFuturesError("cancel_algo_order 需要 algoId 或 clientAlgoId 至少一个")
+        params: dict[str, Any] = {}
+        if algo_id:
+            params["algoId"] = algo_id
+        if client_algo_id:
+            params["clientAlgoId"] = client_algo_id
+        return self._request("DELETE", "/fapi/v1/algo/order", params, signed=True)
+
     def get_open_orders(self, symbol: str | None = None) -> list[dict]:
         params = {"symbol": symbol} if symbol else None
         return self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
@@ -341,23 +400,50 @@ class BinanceFuturesClient:
         跟踪逻辑：做多时价格创新高后回落 callback_rate% 触发平仓；
                   做空时价格创新低后反弹 callback_rate% 触发平仓。
 
+        ⚠️ -4136 实测（2026-10-12 SUSDT/WUSDT）：TRAILING_STOP_MARKET + closePosition=true
+        组合被币安拒（"Target strategy invalid"）。因此**有 quantity 时优先用数量**（配合
+        positionSide + 反向 side 表达平仓，绕开 closePosition）；子账户再遇 -4120
+        则自动回退 Algo Order API。
+
         Args:
             symbol: 合约代码
             direction: long / short（持仓方向，平仓 side 与之相反）
             callback_rate: 回调比例 %（如 3.0 表示 3%）
-            quantity: 平仓数量（close_position=True 时可省略）
-            close_position: True=全部平仓（默认）
+            quantity: 平仓数量（推荐传开仓数量；有值时用数量路径规避 -4136）
+            close_position: True=全部平仓（仅在 quantity 未传时生效）
         """
         close_side = "SELL" if direction == "long" else "BUY"
         position_side = "LONG" if direction == "long" else "SHORT"
-        return self.place_order(
-            symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
-            quantity=quantity if not close_position else None,
-            close_position=close_position,
-            position_side=position_side,
-            callback_rate=callback_rate,
-            new_client_order_id=f"trl{direction[:1]}{callback_rate:.0f}",
-        )
+        cid = f"trl{direction[:1]}{callback_rate:.0f}"
+        try:
+            if quantity is not None:
+                return self.place_order(
+                    symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
+                    quantity=quantity, close_position=False,
+                    position_side=position_side, callback_rate=callback_rate,
+                    new_client_order_id=cid,
+                )
+            return self.place_order(
+                symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
+                quantity=None, close_position=close_position,
+                position_side=position_side, callback_rate=callback_rate,
+                new_client_order_id=cid,
+            )
+        except BinanceFuturesError as e:
+            if "-4120" in str(e) or "-4136" in str(e):
+                # 子账户（-4120 条件单须走 Algo API）/ closePosition 组合受限（-4136）
+                if quantity is not None:
+                    return self.place_algo_order(
+                        symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
+                        quantity=quantity, position_side=position_side,
+                        callback_rate=callback_rate, new_client_order_id=cid,
+                    )
+                return self.place_algo_order(
+                    symbol=symbol, side=close_side, order_type="TRAILING_STOP_MARKET",
+                    close_position=close_position, position_side=position_side,
+                    callback_rate=callback_rate, new_client_order_id=cid,
+                )
+            raise
 
     def open_position(
         self,
@@ -412,24 +498,35 @@ class BinanceFuturesClient:
         # 币安允许 STOP_MARKET(closePosition) 与 TRAILING_STOP_MARKET(closePosition) 同时
         # 存在于同一持仓侧；只有「GTE_GTC + closePosition」才限一张（-4130）。原实现把
         # 跟踪止盈与固定止损写成 if/else 互斥，导致 TR>0 时硬止损被静默跳过（实盘裸奔）。
+        # ⚠️ 2026-10-12 防裸奔：任一保护单失败**不得静默**——失败信息汇总到
+        #    result["_protective_error"]（不抛出，由调用方决定回滚/告警），
+        #    禁止「开仓成功但无保护单」裸奔落地。
+        p_errs: list[str] = []
         if stop_loss_pct and stop_loss_pct > 0:
             try:
-                sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct, is_stop=True)
+                sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct,
+                                     is_stop=True, quantity=qty)
                 result["_stop_loss"] = sl
             except BinanceFuturesError as e:
                 result["_stop_loss"] = {"error": str(e)}
+                p_errs.append(f"stop_loss: {e}")
         if trailing_stop_pct and trailing_stop_pct > 0:
             try:
-                trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct)
+                trl = self.place_trailing_stop(symbol, direction, trailing_stop_pct, quantity=qty)
                 result["_trailing_stop"] = trl
             except BinanceFuturesError as e:
                 result["_trailing_stop"] = {"error": str(e)}
+                p_errs.append(f"trailing_stop: {e}")
         if take_profit_pct and take_profit_pct > 0:
             try:
-                tp = self.place_sltp(symbol, direction, entry_used, take_profit_pct, is_stop=False)
+                tp = self.place_sltp(symbol, direction, entry_used, take_profit_pct,
+                                     is_stop=False, quantity=qty)
                 result["_take_profit"] = tp
             except BinanceFuturesError as e:
                 result["_take_profit"] = {"error": str(e)}
+                p_errs.append(f"take_profit: {e}")
+        if p_errs:
+            result["_protective_error"] = "; ".join(p_errs)
 
         return result
 
@@ -440,6 +537,7 @@ class BinanceFuturesClient:
         entry_price: float,
         pct: float,
         is_stop: bool,  # True=止损(STOP_MARKET 全平) / False=止盈(TAKE_PROFIT_MARKET 全平)
+        quantity: float | None = None,  # 传入开仓数量，供 -4136 时以数量挂单兜底
     ) -> dict:
         """挂止损/止盈平仓单（closePosition 全平，方向与开仓相反）。
 
@@ -448,6 +546,10 @@ class BinanceFuturesClient:
         - 空单止盈：进场价下方 pct%，平空 → BUY + SHORT
         - 多单止损：进场价下方 pct%，平多 → SELL + LONG
         - 多单止盈：进场价上方 pct%，平多 → SELL + LONG
+
+        ⚠️ 自动回退（2026-10-12 实测 SUSDT/WUSDT）：
+        - 普通接口 -4120（子账户条件单须走 Algo API）→ 回退 place_algo_order(closePosition)
+        - 普通接口 -4136（closePosition 组合无效）→ 回退 place_algo_order(quantity)
         """
         info = self.get_exchange_info(symbol)
         # 平仓 side 与开仓相反
@@ -463,9 +565,26 @@ class BinanceFuturesClient:
 
         trigger_price = _round_price_to_tick(trigger_price, info["tick_size"])
         tag = "sl" if is_stop else "tp"
-        return self.place_order(
-            symbol=symbol, side=close_side, order_type=order_type,
-            stop_price=trigger_price, close_position=True,
-            position_side=position_side,
-            new_client_order_id=f"{tag}{direction[:1]}{int(trigger_price)}",
-        )
+        cid = f"{tag}{direction[:1]}{int(trigger_price)}"
+        try:
+            return self.place_order(
+                symbol=symbol, side=close_side, order_type=order_type,
+                stop_price=trigger_price, close_position=True,
+                position_side=position_side, new_client_order_id=cid,
+            )
+        except BinanceFuturesError as e:
+            if "-4120" in str(e):
+                # 子账户：条件单必须走 Algo Order API
+                return self.place_algo_order(
+                    symbol=symbol, side=close_side, order_type=order_type,
+                    stop_price=trigger_price, close_position=True,
+                    position_side=position_side, new_client_order_id=cid,
+                )
+            if "-4136" in str(e) and quantity is not None:
+                # closePosition 组合无效 → 改用数量挂单
+                return self.place_algo_order(
+                    symbol=symbol, side=close_side, order_type=order_type,
+                    stop_price=trigger_price, quantity=quantity,
+                    position_side=position_side, new_client_order_id=cid,
+                )
+            raise

@@ -535,6 +535,7 @@ def _ensure_protective(client, conn, settings) -> int:
     1. 自愈补挂：**硬止损（STOP_MARKET）** 缺失或挂单失败（protective_orders 里
        stop_loss 是 error 或缺 orderId，如子账户 -4120 历史裸奔单）→ 按 sl_pct 重新
        补挂（binance_futures 已走 Algo Order API）。部署后首轮即给存量裸奔仓补挂 SL。
+       存量「按数量」SL（closePosition=false，仓位页不显示止损价）一并重挂为 Close-All。
        **跟踪止盈由软件 TR 接管（_trail_check，峰值=入场后已收盘 1h bar 的 max high，
        回调 tr_pct 触发），不再挂原生 TRAILING_STOP_MARKET** —— 2026-10-12 对齐回测：
        回测峰值从「入场后 bar 的 high」累积、实盘原生 TR 从「入场价」激活，导致
@@ -573,9 +574,13 @@ def _ensure_protective(client, conn, settings) -> int:
                 return bool(v) and "error" not in v and (
                     v.get("orderId") or v.get("algoId") or v.get("clientAlgoId"))
             sl_missing = not _prot_ok(sl)
+            # 存量迁移：历史挂的 SL 若是「按数量」条件单（closePosition=false），
+            # 币安仓位页不显示止损价（只出现在「当前委托→条件委托」），易被误判为裸奔
+            # （WUSDT id=5 实盘复现）→ 重挂为 Close-All，一次性收敛。
+            sl_not_close_all = _prot_ok(sl) and sl.get("closePosition") is False
 
             # ── 1) 自愈补挂缺失硬止损（TR 由 _trail_check 软件接管，不补原生单）──
-            if sl_missing:
+            if sl_missing or sl_not_close_all:
                 # 清残留挂单（避免同侧多张 closePosition 单 -4045 冲突）
                 _cancel_protective_orders(client, t["symbol"], prot)
                 new_prot = prot.copy()
@@ -593,8 +598,9 @@ def _ensure_protective(client, conn, settings) -> int:
                             "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
                             "updated_at=NOW() WHERE id=%s",
                             (json.dumps(new_prot), t["id"]))
+                    why = "缺失" if sl_missing else "改 Close-All"
                     print(f"  [ensure] 补挂硬止损 {t['symbol']} id={t['id']} "
-                          f"sl=ok（TR=软件接管）")
+                          f"原因={why} sl=ok（TR=软件接管）")
                     n += 1
                 continue  # 本轮先补挂，浮盈保本下轮评估
 
@@ -607,7 +613,9 @@ def _ensure_protective(client, conn, settings) -> int:
             # 不是 0%（纯保本）——市价止损触发有滑点+手续费，停在入场价实际是亏。
             target_stop = (entry * (1 + BREAKEVEN_COST_COVER_PCT / 100)) if direction == "long" \
                 else (entry * (1 - BREAKEVEN_COST_COVER_PCT / 100))
-            cur_stop = float(sl.get("stopPrice") or 0)
+            # Algo 条件单的触发价字段是 triggerPrice（closePosition 单的 stopPrice 恒为 0），
+            # 只看 stopPrice 会导致幂等判断永远落空 → 每轮撤单重挂止损（churn）。
+            cur_stop = float(sl.get("triggerPrice") or sl.get("stopPrice") or 0)
             if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
                              (direction == "short" and cur_stop <= target_stop)):
                 continue  # 已到保本线，幂等跳过
@@ -620,10 +628,10 @@ def _ensure_protective(client, conn, settings) -> int:
                     client.cancel_order(t["symbol"], sl["orderId"])
             except Exception as e:  # noqa: BLE001
                 print(f"  [ensure] 撤旧止损失败 {t['symbol']}: {type(e).__name__}: {e}")
-            # 挂保本止损（保留 TR 不动）；stop_price 直传目标触发价
+            # 挂保本止损（保留 TR 不动）；stop_price 直传目标触发价。
+            # 不传 quantity → Close-All（仓位页可见 + 自动跟随仓位数量）。
             new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
-                                       is_stop=True, quantity=abs(amt),
-                                       stop_price=target_stop)
+                                       is_stop=True, stop_price=target_stop)
             new_sl["breakeven"] = True
             new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
             new_sl["moved_from_pct"] = t.get("sl_pct")

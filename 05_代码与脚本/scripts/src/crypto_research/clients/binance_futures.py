@@ -493,7 +493,7 @@ class BinanceFuturesClient:
         if stop_loss_pct and stop_loss_pct > 0:
             try:
                 sl = self.place_sltp(symbol, direction, entry_used, stop_loss_pct,
-                                     is_stop=True, quantity=qty)
+                                     is_stop=True)
                 result["_stop_loss"] = sl
             except BinanceFuturesError as e:
                 result["_stop_loss"] = {"error": str(e)}
@@ -508,7 +508,7 @@ class BinanceFuturesClient:
         if take_profit_pct and take_profit_pct > 0:
             try:
                 tp = self.place_sltp(symbol, direction, entry_used, take_profit_pct,
-                                     is_stop=False, quantity=qty)
+                                     is_stop=False)
                 result["_take_profit"] = tp
             except BinanceFuturesError as e:
                 result["_take_profit"] = {"error": str(e)}
@@ -525,10 +525,15 @@ class BinanceFuturesClient:
         entry_price: float,
         pct: float,
         is_stop: bool,  # True=止损(STOP_MARKET 全平) / False=止盈(TAKE_PROFIT_MARKET 全平)
-        quantity: float | None = None,  # 传入开仓数量，供 -4136 时以数量挂单兜底
         stop_price: float | None = None,  # 直传触发价（覆盖 pct 推导；浮盈保本止损可高于入场价）
     ) -> dict:
         """挂止损/止盈平仓单（closePosition 全平，方向与开仓相反）。
+
+        ⚠️ 必须用 closePosition=true（Close-All），**不要传 quantity**（2026-10-12）：
+        按数量的 reduce-only 条件单（closePosition=false）虽然同样能平仓，但币安 App/Web
+        的「仓位」行只认 Close-All 型条件单来填充「止损价/止盈价」列 —— 数量型只出现在
+        「当前委托 → 条件委托」里，仓位页显示「--」，误判为没有止损（WUSDT id=5 实盘复现）。
+        另 closePosition 会自动跟随仓位实际数量，不会因仓位变动而残留旧数量。
 
         价格方向（相对进场价，未传 stop_price 时按 pct 推导）：
         - 空单止损：进场价上方 pct%，平空 → BUY + SHORT
@@ -537,8 +542,7 @@ class BinanceFuturesClient:
         - 多单止盈：进场价上方 pct%，平多 → SELL + LONG
 
         ⚠️ 2025-12-09 起币安条件单全量走 /fapi/v1/algoOrder（普通接口 -4120），
-        本方法直接走 Algo Order API（closePosition 与 quantity 二选一：quantity 传了
-        用数量，否则 closePosition=true Close-All）。
+        本方法直接走 Algo Order API，固定 closePosition=true（Close-All）。
 
         ⚠️ stop_price 直传：pct 推导只能把止损挂在入场价一侧（多单下方/空单上方），
         浮盈保本止损要挂在**入场价上方**（多单，覆盖成本后净保本），必须直传触发价。
@@ -563,8 +567,7 @@ class BinanceFuturesClient:
         return self.place_algo_order(
             symbol=symbol, side=close_side, order_type=order_type,
             stop_price=trigger_price,
-            close_position=quantity is None,  # closePosition 与 quantity 互斥
-            quantity=quantity,
+            close_position=True,  # Close-All：仓位页「止损/止盈价」列可见 + 自动跟随仓位数量
             position_side=position_side,
             new_client_order_id=cid,
         )

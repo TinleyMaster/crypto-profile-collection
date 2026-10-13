@@ -359,14 +359,16 @@ class BinanceFuturesClient:
 
     def cancel_algo_order(self, algo_id: int | str | None = None,
                           client_algo_id: str | None = None) -> dict:
-        """按 algoId 或 clientAlgoId 撤销条件单（DELETE /fapi/v1/algoOrder）。"""
+        """按 algoId 或 clientAlgoId 撤销条件单（DELETE /fapi/v1/algoOrder）。
+
+        ⚠️ **只传其中一个**（algoId 优先）：两个同时传可能被判参数冲突而整单失败。
+        撤单失败却继续挂新单，是 2026-10-12 DOSUSDT 裸奔事故的放大器——旧止损未撤时
+        新 closePosition 单会 -4130 冲突；调用方必须把「撤失败」当作分支终止条件
+        （见 execute_gainers_v2._ensure_protective）。
+        """
         if not algo_id and not client_algo_id:
             raise BinanceFuturesError("cancel_algo_order 需要 algoId 或 clientAlgoId 至少一个")
-        params: dict[str, Any] = {}
-        if algo_id:
-            params["algoId"] = algo_id
-        if client_algo_id:
-            params["clientAlgoId"] = client_algo_id
+        params: dict[str, Any] = {"algoId": algo_id} if algo_id else {"clientAlgoId": client_algo_id}
         return self._request("DELETE", "/fapi/v1/algoOrder", params, signed=True)
 
     def get_open_orders(self, symbol: str | None = None) -> list[dict]:
@@ -563,7 +565,12 @@ class BinanceFuturesClient:
 
         trigger_price = _round_price_to_tick(trigger_price, info["tick_size"])
         tag = "sl" if is_stop else "tp"
-        cid = f"{tag}{direction[:1]}{int(trigger_price)}"
+        # ⚠️ clientAlgoId 必须唯一（2026-10-12 DOSUSDT 裸奔事故修正）：原实现
+        # f"{tag}{direction[:1]}{int(trigger_price)}" 对低价币 int(trigger_price) 恒为 0
+        # （DOSUSDT 首挂 0.3799 与浮盈保本重挂 0.4227 都 → "sll0"），撤旧单后重挂
+        # **同一个 ID**，可能被币安判重拒绝 → 新止损挂不上而旧止损已撤 = 裸奔。
+        # 追加毫秒后缀保证每次挂单 ID 唯一（长度 11 位，远小于上限 36）。
+        cid = f"{tag}{direction[:1]}{int(trigger_price)}{int(time.time() * 1000) % 10 ** 7}"
         return self.place_algo_order(
             symbol=symbol, side=close_side, order_type=order_type,
             stop_price=trigger_price,

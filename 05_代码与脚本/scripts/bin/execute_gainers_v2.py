@@ -534,6 +534,52 @@ def _reconcile_closed(client, settings, conn) -> int:
     return n
 
 
+def _save_prot(conn, tid, prot: dict) -> None:
+    """把保护单快照写回 v2_trade_log（唯一落点，避免散落的 UPDATE 写错字段）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
+            "updated_at=NOW() WHERE id=%s",
+            (json.dumps(prot), tid))
+
+
+def _restore_or_alert(client, conn, settings, t, prot, direction, entry, reason) -> bool:
+    """「撤旧止损成功、挂新止损失败」的兜底：立刻按原 sl_pct 恢复硬止损。
+
+    2026-10-12 DOSUSDT 事故根因（id=8，−45%）：持仓浮盈 +100% 触发保本上移 →
+    旧止损（0.3799）撤掉、新止损挂单失败被外层 except 吞掉 → DB 里仍留着**旧的
+    已失效记录**，看起来"有止损"，实则从 21:1x 一路裸奔到 21:45 崩盘。
+    本函数杜绝该假象：
+      - 恢复成功 → 写回原单，仓位重新有 -sl_pct 硬止损；
+      - 恢复失败 → stop_loss 写 `{"error": ...}` 标记（下轮自愈分支会重挂）+
+        邮件告警，绝不静默。
+    返回是否恢复成功。
+    """
+    sl_pct = float(t.get("sl_pct") or 0)
+    if sl_pct > 0:
+        try:
+            orig = client.place_sltp(t["symbol"], direction, entry, sl_pct * 100, is_stop=True)
+            orig["restored"] = True
+            prot["stop_loss"] = orig
+            _save_prot(conn, t["id"], prot)
+            print(f"  [ensure] 已恢复原硬止损 {t['symbol']} -{sl_pct*100:.0f}% "
+                  f"id={t['id']}（{reason}）")
+            return True
+        except Exception as e2:  # noqa: BLE001
+            err = f"{reason}；恢复原止损亦失败: {type(e2).__name__}: {e2}"
+    else:
+        err = f"{reason}；无 sl_pct 可恢复"
+    prot["stop_loss"] = {"error": err}
+    _save_prot(conn, t["id"], prot)
+    print(f"  [ensure] ⚠️ 裸奔告警 {t['symbol']} id={t['id']}: {err}")
+    _alert_protective_failed(
+        settings,
+        {"symbol": t["symbol"], "signal_type": t.get("signal_type") or "-",
+         "direction": t.get("direction"), "price_usd": entry},
+        err, "止损已撤且新挂/恢复均失败 → 该仓位当前无止损，下轮自愈分支将重挂")
+    return False
+
+
 def _ensure_protective(client, conn, settings) -> int:
     """保护单自愈 + 浮盈保本止损（--watch 每轮调用）。
 
@@ -554,13 +600,17 @@ def _ensure_protective(client, conn, settings) -> int:
        瞬时价会漏掉插针）；且仅当当前价仍在保本线盈利侧才上移（否则挂出即触发）。
        幂等：止损触发价已不低于保本线则跳过。正常回撤由软件 TR
        （峰值-3%）先兑现，保本止损只在跳空/闪崩跌破保本线时兜底。
+       ⚠️ 「撤旧→挂新」不是原子操作：币安同一持仓侧只允许一张 closePosition 单，
+       必须先撤后挂。故撤单失败即终止本次上移（旧单仍在）；**新单挂单失败则立刻恢复
+       原硬止损**，恢复失败写 error 标记 + 邮件告警（`_restore_or_alert`）——绝不
+       留下「DB 有止损记录、实际裸奔」的假象（2026-10-12 DOSUSDT −45% 事故）。
 
     返回处理笔数。
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, symbol, direction, open_ts, open_price, sl_pct, tr_pct, "
-            "       protective_orders, "
+            "SELECT id, symbol, direction, signal_type, open_ts, open_price, "
+            "       sl_pct, tr_pct, protective_orders, "
             "       (SELECT COALESCE(MAX(k.high_px), 0) FROM biz.asset_klines k "
             "         WHERE k.symbol = t.symbol AND k.interval IN ('5m','15m','1h') "
             "           AND k.open_time >= t.open_ts) AS peak_intra, "
@@ -601,18 +651,21 @@ def _ensure_protective(client, conn, settings) -> int:
                 new_prot = prot.copy()
                 new_prot["trailing_stop"] = {"mode": "software",
                                              "tr_pct": float(t.get("tr_pct") or 0)}
-                changed = False
                 if (t.get("sl_pct") or 0) > 0:
-                    r = client.place_sltp(t["symbol"], direction, entry,
-                                          float(t["sl_pct"]) * 100, is_stop=True)
+                    try:
+                        r = client.place_sltp(t["symbol"], direction, entry,
+                                              float(t["sl_pct"]) * 100, is_stop=True)
+                    except Exception as e:  # noqa: BLE001
+                        # 补挂失败：写 error 标记（下轮本分支重试），**绝不保留
+                        # "看起来有止损"的旧记录**（否则下一轮会被判为有效而永不重挂）。
+                        new_prot["stop_loss"] = {
+                            "error": f"recover_place_failed: {type(e).__name__}: {e}"}
+                        _save_prot(conn, t["id"], new_prot)
+                        print(f"  [ensure] 补挂硬止损失败 {t['symbol']} id={t['id']}: "
+                              f"{type(e).__name__}: {e}")
+                        continue  # 留待下轮重试
                     new_prot["stop_loss"] = r
-                    changed = True
-                if changed:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
-                            "updated_at=NOW() WHERE id=%s",
-                            (json.dumps(new_prot), t["id"]))
+                    _save_prot(conn, t["id"], new_prot)
                     why = "缺失" if sl_missing else "改 Close-All"
                     print(f"  [ensure] 补挂硬止损 {t['symbol']} id={t['id']} "
                           f"原因={why} sl=ok（TR=软件接管）")
@@ -649,30 +702,41 @@ def _ensure_protective(client, conn, settings) -> int:
             if cur_stop and ((direction == "long" and cur_stop >= target_stop) or
                              (direction == "short" and cur_stop <= target_stop)):
                 continue  # 已到保本线，幂等跳过
-            # 撤旧止损（algo 单按 clientAlgoId/algoId 撤，普通单按 orderId 撤）
+            # 撤旧止损（algo 单按 algoId/clientAlgoId 撤，普通单按 orderId 撤）。
+            # ⚠️ 撤单失败 → 旧止损仍在挂，**本轮放弃上移**：继续挂新单会与旧
+            # closePosition 单 -4130 冲突，且会把「旧单仍有效」的真实状态搅乱。
             try:
-                if sl.get("clientAlgoId") or sl.get("algoId"):
-                    client.cancel_algo_order(algo_id=sl.get("algoId"),
-                                             client_algo_id=sl.get("clientAlgoId"))
+                if sl.get("algoId"):
+                    client.cancel_algo_order(algo_id=sl["algoId"])
+                elif sl.get("clientAlgoId"):
+                    client.cancel_algo_order(client_algo_id=sl["clientAlgoId"])
                 elif sl.get("orderId"):
                     client.cancel_order(t["symbol"], sl["orderId"])
             except Exception as e:  # noqa: BLE001
-                print(f"  [ensure] 撤旧止损失败 {t['symbol']}: {type(e).__name__}: {e}")
+                print(f"  [ensure] 撤旧止损失败 {t['symbol']}，跳过本次保本上移: "
+                      f"{type(e).__name__}: {e}")
+                continue
             # 挂保本止损（保留 TR 不动）；stop_price 直传目标触发价。
             # 不传 quantity → Close-All（仓位页可见 + 自动跟随仓位数量）。
-            new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
-                                       is_stop=True, stop_price=target_stop)
+            # ⚠️ 此处**旧止损已被撤掉**：挂单失败即裸奔，必须立刻恢复原硬止损
+            # （DOSUSDT 事故就是这一步失败被吞掉、裸奔到崩盘 −45%）。
+            try:
+                new_sl = client.place_sltp(t["symbol"], direction, entry, 0.0,
+                                           is_stop=True, stop_price=target_stop)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [ensure] 保本止损挂单失败 {t['symbol']} id={t['id']}: "
+                      f"{type(e).__name__}: {e}")
+                _restore_or_alert(client, conn, settings, t, prot, direction, entry,
+                                  f"保本上移({cur_stop}→{target_stop:.6g})挂单失败: "
+                                  f"{type(e).__name__}: {e}")
+                continue
             new_sl["breakeven"] = True
             new_sl["breakeven_trigger_pct"] = BREAKEVEN_TRIGGER_PCT
             new_sl["breakeven_ref"] = "peak_intra"
             new_sl["peak_price"] = ref_px
             new_sl["moved_from_pct"] = t.get("sl_pct")
             prot["stop_loss"] = new_sl
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE biz.v2_trade_log SET protective_orders=%s::jsonb, "
-                    "updated_at=NOW() WHERE id=%s",
-                    (json.dumps(prot), t["id"]))
+            _save_prot(conn, t["id"], prot)
             print(f"  [ensure] 浮盈保本 {t['symbol']} 峰值浮盈={pnl*100:+.1f}% "
                   f"(峰值价 {ref_px:.6g} 现价 {cur_px:.6g}) "
                   f"止损 {cur_stop}→{target_stop:.6g} id={t['id']}")
